@@ -421,7 +421,13 @@ fn begin_images(engine: &mut Engine) -> Vec<String> {
 /// scratch buffer for the next. We never hold all the compressed image bytes
 /// at once (the old `pairs` approach peaked at ~16 blobs → the heap-OOM the
 /// fast keep-alive pool exposed).
-fn fetch_next_images(engine: &mut Engine, pending: &mut Vec<String>) {
+/// `needs_relayout` comes from the last layout: false means every `<img>` box
+/// was already definite (both dimensions authored), so arriving pixels change
+/// no geometry and a repaint is enough. That is the difference between ~15 ms
+/// and ~145 ms of engine work per batch on a real article — and under the
+/// wasmi interpreter on the device, between a page that scrolls while it
+/// loads and one that does not.
+fn fetch_next_images(engine: &mut Engine, pending: &mut Vec<String>, needs_relayout: bool) {
     if pending.is_empty() {
         return;
     }
@@ -440,8 +446,10 @@ fn fetch_next_images(engine: &mut Engine, pending: &mut Vec<String>) {
         any = true;
     }
     if any {
-        bump_content_gen(); // re-layout so they replace their placeholders
-        mark_dirty();
+        if needs_relayout {
+            bump_content_gen(); // a guessed box moves once the real size lands
+        }
+        mark_dirty(); // otherwise just paint: the display list is unchanged
     }
 }
 
@@ -1329,7 +1337,10 @@ pub extern "C" fn _start() {
         // Text and layout are on screen now — pull in the next few images,
         // then come back round and paint them. Scrolling keeps working in
         // between, because a batch is small.
-        fetch_next_images(&mut engine, &mut pending_imgs);
+        let needs_relayout = cache
+            .as_ref()
+            .map_or(true, |(l, _, _): &(Layout, i32, u32)| l.intrinsic_images_pending);
+        fetch_next_images(&mut engine, &mut pending_imgs, needs_relayout);
         // ALWAYS yield so this worker core can halt — a cooperative fiber that
         // never sleeps pins its core at 100%. A short nap while interacting
         // stays responsive; a longer one when idle keeps the core asleep.
