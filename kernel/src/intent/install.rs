@@ -135,13 +135,23 @@ pub fn intent_install(args: &str) {
 
     // Download module
     let wasm_path = alloc::format!("{}/{}.wasm", MODULE_BASE, name);
-    let wasm_data = match super::http::https_get(MODULE_HOST, &wasm_path, MAX_MODULE_SIZE) {
+    // Bound the fetch by the manifest's own size rather than a fixed cap, so a
+    // growing module can never be silently truncated at a constant nobody
+    // remembered to raise (that is exactly how OTA broke when the kernel
+    // crossed 4 MiB). The manifest is unauthenticated here — SHA-384 and the
+    // signature below are the real gate — so it may only lower the bound.
+    if entry.size == 0 || entry.size > MAX_MODULE_SIZE {
+        kprintln!("[npk] Refusing implausible module size: {} bytes (max {})",
+            entry.size, MAX_MODULE_SIZE);
+        return;
+    }
+    let wasm_data = match super::http::https_get(MODULE_HOST, &wasm_path, entry.size) {
         Ok(d) => d,
         Err(e) => { kprintln!("[npk] Download failed: {}", e); return; }
     };
 
     if wasm_data.len() != entry.size {
-        kprintln!("[npk] Size mismatch: got {} expected {}", wasm_data.len(), entry.size);
+        kprintln!("[npk] Short download: got {} of {} bytes", wasm_data.len(), entry.size);
         return;
     }
 
@@ -242,13 +252,17 @@ pub fn update_all_modules() -> usize {
         // Download module
         kprint!("[npk]   downloading... ");
         let wasm_path = alloc::format!("{}/{}.wasm", MODULE_BASE, remote.name);
-        let wasm_data = match super::http::https_get(MODULE_HOST, &wasm_path, MAX_MODULE_SIZE) {
+        if remote.size == 0 || remote.size > MAX_MODULE_SIZE {
+            kprintln!("implausible size {} (max {})", remote.size, MAX_MODULE_SIZE);
+            continue;
+        }
+        let wasm_data = match super::http::https_get(MODULE_HOST, &wasm_path, remote.size) {
             Ok(d) => d,
             Err(e) => { kprintln!("failed: {}", e); continue; }
         };
 
         if wasm_data.len() != remote.size {
-            kprintln!("size mismatch (got {} expected {})", wasm_data.len(), remote.size);
+            kprintln!("short download (got {} of {})", wasm_data.len(), remote.size);
             continue;
         }
 
