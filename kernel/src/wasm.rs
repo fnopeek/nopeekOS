@@ -1172,6 +1172,21 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_ticks() -> milliseconds since boot (monotonic), or -1.
+    //
+    // A clock, not a calendar: no wall time, no timezone, nothing that
+    // identifies the machine — so it needs no capability, like the theme
+    // query. Resolution is the 100 Hz timer, i.e. 10 ms steps; enough to
+    // attribute phases of a page load, not enough to time a single glyph.
+    //
+    // Stage 1 needs this anyway for `setTimeout`/`requestAnimationFrame`
+    // (BROWSER.md §10 lists `now_ms` in the Platform surface).
+    linker.func_wrap("env", "npk_ticks",
+        |_caller: Caller<'_, HostState>| -> i64 {
+            (crate::interrupts::ticks() as i64).saturating_mul(10)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_theme_token(token_id) -> RGBA u32 (0xAARRGGBB) for the ACTIVE theme
     // (light/dark aware), or 0 for an unknown token. RENDER-gated. Lets an app
     // that paints its own surface (e.g. the browser's Canvas) match the theme's

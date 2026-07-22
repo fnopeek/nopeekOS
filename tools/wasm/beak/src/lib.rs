@@ -60,6 +60,40 @@ unsafe extern "C" {
     fn npk_close_widget() -> i32;
     fn npk_log_serial(ptr: i32, len: i32);
     fn npk_sleep(ms: i32) -> i32;
+    /// Milliseconds since boot, 10 ms resolution (the 100 Hz timer).
+    fn npk_ticks() -> i64;
+}
+
+/// Milliseconds since boot. Used only for the phase timings below.
+fn now_ms() -> i64 {
+    unsafe { npk_ticks() }
+}
+
+/// Log "<label>: <ms> ms". Phase timings are permanent, not scaffolding:
+/// on this hardware the engine runs under a WASM interpreter, so knowing
+/// which phase a page load actually spends its time in is the difference
+/// between fixing the slow thing and rewriting the fast one.
+fn log_ms(label: &str, ms: i64) {
+    let mut b = String::new();
+    b.push_str("[beak] ");
+    b.push_str(label);
+    b.push_str(": ");
+    push_i64(&mut b, ms);
+    b.push_str(" ms");
+    log(&b);
+}
+
+fn push_i64(out: &mut String, mut v: i64) {
+    if v < 0 { out.push('-'); v = -v; }
+    let mut d = [0u8; 20];
+    let mut n = 0;
+    loop {
+        d[n] = b'0' + (v % 10) as u8;
+        v /= 10;
+        n += 1;
+        if v == 0 { break; }
+    }
+    while n > 0 { n -= 1; out.push(d[n] as char); }
 }
 
 fn log(m: &str) {
@@ -310,11 +344,14 @@ fn do_layout(engine: &Engine, w: u32, state: &FormState) -> Layout {
     if let Some((_, _, _, h)) = canvas_rect() {
         engine.set_viewport_h(h as u32);
     }
-    if use_site_css() {
+    let t0 = now_ms();
+    let lay = if use_site_css() {
         engine.layout_forms(html_str(), css_str(), w, state)
     } else {
         engine.layout_ua_forms(html_str(), w, state)
-    }
+    };
+    log_ms("layout (parse+cascade+layout)", now_ms() - t0);
+    lay
 }
 fn payload_str(len: usize) -> &'static str {
     unsafe {
@@ -334,6 +371,12 @@ fn mark_dirty() {
 
 // Content generation — bumped on every fetch so the layout cache knows to
 // re-lay-out (vs. reusing it for scroll, which keeps scrolling smooth).
+/// When the current navigation started, so the first paint after it can
+/// report the ONE number a user actually feels: click → something on screen.
+static mut NAV_START_MS: i64 = 0;
+/// Cleared once that number has been reported for this navigation.
+static mut NAV_REPORTED: bool = true;
+
 static mut CONTENT_GEN: u32 = 0;
 fn bump_content_gen() {
     unsafe {
@@ -360,8 +403,14 @@ fn fetched_from() -> Option<String> {
 /// Fetch `url` into HTML_BUF, then its linked stylesheets; resets scroll +
 /// marks dirty.
 fn fetch(url: &str) -> bool {
+    let t_nav = now_ms();
+    unsafe {
+        core::ptr::addr_of_mut!(NAV_START_MS).write(t_nav);
+        core::ptr::addr_of_mut!(NAV_REPORTED).write(false);
+    }
     let dst = core::ptr::addr_of_mut!(HTML_BUF) as *mut u8;
     let n = unsafe { npk_http_request(url.as_ptr() as i32, url.len() as i32, dst as i32, HTML_CAP as i32) };
+    log_ms("fetch document", now_ms() - t_nav);
     let len = if n < 0 { 0 } else { n as usize };
     unsafe { core::ptr::addr_of_mut!(HTML_LEN).write(len) };
     set_scroll(0);
@@ -376,7 +425,9 @@ fn fetch(url: &str) -> bool {
         // Wikimedia's rate limit (a wall of HTTP 429).
         let base = fetched_from().unwrap_or_else(|| url.to_string());
         set_url(&base);
+        let t_css = now_ms();
         fetch_stylesheets(&base);
+        log_ms("fetch stylesheets", now_ms() - t_css);
         unsafe { core::ptr::addr_of_mut!(IMAGES_DIRTY).write(true) };
     } else {
         unsafe { core::ptr::addr_of_mut!(CSS_LEN).write(0) };
@@ -742,8 +793,19 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, u32)>, buf: &
     if buf.len() != need {
         buf.resize(need, 0);
     }
+    let t_paint = now_ms();
     engine.paint(layout, w as u32, h as u32, sy, buf);
+    let t_commit = now_ms();
     unsafe { npk_canvas_commit(CANVAS_ID, buf.as_ptr() as i32, buf.len() as i32, w, h) };
+    log_ms("paint", t_commit - t_paint);
+    log_ms("canvas commit", now_ms() - t_commit);
+    // The number that matters: navigation → first pixels.
+    unsafe {
+        if !core::ptr::addr_of!(NAV_REPORTED).read() {
+            core::ptr::addr_of_mut!(NAV_REPORTED).write(true);
+            log_ms("=== navigation -> first paint", now_ms() - core::ptr::addr_of!(NAV_START_MS).read());
+        }
+    }
 
     unsafe {
         core::ptr::addr_of_mut!(LAST_W).write(w);
