@@ -43,3 +43,7 @@ default-features = false
 [dependencies.zune-core]
 version = "0.4"
 default-features = false
+
+[features]
+# Dev-only: print oversized boxes with the element that made them.
+diag-boxes = []
