@@ -859,8 +859,17 @@ impl Ctx<'_> {
             if let Some(kind) = crate::forms::kind_of(el) {
                 if kind != ControlKind::Hidden {
                     self.path.push(ElemInfo::of(el));
-                    let ctl = self.control_box(el, &st, kind, w as f32);
-                    inline.control(ctl);
+                    // An absolutely-positioned control is out of flow, like any
+                    // other abspos box — the checkbox-hack toggle overlay
+                    // (`position:absolute; width:100%; height:100%; opacity:0`)
+                    // must NOT advance the line, or its full-size box inflates
+                    // the container by the whole page height.
+                    if matches!(st.position, Position::Absolute | Position::Fixed) {
+                        self.layout_abs(el, &st, x, anchor + open.value() as i32);
+                    } else {
+                        let ctl = self.control_box(el, &st, kind, w as f32);
+                        inline.control(ctl);
+                    }
                     self.path.pop();
                 }
                 continue;
