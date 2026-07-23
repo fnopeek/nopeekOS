@@ -23,7 +23,7 @@
 //! common case (all of Bootstrap defines its palette on `:root{…}`). True
 //! cascade-scoped custom properties are out of scope.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -40,7 +40,11 @@ pub fn resolve_vars(css: &str, viewport_w: f32) -> String {
     }
 
     let mut map: BTreeMap<String, String> = BTreeMap::new();
-    collect(css, &mut map, viewport_w);
+    // Names whose winning value came from an *unconditional* (`:root`/`html`/
+    // `body`/`*`) block — a later *conditional* block (a theme/state class such
+    // as `html.skin-theme-clientpref-night`) must not overwrite these.
+    let mut uncond: BTreeSet<String> = BTreeSet::new();
+    collect(css, &mut map, &mut uncond, viewport_w);
 
     // Expand to a fixpoint. A variable's value (or a fallback) may itself hold
     // more `var()`; each pass resolves one layer, so we loop until stable.
@@ -69,10 +73,16 @@ pub fn resolve_vars(css: &str, viewport_w: f32) -> String {
 /// skipped so a `--x:` inside them is never mistaken for a declaration. A
 /// `--name` that is *used* (`var(--name)`) is not a declaration because it is
 /// not followed by `:`, so it is ignored here.
-fn collect(css: &str, map: &mut BTreeMap<String, String>, viewport_w: f32) {
+fn collect(css: &str, map: &mut BTreeMap<String, String>, uncond: &mut BTreeSet<String>, viewport_w: f32) {
     let b = css.as_bytes();
     let n = b.len();
     let mut i = 0;
+    // Track the block a declaration sits in: `depth` (0 = between rules), and
+    // whether the current top-level rule's selector is unconditional-root.
+    // `sel_start` marks where the pending selector prelude began.
+    let mut depth: i32 = 0;
+    let mut sel_start = 0usize;
+    let mut block_uncond = false;
     while i < n {
         // Skip comments.
         if b[i] == b'/' && i + 1 < n && b[i + 1] == b'*' {
@@ -101,9 +111,12 @@ fn collect(css: &str, map: &mut BTreeMap<String, String>, viewport_w: f32) {
                 }
                 let close = crate::css::matching_brace(b, k, n);
                 if crate::css::media_matches(&css[j..k], viewport_w) {
-                    collect(&css[k + 1..close], map, viewport_w);
+                    // The media body is a fresh rule list — its own selectors
+                    // decide unconditional-ness, so recurse (depth resets).
+                    collect(&css[k + 1..close], map, uncond, viewport_w);
                 }
                 i = (close + 1).min(n);
+                sel_start = i;
                 continue;
             }
             i = j;
@@ -112,6 +125,31 @@ fn collect(css: &str, map: &mut BTreeMap<String, String>, viewport_w: f32) {
         // Skip strings.
         if b[i] == b'"' || b[i] == b'\'' {
             i = skip_string(b, i);
+            continue;
+        }
+        // Block boundaries — track which rule (and whether its selector is
+        // unconditional-root) each declaration sits in.
+        if b[i] == b'{' {
+            if depth == 0 {
+                block_uncond = is_unconditional_root(css[sel_start..i].trim());
+            }
+            depth += 1;
+            i += 1;
+            continue;
+        }
+        if b[i] == b'}' {
+            if depth > 0 {
+                depth -= 1;
+            }
+            if depth == 0 {
+                sel_start = i + 1;
+            }
+            i += 1;
+            continue;
+        }
+        if b[i] == b';' && depth == 0 {
+            sel_start = i + 1;
+            i += 1;
             continue;
         }
         // Candidate custom-property declaration: `--` ident … `:`.
@@ -135,7 +173,18 @@ fn collect(css: &str, map: &mut BTreeMap<String, String>, viewport_w: f32) {
                     let v = read_value_end(b, val_start);
                     let name = css[name_start..j].to_string();
                     let value = css[val_start..v].trim().to_string();
-                    map.insert(name, value);
+                    // A declaration at rule level (depth 1) is "unconditional"
+                    // only if its selector is a bare root; deeper nesting
+                    // (@supports/@keyframes) is collected as before. An
+                    // unconditional value overwrites freely and is protected;
+                    // a conditional one may not clobber a protected value.
+                    let is_uncond = depth != 1 || block_uncond;
+                    if is_uncond {
+                        map.insert(name.clone(), value);
+                        uncond.insert(name);
+                    } else if !uncond.contains(&name) {
+                        map.insert(name, value);
+                    }
                     i = v;
                     continue;
                 }
@@ -145,6 +194,29 @@ fn collect(css: &str, map: &mut BTreeMap<String, String>, viewport_w: f32) {
         }
         i += 1;
     }
+}
+
+/// Does a selector list apply unconditionally — i.e. does any alternative
+/// target the document root with no class/id/attribute/state qualifier
+/// (`:root`, `html`, `body`, `*`, `html body`, …)? A theme or state override
+/// like `html.skin-theme-clientpref-night` or `:root[data-theme=dark]` adds a
+/// qualifier we cannot confirm at collection time, so its custom-property
+/// values must not overwrite the unconditional default (dark palettes were
+/// otherwise winning document-wide on any site that ships one).
+fn is_unconditional_root(sel: &str) -> bool {
+    sel.split(',').any(|alt| {
+        let a = alt.trim();
+        if a.is_empty() {
+            return false;
+        }
+        // Any class, id, or attribute qualifier makes it conditional.
+        if a.contains('.') || a.contains('#') || a.contains('[') {
+            return false;
+        }
+        // The only pseudo allowed is `:root`; anything else (`:where`, `:not`,
+        // `:hover`, a pseudo-element, …) is conditional.
+        !a.replace(":root", "").contains(':')
+    })
 }
 
 /// Return the index one past the end of a declaration value that starts at
