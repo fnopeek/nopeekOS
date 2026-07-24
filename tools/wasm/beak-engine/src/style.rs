@@ -13,7 +13,8 @@
 //! Colours resolve against the active `Theme` so pages follow light/dark like
 //! the rest of the UI (until pages set their own `color`, which we honor).
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 use crate::css::{ElemInfo, PseudoElem, Stylesheet};
 use crate::dom::Element;
@@ -54,6 +55,77 @@ pub enum Display {
     /// from arbitrary stray content (which anonymous-box-wraps instead).
     TableColumn,
     TableColumnGroup,
+}
+
+/// CSS `text-align` — how a block container distributes its line boxes'
+/// leftover inline space. `Start`/`End` are the writing-mode-relative pair;
+/// this engine is LTR-only, so `Start == Left` and `End == Right` at use time.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TextAlign {
+    Start,
+    End,
+    Left,
+    Right,
+    Center,
+    /// Stretch every line but the last to fill the line box. Not implemented
+    /// (our line segments merge adjacent same-style words, so there are no
+    /// per-word boxes left to expand) — laid out as `Start`.
+    Justify,
+}
+
+/// CSS `line-height`. A unitless number inherits AS a number (each descendant
+/// resolves it against its own font-size); a length/percentage inherits as the
+/// already-computed px. Keeping the two apart is what makes `body{line-height:
+/// 1.5}` scale a nested heading instead of squashing it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum LineHeight {
+    /// `normal` — use the face's own line metrics.
+    Normal,
+    Num(f32),
+    Px(f32),
+}
+
+impl LineHeight {
+    /// The used line-height in px for a box at `font_px`, or `None` for
+    /// `normal` (the caller falls back to font metrics).
+    pub fn px(self, font_px: f32) -> Option<f32> {
+        match self {
+            LineHeight::Normal => None,
+            LineHeight::Num(n) => Some(n * font_px),
+            LineHeight::Px(p) => Some(p),
+        }
+    }
+}
+
+/// CSS `text-transform` — a rendering-time case mapping of the text content.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TextTransform {
+    None,
+    Upper,
+    Lower,
+    Capitalize,
+}
+
+/// CSS `list-style-type` — the marker a `display:list-item` box generates.
+/// Inherited, so setting it on the `<ul>`/`<ol>` reaches every `<li>`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ListStyle {
+    None,
+    Disc,
+    Circle,
+    Square,
+    Decimal,
+    LowerAlpha,
+    UpperAlpha,
+    LowerRoman,
+    UpperRoman,
+}
+
+impl ListStyle {
+    /// A glyph marker (bullet) rather than a counter string.
+    pub fn is_bullet(self) -> bool {
+        matches!(self, ListStyle::Disc | ListStyle::Circle | ListStyle::Square)
+    }
 }
 
 /// CSS `table-layout` — how a table computes its column widths.
@@ -246,6 +318,18 @@ pub struct ComputedStyle {
     pub mono: bool,
     pub pre: bool, // white-space: pre (no collapse, honor newlines)
     pub color: Rgb,
+    pub text_align: TextAlign,
+    pub list_style: ListStyle,
+    pub line_height: LineHeight,
+    /// `direction: rtl` — the inline base direction. This engine does no bidi
+    /// reordering (no RTL faces are embedded); what it does honour is the part
+    /// that governs layout of LTR content inside an RTL container: `start`/
+    /// `end` text alignment flip, so an unstyled RTL block right-aligns.
+    pub rtl: bool,
+    pub text_transform: TextTransform,
+    /// `text-align-last` — alignment of a block's LAST line. `None` = `auto`,
+    /// i.e. defer to `text-align`.
+    pub text_align_last: Option<TextAlign>,
     // — not inherited —
     pub display: Display,
     // — box model (block) —
@@ -350,6 +434,12 @@ impl ComputedStyle {
             mono: false,
             pre: false,
             color: theme.text,
+            text_align: TextAlign::Start,
+            list_style: ListStyle::Disc,
+            line_height: LineHeight::Normal,
+            rtl: false,
+            text_transform: TextTransform::None,
+            text_align_last: None,
             display: Display::Block,
             width: Len::Auto,
             min_width: Len::Auto,
@@ -450,6 +540,12 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         mono: parent.mono,
         pre: parent.pre,
         color: parent.color,
+        text_align: parent.text_align,
+        list_style: parent.list_style,
+        line_height: parent.line_height,
+        rtl: parent.rtl,
+        text_transform: parent.text_transform,
+        text_align_last: parent.text_align_last,
         display: Display::Inline, // CSS initial `display` is inline
         width: Len::Auto,
         min_width: Len::Auto,
@@ -548,6 +644,13 @@ pub fn resolve(
 ) -> ComputedStyle {
     let mut s = inherit_reset(parent);
     ua_rule(&el.tag, parent, theme, &mut s);
+    // HTML's `dir` attribute is a presentational hint for `direction`: it sits
+    // between the UA sheet and the author cascade, so author CSS still wins.
+    match el.attr("dir") {
+        Some("rtl") => s.rtl = true,
+        Some("ltr") => s.rtl = false,
+        _ => {}
+    }
 
     // Author cascade WITH `!important` (CSS Cascade 4 §6.3): two passes. Normal
     // declarations first (UA < author-normal < inline-normal), then `!important`
@@ -767,20 +870,21 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
         // Tables. `<table>` gets the table formatting context; cells are block
         // containers for their own content (`th` also bold). `tr`/`tbody`/… are
         // walked by `layout_table`, so their display is only a fallback.
-        "table" => {
-            s.display = Display::Table;
-            s.margin_top = em * 0.5;
-            s.margin_bottom = em * 0.5;
-        }
+        // No default margin: the HTML UA sheet gives `<table>` none (only
+        // `border-spacing`), and inventing one shifts everything after a table
+        // by half an em relative to what every reftest reference assumes.
+        "table" => s.display = Display::Table,
         "td" => s.display = Display::Block,
         "th" => {
             s.display = Display::Block;
             s.bold = true;
+            s.text_align = TextAlign::Center;
         }
         "caption" => {
             s.display = Display::Block;
             s.bold = true;
             s.margin_bottom = em * 0.3;
+            s.text_align = TextAlign::Center;
         }
         "p" => {
             s.display = Display::Block;
@@ -802,6 +906,7 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
             s.pad_left = 26.0;
             s.margin_top = em * 0.5;
             s.margin_bottom = em * 0.5;
+            s.list_style = if tag == "ol" { ListStyle::Decimal } else { ListStyle::Disc };
         }
         "li" => s.display = Display::ListItem,
         "dl" => {
@@ -981,6 +1086,85 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 s.font_px = px.clamp(6.0, 200.0);
             }
         }
+        // `line-height: normal | <number> | <length> | <percentage>`. A bare
+        // number stays a number (inherits as a ratio); everything else computes
+        // to px against THIS element's font-size, per CSS 2.1 §10.8.1.
+        "line-height" => {
+            let t = v.trim();
+            s.line_height = if t == "normal" {
+                LineHeight::Normal
+            } else if let Some(p) = t.strip_suffix('%') {
+                match p.trim().parse::<f32>() {
+                    Ok(n) => LineHeight::Px(n / 100.0 * s.font_px),
+                    Err(_) => s.line_height,
+                }
+            } else if let Ok(n) = t.parse::<f32>() {
+                LineHeight::Num(n)
+            } else {
+                match parse_len_opt(t, u) {
+                    Some(Len::Px(px)) => LineHeight::Px(px),
+                    _ => s.line_height,
+                }
+            };
+        }
+        "font" => apply_font_shorthand(&v, theme, s),
+        "text-transform" => {
+            s.text_transform = match v.as_str() {
+                "uppercase" => TextTransform::Upper,
+                "lowercase" => TextTransform::Lower,
+                "capitalize" => TextTransform::Capitalize,
+                "none" => TextTransform::None,
+                _ => s.text_transform,
+            };
+        }
+        // Applies to the last line of a block (and so to a block with only
+        // one). `auto` defers to `text-align`.
+        "text-align-last" => {
+            s.text_align_last = match v.as_str() {
+                "left" => Some(TextAlign::Left),
+                "right" => Some(TextAlign::Right),
+                "center" => Some(TextAlign::Center),
+                "justify" => Some(TextAlign::Justify),
+                "start" => Some(TextAlign::Start),
+                "end" => Some(TextAlign::End),
+                "auto" => None,
+                _ => s.text_align_last,
+            };
+        }
+        "direction" => match v.as_str() {
+            "rtl" => s.rtl = true,
+            "ltr" => s.rtl = false,
+            _ => {}
+        },
+        "text-align" => {
+            s.text_align = match v.as_str() {
+                "left" => TextAlign::Left,
+                "right" => TextAlign::Right,
+                "center" => TextAlign::Center,
+                "justify" => TextAlign::Justify,
+                "end" => TextAlign::End,
+                "start" => TextAlign::Start,
+                // `match-parent` on a LTR root computes to `left`; `inherit`/
+                // `unset` are already the inherited value we started from.
+                "match-parent" | "inherit" | "unset" => s.text_align,
+                _ => s.text_align,
+            };
+        }
+        "list-style-type" => {
+            if let Some(ls) = parse_list_style(&v) {
+                s.list_style = ls;
+            }
+        }
+        // `list-style: <type> || <position> || <image>` in any order; we only
+        // consume the type keyword. `none` legitimately means "no marker".
+        "list-style" => {
+            for part in v.split_whitespace() {
+                if let Some(ls) = parse_list_style(part) {
+                    s.list_style = ls;
+                    break;
+                }
+            }
+        }
         "white-space" => match v.as_str() {
             "pre" | "pre-wrap" | "pre-line" => s.pre = true,
             "normal" | "nowrap" => s.pre = false,
@@ -1017,10 +1201,22 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             s.margin_bottom = margin_tb(b, u);
             s.margin_left = margin_lr(l, u);
         }
-        "margin-top" => s.margin_top = margin_tb(&v, u),
-        "margin-bottom" => s.margin_bottom = margin_tb(&v, u),
-        "margin-left" => s.margin_left = margin_lr(&v, u),
-        "margin-right" => s.margin_right = margin_lr(&v, u),
+        "margin-top" | "margin-block-start" => s.margin_top = margin_tb(&v, u),
+        "margin-bottom" | "margin-block-end" => s.margin_bottom = margin_tb(&v, u),
+        "margin-left" | "margin-inline-start" => s.margin_left = margin_lr(&v, u),
+        "margin-right" | "margin-inline-end" => s.margin_right = margin_lr(&v, u),
+        // Logical two-value shorthands, LTR/horizontal-tb: `margin-inline` is
+        // (left, right), `margin-block` is (top, bottom); one value sets both.
+        "margin-inline" => {
+            let p = split_sides(&v);
+            s.margin_left = margin_lr(p[0], u);
+            s.margin_right = margin_lr(p[1], u);
+        }
+        "margin-block" => {
+            let p = split_sides(&v);
+            s.margin_top = margin_tb(p[0], u);
+            s.margin_bottom = margin_tb(p[1], u);
+        }
         "padding" => {
             let u = s.units();
             let (t, r, b, l) = four_values(&v);
@@ -1029,10 +1225,20 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             s.pad_bottom = parse_pad(b, u, 0.0);
             s.pad_left = parse_pad(l, u, 0.0);
         }
-        "padding-top" => s.pad_top = parse_pad(&v, u, s.pad_top),
-        "padding-right" => s.pad_right = parse_pad(&v, u, s.pad_right),
-        "padding-bottom" => s.pad_bottom = parse_pad(&v, u, s.pad_bottom),
-        "padding-left" => s.pad_left = parse_pad(&v, u, s.pad_left),
+        "padding-top" | "padding-block-start" => s.pad_top = parse_pad(&v, u, s.pad_top),
+        "padding-right" | "padding-inline-end" => s.pad_right = parse_pad(&v, u, s.pad_right),
+        "padding-bottom" | "padding-block-end" => s.pad_bottom = parse_pad(&v, u, s.pad_bottom),
+        "padding-left" | "padding-inline-start" => s.pad_left = parse_pad(&v, u, s.pad_left),
+        "padding-inline" => {
+            let p = split_sides(&v);
+            s.pad_left = parse_pad(p[0], u, s.pad_left);
+            s.pad_right = parse_pad(p[1], u, s.pad_right);
+        }
+        "padding-block" => {
+            let p = split_sides(&v);
+            s.pad_top = parse_pad(p[0], u, s.pad_top);
+            s.pad_bottom = parse_pad(p[1], u, s.pad_bottom);
+        }
 
         // — background + border —
         "background-color" | "background" => {
@@ -1434,6 +1640,92 @@ fn parse_calc_affine(v: &str, u: Units) -> Option<Len> {
     } else {
         Some(Len::Calc { pct, px: at0 })
     }
+}
+
+/// Whether a token can start a `font-size` — the shorthand's anchor: everything
+/// before it is style/variant/weight, everything after it is the family.
+fn is_font_size_token(t: &str) -> bool {
+    let head = t.split('/').next().unwrap_or("");
+    matches!(
+        head,
+        "xx-small" | "x-small" | "small" | "medium" | "large" | "x-large" | "xx-large"
+            | "larger" | "smaller"
+    ) || head.starts_with(|c: char| c.is_ascii_digit() || c == '.')
+}
+
+/// `font: [<style> || <variant> || <weight>] <size>[/<line-height>] <family>`
+/// (CSS 2.1 §15.8). Resetting every sub-property it does not mention is the
+/// whole point of the shorthand, so unspecified style/weight/line-height go
+/// back to their initial values rather than keeping what the cascade had.
+fn apply_font_shorthand(v: &str, theme: &Theme, s: &mut ComputedStyle) {
+    let t = v.trim();
+    if t.is_empty() {
+        return;
+    }
+    // `inherit` restores the parent's font; `em_base` IS the parent's size.
+    // System-font keywords have no user-configurable faces here, so they take
+    // the UA body font.
+    if matches!(t, "inherit" | "unset" | "caption" | "icon" | "menu" | "message-box" | "small-caption" | "status-bar") {
+        s.font_px = if t == "inherit" || t == "unset" { s.em_base } else { BASE_FONT_PX };
+        s.line_height = LineHeight::Normal;
+        return;
+    }
+    let toks: Vec<&str> = t.split_whitespace().collect();
+    let Some(i) = toks.iter().position(|k| is_font_size_token(k)) else {
+        return; // no size → not a valid font shorthand, change nothing
+    };
+    let (lead, rest) = toks.split_at(i);
+    let (mut bold, mut italic) = (false, false);
+    for k in lead {
+        match *k {
+            "normal" | "small-caps" | "lighter" | "condensed" | "expanded" => {}
+            "italic" | "oblique" => italic = true,
+            "bold" | "bolder" => bold = true,
+            w => match w.parse::<u32>() {
+                Ok(n) => bold = n >= 600,
+                Err(_) => return, // an unknown keyword invalidates the whole value
+            },
+        }
+    }
+    let mut parts = rest[0].splitn(2, '/');
+    let size = parts.next().unwrap_or("");
+    let lh = parts.next().map(|s| s.to_string());
+    s.bold = bold;
+    s.italic = italic;
+    s.line_height = LineHeight::Normal;
+    apply_one("font-size", size, theme, s);
+    if let Some(lh) = lh {
+        if !lh.is_empty() {
+            apply_one("line-height", &lh, theme, s);
+        }
+    }
+    if rest.len() > 1 {
+        apply_one("font-family", &rest[1..].join(" "), theme, s);
+    }
+}
+
+/// `<a> [<b>]` — a two-sided logical shorthand. One value applies to both.
+fn split_sides(v: &str) -> [&str; 2] {
+    let mut it = v.split_whitespace();
+    let a = it.next().unwrap_or("0");
+    [a, it.next().unwrap_or(a)]
+}
+
+/// A `list-style-type` keyword, or `None` for anything we don't render as a
+/// marker (`inside`/`outside`/`url(…)`/an unknown counter style).
+fn parse_list_style(v: &str) -> Option<ListStyle> {
+    Some(match v {
+        "none" => ListStyle::None,
+        "disc" => ListStyle::Disc,
+        "circle" => ListStyle::Circle,
+        "square" => ListStyle::Square,
+        "decimal" => ListStyle::Decimal,
+        "lower-alpha" | "lower-latin" => ListStyle::LowerAlpha,
+        "upper-alpha" | "upper-latin" => ListStyle::UpperAlpha,
+        "lower-roman" => ListStyle::LowerRoman,
+        "upper-roman" => ListStyle::UpperRoman,
+        _ => return None,
+    })
 }
 
 /// Top/bottom margin: `auto` computes to 0 for block boxes.
