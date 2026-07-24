@@ -25,7 +25,8 @@ use crate::forms::{ControlKind, FormState};
 use crate::image::ImageMap;
 use crate::style::{
     self, BorderSide, ClearKind, Clip, ComputedStyle, CrossAlign, Display, FlexBasis, FloatKind,
-    GridTrack, Justify, Len, Position, TableLayout, ZIndex, BASE_FONT_PX,
+    GridTrack, Justify, Len, ListStyle, Position, TableLayout, TextAlign, TextTransform, ZIndex,
+    BASE_FONT_PX,
 };
 
 /// An active float's exclusion rectangle (document space) within a block
@@ -424,6 +425,23 @@ fn line_gap(font: &Font, size: f32) -> f32 {
     font.horizontal_line_metrics(size).map(|m| m.new_line_size).unwrap_or(size * 1.3)
 }
 
+/// One inline run's contribution to its line box: `(ascent above the shared
+/// baseline, box height)`. With `line-height: normal` these are the face's own
+/// metrics — unchanged from before line-height existed. An explicit
+/// line-height distributes its difference from the content height as
+/// half-leading above and below the baseline (CSS 2.1 §10.8.1), so a value
+/// under the content height legitimately yields a negative half and lets
+/// consecutive lines overlap.
+fn run_metrics(font: &Font, size: f32, lh: f32) -> (f32, f32) {
+    let m = font.horizontal_line_metrics(size);
+    let asc = m.map(|m| m.ascent).unwrap_or(size);
+    if lh <= 0.0 {
+        return (asc, line_gap(font, size));
+    }
+    let desc = m.map(|m| m.descent.abs()).unwrap_or(0.0);
+    (asc + (lh - (asc + desc)) / 2.0, lh)
+}
+
 // ── entry point + block/inline tree walk ───────────────────────────────────
 
 /// Per-layout mutable context: the shared inputs (font / theme / author sheet)
@@ -478,6 +496,13 @@ struct Ctx<'a> {
     /// another explicit `z-index`, are out of scope — sibling ordering is
     /// the common case these reftests need).
     stack_depth: u32,
+    /// The list counter for the `display:list-item` box about to be laid out.
+    /// `flow_children` owns one counter per child run and stamps it here right
+    /// before descending, so the marker code reads the right ordinal without
+    /// threading it through every box-layout signature. A nested list can't
+    /// clobber it: the inner list is laid out from inside the outer item's
+    /// children, i.e. after its marker was already emitted.
+    marker_ord: i32,
 }
 
 impl Ctx<'_> {
@@ -571,6 +596,7 @@ pub fn layout(
         stack_ops: Vec::new(),
         stack_links: Vec::new(),
         stack_depth: 0,
+        marker_ord: 0,
     };
 
     let mut y = PAD;
@@ -799,6 +825,13 @@ impl Ctx<'_> {
         // and the total element-sibling count for `:nth-child`/`:last-child`.
         let mut siblings: Vec<ElemInfo> = Vec::new();
         let sib_count = nodes.iter().filter(|n| matches!(n, Node::Element(_))).count() as u32;
+        // `<ol start="n">` seeds the list counter; the first item lands on `n`.
+        let mut list_ord: i32 = owner
+            .filter(|o| o.tag == "ol")
+            .and_then(|o| o.attr("start"))
+            .and_then(|s| s.trim().parse::<i32>().ok())
+            .map(|n| n - 1)
+            .unwrap_or(0);
 
         // A run of `table-row`/`-row-group`/`-header-group`/`-footer-group`/
         // `-cell` siblings found here (not already inside table/row layout)
@@ -838,6 +871,14 @@ impl Ctx<'_> {
             siblings.push(ElemInfo::of(el));
             if st.display == Display::None {
                 continue;
+            }
+            if st.display == Display::ListItem {
+                // `<li value="n">` restarts the counter at n (HTML §4.4.8).
+                list_ord = el
+                    .attr("value")
+                    .and_then(|v| v.trim().parse::<i32>().ok())
+                    .unwrap_or(list_ord + 1);
+                self.marker_ord = list_ord;
             }
             // `<img>` is an atomic inline box: add it to the current inline run
             // (a lone `<img>` flows as one item → its own line; an `<img>` in an
@@ -898,7 +939,7 @@ impl Ctx<'_> {
             // a line box separates margins, so the open margin commits here.
             if !inline.is_empty() {
                 let ly = anchor + open.value() as i32;
-                let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, &mut self.ops, &mut self.links, &mut self.controls);
+                let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, parent.text_align, parent.text_align_last, parent.rtl, parent.line_height.px(parent.font_px).unwrap_or(0.0), &mut self.ops, &mut self.links, &mut self.controls);
                 if !committed {
                     first_top = ly;
                     committed = true;
@@ -982,7 +1023,7 @@ impl Ctx<'_> {
         }
         if !inline.is_empty() {
             let ly = anchor + open.value() as i32;
-            let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, &mut self.ops, &mut self.links, &mut self.controls);
+            let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, parent.text_align, parent.text_align_last, parent.rtl, parent.line_height.px(parent.font_px).unwrap_or(0.0), &mut self.ops, &mut self.links, &mut self.controls);
             if !committed {
                 first_top = ly;
                 committed = true;
@@ -1059,10 +1100,36 @@ impl Ctx<'_> {
             self.ops.push(DrawOp::Rect { x: content_x, y: y + 1, w: content_w.max(1), h: 1, color: self.theme.rule });
             return BoxOut { bottom: y + 3 + pb, top_y: prov_top_y, open: Collapse::one(if isolated { 0.0 } else { st.margin_bottom }), through: false };
         }
-        if st.display == Display::ListItem {
-            let s = 4;
-            let by = prov_top_y + bt + pt + (st.font_px * 0.55) as i32;
-            self.ops.push(DrawOp::Rect { x: content_x - 12, y: by, w: s, h: s, color: self.theme.muted });
+        // The `display:list-item` marker box, outside the content edge.
+        // `list-style-type:none` generates none at all — Wikipedia's nav/TOC
+        // lists rely on that, and a bullet there is pure noise.
+        if st.display == Display::ListItem && st.list_style != ListStyle::None {
+            let top = prov_top_y + bt + pt;
+            if st.list_style.is_bullet() {
+                let s = 4;
+                self.ops.push(DrawOp::Rect {
+                    x: content_x - 12,
+                    y: top + (st.font_px * 0.55) as i32,
+                    w: s,
+                    h: s,
+                    color: self.theme.muted,
+                });
+            } else {
+                // A counter marker is right-aligned against the content edge,
+                // like every browser's `::marker` box.
+                let label = marker_label(st.list_style, self.marker_ord);
+                let mw = measure(self.fonts.pick(st.bold, st.italic, st.mono), &label, st.font_px);
+                self.ops.push(DrawOp::Text {
+                    x: content_x - 8 - ceil_i32(mw),
+                    y: top,
+                    size: st.font_px,
+                    color: st.color,
+                    bold: st.bold,
+                    italic: st.italic,
+                    mono: st.mono,
+                    text: label,
+                });
+            }
         }
 
         // A positioned block becomes the containing block for `absolute`
@@ -1295,7 +1362,7 @@ impl Ctx<'_> {
             focused,
             caret,
             bg: st.bg,
-            style: RunStyle { size, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: 0 },
+            style: RunStyle { size, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: 0, lh: st.line_height.px(size).unwrap_or(0.0) },
         }
     }
 
@@ -2990,15 +3057,21 @@ fn layout_pre(
     gather_text(&el.children, &mut raw);
     // Browsers strip a single leading newline right after <pre>.
     let raw = raw.strip_prefix('\n').unwrap_or(&raw);
-    let lh = ceil_i32(line_gap(font, st.font_px));
+    // `line-height` governs a preformatted block's line advance exactly as it
+    // does an inline formatting context's; the baseline sits at the content
+    // ascent plus half the leading.
+    let used_lh = st.line_height.px(st.font_px).unwrap_or(0.0);
+    let (run_asc, run_h) = run_metrics(font, st.font_px, used_lh);
+    let lh = ceil_i32(run_h).max(1);
     let asc = ascent_i(font, st.font_px);
+    let baseline_off = if used_lh > 0.0 { run_asc as i32 - asc } else { (lh - asc) / 2 };
     let mut y = y0;
     for line in raw.split('\n') {
         let text = line.replace('\t', "    ");
         if !text.is_empty() {
             ops.push(DrawOp::Text {
                 x,
-                y: y + (lh - asc) / 2,
+                y: y + baseline_off,
                 size: st.font_px,
                 color: st.color,
                 bold: st.bold,
@@ -3067,6 +3140,7 @@ impl Ctx<'_> {
             return;
         }
         let href = if st.is_link { el.attr("href").or(href) } else { href };
+        let n0 = inline.item_count();
         // `el::before` — same anonymous-inline-box treatment as the block
         // path (`flow_children`), just feeding this inline run instead.
         if let Some((text, ps)) = self.pseudo(el, st, PseudoElem::Before) {
@@ -3095,6 +3169,9 @@ impl Ctx<'_> {
         if let Some((text, ps)) = self.pseudo(el, st, PseudoElem::After) {
             inline.text(&text, &ps, href);
         }
+        if inline.item_count() == n0 {
+            inline.strut(st);
+        }
     }
 }
 
@@ -3110,11 +3187,18 @@ struct RunStyle {
     italic: bool,
     mono: bool,
     valign: i8, // vertical-align: super (+1) / sub (-1) / baseline (0)
+    /// Used `line-height` in px, or 0 for `normal` (use the face's metrics).
+    lh: f32,
 }
 
 /// One inline item: a word, an atomic `<img>`, a form control, or a `<br>`.
 enum Item {
     Word { text: String, style: RunStyle, href: Option<String>, space_before: bool },
+    /// An inline box that generated no content of its own. It still contributes
+    /// its leading to any line box it lands in (CSS 2.1 §10.8) — `<span
+    /// style="line-height:5"></span>X` is a tall line — but it never makes a
+    /// line non-empty, so a line holding nothing else is still not generated.
+    Strut(RunStyle),
     Image { src: String, w: i32, h: i32, href: Option<String>, alt: String, space_before: bool },
     Control { ctl: CtlBox, space_before: bool },
     Break,
@@ -3400,12 +3484,13 @@ impl Inline {
 
     /// Add collapsed text from one text node under style `st`.
     fn text(&mut self, raw: &str, st: &ComputedStyle, href: Option<&str>) {
-        let rs = RunStyle { size: st.font_px, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: st.valign };
+        let rs = RunStyle { size: st.font_px, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: st.valign, lh: st.line_height.px(st.font_px).unwrap_or(0.0) };
         let mut word = String::new();
         for ch in raw.chars() {
             if ch.is_whitespace() {
                 if !word.is_empty() {
-                    self.push_word(core::mem::take(&mut word), rs, href);
+                    let w = transform_word(core::mem::take(&mut word), st.text_transform);
+                    self.push_word(w, rs, href);
                 }
                 if !self.items.is_empty() {
                     self.pending_space = true;
@@ -3415,7 +3500,8 @@ impl Inline {
             }
         }
         if !word.is_empty() {
-            self.push_word(word, rs, href);
+            let w = transform_word(word, st.text_transform);
+            self.push_word(w, rs, href);
         }
     }
 
@@ -3445,6 +3531,22 @@ impl Inline {
         self.pending_space = false;
     }
 
+    fn strut(&mut self, st: &ComputedStyle) {
+        self.items.push(Item::Strut(RunStyle {
+            size: st.font_px,
+            color: st.color,
+            bold: st.bold,
+            italic: st.italic,
+            mono: st.mono,
+            valign: st.valign,
+            lh: st.line_height.px(st.font_px).unwrap_or(0.0),
+        }));
+    }
+
+    fn item_count(&self) -> usize {
+        self.items.len()
+    }
+
     /// Flow the accumulated items into line boxes starting at `y0`; append the
     /// resulting `DrawOp`s + `LinkRect`s. Returns the y below the last line.
     /// `theme` supplies placeholder colours for undecodable images.
@@ -3457,6 +3559,10 @@ impl Inline {
         w: i32,
         y0: i32,
         floats: &[FloatRect],
+        align: TextAlign,
+        align_last: Option<TextAlign>,
+        rtl: bool,
+        strut: f32,
         ops: &mut Vec<DrawOp>,
         links: &mut Vec<LinkRect>,
         controls: &mut Vec<ControlRect>,
@@ -3468,7 +3574,10 @@ impl Inline {
         let mut y = y0;
         let mut line: Vec<Placed> = Vec::new();
         // Each line's usable [left, right] narrows around floats at its y-band.
-        let lh = ceil_i32(line_gap(fonts.regular(), BASE_FONT_PX)).max(1);
+        // The strut: an empty line box is as tall as the block's own
+        // line-height, and that is also the band height float avoidance probes.
+        let strut_h = if strut > 0.0 { strut } else { line_gap(fonts.regular(), BASE_FONT_PX) };
+        let lh = ceil_i32(strut_h).max(1);
         let (l0, r0) = band_of(floats, y, y + lh, x, x + w);
         let mut pen = l0 as f32;
         let mut line_ascent = 0.0f32;
@@ -3477,11 +3586,16 @@ impl Inline {
 
         for item in &self.items {
             match item {
+                Item::Strut(style) => {
+                    let (asc, lb) = run_metrics(face(style), style.size, style.lh);
+                    line_ascent = line_ascent.max(asc);
+                    gap = gap.max(lb);
+                }
                 Item::Break => {
                     if line.is_empty() {
-                        y += ceil_i32(line_gap(fonts.regular(), BASE_FONT_PX));
+                        y += ceil_i32(strut_h);
                     } else {
-                        y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, ops, links, controls);
+                        y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
                     }
                     let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                     pen = bl as f32;
@@ -3493,7 +3607,7 @@ impl Inline {
                     let ww = measure(face(style), text, style.size);
                     let sw = if *space_before { space_width(face(style), style.size) } else { 0.0 };
                     if !line.is_empty() && pen + sw + ww > right {
-                        y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, ops, links, controls);
+                        y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
                         let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                         pen = bl as f32;
                         right = br as f32;
@@ -3514,8 +3628,9 @@ impl Inline {
                         line.push(Placed::Text(Seg { x: sx, text: text.clone(), style: *style, href: href.clone() }));
                     }
                     pen += lead + ww;
-                    line_ascent = line_ascent.max(face(style).horizontal_line_metrics(style.size).map(|m| m.ascent).unwrap_or(style.size));
-                    gap = gap.max(line_gap(face(style), style.size));
+                    let (asc, lb) = run_metrics(face(style), style.size, style.lh);
+                    line_ascent = line_ascent.max(asc);
+                    gap = gap.max(lb);
                 }
                 Item::Image { src, w: iw, h: ih, href, alt, space_before } => {
                     // Fit the image to the content width, keeping aspect.
@@ -3527,7 +3642,7 @@ impl Inline {
                     let (bw, bh) = (bw.max(1.0) as i32, bh.max(1.0) as i32);
                     let sw = if *space_before { space_width(fonts.regular(), BASE_FONT_PX) } else { 0.0 };
                     if !line.is_empty() && pen + sw + bw as f32 > right {
-                        y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, ops, links, controls);
+                        y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
                         let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                         pen = bl as f32;
                         right = br as f32;
@@ -3551,7 +3666,7 @@ impl Inline {
                 Item::Control { ctl, space_before } => {
                     let sw = if *space_before { space_width(fonts.regular(), BASE_FONT_PX) } else { 0.0 };
                     if !line.is_empty() && pen + sw + ctl.w as f32 > right {
-                        y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, ops, links, controls);
+                        y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
                         let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                         pen = bl as f32;
                         right = br as f32;
@@ -3571,7 +3686,8 @@ impl Inline {
             }
         }
         if !line.is_empty() {
-            y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, ops, links, controls);
+            let a = align_last.unwrap_or(align);
+            y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, align_dx(a, rtl, pen, right), ops, links, controls);
         }
         y
     }
@@ -3593,6 +3709,102 @@ struct Seg {
     href: Option<String>,
 }
 
+/// `text-transform` applied to one whitespace-delimited word. `capitalize`
+/// uppercases the first letter of each word, which is exactly what a word here
+/// is — the caller has already split on whitespace.
+fn transform_word(w: String, tt: TextTransform) -> String {
+    match tt {
+        TextTransform::None => w,
+        TextTransform::Upper => w.chars().flat_map(|c| c.to_uppercase()).collect(),
+        TextTransform::Lower => w.chars().flat_map(|c| c.to_lowercase()).collect(),
+        TextTransform::Capitalize => {
+            let mut out = String::with_capacity(w.len());
+            let mut first = true;
+            for c in w.chars() {
+                if first && c.is_alphabetic() {
+                    out.extend(c.to_uppercase());
+                    first = false;
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        }
+    }
+}
+
+/// The marker string for a counter-style `list-style-type` at ordinal `n`.
+fn marker_label(ls: ListStyle, n: i32) -> String {
+    match ls {
+        ListStyle::Decimal => alloc::format!("{n}."),
+        ListStyle::LowerAlpha => alloc::format!("{}.", alpha_counter(n, false)),
+        ListStyle::UpperAlpha => alloc::format!("{}.", alpha_counter(n, true)),
+        ListStyle::LowerRoman => alloc::format!("{}.", roman_counter(n, false)),
+        ListStyle::UpperRoman => alloc::format!("{}.", roman_counter(n, true)),
+        _ => String::new(),
+    }
+}
+
+/// Bijective base-26: 1→a, 26→z, 27→aa. Out-of-range ordinals fall back to the
+/// decimal representation, as CSS requires of an exhausted counter style.
+fn alpha_counter(n: i32, upper: bool) -> String {
+    if n < 1 {
+        return alloc::format!("{n}");
+    }
+    let base = if upper { b'A' } else { b'a' };
+    let mut out: Vec<u8> = Vec::new();
+    let mut v = n;
+    while v > 0 {
+        let rem = (v - 1) % 26;
+        out.push(base + rem as u8);
+        v = (v - 1) / 26;
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap_or_default()
+}
+
+/// Additive Roman numerals (CSS `lower-roman`/`upper-roman`). Only 1..=3999 is
+/// representable; anything else falls back to decimal.
+fn roman_counter(n: i32, upper: bool) -> String {
+    if !(1..=3999).contains(&n) {
+        return alloc::format!("{n}");
+    }
+    const VALS: [(i32, &str, &str); 13] = [
+        (1000, "m", "M"), (900, "cm", "CM"), (500, "d", "D"), (400, "cd", "CD"),
+        (100, "c", "C"), (90, "xc", "XC"), (50, "l", "L"), (40, "xl", "XL"),
+        (10, "x", "X"), (9, "ix", "IX"), (5, "v", "V"), (4, "iv", "IV"), (1, "i", "I"),
+    ];
+    let mut v = n;
+    let mut out = String::new();
+    for (val, lo, up) in VALS {
+        while v >= val {
+            out.push_str(if upper { up } else { lo });
+            v -= val;
+        }
+    }
+    out
+}
+
+/// `text-align`'s inline shift for one finished line: `pen` is the x just past
+/// the last placed item, `right` the line box's right edge. LTR only, so
+/// `start`/`left`/`justify` never shift. A line that overflows its box (a long
+/// unbreakable word) has no slack to distribute and stays put.
+fn align_dx(align: TextAlign, rtl: bool, pen: f32, right: f32) -> i32 {
+    let slack = right - pen;
+    if slack <= 0.0 {
+        return 0;
+    }
+    // `start`/`end` are direction-relative; `left`/`right` never are.
+    let to_right = match align {
+        TextAlign::Right => true,
+        TextAlign::Left => false,
+        TextAlign::Start | TextAlign::Justify => rtl,
+        TextAlign::End => !rtl,
+        TextAlign::Center => return (slack / 2.0) as i32,
+    };
+    if to_right { slack as i32 } else { 0 }
+}
+
 /// Emit one completed line at a shared baseline; return the next line's top y.
 /// Text runs sit on the baseline (`top + ascent == baseline`); images are
 /// bottom-aligned to the baseline. Images in a link get a `LinkRect` too.
@@ -3604,6 +3816,7 @@ fn emit_line(
     y: i32,
     line_ascent: f32,
     gap: f32,
+    dx: i32,
     ops: &mut Vec<DrawOp>,
     links: &mut Vec<LinkRect>,
     controls: &mut Vec<ControlRect>,
@@ -3625,10 +3838,10 @@ fn emit_line(
                 }
                 if let Some(h) = &seg.href {
                     let sw = measure(font, &seg.text, seg.style.size);
-                    links.push(LinkRect { x: seg.x, y: line_top, w: ceil_i32(sw), h: box_h, href: h.clone() });
+                    links.push(LinkRect { x: seg.x + dx, y: line_top, w: ceil_i32(sw), h: box_h, href: h.clone() });
                 }
                 ops.push(DrawOp::Text {
-                    x: seg.x,
+                    x: seg.x + dx,
                     y: top,
                     size: seg.style.size,
                     color: seg.style.color,
@@ -3640,9 +3853,10 @@ fn emit_line(
             }
             Placed::Control { x, ctl } => {
                 let top = baseline - (ctl.h - CTL_PAD_Y);
-                paint_control(fonts, theme, ctl, x, top, ops, controls);
+                paint_control(fonts, theme, ctl, x + dx, top, ops, controls);
             }
             Placed::Image { x, w, h, src, href, alt } => {
+                let x = x + dx;
                 let top = baseline - h; // image bottom sits on the baseline
                 if let Some(href) = &href {
                     links.push(LinkRect { x, y: top, w, h, href: href.clone() });
