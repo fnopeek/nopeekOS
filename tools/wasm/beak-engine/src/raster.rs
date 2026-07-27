@@ -33,6 +33,10 @@ pub struct Engine {
     /// `Cell` for the same reason `glyphs` is a `RefCell`: the shell holds the
     /// engine by shared reference across a frame.
     viewport_h: core::cell::Cell<u32>,
+    /// When set, `layout` records an `InspectBox` per element box (the dev
+    /// tool). Off by default so the label-formatting cost is only paid while the
+    /// user is inspecting; the shell toggles it and re-lays-out.
+    inspect: core::cell::Cell<bool>,
 }
 
 impl Default for Engine {
@@ -54,6 +58,7 @@ impl Engine {
             // 600 keeps the historical behaviour of the reftest canvas for any
             // caller that never sets it.
             viewport_h: core::cell::Cell::new(600),
+            inspect: core::cell::Cell::new(false),
         }
     }
 
@@ -62,6 +67,12 @@ impl Engine {
         if h > 0 {
             self.viewport_h.set(h);
         }
+    }
+
+    /// Enable/disable the inspect dev tool. When on, the next `layout` records
+    /// an element box per node into `Layout::inspect`; the shell re-lays-out.
+    pub fn set_inspect(&self, on: bool) {
+        self.inspect.set(on);
     }
 
     /// Set the page colours (the shell resolves these from the compositor
@@ -136,7 +147,7 @@ impl Engine {
     ) -> Layout {
         let dom = crate::dom::parse(html);
         let sheet = crate::css::collect_all(&dom, external_css, width as f32);
-        crate::layout::layout(&self.fonts, &dom, &sheet, &self.images, width, self.viewport_h.get(), &self.theme, forms)
+        crate::layout::layout(&self.fonts, &dom, &sheet, &self.images, width, self.viewport_h.get(), &self.theme, forms, self.inspect.get())
     }
 
     /// Lay out with the UA sheet ONLY — no author `<style>`/`<link>` CSS
@@ -157,6 +168,7 @@ impl Engine {
             self.viewport_h.get(),
             &self.theme,
             forms,
+            self.inspect.get(),
         )
     }
 

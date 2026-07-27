@@ -351,6 +351,23 @@ pub struct LinkRect {
     pub href: String,
 }
 
+/// A laid-out element's document-space box plus a human label — the data behind
+/// beak's "inspect" dev tool. Recorded only when inspection is enabled (see
+/// `Ctx::inspect`); the shell hit-tests these and shows the deepest box under
+/// the cursor so a mis-placed element can be named on the device.
+pub struct InspectBox {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    /// Tree depth (ancestor count) — the deepest box containing a point is the
+    /// most specific element there.
+    pub depth: u16,
+    /// `tag#id.class  W×H  display:… float:… position:…` — enough to find the
+    /// element in the page and see the geometry/box properties that went wrong.
+    pub label: String,
+}
+
 /// An interactive form control's document-space rectangle. The shell hit-tests
 /// these to give a control focus / activate it; `seq` identifies the element
 /// across re-layouts (`dom::Element::seq`).
@@ -382,9 +399,21 @@ pub struct Layout {
     /// between ~15 ms and ~145 ms — and under the device's WASM interpreter,
     /// between a page that scrolls while it loads and one that freezes.
     pub guessed_image_srcs: Vec<String>,
+    /// Element boxes for the inspect dev tool (empty unless inspection was on).
+    pub inspect: Vec<InspectBox>,
 }
 
 impl Layout {
+    /// The deepest (most specific) inspect box containing a document-space
+    /// point, for the inspect dev tool. Ties break toward the one recorded
+    /// later (painted on top).
+    pub fn hit_inspect(&self, x: i32, y: i32) -> Option<&InspectBox> {
+        self.inspect
+            .iter()
+            .filter(|b| x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h)
+            .max_by_key(|b| b.depth)
+    }
+
     /// Link href at a document-space point (caller adds scroll to screen y).
     pub fn hit_test(&self, x: i32, y: i32) -> Option<&str> {
         // Reverse so a link painted later (on top) wins an overlap.
@@ -566,6 +595,9 @@ struct Ctx<'a> {
     marker_ord: i32,
     /// CSS counter state (`counter-reset`/`-increment`, read by `counter()`).
     counters: Counters,
+    /// When set, element boxes are recorded into `inspects` for the dev tool.
+    inspect: bool,
+    inspects: Vec<InspectBox>,
 }
 
 impl Ctx<'_> {
@@ -585,6 +617,57 @@ impl Ctx<'_> {
         if link_end > link_start {
             self.stack_links.push((z, link_start, link_end));
         }
+    }
+
+    /// Record `el`'s box `(x, y, w, h)` for the inspect dev tool. No-op unless
+    /// inspection is enabled, so the label formatting cost is only paid when the
+    /// user is actually inspecting.
+    fn record_inspect(&mut self, el: &Element, st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32) {
+        if !self.inspect {
+            return;
+        }
+        let mut label = el.tag.clone();
+        if let Some(id) = el.attr("id") {
+            label.push('#');
+            label.push_str(id);
+        }
+        if let Some(cls) = el.attr("class") {
+            for c in cls.split_whitespace().take(5) {
+                label.push('.');
+                label.push_str(c);
+            }
+        }
+        label.push_str(&alloc::format!("  {w}×{h}  {}", display_name(st.display)));
+        match st.float {
+            FloatKind::Left => label.push_str(" float:left"),
+            FloatKind::Right => label.push_str(" float:right"),
+            FloatKind::None => {}
+        }
+        match st.position {
+            Position::Relative => label.push_str(" position:relative"),
+            Position::Absolute => label.push_str(" position:absolute"),
+            Position::Fixed => label.push_str(" position:fixed"),
+            Position::Sticky => label.push_str(" position:sticky"),
+            Position::Static => {}
+        }
+        if st.bg.is_some() {
+            label.push_str(" bg");
+        }
+        self.inspects.push(InspectBox { x, y, w, h, depth: self.path.len() as u16, label });
+    }
+}
+
+/// A short name for a `Display` value, for the inspect label.
+fn display_name(d: Display) -> &'static str {
+    match d {
+        Display::Block => "block",
+        Display::Inline => "inline",
+        Display::ListItem => "list-item",
+        Display::Table => "table",
+        Display::Flex => "flex",
+        Display::Grid => "grid",
+        Display::None => "none",
+        _ => "table-part",
     }
 }
 
@@ -630,6 +713,7 @@ pub fn layout(
     viewport_h: u32,
     theme: &Theme,
     forms: &FormState,
+    inspect: bool,
 ) -> Layout {
     // The root element is never painted, but `html { … }` still cascades into
     // the document — and its `font-size` is the basis for every `rem`.
@@ -661,6 +745,8 @@ pub fn layout(
         stack_depth: 0,
         marker_ord: 0,
         counters: Counters::default(),
+        inspect,
+        inspects: Vec::new(),
     };
 
     let mut y = PAD;
@@ -706,6 +792,7 @@ pub fn layout(
         height: y.max(1) as u32,
         bg: canvas_bg,
         guessed_image_srcs: ctx.guessed.into_inner(),
+        inspect: ctx.inspects,
     }
 }
 
@@ -833,6 +920,7 @@ impl Ctx<'_> {
         // `layout_box` re-adds margin-left + padding from `mbox_left`; passing the
         // margin-box width lets an `auto`-width child fill the shrink-to-fit box.
         let border_bottom = self.layout_box(el, st, mbox_left, fw, border_top);
+        self.record_inspect(el, st, mbox_left + ml as i32, border_top, (fw as f32 - ml - mr) as i32, border_bottom - border_top);
         self.floats = saved;
         self.path.pop();
         self.floats.push(FloatRect {
@@ -1052,10 +1140,18 @@ impl Ctx<'_> {
                 let (bx, bw, byy) = self.avoid_floats_bfc(&st, x, w, by);
                 let saved = core::mem::take(&mut self.floats);
                 let bottom = self.layout_box(el, &st, bx, bw, byy);
+                self.record_inspect(el, &st, bx, byy, bw, bottom - byy);
                 self.floats = saved;
                 BoxOut { bottom, top_y: byy, open: Collapse::one(st.margin_bottom), through: false }
             } else {
-                self.flow_block_impl(el, &st, x, w, anchor, open, false)
+                let o = self.flow_block_impl(el, &st, x, w, anchor, open, false);
+                if !o.through {
+                    // `w` is the containing block's content width — for the
+                    // full-width blocks that make up most of a page (and the
+                    // "dark band across the page" case) it IS the box width.
+                    self.record_inspect(el, &st, x, o.top_y, w, o.bottom - o.top_y);
+                }
+                o
             };
             if track {
                 self.stack_depth -= 1;
@@ -1595,6 +1691,9 @@ impl Ctx<'_> {
                 self.record_stack_entry(z, start, self.ops.len(), link_start, self.links.len());
             }
         }
+        // The out-of-flow box, at its final (post-bottom-shift) position.
+        let dy = bottom - box_bottom;
+        self.record_inspect(el, st, px as i32, py as i32 + dy, w_i, box_bottom - py as i32);
     }
 
     /// Insert the block's `background-color` behind its content (at `bg_idx`)
@@ -4012,7 +4111,7 @@ mod tests {
     fn lay(html: &str, w: u32) -> Layout {
         let dom = dom::parse(html);
         let sheet = crate::css::collect(&dom, 800.0);
-        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, &FormState::default())
+        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, &FormState::default(), false)
     }
 
     fn texts(l: &Layout) -> Vec<(i32, i32, &str)> {
@@ -4229,7 +4328,7 @@ mod tests {
     fn lay_forms(html: &str, w: u32, st: &FormState) -> Layout {
         let dom = dom::parse(html);
         let sheet = crate::css::collect(&dom, 800.0);
-        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, st)
+        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, st, false)
     }
 
     #[test]
