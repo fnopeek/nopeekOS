@@ -650,8 +650,8 @@ impl Ctx<'_> {
             Position::Sticky => label.push_str(" position:sticky"),
             Position::Static => {}
         }
-        if st.bg.is_some() {
-            label.push_str(" bg");
+        if let Some(bg) = st.bg {
+            label.push_str(&alloc::format!(" bg:#{:02x}{:02x}{:02x}", bg.0, bg.1, bg.2));
         }
         self.inspects.push(InspectBox { x, y, w, h, depth: self.path.len() as u16, label });
     }
