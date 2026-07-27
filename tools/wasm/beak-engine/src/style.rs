@@ -115,6 +115,7 @@ pub enum ListStyle {
     Circle,
     Square,
     Decimal,
+    DecimalLeadingZero,
     LowerAlpha,
     UpperAlpha,
     LowerRoman,
@@ -180,6 +181,46 @@ pub fn area_hash(name: &str) -> u32 {
         1
     } else {
         h
+    }
+}
+
+/// Hash a CSS counter name. CSS identifiers are technically case-sensitive, but
+/// no page relies on two counters differing only by case, and the two parsers
+/// that must agree — this one and the `content: counter(…)` side — reach the
+/// name through different paths (`apply_one` already ASCII-lowercases its value,
+/// `content` does not), so case-folding here keeps them consistent. Reuses the
+/// grid-area FNV so `0` is never a valid hash.
+pub fn counter_hash(name: &str) -> u32 {
+    area_hash(&name.trim().to_ascii_lowercase())
+}
+
+/// Parse a `counter-reset`/`counter-increment` value — a list of `<name>
+/// [<integer>]?` pairs — into `out`/`n`. `default` is the value when a name has
+/// no explicit integer (0 for reset, 1 for increment). `none` clears the list.
+fn parse_counter_ops(v: &str, out: &mut [(u32, i32); COUNTER_OPS_MAX], n: &mut u8, default: i32) {
+    *n = 0;
+    let t = v.trim();
+    if t.is_empty() || t == "none" {
+        return;
+    }
+    let mut it = t.split_whitespace().peekable();
+    while let Some(name) = it.next() {
+        // A stray keyword (`none`) among names is not a counter; skip it.
+        if name == "none" {
+            continue;
+        }
+        // An optional integer follows the name; otherwise the default applies.
+        let val = match it.peek().and_then(|s| s.parse::<i32>().ok()) {
+            Some(num) => {
+                it.next();
+                num
+            }
+            None => default,
+        };
+        if (*n as usize) < COUNTER_OPS_MAX {
+            out[*n as usize] = (counter_hash(name), val);
+            *n += 1;
+        }
     }
 }
 
@@ -411,7 +452,19 @@ pub struct ComputedStyle {
     pub clip: Clip,
     // — table —
     pub table_layout: TableLayout,
+    // — CSS counters (css-lists-3 §4) — `(name_hash, value)` pairs. Names are
+    // case-folded FNV-1a hashes (like `grid_area`) so `ComputedStyle` stays
+    // `Copy` — no `Vec`. Not inherited. `_n` is how many of the slots are used.
+    pub counter_reset: [(u32, i32); COUNTER_OPS_MAX],
+    pub counter_reset_n: u8,
+    pub counter_increment: [(u32, i32); COUNTER_OPS_MAX],
+    pub counter_increment_n: u8,
 }
+
+/// Max named counters one `counter-reset`/`counter-increment` declaration can
+/// carry. Real pages list one or two; extras are dropped (keeps the array
+/// `Copy`, no heap).
+pub const COUNTER_OPS_MAX: usize = 4;
 
 impl ComputedStyle {
     /// Total horizontal border (left + right) contribution to the box.
@@ -507,6 +560,10 @@ impl ComputedStyle {
             clear: ClearKind::None,
             clip: Clip::Auto,
             table_layout: TableLayout::Auto,
+            counter_reset: [(0, 0); COUNTER_OPS_MAX],
+            counter_reset_n: 0,
+            counter_increment: [(0, 0); COUNTER_OPS_MAX],
+            counter_increment_n: 0,
         }
     }
 }
@@ -613,6 +670,11 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         clear: ClearKind::None,
         clip: Clip::Auto,
         table_layout: TableLayout::Auto,
+        // Counters are not inherited: reset to empty on every element.
+        counter_reset: [(0, 0); COUNTER_OPS_MAX],
+        counter_reset_n: 0,
+        counter_increment: [(0, 0); COUNTER_OPS_MAX],
+        counter_increment_n: 0,
     }
 }
 
@@ -722,7 +784,7 @@ pub fn resolve_pseudo(
     sib_count: u32,
     viewport_w: f32,
     pseudo: PseudoElem,
-) -> Option<(String, ComputedStyle)> {
+) -> Option<(Vec<ContentPiece>, ComputedStyle)> {
     if sheet.is_empty() {
         return None;
     }
@@ -732,17 +794,20 @@ pub fn resolve_pseudo(
         return None;
     }
     matched.sort_by_key(|(spec, order, _)| (*spec, *order));
-    // The winning `content` value: later (higher-specificity/later-order)
-    // declarations override earlier ones, same as every other property.
-    let mut content_val: Option<&str> = None;
+    // The `content` declarations in cascade order (later overrides earlier). An
+    // INVALID one is dropped at parse time (CSS Syntax 3 §4), so the winner is
+    // the LAST one that parses — not simply the last one. The template may
+    // reference counters (`counter()`/`counters()`), resolved later against the
+    // layout-time counter stack; a plain string is a single `Text` piece.
+    let mut content_vals: Vec<&str> = Vec::new();
     for (_, _, decls) in &matched {
         for (p, v) in *decls {
             if p == "content" {
-                content_val = Some(v.as_str());
+                content_vals.push(v.as_str());
             }
         }
     }
-    let text = parse_content_string(content_val?)?;
+    let template = content_vals.iter().rev().find_map(|v| parse_content_template(v))?;
     let mut s = inherit_reset(own);
     for pass_imp in [false, true] {
         for (_, _, decls) in &matched {
@@ -772,81 +837,237 @@ pub fn resolve_pseudo(
     if s.display != Display::Inline || s.width != Len::Auto || s.height != Len::Auto {
         return None;
     }
-    Some((text, s))
+    Some((template, s))
 }
 
-/// Parse a CSS `content` value that is one or more concatenated `<string>`
-/// tokens (`"a" 'b'`) into the literal text they produce. Any other component
-/// (`attr()`, `counter()`/`counters()`, `open-quote`/`close-quote`/…,
-/// `url()`) is out of scope: rather than mis-render, the whole value produces
-/// no content — the caller then generates nothing, per CONFORMANCE.md's
-/// forward-compatible rule. `none`/`normal` also produce nothing (no box).
-///
-/// Handles css-syntax-3 §4.3.7 string escapes: `\` + 1-6 hex digits (+ one
-/// optional trailing whitespace) is a code point (`\A` = U+000A, the common
-/// "forced line break" idiom in generated content); `\` + an actual newline
-/// is a line continuation (produces nothing); `\` + any other character is
-/// that literal character.
-pub fn parse_content_string(v: &str) -> Option<String> {
+/// One component of a resolved `content` value on a `::before`/`::after` box.
+/// A plain string is a single `Text`; `counter()`/`counters()` stay symbolic
+/// because their value depends on layout-time counter state, resolved in
+/// `layout.rs`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ContentPiece {
+    Text(String),
+    /// `counter(name, style)` — the innermost in-scope value of `name`.
+    Counter { name: u32, style: ListStyle },
+    /// `counters(name, sep, style)` — every in-scope value of `name`, joined
+    /// by `sep` (outermost first).
+    Counters { name: u32, sep: String, style: ListStyle },
+}
+
+/// Parse a CSS `content` value into its component pieces: concatenated
+/// `<string>` tokens (`"a" 'b'`) and `counter()`/`counters()` functions, in
+/// order. Any OTHER component (`attr()`, `open-quote`/`close-quote`, `url()`,
+/// an unknown identifier) is out of scope: rather than mis-render, the WHOLE
+/// value produces no content — the caller then generates nothing, per
+/// CONFORMANCE.md's forward-compatible rule. `none`/`normal` also produce
+/// nothing (no box).
+pub fn parse_content_template(v: &str) -> Option<Vec<ContentPiece>> {
     let v = v.trim();
     if v.is_empty() || v.eq_ignore_ascii_case("none") || v.eq_ignore_ascii_case("normal") {
         return None;
     }
-    let mut out = String::new();
+    let mut pieces: Vec<ContentPiece> = Vec::new();
     let mut chars = v.chars().peekable();
-    let mut any = false;
     loop {
         while matches!(chars.peek(), Some(c) if c.is_whitespace()) {
             chars.next();
         }
-        let Some(&q) = chars.peek() else { break };
-        if q != '"' && q != '\'' {
-            // Anything that isn't a quoted string (`attr(...)`, `counter(...)`,
-            // `open-quote`, a bare `url(...)`, …) — unsupported, so the whole
-            // value contributes nothing rather than a mangled partial string.
-            return None;
+        let Some(&c0) = chars.peek() else { break };
+        if c0 == '"' || c0 == '\'' {
+            pieces.push(ContentPiece::Text(parse_string_token(&mut chars)?));
+            continue;
         }
-        chars.next(); // opening quote
-        loop {
-            match chars.next() {
-                None => return None, // unterminated string → invalid value
-                Some(c) if c == q => break,
-                Some('\\') => match chars.peek().copied() {
-                    None => {}
-                    Some(c) if c == '\n' => {
-                        chars.next(); // escaped newline: line continuation, no output
-                    }
-                    Some(c) if c.is_ascii_hexdigit() => {
-                        let mut hex = String::new();
-                        while hex.len() < 6 {
-                            match chars.peek() {
-                                Some(h) if h.is_ascii_hexdigit() => {
-                                    hex.push(*h);
-                                    chars.next();
-                                }
-                                _ => break,
-                            }
-                        }
-                        if let Some(&w) = chars.peek() {
-                            if w.is_whitespace() {
-                                chars.next(); // one trailing whitespace terminates the escape
-                            }
-                        }
-                        if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
-                            out.push(ch);
-                        }
-                    }
-                    Some(c) => {
-                        out.push(c);
-                        chars.next();
-                    }
-                },
-                Some(c) => out.push(c),
+        // An identifier or function token: read up to whitespace or '('.
+        let mut ident = String::new();
+        while let Some(&c) = chars.peek() {
+            if c.is_whitespace() || c == '(' {
+                break;
             }
+            ident.push(c);
+            chars.next();
         }
-        any = true;
+        let lname = ident.to_ascii_lowercase();
+        if matches!(chars.peek(), Some('(')) && (lname == "counter" || lname == "counters") {
+            chars.next(); // consume '('
+            let inside = read_until_close(&mut chars)?;
+            let args = split_top_commas(&inside);
+            let name = args.first().map(|s| s.trim()).filter(|s| !s.is_empty())?;
+            let name_hash = counter_hash(name);
+            // A wrong argument count or an unrecognised `<counter-style>` makes
+            // the WHOLE `content` value invalid — it is dropped so an earlier
+            // valid declaration wins (CSS Syntax 3 §4), and an unimplemented but
+            // syntactically-valid style falls into the same "produce nothing"
+            // bucket per CONFORMANCE.md's forward-compatible rule.
+            if lname == "counter" {
+                // `counter(name)` | `counter(name, <style>)`
+                if args.len() > 2 {
+                    return None;
+                }
+                let style = match args.get(1) {
+                    None => ListStyle::Decimal,
+                    Some(s) => parse_list_style(s.trim())?,
+                };
+                pieces.push(ContentPiece::Counter { name: name_hash, style });
+            } else {
+                // `counters(name, <sep>)` | `counters(name, <sep>, <style>)`
+                if !(2..=3).contains(&args.len()) {
+                    return None;
+                }
+                let sep = unquote_string(args.get(1)?.trim())?;
+                let style = match args.get(2) {
+                    None => ListStyle::Decimal,
+                    Some(s) => parse_list_style(s.trim())?,
+                };
+                pieces.push(ContentPiece::Counters { name: name_hash, sep, style });
+            }
+            continue;
+        }
+        // `attr(...)`, `open-quote`, `url(...)`, or an unknown identifier —
+        // unsupported, so the whole value contributes nothing.
+        return None;
     }
-    if any { Some(out) } else { None }
+    if pieces.is_empty() { None } else { Some(pieces) }
+}
+
+/// Parse ONE CSS `<string>` token, with `chars` positioned on the opening
+/// quote. Consumes through the closing quote. Handles css-syntax-3 §4.3.7
+/// escapes: `\` + 1-6 hex digits (+ one optional trailing whitespace) is a code
+/// point (`\A` = U+000A, the "forced line break" idiom); `\` + an actual
+/// newline is a line continuation (no output); `\` + any other char is that
+/// literal char. Returns `None` on an unterminated string.
+fn parse_string_token(chars: &mut core::iter::Peekable<core::str::Chars>) -> Option<String> {
+    let q = chars.next()?; // opening quote
+    let mut out = String::new();
+    loop {
+        match chars.next() {
+            None => return None, // unterminated → invalid value
+            Some(c) if c == q => break,
+            Some('\\') => match chars.peek().copied() {
+                None => {}
+                Some('\n') => {
+                    chars.next(); // escaped newline: line continuation, no output
+                }
+                Some(c) if c.is_ascii_hexdigit() => {
+                    let mut hex = String::new();
+                    while hex.len() < 6 {
+                        match chars.peek() {
+                            Some(h) if h.is_ascii_hexdigit() => {
+                                hex.push(*h);
+                                chars.next();
+                            }
+                            _ => break,
+                        }
+                    }
+                    if matches!(chars.peek(), Some(w) if w.is_whitespace()) {
+                        chars.next(); // one trailing whitespace terminates the escape
+                    }
+                    if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                        out.push(ch);
+                    }
+                }
+                Some(c) => {
+                    out.push(c);
+                    chars.next();
+                }
+            },
+            Some(c) => out.push(c),
+        }
+    }
+    Some(out)
+}
+
+/// Read the raw text inside a `(` … `)` (the `(` already consumed), balancing
+/// nested parens and skipping over quoted strings so a `,`/`)` inside a string
+/// doesn't terminate. Returns `None` if unterminated.
+fn read_until_close(chars: &mut core::iter::Peekable<core::str::Chars>) -> Option<String> {
+    let mut depth = 1;
+    let mut out = String::new();
+    while let Some(c) = chars.next() {
+        match c {
+            '(' => {
+                depth += 1;
+                out.push(c);
+            }
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(out);
+                }
+                out.push(c);
+            }
+            '"' | '\'' => {
+                out.push(c);
+                while let Some(q) = chars.next() {
+                    out.push(q);
+                    if q == c {
+                        break;
+                    }
+                    if q == '\\' {
+                        if let Some(e) = chars.next() {
+                            out.push(e);
+                        }
+                    }
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    None
+}
+
+/// Split a function-argument list on top-level commas (commas inside quotes or
+/// nested parens don't split). Each arg is returned trimmed.
+fn split_top_commas(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut depth = 0i32;
+    let mut chs = s.chars();
+    while let Some(c) = chs.next() {
+        match quote {
+            Some(q) => {
+                cur.push(c);
+                if c == q {
+                    quote = None;
+                } else if c == '\\' {
+                    if let Some(e) = chs.next() {
+                        cur.push(e);
+                    }
+                }
+            }
+            None => match c {
+                '"' | '\'' => {
+                    quote = Some(c);
+                    cur.push(c);
+                }
+                '(' => {
+                    depth += 1;
+                    cur.push(c);
+                }
+                ')' => {
+                    depth -= 1;
+                    cur.push(c);
+                }
+                ',' if depth == 0 => {
+                    out.push(cur.trim().to_string());
+                    cur.clear();
+                }
+                _ => cur.push(c),
+            },
+        }
+    }
+    out.push(cur.trim().to_string());
+    out
+}
+
+/// Unwrap a single quoted `<string>` argument (the `counters()` separator) to
+/// its literal text. `None` if it isn't a proper quoted string.
+fn unquote_string(s: &str) -> Option<String> {
+    let mut chars = s.trim().chars().peekable();
+    match chars.peek() {
+        Some('"') | Some('\'') => parse_string_token(&mut chars),
+        _ => None,
+    }
 }
 
 /// The UA default stylesheet (HTML rendering §15), expressed as code over the
@@ -1164,6 +1385,13 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                     break;
                 }
             }
+        }
+        // CSS counters (css-lists-3 §4). `content: counter(…)` reads these at
+        // layout time; the values themselves are resolved in `layout.rs`, which
+        // maintains the scoped counter stack.
+        "counter-reset" => parse_counter_ops(&v, &mut s.counter_reset, &mut s.counter_reset_n, 0),
+        "counter-increment" => {
+            parse_counter_ops(&v, &mut s.counter_increment, &mut s.counter_increment_n, 1)
         }
         "white-space" => match v.as_str() {
             "pre" | "pre-wrap" | "pre-line" => s.pre = true,
@@ -1720,6 +1948,7 @@ fn parse_list_style(v: &str) -> Option<ListStyle> {
         "circle" => ListStyle::Circle,
         "square" => ListStyle::Square,
         "decimal" => ListStyle::Decimal,
+        "decimal-leading-zero" => ListStyle::DecimalLeadingZero,
         "lower-alpha" | "lower-latin" => ListStyle::LowerAlpha,
         "upper-alpha" | "upper-latin" => ListStyle::UpperAlpha,
         "lower-roman" => ListStyle::LowerRoman,

@@ -24,9 +24,9 @@ use crate::dom::{Dom, Element, Node};
 use crate::forms::{ControlKind, FormState};
 use crate::image::ImageMap;
 use crate::style::{
-    self, BorderSide, ClearKind, Clip, ComputedStyle, CrossAlign, Display, FlexBasis, FloatKind,
-    GridTrack, Justify, Len, ListStyle, Position, TableLayout, TextAlign, TextTransform, ZIndex,
-    BASE_FONT_PX,
+    self, BorderSide, ClearKind, Clip, ComputedStyle, ContentPiece, CrossAlign, Display, FlexBasis,
+    FloatKind, GridTrack, Justify, Len, ListStyle, Position, TableLayout, TextAlign, TextTransform,
+    ZIndex, BASE_FONT_PX,
 };
 
 /// An active float's exclusion rectangle (document space) within a block
@@ -442,6 +442,67 @@ fn run_metrics(font: &Font, size: f32, lh: f32) -> (f32, f32) {
     (asc + (lh - (asc + desc)) / 2.0, lh)
 }
 
+// ── CSS counters (css-lists-3 §4) ───────────────────────────────────────────
+
+/// One counter instance on the scope stack: its value, plus the tree DEPTH
+/// (`path.len()`) of the element whose `counter-reset` created it — used to tell
+/// an ancestor's counter (nest a new instance) from a sibling's (overwrite the
+/// existing one).
+#[derive(Clone, Copy)]
+struct CounterInst {
+    name: u32,
+    value: i32,
+    depth: usize,
+}
+
+/// The scoped counter state threaded through the tree walk. A stack of
+/// instances (innermost last); `counter()` reads the innermost value of a name,
+/// `counters()` walks every in-scope instance of it (outermost first). Scope is
+/// bounded by truncating the stack back to a saved length when a subtree's child
+/// list ends (see `flow_children`/`collect_inline`), which implements the
+/// "descendants + following siblings" scope of css-lists-3 §4.4 closely enough
+/// for the content web.
+#[derive(Default)]
+struct Counters {
+    stack: Vec<CounterInst>,
+}
+
+impl Counters {
+    /// Apply an element's `counter-reset` then `counter-increment` (spec order),
+    /// given its tree depth. Reset nests a new instance when the innermost
+    /// same-name counter belongs to an ancestor (shallower depth), else it
+    /// overwrites that instance's value (self/sibling). Increment auto-creates a
+    /// counter at 0 first if none is in scope.
+    fn enter(&mut self, st: &ComputedStyle, depth: usize) {
+        for &(name, value) in &st.counter_reset[..st.counter_reset_n as usize] {
+            match self.stack.iter().rposition(|c| c.name == name) {
+                Some(i) if self.stack[i].depth >= depth => {
+                    // self or a sibling at the same level → overwrite in place.
+                    self.stack[i].value = value;
+                    self.stack[i].depth = depth;
+                }
+                _ => self.stack.push(CounterInst { name, value, depth }),
+            }
+        }
+        for &(name, delta) in &st.counter_increment[..st.counter_increment_n as usize] {
+            match self.stack.iter().rposition(|c| c.name == name) {
+                Some(i) => self.stack[i].value += delta,
+                None => self.stack.push(CounterInst { name, value: delta, depth }),
+            }
+        }
+    }
+
+    /// The innermost in-scope value of `name` (0 if none), for `counter()`.
+    fn value(&self, name: u32) -> i32 {
+        self.stack.iter().rev().find(|c| c.name == name).map(|c| c.value).unwrap_or(0)
+    }
+
+    /// Every in-scope value of `name`, outermost first, for `counters()`.
+    fn values(&self, name: u32) -> Vec<i32> {
+        self.stack.iter().filter(|c| c.name == name).map(|c| c.value).collect()
+    }
+}
+
 // ── entry point + block/inline tree walk ───────────────────────────────────
 
 /// Per-layout mutable context: the shared inputs (font / theme / author sheet)
@@ -503,6 +564,8 @@ struct Ctx<'a> {
     /// clobber it: the inner list is laid out from inside the outer item's
     /// children, i.e. after its marker was already emitted.
     marker_ord: i32,
+    /// CSS counter state (`counter-reset`/`-increment`, read by `counter()`).
+    counters: Counters,
 }
 
 impl Ctx<'_> {
@@ -597,6 +660,7 @@ pub fn layout(
         stack_links: Vec::new(),
         stack_depth: 0,
         marker_ord: 0,
+        counters: Counters::default(),
     };
 
     let mut y = PAD;
@@ -811,6 +875,10 @@ impl Ctx<'_> {
         let mut open = incoming; // adjoining margin not yet committed
         let mut committed = false;
         let mut first_top = anchor_y;
+        // Counter scope: any counter a child of this run resets lives until this
+        // child list ends (its descendants + following siblings). Truncate the
+        // stack back to here on the way out (css-lists-3 §4.4 scope boundary).
+        let counter_base = self.counters.stack.len();
         let mut inline = Inline::new();
         // `owner::before` — an anonymous inline box carrying its `content`
         // string, inserted ahead of `owner`'s real children (CSS2.1 §12.1).
@@ -872,6 +940,10 @@ impl Ctx<'_> {
             if st.display == Display::None {
                 continue;
             }
+            // Apply this element's counter-reset/-increment before laying it
+            // out, so its `::before`/`::after` and descendants see the updated
+            // values. Depth = its ancestor count (it is not yet on `path`).
+            self.counters.enter(&st, self.path.len());
             if st.display == Display::ListItem {
                 // `<li value="n">` restarts the counter at n (HTML §4.4.8).
                 list_ord = el
@@ -1031,6 +1103,8 @@ impl Ctx<'_> {
             anchor = nb;
             open = Collapse::default();
         }
+        // Leave the counter scope this child list opened.
+        self.counters.stack.truncate(counter_base);
         Flow { bottom: anchor, open, first_top, committed }
     }
 
@@ -1041,7 +1115,38 @@ impl Ctx<'_> {
     /// box-laying call), so its ancestors are everything before that.
     fn pseudo(&self, owner: &Element, own: &ComputedStyle, kind: PseudoElem) -> Option<(String, ComputedStyle)> {
         let anc = self.path.len().saturating_sub(1);
-        style::resolve_pseudo(owner, own, self.theme, self.sheet, &self.path[..anc], &[], 0, self.viewport_w, kind)
+        let (template, ps) =
+            style::resolve_pseudo(owner, own, self.theme, self.sheet, &self.path[..anc], &[], 0, self.viewport_w, kind)?;
+        Some((self.render_content(&template), ps))
+    }
+
+    /// Resolve a `content` template to its final text, reading any
+    /// `counter()`/`counters()` against the current counter scope.
+    fn render_content(&self, template: &[ContentPiece]) -> String {
+        let mut out = String::new();
+        for piece in template {
+            match piece {
+                ContentPiece::Text(s) => out.push_str(s),
+                ContentPiece::Counter { name, style } => {
+                    out.push_str(&format_counter(*style, self.counters.value(*name)))
+                }
+                ContentPiece::Counters { name, sep, style } => {
+                    let vals = self.counters.values(*name);
+                    // An out-of-scope counter is treated as a single 0.
+                    if vals.is_empty() {
+                        out.push_str(&format_counter(*style, 0));
+                    } else {
+                        for (i, v) in vals.iter().enumerate() {
+                            if i > 0 {
+                                out.push_str(sep);
+                            }
+                            out.push_str(&format_counter(*style, *v));
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Lay one block-level box with the CSS block box model: resolve the
@@ -3141,6 +3246,9 @@ impl Ctx<'_> {
         }
         let href = if st.is_link { el.attr("href").or(href) } else { href };
         let n0 = inline.item_count();
+        // `el` was already counter-entered by the caller; bound the counters its
+        // own descendants reset to this subtree (mirrors `flow_children`).
+        let counter_base = self.counters.stack.len();
         // `el::before` — same anonymous-inline-box treatment as the block
         // path (`flow_children`), just feeding this inline run instead.
         if let Some((text, ps)) = self.pseudo(el, st, PseudoElem::Before) {
@@ -3154,6 +3262,7 @@ impl Ctx<'_> {
                     if cs.display == Display::None {
                         continue;
                     }
+                    self.counters.enter(&cs, self.path.len());
                     // A floated inline element leaves the inline flow and is placed
                     // as a float; surrounding text wraps around it.
                     if cs.float != FloatKind::None {
@@ -3169,6 +3278,7 @@ impl Ctx<'_> {
         if let Some((text, ps)) = self.pseudo(el, st, PseudoElem::After) {
             inline.text(&text, &ps, href);
         }
+        self.counters.stack.truncate(counter_base);
         if inline.item_count() == n0 {
             inline.strut(st);
         }
@@ -3742,6 +3852,26 @@ fn marker_label(ls: ListStyle, n: i32) -> String {
         ListStyle::LowerRoman => alloc::format!("{}.", roman_counter(n, false)),
         ListStyle::UpperRoman => alloc::format!("{}.", roman_counter(n, true)),
         _ => String::new(),
+    }
+}
+
+/// A `counter()`/`counters()` value formatted in `style` — the bare number, no
+/// trailing separator (unlike a list `marker_label`, which appends `.`).
+/// `disc`/`circle`/`square` render their glyph (as browsers do); `none` is
+/// empty. Unknown/`decimal` fall through to plain decimal.
+fn format_counter(style: ListStyle, n: i32) -> String {
+    match style {
+        ListStyle::LowerAlpha => alpha_counter(n, false),
+        ListStyle::UpperAlpha => alpha_counter(n, true),
+        ListStyle::LowerRoman => roman_counter(n, false),
+        ListStyle::UpperRoman => roman_counter(n, true),
+        // Pad 1..9 to two digits (`01`); everything else is plain decimal.
+        ListStyle::DecimalLeadingZero => alloc::format!("{n:02}"),
+        ListStyle::Disc => "•".into(),
+        ListStyle::Circle => "◦".into(),
+        ListStyle::Square => "▪".into(),
+        ListStyle::None => String::new(),
+        _ => alloc::format!("{n}"),
     }
 }
 
