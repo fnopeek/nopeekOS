@@ -1304,6 +1304,13 @@ fn handle(engine: &Engine, ev: Event, cache: &Option<(Layout, i32, u32)>, page: 
                     // status-bar label) instead of following a link.
                     if inspect_mode() {
                         let sel = lay.hit_inspect(cx, cy).map(|b| (b.x, b.y, b.w, b.h, b.label.clone()));
+                        // Also echo to the serial console so it can be copied
+                        // without transcribing from the screen.
+                        if let Some((bx, by, _, _, ref label)) = sel {
+                            log(&alloc::format!("[inspect] @({bx},{by}) {label}"));
+                        } else {
+                            log("[inspect] (no element here)");
+                        }
                         set_selected(sel);
                         mark_dirty();
                         return true;
