@@ -145,6 +145,14 @@ struct Compound {
     classes: Vec<String>,
     attrs: Vec<AttrSel>,
     not: Vec<Compound>,
+    /// `:is(…)`/`:matches(…)` groups: each group is a list of alternative
+    /// compounds; the compound matches only if EACH group has at least one
+    /// matching alternative. Contributes its most specific argument's
+    /// specificity (like a class group). Only compound alternatives are
+    /// supported (no combinators inside) — enough for MediaWiki/Bootstrap.
+    is_groups: Vec<Vec<Compound>>,
+    /// `:where(…)` groups: match like `:is()` but contribute ZERO specificity.
+    where_groups: Vec<Vec<Compound>>,
     structural: Vec<Structural>,
     /// `::before`/`::after` on this compound (only valid on the LAST compound
     /// of a selector — checked in `parse_selector`).
@@ -176,7 +184,13 @@ impl Compound {
             return false;
         }
         // :not(x) — none of the negated compounds may match.
-        !self.not.iter().any(|n| n.matches(e, ctx))
+        if self.not.iter().any(|n| n.matches(e, ctx)) {
+            return false;
+        }
+        // :is(…)/:where(…) — every group must have at least one matching
+        // alternative (an empty group, e.g. all-unsupported args, matches
+        // nothing → the compound never matches).
+        self.is_groups.iter().chain(self.where_groups.iter()).all(|group| group.iter().any(|alt| alt.matches(e, ctx)))
     }
 }
 
@@ -801,9 +815,18 @@ fn parse_media_query(prelude: &str) -> Vec<MediaCond> {
                     let mut kv = inner.splitn(2, ':');
                     let feat = kv.next().unwrap_or("").trim();
                     let val = kv.next().unwrap_or("").trim();
+                    // A width feature whose value we can't parse must NOT leave
+                    // the bound `None` (that matches every viewport) — mark the
+                    // whole query not-understood so it fails closed instead.
                     match feat {
-                        "min-width" => cond.min_width = parse_px(val),
-                        "max-width" => cond.max_width = parse_px(val),
+                        "min-width" => match parse_media_px(val) {
+                            Some(px) => cond.min_width = Some(px),
+                            None => cond.understood = false,
+                        },
+                        "max-width" => match parse_media_px(val) {
+                            Some(px) => cond.max_width = Some(px),
+                            None => cond.understood = false,
+                        },
                         _ => cond.understood = false,
                     }
                 } else {
@@ -831,6 +854,35 @@ pub(crate) fn media_matches(prelude: &str, viewport_w: f32) -> bool {
 fn parse_px(v: &str) -> Option<f32> {
     let v = v.trim();
     v.strip_suffix("px").unwrap_or(v).trim().parse::<f32>().ok()
+}
+
+/// A media-feature length: a plain `<px>` or a `calc()` of `±<px>` terms.
+/// MediaWiki (and others) express breakpoints as `calc(640px - 1px)`; without
+/// `calc()` support the value fails to parse, `max_width` stays `None`, and the
+/// `@media (max-width: …)` block then matches EVERY viewport — leaking mobile
+/// rules (e.g. `.wikitable{float:none}`) onto the desktop layout.
+fn parse_media_px(v: &str) -> Option<f32> {
+    let v = v.trim();
+    if let Some(inner) = v.strip_prefix("calc(").and_then(|s| s.strip_suffix(')')) {
+        // Sum of whitespace-separated `±<px>` terms (CSS requires spaces around
+        // the `+`/`-` operators, so tokenising on whitespace is sufficient).
+        let mut acc = 0.0f32;
+        let mut sign = 1.0f32;
+        let mut have = false;
+        for tok in inner.split_whitespace() {
+            match tok {
+                "+" => sign = 1.0,
+                "-" => sign = -1.0,
+                _ => {
+                    acc += sign * parse_px(tok)?;
+                    sign = 1.0;
+                    have = true;
+                }
+            }
+        }
+        return have.then_some(acc);
+    }
+    parse_px(v)
 }
 
 fn strip_comments(css: &str) -> String {
@@ -883,7 +935,37 @@ fn skip_at_rule(bytes: &[u8], start: usize) -> usize {
 }
 
 fn parse_selector_list(text: &str) -> Vec<Selector> {
-    text.split(',').filter_map(|s| parse_selector(s.trim())).collect()
+    split_top_level_commas(text).into_iter().filter_map(|s| parse_selector(s.trim())).collect()
+}
+
+/// Split a comma-separated selector list on TOP-LEVEL commas only — commas
+/// inside `[…]` or `:is(…)`/`:where(…)`/`:not(…)` parentheses do not separate.
+/// A naive `split(',')` would tear `:is(div,table,ul)` apart.
+fn split_top_level_commas(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (i, ch) in text.char_indices() {
+        match ch {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = (depth - 1).max(0),
+            ',' if depth == 0 => {
+                out.push(text[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(text[start..].trim());
+    out
+}
+
+/// Parse an `:is()`/`:where()` argument (a forgiving selector list) into its
+/// alternative compounds. Per css-selectors §4 forgiving parsing, an
+/// unsupported alternative (e.g. `:hover`, or one with a combinator we don't
+/// model) is dropped rather than invalidating the whole list.
+fn parse_compound_list(arg: &str) -> Vec<Compound> {
+    split_top_level_commas(arg).into_iter().filter_map(|s| parse_compound(s.trim())).collect()
 }
 
 fn parse_selector(text: &str) -> Option<Selector> {
@@ -975,6 +1057,8 @@ fn parse_compound(tok: &str) -> Option<Compound> {
         classes: Vec::new(),
         attrs: Vec::new(),
         not: Vec::new(),
+        is_groups: Vec::new(),
+        where_groups: Vec::new(),
         structural: Vec::new(),
         pseudo: PseudoElem::None,
     };
@@ -1021,7 +1105,24 @@ fn parse_compound(tok: &str) -> Option<Compound> {
                 }
                 let name = tok[s..i].to_ascii_lowercase();
                 let arg = if i < b.len() && b[i] == b'(' {
-                    let end = tok[i..].find(')')? + i;
+                    // Balanced close paren, so a nested `:is(:nth-child(2n))`
+                    // doesn't terminate on the inner `)`.
+                    let mut d = 0i32;
+                    let mut end = None;
+                    for (k, &ch) in b[i..].iter().enumerate() {
+                        match ch {
+                            b'(' => d += 1,
+                            b')' => {
+                                d -= 1;
+                                if d == 0 {
+                                    end = Some(i + k);
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    let end = end?;
                     let a = tok[i + 1..end].to_string();
                     i = end + 1;
                     Some(a)
@@ -1047,6 +1148,10 @@ fn parse_compound(tok: &str) -> Option<Compound> {
                     // selection, …) is unsupported → drop rather than mis-apply.
                     _ if dbl => return None,
                     ("not", Some(a)) => c.not.push(parse_compound(a.trim())?),
+                    // `:is()`/`:where()` (and the legacy `:matches()` alias) —
+                    // forgiving compound-alternative lists.
+                    ("is" | "matches", Some(a)) => c.is_groups.push(parse_compound_list(&a)),
+                    ("where", Some(a)) => c.where_groups.push(parse_compound_list(&a)),
                     ("first-child", None) => c.structural.push(Structural::FirstChild),
                     ("last-child", None) => c.structural.push(Structural::LastChild),
                     ("only-child", None) => c.structural.push(Structural::OnlyChild),
@@ -1125,29 +1230,39 @@ fn parse_nth(s: &str) -> Option<(i32, i32)> {
     }
 }
 
+/// One compound's specificity as `(id, class, type)` counts. Recurses through
+/// `:not()` (its argument's specificity) and `:is()` (its MOST specific
+/// argument's); `:where()` adds nothing (css-selectors §16/§4).
+fn compound_spec(comp: &Compound) -> (u32, u32, u32) {
+    let mut a = comp.id.is_some() as u32;
+    // classes, `[attr]` and pseudo-classes all count at the class level.
+    let mut b = (comp.classes.len() + comp.attrs.len() + comp.structural.len()) as u32;
+    // tag + a pseudo-element each count like a type selector (css-cascade §5.8.3).
+    let mut c = comp.tag.is_some() as u32 + (comp.pseudo != PseudoElem::None) as u32;
+    for n in &comp.not {
+        let (na, nb, nc) = compound_spec(n);
+        a += na;
+        b += nb;
+        c += nc;
+    }
+    for group in &comp.is_groups {
+        if let Some((ma, mb, mc)) = group.iter().map(compound_spec).max() {
+            a += ma;
+            b += mb;
+            c += mc;
+        }
+    }
+    (a, b, c)
+}
+
 /// CSS specificity packed as (id<<20)|(class<<10)|type — enough headroom.
 fn specificity(compounds: &[Compound]) -> u32 {
     let (mut a, mut b, mut c) = (0u32, 0u32, 0u32);
-    let mut acc = |comp: &Compound| {
-        if comp.id.is_some() {
-            a += 1;
-        }
-        // classes, `[attr]` and pseudo-classes all count at the class level.
-        b += (comp.classes.len() + comp.attrs.len() + comp.structural.len()) as u32;
-        if comp.tag.is_some() {
-            c += 1;
-        }
-        // A pseudo-element contributes like a type selector (css-cascade §5.8.3).
-        if comp.pseudo != PseudoElem::None {
-            c += 1;
-        }
-    };
     for comp in compounds {
-        acc(comp);
-        // `:not(x)` contributes its argument's specificity (css-selectors §16).
-        for n in &comp.not {
-            acc(n);
-        }
+        let (ca, cb, cc) = compound_spec(comp);
+        a += ca;
+        b += cb;
+        c += cc;
     }
     (a << 20) | (b << 10) | c
 }

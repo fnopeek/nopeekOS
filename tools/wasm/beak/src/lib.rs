@@ -143,6 +143,7 @@ const ACT_MENU_DISMISS: u32 = 5_500;
 const ACT_FILE_CLOSE: u32 = 6_000;
 const ACT_VIEW_RELOAD: u32 = 6_020;
 const ACT_VIEW_TOGGLE_CSS: u32 = 6_021;
+const ACT_VIEW_INSPECT: u32 = 6_022;
 const ACT_HELP_ABOUT: u32 = 6_100;
 
 // Menu-label anchor NodeIds (for the dropdown Popover)
@@ -336,6 +337,32 @@ fn use_site_css() -> bool {
 fn toggle_site_css() {
     unsafe { core::ptr::addr_of_mut!(USE_SITE_CSS).write(!use_site_css()) };
 }
+
+// Inspect dev tool: when on, the engine records an element box per node and a
+// canvas click selects the deepest box under the cursor (outline + a label in
+// the status bar) instead of following a link — so a mis-rendered element can
+// be named on the device.
+static mut INSPECT_MODE: bool = false;
+fn inspect_mode() -> bool {
+    unsafe { core::ptr::addr_of!(INSPECT_MODE).read() }
+}
+fn toggle_inspect() {
+    unsafe {
+        let p = core::ptr::addr_of_mut!(INSPECT_MODE);
+        p.write(!p.read());
+    }
+}
+/// The selected element: document-space `(x, y, w, h)` + its label.
+static mut SEL_BOX: Option<(i32, i32, i32, i32, String)> = None;
+fn set_selected(b: Option<(i32, i32, i32, i32, String)>) {
+    unsafe { core::ptr::addr_of_mut!(SEL_BOX).write(b) };
+}
+fn selected_rect() -> Option<(i32, i32, i32, i32)> {
+    unsafe { (*core::ptr::addr_of!(SEL_BOX)).as_ref().map(|(x, y, w, h, _)| (*x, *y, *w, *h)) }
+}
+fn selected_label() -> Option<String> {
+    unsafe { (*core::ptr::addr_of!(SEL_BOX)).as_ref().map(|(_, _, _, _, l)| l.clone()) }
+}
 /// Lay out the current page honoring the reader-mode toggle: full site CSS
 /// (external `<link>` + inline `<style>`) when on, UA-only when off.
 fn do_layout(engine: &Engine, w: u32, state: &FormState) -> Layout {
@@ -344,6 +371,7 @@ fn do_layout(engine: &Engine, w: u32, state: &FormState) -> Layout {
     if let Some((_, _, _, h)) = canvas_rect() {
         engine.set_viewport_h(h as u32);
     }
+    engine.set_inspect(inspect_mode());
     let t0 = now_ms();
     let lay = if use_site_css() {
         engine.layout_forms(html_str(), css_str(), w, state)
@@ -765,6 +793,40 @@ fn canvas_rect() -> Option<(i32, i32, i32, i32)> {
 /// Re-layout + paint the visible slice into the canvas if it's dirty or the
 /// viewport resized. Paints only the viewport (bounded memory, any page
 /// length — long one-pagers just scroll).
+/// Set one BGRA pixel (bounds-checked).
+fn px_set(buf: &mut [u8], w: i32, h: i32, x: i32, y: i32, bgr: [u8; 3]) {
+    if x < 0 || x >= w || y < 0 || y >= h {
+        return;
+    }
+    let o = ((y * w + x) * 4) as usize;
+    if o + 3 < buf.len() {
+        buf[o] = bgr[0];
+        buf[o + 1] = bgr[1];
+        buf[o + 2] = bgr[2];
+        buf[o + 3] = 255;
+    }
+}
+
+/// Stroke a 2px rectangle border into a BGRA buffer — the inspect highlight.
+fn stroke_rect_bgra(buf: &mut [u8], w: i32, h: i32, x: i32, y: i32, rw: i32, rh: i32, bgr: [u8; 3]) {
+    if rw <= 0 || rh <= 0 {
+        return;
+    }
+    let t = 2i32;
+    for dy in 0..rh {
+        for k in 0..t {
+            px_set(buf, w, h, x + k, y + dy, bgr);
+            px_set(buf, w, h, x + rw - 1 - k, y + dy, bgr);
+        }
+    }
+    for dx in 0..rw {
+        for k in 0..t {
+            px_set(buf, w, h, x + dx, y + k, bgr);
+            px_set(buf, w, h, x + dx, y + rh - 1 - k, bgr);
+        }
+    }
+}
+
 fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, u32)>, buf: &mut Vec<u8>, state: &FormState) {
     let (_x, _y, w, h) = match canvas_rect() {
         Some(r) => r,
@@ -806,6 +868,12 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, u32)>, buf: &
     }
     let t_paint = now_ms();
     engine.paint(layout, w as u32, h as u32, sy, buf);
+    // Inspect overlay: outline the selected element box (document → screen).
+    if inspect_mode() {
+        if let Some((bx, by, bw, bh)) = selected_rect() {
+            stroke_rect_bgra(buf, w, h, bx, by - sy, bw, bh, [0, 0, 255]);
+        }
+    }
     let t_commit = now_ms();
     unsafe { npk_canvas_commit(CANVAS_ID, buf.as_ptr() as i32, buf.len() as i32, w, h) };
     log_ms("paint", t_commit - t_paint);
@@ -900,6 +968,21 @@ fn render_chrome() {
         },
     ];
 
+    // Inspect status bar: the selected element's label, or a hint.
+    if inspect_mode() {
+        children.push(Widget::Divider);
+        let label = selected_label().unwrap_or_else(|| "Inspizieren: klicke ein Element im Seiteninhalt".to_string());
+        children.push(Widget::Text {
+            content: label,
+            style: TextStyle::Mono,
+            modifiers: vec![
+                Modifier::Padding(Padding::Sm.as_u16()),
+                Modifier::Background(Token::SurfaceMuted),
+                Modifier::Tint(Token::OnSurface),
+            ],
+        });
+    }
+
     if let Some((anchor, content)) = dropdown_for(open_menu()) {
         children.push(Widget::Popover {
             anchor: NodeId(anchor),
@@ -945,6 +1028,10 @@ fn dropdown_for(which: u8) -> Option<(u32, Widget)> {
                     (
                         if use_site_css() { "Site-CSS: an".to_string() } else { "Site-CSS: aus".to_string() },
                         ActionId(ACT_VIEW_TOGGLE_CSS),
+                    ),
+                    (
+                        if inspect_mode() { "Inspizieren: an".to_string() } else { "Inspizieren: aus".to_string() },
+                        ActionId(ACT_VIEW_INSPECT),
                     ),
                 ],
                 None,
@@ -1134,6 +1221,16 @@ fn handle(engine: &Engine, ev: Event, cache: &Option<(Layout, i32, u32)>, page: 
                 set_open_menu(0);
                 true
             }
+            ACT_VIEW_INSPECT => {
+                toggle_inspect();
+                if !inspect_mode() {
+                    set_selected(None);
+                }
+                bump_content_gen("inspect-toggle"); // re-layout with/without inspect boxes
+                mark_dirty();
+                set_open_menu(0);
+                true
+            }
             ACT_BACK => {
                 if let Some(u) = hist_back() {
                     fetch_url(u);
@@ -1202,6 +1299,15 @@ fn handle(engine: &Engine, ev: Event, cache: &Option<(Layout, i32, u32)>, page: 
                             &fresh
                         }
                     };
+                    // Inspect mode intercepts the click: select the deepest
+                    // element box under the cursor (shown as an outline + a
+                    // status-bar label) instead of following a link.
+                    if inspect_mode() {
+                        let sel = lay.hit_inspect(cx, cy).map(|b| (b.x, b.y, b.w, b.h, b.label.clone()));
+                        set_selected(sel);
+                        mark_dirty();
+                        return true;
+                    }
                     // A control wins over a link: a submit button inside an
                     // <a>, or a field overlapping a link rect, is the target.
                     if let Some(ctl) = lay.hit_control(cx, cy) {
