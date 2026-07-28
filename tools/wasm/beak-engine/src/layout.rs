@@ -1834,6 +1834,31 @@ impl Ctx<'_> {
                 minw[c] = minw[c].max((m + frame).max(spec));
             }
         }
+        // Dev: which column made a table too wide, and which cell drove it.
+        #[cfg(feature = "diag-boxes")]
+        {
+            extern crate std;
+            let who = self.path.last().map(|e| e.classes.join(".")).unwrap_or_default();
+            std::eprintln!("[cols] {who} avail={w} cols={ncols} total={:.0} pref={:?}", pref.iter().sum::<f32>(), pref.iter().map(|v| *v as i32).collect::<Vec<_>>());
+            for (c, p) in pref.iter().enumerate() {
+                let mut widest = (0.0f32, String::new());
+                for row in rows.iter() {
+                    if let Some(cell) = row.get(c) {
+                        let cs = self.cell_style(cell, st);
+                        let (cp, _) = self.intrinsic_width_cell(cell, &cs);
+                        if cp > widest.0 {
+                            let mut t = String::new();
+                            match cell {
+                                Cell::Real(e) => gather_text(&e.children, &mut t),
+                                Cell::Anon(n) => gather_text(n, &mut t),
+                            }
+                            widest = (cp, collapse_whitespace(&t).trim().chars().take(70).collect());
+                        }
+                    }
+                }
+                std::eprintln!("       col{c} pref={:.0} widest={:.0} <- {:?}", p, widest.0, widest.1);
+            }
+        }
         let content_w = table_content_width(st, w as f32);
         let table_auto = st.width == Len::Auto;
         let cap = if table_auto { w as f32 } else { content_w };
@@ -2280,6 +2305,14 @@ impl Ctx<'_> {
             }
             Node::Element(e) => e,
         };
+        // A forced break ends the line even at max-content, so the text on
+        // either side of it never adds up. Wikipedia's infoboxes label their
+        // cells across two or three `<br>` lines; measuring those as one line
+        // made the label column ~2x too wide and squeezed the article text.
+        if el.tag == "br" {
+            flush_run(self.fonts, st, run, pref, min, horiz);
+            return;
+        }
         let cs = style::resolve(el, st, self.theme, self.sheet, &self.path, &[], 0, self.viewport_w);
         // Not rendered, or out of flow → contributes no intrinsic width.
         if cs.display == Display::None || matches!(cs.position, Position::Absolute | Position::Fixed) {
@@ -3417,6 +3450,27 @@ fn layout_pre(
 /// first, or source formatting would count as visible width.
 fn flush_run(fonts: &crate::fonts::Fonts, st: &ComputedStyle, run: &mut String, pref: &mut f32, min: &mut f32, horiz: bool) {
     if run.is_empty() {
+        return;
+    }
+    // `white-space: pre` keeps the source line breaks, so each source line is
+    // its own line box and the widest one wins — collapsing them into one
+    // would measure a whole code block as a single enormous line.
+    if st.pre {
+        let font = fonts.pick(st.bold, st.italic, st.mono);
+        let mut widest = 0.0f32;
+        for line in run.lines() {
+            // Trailing spaces hang past the line box, so they never widen it
+            // (css-text-3 §8). Leading ones DO count under `pre`.
+            widest = widest.max(measure(font, line.trim_end(), st.font_px));
+        }
+        run.clear();
+        if horiz {
+            *pref += widest;
+            *min += widest;
+        } else {
+            *pref = pref.max(widest);
+            *min = min.max(widest);
+        }
         return;
     }
     let collapsed = collapse_whitespace(run);
