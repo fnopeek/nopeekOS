@@ -1828,23 +1828,32 @@ impl Ctx<'_> {
         // block boxes inside each cell — painting per-cell backgrounds/borders
         // there would (without collapsed-border resolution) draw borders that
         // should be hidden and swatches the reference omits.
+        // The columns share the table's CONTENT box, so the space they may use
+        // is what is left of `w` after the table's own border and padding —
+        // otherwise the grid overflows the border box by exactly that much.
+        let frame = (st.pad_left + st.pad_right + st.border_x()) as i32;
+        let inner_w = (w - frame).max(0);
         let (colw, paint_cells) = if st.table_layout == TableLayout::Fixed {
-            (self.fixed_columns(&rows, ncols, st, w), true)
+            (self.fixed_columns(&rows, ncols, st, inner_w), true)
         } else {
-            (self.auto_columns(&rows, ncols, st, w), false)
+            (self.auto_columns(&rows, ncols, st, inner_w), false)
         };
-        // The table's own padding wraps the row grid.
-        let inner_x = x + st.pad_left as i32;
-        let content_top = y0 + st.pad_top as i32;
+        // The table's own border box: border, then padding, then the row grid.
+        // Getting the border edge in here is what lets the table paint its own
+        // decoration at all — laying the grid at `x + pad_left` (no border
+        // offset) put every stroke a border-width off.
+        let (btl, btt) = (st.border_left.width as i32, st.border_top.width as i32);
+        let inner_x = x + btl + st.pad_left as i32;
+        let content_top = y0 + btt + st.pad_top as i32;
         let bg_idx = self.ops.len();
         let bottom = self.lay_table_rows(&rows, ncols, &colw, st, inner_x, content_top, paint_cells);
-        let table_bottom = bottom + st.pad_bottom as i32;
-        // The TABLE box paints its own background and border like any other
-        // box — only per-cell decoration is left to the boxes inside (see
-        // above). Without this a floated infobox is transparent and the article
-        // text it overlaps shows straight through it. The box is as wide as its
-        // columns came out, not as wide as the space it was offered.
-        let table_w = colw.iter().sum::<i32>() + st.pad_left as i32 + st.pad_right as i32;
+        let table_bottom = bottom + st.pad_bottom as i32 + st.border_bottom.width as i32;
+        // A table box paints its own background and border like any other box;
+        // only per-cell decoration is left to the boxes inside (see above).
+        // Without this a floated infobox is transparent and the article text it
+        // overlaps shows straight through it. Its used width comes from the
+        // columns it actually produced, not from the space it was offered.
+        let table_w = colw.iter().sum::<i32>() + frame;
         self.insert_bg(st, x, y0, table_w, table_bottom - y0, bg_idx);
         table_bottom
     }
