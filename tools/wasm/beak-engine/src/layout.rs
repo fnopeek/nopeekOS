@@ -656,6 +656,9 @@ impl Ctx<'_> {
             Position::Sticky => label.push_str(" position:sticky"),
             Position::Static => {}
         }
+        if st.hidden {
+            label.push_str(" visibility:hidden");
+        }
         if let Some(bg) = st.bg {
             label.push_str(&alloc::format!(" bg:#{:02x}{:02x}{:02x}", bg.0, bg.1, bg.2));
         }
@@ -790,6 +793,11 @@ pub fn layout(
     // z-index stacking order (CSS2.1 §9.9 / Appendix E): reorder the flat,
     // tree-order display list so negative-z ranges paint first (behind) and
     // positive-z ranges paint last (in front) of everything else.
+    #[cfg(feature = "diag-boxes")]
+    {
+        extern crate std;
+        std::eprintln!("[stack] ops={} ranges={:?}", ctx.ops.len(), ctx.stack_ops);
+    }
     let ops = reorder_by_z(ctx.ops, &ctx.stack_ops);
     let links = reorder_by_z(ctx.links, &ctx.stack_links);
     Layout {
@@ -1056,7 +1064,7 @@ impl Ctx<'_> {
                 let (iw, ih) = self.img_box(el);
                 let alt = el.attr("alt").unwrap_or("").trim().to_string();
                 let src = el.attr("src").unwrap_or("").to_string();
-                inline.image(src, iw, ih, None, alt);
+                inline.image(src, iw, ih, None, alt, st.hidden, st.transparent);
                 self.path.pop();
                 continue;
             }
@@ -1305,13 +1313,15 @@ impl Ctx<'_> {
         // `<hr>` renders a rule at the content top.
         if st.is_rule {
             let y = prov_top_y + bt + pt;
-            self.ops.push(DrawOp::Rect { x: content_x, y: y + 1, w: content_w.max(1), h: 1, color: self.theme.rule });
+            if !st.hidden && !st.transparent {
+                self.ops.push(DrawOp::Rect { x: content_x, y: y + 1, w: content_w.max(1), h: 1, color: self.theme.rule });
+            }
             return BoxOut { bottom: y + 3 + pb, top_y: prov_top_y, open: Collapse::one(if isolated { 0.0 } else { st.margin_bottom }), through: false };
         }
         // The `display:list-item` marker box, outside the content edge.
         // `list-style-type:none` generates none at all — Wikipedia's nav/TOC
         // lists rely on that, and a bullet there is pure noise.
-        if st.display == Display::ListItem && st.list_style != ListStyle::None {
+        if st.display == Display::ListItem && st.list_style != ListStyle::None && !st.hidden && !st.transparent {
             let top = prov_top_y + bt + pt;
             if st.list_style.is_bullet() {
                 let s = 4;
@@ -1575,7 +1585,7 @@ impl Ctx<'_> {
             focused,
             caret,
             bg: st.bg,
-            style: RunStyle { size, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: 0, lh: st.line_height.px(size).unwrap_or(0.0) },
+            style: RunStyle { hidden: st.hidden, transparent: st.transparent, size, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: 0, lh: st.line_height.px(size).unwrap_or(0.0) },
         }
     }
 
@@ -1702,7 +1712,10 @@ impl Ctx<'_> {
     /// Insert the block's `background-color` behind its content (at `bg_idx`)
     /// and stroke its `border` on the border-box edges.
     fn paint_box_decoration(&mut self, st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, bg_idx: usize) {
-        if w <= 0 || h <= 0 {
+        // `visibility:hidden` suppresses this box's own background and border.
+        // Bailing before the `bg_idx` insert is what keeps the recorded
+        // stacking ranges intact — nothing is inserted, so nothing shifts.
+        if w <= 0 || h <= 0 || st.hidden || st.transparent {
             return;
         }
         #[cfg(feature = "diag-boxes")]
@@ -1992,12 +2005,20 @@ impl Ctx<'_> {
     /// any draw ops (used to size table rows before painting cell boxes).
     fn measure_children_height(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
         let (o, l, c) = (self.ops.len(), self.links.len(), self.controls.len());
+        // Stacking ranges index into `ops`/`links`, so a discarded speculative
+        // layout has to drop the ones it recorded too — otherwise they survive
+        // pointing into a vector that was truncated behind them, and
+        // `reorder_by_z` (which needs disjoint ascending ranges) slices the
+        // real display list at the wrong offsets.
+        let (so, sl) = (self.stack_ops.len(), self.stack_links.len());
         self.path.push(ElemInfo::of(el));
         let bottom = self.layout_children(&el.children, st, Some(el), x, w.max(0), y);
         self.path.pop();
         self.ops.truncate(o);
         self.links.truncate(l);
         self.controls.truncate(c);
+        self.stack_ops.truncate(so);
+        self.stack_links.truncate(sl);
         (bottom - y).max(0)
     }
 
@@ -2008,10 +2029,13 @@ impl Ctx<'_> {
             Cell::Real(e) => self.measure_children_height(e, st, x, w, y),
             Cell::Anon(nodes) => {
                 let (o, l, c) = (self.ops.len(), self.links.len(), self.controls.len());
+                let (so, sl) = (self.stack_ops.len(), self.stack_links.len());
                 let bottom = self.layout_children(nodes, st, None, x, w.max(0), y);
                 self.ops.truncate(o);
                 self.links.truncate(l);
                 self.controls.truncate(c);
+                self.stack_ops.truncate(so);
+                self.stack_links.truncate(sl);
                 (bottom - y).max(0)
             }
         }
@@ -2859,6 +2883,12 @@ impl Ctx<'_> {
     /// (used for grid auto-row sizing before the real placement pass).
     fn measure_box_height(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
         let (o, l, c) = (self.ops.len(), self.links.len(), self.controls.len());
+        // Stacking ranges index into `ops`/`links`, so a discarded speculative
+        // layout has to drop the ones it recorded too — otherwise they survive
+        // pointing into a vector that was truncated behind them, and
+        // `reorder_by_z` (which needs disjoint ascending ranges) slices the
+        // real display list at the wrong offsets.
+        let (so, sl) = (self.stack_ops.len(), self.stack_links.len());
         let prev_cb = self.cb;
         self.path.push(ElemInfo::of(el));
         let bottom = self.layout_box(el, st, x, w.max(1), y);
@@ -2866,6 +2896,8 @@ impl Ctx<'_> {
         self.ops.truncate(o);
         self.links.truncate(l);
         self.controls.truncate(c);
+        self.stack_ops.truncate(so);
+        self.stack_links.truncate(sl);
         self.cb = prev_cb;
         bottom - y
     }
@@ -3426,7 +3458,7 @@ fn layout_pre(
     let mut y = y0;
     for line in raw.split('\n') {
         let text = line.replace('\t', "    ");
-        if !text.is_empty() {
+        if !text.is_empty() && !st.hidden && !st.transparent {
             ops.push(DrawOp::Text {
                 x,
                 y: y + baseline_off,
@@ -3538,7 +3570,7 @@ impl Ctx<'_> {
         if el.tag == "img" {
             let (iw, ih) = self.img_box(el);
             let src = el.attr("src").unwrap_or("").to_string();
-            inline.image(src, iw, ih, href, el.attr("alt").unwrap_or("").trim().to_string());
+            inline.image(src, iw, ih, href, el.attr("alt").unwrap_or("").trim().to_string(), st.hidden, st.transparent);
             return;
         }
         if let Some(kind) = crate::forms::kind_of(el) {
@@ -3595,6 +3627,11 @@ impl Ctx<'_> {
 /// merge into one `DrawOp` only if these match (fewer ops, same pixels).
 #[derive(Clone, Copy, PartialEq)]
 struct RunStyle {
+    /// `visibility:hidden` on the run's own style: it still measures and still
+    /// takes its place on the line, it just isn't painted.
+    hidden: bool,
+    /// `opacity:0` on the run: painted as nothing, but still a click target.
+    transparent: bool,
     size: f32,
     color: Rgb,
     bold: bool,
@@ -3613,7 +3650,7 @@ enum Item {
     /// style="line-height:5"></span>X` is a tall line — but it never makes a
     /// line non-empty, so a line holding nothing else is still not generated.
     Strut(RunStyle),
-    Image { src: String, w: i32, h: i32, href: Option<String>, alt: String, space_before: bool },
+    Image { src: String, w: i32, h: i32, href: Option<String>, alt: String, space_before: bool, hidden: bool, transparent: bool },
     Control { ctl: CtlBox, space_before: bool },
     Break,
 }
@@ -3710,7 +3747,18 @@ fn paint_control(
     ops: &mut Vec<DrawOp>,
     controls: &mut Vec<ControlRect>,
 ) {
+    // A `visibility:hidden` control paints nothing and takes no clicks — it is
+    // not registered, so it can't sit as an invisible target over the page.
+    if ctl.style.hidden {
+        return;
+    }
     let (w, h) = (ctl.w, ctl.h);
+    // `opacity:0`: paint nothing, but keep the hit rect — this is the
+    // checkbox-hack overlay that a CSS-only dropdown is toggled with.
+    if ctl.style.transparent {
+        controls.push(ControlRect { x, y: top, w, h, seq: ctl.seq, kind: ctl.kind });
+        return;
+    }
     let font = fonts.pick(ctl.style.bold, ctl.style.italic, ctl.style.mono);
     let border = if ctl.focused { theme.link } else { mix(theme.rule, theme.text, 40) };
     // A page that styles its own button (`background-color`) wins; otherwise
@@ -3898,7 +3946,7 @@ impl Inline {
 
     /// Add collapsed text from one text node under style `st`.
     fn text(&mut self, raw: &str, st: &ComputedStyle, href: Option<&str>) {
-        let rs = RunStyle { size: st.font_px, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: st.valign, lh: st.line_height.px(st.font_px).unwrap_or(0.0) };
+        let rs = RunStyle { hidden: st.hidden, transparent: st.transparent, size: st.font_px, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: st.valign, lh: st.line_height.px(st.font_px).unwrap_or(0.0) };
         let mut word = String::new();
         for ch in raw.chars() {
             if ch.is_whitespace() {
@@ -3927,10 +3975,10 @@ impl Inline {
 
     /// Add an atomic `<img>` (decoded or a placeholder) to the inline run,
     /// carrying the enclosing link so an image-in-a-link stays clickable.
-    fn image(&mut self, src: String, w: i32, h: i32, href: Option<&str>, alt: String) {
+    fn image(&mut self, src: String, w: i32, h: i32, href: Option<&str>, alt: String, hidden: bool, transparent: bool) {
         let space_before = self.pending_space && !self.items.is_empty();
         self.pending_space = false;
-        self.items.push(Item::Image { src, w, h, href: href.map(|s| s.to_string()), alt, space_before });
+        self.items.push(Item::Image { src, w, h, href: href.map(|s| s.to_string()), alt, space_before, hidden, transparent });
     }
 
     /// Add an atomic form control to the inline run.
@@ -3947,6 +3995,8 @@ impl Inline {
 
     fn strut(&mut self, st: &ComputedStyle) {
         self.items.push(Item::Strut(RunStyle {
+            hidden: st.hidden,
+            transparent: st.transparent,
             size: st.font_px,
             color: st.color,
             bold: st.bold,
@@ -4046,7 +4096,7 @@ impl Inline {
                     line_ascent = line_ascent.max(asc);
                     gap = gap.max(lb);
                 }
-                Item::Image { src, w: iw, h: ih, href, alt, space_before } => {
+                Item::Image { src, w: iw, h: ih, href, alt, space_before, hidden, transparent } => {
                     // Fit the image to the content width, keeping aspect.
                     let (mut bw, mut bh) = (*iw as f32, *ih as f32);
                     if bw > w as f32 {
@@ -4072,6 +4122,8 @@ impl Inline {
                         src: src.clone(),
                         href: href.clone(),
                         alt: alt.clone(),
+                        hidden: *hidden,
+                        transparent: *transparent,
                     });
                     pen += lead + bw as f32;
                     line_ascent = line_ascent.max(bh as f32);
@@ -4111,7 +4163,7 @@ impl Inline {
 /// form control (borrowed from the inline run — it is only measured once).
 enum Placed<'a> {
     Text(Seg),
-    Image { x: i32, w: i32, h: i32, src: String, href: Option<String>, alt: String },
+    Image { x: i32, w: i32, h: i32, src: String, href: Option<String>, alt: String, hidden: bool, transparent: bool },
     Control { x: i32, ctl: &'a CtlBox },
 }
 
@@ -4270,34 +4322,40 @@ fn emit_line(
                     -1 => top += (seg.style.size * 0.18) as i32,
                     _ => {}
                 }
-                if let Some(h) = &seg.href {
+                // A hidden run is not a click target either — otherwise a
+                // collapsed dropdown leaves invisible links over the article.
+                if let (Some(h), false) = (&seg.href, seg.style.hidden) {
                     let sw = measure(font, &seg.text, seg.style.size);
                     links.push(LinkRect { x: seg.x + dx, y: line_top, w: ceil_i32(sw), h: box_h, href: h.clone() });
                 }
-                ops.push(DrawOp::Text {
-                    x: seg.x + dx,
-                    y: top,
-                    size: seg.style.size,
-                    color: seg.style.color,
-                    bold: seg.style.bold,
-                    italic: seg.style.italic,
-                    mono: seg.style.mono,
-                    text: seg.text,
-                });
+                if !seg.style.hidden && !seg.style.transparent {
+                    ops.push(DrawOp::Text {
+                        x: seg.x + dx,
+                        y: top,
+                        size: seg.style.size,
+                        color: seg.style.color,
+                        bold: seg.style.bold,
+                        italic: seg.style.italic,
+                        mono: seg.style.mono,
+                        text: seg.text,
+                    });
+                }
             }
             Placed::Control { x, ctl } => {
                 let top = baseline - (ctl.h - CTL_PAD_Y);
                 paint_control(fonts, theme, ctl, x + dx, top, ops, controls);
             }
-            Placed::Image { x, w, h, src, href, alt } => {
+            Placed::Image { x, w, h, src, href, alt, hidden, transparent } => {
                 let x = x + dx;
                 let top = baseline - h; // image bottom sits on the baseline
-                if let Some(href) = &href {
+                if let (Some(href), false) = (&href, hidden) {
                     links.push(LinkRect { x, y: top, w, h, href: href.clone() });
                 }
                 // Emitted whether or not the pixels have arrived — the
                 // rasteriser draws the placeholder when the lookup misses.
-                ops.push(DrawOp::Image { x, y: top, w, h, src, alt });
+                if !hidden && !transparent {
+                    ops.push(DrawOp::Image { x, y: top, w, h, src, alt });
+                }
             }
         }
     }
