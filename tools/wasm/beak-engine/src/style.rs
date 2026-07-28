@@ -358,6 +358,20 @@ pub struct ComputedStyle {
     pub italic: bool,
     pub mono: bool,
     pub pre: bool, // white-space: pre (no collapse, honor newlines)
+    /// `visibility: hidden`/`collapse` — the box still lays out and still takes
+    /// its space, but paints nothing. Inherited, so a descendant can set
+    /// `visible` and reappear inside a hidden ancestor (CSS2.1 §11.2).
+    pub hidden: bool,
+    /// The box (and its whole subtree) is fully transparent — `opacity: 0`.
+    /// Unlike `visibility` this cannot be undone further down: opacity groups
+    /// the subtree, so a descendant with `opacity: 1` is still invisible. It
+    /// stays HIT-TESTABLE, which is exactly what a checkbox-hack click overlay
+    /// (`position:absolute; width:100%; height:100%; opacity:0`) needs.
+    pub transparent: bool,
+    /// This element's OWN `opacity: 0`, before it is folded into `transparent`.
+    /// Kept apart so a later declaration in the same cascade can undo an
+    /// earlier one, while an ANCESTOR's transparency still can't be undone.
+    pub opacity_zero: bool,
     pub color: Rgb,
     pub text_align: TextAlign,
     pub list_style: ListStyle,
@@ -487,6 +501,9 @@ impl ComputedStyle {
             mono: false,
             pre: false,
             color: theme.text,
+            hidden: false,
+            transparent: false,
+            opacity_zero: false,
             text_align: TextAlign::Start,
             list_style: ListStyle::Disc,
             line_height: LineHeight::Normal,
@@ -596,6 +613,9 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         italic: parent.italic,
         mono: parent.mono,
         pre: parent.pre,
+        hidden: parent.hidden,
+        transparent: parent.transparent,
+        opacity_zero: false,
         color: parent.color,
         text_align: parent.text_align,
         list_style: parent.list_style,
@@ -760,6 +780,9 @@ pub fn resolve(
     if matches!(s.z_index, ZIndex::Inherit) {
         s.z_index = parent.z_index;
     }
+    // Opacity groups the subtree: a transparent ancestor wins over anything
+    // this element declares, but within this element the cascade decides.
+    s.transparent |= s.opacity_zero;
     s
 }
 
@@ -837,6 +860,7 @@ pub fn resolve_pseudo(
     if s.display != Display::Inline || s.width != Len::Auto || s.height != Len::Auto {
         return None;
     }
+    s.transparent |= s.opacity_zero;
     Some((template, s))
 }
 
@@ -1400,6 +1424,21 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             // drops (CSS Syntax 3 §4), keeping whatever the cascade already
             // set — for `inherit` specifically, that's already the parent's
             // value, since `pre` is copied from `parent` before this runs.
+            _ => {}
+        },
+        // `collapse` differs from `hidden` only on table rows/columns (where it
+        // removes the track); everywhere else the spec says treat it as
+        // `hidden`, and we have no row-removal to do.
+        // Only fully-transparent is modelled: anything in between needs real
+        // alpha compositing in the rasteriser. Never cleared — see the field.
+        "opacity" => {
+            if let Ok(o) = v.trim().parse::<f32>() {
+                s.opacity_zero = o <= 0.001;
+            }
+        }
+        "visibility" => match v.as_str() {
+            "hidden" | "collapse" => s.hidden = true,
+            "visible" => s.hidden = false,
             _ => {}
         },
         "font-family" => {
