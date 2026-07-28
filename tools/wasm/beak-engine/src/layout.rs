@@ -906,8 +906,12 @@ impl Ctx<'_> {
         // shrink-to-fit float, but a definite width may exceed the CB).
         let fw = (ceil_i32(content_w + pad_border + ml + mr)).max(1);
         // Float margins never collapse: the margin box top is the static flow
-        // position `y`. Drop below earlier floats until the margin box fits.
-        let mut fy = y;
+        // position `y`. `clear` applies to floats as well (CSS2.1 §9.5.2), so
+        // first drop below every earlier float on the cleared side — without
+        // it Wikipedia's `clear:right` article thumbnails wedge in beside the
+        // infobox instead of below it, squeezing the text to a few characters
+        // per line. Then drop further until the margin box actually fits.
+        let mut fy = self.clear_below(st.clear, y).max(y);
         loop {
             let (bl, br) = self.float_band(fy, fy + 1, x, x + w);
             if fw <= br - bl || br - bl >= w {
