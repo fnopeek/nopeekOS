@@ -14,6 +14,7 @@
 //! Scroll-independent: computed once per (content, width); `raster::paint`
 //! draws the visible slice at any offset. Flex/Grid/floats/position come next.
 
+use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -598,6 +599,11 @@ struct Ctx<'a> {
     /// When set, element boxes are recorded into `inspects` for the dev tool.
     inspect: bool,
     inspects: Vec<InspectBox>,
+    /// Memoised `intrinsic_width` results, keyed by element `seq`. Measuring a
+    /// subtree now cascades every descendant, and the same element is asked
+    /// repeatedly (a table sizes its columns over several passes) — without
+    /// this the cascade work would multiply.
+    intrinsic: BTreeMap<u32, (f32, f32)>,
 }
 
 impl Ctx<'_> {
@@ -747,6 +753,7 @@ pub fn layout(
         counters: Counters::default(),
         inspect,
         inspects: Vec::new(),
+        intrinsic: BTreeMap::new(),
     };
 
     let mut y = PAD;
@@ -878,7 +885,7 @@ impl Ctx<'_> {
         // preferred)); a definite width is used directly (may overflow the CB).
         let content_w = match st.width {
             Len::Auto => {
-                let (pref, min) = self.intrinsic_width(el, st.font_px);
+                let (pref, min) = self.intrinsic_width(el, st);
                 let avail = (w as f32 - ml - mr - pad_border).max(0.0);
                 pref.min(avail).max(min).max(0.0)
             }
@@ -1539,7 +1546,12 @@ impl Ctx<'_> {
             // A CSS width is a content width unless `box-sizing: border-box`.
             w = if st.box_border { cw as i32 } else { cw as i32 + 2 * pad_x + 2 };
         }
-        if let Some(chh) = st.height.px(avail) {
+        // A percentage height resolves against the containing block's HEIGHT
+        // (§10.5), never `avail` (its width) — the checkbox-hack overlay is
+        // `width:100%; height:100%`, and measuring its height off the width
+        // made it as tall as its container is wide. An indefinite CB height
+        // leaves the percentage unresolvable, so the intrinsic height stands.
+        if let Some(chh) = vert_len(st.height, self.cb.3) {
             h = if st.box_border { chh as i32 } else { chh as i32 + 2 * CTL_PAD_Y + 2 };
         }
         if let Some(mx) = st.max_width.px(avail) {
@@ -1578,7 +1590,7 @@ impl Ctx<'_> {
         let width = match (st.width.px(avail), left, right) {
             (Some(wd), _, _) => wd,
             (None, Some(l), Some(r)) => (avail - l - r).max(0.0),
-            _ => self.intrinsic_width(el, st.font_px).0.min(avail), // shrink-to-fit
+            _ => self.intrinsic_width(el, st).0.min(avail), // shrink-to-fit
         };
         // Horizontal: an offset pins to the CB edge; with both `left`/`right`
         // auto the box keeps its **static position** (CSS2.1 §10.3.7).
@@ -1594,17 +1606,8 @@ impl Ctx<'_> {
         // layout by the CB's aspect ratio. An indefinite CB height leaves a
         // percentage unresolvable here (the parent's content height doesn't
         // exist yet while its children are laid out), so it behaves as `auto`.
-        let vert = |len: Len| -> Option<f32> {
-            match len {
-                Len::Auto => None,
-                Len::Px(p) => Some(p),
-                Len::Pct(p) => cbh.map(|h| p / 100.0 * h as f32),
-                Len::Calc { pct, px } if pct == 0.0 => Some(px),
-                Len::Calc { pct, px } => cbh.map(|h| pct / 100.0 * h as f32 + px),
-            }
-        };
-        let top = vert(st.top);
-        let bottom = vert(st.bottom);
+        let top = vert_len(st.top, cbh);
+        let bottom = vert_len(st.bottom, cbh);
 
         // §10.6.4: `top` + `bottom` with `height:auto` stretches the box to the
         // gap between them. Over-constrained (all three given) → `bottom` is
@@ -1814,14 +1817,14 @@ impl Ctx<'_> {
     /// shrinking columns proportionally (never below their minimum) only when
     /// they overflow the available width; an explicit table `width` wider than
     /// the content spreads the slack across columns.
-    fn auto_columns(&self, rows: &[Vec<Cell>], ncols: usize, st: &ComputedStyle, w: i32) -> Vec<i32> {
+    fn auto_columns(&mut self, rows: &[Vec<Cell>], ncols: usize, st: &ComputedStyle, w: i32) -> Vec<i32> {
         let mut pref = vec![0.0f32; ncols];
         let mut minw = vec![0.0f32; ncols];
         for row in rows {
             for (c, cell) in row.iter().enumerate().take(ncols) {
                 let cs = self.cell_style(cell, st);
                 let frame = cs.pad_left + cs.pad_right + cs.border_x();
-                let (p, m) = self.intrinsic_width_cell(cell, cs.font_px);
+                let (p, m) = self.intrinsic_width_cell(cell, &cs);
                 let spec = match cs.width.px(w as f32) {
                     Some(v) if cs.box_border => v,
                     Some(v) => v + frame,
@@ -2151,53 +2154,171 @@ impl Ctx<'_> {
         cells
     }
 
-    /// (preferred, minimum) content width of a box: preferred = all text on one
-    /// line, minimum = the widest single word. Approximated over concatenated
-    /// text at `size` px (ignores nested font sizes) — fine for auto table/
-    /// flex/grid sizing. `size` is the box's OWN font size (its caller's
-    /// resolved style) — using a fixed reference size here regressed nested
-    /// anonymous tables (CSS2.1 §17.2.1): a cell whose font differs from that
-    /// fixed size would get a column sized at the wrong scale, wrapping its
-    /// text far more (or less) than the sibling column an equal-text real
-    /// cell computes at its own (matching) font size.
-    fn intrinsic_width(&self, el: &Element, size: f32) -> (f32, f32) {
+    /// (max-content, min-content) width of a box's contents: max-content = the
+    /// widest line when nothing wraps, min-content = the widest unbreakable
+    /// word. `st` is the box's OWN resolved style — using a fixed reference
+    /// size here regressed nested anonymous tables (CSS2.1 §17.2.1): a cell
+    /// whose font differs would get a column sized at the wrong scale.
+    ///
+    /// Two things the flat "concatenate every descendant's text" shortcut got
+    /// wrong, both of which real pages lean on:
+    ///
+    /// * Out-of-flow (`absolute`/`fixed`) and `display:none` descendants
+    ///   contribute nothing (css-sizing-3 §4). A CSS-only dropdown hangs its
+    ///   panel off the button as an abspos child; counting it made the button
+    ///   as wide as all 62 language names laid end to end (~4150 px).
+    /// * A block-level child starts its own line, so a block container's
+    ///   max-content is its WIDEST child, not the sum of every descendant.
+    fn intrinsic_width(&mut self, el: &Element, st: &ComputedStyle) -> (f32, f32) {
+        if let Some(hit) = self.intrinsic.get(&el.seq) {
+            return *hit;
+        }
         // A control has no text children to measure — without this it sizes to
         // 0 as a flex/grid item and disappears.
-        if let Some(kind) = crate::forms::kind_of(el) {
+        let out = if let Some(kind) = crate::forms::kind_of(el) {
             if kind == ControlKind::Hidden {
-                return (0.0, 0.0);
+                (0.0, 0.0)
+            } else {
+                let rst = ComputedStyle::root(self.theme);
+                let w = self.control_box(el, &rst, kind, 0.0).w as f32;
+                (w, w)
             }
-            let st = ComputedStyle::root(self.theme);
-            let w = self.control_box(el, &st, kind, 0.0).w as f32;
-            return (w, w);
-        }
-        self.intrinsic_width_nodes(&el.children, size)
+        } else {
+            // `el`'s children cascade with `el` as their parent, so it has to
+            // be on the ancestor path — unless a caller (the abspos path) put
+            // it there already. Without this their descendant selectors match
+            // against `el`'s parent and resolve the wrong `display`, which is
+            // exactly what the anonymous-table-object reftests measure.
+            let push = self.path.last().map(|p| p.seq) != Some(el.seq);
+            if push {
+                self.path.push(ElemInfo::of(el));
+            }
+            let got = if st.display == Display::Table {
+                self.intrinsic_table(&el.children, st)
+            } else {
+                self.intrinsic_width_nodes(&el.children, st)
+            };
+            if push {
+                self.path.pop();
+            }
+            got
+        };
+        self.intrinsic.insert(el.seq, out);
+        out
     }
 
     /// `intrinsic_width` over a bare node slice — an anonymous cell has no
-    /// owning element to gather text from.
-    fn intrinsic_width_nodes(&self, nodes: &[Node], size: f32) -> (f32, f32) {
-        let mut text = String::new();
-        gather_text(nodes, &mut text);
-        // `white-space: normal` collapses any run of whitespace (including the
-        // newlines/indentation between sibling tags in pretty-printed markup)
-        // to a single space before it's measured as one line — otherwise a
-        // multi-node run (several sibling text/inline nodes, as an anonymous
-        // cell wraps) measures far wider than it will actually render.
-        let collapsed = collapse_whitespace(&text);
-        let pref = measure(self.fonts.regular(), collapsed.trim(), size);
-        let min = collapsed
-            .split_whitespace()
-            .map(|wd| measure(self.fonts.regular(), wd, size))
-            .fold(0.0f32, f32::max);
+    /// owning element to gather text from. `st` is the style the slice's
+    /// content inherits from.
+    fn intrinsic_width_nodes(&mut self, nodes: &[Node], st: &ComputedStyle) -> (f32, f32) {
+        let (mut pref, mut min) = (0.0f32, 0.0f32);
+        let mut run = String::new();
+        self.intrinsic_walk(nodes, st, &mut run, &mut pref, &mut min);
+        flush_run(self.fonts, st, &mut run, &mut pref, &mut min, side_by_side(st));
         (pref, min)
     }
 
+    /// A table's own (max-content, min-content) width: each column takes its
+    /// widest cell, and the table is the sum of its columns. Deliberately the
+    /// same decomposition `auto_columns` lays out with — `collect_table_rows`
+    /// owns the CSS2.1 §17.2.1 anonymous-object fixup, so measuring through it
+    /// keeps the measurement and the layout from drifting apart.
+    fn intrinsic_table(&mut self, nodes: &[Node], st: &ComputedStyle) -> (f32, f32) {
+        let mut rows = self.collect_table_rows(nodes, st);
+        rows.retain(|r| !r.is_empty());
+        let ncols = rows.iter().map(|r| r.len()).max().unwrap_or(0).min(64);
+        if ncols == 0 {
+            return (0.0, 0.0);
+        }
+        let (mut pref, mut minw) = (vec![0.0f32; ncols], vec![0.0f32; ncols]);
+        for row in &rows {
+            for (c, cell) in row.iter().enumerate().take(ncols) {
+                let cs = self.cell_style(cell, st);
+                let frame = cs.pad_left + cs.pad_right + cs.border_x();
+                let (p, m) = self.intrinsic_width_cell(cell, &cs);
+                pref[c] = pref[c].max(p + frame);
+                minw[c] = minw[c].max(m + frame);
+            }
+        }
+        (pref.iter().sum(), minw.iter().sum())
+    }
+
+    /// Walk `nodes` as one block container's contents, accumulating inline
+    /// content into `run` and folding each block-level child's own measurement
+    /// into `pref`/`min`. `st` is the parent style the children cascade from;
+    /// `self.path` must already end at their parent.
+    fn intrinsic_walk(&mut self, nodes: &[Node], st: &ComputedStyle, run: &mut String, pref: &mut f32, min: &mut f32) {
+        let horiz = side_by_side(st);
+        // A stray run of table parts (rows/cells with no table ancestor) is one
+        // anonymous table box, measured as such — not as loose siblings.
+        for seg in self.segment_table_runs(nodes, st) {
+            match seg {
+                TableSeg::Table(part) => {
+                    flush_run(self.fonts, st, run, pref, min, horiz);
+                    let (p, m) = self.intrinsic_table(part, st);
+                    if horiz {
+                        *pref += p;
+                        *min += m;
+                    } else {
+                        *pref = pref.max(p);
+                        *min = min.max(m);
+                    }
+                }
+                TableSeg::Node(n) => self.intrinsic_node(n, st, run, pref, min, horiz),
+            }
+        }
+    }
+
+    /// One node of a block container's content walk (see `intrinsic_walk`).
+    /// `horiz` says whether this container's children sit side by side, so a
+    /// finished box adds to the running width instead of competing with it.
+    fn intrinsic_node(&mut self, n: &Node, st: &ComputedStyle, run: &mut String, pref: &mut f32, min: &mut f32, horiz: bool) {
+        let el = match n {
+            Node::Text(t) => {
+                run.push_str(t);
+                return;
+            }
+            Node::Element(e) => e,
+        };
+        let cs = style::resolve(el, st, self.theme, self.sheet, &self.path, &[], 0, self.viewport_w);
+        // Not rendered, or out of flow → contributes no intrinsic width.
+        if cs.display == Display::None || matches!(cs.position, Position::Absolute | Position::Fixed) {
+            return;
+        }
+        // An inline box's text joins the line its parent is building.
+        if cs.display == Display::Inline && crate::forms::kind_of(el).is_none() && el.tag != "img" {
+            self.path.push(ElemInfo::of(el));
+            self.intrinsic_walk(&el.children, &cs, run, pref, min);
+            self.path.pop();
+            return;
+        }
+        // Everything else is a box of its own: an atomic inline (image, form
+        // control) or a block-level child. Either way it ends the current line.
+        let (p, m) = if el.tag == "img" {
+            self.path.push(ElemInfo::of(el));
+            let (iw, _) = self.img_box(el);
+            self.path.pop();
+            (iw as f32, iw as f32)
+        } else {
+            let (p, m) = self.intrinsic_width(el, &cs);
+            let frame = cs.pad_left + cs.pad_right + cs.border_x();
+            (p + frame, m + frame)
+        };
+        flush_run(self.fonts, st, run, pref, min, horiz);
+        if horiz {
+            *pref += p;
+            *min += m;
+        } else {
+            *pref = pref.max(p);
+            *min = min.max(m);
+        }
+    }
+
     /// `intrinsic_width`, dispatching on whether the cell is real or anonymous.
-    fn intrinsic_width_cell(&self, cell: &Cell, size: f32) -> (f32, f32) {
+    fn intrinsic_width_cell(&mut self, cell: &Cell, st: &ComputedStyle) -> (f32, f32) {
         match cell {
-            Cell::Real(e) => self.intrinsic_width(e, size),
-            Cell::Anon(nodes) => self.intrinsic_width_nodes(nodes, size),
+            Cell::Real(e) => self.intrinsic_width(e, st),
+            Cell::Anon(nodes) => self.intrinsic_width_nodes(nodes, st),
         }
     }
 
@@ -2522,7 +2643,7 @@ impl Ctx<'_> {
         for (i, (el_i, s_i)) in items.iter().enumerate() {
             let (c, cspan, _, _) = place[i];
             if cspan == 1 {
-                auto_content[c] = auto_content[c].max(self.intrinsic_width(el_i, s_i.font_px).0);
+                auto_content[c] = auto_content[c].max(self.intrinsic_width(el_i, s_i).0);
             }
         }
         let mut colw = vec![0.0f32; ncols];
@@ -2580,7 +2701,7 @@ impl Ctx<'_> {
                 (colx[c], cw)
             } else {
                 let uw = match s.width {
-                    Len::Auto => self.intrinsic_width(el_i, s.font_px).0,
+                    Len::Auto => self.intrinsic_width(el_i, s).0,
                     other => other.px(cw).unwrap_or(0.0),
                 }
                 .min(cw)
@@ -2949,7 +3070,7 @@ impl Ctx<'_> {
             let mut wd = if stretch {
                 (avail - ml - mr).max(1.0)
             } else {
-                s.width.px(avail).map(to_content).unwrap_or_else(|| self.intrinsic_width(el, s.font_px).0)
+                s.width.px(avail).map(to_content).unwrap_or_else(|| self.intrinsic_width(el, s).0)
             };
             if let Some(mx) = s.max_width.px(avail) {
                 wd = wd.min(to_content(mx));
@@ -3006,7 +3127,7 @@ impl Ctx<'_> {
 
     /// Per-item flex metrics on the main axis (row: width; column: width used as
     /// cross). `row` selects which margins/paddings are the main vs cross axis.
-    fn flex_metrics(&self, items: &[(&Element, ComputedStyle)], avail: f32, row: bool) -> Vec<FlexItem> {
+    fn flex_metrics(&mut self, items: &[(&Element, ComputedStyle)], avail: f32, row: bool) -> Vec<FlexItem> {
         let mut out = Vec::with_capacity(items.len());
         for (el, s) in items {
             let (main_pad, cross_pad) = if row {
@@ -3038,7 +3159,7 @@ impl Ctx<'_> {
             };
             let to_content = |px: f32| if s.box_border { (px - main_pad).max(0.0) } else { px };
             let spec = main_size.px(avail).map(to_content);
-            let (pref, minc) = self.intrinsic_width(el, s.font_px);
+            let (pref, minc) = self.intrinsic_width(el, s);
             let base = match s.flex_basis {
                 FlexBasis::Px(p) => to_content(p),
                 FlexBasis::Pct(p) => to_content(p / 100.0 * avail),
@@ -3287,6 +3408,36 @@ fn layout_pre(
         y += lh;
     }
     y
+}
+
+/// Measure the inline text collected so far as one line and fold it into a
+/// box's running (max-content, min-content), then clear it. `white-space:
+/// normal` collapses every whitespace run — including the newlines and
+/// indentation between sibling tags in pretty-printed markup — to one space
+/// first, or source formatting would count as visible width.
+fn flush_run(fonts: &crate::fonts::Fonts, st: &ComputedStyle, run: &mut String, pref: &mut f32, min: &mut f32, horiz: bool) {
+    if run.is_empty() {
+        return;
+    }
+    let collapsed = collapse_whitespace(run);
+    run.clear();
+    // The run's OWN font, not `regular()`: monospace advances wider than the
+    // proportional face, so measuring mono content with it under-sizes every
+    // auto table column that holds code.
+    let font = fonts.pick(st.bold, st.italic, st.mono);
+    let size = st.font_px;
+    let p = measure(font, collapsed.trim(), size);
+    let m = collapsed.split_whitespace().map(|wd| measure(font, wd, size)).fold(0.0f32, f32::max);
+    // Inside a row (or any inline-axis container) a run of stray inline content
+    // is one anonymous cell sitting BESIDE its siblings, so it adds to the
+    // row's width instead of competing with it (CSS2.1 §17.2.1).
+    if horiz {
+        *pref += p;
+        *min += m;
+    } else {
+        *pref = pref.max(p);
+        *min = min.max(m);
+    }
 }
 
 fn gather_text(nodes: &[Node], out: &mut String) {
@@ -4689,6 +4840,31 @@ mod tests {
 /// percentages on its absolutely-positioned descendants resolve against
 /// (CSS 2.1 §9.3.2). Only an explicit `height` counts: abspos children are laid
 /// out during the parent's child walk, before its content height exists.
+/// Whether a box lays its children out along the inline axis, so their
+/// max-contents add up rather than the widest one winning.
+fn side_by_side(st: &ComputedStyle) -> bool {
+    match st.display {
+        Display::TableRow => true,
+        Display::Flex => st.flex_row,
+        Display::Grid => true,
+        _ => false,
+    }
+}
+
+/// Resolve a vertical length against a containing-block height (CSS2.1 §9.3.2 /
+/// §10.5). A percentage needs a definite CB height; an indefinite one (the
+/// parent's content height doesn't exist yet while its children lay out) leaves
+/// it unresolvable, which behaves as `auto`.
+fn vert_len(len: Len, cbh: Option<i32>) -> Option<f32> {
+    match len {
+        Len::Auto => None,
+        Len::Px(p) => Some(p),
+        Len::Pct(p) => cbh.map(|h| p / 100.0 * h as f32),
+        Len::Calc { pct, px } if pct == 0.0 => Some(px),
+        Len::Calc { pct, px } => cbh.map(|h| pct / 100.0 * h as f32 + px),
+    }
+}
+
 fn definite_cb_height(st: &ComputedStyle) -> Option<i32> {
     let pad_v = st.pad_top as i32 + st.pad_bottom as i32;
     match st.height {
