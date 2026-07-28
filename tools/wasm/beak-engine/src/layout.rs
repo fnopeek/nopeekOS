@@ -1818,7 +1818,7 @@ impl Ctx<'_> {
     fn layout_table_body(&mut self, nodes: &[Node], st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
         let mut rows = self.collect_table_rows(nodes, st);
         rows.retain(|r| !r.is_empty());
-        let ncols = rows.iter().map(|r| r.len()).max().unwrap_or(0).min(64);
+        let ncols = rows.iter().map(|r| row_columns(r).1).max().unwrap_or(0).min(64);
         if ncols == 0 {
             return y0;
         }
@@ -1867,18 +1867,35 @@ impl Ctx<'_> {
     fn auto_columns(&mut self, rows: &[Vec<Cell>], ncols: usize, st: &ComputedStyle, w: i32) -> Vec<i32> {
         let mut pref = vec![0.0f32; ncols];
         let mut minw = vec![0.0f32; ncols];
-        for row in rows {
-            for (c, cell) in row.iter().enumerate().take(ncols) {
-                let cs = self.cell_style(cell, st);
-                let frame = cs.pad_left + cs.pad_right + cs.border_x();
-                let (p, m) = self.intrinsic_width_cell(cell, &cs);
-                let spec = match cs.width.px(w as f32) {
-                    Some(v) if cs.box_border => v,
-                    Some(v) => v + frame,
-                    None => 0.0,
-                };
-                pref[c] = pref[c].max((p + frame).max(spec));
-                minw[c] = minw[c].max((m + frame).max(spec));
+        // Single-column cells define their column outright; cells spanning
+        // several only have to fit ACROSS them, so they run in a second pass
+        // once the single-span widths are known.
+        for pass_span in [false, true] {
+            for row in rows {
+                let (starts, _) = row_columns(row);
+                for (i, cell) in row.iter().enumerate() {
+                    let c = starts[i];
+                    let span = cell_span(cell);
+                    if c >= ncols || (span > 1) != pass_span {
+                        continue;
+                    }
+                    let cs = self.cell_style(cell, st);
+                    let frame = cs.pad_left + cs.pad_right + cs.border_x();
+                    let (p, m) = self.intrinsic_width_cell(cell, &cs);
+                    let spec = match cs.width.px(w as f32) {
+                        Some(v) if cs.box_border => v,
+                        Some(v) => v + frame,
+                        None => 0.0,
+                    };
+                    let (wp, wm) = ((p + frame).max(spec), (m + frame).max(spec));
+                    if span == 1 {
+                        pref[c] = pref[c].max(wp);
+                        minw[c] = minw[c].max(wm);
+                    } else {
+                        spread_span(&mut pref, c, span, wp);
+                        spread_span(&mut minw, c, span, wm);
+                    }
+                }
             }
         }
         // Dev: which column made a table too wide, and which cell drove it.
@@ -1886,7 +1903,7 @@ impl Ctx<'_> {
         {
             extern crate std;
             let who = self.path.last().map(|e| e.classes.join(".")).unwrap_or_default();
-            std::eprintln!("[cols] {who} avail={w} cols={ncols} total={:.0} pref={:?}", pref.iter().sum::<f32>(), pref.iter().map(|v| *v as i32).collect::<Vec<_>>());
+            std::eprintln!("[cols] {who} avail={w} font={} cols={ncols} total={:.0} pref={:?}", st.font_px, pref.iter().sum::<f32>(), pref.iter().map(|v| *v as i32).collect::<Vec<_>>());
             for (c, p) in pref.iter().enumerate() {
                 let mut widest = (0.0f32, String::new());
                 for row in rows.iter() {
@@ -1933,7 +1950,14 @@ impl Ctx<'_> {
         // Per-column border-box width; None = "auto" (share the leftover).
         let mut fixed: Vec<Option<f32>> = vec![None; ncols];
         if let Some(first) = rows.first() {
-            for (c, cell) in first.iter().enumerate().take(ncols) {
+            let (starts, _) = row_columns(first);
+            for (i, cell) in first.iter().enumerate() {
+                let c = starts[i];
+                // A first-row cell that spans columns doesn't pin any single
+                // one of them (CSS2 §17.5.2.1 reads widths per column).
+                if c >= ncols || cell_span(cell) > 1 {
+                    continue;
+                }
                 let cs = self.cell_style(cell, st);
                 if let Some(cw) = cs.width.px(content_w) {
                     let border_box = if cs.box_border {
@@ -1979,19 +2003,25 @@ impl Ctx<'_> {
         let mut y = y0;
         for row in rows {
             // Pass 1: resolve cell styles + measure the tallest cell.
-            let mut cells: Vec<(ComputedStyle, i32, i32, i32)> = Vec::new(); // (style, cell_x, content_x, content_w)
-            let mut cx = x;
-            for (c, cell) in row.iter().enumerate().take(ncols) {
-                let cw = colw[c];
+            let mut cells: Vec<(ComputedStyle, i32, i32, i32, i32)> = Vec::new(); // (style, cell_x, cell_w, content_x, content_w)
+            let (starts, _) = row_columns(row);
+            for (i, cell) in row.iter().enumerate() {
+                let c = starts[i];
+                if c >= ncols {
+                    break;
+                }
+                // A spanning cell is as wide as all the columns it covers.
+                let end = (c + cell_span(cell)).min(ncols);
+                let cw = colw[c..end].iter().sum::<i32>();
+                let cx = x + colw[..c].iter().sum::<i32>();
                 let cs = self.cell_style(cell, st);
                 let content_x = cx + cs.border_left.width as i32 + cs.pad_left as i32;
                 let content_w = (cw - cs.border_x() as i32 - (cs.pad_left + cs.pad_right) as i32).max(0);
-                cells.push((cs, cx, content_x, content_w));
-                cx += cw;
+                cells.push((cs, cx, cw, content_x, content_w));
             }
             // Row height = the tallest cell border-box (content, or explicit height).
             let mut row_h = 0i32;
-            for (c, (cs, _, content_x, content_w)) in cells.iter().enumerate() {
+            for (c, (cs, _, _, content_x, content_w)) in cells.iter().enumerate() {
                 let content_y = y + cs.border_top.width as i32 + cs.pad_top as i32;
                 let mut ch = if cs.display == Display::None {
                     0
@@ -2010,7 +2040,7 @@ impl Ctx<'_> {
                 row_h = row_h.max(cell_box_h);
             }
             // Pass 2: emit content + paint each cell's border-box at row height.
-            for (c, (cs, cell_x, content_x, content_w)) in cells.iter().enumerate() {
+            for (c, (cs, cell_x, cell_w, content_x, content_w)) in cells.iter().enumerate() {
                 if cs.display == Display::None {
                     continue;
                 }
@@ -2027,7 +2057,7 @@ impl Ctx<'_> {
                     }
                 }
                 if paint_cells {
-                    self.paint_box_decoration(cs, *cell_x, y, colw[c], row_h, bg_idx);
+                    self.paint_box_decoration(cs, *cell_x, y, *cell_w, row_h, bg_idx);
                 }
             }
             y += row_h;
@@ -2316,18 +2346,31 @@ impl Ctx<'_> {
     fn intrinsic_table(&mut self, nodes: &[Node], st: &ComputedStyle) -> (f32, f32) {
         let mut rows = self.collect_table_rows(nodes, st);
         rows.retain(|r| !r.is_empty());
-        let ncols = rows.iter().map(|r| r.len()).max().unwrap_or(0).min(64);
+        let ncols = rows.iter().map(|r| row_columns(r).1).max().unwrap_or(0).min(64);
         if ncols == 0 {
             return (0.0, 0.0);
         }
         let (mut pref, mut minw) = (vec![0.0f32; ncols], vec![0.0f32; ncols]);
-        for row in &rows {
-            for (c, cell) in row.iter().enumerate().take(ncols) {
-                let cs = self.cell_style(cell, st);
-                let frame = cs.pad_left + cs.pad_right + cs.border_x();
-                let (p, m) = self.intrinsic_width_cell(cell, &cs);
-                pref[c] = pref[c].max(p + frame);
-                minw[c] = minw[c].max(m + frame);
+        for pass_span in [false, true] {
+            for row in &rows {
+                let (starts, _) = row_columns(row);
+                for (i, cell) in row.iter().enumerate() {
+                    let c = starts[i];
+                    let span = cell_span(cell);
+                    if c >= ncols || (span > 1) != pass_span {
+                        continue;
+                    }
+                    let cs = self.cell_style(cell, st);
+                    let frame = cs.pad_left + cs.pad_right + cs.border_x();
+                    let (p, m) = self.intrinsic_width_cell(cell, &cs);
+                    if span == 1 {
+                        pref[c] = pref[c].max(p + frame);
+                        minw[c] = minw[c].max(m + frame);
+                    } else {
+                        spread_span(&mut pref, c, span, p + frame);
+                        spread_span(&mut minw, c, span, m + frame);
+                    }
+                }
             }
         }
         (pref.iter().sum(), minw.iter().sum())
@@ -4998,6 +5041,50 @@ mod tests {
 /// percentages on its absolutely-positioned descendants resolve against
 /// (CSS 2.1 §9.3.2). Only an explicit `height` counts: abspos children are laid
 /// out during the parent's child walk, before its content height exists.
+
+/// `colspan` (HTML §4.9.11): how many columns a cell occupies. `0` means "to
+/// the end of the row group" in old HTML and was dropped from the spec, so it
+/// folds to 1 like any other unparseable value.
+fn cell_span(cell: &Cell) -> usize {
+    match cell {
+        Cell::Real(e) => e.attr("colspan").and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(1).clamp(1, 64),
+        Cell::Anon(_) => 1,
+    }
+}
+
+/// The start column of every cell in `row`, and how many columns the row
+/// occupies in total. Without `rowspan` a row's cells simply pack left to
+/// right, each taking `colspan` slots.
+fn row_columns(row: &[Cell]) -> (Vec<usize>, usize) {
+    let mut starts = Vec::with_capacity(row.len());
+    let mut c = 0usize;
+    for cell in row {
+        starts.push(c);
+        c += cell_span(cell);
+    }
+    (starts, c)
+}
+
+/// Widen `track[c .. c+span]` just enough that it totals `want`, sharing the
+/// shortfall equally. CSS2 §17.5.2.2 leaves the distribution up to the UA; a
+/// spanning cell must never dictate a single column's width, which is what
+/// made a `<td colspan="2" style="width:290px">` infobox header blow column 0
+/// up to the width meant for the whole table.
+fn spread_span(track: &mut [f32], c: usize, span: usize, want: f32) {
+    let end = (c + span).min(track.len());
+    if end <= c {
+        return;
+    }
+    let have: f32 = track[c..end].iter().sum();
+    if want <= have {
+        return;
+    }
+    let extra = (want - have) / (end - c) as f32;
+    for t in &mut track[c..end] {
+        *t += extra;
+    }
+}
+
 /// Whether a box lays its children out along the inline axis, so their
 /// max-contents add up rather than the widest one winning.
 fn side_by_side(st: &ComputedStyle) -> bool {
