@@ -506,7 +506,13 @@ pub fn collect_all(dom: &Dom, external: &str, viewport_w: f32) -> Stylesheet {
     // Expand CSS custom properties (`var(--x)`) as a pre-pass so the parser +
     // cascade never see variables — modern sites (Bootstrap's `--bs-*`) lean
     // on them heavily.
-    let css = crate::vars::resolve_vars(&css, viewport_w);
+    // The document root's classes decide which of a site's per-preference
+    // custom-property blocks actually applies (MediaWiki ships one per user
+    // setting on `html.…-clientpref-N`).
+    let root = dom.root_element();
+    let root_class_attr = root.attr("class").unwrap_or("");
+    let root_classes: Vec<&str> = root_class_attr.split_whitespace().collect();
+    let css = crate::vars::resolve_vars(&css, viewport_w, &root_classes);
     parse(&css)
 }
 
