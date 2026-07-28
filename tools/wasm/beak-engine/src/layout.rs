@@ -924,6 +924,12 @@ impl Ctx<'_> {
                 _ => break,
             }
         }
+        #[cfg(feature = "diag-boxes")]
+        {
+            extern crate std;
+            let who = el.attr("class").unwrap_or(&el.tag);
+            std::eprintln!("[float] {who}: static_y={y} placed_fy={fy} fw={fw} x={x} w={w} floats={}", self.floats.len());
+        }
         let (bl, br) = self.float_band(fy, fy + 1, x, x + w);
         // Margin-box left edge: left floats pack left, right floats pack right.
         let mbox_left = if is_left { bl } else { (br - fw).max(bl) };
@@ -1711,6 +1717,35 @@ impl Ctx<'_> {
 
     /// Insert the block's `background-color` behind its content (at `bg_idx`)
     /// and stroke its `border` on the border-box edges.
+    /// Insert a box's `background-color` behind the content it already emitted
+    /// (at `bg_idx`). Split out from `paint_box_decoration` because a table can
+    /// paint its background — an opaque infobox must not let the article text
+    /// it floats over show through — while its BORDER still can't be drawn from
+    /// here: the table box has no resolved border box yet, and guessing one
+    /// puts the stroke in the wrong place (measured: 5 reftests).
+    fn insert_bg(&mut self, st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, bg_idx: usize) {
+        if w <= 0 || h <= 0 || st.hidden || st.transparent {
+            return;
+        }
+        let Some(bg) = st.bg else { return };
+        self.ops.insert(bg_idx, DrawOp::Rect { x, y, w, h, color: bg });
+        // `insert` shifts every later op up by one slot — any already-recorded
+        // stacking range overlapping or after `bg_idx` (a descendant's tracked
+        // z-index range, recorded before this, its ancestor's own background
+        // gets painted in) must shift too. Half-open `[s, e)`: a range that
+        // already ends at-or-before `bg_idx` is untouched (`e > bg_idx`,
+        // strict — `e == bg_idx` means the insertion lands right after the
+        // range, not inside it).
+        for (_, s, e) in &mut self.stack_ops {
+            if *s >= bg_idx {
+                *s += 1;
+            }
+            if *e > bg_idx {
+                *e += 1;
+            }
+        }
+    }
+
     fn paint_box_decoration(&mut self, st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, bg_idx: usize) {
         // `visibility:hidden` suppresses this box's own background and border.
         // Bailing before the `bg_idx` insert is what keeps the recorded
@@ -1729,25 +1764,7 @@ impl Ctx<'_> {
             extern crate std;
             std::println!("[box] {who}: x={x} y={y} w={w} h={h}");
         }
-        if let Some(bg) = st.bg {
-            self.ops.insert(bg_idx, DrawOp::Rect { x, y, w, h, color: bg });
-            // `insert` shifts every later op up by one slot — any already-
-            // recorded stacking range overlapping or after `bg_idx` (a
-            // descendant's tracked z-index range, recorded before this, its
-            // ancestor's, own background gets painted in) must shift too.
-            // Half-open `[s, e)`: a range that already ends at-or-before
-            // `bg_idx` is untouched (`e > bg_idx`, strict, is the covered
-            // check — `e == bg_idx` means the insertion lands right after
-            // the range, not inside it).
-            for (_, s, e) in &mut self.stack_ops {
-                if *s >= bg_idx {
-                    *s += 1;
-                }
-                if *e > bg_idx {
-                    *e += 1;
-                }
-            }
-        }
+        self.insert_bg(st, x, y, w, h, bg_idx);
         // Each side paints independently on the border-box edge.
         let side = |ops: &mut Vec<DrawOp>, s: &BorderSide, rect: (i32, i32, i32, i32)| {
             if let (Some(c), true) = (s.color, s.width > 0.0) {
@@ -1816,12 +1833,20 @@ impl Ctx<'_> {
         } else {
             (self.auto_columns(&rows, ncols, st, w), false)
         };
-        // The table's own padding wraps the row grid (its border/background are
-        // left unpainted — collapsed borders aren't resolved here).
+        // The table's own padding wraps the row grid.
         let inner_x = x + st.pad_left as i32;
         let content_top = y0 + st.pad_top as i32;
+        let bg_idx = self.ops.len();
         let bottom = self.lay_table_rows(&rows, ncols, &colw, st, inner_x, content_top, paint_cells);
-        bottom + st.pad_bottom as i32
+        let table_bottom = bottom + st.pad_bottom as i32;
+        // The TABLE box paints its own background and border like any other
+        // box — only per-cell decoration is left to the boxes inside (see
+        // above). Without this a floated infobox is transparent and the article
+        // text it overlaps shows straight through it. The box is as wide as its
+        // columns came out, not as wide as the space it was offered.
+        let table_w = colw.iter().sum::<i32>() + st.pad_left as i32 + st.pad_right as i32;
+        self.insert_bg(st, x, y0, table_w, table_bottom - y0, bg_idx);
+        table_bottom
     }
 
     /// Auto table sizing (CSS2 §17.5.2.2, approximated): each column takes the
@@ -2011,6 +2036,10 @@ impl Ctx<'_> {
         // `reorder_by_z` (which needs disjoint ascending ranges) slices the
         // real display list at the wrong offsets.
         let (so, sl) = (self.stack_ops.len(), self.stack_links.len());
+        // Floats live on past the box that placed them, so a discarded layout
+        // leaks exclusion rects into the real one: the next float finds a BFC
+        // that looks full and drops below phantom neighbours.
+        let fl = self.floats.len();
         self.path.push(ElemInfo::of(el));
         let bottom = self.layout_children(&el.children, st, Some(el), x, w.max(0), y);
         self.path.pop();
@@ -2019,6 +2048,7 @@ impl Ctx<'_> {
         self.controls.truncate(c);
         self.stack_ops.truncate(so);
         self.stack_links.truncate(sl);
+        self.floats.truncate(fl);
         (bottom - y).max(0)
     }
 
@@ -2030,12 +2060,14 @@ impl Ctx<'_> {
             Cell::Anon(nodes) => {
                 let (o, l, c) = (self.ops.len(), self.links.len(), self.controls.len());
                 let (so, sl) = (self.stack_ops.len(), self.stack_links.len());
+                let fl = self.floats.len();
                 let bottom = self.layout_children(nodes, st, None, x, w.max(0), y);
                 self.ops.truncate(o);
                 self.links.truncate(l);
                 self.controls.truncate(c);
                 self.stack_ops.truncate(so);
                 self.stack_links.truncate(sl);
+                self.floats.truncate(fl);
                 (bottom - y).max(0)
             }
         }
@@ -2889,6 +2921,10 @@ impl Ctx<'_> {
         // `reorder_by_z` (which needs disjoint ascending ranges) slices the
         // real display list at the wrong offsets.
         let (so, sl) = (self.stack_ops.len(), self.stack_links.len());
+        // Floats live on past the box that placed them, so a discarded layout
+        // leaks exclusion rects into the real one: the next float finds a BFC
+        // that looks full and drops below phantom neighbours.
+        let fl = self.floats.len();
         let prev_cb = self.cb;
         self.path.push(ElemInfo::of(el));
         let bottom = self.layout_box(el, st, x, w.max(1), y);
@@ -2898,6 +2934,7 @@ impl Ctx<'_> {
         self.controls.truncate(c);
         self.stack_ops.truncate(so);
         self.stack_links.truncate(sl);
+        self.floats.truncate(fl);
         self.cb = prev_cb;
         bottom - y
     }
