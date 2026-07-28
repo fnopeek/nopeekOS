@@ -30,6 +30,10 @@ pub struct ElemInfo {
     pub id: Option<String>,
     pub classes: Vec<String>,
     pub attrs: Vec<(String, String)>,
+    /// Document-order id of the element this was built from. Not used for
+    /// matching — it lets a caller tell whether the element it is about to
+    /// measure is already the last entry on the ancestor path.
+    pub seq: u32,
 }
 
 impl ElemInfo {
@@ -40,7 +44,7 @@ impl ElemInfo {
             .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
             .unwrap_or_default();
         let attrs = el.attrs.iter().map(|(k, v)| (k.to_ascii_lowercase(), v.clone())).collect();
-        ElemInfo { tag: el.tag.clone(), id, classes, attrs }
+        ElemInfo { tag: el.tag.clone(), id, classes, attrs, seq: el.seq }
     }
 }
 
@@ -1293,6 +1297,7 @@ mod tests {
             id: id.map(|s| s.to_string()),
             classes: classes.iter().map(|s| s.to_string()).collect(),
             attrs: Vec::new(),
+            seq: 0,
         }
     }
 
