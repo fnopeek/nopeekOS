@@ -604,9 +604,58 @@ struct Ctx<'a> {
     /// repeatedly (a table sizes its columns over several passes) — without
     /// this the cascade work would multiply.
     intrinsic: BTreeMap<u32, (f32, f32)>,
+    /// Memoised `style::resolve` results, keyed by a hash of everything the
+    /// cascade reads (see `style_key`) — so this is a pure cache, not a policy.
+    /// A real article cascades the SAME element about twelve times: every
+    /// throwaway measurement re-walks its subtree, and selector matching is
+    /// ~90 % of layout, so that multiplier is most of the cost of a page.
+    styles: core::cell::RefCell<BTreeMap<u64, ComputedStyle>>,
+}
+
+/// Hash the inputs `style::resolve` actually depends on. Elements are
+/// identified by `seq` rather than by content, which makes the whole ancestor
+/// chain and sibling list a handful of integer mixes.
+///
+/// `parent` is not hashed in full — only the inherited values a cascade can
+/// read back (font size, colour, weight, direction). The chain of ancestor
+/// `seq`s already determines which element the parent IS; the fingerprint is
+/// there for the call sites that hand a cell the table's style rather than the
+/// row's, so those cannot collide with each other.
+fn style_key(el: &Element, parent: &ComputedStyle, ancestors: &[ElemInfo], prev: &[ElemInfo], sib_count: u32) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |v: u64| {
+        h ^= v;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    mix(el.seq as u64);
+    mix(sib_count as u64);
+    mix(prev.len() as u64);
+    for a in ancestors {
+        mix(a.seq as u64 | 0x1_0000_0000);
+    }
+    for p in prev {
+        mix(p.seq as u64 | 0x2_0000_0000);
+    }
+    mix(parent.font_px.to_bits() as u64);
+    mix(parent.color.0 as u64 | (parent.color.1 as u64) << 8 | (parent.color.2 as u64) << 16);
+    mix(parent.bold as u64 | (parent.italic as u64) << 1 | (parent.mono as u64) << 2 | (parent.rtl as u64) << 3);
+    h
 }
 
 impl Ctx<'_> {
+    /// `style::resolve` through the memo. Every cascade inside the layout goes
+    /// through here so a re-measured subtree costs a map lookup, not a full
+    /// selector match against the page's stylesheet.
+    fn styled(&self, el: &Element, parent: &ComputedStyle, prev: &[ElemInfo], sib_count: u32) -> ComputedStyle {
+        let key = style_key(el, parent, &self.path, prev, sib_count);
+        if let Some(s) = self.styles.borrow().get(&key) {
+            return *s;
+        }
+        let s = style::resolve(el, parent, self.theme, self.sheet, &self.path, prev, sib_count, self.viewport_w);
+        self.styles.borrow_mut().insert(key, s);
+        s
+    }
+
     /// Whether `st` should open a new tracked stacking range right now: it is
     /// positioned, has an explicit `z-index`, and isn't already nested inside
     /// another tracked range.
@@ -757,6 +806,7 @@ pub fn layout(
         inspect,
         inspects: Vec::new(),
         intrinsic: BTreeMap::new(),
+        styles: core::cell::RefCell::new(BTreeMap::new()),
     };
 
     let mut y = PAD;
@@ -1048,7 +1098,7 @@ impl Ctx<'_> {
                 }
                 Node::Element(el) => el,
             };
-            let st = style::resolve(el, parent, self.theme, self.sheet, &self.path, &siblings, sib_count, self.viewport_w);
+            let st = self.styled(el, parent, &siblings, sib_count);
             siblings.push(ElemInfo::of(el));
             if st.display == Display::None {
                 continue;
@@ -1071,7 +1121,7 @@ impl Ctx<'_> {
             // `collect_inline`; this catches direct children of any display.
             if el.tag == "img" {
                 self.path.push(ElemInfo::of(el));
-                let (iw, ih) = self.img_box(el);
+                let (iw, ih) = self.img_box(el, &st);
                 let alt = el.attr("alt").unwrap_or("").trim().to_string();
                 let src = el.attr("src").unwrap_or("").to_string();
                 inline.image(src, iw, ih, None, alt, st.hidden, st.transparent);
@@ -1483,14 +1533,31 @@ impl Ctx<'_> {
     /// pixels arriving later change nothing, so the shell can repaint instead
     /// of re-laying-out. Without them the box depends on the decoded size, and
     /// a later decode really does move the page.
-    fn img_box(&self, el: &Element) -> (i32, i32) {
+    fn img_box(&self, el: &Element, st: &ComputedStyle) -> (i32, i32) {
         let img = el.attr("src").and_then(|s| self.images.get(s));
         let (iw, ih) = img.map(|i| (i.w as f32, i.h as f32)).unwrap_or((0.0, 0.0));
         let attr = |n: &str| el.attr(n).and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok());
-        let (aw, ah) = (attr("width"), attr("height"));
+        // A definite CSS length beats the presentational attribute (HTML
+        // §15.3). Only px counts: a percentage needs the containing block,
+        // which a replaced element's own box measurement does not have here, so
+        // it stays as indefinite as `auto`. Wikipedia sizes its footer wordmark
+        // this way (`style="width:7.5em;height:1.125em"`) — without this the
+        // box is not just the wrong size, it also counts as GUESSED, and every
+        // guess costs a full re-layout the moment the pixels land.
+        let css = |l: Len| match l {
+            Len::Px(v) if v >= 0.0 => Some(v),
+            _ => None,
+        };
+        let (aw, ah) = (css(st.width).or_else(|| attr("width")), css(st.height).or_else(|| attr("height")));
         if img.is_none() && (aw.is_none() || ah.is_none()) {
             if let Some(src) = el.attr("src") {
-                self.guessed.borrow_mut().push(String::from(src));
+                // Throwaway measurements size the same `<img>` several times,
+                // so without this the list holds one entry per measurement pass
+                // and the shell rescans them all on every image that lands.
+                let mut g = self.guessed.borrow_mut();
+                if !g.iter().any(|s| s == src) {
+                    g.push(String::from(src));
+                }
             }
         }
         let bw = aw.unwrap_or(if iw > 0.0 { iw } else { 100.0 });
@@ -1818,7 +1885,7 @@ impl Ctx<'_> {
         for c in &el.children {
             if let Node::Element(e) = c {
                 if e.tag == "caption" {
-                    let cs = style::resolve(e, st, self.theme, self.sheet, &self.path, &[], 0, self.viewport_w);
+                    let cs = self.styled(e, st, &[], 0);
                     self.path.push(ElemInfo::of(e));
                     y = self.layout_children(&e.children, &cs, Some(e), x, w, y);
                     self.path.pop();
@@ -2034,7 +2101,7 @@ impl Ctx<'_> {
     /// properties from `st`, every other property at its initial value).
     fn cell_style(&self, cell: &Cell, st: &ComputedStyle) -> ComputedStyle {
         match cell {
-            Cell::Real(e) => style::resolve(e, st, self.theme, self.sheet, &self.path, &[], 0, self.viewport_w),
+            Cell::Real(e) => self.styled(e, st, &[], 0),
             Cell::Anon(_) => style::anon_inherit(st, Display::TableCell),
         }
     }
@@ -2205,7 +2272,7 @@ impl Ctx<'_> {
             "td" | "th" => TableRole::Cell,
             "caption" | "col" | "colgroup" => TableRole::Skip,
             _ => {
-                let st = style::resolve(e, parent, self.theme, self.sheet, &self.path, &[], 0, self.viewport_w);
+                let st = self.styled(e, parent, &[], 0);
                 match st.display {
                     Display::TableRow => TableRole::Row,
                     Display::TableRowGroup => TableRole::RowGroup,
@@ -2502,7 +2569,7 @@ impl Ctx<'_> {
             flush_run(self.fonts, st, run, pref, min, horiz);
             return;
         }
-        let cs = style::resolve(el, st, self.theme, self.sheet, &self.path, &[], 0, self.viewport_w);
+        let cs = self.styled(el, st, &[], 0);
         // Not rendered, or out of flow → contributes no intrinsic width.
         if cs.display == Display::None || matches!(cs.position, Position::Absolute | Position::Fixed) {
             return;
@@ -2518,7 +2585,7 @@ impl Ctx<'_> {
         // control) or a block-level child. Either way it ends the current line.
         let (p, m) = if el.tag == "img" {
             self.path.push(ElemInfo::of(el));
-            let (iw, _) = self.img_box(el);
+            let (iw, _) = self.img_box(el, &cs);
             self.path.pop();
             (iw as f32, iw as f32)
         } else {
@@ -2765,7 +2832,7 @@ impl Ctx<'_> {
         let mut items: Vec<(&Element, ComputedStyle)> = Vec::new();
         for c in &el.children {
             if let Node::Element(ce) = c {
-                let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path, &[], 0, self.viewport_w);
+                let cs = self.styled(ce, st, &[], 0);
                 if cs.display == Display::None {
                     continue;
                 }
@@ -3120,7 +3187,7 @@ impl Ctx<'_> {
         let mut items: Vec<(&Element, ComputedStyle)> = Vec::new();
         for c in &el.children {
             if let Node::Element(ce) = c {
-                let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path, &[], 0, self.viewport_w);
+                let cs = self.styled(ce, st, &[], 0);
                 if cs.display == Display::None {
                     continue;
                 }
@@ -3774,7 +3841,7 @@ impl Ctx<'_> {
         // thumbnails) is an atomic inline box; carry the enclosing link so it
         // stays clickable.
         if el.tag == "img" {
-            let (iw, ih) = self.img_box(el);
+            let (iw, ih) = self.img_box(el, st);
             let src = el.attr("src").unwrap_or("").to_string();
             inline.image(src, iw, ih, href, el.attr("alt").unwrap_or("").trim().to_string(), st.hidden, st.transparent);
             return;
@@ -3800,7 +3867,7 @@ impl Ctx<'_> {
             match c {
                 Node::Text(t) => inline.text(t, st, href),
                 Node::Element(ce) => {
-                    let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path, &[], 0, self.viewport_w);
+                    let cs = self.styled(ce, st, &[], 0);
                     if cs.display == Display::None {
                         continue;
                     }

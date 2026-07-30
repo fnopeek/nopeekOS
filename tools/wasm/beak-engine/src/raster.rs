@@ -37,6 +37,28 @@ pub struct Engine {
     /// tool). Off by default so the label-formatting cost is only paid while the
     /// user is inspecting; the shell toggles it and re-lays-out.
     inspect: core::cell::Cell<bool>,
+    /// The last parsed stylesheet with the fingerprint of the inputs that built
+    /// it. Parsing a real page's CSS is a third of a layout, and a page is laid
+    /// out several times over its life (images landing, a form key, a resize)
+    /// from unchanged bytes — so the parse is repeated for nothing.
+    sheet: RefCell<Option<(u64, crate::css::Stylesheet)>>,
+}
+
+/// Cheap content fingerprint (FNV-1a over 8-byte words). Identity by pointer
+/// would be wrong here: the shell parses into one static buffer, so a different
+/// document can land at the same address with the same length.
+fn fingerprint(b: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut it = b.chunks_exact(8);
+    for c in &mut it {
+        h ^= u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    for &x in it.remainder() {
+        h ^= x as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h ^ b.len() as u64
 }
 
 impl Default for Engine {
@@ -59,6 +81,7 @@ impl Engine {
             // caller that never sets it.
             viewport_h: core::cell::Cell::new(600),
             inspect: core::cell::Cell::new(false),
+            sheet: RefCell::new(None),
         }
     }
 
@@ -146,8 +169,17 @@ impl Engine {
         forms: &crate::forms::FormState,
     ) -> Layout {
         let dom = crate::dom::parse(html);
-        let sheet = crate::css::collect_all(&dom, external_css, width as f32);
-        crate::layout::layout(&self.fonts, &dom, &sheet, &self.images, width, self.viewport_h.get(), &self.theme, forms, self.inspect.get())
+        // The cascade also reads the document's own `<style>` blocks and the
+        // viewport width (media queries), so both are part of the identity.
+        let key = fingerprint(html.as_bytes())
+            ^ fingerprint(external_css.as_bytes()).rotate_left(17)
+            ^ (width as u64) << 40;
+        if self.sheet.borrow().as_ref().map(|(k, _)| *k) != Some(key) {
+            *self.sheet.borrow_mut() = Some((key, crate::css::collect_all(&dom, external_css, width as f32)));
+        }
+        let held = self.sheet.borrow();
+        let sheet = &held.as_ref().unwrap().1;
+        crate::layout::layout(&self.fonts, &dom, sheet, &self.images, width, self.viewport_h.get(), &self.theme, forms, self.inspect.get())
     }
 
     /// Lay out with the UA sheet ONLY — no author `<style>`/`<link>` CSS
@@ -256,34 +288,32 @@ impl Engine {
         let ascent = font.horizontal_line_metrics(size).map(|m| m.ascent).unwrap_or(size);
         let baseline = y + ascent as i32;
         let mut pen = x as f32;
+        // One borrow for the whole run instead of three per character.
+        let mut cache = self.glyphs.borrow_mut();
         for ch in text.chars() {
             let key = (ch as u32, size.to_bits(), face);
-            if !self.glyphs.borrow().contains_key(&key) {
-                let g = font.rasterize(ch, size);
-                self.glyphs.borrow_mut().insert(key, g);
-            }
-            let cache = self.glyphs.borrow();
-            let (m, cov) = cache.get(&key).unwrap();
+            let (m, cov) = cache.entry(key).or_insert_with(|| font.rasterize(ch, size));
             let gx0 = pen as i32 + m.xmin;
             let gy0 = baseline - m.ymin - m.height as i32;
-            for gy in 0..m.height {
-                let py = gy0 + gy as i32;
-                if py < 0 || py >= h {
-                    continue;
-                }
-                let row = gy * m.width;
-                for gx in 0..m.width {
+            pen += m.advance_width;
+            // Clip the glyph box against the buffer once; the inner loop then
+            // walks a row by offset and never re-tests a bound.
+            let (cx0, cx1) = (gx0.max(0), (gx0 + m.width as i32).min(w));
+            let (cy0, cy1) = (gy0.max(0), (gy0 + m.height as i32).min(h));
+            if cx1 <= cx0 || cy1 <= cy0 {
+                continue;
+            }
+            for py in cy0..cy1 {
+                let row = (py - gy0) as usize * m.width + (cx0 - gx0) as usize;
+                let mut i = idx(w, cx0, py);
+                for gx in 0..(cx1 - cx0) as usize {
                     let a = cov[row + gx];
-                    if a == 0 {
-                        continue;
+                    if a != 0 {
+                        blend_at(out, i, color, a);
                     }
-                    let px = gx0 + gx as i32;
-                    if px >= 0 && px < w {
-                        blend(out, w, px, py, color, a);
-                    }
+                    i += 4;
                 }
             }
-            pen += m.advance_width;
         }
     }
 }
@@ -293,24 +323,54 @@ fn idx(w: i32, x: i32, y: i32) -> usize {
     ((y * w + x) * 4) as usize
 }
 
+/// Fill a rect by building ONE row and copying it, rather than storing four
+/// bytes per pixel.
+///
+/// This is the hottest loop in the app. A frame clears the canvas and then
+/// paints roughly another viewport of backgrounds on top, so about 3.7 M pixels
+/// are written per scroll step — and under the wasmi interpreter every one of
+/// those byte stores is an interpreted instruction with its own bounds check.
+/// `copy_within` compiles to `memory.copy`, a single instruction the host
+/// executes as a native memmove, so an N-pixel row costs log2(N) copies to
+/// build plus one copy per further row instead of 4·N·rows stores.
 fn fill(out: &mut [u8], w: i32, h: i32, x: i32, y: i32, rw: i32, rh: i32, c: Rgb) {
     let x0 = x.max(0);
     let y0 = y.max(0);
     let x1 = (x + rw).min(w);
     let y1 = (y + rh).min(h);
-    for py in y0..y1 {
-        for px in x0..x1 {
-            let i = idx(w, px, py);
-            out[i] = c.2; // B
-            out[i + 1] = c.1; // G
-            out[i + 2] = c.0; // R
-            out[i + 3] = 255; // A
-        }
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let row = ((x1 - x0) * 4) as usize;
+    let first = idx(w, x0, y0);
+    out[first] = c.2; // B
+    out[first + 1] = c.1; // G
+    out[first + 2] = c.0; // R
+    out[first + 3] = 255; // A
+    let mut done = 4;
+    while done < row {
+        let n = done.min(row - done);
+        out.copy_within(first..first + n, first + done);
+        done += n;
+    }
+    for py in (y0 + 1)..y1 {
+        let dst = idx(w, x0, py);
+        out.copy_within(first..first + row, dst);
     }
 }
 
-fn blend(out: &mut [u8], w: i32, x: i32, y: i32, c: Rgb, a: u8) {
-    let i = idx(w, x, y);
+/// Blend `c` at `a`/255 coverage over the pixel starting at byte `i`. Takes the
+/// offset rather than (x, y) so the caller can walk a row by adding 4 instead of
+/// recomputing `y * w + x` for every pixel it touches.
+#[inline]
+fn blend_at(out: &mut [u8], i: usize, c: Rgb, a: u8) {
+    if a == 255 {
+        out[i] = c.2;
+        out[i + 1] = c.1;
+        out[i + 2] = c.0;
+        out[i + 3] = 255;
+        return;
+    }
     let a = a as u32;
     let ia = 255 - a;
     out[i] = ((c.2 as u32 * a + out[i] as u32 * ia) / 255) as u8; // B
@@ -326,35 +386,33 @@ fn blit_image(out: &mut [u8], w: i32, h: i32, dx: i32, dy: i32, dw: i32, dh: i32
         return;
     }
     let (iw, ih) = (img.w as i32, img.h as i32);
-    for ry in 0..dh {
-        let py = dy + ry;
-        if py < 0 || py >= h {
-            continue;
-        }
-        let sy = (ry * ih / dh).clamp(0, ih - 1);
-        for rx in 0..dw {
-            let px = dx + rx;
-            if px < 0 || px >= w {
-                continue;
-            }
-            let sx = (rx * iw / dw).clamp(0, iw - 1);
-            let si = ((sy * iw + sx) * 4) as usize;
-            let a = img.bgra[si + 3] as u32;
-            if a == 0 {
-                continue;
-            }
-            let di = idx(w, px, py);
+    let x0 = dx.max(0);
+    let x1 = (dx + dw).min(w);
+    let y0 = dy.max(0);
+    let y1 = (dy + dh).min(h);
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    // The source column for each destination column, resolved once for the
+    // whole blit instead of a multiply, divide and clamp per pixel.
+    let cols: Vec<usize> = (x0..x1).map(|px| ((px - dx) * iw / dw).clamp(0, iw - 1) as usize * 4).collect();
+    for py in y0..y1 {
+        let sy = ((py - dy) * ih / dh).clamp(0, ih - 1);
+        let srow = (sy * iw) as usize * 4;
+        let mut di = idx(w, x0, py);
+        for &sx in &cols {
+            let si = srow + sx;
+            let a = img.bgra[si + 3];
             if a == 255 {
-                out[di] = img.bgra[si];
-                out[di + 1] = img.bgra[si + 1];
-                out[di + 2] = img.bgra[si + 2];
-            } else {
-                let ia = 255 - a;
+                out[di..di + 4].copy_from_slice(&img.bgra[si..si + 4]);
+            } else if a != 0 {
+                let (a, ia) = (a as u32, 255 - a as u32);
                 out[di] = ((img.bgra[si] as u32 * a + out[di] as u32 * ia) / 255) as u8;
                 out[di + 1] = ((img.bgra[si + 1] as u32 * a + out[di + 1] as u32 * ia) / 255) as u8;
                 out[di + 2] = ((img.bgra[si + 2] as u32 * a + out[di + 2] as u32 * ia) / 255) as u8;
+                out[di + 3] = 255;
             }
-            out[di + 3] = 255;
+            di += 4;
         }
     }
 }
