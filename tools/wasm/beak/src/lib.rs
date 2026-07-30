@@ -1471,11 +1471,6 @@ pub extern "C" fn _start() {
     // Image sources of the current page still to fetch, one per loop turn.
     let mut pending_imgs: Vec<String> = Vec::new();
     loop {
-        // A fresh page: note which images it wants, but do NOT fetch them here
-        // — that runs after the repaint below, one per turn.
-        if images_dirty() {
-            pending_imgs = begin_images(&mut engine);
-        }
         // Pick up a navigation: re-parse the document's forms, drop old edits.
         page.sync();
         // Drain the ENTIRE event queue this tick, THEN repaint once. Wheel
@@ -1518,6 +1513,18 @@ pub extern "C" fn _start() {
                 bump_content_gen("theme-change");
                 mark_dirty();
             }
+        }
+        // A fresh page: drop the old page's decoded images and note which ones
+        // it wants (fetching them happens after the repaint, one batch a turn).
+        //
+        // This has to sit RIGHT BEFORE the repaint, not at the top of the loop.
+        // A navigation happens while the event queue above is being drained, so
+        // from the top of the loop it is always one turn late: the page was laid
+        // out once against the PREVIOUS page's images, and clearing them a turn
+        // later invalidated that layout and laid it out again. Two full layouts
+        // per navigation, and on the device a layout is over five seconds.
+        if images_dirty() {
+            pending_imgs = begin_images(&mut engine);
         }
         maybe_repaint(&engine, &mut cache, &mut paint_buf, &page.state);
         // Text and layout are on screen now — pull in the next few images,
