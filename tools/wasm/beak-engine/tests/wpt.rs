@@ -104,6 +104,36 @@ fn ink_fraction(buf: &[u8]) -> f64 {
     ink as f64 / px as f64
 }
 
+/// Write a BGRA buffer as a 24-bit bottom-up BMP, so a failing reftest can be
+/// looked at instead of guessed about (`WPT_DUMP=<dir>`).
+fn write_bmp(path: &Path, buf: &[u8], w: u32, h: u32) {
+    let row = (w * 3).div_ceil(4) * 4;
+    let mut bmp = Vec::with_capacity(54 + (row * h) as usize);
+    bmp.extend_from_slice(b"BM");
+    bmp.extend_from_slice(&(54 + row * h).to_le_bytes());
+    bmp.extend_from_slice(&[0; 4]);
+    bmp.extend_from_slice(&54u32.to_le_bytes());
+    bmp.extend_from_slice(&40u32.to_le_bytes());
+    bmp.extend_from_slice(&w.to_le_bytes());
+    bmp.extend_from_slice(&h.to_le_bytes());
+    bmp.extend_from_slice(&1u16.to_le_bytes());
+    bmp.extend_from_slice(&24u16.to_le_bytes());
+    bmp.extend_from_slice(&[0; 24]);
+    for y in (0..h).rev() {
+        let mut n = 0;
+        for x in 0..w {
+            let o = ((y * w + x) * 4) as usize;
+            bmp.extend_from_slice(&[buf[o], buf[o + 1], buf[o + 2]]);
+            n += 3;
+        }
+        while n < row {
+            bmp.push(0);
+            n += 1;
+        }
+    }
+    let _ = fs::write(path, &bmp);
+}
+
 /// Collect every reftest (a `*.html` that is not a `-ref.html`) under `dir`.
 fn collect_tests(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(rd) = fs::read_dir(dir) else { return };
@@ -138,6 +168,11 @@ fn wpt_reftests() {
     let mut tests = Vec::new();
     collect_tests(&root, &mut tests);
     tests.sort();
+    // WPT_FILTER=<substr> runs only the matching tests. A full pass is ~5 min,
+    // which is too slow to iterate one feature against.
+    if let Ok(f) = std::env::var("WPT_FILTER") {
+        tests.retain(|t| t.to_str().is_some_and(|s| s.contains(&f)));
+    }
 
     // Pass threshold: reftests are near-exact; allow a hair for AA/rounding.
     const PASS_MAX_DIFF: f64 = 0.005; // ≤0.5% of pixels may differ
@@ -165,6 +200,11 @@ fn wpt_reftests() {
         }
         let d = diff_fraction(&ta, &ra);
         let ok = d <= PASS_MAX_DIFF;
+        if let Ok(dir) = std::env::var("WPT_DUMP") {
+            let stem = t.file_stem().unwrap().to_str().unwrap();
+            write_bmp(&Path::new(&dir).join(format!("{stem}-test.bmp")), &ta, W, H);
+            write_bmp(&Path::new(&dir).join(format!("{stem}-ref.bmp")), &ra, W, H);
+        }
         if ok {
             pass += 1;
         } else {

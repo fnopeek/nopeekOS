@@ -1111,7 +1111,12 @@ impl Ctx<'_> {
             // `float:left|right` — out of normal flow, placed at the current
             // flow edge; following inline + blocks flow around it.
             if st.float != FloatKind::None {
-                self.place_float(el, &st, x, w, anchor);
+                // The float's margin-box top is its STATIC position, which is
+                // below the margin still open from the preceding block — a
+                // float doesn't collapse with it, but it doesn't ignore it
+                // either. `open` stays untouched: the float is out of flow, so
+                // the next in-flow block still collapses through it.
+                self.place_float(el, &st, x, w, anchor + open.value() as i32);
                 continue;
             }
             if st.display == Display::Inline {
@@ -1750,6 +1755,16 @@ impl Ctx<'_> {
         }
     }
 
+    /// Paint one border edge rect (the collapsed model draws grid lines
+    /// individually rather than a box's four sides together).
+    fn paint_edge(&mut self, s: &BorderSide, x: i32, y: i32, w: i32, h: i32) {
+        if let (Some(c), true) = (s.color, s.width > 0.0) {
+            if w > 0 && h > 0 {
+                self.ops.push(DrawOp::Rect { x, y, w, h, color: c });
+            }
+        }
+    }
+
     fn paint_box_decoration(&mut self, st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, bg_idx: usize) {
         // `visibility:hidden` suppresses this box's own background and border.
         // Bailing before the `bg_idx` insert is what keeps the recorded
@@ -1835,30 +1850,64 @@ impl Ctx<'_> {
         // The columns share the table's CONTENT box, so the space they may use
         // is what is left of `w` after the table's own border and padding —
         // otherwise the grid overflows the border box by exactly that much.
-        let frame = (st.pad_left + st.pad_right + st.border_x()) as i32;
-        let inner_w = (w - frame).max(0);
-        let (colw, paint_cells) = if st.table_layout == TableLayout::Fixed {
-            (self.fixed_columns(&rows, ncols, st, inner_w), true)
+        // Horizontal margins apply to a table box like any other block-level
+        // box, but the enclosing BFC branch only carries the vertical ones —
+        // flex and grid pick these up inside `resolve_block_h`, which a table
+        // can't use (its `width:auto` shrink-wraps instead of filling).
+        let (ml_len, mr_len) = (st.margin_left, st.margin_right);
+        let (ml, mr) = (ml_len.px(w as f32).unwrap_or(0.0) as i32, mr_len.px(w as f32).unwrap_or(0.0) as i32);
+        let avail = (w - ml - mr).max(0);
+        // In the collapsed model the table has neither padding nor a border box
+        // of its own (CSS2.1 §17.6.2) — the outermost cell borders ARE the
+        // table's frame, so the grid starts flush at the table's edge and the
+        // cells draw every grid line, outer ones included.
+        let collapse = st.border_collapse;
+        let frame = if collapse { 0 } else { (st.pad_left + st.pad_right + st.border_x()) as i32 };
+        // Separated border model: `border-spacing` runs between every pair of
+        // columns AND once along each outer edge, so `ncols + 1` gaps come out
+        // of the content box before the columns share what is left.
+        let (sx, sy) = spacing_of(st);
+        let gaps = sx * (ncols as i32 + 1);
+        let inner_w = (avail - frame - gaps).max(0);
+        let colw = if st.table_layout == TableLayout::Fixed {
+            self.fixed_columns(&rows, ncols, st, inner_w)
         } else {
-            (self.auto_columns(&rows, ncols, st, inner_w), false)
+            self.auto_columns(&rows, ncols, st, inner_w)
         };
         // The table's own border box: border, then padding, then the row grid.
         // Getting the border edge in here is what lets the table paint its own
         // decoration at all — laying the grid at `x + pad_left` (no border
         // offset) put every stroke a border-width off.
         let (btl, btt) = (st.border_left.width as i32, st.border_top.width as i32);
-        let inner_x = x + btl + st.pad_left as i32;
-        let content_top = y0 + btt + st.pad_top as i32;
+        // A table's used width is known only once its columns are, so `auto`
+        // margins can only be resolved here (CSS2.1 §10.3.3 over §17.5.2): both
+        // auto centres the table, one auto pushes it to the other edge.
+        let table_w = colw.iter().sum::<i32>() + gaps + frame;
+        let slack = (avail - table_w).max(0);
+        let off = match (ml_len, mr_len) {
+            (Len::Auto, Len::Auto) => ml + slack / 2,
+            (Len::Auto, _) => ml + slack,
+            _ => ml,
+        };
+        let x = x + off;
+        let (inner_x, content_top) = if collapse {
+            (x, y0)
+        } else {
+            (x + btl + st.pad_left as i32 + sx, y0 + btt + st.pad_top as i32 + sy)
+        };
         let bg_idx = self.ops.len();
-        let bottom = self.lay_table_rows(&rows, ncols, &colw, st, inner_x, content_top, paint_cells);
-        let table_bottom = bottom + st.pad_bottom as i32 + st.border_bottom.width as i32;
+        let bottom = self.lay_table_rows(&rows, ncols, &colw, st, inner_x, content_top);
+        let table_bottom = if collapse { bottom } else { bottom + sy + st.pad_bottom as i32 + st.border_bottom.width as i32 };
         // A table box paints its own background and border like any other box;
         // only per-cell decoration is left to the boxes inside (see above).
         // Without this a floated infobox is transparent and the article text it
         // overlaps shows straight through it. Its used width comes from the
         // columns it actually produced, not from the space it was offered.
-        let table_w = colw.iter().sum::<i32>() + frame;
-        self.insert_bg(st, x, y0, table_w, table_bottom - y0, bg_idx);
+        if collapse {
+            self.insert_bg(st, x, y0, table_w, table_bottom - y0, bg_idx);
+        } else {
+            self.paint_box_decoration(st, x, y0, table_w, table_bottom - y0, bg_idx);
+        }
         table_bottom
     }
 
@@ -1884,14 +1933,7 @@ impl Ctx<'_> {
                         continue;
                     }
                     let cs = self.cell_style(cell, st);
-                    let frame = cs.pad_left + cs.pad_right + cs.border_x();
-                    let (p, m) = self.intrinsic_width_cell(cell, &cs);
-                    let spec = match cs.width.px(w as f32) {
-                        Some(v) if cs.box_border => v,
-                        Some(v) => v + frame,
-                        None => 0.0,
-                    };
-                    let (wp, wm) = ((p + frame).max(spec), (m + frame).max(spec));
+                    let (wp, wm) = self.cell_pref_min(cell, &cs, Some(w as f32), st.border_collapse);
                     if span == 1 {
                         pref[c] = pref[c].max(wp);
                         minw[c] = minw[c].max(wm);
@@ -1964,11 +2006,8 @@ impl Ctx<'_> {
                 }
                 let cs = self.cell_style(cell, st);
                 if let Some(cw) = cs.width.px(content_w) {
-                    let border_box = if cs.box_border {
-                        cw
-                    } else {
-                        cw + cs.pad_left + cs.pad_right + cs.border_x()
-                    };
+                    let (bl, br, _, _) = cell_borders(&cs, st.border_collapse);
+                    let border_box = if cs.box_border { cw } else { cw + cs.pad_left + cs.pad_right + bl + br };
                     fixed[c] = Some(border_box.max(0.0));
                 }
             }
@@ -2003,9 +2042,18 @@ impl Ctx<'_> {
     /// Lay a table's rows given resolved (border-box) column widths. Cells sit
     /// side by side; each cell box stretches to the row's tallest cell and paints
     /// its own background/border, with content placed inside its padding.
-    fn lay_table_rows(&mut self, rows: &[Vec<Cell>], ncols: usize, colw: &[i32], st: &ComputedStyle, x: i32, y0: i32, paint_cells: bool) -> i32 {
+    fn lay_table_rows(&mut self, rows: &[Vec<Cell>], ncols: usize, colw: &[i32], st: &ComputedStyle, x: i32, y0: i32) -> i32 {
+        // The gaps around the outside are added by the caller, which owns the
+        // table's padding edge; these are the ones BETWEEN cells and rows.
+        let (sx, sy) = spacing_of(st);
+        let col_x = |c: usize| colw[..c].iter().sum::<i32>() + sx * c as i32;
+        let collapse = st.border_collapse;
+        // The previous row's (style, x, width), so a cell can resolve the grid
+        // line it shares with the cell above it in the collapsed model.
+        let mut prev_row: Vec<(ComputedStyle, i32, i32)> = Vec::new();
+        let nrows = rows.len();
         let mut y = y0;
-        for row in rows {
+        for (ri, row) in rows.iter().enumerate() {
             // Pass 1: resolve cell styles + measure the tallest cell.
             let mut cells: Vec<(ComputedStyle, i32, i32, i32, i32)> = Vec::new(); // (style, cell_x, cell_w, content_x, content_w)
             let (starts, _) = row_columns(row);
@@ -2016,17 +2064,21 @@ impl Ctx<'_> {
                 }
                 // A spanning cell is as wide as all the columns it covers.
                 let end = (c + cell_span(cell)).min(ncols);
-                let cw = colw[c..end].iter().sum::<i32>();
-                let cx = x + colw[..c].iter().sum::<i32>();
+                // A spanning cell swallows the gaps between the columns it
+                // covers along with the columns themselves.
+                let cw = colw[c..end].iter().sum::<i32>() + sx * (end - c).saturating_sub(1) as i32;
+                let cx = x + col_x(c);
                 let cs = self.cell_style(cell, st);
-                let content_x = cx + cs.border_left.width as i32 + cs.pad_left as i32;
-                let content_w = (cw - cs.border_x() as i32 - (cs.pad_left + cs.pad_right) as i32).max(0);
+                let (bl, br, _, _) = cell_borders(&cs, collapse);
+                let content_x = cx + bl as i32 + cs.pad_left as i32;
+                let content_w = (cw - (bl + br) as i32 - (cs.pad_left + cs.pad_right) as i32).max(0);
                 cells.push((cs, cx, cw, content_x, content_w));
             }
             // Row height = the tallest cell border-box (content, or explicit height).
             let mut row_h = 0i32;
             for (c, (cs, _, _, content_x, content_w)) in cells.iter().enumerate() {
-                let content_y = y + cs.border_top.width as i32 + cs.pad_top as i32;
+                let (_, _, bt, bb) = cell_borders(cs, collapse);
+                let content_y = y + bt as i32 + cs.pad_top as i32;
                 let mut ch = if cs.display == Display::None {
                     0
                 } else {
@@ -2034,13 +2086,13 @@ impl Ctx<'_> {
                 };
                 if let Len::Px(h) = cs.height {
                     let hb = if cs.box_border {
-                        (h as i32 - (cs.pad_top + cs.pad_bottom) as i32 - cs.border_y() as i32).max(0)
+                        (h as i32 - (cs.pad_top + cs.pad_bottom) as i32 - (bt + bb) as i32).max(0)
                     } else {
                         h as i32
                     };
                     ch = ch.max(hb);
                 }
-                let cell_box_h = ch + (cs.pad_top + cs.pad_bottom) as i32 + cs.border_y() as i32;
+                let cell_box_h = ch + (cs.pad_top + cs.pad_bottom) as i32 + (bt + bb) as i32;
                 row_h = row_h.max(cell_box_h);
             }
             // Pass 2: emit content + paint each cell's border-box at row height.
@@ -2048,7 +2100,7 @@ impl Ctx<'_> {
                 if cs.display == Display::None {
                     continue;
                 }
-                let content_y = y + cs.border_top.width as i32 + cs.pad_top as i32;
+                let content_y = y + cell_borders(cs, collapse).2 as i32 + cs.pad_top as i32;
                 let bg_idx = self.ops.len();
                 match row[c] {
                     Cell::Real(e) => {
@@ -2060,13 +2112,39 @@ impl Ctx<'_> {
                         let _ = self.layout_children(nodes, cs, None, *content_x, *content_w, content_y);
                     }
                 }
-                if paint_cells {
+                if collapse {
+                    // Each grid line is drawn exactly once, by the cell above/
+                    // left of it, as the winner of the two borders that meet
+                    // there. The outer lines resolve against the table's own
+                    // border, which is why the table paints none itself.
+                    let above = prev_row.iter().find(|(_, px, pw)| *px < cell_x + cell_w && px + pw > *cell_x);
+                    let left = c.checked_sub(1).and_then(|i| cells.get(i));
+                    let top = collapsed_edge(&cs.border_top, above.map_or(&st.border_top, |(a, _, _)| &a.border_bottom));
+                    let lft = collapsed_edge(&cs.border_left, left.map_or(&st.border_left, |(l, _, _, _, _)| &l.border_right));
+                    self.insert_bg(cs, *cell_x, y, *cell_w, row_h, bg_idx);
+                    // A collapsed border straddles the grid line: half of it
+                    // falls in each of the two cells that meet there.
+                    let half = |w: f32| (w / 2.0) as i32;
+                    self.paint_edge(&top, *cell_x, y - half(top.width), *cell_w, top.width as i32);
+                    self.paint_edge(&lft, cell_x - half(lft.width), y, lft.width as i32, row_h);
+                    if c + 1 == cells.len() {
+                        let r = collapsed_edge(&cs.border_right, &st.border_right);
+                        self.paint_edge(&r, cell_x + cell_w - half(r.width), y, r.width as i32, row_h);
+                    }
+                    if ri + 1 == nrows {
+                        let b = collapsed_edge(&cs.border_bottom, &st.border_bottom);
+                        self.paint_edge(&b, *cell_x, y + row_h - half(b.width), *cell_w, b.width as i32);
+                    }
+                } else {
                     self.paint_box_decoration(cs, *cell_x, y, *cell_w, row_h, bg_idx);
                 }
             }
-            y += row_h;
+            prev_row = cells.iter().map(|(cs, cx, cw, _, _)| (*cs, *cx, *cw)).collect();
+            y += row_h + sy;
         }
-        y
+        // The trailing gap belongs BETWEEN rows, not after the last one — the
+        // caller adds the outer one.
+        y - if rows.is_empty() { 0 } else { sy }
     }
 
     /// Lay an element's children to measure their flowed height without emitting
@@ -2365,14 +2443,13 @@ impl Ctx<'_> {
                         continue;
                     }
                     let cs = self.cell_style(cell, st);
-                    let frame = cs.pad_left + cs.pad_right + cs.border_x();
-                    let (p, m) = self.intrinsic_width_cell(cell, &cs);
+                    let (p, m) = self.cell_pref_min(cell, &cs, None, st.border_collapse);
                     if span == 1 {
-                        pref[c] = pref[c].max(p + frame);
-                        minw[c] = minw[c].max(m + frame);
+                        pref[c] = pref[c].max(p);
+                        minw[c] = minw[c].max(m);
                     } else {
-                        spread_span(&mut pref, c, span, p + frame);
-                        spread_span(&mut minw, c, span, m + frame);
+                        spread_span(&mut pref, c, span, p);
+                        spread_span(&mut minw, c, span, m);
                     }
                 }
             }
@@ -2447,7 +2524,18 @@ impl Ctx<'_> {
         } else {
             let (p, m) = self.intrinsic_width(el, &cs);
             let frame = cs.pad_left + cs.pad_right + cs.border_x();
-            (p + frame, m + frame)
+            // A definite `width` fixes the child's outer width, so that — not
+            // what its content would prefer — is what it contributes to its
+            // parent's shrink-to-fit (css-sizing-3 §4). A percentage stays
+            // indefinite while the parent's own width is still unknown.
+            match cs.width {
+                Len::Px(v) => {
+                    let outer = if cs.box_border { v } else { v + frame };
+                    let outer = clamp_len(outer, cs.min_width, cs.max_width, cs.box_border, frame);
+                    (outer, outer)
+                }
+                _ => (p + frame, m + frame),
+            }
         };
         flush_run(self.fonts, st, run, pref, min, horiz);
         if horiz {
@@ -2465,6 +2553,31 @@ impl Ctx<'_> {
             Cell::Real(e) => self.intrinsic_width(e, st),
             Cell::Anon(nodes) => self.intrinsic_width_nodes(nodes, st),
         }
+    }
+
+    /// A cell's (max-content, min-content) BORDER-BOX width, honouring an
+    /// explicit `width` on the cell itself (CSS2.1 §17.5.2.2). `avail` is the
+    /// basis a percentage width resolves against, or `None` while the table's
+    /// own width is still being measured — a percentage is indefinite then and
+    /// contributes nothing. Shared by `auto_columns` (layout) and
+    /// `intrinsic_table` (measurement) so the two cannot drift apart.
+    fn cell_pref_min(&mut self, cell: &Cell, cs: &ComputedStyle, avail: Option<f32>, collapse: bool) -> (f32, f32) {
+        let (bl, br, _, _) = cell_borders(cs, collapse);
+        let frame = cs.pad_left + cs.pad_right + bl + br;
+        let (p, m) = self.intrinsic_width_cell(cell, cs);
+        let spec = match avail {
+            Some(a) => cs.width.px(a),
+            None => match cs.width {
+                Len::Px(v) => Some(v),
+                _ => None,
+            },
+        };
+        let spec = match spec {
+            Some(v) if cs.box_border => v,
+            Some(v) => v + frame,
+            None => 0.0,
+        };
+        ((p + frame).max(spec), (m + frame).max(spec))
     }
 
     /// Split `nodes` into pass-through single nodes and maximal runs of
@@ -5087,6 +5200,58 @@ fn spread_span(track: &mut [f32], c: usize, span: usize, want: f32) {
     for t in &mut track[c..end] {
         *t += extra;
     }
+}
+
+/// A cell's used border widths (left, right, top, bottom). In the collapsed
+/// model a border is shared with the neighbouring cell and sits centred on the
+/// grid line, so only HALF of it lies inside this cell (CSS2.1 §17.6.2) — that
+/// half is what the column widths and the content box have to account for.
+fn cell_borders(cs: &ComputedStyle, collapse: bool) -> (f32, f32, f32, f32) {
+    let (l, r, t, b) = (cs.border_left.width, cs.border_right.width, cs.border_top.width, cs.border_bottom.width);
+    if collapse {
+        (l / 2.0, r / 2.0, t / 2.0, b / 2.0)
+    } else {
+        (l, r, t, b)
+    }
+}
+
+/// The border that wins a collapsed grid line (CSS2.1 §17.6.2.1). Width-first,
+/// which is the part that decides real tables; the full style-then-element
+/// priority chain only matters when the widths tie, and a tie already draws the
+/// same line at the same size.
+fn collapsed_edge(a: &BorderSide, b: &BorderSide) -> BorderSide {
+    if b.width > a.width {
+        *b
+    } else {
+        *a
+    }
+}
+
+/// A table's used `border-spacing` in px. The collapsed border model merges
+/// adjacent borders instead of spacing them, so it ignores the property
+/// entirely (CSS2.1 §17.6.1).
+fn spacing_of(st: &ComputedStyle) -> (i32, i32) {
+    if st.border_collapse {
+        (0, 0)
+    } else {
+        (st.border_spacing.0 as i32, st.border_spacing.1 as i32)
+    }
+}
+
+/// Clamp an outer (border-box) width to `min-width`/`max-width`, which are
+/// content-box lengths unless `box-sizing: border-box` is in effect. Only
+/// definite px limits apply — a percentage limit needs a containing block that
+/// intrinsic sizing does not have yet.
+fn clamp_len(outer: f32, min_w: Len, max_w: Len, box_border: bool, frame: f32) -> f32 {
+    let to_outer = |v: f32| if box_border { v } else { v + frame };
+    let mut out = outer;
+    if let Len::Px(mx) = max_w {
+        out = out.min(to_outer(mx));
+    }
+    if let Len::Px(mn) = min_w {
+        out = out.max(to_outer(mn));
+    }
+    out.max(0.0)
 }
 
 /// Whether a box lays its children out along the inline axis, so their

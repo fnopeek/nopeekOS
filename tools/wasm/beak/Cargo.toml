@@ -1,6 +1,6 @@
 [package]
 name = "beak"
-version = "0.1.62"
+version = "0.1.63"
 edition = "2024"
 description = "beak — the native, sandboxed web browser for nopeekOS. See BROWSER.md."
 
