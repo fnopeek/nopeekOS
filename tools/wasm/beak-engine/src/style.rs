@@ -466,6 +466,24 @@ pub struct ComputedStyle {
     pub clip: Clip,
     // — table —
     pub table_layout: TableLayout,
+    /// `border-spacing` (horizontal, vertical) in px — the gap the separated
+    /// border model leaves between adjacent cell borders, and between the
+    /// table's own padding edge and the outermost cells (CSS2.1 §17.6.1).
+    /// Inherited, so it reaches cells from the table without a walk.
+    pub border_spacing: (f32, f32),
+    /// `border-collapse: collapse` — cell borders merge with their neighbours'
+    /// and with the table's, and `border-spacing` no longer applies.
+    pub border_collapse: bool,
+    /// `empty-cells: hide` — a cell with no in-flow content paints neither
+    /// border nor background in the separated model (CSS2.1 §17.6.1.1).
+    pub empty_cells_hide: bool,
+    /// `<table border>` / `<table cellpadding>`: HTML presentational hints that
+    /// style the table's CELLS, not the table (HTML §15.3.8). The cells are
+    /// several levels down (`tr`, row groups), so they ride down as inherited
+    /// state instead of needing an ancestor-attribute lookup. `None` = the
+    /// attribute is absent.
+    pub attr_cell_border: Option<f32>,
+    pub attr_cell_padding: Option<f32>,
     // — CSS counters (css-lists-3 §4) — `(name_hash, value)` pairs. Names are
     // case-folded FNV-1a hashes (like `grid_area`) so `ComputedStyle` stays
     // `Copy` — no `Vec`. Not inherited. `_n` is how many of the slots are used.
@@ -577,6 +595,11 @@ impl ComputedStyle {
             clear: ClearKind::None,
             clip: Clip::Auto,
             table_layout: TableLayout::Auto,
+            border_spacing: (0.0, 0.0),
+            border_collapse: false,
+            empty_cells_hide: false,
+            attr_cell_border: None,
+            attr_cell_padding: None,
             counter_reset: [(0, 0); COUNTER_OPS_MAX],
             counter_reset_n: 0,
             counter_increment: [(0, 0); COUNTER_OPS_MAX],
@@ -690,6 +713,11 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         clear: ClearKind::None,
         clip: Clip::Auto,
         table_layout: TableLayout::Auto,
+        border_spacing: parent.border_spacing,
+        border_collapse: parent.border_collapse,
+        empty_cells_hide: parent.empty_cells_hide,
+        attr_cell_border: parent.attr_cell_border,
+        attr_cell_padding: parent.attr_cell_padding,
         // Counters are not inherited: reset to empty on every element.
         counter_reset: [(0, 0); COUNTER_OPS_MAX],
         counter_reset_n: 0,
@@ -732,6 +760,28 @@ pub fn resolve(
         Some("rtl") => s.rtl = true,
         Some("ltr") => s.rtl = false,
         _ => {}
+    }
+    // `<table>`'s presentational attributes (HTML §15.3.8). `cellspacing` is
+    // the one the reftest corpus leans on: it writes `cellspacing="0"`, and
+    // without this the UA's 2px default silently applies where the page asked
+    // for none. `border`/`cellpadding` style the cells, so they ride down as
+    // inherited state (see `attr_cell_border`).
+    if el.tag == "table" {
+        if let Some(n) = el.attr("cellspacing").and_then(|v| parse_length(v.trim(), s.units())) {
+            s.border_spacing = (n.max(0.0), n.max(0.0));
+        }
+        if let Some(n) = el.attr("cellpadding").and_then(|v| parse_length(v.trim(), s.units())) {
+            s.attr_cell_padding = Some(n.max(0.0));
+        }
+        if let Some(n) = el.attr("border").and_then(|v| parse_length(v.trim(), s.units())) {
+            s.attr_cell_border = Some(n.max(0.0));
+            if n > 0.0 {
+                for side in [&mut s.border_top, &mut s.border_right, &mut s.border_bottom, &mut s.border_left] {
+                    side.width = n;
+                    side.color = Some(theme.rule);
+                }
+            }
+        }
     }
 
     // Author cascade WITH `!important` (CSS Cascade 4 §6.3): two passes. Normal
@@ -1118,12 +1168,33 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
         // No default margin: the HTML UA sheet gives `<table>` none (only
         // `border-spacing`), and inventing one shifts everything after a table
         // by half an em relative to what every reftest reference assumes.
-        "table" => s.display = Display::Table,
-        "td" => s.display = Display::Block,
-        "th" => {
+        "table" => {
+            s.display = Display::Table;
+            // The HTML UA sheet's `border-spacing: 2px` (HTML §15.3.8). It is
+            // inherited, so every cell sees it without walking back up.
+            s.border_spacing = (2.0, 2.0);
+            s.border_collapse = false;
+        }
+        "td" | "th" => {
             s.display = Display::Block;
-            s.bold = true;
-            s.text_align = TextAlign::Center;
+            // `padding: 1px` from the UA sheet, overridden by `<table
+            // cellpadding>` when that attribute is present.
+            let p = s.attr_cell_padding.unwrap_or(1.0);
+            s.pad_top = p;
+            s.pad_right = p;
+            s.pad_bottom = p;
+            s.pad_left = p;
+            // `<table border>` gives every cell a 1px inset border.
+            if s.attr_cell_border.is_some_and(|b| b > 0.0) {
+                for side in [&mut s.border_top, &mut s.border_right, &mut s.border_bottom, &mut s.border_left] {
+                    side.width = 1.0;
+                    side.color = Some(theme.rule);
+                }
+            }
+            if tag == "th" {
+                s.bold = true;
+                s.text_align = TextAlign::Center;
+            }
         }
         "caption" => {
             s.display = Display::Block;
@@ -1297,6 +1368,16 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         }
         "table-layout" => {
             s.table_layout = if v == "fixed" { TableLayout::Fixed } else { TableLayout::Auto };
+        }
+        "border-collapse" => s.border_collapse = v == "collapse",
+        "empty-cells" => s.empty_cells_hide = v == "hide",
+        // One length applies to both axes; two give horizontal then vertical.
+        "border-spacing" => {
+            let mut it = v.split_whitespace().filter_map(|p| parse_length(p, u));
+            if let Some(h) = it.next() {
+                let vert = it.next().unwrap_or(h);
+                s.border_spacing = (h.max(0.0), vert.max(0.0));
+            }
         }
         "color" => {
             if let Some(c) = parse_color(&v, theme) {
