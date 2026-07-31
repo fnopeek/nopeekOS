@@ -22,37 +22,43 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-07-31, beak 0.1.66)
+### Current number (measured 2026-07-31, beak 0.1.67)
 
 ```
-3688 pass / 1850 fail / 248 inconclusive   (of 5786 vendored reftests)
-= 66.6 % of the conclusive 5538
+3723 pass / 1864 fail / 199 inconclusive   (of 5786 vendored reftests)
+= 66.6 % of the conclusive 5587
 ```
 
-0.1.65 moved six tests out of "inconclusive" — implementing `:root` made those
-references paint at all, so they are now honestly counted (five as failures) —
-with **not one PASS → FAIL**. 0.1.66 added +8 / −3, and all three losses are
-tests that had been green only because neither side of the reftest did
-anything (see the bucket-B notes).
+Session arc: 3682 (0.1.64) → 3683 → 3688 → **3723**. The inconclusive count
+fell 254 → 199 across the same span: references that used to render blank —
+because `:root` was dropped, or because an `inline-block` had no box — now
+paint, so 55 more tests actually measure something.
 
 Per suite (pass / total of that suite, inconclusive included in the total):
 
-| Suite | Pass | Total | % |
-|---|---|---|---|
-| css-fonts | 40 | 43 | 93.0 |
-| css-color | 221 | 282 | 78.4 |
-| css-position | 28 | 36 | 77.8 |
-| **CSS2** (2.1 suite) | 2580 | 3351 | 77.0 |
-| html-forms | 15 | 21 | 71.4 |
-| css-text | 241 | 381 | 63.3 |
-| css-display | 44 | 88 | 50.0 |
-| css-cascade | 16 | 32 | 50.0 |
-| css-backgrounds | 61 | 144 | 42.4 |
-| css-values | 33 | 93 | 35.5 |
-| css-grid | 256 | 749 | 34.2 |
-| css-sizing | 37 | 109 | 33.9 |
-| **css-flexbox** | 111 | 428 | 25.9 |
-| css-align | 5 | 29 | 17.2 |
+| Suite | Pass | Total | % | vs 0.1.64 |
+|---|---|---|---|---|
+| css-fonts | 40 | 43 | 93.0 | — |
+| css-color | 221 | 282 | 78.4 | — |
+| **CSS2** (2.1 suite) | 2598 | 3351 | 77.5 | +18 |
+| html-forms | 15 | 21 | 71.4 | — |
+| css-text | 240 | 381 | 63.0 | −1 |
+| css-display | 44 | 88 | 50.0 | — |
+| css-cascade | 14 | 32 | 43.8 | +1 |
+| css-backgrounds | 59 | 144 | 41.0 | +1 |
+| css-values | 34 | 93 | 36.6 | +1 |
+| **css-flexbox** | 149 | 428 | 34.8 | **+39** |
+| css-grid | 256 | 749 | 34.2 | — |
+| css-sizing | 37 | 109 | 33.9 | — |
+| css-position | 9 | 36 | 25.0 | **−19** |
+| css-align | 7 | 29 | 24.1 | +1 |
+
+**css-position dropped on purpose.** 19 of its tests were green only because
+neither side of the reftest painted anything: they position a `<tr>`/`<tbody>`
+with `position: relative` so its background covers a red marker, and we paint
+neither the marker (it sat inside an `inline-block` that had no box) nor the
+row background. Now the marker renders and the cover does not. The fix is
+named in bucket B below.
 
 Run it: `cargo test --release --manifest-path tools/wasm/beak-engine/Cargo.toml
 --test wpt -- --nocapture` (~5 min). Redirect to a log and wait on it rather
@@ -73,7 +79,7 @@ each case.
 
 ---
 
-# Gap map (measured 2026-07-31, beak 0.1.66)
+# Gap map (measured 2026-07-31, beak 0.1.67)
 
 Two independent axes, because they disagree and each catches what the other
 misses:
@@ -247,18 +253,52 @@ menu to pick from.
    because the style didn't track overflow. It does now, and that one line took
    `floats-bfc-002`, `floats-wrap-bfc-008` and two flexbox tests with it.
 
+10. ✅ **`display: inline-block`** — was mapped onto plain `Display::Inline`,
+    so it had no box at all: no background, no border, no width/height.
+    **239 failing tests used it, 165 of them in the REFERENCE** — which is why
+    the flexbox suite looked so much worse than it was. Now `Display::
+    InlineBlock`: laid out at the origin with the full block box model
+    (shrink-to-fit for `auto`, the same §10.3.9 formula floats use) into a
+    detached display list, then translated once the line box knows where it
+    sits. Blockified when it is a float, out of flow, or a flex/grid item
+    (css-display-3 §2.7). It aligns on **its last line box's baseline**
+    (§10.8.1) — bottom margin edge only when it has no line box or clips its
+    overflow; the six `inline-block-baseline-*` tests measure exactly that.
+11. ✅ **Sibling context for flex items, grid items and inline children.**
+    `layout_flex`, `layout_grid` and `collect_inline` resolved child styles with
+    `self.styled(ce, st, &[], 0)` — empty preceding-siblings, sibling count 0 —
+    so **every child looked like `:nth-child(1)`**. The whole Opera flexbox
+    family paints its items in four colours via `:nth-child(n)` and got four
+    yellow boxes. **+33 tests, not one regression**, and on the real web this is
+    `tr:nth-child(even)` zebra striping and every `:first-child` margin reset.
+    Still missing the same way: table cells (`cell_style`), the `<caption>`
+    scan, the table-role probe, and `intrinsic_walk` — the last one matters
+    because measurement and layout must agree.
+12. **`position: relative` + `background` on table rows and row groups** —
+    19 `css-position/position-relative-table-*` tests, the largest single block
+    left. `collect_table_rows` returns `Vec<Vec<Cell>>`, so the `<tr>` element
+    is thrown away and the row can be neither styled nor painted. Recipe:
+    carry `{ el: Option<&Element>, group: Option<&Element>, cells }` per row
+    (~20 mechanical call sites), resolve the row style WITH sibling context,
+    insert the row background behind its cells, and shift the row's op range by
+    `top`/`left`. A group's rows are already contiguous in the output, so the
+    same treatment covers `tbody`/`thead`/`tfoot`.
+
 **C — the big structural blocks (oracle-heavy)**
 
-10. **Flexbox core** — 25.7 % is our worst suite; 86 of the fails are the
-    `flex-0/1/N` basis/grow/shrink family, i.e. one algorithm (css-flexbox-1
-    §9.7 resolving flexible lengths) rather than 86 separate bugs. Highest
-    oracle yield per unit of work anywhere in the list.
-11. **CSS2 long tail** — `margin-collapse` 28, `abspos-containing-block` 25,
+13. **Flexbox core** — now 34.8 % after the two fixes above. The remaining
+    `flex-0/1/N` basis/grow/shrink family is one algorithm (css-flexbox-1 §9.7
+    resolving flexible lengths): `resolve_flex_line` only clamps to the item's
+    floor/ceiling inside its grow and shrink branches, and does no
+    freeze/unfreeze iteration, so a violated min/max is not redistributed.
+    Also missing: `align-content` (~15 tests), reverse directions, baseline
+    alignment.
+14. **CSS2 long tail** — `margin-collapse` 28, `abspos-containing-block` 25,
     `floats-wrap` 22, `border-*-width` 44 (`thin`/`medium`/`thick` keywords
     are a suspiciously cheap 44).
-12. **Grid** — 467 fails but 84 are experimental `grid-lanes`; the real
+15. **Grid** — 467 fails but 84 are experimental `grid-lanes`; the real
     reserve is auto-placement (`row/column-auto`, 64) and abspos-in-grid (48).
-13. Bidi reordering — costs ~13 tests *actively* and blocks `unicode-bidi`.
+16. Bidi reordering — costs ~13 tests *actively* and blocks `unicode-bidi`.
 
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the
@@ -301,7 +341,7 @@ cursor), `user-select`/`touch-action`/`overflow-anchor`/`scroll-margin`
 | Feature | Spec | Status | Notes |
 |---------|------|--------|-------|
 | Block flow (vertical stacking) | CSS2.1 §9 | ✅ | block formatting context (`layout.rs`): stack + adjacent-sibling **margin collapse**; anonymous inline runs flushed at block boundaries |
-| Inline flow / line boxes | CSS2.1 §9.4.2 | ✅ | line boxes with **mixed-style runs** (size/colour/weight/italic) sharing a baseline; greedy wrap; `<a>`/`<b>`/`<i>`/`<code>` flow inline; `<br>` breaks. No bidi/UAX-14 yet |
+| Inline flow / line boxes | CSS2.1 §9.4.2 | ✅ | line boxes with **mixed-style runs** (size/colour/weight/italic) sharing a baseline; greedy wrap; `<a>`/`<b>`/`<i>`/`<code>` flow inline; `<br>` breaks. Atomic inline boxes: `<img>`, form controls and **`display: inline-block`** (a full block box laid out at the origin, then translated into its line; aligned on its own last line box's baseline). No bidi/UAX-14 yet |
 | Box model (margin/border/padding) | css-box-3 | 🟡 | full block box model: `width`/`min-width`/`max-width`, `margin` (4-side + **`auto` centering**, §10.3.3 + §10.4 min/max redo), `padding` (4-side), **per-side borders** (width/style/colour), `box-sizing`, logical `margin-inline`/`-block` + `padding-inline`/`-block`, vertical margin collapse → **centered `max-width` containers work**. No `border-radius` |
 | Text wrapping / `white-space` | css-text-3 | 🟡 | `normal` collapse+wrap and `pre` (each source line its own line box, trailing spaces hang, §8); `<br>` forces a break even under max-content. **`word-break`/`overflow-wrap`/`word-wrap: break-word`** split an over-long word at the last character that fits, never inside a grapheme cluster (ZWJ sequences, variation selectors, skin tones, keycaps, combining marks, flags, tag sequences). `pre-wrap`/`pre-line`/`nowrap` are **not** distinguished from `pre`/`normal`. No `hyphens`, no UAX-14 line breaking, no bidi reordering |
 | Tables (`table`/`tr`/`td`/`th`) | css-tables-3 | 🟡 | `layout.rs`: §17.2.1 anonymous-box fixup, auto **and** `table-layout: fixed` column algorithms, `colspan` (spanning cells distribute only the shortfall), **both border models** — `border-collapse` (winner-takes-the-edge, half the collapsed line per cell, incl. in column widths) and separated with `border-spacing` + `empty-cells` — the `border`/`cellpadding`/`cellspacing` presentation attributes, table border box + `auto` horizontal centring, `<caption>`. **`caption-side`** and per-cell **`vertical-align`** (`top`/`middle`/`bottom`; `baseline` degrades to `top` — no cross-cell baseline alignment). No `rowspan`, `display:inline-table` is block-level |

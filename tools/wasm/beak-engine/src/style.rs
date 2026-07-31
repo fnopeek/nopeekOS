@@ -26,6 +26,10 @@ pub enum Display {
     None,
     Block,
     Inline,
+    /// `display: inline-block` — a block box inside, an atomic inline box
+    /// outside: it takes part in a line box like an image, but lays its own
+    /// content out with the full block box model.
+    InlineBlock,
     ListItem,
     /// `<table>` — establishes the (simplified) table formatting context in
     /// `layout.rs`; its `tr`/`td`/`th` descendants are laid by that walker.
@@ -952,6 +956,13 @@ pub fn resolve(
     if el.tag == "html" || el.tag == "body" {
         s.overflow_clip = false;
     }
+    // A float or an out-of-flow box is blockified (css-display-3 §2.7), so
+    // `inline-block` there is just a block — it never joins a line box.
+    if s.display == Display::InlineBlock
+        && (s.float != FloatKind::None || matches!(s.position, Position::Absolute | Position::Fixed))
+    {
+        s.display = Display::Block;
+    }
     // `vertical-align` applies to inline-level boxes and table cells only
     // (CSS2.1 §10.8.1). An out-of-flow or block-level box is never aligned in
     // a line box, and leaving the value on it would ride down into the text
@@ -965,7 +976,7 @@ pub fn resolve(
     if !is_cell
         && (matches!(s.position, Position::Absolute | Position::Fixed)
             || s.float != FloatKind::None
-            || !matches!(s.display, Display::Inline))
+            || !matches!(s.display, Display::Inline | Display::InlineBlock))
     {
         s.valign = VAlign::Baseline;
     }
@@ -1039,13 +1050,11 @@ pub fn resolve_pseudo(
     // box. Any other display (`block`, `list-item`, …) is a box shape we
     // don't lay out here — CONFORMANCE.md's forward-compatible rule: produce
     // nothing rather than render it wrong. An explicit `width`/`height` is
-    // the same story a level down: `display: inline-block` computes to the
-    // same `Display::Inline` this engine uses for plain inline text (no
-    // separate inline-block box type), so a sized spacer (the common
-    // `content: "…"; display: inline-block; width: N%` idiom some reftest
-    // references use as an indent/spacer trick) would otherwise flow as
-    // plain unsized text instead of reserving that width — visibly wrong,
-    // so skip it too.
+    // the same story a level down: generated content is emitted as a plain
+    // text run, so a sized spacer (the common `content: "…"; display:
+    // inline-block; width: N%` idiom some reftest references use as an
+    // indent trick) would flow as unsized text instead of reserving that
+    // width — visibly wrong, so skip it too.
     if s.display != Display::Inline || s.width != Len::Auto || s.height != Len::Auto {
         return None;
     }
@@ -1493,7 +1502,8 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             s.display = match v.as_str() {
                 "none" => Display::None,
                 "list-item" => Display::ListItem,
-                "inline" | "inline-block" => Display::Inline,
+                "inline" => Display::Inline,
+                "inline-block" => Display::InlineBlock,
                 "table" | "inline-table" => Display::Table,
                 "table-row" => Display::TableRow,
                 "table-row-group" => Display::TableRowGroup,

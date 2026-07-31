@@ -16,6 +16,7 @@
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
+use core::cell::RefCell;
 use alloc::vec;
 use alloc::vec::Vec;
 use fontdue::Font;
@@ -222,6 +223,22 @@ fn translate_ops(ops: &mut [DrawOp], dy: i32) {
             | DrawOp::RoundRect { y, .. }
             | DrawOp::Text { y, .. }
             | DrawOp::Image { y, .. } => *y += dy,
+        }
+    }
+}
+
+/// Move a detached op list (an `inline-block`'s, laid out at the origin) to
+/// where its line box put it.
+fn translate_op_list(ops: &mut [DrawOp], dx: i32, dy: i32) {
+    for op in ops {
+        match op {
+            DrawOp::Rect { x, y, .. }
+            | DrawOp::RoundRect { x, y, .. }
+            | DrawOp::Text { x, y, .. }
+            | DrawOp::Image { x, y, .. } => {
+                *x += dx;
+                *y += dy;
+            }
         }
     }
 }
@@ -695,6 +712,10 @@ struct Ctx<'a> {
     /// jurisdiction (CSS2.1 §11.1.1) — see `clip_overflow`.
     abs_count: u32,
     fixed_count: u32,
+    /// Document y of the last line box's baseline emitted so far. An
+    /// `inline-block` aligns on the baseline of ITS last line box (CSS2.1
+    /// §10.8.1), which is only known once its content has been laid out.
+    last_baseline: Option<i32>,
     /// Depth of currently-open *tracked* (recorded) stacking ranges. Only a
     /// box at depth 0 gets recorded — a z-indexed box nested inside another
     /// already-tracked one paints as part of its ancestor's range instead
@@ -835,6 +856,7 @@ fn display_name(d: Display) -> &'static str {
     match d {
         Display::Block => "block",
         Display::Inline => "inline",
+        Display::InlineBlock => "inline-block",
         Display::ListItem => "list-item",
         Display::Table => "table",
         Display::Flex => "flex",
@@ -914,6 +936,7 @@ pub fn layout(
         viewport_w: width as f32,
         abs_count: 0,
         fixed_count: 0,
+        last_baseline: None,
         floats: Vec::new(),
         stack_ops: Vec::new(),
         stack_links: Vec::new(),
@@ -1286,7 +1309,7 @@ impl Ctx<'_> {
                 self.place_float(el, &st, x, w, anchor + open.value() as i32);
                 continue;
             }
-            if st.display == Display::Inline {
+            if matches!(st.display, Display::Inline | Display::InlineBlock) {
                 self.path.push(ElemInfo::of(el));
                 self.collect_inline(el, &st, None, &mut inline, x, w, anchor);
                 self.path.pop();
@@ -1296,7 +1319,7 @@ impl Ctx<'_> {
             // a line box separates margins, so the open margin commits here.
             if !inline.is_empty() {
                 let ly = anchor + open.value() as i32;
-                let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, parent.text_align, parent.text_align_last, parent.rtl, parent.line_height.px(parent.font_px).unwrap_or(0.0), &mut self.ops, &mut self.links, &mut self.controls);
+                let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, parent.text_align, parent.text_align_last, parent.rtl, parent.line_height.px(parent.font_px).unwrap_or(0.0), &mut self.ops, &mut self.links, &mut self.controls, &mut self.last_baseline);
                 if !committed {
                     first_top = ly;
                     committed = true;
@@ -1388,7 +1411,7 @@ impl Ctx<'_> {
         }
         if !inline.is_empty() {
             let ly = anchor + open.value() as i32;
-            let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, parent.text_align, parent.text_align_last, parent.rtl, parent.line_height.px(parent.font_px).unwrap_or(0.0), &mut self.ops, &mut self.links, &mut self.controls);
+            let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, parent.text_align, parent.text_align_last, parent.rtl, parent.line_height.px(parent.font_px).unwrap_or(0.0), &mut self.ops, &mut self.links, &mut self.controls, &mut self.last_baseline);
             if !committed {
                 first_top = ly;
                 committed = true;
@@ -3036,9 +3059,15 @@ impl Ctx<'_> {
 
         // Grid items = in-flow child elements; abspos children are out of flow.
         let mut items: Vec<(&Element, ComputedStyle)> = Vec::new();
+        let sib_count = el.children.iter().filter(|n| matches!(n, Node::Element(_))).count() as u32;
+        let mut siblings: Vec<ElemInfo> = Vec::new();
         for c in &el.children {
             if let Node::Element(ce) = c {
-                let cs = self.styled(ce, st, &[], 0);
+                let mut cs = self.styled(ce, st, &siblings, sib_count);
+                siblings.push(ElemInfo::of(ce));
+                if matches!(cs.display, Display::Inline | Display::InlineBlock) {
+                    cs.display = Display::Block;
+                }
                 if cs.display == Display::None {
                     continue;
                 }
@@ -3390,10 +3419,19 @@ impl Ctx<'_> {
     /// reverse directions, `align-content`, baseline alignment.
     fn layout_flex(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
         // Flex items = in-flow child elements; abspos children are out of flow.
+        // Structural selectors count EVERY element sibling, so the position is
+        // tracked independently of which children become items.
         let mut items: Vec<(&Element, ComputedStyle)> = Vec::new();
+        let sib_count = el.children.iter().filter(|n| matches!(n, Node::Element(_))).count() as u32;
+        let mut siblings: Vec<ElemInfo> = Vec::new();
         for c in &el.children {
             if let Node::Element(ce) = c {
-                let cs = self.styled(ce, st, &[], 0);
+                let mut cs = self.styled(ce, st, &siblings, sib_count);
+                siblings.push(ElemInfo::of(ce));
+                // A flex item is blockified (css-display-3 §2.7).
+                if matches!(cs.display, Display::Inline | Display::InlineBlock) {
+                    cs.display = Display::Block;
+                }
                 if cs.display == Display::None {
                     continue;
                 }
@@ -4039,9 +4077,73 @@ impl Ctx<'_> {
     /// Collect an inline element's subtree into the current inline run
     /// (recursing through nested inline elements, carrying each one's style +
     /// link href). `el` is already on `self.path` when this is called.
+    /// Lay an `inline-block` out at the origin and capture everything it
+    /// painted, so the line box can place a finished rectangle. Width is
+    /// shrink-to-fit for `auto` (CSS2.1 §10.3.9, the same formula floats use).
+    ///
+    /// The box establishes its own block formatting context, so the parent's
+    /// floats must not reach into it — and its own must not leak out
+    /// ([[feedback-speculative-layout-state]]: every throwaway context has to
+    /// put back what it took).
+    fn inline_block_box(&mut self, el: &Element, st: &ComputedStyle, avail_w: i32) -> Option<AtomicBox> {
+        if st.hidden || st.transparent {
+            return None;
+        }
+        let cbw = avail_w as f32;
+        let ml = st.margin_left.px(cbw).unwrap_or(0.0).max(0.0);
+        let mr = st.margin_right.px(cbw).unwrap_or(0.0).max(0.0);
+        let pad_border = st.pad_left + st.pad_right + st.border_x();
+        let content_w = match st.width {
+            Len::Auto => {
+                let (pref, min) = self.intrinsic_width(el, st);
+                let room = (cbw - ml - mr - pad_border).max(0.0);
+                pref.min(room).max(min).max(0.0)
+            }
+            other => {
+                let v = other.px(cbw).unwrap_or(0.0);
+                if st.box_border { (v - pad_border).max(0.0) } else { v }
+            }
+        };
+        let outer_w = ceil_i32(content_w + pad_border + ml + mr).max(1);
+
+        let (o0, l0, c0) = (self.ops.len(), self.links.len(), self.controls.len());
+        let saved_floats = core::mem::take(&mut self.floats);
+        let saved_baseline = self.last_baseline.take();
+        self.path.push(ElemInfo::of(el));
+        // `layout_box` re-adds margin-left + padding, so it gets the MARGIN-box
+        // width — the same contract `place_float` uses.
+        let border_bottom = self.layout_box(el, st, 0, outer_w, st.margin_top as i32);
+        self.path.pop();
+        self.floats = saved_floats;
+        let inner_baseline = self.last_baseline.take();
+        self.last_baseline = saved_baseline;
+
+        let ops: Vec<DrawOp> = self.ops.drain(o0..).collect();
+        let links: Vec<LinkRect> = self.links.drain(l0..).collect();
+        let controls: Vec<ControlRect> = self.controls.drain(c0..).collect();
+        let h = (border_bottom + st.margin_bottom as i32).max(0);
+        // The box aligns on its LAST line box's baseline; with no in-flow line
+        // box, or when it clips its overflow, it aligns on its bottom margin
+        // edge instead (CSS2.1 §10.8.1).
+        let baseline = match inner_baseline {
+            Some(b) if !st.overflow_clip => b.clamp(0, h),
+            _ => h,
+        };
+        Some(AtomicBox { ops, links, controls, w: outer_w, h, baseline })
+    }
+
     fn collect_inline(&mut self, el: &Element, st: &ComputedStyle, href: Option<&str>, inline: &mut Inline, bx: i32, bw: i32, by: i32) {
         if st.is_break {
             inline.brk();
+            return;
+        }
+        // `display: inline-block` — lay the whole box out now (block model,
+        // shrink-to-fit width) into its own display list, and hand the line
+        // box a finished rectangle. Position comes later, in `emit_line`.
+        if st.display == Display::InlineBlock {
+            if let Some(b) = self.inline_block_box(el, st, bw) {
+                inline.atomic(b);
+            }
             return;
         }
         // An `<img>` inside inline content (e.g. `<a><img></a>` — Wikipedia's
@@ -4070,11 +4172,14 @@ impl Ctx<'_> {
         if let Some((text, ps)) = self.pseudo(el, st, PseudoElem::Before) {
             inline.text(&text, &ps, href);
         }
+        let sib_count = el.children.iter().filter(|n| matches!(n, Node::Element(_))).count() as u32;
+        let mut siblings: Vec<ElemInfo> = Vec::new();
         for c in &el.children {
             match c {
                 Node::Text(t) => inline.text(t, st, href),
                 Node::Element(ce) => {
-                    let cs = self.styled(ce, st, &[], 0);
+                    let cs = self.styled(ce, st, &siblings, sib_count);
+                    siblings.push(ElemInfo::of(ce));
                     if cs.display == Display::None {
                         continue;
                     }
@@ -4126,6 +4231,19 @@ struct RunStyle {
     lh: f32,
 }
 
+/// An inline-block's finished display list, laid out at the origin and
+/// translated into place once the line box knows where it sits.
+struct AtomicBox {
+    ops: Vec<DrawOp>,
+    links: Vec<LinkRect>,
+    controls: Vec<ControlRect>,
+    /// Margin-box size — what the line reserves.
+    w: i32,
+    h: i32,
+    /// Distance from the margin-box top to the baseline the line aligns on.
+    baseline: i32,
+}
+
 /// One inline item: a word, an atomic `<img>`, a form control, or a `<br>`.
 enum Item {
     Word { text: String, style: RunStyle, href: Option<String>, space_before: bool },
@@ -4136,6 +4254,11 @@ enum Item {
     Strut(RunStyle),
     Image { src: String, w: i32, h: i32, href: Option<String>, alt: String, space_before: bool, hidden: bool, transparent: bool },
     Control { ctl: CtlBox, space_before: bool },
+    /// `display: inline-block` — laid out already, waiting for its position.
+    /// The finished display list is MOVED out when the line box places it;
+    /// `flow` only has a shared borrow of the item list (`Placed::Control`
+    /// borrows from it), hence the cell. Each `Inline` is flowed exactly once.
+    Atomic { box_: RefCell<Option<AtomicBox>>, space_before: bool },
     Break,
 }
 
@@ -4465,6 +4588,13 @@ impl Inline {
         self.items.push(Item::Image { src, w, h, href: href.map(|s| s.to_string()), alt, space_before, hidden, transparent });
     }
 
+    /// Add a laid-out `inline-block` to the inline run.
+    fn atomic(&mut self, box_: AtomicBox) {
+        let space_before = self.pending_space && !self.items.is_empty();
+        self.pending_space = false;
+        self.items.push(Item::Atomic { box_: RefCell::new(Some(box_)), space_before });
+    }
+
     /// Add an atomic form control to the inline run.
     fn control(&mut self, ctl: CtlBox) {
         let space_before = self.pending_space && !self.items.is_empty();
@@ -4516,6 +4646,7 @@ impl Inline {
         ops: &mut Vec<DrawOp>,
         links: &mut Vec<LinkRect>,
         controls: &mut Vec<ControlRect>,
+        last_baseline: &mut Option<i32>,
     ) -> i32 {
         // Each word/segment measures with its own face (a monospace run advances
         // differently from proportional Inter), so glyph positions match what
@@ -4545,6 +4676,7 @@ impl Inline {
                     if line.is_empty() {
                         y += ceil_i32(strut_h);
                     } else {
+                        *last_baseline = Some(y + line_ascent as i32);
                         y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
                     }
                     let (bl, br) = band_of(floats, y, y + lh, x, x + w);
@@ -4557,6 +4689,7 @@ impl Inline {
                     let ww = measure(face(style), text, style.size);
                     let sw = if *space_before { space_width(face(style), style.size) } else { 0.0 };
                     if !line.is_empty() && pen + sw + ww > right {
+                        *last_baseline = Some(y + line_ascent as i32);
                         y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
                         let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                         pen = bl as f32;
@@ -4578,7 +4711,8 @@ impl Inline {
                             let mut n = fit_prefix(f, rest, style.size, right - pen - lead);
                             if n == 0 {
                                 if !line.is_empty() {
-                                    y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
+                                    *last_baseline = Some(y + line_ascent as i32);
+                        y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
                                     let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                                     pen = bl as f32;
                                     right = br as f32;
@@ -4625,6 +4759,24 @@ impl Inline {
                     line_ascent = line_ascent.max(asc);
                     gap = gap.max(lb);
                 }
+                Item::Atomic { box_, space_before } => {
+                    let Some(b) = box_.borrow_mut().take() else { continue };
+                    let sw = if *space_before { space_width(fonts.regular(), BASE_FONT_PX) } else { 0.0 };
+                    if !line.is_empty() && pen + sw + b.w as f32 > right {
+                        *last_baseline = Some(y + line_ascent as i32);
+                        y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
+                        let (bl, br) = band_of(floats, y, y + lh, x, x + w);
+                        pen = bl as f32;
+                        right = br as f32;
+                        line_ascent = 0.0;
+                        gap = 0.0;
+                    }
+                    let lead = if line.is_empty() { 0.0 } else { sw };
+                    pen += lead + b.w as f32;
+                    line_ascent = line_ascent.max(b.baseline as f32);
+                    gap = gap.max(b.h as f32);
+                    line.push(Placed::Atomic { x: (pen - b.w as f32) as i32, box_: b });
+                }
                 Item::Image { src, w: iw, h: ih, href, alt, space_before, hidden, transparent } => {
                     // Fit the image to the content width, keeping aspect.
                     let (mut bw, mut bh) = (*iw as f32, *ih as f32);
@@ -4635,6 +4787,7 @@ impl Inline {
                     let (bw, bh) = (bw.max(1.0) as i32, bh.max(1.0) as i32);
                     let sw = if *space_before { space_width(fonts.regular(), BASE_FONT_PX) } else { 0.0 };
                     if !line.is_empty() && pen + sw + bw as f32 > right {
+                        *last_baseline = Some(y + line_ascent as i32);
                         y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
                         let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                         pen = bl as f32;
@@ -4661,6 +4814,7 @@ impl Inline {
                 Item::Control { ctl, space_before } => {
                     let sw = if *space_before { space_width(fonts.regular(), BASE_FONT_PX) } else { 0.0 };
                     if !line.is_empty() && pen + sw + ctl.w as f32 > right {
+                        *last_baseline = Some(y + line_ascent as i32);
                         y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
                         let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                         pen = bl as f32;
@@ -4682,6 +4836,7 @@ impl Inline {
         }
         if !line.is_empty() {
             let a = align_last.unwrap_or(align);
+            *last_baseline = Some(y + line_ascent as i32);
             y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, align_dx(a, rtl, pen, right), ops, links, controls);
         }
         y
@@ -4692,6 +4847,7 @@ impl Inline {
 /// form control (borrowed from the inline run — it is only measured once).
 enum Placed<'a> {
     Text(Seg),
+    Atomic { x: i32, box_: AtomicBox },
     Image { x: i32, w: i32, h: i32, src: String, href: Option<String>, alt: String, hidden: bool, transparent: bool },
     Control { x: i32, ctl: &'a CtlBox },
 }
@@ -4895,6 +5051,24 @@ fn emit_line(
                         text: seg.text,
                     });
                 }
+            }
+            Placed::Atomic { x, mut box_ } => {
+                // The box's own baseline sits on the line's baseline; with the
+                // approximation `baseline == h` that puts its bottom margin
+                // edge there, which is what a block-ish inline-block does.
+                let (dx, dy) = (x + dx, baseline - box_.baseline);
+                translate_op_list(&mut box_.ops, dx, dy);
+                for lk in &mut box_.links {
+                    lk.x += dx;
+                    lk.y += dy;
+                }
+                for c in &mut box_.controls {
+                    c.x += dx;
+                    c.y += dy;
+                }
+                ops.append(&mut box_.ops);
+                links.append(&mut box_.links);
+                controls.append(&mut box_.controls);
             }
             Placed::Control { x, ctl } => {
                 let top = baseline - (ctl.h - CTL_PAD_Y);
