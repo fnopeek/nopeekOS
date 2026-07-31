@@ -22,16 +22,18 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-07-31, beak 0.1.65)
+### Current number (measured 2026-07-31, beak 0.1.66)
 
 ```
-3683 pass / 1855 fail / 248 inconclusive   (of 5786 vendored reftests)
-= 66.5 % of the conclusive 5538
+3688 pass / 1850 fail / 248 inconclusive   (of 5786 vendored reftests)
+= 66.6 % of the conclusive 5538
 ```
 
-The 0.1.65 round moved six tests out of "inconclusive" — implementing `:root`
-made those references paint at all, so they are now honestly counted (five of
-them as failures). Against 0.1.64 there was **not one PASS → FAIL**.
+0.1.65 moved six tests out of "inconclusive" — implementing `:root` made those
+references paint at all, so they are now honestly counted (five as failures) —
+with **not one PASS → FAIL**. 0.1.66 added +8 / −3, and all three losses are
+tests that had been green only because neither side of the reftest did
+anything (see the bucket-B notes).
 
 Per suite (pass / total of that suite, inconclusive included in the total):
 
@@ -44,13 +46,13 @@ Per suite (pass / total of that suite, inconclusive included in the total):
 | html-forms | 15 | 21 | 71.4 |
 | css-text | 241 | 381 | 63.3 |
 | css-display | 44 | 88 | 50.0 |
-| css-cascade | 13 | 32 | 40.6 |
-| css-backgrounds | 59 | 144 | 41.0 |
+| css-cascade | 16 | 32 | 50.0 |
+| css-backgrounds | 61 | 144 | 42.4 |
 | css-values | 33 | 93 | 35.5 |
 | css-grid | 256 | 749 | 34.2 |
 | css-sizing | 37 | 109 | 33.9 |
-| **css-flexbox** | 110 | 428 | 25.7 |
-| css-align | 6 | 29 | 20.7 |
+| **css-flexbox** | 111 | 428 | 25.9 |
+| css-align | 5 | 29 | 17.2 |
 
 Run it: `cargo test --release --manifest-path tools/wasm/beak-engine/Cargo.toml
 --test wpt -- --nocapture` (~5 min). Redirect to a log and wait on it rather
@@ -71,7 +73,7 @@ each case.
 
 ---
 
-# Gap map (measured 2026-07-31, beak 0.1.65)
+# Gap map (measured 2026-07-31, beak 0.1.66)
 
 Two independent axes, because they disagree and each catches what the other
 misses:
@@ -96,32 +98,35 @@ arms in `style.rs::apply_one`; extract the truth with
 
 ## Real-web axis — de.wikipedia.org/wiki/Stansstad
 
-1521 elements, 112 distinct properties applied, **4707 implemented / 1197
-unimplemented** property applications (was 4340 / 1564 at 0.1.64 — the five
-bucket-A features below closed 367 of them). The unimplemented ones, by
-elements affected, split by whether ignoring them is actually wrong:
+1521 elements, 112 distinct properties applied, **5300 implemented / 604
+unimplemented** property applications — down from 4340 / 1564 at 0.1.64, so
+buckets A and B closed **61 % of the gap**. What is left, by elements affected,
+split by whether ignoring it is actually wrong:
 
 | Property | Elems | Dominant value | Ignoring it is… |
 |---|---:|---|---|
-| `border-radius` | 307 | `2px` | **wrong** — every pill/button/search box is a hard rectangle |
-| `word-wrap` / `word-break` / `overflow-wrap` | 165 / 52 / 3 | `break-word` | **wrong** — long tokens overflow their box instead of breaking |
-| `vertical-align` (inline only) | 74 | 46× `middle`, 10× `text-bottom` | **partly wrong** — cells align since 0.1.65, inline boxes still sit on the baseline |
-| `overflow` | 58 | 47× `hidden` | **wrong** — we paint what should be clipped |
-| `user-select` (+`-moz-`/`-webkit-`) | 112 | `none` | harmless — no selection yet anyway |
-| `transition-property`/`-duration` | 68 | — | harmless — ignoring = jump straight to the final state |
-| `cursor` | 30 | 22× `pointer` | cosmetic — the *compositor* owns the cursor, not us |
 | `mask-*` (+`-webkit-`) | 28 each | `url(…)` + `center`/`no-repeat` | **wrong** — this is Vector's whole icon system |
 | `text-overflow` | 24 | `ellipsis` | **wrong** — truncated labels run on |
 | `unicode-bidi` | 21 | `isolate` | **wrong**, but blocked on bidi generally |
 | `background-image` / `-position` / `-repeat` / `-size` | 19 each | `url(…)` | **wrong** — 16 real icons unpainted |
-| `scroll-margin-top`, `overflow-anchor`, `touch-action`, `-*-appearance`, `list-style-image:none`, `font-variant:normal`, `text-indent:0` | 1–15 | — | harmless |
 | `box-shadow` | 10 | `0 2px 6px -1px rgba(…)` | cosmetic |
-| `transform` | 2 | `translateY(-50%)` | **wrong** where used for centering |
+| `transform` | 2 | `translateY(-50%)` | **wrong** where used for centring |
+| `vertical-align` (inline only) | 74 | 46× `middle`, 10× `text-bottom` | **partly** — cells align since 0.1.65, inline boxes still sit on the baseline |
+| `user-select` (+`-moz-`/`-webkit-`) | 112 | `none` | harmless — no selection yet anyway |
+| `transition-property`/`-duration` | 68 | — | harmless — ignoring = jump straight to the final state |
+| `cursor` | 30 | 22× `pointer` | cosmetic — the *compositor* owns the cursor, not us |
+| `scroll-margin-top`, `overflow-anchor`, `touch-action`, `-*-appearance`, `list-style-image:none`, `font-variant:normal`, `text-indent:0` | 1–15 | — | harmless |
 
-**Caveat:** one page, one skin. `border-radius` at 307 is inflated by Vector's
-`2px`-on-everything; `mask-*` at 28 is *the* icon mechanism and matters more
-than its count suggests. Re-run on a second site (a shop, a docs page, GitHub)
-before treating this ranking as general.
+**After A + B the top of this list is almost all noise.** That is the point of
+the damage column: without it, `user-select` at 112 elements looks like the
+biggest remaining item, and it is worth nothing. The two that still cost real
+pixels are `mask-image` and `background-image` — the same missing capability
+(fetch a sub-resource named from inside CSS), which is why they are one entry
+in bucket B.
+
+**Caveat:** one page, one skin. `mask-*` at 28 is *the* icon mechanism and
+matters more than its count suggests. Re-run on a second site (a shop, a docs
+page, GitHub) before treating this ranking as general.
 
 ## Oracle axis — where the WPT failures sit
 
@@ -144,11 +149,10 @@ excluded):
 
 ## Known holes, by kind
 
-**Properties not parsed at all** (`style.rs::apply_one` has 115 arms; these
+**Properties not parsed at all** (`style.rs::apply_one` has ~125 arms; these
 aren't among them): `background-image`/`-repeat`/`-position`/`-size`,
-`border-radius`, `box-shadow`, `text-decoration*`, `text-indent`,
-`text-shadow`, `letter-spacing`, `word-spacing`, `word-break`/`overflow-wrap`/
-`hyphens`, `overflow*`, `cursor`, `outline*`, `transform`, `transition`,
+`box-shadow`, `text-indent`,
+`text-shadow`, `letter-spacing`, `word-spacing`, `hyphens`, `cursor`, `outline*`, `transform`, `transition`,
 `animation`, `aspect-ratio`, `object-fit`, `filter`, `mask-*`, `quotes`,
 `appearance`, `resize`, `writing-mode`.
 
@@ -204,19 +208,44 @@ menu to pick from.
    coincide) went 2.01 % → 3.46 %. **When adding a property, add its
    applies-to rule in the same commit.**
 
-**B — real visual damage, medium effort**
+**B — real visual damage, medium effort — 6-8 ✅ DONE in 0.1.66**
 
-6. `border-radius` — 307 elements here, and it gates `background-clip` (15
-   WPT) + `box-shadow-radius` tests. Needs rounded-rect fill and a clip path
-   in `raster.rs`; the rest of the engine only needs to carry 4 radii.
-7. `overflow: hidden` clipping — 58 elements, 22 WPT near-misses; the
-   `Layout` already carries rects, so this is a raster-side clip stack.
-8. `word-break` / `overflow-wrap: break-word` — 220 elements combined, 12 WPT.
-   A break opportunity inside a word when the line can't otherwise fit.
+6. ✅ `border-radius` (307 elements) — the shorthand with `/`, the four corner
+   longhands, percentages, and the §5.5 all-corners scaling when a pair
+   overflows a side. New `DrawOp::RoundRect`: a solid fill walks only its
+   corner rows (the straight middle stays ONE `fill`, so a page-tall background
+   costs what it always did), and `ring > 0` strokes a uniform border as one
+   shape so the border follows the curve. Horizontal edges are antialiased —
+   without that a 2px corner is a chopped pixel. Every `border-radius` WPT test
+   moved measurably closer (`box-shadow-border-radius-001` 18.75 → 14.78 %) and
+   two `background-clip` ones flipped green. A **non-uniform** border still
+   falls back to four square edges.
+7. ✅ `overflow: hidden`/`clip` — reuses the `clip: rect()` machinery.
+   `auto`/`scroll` deliberately do NOT clip: with no in-page scroll container,
+   clipping there would hide content the user is meant to reach. Two spec rules
+   came with it, both caught by WPT: an out-of-flow descendant is clipped only
+   by an ancestor in its **containing-block** chain (§11.1.1 — a `static` box
+   cannot clip an abspos child, and nothing but the viewport clips a `fixed`
+   one), and `overflow` on `html`/`body` **propagates to the viewport**, so
+   those two never clip themselves. Skipped when a descendant recorded a
+   z-index range in the span — `clip_ops` rebuilds the tail, and a scrambled
+   display list is far worse than an unclipped overflow.
+8. ✅ `word-break` / `overflow-wrap: break-word` / `word-wrap` (220 elements) —
+   split a word at the last character that fits. **Never inside a grapheme
+   cluster**: `line-breaking-014` broke the flag of Wales apart, so the break
+   point snaps back over ZWJ sequences, variation selectors, skin-tone
+   modifiers, keycaps, combining marks, regional-indicator pairs and tag
+   sequences. Intrinsic widths are deliberately unchanged (that is
+   `overflow-wrap` semantics; true `break-all` would also shrink min-content).
 9. `background-image: url()` + `linear-gradient()` + `mask-image` — 19 + 28
    elements, and the entire Vector icon set. Needs sub-resource fetch driven
    *from CSS* (the shell only scans `<img>` and `<link>` today), which is the
-   real cost, not the painting.
+   real cost, not the painting. **The biggest remaining real-web item.**
+
+   **Bonus from 7:** `overflow != visible` establishes a block formatting
+   context (CSS2.1 §9.4.1) — the predicate had a comment saying so and a TODO
+   because the style didn't track overflow. It does now, and that one line took
+   `floats-bfc-002`, `floats-wrap-bfc-008` and two flexbox tests with it.
 
 **C — the big structural blocks (oracle-heavy)**
 
@@ -274,7 +303,7 @@ cursor), `user-select`/`touch-action`/`overflow-anchor`/`scroll-margin`
 | Block flow (vertical stacking) | CSS2.1 §9 | ✅ | block formatting context (`layout.rs`): stack + adjacent-sibling **margin collapse**; anonymous inline runs flushed at block boundaries |
 | Inline flow / line boxes | CSS2.1 §9.4.2 | ✅ | line boxes with **mixed-style runs** (size/colour/weight/italic) sharing a baseline; greedy wrap; `<a>`/`<b>`/`<i>`/`<code>` flow inline; `<br>` breaks. No bidi/UAX-14 yet |
 | Box model (margin/border/padding) | css-box-3 | 🟡 | full block box model: `width`/`min-width`/`max-width`, `margin` (4-side + **`auto` centering**, §10.3.3 + §10.4 min/max redo), `padding` (4-side), **per-side borders** (width/style/colour), `box-sizing`, logical `margin-inline`/`-block` + `padding-inline`/`-block`, vertical margin collapse → **centered `max-width` containers work**. No `border-radius` |
-| Text wrapping / `white-space` | css-text-3 | 🟡 | `normal` collapse+wrap and `pre` (each source line its own line box, trailing spaces hang, §8); `<br>` forces a break even under max-content. `pre-wrap`/`pre-line`/`nowrap` are **not** distinguished from `pre`/`normal`. No `word-break`/`overflow-wrap`/`hyphens`, no UAX-14 line breaking, no bidi reordering |
+| Text wrapping / `white-space` | css-text-3 | 🟡 | `normal` collapse+wrap and `pre` (each source line its own line box, trailing spaces hang, §8); `<br>` forces a break even under max-content. **`word-break`/`overflow-wrap`/`word-wrap: break-word`** split an over-long word at the last character that fits, never inside a grapheme cluster (ZWJ sequences, variation selectors, skin tones, keycaps, combining marks, flags, tag sequences). `pre-wrap`/`pre-line`/`nowrap` are **not** distinguished from `pre`/`normal`. No `hyphens`, no UAX-14 line breaking, no bidi reordering |
 | Tables (`table`/`tr`/`td`/`th`) | css-tables-3 | 🟡 | `layout.rs`: §17.2.1 anonymous-box fixup, auto **and** `table-layout: fixed` column algorithms, `colspan` (spanning cells distribute only the shortfall), **both border models** — `border-collapse` (winner-takes-the-edge, half the collapsed line per cell, incl. in column widths) and separated with `border-spacing` + `empty-cells` — the `border`/`cellpadding`/`cellspacing` presentation attributes, table border box + `auto` horizontal centring, `<caption>`. **`caption-side`** and per-cell **`vertical-align`** (`top`/`middle`/`bottom`; `baseline` degrades to `top` — no cross-cell baseline alignment). No `rowspan`, `display:inline-table` is block-level |
 | Flexbox | css-flexbox-1 | 🟡 | `layout.rs::layout_flex`: row/column, **multi-line wrap**, `flex-grow`/`-shrink`/`-basis` + `flex` shorthand, `gap`, `justify-content` (all 6), `align-items`/`align-self`, `order`, per-item `margin:auto`, automatic content minimum size. No reverse directions, no baseline alignment, no `align-content`, no writing modes. **Weakest suite at 25.7 %** — see the gap map |
 | Grid | css-grid-2 | 🟡 | `layout.rs::layout_grid`: `grid-template-columns`/`-rows` (px/%/`fr`/`auto`/`repeat()`/`minmax()`≈), `grid-template-areas`, `grid-auto-rows`, row-major auto-placement, `grid-column`/`-row` (`span N`, `A / B`), `grid-area`, `gap`, `justify-items`/`justify-self`/`place-*`. No dense flow, no abspos-in-grid, no orthogonal/RTL flows |
@@ -286,11 +315,12 @@ cursor), `user-select`/`touch-action`/`overflow-anchor`/`scroll-margin`
 | Feature | Spec | Status | Notes |
 |---------|------|--------|-------|
 | Color / text color | css-color-4 | ✅ | `color.rs`: `#rgb`/`#rrggbb`/`#rgba`, the named-colour table, `rgb()`/`hsl()`/`hwb()`/`lab()`/`lch()`/`oklab()`/`oklch()`/`color()`, alpha and modern slash syntax |
-| Backgrounds / borders | css-backgrounds-3 | 🟡 | `background`/`background-color` fill (inserted behind content at a recorded op index) + **per-side** `border` (width/style/colour, incl. the shorthands and `border-collapse` edge resolution). No `background-image`/gradients, no `background-clip`/`-repeat`/`-position`/`-size`, no `border-radius`, no `box-shadow`, no `border-image`. 40.3 % of the suite |
+| Backgrounds / borders | css-backgrounds-3 | 🟡 | `background`/`background-color` fill (inserted behind content at a recorded op index) + **per-side** `border` (width/style/colour, incl. the shorthands and `border-collapse` edge resolution) + **`border-radius`** (shorthand with `/`, four corner longhands, percentages, §5.5 corner scaling; antialiased fill, and a uniform border stroked as one rounded ring — a non-uniform one keeps square corners). No `background-image`/gradients, no `background-clip`/`-repeat`/`-position`/`-size`, no `box-shadow`, no `border-image`. 42.4 % of the suite |
 | Font size / weight / family | css-fonts-4 | 🟡 | em-relative `font-size` cascade with correct compounding; **six real subsetted faces** (Inter regular/bold/italic/bold-italic + mono/mono-bold, `fonts.rs`) — synthetic bold/italic retired. No `@font-face` / webfonts / family fallback lists |
 | Text decoration | css-text-decor-3 | 🟡 | `text-decoration`/`-line`: underline / line-through / overline as rects in the run's colour, at metric-free approximations of the font's decoration positions. UA rules: `:any-link` (href-gated), `<u>`/`<ins>`, `<s>`/`<del>`/`<strike>`. Inherited rather than propagated (§1.2) — same pixels for every construct we have. No `-color`/`-style`/`-thickness`, no `text-underline-offset` |
 | Glyph rasterisation + AA | — | ✅ | fontdue + coverage blend, warm glyph cache; `fill` builds one row and `copy_within`s it (a per-pixel loop cost ~10× under wasmi) |
 | Transforms / filters / shadows | css-transforms/… | ❌ | §9 frontier — `transform`, `filter`, `text-shadow`, `box-shadow` all unparsed |
+| `overflow` | css-overflow-3 | 🟡 | `hidden`/`clip` on both axes drop what the box's content painted outside its padding box, and establish a block formatting context (CSS2.1 §9.4.1). Honours the containing-block rule for out-of-flow descendants (§11.1.1) and viewport propagation from `html`/`body` (§3.3). `auto`/`scroll` do **not** clip — there is no in-page scroll container to reach the hidden part with. No scrollbars, and the clip is skipped inside a z-index stacking range |
 | `opacity` / `visibility` | css-color-4 / css-display | 🟡 | `visibility: hidden/collapse` inherits and suppresses bg/border/text/image/marker (and removes the element as a click target); `opacity: 0` groups its subtree (a descendant can't take it back) but **stays hit-testable** — that is the point of the checkbox-hack overlay. No fractional opacity compositing |
 
 ## Images

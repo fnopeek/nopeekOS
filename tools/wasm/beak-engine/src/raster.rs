@@ -215,6 +215,9 @@ impl Engine {
                 DrawOp::Rect { x, y, w: rw, h: rh, color } => {
                     fill(out, wi, hi, *x, *y - scroll_y, *rw, *rh, *color);
                 }
+                DrawOp::RoundRect { x, y, w: rw, h: rh, r, color, ring } => {
+                    fill_round(out, wi, hi, *x, *y - scroll_y, *rw, *rh, *r, *color, *ring);
+                }
                 DrawOp::Text { x, y, size, color, bold, italic, mono, text } => {
                     let vy = *y - scroll_y;
                     if vy > hi || vy + (*size as i32) + 6 < 0 {
@@ -357,6 +360,133 @@ fn fill(out: &mut [u8], w: i32, h: i32, x: i32, y: i32, rw: i32, rh: i32, c: Rgb
         let dst = idx(w, x0, py);
         out.copy_within(first..first + row, dst);
     }
+}
+
+/// How far a rounded rect's left and right edges move inwards on the row whose
+/// top is `row_y` (rect-local), in fractional pixels. Radii are `[tl, tr, br,
+/// bl]` (CSS corner order) and are treated as circular — CSS allows an ellipse
+/// per corner, we take one radius.
+fn round_insets(row_y: f32, rh: f32, r: [f32; 4]) -> (f32, f32) {
+    let [tl, tr, br, bl] = r;
+    let cy = row_y + 0.5; // sample the row's centre
+    let inset = |rad: f32, dy: f32| {
+        if rad <= 0.0 || dy <= 0.0 {
+            0.0
+        } else {
+            rad - libm::sqrtf((rad * rad - dy * dy).max(0.0))
+        }
+    };
+    let pick = |top: f32, bot: f32| {
+        if cy < top {
+            inset(top, top - cy)
+        } else if cy > rh - bot {
+            inset(bot, cy - (rh - bot))
+        } else {
+            0.0
+        }
+    };
+    (pick(tl, bl), pick(tr, br))
+}
+
+/// Fill one row's horizontal span with fractional ends: the interior is a solid
+/// run, the two boundary pixels get partial coverage. That antialiasing is what
+/// keeps a 2px corner from looking like a chopped pixel.
+fn fill_span(out: &mut [u8], w: i32, h: i32, y: i32, xl: f32, xr: f32, c: Rgb) {
+    if y < 0 || y >= h || xr <= xl {
+        return;
+    }
+    let (l, rr) = (libm::floorf(xl), libm::ceilf(xr));
+    // Solid interior first, then the two fractional edges over it.
+    let (i0, i1) = ((l as i32 + 1).max(0), ((rr as i32) - 1).min(w));
+    if i1 > i0 {
+        fill(out, w, h, i0, y, i1 - i0, 1, c);
+    }
+    let mut edge = |px: f32, cov: f32| {
+        let xi = px as i32;
+        if cov > 0.004 && xi >= 0 && xi < w {
+            blend_at(out, idx(w, xi, y), c, (cov.min(1.0) * 255.0) as u8);
+        }
+    };
+    // A span narrower than one pixel covers a single pixel partially.
+    if rr - l <= 1.0 {
+        edge(l, xr - xl);
+        return;
+    }
+    edge(l, 1.0 - (xl - l));
+    edge(rr - 1.0, 1.0 - (rr - xr));
+}
+
+/// Fill a rounded rect, or — when `ring > 0` — only a border of that thickness
+/// along its inside edge. Radii are in px, `[tl, tr, br, bl]`.
+///
+/// A solid fill only walks rows inside the corner bands; everything between
+/// them is ONE `fill` call. So a page-tall background with a 2px radius still
+/// costs one `memory.copy` per row instead of a per-pixel loop over millions
+/// of pixels.
+#[allow(clippy::too_many_arguments)]
+fn fill_round(out: &mut [u8], w: i32, h: i32, x: i32, y: i32, rw: i32, rh: i32, r: [f32; 4], c: Rgb, ring: f32) {
+    if rw <= 0 || rh <= 0 {
+        return;
+    }
+    if r.iter().all(|&v| v <= 0.0) && ring <= 0.0 {
+        fill(out, w, h, x, y, rw, rh, c);
+        return;
+    }
+    let (fx, fy, fw, fh) = (x as f32, y as f32, rw as f32, rh as f32);
+    // A radius may not exceed half the box, and CSS scales ALL of them by one
+    // factor when any pair overflows its side (css-backgrounds-3 §5.5) —
+    // clamping each corner on its own would change the shape.
+    let mut scale = 1.0f32;
+    for (sum, extent) in [(r[0] + r[1], fw), (r[3] + r[2], fw), (r[0] + r[3], fh), (r[1] + r[2], fh)] {
+        if sum > extent && sum > 0.0 {
+            scale = scale.min(extent / sum);
+        }
+    }
+    let r = [r[0] * scale, r[1] * scale, r[2] * scale, r[3] * scale];
+    let span = |out: &mut [u8], py: i32| {
+        let (li, ri) = round_insets(py as f32 - fy, fh, r);
+        fill_span(out, w, h, py, fx + li, fx + fw - ri, c);
+    };
+
+    if ring <= 0.0 {
+        let top = ceil_f(r[0].max(r[1])).min(rh);
+        let bot = ceil_f(r[2].max(r[3])).min(rh - top);
+        for py in y..(y + top) {
+            span(out, py);
+        }
+        fill(out, w, h, x, y + top, rw, rh - top - bot, c);
+        for py in (y + rh - bot)..(y + rh) {
+            span(out, py);
+        }
+        return;
+    }
+
+    // Ring: the hole's radii shrink with the border but never go negative — a
+    // border thicker than the radius leaves a square inner corner, as browsers
+    // do. Rows above and below the hole are border across their whole span.
+    let inner = [
+        (r[0] - ring).max(0.0),
+        (r[1] - ring).max(0.0),
+        (r[2] - ring).max(0.0),
+        (r[3] - ring).max(0.0),
+    ];
+    let (iy0, iy1, ih) = (fy + ring, fy + fh - ring, fh - 2.0 * ring);
+    for py in y.max(0)..(y + rh).min(h) {
+        let cy = py as f32 + 0.5;
+        if cy < iy0 || cy > iy1 || ih <= 0.0 {
+            span(out, py);
+            continue;
+        }
+        let (li, ri) = round_insets(py as f32 - fy, fh, r);
+        let (ili, iri) = round_insets(cy - iy0 - 0.5, ih, inner);
+        fill_span(out, w, h, py, fx + li, fx + ring + ili, c);
+        fill_span(out, w, h, py, fx + fw - ring - iri, fx + fw - ri, c);
+    }
+}
+
+/// `ceil` as an i32 — `core` has no `f32::ceil` in `no_std`.
+fn ceil_f(v: f32) -> i32 {
+    libm::ceilf(v.max(0.0)) as i32
 }
 
 /// Blend `c` at `a`/255 coverage over the pixel starting at byte `i`. Takes the

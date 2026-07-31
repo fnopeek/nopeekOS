@@ -35,6 +35,9 @@ const IMPLEMENTED: &[&str] = &[
     "border-collapse","border-spacing","empty-cells","counter-reset","counter-increment",
     "opacity","visibility","content",
     "text-decoration","text-decoration-line","caption-side","vertical-align",
+    "border-radius","border-top-left-radius","border-top-right-radius",
+    "border-bottom-right-radius","border-bottom-left-radius",
+    "overflow","overflow-wrap","word-wrap","word-break",
 ];
 
 struct Ctx<'a> {
