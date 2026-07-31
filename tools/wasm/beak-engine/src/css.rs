@@ -158,6 +158,10 @@ struct Compound {
     /// `:where(…)` groups: match like `:is()` but contribute ZERO specificity.
     where_groups: Vec<Vec<Compound>>,
     structural: Vec<Structural>,
+    /// `:root` — the document's root element. In an HTML document that is
+    /// always `<html>`, so this is a tag test that keeps pseudo-class
+    /// specificity.
+    root: bool,
     /// `::before`/`::after` on this compound (only valid on the LAST compound
     /// of a selector — checked in `parse_selector`).
     pseudo: PseudoElem,
@@ -185,6 +189,9 @@ impl Compound {
             return false;
         }
         if self.structural.iter().any(|s| !s.matches(ctx)) {
+            return false;
+        }
+        if self.root && e.tag != "html" {
             return false;
         }
         // :not(x) — none of the negated compounds may match.
@@ -361,6 +368,8 @@ impl Index {
             self.by_class.entry(cls.clone()).or_default().push(key);
         } else if let Some(tag) = &last.tag {
             self.by_tag.entry(tag.clone()).or_default().push(key);
+        } else if last.root {
+            self.by_tag.entry("html".into()).or_default().push(key);
         } else {
             self.universal.push(key);
         }
@@ -1070,6 +1079,7 @@ fn parse_compound(tok: &str) -> Option<Compound> {
         is_groups: Vec::new(),
         where_groups: Vec::new(),
         structural: Vec::new(),
+        root: false,
         pseudo: PseudoElem::None,
     };
     let mut i = 0;
@@ -1162,6 +1172,7 @@ fn parse_compound(tok: &str) -> Option<Compound> {
                     // forgiving compound-alternative lists.
                     ("is" | "matches", Some(a)) => c.is_groups.push(parse_compound_list(&a)),
                     ("where", Some(a)) => c.where_groups.push(parse_compound_list(&a)),
+                    ("root", None) => c.root = true,
                     ("first-child", None) => c.structural.push(Structural::FirstChild),
                     ("last-child", None) => c.structural.push(Structural::LastChild),
                     ("only-child", None) => c.structural.push(Structural::OnlyChild),
@@ -1173,7 +1184,7 @@ fn parse_compound(tok: &str) -> Option<Compound> {
                         let (x, y) = parse_nth(&a)?;
                         c.structural.push(Structural::NthLastChild(x, y));
                     }
-                    _ => return None, // :hover/:checked/:root/… — unsupported → drop the selector
+                    _ => return None, // :hover/:checked/… — unsupported → drop the selector
                 }
             }
             _ => return None,
@@ -1246,7 +1257,8 @@ fn parse_nth(s: &str) -> Option<(i32, i32)> {
 fn compound_spec(comp: &Compound) -> (u32, u32, u32) {
     let mut a = comp.id.is_some() as u32;
     // classes, `[attr]` and pseudo-classes all count at the class level.
-    let mut b = (comp.classes.len() + comp.attrs.len() + comp.structural.len()) as u32;
+    let mut b =
+        (comp.classes.len() + comp.attrs.len() + comp.structural.len() + comp.root as usize) as u32;
     // tag + a pseudo-element each count like a type selector (css-cascade §5.8.3).
     let mut c = comp.tag.is_some() as u32 + (comp.pseudo != PseudoElem::None) as u32;
     for n in &comp.not {
@@ -1356,6 +1368,24 @@ mod tests {
         assert!(ss.matched(&info("input", None, &[]), &[], &[], 0, 1000.0).is_empty());
         // … and the plain "h1, h2" list still parsed.
         assert!(!ss.matched(&info("h2", None, &[]), &[], &[], 0, 1000.0).is_empty());
+    }
+
+    #[test]
+    fn root_pseudo_matches_the_html_element() {
+        let ss = parse(":root { color: a } :root.night { color: b } html { color: c }");
+        let html = info("html", None, &[]);
+        let m = ss.matched(&html, &[], &[], 0, 1000.0);
+        // `:root` and `html` both match; `:root.night` does not (no class).
+        assert_eq!(m.len(), 2);
+        // `:root` has class-level specificity, `html` only type-level.
+        let root_spec = m.iter().find(|(_, _, d)| d[0].1 == "a").unwrap().0;
+        let tag_spec = m.iter().find(|(_, _, d)| d[0].1 == "c").unwrap().0;
+        assert!(root_spec > tag_spec);
+        // Not the root element → no match.
+        assert!(ss.matched(&info("body", None, &[]), &[], &[], 0, 1000.0).len() == 0);
+        // With the class present, the qualified rule matches too.
+        let night = info("html", None, &["night"]);
+        assert_eq!(ss.matched(&night, &[], &[], 0, 1000.0).len(), 3);
     }
 
     #[test]
