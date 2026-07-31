@@ -132,6 +132,8 @@ fn fmax(a: f32, b: f32) -> f32 {
 ///   term   := factor (('*' | '/') factor)*
 ///   factor := '(' expr ')'
 ///           | 'calc' '(' expr ')'
+///           | ('min' | 'max') '(' expr (',' expr)* ')'
+///           | 'clamp' '(' expr ',' expr ',' expr ')'
 ///           | ('+' | '-') factor          (unary sign)
 ///           | value                       (number + optional unit)
 /// ```
@@ -224,15 +226,24 @@ impl<'a> Parser<'a> {
                 Some(-self.parse_factor()?)
             }
             _ => {
-                // `calc( ... )` nested, else a numeric value leaf.
-                if self.match_calc() {
+                // A nested math function, else a numeric value leaf.
+                if self.match_fn(b"calc") {
                     let v = self.parse_expr()?;
-                    self.skip_ws();
-                    if self.peek() != Some(b')') {
-                        return None;
-                    }
-                    self.i += 1;
+                    self.close_paren()?;
                     Some(v)
+                } else if self.match_fn(b"min") {
+                    self.parse_fold(fmin)
+                } else if self.match_fn(b"max") {
+                    self.parse_fold(fmax)
+                } else if self.match_fn(b"clamp") {
+                    let lo = self.parse_expr()?;
+                    self.comma()?;
+                    let val = self.parse_expr()?;
+                    self.comma()?;
+                    let hi = self.parse_expr()?;
+                    self.close_paren()?;
+                    // clamp(MIN, VAL, MAX) == max(MIN, min(VAL, MAX)).
+                    Some(fmax(lo, fmin(val, hi)))
                 } else {
                     self.parse_value()
                 }
@@ -240,18 +251,53 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// If the input at the cursor is `calc(` (case-insensitive), consume
-    /// through the opening paren and return true.
-    fn match_calc(&mut self) -> bool {
+    /// Fold a comma-separated argument list (already past the opening paren)
+    /// through `f`, consuming the closing paren. `min()`/`max()` are variadic.
+    fn parse_fold(&mut self, f: fn(f32, f32) -> f32) -> Option<f32> {
+        let mut acc = self.parse_expr()?;
+        loop {
+            self.skip_ws();
+            if self.peek() != Some(b',') {
+                break;
+            }
+            self.i += 1;
+            acc = f(acc, self.parse_expr()?);
+        }
+        self.close_paren()?;
+        Some(acc)
+    }
+
+    fn comma(&mut self) -> Option<()> {
+        self.skip_ws();
+        if self.peek() != Some(b',') {
+            return None;
+        }
+        self.i += 1;
+        Some(())
+    }
+
+    fn close_paren(&mut self) -> Option<()> {
+        self.skip_ws();
+        if self.peek() != Some(b')') {
+            return None;
+        }
+        self.i += 1;
+        Some(())
+    }
+
+    /// If the input at the cursor is `<name>(` (name case-insensitive),
+    /// consume through the opening paren and return true.
+    fn match_fn(&mut self, name: &[u8]) -> bool {
         let rest = &self.b[self.i..];
-        if rest.len() >= 5
-            && rest[0].eq_ignore_ascii_case(&b'c')
-            && rest[1].eq_ignore_ascii_case(&b'a')
-            && rest[2].eq_ignore_ascii_case(&b'l')
-            && rest[3].eq_ignore_ascii_case(&b'c')
-            && rest[4] == b'('
+        let n = name.len();
+        if rest.len() > n
+            && rest[n] == b'('
+            && rest[..n]
+                .iter()
+                .zip(name)
+                .all(|(a, b)| a.eq_ignore_ascii_case(b))
         {
-            self.i += 5;
+            self.i += n + 1;
             true
         } else {
             false
@@ -415,6 +461,33 @@ mod tests {
         approx("calc( 100%  -  3rem )", 952.0); // loose inner whitespace
         approx("calc(1rem - -2px)", 18.0); // unary minus operand
         approx("calc(-3rem + 100%)", 952.0); // leading negative
+    }
+
+    #[test]
+    fn min_max_clamp() {
+        // ctx(): em=16, rem=16, pct_basis=1000, vw=800, vh=600.
+        approx("min(10px, 2rem)", 10.0);
+        approx("max(10px, 2rem)", 32.0);
+        approx("min(50%, 100px, 3rem)", 48.0); // variadic
+        approx("MAX(1px, 2px)", 2.0); // case-insensitive
+        approx("clamp(10px, 5%, 30px)", 30.0); // 50 clamped down to the max
+        approx("clamp(10px, 1px, 30px)", 10.0); // below the min
+        approx("clamp(10px, 20px, 30px)", 20.0); // inside the range
+        // Nested with calc(), and as an operand of one.
+        approx("calc(max(calc(1rem + 2px), 10px) * 2)", 36.0);
+        approx("min(calc(100% - 900px), 200px)", 100.0);
+        approx("max(-3px, -1px)", -1.0);
+    }
+
+    #[test]
+    fn min_max_clamp_invalid() {
+        let c = ctx();
+        assert_eq!(resolve_length("min()", &c), None);
+        assert_eq!(resolve_length("max(1px,)", &c), None);
+        assert_eq!(resolve_length("clamp(1px, 2px)", &c), None); // wrong arity
+        assert_eq!(resolve_length("clamp(1px, 2px, 3px, 4px)", &c), None);
+        assert_eq!(resolve_length("min(1px", &c), None); // unbalanced
+        assert_eq!(resolve_length("min (1px, 2px)", &c), None); // space before paren
     }
 
     #[test]

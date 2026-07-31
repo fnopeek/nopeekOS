@@ -27,12 +27,14 @@ const IMPLEMENTED: &[&str] = &[
     "max-width","min-height","min-width","order","padding","padding-bottom","padding-left",
     "padding-right","padding-top","place-items","place-self","position","right","row-gap",
     "table-layout","top","white-space","width","z-index",
-    // added this session
     "text-align","text-align-last","text-transform","list-style","list-style-type",
     "line-height","direction","font",
     "margin-inline","margin-inline-start","margin-inline-end","margin-block",
     "margin-block-start","margin-block-end","padding-inline","padding-inline-start",
     "padding-inline-end","padding-block","padding-block-start","padding-block-end",
+    "border-collapse","border-spacing","empty-cells","counter-reset","counter-increment",
+    "opacity","visibility","content",
+    "text-decoration","text-decoration-line","caption-side","vertical-align",
 ];
 
 struct Ctx<'a> {

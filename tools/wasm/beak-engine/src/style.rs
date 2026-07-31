@@ -420,7 +420,14 @@ pub struct ComputedStyle {
     pub is_link: bool,
     pub is_rule: bool, // <hr> — painted as a divider
     pub is_break: bool, // <br> — forced line break in inline flow
-    pub valign: i8, // vertical-align: super (+1) / sub (-1) / baseline (0) — not inherited
+    /// `vertical-align` — not inherited. On a table cell it aligns the content
+    /// box in the row; on an inline-level box it shifts the box on the line.
+    pub valign: VAlign,
+    /// `text-decoration-line` as `DECO_*` bits. CSS propagates a decoration to
+    /// in-flow descendants rather than inheriting it (css-text-decor-3 §1.2);
+    /// we inherit, which paints the same pixels for every construct we have —
+    /// the difference only shows where a descendant tries to *cancel* one.
+    pub deco: u8,
     // — flex container —
     pub flex_row: bool, // flex-direction: row (true) vs column (false)
     pub flex_wrap: bool,
@@ -474,6 +481,10 @@ pub struct ComputedStyle {
     /// `border-collapse: collapse` — cell borders merge with their neighbours'
     /// and with the table's, and `border-spacing` no longer applies.
     pub border_collapse: bool,
+    /// `caption-side: bottom` — the caption renders below the table grid
+    /// instead of above it. Inherited (CSS2.1 §17.4.1), so it can be set on
+    /// either the `<table>` or the `<caption>`.
+    pub caption_bottom: bool,
     /// `empty-cells: hide` — a cell with no in-flow content paints neither
     /// border nor background in the separated model (CSS2.1 §17.6.1.1).
     pub empty_cells_hide: bool,
@@ -514,6 +525,8 @@ impl ComputedStyle {
             font_px: BASE_FONT_PX,
             em_base: BASE_FONT_PX,
             rem_base: BASE_FONT_PX,
+            deco: 0,
+            caption_bottom: false,
             bold: false,
             italic: false,
             mono: false,
@@ -560,7 +573,7 @@ impl ComputedStyle {
             is_link: false,
             is_rule: false,
             is_break: false,
-            valign: 0,
+            valign: VAlign::Baseline,
             flex_row: true,
             flex_wrap: false,
             flex_balance: false,
@@ -610,6 +623,55 @@ impl ComputedStyle {
 
 pub const BASE_FONT_PX: f32 = 16.0;
 
+/// `vertical-align`. Lengths and percentages are not represented — they fall
+/// back to `Baseline` rather than being mis-placed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum VAlign {
+    Baseline,
+    Sub,
+    Super,
+    Top,
+    Middle,
+    Bottom,
+    TextTop,
+    TextBottom,
+}
+
+fn parse_valign(v: &str) -> Option<VAlign> {
+    Some(match v {
+        "baseline" => VAlign::Baseline,
+        "sub" => VAlign::Sub,
+        "super" => VAlign::Super,
+        "top" => VAlign::Top,
+        "middle" => VAlign::Middle,
+        "bottom" => VAlign::Bottom,
+        "text-top" => VAlign::TextTop,
+        "text-bottom" => VAlign::TextBottom,
+        _ => return None,
+    })
+}
+
+/// `ComputedStyle::deco` bits (`text-decoration-line`).
+pub const DECO_UNDERLINE: u8 = 1;
+pub const DECO_LINE_THROUGH: u8 = 2;
+pub const DECO_OVERLINE: u8 = 4;
+
+/// `text-decoration` / `text-decoration-line`: keep the line keywords, ignore
+/// the colour and style components of the shorthand (we draw a solid line in
+/// the text's own colour).
+fn parse_deco(v: &str) -> u8 {
+    let mut d = 0;
+    for kw in v.split_whitespace() {
+        match kw {
+            "underline" => d |= DECO_UNDERLINE,
+            "line-through" => d |= DECO_LINE_THROUGH,
+            "overline" => d |= DECO_OVERLINE,
+            _ => {}
+        }
+    }
+    d
+}
+
 /// The two font-relative bases a length may need: `em` (the element's own
 /// font-size, or its inherited one while `font-size` itself is being resolved)
 /// and `rem` (the ROOT element's computed font-size). They differ the moment a
@@ -646,6 +708,8 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         rtl: parent.rtl,
         text_transform: parent.text_transform,
         text_align_last: parent.text_align_last,
+        deco: parent.deco,
+        caption_bottom: parent.caption_bottom,
         display: Display::Inline, // CSS initial `display` is inline
         width: Len::Auto,
         min_width: Len::Auto,
@@ -678,7 +742,7 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         is_link: false,
         is_rule: false,
         is_break: false,
-        valign: 0,
+        valign: VAlign::Baseline,
         flex_row: true,
         flex_wrap: false,
         flex_balance: false,
@@ -754,6 +818,12 @@ pub fn resolve(
 ) -> ComputedStyle {
     let mut s = inherit_reset(parent);
     ua_rule(&el.tag, parent, theme, &mut s);
+    // `:any-link { text-decoration: underline }` (HTML rendering §15.3.9). It
+    // needs the `href`, which `ua_rule` doesn't see — a bare `<a name=…>`
+    // anchor is not a link and is not underlined.
+    if el.tag == "a" && el.attr("href").is_some() {
+        s.deco |= DECO_UNDERLINE;
+    }
     // HTML's `dir` attribute is a presentational hint for `direction`: it sits
     // between the UA sheet and the author cascade, so author CSS still wins.
     match el.attr("dir") {
@@ -829,6 +899,23 @@ pub fn resolve(
     // `z-index: inherit`, same pattern (z-index is not inherited by default).
     if matches!(s.z_index, ZIndex::Inherit) {
         s.z_index = parent.z_index;
+    }
+    // `vertical-align` applies to inline-level boxes and table cells only
+    // (CSS2.1 §10.8.1). An out-of-flow or block-level box is never aligned in
+    // a line box, and leaving the value on it would ride down into the text
+    // runs the box creates and shift its whole content — which is exactly what
+    // `vertical-align-sub-001` catches (two absolutely positioned spans that
+    // must coincide).
+    // A `<td>`/`<th>` carries `display: block` from the UA sheet — the table
+    // machinery recognises cells by tag/role, not by display — so the tag has
+    // to be part of the test.
+    let is_cell = matches!(s.display, Display::TableCell) || el.tag == "td" || el.tag == "th";
+    if !is_cell
+        && (matches!(s.position, Position::Absolute | Position::Fixed)
+            || s.float != FloatKind::None
+            || !matches!(s.display, Display::Inline))
+    {
+        s.valign = VAlign::Baseline;
     }
     // Opacity groups the subtree: a transparent ancestor wins over anything
     // this element declares, but within this element the cascade decides.
@@ -1264,6 +1351,8 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
             s.color = theme.link;
         }
         "b" | "strong" => s.bold = true,
+        "u" | "ins" => s.deco |= DECO_UNDERLINE,
+        "s" | "del" | "strike" => s.deco |= DECO_LINE_THROUGH,
         "i" | "em" | "cite" | "var" | "dfn" => s.italic = true,
         "code" | "kbd" | "samp" | "tt" => s.mono = true,
         "small" => s.font_px = em * 0.85,
@@ -1273,11 +1362,11 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
         // Superscript / subscript: smaller, raised/lowered off the baseline.
         "sup" => {
             s.font_px = em * 0.75;
-            s.valign = 1;
+            s.valign = VAlign::Super;
         }
         "sub" => {
             s.font_px = em * 0.75;
-            s.valign = -1;
+            s.valign = VAlign::Sub;
         }
         // span / label / abbr / time / u / s / … → plain inline.
         _ => {}
@@ -1371,6 +1460,16 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         }
         "border-collapse" => s.border_collapse = v == "collapse",
         "empty-cells" => s.empty_cells_hide = v == "hide",
+        "vertical-align" => {
+            if let Some(a) = parse_valign(&v) {
+                s.valign = a;
+            }
+        }
+        "caption-side" => match v.as_str() {
+            "bottom" => s.caption_bottom = true,
+            "top" => s.caption_bottom = false,
+            _ => {}
+        },
         // One length applies to both axes; two give horizontal then vertical.
         "border-spacing" => {
             let mut it = v.split_whitespace().filter_map(|p| parse_length(p, u));
@@ -1434,6 +1533,13 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             };
         }
         "font" => apply_font_shorthand(&v, theme, s),
+        "text-decoration" | "text-decoration-line" => {
+            // The shorthand resets the line to `none` when it names no line
+            // keyword, so colour/style-only values legitimately clear it.
+            if v != "inherit" && v != "unset" {
+                s.deco = parse_deco(&v);
+            }
+        }
         "text-transform" => {
             s.text_transform = match v.as_str() {
                 "uppercase" => TextTransform::Upper,

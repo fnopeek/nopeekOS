@@ -545,10 +545,20 @@ mod tests {
     }
 
     #[test]
-    fn last_declaration_wins() {
-        // Document-scoped: the later `--c` (green) wins everywhere.
-        let out = resolve_vars(":root{--c:red} .x{--c:green} a{color:var(--c)}", 800.0, &[]);
+    fn last_unconditional_declaration_wins() {
+        // Among equally unconditional root declarations, the later one wins.
+        let out = resolve_vars(":root{--c:red} html{--c:green} a{color:var(--c)}", 800.0, &[]);
         assert!(out.contains("color:green"), "{out}");
+    }
+
+    #[test]
+    fn qualified_declaration_does_not_override_the_unconditional_one() {
+        // A class-qualified definition is conditional on that class being
+        // present; it must not win document-wide (the 0.1.51 dark-mode leak,
+        // which turned every page dark because one theme class defined the
+        // whole palette).
+        let out = resolve_vars(":root{--c:red} .x{--c:green} a{color:var(--c)}", 800.0, &[]);
+        assert!(out.contains("color:red"), "{out}");
     }
 
     #[test]

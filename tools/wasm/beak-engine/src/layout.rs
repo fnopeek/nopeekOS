@@ -1667,7 +1667,7 @@ impl Ctx<'_> {
             focused,
             caret,
             bg: st.bg,
-            style: RunStyle { hidden: st.hidden, transparent: st.transparent, size, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: 0, lh: st.line_height.px(size).unwrap_or(0.0) },
+            style: RunStyle { hidden: st.hidden, transparent: st.transparent, size, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: crate::style::VAlign::Baseline, deco: st.deco, lh: st.line_height.px(size).unwrap_or(0.0) },
         }
     }
 
@@ -1880,19 +1880,32 @@ impl Ctx<'_> {
     /// HTML tag (`tr`/`td`/`th`/`thead`…) or `display: table-*`; anonymous
     /// boxes fill any missing row/row-group/cell wrapper (CSS2 §17.2.1).
     fn layout_table(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
-        // <caption> renders as a block above the grid.
+        // <caption> renders as a block on the table's top or bottom edge
+        // (CSS2.1 §17.4.1), per its own `caption-side`.
+        let mut y = self.layout_captions(el, st, x, w, y0, false);
+        y = self.layout_table_body(&el.children, st, x, w, y);
+        self.layout_captions(el, st, x, w, y, true)
+    }
+
+    /// Lay out the `<caption>` children whose `caption-side` puts them on the
+    /// requested edge, stacked at `y0`. Returns the y below them.
+    fn layout_captions(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y0: i32, bottom: bool) -> i32 {
         let mut y = y0;
         for c in &el.children {
             if let Node::Element(e) = c {
-                if e.tag == "caption" {
-                    let cs = self.styled(e, st, &[], 0);
-                    self.path.push(ElemInfo::of(e));
-                    y = self.layout_children(&e.children, &cs, Some(e), x, w, y);
-                    self.path.pop();
+                if e.tag != "caption" {
+                    continue;
                 }
+                let cs = self.styled(e, st, &[], 0);
+                if cs.caption_bottom != bottom {
+                    continue;
+                }
+                self.path.push(ElemInfo::of(e));
+                y = self.layout_children(&e.children, &cs, Some(e), x, w, y);
+                self.path.pop();
             }
         }
-        self.layout_table_body(&el.children, st, x, w, y)
+        y
     }
 
     /// The table's row grid (everything but `<caption>`): shared by a real
@@ -2143,6 +2156,7 @@ impl Ctx<'_> {
             }
             // Row height = the tallest cell border-box (content, or explicit height).
             let mut row_h = 0i32;
+            let mut box_hs: Vec<i32> = Vec::with_capacity(cells.len());
             for (c, (cs, _, _, content_x, content_w)) in cells.iter().enumerate() {
                 let (_, _, bt, bb) = cell_borders(cs, collapse);
                 let content_y = y + bt as i32 + cs.pad_top as i32;
@@ -2160,6 +2174,7 @@ impl Ctx<'_> {
                     ch = ch.max(hb);
                 }
                 let cell_box_h = ch + (cs.pad_top + cs.pad_bottom) as i32 + (bt + bb) as i32;
+                box_hs.push(cell_box_h);
                 row_h = row_h.max(cell_box_h);
             }
             // Pass 2: emit content + paint each cell's border-box at row height.
@@ -2169,6 +2184,7 @@ impl Ctx<'_> {
                 }
                 let content_y = y + cell_borders(cs, collapse).2 as i32 + cs.pad_top as i32;
                 let bg_idx = self.ops.len();
+                let (link0, ctl0) = (self.links.len(), self.controls.len());
                 match row[c] {
                     Cell::Real(e) => {
                         self.path.push(ElemInfo::of(e));
@@ -2178,6 +2194,21 @@ impl Ctx<'_> {
                     Cell::Anon(nodes) => {
                         let _ = self.layout_children(nodes, cs, None, *content_x, *content_w, content_y);
                     }
+                }
+                // `vertical-align` in the row (CSS2.1 §17.5.3). The content was
+                // laid out at the cell's top; middle/bottom just slide the ops
+                // it produced down by the leftover of the row height. `baseline`
+                // (the initial value) would align the cells' first-line
+                // baselines — we treat it as `top`, which is what it degrades
+                // to for equal-size single-line cells.
+                let slack = (row_h - box_hs[c]).max(0);
+                let dy = match cs.valign {
+                    crate::style::VAlign::Middle => slack / 2,
+                    crate::style::VAlign::Bottom => slack,
+                    _ => 0,
+                };
+                if dy != 0 {
+                    self.shift_ops(bg_idx, self.ops.len(), link0, self.links.len(), ctl0, 0, dy);
                 }
                 if collapse {
                     // Each grid line is drawn exactly once, by the cell above/
@@ -3910,7 +3941,9 @@ struct RunStyle {
     bold: bool,
     italic: bool,
     mono: bool,
-    valign: i8, // vertical-align: super (+1) / sub (-1) / baseline (0)
+    valign: crate::style::VAlign,
+    /// `text-decoration-line` bits (`style::DECO_*`).
+    deco: u8,
     /// Used `line-height` in px, or 0 for `normal` (use the face's metrics).
     lh: f32,
 }
@@ -4219,7 +4252,7 @@ impl Inline {
 
     /// Add collapsed text from one text node under style `st`.
     fn text(&mut self, raw: &str, st: &ComputedStyle, href: Option<&str>) {
-        let rs = RunStyle { hidden: st.hidden, transparent: st.transparent, size: st.font_px, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: st.valign, lh: st.line_height.px(st.font_px).unwrap_or(0.0) };
+        let rs = RunStyle { hidden: st.hidden, transparent: st.transparent, size: st.font_px, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: st.valign, deco: st.deco, lh: st.line_height.px(st.font_px).unwrap_or(0.0) };
         let mut word = String::new();
         for ch in raw.chars() {
             if ch.is_whitespace() {
@@ -4276,6 +4309,7 @@ impl Inline {
             italic: st.italic,
             mono: st.mono,
             valign: st.valign,
+            deco: st.deco,
             lh: st.line_height.px(st.font_px).unwrap_or(0.0),
         }));
     }
@@ -4568,6 +4602,27 @@ fn align_dx(align: TextAlign, rtl: bool, pen: f32, right: f32) -> i32 {
 /// Text runs sit on the baseline (`top + ascent == baseline`); images are
 /// bottom-aligned to the baseline. Images in a link get a `LinkRect` too.
 #[allow(clippy::too_many_arguments)]
+/// Underline / line-through / overline for one text run, in the run's own
+/// colour. Positions are metric-free approximations of the font's decoration
+/// metrics: below the baseline, at roughly half the x-height, and at the cap
+/// top. Emitted BEFORE the glyphs so a thick line never eats a descender.
+fn push_decorations(style: &RunStyle, x: i32, w: i32, baseline: i32, ops: &mut Vec<DrawOp>) {
+    if w <= 0 {
+        return;
+    }
+    let h = ((style.size / 14.0) as i32).max(1);
+    let mut line = |y: i32| ops.push(DrawOp::Rect { x, y, w, h, color: style.color });
+    if style.deco & crate::style::DECO_UNDERLINE != 0 {
+        line(baseline + (style.size * 0.08) as i32);
+    }
+    if style.deco & crate::style::DECO_LINE_THROUGH != 0 {
+        line(baseline - (style.size * 0.27) as i32);
+    }
+    if style.deco & crate::style::DECO_OVERLINE != 0 {
+        line(baseline - (style.size * 0.78) as i32);
+    }
+}
+
 fn emit_line(
     fonts: &crate::fonts::Fonts,
     theme: &Theme,
@@ -4591,8 +4646,8 @@ fn emit_line(
                 // vertical-align: raise a superscript, drop a subscript off the
                 // shared baseline (the run is already at its reduced sup/sub size).
                 match seg.style.valign {
-                    1 => top -= (seg.style.size * 0.42) as i32,
-                    -1 => top += (seg.style.size * 0.18) as i32,
+                    crate::style::VAlign::Super => top -= (seg.style.size * 0.42) as i32,
+                    crate::style::VAlign::Sub => top += (seg.style.size * 0.18) as i32,
                     _ => {}
                 }
                 // A hidden run is not a click target either — otherwise a
@@ -4602,6 +4657,11 @@ fn emit_line(
                     links.push(LinkRect { x: seg.x + dx, y: line_top, w: ceil_i32(sw), h: box_h, href: h.clone() });
                 }
                 if !seg.style.hidden && !seg.style.transparent {
+                    if seg.style.deco != 0 {
+                        let w = ceil_i32(measure(font, &seg.text, seg.style.size));
+                        let run_baseline = top + ascent_i(font, seg.style.size);
+                        push_decorations(&seg.style, seg.x + dx, w, run_baseline, ops);
+                    }
                     ops.push(DrawOp::Text {
                         x: seg.x + dx,
                         y: top,
@@ -4648,6 +4708,73 @@ mod tests {
         let dom = dom::parse(html);
         let sheet = crate::css::collect(&dom, 800.0);
         layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, &FormState::default(), false)
+    }
+
+    #[test]
+    fn vertical_align_positions_cell_content_in_the_row() {
+        // One tall cell sets the row height; the short cell's text moves.
+        let y_of = |va: &str| {
+            let l = lay(
+                &format!(
+                    "<body><table><tr>\
+                     <td style=\"height:120px\">TALL</td>\
+                     <td style=\"vertical-align:{va}\">SHORT</td>\
+                     </tr></table></body>"
+                ),
+                400,
+            );
+            texts(&l).into_iter().find(|(_, _, t)| t.contains("SHORT")).map(|(_, y, _)| y).unwrap()
+        };
+        let (top, mid, bot) = (y_of("top"), y_of("middle"), y_of("bottom"));
+        assert!(top < mid && mid < bot, "top {top} / middle {mid} / bottom {bot}");
+        // The initial value degrades to `top` for us (no cross-cell baselines).
+        assert_eq!(y_of("baseline"), top);
+    }
+
+    #[test]
+    fn caption_side_moves_the_caption_below_the_grid() {
+        let cap_vs_cell = |css: &str| {
+            let l = lay(
+                &format!("<body><style>{css}</style><table><caption>CAP</caption><tr><td>CELL</td></tr></table></body>"),
+                400,
+            );
+            let find = |needle: &str| {
+                texts(&l).into_iter().find(|(_, _, t)| t.contains(needle)).map(|(_, y, _)| y).unwrap()
+            };
+            (find("CAP"), find("CELL"))
+        };
+        let (cap, cell) = cap_vs_cell("");
+        assert!(cap < cell, "default caption-side:top — {cap} !< {cell}");
+        // Inherited, so setting it on the table reaches the caption.
+        let (cap, cell) = cap_vs_cell("table{caption-side:bottom}");
+        assert!(cap > cell, "caption-side:bottom on the table — {cap} !> {cell}");
+        let (cap, cell) = cap_vs_cell("caption{caption-side:bottom}");
+        assert!(cap > cell, "caption-side:bottom on the caption — {cap} !> {cell}");
+    }
+
+    #[test]
+    fn links_are_underlined_unless_the_author_says_otherwise() {
+        let rects = |l: &Layout| l.ops.iter().filter(|o| matches!(o, DrawOp::Rect { .. })).count();
+        // A real link gets a decoration rect …
+        assert_eq!(rects(&lay("<body><a href=\"/x\">hi</a></body>", 400)), 1);
+        // … a bare named anchor is not a link, so it does not.
+        assert_eq!(rects(&lay("<body><a name=\"x\">hi</a></body>", 400)), 0);
+        // … and author CSS can take it away.
+        let off = lay("<body><style>a{text-decoration:none}</style><a href=\"/x\">hi</a></body>", 400);
+        assert_eq!(rects(&off), 0);
+        // `line-through` sits above the baseline, `underline` below it.
+        let strike = lay("<body><span style=\"text-decoration:line-through\">hi</span></body>", 400);
+        let under = lay("<body><span style=\"text-decoration:underline\">hi</span></body>", 400);
+        let y = |l: &Layout| {
+            l.ops
+                .iter()
+                .find_map(|o| match o {
+                    DrawOp::Rect { y, .. } => Some(*y),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert!(y(&strike) < y(&under), "{} !< {}", y(&strike), y(&under));
     }
 
     fn texts(l: &Layout) -> Vec<(i32, i32, &str)> {
