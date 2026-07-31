@@ -23,6 +23,10 @@ use alloc::vec::Vec;
 
 // --- Host function bindings (provided by nopeekOS kernel) ---
 
+// Host functions are WASM imports from the `env` module, resolved by the
+// kernel at instantiation. Naming the module explicitly is what makes them
+// imports rather than ordinary undefined C symbols, which rust-lld rejects.
+#[link(wasm_import_module = "env")]
 unsafe extern "C" {
     fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;

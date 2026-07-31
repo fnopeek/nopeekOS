@@ -17,6 +17,10 @@ fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
 
 // ── App Display API ──────────────────────────────────────────────
 
+// Host functions are WASM imports from the `env` module, resolved by the
+// kernel at instantiation. Naming the module explicitly is what makes them
+// imports rather than ordinary undefined C symbols, which rust-lld rejects.
+#[link(wasm_import_module = "env")]
 unsafe extern "C" {
     /// Write text to the app's display area.
     fn npk_print(ptr: i32, len: i32);
