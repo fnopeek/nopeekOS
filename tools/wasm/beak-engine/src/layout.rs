@@ -42,11 +42,10 @@ struct FloatRect {
 }
 
 /// Whether a block-level box establishes a new block formatting context, so its
-/// border box must not overlap floats (CSS2.1 §9.4.1). We can detect the
-/// formatting-context displays (flex/grid/table); `overflow != visible` also
-/// does but isn't tracked in the style yet.
+/// border box must not overlap floats (CSS2.1 §9.4.1): the formatting-context
+/// displays (flex/grid/table) and a box that clips its overflow.
 fn establishes_bfc(st: &ComputedStyle) -> bool {
-    matches!(st.display, Display::Flex | Display::Grid | Display::Table)
+    matches!(st.display, Display::Flex | Display::Grid | Display::Table) || st.overflow_clip
 }
 
 /// A set of adjoining vertical margins (CSS2.1 §8.3.1). Collapsing margins do
@@ -219,7 +218,10 @@ fn resolve_block_h(st: &ComputedStyle, avail: f32) -> (f32, f32) {
 fn translate_ops(ops: &mut [DrawOp], dy: i32) {
     for op in ops {
         match op {
-            DrawOp::Rect { y, .. } | DrawOp::Text { y, .. } | DrawOp::Image { y, .. } => *y += dy,
+            DrawOp::Rect { y, .. }
+            | DrawOp::RoundRect { y, .. }
+            | DrawOp::Text { y, .. }
+            | DrawOp::Image { y, .. } => *y += dy,
         }
     }
 }
@@ -242,6 +244,20 @@ fn clip_ops(ops: &mut Vec<DrawOp>, start: usize, cl: i32, ct: i32, cr: i32, cb: 
                 let ny1 = (y + h).min(cb);
                 if nx1 > nx && ny1 > ny {
                     ops.push(DrawOp::Rect { x: nx, y: ny, w: nx1 - nx, h: ny1 - ny, color });
+                }
+            }
+            // A rounded box that the clip fully contains keeps its corners;
+            // one the clip cuts degrades to a square rect, which is wrong at
+            // the corners but never paints outside the clip.
+            DrawOp::RoundRect { x, y, w, h, color, .. } => {
+                if x >= cl && y >= ct && x + w <= cr && y + h <= cb {
+                    ops.push(op);
+                } else {
+                    let (nx, ny) = (x.max(cl), y.max(ct));
+                    let (nx1, ny1) = ((x + w).min(cr), (y + h).min(cb));
+                    if nx1 > nx && ny1 > ny {
+                        ops.push(DrawOp::Rect { x: nx, y: ny, w: nx1 - nx, h: ny1 - ny, color });
+                    }
                 }
             }
             DrawOp::Image { x, y, w, h, .. } => {
@@ -334,6 +350,11 @@ pub enum DrawOp {
     Text { x: i32, y: i32, size: f32, color: Rgb, bold: bool, italic: bool, mono: bool, text: String },
     /// A filled rectangle (divider, list bullet).
     Rect { x: i32, y: i32, w: i32, h: i32, color: Rgb },
+    /// A `border-radius` box. `r` is `[tl, tr, br, bl]` in px; `ring` is 0 for
+    /// a solid fill, or the border thickness to stroke along the inside edge.
+    /// Kept apart from `Rect` so the plain case stays one `memory.copy` per
+    /// row — the rounded one has to walk its corner rows.
+    RoundRect { x: i32, y: i32, w: i32, h: i32, r: [f32; 4], color: Rgb, ring: f32 },
     /// A decoded image, scaled to `w`×`h` at blit time.
     /// An `<img>` box. Carries the `src` KEY, not the decoded pixels: the
     /// rasteriser looks the image up when it paints, and draws a placeholder
@@ -341,6 +362,31 @@ pub enum DrawOp {
     /// instead of a full re-layout — which on a real article is the
     /// difference between ~15 ms and ~145 ms, per image batch.
     Image { x: i32, y: i32, w: i32, h: i32, src: String, alt: String },
+}
+
+/// `border-radius` resolved to px against the border-box width. Percentages
+/// resolve per-axis in CSS; we draw circular corners, so the width is the one
+/// basis.
+fn radii_px(st: &ComputedStyle, w: i32) -> [f32; 4] {
+    let cb = w as f32;
+    let one = |l: Len| l.px(cb).unwrap_or(0.0).max(0.0);
+    [one(st.radius[0]), one(st.radius[1]), one(st.radius[2]), one(st.radius[3])]
+}
+
+/// The border's `(width, colour)` when all four sides carry the same visible
+/// one, else `None`.
+fn uniform_border(st: &ComputedStyle) -> Option<(f32, Rgb)> {
+    let t = &st.border_top;
+    let (w, c) = (t.width, t.color?);
+    if w <= 0.0 {
+        return None;
+    }
+    for side in [&st.border_right, &st.border_bottom, &st.border_left] {
+        if side.width != w || side.color != Some(c) {
+            return None;
+        }
+    }
+    Some((w, c))
 }
 
 /// A clickable link's document-space rectangle.
@@ -445,6 +491,69 @@ fn ceil_i32(x: f32) -> i32 {
 fn measure(font: &Font, s: &str, size: f32) -> f32 {
     s.chars().map(|c| font.metrics(c, size).advance_width).sum()
 }
+/// Byte length of the longest prefix of `s` that fits in `avail` px, snapped
+/// back to a legal break. Returns 0 when not even the first cluster fits — the
+/// caller decides whether to try a fresh line or force one through (never
+/// returning 0 forever is the caller's job, not this function's).
+fn fit_prefix(font: &Font, s: &str, size: f32, avail: f32) -> usize {
+    let mut used = 0.0;
+    let mut end = s.len();
+    for (i, c) in s.char_indices() {
+        let adv = font.metrics(c, size).advance_width;
+        if used + adv > avail {
+            end = i;
+            break;
+        }
+        used += adv;
+    }
+    cluster_boundary(s, end)
+}
+
+/// Does `c` bind to the character BEFORE it? Zero-width joiner sequences,
+/// variation selectors, skin-tone modifiers, keycaps, combining marks,
+/// regional-indicator pairs and tag sequences (the Wales/Scotland/England
+/// flags) are all one user-perceived character, and
+/// `word-break: break-all` may still not split one (css-text-3 §5.1 breaks
+/// between grapheme clusters, not code points).
+fn joins_back(c: char) -> bool {
+    matches!(c,
+        '\u{200D}' | '\u{FE0E}' | '\u{FE0F}' | '\u{20E3}'
+        | '\u{0300}'..='\u{036F}' | '\u{1AB0}'..='\u{1AFF}'
+        | '\u{20D0}'..='\u{20FF}' | '\u{FE20}'..='\u{FE2F}'
+        | '\u{1F3FB}'..='\u{1F3FF}' | '\u{1F1E6}'..='\u{1F1FF}'
+        | '\u{E0020}'..='\u{E007F}')
+}
+
+/// The largest legal break offset at or before `n`.
+fn cluster_boundary(s: &str, mut n: usize) -> usize {
+    while n > 0 && n < s.len() {
+        let prev = s[..n].chars().next_back().unwrap();
+        let next = s[n..].chars().next().unwrap();
+        if prev != '\u{200D}' && !joins_back(next) {
+            break;
+        }
+        n -= prev.len_utf8();
+    }
+    n
+}
+
+/// End of the first grapheme cluster in `s` — what a line that cannot fit even
+/// one cluster is forced to take, so the loop always makes progress.
+fn first_cluster(s: &str) -> usize {
+    let mut it = s.char_indices();
+    let Some((_, first)) = it.next() else { return 0 };
+    let mut n = first.len_utf8();
+    let mut prev = first;
+    for (i, c) in it {
+        if prev != '\u{200D}' && !joins_back(c) {
+            return i;
+        }
+        prev = c;
+        n = i + c.len_utf8();
+    }
+    n
+}
+
 fn space_width(font: &Font, size: f32) -> f32 {
     font.metrics(' ', size).advance_width
 }
@@ -580,6 +689,12 @@ struct Ctx<'a> {
     /// else (`auto`/untracked) keeps its in-order position.
     stack_ops: Vec<(i32, usize, usize)>,
     stack_links: Vec<(i32, usize, usize)>,
+    /// How many out-of-flow boxes have been laid out so far, split by whether
+    /// they escape a positioned ancestor. `overflow: hidden` compares these
+    /// across its content to see whether anything inside it left its clip's
+    /// jurisdiction (CSS2.1 §11.1.1) — see `clip_overflow`.
+    abs_count: u32,
+    fixed_count: u32,
     /// Depth of currently-open *tracked* (recorded) stacking ranges. Only a
     /// box at depth 0 gets recorded — a z-indexed box nested inside another
     /// already-tracked one paints as part of its ancestor's range instead
@@ -797,6 +912,8 @@ pub fn layout(
         // stretch to the window rather than collapse (CSS 2.1 §10.1).
         cb: (cx, PAD, cw, Some(viewport_h as i32)),
         viewport_w: width as f32,
+        abs_count: 0,
+        fixed_count: 0,
         floats: Vec::new(),
         stack_ops: Vec::new(),
         stack_links: Vec::new(),
@@ -1352,6 +1469,7 @@ impl Ctx<'_> {
         let box_left = content_x - st.pad_left as i32 - st.border_left.width as i32;
         let box_w = content_w + (st.pad_left + st.pad_right) as i32 + st.border_x() as i32;
         let bg_idx = self.ops.len();
+        let clip_marks = (bg_idx, self.abs_count, self.fixed_count);
 
         let bt = st.border_top.width as i32;
         let bb = st.border_bottom.width as i32;
@@ -1474,6 +1592,7 @@ impl Ctx<'_> {
                 return BoxOut { bottom: base_y, top_y: base_y, open, through: true };
             }
             let box_bottom = border_top_y + bt + pt + ch + pb + bb;
+            self.clip_overflow(st, clip_marks, box_left, border_top_y, box_w, box_bottom - border_top_y);
             self.paint_box_decoration(st, box_left, border_top_y, box_w, box_bottom - border_top_y, bg_idx);
             return BoxOut { bottom: box_bottom, top_y: border_top_y, open: out_bottom_margin, through: false };
         }
@@ -1519,6 +1638,7 @@ impl Ctx<'_> {
             out_open = out_bottom_margin;
         }
         let box_bottom = content_top + ch + pb + bb;
+        self.clip_overflow(st, clip_marks, box_left, border_top_y, box_w, box_bottom - border_top_y);
         self.paint_box_decoration(st, box_left, border_top_y, box_w, box_bottom - border_top_y, bg_idx);
         BoxOut { bottom: box_bottom, top_y: border_top_y, open: out_open, through: false }
     }
@@ -1667,7 +1787,7 @@ impl Ctx<'_> {
             focused,
             caret,
             bg: st.bg,
-            style: RunStyle { hidden: st.hidden, transparent: st.transparent, size, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: crate::style::VAlign::Baseline, deco: st.deco, lh: st.line_height.px(size).unwrap_or(0.0) },
+            style: RunStyle { hidden: st.hidden, transparent: st.transparent, size, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: crate::style::VAlign::Baseline, deco: st.deco, break_word: st.break_word, lh: st.line_height.px(size).unwrap_or(0.0) },
         }
     }
 
@@ -1675,6 +1795,11 @@ impl Ctx<'_> {
     /// from the containing block (`self.cb`) + `top`/`right`/`bottom`/`left`.
     /// The element is `el`, already pushed onto `self.path` by the caller.
     fn layout_abs(&mut self, el: &Element, st: &ComputedStyle, static_x: i32, static_y: i32) {
+        if st.position == Position::Fixed {
+            self.fixed_count += 1;
+        } else {
+            self.abs_count += 1;
+        }
         let (cbx, cby, cbw, cbh) = self.cb;
         let avail = cbw as f32;
         let left = st.left.px(avail);
@@ -1799,12 +1924,51 @@ impl Ctx<'_> {
     /// it floats over show through — while its BORDER still can't be drawn from
     /// here: the table box has no resolved border box yet, and guessing one
     /// puts the stroke in the wrong place (measured: 5 reftests).
+    /// `overflow: hidden` — drop whatever the box's content painted outside its
+    /// padding box. `marks` is `(first op index, abs_count, fixed_count)` taken
+    /// BEFORE the content was laid out. Call BEFORE `paint_box_decoration`, so
+    /// the box's own background and border are not clipped by it.
+    ///
+    /// Skipped when a descendant recorded a z-index stacking range inside the
+    /// span: `clip_ops` rebuilds the tail and can drop ops, which would leave
+    /// those ranges pointing at the wrong slots — and a scrambled display list
+    /// is a far worse defect than an unclipped overflow.
+    fn clip_overflow(&mut self, st: &ComputedStyle, marks: (usize, u32, u32), box_left: i32, box_top: i32, box_w: i32, box_h: i32) {
+        let (start, abs0, fixed0) = marks;
+        if !st.overflow_clip || start >= self.ops.len() {
+            return;
+        }
+        if self.stack_ops.iter().any(|(_, _, e)| *e > start) {
+            return;
+        }
+        // An out-of-flow descendant is clipped only by an ancestor in its
+        // CONTAINING-BLOCK chain (CSS2.1 §11.1.1). A `position: static` box is
+        // not the containing block of an absolutely positioned descendant, and
+        // nothing but the viewport is for a fixed one — so a box that let one
+        // escape cannot clip its span at all. The display list is flat, so the
+        // escapee's ops can't be excluded individually.
+        if self.fixed_count > fixed0 || (st.position == Position::Static && self.abs_count > abs0) {
+            return;
+        }
+        let cl = box_left + st.border_left.width as i32;
+        let ct = box_top + st.border_top.width as i32;
+        let cr = box_left + box_w - st.border_right.width as i32;
+        let cb = box_top + box_h - st.border_bottom.width as i32;
+        clip_ops(&mut self.ops, start, cl, ct, cr, cb);
+    }
+
     fn insert_bg(&mut self, st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, bg_idx: usize) {
         if w <= 0 || h <= 0 || st.hidden || st.transparent {
             return;
         }
         let Some(bg) = st.bg else { return };
-        self.ops.insert(bg_idx, DrawOp::Rect { x, y, w, h, color: bg });
+        let r = radii_px(st, w);
+        let op = if r.iter().any(|&v| v > 0.0) {
+            DrawOp::RoundRect { x, y, w, h, r, color: bg, ring: 0.0 }
+        } else {
+            DrawOp::Rect { x, y, w, h, color: bg }
+        };
+        self.ops.insert(bg_idx, op);
         // `insert` shifts every later op up by one slot — any already-recorded
         // stacking range overlapping or after `bg_idx` (a descendant's tracked
         // z-index range, recorded before this, its ancestor's own background
@@ -1851,6 +2015,17 @@ impl Ctx<'_> {
             std::println!("[box] {who}: x={x} y={y} w={w} h={h}");
         }
         self.insert_bg(st, x, y, w, h, bg_idx);
+        // A rounded border can only be stroked as one shape, so it needs all
+        // four sides to agree; anything else falls through to the four
+        // independent edges below (square corners, visibly wrong only once the
+        // radius is larger than the border).
+        let r = radii_px(st, w);
+        if r.iter().any(|&v| v > 0.0) {
+            if let Some((bw, bc)) = uniform_border(st) {
+                self.ops.push(DrawOp::RoundRect { x, y, w, h, r, color: bc, ring: bw });
+                return;
+            }
+        }
         // Each side paints independently on the border-box edge.
         let side = |ops: &mut Vec<DrawOp>, s: &BorderSide, rect: (i32, i32, i32, i32)| {
             if let (Some(c), true) = (s.color, s.width > 0.0) {
@@ -3586,6 +3761,7 @@ impl Ctx<'_> {
             match op {
                 DrawOp::Text { x, y, .. }
                 | DrawOp::Rect { x, y, .. }
+                | DrawOp::RoundRect { x, y, .. }
                 | DrawOp::Image { x, y, .. } => {
                     *x += dx;
                     *y += dy;
@@ -3944,6 +4120,8 @@ struct RunStyle {
     valign: crate::style::VAlign,
     /// `text-decoration-line` bits (`style::DECO_*`).
     deco: u8,
+    /// `overflow-wrap`/`word-break` allow splitting this run mid-word.
+    break_word: bool,
     /// Used `line-height` in px, or 0 for `normal` (use the face's metrics).
     lh: f32,
 }
@@ -4252,7 +4430,7 @@ impl Inline {
 
     /// Add collapsed text from one text node under style `st`.
     fn text(&mut self, raw: &str, st: &ComputedStyle, href: Option<&str>) {
-        let rs = RunStyle { hidden: st.hidden, transparent: st.transparent, size: st.font_px, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: st.valign, deco: st.deco, lh: st.line_height.px(st.font_px).unwrap_or(0.0) };
+        let rs = RunStyle { hidden: st.hidden, transparent: st.transparent, size: st.font_px, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: st.valign, deco: st.deco, break_word: st.break_word, lh: st.line_height.px(st.font_px).unwrap_or(0.0) };
         let mut word = String::new();
         for ch in raw.chars() {
             if ch.is_whitespace() {
@@ -4310,6 +4488,7 @@ impl Inline {
             mono: st.mono,
             valign: st.valign,
             deco: st.deco,
+            break_word: st.break_word,
             lh: st.line_height.px(st.font_px).unwrap_or(0.0),
         }));
     }
@@ -4385,7 +4564,50 @@ impl Inline {
                         line_ascent = 0.0;
                         gap = 0.0;
                     }
-                    let lead = if line.is_empty() { 0.0 } else { sw };
+                    let mut lead = if line.is_empty() { 0.0 } else { sw };
+                    // `overflow-wrap: break-word` — the word is wider than a
+                    // whole line, so wrapping it whole would just overflow the
+                    // box. Split it across lines at the last character that
+                    // fits. A line that can't take even one character is
+                    // already as narrow as it will get (a float band), so force
+                    // one character through rather than spin.
+                    if style.break_word && pen + lead + ww > right {
+                        let f = face(style);
+                        let mut rest = text.as_str();
+                        while !rest.is_empty() {
+                            let mut n = fit_prefix(f, rest, style.size, right - pen - lead);
+                            if n == 0 {
+                                if !line.is_empty() {
+                                    y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
+                                    let (bl, br) = band_of(floats, y, y + lh, x, x + w);
+                                    pen = bl as f32;
+                                    right = br as f32;
+                                    line_ascent = 0.0;
+                                    gap = 0.0;
+                                    lead = 0.0;
+                                    continue;
+                                }
+                                n = first_cluster(rest);
+                                if n == 0 {
+                                    break;
+                                }
+                            }
+                            let (head, tail) = rest.split_at(n);
+                            line.push(Placed::Text(Seg {
+                                x: (pen + lead) as i32,
+                                text: head.into(),
+                                style: *style,
+                                href: href.clone(),
+                            }));
+                            pen += lead + measure(f, head, style.size);
+                            lead = 0.0;
+                            let (asc, lb) = run_metrics(f, style.size, style.lh);
+                            line_ascent = line_ascent.max(asc);
+                            gap = gap.max(lb);
+                            rest = tail;
+                        }
+                        continue;
+                    }
                     let sx = (pen + lead) as i32;
                     let merge = matches!(line.last(), Some(Placed::Text(last)) if last.style == *style && last.href == *href);
                     if merge {
@@ -4708,6 +4930,85 @@ mod tests {
         let dom = dom::parse(html);
         let sheet = crate::css::collect(&dom, 800.0);
         layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, &FormState::default(), false)
+    }
+
+    #[test]
+    fn overflow_hidden_drops_what_falls_outside_the_box() {
+        let lines = |css: &str| {
+            lay(
+                &format!("<body><div style=\"width:200px;height:40px;{css}\">one<br>two<br>three<br>four</div></body>"),
+                400,
+            )
+            .ops
+            .iter()
+            .filter(|o| matches!(o, DrawOp::Text { .. }))
+            .count()
+        };
+        // Four lines in a 40px box: without clipping all four still paint.
+        assert_eq!(lines(""), 4);
+        // `hidden` keeps only what fits.
+        assert!(lines("overflow:hidden") < 4);
+        // `auto`/`scroll` deliberately do not clip — we have no scroll
+        // container, so clipping would hide reachable content.
+        assert_eq!(lines("overflow:auto"), 4);
+        assert_eq!(lines("overflow:hidden auto"), 4);
+    }
+
+    #[test]
+    fn break_word_splits_an_overlong_word_instead_of_overflowing() {
+        let long = "Donaudampfschifffahrtsgesellschaftskapitaenswitwe";
+        let run = |css: &str| {
+            let l = lay(&format!("<body><div style=\"width:80px;{css}\">{long}</div></body>"), 300);
+            let t = texts(&l);
+            let widest = t.iter().map(|(x, _, s)| x + (s.len() as i32)).max().unwrap_or(0);
+            (t.len(), widest)
+        };
+        // Without it the word stays one run that overflows its 80px box.
+        let (lines, _) = run("");
+        assert_eq!(lines, 1);
+        // With it the word is split across several lines …
+        let (lines, _) = run("overflow-wrap:break-word");
+        assert!(lines > 1, "expected a split, got {lines} run(s)");
+        // … and the legacy spellings mean the same thing.
+        assert!(run("word-wrap:break-word").0 > 1);
+        assert!(run("word-break:break-all").0 > 1);
+        // Every piece must fit the box — that is the whole point.
+        let l = lay(&format!("<body><div style=\"width:80px;overflow-wrap:break-word\">{long}</div></body>"), 300);
+        for (x, _, _) in texts(&l) {
+            assert!(x < 80 + 8, "piece starts at {x}, outside the 80px box");
+        }
+        // A grapheme cluster is never split, however narrow the box: an emoji
+        // ZWJ sequence must stay whole (css-text-3 §5.1, `line-breaking-014`).
+        let emoji = "\u{1F468}\u{200D}\u{1F4BB}\u{1F469}\u{200D}\u{1F467}";
+        let l = lay(&format!("<body><div style=\"width:8px;word-break:break-all\">{emoji}</div></body>"), 300);
+        for (_, _, t) in texts(&l) {
+            assert!(!t.starts_with('\u{200D}') && !t.ends_with('\u{200D}'), "split at a ZWJ: {t:?}");
+        }
+    }
+
+    #[test]
+    fn border_radius_rounds_the_background_and_a_uniform_border() {
+        let round = |l: &Layout| {
+            l.ops.iter().find_map(|o| match o {
+                DrawOp::RoundRect { r, ring, .. } => Some((*r, *ring)),
+                _ => None,
+            })
+        };
+        // Shorthand, resolved against the border-box width.
+        let l = lay("<body><div style=\"width:100px;height:40px;background:#f00;border-radius:8px\">x</div></body>", 400);
+        assert_eq!(round(&l), Some(([8.0; 4], 0.0)));
+        // Percentages resolve; four values map to the CSS corner order.
+        let l = lay("<body><div style=\"width:100px;height:40px;background:#f00;border-radius:1px 2px 3px 4px\">x</div></body>", 400);
+        assert_eq!(round(&l), Some(([1.0, 2.0, 3.0, 4.0], 0.0)));
+        // A uniform border becomes one stroked ring …
+        let l = lay("<body><div style=\"width:100px;height:40px;border:3px solid #000;border-radius:8px\">x</div></body>", 400);
+        assert_eq!(round(&l).map(|(_, ring)| ring), Some(3.0));
+        // … a mismatched one falls back to the four square edges.
+        let l = lay("<body><div style=\"width:100px;height:40px;border:3px solid #000;border-top-width:9px;border-radius:8px\">x</div></body>", 400);
+        assert_eq!(round(&l), None);
+        // No radius → the plain (fast) rect op, unchanged.
+        let l = lay("<body><div style=\"width:100px;height:40px;background:#f00\">x</div></body>", 400);
+        assert_eq!(round(&l), None);
     }
 
     #[test]

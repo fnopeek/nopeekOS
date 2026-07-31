@@ -481,6 +481,19 @@ pub struct ComputedStyle {
     /// `border-collapse: collapse` — cell borders merge with their neighbours'
     /// and with the table's, and `border-spacing` no longer applies.
     pub border_collapse: bool,
+    /// `overflow: hidden`/`clip` on BOTH axes — the box paints nothing of its
+    /// content outside its padding box. `auto`/`scroll` deliberately do NOT
+    /// set this: without in-page scroll containers, clipping there would hide
+    /// content the user is meant to be able to reach.
+    pub overflow_clip: bool,
+    /// `overflow-wrap`/`word-wrap: break-word` or `word-break: break-all`/
+    /// `break-word` — a word longer than its line may be split mid-word rather
+    /// than overflowing the box. Inherited, like both source properties.
+    pub break_word: bool,
+    /// `border-radius`, `[tl, tr, br, bl]` (CSS corner order). Circular — CSS
+    /// allows an ellipse per corner (`r1 / r2`), we keep the horizontal radius.
+    /// Percentages resolve against the border-box width at paint time.
+    pub radius: [Len; 4],
     /// `caption-side: bottom` — the caption renders below the table grid
     /// instead of above it. Inherited (CSS2.1 §17.4.1), so it can be set on
     /// either the `<table>` or the `<caption>`.
@@ -527,6 +540,9 @@ impl ComputedStyle {
             rem_base: BASE_FONT_PX,
             deco: 0,
             caption_bottom: false,
+            break_word: false,
+            overflow_clip: false,
+            radius: [Len::Px(0.0); 4],
             bold: false,
             italic: false,
             mono: false,
@@ -623,6 +639,32 @@ impl ComputedStyle {
 
 pub const BASE_FONT_PX: f32 = 16.0;
 
+/// `border-radius`: 1-4 lengths in the usual corner shorthand order, with an
+/// optional `/ <1-4 lengths>` vertical set that we drop (we draw circular
+/// corners). All-or-nothing: one unparseable component leaves the property
+/// alone rather than applying a half-read shape.
+fn parse_radius_shorthand(v: &str, u: Units) -> Option<[Len; 4]> {
+    let horiz = v.split('/').next()?;
+    let mut it = horiz.split_whitespace();
+    let a = parse_len_opt(it.next()?, u)?;
+    let nth = |it: &mut core::str::SplitWhitespace| match it.next() {
+        None => Some(None),
+        Some(t) => parse_len_opt(t, u).map(Some),
+    };
+    let b = nth(&mut it)?;
+    let c = nth(&mut it)?;
+    let d = nth(&mut it)?;
+    if it.next().is_some() {
+        return None;
+    }
+    Some(match (b, c, d) {
+        (None, _, _) => [a; 4],
+        (Some(b), None, _) => [a, b, a, b],
+        (Some(b), Some(c), None) => [a, b, c, b],
+        (Some(b), Some(c), Some(d)) => [a, b, c, d],
+    })
+}
+
 /// `vertical-align`. Lengths and percentages are not represented — they fall
 /// back to `Baseline` rather than being mis-placed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -710,6 +752,9 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         text_align_last: parent.text_align_last,
         deco: parent.deco,
         caption_bottom: parent.caption_bottom,
+        break_word: parent.break_word,
+        overflow_clip: false,
+        radius: [Len::Px(0.0); 4],
         display: Display::Inline, // CSS initial `display` is inline
         width: Len::Auto,
         min_width: Len::Auto,
@@ -899,6 +944,13 @@ pub fn resolve(
     // `z-index: inherit`, same pattern (z-index is not inherited by default).
     if matches!(s.z_index, ZIndex::Inherit) {
         s.z_index = parent.z_index;
+    }
+    // `overflow` on the root element — and on `<body>` while the root keeps
+    // `visible` — propagates to the VIEWPORT, and the element's own used value
+    // becomes `visible` (css-overflow-3 §3.3). So the box itself neither clips
+    // nor establishes a formatting context.
+    if el.tag == "html" || el.tag == "body" {
+        s.overflow_clip = false;
     }
     // `vertical-align` applies to inline-level boxes and table cells only
     // (CSS2.1 §10.8.1). An out-of-flow or block-level box is never aligned in
@@ -1463,6 +1515,39 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         "vertical-align" => {
             if let Some(a) = parse_valign(&v) {
                 s.valign = a;
+            }
+        }
+        // `word-wrap` is the legacy alias of `overflow-wrap`; `word-break:
+        // break-word` is a deprecated spelling with the same effect. All three
+        // land on one flag — we break at a character, not by script rules, so
+        // `break-all` is not distinguished from `break-word`.
+        // Two values are `x y`; a single one applies to both. Only a box that
+        // clips on BOTH axes is clipped here (see `overflow_clip`).
+        "overflow" => {
+            let mut it = v.split_whitespace();
+            let x = it.next().unwrap_or("");
+            let y = it.next().unwrap_or(x);
+            let clips = |k: &str| k == "hidden" || k == "clip";
+            s.overflow_clip = clips(x) && clips(y);
+        }
+        "overflow-wrap" | "word-wrap" => s.break_word = v == "break-word" || v == "anywhere",
+        "word-break" => s.break_word = v == "break-all" || v == "break-word",
+        "border-radius" => {
+            if let Some(rs) = parse_radius_shorthand(&v, u) {
+                s.radius = rs;
+            }
+        }
+        "border-top-left-radius" | "border-top-right-radius" | "border-bottom-right-radius"
+        | "border-bottom-left-radius" => {
+            // One corner takes `h v`; we keep the horizontal radius.
+            if let Some(n) = parse_len_opt(v.split_whitespace().next().unwrap_or(""), u) {
+                let i = match prop {
+                    "border-top-left-radius" => 0,
+                    "border-top-right-radius" => 1,
+                    "border-bottom-right-radius" => 2,
+                    _ => 3,
+                };
+                s.radius[i] = n;
             }
         }
         "caption-side" => match v.as_str() {
