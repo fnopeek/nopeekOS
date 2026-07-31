@@ -16,6 +16,10 @@ use alloc::vec::Vec;
 use crate::abi::IconId;
 use crate::app_meta::{self, AppMeta, IconRef};
 
+// Host functions are WASM imports from the `env` module, resolved by the
+// kernel at instantiation. Naming the module explicitly is what makes them
+// imports rather than ordinary undefined C symbols, which rust-lld rejects.
+#[link(wasm_import_module = "env")]
 unsafe extern "C" {
     fn npk_list_modules(ptr: i32, max: i32) -> i32;
     // Kernel extracts just the `.npk.app_meta` custom section of sys/wasm/<name>

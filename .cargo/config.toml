@@ -55,15 +55,3 @@ rustflags = [
     "-C", "link-arg=--pack-dyn-relocs=none",
     "-C", "target-feature=+sse,+sse2,+ssse3,+sse4.1,+sse4.2,+avx,+avx2,+aes,+pclmulqdq,-soft-float",
 ]
-
-# Host functions live in the kernel, not in the module: every `npk_*` in an
-# `unsafe extern "C"` block is a WASM *import*, resolved by the runtime at
-# instantiation. Since nightly 2026-07-30 rust-lld rejects those as undefined
-# symbols instead of emitting imports, so every module fails to link from a
-# clean target dir (a warm one kept working, which is why this surfaced only
-# on a fresh build). Telling the linker they are allowed to be undefined is
-# the accurate statement — the ABI check that matters happens in the kernel's
-# validator, which refuses to instantiate a module importing anything it does
-# not offer.
-[target.wasm32-unknown-unknown]
-rustflags = ["-C", "link-arg=--allow-undefined"]

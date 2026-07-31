@@ -21,6 +21,10 @@ use nopeek_widgets::*;
 static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.bin")).len()]
     = *include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.bin"));
 
+// Host functions are WASM imports from the `env` module, resolved by the
+// kernel at instantiation. Naming the module explicitly is what makes them
+// imports rather than ordinary undefined C symbols, which rust-lld rejects.
+#[link(wasm_import_module = "env")]
 unsafe extern "C" {
     fn npk_scene_commit(ptr: i32, len: i32) -> i32;
     fn npk_event_poll(ptr: i32, max: i32) -> i32;

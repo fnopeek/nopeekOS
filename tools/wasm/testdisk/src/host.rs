@@ -2,6 +2,10 @@
 
 #![allow(dead_code)]
 
+// Host functions are WASM imports from the `env` module, resolved by the
+// kernel at instantiation. Naming the module explicitly is what makes them
+// imports rather than ordinary undefined C symbols, which rust-lld rejects.
+#[link(wasm_import_module = "env")]
 unsafe extern "C" {
     fn npk_print(ptr: i32, len: i32);
     /// Direct-to-kernel-serial — bypasses the per-app output buffer
