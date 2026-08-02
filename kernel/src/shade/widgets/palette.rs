@@ -74,11 +74,22 @@ pub fn current() -> Palette {
     Palette { colors }
 }
 
-/// Translucency (0..255) for floating chrome — the dock tray + the bar
-/// pills. Light surfaces are bright, so a lower opacity in light mode
-/// keeps them from washing out; dark stays denser.
+/// Opacity (0..255) of floating chrome — the bar card and the dock tray.
+///
+/// The design paints panels as a FLAT colour and gets its glass look from
+/// a backdrop blur, which we don't have. Rendering them see-through
+/// instead lets a busy wallpaper's texture read straight through the
+/// panel and destroys exactly that flat-chrome impression — on the
+/// design's smooth gradient the same value looks fine, on marble it does
+/// not. Hence a high default plus a live knob: `set shade.chrome_opacity
+/// <0..255>` (255 = flat, ~180 = clearly see-through). Light mode stays
+/// lower because a near-white panel washes out faster.
 pub fn chrome_opacity() -> u32 {
-    if is_light_theme() { 150 } else { 210 }
+    let dflt = if is_light_theme() { 205 } else { 235 };
+    crate::config::get("shade.chrome_opacity")
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .map(|v| v.min(255))
+        .unwrap_or(dflt)
 }
 
 pub fn resolve(token: Token) -> u32 {
