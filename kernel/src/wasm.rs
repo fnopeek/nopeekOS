@@ -869,12 +869,15 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     // into the caller's buffer; returns bytes written or -1. Defaults to
     // "en". The kernel stores the code only — the catalogs live in the
     // apps, so adding a language never touches the kernel.
+    //
+    // Deliberately ungated: which language to draw labels in is a display
+    // preference, not access to data. Gating it on READ would force a
+    // render-only app (beak declares RENDER|CANVAS|NET, no filesystem
+    // read) to take a filesystem capability just to spell its own menu —
+    // and a failed call falls back to English, so the symptom is one app
+    // silently out of language with the rest of the desktop.
     linker.func_wrap("env", "npk_locale",
         |mut caller: Caller<'_, HostState>, buf_ptr: i32, buf_max: i32| -> i32 {
-            let cap_id = caller.data().cap_id;
-            if capability::check_global(&cap_id, capability::Rights::READ).is_err() {
-                return -1;
-            }
             let lang = crate::config::get("lang").unwrap_or_default();
             let lang = lang.trim();
             let bytes = if lang.is_empty() { b"en".as_slice() } else { lang.as_bytes() };

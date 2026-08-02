@@ -633,7 +633,7 @@ fn render_menu_bar() -> Widget {
         NodeId(NODE_MENU_VIEW),
         NodeId(NODE_MENU_HELP),
     ];
-    prefab::menu_bar_with_anchors(&labels, &anchors)
+    prefab::menu_bar_with_icon(IconId::FileText, &labels, &anchors)
 }
 
 fn render_dropdown(sp: &Spell, kind: OpenMenu) -> (u32, Widget) {
@@ -730,7 +730,7 @@ fn render_tabbar(sp: &Spell) -> Widget {
         } else if active {
             Widget::Icon {
                 id:   IconId::X,
-                size: 14,
+                size: 16,
                 modifiers: alloc::vec![
                     Modifier::OnClick(ActionId(ACT_TAB_CLOSE_BASE + i as u32)),
                     Modifier::Tint(Token::OnSurfaceMuted),

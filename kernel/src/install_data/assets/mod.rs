@@ -51,6 +51,27 @@ pub static BUNDLED_ASSETS: &[BundledAsset] = &[
         bytes:   include_bytes!("inter-variable.ttf"),
         version: None,
     },
+    // Monospace face — `TextStyle::Mono` (clock, file-size columns,
+    // source code). Unmodified IBM Plex Mono Regular.
+    BundledAsset {
+        fs_path: "sys/fonts/ibm-plex-mono",
+        bytes:   include_bytes!("ibm-plex-mono.ttf"),
+        version: None,
+    },
+    // Both faces are SIL Open Font License 1.1, which requires the
+    // licence to accompany every copy of the font — including the ones
+    // inside an installed system. Planted next to them, not just kept in
+    // the source tree.
+    BundledAsset {
+        fs_path: "sys/fonts/LICENSE-Inter",
+        bytes:   include_bytes!("LICENSE-Inter.txt"),
+        version: None,
+    },
+    BundledAsset {
+        fs_path: "sys/fonts/LICENSE-IBM-Plex",
+        bytes:   include_bytes!("LICENSE-IBM-Plex.txt"),
+        version: None,
+    },
 
     // ── Phosphor icon atlas ───────────────────────────────────────
     BundledAsset {

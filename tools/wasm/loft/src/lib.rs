@@ -952,7 +952,7 @@ fn render_menu_bar() -> Widget {
         NodeId(NODE_MENU_GO),
         NodeId(NODE_MENU_HELP),
     ];
-    prefab::menu_bar_with_anchors(&labels, &anchors)
+    prefab::menu_bar_with_icon(IconId::Folders, &labels, &anchors)
 }
 
 /// Build the dropdown for the currently-open menu. Returns

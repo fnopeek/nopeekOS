@@ -1886,7 +1886,7 @@ fn rasterize_buffer_with_overlays(
     render::render_with_state(
         &mut rast, &mut target, tree, layout_tree,
         hover_path, focus_path, active_path, density,
-        input_edit, scroll_y,
+        input_edit, scroll_y, None,
     );
 
     // Overlays — paint after the main tree so they sit on top of any
@@ -1895,7 +1895,7 @@ fn rasterize_buffer_with_overlays(
     for p in popovers {
         render::render_with_state(
             &mut rast, &mut target, &p.child, &p.layout,
-            None, None, None, density, None, 0,
+            None, None, None, density, None, 0, None,
         );
     }
 

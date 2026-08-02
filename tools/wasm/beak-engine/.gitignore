@@ -1,3 +1,14 @@
-/sample.bmp
-/sample.png
 /target
+
+# Render dumps from the engine's own diagnostics. Regenerated on every
+# run and several MB each — a committed BMP stays in the pack forever,
+# even after a later delete. The old /sample.* pair grew into a whole
+# family (bootstrap, *_sheet, svg_demo, …), so match by extension.
+*.bmp
+*.png
+
+# Stylesheet dumped from a fetched page while debugging the cascade.
+/resolved.css
+
+# Test fixtures under testdata/ ARE source and stay tracked.
+!testdata/**

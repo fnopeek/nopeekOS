@@ -61,7 +61,7 @@ const SHOT: u32  = 90_001;     // screenshot: left-click = region, right = full
 const VOL_OPEN: u32 = 90_002;
 
 // Chrome sizing — UI_REFRESH.md §4 "Panel".
-const ICON_SIZE: u16 = 17;
+const ICON_SIZE: u16 = 16;
 /// Height of the bar's inner content band.
 const BAND_H: u16 = 24;
 /// Minimum width of a workspace pill / a trailing icon cell.
