@@ -40,6 +40,12 @@ struct AssetSpec {
 
 const ASSETS: &[AssetSpec] = &[
     AssetSpec { section: "font:inter-variable", remote_filename: "inter-variable.ttf",        npkfs_path: "sys/fonts/inter-variable" },
+    AssetSpec { section: "font:ibm-plex-mono",  remote_filename: "ibm-plex-mono.ttf",         npkfs_path: "sys/fonts/ibm-plex-mono" },
+    // Both faces are SIL OFL 1.1: the licence must accompany every copy,
+    // so an OTA-updated system pulls it alongside the font rather than
+    // only fresh installs getting it from the bundled assets.
+    AssetSpec { section: "font:LICENSE-Inter",   remote_filename: "LICENSE-Inter.txt",        npkfs_path: "sys/fonts/LICENSE-Inter" },
+    AssetSpec { section: "font:LICENSE-IBM-Plex", remote_filename: "LICENSE-IBM-Plex.txt",   npkfs_path: "sys/fonts/LICENSE-IBM-Plex" },
     AssetSpec { section: "icons:phosphor",      remote_filename: "phosphor.atlas",            npkfs_path: "sys/icons/phosphor" },
     AssetSpec { section: "microvm:initramfs",   remote_filename: "microvm-initramfs.cpio.gz", npkfs_path: "sys/microvm/initramfs.cpio.gz" },
     AssetSpec { section: "microvm:linux-virt",  remote_filename: "linux-virt.bzImage",        npkfs_path: "sys/microvm/linux-virt.bzImage" },

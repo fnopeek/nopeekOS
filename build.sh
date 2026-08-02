@@ -211,13 +211,18 @@ build_installer() {
     ASSETS_DIR="$INSTALL_DATA/assets"
     mkdir -p "$ASSETS_DIR"
 
-    # Font: fetch from sys/fonts/ (the canonical source tree).
-    if [ -f "$PROJECT_DIR/sys/fonts/inter-variable.ttf" ]; then
-        cp "$PROJECT_DIR/sys/fonts/inter-variable.ttf" "$ASSETS_DIR/inter-variable.ttf"
-        ok "  font: inter-variable.ttf ($(du -h "$ASSETS_DIR/inter-variable.ttf" | cut -f1))"
-    else
-        warn "  font missing: sys/fonts/inter-variable.ttf — installer will fail to compile"
-    fi
+    # Fonts + their licences: fetch from sys/fonts/ (canonical source
+    # tree). Both faces are SIL OFL 1.1, which requires the licence text
+    # to travel with every copy — so the .txt files are bundled too, not
+    # just kept in the repo.
+    for f in inter-variable.ttf ibm-plex-mono.ttf LICENSE-Inter.txt LICENSE-IBM-Plex.txt; do
+        if [ -f "$PROJECT_DIR/sys/fonts/$f" ]; then
+            cp "$PROJECT_DIR/sys/fonts/$f" "$ASSETS_DIR/$f"
+            ok "  font: $f ($(du -h "$ASSETS_DIR/$f" | cut -f1))"
+        else
+            warn "  font missing: sys/fonts/$f — installer will fail to compile"
+        fi
+    done
 
     # Icon atlas: fetch from release/assets/ (rasterized by
     # tools/regen-icons from icons/phosphor/*.svg).
@@ -456,12 +461,23 @@ run_qemu_generic() {
             ;;
     esac
 
+    # The framebuffer is a fixed 1920x1080, but GTK defaults to zoom-to-fit:
+    # it rescales that buffer to whatever size the window ends up with. Under
+    # a tiling WM the window is never exactly 1920x1080, so every frame goes
+    # through a resample and small text turns mushy — very visible in screen
+    # recordings and screenshots. zoom-to-fit=off keeps one guest pixel on one
+    # host pixel; show-menubar=off drops the GTK menu strip so the window IS
+    # the framebuffer (nothing to crop out afterwards). Note this needs the
+    # window to float, otherwise the tiler shrinks it and QEMU crops instead
+    # of scaling. Override with e.g. QEMU_GTK=zoom-to-fit=on for the old
+    # behaviour, or QEMU_GTK=full-screen=on for a fullscreen demo.
     local -a display_args
     if [ "$display" = "gui" ]; then
         display_args=(-vga std \
             -global driver=VGA,property=xres,value=1920 \
-            -global driver=VGA,property=yres,value=1080)
-        log "Launching QEMU GUI @ 1920x1080. Serial in this terminal. Ctrl-A X to quit."
+            -global driver=VGA,property=yres,value=1080 \
+            -display "gtk,${QEMU_GTK:-show-menubar=off,zoom-to-fit=off}")
+        log "Launching QEMU GUI @ 1920x1080 (1:1, unscaled). Serial in this terminal. Ctrl-A X to quit."
     else
         display_args=(-display none)
         log "Launching QEMU. Serial on stdio. Ctrl-A X to quit."
@@ -885,14 +901,18 @@ MANIFEST
         mkdir -p "$RELEASE_DIR/assets"
         ASSET_MANIFEST=""
         if [ -d "$PROJECT_DIR/sys/fonts" ]; then
-            for font_src in "$PROJECT_DIR/sys/fonts/"*.ttf; do
+            # .ttf plus the OFL licence texts — SIL OFL requires the
+            # licence to travel with every copy of the font, including
+            # to systems that only ever see it via OTA.
+            for font_src in "$PROJECT_DIR/sys/fonts/"*.ttf "$PROJECT_DIR/sys/fonts/"LICENSE-*.txt; do
                 [ -f "$font_src" ] || continue
                 FONT_NAME=$(basename "$font_src")
                 cp "$font_src" "$RELEASE_DIR/assets/$FONT_NAME"
                 ASSET_SIZE=$(stat -c%s "$RELEASE_DIR/assets/$FONT_NAME")
                 ASSET_SHA=$(openssl dgst -sha384 -hex "$RELEASE_DIR/assets/$FONT_NAME" 2>/dev/null | awk '{print $NF}')
+                SECTION="${FONT_NAME%.ttf}"; SECTION="${SECTION%.txt}"
 
-                ASSET_MANIFEST="${ASSET_MANIFEST}[font:${FONT_NAME%.ttf}]
+                ASSET_MANIFEST="${ASSET_MANIFEST}[font:${SECTION}]
 size=${ASSET_SIZE}
 sha384=${ASSET_SHA}
 

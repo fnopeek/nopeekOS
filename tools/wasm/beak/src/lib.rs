@@ -951,7 +951,8 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, u32)>, buf: &
 /// Commit the loft-styled chrome: menu bar · toolbar (back/forward/reload +
 /// framed address bar) · canvas body · the open dropdown as a Popover.
 fn render_chrome() {
-    let menu = prefab::menu_bar_with_anchors(
+    let menu = prefab::menu_bar_with_icon(
+        IconId::Bird,
         &[
             (s().menu_file.to_string(), ActionId(ACT_MENU_FILE)),
             (s().menu_edit.to_string(), ActionId(ACT_MENU_EDIT)),
@@ -979,7 +980,7 @@ fn render_chrome() {
         children: vec![
             Widget::Icon {
                 id: lead_icon,
-                size: 20,
+                size: 16,
                 modifiers: vec![Modifier::Tint(lead_tint)],
             },
             Widget::Input {
@@ -1086,7 +1087,7 @@ const NAV_BTN_RADIUS: u8 = 7;
 /// `SurfaceHover` fill under the cursor, accent tint while pressed.
 fn nav_button(icon: IconId, action: ActionId) -> Widget {
     Widget::Row {
-        children: vec![Widget::Icon { id: icon, size: 19, modifiers: vec![] }],
+        children: vec![Widget::Icon { id: icon, size: 16, modifiers: vec![] }],
         spacing: 0,
         align: Align::Center,
         modifiers: vec![

@@ -31,7 +31,7 @@ pub fn render(
     widget: &Widget,
     layout: &LayoutNode,
 ) {
-    render_with_state(rast, target, widget, layout, None, None, None, Density::Regular, None, 0);
+    render_with_state(rast, target, widget, layout, None, None, None, Density::Regular, None, 0, None);
 }
 
 /// Render with explicit pseudo-state context.
@@ -61,12 +61,22 @@ pub fn render_with_state(
     // line window (wheel scroll); Widget::Scroll handles its own offset in
     // layout, so this only matters at the TextArea leaf.
     scroll_y: u32,
+    // Colour inherited from the nearest ancestor carrying `Modifier::Tint`,
+    // like CSS `color`. A `Tint` on a Row is what apps reach for to say
+    // "this whole row is accent now"; without inheritance the Row's own
+    // paint would take it and every Text/Icon inside would silently fall
+    // back to the default. `None` = no ancestor set one.
+    inherited_tint: Option<Token>,
 ) {
     let is_hovered = hover_path.is_some();
     let is_focused = focus_path.is_some();
     let is_active  = active_path.is_some();
     let base = modifiers_of(widget);
     let eff = effective_modifiers(base, is_hovered, is_focused, is_active, density);
+    // This node's own Tint wins for its whole subtree.
+    let subtree_tint = eff.iter().rev()
+        .find_map(|m| if let Modifier::Tint(t) = m { Some(*t) } else { None })
+        .or(inherited_tint);
 
     paint_modifiers_eff(rast, target, &eff, layout.rect);
     // `is_focused && Some([])` (focus exactly here) is the only case
@@ -75,7 +85,7 @@ pub fn render_with_state(
     // check.
     let edit_for_node: Option<&InputEditState> =
         if matches!(focus_path, Some(p) if p.is_empty()) { input_edit } else { None };
-    paint_node_eff(rast, target, widget, layout, &eff, edit_for_node, scroll_y);
+    paint_node_eff(rast, target, widget, layout, &eff, edit_for_node, scroll_y, inherited_tint);
 
     // A Scroll clips its subtree to its viewport rect so overflowing
     // content is masked (and, for a vertical scroll, an overlay scrollbar
@@ -102,6 +112,7 @@ pub fn render_with_state(
         render_with_state(
             rast, target, cw, cl,
             child_hover, child_focus, child_active, density, input_edit, scroll_y,
+            subtree_tint,
         );
     }
 
@@ -441,6 +452,7 @@ fn paint_node_eff(
     eff: &[Modifier],
     edit_state: Option<&InputEditState>,
     scroll_y: u32,
+    inherited_tint: Option<Token>,
 ) {
     let rect = layout.rect;
     // Inner-rect origin for leaf glyph placement. The OUTER rect is
@@ -458,11 +470,12 @@ fn paint_node_eff(
         Widget::Text { content, style, .. } => {
             // Style default, overridable by Modifier::Tint (e.g. an active
             // workspace pill tinted OnAccent so it reads on the Accent fill).
-            let mut color = if matches!(style, super::abi::TextStyle::Muted) {
-                Token::OnSurfaceMuted
-            } else {
-                Token::OnSurface
-            };
+            let mut color = inherited_tint.unwrap_or(
+                if matches!(style, super::abi::TextStyle::Muted) {
+                    Token::OnSurfaceMuted
+                } else {
+                    Token::OnSurface
+                });
             for m in eff {
                 if let Modifier::Tint(tok) = m { color = *tok; }
             }
@@ -470,7 +483,7 @@ fn paint_node_eff(
         }
 
         Widget::Icon { id, size, .. } => {
-            let mut color = Token::OnSurface;
+            let mut color = inherited_tint.unwrap_or(Token::OnSurface);
             // Q8.8 fixed-point scale: 256 = 1.0×. Resolved from the
             // effective modifier list so Hover/Focus/Active states can
             // inflate the icon (dock cells use this for a Mac-style

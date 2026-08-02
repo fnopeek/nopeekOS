@@ -749,13 +749,38 @@ pub fn menu_bar_with_anchors(
     labels: &[(String, ActionId)],
     anchors: &[NodeId],
 ) -> Widget {
-    let mut children: Vec<Widget> = Vec::with_capacity(labels.len() + 1);
+    menu_bar_with_icon(IconId::None, labels, anchors)
+}
+
+/// Menu bar with the app's own glyph at the leading edge — the window's
+/// identity mark, the way every window in the design carries one
+/// (UI_REFRESH.md §5). Pass `IconId::None` for a bare bar.
+pub fn menu_bar_with_icon(
+    icon: IconId,
+    labels: &[(String, ActionId)],
+    anchors: &[NodeId],
+) -> Widget {
+    let mut children: Vec<Widget> = Vec::with_capacity(labels.len() + 3);
+    if !matches!(icon, IconId::None) {
+        children.push(Widget::Row {
+            children: vec![Widget::Icon {
+                id: icon,
+                size: 16,
+                modifiers: vec![Modifier::Tint(Token::Accent)],
+            }],
+            spacing: 0,
+            align:   Align::Center,
+            modifiers: vec![Modifier::Padding(Padding::Xs.as_u16())],
+        });
+    }
     for (i, (label, action)) in labels.iter().enumerate() {
-        let mut mods: Vec<Modifier> = Vec::with_capacity(4);
+        let mut mods: Vec<Modifier> = Vec::with_capacity(5);
         mods.push(Modifier::Padding(Padding::Sm.as_u16()));
+        mods.push(Modifier::Tint(Token::OnSurfaceMuted));
         mods.push(Modifier::OnClick(*action));
         mods.push(Modifier::Hover(vec![
-            Modifier::Background(Token::SurfaceMuted),
+            Modifier::Background(Token::SurfaceHover),
+            Modifier::Tint(Token::OnSurface),
             Modifier::Rounded(Radius::Sm.as_u8()),
         ]));
         if let Some(id) = anchors.get(i) {
@@ -770,14 +795,18 @@ pub fn menu_bar_with_anchors(
     children.push(Widget::Spacer { flex: 1 });
     Widget::Row {
         children,
-        spacing: Spacing::Md.as_u16(),
+        spacing: Spacing::Xxs.as_u16(),
         align:   Align::Center,
         modifiers: vec![
             Modifier::Padding(Padding::Xs.as_u16()),
+            Modifier::MinHeight(MENU_BAR_H),
             Modifier::Background(Token::SurfaceElevated),
         ],
     }
 }
+
+/// Menu-bar band height (UI_REFRESH.md §5).
+const MENU_BAR_H: u16 = 36;
 
 /// Build a popover-content surface from a list of menu items.
 /// Each item is `(label, action_id)`. The wrapper is a SurfaceElevated

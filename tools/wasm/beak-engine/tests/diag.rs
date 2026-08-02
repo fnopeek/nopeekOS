@@ -1,0 +1,477 @@
+//! Throwaway diagnostic — dump the display list for a WPT reftest + its ref.
+//! DIAG=CSS2/height-012.xht cargo test --release --test diag -- --nocapture
+use std::fs;
+use std::path::Path;
+use beak_engine::layout::DrawOp;
+use beak_engine::{Engine, Rgb, Theme};
+
+fn light() -> Theme {
+    Theme { bg: Rgb(255,255,255), text: Rgb(0,0,0), heading: Rgb(0,0,0),
+            link: Rgb(0,0,238), muted: Rgb(96,96,96), rule: Rgb(128,128,128) }
+}
+
+fn dump(label: &str, html: &str) {
+    let mut eng = Engine::new();
+    eng.set_theme(light());
+    let lay = eng.layout_ext(html, "", 800);
+    eprintln!("--- {label}: {} ops, height={} ---", lay.ops.len(), lay.height);
+    for op in &lay.ops {
+        match op {
+            DrawOp::RoundRect { x, y, w, h, color, .. } | DrawOp::Rect { x, y, w, h, color } =>
+                eprintln!("  RECT x={x} y={y} w={w} h={h} color={:?}", color),
+            DrawOp::Text { x, y, size, color, text, .. } =>
+                eprintln!("  TEXT x={x} y={y} size={size:.0} color={:?} {:?}", color,
+                          if text.len()>40 {&text[..40]} else {text}),
+            DrawOp::Image { x, y, w, h, .. } =>
+                eprintln!("  IMG  x={x} y={y} w={w} h={h}"),
+        }
+    }
+}
+
+#[test]
+fn diag() {
+    // DPOS=<css> [DW=w] — dump the position/height/display/visibility cascade
+    // for a `.vector-dropdown-content` div nested under a `.vector-dropdown`,
+    // with a realistic ancestor chain (html.client-js …).
+    if let Ok(cp) = std::env::var("DPOS") {
+        use beak_engine::css::{self, ElemInfo};
+        let css = fs::read_to_string(&cp).expect("css");
+        let w: f32 = std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(1400.0);
+        let ss = css::parse(&css);
+        let ei = |tag: &str, id: Option<&str>, classes: &[&str]| ElemInfo {
+            tag: tag.into(),
+            id: id.map(|s| s.into()),
+            classes: classes.iter().map(|s| s.to_string()).collect(),
+            attrs: Vec::new(), seq: 0,
+        };
+        let ancestors = vec![
+            ei("html", None, &["client-js", "vector-feature-language-in-header-enabled"]),
+            ei("body", None, &["skin-vector-2022"]),
+            ei("div", Some("vector-header-start"), &["vector-header-start"]),
+            ei("nav", None, &["vector-main-menu-landmark"]),
+            ei("div", Some("vector-main-menu-dropdown"), &["vector-dropdown", "vector-main-menu-dropdown"]),
+        ];
+        let el = ei("div", None, &["vector-dropdown-content"]);
+        let prev = [ei("input", Some("vector-main-menu-dropdown-checkbox"), &["vector-dropdown-checkbox"]),
+                    ei("label", Some("vector-main-menu-dropdown-label"), &["vector-dropdown-label"])];
+        let m = ss.matched(&el, &ancestors, &prev, 3, w);
+        for prop in ["position", "height", "display", "visibility", "opacity", "overflow"] {
+            let mut all: Vec<(u32,u32,String)> = Vec::new();
+            for (spec, order, decls) in &m {
+                for (p,v) in decls.iter() { if p == prop { all.push((*spec,*order,v.clone())); } }
+            }
+            all.sort_by_key(|(s,o,_)| (*s,*o));
+            let winner = all.last().map(|(_,_,v)| v.clone()).unwrap_or_else(|| "<none>".into());
+            eprintln!("{prop:>12} = {winner}   ({} rule(s))", all.len());
+            for (s,o,v) in &all { eprintln!("               spec={s} order={o}: {v}"); }
+        }
+        return;
+    }
+    // DDUMP=<html> DCSS=<css> DW=<w> — dump every TEXT op with its y, plus the
+    // page height. Tells you where a marker text lands (push-down debugging).
+    if let Ok(hp) = std::env::var("DDUMP") {
+        let css = std::env::var("DCSS").ok().and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
+        let w: u32 = std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(1400);
+        let html = fs::read_to_string(&hp).expect("html");
+        let mut eng = Engine::new();
+        eng.set_theme(light());
+        let lay = eng.layout_ext(&html, &css, w);
+        eprintln!("page height = {}", lay.height);
+        for op in &lay.ops {
+            if let DrawOp::Text { x, y, text, .. } = op {
+                if !text.trim().is_empty() {
+                    eprintln!("  TEXT y={y:>6} x={x:>5} {:?}", if text.len()>50 {&text[..50]} else {text});
+                }
+            }
+        }
+        return;
+    }
+    // DWIDTHS=<html> DCSS=<css> DW=<w> — trace box widths / overflow.
+    if let Ok(hp) = std::env::var("DWIDTHS") {
+        let css = std::env::var("DCSS").ok().and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
+        let w: u32 = std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(1400);
+        let html = fs::read_to_string(&hp).expect("html");
+        let mut eng = Engine::new();
+        eng.set_theme(light());
+        let lay = eng.layout_ext(&html, &css, w);
+        let mut max_right = 0i32;
+        let mut rects: Vec<(i32, i32, i32)> = vec![];
+        for op in &lay.ops {
+            match op {
+                DrawOp::RoundRect { x, y, w, .. } | DrawOp::Rect { x, y, w, .. } => { max_right = max_right.max(x + w); rects.push((*x, *w, *y)); }
+                DrawOp::Text { x, .. } => { max_right = max_right.max(*x); }
+                DrawOp::Image { x, y: _, w, .. } => { max_right = max_right.max(x + w); }
+            }
+        }
+        eprintln!("viewport={w}  max_right_edge={max_right}  OVERFLOW={}", max_right - w as i32);
+        rects.sort_by_key(|(_, wd, _)| -wd);
+        eprintln!("widest {} rects (x .. right, w, y):", rects.len().min(18));
+        for (x, wd, y) in rects.iter().take(18) {
+            eprintln!("  x={x:>5} right={:>5} w={wd:>5} y={y}", x + wd);
+        }
+        return;
+    }
+    // Parse a CSS file and report whether a given class's declarations survive.
+    // DGRID=<css> [DCLASS=mw-page-container-inner] [DW=1200] cargo test --test diag
+    if let Ok(cp) = std::env::var("DVARS") {
+        let css = fs::read_to_string(&cp).expect("css");
+        let out = beak_engine::vars::resolve_vars(&css, std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(1200.0), &[]);
+        fs::write("resolved.css", &out).expect("write");
+        eprintln!("resolved {} -> {} bytes (resolved.css)", css.len(), out.len());
+        // report the biggest bare numbers in the output
+        let mut nums: Vec<f64> = Vec::new();
+        let b = out.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i].is_ascii_digit() {
+                let s = i;
+                while i < b.len() && (b[i].is_ascii_digit() || b[i] == b'.') { i += 1; }
+                if let Ok(n) = out[s..i].parse::<f64>() { if n > 5000.0 { nums.push(n); } }
+            } else { i += 1; }
+        }
+        nums.sort_by(|a, c| c.partial_cmp(a).unwrap());
+        nums.dedup();
+        eprintln!("big numbers (>5000) in resolved css: {:?}", &nums[..nums.len().min(15)]);
+        return;
+    }
+    if let Ok(cp) = std::env::var("DGRID") {
+        use beak_engine::css::{self, ElemInfo};
+        let css = fs::read_to_string(&cp).expect("css");
+        let class = std::env::var("DCLASS").unwrap_or_else(|_| "mw-page-container-inner".into());
+        let w: f32 = std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(1200.0);
+        let ss = css::parse(&css);
+        let tag = std::env::var("DTAG").unwrap_or_else(|_| "div".into());
+        let prop = std::env::var("DPROP").ok();
+        let el = ElemInfo {
+            tag: tag.clone(),
+            id: None,
+            classes: class.split(',').map(|s| s.trim().to_string()).collect(),
+            attrs: Vec::new(), seq: 0,
+        };
+        let m = ss.matched(&el, &[], &[], 1, w);
+        if let Some(pr) = &prop {
+            let mut all: Vec<(u32,u32,String)> = Vec::new();
+            for (spec, order, decls) in &m {
+                for (p,v) in decls.iter() { if p == pr { all.push((*spec,*order,v.clone())); } }
+            }
+            all.sort_by_key(|(s,o,_)| (*s,*o));
+            eprintln!("=== <{tag}>.{class} '{pr}' cascade (winner last) ===");
+            for (s,o,v) in &all { eprintln!("  spec={s} order={o}: {pr}: {v}"); }
+            return;
+        }
+        eprintln!("=== matched rules for .{class} @ vw={w}: {} ===", m.len());
+        let mut saw_grid = false;
+        for (spec, order, decls) in &m {
+            let has = decls.iter().any(|(p, _)| p == "display" || p.starts_with("grid"));
+            if has {
+                eprintln!("  spec={spec} order={order}:");
+                for (p, v) in decls.iter() {
+                    if p == "display" || p.starts_with("grid") || p == "column-gap" {
+                        eprintln!("      {p}: {v}");
+                        if p == "display" && v.contains("grid") { saw_grid = true; }
+                    }
+                }
+            }
+        }
+        eprintln!("=== display:grid present for .{class}: {saw_grid} ===");
+        return;
+    }
+    // Render a real fetched page (HTML file + concatenated CSS file) to a BMP.
+    // DCTRL=<html> DCSS=<css> DW=<w> — list the page's form controls (rect,
+    // kind, and the text painted inside each) + what a submit would send.
+    if let Ok(hp) = std::env::var("DCTRL") {
+        let html = fs::read_to_string(&hp).expect("html");
+        let css = std::env::var("DCSS").ok().and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
+        let w: u32 = std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(1000);
+        let eng = Engine::new();
+        let lay = eng.layout_ext(&html, &css, w);
+        eprintln!("controls: {}", lay.controls.len());
+        for c in &lay.controls {
+            let inside: Vec<&str> = lay.ops.iter().filter_map(|o| match o {
+                beak_engine::layout::DrawOp::Text { x, y, text, .. }
+                    if *x >= c.x - 2 && *x < c.x + c.w && *y >= c.y - 2 && *y < c.y + c.h => Some(text.as_str()),
+                _ => None,
+            }).collect();
+            eprintln!("  seq={} {:?} at ({},{}) {}x{}  text={:?}", c.seq, c.kind, c.x, c.y, c.w, c.h, inside);
+        }
+        let dom = beak_engine::dom::parse(&html);
+        let forms = beak_engine::forms::collect(&dom);
+        for (i, f) in forms.forms.iter().enumerate() {
+            eprintln!("  form[{i}] action={:?} get={}", f.action, f.method_get);
+        }
+        return;
+    }
+
+    // DIMG=<html> DCSS=<css> DIMGDIR=<dir> DW=<w> DOUT=<bmp> — render a real
+    // page WITH its images, to check that decoded pixels actually reach the
+    // canvas (the device showed grey placeholder boxes). Files in DIMGDIR are
+    // named after the src with '/' and ':' replaced by '_'.
+    if let Ok(hp) = std::env::var("DIMG") {
+        let html = fs::read_to_string(&hp).expect("html");
+        let css = std::env::var("DCSS").ok().and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
+        let dir = std::env::var("DIMGDIR").expect("DIMGDIR");
+        let w: u32 = std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(1400);
+        let mut eng = Engine::new();
+        eng.set_theme(Theme { bg: Rgb(255,255,255), text: Rgb(33,37,41), heading: Rgb(33,37,41),
+                              link: Rgb(13,110,253), muted: Rgb(108,117,125), rule: Rgb(222,226,230) });
+        eng.images_begin();
+        let mut ok = 0; let mut miss = 0; let mut undecodable = 0;
+        for src in beak_engine::image_srcs(&html) {
+            let fname = src.replace('/', "_").replace(':', "_");
+            match fs::read(format!("{dir}/{fname}")) {
+                Ok(bytes) => {
+                    if eng.add_image(&src, &bytes) { ok += 1; }
+                    else { undecodable += 1; println!("  UNDECODABLE {} ({} B)", src, bytes.len()); }
+                }
+                Err(_) => { miss += 1; println!("  NO FILE      {}", src); }
+            }
+        }
+        println!("images: {ok} decoded, {undecodable} undecodable, {miss} not fetched");
+        let want_inspect = std::env::var("DINSPECT").is_ok();
+        if want_inspect { eng.set_inspect(true); }
+        let lay = eng.layout_ext(&html, &css, w);
+        if want_inspect {
+            let filt = std::env::var("DFILTER").unwrap_or_default();
+            println!("=== inspect boxes ({} total){} ===", lay.inspect.len(),
+                     if filt.is_empty() { String::new() } else { format!(", filter '{filt}'") });
+            for b in &lay.inspect {
+                if filt.is_empty() || b.label.contains(&filt) {
+                    println!("  x={:>5} y={:>5} w={:>5} h={:>5} depth={:>2}  {}", b.x, b.y, b.w, b.h, b.depth, b.label);
+                }
+            }
+        }
+        let painted = lay.ops.iter().filter(|o| matches!(o, beak_engine::layout::DrawOp::Image { .. })).count();
+        println!("Image draw-ops in the display list: {painted}");
+        println!("guessed (need relayout): {:?}", lay.guessed_image_srcs);
+        // The tallest filled rects — an enormous empty box shows up here.
+        let mut rects: Vec<(i32,i32,i32,i32,beak_engine::Rgb)> = lay.ops.iter().filter_map(|o| match o {
+            beak_engine::layout::DrawOp::RoundRect { x, y, w, h, color, .. }
+            | beak_engine::layout::DrawOp::Rect { x, y, w, h, color } => Some((*h,*y,*x,*w,*color)),
+            _ => None,
+        }).collect();
+        rects.sort_by_key(|r| -r.0);
+        println!("hoechste Rects (h, y, x, w, farbe):");
+        for (h,y,x,w,c) in rects.iter().take(10) {
+            println!("   h={h:>6} y={y:>6} x={x:>5} w={w:>5}  #{:02x}{:02x}{:02x}", c.0, c.1, c.2);
+        }
+        if let Ok(out_path) = std::env::var("DOUT") {
+            let h = lay.height.clamp(1, 12000);
+            let mut buf = vec![0u8; (w * h * 4) as usize];
+            eng.paint(&lay, w, h, 0, &mut buf);
+            let row = (w * 3 + 3) & !3;
+            let mut bmp = Vec::with_capacity(54 + (row * h) as usize);
+            let fsz = 54 + row * h;
+            bmp.extend_from_slice(b"BM");
+            bmp.extend_from_slice(&fsz.to_le_bytes());
+            bmp.extend_from_slice(&[0;4]);
+            bmp.extend_from_slice(&54u32.to_le_bytes());
+            bmp.extend_from_slice(&40u32.to_le_bytes());
+            bmp.extend_from_slice(&w.to_le_bytes());
+            bmp.extend_from_slice(&h.to_le_bytes());
+            bmp.extend_from_slice(&1u16.to_le_bytes());
+            bmp.extend_from_slice(&24u16.to_le_bytes());
+            bmp.extend_from_slice(&[0;24]);
+            for y in (0..h).rev() {
+                let mut n = 0u32;
+                for x in 0..w {
+                    let o = ((y*w+x)*4) as usize;
+                    bmp.extend_from_slice(&[buf[o], buf[o+1], buf[o+2]]);
+                    n += 3;
+                }
+                while n < row { bmp.push(0); n += 1; }
+            }
+            fs::write(&out_path, &bmp).expect("write bmp");
+            println!("wrote {out_path} ({}x{})", w, h);
+        }
+        return;
+    }
+
+    // DTIME=<html> DCSS=<css> DW=<width> [DN=<runs>] — how long do parse+
+    // cascade+layout and paint actually take? Native, so it is a LOWER bound
+    // for the device, which runs the same code under the wasmi interpreter.
+    if let Ok(hp) = std::env::var("DTIME") {
+        let html = fs::read_to_string(&hp).expect("html");
+        let css = std::env::var("DCSS").ok().and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
+        let w: u32 = std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(1400);
+        let n: u32 = std::env::var("DN").ok().and_then(|s| s.parse().ok()).unwrap_or(3);
+        let mut eng = Engine::new();
+        eng.set_theme(Theme { bg: Rgb(255,255,255), text: Rgb(33,37,41), heading: Rgb(33,37,41),
+                              link: Rgb(13,110,253), muted: Rgb(108,117,125), rule: Rgb(222,226,230) });
+        println!("html {} B, css {} B, width {}", html.len(), css.len(), w);
+        for i in 0..n {
+            // Break the "layout" number into its three real phases — on the
+            // device this whole call is 13 s, so knowing WHICH part decides
+            // what to fix.
+            let t_dom = std::time::Instant::now();
+            let dom = beak_engine::dom::parse(&html);
+            let d_dom = t_dom.elapsed();
+            let t_css = std::time::Instant::now();
+            let sheet = beak_engine::css::collect_all(&dom, &css, w as f32);
+            let d_css = t_css.elapsed();
+            let t_sl = std::time::Instant::now();
+            let links = beak_engine::stylesheet_links(&html);
+            let d_sl = t_sl.elapsed();
+            let t_is = std::time::Instant::now();
+            let imgs = beak_engine::image_srcs(&html);
+            let d_is = t_is.elapsed();
+            println!("       dom::parse {:>7.1} ms   css::collect_all {:>7.1} ms   stylesheet_links {:>7.1} ms ({})   image_srcs {:>7.1} ms ({})",
+                d_dom.as_secs_f64()*1000.0, d_css.as_secs_f64()*1000.0,
+                d_sl.as_secs_f64()*1000.0, links.len(),
+                d_is.as_secs_f64()*1000.0, imgs.len());
+            let t0 = std::time::Instant::now();
+            let lay = eng.layout_ext(&html, &css, w);
+            let t_lay = t0.elapsed();
+            let h = lay.height.clamp(1, 6000);
+            let mut buf = vec![0u8; (w * h * 4) as usize];
+            let t1 = std::time::Instant::now();
+            eng.paint(&lay, w, h, 0, &mut buf);
+            let t_paint = t1.elapsed();
+            println!("run {}: layout {:>7.1} ms   paint {:>7.1} ms   (page height {})",
+                i, t_lay.as_secs_f64()*1000.0, t_paint.as_secs_f64()*1000.0, lay.height);
+        }
+        return;
+    }
+
+    // DPAINT=<html> DCSS=<css> DW=<width> DVH=<viewport height> — measure the
+    // paint the DEVICE actually does: one viewport-sized buffer, repainted at a
+    // series of scroll offsets, which is what a scroll costs. DTIME paints the
+    // whole document once, so it hides both the per-frame canvas clear and the
+    // fact that a scrolled frame still walks the entire display list.
+    if let Ok(hp) = std::env::var("DPAINT") {
+        let html = fs::read_to_string(&hp).expect("html");
+        let css = std::env::var("DCSS").ok().and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
+        let w: u32 = std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(1900);
+        let vh: u32 = std::env::var("DVH").ok().and_then(|s| s.parse().ok()).unwrap_or(950);
+        let mut eng = Engine::new();
+        eng.set_theme(light());
+        eng.set_viewport_h(vh);
+        let lay = eng.layout_ext(&html, &css, w);
+        // What the display list asks the rasteriser to touch, per frame: how
+        // many ops it walks, and how many pixels the rects alone cover once
+        // clipped to the viewport. Overdraw > 1 viewport means the same pixel
+        // is written several times before the text lands on top.
+        let (mut nr, mut nt, mut ni, mut glyphs) = (0u64, 0u64, 0u64, 0u64);
+        for op in &lay.ops {
+            match op {
+                DrawOp::Rect { .. } | DrawOp::RoundRect { .. } => nr += 1,
+                DrawOp::Text { text, .. } => { nt += 1; glyphs += text.chars().count() as u64 }
+                DrawOp::Image { .. } => ni += 1,
+            }
+        }
+        println!("ops {} (rect {nr}, text {nt} / {glyphs} glyphs, img {ni})   page height {}   viewport {w}x{vh}",
+                 lay.ops.len(), lay.height);
+        // Every guessed src costs a FULL re-layout when its pixels land.
+        println!("guessed image boxes: {}", lay.guessed_image_srcs.len());
+        for s in &lay.guessed_image_srcs {
+            println!("   {s}");
+        }
+        let mut buf = vec![0u8; (w * vh * 4) as usize];
+        for scroll in [0i32, 1000, 2000, 3000, 4000] {
+            // Rect pixels this frame would write, clipped to the viewport.
+            let mut px = 0i64;
+            for op in &lay.ops {
+                if let DrawOp::Rect { x, y, w: rw, h: rh, .. } = op {
+                    let (x0, y0) = ((*x).max(0), (*y - scroll).max(0));
+                    let (x1, y1) = ((*x + *rw).min(w as i32), (*y - scroll + *rh).min(vh as i32));
+                    px += ((x1 - x0).max(0) as i64) * ((y1 - y0).max(0) as i64);
+                }
+            }
+            // Warm the glyph cache first: the device keeps it across frames, so
+            // the steady-state scroll cost is what matters, not the first paint.
+            eng.paint(&lay, w, vh, scroll, &mut buf);
+            let t = std::time::Instant::now();
+            for _ in 0..5 {
+                eng.paint(&lay, w, vh, scroll, &mut buf);
+            }
+            let ms = t.elapsed().as_secs_f64() * 1000.0 / 5.0;
+            println!("  scroll {scroll:>5}: paint {ms:>6.2} ms   rect px {:>10}  (= {:.2} viewports)",
+                     px, px as f64 / (w as f64 * vh as f64));
+        }
+        return;
+    }
+
+    // DPAGE=<html> DCSS=<css> DW=<width> DOUT=<bmp> cargo test --test diag
+    if let Ok(hp) = std::env::var("DPAGE") {
+        let html = fs::read_to_string(&hp).expect("html");
+        let css = std::env::var("DCSS").ok().and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
+        let w: u32 = std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(1000);
+        let mut eng = Engine::new();
+        eng.set_theme(Theme { bg: Rgb(255,255,255), text: Rgb(33,37,41), heading: Rgb(33,37,41),
+                              link: Rgb(13,110,253), muted: Rgb(108,117,125), rule: Rgb(222,226,230) });
+        let lay = eng.layout_ext(&html, &css, w);
+        let h = lay.height.clamp(1, 6000);
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        eng.paint(&lay, w, h, 0, &mut buf);
+        // BMP (24-bit, bottom-up) — same writer as lib.rs demos.
+        let row = (w * 3 + 3) & !3;
+        let mut bmp = Vec::with_capacity(54 + (row * h) as usize);
+        let fsz = 54 + row * h;
+        bmp.extend_from_slice(b"BM");
+        bmp.extend_from_slice(&fsz.to_le_bytes());
+        bmp.extend_from_slice(&[0;4]);
+        bmp.extend_from_slice(&54u32.to_le_bytes());
+        bmp.extend_from_slice(&40u32.to_le_bytes());
+        bmp.extend_from_slice(&w.to_le_bytes());
+        bmp.extend_from_slice(&h.to_le_bytes());
+        bmp.extend_from_slice(&1u16.to_le_bytes());
+        bmp.extend_from_slice(&24u16.to_le_bytes());
+        bmp.extend_from_slice(&[0;24]);
+        for y in (0..h).rev() {
+            let mut n = 0u32;
+            for x in 0..w {
+                let o = ((y*w+x)*4) as usize;
+                bmp.extend_from_slice(&[buf[o], buf[o+1], buf[o+2]]);
+                n += 3;
+            }
+            while n < row { bmp.push(0); n += 1; }
+        }
+        let out = std::env::var("DOUT").unwrap_or_else(|_| "page.bmp".into());
+        fs::write(&out, &bmp).expect("write bmp");
+        eprintln!("page render: {}x{} px, {} ops, {} links → {out}", w, h, lay.ops.len(), lay.links.len());
+        return;
+    }
+    if let Ok(h) = std::env::var("DIAGHTML") {
+        dump("LITERAL", &h);
+        return;
+    }
+    let Ok(rel) = std::env::var("DIAG") else { eprintln!("set DIAG=<rel path>"); return };
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/wpt");
+    let tp = root.join(&rel);
+    let html = fs::read_to_string(&tp).expect("test file");
+    dump("TEST", &html);
+    // ref via rel=match
+    if let Some(i) = html.find("rel=\"match\"").or_else(|| html.find("rel='match'")).or_else(|| html.find("rel=match")) {
+        let tag = &html[..];
+        if let Some(h) = tag[i..].find("href=") {
+            let s = i + h + 5;
+            let q = tag.as_bytes()[s] as char;
+            let start = if q=='"'||q=='\'' { s+1 } else { s };
+            let end = start + tag[start..].find(|c| c=='"'||c=='\''||c=='>'||c==' ').unwrap_or(0);
+            let href = &tag[start..end];
+            let rp = tp.parent().unwrap().join(href);
+            if let Ok(rh) = fs::read_to_string(&rp) { dump(&format!("REF {href}"), &rh); }
+        }
+    }
+}
+
+/// DRECT=<html> DW=<w> — dump every RECT op (backgrounds, borders, stripes).
+#[test]
+fn diag_rects() {
+    let Ok(hp) = std::env::var("DRECT") else { return };
+    let w: u32 = std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(800);
+    let html = fs::read_to_string(&hp).expect("html");
+    let mut eng = Engine::new();
+    eng.set_theme(light());
+    let lay = eng.layout_ext(&html, "", w);
+    eprintln!("page height = {}", lay.height);
+    for op in &lay.ops {
+        if let DrawOp::Rect { x, y, w, h, color } = op {
+            eprintln!("  RECT x={x:>5} y={y:>5} w={w:>5} h={h:>4} {:?}", color);
+        }
+    }
+}
+
+#[test]
+fn sizeof_style() {
+    println!("sizeof(ComputedStyle) = {} B", std::mem::size_of::<beak_engine::style::ComputedStyle>());
+}

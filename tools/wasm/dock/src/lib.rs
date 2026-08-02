@@ -197,7 +197,7 @@ const ADD_BASE:     u32 = 300_000;      // ADD_BASE+catalog_idx : add to dock
 
 // Visual sizing (px at 1× scale) — UI_REFRESH.md §3 "dock".
 /// Glyph inside a cell tile.
-const ICON_SIZE: u16 = 20;
+const ICON_SIZE: u16 = 24;
 /// Square tile the glyph sits in.
 const CELL_BOX: u16 = 34;
 /// Corner radius of that tile.
