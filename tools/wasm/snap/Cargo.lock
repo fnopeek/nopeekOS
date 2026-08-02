@@ -40,7 +40,7 @@ dependencies = [
 
 [[package]]
 name = "nopeek_widgets"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "postcard",
  "serde",
@@ -108,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "snap"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "miniz_oxide",
  "nopeek_widgets",
