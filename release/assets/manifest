@@ -8,7 +8,7 @@ sha384=38c4d9b6dfb8ea4f105ef7506aebebe0165261d11bfecc901b3a5285b6b5ee211ddd5a59d
 
 [microvm:initramfs]
 size=6552
-sha384=bc69db57f4e58d6903fc0823edc47ddb14ec027da2a7ffc2afd7d4ce4c5c213bff87202c3755c7ae05bd9bd85a30533d
+sha384=8bdeb50a1f826bfdf554fdf12622560bd5fe55b072db5e2b7084f4d1bd5145dd9d93ef90ed0d1f968adb8f8155cee2d9
 
 [microvm:linux-virt]
 size=12301312
