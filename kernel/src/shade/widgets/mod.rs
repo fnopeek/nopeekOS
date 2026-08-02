@@ -1270,7 +1270,7 @@ fn offset_at(scene: &WidgetScene, x: i32, y: i32, require_inside: bool) -> Optio
     let value = edit.value.as_str();
     match widget {
         abi::Widget::Input { .. } => {
-            Some(byte_at_x(value, abi::TextStyle::Heading, (x - text_x).max(0) as u32))
+            Some(byte_at_x(value, render::INPUT_STYLE, (x - text_x).max(0) as u32))
         }
         abi::Widget::TextArea { .. } => {
             let style = abi::TextStyle::Mono;

@@ -358,6 +358,11 @@ fn blend_towards(src: u32, dst: u32, weight: u32) -> u32 {
     0xFF_00_00_00 | (r << 16) | (g << 8) | b
 }
 
+/// Text style inside a `Widget::Input`. Shared with the click-to-caret
+/// hit test in `widgets::offset_at` — measuring with a different style
+/// there puts the caret on the wrong character.
+pub(super) const INPUT_STYLE: super::abi::TextStyle = super::abi::TextStyle::Body;
+
 /// Gap between the widest line number and the gutter's hairline.
 const GUTTER_PAD_R: i32 = 10;
 /// Gap between the hairline and the left edge of the number column.
@@ -558,17 +563,27 @@ fn paint_node_eff(
                 Some(e) => e.value.as_str(),
                 None    => value.as_str(),
             };
-            let shown = if live_value.is_empty() { placeholder.as_str() } else { live_value };
-            // Built-in 4 px chrome + the modifier's own padding.
-            let text_x = inner_x + 4;
+            // A focused empty field shows the caret ALONE. Drawing the
+            // placeholder too puts both at the same x — the caret ends up
+            // welded to the first letter ("|search"), which reads as a
+            // glitch rather than as a hint. The design never shows the two
+            // together either: rest = placeholder, focus = text + caret.
+            let focused = edit_state.is_some();
+            let text_x = inner_x + 4;   // built-in chrome + the node's padding
             let text_y = inner_y + 4;
-            rast.text(target, shown, super::abi::TextStyle::Heading, Token::OnSurface,
-                      Point { x: text_x, y: text_y });
+            if !live_value.is_empty() {
+                rast.text(target, live_value, INPUT_STYLE, Token::OnSurface,
+                          Point { x: text_x, y: text_y });
+            } else if !focused {
+                // Placeholder is a hint, not content — faint, like the design.
+                rast.text(target, placeholder.as_str(), INPUT_STYLE,
+                          Token::OnSurfaceFaint, Point { x: text_x, y: text_y });
+            }
 
             // Paint the caret. Only when an editor exists (focused) —
             // unfocused inputs render flat text.
             if let Some(e) = edit_state {
-                let style = super::abi::TextStyle::Heading;
+                let style = INPUT_STYLE;
                 let prefix = match e.value.get(..e.cursor) {
                     Some(s) => s,
                     // Cursor mis-aligned (defensive: shouldn't happen)
