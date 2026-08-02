@@ -331,6 +331,8 @@ pub enum Modifier {
     MinHeight(u16),
     /// Layout maximum height (px at 1× scale).
     MaxHeight(u16),
+    /// Per-axis inner padding (px at 1× scale). Sums with `Padding`.
+    PaddingXY { x: u16, y: u16 },
     /// Draw a line-number gutter down the left edge of a `TextArea`.
     LineNumbers(bool),
     // Appended only.

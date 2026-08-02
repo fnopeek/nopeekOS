@@ -1042,7 +1042,11 @@ fn search_input(query: &str) -> Widget {
         spacing:   Spacing::Sm.as_u16(),
         align:     Align::Center,
         modifiers: alloc::vec![
-            Modifier::Padding(Padding::Xs.as_u16()),
+            // Asymmetric on purpose: uniform Padding tied the side air to
+            // the row height, so shrinking the field to 30 px squeezed the
+            // magnifier against the border. (The Input adds ~4 px of its
+            // own chrome, so x=8 reads as the design's 12.)
+            Modifier::PaddingXY { x: 8, y: 0 },
             Modifier::MinHeight(FIELD_H),
             Modifier::Background(Token::SurfaceMuted),
             Modifier::Border { token: Token::Border, width: 1, radius: Radius::Md.as_u8() },

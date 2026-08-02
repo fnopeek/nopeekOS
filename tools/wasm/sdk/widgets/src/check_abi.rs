@@ -170,7 +170,8 @@ fn _modifier_wire_position(m: &Modifier) -> usize {
         Modifier::Ring { .. }       => 24,
         Modifier::MinHeight(_)      => 25,
         Modifier::MaxHeight(_)      => 26,
-        Modifier::LineNumbers(_)    => 27,
+        Modifier::PaddingXY { .. }  => 27,
+        Modifier::LineNumbers(_)    => 28,
     }
 }
 

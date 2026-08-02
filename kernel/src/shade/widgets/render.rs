@@ -200,13 +200,21 @@ fn span_token_at(spans: &[super::abi::Span], off: usize, default: Token) -> Toke
 /// outer-size growth — a single canonical source for "how much
 /// padding does this leaf carry".
 fn leaf_padding(mods: &[Modifier]) -> (u32, u32) {
-    let mut p: u32 = 0;
+    let (mut px, mut py) = (0u32, 0u32);
     for m in mods {
-        if let Modifier::Padding(n) = m {
-            p = p.saturating_add(*n as u32);
+        match m {
+            Modifier::Padding(n) => {
+                px = px.saturating_add(*n as u32);
+                py = py.saturating_add(*n as u32);
+            }
+            Modifier::PaddingXY { x, y } => {
+                px = px.saturating_add(*x as u32);
+                py = py.saturating_add(*y as u32);
+            }
+            _ => {}
         }
     }
-    (p, p)
+    (px, py)
 }
 
 /// Build the modifier list that applies to `widget` after merging the

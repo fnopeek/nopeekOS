@@ -1208,9 +1208,17 @@ fn ceil_u32(v: f32) -> u32 { let i = v as u32; if v > i as f32 { i + 1 } else { 
 
 /// Sum every `Modifier::Padding` — mirrors render's `leaf_padding` so the
 /// inverse hit-mapping uses the same text origin the glyphs were drawn at.
+/// Horizontal padding of a node — the caret hit-test needs the same
+/// x-inset the renderer used, so it must count `PaddingXY.x` too.
 fn padding_sum(mods: &[abi::Modifier]) -> u32 {
     let mut p = 0u32;
-    for m in mods { if let abi::Modifier::Padding(n) = m { p = p.saturating_add(*n as u32); } }
+    for m in mods {
+        match m {
+            abi::Modifier::Padding(n) => p = p.saturating_add(*n as u32),
+            abi::Modifier::PaddingXY { x, .. } => p = p.saturating_add(*x as u32),
+            _ => {}
+        }
+    }
     p
 }
 

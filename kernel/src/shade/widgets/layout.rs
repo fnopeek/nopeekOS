@@ -697,13 +697,21 @@ fn unpack_modifiers_on(mods: &[Modifier], container: Rect) -> (Rect, Rect) {
 
 /// Sum of Padding modifiers → (x-pad, y-pad) in logical px.
 fn padding(mods: &[Modifier]) -> (u32, u32) {
-    let mut p: u32 = 0;
+    let (mut px, mut py) = (0u32, 0u32);
     for m in mods {
-        if let Modifier::Padding(n) = m {
-            p = p.saturating_add(*n as u32);
+        match m {
+            Modifier::Padding(n) => {
+                px = px.saturating_add(*n as u32);
+                py = py.saturating_add(*n as u32);
+            }
+            Modifier::PaddingXY { x, y } => {
+                px = px.saturating_add(*x as u32);
+                py = py.saturating_add(*y as u32);
+            }
+            _ => {}
         }
     }
-    (p, p)
+    (px, py)
 }
 
 /// `f32::ceil` isn't in core (no_std). Positive-only ceil-to-u32,
