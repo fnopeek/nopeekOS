@@ -22,14 +22,14 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-02, beak 0.1.70)
+### Current number (measured 2026-08-02, beak 0.1.71)
 
 ```
-3863 pass / 1724 fail / 199 inconclusive   (of 5786 vendored reftests)
-= 69.1 % of the conclusive 5587
+3869 pass / 1718 fail / 199 inconclusive   (of 5786 vendored reftests)
+= 69.2 % of the conclusive 5587
 ```
 
-Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → 3746 → **3863**. The
+Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → 3746 → 3863 → **3869**. The
 inconclusive count fell 254 → 199 over that span: references that used to
 render blank — because `:root` was dropped, or because an `inline-block` had no
 box — now paint, so 55 more tests actually measure something.
@@ -41,7 +41,7 @@ Per suite (pass / total of that suite, inconclusive included in the total):
 | css-fonts | 40 | 43 | 93.0 | — |
 | css-color | 221 | 282 | 78.4 | — |
 | css-position | 28 | 36 | 77.8 | — |
-| **CSS2** (2.1 suite) | 2601 | 3351 | 77.6 | — |
+| **CSS2** (2.1 suite) | 2605 | 3351 | 77.7 | +4 |
 | html-forms | 15 | 21 | 71.4 | — |
 | css-text | 240 | 381 | 63.0 | — |
 | **css-flexbox** | 235 | 428 | 54.9 | **+86** |
@@ -49,7 +49,7 @@ Per suite (pass / total of that suite, inconclusive included in the total):
 | **css-align** | 13 | 29 | 44.8 | **+6** |
 | css-cascade | 14 | 32 | 43.8 | — |
 | css-backgrounds | 60 | 144 | 41.7 | — |
-| **css-grid** | 281 | 749 | 37.5 | **+25** |
+| **css-grid** | 283 | 749 | 37.8 | **+27** |
 | css-values | 34 | 93 | 36.6 | — |
 | css-sizing | 37 | 109 | 33.9 | — |
 
@@ -181,12 +181,14 @@ discarded rather than mis-applied): every pseudo-class outside
 relative), bidi reordering, UAX-14 line breaking, `display: contents`,
 multi-column, writing modes.
 
-**Positioning:** the containing block an absolutely positioned box resolves
-against is the ancestor's PADDING box (CSS2.1 §10.1); we hand it
-`(content_x, border_box_top)` — the content edge horizontally, the border edge
-vertically. So `top: 0` lands a border-width too high and `left: 0` a padding
-too far right. Found from a flex reftest whose *reference* positions its boxes
-absolutely; fixing it moves every abspos box, so it wants its own step.
+**Paint order:** the display list is flat and painted in emission order, with
+two escapes: an explicit `z-index` range, and — since 0.1.71 — a float layer.
+Still flat inside those, so Appendix E's step 6 is only approximated: a
+`z-index: 0` positioned box does NOT rise above a float or above in-flow
+content it follows in the document. Making it would need `z-index: auto` boxes
+to keep participating in the parent's ordering while positioned boxes hoist,
+which a single flat list with disjoint ranges cannot express — a real stacking
+tree is the fix, and it is a rewrite of `reorder_by_z`.
 
 **Tables:** a row with no cells is dropped in `collect_table_rows`, so it
 contributes no height — an empty `<tr>` used as a spacer collapses away.
@@ -341,6 +343,26 @@ menu to pick from.
     carrying a `background-color`, and we do not paint backgrounds on inline
     boxes. Both sides used to paint nothing; now the test side is right and the
     reference is the one with the hole.
+
+17. ✅ **Floats paint above the in-flow boxes around them, and the containing
+    block is the padding box.** Two small positioning fixes from one real page
+    (+6, no losses).
+
+    The float one came from a device report: on de.wikipedia, `div.mw-heading`'s
+    `border-bottom` rule was drawn straight across the floated infobox. Root:
+    the display list is painted in emission order, and the heading comes later
+    in the document — but CSS2.1 Appendix E puts non-positioned floats (step 4)
+    ABOVE in-flow block boxes (step 3). Floats now record their op range with a
+    paint layer, reusing the `z-index` reorder machinery with `(z, layer)` as
+    the sort key. **`z-index: auto` must stay untracked**: a tracked range is
+    our stand-in for a stacking context, and tracking a `position: relative`
+    wrapper made it swallow its children's ranges so their z-indexes stopped
+    ordering against each other at all (−10 before that was understood).
+
+    The containing block a positioned box establishes is its **padding** box
+    (§10.1); we were handing out the content edge horizontally and the border
+    edge vertically. `padding_cb` now backs out to the padding edges, and
+    `definite_cb_height` subtracts the border under `box-sizing: border-box`.
 
 **C — the big structural blocks (oracle-heavy)**
 

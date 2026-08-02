@@ -738,8 +738,11 @@ struct Ctx<'a> {
     /// per box (CSS2.1 §9.9). `layout()` stable-sorts by `z_index` at the end
     /// so negative levels paint behind, positive ones in front, and everything
     /// else (`auto`/untracked) keeps its in-order position.
-    stack_ops: Vec<(i32, usize, usize)>,
-    stack_links: Vec<(i32, usize, usize)>,
+    /// `(z-index, paint layer, op_start, op_end)`. The layer separates the
+    /// sub-orders CSS2.1 Appendix E puts INSIDE one z-index: in-flow block
+    /// boxes paint below floats, and floats below positioned boxes.
+    stack_ops: Vec<(i32, i32, usize, usize)>,
+    stack_links: Vec<(i32, i32, usize, usize)>,
     /// How many out-of-flow boxes have been laid out so far, split by whether
     /// they escape a positioned ancestor. `overflow: hidden` compares these
     /// across its content to see whether anything inside it left its clip's
@@ -829,18 +832,23 @@ impl Ctx<'_> {
     /// Whether `st` should open a new tracked stacking range right now: it is
     /// positioned, has an explicit `z-index`, and isn't already nested inside
     /// another tracked range.
+    ///
+    /// **`z-index: auto` must stay untracked.** A tracked range is our stand-in
+    /// for a stacking context, and `auto` does not establish one: tracking a
+    /// `position: relative` wrapper made it swallow its children's ranges, so
+    /// their z-indexes stopped ordering against each other at all.
     fn should_track_stack(&self, st: &ComputedStyle) -> bool {
         st.position != Position::Static && matches!(st.z_index, ZIndex::Value(_)) && self.stack_depth == 0
     }
 
     /// Record one box's emitted `ops[op_start..op_end]` / `links[link_start..
     /// link_end]` as its own stacking-order unit. Empty ranges are skipped.
-    fn record_stack_entry(&mut self, z: i32, op_start: usize, op_end: usize, link_start: usize, link_end: usize) {
+    fn record_stack_entry(&mut self, z: i32, layer: i32, op_start: usize, op_end: usize, link_start: usize, link_end: usize) {
         if op_end > op_start {
-            self.stack_ops.push((z, op_start, op_end));
+            self.stack_ops.push((z, layer, op_start, op_end));
         }
         if link_end > link_start {
-            self.stack_links.push((z, link_start, link_end));
+            self.stack_links.push((z, layer, link_start, link_end));
         }
     }
 
@@ -906,29 +914,42 @@ fn display_name(d: Display) -> &'static str {
 /// relative position (a plain stable sort with untracked spans implicitly
 /// keyed `0`). Ranges must be non-overlapping (guaranteed by `stack_depth`
 /// gating at collection time).
-fn reorder_by_z<T>(items: Vec<T>, ranges: &[(i32, usize, usize)]) -> Vec<T> {
+/// Paint layers WITHIN one z-index (CSS2.1 Appendix E, steps 3 and 4): in-flow
+/// block boxes, then non-positioned floats. Untracked spans of the display list
+/// are in-flow content and take layer 0, which is what lifts a float above the
+/// block backgrounds and borders emitted after it. A `z-index: 0` box stays in
+/// layer 0 too: Appendix E would paint it above floats (step 6), but hoisting
+/// it above in-flow content it merely follows in the document breaks more than
+/// the overlap it fixes.
+/// In-flow content — every untracked span of the list, and an explicit
+/// `z-index` range, which orders by its `z` and keeps document order at 0.
+const LAYER_IN_FLOW: i32 = 0;
+/// Non-positioned floats: above the in-flow block boxes around them.
+const LAYER_FLOAT: i32 = 1;
+
+fn reorder_by_z<T>(items: Vec<T>, ranges: &[(i32, i32, usize, usize)]) -> Vec<T> {
     if ranges.is_empty() {
         return items;
     }
     let mut sorted_ranges = ranges.to_vec();
-    sorted_ranges.sort_by_key(|r| r.1); // by start — already ascending, but be safe
+    sorted_ranges.sort_by_key(|r| r.2); // by start — already ascending, but be safe
     let mut it = items.into_iter();
     let mut cursor = 0usize;
-    let mut blocks: Vec<(i32, Vec<T>)> = Vec::new();
-    for (z, start, end) in sorted_ranges {
+    let mut blocks: Vec<((i32, i32), Vec<T>)> = Vec::new();
+    for (z, layer, start, end) in sorted_ranges {
         if start > cursor {
-            blocks.push((0, (&mut it).take(start - cursor).collect()));
+            blocks.push(((0, 0), (&mut it).take(start - cursor).collect()));
         }
-        blocks.push((z, (&mut it).take(end - start).collect()));
+        blocks.push(((z, layer), (&mut it).take(end - start).collect()));
         cursor = end;
     }
     let rest: Vec<T> = it.collect();
     if !rest.is_empty() {
-        blocks.push((0, rest));
+        blocks.push(((0, 0), rest));
     }
-    // Stable: equal-`z` blocks (all the untracked spans + any explicit
-    // `z-index: 0`) keep the relative order they were built in above.
-    blocks.sort_by_key(|(z, _)| *z);
+    // Stable: blocks with the same (z, layer) — all the untracked in-flow spans,
+    // and any explicit `z-index: 0` — keep the relative order built above.
+    blocks.sort_by_key(|(k, _)| *k);
     blocks.into_iter().flat_map(|(_, v)| v).collect()
 }
 
@@ -1340,7 +1361,22 @@ impl Ctx<'_> {
                 // float doesn't collapse with it, but it doesn't ignore it
                 // either. `open` stays untouched: the float is out of flow, so
                 // the next in-flow block still collapses through it.
+                // A float paints ABOVE the in-flow block boxes around it and
+                // below anything positioned (Appendix E). Recording its range
+                // is what stops a later sibling's border — MediaWiki's
+                // `div.mw-heading` rule, say — from being drawn across it.
+                // Only at depth 0: the ranges must stay disjoint, and a float
+                // inside a tracked range is already covered by that one.
+                let track = self.stack_depth == 0;
+                let (fop0, flink0) = (self.ops.len(), self.links.len());
+                if track {
+                    self.stack_depth += 1;
+                }
                 self.place_float(el, &st, x, w, anchor + open.value() as i32);
+                if track {
+                    self.stack_depth -= 1;
+                    self.record_stack_entry(0, LAYER_FLOAT, fop0, self.ops.len(), flink0, self.links.len());
+                }
                 continue;
             }
             if matches!(st.display, Display::Inline | Display::InlineBlock) {
@@ -1419,7 +1455,7 @@ impl Ctx<'_> {
             }
             if track {
                 if let ZIndex::Value(z) = st.z_index {
-                    self.record_stack_entry(z, op0, self.ops.len(), link0, self.links.len());
+                    self.record_stack_entry(z, LAYER_IN_FLOW, op0, self.ops.len(), link0, self.links.len());
                 }
             }
             self.path.pop();
@@ -1591,10 +1627,11 @@ impl Ctx<'_> {
         }
 
         // A positioned block becomes the containing block for `absolute`
-        // descendants (border-box top ≈ `prov_top_y`).
+        // descendants — its PADDING box (§10.1). `prov_top_y` is the border-box
+        // top, so the padding edge is one border down.
         let prev_cb = self.cb;
         if st.position != Position::Static {
-            self.cb = (content_x, prov_top_y, content_w, definite_cb_height(st));
+            self.cb = padding_cb(st, content_x, prov_top_y + st.border_top.width as i32 + st.pad_top as i32, content_w);
         }
         let flow = if st.pre {
             let ly = child_anchor + child_incoming.value() as i32;
@@ -1965,7 +2002,7 @@ impl Ctx<'_> {
         }
         if track {
             if let ZIndex::Value(z) = st.z_index {
-                self.record_stack_entry(z, start, self.ops.len(), link_start, self.links.len());
+                self.record_stack_entry(z, LAYER_IN_FLOW, start, self.ops.len(), link_start, self.links.len());
             }
         }
         // The out-of-flow box, at its final (post-bottom-shift) position.
@@ -1995,7 +2032,7 @@ impl Ctx<'_> {
         if !st.overflow_clip || start >= self.ops.len() {
             return;
         }
-        if self.stack_ops.iter().any(|(_, _, e)| *e > start) {
+        if self.stack_ops.iter().any(|(_, _, _, e)| *e > start) {
             return;
         }
         // An out-of-flow descendant is clipped only by an ancestor in its
@@ -2033,7 +2070,7 @@ impl Ctx<'_> {
         // already ends at-or-before `bg_idx` is untouched (`e > bg_idx`,
         // strict — `e == bg_idx` means the insertion lands right after the
         // range, not inside it).
-        for (_, s, e) in &mut self.stack_ops {
+        for (_, _, s, e) in &mut self.stack_ops {
             if *s >= bg_idx {
                 *s += 1;
             }
@@ -3167,7 +3204,7 @@ impl Ctx<'_> {
 
         let prev_cb = self.cb;
         if st.position != Position::Static {
-            self.cb = (content_x, content_top, content_w, definite_cb_height(st));
+            self.cb = padding_cb(st, content_x, content_top, content_w);
         }
         let content_h = self.grid_content(el, st, content_x, content_w, content_top);
         self.cb = prev_cb;
@@ -3657,7 +3694,7 @@ impl Ctx<'_> {
 
         let prev_cb = self.cb;
         if st.position != Position::Static {
-            self.cb = (content_x, content_top, content_w, definite_cb_height(st));
+            self.cb = padding_cb(st, content_x, content_top, content_w);
         }
 
         // Definite container content height (for cross-stretch / main-axis flex).
@@ -5505,6 +5542,43 @@ mod tests {
     }
 
     #[test]
+    fn a_float_paints_above_later_block_borders() {
+        // MediaWiki's shape: a right-floated infobox, then headings whose
+        // `border-bottom` rule runs the full content width. The rule is a later
+        // in-flow block box, so it must paint UNDER the float (CSS2.1 Appendix
+        // E: in-flow blocks, then floats) — otherwise it is drawn straight
+        // across the table.
+        let l = lay(
+            "<body><style>\
+             .box{float:right;width:100px;height:200px;background:#00f}\
+             h2{border-bottom:1px solid #f00;margin:0}\
+             </style><div class=box></div><h2>A</h2><h2>B</h2></body>",
+            400,
+        );
+        let idx = |c: Rgb| l.ops.iter().position(|o| matches!(o, DrawOp::Rect { color, .. } if *color == c));
+        let float_at = idx(Rgb(0, 0, 0xff)).expect("float background");
+        let rule_at = idx(Rgb(0xff, 0, 0)).expect("heading rule");
+        assert!(float_at > rule_at, "float must paint after the heading rules ({float_at} vs {rule_at})");
+        // A raised z-index still wins over the float layer …
+        let over = |z: &str| {
+            let l = lay(
+                &format!(
+                    "<body><style>\
+                     .box{{float:right;width:100px;height:200px;background:#00f}}\
+                     .over{{position:relative;z-index:{z};width:50px;height:50px;background:#0f0}}\
+                     </style><div class=box></div><div class=over></div></body>"
+                ),
+                400,
+            );
+            let idx = |c: Rgb| l.ops.iter().position(|o| matches!(o, DrawOp::Rect { color, .. } if *color == c));
+            idx(Rgb(0, 0xff, 0)).unwrap() > idx(Rgb(0, 0, 0xff)).unwrap()
+        };
+        assert!(over("1"), "z-index:1 paints above a float");
+        // … and a negative one still loses to it.
+        assert!(!over("-1"), "z-index:-1 paints below a float");
+    }
+
+    #[test]
     fn cells_cascade_from_their_row() {
         let red = Rgb(0xff, 0, 0);
         let table = |css: &str| {
@@ -6294,9 +6368,24 @@ fn vert_len(len: Len, cbh: Option<i32>) -> Option<f32> {
 fn definite_cb_height(st: &ComputedStyle) -> Option<i32> {
     let pad_v = st.pad_top as i32 + st.pad_bottom as i32;
     match st.height {
-        // `box-sizing:border-box` → the used height already spans the padding.
-        Len::Px(h) if st.box_border => Some(h as i32),
+        // `box-sizing:border-box` → the used height already spans padding AND
+        // border, so the padding box is that minus the border.
+        Len::Px(h) if st.box_border => Some((h as i32 - st.border_y() as i32).max(0)),
         Len::Px(h) => Some(h as i32 + pad_v),
         _ => None,
     }
+}
+
+/// The containing block a positioned box establishes for its absolutely
+/// positioned descendants: its **padding** box, not its content box (CSS2.1
+/// §10.1). Given the box's content origin and width, back out to the padding
+/// edges — `top: 0` sits just inside the border, and `left: 0` at the padding
+/// edge, so a padded container does not push its abspos children inwards.
+fn padding_cb(st: &ComputedStyle, content_x: i32, content_top: i32, content_w: i32) -> (i32, i32, i32, Option<i32>) {
+    (
+        content_x - st.pad_left as i32,
+        content_top - st.pad_top as i32,
+        content_w + (st.pad_left + st.pad_right) as i32,
+        definite_cb_height(st),
+    )
 }
