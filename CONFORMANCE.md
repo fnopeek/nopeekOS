@@ -22,14 +22,14 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-02, beak 0.1.68)
+### Current number (measured 2026-08-02, beak 0.1.69)
 
 ```
-3745 pass / 1842 fail / 199 inconclusive   (of 5786 vendored reftests)
+3746 pass / 1841 fail / 199 inconclusive   (of 5786 vendored reftests)
 = 67.0 % of the conclusive 5587
 ```
 
-Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → **3745**. The inconclusive
+Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → **3746**. The inconclusive
 count fell 254 → 199 over that span: references that used to render blank —
 because `:root` was dropped, or because an `inline-block` had no box — now
 paint, so 55 more tests actually measure something.
@@ -41,7 +41,7 @@ Per suite (pass / total of that suite, inconclusive included in the total):
 | css-fonts | 40 | 43 | 93.0 | — |
 | css-color | 221 | 282 | 78.4 | — |
 | **css-position** | 28 | 36 | 77.8 | **+19** |
-| **CSS2** (2.1 suite) | 2600 | 3351 | 77.6 | +2 |
+| **CSS2** (2.1 suite) | 2601 | 3351 | 77.6 | +3 |
 | html-forms | 15 | 21 | 71.4 | — |
 | css-text | 240 | 381 | 63.0 | — |
 | css-display | 44 | 88 | 50.0 | — |
@@ -181,6 +181,12 @@ discarded rather than mis-applied): every pseudo-class outside
 relative), bidi reordering, UAX-14 line breaking, `display: contents`,
 multi-column, writing modes.
 
+**Tables:** a row with no cells is dropped in `collect_table_rows`, so it
+contributes no height — an empty `<tr>` used as a spacer collapses away.
+Costs `border-collapse-empty-row`, whose reference models those spacers as
+thicker collapsed borders (it only started rendering right once `tr:not(
+:last-child) td` began matching, see 11b).
+
 **Paint:** an inline box paints no background and no border — only its text.
 `paint_box_decoration` runs off a block box's resolved geometry, and an inline
 box has none of its own (its fragments live in the line boxes). Costs
@@ -269,6 +275,34 @@ menu to pick from.
     (css-display-3 §2.7). It aligns on **its last line box's baseline**
     (§10.8.1) — bottom margin edge only when it has no line box or clips its
     overflow; the six `inline-block-baseline-*` tests measure exactly that.
+11b. ✅ **Table cells cascade from their row.** `cell_style` resolved a cell
+    with the TABLE's style as its parent, an empty sibling list, and nothing
+    between table and cell on the ancestor path — so `tbody tr td` matched
+    nothing, `td:first-child` matched everything, and a `tr { color }` never
+    reached its cells. A cell's style is now settled once, while the row is
+    collected, with the row on the path and its siblings known; `Row` carries
+    it, so measurement and layout read the same value instead of re-resolving
+    it four times. `push_row_path` puts the row and its group on the path for
+    both — a cell's descendants must see the same ancestor chain either way,
+    or the widths drift ([[feedback-intrinsic-shared-path]]).
+
+    **WPT barely notices this (+2/−1 net) — the real web is the point.** What
+    it did expose is that the *references* of three table tests started
+    rendering correctly, which is where two of the three changes below came
+    from. Worth remembering when a fidelity fix looks oracle-neutral: check
+    whether it moved the reference side.
+
+11c. ✅ **Collapsed borders: rows and row groups take part.** `collapsed_edge`
+    compared the cell with the neighbouring cell or the table and nothing
+    else, and `border-style: hidden` was folded into `width: 0` — identical to
+    `none`. `BorderSide` now carries `hidden`, which wins over every other
+    candidate at a grid line (CSS2.1 §17.6.2 rule 1), and a cell's four edges
+    resolve against its row and its row group as well. `tr`/`tbody`/`thead`/
+    `tfoot { border-style: hidden }` therefore suppresses its cells' borders:
+    `border-conflict-style-101/104/105/106`. `102/103` need `<col>`/
+    `<colgroup>`, which we do not build at all. The rest of the priority chain
+    (style rank, then element rank) still only kicks in at equal width.
+
 11. ✅ **Sibling context for flex items, grid items and inline children.**
     `layout_flex`, `layout_grid` and `collect_inline` resolved child styles with
     `self.styled(ce, st, &[], 0)` — empty preceding-siblings, sibling count 0 —

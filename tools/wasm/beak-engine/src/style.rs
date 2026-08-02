@@ -263,6 +263,11 @@ pub enum FlexBasis {
 pub struct BorderSide {
     pub width: f32,
     pub color: Option<Rgb>,
+    /// `border-style: hidden`. Paints exactly like `none` on its own box, but
+    /// in a collapsed table it is not the same thing: `hidden` SUPPRESSES the
+    /// grid line it meets, beating every other border there (CSS2.1 §17.6.2
+    /// rule 1), while `none` is merely the weakest candidate.
+    pub hidden: bool,
 }
 
 /// A CSS length keyword/value for the box model. `Auto` means "auto" (for
@@ -1850,6 +1855,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 ].into_iter().zip(t4) {
                     if tok == "none" || tok == "hidden" {
                         side.width = 0.0;
+                        side.hidden = tok == "hidden";
                     }
                 }
             }
@@ -1864,12 +1870,14 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         "border-left-color" => s.border_left.color = parse_color(&v, theme).or(s.border_left.color),
         "border-top-style" | "border-right-style" | "border-bottom-style" | "border-left-style" => {
             if v == "none" || v == "hidden" {
-                match prop {
-                    "border-top-style" => s.border_top.width = 0.0,
-                    "border-right-style" => s.border_right.width = 0.0,
-                    "border-bottom-style" => s.border_bottom.width = 0.0,
-                    _ => s.border_left.width = 0.0,
-                }
+                let side = match prop {
+                    "border-top-style" => &mut s.border_top,
+                    "border-right-style" => &mut s.border_right,
+                    "border-bottom-style" => &mut s.border_bottom,
+                    _ => &mut s.border_left,
+                };
+                side.width = 0.0;
+                side.hidden = v == "hidden";
             }
         }
 
@@ -2319,9 +2327,13 @@ fn set_side_width(side: &mut BorderSide, v: &str, u: Units) {
 /// no explicit colour uses `currentColor` (the element's `color`).
 fn parse_border_shorthand(v: &str, u: Units, theme: &Theme, current: Rgb) -> BorderSide {
     let (mut width, mut color, mut none, mut styled) = (None, None, false, false);
+    let mut hidden = false;
     for tok in css_tokens(v) {
         match tok {
-            "none" | "hidden" => none = true,
+            "none" | "hidden" => {
+                none = true;
+                hidden |= tok == "hidden";
+            }
             "thin" => {
                 width = Some(1.0);
                 styled = true;
@@ -2347,12 +2359,12 @@ fn parse_border_shorthand(v: &str, u: Units, theme: &Theme, current: Rgb) -> Bor
         }
     }
     if none {
-        return BorderSide { width: 0.0, color: None };
+        return BorderSide { width: 0.0, color: None, hidden };
     }
     // `border-width` initial is 'medium' (3px) once a border is otherwise given.
     let w = width.unwrap_or(if styled || color.is_some() { 3.0 } else { 0.0 });
     let c = color.or(if w > 0.0 { Some(current) } else { None });
-    BorderSide { width: w, color: c }
+    BorderSide { width: w, color: c, hidden }
 }
 
 /// Expand 1–4 CSS box-side tokens into [top, right, bottom, left].
