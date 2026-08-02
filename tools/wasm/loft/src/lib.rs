@@ -1038,8 +1038,6 @@ fn search_input(query: &str) -> Widget {
                 modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceMuted)],
             },
             raw,
-            Widget::Spacer { flex: 1 },
-            kbd("⌘F"),
         ],
         spacing:   Spacing::Sm.as_u16(),
         align:     Align::Center,
@@ -1055,20 +1053,6 @@ fn search_input(query: &str) -> Widget {
                 Modifier::Border { token: Token::Accent, width: 1, radius: Radius::Md.as_u8() },
                 Modifier::Ring { token: Token::AccentRing, width: 3 },
             ]),
-        ],
-    }
-}
-
-/// Keyboard-shortcut badge — a small mono chip on `SurfaceHover`.
-fn kbd(keys: &str) -> Widget {
-    Widget::Text {
-        content:   keys.to_string(),
-        style:     TextStyle::Mono,
-        modifiers: alloc::vec![
-            Modifier::Padding(Padding::Xxs.as_u16()),
-            Modifier::Background(Token::SurfaceHover),
-            Modifier::Rounded(Radius::Sm.as_u8()),
-            Modifier::Tint(Token::OnSurfaceFaint),
         ],
     }
 }
@@ -1135,23 +1119,42 @@ fn render_body(lf: &Loft) -> Widget {
         if is_device(&p.label) { devices_rows.push(row); }
         else { places_rows.push(row); }
     }
+    // Sections scroll; the capacity meter is a fixed footer BELOW that
+    // scroll, so it stays glued to the bottom edge at any window height.
+    // Putting it inside the scrolled column (or leaning on
+    // `prefab::sidebar_pane`, which appends its own trailing Spacer)
+    // left it floating in the middle of the leftover space.
+    let sections = Widget::Column {
+        children:  alloc::vec![
+            prefab::sidebar_section("PLACES",  places_rows),
+            prefab::sidebar_section("DEVICES", devices_rows),
+        ],
+        spacing:   Spacing::None.as_u16(),
+        align:     Align::Stretch,
+        modifiers: alloc::vec![],
+    };
     let mut pane: Vec<Widget> = alloc::vec![
-        prefab::sidebar_section("PLACES",  places_rows),
-        prefab::sidebar_section("DEVICES", devices_rows),
+        Widget::Scroll {
+            child:     alloc::boxed::Box::new(sections),
+            axis:      Axis::Vertical,
+            // Flex(1) is what pins the footer down: the scroll swallows
+            // all leftover height instead of the meter drifting up.
+            modifiers: alloc::vec![Modifier::Flex(1)],
+        },
     ];
-    // Capacity meter pinned to the foot of the pane.
     if let Some(meter) = storage_meter() {
-        pane.push(Widget::Spacer { flex: 1 });
         pane.push(meter);
     }
-    let sidebar = prefab::sidebar_pane(pane);
-    // Also scroll the sidebar so a long PLACES/DEVICES list can never push
-    // the footer off-screen either; its overlay bar only appears if it
-    // actually overflows (usually it doesn't).
-    let sidebar = Widget::Scroll {
-        child:     alloc::boxed::Box::new(sidebar),
-        axis:      Axis::Vertical,
-        modifiers: alloc::vec![],
+    let sidebar = Widget::Column {
+        children:  pane,
+        spacing:   Spacing::Xs.as_u16(),
+        align:     Align::Stretch,
+        modifiers: alloc::vec![
+            Modifier::Background(Token::SurfaceMuted),
+            Modifier::Padding(Padding::Xs.as_u16()),
+            Modifier::MinWidth(SIDEBAR_W),
+            Modifier::MaxWidth(SIDEBAR_W),
+        ],
     };
 
     // Content — filtered grid OR list, plus two empty states
@@ -1384,6 +1387,8 @@ fn list_cell_text(text: &str, min_w: u16) -> Widget {
     }
 }
 
+/// Sidebar width from the design (UI_REFRESH.md §5).
+const SIDEBAR_W:    u16 = 176;
 const FIELD_H:      u16 = 30;
 const HEADER_ROW_H: u16 = 30;
 const DATA_ROW_H:   u16 = 34;

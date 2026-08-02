@@ -39,16 +39,18 @@ const LIGHT_TERMINAL_OPACITY_DROP: u32 = 56;
 /// the top-right corner of every real (non-panel) window so mouse users
 /// can close it without remembering Mod+Q. Not per-app: provided here
 /// once for all windows. Edge of the (square) hit box at 1× scale.
-const CLOSE_BTN_BOX: u32 = 22;
+const CLOSE_BTN_BOX: u32 = 26;
 /// Assumed height of the app's top menu/toolbar band (loft/spell:
 /// `Datei Bearbeiten …`) at 1× — the X is vertically centred in this
 /// band so it lines up with the menu labels instead of clinging to the
 /// very top edge. Windows without a menu bar (browser, terminal) just
 /// get the X centred in their top ~band; close enough.
-const CLOSE_BTN_BAND: u32 = 40;
-/// White close X glyph size at 1× (no disc → a touch larger than the
-/// old 16 so the bare glyph reads as a button).
-const CLOSE_BTN_GLYPH: u32 = 20;
+const CLOSE_BTN_BAND: u32 = 36;
+/// Close-X glyph size at 1×. MUST be an atlas-native size (16/24/32/…):
+/// `icons::alpha_for` returns the nearest-not-smaller bitmap and the
+/// blit below uses THAT size verbatim, so asking for 20 silently drew a
+/// 24 px X — a quarter larger than intended.
+const CLOSE_BTN_GLYPH: u32 = 16;
 
 /// The platform close-X is a FIXED pixel size — it never tracks the screen
 /// HiDPI scale. Widget apps render their UI at fixed px (the widget rasterizer
@@ -172,14 +174,17 @@ pub fn clear_chrome_cache() {
 }
 
 /// `render_window` so it sits over the window content. No disc / colour
-/// highlight (Florian's call): just the glyph, a touch larger so it reads
-/// as a button. The glyph takes the theme's `OnSurface` colour so it stays
-/// visible in light mode (dark X) as well as dark mode (light X).
+/// highlight (Florian's call): just the glyph, sized and coloured like
+/// the design's `close` — 16 px in a 26 px box, `OnSurfaceMuted`, so it
+/// carries the same weight as the menu labels beside it and flips with
+/// the theme (dark X on light, light X on dark).
 fn draw_close_button(shadow: *mut u8, info: &FbInfo, win: &Window,
                      border: u32, scale: u32) {
     let Some((bx, by, bw, bh)) = close_button_rect(win, border, scale) else { return };
     use crate::shade::widgets::abi::{IconId, Token};
-    let color = crate::shade::widgets::palette::resolve(Token::OnSurface) & 0x00FF_FFFF;
+    // Secondary text weight, like every other piece of window chrome —
+    // the close button shouldn't outshout the menu labels next to it.
+    let color = crate::shade::widgets::palette::resolve(Token::OnSurfaceMuted) & 0x00FF_FFFF;
     let req = CLOSE_BTN_GLYPH * close_btn_scale(win, scale);
     if let Some((asz, glyph)) = crate::gui::icons::alpha_for(IconId::X, req as u16) {
         let asz = asz as u32;
