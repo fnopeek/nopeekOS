@@ -743,6 +743,13 @@ struct Ctx<'a> {
     /// boxes paint below floats, and floats below positioned boxes.
     stack_ops: Vec<(i32, i32, usize, usize)>,
     stack_links: Vec<(i32, i32, usize, usize)>,
+    /// Op / link ranges emitted by non-positioned floats. Kept apart from
+    /// `stack_ops` because a float MAY sit inside a tracked z-index range —
+    /// MediaWiki wraps a whole article in one — and `reorder_by_z` needs
+    /// disjoint ranges. `split_float_ranges` merges the two at the end by
+    /// cutting the enclosing range around the float.
+    float_ops: Vec<(usize, usize)>,
+    float_links: Vec<(usize, usize)>,
     /// How many out-of-flow boxes have been laid out so far, split by whether
     /// they escape a positioned ancestor. `overflow: hidden` compares these
     /// across its content to see whether anything inside it left its clip's
@@ -760,6 +767,8 @@ struct Ctx<'a> {
     /// another explicit `z-index`, are out of scope — sibling ordering is
     /// the common case these reftests need).
     stack_depth: u32,
+    /// Nesting guard for float ranges, independent of `stack_depth`.
+    float_depth: u32,
     /// The list counter for the `display:list-item` box about to be laid out.
     /// `flow_children` owns one counter per child run and stamps it here right
     /// before descending, so the marker code reads the right ordinal without
@@ -927,6 +936,53 @@ const LAYER_IN_FLOW: i32 = 0;
 /// Non-positioned floats: above the in-flow block boxes around them.
 const LAYER_FLOAT: i32 = 1;
 
+/// Merge the float ranges into the tracked z-index ranges so `reorder_by_z`
+/// still sees a disjoint, ascending list. A float inside a tracked range would
+/// otherwise overlap it — so that range is CUT around the float: the pieces
+/// keep the parent's `(z, layer)` and the float becomes `(parent z, float
+/// layer)`, which sorts it to the end of that parent's group and nowhere else.
+/// A float outside every range is simply `(0, float layer)`.
+fn split_float_ranges(
+    stacks: &[(i32, i32, usize, usize)],
+    floats: &[(usize, usize)],
+) -> Vec<(i32, i32, usize, usize)> {
+    if floats.is_empty() {
+        return stacks.to_vec();
+    }
+    let mut out: Vec<(i32, i32, usize, usize)> = Vec::with_capacity(stacks.len() + floats.len() * 2);
+    let mut taken = alloc::vec![false; floats.len()];
+    for &(z, layer, s, e) in stacks {
+        // Tracked ranges never nest (see `should_track_stack`), so each float
+        // lands in at most one of them.
+        let mut inner: Vec<(usize, usize)> = Vec::new();
+        for (i, &(fs, fe)) in floats.iter().enumerate() {
+            if !taken[i] && fs >= s && fe <= e {
+                taken[i] = true;
+                inner.push((fs, fe));
+            }
+        }
+        inner.sort_unstable();
+        let mut cursor = s;
+        for (fs, fe) in inner {
+            if fs > cursor {
+                out.push((z, layer, cursor, fs));
+            }
+            out.push((z, LAYER_FLOAT, fs, fe));
+            cursor = fe;
+        }
+        if cursor < e {
+            out.push((z, layer, cursor, e));
+        }
+    }
+    for (i, &(fs, fe)) in floats.iter().enumerate() {
+        if !taken[i] {
+            out.push((0, LAYER_FLOAT, fs, fe));
+        }
+    }
+    out.sort_unstable_by_key(|r| r.2);
+    out
+}
+
 fn reorder_by_z<T>(items: Vec<T>, ranges: &[(i32, i32, usize, usize)]) -> Vec<T> {
     if ranges.is_empty() {
         return items;
@@ -995,7 +1051,10 @@ pub fn layout(
         floats: Vec::new(),
         stack_ops: Vec::new(),
         stack_links: Vec::new(),
+        float_ops: Vec::new(),
+        float_links: Vec::new(),
         stack_depth: 0,
+        float_depth: 0,
         marker_ord: 0,
         counters: Counters::default(),
         inspect,
@@ -1041,10 +1100,12 @@ pub fn layout(
     #[cfg(feature = "diag-boxes")]
     {
         extern crate std;
-        std::eprintln!("[stack] ops={} ranges={:?}", ctx.ops.len(), ctx.stack_ops);
+        std::eprintln!("[stack] ops={} ranges={:?} floats={:?}", ctx.ops.len(), ctx.stack_ops, ctx.float_ops);
     }
-    let ops = reorder_by_z(ctx.ops, &ctx.stack_ops);
-    let links = reorder_by_z(ctx.links, &ctx.stack_links);
+    let op_ranges = split_float_ranges(&ctx.stack_ops, &ctx.float_ops);
+    let link_ranges = split_float_ranges(&ctx.stack_links, &ctx.float_links);
+    let ops = reorder_by_z(ctx.ops, &op_ranges);
+    let links = reorder_by_z(ctx.links, &link_ranges);
     Layout {
         ops,
         links,
@@ -1361,21 +1422,27 @@ impl Ctx<'_> {
                 // float doesn't collapse with it, but it doesn't ignore it
                 // either. `open` stays untouched: the float is out of flow, so
                 // the next in-flow block still collapses through it.
-                // A float paints ABOVE the in-flow block boxes around it and
-                // below anything positioned (Appendix E). Recording its range
-                // is what stops a later sibling's border — MediaWiki's
-                // `div.mw-heading` rule, say — from being drawn across it.
-                // Only at depth 0: the ranges must stay disjoint, and a float
-                // inside a tracked range is already covered by that one.
-                let track = self.stack_depth == 0;
+                // A float paints ABOVE the in-flow block boxes around it
+                // (Appendix E steps 3/4). Recording its range is what stops a
+                // later sibling's border — MediaWiki's `div.mw-heading` rule,
+                // say — from being drawn across it. `stack_depth` bounds the
+                // NESTING (a float inside a float is covered by the outer one),
+                // not whether we record at all: the enclosing z-index range, if
+                // any, gets cut around this one at the end.
+                let track = self.float_depth == 0;
                 let (fop0, flink0) = (self.ops.len(), self.links.len());
                 if track {
-                    self.stack_depth += 1;
+                    self.float_depth += 1;
                 }
                 self.place_float(el, &st, x, w, anchor + open.value() as i32);
                 if track {
-                    self.stack_depth -= 1;
-                    self.record_stack_entry(0, LAYER_FLOAT, fop0, self.ops.len(), flink0, self.links.len());
+                    self.float_depth -= 1;
+                    if self.ops.len() > fop0 {
+                        self.float_ops.push((fop0, self.ops.len()));
+                    }
+                    if self.links.len() > flink0 {
+                        self.float_links.push((flink0, self.links.len()));
+                    }
                 }
                 continue;
             }
@@ -2078,6 +2145,14 @@ impl Ctx<'_> {
                 *e += 1;
             }
         }
+        for (s, e) in &mut self.float_ops {
+            if *s >= bg_idx {
+                *s += 1;
+            }
+            if *e > bg_idx {
+                *e += 1;
+            }
+        }
     }
 
     /// Paint one border edge rect (the collapsed model draws grid lines
@@ -2643,6 +2718,7 @@ impl Ctx<'_> {
         // `reorder_by_z` (which needs disjoint ascending ranges) slices the
         // real display list at the wrong offsets.
         let (so, sl) = (self.stack_ops.len(), self.stack_links.len());
+        let (fo, flk) = (self.float_ops.len(), self.float_links.len());
         // Floats live on past the box that placed them, so a discarded layout
         // leaks exclusion rects into the real one: the next float finds a BFC
         // that looks full and drops below phantom neighbours.
@@ -2655,6 +2731,8 @@ impl Ctx<'_> {
         self.controls.truncate(c);
         self.stack_ops.truncate(so);
         self.stack_links.truncate(sl);
+        self.float_ops.truncate(fo);
+        self.float_links.truncate(flk);
         self.floats.truncate(fl);
         (bottom - y).max(0)
     }
@@ -2667,6 +2745,7 @@ impl Ctx<'_> {
             Cell::Anon(nodes) => {
                 let (o, l, c) = (self.ops.len(), self.links.len(), self.controls.len());
                 let (so, sl) = (self.stack_ops.len(), self.stack_links.len());
+                let (fo, flk) = (self.float_ops.len(), self.float_links.len());
                 let fl = self.floats.len();
                 let bottom = self.layout_children(nodes, st, None, x, w.max(0), y);
                 self.ops.truncate(o);
@@ -2674,6 +2753,8 @@ impl Ctx<'_> {
                 self.controls.truncate(c);
                 self.stack_ops.truncate(so);
                 self.stack_links.truncate(sl);
+                self.float_ops.truncate(fo);
+                self.float_links.truncate(flk);
                 self.floats.truncate(fl);
                 (bottom - y).max(0)
             }
@@ -3622,6 +3703,7 @@ impl Ctx<'_> {
         // `reorder_by_z` (which needs disjoint ascending ranges) slices the
         // real display list at the wrong offsets.
         let (so, sl) = (self.stack_ops.len(), self.stack_links.len());
+        let (fo, flk) = (self.float_ops.len(), self.float_links.len());
         // Floats live on past the box that placed them, so a discarded layout
         // leaks exclusion rects into the real one: the next float finds a BFC
         // that looks full and drops below phantom neighbours.
@@ -3635,6 +3717,8 @@ impl Ctx<'_> {
         self.controls.truncate(c);
         self.stack_ops.truncate(so);
         self.stack_links.truncate(sl);
+        self.float_ops.truncate(fo);
+        self.float_links.truncate(flk);
         self.floats.truncate(fl);
         self.cb = prev_cb;
         bottom - y
@@ -5576,7 +5660,46 @@ mod tests {
         assert!(over("1"), "z-index:1 paints above a float");
         // … and a negative one still loses to it.
         assert!(!over("-1"), "z-index:-1 paints below a float");
+        // The float layer has to work INSIDE a tracked z-index range too:
+        // MediaWiki wraps a whole article in one positioned container, which is
+        // why the first attempt (float ranges only at depth 0) fixed nothing on
+        // the real page. The enclosing range gets cut around the float instead.
+        let l = lay(
+            "<body><style>\
+             .wrap{position:relative;z-index:0}\
+             .box{float:right;width:100px;height:200px;background:#00f}\
+             h2{border-bottom:1px solid #f00;margin:0}\
+             </style><div class=wrap><div class=box></div><h2>A</h2></div></body>",
+            400,
+        );
+        let idx = |c: Rgb| l.ops.iter().position(|o| matches!(o, DrawOp::Rect { color, .. } if *color == c));
+        assert!(
+            idx(Rgb(0, 0, 0xff)) > idx(Rgb(0xff, 0, 0)),
+            "a float inside a positioned wrapper still paints above the rules in it"
+        );
     }
+
+#[test]
+fn dbg_wiki_shape() {
+    extern crate std;
+    // Wikipedia's shape: floated TABLE (not a div), then a heading with a rule.
+    let l = lay(
+        "<body><style>\
+         table.infobox{float:right;width:100px;background:#00f;border-collapse:collapse}\
+         td{height:100px;padding:0}\
+         .mw-heading{border-bottom:1px solid #f00;margin:0}\
+         </style><table class=infobox><tr><td>X</td></tr></table>\
+         <div class=mw-heading><h2>Head</h2></div><p>text</p></body>",
+        400,
+    );
+    for o in l.ops.iter() {
+        match o {
+            DrawOp::Rect { x, y, w, h, color } => std::println!("RECT {x} {y} {w} {h} {:?}", (color.0, color.1, color.2)),
+            DrawOp::Text { x, y, text, .. } => std::println!("TEXT {x} {y} {text}"),
+            _ => {}
+        }
+    }
+}
 
     #[test]
     fn cells_cascade_from_their_row() {

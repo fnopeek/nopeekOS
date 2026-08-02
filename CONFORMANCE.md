@@ -22,7 +22,7 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-02, beak 0.1.71)
+### Current number (measured 2026-08-02, beak 0.1.72)
 
 ```
 3869 pass / 1718 fail / 199 inconclusive   (of 5786 vendored reftests)
@@ -358,6 +358,16 @@ menu to pick from.
     our stand-in for a stacking context, and tracking a `position: relative`
     wrapper made it swallow its children's ranges so their z-indexes stopped
     ordering against each other at all (−10 before that was understood).
+
+    **And the float layer has to work INSIDE a tracked range** (0.1.72): the
+    first cut only recorded floats at nesting depth 0, which is WPT-neutral and
+    fixed nothing on the real page — MediaWiki wraps the whole article in one
+    positioned, z-indexed container, so every float on it sits at depth 1.
+    `split_float_ranges` now cuts the enclosing range around each float: the
+    pieces keep the parent's `(z, layer)`, the float becomes `(parent z, float
+    layer)`, and `reorder_by_z` still sees one disjoint ascending list. Verified
+    by rendering the real article and reading the pixel at the crossing:
+    `(162,169,177)` (the rule) → `(248,249,250)` (the infobox behind it).
 
     The containing block a positioned box establishes is its **padding** box
     (§10.1); we were handing out the content edge horizontally and the border
