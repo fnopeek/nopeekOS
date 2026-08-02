@@ -22,43 +22,42 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-07-31, beak 0.1.67)
+### Current number (measured 2026-08-02, beak 0.1.68)
 
 ```
-3723 pass / 1864 fail / 199 inconclusive   (of 5786 vendored reftests)
-= 66.6 % of the conclusive 5587
+3745 pass / 1842 fail / 199 inconclusive   (of 5786 vendored reftests)
+= 67.0 % of the conclusive 5587
 ```
 
-Session arc: 3682 (0.1.64) → 3683 → 3688 → **3723**. The inconclusive count
-fell 254 → 199 across the same span: references that used to render blank —
+Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → **3745**. The inconclusive
+count fell 254 → 199 over that span: references that used to render blank —
 because `:root` was dropped, or because an `inline-block` had no box — now
 paint, so 55 more tests actually measure something.
 
 Per suite (pass / total of that suite, inconclusive included in the total):
 
-| Suite | Pass | Total | % | vs 0.1.64 |
+| Suite | Pass | Total | % | vs 0.1.67 |
 |---|---|---|---|---|
 | css-fonts | 40 | 43 | 93.0 | — |
 | css-color | 221 | 282 | 78.4 | — |
-| **CSS2** (2.1 suite) | 2598 | 3351 | 77.5 | +18 |
+| **css-position** | 28 | 36 | 77.8 | **+19** |
+| **CSS2** (2.1 suite) | 2600 | 3351 | 77.6 | +2 |
 | html-forms | 15 | 21 | 71.4 | — |
-| css-text | 240 | 381 | 63.0 | −1 |
+| css-text | 240 | 381 | 63.0 | — |
 | css-display | 44 | 88 | 50.0 | — |
-| css-cascade | 14 | 32 | 43.8 | +1 |
-| css-backgrounds | 59 | 144 | 41.0 | +1 |
-| css-values | 34 | 93 | 36.6 | +1 |
-| **css-flexbox** | 149 | 428 | 34.8 | **+39** |
+| css-cascade | 14 | 32 | 43.8 | — |
+| css-backgrounds | 60 | 144 | 41.7 | +1 |
+| css-values | 34 | 93 | 36.6 | — |
+| css-flexbox | 149 | 428 | 34.8 | — |
 | css-grid | 256 | 749 | 34.2 | — |
 | css-sizing | 37 | 109 | 33.9 | — |
-| css-position | 9 | 36 | 25.0 | **−19** |
-| css-align | 7 | 29 | 24.1 | +1 |
+| css-align | 7 | 29 | 24.1 | — |
 
-**css-position dropped on purpose.** 19 of its tests were green only because
-neither side of the reftest painted anything: they position a `<tr>`/`<tbody>`
-with `position: relative` so its background covers a red marker, and we paint
-neither the marker (it sat inside an `inline-block` that had no box) nor the
-row background. Now the marker renders and the cover does not. The fix is
-named in bucket B below.
+**css-position 25.0 → 77.8 %** is bucket-B item 12 landing: rows, row groups
+and captions are boxes of their own now, so `position: relative` and a
+background work on them. It had dropped to 25 % at 0.1.67 for the honest
+reason — 19 of those tests had been green only because neither side of the
+reftest painted anything.
 
 Run it: `cargo test --release --manifest-path tools/wasm/beak-engine/Cargo.toml
 --test wpt -- --nocapture` (~5 min). Redirect to a log and wait on it rather
@@ -182,6 +181,12 @@ discarded rather than mis-applied): every pseudo-class outside
 relative), bidi reordering, UAX-14 line breaking, `display: contents`,
 multi-column, writing modes.
 
+**Paint:** an inline box paints no background and no border — only its text.
+`paint_box_decoration` runs off a block box's resolved geometry, and an inline
+box has none of its own (its fragments live in the line boxes). Costs
+`display-008/009` outright, and on the real web it is every highlighted or
+badged `<span>`.
+
 ## Priority buckets
 
 Ranked by (real-web damage × oracle reserve) ÷ effort. Not a schedule — a
@@ -274,15 +279,27 @@ menu to pick from.
     Still missing the same way: table cells (`cell_style`), the `<caption>`
     scan, the table-role probe, and `intrinsic_walk` — the last one matters
     because measurement and layout must agree.
-12. **`position: relative` + `background` on table rows and row groups** —
-    19 `css-position/position-relative-table-*` tests, the largest single block
-    left. `collect_table_rows` returns `Vec<Vec<Cell>>`, so the `<tr>` element
-    is thrown away and the row can be neither styled nor painted. Recipe:
-    carry `{ el: Option<&Element>, group: Option<&Element>, cells }` per row
-    (~20 mechanical call sites), resolve the row style WITH sibling context,
-    insert the row background behind its cells, and shift the row's op range by
-    `top`/`left`. A group's rows are already contiguous in the output, so the
-    same treatment covers `tbody`/`thead`/`tfoot`.
+12. ✅ **`position: relative` + `background` on table rows and row groups** —
+    **+24 tests, the whole `position-relative-table-*` family.**
+    `collect_table_rows` returned `Vec<Vec<Cell>>`, throwing the `<tr>` away, so
+    a row could be neither styled nor painted. It now yields `Row { el, group,
+    cells }`, each carrying its resolved style (with sibling context, so
+    `tr:nth-child(even)` stripes), and `lay_table_rows` closes a box around
+    every row and around each run of rows sharing a group: the background goes
+    in BEHIND the cells, then `position: relative` shifts the whole range —
+    cells, text and links together. A positioned row or group is also the
+    containing block its cells' abspos descendants resolve against, which is
+    what the `-absolute-child` half of the family measures. Cells and
+    `<caption>` got the same treatment (a caption is now laid out through
+    `layout_box`, so it takes a width, a background and an offset), and a row
+    or group set to `display: none` is dropped in `collect_table_rows` — the
+    one place both measurement and layout go through.
+
+    **The 2 losses are honest and of the same kind as the wins:**
+    `display-008/009` reproduce a row-group background with an *inline* box
+    carrying a `background-color`, and we do not paint backgrounds on inline
+    boxes. Both sides used to paint nothing; now the test side is right and the
+    reference is the one with the hole.
 
 **C — the big structural blocks (oracle-heavy)**
 

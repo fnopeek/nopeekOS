@@ -146,6 +146,31 @@ enum Cell<'a> {
     Anon(&'a [Node]),
 }
 
+/// One row of a table's grid, with the boxes it belongs to. Keeping the `<tr>`
+/// and its row group here (rather than returning bare cell lists) is what lets
+/// a row be styled at all: its own background, and `position: relative`, which
+/// moves the whole row — cells included — after it is laid out.
+struct Row<'a> {
+    /// The `<tr>`/`display:table-row` element and its resolved style. Absent
+    /// for an anonymous row wrapping stray content — no element, so no
+    /// selector can reach it and it paints nothing of its own.
+    el: Option<(&'a Element, ComputedStyle)>,
+    /// The `<tbody>`/`<thead>`/`<tfoot>` this row came from. Consecutive rows
+    /// carrying the same group form that group's box.
+    group: Option<(&'a Element, ComputedStyle)>,
+    cells: Vec<Cell<'a>>,
+}
+
+/// Where a table row / row group box began in the output. Everything emitted
+/// from here on belongs to it, which is what lets its background go BEHIND its
+/// cells and `position: relative` move the whole thing afterwards.
+#[derive(Clone, Copy)]
+struct TablePart {
+    op: usize,
+    link: usize,
+    ctl: usize,
+}
+
 /// One segment of a `flow_children` node list: either a single node laid out
 /// normally, or a maximal run of stray table-part siblings (CSS2 §17.2.1)
 /// laid out together as one anonymous `table` box. See `segment_table_runs`.
@@ -2098,8 +2123,20 @@ impl Ctx<'_> {
                 if cs.caption_bottom != bottom {
                     continue;
                 }
+                // A caption is a block-level box of its own, not a bare run of
+                // children: it takes a width/height, a background and a border,
+                // and `position: relative` moves it like any other box (the
+                // caller of `layout_box` normally applies that — here that
+                // caller is us).
                 self.path.push(ElemInfo::of(e));
-                y = self.layout_children(&e.children, &cs, Some(e), x, w, y);
+                let part = self.part_start();
+                y = self.layout_box(e, &cs, x, w, y);
+                if cs.position == Position::Relative {
+                    let (dx, dy) = rel_offset(&cs, w as f32);
+                    if dx != 0 || dy != 0 {
+                        self.shift_ops(part.op, self.ops.len(), part.link, self.links.len(), part.ctl, dx, dy);
+                    }
+                }
                 self.path.pop();
             }
         }
@@ -2114,8 +2151,8 @@ impl Ctx<'_> {
     /// only the row-collection step is shared.
     fn layout_table_body(&mut self, nodes: &[Node], st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
         let mut rows = self.collect_table_rows(nodes, st);
-        rows.retain(|r| !r.is_empty());
-        let ncols = rows.iter().map(|r| row_columns(r).1).max().unwrap_or(0).min(64);
+        rows.retain(|r| !r.cells.is_empty());
+        let ncols = rows.iter().map(|r| row_columns(&r.cells).1).max().unwrap_or(0).min(64);
         if ncols == 0 {
             return y0;
         }
@@ -2189,13 +2226,33 @@ impl Ctx<'_> {
         table_bottom
     }
 
+    fn part_start(&self) -> TablePart {
+        TablePart { op: self.ops.len(), link: self.links.len(), ctl: self.controls.len() }
+    }
+
+    /// Close a table row or row-group box around everything emitted since
+    /// `part`: its background goes behind that range, and `position: relative`
+    /// then moves box and content together. Rows and row groups take a
+    /// background but never a border — the separated model ignores border
+    /// properties on them (CSS2.1 §17.6.1), and the collapsed model resolves
+    /// every grid line at the cells.
+    fn finish_table_part(&mut self, cs: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, part: TablePart, cb_w: f32) {
+        self.insert_bg(cs, x, y, w, h, part.op);
+        if cs.position == Position::Relative {
+            let (dx, dy) = rel_offset(cs, cb_w);
+            if dx != 0 || dy != 0 {
+                self.shift_ops(part.op, self.ops.len(), part.link, self.links.len(), part.ctl, dx, dy);
+            }
+        }
+    }
+
     /// Auto table sizing (CSS2 §17.5.2.2, approximated): each column takes the
     /// widest cell's *border-box* preferred width (content + that cell's
     /// padding/border, or its explicit `width`). The table shrink-wraps to that,
     /// shrinking columns proportionally (never below their minimum) only when
     /// they overflow the available width; an explicit table `width` wider than
     /// the content spreads the slack across columns.
-    fn auto_columns(&mut self, rows: &[Vec<Cell>], ncols: usize, st: &ComputedStyle, w: i32) -> Vec<i32> {
+    fn auto_columns(&mut self, rows: &[Row], ncols: usize, st: &ComputedStyle, w: i32) -> Vec<i32> {
         let mut pref = vec![0.0f32; ncols];
         let mut minw = vec![0.0f32; ncols];
         // Single-column cells define their column outright; cells spanning
@@ -2203,8 +2260,8 @@ impl Ctx<'_> {
         // once the single-span widths are known.
         for pass_span in [false, true] {
             for row in rows {
-                let (starts, _) = row_columns(row);
-                for (i, cell) in row.iter().enumerate() {
+                let (starts, _) = row_columns(&row.cells);
+                for (i, cell) in row.cells.iter().enumerate() {
                     let c = starts[i];
                     let span = cell_span(cell);
                     if c >= ncols || (span > 1) != pass_span {
@@ -2231,7 +2288,7 @@ impl Ctx<'_> {
             for (c, p) in pref.iter().enumerate() {
                 let mut widest = (0.0f32, String::new());
                 for row in rows.iter() {
-                    if let Some(cell) = row.get(c) {
+                    if let Some(cell) = row.cells.get(c) {
                         let cs = self.cell_style(cell, st);
                         let (cp, _) = self.intrinsic_width_cell(cell, &cs);
                         if cp > widest.0 {
@@ -2269,13 +2326,13 @@ impl Ctx<'_> {
     /// from the first row's cell `width`s (each a *border-box* width), and the
     /// rest of the table's used width is split equally across the remaining
     /// columns; content never widens a column.
-    fn fixed_columns(&self, rows: &[Vec<Cell>], ncols: usize, st: &ComputedStyle, w: i32) -> Vec<i32> {
+    fn fixed_columns(&self, rows: &[Row], ncols: usize, st: &ComputedStyle, w: i32) -> Vec<i32> {
         let content_w = table_content_width(st, w as f32);
         // Per-column border-box width; None = "auto" (share the leftover).
         let mut fixed: Vec<Option<f32>> = vec![None; ncols];
         if let Some(first) = rows.first() {
-            let (starts, _) = row_columns(first);
-            for (i, cell) in first.iter().enumerate() {
+            let (starts, _) = row_columns(&first.cells);
+            for (i, cell) in first.cells.iter().enumerate() {
                 let c = starts[i];
                 // A first-row cell that spans columns doesn't pin any single
                 // one of them (CSS2 §17.5.2.1 reads widths per column).
@@ -2320,22 +2377,41 @@ impl Ctx<'_> {
     /// Lay a table's rows given resolved (border-box) column widths. Cells sit
     /// side by side; each cell box stretches to the row's tallest cell and paints
     /// its own background/border, with content placed inside its padding.
-    fn lay_table_rows(&mut self, rows: &[Vec<Cell>], ncols: usize, colw: &[i32], st: &ComputedStyle, x: i32, y0: i32) -> i32 {
+    fn lay_table_rows(&mut self, rows: &[Row], ncols: usize, colw: &[i32], st: &ComputedStyle, x: i32, y0: i32) -> i32 {
         // The gaps around the outside are added by the caller, which owns the
         // table's padding edge; these are the ones BETWEEN cells and rows.
         let (sx, sy) = spacing_of(st);
         let col_x = |c: usize| colw[..c].iter().sum::<i32>() + sx * c as i32;
         let collapse = st.border_collapse;
+        // A row (and a row group) spans every column plus the spacing between
+        // them, but not the outer spacing the caller owns — that is the box
+        // its background covers and the containing block its cells see.
+        let grid_w = colw.iter().sum::<i32>() + sx * ncols.saturating_sub(1) as i32;
         // The previous row's (style, x, width), so a cell can resolve the grid
         // line it shares with the cell above it in the collapsed model.
         let mut prev_row: Vec<(ComputedStyle, i32, i32)> = Vec::new();
         let nrows = rows.len();
         let mut y = y0;
+        let outer_cb = self.cb;
+        // The open row group: its style, where its box and ops start, and the
+        // bottom of its last row so far. Rows of one group are contiguous, so
+        // the group closes when a row with a different one comes along.
+        let mut group: Option<(u32, ComputedStyle, TablePart, i32)> = None;
+        let mut last_bottom = y0;
         for (ri, row) in rows.iter().enumerate() {
+            if let Some((seq, gst, part, top)) = group {
+                if row.group.map(|(g, _)| g.seq) != Some(seq) {
+                    self.finish_table_part(&gst, x, top, grid_w, last_bottom - top, part, grid_w as f32);
+                    group = None;
+                }
+            }
+            if let (None, Some((g, gst))) = (group, row.group) {
+                group = Some((g.seq, gst, self.part_start(), y));
+            }
             // Pass 1: resolve cell styles + measure the tallest cell.
             let mut cells: Vec<(ComputedStyle, i32, i32, i32, i32)> = Vec::new(); // (style, cell_x, cell_w, content_x, content_w)
-            let (starts, _) = row_columns(row);
-            for (i, cell) in row.iter().enumerate() {
+            let (starts, _) = row_columns(&row.cells);
+            for (i, cell) in row.cells.iter().enumerate() {
                 let c = starts[i];
                 if c >= ncols {
                     break;
@@ -2361,7 +2437,7 @@ impl Ctx<'_> {
                 let mut ch = if cs.display == Display::None {
                     0
                 } else {
-                    self.measure_cell_height(&row[c], cs, *content_x, *content_w, content_y)
+                    self.measure_cell_height(&row.cells[c], cs, *content_x, *content_w, content_y)
                 };
                 if let Len::Px(h) = cs.height {
                     let hb = if cs.box_border {
@@ -2376,6 +2452,18 @@ impl Ctx<'_> {
                 row_h = row_h.max(cell_box_h);
             }
             // Pass 2: emit content + paint each cell's border-box at row height.
+            // A positioned row (or, failing that, row group) is the containing
+            // block its cells' absolutely positioned descendants resolve
+            // against — the row's height is known now, the group's is not yet.
+            let row_part = self.part_start();
+            let row_pos = row.el.map(|(_, rst)| rst.position != Position::Static).unwrap_or(false);
+            if row_pos {
+                self.cb = (x, y, grid_w, Some(row_h));
+            } else if let Some((_, gst, _, top)) = group {
+                if gst.position != Position::Static {
+                    self.cb = (x, top, grid_w, None);
+                }
+            }
             for (c, (cs, cell_x, cell_w, content_x, content_w)) in cells.iter().enumerate() {
                 if cs.display == Display::None {
                     continue;
@@ -2383,7 +2471,11 @@ impl Ctx<'_> {
                 let content_y = y + cell_borders(cs, collapse).2 as i32 + cs.pad_top as i32;
                 let bg_idx = self.ops.len();
                 let (link0, ctl0) = (self.links.len(), self.controls.len());
-                match row[c] {
+                let cell_cb = self.cb;
+                if cs.position != Position::Static {
+                    self.cb = (*content_x, y, *content_w, Some(row_h));
+                }
+                match row.cells[c] {
                     Cell::Real(e) => {
                         self.path.push(ElemInfo::of(e));
                         let _ = self.layout_children(&e.children, cs, Some(e), *content_x, *content_w, content_y);
@@ -2393,6 +2485,7 @@ impl Ctx<'_> {
                         let _ = self.layout_children(nodes, cs, None, *content_x, *content_w, content_y);
                     }
                 }
+                self.cb = cell_cb;
                 // `vertical-align` in the row (CSS2.1 §17.5.3). The content was
                 // laid out at the cell's top; middle/bottom just slide the ops
                 // it produced down by the leftover of the row height. `baseline`
@@ -2434,9 +2527,26 @@ impl Ctx<'_> {
                 } else {
                     self.paint_box_decoration(cs, *cell_x, y, *cell_w, row_h, bg_idx);
                 }
+                // A relative cell takes its own box with it, so this has to run
+                // after the decoration was inserted — unlike the `vertical-align`
+                // slide above, which moves the content inside a cell that stays.
+                if cs.position == Position::Relative {
+                    let (dx, dy) = rel_offset(cs, grid_w as f32);
+                    if dx != 0 || dy != 0 {
+                        self.shift_ops(bg_idx, self.ops.len(), link0, self.links.len(), ctl0, dx, dy);
+                    }
+                }
+            }
+            self.cb = outer_cb;
+            if let Some((_, rst)) = row.el {
+                self.finish_table_part(&rst, x, y, grid_w, row_h, row_part, grid_w as f32);
             }
             prev_row = cells.iter().map(|(cs, cx, cw, _, _)| (*cs, *cx, *cw)).collect();
-            y += row_h + sy;
+            last_bottom = y + row_h;
+            y = last_bottom + sy;
+        }
+        if let Some((_, gst, part, top)) = group {
+            self.finish_table_part(&gst, x, top, grid_w, last_bottom - top, part, grid_w as f32);
         }
         // The trailing gap belongs BETWEEN rows, not after the last one — the
         // caller adds the outer one.
@@ -2520,13 +2630,19 @@ impl Ctx<'_> {
     /// (plain `<tr>`/`table-row`, `table-row-group`, and any stray content
     /// coalesced into anonymous rows) in document order, then any
     /// `table-footer-group` rows last — regardless of their source order.
-    fn collect_table_rows<'a>(&self, nodes: &'a [Node], parent: &ComputedStyle) -> Vec<Vec<Cell<'a>>> {
+    fn collect_table_rows<'a>(&mut self, nodes: &'a [Node], parent: &ComputedStyle) -> Vec<Row<'a>> {
         let mut header = Vec::new();
         let mut body = Vec::new();
         let mut footer = Vec::new();
-        self.collect_rows_into(nodes, parent, &mut header, &mut body, &mut footer);
+        self.collect_rows_into(nodes, parent, None, &mut header, &mut body, &mut footer);
         header.extend(body);
         header.extend(footer);
+        // A row (or a whole row group) set to `display: none` generates no box:
+        // it takes no height and no column width. Dropping it here rather than
+        // at paint time is what keeps measurement and layout agreeing — both
+        // sides of the table go through this one function.
+        let visible = |s: &Option<(&Element, ComputedStyle)>| s.is_none_or(|(_, st)| st.display != Display::None);
+        header.retain(|r: &Row| visible(&r.el) && visible(&r.group));
         header
     }
 
@@ -2538,15 +2654,22 @@ impl Ctx<'_> {
     /// is wrapped in ONE anonymous row (whitespace-only text neither starts
     /// nor breaks a run, and is dropped if it's all a run ever contained).
     fn collect_rows_into<'a>(
-        &self,
+        &mut self,
         nodes: &'a [Node],
         parent: &ComputedStyle,
-        header: &mut Vec<Vec<Cell<'a>>>,
-        body: &mut Vec<Vec<Cell<'a>>>,
-        footer: &mut Vec<Vec<Cell<'a>>>,
+        group: Option<(&'a Element, ComputedStyle)>,
+        header: &mut Vec<Row<'a>>,
+        body: &mut Vec<Row<'a>>,
+        footer: &mut Vec<Row<'a>>,
     ) {
         let mut run_start: Option<usize> = None;
         let mut run_has_content = false;
+        // Rows and row groups cascade like any other element: `:nth-child` on
+        // a `<tr>` is zebra striping, and every element child counts towards it
+        // — `<caption>`/`<col>` included, since they are DOM siblings even
+        // though they generate no row.
+        let mut siblings: Vec<ElemInfo> = Vec::new();
+        let sib_count = nodes.iter().filter(|n| matches!(n, Node::Element(_))).count() as u32;
         for (i, n) in nodes.iter().enumerate() {
             let role = match n {
                 Node::Element(e) => Some(self.table_role(e, parent)),
@@ -2556,27 +2679,30 @@ impl Ctx<'_> {
                 Some(TableRole::Row) | Some(TableRole::RowGroup) | Some(TableRole::HeaderGroup) | Some(TableRole::FooterGroup) => {
                     if let Some(s) = run_start.take() {
                         if run_has_content {
-                            body.push(self.partition_cells(&nodes[s..i], parent));
+                            body.push(Row { el: None, group, cells: self.partition_cells(&nodes[s..i], parent) });
                         }
                         run_has_content = false;
                     }
                     let Node::Element(e) = n else { unreachable!() };
+                    let est = self.styled(e, parent, &siblings, sib_count);
                     match role {
-                        Some(TableRole::Row) => body.push(self.partition_cells(&e.children, parent)),
-                        Some(TableRole::RowGroup) => self.collect_rows_into(&e.children, parent, header, body, footer),
-                        Some(TableRole::HeaderGroup) => {
-                            let (mut h, mut b, mut f) = (Vec::new(), Vec::new(), Vec::new());
-                            self.collect_rows_into(&e.children, parent, &mut h, &mut b, &mut f);
-                            header.extend(h);
-                            header.extend(b);
-                            header.extend(f);
+                        // A row's children cascade from the row, not from the
+                        // table two levels up.
+                        Some(TableRole::Row) => body.push(Row { el: Some((e, est)), group, cells: self.partition_cells(&e.children, &est) }),
+                        Some(TableRole::RowGroup) => {
+                            self.path.push(ElemInfo::of(e));
+                            self.collect_rows_into(&e.children, &est, Some((e, est)), header, body, footer);
+                            self.path.pop();
                         }
-                        Some(TableRole::FooterGroup) => {
+                        Some(TableRole::HeaderGroup) | Some(TableRole::FooterGroup) => {
                             let (mut h, mut b, mut f) = (Vec::new(), Vec::new(), Vec::new());
-                            self.collect_rows_into(&e.children, parent, &mut h, &mut b, &mut f);
-                            footer.extend(h);
-                            footer.extend(b);
-                            footer.extend(f);
+                            self.path.push(ElemInfo::of(e));
+                            self.collect_rows_into(&e.children, &est, Some((e, est)), &mut h, &mut b, &mut f);
+                            self.path.pop();
+                            let out = if role == Some(TableRole::HeaderGroup) { &mut *header } else { &mut *footer };
+                            out.extend(h);
+                            out.extend(b);
+                            out.extend(f);
                         }
                         _ => unreachable!(),
                     }
@@ -2598,10 +2724,13 @@ impl Ctx<'_> {
                     run_has_content |= has_content;
                 }
             }
+            if let Node::Element(e) = n {
+                siblings.push(ElemInfo::of(e));
+            }
         }
         if let Some(s) = run_start {
             if run_has_content {
-                body.push(self.partition_cells(&nodes[s..], parent));
+                body.push(Row { el: None, group, cells: self.partition_cells(&nodes[s..], parent) });
             }
         }
     }
@@ -2723,16 +2852,16 @@ impl Ctx<'_> {
     /// keeps the measurement and the layout from drifting apart.
     fn intrinsic_table(&mut self, nodes: &[Node], st: &ComputedStyle) -> (f32, f32) {
         let mut rows = self.collect_table_rows(nodes, st);
-        rows.retain(|r| !r.is_empty());
-        let ncols = rows.iter().map(|r| row_columns(r).1).max().unwrap_or(0).min(64);
+        rows.retain(|r| !r.cells.is_empty());
+        let ncols = rows.iter().map(|r| row_columns(&r.cells).1).max().unwrap_or(0).min(64);
         if ncols == 0 {
             return (0.0, 0.0);
         }
         let (mut pref, mut minw) = (vec![0.0f32; ncols], vec![0.0f32; ncols]);
         for pass_span in [false, true] {
             for row in &rows {
-                let (starts, _) = row_columns(row);
-                for (i, cell) in row.iter().enumerate() {
+                let (starts, _) = row_columns(&row.cells);
+                for (i, cell) in row.cells.iter().enumerate() {
                     let c = starts[i];
                     let span = cell_span(cell);
                     if c >= ncols || (span > 1) != pass_span {
@@ -5204,6 +5333,53 @@ mod tests {
         assert!(top < mid && mid < bot, "top {top} / middle {mid} / bottom {bot}");
         // The initial value degrades to `top` for us (no cross-cell baselines).
         assert_eq!(y_of("baseline"), top);
+    }
+
+    #[test]
+    fn table_rows_and_row_groups_are_boxes_of_their_own() {
+        let red = Rgb(0xff, 0, 0);
+        let table = |css: &str| {
+            lay(
+                &format!(
+                    "<body><style>table{{border-spacing:0}}td{{padding:0;width:50px;height:20px}}{css}</style>\
+                     <table><tbody><tr id=a><td>A</td><td>B</td></tr>\
+                     <tr id=b><td>C</td><td>D</td></tr></tbody></table></body>"
+                ),
+                400,
+            )
+        };
+        let reds = |l: &Layout| rects(l).into_iter().filter(|(.., c)| *c == red).collect::<Vec<_>>();
+        // A row background spans every column, not just one cell.
+        let l = table("#a{background:#f00}");
+        let (_, ry, rw, rh, _) = reds(&l)[0];
+        assert_eq!((rw, rh), (100, 20), "row box spans both columns");
+        // … and it sits BEHIND its cells: the text is emitted after the fill.
+        let text_a = texts(&l).into_iter().find(|(.., t)| *t == "A").unwrap();
+        assert_eq!(text_a.1 >= ry, true, "row background covers its cell text");
+        assert!(
+            l.ops.iter().position(|o| matches!(o, DrawOp::Rect { color, .. } if *color == red))
+                < l.ops.iter().position(|o| matches!(o, DrawOp::Text { text, .. } if text == "A")),
+            "row background must be painted before the cell content"
+        );
+        // `position:relative` moves the whole row — background and cells.
+        let base = table("#b{background:#f00}");
+        let moved = table("#b{background:#f00;position:relative;top:7px;left:3px}");
+        let (bx, by, ..) = reds(&base)[0];
+        let (mx, my, ..) = reds(&moved)[0];
+        assert_eq!((mx - bx, my - by), (3, 7), "row box moved");
+        let ty = |l: &Layout| texts(l).into_iter().find(|(.., t)| *t == "C").map(|(x, y, _)| (x, y)).unwrap();
+        let (bcx, bcy) = ty(&base);
+        let (mcx, mcy) = ty(&moved);
+        assert_eq!((mcx - bcx, mcy - bcy), (3, 7), "cell content moved with its row");
+        // A row group is a box too, spanning all of its rows.
+        let l = table("tbody{background:#f00}");
+        let (.., gw, gh, _) = reds(&l)[0];
+        assert_eq!((gw, gh), (100, 40), "row group box spans both rows");
+        // Rows have sibling context, so `:nth-child` can stripe them.
+        let l = table("tr:nth-child(2){background:#f00}");
+        let stripes = reds(&l);
+        assert_eq!(stripes.len(), 1, "exactly one row is striped");
+        assert_eq!(stripes[0].1, by, "the SECOND row (where #b sits), not the first");
     }
 
     #[test]
