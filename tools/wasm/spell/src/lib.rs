@@ -892,7 +892,7 @@ fn render_name_dialog(sp: &Spell) -> Widget {
                     style:     TextStyle::Muted,
                     modifiers: alloc::vec![],
                 },
-                prefab::input(&sp.name_buf, "name.md", prefab::InputKind::Text,
+                prefab::input_autofocus(&sp.name_buf, "name.md", prefab::InputKind::Text,
                               ActionId(ACT_NAME_SUBMIT), None),
                 Widget::Row {
                     children: alloc::vec![

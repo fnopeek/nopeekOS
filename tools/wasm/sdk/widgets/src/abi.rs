@@ -337,6 +337,9 @@ pub enum Modifier {
     /// Appended AFTER LineNumbers — inserting ahead of a shipped variant
     /// renumbers it on the wire and breaks the running app.
     PaddingXY { x: u16, y: u16 },
+    /// This text widget takes focus when its window first appears.
+    /// Without it a window opens with nothing focused.
+    Autofocus,
     // Appended only.
 }
 

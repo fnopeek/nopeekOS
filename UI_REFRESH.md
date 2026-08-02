@@ -99,6 +99,12 @@ umlaufender Rahmen.
 
 ### `dock` — Reveal
 
+**Nicht nachbauen:** im Mockup schiebt sich hinter dem Dock ein
+rechteckiger Balken nach oben in die Kacheln. Das ist ein Renderfehler
+des Entwurfs, kein Gestaltungsmittel. Das Dock ist ein freistehender
+Tray mit Abstand zum unteren Rand; darüber liegt nichts.
+
+
 4px-Hot-Zone · 180 ms rein, 400 ms raus · Slide+Fade 160 ms · die Kacheln
 reflowen mit. Drei Zustände: `0 aus` (nichts) · `1 hint` (34×4-Streifen
 `OnSurfaceFaint` am unteren Rand) · `2 offen` (Tray).
@@ -106,6 +112,31 @@ reflowen mit. Drei Zustände: `0 aus` (nichts) · `1 hint` (34×4-Streifen
 Icon-Zellen 34×34, Radius 9. Laufindikator unter der Zelle:
 laufend+fokussiert = 12×2 `Accent` + Zelle `Background(SurfaceHover)`;
 laufend = 3×2 `OnSurfaceFaint`; nicht laufend = nichts.
+
+## 3a. Fokus und Texteingabe (verbindlich, systemweit)
+
+Vorher war das pro Widget-Art verschieden — der Browser fühlte sich
+richtig an, der Dateimanager sperrte die Tastatur im Suchfeld ein. Eine
+Regel für alle:
+
+| Ereignis | Verhalten |
+|----------|-----------|
+| Fenster erscheint | Fokus liegt **nirgends**, außer ein Textfeld trägt `Modifier::Autofocus`. Das ist der Launcher- und Dialogfall, nicht der Normalfall. |
+| Klick **in** ein `Input`/`TextArea` | Fokus wandert dorthin. |
+| Klick **irgendwo sonst** im Fenster | Fokus wird freigegeben — auch auf Knöpfe, Listenzeilen und leere Fläche. Es gibt immer einen Weg heraus. |
+| Fokus verlässt ein Feld | Der getippte Puffer wird **geparkt**, nicht verworfen. |
+| Fokus kehrt in dasselbe Feld zurück | Der geparkte Puffer lebt weiter. |
+
+Der letzte Punkt ist keine Bequemlichkeit, sondern Notwendigkeit: der
+Editorpuffer des Compositors läuft dem Baum der App **konstruktionsbedingt
+eine Runde voraus**. Wer ihn beim Fokusverlust wegwirft, verliert alles,
+was seit dem letzten Commit der App getippt wurde — das Feld wirkte
+geleert und füllte sich erst bei Enter wieder.
+
+**Folge, bewusst in Kauf genommen:** ein Klick ins Menüband nimmt auch
+dem Editor in spell den Cursor. Das ist der Preis für eine Regel ohne
+Ausnahmen; die Alternative wäre eine Sonderbehandlung für Menüs, und
+genau solche Sonderfälle haben den Zustand vorher unvorhersehbar gemacht.
 
 ## 4. Fenster-Chrome (Compositor)
 
