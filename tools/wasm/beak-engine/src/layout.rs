@@ -3154,14 +3154,16 @@ impl Ctx<'_> {
             return self.layout_block(el, st, x, w, y0);
         }
 
-        // Container horizontal box (mirrors `layout_block`).
+        // Container horizontal box (mirrors `layout_block`) — border included,
+        // same as the flex container: `width` is the CONTENT box, the border
+        // box is that plus padding and border.
         let (cw, off_left) = resolve_block_h(st, w as f32);
         let content_x = x + off_left as i32;
         let content_w = cw.max(1.0) as i32;
-        let box_left = content_x - st.pad_left as i32;
-        let box_w = content_w + (st.pad_left + st.pad_right) as i32;
+        let box_left = content_x - st.pad_left as i32 - st.border_left.width as i32;
+        let box_w = content_w + (st.pad_left + st.pad_right) as i32 + st.border_x() as i32;
         let bg_idx = self.ops.len();
-        let content_top = y0 + st.pad_top as i32;
+        let content_top = y0 + st.pad_top as i32 + st.border_top.width as i32;
 
         let prev_cb = self.cb;
         if st.position != Position::Static {
@@ -3188,7 +3190,7 @@ impl Ctx<'_> {
             ch = ch.min(mx);
         }
 
-        let y = content_top + ch + st.pad_bottom as i32;
+        let y = content_top + ch + st.pad_bottom as i32 + st.border_bottom.width as i32;
         self.paint_box_decoration(st, box_left, y0, box_w, y - y0, bg_idx);
         y
     }
@@ -3641,14 +3643,17 @@ impl Ctx<'_> {
         }
         items.sort_by_key(|(_, s)| s.order); // stable → equal order keeps DOM order
 
-        // Container horizontal box (mirrors `layout_block`/`layout_grid`).
+        // Container horizontal box (mirrors `layout_block`/`layout_grid`). The
+        // border counts: a flex container with `width: 40em; border: 1px` has a
+        // 642px border box like any other block, and leaving it out made every
+        // bordered flex container two pixels narrow AND shifted its content.
         let (cw, off_left) = resolve_block_h(st, w as f32);
         let content_x = x + off_left as i32;
         let content_w = cw.max(1.0) as i32;
-        let box_left = content_x - st.pad_left as i32;
-        let box_w = content_w + (st.pad_left + st.pad_right) as i32;
+        let box_left = content_x - st.pad_left as i32 - st.border_left.width as i32;
+        let box_w = content_w + (st.pad_left + st.pad_right) as i32 + st.border_x() as i32;
         let bg_idx = self.ops.len();
-        let content_top = y0 + st.pad_top as i32;
+        let content_top = y0 + st.pad_top as i32 + st.border_top.width as i32;
 
         let prev_cb = self.cb;
         if st.position != Position::Static {
@@ -3688,7 +3693,7 @@ impl Ctx<'_> {
             ch = ch.min(mx);
         }
 
-        let y = content_top + ch + st.pad_bottom as i32;
+        let y = content_top + ch + st.pad_bottom as i32 + st.border_bottom.width as i32;
         self.paint_box_decoration(st, box_left, y0, box_w, y - y0, bg_idx);
         y
     }
@@ -4091,25 +4096,80 @@ fn flex_break_lines(m: &[FlexItem], avail: f32, gap: f32, wrap: bool, balance: b
 /// `flex-grow`) or shrink out of negative free space (by `flex-shrink × base`),
 /// each clamped to `[floor, ceil]`. Returns the used content main size per item.
 fn resolve_flex_line(li: &[FlexItem], avail: f32, gaps_total: f32) -> Vec<f32> {
-    let mut size: Vec<f32> = li.iter().map(|it| it.hypo).collect();
-    let sum: f32 = size.iter().sum();
-    let free = avail - sum - gaps_total;
-    if free > 0.5 {
-        let tg: f32 = li.iter().map(|it| it.grow).sum();
-        if tg > 0.0 {
-            for (i, it) in li.iter().enumerate() {
-                size[i] = (it.base + free * it.grow / tg).clamp(it.floor.min(it.ceil), it.ceil);
+    let n = li.len();
+    // Margins, padding and borders do not flex: take them out once, and let the
+    // content boxes share what is left. Leaving them in handed the line every
+    // item's padding as extra free space.
+    let fixed: f32 = li.iter().map(|it| it.m_lead + it.m_trail + it.main_pad).sum::<f32>() + gaps_total;
+    let inner = avail - fixed;
+    let clamp = |it: &FlexItem, v: f32| v.clamp(it.floor.min(it.ceil), it.ceil);
+
+    // §9.7.1 — grow or shrink is decided once, from the hypothetical sizes.
+    let hypo_sum: f32 = li.iter().map(|it| it.hypo).sum();
+    let growing = hypo_sum < inner;
+    let factor = |it: &FlexItem| if growing { it.grow } else { it.shrink };
+
+    // §9.7.2 — freeze the inflexible ones straight away: no flex factor, or a
+    // base size already past the hypothetical size in the direction we would
+    // move it (min/max already had the last word there).
+    let mut target: Vec<f32> = Vec::with_capacity(n);
+    let mut frozen: Vec<bool> = Vec::with_capacity(n);
+    for it in li {
+        let stuck = factor(it) == 0.0 || (growing && it.base > it.hypo) || (!growing && it.base < it.hypo);
+        frozen.push(stuck);
+        target.push(if stuck { it.hypo } else { it.base });
+    }
+
+    // §9.7.3 — free space counts frozen items at their target and the rest at
+    // their flex base size.
+    let free_of = |target: &[f32], frozen: &[bool]| -> f32 {
+        inner - (0..n).map(|i| if frozen[i] { target[i] } else { li[i].base }).sum::<f32>()
+    };
+    let initial_free = free_of(&target, &frozen);
+
+    // §9.7.4 — the loop. Every round freezes at least one item, so `n` rounds
+    // always finish. This is the part a single pass cannot do: space clamped
+    // away from one item has to come back round to the items that can still
+    // take it, which is exactly what the `flex-0/1/N-*` family measures.
+    for _ in 0..n {
+        if frozen.iter().all(|f| *f) {
+            break;
+        }
+        let mut remaining = free_of(&target, &frozen);
+        let fsum: f32 = (0..n).filter(|&i| !frozen[i]).map(|i| factor(&li[i])).sum();
+        // Flex factors totalling less than one only claim that fraction of the
+        // ORIGINAL free space; the remainder stays with the container.
+        if fsum < 1.0 {
+            let capped = initial_free * fsum;
+            if capped.abs() < remaining.abs() {
+                remaining = capped;
             }
         }
-    } else if free < -0.5 {
-        let ts: f32 = li.iter().map(|it| it.shrink * it.base).sum();
-        if ts > 0.0 {
-            for (i, it) in li.iter().enumerate() {
-                size[i] = (it.base + free * (it.shrink * it.base) / ts).clamp(it.floor.min(it.ceil), it.ceil);
+        // Growing shares out by flex-grow; shrinking by flex-shrink weighted
+        // with the base size, so a big item gives up more than a small one.
+        let scaled = |i: usize| if growing { li[i].grow } else { li[i].shrink * li[i].base };
+        let denom: f32 = (0..n).filter(|&i| !frozen[i]).map(scaled).sum();
+        let mut viol = alloc::vec![0.0f32; n];
+        let mut total_viol = 0.0f32;
+        for i in 0..n {
+            if frozen[i] {
+                continue;
             }
+            let unclamped = if denom > 0.0 { li[i].base + remaining * scaled(i) / denom } else { li[i].base };
+            target[i] = clamp(&li[i], unclamped);
+            viol[i] = target[i] - unclamped;
+            total_viol += viol[i];
+        }
+        // §9.7.4e — freeze whoever was pulled past a limit; their violation is
+        // what the next round redistributes. No violation → everyone is done.
+        for i in 0..n {
+            if frozen[i] {
+                continue;
+            }
+            frozen[i] = total_viol == 0.0 || (total_viol > 0.0 && viol[i] > 0.0) || (total_viol < 0.0 && viol[i] < 0.0);
         }
     }
-    size
+    target
 }
 
 /// Clamp a stretched cross size to the item's cross min/max.

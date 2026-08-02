@@ -22,36 +22,36 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-02, beak 0.1.69)
+### Current number (measured 2026-08-02, beak 0.1.70)
 
 ```
-3746 pass / 1841 fail / 199 inconclusive   (of 5786 vendored reftests)
-= 67.0 % of the conclusive 5587
+3863 pass / 1724 fail / 199 inconclusive   (of 5786 vendored reftests)
+= 69.1 % of the conclusive 5587
 ```
 
-Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → **3746**. The inconclusive
-count fell 254 → 199 over that span: references that used to render blank —
-because `:root` was dropped, or because an `inline-block` had no box — now
-paint, so 55 more tests actually measure something.
+Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → 3746 → **3863**. The
+inconclusive count fell 254 → 199 over that span: references that used to
+render blank — because `:root` was dropped, or because an `inline-block` had no
+box — now paint, so 55 more tests actually measure something.
 
 Per suite (pass / total of that suite, inconclusive included in the total):
 
-| Suite | Pass | Total | % | vs 0.1.67 |
+| Suite | Pass | Total | % | vs 0.1.69 |
 |---|---|---|---|---|
 | css-fonts | 40 | 43 | 93.0 | — |
 | css-color | 221 | 282 | 78.4 | — |
-| **css-position** | 28 | 36 | 77.8 | **+19** |
-| **CSS2** (2.1 suite) | 2601 | 3351 | 77.6 | +3 |
+| css-position | 28 | 36 | 77.8 | — |
+| **CSS2** (2.1 suite) | 2601 | 3351 | 77.6 | — |
 | html-forms | 15 | 21 | 71.4 | — |
 | css-text | 240 | 381 | 63.0 | — |
+| **css-flexbox** | 235 | 428 | 54.9 | **+86** |
 | css-display | 44 | 88 | 50.0 | — |
+| **css-align** | 13 | 29 | 44.8 | **+6** |
 | css-cascade | 14 | 32 | 43.8 | — |
-| css-backgrounds | 60 | 144 | 41.7 | +1 |
+| css-backgrounds | 60 | 144 | 41.7 | — |
+| **css-grid** | 281 | 749 | 37.5 | **+25** |
 | css-values | 34 | 93 | 36.6 | — |
-| css-flexbox | 149 | 428 | 34.8 | — |
-| css-grid | 256 | 749 | 34.2 | — |
 | css-sizing | 37 | 109 | 33.9 | — |
-| css-align | 7 | 29 | 24.1 | — |
 
 **css-position 25.0 → 77.8 %** is bucket-B item 12 landing: rows, row groups
 and captions are boxes of their own now, so `position: relative` and a
@@ -180,6 +180,13 @@ discarded rather than mis-applied): every pseudo-class outside
 **Layout:** `rowspan` (colspan works), sticky positioning (parsed, behaves as
 relative), bidi reordering, UAX-14 line breaking, `display: contents`,
 multi-column, writing modes.
+
+**Positioning:** the containing block an absolutely positioned box resolves
+against is the ancestor's PADDING box (CSS2.1 §10.1); we hand it
+`(content_x, border_box_top)` — the content edge horizontally, the border edge
+vertically. So `top: 0` lands a border-width too high and `left: 0` a padding
+too far right. Found from a flex reftest whose *reference* positions its boxes
+absolutely; fixing it moves every abspos box, so it wants its own step.
 
 **Tables:** a row with no cells is dropped in `collect_table_rows`, so it
 contributes no height — an empty `<tr>` used as a spacer collapses away.
@@ -337,13 +344,29 @@ menu to pick from.
 
 **C — the big structural blocks (oracle-heavy)**
 
-13. **Flexbox core** — now 34.8 % after the two fixes above. The remaining
-    `flex-0/1/N` basis/grow/shrink family is one algorithm (css-flexbox-1 §9.7
-    resolving flexible lengths): `resolve_flex_line` only clamps to the item's
-    floor/ceiling inside its grow and shrink branches, and does no
-    freeze/unfreeze iteration, so a violated min/max is not redistributed.
-    Also missing: `align-content` (~15 tests), reverse directions, baseline
-    alignment.
+13. ✅ **Flexbox core — 34.8 → 54.9 %, and grid 34.2 → 37.5 % with it (+118).**
+    Two things, and the smaller-looking one was the giant:
+
+    **§9.7 resolving flexible lengths** is now the real freeze/unfreeze loop.
+    `resolve_flex_line` used to distribute once and clamp afterwards, which
+    silently threw away the space a clamped item gave back instead of handing
+    it to the items that could still take it; it also measured free space from
+    the items' content boxes only, so every item's margin, padding and border
+    was counted as free space on top. (+3 on its own.)
+
+    **The flex and grid containers left their own border out of their box.**
+    `box_left`/`box_w` subtracted only the padding, and the content origin and
+    the bottom edge ignored the border entirely — so a `display: flex` box with
+    `width: 40em; border: 1px` came out 640px wide instead of 642 and every
+    item sat a pixel off. The whole Opera flexbox family builds exactly that
+    box. **+83 flex, +25 grid.** Watch the direction of the fix: `off_left`
+    from `resolve_block_h` ALREADY carries `margin + padding + border`, so the
+    content origin needed no change — only the border BOX did. Adding the
+    border to `content_x` as well double-counted it and cost 11 flex and 24
+    grid tests, which is how the mistake was caught.
+
+    Still missing in flex: reverse directions, baseline alignment, and the
+    `align-content` cases beyond the 6 that came along.
 14. **CSS2 long tail** — `margin-collapse` 28, `abspos-containing-block` 25,
     `floats-wrap` 22, `border-*-width` 44 (`thin`/`medium`/`thick` keywords
     are a suspiciously cheap 44).
