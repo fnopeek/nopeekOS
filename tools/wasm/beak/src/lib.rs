@@ -1086,11 +1086,9 @@ const NAV_BTN_RADIUS: u8 = 7;
 /// Navigation button — the design's `toolbar_button`: bare at rest,
 /// `SurfaceHover` fill under the cursor, accent tint while pressed.
 fn nav_button(icon: IconId, action: ActionId) -> Widget {
-    Widget::Row {
-        children: vec![Widget::Icon { id: icon, size: 16, modifiers: vec![] }],
-        spacing: 0,
-        align: Align::Center,
-        modifiers: vec![
+    prefab::center_box(
+        Widget::Icon { id: icon, size: 16, modifiers: vec![] },
+        vec![
             Modifier::MinWidth(NAV_BTN),
             Modifier::MinHeight(NAV_BTN),
             Modifier::Rounded(NAV_BTN_RADIUS),
@@ -1105,7 +1103,7 @@ fn nav_button(icon: IconId, action: ActionId) -> Widget {
                 Modifier::Rounded(NAV_BTN_RADIUS),
             ]),
         ],
-    }
+    )
 }
 
 /// Dropdown content for the open menu code (1=File .. 4=Help) → (anchor, menu).

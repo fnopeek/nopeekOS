@@ -670,16 +670,10 @@ fn icon_cell(
         glyph_mods.push(Modifier::Tint(Token::Accent));
     }
 
-    let tile = Widget::Row {
-        children: alloc::vec![Widget::Icon {
-            id: icon,
-            size: ICON_SIZE,
-            modifiers: glyph_mods,
-        }],
-        spacing:   0,
-        align:     Align::Center,
-        modifiers: tile_mods,
-    };
+    let tile = prefab::center_box(
+        Widget::Icon { id: icon, size: ICON_SIZE, modifiers: glyph_mods },
+        tile_mods,
+    );
 
     let dash = match run {
         RunState::Active  => prefab::mark(DASH_W_ACTIVE,  DASH_H, Some(Token::Accent)),

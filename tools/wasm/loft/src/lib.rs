@@ -1001,10 +1001,10 @@ fn render_toolbar(lf: &Loft) -> Widget {
     let search = search_input(&lf.query);
     Widget::Row {
         children: alloc::vec![
-            prefab::icon_button(IconId::ArrowLeft,      24, Some(ActionId(ACT_TOOLBAR_BACK)),    None),
-            prefab::icon_button(IconId::ArrowRight,     24, Some(ActionId(ACT_TOOLBAR_FORWARD)), None),
-            prefab::icon_button(IconId::ArrowUp,        24, Some(ActionId(ACT_TOOLBAR_UP)),      None),
-            prefab::icon_button(IconId::ArrowClockwise, 24, Some(ActionId(ACT_TOOLBAR_REFRESH)), None),
+            prefab::icon_button(IconId::ArrowLeft,      16, Some(ActionId(ACT_TOOLBAR_BACK)),    None),
+            prefab::icon_button(IconId::ArrowRight,     16, Some(ActionId(ACT_TOOLBAR_FORWARD)), None),
+            prefab::icon_button(IconId::ArrowUp,        16, Some(ActionId(ACT_TOOLBAR_UP)),      None),
+            prefab::icon_button(IconId::ArrowClockwise, 16, Some(ActionId(ACT_TOOLBAR_REFRESH)), None),
             crumbs,
             Widget::Spacer { flex: 1 },
             search,
@@ -1034,9 +1034,7 @@ fn search_input(query: &str) -> Widget {
         children: alloc::vec![
             Widget::Icon {
                 id:        IconId::MagnifyingGlass,
-                // 24 = atlas-native size; 18 scaled down from the 24 px
-                // slot looked visibly fuzzy. Same fix as `prefab::input`.
-                size:      24,
+                size:      16,
                 modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceMuted)],
             },
             raw,
@@ -1261,7 +1259,7 @@ fn list_header_row(lf: &Loft) -> Widget {
         spacing: Spacing::Md.as_u16(),
         align:   Align::Center,
         modifiers: alloc::vec![
-            Modifier::Padding(Padding::Sm.as_u16()),
+            Modifier::Padding(Padding::Xs.as_u16()),
             Modifier::MinHeight(HEADER_ROW_H),
         ],
     }
@@ -1300,7 +1298,7 @@ fn list_data_row(e: &Entry, selected: bool, browsing: bool,
         children: alloc::vec![
             Widget::Icon {
                 id: icon,
-                size: 24,
+                size: 16,
                 modifiers: alloc::vec![Modifier::Tint(
                     if selected { Token::Accent } else { Token::OnSurfaceMuted },
                 )],
@@ -1354,7 +1352,7 @@ fn list_data_row(e: &Entry, selected: bool, browsing: bool,
     if selected {
         row_mods.push(Modifier::Background(Token::AccentMuted));
     }
-    let edge = prefab::mark(2, DATA_ROW_H,
+    let edge = prefab::mark(2, DATA_ROW_H - 2 * ROW_PAD,
         if selected { Some(Token::Accent) } else { None });
 
     Widget::Row {
@@ -1387,6 +1385,9 @@ fn list_cell_text(text: &str, min_w: u16) -> Widget {
 
 const HEADER_ROW_H: u16 = 30;
 const DATA_ROW_H:   u16 = 34;
+/// Vertical inset a list row adds around its content. Subtracted from the
+/// selection edge so edge + padding lands exactly on DATA_ROW_H.
+const ROW_PAD:      u16 = 4;
 
 const COL_NAME_W:  u16 = 240;   // min — flexes to fill the row
 const COL_SIZE_W:  u16 = 110;

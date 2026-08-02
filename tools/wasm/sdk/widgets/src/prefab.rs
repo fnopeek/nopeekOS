@@ -17,6 +17,26 @@ use crate::style::{Elevation, Padding, Radius, Spacing};
 // trailing zero-size widgets that `prefab::input` and `prefab::footer`
 // install at their wrap-Column ends to keep the search row + footer
 // row vertically symmetric between chrome and divider.
+/// Centre a single child inside a fixed-size box.
+///
+/// `MinWidth` widens the box but leaves the child at the leading edge —
+/// `Align` on a Row is the CROSS axis (vertical), not the main one. The
+/// flex spacers are what actually centre it. Every fixed-size cell in the
+/// design (workspace pill, tray icon, dock tile, toolbar button) needs
+/// this; without it the glyph sits left and the fill runs off to the right.
+pub fn center_box(child: Widget, modifiers: Vec<Modifier>) -> Widget {
+    Widget::Row {
+        children: vec![
+            Widget::Spacer { flex: 1 },
+            child,
+            Widget::Spacer { flex: 1 },
+        ],
+        spacing: 0,
+        align:   Align::Center,
+        modifiers,
+    }
+}
+
 /// Solid rectangle of an exact size — the design's fixed-size marks:
 /// the dock's running dashes, a list row's 2 px selection edge, a
 /// vertical separator inside a toolbar. `token: None` renders nothing
@@ -247,19 +267,32 @@ pub fn body(text: &str) -> Widget {
 /// Square tap-target with a single centred icon. Used for toolbar chrome
 /// (back/forward/up, refresh) and in-row actions.
 pub fn icon_button(icon: IconId, size: u16, on_click: Option<ActionId>, on_hover: Option<ActionId>) -> Widget {
-    let mut mods: Vec<Modifier> = Vec::with_capacity(5);
-    mods.push(Modifier::Padding(Padding::Sm.as_u16()));
+    let mut mods: Vec<Modifier> = Vec::with_capacity(6);
+    // A fixed square cell, not a padded glyph: the hit target then stays
+    // the same whatever glyph size the caller asks for, and a row of
+    // these lines up (UI_REFRESH.md §3 `toolbar_button`).
+    mods.push(Modifier::MinWidth(TOOLBAR_BTN));
+    mods.push(Modifier::MinHeight(TOOLBAR_BTN));
+    mods.push(Modifier::Rounded(TOOLBAR_BTN_RADIUS));
     if let Some(id) = on_click { mods.push(Modifier::OnClick(id)); }
     if let Some(id) = on_hover { mods.push(Modifier::OnHover(id)); }
     mods.push(Modifier::Hover(vec![
-        Modifier::Background(Token::SurfaceMuted),
-        Modifier::Rounded(Radius::Sm.as_u8()),
+        Modifier::Background(Token::SurfaceHover),
+        Modifier::Rounded(TOOLBAR_BTN_RADIUS),
+    ]));
+    mods.push(Modifier::Active(vec![
+        Modifier::Background(Token::AccentMuted),
+        Modifier::Tint(Token::Accent),
+        Modifier::Rounded(TOOLBAR_BTN_RADIUS),
     ]));
     mods.push(Modifier::Focus(vec![
-        Modifier::Border { token: Token::OnSurfaceMuted, width: 1, radius: Radius::Sm.as_u8() },
+        Modifier::Ring { token: Token::AccentRing, width: 2 },
     ]));
-    Widget::Icon { id: icon, size, modifiers: mods }
+    center_box(Widget::Icon { id: icon, size, modifiers: vec![] }, mods)
 }
+
+const TOOLBAR_BTN: u16 = 28;
+const TOOLBAR_BTN_RADIUS: u8 = 7;
 
 /// Small uppercase section label above a group of `nav_row`s. Mono and
 /// `OnSurfaceFaint` so it reads as structure, not content
@@ -294,7 +327,7 @@ pub fn nav_row(
     on_hover: Option<ActionId>,
 ) -> Widget {
     let mut mods: Vec<Modifier> = vec![
-        Modifier::Padding(Padding::Sm.as_u16()),
+        Modifier::Padding(Padding::Xs.as_u16()),
         Modifier::MinHeight(NAV_ROW_H),
         Modifier::Rounded(NAV_ROW_RADIUS),
     ];
@@ -319,7 +352,10 @@ pub fn nav_row(
 
     Widget::Row {
         children: vec![
-            Widget::Icon { id: icon, size: 24, modifiers: icon_mods },
+            // 16, not 24: the row is 30 px tall and padding + a 24 px
+            // glyph alone overshoots it. 16 is atlas-native, so it stays
+            // crisp (24 -> 17 would be a scaled blur).
+            Widget::Icon { id: icon, size: 16, modifiers: icon_mods },
             Widget::Text { content: label.to_string(), style: TextStyle::Body, modifiers: vec![] },
             Widget::Spacer { flex: 1 },
         ],
