@@ -1044,7 +1044,8 @@ fn search_input(query: &str) -> Widget {
         spacing:   Spacing::Sm.as_u16(),
         align:     Align::Center,
         modifiers: alloc::vec![
-            Modifier::Padding(Padding::Sm.as_u16()),
+            Modifier::Padding(Padding::Xs.as_u16()),
+            Modifier::MinHeight(FIELD_H),
             Modifier::Background(Token::SurfaceMuted),
             Modifier::Border { token: Token::Border, width: 1, radius: Radius::Md.as_u8() },
             Modifier::MinWidth(230),
@@ -1383,6 +1384,7 @@ fn list_cell_text(text: &str, min_w: u16) -> Widget {
     }
 }
 
+const FIELD_H:      u16 = 30;
 const HEADER_ROW_H: u16 = 30;
 const DATA_ROW_H:   u16 = 34;
 /// Vertical inset a list row adds around its content. Subtracted from the

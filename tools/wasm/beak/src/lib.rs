@@ -994,7 +994,7 @@ fn render_chrome() {
         align: Align::Center,
         modifiers: vec![
             Modifier::Flex(1),
-            Modifier::Padding(Padding::Sm.as_u16()),
+            Modifier::Padding(Padding::Xs.as_u16()),
             Modifier::MinHeight(FIELD_H),
             Modifier::Background(Token::SurfaceMuted),
             Modifier::Border { token: Token::Border, width: 1, radius: Radius::Md.as_u8() },
