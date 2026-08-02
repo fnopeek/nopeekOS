@@ -339,6 +339,32 @@ fn blend_towards(src: u32, dst: u32, weight: u32) -> u32 {
     0xFF_00_00_00 | (r << 16) | (g << 8) | b
 }
 
+/// Gap between the widest line number and the gutter's hairline.
+const GUTTER_PAD_R: i32 = 10;
+/// Gap between the hairline and the left edge of the number column.
+const GUTTER_PAD_L: i32 = 10;
+
+/// Width a `TextArea`'s line-number gutter occupies, or 0 when the app
+/// didn't ask for one. Sized to the highest line number the buffer can
+/// show, so the text doesn't shift sideways as you scroll past 99.
+/// **Shared by the renderer and the click-to-caret hit test** — if these
+/// two disagree, clicks land on the wrong column.
+pub(super) fn textarea_gutter_w(mods: &[Modifier], total_lines: usize) -> u32 {
+    let on = mods.iter().any(|m| matches!(m, Modifier::LineNumbers(true)));
+    if !on { return 0; }
+    let digits = {
+        let mut n = total_lines.max(1);
+        let mut d = 0;
+        while n > 0 { d += 1; n /= 10; }
+        d.max(2)
+    };
+    let mut widest = alloc::string::String::new();
+    for _ in 0..digits { widest.push('0'); }
+    let num_w = ceil_u32_local(
+        crate::gui::text::measure(&widest, super::abi::TextStyle::Mono));
+    num_w + GUTTER_PAD_L as u32 + GUTTER_PAD_R as u32
+}
+
 fn paint_modifiers_eff(
     rast: &mut dyn Rasterizer,
     target: &mut RasterTarget,
@@ -350,11 +376,13 @@ fn paint_modifiers_eff(
     let mut bg: Option<Token> = None;
     let mut border: Option<(Token, u8, u8)> = None;
     let mut rounded: Option<u8> = None;
+    let mut ring: Option<(Token, u8)> = None;
     for m in mods {
         match m {
             Modifier::Background(t) => bg = Some(*t),
             Modifier::Border { token, width, radius } => border = Some((*token, *width, *radius)),
             Modifier::Rounded(r) => rounded = Some(*r),
+            Modifier::Ring { token, width } => ring = Some((*token, *width)),
             _ => {}
         }
     }
@@ -363,6 +391,22 @@ fn paint_modifiers_eff(
     // radius applies only as a fallback so existing apps (which set the
     // radius via Border) keep their look without code changes.
     let radius = rounded.unwrap_or_else(|| border.map(|(_, _, r)| r).unwrap_or(0));
+
+    // Focus ring first: it sits OUTSIDE the node rect, so the background
+    // and border paint over its inner edge and leave a clean band.
+    if let Some((tok, width)) = ring {
+        if width > 0 {
+            let w = width as i32;
+            let outer = Rect {
+                x: rect.x - w,
+                y: rect.y - w,
+                w: rect.w.saturating_add(width as u32 * 2),
+                h: rect.h.saturating_add(width as u32 * 2),
+            };
+            let outer_radius = radius.saturating_add(width);
+            rast.stroke_rounded(target, outer, Fill::Solid(tok), width, outer_radius);
+        }
+    }
 
     if let Some(tok) = bg {
         if radius > 0 {
@@ -542,7 +586,9 @@ fn paint_node_eff(
             let mut color = Token::OnSurface;
             for m in eff { if let Modifier::Tint(tok) = m { color = *tok; } }
 
-            let text_x = inner_x + 4;
+            let total_lines_all = live.split('\n').count();
+            let gutter_w = textarea_gutter_w(eff, total_lines_all) as i32;
+            let text_x = inner_x + 4 + gutter_w;
             let top_y  = inner_y + 4;
             let visible = (rect.h / line_h).max(1) as usize;
 
@@ -568,9 +614,31 @@ fn paint_node_eff(
             // happens on caret MOVES (handle_input_key adjusts scroll_y), so
             // the render must NOT re-pull to the caret every frame — that
             // would defeat manual wheel/drag scrolling.
-            let total_lines = live.split('\n').count();
+            let total_lines = total_lines_all;
             let max_scroll = total_lines.saturating_sub(visible);
             let scroll = ((scroll_y / line_h) as usize).min(max_scroll);
+
+            // Line-number gutter: a right-aligned column of numbers and a
+            // hairline separating it from the text. Drawn here rather than
+            // by the app because only the compositor knows the scroll
+            // position of its own viewport.
+            if gutter_w > 0 {
+                let rule_x = inner_x + gutter_w - 1;
+                rast.rect(target,
+                          Rect { x: rule_x, y: rect.y, w: 1, h: rect.h },
+                          Fill::Solid(Token::Border));
+                for row in 0..visible {
+                    let li = scroll + row;
+                    if li >= total_lines { break; }
+                    let mut num = alloc::string::String::new();
+                    let _ = core::fmt::Write::write_fmt(
+                        &mut num, format_args!("{}", li + 1));
+                    let w = ceil_u32_local(crate::gui::text::measure(&num, style)) as i32;
+                    let y = top_y + (row as u32 * line_h) as i32;
+                    rast.text(target, &num, style, Token::OnSurfaceFaint,
+                              Point { x: rule_x - GUTTER_PAD_R - w, y });
+                }
+            }
 
             // Selected byte range (anchor↔caret), painted as a highlight
             // block under the text on each line it covers.

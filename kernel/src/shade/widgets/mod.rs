@@ -1270,6 +1270,10 @@ fn offset_at(scene: &WidgetScene, x: i32, y: i32, require_inside: bool) -> Optio
             let top_y = rect.y + pad + 4;
             let visible = (rect.h / line_h).max(1) as usize;
             let total_lines = value.split('\n').count();
+            // Same gutter width the renderer used, or clicks land a
+            // column off.
+            let text_x = text_x + render::textarea_gutter_w(
+                modifiers_of_ref(widget), total_lines) as i32;
             let max_scroll = total_lines.saturating_sub(visible);
             let scroll = ((scene.scroll_y / line_h) as usize).min(max_scroll);
             let row = ((y - top_y).max(0) as u32 / line_h) as usize;

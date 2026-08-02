@@ -17,6 +17,32 @@ use crate::style::{Elevation, Padding, Radius, Spacing};
 // trailing zero-size widgets that `prefab::input` and `prefab::footer`
 // install at their wrap-Column ends to keep the search row + footer
 // row vertically symmetric between chrome and divider.
+/// Solid rectangle of an exact size — the design's fixed-size marks:
+/// the dock's running dashes, a list row's 2 px selection edge, a
+/// vertical separator inside a toolbar. `token: None` renders nothing
+/// but still occupies the space, so a group of marks stays aligned
+/// whether or not each one is shown.
+pub fn mark(w: u16, h: u16, token: Option<Token>) -> Widget {
+    let mut modifiers = vec![
+        Modifier::MinWidth(w),
+        Modifier::MaxWidth(w),
+        Modifier::MinHeight(h),
+        Modifier::MaxHeight(h),
+    ];
+    if let Some(t) = token {
+        modifiers.push(Modifier::Background(t));
+        if h > 2 || w > 2 {
+            modifiers.push(Modifier::Rounded(1));
+        }
+    }
+    Widget::Column {
+        children: Vec::new(),
+        spacing: 0,
+        align: Align::Stretch,
+        modifiers,
+    }
+}
+
 pub fn panel(children: Vec<Widget>) -> Widget {
     Widget::Column {
         children,
@@ -235,28 +261,31 @@ pub fn icon_button(icon: IconId, size: u16, on_click: Option<ActionId>, on_hover
     Widget::Icon { id: icon, size, modifiers: mods }
 }
 
-/// Small uppercase section label shown above a group of `nav_row`s in a
-/// sidebar. Matches the "PLACES" / "DEVICES" look from the Thunar mockup.
+/// Small uppercase section label above a group of `nav_row`s. Mono and
+/// `OnSurfaceFaint` so it reads as structure, not content
+/// (UI_REFRESH.md §5).
 pub fn sidebar_section(label: &str, items: Vec<Widget>) -> Widget {
     let mut children: Vec<Widget> = Vec::with_capacity(items.len() + 1);
     children.push(Widget::Text {
         content: label.to_string(),
-        style:   TextStyle::Caption,
+        style:   TextStyle::Mono,
         modifiers: vec![
-            Modifier::Padding(Padding::Xs.as_u16()),
+            Modifier::Padding(Padding::Sm.as_u16()),
+            Modifier::Tint(Token::OnSurfaceFaint),
         ],
     });
     children.extend(items);
     Widget::Column {
         children,
-        spacing:   Spacing::Xxs.as_u16(),
+        spacing:   0,
         align:     Align::Stretch,
         modifiers: vec![Modifier::Padding(Padding::Xs.as_u16())],
     }
 }
 
-/// One entry inside a sidebar. Icon on the left, label to the right,
-/// full-width accent fill when selected.
+/// One entry inside a sidebar. Selection is an accent tint plus accent
+/// text and icon — no border, no full-strength fill (UI_REFRESH.md §3
+/// `list_row`).
 pub fn nav_row(
     icon: IconId,
     label: &str,
@@ -264,24 +293,29 @@ pub fn nav_row(
     on_click: Option<ActionId>,
     on_hover: Option<ActionId>,
 ) -> Widget {
-    let mut mods: Vec<Modifier> = Vec::with_capacity(6);
-    mods.push(Modifier::Padding(Padding::Sm.as_u16()));
+    let mut mods: Vec<Modifier> = vec![
+        Modifier::Padding(Padding::Sm.as_u16()),
+        Modifier::MinHeight(NAV_ROW_H),
+        Modifier::Rounded(NAV_ROW_RADIUS),
+    ];
     if let Some(id) = on_click { mods.push(Modifier::OnClick(id)); }
     if let Some(id) = on_hover { mods.push(Modifier::OnHover(id)); }
     if selected {
-        mods.push(Modifier::Background(Token::SurfaceElevated));
-        mods.push(Modifier::Border { token: Token::Accent, width: 1, radius: Radius::Sm.as_u8() });
+        mods.push(Modifier::Background(Token::AccentMuted));
+        mods.push(Modifier::Tint(Token::Accent));
     } else {
         mods.push(Modifier::Hover(vec![
-            Modifier::Background(Token::SurfaceMuted),
-            Modifier::Rounded(Radius::Sm.as_u8()),
+            Modifier::Background(Token::SurfaceHover),
+            Modifier::Rounded(NAV_ROW_RADIUS),
         ]));
         mods.push(Modifier::Focus(vec![
-            Modifier::Border { token: Token::OnSurfaceMuted, width: 1, radius: Radius::Sm.as_u8() },
+            Modifier::Ring { token: Token::AccentRing, width: 2 },
         ]));
     }
 
-    let icon_mods = if selected { vec![Modifier::Tint(Token::Accent)] } else { vec![] };
+    let icon_mods = vec![Modifier::Tint(
+        if selected { Token::Accent } else { Token::OnSurfaceMuted },
+    )];
 
     Widget::Row {
         children: vec![
@@ -294,6 +328,9 @@ pub fn nav_row(
         modifiers: mods,
     }
 }
+
+const NAV_ROW_H: u16 = 30;
+const NAV_ROW_RADIUS: u8 = 7;
 
 /// Horizontal toolbar with built-in padding. Children align centred.
 pub fn toolbar(children: Vec<Widget>) -> Widget {
@@ -320,13 +357,27 @@ pub fn breadcrumb(segments: &[(String, ActionId)]) -> Widget {
                 modifiers: vec![Modifier::Tint(Token::OnSurfaceMuted)],
             });
         }
+        // The last segment is where you are: a filled chip. The ones
+        // behind it are the way back, and stay quiet.
+        let here = i + 1 == segments.len();
+        let mut mods = vec![
+            Modifier::Padding(Padding::Xs.as_u16()),
+            Modifier::Rounded(Radius::Sm.as_u8()),
+            Modifier::OnClick(*action),
+        ];
+        if here {
+            mods.push(Modifier::Background(Token::SurfaceHover));
+        } else {
+            mods.push(Modifier::Tint(Token::OnSurfaceMuted));
+            mods.push(Modifier::Hover(vec![
+                Modifier::Background(Token::SurfaceHover),
+                Modifier::Rounded(Radius::Sm.as_u8()),
+            ]));
+        }
         children.push(Widget::Text {
             content: label.clone(),
-            style:   if i + 1 == segments.len() { TextStyle::Body } else { TextStyle::Muted },
-            modifiers: vec![
-                Modifier::Padding(Padding::Xs.as_u16()),
-                Modifier::OnClick(*action),
-            ],
+            style:   TextStyle::Mono,
+            modifiers: mods,
         });
     }
     Widget::Row {
@@ -336,7 +387,7 @@ pub fn breadcrumb(segments: &[(String, ActionId)]) -> Widget {
         modifiers: vec![
             Modifier::Padding(Padding::Xs.as_u16()),
             Modifier::Background(Token::SurfaceMuted),
-            Modifier::Border { token: Token::Border, width: 1, radius: Radius::Sm.as_u8() },
+            Modifier::Border { token: Token::Border, width: 1, radius: Radius::Md.as_u8() },
         ],
     }
 }

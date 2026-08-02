@@ -227,6 +227,12 @@ fn fmt_mods(mods: &[Modifier]) -> String {
             Modifier::Rounded(r)    => { let _ = write!(s, "Rounded({})", r); }
             Modifier::Flex(f)       => { let _ = write!(s, "Flex({})", f); }
             Modifier::NodeId(n)     => { let _ = write!(s, "NodeId({})", n.0); }
+            Modifier::Ring { token, width } => {
+                let _ = write!(s, "Ring({:?},{})", token, width);
+            }
+            Modifier::MinHeight(h) => { let _ = write!(s, "MinHeight({})", h); }
+            Modifier::MaxHeight(h) => { let _ = write!(s, "MaxHeight({})", h); }
+            Modifier::LineNumbers(on) => { let _ = write!(s, "LineNumbers({})", on); }
         }
     }
     s.push(']');

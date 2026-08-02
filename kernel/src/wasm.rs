@@ -843,6 +843,55 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_fs_usage() -> i64
+    // Filesystem fill level as (used_mib << 32) | total_mib, or -1 when
+    // nothing is mounted. Feeds the file browser's capacity meter.
+    // READ-gated — it says how much of the disk is in use.
+    linker.func_wrap("env", "npk_fs_usage",
+        |caller: Caller<'_, HostState>| -> i64 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::READ).is_err() {
+                return -1;
+            }
+            let Some((total_blocks, free_blocks, _, _)) = crate::npkfs::stats() else {
+                return -1;
+            };
+            let block = crate::npkfs::BLOCK_SIZE as u64;
+            let to_mib = |blocks: u64| (blocks.saturating_mul(block)) >> 20;
+            let total = to_mib(total_blocks);
+            let used = to_mib(total_blocks.saturating_sub(free_blocks));
+            (((used & 0xFFFF_FFFF) << 32) | (total & 0xFFFF_FFFF)) as i64
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_locale(buf_ptr, buf_max) -> i32
+    // Write the UI language code (`lang` config key, e.g. "en" / "de")
+    // into the caller's buffer; returns bytes written or -1. Defaults to
+    // "en". The kernel stores the code only — the catalogs live in the
+    // apps, so adding a language never touches the kernel.
+    linker.func_wrap("env", "npk_locale",
+        |mut caller: Caller<'_, HostState>, buf_ptr: i32, buf_max: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::READ).is_err() {
+                return -1;
+            }
+            let lang = crate::config::get("lang").unwrap_or_default();
+            let lang = lang.trim();
+            let bytes = if lang.is_empty() { b"en".as_slice() } else { lang.as_bytes() };
+            if buf_max < 0 || bytes.len() > buf_max as usize { return -1; }
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data_mut(&mut caller);
+            let Ok(start) = usize::try_from(buf_ptr) else { return -1 };
+            let Some(end) = start.checked_add(bytes.len()) else { return -1 };
+            if end > data.len() { return -1; }
+            data[start..end].copy_from_slice(bytes);
+            bytes.len() as i32
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_launch_arg(buf_ptr, buf_max) -> i32
     // Read the launch argument the app was started with (e.g. a file
     // path passed by npk_open). Returns bytes written, 0 if none, -1 on
@@ -1934,6 +1983,36 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             } else {
                 -1
             }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_window_titles(buf, max) -> i32
+    // One line per open app window: "<flags>\t<workspace>\t<title>", flags
+    // being a decimal bitmask (1 = focused, 2 = on the active workspace).
+    // Panels and overlays are excluded. The dock derives its running/active
+    // indicators from this, the bar its occupied-workspace hints; the
+    // kernel stays free of app names.
+    linker.func_wrap("env", "npk_window_titles",
+        |mut caller: Caller<'_, HostState>, buf_ptr: i32, max: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                return -1;
+            }
+            if max <= 0 { return -1; }
+            let s = crate::shade::with_compositor(|c| c.window_lines())
+                .unwrap_or_default();
+            let bytes = s.as_bytes();
+            let write_len = bytes.len().min(max as usize);
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data_mut(&mut caller);
+            let Ok(start) = usize::try_from(buf_ptr) else { return -1 };
+            let Some(end) = start.checked_add(write_len) else { return -1 };
+            if end > data.len() { return -1; }
+            data[start..end].copy_from_slice(&bytes[..write_len]);
+            write_len as i32
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 

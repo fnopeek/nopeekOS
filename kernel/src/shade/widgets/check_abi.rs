@@ -39,6 +39,12 @@ const _: () = {
     assert!(Token::Success         as u8 == 9);
     assert!(Token::Warning         as u8 == 10);
     assert!(Token::Danger          as u8 == 11);
+    assert!(Token::Page            as u8 == 12);
+    assert!(Token::SurfaceHover    as u8 == 13);
+    assert!(Token::OnSurfaceFaint  as u8 == 14);
+    assert!(Token::AccentRing      as u8 == 15);
+    assert!(Token::AccentLine      as u8 == 16);
+    assert!((Token::AccentLine as usize) < PALETTE_SLOTS);
 
     // Role — values frozen, appended only.
     assert!(Role::None      as u8 == 0);
@@ -187,6 +193,10 @@ fn _modifier_wire_position(m: &Modifier) -> usize {
         Modifier::Rounded(_)        => 21,
         Modifier::Flex(_)           => 22,
         Modifier::NodeId(_)         => 23,
+        Modifier::Ring { .. }       => 24,
+        Modifier::MinHeight(_)      => 25,
+        Modifier::MaxHeight(_)      => 26,
+        Modifier::LineNumbers(_)    => 27,
     }
 }
 

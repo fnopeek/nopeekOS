@@ -22,8 +22,9 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use nopeek_widgets::app_meta::IconRef;
+use nopeek_widgets::i18n;
 use nopeek_widgets::prefab;
-use nopeek_widgets::style::{Padding, Radius, Spacing};
+use nopeek_widgets::style::{Padding, Spacing};
 use nopeek_widgets::*;
 
 #[unsafe(link_section = ".npk.app_meta")]
@@ -52,6 +53,89 @@ unsafe extern "C" {
     fn npk_close_widget() -> i32;
     fn npk_log_serial(ptr: i32, len: i32);
     fn npk_sleep(ms: i32) -> i32;
+}
+
+// ── Strings ───────────────────────────────────────────────────────────
+// English is the source language; a new one is one more `const` below.
+// See `nopeek_widgets::i18n`.
+
+struct Strings {
+    menu_file:     &'static str,
+    menu_view:     &'static str,
+    menu_help:     &'static str,
+    new:           &'static str,
+    open:          &'static str,
+    save:          &'static str,
+    save_as:       &'static str,
+    close:         &'static str,
+    view_source:   &'static str,
+    view_preview:  &'static str,
+    about:         &'static str,
+    no_files:      &'static str,
+    untitled:      &'static str,
+    placeholder:   &'static str,
+    unsaved_title: &'static str,
+    unsaved_body:  &'static str,
+    discard:       &'static str,
+    cancel:        &'static str,
+    save_as_title: &'static str,
+    filename_in:   &'static str,
+    name_hint:     &'static str,
+    welcome:       &'static str,
+}
+
+const EN: Strings = Strings {
+    menu_file: "File", menu_view: "View", menu_help: "Help",
+    new: "New", open: "Open…", save: "Save", save_as: "Save as…",
+    close: "Close",
+    view_source: "Source", view_preview: "Preview",
+    about: "About Spell",
+    no_files: "(no files in documents)",
+    untitled: "Untitled",
+    placeholder: "Start typing…",
+    unsaved_title: "Unsaved changes",
+    unsaved_body: "{} has unsaved changes.",
+    discard: "Discard", cancel: "Cancel",
+    save_as_title: "Save as",
+    filename_in: "File name (in {}/):",
+    name_hint: "Click the field, then Enter to save · Esc cancels",
+    welcome: "# Welcome to Spell\n\nStart typing, or open a file via **File \u{2192} Open\u{2026}** \u{2014} or double-click in loft.\n\n- Multiple files as tabs\n- Live syntax highlighting\n- Tab inserts 4 spaces\n",
+};
+
+const DE: Strings = Strings {
+    menu_file: "Datei", menu_view: "Ansicht", menu_help: "Hilfe",
+    new: "Neu", open: "Öffnen…", save: "Speichern",
+    save_as: "Speichern unter…", close: "Schließen",
+    view_source: "Quelltext", view_preview: "Vorschau",
+    about: "Über Spell",
+    no_files: "(keine Dateien in documents)",
+    untitled: "Unbenannt",
+    placeholder: "Tippe los…",
+    unsaved_title: "Ungespeicherte Änderungen",
+    unsaved_body: "{} hat ungespeicherte Änderungen.",
+    discard: "Verwerfen", cancel: "Abbrechen",
+    save_as_title: "Speichern unter",
+    filename_in: "Dateiname (in {}/):",
+    name_hint: "Klicke ins Feld, dann Enter zum Speichern · Esc bricht ab",
+    welcome: "# Willkommen bei Spell\n\nTippe los, oder öffne eine Datei über **Datei \u{2192} Öffnen\u{2026}** \u{2014} oder Doppelklick in loft.\n\n- Mehrere Dateien als Tabs\n- Code wird live farbig dargestellt\n- Tab rückt 4 Leerzeichen ein\n",
+};
+
+fn s() -> &'static Strings {
+    match i18n::lang() { i18n::Lang::De => &DE, _ => &EN }
+}
+
+/// Substitute the single `{}` placeholder in a catalog string.
+fn fill(template: &str, value: &str) -> String {
+    match template.find("{}") {
+        Some(i) => {
+            let mut out = String::with_capacity(template.len() + value.len());
+            out.push_str(&template[..i]);
+            out.push_str(value);
+            out.push_str(&template[i + 2..]);
+            out
+        }
+        None => template.to_string(),
+    }
 }
 
 fn log(msg: &str) {
@@ -222,7 +306,7 @@ impl Doc {
     fn empty() -> Self {
         Doc {
             path:  None,
-            title: "Unbenannt".to_string(),
+            title: s().untitled.to_string(),
             text:  String::with_capacity(TEXT_CAP),
             dirty: false,
             mode:  Mode::Edit,
@@ -324,7 +408,7 @@ impl Spell {
 
         // No file argument → welcome tab.
         let mut d = Doc::empty();
-        d.text.push_str("# Willkommen bei Spell\n\nTippe los, oder öffne eine Datei über **Datei → Öffnen…** — oder Doppelklick in loft.\n\n- Mehrere Dateien als Tabs\n- Code wird live farbig dargestellt\n- Tab rückt 4 Leerzeichen ein\n");
+        d.text.push_str(s().welcome);
         sp.docs.push(d);
         sp
     }
@@ -540,9 +624,9 @@ fn render(sp: &Spell) -> Widget {
 
 fn render_menu_bar() -> Widget {
     let labels: Vec<(String, ActionId)> = alloc::vec![
-        ("Datei".to_string(),   ActionId(ACT_MENU_FILE)),
-        ("Ansicht".to_string(), ActionId(ACT_MENU_VIEW)),
-        ("Hilfe".to_string(),   ActionId(ACT_MENU_HELP)),
+        (s().menu_file.to_string(), ActionId(ACT_MENU_FILE)),
+        (s().menu_view.to_string(), ActionId(ACT_MENU_VIEW)),
+        (s().menu_help.to_string(), ActionId(ACT_MENU_HELP)),
     ];
     let anchors: Vec<NodeId> = alloc::vec![
         NodeId(NODE_MENU_FILE),
@@ -557,24 +641,24 @@ fn render_dropdown(sp: &Spell, kind: OpenMenu) -> (u32, Widget) {
         OpenMenu::File => (
             NODE_MENU_FILE,
             prefab::popover_menu(&[
-                ("Neu".to_string(),            ActionId(ACT_FILE_NEW)),
-                ("Öffnen…".to_string(),        ActionId(ACT_FILE_OPEN)),
-                ("Speichern".to_string(),      ActionId(ACT_FILE_SAVE)),
-                ("Speichern unter…".to_string(), ActionId(ACT_FILE_SAVE_AS)),
-                ("Schließen".to_string(),      ActionId(ACT_FILE_CLOSE)),
+                (s().new.to_string(), ActionId(ACT_FILE_NEW)),
+                (s().open.to_string(), ActionId(ACT_FILE_OPEN)),
+                (s().save.to_string(), ActionId(ACT_FILE_SAVE)),
+                (s().save_as.to_string(), ActionId(ACT_FILE_SAVE_AS)),
+                (s().close.to_string(), ActionId(ACT_FILE_CLOSE)),
             ], None),
         ),
         OpenMenu::View => (
             NODE_MENU_VIEW,
             prefab::popover_menu(&[
-                ("Quelltext".to_string(), ActionId(ACT_VIEW_EDIT)),
-                ("Vorschau".to_string(),  ActionId(ACT_VIEW_PREVIEW)),
+                (s().view_source.to_string(), ActionId(ACT_VIEW_EDIT)),
+                (s().view_preview.to_string(), ActionId(ACT_VIEW_PREVIEW)),
             ], Some(match sp.cur().mode { Mode::Edit => 0, Mode::Preview => 1 })),
         ),
         OpenMenu::Help => (
             NODE_MENU_HELP,
             prefab::popover_menu(&[
-                ("Über Spell".to_string(), ActionId(ACT_HELP_ABOUT)),
+                (s().about.to_string(), ActionId(ACT_HELP_ABOUT)),
             ], None),
         ),
     }
@@ -583,7 +667,7 @@ fn render_dropdown(sp: &Spell, kind: OpenMenu) -> (u32, Widget) {
 fn render_open_dialog(sp: &Spell) -> Widget {
     let content = if sp.files.is_empty() {
         prefab::popover_menu(&[
-            ("(keine Dateien in documents)".to_string(), ActionId(ACT_MENU_DISMISS)),
+            (s().no_files.to_string(), ActionId(ACT_MENU_DISMISS)),
         ], None)
     } else {
         let items: Vec<(String, ActionId)> = sp.files.iter().enumerate()
@@ -603,42 +687,76 @@ fn render_open_dialog(sp: &Spell) -> Widget {
 /// with a dirty dot and a close (×). Trailing "+" opens a new tab.
 /// Replaces the old filename+icons toolbar (save lives in the Datei
 /// menu, the markdown view toggle in the Ansicht menu).
+/// Fixed tab width — names ellipsize rather than letting the strip
+/// reflow as you open files (UI_REFRESH.md §3 `tab`).
+const TAB_W: u16 = 200;
+const TAB_H: u16 = 30;
+/// Rounded on top only would need per-corner radii; the strip clips the
+/// bottom edge visually because the active tab shares the body's colour.
+const TAB_RADIUS: u8 = 8;
+
 fn render_tabbar(sp: &Spell) -> Widget {
     let mut tabs: Vec<Widget> = Vec::with_capacity(sp.docs.len() + 1);
     for (i, d) in sp.docs.iter().enumerate() {
         let active = i == sp.active;
-        let label = if d.dirty { alloc::format!("{} ●", d.title) } else { d.title.clone() };
         let mut mods: Vec<Modifier> = alloc::vec![
             Modifier::Padding(Padding::Sm.as_u16()),
+            Modifier::MinWidth(TAB_W),
+            Modifier::MaxWidth(TAB_W),
+            Modifier::MinHeight(TAB_H),
             Modifier::OnClick(ActionId(ACT_TAB_BASE + i as u32)),
-            Modifier::Rounded(Radius::Sm.as_u8()),
+            Modifier::Rounded(TAB_RADIUS),
         ];
         if active {
-            mods.push(Modifier::Background(Token::SurfaceElevated));
-            mods.push(Modifier::Border { token: Token::Accent, width: 1, radius: Radius::Sm.as_u8() });
+            // The active tab carries the colour of the content below it,
+            // so the two read as one surface.
+            mods.push(Modifier::Background(Token::Page));
         } else {
             mods.push(Modifier::Hover(alloc::vec![
                 Modifier::Background(Token::SurfaceMuted),
-                Modifier::Rounded(Radius::Sm.as_u8()),
+                Modifier::Rounded(TAB_RADIUS),
             ]));
         }
+
+        // Unsaved work shows as an accent dot; only a tab you can act on
+        // offers the ×. A saved, inactive tab shows neither.
+        let trailing = if d.dirty {
+            Widget::Row {
+                children:  alloc::vec![prefab::mark(8, 8, Some(Token::Accent))],
+                spacing:   0,
+                align:     Align::Center,
+                modifiers: alloc::vec![Modifier::Rounded(4)],
+            }
+        } else if active {
+            Widget::Icon {
+                id:   IconId::X,
+                size: 14,
+                modifiers: alloc::vec![
+                    Modifier::OnClick(ActionId(ACT_TAB_CLOSE_BASE + i as u32)),
+                    Modifier::Tint(Token::OnSurfaceMuted),
+                ],
+            }
+        } else {
+            prefab::mark(8, 8, None)
+        };
+
         tabs.push(Widget::Row {
             children: alloc::vec![
-                Widget::Text {
-                    content:   label,
-                    style:     TextStyle::Body,
-                    modifiers: if active { alloc::vec![] } else { alloc::vec![Modifier::Tint(Token::OnSurfaceMuted)] },
-                },
                 Widget::Icon {
-                    id:   IconId::X,
-                    size: 14,
-                    modifiers: alloc::vec![
-                        Modifier::OnClick(ActionId(ACT_TAB_CLOSE_BASE + i as u32)),
-                        Modifier::Tint(Token::OnSurfaceMuted),
-                    ],
+                    id:   tab_icon(d),
+                    size: 16,
+                    modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceFaint)],
                 },
+                Widget::Text {
+                    content:   d.title.clone(),
+                    style:     TextStyle::Body,
+                    modifiers: if active { alloc::vec![] }
+                               else { alloc::vec![Modifier::Tint(Token::OnSurfaceMuted)] },
+                },
+                Widget::Spacer { flex: 1 },
+                trailing,
             ],
-            spacing:   Spacing::Xs.as_u16(),
+            spacing:   Spacing::Sm.as_u16(),
             align:     Align::Center,
             modifiers: mods,
         });
@@ -649,25 +767,33 @@ fn render_tabbar(sp: &Spell) -> Widget {
         style:     TextStyle::Body,
         modifiers: alloc::vec![
             Modifier::Padding(Padding::Sm.as_u16()),
+            Modifier::MinHeight(TAB_H),
+            Modifier::Tint(Token::OnSurfaceFaint),
             Modifier::OnClick(ActionId(ACT_FILE_NEW)),
+            Modifier::Rounded(TAB_RADIUS),
             Modifier::Hover(alloc::vec![
                 Modifier::Background(Token::SurfaceMuted),
-                Modifier::Rounded(Radius::Sm.as_u8()),
+                Modifier::Rounded(TAB_RADIUS),
             ]),
         ],
     });
     Widget::Scroll {
         child: Box::new(Widget::Row {
             children:  tabs,
-            spacing:   Spacing::Xs.as_u16(),
-            align:     Align::Center,
-            // Taller padding so the tab row matches loft's toolbar height
-            // (its search box makes it tall) → the divider below the tab
-            // row lines up with loft's across a split view.
-            modifiers: alloc::vec![Modifier::Padding(Padding::Md.as_u16())],
+            spacing:   Spacing::Xxs.as_u16(),
+            align:     Align::End,
+            modifiers: alloc::vec![Modifier::Padding(Padding::Xs.as_u16())],
         }),
         axis:      Axis::Horizontal,
-        modifiers: alloc::vec![],
+        modifiers: alloc::vec![Modifier::Background(Token::SurfaceElevated)],
+    }
+}
+
+/// Tab glyph by file kind — plain text vs. source.
+fn tab_icon(d: &Doc) -> IconId {
+    match d.kind() {
+        Kind::Code(_) => IconId::Code,
+        _             => IconId::FileText,
     }
 }
 
@@ -688,7 +814,7 @@ fn render_body(sp: &Spell) -> Widget {
             axis:      Axis::Vertical,
             modifiers: alloc::vec![
                 Modifier::Flex(1),
-                Modifier::Background(Token::Surface),
+                Modifier::Background(Token::Page),
                 Modifier::Padding(Padding::Md.as_u16()),
             ],
         };
@@ -699,12 +825,13 @@ fn render_body(sp: &Spell) -> Widget {
     };
     Widget::TextArea {
         value:       doc.text.clone(),
-        placeholder: "Tippe los…".to_string(),
+        placeholder: s().placeholder.to_string(),
         spans,
         modifiers:   alloc::vec![
             Modifier::Flex(1),
-            Modifier::Background(Token::Surface),
+            Modifier::Background(Token::Page),
             Modifier::Padding(Padding::Sm.as_u16()),
+            Modifier::LineNumbers(true),
         ],
     }
 }
@@ -714,23 +841,23 @@ fn render_body(sp: &Spell) -> Widget {
 fn render_confirm_dialog(sp: &Spell) -> Widget {
     let title = match sp.confirm_close.and_then(|i| sp.docs.get(i)) {
         Some(d) => d.title.clone(),
-        None => "Datei".to_string(),
+        None => s().menu_file.to_string(),
     };
     let card = prefab::dialog(
-        "Ungespeicherte Änderungen",
+        s().unsaved_title,
         Widget::Column {
             children: alloc::vec![
                 Widget::Text {
-                    content:   alloc::format!("„{}“ hat ungespeicherte Änderungen.", title),
+                    content:   fill(s().unsaved_body, &title),
                     style:     TextStyle::Body,
                     modifiers: alloc::vec![],
                 },
                 Widget::Row {
                     children: alloc::vec![
-                        prefab::button("Verwerfen", prefab::ButtonStyle::Destructive, ActionId(ACT_CLOSE_DISCARD)),
+                        prefab::button(s().discard, prefab::ButtonStyle::Destructive, ActionId(ACT_CLOSE_DISCARD)),
                         Widget::Spacer { flex: 1 },
-                        prefab::button("Abbrechen", prefab::ButtonStyle::Ghost,   ActionId(ACT_CLOSE_CANCEL)),
-                        prefab::button("Speichern",  prefab::ButtonStyle::Primary, ActionId(ACT_CLOSE_SAVE)),
+                        prefab::button(s().cancel, prefab::ButtonStyle::Ghost, ActionId(ACT_CLOSE_CANCEL)),
+                        prefab::button(s().save, prefab::ButtonStyle::Primary, ActionId(ACT_CLOSE_SAVE)),
                     ],
                     spacing:   Spacing::Sm.as_u16(),
                     align:     Align::Center,
@@ -757,11 +884,11 @@ fn render_confirm_dialog(sp: &Spell) -> Widget {
 /// (a re-commit doesn't auto-focus), type the name, Enter or Speichern.
 fn render_name_dialog(sp: &Spell) -> Widget {
     let card = prefab::dialog(
-        "Speichern unter",
+        s().save_as_title,
         Widget::Column {
             children: alloc::vec![
                 Widget::Text {
-                    content:   alloc::format!("Dateiname (in {}/):", basename(&sp.docs_dir)),
+                    content:   fill(s().filename_in, basename(&sp.docs_dir)),
                     style:     TextStyle::Muted,
                     modifiers: alloc::vec![],
                 },
@@ -770,8 +897,8 @@ fn render_name_dialog(sp: &Spell) -> Widget {
                 Widget::Row {
                     children: alloc::vec![
                         Widget::Spacer { flex: 1 },
-                        prefab::button("Abbrechen", prefab::ButtonStyle::Ghost,   ActionId(ACT_NAME_CANCEL)),
-                        prefab::button("Speichern",  prefab::ButtonStyle::Primary, ActionId(ACT_NAME_SUBMIT)),
+                        prefab::button(s().cancel, prefab::ButtonStyle::Ghost, ActionId(ACT_NAME_CANCEL)),
+                        prefab::button(s().save, prefab::ButtonStyle::Primary, ActionId(ACT_NAME_SUBMIT)),
                     ],
                     spacing:   Spacing::Sm.as_u16(),
                     align:     Align::Center,
@@ -782,7 +909,7 @@ fn render_name_dialog(sp: &Spell) -> Widget {
             align:     Align::Stretch,
             modifiers: alloc::vec![],
         },
-        Some("Klicke ins Feld, dann Enter zum Speichern · Esc bricht ab"),
+        Some(s().name_hint),
         360,
     );
     // Centre the dialog in the body area.

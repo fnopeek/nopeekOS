@@ -215,8 +215,8 @@ fn setup_identity_and_settings(salt: &[u8; 16]) -> bool {
     let kb = read_line_default("de_CH");
     config::set("keyboard", &kb);
 
-    kprint!("[npk]   Language  [de]: ");
-    let lang = read_line_default("de");
+    kprint!("[npk]   Language  [en]: ");
+    let lang = read_line_default("en");
     config::set("lang", &lang);
 
     // Default autostart: the app dock + the top bar. Resident apps no
