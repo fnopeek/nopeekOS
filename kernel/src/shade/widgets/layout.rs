@@ -118,10 +118,14 @@ pub fn layout(root: &Widget, container: Rect) -> LayoutOutput {
 }
 
 pub fn layout_scrolled(root: &Widget, container: Rect, scroll_y: u32) -> LayoutOutput {
-    // Pass 1: main tree.
-    let (_, inner) = unpack_modifiers(root, container);
+    // Pass 1: main tree. `place` unpacks the root's own padding itself —
+    // stripping it here first applied it TWICE, which shrank the root's
+    // rect by 2× its padding. On a full-window app that just cost a few
+    // px of content; on a panel it cut visibly into the card, because the
+    // root's Background paints on that rect (a 36 px bar rendered 28 px
+    // tall and sat 5 px too low).
     let mut ctx = ScrollCtx { offset: scroll_y, max: 0, max_rect: Rect { x: 0, y: 0, w: 0, h: 0 } };
-    let tree = place(root, inner, &mut ctx);
+    let tree = place(root, container, &mut ctx);
     let max_scroll_y = ctx.max;
     let max_scroll_rect = ctx.max_rect;
 

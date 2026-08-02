@@ -289,8 +289,9 @@ fn readout(icon: IconId, icon_mods: Vec<Modifier>, value: String,
            click: Option<ActionId>) -> Widget {
     let mut mods: Vec<Modifier> = alloc::vec![
         Modifier::MinHeight(BAND_H),
+        Modifier::MaxHeight(BAND_H),
         Modifier::Rounded(CELL_RADIUS),
-        Modifier::Padding(Padding::Sm.as_u16()),
+        Modifier::Padding(Padding::Xxs.as_u16()),
         Modifier::Tint(Token::OnSurfaceMuted),
     ];
     if let Some(a) = click {
@@ -382,7 +383,10 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
                         children: alloc::vec![prefab::mark(1, 14, Some(Token::Border))],
                         spacing: 0,
                         align: Align::Center,
-                        modifiers: alloc::vec![Modifier::Padding(Padding::Sm.as_u16())],
+                        modifiers: alloc::vec![
+                            Modifier::Padding(Padding::Xs.as_u16()),
+                            Modifier::MaxHeight(BAND_H),
+                        ],
                     },
                     Widget::Row {
                         children: alloc::vec![
@@ -478,7 +482,14 @@ fn zone(names: &[String], st: &BarState) -> Widget {
         children: kids,
         spacing: Spacing::Xxs.as_u16(),
         align: Align::Center,
-        modifiers: Vec::new(),
+        // Pin the zone to the band. Without this a single over-tall
+        // segment makes the zone taller than the bar's content box, the
+        // centring offset saturates to zero, and everything in that zone
+        // rides out of the bottom edge.
+        modifiers: alloc::vec![
+            Modifier::MinHeight(BAND_H),
+            Modifier::MaxHeight(BAND_H),
+        ],
     }
 }
 
