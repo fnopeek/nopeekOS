@@ -140,6 +140,10 @@ pub struct WidgetScene {
     /// for trees that have no state-driven visuals — avoids
     /// re-rendering on every mouse move.
     pub has_pseudo:  bool,
+    /// Last edit buffer set aside when focus left a text widget, with
+    /// the path it belonged to. Refocusing that same widget resumes it
+    /// instead of rebuilding from the app's (one-round-trip-stale) tree.
+    pub parked_edit: Option<(Vec<u32>, InputEditState)>,
     /// Compositor-owned text-editor state, populated when `focus_path`
     /// targets a `Widget::Input`. None means no Input is focused (or
     /// the focused widget isn't an Input). Drives caret render +
@@ -643,29 +647,19 @@ pub fn press_at(window_id: u32, x: i32, y: i32) -> bool {
             None    => return false,
         };
         let press_path = find_focusable_path(&scene.tree, &scene.layout_tree, x, y);
-        // A press into a canvas hands keyboard input to the app itself.
-        if hits_canvas(&scene.tree, &scene.layout_tree, x, y) {
-            (Some(None), press_path, scene.has_pseudo)
-        } else {
+        // One rule, everywhere: a press inside a text widget focuses it,
+        // a press anywhere else releases focus. Previously only a press
+        // into a Canvas released it — which is why the browser (whose
+        // page IS a canvas) felt right while the file browser trapped the
+        // keyboard in its search box with no way out but Tab.
         let new_focus_opt: Option<Option<Vec<u32>>> = match press_path.as_ref() {
-            // Input / TextArea under cursor → focus moves to it.
             Some(p) if matches!(
                 widget_at_path(&scene.tree, p),
                 Some(abi::Widget::Input { .. }) | Some(abi::Widget::TextArea { .. })
-            ) => {
-                Some(Some(p.clone()))
-            }
-            // Non-Input focusable under cursor → focus untouched.
-            // `None` means "no change to focus_path", distinct from
-            // `Some(None)` which would mean "clear focus".
-            Some(_) => None,
-            // Click into empty space → focus untouched too. Apps that
-            // want "click outside an input dismisses focus" can
-            // implement that explicitly later.
-            None    => None,
+            ) => Some(Some(p.clone())),
+            _ => Some(None),
         };
         (new_focus_opt, press_path, scene.has_pseudo)
-        }
     };
 
     let (focus_changed, active_changed) = {
@@ -691,19 +685,30 @@ pub fn press_at(window_id: u32, x: i32, y: i32) -> bool {
 
     let edit_present = if let Some(s) = SCENES.lock().get_mut(&window_id) {
         if let Some(new_focus) = new_focus_opt {
+            // Capture the OUTGOING path before it is overwritten — the
+            // parked buffer is keyed by the field it came from.
+            let leaving = s.focus_path.clone();
             match new_focus {
                 Some(p) => s.focus_path = p,
                 None    => s.focus_path.clear(),
             }
-            // Re-derive input_edit against the new focus target. We
-            // only ever reach this path when focus actually moved
-            // (onto an Input or back to none) — pure non-Input clicks
-            // leave both focus_path and input_edit untouched.
-            s.input_edit = if s.focus_path.is_empty() {
-                None
+            // The editor buffer leads the app's tree by one round-trip BY
+            // DESIGN, so discarding it on focus loss threw away whatever
+            // had been typed since the app last committed: the text
+            // vanished on click-away and only came back once Enter made
+            // the app re-commit. Park it under the field it belongs to,
+            // and hand it back when that same field is focused again.
+            if s.focus_path.is_empty() {
+                if let Some(edit) = s.input_edit.take() {
+                    s.parked_edit = Some((leaving, edit));
+                }
             } else {
-                compute_input_edit(&s.tree, &s.focus_path, None)
-            };
+                let resume = match &s.parked_edit {
+                    Some((path, edit)) if *path == s.focus_path => Some(edit.clone()),
+                    _ => None,
+                };
+                s.input_edit = compute_input_edit(&s.tree, &s.focus_path, resume.as_ref());
+            }
         }
         s.active_path = new_active;
         s.input_edit.is_some()
@@ -987,7 +992,12 @@ fn widget_at_path<'a>(tree: &'a abi::Widget, path: &[u32]) -> Option<&'a abi::Wi
 fn find_first_input_path(tree: &abi::Widget) -> Option<Vec<u32>> {
     fn walk(w: &abi::Widget, cursor: &mut Vec<u32>, out: &mut Option<Vec<u32>>) {
         if out.is_some() || is_disabled(w) { return; }
-        if matches!(w, abi::Widget::Input { .. } | abi::Widget::TextArea { .. }) {
+        // Opt-in via `Modifier::Autofocus`. Grabbing the first Input we
+        // find is right for a launcher and wrong everywhere else: a file
+        // browser's search box swallowed every arrow key on open.
+        if matches!(w, abi::Widget::Input { .. } | abi::Widget::TextArea { .. })
+            && modifiers_of_ref(w).iter().any(|m| matches!(m, abi::Modifier::Autofocus))
+        {
             *out = Some(cursor.clone());
             return;
         }
@@ -1739,7 +1749,7 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
     // when the window itself was created earlier by
     // `npk_window_set_overlay` (drun's path), which is exactly when we
     // want to auto-focus.
-    let (prev_hover, prev_focus, prev_active, prev_input_edit, is_first_commit) = {
+    let (prev_hover, prev_focus, prev_active, prev_input_edit, prev_parked, is_first_commit) = {
         let scenes = SCENES.lock();
         match scenes.get(&target_id) {
             Some(s) => (
@@ -1747,9 +1757,10 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
                 s.focus_path.clone(),
                 s.active_path.clone(),
                 s.input_edit.clone(),
+                s.parked_edit.clone(),
                 false,
             ),
-            None    => (Vec::new(), Vec::new(), None, None, true),
+            None    => (Vec::new(), Vec::new(), None, None, None, true),
         }
     };
 
@@ -1806,6 +1817,7 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
         active_path: prev_active,
         density,
         has_pseudo,
+        parked_edit: prev_parked,
         input_edit,
         scroll_y,
         max_scroll_y,

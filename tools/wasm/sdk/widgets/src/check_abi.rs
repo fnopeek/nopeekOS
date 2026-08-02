@@ -172,6 +172,7 @@ fn _modifier_wire_position(m: &Modifier) -> usize {
         Modifier::MaxHeight(_)      => 26,
         Modifier::LineNumbers(_)    => 27,
         Modifier::PaddingXY { .. }  => 28,
+        Modifier::Autofocus         => 29,
     }
 }
 

@@ -168,7 +168,7 @@ impl Drun {
 
     fn render(&self) -> Widget {
         let badge = prefab::badge("drun");
-        let search = prefab::input(
+        let search = prefab::input_autofocus(
             &self.query,
             "Type to search apps…",
             prefab::InputKind::Search,

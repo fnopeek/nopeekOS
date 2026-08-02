@@ -234,6 +234,7 @@ fn fmt_mods(mods: &[Modifier]) -> String {
             Modifier::MaxHeight(h) => { let _ = write!(s, "MaxHeight({})", h); }
             Modifier::LineNumbers(on) => { let _ = write!(s, "LineNumbers({})", on); }
             Modifier::PaddingXY { x, y } => { let _ = write!(s, "PaddingXY({},{})", x, y); }
+            Modifier::Autofocus => { let _ = write!(s, "Autofocus"); }
         }
     }
     s.push(']');

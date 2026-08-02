@@ -909,7 +909,7 @@ fn render_rename_dialog(lf: &Loft) -> Widget {
                     style:     TextStyle::Muted,
                     modifiers: alloc::vec![],
                 },
-                prefab::input(&lf.rename_buf, "name", prefab::InputKind::Text,
+                prefab::input_autofocus(&lf.rename_buf, "name", prefab::InputKind::Text,
                               ActionId(ACT_RENAME_SUBMIT), None),
                 Widget::Row {
                     children: alloc::vec![

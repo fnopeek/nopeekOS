@@ -418,6 +418,12 @@ pub enum Modifier {
     /// wire — the running app keeps sending the old index and the
     /// compositor decodes garbage (spell rendered an empty window).
     PaddingXY { x: u16, y: u16 },
+    /// This text widget takes focus when its window first appears.
+    /// Opt-in: the compositor used to auto-focus the first `Input` it
+    /// found, which is right for a launcher and wrong for anything with
+    /// a search box — a file browser's list lost every arrow key to a
+    /// field the user never clicked.
+    Autofocus,
     // Appended only.
 }
 

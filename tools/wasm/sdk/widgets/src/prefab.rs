@@ -638,11 +638,36 @@ pub fn input(
     on_submit: ActionId,
     trailing: Option<Widget>,
 ) -> Widget {
+    input_maybe_focused(value, placeholder, kind, on_submit, trailing, false)
+}
+
+/// `input` that takes focus as soon as its window appears — for a
+/// launcher or a dialog whose whole purpose is the field. Everything
+/// else should stay unfocused so the window's own keys (arrows, Esc)
+/// reach the app instead of a text box the user never clicked.
+pub fn input_autofocus(
+    value: &str,
+    placeholder: &str,
+    kind: InputKind,
+    on_submit: ActionId,
+    trailing: Option<Widget>,
+) -> Widget {
+    input_maybe_focused(value, placeholder, kind, on_submit, trailing, true)
+}
+
+fn input_maybe_focused(
+    value: &str,
+    placeholder: &str,
+    kind: InputKind,
+    on_submit: ActionId,
+    trailing: Option<Widget>,
+    autofocus: bool,
+) -> Widget {
     let raw = Widget::Input {
         value:       value.to_string(),
         placeholder: placeholder.to_string(),
         on_submit,
-        modifiers:   vec![],
+        modifiers:   if autofocus { vec![Modifier::Autofocus] } else { vec![] },
     };
     // No background — the input blends with the dialog so the search bar
     // reads as part of the panel rather than as a stacked card on top.
