@@ -402,6 +402,12 @@ pub enum Modifier {
     MinHeight(u16),
     /// Layout maximum height (px at 1× scale).
     MaxHeight(u16),
+    /// Per-axis inner padding (px at 1× scale). `Padding` is uniform;
+    /// the design routinely wants different insets per axis (a search
+    /// field is `padding: 0 10px` with its height set by a clamp), and
+    /// forcing one value makes the horizontal air hostage to the row
+    /// height. Sums with any `Padding` on the same node.
+    PaddingXY { x: u16, y: u16 },
     /// Draw a line-number gutter down the left edge of a `TextArea`.
     /// The compositor owns that widget's viewport, so only it can keep
     /// the numbers in step with scrolling — an app-drawn column would
