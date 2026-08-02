@@ -46,6 +46,7 @@ extern crate alloc;
 
 pub mod abi;
 pub mod app_meta;
+pub mod i18n;
 pub mod prefab;
 pub mod style;
 pub mod wire;
@@ -110,5 +111,6 @@ pub use abi::{
     Role, Shadow, Size, Span, TextStyle, Token, Transition, Widget,
 };
 pub use app_meta::{AppMeta, AppMetaError, IconRef, APP_META_WIRE};
+pub use i18n::Lang;
 pub use style::{Elevation, Motion, Padding, Radius, Spacing};
 pub use wire::{decode, encode, WireError, WIRE_VERSION};

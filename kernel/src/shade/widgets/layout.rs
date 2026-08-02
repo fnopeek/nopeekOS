@@ -233,16 +233,20 @@ fn measure(w: &Widget) -> Size {
 fn apply_size_constraints(size: Size, mods: &[Modifier]) -> Size {
     let mut min_w = 0u32;
     let mut max_w = u32::MAX;
+    let mut min_h = 0u32;
+    let mut max_h = u32::MAX;
     for m in mods {
         match m {
-            Modifier::MinWidth(v) => { let v = *v as u32; if v > min_w { min_w = v; } }
-            Modifier::MaxWidth(v) => { let v = *v as u32; if v < max_w { max_w = v; } }
+            Modifier::MinWidth(v)  => { let v = *v as u32; if v > min_w { min_w = v; } }
+            Modifier::MaxWidth(v)  => { let v = *v as u32; if v < max_w { max_w = v; } }
+            Modifier::MinHeight(v) => { let v = *v as u32; if v > min_h { min_h = v; } }
+            Modifier::MaxHeight(v) => { let v = *v as u32; if v < max_h { max_h = v; } }
             _ => {}
         }
     }
     Size {
         w: size.w.max(min_w).min(max_w),
-        h: size.h,
+        h: size.h.max(min_h).min(max_h),
     }
 }
 

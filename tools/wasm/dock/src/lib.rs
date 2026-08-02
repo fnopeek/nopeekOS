@@ -21,6 +21,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use nopeek_widgets::app_catalog::{self, AppEntry, EntryKind};
+use nopeek_widgets::i18n;
 use nopeek_widgets::prefab;
 use nopeek_widgets::style::{Padding, Radius, Spacing};
 use nopeek_widgets::*;
@@ -49,9 +50,53 @@ unsafe extern "C" {
     fn npk_run_intent(verb_ptr: i32, verb_len: i32) -> i32;
     fn npk_window_set_dock(w: i32, h: i32) -> i32;
     fn npk_window_set_modal(modal: i32) -> i32;
+    fn npk_window_titles(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_get_fb_size() -> i64;
     fn npk_log_serial(ptr: i32, len: i32);
     fn npk_sleep(ms: i32) -> i32;
+}
+
+// ── Strings ───────────────────────────────────────────────────────────
+// English is the source language. A new language is one more `const`
+// here — see `nopeek_widgets::i18n`.
+
+struct Strings {
+    unpin_named:  &'static str,
+    unpin:        &'static str,
+    move_entry:   &'static str,
+    all_pinned:   &'static str,
+}
+
+const EN: Strings = Strings {
+    unpin_named: "Remove {} from dock",
+    unpin:       "Remove from dock",
+    move_entry:  "Move",
+    all_pinned:  "(every app is already pinned)",
+};
+
+const DE: Strings = Strings {
+    unpin_named: "{} vom Dock entfernen",
+    unpin:       "Vom Dock entfernen",
+    move_entry:  "Verschieben",
+    all_pinned:  "(alle Apps schon im Dock)",
+};
+
+fn s() -> &'static Strings {
+    match i18n::lang() { Lang::De => &DE, _ => &EN }
+}
+
+/// Substitute the single `{}` placeholder in a catalog string.
+fn fill(template: &str, value: &str) -> String {
+    match template.find("{}") {
+        Some(i) => {
+            let mut out = String::with_capacity(template.len() + value.len());
+            out.push_str(&template[..i]);
+            out.push_str(value);
+            out.push_str(&template[i + 2..]);
+            out
+        }
+        None => template.to_string(),
+    }
 }
 
 fn log(msg: &str) {
@@ -150,12 +195,22 @@ const MENU_MOVE:    u32 = 200_001;      // enter drag-to-reorder mode
 const MENU_DISMISS: u32 = 200_003;
 const ADD_BASE:     u32 = 300_000;      // ADD_BASE+catalog_idx : add to dock
 
-// Visual sizing (px at 1× scale). Kept low + tight for a flat, floating
-// tray; the compositor draws it translucent with a gap from the edge.
-const ICON_SIZE: u16 = 24;
-const DOCK_HEIGHT: i32 = 48;
-const CELL_FOOTPRINT: i32 = 46; // icon + padding + inter-cell gap
-const SIDE_PADDING: i32 = 28;
+// Visual sizing (px at 1× scale) — UI_REFRESH.md §3 "dock".
+/// Glyph inside a cell tile.
+const ICON_SIZE: u16 = 20;
+/// Square tile the glyph sits in.
+const CELL_BOX: u16 = 34;
+/// Corner radius of that tile.
+const CELL_RADIUS: u8 = 9;
+/// Running-indicator dash: full width when the app is focused, a stub
+/// when it merely runs, invisible (but space-holding) when it doesn't.
+const DASH_W_ACTIVE: u16 = 12;
+const DASH_W_RUNNING: u16 = 3;
+const DASH_H: u16 = 2;
+/// Tile + gap + dash → the cell column's height.
+const DOCK_HEIGHT: i32 = 50;
+const CELL_FOOTPRINT: i32 = 36; // tile + inter-cell gap
+const SIDE_PADDING: i32 = 24;
 /// Approximate compositor `DOCK_BOTTOM_GAP * scale` (kernel default is 12,
 /// HiDPI scale 2× → 24). Subtracted from the expanded window height so
 /// the visible bottom gap is preserved when a menu is open.
@@ -236,29 +291,30 @@ impl Dock {
     }
 
     fn render(&self) -> Widget {
-        let mut cells: Vec<Widget> = Vec::with_capacity(self.entries.len() + 3);
+        let mut cells: Vec<Widget> = Vec::with_capacity(self.entries.len() + 4);
         // Leading flex spacer centres the icon group on the main axis
         // (the row fills the full tray width, icons don't left-pack).
         cells.push(Widget::Spacer { flex: 1 });
         for (i, e) in self.entries.iter().enumerate() {
             cells.push(icon_cell(
                 e.icon,
-                ICON_SIZE,
                 ActionId(CLICK_BASE + i as u32),
                 ActionId(HOVER_BASE + i as u32),
                 NodeId(NODE_CELL + i as u32),
+                run_state_of(&e.launch_name),
             ));
         }
+        cells.push(separator());
         // Trailing launcher button → drun (full search). Right-click on
         // it opens the Add-to-dock submenu. Hover with HOVER_BASE+N (where
         // N == entries.len()) so a drag-reorder can move past the last
         // pinned slot, dropping the moving entry at the end of the list.
         cells.push(icon_cell(
             IconId::MagnifyingGlass,
-            ICON_SIZE,
             ActionId(LAUNCHER),
             ActionId(HOVER_BASE + self.entries.len() as u32),
             NodeId(NODE_LAUNCHER),
+            RunState::Idle,
         ));
         cells.push(Widget::Spacer { flex: 1 });
 
@@ -271,7 +327,7 @@ impl Dock {
         // make the pill look shorter on right-click).
         let tray = Widget::Row {
             children:  cells,
-            spacing:   Spacing::Sm.as_u16(),
+            spacing:   Spacing::Xxs.as_u16(),
             align:     Align::Center,
             modifiers: alloc::vec![
                 Modifier::Background(Token::SurfaceElevated),
@@ -347,16 +403,16 @@ impl Dock {
                     })
                     .unwrap_or_default();
                 let unpin_label = if name.is_empty() {
-                    "Vom Dock entfernen".to_string()
+                    s().unpin.to_string()
                 } else {
-                    alloc::format!("{} vom Dock entfernen", name)
+                    fill(s().unpin_named, &name)
                 };
                 let mut items: Vec<(String, ActionId)> = Vec::with_capacity(2);
                 items.push((unpin_label, ActionId(MENU_UNPIN)));
-                // "Verschieben" only makes sense when there's somewhere
-                // to move TO — at least two pinned entries.
+                // Moving only makes sense when there's somewhere to move
+                // TO — at least two pinned entries.
                 if self.entries.len() > 1 {
-                    items.push(("Verschieben".to_string(), ActionId(MENU_MOVE)));
+                    items.push((s().move_entry.to_string(), ActionId(MENU_MOVE)));
                 }
                 (NodeId(NODE_CELL + idx as u32),
                  prefab::popover_menu(&items, None))
@@ -372,8 +428,7 @@ impl Dock {
                                 ActionId(ADD_BASE + i as u32)));
                 }
                 if items.is_empty() {
-                    items.push(("(alle Apps schon im Dock)".to_string(),
-                                ActionId(MENU_DISMISS)));
+                    items.push((s().all_pinned.to_string(), ActionId(MENU_DISMISS)));
                 }
                 (NodeId(NODE_LAUNCHER),
                  prefab::popover_menu(&items, None))
@@ -572,25 +627,135 @@ impl Dock {
     }
 }
 
-/// Single dock cell — `Widget::Icon` with hover + click + a NodeId
-/// anchor so the right-click popover can attach to it. The `hover`
-/// ActionId fires when the cursor enters the cell — the dock uses
-/// this for the drag-reorder live shuffle. Hover state inflates the
-/// glyph slightly (Mac-Dock style) instead of painting a background
-/// box; the kernel renderer reads `Modifier::Scale` for icons.
-fn icon_cell(icon: IconId, size: u16, click: ActionId, hover: ActionId, anchor: NodeId) -> Widget {
-    let mods: Vec<Modifier> = alloc::vec![
-        Modifier::Padding(Padding::Sm.as_u16()),
+/// How an app in the dock relates to the current window set.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RunState {
+    /// No window open.
+    Idle,
+    /// Has a window somewhere.
+    Running,
+    /// Has the focused window.
+    Active,
+}
+
+/// Single dock cell — a tile holding the glyph, with the running
+/// indicator dash below it. Hover keeps the Mac-style glyph bump; the
+/// tile background is reserved for the app that owns the focus, so the
+/// two cues never mean the same thing. The `hover` ActionId also drives
+/// the drag-reorder live shuffle, and the NodeId anchors the
+/// right-click popover.
+fn icon_cell(
+    icon: IconId,
+    click: ActionId,
+    hover: ActionId,
+    anchor: NodeId,
+    run: RunState,
+) -> Widget {
+    let mut tile_mods: Vec<Modifier> = alloc::vec![
+        Modifier::MinWidth(CELL_BOX),
+        Modifier::MinHeight(CELL_BOX),
+        Modifier::Rounded(CELL_RADIUS),
         Modifier::OnClick(click),
         Modifier::OnHover(hover),
         Modifier::NodeId(anchor),
         Modifier::Hover(alloc::vec![
             // Q8.8: 320 = 1.25× — visible bump without overflowing the
-            // tray pill enough to trample the neighbours.
+            // tray enough to trample the neighbours.
             Modifier::Scale(320),
         ]),
     ];
-    Widget::Icon { id: icon, size, modifiers: mods }
+    let mut glyph_mods: Vec<Modifier> = Vec::new();
+    if run == RunState::Active {
+        tile_mods.push(Modifier::Background(Token::SurfaceHover));
+        glyph_mods.push(Modifier::Tint(Token::Accent));
+    }
+
+    let tile = Widget::Row {
+        children: alloc::vec![Widget::Icon {
+            id: icon,
+            size: ICON_SIZE,
+            modifiers: glyph_mods,
+        }],
+        spacing:   0,
+        align:     Align::Center,
+        modifiers: tile_mods,
+    };
+
+    let dash = match run {
+        RunState::Active  => prefab::mark(DASH_W_ACTIVE,  DASH_H, Some(Token::Accent)),
+        RunState::Running => prefab::mark(DASH_W_RUNNING, DASH_H, Some(Token::OnSurfaceFaint)),
+        RunState::Idle    => prefab::mark(DASH_W_RUNNING, DASH_H, None),
+    };
+
+    Widget::Column {
+        children:  alloc::vec![tile, dash],
+        spacing:   Spacing::Xs.as_u16(),
+        align:     Align::Center,
+        modifiers: Vec::new(),
+    }
+}
+
+/// Vertical hairline between the pinned apps and the trailing launcher.
+fn separator() -> Widget {
+    Widget::Row {
+        children:  alloc::vec![prefab::mark(1, 20, Some(Token::Border))],
+        spacing:   0,
+        align:     Align::Center,
+        modifiers: alloc::vec![Modifier::Padding(Padding::Xs.as_u16())],
+    }
+}
+
+// The compositor's window list, kept in a static buffer rather than on
+// the heap: the render loop resets the bump allocator before every
+// commit, so anything derived here that lived on the heap would be a
+// use-after-free one frame later.
+const TITLES_CAP: usize = 2048;
+static mut TITLES: [u8; TITLES_CAP] = [0; TITLES_CAP];
+static mut TITLES_LEN: usize = 0;
+
+/// Re-read the window list. Returns true when it differs from the last
+/// read — the dock re-renders only then, so polling stays cheap.
+fn refresh_titles() -> bool {
+    let mut scratch = [0u8; TITLES_CAP];
+    let n = unsafe { npk_window_titles(scratch.as_mut_ptr() as i32, TITLES_CAP as i32) };
+    let len = if n > 0 { n as usize } else { 0 };
+    // SAFETY: single-threaded WASM app; no concurrent access.
+    unsafe {
+        let cur_len = *(&raw const TITLES_LEN);
+        let cur = &*(&raw const TITLES);
+        if cur_len == len && cur[..len] == scratch[..len] {
+            return false;
+        }
+        let dst = &mut *(&raw mut TITLES);
+        dst[..len].copy_from_slice(&scratch[..len]);
+        *(&raw mut TITLES_LEN) = len;
+    }
+    true
+}
+
+fn titles_text() -> &'static str {
+    // SAFETY: single-threaded; the buffer is only written by refresh_titles.
+    unsafe {
+        let len = *(&raw const TITLES_LEN);
+        let buf = &*(&raw const TITLES);
+        core::str::from_utf8(&buf[..len]).unwrap_or("")
+    }
+}
+
+/// Window titles carry the module name, so a dock entry's `launch_name`
+/// matches a window line directly.
+fn run_state_of(launch_name: &str) -> RunState {
+    let mut state = RunState::Idle;
+    for line in titles_text().lines() {
+        let mut cols = line.split('\t');
+        let (Some(flags), Some(_ws), Some(title)) = (cols.next(), cols.next(), cols.next())
+            else { continue };
+        if title.trim() != launch_name { continue; }
+        let flags: u8 = flags.trim().parse().unwrap_or(0);
+        if flags & 1 != 0 { return RunState::Active; }
+        state = RunState::Running;
+    }
+    state
 }
 
 /// Read `sys/config/dock` — one app name (module or intent) per line.
@@ -635,6 +800,7 @@ pub extern "C" fn _start() {
     dock.apply_window_size();
 
     let persistent_mark = alloc_mark();
+    refresh_titles();
     dock.commit_tree();
 
     loop {
@@ -654,7 +820,16 @@ pub extern "C" fn _start() {
                     dock.commit_tree();
                 }
             }
-            PollResult::Empty => { unsafe { let _ = npk_sleep(16); } }
+            PollResult::Empty => {
+                // Focus and window opens/closes happen elsewhere — the
+                // dock is never told. Poll the compositor's window list
+                // and re-render only when the running indicators change.
+                if refresh_titles() {
+                    alloc_reset(persistent_mark);
+                    dock.commit_tree();
+                }
+                unsafe { let _ = npk_sleep(16); }
+            }
             PollResult::WindowGone => return,
         }
     }

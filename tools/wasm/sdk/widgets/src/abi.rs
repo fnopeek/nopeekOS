@@ -78,6 +78,16 @@ pub enum Token {
     Success         = 9,
     Warning         = 10,
     Danger          = 11,
+    /// Content canvas — below `Surface`. Editor body, page, terminal.
+    Page            = 12,
+    /// Hover fill / chips — above `SurfaceMuted`.
+    SurfaceHover    = 13,
+    /// Third text level: section headings, meta columns, disabled.
+    OnSurfaceFaint  = 14,
+    /// Accent at 22 % over `Surface` — focus rings.
+    AccentRing      = 15,
+    /// Accent at 45 % over `Surface` — focused window border.
+    AccentLine      = 16,
     // Appended only.
 }
 
@@ -313,6 +323,16 @@ pub enum Modifier {
     /// internally for anchor lookups, never to other apps. Multiple
     /// widgets with the same id is undefined behavior (last wins).
     NodeId(NodeId),
+    /// Focus ring — a stroke of `width` px drawn just OUTSIDE the node's
+    /// rect, under any Border. Mirrors CSS `box-shadow: 0 0 0 Npx`. Costs
+    /// no layout space; leave room yourself (a row gap suffices at ≤ 3).
+    Ring { token: Token, width: u8 },
+    /// Layout minimum height (px at 1× scale).
+    MinHeight(u16),
+    /// Layout maximum height (px at 1× scale).
+    MaxHeight(u16),
+    /// Draw a line-number gutter down the left edge of a `TextArea`.
+    LineNumbers(bool),
     // Appended only.
 }
 
@@ -538,5 +558,8 @@ pub enum Action {
 /// RGBA values are compositor-resolved; the app never picks hex colors.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Palette {
-    pub colors: [u32; 16],
+    pub colors: [u32; PALETTE_SLOTS],
 }
+
+/// Slots in a `Palette` — must stay > the highest `Token` discriminant.
+pub const PALETTE_SLOTS: usize = 24;

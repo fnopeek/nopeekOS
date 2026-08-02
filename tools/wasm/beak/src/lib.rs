@@ -18,9 +18,60 @@ use alloc::vec::Vec;
 
 use beak_engine::forms::{self, ControlKind, FormState, Forms};
 use beak_engine::{Engine, Layout};
+use nopeek_widgets::i18n;
 use nopeek_widgets::style::{Padding, Radius, Spacing};
 use nopeek_widgets::{caps, prefab};
 use nopeek_widgets::*;
+
+// ── Strings ───────────────────────────────────────────────────────────
+// English is the source language; a new one is one more `const` below.
+// See `nopeek_widgets::i18n`.
+
+struct Strings {
+    menu_file:           &'static str,
+    menu_edit:           &'static str,
+    menu_view:           &'static str,
+    menu_help:           &'static str,
+    close:               &'static str,
+    nothing_yet:         &'static str,
+    reload:              &'static str,
+    css_on:              &'static str,
+    css_off:             &'static str,
+    inspect_on:          &'static str,
+    inspect_off:         &'static str,
+    inspect_hint:        &'static str,
+    about:               &'static str,
+    address_placeholder: &'static str,
+}
+
+const EN: Strings = Strings {
+    menu_file: "File", menu_edit: "Edit", menu_view: "View", menu_help: "Help",
+    close: "Close",
+    nothing_yet: "(nothing yet)",
+    reload: "Reload",
+    css_on: "Site CSS: on", css_off: "Site CSS: off",
+    inspect_on: "Inspect: on", inspect_off: "Inspect: off",
+    inspect_hint: "Inspect: click an element in the page",
+    about: "About beak",
+    address_placeholder: "Enter address …",
+};
+
+const DE: Strings = Strings {
+    menu_file: "Datei", menu_edit: "Bearbeiten", menu_view: "Ansicht",
+    menu_help: "Hilfe",
+    close: "Schließen",
+    nothing_yet: "(noch nichts)",
+    reload: "Neu laden",
+    css_on: "Site-CSS: an", css_off: "Site-CSS: aus",
+    inspect_on: "Inspizieren: an", inspect_off: "Inspizieren: aus",
+    inspect_hint: "Inspizieren: klicke ein Element im Seiteninhalt",
+    about: "Über beak",
+    address_placeholder: "Adresse eingeben …",
+};
+
+fn s() -> &'static Strings {
+    match i18n::lang() { i18n::Lang::De => &DE, _ => &EN }
+}
 use talc::{ClaimOnOom, Span, Talc, Talck};
 
 // ── App metadata + capabilities ───────────────────────────────────────────
@@ -902,10 +953,10 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, u32)>, buf: &
 fn render_chrome() {
     let menu = prefab::menu_bar_with_anchors(
         &[
-            ("Datei".to_string(), ActionId(ACT_MENU_FILE)),
-            ("Bearbeiten".to_string(), ActionId(ACT_MENU_EDIT)),
-            ("Ansicht".to_string(), ActionId(ACT_MENU_VIEW)),
-            ("Hilfe".to_string(), ActionId(ACT_MENU_HELP)),
+            (s().menu_file.to_string(), ActionId(ACT_MENU_FILE)),
+            (s().menu_edit.to_string(), ActionId(ACT_MENU_EDIT)),
+            (s().menu_view.to_string(), ActionId(ACT_MENU_VIEW)),
+            (s().menu_help.to_string(), ActionId(ACT_MENU_HELP)),
         ],
         &[
             NodeId(NODE_MENU_FILE),
@@ -915,18 +966,25 @@ fn render_chrome() {
         ],
     );
 
-    // loft's framed-input idiom: icon prefix + Input, SurfaceMuted fill, a
-    // visible Border stroke, Focus→Accent — grown to fill the toolbar.
+    // A lock in Success for https, the bird for anything else — the
+    // scheme belongs in the field, not in the URL text (UI_REFRESH.md §5).
+    let url = url_str();
+    let (lead_icon, lead_tint) = if url.starts_with("https://") {
+        (IconId::Lock, Token::Success)
+    } else {
+        (IconId::Bird, Token::Accent)
+    };
+
     let address = Widget::Row {
         children: vec![
             Widget::Icon {
-                id: IconId::Bird,
+                id: lead_icon,
                 size: 20,
-                modifiers: vec![Modifier::Tint(Token::Accent)],
+                modifiers: vec![Modifier::Tint(lead_tint)],
             },
             Widget::Input {
-                value: url_str().to_string(),
-                placeholder: "Adresse eingeben …".to_string(),
+                value: url.to_string(),
+                placeholder: s().address_placeholder.to_string(),
                 on_submit: ActionId(ACT_GO),
                 modifiers: vec![Modifier::Flex(1)],
             },
@@ -936,27 +994,32 @@ fn render_chrome() {
         modifiers: vec![
             Modifier::Flex(1),
             Modifier::Padding(Padding::Sm.as_u16()),
+            Modifier::MinHeight(FIELD_H),
             Modifier::Background(Token::SurfaceMuted),
             Modifier::Border { token: Token::Border, width: 1, radius: Radius::Md.as_u8() },
             Modifier::MinWidth(220),
-            Modifier::Focus(vec![Modifier::Border {
-                token: Token::Accent,
-                width: 1,
-                radius: Radius::Md.as_u8(),
-            }]),
+            // 1 px accent border plus a 3 px ring — the design's
+            // `text_field` focus state.
+            Modifier::Focus(vec![
+                Modifier::Border { token: Token::Accent, width: 1, radius: Radius::Md.as_u8() },
+                Modifier::Ring { token: Token::AccentRing, width: 3 },
+            ]),
         ],
     };
 
     let toolbar = Widget::Row {
         children: vec![
-            prefab::icon_button(IconId::ArrowLeft, 22, Some(ActionId(ACT_BACK)), None),
-            prefab::icon_button(IconId::ArrowRight, 22, Some(ActionId(ACT_FORWARD)), None),
-            prefab::icon_button(IconId::ArrowClockwise, 22, Some(ActionId(ACT_RELOAD)), None),
+            nav_button(IconId::ArrowLeft, ActionId(ACT_BACK)),
+            nav_button(IconId::ArrowRight, ActionId(ACT_FORWARD)),
+            nav_button(IconId::ArrowClockwise, ActionId(ACT_RELOAD)),
             address,
         ],
         spacing: Spacing::Sm.as_u16(),
         align: Align::Center,
-        modifiers: vec![Modifier::Padding(Padding::Sm.as_u16())],
+        modifiers: vec![
+            Modifier::Padding(Padding::Sm.as_u16()),
+            Modifier::MinHeight(TOOLBAR_H),
+        ],
     };
 
     let mut children = vec![
@@ -968,14 +1031,14 @@ fn render_chrome() {
             id: CanvasId(CANVAS_ID as u32),
             width: 800,
             height: 600,
-            modifiers: vec![Modifier::Flex(1), Modifier::Background(Token::Surface)],
+            modifiers: vec![Modifier::Flex(1), Modifier::Background(Token::Page)],
         },
     ];
 
     // Inspect status bar: the selected element's label, or a hint.
     if inspect_mode() {
         children.push(Widget::Divider);
-        let label = selected_label().unwrap_or_else(|| "Inspizieren: klicke ein Element im Seiteninhalt".to_string());
+        let label = selected_label().unwrap_or_else(|| s().inspect_hint.to_string());
         children.push(Widget::Text {
             content: label,
             style: TextStyle::Mono,
@@ -1013,28 +1076,59 @@ fn render_chrome() {
     }
 }
 
+/// Toolbar chrome sizing (UI_REFRESH.md §5).
+const TOOLBAR_H: u16 = 44;
+const FIELD_H: u16 = 30;
+const NAV_BTN: u16 = 28;
+const NAV_BTN_RADIUS: u8 = 7;
+
+/// Navigation button — the design's `toolbar_button`: bare at rest,
+/// `SurfaceHover` fill under the cursor, accent tint while pressed.
+fn nav_button(icon: IconId, action: ActionId) -> Widget {
+    Widget::Row {
+        children: vec![Widget::Icon { id: icon, size: 19, modifiers: vec![] }],
+        spacing: 0,
+        align: Align::Center,
+        modifiers: vec![
+            Modifier::MinWidth(NAV_BTN),
+            Modifier::MinHeight(NAV_BTN),
+            Modifier::Rounded(NAV_BTN_RADIUS),
+            Modifier::OnClick(action),
+            Modifier::Hover(vec![
+                Modifier::Background(Token::SurfaceHover),
+                Modifier::Rounded(NAV_BTN_RADIUS),
+            ]),
+            Modifier::Active(vec![
+                Modifier::Background(Token::AccentMuted),
+                Modifier::Tint(Token::Accent),
+                Modifier::Rounded(NAV_BTN_RADIUS),
+            ]),
+        ],
+    }
+}
+
 /// Dropdown content for the open menu code (1=File .. 4=Help) → (anchor, menu).
 fn dropdown_for(which: u8) -> Option<(u32, Widget)> {
     match which {
         1 => Some((
             NODE_MENU_FILE,
-            prefab::popover_menu(&[("Schließen".to_string(), ActionId(ACT_FILE_CLOSE))], None),
+            prefab::popover_menu(&[(s().close.to_string(), ActionId(ACT_FILE_CLOSE))], None),
         )),
         2 => Some((
             NODE_MENU_EDIT,
-            prefab::popover_menu(&[("(noch nichts)".to_string(), ActionId(ACT_MENU_DISMISS))], None),
+            prefab::popover_menu(&[(s().nothing_yet.to_string(), ActionId(ACT_MENU_DISMISS))], None),
         )),
         3 => Some((
             NODE_MENU_VIEW,
             prefab::popover_menu(
                 &[
-                    ("Neu laden".to_string(), ActionId(ACT_VIEW_RELOAD)),
+                    (s().reload.to_string(), ActionId(ACT_VIEW_RELOAD)),
                     (
-                        if use_site_css() { "Site-CSS: an".to_string() } else { "Site-CSS: aus".to_string() },
+                        if use_site_css() { s().css_on.to_string() } else { s().css_off.to_string() },
                         ActionId(ACT_VIEW_TOGGLE_CSS),
                     ),
                     (
-                        if inspect_mode() { "Inspizieren: an".to_string() } else { "Inspizieren: aus".to_string() },
+                        if inspect_mode() { s().inspect_on.to_string() } else { s().inspect_off.to_string() },
                         ActionId(ACT_VIEW_INSPECT),
                     ),
                 ],
@@ -1043,7 +1137,7 @@ fn dropdown_for(which: u8) -> Option<(u32, Widget)> {
         )),
         4 => Some((
             NODE_MENU_HELP,
-            prefab::popover_menu(&[("Über beak".to_string(), ActionId(ACT_HELP_ABOUT))], None),
+            prefab::popover_menu(&[(s().about.to_string(), ActionId(ACT_HELP_ABOUT))], None),
         )),
         _ => None,
     }

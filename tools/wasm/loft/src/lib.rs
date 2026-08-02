@@ -20,6 +20,7 @@ extern crate alloc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use nopeek_widgets::i18n;
 use nopeek_widgets::app_meta::IconRef;
 use nopeek_widgets::prefab;
 use nopeek_widgets::style::{Padding, Radius, Spacing};
@@ -51,10 +52,91 @@ unsafe extern "C" {
     fn npk_fs_rename(old_ptr: i32, old_len: i32, new_ptr: i32, new_len: i32) -> i32;
     fn npk_open(app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32) -> i32;
     fn npk_home_dir(buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_fs_usage() -> i64;
     fn npk_window_set_clipboard_sink() -> i32;
     fn npk_close_widget() -> i32;
     fn npk_log_serial(ptr: i32, len: i32);
     fn npk_sleep(ms: i32) -> i32;
+}
+
+// ── Strings ───────────────────────────────────────────────────────────
+// English is the source language; a new one is one more `const` below.
+// See `nopeek_widgets::i18n`.
+
+struct Strings {
+    menu_file:      &'static str,
+    menu_edit:      &'static str,
+    menu_view:      &'static str,
+    menu_go:        &'static str,
+    menu_help:      &'static str,
+    quit:           &'static str,
+    view_grid:      &'static str,
+    view_list:      &'static str,
+    go_home:        &'static str,
+    go_filesystem:  &'static str,
+    about:          &'static str,
+    copy:           &'static str,
+    cut:            &'static str,
+    paste:          &'static str,
+    rename:         &'static str,
+    no_action:      &'static str,
+    rename_title:   &'static str,
+    rename_label:   &'static str,
+    rename_hint:    &'static str,
+    cancel:         &'static str,
+    confirm_rename: &'static str,
+    search:         &'static str,
+    empty_dir:      &'static str,
+    no_matches:     &'static str,
+    col_name:       &'static str,
+    col_size:       &'static str,
+    col_files:      &'static str,
+    col_type:       &'static str,
+    col_modified:   &'static str,
+    no_handler:     &'static str,
+}
+
+const EN: Strings = Strings {
+    menu_file: "File", menu_edit: "Edit", menu_view: "View",
+    menu_go: "Go", menu_help: "Help",
+    quit: "Quit",
+    view_grid: "Grid", view_list: "List",
+    go_home: "Home", go_filesystem: "Filesystem",
+    about: "About loft",
+    copy: "Copy", cut: "Cut", paste: "Paste", rename: "Rename…",
+    no_action: "(no action)",
+    rename_title: "Rename", rename_label: "New name:",
+    rename_hint: "Click the field, then Enter · Esc cancels",
+    cancel: "Cancel", confirm_rename: "Rename",
+    search: "search",
+    empty_dir: "Empty directory", no_matches: "No matches",
+    col_name: "NAME", col_size: "SIZE", col_files: "FILES",
+    col_type: "TYPE", col_modified: "MODIFIED",
+    no_handler: "[loft] no app associated with this file type",
+};
+
+const DE: Strings = Strings {
+    menu_file: "Datei", menu_edit: "Bearbeiten", menu_view: "Ansicht",
+    menu_go: "Gehe zu", menu_help: "Hilfe",
+    quit: "Beenden",
+    view_grid: "Kacheln", view_list: "Liste",
+    go_home: "Persönlicher Ordner", go_filesystem: "Dateisystem",
+    about: "Über loft",
+    copy: "Kopieren", cut: "Ausschneiden", paste: "Einfügen",
+    rename: "Umbenennen…",
+    no_action: "(keine Aktion)",
+    rename_title: "Umbenennen", rename_label: "Neuer Name:",
+    rename_hint: "Klicke ins Feld, dann Enter · Esc bricht ab",
+    cancel: "Abbrechen", confirm_rename: "Umbenennen",
+    search: "suchen",
+    empty_dir: "Leerer Ordner", no_matches: "Keine Treffer",
+    col_name: "NAME", col_size: "GRÖSSE", col_files: "DATEIEN",
+    col_type: "TYP", col_modified: "GEÄNDERT",
+    no_handler: "[loft] keine zugeordnete App für diesen Dateityp",
+};
+
+fn s() -> &'static Strings {
+    match i18n::lang() { Lang::De => &DE, _ => &EN }
 }
 
 fn log(msg: &str) {
@@ -599,7 +681,7 @@ impl Loft {
                          full.as_ptr() as i32, full.len() as i32);
             }
         } else {
-            log("[loft] keine zugeordnete App für diesen Dateityp");
+            log(s().no_handler);
         }
     }
 
@@ -786,18 +868,18 @@ fn file_op_items(lf: &Loft) -> Vec<(String, ActionId)> {
     let mut items: Vec<(String, ActionId)> = Vec::new();
     let has_sel = lf.selected().is_some();
     if has_sel {
-        items.push(("Kopieren".to_string(),     ActionId(ACT_EDIT_COPY)));
-        items.push(("Ausschneiden".to_string(), ActionId(ACT_EDIT_CUT)));
+        items.push((s().copy.to_string(), ActionId(ACT_EDIT_COPY)));
+        items.push((s().cut.to_string(), ActionId(ACT_EDIT_CUT)));
     }
     if lf.can_paste() {
-        items.push(("Einfügen".to_string(), ActionId(ACT_EDIT_PASTE)));
+        items.push((s().paste.to_string(), ActionId(ACT_EDIT_PASTE)));
     }
     if has_sel {
-        items.push(("Umbenennen…".to_string(), ActionId(ACT_EDIT_RENAME)));
+        items.push((s().rename.to_string(), ActionId(ACT_EDIT_RENAME)));
     }
     if items.is_empty() {
         // Keep the surface non-empty so the click still reads as handled.
-        items.push(("(keine Aktion)".to_string(), ActionId(ACT_MENU_DISMISS)));
+        items.push((s().no_action.to_string(), ActionId(ACT_MENU_DISMISS)));
     }
     items
 }
@@ -819,11 +901,11 @@ fn ctx_anchor_wrap(child: Widget) -> Widget {
 /// (the footer hint says so); Enter commits, Esc cancels.
 fn render_rename_dialog(lf: &Loft) -> Widget {
     let card = prefab::dialog(
-        "Umbenennen",
+        s().rename_title,
         Widget::Column {
             children: alloc::vec![
                 Widget::Text {
-                    content:   "Neuer Name:".to_string(),
+                    content:   s().rename_label.to_string(),
                     style:     TextStyle::Muted,
                     modifiers: alloc::vec![],
                 },
@@ -832,8 +914,8 @@ fn render_rename_dialog(lf: &Loft) -> Widget {
                 Widget::Row {
                     children: alloc::vec![
                         Widget::Spacer { flex: 1 },
-                        prefab::button("Abbrechen",  prefab::ButtonStyle::Ghost,   ActionId(ACT_RENAME_CANCEL)),
-                        prefab::button("Umbenennen", prefab::ButtonStyle::Primary, ActionId(ACT_RENAME_SUBMIT)),
+                        prefab::button(s().cancel, prefab::ButtonStyle::Ghost, ActionId(ACT_RENAME_CANCEL)),
+                        prefab::button(s().confirm_rename, prefab::ButtonStyle::Primary, ActionId(ACT_RENAME_SUBMIT)),
                     ],
                     spacing:   Spacing::Sm.as_u16(),
                     align:     Align::Center,
@@ -844,7 +926,7 @@ fn render_rename_dialog(lf: &Loft) -> Widget {
             align:     Align::Stretch,
             modifiers: alloc::vec![],
         },
-        Some("Klicke ins Feld, dann Enter · Esc bricht ab"),
+        Some(s().rename_hint),
         360,
     );
     Widget::Column {
@@ -857,11 +939,11 @@ fn render_rename_dialog(lf: &Loft) -> Widget {
 
 fn render_menu_bar() -> Widget {
     let labels: Vec<(String, ActionId)> = alloc::vec![
-        ("Datei".to_string(),      ActionId(ACT_MENU_FILE)),
-        ("Bearbeiten".to_string(), ActionId(ACT_MENU_EDIT)),
-        ("Ansicht".to_string(),    ActionId(ACT_MENU_VIEW)),
-        ("Gehe zu".to_string(),    ActionId(ACT_MENU_GO)),
-        ("Hilfe".to_string(),      ActionId(ACT_MENU_HELP)),
+        (s().menu_file.to_string(), ActionId(ACT_MENU_FILE)),
+        (s().menu_edit.to_string(), ActionId(ACT_MENU_EDIT)),
+        (s().menu_view.to_string(), ActionId(ACT_MENU_VIEW)),
+        (s().menu_go.to_string(), ActionId(ACT_MENU_GO)),
+        (s().menu_help.to_string(), ActionId(ACT_MENU_HELP)),
     ];
     let anchors: Vec<NodeId> = alloc::vec![
         NodeId(NODE_MENU_FILE),
@@ -881,7 +963,7 @@ fn render_dropdown(lf: &Loft, kind: OpenMenu) -> (u32, Widget) {
         OpenMenu::File => (
             NODE_MENU_FILE,
             prefab::popover_menu(&[
-                ("Quit".to_string(), ActionId(ACT_FILE_QUIT)),
+                (s().quit.to_string(), ActionId(ACT_FILE_QUIT)),
             ], None),
         ),
         OpenMenu::Edit => (
@@ -891,8 +973,8 @@ fn render_dropdown(lf: &Loft, kind: OpenMenu) -> (u32, Widget) {
         OpenMenu::View => (
             NODE_MENU_VIEW,
             prefab::popover_menu(&[
-                ("Grid".to_string(), ActionId(ACT_VIEW_GRID)),
-                ("List".to_string(), ActionId(ACT_VIEW_LIST)),
+                (s().view_grid.to_string(), ActionId(ACT_VIEW_GRID)),
+                (s().view_list.to_string(), ActionId(ACT_VIEW_LIST)),
             ], Some(match lf.view_mode {
                 ViewMode::Grid => 0,
                 ViewMode::List => 1,
@@ -901,14 +983,14 @@ fn render_dropdown(lf: &Loft, kind: OpenMenu) -> (u32, Widget) {
         OpenMenu::Go => (
             NODE_MENU_GO,
             prefab::popover_menu(&[
-                ("Home".to_string(),        ActionId(ACT_GO_HOME)),
-                ("Filesystem".to_string(),  ActionId(ACT_GO_FILESYSTEM)),
+                (s().go_home.to_string(), ActionId(ACT_GO_HOME)),
+                (s().go_filesystem.to_string(), ActionId(ACT_GO_FILESYSTEM)),
             ], None),
         ),
         OpenMenu::Help => (
             NODE_MENU_HELP,
             prefab::popover_menu(&[
-                ("About loft".to_string(), ActionId(ACT_HELP_ABOUT)),
+                (s().about.to_string(), ActionId(ACT_HELP_ABOUT)),
             ], None),
         ),
     }
@@ -944,7 +1026,7 @@ fn render_toolbar(lf: &Loft) -> Widget {
 fn search_input(query: &str) -> Widget {
     let raw = Widget::Input {
         value:       query.to_string(),
-        placeholder: "search".to_string(),
+        placeholder: s().search.to_string(),
         on_submit:   prefab::NO_ACTION,
         modifiers:   alloc::vec![],
     };
@@ -958,6 +1040,8 @@ fn search_input(query: &str) -> Widget {
                 modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceMuted)],
             },
             raw,
+            Widget::Spacer { flex: 1 },
+            kbd("⌘F"),
         ],
         spacing:   Spacing::Sm.as_u16(),
         align:     Align::Center,
@@ -965,12 +1049,74 @@ fn search_input(query: &str) -> Widget {
             Modifier::Padding(Padding::Sm.as_u16()),
             Modifier::Background(Token::SurfaceMuted),
             Modifier::Border { token: Token::Border, width: 1, radius: Radius::Md.as_u8() },
-            Modifier::MinWidth(220),
+            Modifier::MinWidth(230),
+            // 1 px accent border plus a 3 px ring, per the design's
+            // `text_field` focus state (UI_REFRESH.md §3).
             Modifier::Focus(alloc::vec![
                 Modifier::Border { token: Token::Accent, width: 1, radius: Radius::Md.as_u8() },
+                Modifier::Ring { token: Token::AccentRing, width: 3 },
             ]),
         ],
     }
+}
+
+/// Keyboard-shortcut badge — a small mono chip on `SurfaceHover`.
+fn kbd(keys: &str) -> Widget {
+    Widget::Text {
+        content:   keys.to_string(),
+        style:     TextStyle::Mono,
+        modifiers: alloc::vec![
+            Modifier::Padding(Padding::Xxs.as_u16()),
+            Modifier::Background(Token::SurfaceHover),
+            Modifier::Rounded(Radius::Sm.as_u8()),
+            Modifier::Tint(Token::OnSurfaceFaint),
+        ],
+    }
+}
+
+/// Disk fill level at the foot of the sidebar: a slim accent-filled
+/// track plus the percentage. Hidden when the kernel reports no
+/// mounted filesystem.
+fn storage_meter() -> Option<Widget> {
+    let packed = unsafe { npk_fs_usage() };
+    if packed < 0 { return None; }
+    let used  = ((packed as u64) >> 32) as u64;
+    let total = (packed as u64) & 0xFFFF_FFFF;
+    if total == 0 { return None; }
+    let pct = ((used.saturating_mul(100)) / total).min(100) as u16;
+
+    // The track is a fixed-width bar; the fill is the same bar clipped
+    // to `pct` of that width, laid over it in a Stack.
+    const TRACK_W: u16 = 108;
+    let fill_w = ((TRACK_W as u32 * pct as u32) / 100).max(1) as u16;
+    let mut pct_str = String::with_capacity(5);
+    push_usize(&mut pct_str, pct as usize);
+    pct_str.push('%');
+
+    Some(Widget::Row {
+        children: alloc::vec![
+            Widget::Stack {
+                children: alloc::vec![
+                    prefab::mark(TRACK_W, 4, Some(Token::Border)),
+                    prefab::mark(fill_w,  4, Some(Token::Accent)),
+                ],
+                modifiers: Vec::new(),
+            },
+            Widget::Spacer { flex: 1 },
+            Widget::Text {
+                content:   pct_str,
+                style:     TextStyle::Mono,
+                modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceFaint)],
+            },
+        ],
+        spacing:   Spacing::Sm.as_u16(),
+        align:     Align::Center,
+        modifiers: alloc::vec![
+            Modifier::Padding(Padding::Sm.as_u16()),
+            Modifier::Background(Token::SurfaceHover),
+            Modifier::Rounded(Radius::Sm.as_u8()),
+        ],
+    })
 }
 
 fn render_body(lf: &Loft) -> Widget {
@@ -990,10 +1136,16 @@ fn render_body(lf: &Loft) -> Widget {
         if is_device(&p.label) { devices_rows.push(row); }
         else { places_rows.push(row); }
     }
-    let sidebar = prefab::sidebar_pane(alloc::vec![
+    let mut pane: Vec<Widget> = alloc::vec![
         prefab::sidebar_section("PLACES",  places_rows),
         prefab::sidebar_section("DEVICES", devices_rows),
-    ]);
+    ];
+    // Capacity meter pinned to the foot of the pane.
+    if let Some(meter) = storage_meter() {
+        pane.push(Widget::Spacer { flex: 1 });
+        pane.push(meter);
+    }
+    let sidebar = prefab::sidebar_pane(pane);
     // Also scroll the sidebar so a long PLACES/DEVICES list can never push
     // the footer off-screen either; its overlay bar only appears if it
     // actually overflows (usually it doesn't).
@@ -1007,9 +1159,9 @@ fn render_body(lf: &Loft) -> Widget {
     // (genuinely empty directory vs. nothing matched the search).
     let content: Widget = if lf.filtered.is_empty() {
         let hint = if lf.query.is_empty() {
-            "Empty directory"
+            s().empty_dir
         } else {
-            "No matches"
+            s().no_matches
         };
         prefab::empty_state(hint)
     } else {
@@ -1100,37 +1252,43 @@ fn render_list(lf: &Loft) -> Widget {
 fn list_header_row(lf: &Loft) -> Widget {
     Widget::Row {
         children: alloc::vec![
-            header_cell(lf, "Name",     SortKey::Name,     ACT_HEADER_NAME,  COL_NAME_W,  true),
-            header_cell(lf, "Size",     SortKey::Size,     ACT_HEADER_SIZE,  COL_SIZE_W,  false),
-            header_cell(lf, "Files",    SortKey::Files,    ACT_HEADER_FILES, COL_FILES_W, false),
-            header_cell(lf, "Type",     SortKey::Type,     ACT_HEADER_TYPE,  COL_TYPE_W,  false),
-            header_cell(lf, "Modified", SortKey::Modified, ACT_HEADER_MTIME, COL_MTIME_W, false),
+            header_cell(lf, s().col_name,     SortKey::Name,     ACT_HEADER_NAME,  COL_NAME_W,  true),
+            header_cell(lf, s().col_size,     SortKey::Size,     ACT_HEADER_SIZE,  COL_SIZE_W,  false),
+            header_cell(lf, s().col_files,    SortKey::Files,    ACT_HEADER_FILES, COL_FILES_W, false),
+            header_cell(lf, s().col_type,     SortKey::Type,     ACT_HEADER_TYPE,  COL_TYPE_W,  false),
+            header_cell(lf, s().col_modified, SortKey::Modified, ACT_HEADER_MTIME, COL_MTIME_W, false),
         ],
         spacing: Spacing::Md.as_u16(),
         align:   Align::Center,
-        modifiers: alloc::vec![Modifier::Padding(Padding::Sm.as_u16())],
+        modifiers: alloc::vec![
+            Modifier::Padding(Padding::Sm.as_u16()),
+            Modifier::MinHeight(HEADER_ROW_H),
+        ],
     }
 }
 
-/// One clickable column header. Appends a ↑/↓ marker when this is the
-/// active sort column. `flex` lets the Name header grow to fill the row.
+/// One clickable column header. Mono + faint, so the header band reads
+/// as structure rather than as another row of data (UI_REFRESH.md §5).
+/// Appends a ↑/↓ marker on the active sort column; `flex` lets the Name
+/// header grow to fill the row.
 fn header_cell(lf: &Loft, label: &str, key: SortKey, action: u32,
                min_w: u16, flex: bool) -> Widget {
     let mut content = String::from(label);
-    if lf.sort_key == key {
+    let active = lf.sort_key == key;
+    if active {
         content.push(' ');
         content.push(if lf.sort_asc { '↑' } else { '↓' });
     }
     let mut mods: Vec<Modifier> = alloc::vec![
         Modifier::MinWidth(min_w),
+        Modifier::Tint(if active { Token::OnSurfaceMuted } else { Token::OnSurfaceFaint }),
         Modifier::OnClick(ActionId(action)),
         Modifier::Hover(alloc::vec![
-            Modifier::Background(Token::SurfaceMuted),
-            Modifier::Rounded(Radius::Sm.as_u8()),
+            Modifier::Tint(Token::OnSurface),
         ]),
     ];
     if flex { mods.push(Modifier::Flex(1)); }
-    Widget::Text { content, style: TextStyle::Caption, modifiers: mods }
+    Widget::Text { content, style: TextStyle::Mono, modifiers: mods }
 }
 
 fn list_data_row(e: &Entry, selected: bool, browsing: bool,
@@ -1140,7 +1298,13 @@ fn list_data_row(e: &Entry, selected: bool, browsing: bool,
     // row's slack and the fixed columns sit flush against the right edge.
     let name_cell = Widget::Row {
         children: alloc::vec![
-            Widget::Icon { id: icon, size: 24, modifiers: alloc::vec![] },
+            Widget::Icon {
+                id: icon,
+                size: 24,
+                modifiers: alloc::vec![Modifier::Tint(
+                    if selected { Token::Accent } else { Token::OnSurfaceMuted },
+                )],
+            },
             Widget::Text {
                 content:   e.name.clone(),
                 style:     TextStyle::Body,
@@ -1174,25 +1338,28 @@ fn list_data_row(e: &Entry, selected: bool, browsing: bool,
     };
     let type_str   = type_for(e);
     let mtime_str  = format_mtime(e.mtime);
+    // Selection reads as a tint plus a 2 px accent edge on the leading
+    // side — never a boxed-in row (UI_REFRESH.md §3 `list_row`). The
+    // edge occupies its space on every row so nothing shifts sideways
+    // when the selection moves.
     let mut row_mods: Vec<Modifier> = alloc::vec![
-        Modifier::Padding(Padding::Sm.as_u16()),
+        Modifier::Padding(Padding::Xs.as_u16()),
+        Modifier::MinHeight(DATA_ROW_H),
         Modifier::OnClick(on_click),
         Modifier::OnHover(on_hover),
         Modifier::Hover(alloc::vec![
-            Modifier::Background(Token::SurfaceMuted),
-            Modifier::Rounded(Radius::Sm.as_u8()),
+            Modifier::Background(Token::SurfaceHover),
         ]),
     ];
     if selected {
-        row_mods.push(Modifier::Background(Token::SurfaceElevated));
-        row_mods.push(Modifier::Border {
-            token:  Token::Accent,
-            width:  1,
-            radius: Radius::Sm.as_u8(),
-        });
+        row_mods.push(Modifier::Background(Token::AccentMuted));
     }
+    let edge = prefab::mark(2, DATA_ROW_H,
+        if selected { Some(Token::Accent) } else { None });
+
     Widget::Row {
         children: alloc::vec![
+            edge,
             name_cell,
             list_cell_text(&size_str,  COL_SIZE_W),
             list_cell_text(&files_str, COL_FILES_W),
@@ -1205,13 +1372,21 @@ fn list_data_row(e: &Entry, selected: bool, browsing: bool,
     }
 }
 
+/// A metadata column. Mono + faint so the eye runs down the file names
+/// and only lands on the numbers when it goes looking for them.
 fn list_cell_text(text: &str, min_w: u16) -> Widget {
     Widget::Text {
         content: text.to_string(),
-        style:   TextStyle::Body,
-        modifiers: alloc::vec![Modifier::MinWidth(min_w)],
+        style:   TextStyle::Mono,
+        modifiers: alloc::vec![
+            Modifier::MinWidth(min_w),
+            Modifier::Tint(Token::OnSurfaceMuted),
+        ],
     }
 }
+
+const HEADER_ROW_H: u16 = 30;
+const DATA_ROW_H:   u16 = 34;
 
 const COL_NAME_W:  u16 = 240;   // min — flexes to fill the row
 const COL_SIZE_W:  u16 = 110;

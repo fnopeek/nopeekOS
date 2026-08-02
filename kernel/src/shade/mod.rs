@@ -1239,6 +1239,11 @@ pub fn poll_render() {
             // terminal behind drun would overwrite drun's pixels).
             let render_order: alloc::vec::Vec<crate::shade::window::WindowId> =
                 comp.z_order.iter().rev().copied().collect();
+            // One source of truth for the tile borders: the palette. It
+            // already folds in the wallpaper accent (`accent = auto`) and
+            // any `set accent` override, so there is no second theme path.
+            let active_border = comp.border_active();
+            let inactive_border = comp.border_inactive();
             for wid in render_order {
                 let win = match comp.windows.iter_mut().find(|w| w.id == wid) {
                     Some(w) => w,
@@ -1271,17 +1276,6 @@ pub fn poll_render() {
                     }
                 }
 
-                // Re-render window chrome + text (use theme colors if active)
-                let active_border = if crate::theme::is_active() {
-                    crate::gui::background::accent_color()
-                } else {
-                    comp.border_active
-                };
-                let inactive_border = if crate::theme::is_active() {
-                    crate::theme::inactive_border()
-                } else {
-                    comp.border_inactive
-                };
                 let border_color = if win.focused { active_border } else { inactive_border };
                 compositor::Compositor::render_window(shadow, info, win,
                     comp.border, comp.rounding, comp.opacity, comp.scale, border_color);
@@ -1333,7 +1327,7 @@ fn poll_render_layered() {
                     }
 
                     // Re-render window chrome + text on clean background
-                    let border_color = if win.focused { comp.border_active } else { comp.border_inactive };
+                    let border_color = if win.focused { comp.border_active() } else { comp.border_inactive() };
                     compositor::Compositor::render_window(shadow, info, win,
                         comp.border, comp.rounding, comp.opacity, comp.scale, border_color);
                     cursor::draw_cursor_on_shadow(shadow, info);
@@ -1352,7 +1346,7 @@ fn poll_render_legacy() {
         if let Some(ref comp) = *COMPOSITOR.lock() {
             if let Some(fid) = comp.focused {
                 if let Some(win) = comp.windows.iter().find(|w| w.id == fid && w.workspace == comp.active_workspace) {
-                    let border_color = if win.focused { comp.border_active } else { comp.border_inactive };
+                    let border_color = if win.focused { comp.border_active() } else { comp.border_inactive() };
                     compositor::Compositor::render_window(shadow, info, win,
                         comp.border, comp.rounding, comp.opacity, comp.scale, border_color);
                     cursor::draw_cursor_on_shadow(shadow, info);
@@ -1627,10 +1621,10 @@ pub fn stop() {
 /// Get shade config defaults.
 pub fn default_config() -> &'static [(&'static str, &'static str, &'static str)] {
     &[
-        ("shade.gaps", "8", "Gap between tiled windows (px at 1x)"),
+        ("shade.gaps", "6", "Gap between tiled windows (px at 1x)"),
         ("shade.border", "1", "Window border width (px at 1x)"),
-        ("shade.border_active", "", "Active window border color (hex, default: accent)"),
-        ("shade.border_inactive", "3a2555", "Inactive window border color (hex)"),
+        ("shade.border_active", "", "Active window border color (hex; empty = palette AccentLine)"),
+        ("shade.border_inactive", "", "Inactive window border color (hex; empty = palette Border)"),
         ("shade.bar_margin", "6", "Bar strut gap to screen edge (px); bar.wasm reports its own height"),
         ("shade.rounding", "10", "Window corner radius (px at 1x)"),
         ("shade.opacity", "160", "Window background opacity (0-256, lower=more transparent)"),

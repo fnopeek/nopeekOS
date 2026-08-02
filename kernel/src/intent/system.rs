@@ -1324,7 +1324,7 @@ pub fn intent_set(args: &str) {
         // shade.light_tint) so tuning shows at once, not on the next
         // incidental redraw. Struct-cached keys (opacity) still need a
         // compositor rebuild — unchanged.
-        if key.starts_with("shade.") || key == "theme" {
+        if key.starts_with("shade.") || key == "theme" || key == "accent" {
             crate::shade::force_redraw();
         }
     } else {

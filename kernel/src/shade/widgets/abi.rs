@@ -110,6 +110,18 @@ pub enum Token {
     Success         = 9,
     Warning         = 10,
     Danger          = 11,
+
+    // UI-Refresh ramp extension (see UI_REFRESH.md §1).
+    /// Content canvas — below `Surface`. Editor body, page, terminal.
+    Page            = 12,
+    /// Hover fill / chips — above `SurfaceMuted`.
+    SurfaceHover    = 13,
+    /// Third text level: section headings, meta columns, disabled.
+    OnSurfaceFaint  = 14,
+    /// Accent at 22 % over `Surface` — focus rings.
+    AccentRing      = 15,
+    /// Accent at 45 % over `Surface` — focused window border.
+    AccentLine      = 16,
     // Appended only — values frozen forever.
 }
 
@@ -379,6 +391,22 @@ pub enum Modifier {
     /// tagged widget's rect into a side table; `Widget::Popover`'s
     /// `anchor` field looks rects up there at render time.
     NodeId(NodeId),
+    /// Focus ring — a stroke of `width` px drawn just OUTSIDE the node's
+    /// rect, under any Border. Mirrors CSS `box-shadow: 0 0 0 Npx`, which
+    /// is how the design expresses focus. Costs no layout space; the
+    /// caller must leave room (a row's gap is enough at width ≤ 3).
+    Ring { token: Token, width: u8 },
+    /// Layout minimum height (px at 1× scale). The design pins row
+    /// heights (30/34/36/44); without this a row's height is whatever
+    /// its tallest glyph plus padding happens to be.
+    MinHeight(u16),
+    /// Layout maximum height (px at 1× scale).
+    MaxHeight(u16),
+    /// Draw a line-number gutter down the left edge of a `TextArea`.
+    /// The compositor owns that widget's viewport, so only it can keep
+    /// the numbers in step with scrolling — an app-drawn column would
+    /// drift the moment the buffer scrolls.
+    LineNumbers(bool),
     // Appended only.
 }
 
@@ -604,9 +632,13 @@ pub enum Action {
 #[derive(Clone, Copy, Debug)]
 pub struct Palette {
     /// BGRA32 color per Token, indexed by `Token as u8`.
-    /// Slot 0 = Token::Surface, slot 11 = Token::Danger, …
-    pub colors: [u32; 16],
+    /// Slot 0 = Token::Surface, slot 16 = Token::AccentLine, …
+    pub colors: [u32; PALETTE_SLOTS],
 }
+
+/// Slots in a `Palette`. Must stay > the highest `Token` discriminant —
+/// the rasterizer indexes with `token as usize` and does not bounds-check.
+pub const PALETTE_SLOTS: usize = 24;
 
 /// A raster destination. Either a tile in the GGTT slab, or a composition
 /// layer — from the rasterizer's perspective they are identical: a BGRA32

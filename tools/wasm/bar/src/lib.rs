@@ -33,6 +33,7 @@ unsafe extern "C" {
     fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_window_set_panel(edge: i32, behavior: i32, w: i32, h: i32) -> i32;
     fn npk_bar_state(buf_ptr: i32, max: i32) -> i32;
+    fn npk_window_titles(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_battery() -> i32;
     fn npk_workspace_switch(n: i32) -> i32;
     fn npk_power() -> i32;
@@ -59,7 +60,14 @@ const SHOT: u32  = 90_001;     // screenshot: left-click = region, right = full
 // right-click → mute.
 const VOL_OPEN: u32 = 90_002;
 
-const ICON_SIZE: u16 = 24;
+// Chrome sizing — UI_REFRESH.md §4 "Panel".
+const ICON_SIZE: u16 = 17;
+/// Height of the bar's inner content band.
+const BAND_H: u16 = 24;
+/// Minimum width of a workspace pill / a trailing icon cell.
+const CELL_W: u16 = 26;
+/// Corner radius of those cells.
+const CELL_RADIUS: u8 = 6;
 
 // ── Bump allocator with a reset mark ─────────────────────────────────
 // Config is parsed once (below MARK and kept); the per-frame widget tree
@@ -207,76 +215,200 @@ fn parse_state(s: &str) -> BarState<'_> {
     BarState { clock, ws_count, ws_active, title, bat: -1, vol: 0 }
 }
 
+// ── Window list ──────────────────────────────────────────────────────
+// `npk_window_titles` → "<flags>\t<workspace>\t<title>" per open window.
+// Kept in a static buffer: the render loop resets the bump allocator
+// before every commit, so heap-derived state would dangle a frame later.
+const WINS_CAP: usize = 2048;
+static mut WINS: [u8; WINS_CAP] = [0; WINS_CAP];
+static mut WINS_LEN: usize = 0;
+
+/// Re-read the window list; true when it changed since the last read.
+fn refresh_windows() -> bool {
+    let mut scratch = [0u8; WINS_CAP];
+    let n = unsafe { npk_window_titles(scratch.as_mut_ptr() as i32, WINS_CAP as i32) };
+    let len = if n > 0 { n as usize } else { 0 };
+    // SAFETY: single-threaded WASM app.
+    unsafe {
+        if *(&raw const WINS_LEN) == len && (&*(&raw const WINS))[..len] == scratch[..len] {
+            return false;
+        }
+        (&mut *(&raw mut WINS))[..len].copy_from_slice(&scratch[..len]);
+        *(&raw mut WINS_LEN) = len;
+    }
+    true
+}
+
+fn windows_text() -> &'static str {
+    // SAFETY: single-threaded; only refresh_windows writes the buffer.
+    unsafe {
+        let len = *(&raw const WINS_LEN);
+        core::str::from_utf8(&(&*(&raw const WINS))[..len]).unwrap_or("")
+    }
+}
+
+/// Does workspace `ws` hold at least one window?
+fn workspace_occupied(ws: u8) -> bool {
+    windows_text().lines().any(|line| {
+        let mut cols = line.split('\t');
+        cols.next();
+        cols.next().and_then(|w| w.trim().parse::<u8>().ok()) == Some(ws)
+    })
+}
+
+// ── App icons ────────────────────────────────────────────────────────
+// Window titles carry the module name; the catalog maps that to the
+// app's declared icon. Loaded once at startup (below the heap mark).
+static mut CATALOG: Option<Vec<app_catalog::AppEntry>> = None;
+
+fn load_catalog() {
+    // SAFETY: single-threaded; called once before the render loop.
+    unsafe { *(&raw mut CATALOG) = Some(app_catalog::load(&[])); }
+}
+
+fn icon_for_app(title: &str) -> IconId {
+    // SAFETY: single-threaded; written once by load_catalog.
+    let cat = unsafe { (*(&raw const CATALOG)).as_ref() };
+    cat.and_then(|c| c.iter().find(|e| e.launch_name == title))
+        .map(|e| e.icon)
+        .unwrap_or(IconId::Monitor)
+}
+
 // ── Segment → widgets ────────────────────────────────────────────────
+
+/// A fixed-size, centred chrome cell — a workspace pill or a tray icon.
+fn cell(child: Widget, modifiers: Vec<Modifier>) -> Widget {
+    Widget::Row {
+        children: alloc::vec![child],
+        spacing: 0,
+        align: Align::Center,
+        modifiers,
+    }
+}
+
+/// Icon plus a mono value (volume, battery) as one hoverable unit.
+fn readout(icon: IconId, icon_mods: Vec<Modifier>, value: String,
+           click: Option<ActionId>) -> Widget {
+    let mut mods: Vec<Modifier> = alloc::vec![
+        Modifier::MinHeight(BAND_H),
+        Modifier::Rounded(CELL_RADIUS),
+        Modifier::Padding(Padding::Sm.as_u16()),
+        Modifier::Tint(Token::OnSurfaceMuted),
+    ];
+    if let Some(a) = click {
+        mods.push(Modifier::OnClick(a));
+        mods.push(Modifier::Hover(alloc::vec![
+            Modifier::Background(Token::SurfaceHover),
+            Modifier::Rounded(CELL_RADIUS),
+        ]));
+    }
+    Widget::Row {
+        children: alloc::vec![
+            Widget::Icon { id: icon, size: ICON_SIZE, modifiers: icon_mods },
+            Widget::Text { content: value, style: TextStyle::Mono, modifiers: Vec::new() },
+        ],
+        spacing: Spacing::Xs.as_u16(),
+        align: Align::Center,
+        modifiers: mods,
+    }
+}
+
+/// Tray icon cell: rest is `OnSurfaceMuted` on no background, hover
+/// fills `SurfaceHover` (UI_REFRESH.md §3 `toolbar_button`).
+fn tray_cell(icon: IconId, click: Option<ActionId>, tint: Token) -> Widget {
+    let mut mods: Vec<Modifier> = alloc::vec![
+        Modifier::MinWidth(CELL_W),
+        Modifier::MinHeight(BAND_H),
+        Modifier::Rounded(CELL_RADIUS),
+        Modifier::Tint(tint),
+        Modifier::Hover(alloc::vec![
+            Modifier::Background(Token::SurfaceHover),
+            Modifier::Rounded(CELL_RADIUS),
+        ]),
+    ];
+    if let Some(a) = click { mods.push(Modifier::OnClick(a)); }
+    cell(Widget::Icon { id: icon, size: ICON_SIZE, modifiers: Vec::new() }, mods)
+}
+
 // No per-widget Padding (the bar is short — the enclosing card supplies
 // the inset; uniform Padding here would overflow the band vertically).
 fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
     match name {
         "workspaces" => {
-            // Each workspace is a rounded pill button (Wayland/Waybar style):
-            // active = filled Accent, inactive = subtle SurfaceMuted. No
-            // separators between them.
+            // A rounded cell per workspace. Active = filled Accent; an
+            // occupied-but-inactive one keeps full-strength text; an empty
+            // one recedes to OnSurfaceFaint, so the row doubles as an
+            // at-a-glance map of where your windows are.
             let mut row = Vec::new();
             for i in 0..st.ws_count {
                 let active = i == st.ws_active;
                 let mut mods: Vec<Modifier> = alloc::vec![
-                    // Spaces give the pill horizontal width (capsule); uniform
-                    // Padding can only add vertical room too, which would
-                    // overflow the band. Small Padding for a thin inset.
-                    Modifier::Padding(Padding::Xs.as_u16()),
-                    Modifier::Rounded(Radius::Lg.as_u8()),  // capsule ends
+                    Modifier::MinWidth(CELL_W),
+                    Modifier::MinHeight(BAND_H),
+                    Modifier::Rounded(CELL_RADIUS),
                     Modifier::OnClick(ActionId(WS_BASE + i as u32)),
                 ];
                 if active {
-                    // Active = filled Accent pill; OnAccent text so the
-                    // number reads on the accent fill (both themes).
                     mods.push(Modifier::Background(Token::Accent));
                     mods.push(Modifier::Tint(Token::OnAccent));
                 } else {
+                    if !workspace_occupied(i) {
+                        mods.push(Modifier::Tint(Token::OnSurfaceFaint));
+                    }
                     mods.push(Modifier::Hover(alloc::vec![
-                        Modifier::Background(Token::SurfaceMuted),
-                        Modifier::Rounded(Radius::Lg.as_u8()),
+                        Modifier::Background(Token::SurfaceHover),
+                        Modifier::Rounded(CELL_RADIUS),
                     ]));
                 }
-                row.push(Widget::Text {
-                    content: alloc::format!("    {}    ", i + 1),
-                    style: TextStyle::Body,
-                    modifiers: mods,
-                });
+                row.push(cell(Widget::Text {
+                    content: alloc::format!("{}", i + 1),
+                    style: TextStyle::Mono,
+                    modifiers: Vec::new(),
+                }, mods));
             }
             alloc::vec![Widget::Row {
                 children: row,
-                spacing: Spacing::Xs.as_u16(),
+                spacing: Spacing::Xxs.as_u16(),
                 align: Align::Center,
                 modifiers: Vec::new(),
             }]
         }
-        // The title only appears when something is focused/open; prefix it
-        // with a single "|" separator (so the divider shows up only then,
-        // after the workspaces) and give it a trailing space.
+        // The focused app: its catalog icon plus its name. Absent when
+        // nothing is open, and preceded by a hairline so the divider only
+        // shows up together with it.
         "title" => {
             if st.title.is_empty() { Vec::new() }
             else {
                 alloc::vec![
-                    Widget::Text {
-                        content: "|".to_string(),
-                        style: TextStyle::Body,
-                        modifiers: Vec::new(),
+                    Widget::Row {
+                        children: alloc::vec![prefab::mark(1, 14, Some(Token::Border))],
+                        spacing: 0,
+                        align: Align::Center,
+                        modifiers: alloc::vec![Modifier::Padding(Padding::Sm.as_u16())],
                     },
-                    Widget::Text {
-                        content: alloc::format!("{}  ", st.title),
-                        style: TextStyle::Body,
+                    Widget::Row {
+                        children: alloc::vec![
+                            Widget::Icon {
+                                id: icon_for_app(st.title),
+                                size: 16,
+                                modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceMuted)],
+                            },
+                            Widget::Text {
+                                content: st.title.to_string(),
+                                style: TextStyle::Body,
+                                modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceMuted)],
+                            },
+                        ],
+                        spacing: Spacing::Sm.as_u16(),
+                        align: Align::Center,
                         modifiers: Vec::new(),
                     },
                 ]
             }
         }
-        // Padded with spaces for horizontal breathing room inside the pill
-        // (uniform Modifier::Padding would also grow it vertically past the
-        // band, so the spaces give left/right air without that).
         "clock" => alloc::vec![Widget::Text {
-            content: alloc::format!("    {}    ", st.clock),
-            style: TextStyle::Heading,
+            content: st.clock.to_string(),
+            style: TextStyle::Mono,
             modifiers: Vec::new(),
         }],
         // Battery: hidden entirely when no smart battery responds (bat < 0,
@@ -302,40 +434,23 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
             if status == 0 && percent <= 10 {
                 icon_mods.push(Modifier::Tint(Token::Danger));
             }
-            alloc::vec![
-                Widget::Icon { id: icon, size: ICON_SIZE, modifiers: icon_mods },
-                Widget::Text {
-                    content: alloc::format!(" {}%", percent),
-                    style: TextStyle::Body,
-                    modifiers: Vec::new(),
-                },
-            ]
+            alloc::vec![readout(icon, icon_mods,
+                alloc::format!("{}%", percent), None)]
         }
-        "tray" => alloc::vec![Widget::Icon {
-            id: IconId::Gear,
-            size: ICON_SIZE,
-            modifiers: Vec::new(),
-        }],
-        "screenshot" => alloc::vec![Widget::Icon {
-            id: IconId::Camera,
-            size: ICON_SIZE,
-            modifiers: alloc::vec![Modifier::OnClick(ActionId(SHOT))],
-        }],
+        "tray" => alloc::vec![tray_cell(IconId::Gear, None, Token::OnSurfaceMuted)],
+        "screenshot" => alloc::vec![
+            tray_cell(IconId::Camera, Some(ActionId(SHOT)), Token::OnSurfaceMuted)
+        ],
         // Fixed-width empty filler — keeps the camera and power icons a
         // safe distance apart so a click can't land on the wrong one.
         "gap" => alloc::vec![Widget::Text {
             content: String::new(),
             style: TextStyle::Body,
-            modifiers: alloc::vec![Modifier::MinWidth(32)],
+            modifiers: alloc::vec![Modifier::MinWidth(16)],
         }],
-        "power" => alloc::vec![Widget::Icon {
-            id: IconId::Power,
-            size: ICON_SIZE,
-            modifiers: alloc::vec![
-                Modifier::Tint(Token::Danger),
-                Modifier::OnClick(ActionId(POWER)),
-            ],
-        }],
+        "power" => alloc::vec![
+            tray_cell(IconId::Power, Some(ActionId(POWER)), Token::Danger)
+        ],
         // Volume: speaker icon + level. Left-click either → launch the
         // `volume` overlay slider; right-click → mute. Reflects the kernel
         // master volume (also moved by the slider / apps).
@@ -344,22 +459,18 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
             let icon = if v == 0 { IconId::SpeakerX }
                        else if v <= 50 { IconId::SpeakerLow }
                        else { IconId::SpeakerHigh };
-            alloc::vec![
-                Widget::Icon { id: icon, size: ICON_SIZE,
-                    modifiers: alloc::vec![Modifier::OnClick(ActionId(VOL_OPEN))] },
-                Widget::Text { content: alloc::format!(" {}%", v),
-                    style: TextStyle::Body,
-                    modifiers: alloc::vec![Modifier::OnClick(ActionId(VOL_OPEN))] },
-            ]
+            alloc::vec![readout(icon, Vec::new(),
+                alloc::format!("{}%", v), Some(ActionId(VOL_OPEN)))]
         }
         _ => Vec::new(),
     }
 }
 
-/// A zone → a detached pill (Row with its own translucent SurfaceElevated
-/// background + rounding). Empty zones collapse to a zero spacer so the
-/// left/center/right structure (and the wallpaper gaps) stay intact.
-fn card(names: &[String], st: &BarState) -> Widget {
+/// A zone → a plain Row of its segments. The chrome is no longer per
+/// zone: the design has ONE bar card holding all three (UI_REFRESH.md
+/// §4). Empty zones collapse to a zero spacer so the left/center/right
+/// structure stays intact.
+fn zone(names: &[String], st: &BarState) -> Widget {
     let mut kids = Vec::new();
     for n in names { kids.extend(segment_widgets(n, st)); }
     if kids.is_empty() {
@@ -367,20 +478,9 @@ fn card(names: &[String], st: &BarState) -> Widget {
     }
     Widget::Row {
         children: kids,
-        // A touch more air between the icons (gear/camera/battery) than the
-        // default Sm so they don't crowd each other; the big pre-power gap is
-        // the separate `gap` filler.
-        spacing: Spacing::Md.as_u16(),
+        spacing: Spacing::Xxs.as_u16(),
         align: Align::Center,
-        modifiers: alloc::vec![
-            Modifier::Background(Token::SurfaceElevated),
-            // Rounded by the rasteriser: in the bar's transparent scene the
-            // bg is filled at chrome alpha with proper AA corners, then the
-            // compositor composites by per-pixel alpha → clean translucent
-            // pill, no halo.
-            Modifier::Rounded(Radius::Md.as_u8()),
-            Modifier::Padding(Padding::Xs.as_u16()),
-        ],
+        modifiers: Vec::new(),
     }
 }
 
@@ -388,32 +488,39 @@ fn build_tree(seg: &Segments, st: &BarState) -> Widget {
     // Two overlaid full-width layers so the clock is centred on the SCREEN,
     // not between the (asymmetric) side groups: the sides layer pins left to
     // the start + right to the end; the centre layer centres the clock with
-    // equal flex spacers. Backgroundless containers stay the Surface clear →
-    // wallpaper shows in the gaps; the cards are the detached pills.
-    // Align::Stretch makes every pill the full bar height.
+    // equal flex spacers.
     let sides = Widget::Row {
         children: alloc::vec![
-            card(&seg.left, st),
+            zone(&seg.left, st),
             Widget::Spacer { flex: 1 },
-            card(&seg.right, st),
+            zone(&seg.right, st),
         ],
         spacing: Spacing::Sm.as_u16(),
-        align: Align::Stretch,
+        align: Align::Center,
         modifiers: Vec::new(),
     };
     let center = Widget::Row {
         children: alloc::vec![
             Widget::Spacer { flex: 1 },
-            card(&seg.center, st),
+            zone(&seg.center, st),
             Widget::Spacer { flex: 1 },
         ],
         spacing: Spacing::Sm.as_u16(),
-        align: Align::Stretch,
+        align: Align::Center,
         modifiers: Vec::new(),
     };
+    // One continuous card. In the bar's transparent scene the background
+    // is filled at chrome alpha with anti-aliased corners and the
+    // compositor composites it by per-pixel alpha — translucent panel,
+    // crisp glyphs, no halo.
     Widget::Stack {
         children: alloc::vec![sides, center],
-        modifiers: Vec::new(),
+        modifiers: alloc::vec![
+            Modifier::Background(Token::SurfaceElevated),
+            Modifier::Border { token: Token::Border, width: 1, radius: Radius::Md.as_u8() },
+            Modifier::Rounded(Radius::Md.as_u8()),
+            Modifier::Padding(Padding::Xs.as_u16()),
+        ],
     }
 }
 
@@ -439,7 +546,11 @@ fn state_changed() -> Option<usize> {
     };
     let bat_same = bat == unsafe { LAST_BAT };
     let vol_same = vol == unsafe { LAST_VOL };
-    if last == Some(cur) && bat_same && vol_same { return None; }
+    // The window list feeds the occupied-workspace hints, and a window
+    // opening on ANOTHER workspace leaves bar_state untouched — so it
+    // needs its own vote in the change gate.
+    let wins_changed = refresh_windows();
+    if last == Some(cur) && bat_same && vol_same && !wins_changed { return None; }
     unsafe {
         let lp = core::ptr::addr_of_mut!(LAST_BUF) as *mut u8;
         core::ptr::copy_nonoverlapping(p, lp, n);
@@ -512,6 +623,7 @@ fn handle(ev: Event) {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     let seg = read_segments();
+    load_catalog();                    // title → app icon, resolved once
     unsafe { HEAP_MARK = HEAP_POS; }   // freeze config; tree rebuilds above this
 
     // Declare the top strut panel. `h` is the band height we need (room for

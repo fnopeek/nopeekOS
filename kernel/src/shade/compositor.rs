@@ -306,10 +306,11 @@ pub struct Compositor {
     pub gaps: u32,
     /// Window border width (in pixels, scaled).
     pub border: u32,
-    /// Active window border color.
-    pub border_active: u32,
-    /// Inactive window border color.
-    pub border_inactive: u32,
+    /// Active window border color — `None` = follow the palette's
+    /// `AccentLine`, so a wallpaper/theme/accent switch moves it live.
+    pub border_active: Option<u32>,
+    /// Inactive window border color — `None` = palette `Border`.
+    pub border_inactive: Option<u32>,
     /// Corner radius (in pixels, scaled).
     pub rounding: u32,
     /// Window background opacity (0=transparent, 256=opaque).
@@ -342,11 +343,9 @@ impl Compositor {
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(1) * scale;
         let border_active = crate::config::get("shade.border_active")
-            .and_then(|s| parse_hex_color(&s))
-            .unwrap_or_else(|| background::accent_color());
+            .and_then(|s| parse_hex_color(&s));
         let border_inactive = crate::config::get("shade.border_inactive")
-            .and_then(|s| parse_hex_color(&s))
-            .unwrap_or(0x003A2555);
+            .and_then(|s| parse_hex_color(&s));
         let rounding = crate::config::get("shade.rounding")
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(10) * scale;
@@ -382,6 +381,21 @@ impl Compositor {
             dock: None,
             top_strut: None,
         }
+    }
+
+    /// Border of the focused tile. `AccentLine` (accent at 45 % over the
+    /// surface) unless `shade.border_active` pins a hex value.
+    pub fn border_active(&self) -> u32 {
+        self.border_active.unwrap_or_else(|| {
+            super::widgets::palette::resolve(super::widgets::abi::Token::AccentLine) & 0x00FF_FFFF
+        })
+    }
+
+    /// Border of unfocused tiles. Palette `Border` unless pinned.
+    pub fn border_inactive(&self) -> u32 {
+        self.border_inactive.unwrap_or_else(|| {
+            super::widgets::palette::resolve(super::widgets::abi::Token::Border) & 0x00FF_FFFF
+        })
     }
 
     /// Height reserved at the top for the bar strut (0 if no bar registered).
@@ -822,6 +836,25 @@ impl Compositor {
         (self.workspace_count, self.active_workspace, title)
     }
 
+    /// One line per real app window: `<flags>\t<workspace>\t<title>`,
+    /// flags being a decimal bitmask (1 = focused, 2 = on the active
+    /// workspace). Panels and transient overlays are excluded. Feeds the
+    /// dock's running/active indicators and the bar's occupied-workspace
+    /// hints; the kernel names no app.
+    pub fn window_lines(&self) -> alloc::string::String {
+        use core::fmt::Write;
+        let mut out = alloc::string::String::new();
+        for wid in &self.z_order {
+            let Some(w) = self.windows.iter().find(|w| w.id == *wid) else { continue };
+            if w.is_overlay || w.is_dock || w.is_bar { continue; }
+            let mut flags = 0u8;
+            if Some(w.id) == self.focused { flags |= 1; }
+            if w.workspace == self.active_workspace { flags |= 2; }
+            let _ = writeln!(out, "{}\t{}\t{}", flags, w.workspace, w.title);
+        }
+        out
+    }
+
     /// Drive the dock reveal/hide intent from the current cursor Y.
     /// Called every frame (poll_render) so dwell/debounce advance even
     /// while the cursor is parked. Suppressed during a drag/resize so the
@@ -1236,12 +1269,12 @@ impl Compositor {
                 let active_border = if crate::theme::is_active() {
                     crate::gui::background::accent_color()
                 } else {
-                    self.border_active
+                    self.border_active()
                 };
                 let inactive_border = if crate::theme::is_active() {
                     crate::theme::inactive_border()
                 } else {
-                    self.border_inactive
+                    self.border_inactive()
                 };
                 Self::render_window(shadow, info, win, border, rounding, opacity, scale,
                     if win.focused { active_border } else { inactive_border });
@@ -1722,12 +1755,12 @@ impl Compositor {
                     let active_border = if crate::theme::is_active() {
                         crate::gui::background::accent_color()
                     } else {
-                        self.border_active
+                        self.border_active()
                     };
                     let inactive_border = if crate::theme::is_active() {
                         crate::theme::inactive_border()
                     } else {
-                        self.border_inactive
+                        self.border_inactive()
                     };
                     let border_color = if win.focused { active_border } else { inactive_border };
                     Self::render_window(shadow, info, win, border, rounding, opacity, scale, border_color);
@@ -2558,13 +2591,13 @@ impl Compositor {
             if crate::theme::is_active() {
                 crate::gui::background::accent_color()
             } else {
-                self.border_active
+                self.border_active()
             }
         } else {
             if crate::theme::is_active() {
                 crate::theme::inactive_border()
             } else {
-                self.border_inactive
+                self.border_inactive()
             }
         }
     }

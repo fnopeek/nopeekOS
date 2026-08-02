@@ -11,47 +11,65 @@
 use super::abi::{Palette, Token};
 
 struct ThemePalette {
+    page:             u32,
     surface:          u32,
     surface_elevated: u32,
     surface_muted:    u32,
+    surface_hover:    u32,
     border:           u32,
     on_surface:       u32,
     on_surface_muted: u32,
+    on_surface_faint: u32,
     success:          u32,
     warning:          u32,
     danger:           u32,
 }
 
 const DARK: ThemePalette = ThemePalette {
-    surface:          0xFF1E1E24,
-    surface_elevated: 0xFF2A2A32,
-    surface_muted:    0xFF252530,
-    border:           0xFF3A3A45,
-    on_surface:       0xFFE0E0E8,
-    on_surface_muted: 0xFF8A8A96,
-    success:          0xFF4CAF50,
-    warning:          0xFFFFB300,
-    danger:           0xFFE74C3C,
+    page:             0xFF131517,
+    surface:          0xFF17191B,
+    surface_elevated: 0xFF1C1F21,
+    surface_muted:    0xFF1E2124,
+    surface_hover:    0xFF262A2E,
+    border:           0xFF2C3034,
+    on_surface:       0xFFE6E8EA,
+    on_surface_muted: 0xFFA2A8AE,
+    on_surface_faint: 0xFF6F767C,
+    success:          0xFF8FBF9F,
+    warning:          0xFFE0B877,
+    danger:           0xFFE07B7B,
 };
 
 const LIGHT: ThemePalette = ThemePalette {
-    surface:          0xFFF5F5F7,
-    surface_elevated: 0xFFFFFFFF,
-    surface_muted:    0xFFEAEAEC,
-    border:           0xFFD0D0D5,
-    on_surface:       0xFF1A1A20,
-    on_surface_muted: 0xFF606068,
-    success:          0xFF2E7D32,
-    warning:          0xFFE68900,
-    danger:           0xFFD32F2F,
+    page:             0xFFFFFFFF,
+    surface:          0xFFFAF9F7,
+    surface_elevated: 0xFFF0F0EC,
+    surface_muted:    0xFFF1F0EC,
+    surface_hover:    0xFFE4E3DE,
+    border:           0xFFDEDCD6,
+    on_surface:       0xFF1B1D1F,
+    on_surface_muted: 0xFF5C6166,
+    on_surface_faint: 0xFF8A9096,
+    success:          0xFF4D8A63,
+    warning:          0xFFB07A28,
+    danger:           0xFFC04C4C,
 };
 
-const DEFAULT_ACCENT: u32 = 0xFF7B50A0;
+/// Named accent presets from the design. `accent = auto` (the default)
+/// keeps deriving the accent from the wallpaper instead.
+const ACCENT_PRESETS: [(&str, u32); 4] = [
+    ("rose",  0xFFE39BAB),
+    ("sage",  0xFF8FBF9F),
+    ("blue",  0xFF9FB8E0),
+    ("amber", 0xFFE0B877),
+];
+
+const DEFAULT_ACCENT: u32 = 0xFFE39BAB;
 
 pub fn current() -> Palette {
-    let mut colors = [0u32; 16];
-    for i in 0..16 {
-        colors[i] = resolve(token_at(i));
+    let mut colors = [0u32; super::abi::PALETTE_SLOTS];
+    for (i, slot) in colors.iter_mut().enumerate() {
+        *slot = resolve(token_at(i));
     }
     Palette { colors }
 }
@@ -68,18 +86,23 @@ pub fn resolve(token: Token) -> u32 {
     let t = if is_light { &LIGHT } else { &DARK };
 
     match token {
+        Token::Page            => glass(t.page, is_light),
         Token::Surface         => glass(t.surface, is_light),
         Token::SurfaceElevated => glass(t.surface_elevated, is_light),
         Token::SurfaceMuted    => glass(t.surface_muted, is_light),
+        Token::SurfaceHover    => glass(t.surface_hover, is_light),
         Token::Border          => t.border,
         Token::OnSurface       => t.on_surface,
         Token::OnSurfaceMuted  => t.on_surface_muted,
+        Token::OnSurfaceFaint  => t.on_surface_faint,
         Token::Success         => t.success,
         Token::Warning         => t.warning,
         Token::Danger          => t.danger,
 
         Token::Accent          => accent_adjusted(t.surface),
-        Token::AccentMuted     => accent_muted(t.surface),
+        Token::AccentMuted     => accent_over(t.surface, 38),
+        Token::AccentRing      => accent_over(t.surface, 56),
+        Token::AccentLine      => accent_over(t.surface, 115),
         Token::OnAccent        => on_accent(t.surface),
     }
 }
@@ -128,12 +151,32 @@ pub fn is_light_theme() -> bool {
     }
 }
 
-fn accent_raw() -> u32 {
+/// The user's accent choice. `auto` (default) keeps deriving it from the
+/// wallpaper; a preset name or a `#RRGGBB` literal pins it. Set live with
+/// `set accent <rose|sage|blue|amber|auto|#RRGGBB>`.
+pub fn accent_raw() -> u32 {
+    let choice = crate::config::get("accent").unwrap_or_default();
+    let choice = choice.trim();
+
+    for (name, color) in ACCENT_PRESETS {
+        if choice.eq_ignore_ascii_case(name) { return color; }
+    }
+    if let Some(hex) = choice.strip_prefix('#') {
+        if let Ok(rgb) = u32::from_str_radix(hex, 16) {
+            if hex.len() == 6 { return 0xFF00_0000 | rgb; }
+        }
+    }
+
     if crate::theme::is_active() {
         crate::gui::background::accent_color() | 0xFF00_0000
     } else {
         DEFAULT_ACCENT
     }
+}
+
+/// Names a `set accent …` value can take, for the shell's completion/help.
+pub fn accent_preset_names() -> [&'static str; 4] {
+    [ACCENT_PRESETS[0].0, ACCENT_PRESETS[1].0, ACCENT_PRESETS[2].0, ACCENT_PRESETS[3].0]
 }
 
 /// Accent adjusted for minimum contrast against the active surface.
@@ -148,21 +191,22 @@ fn accent_adjusted(surface: u32) -> u32 {
     if surf_lum > 128 { darken(raw, 0x60) } else { lighten(raw, 0x60) }
 }
 
-/// Selected-row fill — anchored on a shifted surface so contrast is
-/// guaranteed, then tinted towards accent.
-fn accent_muted(surface: u32) -> u32 {
-    let accent = accent_adjusted(surface);
-    let base = if luminance(surface) > 128 {
-        darken(surface, 0x18)
-    } else {
-        lighten(surface, 0x18)
-    };
-    blend(base, accent, 72)
+/// Accent pre-mixed over the surface at `weight`/255. The design writes
+/// these as `rgba(accent, .15/.22/.45)`; the rasterizer ignores a token's
+/// alpha byte (opacity comes from `bg_alpha`), so they are flattened here.
+fn accent_over(surface: u32, weight: u32) -> u32 {
+    blend(surface, accent_adjusted(surface), weight)
 }
 
+/// Ink on an Accent fill. Light mode always takes white — `accent_adjusted`
+/// has already darkened the pastel accent against the bright surface, so
+/// white carries. Dark mode takes a near-black tinted with the accent hue
+/// (the design's per-preset `--accent-ink`), falling back to white if the
+/// accent is itself dark.
 fn on_accent(surface: u32) -> u32 {
+    if is_light_theme() { return 0xFFFFFFFF; }
     let accent = accent_adjusted(surface);
-    if luminance(accent) > 128 { 0xFF1A1A20 } else { 0xFFFFFFFF }
+    if luminance(accent) > 128 { blend(0xFF101010, accent, 24) } else { 0xFFFFFFFF }
 }
 
 fn luminance(c: u32) -> u32 {
@@ -217,6 +261,11 @@ fn token_at(idx: usize) -> Token {
         9  => Token::Success,
         10 => Token::Warning,
         11 => Token::Danger,
+        12 => Token::Page,
+        13 => Token::SurfaceHover,
+        14 => Token::OnSurfaceFaint,
+        15 => Token::AccentRing,
+        16 => Token::AccentLine,
         _  => Token::Surface,
     }
 }

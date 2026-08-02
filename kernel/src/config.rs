@@ -175,7 +175,9 @@ pub fn list() -> Vec<(String, String)> {
 pub const KNOWN_KEYS: &[(&str, &str)] = &[
     ("timezone", "UTC offset (e.g. +2, -5, +5:30)"),
     ("keyboard", "Keyboard layout (e.g. de_CH, us, de_DE)"),
-    ("lang", "Display language (e.g. de, en, fr)"),
+    ("lang", "UI language (en, de); apps carry the catalogs"),
+    ("theme", "dark, light or auto (follows the wallpaper luminance)"),
+    ("accent", "auto (from the wallpaper), rose, sage, blue, amber, or #RRGGBB"),
     ("static_ip", "Static IPv4 (e.g. 192.168.1.50); unset = DHCP"),
     ("static_gw", "Static default gateway (with static_ip)"),
     ("static_dns", "Static DNS server (with static_ip)"),
