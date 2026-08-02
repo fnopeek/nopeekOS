@@ -15,6 +15,7 @@ extern crate alloc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use nopeek_widgets::prefab;
 use nopeek_widgets::style::{Padding, Radius, Spacing};
 use nopeek_widgets::*;
 
@@ -277,13 +278,10 @@ fn icon_for_app(title: &str) -> IconId {
 // ── Segment → widgets ────────────────────────────────────────────────
 
 /// A fixed-size, centred chrome cell — a workspace pill or a tray icon.
+/// `prefab::center_box` supplies the flex spacers: `MinWidth` alone
+/// widens the box and leaves the glyph pinned to its left edge.
 fn cell(child: Widget, modifiers: Vec<Modifier>) -> Widget {
-    Widget::Row {
-        children: alloc::vec![child],
-        spacing: 0,
-        align: Align::Center,
-        modifiers,
-    }
+    prefab::center_box(child, modifiers)
 }
 
 /// Icon plus a mono value (volume, battery) as one hoverable unit.
@@ -629,7 +627,7 @@ pub extern "C" fn _start() {
     // Declare the top strut panel. `h` is the band height we need (room for
     // 24px tray icons + pill padding); the compositor reserves `margin + h`
     // and sizes our window to it. `w` is advisory.
-    unsafe { let _ = npk_window_set_panel(EDGE_TOP, BEHAVIOR_STRUT, 1920, 34); }
+    unsafe { let _ = npk_window_set_panel(EDGE_TOP, BEHAVIOR_STRUT, 1920, 36); }
 
     // First commit.
     if let Some(len) = state_changed() {
