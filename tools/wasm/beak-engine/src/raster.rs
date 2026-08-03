@@ -13,6 +13,7 @@ use hashbrown::HashMap;
 
 use crate::fonts::Fonts;
 use crate::layout::{DrawOp, Layout, Rgb, Theme};
+use crate::style::{BgPos, BgSize};
 
 pub struct Engine {
     fonts: Fonts,
@@ -24,6 +25,15 @@ pub struct Engine {
     theme: Theme,
     /// Decoded page images keyed by `<img src>` (set by the shell each nav).
     images: crate::image::ImageMap,
+    /// Decoded CSS images (`background-image`/`mask-image`) keyed by
+    /// `css::url_key`. Separate from `images` so a page's `<img src="x">` and
+    /// a stylesheet's `url(x)` cannot collide, and because these are resolved
+    /// on a different clock: `data:` URIs decode during layout, fetched ones
+    /// arrive later from the shell.
+    css_images: RefCell<HashMap<u64, alloc::rc::Rc<crate::image::Image>>>,
+    /// Decoded-BGRA budget for CSS images, separate from `img_budget` so a
+    /// page full of icons cannot starve its `<img>`s (or the reverse).
+    css_img_budget: core::cell::Cell<usize>,
     /// Remaining decoded-BGRA budget for the current page (streaming decode).
     img_budget: usize,
     /// Viewport height (px) — the initial containing block's height, which
@@ -76,6 +86,8 @@ impl Engine {
             glyphs: RefCell::new(HashMap::new()),
             theme: Theme::DARK,
             images: crate::image::ImageMap::new(),
+            css_images: RefCell::new(HashMap::new()),
+            css_img_budget: core::cell::Cell::new(crate::image::CSS_BUDGET),
             img_budget: crate::image::TOTAL_BUDGET,
             // 600 keeps the historical behaviour of the reftest canvas for any
             // caller that never sets it.
@@ -179,7 +191,56 @@ impl Engine {
         }
         let held = self.sheet.borrow();
         let sheet = &held.as_ref().unwrap().1;
-        crate::layout::layout(&self.fonts, &dom, sheet, &self.images, width, self.viewport_h.get(), &self.theme, forms, self.inspect.get())
+        let mut lay = crate::layout::layout(&self.fonts, &dom, sheet, &self.images, width, self.viewport_h.get(), &self.theme, forms, self.inspect.get());
+        self.resolve_css_images(sheet, &mut lay);
+        lay
+    }
+
+    /// Turn the CSS image keys a layout needs back into URLs.
+    ///
+    /// A `data:` URI carries its own bytes, so the engine decodes it here and
+    /// the shell never hears about it; everything else is reported in
+    /// `css_image_srcs` for the shell to fetch and hand back via
+    /// `add_css_image`. Already-decoded keys are skipped, so this stays cheap
+    /// across the several layouts one page runs through.
+    fn resolve_css_images(&self, sheet: &crate::css::Stylesheet, lay: &mut Layout) {
+        for &key in &lay.css_image_keys {
+            if self.css_images.borrow().contains_key(&key) {
+                continue;
+            }
+            let Some(url) = sheet.url(key) else { continue };
+            if url.starts_with("data:") || url.starts_with("DATA:") {
+                if let Some(bytes) = crate::image::decode_data_uri(url) {
+                    self.store_css_image(key, &bytes);
+                }
+            } else {
+                lay.css_image_srcs.push((key, alloc::string::String::from(url)));
+            }
+        }
+    }
+
+    fn store_css_image(&self, key: u64, bytes: &[u8]) -> bool {
+        if let Some(img) = crate::image::decode(bytes) {
+            let budget = self.css_img_budget.get();
+            if img.bgra.len() <= budget {
+                self.css_img_budget.set(budget - img.bgra.len());
+                self.css_images.borrow_mut().insert(key, alloc::rc::Rc::new(img));
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Store a CSS image the shell fetched (see `Layout::css_image_srcs`).
+    /// Costs a repaint, never a re-layout: a background cannot move a box.
+    pub fn add_css_image(&self, key: u64, bytes: &[u8]) -> bool {
+        self.store_css_image(key, bytes)
+    }
+
+    /// Drop the previous page's CSS images (called on navigation).
+    pub fn css_images_begin(&self) {
+        self.css_images.borrow_mut().clear();
+        self.css_img_budget.set(crate::image::CSS_BUDGET);
     }
 
     /// Lay out with the UA sheet ONLY — no author `<style>`/`<link>` CSS
@@ -237,6 +298,19 @@ impl Engine {
                     match self.images.get(src) {
                         Some(img) => blit_image(out, wi, hi, *x, vy, *iw, *ih, img),
                         None => self.draw_img_placeholder(out, wi, hi, *x, vy, *iw, *ih, alt),
+                    }
+                }
+                DrawOp::BgImage { x, y, w: bw, h: bh, key, repeat, pos, size, tint } => {
+                    let vy = *y - scroll_y;
+                    if vy > hi || vy + *bh < 0 {
+                        continue;
+                    }
+                    // A missing background draws NOTHING — unlike `<img>`,
+                    // there is no placeholder for one: the box is styled and
+                    // sized either way, so an absent decoration must simply be
+                    // absent rather than a grey frame over the content.
+                    if let Some(img) = self.css_images.borrow().get(key) {
+                        blit_bg(out, wi, hi, *x, vy, *bw, *bh, img, *repeat, *pos, *size, *tint);
                     }
                 }
             }
@@ -511,6 +585,138 @@ fn blend_at(out: &mut [u8], i: usize, c: Rgb, a: u8) {
 
 /// Nearest-neighbour scale a decoded `img` (BGRA) into a `dw`×`dh` box at
 /// (dx, dy), alpha-blending over `out`. Clipped to the buffer.
+/// Resolve `background-size` against the positioning area (css-backgrounds-3
+/// §3.9). `auto` on one axis keeps the intrinsic aspect ratio.
+fn bg_tile_size(area: (i32, i32), img: (u32, u32), size: BgSize) -> (i32, i32) {
+    let (aw, ah) = (area.0 as f32, area.1 as f32);
+    let (iw, ih) = (img.0 as f32, img.1 as f32);
+    let ratio = iw / ih;
+    let (tw, th) = match size {
+        BgSize::Auto => (iw, ih),
+        BgSize::Cover | BgSize::Contain => {
+            let s = if matches!(size, BgSize::Cover) {
+                (aw / iw).max(ah / ih)
+            } else {
+                (aw / iw).min(ah / ih)
+            };
+            (iw * s, ih * s)
+        }
+        BgSize::Fixed(fw, fh) => {
+            let rw = fw.and_then(|l| l.px(aw));
+            let rh = fh.and_then(|l| l.px(ah));
+            match (rw, rh) {
+                (Some(a), Some(b)) => (a, b),
+                (Some(a), None) => (a, a / ratio),
+                (None, Some(b)) => (b * ratio, b),
+                (None, None) => (iw, ih),
+            }
+        }
+    };
+    ((libm::roundf(tw) as i32).max(1), (libm::roundf(th) as i32).max(1))
+}
+
+fn bg_offset(p: BgPos, area: i32, tile: i32) -> i32 {
+    match p {
+        BgPos::Px(v) => libm::roundf(v) as i32,
+        BgPos::Pct(f) => libm::roundf((area - tile) as f32 * f) as i32,
+    }
+}
+
+/// Paint one `background-image`/`mask-image` layer into the box `dx,dy,dw,dh`.
+/// Everything is clipped to that box; repeating axes tile outward from the
+/// positioned origin.
+#[allow(clippy::too_many_arguments)]
+fn blit_bg(
+    out: &mut [u8],
+    w: i32,
+    h: i32,
+    dx: i32,
+    dy: i32,
+    dw: i32,
+    dh: i32,
+    img: &crate::image::Image,
+    repeat: (bool, bool),
+    pos: (BgPos, BgPos),
+    size: BgSize,
+    tint: Option<crate::layout::Rgb>,
+) {
+    if dw <= 0 || dh <= 0 || img.w == 0 || img.h == 0 {
+        return;
+    }
+    let (tw, th) = bg_tile_size((dw, dh), (img.w, img.h), size);
+    let ox = dx + bg_offset(pos.0, dw, tw);
+    let oy = dy + bg_offset(pos.1, dh, th);
+    // Tile range: how many steps back from the origin before leaving the box,
+    // and how many forward. A non-repeating axis is the single tile.
+    let span = |origin: i32, box_lo: i32, box_hi: i32, tile: i32, rep: bool| -> (i32, i32) {
+        if !rep {
+            return (0, 0);
+        }
+        let lo = (box_lo - origin).div_euclid(tile).min(0);
+        let hi = (box_hi - origin - 1).div_euclid(tile).max(0);
+        (lo, hi)
+    };
+    let (ix0, ix1) = span(ox, dx, dx + dw, tw, repeat.0);
+    let (iy0, iy1) = span(oy, dy, dy + dh, th, repeat.1);
+    // Clip to the box AND to the surface in one rect, so the inner loop never
+    // tests bounds per pixel.
+    let (cx0, cx1) = (dx.max(0), (dx + dw).min(w));
+    let (cy0, cy1) = (dy.max(0), (dy + dh).min(h));
+    if cx1 <= cx0 || cy1 <= cy0 {
+        return;
+    }
+    for ty in iy0..=iy1 {
+        let ty0 = oy + ty * th;
+        let (y0, y1) = (ty0.max(cy0), (ty0 + th).min(cy1));
+        if y1 <= y0 {
+            continue;
+        }
+        for tx in ix0..=ix1 {
+            let tx0 = ox + tx * tw;
+            let (x0, x1) = (tx0.max(cx0), (tx0 + tw).min(cx1));
+            if x1 <= x0 {
+                continue;
+            }
+            // Source column per destination column, resolved once per tile
+            // rather than a multiply+divide per pixel (the interpreter charges
+            // ~150× for a per-pixel loop — see the wasmi hot-loop note).
+            let cols: Vec<usize> = (x0..x1)
+                .map(|px| ((px - tx0) * img.w as i32 / tw).clamp(0, img.w as i32 - 1) as usize * 4)
+                .collect();
+            for py in y0..y1 {
+                let sy = ((py - ty0) * img.h as i32 / th).clamp(0, img.h as i32 - 1);
+                let srow = (sy * img.w as i32) as usize * 4;
+                let mut di = idx(w, x0, py);
+                for &sx in &cols {
+                    let si = srow + sx;
+                    let a = img.bgra[si + 3] as u32;
+                    if a != 0 {
+                        // A mask takes only the alpha and paints the tint
+                        // through it; a background image paints its own pixels.
+                        let src = match tint {
+                            Some(c) => [c.2, c.1, c.0],
+                            None => [img.bgra[si], img.bgra[si + 1], img.bgra[si + 2]],
+                        };
+                        if a == 255 {
+                            out[di] = src[0];
+                            out[di + 1] = src[1];
+                            out[di + 2] = src[2];
+                            out[di + 3] = 255;
+                        } else {
+                            let ia = 255 - a;
+                            for c in 0..3 {
+                                out[di + c] = ((src[c] as u32 * a + out[di + c] as u32 * ia) / 255) as u8;
+                            }
+                            out[di + 3] = 255;
+                        }
+                    }
+                    di += 4;
+                }
+            }
+        }
+    }
+}
+
 fn blit_image(out: &mut [u8], w: i32, h: i32, dx: i32, dy: i32, dw: i32, dh: i32, img: &crate::image::Image) {
     if dw <= 0 || dh <= 0 || img.w == 0 || img.h == 0 {
         return;
@@ -544,5 +750,99 @@ fn blit_image(out: &mut [u8], w: i32, h: i32, dx: i32, dy: i32, dw: i32, dh: i32
             }
             di += 4;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::{Rgb, Theme};
+
+    /// An inline SVG `data:` URI, quote-safe: the SVG's own attribute quotes
+    /// are percent-encoded, so the URI survives being nested inside a CSS
+    /// string inside an HTML attribute (which is how real pages ship them).
+    const MASK_LEFT_HALF: &str = "data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22\
+        %20width=%2220%22%20height=%2220%22%20viewBox=%220%200%2020%2020%22%3E\
+        %3Cpath%20d=%22M0%200%20H10%20V20%20H0%20Z%22%20fill=%22%23000%22/%3E%3C/svg%3E";
+
+    fn light() -> Theme {
+        Theme {
+            bg: Rgb(255, 255, 255),
+            text: Rgb(0, 0, 0),
+            heading: Rgb(0, 0, 0),
+            link: Rgb(0, 0, 238),
+            muted: Rgb(96, 96, 96),
+            rule: Rgb(128, 128, 128),
+        }
+    }
+
+    /// Paint one page and read a pixel back as (r, g, b). `x`/`y` are relative
+    /// to the document's top-left content corner, i.e. past the page padding.
+    fn pixel_at(html: &str, x: u32, y: u32) -> (u8, u8, u8) {
+        const PAD: u32 = 20; // layout::PAD — the fixed page gutter
+        let (w, h) = (PAD * 2 + 40, PAD * 2 + 40);
+        let mut eng = Engine::new();
+        eng.set_theme(light());
+        let lay = eng.layout(html, w);
+        let mut buf = alloc::vec![0u8; (w * h * 4) as usize];
+        eng.paint(&lay, w, h, 0, &mut buf);
+        let i = (((y + PAD) * w + x + PAD) * 4) as usize;
+        (buf[i + 2], buf[i + 1], buf[i])
+    }
+
+    /// A mask paints the element's own background-colour through the image's
+    /// alpha — it does NOT paint the image. This SVG is opaque on its left half
+    /// only, so the box must be red on the left and untouched on the right.
+    #[test]
+    fn mask_image_stencils_the_background_colour() {
+        // A `data:` URI needs no fetch: the engine decodes it during layout.
+        let html = alloc::format!(
+            "<div style=\"width:20px;height:20px;background-color:#ff0000;\
+             mask-image:url('{MASK_LEFT_HALF}');mask-size:contain;mask-repeat:no-repeat\"></div>"
+        );
+        assert_eq!(pixel_at(&html, 4, 10), (255, 0, 0), "left half is stencilled red");
+        assert_eq!(pixel_at(&html, 16, 10), (255, 255, 255), "right half stays clear");
+    }
+
+    /// Without a mask the same box is a plain filled rect — the guard that the
+    /// mask path is what changed, not background painting in general.
+    #[test]
+    fn a_plain_background_colour_still_fills_the_whole_box() {
+        let html = "<div style='width:20px;height:20px;background-color:#ff0000'></div>";
+        assert_eq!(pixel_at(html, 4, 10), (255, 0, 0));
+        assert_eq!(pixel_at(html, 16, 10), (255, 0, 0));
+    }
+
+    /// `no-repeat` must leave the rest of the box alone, and the tile must sit
+    /// where `background-position` puts it.
+    #[test]
+    fn background_image_honours_no_repeat_and_position() {
+        let svg = "data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22\
+                   %20width=%224%22%20height=%224%22%20viewBox=%220%200%204%204%22%3E\
+                   %3Cpath%20d=%22M0%200%20H4%20V4%20H0%20Z%22%20fill=%22%230000ff%22/%3E%3C/svg%3E";
+        let html = alloc::format!(
+            "<div style=\"width:20px;height:20px;background-image:url('{svg}');\
+             background-repeat:no-repeat;background-position:right top\"></div>"
+        );
+        assert_eq!(pixel_at(&html, 18, 2), (0, 0, 255), "tile sits at the right edge");
+        assert_eq!(pixel_at(&html, 2, 2), (255, 255, 255), "and nowhere else");
+    }
+
+    /// The spelling MediaWiki actually ships: a double-quoted `url()` whose
+    /// payload carries BACKSLASH-ESCAPED quotes. Stopping at the first inner
+    /// quote truncates the URI into something that still parses as a URL and
+    /// then silently decodes to nothing — so this is a paint test, not a
+    /// parse test.
+    #[test]
+    fn a_data_uri_with_escaped_quotes_still_paints() {
+        let svg = "data:image/svg+xml;utf8,<svg xmlns=\\\"http://www.w3.org/2000/svg\\\" \
+                   width=\\\"20\\\" height=\\\"20\\\" viewBox=\\\"0 0 20 20\\\">\
+                   <path d=\\\"M0 0 H10 V20 H0 Z\\\" fill=\\\"%23000\\\"/></svg>";
+        let html = alloc::format!(
+            "<style>div{{width:20px;height:20px;background-color:#ff0000;\
+             mask-image:url(\"{svg}\");mask-size:contain;mask-repeat:no-repeat}}</style><div></div>"
+        );
+        assert_eq!(pixel_at(&html, 4, 10), (255, 0, 0), "left half is stencilled red");
+        assert_eq!(pixel_at(&html, 16, 10), (255, 255, 255), "right half stays clear");
     }
 }

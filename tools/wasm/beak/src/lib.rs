@@ -602,6 +602,42 @@ fn images_dirty() -> bool {
     unsafe { core::ptr::addr_of!(IMAGES_DIRTY).read() }
 }
 
+/// Fetch the CSS images (`background-image`/`mask-image`) the last layout
+/// asked for, one batch a turn.
+///
+/// Kept apart from `fetch_next_images` for one reason that matters: a CSS
+/// image can never move a box, so an arriving one is ALWAYS just a repaint —
+/// there is no `guessed` case and no `bump_content_gen`. The engine already
+/// resolved every `data:` URI itself, so this list is only what genuinely
+/// needs the network.
+///
+/// The URL is resolved against the DOCUMENT, not the stylesheet that declared
+/// it. Those differ only for a relative url() in a linked sheet; the shell
+/// concatenates the sheets into one buffer, so the per-sheet base is gone by
+/// here. Absolute and root-relative urls — which is what real sheets ship —
+/// resolve identically either way.
+fn fetch_next_css_images(engine: &Engine, pending: &mut Vec<(u64, String)>) {
+    if pending.is_empty() {
+        return;
+    }
+    let take = pending.len().min(IMG_BATCH);
+    let want: Vec<(u64, String)> = pending.drain(..take).collect();
+    let urls: Vec<String> = want.iter().map(|(_, u)| resolve(url_str(), u)).collect();
+    let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
+    let spans = fetch_batch(&urls, dst, IMG_FETCH_CAP);
+    let mut any = false;
+    for ((key, _), (off, n)) in want.iter().zip(spans) {
+        if n == 0 {
+            continue; // failed or did not fit → the box stays undecorated
+        }
+        let bytes = unsafe { core::slice::from_raw_parts(dst.add(off) as *const u8, n) };
+        any |= engine.add_css_image(*key, bytes);
+    }
+    if any {
+        mark_dirty();
+    }
+}
+
 /// Fetch every `<link rel=stylesheet>` of the just-loaded page into CSS_BUF
 /// (concatenated), resolving hrefs against `base`. Bounded by CSS_CAP +
 /// MAX_CSS_LINKS. Each is a blocking sub-resource request (adds latency).
@@ -1567,6 +1603,8 @@ pub extern "C" fn _start() {
     let mut paint_buf: Vec<u8> = Vec::new();
     // Image sources of the current page still to fetch, one per loop turn.
     let mut pending_imgs: Vec<String> = Vec::new();
+    // CSS images still to fetch, as (url_key, url). Filled from the layout.
+    let mut pending_css_imgs: Vec<(u64, String)> = Vec::new();
     loop {
         // Pick up a navigation: re-parse the document's forms, drop old edits.
         page.sync();
@@ -1622,6 +1660,8 @@ pub extern "C" fn _start() {
         // per navigation, and on the device a layout is over five seconds.
         if images_dirty() {
             pending_imgs = begin_images(&mut engine);
+            engine.css_images_begin();
+            pending_css_imgs.clear();
         }
         maybe_repaint(&engine, &mut cache, &mut paint_buf, &page.state);
         // Text and layout are on screen now — pull in the next few images,
@@ -1632,11 +1672,22 @@ pub extern "C" fn _start() {
             .map(|(l, _, _): &(Layout, i32, u32)| l.guessed_image_srcs.clone())
             .unwrap_or_default();
         fetch_next_images(&mut engine, &mut pending_imgs, &guessed);
+        // The layout reports which CSS images it needs, so this queue can only
+        // be filled AFTER a layout — unlike `<img>`, whose srcs are in the HTML.
+        if let Some((l, _, _)) = cache.as_ref() {
+            for (k, u) in &l.css_image_srcs {
+                if !pending_css_imgs.iter().any(|(pk, _)| pk == k) {
+                    pending_css_imgs.push((*k, u.clone()));
+                }
+            }
+        }
+        fetch_next_css_images(&engine, &mut pending_css_imgs);
         // ALWAYS yield so this worker core can halt — a cooperative fiber that
         // never sleeps pins its core at 100%. A short nap while interacting
         // stays responsive; a longer one when idle keeps the core asleep.
         unsafe {
-            let _ = npk_sleep(if had_event || !pending_imgs.is_empty() { 4 } else { 16 });
+            let nap = if had_event || !pending_imgs.is_empty() || !pending_css_imgs.is_empty() { 4 } else { 16 };
+            let _ = npk_sleep(nap);
         }
     }
 }

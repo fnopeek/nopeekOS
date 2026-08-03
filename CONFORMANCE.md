@@ -154,11 +154,10 @@ excluded):
 
 ## Known holes, by kind
 
-**Properties not parsed at all** (`style.rs::apply_one` has ~125 arms; these
-aren't among them): `background-image`/`-repeat`/`-position`/`-size`,
-`box-shadow`, `text-indent`,
+**Properties not parsed at all** (`style.rs::apply_one` has ~135 arms; these
+aren't among them): `box-shadow`, `text-indent`,
 `text-shadow`, `letter-spacing`, `word-spacing`, `hyphens`, `cursor`, `outline*`, `transform`, `transition`,
-`animation`, `aspect-ratio`, `object-fit`, `filter`, `mask-*`, `quotes`,
+`animation`, `aspect-ratio`, `object-fit`, `filter`, `quotes`,
 `appearance`, `resize`, `writing-mode`.
 
 **Selectors that drop the whole rule** (`css.rs` returns `None` → the rule is
@@ -170,8 +169,20 @@ discarded rather than mis-applied): every pseudo-class outside
 `::before`/`::after` also drop the rule.
 
 **Value syntax not understood:** `attr()`, `env()`,
-`linear-gradient()`/`radial-gradient()`/`conic-gradient()`, `image-set()`,
-`url()` in any property except as a bare marker.
+`linear-gradient()`/`radial-gradient()`/`conic-gradient()`, `image-set()`.
+A gradient is *recognised* in the `background` shorthand (so it resets the
+colour, as the spec says) but never painted.
+
+**CSS images (0.3.0):** `background-image` and `mask-image` are painted, with
+`-repeat`/`-position`/`-size` and the `background`/`mask` shorthands. A mask
+stencils the element's `background-color` through the image's alpha, which is
+how icon systems (MediaWiki Vector, Codex) draw a recolourable icon. `data:`
+URIs are decoded by the engine during layout; anything else is reported in
+`Layout::css_image_srcs` for the shell to fetch, and arrives as a REPAINT — a
+background can never move a box. Still missing: multiple layers per element
+(only the first is used), `background-clip`/`-origin`, `background-attachment`,
+and a background on an INLINE box (see Paint, below) — which on a real page is
+the bigger of the two gaps.
 
 **At-rules skipped:** `@font-face`, `@keyframes`, `@import`, `@layer`,
 `@container`, `@page`. (`@media` width features + `prefers-color-scheme` and
@@ -201,6 +212,16 @@ thicker collapsed borders (it only started rendering right once `tr:not(
 box has none of its own (its fragments live in the line boxes). Costs
 `display-008/009` outright, and on the real web it is every highlighted or
 badged `<span>`.
+
+**Measured on de.wikipedia/Stansstad (0.3.0, 1521 elements):** 44 elements win
+a CSS image. **15 of them are `a.external`** — the external-link arrow, an
+INLINE box, so this hole is what blocks `background-image` on that page
+entirely, not the image machinery. Most of the rest are `.vector-icon` masks
+inside `display:none` subtrees (the collapsed menus), which are correctly not
+painted. Four icons are actually visible; one is a `data:` URI and paints, three
+come from `load.php` and need the fetch. **Note for the next census: `gap.rs`
+counts cascade wins and does NOT know about `display:none` ancestors — it read
+this page as "28 mask + 19 background elements".**
 
 ## Priority buckets
 

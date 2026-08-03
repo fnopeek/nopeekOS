@@ -24,12 +24,69 @@ fn dump(label: &str, html: &str) {
                           if text.len()>40 {&text[..40]} else {text}),
             DrawOp::Image { x, y, w, h, .. } =>
                 eprintln!("  IMG  x={x} y={y} w={w} h={h}"),
+            DrawOp::BgImage { x, y, w, h, key, tint, .. } =>
+                eprintln!("  BGIMG x={x} y={y} w={w} h={h} key={key:016x} {}",
+                          if tint.is_some() {"MASK"} else {"bg"}),
         }
     }
 }
 
 #[test]
 fn diag() {
+    // DCSSIMG=<html> DCSS=<css> [DW=w] — for every element that WINS a
+    // background-image or mask-image, report what would stop us painting it:
+    // the display type (an inline box has no box decoration) and whether there
+    // is a background-colour for a mask to stencil.
+    if let Ok(hp) = std::env::var("DCSSIMG") {
+        use beak_engine::css::{self, ElemInfo};
+        use beak_engine::dom::{self, Element, Node};
+        use beak_engine::style::{self, ComputedStyle};
+        let csspath = std::env::var("DCSS").unwrap_or_default();
+        let css = fs::read_to_string(&csspath).unwrap_or_default();
+        let w: f32 = std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(1900.0);
+        let html = fs::read_to_string(&hp).expect("html");
+        let dom = dom::parse(&html);
+        let ss = css::collect_all(&dom, &css, w);
+        let theme = light();
+        let mut tally: std::collections::BTreeMap<String, u32> = Default::default();
+        #[allow(clippy::too_many_arguments)]
+        fn walk(el: &Element, parent: &ComputedStyle, ss: &css::Stylesheet, theme: &Theme,
+                w: f32, anc: &mut Vec<ElemInfo>, tally: &mut std::collections::BTreeMap<String, u32>,
+                dead: bool) {
+            let kids: Vec<&Element> = el.children.iter()
+                .filter_map(|n| match n { Node::Element(e) => Some(e), _ => None }).collect();
+            let n = kids.len() as u32;
+            let mut prev: Vec<ElemInfo> = Vec::new();
+            for k in &kids {
+                let st = style::resolve(k, parent, theme, ss, anc, &prev, n, w);
+                let which = if st.mask_layer.image.is_some() { Some("mask") }
+                            else if st.bg_layer.image.is_some() { Some("bg") } else { None };
+                if let Some(kind) = which {
+                    let blocked = if dead { "ancestor display:none" }
+                        else if st.display == style::Display::None { "display:none" }
+                        else if st.display == style::Display::Inline { "INLINE (no box decoration)" }
+                        else if kind == "mask" && st.bg.is_none() { "mask without background-color" }
+                        else { "paints" };
+                    let blocked = &format!("{blocked} [{:?}]", st.display);
+                    let cls = k.attr("class").unwrap_or("");
+                    *tally.entry(format!("{kind:4} {blocked:28} {} .{}", k.tag,
+                        cls.split_whitespace().take(2).collect::<Vec<_>>().join("."))).or_insert(0) += 1;
+                }
+                anc.push(ElemInfo::of(k));
+                walk(k, &st, ss, theme, w, anc, tally, dead || st.display == style::Display::None);
+                anc.pop();
+                prev.push(ElemInfo::of(k));
+            }
+        }
+        let root = ComputedStyle::root(&theme);
+        walk(&dom.root, &root, &ss, &theme, w, &mut Vec::new(), &mut tally, false);
+        let total: u32 = tally.values().sum();
+        println!("elements winning a CSS image: {total}");
+        let mut v: Vec<_> = tally.into_iter().collect();
+        v.sort_by_key(|(_, c)| -(*c as i64));
+        for (k, c) in v { println!("  {c:>3}x  {k}"); }
+        return;
+    }
     // DPOS=<css> [DW=w] — dump the position/height/display/visibility cascade
     // for a `.vector-dropdown-content` div nested under a `.vector-dropdown`,
     // with a realistic ancestor chain (html.client-js …).
@@ -100,7 +157,7 @@ fn diag() {
             match op {
                 DrawOp::RoundRect { x, y, w, .. } | DrawOp::Rect { x, y, w, .. } => { max_right = max_right.max(x + w); rects.push((*x, *w, *y)); }
                 DrawOp::Text { x, .. } => { max_right = max_right.max(*x); }
-                DrawOp::Image { x, y: _, w, .. } => { max_right = max_right.max(x + w); }
+                DrawOp::Image { x, y: _, w, .. } | DrawOp::BgImage { x, y: _, w, .. } => { max_right = max_right.max(x + w); }
             }
         }
         eprintln!("viewport={w}  max_right_edge={max_right}  OVERFLOW={}", max_right - w as i32);
@@ -243,6 +300,15 @@ fn diag() {
         let painted = lay.ops.iter().filter(|o| matches!(o, beak_engine::layout::DrawOp::Image { .. })).count();
         println!("Image draw-ops in the display list: {painted}");
         println!("guessed (need relayout): {:?}", lay.guessed_image_srcs);
+        // CSS images (background-image / mask-image), split by how they are
+        // sourced: data: URIs need no network, the rest is the fetch backlog.
+        let masks = lay.ops.iter().filter(|o| matches!(o, beak_engine::layout::DrawOp::BgImage { tint: Some(_), .. })).count();
+        let bgs = lay.ops.iter().filter(|o| matches!(o, beak_engine::layout::DrawOp::BgImage { tint: None, .. })).count();
+        println!("CSS image ops: {masks} mask + {bgs} background   (keys used: {}, still to fetch: {})",
+                 lay.css_image_keys.len(), lay.css_image_srcs.len());
+        for (_, u) in lay.css_image_srcs.iter().take(8) {
+            println!("   FETCH {}", if u.len() > 110 { &u[..110] } else { u });
+        }
         // The tallest filled rects — an enormous empty box shows up here.
         let mut rects: Vec<(i32,i32,i32,i32,beak_engine::Rgb)> = lay.ops.iter().filter_map(|o| match o {
             beak_engine::layout::DrawOp::RoundRect { x, y, w, h, color, .. }
@@ -355,7 +421,7 @@ fn diag() {
             match op {
                 DrawOp::Rect { .. } | DrawOp::RoundRect { .. } => nr += 1,
                 DrawOp::Text { text, .. } => { nt += 1; glyphs += text.chars().count() as u64 }
-                DrawOp::Image { .. } => ni += 1,
+                DrawOp::Image { .. } | DrawOp::BgImage { .. } => ni += 1,
             }
         }
         println!("ops {} (rect {nr}, text {nt} / {glyphs} glyphs, img {ni})   page height {}   viewport {w}x{vh}",
