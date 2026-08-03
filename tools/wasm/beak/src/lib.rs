@@ -1605,6 +1605,10 @@ pub extern "C" fn _start() {
     let mut pending_imgs: Vec<String> = Vec::new();
     // CSS images still to fetch, as (url_key, url). Filled from the layout.
     let mut pending_css_imgs: Vec<(u64, String)> = Vec::new();
+    // Every CSS image this page has already been asked for — including the
+    // ones that failed. A miss must not be retried forever; the box simply
+    // stays undecorated until the next navigation.
+    let mut css_asked: Vec<u64> = Vec::new();
     loop {
         // Pick up a navigation: re-parse the document's forms, drop old edits.
         page.sync();
@@ -1662,6 +1666,7 @@ pub extern "C" fn _start() {
             pending_imgs = begin_images(&mut engine);
             engine.css_images_begin();
             pending_css_imgs.clear();
+            css_asked.clear();
         }
         maybe_repaint(&engine, &mut cache, &mut paint_buf, &page.state);
         // Text and layout are on screen now — pull in the next few images,
@@ -1673,10 +1678,19 @@ pub extern "C" fn _start() {
             .unwrap_or_default();
         fetch_next_images(&mut engine, &mut pending_imgs, &guessed);
         // The layout reports which CSS images it needs, so this queue can only
-        // be filled AFTER a layout — unlike `<img>`, whose srcs are in the HTML.
+        // be filled AFTER a layout — unlike `<img>`, whose srcs are in the HTML
+        // and are queued once by `begin_images`.
+        //
+        // That difference is a trap: the cached layout keeps listing the SAME
+        // srcs every turn (nothing re-lays-out when a background arrives — it
+        // is a repaint), so the guard has to be "already asked for this page",
+        // NOT "already in the queue". The queue empties on every fetch, so
+        // checking it re-requested all of them once a turn, for as long as the
+        // page stayed open. Cleared on navigation, with the engine's cache.
         if let Some((l, _, _)) = cache.as_ref() {
             for (k, u) in &l.css_image_srcs {
-                if !pending_css_imgs.iter().any(|(pk, _)| pk == k) {
+                if !css_asked.contains(k) {
+                    css_asked.push(*k);
                     pending_css_imgs.push((*k, u.clone()));
                 }
             }
