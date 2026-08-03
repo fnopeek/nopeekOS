@@ -295,6 +295,54 @@ impl Len {
     }
 }
 
+/// One axis of `background-position` / `mask-position`.
+///
+/// A percentage aligns the same fraction of the image with that fraction of
+/// the positioning area (css-backgrounds-3 §3.6), so it cannot be resolved
+/// until the image's size is known — which is at paint time, since an image
+/// may arrive after layout.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum BgPos {
+    Px(f32),
+    /// Fraction 0..1: `offset = (area - image) * f`.
+    Pct(f32),
+}
+
+/// `background-size` / `mask-size`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum BgSize {
+    /// Intrinsic size (css-backgrounds-3 §3.9).
+    Auto,
+    Cover,
+    Contain,
+    /// Explicit per axis; `None` on an axis means `auto` (keep the aspect
+    /// ratio against the other axis). Percentages are of the positioning area.
+    Fixed(Option<Len>, Option<Len>),
+}
+
+/// A `background-image` or `mask-image` layer.
+///
+/// `image` is a `url_key` into the stylesheet's URL table, not the string:
+/// `ComputedStyle` is `Copy` and must stay that way (it is copied per element
+/// and memoised), so it cannot hold an allocation.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct BgLayer {
+    pub image: Option<u64>,
+    /// (repeat-x, repeat-y).
+    pub repeat: (bool, bool),
+    pub pos: (BgPos, BgPos),
+    pub size: BgSize,
+}
+
+impl BgLayer {
+    pub const NONE: BgLayer = BgLayer {
+        image: None,
+        repeat: (true, true),
+        pos: (BgPos::Pct(0.0), BgPos::Pct(0.0)),
+        size: BgSize::Auto,
+    };
+}
+
 /// CSS `position`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Position {
@@ -415,6 +463,13 @@ pub struct ComputedStyle {
     pub contain_size: bool, // `contain: size`/`strict` — content contributes no size
     pub contain_intrinsic: Option<(f32, f32)>, // `contain-intrinsic-size` (w, h) px
     pub bg: Option<Rgb>, // background-color (None = transparent)
+    /// `background-image` + its placement properties.
+    pub bg_layer: BgLayer,
+    /// `mask-image` + its placement. A mask does not paint the image: it
+    /// stencils the element's own `background-color` through the image's alpha
+    /// — which is how icon systems (MediaWiki's Vector, Codex) draw a
+    /// recolourable icon from one SVG.
+    pub mask_layer: BgLayer,
     pub border_top: BorderSide,
     pub border_right: BorderSide,
     pub border_bottom: BorderSide,
@@ -585,6 +640,8 @@ impl ComputedStyle {
             contain_size: false,
             contain_intrinsic: None,
             bg: None,
+            bg_layer: BgLayer::NONE,
+            mask_layer: BgLayer::NONE,
             border_top: BorderSide::default(),
             border_right: BorderSide::default(),
             border_bottom: BorderSide::default(),
@@ -783,6 +840,8 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         contain_size: false,
         contain_intrinsic: None,
         bg: None,
+        bg_layer: BgLayer::NONE,
+        mask_layer: BgLayer::NONE,
         border_top: BorderSide::default(),
         border_right: BorderSide::default(),
         border_bottom: BorderSide::default(),
@@ -1468,7 +1527,7 @@ fn split_important(v: &str) -> (&str, bool) {
 /// Apply the `style="…"` declarations whose importance matches `important`, so
 /// callers run the two cascade passes. css-syntax-3 syntax, unknown props skipped.
 fn apply_declarations_pass(decls: &str, theme: &Theme, s: &mut ComputedStyle, important: bool) {
-    for decl in decls.split(';') {
+    for decl in crate::css::split_decls(decls) {
         let mut it = decl.splitn(2, ':');
         let prop = match it.next() {
             Some(p) => p.trim().to_ascii_lowercase(),
@@ -1795,23 +1854,69 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         }
 
         // — background + border —
-        "background-color" | "background" => {
+        // `background-color` is a single property; `background` is a shorthand
+        // that resets every longhand it covers — including the image — and is
+        // applied as a unit or not at all.
+        "background-color" => {
             let vt = v.trim();
             if vt == "none" || vt == "transparent" {
                 s.bg = None;
             } else if let Some(c) = parse_color(vt, theme) {
-                // Whole value is a colour — handles space-separated function
-                // colours like `rgb(0% 50% 0%)` / `hsl(120 100% 25%)`.
+                // Handles space-separated function colours like
+                // `rgb(0% 50% 0%)` / `hsl(120 100% 25%)`.
                 s.bg = Some(c);
-            } else {
-                // `background` shorthand may carry more than a colour → take the
-                // first token that parses as one; gradients/images are ignored.
-                for tok in css_tokens(vt) {
-                    if let Some(c) = parse_color(tok, theme) {
-                        s.bg = Some(c);
-                        break;
-                    }
-                }
+            }
+        }
+        "background" => {
+            let vt = v.trim();
+            if let Some(c) = parse_color(vt, theme) {
+                // The whole value is one colour — the overwhelmingly common
+                // case, and the only one where a function colour's internal
+                // spaces must not be read as separate tokens.
+                s.bg = Some(c);
+                s.bg_layer = BgLayer::NONE;
+            } else if let Some((color, layer)) = parse_bg_shorthand(val, &v, u, theme) {
+                s.bg = color;
+                s.bg_layer = layer;
+            }
+        }
+        "background-image" => s.bg_layer.image = parse_bg_image(val),
+        "background-repeat" => {
+            if let Some(r) = parse_bg_repeat(&v) {
+                s.bg_layer.repeat = r;
+            }
+        }
+        "background-position" => {
+            if let Some(p) = parse_bg_pos(&v, u) {
+                s.bg_layer.pos = p;
+            }
+        }
+        "background-size" => {
+            if let Some(sz) = parse_bg_size(&v, u) {
+                s.bg_layer.size = sz;
+            }
+        }
+        // `mask` is still shipped prefixed by the icon systems that use it, and
+        // the two spellings are the same property to us.
+        "mask" | "-webkit-mask" => {
+            if let Some((_, layer)) = parse_bg_shorthand(val, &v, u, theme) {
+                s.mask_layer = layer;
+            }
+        }
+        "mask-image" | "-webkit-mask-image" => s.mask_layer.image = parse_bg_image(val),
+        "mask-repeat" | "-webkit-mask-repeat" => {
+            if let Some(r) = parse_bg_repeat(&v) {
+                s.mask_layer.repeat = r;
+            }
+        }
+        "mask-position" | "-webkit-mask-position" => {
+            if let Some(p) = parse_bg_pos(&v, u) {
+                s.mask_layer.pos = p;
+            }
+        }
+        "mask-size" | "-webkit-mask-size" => {
+            if let Some(sz) = parse_bg_size(&v, u) {
+                s.mask_layer.size = sz;
             }
         }
         "border" => {
@@ -2151,6 +2256,179 @@ fn parse_len_opt(v: &str, u: Units) -> Option<Len> {
 
 fn parse_len(v: &str, u: Units) -> Len {
     parse_len_opt(v, u).unwrap_or(Len::Auto)
+}
+
+// ── background-image / mask-image ───────────────────────────────────────────
+
+/// The first layer of a comma-separated `<bg-layer>` list. Splitting has to be
+/// paren-aware: a `data:` URI is full of commas.
+fn first_layer(v: &str) -> &str {
+    let b = v.as_bytes();
+    let (mut depth, mut quote) = (0i32, 0u8);
+    for i in 0..b.len() {
+        match b[i] {
+            q @ (b'"' | b'\'') if quote == 0 => quote = q,
+            q if q == quote => quote = 0,
+            b'(' if quote == 0 => depth += 1,
+            b')' if quote == 0 => depth = (depth - 1).max(0),
+            b',' if quote == 0 && depth == 0 => return v[..i].trim(),
+            _ => {}
+        }
+    }
+    v.trim()
+}
+
+/// `background-image`/`mask-image` → a URL key. Values we cannot paint
+/// (gradients, `none`, `element()`) leave the layer imageless.
+fn parse_bg_image(val: &str) -> Option<u64> {
+    crate::css::url_value(first_layer(val)).map(|u| crate::css::url_key(&u))
+}
+
+fn parse_bg_repeat(v: &str) -> Option<(bool, bool)> {
+    let t: Vec<&str> = css_tokens(v);
+    let one = |s: &str| match s {
+        "no-repeat" => Some(false),
+        "repeat" | "round" | "space" => Some(true),
+        _ => None,
+    };
+    match t.as_slice() {
+        ["repeat-x"] => Some((true, false)),
+        ["repeat-y"] => Some((false, true)),
+        [a] => one(a).map(|r| (r, r)),
+        [a, b] => Some((one(a)?, one(b)?)),
+        _ => None,
+    }
+}
+
+/// One `background-position` component: a keyword, a length or a percentage.
+/// `Some((axis, pos))` where `axis` is `Some(false)` for horizontal-only
+/// keywords, `Some(true)` for vertical-only, `None` when it fits either.
+fn parse_pos_component(v: &str, u: Units) -> Option<(Option<bool>, BgPos)> {
+    match v {
+        "left" => Some((Some(false), BgPos::Pct(0.0))),
+        "right" => Some((Some(false), BgPos::Pct(1.0))),
+        "top" => Some((Some(true), BgPos::Pct(0.0))),
+        "bottom" => Some((Some(true), BgPos::Pct(1.0))),
+        "center" => Some((None, BgPos::Pct(0.5))),
+        _ => match parse_len_opt(v, u)? {
+            Len::Pct(p) => Some((None, BgPos::Pct(p / 100.0))),
+            Len::Px(p) => Some((None, BgPos::Px(p))),
+            Len::Calc { pct, px } if pct == 0.0 => Some((None, BgPos::Px(px))),
+            _ => None,
+        },
+    }
+}
+
+/// `background-position` (css-backgrounds-3 §3.6), one- and two-value forms.
+/// A keyword binds to its own axis regardless of order, so `center right`
+/// means x=right, y=center.
+fn parse_bg_pos(v: &str, u: Units) -> Option<(BgPos, BgPos)> {
+    let t = css_tokens(v);
+    let (mut x, mut y) = (None, None);
+    match t.as_slice() {
+        [a] => {
+            let (axis, p) = parse_pos_component(a, u)?;
+            match axis {
+                Some(true) => y = Some(p),
+                _ => x = Some(p),
+            }
+        }
+        [a, b] => {
+            let (ax, pa) = parse_pos_component(a, u)?;
+            let (bx, pb) = parse_pos_component(b, u)?;
+            // Reject a pair that names the same axis twice (`left right`).
+            if ax == Some(true) || bx == Some(false) {
+                if ax == Some(false) || bx == Some(true) {
+                    return None;
+                }
+                y = Some(pa);
+                x = Some(pb);
+            } else {
+                x = Some(pa);
+                y = Some(pb);
+            }
+        }
+        _ => return None,
+    }
+    Some((x.unwrap_or(BgPos::Pct(0.5)), y.unwrap_or(BgPos::Pct(0.5))))
+}
+
+fn parse_bg_size(v: &str, u: Units) -> Option<BgSize> {
+    let t = css_tokens(v);
+    let axis = |s: &str| -> Option<Option<Len>> {
+        if s == "auto" {
+            return Some(None);
+        }
+        match parse_len_opt(s, u)? {
+            Len::Auto => Some(None),
+            l => Some(Some(l)),
+        }
+    };
+    match t.as_slice() {
+        ["cover"] => Some(BgSize::Cover),
+        ["contain"] => Some(BgSize::Contain),
+        ["auto"] => Some(BgSize::Auto),
+        [a] => Some(BgSize::Fixed(axis(a)?, None)),
+        [a, b] => Some(BgSize::Fixed(axis(a)?, axis(b)?)),
+        _ => None,
+    }
+}
+
+/// The `background`/`mask` shorthand, parsed as a unit: `(colour, layer)`.
+///
+/// `None` means the value is INVALID and the whole declaration must be dropped
+/// (css-syntax-3 §4) — `background: "red"` and `background:\0020red` are the
+/// reftests that insist on it. That distinction is the whole reason this
+/// returns a result instead of mutating: a shorthand resets every longhand it
+/// covers, so treating an unparseable value as "no colour named" would clear a
+/// perfectly good background instead of leaving it alone.
+fn parse_bg_shorthand(
+    val: &str,
+    v: &str,
+    u: Units,
+    theme: &Theme,
+) -> Option<(Option<Rgb>, BgLayer)> {
+    let mut layer = BgLayer::NONE;
+    let mut color = None;
+    layer.image = parse_bg_image(val);
+    // Position and size are written `<position> / <size>`; everything else is
+    // order-free. Collect the unclaimed tokens and split them on the slash.
+    // The slash need not be spaced (`center/contain`), so give it room first.
+    let spaced = first_layer(v).replace('/', " / ");
+    let mut parts: Vec<&str> = Vec::new();
+    for tok in css_tokens(&spaced) {
+        if let Some(r) = parse_bg_repeat(tok) {
+            layer.repeat = r;
+        } else if let Some(c) = parse_color(tok, theme) {
+            color = Some(c);
+        } else if tok == "transparent" {
+            color = None;
+        } else if matches!(
+            tok,
+            "scroll" | "fixed" | "local" | "border-box" | "padding-box" | "content-box" | "none"
+        ) || tok.starts_with("url(")
+            // A gradient is valid CSS we cannot paint. Accepting it keeps the
+            // reset (`background: <gradient>` HAS no colour) instead of
+            // dropping the declaration and leaving a stale one in place.
+            || tok.contains("-gradient(")
+        {
+            // attachment / origin / clip / the image — not the layer's placement
+        } else {
+            parts.push(tok);
+        }
+    }
+    let slash = parts.iter().position(|t| *t == "/");
+    let (pos_toks, size_toks) = match slash {
+        Some(i) => (&parts[..i], &parts[i + 1..]),
+        None => (&parts[..], &parts[parts.len()..]),
+    };
+    if !pos_toks.is_empty() {
+        layer.pos = parse_bg_pos(&pos_toks.join(" "), u)?;
+    }
+    if !size_toks.is_empty() {
+        layer.size = parse_bg_size(&size_toks.join(" "), u)?;
+    }
+    Some((color, layer))
 }
 
 /// `width`/`height`/`min`/`max` reject negative used lengths as invalid.
@@ -2867,5 +3145,95 @@ mod tests {
             let st = resolve(e, &root, &theme, &Stylesheet::empty(), &[], &[], 0, 1000.0);
             assert_eq!(st.display, Display::None, "{tag}");
         }
+    }
+
+    /// The value arrives at `apply_one` lowercased for keyword matching — a
+    /// `data:` URI must NOT be taken from that copy, or its base64 payload is
+    /// silently corrupted.
+    #[test]
+    fn data_uri_keeps_its_case() {
+        let theme = Theme::DARK;
+        let mut st = ComputedStyle::root(&theme);
+        let uri = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==";
+        apply_one("background-image", &alloc::format!("url({uri})"), &theme, &mut st);
+        assert_eq!(st.bg_layer.image, Some(crate::css::url_key(uri)));
+        assert_ne!(
+            st.bg_layer.image,
+            Some(crate::css::url_key(&uri.to_ascii_lowercase())),
+            "the key must be over the original bytes"
+        );
+    }
+
+    /// A `data:` URI is full of commas; the layer split must not cut it.
+    #[test]
+    fn data_uri_survives_the_layer_split() {
+        let theme = Theme::DARK;
+        let mut st = ComputedStyle::root(&theme);
+        let uri = "data:image/svg+xml,%3Csvg viewBox='0,0,4,4'%3E%3C/svg%3E";
+        apply_one("mask-image", &alloc::format!("url(\"{uri}\")"), &theme, &mut st);
+        assert_eq!(st.mask_layer.image, Some(crate::css::url_key(uri)));
+    }
+
+    #[test]
+    fn background_shorthand_resets_the_image_but_background_color_does_not() {
+        let theme = Theme::DARK;
+        let mut st = ComputedStyle::root(&theme);
+        apply_one("background-image", "url(a.png)", &theme, &mut st);
+        apply_one("background-color", "red", &theme, &mut st);
+        assert!(st.bg_layer.image.is_some(), "background-color is not a shorthand");
+        apply_one("background", "red", &theme, &mut st);
+        assert_eq!(st.bg_layer.image, None, "the shorthand resets every longhand it covers");
+    }
+
+    /// A keyword binds to its own axis whatever the order — `center right`
+    /// means x=right, y=center (css-backgrounds-3 §3.6).
+    #[test]
+    fn background_position_keywords_bind_per_axis() {
+        let theme = Theme::DARK;
+        let mut st = ComputedStyle::root(&theme);
+        apply_one("background-position", "center right", &theme, &mut st);
+        assert_eq!(st.bg_layer.pos, (BgPos::Pct(1.0), BgPos::Pct(0.5)));
+        apply_one("background-position", "bottom", &theme, &mut st);
+        assert_eq!(st.bg_layer.pos, (BgPos::Pct(0.5), BgPos::Pct(1.0)));
+        // Two horizontal keywords are not a position at all → declaration dropped.
+        let before = st.bg_layer.pos;
+        apply_one("background-position", "left right", &theme, &mut st);
+        assert_eq!(st.bg_layer.pos, before);
+    }
+
+    #[test]
+    fn background_size_and_repeat() {
+        let theme = Theme::DARK;
+        let mut st = ComputedStyle::root(&theme);
+        apply_one("background-size", "0.857em", &theme, &mut st);
+        let em = st.font_px * 0.857;
+        assert_eq!(st.bg_layer.size, BgSize::Fixed(Some(Len::Px(em)), None));
+        apply_one("background-repeat", "no-repeat", &theme, &mut st);
+        assert_eq!(st.bg_layer.repeat, (false, false));
+        apply_one("background-repeat", "repeat-x", &theme, &mut st);
+        assert_eq!(st.bg_layer.repeat, (true, false));
+    }
+
+    /// The form the icon systems ship: one shorthand carrying url, position,
+    /// size and repeat, with an unspaced slash.
+    #[test]
+    fn mask_shorthand_carries_position_and_size() {
+        let theme = Theme::DARK;
+        let mut st = ComputedStyle::root(&theme);
+        apply_one("-webkit-mask", "url(i.svg) center/contain no-repeat", &theme, &mut st);
+        assert_eq!(st.mask_layer.image, Some(crate::css::url_key("i.svg")));
+        assert_eq!(st.mask_layer.pos, (BgPos::Pct(0.5), BgPos::Pct(0.5)));
+        assert_eq!(st.mask_layer.size, BgSize::Contain);
+        assert_eq!(st.mask_layer.repeat, (false, false));
+    }
+
+    /// We cannot paint a gradient, and pretending we can would be worse than
+    /// leaving the box flat.
+    #[test]
+    fn gradient_leaves_the_layer_imageless() {
+        let theme = Theme::DARK;
+        let mut st = ComputedStyle::root(&theme);
+        apply_one("background-image", "linear-gradient(red, blue)", &theme, &mut st);
+        assert_eq!(st.bg_layer.image, None);
     }
 }

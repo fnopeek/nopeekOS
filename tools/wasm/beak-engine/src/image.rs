@@ -37,6 +37,79 @@ fn zeroed(n: usize) -> Option<Vec<u8>> {
     Some(v)
 }
 
+/// The payload bytes of a `data:` URI (RFC 2397), base64 or percent-encoded.
+///
+/// CSS icon systems inline their SVGs this way, so these need no fetch at all —
+/// the bytes are already in the stylesheet.
+pub fn decode_data_uri(uri: &str) -> Option<Vec<u8>> {
+    let rest = uri.strip_prefix("data:").or_else(|| uri.strip_prefix("DATA:"))?;
+    let comma = rest.find(',')?;
+    let (meta, payload) = (&rest[..comma], &rest[comma + 1..]);
+    if meta.trim_end().to_ascii_lowercase().ends_with("base64") {
+        return base64_decode(payload);
+    }
+    // Percent-decoding. `+` is NOT a space here (that is form encoding, not
+    // RFC 2397) — treating it as one corrupts SVG path data.
+    let b = payload.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let hex = |c: u8| -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        }
+    };
+    let mut i = 0;
+    while i < b.len() {
+        match (b[i], b.get(i + 1).copied().and_then(hex), b.get(i + 2).copied().and_then(hex)) {
+            (b'%', Some(h), Some(l)) => {
+                out.push(h << 4 | l);
+                i += 3;
+            }
+            (c, _, _) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    Some(out)
+}
+
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    let val = |c: u8| -> Option<u32> {
+        Some(match c {
+            b'A'..=b'Z' => (c - b'A') as u32,
+            b'a'..=b'z' => (c - b'a') as u32 + 26,
+            b'0'..=b'9' => (c - b'0') as u32 + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        })
+    };
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for &c in s.as_bytes() {
+        if c == b'=' {
+            break;
+        }
+        let Some(v) = val(c) else {
+            // Whitespace inside base64 is legal and common (wrapped lines).
+            if c.is_ascii_whitespace() {
+                continue;
+            }
+            return None;
+        };
+        acc = acc << 6 | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
 /// Decode image bytes. Returns `None` for unsupported formats / malformed data
 /// / oversize images (→ placeholder).
 pub fn decode(bytes: &[u8]) -> Option<Image> {
@@ -331,6 +404,12 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
 /// Total decoded-pixel budget across a page — once exceeded, further images
 /// stay placeholders so an image-heavy page can't exhaust the shell heap.
 pub(crate) const TOTAL_BUDGET: usize = 24 * 1024 * 1024; // bytes of BGRA
+
+/// Decoded-BGRA budget for CSS images. Smaller than the `<img>` one on
+/// purpose: these are icons and tiles, and a page's whole icon set is a few
+/// hundred KB — a `background-image` big enough to blow this is a page doing
+/// something we would rather drop than pay for.
+pub(crate) const CSS_BUDGET: usize = 8 * 1024 * 1024;
 
 /// Decode a batch of (src, bytes) into an `ImageMap` (failures / over-budget →
 /// skipped, they render as placeholders).

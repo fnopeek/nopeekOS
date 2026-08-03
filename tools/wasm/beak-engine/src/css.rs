@@ -16,6 +16,7 @@
 //! External `<link>` stylesheets need a sub-resource fetch → later; the parser
 //! + cascade here are exactly what that will reuse.
 
+use alloc::borrow::Cow;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -344,6 +345,102 @@ pub struct Stylesheet {
     /// generated box). Sharing one index made each pass walk the other
     /// two passes' candidates only to reject them.
     pseudo: Index,
+    /// Every `url(…)` appearing anywhere in the sheet, keyed by `url_key`.
+    ///
+    /// `ComputedStyle` is `Copy`, so it cannot carry the URL itself — it
+    /// stores the key and looks the string up here. Collecting them from the
+    /// source text rather than threading an interner through the cascade
+    /// keeps `apply_one` a pure function: a URL that wins the cascade is by
+    /// definition present in the text it was parsed from.
+    urls: BTreeMap<u64, String>,
+}
+
+/// Stable 64-bit key for a `url()` value (FNV-1a). Case-sensitive on purpose:
+/// a `data:` payload's base64 is case-significant.
+pub fn url_key(url: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in url.as_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// The next `url(…)` in `text` at or after `from`, as `(url, index after it)`.
+///
+/// One scanner for both callers, because the ways to get this wrong are the
+/// same in each: a QUOTED url may legally contain `)`, a url is rarely the
+/// whole value (`background: red url(x) no-repeat`), and a quoted one may
+/// carry BACKSLASH-ESCAPED quotes — which is exactly how an inline SVG
+/// `data:` URI is written (`url("data:image/svg+xml,<svg xmlns=\"…\">")`).
+/// Stopping at the first inner quote truncates the payload into something that
+/// still looks like a URL and silently decodes to nothing.
+fn url_at(text: &str, from: usize) -> Option<(Cow<'_, str>, usize)> {
+    let p = text[from..].find("url(")? + from;
+    let open = p + 4;
+    let b = text.as_bytes();
+    let (start, end, after) = match b.get(open) {
+        Some(&q) if q == b'"' || q == b'\'' => {
+            let s = open + 1;
+            let mut i = s;
+            while i < b.len() && b[i] != q {
+                i += if b[i] == b'\\' { 2 } else { 1 };
+            }
+            let e = i.min(b.len());
+            (s, e, (e + 1).min(text.len()))
+        }
+        _ => {
+            let e = text[open..].find(')').map(|e| open + e).unwrap_or(text.len());
+            (open, e, (e + 1).min(text.len()))
+        }
+    };
+    Some((unescape(text.get(start..end)?.trim()), after.max(open)))
+}
+
+/// Undo CSS string escaping (`\"` → `"`). Hex escapes (`\41`) are left alone:
+/// they do not occur in the URLs real pages ship, and guessing at one would
+/// corrupt more than it fixes.
+fn unescape(s: &str) -> Cow<'_, str> {
+    if !s.contains('\\') {
+        return Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        match c {
+            '\\' => match it.next() {
+                Some(n) if n.is_ascii_hexdigit() => {
+                    out.push('\\');
+                    out.push(n);
+                }
+                Some(n) => out.push(n),
+                None => {}
+            },
+            _ => out.push(c),
+        }
+    }
+    Cow::Owned(out)
+}
+
+/// The first `url(…)` in a declaration value, unquoted and unescaped.
+pub fn url_value(v: &str) -> Option<Cow<'_, str>> {
+    let (u, _) = url_at(v, 0)?;
+    (!u.is_empty()).then_some(u)
+}
+
+/// Record every `url(…)` in a block of CSS text into `out`.
+///
+/// Runs over the raw text, not the parsed rules, because `url()` can appear in
+/// any property (`background-image`, `mask-image`, `list-style-image`, …) and
+/// we want the table complete before the cascade picks a winner.
+fn collect_urls(css: &str, out: &mut BTreeMap<u64, String>) {
+    let mut i = 0usize;
+    while let Some((u, next)) = url_at(css, i) {
+        if !u.is_empty() {
+            out.entry(url_key(&u)).or_insert_with(|| u.into_owned());
+        }
+        i = next;
+    }
 }
 
 /// Candidate `(rule, selector)` pairs bucketed by the most selective simple
@@ -395,7 +492,23 @@ impl Index {
 
 impl Stylesheet {
     pub fn empty() -> Stylesheet {
-        Stylesheet { rules: Vec::new(), normal: Index::default(), pseudo: Index::default() }
+        Stylesheet {
+            rules: Vec::new(),
+            normal: Index::default(),
+            pseudo: Index::default(),
+            urls: BTreeMap::new(),
+        }
+    }
+
+    /// The `url()` string behind a key held by a `ComputedStyle`.
+    pub fn url(&self, key: u64) -> Option<&str> {
+        self.urls.get(&key).map(|s| s.as_str())
+    }
+
+    /// Record `url()`s from text outside the sheet itself (inline `style`
+    /// attributes), so the cascade can resolve a key that came from there.
+    pub fn add_urls(&mut self, text: &str) {
+        collect_urls(text, &mut self.urls);
     }
 
     /// Build the selector index. Called once after parsing.
@@ -510,7 +623,9 @@ pub fn collect_all(dom: &Dom, external: &str, viewport_w: f32) -> Stylesheet {
     css.push('\n');
     gather_style_text(&dom.root, &mut css);
     if css.trim().is_empty() {
-        return Stylesheet::empty();
+        let mut sheet = Stylesheet::empty();
+        gather_inline_urls(&dom.root, &mut sheet);
+        return sheet;
     }
     // Expand CSS custom properties (`var(--x)`) as a pre-pass so the parser +
     // cascade never see variables — modern sites (Bootstrap's `--bs-*`) lean
@@ -522,7 +637,25 @@ pub fn collect_all(dom: &Dom, external: &str, viewport_w: f32) -> Stylesheet {
     let root_class_attr = root.attr("class").unwrap_or("");
     let root_classes: Vec<&str> = root_class_attr.split_whitespace().collect();
     let css = crate::vars::resolve_vars(&css, viewport_w, &root_classes);
-    parse(&css)
+    let mut sheet = parse(&css);
+    // An inline `style="background-image:url(…)"` never passes through the
+    // sheet text, so its URL would have no entry to resolve against.
+    gather_inline_urls(&dom.root, &mut sheet);
+    sheet
+}
+
+/// Add every `url()` found in an inline `style` attribute to the sheet's table.
+fn gather_inline_urls(el: &Element, sheet: &mut Stylesheet) {
+    if let Some(s) = el.attr("style") {
+        if s.contains("url(") {
+            sheet.add_urls(s);
+        }
+    }
+    for c in &el.children {
+        if let Node::Element(e) = c {
+            gather_inline_urls(e, sheet);
+        }
+    }
 }
 
 /// Hrefs of every `<link rel="stylesheet">` in the document, for the shell to
@@ -588,7 +721,9 @@ pub fn parse(css: &str) -> Stylesheet {
     let mut rules = Vec::new();
     let mut order = 0u32;
     parse_into(&css, 0, css.len(), None, &mut rules, &mut order);
-    let mut sheet = Stylesheet { rules, normal: Index::default(), pseudo: Index::default() };
+    let mut urls = BTreeMap::new();
+    collect_urls(&css, &mut urls);
+    let mut sheet = Stylesheet { rules, normal: Index::default(), pseudo: Index::default(), urls };
     sheet.build_index();
     sheet
 }
@@ -1289,9 +1424,39 @@ fn specificity(compounds: &[Compound]) -> u32 {
     (a << 20) | (b << 10) | c
 }
 
+/// Split a declaration block on its top-level `;`.
+///
+/// NOT `str::split(';')`: a semicolon inside a string or a `url()` belongs to
+/// the value. `url("data:image/svg+xml;utf8,<svg …>")` is the form icon
+/// systems ship, and cutting it at `;utf8` leaves a declaration that still
+/// parses — it just points at nothing.
+pub fn split_decls(body: &str) -> Vec<&str> {
+    let b = body.as_bytes();
+    let (mut out, mut start) = (Vec::new(), 0usize);
+    let (mut depth, mut quote) = (0i32, 0u8);
+    let mut i = 0usize;
+    while i < b.len() {
+        match b[i] {
+            b'\\' if quote != 0 => i += 1, // escaped char inside a string
+            q @ (b'"' | b'\'') if quote == 0 => quote = q,
+            q if quote != 0 && q == quote => quote = 0,
+            b'(' if quote == 0 => depth += 1,
+            b')' if quote == 0 => depth = (depth - 1).max(0),
+            b';' if quote == 0 && depth == 0 => {
+                out.push(&body[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out.push(&body[start.min(body.len())..]);
+    out
+}
+
 fn parse_decls(body: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    for decl in body.split(';') {
+    for decl in split_decls(body) {
         let mut it = decl.splitn(2, ':');
         let (p, v) = match (it.next(), it.next()) {
             (Some(p), Some(v)) => (p.trim(), v.trim()),

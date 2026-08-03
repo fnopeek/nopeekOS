@@ -26,9 +26,9 @@ use crate::dom::{Dom, Element, Node};
 use crate::forms::{ControlKind, FormState};
 use crate::image::ImageMap;
 use crate::style::{
-    self, BorderSide, ClearKind, Clip, ComputedStyle, ContentPiece, CrossAlign, Display, FlexBasis,
-    FloatKind, GridTrack, Justify, Len, ListStyle, Position, TableLayout, TextAlign, TextTransform,
-    ZIndex, BASE_FONT_PX,
+    self, BgPos, BgSize, BorderSide, ClearKind, Clip, ComputedStyle, ContentPiece, CrossAlign,
+    Display, FlexBasis, FloatKind, GridTrack, Justify, Len, ListStyle, Position, TableLayout,
+    TextAlign, TextTransform, ZIndex, BASE_FONT_PX,
 };
 
 /// An active float's exclusion rectangle (document space) within a block
@@ -256,7 +256,8 @@ fn translate_ops(ops: &mut [DrawOp], dy: i32) {
             DrawOp::Rect { y, .. }
             | DrawOp::RoundRect { y, .. }
             | DrawOp::Text { y, .. }
-            | DrawOp::Image { y, .. } => *y += dy,
+            | DrawOp::Image { y, .. }
+            | DrawOp::BgImage { y, .. } => *y += dy,
         }
     }
 }
@@ -269,7 +270,8 @@ fn translate_op_list(ops: &mut [DrawOp], dx: i32, dy: i32) {
             DrawOp::Rect { x, y, .. }
             | DrawOp::RoundRect { x, y, .. }
             | DrawOp::Text { x, y, .. }
-            | DrawOp::Image { x, y, .. } => {
+            | DrawOp::Image { x, y, .. }
+            | DrawOp::BgImage { x, y, .. } => {
                 *x += dx;
                 *y += dy;
             }
@@ -311,7 +313,11 @@ fn clip_ops(ops: &mut Vec<DrawOp>, start: usize, cl: i32, ct: i32, cr: i32, cb: 
                     }
                 }
             }
-            DrawOp::Image { x, y, w, h, .. } => {
+            // Kept whole when it overlaps, like `Image`: the layer's origin
+            // is its box, so shrinking the rect would MOVE the background
+            // rather than crop it. Over-paints only when a clip cuts through a
+            // box that has one.
+            DrawOp::Image { x, y, w, h, .. } | DrawOp::BgImage { x, y, w, h, .. } => {
                 if x < cr && x + w > cl && y < cb && y + h > ct {
                     ops.push(op);
                 }
@@ -413,6 +419,24 @@ pub enum DrawOp {
     /// instead of a full re-layout — which on a real article is the
     /// difference between ~15 ms and ~145 ms, per image batch.
     Image { x: i32, y: i32, w: i32, h: i32, src: String, alt: String },
+    /// A `background-image` or `mask-image` layer over the box `x,y,w,h` (the
+    /// background positioning area). Carries the `url_key`, not the pixels —
+    /// same reason as `Image`: an asset arriving late costs a repaint, never a
+    /// re-layout, because a background never affects geometry.
+    ///
+    /// `tint: Some(c)` is the mask case — the image's alpha stencils colour
+    /// `c` instead of its own pixels being drawn.
+    BgImage {
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        key: u64,
+        repeat: (bool, bool),
+        pos: (BgPos, BgPos),
+        size: BgSize,
+        tint: Option<Rgb>,
+    },
 }
 
 /// `border-radius` resolved to px against the border-box width. Percentages
@@ -497,6 +521,15 @@ pub struct Layout {
     /// between ~15 ms and ~145 ms — and under the device's WASM interpreter,
     /// between a page that scrolls while it loads and one that freezes.
     pub guessed_image_srcs: Vec<String>,
+    /// `url_key`s of the CSS images (`background-image`/`mask-image`) this
+    /// layout actually needs — i.e. the ones that won the cascade on a box we
+    /// painted, not every `url()` in the stylesheet. The engine turns these
+    /// back into URLs (via the sheet's table) for the shell to fetch.
+    pub css_image_keys: Vec<u64>,
+    /// The subset of `css_image_keys` the shell still has to fetch, as
+    /// (key, URL) — `data:` URIs are resolved by the engine itself and never
+    /// appear here. Filled in by `Engine::layout_ext`, which holds the sheet.
+    pub css_image_srcs: Vec<(u64, String)>,
     /// Element boxes for the inspect dev tool (empty unless inspection was on).
     pub inspect: Vec<InspectBox>,
 }
@@ -713,6 +746,12 @@ struct Ctx<'a> {
     /// a full re-layout even when all of ITS images had definite boxes. On a
     /// real article that was 5.7 s of frozen UI per batch.
     guessed: core::cell::RefCell<Vec<String>>,
+    /// `url_key`s of the CSS images this layout referenced. Deliberately a
+    /// SET (deduped on insert), not an append-only log: a throwaway
+    /// measurement layout paints boxes too, and its entries must be
+    /// indistinguishable from the real pass's rather than something the
+    /// measure helpers have to remember to roll back.
+    css_images: core::cell::RefCell<Vec<u64>>,
     ops: Vec<DrawOp>,
     links: Vec<LinkRect>,
     controls: Vec<ControlRect>,
@@ -1035,6 +1074,7 @@ pub fn layout(
         sheet,
         images,
         guessed: core::cell::RefCell::new(Vec::new()),
+        css_images: core::cell::RefCell::new(Vec::new()),
         ops: Vec::new(),
         links: Vec::new(),
         controls: Vec::new(),
@@ -1113,6 +1153,8 @@ pub fn layout(
         height: y.max(1) as u32,
         bg: canvas_bg,
         guessed_image_srcs: ctx.guessed.into_inner(),
+        css_image_keys: ctx.css_images.into_inner(),
+        css_image_srcs: Vec::new(),
         inspect: ctx.inspects,
     }
 }
@@ -2122,15 +2164,55 @@ impl Ctx<'_> {
         if w <= 0 || h <= 0 || st.hidden || st.transparent {
             return;
         }
-        let Some(bg) = st.bg else { return };
-        let r = radii_px(st, w);
-        let op = if r.iter().any(|&v| v > 0.0) {
-            DrawOp::RoundRect { x, y, w, h, r, color: bg, ring: 0.0 }
-        } else {
-            DrawOp::Rect { x, y, w, h, color: bg }
-        };
-        self.ops.insert(bg_idx, op);
-        // `insert` shifts every later op up by one slot — any already-recorded
+        // The background layer of one box, bottom-up: colour, then image. A
+        // mask replaces the colour fill with a stencilled one, so the two are
+        // mutually exclusive.
+        let mut layer: Vec<DrawOp> = Vec::new();
+        let masked = self.bg_key(st.mask_layer.image);
+        match (st.bg, masked) {
+            (Some(bg), Some(key)) => layer.push(DrawOp::BgImage {
+                x,
+                y,
+                w,
+                h,
+                key,
+                repeat: st.mask_layer.repeat,
+                pos: st.mask_layer.pos,
+                size: st.mask_layer.size,
+                tint: Some(bg),
+            }),
+            (Some(bg), None) => {
+                let r = radii_px(st, w);
+                layer.push(if r.iter().any(|&v| v > 0.0) {
+                    DrawOp::RoundRect { x, y, w, h, r, color: bg, ring: 0.0 }
+                } else {
+                    DrawOp::Rect { x, y, w, h, color: bg }
+                });
+            }
+            // A mask with no colour to stencil paints nothing at all.
+            (None, _) => {}
+        }
+        if let Some(key) = self.bg_key(st.bg_layer.image) {
+            layer.push(DrawOp::BgImage {
+                x,
+                y,
+                w,
+                h,
+                key,
+                repeat: st.bg_layer.repeat,
+                pos: st.bg_layer.pos,
+                size: st.bg_layer.size,
+                tint: None,
+            });
+        }
+        if layer.is_empty() {
+            return;
+        }
+        let n = layer.len();
+        for (i, op) in layer.into_iter().enumerate() {
+            self.ops.insert(bg_idx + i, op);
+        }
+        // `insert` shifts every later op up by `n` slots — any already-recorded
         // stacking range overlapping or after `bg_idx` (a descendant's tracked
         // z-index range, recorded before this, its ancestor's own background
         // gets painted in) must shift too. Half-open `[s, e)`: a range that
@@ -2139,20 +2221,30 @@ impl Ctx<'_> {
         // range, not inside it).
         for (_, _, s, e) in &mut self.stack_ops {
             if *s >= bg_idx {
-                *s += 1;
+                *s += n;
             }
             if *e > bg_idx {
-                *e += 1;
+                *e += n;
             }
         }
         for (s, e) in &mut self.float_ops {
             if *s >= bg_idx {
-                *s += 1;
+                *s += n;
             }
             if *e > bg_idx {
-                *e += 1;
+                *e += n;
             }
         }
+    }
+
+    /// Note that this layout needs a CSS image, and hand back its key.
+    fn bg_key(&self, image: Option<u64>) -> Option<u64> {
+        let key = image?;
+        let mut used = self.css_images.borrow_mut();
+        if !used.contains(&key) {
+            used.push(key);
+        }
+        Some(key)
     }
 
     /// Paint one border edge rect (the collapsed model draws grid lines
@@ -4117,7 +4209,8 @@ impl Ctx<'_> {
                 DrawOp::Text { x, y, .. }
                 | DrawOp::Rect { x, y, .. }
                 | DrawOp::RoundRect { x, y, .. }
-                | DrawOp::Image { x, y, .. } => {
+                | DrawOp::Image { x, y, .. }
+                | DrawOp::BgImage { x, y, .. } => {
                     *x += dx;
                     *y += dy;
                 }
