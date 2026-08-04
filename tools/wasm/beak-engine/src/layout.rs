@@ -1724,6 +1724,84 @@ impl Ctx<'_> {
         Some((self.render_content(owner, &template), ps))
     }
 
+    /// Place an out-of-flow `::before`/`::after` now that its originating box's
+    /// geometry is known. Its containing block is that box's PADDING box, so
+    /// this can only run once the box is finished — which is why it hangs off
+    /// the end of the block and flex paths rather than the child walk. Only for
+    /// a POSITIONED owner: for a static one the containing block is some
+    /// ancestor, and this box is not it.
+    ///
+    /// This is how a page underlines its active tab —
+    /// `a::after { position: absolute; bottom: 0; left: 0; width: 100%;
+    /// height: 2px }` — and how MediaWiki hangs the magnify icon off a thumb.
+    fn place_abs_pseudos(&mut self, el: &Element, st: &ComputedStyle, bx: i32, by: i32, bw: i32, bh: i32) {
+        if st.position == Position::Static {
+            return;
+        }
+        let (px, py, pw, ph) = (
+            bx + st.border_left.width as i32,
+            by + st.border_top.width as i32,
+            (bw - st.border_x() as i32).max(0),
+            (bh - st.border_y() as i32).max(0),
+        );
+        for kind in [PseudoElem::Before, PseudoElem::After] {
+            let Some((text, ps)) = self.pseudo_content(el, st, kind) else { continue };
+            if !ps.is_generated_box()
+                || !matches!(ps.position, Position::Absolute | Position::Fixed)
+                || ps.hidden
+                || ps.transparent
+            {
+                continue;
+            }
+            let (aw, ah) = (pw as f32, ph as f32);
+            let frame_x = ps.pad_left + ps.pad_right + ps.border_x();
+            let frame_y = ps.pad_top + ps.pad_bottom + ps.border_y();
+            let font = self.fonts.pick(ps.bold, ps.italic, ps.mono);
+            let cw = match ps.width.px(aw) {
+                Some(v) if v >= 0.0 => v,
+                _ => measure(font, text.trim(), ps.font_px),
+            };
+            let ch = match vert_len(ps.height, Some(ph)) {
+                Some(v) if v >= 0.0 => v,
+                _ if text.trim().is_empty() => 0.0,
+                _ => line_gap(font, ps.font_px),
+            };
+            let (w, h) = ((cw + frame_x).max(0.0) as i32, (ch + frame_y).max(0.0) as i32);
+            if w <= 0 || h <= 0 {
+                continue;
+            }
+            // `left` wins over `right`; with neither the box sits at the
+            // containing block's start edge (§10.3.7 with a static position we
+            // do not track for generated content).
+            let x = match (ps.left.px(aw), ps.right.px(aw)) {
+                (Some(l), _) => px + l as i32,
+                (None, Some(r)) => px + pw - w - r as i32,
+                _ => px,
+            };
+            let y = match (vert_len(ps.top, Some(ph)), vert_len(ps.bottom, Some(ph))) {
+                (Some(t), _) => py + t as i32,
+                (None, Some(b)) => py + ph - h - b as i32,
+                _ => py,
+            };
+            let mut ops: Vec<DrawOp> = Vec::new();
+            bg_ops(&ps, self.bg_key(ps.bg_layer.image), self.bg_key(ps.mask_layer.image), x, y, w, h, &mut ops);
+            border_ops(&ps, x, y, w, h, (true, true), &mut ops);
+            if !text.trim().is_empty() {
+                ops.push(DrawOp::Text {
+                    x: x + (ps.border_left.width + ps.pad_left) as i32,
+                    y: y + (ps.border_top.width + ps.pad_top) as i32,
+                    size: ps.font_px,
+                    color: ps.color,
+                    bold: ps.bold,
+                    italic: ps.italic,
+                    mono: ps.mono,
+                    text: text.trim().into(),
+                });
+            }
+            self.ops.append(&mut ops);
+        }
+    }
+
     /// The finished rectangle of a `::before`/`::after` that carries a box of
     /// its own — the CSS-icon idiom, `content: ""` plus a size plus a
     /// `background-image`. Every layout path can place one of these: an inline
@@ -3557,6 +3635,7 @@ impl Ctx<'_> {
 
         let y = content_top + ch + st.pad_bottom as i32 + st.border_bottom.width as i32;
         self.paint_box_decoration(st, box_left, y0, box_w, y - y0, bg_idx);
+        self.place_abs_pseudos(el, st, box_left, y0, box_w, y - y0);
         y
     }
 
@@ -4110,6 +4189,7 @@ impl Ctx<'_> {
 
         let y = content_top + ch + st.pad_bottom as i32 + st.border_bottom.width as i32;
         self.paint_box_decoration(st, box_left, y0, box_w, y - y0, bg_idx);
+        self.place_abs_pseudos(el, st, box_left, y0, box_w, y - y0);
         y
     }
 
