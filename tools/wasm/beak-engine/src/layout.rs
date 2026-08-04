@@ -2198,6 +2198,13 @@ impl Ctx<'_> {
             (None, Some(l), Some(r)) => (avail - l - r).max(0.0),
             _ => self.intrinsic_width(el, st).0.min(avail), // shrink-to-fit
         };
+        // `min-width`/`max-width` apply to an out-of-flow box like any other
+        // (CSS2.1 §10.4) — the height path already went through them, the width
+        // did not. A shrink-to-fit box with no content is the case that shows
+        // it: MediaWiki's search magnifier is an empty absolutely positioned
+        // span sized only by `min-width`, and without the clamp it came out
+        // ONE pixel wide.
+        let width = clamp_len(width, st.min_width, st.max_width, st.box_border, st.pad_left + st.pad_right + st.border_x());
         // Horizontal: an offset pins to the CB edge; with both `left`/`right`
         // auto the box keeps its **static position** (CSS2.1 §10.3.7).
         let px = if let Some(l) = left {

@@ -716,6 +716,25 @@ menu to pick from.
     Still open here: `display: contents` on a generated element (we have no
     such display at all) and the trailing flex box.
 
+25. ✅ **`min-width` on an out-of-flow box, and SVG gradient fills (0.3.9).**
+    WPT-neutral again — zero status changes — both from looking at the render.
+
+    - **`layout_abs` never clamped its width.** The height went through
+      `min-height`/`max-height`, the width did not, though CSS2.1 §10.4 applies
+      to out-of-flow boxes like any other. It shows on a shrink-to-fit box with
+      no content: MediaWiki's search magnifier is an empty absolutely
+      positioned `<span>` sized only by `min-width`, and it came out **one
+      pixel** wide.
+    - **`fill="url(#gradient)"` fell back to BLACK.** `parse_color` does not
+      know `url()`, so the fill kept the inherited default — every SVG built on
+      gradients rendered as a black blob, which is what Wikipedia's globe was.
+      Gradients are now scanned out of the raw document (the parser skips
+      `<defs>`) and painted as **one flat colour: the mean of their stops.**
+      That is a stand-in, not an implementation — a real gradient needs
+      per-pixel interpolation in the rasteriser — but the mean is never
+      catastrophically wrong, and at icon size the difference is small. The
+      globe reads correctly now.
+
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the
 cursor), `user-select`/`touch-action`/`overflow-anchor`/`scroll-margin`

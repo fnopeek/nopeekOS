@@ -79,7 +79,8 @@ pub fn render(bytes: &[u8]) -> Option<Image> {
         stroke_opacity: 1.0,
         cap: Cap::Butt,
     };
-    walk(&root, &root_mat, &base, &mut fills);
+    let grads = gradient_colors(text);
+    walk(&root, &root_mat, &base, &mut fills, &grads);
     if fills.is_empty() {
         // Nothing drawable — still return a transparent box so the <img> box
         // is sized (better than a placeholder for an empty/def-only SVG).
@@ -175,19 +176,19 @@ struct Fill {
     evenodd: bool,
 }
 
-fn walk(el: &XmlEl, ctm: &Mat, parent: &Paint, out: &mut Vec<Fill>) {
+fn walk(el: &XmlEl, ctm: &Mat, parent: &Paint, out: &mut Vec<Fill>, grads: &[(String, Rgb)]) {
     let ctm = match attr(el, "transform") {
         Some(t) => ctm.mul(&parse_transform(&t)),
         None => *ctm,
     };
-    let paint = resolve_paint(el, parent);
+    let paint = resolve_paint(el, parent, grads);
 
     let tag = local_name(&el.tag);
     match tag {
         "svg" | "g" | "a" | "switch" | "symbol" => {
             for ch in &el.children {
                 if let XmlNode::El(c) = ch {
-                    walk(c, &ctm, &paint, out);
+                    walk(c, &ctm, &paint, out, grads);
                 }
             }
         }
@@ -221,7 +222,88 @@ fn walk(el: &XmlEl, ctm: &Mat, parent: &Paint, out: &mut Vec<Fill>) {
     }
 }
 
-fn resolve_paint(el: &XmlEl, parent: &Paint) -> Paint {
+/// Average colour of every gradient in the document, by id.
+///
+/// v1 paints a gradient as ONE flat colour: the mean of its stops. A real
+/// gradient needs per-pixel interpolation in the rasteriser; the flat stand-in
+/// is what turns Wikipedia's logo from a black disc into a light sphere, and at
+/// icon size the difference from the real thing is small. Scanned off the raw
+/// text rather than the parsed tree because `<defs>` is skipped there.
+fn gradient_colors(text: &str) -> Vec<(String, Rgb)> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("Gradient") {
+        // `<linearGradient` / `<radialGradient` — anything else is not one.
+        let head = &rest[..i];
+        if !(head.ends_with("<linear") || head.ends_with("<radial")) {
+            rest = &rest[i + 8..];
+            continue;
+        }
+        let body = &rest[i..];
+        let Some(end) = body.find("Gradient>") else { break };
+        let block = &body[..end];
+        rest = &body[end + 9..];
+        let Some(id) = attr_value(block, "id") else { continue };
+        let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
+        for stop in block.split("<stop").skip(1) {
+            let c = attr_value(stop, "stop-color")
+                .or_else(|| style_value(stop, "stop-color"))
+                .and_then(|v| parse_color(&v));
+            if let Some(Rgb(cr, cg, cb)) = c {
+                r += cr as u32;
+                g += cg as u32;
+                b += cb as u32;
+                n += 1;
+            }
+        }
+        if n > 0 {
+            out.push((id, Rgb((r / n) as u8, (g / n) as u8, (b / n) as u8)));
+        }
+    }
+    out
+}
+
+/// The value of `name="…"` in a raw tag slice.
+fn attr_value(s: &str, name: &str) -> Option<String> {
+    let mut from = 0;
+    while let Some(i) = s[from..].find(name) {
+        let at = from + i;
+        let before = s[..at].chars().next_back();
+        let after = s[at + name.len()..].trim_start();
+        from = at + name.len();
+        if !matches!(before, Some(c) if c.is_whitespace() || c == '<') || !after.starts_with('=') {
+            continue;
+        }
+        let v = after[1..].trim_start();
+        let q = v.chars().next()?;
+        if q != '"' && q != '\'' {
+            continue;
+        }
+        let end = v[1..].find(q)?;
+        return Some(v[1..1 + end].to_string());
+    }
+    None
+}
+
+/// The value of `name:` inside this tag's `style="…"`.
+fn style_value(s: &str, name: &str) -> Option<String> {
+    let style = attr_value(s, "style")?;
+    for decl in style.split(';') {
+        let (k, v) = decl.split_once(':')?;
+        if k.trim() == name {
+            return Some(v.trim().to_string());
+        }
+    }
+    None
+}
+
+/// `url(#id)` → the id it names.
+fn url_ref(v: &str) -> Option<&str> {
+    let inner = v.strip_prefix("url(")?.strip_suffix(')')?.trim();
+    inner.strip_prefix('#').map(|s| s.trim_matches(|c| c == '"' || c == '\''))
+}
+
+fn resolve_paint(el: &XmlEl, parent: &Paint, grads: &[(String, Rgb)]) -> Paint {
     let mut p = *parent;
     p.opacity = parent.opacity; // opacity does NOT inherit; applied multiplicatively
     // opacity is a property of THIS element only (reset), fill/fill-* inherit.
@@ -234,7 +316,10 @@ fn resolve_paint(el: &XmlEl, parent: &Paint) -> Paint {
                 p.fill = match val {
                     "none" => None,
                     "currentColor" | "context-fill" => Some(Rgb(0, 0, 0)),
-                    v => parse_color(v).or(p.fill),
+                    v => url_ref(v)
+                        .and_then(|id| grads.iter().find(|(g, _)| g == id).map(|(_, c)| *c))
+                        .or_else(|| parse_color(v))
+                        .or(p.fill),
                 }
             }
             "fill-opacity" => {
