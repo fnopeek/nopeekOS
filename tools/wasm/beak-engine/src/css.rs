@@ -1330,7 +1330,19 @@ fn parse_compound(tok: &str) -> Option<Compound> {
                     // Any other `::pseudo-element` (first-line, placeholder,
                     // selection, …) is unsupported → drop rather than mis-apply.
                     _ if dbl => return None,
-                    ("not", Some(a)) => c.not.push(parse_compound(a.trim())?),
+                    ("not", Some(a)) => {
+                        // A state a static render never enters makes the
+                        // negation trivially true: drop the clause and KEEP the
+                        // rule. That is what carries the "visually hidden"
+                        // idiom — `.skip-link:not(:focus){clip:rect(1px,1px,1px,1px)}`
+                        // is how a page hides a link until it is tabbed to, and
+                        // dropping the whole rule leaves the link on the page
+                        // for everyone to read.
+                        let a = a.trim();
+                        if !never_matches(a) {
+                            c.not.push(parse_compound(a)?);
+                        }
+                    }
                     // `:is()`/`:where()` (and the legacy `:matches()` alias) —
                     // forgiving compound-alternative lists.
                     ("is" | "matches", Some(a)) => c.is_groups.push(parse_compound_list(&a)),
@@ -1354,6 +1366,16 @@ fn parse_compound(tok: &str) -> Option<Compound> {
         }
     }
     Some(c)
+}
+
+/// A pseudo-class naming an interaction state this engine never enters, so a
+/// selector demanding it can never match. Only meaningful inside `:not()`,
+/// where it makes the negation always true.
+fn never_matches(sel: &str) -> bool {
+    matches!(
+        sel.trim().to_ascii_lowercase().as_str(),
+        ":hover" | ":focus" | ":focus-visible" | ":focus-within" | ":active" | ":target" | ":visited"
+    )
 }
 
 /// Parse the inside of an `[attr…]` selector (`attr`, `attr=v`, `attr~=v`, …).
