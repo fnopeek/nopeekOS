@@ -683,6 +683,39 @@ menu to pick from.
       — a gallery thumbnail as `div.thumb @(0,2)`, which reads as a layout bug
       that is not there. They travel with the box now.
 
+24. ✅ **A `::before`/`::after` can be a BOX (0.3.8).** WPT break-even
+    (+2/−2) and it puts Wikipedia's logo on screen — the CSS-icon idiom,
+    `content: ""` plus a size plus a `background-image`, which no `<img>` is
+    involved in. dewiki's logo gadget hides `.mw-logo-icon` outright and draws
+    the globe with `.mw-logo::before` and the tagline with
+    `.mw-logo-container::after`; 18 rules on that one page use the pattern.
+
+    `resolve_pseudo` used to refuse any generated element with a `display` of
+    its own or an explicit `width`/`height` — CONFORMANCE's forward-compatible
+    rule, since layout could only place a text run. It now builds an
+    `AtomicBox` (background, border, optional text) that every path can place:
+    an inline run takes it like an `inline-block`, a block container feeds it
+    into its anonymous inline box, a flex container reserves it at the start
+    of the main axis.
+
+    **Three guards, each one a test that caught it:**
+    - **Out-of-flow generated boxes produce nothing.** MediaWiki underlines the
+      active tab with `a::after { position: absolute; bottom: 0; height: 2px }`.
+      Placed in flow, that draws a line straight *through* the tab's text —
+      which is what the first cut did to "Artikel" and "Lesen".
+    - **The display list is closed.** `display: none` and the table-internal
+      roles generate no box at all: `before-content-display-012` puts
+      `content: "FAIL"` on a `display: table-column-group` and asserts nothing
+      appears. The old bail happened to cover these; the new predicate names
+      them.
+    - **Only the LEADING box in a flex container.** A trailing one has to sit
+      directly behind the last item, and reserving it off the main axis puts it
+      at the container's far edge instead (`flexbox_generated` measures that
+      gap). Waits until generated content is a real flex item.
+
+    Still open here: `display: contents` on a generated element (we have no
+    such display at all) and the trailing flex box.
+
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the
 cursor), `user-select`/`touch-action`/`overflow-anchor`/`scroll-margin`
@@ -726,7 +759,7 @@ cursor), `user-select`/`touch-action`/`overflow-anchor`/`scroll-margin`
 | Block flow (vertical stacking) | CSS2.1 §9 | ✅ | block formatting context (`layout.rs`): stack + adjacent-sibling **margin collapse**; anonymous inline runs flushed at block boundaries |
 | Inline flow / line boxes | CSS2.1 §9.4.2 | ✅ | line boxes with **mixed-style runs** (size/colour/weight/italic) sharing a baseline; greedy wrap; `<a>`/`<b>`/`<i>`/`<code>` flow inline; `<br>` breaks. Atomic inline boxes: `<img>`, form controls and **`display: inline-block`** (a full block box laid out at the origin, then translated into its line; aligned on its own last line box's baseline). **Non-atomic inline boxes carry a box too** (0.3.2): horizontal margin/border/padding advance the flow and each line box gets a decoration rectangle, sliced so only the first/last fragment carries the left/right edge. A `display: block` child does not split its inline ancestor into anonymous boxes yet. No bidi/UAX-14 yet |
 | Box model (margin/border/padding) | css-box-3 | 🟡 | full block box model: `width`/`min-width`/`max-width`, `margin` (4-side + **`auto` centering**, §10.3.3 + §10.4 min/max redo), `padding` (4-side), **per-side borders** (width/style/colour), `box-sizing`, logical `margin-inline`/`-block` + `padding-inline`/`-block`, vertical margin collapse → **centered `max-width` containers work**. No `border-radius` |
-| Generated content (`::before`/`::after`) | CSS2.1 §12 | 🟡 | `content` as concatenated `<string>` tokens (with css-syntax-3 §4.3.7 escapes), **`counter()`/`counters()`** against a real counter scope (`counter-reset`/`counter-increment`, nesting by tree depth) and **`attr(X)`** — the originating element's attribute, empty string when absent. Any other component (`open-quote`/`close-quote`, `url()`, an unknown identifier) makes the WHOLE value produce nothing rather than render half of it. The generated box is inline-level only: a `::before` with a `display`/`width`/`height` of its own is skipped, and `html::before`/`head::before` never render because layout starts at `<body>` |
+| Generated content (`::before`/`::after`) | CSS2.1 §12 | 🟡 | `content` as concatenated `<string>` tokens (with css-syntax-3 §4.3.7 escapes), **`counter()`/`counters()`** against a real counter scope (`counter-reset`/`counter-increment`, nesting by tree depth) and **`attr(X)`** — the originating element's attribute, empty string when absent. Any other component (`open-quote`/`close-quote`, `url()`, an unknown identifier) makes the WHOLE value produce nothing rather than render half of it. A generated element is a text run when it is `inline`, and **a real box** (background, border, size) for `block`/`inline-block`/`list-item`/`flex`/`grid`/`table` — the CSS-icon idiom. `display: none`, `display: contents` and the table-internal roles produce nothing, as does an out-of-flow one (no containing block resolved for pseudo-elements yet). In a flex container only the LEADING box is placed. `html::before`/`head::before` never render because layout starts at `<body>` |
 | `text-indent` | css-text-3 §7 | 🟡 | the block's FIRST line box starts in from the content edge (lengths, percentages of the containing block, negative hanging values). Inherited. **Not counted in intrinsic widths** — a shrink-to-fit box around indented text comes out that much too narrow |
 | Text wrapping / `white-space` | css-text-3 | 🟡 | `normal` collapse+wrap, `pre` (each source line its own line box, trailing spaces hang, §8) and **`nowrap`** (spaces collapse but are not break opportunities; min-content is the whole line); `<br>` forces a break even under max-content. **`word-break`/`overflow-wrap`/`word-wrap: break-word`** split an over-long word at the last character that fits, never inside a grapheme cluster (ZWJ sequences, variation selectors, skin tones, keycaps, combining marks, flags, tag sequences). `pre-wrap`/`pre-line` are **not** distinguished from `pre`. No `hyphens`, no UAX-14 line breaking, no bidi reordering |
 | Tables (`table`/`tr`/`td`/`th`) | css-tables-3 | 🟡 | `layout.rs`: §17.2.1 anonymous-box fixup, auto **and** `table-layout: fixed` column algorithms, `colspan` (spanning cells distribute only the shortfall), **both border models** — `border-collapse` (winner-takes-the-edge, half the collapsed line per cell, incl. in column widths) and separated with `border-spacing` + `empty-cells` — the `border`/`cellpadding`/`cellspacing` presentation attributes, table border box + `auto` horizontal centring, `<caption>`. **`caption-side`** and per-cell **`vertical-align`** (`top`/`middle`/`bottom`; `baseline` degrades to `top` — no cross-cell baseline alignment). No `rowspan`, `display:inline-table` is block-level |
