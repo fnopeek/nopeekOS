@@ -305,14 +305,34 @@ impl Selector {
 pub struct MediaCond {
     min_width: Option<f32>,
     max_width: Option<f32>,
+    /// `prefers-color-scheme` — `Some(true)` wants dark, `Some(false)` light.
+    scheme_dark: Option<bool>,
     understood: bool,
 }
 
 impl MediaCond {
-    fn matches(&self, viewport_w: f32) -> bool {
+    fn matches(&self, m: Media) -> bool {
         self.understood
-            && self.min_width.is_none_or(|m| viewport_w >= m)
-            && self.max_width.is_none_or(|m| viewport_w <= m)
+            && self.min_width.is_none_or(|v| m.width >= v)
+            && self.max_width.is_none_or(|v| m.width <= v)
+            && self.scheme_dark.is_none_or(|want| want == m.dark)
+    }
+}
+
+/// What the page is being rendered INTO — everything `@media` can ask about.
+/// One value instead of a widening list of parameters, and it is `Copy`, so it
+/// threads through the cascade the way `viewport_w` used to.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Media {
+    pub width: f32,
+    /// The user's colour-scheme preference. On this system that IS the page
+    /// theme: the shell resolves it from the compositor palette.
+    pub dark: bool,
+}
+
+impl Media {
+    pub fn new(width: f32, dark: bool) -> Media {
+        Media { width, dark }
     }
 }
 
@@ -543,9 +563,9 @@ impl Stylesheet {
         ancestors: &[ElemInfo],
         prev_siblings: &[ElemInfo],
         sib_count: u32,
-        viewport_w: f32,
+        media: Media,
     ) -> Vec<(u32, u32, &'a [(String, String)])> {
-        self.matched_filtered(subject, ancestors, prev_siblings, sib_count, viewport_w, PseudoElem::None)
+        self.matched_filtered(subject, ancestors, prev_siblings, sib_count, media, PseudoElem::None)
     }
 
     /// Same as `matched`, but for `subject`'s `::before`/`::after` generated
@@ -556,10 +576,10 @@ impl Stylesheet {
         ancestors: &[ElemInfo],
         prev_siblings: &[ElemInfo],
         sib_count: u32,
-        viewport_w: f32,
+        media: Media,
         pseudo: PseudoElem,
     ) -> Vec<(u32, u32, &'a [(String, String)])> {
-        self.matched_filtered(subject, ancestors, prev_siblings, sib_count, viewport_w, pseudo)
+        self.matched_filtered(subject, ancestors, prev_siblings, sib_count, media, pseudo)
     }
 
     fn matched_filtered<'a>(
@@ -568,7 +588,7 @@ impl Stylesheet {
         ancestors: &[ElemInfo],
         prev_siblings: &[ElemInfo],
         sib_count: u32,
-        viewport_w: f32,
+        media: Media,
         want: PseudoElem,
     ) -> Vec<(u32, u32, &'a [(String, String)])> {
         // Only selectors whose rightmost compound could match this element are
@@ -589,7 +609,7 @@ impl Stylesheet {
             // Skip rules inside an `@media` block whose condition doesn't hold
             // at this viewport width.
             let media_ok = match &rule.media {
-                Some(conds) => conds.iter().any(|c| c.matches(viewport_w)),
+                Some(conds) => conds.iter().any(|c| c.matches(media)),
                 None => true,
             };
             let mut best: Option<u32> = None;
@@ -611,14 +631,14 @@ impl Stylesheet {
 }
 
 /// Gather + parse every `<style>` block in the document into one stylesheet.
-pub fn collect(dom: &Dom, viewport_w: f32) -> Stylesheet {
-    collect_all(dom, "", viewport_w)
+pub fn collect(dom: &Dom, media: Media) -> Stylesheet {
+    collect_all(dom, "", media)
 }
 
 /// Author stylesheet = already-fetched external `<link>` CSS (document order:
 /// `<head>` first) followed by inline `<style>` blocks. The shell fetches the
 /// linked files (the engine is host-free) and hands their bytes in as `external`.
-pub fn collect_all(dom: &Dom, external: &str, viewport_w: f32) -> Stylesheet {
+pub fn collect_all(dom: &Dom, external: &str, media: Media) -> Stylesheet {
     let mut css = String::from(external);
     css.push('\n');
     gather_style_text(&dom.root, &mut css);
@@ -636,7 +656,7 @@ pub fn collect_all(dom: &Dom, external: &str, viewport_w: f32) -> Stylesheet {
     let root = dom.root_element();
     let root_class_attr = root.attr("class").unwrap_or("");
     let root_classes: Vec<&str> = root_class_attr.split_whitespace().collect();
-    let css = crate::vars::resolve_vars(&css, viewport_w, &root_classes);
+    let css = crate::vars::resolve_vars(&css, media, &root_classes);
     let mut sheet = parse(&css);
     // An inline `style="background-image:url(…)"` never passes through the
     // sheet text, so its URL would have no entry to resolve against.
@@ -958,7 +978,7 @@ fn parse_media_query(prelude: &str) -> Vec<MediaCond> {
     prelude
         .split(',')
         .map(|q| {
-            let mut cond = MediaCond { min_width: None, max_width: None, understood: true };
+            let mut cond = MediaCond { min_width: None, max_width: None, scheme_dark: None, understood: true };
             let ql = q.to_ascii_lowercase();
             for part in ql.split("and") {
                 let p = part.trim();
@@ -981,6 +1001,14 @@ fn parse_media_query(prelude: &str) -> Vec<MediaCond> {
                             Some(px) => cond.max_width = Some(px),
                             None => cond.understood = false,
                         },
+                        // `no-preference` was dropped from the spec and never
+                        // matches; anything else is a value we don't know, so
+                        // the query fails closed like any other.
+                        "prefers-color-scheme" => match val {
+                            "dark" => cond.scheme_dark = Some(true),
+                            "light" => cond.scheme_dark = Some(false),
+                            _ => cond.understood = false,
+                        },
                         _ => cond.understood = false,
                     }
                 } else {
@@ -1000,8 +1028,8 @@ fn parse_media_query(prelude: &str) -> Vec<MediaCond> {
 /// Does an `@media` prelude hold at this viewport width? Shared with the
 /// custom-property pre-pass, which must gate on exactly the same condition the
 /// cascade uses — otherwise a variable from a non-matching block leaks.
-pub(crate) fn media_matches(prelude: &str, viewport_w: f32) -> bool {
-    parse_media_query(prelude).iter().any(|c| c.matches(viewport_w))
+pub(crate) fn media_matches(prelude: &str, m: Media) -> bool {
+    parse_media_query(prelude).iter().any(|c| c.matches(m))
 }
 
 /// A media-feature `<length>` — px only (Bootstrap/WP breakpoints are all px).
@@ -1487,10 +1515,10 @@ mod tests {
     #[test]
     fn parses_and_matches_type_class_id() {
         let ss = parse("p { color: red } .lead { font-weight: bold } #main { color: blue }");
-        assert!(!ss.matched(&info("p", None, &[]), &[], &[], 0, 1000.0).is_empty());
-        assert!(!ss.matched(&info("div", None, &["lead"]), &[], &[], 0, 1000.0).is_empty());
-        assert!(!ss.matched(&info("div", Some("main"), &[]), &[], &[], 0, 1000.0).is_empty());
-        assert!(ss.matched(&info("span", None, &[]), &[], &[], 0, 1000.0).is_empty());
+        assert!(!ss.matched(&info("p", None, &[]), &[], &[], 0, Media::new(1000.0, false)).is_empty());
+        assert!(!ss.matched(&info("div", None, &["lead"]), &[], &[], 0, Media::new(1000.0, false)).is_empty());
+        assert!(!ss.matched(&info("div", Some("main"), &[]), &[], &[], 0, Media::new(1000.0, false)).is_empty());
+        assert!(ss.matched(&info("span", None, &[]), &[], &[], 0, Media::new(1000.0, false)).is_empty());
     }
 
     #[test]
@@ -1500,19 +1528,19 @@ mod tests {
         let div = info("div", None, &[]);
         let ul = info("ul", None, &[]);
         // nav a: matches an <a> with <nav> anywhere above
-        assert!(!ss.matched(&info("a", None, &[]), &[nav.clone()], &[], 0, 1000.0).is_empty());
-        assert!(!ss.matched(&info("a", None, &[]), &[nav.clone(), div.clone()], &[], 0, 1000.0).is_empty());
-        assert!(ss.matched(&info("a", None, &[]), &[div.clone()], &[], 0, 1000.0).is_empty());
+        assert!(!ss.matched(&info("a", None, &[]), &[nav.clone()], &[], 0, Media::new(1000.0, false)).is_empty());
+        assert!(!ss.matched(&info("a", None, &[]), &[nav.clone(), div.clone()], &[], 0, Media::new(1000.0, false)).is_empty());
+        assert!(ss.matched(&info("a", None, &[]), &[div.clone()], &[], 0, Media::new(1000.0, false)).is_empty());
         // ul > li: <li> whose IMMEDIATE parent is <ul>
-        assert!(!ss.matched(&info("li", None, &[]), &[ul.clone()], &[], 0, 1000.0).is_empty());
-        assert!(ss.matched(&info("li", None, &[]), &[ul.clone(), div.clone()], &[], 0, 1000.0).is_empty());
+        assert!(!ss.matched(&info("li", None, &[]), &[ul.clone()], &[], 0, Media::new(1000.0, false)).is_empty());
+        assert!(ss.matched(&info("li", None, &[]), &[ul.clone(), div.clone()], &[], 0, Media::new(1000.0, false)).is_empty());
     }
 
     #[test]
     fn specificity_ranks_id_over_class_over_type() {
         let ss = parse("p { color: a } p.x { color: b } #p { color: c }");
         let e = info("p", Some("p"), &["x"]);
-        let mut m = ss.matched(&e, &[], &[], 0, 1000.0);
+        let mut m = ss.matched(&e, &[], &[], 0, Media::new(1000.0, false));
         m.sort_by_key(|(spec, order, _)| (*spec, *order));
         // ascending: type(p) < class(p.x) < id(#p)
         assert_eq!(m.len(), 3);
@@ -1529,17 +1557,17 @@ mod tests {
         // :hover + [attr] selectors dropped (unsupported); the @media block is
         // now DESCENDED (not dropped), but `screen` alone always matches so its
         // `p` rule is fine either way …
-        assert!(ss.matched(&info("a", None, &[]), &[], &[], 0, 1000.0).is_empty());
-        assert!(ss.matched(&info("input", None, &[]), &[], &[], 0, 1000.0).is_empty());
+        assert!(ss.matched(&info("a", None, &[]), &[], &[], 0, Media::new(1000.0, false)).is_empty());
+        assert!(ss.matched(&info("input", None, &[]), &[], &[], 0, Media::new(1000.0, false)).is_empty());
         // … and the plain "h1, h2" list still parsed.
-        assert!(!ss.matched(&info("h2", None, &[]), &[], &[], 0, 1000.0).is_empty());
+        assert!(!ss.matched(&info("h2", None, &[]), &[], &[], 0, Media::new(1000.0, false)).is_empty());
     }
 
     #[test]
     fn root_pseudo_matches_the_html_element() {
         let ss = parse(":root { color: a } :root.night { color: b } html { color: c }");
         let html = info("html", None, &[]);
-        let m = ss.matched(&html, &[], &[], 0, 1000.0);
+        let m = ss.matched(&html, &[], &[], 0, Media::new(1000.0, false));
         // `:root` and `html` both match; `:root.night` does not (no class).
         assert_eq!(m.len(), 2);
         // `:root` has class-level specificity, `html` only type-level.
@@ -1547,10 +1575,10 @@ mod tests {
         let tag_spec = m.iter().find(|(_, _, d)| d[0].1 == "c").unwrap().0;
         assert!(root_spec > tag_spec);
         // Not the root element → no match.
-        assert!(ss.matched(&info("body", None, &[]), &[], &[], 0, 1000.0).len() == 0);
+        assert!(ss.matched(&info("body", None, &[]), &[], &[], 0, Media::new(1000.0, false)).len() == 0);
         // With the class present, the qualified rule matches too.
         let night = info("html", None, &["night"]);
-        assert_eq!(ss.matched(&night, &[], &[], 0, 1000.0).len(), 3);
+        assert_eq!(ss.matched(&night, &[], &[], 0, Media::new(1000.0, false)).len(), 3);
     }
 
     #[test]
@@ -1567,8 +1595,8 @@ mod tests {
     fn external_css_cascades_before_inline_style() {
         // external (red) parsed first, inline <style> (blue) after → blue wins.
         let dom = dom::parse("<html><head><style>p{color:blue}</style></head><body><p>x</p></body></html>");
-        let ss = collect_all(&dom, "p { color: red }", 800.0);
-        let mut m = ss.matched(&info("p", None, &[]), &[], &[], 0, 1000.0);
+        let ss = collect_all(&dom, "p { color: red }", Media::new(800.0, false));
+        let mut m = ss.matched(&info("p", None, &[]), &[], &[], 0, Media::new(1000.0, false));
         m.sort_by_key(|(spec, order, _)| (*spec, *order));
         assert_eq!(m.len(), 2, "both external + inline rules match");
         assert!(m[0].1 < m[1].1, "external rule has earlier document order");
@@ -1578,9 +1606,9 @@ mod tests {
     fn collects_style_blocks_from_dom() {
         let dom = dom::parse("<html><head><style>p{color:red}</style></head>\
             <body><style>.x{color:blue}</style><p>hi</p></body></html>");
-        let ss = collect(&dom, 800.0);
-        assert!(!ss.matched(&info("p", None, &[]), &[], &[], 0, 1000.0).is_empty());
-        assert!(!ss.matched(&info("span", None, &["x"]), &[], &[], 0, 1000.0).is_empty());
+        let ss = collect(&dom, Media::new(800.0, false));
+        assert!(!ss.matched(&info("p", None, &[]), &[], &[], 0, Media::new(1000.0, false)).is_empty());
+        assert!(!ss.matched(&info("span", None, &["x"]), &[], &[], 0, Media::new(1000.0, false)).is_empty());
     }
 
     #[test]
@@ -1592,11 +1620,11 @@ mod tests {
         );
         let e = info("div", None, &["col"]);
         // Wide (1000 ≥ 768): both rules present.
-        assert_eq!(ss.matched(&e, &[], &[], 0, 1000.0).len(), 2, "media rule applies wide");
+        assert_eq!(ss.matched(&e, &[], &[], 0, Media::new(1000.0, false)).len(), 2, "media rule applies wide");
         // Narrow (500 < 768): only the base rule.
-        assert_eq!(ss.matched(&e, &[], &[], 0, 500.0).len(), 1, "media rule dropped narrow");
+        assert_eq!(ss.matched(&e, &[], &[], 0, Media::new(500.0, false)).len(), 1, "media rule dropped narrow");
         // An un-evaluable feature never matches (rule dropped both ways).
         let ss2 = parse("@media (prefers-color-scheme: dark) { .col { color: blue } }");
-        assert!(ss2.matched(&e, &[], &[], 0, 1000.0).is_empty(), "unknown feature never applies");
+        assert!(ss2.matched(&e, &[], &[], 0, Media::new(1000.0, false)).is_empty(), "unknown feature never applies");
     }
 }

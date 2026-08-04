@@ -38,6 +38,11 @@ pub enum Display {
     Flex,
     /// `display: grid` — grid formatting context (explicit columns + auto rows).
     Grid,
+    /// `display: table-caption` — a `<caption>` box by any other name. Sized to
+    /// the finished table rather than sizing it, so it must be recognised or a
+    /// long caption widens the table it describes (MediaWiki's image thumbs are
+    /// exactly this: `figure{display:table}` + `figcaption{display:table-caption}`).
+    TableCaption,
     /// `display: table-row` — a row inside a (CSS) table. Laid by `layout_table`.
     TableRow,
     /// `display: table-row-group` — a plain row group (`<tbody>`).
@@ -1042,7 +1047,7 @@ pub fn resolve(
     let inline = el.attr("style");
     if !sheet.is_empty() {
         let info = ElemInfo::of(el);
-        let mut matched = sheet.matched(&info, ancestors, prev_siblings, sib_count, viewport_w);
+        let mut matched = sheet.matched(&info, ancestors, prev_siblings, sib_count, crate::css::Media::new(viewport_w, theme.is_dark()));
         matched.sort_by_key(|(spec, order, _)| (*spec, *order));
         // Pass 1 — normal <style> declarations, low→high specificity.
         for (_, _, decls) in &matched {
@@ -1145,7 +1150,7 @@ pub fn resolve_pseudo(
         return None;
     }
     let info = ElemInfo::of(el);
-    let mut matched = sheet.matched_pseudo(&info, ancestors, prev_siblings, sib_count, viewport_w, pseudo);
+    let mut matched = sheet.matched_pseudo(&info, ancestors, prev_siblings, sib_count, crate::css::Media::new(viewport_w, theme.is_dark()), pseudo);
     if matched.is_empty() {
         return None;
     }
@@ -1660,6 +1665,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 "inline" => Display::Inline,
                 "inline-block" => Display::InlineBlock,
                 "table" | "inline-table" => Display::Table,
+                "table-caption" => Display::TableCaption,
                 "table-row" => Display::TableRow,
                 "table-row-group" => Display::TableRowGroup,
                 "table-header-group" => Display::TableHeaderGroup,

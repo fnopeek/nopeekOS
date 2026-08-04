@@ -143,19 +143,30 @@ fn decode_jpeg(bytes: &[u8]) -> Option<Image> {
     if w == 0 || h == 0 || w.saturating_mul(h) > MAX_PIXELS {
         return None;
     }
-    let rgb = dec.decode().ok()?;
+    let out = dec.decode().ok()?;
     let count = w.checked_mul(h)?;
-    // Output is 3-channel RGB (we requested it); bail if the buffer is short.
-    if rgb.len() < count.checked_mul(3)? {
+    // How many channels came back, measured rather than assumed. We ask for
+    // RGB, and a YCbCr source obliges — but a SINGLE-COMPONENT (grayscale)
+    // JPEG returns one byte per pixel whatever was requested, and
+    // `get_output_colorspace` just echoes the request rather than reporting
+    // that. The buffer length is the only truthful signal. Wikipedia serves
+    // its scanned aerial photographs exactly this way; assuming 3 channels
+    // threw the whole image away and left a blank figure on the page.
+    let channels = out.len().checked_div(count)?;
+    if !(1..=4).contains(&channels) {
         return None;
     }
     let mut bgra = zeroed(count.checked_mul(4)?)?;
     for i in 0..count {
-        let s = i * 3;
+        let s = i * channels;
         let d = i * 4;
-        bgra[d] = rgb[s + 2]; // B
-        bgra[d + 1] = rgb[s + 1]; // G
-        bgra[d + 2] = rgb[s]; // R
+        let (r, g, b) = match channels {
+            1 => (out[s], out[s], out[s]),
+            _ => (out[s], out[s + 1], out[s + 2]),
+        };
+        bgra[d] = b;
+        bgra[d + 1] = g;
+        bgra[d + 2] = r;
         bgra[d + 3] = 255;
     }
     Some(Image { bgra, w: w as u32, h: h as u32 })

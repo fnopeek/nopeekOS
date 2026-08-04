@@ -183,11 +183,17 @@ impl Engine {
         let dom = crate::dom::parse(html);
         // The cascade also reads the document's own `<style>` blocks and the
         // viewport width (media queries), so both are part of the identity.
+        // The theme is part of the identity too: `prefers-color-scheme` decides
+        // which rules apply, and `resolve_vars` BAKES the winning custom
+        // properties into the text it hands on — so a light and a dark sheet
+        // are different documents, not the same one read differently.
+        let media = crate::css::Media::new(width as f32, self.theme.is_dark());
         let key = fingerprint(html.as_bytes())
             ^ fingerprint(external_css.as_bytes()).rotate_left(17)
-            ^ (width as u64) << 40;
+            ^ (width as u64) << 40
+            ^ (media.dark as u64) << 63;
         if self.sheet.borrow().as_ref().map(|(k, _)| *k) != Some(key) {
-            *self.sheet.borrow_mut() = Some((key, crate::css::collect_all(&dom, external_css, width as f32)));
+            *self.sheet.borrow_mut() = Some((key, crate::css::collect_all(&dom, external_css, media)));
         }
         let held = self.sheet.borrow();
         let sheet = &held.as_ref().unwrap().1;
