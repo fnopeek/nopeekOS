@@ -209,7 +209,7 @@ aren't among them): `box-shadow`,
 **Selectors that drop the whole rule** (`css.rs` returns `None` → the rule is
 discarded rather than mis-applied): every pseudo-class outside
 `:not()`/`:is()`/`:where()`/`:first-child`/`:last-child`/`:only-child`/
-`:nth-child()`/`:nth-last-child()`. That includes **`:root`**, `:checked`,
+`:nth-child()`/`:nth-last-child()`. Inside `:not()` an interaction state we never enter (`:hover`/`:focus`/`:active`/`:target`/`:visited`) is treated as never matching, so the negation holds and the rule survives — that is what makes the visually-hidden idiom work. Otherwise dropped: **`:root`**, `:checked`,
 `:hover`, `:focus`, `:link`/`:visited`, `:first-of-type`/`:nth-of-type()`,
 `:empty`, `:disabled`, `:has()`. Pseudo-*elements* other than
 `::before`/`::after` also drop the rule.
@@ -734,6 +734,26 @@ menu to pick from.
       per-pixel interpolation in the rasteriser — but the mean is never
       catastrophically wrong, and at icon size the difference is small. The
       globe reads correctly now.
+
+26. ✅ **`:not(:focus)` keeps its rule (0.3.10).** WPT-neutral, and it takes
+    "Zum Inhalt springen" off the top of every Wikipedia page.
+
+    A pseudo-class we do not support inside `:not()` made `parse_compound`
+    fail, which dropped the WHOLE rule. But a state a static render never
+    enters — `:hover`, `:focus`, `:focus-visible`, `:focus-within`, `:active`,
+    `:target`, `:visited` — makes the negation **trivially true**, so the
+    clause can be dropped and the rule kept. That is exactly what carries the
+    visually-hidden idiom:
+
+    ```css
+    .mw-jump-link:not(:focus) { position: absolute; clip: rect(1px,1px,1px,1px);
+                                width: 1px; height: 1px; overflow: hidden }
+    ```
+
+    Every skip link and every screen-reader-only label on the web is built this
+    way. Dropping the rule leaves them sitting in the page as ordinary text —
+    which is what a device report called out first, before any of the subtler
+    layout problems.
 
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the
