@@ -257,17 +257,78 @@ pub enum FlexBasis {
 }
 
 /// One edge of a box's border: its used width (px) and colour. A side paints
-/// only when `width > 0` AND `color` is set (`border-style:none`/no colour → no
-/// paint). The four sides are independent (`border-top`/`-right`/… may differ).
-#[derive(Clone, Copy, PartialEq, Debug, Default)]
+/// only when `width > 0` AND `color` is set. The four sides are independent
+/// (`border-top`/`-right`/… may differ).
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct BorderSide {
+    /// The USED width — what layout and paint read. It is the specified width
+    /// only while a style is in effect, and 0 otherwise.
     pub width: f32,
+    /// `None` means `currentColor` — the initial value, and still unresolved.
+    /// `finish_borders` turns it into the element's own `color` once the whole
+    /// cascade has run, so a later `color` declaration still reaches it.
     pub color: Option<Rgb>,
     /// `border-style: hidden`. Paints exactly like `none` on its own box, but
     /// in a collapsed table it is not the same thing: `hidden` SUPPRESSES the
     /// grid line it meets, beating every other border there (CSS2.1 §17.6.2
     /// rule 1), while `none` is merely the weakest candidate.
     pub hidden: bool,
+    /// The specified `border-width`, kept apart from the used one. The two
+    /// halves arrive in either order and neither implies the other: a width
+    /// with no style paints nothing, a style with no width is `medium`.
+    pub spec_width: f32,
+    /// A `border-style` other than `none`/`hidden` is in effect.
+    pub styled: bool,
+}
+
+/// `border-width`'s initial value, `medium`.
+pub const BORDER_MEDIUM: f32 = 3.0;
+
+impl Default for BorderSide {
+    fn default() -> BorderSide {
+        BorderSide { width: 0.0, color: None, hidden: false, spec_width: BORDER_MEDIUM, styled: false }
+    }
+}
+
+impl BorderSide {
+    /// Recompute the used width after either half changed. `border-style`'s
+    /// initial value is `none`, and that forces the used width to 0 whatever
+    /// `border-width` says (CSS2.1 §8.5.3).
+    fn sync(&mut self) {
+        self.width = if self.styled { self.spec_width } else { 0.0 };
+    }
+    fn set_spec_width(&mut self, w: f32) {
+        self.spec_width = w;
+        self.sync();
+    }
+    /// Apply one `border-style` token. An unknown one is invalid and leaves the
+    /// side alone.
+    fn set_style(&mut self, tok: &str) {
+        match tok {
+            "none" | "hidden" => {
+                self.styled = false;
+                self.hidden = tok == "hidden";
+            }
+            "solid" | "dashed" | "dotted" | "double" | "groove" | "ridge" | "inset" | "outset" => {
+                self.styled = true;
+                self.hidden = false;
+            }
+            _ => return,
+        }
+        self.sync();
+    }
+}
+
+/// Resolve every side's `currentColor` against the element's final `color`.
+/// Runs after the whole cascade, because `border-style: solid; color: green`
+/// and `color: green; border-style: solid` have to mean the same thing.
+fn finish_borders(s: &mut ComputedStyle) {
+    let c = s.color;
+    for side in [&mut s.border_top, &mut s.border_right, &mut s.border_bottom, &mut s.border_left] {
+        if side.color.is_none() && side.width > 0.0 {
+            side.color = Some(c);
+        }
+    }
 }
 
 /// A CSS length keyword/value for the box model. `Auto` means "auto" (for
@@ -966,7 +1027,8 @@ pub fn resolve(
             s.attr_cell_border = Some(n.max(0.0));
             if n > 0.0 {
                 for side in [&mut s.border_top, &mut s.border_right, &mut s.border_bottom, &mut s.border_left] {
-                    side.width = n;
+                    side.set_style("solid");
+                    side.set_spec_width(n);
                     side.color = Some(theme.rule);
                 }
             }
@@ -1053,6 +1115,7 @@ pub fn resolve(
     // Opacity groups the subtree: a transparent ancestor wins over anything
     // this element declares, but within this element the cascade decides.
     s.transparent |= s.opacity_zero;
+    finish_borders(&mut s);
     s
 }
 
@@ -1129,6 +1192,7 @@ pub fn resolve_pseudo(
         return None;
     }
     s.transparent |= s.opacity_zero;
+    finish_borders(&mut s);
     Some((template, s))
 }
 
@@ -1405,7 +1469,8 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
             // `<table border>` gives every cell a 1px inset border.
             if s.attr_cell_border.is_some_and(|b| b > 0.0) {
                 for side in [&mut s.border_top, &mut s.border_right, &mut s.border_bottom, &mut s.border_left] {
-                    side.width = 1.0;
+                    side.set_style("solid");
+                    side.set_spec_width(1.0);
                     side.color = Some(theme.rule);
                 }
             }
@@ -1931,16 +1996,16 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             }
         }
         "border" => {
-            let side = parse_border_shorthand(&v, u, theme, s.color);
+            let side = parse_border_shorthand(&v, u, theme);
             s.border_top = side;
             s.border_right = side;
             s.border_bottom = side;
             s.border_left = side;
         }
-        "border-top" => s.border_top = parse_border_shorthand(&v, u, theme, s.color),
-        "border-right" => s.border_right = parse_border_shorthand(&v, u, theme, s.color),
-        "border-bottom" => s.border_bottom = parse_border_shorthand(&v, u, theme, s.color),
-        "border-left" => s.border_left = parse_border_shorthand(&v, u, theme, s.color),
+        "border-top" => s.border_top = parse_border_shorthand(&v, u, theme),
+        "border-right" => s.border_right = parse_border_shorthand(&v, u, theme),
+        "border-bottom" => s.border_bottom = parse_border_shorthand(&v, u, theme),
+        "border-left" => s.border_left = parse_border_shorthand(&v, u, theme),
         "border-width" => {
             let u = s.units();
             if let Some(t4) = four_sides(&css_tokens(&v)) {
@@ -1948,7 +2013,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                     &mut s.border_top, &mut s.border_right, &mut s.border_bottom, &mut s.border_left,
                 ].into_iter().zip(t4) {
                     if let Some(w) = border_width_kw(tok, u) {
-                        side.width = w;
+                        side.set_spec_width(w);
                     }
                 }
             }
@@ -1969,10 +2034,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 for (side, tok) in [
                     &mut s.border_top, &mut s.border_right, &mut s.border_bottom, &mut s.border_left,
                 ].into_iter().zip(t4) {
-                    if tok == "none" || tok == "hidden" {
-                        side.width = 0.0;
-                        side.hidden = tok == "hidden";
-                    }
+                    side.set_style(tok);
                 }
             }
         }
@@ -1985,16 +2047,13 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         "border-bottom-color" => s.border_bottom.color = parse_color(&v, theme).or(s.border_bottom.color),
         "border-left-color" => s.border_left.color = parse_color(&v, theme).or(s.border_left.color),
         "border-top-style" | "border-right-style" | "border-bottom-style" | "border-left-style" => {
-            if v == "none" || v == "hidden" {
-                let side = match prop {
-                    "border-top-style" => &mut s.border_top,
-                    "border-right-style" => &mut s.border_right,
-                    "border-bottom-style" => &mut s.border_bottom,
-                    _ => &mut s.border_left,
-                };
-                side.width = 0.0;
-                side.hidden = v == "hidden";
-            }
+            let side = match prop {
+                "border-top-style" => &mut s.border_top,
+                "border-right-style" => &mut s.border_right,
+                "border-bottom-style" => &mut s.border_bottom,
+                _ => &mut s.border_left,
+            };
+            side.set_style(&v);
         }
 
         // — positioning —
@@ -2594,66 +2653,52 @@ fn parse_pad(v: &str, u: Units, prior: f32) -> f32 {
 }
 
 /// A border-width keyword/length → px. `thin`/`medium`/`thick` = 1/3/5px.
+/// A NEGATIVE length is invalid, not zero: the declaration is dropped and the
+/// side keeps the width it had (`border-top-width-012` and its siblings turn
+/// on exactly that difference).
 fn border_width_kw(tok: &str, u: Units) -> Option<f32> {
     match tok.trim() {
         "" => None,
         "thin" => Some(1.0),
-        "medium" => Some(3.0),
+        "medium" => Some(BORDER_MEDIUM),
         "thick" => Some(5.0),
-        t => parse_length(t, u).map(|w| w.max(0.0)),
+        t => parse_length(t, u).filter(|w| *w >= 0.0),
     }
 }
 
 /// Assign one side's border width (keeps the prior value on an invalid one).
 fn set_side_width(side: &mut BorderSide, v: &str, u: Units) {
     if let Some(w) = border_width_kw(v.trim(), u) {
-        side.width = w;
+        side.set_spec_width(w);
     }
 }
 
 /// Parse a `border`/`border-<side>` shorthand (`<width> || <style> || <color>`,
 /// any order) into a side. `none`/`hidden` → no border. A specified border with
 /// no explicit colour uses `currentColor` (the element's `color`).
-fn parse_border_shorthand(v: &str, u: Units, theme: &Theme, current: Rgb) -> BorderSide {
-    let (mut width, mut color, mut none, mut styled) = (None, None, false, false);
-    let mut hidden = false;
+fn parse_border_shorthand(v: &str, u: Units, theme: &Theme) -> BorderSide {
+    // A shorthand resets every side it names, so this starts from the initial
+    // value rather than from whatever came before.
+    let mut side = BorderSide::default();
+    let mut width = None;
     for tok in css_tokens(v) {
         match tok {
-            "none" | "hidden" => {
-                none = true;
-                hidden |= tok == "hidden";
-            }
-            "thin" => {
-                width = Some(1.0);
-                styled = true;
-            }
-            "medium" => {
-                width = Some(3.0);
-                styled = true;
-            }
-            "thick" => {
-                width = Some(5.0);
-                styled = true;
-            }
-            "solid" | "dashed" | "dotted" | "double" | "groove" | "ridge" | "inset" | "outset" => {
-                styled = true
-            }
+            "none" | "hidden" | "solid" | "dashed" | "dotted" | "double" | "groove" | "ridge"
+            | "inset" | "outset" => side.set_style(tok),
+            "thin" | "medium" | "thick" => width = border_width_kw(tok, u),
             _ => {
                 if let Some(c) = parse_color(tok, theme) {
-                    color = Some(c);
-                } else if let Some(w) = parse_length(tok, u) {
-                    width = Some(w.max(0.0));
+                    side.color = Some(c);
+                } else if let Some(w) = parse_length(tok, u).filter(|w| *w >= 0.0) {
+                    width = Some(w);
                 }
             }
         }
     }
-    if none {
-        return BorderSide { width: 0.0, color: None, hidden };
+    if let Some(w) = width {
+        side.set_spec_width(w);
     }
-    // `border-width` initial is 'medium' (3px) once a border is otherwise given.
-    let w = width.unwrap_or(if styled || color.is_some() { 3.0 } else { 0.0 });
-    let c = color.or(if w > 0.0 { Some(current) } else { None });
-    BorderSide { width: w, color: c, hidden }
+    side
 }
 
 /// Expand 1–4 CSS box-side tokens into [top, right, bottom, left].
@@ -3075,6 +3120,32 @@ mod tests {
         assert!(st.bold);
         assert!(st.font_px > BASE_FONT_PX * 1.5);
         assert_eq!(st.color, theme.heading);
+    }
+
+    /// `border-width` and `border-style` are independent halves and neither
+    /// implies the other: a width alone paints nothing, a style alone is
+    /// `medium`, and the colour defaults to `currentColor` however late in the
+    /// declaration block the `color` arrives.
+    #[test]
+    fn a_border_needs_both_a_style_and_a_width() {
+        let side = |css: &str| {
+            let html = alloc::format!("<body><p style=\"{css}\">x</p></body>");
+            let dom = dom::parse(&html);
+            let theme = Theme::DARK;
+            resolve(first_el(&dom), &ComputedStyle::root(&theme), &theme, &Stylesheet::empty(), &[], &[], 0, 1000.0)
+                .border_top
+        };
+        assert_eq!(side("border-top-width:5px").width, 0.0, "a width with no style is not a border");
+        assert_eq!(side("border-top-style:solid").width, 3.0, "a style with no width is medium");
+        assert_eq!(side("border-top-style:solid;border-top-width:5px").width, 5.0);
+        assert_eq!(side("border-top-width:5px;border-top-style:solid").width, 5.0, "either order");
+        assert_eq!(side("border-top:5px solid;border-top-style:none").width, 0.0, "none takes it away");
+        // An invalid width leaves the specified one alone — it does not fall
+        // back to 0, which is what `border-top-width-012` checks.
+        assert_eq!(side("border-top-style:solid;border-top-width:-1pt").width, 3.0);
+        let c = Rgb(0, 128, 0);
+        assert_eq!(side("border-top-style:solid;color:#008000").color, Some(c), "currentColor, resolved late");
+        assert_eq!(side("color:#008000;border-top-style:solid").color, Some(c), "either order");
     }
 
     #[test]

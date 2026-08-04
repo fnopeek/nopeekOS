@@ -22,15 +22,15 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-04, beak 0.3.2)
+### Current number (measured 2026-08-04, beak 0.3.3)
 
 ```
-3880 pass / 1725 fail / 181 inconclusive   (of 5786 vendored reftests)
-= 69.3 % of the conclusive 5605
+3926 pass / 1680 fail / 180 inconclusive   (of 5786 vendored reftests)
+= 70.0 % of the conclusive 5606
 ```
 
 Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → 3746 → 3863 → 3869 →
-3870 (0.3.0) → **3880** (0.3.2). The inconclusive count fell 254 → 181 over that
+3870 (0.3.0) → 3880 (0.3.2) → **3926** (0.3.3). The inconclusive count fell 254 → 180 over that
 span: references that used to render blank — because `:root` was dropped,
 because an `inline-block` had no box, or because an inline box painted no
 background — now paint, so 73 more tests actually measure something.
@@ -45,6 +45,15 @@ were INCONCLUSIVE — their reference was blank and now renders, so they finally
 measure something and say we are wrong. That is the pattern the oracle keeps
 producing: a correct feature makes the *reference* work, and the honest score
 goes down before it goes up.
+
+**0.3.3 in detail: +50 gained, −4 lost** — `border-width` and `border-style`
+became independent halves (bucket item 19). The four losses: two are
+`border-image`, which we do not implement and whose references now paint a real
+border; one is `border-right-width-medium` drifting 0.48 % → 0.54 % past the
+threshold it was already sitting on; one is a scrollable-baseline test.
+**And the real page did not move by one pixel** — de.wikipedia/Stansstad
+renders byte-identically before and after, because MediaWiki always writes the
+`border` shorthand. The change is oracle-only on that page.
 
 Per suite (pass / total of that suite, inconclusive included in the total):
 
@@ -447,8 +456,7 @@ menu to pick from.
     Still missing in flex: reverse directions, baseline alignment, and the
     `align-content` cases beyond the 6 that came along.
 14. **CSS2 long tail** — `margin-collapse` 28, `abspos-containing-block` 25,
-    `floats-wrap` 22, `border-*-width` 44 (`thin`/`medium`/`thick` keywords
-    are a suspiciously cheap 44).
+    `floats-wrap` 22. (`border-*-width` stood here at 44; item 19 took it.)
 15. **Grid** — 467 fails but 84 are experimental `grid-lanes`; the real
     reserve is auto-placement (`row/column-auto`, 64) and abspos-in-grid (48).
 16. Bidi reordering — costs ~13 tests *actively* and blocks `unicode-bidi`.
@@ -496,6 +504,44 @@ menu to pick from.
     Still open in this corner, all measured: `block-in-inline` splitting (3),
     `border-style` without an explicit width (5, see the paint table),
     `text-indent` in intrinsic widths, and `word-spacing`.
+
+19. ✅ **`border-width` and `border-style` are independent halves (0.3.3).**
+    +50 / −4, the biggest single-property jump the tracker has recorded.
+
+    We folded the style into the width — `border-style` only ever set the width
+    to 0 for `none`/`hidden`, and nothing else. So `border-style: solid` with no
+    explicit `border-width` produced **no border at all** instead of `medium`,
+    and `border-width: 5px` with no style produced one that should not exist.
+    Both directions are in the corpus, and both are what the whole
+    `border-*-width` family (44) and the `c55*-brdr-*`/`c55*-ibrdr-*` families
+    turn on.
+
+    `BorderSide` now keeps `spec_width` (the specified value, initial `medium`)
+    and `styled` beside `width`, and `width` stays the USED value — which is why
+    the change is contained: layout and paint read `width` in ~50 places and
+    none of them had to know. Every setter goes through `sync()`.
+
+    Three spec details came with it, each worth a test on its own:
+    - **A negative `border-width` is invalid, not zero.** The declaration is
+      dropped and the side keeps what it had, so `border-top-width: -1pt` after
+      a style leaves `medium` standing. `border-top-width-012` and its 13
+      siblings test exactly that; we were clamping to 0.
+    - **`border-color`'s initial value is `currentColor`**, and it has to be
+      resolved AFTER the whole cascade — `border-style: solid; color: green`
+      and `color: green; border-style: solid` must agree. `None` on the side
+      means "currentColor, unresolved" and `finish_borders` closes it at the
+      end of `resolve` (and of `resolve_pseudo`). That also makes
+      `border-color: inherit` land right: the parent's value is the same
+      keyword, so it resolves against the child's own colour, which is what
+      `border-color-012` asserts.
+    - **A shorthand resets every longhand it names**, so `parse_border_shorthand`
+      starts from `BorderSide::default()` rather than from what came before.
+
+    **The regression check that mattered was not the oracle:** rendering
+    de.wikipedia/Stansstad before and after gave a **byte-identical** bitmap.
+    A change to the border model touches every box on every page, and 5786
+    reftests averaged into one number cannot say that
+    ([[feedback-byte-identical-render-gate]]).
 
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the
@@ -553,7 +599,7 @@ cursor), `user-select`/`touch-action`/`overflow-anchor`/`scroll-margin`
 | Feature | Spec | Status | Notes |
 |---------|------|--------|-------|
 | Color / text color | css-color-4 | ✅ | `color.rs`: `#rgb`/`#rrggbb`/`#rgba`, the named-colour table, `rgb()`/`hsl()`/`hwb()`/`lab()`/`lch()`/`oklab()`/`oklch()`/`color()`, alpha and modern slash syntax |
-| Backgrounds / borders | css-backgrounds-3 | 🟡 | `background`/`background-color` fill (inserted behind content at a recorded op index) + **per-side** `border` (width/style/colour, incl. the shorthands and `border-collapse` edge resolution) + **`border-radius`** (shorthand with `/`, four corner longhands, percentages, §5.5 corner scaling; antialiased fill, and a uniform border stroked as one rounded ring — a non-uniform one keeps square corners) + **`background-image`/`mask-image`** with `-repeat`/`-position`/`-size`, on block AND inline boxes. No gradients, no `background-clip`/`-origin`/`-attachment`, one layer per element, no `box-shadow`, no `border-image`. **`border-style` alone does not produce a border** — we fold style into width, so `border-style: solid` with no explicit width stays 0 instead of `medium` (costs the `c55*-ibrdr-*` family, `border-color-012`, and part of the 44 `border-*-width` failures) |
+| Backgrounds / borders | css-backgrounds-3 | 🟡 | `background`/`background-color` fill (inserted behind content at a recorded op index) + **per-side** `border` (width/style/colour, incl. the shorthands and `border-collapse` edge resolution) + **`border-radius`** (shorthand with `/`, four corner longhands, percentages, §5.5 corner scaling; antialiased fill, and a uniform border stroked as one rounded ring — a non-uniform one keeps square corners) + **`background-image`/`mask-image`** with `-repeat`/`-position`/`-size`, on block AND inline boxes. No gradients, no `background-clip`/`-origin`/`-attachment`, one layer per element, no `box-shadow`, no `border-image`. **`border-width` and `border-style` are independent** (0.3.3): `BorderSide` keeps the specified width beside the used one, so a width with no style paints nothing and a style with no width is `medium`, in either declaration order. A negative width is invalid and keeps the previous value rather than becoming 0. `border-color` defaults to `currentColor`, resolved after the whole cascade so `border-style: solid; color: green` and the reverse agree |
 | Font size / weight / family | css-fonts-4 | 🟡 | em-relative `font-size` cascade with correct compounding; **six real subsetted faces** (Inter regular/bold/italic/bold-italic + mono/mono-bold, `fonts.rs`) — synthetic bold/italic retired. No `@font-face` / webfonts / family fallback lists |
 | Text decoration | css-text-decor-3 | 🟡 | `text-decoration`/`-line`: underline / line-through / overline as rects in the run's colour, at metric-free approximations of the font's decoration positions. UA rules: `:any-link` (href-gated), `<u>`/`<ins>`, `<s>`/`<del>`/`<strike>`. Inherited rather than propagated (§1.2) — same pixels for every construct we have. No `-color`/`-style`/`-thickness`, no `text-underline-offset` |
 | Glyph rasterisation + AA | — | ✅ | fontdue + coverage blend, warm glyph cache; `fill` builds one row and `copy_within`s it (a per-pixel loop cost ~10× under wasmi) |

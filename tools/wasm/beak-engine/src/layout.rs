@@ -6806,7 +6806,7 @@ fn collapsed_edge(a: &BorderSide, b: &BorderSide) -> BorderSide {
     // Rule 1 first: one `hidden` among the boxes meeting at a grid line
     // suppresses that line outright, however wide the others are.
     if a.hidden || b.hidden {
-        return BorderSide { width: 0.0, color: None, hidden: true };
+        return BorderSide { hidden: true, ..BorderSide::default() };
     }
     if b.width > a.width {
         *b
