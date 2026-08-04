@@ -1223,12 +1223,27 @@ pub fn resolve_pseudo(
     // inline-block; width: N%` idiom some reftest references use as an
     // indent trick) would flow as unsized text instead of reserving that
     // width — visibly wrong, so skip it too.
-    if s.display != Display::Inline || s.width != Len::Auto || s.height != Len::Auto {
-        return None;
-    }
     s.transparent |= s.opacity_zero;
     finish_borders(&mut s);
     Some((template, s))
+}
+
+impl ComputedStyle {
+    /// Does this generated element produce a BOX we lay out as a rectangle —
+    /// the CSS-icon idiom, `content: ""` plus a size plus a `background-image`?
+    ///
+    /// Deliberately a closed list. `display: none` produces nothing, and the
+    /// table-internal roles have no content box of their own, so generated
+    /// content in them renders nothing at all — `before-content-display-012`
+    /// puts `content: "FAIL"` on a `display: table-column-group` and asserts
+    /// that nothing appears. Anything not listed here and not `inline` keeps
+    /// the old forward-compatible answer: produce nothing rather than guess.
+    pub fn is_generated_box(&self) -> bool {
+        matches!(
+            self.display,
+            Display::Block | Display::InlineBlock | Display::ListItem | Display::Flex | Display::Grid | Display::Table
+        )
+    }
 }
 
 /// One component of a resolved `content` value on a `::before`/`::after` box.

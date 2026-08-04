@@ -1439,7 +1439,9 @@ impl Ctx<'_> {
         // An anonymous `owner` (a table object with no source element) can't
         // be selected, so it can't generate one.
         if let Some(owner) = owner {
-            if let Some((text, ps)) = self.pseudo(owner, parent, PseudoElem::Before) {
+            if let Some(b) = self.pseudo_box(owner, parent, PseudoElem::Before, w) {
+                inline.atomic(b);
+            } else if let Some((text, ps)) = self.pseudo(owner, parent, PseudoElem::Before) {
                 inline.text(&text, &ps, None);
             }
         }
@@ -1681,7 +1683,9 @@ impl Ctx<'_> {
         // final line-box flush so it shares a line with trailing inline
         // content (or starts its own, if the last child was block-level).
         if let Some(owner) = owner {
-            if let Some((text, ps)) = self.pseudo(owner, parent, PseudoElem::After) {
+            if let Some(b) = self.pseudo_box(owner, parent, PseudoElem::After, w) {
+                inline.atomic(b);
+            } else if let Some((text, ps)) = self.pseudo(owner, parent, PseudoElem::After) {
                 inline.text(&text, &ps, None);
             }
         }
@@ -1706,10 +1710,91 @@ impl Ctx<'_> {
     /// every call site (the uniform `path.push(ElemInfo::of(el))` before any
     /// box-laying call), so its ancestors are everything before that.
     fn pseudo(&self, owner: &Element, own: &ComputedStyle, kind: PseudoElem) -> Option<(String, ComputedStyle)> {
+        let (text, ps) = self.pseudo_content(owner, own, kind)?;
+        // Only a plain inline generated element is a text run. A box-shaped one
+        // is `pseudo_box`'s job, and anything else (`display: none`, the
+        // table-internal roles) produces nothing at all.
+        (ps.display == Display::Inline).then_some((text, ps))
+    }
+
+    fn pseudo_content(&self, owner: &Element, own: &ComputedStyle, kind: PseudoElem) -> Option<(String, ComputedStyle)> {
         let anc = self.path.len().saturating_sub(1);
         let (template, ps) =
             style::resolve_pseudo(owner, own, self.theme, self.sheet, &self.path[..anc], &[], 0, self.viewport_w, kind)?;
         Some((self.render_content(owner, &template), ps))
+    }
+
+    /// The finished rectangle of a `::before`/`::after` that carries a box of
+    /// its own — the CSS-icon idiom, `content: ""` plus a size plus a
+    /// `background-image`. Every layout path can place one of these: an inline
+    /// run puts it on a line like an `inline-block`, a flex container reserves
+    /// it at the start (or end) of its main axis.
+    ///
+    /// `width`/`height` come from the style when definite; otherwise the text
+    /// decides, as for any shrink-to-fit box. Percentages resolve against
+    /// `avail_w`.
+    fn pseudo_box(&mut self, owner: &Element, own: &ComputedStyle, kind: PseudoElem, avail_w: i32) -> Option<AtomicBox> {
+        let (text, ps) = self.pseudo_content(owner, own, kind)?;
+        if !ps.is_generated_box() || ps.hidden || ps.transparent {
+            return None;
+        }
+        // An out-of-flow generated box needs a containing block and offsets we
+        // do not resolve for pseudo-elements yet. Placing it IN the flow puts
+        // it somewhere it never belongs — MediaWiki underlines the active tab
+        // with `a::after { position: absolute; bottom: 0; height: 2px }`, and
+        // in-flow that draws a line straight through the tab's text. Produce
+        // nothing rather than render it wrong.
+        if matches!(ps.position, Position::Absolute | Position::Fixed) {
+            return None;
+        }
+        let cbw = avail_w as f32;
+        let frame_x = ps.pad_left + ps.pad_right + ps.border_x();
+        let frame_y = ps.pad_top + ps.pad_bottom + ps.border_y();
+        let font = self.fonts.pick(ps.bold, ps.italic, ps.mono);
+        let cw = match ps.width.px(cbw) {
+            Some(v) if v >= 0.0 => v,
+            _ => measure(font, text.trim(), ps.font_px),
+        };
+        let ch = match ps.height.px(cbw) {
+            Some(v) if v >= 0.0 => v,
+            _ if text.trim().is_empty() => 0.0,
+            _ => line_gap(font, ps.font_px),
+        };
+        let (ml, mr) = (
+            ps.margin_left.px(cbw).unwrap_or(0.0).max(0.0),
+            ps.margin_right.px(cbw).unwrap_or(0.0).max(0.0),
+        );
+        let (bw, bh) = ((cw + frame_x).max(0.0) as i32, (ch + frame_y).max(0.0) as i32);
+        if bw <= 0 && bh <= 0 {
+            return None;
+        }
+        let mut ops: Vec<DrawOp> = Vec::new();
+        let bx = ml as i32;
+        let by = ps.margin_top as i32;
+        bg_ops(&ps, self.bg_key(ps.bg_layer.image), self.bg_key(ps.mask_layer.image), bx, by, bw, bh, &mut ops);
+        border_ops(&ps, bx, by, bw, bh, (true, true), &mut ops);
+        if !text.trim().is_empty() {
+            ops.push(DrawOp::Text {
+                x: bx + (ps.border_left.width + ps.pad_left) as i32,
+                y: by + (ps.border_top.width + ps.pad_top) as i32,
+                size: ps.font_px,
+                color: ps.color,
+                bold: ps.bold,
+                italic: ps.italic,
+                mono: ps.mono,
+                text: text.trim().into(),
+            });
+        }
+        let h = bh + (ps.margin_top + ps.margin_bottom) as i32;
+        Some(AtomicBox {
+            ops,
+            links: Vec::new(),
+            controls: Vec::new(),
+            inspects: Vec::new(),
+            w: bw + (ml + mr) as i32,
+            h,
+            baseline: h,
+        })
     }
 
     /// Resolve a `content` template to its final text, reading any
@@ -3913,8 +3998,21 @@ impl Ctx<'_> {
                 items.push((ce, cs));
             }
         }
+        // A `::before`/`::after` with a box of its own is a flex item like any
+        // other child (CSS Display 3 §2.2). It is a fixed rectangle and never a
+        // flexible length, so instead of threading a second item KIND through
+        // the whole §9.7 machinery it is reserved off the main axis here and
+        // the real items share what is left. Exact for the idiom this serves —
+        // a `content: ""` box with a definite width.
+        // Only the LEADING one: a trailing box would have to sit right behind
+        // the last item, and reserving it off the axis puts it at the
+        // container's far edge instead (`flexbox_generated` measures exactly
+        // that gap). The icon-before-content idiom this serves needs the lead;
+        // the tail waits until generated content is a real flex item.
+        let lead_box = self.pseudo_box(el, st, PseudoElem::Before, w);
+        let tail_box: Option<AtomicBox> = None;
         // Empty flex box: fall back to block so its own box decoration still paints.
-        if items.is_empty() {
+        if items.is_empty() && lead_box.is_none() && tail_box.is_none() {
             return self.layout_block(el, st, x, w, y0);
         }
         items.sort_by_key(|(_, s)| s.order); // stable → equal order keeps DOM order
@@ -3930,6 +4028,15 @@ impl Ctx<'_> {
         let box_w = content_w + (st.pad_left + st.pad_right) as i32 + st.border_x() as i32;
         let bg_idx = self.ops.len();
         let content_top = y0 + st.pad_top as i32 + st.border_top.width as i32;
+        // Along the main axis in a row. `content_x`/`content_w` shrink around
+        // the generated boxes so the real items never overlap them.
+        let row = st.flex_row;
+        let (lead_w, tail_w) = (
+            lead_box.as_ref().map_or(0, |b| if row { b.w } else { 0 }),
+            tail_box.as_ref().map_or(0, |b| if row { b.w } else { 0 }),
+        );
+        let gen_x = content_x;
+        let (content_x, content_w) = (content_x + lead_w, (content_w - lead_w - tail_w).max(1));
 
         let prev_cb = self.cb;
         if st.position != Position::Static {
@@ -3944,11 +4051,36 @@ impl Ctx<'_> {
             _ => None,
         };
 
-        let content_h = if st.flex_row {
+        let mut content_h = if items.is_empty() {
+            0
+        } else if st.flex_row {
             self.flex_row(&items, st, content_x, content_w, content_top, def_h)
         } else {
             self.flex_column(&items, st, content_x, content_w, content_top, def_h)
         };
+        // Place the generated boxes now that the line's height is known: on the
+        // main axis in a row (centred on the cross axis, which is what
+        // `align-items: center` does for the icon idiom), stacked before and
+        // after the content in a column.
+        for (b, at_start) in [(lead_box, true), (tail_box, false)] {
+            let Some(mut b) = b else { continue };
+            let (dx, dy) = if row {
+                let line_h = def_h.map(|v| v as i32).unwrap_or(content_h).max(b.h);
+                content_h = content_h.max(b.h);
+                let cx = if at_start { gen_x } else { gen_x + lead_w + content_w };
+                (cx, content_top + (line_h - b.h) / 2)
+            } else if at_start {
+                let d = (content_x, content_top);
+                content_h += b.h;
+                d
+            } else {
+                let d = (content_x, content_top + content_h);
+                content_h += b.h;
+                d
+            };
+            translate_op_list(&mut b.ops, dx, dy);
+            self.ops.append(&mut b.ops);
+        }
         self.cb = prev_cb;
 
         // Explicit / min / max height clamp the content-box height.
@@ -4794,7 +4926,9 @@ impl Ctx<'_> {
         let counter_base = self.counters.stack.len();
         // `el::before` — same anonymous-inline-box treatment as the block
         // path (`flow_children`), just feeding this inline run instead.
-        if let Some((text, ps)) = self.pseudo(el, st, PseudoElem::Before) {
+        if let Some(b) = self.pseudo_box(el, st, PseudoElem::Before, bw) {
+            inline.atomic(b);
+        } else if let Some((text, ps)) = self.pseudo(el, st, PseudoElem::Before) {
             inline.text(&text, &ps, href);
         }
         let sib_count = el.children.iter().filter(|n| matches!(n, Node::Element(_))).count() as u32;
@@ -4825,7 +4959,9 @@ impl Ctx<'_> {
                 }
             }
         }
-        if let Some((text, ps)) = self.pseudo(el, st, PseudoElem::After) {
+        if let Some(b) = self.pseudo_box(el, st, PseudoElem::After, bw) {
+            inline.atomic(b);
+        } else if let Some((text, ps)) = self.pseudo(el, st, PseudoElem::After) {
             inline.text(&text, &ps, href);
         }
         self.counters.stack.truncate(counter_base);
