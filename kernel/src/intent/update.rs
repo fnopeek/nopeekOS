@@ -319,13 +319,26 @@ pub fn update_all_assets() -> usize {
     let mut updated = 0usize;
 
     for entry in &entries {
-        let spec = match ASSETS.iter().find(|s| s.section == entry.section) {
-            Some(s) => s,
-            None => {
-                kprintln!("[npk]   unknown asset [{}] (skipping)", entry.section);
-                continue;
-            }
+        // A `[wallpaper:<name>]` section needs NO compile-time entry: the
+        // section name IS the filename, so shipping a new wallpaper is
+        // dropping a file into `release/assets/wallpapers/` — no kernel
+        // change and no reinstall. The trust chain is unchanged: size and
+        // sha384 come from the manifest and every asset is still checked
+        // against its own detached signature below.
+        let (npkfs_path, remote_filename) = match ASSETS.iter().find(|s| s.section == entry.section) {
+            Some(s) => (String::from(s.npkfs_path), String::from(s.remote_filename)),
+            None => match entry.section.strip_prefix("wallpaper:").filter(|n| safe_asset_name(n)) {
+                Some(name) => (
+                    alloc::format!("sys/wallpapers/{}", name),
+                    alloc::format!("wallpapers/{}", name),
+                ),
+                None => {
+                    kprintln!("[npk]   unknown asset [{}] (skipping)", entry.section);
+                    continue;
+                }
+            },
         };
+        let spec = AssetRef { npkfs_path: &npkfs_path, remote_filename: &remote_filename };
 
         let local_hash = crate::npkfs::fetch(spec.npkfs_path).ok()
             .map(|(data, _)| crate::tls::sha256::sha384(&data));
@@ -510,8 +523,49 @@ pub fn update_all_assets() -> usize {
         }
 
         kprintln!("OK");
+        // A system wallpaper is only reachable through the user's own
+        // wallpapers/ folder — that is the single directory `wallpaper
+        // list` and `wallpaper set` read. Refresh the user copy so an OTA
+        // wallpaper actually appears, and so REPLACING npk01 replaces what
+        // the user sees rather than leaving the install-time copy behind.
+        if let Some(name) = spec.npkfs_path.strip_prefix("sys/wallpapers/") {
+            copy_wallpaper_to_user(name);
+        }
         updated += 1;
     }
 
     updated
+}
+
+/// A manifest-supplied asset name we are willing to turn into a path.
+/// Deliberately strict — the name becomes part of an npkFS path, so anything
+/// that could climb out of `sys/wallpapers/` is refused. The manifest is
+/// signature-checked per asset, but a name is not a place to be trusting.
+fn safe_asset_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('.')
+        && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'.' || c == b'-' || c == b'_')
+}
+
+/// Mirror `sys/wallpapers/<name>` into the user's wallpapers folder. Unlike
+/// the installer's copy this OVERWRITES: a system wallpaper is system-managed,
+/// and the point of shipping one over OTA is that the picture on screen
+/// changes. A wallpaper the user added under a different name is untouched.
+fn copy_wallpaper_to_user(name: &str) {
+    use crate::security::capability::CAP_NULL;
+    let Some(user) = crate::config::get("name").filter(|n| !n.is_empty()) else { return };
+    let Ok((bytes, _)) = crate::npkfs::fetch(&alloc::format!("sys/wallpapers/{}", name)) else { return };
+    let target = alloc::format!("home/{}/pictures/wallpapers/{}", user, name);
+    match crate::npkfs::store(&target, &bytes, CAP_NULL) {
+        Ok(_) => kprintln!("[npk]   {} (user copy refreshed)", target),
+        Err(e) => kprintln!("[npk]   user copy failed: {} — {:?}", target, e),
+    }
+}
+
+/// One asset's two paths, borrowed — the static table and the dynamic
+/// wallpaper case produce the same shape.
+struct AssetRef<'a> {
+    npkfs_path: &'a str,
+    remote_filename: &'a str,
 }
