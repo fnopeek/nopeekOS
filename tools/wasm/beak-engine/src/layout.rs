@@ -1515,7 +1515,7 @@ impl Ctx<'_> {
                 let (iw, ih) = self.img_box(el, &st);
                 let alt = el.attr("alt").unwrap_or("").trim().to_string();
                 let src = el.attr("src").unwrap_or("").to_string();
-                inline.image(src, iw, ih, None, alt, st.hidden, st.transparent);
+                inline.image(src, iw, ih, None, alt, st.hidden, st.transparent, self.image_deco(&st));
                 self.path.pop();
                 continue;
             }
@@ -1595,7 +1595,7 @@ impl Ctx<'_> {
             // a line box separates margins, so the open margin commits here.
             if !inline.is_empty() {
                 let ly = anchor + open.value() as i32;
-                let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, parent.text_align, parent.text_align_last, parent.rtl, parent.text_indent.px(w as f32).unwrap_or(0.0), parent.line_height.px(parent.font_px).unwrap_or(0.0), &mut self.ops, &mut self.links, &mut self.controls, &mut self.last_baseline);
+                let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, parent.text_align, parent.text_align_last, parent.rtl, parent.text_indent.px(w as f32).unwrap_or(0.0), parent.line_height.px(parent.font_px).unwrap_or(0.0), &mut self.ops, &mut self.links, &mut self.controls, &mut self.inspects, &mut self.last_baseline);
                 if !committed {
                     first_top = ly;
                     committed = true;
@@ -1687,7 +1687,7 @@ impl Ctx<'_> {
         }
         if !inline.is_empty() {
             let ly = anchor + open.value() as i32;
-            let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, parent.text_align, parent.text_align_last, parent.rtl, parent.text_indent.px(w as f32).unwrap_or(0.0), parent.line_height.px(parent.font_px).unwrap_or(0.0), &mut self.ops, &mut self.links, &mut self.controls, &mut self.last_baseline);
+            let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, parent.text_align, parent.text_align_last, parent.rtl, parent.text_indent.px(w as f32).unwrap_or(0.0), parent.line_height.px(parent.font_px).unwrap_or(0.0), &mut self.ops, &mut self.links, &mut self.controls, &mut self.inspects, &mut self.last_baseline);
             if !committed {
                 first_top = ly;
                 committed = true;
@@ -2351,10 +2351,19 @@ impl Ctx<'_> {
     /// boxes fill any missing row/row-group/cell wrapper (CSS2 §17.2.1).
     fn layout_table(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
         // <caption> renders as a block on the table's top or bottom edge
-        // (CSS2.1 §17.4.1), per its own `caption-side`.
-        let mut y = self.layout_captions(el, st, x, w, y0, false);
+        // (CSS2.1 §17.4.1), per its own `caption-side` — aligned with the
+        // TABLE box, so the table's horizontal margins have to come off first.
+        // `layout_table_body` applies them to the grid; without the same shift
+        // here a floated table with a left margin puts its caption a margin's
+        // width further left than the rows above it, which is exactly what
+        // MediaWiki's image thumbs (`margin-left: 1.4em`) show.
+        let cbw = w as f32;
+        let ml = st.margin_left.px(cbw).unwrap_or(0.0) as i32;
+        let mr = st.margin_right.px(cbw).unwrap_or(0.0) as i32;
+        let (cx, cw) = (x + ml, (w - ml - mr).max(0));
+        let mut y = self.layout_captions(el, st, cx, cw, y0, false);
         y = self.layout_table_body(&el.children, st, x, w, y);
-        self.layout_captions(el, st, x, w, y, true)
+        self.layout_captions(el, st, cx, cw, y, true)
     }
 
     /// Lay out the caption children whose `caption-side` puts them on the
@@ -4658,6 +4667,7 @@ impl Ctx<'_> {
         let outer_w = ceil_i32(content_w + pad_border + ml + mr).max(1);
 
         let (o0, l0, c0) = (self.ops.len(), self.links.len(), self.controls.len());
+        let i0 = self.inspects.len();
         let saved_floats = core::mem::take(&mut self.floats);
         let saved_baseline = self.last_baseline.take();
         self.path.push(ElemInfo::of(el));
@@ -4672,6 +4682,7 @@ impl Ctx<'_> {
         let ops: Vec<DrawOp> = self.ops.drain(o0..).collect();
         let links: Vec<LinkRect> = self.links.drain(l0..).collect();
         let controls: Vec<ControlRect> = self.controls.drain(c0..).collect();
+        let inspects: Vec<InspectBox> = self.inspects.drain(i0..).collect();
         let h = (border_bottom + st.margin_bottom as i32).max(0);
         // The box aligns on its LAST line box's baseline; with no in-flow line
         // box, or when it clips its overflow, it aligns on its bottom margin
@@ -4680,7 +4691,7 @@ impl Ctx<'_> {
             Some(b) if !st.overflow_clip => b.clamp(0, h),
             _ => h,
         };
-        Some(AtomicBox { ops, links, controls, w: outer_w, h, baseline })
+        Some(AtomicBox { ops, links, controls, inspects, w: outer_w, h, baseline })
     }
 
     /// The inline box an inline-level child needs, if any: one that paints
@@ -4719,6 +4730,33 @@ impl Ctx<'_> {
         })
     }
 
+    /// The box decoration an `<img>` paints around its pixels. A replaced
+    /// element is atomic in the inline flow but it still has a box: MediaWiki
+    /// frames every thumbnail with `border: 1px solid` on the `<img>` itself,
+    /// and without this the picture sits in its figure with no frame at all.
+    /// Reuses `InlineBox` for the values; only the vertical extent differs —
+    /// an image's content box is the image, not a font's ascent + descent.
+    fn image_deco(&self, st: &ComputedStyle) -> Option<InlineBox> {
+        let edge = |s: &BorderSide| s.width > 0.0 && s.color.is_some();
+        let paints = st.bg.is_some()
+            || edge(&st.border_top)
+            || edge(&st.border_right)
+            || edge(&st.border_bottom)
+            || edge(&st.border_left);
+        if !paints {
+            return None;
+        }
+        Some(InlineBox {
+            st: *st,
+            bg: None,
+            mask: None,
+            lead: st.border_left.width + st.pad_left,
+            trail: st.pad_right + st.border_right.width,
+            margin_left: 0.0,
+            margin_right: 0.0,
+        })
+    }
+
     fn collect_inline(&mut self, el: &Element, st: &ComputedStyle, href: Option<&str>, inline: &mut Inline, bx: i32, bw: i32, by: i32) {
         if st.is_break {
             inline.brk();
@@ -4739,7 +4777,7 @@ impl Ctx<'_> {
         if el.tag == "img" {
             let (iw, ih) = self.img_box(el, st);
             let src = el.attr("src").unwrap_or("").to_string();
-            inline.image(src, iw, ih, href, el.attr("alt").unwrap_or("").trim().to_string(), st.hidden, st.transparent);
+            inline.image(src, iw, ih, href, el.attr("alt").unwrap_or("").trim().to_string(), st.hidden, st.transparent, self.image_deco(st));
             return;
         }
         if let Some(kind) = crate::forms::kind_of(el) {
@@ -4831,6 +4869,11 @@ struct AtomicBox {
     ops: Vec<DrawOp>,
     links: Vec<LinkRect>,
     controls: Vec<ControlRect>,
+    /// Inspect boxes recorded while laying this box out at the origin. They
+    /// move with it — without that the dev tool reports every box inside an
+    /// `inline-block` at the page's top-left corner, which reads as a layout
+    /// bug that is not there.
+    inspects: Vec<InspectBox>,
     /// Margin-box size — what the line reserves.
     w: i32,
     h: i32,
@@ -4838,6 +4881,7 @@ struct AtomicBox {
     baseline: i32,
 }
 
+#[derive(Clone)]
 /// An inline-level box that decorates itself or reserves horizontal space —
 /// `<a class="external">` with its arrow icon, a badged `<span>`. Unlike a
 /// block box it has no geometry of its own: it takes as many rectangles as it
@@ -4872,7 +4916,7 @@ enum Item {
     /// style="line-height:5"></span>X` is a tall line — but it never makes a
     /// line non-empty, so a line holding nothing else is still not generated.
     Strut(RunStyle),
-    Image { src: String, w: i32, h: i32, href: Option<String>, alt: String, space_before: bool, hidden: bool, transparent: bool },
+    Image { src: String, w: i32, h: i32, href: Option<String>, alt: String, space_before: bool, hidden: bool, transparent: bool, deco: Option<alloc::boxed::Box<InlineBox>> },
     Control { ctl: CtlBox, space_before: bool },
     /// `display: inline-block` — laid out already, waiting for its position.
     /// The finished display list is MOVED out when the line box places it;
@@ -5241,10 +5285,11 @@ impl Inline {
 
     /// Add an atomic `<img>` (decoded or a placeholder) to the inline run,
     /// carrying the enclosing link so an image-in-a-link stays clickable.
-    fn image(&mut self, src: String, w: i32, h: i32, href: Option<&str>, alt: String, hidden: bool, transparent: bool) {
+    #[allow(clippy::too_many_arguments)]
+    fn image(&mut self, src: String, w: i32, h: i32, href: Option<&str>, alt: String, hidden: bool, transparent: bool, deco: Option<InlineBox>) {
         let space_before = self.pending_space && !self.items.is_empty();
         self.pending_space = false;
-        self.items.push(Item::Image { src, w, h, href: href.map(|s| s.to_string()), alt, space_before, hidden, transparent });
+        self.items.push(Item::Image { src, w, h, href: href.map(|s| s.to_string()), alt, space_before, hidden, transparent, deco: deco.map(alloc::boxed::Box::new) });
     }
 
     /// Add a laid-out `inline-block` to the inline run.
@@ -5325,6 +5370,7 @@ impl Inline {
         ops: &mut Vec<DrawOp>,
         links: &mut Vec<LinkRect>,
         controls: &mut Vec<ControlRect>,
+        inspects: &mut Vec<InspectBox>,
         last_baseline: &mut Option<i32>,
     ) -> i32 {
         // Each word/segment measures with its own face (a monospace run advances
@@ -5391,7 +5437,7 @@ impl Inline {
                         y += ceil_i32(strut_h);
                     } else {
                         *last_baseline = Some(y + line_ascent as i32);
-                        y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
+                        y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls, inspects);
                     }
                     let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                     pen = bl as f32;
@@ -5407,7 +5453,7 @@ impl Inline {
                     if !style.nowrap && !line.is_empty() && pen + sw + ww > right {
                         *last_baseline = Some(y + line_ascent as i32);
                         break_frags(&mut open, &mut frags, pen);
-                        y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
+                        y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls, inspects);
                         let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                         pen = bl as f32;
                         right = br as f32;
@@ -5430,7 +5476,7 @@ impl Inline {
                                 if !line.is_empty() {
                                     *last_baseline = Some(y + line_ascent as i32);
                                     break_frags(&mut open, &mut frags, pen);
-                                    y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
+                                    y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls, inspects);
                                     let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                                     pen = bl as f32;
                                     right = br as f32;
@@ -5486,7 +5532,7 @@ impl Inline {
                     if !line.is_empty() && pen + sw + b.w as f32 > right {
                         *last_baseline = Some(y + line_ascent as i32);
                         break_frags(&mut open, &mut frags, pen);
-                        y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
+                        y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls, inspects);
                         let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                         pen = bl as f32;
                         right = br as f32;
@@ -5499,7 +5545,11 @@ impl Inline {
                     gap = gap.max(b.h as f32);
                     line.push(Placed::Atomic { x: (pen - b.w as f32) as i32, box_: b });
                 }
-                Item::Image { src, w: iw, h: ih, href, alt, space_before, hidden, transparent } => {
+                Item::Image { src, w: iw, h: ih, href, alt, space_before, hidden, transparent, deco } => {
+                    // The frame an `<img>` paints around itself is part of the
+                    // space it takes on the line — measure with it, or the
+                    // border overlaps whatever comes next.
+                    let (fl, fr) = deco.as_ref().map_or((0.0, 0.0), |d| (d.lead, d.trail));
                     // Fit the image to the content width, keeping aspect.
                     let (mut bw, mut bh) = (*iw as f32, *ih as f32);
                     if bw > w as f32 {
@@ -5511,7 +5561,7 @@ impl Inline {
                     if !line.is_empty() && pen + sw + bw as f32 > right {
                         *last_baseline = Some(y + line_ascent as i32);
                         break_frags(&mut open, &mut frags, pen);
-                        y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
+                        y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls, inspects);
                         let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                         pen = bl as f32;
                         right = br as f32;
@@ -5519,7 +5569,7 @@ impl Inline {
                         gap = 0.0;
                     }
                     let lead = if line.is_empty() { 0.0 } else { sw };
-                    let sx = (pen + lead) as i32;
+                    let sx = (pen + lead + fl) as i32;
                     line.push(Placed::Image {
                         x: sx,
                         w: bw,
@@ -5529,8 +5579,9 @@ impl Inline {
                         alt: alt.clone(),
                         hidden: *hidden,
                         transparent: *transparent,
+                        deco: deco.clone(),
                     });
-                    pen += lead + bw as f32;
+                    pen += lead + fl + bw as f32 + fr;
                     line_ascent = line_ascent.max(bh as f32);
                     gap = gap.max(bh as f32 + 2.0);
                 }
@@ -5539,7 +5590,7 @@ impl Inline {
                     if !line.is_empty() && pen + sw + ctl.w as f32 > right {
                         *last_baseline = Some(y + line_ascent as i32);
                         break_frags(&mut open, &mut frags, pen);
-                        y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
+                        y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls, inspects);
                         let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                         pen = bl as f32;
                         right = br as f32;
@@ -5562,7 +5613,7 @@ impl Inline {
         if line_exists(&line, &frags) {
             let a = align_last.unwrap_or(align);
             *last_baseline = Some(y + line_ascent as i32);
-            y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(a, rtl, pen, right), ops, links, controls);
+            y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(a, rtl, pen, right), ops, links, controls, inspects);
         }
         y
     }
@@ -5573,7 +5624,7 @@ impl Inline {
 enum Placed<'a> {
     Text(Seg),
     Atomic { x: i32, box_: AtomicBox },
-    Image { x: i32, w: i32, h: i32, src: String, href: Option<String>, alt: String, hidden: bool, transparent: bool },
+    Image { x: i32, w: i32, h: i32, src: String, href: Option<String>, alt: String, hidden: bool, transparent: bool, deco: Option<alloc::boxed::Box<InlineBox>> },
     Control { x: i32, ctl: &'a CtlBox },
 }
 
@@ -5820,6 +5871,7 @@ fn emit_line(
     ops: &mut Vec<DrawOp>,
     links: &mut Vec<LinkRect>,
     controls: &mut Vec<ControlRect>,
+    inspects: &mut Vec<InspectBox>,
 ) -> i32 {
     let line_top = y;
     let baseline = y + line_ascent as i32;
@@ -5884,15 +5936,20 @@ fn emit_line(
                     c.x += dx;
                     c.y += dy;
                 }
+                for b in &mut box_.inspects {
+                    b.x += dx;
+                    b.y += dy;
+                }
                 ops.append(&mut box_.ops);
                 links.append(&mut box_.links);
                 controls.append(&mut box_.controls);
+                inspects.append(&mut box_.inspects);
             }
             Placed::Control { x, ctl } => {
                 let top = baseline - (ctl.h - CTL_PAD_Y);
                 paint_control(fonts, theme, ctl, x + dx, top, ops, controls);
             }
-            Placed::Image { x, w, h, src, href, alt, hidden, transparent } => {
+            Placed::Image { x, w, h, src, href, alt, hidden, transparent, deco } => {
                 let x = x + dx;
                 let top = baseline - h; // image bottom sits on the baseline
                 if let (Some(href), false) = (&href, hidden) {
@@ -5901,6 +5958,17 @@ fn emit_line(
                 // Emitted whether or not the pixels have arrived — the
                 // rasteriser draws the placeholder when the lookup misses.
                 if !hidden && !transparent {
+                    // The image's own box, under its pixels: a replaced element
+                    // is atomic in the flow but still paints a background and a
+                    // border (MediaWiki frames every thumbnail this way).
+                    if let Some(d) = &deco {
+                        let st = &d.st;
+                        let (bx, by) = (x - d.lead as i32, top - (st.pad_top + st.border_top.width) as i32);
+                        let bw = w + (d.lead + d.trail) as i32;
+                        let bh = h + (st.pad_top + st.pad_bottom + st.border_y()) as i32;
+                        bg_ops(st, None, None, bx, by, bw, bh, ops);
+                        border_ops(st, bx, by, bw, bh, (true, true), ops);
+                    }
                     ops.push(DrawOp::Image { x, y: top, w, h, src, alt });
                 }
             }
