@@ -9,36 +9,44 @@ use std::fs;
 use beak_engine::css::{self, ElemInfo, Stylesheet};
 use beak_engine::dom::{self, Element, Node};
 
-/// Properties `style::apply_one` actually handles (kept in sync by hand from
-/// the top-level `match prop` arms).
-const IMPLEMENTED: &[&str] = &[
-    "align-items","align-self","background","background-color","border","border-bottom",
-    "border-bottom-color","border-bottom-style","border-bottom-width","border-color",
-    "border-left","border-left-color","border-left-style","border-left-width","border-right",
-    "border-right-color","border-right-style","border-right-width","border-style","border-top",
-    "border-top-color","border-top-style","border-top-width","border-width","bottom",
-    "box-sizing","clear","clip","color","column-gap","contain","contain-intrinsic-size",
-    "display","flex","flex-basis","flex-direction","flex-flow","flex-grow","flex-shrink",
-    "flex-wrap","float","font-family","font-size","font-style","font-weight","gap","grid",
-    "grid-area","grid-auto-rows","grid-column","grid-column-start","grid-gap","grid-row",
-    "grid-row-start","grid-template","grid-template-areas","grid-template-columns",
-    "grid-template-rows","height","justify-content","justify-items","justify-self","left",
-    "margin","margin-bottom","margin-left","margin-right","margin-top","max-height",
-    "max-width","min-height","min-width","order","padding","padding-bottom","padding-left",
-    "padding-right","padding-top","place-items","place-self","position","right","row-gap",
-    "table-layout","top","white-space","width","z-index",
-    "text-align","text-align-last","text-transform","list-style","list-style-type",
-    "line-height","direction","font",
-    "margin-inline","margin-inline-start","margin-inline-end","margin-block",
-    "margin-block-start","margin-block-end","padding-inline","padding-inline-start",
-    "padding-inline-end","padding-block","padding-block-start","padding-block-end",
-    "border-collapse","border-spacing","empty-cells","counter-reset","counter-increment",
-    "opacity","visibility","content",
-    "text-decoration","text-decoration-line","caption-side","vertical-align",
-    "border-radius","border-top-left-radius","border-top-right-radius",
-    "border-bottom-right-radius","border-bottom-left-radius",
-    "overflow","overflow-wrap","word-wrap","word-break",
-];
+/// Every property `style::apply_one` actually handles, read out of the source
+/// at run time. This list used to be maintained by hand and went stale twice —
+/// once claiming `background-image` was missing months after it shipped, which
+/// put a phantom item at the top of the priority list. Deriving it costs one
+/// file read and cannot drift.
+fn implemented() -> std::collections::HashSet<String> {
+    let src = fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/style.rs"),
+    )
+    .expect("src/style.rs");
+    let body = src
+        .split_once("fn apply_one")
+        .expect("apply_one")
+        .1;
+    let mut out = std::collections::HashSet::new();
+    for line in body.lines() {
+        // A match arm head sits at exactly 8 spaces and starts with a string
+        // pattern. `"a" | "b" => …` puts several on one line; a pattern broken
+        // over lines continues with `| "c"`.
+        let ind = line.len() - line.trim_start().len();
+        let t = line.trim_start();
+        if ind != 8 || !(t.starts_with('"') || t.starts_with("| \"")) {
+            continue;
+        }
+        // Only what precedes `=>` is the pattern; the arm body may hold strings
+        // of its own (values, keywords) that are not property names.
+        let pat = t.split("=>").next().unwrap_or("");
+        let mut rest = pat;
+        while let Some(a) = rest.find('"') {
+            let Some(b) = rest[a + 1..].find('"') else { break };
+            out.insert(rest[a + 1..a + 1 + b].to_string());
+            rest = &rest[a + b + 2..];
+        }
+    }
+    assert!(out.len() > 100, "apply_one scrape found only {} arms — did the shape change?", out.len());
+    out
+}
+
 
 struct Ctx<'a> {
     ss: &'a Stylesheet,
@@ -180,7 +188,7 @@ fn gap() {
     let mut anc = Vec::new();
     walk(&mut ctx, &d.root, &mut anc);
 
-    let impl_set: std::collections::HashSet<&str> = IMPLEMENTED.iter().copied().collect();
+    let impl_set = implemented();
     let mut rows: Vec<(u32, String, bool, Vec<(String, u32)>)> = ctx
         .tally
         .into_iter()
