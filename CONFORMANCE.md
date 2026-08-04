@@ -22,15 +22,15 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-04, beak 0.3.3)
+### Current number (measured 2026-08-04, beak 0.3.4)
 
 ```
-3926 pass / 1680 fail / 180 inconclusive   (of 5786 vendored reftests)
-= 70.0 % of the conclusive 5606
+3959 pass / 1647 fail / 180 inconclusive   (of 5786 vendored reftests)
+= 70.6 % of the conclusive 5606
 ```
 
 Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → 3746 → 3863 → 3869 →
-3870 (0.3.0) → 3880 (0.3.2) → **3926** (0.3.3). The inconclusive count fell 254 → 180 over that
+3870 (0.3.0) → 3880 (0.3.2) → 3926 (0.3.3) → **3959** (0.3.4). The inconclusive count fell 254 → 180 over that
 span: references that used to render blank — because `:root` was dropped,
 because an `inline-block` had no box, or because an inline box painted no
 background — now paint, so 73 more tests actually measure something.
@@ -54,6 +54,13 @@ threshold it was already sitting on; one is a scrollable-baseline test.
 **And the real page did not move by one pixel** — de.wikipedia/Stansstad
 renders byte-identically before and after, because MediaWiki always writes the
 `border` shorthand. The change is oracle-only on that page.
+
+**0.3.4: +33 gained, 0 lost** — `content: attr(X)` (item 20). One function,
+one family: 42 of the 51 remaining `CSS2/content-*` failures were `attr()`,
+and they all sat at 0.63–0.70 % diff, i.e. one missing string away from green.
+Picking it came out of a census of the 1680 remaining failures by family
+rather than by suite — the biggest was `CSS2/content` at 51, and reading what
+those values actually asked for is what identified the single lever.
 
 Per suite (pass / total of that suite, inconclusive included in the total):
 
@@ -189,7 +196,7 @@ discarded rather than mis-applied): every pseudo-class outside
 `:empty`, `:disabled`, `:has()`. Pseudo-*elements* other than
 `::before`/`::after` also drop the rule.
 
-**Value syntax not understood:** `attr()`, `env()`,
+**Value syntax not understood:** `env()`,
 `linear-gradient()`/`radial-gradient()`/`conic-gradient()`, `image-set()`.
 A gradient is *recognised* in the `background` shorthand (so it resets the
 colour, as the spec says) but never painted.
@@ -543,6 +550,30 @@ menu to pick from.
     reftests averaged into one number cannot say that
     ([[feedback-byte-identical-render-gate]]).
 
+20. ✅ **`content: attr(X)` (0.3.4).** +33, **zero losses** — the cleanest
+    entry in this file.
+
+    How it was picked matters more than what it was: a census of the 1680
+    remaining failures **by family name** rather than by suite put
+    `CSS2/content` on top at 51, and reading what those `content` values
+    actually asked for showed **42 of the 51 were `attr()`** — one function.
+    All of them sat at 0.63–0.70 % diff, one missing string away from the
+    0.5 % threshold. Suite-level numbers would never have surfaced that:
+    CSS2 is the biggest suite by far, so its share of the failures looks
+    unremarkable until it is broken down.
+
+    `attr()` takes exactly ONE argument. The type/fallback arguments are
+    css-values-5 and would change what the value MEANS, so they invalidate the
+    declaration rather than being ignored. A missing attribute is the empty
+    string, not a dropped value (CSS2.1 §12.2) — the box is still generated.
+
+    The 9 `attr()` tests still failing are not about `attr()`: five put the
+    `::before` on `html`/`head` (layout starts at `<body>`), and
+    `content-048`'s 99.89 % is the `<body bgcolor>` presentational hint, which
+    we do not honour. The rest of the family is 3 `counters()` styles
+    (`lower-greek`, `armenian`, `georgian`), `open-quote`, and 4 tests where a
+    `\A` in generated content has to force a line break.
+
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the
 cursor), `user-select`/`touch-action`/`overflow-anchor`/`scroll-margin`
@@ -586,13 +617,14 @@ cursor), `user-select`/`touch-action`/`overflow-anchor`/`scroll-margin`
 | Block flow (vertical stacking) | CSS2.1 §9 | ✅ | block formatting context (`layout.rs`): stack + adjacent-sibling **margin collapse**; anonymous inline runs flushed at block boundaries |
 | Inline flow / line boxes | CSS2.1 §9.4.2 | ✅ | line boxes with **mixed-style runs** (size/colour/weight/italic) sharing a baseline; greedy wrap; `<a>`/`<b>`/`<i>`/`<code>` flow inline; `<br>` breaks. Atomic inline boxes: `<img>`, form controls and **`display: inline-block`** (a full block box laid out at the origin, then translated into its line; aligned on its own last line box's baseline). **Non-atomic inline boxes carry a box too** (0.3.2): horizontal margin/border/padding advance the flow and each line box gets a decoration rectangle, sliced so only the first/last fragment carries the left/right edge. A `display: block` child does not split its inline ancestor into anonymous boxes yet. No bidi/UAX-14 yet |
 | Box model (margin/border/padding) | css-box-3 | 🟡 | full block box model: `width`/`min-width`/`max-width`, `margin` (4-side + **`auto` centering**, §10.3.3 + §10.4 min/max redo), `padding` (4-side), **per-side borders** (width/style/colour), `box-sizing`, logical `margin-inline`/`-block` + `padding-inline`/`-block`, vertical margin collapse → **centered `max-width` containers work**. No `border-radius` |
+| Generated content (`::before`/`::after`) | CSS2.1 §12 | 🟡 | `content` as concatenated `<string>` tokens (with css-syntax-3 §4.3.7 escapes), **`counter()`/`counters()`** against a real counter scope (`counter-reset`/`counter-increment`, nesting by tree depth) and **`attr(X)`** — the originating element's attribute, empty string when absent. Any other component (`open-quote`/`close-quote`, `url()`, an unknown identifier) makes the WHOLE value produce nothing rather than render half of it. The generated box is inline-level only: a `::before` with a `display`/`width`/`height` of its own is skipped, and `html::before`/`head::before` never render because layout starts at `<body>` |
 | `text-indent` | css-text-3 §7 | 🟡 | the block's FIRST line box starts in from the content edge (lengths, percentages of the containing block, negative hanging values). Inherited. **Not counted in intrinsic widths** — a shrink-to-fit box around indented text comes out that much too narrow |
 | Text wrapping / `white-space` | css-text-3 | 🟡 | `normal` collapse+wrap and `pre` (each source line its own line box, trailing spaces hang, §8); `<br>` forces a break even under max-content. **`word-break`/`overflow-wrap`/`word-wrap: break-word`** split an over-long word at the last character that fits, never inside a grapheme cluster (ZWJ sequences, variation selectors, skin tones, keycaps, combining marks, flags, tag sequences). `pre-wrap`/`pre-line`/`nowrap` are **not** distinguished from `pre`/`normal`. No `hyphens`, no UAX-14 line breaking, no bidi reordering |
 | Tables (`table`/`tr`/`td`/`th`) | css-tables-3 | 🟡 | `layout.rs`: §17.2.1 anonymous-box fixup, auto **and** `table-layout: fixed` column algorithms, `colspan` (spanning cells distribute only the shortfall), **both border models** — `border-collapse` (winner-takes-the-edge, half the collapsed line per cell, incl. in column widths) and separated with `border-spacing` + `empty-cells` — the `border`/`cellpadding`/`cellspacing` presentation attributes, table border box + `auto` horizontal centring, `<caption>`. **`caption-side`** and per-cell **`vertical-align`** (`top`/`middle`/`bottom`; `baseline` degrades to `top` — no cross-cell baseline alignment). No `rowspan`, `display:inline-table` is block-level |
 | Flexbox | css-flexbox-1 | 🟡 | `layout.rs::layout_flex`: row/column, **multi-line wrap**, `flex-grow`/`-shrink`/`-basis` + `flex` shorthand, `gap`, `justify-content` (all 6), `align-items`/`align-self`, `order`, per-item `margin:auto`, automatic content minimum size. No reverse directions, no baseline alignment, no `align-content`, no writing modes. **Weakest suite at 25.7 %** — see the gap map |
 | Grid | css-grid-2 | 🟡 | `layout.rs::layout_grid`: `grid-template-columns`/`-rows` (px/%/`fr`/`auto`/`repeat()`/`minmax()`≈), `grid-template-areas`, `grid-auto-rows`, row-major auto-placement, `grid-column`/`-row` (`span N`, `A / B`), `grid-area`, `gap`, `justify-items`/`justify-self`/`place-*`. No dense flow, no abspos-in-grid, no orthogonal/RTL flows |
 | Positioning (rel/abs/fixed/sticky) | css-position-3 | 🟡 | `relative` (in-flow paint offset) + `absolute`/`fixed` (out of flow, positioned vs nearest `position!=static` ancestor's box / page). `top`/`left`/`right`/**`bottom`** (§10.6.4); `top`/`bottom` percentages resolve against the containing block's **height** (§9.3.2). **`z-index`** via recorded display-list ranges stable-sorted at the end of layout (§9.9) — the ranges must stay disjoint, a leaking throwaway measurement corrupts the whole list. `sticky` parses but lays out without offsets; `fixed` scrolls with the page |
-| Values & units (px/em/%/rem/…) | css-values-4 | 🟡 | `values.rs`: `px`/`em`/`rem`/`ex`/`ch`/`%`/`vw`/`vh`/`vmin`/`vmax`/`pt`/`pc`/`cm`/`mm`/`in`/`Q`, `auto`, `fr`, plus **`calc()`** with `+ - * /` and nesting (one code path for a bare `16px`, a `50%` and a full `calc(100% - 3rem)`). plus **`min()`/`max()`** (variadic) and **`clamp()`**, nestable in any combination with `calc()`. `rem` resolves against the root element, not the parent. No `attr()`/`env()` — those drop the declaration |
+| Values & units (px/em/%/rem/…) | css-values-4 | 🟡 | `values.rs`: `px`/`em`/`rem`/`ex`/`ch`/`%`/`vw`/`vh`/`vmin`/`vmax`/`pt`/`pc`/`cm`/`mm`/`in`/`Q`, `auto`, `fr`, plus **`calc()`** with `+ - * /` and nesting (one code path for a bare `16px`, a `50%` and a full `calc(100% - 3rem)`). plus **`min()`/`max()`** (variadic) and **`clamp()`**, nestable in any combination with `calc()`. `rem` resolves against the root element, not the parent. `attr()` works in `content` (see Generated content); as a LENGTH (css-values-5) it still drops the declaration, as does `env()` |
 
 ## CSS — paint
 
