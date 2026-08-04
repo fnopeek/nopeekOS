@@ -2091,7 +2091,7 @@ impl Ctx<'_> {
             focused,
             caret,
             bg: st.bg,
-            style: RunStyle { hidden: st.hidden, transparent: st.transparent, size, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: crate::style::VAlign::Baseline, deco: st.deco, break_word: st.break_word, lh: st.line_height.px(size).unwrap_or(0.0) },
+            style: RunStyle { hidden: st.hidden, transparent: st.transparent, size, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: crate::style::VAlign::Baseline, deco: st.deco, break_word: st.break_word, nowrap: st.nowrap, lh: st.line_height.px(size).unwrap_or(0.0) },
         }
     }
 
@@ -4575,7 +4575,14 @@ fn flush_run(fonts: &crate::fonts::Fonts, st: &ComputedStyle, run: &mut Run, pre
     let font = fonts.pick(st.bold, st.italic, st.mono);
     let size = st.font_px;
     let p = measure(font, collapsed.trim(), size) + frame;
-    let m = collapsed.split_whitespace().map(|wd| measure(font, wd, size)).fold(0.0f32, f32::max) + frame;
+    // `white-space: nowrap` has no break opportunities, so min-content is the
+    // whole line — not its widest word. Without this a shrink-to-fit box around
+    // a nowrap run is sized to one word and the run hangs out of it.
+    let m = if st.nowrap {
+        p
+    } else {
+        collapsed.split_whitespace().map(|wd| measure(font, wd, size)).fold(0.0f32, f32::max) + frame
+    };
     // Inside a row (or any inline-axis container) a run of stray inline content
     // is one anonymous cell sitting BESIDE its siblings, so it adds to the
     // row's width instead of competing with it (CSS2.1 §17.2.1).
@@ -4811,6 +4818,9 @@ struct RunStyle {
     deco: u8,
     /// `overflow-wrap`/`word-break` allow splitting this run mid-word.
     break_word: bool,
+    /// `white-space: nowrap` — this run's spaces are not break opportunities,
+    /// so the line grows past its box rather than wrapping.
+    nowrap: bool,
     /// Used `line-height` in px, or 0 for `normal` (use the face's metrics).
     lh: f32,
 }
@@ -5202,7 +5212,7 @@ impl Inline {
 
     /// Add collapsed text from one text node under style `st`.
     fn text(&mut self, raw: &str, st: &ComputedStyle, href: Option<&str>) {
-        let rs = RunStyle { hidden: st.hidden, transparent: st.transparent, size: st.font_px, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: st.valign, deco: st.deco, break_word: st.break_word, lh: st.line_height.px(st.font_px).unwrap_or(0.0) };
+        let rs = RunStyle { hidden: st.hidden, transparent: st.transparent, size: st.font_px, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: st.valign, deco: st.deco, break_word: st.break_word, nowrap: st.nowrap, lh: st.line_height.px(st.font_px).unwrap_or(0.0) };
         let mut word = String::new();
         for ch in raw.chars() {
             if ch.is_whitespace() {
@@ -5284,6 +5294,7 @@ impl Inline {
             valign: st.valign,
             deco: st.deco,
             break_word: st.break_word,
+            nowrap: st.nowrap,
             lh: st.line_height.px(st.font_px).unwrap_or(0.0),
         }));
     }
@@ -5391,7 +5402,9 @@ impl Inline {
                 Item::Word { text, style, href, space_before } => {
                     let ww = measure(face(style), text, style.size);
                     let sw = if *space_before { space_width(face(style), style.size) } else { 0.0 };
-                    if !line.is_empty() && pen + sw + ww > right {
+                    // `white-space: nowrap`: the space before this word is not a
+                    // break opportunity, so the line overflows instead.
+                    if !style.nowrap && !line.is_empty() && pen + sw + ww > right {
                         *last_baseline = Some(y + line_ascent as i32);
                         break_frags(&mut open, &mut frags, pen);
                         y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
