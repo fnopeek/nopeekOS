@@ -464,6 +464,91 @@ fn uniform_border(st: &ComputedStyle) -> Option<(f32, Rgb)> {
     Some((w, c))
 }
 
+/// One box's background layer, bottom-up: colour (or a mask stencilling it),
+/// then the image. Shared by block boxes, which insert it UNDER content they
+/// have already emitted, and by inline-box fragments, which push it ahead of
+/// their line's text. The keys are resolved by the caller — only it knows
+/// where to register the image the layout still needs.
+fn bg_ops(st: &ComputedStyle, bg: Option<u64>, mask: Option<u64>, x: i32, y: i32, w: i32, h: i32, out: &mut Vec<DrawOp>) {
+    match (st.bg, mask) {
+        (Some(color), Some(key)) => out.push(DrawOp::BgImage {
+            x,
+            y,
+            w,
+            h,
+            key,
+            repeat: st.mask_layer.repeat,
+            pos: st.mask_layer.pos,
+            size: st.mask_layer.size,
+            tint: Some(color),
+        }),
+        (Some(color), None) => {
+            let r = radii_px(st, w);
+            out.push(if r.iter().any(|&v| v > 0.0) {
+                DrawOp::RoundRect { x, y, w, h, r, color, ring: 0.0 }
+            } else {
+                DrawOp::Rect { x, y, w, h, color }
+            });
+        }
+        // A mask with no colour to stencil paints nothing at all.
+        (None, _) => {}
+    }
+    if let Some(key) = bg {
+        out.push(DrawOp::BgImage {
+            x,
+            y,
+            w,
+            h,
+            key,
+            repeat: st.bg_layer.repeat,
+            pos: st.bg_layer.pos,
+            size: st.bg_layer.size,
+            tint: None,
+        });
+    }
+}
+
+/// One box's four border edges. `sides` says whether the box's left and right
+/// edges belong to THIS rectangle — a fragment of an inline box that continues
+/// on from the previous line, or breaks onto the next one, carries neither
+/// (the `box-decoration-break: slice` default).
+fn border_ops(st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, sides: (bool, bool), out: &mut Vec<DrawOp>) {
+    // A rounded border can only be stroked as one shape, so it needs all four
+    // sides to agree; anything else falls through to the four independent
+    // edges below (square corners, visibly wrong only once the radius is
+    // larger than the border).
+    let r = radii_px(st, w);
+    if sides == (true, true) && r.iter().any(|&v| v > 0.0) {
+        if let Some((bw, bc)) = uniform_border(st) {
+            out.push(DrawOp::RoundRect { x, y, w, h, r, color: bc, ring: bw });
+            return;
+        }
+    }
+    // Each side paints independently on the border-box edge.
+    let side = |out: &mut Vec<DrawOp>, s: &BorderSide, rect: (i32, i32, i32, i32)| {
+        if let (Some(c), true) = (s.color, s.width > 0.0) {
+            let (rx, ry, rw, rh) = rect;
+            if rw > 0 && rh > 0 {
+                out.push(DrawOp::Rect { x: rx, y: ry, w: rw, h: rh, color: c });
+            }
+        }
+    };
+    let (bt, br, bb, bl) = (
+        st.border_top.width as i32,
+        st.border_right.width as i32,
+        st.border_bottom.width as i32,
+        st.border_left.width as i32,
+    );
+    side(out, &st.border_top, (x, y, w, bt));
+    side(out, &st.border_bottom, (x, y + h - bb, w, bb));
+    if sides.0 {
+        side(out, &st.border_left, (x, y, bl, h));
+    }
+    if sides.1 {
+        side(out, &st.border_right, (x + w - br, y, br, h));
+    }
+}
+
 /// A clickable link's document-space rectangle.
 pub struct LinkRect {
     pub x: i32,
@@ -1489,16 +1574,20 @@ impl Ctx<'_> {
                 continue;
             }
             if matches!(st.display, Display::Inline | Display::InlineBlock) {
+                let ib = self.inline_box_of(el, &st, w).map(|b| inline.open_box(b));
                 self.path.push(ElemInfo::of(el));
                 self.collect_inline(el, &st, None, &mut inline, x, w, anchor);
                 self.path.pop();
+                if let Some(i) = ib {
+                    inline.close_box(i);
+                }
                 continue;
             }
             // Block-level, in normal flow. Flush pending inline content first —
             // a line box separates margins, so the open margin commits here.
             if !inline.is_empty() {
                 let ly = anchor + open.value() as i32;
-                let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, parent.text_align, parent.text_align_last, parent.rtl, parent.line_height.px(parent.font_px).unwrap_or(0.0), &mut self.ops, &mut self.links, &mut self.controls, &mut self.last_baseline);
+                let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, parent.text_align, parent.text_align_last, parent.rtl, parent.text_indent.px(w as f32).unwrap_or(0.0), parent.line_height.px(parent.font_px).unwrap_or(0.0), &mut self.ops, &mut self.links, &mut self.controls, &mut self.last_baseline);
                 if !committed {
                     first_top = ly;
                     committed = true;
@@ -1590,7 +1679,7 @@ impl Ctx<'_> {
         }
         if !inline.is_empty() {
             let ly = anchor + open.value() as i32;
-            let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, parent.text_align, parent.text_align_last, parent.rtl, parent.line_height.px(parent.font_px).unwrap_or(0.0), &mut self.ops, &mut self.links, &mut self.controls, &mut self.last_baseline);
+            let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, parent.text_align, parent.text_align_last, parent.rtl, parent.text_indent.px(w as f32).unwrap_or(0.0), parent.line_height.px(parent.font_px).unwrap_or(0.0), &mut self.ops, &mut self.links, &mut self.controls, &mut self.last_baseline);
             if !committed {
                 first_top = ly;
                 committed = true;
@@ -2164,47 +2253,9 @@ impl Ctx<'_> {
         if w <= 0 || h <= 0 || st.hidden || st.transparent {
             return;
         }
-        // The background layer of one box, bottom-up: colour, then image. A
-        // mask replaces the colour fill with a stencilled one, so the two are
-        // mutually exclusive.
         let mut layer: Vec<DrawOp> = Vec::new();
         let masked = self.bg_key(st.mask_layer.image);
-        match (st.bg, masked) {
-            (Some(bg), Some(key)) => layer.push(DrawOp::BgImage {
-                x,
-                y,
-                w,
-                h,
-                key,
-                repeat: st.mask_layer.repeat,
-                pos: st.mask_layer.pos,
-                size: st.mask_layer.size,
-                tint: Some(bg),
-            }),
-            (Some(bg), None) => {
-                let r = radii_px(st, w);
-                layer.push(if r.iter().any(|&v| v > 0.0) {
-                    DrawOp::RoundRect { x, y, w, h, r, color: bg, ring: 0.0 }
-                } else {
-                    DrawOp::Rect { x, y, w, h, color: bg }
-                });
-            }
-            // A mask with no colour to stencil paints nothing at all.
-            (None, _) => {}
-        }
-        if let Some(key) = self.bg_key(st.bg_layer.image) {
-            layer.push(DrawOp::BgImage {
-                x,
-                y,
-                w,
-                h,
-                key,
-                repeat: st.bg_layer.repeat,
-                pos: st.bg_layer.pos,
-                size: st.bg_layer.size,
-                tint: None,
-            });
-        }
+        bg_ops(st, self.bg_key(st.bg_layer.image), masked, x, y, w, h, &mut layer);
         if layer.is_empty() {
             return;
         }
@@ -2276,36 +2327,7 @@ impl Ctx<'_> {
             std::println!("[box] {who}: x={x} y={y} w={w} h={h}");
         }
         self.insert_bg(st, x, y, w, h, bg_idx);
-        // A rounded border can only be stroked as one shape, so it needs all
-        // four sides to agree; anything else falls through to the four
-        // independent edges below (square corners, visibly wrong only once the
-        // radius is larger than the border).
-        let r = radii_px(st, w);
-        if r.iter().any(|&v| v > 0.0) {
-            if let Some((bw, bc)) = uniform_border(st) {
-                self.ops.push(DrawOp::RoundRect { x, y, w, h, r, color: bc, ring: bw });
-                return;
-            }
-        }
-        // Each side paints independently on the border-box edge.
-        let side = |ops: &mut Vec<DrawOp>, s: &BorderSide, rect: (i32, i32, i32, i32)| {
-            if let (Some(c), true) = (s.color, s.width > 0.0) {
-                let (rx, ry, rw, rh) = rect;
-                if rw > 0 && rh > 0 {
-                    ops.push(DrawOp::Rect { x: rx, y: ry, w: rw, h: rh, color: c });
-                }
-            }
-        };
-        let (bt, br, bb, bl) = (
-            st.border_top.width as i32,
-            st.border_right.width as i32,
-            st.border_bottom.width as i32,
-            st.border_left.width as i32,
-        );
-        side(&mut self.ops, &st.border_top, (x, y, w, bt));
-        side(&mut self.ops, &st.border_bottom, (x, y + h - bb, w, bb));
-        side(&mut self.ops, &st.border_left, (x, y, bl, h));
-        side(&mut self.ops, &st.border_right, (x + w - br, y, br, h));
+        border_ops(st, x, y, w, h, (true, true), &mut self.ops);
     }
 
     /// Simplified table layout. Two column models: `table-layout: auto` sizes
@@ -3110,7 +3132,7 @@ impl Ctx<'_> {
     /// content inherits from.
     fn intrinsic_width_nodes(&mut self, nodes: &[Node], st: &ComputedStyle) -> (f32, f32) {
         let (mut pref, mut min) = (0.0f32, 0.0f32);
-        let mut run = String::new();
+        let mut run = Run::default();
         self.intrinsic_walk(nodes, st, &mut run, &mut pref, &mut min);
         flush_run(self.fonts, st, &mut run, &mut pref, &mut min, side_by_side(st));
         (pref, min)
@@ -3158,7 +3180,7 @@ impl Ctx<'_> {
     /// content into `run` and folding each block-level child's own measurement
     /// into `pref`/`min`. `st` is the parent style the children cascade from;
     /// `self.path` must already end at their parent.
-    fn intrinsic_walk(&mut self, nodes: &[Node], st: &ComputedStyle, run: &mut String, pref: &mut f32, min: &mut f32) {
+    fn intrinsic_walk(&mut self, nodes: &[Node], st: &ComputedStyle, run: &mut Run, pref: &mut f32, min: &mut f32) {
         let horiz = side_by_side(st);
         // A stray run of table parts (rows/cells with no table ancestor) is one
         // anonymous table box, measured as such — not as loose siblings.
@@ -3183,10 +3205,10 @@ impl Ctx<'_> {
     /// One node of a block container's content walk (see `intrinsic_walk`).
     /// `horiz` says whether this container's children sit side by side, so a
     /// finished box adds to the running width instead of competing with it.
-    fn intrinsic_node(&mut self, n: &Node, st: &ComputedStyle, run: &mut String, pref: &mut f32, min: &mut f32, horiz: bool) {
+    fn intrinsic_node(&mut self, n: &Node, st: &ComputedStyle, run: &mut Run, pref: &mut f32, min: &mut f32, horiz: bool) {
         let el = match n {
             Node::Text(t) => {
-                run.push_str(t);
+                run.text.push_str(t);
                 return;
             }
             Node::Element(e) => e,
@@ -3206,6 +3228,7 @@ impl Ctx<'_> {
         }
         // An inline box's text joins the line its parent is building.
         if cs.display == Display::Inline && crate::forms::kind_of(el).is_none() && el.tag != "img" {
+            run.frame += inline_frame(&cs, 0.0);
             self.path.push(ElemInfo::of(el));
             self.intrinsic_walk(&el.children, &cs, run, pref, min);
             self.path.pop();
@@ -4458,27 +4481,52 @@ fn layout_pre(
     y
 }
 
+/// The line being measured: its text, plus the horizontal frame that rides on
+/// it. The frame is what inline boxes on the line reserve (margin + border +
+/// padding) — unbreakable width, so it adds to the min- and max-content
+/// measurement alike.
+#[derive(Default)]
+struct Run {
+    text: String,
+    frame: f32,
+}
+
+/// The horizontal space one inline box adds to its line. `flow` advances the
+/// pen by exactly this (as `InlineBox::lead + trail`), so the measurement has
+/// to count it too or every shrink-to-fit box around a padded `<span>` comes
+/// out too narrow. `cb` is 0 while measuring: a percentage margin has no basis
+/// yet, so it contributes nothing.
+fn inline_frame(st: &ComputedStyle, cb: f32) -> f32 {
+    st.margin_left.px(cb).unwrap_or(0.0)
+        + st.margin_right.px(cb).unwrap_or(0.0)
+        + st.border_x()
+        + st.pad_left
+        + st.pad_right
+}
+
 /// Measure the inline text collected so far as one line and fold it into a
 /// box's running (max-content, min-content), then clear it. `white-space:
 /// normal` collapses every whitespace run — including the newlines and
 /// indentation between sibling tags in pretty-printed markup — to one space
 /// first, or source formatting would count as visible width.
-fn flush_run(fonts: &crate::fonts::Fonts, st: &ComputedStyle, run: &mut String, pref: &mut f32, min: &mut f32, horiz: bool) {
-    if run.is_empty() {
+fn flush_run(fonts: &crate::fonts::Fonts, st: &ComputedStyle, run: &mut Run, pref: &mut f32, min: &mut f32, horiz: bool) {
+    if run.text.is_empty() && run.frame == 0.0 {
         return;
     }
+    let frame = core::mem::take(&mut run.frame);
     // `white-space: pre` keeps the source line breaks, so each source line is
     // its own line box and the widest one wins — collapsing them into one
     // would measure a whole code block as a single enormous line.
     if st.pre {
         let font = fonts.pick(st.bold, st.italic, st.mono);
         let mut widest = 0.0f32;
-        for line in run.lines() {
+        for line in run.text.lines() {
             // Trailing spaces hang past the line box, so they never widen it
             // (css-text-3 §8). Leading ones DO count under `pre`.
             widest = widest.max(measure(font, line.trim_end(), st.font_px));
         }
-        run.clear();
+        let widest = widest + frame;
+        run.text.clear();
         if horiz {
             *pref += widest;
             *min += widest;
@@ -4488,15 +4536,15 @@ fn flush_run(fonts: &crate::fonts::Fonts, st: &ComputedStyle, run: &mut String, 
         }
         return;
     }
-    let collapsed = collapse_whitespace(run);
-    run.clear();
+    let collapsed = collapse_whitespace(&run.text);
+    run.text.clear();
     // The run's OWN font, not `regular()`: monospace advances wider than the
     // proportional face, so measuring mono content with it under-sizes every
     // auto table column that holds code.
     let font = fonts.pick(st.bold, st.italic, st.mono);
     let size = st.font_px;
-    let p = measure(font, collapsed.trim(), size);
-    let m = collapsed.split_whitespace().map(|wd| measure(font, wd, size)).fold(0.0f32, f32::max);
+    let p = measure(font, collapsed.trim(), size) + frame;
+    let m = collapsed.split_whitespace().map(|wd| measure(font, wd, size)).fold(0.0f32, f32::max) + frame;
     // Inside a row (or any inline-axis container) a run of stray inline content
     // is one anonymous cell sitting BESIDE its siblings, so it adds to the
     // row's width instead of competing with it (CSS2.1 §17.2.1).
@@ -4597,6 +4645,42 @@ impl Ctx<'_> {
         Some(AtomicBox { ops, links, controls, w: outer_w, h, baseline })
     }
 
+    /// The inline box an inline-level child needs, if any: one that paints
+    /// something of its own or reserves horizontal space. An `<img>`, a form
+    /// control and an `inline-block` are atomic — each already lays out and
+    /// paints its own box — and a `<br>` has none at all.
+    fn inline_box_of(&self, el: &Element, st: &ComputedStyle, cb_w: i32) -> Option<InlineBox> {
+        if st.is_break || st.display != Display::Inline || el.tag == "img" || crate::forms::kind_of(el).is_some() {
+            return None;
+        }
+        let cb = cb_w as f32;
+        // `lead + trail` is `inline_frame` split at the content — the intrinsic
+        // measurement counts the same total, keep the two in step.
+        let (ml, mr) = (st.margin_left.px(cb).unwrap_or(0.0), st.margin_right.px(cb).unwrap_or(0.0));
+        let lead = ml + st.border_left.width + st.pad_left;
+        let trail = st.pad_right + st.border_right.width + mr;
+        let edge = |s: &BorderSide| s.width > 0.0 && s.color.is_some();
+        let paints = st.bg.is_some()
+            || st.bg_layer.image.is_some()
+            || st.mask_layer.image.is_some()
+            || edge(&st.border_top)
+            || edge(&st.border_right)
+            || edge(&st.border_bottom)
+            || edge(&st.border_left);
+        if !paints && lead == 0.0 && trail == 0.0 {
+            return None;
+        }
+        Some(InlineBox {
+            st: *st,
+            bg: self.bg_key(st.bg_layer.image),
+            mask: self.bg_key(st.mask_layer.image),
+            lead,
+            trail,
+            margin_left: ml,
+            margin_right: mr,
+        })
+    }
+
     fn collect_inline(&mut self, el: &Element, st: &ComputedStyle, href: Option<&str>, inline: &mut Inline, bx: i32, bw: i32, by: i32) {
         if st.is_break {
             inline.brk();
@@ -4655,9 +4739,13 @@ impl Ctx<'_> {
                         self.place_float(ce, &cs, bx, bw, by);
                         continue;
                     }
+                    let ib = self.inline_box_of(ce, &cs, bw).map(|b| inline.open_box(b));
                     self.path.push(ElemInfo::of(ce));
                     self.collect_inline(ce, &cs, href, inline, bx, bw, by);
                     self.path.pop();
+                    if let Some(i) = ib {
+                        inline.close_box(i);
+                    }
                 }
             }
         }
@@ -4709,9 +4797,35 @@ struct AtomicBox {
     baseline: i32,
 }
 
+/// An inline-level box that decorates itself or reserves horizontal space —
+/// `<a class="external">` with its arrow icon, a badged `<span>`. Unlike a
+/// block box it has no geometry of its own: it takes as many rectangles as it
+/// has line boxes. Vertical padding and borders paint but never change the
+/// line's height (CSS 2.1 §10.6.1); horizontal ones advance the flow.
+struct InlineBox {
+    st: ComputedStyle,
+    /// Image keys, already registered with the layout that needs them — `flow`
+    /// paints without a `Ctx` to ask.
+    bg: Option<u64>,
+    mask: Option<u64>,
+    /// Resolved px the box adds before its content (`margin + border +
+    /// padding`) and after it.
+    lead: f32,
+    trail: f32,
+    margin_left: f32,
+    margin_right: f32,
+}
+
 /// One inline item: a word, an atomic `<img>`, a form control, or a `<br>`.
 enum Item {
     Word { text: String, style: RunStyle, href: Option<String>, space_before: bool },
+    /// An inline box opens / closes around the items between them. Both index
+    /// `Inline::boxes`; they nest, so a box always closes the innermost open one.
+    /// The opening marker carries any collapsed space that precedes the box —
+    /// that space belongs to the text around it, so it advances the pen OUTSIDE
+    /// the box's background.
+    BoxStart { bx: usize, space_before: bool },
+    BoxEnd(usize),
     /// An inline box that generated no content of its own. It still contributes
     /// its leading to any line box it lands in (CSS 2.1 §10.8) — `<span
     /// style="line-height:5"></span>X` is a tall line — but it never makes a
@@ -5005,12 +5119,15 @@ fn clip_text_tail(font: &Font, text: &str, size: f32, max_w: f32) -> String {
 /// across inline-element boundaries) becomes at most one inter-word space.
 struct Inline {
     items: Vec<Item>,
+    /// Every inline box opened in this run, in tree order — so painting them
+    /// by index paints an ancestor's background under its descendant's.
+    boxes: Vec<InlineBox>,
     pending_space: bool,
 }
 
 impl Inline {
     fn new() -> Inline {
-        Inline { items: Vec::new(), pending_space: false }
+        Inline { items: Vec::new(), boxes: Vec::new(), pending_space: false }
     }
     fn is_empty(&self) -> bool {
         self.items.is_empty()
@@ -5067,6 +5184,22 @@ impl Inline {
         self.items.push(Item::Control { ctl, space_before });
     }
 
+    /// Open an inline box around the items that follow. Deliberately leaves
+    /// `pending_space` alone: a space before `<a>` belongs to the word inside
+    /// it, not to the box.
+    fn open_box(&mut self, b: InlineBox) -> usize {
+        let space_before = self.pending_space && !self.items.is_empty();
+        self.pending_space = false;
+        let i = self.boxes.len();
+        self.boxes.push(b);
+        self.items.push(Item::BoxStart { bx: i, space_before });
+        i
+    }
+
+    fn close_box(&mut self, i: usize) {
+        self.items.push(Item::BoxEnd(i));
+    }
+
     fn brk(&mut self) {
         self.items.push(Item::Break);
         self.pending_space = false;
@@ -5107,6 +5240,9 @@ impl Inline {
         align: TextAlign,
         align_last: Option<TextAlign>,
         rtl: bool,
+        // `text-indent` in px: only the FIRST line box starts in from the
+        // content edge — every later one resets the pen to the float band.
+        indent: f32,
         strut: f32,
         ops: &mut Vec<DrawOp>,
         links: &mut Vec<LinkRect>,
@@ -5125,24 +5261,59 @@ impl Inline {
         let strut_h = if strut > 0.0 { strut } else { line_gap(fonts.regular(), BASE_FONT_PX) };
         let lh = ceil_i32(strut_h).max(1);
         let (l0, r0) = band_of(floats, y, y + lh, x, x + w);
-        let mut pen = l0 as f32;
+        let mut pen = l0 as f32 + indent;
         let mut line_ascent = 0.0f32;
         let mut gap = 0.0f32;
         let mut right = r0 as f32;
+        // Inline boxes currently spanning the pen, innermost last, and the
+        // fragments they have finished on the line being built.
+        let mut open: Vec<OpenFrag> = Vec::new();
+        let mut frags: Vec<Frag> = Vec::new();
+        // Where the last text run left the pen. Two runs merge into one op only
+        // if the second starts exactly where the first ended — an inline box's
+        // edge (its space, margin, border, padding) moves the pen in between,
+        // and merging across that would draw the second run at the first one's
+        // pen and lose the gap.
+        let mut run_end = f32::NAN;
 
         for item in &self.items {
             match item {
+                Item::BoxStart { bx, space_before } => {
+                    let b = &self.boxes[*bx];
+                    if *space_before && !line.is_empty() {
+                        // The box's own face, not `regular()`: a box inherits
+                        // the font of the run whose space this is, so it is the
+                        // closest thing to hand — and a monospace space is much
+                        // wider than a proportional one.
+                        pen += space_width(fonts.pick(b.st.bold, b.st.italic, b.st.mono), b.st.font_px);
+                    }
+                    open.push(OpenFrag { bx: *bx, x0: Some((pen + b.margin_left) as i32), left: true });
+                    pen += b.lead;
+                }
+                Item::BoxEnd(i) => {
+                    let b = &self.boxes[*i];
+                    // The border box ends where the content does plus the right
+                    // padding and border; the margin stays outside it.
+                    let x1 = (pen + b.trail - b.margin_right) as i32;
+                    pen += b.trail;
+                    if let Some(k) = open.iter().rposition(|o| o.bx == *i) {
+                        let o = open.remove(k);
+                        frags.push(Frag { bx: *i, x0: o.x0, x1, left: o.left, right: true });
+                    }
+                }
                 Item::Strut(style) => {
                     let (asc, lb) = run_metrics(face(style), style.size, style.lh);
                     line_ascent = line_ascent.max(asc);
                     gap = gap.max(lb);
                 }
                 Item::Break => {
-                    if line.is_empty() {
+                    break_frags(&mut open, &mut frags, pen);
+                    if !line_exists(&line, &frags) {
+                        frags.clear();
                         y += ceil_i32(strut_h);
                     } else {
                         *last_baseline = Some(y + line_ascent as i32);
-                        y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
+                        y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
                     }
                     let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                     pen = bl as f32;
@@ -5155,7 +5326,8 @@ impl Inline {
                     let sw = if *space_before { space_width(face(style), style.size) } else { 0.0 };
                     if !line.is_empty() && pen + sw + ww > right {
                         *last_baseline = Some(y + line_ascent as i32);
-                        y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
+                        break_frags(&mut open, &mut frags, pen);
+                        y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
                         let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                         pen = bl as f32;
                         right = br as f32;
@@ -5177,7 +5349,8 @@ impl Inline {
                             if n == 0 {
                                 if !line.is_empty() {
                                     *last_baseline = Some(y + line_ascent as i32);
-                        y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
+                                    break_frags(&mut open, &mut frags, pen);
+                                    y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
                                     let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                                     pen = bl as f32;
                                     right = br as f32;
@@ -5199,6 +5372,7 @@ impl Inline {
                                 href: href.clone(),
                             }));
                             pen += lead + measure(f, head, style.size);
+                            run_end = pen;
                             lead = 0.0;
                             let (asc, lb) = run_metrics(f, style.size, style.lh);
                             line_ascent = line_ascent.max(asc);
@@ -5208,7 +5382,8 @@ impl Inline {
                         continue;
                     }
                     let sx = (pen + lead) as i32;
-                    let merge = matches!(line.last(), Some(Placed::Text(last)) if last.style == *style && last.href == *href);
+                    let merge = pen == run_end
+                        && matches!(line.last(), Some(Placed::Text(last)) if last.style == *style && last.href == *href);
                     if merge {
                         if let Some(Placed::Text(last)) = line.last_mut() {
                             if lead > 0.0 {
@@ -5220,6 +5395,7 @@ impl Inline {
                         line.push(Placed::Text(Seg { x: sx, text: text.clone(), style: *style, href: href.clone() }));
                     }
                     pen += lead + ww;
+                    run_end = pen;
                     let (asc, lb) = run_metrics(face(style), style.size, style.lh);
                     line_ascent = line_ascent.max(asc);
                     gap = gap.max(lb);
@@ -5229,7 +5405,8 @@ impl Inline {
                     let sw = if *space_before { space_width(fonts.regular(), BASE_FONT_PX) } else { 0.0 };
                     if !line.is_empty() && pen + sw + b.w as f32 > right {
                         *last_baseline = Some(y + line_ascent as i32);
-                        y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
+                        break_frags(&mut open, &mut frags, pen);
+                        y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
                         let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                         pen = bl as f32;
                         right = br as f32;
@@ -5253,7 +5430,8 @@ impl Inline {
                     let sw = if *space_before { space_width(fonts.regular(), BASE_FONT_PX) } else { 0.0 };
                     if !line.is_empty() && pen + sw + bw as f32 > right {
                         *last_baseline = Some(y + line_ascent as i32);
-                        y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
+                        break_frags(&mut open, &mut frags, pen);
+                        y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
                         let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                         pen = bl as f32;
                         right = br as f32;
@@ -5280,7 +5458,8 @@ impl Inline {
                     let sw = if *space_before { space_width(fonts.regular(), BASE_FONT_PX) } else { 0.0 };
                     if !line.is_empty() && pen + sw + ctl.w as f32 > right {
                         *last_baseline = Some(y + line_ascent as i32);
-                        y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
+                        break_frags(&mut open, &mut frags, pen);
+                        y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls);
                         let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                         pen = bl as f32;
                         right = br as f32;
@@ -5299,10 +5478,11 @@ impl Inline {
                 }
             }
         }
-        if !line.is_empty() {
+        break_frags(&mut open, &mut frags, pen);
+        if line_exists(&line, &frags) {
             let a = align_last.unwrap_or(align);
             *last_baseline = Some(y + line_ascent as i32);
-            y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, align_dx(a, rtl, pen, right), ops, links, controls);
+            y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(a, rtl, pen, right), ops, links, controls);
         }
         y
     }
@@ -5315,6 +5495,47 @@ enum Placed<'a> {
     Atomic { x: i32, box_: AtomicBox },
     Image { x: i32, w: i32, h: i32, src: String, href: Option<String>, alt: String, hidden: bool, transparent: bool },
     Control { x: i32, ctl: &'a CtlBox },
+}
+
+/// An inline box spanning the pen: its fragment on the current line is open.
+struct OpenFrag {
+    bx: usize,
+    /// Border-box left edge, or `None` on a line the box only continues onto —
+    /// there the fragment starts at whatever content the line starts with.
+    x0: Option<i32>,
+    /// This fragment carries the box's left border + padding.
+    left: bool,
+}
+
+/// One inline box's rectangle on one line box. A box that spans three lines
+/// leaves three of these, and only the first/last carry its left/right edge
+/// (the `box-decoration-break: slice` default).
+struct Frag {
+    bx: usize,
+    x0: Option<i32>,
+    x1: i32,
+    left: bool,
+    right: bool,
+}
+
+/// The line is about to be emitted: close every open inline-box fragment at
+/// the current pen. The boxes stay open — their next fragment begins on the
+/// next line, no longer carrying the left edge and starting wherever that
+/// line's content does.
+/// Does this line box exist at all? It does if it holds content — or if an
+/// inline box on it reserves horizontal space: margins, borders and padding on
+/// an inline box keep an otherwise empty line alive (CSS 2.1 §9.4.2), which is
+/// how an icon-only `<span>` gets a box to paint its background into.
+fn line_exists(line: &[Placed<'_>], frags: &[Frag]) -> bool {
+    !line.is_empty() || frags.iter().any(|f| f.x1 > f.x0.unwrap_or(f.x1))
+}
+
+fn break_frags(open: &mut [OpenFrag], frags: &mut Vec<Frag>, pen: f32) {
+    for o in open.iter_mut() {
+        frags.push(Frag { bx: o.bx, x0: o.x0, x1: pen as i32, left: o.left, right: false });
+        o.x0 = None;
+        o.left = false;
+    }
 }
 
 /// One same-style segment placed on the current line.
@@ -5466,10 +5687,52 @@ fn push_decorations(style: &RunStyle, x: i32, w: i32, baseline: i32, ops: &mut V
     }
 }
 
+/// Where a placed item starts on its line — the left edge of a fragment that
+/// only continues onto this line, since the box's own left edge is a line above.
+fn placed_x(p: &Placed<'_>) -> i32 {
+    match p {
+        Placed::Text(s) => s.x,
+        Placed::Atomic { x, .. } | Placed::Image { x, .. } | Placed::Control { x, .. } => *x,
+    }
+}
+
+/// Paint one fragment of an inline box. The rectangle is the box's own content
+/// area — its font's ascent + descent, NOT the line box (CSS 2.1 §10.6.1) —
+/// grown by its padding and border. Vertical padding therefore spills over the
+/// neighbouring lines instead of pushing them apart, which is what CSS asks for.
+fn paint_frag(
+    fonts: &crate::fonts::Fonts,
+    b: &InlineBox,
+    x0: i32,
+    x1: i32,
+    baseline: i32,
+    sides: (bool, bool),
+    ops: &mut Vec<DrawOp>,
+) {
+    let st = &b.st;
+    if st.hidden || st.transparent {
+        return;
+    }
+    let font = fonts.pick(st.bold, st.italic, st.mono);
+    let m = font.horizontal_line_metrics(st.font_px);
+    let asc = m.map(|m| m.ascent).unwrap_or(st.font_px);
+    let desc = m.map(|m| m.descent.abs()).unwrap_or(0.0);
+    let top = baseline - (asc + st.pad_top + st.border_top.width) as i32;
+    let h = (asc + desc + st.pad_top + st.pad_bottom + st.border_y()) as i32;
+    let w = x1 - x0;
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    bg_ops(st, b.bg, b.mask, x0, top, w, h, ops);
+    border_ops(st, x0, top, w, h, sides, ops);
+}
+
 fn emit_line(
     fonts: &crate::fonts::Fonts,
     theme: &Theme,
     line: &mut Vec<Placed<'_>>,
+    frags: &mut Vec<Frag>,
+    boxes: &[InlineBox],
     y: i32,
     line_ascent: f32,
     gap: f32,
@@ -5481,6 +5744,16 @@ fn emit_line(
     let line_top = y;
     let baseline = y + line_ascent as i32;
     let box_h = ceil_i32(gap).max(1);
+    // Inline-box decoration goes down before anything on the line, so text sits
+    // on its own background. Sorted by box index — allocation order is tree
+    // order, which puts an ancestor's background under its descendant's.
+    if !frags.is_empty() {
+        let head = line.iter().map(placed_x).min().unwrap_or(0);
+        frags.sort_by_key(|f| f.bx);
+        for f in frags.drain(..) {
+            paint_frag(fonts, &boxes[f.bx], f.x0.unwrap_or(head) + dx, f.x1 + dx, baseline, (f.left, f.right), ops);
+        }
+    }
     for placed in line.drain(..) {
         match placed {
             Placed::Text(seg) => {
@@ -5930,6 +6203,19 @@ fn dbg_wiki_shape() {
             v.len()
         };
         assert!(distinct > 3, "expected several wrapped lines, got {distinct}");
+    }
+
+    /// `text-indent` moves the FIRST line box only — every later line starts at
+    /// the content edge again.
+    #[test]
+    fn text_indent_moves_only_the_first_line() {
+        let words = "lorem ipsum dolor sit amet ".repeat(20);
+        let l = lay(&alloc::format!("<body><p style=\"text-indent:60px\">{words}</p></body>"), 300);
+        let xs: Vec<i32> = texts(&l).iter().map(|(x, _, _)| *x).collect();
+        let plain = lay(&alloc::format!("<body><p>{words}</p></body>"), 300);
+        let base = texts(&plain)[0].0;
+        assert_eq!(xs[0], base + 60, "the first line is indented");
+        assert!(xs[1..].iter().all(|&x| x == base), "the rest is not: {xs:?}");
     }
 
     #[test]
