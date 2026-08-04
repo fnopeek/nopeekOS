@@ -67,6 +67,17 @@ pub struct Window {
     /// Resize delta for tiling split adjustment (pixels, can be negative).
     pub resize_w: i32,
     pub resize_h: i32,
+    /// Dwindle: the window this one SPLIT when it opened, and which way.
+    ///
+    /// Together these two fields are the whole layout tree — a dwindle tree is
+    /// fully determined by "who did each window split, and in which direction",
+    /// so no separate structure has to be kept in sync with the window list.
+    /// `None` = this window owns the workspace's whole area (the root).
+    pub split_from: Option<WindowId>,
+    /// `true` = the split put the new window BESIDE its parent, `false` = below.
+    /// Decided once, from the parent's shape at the moment of the split, so the
+    /// layout stays stable when windows are later resized or closed.
+    pub split_beside: bool,
     /// Process ID in process table (0 = not registered).
     pub pid: u32,
     /// Content kind — Terminal (classic loop) or Widget (Phase 10 GUI).
@@ -114,6 +125,8 @@ impl Window {
             terminal_idx: 0,
             resize_w: 0,
             resize_h: 0,
+            split_from: None,
+            split_beside: true,
             pid: 0,
             kind: WindowKind::Terminal,
             is_overlay: false,

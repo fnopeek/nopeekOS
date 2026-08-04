@@ -441,6 +441,29 @@ impl Compositor {
 
     /// Create a new window and add it to the current workspace.
     /// Returns None if no terminal slots available.
+
+    /// Where a newly opened window hangs in the dwindle tree: it SPLITS the
+    /// focused window, which is what makes the leftmost tile splittable at all
+    /// — the old layout always subdivided the most recent window, so the first
+    /// tile could never be halved however long the session ran.
+    ///
+    /// Direction comes from the focused tile's shape: a wide one splits
+    /// side-by-side, a tall one stacks. That is why the first split on a
+    /// landscape screen goes to the right.
+    fn dwindle_parent(&self) -> (Option<WindowId>, bool) {
+        let Some(fid) = self.focused else { return (None, true) };
+        match self.windows.iter().find(|w| {
+            w.id == fid
+                && w.workspace == self.active_workspace
+                && w.state == WindowState::Tiled
+                && w.visible
+                && !w.is_overlay
+        }) {
+            Some(f) => (Some(fid), f.width >= f.height),
+            None => (None, true),
+        }
+    }
+
     pub fn create_window(&mut self, title: &str, x: u32, y: u32, w: u32, h: u32) -> Option<WindowId> {
         let terminal_idx = terminal::allocate()?;
 
@@ -449,6 +472,7 @@ impl Compositor {
 
         let mut win = Window::new(id, title, x, y, w, h);
         win.workspace = self.active_workspace;
+        (win.split_from, win.split_beside) = self.dwindle_parent();
         win.terminal_idx = terminal_idx;
         win.kind = crate::shade::window::WindowKind::Terminal;
         crate::intent::create_session(terminal_idx);
@@ -476,6 +500,7 @@ impl Compositor {
 
         let mut win = Window::new(id, title, 0, 0, 100, 100);
         win.workspace = self.active_workspace;
+        (win.split_from, win.split_beside) = self.dwindle_parent();
         win.terminal_idx = 255; // sentinel — no terminal buffer owned
         win.kind = crate::shade::window::WindowKind::Widget;
         win.pid = 0;
@@ -502,6 +527,7 @@ impl Compositor {
 
         let mut win = Window::new(id, title, 0, 0, 100, 100);
         win.workspace = self.active_workspace;
+        (win.split_from, win.split_beside) = self.dwindle_parent();
         win.terminal_idx = 255; // sentinel — no terminal buffer owned
         win.kind = crate::shade::window::WindowKind::Surface;
         win.pid = 0;
@@ -1010,6 +1036,27 @@ impl Compositor {
                 }
             }
         }
+        // Dwindle: hand this window's children to its own parent, in its
+        // place. Without it they would each become a root and spread across
+        // the whole screen instead of taking over the space that just freed
+        // up — which is the one thing closing a window must do.
+        let gone = self.windows.iter().find(|w| w.id == id).map(|w| (w.split_from, w.split_beside));
+        if let Some((inherited, beside)) = gone {
+            let mut first = true;
+            for w in &mut self.windows {
+                if w.split_from == Some(id) {
+                    w.split_from = inherited;
+                    // The eldest child takes over the closed window's SLOT, so
+                    // it inherits the direction too and fills the region that
+                    // just freed up. Later children keep their own and chain
+                    // after it, exactly as they did underneath.
+                    if first {
+                        w.split_beside = beside;
+                        first = false;
+                    }
+                }
+            }
+        }
         self.windows.retain(|w| w.id != id);
         self.z_order.retain(|&wid| wid != id);
 
@@ -1141,8 +1188,9 @@ impl Compositor {
         }
     }
 
-    /// Dwindle tiling: recursively split space in half for each window.
-    /// 1 window = full area. 2 = left/right split. 3 = left + right split top/bottom. etc.
+    /// Dwindle tiling: every window splits the one that was focused when it
+    /// opened (`Window::split_from`), so the tree is stored on the windows
+    /// themselves and needs no separate structure.
     pub fn retile(&mut self) {
         let (area_x, area_y, area_w, area_h) = self.workspace_area();
 
@@ -1156,9 +1204,89 @@ impl Compositor {
 
         if tiled.is_empty() { return; }
 
+        // Roots: a tiled window whose parent is gone or lives on another
+        // workspace. Normally exactly one; a window moved between workspaces
+        // can leave a second, and chaining them keeps the screen usable
+        // instead of dropping tiles off it.
+        let roots: Vec<WindowId> = tiled.iter().copied()
+            .filter(|id| {
+                let parent = self.windows.iter().find(|w| w.id == *id).and_then(|w| w.split_from);
+                match parent {
+                    None => true,
+                    Some(p) => !tiled.contains(&p),
+                }
+            })
+            .collect();
+        let roots = if roots.is_empty() { alloc::vec![tiled[0]] } else { roots };
+
         let gap = self.gaps;
-        self.dwindle_layout(&tiled, area_x, area_y, area_w, area_h, gap, true);
+        self.dwindle_chain(&roots, &tiled, area_x, area_y, area_w, area_h, gap);
         self.sync_surface_tile_sizes();
+    }
+
+    /// Lay a window out in `rect` together with everything that split it.
+    ///
+    /// Children are walked in CREATION order, each taking half of what is left:
+    /// splitting A, then splitting A again, halves A twice — which is exactly
+    /// what happens interactively when the focus stays put.
+    fn dwindle(&mut self, id: WindowId, tiled: &[WindowId],
+               x: u32, y: u32, w: u32, h: u32, gap: u32) {
+        let kids: Vec<WindowId> = self.windows.iter()
+            .filter(|c| c.split_from == Some(id) && tiled.contains(&c.id))
+            .map(|c| c.id)
+            .collect();
+
+        let (mut cx, mut cy, mut cw, mut ch) = (x, y, w, h);
+        for kid in kids {
+            // The split's position is the CHILD's resize delta: it is the one
+            // that arrived and drew the line, so Mod+arrow on it moves the
+            // line it created.
+            let (beside, dw, dh) = self.windows.iter().find(|c| c.id == kid)
+                .map(|c| (c.split_beside, c.resize_w, c.resize_h))
+                .unwrap_or((true, 0, 0));
+            if beside {
+                let half = cw.saturating_sub(gap) / 2;
+                let max = cw.saturating_sub(gap).saturating_sub(100).max(100) as i32;
+                let keep = (half as i32 - dw).clamp(100, max) as u32;
+                let give = cw.saturating_sub(keep + gap);
+                self.dwindle(kid, tiled, cx + keep + gap, cy, give, ch, gap);
+                cw = keep;
+            } else {
+                let half = ch.saturating_sub(gap) / 2;
+                let max = ch.saturating_sub(gap).saturating_sub(80).max(80) as i32;
+                let keep = (half as i32 - dh).clamp(80, max) as u32;
+                let give = ch.saturating_sub(keep + gap);
+                self.dwindle(kid, tiled, cx, cy + keep + gap, cw, give, gap);
+                ch = keep;
+            }
+        }
+
+        if let Some(win) = self.windows.iter_mut().find(|win| win.id == id) {
+            win.x = cx;
+            win.y = cy;
+            win.width = cw;
+            win.height = ch;
+            win.dirty = true;
+        }
+    }
+
+    /// Several roots share the area the way siblings would — only reachable
+    /// when a window changed workspace and left its parent behind.
+    #[allow(clippy::too_many_arguments)]
+    fn dwindle_chain(&mut self, roots: &[WindowId], tiled: &[WindowId],
+                     x: u32, y: u32, w: u32, h: u32, gap: u32) {
+        let (mut cx, mut cw) = (x, w);
+        for (i, root) in roots.iter().enumerate() {
+            let left = roots.len() - i;
+            if left == 1 {
+                self.dwindle(*root, tiled, cx, y, cw, h, gap);
+            } else {
+                let share = cw.saturating_sub(gap * (left as u32 - 1)) / left as u32;
+                self.dwindle(*root, tiled, cx, y, share.max(1), h, gap);
+                cx += share + gap;
+                cw = cw.saturating_sub(share + gap);
+            }
+        }
     }
 
     /// Push every Surface window's content rect into the surface
@@ -2262,11 +2390,31 @@ impl Compositor {
         let b_from = self.windows.iter().find(|w| w.id == b)
             .map(|w| (w.x, w.y, w.width, w.height)).unwrap_or((0,0,0,0));
 
-        // Swap order and retile (calculates new positions)
-        let a_idx = self.windows.iter().position(|w| w.id == a);
-        let b_idx = self.windows.iter().position(|w| w.id == b);
-        if let (Some(ai), Some(bi)) = (a_idx, b_idx) {
-            self.windows.swap(ai, bi);
+        // Swap their PLACES IN THE TREE, not their places in the list — the
+        // list order no longer decides geometry. Each takes the other's
+        // parent, and each other's children come along, so the two tiles
+        // exchange regions with everything nested inside them.
+        let slot = |ws: &Vec<crate::shade::window::Window>, id: WindowId| {
+            ws.iter().find(|w| w.id == id).map(|w| (w.split_from, w.split_beside))
+        };
+        if let (Some(a_slot), Some(b_slot)) = (slot(&self.windows, a), slot(&self.windows, b)) {
+            for w in &mut self.windows {
+                if w.id == a {
+                    (w.split_from, w.split_beside) = (b_slot.0, b_slot.1);
+                } else if w.id == b {
+                    (w.split_from, w.split_beside) = (a_slot.0, a_slot.1);
+                } else if w.split_from == Some(a) {
+                    w.split_from = Some(b);
+                } else if w.split_from == Some(b) {
+                    w.split_from = Some(a);
+                }
+            }
+            // A child of the other is now its own parent — undo that one case.
+            if a_slot.0 == Some(b) {
+                if let Some(w) = self.windows.iter_mut().find(|w| w.id == b) { w.split_from = Some(a); }
+            } else if b_slot.0 == Some(a) {
+                if let Some(w) = self.windows.iter_mut().find(|w| w.id == a) { w.split_from = Some(b); }
+            }
         }
         self.retile();
 
