@@ -46,7 +46,7 @@ fn diag() {
         let w: f32 = std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(1900.0);
         let html = fs::read_to_string(&hp).expect("html");
         let dom = dom::parse(&html);
-        let ss = css::collect_all(&dom, &css, w);
+        let ss = css::collect_all(&dom, &css, css::Media::new(w, false));
         let theme = light();
         let mut tally: std::collections::BTreeMap<String, u32> = Default::default();
         #[allow(clippy::too_many_arguments)]
@@ -86,6 +86,27 @@ fn diag() {
         for (k, c) in v { println!("  {c:>3}x  {k}"); }
         return;
     }
+    // DJPEG=<file> — decode one JPEG and print the decoder's own error.
+    if let Ok(fp) = std::env::var("DJPEG") {
+        use zune_core::colorspace::ColorSpace;
+        use zune_core::options::DecoderOptions;
+        use zune_jpeg::JpegDecoder;
+        let bytes = fs::read(&fp).expect("file");
+        let opts = DecoderOptions::default()
+            .jpeg_set_out_colorspace(ColorSpace::RGB)
+            .set_max_width(8192)
+            .set_max_height(8192);
+        let mut dec = JpegDecoder::new_with_options(&bytes[..], opts);
+        match dec.decode_headers() {
+            Err(e) => println!("headers: ERR {e:?}"),
+            Ok(()) => println!("headers: ok, dims={:?}", dec.dimensions()),
+        }
+        match dec.decode() {
+            Err(e) => println!("decode:  ERR {e:?}"),
+            Ok(v) => println!("decode:  ok, {} bytes", v.len()),
+        }
+        return;
+    }
     // DPOS=<css> [DW=w] — dump the position/height/display/visibility cascade
     // for a `.vector-dropdown-content` div nested under a `.vector-dropdown`,
     // with a realistic ancestor chain (html.client-js …).
@@ -110,7 +131,7 @@ fn diag() {
         let el = ei("div", None, &["vector-dropdown-content"]);
         let prev = [ei("input", Some("vector-main-menu-dropdown-checkbox"), &["vector-dropdown-checkbox"]),
                     ei("label", Some("vector-main-menu-dropdown-label"), &["vector-dropdown-label"])];
-        let m = ss.matched(&el, &ancestors, &prev, 3, w);
+        let m = ss.matched(&el, &ancestors, &prev, 3, beak_engine::css::Media::new(w, false));
         for prop in ["position", "height", "display", "visibility", "opacity", "overflow"] {
             let mut all: Vec<(u32,u32,String)> = Vec::new();
             for (spec, order, decls) in &m {
@@ -171,7 +192,7 @@ fn diag() {
     // DGRID=<css> [DCLASS=mw-page-container-inner] [DW=1200] cargo test --test diag
     if let Ok(cp) = std::env::var("DVARS") {
         let css = fs::read_to_string(&cp).expect("css");
-        let out = beak_engine::vars::resolve_vars(&css, std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(1200.0), &[]);
+        let out = beak_engine::vars::resolve_vars(&css, beak_engine::css::Media::new(std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(1200.0), false), &[]);
         fs::write("resolved.css", &out).expect("write");
         eprintln!("resolved {} -> {} bytes (resolved.css)", css.len(), out.len());
         // report the biggest bare numbers in the output
@@ -204,7 +225,7 @@ fn diag() {
             classes: class.split(',').map(|s| s.trim().to_string()).collect(),
             attrs: Vec::new(), seq: 0,
         };
-        let m = ss.matched(&el, &[], &[], 1, w);
+        let m = ss.matched(&el, &[], &[], 1, beak_engine::css::Media::new(w, false));
         if let Some(pr) = &prop {
             let mut all: Vec<(u32,u32,String)> = Vec::new();
             for (spec, order, decls) in &m {
@@ -268,8 +289,17 @@ fn diag() {
         let dir = std::env::var("DIMGDIR").expect("DIMGDIR");
         let w: u32 = std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(1400);
         let mut eng = Engine::new();
-        eng.set_theme(Theme { bg: Rgb(255,255,255), text: Rgb(33,37,41), heading: Rgb(33,37,41),
-                              link: Rgb(13,110,253), muted: Rgb(108,117,125), rule: Rgb(222,226,230) });
+        // DTHEME=dark reproduces what the device does when the compositor
+        // palette is dark: the PAGE stays whatever colour its CSS says, but
+        // anything we derive from the theme (form-control chrome, placeholder
+        // text, the default text colour) flips. Device-only colour reports are
+        // otherwise impossible to reproduce here.
+        eng.set_theme(if std::env::var("DTHEME").as_deref() == Ok("dark") {
+            Theme::DARK
+        } else {
+            Theme { bg: Rgb(255,255,255), text: Rgb(33,37,41), heading: Rgb(33,37,41),
+                    link: Rgb(13,110,253), muted: Rgb(108,117,125), rule: Rgb(222,226,230) }
+        });
         eng.images_begin();
         let mut ok = 0; let mut miss = 0; let mut undecodable = 0;
         for src in beak_engine::image_srcs(&html) {
@@ -380,7 +410,7 @@ fn diag() {
             let dom = beak_engine::dom::parse(&html);
             let d_dom = t_dom.elapsed();
             let t_css = std::time::Instant::now();
-            let sheet = beak_engine::css::collect_all(&dom, &css, w as f32);
+            let sheet = beak_engine::css::collect_all(&dom, &css, beak_engine::css::Media::new(w as f32, false));
             let d_css = t_css.elapsed();
             let t_sl = std::time::Instant::now();
             let links = beak_engine::stylesheet_links(&html);

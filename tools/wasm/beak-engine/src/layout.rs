@@ -397,6 +397,14 @@ impl Theme {
         muted: Rgb(148, 148, 154),
         rule: Rgb(58, 58, 64),
     };
+
+    /// Is this a dark palette? Answers `prefers-color-scheme` — the page theme
+    /// IS the user's colour-scheme preference here, since the shell resolves it
+    /// from the compositor palette. Rec. 601 luma on the page background.
+    pub fn is_dark(&self) -> bool {
+        let Rgb(r, g, b) = self.bg;
+        (r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000 < 128
+    }
 }
 
 const PAD: i32 = 20;
@@ -2349,17 +2357,22 @@ impl Ctx<'_> {
         self.layout_captions(el, st, x, w, y, true)
     }
 
-    /// Lay out the `<caption>` children whose `caption-side` puts them on the
-    /// requested edge, stacked at `y0`. Returns the y below them.
+    /// Lay out the caption children whose `caption-side` puts them on the
+    /// requested edge, stacked at `y0`. Returns the y below them. A caption is
+    /// recognised by `display: table-caption` as well as by the `<caption>`
+    /// tag — MediaWiki's image thumbs are a `figure{display:table}` with a
+    /// `figcaption{display:table-caption}`, and reading only the tag turns the
+    /// caption into stray content that widens the table instead of wrapping to
+    /// it.
     fn layout_captions(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y0: i32, bottom: bool) -> i32 {
         let mut y = y0;
         for c in &el.children {
             if let Node::Element(e) = c {
-                if e.tag != "caption" {
+                let cs = self.styled(e, st, &[], 0);
+                if e.tag != "caption" && cs.display != Display::TableCaption {
                     continue;
                 }
-                let cs = self.styled(e, st, &[], 0);
-                if cs.caption_bottom != bottom {
+                if cs.display == Display::None || cs.caption_bottom != bottom {
                     continue;
                 }
                 // A caption is a block-level box of its own, not a bare run of
@@ -2897,7 +2910,7 @@ impl Ctx<'_> {
                     Display::TableHeaderGroup => TableRole::HeaderGroup,
                     Display::TableFooterGroup => TableRole::FooterGroup,
                     Display::TableCell => TableRole::Cell,
-                    Display::TableColumn | Display::TableColumnGroup => TableRole::Skip,
+                    Display::TableColumn | Display::TableColumnGroup | Display::TableCaption => TableRole::Skip,
                     _ => TableRole::Other,
                 }
             }
@@ -3054,7 +3067,21 @@ impl Ctx<'_> {
                     let st = self.styled(e, parent, &siblings, sib_count);
                     cells.push(StyledCell { cell: Cell::Real(e), st });
                 }
-                Some(TableRole::Skip) => {}
+                // A caption/`<col>` is a PROPER table child, so it ends the run
+                // of consecutive stray siblings rather than sitting inside it
+                // (CSS2.1 §17.2.1 wraps consecutive non-table children only).
+                // The anonymous cell is a contiguous slice, so leaving the run
+                // open here would swallow the caption's text and size the
+                // column to it — which is how a MediaWiki image thumb came out
+                // as wide as its caption instead of as wide as its image.
+                Some(TableRole::Skip) => {
+                    if let Some(s) = run_start.take() {
+                        if run_has_content {
+                            cells.push(anon(Cell::Anon(&nodes[s..i])));
+                        }
+                        run_has_content = false;
+                    }
+                }
                 _ => {
                     let has_content = match n {
                         Node::Text(t) => !t.trim().is_empty(),
@@ -4928,6 +4955,35 @@ fn mix(a: Rgb, b: Rgb, t: u32) -> Rgb {
 }
 
 /// Paint one control's chrome + text at (x, top) and record its hit rect.
+/// The UA palette to draw a form control's chrome from, given the colour its
+/// text inherited. `theme` is used as-is when the two agree, so a page that
+/// says nothing keeps following the device; only a page that paints against
+/// the theme gets a flipped palette. Approximates CSS Color Adjust's
+/// `color-scheme`, which real pages almost never declare.
+fn surface_palette(theme: &Theme, text: Rgb) -> Theme {
+    let light_text = luma(text) >= 128;
+    if light_text == theme.is_dark() {
+        return *theme;
+    }
+    if light_text {
+        Theme::DARK
+    } else {
+        Theme {
+            bg: Rgb(255, 255, 255),
+            text: Rgb(32, 33, 34),
+            heading: Rgb(32, 33, 34),
+            link: Rgb(51, 102, 204),
+            muted: Rgb(114, 119, 124),
+            rule: Rgb(162, 169, 177),
+        }
+    }
+}
+
+/// Rec. 601 luma, the same measure `Theme::is_dark` uses.
+fn luma(c: Rgb) -> u32 {
+    (c.0 as u32 * 299 + c.1 as u32 * 587 + c.2 as u32 * 114) / 1000
+}
+
 fn paint_control(
     fonts: &crate::fonts::Fonts,
     theme: &Theme,
@@ -4950,6 +5006,13 @@ fn paint_control(
         return;
     }
     let font = fonts.pick(ctl.style.bold, ctl.style.italic, ctl.style.mono);
+    // A control's chrome follows the SURFACE IT SITS ON, not the device theme.
+    // Wikipedia paints itself light whatever the desktop is set to (its dark
+    // mode is opt-in, gated on a class), so a face mixed from a dark theme is a
+    // black box on a white page. The signal that is actually to hand is the
+    // control's own inherited text colour: light text means a dark surface
+    // behind it, and dark text a light one.
+    let theme = &surface_palette(theme, ctl.style.color);
     let border = if ctl.focused { theme.link } else { mix(theme.rule, theme.text, 40) };
     // A page that styles its own button (`background-color`) wins; otherwise
     // the UA face is derived from the theme so it reads on light and dark.
@@ -5844,7 +5907,7 @@ mod tests {
 
     fn lay(html: &str, w: u32) -> Layout {
         let dom = dom::parse(html);
-        let sheet = crate::css::collect(&dom, 800.0);
+        let sheet = crate::css::collect(&dom, crate::css::Media::new(800.0, false));
         layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, &FormState::default(), false)
     }
 
@@ -6402,7 +6465,7 @@ fn dbg_wiki_shape() {
     /// Lay out with live form state (what the shell does while the user types).
     fn lay_forms(html: &str, w: u32, st: &FormState) -> Layout {
         let dom = dom::parse(html);
-        let sheet = crate::css::collect(&dom, 800.0);
+        let sheet = crate::css::collect(&dom, crate::css::Media::new(800.0, false));
         layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, st, false)
     }
 
@@ -6459,6 +6522,23 @@ fn dbg_wiki_shape() {
         assert_eq!(l.controls[2].w, l.controls[3].w);
         assert!(l.controls[2].w > 300, "1fr column stretches the field");
         assert!(l.controls[4].y > l.controls[2].y);
+    }
+
+    /// A form control's chrome follows the surface it sits on. The engine runs
+    /// on a DARK theme here, so a page that says nothing keeps dark controls —
+    /// but a page that paints itself light (Wikipedia does, whatever the
+    /// desktop is set to) must not get a black box on its white background.
+    #[test]
+    fn control_chrome_follows_the_page_not_the_device_theme() {
+        // The control's face is the first rect painted for it.
+        let face = |css: &str| {
+            let l = lay(&alloc::format!("<body{css}><input type=text></body>"), 400);
+            rects(&l).into_iter().map(|r| r.4).next().expect("control face")
+        };
+        let dark_page = face("");
+        let light_page = face(" style=\"color:#202122\"");
+        assert!(luma(dark_page) < 128, "dark page keeps a dark control: {dark_page:?}");
+        assert!(luma(light_page) > 200, "light page gets a light control: {light_page:?}");
     }
 
     #[test]

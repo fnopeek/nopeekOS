@@ -73,7 +73,7 @@ fn walk(ctx: &mut Ctx, el: &Element, ancestors: &mut Vec<ElemInfo>) {
         .collect();
     let sib_count = kids.len() as u32;
 
-    let mut m = ctx.ss.matched(&ei, ancestors, &[], sib_count, ctx.w);
+    let mut m = ctx.ss.matched(&ei, ancestors, &[], sib_count, css::Media::new(ctx.w, false));
     m.sort_by_key(|(spec, ord, _)| (*spec, *ord));
     // last writer per property wins (ignoring !important — close enough for a
     // frequency census)
@@ -128,7 +128,7 @@ fn walk_with_prev(ctx: &mut Ctx, el: &Element, ancestors: &mut Vec<ElemInfo>, pr
         })
         .collect();
 
-    let mut m = ctx.ss.matched(&ei, ancestors, prev, prev.len() as u32 + 1, ctx.w);
+    let mut m = ctx.ss.matched(&ei, ancestors, prev, prev.len() as u32 + 1, css::Media::new(ctx.w, false));
     m.sort_by_key(|(spec, ord, _)| (*spec, *ord));
     let mut winner: HashMap<&str, &str> = HashMap::new();
     for (_, _, decls) in &m {
@@ -176,7 +176,7 @@ fn gap() {
     let html = fs::read_to_string(&hp).expect("html");
     let extern_css = fs::read_to_string(&cp).unwrap_or_default();
     let d = dom::parse(&html);
-    let ss = css::collect_all(&d, &extern_css, w);
+    let ss = css::collect_all(&d, &extern_css, css::Media::new(w, false));
 
     let mut ctx = Ctx {
         ss: &ss,

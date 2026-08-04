@@ -22,15 +22,15 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-04, beak 0.3.4)
+### Current number (measured 2026-08-04, beak 0.3.5)
 
 ```
-3959 pass / 1647 fail / 180 inconclusive   (of 5786 vendored reftests)
-= 70.6 % of the conclusive 5606
+3963 pass / 1643 fail / 180 inconclusive   (of 5786 vendored reftests)
+= 70.7 % of the conclusive 5606
 ```
 
 Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → 3746 → 3863 → 3869 →
-3870 (0.3.0) → 3880 (0.3.2) → 3926 (0.3.3) → **3959** (0.3.4). The inconclusive count fell 254 → 180 over that
+3870 (0.3.0) → 3880 (0.3.2) → 3926 (0.3.3) → 3959 (0.3.4) → **3963** (0.3.5). The inconclusive count fell 254 → 180 over that
 span: references that used to render blank — because `:root` was dropped,
 because an `inline-block` had no box, or because an inline box painted no
 background — now paint, so 73 more tests actually measure something.
@@ -591,6 +591,49 @@ menu to pick from.
     we do not honour. The rest of the family is 3 `counters()` styles
     (`lower-greek`, `armenian`, `georgian`), `open-quote`, and 4 tests where a
     `\A` in generated content has to force a line break.
+
+21. ✅ **Four device-reported defects, 0.3.5.** A round driven entirely by the
+    second axis — Florian running the real page on the device and naming what
+    looked wrong. Three of the four were invisible to WPT.
+
+    - **`prefers-color-scheme` was never evaluated.** `parse_media_query` knew
+      `min-width`/`max-width` and marked every other feature not-understood, so
+      the query failed closed and the block was dropped. Now a `Media { width,
+      dark }` threads through the cascade in place of the bare width, and
+      `dark` comes from `Theme::is_dark()` (Rec. 601 luma on the page
+      background — the shell resolves the theme from the compositor palette, so
+      the page theme IS the user's preference). **The parsed sheet is cached,
+      and `resolve_vars` bakes the winning custom properties into the text it
+      hands on, so the theme had to enter the cache key too** — otherwise
+      switching theme reuses the other scheme's sheet.
+    - **Form-control chrome followed the DEVICE, not the page.** The reported
+      symptom: a black search box on Wikipedia's white page. `paint_control`
+      mixed its face from `theme.bg`/`theme.text`, and Wikipedia paints itself
+      light whatever the desktop is set to (its dark mode is opt-in, every
+      block gated on `html.skin-theme-clientpref-os` — which is why fixing the
+      media query alone changes nothing there, exactly as in Firefox). The
+      chrome now follows the surface it sits on, read off the control's own
+      inherited text colour: light text means a dark surface behind it. That
+      keeps a bare page on the device theme and a self-painting page on its
+      own colours, which `color-scheme` alone would not (real pages almost
+      never declare it).
+    - **A grayscale JPEG was thrown away.** We ask zune-jpeg for RGB output and
+      a YCbCr source obliges, but a single-component image comes back one byte
+      per pixel regardless — and `get_output_colorspace()` echoes the REQUEST
+      rather than reporting that. The 3-channel assumption failed its length
+      guard and the image became a blank figure. Channel count is now measured
+      from the buffer. Wikipedia serves its scanned aerial photographs this way.
+    - **`display: table-caption` did not exist**, so MediaWiki's image thumbs
+      (`figure{display:table}` + `figcaption{display:table-caption}`) put the
+      caption into the anonymous cell beside the image and sized the column to
+      the caption text: a 250 px photo in a **551 px** box. Two halves — the
+      display value and its `TableRole::Skip`, and then `partition_cells` had
+      to let a proper table child END the run of stray siblings instead of
+      being transparent to it, because an anonymous cell is a contiguous slice
+      and an open run swallows whatever follows. The thumb is 252 px now.
+      **+8 `caption-side-applies-to`; −4 `*-applies-to-015`, which are the
+      table-caption row of the applies-to matrix and only became measurable
+      because the box now exists.**
 
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the

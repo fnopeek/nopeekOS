@@ -32,7 +32,7 @@ use alloc::vec::Vec;
 /// then feeds the existing `css::parse`). Handles nested `var()`, fallbacks,
 /// missing variables, and whitespace variations. Document-scoped (see module
 /// note). Cheap fast-path: returns the input unchanged when it has no `var(`.
-pub fn resolve_vars(css: &str, viewport_w: f32, root_classes: &[&str]) -> String {
+pub fn resolve_vars(css: &str, media: crate::css::Media, root_classes: &[&str]) -> String {
     // Fast path: nothing to do. Also covers the common case of a sheet with no
     // custom properties at all.
     if !contains_var(css.as_bytes()) {
@@ -44,7 +44,7 @@ pub fn resolve_vars(css: &str, viewport_w: f32, root_classes: &[&str]) -> String
     // `body`/`*`) block — a later *conditional* block (a theme/state class such
     // as `html.skin-theme-clientpref-night`) must not overwrite these.
     let mut uncond: BTreeSet<String> = BTreeSet::new();
-    collect(css, &mut map, &mut uncond, viewport_w, root_classes);
+    collect(css, &mut map, &mut uncond, media, root_classes);
 
     // Expand to a fixpoint. A variable's value (or a fallback) may itself hold
     // more `var()`; each pass resolves one layer, so we loop until stable.
@@ -73,7 +73,7 @@ pub fn resolve_vars(css: &str, viewport_w: f32, root_classes: &[&str]) -> String
 /// skipped so a `--x:` inside them is never mistaken for a declaration. A
 /// `--name` that is *used* (`var(--name)`) is not a declaration because it is
 /// not followed by `:`, so it is ignored here.
-fn collect(css: &str, map: &mut BTreeMap<String, String>, uncond: &mut BTreeSet<String>, viewport_w: f32, root_classes: &[&str]) {
+fn collect(css: &str, map: &mut BTreeMap<String, String>, uncond: &mut BTreeSet<String>, media: crate::css::Media, root_classes: &[&str]) {
     let b = css.as_bytes();
     let n = b.len();
     let mut i = 0;
@@ -113,10 +113,10 @@ fn collect(css: &str, map: &mut BTreeMap<String, String>, uncond: &mut BTreeSet<
                     continue;
                 }
                 let close = crate::css::matching_brace(b, k, n);
-                if crate::css::media_matches(&css[j..k], viewport_w) {
+                if crate::css::media_matches(&css[j..k], media) {
                     // The media body is a fresh rule list — its own selectors
                     // decide unconditional-ness, so recurse (depth resets).
-                    collect(&css[k + 1..close], map, uncond, viewport_w, root_classes);
+                    collect(&css[k + 1..close], map, uncond, media, root_classes);
                 }
                 i = (close + 1).min(n);
                 sel_start = i;
@@ -480,19 +480,19 @@ mod tests {
 
     #[test]
     fn simple_root_var() {
-        let out = resolve_vars(":root{--c:#f00} a{color:var(--c)}", 800.0, &[]);
+        let out = resolve_vars(":root{--c:#f00} a{color:var(--c)}", crate::css::Media::new(800.0, false), &[]);
         assert!(out.contains("color:#f00"), "{out}");
     }
 
     #[test]
     fn fallback_used_when_undefined() {
-        let out = resolve_vars("a{color:var(--missing, blue)}", 800.0, &[]);
+        let out = resolve_vars("a{color:var(--missing, blue)}", crate::css::Media::new(800.0, false), &[]);
         assert!(out.contains("color:blue"), "{out}");
     }
 
     #[test]
     fn fallback_ignored_when_defined() {
-        let out = resolve_vars(":root{--c:green} a{color:var(--c, blue)}", 800.0, &[]);
+        let out = resolve_vars(":root{--c:green} a{color:var(--c, blue)}", crate::css::Media::new(800.0, false), &[]);
         assert!(out.contains("color:green"), "{out}");
         assert!(!out.contains("color:blue"), "{out}");
     }
@@ -500,46 +500,46 @@ mod tests {
     #[test]
     fn undefined_no_fallback_is_empty() {
         // `color:var(--nope)` → `color:` (invalid at computed-value time ~ "").
-        let out = resolve_vars("a{color:var(--nope)}", 800.0, &[]);
+        let out = resolve_vars("a{color:var(--nope)}", crate::css::Media::new(800.0, false), &[]);
         assert!(out.contains("a{color:}"), "{out}");
     }
 
     #[test]
     fn nested_var_in_value() {
-        let out = resolve_vars(":root{--a:var(--b);--b:#0d6efd} a{color:var(--a)}", 800.0, &[]);
+        let out = resolve_vars(":root{--a:var(--b);--b:#0d6efd} a{color:var(--a)}", crate::css::Media::new(800.0, false), &[]);
         assert!(out.contains("color:#0d6efd"), "{out}");
     }
 
     #[test]
     fn nested_var_in_fallback() {
-        let out = resolve_vars(":root{--b:orange} a{color:var(--missing, var(--b))}", 800.0, &[]);
+        let out = resolve_vars(":root{--b:orange} a{color:var(--missing, var(--b))}", crate::css::Media::new(800.0, false), &[]);
         assert!(out.contains("color:orange"), "{out}");
     }
 
     #[test]
     fn deeply_nested_fallback_with_calc() {
         // Fallback holds calc() with its own nested var() + fallback.
-        let out = resolve_vars("a{width:var(--x, calc(1px + var(--y, 2px)))}", 800.0, &[]);
+        let out = resolve_vars("a{width:var(--x, calc(1px + var(--y, 2px)))}", crate::css::Media::new(800.0, false), &[]);
         assert!(out.contains("width:calc(1px + 2px)"), "{out}");
     }
 
     #[test]
     fn fallback_with_commas_and_parens() {
         // rgba() inside the fallback must survive intact (paren-depth parse).
-        let out = resolve_vars("a{box-shadow:0 0 0 var(--x, rgba(0,0,0,.1))}", 800.0, &[]);
+        let out = resolve_vars("a{box-shadow:0 0 0 var(--x, rgba(0,0,0,.1))}", crate::css::Media::new(800.0, false), &[]);
         assert!(out.contains("box-shadow:0 0 0 rgba(0,0,0,.1)"), "{out}");
     }
 
     #[test]
     fn defined_var_wins_over_rgba_fallback() {
-        let out = resolve_vars(":root{--x:#111} a{color:var(--x, rgba(0,0,0,.1))}", 800.0, &[]);
+        let out = resolve_vars(":root{--x:#111} a{color:var(--x, rgba(0,0,0,.1))}", crate::css::Media::new(800.0, false), &[]);
         assert!(out.contains("color:#111"), "{out}");
         assert!(!out.contains("rgba"), "{out}");
     }
 
     #[test]
     fn multiple_uses() {
-        let out = resolve_vars(":root{--c:#123456} a{color:var(--c)} b{border-color:var(--c)}", 800.0, &[]);
+        let out = resolve_vars(":root{--c:#123456} a{color:var(--c)} b{border-color:var(--c)}", crate::css::Media::new(800.0, false), &[]);
         assert!(out.contains("color:#123456"), "{out}");
         assert!(out.contains("border-color:#123456"), "{out}");
     }
@@ -547,7 +547,7 @@ mod tests {
     #[test]
     fn last_unconditional_declaration_wins() {
         // Among equally unconditional root declarations, the later one wins.
-        let out = resolve_vars(":root{--c:red} html{--c:green} a{color:var(--c)}", 800.0, &[]);
+        let out = resolve_vars(":root{--c:red} html{--c:green} a{color:var(--c)}", crate::css::Media::new(800.0, false), &[]);
         assert!(out.contains("color:green"), "{out}");
     }
 
@@ -557,22 +557,22 @@ mod tests {
         // present; it must not win document-wide (the 0.1.51 dark-mode leak,
         // which turned every page dark because one theme class defined the
         // whole palette).
-        let out = resolve_vars(":root{--c:red} .x{--c:green} a{color:var(--c)}", 800.0, &[]);
+        let out = resolve_vars(":root{--c:red} .x{--c:green} a{color:var(--c)}", crate::css::Media::new(800.0, false), &[]);
         assert!(out.contains("color:red"), "{out}");
     }
 
     #[test]
     fn whitespace_variations() {
-        let out = resolve_vars(":root{--c:#abc} a{color:var( --c )}", 800.0, &[]);
+        let out = resolve_vars(":root{--c:#abc} a{color:var( --c )}", crate::css::Media::new(800.0, false), &[]);
         assert!(out.contains("color:#abc"), "{out}");
-        let out2 = resolve_vars("a{color:var(  --missing ,  blue  )}", 800.0, &[]);
+        let out2 = resolve_vars("a{color:var(  --missing ,  blue  )}", crate::css::Media::new(800.0, false), &[]);
         assert!(out2.contains("color:blue"), "{out2}");
     }
 
     #[test]
     fn uppercase_var_function() {
         // CSS function names are case-insensitive.
-        let out = resolve_vars(":root{--c:#0f0} a{color:VAR(--c)}", 800.0, &[]);
+        let out = resolve_vars(":root{--c:#0f0} a{color:VAR(--c)}", crate::css::Media::new(800.0, false), &[]);
         assert!(out.contains("color:#0f0"), "{out}");
     }
 
@@ -583,40 +583,40 @@ mod tests {
         // query doesn't hold — www.wikipedia.org paints its whole page from
         // `--background-color-base`, and the leak turned every site dark.
         let css = ":root{--bg:#fff} @media (prefers-color-scheme:dark){:root{--bg:#101418}} a{background:var(--bg)}";
-        assert!(resolve_vars(css, 1880.0, &[]).contains("background:#fff"));
+        assert!(resolve_vars(css, crate::css::Media::new(1880.0, false), &[]).contains("background:#fff"));
 
         // Width queries gate on the actual viewport, both ways.
         let css = ":root{--pad:32px} @media (max-width:480px){:root{--pad:8px}} a{padding:var(--pad)}";
-        assert!(resolve_vars(css, 1880.0, &[]).contains("padding:32px"));
-        assert!(resolve_vars(css, 400.0, &[]).contains("padding:8px"));
+        assert!(resolve_vars(css, crate::css::Media::new(1880.0, false), &[]).contains("padding:32px"));
+        assert!(resolve_vars(css, crate::css::Media::new(400.0, false), &[]).contains("padding:8px"));
 
         // A block that DOES hold still contributes, nested ones included.
         let css = ":root{--c:red} @media screen{@media (min-width:600px){:root{--c:green}}} a{color:var(--c)}";
-        assert!(resolve_vars(css, 1880.0, &[]).contains("color:green"));
+        assert!(resolve_vars(css, crate::css::Media::new(1880.0, false), &[]).contains("color:green"));
     }
 
     fn no_vars_passthrough() {
         let css = "a{color:red;font-weight:bold}";
-        assert_eq!(resolve_vars(css, 800.0, &[]), css);
+        assert_eq!(resolve_vars(css, crate::css::Media::new(800.0, false), &[]), css);
     }
 
     #[test]
     fn var_inside_string_not_expanded() {
-        let out = resolve_vars(r#":root{--c:red} a{content:"var(--c)"}"#, 800.0, &[]);
+        let out = resolve_vars(r#":root{--c:red} a{content:"var(--c)"}"#, crate::css::Media::new(800.0, false), &[]);
         assert!(out.contains(r#"content:"var(--c)""#), "{out}");
     }
 
     #[test]
     fn declaration_in_comment_ignored() {
         // A `--x:` inside a comment must not be collected as a real value.
-        let out = resolve_vars("/* --c: red */ :root{--c:blue} a{color:var(--c)}", 800.0, &[]);
+        let out = resolve_vars("/* --c: red */ :root{--c:blue} a{color:var(--c)}", crate::css::Media::new(800.0, false), &[]);
         assert!(out.contains("color:blue"), "{out}");
     }
 
     #[test]
     fn cyclic_reference_terminates() {
         // Must not hang; residual var() is acceptable, just no infinite loop.
-        let out = resolve_vars(":root{--a:var(--b);--b:var(--a)} x{color:var(--a)}", 800.0, &[]);
+        let out = resolve_vars(":root{--a:var(--b);--b:var(--a)} x{color:var(--a)}", crate::css::Media::new(800.0, false), &[]);
         let _ = out; // reaching here means it terminated
     }
 
@@ -624,14 +624,14 @@ mod tests {
     fn bootstrap_like_chain() {
         let css = ":root{--bs-blue:#0d6efd;--bs-primary:var(--bs-blue)}\
                    .btn{background-color:var(--bs-primary);border-color:var(--bs-primary, #ccc)}";
-        let out = resolve_vars(css, 800.0, &[]);
+        let out = resolve_vars(css, crate::css::Media::new(800.0, false), &[]);
         assert!(out.contains("background-color:#0d6efd"), "{out}");
         assert!(out.contains("border-color:#0d6efd"), "{out}");
     }
 
     #[test]
     fn empty_fallback() {
-        let out = resolve_vars("a{margin:var(--m,)}", 800.0, &[]);
+        let out = resolve_vars("a{margin:var(--m,)}", crate::css::Media::new(800.0, false), &[]);
         assert!(out.contains("a{margin:}"), "{out}");
     }
 }
