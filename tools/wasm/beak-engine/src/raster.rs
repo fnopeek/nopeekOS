@@ -776,18 +776,27 @@ mod tests {
         }
     }
 
+    const PAD: u32 = 20; // layout::PAD — the fixed page gutter
+
     /// Paint one page and read a pixel back as (r, g, b). `x`/`y` are relative
     /// to the document's top-left content corner, i.e. past the page padding.
     fn pixel_at(html: &str, x: u32, y: u32) -> (u8, u8, u8) {
-        const PAD: u32 = 20; // layout::PAD — the fixed page gutter
-        let (w, h) = (PAD * 2 + 40, PAD * 2 + 40);
+        page(html, 40, 40)(x, y)
+    }
+
+    /// `pixel_at` over a content box of a given size — inline content needs a
+    /// line's worth of width. Returns a reader so one paint answers many probes.
+    fn page(html: &str, cw: u32, ch: u32) -> impl Fn(u32, u32) -> (u8, u8, u8) {
+        let (w, h) = (PAD * 2 + cw, PAD * 2 + ch);
         let mut eng = Engine::new();
         eng.set_theme(light());
         let lay = eng.layout(html, w);
         let mut buf = alloc::vec![0u8; (w * h * 4) as usize];
         eng.paint(&lay, w, h, 0, &mut buf);
-        let i = (((y + PAD) * w + x + PAD) * 4) as usize;
-        (buf[i + 2], buf[i + 1], buf[i])
+        move |x: u32, y: u32| {
+            let i = (((y + PAD) * w + x + PAD) * 4) as usize;
+            (buf[i + 2], buf[i + 1], buf[i])
+        }
     }
 
     /// A mask paints the element's own background-colour through the image's
@@ -844,5 +853,57 @@ mod tests {
         );
         assert_eq!(pixel_at(&html, 4, 10), (255, 0, 0), "left half is stencilled red");
         assert_eq!(pixel_at(&html, 16, 10), (255, 255, 255), "right half stays clear");
+    }
+
+    /// An inline box has no block geometry — only the fragments it leaves in
+    /// line boxes. It still paints a background over them, and its horizontal
+    /// padding is part of that background AND advances the text after it.
+    #[test]
+    fn an_inline_box_paints_its_own_background() {
+        let at = page("<span style='background-color:#ff0000;padding-left:10px'>l</span>", 120, 40);
+        assert_eq!(at(2, 8), (255, 0, 0), "the left padding is background too");
+        assert_eq!(at(2, 34), (255, 255, 255), "and stops below the box");
+    }
+
+    /// The `a.external` shape: the icon lives in the padding the box reserves
+    /// past its text, so nothing shows unless BOTH the padding advances the
+    /// flow and the fragment paints its background image.
+    #[test]
+    fn an_inline_background_image_lands_in_the_padding() {
+        let svg = "data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22\
+                   %20width=%224%22%20height=%224%22%20viewBox=%220%200%204%204%22%3E\
+                   %3Cpath%20d=%22M0%200%20H4%20V4%20H0%20Z%22%20fill=%22%230000ff%22/%3E%3C/svg%3E";
+        let html = alloc::format!(
+            "<span style=\"padding-left:10px;background-image:url('{svg}');\
+             background-repeat:no-repeat;background-position:left top\">l</span>"
+        );
+        let at = page(&html, 120, 40);
+        assert_eq!(at(1, 1), (0, 0, 255), "the tile sits in the box's own padding");
+        assert_eq!(at(8, 8), (255, 255, 255), "no-repeat leaves the rest alone");
+    }
+
+    /// A box that only wraps an icon has no text at all. Its padding still
+    /// keeps the line box alive (CSS 2.1 §9.4.2) — otherwise the whole
+    /// `.vector-icon` pattern paints nothing.
+    #[test]
+    fn an_empty_inline_box_still_gets_a_line_to_paint_on() {
+        let at = page("<span style='background-color:#ff0000;padding-left:12px'></span>", 120, 40);
+        assert_eq!(at(4, 8), (255, 0, 0));
+    }
+
+    /// Broken over two lines, an inline box leaves one rectangle per line —
+    /// and only the first carries its left border (`box-decoration-break:
+    /// slice`, the default).
+    #[test]
+    fn an_inline_box_broken_over_two_lines_paints_both_fragments() {
+        let at = page(
+            "<span style='background-color:#ff0000;border-left:4px solid #0000ff'>llllllll llllllll</span>",
+            40,
+            60,
+        );
+        assert_eq!(at(1, 1), (0, 0, 255), "the left border opens the first fragment");
+        assert_eq!(at(6, 1), (255, 0, 0), "which the background follows");
+        assert_eq!(at(6, 21), (255, 0, 0), "the second line carries the background too");
+        assert_eq!(at(1, 21), (255, 0, 0), "but not the left border a second time");
     }
 }

@@ -442,6 +442,10 @@ pub struct ComputedStyle {
     /// `text-align-last` — alignment of a block's LAST line. `None` = `auto`,
     /// i.e. defer to `text-align`.
     pub text_align_last: Option<TextAlign>,
+    /// `text-indent` — how far the block's FIRST line box starts in from its
+    /// content edge. Inherited; a percentage resolves against the containing
+    /// block's width. Negative values hang the first line out to the left.
+    pub text_indent: Len,
     // — not inherited —
     pub display: Display,
     // — box model (block) —
@@ -621,6 +625,7 @@ impl ComputedStyle {
             rtl: false,
             text_transform: TextTransform::None,
             text_align_last: None,
+            text_indent: Len::Px(0.0),
             display: Display::Block,
             width: Len::Auto,
             min_width: Len::Auto,
@@ -816,6 +821,7 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         rtl: parent.rtl,
         text_transform: parent.text_transform,
         text_align_last: parent.text_align_last,
+        text_indent: parent.text_indent,
         deco: parent.deco,
         caption_bottom: parent.caption_bottom,
         break_word: parent.break_word,
@@ -1721,6 +1727,11 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 "auto" => None,
                 _ => s.text_align_last,
             };
+        }
+        "text-indent" => {
+            if let Some(l) = parse_len_opt(&v, u) {
+                s.text_indent = l;
+            }
         }
         "direction" => match v.as_str() {
             "rtl" => s.rtl = true,

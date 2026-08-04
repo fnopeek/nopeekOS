@@ -64,7 +64,6 @@ fn diag() {
                 if let Some(kind) = which {
                     let blocked = if dead { "ancestor display:none" }
                         else if st.display == style::Display::None { "display:none" }
-                        else if st.display == style::Display::Inline { "INLINE (no box decoration)" }
                         else if kind == "mask" && st.bg.is_none() { "mask without background-color" }
                         else { "paints" };
                     let blocked = &format!("{blocked} [{:?}]", st.display);
@@ -306,9 +305,18 @@ fn diag() {
         let bgs = lay.ops.iter().filter(|o| matches!(o, beak_engine::layout::DrawOp::BgImage { tint: None, .. })).count();
         println!("CSS image ops: {masks} mask + {bgs} background   (keys used: {}, still to fetch: {})",
                  lay.css_image_keys.len(), lay.css_image_srcs.len());
-        for (_, u) in lay.css_image_srcs.iter().take(8) {
-            println!("   FETCH {}", if u.len() > 110 { &u[..110] } else { u });
+        // Feed the CSS-image backlog from DIMGDIR too, the way the shell would.
+        // A background cannot move a box, so this needs no relayout — the ops
+        // are already in the list, only their pixels were missing.
+        let mut css_ok = 0;
+        for (key, u) in &lay.css_image_srcs {
+            let fname = u.replace('/', "_").replace(':', "_");
+            match fs::read(format!("{dir}/{fname}")) {
+                Ok(bytes) if eng.add_css_image(*key, &bytes) => css_ok += 1,
+                _ => println!("   FETCH {}", if u.len() > 110 { &u[..110] } else { u }),
+            }
         }
+        println!("CSS images loaded from disk: {css_ok}");
         // The tallest filled rects — an enormous empty box shows up here.
         let mut rects: Vec<(i32,i32,i32,i32,beak_engine::Rgb)> = lay.ops.iter().filter_map(|o| match o {
             beak_engine::layout::DrawOp::RoundRect { x, y, w, h, color, .. }

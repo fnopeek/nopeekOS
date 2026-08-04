@@ -22,17 +22,29 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-02, beak 0.1.72)
+### Current number (measured 2026-08-04, beak 0.3.2)
 
 ```
-3869 pass / 1718 fail / 199 inconclusive   (of 5786 vendored reftests)
-= 69.2 % of the conclusive 5587
+3880 pass / 1725 fail / 181 inconclusive   (of 5786 vendored reftests)
+= 69.3 % of the conclusive 5605
 ```
 
-Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → 3746 → 3863 → **3869**. The
-inconclusive count fell 254 → 199 over that span: references that used to
-render blank — because `:root` was dropped, or because an `inline-block` had no
-box — now paint, so 55 more tests actually measure something.
+Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → 3746 → 3863 → 3869 →
+3870 (0.3.0) → **3880** (0.3.2). The inconclusive count fell 254 → 181 over that
+span: references that used to render blank — because `:root` was dropped,
+because an `inline-block` had no box, or because an inline box painted no
+background — now paint, so 73 more tests actually measure something.
+
+**0.3.2 in detail: +29 gained, −24 lost, and every loss is a named hole.**
+`border-style` with no explicit width (6), `block-in-inline` splitting (3),
+`grid-lanes`/masonry which we deliberately do not build (4), bidi (1),
+`word-spacing` (1), the inline frame in intrinsic sizing (1,
+`slice-nowrap-intrinsic-size`), `width` on `<body>` being ignored so a
+percentage resolves against the viewport (1, `calc-text-indent-1`), and 5 that
+were INCONCLUSIVE — their reference was blank and now renders, so they finally
+measure something and say we are wrong. That is the pattern the oracle keeps
+producing: a correct feature makes the *reference* work, and the honest score
+goes down before it goes up.
 
 Per suite (pass / total of that suite, inconclusive included in the total):
 
@@ -155,7 +167,7 @@ excluded):
 ## Known holes, by kind
 
 **Properties not parsed at all** (`style.rs::apply_one` has ~135 arms; these
-aren't among them): `box-shadow`, `text-indent`,
+aren't among them): `box-shadow`,
 `text-shadow`, `letter-spacing`, `word-spacing`, `hyphens`, `cursor`, `outline*`, `transform`, `transition`,
 `animation`, `aspect-ratio`, `object-fit`, `filter`, `quotes`,
 `appearance`, `resize`, `writing-mode`.
@@ -180,9 +192,9 @@ how icon systems (MediaWiki Vector, Codex) draw a recolourable icon. `data:`
 URIs are decoded by the engine during layout; anything else is reported in
 `Layout::css_image_srcs` for the shell to fetch, and arrives as a REPAINT — a
 background can never move a box. Still missing: multiple layers per element
-(only the first is used), `background-clip`/`-origin`, `background-attachment`,
-and a background on an INLINE box (see Paint, below) — which on a real page is
-the bigger of the two gaps.
+(only the first is used), `background-clip`/`-origin`, `background-attachment`.
+Backgrounds on INLINE boxes landed in 0.3.2 — that was the hole that blocked
+this page's icons entirely, not the image machinery.
 
 **At-rules skipped:** `@font-face`, `@keyframes`, `@import`, `@layer`,
 `@container`, `@page`. (`@media` width features + `prefers-color-scheme` and
@@ -191,6 +203,21 @@ the bigger of the two gaps.
 **Layout:** `rowspan` (colspan works), sticky positioning (parsed, behaves as
 relative), bidi reordering, UAX-14 line breaking, `display: contents`,
 multi-column, writing modes.
+
+**Percentage padding resolves against the FONT SIZE, not the containing
+block.** `pad_left` and its siblings are a resolved `f32` on `ComputedStyle`,
+computed in the cascade where the containing block's width is not known yet,
+and `parse_length` falls back to the em basis — so `padding-left: 50%` comes
+out 8px at a 16px font instead of half the parent's width. Block and inline
+boxes alike. The fix is to make the four paddings `Len` (as `margin_left`/
+`margin_right` already are) and resolve them at layout time. Found while
+checking `c547-indent-001`, whose reference reproduces `text-indent: 50%` with
+`padding-left: 50%` on a span. Pre-existing, not a 0.3.2 regression.
+
+**`width` on `<body>` is ignored**, so every percentage on the page resolves
+against the viewport rather than the body's box. Costs `calc-text-indent-1`
+(whose reference bakes the same value in as literal px) and is one reason a
+`%`-sized reference and its test can disagree by a constant.
 
 **Paint order:** the display list is flat and painted in emission order, with
 two escapes: an explicit `z-index` range, and — since 0.1.71 — a float layer.
@@ -207,21 +234,20 @@ Costs `border-collapse-empty-row`, whose reference models those spacers as
 thicker collapsed borders (it only started rendering right once `tr:not(
 :last-child) td` began matching, see 11b).
 
-**Paint:** an inline box paints no background and no border — only its text.
-`paint_box_decoration` runs off a block box's resolved geometry, and an inline
-box has none of its own (its fragments live in the line boxes). Costs
-`display-008/009` outright, and on the real web it is every highlighted or
-badged `<span>`.
+**Paint (closed in 0.3.2):** an inline box now paints its background, image,
+mask and border, one rectangle per line box it appears on. What is still open
+there is `block-in-inline` splitting: a `display: block` child does NOT break
+its inline ancestor into the anonymous boxes CSS 2.1 §9.2.1.1 asks for, so the
+inline box paints one fragment straight through the block instead of stopping
+above it and resuming below (`block-in-inline-003`, `-nested-002`,
+`split-inner-inline-2`).
 
-**Measured on de.wikipedia/Stansstad (0.3.0, 1521 elements):** 44 elements win
-a CSS image. **15 of them are `a.external`** — the external-link arrow, an
-INLINE box, so this hole is what blocks `background-image` on that page
-entirely, not the image machinery. Most of the rest are `.vector-icon` masks
-inside `display:none` subtrees (the collapsed menus), which are correctly not
-painted. Four icons are actually visible; one is a `data:` URI and paints, three
-come from `load.php` and need the fetch. **Note for the next census: `gap.rs`
-counts cascade wins and does NOT know about `display:none` ancestors — it read
-this page as "28 mask + 19 background elements".**
+**Note for the next census: `gap.rs` counts cascade wins and does NOT know
+about `display:none` ancestors** — it read de.wikipedia/Stansstad as "28 mask +
+19 background elements" when 44 elements win a CSS image and most of the icons
+sit in collapsed menus. `DCSSIMG=<html> DCSS=<css>` in `tests/diag.rs` reports
+per element what stops it painting; run that before sizing an item from
+`gap.rs` alone.
 
 ## Priority buckets
 
@@ -427,6 +453,50 @@ menu to pick from.
     reserve is auto-placement (`row/column-auto`, 64) and abspos-in-grid (48).
 16. Bidi reordering — costs ~13 tests *actively* and blocks `unicode-bidi`.
 
+18. ✅ **Inline boxes carry a box (0.3.2).** Bucket-B item 9's other half: an
+    inline box painted no background, image, mask or border, because
+    `paint_box_decoration` runs off a block box's resolved geometry and an
+    inline box has none — its fragments live in the line boxes. It now takes
+    one rectangle per line box it appears on, and its horizontal margin,
+    border and padding advance the inline flow.
+
+    **Why it mattered more than the count suggests:** on de.wikipedia/Stansstad
+    15 of the 44 elements that win a CSS image are `a.external`, an inline box.
+    So the whole CSS-image feature shipped in 0.3.0 painted **nothing** on that
+    page — the icon lives in `padding-right: 1em` that was not reserved, under
+    a background that was not painted. Verified by rendering the article twice,
+    once with the icon SVG on disk and once without, and diffing the two
+    bitmaps: 11 distinct 11×11 boxes appear, and nothing else moves.
+
+    The geometry: a fragment's rectangle is the box's OWN font ascent + descent
+    (CSS 2.1 §10.6.1 — the content area, not the line box) grown by its padding
+    and border, so vertical padding spills over the neighbouring lines instead
+    of pushing them apart. Only the first and last fragment carry the left and
+    right edge (`box-decoration-break: slice`). Fragments are painted before
+    anything else on their line and sorted by box index — allocation order is
+    tree order, which puts an ancestor's background under its descendant's.
+    An icon-only `<span>` with no text keeps its line box alive, since padding
+    on an inline box is exactly what CSS 2.1 §9.4.2 says does that.
+
+    **Two things this exposed that had been invisible:**
+    - A pending space before an inline box was swallowed by the box. It has to
+      advance the pen OUTSIDE the box, or the background starts a space too
+      early — and the space belongs to the text around the box, not to it.
+    - Adjacent same-style text runs are merged into one `DrawOp`, which is only
+      valid if the second starts exactly where the first ended. A box edge now
+      moves the pen in between, so the merge is gated on the pen not having
+      moved (`run_end`). Without that gate the second run was drawn at the
+      first one's pen and the gap vanished — 14 `border-*-width-0NN` tests.
+
+    **`text-indent` came with it**, because 4 losses were the same story in
+    reverse: the tests indent a block's first line and their references
+    reproduce it with `margin-left` on an inline box. Once the reference
+    painted, the missing property was the visible half.
+
+    Still open in this corner, all measured: `block-in-inline` splitting (3),
+    `border-style` without an explicit width (5, see the paint table),
+    `text-indent` in intrinsic widths, and `word-spacing`.
+
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the
 cursor), `user-select`/`touch-action`/`overflow-anchor`/`scroll-margin`
@@ -468,8 +538,9 @@ cursor), `user-select`/`touch-action`/`overflow-anchor`/`scroll-margin`
 | Feature | Spec | Status | Notes |
 |---------|------|--------|-------|
 | Block flow (vertical stacking) | CSS2.1 §9 | ✅ | block formatting context (`layout.rs`): stack + adjacent-sibling **margin collapse**; anonymous inline runs flushed at block boundaries |
-| Inline flow / line boxes | CSS2.1 §9.4.2 | ✅ | line boxes with **mixed-style runs** (size/colour/weight/italic) sharing a baseline; greedy wrap; `<a>`/`<b>`/`<i>`/`<code>` flow inline; `<br>` breaks. Atomic inline boxes: `<img>`, form controls and **`display: inline-block`** (a full block box laid out at the origin, then translated into its line; aligned on its own last line box's baseline). No bidi/UAX-14 yet |
+| Inline flow / line boxes | CSS2.1 §9.4.2 | ✅ | line boxes with **mixed-style runs** (size/colour/weight/italic) sharing a baseline; greedy wrap; `<a>`/`<b>`/`<i>`/`<code>` flow inline; `<br>` breaks. Atomic inline boxes: `<img>`, form controls and **`display: inline-block`** (a full block box laid out at the origin, then translated into its line; aligned on its own last line box's baseline). **Non-atomic inline boxes carry a box too** (0.3.2): horizontal margin/border/padding advance the flow and each line box gets a decoration rectangle, sliced so only the first/last fragment carries the left/right edge. A `display: block` child does not split its inline ancestor into anonymous boxes yet. No bidi/UAX-14 yet |
 | Box model (margin/border/padding) | css-box-3 | 🟡 | full block box model: `width`/`min-width`/`max-width`, `margin` (4-side + **`auto` centering**, §10.3.3 + §10.4 min/max redo), `padding` (4-side), **per-side borders** (width/style/colour), `box-sizing`, logical `margin-inline`/`-block` + `padding-inline`/`-block`, vertical margin collapse → **centered `max-width` containers work**. No `border-radius` |
+| `text-indent` | css-text-3 §7 | 🟡 | the block's FIRST line box starts in from the content edge (lengths, percentages of the containing block, negative hanging values). Inherited. **Not counted in intrinsic widths** — a shrink-to-fit box around indented text comes out that much too narrow |
 | Text wrapping / `white-space` | css-text-3 | 🟡 | `normal` collapse+wrap and `pre` (each source line its own line box, trailing spaces hang, §8); `<br>` forces a break even under max-content. **`word-break`/`overflow-wrap`/`word-wrap: break-word`** split an over-long word at the last character that fits, never inside a grapheme cluster (ZWJ sequences, variation selectors, skin tones, keycaps, combining marks, flags, tag sequences). `pre-wrap`/`pre-line`/`nowrap` are **not** distinguished from `pre`/`normal`. No `hyphens`, no UAX-14 line breaking, no bidi reordering |
 | Tables (`table`/`tr`/`td`/`th`) | css-tables-3 | 🟡 | `layout.rs`: §17.2.1 anonymous-box fixup, auto **and** `table-layout: fixed` column algorithms, `colspan` (spanning cells distribute only the shortfall), **both border models** — `border-collapse` (winner-takes-the-edge, half the collapsed line per cell, incl. in column widths) and separated with `border-spacing` + `empty-cells` — the `border`/`cellpadding`/`cellspacing` presentation attributes, table border box + `auto` horizontal centring, `<caption>`. **`caption-side`** and per-cell **`vertical-align`** (`top`/`middle`/`bottom`; `baseline` degrades to `top` — no cross-cell baseline alignment). No `rowspan`, `display:inline-table` is block-level |
 | Flexbox | css-flexbox-1 | 🟡 | `layout.rs::layout_flex`: row/column, **multi-line wrap**, `flex-grow`/`-shrink`/`-basis` + `flex` shorthand, `gap`, `justify-content` (all 6), `align-items`/`align-self`, `order`, per-item `margin:auto`, automatic content minimum size. No reverse directions, no baseline alignment, no `align-content`, no writing modes. **Weakest suite at 25.7 %** — see the gap map |
@@ -482,7 +553,7 @@ cursor), `user-select`/`touch-action`/`overflow-anchor`/`scroll-margin`
 | Feature | Spec | Status | Notes |
 |---------|------|--------|-------|
 | Color / text color | css-color-4 | ✅ | `color.rs`: `#rgb`/`#rrggbb`/`#rgba`, the named-colour table, `rgb()`/`hsl()`/`hwb()`/`lab()`/`lch()`/`oklab()`/`oklch()`/`color()`, alpha and modern slash syntax |
-| Backgrounds / borders | css-backgrounds-3 | 🟡 | `background`/`background-color` fill (inserted behind content at a recorded op index) + **per-side** `border` (width/style/colour, incl. the shorthands and `border-collapse` edge resolution) + **`border-radius`** (shorthand with `/`, four corner longhands, percentages, §5.5 corner scaling; antialiased fill, and a uniform border stroked as one rounded ring — a non-uniform one keeps square corners). No `background-image`/gradients, no `background-clip`/`-repeat`/`-position`/`-size`, no `box-shadow`, no `border-image`. 42.4 % of the suite |
+| Backgrounds / borders | css-backgrounds-3 | 🟡 | `background`/`background-color` fill (inserted behind content at a recorded op index) + **per-side** `border` (width/style/colour, incl. the shorthands and `border-collapse` edge resolution) + **`border-radius`** (shorthand with `/`, four corner longhands, percentages, §5.5 corner scaling; antialiased fill, and a uniform border stroked as one rounded ring — a non-uniform one keeps square corners) + **`background-image`/`mask-image`** with `-repeat`/`-position`/`-size`, on block AND inline boxes. No gradients, no `background-clip`/`-origin`/`-attachment`, one layer per element, no `box-shadow`, no `border-image`. **`border-style` alone does not produce a border** — we fold style into width, so `border-style: solid` with no explicit width stays 0 instead of `medium` (costs the `c55*-ibrdr-*` family, `border-color-012`, and part of the 44 `border-*-width` failures) |
 | Font size / weight / family | css-fonts-4 | 🟡 | em-relative `font-size` cascade with correct compounding; **six real subsetted faces** (Inter regular/bold/italic/bold-italic + mono/mono-bold, `fonts.rs`) — synthetic bold/italic retired. No `@font-face` / webfonts / family fallback lists |
 | Text decoration | css-text-decor-3 | 🟡 | `text-decoration`/`-line`: underline / line-through / overline as rects in the run's colour, at metric-free approximations of the font's decoration positions. UA rules: `:any-link` (href-gated), `<u>`/`<ins>`, `<s>`/`<del>`/`<strike>`. Inherited rather than propagated (§1.2) — same pixels for every construct we have. No `-color`/`-style`/`-thickness`, no `text-underline-offset` |
 | Glyph rasterisation + AA | — | ✅ | fontdue + coverage blend, warm glyph cache; `fill` builds one row and `copy_within`s it (a per-pixel loop cost ~10× under wasmi) |
