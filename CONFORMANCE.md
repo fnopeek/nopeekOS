@@ -659,6 +659,30 @@ menu to pick from.
     pre-existing gap: our auto table columns come out too narrow for monospace
     content. Worth its own step.
 
+23. ✅ **An `<img>` has a box too, and a caption sits on the table (0.3.7).**
+    WPT-neutral — zero status changes — and both visible on every MediaWiki
+    image thumb. This is what the side-by-side against a real browser is for.
+
+    - **A replaced element painted no background and no border.** `<img>` was
+      an atomic item in the inline flow that only blitted pixels, so
+      `figure … .mw-file-element { border: 1px solid }` — the frame MediaWiki
+      puts on every thumbnail — did nothing. The item now carries its box, the
+      line reserves the frame's width, and `emit_line` paints background and
+      border under the pixels. Same shape as item 18's inline boxes; the only
+      difference is the vertical extent, which for an image is the image and
+      not a font's ascent + descent.
+    - **`layout_table` handed its captions the table's MARGIN-box x.**
+      `layout_table_body` takes the horizontal margins off the grid;
+      `layout_captions` did not, so a floated table with `margin-left: 1.4em`
+      put its caption a margin's width to the left of the rows above it. The
+      thumb caption was visibly offset from its own picture.
+    - 🔧 **The inspect dev tool was lying about `inline-block` content.** An
+      `inline-block` is laid out at the ORIGIN and translated into its line
+      afterwards; the ops, links and controls move with it, the inspect boxes
+      did not. Every box inside one was reported at the page's top-left corner
+      — a gallery thumbnail as `div.thumb @(0,2)`, which reads as a layout bug
+      that is not there. They travel with the box now.
+
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the
 cursor), `user-select`/`touch-action`/`overflow-anchor`/`scroll-margin`
