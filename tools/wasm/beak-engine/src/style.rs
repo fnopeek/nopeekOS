@@ -1123,9 +1123,12 @@ pub fn resolve(
     if el.tag == "html" || el.tag == "body" {
         s.overflow_clip = false;
     }
-    // A float or an out-of-flow box is blockified (css-display-3 §2.7), so
-    // `inline-block` there is just a block — it never joins a line box.
-    if s.display == Display::InlineBlock
+    // A float or an out-of-flow box is blockified (css-display-3 §2.7): it
+    // never joins a line box, so `inline`/`inline-block` there is just a block.
+    // `inline` matters for generated content — a page underlines its active tab
+    // with `a::after { position: absolute; … }` and states no display at all,
+    // relying on exactly this rule to give it a box.
+    if matches!(s.display, Display::Inline | Display::InlineBlock)
         && (s.float != FloatKind::None || matches!(s.position, Position::Absolute | Position::Fixed))
     {
         s.display = Display::Block;
@@ -1223,6 +1226,15 @@ pub fn resolve_pseudo(
     // inline-block; width: N%` idiom some reftest references use as an
     // indent trick) would flow as unsized text instead of reserving that
     // width — visibly wrong, so skip it too.
+    // Same blockification as a real element (css-display-3 §2.7) — a generated
+    // box that is floated or out of flow never joins a line box. This is what
+    // gives `a::after { position: absolute }` a box when the page states no
+    // display at all.
+    if matches!(s.display, Display::Inline | Display::InlineBlock)
+        && (s.float != FloatKind::None || matches!(s.position, Position::Absolute | Position::Fixed))
+    {
+        s.display = Display::Block;
+    }
     s.transparent |= s.opacity_zero;
     finish_borders(&mut s);
     Some((template, s))

@@ -755,6 +755,26 @@ menu to pick from.
     which is what a device report called out first, before any of the subtler
     layout problems.
 
+27. ✅ **Out-of-flow generated boxes land where they belong (0.3.11).**
+    WPT-neutral, zero status changes — and the active tab gets its underline.
+
+    Item 24 skipped an absolutely positioned `::before`/`::after` outright,
+    because placing it IN the flow drew a line straight through the tab's text.
+    It is now resolved against its originating box's **padding box** the way any
+    out-of-flow child is. That has to happen once the box is FINISHED — its
+    height is the containing block — so it hangs off the end of the block and
+    flex paths rather than the child walk, and only for a positioned owner (a
+    static one is not the containing block).
+
+    **Two things had to be true before it worked**, and both were spec rules we
+    only half had:
+    - **Blockification (css-display-3 §2.7) applies to `inline` too**, not just
+      `inline-block`. A floated or out-of-flow box never joins a line box.
+    - **…and it applies to generated boxes.** `resolve_pseudo` built its style
+      without that step. The tab underline states no `display` at all —
+      `a::after { position: absolute; bottom: 0; width: 100%; height: 2px }` —
+      and relies entirely on being blockified to have a box.
+
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the
 cursor), `user-select`/`touch-action`/`overflow-anchor`/`scroll-margin`
