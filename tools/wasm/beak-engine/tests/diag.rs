@@ -328,6 +328,11 @@ fn diag() {
         }
         let painted = lay.ops.iter().filter(|o| matches!(o, beak_engine::layout::DrawOp::Image { .. })).count();
         println!("Image draw-ops in the display list: {painted}");
+        for op in &lay.ops {
+            if let beak_engine::layout::DrawOp::Image { x, y, w, h, src, .. } = op {
+                println!("   IMG x={x:>5} y={y:>5} {w:>4}x{h:<4} {}", &src[src.len().saturating_sub(60)..]);
+            }
+        }
         println!("guessed (need relayout): {:?}", lay.guessed_image_srcs);
         // CSS images (background-image / mask-image), split by how they are
         // sourced: data: URIs need no network, the rest is the fetch backlog.

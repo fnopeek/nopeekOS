@@ -22,15 +22,15 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-04, beak 0.3.5)
+### Current number (measured 2026-08-04, beak 0.3.6)
 
 ```
-3963 pass / 1643 fail / 180 inconclusive   (of 5786 vendored reftests)
-= 70.7 % of the conclusive 5606
+3967 pass / 1639 fail / 180 inconclusive   (of 5786 vendored reftests)
+= 70.8 % of the conclusive 5606
 ```
 
 Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → 3746 → 3863 → 3869 →
-3870 (0.3.0) → 3880 (0.3.2) → 3926 (0.3.3) → 3959 (0.3.4) → **3963** (0.3.5). The inconclusive count fell 254 → 180 over that
+3870 (0.3.0) → 3880 (0.3.2) → 3926 (0.3.3) → 3959 (0.3.4) → 3963 (0.3.5) → **3967** (0.3.6). The inconclusive count fell 254 → 180 over that
 span: references that used to render blank — because `:root` was dropped,
 because an `inline-block` had no box, or because an inline box painted no
 background — now paint, so 73 more tests actually measure something.
@@ -635,6 +635,30 @@ menu to pick from.
       table-caption row of the applies-to matrix and only became measurable
       because the box now exists.**
 
+22. ✅ **`border-color: transparent`, and `white-space: nowrap` (0.3.6).**
+    Both from the same device round as item 21.
+
+    **`transparent` is a VALUE on a border, not an absence** (+5, no losses).
+    `parse_color("transparent")` returns `None`, and `border-color` treated
+    that as "nothing parsed" and kept whatever colour was already there — so a
+    page that hides a button's frame with `border-color: transparent` got the
+    frame anyway. On de.wikipedia that is every icon button: the hamburger menu
+    rendered as an empty 105×34 rectangle. `BorderSide` now carries
+    `see_through` as a third state beside "a colour" and "unset =
+    currentColor", and `finish_borders` leaves it alone. It also recovered
+    `background-rounded-image-clip-001`, one of item 19's four losses.
+
+    **`white-space: nowrap` was folded onto `normal`** (+3, −4). It is now its
+    own inherited flag: spaces still collapse, but they are not break
+    opportunities, and min-content becomes the whole line rather than the
+    widest word (otherwise a shrink-to-fit box is sized to one word and the
+    run hangs out of it). **The 4 losses are the reference side**:
+    `table-anonymous-objects-081..084` put `white-space: nowrap` on `<body>`,
+    so the TEST now renders one line per cell — correctly — while the
+    reference, a real `<table>` without it, still wraps. That exposes a
+    pre-existing gap: our auto table columns come out too narrow for monospace
+    content. Worth its own step.
+
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the
 cursor), `user-select`/`touch-action`/`overflow-anchor`/`scroll-margin`
@@ -680,7 +704,7 @@ cursor), `user-select`/`touch-action`/`overflow-anchor`/`scroll-margin`
 | Box model (margin/border/padding) | css-box-3 | 🟡 | full block box model: `width`/`min-width`/`max-width`, `margin` (4-side + **`auto` centering**, §10.3.3 + §10.4 min/max redo), `padding` (4-side), **per-side borders** (width/style/colour), `box-sizing`, logical `margin-inline`/`-block` + `padding-inline`/`-block`, vertical margin collapse → **centered `max-width` containers work**. No `border-radius` |
 | Generated content (`::before`/`::after`) | CSS2.1 §12 | 🟡 | `content` as concatenated `<string>` tokens (with css-syntax-3 §4.3.7 escapes), **`counter()`/`counters()`** against a real counter scope (`counter-reset`/`counter-increment`, nesting by tree depth) and **`attr(X)`** — the originating element's attribute, empty string when absent. Any other component (`open-quote`/`close-quote`, `url()`, an unknown identifier) makes the WHOLE value produce nothing rather than render half of it. The generated box is inline-level only: a `::before` with a `display`/`width`/`height` of its own is skipped, and `html::before`/`head::before` never render because layout starts at `<body>` |
 | `text-indent` | css-text-3 §7 | 🟡 | the block's FIRST line box starts in from the content edge (lengths, percentages of the containing block, negative hanging values). Inherited. **Not counted in intrinsic widths** — a shrink-to-fit box around indented text comes out that much too narrow |
-| Text wrapping / `white-space` | css-text-3 | 🟡 | `normal` collapse+wrap and `pre` (each source line its own line box, trailing spaces hang, §8); `<br>` forces a break even under max-content. **`word-break`/`overflow-wrap`/`word-wrap: break-word`** split an over-long word at the last character that fits, never inside a grapheme cluster (ZWJ sequences, variation selectors, skin tones, keycaps, combining marks, flags, tag sequences). `pre-wrap`/`pre-line`/`nowrap` are **not** distinguished from `pre`/`normal`. No `hyphens`, no UAX-14 line breaking, no bidi reordering |
+| Text wrapping / `white-space` | css-text-3 | 🟡 | `normal` collapse+wrap, `pre` (each source line its own line box, trailing spaces hang, §8) and **`nowrap`** (spaces collapse but are not break opportunities; min-content is the whole line); `<br>` forces a break even under max-content. **`word-break`/`overflow-wrap`/`word-wrap: break-word`** split an over-long word at the last character that fits, never inside a grapheme cluster (ZWJ sequences, variation selectors, skin tones, keycaps, combining marks, flags, tag sequences). `pre-wrap`/`pre-line` are **not** distinguished from `pre`. No `hyphens`, no UAX-14 line breaking, no bidi reordering |
 | Tables (`table`/`tr`/`td`/`th`) | css-tables-3 | 🟡 | `layout.rs`: §17.2.1 anonymous-box fixup, auto **and** `table-layout: fixed` column algorithms, `colspan` (spanning cells distribute only the shortfall), **both border models** — `border-collapse` (winner-takes-the-edge, half the collapsed line per cell, incl. in column widths) and separated with `border-spacing` + `empty-cells` — the `border`/`cellpadding`/`cellspacing` presentation attributes, table border box + `auto` horizontal centring, `<caption>`. **`caption-side`** and per-cell **`vertical-align`** (`top`/`middle`/`bottom`; `baseline` degrades to `top` — no cross-cell baseline alignment). No `rowspan`, `display:inline-table` is block-level |
 | Flexbox | css-flexbox-1 | 🟡 | `layout.rs::layout_flex`: row/column, **multi-line wrap**, `flex-grow`/`-shrink`/`-basis` + `flex` shorthand, `gap`, `justify-content` (all 6), `align-items`/`align-self`, `order`, per-item `margin:auto`, automatic content minimum size. No reverse directions, no baseline alignment, no `align-content`, no writing modes. **Weakest suite at 25.7 %** — see the gap map |
 | Grid | css-grid-2 | 🟡 | `layout.rs::layout_grid`: `grid-template-columns`/`-rows` (px/%/`fr`/`auto`/`repeat()`/`minmax()`≈), `grid-template-areas`, `grid-auto-rows`, row-major auto-placement, `grid-column`/`-row` (`span N`, `A / B`), `grid-area`, `gap`, `justify-items`/`justify-self`/`place-*`. No dense flow, no abspos-in-grid, no orthogonal/RTL flows |

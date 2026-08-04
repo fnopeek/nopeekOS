@@ -284,6 +284,10 @@ pub struct BorderSide {
     pub spec_width: f32,
     /// A `border-style` other than `none`/`hidden` is in effect.
     pub styled: bool,
+    /// `border-color: transparent` — a VALUE, not an absence. The side keeps
+    /// its width and paints nothing, which differs from both a colour and from
+    /// leaving the property unset (that means `currentColor`).
+    pub see_through: bool,
 }
 
 /// `border-width`'s initial value, `medium`.
@@ -291,7 +295,7 @@ pub const BORDER_MEDIUM: f32 = 3.0;
 
 impl Default for BorderSide {
     fn default() -> BorderSide {
-        BorderSide { width: 0.0, color: None, hidden: false, spec_width: BORDER_MEDIUM, styled: false }
+        BorderSide { width: 0.0, color: None, hidden: false, spec_width: BORDER_MEDIUM, styled: false, see_through: false }
     }
 }
 
@@ -306,6 +310,24 @@ impl BorderSide {
         self.spec_width = w;
         self.sync();
     }
+    /// Apply one `border-color` token, reporting whether it was one. A page
+    /// that hides a button's frame writes `border-color: transparent`; treating
+    /// that as "no colour parsed" drops the declaration and leaves the frame
+    /// standing — which is how Wikipedia's icon buttons came out as empty
+    /// rectangles.
+    fn set_color(&mut self, tok: &str, theme: &Theme) -> bool {
+        if tok.eq_ignore_ascii_case("transparent") {
+            self.color = None;
+            self.see_through = true;
+        } else if let Some(c) = parse_color(tok, theme) {
+            self.color = Some(c);
+            self.see_through = false;
+        } else {
+            return false;
+        }
+        true
+    }
+
     /// Apply one `border-style` token. An unknown one is invalid and leaves the
     /// side alone.
     fn set_style(&mut self, tok: &str) {
@@ -330,7 +352,7 @@ impl BorderSide {
 fn finish_borders(s: &mut ComputedStyle) {
     let c = s.color;
     for side in [&mut s.border_top, &mut s.border_right, &mut s.border_bottom, &mut s.border_left] {
-        if side.color.is_none() && side.width > 0.0 {
+        if side.color.is_none() && !side.see_through && side.width > 0.0 {
             side.color = Some(c);
         }
     }
@@ -481,6 +503,12 @@ pub struct ComputedStyle {
     pub italic: bool,
     pub mono: bool,
     pub pre: bool, // white-space: pre (no collapse, honor newlines)
+    /// `white-space: nowrap` — whitespace still collapses, but the line never
+    /// breaks at one. Inherited. Real pages use it to keep a label, a
+    /// coordinate pair or a table header on one line; wrapping it anyway makes
+    /// the box a line taller and, under `position: absolute`, overlaps
+    /// whatever it was placed above.
+    pub nowrap: bool,
     /// `visibility: hidden`/`collapse` — the box still lays out and still takes
     /// its space, but paints nothing. Inherited, so a descendant can set
     /// `visible` and reappear inside a hidden ancestor (CSS2.1 §11.2).
@@ -680,6 +708,7 @@ impl ComputedStyle {
             bold: false,
             italic: false,
             mono: false,
+            nowrap: false,
             pre: false,
             color: theme.text,
             hidden: false,
@@ -877,6 +906,7 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         italic: parent.italic,
         mono: parent.mono,
         pre: parent.pre,
+        nowrap: parent.nowrap,
         hidden: parent.hidden,
         transparent: parent.transparent,
         opacity_zero: false,
@@ -1866,8 +1896,22 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             parse_counter_ops(&v, &mut s.counter_increment, &mut s.counter_increment_n, 1)
         }
         "white-space" => match v.as_str() {
-            "pre" | "pre-wrap" | "pre-line" => s.pre = true,
-            "normal" | "nowrap" => s.pre = false,
+            "pre" => {
+                s.pre = true;
+                s.nowrap = false;
+            }
+            "pre-wrap" | "pre-line" => {
+                s.pre = true;
+                s.nowrap = false;
+            }
+            "normal" => {
+                s.pre = false;
+                s.nowrap = false;
+            }
+            "nowrap" => {
+                s.pre = false;
+                s.nowrap = true;
+            }
             // `inherit`/`unset`/garbage: an invalid or non-recomputable value
             // drops (CSS Syntax 3 §4), keeping whatever the cascade already
             // set — for `inherit` specifically, that's already the parent's
@@ -2049,9 +2093,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 for (side, tok) in [
                     &mut s.border_top, &mut s.border_right, &mut s.border_bottom, &mut s.border_left,
                 ].into_iter().zip(t4) {
-                    if let Some(c) = parse_color(tok, theme) {
-                        side.color = Some(c);
-                    }
+                    side.set_color(tok, theme);
                 }
             }
         }
@@ -2068,10 +2110,10 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         "border-right-width" => set_side_width(&mut s.border_right, &v, u),
         "border-bottom-width" => set_side_width(&mut s.border_bottom, &v, u),
         "border-left-width" => set_side_width(&mut s.border_left, &v, u),
-        "border-top-color" => s.border_top.color = parse_color(&v, theme).or(s.border_top.color),
-        "border-right-color" => s.border_right.color = parse_color(&v, theme).or(s.border_right.color),
-        "border-bottom-color" => s.border_bottom.color = parse_color(&v, theme).or(s.border_bottom.color),
-        "border-left-color" => s.border_left.color = parse_color(&v, theme).or(s.border_left.color),
+        "border-top-color" => { s.border_top.set_color(v.trim(), theme); }
+        "border-right-color" => { s.border_right.set_color(v.trim(), theme); }
+        "border-bottom-color" => { s.border_bottom.set_color(v.trim(), theme); }
+        "border-left-color" => { s.border_left.set_color(v.trim(), theme); }
         "border-top-style" | "border-right-style" | "border-bottom-style" | "border-left-style" => {
             let side = match prop {
                 "border-top-style" => &mut s.border_top,
@@ -2713,10 +2755,10 @@ fn parse_border_shorthand(v: &str, u: Units, theme: &Theme) -> BorderSide {
             | "inset" | "outset" => side.set_style(tok),
             "thin" | "medium" | "thick" => width = border_width_kw(tok, u),
             _ => {
-                if let Some(c) = parse_color(tok, theme) {
-                    side.color = Some(c);
-                } else if let Some(w) = parse_length(tok, u).filter(|w| *w >= 0.0) {
-                    width = Some(w);
+                if !side.set_color(tok, theme) {
+                    if let Some(w) = parse_length(tok, u).filter(|w| *w >= 0.0) {
+                        width = Some(w);
+                    }
                 }
             }
         }
@@ -3172,6 +3214,14 @@ mod tests {
         let c = Rgb(0, 128, 0);
         assert_eq!(side("border-top-style:solid;color:#008000").color, Some(c), "currentColor, resolved late");
         assert_eq!(side("color:#008000;border-top-style:solid").color, Some(c), "either order");
+        // `transparent` is a VALUE: the width stays, nothing paints, and it is
+        // not the same as leaving the colour unset (that means currentColor).
+        let t = side("border-top:1px solid #f00;border-top-color:transparent");
+        assert_eq!(t.width, 1.0, "a transparent border still takes its space");
+        assert_eq!(t.color, None, "and paints nothing");
+        assert_eq!(side("border-top:1px solid transparent").color, None, "also in the shorthand");
+        // …and a real colour after it wins back.
+        assert_eq!(side("border-top-color:transparent;border-top:1px solid #f00").color, Some(Rgb(255, 0, 0)));
     }
 
     #[test]
