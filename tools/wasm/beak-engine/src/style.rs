@@ -1208,13 +1208,17 @@ pub enum ContentPiece {
     /// `counters(name, sep, style)` — every in-scope value of `name`, joined
     /// by `sep` (outermost first).
     Counters { name: u32, sep: String, style: ListStyle },
+    /// `attr(name)` — the originating element's attribute as a string, or the
+    /// empty string when it has no such attribute (CSS2.1 §12.2). Lowercased,
+    /// which is how the HTML parser stores attribute names.
+    Attr(String),
 }
 
 /// Parse a CSS `content` value into its component pieces: concatenated
-/// `<string>` tokens (`"a" 'b'`) and `counter()`/`counters()` functions, in
-/// order. Any OTHER component (`attr()`, `open-quote`/`close-quote`, `url()`,
-/// an unknown identifier) is out of scope: rather than mis-render, the WHOLE
-/// value produces no content — the caller then generates nothing, per
+/// `<string>` tokens (`"a" 'b'`), `counter()`/`counters()` and `attr()`, in
+/// order. Any OTHER component (`open-quote`/`close-quote`, `url()`, an unknown
+/// identifier) is out of scope: rather than mis-render, the WHOLE value
+/// produces no content — the caller then generates nothing, per
 /// CONFORMANCE.md's forward-compatible rule. `none`/`normal` also produce
 /// nothing (no box).
 pub fn parse_content_template(v: &str) -> Option<Vec<ContentPiece>> {
@@ -1278,8 +1282,24 @@ pub fn parse_content_template(v: &str) -> Option<Vec<ContentPiece>> {
             }
             continue;
         }
-        // `attr(...)`, `open-quote`, `url(...)`, or an unknown identifier —
-        // unsupported, so the whole value contributes nothing.
+        if matches!(chars.peek(), Some('(')) && lname == "attr" {
+            chars.next(); // consume '('
+            let inside = read_until_close(&mut chars)?;
+            // CSS2.1 `attr(X)` takes exactly one argument — an attribute NAME,
+            // not a string. The type/fallback arguments are css-values-5 and
+            // would change what the value means, so they invalidate it here
+            // rather than being ignored.
+            let args = split_top_commas(&inside);
+            let [name] = args.as_slice() else { return None };
+            let name = name.trim();
+            if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+                return None;
+            }
+            pieces.push(ContentPiece::Attr(name.to_ascii_lowercase()));
+            continue;
+        }
+        // `open-quote`, `url(...)`, or an unknown identifier — unsupported, so
+        // the whole value contributes nothing.
         return None;
     }
     if pieces.is_empty() { None } else { Some(pieces) }

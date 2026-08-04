@@ -1701,16 +1701,20 @@ impl Ctx<'_> {
         let anc = self.path.len().saturating_sub(1);
         let (template, ps) =
             style::resolve_pseudo(owner, own, self.theme, self.sheet, &self.path[..anc], &[], 0, self.viewport_w, kind)?;
-        Some((self.render_content(&template), ps))
+        Some((self.render_content(owner, &template), ps))
     }
 
     /// Resolve a `content` template to its final text, reading any
-    /// `counter()`/`counters()` against the current counter scope.
-    fn render_content(&self, template: &[ContentPiece]) -> String {
+    /// `counter()`/`counters()` against the current counter scope and any
+    /// `attr()` off `owner` — the element the pseudo-element hangs on.
+    fn render_content(&self, owner: &Element, template: &[ContentPiece]) -> String {
         let mut out = String::new();
         for piece in template {
             match piece {
                 ContentPiece::Text(s) => out.push_str(s),
+                // A missing attribute is the empty string, not a dropped value
+                // (CSS2.1 §12.2) — an empty `::before` box is still generated.
+                ContentPiece::Attr(name) => out.push_str(owner.attr(name).unwrap_or("")),
                 ContentPiece::Counter { name, style } => {
                     out.push_str(&format_counter(*style, self.counters.value(*name)))
                 }
@@ -6203,6 +6207,25 @@ fn dbg_wiki_shape() {
             v.len()
         };
         assert!(distinct > 3, "expected several wrapped lines, got {distinct}");
+    }
+
+    /// `attr()` in generated content reads the originating element's
+    /// attribute. A missing one is the EMPTY STRING, not a dropped declaration
+    /// — the box is still generated, so the brackets around it still show.
+    #[test]
+    fn generated_content_reads_an_attribute() {
+        let text = |css: &str, markup: &str| {
+            let l = lay(&alloc::format!("<body><style>p::before{{content:{css}}}</style>{markup}</body>"), 800);
+            texts(&l).iter().map(|(_, _, t)| (*t).to_string()).collect::<Vec<_>>().join("|")
+        };
+        assert!(text("attr(data-x)", "<p data-x=\"HELLO\">y</p>").contains("HELLO"));
+        assert!(text("'[' attr(data-gone) ']'", "<p>y</p>").contains("[]"), "absent → empty string");
+        // The attribute NAME is case-insensitive (the parser lowercases it);
+        // the VALUE keeps its case.
+        assert!(text("attr(DATA-X)", "<p data-x=\"MiXeD\">y</p>").contains("MiXeD"));
+        // A type/fallback argument is css-values-5 — out of scope, so the whole
+        // declaration is dropped rather than half-applied.
+        assert!(!text("attr(data-x px)", "<p data-x=\"5\">y</p>").contains('5'));
     }
 
     /// `text-indent` moves the FIRST line box only — every later line starts at
