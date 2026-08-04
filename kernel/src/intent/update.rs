@@ -345,6 +345,15 @@ pub fn update_all_assets() -> usize {
 
         if local_hash.as_ref() == Some(&entry.sha384) {
             kprintln!("[npk]   {} (up to date)", spec.npkfs_path);
+            // The SYSTEM copy is current — the copy the user actually sees
+            // may not be. `wallpaper list`/`set` read only the home folder,
+            // and this hash check never looks there, so a deleted or missing
+            // user copy stays missing however often `update` runs. Restore
+            // it; an existing one is left alone (it may be the user's own
+            // edit — a CHANGED wallpaper still overwrites further down).
+            if let Some(name) = spec.npkfs_path.strip_prefix("sys/wallpapers/") {
+                sync_wallpaper_to_user(name, false);
+            }
             continue;
         }
 
@@ -529,7 +538,7 @@ pub fn update_all_assets() -> usize {
         // wallpaper actually appears, and so REPLACING npk01 replaces what
         // the user sees rather than leaving the install-time copy behind.
         if let Some(name) = spec.npkfs_path.strip_prefix("sys/wallpapers/") {
-            copy_wallpaper_to_user(name);
+            sync_wallpaper_to_user(name, true);
         }
         updated += 1;
     }
@@ -548,17 +557,23 @@ fn safe_asset_name(name: &str) -> bool {
         && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'.' || c == b'-' || c == b'_')
 }
 
-/// Mirror `sys/wallpapers/<name>` into the user's wallpapers folder. Unlike
-/// the installer's copy this OVERWRITES: a system wallpaper is system-managed,
-/// and the point of shipping one over OTA is that the picture on screen
-/// changes. A wallpaper the user added under a different name is untouched.
-fn copy_wallpaper_to_user(name: &str) {
+/// Mirror `sys/wallpapers/<name>` into the user's wallpapers folder — the only
+/// directory `wallpaper list` and `wallpaper set` read.
+///
+/// `force` says whether an EXISTING user copy may be replaced. A wallpaper that
+/// just changed over OTA overwrites (the point of shipping one is that the
+/// picture changes); an unchanged one only fills a gap, so a copy the user
+/// edited or renamed survives every later `update`.
+fn sync_wallpaper_to_user(name: &str, force: bool) {
     use crate::security::capability::CAP_NULL;
     let Some(user) = crate::config::get("name").filter(|n| !n.is_empty()) else { return };
-    let Ok((bytes, _)) = crate::npkfs::fetch(&alloc::format!("sys/wallpapers/{}", name)) else { return };
     let target = alloc::format!("home/{}/pictures/wallpapers/{}", user, name);
+    if !force && crate::npkfs::exists(&target) {
+        return;
+    }
+    let Ok((bytes, _)) = crate::npkfs::fetch(&alloc::format!("sys/wallpapers/{}", name)) else { return };
     match crate::npkfs::store(&target, &bytes, CAP_NULL) {
-        Ok(_) => kprintln!("[npk]   {} (user copy refreshed)", target),
+        Ok(_) => kprintln!("[npk]   {} ({})", target, if force { "user copy refreshed" } else { "user copy restored" }),
         Err(e) => kprintln!("[npk]   user copy failed: {} — {:?}", target, e),
     }
 }
