@@ -106,7 +106,7 @@ each case.
 
 ---
 
-# Gap map (measured 2026-07-31, beak 0.1.67)
+# Gap map (real-web axis measured 2026-08-04, beak 0.3.4; oracle families below re-counted the same day)
 
 Two independent axes, because they disagree and each catches what the other
 misses:
@@ -125,46 +125,64 @@ curl --http2 -A "beak/0.1.64 (nopeekOS)" -o wiki.html https://de.wikipedia.org/w
 GAPHTML=wiki.html GAPCSS=wiki.css cargo test --release --test gap -- --nocapture
 ```
 
-`gap.rs`'s `IMPLEMENTED` list is kept in sync by hand with the `match prop`
-arms in `style.rs::apply_one`; extract the truth with
-`awk '/fn apply_one/,/^}/' src/style.rs | grep -oE '^\s{8}"[a-z-]+"'`.
+`gap.rs` scrapes the implemented set out of `style.rs::apply_one` at run time.
+It used to be a hand-maintained list and **went stale twice**, most recently
+claiming `background-image`/`mask-image` were missing months after they
+shipped — which put a phantom item at the top of this ranking. If the scrape
+ever finds under 100 arms it asserts rather than under-reporting.
 
 ## Real-web axis — de.wikipedia.org/wiki/Stansstad
 
-1521 elements, 112 distinct properties applied, **5300 implemented / 604
-unimplemented** property applications — down from 4340 / 1564 at 0.1.64, so
-buckets A and B closed **61 % of the gap**. What is left, by elements affected,
-split by whether ignoring it is actually wrong:
+1521 elements, 111 distinct properties applied, **5601 implemented / 301
+unimplemented** property applications. The arc: 4340 / 1564 at 0.1.64 → 5300 /
+604 at 0.1.67 → **5601 / 301** now. What is left, by elements affected, split by
+whether ignoring it is actually wrong:
 
 | Property | Elems | Dominant value | Ignoring it is… |
 |---|---:|---|---|
-| `mask-*` (+`-webkit-`) | 28 each | `url(…)` + `center`/`no-repeat` | **wrong** — this is Vector's whole icon system |
+| `user-select` (+`-moz-`/`-webkit-`) | 112 | `none` | harmless — no selection yet anyway |
+| `transition-property`/`-duration` (+`transition`) | 71 | — | harmless — ignoring = jump straight to the final state |
+| `cursor` | 30 | 22× `pointer` | cosmetic — the *compositor* owns the cursor, not us |
 | `text-overflow` | 24 | `ellipsis` | **wrong** — truncated labels run on |
 | `unicode-bidi` | 21 | `isolate` | **wrong**, but blocked on bidi generally |
-| `background-image` / `-position` / `-repeat` / `-size` | 19 each | `url(…)` | **wrong** — 16 real icons unpainted |
+| `scroll-margin-top` | 15 | `75px` | harmless — no smooth scrolling to anchor |
 | `box-shadow` | 10 | `0 2px 6px -1px rgba(…)` | cosmetic |
 | `transform` | 2 | `translateY(-50%)` | **wrong** where used for centring |
-| `vertical-align` (inline only) | 74 | 46× `middle`, 10× `text-bottom` | **partly** — cells align since 0.1.65, inline boxes still sit on the baseline |
-| `user-select` (+`-moz-`/`-webkit-`) | 112 | `none` | harmless — no selection yet anyway |
-| `transition-property`/`-duration` | 68 | — | harmless — ignoring = jump straight to the final state |
-| `cursor` | 30 | 22× `pointer` | cosmetic — the *compositor* owns the cursor, not us |
-| `scroll-margin-top`, `overflow-anchor`, `touch-action`, `-*-appearance`, `list-style-image:none`, `font-variant:normal`, `text-indent:0` | 1–15 | — | harmless |
+| `overflow-x`, `overflow-anchor`, `touch-action`, `-*-appearance`, `list-style-image:none`, `font-variant:normal` | 1–2 | — | harmless |
 
-**After A + B the top of this list is almost all noise.** That is the point of
-the damage column: without it, `user-select` at 112 elements looks like the
-biggest remaining item, and it is worth nothing. The two that still cost real
-pixels are `mask-image` and `background-image` — the same missing capability
-(fetch a sub-resource named from inside CSS), which is why they are one entry
-in bucket B.
+**🔑 On this page the real-web axis is essentially CLOSED.** Of the 301
+remaining applications, roughly 230 are in the "harmless" rows, and the only
+ones that still cost pixels are `text-overflow: ellipsis` (24), `box-shadow`
+(10) and two `transform: translateY(-50%)`. Everything that used to head this
+list — `mask-*`, `background-image` and their placement properties, 47
+applications of the Vector icon system — shipped in 0.3.0 + 0.3.2.
 
-**Caveat:** one page, one skin. `mask-*` at 28 is *the* icon mechanism and
-matters more than its count suggests. Re-run on a second site (a shop, a docs
-page, GitHub) before treating this ranking as general.
+**That changes what this axis is for.** One page no longer discriminates, so
+the next real-web measurement has to be a DIFFERENT site (a shop, a docs page,
+GitHub) rather than a re-run of this one. Until then the oracle axis is the
+one carrying information.
 
 ## Oracle axis — where the WPT failures sit
 
 Failing-test families, largest blocks first (`FAIL` only, inconclusive
 excluded):
+
+Counted by FAMILY NAME (the test name with its trailing number stripped), not
+by suite — the biggest suite always looks like the biggest problem, and the
+family view is what surfaced the `attr()` lever
+([[feedback-census-by-family-not-suite]]).
+
+Re-counted at 0.3.4 over the 1647 remaining failures, largest first:
+**`CSS2/bidi` 22 · `CSS2/margin-collapse` 21 · `css-grid/positioned-grid-items`
+20 · `CSS2/content` 18 (rest: 3 `counters()` styles, `open-quote`, 4× `\A` as a
+forced break, 5× `::before` on `html`/`head`) · `css-grid/orthogonal-positioned-
+grid-items` 17 · `css-sizing/contain-intrinsic-size` 15 ·
+`css-grid/column-align-items` 15 · `CSS2/abspos-containing-block-initial` 15**.
+The whole abspos clan (`abspos*`, `top-*`, `bottom-*`, `left-*`, `right-*`)
+is **102** tests and the largest coherent block left, but its diffs run
+8–97 %, so it is real layout work rather than a near-miss family.
+
+The older per-suite table, kept for the shape of it:
 
 | Suite | Fails | Biggest families |
 |---|---:|---|
