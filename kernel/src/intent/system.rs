@@ -1143,7 +1143,7 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("    shade.border          Border width (px, default: 2)");
             kprintln!("    shade.border_active   Active border color (hex)");
             kprintln!("    shade.border_inactive Inactive border color (hex)");
-            kprintln!("    shade.glow            Focus halo width (px, 0 = off, default: 4)");
+            kprintln!("    shade.glow            Focus halo width (px, 0 = off, default: 6)");
             kprintln!("    shade.bar_height      Status bar height (px, default: 28)");
             kprintln!("    shade.bar_position    Bar position (top/bottom)");
             kprintln!();
