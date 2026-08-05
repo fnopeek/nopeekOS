@@ -1262,7 +1262,8 @@ impl Compositor {
     }
 
     /// Move the focused window to a different workspace: unhook it from this
-    /// workspace's tree, hang it into the target's, and leave focus behind.
+    /// workspace's tree, hang it into the target's, and go along with it
+    /// (Hyprland's `movetoworkspace`, not the `silent` variant).
     pub fn move_to_workspace(&mut self, ws: u8) {
         let Some(fid) = self.focused else { return };
         if ws == self.active_workspace || ws >= self.workspace_count { return }
@@ -1297,11 +1298,16 @@ impl Compositor {
             win.resize_h = 0;
         }
 
-        // Focus must not follow the window off-screen: it would keep taking
-        // keystrokes on a workspace nobody is looking at.
-        self.refocus_active_workspace();
-
-        self.retile();
+        // Go with it. Anything else means the window you just sent away keeps
+        // the focus on a workspace nobody is looking at — so if we stay, focus
+        // has to be handed back here (`refocus_active_workspace`, what
+        // close_window does). Following is the Hyprland default and keeps the
+        // window you are working on under your hands. switch_workspace does the
+        // retile, the panels and the terminal hand-over; the tree link above
+        // has to be set before it, or it would lay the window out as a stray
+        // second root.
+        self.switch_workspace(ws);
+        self.focus_window(fid);
         self.needs_full_redraw = true;
     }
 
