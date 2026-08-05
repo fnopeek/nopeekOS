@@ -3,7 +3,7 @@
 //! Downloads kernel from GitHub, verifies ECDSA P-384 signature,
 //! writes to ESP FAT32 partition.
 
-use crate::{kprintln, kprint};
+use crate::kprintln;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -304,52 +304,44 @@ fn apply_plan(plan: Plan) {
 
 /// Download, verify and write the kernel to the ESP.
 fn apply_kernel(manifest: &Manifest) -> bool {
-    kprint!("[npk]   + kernel   v{} {} ", manifest.version, fmt_size(manifest.size));
+    kprintln!("[npk]   + kernel   v{} {}", manifest.version, fmt_size(manifest.size));
     let kernel_path = alloc::format!("{}/kernel.efi", UPDATE_BASE);
     let kernel_data = match super::http::https_get(UPDATE_HOST, &kernel_path, manifest.size) {
         Ok(d) => d,
-        Err(e) => { kprintln!(""); kprintln!("[npk]   ! kernel download: {}", e); return false; }
+        Err(e) => { kprintln!("[npk]   ! kernel     download: {}", e); return false; }
     };
     if kernel_data.len() != manifest.size {
-        kprintln!("");
-        kprintln!("[npk]   ! kernel short download ({} of {})", kernel_data.len(), manifest.size);
+        kprintln!("[npk]   ! kernel     short download ({} of {})", kernel_data.len(), manifest.size);
         return false;
     }
 
     let hash = crate::tls::sha256::sha384(&kernel_data);
     if hash != manifest.sha384 {
-        kprintln!("");
-        kprintln!("[npk]   ! kernel checksum mismatch — rejected");
+        kprintln!("[npk]   ! kernel     checksum mismatch — rejected");
         return false;
     }
 
     let sig_path = alloc::format!("{}/kernel.sig", UPDATE_BASE);
     let sig_data = match super::http::https_get(UPDATE_HOST, &sig_path, MAX_SIG_SIZE) {
         Ok(d) => d,
-        Err(e) => { kprintln!(""); kprintln!("[npk]   ! kernel signature: {}", e); return false; }
+        Err(e) => { kprintln!("[npk]   ! kernel     signature: {}", e); return false; }
     };
     let pubkey = &crate::update_key::UPDATE_PUB_KEY;
     if !crate::tls::certstore::verify_p384_prehash_384(pubkey, &hash, &sig_data) {
-        kprintln!("");
-        kprintln!("[npk]   ! kernel signature invalid — rejected");
+        kprintln!("[npk]   ! kernel     signature invalid — rejected");
         return false;
     }
 
     let esp_start = match crate::gpt::detect_esp_offset() {
         Some(s) => s,
         None => {
-            kprintln!("");
-            kprintln!("[npk]   ! no ESP partition found — is this a GPT disk?");
+            kprintln!("[npk]   ! kernel     no ESP partition found — is this a GPT disk?");
             return false;
         }
     };
     match crate::fat32::update_kernel(esp_start, &kernel_data) {
-        Ok(()) => { kprintln!("OK"); true }
-        Err(e) => {
-            kprintln!("");
-            kprintln!("[npk]   ! ESP write: {}", e);
-            false
-        }
+        Ok(()) => true,
+        Err(e) => { kprintln!("[npk]   ! kernel     ESP write: {}", e); false }
     }
 }
 
@@ -524,7 +516,7 @@ fn apply_asset(job: &AssetJob) -> bool {
             return false;
         }
 
-        kprint!("[npk]   + asset    {} {} ", spec.npkfs_path, fmt_size(entry.size));
+        kprintln!("[npk]   + asset    {:<28} {}", spec.npkfs_path, fmt_size(entry.size));
 
         // Two URL paths:
         //   (a) entry.url == Some(url)  → fetch verbatim (GitHub Releases).
@@ -537,7 +529,7 @@ fn apply_asset(job: &AssetJob) -> bool {
         let (asset_host_str, asset_path_str): (&str, &str) = if let Some(url) = &entry.url {
             match split_url(url) {
                 Some((h, p)) => (h, p),
-                None => { kprintln!("bad url"); return false; }
+                None => { kprintln!("[npk]   ! asset     bad url"); return false; }
             }
         } else {
             asset_host = String::from(UPDATE_HOST);
@@ -551,7 +543,7 @@ fn apply_asset(job: &AssetJob) -> bool {
         // 1 GB userspace bundle no longer needs a 1 GB heap spike.
         let mut writer = match crate::npkfs::open_streaming_write(spec.npkfs_path) {
             Ok(w) => w,
-            Err(e) => { kprintln!("npkfs open failed: {:?}", e); return false; }
+            Err(e) => { kprintln!("[npk]   ! asset     npkfs open failed: {:?}", e); return false; }
         };
         let mut hasher = crate::tls::sha256::Sha384::new();
         let mut total_bytes: usize = 0;
@@ -589,7 +581,7 @@ fn apply_asset(job: &AssetJob) -> bool {
         match stream_result {
             Ok(_) => {}
             Err(e) => {
-                kprintln!("failed: {}{}",
+                kprintln!("[npk]   ! asset     download: {}{}",
                     e,
                     write_err.map(|w| alloc::format!(" ({})", w)).unwrap_or_default());
                 // Drop the partial writer and sweep the chunks it already
@@ -602,13 +594,13 @@ fn apply_asset(job: &AssetJob) -> bool {
             }
         }
         if total_bytes != entry.size {
-            kprintln!("size mismatch (got {} expected {})", total_bytes, entry.size);
+            kprintln!("[npk]   ! asset     size mismatch (got {} expected {})", total_bytes, entry.size);
             return false;
         }
 
         let hash = hasher.finalize();
         if hash != entry.sha384 {
-            kprintln!("checksum failed");
+            kprintln!("[npk]   ! asset     checksum failed");
             // Drop the writer without finishing — flushed chunks
             // remain in storage but are unreachable from the path
             // tree, so the next `gc()` cycle reclaims them.
@@ -626,7 +618,7 @@ fn apply_asset(job: &AssetJob) -> bool {
                     sig_path_owned = String::from(p);
                     (sig_host_owned.as_str(), sig_path_owned.as_str())
                 }
-                None => { kprintln!("bad sig url"); return false; }
+                None => { kprintln!("[npk]   ! asset     bad sig url"); return false; }
             }
         } else {
             sig_host_owned = String::from(UPDATE_HOST);
@@ -636,12 +628,12 @@ fn apply_asset(job: &AssetJob) -> bool {
 
         let sig_data = match super::http::https_get(sig_host_str, sig_path_str, MAX_SIG_SIZE) {
             Ok(d) => d,
-            Err(e) => { kprintln!("sig failed: {}", e); return false; }
+            Err(e) => { kprintln!("[npk]   ! asset     signature: {}", e); return false; }
         };
 
         let pubkey = &crate::update_key::UPDATE_PUB_KEY;
         if !crate::tls::certstore::verify_p384_prehash_384(pubkey, &hash, &sig_data) {
-            kprintln!("signature invalid");
+            kprintln!("[npk]   ! asset     signature invalid");
             // Writer is dropped without finish; chunks become
             // unreachable, gc reclaims them on next pass.
             return false;
@@ -651,10 +643,9 @@ fn apply_asset(job: &AssetJob) -> bool {
         // atomically. Replaces any existing entry at the same path.
         match writer.finish() {
             Ok(_) => {}
-            Err(e) => { kprintln!("publish failed: {:?}", e); return false; }
+            Err(e) => { kprintln!("[npk]   ! asset     publish failed: {:?}", e); return false; }
         }
 
-        kprintln!("OK");
         // A system wallpaper is only reachable through the user's own
         // wallpapers/ folder — that is the single directory `wallpaper
         // list` and `wallpaper set` read. Refresh the user copy so an OTA

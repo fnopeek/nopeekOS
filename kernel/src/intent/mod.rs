@@ -42,35 +42,55 @@ pub fn clear_cancel() {
     CANCEL_REQUESTED.store(false, core::sync::atomic::Ordering::Release);
 }
 
+/// Give up waiting after this long and answer "no", so a prompt can never
+/// wedge the shell — whatever an intent asks, the machine comes back.
+const CONFIRM_TIMEOUT_TICKS: u64 = 60 * 100; // 60 s at 100 Hz
+
 /// Ask a yes/no question and block until it is answered. Default is NO —
-/// Enter, Esc and Ctrl+C all decline, only an explicit `y` agrees.
+/// Enter, Esc, Ctrl+C and the timeout all decline; only an explicit `y` agrees.
 ///
 /// An intent runs *inside* the loop's read cycle, so there is no session to
-/// hand the question back to. We drive the keyboard directly and keep the
-/// renderer ticking, the same way a long download keeps printing progress
-/// while it blocks the loop.
+/// hand the question back to: it drives the keyboard itself. That means it
+/// cannot lean on the machinery the loop normally provides — see the two
+/// comments below, both of which cost a hang before they were understood.
 pub fn confirm(question: &str) -> bool {
     kprint!("[npk] {} [y/N] ", question);
     // Paint the question, then wait. Deliberately NOT `poll_render` in the
     // wait loop: that pumps mouse events too, and a click on a window's X
     // would free the session this intent is running inside. Nothing else
     // changes on screen while we wait, so one frame is enough.
-    if crate::shade::is_active() && crate::smp::per_core::current_core_id() == 0 {
-        crate::shade::render_frame();
-    }
-    loop {
-        if cancel_requested() { kprintln!("^C"); return false; }
+    let on_screen = crate::shade::is_active()
+        && crate::smp::per_core::current_core_id() == 0;
+    if on_screen { crate::shade::render_frame(); }
+
+    let started = crate::interrupts::ticks();
+    let answer = loop {
+        if cancel_requested() { kprint!("^C"); break false; }
+        if crate::interrupts::ticks().wrapping_sub(started) > CONFIRM_TIMEOUT_TICKS {
+            kprint!("(timeout)");
+            break false;
+        }
+
+        // Drain the USB event ring ourselves instead of relying on the timer
+        // IRQ: an intent may run in a fiber under the cooperative IF=0
+        // invariant, where nothing arrives on its own and a bare `hlt` never
+        // wakes. `poll_events` is the main-loop-context drain and is a no-op
+        // when the IRQ already did the work.
+        crate::xhci::poll_events();
+
         let key = crate::keyboard::read_key().or_else(|| {
             // Serial-only mode (no compositor): the answer arrives on COM1.
-            let serial = serial::SERIAL.lock();
+            // `try_lock` — never spin on the lock a print holds; we would be
+            // the one blocking the writer.
+            let serial = serial::SERIAL.try_lock()?;
             if serial.has_data() { Some(serial.read_serial_raw()) } else { None }
         });
         if let Some(key) = key {
             match key {
-                b'y' | b'Y' => { kprintln!("y"); return true; }
-                b'n' | b'N' => { kprintln!("n"); return false; }
-                b'\n' | b'\r' => { kprintln!(); return false; }
-                0x03 => { kprintln!("^C"); return false; }
+                b'y' | b'Y' => { kprint!("y"); break true; }
+                b'n' | b'N' => { kprint!("n"); break false; }
+                b'\n' | b'\r' => break false,
+                0x03 => { kprint!("^C"); break false; }
                 0x1B => {
                     // An arrow key arrives as ESC '[' 'A' — swallow the rest of
                     // the sequence instead of reading it as "Escape, decline".
@@ -78,16 +98,23 @@ pub fn confirm(question: &str) -> bool {
                         let _ = crate::keyboard::read_key();
                         continue;
                     }
-                    kprintln!();
-                    return false;
+                    break false;
                 }
                 _ => {}
             }
         }
-        // SAFETY: ring-0 with IRQs enabled — the 100 Hz timer wakes us even
-        // if no key ever arrives.
-        unsafe { core::arch::asm!("hlt") };
-    }
+
+        // Hand the core to peer fibers if we are one; otherwise spin. NOT
+        // `hlt`: under IF=0 it would halt the core for good, and the timer
+        // that should wake it is the very thing that is off. A prompt waits
+        // on a human, so the spin is bounded by the timeout above.
+        if !crate::smp::fiber::yield_sleep(2) {
+            core::hint::spin_loop();
+        }
+    };
+    kprintln!();
+    if on_screen { crate::shade::render_frame(); }
+    answer
 }
 
 // -- Command history --
