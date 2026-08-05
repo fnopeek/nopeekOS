@@ -269,14 +269,13 @@ pub fn apply_module(p: &ModulePlan) -> bool {
     let store_name = alloc::format!("sys/wasm/{}", p.name);
     let version_key = alloc::format!("sys/wasm/{}.version", p.name);
 
-    // The line opens before the download and is closed by `OK` — it is the
-    // only sign of life while a slow fetch blocks the loop. A failure ends it
-    // and states the reason on its own `!` line, so the marker at the start
-    // of a line always tells the truth about how it went.
-    kprint!("[npk]   + module   {:<10} {} ", p.name, p.remote);
+    // A COMPLETE line before the work, never one left open waiting for its
+    // `OK`: the download itself prints (redirects, ESP writes, progress), and
+    // the tail then landed on some later line. Success adds nothing — the
+    // summary counts it; only a failure speaks again, on its own `!` line.
+    kprintln!("[npk]   + module   {:<10} {}", p.name, p.remote);
     let fail = |msg: core::fmt::Arguments| {
-        kprintln!("");
-        kprintln!("[npk]   ! module {} {}", p.name, msg);
+        kprintln!("[npk]   ! module   {:<10} {}", p.name, msg);
         false
     };
 
@@ -315,7 +314,6 @@ pub fn apply_module(p: &ModulePlan) -> bool {
 
     if crate::npkfs::store(&store_name, &wasm_data, crate::capability::CAP_NULL).is_ok() {
         let _ = crate::npkfs::store(&version_key, p.remote.as_bytes(), crate::capability::CAP_NULL);
-        kprintln!("OK");
         true
     } else {
         fail(format_args!("store failed"))
