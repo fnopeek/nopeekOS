@@ -41,9 +41,9 @@ const LIGHT_TERMINAL_OPACITY_DROP: u32 = 56;
 /// the colour underneath. It settles at `STEADY`; the moment focus lands it
 /// starts at `FLASH` and fades down over `FLASH_TICKS` (100 Hz timer), which
 /// is what makes a focus change catch the eye anywhere on screen.
-const GLOW_STEADY_ALPHA: u32 = 60;
-const GLOW_FLASH_ALPHA: u32 = 210;
-const GLOW_FLASH_TICKS: u64 = 22;
+const GLOW_STEADY_ALPHA: u32 = 100;
+const GLOW_FLASH_ALPHA: u32 = 255;
+const GLOW_FLASH_TICKS: u64 = 24;
 /// Border blend of the focused / unfocused tile (0..256). The gap between the
 /// two carries the steady-state distinction together with the halo.
 const BORDER_ACTIVE_OPACITY: u32 = 235;
@@ -460,13 +460,16 @@ impl Compositor {
     }
 
     /// Width of the focus halo. `shade.glow` in px (0 disables), capped at
-    /// half the gap so the halo — and the wallpaper restore that erases it —
-    /// can never reach into the neighbouring tile.
+    /// the full gap: only ONE tile is ever focused, so two halos can never
+    /// meet, and the band stops one pixel short of the neighbour's rect
+    /// (tiles stand `gaps` apart, band columns are `[edge, edge + gaps)`).
+    /// The workspace area is inset by `gaps` on all four sides, so the band
+    /// stays on wallpaper at the screen edges and under the bar too.
     fn glow_width(&self) -> u32 {
         let w = crate::config::get("shade.glow")
             .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(4) * self.scale;
-        w.min(self.gaps / 2)
+            .unwrap_or(6) * self.scale;
+        w.min(self.gaps)
     }
 
     /// Halo for this window right now. Unfocused tiles keep the `band` (they
@@ -1697,8 +1700,8 @@ impl Compositor {
         if !win.is_overlay || win.is_bar {
             // Restore the halo band too, ALWAYS — also for an unfocused tile,
             // which is exactly the one that has to paint over the halo it had
-            // while it was focused. The band lives in the gap (capped at half
-            // of it), so this never reaches a neighbour.
+            // while it was focused. The band lives inside the gap, so this
+            // never reaches a neighbour (see `glow_width`).
             let g = glow.band;
             background::draw_background_region(shadow, info,
                 win.x.saturating_sub(g), win.y.saturating_sub(g),
