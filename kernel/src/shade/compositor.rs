@@ -367,6 +367,9 @@ pub struct Compositor {
     /// and settles into the steady one over `GLOW_FLASH_TICKS`, so a focus
     /// change is visible even when you were not looking at that corner.
     pub focus_glow: Option<(WindowId, u64)>,
+    /// Timer tick the halo was last repainted at — the callers can run far
+    /// more often than the animation has frames.
+    glow_last_tick: u64,
     /// Auto-hide bottom dock, if a dock app has registered one.
     pub dock: Option<DockState>,
     /// Top strut bar, if a bar app (`bar.wasm`) has registered one. `None`
@@ -421,6 +424,7 @@ impl Compositor {
             drag: None,
             animation: None,
             focus_glow: None,
+            glow_last_tick: 0,
             dock: None,
             top_strut: None,
         }
@@ -499,7 +503,14 @@ impl Compositor {
             self.focus_glow = None;
             return false;
         }
-        if crate::interrupts::ticks().saturating_sub(start) >= GLOW_FLASH_TICKS {
+        let now = crate::interrupts::ticks();
+        // At most one repaint per timer tick. The callers are not a frame
+        // clock: `poll_render` runs from a download's recv loop thousands of
+        // times a second, and repainting the band that often would burn the
+        // core for frames nobody can see — the alpha only moves once a tick.
+        if now == self.glow_last_tick { return false }
+        self.glow_last_tick = now;
+        if now.saturating_sub(start) >= GLOW_FLASH_TICKS {
             self.focus_glow = None;
         }
         true

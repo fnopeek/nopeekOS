@@ -762,12 +762,22 @@ fn render_focus_glow() {
         let (shadow, _) = fb.shadow_ptr();
 
         if let Some(ref comp) = *COMPOSITOR.lock() {
+            // The cursor is BAKED into the front buffer. Baking another one
+            // per tick — which is what a plain `draw_cursor_on_shadow` does —
+            // left a copy at every position the mouse passed through: this
+            // pass repaints only the halo band, so nothing overwrites them
+            // (they vanished later, when a full render came along). Erase,
+            // repaint, bake at the new spot: the same save/restore dance
+            // `render_frame_cursor_only` does for every partial repaint.
+            let old = cursor::saved_pos();
+            let had_old = cursor::save_valid();
+            cursor::restore_under(shadow, &info);
             let regions = comp.render_focus_glow(shadow, &info);
-            if regions.is_empty() { return }
-            cursor::draw_cursor_on_shadow(shadow, &info);
+            cursor::save_under_and_bake(shadow, &info);
             for (x, y, w, h) in regions {
                 framebuffer::blit_rect(fb, x, y, w, h);
             }
+            blit_cursor_bbox(fb, old, had_old);
         }
     });
 }
