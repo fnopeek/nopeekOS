@@ -2743,6 +2743,11 @@ fn process_hid_report(modifiers: u8, keys: &[u8; 6], state: &mut XhciState) {
                 0x52 => { crate::shade::input::push_action_direct(if ctrl { crate::shade::input::ShadeAction::ResizeUp } else if shift { crate::shade::input::ShadeAction::SwapUp } else { crate::shade::input::ShadeAction::FocusUp }); true }
                 0x4B => { crate::shade::input::push_action_direct(crate::shade::input::ShadeAction::ScrollUp); true }
                 0x4E => { crate::shade::input::push_action_direct(crate::shade::input::ShadeAction::ScrollDown); true }
+                // Digits 1..9 by HID code, not by character: with Shift the
+                // layout has already turned "1" into "+"/"!" (and de_CH's
+                // Shift+4 into nothing at all), so Mod+Shift+N never reached
+                // the character keybinds. HID 0x1E = '1'.
+                0x1E..=0x26 => { crate::shade::input::push_workspace_key(key - 0x1D, shift); true }
                 _ => false,
             };
             if handled { continue; }
