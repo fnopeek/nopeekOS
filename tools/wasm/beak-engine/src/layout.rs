@@ -219,6 +219,41 @@ fn band_of(floats: &[FloatRect], top: i32, bot: i32, cl: i32, cr: i32) -> (i32, 
 /// content width `avail`: CSS2.1 §10.3.3 (used width + margins) plus the
 /// §10.4 min/max-width redo. Returns (content-width, content-left-offset =
 /// margin-left + padding-left).
+/// A replaced element whose content we do not lay out — an `<iframe>`'s
+/// document, a `<video>`'s frames, a `<canvas>`'s bitmap, an `<object>`'s
+/// plugin. What it has is a BOX, and CSS2.1 §10.3.2 / §10.6.2 give a replaced
+/// element with no intrinsic size **300 × 150**; HTML maps the presentational
+/// `width`/`height` attributes onto it, which is how a video embed states its
+/// size. Returns the intrinsic content size, or `None` for anything else.
+///
+/// `<img>` is deliberately not here: it has real intrinsic dimensions once its
+/// pixels land, and its own path (`img_box`) tracks whether the box was guessed.
+fn replaced_intrinsic(el: &Element) -> Option<(f32, f32)> {
+    if !matches!(el.tag.as_str(), "iframe" | "video" | "canvas" | "object" | "embed") {
+        return None;
+    }
+    // `<object>` is the exception: when its resource cannot be obtained it
+    // represents its FALLBACK content and is not replaced at all (HTML §4.8.7).
+    // We never load a plugin, so a fallback is exactly what a browser shows —
+    // `flexbox_object` measures precisely that. Without a fallback it is still
+    // an empty replaced box. `<param>` is metadata, not content.
+    if el.tag == "object" {
+        let renders = el.children.iter().any(|n| match n {
+            Node::Element(c) => c.tag != "param",
+            Node::Text(t) => !t.trim().is_empty(),
+        });
+        if renders {
+            return None;
+        }
+    }
+    let attr = |n: &str| {
+        el.attr(n)
+            .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
+            .filter(|v| *v >= 0.0)
+    };
+    Some((attr("width").unwrap_or(300.0), attr("height").unwrap_or(150.0)))
+}
+
 fn resolve_block_h(st: &ComputedStyle, avail: f32) -> (f32, f32) {
     // Horizontal padding + border both sit between the content box and the
     // margin edge (border-box `width` includes them; content-box adds them).
@@ -406,8 +441,6 @@ impl Theme {
         (r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000 < 128
     }
 }
-
-const PAD: i32 = 20;
 
 /// One paint instruction, positioned in document space (pre-scroll).
 pub enum DrawOp {
@@ -1159,8 +1192,8 @@ pub fn layout(
     let html_el = dom.root_element();
     let mut root = style::resolve(html_el, &initial, theme, sheet, &[], &[], 0, width as f32);
     root.rem_base = root.font_px;
-    let cx = PAD;
-    let cw = (width as i32 - 2 * PAD).max(60);
+    let cx = 0;
+    let cw = (width as i32).max(60);
     let mut ctx = Ctx {
         fonts,
         theme,
@@ -1173,10 +1206,13 @@ pub fn layout(
         controls: Vec::new(),
         forms,
         path: Vec::new(),
-        // Initial containing block: the viewport. Its height is definite —
-        // that is what makes `top:0; bottom:0` on a root-level abspos box
-        // stretch to the window rather than collapse (CSS 2.1 §10.1).
-        cb: (cx, PAD, cw, Some(viewport_h as i32)),
+        // Initial containing block: the viewport, anchored at the CANVAS
+        // origin (CSS2.1 §10.1) — not at the page's content box. `left: 100px`
+        // on a box with no positioned ancestor means 100px from the window
+        // edge, whatever inset the page content sits at. Its height is
+        // definite, which is what makes `top:0; bottom:0` on a root-level
+        // abspos box stretch to the window rather than collapse.
+        cb: (0, 0, width as i32, Some(viewport_h as i32)),
         viewport_w: width as f32,
         abs_count: 0,
         fixed_count: 0,
@@ -1196,29 +1232,52 @@ pub fn layout(
         styles: core::cell::RefCell::new(BTreeMap::new()),
     };
 
-    let mut y = PAD;
-
-    // Resolve <body> itself so `body { … }` rules inherit into the page, and
-    // put it on the ancestor path so `body p` / `.article p` selectors match.
+    // Resolve <body> for the canvas-background rule below; layout reaches it
+    // as an ordinary child of the root.
     let body = dom.body();
     let html_info = [ElemInfo::of(html_el)];
     let anc: &[ElemInfo] = if core::ptr::eq(html_el, body) { &[] } else { &html_info };
     let body_style = style::resolve(body, &root, theme, sheet, anc, &[], 0, width as f32);
-    ctx.path.extend_from_slice(anc);
-    ctx.path.push(ElemInfo::of(body));
-    // A `display: table`/`flex`/`grid` `<body>` must itself establish that
-    // formatting context — otherwise its `table-row`/`-cell` children have no
-    // `table` ancestor and (correctly, per CSS2.1 §17.2.1) get wrapped in
-    // their own anonymous table, which is not what the author asked for.
-    y = if establishes_bfc(&body_style) {
-        ctx.layout_box(body, &body_style, cx, cw, y)
+
+    // The ROOT ELEMENT IS A BOX. It used to be skipped — layout started at
+    // `<body>`'s children, inside a hardcoded 20px page inset — so `html
+    // { position: absolute }`, its border, its width and `<body>`'s own margin
+    // all meant nothing. Laying it out like any other block is what makes the
+    // whole `abspos-containing-block-initial` family measurable, and it is
+    // where the page inset now comes from: `<body>`'s UA margin.
+    // The root's containing block is the ICB, whose height IS definite — so a
+    // percentage height on it resolves, unlike one anywhere else in the flow
+    // (where the parent's content height does not exist yet).
+    if let Some(h) = root.height.px(viewport_h as f32) {
+        if matches!(root.height, Len::Pct(_) | Len::Calc { .. }) {
+            root.height = Len::Px(h);
+        }
+    }
+    let mut y;
+    if root.display == Display::None {
+        // `html { display: none }` — the root generates no box, so the document
+        // renders nothing at all (`root-box-003`). Only the canvas keeps its
+        // propagated background.
+        y = 0;
+    } else if core::ptr::eq(html_el, body) {
+        // A document with no `<html>` at all: the synthetic container is both.
+        ctx.path.push(ElemInfo::of(body));
+        y = ctx.layout_children(&body.children, &body_style, Some(body), cx, cw, 0);
     } else {
-        ctx.layout_children(&body.children, &body_style, Some(body), cx, cw, y)
-    };
+        ctx.path.push(ElemInfo::of(html_el));
+        if matches!(root.position, Position::Absolute | Position::Fixed) {
+            // An out-of-flow root resolves against the ICB like any other
+            // out-of-flow box — it just has no in-flow position to fall back to.
+            ctx.layout_abs(html_el, &root, cx, 0);
+            y = viewport_h as i32;
+        } else {
+            y = ctx.layout_box(html_el, &root, cx, cw, 0);
+        }
+        ctx.path.pop();
+    }
     // A float can extend below the last in-flow line — grow the page to contain it.
     let float_bottom = ctx.floats.iter().map(|f| f.bottom).max().unwrap_or(0);
     y = y.max(float_bottom);
-    y += PAD;
 
     // The body's background propagates to the whole canvas (a bare `<body
     // background>` fills the viewport, not just the body box).
@@ -1519,6 +1578,16 @@ impl Ctx<'_> {
                 let src = el.attr("src").unwrap_or("").to_string();
                 inline.image(src, iw, ih, None, alt, st.hidden, st.transparent, self.image_deco(&st));
                 self.path.pop();
+                continue;
+            }
+            // Every other replaced element is an atomic inline box too, and one
+            // that lays out through the block model — same as an `inline-block`,
+            // which is what `inline_block_box` builds. (A floated or out-of-flow
+            // one was blockified in `styled`, so it never reaches here.)
+            if st.display == Display::Inline && replaced_intrinsic(el).is_some() {
+                if let Some(b) = self.inline_block_box(el, &st, w) {
+                    inline.atomic(b);
+                }
                 continue;
             }
             // Form controls are atomic inline boxes too — and their children
@@ -1928,7 +1997,14 @@ impl Ctx<'_> {
     /// left open for the next sibling. When `isolated`, `base_y` is the
     /// border-box top and margins are committed, not propagated.
     fn flow_block_impl(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, base_y: i32, incoming: Collapse, isolated: bool) -> BoxOut {
-        let (cw, off_left) = resolve_block_h(st, w as f32);
+        let (mut cw, off_left) = resolve_block_h(st, w as f32);
+        // §10.3.4: a replaced element with `width: auto` takes its INTRINSIC
+        // width. It does not fill its container the way a block box does, so
+        // `resolve_block_h`'s auto-solve is the wrong answer for it.
+        if let (Some((iw, _)), Len::Auto) = (replaced_intrinsic(el), st.width) {
+            let frame = st.pad_left + st.pad_right + st.border_x();
+            cw = clamp_len(iw + frame, st.min_width, st.max_width, st.box_border, frame) - frame;
+        }
         let content_x = x + off_left as i32;
         let content_w = cw.max(1.0) as i32;
 
@@ -2006,7 +2082,13 @@ impl Ctx<'_> {
         if st.position != Position::Static {
             self.cb = padding_cb(st, content_x, prov_top_y + st.border_top.width as i32 + st.pad_top as i32, content_w);
         }
-        let flow = if st.pre {
+        let flow = if replaced_intrinsic(el).is_some() {
+            // A replaced element's children are not page content — an
+            // `<iframe>`'s fallback text, a `<video>`'s `<source>` list, a
+            // `<canvas>`'s alternative. Nothing commits; the box is the whole
+            // of it, and its height comes from the intrinsic size below.
+            Flow { bottom: child_anchor, open: Collapse::default(), first_top: child_anchor, committed: false }
+        } else if st.pre {
             let ly = child_anchor + child_incoming.value() as i32;
             let nb = layout_pre(self.fonts.pick(st.bold, st.italic, st.mono), el, st, content_x, content_w, ly, &mut self.ops);
             Flow { bottom: nb, open: Collapse::default(), first_top: ly, committed: true }
@@ -2037,6 +2119,10 @@ impl Ctx<'_> {
             let mut ch = 0;
             if let Some(h) = px_h(st.height) {
                 ch = h;
+            } else if let Some((_, ih)) = replaced_intrinsic(el) {
+                // §10.6.2: `height: auto` on a replaced element is its
+                // intrinsic height, not the zero its (unrendered) content says.
+                ch = ih as i32;
             } else if st.contain_size {
                 // Size containment: content contributes no size, so an auto
                 // height falls back to `contain-intrinsic-size`'s height.
@@ -3303,9 +3389,14 @@ impl Ctx<'_> {
         if let Some(hit) = self.intrinsic.get(&el.seq) {
             return *hit;
         }
+        // A replaced element measures as its intrinsic width, both ways — it
+        // neither wraps nor shrinks below itself. Without this it sizes to 0 as
+        // a flex/grid item, a table cell or a shrink-to-fit out-of-flow box.
+        let out = if let Some((iw, _)) = replaced_intrinsic(el) {
+            (iw, iw)
         // A control has no text children to measure — without this it sizes to
         // 0 as a flex/grid item and disappears.
-        let out = if let Some(kind) = crate::forms::kind_of(el) {
+        } else if let Some(kind) = crate::forms::kind_of(el) {
             if kind == ControlKind::Hidden {
                 (0.0, 0.0)
             } else {
@@ -3437,7 +3528,11 @@ impl Ctx<'_> {
             return;
         }
         // An inline box's text joins the line its parent is building.
-        if cs.display == Display::Inline && crate::forms::kind_of(el).is_none() && el.tag != "img" {
+        if cs.display == Display::Inline
+            && crate::forms::kind_of(el).is_none()
+            && el.tag != "img"
+            && replaced_intrinsic(el).is_none()
+        {
             run.frame += inline_frame(&cs, 0.0);
             self.path.push(ElemInfo::of(el));
             self.intrinsic_walk(&el.children, &cs, run, pref, min);
@@ -4997,6 +5092,14 @@ impl Ctx<'_> {
             let (iw, ih) = self.img_box(el, st);
             let src = el.attr("src").unwrap_or("").to_string();
             inline.image(src, iw, ih, href, el.attr("alt").unwrap_or("").trim().to_string(), st.hidden, st.transparent, self.image_deco(st));
+            return;
+        }
+        // …and every other replaced element, laid out through the block model
+        // and handed to the line as a finished rectangle.
+        if replaced_intrinsic(el).is_some() {
+            if let Some(b) = self.inline_block_box(el, st, bw) {
+                inline.atomic(b);
+            }
             return;
         }
         if let Some(kind) = crate::forms::kind_of(el) {
@@ -6718,9 +6821,10 @@ fn dbg_wiki_shape() {
         );
         let badge = l.ops.iter().find_map(|o| match o { DrawOp::Text { x, y, text, .. } if text == "badge" => Some((*x, *y)), _ => None }).unwrap();
         let flow_y = |ll: &Layout| ll.ops.iter().find_map(|o| match o { DrawOp::Text { y, text, .. } if text == "flow" => Some(*y), _ => None }).unwrap();
-        // cb = the relative div's content box; its left = PAD(20), top = PAD(20).
-        assert_eq!(badge.0, 20 + 30, "abs left = cb.left + left");
-        assert!(badge.1 >= 20 + 8 && badge.1 <= 20 + 8 + 6, "abs top ≈ cb.top + top");
+        // cb = the relative div's content box, which starts at the body's UA
+        // margin (8px) — the page has no gutter of its own.
+        assert_eq!(badge.0, 8 + 30, "abs left = cb.left + left");
+        assert!(badge.1 >= 8 + 8 && badge.1 <= 8 + 8 + 6, "abs top ≈ cb.top + top");
         // out of flow: the sibling <p> lands where it would with no badge at all.
         let without = lay("<body><div style=\"position:relative\"><p>flow</p></div></body>", 800);
         assert_eq!(flow_y(&l), flow_y(&without), "absolute badge does not shift the following text");
@@ -6729,8 +6833,9 @@ fn dbg_wiki_shape() {
     #[test]
     fn max_width_container_centers_and_pads() {
         // `.container { max-width:400px; margin:0 auto; padding:20px }` on an
-        // 800px viewport (body content width 760): the box is capped to 400 and
-        // centered → left margin (760-400)/2 = 180, +PAD(20) +pad_left(20) → x≈220.
+        // 800px viewport (body content width 784): the box is capped to 400 and
+        // centered → left margin (784-400)/2 = 192, +body margin(8) +pad_left(20)
+        // → x≈220.
         let l = lay(
             "<body><div style=\"max-width:400px; margin:0 auto; padding:20px\"><p>hi</p></div></body>",
             800,
@@ -6740,6 +6845,47 @@ fn dbg_wiki_shape() {
             _ => None,
         }).unwrap();
         assert!((190..=250).contains(&x), "container centered+padded → x≈220, got {x}");
+    }
+
+    #[test]
+    fn a_replaced_element_with_no_intrinsic_size_is_300_by_150() {
+        // CSS2.1 §10.3.2 + §10.6.2. We never load a frame, a video or a canvas
+        // bitmap — but the BOX is still there, and on the real web that box is
+        // every video embed and every embedded map.
+        let box_of = |html: &str| {
+            let l = lay(html, 800);
+            rects(&l)
+                .into_iter()
+                .find(|(_, _, _, _, c)| *c == Rgb(255, 0, 0))
+                .map(|(_, _, w, h, _)| (w, h))
+        };
+        for tag in ["iframe", "video", "canvas", "embed", "object"] {
+            let html = std::format!("<body><{tag} style=\"background:#ff0000\"></{tag}></body>");
+            assert_eq!(box_of(&html), Some((300, 150)), "<{tag}> with no size");
+        }
+        // The presentational attributes size it — how a video embed states 16:9.
+        assert_eq!(
+            box_of("<body><iframe width=560 height=315 style=\"background:#ff0000\"></iframe></body>"),
+            Some((560, 315)),
+        );
+        // CSS wins over the attribute, and `height: auto` still falls back to
+        // the intrinsic 150 rather than to the zero its content would give.
+        assert_eq!(
+            box_of("<body><iframe width=560 style=\"width:200px;background:#ff0000\"></iframe></body>"),
+            Some((200, 150)),
+        );
+    }
+
+    #[test]
+    fn an_object_with_fallback_content_is_not_a_replaced_box() {
+        // HTML §4.8.7: when the resource cannot be obtained — and ours never
+        // can — the element represents its fallback content instead.
+        let l = lay("<body><object>fallback text</object></body>", 800);
+        assert!(texts(&l).iter().any(|(_, _, t)| t.contains("fallback")), "fallback renders");
+        // With nothing to fall back to it stays an empty replaced box.
+        let l = lay("<body><object style=\"background:#ff0000\"></object></body>", 800);
+        let r = rects(&l).into_iter().find(|(_, _, _, _, c)| *c == Rgb(255, 0, 0));
+        assert_eq!(r.map(|(_, _, w, h, _)| (w, h)), Some((300, 150)));
     }
 
     #[test]
@@ -7139,8 +7285,8 @@ fn dbg_wiki_shape() {
         let l = lay("<body><ul><li>one</li><li>two</li></ul></body>", 800);
         let bullets = l.ops.iter().filter(|o| matches!(o, DrawOp::Rect { .. })).count();
         assert_eq!(bullets, 2, "one bullet per li");
-        // list text is indented past the plain content edge (PAD=20)
-        assert!(texts(&l).iter().all(|(x, _, _)| *x > 20));
+        // list text is indented past the plain content edge (the body margin)
+        assert!(texts(&l).iter().all(|(x, _, _)| *x > 8));
     }
 }
 

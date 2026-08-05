@@ -782,7 +782,7 @@ mod tests {
         }
     }
 
-    const PAD: u32 = 20; // layout::PAD — the fixed page gutter
+    const PAD: u32 = 8; // the UA `body { margin }` — where page content starts
 
     /// Paint one page and read a pixel back as (r, g, b). `x`/`y` are relative
     /// to the document's top-left content corner, i.e. past the page padding.
