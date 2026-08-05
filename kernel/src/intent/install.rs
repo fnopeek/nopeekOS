@@ -436,26 +436,88 @@ fn is_bundled_module(name: &str) -> bool {
 
 /// `modules` — list installed and available modules.
 pub fn intent_modules() {
-    kprintln!("[npk] Installed modules:");
-
     let entries = match crate::npkfs::fs::list("sys/wasm") {
         Ok(Some(v)) => v,
-        Ok(None) | Err(_) => { kprintln!("  (none)"); return; }
+        Ok(None) | Err(_) => { kprintln!("[npk] modules — none installed"); return; }
     };
 
-    let mut found = false;
+    let mut rows: Vec<(String, String, u64)> = Vec::new();
+    let mut bytes = 0u64;
     for e in &entries {
         if !matches!(e.kind, crate::npkfs::object::EntryKind::File) { continue; }
         if e.name.ends_with(".version") { continue; }
         let version_key = alloc::format!("sys/wasm/{}.version", e.name);
+        // `.trim()` is not cosmetic: the sidecar carries a trailing newline,
+        // and printing it un-trimmed put a blank line after every module that
+        // had one.
         let version = crate::npkfs::fetch(&version_key).ok()
-            .and_then(|(data, _)| core::str::from_utf8(&data).ok().map(String::from))
+            .and_then(|(data, _)| core::str::from_utf8(&data).ok().map(|s| String::from(s.trim())))
             .unwrap_or_else(|| String::from("builtin"));
-        kprintln!("  {} v{}", e.name, version);
-        found = true;
+        bytes += e.size;
+        rows.push((e.name.clone(), version, e.size));
     }
 
-    if !found {
-        kprintln!("  (none)");
+    if rows.is_empty() {
+        kprintln!("[npk] modules — none installed");
+        return;
+    }
+
+    kprintln!("[npk] modules — {} installed {}", rows.len(),
+        super::update::fmt_size(bytes as usize));
+    kprintln!("[npk]");
+    let w = rows.iter().map(|(n, _, _)| n.len()).max().unwrap_or(8).max(8);
+    let v = rows.iter().map(|(_, v, _)| v.len()).max().unwrap_or(6).max(6);
+    for (name, version, size) in &rows {
+        kprintln!("[npk]   * {:<w$}  {:<v$}  {}", name, version,
+            super::update::fmt_size(*size as usize), w = w, v = v);
+    }
+}
+
+/// `assets` — what the system carries besides modules: fonts, icons, the
+/// microvm payloads, wallpapers. They arrive over the same signed OTA path
+/// as modules but were invisible until now, so a 261 MB userspace bundle
+/// sat on the disk with nothing to show it.
+pub fn intent_assets() {
+    // Directories rather than the update table: this lists what npkFS
+    // actually holds, including anything dropped in by hand.
+    const DIRS: &[(&str, &str)] = &[
+        ("fonts",      "sys/fonts"),
+        ("icons",      "sys/icons"),
+        ("microvm",    "sys/microvm"),
+        ("wallpapers", "sys/wallpapers"),
+    ];
+
+    let mut groups: Vec<(&str, Vec<(String, u64)>)> = Vec::new();
+    let mut total = 0u64;
+    let mut count = 0usize;
+    for (label, path) in DIRS {
+        let Ok(Some(entries)) = crate::npkfs::fs::list(path) else { continue };
+        let mut rows: Vec<(String, u64)> = entries.iter()
+            .filter(|e| matches!(e.kind, crate::npkfs::object::EntryKind::File))
+            .map(|e| (e.name.clone(), e.size))
+            .collect();
+        if rows.is_empty() { continue }
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        total += rows.iter().map(|(_, s)| *s).sum::<u64>();
+        count += rows.len();
+        groups.push((label, rows));
+    }
+
+    if groups.is_empty() {
+        kprintln!("[npk] assets — none");
+        return;
+    }
+
+    kprintln!("[npk] assets — {} objects {}", count, super::update::fmt_size(total as usize));
+    let w = groups.iter()
+        .flat_map(|(_, rows)| rows.iter().map(|(n, _)| n.len()))
+        .max().unwrap_or(12).max(12);
+    for (label, rows) in &groups {
+        kprintln!("[npk]");
+        kprintln!("[npk]   {}", label);
+        for (name, size) in rows {
+            kprintln!("[npk]     * {:<w$}  {}", name,
+                super::update::fmt_size(*size as usize), w = w);
+        }
     }
 }

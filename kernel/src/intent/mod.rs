@@ -2040,6 +2040,9 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         "modules" => {
             install::intent_modules();
         }
+        "assets" | "asset" => {
+            install::intent_assets();
+        }
 
         "wallpaper" | "wp" => {
             wallpaper::intent_wallpaper(args);

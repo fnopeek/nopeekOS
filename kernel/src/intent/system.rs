@@ -1170,6 +1170,7 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("  install <module>       Download + verify + install WASM module");
             kprintln!("  uninstall <module> [--force]  Remove module (--force for bundled)");
             kprintln!("  modules                List installed modules");
+            kprintln!("  assets                 List fonts, icons, microvm payloads, wallpapers");
             kprintln!();
             kprintln!("  update                 Show what is new, then ask before applying");
             kprintln!("  update -y              Apply without asking");
@@ -1263,7 +1264,7 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("  Content:   cat · grep · head · wc · hexdump");
             kprintln!("  Network:   ping · resolve · http · https · traceroute · netstat");
             kprintln!("  Exec:      run · driver");
-            kprintln!("  Packages:  install · uninstall · modules");
+            kprintln!("  Packages:  install · uninstall · modules · assets · update");
             kprintln!("  Security:  lock · passwd · caps · audit · shell");
             kprintln!("  Config:    set · get · config");
             kprintln!("  Display:   gpu · shade · wallpaper");
