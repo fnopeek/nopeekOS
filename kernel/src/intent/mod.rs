@@ -522,6 +522,10 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
         // Tick swap animation
         if crate::shade::with_compositor(|comp| comp.tick_animation()).unwrap_or(false) {
             crate::shade::render_frame();
+        } else {
+            // This loop idles in `hlt` without ever reaching poll_render, so
+            // the focus flash needs its tick here too.
+            crate::shade::tick_focus_glow();
         }
 
         while let Some(evt) = crate::xhci::poll_mouse() {
