@@ -121,128 +121,222 @@ fn hex_to_bytes48(hex: &str) -> Result<[u8; 48], &'static str> {
     Ok(out)
 }
 
-pub fn intent_update(_args: &str) {
-    super::clear_cancel(); // arm Ctrl+C cancel for this OTA run
-    kprintln!("[npk] Checking for updates...");
+/// Human-readable size, three significant-ish digits, no float formatting.
+fn fmt_size(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        let tenths = (bytes as u64 * 10 / (1024 * 1024)) as usize;
+        alloc::format!("({}.{} MB)", tenths / 10, tenths % 10)
+    } else {
+        alloc::format!("({} KB)", (bytes + 1023) / 1024)
+    }
+}
 
-    // 1. Download manifest
-    kprintln!("[npk] Fetching manifest...");
+/// Everything `update` found to do — built without changing a thing, so it
+/// can be shown before it is applied.
+struct Plan {
+    kernel: Option<Manifest>,
+    modules: Vec<super::install::ModulePlan>,
+    modules_current: usize,
+    assets: Vec<AssetJob>,
+    assets_current: usize,
+    /// Wallpapers whose system copy is current but whose user copy is gone.
+    /// Restoring it is a local repair, but it still writes — so it is part of
+    /// the plan instead of a side effect of looking.
+    wallpaper_copies: Vec<String>,
+}
+
+impl Plan {
+    fn is_empty(&self) -> bool {
+        self.kernel.is_none()
+            && self.modules.is_empty()
+            && self.assets.is_empty()
+            && self.wallpaper_copies.is_empty()
+    }
+
+    fn count(&self) -> usize {
+        self.kernel.iter().count() + self.modules.len()
+            + self.assets.len() + self.wallpaper_copies.len()
+    }
+
+    /// "kernel v0.240.0, 18 modules, 14 assets" — everything that needs nothing.
+    fn current_summary(&self) -> String {
+        let mut bits = Vec::new();
+        if self.kernel.is_none() {
+            bits.push(alloc::format!("kernel v{}", env!("CARGO_PKG_VERSION")));
+        }
+        if self.modules_current > 0 { bits.push(alloc::format!("{} modules", self.modules_current)); }
+        if self.assets_current > 0 { bits.push(alloc::format!("{} assets", self.assets_current)); }
+        bits.join(", ")
+    }
+}
+
+pub fn intent_update(args: &str) {
+    super::clear_cancel(); // arm Ctrl+C cancel for this OTA run
+    let assume_yes = matches!(args.trim(), "-y" | "yes" | "apply" | "force");
+
+    let Some(plan) = build_plan() else { return };
+
+    if plan.is_empty() {
+        // The whole point of the rewrite: nothing to do is ONE line, not one
+        // line per module and per asset with the four that matter buried in it.
+        kprintln!("[npk]   * everything current — {}", plan.current_summary());
+        return;
+    }
+
+    kprintln!("[npk]");
+    print_plan(&plan);
+    kprintln!("[npk]");
+
+    let n = plan.count();
+    let question = if n == 1 { String::from("Apply 1 change?") }
+                   else { alloc::format!("Apply {} changes?", n) };
+    if !assume_yes && !super::confirm(&question) {
+        kprintln!("[npk]   . nothing changed");
+        return;
+    }
+
+    kprintln!("[npk]");
+    apply_plan(plan);
+}
+
+/// Fetch the three manifests and diff them against what is installed.
+/// Reads only — nothing here writes to the ESP or npkFS.
+fn build_plan() -> Option<Plan> {
+    kprintln!("[npk] update — {}{}", UPDATE_HOST, UPDATE_BASE);
+
     let manifest_path = alloc::format!("{}/manifest", UPDATE_BASE);
     let manifest_data = match super::http::https_get(UPDATE_HOST, &manifest_path, MAX_MANIFEST_SIZE) {
         Ok(d) => d,
-        Err(e) => { kprintln!("[npk] Failed to fetch manifest: {}", e); return; }
+        Err(e) => { kprintln!("[npk]   ! manifest: {}", e); return None; }
     };
-
     let manifest = match parse_manifest(&manifest_data) {
         Ok(m) => m,
-        Err(e) => { kprintln!("[npk] {}", e); return; }
+        Err(e) => { kprintln!("[npk]   ! {}", e); return None; }
     };
 
     let current = env!("CARGO_PKG_VERSION");
-    kprintln!("[npk] Available: v{} (current: v{})", manifest.version, current);
-
-    let mut kernel_updated = false;
-
-    if manifest.version == current {
-        kprintln!("[npk] Kernel up to date.");
+    // The manifest is not authenticated yet — the SHA-384 and signature
+    // checks in `apply_kernel` are what make it trustworthy. Here it may only
+    // *lower* our appetite, never raise it past MAX_KERNEL_SIZE.
+    let kernel = if manifest.version == current {
+        None
+    } else if manifest.size == 0 || manifest.size > MAX_KERNEL_SIZE {
+        kprintln!("[npk]   ! implausible kernel size {} (max {})", manifest.size, MAX_KERNEL_SIZE);
+        None
     } else {
-        kprintln!("[npk] Size: {} bytes", manifest.size);
+        Some(manifest)
+    };
 
-        // 2. Download kernel (UEFI PE+ binary).
-        //
-        // The bound is the manifest's own size, not a fixed constant, so a
-        // growing kernel can never again outgrow its downloader. The manifest
-        // is not yet authenticated at this point — the SHA-384 and signature
-        // checks below are what make it trustworthy — so it is only allowed to
-        // *lower* our appetite, never raise it past MAX_KERNEL_SIZE.
-        if manifest.size == 0 || manifest.size > MAX_KERNEL_SIZE {
-            kprintln!("[npk] Refusing implausible kernel size: {} bytes (max {})",
-                manifest.size, MAX_KERNEL_SIZE);
-            return;
+    let (modules, modules_current) = super::install::plan_modules();
+    let (assets, assets_current, wallpaper_copies) = plan_assets();
+
+    Some(Plan { kernel, modules, modules_current, assets, assets_current, wallpaper_copies })
+}
+
+fn print_plan(plan: &Plan) {
+    let current = env!("CARGO_PKG_VERSION");
+    if let Some(k) = &plan.kernel {
+        kprintln!("[npk]   + kernel   v{} -> v{}  {}", current, k.version, fmt_size(k.size));
+    }
+    for m in &plan.modules {
+        match &m.local {
+            Some(v) => kprintln!("[npk]   + module   {:<10} {} -> {}", m.name, v, m.remote),
+            None => kprintln!("[npk]   + module   {:<10} {}  (new)", m.name, m.remote),
         }
-        kprintln!("[npk] Downloading kernel.efi ({} KB)...", manifest.size / 1024);
-        let kernel_path = alloc::format!("{}/kernel.efi", UPDATE_BASE);
-        let kernel_data = match super::http::https_get(UPDATE_HOST, &kernel_path, manifest.size) {
-            Ok(d) => d,
-            Err(e) => { kprintln!("[npk] Download failed: {}", e); return; }
-        };
-
-        if kernel_data.len() != manifest.size {
-            kprintln!("[npk] Short download: got {} of {} bytes", kernel_data.len(), manifest.size);
-            return;
-        }
-
-        // 3. Verify SHA-384
-        kprint!("[npk] Verifying SHA-384... ");
-        let hash = crate::tls::sha256::sha384(&kernel_data);
-        if hash != manifest.sha384 {
-            kprintln!("FAILED");
-            kprintln!("[npk] Checksum mismatch! Update rejected.");
-            return;
-        }
-        kprintln!("OK");
-
-        // 4. Download signature
-        kprintln!("[npk] Downloading signature...");
-        let sig_path = alloc::format!("{}/kernel.sig", UPDATE_BASE);
-        let sig_data = match super::http::https_get(UPDATE_HOST, &sig_path, MAX_SIG_SIZE) {
-            Ok(d) => d,
-            Err(e) => { kprintln!("[npk] Signature download failed: {}", e); return; }
-        };
-
-        // 5. Verify ECDSA P-384 signature (reuse SHA-384 hash from step 3)
-        kprint!("[npk] Verifying ECDSA P-384 signature... ");
-        let pubkey = &crate::update_key::UPDATE_PUB_KEY;
-        if !crate::tls::certstore::verify_p384_prehash_384(pubkey, &hash, &sig_data) {
-            kprintln!("FAILED");
-            kprintln!("[npk] Invalid signature! Update rejected.");
-            return;
-        }
-        kprintln!("OK");
-
-        // 6. Find ESP partition
-        kprint!("[npk] Locating ESP partition... ");
-        let esp_start = match crate::gpt::detect_esp_offset() {
-            Some(s) => { kprintln!("sector {}", s); s }
-            None => { kprintln!("not found"); kprintln!("[npk] No ESP partition. Is this a GPT disk?"); return; }
-        };
-
-        // 7. Write to ESP
-        kprintln!("[npk] Writing kernel to ESP...");
-        match crate::fat32::update_kernel(esp_start, &kernel_data) {
-            Ok(()) => {}
-            Err(e) => {
-                kprintln!("[npk] ESP write failed: {}", e);
-                return;
-            }
-        }
-
-        kprintln!("[npk] Kernel v{} installed.", manifest.version);
-        kernel_updated = true;
+    }
+    for a in &plan.assets {
+        let what = if a.present { "" } else { "  (new)" };
+        kprintln!("[npk]   + asset    {:<28} {}{}", a.npkfs_path, fmt_size(a.entry.size), what);
+    }
+    for w in &plan.wallpaper_copies {
+        kprintln!("[npk]   + copy     {:<28} (user copy missing)", w);
     }
 
-    // 8. Update installed WASM modules
-    kprintln!("[npk] Checking modules...");
-    let mod_count = super::install::update_all_modules();
-    if mod_count > 0 {
-        kprintln!("[npk] {} module(s) updated.", mod_count);
-    } else {
-        kprintln!("[npk] Modules up to date.");
+    // One line for everything that needs nothing — this used to be one line
+    // per module and per asset, which buried the few that mattered.
+    let rest = plan.current_summary();
+    if !rest.is_empty() {
+        kprintln!("[npk]   . {} current", rest);
+    }
+}
+
+fn apply_plan(plan: Plan) {
+    let mut kernel_done = false;
+    if let Some(k) = &plan.kernel {
+        kernel_done = apply_kernel(k);
     }
 
-    // 9. Update bundled assets (fonts, icons, microvm payloads)
-    kprintln!("[npk] Checking assets...");
-    let asset_count = update_all_assets();
-    if asset_count > 0 {
-        kprintln!("[npk] {} asset(s) updated.", asset_count);
-    } else {
-        kprintln!("[npk] Assets up to date.");
+    let mut mods = 0;
+    for m in &plan.modules {
+        if super::install::apply_module(m) { mods += 1; }
     }
 
-    if kernel_updated {
-        kprintln!("[npk] ====================================");
-        kprintln!("[npk]  Type 'reboot' to apply.");
-        kprintln!("[npk] ====================================");
+    let mut assets = 0;
+    for a in &plan.assets {
+        if apply_asset(a) { assets += 1; }
+    }
+
+    for name in &plan.wallpaper_copies {
+        sync_wallpaper_to_user(name, false);
+    }
+
+    let plural = |n: usize, one: &str, many: &str| if n == 1 { String::from(one) } else { alloc::format!("{} {}", n, many) };
+    kprintln!("[npk]");
+    kprintln!("[npk]   * done — {}, {}",
+        plural(mods, "1 module", "modules"), plural(assets, "1 asset", "assets"));
+    if kernel_done {
+        kprintln!("[npk]   * kernel installed — type 'reboot' to apply");
+    }
+}
+
+/// Download, verify and write the kernel to the ESP.
+fn apply_kernel(manifest: &Manifest) -> bool {
+    kprint!("[npk]   + kernel   v{} {} ", manifest.version, fmt_size(manifest.size));
+    let kernel_path = alloc::format!("{}/kernel.efi", UPDATE_BASE);
+    let kernel_data = match super::http::https_get(UPDATE_HOST, &kernel_path, manifest.size) {
+        Ok(d) => d,
+        Err(e) => { kprintln!(""); kprintln!("[npk]   ! kernel download: {}", e); return false; }
+    };
+    if kernel_data.len() != manifest.size {
+        kprintln!("");
+        kprintln!("[npk]   ! kernel short download ({} of {})", kernel_data.len(), manifest.size);
+        return false;
+    }
+
+    let hash = crate::tls::sha256::sha384(&kernel_data);
+    if hash != manifest.sha384 {
+        kprintln!("");
+        kprintln!("[npk]   ! kernel checksum mismatch — rejected");
+        return false;
+    }
+
+    let sig_path = alloc::format!("{}/kernel.sig", UPDATE_BASE);
+    let sig_data = match super::http::https_get(UPDATE_HOST, &sig_path, MAX_SIG_SIZE) {
+        Ok(d) => d,
+        Err(e) => { kprintln!(""); kprintln!("[npk]   ! kernel signature: {}", e); return false; }
+    };
+    let pubkey = &crate::update_key::UPDATE_PUB_KEY;
+    if !crate::tls::certstore::verify_p384_prehash_384(pubkey, &hash, &sig_data) {
+        kprintln!("");
+        kprintln!("[npk]   ! kernel signature invalid — rejected");
+        return false;
+    }
+
+    let esp_start = match crate::gpt::detect_esp_offset() {
+        Some(s) => s,
+        None => {
+            kprintln!("");
+            kprintln!("[npk]   ! no ESP partition found — is this a GPT disk?");
+            return false;
+        }
+    };
+    match crate::fat32::update_kernel(esp_start, &kernel_data) {
+        Ok(()) => { kprintln!("OK"); true }
+        Err(e) => {
+            kprintln!("");
+            kprintln!("[npk]   ! ESP write: {}", e);
+            false
+        }
     }
 }
 
@@ -299,32 +393,41 @@ fn split_url(url: &str) -> Option<(&str, &str)> {
     }
 }
 
-/// Diff release/assets/manifest against npkFS-resident assets and
-/// re-fetch any whose sha384 differs (or that aren't present yet).
-/// Each asset is verified against its detached ECDSA P-384 signature
-/// using the same update key as kernel/modules. Returns the count of
-/// assets actually written.
-pub fn update_all_assets() -> usize {
+/// One asset the release has a different build of, resolved to its paths.
+struct AssetJob {
+    entry: AssetEntry,
+    npkfs_path: String,
+    remote_filename: String,
+    /// Whether a copy already exists locally (only differs in wording).
+    present: bool,
+}
+
+/// Diff release/assets/manifest against npkFS-resident assets. Reads only:
+/// returns the jobs to run, how many were already current, and the
+/// wallpapers whose user copy needs restoring.
+fn plan_assets() -> (Vec<AssetJob>, usize, Vec<String>) {
     let manifest_path = alloc::format!("{}/assets/manifest", UPDATE_BASE);
     let manifest_data = match super::http::https_get(UPDATE_HOST, &manifest_path, MAX_ASSET_MANIFEST_SIZE) {
         Ok(d) => d,
-        Err(e) => { kprintln!("[npk] Asset manifest fetch failed: {}", e); return 0; }
+        Err(e) => { kprintln!("[npk]   ! asset manifest: {}", e); return (Vec::new(), 0, Vec::new()); }
     };
 
     let entries = match parse_asset_manifest(&manifest_data) {
         Ok(e) => e,
-        Err(e) => { kprintln!("[npk] Asset manifest parse error: {}", e); return 0; }
+        Err(e) => { kprintln!("[npk]   ! asset manifest: {}", e); return (Vec::new(), 0, Vec::new()); }
     };
 
-    let mut updated = 0usize;
+    let mut jobs = Vec::new();
+    let mut current = 0usize;
+    let mut wallpaper_copies = Vec::new();
 
-    for entry in &entries {
+    for entry in entries {
         // A `[wallpaper:<name>]` section needs NO compile-time entry: the
         // section name IS the filename, so shipping a new wallpaper is
         // dropping a file into `release/assets/wallpapers/` — no kernel
         // change and no reinstall. The trust chain is unchanged: size and
         // sha384 come from the manifest and every asset is still checked
-        // against its own detached signature below.
+        // against its own detached signature on apply.
         let (npkfs_path, remote_filename) = match ASSETS.iter().find(|s| s.section == entry.section) {
             Some(s) => (String::from(s.npkfs_path), String::from(s.remote_filename)),
             None => match entry.section.strip_prefix("wallpaper:").filter(|n| safe_asset_name(n)) {
@@ -333,36 +436,43 @@ pub fn update_all_assets() -> usize {
                     alloc::format!("wallpapers/{}", name),
                 ),
                 None => {
-                    kprintln!("[npk]   unknown asset [{}] (skipping)", entry.section);
+                    kprintln!("[npk]   . unknown asset [{}] (skipped)", entry.section);
                     continue;
                 }
             },
         };
-        let spec = AssetRef { npkfs_path: &npkfs_path, remote_filename: &remote_filename };
 
-        let local_hash = crate::npkfs::fetch(spec.npkfs_path).ok()
+        let local_hash = crate::npkfs::fetch(&npkfs_path).ok()
             .map(|(data, _)| crate::tls::sha256::sha384(&data));
 
         if local_hash.as_ref() == Some(&entry.sha384) {
-            kprintln!("[npk]   {} (up to date)", spec.npkfs_path);
+            current += 1;
             // The SYSTEM copy is current — the copy the user actually sees
             // may not be. `wallpaper list`/`set` read only the home folder,
             // and this hash check never looks there, so a deleted or missing
-            // user copy stays missing however often `update` runs. Restore
-            // it; an existing one is left alone (it may be the user's own
-            // edit — a CHANGED wallpaper still overwrites further down).
-            if let Some(name) = spec.npkfs_path.strip_prefix("sys/wallpapers/") {
-                sync_wallpaper_to_user(name, false);
+            // user copy stays missing however often `update` runs.
+            if let Some(name) = npkfs_path.strip_prefix("sys/wallpapers/") {
+                if user_wallpaper_missing(name) {
+                    wallpaper_copies.push(String::from(name));
+                }
             }
             continue;
         }
 
-        if local_hash.is_none() {
-            kprintln!("[npk]   {} (not in npkFS — installing)", spec.npkfs_path);
-        } else {
-            kprintln!("[npk]   {} (out of date — refreshing)", spec.npkfs_path);
-        }
+        let present = local_hash.is_some();
+        jobs.push(AssetJob { entry, npkfs_path, remote_filename, present });
+    }
 
+    (jobs, current, wallpaper_copies)
+}
+
+/// Download, verify and store one planned asset. Prints its own result line;
+/// returns whether the asset was written.
+fn apply_asset(job: &AssetJob) -> bool {
+    let entry = &job.entry;
+    let spec = AssetRef { npkfs_path: &job.npkfs_path, remote_filename: &job.remote_filename };
+    let local_present = job.present;
+    {
         // ── Make room before a streaming write ──────────────────────
         // The streaming writer keeps the OLD copy live until finish(),
         // so a refresh transiently needs the new asset's size ON TOP of
@@ -380,7 +490,7 @@ pub fn update_all_assets() -> usize {
         if free_bytes() < need {
             if let Ok(g) = crate::storage::npkfs::fs::gc() {
                 if g.removed > 0 {
-                    kprintln!("[npk]   gc reclaimed {} orphaned object(s)", g.removed);
+                    kprintln!("[npk]   . gc reclaimed {} orphaned object(s)", g.removed);
                 }
             }
         }
@@ -388,20 +498,20 @@ pub fn update_all_assets() -> usize {
         //    don't need 2× the asset size. We're replacing it anyway;
         //    on a disk this tight, keeping both isn't an option. The
         //    path unlink orphans the chunk blobs; gc reclaims them.
-        if free_bytes() < need && local_hash.is_some() {
+        if free_bytes() < need && local_present {
             if crate::npkfs::delete(spec.npkfs_path).is_ok() {
                 let _ = crate::storage::npkfs::fs::gc();
-                kprintln!("[npk]   freed old {} to make room", spec.npkfs_path);
+                kprintln!("[npk]   . freed old {} to make room", spec.npkfs_path);
             }
         }
         // 3. Truly out of space — fail clearly instead of 40 MB in.
         if free_bytes() < need {
-            kprintln!("[npk]   skipping {}: disk full (need {} MB, {} MB free)",
+            kprintln!("[npk]   ! {} disk full (need {} MB, {} MB free)",
                 spec.npkfs_path, need / (1024 * 1024), free_bytes() / (1024 * 1024));
-            continue;
+            return false;
         }
 
-        kprint!("[npk]   downloading {} ({} KB)... ", spec.remote_filename, entry.size / 1024);
+        kprint!("[npk]   + asset    {} {} ", spec.npkfs_path, fmt_size(entry.size));
 
         // Two URL paths:
         //   (a) entry.url == Some(url)  → fetch verbatim (GitHub Releases).
@@ -414,7 +524,7 @@ pub fn update_all_assets() -> usize {
         let (asset_host_str, asset_path_str): (&str, &str) = if let Some(url) = &entry.url {
             match split_url(url) {
                 Some((h, p)) => (h, p),
-                None => { kprintln!("bad url"); continue; }
+                None => { kprintln!("bad url"); return false; }
             }
         } else {
             asset_host = String::from(UPDATE_HOST);
@@ -428,7 +538,7 @@ pub fn update_all_assets() -> usize {
         // 1 GB userspace bundle no longer needs a 1 GB heap spike.
         let mut writer = match crate::npkfs::open_streaming_write(spec.npkfs_path) {
             Ok(w) => w,
-            Err(e) => { kprintln!("npkfs open failed: {:?}", e); continue; }
+            Err(e) => { kprintln!("npkfs open failed: {:?}", e); return false; }
         };
         let mut hasher = crate::tls::sha256::Sha384::new();
         let mut total_bytes: usize = 0;
@@ -475,12 +585,12 @@ pub fn update_all_assets() -> usize {
                 // orphaned space across attempts.
                 drop(writer);
                 let _ = crate::storage::npkfs::fs::gc();
-                continue;
+                return false;
             }
         }
         if total_bytes != entry.size {
             kprintln!("size mismatch (got {} expected {})", total_bytes, entry.size);
-            continue;
+            return false;
         }
 
         let hash = hasher.finalize();
@@ -489,7 +599,7 @@ pub fn update_all_assets() -> usize {
             // Drop the writer without finishing — flushed chunks
             // remain in storage but are unreachable from the path
             // tree, so the next `gc()` cycle reclaims them.
-            continue;
+            return false;
         }
 
         // Sig URL: `<asset_url>.sig` if url= override, else default path.
@@ -503,7 +613,7 @@ pub fn update_all_assets() -> usize {
                     sig_path_owned = String::from(p);
                     (sig_host_owned.as_str(), sig_path_owned.as_str())
                 }
-                None => { kprintln!("bad sig url"); continue; }
+                None => { kprintln!("bad sig url"); return false; }
             }
         } else {
             sig_host_owned = String::from(UPDATE_HOST);
@@ -513,7 +623,7 @@ pub fn update_all_assets() -> usize {
 
         let sig_data = match super::http::https_get(sig_host_str, sig_path_str, MAX_SIG_SIZE) {
             Ok(d) => d,
-            Err(e) => { kprintln!("sig failed: {}", e); continue; }
+            Err(e) => { kprintln!("sig failed: {}", e); return false; }
         };
 
         let pubkey = &crate::update_key::UPDATE_PUB_KEY;
@@ -521,14 +631,14 @@ pub fn update_all_assets() -> usize {
             kprintln!("signature invalid");
             // Writer is dropped without finish; chunks become
             // unreachable, gc reclaims them on next pass.
-            continue;
+            return false;
         }
 
         // Commit: writer.finish() publishes the chunked file
         // atomically. Replaces any existing entry at the same path.
         match writer.finish() {
             Ok(_) => {}
-            Err(e) => { kprintln!("publish failed: {:?}", e); continue; }
+            Err(e) => { kprintln!("publish failed: {:?}", e); return false; }
         }
 
         kprintln!("OK");
@@ -540,10 +650,8 @@ pub fn update_all_assets() -> usize {
         if let Some(name) = spec.npkfs_path.strip_prefix("sys/wallpapers/") {
             sync_wallpaper_to_user(name, true);
         }
-        updated += 1;
+        true
     }
-
-    updated
 }
 
 /// A manifest-supplied asset name we are willing to turn into a path.
@@ -555,6 +663,13 @@ fn safe_asset_name(name: &str) -> bool {
         && name.len() <= 64
         && !name.starts_with('.')
         && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'.' || c == b'-' || c == b'_')
+}
+
+/// Does the user's own copy of a system wallpaper need restoring? Read-only,
+/// so the plan phase can ask without changing anything.
+fn user_wallpaper_missing(name: &str) -> bool {
+    let Some(user) = crate::config::get("name").filter(|n| !n.is_empty()) else { return false };
+    !crate::npkfs::exists(&alloc::format!("home/{}/pictures/wallpapers/{}", user, name))
 }
 
 /// Mirror `sys/wallpapers/<name>` into the user's wallpapers folder — the only

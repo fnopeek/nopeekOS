@@ -1171,6 +1171,9 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("  uninstall <module> [--force]  Remove module (--force for bundled)");
             kprintln!("  modules                List installed modules");
             kprintln!();
+            kprintln!("  update                 Show what is new, then ask before applying");
+            kprintln!("  update -y              Apply without asking");
+            kprintln!();
             kprintln!("  Modules are signed (ECDSA P-384) and verified.");
             kprintln!("  Source: raw.githubusercontent.com/fnopeek/nopeekOS/");
             kprintln!();

@@ -459,6 +459,89 @@ fn theme_selection() -> u32 {
         crate::shade::widgets::abi::Token::AccentMuted) & 0x00FF_FFFF
 }
 
+fn theme_token(t: crate::shade::widgets::abi::Token) -> u32 {
+    crate::shade::widgets::palette::resolve(t) & 0x00FF_FFFF
+}
+
+// ── Status lines ──────────────────────────────────────────────────────
+//
+// The terminal has no escape codes and the font is ASCII-only, so colour
+// cannot travel inside the text. It comes from the SHAPE of a line, the way
+// the `[npk]` prefix and the `path> ` prompt already work: a line whose first
+// non-blank character is one of these markers (followed by a space) is a
+// status line, and its tokens are coloured by what they look like.
+//
+//   +  something will change / did change   (accent)
+//   .  already current                      (faint, whole line)
+//   !  failed                               (danger, whole line)
+//   *  finished                             (success)
+//
+// Emitters: `intent::update`. Anything else printing these markers gets the
+// same treatment, which is the point — it is a shell-wide convention, not an
+// update-specific hack.
+const STATUS_MARKERS: &[u8] = b"+.!*";
+
+fn status_colors(marker: u8) -> (u32, u32) {
+    use crate::shade::widgets::abi::Token;
+    match marker {
+        b'.' => (theme_token(Token::OnSurfaceFaint), theme_token(Token::OnSurfaceFaint)),
+        b'!' => (theme_token(Token::Danger), theme_token(Token::Danger)),
+        b'*' => (theme_token(Token::Success), theme_fg()),
+        _ => (theme_token(Token::Accent), theme_fg()),
+    }
+}
+
+/// Colour of one whitespace-delimited token on a status line.
+/// `(…)` is the parenthetical the emitters use for sizes and asides, so it
+/// steps back; a version number is the thing you actually came to read.
+fn token_color(tok: &str, base: u32, accent: u32, faint: u32) -> u32 {
+    let b = tok.as_bytes();
+    if b.first() == Some(&b'(') || b.last() == Some(&b')') { return faint }
+    if tok == "->" { return faint }
+    let looks_like_version = match b.first() {
+        Some(&b'v') => b.get(1).is_some_and(|c| c.is_ascii_digit()),
+        Some(c) => c.is_ascii_digit(),
+        None => false,
+    };
+    if looks_like_version && tok.contains('.') { return accent }
+    base
+}
+
+/// Draw one row of terminal text, `[npk]` prefix already handled by the
+/// caller. Returns false when the row is not a status line and the caller
+/// should draw it plainly.
+fn draw_status_row(shadow: *mut u8, info: &crate::framebuffer::FbInfo,
+                   text: &str, x: u32, py: u32, char_w: u32) -> bool {
+    let bytes = text.as_bytes();
+    let first = match bytes.iter().position(|c| *c != b' ') { Some(i) => i, None => return false };
+    let marker = bytes[first];
+    if !STATUS_MARKERS.contains(&marker) { return false }
+    if bytes.get(first + 1) != Some(&b' ') { return false }
+
+    let (marker_color, base) = status_colors(marker);
+    let accent = theme_token(crate::shade::widgets::abi::Token::Accent);
+    let faint = theme_token(crate::shade::widgets::abi::Token::OnSurfaceFaint);
+    crate::gui::font::draw_str(shadow, info, &text[first..first + 1],
+        x + first as u32 * char_w, py, marker_color, None, 1);
+
+    // Tokens keep their byte offset, so every glyph stays in the column it
+    // would have had — selection and wrapping still count plain bytes.
+    let mut i = first + 2;
+    while i < bytes.len() {
+        if bytes[i] == b' ' { i += 1; continue }
+        let end = bytes[i..].iter().position(|c| *c == b' ').map(|p| i + p).unwrap_or(bytes.len());
+        let tok = &text[i..end];
+        let color = if marker == b'+' || marker == b'*' {
+            token_color(tok, base, accent, faint)
+        } else {
+            base
+        };
+        crate::gui::font::draw_str(shadow, info, tok, x + i as u32 * char_w, py, color, None, 1);
+        i = end;
+    }
+    true
+}
+
 // ── Mouse text selection (drag to mark, Ctrl+Shift+C to copy) ─────────
 //
 // A cell is identified by (absolute logical line, byte column). Absolute
@@ -740,7 +823,10 @@ pub fn render_to_window(
                 crate::gui::font::draw_str(shadow, info, "[npk]", x, py, prompt_color, None, 1);
                 if e > 5 {
                     if let Ok(rest) = core::str::from_utf8(&line_data[5..e]) {
-                        crate::gui::font::draw_str(shadow, info, rest, x + 5 * char_w, py, fg, None, 1);
+                        let rx = x + 5 * char_w;
+                        if !draw_status_row(shadow, info, rest, rx, py, char_w) {
+                            crate::gui::font::draw_str(shadow, info, rest, rx, py, fg, None, 1);
+                        }
                     }
                 }
             } else if first {

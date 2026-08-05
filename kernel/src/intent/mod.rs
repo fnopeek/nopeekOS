@@ -42,6 +42,54 @@ pub fn clear_cancel() {
     CANCEL_REQUESTED.store(false, core::sync::atomic::Ordering::Release);
 }
 
+/// Ask a yes/no question and block until it is answered. Default is NO —
+/// Enter, Esc and Ctrl+C all decline, only an explicit `y` agrees.
+///
+/// An intent runs *inside* the loop's read cycle, so there is no session to
+/// hand the question back to. We drive the keyboard directly and keep the
+/// renderer ticking, the same way a long download keeps printing progress
+/// while it blocks the loop.
+pub fn confirm(question: &str) -> bool {
+    kprint!("[npk] {} [y/N] ", question);
+    // Paint the question, then wait. Deliberately NOT `poll_render` in the
+    // wait loop: that pumps mouse events too, and a click on a window's X
+    // would free the session this intent is running inside. Nothing else
+    // changes on screen while we wait, so one frame is enough.
+    if crate::shade::is_active() && crate::smp::per_core::current_core_id() == 0 {
+        crate::shade::render_frame();
+    }
+    loop {
+        if cancel_requested() { kprintln!("^C"); return false; }
+        let key = crate::keyboard::read_key().or_else(|| {
+            // Serial-only mode (no compositor): the answer arrives on COM1.
+            let serial = serial::SERIAL.lock();
+            if serial.has_data() { Some(serial.read_serial_raw()) } else { None }
+        });
+        if let Some(key) = key {
+            match key {
+                b'y' | b'Y' => { kprintln!("y"); return true; }
+                b'n' | b'N' => { kprintln!("n"); return false; }
+                b'\n' | b'\r' => { kprintln!(); return false; }
+                0x03 => { kprintln!("^C"); return false; }
+                0x1B => {
+                    // An arrow key arrives as ESC '[' 'A' — swallow the rest of
+                    // the sequence instead of reading it as "Escape, decline".
+                    if crate::keyboard::read_key() == Some(b'[') {
+                        let _ = crate::keyboard::read_key();
+                        continue;
+                    }
+                    kprintln!();
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        // SAFETY: ring-0 with IRQs enabled — the 100 Hz timer wakes us even
+        // if no key ever arrives.
+        unsafe { core::arch::asm!("hlt") };
+    }
+}
+
 // -- Command history --
 const HIST_MAX: usize = 32;
 const HIST_LINE: usize = 256;

@@ -197,109 +197,129 @@ pub fn intent_install(args: &str) {
     kprintln!("[npk] ✓ {} v{} installed.", name, entry.version);
 }
 
-/// Update all installed WASM modules to latest versions.
-/// Called by `update` intent after kernel update.
-/// Returns number of modules updated.
-pub fn update_all_modules() -> usize {
+/// One installed module that the release has a newer build of.
+pub struct ModulePlan {
+    pub name: String,
+    /// Installed version — `None` when the module has no `.version` sidecar.
+    pub local: Option<String>,
+    pub remote: String,
+    pub size: usize,
+    sha384: [u8; 48],
+}
+
+/// Compare installed modules against the release manifest WITHOUT touching
+/// anything. Returns what needs updating plus how many were already current,
+/// so the caller can show a plan before asking to apply it.
+pub fn plan_modules() -> (Vec<ModulePlan>, usize) {
     let manifest_path = alloc::format!("{}/manifest", MODULE_BASE);
     let manifest_data = match super::http::https_get(MODULE_HOST, &manifest_path, MAX_MANIFEST_SIZE) {
         Ok(d) => d,
-        Err(e) => { kprintln!("[npk] Module manifest fetch failed: {}", e); return 0; }
+        Err(e) => { kprintln!("[npk]   ! module manifest: {}", e); return (Vec::new(), 0); }
     };
 
     let modules = match parse_manifest(&manifest_data) {
         Ok(m) => m,
-        Err(e) => { kprintln!("[npk] Module manifest parse error: {}", e); return 0; }
+        Err(e) => { kprintln!("[npk]   ! module manifest: {}", e); return (Vec::new(), 0); }
     };
 
     // List installed modules straight from `sys/wasm` instead of
     // walking the entire FS.
-    let installed: alloc::vec::Vec<alloc::string::String> =
+    let installed: Vec<String> =
         match crate::npkfs::fs::list("sys/wasm") {
             Ok(Some(v)) => v.iter()
                 .filter(|e| matches!(e.kind, crate::npkfs::object::EntryKind::File))
                 .map(|e| e.name.clone())
                 .collect(),
-            Ok(None) => alloc::vec::Vec::new(),
-            Err(_) => return 0,
+            Ok(None) => Vec::new(),
+            Err(_) => return (Vec::new(), 0),
         };
 
-    let mut updated = 0;
+    let mut plan = Vec::new();
+    let mut current = 0usize;
 
     for remote in &modules {
         // Only update modules that are already installed (skip
         // `.version` sidecars; we want bare `<name>` to be present).
         if !installed.iter().any(|n| n.as_str() == remote.name) { continue; }
-        let store_name = alloc::format!("sys/wasm/{}", remote.name);
 
-        // Check version — skip if already up to date (trim for safety)
         let version_key = alloc::format!("sys/wasm/{}.version", remote.name);
-        let installed_ver_str = crate::npkfs::fetch(&version_key).ok()
+        let local = crate::npkfs::fetch(&version_key).ok()
             .and_then(|(data, _)| core::str::from_utf8(&data).ok().map(|s| String::from(s.trim())));
+        let remote_ver = String::from(remote.version.trim());
 
-        let remote_ver = remote.version.trim();
-
-        if let Some(ref local_ver) = installed_ver_str {
-            if local_ver == remote_ver {
-                kprintln!("[npk]   {} v{} (up to date)", remote.name, local_ver);
-                continue;
-            }
-            kprintln!("[npk]   {} v{} -> v{}", remote.name, local_ver, remote_ver);
-        } else {
-            kprintln!("[npk]   {} -> v{} (no local version)", remote.name, remote_ver);
-        }
-
-        // Download module
-        kprint!("[npk]   downloading... ");
-        let wasm_path = alloc::format!("{}/{}.wasm", MODULE_BASE, remote.name);
-        if remote.size == 0 || remote.size > MAX_MODULE_SIZE {
-            kprintln!("implausible size {} (max {})", remote.size, MAX_MODULE_SIZE);
+        if local.as_deref() == Some(remote_ver.as_str()) {
+            current += 1;
             continue;
         }
-        let wasm_data = match super::http::https_get(MODULE_HOST, &wasm_path, remote.size) {
-            Ok(d) => d,
-            Err(e) => { kprintln!("failed: {}", e); continue; }
-        };
-
-        if wasm_data.len() != remote.size {
-            kprintln!("short download (got {} of {})", wasm_data.len(), remote.size);
-            continue;
-        }
-
-        // Verify SHA-384
-        let hash = crate::tls::sha256::sha384(&wasm_data);
-        if hash != remote.sha384 {
-            kprintln!("checksum failed");
-            continue;
-        }
-
-        // Verify ECDSA P-384 signature
-        let sig_path = alloc::format!("{}/{}.sig", MODULE_BASE, remote.name);
-        let sig_data = match super::http::https_get(MODULE_HOST, &sig_path, MAX_SIG_SIZE) {
-            Ok(d) => d,
-            Err(e) => { kprintln!("sig failed: {}", e); continue; }
-        };
-
-        let pubkey = &crate::update_key::UPDATE_PUB_KEY;
-        if !crate::tls::certstore::verify_p384_prehash_384(pubkey, &hash, &sig_data) {
-            kprintln!("signature invalid");
-            continue;
-        }
-
-        // Delete old module + version before storing new one (npkFS doesn't overwrite)
-        let _ = crate::npkfs::delete(&store_name);
-        let _ = crate::npkfs::delete(&version_key);
-
-        if crate::npkfs::store(&store_name, &wasm_data, crate::capability::CAP_NULL).is_ok() {
-            let _ = crate::npkfs::store(&version_key, remote_ver.as_bytes(), crate::capability::CAP_NULL);
-            kprintln!("OK");
-            updated += 1;
-        } else {
-            kprintln!("store failed");
-        }
+        plan.push(ModulePlan {
+            name: remote.name.clone(),
+            local,
+            remote: remote_ver,
+            size: remote.size,
+            sha384: remote.sha384,
+        });
     }
 
-    updated
+    (plan, current)
+}
+
+/// Download, verify and install one planned module. Prints its own result
+/// line; returns whether the module was written.
+pub fn apply_module(p: &ModulePlan) -> bool {
+    let store_name = alloc::format!("sys/wasm/{}", p.name);
+    let version_key = alloc::format!("sys/wasm/{}.version", p.name);
+
+    // The line opens before the download and is closed by `OK` — it is the
+    // only sign of life while a slow fetch blocks the loop. A failure ends it
+    // and states the reason on its own `!` line, so the marker at the start
+    // of a line always tells the truth about how it went.
+    kprint!("[npk]   + module   {:<10} {} ", p.name, p.remote);
+    let fail = |msg: core::fmt::Arguments| {
+        kprintln!("");
+        kprintln!("[npk]   ! module {} {}", p.name, msg);
+        false
+    };
+
+    if p.size == 0 || p.size > MAX_MODULE_SIZE {
+        return fail(format_args!("implausible size {} (max {})", p.size, MAX_MODULE_SIZE));
+    }
+    let wasm_path = alloc::format!("{}/{}.wasm", MODULE_BASE, p.name);
+    let wasm_data = match super::http::https_get(MODULE_HOST, &wasm_path, p.size) {
+        Ok(d) => d,
+        Err(e) => return fail(format_args!("download: {}", e)),
+    };
+
+    if wasm_data.len() != p.size {
+        return fail(format_args!("short download ({} of {})", wasm_data.len(), p.size));
+    }
+
+    let hash = crate::tls::sha256::sha384(&wasm_data);
+    if hash != p.sha384 {
+        return fail(format_args!("checksum mismatch"));
+    }
+
+    let sig_path = alloc::format!("{}/{}.sig", MODULE_BASE, p.name);
+    let sig_data = match super::http::https_get(MODULE_HOST, &sig_path, MAX_SIG_SIZE) {
+        Ok(d) => d,
+        Err(e) => return fail(format_args!("signature: {}", e)),
+    };
+
+    let pubkey = &crate::update_key::UPDATE_PUB_KEY;
+    if !crate::tls::certstore::verify_p384_prehash_384(pubkey, &hash, &sig_data) {
+        return fail(format_args!("signature invalid"));
+    }
+
+    // Delete old module + version before storing new one (npkFS doesn't overwrite)
+    let _ = crate::npkfs::delete(&store_name);
+    let _ = crate::npkfs::delete(&version_key);
+
+    if crate::npkfs::store(&store_name, &wasm_data, crate::capability::CAP_NULL).is_ok() {
+        let _ = crate::npkfs::store(&version_key, p.remote.as_bytes(), crate::capability::CAP_NULL);
+        kprintln!("OK");
+        true
+    } else {
+        fail(format_args!("store failed"))
+    }
 }
 
 /// `uninstall <name> [--force]` — remove a WASM module, with safety
