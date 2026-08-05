@@ -912,6 +912,10 @@ pub fn handle_action(action: input::ShadeAction) {
             });
             render_frame();
         }
+        ShadeAction::ToggleSplit => {
+            with_compositor(|comp| comp.toggle_split());
+            render_frame();
+        }
         ShadeAction::ScrollUp => {
             // Focused widget app with scrollable content → scroll its
             // Widget::Scroll; otherwise the terminal scrollback. (scroll_by

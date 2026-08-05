@@ -249,6 +249,11 @@ pub struct DragState {
     /// Resize delta when drag started.
     pub start_rw: i32,
     pub start_rh: i32,
+    /// Which split line the drag moves per axis, and with which sign —
+    /// resolved once at drag start (see `resize_target`). The dragged window
+    /// is rarely the one holding the delta.
+    pub w_target: Option<(WindowId, i32)>,
+    pub h_target: Option<(WindowId, i32)>,
 }
 
 /// Auto-hide bottom dock state. The compositor owns the reveal/hide
@@ -462,6 +467,59 @@ impl Compositor {
             Some(f) => (Some(fid), f.width >= f.height),
             None => (None, true),
         }
+    }
+
+    /// Is this window part of the active workspace's tiling right now?
+    fn is_tiled(&self, id: WindowId) -> bool {
+        self.windows.iter().any(|w| w.id == id
+            && w.workspace == self.active_workspace
+            && w.state == WindowState::Tiled
+            && w.visible
+            && !w.is_overlay)
+    }
+
+    /// Which stored delta a resize gesture on `id` has to move, and with which
+    /// sign, for one axis (`beside` = the vertical line between side-by-side
+    /// tiles, else the horizontal one). `None` = no such line bounds it.
+    ///
+    /// The delta lives on the window that DREW the line, so a window owns the
+    /// line at only one of its edges; the opposite edge belongs to the last
+    /// child that split it, and pushing that one has to flip the sign. Adding
+    /// the delta to the focused window unconditionally was silently a no-op on
+    /// every root window — the one tile that has no line of its own.
+    ///
+    /// Positive delta always GROWS the focused window, whichever edge moves.
+    fn resize_target(&self, id: WindowId, beside: bool) -> Option<(WindowId, i32)> {
+        let mut cur = id;
+        // Bounded walk: a corrupt parent chain must not spin the compositor.
+        for _ in 0..self.windows.len() {
+            let w = self.windows.iter().find(|w| w.id == cur)?;
+            let parent = w.split_from.filter(|p| self.is_tiled(*p));
+            if parent.is_some() && w.split_beside == beside {
+                return Some((cur, 1));
+            }
+            if let Some(kid) = self.windows.iter().rev()
+                .find(|c| c.split_from == Some(cur) && c.split_beside == beside && self.is_tiled(c.id))
+                .map(|c| c.id)
+            {
+                return Some((kid, -1));
+            }
+            cur = parent?;
+        }
+        None
+    }
+
+    /// The window holding the split line the focused tile sits on, whatever
+    /// its orientation — its own if it has one, else the one its last child
+    /// drew. Used by `toggle_split`.
+    fn split_line_owner(&self, id: WindowId) -> Option<WindowId> {
+        let w = self.windows.iter().find(|w| w.id == id)?;
+        if w.split_from.filter(|p| self.is_tiled(*p)).is_some() {
+            return Some(id);
+        }
+        self.windows.iter().rev()
+            .find(|c| c.split_from == Some(id) && self.is_tiled(c.id))
+            .map(|c| c.id)
     }
 
     pub fn create_window(&mut self, title: &str, x: u32, y: u32, w: u32, h: u32) -> Option<WindowId> {
@@ -1040,56 +1098,76 @@ impl Compositor {
         // place. Without it they would each become a root and spread across
         // the whole screen instead of taking over the space that just freed
         // up — which is the one thing closing a window must do.
-        let gone = self.windows.iter().find(|w| w.id == id).map(|w| (w.split_from, w.split_beside));
-        if let Some((inherited, beside)) = gone {
-            let mut first = true;
-            for w in &mut self.windows {
-                if w.split_from == Some(id) {
-                    w.split_from = inherited;
-                    // The eldest child takes over the closed window's SLOT, so
-                    // it inherits the direction too and fills the region that
-                    // just freed up. Later children keep their own and chain
-                    // after it, exactly as they did underneath.
-                    if first {
-                        w.split_beside = beside;
-                        first = false;
-                    }
-                }
-            }
-        }
+        self.reparent_children(id);
         self.windows.retain(|w| w.id != id);
         self.z_order.retain(|&wid| wid != id);
 
         if self.focused == Some(id) {
-            // Reassign focus to the topmost REAL window in this workspace.
-            // Panels (dock/bar) must never hold focus — otherwise closing
-            // the last app window would focus a panel, and the next Mod+Q
-            // would close the dock/bar. When only panels remain, focus is
-            // None (empty desktop) and Mod+Q no-ops.
-            self.focused = self.z_order.iter()
-                .filter(|&&wid| !self.is_panel(wid))
-                .find_map(|&top_id| {
-                    self.windows.iter().find(|w| w.id == top_id && w.workspace == self.active_workspace)
-                })
-                .map(|w| w.id);
-            if let Some(fid) = self.focused {
-                self.set_focused_flag(fid);
-                // Point ACTIVE_IDX + the cursor at the newly-focused window,
-                // same as focus_window. Without this, closing the focused
-                // window (Mod+Q or `exit`) leaves ACTIVE_IDX on the just-freed
-                // terminal → the loop serves a phantom terminal and its
-                // input/output/cursor fall through to the serial console.
-                if let Some(win) = self.windows.iter().find(|w| w.id == fid) {
-                    if win.kind == crate::shade::window::WindowKind::Terminal {
-                        terminal::set_active_terminal(win.terminal_idx);
-                        terminal::restore_cursor();
-                    }
-                }
-            }
+            self.refocus_active_workspace();
         }
 
         self.retile();
         self.needs_full_redraw = true;
+    }
+
+    /// Hand `id`'s children to its own parent, in its place — for every path
+    /// that takes a window out of a workspace's tree (close, or move away).
+    /// Without it they each become a root and spread over the whole screen
+    /// instead of taking over the region that just freed up.
+    fn reparent_children(&mut self, id: WindowId) {
+        let Some((inherited, beside, rw, rh)) = self.windows.iter().find(|w| w.id == id)
+            .map(|w| (w.split_from, w.split_beside, w.resize_w, w.resize_h)) else { return };
+        let mut first = true;
+        for w in &mut self.windows {
+            if w.split_from == Some(id) {
+                w.split_from = inherited;
+                // The eldest child takes over the departing window's SLOT, so
+                // it inherits the direction AND the line's offset — the delta
+                // belongs to the line, not to the window that happens to hold
+                // it. Later children keep their own and chain after it,
+                // exactly as they did underneath.
+                if first {
+                    w.split_beside = beside;
+                    w.resize_w = rw;
+                    w.resize_h = rh;
+                    first = false;
+                }
+            }
+        }
+    }
+
+    /// Focus the topmost real window of the active workspace and point
+    /// ACTIVE_IDX + the cursor at it. Panels (dock/bar) are never focused —
+    /// otherwise closing the last app window would focus the dock and the
+    /// next Mod+Q would close it. No real window left → focus None (empty
+    /// desktop) and Mod+Q no-ops.
+    ///
+    /// Every path that makes the focused window leave the screen must call
+    /// this: leaving ACTIVE_IDX behind means the loop keeps serving a terminal
+    /// nobody can see, and its input/output/cursor fall through to serial.
+    fn refocus_active_workspace(&mut self) {
+        self.focused = self.z_order.iter()
+            .filter(|&&wid| !self.is_panel(wid))
+            .find_map(|&top_id| {
+                self.windows.iter().find(|w| w.id == top_id && w.workspace == self.active_workspace)
+            })
+            .map(|w| w.id);
+        if let Some(fid) = self.focused {
+            self.set_focused_flag(fid);
+            self.sync_active_terminal(fid);
+        }
+    }
+
+    /// Point ACTIVE_IDX + the cursor at `fid`'s terminal buffer. Widget and
+    /// Surface windows own none, so ACTIVE_IDX stays where it was and kprintln
+    /// keeps a valid sink while such a window is focused.
+    fn sync_active_terminal(&self, fid: WindowId) {
+        if let Some(win) = self.windows.iter().find(|w| w.id == fid) {
+            if win.kind == crate::shade::window::WindowKind::Terminal {
+                terminal::set_active_terminal(win.terminal_idx);
+                terminal::restore_cursor();
+            }
+        }
     }
 
     /// Set focus to a window.
@@ -1169,6 +1247,10 @@ impl Compositor {
 
         if let Some(fid) = self.focused {
             self.set_focused_flag(fid);
+            // The new workspace serves a different terminal buffer — carry
+            // ACTIVE_IDX and the cursor over, or every keystroke after the
+            // switch lands in the window you just left behind.
+            self.sync_active_terminal(fid);
         }
 
         self.retile();
@@ -1176,16 +1258,48 @@ impl Compositor {
         self.needs_full_redraw = true;
     }
 
-    /// Move the focused window to a different workspace.
+    /// Move the focused window to a different workspace: unhook it from this
+    /// workspace's tree, hang it into the target's, and leave focus behind.
     pub fn move_to_workspace(&mut self, ws: u8) {
-        if let Some(fid) = self.focused {
-            if let Some(win) = self.windows.iter_mut().find(|w| w.id == fid) {
-                win.workspace = ws;
-                win.dirty = true;
-            }
-            self.retile();
-            self.needs_full_redraw = true;
+        let Some(fid) = self.focused else { return };
+        if ws == self.active_workspace { return }
+        // Panels are global chrome — they belong to every workspace at once.
+        if self.is_panel(fid) { return }
+
+        // Unhook here first: the children stay behind and have to close the
+        // gap, exactly as if the window had been closed.
+        self.reparent_children(fid);
+
+        // Hang it into the target's tree — splitting the topmost tile there,
+        // or becoming the root when that workspace is empty. Without this it
+        // arrives as a second root, is chained beside the existing one and
+        // never takes part in the layout properly. Its old delta stays with
+        // the line it drew here, so the arriving window starts centred.
+        let host = self.z_order.iter().copied()
+            .find(|&wid| self.windows.iter().any(|w| w.id == wid
+                && w.workspace == ws
+                && w.state == WindowState::Tiled
+                && w.visible
+                && !w.is_overlay));
+        let beside = host
+            .and_then(|h| self.windows.iter().find(|w| w.id == h))
+            .map(|w| w.width >= w.height)
+            .unwrap_or(true);
+        if let Some(win) = self.windows.iter_mut().find(|w| w.id == fid) {
+            win.workspace = ws;
+            win.dirty = true;
+            win.split_from = host;
+            win.split_beside = beside;
+            win.resize_w = 0;
+            win.resize_h = 0;
         }
+
+        // Focus must not follow the window off-screen: it would keep taking
+        // keystrokes on a workspace nobody is looking at.
+        self.refocus_active_workspace();
+
+        self.retile();
+        self.needs_full_redraw = true;
     }
 
     /// Dwindle tiling: every window splits the one that was focused when it
@@ -1236,7 +1350,8 @@ impl Compositor {
             .map(|c| c.id)
             .collect();
 
-        let (mut cx, mut cy, mut cw, mut ch) = (x, y, w, h);
+        // Children only ever eat into the right/bottom, so the origin stays put.
+        let (cx, cy, mut cw, mut ch) = (x, y, w, h);
         for kid in kids {
             // The split's position is the CHILD's resize delta: it is the one
             // that arrived and drew the line, so Mod+arrow on it moves the
@@ -1248,6 +1363,7 @@ impl Compositor {
                 let half = cw.saturating_sub(gap) / 2;
                 let max = cw.saturating_sub(gap).saturating_sub(100).max(100) as i32;
                 let keep = (half as i32 - dw).clamp(100, max) as u32;
+                self.store_delta(kid, true, half as i32 - keep as i32, dw);
                 let give = cw.saturating_sub(keep + gap);
                 self.dwindle(kid, tiled, cx + keep + gap, cy, give, ch, gap);
                 cw = keep;
@@ -1255,6 +1371,7 @@ impl Compositor {
                 let half = ch.saturating_sub(gap) / 2;
                 let max = ch.saturating_sub(gap).saturating_sub(80).max(80) as i32;
                 let keep = (half as i32 - dh).clamp(80, max) as u32;
+                self.store_delta(kid, false, half as i32 - keep as i32, dh);
                 let give = ch.saturating_sub(keep + gap);
                 self.dwindle(kid, tiled, cx, cy + keep + gap, cw, give, gap);
                 ch = keep;
@@ -1267,6 +1384,16 @@ impl Compositor {
             win.width = cw;
             win.height = ch;
             win.dirty = true;
+        }
+    }
+
+    /// Write back the offset a split line ACTUALLY took after clamping, so a
+    /// key held against the minimum tile size doesn't pile up an invisible
+    /// debt that has to be pressed off again before the line moves back.
+    fn store_delta(&mut self, id: WindowId, beside: bool, effective: i32, current: i32) {
+        if effective == current { return }
+        if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
+            if beside { win.resize_w = effective } else { win.resize_h = effective }
         }
     }
 
@@ -1306,72 +1433,6 @@ impl Compositor {
                     win.content_h(border),
                 );
             }
-        }
-    }
-
-    /// Recursive dwindle: assign position to first window, recurse for rest.
-    fn dwindle_layout(&mut self, ids: &[WindowId],
-                      x: u32, y: u32, w: u32, h: u32,
-                      gap: u32, split_horizontal: bool) {
-        if ids.is_empty() { return; }
-
-        if ids.len() == 1 {
-            for win in &mut self.windows {
-                if win.id == ids[0] {
-                    win.x = x;
-                    win.y = y;
-                    win.width = w;
-                    win.height = h;
-                    win.dirty = true;
-                    break;
-                }
-            }
-            return;
-        }
-
-        // Split: first window takes one half (+resize delta), rest take the other half
-        // Look up first window's resize delta for split adjustment
-        let (delta_w, delta_h) = self.windows.iter()
-            .find(|w| w.id == ids[0])
-            .map(|w| (w.resize_w, w.resize_h))
-            .unwrap_or((0, 0));
-
-        if split_horizontal {
-            let half = (w.saturating_sub(gap)) / 2;
-            let max_w = w.saturating_sub(gap).saturating_sub(100).max(100) as i32;
-            let left_w = (half as i32 + delta_w).clamp(100, max_w) as u32;
-            let right_w = w.saturating_sub(left_w + gap);
-            // First window: left half (adjusted by delta)
-            for win in &mut self.windows {
-                if win.id == ids[0] {
-                    win.x = x;
-                    win.y = y;
-                    win.width = left_w;
-                    win.height = h;
-                    win.dirty = true;
-                    break;
-                }
-            }
-            // Rest: right half, split vertically next time
-            self.dwindle_layout(&ids[1..], x + left_w + gap, y, right_w, h, gap, false);
-        } else {
-            let half = (h.saturating_sub(gap)) / 2;
-            let max_h = h.saturating_sub(gap).saturating_sub(80).max(80) as i32;
-            let top_h = (half as i32 + delta_h).clamp(80, max_h) as u32;
-            let bottom_h = h.saturating_sub(top_h + gap);
-            // First window: top half (adjusted by delta)
-            for win in &mut self.windows {
-                if win.id == ids[0] {
-                    win.x = x;
-                    win.y = y;
-                    win.width = w;
-                    win.height = top_h;
-                    win.dirty = true;
-                    break;
-                }
-            }
-            // Rest: bottom half, split horizontally next time
-            self.dwindle_layout(&ids[1..], x, y + top_h + gap, w, bottom_h, gap, true);
         }
     }
 
@@ -2041,10 +2102,7 @@ impl Compositor {
                     DragMode::Resize => {
                         let dx = mx - drag.start_mx;
                         let dy = my - drag.start_my;
-                        if let Some(win) = self.windows.iter_mut().find(|w| w.id == drag.window) {
-                            win.resize_w = drag.start_rw + dx;
-                            win.resize_h = drag.start_rh + dy;
-                        }
+                        self.apply_resize_drag(&drag, dx, dy);
                         self.drag = Some(drag); // Keep drag alive
                         self.retile();
                         self.needs_full_redraw = true;
@@ -2064,6 +2122,7 @@ impl Compositor {
                     window: wid, mode: DragMode::Swap,
                     last_target: None,
                     start_mx: 0, start_my: 0, start_rw: 0, start_rh: 0,
+                    w_target: None, h_target: None,
                 });
                 self.focus_window(wid);
                 return true;
@@ -2073,17 +2132,7 @@ impl Compositor {
         // Mod+RMB: start resize-drag
         if mod_held && self.mouse.right_clicked() {
             if let Some(wid) = self.window_at(mx, my) {
-                let (rw, rh) = self.windows.iter()
-                    .find(|w| w.id == wid)
-                    .map(|w| (w.resize_w, w.resize_h))
-                    .unwrap_or((0, 0));
-                self.drag = Some(DragState {
-                    window: wid, mode: DragMode::Resize,
-                    last_target: None,
-                    start_mx: mx, start_my: my,
-                    start_rw: rw, start_rh: rh,
-                });
-                self.focus_window(wid);
+                self.begin_resize_drag(wid, mx, my);
                 return true;
             }
         }
@@ -2142,10 +2191,7 @@ impl Compositor {
                     DragMode::Resize => {
                         let dx = mx - drag.start_mx;
                         let dy = my - drag.start_my;
-                        if let Some(win) = self.windows.iter_mut().find(|w| w.id == drag.window) {
-                            win.resize_w = drag.start_rw + dx;
-                            win.resize_h = drag.start_rh + dy;
-                        }
+                        self.apply_resize_drag(&drag, dx, dy);
                         self.drag = Some(drag); // Keep drag alive
                         self.retile();
                         self.needs_full_redraw = true;
@@ -2175,6 +2221,7 @@ impl Compositor {
                     window: wid, mode: DragMode::Swap,
                     last_target: None,
                     start_mx: 0, start_my: 0, start_rw: 0, start_rh: 0,
+                    w_target: None, h_target: None,
                 });
                 self.focus_window(wid);
                 return true;
@@ -2184,17 +2231,7 @@ impl Compositor {
         // Mod+RMB: start resize-drag
         if mod_held && self.mouse.right_clicked() {
             if let Some(wid) = self.window_at(mx, my) {
-                let (rw, rh) = self.windows.iter()
-                    .find(|w| w.id == wid)
-                    .map(|w| (w.resize_w, w.resize_h))
-                    .unwrap_or((0, 0));
-                self.drag = Some(DragState {
-                    window: wid, mode: DragMode::Resize,
-                    last_target: None,
-                    start_mx: mx, start_my: my,
-                    start_rw: rw, start_rh: rh,
-                });
-                self.focus_window(wid);
+                self.begin_resize_drag(wid, mx, my);
                 return true;
             }
         }
@@ -2334,15 +2371,74 @@ impl Compositor {
         false
     }
 
-    /// Resize focused window by adjusting its tiling split delta.
+    /// Resize the focused window by pushing the split line that bounds it.
+    /// A positive delta grows it, no matter which of its edges is the movable
+    /// one (`resize_target` picks the line and the sign).
     pub fn resize_focused(&mut self, dx: i32, dy: i32) {
-        if let Some(fid) = self.focused {
-            if let Some(win) = self.windows.iter_mut().find(|w| w.id == fid) {
-                win.resize_w += dx;
-                win.resize_h += dy;
+        let Some(fid) = self.focused else { return };
+        let mut moved = false;
+        for (delta, beside) in [(dx, true), (dy, false)] {
+            if delta == 0 { continue }
+            let Some((tid, sign)) = self.resize_target(fid, beside) else { continue };
+            if let Some(win) = self.windows.iter_mut().find(|w| w.id == tid) {
+                if beside { win.resize_w += sign * delta } else { win.resize_h += sign * delta }
+                moved = true;
             }
+        }
+        if moved {
             self.retile();
             self.needs_full_redraw = true;
+        }
+    }
+
+    /// Mod+J — flip the split the focused window sits on from side-by-side to
+    /// stacked and back (Hyprland's `togglesplit`). It flips the same line a
+    /// resize would push, so what you toggle is what you were just adjusting.
+    /// The offset is dropped: the delta is per-axis, and the axis just changed.
+    pub fn toggle_split(&mut self) {
+        let Some(fid) = self.focused else { return };
+        let Some(owner) = self.split_line_owner(fid) else { return };
+        if let Some(win) = self.windows.iter_mut().find(|w| w.id == owner) {
+            win.split_beside = !win.split_beside;
+            win.resize_w = 0;
+            win.resize_h = 0;
+        }
+        self.retile();
+        self.needs_full_redraw = true;
+    }
+
+    /// Resolve the split lines a Mod+RMB drag will move and remember where
+    /// they stood, so the drag stays absolute against its start position.
+    fn begin_resize_drag(&mut self, wid: WindowId, mx: i32, my: i32) {
+        let w_target = self.resize_target(wid, true);
+        let h_target = self.resize_target(wid, false);
+        let delta_of = |s: &Self, t: Option<(WindowId, i32)>, beside: bool| -> i32 {
+            t.and_then(|(id, _)| s.windows.iter().find(|w| w.id == id))
+                .map(|w| if beside { w.resize_w } else { w.resize_h })
+                .unwrap_or(0)
+        };
+        self.drag = Some(DragState {
+            window: wid, mode: DragMode::Resize,
+            last_target: None,
+            start_mx: mx, start_my: my,
+            start_rw: delta_of(self, w_target, true),
+            start_rh: delta_of(self, h_target, false),
+            w_target, h_target,
+        });
+        self.focus_window(wid);
+    }
+
+    /// Apply a resize drag: absolute against the deltas captured at drag start.
+    fn apply_resize_drag(&mut self, drag: &DragState, dx: i32, dy: i32) {
+        if let Some((id, sign)) = drag.w_target {
+            if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
+                win.resize_w = drag.start_rw + sign * dx;
+            }
+        }
+        if let Some((id, sign)) = drag.h_target {
+            if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
+                win.resize_h = drag.start_rh + sign * dy;
+            }
         }
     }
 
@@ -2394,15 +2490,17 @@ impl Compositor {
         // list order no longer decides geometry. Each takes the other's
         // parent, and each other's children come along, so the two tiles
         // exchange regions with everything nested inside them.
+        // The split offset travels with the slot too — it describes where a
+        // line stands, not how big a particular window wants to be.
         let slot = |ws: &Vec<crate::shade::window::Window>, id: WindowId| {
-            ws.iter().find(|w| w.id == id).map(|w| (w.split_from, w.split_beside))
+            ws.iter().find(|w| w.id == id).map(|w| (w.split_from, w.split_beside, w.resize_w, w.resize_h))
         };
         if let (Some(a_slot), Some(b_slot)) = (slot(&self.windows, a), slot(&self.windows, b)) {
             for w in &mut self.windows {
                 if w.id == a {
-                    (w.split_from, w.split_beside) = (b_slot.0, b_slot.1);
+                    (w.split_from, w.split_beside, w.resize_w, w.resize_h) = b_slot;
                 } else if w.id == b {
-                    (w.split_from, w.split_beside) = (a_slot.0, a_slot.1);
+                    (w.split_from, w.split_beside, w.resize_w, w.resize_h) = a_slot;
                 } else if w.split_from == Some(a) {
                     w.split_from = Some(b);
                 } else if w.split_from == Some(b) {
