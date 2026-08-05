@@ -21,6 +21,9 @@ pub enum ShadeAction {
     ToggleFullscreen,
     /// Mod+V: toggle floating
     ToggleFloating,
+    /// Mod+J: flip the split the focused window sits on between
+    /// side-by-side and stacked (Hyprland's `togglesplit`).
+    ToggleSplit,
     /// Mod+1..4: switch workspace
     Workspace(u8),
     /// Mod+Shift+1..4: move window to workspace
@@ -110,6 +113,7 @@ pub fn try_keybind(key: u8) -> bool {
         b'q' | b'Q' => { push_action(ShadeAction::CloseWindow); true }
         b'f' | b'F' => { push_action(ShadeAction::ToggleFullscreen); true }
         b'v' | b'V' => { push_action(ShadeAction::ToggleFloating); true }
+        b'j' | b'J' => { push_action(ShadeAction::ToggleSplit); true }
         b'l' | b'L' => { push_action(ShadeAction::Lock); true }
         b'd' | b'D' => { push_action(ShadeAction::SpawnLauncher); true }
         b'1'..=b'4' => {
@@ -154,6 +158,7 @@ pub fn try_keybind_event(event: &crate::input::KeyEvent) -> bool {
         KeyCode::Char(b'q') | KeyCode::Char(b'Q') => { push_action(ShadeAction::CloseWindow); true }
         KeyCode::Char(b'f') | KeyCode::Char(b'F') => { push_action(ShadeAction::ToggleFullscreen); true }
         KeyCode::Char(b'v') | KeyCode::Char(b'V') => { push_action(ShadeAction::ToggleFloating); true }
+        KeyCode::Char(b'j') | KeyCode::Char(b'J') => { push_action(ShadeAction::ToggleSplit); true }
         KeyCode::Char(b'l') | KeyCode::Char(b'L') => { push_action(ShadeAction::Lock); true }
         KeyCode::Char(b'd') | KeyCode::Char(b'D') => { push_action(ShadeAction::SpawnLauncher); true }
         KeyCode::Char(b'1'..=b'4') => {
