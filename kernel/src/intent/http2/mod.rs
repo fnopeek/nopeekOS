@@ -608,10 +608,12 @@ fn strip_headers_padding(flags: u8, payload: &[u8]) -> Option<&[u8]> {
 /// to `Err(NotNegotiated)` — never silently to HTTP/1.1 — so the caller can
 /// decide explicitly.
 pub fn connect(host: &str, ip: [u8; 4], port: u16) -> Result<Http2, Http2Error> {
-    kprintln!(
-        "[npk]   h2 connect {} -> {}.{}.{}.{}:{}",
-        host, ip[0], ip[1], ip[2], ip[3], port
-    );
+    if super::http::chatty() {
+        kprintln!(
+            "[npk]   h2 connect {} -> {}.{}.{}.{}:{}",
+            host, ip[0], ip[1], ip[2], ip[3], port
+        );
+    }
     let t_tcp = crate::interrupts::ticks();
     let handle = crate::net::tcp::connect(ip, port).map_err(|_| Http2Error::Tls("TCP connect failed"))?;
     let t_tls = crate::interrupts::ticks();

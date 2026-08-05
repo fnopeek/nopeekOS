@@ -6,6 +6,34 @@ use super::{parse_ip, resolve_path};
 
 const HTTP_MAX_RESPONSE: usize = 128 * 1024; // 128 KB
 
+/// Per-request chatter — the connect breakdown and the HTTP status lines.
+///
+/// On by default: for `https <host>` the transfer IS what you asked about,
+/// and the `dns + arp + tcp + tls` split is the tool that names a slow leg
+/// (see the netbench work). But an intent that makes several requests just to
+/// answer a question of its own — `update` fetches three manifests before it
+/// can even say what changed — drowns its own output in them. Such a caller
+/// takes a `quiet()` guard for its duration; errors still speak.
+static HTTP_QUIET: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn chatty() -> bool {
+    !HTTP_QUIET.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Silence per-request chatter until the returned guard is dropped — so an
+/// early `return` in the middle of a fetch cannot leave the shell mute.
+pub struct QuietGuard(bool);
+
+pub fn quiet() -> QuietGuard {
+    QuietGuard(HTTP_QUIET.swap(true, core::sync::atomic::Ordering::Relaxed))
+}
+
+impl Drop for QuietGuard {
+    fn drop(&mut self) {
+        HTTP_QUIET.store(self.0, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// How we identify ourselves. Deliberately NOT a borrowed browser string.
 ///
 /// This used to read `Mozilla/5.0 (X11; Linux x86_64) beak/0.1`, added in the
@@ -714,10 +742,12 @@ fn open_tls(host: &str) -> Result<crate::tls::TlsSession, &'static str> {
     // between ~200 ms and ~2100 ms across runs, and 2 s is suspiciously
     // exactly a retransmission timeout — this says which leg waits.
     let done = crate::interrupts::ticks();
-    kprintln!("[npk]   connect {} -> {}.{}.{}.{}:443 (dns {} + arp {} + tcp {} + tls {} ms)",
-        host, ip[0], ip[1], ip[2], ip[3],
-        t_arp.wrapping_sub(t_dns) * 10, t_tcp.wrapping_sub(t_arp) * 10,
-        t_tls.wrapping_sub(t_tcp) * 10, done.wrapping_sub(t_tls) * 10);
+    if chatty() {
+        kprintln!("[npk]   connect {} -> {}.{}.{}.{}:443 (dns {} + arp {} + tcp {} + tls {} ms)",
+            host, ip[0], ip[1], ip[2], ip[3],
+            t_arp.wrapping_sub(t_dns) * 10, t_tcp.wrapping_sub(t_arp) * 10,
+            t_tls.wrapping_sub(t_tcp) * 10, done.wrapping_sub(t_tls) * 10);
+    }
     out
 }
 
@@ -801,8 +831,10 @@ fn h2_open(host: &str) -> Option<Http2> {
     let gw = crate::net::ipv4::gateway();
     let _ = crate::net::arp::resolve(gw, 100);
     let t_conn = crate::interrupts::ticks();
-    kprintln!("[npk]   h2 pre-connect {} (dns {} + arp {} ms)",
-        host, t_arp.wrapping_sub(t_dns) * 10, t_conn.wrapping_sub(t_arp) * 10);
+    if chatty() {
+        kprintln!("[npk]   h2 pre-connect {} (dns {} + arp {} ms)",
+            host, t_arp.wrapping_sub(t_dns) * 10, t_conn.wrapping_sub(t_arp) * 10);
+    }
     match http2::connect(host, ip, 443) {
         Ok(c) => Some(c),
         Err(http2::Http2Error::NotNegotiated) => {
@@ -1032,15 +1064,17 @@ fn https_exchange(
     // Redirect: drain the courtesy body so the socket is clean, then hand
     // the Location back to the caller (no bytes go to the sink).
     if (300..400).contains(&status) {
-        match &location {
-            Some(l) => kprintln!("[npk]   HTTP {} -> {}", status, l),
-            None => kprintln!("[npk]   HTTP {} (redirect, no Location)", status),
+        if chatty() {
+            match &location {
+                Some(l) => kprintln!("[npk]   HTTP {} -> {}", status, l),
+                None => kprintln!("[npk]   HTTP {} (redirect, no Location)", status),
+            }
         }
         let drained = drain_body(&mut tls, leading, content_length, chunked, &mut buf);
         finish_conn(host, tls, persistent && drained);
         return Ok(HttpResponse { status, location });
     }
-    kprintln!("[npk]   HTTP {} — receiving body", status);
+    if chatty() { kprintln!("[npk]   HTTP {} — receiving body", status); }
 
     // 2xx / other: stream the body. The headers already proved the socket
     // live, so a failure HERE is a genuine mid-body drop (partial bytes are
@@ -1521,11 +1555,11 @@ fn http_get_once(
         Some(ip) => ip,
         None => crate::net::dns::resolve(host).ok_or("DNS resolution failed")?,
     };
-    kprintln!("[npk]   {} -> {}.{}.{}.{}", host, ip[0], ip[1], ip[2], ip[3]);
+    if chatty() { kprintln!("[npk]   {} -> {}.{}.{}.{}", host, ip[0], ip[1], ip[2], ip[3]); }
     let gw = crate::net::ipv4::gateway();
     let _ = crate::net::arp::resolve(gw, 100); // see open_tls: not a blind spin
 
-    kprintln!("[npk]   TCP connect {}:80 ...", host);
+    if chatty() { kprintln!("[npk]   TCP connect {}:80 ...", host); }
     let handle = crate::net::tcp::connect(ip, 80).map_err(|_| "TCP connect failed")?;
 
     // Timer-NAPI: speed this worker core's idle timer to ~10 kHz for the whole
@@ -1585,13 +1619,14 @@ fn http_get_once(
 
     if (300..400).contains(&status) {
         match &location {
-            Some(l) => kprintln!("[npk]   HTTP {} → {}", status, l),
-            None => kprintln!("[npk]   HTTP {} (redirect, no Location)", status),
+            Some(l) if chatty() => kprintln!("[npk]   HTTP {} → {}", status, l),
+            None if chatty() => kprintln!("[npk]   HTTP {} (redirect, no Location)", status),
+            _ => {}
         }
         let _ = crate::net::tcp::close(handle);
         return Ok(HttpResponse { status, location });
     }
-    kprintln!("[npk]   HTTP {} — receiving body", status);
+    if chatty() { kprintln!("[npk]   HTTP {} — receiving body", status); }
 
     let cl = match parse_header_value(hdr_str, "content-length").and_then(|v| v.trim().parse::<usize>().ok()) {
         Some(c) => c,

@@ -1173,6 +1173,7 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!();
             kprintln!("  update                 Show what is new, then ask before applying");
             kprintln!("  update -y              Apply without asking");
+            kprintln!("  update -v              Keep the connect / HTTP diagnostics");
             kprintln!();
             kprintln!("  Modules are signed (ECDSA P-384) and verified.");
             kprintln!("  Source: raw.githubusercontent.com/fnopeek/nopeekOS/");

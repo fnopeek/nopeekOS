@@ -172,7 +172,20 @@ impl Plan {
 
 pub fn intent_update(args: &str) {
     super::clear_cancel(); // arm Ctrl+C cancel for this OTA run
-    let assume_yes = matches!(args.trim(), "-y" | "yes" | "apply" | "force");
+    let mut assume_yes = false;
+    let mut verbose = false;
+    for tok in args.split_whitespace() {
+        match tok {
+            "-y" | "yes" | "apply" | "force" => assume_yes = true,
+            "-v" | "verbose" => verbose = true,
+            _ => {}
+        }
+    }
+
+    // Answering "what changed" takes three manifest fetches plus one request
+    // per item — their connect timings and status lines say nothing about the
+    // question and buried the answer. `-v` puts them back.
+    let _quiet = (!verbose).then(super::http::quiet);
 
     let Some(plan) = build_plan() else { return };
 
