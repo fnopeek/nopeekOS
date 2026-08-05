@@ -122,7 +122,9 @@ fn hex_to_bytes48(hex: &str) -> Result<[u8; 48], &'static str> {
 }
 
 /// Human-readable size, three significant-ish digits, no float formatting.
-fn fmt_size(bytes: usize) -> String {
+/// Parenthesised on purpose: the terminal draws `(…)` on a status line in the
+/// faint colour, so sizes step back behind names and versions.
+pub(super) fn fmt_size(bytes: usize) -> String {
     if bytes >= 1024 * 1024 {
         let tenths = (bytes as u64 * 10 / (1024 * 1024)) as usize;
         alloc::format!("({}.{} MB)", tenths / 10, tenths % 10)
