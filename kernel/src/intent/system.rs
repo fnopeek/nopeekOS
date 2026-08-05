@@ -1053,227 +1053,188 @@ pub fn intent_time() {
     }
 }
 
+/// One command and what it does. `*` makes it a status line, so the terminal
+/// colours the marker and steps `(…)` asides back — see `shade::terminal`.
+fn help_row(cmd: &str, what: &str) {
+    kprintln!("[npk]   * {:<21} {}", cmd, what);
+}
+
+/// One group in the overview: a short label, then the commands it holds.
+fn help_group(label: &str, cmds: &str) {
+    kprintln!("[npk]   * {:<10} {}", label, cmds);
+}
+
+/// A dimmed aside: subtitles, hints, "see also". `.` dims the whole line.
+fn help_note(text: &str) {
+    kprintln!("[npk]   . {}", text);
+}
+
+fn help_head(title: &str, subtitle: &str) {
+    kprintln!("[npk] {}", title);
+    if !subtitle.is_empty() { help_note(subtitle); }
+    kprintln!("[npk]");
+}
+
+/// Help. ASCII only, on purpose: the terminal font draws 0x20..0x7E and
+/// silently SKIPS anything above it, while the column arithmetic still counts
+/// the bytes. The old help was full of `─`, `·` and `✓` — 297 of them — so
+/// every rule appeared as a blank line and every separator as a gap. It only
+/// ever looked right on the serial console.
 pub fn intent_help_topic(topic: &str) {
     match topic {
-        "storage" | "store" | "fs" => {
-            kprintln!();
-            kprintln!("  Storage");
-            kprintln!("  ───────");
-            kprintln!("  store <name> <data>   Save object to content store");
-            kprintln!("  fetch <name>          Load and display object");
-            kprintln!("  delete <name>         Remove object");
-            kprintln!("  list                  List all objects with hashes");
-            kprintln!("  fsinfo                Disk usage and block stats");
-            kprintln!();
+        "files" | "storage" | "store" | "fs" | "content" | "cat" | "grep" => {
+            help_head("files", "objects in a content-addressed store; paths are names for them");
+            help_row("ls [path]", "List a directory");
+            help_row("cd <path>", "Change the working directory");
+            help_row("pwd", "Print the working directory");
+            help_row("mkdir <path>", "Create a directory");
+            help_row("rm <name>", "Remove an object");
+            help_row("store <name> <data>", "Save an object");
+            help_row("fetch <name>", "Load and print an object");
+            help_row("cat <name>", "Print an object");
+            help_row("head <name> [n]", "First n lines (default 10)");
+            help_row("grep <pat> <name>", "Search lines, case-insensitive");
+            help_row("wc <name>", "Count lines, words, bytes");
+            help_row("hexdump <name> [n]", "Hex dump (default 256 bytes)");
+            help_row("find <pattern>", "Search object names");
+            help_row("list", "Every object with its hash");
+            help_row("fsinfo", "Disk usage and block stats");
+            help_row("gc", "Reclaim unreachable objects");
+            kprintln!("[npk]");
+            help_note("redirect with '>':  cat mypage > copy");
         }
-        "content" | "tools" | "cat" | "grep" => {
-            kprintln!();
-            kprintln!("  Content Tools");
-            kprintln!("  ─────────────");
-            kprintln!("  cat <name>              Display object contents");
-            kprintln!("  grep <pattern> <name>   Search lines (case-insensitive)");
-            kprintln!("  head <name> [n]         Show first n lines (default 10)");
-            kprintln!("  wc <name>               Count lines, words, bytes");
-            kprintln!("  hexdump <name> [n]      Hex dump (default 256 bytes)");
-            kprintln!();
-            kprintln!("  Redirect: cat mypage > copy   grep html mypage > matches");
-            kprintln!();
+        "net" | "network" | "http" | "https" => {
+            help_head("net", "");
+            help_row("ping <host>", "ICMP echo (IP or hostname)");
+            help_row("resolve <host>", "DNS lookup");
+            help_row("https <host> [path]", "HTTPS GET (TLS 1.3)");
+            help_row("http <host> [path]", "HTTP GET (plaintext)");
+            help_row("curl <host> [path]", "Alias of http (also: wget)");
+            help_row("netstat", "Active connections");
+            help_row("net", "Interface state");
+            help_row("ifconfig", "Address, gateway, MAC");
+            help_row("dhcp", "Renew the lease");
+            help_row("dns <host>", "Resolver detail");
+            help_row("traceroute <host>", "Path trace");
+            help_row("nic", "USB-NIC scan (link + speed)");
+            help_row("netbench", "Throughput measurement");
+            kprintln!("[npk]");
+            help_note("save a download:  https example.com /page.html > page");
         }
-        "network" | "net" | "http" | "https" => {
-            kprintln!();
-            kprintln!("  Network");
-            kprintln!("  ───────");
-            kprintln!("  ping <host>              ICMP ping (IP or hostname)");
-            kprintln!("  resolve <host>           DNS lookup");
-            kprintln!("  traceroute <host>        Network path trace");
-            kprintln!("  netstat                  Active connections");
-            kprintln!("  net                      Interface info");
-            kprintln!("  nic                      USB-NIC root-port scan (USB2/3 + link)");
-            kprintln!("  xhci                     Scan all xHCI controllers + port link-state");
-            kprintln!("  tbtrain                  Warm-reset Thunderbolt USB3 ports (SS link)");
-            kprintln!();
-            kprintln!("  http  <host> [path]      HTTP GET (plaintext)");
-            kprintln!("  https <host> [path]      HTTPS GET (TLS 1.3)");
-            kprintln!("    Flags:  -h headers only  -b body only  -s silent");
-            kprintln!("    Store:  https example.com / > mypage");
-            kprintln!();
+        "packages" | "install" | "modules" | "update" | "assets" => {
+            help_head("packages", "signed (ECDSA P-384) and verified on every path");
+            help_row("modules", "Installed WASM modules");
+            help_row("assets", "Fonts, icons, microvm payloads, wallpapers");
+            help_row("install <module>", "Download, verify, install");
+            help_row("uninstall <module>", "Remove (--force for bundled)");
+            help_row("update", "Show what is new, then ask");
+            help_row("update -y", "Apply without asking");
+            help_row("update -v", "Keep the connect/HTTP diagnostics");
+            kprintln!("[npk]");
+            help_note("source: raw.githubusercontent.com/fnopeek/nopeekOS");
         }
-        "exec" | "wasm" | "run" => {
-            kprintln!();
-            kprintln!("  Execution");
-            kprintln!("  ─────────");
-            kprintln!("  run <module> [args]   Execute WASM module from store");
-            kprintln!();
+        "apps" | "exec" | "wasm" | "run" | "browser" => {
+            help_head("apps", "");
+            help_row("run <module> [args]", "Execute a WASM module");
+            help_row("driver <name>", "Load a WASM hardware driver");
+            help_row("browser", "LibreWolf in a tiled MicroVM");
+            kprintln!("[npk]");
+            help_note("the dock and Mod+D start the same modules; 'modules' lists them");
+        }
+        "desktop" | "shade" | "compositor" | "wm" | "display" | "wallpaper" | "wp" => {
+            help_head("desktop", "shade: the tiling compositor");
+            help_row("shade", "Compositor state (also: shade config)");
+            help_row("shade ws <1-4>", "Switch workspace");
+            help_row("wallpaper set <name>", "Set wallpaper (also: list, random, clear)");
+            help_row("theme", "Palette state (from the wallpaper)");
+            help_row("dark | light | auto", "Switch the theme mode");
+            help_row("gpu", "Graphics adapter and mode");
+            help_row("volume [0-100]", "Audio level");
+            help_row("battery", "Charge level");
+            help_row("mouse speed <25-600>", "Pointer speed (also: mouse size)");
+            kprintln!("[npk]");
+            help_note("keys: Mod+Enter new  Mod+Q close  Mod+D launcher  Mod+F fullscreen");
+            help_note("      Mod+J flip split  Mod+arrow focus  Mod+Shift+arrow move");
+            help_note("      Mod+Ctrl+arrow resize  Mod+1-4 workspace  Mod+Shift+1-4 send");
+            kprintln!("[npk]");
+            help_note("config: shade.gaps, shade.border, shade.rounding, shade.glow,");
+            help_note("        shade.opacity, shade.mod");
+        }
+        "system" | "status" => {
+            help_head("system", "");
+            help_row("status", "Kernel, memory, uptime at a glance");
+            help_row("top", "Live processes and cores");
+            help_row("uptime", "Time since boot");
+            help_row("time", "Clock (also: date)");
+            help_row("dmesg", "Kernel log");
+            help_row("bootlog", "Log of the current boot");
+            help_row("cores", "Per-core load and frequency");
+            help_row("cpu", "CPU model and features");
+            help_row("slab", "Allocator statistics");
+            help_row("history", "Previous intents");
+            help_row("clear", "Clear the window");
+            help_row("version", "Kernel version (also: uname, about)");
+            help_row("reboot", "Restart");
+            help_row("halt", "Power off");
+            help_row("exit", "Close this loop window");
+            kprintln!("[npk]");
+            help_row("echo <text>", "Print text");
+            help_row("about", "What this system is (also: philosophy)");
         }
         "security" | "lock" | "caps" => {
-            kprintln!();
-            kprintln!("  Security");
-            kprintln!("  ────────");
-            kprintln!("  lock                  Lock system (clear keys)");
-            kprintln!("  passwd                Change passphrase");
-            kprintln!("  caps                  Show capability vault");
-            kprintln!("  audit                 Security event log");
-            kprintln!("  shell                 Start encrypted remote shell (port 4444)");
-            kprintln!();
+            help_head("security", "capabilities, not permissions: no chmod, no ACLs, no root");
+            help_row("lock", "Lock the system (clears keys)");
+            help_row("passwd", "Change the passphrase");
+            help_row("caps", "Capability vault");
+            help_row("audit", "Security event log");
+            help_row("shell", "Encrypted remote shell (port 4444)");
         }
         "config" | "set" | "settings" => {
-            kprintln!();
-            kprintln!("  Configuration");
-            kprintln!("  ─────────────");
-            kprintln!("  set <key> <value>     Set config value");
-            kprintln!("  get <key>             Get config value");
-            kprintln!("  config                Show all settings");
-            kprintln!();
-            kprintln!("  Keys: timezone (+2), keyboard (de_CH), lang (de)");
-            kprintln!();
+            help_head("config", "");
+            help_row("config", "Every setting");
+            help_row("set <key> <value>", "Change one");
+            help_row("get <key>", "Read one");
+            kprintln!("[npk]");
+            help_note("keys: name, timezone, keyboard, lang, accent, theme, launcher,");
+            help_note("      autostart, mouse_speed, shade.* (see 'help desktop')");
         }
-        "shade" | "compositor" | "wm" | "display" => {
-            kprintln!();
-            kprintln!("  Shade Compositor");
-            kprintln!("  ────────────────");
-            kprintln!("  shade init             Start compositor");
-            kprintln!("  shade demo             Demo with 3 tiled windows");
-            kprintln!("  shade stop             Stop compositor, return to text");
-            kprintln!("  shade status           Current compositor state");
-            kprintln!("  shade config           Show/change compositor settings");
-            kprintln!("  shade ws <1-4>         Switch workspace");
-            kprintln!();
-            kprintln!("  Config keys (set via 'set <key> <value>'):");
-            kprintln!("    shade.gaps            Gap between windows (px, default: 8)");
-            kprintln!("    shade.border          Border width (px, default: 2)");
-            kprintln!("    shade.border_active   Active border color (hex)");
-            kprintln!("    shade.border_inactive Inactive border color (hex)");
-            kprintln!("    shade.glow            Focus halo width (px, 0 = off, default: 6)");
-            kprintln!("    shade.bar_height      Status bar height (px, default: 28)");
-            kprintln!("    shade.bar_position    Bar position (top/bottom)");
-            kprintln!();
+        "hardware" | "hw" | "disk" | "blk" | "pci" | "usb" => {
+            help_head("hardware", "");
+            help_row("pci", "PCI devices (also: lspci)");
+            help_row("usb", "USB devices (also: lsusb)");
+            help_row("xhci", "USB controllers and port link state");
+            help_row("disk", "Disk info");
+            help_row("disk read <sector>", "Raw sector hex dump");
+            help_row("disk write <s> <txt>", "Write text to a sector");
+            help_row("fbinfo", "Framebuffer geometry");
+            help_row("beep", "Speaker test");
+            help_row("test-audio", "Audio output test");
         }
-        "wallpaper" | "wp" | "background" => {
-            kprintln!();
-            kprintln!("  Wallpaper");
-            kprintln!("  ─────────");
-            kprintln!("  wallpaper set <name>   Set wallpaper from npkFS");
-            kprintln!("  wallpaper clear        Revert to aurora background");
-            kprintln!("  wallpaper list         List available wallpapers");
-            kprintln!("  wallpaper random       Set random wallpaper");
-            kprintln!();
-            kprintln!("  Wallpapers live in ~/wallpapers/");
-            kprintln!("  Download: https <host> /image.png > wallpapers/name");
-            kprintln!("  A random wallpaper is set on each login.");
-            kprintln!("  Theme colors are extracted automatically.");
-            kprintln!();
-        }
-        "packages" | "install" | "modules" => {
-            kprintln!();
-            kprintln!("  Package Manager");
-            kprintln!("  ───────────────");
-            kprintln!("  install <module>       Download + verify + install WASM module");
-            kprintln!("  uninstall <module> [--force]  Remove module (--force for bundled)");
-            kprintln!("  modules                List installed modules");
-            kprintln!("  assets                 List fonts, icons, microvm payloads, wallpapers");
-            kprintln!();
-            kprintln!("  update                 Show what is new, then ask before applying");
-            kprintln!("  update -y              Apply without asking");
-            kprintln!("  update -v              Keep the connect / HTTP diagnostics");
-            kprintln!();
-            kprintln!("  Modules are signed (ECDSA P-384) and verified.");
-            kprintln!("  Source: raw.githubusercontent.com/fnopeek/nopeekOS/");
-            kprintln!();
-        }
-        "disk" | "blk" => {
-            kprintln!();
-            kprintln!("  Disk");
-            kprintln!("  ────");
-            kprintln!("  disk                  Disk info");
-            kprintln!("  disk read <sector>    Raw sector hex dump");
-            kprintln!("  disk write <s> <txt>  Write text to sector");
-            kprintln!();
-        }
-        "vmx" | "vt-x" => {
-            kprintln!();
-            kprintln!("  Virtualization probe (Phase 12 — MicroVM)");
-            kprintln!("  ─────────────────────────────────────────");
-            kprintln!("  vmx                    Probe Intel VT-x capability + report");
-            kprintln!();
-            kprintln!("  Reported fields:");
-            kprintln!("    revision_id      VMCS revision (per CPU stepping)");
-            kprintln!("    vmxon_region_sz  VMXON / VMCS allocation size in bytes");
-            kprintln!("    ept_supported    Extended Page Tables for guest-phys → host-phys");
-            kprintln!("    unrestricted     Real-mode guest without trampolining");
-            kprintln!("    vpid             Tagged TLB across VM-entry/exit");
-            kprintln!();
-            kprintln!("  If 'NOT available': enable 'Intel Virtualization Technology'");
-            kprintln!("  in BIOS/UEFI firmware setup.");
-            kprintln!();
-            kprintln!("  See 'microvm' for the substrate test (VMXON / VMLAUNCH).");
-            kprintln!();
-        }
-        "browser" => {
-            kprintln!();
-            kprintln!("  Browser (LibreWolf in a MicroVM)");
-            kprintln!("  ────────────────────────────────");
-            kprintln!("  browser               Launch LibreWolf in a tiled MicroVM");
-            kprintln!("                        window. Boots Linux 6.18 → cage kiosk");
-            kprintln!("                        compositor → LibreWolf. Standard config,");
-            kprintln!("                        2 GiB RAM, e10s + fission + sandbox on.");
-            kprintln!();
-            kprintln!("  See also: 'microvm' for the VT-x / AMD-V substrate.");
-            kprintln!();
-        }
-        "microvm" => {
-            kprintln!();
-            kprintln!("  MicroVM (Phase 12 — VT-x / AMD-V sandbox for Linux apps)");
-            kprintln!("  ────────────────────────────────────────────────────────");
-            kprintln!("  microvm test          Run the real-mode HLT-loop substrate");
-            kprintln!("                        test: VMXON → EPT/NPT → unrestricted");
-            kprintln!("                        real-mode guest → VMLAUNCH → VM-exit");
-            kprintln!("                        → VMXOFF. Prints the basic exit reason.");
-            kprintln!("  microvm linux-info    Parse bundled bzImage from npkFS, print");
-            kprintln!("                        Linux Boot Protocol stats.");
-            kprintln!("  microvm linux         Same as 'browser' — boot the LibreWolf");
-            kprintln!("                        bundle (dev/test alias).");
-            kprintln!();
-            kprintln!("  Phase 12 status:");
-            kprintln!("    12.1.0a-c  VMXON / VMCS / VMPTRLD                 ✓");
-            kprintln!("    12.1.0d    host-state + TSS + VMLAUNCH (long-mode) ✓");
-            kprintln!("    12.1.1a    EPT identity-map (1 GB)                ✓");
-            kprintln!("    12.1.1b    real-mode + unrestricted + I/O exit    ✓");
-            kprintln!("    12.1.1c-1  16 MB non-identity EPT window          ✓");
-            kprintln!("    12.1.1c-2  bring-up off the boot path             ✓");
-            kprintln!("    12.1.1c-3a 64 MB EPT + bzImage in npkFS           ✓");
-            kprintln!("    12.1.1c-3b1 bzImage parser + linux-info           ✓");
-            kprintln!("    12.1.1c-3b2 I/O-bitmap capture (0x80, 0x3F8-3FF)  ✓");
-            kprintln!("    12.1.1c-3b3a VMRESUME loop + GPR save/restore     ✓");
-            kprintln!("    12.1.1c-3b3b1 32-bit prot mode guest               ✓");
-            kprintln!("    12.1.1c-3b3b2 bzImage loader + microvm linux       ✓");
-            kprintln!("    12.1.1d       early-panic detection                — next");
-            kprintln!("    12.1.2+    virtio-console, initramfs, Rust-PID-1");
-            kprintln!();
-            kprintln!("  This intent currently leaks ~16 MB of guest RAM per call.");
-            kprintln!("  Persistent VM lifecycle lands in Phase 12.2.");
-            kprintln!();
+        "virt" | "microvm" | "vmx" | "vt-x" => {
+            help_head("virt", "Linux apps inside a hardware-isolated guest");
+            help_row("microvm test", "Substrate smoke test");
+            help_row("microvm linux-info", "Parse the bundled bzImage");
+            help_row("microvm linux", "Boot the bundled userspace");
+            help_row("vmx", "Probe Intel VT-x support");
+            kprintln!("[npk]");
+            help_note("'browser' is the app-facing way in; this is the substrate");
+            help_note("no VT-x? enable Intel Virtualization Technology in UEFI setup");
         }
         _ => {
-            // Main overview
-            kprintln!();
-            kprintln!("  nopeekOS");
-            kprintln!("  ════════");
-            kprintln!();
-            kprintln!("  System:    status · uptime · time · dmesg · about · clear · exit · halt");
-            kprintln!("  Storage:   store · fetch · delete · list · fsinfo");
-            kprintln!("  Content:   cat · grep · head · wc · hexdump");
-            kprintln!("  Network:   ping · resolve · http · https · traceroute · netstat");
-            kprintln!("  Exec:      run · driver");
-            kprintln!("  Packages:  install · uninstall · modules · assets · update");
-            kprintln!("  Security:  lock · passwd · caps · audit · shell");
-            kprintln!("  Config:    set · get · config");
-            kprintln!("  Display:   gpu · shade · wallpaper");
-            kprintln!("  Disk:      disk read · disk write");
-            kprintln!("  Apps:      browser");
-            kprintln!("  Virt:      vmx · microvm");
-            kprintln!();
-            kprintln!("  help <topic>  for details (storage, content, network, exec, security, config, disk, shade, wallpaper, browser, vmx, microvm)");
-            kprintln!();
+            kprintln!("[npk] nopeekOS v{}", env!("CARGO_PKG_VERSION"));
+            kprintln!("[npk]");
+            help_group("files", "ls  cd  cat  find  store  fetch  rm  fsinfo");
+            help_group("net", "ping  resolve  https  netstat  nic  dhcp");
+            help_group("packages", "modules  assets  install  update");
+            help_group("apps", "run  driver  browser");
+            help_group("desktop", "shade  wallpaper  theme  gpu  volume  battery");
+            help_group("system", "status  top  dmesg  cores  reboot  halt");
+            help_group("security", "lock  passwd  caps  audit  shell");
+            help_group("config", "config  set  get");
+            help_group("hardware", "pci  usb  disk  fbinfo");
+            help_group("virt", "microvm  vmx");
+            kprintln!("[npk]");
+            help_note("help <topic> for any of those");
         }
     }
 }
