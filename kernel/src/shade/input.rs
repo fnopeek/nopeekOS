@@ -83,6 +83,18 @@ pub fn push_action_direct(action: ShadeAction) {
     push_action(action);
 }
 
+/// Workspace switch / move for digit key `n` (1-based), pushed by the
+/// keyboard drivers from the RAW key — a keybinding table matching on
+/// characters can never see Mod+Shift+N, because the layout has long turned
+/// "1" into "+" (de_CH) or "!" (us) by then. Mod+Shift+4 on de_CH produced
+/// no character at all (ç), so "move to workspace" was unreachable.
+pub fn push_workspace_key(n: u8, shift: bool) {
+    if n == 0 || n > 9 { return }
+    if !crate::shade::is_active() { return }
+    let ws = n - 1;
+    push_action(if shift { ShadeAction::MoveToWorkspace(ws) } else { ShadeAction::Workspace(ws) });
+}
+
 /// Push a pending action.
 fn push_action(action: ShadeAction) {
     // SAFETY: single-core, no preemption

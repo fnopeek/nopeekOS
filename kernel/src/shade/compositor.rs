@@ -1211,6 +1211,9 @@ impl Compositor {
     /// Switch to workspace.
     pub fn switch_workspace(&mut self, ws: u8) {
         if ws == self.active_workspace { return; }
+        // The keys go up to 9; only the workspaces the bar actually shows
+        // exist, and switching past them would leave it with nothing to mark.
+        if ws >= self.workspace_count { return; }
         self.active_workspace = ws;
 
         // The dock is global: follow the active workspace and snap shut so
@@ -1262,7 +1265,7 @@ impl Compositor {
     /// workspace's tree, hang it into the target's, and leave focus behind.
     pub fn move_to_workspace(&mut self, ws: u8) {
         let Some(fid) = self.focused else { return };
-        if ws == self.active_workspace { return }
+        if ws == self.active_workspace || ws >= self.workspace_count { return }
         // Panels are global chrome — they belong to every workspace at once.
         if self.is_panel(fid) { return }
 

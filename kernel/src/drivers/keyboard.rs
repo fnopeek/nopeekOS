@@ -522,6 +522,12 @@ fn decode_scancode(scancode: u8) -> Option<u8> {
         crate::shade::input::push_action_direct(crate::shade::input::ShadeAction::Paste);
         return None;
     }
+    // Mod+1..9 / Mod+Shift+1..9 by scancode, before the layout turns the
+    // digit into "+" / "!" / nothing (see push_workspace_key). Set-1 0x02='1'.
+    if SUPER.load(Ordering::Relaxed) && matches!(code, 0x02..=0x0A) {
+        crate::shade::input::push_workspace_key(code - 0x01, shift);
+        return None;
+    }
     if ctrl && code == 0x2E {
         // Ctrl+C → terminal SIGINT: cancel a running foreground intent
         // (download/OTA). Set here so it works even when the main loop is
