@@ -249,11 +249,11 @@ pub struct DragState {
     /// Resize delta when drag started.
     pub start_rw: i32,
     pub start_rh: i32,
-    /// Which split line the drag moves per axis, and with which sign —
-    /// resolved once at drag start (see `resize_target`). The dragged window
-    /// is rarely the one holding the delta.
-    pub w_target: Option<(WindowId, i32)>,
-    pub h_target: Option<(WindowId, i32)>,
+    /// Which split line the drag moves per axis — resolved once at drag start
+    /// (see `resize_target`). The dragged window is rarely the one holding the
+    /// delta.
+    pub w_target: Option<WindowId>,
+    pub h_target: Option<WindowId>,
 }
 
 /// Auto-hide bottom dock state. The compositor owns the reveal/hide
@@ -2409,11 +2409,13 @@ impl Compositor {
 
     /// Resolve the split lines a Mod+RMB drag will move and remember where
     /// they stood, so the drag stays absolute against its start position.
+    /// Only WHICH line comes from `resize_target` — the sign doesn't, see
+    /// `apply_resize_drag`.
     fn begin_resize_drag(&mut self, wid: WindowId, mx: i32, my: i32) {
-        let w_target = self.resize_target(wid, true);
-        let h_target = self.resize_target(wid, false);
-        let delta_of = |s: &Self, t: Option<(WindowId, i32)>, beside: bool| -> i32 {
-            t.and_then(|(id, _)| s.windows.iter().find(|w| w.id == id))
+        let w_target = self.resize_target(wid, true).map(|(id, _)| id);
+        let h_target = self.resize_target(wid, false).map(|(id, _)| id);
+        let delta_of = |s: &Self, t: Option<WindowId>, beside: bool| -> i32 {
+            t.and_then(|id| s.windows.iter().find(|w| w.id == id))
                 .map(|w| if beside { w.resize_w } else { w.resize_h })
                 .unwrap_or(0)
         };
@@ -2429,15 +2431,23 @@ impl Compositor {
     }
 
     /// Apply a resize drag: absolute against the deltas captured at drag start.
+    ///
+    /// The mouse does NOT use `resize_target`'s grow-sign — dragging is direct
+    /// manipulation, so the border has to follow the hand: mouse right = line
+    /// right, whichever side of it the focused tile is on. A delta always sits
+    /// on the child that drew the line and always moves it towards its parent's
+    /// origin (left / up), so following the cursor is a fixed `- delta` on both
+    /// axes. The keys mean something else (Mod+Ctrl+Right = "make it wider",
+    /// like Hyprland's resizeactive) and keep the grow-sign.
     fn apply_resize_drag(&mut self, drag: &DragState, dx: i32, dy: i32) {
-        if let Some((id, sign)) = drag.w_target {
+        if let Some(id) = drag.w_target {
             if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
-                win.resize_w = drag.start_rw + sign * dx;
+                win.resize_w = drag.start_rw - dx;
             }
         }
-        if let Some((id, sign)) = drag.h_target {
+        if let Some(id) = drag.h_target {
             if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
-                win.resize_h = drag.start_rh + sign * dy;
+                win.resize_h = drag.start_rh - dy;
             }
         }
     }
