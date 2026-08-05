@@ -15,7 +15,7 @@
 //!   3. Iterate BUNDLED_ASSETS, write each entry to npkFS:
 //!      - always store `<fs_path>` with the bytes
 //!      - if version Some, also store `<fs_path>.version` — so
-//!        `intent::install` and `intent::update::update_all_modules`
+//!        `intent::install` and `intent::install::plan_modules`
 //!        see the module as up-to-date and skip spurious redownloads.
 //!   4. First boot from NVMe: FS is seeded, font + modules are ready.
 //!
@@ -223,7 +223,7 @@ pub fn bootstrap_into_npkfs() {
         }
 
         // Versioned asset → also write the `.version` sidecar so
-        // `intent::install` / `intent::update::update_all_modules`
+        // `intent::install` / `intent::install::plan_modules`
         // recognise it as installed at the right version.
         if let Some(version) = a.version {
             let ver_path = alloc::format!("{}.version", a.fs_path);
