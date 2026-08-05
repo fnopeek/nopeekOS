@@ -743,6 +743,35 @@ fn render_damaged_layered() {
     });
 }
 
+/// Fade the focus flash down to the steady halo, repainting only its band —
+/// nothing inside the window changes, so a full frame per tick would be pure
+/// waste. Every loop that idles while shade is up has to call this, or the
+/// flash stands still at full strength until something else repaints.
+pub fn tick_focus_glow() {
+    if !is_active() { return; }
+    if crate::smp::per_core::current_core_id() != 0 { return; }
+    if with_compositor(|comp| comp.tick_focus_glow()).unwrap_or(false) {
+        render_focus_glow();
+    }
+}
+
+/// Repaint just the focus halo band (see `Compositor::render_focus_glow`).
+fn render_focus_glow() {
+    framebuffer::with_fb(|fb| {
+        let info = *fb.info();
+        let (shadow, _) = fb.shadow_ptr();
+
+        if let Some(ref comp) = *COMPOSITOR.lock() {
+            let regions = comp.render_focus_glow(shadow, &info);
+            if regions.is_empty() { return }
+            cursor::draw_cursor_on_shadow(shadow, &info);
+            for (x, y, w, h) in regions {
+                framebuffer::blit_rect(fb, x, y, w, h);
+            }
+        }
+    });
+}
+
 fn render_damaged_legacy() {
     framebuffer::with_fb(|fb| {
         let info = *fb.info();
@@ -1139,6 +1168,8 @@ pub fn poll_render() {
         render_frame();
     }
 
+    if !animating { tick_focus_glow(); }
+
     // Drive the auto-hide dock. Feed it the current cursor Y so the reveal
     // dwell / hide debounce advance even while the cursor is parked, then
     // advance the slide. Re-render the frame while it's moving.
@@ -1249,13 +1280,19 @@ pub fn poll_render() {
             let active_border = comp.border_active();
             let inactive_border = comp.border_inactive();
             for wid in render_order {
+                // Skip checks and halo up front: the paint below needs a &mut
+                // to clear `dirty`, while the halo has to be resolved against
+                // the whole compositor (gaps, flash state).
+                let glow = match comp.windows.iter().find(|w| w.id == wid) {
+                    Some(w) if w.workspace == comp.active_workspace
+                        && w.visible
+                        && (w.dirty || Some(w.id) == focused_id) => comp.glow_for(w),
+                    _ => continue,
+                };
                 let win = match comp.windows.iter_mut().find(|w| w.id == wid) {
                     Some(w) => w,
                     None => continue,
                 };
-                if win.workspace != comp.active_workspace { continue; }
-                if !win.visible { continue; }
-                if !win.dirty && Some(win.id) != focused_id { continue; }
                 win.dirty = false;
 
                 // Restore window region from BG layer. Overlays skip
@@ -1282,7 +1319,8 @@ pub fn poll_render() {
 
                 let border_color = if win.focused { active_border } else { inactive_border };
                 compositor::Compositor::render_window(shadow, info, win,
-                    comp.border, comp.rounding, comp.opacity, comp.scale, border_color);
+                    comp.border, comp.rounding, comp.opacity, comp.scale, border_color,
+                    glow);
                 framebuffer::blit_rect(fb, win.x, win.y, win.width, win.height);
             }
         }
@@ -1333,7 +1371,8 @@ fn poll_render_layered() {
                     // Re-render window chrome + text on clean background
                     let border_color = if win.focused { comp.border_active() } else { comp.border_inactive() };
                     compositor::Compositor::render_window(shadow, info, win,
-                        comp.border, comp.rounding, comp.opacity, comp.scale, border_color);
+                        comp.border, comp.rounding, comp.opacity, comp.scale, border_color,
+                        comp.glow_for(win));
                     cursor::draw_cursor_on_shadow(shadow, info);
                     framebuffer::blit_rect(fb, win.x, win.y, win.width, win.height);
                 }
@@ -1352,7 +1391,8 @@ fn poll_render_legacy() {
                 if let Some(win) = comp.windows.iter().find(|w| w.id == fid && w.workspace == comp.active_workspace) {
                     let border_color = if win.focused { comp.border_active() } else { comp.border_inactive() };
                     compositor::Compositor::render_window(shadow, info, win,
-                        comp.border, comp.rounding, comp.opacity, comp.scale, border_color);
+                        comp.border, comp.rounding, comp.opacity, comp.scale, border_color,
+                        comp.glow_for(win));
                     cursor::draw_cursor_on_shadow(shadow, info);
                     framebuffer::blit_rect(fb, win.x, win.y, win.width, win.height);
                 }

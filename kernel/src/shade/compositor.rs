@@ -35,6 +35,34 @@ const DOCK_BOTTOM_GAP: u32 = 12;
 /// background shine through. Dark mode is untouched.
 const LIGHT_TERMINAL_OPACITY_DROP: u32 = 56;
 
+/// Focus halo. The focused tile bleeds a little accent into the gap around
+/// it: a 1 px border in a wallpaper-derived colour is invisible on half the
+/// wallpapers, a halo reads on all of them because it does not compete with
+/// the colour underneath. It settles at `STEADY`; the moment focus lands it
+/// starts at `FLASH` and fades down over `FLASH_TICKS` (100 Hz timer), which
+/// is what makes a focus change catch the eye anywhere on screen.
+const GLOW_STEADY_ALPHA: u32 = 60;
+const GLOW_FLASH_ALPHA: u32 = 210;
+const GLOW_FLASH_TICKS: u64 = 22;
+/// Border blend of the focused / unfocused tile (0..256). The gap between the
+/// two carries the steady-state distinction together with the halo.
+const BORDER_ACTIVE_OPACITY: u32 = 235;
+const BORDER_INACTIVE_OPACITY: u32 = 130;
+
+/// What to paint around a window: `band` is the strip reserved for the halo
+/// (restored from the wallpaper on every repaint, so a tile that LOST focus
+/// erases its old halo), `alpha` is how strongly it is drawn right now.
+#[derive(Clone, Copy)]
+pub struct Glow {
+    pub band: u32,
+    pub alpha: u32,
+    pub color: u32,
+}
+
+impl Glow {
+    pub const NONE: Glow = Glow { band: 0, alpha: 0, color: 0 };
+}
+
 /// Platform close button — the compositor draws a small "X" affordance in
 /// the top-right corner of every real (non-panel) window so mouse users
 /// can close it without remembering Mod+Q. Not per-app: provided here
@@ -335,6 +363,10 @@ pub struct Compositor {
     pub drag: Option<DragState>,
     /// Active swap animation (windows gliding to new positions).
     pub animation: Option<SwapAnimation>,
+    /// Focus flash: (window, tick it gained focus). The halo starts bright
+    /// and settles into the steady one over `GLOW_FLASH_TICKS`, so a focus
+    /// change is visible even when you were not looking at that corner.
+    pub focus_glow: Option<(WindowId, u64)>,
     /// Auto-hide bottom dock, if a dock app has registered one.
     pub dock: Option<DockState>,
     /// Top strut bar, if a bar app (`bar.wasm`) has registered one. `None`
@@ -388,6 +420,7 @@ impl Compositor {
             },
             drag: None,
             animation: None,
+            focus_glow: None,
             dock: None,
             top_strut: None,
         }
@@ -406,6 +439,103 @@ impl Compositor {
         self.border_inactive.unwrap_or_else(|| {
             super::widgets::palette::resolve(super::widgets::abi::Token::Border) & 0x00FF_FFFF
         })
+    }
+
+    /// Border colour actually used for the focused / unfocused tile: a
+    /// wallpaper theme overrides the palette tokens.
+    fn active_border_color(&self) -> u32 {
+        if crate::theme::is_active() {
+            crate::gui::background::accent_color()
+        } else {
+            self.border_active()
+        }
+    }
+
+    fn inactive_border_color(&self) -> u32 {
+        if crate::theme::is_active() {
+            crate::theme::inactive_border()
+        } else {
+            self.border_inactive()
+        }
+    }
+
+    /// Width of the focus halo. `shade.glow` in px (0 disables), capped at
+    /// half the gap so the halo — and the wallpaper restore that erases it —
+    /// can never reach into the neighbouring tile.
+    fn glow_width(&self) -> u32 {
+        let w = crate::config::get("shade.glow")
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(4) * self.scale;
+        w.min(self.gaps / 2)
+    }
+
+    /// Halo for this window right now. Unfocused tiles keep the `band` (they
+    /// have to repaint over their own former halo) but draw nothing.
+    pub fn glow_for(&self, win: &Window) -> Glow {
+        if win.is_overlay || win.state != WindowState::Tiled { return Glow::NONE }
+        let band = self.glow_width();
+        if band == 0 { return Glow::NONE }
+        if !win.focused { return Glow { band, alpha: 0, color: 0 } }
+        let alpha = match self.focus_glow {
+            Some((id, start)) if id == win.id => {
+                let t = crate::interrupts::ticks().saturating_sub(start)
+                    .min(GLOW_FLASH_TICKS) as u32;
+                GLOW_FLASH_ALPHA
+                    - (GLOW_FLASH_ALPHA - GLOW_STEADY_ALPHA) * t / GLOW_FLASH_TICKS as u32
+            }
+            _ => GLOW_STEADY_ALPHA,
+        };
+        Glow { band, alpha, color: self.active_border_color() }
+    }
+
+    /// Advance the focus flash. True while it still has a frame to draw —
+    /// the last one settles the halo to its steady strength.
+    pub fn tick_focus_glow(&mut self) -> bool {
+        let Some((id, start)) = self.focus_glow else { return false };
+        if !self.is_tiled(id) || self.focused != Some(id) {
+            self.focus_glow = None;
+            return false;
+        }
+        if crate::interrupts::ticks().saturating_sub(start) >= GLOW_FLASH_TICKS {
+            self.focus_glow = None;
+        }
+        true
+    }
+
+    /// Repaint ONLY the halo band of the focused tile. The flash animates
+    /// nothing inside the window, so redrawing the whole tile 20 times over
+    /// (millions of pixels at 4K, per frame) would be wasted — this touches
+    /// the four gap strips and hands them back as the damage to blit.
+    pub fn render_focus_glow(&self, shadow: *mut u8, info: &FbInfo)
+        -> Vec<(u32, u32, u32, u32)>
+    {
+        let Some(fid) = self.focused else { return Vec::new() };
+        let Some(win) = self.windows.iter()
+            .find(|w| w.id == fid && w.workspace == self.active_workspace && w.visible)
+            else { return Vec::new() };
+        let glow = self.glow_for(win);
+        if glow.band == 0 { return Vec::new() }
+
+        let (x, y, w, h) = (win.x, win.y, win.width, win.height);
+        let g = glow.band;
+        let bands = [
+            (x.saturating_sub(g), y.saturating_sub(g), w + 2 * g, g),
+            (x.saturating_sub(g), y + h,               w + 2 * g, g),
+            (x.saturating_sub(g), y,                   g,         h),
+            (x + w,               y,                   g,         h),
+        ];
+        let mut out = Vec::new();
+        for (bx, by, bw, bh) in bands {
+            if bx >= info.width || by >= info.height { continue }
+            let bw = bw.min(info.width - bx);
+            let bh = bh.min(info.height - by);
+            if bw == 0 || bh == 0 { continue }
+            background::draw_background_region(shadow, info, bx, by, bw, bh);
+            out.push((bx, by, bw, bh));
+        }
+        render::draw_glow_ring(shadow, info, x, y, w, h, self.rounding,
+            glow.color, glow.band, glow.alpha);
+        out
     }
 
     /// Height reserved at the top for the bar strut (0 if no bar registered).
@@ -1469,18 +1599,13 @@ impl Compositor {
                     _ => wc[3] += 1,
                 }
 
-                let active_border = if crate::theme::is_active() {
-                    crate::gui::background::accent_color()
+                let border_color = if win.focused {
+                    self.active_border_color()
                 } else {
-                    self.border_active()
-                };
-                let inactive_border = if crate::theme::is_active() {
-                    crate::theme::inactive_border()
-                } else {
-                    self.border_inactive()
+                    self.inactive_border_color()
                 };
                 Self::render_window(shadow, info, win, border, rounding, opacity, scale,
-                    if win.focused { active_border } else { inactive_border });
+                    border_color, self.glow_for(win));
             }
         }
         {
@@ -1556,7 +1681,7 @@ impl Compositor {
     /// Render a single window: background overwrite + border blend + content blend + text.
     pub(crate) fn render_window(shadow: *mut u8, info: &FbInfo, win: &Window,
                      border: u32, rounding: u32, opacity: u32, scale: u32,
-                     border_color: u32) {
+                     border_color: u32, glow: Glow) {
         // [rw-phase] per-window timing: wallpaper restore | chrome | content.
         static RW_BG: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
         static RW_CHROME: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -1570,8 +1695,19 @@ impl Compositor {
         // tick, so it MUST restore its band from the wallpaper first or
         // successive blends would stack into an opaque smear.
         if !win.is_overlay || win.is_bar {
+            // Restore the halo band too, ALWAYS — also for an unfocused tile,
+            // which is exactly the one that has to paint over the halo it had
+            // while it was focused. The band lives in the gap (capped at half
+            // of it), so this never reaches a neighbour.
+            let g = glow.band;
             background::draw_background_region(shadow, info,
-                win.x, win.y, win.width, win.height);
+                win.x.saturating_sub(g), win.y.saturating_sub(g),
+                win.width + g + (win.x - win.x.saturating_sub(g)),
+                win.height + g + (win.y - win.y.saturating_sub(g)));
+        }
+        if glow.alpha > 0 {
+            render::draw_glow_ring(shadow, info, win.x, win.y, win.width, win.height,
+                rounding, glow.color, glow.band, glow.alpha);
         }
         let t_rw_bg = crate::interrupts::rdtsc();
 
@@ -1592,11 +1728,15 @@ impl Compositor {
         };
 
         if !win.is_dock && !win.is_bar {
-            let (ba, bb, b_op) = if crate::theme::is_active() && win.focused {
-                let (ga, gb) = crate::theme::border_gradient();
-                (ga, gb, 200u32)
+            let (ba, bb, b_op) = if win.focused {
+                if crate::theme::is_active() {
+                    let (ga, gb) = crate::theme::border_gradient();
+                    (ga, gb, BORDER_ACTIVE_OPACITY)
+                } else {
+                    (border_color, border_color, BORDER_ACTIVE_OPACITY)
+                }
             } else {
-                (border_color, border_color, 180u32)
+                (border_color, border_color, BORDER_INACTIVE_OPACITY)
             };
             let paint_content = matches!(win.kind, crate::shade::window::WindowKind::Terminal);
             // Terminal (`loop`) windows track the active theme like the
@@ -1955,19 +2095,23 @@ impl Compositor {
 
             if needs_render {
                 if let Some(win) = self.windows.iter().find(|w| w.id == wid) {
-                    let active_border = if crate::theme::is_active() {
-                        crate::gui::background::accent_color()
+                    let border_color = if win.focused {
+                        self.active_border_color()
                     } else {
-                        self.border_active()
+                        self.inactive_border_color()
                     };
-                    let inactive_border = if crate::theme::is_active() {
-                        crate::theme::inactive_border()
-                    } else {
-                        self.border_inactive()
-                    };
-                    let border_color = if win.focused { active_border } else { inactive_border };
-                    Self::render_window(shadow, info, win, border, rounding, opacity, scale, border_color);
-                    regions.push((win.x, win.y, win.width, win.height));
+                    let glow = self.glow_for(win);
+                    Self::render_window(shadow, info, win, border, rounding, opacity, scale,
+                        border_color, glow);
+                    // Damage covers the halo band: the tile that just lost
+                    // focus repaints wallpaper there, and the one that gained
+                    // it paints the halo — neither is inside its own rect.
+                    let g = glow.band;
+                    let rx = win.x.saturating_sub(g);
+                    let ry = win.y.saturating_sub(g);
+                    regions.push((rx, ry,
+                        (win.width + g + (win.x - rx)).min(info.width.saturating_sub(rx)),
+                        (win.height + g + (win.y - ry)).min(info.height.saturating_sub(ry))));
                 }
             }
         }
@@ -1998,12 +2142,19 @@ impl Compositor {
 
     /// Update focused flag — only mark changed windows dirty.
     fn set_focused_flag(&mut self, focused_id: WindowId) {
+        let mut gained = false;
         for win in &mut self.windows {
             let was = win.focused;
             win.focused = win.id == focused_id;
             if win.focused != was {
                 win.dirty = true; // Only re-render windows that changed
+                if win.focused { gained = true; }
             }
+        }
+        // Flash only on a real change of focus — every path routes through
+        // here, and several of them re-assert the focus that is already set.
+        if gained {
+            self.focus_glow = Some((focused_id, crate::interrupts::ticks()));
         }
     }
 

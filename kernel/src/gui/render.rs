@@ -233,6 +233,61 @@ pub fn rect_coverage_sdf(px: u32, py: u32,
     arc_coverage_sdf(cdx_q8, cdy_q8, r_i * 256)
 }
 
+/// Soft halo just OUTSIDE a rounded rect, alpha falling off with distance.
+///
+/// The focus border is a hairline in a wallpaper-derived colour, so on a busy
+/// or similarly-coloured wallpaper it disappears. A halo does not depend on
+/// the colour underneath: it lifts the tile off whatever is behind it.
+///
+/// Paints strictly outside the rect (coverage 0), so window content and the
+/// chrome's own AA edge stay untouched. Lives in the tile gap — the caller
+/// keeps `width` inside it, and restores that band before repainting.
+pub fn draw_glow_ring(shadow: *mut u8, info: &FbInfo,
+                      x: u32, y: u32, w: u32, h: u32, r: u32,
+                      color: u32, width: u32, alpha: u32) {
+    if width == 0 || alpha == 0 || w < 2 || h < 2 { return; }
+    let r = r.min(w / 2).min(h / 2);
+    let x0 = x.saturating_sub(width);
+    let y0 = y.saturating_sub(width);
+    let x1 = (x + w + width).min(info.width);
+    let y1 = (y + h + width).min(info.height);
+    if x1 <= x0 || y1 <= y0 { return; }
+
+    let paint = |px: u32, py: u32| {
+        if rect_coverage_sdf(px, py, x, y, w, h, r) > 0 { return; }
+        // Distance to the tile in whole pixels = the first grown ring that
+        // reaches this pixel. Nearest ring is brightest.
+        for i in 1..=width {
+            let gx = x.saturating_sub(i);
+            let gy = y.saturating_sub(i);
+            let gw = w + i + (x - gx);
+            let gh = h + i + (y - gy);
+            let cov = rect_coverage_sdf(px, py, gx, gy, gw, gh, r + i);
+            if cov == 0 { continue; }
+            let falloff = (width + 1 - i) * 256 / width;
+            let a = (alpha * falloff / 256) * cov / 256;
+            if a > 0 {
+                let bg = read_pixel(shadow, info, px, py);
+                put_pixel(shadow, info, px, py, blend(color, bg, a.min(256)));
+            }
+            return;
+        }
+    };
+
+    // Only the band is walked: rows that can hold a rounded corner get the
+    // full width, the straight middle just the two side strips.
+    let corner_lo = (y + r).min(y1);
+    let corner_hi = (y + h).saturating_sub(r).max(corner_lo);
+    for py in y0..y1 {
+        if py < corner_lo || py >= corner_hi {
+            for px in x0..x1 { paint(px, py); }
+        } else {
+            for px in x0..x.min(x1) { paint(px, py); }
+            for px in (x + w).clamp(x0, x1)..x1 { paint(px, py); }
+        }
+    }
+}
+
 // ── Public rounded-rect helpers ────────────────────────────────────────
 
 /// Fill a rounded rectangle (filled body + AA quarter-circle corners).
