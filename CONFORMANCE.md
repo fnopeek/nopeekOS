@@ -25,13 +25,13 @@ the dev box (§10). testharness.js-based tests need the JS engine first.
 ### Current number (measured 2026-08-04, beak 0.3.6)
 
 ```
-3997 pass / 1605 fail / 184 inconclusive   (of 5786 vendored reftests)
-= 71.3 % of the conclusive 5602
+3998 pass / 1604 fail / 184 inconclusive   (of 5786 vendored reftests)
+= 71.4 % of the conclusive 5602
 ```
 
 Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → 3746 → 3863 → 3869 →
 3870 (0.3.0) → 3880 (0.3.2) → 3926 (0.3.3) → 3959 (0.3.4) → 3963 (0.3.5) →
-**3967** (0.3.6) → 3967 (0.3.11) → 3978 (0.3.12) → **3997** (0.3.13). The inconclusive count fell 254 → 184 over
+**3967** (0.3.6) → 3967 (0.3.11) → 3978 (0.3.12) → 3997 (0.3.13) → **3998** (0.3.14). The inconclusive count fell 254 → 184 over
 that span: references that used to render blank — because `:root` was dropped,
 because an `inline-block` had no box, or because an inline box painted no
 background — now paint, so 73 more tests actually measure something.
@@ -943,6 +943,36 @@ menu to pick from.
     flex` root — same group as the four `display: table` ones above) and
     `clip-border-area-on-body-not-propagated-to-root` (9.31 %, a
     `background-clip` value we do not implement).
+
+30. ✅ **The page is as tall as what it PAINTS (0.3.14).** A shipped
+    regression, reported from the device as "scrolling doesn't work any more",
+    and the fix is a net **+1** on the oracle as well.
+
+    Item 29 resolved a percentage `height` on the root against the viewport —
+    the ICB's height is definite, so it looked like a free correctness win. It
+    was not. `html { height: 100% }` is an everyday idiom, and it makes the root
+    box exactly one viewport tall; `Layout::height` was the root's border-box
+    bottom, so a 2176px page reported **600** and the shell had nothing to
+    scroll. Measured, not guessed: rendering 60 paragraphs with and without that
+    one rule showed 2176 against 600.
+
+    Two changes, and the second is the one that matters:
+    - `Layout::height` is now the maximum of the root box's bottom and the
+      bottom edge of every painted op. The scrollable extent is how far the
+      content reaches, not where a box ends — that holds for any box with a
+      definite height shorter than its content, not just the root.
+    - **The percentage-height special case is gone.** Measuring it out is what
+      settled it: it fixed neither of the two tests it was added for
+      (`009a`/`009b`), cost `abspos-containing-block-006`, and caused the
+      regression. Removing it is +2/−1. Percentage heights belong with general
+      percentage-height support, which this file already records as
+      measured-worse in isolation.
+
+    **The lesson is about the oracle's blind spot.** 5786 reftests render at a
+    fixed 800×600 and never read `Layout::height`, so this was invisible to the
+    number in both directions — it shipped green and it was fixed green. Page
+    height, scrolling and anything else the SHELL consumes needs its own unit
+    test; there is now `the_page_is_as_tall_as_what_it_paints`.
 
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the
