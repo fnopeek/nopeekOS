@@ -480,6 +480,19 @@ pub enum DrawOp {
     },
 }
 
+/// The bottom edge a draw op reaches, for sizing the scrollable page.
+fn op_bottom(op: &DrawOp) -> i32 {
+    match op {
+        // A text run's `y` is its top; `size` over-estimates the descent
+        // slightly, which is the safe direction for a scroll extent.
+        DrawOp::Text { y, size, .. } => y + ceil_i32(*size),
+        DrawOp::Rect { y, h, .. }
+        | DrawOp::RoundRect { y, h, .. }
+        | DrawOp::Image { y, h, .. }
+        | DrawOp::BgImage { y, h, .. } => y + h,
+    }
+}
+
 /// `border-radius` resolved to px against the border-box width. Percentages
 /// resolve per-axis in CSS; we draw circular corners, so the width is the one
 /// basis.
@@ -1245,14 +1258,13 @@ pub fn layout(
     // all meant nothing. Laying it out like any other block is what makes the
     // whole `abspos-containing-block-initial` family measurable, and it is
     // where the page inset now comes from: `<body>`'s UA margin.
-    // The root's containing block is the ICB, whose height IS definite — so a
-    // percentage height on it resolves, unlike one anywhere else in the flow
-    // (where the parent's content height does not exist yet).
-    if let Some(h) = root.height.px(viewport_h as f32) {
-        if matches!(root.height, Len::Pct(_) | Len::Calc { .. }) {
-            root.height = Len::Px(h);
-        }
-    }
+    // NOTE: 0.3.13 resolved a percentage `height` on the root against the
+    // viewport here — the ICB's height IS definite, so it looked right. It was
+    // measured OUT again in 0.3.14: it fixed none of the two tests it was
+    // added for, cost `abspos-containing-block-006`, and truncated every page
+    // that writes the everyday `html { height: 100% }` to one viewport, which
+    // stopped scrolling dead. Percentage heights belong with general
+    // percentage-height support, not as a special case for the root.
     let mut y;
     if root.display == Display::None {
         // `html { display: none }` — the root generates no box, so the document
@@ -1278,6 +1290,13 @@ pub fn layout(
     // A float can extend below the last in-flow line — grow the page to contain it.
     let float_bottom = ctx.floats.iter().map(|f| f.bottom).max().unwrap_or(0);
     y = y.max(float_bottom);
+    // The page's scrollable height is how far the PAINTED content reaches, not
+    // where the root box ends. `html { height: 100% }` is an everyday idiom and
+    // it makes the root box exactly one viewport tall — everything below it
+    // still scrolls in every browser. Taking the root's border-box bottom alone
+    // truncated such a page to the window and killed scrolling outright.
+    let painted_bottom = ctx.ops.iter().map(op_bottom).max().unwrap_or(0);
+    y = y.max(painted_bottom);
 
     // The body's background propagates to the whole canvas (a bare `<body
     // background>` fills the viewport, not just the body box).
@@ -6845,6 +6864,22 @@ fn dbg_wiki_shape() {
             _ => None,
         }).unwrap();
         assert!((190..=250).contains(&x), "container centered+padded → x≈220, got {x}");
+    }
+
+    #[test]
+    fn the_page_is_as_tall_as_what_it_paints() {
+        // `Layout::height` is the scrollable extent, and the shell scrolls by
+        // it — so a root box SHORTER than its content must not shorten the
+        // page. `html { height: 100% }` is an everyday idiom; taking the root's
+        // border-box bottom for the page height truncated such a page to one
+        // viewport and stopped scrolling outright (0.3.13 → fixed in 0.3.14).
+        let long: String = (0..60).map(|i| alloc::format!("<p>Zeile {i} mit etwas Text</p>")).collect();
+        let plain = lay(&alloc::format!("<body>{long}</body>"), 800).height;
+        assert!(plain > 2000, "60 paragraphs are a long page, got {plain}");
+        for css in ["html,body{height:100%}", "html{height:100%}", "body{height:50%}"] {
+            let h = lay(&alloc::format!("<html><head><style>{css}</style></head><body>{long}</body></html>"), 800).height;
+            assert!(h > 2000, "{css}: page must stay scrollable, got {h}");
+        }
     }
 
     #[test]
