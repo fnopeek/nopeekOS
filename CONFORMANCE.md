@@ -25,15 +25,26 @@ the dev box (§10). testharness.js-based tests need the JS engine first.
 ### Current number (measured 2026-08-04, beak 0.3.6)
 
 ```
-3967 pass / 1639 fail / 180 inconclusive   (of 5786 vendored reftests)
-= 70.8 % of the conclusive 5606
+3997 pass / 1605 fail / 184 inconclusive   (of 5786 vendored reftests)
+= 71.3 % of the conclusive 5602
 ```
 
 Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → 3746 → 3863 → 3869 →
-3870 (0.3.0) → 3880 (0.3.2) → 3926 (0.3.3) → 3959 (0.3.4) → 3963 (0.3.5) → **3967** (0.3.6). The inconclusive count fell 254 → 180 over that
-span: references that used to render blank — because `:root` was dropped,
+3870 (0.3.0) → 3880 (0.3.2) → 3926 (0.3.3) → 3959 (0.3.4) → 3963 (0.3.5) →
+**3967** (0.3.6) → 3967 (0.3.11) → 3978 (0.3.12) → **3997** (0.3.13). The inconclusive count fell 254 → 184 over
+that span: references that used to render blank — because `:root` was dropped,
 because an `inline-block` had no box, or because an inline box painted no
 background — now paint, so 73 more tests actually measure something.
+
+**0.3.7 through 0.3.11 moved the oracle by exactly zero** — re-measured
+2026-08-05, same 3967 / 1639 / 180. That is not a failure: every one of those
+five rounds fixed a real defect on a real page, reported from the device, and
+three of them were called out in this file as WPT-neutral when they landed.
+It is a reminder that **the two axes are separate threads** — the oracle
+measures spec coverage, the device measures whether a page looks right — and a
+session should know which one it is pulling. Chasing "CSS complete" is the
+oracle thread; chasing "this page is wrong" is not, and mixing them makes both
+feel slow.
 
 **0.3.2 in detail: +29 gained, −24 lost, and every loss is a named hole.**
 `border-style` with no explicit width (6), `block-in-inline` splitting (3),
@@ -88,11 +99,40 @@ reason — 19 of those tests had been green only because neither side of the
 reftest painted anything.
 
 Run it: `cargo test --release --manifest-path tools/wasm/beak-engine/Cargo.toml
---test wpt -- --nocapture` (~5 min). Redirect to a log and wait on it rather
-than watching a raw pipe — a piped run has been SIGTERM'd mid-way before.
-`WPT_FILTER=<substr>` narrows a run to iterate on one feature; `WPT_DUMP=<dir>`
-writes `<test>-test.bmp` + `<test>-ref.bmp` so a failing reftest can be *looked
-at* instead of guessed at.
+--test wpt -- --nocapture` — **35 s** on 12 cores.
+
+| Variable | Effect |
+|---|---|
+| `WPT_FILTER=<substr>` | run only matching tests, to iterate on one feature |
+| `WPT_DUMP=<dir>` | write `<test>-test.bmp` + `<test>-ref.bmp` so a failure can be *looked at* instead of guessed at |
+| `WPT_BLESS=1` | rewrite `tests/wpt-baseline.tsv` after a deliberate move |
+| `WPT_JOBS=<n>` | thread count (default: all cores) |
+| `WPT_DIR=<dir>` | measure a larger corpus without committing it |
+
+**The run was 4 m 50 s until 2026-08-05, and that was the tempo of the whole
+project** — every decision waits on this number, so a five-minute answer means
+guessing between measurements. Two things were wrong with it, both structural:
+it used one core of twelve, and it re-rendered each reference once per test
+when **228 tests share `ref-if-there-is-no-red.xht`** — 2605 of 5736 reference
+renders were duplicate work. Tests are now grouped by reference (rendered once
+per group, longest group handed out first) and the groups run on every core.
+Verified behaviour-neutral the only way that counts: all 5786 verdicts and
+every diff-% byte-identical to the serial run
+([[feedback-byte-identical-render-gate]]).
+
+Two things the run now does that were hand-work before:
+
+- **Baseline delta.** `tests/wpt-baseline.tsv` holds the committed verdict per
+  test; every run prints `+gained / −lost` **by name**. The total alone never
+  says which side moved — a correct feature routinely makes a *reference*
+  render for the first time and the honest score dips
+  ([[feedback-which-side-moved]]).
+- **Census.** The run ends with the biggest failing families (with their median
+  diff, so "20 tests" at 3 % reads differently from 20 tests at 17 %) and a
+  **near-miss** list: families with ≥4 failures where none exceeds 2 %, i.e. one
+  detail from green. That is exactly the query that found `attr()` (+33) by
+  hand ([[feedback-census-by-family-not-suite]]) — picking the next lever is
+  now a read, not a hunt.
 
 "Inconclusive" means the reference itself rendered blank, so the comparison
 says nothing about us either way. Those are excluded from the pass rate
@@ -170,17 +210,48 @@ excluded):
 Counted by FAMILY NAME (the test name with its trailing number stripped), not
 by suite — the biggest suite always looks like the biggest problem, and the
 family view is what surfaced the `attr()` lever
-([[feedback-census-by-family-not-suite]]).
+([[feedback-census-by-family-not-suite]]). **The run prints this itself now**,
+so the numbers below are a snapshot to read against, not something to re-derive
+by hand.
 
-Re-counted at 0.3.4 over the 1647 remaining failures, largest first:
-**`CSS2/bidi` 22 · `CSS2/margin-collapse` 21 · `css-grid/positioned-grid-items`
-20 · `CSS2/content` 18 (rest: 3 `counters()` styles, `open-quote`, 4× `\A` as a
-forced break, 5× `::before` on `html`/`head`) · `css-grid/orthogonal-positioned-
-grid-items` 17 · `css-sizing/contain-intrinsic-size` 15 ·
-`css-grid/column-align-items` 15 · `CSS2/abspos-containing-block-initial` 15**.
-The whole abspos clan (`abspos*`, `top-*`, `bottom-*`, `left-*`, `right-*`)
-is **102** tests and the largest coherent block left, but its diffs run
-8–97 %, so it is real layout work rather than a near-miss family.
+At 0.3.11, over the 1639 remaining failures, largest first:
+**`CSS2/bidi` 22 (med 12.3 %) · `CSS2/margin-collapse` 21 (2.8 %) ·
+`css-grid/positioned-grid-items` 20 (3.4 %) · `CSS2/content` 18 (1.1 %; rest: 3
+`counters()` styles, `open-quote`, 4× `\A` as a forced break, 5× `::before` on
+`html`/`head`) · `css-grid/orthogonal-positioned-grid-items` 17 (3.5 %) ·
+`CSS2/abspos-containing-block-initial` 15 (0.9 %) ·
+`css-grid/column-align-items` 15 (16.9 %) · `css-sizing/contain-intrinsic-size`
+15 (11.0 %)**. The median diff is half the information: 15 tests at 0.9 % and
+15 at 16.9 % are not the same size of job.
+
+**How far off the failures are — 500 of 1639 are within 2 %:**
+
+| diff | 0–1 % | 1–2 % | 2–5 % | 5–25 % | >25 % |
+|---|---:|---:|---:|---:|---:|
+| tests | 212 | 288 | 532 | 511 | 96 |
+
+The whole abspos clan (`abspos*`, `top-*`, `bottom-*`, `left-*`, `right-*`) is
+**102** tests and the largest coherent block left — but it splits by distance,
+and that is the useful cut: `abspos-containing-block-initial` (15, median
+0.9 %, all one root — `position: absolute` on `<html>`, whose containing block
+is the initial one) and `abspos` (14, median 0.78 %) are near misses, while
+`abspos-containing-block` (10, **median 96.8 %**) is real layout work. Take the
+near half, leave the far half.
+
+**Near misses — ≥4 failures in a family, none over 2 % (68 tests at 0.3.13):**
+`css-fonts/font-family-name` 18 (**not real** — needs the W3C test fonts and
+compares different strings; the run cannot know that, so read the list with
+judgement) · `CSS2/margin-right` 7 · `css-flexbox/flexbox-writing-mode` 7 ·
+`CSS2/margin-left` 6 · `CSS2/margin-right-applies-to` 5 ·
+`css-text/text-wrap-balance-float` 5 · `css-flexbox/flexbox-break-request-vert`
+4 · `css-grid/descendant-static-position` 4 · `css-grid/flow-tolerance-row` 4 ·
+`css-text/hyphenate-character` 4 · `css-text/white-space-pre-wrap-justify` 4.
+
+`CSS2/absolute-replaced-height` headed this list at 0.3.11 with 8 tests, all
+between 0.76 % and 0.82 %, and reading them is what produced item 28 — one
+spec rule (300 × 150) plus a 3 px house-style margin. That is the shape to look
+for here: a tight family whose members all sit just over the threshold is
+usually one rule, not eight bugs.
 
 The older per-suite table, kept for the shape of it:
 
@@ -261,6 +332,18 @@ content it follows in the document. Making it would need `z-index: auto` boxes
 to keep participating in the parent's ordering while positioned boxes hoist,
 which a single flat list with disjoint ranges cannot express — a real stacking
 tree is the fix, and it is a rewrite of `reorder_by_z`.
+
+**Since 0.3.12 this gap is measurable: 11 named tests** —
+`inline-replaced-height-004/005/007`, `inline-block-replaced-height-004/005/007`,
+`float-replaced-height-004/005/007`, `absolute-replaced-height-028/035`. Each
+puts an in-flow replaced box under an absolutely positioned one that must cover
+it; our geometry is pixel-exact in all 11 and only the order is wrong. The
+mechanism is narrower than the general problem: an inline run's ops are emitted
+when the LINE flushes, which is after an out-of-flow sibling encountered
+mid-block has already emitted its own. Whoever takes this: the trap is that a
+tracked op range is our stand-in for a stacking context, so hoisting a
+`position: relative` wrapper makes it swallow its children's ranges and their
+z-indexes stop ordering against each other (that cost −10 once already).
 
 **Tables:** a row with no cells is dropped in `collect_table_rows`, so it
 contributes no height — an empty `<tr>` used as a spacer collapses away.
@@ -774,6 +857,92 @@ menu to pick from.
       without that step. The tab underline states no `display` at all —
       `a::after { position: absolute; bottom: 0; width: 100%; height: 2px }` —
       and relies entirely on being blockified to have a box.
+
+28. ✅ **A replaced element we do not load still has a box (0.3.12).** +22 / −11,
+    and the eleven losses have one named root that is *not* this change.
+
+    `<iframe>`, `<video>`, `<canvas>`, `<embed>` and a fallback-less `<object>`
+    were ordinary empty elements: no width, no height, no box. CSS2.1 §10.3.2 /
+    §10.6.2 give a replaced element with no intrinsic size **300 × 150**, and
+    HTML maps the presentational `width`/`height` attributes onto it — which is
+    how every video embed states its size. `replaced_intrinsic()` is that rule;
+    the box then goes through the ordinary block model, so borders, background,
+    percentages, min/max and positioning all come for free. Four hooks: the
+    intrinsic measurement (else it is 0 wide as a flex/grid item or a
+    shrink-to-fit out-of-flow box), `width: auto` → intrinsic rather than
+    fill (§10.3.4), `height: auto` → intrinsic rather than the zero its
+    unrendered content reports, and the two inline paths, which hand it to the
+    line through `inline_block_box` exactly like an `inline-block`.
+
+    **`<object>` is the exception and WPT caught it**: when its resource cannot
+    be obtained the element represents its FALLBACK content and is not replaced
+    at all (HTML §4.8.7). Ours never can, so a fallback is precisely what a
+    browser shows — `flexbox_object` went 18.65 % off until an `<object>` with
+    renderable children stopped being a box.
+
+    **The `<p>` margin was the other half.** The family sat at 0.76 % with the
+    box in place, and the dump said the green reference box was **3 px** off.
+    Our UA sheet had `p { margin: 0.85em }` — house style; every browser's is
+    `1em`. Reftests bake the difference in as literal pixels (`margin-top:
+    112px` = `1in` + `1em`), so the two changes only pay off together: the
+    replaced box alone measured **−10**, with `1em` it is **+22**. It also
+    tightened every real page by 3 px per paragraph against what its author
+    designed for.
+
+    **The 11 losses are one root, and in all 11 our geometry is exactly right.**
+    `inline-replaced-height-*`, `inline-block-replaced-height-*`,
+    `float-replaced-height-*`, `absolute-replaced-height-028/035`: the red box
+    lands pixel-for-pixel where the green reference box is, and is painted OVER
+    it. They only passed before because the iframe painted nothing at all. The
+    cause is the flat display list: an inline run's ops are emitted when the
+    LINE flushes, which is after an absolutely positioned sibling encountered
+    mid-block has already emitted its own — while Appendix E step 8 puts a
+    positioned box above in-flow content. That is the stacking-tree gap this
+    file has recorded all along, and it now has **11 named tests** attached to
+    it instead of being unmeasurable.
+
+29. ✅ **The root element is a box, and the page inset is `<body>`'s margin
+    (0.3.13).** +46 / −27. Picked as `abspos-containing-block-initial` (15
+    tests, median 0.92 %) and the census was right that they share one root —
+    it was just deeper than the family name suggests.
+
+    All 15 put something on `<html>`: `position: absolute|fixed`, a width, a
+    height, a border, a margin. **`layout()` never laid the root out.** It
+    resolved `html`'s style (for `rem` and the cascade) and then started at
+    `<body>`'s CHILDREN, inside a hardcoded `PAD = 20` page gutter. So the root
+    had no box at all, and `<body>`'s own margin was equally meaningless — the
+    gutter was not something a page could set.
+
+    Three changes, each measured on its own:
+    - **The ICB is the viewport at the canvas origin** (§10.1), not the page's
+      content box. `left: 100px` with no positioned ancestor means 100px from
+      the window edge. Alone this measured **−11**, because the origin and the
+      page inset then disagreed — the honest signal that the inset was the real
+      problem.
+    - **`body { margin: 8px }` in the UA sheet, and `PAD` is gone.** The inset
+      is now a style a page can override, which is what every reftest writing
+      `body { margin: 0 }` has been asking for all along. Same class of bug as
+      item 28's `p { margin: 0.85em }` — house taste where the standard has a
+      value ([[feedback-ua-sheet-is-spec-not-taste]]).
+    - **The root lays out through `layout_box`**, or `layout_abs` when it is
+      positioned; `display: none` on it renders the document empty
+      (`root-box-003`); and a percentage `height` on it resolves, because the
+      ICB's height is definite where a parent's content height is not.
+
+    8 of the 15 pass. The 7 that do not split cleanly: four
+    (`004c/d`, `005b/d`) put `display: table` on the positioned root, two
+    (`009a/b`) need a percentage height on an out-of-flow box — which this file
+    already records as measured-worse in isolation — and `007` needs both.
+
+    **16 of the 27 losses are `css-fonts/font-family-name`, which cannot pass
+    either way:** they require the W3C test fonts to be installed and their test
+    and reference show *different strings* (`5678` vs `PASS`). They were under
+    the 0.5 % threshold by luck of where the line broke, and the wider content
+    box (784 rather than 760) moved the break. Of the rest, the ones worth a
+    look are `position-absolute/fixed-root-element-flex` (2.30 %, a `display:
+    flex` root — same group as the four `display: table` ones above) and
+    `clip-border-area-on-body-not-propagated-to-root` (9.31 %, a
+    `background-clip` value we do not implement).
 
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the

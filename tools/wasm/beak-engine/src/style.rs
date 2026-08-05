@@ -1519,8 +1519,20 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
             s.display = Display::None;
         }
 
+        // `<body>` is the block container that insets the page, and the inset
+        // is its UA MARGIN (HTML's rendering section says 8px) — not a fixed
+        // page padding. A reftest that writes `body { margin: 0 }` means it,
+        // and so does a page that lays itself edge to edge.
+        "body" => {
+            s.display = Display::Block;
+            s.margin_top = 8.0;
+            s.margin_bottom = 8.0;
+            s.margin_left = Len::Px(8.0);
+            s.margin_right = Len::Px(8.0);
+        }
+
         // Block containers.
-        "html" | "body" | "div" | "section" | "article" | "header" | "footer" | "main" | "nav"
+        "html" | "div" | "section" | "article" | "header" | "footer" | "main" | "nav"
         | "aside" | "figure" | "figcaption" | "form" | "address" | "details" | "summary"
         | "tbody" | "thead" | "tfoot" | "tr" | "fieldset" => {
             s.display = Display::Block;
@@ -1569,8 +1581,8 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
         }
         "p" => {
             s.display = Display::Block;
-            s.margin_top = em * 0.85;
-            s.margin_bottom = em * 0.85;
+            s.margin_top = em;
+            s.margin_bottom = em;
         }
 
         // Headings: font-size in em of the parent, bold, heading colour.
