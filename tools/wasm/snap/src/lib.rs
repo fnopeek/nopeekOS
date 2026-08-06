@@ -43,11 +43,41 @@ unsafe extern "C" {
     fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
     fn npk_fs_list(prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32;
     fn npk_home_dir(buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_ticks() -> i64;
     fn npk_log_serial(ptr: i32, len: i32);
 }
 
 fn log(msg: &str) {
     unsafe { npk_log_serial(msg.as_ptr() as i32, msg.len() as i32); }
+}
+
+fn now_ms() -> i64 { unsafe { npk_ticks() } }
+
+/// Log "<label>: <ms> ms". Permanent, not scaffolding: this runs under a
+/// WASM interpreter, so which phase a save spends its seconds in is the
+/// difference between fixing the slow thing and rewriting the fast one.
+/// Resolution is the 100 Hz timer, i.e. 10 ms steps.
+fn log_ms(label: &str, ms: i64) {
+    let mut b = String::new();
+    b.push_str("[snap] ");
+    b.push_str(label);
+    b.push_str(": ");
+    push_i64(&mut b, ms);
+    b.push_str(" ms");
+    log(&b);
+}
+
+fn push_i64(out: &mut String, mut v: i64) {
+    if v < 0 { out.push('-'); v = -v; }
+    let mut digits = [0u8; 20];
+    let mut n = 0;
+    loop {
+        digits[n] = b'0' + (v % 10) as u8;
+        v /= 10;
+        n += 1;
+        if v == 0 { break; }
+    }
+    while n > 0 { n -= 1; out.push(digits[n] as char); }
 }
 
 // ── Buffers ───────────────────────────────────────────────────────────
@@ -97,14 +127,19 @@ pub extern "C" fn _start() {
     let h = ((packed as u32) & 0xFFFF) as usize;
     if w == 0 || h == 0 { log("[snap] zero screen"); return; }
 
+    let t_start = now_ms();
+
     // Capture the composited screen as BGRA.
     let need = w * h * 4;
     let mut bgra: Vec<u8> = alloc::vec![0u8; need];
     let got = unsafe { npk_capture_screen(bgra.as_mut_ptr() as i32, need as i32) };
     if got as usize != need { log("[snap] capture failed"); return; }
+    let t_captured = now_ms();
+    log_ms("capture", t_captured - t_start);
 
     // Encode PNG (RGB, screenshots have no meaningful alpha).
     let png = encode_png_rgb(&bgra, w as u32, h as u32);
+    let t_encoded = now_ms();
 
     // Save under the printscreens folder (created on first write).
     let home = read_home_dir();
@@ -114,6 +149,10 @@ pub extern "C" fn _start() {
     let rc = unsafe {
         npk_store(path.as_ptr() as i32, path.len() as i32, png.as_ptr() as i32, png.len() as i32)
     };
+    let t_stored = now_ms();
+    log_ms("store", t_stored - t_encoded);
+    // The number that matters: button press → file on disk.
+    log_ms("=== capture -> saved", t_stored - t_start);
     if rc < 0 { log("[snap] save failed"); } else { log("[snap] saved screenshot"); }
 }
 
@@ -151,6 +190,7 @@ fn next_name(dir: &str) -> String {
 fn encode_png_rgb(bgra: &[u8], w: u32, h: u32) -> Vec<u8> {
     let wc = w as usize;
     let hc = h as usize;
+    let t0 = now_ms();
     // Raw scanlines: 1 filter byte (0 = None) + W*3 RGB bytes per row.
     let mut raw: Vec<u8> = Vec::with_capacity(hc * (1 + wc * 3));
     for y in 0..hc {
@@ -164,8 +204,13 @@ fn encode_png_rgb(bgra: &[u8], w: u32, h: u32) -> Vec<u8> {
             raw.push(bgra[p]);
         }
     }
+    let t_repack = now_ms();
+    log_ms("repack bgra->rgb", t_repack - t0);
+
     // zlib-wrapped deflate (header + deflate + adler32).
     let idat = miniz_oxide::deflate::compress_to_vec_zlib(&raw, 6);
+    let t_deflate = now_ms();
+    log_ms("deflate", t_deflate - t_repack);
 
     let mut out: Vec<u8> = Vec::with_capacity(idat.len() + 64);
     out.extend_from_slice(b"\x89PNG\r\n\x1a\n");
@@ -182,6 +227,9 @@ fn encode_png_rgb(bgra: &[u8], w: u32, h: u32) -> Vec<u8> {
     write_chunk(&mut out, b"IHDR", &ihdr);
     write_chunk(&mut out, b"IDAT", &idat);
     write_chunk(&mut out, b"IEND", &[]);
+    // CRC runs over every IDAT byte, so it scales with the image, not
+    // with the chunk count — worth its own number.
+    log_ms("chunks + crc32", now_ms() - t_deflate);
     out
 }
 
