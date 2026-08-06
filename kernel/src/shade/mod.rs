@@ -1692,5 +1692,6 @@ pub fn default_config() -> &'static [(&'static str, &'static str, &'static str)]
         ("shade.chrome_opacity", "", "Bar/dock panel opacity (0-255; empty = 235 dark / 205 light)"),
         ("shade.bar_opacity", "", "Top-bar opacity (0-255; empty = shade.chrome_opacity)"),
         ("shade.dock_opacity", "", "Dock opacity (0-255; empty = shade.chrome_opacity)"),
+        ("shade.flash_opacity", "", "Screenshot flash strength (0-255, 0 = off; empty = 80)"),
     ]
 }

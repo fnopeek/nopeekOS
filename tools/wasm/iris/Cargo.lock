@@ -31,7 +31,7 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
 name = "iris"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "miniz_oxide",
  "nopeek_widgets",
