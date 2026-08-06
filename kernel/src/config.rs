@@ -125,7 +125,6 @@ pub fn set(key: &str, value: &str) {
 }
 
 /// Remove a config value and persist.
-#[allow(dead_code)]
 pub fn unset(key: &str) -> bool {
     let removed = CONFIG.lock().remove(key);
     if removed { save(); }

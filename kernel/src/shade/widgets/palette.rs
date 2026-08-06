@@ -111,9 +111,21 @@ pub fn set_dock_window(id: Option<u32>) {
     DOCK_WINDOW.store(id.unwrap_or(0), Ordering::Relaxed);
 }
 
+/// Drop both per-panel overrides. Called when `shade.chrome_opacity` is
+/// set: the shared knob is the master, so setting it always moves both
+/// panels again — otherwise a value tried once on the bar would silently
+/// outrank every later shared setting, with no way back short of editing
+/// the config blob. Returns true if anything was actually cleared.
+pub fn clear_panel_opacity_overrides() -> bool {
+    let bar  = crate::config::unset("shade.bar_opacity");
+    let dock = crate::config::unset("shade.dock_opacity");
+    bar || dock
+}
+
 /// Opacity for one panel window: its own knob if set, else the shared
 /// `shade.chrome_opacity`, else the theme default. Lets the bar stay
 /// legible while the dock reads more like glass (or the other way round).
+/// Setting the shared knob clears these — see above.
 pub fn panel_opacity(window_id: u32) -> u32 {
     let key = if window_id != 0 && BAR_WINDOW.load(Ordering::Relaxed) == window_id {
         "shade.bar_opacity"
