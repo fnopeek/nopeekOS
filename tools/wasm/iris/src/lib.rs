@@ -191,18 +191,57 @@ fn alloc_reset(pos: usize) { unsafe { core::ptr::addr_of_mut!(HEAP_POS).write(po
 // each) buys 300 MB at 4K (33 MB each); the same mistake a per-stylesheet
 // cap made in beak. With a byte budget the depth adapts by itself.
 //
-// 320 MB buys the ±4 that was asked for at EVERY size: 9 pictures fit
-// even at 4K, ~38 at 1080p. It is a lot of memory for a viewer, and a
-// deliberate call — the module's linear memory is allocated and zeroed at
-// launch, so this is also a slightly slower start.
+// **And grown on demand, not reserved.** A `static` array would be part
+// of the module's linear memory and therefore allocated and zeroed at
+// launch — half a gigabyte for a folder holding three pictures. Instead
+// the arena is claimed with `memory.grow` as pictures actually arrive,
+// and only up to what this folder can use: nine images at the size the
+// first decode turned out to be. Three small pictures cost a few dozen
+// megabytes and never more.
+//
+// The growth is contiguous because we are the only caller of
+// `memory.grow` in this module — the bump allocator hands out slices of
+// a fixed array and never asks the runtime for more.
 //
 // The arena is a ring: allocations run forward, wrap when the tail is
 // too short, and evict whatever they land on. In sequential browsing
 // that means the pictures furthest behind you go first, which is exactly
 // the right eviction order and costs no compaction.
-const CACHE_BYTES: usize = 320 * 1024 * 1024;
-static mut CACHE: [u8; CACHE_BYTES] = [0; CACHE_BYTES];
+const CACHE_MAX: usize = 320 * 1024 * 1024;
+const WASM_PAGE: usize = 64 * 1024;
+
+static mut CACHE_PTR: *mut u8 = core::ptr::null_mut();
+static mut CACHE_CAP: usize = 0;
 static mut CACHE_POS: usize = 0;
+
+/// Claim linear memory until the arena holds at least `want` bytes (never
+/// past `CACHE_MAX`). Returns the capacity actually available.
+fn arena_reserve(want: usize) -> usize {
+    unsafe {
+        let cap = *(&raw const CACHE_CAP);
+        let want = want.min(CACHE_MAX);
+        if want <= cap { return cap; }
+        let pages = (want - cap).div_ceil(WASM_PAGE);
+        let prev = core::arch::wasm32::memory_grow(0, pages);
+        if prev == usize::MAX { return cap; }   // runtime refused; keep what we have
+        let fresh = (prev * WASM_PAGE) as *mut u8;
+        if cap == 0 {
+            *(&raw mut CACHE_PTR) = fresh;
+        } else if fresh != (*(&raw const CACHE_PTR)).add(cap) {
+            // Someone else claimed memory in between, so the arena is no
+            // longer one run. Nothing else in this module does that today;
+            // if it ever starts to, drop what we hold and re-base rather
+            // than address across the gap.
+            cache_clear();
+            *(&raw mut CACHE_PTR) = fresh;
+            *(&raw mut CACHE_CAP) = pages * WASM_PAGE;
+            return pages * WASM_PAGE;
+        }
+        let grown = cap + pages * WASM_PAGE;
+        *(&raw mut CACHE_CAP) = grown;
+        grown
+    }
+}
 
 #[derive(Clone, Copy)]
 struct CacheEntry { idx: usize, off: usize, len: usize, w: u32, h: u32 }
@@ -243,21 +282,29 @@ fn cache_clear() {
 
 fn cache_get(idx: usize) -> Option<(&'static [u8], u32, u32)> {
     unsafe {
+        let base = *(&raw const CACHE_PTR);
+        if base.is_null() { return None; }
         let entries = &*(&raw const ENTRIES);
         let e = entries.iter().flatten().find(|e| e.idx == idx)?;
-        let base = (&raw const CACHE) as *const u8;
         Some((core::slice::from_raw_parts(base.add(e.off), e.len), e.w, e.h))
     }
 }
 
-/// Store a decoded bitmap. Skips pictures too big to share the arena —
-/// one of those would evict everything else on every navigation.
-fn cache_put(idx: usize, bgra: &[u8], w: u32, h: u32) {
+/// Store a decoded bitmap, growing the arena if this folder can use the
+/// room. `wanted` is how many pictures are worth holding — the prefetch
+/// window, capped by how many the folder actually has, so a two-picture
+/// folder never claims space for nine.
+///
+/// Skips pictures too big to share the arena: one of those would evict
+/// everything else on every navigation.
+fn cache_put(idx: usize, bgra: &[u8], w: u32, h: u32, wanted: usize) {
     let len = bgra.len();
-    if len == 0 || len > CACHE_BYTES / 2 { return; }
+    if len == 0 || len > CACHE_MAX / 2 { return; }
+    let cap = arena_reserve(len.saturating_mul(wanted.max(1)));
+    if cap < len { return; }
     unsafe {
         let mut start = *(&raw const CACHE_POS);
-        if start + len > CACHE_BYTES { start = 0; }   // wrap; tail is wasted
+        if start + len > cap { start = 0; }   // wrap; tail is wasted
         let end = start + len;
         let entries = &mut *(&raw mut ENTRIES);
         // Anything the new bytes land on is gone.
@@ -265,9 +312,8 @@ fn cache_put(idx: usize, bgra: &[u8], w: u32, h: u32) {
             if let Some(e) = slot {
                 if e.off < end && start < e.off + e.len { *slot = None; }
             }
-
         }
-        let dst = (&raw mut CACHE) as *mut u8;
+        let dst = *(&raw const CACHE_PTR);
         core::ptr::copy_nonoverlapping(bgra.as_ptr(), dst.add(start), len);
         let entry = CacheEntry { idx, off: start, len, w, h };
         // Prefer a free slot; if the table is full the oldest region is
@@ -509,11 +555,18 @@ impl Iris {
                 if rc < 0 { self.failed = true; log("[iris] canvas_commit rejected"); }
                 else {
                     self.w = w; self.h = h;
-                    cache_put(self.idx, &bgra, w, h);
+                    cache_put(self.idx, &bgra, w, h, self.cache_slots());
                 }
             }
             None => { self.failed = true; log("[iris] decode failed"); }
         }
+    }
+
+    /// How many pictures are worth holding: the prefetch window in both
+    /// directions plus the current one, but never more than the folder
+    /// has. Three pictures in a folder must not claim room for nine.
+    fn cache_slots(&self) -> usize {
+        (2 * PREFETCH_DEPTH + 1).min(self.files.len().max(1))
     }
 
     /// The next neighbour worth decoding ahead, nearest first and in the
@@ -545,7 +598,7 @@ impl Iris {
         let Some(bytes) = fetch_file(&path) else { skip_mark(idx); return };
         let t = now_ms();
         if let Some((bgra, w, h)) = decode_png(bytes) {
-            cache_put(idx, &bgra, w, h);
+            cache_put(idx, &bgra, w, h, self.cache_slots());
             log_ms("prefetch", now_ms() - t);
         }
         // Did not land (undecodable, or larger than the budget allows) —
