@@ -1295,6 +1295,12 @@ pub fn intent_set(args: &str) {
         // incidental redraw. Struct-cached keys (opacity) still need a
         // compositor rebuild — unchanged.
         if key.starts_with("shade.") || key == "theme" || key == "accent" {
+            // Panel translucency is baked into the panel's pixel buffer at
+            // rasterize time, so a recomposite alone would show the old
+            // value until the app next commits (up to a minute for the
+            // bar). Re-rasterize the cached scenes first — same step the
+            // `theme` intent takes.
+            crate::shade::widgets::refresh_all_scenes();
             crate::shade::force_redraw();
         }
     } else {
