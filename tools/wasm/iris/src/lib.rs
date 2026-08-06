@@ -188,20 +188,19 @@ fn alloc_reset(pos: usize) { unsafe { core::ptr::addr_of_mut!(HEAP_POS).write(po
 // would otherwise pull it out from under us every event.
 //
 // **Budgeted in bytes, not in pictures.** A count that fits 1080p (8 MB
-// each) buys 300 MB at 4K (33 MB each) and blows the module apart; the
-// same mistake a per-stylesheet cap made in beak. With a byte budget the
-// depth adapts by itself: ~11 held at 1080p (the ±4 that was asked for,
-// with room to spare), ~2 at 4K.
+// each) buys 300 MB at 4K (33 MB each); the same mistake a per-stylesheet
+// cap made in beak. With a byte budget the depth adapts by itself.
 //
-// 96 MB, paid for out of the bump heap rather than added on top: the
-// heap dropped 256 → 160 MB, which still leaves double what a 4K decode
-// needs live at once. The module's footprint is unchanged.
+// 320 MB buys the ±4 that was asked for at EVERY size: 9 pictures fit
+// even at 4K, ~38 at 1080p. It is a lot of memory for a viewer, and a
+// deliberate call — the module's linear memory is allocated and zeroed at
+// launch, so this is also a slightly slower start.
 //
 // The arena is a ring: allocations run forward, wrap when the tail is
 // too short, and evict whatever they land on. In sequential browsing
 // that means the pictures furthest behind you go first, which is exactly
 // the right eviction order and costs no compaction.
-const CACHE_BYTES: usize = 96 * 1024 * 1024;
+const CACHE_BYTES: usize = 320 * 1024 * 1024;
 static mut CACHE: [u8; CACHE_BYTES] = [0; CACHE_BYTES];
 static mut CACHE_POS: usize = 0;
 
@@ -483,7 +482,21 @@ impl Iris {
         };
         let t_fetched = now_ms();
         log_ms("fetch", t_fetched - t_start);
-        match decode_png(bytes) {
+        // Show each band as it lands. The window is empty until the first
+        // one arrives, and that is roughly a twelfth of the decode — a
+        // tenth of a second instead of a second and a half of nothing.
+        let mut first_pixels: i64 = 0;
+        let progressive = |px: &[u8], w: u32, h: u32| {
+            unsafe {
+                let _ = npk_canvas_commit(CANVAS_ID, px.as_ptr() as i32,
+                    px.len() as i32, w as i32, h as i32);
+            }
+            if first_pixels == 0 {
+                first_pixels = now_ms();
+                log_ms("=== open -> first pixels", first_pixels - t_start);
+            }
+        };
+        match decode_png_cb(bytes, progressive) {
             Some((bgra, w, h)) => {
                 let t_decoded = now_ms();
                 let rc = unsafe {
@@ -1005,6 +1018,24 @@ fn split_path(path: &str) -> (&str, &str) {
 // ── PNG decoder (ported from wallpaper) ───────────────────────────────
 // 8-bit RGB/RGBA, non-interlaced. Returns (BGRA, width, height).
 fn decode_png(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+    decode_png_cb(data, |_, _, _| {})
+}
+
+/// Decode with progress. `on_rows` is handed the (still incomplete) BGRA
+/// buffer every time another band of scanlines is finished, so a viewer
+/// can put pixels on screen long before the picture is done.
+///
+/// Why bands and not a low-resolution preview: a PNG holds no smaller
+/// version of itself, and the pixels cannot be sampled — the whole file
+/// is ONE deflate stream, and every scanline's filter refers to the one
+/// above it. Row 500 is unreachable except through rows 0..499. What the
+/// format does give us is that the stream arrives in order, so the top of
+/// the picture is genuinely ready while the bottom is still compressed.
+/// We were simply throwing that away until the last byte arrived.
+fn decode_png_cb<F>(data: &[u8], mut on_rows: F) -> Option<(Vec<u8>, u32, u32)>
+where
+    F: FnMut(&[u8], u32, u32),
+{
     let t_enter = now_ms();
     if data.len() < 8 || &data[0..8] != b"\x89PNG\r\n\x1a\n" { return None; }
 
@@ -1048,27 +1079,81 @@ fn decode_png(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     if idat_data.len() < 6 { return None; }
     let t_parsed = now_ms();
     log_ms("png parse", t_parsed - t_enter);
-    let decompressed = match miniz_oxide::inflate::decompress_to_vec_zlib(&idat_data) {
-        Ok(d) => d,
-        Err(_) => match miniz_oxide::inflate::decompress_to_vec(&idat_data[2..]) {
-            Ok(d) => d,
-            Err(_) => return None,
-        },
-    };
-    let t_inflated = now_ms();
-    log_ms("inflate", t_inflated - t_parsed);
 
-    let expected = height as usize * (1 + stride);
-    if decompressed.len() < expected { return None; }
+    let row_bytes = 1 + stride;
+    let rows = height as usize;
+    let pixel_count = (width * height) as usize;
 
-    // Un-filter per ROW, not per byte. The filter type is constant for a
-    // whole scanline, so branching on it inside the inner loop paid for
-    // ~25 M matches plus three guarded neighbour loads at 4K — measured
-    // 1850 ms of a 3040 ms open. Specialising per row also turns the
-    // common case (filter 0, which is what snap writes) into one
-    // `copy_from_slice`, i.e. a wasm `memory.copy`.
-    let mut unfiltered = alloc::vec![0u8; height as usize * stride];
-    for y in 0..height as usize {
+    let mut decompressed = alloc::vec![0u8; rows * row_bytes];
+    let mut unfiltered = alloc::vec![0u8; rows * stride];
+    // Opaque black underneath, so the part that has not arrived yet reads
+    // as a neutral band rather than as transparent garbage.
+    let mut bgra = alloc::vec![0u8; pixel_count * 4];
+    for p in bgra.chunks_exact_mut(4) { p[3] = 255; }
+
+    use miniz_oxide::inflate::core::{decompress, inflate_flags, DecompressorOxide};
+    use miniz_oxide::inflate::TINFLStatus;
+
+    let mut state = DecompressorOxide::new();
+    let mut in_pos = 0usize;
+    let mut out_pos = 0usize;
+    let mut rows_done = 0usize;
+    let mut t_inflate: i64 = 0;
+    let mut t_rest: i64 = 0;
+
+    // Feed the compressed stream in slices so finished scanlines can be
+    // handed on while the rest is still packed. Twelve bands is a
+    // compromise: fine enough that the first pixels show up in about a
+    // tenth of the total time, coarse enough that the extra full-buffer
+    // uploads stay in the noise.
+    let bands = 12usize;
+    let chunk = (idat_data.len() / bands).max(64 * 1024);
+
+    loop {
+        let t0 = now_ms();
+        let end = (in_pos + chunk).min(idat_data.len());
+        let last_slice = end >= idat_data.len();
+        let mut flags = inflate_flags::TINFL_FLAG_PARSE_ZLIB_HEADER
+            | inflate_flags::TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF;
+        if !last_slice { flags |= inflate_flags::TINFL_FLAG_HAS_MORE_INPUT; }
+
+        let (status, used_in, used_out) =
+            decompress(&mut state, &idat_data[in_pos..end], &mut decompressed, out_pos, flags);
+        in_pos += used_in;
+        out_pos += used_out;
+        t_inflate += now_ms() - t0;
+
+        let t1 = now_ms();
+        let ready = (out_pos / row_bytes).min(rows);
+        if ready > rows_done {
+            unfilter_rows(&decompressed, &mut unfiltered, rows_done, ready, stride, channels);
+            rows_to_bgra(&unfiltered, &mut bgra, rows_done, ready, width as usize, channels);
+            rows_done = ready;
+            on_rows(&bgra, width, height);
+        }
+        t_rest += now_ms() - t1;
+
+        match status {
+            TINFLStatus::Done => break,
+            TINFLStatus::NeedsMoreInput | TINFLStatus::HasMoreOutput => {
+                if last_slice && used_in == 0 && used_out == 0 { break; }
+            }
+            _ => return None,
+        }
+        if rows_done >= rows { break; }
+    }
+
+    log_ms("inflate", t_inflate);
+    log_ms("unfilter + bgra", t_rest);
+    if rows_done < rows { return None; }
+    Some((bgra, width, height))
+}
+
+/// Un-filter scanlines `[from, to)` in place. Resumable: everything it
+/// needs about earlier rows is already in `unfiltered`.
+fn unfilter_rows(decompressed: &[u8], unfiltered: &mut [u8],
+                 from: usize, to: usize, stride: usize, channels: usize) {
+    for y in from..to {
         let src_offset = y * (1 + stride);
         let filter_type = decompressed[src_offset];
         let row_start = src_offset + 1;
@@ -1081,35 +1166,36 @@ fn decode_png(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
         let above: Option<&[u8]> = if y == 0 { None } else { Some(&done[dst - stride..]) };
         unfilter_row(filter_type, &mut rest[..stride], src, above, channels);
     }
-    let t_unfiltered = now_ms();
-    log_ms("unfilter", t_unfiltered - t_inflated);
+}
 
-    let pixel_count = (width * height) as usize;
-    let mut bgra = alloc::vec![0u8; pixel_count * 4];
-    // Paired `chunks_exact` instead of index arithmetic: the compiler
-    // knows each chunk's length, so the four writes per pixel lose their
-    // bounds checks — and the channel count leaves the inner loop.
-    // One 32-bit store per pixel instead of four byte stores. BGRA in
-    // memory is little-endian B | G<<8 | R<<16 | A<<24.
-    if channels == 4 {
-        for (d, s) in bgra.chunks_exact_mut(4).zip(unfiltered.chunks_exact(4)) {
-            let v = (s[2] as u32)
-                | ((s[1] as u32) << 8)
-                | ((s[0] as u32) << 16)
-                | ((s[3] as u32) << 24);
-            d.copy_from_slice(&v.to_le_bytes());
-        }
-    } else {
-        for (d, s) in bgra.chunks_exact_mut(4).zip(unfiltered.chunks_exact(3)) {
-            let v = (s[2] as u32)
-                | ((s[1] as u32) << 8)
-                | ((s[0] as u32) << 16)
-                | 0xFF00_0000;
-            d.copy_from_slice(&v.to_le_bytes());
+/// Convert scanlines `[from, to)` to BGRA. One 32-bit store per pixel
+/// instead of four byte stores; BGRA in memory is little-endian
+/// B | G<<8 | R<<16 | A<<24.
+fn rows_to_bgra(unfiltered: &[u8], bgra: &mut [u8],
+                from: usize, to: usize, width: usize, channels: usize) {
+    let src_stride = width * channels;
+    let dst_stride = width * 4;
+    for y in from..to {
+        let s = &unfiltered[y * src_stride..(y + 1) * src_stride];
+        let d = &mut bgra[y * dst_stride..(y + 1) * dst_stride];
+        if channels == 4 {
+            for (d, s) in d.chunks_exact_mut(4).zip(s.chunks_exact(4)) {
+                let v = (s[2] as u32)
+                    | ((s[1] as u32) << 8)
+                    | ((s[0] as u32) << 16)
+                    | ((s[3] as u32) << 24);
+                d.copy_from_slice(&v.to_le_bytes());
+            }
+        } else {
+            for (d, s) in d.chunks_exact_mut(4).zip(s.chunks_exact(3)) {
+                let v = (s[2] as u32)
+                    | ((s[1] as u32) << 8)
+                    | ((s[0] as u32) << 16)
+                    | 0xFF00_0000;
+                d.copy_from_slice(&v.to_le_bytes());
+            }
         }
     }
-    log_ms("rgb->bgra", now_ms() - t_unfiltered);
-    Some((bgra, width, height))
 }
 
 // ── PNG un-filtering, one row at a time ───────────────────────────────
