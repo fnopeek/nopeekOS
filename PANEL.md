@@ -99,8 +99,9 @@ clock-less regression if the app fails to load.
   never makes the bar taller.
 - `sys/config/dock` — pins (already shipped).
 - Panel translucency is compositor-side: `set shade.chrome_opacity <0-255>`
-  for both panels, `shade.bar_opacity` / `shade.dock_opacity` to override
-  one of them (empty = inherit the shared value).
+  is the master — it moves both panels and **clears** the per-panel keys.
+  `shade.bar_opacity` / `shade.dock_opacity` then override one of them
+  again (unset = inherit the shared value).
 - Placement/behaviour as config keys later: `bar.edge`, `bar.height`,
   `dock.autohide`, … (read by the apps / passed to `set_panel`).
 - Both apps are WASM → fully replaceable.

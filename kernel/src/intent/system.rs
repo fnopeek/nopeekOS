@@ -1159,8 +1159,9 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("[npk]");
             help_note("config: shade.gaps, shade.border, shade.rounding, shade.glow,");
             help_note("        shade.opacity, shade.mod, shade.light_tint");
-            help_note("panels: shade.chrome_opacity sets bar + dock (0-255),");
-            help_note("        shade.bar_opacity / shade.dock_opacity override one;");
+            help_note("panels: shade.chrome_opacity sets bar + dock (0-255) and");
+            help_note("        clears the per-panel keys; shade.bar_opacity /");
+            help_note("        shade.dock_opacity then override one of them again.");
             help_note("        bar text + icon px: 'font:' / 'icon:' in sys/config/bar");
         }
         "system" | "status" => {
@@ -1290,6 +1291,13 @@ pub fn intent_set(args: &str) {
         }
         crate::config::set(key, value);
         kprintln!("[npk] {} = {}", key, value);
+        // The shared panel knob is the master: it drops any per-panel
+        // override so it always moves bar AND dock.
+        if key == "shade.chrome_opacity"
+            && crate::shade::widgets::palette::clear_panel_opacity_overrides()
+        {
+            kprintln!("[npk] cleared shade.bar_opacity / shade.dock_opacity");
+        }
         // Live-apply rendering keys read fresh each frame (e.g.
         // shade.light_tint) so tuning shows at once, not on the next
         // incidental redraw. Struct-cached keys (opacity) still need a
