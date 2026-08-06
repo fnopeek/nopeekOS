@@ -2379,7 +2379,20 @@ impl Ctx<'_> {
         let width = match (st.width.px(avail), left, right) {
             (Some(wd), _, _) => wd,
             (None, Some(l), Some(r)) => (avail - l - r).max(0.0),
-            _ => self.intrinsic_width(el, st).0.min(avail), // shrink-to-fit
+            _ => {
+                // Shrink-to-fit (§10.3.7). `intrinsic_width` returns a CONTENT
+                // width, but what goes to `layout_box` is read as a containing
+                // block and has margin/padding/border taken off it AGAIN — so
+                // the box lost its own frame twice and its content overflowed
+                // by exactly that much. Floats and inline-blocks hand over the
+                // MARGIN-box width for this reason; this path did not.
+                let frame = st.margin_left.px(avail).unwrap_or(0.0)
+                    + st.margin_right.px(avail).unwrap_or(0.0)
+                    + st.pad_left
+                    + st.pad_right
+                    + st.border_x();
+                (self.intrinsic_width(el, st).0 + frame).min(avail)
+            }
         };
         // `min-width`/`max-width` apply to an out-of-flow box like any other
         // (CSS2.1 §10.4) — the height path already went through them, the width
@@ -3593,7 +3606,12 @@ impl Ctx<'_> {
             (iw as f32, iw as f32)
         } else {
             let (p, m) = self.intrinsic_width(el, &cs);
-            let frame = cs.pad_left + cs.pad_right + cs.border_x();
+            // A child contributes its MARGIN box: its margins have to fit
+            // inside the parent's shrink-to-fit width too (css-sizing-3 §4).
+            // A percentage margin resolves against a width that does not exist
+            // yet, so it is indefinite here and contributes nothing.
+            let margins = cs.margin_left.px(0.0).unwrap_or(0.0) + cs.margin_right.px(0.0).unwrap_or(0.0);
+            let frame = cs.pad_left + cs.pad_right + cs.border_x() + margins;
             // A definite `width` fixes the child's outer width, so that — not
             // what its content would prefer — is what it contributes to its
             // parent's shrink-to-fit (css-sizing-3 §4). A percentage stays
@@ -6467,6 +6485,29 @@ mod tests {
             box_of("width:100px;height:60px;border:10px solid #00f;box-sizing:border-box"),
             (100, 60)
         );
+    }
+
+    #[test]
+    fn a_shrink_to_fit_box_wraps_its_content_margin_box() {
+        let blue = Rgb(0, 0, 0xff);
+        // An out-of-flow box with `width: auto` shrink-wraps. Its own frame was
+        // subtracted twice (once here, once by the block path that reads the
+        // handed-over width as a containing block), and a child's margins never
+        // reached the measurement at all.
+        let outer = |inner: &str| {
+            let l = lay(
+                &format!(
+                    "<body style=\"margin:0\"><div style=\"border:10px solid #00f;position:absolute;top:0\">\
+                     <div style=\"{inner}\"></div></div></body>"
+                ),
+                800,
+            );
+            rects(&l).into_iter().find(|(.., c)| *c == blue).map(|(_, _, w, _, _)| w).unwrap()
+        };
+        // 200 content + 20 child border + 20 own border.
+        assert_eq!(outer("border:10px solid #f00;width:200px;height:60px"), 240);
+        // … + 50px margins on each side.
+        assert_eq!(outer("border:10px solid #f00;width:200px;height:60px;margin:0 50px"), 340);
     }
 
     #[test]
