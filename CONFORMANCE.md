@@ -22,16 +22,16 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-06, beak 0.3.16)
+### Current number (measured 2026-08-06, beak 0.4.1)
 
 ```
-4036 pass / 1567 fail / 183 inconclusive   (of 5786 vendored reftests)
-= 72.0 % of the conclusive 5603
+4056 pass / 1549 fail / 181 inconclusive   (of 5786 vendored reftests)
+= 72.4 % of the conclusive 5605
 ```
 
 Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → 3746 → 3863 → 3869 →
 3870 (0.3.0) → 3880 (0.3.2) → 3926 (0.3.3) → 3959 (0.3.4) → 3963 (0.3.5) →
-**3967** (0.3.6) → 3967 (0.3.11) → 3978 (0.3.12) → 3997 (0.3.13) → 3998 (0.3.14) → 4012 (0.3.15) → **4036** (0.3.16). The inconclusive count fell 254 → 184 over
+**3967** (0.3.6) → 3967 (0.3.11) → 3978 (0.3.12) → 3997 (0.3.13) → 3998 (0.3.14) → 4012 (0.3.15) → 4036 (0.3.16) → **4056** (0.4.1). The inconclusive count fell 254 → 184 over
 that span: references that used to render blank — because `:root` was dropped,
 because an `inline-block` had no box, or because an inline box painted no
 background — now paint, so 73 more tests actually measure something.
@@ -1100,6 +1100,50 @@ menu to pick from.
     **Still open on that page:** the `::before` strut MediaWiki centres its
     thumbnails with is `height: 100%`, and percentage heights are not
     supported — the tallest image still overhangs its frame by a few pixels.
+
+35. ✅ **Percentage heights, generally (0.4.1).** WPT **4036 → 4056**
+    (+32 / −12). This file recorded percentage heights as *measured worse* two
+    separate times — and both notes said the same thing about why: each attempt
+    taught ONE code path to resolve them, so the other paths still read the same
+    box as `auto` and the two answers disagreed. Built as one mechanism, it is
+    a clear net win.
+
+    - `Ctx` carries `cb_h`: the containing block's content height **when it is
+      definite**. `None` means the height depends on content, and then a
+      percentage computes to `auto` (CSS2.1 §10.5). That fallback is the whole
+      design — guessing a height for `html { height: 100% }` is what truncated
+      pages before.
+    - `resolve_pct_heights` resolves `height`/`min-`/`max-height` **once**, at
+      the entry to laying a box out. Everything downstream keeps matching on
+      `Len::Px` exactly as it did. It returns `None` when there is nothing to
+      resolve, so the common case does not copy a 1 kB `ComputedStyle`.
+    - Propagated by the block path (its own definite content height), by flex
+      and grid (the container's), and by the out-of-flow path (the positioned
+      ancestor's padding box, which `self.cb` already tracked).
+    - The root's containing block is the viewport, which IS definite.
+
+    **The precondition was already in place, and that is why this worked now.**
+    Item 30 made `Layout::height` the painted extent rather than the root box's
+    bottom. Without it, resolving `html { height: 100% }` makes the root exactly
+    one viewport tall and kills scrolling — the shipped 0.3.13 regression.
+    There is now a unit test for exactly that
+    (`html_height_100_percent_does_not_truncate_the_page`).
+
+    **One refinement measured worse and is parked WITH the number:** css-grid-2
+    §6.6 says a grid item's percentage height resolves against its GRID AREA,
+    and the row tracks are sized by the time items are placed, so it can be
+    answered exactly. It scores **4052 against 4056**. Guarding it on the
+    spanned rows being definite changed nothing, so it is not the circularity —
+    the `align-self: stretch` branch already hands an auto-height item the row's
+    height, and the coarser container-level answer agrees with more references.
+    Noted in the code at the site.
+
+    **Two of the twelve losses are 100 % and both are honest:**
+    `vh-support-margin` and `initial-background-color` were green because their
+    red box had `height: 100%` against an indefinite parent and so collapsed to
+    nothing. It now has a height and paints — exposing a *different* gap
+    (`margin: -100vw/-100vh` is not applied). Same shape as item 32's loss: a
+    correction removes the accident that was hiding a second defect.
 
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the
