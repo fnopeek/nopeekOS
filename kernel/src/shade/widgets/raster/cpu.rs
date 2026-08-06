@@ -166,7 +166,8 @@ impl Rasterizer for CpuRasterizer {
         }
     }
 
-    fn canvas_blit(&mut self, t: &mut RasterTarget, src: &[u8], sw: u32, sh: u32, rect: Rect) {
+    fn canvas_blit(&mut self, t: &mut RasterTarget, src: &[u8], sw: u32, sh: u32,
+                   rect: Rect, zoom_q88: u32) {
         if sw == 0 || sh == 0 || rect.w == 0 || rect.h == 0 { return; }
         if src.len() < (sw * sh * 4) as usize { return; }
         // Contain-fit: largest integer scale (numerator/denominator) that
@@ -175,7 +176,7 @@ impl Rasterizer for CpuRasterizer {
         let rw = rect.w;
         let rh = rect.h;
         // Choose dst size: scale so that dst_w<=rw and dst_h<=rh, max one.
-        let (dst_w, dst_h) = {
+        let (fit_w, fit_h) = {
             // fit by width vs by height, pick the one that fits both.
             let by_w_h = (sh * rw + sw / 2) / sw; // height if scaled to rw
             if by_w_h <= rh {
@@ -185,22 +186,38 @@ impl Rasterizer for CpuRasterizer {
                 (by_h_w.max(1), rh)
             }
         };
+        // Zoom multiplies the fitted size; the image stays centred and the
+        // rect crops it. 256 = plain fit.
+        let z = zoom_q88.max(1) as u64;
+        let dst_w = (((fit_w as u64 * z) / 256).max(1)).min(u32::MAX as u64) as u32;
+        let dst_h = (((fit_h as u64 * z) / 256).max(1)).min(u32::MAX as u64) as u32;
+
         let (rx, ry) = window_to_target(t, rect.x, rect.y);
-        let ox = rx + ((rw - dst_w) / 2) as i32;
-        let oy = ry + ((rh - dst_h) / 2) as i32;
+        // Signed: zoomed past the rect the origin goes negative.
+        let ox = rx + (rw as i32 - dst_w as i32) / 2;
+        let oy = ry + (rh as i32 - dst_h as i32) / 2;
+
+        // Walk only the pixels that can survive: the target clip, the
+        // canvas rect and the scaled image all intersected up front. The
+        // old form iterated the whole destination and skipped per pixel,
+        // which at high zoom is most of the work for nothing.
         let (clx0, cly0, clx1, cly1) = local_clip(t);
+        let x0 = clx0.max(rx).max(ox);
+        let y0 = cly0.max(ry).max(oy);
+        let x1 = clx1.min(rx + rw as i32).min(ox + dst_w as i32);
+        let y1 = cly1.min(ry + rh as i32).min(oy + dst_h as i32);
+        if x0 >= x1 || y0 >= y1 { return; }
+
         let stride = t.stride as usize;
-        for dy in 0..dst_h {
-            let py = oy + dy as i32;
-            if py < cly0 || py >= cly1 { continue; }
-            let sy = (dy * sh) / dst_h; // nearest-neighbour
-            let src_row = (sy as usize) * (sw as usize) * 4;
+        for py in y0..y1 {
+            let dy = (py - oy) as u32;
+            let sy = ((dy as u64 * sh as u64) / dst_h as u64) as u32; // nearest-neighbour
+            let src_row = (sy.min(sh - 1) as usize) * (sw as usize) * 4;
             let dst_row = (py as usize) * stride;
-            for dx in 0..dst_w {
-                let px = ox + dx as i32;
-                if px < clx0 || px >= clx1 { continue; }
-                let sx = (dx * sw) / dst_w;
-                let src_off = src_row + (sx as usize) * 4;
+            for px in x0..x1 {
+                let dx = (px - ox) as u32;
+                let sx = ((dx as u64 * sw as u64) / dst_w as u64) as u32;
+                let src_off = src_row + (sx.min(sw - 1) as usize) * 4;
                 let b = src[src_off]     as u32;
                 let g = src[src_off + 1] as u32;
                 let r = src[src_off + 2] as u32;

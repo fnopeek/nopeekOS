@@ -792,8 +792,16 @@ fn paint_node_eff(
             // Record the actual rect so the app can query it (npk_canvas_rect)
             // and paint 1:1 / map click coordinates.
             super::canvas::record_rect(wid, cid, rect.x, rect.y, rect.w, rect.h);
+            // `Modifier::Scale` zooms the blit — the rect and the stored
+            // bitmap are untouched, so an app can zoom without re-uploading
+            // (or even re-decoding) a single pixel. Same Q8.8 meaning as on
+            // an Icon: 256 = 1.0×, here relative to the contain-fit size.
+            let mut zoom: u32 = 256;
+            for m in eff {
+                if let Modifier::Scale(v) = m { zoom = *v as u32; }
+            }
             let drawn = super::canvas::with_bitmap(wid, cid, |px, w, h| {
-                rast.canvas_blit(target, px, w, h, rect);
+                rast.canvas_blit(target, px, w, h, rect, zoom);
             }).is_some();
             if !drawn {
                 rast.rect(target, rect, Fill::Solid(Token::SurfaceMuted));

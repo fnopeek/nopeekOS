@@ -756,7 +756,11 @@ pub trait Rasterizer: Send + Sync {
     /// Blit a BGRA32 bitmap (`sw`×`sh`) contain-fit into `rect` (window
     /// coordinates): scaled to fit while preserving aspect, centred,
     /// no background fill outside the fitted image. Default no-op.
-    fn canvas_blit(&mut self, _t: &mut RasterTarget, _src: &[u8], _sw: u32, _sh: u32, _rect: Rect) {}
+    /// Blit app-supplied BGRA pixels into `rect`, contain-fit and centred.
+    /// `zoom_q88` scales that fitted size (256 = 1.0× = plain fit, larger
+    /// crops to the rect); it comes from `Modifier::Scale` on the Canvas.
+    fn canvas_blit(&mut self, _t: &mut RasterTarget, _src: &[u8], _sw: u32, _sh: u32,
+                   _rect: Rect, _zoom_q88: u32) {}
 
     // ── Reserved (v2+, default no-op on CPU backend) ──────────────────
 

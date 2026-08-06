@@ -1163,6 +1163,7 @@ pub fn intent_help_topic(topic: &str) {
             help_note("        clears the per-panel keys; shade.bar_opacity /");
             help_note("        shade.dock_opacity then override one of them again.");
             help_note("        bar text + icon px: 'font:' / 'icon:' in sys/config/bar");
+            help_note("        shade.flash_opacity: screenshot blink (0-255, 0 = off)");
         }
         "system" | "status" => {
             help_head("system", "");

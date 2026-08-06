@@ -2785,12 +2785,23 @@ impl Compositor {
     // on screen, which is the expensive operation at 4K.
 
     /// Ticks (100 Hz) the flash lasts.
-    const FLASH_TICKS: u64 = 15;
-    /// Opacity the flash starts at.
-    const FLASH_ALPHA: u32 = 210;
+    const FLASH_TICKS: u64 = 12;
+    /// Opacity the flash starts at. A wash over the WHOLE screen reads far
+    /// stronger than the same value in a small panel — 210 was blinding.
+    /// `set shade.flash_opacity <0-255>` overrides it; 0 turns it off.
+    const FLASH_ALPHA: u32 = 80;
 
-    /// Start (or restart) the shutter blink.
+    fn flash_peak() -> u32 {
+        crate::config::get("shade.flash_opacity")
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .map(|v| v.min(255))
+            .unwrap_or(Self::FLASH_ALPHA)
+    }
+
+    /// Start (or restart) the shutter blink. Turned off entirely at
+    /// opacity 0, so the capture costs no extra frames at all.
     pub fn start_flash(&mut self) {
+        if Self::flash_peak() == 0 { return; }
         self.flash = Some(crate::interrupts::ticks());
         self.needs_full_redraw = true;
     }
@@ -2815,9 +2826,9 @@ impl Compositor {
         let elapsed = crate::interrupts::ticks().saturating_sub(start);
         if elapsed >= Self::FLASH_TICKS { return 0; }
         let remaining = Self::FLASH_TICKS - elapsed;      // 1..=FLASH_TICKS
-        // Quadratic falloff: full brightness for the first frames, then
-        // a quick drain.
-        let a = Self::FLASH_ALPHA as u64 * remaining * remaining
+        // Quadratic falloff: brightest on the first frame, then a quick
+        // drain — a blink, not a fade.
+        let a = Self::flash_peak() as u64 * remaining * remaining
             / (Self::FLASH_TICKS * Self::FLASH_TICKS);
         a as u32
     }
