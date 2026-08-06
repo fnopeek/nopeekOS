@@ -1223,6 +1223,46 @@ menu to pick from.
     not toggle its control either. Not covered: `<fieldset disabled>` disabling
     its descendants.
 
+38. ✅ **`:has()` (0.4.4).** WPT unchanged at 4064 — the oracle barely uses it;
+    the case for it is the real web (132 occurrences in GitHub's CSS, 92 in
+    SRF's, 13 on Wikipedia). 178 unit tests.
+
+    **The scope is measured, not guessed.** Extracting every `:has()` argument
+    from the CSS four real pages load gives 243 of them, and **223 (92 %) are
+    exactly one leading combinator plus one compound**:
+
+    | argument shape | count |
+    |---|---:|
+    | `:has(.x)` — descendant | 178 |
+    | `:has(+ .x)` | 20 |
+    | `:has(> .x)` | 18 |
+    | `:has(~ .x)` | 7 |
+    | multi-part / nested | 17 |
+    | (comma lists, across the above) | 8 |
+
+    So that is what is implemented, plus comma lists (an OR). Anything more
+    complex — `:has(> a > span)` — still drops its selector, exactly as an
+    unknown pseudo-class did before, so nothing regresses.
+
+    Descendant and child only need the subject's own subtree. The **sibling**
+    forms need elements that come AFTER the subject, so `SibCtx` now carries
+    the parent — the same trick item 37 used for `:nth-last-of-type`, and again
+    only possible because the matcher borrows live elements.
+
+    **Cost, measured by A/B on the heaviest page available** (GitHub, 4.4 MiB
+    of CSS): 160 ms without, 173 ms with — **~8 %**. That is the payoff of
+    evaluating `:has()` LAST in `Compound::matches`, after tag/id/class/attr:
+    `.foo:has(.bar)` walks a subtree only for elements that are already `.foo`.
+
+    Specificity follows Selectors 4 §17 — the most specific argument counts,
+    as with `:is()`. `:empty`/`:checked`/`:disabled` were folded into the
+    class-level count at the same time; they had been contributing nothing.
+
+    **Known limits:** a structural pseudo-class INSIDE `:has()` has no sibling
+    context and fails; a sibling `:has()` on an ancestor compound
+    (`.a:has(+ .b) .c`) has no parent on the path and fails. Both are the same
+    shape as the existing ancestor-context shortcut.
+
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the
 cursor), `user-select`/`touch-action`/`overflow-anchor`/`scroll-margin`
