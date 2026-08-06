@@ -19,10 +19,14 @@
 
 extern crate alloc;
 
+use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use nopeek_widgets::app_meta::IconRef;
+use nopeek_widgets::i18n;
+use nopeek_widgets::prefab;
+use nopeek_widgets::style::Spacing;
 use nopeek_widgets::*;
 
 #[unsafe(link_section = ".npk.app_meta")]
@@ -48,12 +52,42 @@ unsafe extern "C" {
     fn npk_launch_arg(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_canvas_commit(canvas_id: i32, ptr: i32, len: i32, w: i32, h: i32) -> i32;
     fn npk_close_widget() -> i32;
+    fn npk_ticks() -> i64;
     fn npk_log_serial(ptr: i32, len: i32);
     fn npk_sleep(ms: i32) -> i32;
 }
 
 fn log(msg: &str) {
     unsafe { npk_log_serial(msg.as_ptr() as i32, msg.len() as i32); }
+}
+
+fn now_ms() -> i64 { unsafe { npk_ticks() } }
+
+/// Log "<label>: <ms> ms". Permanent, not scaffolding: the decode runs
+/// under a WASM interpreter, so knowing whether the seconds go into
+/// inflate, un-filtering or the colour swap is the difference between
+/// fixing the slow thing and rewriting the fast one. 10 ms resolution.
+fn log_ms(label: &str, ms: i64) {
+    let mut b = String::new();
+    b.push_str("[iris] ");
+    b.push_str(label);
+    b.push_str(": ");
+    push_i64(&mut b, ms);
+    b.push_str(" ms");
+    log(&b);
+}
+
+fn push_i64(out: &mut String, mut v: i64) {
+    if v < 0 { out.push('-'); v = -v; }
+    let mut digits = [0u8; 20];
+    let mut n = 0;
+    loop {
+        digits[n] = b'0' + (v % 10) as u8;
+        v /= 10;
+        n += 1;
+        if v == 0 { break; }
+    }
+    while n > 0 { n -= 1; out.push(digits[n] as char); }
 }
 
 fn commit(bytes: &[u8]) -> i32 {
@@ -144,6 +178,65 @@ fn panic(_: &core::panic::PanicInfo) -> ! { log("[iris] panic!"); loop {} }
 fn alloc_mark() -> usize { unsafe { core::ptr::addr_of!(HEAP_POS).read() } }
 fn alloc_reset(pos: usize) { unsafe { core::ptr::addr_of_mut!(HEAP_POS).write(pos); } }
 
+// ── Strings ───────────────────────────────────────────────────────────
+struct Strings {
+    menu_file:   &'static str,
+    menu_view:   &'static str,
+    menu_help:   &'static str,
+    open:        &'static str,
+    close:       &'static str,
+    next:        &'static str,
+    previous:    &'static str,
+    about:       &'static str,
+    no_images:   &'static str,
+    no_image:    &'static str,
+    unsupported: &'static str,
+}
+
+const EN: Strings = Strings {
+    menu_file: "File", menu_view: "View", menu_help: "Help",
+    open: "Open…", close: "Close",
+    next: "Next", previous: "Previous",
+    about: "About Iris",
+    no_images: "No images in this folder",
+    no_image: "No image",
+    unsupported: "Unsupported format",
+};
+
+const DE: Strings = Strings {
+    menu_file: "Datei", menu_view: "Ansicht", menu_help: "Hilfe",
+    open: "Öffnen…", close: "Schließen",
+    next: "Weiter", previous: "Zurück",
+    about: "Über Iris",
+    no_images: "Keine Bilder in diesem Ordner",
+    no_image: "Kein Bild",
+    unsupported: "Format nicht unterstützt",
+};
+
+fn s() -> &'static Strings {
+    match i18n::lang() { i18n::Lang::De => &DE, _ => &EN }
+}
+
+// ── Actions / anchors ─────────────────────────────────────────────────
+const ACT_MENU_FILE:    u32 = 1;
+const ACT_MENU_VIEW:    u32 = 2;
+const ACT_MENU_HELP:    u32 = 3;
+const ACT_MENU_DISMISS: u32 = 4;
+const ACT_FILE_OPEN:    u32 = 5;
+const ACT_FILE_CLOSE:   u32 = 6;
+const ACT_NEXT:         u32 = 7;
+const ACT_PREV:         u32 = 8;
+const ACT_HELP_ABOUT:   u32 = 9;
+/// Picking a file from the Open list: base + index.
+const ACT_OPEN_FILE_BASE: u32 = 1000;
+
+const NODE_MENU_FILE: u32 = 100;
+const NODE_MENU_VIEW: u32 = 101;
+const NODE_MENU_HELP: u32 = 102;
+
+#[derive(Clone, Copy, PartialEq)]
+enum OpenMenu { File, View, Help }
+
 // ── State ─────────────────────────────────────────────────────────────
 struct Iris {
     dir:    String,        // folder being browsed (npkFS path, no trailing /)
@@ -152,6 +245,9 @@ struct Iris {
     w:      u32,           // current image dims (0 = none / failed)
     h:      u32,
     failed: bool,          // decode failed for the current file
+    // Chrome state. Copy-only, so it may be mutated after the alloc mark.
+    menu:   Option<OpenMenu>,
+    picking: bool,         // File → Open… list is showing
 }
 
 impl Iris {
@@ -159,6 +255,7 @@ impl Iris {
         let mut iris = Iris {
             dir: String::new(), files: Vec::new(), idx: 0,
             w: 0, h: 0, failed: false,
+            menu: None, picking: false,
         };
         // Launched to open a specific file?
         let mut argbuf = [0u8; 512];
@@ -202,16 +299,23 @@ impl Iris {
     fn load(&mut self) {
         self.w = 0; self.h = 0; self.failed = false;
         let path = match self.full_path() { Some(p) => p, None => return };
+        let t_start = now_ms();
         let bytes = match fetch_file(&path) {
             Some(b) => b,
             None => { self.failed = true; log("[iris] fetch failed"); return; }
         };
+        let t_fetched = now_ms();
+        log_ms("fetch", t_fetched - t_start);
         match decode_png(bytes) {
             Some((bgra, w, h)) => {
+                let t_decoded = now_ms();
                 let rc = unsafe {
                     npk_canvas_commit(CANVAS_ID, bgra.as_ptr() as i32,
                         bgra.len() as i32, w as i32, h as i32)
                 };
+                log_ms("canvas commit", now_ms() - t_decoded);
+                // The number that matters: click → pixels on screen.
+                log_ms("=== open -> displayed", now_ms() - t_start);
                 if rc < 0 { self.failed = true; log("[iris] canvas_commit rejected"); }
                 else { self.w = w; self.h = h; }
             }
@@ -233,11 +337,23 @@ enum Outcome { Idle, Render, Reload, Exit }
 
 fn handle(iris: &mut Iris, ev: Event, payload: &str) -> Outcome {
     match ev {
-        Event::Key(KeyCode::Escape) => Outcome::Exit,
+        // Escape closes an open menu first, the window only when none is.
+        Event::Key(KeyCode::Escape) => {
+            if iris.menu.is_some() || iris.picking {
+                iris.menu = None; iris.picking = false; Outcome::Render
+            } else { Outcome::Exit }
+        }
         Event::Key(KeyCode::Right) | Event::Key(KeyCode::Down) => { iris.next(); Outcome::Reload }
         Event::Key(KeyCode::Left)  | Event::Key(KeyCode::Up)   => { iris.prev(); Outcome::Reload }
-        // Left-click = next, right-click = previous.
-        Event::MouseButton { button: MouseButton::Left,  down: true, .. } => { iris.next(); Outcome::Reload }
+        Event::Action(ActionId(id)) => handle_action(iris, id),
+        // Click on the image itself: left = next, right = previous. The
+        // menu bar and toolbar deliver Action instead, so those clicks
+        // never reach here.
+        Event::MouseButton { button: MouseButton::Left,  down: true, .. } => {
+            if iris.menu.is_some() || iris.picking {
+                iris.menu = None; iris.picking = false; Outcome::Render
+            } else { iris.next(); Outcome::Reload }
+        }
         Event::MouseButton { button: MouseButton::Right, down: true, .. } => { iris.prev(); Outcome::Reload }
         // Another image opened while running (loft / singleton routing).
         Event::Open(_) => { iris.point_at(payload); Outcome::Reload }
@@ -245,56 +361,196 @@ fn handle(iris: &mut Iris, ev: Event, payload: &str) -> Outcome {
     }
 }
 
+fn handle_action(iris: &mut Iris, id: u32) -> Outcome {
+    // Picking a file out of the Open list.
+    if id >= ACT_OPEN_FILE_BASE {
+        let i = (id - ACT_OPEN_FILE_BASE) as usize;
+        iris.picking = false;
+        if i < iris.files.len() { iris.idx = i; return Outcome::Reload; }
+        return Outcome::Render;
+    }
+    match id {
+        // A menu label toggles its own dropdown and closes any other.
+        ACT_MENU_FILE => { iris.picking = false; iris.menu = toggle(iris.menu, OpenMenu::File); Outcome::Render }
+        ACT_MENU_VIEW => { iris.picking = false; iris.menu = toggle(iris.menu, OpenMenu::View); Outcome::Render }
+        ACT_MENU_HELP => { iris.picking = false; iris.menu = toggle(iris.menu, OpenMenu::Help); Outcome::Render }
+        ACT_MENU_DISMISS => { iris.menu = None; iris.picking = false; Outcome::Render }
+        ACT_FILE_OPEN => { iris.menu = None; iris.refresh(); iris.picking = true; Outcome::Render }
+        ACT_FILE_CLOSE => Outcome::Exit,
+        ACT_NEXT => { iris.menu = None; iris.next(); Outcome::Reload }
+        ACT_PREV => { iris.menu = None; iris.prev(); Outcome::Reload }
+        ACT_HELP_ABOUT => { iris.menu = None; log("[iris] image viewer"); Outcome::Render }
+        _ => Outcome::Idle,
+    }
+}
+
+fn toggle(cur: Option<OpenMenu>, want: OpenMenu) -> Option<OpenMenu> {
+    if cur == Some(want) { None } else { Some(want) }
+}
+
 // ── Scene ─────────────────────────────────────────────────────────────
-fn render(iris: &Iris) -> Widget {
-    // Title derived from the current file (files[] lives below the alloc
-    // mark, so it survives alloc_reset — unlike a per-load heap String).
-    let title = iris.files.get(iris.idx).cloned().unwrap_or_else(|| "Kein Bild".to_string());
-    let meta = if iris.files.is_empty() {
-        "—".to_string()
-    } else if iris.failed {
-        alloc::format!("{}/{} · Format nicht unterstützt", iris.idx + 1, iris.files.len())
+//
+// Same three bands as loft / spell / beak: menu bar · toolbar · body ·
+// footer, all built from prefabs so the chrome tracks the design system
+// instead of drifting on its own hardcoded paddings.
+
+/// Toolbar chrome sizing — beak's `toolbar_button` (UI_REFRESH.md §5).
+const NAV_BTN: u16 = 28;
+const NAV_BTN_RADIUS: u8 = 7;
+
+/// Navigation button: bare at rest, `SurfaceHover` under the cursor,
+/// accent tint while pressed. Disabled-looking (faint, no handler) when
+/// there is nowhere to go.
+fn nav_button(icon: IconId, action: u32, enabled: bool) -> Widget {
+    let mut mods: Vec<Modifier> = alloc::vec![
+        Modifier::MinWidth(NAV_BTN),
+        Modifier::MinHeight(NAV_BTN),
+        Modifier::Rounded(NAV_BTN_RADIUS),
+    ];
+    if enabled {
+        mods.push(Modifier::OnClick(ActionId(action)));
+        mods.push(Modifier::Hover(alloc::vec![
+            Modifier::Background(Token::SurfaceHover),
+            Modifier::Rounded(NAV_BTN_RADIUS),
+        ]));
+        mods.push(Modifier::Active(alloc::vec![
+            Modifier::Background(Token::AccentMuted),
+            Modifier::Tint(Token::Accent),
+            Modifier::Rounded(NAV_BTN_RADIUS),
+        ]));
     } else {
-        alloc::format!("{}/{} · {}×{}", iris.idx + 1, iris.files.len(), iris.w, iris.h)
-    };
+        mods.push(Modifier::Tint(Token::OnSurfaceFaint));
+    }
+    prefab::center_box(Widget::Icon { id: icon, size: 16, modifiers: Vec::new() }, mods)
+}
 
-    let toolbar = Widget::Row {
-        spacing: 4,
-        align: Align::Center,
-        modifiers: alloc::vec![
-            Modifier::Background(Token::SurfaceElevated),
-            Modifier::Padding(8),
+fn render_menu_bar() -> Widget {
+    prefab::menu_bar_with_icon(
+        IconId::Image,
+        &[
+            (s().menu_file.to_string(), ActionId(ACT_MENU_FILE)),
+            (s().menu_view.to_string(), ActionId(ACT_MENU_VIEW)),
+            (s().menu_help.to_string(), ActionId(ACT_MENU_HELP)),
         ],
-        children: alloc::vec![
-            Widget::Icon { id: IconId::Image, size: 18, modifiers: alloc::vec![Modifier::Tint(Token::Accent)] },
-            Widget::Text { content: title, style: TextStyle::Body, modifiers: alloc::vec![Modifier::Padding(6)] },
-            Widget::Spacer { flex: 1 },
-            Widget::Text { content: meta, style: TextStyle::Muted, modifiers: Vec::new() },
-        ],
-    };
+        &[NodeId(NODE_MENU_FILE), NodeId(NODE_MENU_VIEW), NodeId(NODE_MENU_HELP)],
+    )
+}
 
+fn render_toolbar(iris: &Iris) -> Widget {
+    let many = iris.files.len() > 1;
+    let title = iris.files.get(iris.idx).cloned()
+        .unwrap_or_else(|| s().no_image.to_string());
+    prefab::toolbar(alloc::vec![
+        nav_button(IconId::ArrowLeft, ACT_PREV, many),
+        nav_button(IconId::ArrowRight, ACT_NEXT, many),
+        Widget::Text {
+            content: title,
+            style: TextStyle::Body,
+            modifiers: alloc::vec![Modifier::Flex(1)],
+        },
+        prefab::text_badge(if iris.files.is_empty() {
+            "0/0".to_string()
+        } else {
+            alloc::format!("{}/{}", iris.idx + 1, iris.files.len())
+        }),
+    ])
+}
+
+/// Footer: full npkFS path left, dimensions (or the failure reason) right
+/// — loft's `prefab::footer` split.
+fn render_footer(iris: &Iris) -> Widget {
+    let path = iris.full_path().unwrap_or_default();
+    let right = if iris.files.is_empty() {
+        s().no_images.to_string()
+    } else if iris.failed {
+        s().unsupported.to_string()
+    } else {
+        alloc::format!("{}×{}", iris.w, iris.h)
+    };
+    prefab::footer(&path, &right)
+}
+
+fn render_dropdown(iris: &Iris, kind: OpenMenu) -> (u32, Widget) {
+    match kind {
+        OpenMenu::File => (
+            NODE_MENU_FILE,
+            prefab::popover_menu(&[
+                (s().open.to_string(), ActionId(ACT_FILE_OPEN)),
+                (s().close.to_string(), ActionId(ACT_FILE_CLOSE)),
+            ], None),
+        ),
+        OpenMenu::View => (
+            NODE_MENU_VIEW,
+            prefab::popover_menu(&[
+                (s().next.to_string(), ActionId(ACT_NEXT)),
+                (s().previous.to_string(), ActionId(ACT_PREV)),
+            ], None),
+        ),
+        OpenMenu::Help => (
+            NODE_MENU_HELP,
+            prefab::popover_menu(&[
+                (s().about.to_string(), ActionId(ACT_HELP_ABOUT)),
+            ], None),
+        ),
+    }
+}
+
+/// File → Open…: every image in the folder, current one check-marked.
+fn render_open_list(iris: &Iris) -> Widget {
+    let content = if iris.files.is_empty() {
+        prefab::popover_menu(&[
+            (s().no_images.to_string(), ActionId(ACT_MENU_DISMISS)),
+        ], None)
+    } else {
+        let items: Vec<(String, ActionId)> = iris.files.iter().enumerate()
+            .map(|(i, f)| (f.clone(), ActionId(ACT_OPEN_FILE_BASE + i as u32)))
+            .collect();
+        prefab::popover_menu(&items, Some(iris.idx))
+    };
+    Widget::Popover {
+        anchor:     NodeId(NODE_MENU_FILE),
+        child:      Box::new(content),
+        on_dismiss: ActionId(ACT_MENU_DISMISS),
+        modifiers:  Vec::new(),
+    }
+}
+
+fn render(iris: &Iris) -> Widget {
     let body = Widget::Canvas {
         id: CanvasId(CANVAS_ID as u32),
         width: 320,
         height: 240,
-        modifiers: alloc::vec![Modifier::Flex(1)],
+        modifiers: alloc::vec![Modifier::Flex(1), Modifier::Background(Token::Page)],
     };
 
-    let footer_path = iris.full_path().unwrap_or_default();
-    let footer = Widget::Row {
-        spacing: 0,
-        align: Align::Center,
-        modifiers: alloc::vec![Modifier::Padding(6)],
-        children: alloc::vec![
-            Widget::Text { content: footer_path, style: TextStyle::Muted, modifiers: Vec::new() },
-        ],
-    };
+    let mut children: Vec<Widget> = alloc::vec![
+        render_menu_bar(),
+        Widget::Divider,
+        render_toolbar(iris),
+        Widget::Divider,
+        body,
+        Widget::Divider,
+        render_footer(iris),
+    ];
+
+    // The Open list replaces the File dropdown at the same anchor.
+    if iris.picking {
+        children.push(render_open_list(iris));
+    } else if let Some(kind) = iris.menu {
+        let (anchor, content) = render_dropdown(iris, kind);
+        children.push(Widget::Popover {
+            anchor:     NodeId(anchor),
+            child:      Box::new(content),
+            on_dismiss: ActionId(ACT_MENU_DISMISS),
+            modifiers:  Vec::new(),
+        });
+    }
 
     Widget::Column {
-        spacing: 0,
-        align: Align::Stretch,
+        children,
+        spacing:   Spacing::None.as_u16(),
+        align:     Align::Stretch,
         modifiers: alloc::vec![Modifier::Background(Token::Surface)],
-        children: alloc::vec![toolbar, Widget::Divider, body, Widget::Divider, footer],
     }
 }
 
@@ -392,6 +648,7 @@ fn split_path(path: &str) -> (&str, &str) {
 // ── PNG decoder (ported from wallpaper) ───────────────────────────────
 // 8-bit RGB/RGBA, non-interlaced. Returns (BGRA, width, height).
 fn decode_png(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+    let t_enter = now_ms();
     if data.len() < 8 || &data[0..8] != b"\x89PNG\r\n\x1a\n" { return None; }
 
     let mut pos = 8;
@@ -432,6 +689,8 @@ fn decode_png(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     let stride = width as usize * channels;
 
     if idat_data.len() < 6 { return None; }
+    let t_parsed = now_ms();
+    log_ms("png parse", t_parsed - t_enter);
     let decompressed = match miniz_oxide::inflate::decompress_to_vec_zlib(&idat_data) {
         Ok(d) => d,
         Err(_) => match miniz_oxide::inflate::decompress_to_vec(&idat_data[2..]) {
@@ -439,6 +698,8 @@ fn decode_png(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
             Err(_) => return None,
         },
     };
+    let t_inflated = now_ms();
+    log_ms("inflate", t_inflated - t_parsed);
 
     let expected = height as usize * (1 + stride);
     if decompressed.len() < expected { return None; }
@@ -465,6 +726,8 @@ fn decode_png(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
             unfiltered[dst_offset + x] = val;
         }
     }
+    let t_unfiltered = now_ms();
+    log_ms("unfilter", t_unfiltered - t_inflated);
 
     let pixel_count = (width * height) as usize;
     let mut bgra = alloc::vec![0u8; pixel_count * 4];
@@ -476,6 +739,7 @@ fn decode_png(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
         bgra[dst + 2] = unfiltered[src];
         bgra[dst + 3] = if channels == 4 { unfiltered[src + 3] } else { 255 };
     }
+    log_ms("rgb->bgra", now_ms() - t_unfiltered);
     Some((bgra, width, height))
 }
 
