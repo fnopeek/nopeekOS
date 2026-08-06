@@ -948,6 +948,13 @@ struct Ctx<'a> {
     /// jurisdiction (CSS2.1 §11.1.1) — see `clip_overflow`.
     abs_count: u32,
     fixed_count: u32,
+    /// The containing block's CONTENT height, when it is definite — what a
+    /// percentage `height`/`min-`/`max-height` resolves against (CSS2.1 §10.5).
+    /// `None` means the containing block's height depends on its content, and
+    /// then a percentage computes to `auto`. That fallback is the whole reason
+    /// this is an `Option`: `html { height: 100% }` is an everyday idiom, and
+    /// guessing a height for it truncates pages.
+    cb_h: Option<f32>,
     /// Document y of the last line box's baseline emitted so far. An
     /// `inline-block` aligns on the baseline of ITS last line box (CSS2.1
     /// §10.8.1), which is only known once its content has been laid out.
@@ -1040,6 +1047,38 @@ impl Ctx<'_> {
     /// their z-indexes stopped ordering against each other at all.
     fn should_track_stack(&self, st: &ComputedStyle) -> bool {
         st.position != Position::Static && matches!(st.z_index, ZIndex::Value(_)) && self.stack_depth == 0
+    }
+
+    /// Resolve percentage `height`/`min-`/`max-height` against the containing
+    /// block ONCE, at the entry to laying the box out. Everything downstream
+    /// then matches on `Len::Px` exactly as before — which is the point: the
+    /// two earlier attempts at percentage heights each taught one code path to
+    /// resolve them and measured WORSE, because the other paths still read the
+    /// same box as `auto` and the two answers disagreed.
+    ///
+    /// Returns `None` when nothing needs resolving, so the common case does not
+    /// copy a 1 kB `ComputedStyle`.
+    fn resolve_pct_heights(&self, st: &ComputedStyle) -> Option<ComputedStyle> {
+        let pct = |l: Len| matches!(l, Len::Pct(_) | Len::Calc { .. });
+        if !(pct(st.height) || pct(st.min_height) || pct(st.max_height)) {
+            return None;
+        }
+        let cbh = self.cb_h;
+        // §10.5: against an indefinite containing block a percentage behaves as
+        // `auto`. `min-height` is the exception the spec spells out — it falls
+        // back to 0, which is its initial value anyway.
+        let one = |l: Len, auto: Len| match l {
+            Len::Pct(_) | Len::Calc { .. } => match vert_len(l, cbh.map(|h| h as i32)) {
+                Some(v) => Len::Px(v.max(0.0)),
+                None => auto,
+            },
+            other => other,
+        };
+        let mut out = *st;
+        out.height = one(st.height, Len::Auto);
+        out.min_height = one(st.min_height, Len::Px(0.0));
+        out.max_height = one(st.max_height, Len::Auto);
+        Some(out)
     }
 
     /// Record one box's emitted `ops[op_start..op_end]` / `links[link_start..
@@ -1243,6 +1282,7 @@ pub fn layout(
         viewport_w: width as f32,
         abs_count: 0,
         fixed_count: 0,
+        cb_h: Some(viewport_h as f32),
         last_baseline: None,
         floats: Vec::new(),
         stack_ops: Vec::new(),
@@ -2034,6 +2074,8 @@ impl Ctx<'_> {
     /// left open for the next sibling. When `isolated`, `base_y` is the
     /// border-box top and margins are committed, not propagated.
     fn flow_block_impl(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, base_y: i32, incoming: Collapse, isolated: bool) -> BoxOut {
+        let resolved = self.resolve_pct_heights(st);
+        let st = resolved.as_ref().unwrap_or(st);
         let (mut cw, off_left) = resolve_block_h(st, w as f32);
         // §10.3.4: a replaced element with `width: auto` takes its INTRINSIC
         // width. It does not fill its container the way a block box does, so
@@ -2119,6 +2161,12 @@ impl Ctx<'_> {
         if st.position != Position::Static {
             self.cb = padding_cb(st, content_x, prov_top_y + st.border_top.width as i32 + st.pad_top as i32, content_w);
         }
+        // This box's own content height is what a percentage height on a CHILD
+        // resolves against — and only when it is definite. An `auto` height
+        // depends on those very children, so it stays indefinite and their
+        // percentages fall back to `auto` (§10.5).
+        let prev_cb_h = self.cb_h;
+        self.cb_h = content_height_of(st, st.height);
         let flow = if replaced_intrinsic(el).is_some() {
             // A replaced element's children are not page content — an
             // `<iframe>`'s fallback text, a `<video>`'s `<source>` list, a
@@ -2132,6 +2180,7 @@ impl Ctx<'_> {
         } else {
             self.flow_children(&el.children, st, Some(el), content_x, content_w, child_anchor, child_incoming)
         };
+        self.cb_h = prev_cb_h;
         self.cb = prev_cb;
 
         // Resolve the border-box top: when the top margin collapsed through, the
@@ -2391,6 +2440,11 @@ impl Ctx<'_> {
             self.abs_count += 1;
         }
         let (cbx, cby, cbw, cbh) = self.cb;
+        // An out-of-flow box resolves its percentage height against the
+        // containing block it is positioned in, not against whatever in-flow
+        // ancestor happens to be open (§10.5 + §10.1).
+        let prev_cb_h = self.cb_h;
+        self.cb_h = cbh.map(|h| h as f32);
         let avail = cbw as f32;
         let left = st.left.px(avail);
         let right = st.right.px(avail);
@@ -2524,6 +2578,7 @@ impl Ctx<'_> {
         // The out-of-flow box, at its final (post-bottom-shift) position.
         let dy = bottom - box_bottom;
         self.record_inspect(el, st, px as i32, py as i32 + dy, w_i, box_bottom - py as i32);
+        self.cb_h = prev_cb_h;
     }
 
     /// Insert the block's `background-color` behind its content (at `bg_idx`)
@@ -3762,6 +3817,10 @@ impl Ctx<'_> {
             paint_control(self.fonts, self.theme, &ctl, x, y, &mut self.ops, &mut self.controls);
             return y + h_i;
         }
+        // The block path resolves percentage heights itself (it is entered
+        // directly from the flow loop too); the other three come through here.
+        let resolved = self.resolve_pct_heights(st);
+        let st = resolved.as_ref().unwrap_or(st);
         match st.display {
             Display::Table => self.layout_table(el, st, x, w, y),
             Display::Flex => self.layout_flex(el, st, x, w, y),
@@ -3800,7 +3859,10 @@ impl Ctx<'_> {
         if st.position != Position::Static {
             self.cb = padding_cb(st, content_x, content_top, content_w);
         }
+        let prev_cb_h = self.cb_h;
+        self.cb_h = content_height_of(st, st.height);
         let content_h = self.grid_content(el, st, content_x, content_w, content_top);
+        self.cb_h = prev_cb_h;
         self.cb = prev_cb;
 
         // Explicit / min / max height clamp the content-box height.
@@ -4181,6 +4243,16 @@ impl Ctx<'_> {
             let link0 = self.links.len();
             let ctl0 = self.controls.len();
             self.path.push(ElemInfo::of(el_i));
+            // NOTE: css-grid-2 §6.6 says a grid item's percentage height
+            // resolves against its GRID AREA, and the row tracks are sized by
+            // now, so it could be answered right here — `self.cb_h =
+            // Some(cell_h)` guarded on the spanned rows being definite. It
+            // MEASURES WORSE: 4052 against 4056 for keeping the container's
+            // content height. Guarding on definite tracks changed nothing, so
+            // the difference is not the circularity — something downstream
+            // (the `align-self: stretch` branch above already gives an
+            // auto-height item the row's height) compensates for the coarser
+            // answer. Parked with the number rather than taken on faith.
             let bottom = self.layout_box(el_i, &s2, ix as i32, (iw as i32).max(1), cell_y);
             self.path.pop();
             let laid_h = bottom - cell_y;
@@ -4310,6 +4382,8 @@ impl Ctx<'_> {
         // Definite container content height (for cross-stretch / main-axis flex).
         let def_h: Option<f32> = content_height_of(st, st.height);
 
+        let prev_cb_h = self.cb_h;
+        self.cb_h = def_h;
         let mut content_h = if items.is_empty() {
             0
         } else if st.flex_row {
@@ -4321,6 +4395,7 @@ impl Ctx<'_> {
         // main axis in a row (centred on the cross axis, which is what
         // `align-items: center` does for the icon idiom), stacked before and
         // after the content in a column.
+        self.cb_h = prev_cb_h;
         for (b, at_start) in [(lead_box, true), (tail_box, false)] {
             let Some(mut b) = b else { continue };
             let (dx, dy) = if row {
@@ -6464,6 +6539,44 @@ mod tests {
         // … and it matches what is actually painted.
         let red = rects(&l).into_iter().find(|(.., c)| *c == Rgb(0xff, 0, 0)).unwrap();
         assert_eq!((red.0, red.2), (b.x, b.w));
+    }
+
+    #[test]
+    fn a_percentage_height_needs_a_definite_containing_block() {
+        let inner_h = |outer: &str| {
+            let l = lay(
+                &format!(
+                    "<body style=\"margin:0\"><div style=\"{outer}\">\
+                     <div style=\"height:50%;background:#f00\"></div></div></body>"
+                ),
+                800,
+            );
+            rects(&l).into_iter().find(|(.., c)| *c == Rgb(0xff, 0, 0)).map(|(_, _, _, h, _)| h).unwrap_or(0)
+        };
+        // Definite parent → half of its CONTENT height.
+        assert_eq!(inner_h("height:200px"), 100);
+        // `box-sizing: border-box` — the content box is what a % measures.
+        assert_eq!(inner_h("height:220px;padding:10px;box-sizing:border-box"), 100);
+        // Indefinite parent → the percentage behaves as `auto` (CSS2.1 §10.5),
+        // which for an empty box is zero. Guessing a height here is what
+        // truncated pages the two earlier attempts at this.
+        assert_eq!(inner_h("background:#eee"), 0);
+    }
+
+    #[test]
+    fn html_height_100_percent_does_not_truncate_the_page() {
+        // The 0.3.13 regression, nailed down: `html { height: 100% }` makes the
+        // root box exactly one viewport tall, and the page still has to scroll.
+        // `Layout::height` is the painted extent, not the root box's bottom —
+        // that fix (0.3.14) is what made general percentage heights safe to add.
+        let body: String = (0..60)
+            .map(|i| alloc::format!("<p>Absatz {i} mit genug Text fuer mehrere Zeilen.</p>"))
+            .collect();
+        let l = lay(
+            &alloc::format!("<html><head><style>html,body{{height:100%;margin:0}}</style></head><body>{body}</body></html>"),
+            800,
+        );
+        assert!(l.height > 600, "page collapsed to one viewport: {}", l.height);
     }
 
     #[test]
