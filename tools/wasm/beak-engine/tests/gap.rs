@@ -58,7 +58,7 @@ struct Ctx<'a> {
     tags: HashMap<String, u32>,
 }
 
-fn walk(ctx: &mut Ctx, el: &Element, ancestors: &mut Vec<ElemInfo>) {
+fn walk<'a>(ctx: &mut Ctx, el: &'a Element, ancestors: &mut Vec<ElemInfo<'a>>) {
     let ei = ElemInfo::of(el);
     ctx.elems += 1;
     *ctx.tags.entry(el.tag.clone()).or_insert(0) += 1;
@@ -114,7 +114,7 @@ fn walk(ctx: &mut Ctx, el: &Element, ancestors: &mut Vec<ElemInfo>) {
     ancestors.pop();
 }
 
-fn walk_with_prev(ctx: &mut Ctx, el: &Element, ancestors: &mut Vec<ElemInfo>, prev: &[ElemInfo]) {
+fn walk_with_prev<'a>(ctx: &mut Ctx, el: &'a Element, ancestors: &mut Vec<ElemInfo<'a>>, prev: &[ElemInfo<'a>]) {
     let ei = ElemInfo::of(el);
     ctx.elems += 1;
     *ctx.tags.entry(el.tag.clone()).or_insert(0) += 1;

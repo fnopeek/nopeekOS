@@ -50,8 +50,8 @@ fn diag() {
         let theme = light();
         let mut tally: std::collections::BTreeMap<String, u32> = Default::default();
         #[allow(clippy::too_many_arguments)]
-        fn walk(el: &Element, parent: &ComputedStyle, ss: &css::Stylesheet, theme: &Theme,
-                w: f32, anc: &mut Vec<ElemInfo>, tally: &mut std::collections::BTreeMap<String, u32>,
+        fn walk<'a>(el: &'a Element, parent: &ComputedStyle, ss: &css::Stylesheet, theme: &Theme,
+                w: f32, anc: &mut Vec<ElemInfo<'a>>, tally: &mut std::collections::BTreeMap<String, u32>,
                 dead: bool) {
             let kids: Vec<&Element> = el.children.iter()
                 .filter_map(|n| match n { Node::Element(e) => Some(e), _ => None }).collect();
@@ -115,22 +115,42 @@ fn diag() {
         let css = fs::read_to_string(&cp).expect("css");
         let w: f32 = std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(1400.0);
         let ss = css::parse(&css);
-        let ei = |tag: &str, id: Option<&str>, classes: &[&str]| ElemInfo {
-            tag: tag.into(),
-            id: id.map(|s| s.into()),
-            classes: classes.iter().map(|s| s.to_string()).collect(),
-            attrs: Vec::new(), seq: 0,
-        };
-        let ancestors = vec![
-            ei("html", None, &["client-js", "vector-feature-language-in-header-enabled"]),
-            ei("body", None, &["skin-vector-2022"]),
-            ei("div", Some("vector-header-start"), &["vector-header-start"]),
-            ei("nav", None, &["vector-main-menu-landmark"]),
-            ei("div", Some("vector-main-menu-dropdown"), &["vector-dropdown", "vector-main-menu-dropdown"]),
-        ];
-        let el = ei("div", None, &["vector-dropdown-content"]);
-        let prev = [ei("input", Some("vector-main-menu-dropdown-checkbox"), &["vector-dropdown-checkbox"]),
-                    ei("label", Some("vector-main-menu-dropdown-label"), &["vector-dropdown-label"])];
+        // ElemInfo borrows a live element now (so a selector can see children
+        // and element state), so the chain is built by parsing a snippet with
+        // the shape we want rather than by hand-filling a struct.
+        let dom = beak_engine::dom::parse(
+            "<html class='client-js vector-feature-language-in-header-enabled'>\
+             <body class='skin-vector-2022'>\
+             <div id='vector-header-start' class='vector-header-start'>\
+             <nav class='vector-main-menu-landmark'>\
+             <div id='vector-main-menu-dropdown' class='vector-dropdown vector-main-menu-dropdown'>\
+             <input id='vector-main-menu-dropdown-checkbox' class='vector-dropdown-checkbox'>\
+             <label id='vector-main-menu-dropdown-label' class='vector-dropdown-label'></label>\
+             <div class='vector-dropdown-content'></div>\
+             </div></nav></div></body></html>",
+        );
+        // root → … → parent, then the subject and its preceding siblings.
+        let mut chain: Vec<&beak_engine::dom::Element> = Vec::new();
+        let mut cur = &dom.root;
+        loop {
+            let next = cur.children.iter().find_map(|n| match n {
+                beak_engine::dom::Node::Element(e) => Some(e),
+                _ => None,
+            });
+            match next {
+                Some(e) => { chain.push(e); cur = e; }
+                None => break,
+            }
+        }
+        let dropdown = chain.iter().find(|e| e.attr("id") == Some("vector-main-menu-dropdown")).expect("dropdown");
+        let kids: Vec<&beak_engine::dom::Element> = dropdown.children.iter().filter_map(|n| match n {
+            beak_engine::dom::Node::Element(e) => Some(e),
+            _ => None,
+        }).collect();
+        let ancestors: Vec<ElemInfo> = chain.iter().take_while(|e| e.attr("id") != Some("vector-main-menu-dropdown"))
+            .chain(core::iter::once(dropdown)).map(|e| ElemInfo::of(e)).collect();
+        let el = ElemInfo::of(kids.iter().find(|e| e.tag == "div").expect("content div"));
+        let prev: Vec<ElemInfo> = kids.iter().take(2).map(|e| ElemInfo::of(e)).collect();
         let m = ss.matched(&el, &ancestors, &prev, 3, beak_engine::css::Media::new(w, false));
         for prop in ["position", "height", "display", "visibility", "opacity", "overflow"] {
             let mut all: Vec<(u32,u32,String)> = Vec::new();
@@ -219,12 +239,18 @@ fn diag() {
         let ss = css::parse(&css);
         let tag = std::env::var("DTAG").unwrap_or_else(|_| "div".into());
         let prop = std::env::var("DPROP").ok();
-        let el = ElemInfo {
-            tag: tag.clone(),
-            id: None,
-            classes: class.split(',').map(|s| s.trim().to_string()).collect(),
-            attrs: Vec::new(), seq: 0,
-        };
+        // ElemInfo borrows a live element — build one instead of filling a
+        // struct by hand.
+        let cls = class.split(',').map(|s| s.trim()).collect::<Vec<_>>().join(" ");
+        let dom = beak_engine::dom::parse(&format!("<{tag} class=\"{cls}\"></{tag}>"));
+        fn first<'x>(el: &'x beak_engine::dom::Element, tag: &str) -> Option<&'x beak_engine::dom::Element> {
+            if el.tag == tag { return Some(el); }
+            el.children.iter().find_map(|n| match n {
+                beak_engine::dom::Node::Element(e) => first(e, tag),
+                _ => None,
+            })
+        }
+        let el = ElemInfo::of(first(&dom.root, &tag).expect("element"));
         let m = ss.matched(&el, &[], &[], 1, beak_engine::css::Media::new(w, false));
         if let Some(pr) = &prop {
             let mut all: Vec<(u32,u32,String)> = Vec::new();

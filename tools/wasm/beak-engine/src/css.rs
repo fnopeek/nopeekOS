@@ -26,26 +26,61 @@ use crate::dom::{Dom, Element, Node};
 /// The identity a selector matches against: tag + id + classes + all attributes
 /// (names lowercased) for `[attr]` selectors.
 #[derive(Clone)]
-pub struct ElemInfo {
-    pub tag: String,
-    pub id: Option<String>,
-    pub classes: Vec<String>,
-    pub attrs: Vec<(String, String)>,
-    /// Document-order id of the element this was built from. Not used for
-    /// matching — it lets a caller tell whether the element it is about to
-    /// measure is already the last entry on the ancestor path.
-    pub seq: u32,
+pub struct ElemInfo<'a> {
+    /// The live element. Borrowed, not snapshotted: a selector has to be able
+    /// to look at an element's CHILDREN (`:empty`, `:has()`), and a copy of the
+    /// tag/id/class triple never can. This is also the shape `querySelector`
+    /// needs — matching against a live tree, not against copies of it — so
+    /// there is one matcher for the cascade and for scripting, not two.
+    pub el: &'a Element,
+    /// `class` split once. Selector matching runs EVERY rule against this
+    /// element, so re-splitting per rule would dominate the cascade; the slices
+    /// borrow, so nothing is copied.
+    classes: Vec<&'a str>,
+    /// What only the runtime knows. `:checked`/`:disabled` read it today;
+    /// `:hover`/`:focus` are the same mechanism and stay `false` until there is
+    /// an event loop to flip them. Keeping them HERE rather than as scattered
+    /// "never matches" special cases is what makes that a one-line change
+    /// later instead of a hunt.
+    pub state: ElemState,
 }
 
-impl ElemInfo {
-    pub fn of(el: &Element) -> ElemInfo {
-        let id = el.attr("id").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-        let classes = el
-            .attr("class")
-            .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
-            .unwrap_or_default();
-        let attrs = el.attrs.iter().map(|(k, v)| (k.to_ascii_lowercase(), v.clone())).collect();
-        ElemInfo { tag: el.tag.clone(), id, classes, attrs, seq: el.seq }
+/// Runtime state a selector can ask about (CSS Selectors 4 §4, §11).
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub struct ElemState {
+    pub checked: bool,
+    pub disabled: bool,
+    pub focus: bool,
+    pub hover: bool,
+}
+
+impl<'a> ElemInfo<'a> {
+    pub fn of(el: &'a Element) -> ElemInfo<'a> {
+        ElemInfo::with_state(el, ElemState::default())
+    }
+
+    pub fn with_state(el: &'a Element, state: ElemState) -> ElemInfo<'a> {
+        let classes = el.attr("class").map(|c| c.split_whitespace().collect()).unwrap_or_default();
+        ElemInfo { el, classes, state }
+    }
+
+    pub fn tag(&self) -> &str {
+        &self.el.tag
+    }
+    pub fn id(&self) -> Option<&str> {
+        self.el.attr("id").map(str::trim).filter(|s| !s.is_empty())
+    }
+    pub fn seq(&self) -> u32 {
+        self.el.seq
+    }
+    /// `:empty`: no element children and no non-whitespace text (Selectors 4
+    /// §14.3 — white-space-only text nodes do not disqualify, which is what
+    /// browsers do and what the `<td></td>` / `<p>\n</p>` idioms rely on).
+    pub fn is_empty_element(&self) -> bool {
+        self.el.children.iter().all(|n| match n {
+            Node::Text(t) => t.trim().is_empty(),
+            Node::Element(_) => false,
+        })
     }
 }
 
@@ -91,7 +126,7 @@ struct AttrSel {
 
 impl AttrSel {
     fn matches(&self, e: &ElemInfo) -> bool {
-        e.attrs.iter().any(|(k, v)| {
+        e.el.attrs.iter().any(|(k, v)| {
             if *k != self.name {
                 return false;
             }
@@ -163,6 +198,10 @@ struct Compound {
     /// always `<html>`, so this is a tag test that keeps pseudo-class
     /// specificity.
     root: bool,
+    /// `:empty` — no children other than white-space-only text (Selectors 4
+    /// §14.3). Only expressible since the matcher borrows the live element:
+    /// a snapshot of tag/id/class can never answer "what is inside".
+    empty: bool,
     /// `::before`/`::after` on this compound (only valid on the LAST compound
     /// of a selector — checked in `parse_selector`).
     pseudo: PseudoElem,
@@ -174,12 +213,12 @@ impl Compound {
     /// structural pseudo fail (the selector is dropped rather than mis-applied).
     fn matches(&self, e: &ElemInfo, ctx: Option<(u32, u32)>) -> bool {
         if let Some(t) = &self.tag {
-            if *t != e.tag {
+            if t != e.tag() {
                 return false;
             }
         }
         if let Some(id) = &self.id {
-            if e.id.as_deref() != Some(id.as_str()) {
+            if e.id() != Some(id.as_str()) {
                 return false;
             }
         }
@@ -192,7 +231,10 @@ impl Compound {
         if self.structural.iter().any(|s| !s.matches(ctx)) {
             return false;
         }
-        if self.root && e.tag != "html" {
+        if self.root && e.tag() != "html" {
+            return false;
+        }
+        if self.empty && !e.is_empty_element() {
             return false;
         }
         // :not(x) — none of the negated compounds may match.
@@ -493,17 +535,17 @@ impl Index {
     }
 
     fn candidates(&self, subject: &ElemInfo, out: &mut Vec<(u32, u32)>) {
-        if let Some(id) = &subject.id {
-            if let Some(v) = self.by_id.get(id.as_str()) {
+        if let Some(id) = subject.id() {
+            if let Some(v) = self.by_id.get(id) {
                 out.extend_from_slice(v);
             }
         }
         for c in &subject.classes {
-            if let Some(v) = self.by_class.get(c.as_str()) {
+            if let Some(v) = self.by_class.get(*c) {
                 out.extend_from_slice(v);
             }
         }
-        if let Some(v) = self.by_tag.get(subject.tag.as_str()) {
+        if let Some(v) = self.by_tag.get(subject.tag()) {
             out.extend_from_slice(v);
         }
         out.extend_from_slice(&self.universal);
@@ -1245,6 +1287,7 @@ fn parse_compound(tok: &str) -> Option<Compound> {
         where_groups: Vec::new(),
         structural: Vec::new(),
         root: false,
+        empty: false,
         pseudo: PseudoElem::None,
     };
     let mut i = 0;
@@ -1350,6 +1393,7 @@ fn parse_compound(tok: &str) -> Option<Compound> {
                     ("is" | "matches", Some(a)) => c.is_groups.push(parse_compound_list(&a)),
                     ("where", Some(a)) => c.where_groups.push(parse_compound_list(&a)),
                     ("root", None) => c.root = true,
+                    ("empty", None) => c.empty = true,
                     ("first-child", None) => c.structural.push(Structural::FirstChild),
                     ("last-child", None) => c.structural.push(Structural::LastChild),
                     ("only-child", None) => c.structural.push(Structural::OnlyChild),
@@ -1526,14 +1570,54 @@ mod tests {
     use super::*;
     use crate::dom;
 
-    fn info(tag: &str, id: Option<&str>, classes: &[&str]) -> ElemInfo {
-        ElemInfo {
-            tag: tag.to_string(),
-            id: id.map(|s| s.to_string()),
-            classes: classes.iter().map(|s| s.to_string()).collect(),
-            attrs: Vec::new(),
-            seq: 0,
+    /// A standalone element to match against. `ElemInfo` borrows a live node
+    /// now, so the tree has to outlive the `ElemInfo` — leaked here so the
+    /// assertions can keep passing `info(...)` inline. A unit test process
+    /// exits before that matters.
+    fn info(tag: &str, id: Option<&str>, classes: &[&str]) -> ElemInfo<'static> {
+        let mut h = alloc::format!("<{tag}");
+        if let Some(i) = id {
+            h += &alloc::format!(" id=\"{i}\"");
         }
+        if !classes.is_empty() {
+            h += &alloc::format!(" class=\"{}\"", classes.join(" "));
+        }
+        h += &alloc::format!("></{tag}>");
+        let dom: &'static dom::Dom = alloc::boxed::Box::leak(alloc::boxed::Box::new(dom::parse(&h)));
+        fn find<'x>(el: &'x dom::Element, tag: &str) -> Option<&'x dom::Element> {
+            if el.tag == tag {
+                return Some(el);
+            }
+            el.children.iter().find_map(|n| match n {
+                dom::Node::Element(e) => find(e, tag),
+                _ => None,
+            })
+        }
+        ElemInfo::of(find(&dom.root, tag).expect("element"))
+    }
+
+    #[test]
+    fn empty_matches_only_a_childless_element() {
+        // `:empty` needs to see INSIDE the element — impossible while the
+        // matcher took a snapshot of tag/id/class, which is why it used to
+        // drop its whole selector.
+        let ss = parse("td:empty { color: red }");
+        let hit = |html: &str| {
+            let dom = dom::parse(html);
+            fn find<'x>(el: &'x dom::Element, tag: &str) -> Option<&'x dom::Element> {
+                if el.tag == tag { return Some(el); }
+                el.children.iter().find_map(|n| match n {
+                    dom::Node::Element(e) => find(e, tag),
+                    _ => None,
+                })
+            }
+            let el = ElemInfo::of(find(&dom.root, "td").expect("td"));
+            !ss.matched(&el, &[], &[], 1, Media::new(1000.0, false)).is_empty()
+        };
+        assert!(hit("<table><tr><td></td></tr></table>"), "no children at all");
+        assert!(hit("<table><tr><td>\n  </td></tr></table>"), "whitespace-only text does not count");
+        assert!(!hit("<table><tr><td>x</td></tr></table>"), "text disqualifies");
+        assert!(!hit("<table><tr><td><span></span></td></tr></table>"), "an element child disqualifies");
     }
 
     #[test]

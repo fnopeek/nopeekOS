@@ -911,7 +911,7 @@ struct Ctx<'a> {
     /// Live form-control state (typed values, checked boxes, focus) — read
     /// only; the shell owns it and re-lays out when it changes.
     forms: &'a FormState,
-    path: Vec<ElemInfo>, // root → … → current parent
+    path: Vec<ElemInfo<'a>>, // root → … → current parent
     /// Positioned containing block (x, y, width, height) for
     /// `position:absolute` descendants — the nearest ancestor with
     /// `position != static`, else page. The height is `None` unless the
@@ -1012,10 +1012,10 @@ fn style_key(el: &Element, parent: &ComputedStyle, ancestors: &[ElemInfo], prev:
     mix(sib_count as u64);
     mix(prev.len() as u64);
     for a in ancestors {
-        mix(a.seq as u64 | 0x1_0000_0000);
+        mix(a.seq() as u64 | 0x1_0000_0000);
     }
     for p in prev {
-        mix(p.seq as u64 | 0x2_0000_0000);
+        mix(p.seq() as u64 | 0x2_0000_0000);
     }
     mix(parent.font_px.to_bits() as u64);
     mix(parent.color.0 as u64 | (parent.color.1 as u64) << 8 | (parent.color.2 as u64) << 16);
@@ -1023,7 +1023,7 @@ fn style_key(el: &Element, parent: &ComputedStyle, ancestors: &[ElemInfo], prev:
     h
 }
 
-impl Ctx<'_> {
+impl<'a> Ctx<'a> {
     /// `style::resolve` through the memo. Every cascade inside the layout goes
     /// through here so a re-measured subtree costs a map lookup, not a full
     /// selector match against the page's stylesheet.
@@ -1384,7 +1384,7 @@ pub fn layout(
     }
 }
 
-impl Ctx<'_> {
+impl<'a> Ctx<'a> {
     /// Narrow an x-range `[cl, cr]` by any active floats overlapping the
     /// vertical band `[top, bot)`. Returns the (left, right) available there.
     fn float_band(&self, top: i32, bot: i32, cl: i32, cr: i32) -> (i32, i32) {
@@ -1457,7 +1457,7 @@ impl Ctx<'_> {
     /// below the ones it can't fit beside), lays the box out isolated in its own
     /// BFC, and records its margin box as an exclusion rect. Does not advance
     /// normal flow. `x`/`w` are the BFC content box; `y` the static flow top.
-    fn place_float(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y: i32) {
+    fn place_float(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y: i32) {
         let is_left = st.float == FloatKind::Left;
         let ml = st.margin_left.px(w as f32).unwrap_or(0.0).max(0.0);
         let mr = st.margin_right.px(w as f32).unwrap_or(0.0).max(0.0);
@@ -1537,7 +1537,7 @@ impl Ctx<'_> {
     /// belong to, for `::before`/`::after` generated content — `None` for an
     /// anonymous box (CSS2.1 §17.2.1 table objects): an anonymous box has no
     /// source element, so it cannot be selected and cannot generate one.
-    fn layout_children(&mut self, nodes: &[Node], parent: &ComputedStyle, owner: Option<&Element>, x: i32, w: i32, y0: i32) -> i32 {
+    fn layout_children(&mut self, nodes: &'a [Node], parent: &ComputedStyle, owner: Option<&Element>, x: i32, w: i32, y0: i32) -> i32 {
         let flow = self.flow_children(nodes, parent, owner, x, w, y0, Collapse::default());
         flow.bottom + flow.open.value() as i32
     }
@@ -1549,7 +1549,7 @@ impl Ctx<'_> {
     /// there (e.g. a parent's top margin collapsing into its first child).
     fn flow_children(
         &mut self,
-        nodes: &[Node],
+        nodes: &'a [Node],
         parent: &ComputedStyle,
         owner: Option<&Element>,
         x: i32,
@@ -2059,7 +2059,7 @@ impl Ctx<'_> {
     /// padding) within the containing block's content width `w`, add vertical
     /// padding, then lay the content. This is what makes `max-width` + `margin:
     /// 0 auto` **centered containers** work.
-    fn layout_block(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
+    fn layout_block(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
         // `isolated`: `y0` is the border-box top (the caller — a float, cell,
         // flex item, abs box — already positioned it and owns its margins), so
         // no parent/sibling margin collapsing applies to this box's own edges.
@@ -2073,7 +2073,7 @@ impl Ctx<'_> {
     /// its bottom margin collapses with its last child (auto height) and is
     /// left open for the next sibling. When `isolated`, `base_y` is the
     /// border-box top and margins are committed, not propagated.
-    fn flow_block_impl(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, base_y: i32, incoming: Collapse, isolated: bool) -> BoxOut {
+    fn flow_block_impl(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, base_y: i32, incoming: Collapse, isolated: bool) -> BoxOut {
         let resolved = self.resolve_pct_heights(st);
         let st = resolved.as_ref().unwrap_or(st);
         let (mut cw, off_left) = resolve_block_h(st, w as f32);
@@ -2433,7 +2433,7 @@ impl Ctx<'_> {
     /// Lay a `position:absolute`/`fixed` box, out of flow, at a position derived
     /// from the containing block (`self.cb`) + `top`/`right`/`bottom`/`left`.
     /// The element is `el`, already pushed onto `self.path` by the caller.
-    fn layout_abs(&mut self, el: &Element, st: &ComputedStyle, static_x: i32, static_y: i32) {
+    fn layout_abs(&mut self, el: &'a Element, st: &ComputedStyle, static_x: i32, static_y: i32) {
         if st.position == Position::Fixed {
             self.fixed_count += 1;
         } else {
@@ -2710,7 +2710,7 @@ impl Ctx<'_> {
     /// cell's own box (background/border/padding). Rows/cells are recognised by
     /// HTML tag (`tr`/`td`/`th`/`thead`…) or `display: table-*`; anonymous
     /// boxes fill any missing row/row-group/cell wrapper (CSS2 §17.2.1).
-    fn layout_table(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
+    fn layout_table(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
         // <caption> renders as a block on the table's top or bottom edge
         // (CSS2.1 §17.4.1), per its own `caption-side` — aligned with the
         // TABLE box, so the table's horizontal margins have to come off first.
@@ -2734,7 +2734,7 @@ impl Ctx<'_> {
     /// `figcaption{display:table-caption}`, and reading only the tag turns the
     /// caption into stray content that widens the table instead of wrapping to
     /// it.
-    fn layout_captions(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y0: i32, bottom: bool) -> i32 {
+    fn layout_captions(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y0: i32, bottom: bool) -> i32 {
         let mut y = y0;
         for c in &el.children {
             if let Node::Element(e) = c {
@@ -2771,7 +2771,7 @@ impl Ctx<'_> {
     /// `table`/`inline-table` ancestor (CSS2 §17.2.1) — an anonymous table
     /// can't have a `<caption>` child (nothing selects an anonymous box), so
     /// only the row-collection step is shared.
-    fn layout_table_body(&mut self, nodes: &[Node], st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
+    fn layout_table_body(&mut self, nodes: &'a [Node], st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
         let mut rows = self.collect_table_rows(nodes, st);
         rows.retain(|r| !r.cells.is_empty());
         let ncols = rows.iter().map(|r| row_columns(&r.cells).1).max().unwrap_or(0).min(64);
@@ -2888,7 +2888,7 @@ impl Ctx<'_> {
     /// shrinking columns proportionally (never below their minimum) only when
     /// they overflow the available width; an explicit table `width` wider than
     /// the content spreads the slack across columns.
-    fn auto_columns(&mut self, rows: &[Row], ncols: usize, st: &ComputedStyle, w: i32) -> Vec<i32> {
+    fn auto_columns(&mut self, rows: &[Row<'a>], ncols: usize, st: &ComputedStyle, w: i32) -> Vec<i32> {
         let mut pref = vec![0.0f32; ncols];
         let mut minw = vec![0.0f32; ncols];
         // Single-column cells define their column outright; cells spanning
@@ -3010,7 +3010,7 @@ impl Ctx<'_> {
     /// cells do, and return the depth to truncate back to. Measurement and
     /// layout BOTH go through this — a cell's descendants must resolve against
     /// the same ancestor chain in either, or the widths drift apart.
-    fn push_row_path(&mut self, row: &Row) -> usize {
+    fn push_row_path(&mut self, row: &Row<'a>) -> usize {
         let depth = self.path.len();
         if let Some((g, _)) = row.group {
             self.path.push(ElemInfo::of(g));
@@ -3024,7 +3024,7 @@ impl Ctx<'_> {
     /// Lay a table's rows given resolved (border-box) column widths. Cells sit
     /// side by side; each cell box stretches to the row's tallest cell and paints
     /// its own background/border, with content placed inside its padding.
-    fn lay_table_rows(&mut self, rows: &[Row], ncols: usize, colw: &[i32], st: &ComputedStyle, x: i32, y0: i32) -> i32 {
+    fn lay_table_rows(&mut self, rows: &[Row<'a>], ncols: usize, colw: &[i32], st: &ComputedStyle, x: i32, y0: i32) -> i32 {
         // The gaps around the outside are added by the caller, which owns the
         // table's padding edge; these are the ones BETWEEN cells and rows.
         let (sx, sy) = spacing_of(st);
@@ -3230,7 +3230,7 @@ impl Ctx<'_> {
 
     /// Lay an element's children to measure their flowed height without emitting
     /// any draw ops (used to size table rows before painting cell boxes).
-    fn measure_children_height(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
+    fn measure_children_height(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
         let (o, l, c) = (self.ops.len(), self.links.len(), self.controls.len());
         // Stacking ranges index into `ops`/`links`, so a discarded speculative
         // layout has to drop the ones it recorded too — otherwise they survive
@@ -3259,7 +3259,7 @@ impl Ctx<'_> {
 
     /// Same as `measure_children_height`, for a table cell that may be an
     /// anonymous box (no owning element to push on `self.path`).
-    fn measure_cell_height(&mut self, cell: &Cell, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
+    fn measure_cell_height(&mut self, cell: &Cell<'a>, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
         match cell {
             Cell::Real(e) => self.measure_children_height(e, st, x, w, y),
             Cell::Anon(nodes) => {
@@ -3311,7 +3311,7 @@ impl Ctx<'_> {
     /// (plain `<tr>`/`table-row`, `table-row-group`, and any stray content
     /// coalesced into anonymous rows) in document order, then any
     /// `table-footer-group` rows last — regardless of their source order.
-    fn collect_table_rows<'a>(&mut self, nodes: &'a [Node], parent: &ComputedStyle) -> Vec<Row<'a>> {
+    fn collect_table_rows(&mut self, nodes: &'a [Node], parent: &ComputedStyle) -> Vec<Row<'a>> {
         let mut header = Vec::new();
         let mut body = Vec::new();
         let mut footer = Vec::new();
@@ -3334,7 +3334,7 @@ impl Ctx<'_> {
     /// stray text, stray elements — anything that isn't a proper table child)
     /// is wrapped in ONE anonymous row (whitespace-only text neither starts
     /// nor breaks a run, and is dropped if it's all a run ever contained).
-    fn collect_rows_into<'a>(
+    fn collect_rows_into(
         &mut self,
         nodes: &'a [Node],
         parent: &ComputedStyle,
@@ -3432,7 +3432,7 @@ impl Ctx<'_> {
     /// anonymous cell takes the §17.2.1 anonymous-box style from it. The
     /// caller must have the row on `self.path` — the cells' selectors are
     /// resolved here, and measurement and layout have to agree on that path.
-    fn partition_cells<'a>(&self, nodes: &'a [Node], parent: &ComputedStyle) -> Vec<StyledCell<'a>> {
+    fn partition_cells(&self, nodes: &'a [Node], parent: &ComputedStyle) -> Vec<StyledCell<'a>> {
         let mut cells = Vec::new();
         let mut run_start: Option<usize> = None;
         let mut run_has_content = false;
@@ -3509,7 +3509,7 @@ impl Ctx<'_> {
     ///   as wide as all 62 language names laid end to end (~4150 px).
     /// * A block-level child starts its own line, so a block container's
     ///   max-content is its WIDEST child, not the sum of every descendant.
-    fn intrinsic_width(&mut self, el: &Element, st: &ComputedStyle) -> (f32, f32) {
+    fn intrinsic_width(&mut self, el: &'a Element, st: &ComputedStyle) -> (f32, f32) {
         if let Some(hit) = self.intrinsic.get(&el.seq) {
             return *hit;
         }
@@ -3534,7 +3534,7 @@ impl Ctx<'_> {
             // it there already. Without this their descendant selectors match
             // against `el`'s parent and resolve the wrong `display`, which is
             // exactly what the anonymous-table-object reftests measure.
-            let push = self.path.last().map(|p| p.seq) != Some(el.seq);
+            let push = self.path.last().map(|p| p.seq()) != Some(el.seq);
             if push {
                 self.path.push(ElemInfo::of(el));
             }
@@ -3562,7 +3562,7 @@ impl Ctx<'_> {
     /// `intrinsic_width` over a bare node slice — an anonymous cell has no
     /// owning element to gather text from. `st` is the style the slice's
     /// content inherits from.
-    fn intrinsic_width_nodes(&mut self, nodes: &[Node], st: &ComputedStyle) -> (f32, f32) {
+    fn intrinsic_width_nodes(&mut self, nodes: &'a [Node], st: &ComputedStyle) -> (f32, f32) {
         let (mut pref, mut min) = (0.0f32, 0.0f32);
         let mut run = Run::default();
         self.intrinsic_walk(nodes, st, &mut run, &mut pref, &mut min);
@@ -3575,7 +3575,7 @@ impl Ctx<'_> {
     /// same decomposition `auto_columns` lays out with — `collect_table_rows`
     /// owns the CSS2.1 §17.2.1 anonymous-object fixup, so measuring through it
     /// keeps the measurement and the layout from drifting apart.
-    fn intrinsic_table(&mut self, nodes: &[Node], st: &ComputedStyle) -> (f32, f32) {
+    fn intrinsic_table(&mut self, nodes: &'a [Node], st: &ComputedStyle) -> (f32, f32) {
         let mut rows = self.collect_table_rows(nodes, st);
         rows.retain(|r| !r.cells.is_empty());
         let ncols = rows.iter().map(|r| row_columns(&r.cells).1).max().unwrap_or(0).min(64);
@@ -3612,7 +3612,7 @@ impl Ctx<'_> {
     /// content into `run` and folding each block-level child's own measurement
     /// into `pref`/`min`. `st` is the parent style the children cascade from;
     /// `self.path` must already end at their parent.
-    fn intrinsic_walk(&mut self, nodes: &[Node], st: &ComputedStyle, run: &mut Run, pref: &mut f32, min: &mut f32) {
+    fn intrinsic_walk(&mut self, nodes: &'a [Node], st: &ComputedStyle, run: &mut Run, pref: &mut f32, min: &mut f32) {
         let horiz = side_by_side(st);
         // A stray run of table parts (rows/cells with no table ancestor) is one
         // anonymous table box, measured as such — not as loose siblings.
@@ -3637,7 +3637,7 @@ impl Ctx<'_> {
     /// One node of a block container's content walk (see `intrinsic_walk`).
     /// `horiz` says whether this container's children sit side by side, so a
     /// finished box adds to the running width instead of competing with it.
-    fn intrinsic_node(&mut self, n: &Node, st: &ComputedStyle, run: &mut Run, pref: &mut f32, min: &mut f32, horiz: bool) {
+    fn intrinsic_node(&mut self, n: &'a Node, st: &ComputedStyle, run: &mut Run, pref: &mut f32, min: &mut f32, horiz: bool) {
         let el = match n {
             Node::Text(t) => {
                 run.text.push_str(t);
@@ -3721,7 +3721,7 @@ impl Ctx<'_> {
     }
 
     /// `intrinsic_width`, dispatching on whether the cell is real or anonymous.
-    fn intrinsic_width_cell(&mut self, cell: &Cell, st: &ComputedStyle) -> (f32, f32) {
+    fn intrinsic_width_cell(&mut self, cell: &Cell<'a>, st: &ComputedStyle) -> (f32, f32) {
         match cell {
             Cell::Real(e) => self.intrinsic_width(e, st),
             Cell::Anon(nodes) => self.intrinsic_width_nodes(nodes, st),
@@ -3734,7 +3734,7 @@ impl Ctx<'_> {
     /// own width is still being measured — a percentage is indefinite then and
     /// contributes nothing. Shared by `auto_columns` (layout) and
     /// `intrinsic_table` (measurement) so the two cannot drift apart.
-    fn cell_pref_min(&mut self, cell: &Cell, cs: &ComputedStyle, avail: Option<f32>, collapse: bool) -> (f32, f32) {
+    fn cell_pref_min(&mut self, cell: &Cell<'a>, cs: &ComputedStyle, avail: Option<f32>, collapse: bool) -> (f32, f32) {
         let (bl, br, _, _) = cell_borders(cs, collapse);
         let frame = cs.pad_left + cs.pad_right + bl + br;
         let (p, m) = self.intrinsic_width_cell(cell, cs);
@@ -3759,7 +3759,7 @@ impl Ctx<'_> {
     /// found here has no `table`/`inline-table` ancestor — `flow_children`
     /// wraps it in one anonymous `table` box (CSS2 §17.2.1) instead of laying
     /// each part out as an ordinary block.
-    fn segment_table_runs<'a>(&self, nodes: &'a [Node], parent: &ComputedStyle) -> Vec<TableSeg<'a>> {
+    fn segment_table_runs(&self, nodes: &'a [Node], parent: &ComputedStyle) -> Vec<TableSeg<'a>> {
         fn is_table_part(role: TableRole) -> bool {
             matches!(role, TableRole::Row | TableRole::RowGroup | TableRole::HeaderGroup | TableRole::FooterGroup | TableRole::Cell)
         }
@@ -3791,7 +3791,7 @@ impl Ctx<'_> {
     }
 
     /// Dispatch a block-level box to the right formatting context.
-    fn layout_box(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
+    fn layout_box(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
         // A form control is atomic wherever it lands. `flow_children` and
         // `collect_inline` catch the in-flow cases (so a field flows with the
         // text beside it); this catches every other box-making path — flex and
@@ -3838,7 +3838,7 @@ impl Ctx<'_> {
     /// (`justify-items`/`align-items`/`justify-self`/`align-self`, incl. the
     /// default `stretch`). Not yet: named lines/areas, `repeat(auto-fill)`,
     /// dense packing, subgrid, or `align-content`/`justify-content`.
-    fn layout_grid(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
+    fn layout_grid(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
         // No template at all → a grid degenerates to a block box.
         if st.grid_ncols == 0 && st.grid_nrows == 0 {
             return self.layout_block(el, st, x, w, y0);
@@ -3886,7 +3886,7 @@ impl Ctx<'_> {
 
     /// Lay a grid container's items inside its content box `(x, w, y0)`, returning
     /// the content-box height. `self.cb` is already set for the container.
-    fn grid_content(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
+    fn grid_content(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
         // Column tracks, expanding any `repeat(auto-fill/auto-fit, …)` to fill the
         // container width.
         let mut tracks: Vec<GridTrack> = st.grid_tracks[..st.grid_ncols as usize].to_vec();
@@ -4271,7 +4271,7 @@ impl Ctx<'_> {
 
     /// Lay a box just to measure its natural height, discarding the emitted ops
     /// (used for grid auto-row sizing before the real placement pass).
-    fn measure_box_height(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
+    fn measure_box_height(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
         let (o, l, c) = (self.ops.len(), self.links.len(), self.controls.len());
         // Stacking ranges index into `ops`/`links`, so a discarded speculative
         // layout has to drop the ones it recorded too — otherwise they survive
@@ -4307,7 +4307,7 @@ impl Ctx<'_> {
     /// on the main axis), `gap`, `justify-content`, `align-items`/`align-self`
     /// (start/center/end/stretch), and `flex-wrap` (multi-line). Not yet:
     /// reverse directions, `align-content`, baseline alignment.
-    fn layout_flex(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
+    fn layout_flex(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
         // Flex items = in-flow child elements; abspos children are out of flow.
         // Structural selectors count EVERY element sibling, so the position is
         // tracked independently of which children become items.
@@ -4441,7 +4441,7 @@ impl Ctx<'_> {
     /// content-box height consumed by all lines.
     fn flex_row(
         &mut self,
-        items: &[(&Element, ComputedStyle)],
+        items: &[(&'a Element, ComputedStyle)],
         st: &ComputedStyle,
         x: i32,
         w: i32,
@@ -4557,7 +4557,7 @@ impl Ctx<'_> {
     /// is the container's definite content height (main size) if any.
     fn flex_column(
         &mut self,
-        items: &[(&Element, ComputedStyle)],
+        items: &[(&'a Element, ComputedStyle)],
         st: &ComputedStyle,
         x: i32,
         w: i32,
@@ -4643,7 +4643,7 @@ impl Ctx<'_> {
 
     /// Per-item flex metrics on the main axis (row: width; column: width used as
     /// cross). `row` selects which margins/paddings are the main vs cross axis.
-    fn flex_metrics(&mut self, items: &[(&Element, ComputedStyle)], avail: f32, row: bool) -> Vec<FlexItem> {
+    fn flex_metrics(&mut self, items: &[(&'a Element, ComputedStyle)], avail: f32, row: bool) -> Vec<FlexItem> {
         let mut out = Vec::with_capacity(items.len());
         for (el, s) in items {
             let (main_pad, cross_pad) = if row {
@@ -5099,7 +5099,7 @@ fn collapse_whitespace(s: &str) -> String {
     out
 }
 
-impl Ctx<'_> {
+impl<'a> Ctx<'a> {
     /// Collect an inline element's subtree into the current inline run
     /// (recursing through nested inline elements, carrying each one's style +
     /// link href). `el` is already on `self.path` when this is called.
@@ -5111,7 +5111,7 @@ impl Ctx<'_> {
     /// floats must not reach into it — and its own must not leak out
     /// ([[feedback-speculative-layout-state]]: every throwaway context has to
     /// put back what it took).
-    fn inline_block_box(&mut self, el: &Element, st: &ComputedStyle, avail_w: i32) -> Option<AtomicBox> {
+    fn inline_block_box(&mut self, el: &'a Element, st: &ComputedStyle, avail_w: i32) -> Option<AtomicBox> {
         if st.hidden || st.transparent {
             return None;
         }
@@ -5223,7 +5223,7 @@ impl Ctx<'_> {
         })
     }
 
-    fn collect_inline(&mut self, el: &Element, st: &ComputedStyle, href: Option<&str>, inline: &mut Inline, bx: i32, bw: i32, by: i32) {
+    fn collect_inline(&mut self, el: &'a Element, st: &ComputedStyle, href: Option<&str>, inline: &mut Inline, bx: i32, bw: i32, by: i32) {
         if st.is_break {
             inline.brk();
             return;
