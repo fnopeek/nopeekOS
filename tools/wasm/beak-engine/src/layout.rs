@@ -714,6 +714,13 @@ impl Layout {
 
 // ── small font helpers (no_std: no f32::ceil) ──────────────────────────────
 
+/// Half the x-height that `vertical-align: middle` measures against (CSS2.1
+/// §10.8.1 says the parent's, which is not threaded this far down). The line
+/// SIZING and the PLACEMENT must use the identical value — with two different
+/// approximations a middle-aligned box is sized into one line and painted
+/// against another, and lands outside its own line box.
+const MIDDLE_HALF_X: f32 = crate::style::BASE_FONT_PX * 0.25;
+
 fn ceil_i32(x: f32) -> i32 {
     let c = x as i32;
     if (c as f32) < x { c + 1 } else { c }
@@ -1970,6 +1977,7 @@ impl Ctx<'_> {
             w: bw + (ml + mr) as i32,
             h,
             baseline: h,
+            valign: ps.valign,
         })
     }
 
@@ -5074,7 +5082,7 @@ impl Ctx<'_> {
             Some(b) if !st.overflow_clip => b.clamp(0, h),
             _ => h,
         };
-        Some(AtomicBox { ops, links, controls, inspects, w: outer_w, h, baseline })
+        Some(AtomicBox { ops, links, controls, inspects, w: outer_w, h, baseline, valign: st.valign })
     }
 
     /// The inline box an inline-level child needs, if any: one that paints
@@ -5274,6 +5282,11 @@ struct AtomicBox {
     h: i32,
     /// Distance from the margin-box top to the baseline the line aligns on.
     baseline: i32,
+    /// How the box sits on the line (CSS2.1 §10.8.1). Ignoring this put every
+    /// atomic inline on the baseline, so a row of `inline-block`s of differing
+    /// heights came out as a STAIRCASE — MediaWiki galleries, icon rows and
+    /// badges all set `vertical-align: top` for exactly that reason.
+    valign: crate::style::VAlign,
 }
 
 #[derive(Clone)]
@@ -5782,6 +5795,10 @@ impl Inline {
         let (l0, r0) = band_of(floats, y, y + lh, x, x + w);
         let mut pen = l0 as f32 + indent;
         let mut line_ascent = 0.0f32;
+        // How far the deepest item on the line reaches BELOW the baseline. Only
+        // needed to size a line around a `vertical-align: middle` box; text
+        // carries its descent inside its own line-box height already.
+        let mut line_below = 0.0f32;
         let mut gap = 0.0f32;
         let mut right = r0 as f32;
         // Inline boxes currently spanning the pen, innermost last, and the
@@ -5838,6 +5855,7 @@ impl Inline {
                     pen = bl as f32;
                     right = br as f32;
                     line_ascent = 0.0;
+                    line_below = 0.0;
                     gap = 0.0;
                 }
                 Item::Word { text, style, href, space_before } => {
@@ -5853,6 +5871,7 @@ impl Inline {
                         pen = bl as f32;
                         right = br as f32;
                         line_ascent = 0.0;
+                        line_below = 0.0;
                         gap = 0.0;
                     }
                     let mut lead = if line.is_empty() { 0.0 } else { sw };
@@ -5876,6 +5895,7 @@ impl Inline {
                                     pen = bl as f32;
                                     right = br as f32;
                                     line_ascent = 0.0;
+                                    line_below = 0.0;
                                     gap = 0.0;
                                     lead = 0.0;
                                     continue;
@@ -5932,12 +5952,31 @@ impl Inline {
                         pen = bl as f32;
                         right = br as f32;
                         line_ascent = 0.0;
+                        line_below = 0.0;
                         gap = 0.0;
                     }
                     let lead = if line.is_empty() { 0.0 } else { sw };
                     pen += lead + b.w as f32;
-                    line_ascent = line_ascent.max(b.baseline as f32);
-                    gap = gap.max(b.h as f32);
+                    // How far this box reaches above and below the baseline
+                    // decides how tall the line box has to be. A `middle` box
+                    // straddles the baseline, so half of it hangs ABOVE — the
+                    // line has to grow for that half or the box paints outside
+                    // its own line, which is what pushed MediaWiki's gallery
+                    // thumbnails up out of their frames. `top`/`bottom` are
+                    // measured against the line box itself and so contribute
+                    // only their height.
+                    let half_x = MIDDLE_HALF_X;
+                    let (above, below) = match b.valign {
+                        crate::style::VAlign::Top
+                        | crate::style::VAlign::TextTop
+                        | crate::style::VAlign::Bottom
+                        | crate::style::VAlign::TextBottom => (0.0, 0.0),
+                        crate::style::VAlign::Middle => (b.h as f32 / 2.0 + half_x, b.h as f32 / 2.0 - half_x),
+                        _ => (b.baseline as f32, (b.h - b.baseline) as f32),
+                    };
+                    line_ascent = line_ascent.max(above);
+                    line_below = line_below.max(below);
+                    gap = gap.max(b.h as f32).max(line_ascent + line_below);
                     line.push(Placed::Atomic { x: (pen - b.w as f32) as i32, box_: b });
                 }
                 Item::Image { src, w: iw, h: ih, href, alt, space_before, hidden, transparent, deco } => {
@@ -5961,6 +6000,7 @@ impl Inline {
                         pen = bl as f32;
                         right = br as f32;
                         line_ascent = 0.0;
+                        line_below = 0.0;
                         gap = 0.0;
                     }
                     let lead = if line.is_empty() { 0.0 } else { sw };
@@ -5990,6 +6030,7 @@ impl Inline {
                         pen = bl as f32;
                         right = br as f32;
                         line_ascent = 0.0;
+                        line_below = 0.0;
                         gap = 0.0;
                     }
                     let lead = if line.is_empty() { 0.0 } else { sw };
@@ -6318,10 +6359,24 @@ fn emit_line(
                 }
             }
             Placed::Atomic { x, mut box_ } => {
-                // The box's own baseline sits on the line's baseline; with the
-                // approximation `baseline == h` that puts its bottom margin
-                // edge there, which is what a block-ish inline-block does.
-                let (dx, dy) = (x + dx, baseline - box_.baseline);
+                // CSS2.1 §10.8.1. `baseline` puts the box's own baseline on the
+                // line's — with the approximation `baseline == h` that is its
+                // bottom margin edge, which is what a block-ish inline-block
+                // does. `top`/`bottom` measure against the LINE BOX instead,
+                // and that is the case real pages lean on: without it a row of
+                // differently tall `inline-block`s descends like a staircase.
+                use crate::style::VAlign;
+                let dy = match box_.valign {
+                    VAlign::Top | VAlign::TextTop => line_top,
+                    VAlign::Bottom | VAlign::TextBottom => line_top + box_h - box_.h,
+                    // Approximate: the box's midpoint against the baseline
+                    // raised by half an x-height, taken as a fraction of the
+                    // line's ascent (the parent's font metrics are not threaded
+                    // this far down).
+                    VAlign::Middle => baseline - MIDDLE_HALF_X as i32 - box_.h / 2,
+                    VAlign::Baseline | VAlign::Sub | VAlign::Super => baseline - box_.baseline,
+                };
+                let (dx, dy) = (x + dx, dy);
                 translate_op_list(&mut box_.ops, dx, dy);
                 for lk in &mut box_.links {
                     lk.x += dx;
@@ -6409,6 +6464,37 @@ mod tests {
         // … and it matches what is actually painted.
         let red = rects(&l).into_iter().find(|(.., c)| *c == Rgb(0xff, 0, 0)).unwrap();
         assert_eq!((red.0, red.2), (b.x, b.w));
+    }
+
+    #[test]
+    fn vertical_align_places_atomic_inlines_against_the_line_box() {
+        // Every atomic inline used to sit on the baseline, so a row of
+        // `inline-block`s of differing heights descended like a staircase —
+        // MediaWiki galleries, icon rows and badges all set `vertical-align`
+        // for exactly this.
+        let tops = |va: &str| {
+            let l = lay(
+                &format!(
+                    "<body style=\"margin:0\"><div>\
+                     <span style=\"display:inline-block;vertical-align:{va};background:#f00;width:60px;height:40px\"></span>\
+                     <span style=\"display:inline-block;vertical-align:{va};background:#00f;width:60px;height:140px\"></span>\
+                     </div></body>"
+                ),
+                600,
+            );
+            let f = |c: Rgb| rects(&l).into_iter().find(|(.., cc)| *cc == c).map(|(_, y, _, h, _)| (y, h)).unwrap();
+            (f(Rgb(0xff, 0, 0)), f(Rgb(0, 0, 0xff)))
+        };
+        let ((ry, _), (by, _)) = tops("top");
+        assert_eq!(ry, by, "top-aligned boxes share the line box top");
+        let ((ry, rh), (by, bh)) = tops("bottom");
+        assert_eq!(ry + rh, by + bh, "bottom-aligned boxes share its bottom");
+        // A `middle` box straddles the baseline, so the line has to grow around
+        // it — otherwise it paints above its own line (the gallery thumbnails
+        // hung out of their frames).
+        let ((ry, _), (by, _)) = tops("middle");
+        assert!(ry > by, "the short box sits lower: {ry} vs {by}");
+        assert!(by >= 0, "the tall box stays inside the line box, got {by}");
     }
 
     #[test]

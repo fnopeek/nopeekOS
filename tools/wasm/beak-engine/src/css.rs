@@ -1028,7 +1028,9 @@ fn parse_media_query(prelude: &str) -> Vec<MediaCond> {
 /// Does an `@media` prelude hold at this viewport width? Shared with the
 /// custom-property pre-pass, which must gate on exactly the same condition the
 /// cascade uses — otherwise a variable from a non-matching block leaks.
-pub(crate) fn media_matches(prelude: &str, m: Media) -> bool {
+/// Does a media query text apply to `m`? Used by `@media` preludes and by
+/// `<source media=…>` in a `<picture>`.
+pub fn media_matches(prelude: &str, m: Media) -> bool {
     parse_media_query(prelude).iter().any(|c| c.matches(m))
 }
 

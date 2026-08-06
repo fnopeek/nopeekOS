@@ -1065,6 +1065,42 @@ menu to pick from.
     — we always take the fallback `<img>` (25×25) where a browser takes the
     `<source>` (84×29). `srcset` on a bare `<img>` is equally unparsed.
 
+34. ✅ **Responsive images, and `vertical-align` on atomic inlines (0.4.0).**
+    WPT unchanged at 4036; both are invisible to the oracle and both were
+    obvious in a side-by-side against Firefox.
+
+    **`<picture>` / `srcset` did not exist** (`grep srcset` → no hits). New
+    `picture.rs` resolves them as a DOM pass right after parsing and folds the
+    winner into the `<img>`'s own `src`/`width`/`height`, so `image_srcs`,
+    `img_box` and the draw op keep reading a plain `<img src>`. That also
+    guarantees the shell FETCHES the URL layout will ask for — two independent
+    selection sites could not. `<source type>` we cannot decode is skipped
+    rather than taken (an `image/webp` source would replace a picture that
+    renders with one that renders nothing); `w` candidates resolve against
+    `sizes` defaulting to the viewport; density candidates resolve at 1x, so
+    the 2x asset is never fetched. Wikipedia's footer now shows the wide
+    "a WIKIMEDIA project" / "Powered by MediaWiki" buttons instead of the
+    25×25 fallback icons, matching Firefox.
+
+    **`vertical-align` reached table cells and sub/superscript text but never
+    an atomic inline box.** Every `inline-block` sat on the baseline, so a row
+    of differing heights descended like a STAIRCASE — MediaWiki's gallery,
+    icon rows and badges all set `vertical-align: top` for exactly that. `top`
+    and `bottom` measure against the line box; `middle` straddles the baseline,
+    which means **the line box has to grow around the half that hangs above**
+    — without that the gallery thumbnails painted outside their own frames.
+
+    **The bug inside the fix is the reusable lesson:** the line SIZING and the
+    PLACEMENT used two different approximations of the x-height
+    (`BASE_FONT_PX * 0.25` against `line_ascent * 0.31`), so a `middle` box was
+    sized into one line and painted against another, landing 18 px outside it.
+    One shared `MIDDLE_HALF_X` constant. Same shape as
+    [[feedback-intrinsic-shared-path]]: two sites computing one quantity drift.
+
+    **Still open on that page:** the `::before` strut MediaWiki centres its
+    thumbnails with is `height: 100%`, and percentage heights are not
+    supported — the tallest image still overhangs its frame by a few pixels.
+
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the
 cursor), `user-select`/`touch-action`/`overflow-anchor`/`scroll-margin`

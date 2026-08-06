@@ -23,6 +23,7 @@ pub mod fonts;
 pub mod forms;
 pub mod image;
 pub mod layout;
+pub mod picture;
 pub mod raster;
 pub mod style;
 pub mod svg;
@@ -43,7 +44,10 @@ pub fn stylesheet_links(html: &str) -> alloc::vec::Vec<alloc::string::String> {
 
 /// `src` of every `<img>` in an HTML document (as written), for the shell to
 /// fetch + hand back via `Engine::set_images`.
-pub fn image_srcs(html: &str) -> alloc::vec::Vec<alloc::string::String> {
+/// Every `<img src>` in the document, in document order — the shell's fetch
+/// list. `width` is the viewport: `<picture>`/`srcset` is resolved first, so
+/// this returns exactly the URLs layout will ask for at that width.
+pub fn image_srcs(html: &str, width: u32) -> alloc::vec::Vec<alloc::string::String> {
     fn walk(el: &Element, out: &mut alloc::vec::Vec<alloc::string::String>) {
         for c in &el.children {
             if let Node::Element(e) = c {
@@ -58,7 +62,8 @@ pub fn image_srcs(html: &str) -> alloc::vec::Vec<alloc::string::String> {
             }
         }
     }
-    let dom = dom::parse(html);
+    let mut dom = dom::parse(html);
+    picture::resolve(&mut dom, css::Media::new(width as f32, false));
     let mut out = alloc::vec::Vec::new();
     walk(&dom.root, &mut out);
     out
