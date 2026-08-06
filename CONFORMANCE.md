@@ -1038,6 +1038,33 @@ menu to pick from.
     the display list: identical inner geometry on both sides, one wrong outer
     rectangle.
 
+33. ✅ **Two things the oracle cannot see (0.3.17).** WPT unchanged at 4036 —
+    both found by rendering de.wikipedia/Stansstad and reading numbers off it,
+    the second axis ([[feedback-browser-side-by-side]]).
+
+    **The inspect tool was reporting the wrong box.** For an in-flow block it
+    passed the CONTAINING BLOCK's `x`/`width` to `record_inspect`, and the code
+    said so in a comment: "for the full-width blocks that make up most of a
+    page it IS the box width". It is not, for anything with `max-width`,
+    `margin: 0 auto`, an explicit `width` or plain margins. MediaWiki's
+    `.mw-page-container` (`max-width: 99.75rem; margin: 0 auto`) **paints**
+    1596 px wide at x=162 and was **reported** as 1920 wide at x=0. Every
+    device report about a centred container has been measured against a wrong
+    number. `BoxOut` now carries the box's own used border box, and there is a
+    unit test asserting the inspect box equals the painted rect.
+
+    **Floated siblings add up at max-content.** A block container took the
+    WIDEST float instead of their sum, so a `float: right` `<ul>` shrink-wrapped
+    to ONE icon — and its own `float: left` `<li>` children then had no room
+    beside each other and stacked vertically. That is the Wikipedia footer's
+    two icons. At min-content the widest still wins (each float gets its own
+    line). WPT-neutral, visibly wrong on the page.
+
+    **Still open on that footer:** the icons are narrower than a browser's
+    because `<picture>` / `<source media=… srcset=…>` is not implemented at all
+    — we always take the fallback `<img>` (25×25) where a browser takes the
+    `<source>` (84×29). `srcset` on a bare `<img>` is equally unparsed.
+
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the
 cursor), `user-select`/`touch-action`/`overflow-anchor`/`scroll-margin`
