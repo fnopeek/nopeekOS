@@ -1145,6 +1145,58 @@ menu to pick from.
     (`margin: -100vw/-100vh` is not applied). Same shape as item 32's loss: a
     correction removes the accident that was hiding a second defect.
 
+36. ✅ **The selector matcher borrows the live element (0.4.2).** WPT
+    unchanged at 4056, 175 unit tests, and de.wikipedia/Stansstad renders
+    **byte-identical** — a deliberately behaviour-neutral refactor, gated the
+    sharpest way we have.
+
+    It was already the right SHAPE — `matches(subject, ancestors,
+    prev_siblings, sib_count)` is a standalone predicate, not a cascade walk,
+    which is exactly what `querySelector`/`matches`/`closest` will need. What
+    was wrong was the subject: `ElemInfo` was a lossy owned snapshot of
+    tag/id/class/attrs, and that made three things impossible rather than hard:
+    - **It could not see children.** `:empty` and `:has()` were not expressible
+      through the signature at all, so adding them meant adding them BESIDE it
+      — a second matching path, which is the double work to avoid.
+    - **It carried no element state.** `:checked`/`:disabled`/`:focus`/`:hover`
+      had nowhere to live.
+    - **Scripting could not reuse it.** `querySelectorAll` over a real DOM that
+      clones several `String`s per element is not viable under wasmi.
+
+    Now `ElemInfo<'a>` borrows the node, splits `class` once into `&str`
+    slices, and carries an `ElemState { checked, disabled, focus, hover }`.
+    **That state field is the seam between CSS and scripting**: `:checked` and
+    `:disabled` read it today, and `:hover`/`:focus` are the same mechanism,
+    left `false` until there is an event loop to flip them. Keeping them there
+    rather than as scattered "never matches" special cases is what makes that a
+    one-line change later instead of a hunt.
+
+    `:empty` lands with it as the proof the shape works (26 uses on GitHub's
+    CSS, 15 on SRF, 6 on Wikipedia; WPT-neutral). Whitespace-only text does not
+    disqualify, per Selectors 4 §14.3.
+
+    **A correction to this file's own gap list:** it said an unsupported
+    pseudo-class "drops the whole rule". It does not — `parse_selector_list`
+    uses `filter_map`, so only the failing selector of a comma list is dropped
+    and the rest survives. A selector that stands alone still loses its
+    declarations, which is what the `:checked` and `:nth-of-type` counts below
+    cost.
+
+    **Measured, so the next step is not guessed** — occurrences in the CSS four
+    real pages actually load:
+
+    | | vw/vh | `@layer` | `:has()` | `:nth-of-type` | `:checked` | `:empty` | gradient | box-shadow |
+    |---|---:|---:|---:|---:|---:|---:|---:|---:|
+    | GitHub (4.4 MiB) | 389 | 11 | 132 | 224 | 242 | 26 | 171 | 641 |
+    | SRF (367 KiB) | 10 | 0 | 92 | 16 | 15 | 15 | 25 | 86 |
+    | Wikipedia (267 KiB) | 7 | 0 | 13 | 14 | **193** | 6 | 1 | 23 |
+    | MDN (71 KiB) | 5 | 0 | 6 | 4 | 0 | 0 | 1 | 2 |
+
+    `@layer` is **much smaller than this file assumed** — 11 occurrences on one
+    of four pages, not the half-a-stylesheet catastrophe noted earlier. The
+    `:checked` column is the surprise: 193 on Wikipedia, the checkbox-hack that
+    drives its collapsible menus.
+
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the
 cursor), `user-select`/`touch-action`/`overflow-anchor`/`scroll-margin`
