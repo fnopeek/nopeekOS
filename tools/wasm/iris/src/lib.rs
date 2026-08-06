@@ -1157,8 +1157,12 @@ where
     let mut unfiltered = alloc::vec![0u8; rows * stride];
     // Opaque black underneath, so the part that has not arrived yet reads
     // as a neutral band rather than as transparent garbage.
+    // No alpha pre-fill: the conversion writes all four bytes of every
+    // pixel. Pre-filling was needed while half-decoded pictures went on
+    // screen; now that nothing partial is shown it was two million loop
+    // iterations of pure waste per image — and it sat inside the phase we
+    // have spent all afternoon trying to speed up.
     let mut bgra = alloc::vec![0u8; pixel_count * 4];
-    for p in bgra.chunks_exact_mut(4) { p[3] = 255; }
 
     use miniz_oxide::inflate::core::{decompress, inflate_flags, DecompressorOxide};
     use miniz_oxide::inflate::TINFLStatus;
