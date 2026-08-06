@@ -1178,6 +1178,12 @@ pub fn poll_render() {
         render_frame();
     }
 
+    // Screenshot flash — its own tick so it also runs while nothing else
+    // is moving (a capture usually happens on a still desktop).
+    if with_compositor(|comp| comp.flash_tick()).unwrap_or(false) {
+        render_frame();
+    }
+
     if !animating { tick_focus_glow(); }
 
     // Drive the auto-hide dock. Feed it the current cursor Y so the reveal
