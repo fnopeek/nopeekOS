@@ -260,6 +260,12 @@ struct Iris {
     /// window. The compositor scales the bitmap it already holds, so a
     /// zoom step costs no decode and no upload.
     zoom:   u16,
+    /// Pan in px from centred. Clamped by the compositor to the overhang.
+    pan:    (i32, i32),
+    /// Where the primary button went down, while it is still down.
+    press:  Option<(i32, i32)>,
+    /// The pointer moved far enough since the press to call it a drag.
+    dragged: bool,
 }
 
 const ZOOM_FIT: u16 = 256;
@@ -268,6 +274,9 @@ const ZOOM_MAX: u16 = 4096;    // 16×
 /// One wheel notch — a bit under 1.25×, so a few clicks feel linear.
 const ZOOM_STEP_NUM: u32 = 5;
 const ZOOM_STEP_DEN: u32 = 4;
+/// Movement (px, Manhattan) below which a press+release is still a click
+/// and not a drag. Generous enough that a shaky hand still pages.
+const DRAG_SLOP: i32 = 4;
 
 fn zoom_in(z: u16) -> u16 {
     ((z as u32 * ZOOM_STEP_NUM / ZOOM_STEP_DEN) as u16).min(ZOOM_MAX)
@@ -282,6 +291,7 @@ impl Iris {
             dir: String::new(), files: Vec::new(), idx: 0,
             w: 0, h: 0, failed: false,
             menu: None, picking: false, zoom: ZOOM_FIT,
+            pan: (0, 0), press: None, dragged: false,
         };
         // Launched to open a specific file?
         let mut argbuf = [0u8; 512];
@@ -354,12 +364,24 @@ impl Iris {
     fn next(&mut self) {
         if self.files.len() < 2 { return; }
         self.idx = (self.idx + 1) % self.files.len();
-        self.zoom = ZOOM_FIT;
+        self.reset_view();
     }
     fn prev(&mut self) {
         if self.files.len() < 2 { return; }
         self.idx = (self.idx + self.files.len() - 1) % self.files.len();
+        self.reset_view();
+    }
+
+    fn reset_view(&mut self) {
         self.zoom = ZOOM_FIT;
+        self.pan = (0, 0);
+    }
+
+    /// Zooming keeps the pan; the compositor re-clamps it to the new
+    /// overhang, so zooming out simply pulls the image back to centre.
+    fn set_zoom(&mut self, z: u16) {
+        self.zoom = z;
+        if z == ZOOM_FIT { self.pan = (0, 0); }
     }
 }
 
@@ -377,24 +399,47 @@ fn handle(iris: &mut Iris, ev: Event, payload: &str) -> Outcome {
         Event::Key(KeyCode::Left)  | Event::Key(KeyCode::Up)   => { iris.prev(); Outcome::Reload }
         // Keyboard zoom, the usual trio.
         Event::Key(KeyCode::Char(b'+')) | Event::Key(KeyCode::Char(b'=')) => {
-            iris.zoom = zoom_in(iris.zoom); Outcome::Render
+            iris.set_zoom(zoom_in(iris.zoom)); Outcome::Render
         }
-        Event::Key(KeyCode::Char(b'-')) => { iris.zoom = zoom_out(iris.zoom); Outcome::Render }
-        Event::Key(KeyCode::Char(b'0')) => { iris.zoom = ZOOM_FIT; Outcome::Render }
+        Event::Key(KeyCode::Char(b'-')) => { iris.set_zoom(zoom_out(iris.zoom)); Outcome::Render }
+        Event::Key(KeyCode::Char(b'0')) => { iris.reset_view(); Outcome::Render }
         // Wheel zoom. `dy` is the compositor's scroll step, sign only —
         // up (negative) enlarges, like every other viewer.
         Event::Wheel { dy } => {
-            iris.zoom = if dy < 0 { zoom_in(iris.zoom) } else { zoom_out(iris.zoom) };
+            iris.set_zoom(if dy < 0 { zoom_in(iris.zoom) } else { zoom_out(iris.zoom) });
             Outcome::Render
         }
         Event::Action(ActionId(id)) => handle_action(iris, id),
-        // Click on the image itself: left = next, right = previous. The
-        // menu bar and toolbar deliver Action instead, so those clicks
-        // never reach here.
-        Event::MouseButton { button: MouseButton::Left,  down: true, .. } => {
+        // Press just arms a possible drag — what it MEANT is decided on
+        // release, because the same button both pans and pages. That is
+        // how every image viewer resolves this: a drag moves the picture,
+        // a click without movement is still a click.
+        Event::MouseButton { button: MouseButton::Left, down: true, x, y } => {
             if iris.menu.is_some() || iris.picking {
-                iris.menu = None; iris.picking = false; Outcome::Render
-            } else { iris.next(); Outcome::Reload }
+                iris.menu = None; iris.picking = false; return Outcome::Render;
+            }
+            iris.press = Some((x, y));
+            iris.dragged = false;
+            Outcome::Idle
+        }
+        Event::MouseButton { button: MouseButton::Left, down: false, .. } => {
+            let was_click = iris.press.is_some() && !iris.dragged;
+            iris.press = None;
+            if was_click { iris.next(); Outcome::Reload } else { Outcome::Idle }
+        }
+        // Motion only arrives while the button is held (the compositor
+        // forwards drags, never hover), so this IS the pan.
+        Event::MouseMove { x, y } => {
+            let Some((px, py)) = iris.press else { return Outcome::Idle };
+            let (dx, dy) = (x - px, y - py);
+            if !iris.dragged && dx.abs() + dy.abs() <= DRAG_SLOP {
+                return Outcome::Idle;   // still a click, not yet a drag
+            }
+            iris.dragged = true;
+            iris.press = Some((x, y));
+            if iris.zoom == ZOOM_FIT { return Outcome::Idle; } // nothing to pan
+            iris.pan = (iris.pan.0 + dx, iris.pan.1 + dy);
+            Outcome::Render
         }
         Event::MouseButton { button: MouseButton::Right, down: true, .. } => { iris.prev(); Outcome::Reload }
         // Another image opened while running (loft / singleton routing).
@@ -421,9 +466,9 @@ fn handle_action(iris: &mut Iris, id: u32) -> Outcome {
         ACT_FILE_CLOSE => Outcome::Exit,
         ACT_NEXT => { iris.menu = None; iris.next(); Outcome::Reload }
         ACT_PREV => { iris.menu = None; iris.prev(); Outcome::Reload }
-        ACT_ZOOM_IN  => { iris.menu = None; iris.zoom = zoom_in(iris.zoom); Outcome::Render }
-        ACT_ZOOM_OUT => { iris.menu = None; iris.zoom = zoom_out(iris.zoom); Outcome::Render }
-        ACT_ZOOM_FIT => { iris.menu = None; iris.zoom = ZOOM_FIT; Outcome::Render }
+        ACT_ZOOM_IN  => { iris.menu = None; iris.set_zoom(zoom_in(iris.zoom)); Outcome::Render }
+        ACT_ZOOM_OUT => { iris.menu = None; iris.set_zoom(zoom_out(iris.zoom)); Outcome::Render }
+        ACT_ZOOM_FIT => { iris.menu = None; iris.reset_view(); Outcome::Render }
         ACT_HELP_ABOUT => { iris.menu = None; log("[iris] image viewer"); Outcome::Render }
         _ => Outcome::Idle,
     }
@@ -572,6 +617,9 @@ fn render(iris: &Iris) -> Widget {
     // no re-upload, so a wheel notch is a repaint and nothing more.
     if iris.zoom != ZOOM_FIT {
         canvas_mods.push(Modifier::Scale(iris.zoom));
+        if iris.pan != (0, 0) {
+            canvas_mods.push(Modifier::CanvasOffset { x: iris.pan.0, y: iris.pan.1 });
+        }
     }
     let body = Widget::Canvas {
         id: CanvasId(CANVAS_ID as u32),

@@ -430,6 +430,12 @@ pub enum Modifier {
     /// keeps a correct box. Clamped to `FONT_SIZE_RANGE`; ignored on every
     /// other widget.
     FontSize(u16),
+    /// Pan a `Widget::Canvas`'s content by this many px, relative to the
+    /// centred contain-fit position. Pairs with `Modifier::Scale`: scale
+    /// decides how big the image is drawn, this decides which part of it
+    /// the rect shows. Clamped to the overhang, so it can never push the
+    /// content out of view. Ignored on every other widget.
+    CanvasOffset { x: i32, y: i32 },
     // Appended only.
 }
 
@@ -759,8 +765,10 @@ pub trait Rasterizer: Send + Sync {
     /// Blit app-supplied BGRA pixels into `rect`, contain-fit and centred.
     /// `zoom_q88` scales that fitted size (256 = 1.0× = plain fit, larger
     /// crops to the rect); it comes from `Modifier::Scale` on the Canvas.
+    /// `pan` shifts the content from centred (`Modifier::CanvasOffset`)
+    /// and is clamped to the overhang, so the rect never shows a gap.
     fn canvas_blit(&mut self, _t: &mut RasterTarget, _src: &[u8], _sw: u32, _sh: u32,
-                   _rect: Rect, _zoom_q88: u32) {}
+                   _rect: Rect, _zoom_q88: u32, _pan: (i32, i32)) {}
 
     // ── Reserved (v2+, default no-op on CPU backend) ──────────────────
 

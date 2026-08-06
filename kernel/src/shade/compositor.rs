@@ -2265,6 +2265,11 @@ impl Compositor {
 
         let mod_held = crate::keyboard::is_super_held();
 
+        // A held button over a widget app makes this motion that app's
+        // drag (pan, rubber-band). Bails out on its own when the
+        // compositor owns the drag, so it can sit ahead of that block.
+        self.forward_drag_motion();
+
         // Handle active drag (swap or resize)
         if let Some(mut drag) = self.drag {
             let held = match drag.mode {
@@ -2345,6 +2350,33 @@ impl Compositor {
 
         // Cursor overlay handled by redraw_overlay — no scene redraw for movement
         false
+    }
+
+    /// Forward pointer motion to the focused widget app while its primary
+    /// button is held — i.e. during an actual drag.
+    ///
+    /// Only during a drag on purpose: hover motion is resolved inside the
+    /// compositor (see `widgets::hover_at`) precisely so apps don't get a
+    /// firehose of moves they'd have to filter. A drag, by contrast, is
+    /// something only the app can interpret — panning a zoomed canvas,
+    /// rubber-banding a selection — and it is bounded by the button being
+    /// down. Addressed to the FOCUSED window rather than the one under the
+    /// cursor, so a drag that leaves the window keeps arriving.
+    fn forward_drag_motion(&mut self) {
+        if self.drag.is_some() { return }               // compositor owns this drag
+        if !self.mouse.left_held() { return }
+        if crate::keyboard::is_super_held() { return }  // Mod+drag = swap/resize
+        let Some(fid) = self.focused else { return };
+        let is_widget = self.windows.iter()
+            .find(|w| w.id == fid)
+            .map(|w| w.kind == crate::shade::window::WindowKind::Widget)
+            .unwrap_or(false);
+        if !is_widget { return }
+        crate::shade::widgets::push_event(fid.0,
+            crate::shade::widgets::abi::Event::MouseMove {
+                x: self.mouse.x,
+                y: self.mouse.y,
+            });
     }
 
     /// Handle only button events (click, drag, release). Position already in self.mouse.
@@ -2780,16 +2812,17 @@ impl Compositor {
 
     // ── Screen flash ──────────────────────────────────────────────────
     //
-    // Short and bright rather than long and subtle: a camera shutter, not
-    // a fade. Kept to a few frames because the overlay blends every pixel
-    // on screen, which is the expensive operation at 4K.
+    // A shutter closing, not a floodlight: the screen dips DARK for a
+    // moment instead of being washed white. Same mechanism either way —
+    // a full-screen blend — but dimming reads as a soft blink while white
+    // is genuinely harsh on a dark desktop. Kept to a few frames because
+    // the overlay touches every pixel, the expensive operation at 4K.
 
     /// Ticks (100 Hz) the flash lasts.
     const FLASH_TICKS: u64 = 12;
-    /// Opacity the flash starts at. A wash over the WHOLE screen reads far
-    /// stronger than the same value in a small panel — 210 was blinding.
+    /// How far down the screen dips at the peak, 0..255.
     /// `set shade.flash_opacity <0-255>` overrides it; 0 turns it off.
-    const FLASH_ALPHA: u32 = 80;
+    const FLASH_ALPHA: u32 = 110;
 
     fn flash_peak() -> u32 {
         crate::config::get("shade.flash_opacity")
@@ -2833,12 +2866,13 @@ impl Compositor {
         a as u32
     }
 
-    /// Paint the flash over the finished frame.
+    /// Paint the flash over the finished frame. Black, not white — the
+    /// screen darkens and comes back.
     fn render_flash(&self, shadow: *mut u8, info: &FbInfo) {
         let alpha = self.flash_alpha();
         if alpha == 0 { return; }
         render::fill_rounded_rect_alpha(shadow, info, 0, 0,
-            self.screen_w, self.screen_h, 0x00FF_FFFF, 0, alpha);
+            self.screen_w, self.screen_h, 0x0000_0000, 0, alpha);
     }
 
     /// Instantly complete any active animation.
