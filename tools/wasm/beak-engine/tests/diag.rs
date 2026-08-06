@@ -302,7 +302,7 @@ fn diag() {
         });
         eng.images_begin();
         let mut ok = 0; let mut miss = 0; let mut undecodable = 0;
-        for src in beak_engine::image_srcs(&html) {
+        for src in beak_engine::image_srcs(&html, w) {
             let fname = src.replace('/', "_").replace(':', "_");
             match fs::read(format!("{dir}/{fname}")) {
                 Ok(bytes) => {
@@ -421,7 +421,7 @@ fn diag() {
             let links = beak_engine::stylesheet_links(&html);
             let d_sl = t_sl.elapsed();
             let t_is = std::time::Instant::now();
-            let imgs = beak_engine::image_srcs(&html);
+            let imgs = beak_engine::image_srcs(&html, w);
             let d_is = t_is.elapsed();
             println!("       dom::parse {:>7.1} ms   css::collect_all {:>7.1} ms   stylesheet_links {:>7.1} ms ({})   image_srcs {:>7.1} ms ({})",
                 d_dom.as_secs_f64()*1000.0, d_css.as_secs_f64()*1000.0,

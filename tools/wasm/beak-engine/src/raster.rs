@@ -180,7 +180,11 @@ impl Engine {
         width: u32,
         forms: &crate::forms::FormState,
     ) -> Layout {
-        let dom = crate::dom::parse(html);
+        let mut dom = crate::dom::parse(html);
+        // `<picture>`/`srcset` is folded into the `<img>` before anything reads
+        // a `src` — layout, the fetch list and the draw op then all see the one
+        // URL that actually won.
+        crate::picture::resolve(&mut dom, crate::css::Media::new(width as f32, self.theme.is_dark()));
         // The cascade also reads the document's own `<style>` blocks and the
         // viewport width (media queries), so both are part of the identity.
         // The theme is part of the identity too: `prefers-color-scheme` decides
@@ -257,7 +261,8 @@ impl Engine {
 
     /// Reader mode with live form state (see `layout_forms`).
     pub fn layout_ua_forms(&self, html: &str, width: u32, forms: &crate::forms::FormState) -> Layout {
-        let dom = crate::dom::parse(html);
+        let mut dom = crate::dom::parse(html);
+        crate::picture::resolve(&mut dom, crate::css::Media::new(width as f32, self.theme.is_dark()));
         crate::layout::layout(
             &self.fonts,
             &dom,
