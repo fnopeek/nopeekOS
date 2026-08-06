@@ -167,7 +167,7 @@ impl Rasterizer for CpuRasterizer {
     }
 
     fn canvas_blit(&mut self, t: &mut RasterTarget, src: &[u8], sw: u32, sh: u32,
-                   rect: Rect, zoom_q88: u32) {
+                   rect: Rect, zoom_q88: u32, pan: (i32, i32)) {
         if sw == 0 || sh == 0 || rect.w == 0 || rect.h == 0 { return; }
         if src.len() < (sw * sh * 4) as usize { return; }
         // Contain-fit: largest integer scale (numerator/denominator) that
@@ -194,8 +194,16 @@ impl Rasterizer for CpuRasterizer {
 
         let (rx, ry) = window_to_target(t, rect.x, rect.y);
         // Signed: zoomed past the rect the origin goes negative.
-        let ox = rx + (rw as i32 - dst_w as i32) / 2;
-        let oy = ry + (rh as i32 - dst_h as i32) / 2;
+        // Pan is clamped to the overhang — the amount by which the scaled
+        // image exceeds the rect — so dragging stops at the image edge
+        // instead of pulling it off into the background. Nothing overhangs
+        // on an axis that still fits, so that axis simply cannot be moved.
+        let over_x = (dst_w as i32 - rw as i32).max(0) / 2;
+        let over_y = (dst_h as i32 - rh as i32).max(0) / 2;
+        let pan_x = pan.0.clamp(-over_x, over_x);
+        let pan_y = pan.1.clamp(-over_y, over_y);
+        let ox = rx + (rw as i32 - dst_w as i32) / 2 + pan_x;
+        let oy = ry + (rh as i32 - dst_h as i32) / 2 + pan_y;
 
         // Walk only the pixels that can survive: the target clip, the
         // canvas rect and the scaled image all intersected up front. The

@@ -346,6 +346,12 @@ pub enum Modifier {
     /// keeps a correct box. Clamped to 6..=64 by the compositor; ignored
     /// on every other widget.
     FontSize(u16),
+    /// Pan a `Widget::Canvas`'s content by this many px, relative to the
+    /// centred contain-fit position. Pairs with `Modifier::Scale`: scale
+    /// decides how big the image is drawn, this decides which part of it
+    /// the rect shows. The compositor clamps it to the overhang, so it can
+    /// never push the content out of view. Ignored on every other widget.
+    CanvasOffset { x: i32, y: i32 },
     // Appended only.
 }
 

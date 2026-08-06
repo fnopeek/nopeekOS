@@ -797,11 +797,16 @@ fn paint_node_eff(
             // (or even re-decoding) a single pixel. Same Q8.8 meaning as on
             // an Icon: 256 = 1.0×, here relative to the contain-fit size.
             let mut zoom: u32 = 256;
+            let mut pan = (0i32, 0i32);
             for m in eff {
-                if let Modifier::Scale(v) = m { zoom = *v as u32; }
+                match m {
+                    Modifier::Scale(v) => zoom = *v as u32,
+                    Modifier::CanvasOffset { x, y } => pan = (*x, *y),
+                    _ => {}
+                }
             }
             let drawn = super::canvas::with_bitmap(wid, cid, |px, w, h| {
-                rast.canvas_blit(target, px, w, h, rect, zoom);
+                rast.canvas_blit(target, px, w, h, rect, zoom, pan);
             }).is_some();
             if !drawn {
                 rast.rect(target, rect, Fill::Solid(Token::SurfaceMuted));
