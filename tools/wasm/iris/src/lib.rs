@@ -51,6 +51,8 @@ unsafe extern "C" {
     fn npk_home_dir(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_launch_arg(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_canvas_commit(canvas_id: i32, ptr: i32, len: i32, w: i32, h: i32) -> i32;
+    fn npk_canvas_rect(canvas_id: i32, out_ptr: i32) -> i32;
+    fn npk_cursor_pos() -> i32;
     fn npk_close_widget() -> i32;
     fn npk_ticks() -> i64;
     fn npk_log_serial(ptr: i32, len: i32);
@@ -390,6 +392,30 @@ impl Iris {
         self.zoom = z;
         if z == ZOOM_FIT { self.pan = (0, 0); }
     }
+
+    /// Zoom anchored on the pointer: whatever pixel sits under the cursor
+    /// stays under it. Without this, zooming in on a detail means zooming
+    /// to the middle and then dragging the detail back — twice the work
+    /// for the thing you actually wanted.
+    ///
+    /// A point `p` of the image (in fit-units from the canvas centre) is
+    /// drawn at offset `s = p·z/256 + pan`. Holding `s` fixed at the
+    /// cursor offset `c` while z0 → z1 gives `pan1 = c − (c − pan0)·z1/z0`.
+    /// Falls back to centred zoom when the pointer is elsewhere.
+    fn zoom_at_cursor(&mut self, z1: u16) {
+        let z0 = self.zoom;
+        self.zoom = z1;
+        if z1 == ZOOM_FIT { self.pan = (0, 0); return; }
+        let (Some((cx, cy)), Some((rx, ry, rw, rh))) = (cursor_pos(), canvas_rect()) else {
+            return;
+        };
+        if cx < rx || cy < ry || cx >= rx + rw || cy >= ry + rh { return; }
+        let c = ((cx - (rx + rw / 2)) as i64, (cy - (ry + rh / 2)) as i64);
+        let (z0, z1) = (z0 as i64, z1 as i64);
+        let px = c.0 - (c.0 - self.pan.0 as i64) * z1 / z0;
+        let py = c.1 - (c.1 - self.pan.1 as i64) * z1 / z0;
+        self.pan = (px as i32, py as i32);
+    }
 }
 
 enum Outcome { Idle, Render, Reload, Exit }
@@ -413,7 +439,7 @@ fn handle(iris: &mut Iris, ev: Event, payload: &str) -> Outcome {
         // Wheel zoom. `dy` is the compositor's scroll step, sign only —
         // up (negative) enlarges, like every other viewer.
         Event::Wheel { dy } => {
-            iris.set_zoom(if dy < 0 { zoom_in(iris.zoom) } else { zoom_out(iris.zoom) });
+            iris.zoom_at_cursor(if dy < 0 { zoom_in(iris.zoom) } else { zoom_out(iris.zoom) });
             Outcome::Render
         }
         // A widget (menu label, menu item, toolbar button) took this
@@ -723,6 +749,23 @@ fn read_home_dir() -> String {
     if n <= 0 { return "home".to_string(); }
     let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
     core::str::from_utf8(slice).unwrap_or("home").to_string()
+}
+
+/// Pointer position in screen coordinates — the same space the mouse
+/// events report. `None` while we don't have focus (the kernel refuses).
+fn cursor_pos() -> Option<(i32, i32)> {
+    let packed = unsafe { npk_cursor_pos() };
+    if packed < 0 { return None; }
+    Some((packed >> 16, packed & 0xFFFF))
+}
+
+/// The canvas widget's laid-out rect (screen coords). `None` until the
+/// first scene with a Canvas has been laid out.
+fn canvas_rect() -> Option<(i32, i32, i32, i32)> {
+    let mut buf = [0u8; 16];
+    if unsafe { npk_canvas_rect(CANVAS_ID, buf.as_mut_ptr() as i32) } < 0 { return None; }
+    let g = |i: usize| i32::from_le_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
+    Some((g(0), g(4), g(8), g(12)))
 }
 
 fn fetch_file(path: &str) -> Option<&'static [u8]> {

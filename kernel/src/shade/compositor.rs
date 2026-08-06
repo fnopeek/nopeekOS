@@ -2265,11 +2265,6 @@ impl Compositor {
 
         let mod_held = crate::keyboard::is_super_held();
 
-        // A held button over a widget app makes this motion that app's
-        // drag (pan, rubber-band). Bails out on its own when the
-        // compositor owns the drag, so it can sit ahead of that block.
-        self.forward_drag_motion();
-
         // Handle active drag (swap or resize)
         if let Some(mut drag) = self.drag {
             let held = match drag.mode {
@@ -2352,32 +2347,6 @@ impl Compositor {
         false
     }
 
-    /// Forward pointer motion to the focused widget app while its primary
-    /// button is held — i.e. during an actual drag.
-    ///
-    /// Only during a drag on purpose: hover motion is resolved inside the
-    /// compositor (see `widgets::hover_at`) precisely so apps don't get a
-    /// firehose of moves they'd have to filter. A drag, by contrast, is
-    /// something only the app can interpret — panning a zoomed canvas,
-    /// rubber-banding a selection — and it is bounded by the button being
-    /// down. Addressed to the FOCUSED window rather than the one under the
-    /// cursor, so a drag that leaves the window keeps arriving.
-    fn forward_drag_motion(&mut self) {
-        if self.drag.is_some() { return }               // compositor owns this drag
-        if !self.mouse.left_held() { return }
-        if crate::keyboard::is_super_held() { return }  // Mod+drag = swap/resize
-        let Some(fid) = self.focused else { return };
-        let is_widget = self.windows.iter()
-            .find(|w| w.id == fid)
-            .map(|w| w.kind == crate::shade::window::WindowKind::Widget)
-            .unwrap_or(false);
-        if !is_widget { return }
-        crate::shade::widgets::push_event(fid.0,
-            crate::shade::widgets::abi::Event::MouseMove {
-                x: self.mouse.x,
-                y: self.mouse.y,
-            });
-    }
 
     /// Handle only button events (click, drag, release). Position already in self.mouse.
     /// Called from lock-free input path — only when buttons change.

@@ -1306,6 +1306,30 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_cursor_pos() -> (x << 16) | y, or -1
+    //
+    // Screen coordinates, the same space `Event::MouseMove` and
+    // `Event::MouseButton` report. RENDER-gated AND focus-gated: an app
+    // may learn where the pointer is only while it holds focus, so a
+    // background module cannot watch the mouse.
+    //
+    // Exists because `Event::Wheel` carries no position — an app that
+    // wants to zoom towards the pointer has to ask for it.
+    linker.func_wrap("env", "npk_cursor_pos",
+        |caller: Caller<'_, HostState>| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                return -1;
+            }
+            let wid = caller.data().widget_window_id;
+            if wid == 0 { return -1; }
+            if crate::shade::focused_widget_id() != Some(wid) { return -1; }
+            let (x, y) = crate::shade::cursor::atomic_pos();
+            if x < 0 || y < 0 || x > 0xFFFF || y > 0xFFFF { return -1; }
+            (x << 16) | y
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_screen_flash() -> 0 or -1
     // CAPTURE-gated: same right as reading the screen, because this is
     // the acknowledgement for exactly that act. Paints a white wash over
