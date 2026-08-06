@@ -266,6 +266,13 @@ struct Iris {
     press:  Option<(i32, i32)>,
     /// The pointer moved far enough since the press to call it a drag.
     dragged: bool,
+    /// A widget consumed this click, so the raw press that follows it is
+    /// not ours. The compositor sends BOTH for one physical click: first
+    /// `Action(id)` for the button/menu that was hit, then the raw
+    /// `MouseButton` for position-sensitive apps. Without this the
+    /// toolbar's ◀ would page back on the Action and forward again on the
+    /// release, and a menu would close in the same click that opened it.
+    swallow_press: bool,
 }
 
 const ZOOM_FIT: u16 = 256;
@@ -291,7 +298,7 @@ impl Iris {
             dir: String::new(), files: Vec::new(), idx: 0,
             w: 0, h: 0, failed: false,
             menu: None, picking: false, zoom: ZOOM_FIT,
-            pan: (0, 0), press: None, dragged: false,
+            pan: (0, 0), press: None, dragged: false, swallow_press: false,
         };
         // Launched to open a specific file?
         let mut argbuf = [0u8; 512];
@@ -409,15 +416,25 @@ fn handle(iris: &mut Iris, ev: Event, payload: &str) -> Outcome {
             iris.set_zoom(if dy < 0 { zoom_in(iris.zoom) } else { zoom_out(iris.zoom) });
             Outcome::Render
         }
-        Event::Action(ActionId(id)) => handle_action(iris, id),
+        // A widget (menu label, menu item, toolbar button) took this
+        // click. Swallow the raw press that the compositor sends right
+        // after it, or the same physical click would act twice.
+        Event::Action(ActionId(id)) => {
+            iris.swallow_press = true;
+            handle_action(iris, id)
+        }
         // Press just arms a possible drag — what it MEANT is decided on
         // release, because the same button both pans and pages. That is
         // how every image viewer resolves this: a drag moves the picture,
         // a click without movement is still a click.
         Event::MouseButton { button: MouseButton::Left, down: true, x, y } => {
-            if iris.menu.is_some() || iris.picking {
-                iris.menu = None; iris.picking = false; return Outcome::Render;
+            if iris.swallow_press {
+                iris.swallow_press = false;
+                return Outcome::Idle;
             }
+            // Belt and braces: a click with a dropdown open is the
+            // dismissing click and belongs to the Popover, not to us.
+            if iris.menu.is_some() || iris.picking { return Outcome::Idle; }
             iris.press = Some((x, y));
             iris.dragged = false;
             Outcome::Idle
