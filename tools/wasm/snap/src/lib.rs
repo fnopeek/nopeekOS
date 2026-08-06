@@ -40,6 +40,7 @@ unsafe extern "C" {
     fn npk_launch_arg(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_screen_size() -> i32;
     fn npk_capture_screen(buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_screen_flash() -> i32;
     fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
     fn npk_fs_list(prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32;
     fn npk_home_dir(buf_ptr: i32, buf_max: i32) -> i32;
@@ -136,6 +137,11 @@ pub extern "C" fn _start() {
     if got as usize != need { log("[snap] capture failed"); return; }
     let t_captured = now_ms();
     log_ms("capture", t_captured - t_start);
+
+    // Shutter blink — AFTER the capture, so the white is never in the
+    // shot, and BEFORE the encode, so the acknowledgement is immediate
+    // rather than a second later when the file lands.
+    unsafe { let _ = npk_screen_flash(); }
 
     // Encode PNG (RGB, screenshots have no meaningful alpha).
     let png = encode_png_rgb(&bgra, w as u32, h as u32);

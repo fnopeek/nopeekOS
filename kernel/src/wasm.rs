@@ -1306,6 +1306,26 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_screen_flash() -> 0 or -1
+    // CAPTURE-gated: same right as reading the screen, because this is
+    // the acknowledgement for exactly that act. Paints a white wash over
+    // the finished frame for ~150 ms. The caller is expected to capture
+    // FIRST and flash after, so the wash can never be in the shot; the
+    // compositor also draws it last, after every window.
+    linker.func_wrap("env", "npk_screen_flash",
+        |caller: Caller<'_, HostState>| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::CAPTURE).is_err() {
+                return -1;
+            }
+            // Worker cores may only set the state; core 0 ticks and paints
+            // it from poll_render.
+            crate::shade::with_compositor(|comp| comp.start_flash());
+            crate::shade::request_render();
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_capture_screen(buf_ptr, buf_max) -> bytes_written or -1
     // CAPTURE-gated (screen-scrape — only the screenshot tool holds it).
     // Copies the composited front framebuffer as tightly-packed BGRA32

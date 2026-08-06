@@ -363,6 +363,11 @@ pub struct Compositor {
     pub drag: Option<DragState>,
     /// Active swap animation (windows gliding to new positions).
     pub animation: Option<SwapAnimation>,
+    /// Screen flash: the tick it started at. A shutter blink confirming a
+    /// screenshot — the file itself lands seconds later, so without this
+    /// the button feels dead. Painted over the finished frame, so it can
+    /// never end up inside a capture.
+    pub flash: Option<u64>,
     /// Focus flash: (window, tick it gained focus). The halo starts bright
     /// and settles into the steady one over `GLOW_FLASH_TICKS`, so a focus
     /// change is visible even when you were not looking at that corner.
@@ -423,6 +428,7 @@ impl Compositor {
             },
             drag: None,
             animation: None,
+            flash: None,
             focus_glow: None,
             glow_last_tick: 0,
             dock: None,
@@ -1643,6 +1649,9 @@ impl Compositor {
         // Presence handle for a fully-hidden dock.
         self.render_dock_handle(shadow, info);
 
+        // Last of all, over everything: the screenshot flash.
+        self.render_flash(shadow, info);
+
         for win in &mut self.windows {
             win.dirty = false;
         }
@@ -2767,6 +2776,58 @@ impl Compositor {
         }
         self.needs_full_redraw = true;
         true
+    }
+
+    // ── Screen flash ──────────────────────────────────────────────────
+    //
+    // Short and bright rather than long and subtle: a camera shutter, not
+    // a fade. Kept to a few frames because the overlay blends every pixel
+    // on screen, which is the expensive operation at 4K.
+
+    /// Ticks (100 Hz) the flash lasts.
+    const FLASH_TICKS: u64 = 15;
+    /// Opacity the flash starts at.
+    const FLASH_ALPHA: u32 = 210;
+
+    /// Start (or restart) the shutter blink.
+    pub fn start_flash(&mut self) {
+        self.flash = Some(crate::interrupts::ticks());
+        self.needs_full_redraw = true;
+    }
+
+    /// Advance the flash. True while it still needs frames — including the
+    /// final one that clears it, otherwise the last white wash would stay
+    /// on screen until something else happened to repaint.
+    pub fn flash_tick(&mut self) -> bool {
+        let start = match self.flash { Some(s) => s, None => return false };
+        let elapsed = crate::interrupts::ticks().saturating_sub(start);
+        self.needs_full_redraw = true;
+        if elapsed >= Self::FLASH_TICKS {
+            self.flash = None;
+        }
+        true
+    }
+
+    /// Current flash opacity, 0 when inactive. Ease-out so it snaps bright
+    /// and drains away.
+    fn flash_alpha(&self) -> u32 {
+        let start = match self.flash { Some(s) => s, None => return 0 };
+        let elapsed = crate::interrupts::ticks().saturating_sub(start);
+        if elapsed >= Self::FLASH_TICKS { return 0; }
+        let remaining = Self::FLASH_TICKS - elapsed;      // 1..=FLASH_TICKS
+        // Quadratic falloff: full brightness for the first frames, then
+        // a quick drain.
+        let a = Self::FLASH_ALPHA as u64 * remaining * remaining
+            / (Self::FLASH_TICKS * Self::FLASH_TICKS);
+        a as u32
+    }
+
+    /// Paint the flash over the finished frame.
+    fn render_flash(&self, shadow: *mut u8, info: &FbInfo) {
+        let alpha = self.flash_alpha();
+        if alpha == 0 { return; }
+        render::fill_rounded_rect_alpha(shadow, info, 0, 0,
+            self.screen_w, self.screen_h, 0x00FF_FFFF, 0, alpha);
     }
 
     /// Instantly complete any active animation.
