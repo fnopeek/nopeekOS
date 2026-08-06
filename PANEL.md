@@ -89,7 +89,18 @@ clock-less regression if the app fails to load.
   Built-in segment widgets (Phase 1): `workspaces`, `title`, `clock`,
   `tray` (status icons), `power`. Unknown names skipped. Missing config →
   built-in default layout above.
+
+  Same file, sizing (re-read every ~3 s, so editing it is edit-and-look):
+  ```
+  font: 15    # text px, 9..18 (default 15)
+  icon: 18    # icon px, 12..22 (default 18)
+  ```
+  Both are capped to what the 24 px content band holds — turning them up
+  never makes the bar taller.
 - `sys/config/dock` — pins (already shipped).
+- Panel translucency is compositor-side: `set shade.chrome_opacity <0-255>`
+  for both panels, `shade.bar_opacity` / `shade.dock_opacity` to override
+  one of them (empty = inherit the shared value).
 - Placement/behaviour as config keys later: `bar.edge`, `bar.height`,
   `dock.autohide`, … (read by the apps / passed to `set_panel`).
 - Both apps are WASM → fully replaceable.

@@ -492,7 +492,10 @@ fn paint_node_eff(
             for m in eff {
                 if let Modifier::Tint(tok) = m { color = *tok; }
             }
-            rast.text(target, content, *style, color, Point { x: inner_x, y: inner_y });
+            // Same resolver the layout pass used — otherwise the glyphs
+            // would outgrow the box that was measured for them.
+            let px = super::layout::font_size_of(*style, eff);
+            rast.text_px(target, content, *style, px, color, Point { x: inner_x, y: inner_y });
         }
 
         Widget::Icon { id, size, .. } => {

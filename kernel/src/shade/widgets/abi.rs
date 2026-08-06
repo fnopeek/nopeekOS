@@ -424,8 +424,19 @@ pub enum Modifier {
     /// a search box — a file browser's list lost every arrow key to a
     /// field the user never clicked.
     Autofocus,
+    /// Font size override in px for a `Widget::Text` — replaces the size
+    /// its `TextStyle` resolves to; the face (proportional vs mono) still
+    /// comes from the style. Layout measures at the override, so the text
+    /// keeps a correct box. Clamped to `FONT_SIZE_RANGE`; ignored on every
+    /// other widget.
+    FontSize(u16),
     // Appended only.
 }
+
+/// Accepted range for `Modifier::FontSize`. The ceiling keeps a module
+/// from filling the glyph cache with oversized bitmaps.
+pub const FONT_SIZE_MIN: u16 = 6;
+pub const FONT_SIZE_MAX: u16 = 64;
 
 // ── Widget ────────────────────────────────────────────────────────────
 
@@ -728,6 +739,13 @@ pub trait Rasterizer: Send + Sync {
 
     /// Draw text at baseline point `p` (window coordinates) in `color`.
     fn text(&mut self, t: &mut RasterTarget, s: &str, style: TextStyle, color: Token, p: Point);
+
+    /// `text` with the style's pixel size overridden (`Modifier::FontSize`).
+    /// Default ignores the override so a backend can opt in.
+    fn text_px(&mut self, t: &mut RasterTarget, s: &str, style: TextStyle, _size_px: u16,
+               color: Token, p: Point) {
+        self.text(t, s, style, color, p);
+    }
 
     /// Draw an icon from the built-in atlas.
     fn icon(&mut self, t: &mut RasterTarget, id: IconId, size: u16, color: Token, p: Point);

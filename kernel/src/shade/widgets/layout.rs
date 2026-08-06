@@ -268,6 +268,19 @@ fn flex_modifier(mods: &[Modifier]) -> Option<u8> {
     if found { Some(max) } else { None }
 }
 
+/// Pixel size a text leaf renders at: `Modifier::FontSize` when present
+/// (clamped — a module must not be able to ask for a 60 000 px glyph),
+/// else whatever the style resolves to. Layout and render must agree on
+/// this, so both go through here.
+pub(super) fn font_size_of(style: TextStyle, mods: &[Modifier]) -> u16 {
+    for m in mods {
+        if let Modifier::FontSize(px) = m {
+            return (*px).clamp(super::abi::FONT_SIZE_MIN, super::abi::FONT_SIZE_MAX);
+        }
+    }
+    crate::gui::text::style_desc(style).size_px
+}
+
 fn mods_of_widget(w: &Widget) -> &[Modifier] {
     match w {
         Widget::Column  { modifiers, .. } |
@@ -356,8 +369,9 @@ fn measure_intrinsic(w: &Widget) -> Size {
         }
 
         Widget::Text { content, style, modifiers } => {
-            let w = ceil_u32(crate::gui::text::measure(content, *style));
-            let h = ceil_u32(crate::gui::text::line_height(*style));
+            let px = font_size_of(*style, modifiers);
+            let w = ceil_u32(crate::gui::text::measure_px(content, *style, px));
+            let h = ceil_u32(crate::gui::text::line_height_px(*style, px));
             // Fallbacks for when font isn't loaded — line_height returns
             // size_px * 1.2, measure returns 0 → conservative 6 px/char.
             let w = if w == 0 {

@@ -86,6 +86,7 @@ tree with the new string.
 | `Rounded(u8)`                       | Outer corner radius without a stroke. Wins over Border's radius. |
 | `Opacity(u8)`                       | 0..=255 post-paint dampening.                   |
 | `Tint(Token)`                       | Re-colour an Icon (default OnSurface).          |
+| `FontSize(u16)`                     | Pixel size for a `Text`, overriding its `TextStyle` (the face still comes from the style). Clamped 6..=64; layout measures at the override. `Text` only. |
 
 ### Layout
 

@@ -1684,5 +1684,7 @@ pub fn default_config() -> &'static [(&'static str, &'static str, &'static str)]
         ("shade.opacity", "160", "Window background opacity (0-256, lower=more transparent)"),
         ("shade.light_tint", "70", "Darken glass on bright wallpapers (0-100, light mode; higher=darker)"),
         ("shade.chrome_opacity", "", "Bar/dock panel opacity (0-255; empty = 235 dark / 205 light)"),
+        ("shade.bar_opacity", "", "Top-bar opacity (0-255; empty = shade.chrome_opacity)"),
+        ("shade.dock_opacity", "", "Dock opacity (0-255; empty = shade.chrome_opacity)"),
     ]
 }

@@ -62,9 +62,20 @@ const SHOT: u32  = 90_001;     // screenshot: left-click = region, right = full
 const VOL_OPEN: u32 = 90_002;
 
 // Chrome sizing — UI_REFRESH.md §4 "Panel".
-const ICON_SIZE: u16 = 16;
-/// Height of the bar's inner content band.
+/// Height of the bar's inner content band. The panel height is derived
+/// from it, so text and icons are capped to what fits inside: turning
+/// them up must never push the bar taller.
 const BAND_H: u16 = 24;
+/// Text px in the bar. Bigger than `TextStyle::Body` (13) — at bar
+/// distance 13 reads small, and 15 still leaves 6 px of band.
+const FONT_DEFAULT: u16 = 15;
+const FONT_MIN: u16 = 9;
+const FONT_MAX: u16 = 18;      // line height at 18 ≈ 22 px < BAND_H
+/// Icon px in the bar. The atlas is native at 16/24; 18 comes down from
+/// 24 through the compositor's box filter.
+const ICON_DEFAULT: u16 = 18;
+const ICON_MIN: u16 = 12;
+const ICON_MAX: u16 = 20;      // 20 + the readout's 4 px padding = BAND_H
 /// Minimum width of a workspace pill / a trailing icon cell.
 const CELL_W: u16 = 26;
 /// Corner radius of those cells.
@@ -150,7 +161,8 @@ fn poll_event() -> PollResult {
 }
 
 // ── Config: segments ─────────────────────────────────────────────────
-// `sys/config/bar` lines: "left: a b c", "center: x", "right: y z".
+// `sys/config/bar` lines: "left: a b c", "center: x", "right: y z",
+// plus "font: <px>" / "icon: <px>" (see read_sizes).
 // Missing / empty → built-in default. Unknown widget names are skipped
 // at render time.
 struct Segments { left: Vec<String>, center: Vec<String>, right: Vec<String> }
@@ -187,6 +199,50 @@ fn read_segments() -> Segments {
         }
     }
     if any { seg } else { default_segments() }
+}
+
+// ── Config: sizing ───────────────────────────────────────────────────
+// Same file, two more lines: "font: 15", "icon: 18". Kept in statics and
+// re-read every few seconds, so tuning them is edit-and-look — no heap
+// involved, which is what lets this run above the bump-allocator mark.
+static mut FONT_PX: u16 = FONT_DEFAULT;
+static mut ICON_PX: u16 = ICON_DEFAULT;
+
+fn font_px() -> u16 { unsafe { *(&raw const FONT_PX) } }
+fn icon_px() -> u16 { unsafe { *(&raw const ICON_PX) } }
+
+/// Re-read the two size lines. True when either changed.
+fn read_sizes() -> bool {
+    const CFG: usize = 2048;
+    static mut SBUF: [u8; CFG] = [0; CFG];
+    let path = "sys/config/bar";
+    let p = core::ptr::addr_of_mut!(SBUF) as *mut u8;
+    let n = unsafe { npk_fetch(path.as_ptr() as i32, path.len() as i32, p as i32, CFG as i32) };
+    let mut font = FONT_DEFAULT;
+    let mut icon = ICON_DEFAULT;
+    if n > 0 {
+        let bytes = unsafe { core::slice::from_raw_parts(p as *const u8, n as usize) };
+        if let Ok(text) = core::str::from_utf8(bytes) {
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') { continue; }
+                let Some((key, val)) = line.split_once(':') else { continue };
+                let Ok(v) = val.trim().parse::<u16>() else { continue };
+                match key.trim() {
+                    "font" => font = v.clamp(FONT_MIN, FONT_MAX),
+                    "icon" => icon = v.clamp(ICON_MIN, ICON_MAX),
+                    _ => {}
+                }
+            }
+        }
+    }
+    // SAFETY: single-threaded WASM app.
+    unsafe {
+        let changed = *(&raw const FONT_PX) != font || *(&raw const ICON_PX) != icon;
+        *(&raw mut FONT_PX) = font;
+        *(&raw mut ICON_PX) = icon;
+        changed
+    }
 }
 
 // ── Live state ───────────────────────────────────────────────────────
@@ -284,6 +340,13 @@ fn cell(child: Widget, modifiers: Vec<Modifier>) -> Widget {
     prefab::center_box(child, modifiers)
 }
 
+/// Bar text: the style picks the face, `FontSize` the size. Every string
+/// in the bar goes through here so one config line moves all of them.
+fn bar_text(content: String, style: TextStyle, mut modifiers: Vec<Modifier>) -> Widget {
+    modifiers.push(Modifier::FontSize(font_px()));
+    Widget::Text { content, style, modifiers }
+}
+
 /// Icon plus a mono value (volume, battery) as one hoverable unit.
 fn readout(icon: IconId, icon_mods: Vec<Modifier>, value: String,
            click: Option<ActionId>) -> Widget {
@@ -303,8 +366,8 @@ fn readout(icon: IconId, icon_mods: Vec<Modifier>, value: String,
     }
     Widget::Row {
         children: alloc::vec![
-            Widget::Icon { id: icon, size: ICON_SIZE, modifiers: icon_mods },
-            Widget::Text { content: value, style: TextStyle::Mono, modifiers: Vec::new() },
+            Widget::Icon { id: icon, size: icon_px(), modifiers: icon_mods },
+            bar_text(value, TextStyle::Mono, Vec::new()),
         ],
         spacing: Spacing::Xs.as_u16(),
         align: Align::Center,
@@ -326,7 +389,7 @@ fn tray_cell(icon: IconId, click: Option<ActionId>, tint: Token) -> Widget {
         ]),
     ];
     if let Some(a) = click { mods.push(Modifier::OnClick(a)); }
-    cell(Widget::Icon { id: icon, size: ICON_SIZE, modifiers: Vec::new() }, mods)
+    cell(Widget::Icon { id: icon, size: icon_px(), modifiers: Vec::new() }, mods)
 }
 
 // No per-widget Padding (the bar is short — the enclosing card supplies
@@ -359,11 +422,9 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
                         Modifier::Rounded(CELL_RADIUS),
                     ]));
                 }
-                row.push(cell(Widget::Text {
-                    content: alloc::format!("{}", i + 1),
-                    style: TextStyle::Mono,
-                    modifiers: Vec::new(),
-                }, mods));
+                row.push(cell(
+                    bar_text(alloc::format!("{}", i + 1), TextStyle::Mono, Vec::new()),
+                    mods));
             }
             alloc::vec![Widget::Row {
                 children: row,
@@ -392,14 +453,11 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
                         children: alloc::vec![
                             Widget::Icon {
                                 id: icon_for_app(st.title),
-                                size: 16,
+                                size: icon_px(),
                                 modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceMuted)],
                             },
-                            Widget::Text {
-                                content: st.title.to_string(),
-                                style: TextStyle::Body,
-                                modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceMuted)],
-                            },
+                            bar_text(st.title.to_string(), TextStyle::Body,
+                                alloc::vec![Modifier::Tint(Token::OnSurfaceMuted)]),
                         ],
                         spacing: Spacing::Sm.as_u16(),
                         align: Align::Center,
@@ -408,11 +466,7 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
                 ]
             }
         }
-        "clock" => alloc::vec![Widget::Text {
-            content: st.clock.to_string(),
-            style: TextStyle::Mono,
-            modifiers: Vec::new(),
-        }],
+        "clock" => alloc::vec![bar_text(st.clock.to_string(), TextStyle::Mono, Vec::new())],
         // Battery: hidden entirely when no smart battery responds (bat < 0,
         // e.g. desktops/QEMU). Icon picked by charge level; charging shows
         // the bolt; a near-empty pack tints Danger.
@@ -632,6 +686,7 @@ fn handle(ev: Event) {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     let seg = read_segments();
+    let _ = read_sizes();
     load_catalog();                    // title → app icon, resolved once
     unsafe { HEAP_MARK = HEAP_POS; }   // freeze config; tree rebuilds above this
 
@@ -645,6 +700,11 @@ pub extern "C" fn _start() {
         rebuild_and_commit(&seg, len);
     }
 
+    // Ticks between size-config re-reads (300 ms each → ~3 s). Sizes are
+    // the one thing worth tuning by eye, so they must not need a restart.
+    const SIZE_POLL_TICKS: u32 = 10;
+    let mut tick: u32 = 0;
+
     loop {
         // Drain any pending click events first.
         loop {
@@ -654,10 +714,21 @@ pub extern "C" fn _start() {
                 PollResult::WindowGone => return,
             }
         }
+        tick = tick.wrapping_add(1);
+        let resized = tick % SIZE_POLL_TICKS == 0 && read_sizes();
         // Re-render only when the live state changed (clock minute / title
         // / active workspace), so the tree isn't rebuilt every tick.
-        if let Some(len) = state_changed() {
-            rebuild_and_commit(&seg, len);
+        match state_changed() {
+            Some(len) => rebuild_and_commit(&seg, len),
+            // State is unchanged but the sizes moved — repaint at the last
+            // committed length (STATE_BUF still holds that same state).
+            None if resized => {
+                let len = unsafe { *(&raw const LAST_LEN) };
+                if len != usize::MAX && len <= STATE_MAX {
+                    rebuild_and_commit(&seg, len);
+                }
+            }
+            None => {}
         }
         unsafe { let _ = npk_sleep(300); }
     }

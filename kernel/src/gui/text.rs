@@ -256,17 +256,25 @@ pub fn advance_width(ch: char, style: TextStyle) -> f32 {
 /// Pair kerning correction (left, right) in logical pixels.
 /// 0.0 if no kerning pair defined or font not loaded.
 pub fn kern(left: char, right: char, style: TextStyle) -> f32 {
-    let d = style_desc(style);
-    with_font_for(style, |f| f.horizontal_kern(left, right, d.size_px as f32))
+    kern_px(left, right, style, style_desc(style).size_px)
+}
+
+/// `kern` at an explicit pixel size (`Modifier::FontSize`).
+pub fn kern_px(left: char, right: char, style: TextStyle, size_px: u16) -> f32 {
+    with_font_for(style, |f| f.horizontal_kern(left, right, size_px as f32))
         .flatten()
         .unwrap_or(0.0)
 }
 
 /// Measure a string's total advance width (logical px), with kerning.
 pub fn measure(s: &str, style: TextStyle) -> f32 {
-    let d = style_desc(style);
+    measure_px(s, style, style_desc(style).size_px)
+}
+
+/// `measure` at an explicit pixel size (`Modifier::FontSize`).
+pub fn measure_px(s: &str, style: TextStyle, size_px: u16) -> f32 {
     with_font_for(style, |f| {
-        let size = d.size_px as f32;
+        let size = size_px as f32;
         let mut total = 0.0f32;
         let mut prev: Option<char> = None;
         for ch in s.chars() {
@@ -284,18 +292,26 @@ pub fn measure(s: &str, style: TextStyle) -> f32 {
 
 /// Line height (ascent − descent + line_gap) in logical pixels.
 pub fn line_height(style: TextStyle) -> f32 {
-    let d = style_desc(style);
-    with_font_for(style, |f| f.horizontal_line_metrics(d.size_px as f32).map(|m| m.new_line_size))
+    line_height_px(style, style_desc(style).size_px)
+}
+
+/// `line_height` at an explicit pixel size (`Modifier::FontSize`).
+pub fn line_height_px(style: TextStyle, size_px: u16) -> f32 {
+    with_font_for(style, |f| f.horizontal_line_metrics(size_px as f32).map(|m| m.new_line_size))
         .flatten()
-        .unwrap_or(d.size_px as f32 * 1.2) // conservative fallback
+        .unwrap_or(size_px as f32 * 1.2) // conservative fallback
 }
 
 /// Ascent (baseline → top), always positive.
 pub fn ascent(style: TextStyle) -> f32 {
-    let d = style_desc(style);
-    with_font_for(style, |f| f.horizontal_line_metrics(d.size_px as f32).map(|m| m.ascent))
+    ascent_px(style, style_desc(style).size_px)
+}
+
+/// `ascent` at an explicit pixel size (`Modifier::FontSize`).
+pub fn ascent_px(style: TextStyle, size_px: u16) -> f32 {
+    with_font_for(style, |f| f.horizontal_line_metrics(size_px as f32).map(|m| m.ascent))
         .flatten()
-        .unwrap_or(d.size_px as f32)
+        .unwrap_or(size_px as f32)
 }
 
 /// Descent (baseline → bottom). Conventionally negative.
@@ -340,7 +356,17 @@ pub fn rasterize_cached<F, R>(ch: char, style: TextStyle, f: F) -> Option<R>
 where
     F: FnOnce(&CachedGlyph) -> R,
 {
-    let d = style_desc(style);
+    rasterize_cached_px(ch, style, style_desc(style).size_px, f)
+}
+
+/// `rasterize_cached` at an explicit pixel size (`Modifier::FontSize`).
+/// The size is part of the cache key, so an override costs one cache
+/// generation, not a re-raster per frame.
+pub fn rasterize_cached_px<F, R>(ch: char, style: TextStyle, size_px: u16, f: F) -> Option<R>
+where
+    F: FnOnce(&CachedGlyph) -> R,
+{
+    let d = StyleDesc { size_px, weight: style_desc(style).weight };
     let mono_guard = MONO.lock();
     let sans_guard = FONT.lock();
     // Mono styles take the monospace face when it loaded, else the
