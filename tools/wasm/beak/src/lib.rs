@@ -231,14 +231,28 @@ static mut HTML_BUF: [u8; HTML_CAP] = [0; HTML_CAP];
 static mut HTML_LEN: usize = 0;
 
 // Concatenated bytes of the page's external <link rel=stylesheet> files.
-const CSS_CAP: usize = 2 * 1024 * 1024;
-const MAX_CSS_LINKS: usize = 16;
+// Both numbers are measured against real pages, not guessed: GitHub links 37
+// sheets totalling 4.4 MiB, MDN links 17 that come to 71 KiB, SRF 5 / 367 KiB,
+// Wikipedia 3 / 273 KiB. The old 16-link cap therefore broke MDN at 3 % of the
+// byte budget — the count was the wrong unit, the same mistake MAX_IMAGES made.
+// A dropped stylesheet is not a missing icon, it is a broken page, so the
+// headroom is deliberate. The buffer is `.bss`: it costs runtime memory only,
+// nothing in the shipped .wasm.
+const CSS_CAP: usize = 8 * 1024 * 1024;
+const MAX_CSS_LINKS: usize = 64;
 static mut CSS_BUF: [u8; CSS_CAP] = [0; CSS_CAP];
 static mut CSS_LEN: usize = 0;
 
 // Scratch buffer to fetch one <img>'s bytes into before decoding.
 const IMG_FETCH_CAP: usize = 6 * 1024 * 1024;
-const MAX_IMAGES: usize = 16;
+/// A REQUEST backstop, not a memory bound. Memory is bounded one layer down,
+/// where it can be measured: the engine keeps a per-page budget of decoded
+/// BGRA and refuses anything over it, plus a per-image pixel cap. Counting
+/// images here as well was the cruder of the two caps and the one that bit —
+/// de.wikipedia/Stansstad has 20 distinct sources whose pixels come to a
+/// couple of MB, so the byte budget never came near, and #17/#19/#20 (a navbox
+/// coat of arms and both footer icons) silently kept their placeholders.
+const MAX_IMAGES: usize = 64;
 static mut IMG_FETCH_BUF: [u8; IMG_FETCH_CAP] = [0; IMG_FETCH_CAP];
 
 /// How many images one batch asks for. Small on purpose: the batch is a
@@ -537,8 +551,10 @@ fn begin_images(engine: &mut Engine) -> Vec<String> {
     unsafe { core::ptr::addr_of_mut!(IMAGES_DIRTY).write(false) };
     engine.images_begin();
     let mut pending: Vec<String> = Vec::new();
-    for src in beak_engine::image_srcs(html_str()).iter() {
+    let all = beak_engine::image_srcs(html_str());
+    for src in all.iter() {
         if pending.len() >= MAX_IMAGES {
+            log(&alloc::format!("[beak] image cap hit: {} of {} sources fetched", MAX_IMAGES, all.len()));
             break;
         }
         if !pending.iter().any(|s| s == src) {
@@ -647,6 +663,9 @@ fn fetch_stylesheets(base: &str) {
     let mut urls: Vec<String> = Vec::new();
     for href in links.iter() {
         if urls.len() >= MAX_CSS_LINKS {
+            // Say so. A silently dropped stylesheet looks like a layout bug
+            // and sends the next session hunting in the engine.
+            log(&alloc::format!("[beak] stylesheet cap hit: {} of {} linked sheets used", MAX_CSS_LINKS, links.len()));
             break;
         }
         let abs = resolve(&base, href);
@@ -673,6 +692,9 @@ fn fetch_stylesheets(base: &str) {
         let dst = core::ptr::addr_of_mut!(CSS_BUF) as *mut u8;
         for (off, n) in spans {
             if n == 0 || off + n > scratch.len() || len + n + 1 >= CSS_CAP {
+                if n > 0 && len + n + 1 >= CSS_CAP {
+                    log(&alloc::format!("[beak] CSS buffer full at {len} B — dropped a {n} B sheet"));
+                }
                 continue;
             }
             unsafe {

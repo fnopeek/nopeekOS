@@ -22,16 +22,16 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-06, beak 0.3.15)
+### Current number (measured 2026-08-06, beak 0.3.16)
 
 ```
-4012 pass / 1591 fail / 183 inconclusive   (of 5786 vendored reftests)
-= 71.7 % of the conclusive 5603
+4036 pass / 1567 fail / 183 inconclusive   (of 5786 vendored reftests)
+= 72.0 % of the conclusive 5603
 ```
 
 Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → 3746 → 3863 → 3869 →
 3870 (0.3.0) → 3880 (0.3.2) → 3926 (0.3.3) → 3959 (0.3.4) → 3963 (0.3.5) →
-**3967** (0.3.6) → 3967 (0.3.11) → 3978 (0.3.12) → 3997 (0.3.13) → 3998 (0.3.14) → **4012** (0.3.15). The inconclusive count fell 254 → 184 over
+**3967** (0.3.6) → 3967 (0.3.11) → 3978 (0.3.12) → 3997 (0.3.13) → 3998 (0.3.14) → 4012 (0.3.15) → **4036** (0.3.16). The inconclusive count fell 254 → 184 over
 that span: references that used to render blank — because `:root` was dropped,
 because an `inline-block` had no box, or because an inline box painted no
 background — now paint, so 73 more tests actually measure something.
@@ -1012,6 +1012,31 @@ menu to pick from.
     reference now sets its text correctly, and the test page still needs
     `content` on table cells, which we do not do. Rendering the old and new
     code side by side answered it in a minute.
+
+32. ✅ **Shrink-to-fit lost the frame twice, and never saw a child's margins
+    (0.3.16).** WPT **4012 → 4036** (+24 / −0). The census pointed at a
+    `margin`/`margin-applies-to`/`margin-right` cluster, ~43 tests, all under
+    2 %. **It is not a margin bug.** In every one of them the INNER box is
+    placed pixel-exactly right; only the enclosing `position:absolute;
+    width:auto` box is too narrow. Two roots in the same path:
+    - **`layout_abs` handed `layout_box` a CONTENT width**, which the block
+      path reads as a containing block and takes margin/padding/border off
+      AGAIN — so the box lost its own frame twice and its content overflowed by
+      exactly that much. Floats (`place_float`) and inline-blocks
+      (`inline_block_box`) hand over the MARGIN-box width and say so in a
+      comment; the out-of-flow path never joined that contract.
+    - **`intrinsic_node` added a child's padding and border but not its
+      margins.** A child with `margin: 0 50px` contributed 100 px less than it
+      occupies.
+
+    The whole `padding-00x` family came along for free — same wrapper, same
+    arithmetic. Zero losses.
+
+    **Method note:** the plan said "look into the family before taking it on"
+    ([[feedback-census-by-family-not-suite]]) and that is what turned a
+    plausible margin hunt into a two-line fix somewhere else. The tell was in
+    the display list: identical inner geometry on both sides, one wrong outer
+    rectangle.
 
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the
