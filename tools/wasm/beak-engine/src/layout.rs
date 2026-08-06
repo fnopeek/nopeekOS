@@ -114,6 +114,13 @@ struct BoxOut {
     /// The box has no content, border, padding or height: its top and bottom
     /// margins are adjoining and it occupies no vertical space.
     through: bool,
+    /// The box's OWN used border-box left edge and width. Not the containing
+    /// block's — `max-width`, `margin: 0 auto`, an explicit `width` or plain
+    /// margins all make the two differ, and the inspect tool reported the
+    /// parent's numbers for years because they coincide on a plain
+    /// `width: auto` block.
+    box_x: i32,
+    box_w: i32,
 }
 
 /// The role a child element plays inside a table box (CSS2.1 §17.2.1).
@@ -1728,14 +1735,17 @@ impl Ctx<'_> {
                 let bottom = self.layout_box(el, &st, bx, bw, byy);
                 self.record_inspect(el, &st, bx, byy, bw, bottom - byy);
                 self.floats = saved;
-                BoxOut { bottom, top_y: byy, open: Collapse::one(st.margin_bottom), through: false }
+                BoxOut { bottom, top_y: byy, open: Collapse::one(st.margin_bottom), through: false, box_x: bx, box_w: bw }
             } else {
                 let o = self.flow_block_impl(el, &st, x, w, anchor, open, false);
                 if !o.through {
-                    // `w` is the containing block's content width — for the
-                    // full-width blocks that make up most of a page (and the
-                    // "dark band across the page" case) it IS the box width.
-                    self.record_inspect(el, &st, x, o.top_y, w, o.bottom - o.top_y);
+                    // The box's OWN border box. Reporting the containing
+                    // block's `x`/`w` here made every device report about a
+                    // centred or max-width container wrong: MediaWiki's
+                    // `.mw-page-container` (max-width 99.75rem, margin 0 auto)
+                    // paints 1596 px wide at x=162 and was reported as
+                    // 1920 wide at x=0.
+                    self.record_inspect(el, &st, o.box_x, o.top_y, o.box_w, o.bottom - o.top_y);
                 }
                 o
             };
@@ -2060,7 +2070,7 @@ impl Ctx<'_> {
             if !st.hidden && !st.transparent {
                 self.ops.push(DrawOp::Rect { x: content_x, y: y + 1, w: content_w.max(1), h: 1, color: self.theme.rule });
             }
-            return BoxOut { bottom: y + 3 + pb, top_y: prov_top_y, open: Collapse::one(if isolated { 0.0 } else { st.margin_bottom }), through: false };
+            return BoxOut { bottom: y + 3 + pb, top_y: prov_top_y, open: Collapse::one(if isolated { 0.0 } else { st.margin_bottom }), through: false, box_x: box_left, box_w };
         }
         // The `display:list-item` marker box, outside the content edge.
         // `list-style-type:none` generates none at all — Wikipedia's nav/TOC
@@ -2161,12 +2171,12 @@ impl Ctx<'_> {
                 let mut open = top;
                 open.merge(flow.open);
                 open.add(st.margin_bottom);
-                return BoxOut { bottom: base_y, top_y: base_y, open, through: true };
+                return BoxOut { bottom: base_y, top_y: base_y, open, through: true, box_x: box_left, box_w };
             }
             let box_bottom = border_top_y + bt + pt + ch + pb + bb;
             self.clip_overflow(st, clip_marks, box_left, border_top_y, box_w, box_bottom - border_top_y);
             self.paint_box_decoration(st, box_left, border_top_y, box_w, box_bottom - border_top_y, bg_idx);
-            return BoxOut { bottom: box_bottom, top_y: border_top_y, open: out_bottom_margin, through: false };
+            return BoxOut { bottom: box_bottom, top_y: border_top_y, open: out_bottom_margin, through: false, box_x: box_left, box_w };
         }
 
         // Box with committed content. The last child's trailing margin
@@ -2212,7 +2222,7 @@ impl Ctx<'_> {
         let box_bottom = content_top + ch + pb + bb;
         self.clip_overflow(st, clip_marks, box_left, border_top_y, box_w, box_bottom - border_top_y);
         self.paint_box_decoration(st, box_left, border_top_y, box_w, box_bottom - border_top_y, bg_idx);
-        BoxOut { bottom: box_bottom, top_y: border_top_y, open: out_open, through: false }
+        BoxOut { bottom: box_bottom, top_y: border_top_y, open: out_open, through: false, box_x: box_left, box_w }
     }
 
     /// The decoded image (if any) + natural box size for an `<img>`: from the
@@ -3629,10 +3639,22 @@ impl Ctx<'_> {
         if horiz {
             *pref += p;
             *min += m;
-        } else {
-            *pref = pref.max(p);
-            *min = min.max(m);
+            return;
         }
+        // Floated siblings sit side by side, so a block container's max-content
+        // width is their SUM, not the widest of them. Taking the widest sized a
+        // `float: right` <ul> of icons to ONE icon — and its own floated <li>
+        // children then had no room beside each other and stacked vertically,
+        // which is exactly what the Wikipedia footer showed. At MIN-content each
+        // float gets its own line, so there the widest still wins.
+        if cs.float != FloatKind::None {
+            run.floats += p;
+            *pref = pref.max(run.floats);
+        } else {
+            run.floats = 0.0;
+            *pref = pref.max(p);
+        }
+        *min = min.max(m);
     }
 
     /// `intrinsic_width`, dispatching on whether the cell is real or anonymous.
@@ -4886,6 +4908,10 @@ fn layout_pre(
 struct Run {
     text: String,
     frame: f32,
+    /// Running sum of the margin-box widths of a consecutive group of floated
+    /// siblings. They sit SIDE BY SIDE, so at max-content they add up instead
+    /// of competing; any non-float box ends the group.
+    floats: f32,
 }
 
 /// The horizontal space one inline box adds to its line. `flow` advances the
@@ -6359,6 +6385,49 @@ mod tests {
         let dom = dom::parse(html);
         let sheet = crate::css::collect(&dom, crate::css::Media::new(800.0, false));
         layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, &FormState::default(), false)
+    }
+
+    fn lay_inspect(html: &str, w: u32) -> Layout {
+        let dom = dom::parse(html);
+        let sheet = crate::css::collect(&dom, crate::css::Media::new(800.0, false));
+        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, &FormState::default(), true)
+    }
+
+    #[test]
+    fn inspect_reports_the_box_not_its_containing_block() {
+        // The device debugging tool has to agree with the pixels. It used to
+        // report the CONTAINING BLOCK's x/width, which coincides with the box
+        // only for a plain `width: auto` block — so every report about a
+        // centred or max-width container (MediaWiki's `.mw-page-container`)
+        // carried the viewport's numbers instead of the box's.
+        let l = lay_inspect(
+            "<body style=\"margin:0\"><div id=c style=\"max-width:600px;margin:0 auto;background:#f00\">x</div></body>",
+            1000,
+        );
+        let b = l.inspect.iter().find(|b| b.label.starts_with("div#c")).expect("inspect box");
+        assert_eq!((b.x, b.w), (200, 600), "centred max-width box");
+        // … and it matches what is actually painted.
+        let red = rects(&l).into_iter().find(|(.., c)| *c == Rgb(0xff, 0, 0)).unwrap();
+        assert_eq!((red.0, red.2), (b.x, b.w));
+    }
+
+    #[test]
+    fn floated_siblings_add_up_at_max_content() {
+        // Floats sit side by side, so a shrink-to-fit box around a row of them
+        // is as wide as their SUM. Taking the widest sized Wikipedia's
+        // `float: right` footer <ul> to one icon, and its floated <li> children
+        // then stacked vertically instead of sitting in a row.
+        let l = lay(
+            "<body style=\"margin:0\"><ul style=\"float:right;margin:0;padding:0;list-style:none\">\
+             <li style=\"float:left\"><div style=\"width:40px;height:20px;background:#f00\"></div></li>\
+             <li style=\"float:left\"><div style=\"width:40px;height:20px;background:#00f\"></div></li>\
+             </ul></body>",
+            600,
+        );
+        let red = rects(&l).into_iter().find(|(.., c)| *c == Rgb(0xff, 0, 0)).unwrap();
+        let blue = rects(&l).into_iter().find(|(.., c)| *c == Rgb(0, 0, 0xff)).unwrap();
+        assert_eq!(red.1, blue.1, "the two floats share a line, not stack");
+        assert_eq!(blue.0 - red.0, 40, "and sit directly beside each other");
     }
 
     #[test]
