@@ -340,6 +340,7 @@ struct Strings {
     zoom_fit:    &'static str,
     about:       &'static str,
     no_images:   &'static str,
+    loading:     &'static str,
     no_image:    &'static str,
     unsupported: &'static str,
 }
@@ -351,6 +352,7 @@ const EN: Strings = Strings {
     zoom_in: "Zoom in", zoom_out: "Zoom out", zoom_fit: "Fit to window",
     about: "About Iris",
     no_images: "No images in this folder",
+    loading: "Loading…",
     no_image: "No image",
     unsupported: "Unsupported format",
 };
@@ -362,6 +364,7 @@ const DE: Strings = Strings {
     zoom_in: "Vergrößern", zoom_out: "Verkleinern", zoom_fit: "Einpassen",
     about: "Über Iris",
     no_images: "Keine Bilder in diesem Ordner",
+    loading: "Lädt…",
     no_image: "Kein Bild",
     unsupported: "Format nicht unterstützt",
 };
@@ -416,6 +419,10 @@ struct Iris {
     dragged: bool,
     /// Last navigation direction — prefetch follows it first.
     forward: bool,
+    /// A decode is about to run. Committed as a scene BEFORE the decode
+    /// starts, so the footer says what is happening during the seconds
+    /// the picture takes — the window is otherwise silent.
+    loading: bool,
     /// A widget consumed this click, so the raw press that follows it is
     /// not ours. The compositor sends BOTH for one physical click: first
     /// `Action(id)` for the button/menu that was hit, then the raw
@@ -456,7 +463,7 @@ impl Iris {
             dir: String::new(), files: Vec::new(), idx: 0,
             w: 0, h: 0, failed: false,
             menu: None, picking: false, zoom: ZOOM_FIT,
-            pan: (0, 0), press: None, dragged: false, forward: true,
+            pan: (0, 0), press: None, dragged: false, forward: true, loading: false,
             swallow_press: false,
         };
         // Launched to open a specific file?
@@ -528,21 +535,14 @@ impl Iris {
         };
         let t_fetched = now_ms();
         log_ms("fetch", t_fetched - t_start);
-        // Show each band as it lands. The window is empty until the first
-        // one arrives, and that is roughly a twelfth of the decode — a
-        // tenth of a second instead of a second and a half of nothing.
-        let mut first_pixels: i64 = 0;
-        let progressive = |px: &[u8], w: u32, h: u32| {
-            unsafe {
-                let _ = npk_canvas_commit(CANVAS_ID, px.as_ptr() as i32,
-                    px.len() as i32, w as i32, h as i32);
-            }
-            if first_pixels == 0 {
-                first_pixels = now_ms();
-                log_ms("=== open -> first pixels", first_pixels - t_start);
-            }
-        };
-        match decode_png_cb(bytes, progressive) {
+        // Nothing is shown until the picture is whole. Handing over each
+        // band as it landed did work — first pixels after a tenth of the
+        // time — but watching an image wipe in over two seconds reads
+        // worse than a moment of quiet, and while browsing it replaced a
+        // finished picture with a half-black one. The decoder stays
+        // resumable (it costs nothing and is checked bit-identical); it
+        // simply keeps its intermediate states to itself.
+        match decode_png(bytes) {
             Some((bgra, w, h)) => {
                 let t_decoded = now_ms();
                 let rc = unsafe {
@@ -833,7 +833,9 @@ fn render_toolbar(iris: &Iris) -> Widget {
 /// — loft's `prefab::footer` split.
 fn render_footer(iris: &Iris) -> Widget {
     let path = iris.full_path().unwrap_or_default();
-    let right = if iris.files.is_empty() {
+    let right = if iris.loading {
+        s().loading.to_string()
+    } else if iris.files.is_empty() {
         s().no_images.to_string()
     } else if iris.failed {
         s().unsupported.to_string()
@@ -955,8 +957,13 @@ fn commit_scene(iris: &Iris) {
 pub extern "C" fn _start() {
     let mut iris = Iris::new();
     let mut mark = alloc_mark();
+    // The window appears immediately and says what it is busy with; the
+    // first picture has nothing cached behind it and takes the full
+    // decode, which is the longest wait iris ever shows anyone.
+    iris.loading = true;
     commit_scene(&iris); // creates the window (assigns widget_window_id)
     iris.load();         // window exists now → canvas_commit works
+    iris.loading = false;
     commit_scene(&iris); // refresh chrome with dims
 
     // Consecutive empty polls — the quiet period that gates prefetching.
@@ -976,7 +983,16 @@ pub extern "C" fn _start() {
                 match outcome {
                     Outcome::Idle => {}
                     Outcome::Render => commit_scene(&iris),
-                    Outcome::Reload => { iris.load(); commit_scene(&iris); }
+                    Outcome::Reload => {
+                        // Say "loading" first, then do the work: a decode
+                        // blocks this loop for seconds and nothing else
+                        // would tell the user anything.
+                        iris.loading = true;
+                        commit_scene(&iris);
+                        iris.load();
+                        iris.loading = false;
+                        commit_scene(&iris);
+                    }
                     Outcome::Exit => { close_self(); return; }
                 }
             }
