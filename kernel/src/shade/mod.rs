@@ -1550,6 +1550,28 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
         widgets::update_hover(wid, hx, hy);
     }
 
+    // Drag motion → the focused widget app. Only while its primary button
+    // is held, i.e. during an actual drag: hover is resolved above,
+    // compositor-side, precisely so apps never see a firehose of moves.
+    // A drag is the part only the app can interpret (panning a zoomed
+    // canvas, rubber-banding), and it is bounded by the button being down.
+    // Addressed to the FOCUSED window, not the one under the cursor, so a
+    // drag that leaves the window keeps arriving.
+    //
+    // This has to live here, on the real motion path: `handle_mouse` on
+    // the compositor looks like the right home but has no callers at all.
+    {
+        let (btn, _) = cursor::atomic_buttons();
+        if btn & 1 != 0
+            && !DRAG_ACTIVE.load(Ordering::Relaxed)
+            && !crate::keyboard::is_super_held()
+        {
+            if let Some(wid) = focused_widget_id() {
+                widgets::push_event(wid, widgets::abi::Event::MouseMove { x: hx, y: hy });
+            }
+        }
+    }
+
     let is_button_change = cursor::has_button_event();
     let is_drag = DRAG_ACTIVE.load(Ordering::Relaxed);
 
