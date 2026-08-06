@@ -22,16 +22,16 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-06, beak 0.4.1)
+### Current number (measured 2026-08-06, beak 0.4.3)
 
 ```
-4056 pass / 1549 fail / 181 inconclusive   (of 5786 vendored reftests)
-= 72.4 % of the conclusive 5605
+4064 pass / 1541 fail / 181 inconclusive   (of 5786 vendored reftests)
+= 72.5 % of the conclusive 5605
 ```
 
 Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → 3746 → 3863 → 3869 →
 3870 (0.3.0) → 3880 (0.3.2) → 3926 (0.3.3) → 3959 (0.3.4) → 3963 (0.3.5) →
-**3967** (0.3.6) → 3967 (0.3.11) → 3978 (0.3.12) → 3997 (0.3.13) → 3998 (0.3.14) → 4012 (0.3.15) → 4036 (0.3.16) → **4056** (0.4.1). The inconclusive count fell 254 → 184 over
+**3967** (0.3.6) → 3967 (0.3.11) → 3978 (0.3.12) → 3997 (0.3.13) → 3998 (0.3.14) → 4012 (0.3.15) → 4036 (0.3.16) → 4056 (0.4.1) → **4064** (0.4.3). The inconclusive count fell 254 → 184 over
 that span: references that used to render blank — because `:root` was dropped,
 because an `inline-block` had no box, or because an inline box painted no
 background — now paint, so 73 more tests actually measure something.
@@ -1196,6 +1196,32 @@ menu to pick from.
     of four pages, not the half-a-stylesheet catastrophe noted earlier. The
     `:checked` column is the surprise: 193 on Wikipedia, the checkbox-hack that
     drives its collapsible menus.
+
+37. ✅ **The pseudo-classes the refactor unlocked (0.4.3).** WPT **4056 →
+    4064** (+8 / −0), 177 unit tests. Everything here is small *because* item 36
+    landed first — which was the point of doing it first.
+
+    - **`:first-of-type` / `:last-of-type` / `:only-of-type` / `:nth-of-type()`
+      / `:nth-last-of-type()`.** Same arithmetic as the `:nth-child` family,
+      counted only among siblings sharing the subject's tag. The `-last-` and
+      `-only-` halves need siblings that come AFTER the subject, and those are
+      read off `ancestors.last().el.children` — **reachable only because the
+      matcher borrows live elements**. With the old snapshot they were not
+      expressible. +8 on the oracle (the whole `css-flexbox/gap-004/005`
+      family), 224 occurrences in GitHub's CSS.
+    - **`:checked` / `:disabled` / `:enabled`**, reading `ElemInfo::state`.
+      WPT-neutral and **visibly right on the real page**: de.wikipedia's search
+      field goes from `(248,248,248)` to `(255,255,255)` because
+      `.cdx-text-input__input:enabled { background-color: #fff }` finally
+      applies, and the Suchen button picks up its `:enabled` colours
+      (`(32,33,34)` → `(64,66,68)`, `(230,231,231)` → `(248,249,250)`). Matches
+      Firefox.
+
+    State comes from the DOCUMENT (`checked`/`disabled` attributes). Live
+    `checked` after a click belongs to the form state and is a separate step —
+    and on its own it would buy nothing yet, because clicking a `<label>` does
+    not toggle its control either. Not covered: `<fieldset disabled>` disabling
+    its descendants.
 
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the

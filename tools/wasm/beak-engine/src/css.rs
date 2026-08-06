@@ -56,7 +56,18 @@ pub struct ElemState {
 
 impl<'a> ElemInfo<'a> {
     pub fn of(el: &'a Element) -> ElemInfo<'a> {
-        ElemInfo::with_state(el, ElemState::default())
+        // What the DOCUMENT says. `:hover`/`:focus` have no document form and
+        // stay false until an event loop sets them; live `checked` after a
+        // click belongs to the form state and comes through `with_state`.
+        // Not covered: a `<fieldset disabled>` disabling its descendants.
+        ElemInfo::with_state(
+            el,
+            ElemState {
+                checked: el.attr("checked").is_some(),
+                disabled: el.attr("disabled").is_some(),
+                ..ElemState::default()
+            },
+        )
     }
 
     pub fn with_state(el: &'a Element, state: ElemState) -> ElemInfo<'a> {
@@ -76,6 +87,11 @@ impl<'a> ElemInfo<'a> {
     /// `:empty`: no element children and no non-whitespace text (Selectors 4
     /// §14.3 — white-space-only text nodes do not disqualify, which is what
     /// browsers do and what the `<td></td>` / `<p>\n</p>` idioms rely on).
+    #[cfg(test)]
+    pub fn clone_for_test(&self) -> ElemInfo<'a> {
+        ElemInfo::with_state(self.el, self.state)
+    }
+
     pub fn is_empty_element(&self) -> bool {
         self.el.children.iter().all(|n| match n {
             Node::Text(t) => t.trim().is_empty(),
@@ -152,11 +168,30 @@ enum Structural {
     OnlyChild,
     NthChild(i32, i32),     // matches index == a*n + b for some n ≥ 0
     NthLastChild(i32, i32), // same, counted from the end
+    /// The same five, counted only among siblings with the subject's tag.
+    FirstOfType,
+    LastOfType,
+    OnlyOfType,
+    NthOfType(i32, i32),
+    NthLastOfType(i32, i32),
+}
+
+/// Where the subject sits among its element siblings: the 1-based index and
+/// the count, and the same pair counted only among siblings that share its tag
+/// (`:*-of-type`). The of-type half needs the FULL sibling list, not just the
+/// preceding one — reachable only since the matcher borrows live elements and
+/// can look at the parent's children.
+#[derive(Clone, Copy)]
+struct SibCtx {
+    idx: u32,
+    count: u32,
+    idx_of_type: u32,
+    count_of_type: u32,
 }
 
 impl Structural {
-    fn matches(&self, ctx: Option<(u32, u32)>) -> bool {
-        let Some((idx, count)) = ctx else { return false }; // no sibling context → can't evaluate
+    fn matches(&self, ctx: Option<SibCtx>) -> bool {
+        let Some(SibCtx { idx, count, idx_of_type, count_of_type }) = ctx else { return false }; // no sibling context → can't evaluate
         // i == a*n + b for some integer n ≥ 0 (handles a ≤ 0 too).
         let nth = |a: i32, b: i32, i: u32| {
             let i = i as i32;
@@ -173,6 +208,13 @@ impl Structural {
             Structural::OnlyChild => count == 1,
             Structural::NthChild(a, b) => nth(a, b, idx),
             Structural::NthLastChild(a, b) => count >= idx && nth(a, b, count - idx + 1),
+            Structural::FirstOfType => idx_of_type == 1,
+            Structural::LastOfType => idx_of_type == count_of_type,
+            Structural::OnlyOfType => count_of_type == 1,
+            Structural::NthOfType(a, b) => nth(a, b, idx_of_type),
+            Structural::NthLastOfType(a, b) => {
+                count_of_type >= idx_of_type && nth(a, b, count_of_type - idx_of_type + 1)
+            }
         }
     }
 }
@@ -202,6 +244,11 @@ struct Compound {
     /// §14.3). Only expressible since the matcher borrows the live element:
     /// a snapshot of tag/id/class can never answer "what is inside".
     empty: bool,
+    /// State pseudo-classes, each `Some(want)` when the selector asks for it.
+    /// They read `ElemInfo::state` — the same field `:hover`/`:focus` will use
+    /// once there is an event loop, which is why they live together.
+    checked: Option<bool>,
+    disabled: Option<bool>,
     /// `::before`/`::after` on this compound (only valid on the LAST compound
     /// of a selector — checked in `parse_selector`).
     pseudo: PseudoElem,
@@ -211,7 +258,7 @@ impl Compound {
     /// `ctx = Some((index, count))` provides the sibling position for structural
     /// pseudo-classes; `None` (an ancestor with no known position) makes any
     /// structural pseudo fail (the selector is dropped rather than mis-applied).
-    fn matches(&self, e: &ElemInfo, ctx: Option<(u32, u32)>) -> bool {
+    fn matches(&self, e: &ElemInfo, ctx: Option<SibCtx>) -> bool {
         if let Some(t) = &self.tag {
             if t != e.tag() {
                 return false;
@@ -235,6 +282,12 @@ impl Compound {
             return false;
         }
         if self.empty && !e.is_empty_element() {
+            return false;
+        }
+        if self.checked.is_some_and(|w| w != e.state.checked) {
+            return false;
+        }
+        if self.disabled.is_some_and(|w| w != e.state.disabled) {
             return false;
         }
         // :not(x) — none of the negated compounds may match.
@@ -266,8 +319,29 @@ impl Selector {
     /// enough for content selectors; noted as a shortcut).
     fn matches(&self, subject: &ElemInfo, ancestors: &[ElemInfo], prev_siblings: &[ElemInfo], sib_count: u32) -> bool {
         // The subject's structural pseudo-classes evaluate against its 1-based
-        // sibling index (preceding count + 1) and the total sibling count.
-        let subj_ctx = Some((prev_siblings.len() as u32 + 1, sib_count));
+        // sibling index (preceding count + 1) and the total sibling count —
+        // and, for `:*-of-type`, against the same pair restricted to its tag.
+        // The of-type COUNT needs siblings that come after the subject too, so
+        // it is read off the parent's children.
+        let tag = subject.tag();
+        let idx_of_type = prev_siblings.iter().filter(|p| p.tag() == tag).count() as u32 + 1;
+        let count_of_type = ancestors
+            .last()
+            .map(|p| {
+                p.el.children
+                    .iter()
+                    .filter(|n| matches!(n, Node::Element(e) if e.tag == tag))
+                    .count() as u32
+            })
+            // No parent on the path (the root, or a caller that did not supply
+            // one): the subject is the only element of its type we can see.
+            .unwrap_or(idx_of_type);
+        let subj_ctx = Some(SibCtx {
+            idx: prev_siblings.len() as u32 + 1,
+            count: sib_count,
+            idx_of_type,
+            count_of_type,
+        });
         let last = self.compounds.len() - 1;
         if !self.compounds[last].matches(subject, subj_ctx) {
             return false;
@@ -1288,6 +1362,8 @@ fn parse_compound(tok: &str) -> Option<Compound> {
         structural: Vec::new(),
         root: false,
         empty: false,
+        checked: None,
+        disabled: None,
         pseudo: PseudoElem::None,
     };
     let mut i = 0;
@@ -1394,6 +1470,9 @@ fn parse_compound(tok: &str) -> Option<Compound> {
                     ("where", Some(a)) => c.where_groups.push(parse_compound_list(&a)),
                     ("root", None) => c.root = true,
                     ("empty", None) => c.empty = true,
+                    ("checked", None) => c.checked = Some(true),
+                    ("disabled", None) => c.disabled = Some(true),
+                    ("enabled", None) => c.disabled = Some(false),
                     ("first-child", None) => c.structural.push(Structural::FirstChild),
                     ("last-child", None) => c.structural.push(Structural::LastChild),
                     ("only-child", None) => c.structural.push(Structural::OnlyChild),
@@ -1404,6 +1483,17 @@ fn parse_compound(tok: &str) -> Option<Compound> {
                     ("nth-last-child", Some(a)) => {
                         let (x, y) = parse_nth(&a)?;
                         c.structural.push(Structural::NthLastChild(x, y));
+                    }
+                    ("first-of-type", None) => c.structural.push(Structural::FirstOfType),
+                    ("last-of-type", None) => c.structural.push(Structural::LastOfType),
+                    ("only-of-type", None) => c.structural.push(Structural::OnlyOfType),
+                    ("nth-of-type", Some(a)) => {
+                        let (x, y) = parse_nth(&a)?;
+                        c.structural.push(Structural::NthOfType(x, y));
+                    }
+                    ("nth-last-of-type", Some(a)) => {
+                        let (x, y) = parse_nth(&a)?;
+                        c.structural.push(Structural::NthLastOfType(x, y));
                     }
                     _ => return None, // :hover/:checked/… — unsupported → drop the selector
                 }
@@ -1594,6 +1684,74 @@ mod tests {
             })
         }
         ElemInfo::of(find(&dom.root, tag).expect("element"))
+    }
+
+    #[test]
+    fn state_pseudo_classes_read_the_element_state() {
+        let dom = dom::parse(
+            "<form><input type=checkbox checked><input type=checkbox><input disabled></form>",
+        );
+        fn inputs<'x>(el: &'x dom::Element, out: &mut Vec<&'x dom::Element>) {
+            if el.tag == "input" { out.push(el); }
+            for n in &el.children {
+                if let dom::Node::Element(e) = n { inputs(e, out); }
+            }
+        }
+        let mut v = Vec::new();
+        inputs(&dom.root, &mut v);
+        let hit = |sel: &str, i: usize| {
+            let ss = parse(&alloc::format!("{sel} {{ color: red }}"));
+            !ss.matched(&ElemInfo::of(v[i]), &[], &[], 3, Media::new(1000.0, false)).is_empty()
+        };
+        assert!(hit("input:checked", 0));
+        assert!(!hit("input:checked", 1));
+        assert!(hit("input:disabled", 2));
+        assert!(!hit("input:disabled", 0));
+        // `:enabled` is the negation, not "no disabled selector at all".
+        assert!(hit("input:enabled", 0));
+        assert!(!hit("input:enabled", 2));
+    }
+
+    #[test]
+    fn of_type_counts_only_siblings_with_the_same_tag() {
+        // `:nth-last-of-type` and `:only-of-type` need siblings that come AFTER
+        // the subject, which is readable off the parent's children only because
+        // the matcher borrows live elements.
+        let html = "<div><p>a</p><span>s</span><p>b</p><span>t</span><p>c</p></div>";
+        let dom = dom::parse(html);
+        fn kids<'x>(el: &'x dom::Element) -> Vec<&'x dom::Element> {
+            el.children.iter().filter_map(|n| match n {
+                dom::Node::Element(e) => Some(e),
+                _ => None,
+            }).collect()
+        }
+        fn find_div<'x>(el: &'x dom::Element) -> Option<&'x dom::Element> {
+            if el.tag == "div" { return Some(el); }
+            el.children.iter().find_map(|n| match n {
+                dom::Node::Element(e) => find_div(e),
+                _ => None,
+            })
+        }
+        let div = find_div(&dom.root).expect("div");
+        let parent = ElemInfo::of(div);
+        let ks = kids(div);
+        let hit = |sel: &str, i: usize| {
+            let ss = parse(&alloc::format!("{sel} {{ color: red }}"));
+            let prev: Vec<ElemInfo> = ks[..i].iter().map(|e| ElemInfo::of(e)).collect();
+            let subj = ElemInfo::of(ks[i]);
+            !ss.matched(&subj, &[parent.clone_for_test()], &prev, ks.len() as u32, Media::new(1000.0, false)).is_empty()
+        };
+        // <p> elements are at positions 0, 2, 4 → of-type indices 1, 2, 3.
+        assert!(hit("p:first-of-type", 0));
+        assert!(!hit("p:first-of-type", 2));
+        assert!(hit("p:nth-of-type(2)", 2));
+        assert!(hit("p:last-of-type", 4));
+        assert!(hit("p:nth-last-of-type(1)", 4));
+        assert!(!hit("p:only-of-type", 0));
+        // `:first-child` is NOT the same question: the second <span> is the
+        // fourth child but only the second of its type.
+        assert!(hit("span:nth-of-type(2)", 3));
+        assert!(!hit("span:nth-child(2)", 3));
     }
 
     #[test]
