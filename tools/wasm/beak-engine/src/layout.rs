@@ -2748,7 +2748,21 @@ impl Ctx<'_> {
         };
         let bg_idx = self.ops.len();
         let bottom = self.lay_table_rows(&rows, ncols, &colw, st, inner_x, content_top);
-        let table_bottom = if collapse { bottom } else { bottom + sy + st.pad_bottom as i32 + st.border_bottom.width as i32 };
+        let mut table_bottom = if collapse { bottom } else { bottom + sy + st.pad_bottom as i32 + st.border_bottom.width as i32 };
+        // `height` on a table is a MINIMUM for its box, never a maximum
+        // (CSS2.1 §17.5.3) — rows keep the height their content needs, and a
+        // table shorter than its `height` grows to it. The rows themselves are
+        // not stretched into the extra space; that is the "distribute over
+        // rows" part of §17.5.3 and needs per-row percentage heights first.
+        let frame_y = if collapse { 0.0 } else { st.pad_top + st.pad_bottom + st.border_y() };
+        let min_h = |len: Len| match len {
+            Len::Px(h) if st.box_border => Some(h),
+            Len::Px(h) => Some(h + frame_y),
+            _ => None,
+        };
+        if let Some(h) = min_h(st.height).or_else(|| min_h(st.min_height)) {
+            table_bottom = table_bottom.max(y0 + h as i32);
+        }
         // A table box paints its own background and border like any other box;
         // only per-cell decoration is left to the boxes inside (see above).
         // Without this a floated infobox is transparent and the article text it
@@ -2851,7 +2865,12 @@ impl Ctx<'_> {
             for c in 0..ncols {
                 colw[c] = (cap * pref[c] / total).max(minw[c]);
             }
-        } else if !table_auto && total < content_w && total > 0.0 {
+        } else if !table_auto && total < content_w {
+            // No `total > 0` guard: a table whose columns all measure zero
+            // (every cell empty) still has to reach its specified `width` —
+            // otherwise `table { width: 100px }` around empty cells collapses
+            // to its border alone, which is what a `display: table` root with
+            // an empty `<body>` does.
             let extra = (content_w - total) / ncols as f32;
             for c in 0..ncols {
                 colw[c] += extra;
@@ -3443,6 +3462,13 @@ impl Ctx<'_> {
             }
             got
         };
+        // Whole pixels, rounded UP. A max-content width is a REQUIREMENT — the
+        // width at which the content does not wrap — so a consumer that turns
+        // 678.4 into a used width of 678 loses the last word to a second line.
+        // Floats and inline-blocks learned this and ceil themselves; flex items
+        // and shrink-to-fit out-of-flow boxes truncated, which is why a root
+        // `display:flex` wrapped text its `display:block` reference did not.
+        let out = (ceil_i32(out.0) as f32, ceil_i32(out.1) as f32);
         self.intrinsic.insert(el.seq, out);
         out
     }
@@ -3730,12 +3756,7 @@ impl Ctx<'_> {
         self.cb = prev_cb;
 
         // Explicit / min / max height clamp the content-box height.
-        let pad_v = st.pad_top as i32 + st.pad_bottom as i32;
-        let px_h = |len: Len| match len {
-            Len::Px(h) if st.box_border => Some((h as i32 - pad_v).max(0)),
-            Len::Px(h) => Some(h as i32),
-            _ => None,
-        };
+        let px_h = |len: Len| content_height_of(st, len).map(|v| v as i32);
         let mut ch = content_h;
         if let Some(h) = px_h(st.height) {
             ch = h;
@@ -3836,12 +3857,7 @@ impl Ctx<'_> {
         let row_gap = st.grid_row_gap;
 
         // Definite container content height (for %/fr row resolution).
-        let pad_v = st.pad_top + st.pad_bottom;
-        let def_h: Option<f32> = match st.height {
-            Len::Px(h) if st.box_border => Some((h - pad_v).max(0.0)),
-            Len::Px(h) => Some(h),
-            _ => None,
-        };
+        let def_h: Option<f32> = content_height_of(st, st.height);
 
         // — placement — (col, colspan, row, rowspan) per item, row-major flow
         // honouring explicit `grid-column`/`grid-row` start lines + spans.
@@ -4244,12 +4260,7 @@ impl Ctx<'_> {
         }
 
         // Definite container content height (for cross-stretch / main-axis flex).
-        let pad_v = st.pad_top + st.pad_bottom;
-        let def_h: Option<f32> = match st.height {
-            Len::Px(h) if st.box_border => Some((h - pad_v).max(0.0)),
-            Len::Px(h) => Some(h),
-            _ => None,
-        };
+        let def_h: Option<f32> = content_height_of(st, st.height);
 
         let mut content_h = if items.is_empty() {
             0
@@ -4284,12 +4295,7 @@ impl Ctx<'_> {
         self.cb = prev_cb;
 
         // Explicit / min / max height clamp the content-box height.
-        let pad_vi = st.pad_top as i32 + st.pad_bottom as i32;
-        let px_h = |len: Len| match len {
-            Len::Px(h) if st.box_border => Some((h as i32 - pad_vi).max(0)),
-            Len::Px(h) => Some(h as i32),
-            _ => None,
-        };
+        let px_h = |len: Len| content_height_of(st, len).map(|v| v as i32);
         let mut ch = content_h;
         if let Some(h) = px_h(st.height) {
             ch = h;
@@ -6438,6 +6444,53 @@ mod tests {
     }
 
     #[test]
+    fn a_table_takes_its_specified_width_and_height() {
+        let red = Rgb(0xff, 0, 0);
+        let box_of = |css: &str| {
+            let l = lay(
+                &format!("<body style=\"margin:0\"><table style=\"border-spacing:0;background:#f00;{css}\">\
+                          <tr><td></td></tr></table></body>"),
+                400,
+            );
+            rects(&l).into_iter().find(|(.., c)| *c == red).map(|(_, _, w, h, _)| (w, h)).unwrap()
+        };
+        // Empty cells used to collapse the table onto its border: the columns
+        // measure zero, so nothing ever claimed the specified width.
+        assert_eq!(box_of("width:100px;height:60px"), (100, 60));
+        // `height` is a MINIMUM (CSS2.1 §17.5.3) — taller content wins.
+        let (_, h) = box_of("width:100px;height:1px");
+        assert!(h > 1, "content keeps its height, got {h}");
+        // `min-height` does the same job.
+        assert_eq!(box_of("width:100px;min-height:60px"), (100, 60));
+        // `box-sizing: border-box` counts the border in, not on top.
+        assert_eq!(
+            box_of("width:100px;height:60px;border:10px solid #00f;box-sizing:border-box"),
+            (100, 60)
+        );
+    }
+
+    #[test]
+    fn a_max_content_width_is_rounded_up_not_truncated() {
+        // A max-content width is the width at which the content does NOT wrap.
+        // Truncating a fractional one to whole pixels loses the last word —
+        // and the shrink-to-fit paths disagreed about it: a float ceiled, a
+        // flex item truncated, so the same text wrapped in one and not in the
+        // other.
+        let lines = |display: &str| {
+            let l = lay(
+                &format!(
+                    "<body style=\"margin:0\"><div style=\"display:{display}\">\
+                     <div id=t>Wrapping here would be one word too early</div></div></body>"
+                ),
+                600,
+            );
+            texts(&l).len()
+        };
+        assert_eq!(lines("flex"), lines("block"), "flex item wraps where a block does not");
+        assert_eq!(lines("flex"), 1, "the text fits on one line either way");
+    }
+
+    #[test]
     fn table_rows_and_row_groups_are_boxes_of_their_own() {
         let red = Rgb(0xff, 0, 0);
         let table = |css: &str| {
@@ -7452,6 +7505,19 @@ fn vert_len(len: Len, cbh: Option<i32>) -> Option<f32> {
         Len::Pct(p) => cbh.map(|h| p / 100.0 * h as f32),
         Len::Calc { pct, px } if pct == 0.0 => Some(px),
         Len::Calc { pct, px } => cbh.map(|h| pct / 100.0 * h as f32 + px),
+    }
+}
+
+/// The CONTENT-box height a definite `height`/`min-`/`max-height` asks for.
+/// Under `box-sizing: border-box` the used height spans padding AND border;
+/// flex and grid each subtracted only the padding, so every bordered container
+/// with a definite height came out two border-widths too tall — and a root
+/// `display:flex` stretched between `top`/`bottom` overshot the viewport.
+fn content_height_of(st: &ComputedStyle, len: Len) -> Option<f32> {
+    match len {
+        Len::Px(h) if st.box_border => Some((h - st.pad_top - st.pad_bottom - st.border_y()).max(0.0)),
+        Len::Px(h) => Some(h),
+        _ => None,
     }
 }
 
