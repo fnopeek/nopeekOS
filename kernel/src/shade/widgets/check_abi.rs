@@ -199,6 +199,7 @@ fn _modifier_wire_position(m: &Modifier) -> usize {
         Modifier::LineNumbers(_)    => 27,
         Modifier::PaddingXY { .. }  => 28,
         Modifier::Autofocus         => 29,
+        Modifier::FontSize(_)       => 30,
     }
 }
 

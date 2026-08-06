@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "nopeek_widgets"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "postcard",
  "serde",

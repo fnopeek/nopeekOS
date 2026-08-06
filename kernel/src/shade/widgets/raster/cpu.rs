@@ -57,12 +57,18 @@ impl Rasterizer for CpuRasterizer {
     }
 
     fn text(&mut self, t: &mut RasterTarget, s: &str, style: TextStyle, color: Token, p: Point) {
+        let size = crate::gui::text::style_desc(style).size_px;
+        self.text_px(t, s, style, size, color, p);
+    }
+
+    fn text_px(&mut self, t: &mut RasterTarget, s: &str, style: TextStyle, size_px: u16,
+               color: Token, p: Point) {
         // Caller-resolved glyph colour (style-default or a Tint override).
         let text_color = t.palette.colors[color as usize];
 
         // Baseline start point in window coords → target-local.
         // `f32::ceil` isn't in core; inline the positive-only version.
-        let ascent_f = crate::gui::text::ascent(style);
+        let ascent_f = crate::gui::text::ascent_px(style, size_px);
         let ascent_i = if ascent_f <= 0.0 {
             0
         } else {
@@ -81,13 +87,13 @@ impl Rasterizer for CpuRasterizer {
 
             // Kerning with previous char (Inter `kern` feature).
             if let Some(prev_ch) = prev {
-                pen_x += crate::gui::text::kern(prev_ch, ch, style);
+                pen_x += crate::gui::text::kern_px(prev_ch, ch, style, size_px);
             }
 
             // Rasterize glyph via cached-path, composite alpha onto
             // target pixels. The cache handles its own GGTT slot too
             // (P10.4 glyph-atlas migration).
-            let drew = crate::gui::text::rasterize_cached(ch, style, |glyph| {
+            let drew = crate::gui::text::rasterize_cached_px(ch, style, size_px, |glyph| {
                 if glyph.width == 0 || glyph.height == 0 {
                     return glyph.advance;
                 }
@@ -307,16 +313,39 @@ fn composite_alpha_scaled(
     if x0 >= x1 || y0 >= y1 { return; }
 
     let stride = t.stride as usize;
+    // Downscale: average the source box a destination pixel covers.
+    // Nearest-neighbour drops whole rows of a 1.5 px phosphor stroke, so
+    // an 18 px icon taken from the 24 px atlas came out visibly ragged.
+    // Upscale keeps nearest — the atlas has a size above every request we
+    // make, so this is the path that runs.
+    let downscale = atlas_size > size;
     for py in y0..y1 {
         let ly = (py - y) as u32;
-        let sy = (ly * atlas_size / size) as usize;
+        let sy0 = (ly * atlas_size / size) as usize;
+        let sy1 = if downscale {
+            (((ly + 1) * atlas_size / size) as usize).max(sy0 + 1).min(atlas_size as usize)
+        } else { sy0 + 1 };
         let dst_base = py as usize * stride;
         for px in x0..x1 {
             let lx = (px - x) as u32;
-            let sx = (lx * atlas_size / size) as usize;
-            let a_idx = sy * atlas_size as usize + sx;
-            if a_idx >= alpha.len() { continue; }
-            let a = alpha[a_idx];
+            let sx0 = (lx * atlas_size / size) as usize;
+            let sx1 = if downscale {
+                (((lx + 1) * atlas_size / size) as usize).max(sx0 + 1).min(atlas_size as usize)
+            } else { sx0 + 1 };
+
+            let mut sum = 0u32;
+            let mut n = 0u32;
+            for sy in sy0..sy1 {
+                let row = sy * atlas_size as usize;
+                for sx in sx0..sx1 {
+                    let a_idx = row + sx;
+                    if a_idx >= alpha.len() { continue; }
+                    sum += alpha[a_idx] as u32;
+                    n += 1;
+                }
+            }
+            if n == 0 { continue; }
+            let a = (sum / n) as u8;
             if a == 0 { continue; }
             let dst = t.pixels[dst_base + px as usize];
             t.pixels[dst_base + px as usize] = blend_over(dst, color, a);

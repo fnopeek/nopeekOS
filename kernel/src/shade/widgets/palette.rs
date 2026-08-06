@@ -8,6 +8,8 @@
 
 #![allow(dead_code)]
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use super::abi::{Palette, Token};
 
 struct ThemePalette {
@@ -86,10 +88,41 @@ pub fn current() -> Palette {
 /// lower because a near-white panel washes out faster.
 pub fn chrome_opacity() -> u32 {
     let dflt = if is_light_theme() { 205 } else { 235 };
-    crate::config::get("shade.chrome_opacity")
+    opacity_key("shade.chrome_opacity").unwrap_or(dflt)
+}
+
+fn opacity_key(key: &str) -> Option<u32> {
+    crate::config::get(key)
         .and_then(|s| s.trim().parse::<u32>().ok())
         .map(|v| v.min(255))
-        .unwrap_or(dflt)
+}
+
+// The two panel windows, published by the compositor. The rasterizer runs
+// while the SCENES lock is held and must not reach for the compositor
+// lock, so the ids travel as plain atomics. 0 = no such panel.
+static BAR_WINDOW:  AtomicU32 = AtomicU32::new(0);
+static DOCK_WINDOW: AtomicU32 = AtomicU32::new(0);
+
+pub fn set_bar_window(id: Option<u32>) {
+    BAR_WINDOW.store(id.unwrap_or(0), Ordering::Relaxed);
+}
+
+pub fn set_dock_window(id: Option<u32>) {
+    DOCK_WINDOW.store(id.unwrap_or(0), Ordering::Relaxed);
+}
+
+/// Opacity for one panel window: its own knob if set, else the shared
+/// `shade.chrome_opacity`, else the theme default. Lets the bar stay
+/// legible while the dock reads more like glass (or the other way round).
+pub fn panel_opacity(window_id: u32) -> u32 {
+    let key = if window_id != 0 && BAR_WINDOW.load(Ordering::Relaxed) == window_id {
+        "shade.bar_opacity"
+    } else if window_id != 0 && DOCK_WINDOW.load(Ordering::Relaxed) == window_id {
+        "shade.dock_opacity"
+    } else {
+        return chrome_opacity();
+    };
+    opacity_key(key).unwrap_or_else(chrome_opacity)
 }
 
 pub fn resolve(token: Token) -> u32 {

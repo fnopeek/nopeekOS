@@ -235,6 +235,7 @@ fn fmt_mods(mods: &[Modifier]) -> String {
             Modifier::LineNumbers(on) => { let _ = write!(s, "LineNumbers({})", on); }
             Modifier::PaddingXY { x, y } => { let _ = write!(s, "PaddingXY({},{})", x, y); }
             Modifier::Autofocus => { let _ = write!(s, "Autofocus"); }
+            Modifier::FontSize(px) => { let _ = write!(s, "FontSize({})", px); }
         }
     }
     s.push(']');

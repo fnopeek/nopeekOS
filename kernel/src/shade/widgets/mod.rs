@@ -1877,7 +1877,7 @@ fn rasterize_buffer_with_overlays(
     // before. Derived from the tree so it needs no extra plumbing or locks
     // (relayout_scene rasterises while holding the SCENES lock).
     let bg_alpha: u8 = if matches!(tree, abi::Widget::Stack { .. }) {
-        palette::chrome_opacity() as u8
+        palette::panel_opacity(window_id) as u8
     } else {
         255
     };

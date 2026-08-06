@@ -1158,7 +1158,10 @@ pub fn intent_help_topic(topic: &str) {
             help_note("      Mod+Ctrl+arrow resize  Mod+1-4 workspace  Mod+Shift+1-4 send");
             kprintln!("[npk]");
             help_note("config: shade.gaps, shade.border, shade.rounding, shade.glow,");
-            help_note("        shade.opacity, shade.mod");
+            help_note("        shade.opacity, shade.mod, shade.light_tint");
+            help_note("panels: shade.chrome_opacity sets bar + dock (0-255),");
+            help_note("        shade.bar_opacity / shade.dock_opacity override one;");
+            help_note("        bar text + icon px: 'font:' / 'icon:' in sys/config/bar");
         }
         "system" | "status" => {
             help_head("system", "");

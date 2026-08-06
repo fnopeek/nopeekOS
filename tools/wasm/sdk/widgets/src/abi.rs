@@ -340,6 +340,12 @@ pub enum Modifier {
     /// This text widget takes focus when its window first appears.
     /// Without it a window opens with nothing focused.
     Autofocus,
+    /// Font size override in px for a `Widget::Text` — replaces the size
+    /// its `TextStyle` resolves to; the face (proportional vs mono) still
+    /// comes from the style. Layout measures at the override, so the text
+    /// keeps a correct box. Clamped to 6..=64 by the compositor; ignored
+    /// on every other widget.
+    FontSize(u16),
     // Appended only.
 }
 

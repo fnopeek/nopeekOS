@@ -944,6 +944,7 @@ impl Compositor {
 
         if found {
             self.top_strut = Some(TopStrut { id, pill_h, margin });
+            crate::shade::widgets::palette::set_bar_window(Some(id.0));
             // If the spawn path focused it, drop focus — panels never hold it.
             if self.focused == Some(id) { self.focused = None; }
             self.retile();
@@ -1037,6 +1038,7 @@ impl Compositor {
                 dwell: 0,
                 debounce: 0,
             });
+            crate::shade::widgets::palette::set_dock_window(Some(id.0));
             // If the spawn path focused it, drop focus — panels never hold it.
             if self.focused == Some(id) { self.focused = None; }
             // Overlay → tiling grid is untouched, but retile reclaims any
@@ -1203,10 +1205,12 @@ impl Compositor {
         // reveal/tick machinery no-ops.
         if self.dock.map(|d| d.id) == Some(id) {
             self.dock = None;
+            crate::shade::widgets::palette::set_dock_window(None);
         }
         // Bar window gone → free the top strut band; tiles reclaim the height.
         if self.top_strut.map(|s| s.id) == Some(id) {
             self.top_strut = None;
+            crate::shade::widgets::palette::set_bar_window(None);
             self.retile();
             self.needs_full_redraw = true;
         }
@@ -1671,7 +1675,7 @@ impl Compositor {
             crate::shade::widgets::abi::Token::SurfaceElevated);
         render::fill_rounded_rect_alpha(shadow, info, x, y, w, hh,
             tray & 0x00FF_FFFF, hh / 2,
-            crate::shade::widgets::palette::chrome_opacity());
+            crate::shade::widgets::palette::panel_opacity(dock.id.0));
     }
 
     /// Fast render: only the current input line of the focused window.
