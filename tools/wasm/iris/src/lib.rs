@@ -153,7 +153,7 @@ fn poll_event() -> PollResult {
 // unfiltered + BGRA). 256 MB matches wallpaper's headroom; everything
 // above `persistent_mark` (the per-frame scene + the decode buffers) is
 // freed each loop iteration so navigation doesn't leak.
-const HEAP_SIZE: usize = 256 * 1024 * 1024;
+const HEAP_SIZE: usize = 160 * 1024 * 1024;
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 static mut HEAP_POS: usize = 0;
 
@@ -179,6 +179,107 @@ fn panic(_: &core::panic::PanicInfo) -> ! { log("[iris] panic!"); loop {} }
 
 fn alloc_mark() -> usize { unsafe { core::ptr::addr_of!(HEAP_POS).read() } }
 fn alloc_reset(pos: usize) { unsafe { core::ptr::addr_of_mut!(HEAP_POS).write(pos); } }
+
+// ── Decoded-bitmap cache ──────────────────────────────────────────────
+//
+// Decoding is the whole cost of showing an image (~1.3 s for a 1080p
+// PNG under the interpreter), so a picture already decoded must never be
+// decoded twice. The cache lives OUTSIDE the bump heap — `alloc_reset`
+// would otherwise pull it out from under us every event.
+//
+// **Budgeted in bytes, not in pictures.** A count that fits 1080p (8 MB
+// each) buys 300 MB at 4K (33 MB each) and blows the module apart; the
+// same mistake a per-stylesheet cap made in beak. With a byte budget the
+// depth adapts by itself: ~11 held at 1080p (the ±4 that was asked for,
+// with room to spare), ~2 at 4K.
+//
+// 96 MB, paid for out of the bump heap rather than added on top: the
+// heap dropped 256 → 160 MB, which still leaves double what a 4K decode
+// needs live at once. The module's footprint is unchanged.
+//
+// The arena is a ring: allocations run forward, wrap when the tail is
+// too short, and evict whatever they land on. In sequential browsing
+// that means the pictures furthest behind you go first, which is exactly
+// the right eviction order and costs no compaction.
+const CACHE_BYTES: usize = 96 * 1024 * 1024;
+static mut CACHE: [u8; CACHE_BYTES] = [0; CACHE_BYTES];
+static mut CACHE_POS: usize = 0;
+
+#[derive(Clone, Copy)]
+struct CacheEntry { idx: usize, off: usize, len: usize, w: u32, h: u32 }
+
+const CACHE_SLOTS: usize = 48;
+static mut ENTRIES: [Option<CacheEntry>; CACHE_SLOTS] = [None; CACHE_SLOTS];
+
+/// Pictures that did not make it into the cache — too big for the budget,
+/// or undecodable. Without this list prefetching would pick the same
+/// target every round and re-decode it forever: a hundred percent of a
+/// core, spent on an image that can never land.
+const SKIP_SLOTS: usize = 8;
+static mut SKIP: [Option<usize>; SKIP_SLOTS] = [None; SKIP_SLOTS];
+static mut SKIP_POS: usize = 0;
+
+fn skip_mark(idx: usize) {
+    unsafe {
+        let pos = *(&raw const SKIP_POS);
+        (&mut *(&raw mut SKIP))[pos] = Some(idx);
+        *(&raw mut SKIP_POS) = (pos + 1) % SKIP_SLOTS;
+    }
+}
+
+fn skip_holds(idx: usize) -> bool {
+    unsafe { (&*(&raw const SKIP)).iter().flatten().any(|&i| i == idx) }
+}
+
+/// Everything cached is dropped when the folder changes — the entries are
+/// keyed by position in `files`, and that meaning changes with the list.
+fn cache_clear() {
+    unsafe {
+        *(&raw mut CACHE_POS) = 0;
+        for e in (&mut *(&raw mut ENTRIES)).iter_mut() { *e = None; }
+        for s in (&mut *(&raw mut SKIP)).iter_mut() { *s = None; }
+        *(&raw mut SKIP_POS) = 0;
+    }
+}
+
+fn cache_get(idx: usize) -> Option<(&'static [u8], u32, u32)> {
+    unsafe {
+        let entries = &*(&raw const ENTRIES);
+        let e = entries.iter().flatten().find(|e| e.idx == idx)?;
+        let base = (&raw const CACHE) as *const u8;
+        Some((core::slice::from_raw_parts(base.add(e.off), e.len), e.w, e.h))
+    }
+}
+
+/// Store a decoded bitmap. Skips pictures too big to share the arena —
+/// one of those would evict everything else on every navigation.
+fn cache_put(idx: usize, bgra: &[u8], w: u32, h: u32) {
+    let len = bgra.len();
+    if len == 0 || len > CACHE_BYTES / 2 { return; }
+    unsafe {
+        let mut start = *(&raw const CACHE_POS);
+        if start + len > CACHE_BYTES { start = 0; }   // wrap; tail is wasted
+        let end = start + len;
+        let entries = &mut *(&raw mut ENTRIES);
+        // Anything the new bytes land on is gone.
+        for slot in entries.iter_mut() {
+            if let Some(e) = slot {
+                if e.off < end && start < e.off + e.len { *slot = None; }
+            }
+
+        }
+        let dst = (&raw mut CACHE) as *mut u8;
+        core::ptr::copy_nonoverlapping(bgra.as_ptr(), dst.add(start), len);
+        let entry = CacheEntry { idx, off: start, len, w, h };
+        // Prefer a free slot; if the table is full the oldest region is
+        // the one nearest the write head, so drop the first entry.
+        match entries.iter_mut().find(|s| s.is_none()) {
+            Some(slot) => *slot = Some(entry),
+            None => entries[0] = Some(entry),
+        }
+        *(&raw mut CACHE_POS) = end;
+    }
+}
 
 // ── Strings ───────────────────────────────────────────────────────────
 struct Strings {
@@ -268,6 +369,8 @@ struct Iris {
     press:  Option<(i32, i32)>,
     /// The pointer moved far enough since the press to call it a drag.
     dragged: bool,
+    /// Last navigation direction — prefetch follows it first.
+    forward: bool,
     /// A widget consumed this click, so the raw press that follows it is
     /// not ours. The compositor sends BOTH for one physical click: first
     /// `Action(id)` for the button/menu that was hit, then the raw
@@ -287,6 +390,14 @@ const ZOOM_STEP_DEN: u32 = 4;
 /// and not a drag. Generous enough that a shaky hand still pages.
 const DRAG_SLOP: i32 = 4;
 
+/// How far ahead and behind to decode. The byte budget decides how many
+/// of these actually fit — at 4K only the nearest one or two will.
+const PREFETCH_DEPTH: usize = 4;
+/// Empty polls (16 ms each) before prefetching starts. Decoding is a
+/// solid second of CPU, so it must never race the user: while clicks are
+/// still arriving, answering them wins.
+const QUIET_POLLS: u32 = 20;
+
 fn zoom_in(z: u16) -> u16 {
     ((z as u32 * ZOOM_STEP_NUM / ZOOM_STEP_DEN) as u16).min(ZOOM_MAX)
 }
@@ -300,7 +411,8 @@ impl Iris {
             dir: String::new(), files: Vec::new(), idx: 0,
             w: 0, h: 0, failed: false,
             menu: None, picking: false, zoom: ZOOM_FIT,
-            pan: (0, 0), press: None, dragged: false, swallow_press: false,
+            pan: (0, 0), press: None, dragged: false, forward: true,
+            swallow_press: false,
         };
         // Launched to open a specific file?
         let mut argbuf = [0u8; 512];
@@ -328,6 +440,9 @@ impl Iris {
 
     /// Re-list `dir` for image files.
     fn refresh(&mut self) {
+        // Entries are keyed by position in `files`; a new listing gives
+        // those positions a different meaning.
+        cache_clear();
         self.files = list_images(&self.dir);
         if self.idx >= self.files.len() { self.idx = 0; }
     }
@@ -341,8 +456,25 @@ impl Iris {
     /// Mutates only Copy fields (w/h/failed) + the kernel canvas store —
     /// nothing heap-persistent — so it's safe to run after the per-frame
     /// alloc mark (its big decode buffers are transient, freed next reset).
+    /// Show the current image. A cache hit is the whole point: the only
+    /// work left is handing the bitmap to the compositor.
     fn load(&mut self) {
         self.w = 0; self.h = 0; self.failed = false;
+        if let Some((px, w, h)) = cache_get(self.idx) {
+            let t = now_ms();
+            let rc = unsafe {
+                npk_canvas_commit(CANVAS_ID, px.as_ptr() as i32, px.len() as i32,
+                    w as i32, h as i32)
+            };
+            log_ms("=== cached -> displayed", now_ms() - t);
+            if rc < 0 { self.failed = true; } else { self.w = w; self.h = h; }
+            return;
+        }
+        self.decode_into_view();
+    }
+
+    /// Decode `idx` off disk, show it, and keep it for next time.
+    fn decode_into_view(&mut self) {
         let path = match self.full_path() { Some(p) => p, None => return };
         let t_start = now_ms();
         let bytes = match fetch_file(&path) {
@@ -362,10 +494,50 @@ impl Iris {
                 // The number that matters: click → pixels on screen.
                 log_ms("=== open -> displayed", now_ms() - t_start);
                 if rc < 0 { self.failed = true; log("[iris] canvas_commit rejected"); }
-                else { self.w = w; self.h = h; }
+                else {
+                    self.w = w; self.h = h;
+                    cache_put(self.idx, &bgra, w, h);
+                }
             }
             None => { self.failed = true; log("[iris] decode failed"); }
         }
+    }
+
+    /// The next neighbour worth decoding ahead, nearest first and in the
+    /// direction of travel — so a fast click in the way you were already
+    /// going is the case that is covered first.
+    fn prefetch_target(&self) -> Option<usize> {
+        let n = self.files.len();
+        if n < 2 { return None; }
+        let ahead = self.forward;
+        for d in 1..=PREFETCH_DEPTH {
+            for first in [ahead, !ahead] {
+                let idx = if first {
+                    (self.idx + d) % n
+                } else {
+                    (self.idx + n - (d % n)) % n
+                };
+                if idx == self.idx || skip_holds(idx) { continue; }
+                if cache_get(idx).is_none() { return Some(idx); }
+            }
+        }
+        None
+    }
+
+    /// Decode ONE neighbour into the cache. Never touches the view, so a
+    /// half-finished round of prefetching leaves nothing behind.
+    fn prefetch_one(&mut self, idx: usize) {
+        let Some(name) = self.files.get(idx) else { skip_mark(idx); return };
+        let path = alloc::format!("{}/{}", self.dir, name);
+        let Some(bytes) = fetch_file(&path) else { skip_mark(idx); return };
+        let t = now_ms();
+        if let Some((bgra, w, h)) = decode_png(bytes) {
+            cache_put(idx, &bgra, w, h);
+            log_ms("prefetch", now_ms() - t);
+        }
+        // Did not land (undecodable, or larger than the budget allows) —
+        // remember that, or we would try it again every round forever.
+        if cache_get(idx).is_none() { skip_mark(idx); }
     }
 
     // A new image always starts fit to the window — carrying a 4× zoom
@@ -373,11 +545,13 @@ impl Iris {
     fn next(&mut self) {
         if self.files.len() < 2 { return; }
         self.idx = (self.idx + 1) % self.files.len();
+        self.forward = true;
         self.reset_view();
     }
     fn prev(&mut self) {
         if self.files.len() < 2 { return; }
         self.idx = (self.idx + self.files.len() - 1) % self.files.len();
+        self.forward = false;
         self.reset_view();
     }
 
@@ -719,9 +893,13 @@ pub extern "C" fn _start() {
     iris.load();         // window exists now → canvas_commit works
     commit_scene(&iris); // refresh chrome with dims
 
+    // Consecutive empty polls — the quiet period that gates prefetching.
+    let mut quiet: u32 = 0;
+
     loop {
         match poll_event() {
             PollResult::Event(ev) => {
+                quiet = 0;
                 let plen = match &ev {
                     Event::Open(s) => copy_payload(s),
                     _ => 0,
@@ -736,7 +914,21 @@ pub extern "C" fn _start() {
                     Outcome::Exit => { close_self(); return; }
                 }
             }
-            PollResult::Empty => { unsafe { let _ = npk_sleep(16); } }
+            PollResult::Empty => {
+                // Decode a neighbour once the user has stopped for a
+                // moment — ONE per round, then straight back to polling,
+                // so a click never waits behind more than a single image.
+                if quiet >= QUIET_POLLS {
+                    if let Some(idx) = iris.prefetch_target() {
+                        alloc_reset(mark);
+                        iris.prefetch_one(idx);
+                        alloc_reset(mark);   // decode buffers are transient
+                        continue;
+                    }
+                }
+                quiet = quiet.saturating_add(1);
+                unsafe { let _ = npk_sleep(16); }
+            }
             PollResult::WindowGone => return,
         }
     }
