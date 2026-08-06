@@ -22,16 +22,16 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-04, beak 0.3.6)
+### Current number (measured 2026-08-06, beak 0.3.15)
 
 ```
-3998 pass / 1604 fail / 184 inconclusive   (of 5786 vendored reftests)
-= 71.4 % of the conclusive 5602
+4012 pass / 1591 fail / 183 inconclusive   (of 5786 vendored reftests)
+= 71.7 % of the conclusive 5603
 ```
 
 Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → 3746 → 3863 → 3869 →
 3870 (0.3.0) → 3880 (0.3.2) → 3926 (0.3.3) → 3959 (0.3.4) → 3963 (0.3.5) →
-**3967** (0.3.6) → 3967 (0.3.11) → 3978 (0.3.12) → 3997 (0.3.13) → **3998** (0.3.14). The inconclusive count fell 254 → 184 over
+**3967** (0.3.6) → 3967 (0.3.11) → 3978 (0.3.12) → 3997 (0.3.13) → 3998 (0.3.14) → **4012** (0.3.15). The inconclusive count fell 254 → 184 over
 that span: references that used to render blank — because `:root` was dropped,
 because an `inline-block` had no box, or because an inline box painted no
 background — now paint, so 73 more tests actually measure something.
@@ -973,6 +973,45 @@ menu to pick from.
     number in both directions — it shipped green and it was fixed green. Page
     height, scrolling and anything else the SHELL consumes needs its own unit
     test; there is now `the_page_is_as_tall_as_what_it_paints`.
+
+31. ✅ **A positioned `display:table`/`flex` root, and one pixel of rounding
+    (0.3.15).** WPT **3998 → 4012** (+15 / −1). Planned as "6 tests", and the
+    plan named the wrong cause — the note from the evening before said an empty
+    table bails out of `layout_table_body` before it paints. **The display list
+    said otherwise:** the table painted its box fine, at 20×28 instead of
+    120×120. Measuring first cost two minutes and saved a wrong fix.
+
+    Three roots, each measured on its own:
+    - **A table's `width` needs no content to reach it.** `auto_columns` spread
+      an explicit width over its columns only when they already measured
+      something (`total > 0.0`), so `table { width: 100px }` around empty cells
+      collapsed onto its own border. Neutral on the oracle by itself.
+    - **A table's `height` is a MINIMUM** (CSS2.1 §17.5.3) — it was ignored
+      outright. Rows keep the height their content needs; the box grows to the
+      specified one. That alone is **+8**, and four of them
+      (`left`/`top-applies-to-013/014`) were not on the list.
+    - **`box-sizing: border-box` counts the border, not just the padding.**
+      `layout_block` had it right; flex and grid each carried their own copy
+      that subtracted only the padding, so every bordered container with a
+      definite height came out two border-widths too tall. Now one helper,
+      `content_height_of`. This is the third time a box-model correction turned
+      out to be a duplicated helper drifting from the original.
+
+    **The pixel: a max-content width is a REQUIREMENT, so it is rounded UP.**
+    `position-absolute-root-element-flex` matched its reference's border box
+    exactly and still failed, because the text wrapped one word early. Measured:
+    the sentence needs 679 px, the flex item got 678. Floats and inline-blocks
+    already called `ceil_i32`; flex items and shrink-to-fit out-of-flow boxes
+    truncated. Rounding once at the source (`intrinsic_width`) instead of at
+    each consumer is **+7** on its own, and on de.wikipedia/Stansstad the page
+    got 32 px shorter — content that had wrapped no longer does.
+
+    **The one loss is the reference getting better**, the fourth time this
+    pattern has come up ([[feedback-which-side-moved]]). `content-inherit-002`
+    was green because test AND reference wrapped identically wrong; the
+    reference now sets its text correctly, and the test page still needs
+    `content` on table cells, which we do not do. Rendering the old and new
+    code side by side answered it in a minute.
 
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the
