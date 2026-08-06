@@ -704,26 +704,73 @@ fn decode_png(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     let expected = height as usize * (1 + stride);
     if decompressed.len() < expected { return None; }
 
+    // Un-filter per ROW, not per byte. The filter type is constant for a
+    // whole scanline, so branching on it inside the inner loop paid for
+    // ~25 M matches plus three guarded neighbour loads at 4K — measured
+    // 1850 ms of a 3040 ms open. Specialising per row also turns the
+    // common case (filter 0, which is what snap writes) into one
+    // `copy_from_slice`, i.e. a wasm `memory.copy`.
     let mut unfiltered = alloc::vec![0u8; height as usize * stride];
     for y in 0..height as usize {
         let src_offset = y * (1 + stride);
         let filter_type = decompressed[src_offset];
         let row_start = src_offset + 1;
-        let dst_offset = y * stride;
-        for x in 0..stride {
-            let raw = decompressed[row_start + x];
-            let a = if x >= channels { unfiltered[dst_offset + x - channels] } else { 0 };
-            let b = if y > 0 { unfiltered[dst_offset - stride + x] } else { 0 };
-            let c = if x >= channels && y > 0 { unfiltered[dst_offset - stride + x - channels] } else { 0 };
-            let val = match filter_type {
-                0 => raw,
-                1 => raw.wrapping_add(a),
-                2 => raw.wrapping_add(b),
-                3 => raw.wrapping_add(((a as u16 + b as u16) / 2) as u8),
-                4 => raw.wrapping_add(paeth(a, b, c)),
-                _ => raw,
-            };
-            unfiltered[dst_offset + x] = val;
+        let dst = y * stride;
+        let src = &decompressed[row_start..row_start + stride];
+        let first_row = y == 0;
+        match filter_type {
+            // None.
+            0 => unfiltered[dst..dst + stride].copy_from_slice(src),
+            // Sub — left neighbour only.
+            1 => {
+                unfiltered[dst..dst + channels].copy_from_slice(&src[..channels]);
+                for x in channels..stride {
+                    let a = unfiltered[dst + x - channels];
+                    unfiltered[dst + x] = src[x].wrapping_add(a);
+                }
+            }
+            // Up — the byte directly above. On the first row everything
+            // above reads as zero, so it degenerates to a plain copy.
+            2 => {
+                if first_row {
+                    unfiltered[dst..dst + stride].copy_from_slice(src);
+                } else {
+                    let above = dst - stride;
+                    for x in 0..stride {
+                        let b = unfiltered[above + x];
+                        unfiltered[dst + x] = src[x].wrapping_add(b);
+                    }
+                }
+            }
+            // Average — mean of left and above.
+            3 => {
+                for x in 0..stride {
+                    let a = if x >= channels { unfiltered[dst + x - channels] } else { 0 };
+                    let b = if first_row { 0 } else { unfiltered[dst - stride + x] };
+                    unfiltered[dst + x] = src[x]
+                        .wrapping_add(((a as u16 + b as u16) / 2) as u8);
+                }
+            }
+            // Paeth — left / above / above-left predictor.
+            4 => {
+                if first_row {
+                    // Only the left neighbour is non-zero, and paeth(a,0,0) = a.
+                    unfiltered[dst..dst + channels].copy_from_slice(&src[..channels]);
+                    for x in channels..stride {
+                        let a = unfiltered[dst + x - channels];
+                        unfiltered[dst + x] = src[x].wrapping_add(a);
+                    }
+                } else {
+                    let above = dst - stride;
+                    for x in 0..stride {
+                        let a = if x >= channels { unfiltered[dst + x - channels] } else { 0 };
+                        let b = unfiltered[above + x];
+                        let c = if x >= channels { unfiltered[above + x - channels] } else { 0 };
+                        unfiltered[dst + x] = src[x].wrapping_add(paeth(a, b, c));
+                    }
+                }
+            }
+            _ => unfiltered[dst..dst + stride].copy_from_slice(src),
         }
     }
     let t_unfiltered = now_ms();
@@ -731,13 +778,17 @@ fn decode_png(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
 
     let pixel_count = (width * height) as usize;
     let mut bgra = alloc::vec![0u8; pixel_count * 4];
-    for i in 0..pixel_count {
-        let src = i * channels;
-        let dst = i * 4;
-        bgra[dst]     = unfiltered[src + 2];
-        bgra[dst + 1] = unfiltered[src + 1];
-        bgra[dst + 2] = unfiltered[src];
-        bgra[dst + 3] = if channels == 4 { unfiltered[src + 3] } else { 255 };
+    // Paired `chunks_exact` instead of index arithmetic: the compiler
+    // knows each chunk's length, so the four writes per pixel lose their
+    // bounds checks — and the channel count leaves the inner loop.
+    if channels == 4 {
+        for (d, s) in bgra.chunks_exact_mut(4).zip(unfiltered.chunks_exact(4)) {
+            d[0] = s[2]; d[1] = s[1]; d[2] = s[0]; d[3] = s[3];
+        }
+    } else {
+        for (d, s) in bgra.chunks_exact_mut(4).zip(unfiltered.chunks_exact(3)) {
+            d[0] = s[2]; d[1] = s[1]; d[2] = s[0]; d[3] = 255;
+        }
     }
     log_ms("rgb->bgra", now_ms() - t_unfiltered);
     Some((bgra, width, height))

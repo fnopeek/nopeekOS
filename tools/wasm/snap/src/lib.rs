@@ -192,23 +192,40 @@ fn encode_png_rgb(bgra: &[u8], w: u32, h: u32) -> Vec<u8> {
     let hc = h as usize;
     let t0 = now_ms();
     // Raw scanlines: 1 filter byte (0 = None) + W*3 RGB bytes per row.
-    let mut raw: Vec<u8> = Vec::with_capacity(hc * (1 + wc * 3));
+    //
+    // Filter 0 for every row is deliberate on both ends: it costs the
+    // encoder nothing, and it lets iris un-filter a whole row with one
+    // `copy_from_slice` (a wasm `memory.copy`) instead of a per-byte
+    // add. A cleverer filter would shrink the file and make BOTH sides
+    // walk 25 MB byte by byte under the interpreter.
+    //
+    // Pre-zeroed + indexed writes rather than `push`: three pushes per
+    // pixel is ~25 M capacity checks at 4K. `chunks_exact` drops the
+    // per-access bounds checks on top.
+    let row_bytes = 1 + wc * 3;
+    let mut raw: Vec<u8> = alloc::vec![0u8; hc * row_bytes];
     for y in 0..hc {
-        raw.push(0);
-        let row = y * wc * 4;
-        for x in 0..wc {
-            let p = row + x * 4;
-            // source is BGRA → RGB
-            raw.push(bgra[p + 2]);
-            raw.push(bgra[p + 1]);
-            raw.push(bgra[p]);
+        let dst = y * row_bytes + 1;             // filter byte stays 0
+        let src = y * wc * 4;
+        let dst_row = &mut raw[dst..dst + wc * 3];
+        let src_row = &bgra[src..src + wc * 4];
+        for (d, s) in dst_row.chunks_exact_mut(3).zip(src_row.chunks_exact(4)) {
+            d[0] = s[2];  // B G R A → R G B
+            d[1] = s[1];
+            d[2] = s[0];
         }
     }
     let t_repack = now_ms();
     log_ms("repack bgra->rgb", t_repack - t0);
 
     // zlib-wrapped deflate (header + deflate + adler32).
-    let idat = miniz_oxide::deflate::compress_to_vec_zlib(&raw, 6);
+    //
+    // Level 1, not 6. Measured on a 4K screen under the interpreter:
+    // level 6 spent 4240 ms of a 4970 ms save inside deflate — 85 % of
+    // the wait for a file that is only somewhat smaller. A screenshot is
+    // a transient artefact; seconds of the user's time cost more than
+    // the megabyte.
+    let idat = miniz_oxide::deflate::compress_to_vec_zlib(&raw, 1);
     let t_deflate = now_ms();
     log_ms("deflate", t_deflate - t_repack);
 
@@ -243,17 +260,33 @@ fn write_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
     out.extend_from_slice(&crc.finalize().to_be_bytes());
 }
 
-// CRC-32 (IEEE, PNG) — bitwise, no table (a few chunks per image).
+// CRC-32 (IEEE, PNG), table-driven. The chunk COUNT is small but the
+// IDAT chunk is the whole image: bitwise cost 8 iterations per byte and
+// measured 200 ms of a 4K save. The table is built at compile time, so
+// it costs 1 KB of module data and no startup work.
+const CRC_TABLE: [u32; 256] = {
+    let mut table = [0u32; 256];
+    let mut i = 0usize;
+    while i < 256 {
+        let mut c = i as u32;
+        let mut k = 0;
+        while k < 8 {
+            c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+            k += 1;
+        }
+        table[i] = c;
+        i += 1;
+    }
+    table
+};
+
 struct Crc { v: u32 }
 impl Crc {
     fn new() -> Self { Crc { v: 0xFFFF_FFFF } }
     fn update(&mut self, data: &[u8]) {
         for &byte in data {
-            self.v ^= byte as u32;
-            for _ in 0..8 {
-                let mask = (self.v & 1).wrapping_neg();
-                self.v = (self.v >> 1) ^ (0xEDB8_8320 & mask);
-            }
+            let idx = ((self.v ^ byte as u32) & 0xFF) as usize;
+            self.v = CRC_TABLE[idx] ^ (self.v >> 8);
         }
     }
     fn finalize(self) -> u32 { self.v ^ 0xFFFF_FFFF }
