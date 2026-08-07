@@ -417,6 +417,24 @@ pub fn is_open_pick(picker: u32) -> bool {
     PICK_SESSIONS.lock().contains_key(&picker)
 }
 
+/// Drop every session belonging to `requester` and return their picker
+/// windows, so the caller can close them.
+///
+/// A dialog belongs to the window that opened it: once the requester is
+/// gone there is nobody left to hand a path to, and a picker left behind
+/// still looks usable — the user picks a file and nothing happens. The
+/// sessions are removed here, before the windows close, so the picker's
+/// own teardown doesn't try to report a cancel to the dead requester.
+pub fn take_picks_for_requester(requester: u32) -> alloc::vec::Vec<u32> {
+    let mut sessions = PICK_SESSIONS.lock();
+    let orphans: alloc::vec::Vec<u32> = sessions.iter()
+        .filter(|(_, s)| s.requester == requester)
+        .map(|(picker, _)| *picker)
+        .collect();
+    for picker in &orphans { sessions.remove(picker); }
+    orphans
+}
+
 /// Consume the session owned by picker window `picker`. Returns None if
 /// the caller isn't a registered picker — which is also the authorisation
 /// check for `npk_pick_result`: only a window the kernel itself spawned as
