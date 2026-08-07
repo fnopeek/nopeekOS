@@ -22,16 +22,16 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-07, beak 0.4.5)
+### Current number (measured 2026-08-07, beak 0.4.6)
 
 ```
-4069 pass / 1538 fail / 179 inconclusive   (of 5786 vendored reftests)
-= 72.6 % of the conclusive 5607
+4074 pass / 1533 fail / 179 inconclusive   (of 5786 vendored reftests)
+= 72.7 % of the conclusive 5607
 ```
 
 Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → 3746 → 3863 → 3869 →
 3870 (0.3.0) → 3880 (0.3.2) → 3926 (0.3.3) → 3959 (0.3.4) → 3963 (0.3.5) →
-**3967** (0.3.6) → 3967 (0.3.11) → 3978 (0.3.12) → 3997 (0.3.13) → 3998 (0.3.14) → 4012 (0.3.15) → 4036 (0.3.16) → 4056 (0.4.1) → 4064 (0.4.3) → **4069** (0.4.5). The inconclusive count fell 254 → 184 over
+**3967** (0.3.6) → 3967 (0.3.11) → 3978 (0.3.12) → 3997 (0.3.13) → 3998 (0.3.14) → 4012 (0.3.15) → 4036 (0.3.16) → 4056 (0.4.1) → 4064 (0.4.3) → 4069 (0.4.5) → **4074** (0.4.6). The inconclusive count fell 254 → 184 over
 that span: references that used to render blank — because `:root` was dropped,
 because an `inline-block` had no box, or because an inline box painted no
 background — now paint, so 73 more tests actually measure something.
@@ -1322,6 +1322,76 @@ menu to pick from.
     correctness win, not a visible one. (Verified live all the same: on a
     synthetic page `50vw`→950, `25vmin`→150, `calc(100vw - 300px)`→1600 at a
     1900×600 viewport — [[feedback-verify-the-call-path]].)
+
+40. ✅ **Was Wikipedias Suchfeld kaputt machte (0.4.6).** WPT **4069 → 4074**
+    (+5 / −0), 185 unit tests. Started from ONE device screenshot with three
+    complaints — a stray second rule, the Suchen button overlapping the field,
+    and a missing magnifier — and every one of them turned out to be a
+    general engine defect, not a Wikipedia quirk.
+
+    ### 🔑 The same defect shape as item 39, three more times
+
+    `values.rs` evaluates `calc()`/`min()`/`max()`/`clamp()`. The box model
+    reaches it through `style.rs`, and **`style.rs` did not route most of it**:
+    - `parse_len_opt` gated on `calc(` alone → `width: max(20px, 10px)` failed
+      its length parse and became `auto`. Bucket A item 1 has ticked
+      `min()`/`max()`/`clamp()` as done since 0.1.65; **that tick was only ever
+      true for custom properties**.
+    - `parse_pad` called `parse_length` directly → `padding: calc(…)` was
+      dropped WHOLESALE and the side silently kept its previous value.
+
+    Both now go through one `is_math_fn` gate. This is the third time in two
+    rounds that a capability existed in `values.rs` and never reached a
+    consumer; the lesson is in [[feedback-count-matched-rules-not-occurrences]]'s
+    neighbour — **when a helper module gains a feature, grep for every caller
+    that hand-rolls the same parse.**
+
+    ### Cyclic custom properties are guaranteed-invalid, not literal text
+
+    Wikipedia ships `--font-size-medium: var(--font-size-medium, 1rem)`. CSS
+    Variables 1 §3 makes a self-referencing property invalid at computed-value
+    time, so consumers use their own fallback. We left it in the map, the
+    fixpoint expansion substituted the name with itself, stopped changing, and
+    **left a literal `var(…)` in the text** — so every `calc()` consuming it
+    failed. New `drop_cyclic` removes any name that reaches itself through the
+    reference graph (fallbacks included). Oracle-neutral, but it moves the
+    whole page: the placeholder goes 14px → 16px because the variable finally
+    resolves.
+
+    ### Flexbox: two box-model twins in the cross axis
+
+    - **The line was sized from each item's NATURAL cross size**, not its
+      hypothetical one (§9.4 step 7 = natural clamped by the item's own
+      `min-`/`max-height`). An item held open by `min-height` then hung out
+      below the container — Wikipedia's `min-height: 32px` button beside a
+      shorter field, which is the "button overlaps" complaint.
+    - **`flex_item_style` returned the stretched border-box size as a content
+      height with only the PADDING removed**, so a bordered item came out
+      `border_y()` too tall. Item 31 removed exactly this twin from
+      `layout_flex` and `layout_grid`; **this was the third copy**, and it is
+      the "second rule" complaint — three boxes with three different bottom
+      edges where the page merges them with `margin: -1px`.
+
+    Together: +2 (`css-flexbox/flexbox-definite-sizes-001`/`-003`).
+
+    ### Controls are atomic, but not opaque
+
+    `control_box` honoured only `width`/`height`/`max-width`, so a real page
+    could not give its search field a height (`min-height: 32px`) nor reserve
+    room for an icon (`padding-left: calc(8px + 8px + …)` = 36px). It now takes
+    `min-`/`max-height` and `min-width`, and `CtlBox` carries the authored
+    leading inset. **CSS only ever widens that inset** — it cannot squeeze the
+    text below `CTL_PAD_X`, so no existing control gets tighter.
+
+    ### 🎯 What is still wrong on that widget, and why it is the next grip
+
+    The magnifier now decodes, sizes (20×20) and has its 36px of reserved
+    space — and is **still invisible**, because it is painted BEFORE the
+    input's own white background covers it. That is exactly item 28's flat
+    display list: an `position:absolute` box emitted while walking the block,
+    versus Appendix E step 8. **11 WPT tests and this icon are the same fix.**
+    Also open on it: `transform: translateY(-50%)` (the icon sits at the top
+    instead of centred) and the group being 22px wider than its content.
 
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the

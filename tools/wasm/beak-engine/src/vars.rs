@@ -45,6 +45,7 @@ pub fn resolve_vars(css: &str, media: crate::css::Media, root_classes: &[&str]) 
     // as `html.skin-theme-clientpref-night`) must not overwrite these.
     let mut uncond: BTreeSet<String> = BTreeSet::new();
     collect(css, &mut map, &mut uncond, media, root_classes);
+    drop_cyclic(&mut map);
 
     // Expand to a fixpoint. A variable's value (or a fallback) may itself hold
     // more `var()`; each pass resolves one layer, so we loop until stable.
@@ -64,6 +65,68 @@ pub fn resolve_vars(css: &str, media: crate::css::Media, root_classes: &[&str]) 
         cur = next;
     }
     cur
+}
+
+/// Remove custom properties that reference themselves, directly or through a
+/// chain. CSS Variables 1 §3: such a property is **invalid at computed-value
+/// time**, so a `var(--x, fallback)` that consumes it must fall back — which is
+/// the whole point of the idiom.
+///
+/// Wikipedia writes `--font-size-medium: var(--font-size-medium, 1rem)`. Left
+/// in the map, the expansion below substitutes the name with itself, stops
+/// changing, and leaves a literal `var(…)` in the text — so the consuming
+/// `calc(var(--font-size-medium,1rem) + 4px)` never parses and the box falls
+/// back to `auto`. That is the search field's missing magnifier: 0-wide, then
+/// clamped up to its 10px `min-width`.
+fn drop_cyclic(map: &mut BTreeMap<String, String>) {
+    let names: Vec<String> = map.keys().cloned().collect();
+    let mut bad: Vec<String> = Vec::new();
+    for start in &names {
+        // Walk the reference graph from `start`; if we arrive back at it, the
+        // property is in a cycle. `seen` bounds the walk on shared sub-chains.
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut stack: Vec<String> = var_refs(map.get(start).map(|s| s.as_str()).unwrap_or(""));
+        let mut cyclic = false;
+        while let Some(name) = stack.pop() {
+            if name == *start {
+                cyclic = true;
+                break;
+            }
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            if let Some(v) = map.get(&name) {
+                stack.extend(var_refs(v));
+            }
+        }
+        if cyclic {
+            bad.push(start.clone());
+        }
+    }
+    for name in bad {
+        map.remove(&name);
+    }
+}
+
+/// Every `--name` a value references through `var()`, fallbacks included.
+fn var_refs(value: &str) -> Vec<String> {
+    let b = value.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if is_var_at(b, i) && !(i > 0 && is_name(b[i - 1])) {
+            if let Some((end, name, fallback)) = parse_var_args(value, i + 3) {
+                out.push(name);
+                if let Some(f) = fallback {
+                    out.extend(var_refs(&f));
+                }
+                i = end;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
 }
 
 // ── collection ──────────────────────────────────────────────────────────────
@@ -482,6 +545,45 @@ mod tests {
     fn simple_root_var() {
         let out = resolve_vars(":root{--c:#f00} a{color:var(--c)}", crate::css::Media::new(800.0, false), &[]);
         assert!(out.contains("color:#f00"), "{out}");
+    }
+
+    /// A custom property that references itself is invalid at computed-value
+    /// time (CSS Variables 1 §3), so a consumer with a fallback must use it.
+    /// Wikipedia ships `--font-size-medium: var(--font-size-medium, 1rem)`;
+    /// leaving it in the map made the expansion substitute the name with
+    /// itself, stop changing, and leave a literal `var(…)` in the text — which
+    /// then failed every `calc()` that consumed it.
+    #[test]
+    fn a_self_referential_variable_falls_back() {
+        let out = resolve_vars(
+            ":root{--fs:var(--fs,1rem)} a{width:calc(var(--fs,1rem) + 4px)}",
+            crate::css::Media::new(800.0, false),
+            &[],
+        );
+        assert!(out.contains("calc(1rem + 4px)"), "{out}");
+        assert!(!out.contains("var("), "no var() may survive: {out}");
+    }
+
+    /// The same for a cycle that goes through another name.
+    #[test]
+    fn an_indirect_variable_cycle_falls_back() {
+        let out = resolve_vars(
+            ":root{--a:var(--b);--b:var(--a)} p{color:var(--a,red)}",
+            crate::css::Media::new(800.0, false),
+            &[],
+        );
+        assert!(out.contains("color:red"), "{out}");
+    }
+
+    /// A long chain is not a cycle and must still resolve.
+    #[test]
+    fn a_deep_chain_is_not_a_cycle() {
+        let out = resolve_vars(
+            ":root{--a:var(--b);--b:var(--c);--c:#0f0} p{color:var(--a)}",
+            crate::css::Media::new(800.0, false),
+            &[],
+        );
+        assert!(out.contains("color:#0f0"), "{out}");
     }
 
     #[test]

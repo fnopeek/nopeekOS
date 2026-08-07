@@ -164,6 +164,35 @@ fn diag() {
         }
         return;
     }
+    // DOPS=<html> DCSS=<css> DW=<w> — the WHOLE display list, in paint order.
+    // Use when a widget is visibly wrong and you need to see which rect is the
+    // stray one, not just where the text landed.
+    if let Ok(hp) = std::env::var("DOPS") {
+        let css = std::env::var("DCSS").ok().and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
+        let w: u32 = std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(1400);
+        let html = fs::read_to_string(&hp).expect("html");
+        let mut eng = Engine::new();
+        eng.set_theme(light());
+        let lay = eng.layout_ext(&html, &css, w);
+        eprintln!("--- {} ops, page height {} ---", lay.ops.len(), lay.height);
+        for (i, op) in lay.ops.iter().enumerate() {
+            match op {
+                DrawOp::Rect { x, y, w, h, color } =>
+                    eprintln!("{i:>3} RECT   x={x:>5} y={y:>5} w={w:>5} h={h:>4}  {color:?}"),
+                DrawOp::RoundRect { x, y, w, h, color, .. } =>
+                    eprintln!("{i:>3} RRECT  x={x:>5} y={y:>5} w={w:>5} h={h:>4}  {color:?}"),
+                DrawOp::Text { x, y, size, text, .. } =>
+                    eprintln!("{i:>3} TEXT   x={x:>5} y={y:>5} size={size:.0} {:?}",
+                              if text.len()>40 {&text[..40]} else {text}),
+                DrawOp::Image { x, y, w, h, .. } =>
+                    eprintln!("{i:>3} IMG    x={x:>5} y={y:>5} w={w:>5} h={h:>4}"),
+                DrawOp::BgImage { x, y, w, h, key, tint, .. } =>
+                    eprintln!("{i:>3} BGIMG  x={x:>5} y={y:>5} w={w:>5} h={h:>4} key={key:016x} {}",
+                              if tint.is_some() {"MASK"} else {"bg"}),
+            }
+        }
+        return;
+    }
     // DDUMP=<html> DCSS=<css> DW=<w> — dump every TEXT op with its y, plus the
     // page height. Tells you where a marker text lands (push-down debugging).
     if let Ok(hp) = std::env::var("DDUMP") {

@@ -4041,9 +4041,9 @@ FAIL	css-flexbox/flexbox-column-row-gap-001.html
 FAIL	css-flexbox/flexbox-column-row-gap-002.html
 INCONCLUSIVE	css-flexbox/flexbox-column-row-gap-003.html
 FAIL	css-flexbox/flexbox-column-row-gap-004.html
-FAIL	css-flexbox/flexbox-definite-sizes-001.html
+PASS	css-flexbox/flexbox-definite-sizes-001.html
 PASS	css-flexbox/flexbox-definite-sizes-002.html
-FAIL	css-flexbox/flexbox-definite-sizes-003.html
+PASS	css-flexbox/flexbox-definite-sizes-003.html
 PASS	css-flexbox/flexbox-definite-sizes-004.html
 PASS	css-flexbox/flexbox-definite-sizes-005.html
 PASS	css-flexbox/flexbox-flex-basis-content-003a.html
@@ -5691,7 +5691,7 @@ PASS	css-values/calc-ch-ex-lang.html
 INCONCLUSIVE	css-values/calc-height-block-1.html
 PASS	css-values/calc-height-table-1.html
 PASS	css-values/calc-in-calc.html
-FAIL	css-values/calc-in-max.html
+PASS	css-values/calc-in-max.html
 PASS	css-values/calc-in-media-queries-001.html
 PASS	css-values/calc-in-media-queries-002.html
 PASS	css-values/calc-invalid-range-clamping.html
@@ -5736,8 +5736,8 @@ FAIL	css-values/ch-unit-011.html
 FAIL	css-values/ch-unit-012.html
 INCONCLUSIVE	css-values/ex-calc-expression-001.html
 FAIL	css-values/html-attr-case-insensitivity.html
-FAIL	css-values/max-20-arguments.html
-FAIL	css-values/max-length-percent-001.html
+PASS	css-values/max-20-arguments.html
+PASS	css-values/max-length-percent-001.html
 FAIL	css-values/max-unitless-zero-invalid.html
 FAIL	css-values/min-length-percent-001.html
 INCONCLUSIVE	css-values/negative-calc-to-non-negative-integer.html
