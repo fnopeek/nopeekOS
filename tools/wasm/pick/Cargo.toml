@@ -1,8 +1,8 @@
 [package]
-name = "dock"
-version = "0.5.5"
+name = "pick"
+version = "0.1.0"
 edition = "2024"
-description = "Bottom auto-hide app dock (overlay launcher)."
+description = "File dialog portal — nopeekOS."
 
 [lib]
 crate-type = ["cdylib"]

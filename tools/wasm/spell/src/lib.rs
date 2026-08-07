@@ -34,6 +34,10 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 
 // Declared capabilities: read + write (save files) + render. No EXEC —
 // Spell never launches intents. The kernel grants exactly this.
+//
+// Browsing is NOT among them: Open and Save go through `npk_pick`, which
+// runs the dialog in its own module. That module holds the listing right;
+// we only ever see the one path the user chose.
 #[unsafe(link_section = ".npk.caps")]
 #[used]
 static NPK_CAPS: [u8; 1] = [caps::READ | caps::WRITE | caps::RENDER];
@@ -47,8 +51,8 @@ unsafe extern "C" {
     fn npk_event_poll(ptr: i32, max: i32) -> i32;
     fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
-    fn npk_fs_list(prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32;
-    fn npk_home_dir(buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_pick(mode: i32, start_ptr: i32, start_len: i32,
+                suggest_ptr: i32, suggest_len: i32, tag: i32) -> i32;
     fn npk_launch_arg(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_close_widget() -> i32;
     fn npk_log_serial(ptr: i32, len: i32);
@@ -71,16 +75,12 @@ struct Strings {
     view_source:   &'static str,
     view_preview:  &'static str,
     about:         &'static str,
-    no_files:      &'static str,
     untitled:      &'static str,
     placeholder:   &'static str,
     unsaved_title: &'static str,
     unsaved_body:  &'static str,
     discard:       &'static str,
     cancel:        &'static str,
-    save_as_title: &'static str,
-    filename_in:   &'static str,
-    name_hint:     &'static str,
     welcome:       &'static str,
 }
 
@@ -90,16 +90,12 @@ const EN: Strings = Strings {
     close: "Close",
     view_source: "Source", view_preview: "Preview",
     about: "About Spell",
-    no_files: "(no files in documents)",
     untitled: "Untitled",
     placeholder: "Start typing…",
     unsaved_title: "Unsaved changes",
     unsaved_body: "{} has unsaved changes.",
     discard: "Discard", cancel: "Cancel",
-    save_as_title: "Save as",
-    filename_in: "File name (in {}/):",
-    name_hint: "Click the field, then Enter to save · Esc cancels",
-    welcome: "# Welcome to Spell\n\nStart typing, or open a file via **File \u{2192} Open\u{2026}** \u{2014} or double-click in loft.\n\n- Multiple files as tabs\n- Live syntax highlighting\n- Tab inserts 4 spaces\n",
+    welcome: "Welcome to Spell\n\nStart typing, or open a file via File \u{2192} Open\u{2026} \u{2014} or double-click in loft.\n\nMultiple files open as tabs. Save it with a name and the\nextension decides how it is highlighted.\n",
 };
 
 const DE: Strings = Strings {
@@ -108,16 +104,12 @@ const DE: Strings = Strings {
     save_as: "Speichern unter…", close: "Schließen",
     view_source: "Quelltext", view_preview: "Vorschau",
     about: "Über Spell",
-    no_files: "(keine Dateien in documents)",
     untitled: "Unbenannt",
     placeholder: "Tippe los…",
     unsaved_title: "Ungespeicherte Änderungen",
     unsaved_body: "{} hat ungespeicherte Änderungen.",
     discard: "Verwerfen", cancel: "Abbrechen",
-    save_as_title: "Speichern unter",
-    filename_in: "Dateiname (in {}/):",
-    name_hint: "Klicke ins Feld, dann Enter zum Speichern · Esc bricht ab",
-    welcome: "# Willkommen bei Spell\n\nTippe los, oder öffne eine Datei über **Datei \u{2192} Öffnen\u{2026}** \u{2014} oder Doppelklick in loft.\n\n- Mehrere Dateien als Tabs\n- Code wird live farbig dargestellt\n- Tab rückt 4 Leerzeichen ein\n",
+    welcome: "Willkommen bei Spell\n\nTippe los, oder öffne eine Datei über Datei \u{2192} Öffnen\u{2026} \u{2014} oder Doppelklick in loft.\n\nMehrere Dateien liegen als Tabs nebeneinander. Speichere sie\nunter einem Namen, die Endung entscheidet über die Farben.\n",
 };
 
 fn s() -> &'static Strings {
@@ -160,13 +152,6 @@ static mut EVENT_BUF: [u8; EVENT_BUF_SIZE] = [0; EVENT_BUF_SIZE];
 // Scratch for npk_fetch (open) — same ceiling as the edit buffer.
 const FETCH_BUF_SIZE: usize = 512 * 1024;
 static mut FETCH_BUF: [u8; FETCH_BUF_SIZE] = [0; FETCH_BUF_SIZE];
-
-// Directory listing scratch for the open dialog.
-const LIST_BUF_SIZE: usize = 64 * 1024;
-static mut LIST_BUF: [u8; LIST_BUF_SIZE] = [0; LIST_BUF_SIZE];
-
-const NAME_FETCH_CAP: usize = 64;
-static mut NAME_BUF: [u8; NAME_FETCH_CAP] = [0; NAME_FETCH_CAP];
 
 // Pre-allocate the document so ordinary edits stay within capacity and
 // don't churn the bump allocator (mirrors loft's `query` discipline).
@@ -251,9 +236,6 @@ const ACT_FILE_OPEN:    u32 = 6_001;
 const ACT_FILE_SAVE:    u32 = 6_002;
 const ACT_FILE_CLOSE:   u32 = 6_003;
 const ACT_FILE_SAVE_AS: u32 = 6_004;
-// Name dialog: on_submit of the filename Input + the two buttons.
-const ACT_NAME_SUBMIT:  u32 = 6_005;
-const ACT_NAME_CANCEL:  u32 = 6_006;
 // Unsaved-changes-on-close dialog.
 const ACT_CLOSE_SAVE:    u32 = 6_007;
 const ACT_CLOSE_DISCARD: u32 = 6_008;
@@ -262,8 +244,16 @@ const ACT_VIEW_EDIT:    u32 = 6_100;
 const ACT_VIEW_PREVIEW: u32 = 6_101;
 const ACT_HELP_ABOUT: u32 = 6_300;
 
-// i-th file in the open dialog.
-const ACT_OPEN_FILE_BASE: u32 = 7_000;
+// `npk_pick` modes.
+const PICK_OPEN: i32 = 0;
+const PICK_SAVE: i32 = 1;
+
+// Tags handed to `npk_pick` and returned in `Event::Picked`. The save tags
+// carry the tab index, so a reply lands on the document it was asked for
+// rather than on whatever happens to be active when it arrives.
+const TAG_OPEN:            u32 = 1;
+const TAG_SAVE_BASE:       u32 = 1_000;
+const TAG_SAVE_CLOSE_BASE: u32 = 2_000;
 
 // Tab bar: select tab i / close tab i.
 const ACT_TAB_BASE:       u32 = 8_000;
@@ -281,8 +271,11 @@ enum Mode { Edit, Preview }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OpenMenu { File, View, Help }
 
+/// What the file's extension says it is. A buffer with no filename yet is
+/// `Untyped`: no highlighting, no preview toggle, no assumed extension —
+/// it becomes a kind when the user names it.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Kind { Markdown, Code(Lang), Plain }
+enum Kind { Markdown, Code(Lang), Plain, Untyped }
 
 /// Languages with a preview highlighter. Markup = HTML/XML (tag-based);
 /// the rest share the C-like tokenizer parameterised by `lang_spec`.
@@ -329,14 +322,11 @@ impl Doc {
             Some("sh") | Some("bash")              => Kind::Code(Lang::Shell),
             Some("json")                           => Kind::Code(Lang::Json),
             Some("html") | Some("htm") | Some("xml") => Kind::Code(Lang::Markup),
-            None                                   => Kind::Markdown, // fresh buffer
-            _                                      => Kind::Plain,    // txt/log/toml/yaml/…
+            None                                   => Kind::Untyped, // unnamed buffer
+            _                                      => Kind::Plain,   // txt/log/toml/yaml/…
         }
     }
 
-    fn kind_label(&self) -> String {
-        self.ext().unwrap_or_else(|| "md".to_string())
-    }
 
     fn set_text(&mut self, s: &str) {
         self.text.clear();
@@ -356,19 +346,6 @@ struct Spell {
     /// Index of the active tab.
     active:       usize,
     open_menu:    Option<OpenMenu>,
-    /// The open dialog (a file-list popover) is showing.
-    picking:      bool,
-    /// The "Speichern unter…" name dialog is showing. While true the
-    /// TextArea is hidden, so the name `Input` is the only editable
-    /// widget and `InputChange` is unambiguous.
-    naming:       bool,
-    /// Filename being typed in the name dialog (pre-allocated so edits
-    /// stay within capacity across `alloc_reset`).
-    name_buf:     String,
-    /// `<home>/documents` — the open dialog's source directory.
-    docs_dir:     String,
-    /// Files listed by the open dialog (full npkFS paths).
-    files:        Vec<String>,
     /// Tab index pending an unsaved-changes confirmation before close.
     /// `Some(i)` shows the "save changes?" dialog for tab `i`.
     confirm_close: Option<usize>,
@@ -376,17 +353,10 @@ struct Spell {
 
 impl Spell {
     fn new() -> Self {
-        let home = read_home_dir();
-        let docs_dir = alloc::format!("{}/documents", home);
         let mut sp = Spell {
             docs:      Vec::new(),
             active:    0,
             open_menu: None,
-            picking:   false,
-            naming:    false,
-            name_buf:  String::with_capacity(256),
-            docs_dir,
-            files:     Vec::new(),
             confirm_close: None,
         };
 
@@ -475,12 +445,12 @@ impl Spell {
         }
     }
 
-    /// Save the active doc, or open the name dialog if it has no file yet.
+    /// Save the active doc, or ask where to put it if it has no file yet.
     fn save_or_name(&mut self) {
         if let Some(p) = self.cur().path.clone() {
             self.write_to(&p);
         } else {
-            self.start_naming("");
+            self.ask_save_target(self.active, false);
         }
     }
 
@@ -493,39 +463,45 @@ impl Spell {
         self.cur_mut().dirty = false;
     }
 
-    /// Open the "Speichern unter…" dialog. `default` pre-fills the name
-    /// field (current basename, or a sensible suggestion when empty).
-    fn start_naming(&mut self, default: &str) {
+    /// Ask the picker where to save tab `doc`. `then_close` remembers that
+    /// this save came from the close dialog, so the tab goes away once the
+    /// file is written.
+    ///
+    /// The dialog is modal, so the tab indices encoded in the tag can't
+    /// shift while it's up.
+    fn ask_save_target(&mut self, doc: usize, then_close: bool) {
         self.open_menu = None;
-        self.picking = false;
-        self.name_buf.clear();
-        if default.is_empty() {
-            self.name_buf.push_str(match self.cur().kind() {
-                Kind::Code(Lang::Rust) => "unbenannt.rs",
-                _ => "unbenannt.md",
-            });
-        } else {
-            self.name_buf.push_str(default);
-        }
-        self.naming = true;
+        let d = match self.docs.get(doc) { Some(d) => d, None => return };
+        // Open where the file already lives; a fresh buffer starts wherever
+        // the picker defaults to (the kernel resolves "" to the user's home).
+        let start = d.path.as_deref().map(dirname).unwrap_or("");
+        let suggest = d.path.as_deref().map(basename).unwrap_or("");
+        let base = if then_close { TAG_SAVE_CLOSE_BASE } else { TAG_SAVE_BASE };
+        pick(PICK_SAVE, start, suggest, base + doc as u32);
     }
 
-    /// Commit the name dialog: write the active doc to `documents/<name>`
-    /// and adopt it as that doc's file.
-    fn commit_name(&mut self) {
-        let name = self.name_buf.trim();
-        if name.is_empty() { return; }
-        let path = alloc::format!("{}/{}", self.docs_dir, name);
-        self.write_to(&path);
-        let title = basename(&path).to_string();
-        let d = self.cur_mut();
-        d.title = title;
-        d.path = Some(path);
-        self.naming = false;
+    /// Adopt `path` as tab `doc`'s file and write it there.
+    fn save_as(&mut self, doc: usize, path: &str) {
+        if doc >= self.docs.len() { return; }
+        let title = basename(path).to_string();
+        self.docs[doc].title = title;
+        self.docs[doc].path = Some(path.to_string());
+        let prev = self.active;
+        self.active = doc;
+        self.write_to(path);
+        self.active = prev.min(self.docs.len().saturating_sub(1));
     }
+}
 
-    fn refresh_files(&mut self) {
-        self.files = list_files(&self.docs_dir);
+/// Ask the kernel for a file dialog. `tag` comes back in `Event::Picked`.
+fn pick(mode: i32, start: &str, suggest: &str, tag: u32) {
+    unsafe {
+        let _ = npk_pick(
+            mode,
+            start.as_ptr() as i32, start.len() as i32,
+            suggest.as_ptr() as i32, suggest.len() as i32,
+            tag as i32,
+        );
     }
 }
 
@@ -541,51 +517,19 @@ fn read_file(path: &str) -> Option<String> {
     core::str::from_utf8(slice).ok().map(|s| s.to_string())
 }
 
-// ── Filesystem helpers ────────────────────────────────────────────────
-
-fn read_home_dir() -> String {
-    // The username lives in the single encrypted `.system/config` blob,
-    // not a fetchable `sys/config/name` object, so ask the kernel for the
-    // resolved home dir ("home/<name>") directly.
-    let buf_ptr = core::ptr::addr_of_mut!(NAME_BUF) as *mut u8;
-    let n = unsafe { npk_home_dir(buf_ptr as i32, NAME_FETCH_CAP as i32) };
-    if n <= 0 { return String::from("home"); }
-    let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
-    match core::str::from_utf8(slice) {
-        Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
-        _ => String::from("home"),
-    }
-}
-
-/// List regular files directly under `dir` (non-recursive), returning
-/// full npkFS paths. Directories and `.dir` markers are skipped.
-fn list_files(dir: &str) -> Vec<String> {
-    let buf_ptr = core::ptr::addr_of_mut!(LIST_BUF) as *mut u8;
-    let n = unsafe {
-        npk_fs_list(dir.as_ptr() as i32, dir.len() as i32,
-                    buf_ptr as i32, LIST_BUF_SIZE as i32, 0)
-    };
-    if n <= 0 { return Vec::new(); }
-    let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
-    let mut out: Vec<String> = Vec::new();
-    for line in slice.split(|&b| b == b'\n') {
-        // Wire: name\0size(8)\0is_dir(1)[\0mtime(8)]
-        let nul = match line.iter().position(|&b| b == 0) { Some(i) => i, None => continue };
-        let name = match core::str::from_utf8(&line[..nul]) { Ok(s) => s, Err(_) => continue };
-        if name.is_empty() || name == ".dir" { continue; }
-        let rest = &line[nul + 1..];
-        if rest.len() < 10 { continue; }
-        if rest[9] != 0 { continue; } // is_dir
-        out.push(alloc::format!("{}/{}", dir, name));
-    }
-    out.sort();
-    out
-}
+// ── Path helpers ──────────────────────────────────────────────────────
 
 fn basename(path: &str) -> &str {
     match path.rfind('/') {
         Some(i) => &path[i + 1..],
         None => path,
+    }
+}
+
+fn dirname(path: &str) -> &str {
+    match path.rfind('/') {
+        Some(i) => &path[..i],
+        None => "",
     }
 }
 
@@ -600,11 +544,7 @@ fn render(sp: &Spell) -> Widget {
         render_body(sp),       // Flex(1) — fills (no footer; removed as noise)
     ];
 
-    // Open dialog takes precedence over the Datei dropdown (it replaces
-    // it, anchored to the same menu label).
-    if sp.picking {
-        children.push(render_open_dialog(sp));
-    } else if let Some(kind) = sp.open_menu {
+    if let Some(kind) = sp.open_menu {
         let (anchor, content) = render_dropdown(sp, kind);
         children.push(Widget::Popover {
             anchor:     NodeId(anchor),
@@ -661,25 +601,6 @@ fn render_dropdown(sp: &Spell, kind: OpenMenu) -> (u32, Widget) {
                 (s().about.to_string(), ActionId(ACT_HELP_ABOUT)),
             ], None),
         ),
-    }
-}
-
-fn render_open_dialog(sp: &Spell) -> Widget {
-    let content = if sp.files.is_empty() {
-        prefab::popover_menu(&[
-            (s().no_files.to_string(), ActionId(ACT_MENU_DISMISS)),
-        ], None)
-    } else {
-        let items: Vec<(String, ActionId)> = sp.files.iter().enumerate()
-            .map(|(i, p)| (basename(p).to_string(), ActionId(ACT_OPEN_FILE_BASE + i as u32)))
-            .collect();
-        prefab::popover_menu(&items, None)
-    };
-    Widget::Popover {
-        anchor:     NodeId(NODE_MENU_FILE),
-        child:      Box::new(content),
-        on_dismiss: ActionId(ACT_MENU_DISMISS),
-        modifiers:  alloc::vec![],
     }
 }
 
@@ -801,9 +722,6 @@ fn render_body(sp: &Spell) -> Widget {
     if sp.confirm_close.is_some() {
         return render_confirm_dialog(sp);
     }
-    if sp.naming {
-        return render_name_dialog(sp);
-    }
     // Markdown is the special case: a rendered preview you toggle to.
     // Everything else is the live-highlighted editor — code gets colour
     // spans the compositor paints while you type, no toggle needed.
@@ -871,48 +789,6 @@ fn render_confirm_dialog(sp: &Spell) -> Widget {
         Some("Esc bricht ab"),
         380,
     );
-    Widget::Column {
-        children:  alloc::vec![Widget::Spacer { flex: 1 }, card, Widget::Spacer { flex: 1 }],
-        spacing:   0,
-        align:     Align::Center,
-        modifiers: alloc::vec![Modifier::Flex(1), Modifier::Padding(Padding::Lg.as_u16())],
-    }
-}
-
-/// "Speichern unter…" dialog — fills the body (TextArea hidden) so the
-/// name `Input` is the only editable widget. Click the field to focus it
-/// (a re-commit doesn't auto-focus), type the name, Enter or Speichern.
-fn render_name_dialog(sp: &Spell) -> Widget {
-    let card = prefab::dialog(
-        s().save_as_title,
-        Widget::Column {
-            children: alloc::vec![
-                Widget::Text {
-                    content:   fill(s().filename_in, basename(&sp.docs_dir)),
-                    style:     TextStyle::Muted,
-                    modifiers: alloc::vec![],
-                },
-                prefab::input_autofocus(&sp.name_buf, "name.md", prefab::InputKind::Text,
-                              ActionId(ACT_NAME_SUBMIT), None),
-                Widget::Row {
-                    children: alloc::vec![
-                        Widget::Spacer { flex: 1 },
-                        prefab::button(s().cancel, prefab::ButtonStyle::Ghost, ActionId(ACT_NAME_CANCEL)),
-                        prefab::button(s().save, prefab::ButtonStyle::Primary, ActionId(ACT_NAME_SUBMIT)),
-                    ],
-                    spacing:   Spacing::Sm.as_u16(),
-                    align:     Align::Center,
-                    modifiers: alloc::vec![],
-                },
-            ],
-            spacing:   Spacing::Md.as_u16(),
-            align:     Align::Stretch,
-            modifiers: alloc::vec![],
-        },
-        Some(s().name_hint),
-        360,
-    );
-    // Centre the dialog in the body area.
     Widget::Column {
         children:  alloc::vec![Widget::Spacer { flex: 1 }, card, Widget::Spacer { flex: 1 }],
         spacing:   0,
@@ -1200,8 +1076,6 @@ fn handle(sp: &mut Spell, ev: Event, payload: &str) -> Outcome {
     match ev {
         Event::Key(KeyCode::Escape) => {
             if sp.confirm_close.is_some() { sp.confirm_close = None; Outcome::Rerender }
-            else if sp.naming { sp.naming = false; Outcome::Rerender }
-            else if sp.picking { sp.picking = false; Outcome::Rerender }
             else if sp.open_menu.is_some() { sp.open_menu = None; Outcome::Rerender }
             // Quit only when nothing has unsaved changes; otherwise ask
             // about the active tab first.
@@ -1214,16 +1088,26 @@ fn handle(sp: &mut Spell, ev: Event, payload: &str) -> Outcome {
         }
         Event::InputChange { .. } => {
             // `payload` is the stabilized buffer value (the event's own
-            // String was freed by alloc_reset).
-            if sp.naming {
-                // Only the name Input is editable while naming.
-                sp.name_buf.clear();
-                sp.name_buf.push_str(payload);
-            } else {
-                // Mirror the compositor's edit buffer into the active doc.
-                let d = sp.cur_mut();
-                d.set_text(payload);
-                d.dirty = true;
+            // String was freed by alloc_reset). The TextArea is the only
+            // editable widget we render — the file dialogs live in their
+            // own window now.
+            let d = sp.cur_mut();
+            d.set_text(payload);
+            d.dirty = true;
+            Outcome::Rerender
+        }
+        // The file dialog came back. `payload` is the chosen path; empty
+        // means the user cancelled.
+        Event::Picked { tag, .. } => {
+            if payload.is_empty() { return Outcome::Idle; }
+            if tag == TAG_OPEN {
+                sp.open_path(payload);
+            } else if tag >= TAG_SAVE_CLOSE_BASE {
+                let doc = (tag - TAG_SAVE_CLOSE_BASE) as usize;
+                sp.save_as(doc, payload);
+                sp.close_tab(doc);
+            } else if tag >= TAG_SAVE_BASE {
+                sp.save_as((tag - TAG_SAVE_BASE) as usize, payload);
             }
             Outcome::Rerender
         }
@@ -1240,15 +1124,12 @@ fn handle(sp: &mut Spell, ev: Event, payload: &str) -> Outcome {
 
 fn handle_action(sp: &mut Spell, id: u32) -> Outcome {
     match id {
-        ACT_MENU_FILE => { sp.picking = false; sp.open_menu = toggle(sp.open_menu, OpenMenu::File); Outcome::Rerender }
-        ACT_MENU_VIEW => { sp.picking = false; sp.open_menu = toggle(sp.open_menu, OpenMenu::View); Outcome::Rerender }
-        ACT_MENU_HELP => { sp.picking = false; sp.open_menu = toggle(sp.open_menu, OpenMenu::Help); Outcome::Rerender }
+        ACT_MENU_FILE => { sp.open_menu = toggle(sp.open_menu, OpenMenu::File); Outcome::Rerender }
+        ACT_MENU_VIEW => { sp.open_menu = toggle(sp.open_menu, OpenMenu::View); Outcome::Rerender }
+        ACT_MENU_HELP => { sp.open_menu = toggle(sp.open_menu, OpenMenu::Help); Outcome::Rerender }
         ACT_MENU_DISMISS => {
-            if sp.picking || sp.open_menu.is_some() {
-                sp.picking = false;
-                sp.open_menu = None;
-                Outcome::Rerender
-            } else { Outcome::Idle }
+            if sp.open_menu.is_some() { sp.open_menu = None; Outcome::Rerender }
+            else { Outcome::Idle }
         }
         ACT_FILE_NEW => {
             sp.open_menu = None;
@@ -1257,18 +1138,17 @@ fn handle_action(sp: &mut Spell, id: u32) -> Outcome {
         }
         ACT_FILE_OPEN => {
             sp.open_menu = None;
-            sp.refresh_files();
-            sp.picking = true;
+            // Start where the current file lives; the picker falls back to
+            // the user's home for an unnamed buffer.
+            let start = sp.cur().path.as_deref().map(dirname).unwrap_or("").to_string();
+            pick(PICK_OPEN, &start, "", TAG_OPEN);
             Outcome::Rerender
         }
         ACT_FILE_SAVE => { sp.open_menu = None; sp.save_or_name(); Outcome::Rerender }
         ACT_FILE_SAVE_AS => {
-            let d = if sp.cur().path.is_some() { sp.cur().title.clone() } else { String::new() };
-            sp.start_naming(&d);
+            sp.ask_save_target(sp.active, false);
             Outcome::Rerender
         }
-        ACT_NAME_SUBMIT => { sp.commit_name(); Outcome::Rerender }
-        ACT_NAME_CANCEL => { sp.naming = false; Outcome::Rerender }
         ACT_FILE_CLOSE => { sp.open_menu = None; sp.request_close(sp.active); Outcome::Rerender }
         // Unsaved-changes dialog buttons.
         ACT_CLOSE_DISCARD => {
@@ -1283,15 +1163,24 @@ fn handle_action(sp: &mut Spell, id: u32) -> Outcome {
                     sp.write_to(&p);
                     sp.close_tab(i);
                 } else {
-                    // No filename yet → name it first; close afterwards
-                    // (the tab is no longer dirty once saved).
-                    sp.start_naming("");
+                    // No filename yet → ask where to put it. The tab closes
+                    // when the picker replies (TAG_SAVE_CLOSE_BASE + i).
+                    sp.ask_save_target(i, true);
                 }
             }
             Outcome::Rerender
         }
         ACT_VIEW_EDIT => { sp.open_menu = None; sp.cur_mut().mode = Mode::Edit; Outcome::Rerender }
-        ACT_VIEW_PREVIEW => { sp.open_menu = None; sp.cur_mut().mode = Mode::Preview; Outcome::Rerender }
+        ACT_VIEW_PREVIEW => {
+            sp.open_menu = None;
+            // Only markdown has a preview. Leaving the mode on Edit for
+            // everything else keeps the menu's radio dot honest instead of
+            // marking a view that never renders.
+            if matches!(sp.cur().kind(), Kind::Markdown) {
+                sp.cur_mut().mode = Mode::Preview;
+            }
+            Outcome::Rerender
+        }
         ACT_HELP_ABOUT => {
             log("[spell] Spell 0.1 — nopeekOS text editor");
             sp.open_menu = None;
@@ -1307,14 +1196,6 @@ fn handle_action(sp: &mut Spell, id: u32) -> Outcome {
                 let i = (id - ACT_TAB_BASE) as usize;
                 if i < sp.docs.len() { sp.active = i; }
                 return Outcome::Rerender;
-            }
-            if id >= ACT_OPEN_FILE_BASE {
-                let i = (id - ACT_OPEN_FILE_BASE) as usize;
-                if let Some(path) = sp.files.get(i).cloned() {
-                    sp.open_path(&path);
-                    sp.picking = false;
-                    return Outcome::Rerender;
-                }
             }
             Outcome::Idle
         }
@@ -1358,6 +1239,7 @@ pub extern "C" fn _start() {
                 let plen = match &ev {
                     Event::Open(s) => copy_payload(s),
                     Event::InputChange { value } => copy_payload(value),
+                    Event::Picked { path, .. } => copy_payload(path),
                     _ => 0,
                 };
                 alloc_reset(persistent_mark);

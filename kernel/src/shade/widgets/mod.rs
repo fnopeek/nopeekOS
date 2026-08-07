@@ -275,6 +275,14 @@ pub fn widget_window_exists(window_id: u32) -> bool {
 pub fn remove_event_queue(window_id: u32) {
     EVENT_QUEUES.lock().remove(&window_id);
     CLIPBOARD_SINKS.lock().remove(&window_id);
+    // A picker closed by its window button (rather than by picking) still
+    // owes its requester an answer, or the app waits for a dialog that no
+    // longer exists. Report it as a cancel. `take_pick` first so the
+    // session is gone before `finish_pick` touches the event queue —
+    // EVENT_QUEUES is already released by then.
+    if let Some(session) = take_pick(window_id) {
+        finish_pick(session, alloc::string::String::new());
+    }
 }
 
 // ── Clipboard-sink opt-in ─────────────────────────────────────────────
@@ -295,6 +303,53 @@ pub fn set_clipboard_sink(window_id: u32) {
 /// True if `window_id` opted into `Event::Clipboard` delivery.
 pub fn is_clipboard_sink(window_id: u32) -> bool {
     CLIPBOARD_SINKS.lock().contains(&window_id)
+}
+
+// ── File-picker portal ────────────────────────────────────────────────
+//
+// An app that wants to open or save a file calls `npk_pick`, which spawns
+// the picker module in its own floating window. The picker browses npkFS
+// (it needs READ; the requester does not) and reports the chosen path via
+// `npk_pick_result`. The kernel then hands the requester an
+// `Event::Picked` — so a user's click in a trusted picker, not a blanket
+// right, is what points an app at a file.
+//
+// The picker never writes. It returns a path; the requester does the I/O.
+
+/// Live picker sessions, keyed by the picker window's id.
+static PICK_SESSIONS: Mutex<BTreeMap<u32, PickSession>> = Mutex::new(BTreeMap::new());
+
+#[derive(Clone, Copy)]
+pub struct PickSession {
+    /// Widget window of the app that asked for the dialog.
+    pub requester: u32,
+    /// Caller-owned correlation value, returned in `Event::Picked`.
+    pub tag: u32,
+}
+
+/// Register a picker window as belonging to `requester`. Called by
+/// `npk_pick` right after it creates the picker's window.
+pub fn register_pick(picker: u32, requester: u32, tag: u32) {
+    PICK_SESSIONS.lock().insert(picker, PickSession { requester, tag });
+}
+
+/// True if `requester` already has a picker open — one dialog per app, so
+/// a repeated click can't stack windows.
+pub fn has_open_pick(requester: u32) -> bool {
+    PICK_SESSIONS.lock().values().any(|s| s.requester == requester)
+}
+
+/// Consume the session owned by picker window `picker`. Returns None if
+/// the caller isn't a registered picker — which is also the authorisation
+/// check for `npk_pick_result`: only a window the kernel itself spawned as
+/// a picker can deliver a result.
+pub fn take_pick(picker: u32) -> Option<PickSession> {
+    PICK_SESSIONS.lock().remove(&picker)
+}
+
+/// Deliver the picker's answer to the requester. Empty `path` = cancelled.
+pub fn finish_pick(session: PickSession, path: alloc::string::String) {
+    push_event(session.requester, abi::Event::Picked { path, tag: session.tag });
 }
 
 /// Deepest widget at (x, y) that declares an OnClick — returns the

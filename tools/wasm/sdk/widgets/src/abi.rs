@@ -538,6 +538,13 @@ pub enum Event {
     /// against an older SDK simply fails to decode it and skips (its
     /// `postcard::from_bytes` returns `Err`, treated as "no event").
     Clipboard(ClipKind),
+    /// A file-picker request this app started via `npk_pick` finished.
+    /// `path` is the npkFS path the user chose, or **empty if they
+    /// cancelled**. `tag` is the caller's own value from `npk_pick`,
+    /// returned unchanged — the picker roundtrip is asynchronous, so an
+    /// app running several dialogs (open / save-as / …) uses it to tell
+    /// which one came back. The kernel never interprets it.
+    Picked { path: String, tag: u32 },
     // Appended only.
 }
 

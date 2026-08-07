@@ -365,6 +365,15 @@ pub fn intent_uninstall(args: &str) {
         return;
     }
 
+    // Same for the file dialog: without it `npk_pick` has nothing to
+    // spawn, and every app loses Open and Save at once.
+    if is_active_picker(name) {
+        kprintln!("[npk] Cannot uninstall '{}' — it is the active file dialog.", name);
+        kprintln!("[npk] Point `sys/config/picker` to a different module first,");
+        kprintln!("[npk] then re-run uninstall.");
+        return;
+    }
+
     // Guard 2: bundled modules need --force.
     let store_name = alloc::format!("sys/wasm/{}", name);
     let bundled = is_bundled_module(name);
@@ -389,6 +398,24 @@ pub fn intent_uninstall(args: &str) {
         }
         Err(_) => kprintln!("[npk] Module '{}' not installed.", name),
     }
+}
+
+/// True iff `name` matches the module serving `npk_pick`
+/// (`sys/config/picker`, default `pick` — same fallback as the kernel).
+fn is_active_picker(name: &str) -> bool {
+    let configured = match crate::npkfs::fetch("sys/config/picker") {
+        Ok((data, _)) => match core::str::from_utf8(&data) {
+            Ok(s) => s.trim().to_string(),
+            Err(_) => alloc::string::String::from("pick"),
+        },
+        Err(_) => alloc::string::String::from("pick"),
+    };
+    let configured = if configured.is_empty() {
+        alloc::string::String::from("pick")
+    } else {
+        configured
+    };
+    configured == name
 }
 
 /// True iff `name` matches the active launcher (`sys/config/launcher`).
@@ -428,6 +455,7 @@ fn is_bundled_module(name: &str) -> bool {
         "bar",
         "testdisk",
         "spell",
+        "pick",
         "iris",
         "snap",
     ];
