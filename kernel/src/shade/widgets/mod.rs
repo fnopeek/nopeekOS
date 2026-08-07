@@ -725,6 +725,45 @@ fn collect_text_widgets(
     }
 }
 
+/// Mutable twin of `widget_at_path`.
+fn widget_at_path_mut<'a>(tree: &'a mut abi::Widget, path: &[u32])
+    -> Option<&'a mut abi::Widget>
+{
+    let mut cur = tree;
+    for &i in path {
+        let kids = widget_children_mut(cur);
+        cur = kids.into_iter().nth(i as usize)?;
+    }
+    Some(cur)
+}
+
+/// Write the editor's buffer into the compositor's copy of the tree.
+///
+/// The editor leads the app's tree by one round-trip by design: what you
+/// typed lives in `input_edit`, and the app's `value` only catches up when
+/// it re-commits. An app that doesn't re-commit on every keystroke (beak's
+/// address bar, for one — a full chrome commit per character is not free)
+/// therefore still holds the OLD value. While the field is focused nobody
+/// notices, because the editor buffer is what gets painted. The moment
+/// focus leaves, the paint falls back to the tree and the text appears to
+/// vanish — though it was never lost, only unparked on the way back.
+///
+/// So on the way out we push the buffer into the tree. The next real
+/// `scene_commit` overwrites it, which is correct: an app that states a
+/// value outranks a stale keystroke.
+fn set_input_value_at(tree: &mut abi::Widget, path: &[u32], value: &str) -> bool {
+    match widget_at_path_mut(tree, path) {
+        Some(abi::Widget::Input { value: v, .. })
+        | Some(abi::Widget::TextArea { value: v, .. }) => {
+            if v.as_str() == value { return false; }
+            v.clear();
+            v.push_str(value);
+            true
+        }
+        _ => false,
+    }
+}
+
 pub fn update_hover(window_id: u32, x: i32, y: i32) {
     // Step 1 — recompute the hover path against the cached layout tree.
     // Cheap (one descent), avoids re-rendering on hover moves that
@@ -928,6 +967,7 @@ pub fn press_at(window_id: u32, x: i32, y: i32) -> bool {
 
     if !(focus_changed || active_changed) { return false; }
 
+    let mut tree_updated = false;
     let edit_present = if let Some(s) = SCENES.lock().get_mut(&window_id) {
         if let Some(new_focus) = new_focus_opt {
             // Capture the OUTGOING path before it is overwritten — the
@@ -945,6 +985,11 @@ pub fn press_at(window_id: u32, x: i32, y: i32) -> bool {
             // and hand it back when that same field is focused again.
             if s.focus_path.is_empty() {
                 if let Some(edit) = s.input_edit.take() {
+                    // Keep what was typed on screen — see
+                    // `set_input_value_at`.
+                    if set_input_value_at(&mut s.tree, &leaving, &edit.value) {
+                        tree_updated = true;
+                    }
                     s.parked_edit = Some((leaving, edit));
                 }
             } else {
@@ -971,7 +1016,7 @@ pub fn press_at(window_id: u32, x: i32, y: i32) -> bool {
         s.input_edit.is_some()
     } else { false };
 
-    if has_pseudo || edit_present {
+    if has_pseudo || edit_present || tree_updated {
         rerender_state_only(window_id);
         crate::shade::request_render();
         return true;
@@ -1222,6 +1267,25 @@ fn widget_children_ref(w: &abi::Widget) -> alloc::vec::Vec<&abi::Widget> {
         }
         abi::Widget::Scroll { child, .. } | abi::Widget::Popover { child, .. } => {
             out.push(child.as_ref());
+        }
+        _ => {}
+    }
+    out
+}
+
+/// Mutable twin of `widget_children_ref`. Same container set — anything
+/// missing here would silently break path descent for the mutable walk.
+fn widget_children_mut(w: &mut abi::Widget) -> alloc::vec::Vec<&mut abi::Widget> {
+    let mut out = alloc::vec::Vec::new();
+    match w {
+        abi::Widget::Column { children, .. } |
+        abi::Widget::Row    { children, .. } |
+        abi::Widget::Stack  { children, .. } |
+        abi::Widget::Menu   { items: children, .. } => {
+            for c in children { out.push(c); }
+        }
+        abi::Widget::Scroll { child, .. } | abi::Widget::Popover { child, .. } => {
+            out.push(child.as_mut());
         }
         _ => {}
     }
