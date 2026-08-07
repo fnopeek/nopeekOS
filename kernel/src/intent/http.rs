@@ -505,6 +505,23 @@ fn url_basename(url_path: &str) -> Option<String> {
 struct HttpResponse {
     status: u16,
     location: Option<String>,
+    /// Raw `Content-Type` value. A browser cannot decode a document without
+    /// it: a page declaring `charset=ISO-8859-1` is not UTF-8, and guessing
+    /// wrong costs the whole document.
+    content_type: Option<String>,
+}
+
+/// What the caller learns about a response besides its bytes.
+///
+/// Grouped rather than passed as more out-params, because every one of
+/// these is "something the body alone cannot tell you" and the list grows.
+#[derive(Default)]
+pub struct FetchInfo {
+    /// The URL the body actually came from, after redirects (RFC 3986
+    /// §5.1.3 base URL). Empty if unknown.
+    pub final_url: String,
+    /// The response's `Content-Type`, verbatim. Empty if the server sent none.
+    pub content_type: String,
 }
 
 /// Reusable HTTPS GET — returns the response body as Vec<u8>.
@@ -578,20 +595,21 @@ pub fn https_get_streaming(
     https_get_streaming_ex(host, path, max_size, on_chunk, None)
 }
 
-/// As [`https_get_streaming`], but also reports the URL the body actually
-/// came from after following redirects.
+/// As [`https_get_streaming`], but also reports what the caller needs to
+/// interpret the bytes — see [`FetchInfo`].
 ///
-/// A browser resolves a document's relative URLs against that *final*
+/// A browser resolves a document's relative URLs against the *final*
 /// address (the document base URL, RFC 3986 §5.1.3). Without it every
 /// relative sub-resource is requested against the pre-redirect address and
 /// pays a second round-trip through the same redirect — which is what drove
-/// beak into Wikimedia's rate limit.
+/// beak into Wikimedia's rate limit. It equally cannot decode the bytes
+/// without the Content-Type.
 pub fn https_get_streaming_ex(
     host: &str,
     path: &str,
     max_size: usize,
     on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
-    mut final_url: Option<&mut String>,
+    mut info: Option<&mut FetchInfo>,
 ) -> Result<usize, &'static str> {
     let mut cur_host = String::from(host);
     let mut cur_path = String::from(path);
@@ -612,11 +630,15 @@ pub fn https_get_streaming_ex(
                 if total == 0 {
                     return Err("empty body");
                 }
-                if let Some(out) = final_url.as_deref_mut() {
-                    out.clear();
-                    out.push_str("https://");
-                    out.push_str(&cur_host);
-                    out.push_str(&cur_path);
+                if let Some(out) = info.as_deref_mut() {
+                    out.final_url.clear();
+                    out.final_url.push_str("https://");
+                    out.final_url.push_str(&cur_host);
+                    out.final_url.push_str(&cur_path);
+                    out.content_type.clear();
+                    if let Some(ct) = &resp.content_type {
+                        out.content_type.push_str(ct);
+                    }
                 }
                 return Ok(total);
             }
@@ -1085,6 +1107,7 @@ fn https_exchange(
     };
     let status = parse_status_code(hdr_str).unwrap_or(0);
     let location = parse_header_value(hdr_str, "location").map(String::from);
+    let content_type = parse_header_value(hdr_str, "content-type").map(String::from);
     let content_length = parse_header_value(hdr_str, "content-length")
         .and_then(|v| v.trim().parse::<usize>().ok());
     let chunked = parse_header_value(hdr_str, "transfer-encoding")
@@ -1113,7 +1136,7 @@ fn https_exchange(
         }
         let drained = drain_body(&mut tls, leading, content_length, chunked, &mut buf);
         finish_conn(host, tls, persistent && drained);
-        return Ok(HttpResponse { status, location });
+        return Ok(HttpResponse { status, location, content_type });
     }
     if chatty() { kprintln!("[npk]   HTTP {} — receiving body", status); }
 
@@ -1190,7 +1213,7 @@ fn https_exchange(
     }
 
     finish_conn(host, tls, persistent && fully_drained);
-    Ok(HttpResponse { status, location })
+    Ok(HttpResponse { status, location, content_type })
 }
 
 /// One HTTPS round-trip — no redirect following. Reuses a pooled
@@ -1657,6 +1680,7 @@ fn http_get_once(
     let hdr_str = core::str::from_utf8(&raw[..hdr_end]).map_err(|_| "invalid header encoding")?;
     let status = parse_status_code(hdr_str).unwrap_or(0);
     let location = parse_header_value(hdr_str, "location").map(String::from);
+    let content_type = parse_header_value(hdr_str, "content-type").map(String::from);
 
     if (300..400).contains(&status) {
         match &location {
@@ -1665,7 +1689,7 @@ fn http_get_once(
             _ => {}
         }
         let _ = crate::net::tcp::close(handle);
-        return Ok(HttpResponse { status, location });
+        return Ok(HttpResponse { status, location, content_type });
     }
     if chatty() { kprintln!("[npk]   HTTP {} — receiving body", status); }
 
@@ -1693,7 +1717,7 @@ fn http_get_once(
         }
     }
     let _ = crate::net::tcp::close(handle);
-    Ok(HttpResponse { status, location })
+    Ok(HttpResponse { status, location, content_type })
 }
 
 /// Parse HTTP status code from first header line.

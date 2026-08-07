@@ -18,6 +18,7 @@ use alloc::vec::Vec;
 
 mod neterror;
 
+use beak_engine::charset;
 use beak_engine::forms::{self, ControlKind, FormState, Forms};
 use beak_engine::{Engine, Layout};
 use nopeek_widgets::i18n;
@@ -101,6 +102,8 @@ unsafe extern "C" {
     fn npk_http_final_url(buf_ptr: i32, buf_max: i32) -> i32;
     /// Why the last request failed: `kind\tmessage`. Cleared on success.
     fn npk_http_last_error(buf_ptr: i32, buf_max: i32) -> i32;
+    /// The last response's Content-Type, verbatim. -1 if the server sent none.
+    fn npk_http_content_type(buf_ptr: i32, buf_max: i32) -> i32;
     /// Fetch a newline-separated list of URLs in one call, multiplexed over
     /// HTTP/2 where the host offers it. Bodies land back-to-back in `out`;
     /// `lens` receives one little-endian i32 per URL (bytes written, or -1).
@@ -536,6 +539,59 @@ fn show_error_page(url: &str) {
     }
 }
 
+/// The last response's Content-Type. `None` if the server sent none — or if
+/// the kernel is older than the host fn, which is why every caller has to
+/// cope with not knowing rather than assume UTF-8.
+fn content_type() -> Option<String> {
+    const CT_CAP: usize = 256;
+    static mut CT_BUF: [u8; CT_CAP] = [0; CT_CAP];
+    let dst = core::ptr::addr_of_mut!(CT_BUF) as *mut u8;
+    let n = unsafe { npk_http_content_type(dst as i32, CT_CAP as i32) };
+    if n <= 0 {
+        return None;
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(dst as *const u8, n as usize) };
+    core::str::from_utf8(bytes).ok().map(|s| s.to_string())
+}
+
+/// Bring the freshly fetched document to valid UTF-8, in place.
+///
+/// Must run before ANYTHING reads `html_str()` — the stylesheet scan does,
+/// and a document still holding raw Latin-1 reads back as the empty string.
+fn decode_document() {
+    let len = unsafe { core::ptr::addr_of!(HTML_LEN).read() };
+    if len == 0 {
+        return;
+    }
+    let ct = content_type();
+    let buf = unsafe {
+        core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(HTML_BUF) as *mut u8, HTML_CAP)
+    };
+    let (n, how) = charset::to_utf8_in_place(buf, len, ct.as_deref());
+    unsafe { core::ptr::addr_of_mut!(HTML_LEN).write(n) };
+    if how != charset::KEPT {
+        log(&alloc::format!("[beak] document charset: {} ({} -> {} B)", how, len, n));
+    }
+}
+
+/// Same for the concatenated stylesheets. No Content-Type here — they arrive
+/// through the batch fetch, which reports one status per URL and no headers —
+/// so this is sniff-only. One bad byte used to cost the page ALL its CSS.
+fn decode_css() {
+    let len = unsafe { core::ptr::addr_of!(CSS_LEN).read() };
+    if len == 0 {
+        return;
+    }
+    let buf = unsafe {
+        core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(CSS_BUF) as *mut u8, CSS_CAP)
+    };
+    let (n, how) = charset::to_utf8_in_place(buf, len, None);
+    unsafe { core::ptr::addr_of_mut!(CSS_LEN).write(n) };
+    if how != charset::KEPT {
+        log(&alloc::format!("[beak] css charset: {} ({} -> {} B)", how, len, n));
+    }
+}
+
 /// The URL the last fetch's body actually came from, after redirects.
 /// `None` if the kernel reported none (request failed, or an older kernel).
 fn fetched_from() -> Option<String> {
@@ -561,6 +617,10 @@ fn fetch(url: &str) -> bool {
     log_ms("fetch document", now_ms() - t_nav);
     let len = if n < 0 { 0 } else { n as usize };
     unsafe { core::ptr::addr_of_mut!(HTML_LEN).write(len) };
+    // Before anything reads the document: its bytes are not UTF-8 just
+    // because we would like them to be.
+    decode_document();
+    let len = unsafe { core::ptr::addr_of!(HTML_LEN).read() };
     set_scroll(0);
     mark_dirty();
     bump_content_gen("navigation");
@@ -758,6 +818,7 @@ fn fetch_stylesheets(base: &str) {
         }
     }
     unsafe { core::ptr::addr_of_mut!(CSS_LEN).write(len) };
+    decode_css();
 }
 
 /// Set the address + fetch, WITHOUT touching history (used by back/forward).

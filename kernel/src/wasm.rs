@@ -64,6 +64,10 @@ struct HostState {
     /// redirects. Read back via `npk_http_final_url` — a browser needs it
     /// as the document base URL for relative sub-resources.
     http_final_url: Option<String>,
+    /// The last `npk_http_request`'s `Content-Type`. Read back via
+    /// `npk_http_content_type` — a browser cannot decode a document
+    /// without it, and guessing the charset wrong costs the WHOLE page.
+    http_content_type: Option<String>,
     /// Why the last `npk_http_request` failed, as `kind\tmessage`. Read
     /// back via `npk_http_last_error`. Without it every failure reaches the
     /// caller as a bare -1, which is how an untrusted certificate ended up
@@ -378,6 +382,7 @@ fn wasm_worker_task(arg: u64) {
         module_name: String::from(name_str),
         launch_arg: job.launch_arg.clone(),
         http_final_url: None,
+        http_content_type: None,
         http_last_error: None,
     });
     let _ = store.set_fuel(INTERACTIVE_FUEL);
@@ -480,6 +485,7 @@ pub fn execute_interactive(
         module_name: String::new(),
         launch_arg: None,
         http_final_url: None,
+        http_content_type: None,
         http_last_error: None,
     });
     store.set_fuel(INTERACTIVE_FUEL).map_err(|_| WasmError::ExecutionFailed)?;
@@ -526,6 +532,7 @@ fn execute_inner(
         module_name: String::new(),
         launch_arg: None,
         http_final_url: None,
+        http_content_type: None,
         http_last_error: None,
     });
     store.set_fuel(fuel).map_err(|_| WasmError::ExecutionFailed)?;
@@ -687,7 +694,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             };
 
             let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-            let mut final_url = String::new();
+            let mut info = crate::intent::http::FetchInfo::default();
             let res = crate::intent::http::https_get_streaming_ex(
                 &host, &path, cap,
                 &mut |chunk: &[u8]| -> Result<(), &'static str> {
@@ -697,12 +704,17 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                     }
                     Ok(())
                 },
-                Some(&mut final_url),
+                Some(&mut info),
             );
             // A failed request must not leave the previous request's final
             // URL readable as if it were this one's.
+            let ok = res.is_ok();
             caller.data_mut().http_final_url =
-                if res.is_ok() && !final_url.is_empty() { Some(final_url) } else { None };
+                if ok && !info.final_url.is_empty() { Some(info.final_url) } else { None };
+            // Same rule: a stale Content-Type would make the next document
+            // decode against the last one's charset.
+            caller.data_mut().http_content_type =
+                if ok && !info.content_type.is_empty() { Some(info.content_type) } else { None };
             // Same rule for the reason: cleared on success, so a caller can
             // never read a stale error and attribute it to this request.
             caller.data_mut().http_last_error = match &res {
@@ -810,6 +822,45 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             match start.checked_add(n) {
                 Some(end) if end <= data.len() => {
                     data[start..end].copy_from_slice(&url.as_bytes()[..n]);
+                    n as i32
+                }
+                _ => -1,
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_http_content_type(buf_ptr, buf_max) -> len, or -1
+    //
+    // The last npk_http_request's Content-Type, verbatim (e.g.
+    // "text/html; charset=ISO-8859-1"). Cleared when the request failed.
+    //
+    // A document's bytes do not say what encoding they are in. Without this
+    // a browser can only assume UTF-8, and one byte that is not valid UTF-8
+    // costs it the entire page — which is exactly what made google.ch render
+    // blank. NET-gated, like the request it describes.
+    linker.func_wrap("env", "npk_http_content_type",
+        |mut caller: Caller<'_, HostState>, buf_ptr: i32, buf_max: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::NET).is_err() {
+                return -1;
+            }
+            if buf_ptr < 0 || buf_max <= 0 { return -1; }
+            let ct = match &caller.data().http_content_type {
+                Some(c) => c.clone(),
+                None => return -1,
+            };
+            let n = ct.len().min(buf_max as usize);
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data_mut(&mut caller);
+            let start = buf_ptr as usize;
+            // checked_add: a wrapping `start + n` would produce start > end and
+            // panic the KERNEL on the slice index — a guest-triggerable halt.
+            match start.checked_add(n) {
+                Some(end) if end <= data.len() => {
+                    data[start..end].copy_from_slice(&ct.as_bytes()[..n]);
                     n as i32
                 }
                 _ => -1,
