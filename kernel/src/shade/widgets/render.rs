@@ -31,7 +31,7 @@ pub fn render(
     widget: &Widget,
     layout: &LayoutNode,
 ) {
-    render_with_state(rast, target, widget, layout, None, None, None, Density::Regular, None, 0, None);
+    render_with_state(rast, target, widget, layout, None, None, None, Density::Regular, None, 0, 0, None);
 }
 
 /// Render with explicit pseudo-state context.
@@ -61,6 +61,9 @@ pub fn render_with_state(
     // line window (wheel scroll); Widget::Scroll handles its own offset in
     // layout, so this only matters at the TextArea leaf.
     scroll_y: u32,
+    // Horizontal offset of a focused TextArea (px). Only an editor scrolls
+    // sideways; every other widget ignores it.
+    scroll_x: u32,
     // Colour inherited from the nearest ancestor carrying `Modifier::Tint`,
     // like CSS `color`. A `Tint` on a Row is what apps reach for to say
     // "this whole row is accent now"; without inheritance the Row's own
@@ -85,7 +88,7 @@ pub fn render_with_state(
     // check.
     let edit_for_node: Option<&InputEditState> =
         if matches!(focus_path, Some(p) if p.is_empty()) { input_edit } else { None };
-    paint_node_eff(rast, target, widget, layout, &eff, edit_for_node, scroll_y, inherited_tint);
+    paint_node_eff(rast, target, widget, layout, &eff, edit_for_node, scroll_y, scroll_x, inherited_tint);
 
     // A Scroll clips its subtree to its viewport rect so overflowing
     // content is masked (and, for a vertical scroll, an overlay scrollbar
@@ -111,7 +114,7 @@ pub fn render_with_state(
         let child_active = descend(active_path, i as u32);
         render_with_state(
             rast, target, cw, cl,
-            child_hover, child_focus, child_active, density, input_edit, scroll_y,
+            child_hover, child_focus, child_active, density, input_edit, scroll_y, scroll_x,
             subtree_tint,
         );
     }
@@ -466,6 +469,7 @@ fn paint_node_eff(
     eff: &[Modifier],
     edit_state: Option<&InputEditState>,
     scroll_y: u32,
+    scroll_x: u32,
     inherited_tint: Option<Token>,
 ) {
     let rect = layout.rect;
