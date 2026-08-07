@@ -83,8 +83,6 @@ struct Strings {
     overwrite_t:  &'static str,
     overwrite_b:  &'static str,
     replace:      &'static str,
-    hint_open:    &'static str,
-    hint_save:    &'static str,
     new_folder:   &'static str,
     name_label:   &'static str,
     folder_title: &'static str,
@@ -104,8 +102,6 @@ const EN: Strings = Strings {
     overwrite_t: "Replace file?",
     overwrite_b: "{} already exists in this folder.",
     replace:     "Replace",
-    hint_open:   "\u{2191}\u{2193} navigate   \u{21b5} open   esc cancel",
-    hint_save:   "\u{2191}\u{2193} navigate   \u{21b5} save   esc cancel",
     new_folder:  "New folder",
     name_label:  "Name",
     folder_title: "New folder",
@@ -125,8 +121,6 @@ const DE: Strings = Strings {
     overwrite_t: "Datei ersetzen?",
     overwrite_b: "{} gibt es in diesem Ordner schon.",
     replace:     "Ersetzen",
-    hint_open:   "\u{2191}\u{2193} navigieren   \u{21b5} öffnen   esc abbrechen",
-    hint_save:   "\u{2191}\u{2193} navigieren   \u{21b5} speichern   esc abbrechen",
     new_folder:  "Neuer Ordner",
     name_label:  "Name",
     folder_title: "Neuer Ordner",
@@ -587,7 +581,6 @@ fn render(p: &Pick) -> Widget {
     }
 
     let title = if p.mode == Mode::Save { s().save_title } else { s().open_title };
-    let hint = if p.mode == Mode::Save { s().hint_save } else { s().hint_open };
 
     // Flat in the panel's own Column, with Flex(1) on the Scroll ITSELF.
     // `measure` reports only a 24 px floor for a scroll container on its
@@ -607,7 +600,7 @@ fn render(p: &Pick) -> Widget {
     }
 
     children.push(Widget::Divider);
-    children.push(render_footer(p, hint));
+    children.push(render_footer(p));
 
     prefab::panel(children)
 }
@@ -895,9 +888,10 @@ fn render_name_field(p: &Pick) -> Widget {
     }
 }
 
-/// Key hints on the left, the two buttons on the right — one row, so the
-/// dialog ends on a single line instead of two stacked bands.
-fn render_footer(p: &Pick, hint: &str) -> Widget {
+/// The two buttons, right-aligned. No key-hint strip: the arrows, Enter
+/// and Esc do what they do everywhere, and spelling that out under every
+/// dialog is noise.
+fn render_footer(p: &Pick) -> Widget {
     let confirm = if p.mode == Mode::Save { s().save_btn } else { s().open_btn };
     // A button that looks live but does nothing is worse than one that
     // says it can't act yet: save needs a name, open needs a file picked.
@@ -913,11 +907,6 @@ fn render_footer(p: &Pick, hint: &str) -> Widget {
 
     Widget::Row {
         children: alloc::vec![
-            Widget::Text {
-                content:   hint.to_string(),
-                style:     TextStyle::Caption,
-                modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceFaint)],
-            },
             Widget::Spacer { flex: 1 },
             prefab::button(s().cancel, prefab::ButtonStyle::Ghost, ActionId(ACT_CANCEL)),
             confirm_btn,
