@@ -532,17 +532,25 @@ fn paint_node_eff(
             if !has_bg {
                 rast.rect(target, rect, Fill::Solid(Token::Accent));
             }
+            // Label + icon follow `Modifier::Tint` like Text and Icon do.
+            // They used to be hardcoded — OnSurface for the label, OnAccent
+            // for the icon — so a filled button painted dark-on-dark text on
+            // its own Accent fill and the two halves disagreed with each
+            // other. The default stays OnSurface for the unfilled styles.
+            let mut color = inherited_tint.unwrap_or(Token::OnSurface);
+            for m in eff {
+                if let Modifier::Tint(tok) = m { color = *tok; }
+            }
             let pad_x = 8i32;
             let pad_y = 4i32;
             let mut x = rect.x + pad_x;
             use super::abi::IconId;
             if !matches!(icon, IconId::None) {
-                rast.icon(target, *icon, 16, Token::OnAccent,
-                          Point { x, y: rect.y + pad_y });
+                rast.icon(target, *icon, 16, color, Point { x, y: rect.y + pad_y });
                 x += 20;
             }
             if !label.is_empty() {
-                rast.text(target, label, super::abi::TextStyle::Body, Token::OnSurface,
+                rast.text(target, label, super::abi::TextStyle::Body, color,
                           Point { x, y: rect.y + pad_y });
             }
         }
