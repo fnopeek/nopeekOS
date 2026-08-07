@@ -998,12 +998,11 @@ pub fn persist_boot_log() {
     if log.is_empty() { return; }
 
     // `store` walks to the parent and fails if it isn't there — it creates
-    // no intermediate directories.
-    if !crate::npkfs::exists(BOOT_LOG_DIR) {
-        if let Err(e) = crate::npkfs::fs::mkdir(BOOT_LOG_DIR) {
-            kprintln!("[npk] boot log: mkdir {} failed: {:?}", BOOT_LOG_DIR, e);
-            return;
-        }
+    // no intermediate directories. `ensure_dirs` is the idempotent variant
+    // the mkdir intent uses; it is fine with the directory already existing.
+    if let Err(e) = crate::npkfs::fs::ensure_dirs(BOOT_LOG_DIR) {
+        kprintln!("[npk] boot log: mkdir {} failed: {:?}", BOOT_LOG_DIR, e);
+        return;
     }
 
     // Rotate by copy, not `rename`: rename refuses an existing target, and
@@ -1011,10 +1010,13 @@ pub fn persist_boot_log() {
     if let Ok((prev, _)) = crate::npkfs::fetch(BOOT_LOG_PATH) {
         let _ = crate::npkfs::upsert(BOOT_LOG_PREV_PATH, &prev, crate::capability::CAP_NULL);
     }
-    if let Err(e) = crate::npkfs::upsert(
+    match crate::npkfs::upsert(
         BOOT_LOG_PATH, log.as_bytes(), crate::capability::CAP_NULL)
     {
-        kprintln!("[npk] boot log: store failed: {:?}", e);
+        // One line, so it is self-evident from the log itself that the log
+        // was filed — and where.
+        Ok(_)  => kprintln!("[npk] boot log: {} ({} bytes)", BOOT_LOG_PATH, log.len()),
+        Err(e) => kprintln!("[npk] boot log: store failed: {:?}", e),
     }
 }
 
