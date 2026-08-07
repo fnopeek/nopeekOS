@@ -15,10 +15,10 @@ PASS	CSS2/absolute-replaced-height-019.xht
 PASS	CSS2/absolute-replaced-height-021.xht
 PASS	CSS2/absolute-replaced-height-025.xht
 PASS	CSS2/absolute-replaced-height-026.xht
-FAIL	CSS2/absolute-replaced-height-028.xht
+PASS	CSS2/absolute-replaced-height-028.xht
 PASS	CSS2/absolute-replaced-height-032.xht
 PASS	CSS2/absolute-replaced-height-033.xht
-FAIL	CSS2/absolute-replaced-height-035.xht
+PASS	CSS2/absolute-replaced-height-035.xht
 PASS	CSS2/absolute-replaced-width-003a.xht
 PASS	CSS2/absolute-replaced-width-003b.xht
 PASS	CSS2/absolute-replaced-width-003c.xht
@@ -4130,7 +4130,7 @@ PASS	css-flexbox/flexbox_direction-column.html
 PASS	css-flexbox/flexbox_display.html
 PASS	css-flexbox/flexbox_fbfc.html
 PASS	css-flexbox/flexbox_fbfc2.html
-FAIL	css-flexbox/flexbox_first-line.html
+PASS	css-flexbox/flexbox_first-line.html
 PASS	css-flexbox/flexbox_flex-0-0-0-unitless.html
 PASS	css-flexbox/flexbox_flex-0-0-0.html
 FAIL	css-flexbox/flexbox_flex-0-0-1-unitless-basis.html

@@ -685,6 +685,12 @@ pub struct ComputedStyle {
     pub radius: [Len; 4],
     /// `box-shadow`, first layer, outer, zero-blur only (see `BoxShadow`).
     pub shadow: Option<BoxShadow>,
+    /// `transform: translate(...)` as a paint-time offset, in px and in
+    /// PERCENT of the box's own size (`Len::Pct`) — the `translate(-50%,-50%)`
+    /// centring idiom needs the latter. Only translation: rotation and scale
+    /// would need a transformed raster path, and every other transform value
+    /// leaves this `None` rather than being approximated.
+    pub translate: Option<(Len, Len)>,
     /// `caption-side: bottom` — the caption renders below the table grid
     /// instead of above it. Inherited (CSS2.1 §17.4.1), so it can be set on
     /// either the `<table>` or the `<caption>`.
@@ -740,6 +746,7 @@ impl ComputedStyle {
             overflow_clip: false,
             radius: [Len::Px(0.0); 4],
             shadow: None,
+            translate: None,
             bold: false,
             italic: false,
             mono: false,
@@ -967,6 +974,7 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         overflow_clip: false,
         radius: [Len::Px(0.0); 4],
         shadow: None,
+        translate: None,
         display: Display::Inline, // CSS initial `display` is inline
         width: Len::Auto,
         min_width: Len::Auto,
@@ -1820,6 +1828,9 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             if let Some(rs) = parse_radius_shorthand(&v, u) {
                 s.radius = rs;
             }
+        }
+        "transform" => {
+            s.translate = parse_translate(&v, u);
         }
         "box-shadow" => {
             let t = v.trim();
@@ -2814,6 +2825,39 @@ fn margin_lr(v: &str, u: Units) -> Len {
 }
 
 /// A padding length. Negative is invalid (padding ≥ 0) → keeps `prior`.
+/// `transform` → a translation, or `None` for anything else.
+///
+/// `translate(x[,y])` / `translateX(x)` / `translateY(y)` only. A rotation or a
+/// scale is deliberately dropped rather than approximated: half a transform
+/// moves a box to a place neither the author nor the untransformed layout
+/// intended. Percentages resolve against the BOX's own size, not the containing
+/// block, so they are kept as `Len::Pct` until paint.
+fn parse_translate(v: &str, u: Units) -> Option<(Len, Len)> {
+    let t = v.trim();
+    let (name, args) = t.split_once('(')?;
+    let args = args.strip_suffix(')')?;
+    let name = name.trim();
+    let mut parts = args.split(',').map(str::trim);
+    let first = parse_len_opt(parts.next()?, u)?;
+    let second = match parts.next() {
+        Some(p) => Some(parse_len_opt(p, u)?),
+        None => None,
+    };
+    if parts.next().is_some() {
+        return None;
+    }
+    let zero = Len::Px(0.0);
+    if name.eq_ignore_ascii_case("translate") {
+        Some((first, second.unwrap_or(zero)))
+    } else if name.eq_ignore_ascii_case("translateX") {
+        second.is_none().then_some((first, zero))
+    } else if name.eq_ignore_ascii_case("translateY") {
+        second.is_none().then_some((zero, first))
+    } else {
+        None
+    }
+}
+
 /// One `box-shadow` layer: `[<color>]? <dx> <dy> [<blur>] [<spread>] [<color>]?`.
 /// `inset` is recognised and rejected — an inner shadow is a different paint,
 /// and drawing it as an outer one would put a slab OUTSIDE the box.
