@@ -633,6 +633,18 @@ pub enum Event {
     /// seconds of silence, closes the window anyway: an app must never be
     /// able to make its window unclosable.
     CloseRequest,
+    /// A Ctrl chord the text editor doesn't own — Ctrl+S, Ctrl+O, … The
+    /// editor keeps Ctrl+A/C/X/V for text; everything else reaches the app
+    /// here. **Ctrl is implied**; `shift`/`alt` say what else was held, so
+    /// Ctrl+Shift+S is distinguishable from Ctrl+S.
+    ///
+    /// `letter` is the lowercase ASCII letter, already normalized from the
+    /// control byte some keyboard paths produce (0x13 → 's').
+    ///
+    /// Exists because `Event::Key` carries no modifiers: an app could not
+    /// otherwise tell Ctrl+S from a typed "s" — and while a text widget is
+    /// focused it never saw the keystroke at all.
+    Chord { letter: u8, shift: bool, alt: bool },
     // Appended only.
 }
 

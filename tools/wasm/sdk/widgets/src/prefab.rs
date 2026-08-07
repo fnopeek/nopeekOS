@@ -887,6 +887,18 @@ pub fn popover_menu(
     items: &[(String, ActionId)],
     selected_index: Option<usize>,
 ) -> Widget {
+    popover_menu_shortcuts(items, &[], selected_index)
+}
+
+/// `popover_menu` with a right-hand shortcut column ("Ctrl+S"). `hints`
+/// is indexed alongside `items`; a short list or an empty string just
+/// leaves that row without one. A menu is where people *learn* the
+/// shortcut, so an app that binds keys should show them here.
+pub fn popover_menu_shortcuts(
+    items: &[(String, ActionId)],
+    hints: &[&str],
+    selected_index: Option<usize>,
+) -> Widget {
     let mut rows: Vec<Widget> = Vec::with_capacity(items.len());
     for (i, (label, action)) in items.iter().enumerate() {
         let is_selected = selected_index == Some(i);
@@ -908,6 +920,14 @@ pub fn popover_menu(
                     content:   label.clone(),
                     style:     TextStyle::Body,
                     modifiers: vec![],
+                },
+                // Push the shortcut to the right edge. The spacer is here
+                // even without one, so labels line up across a mixed menu.
+                Widget::Spacer { flex: 1 },
+                Widget::Text {
+                    content:   hints.get(i).copied().unwrap_or("").to_string(),
+                    style:     TextStyle::Caption,
+                    modifiers: vec![Modifier::Tint(Token::OnSurfaceFaint)],
                 },
             ],
             spacing: Spacing::Sm.as_u16(),

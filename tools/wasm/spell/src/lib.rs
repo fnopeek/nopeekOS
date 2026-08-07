@@ -677,15 +677,17 @@ fn render_menu_bar() -> Widget {
 
 fn render_dropdown(sp: &Spell, kind: OpenMenu) -> (u32, Widget) {
     match kind {
+        // The menu is where the shortcuts are learned, so they're listed
+        // next to the entry that binds them.
         OpenMenu::File => (
             NODE_MENU_FILE,
-            prefab::popover_menu(&[
+            prefab::popover_menu_shortcuts(&[
                 (s().new.to_string(), ActionId(ACT_FILE_NEW)),
                 (s().open.to_string(), ActionId(ACT_FILE_OPEN)),
                 (s().save.to_string(), ActionId(ACT_FILE_SAVE)),
                 (s().save_as.to_string(), ActionId(ACT_FILE_SAVE_AS)),
                 (s().close.to_string(), ActionId(ACT_FILE_CLOSE)),
-            ], None),
+            ], &["Ctrl+N", "Ctrl+O", "Ctrl+S", "Ctrl+Shift+S", "Ctrl+W"], None),
         ),
         OpenMenu::View => (
             NODE_MENU_VIEW,
@@ -1238,6 +1240,20 @@ fn handle(sp: &mut Spell, ev: Event, payload: &str) -> Outcome {
             sp.open_path(payload);
             Outcome::Rerender
         }
+        // Ctrl chords. The editor keeps Ctrl+A/C/X/V for text, so those
+        // never arrive here.
+        Event::Chord { letter, shift, .. } => match letter {
+            b's' if shift => { sp.ask_save_target(sp.active, false); Outcome::Rerender }
+            b's' => { sp.save_or_name(); Outcome::Rerender }
+            b'o' => {
+                let start = sp.cur().path.as_deref().map(dirname).unwrap_or("").to_string();
+                pick(PICK_OPEN, &start, "", TAG_OPEN);
+                Outcome::Rerender
+            }
+            b'n' => { sp.new_doc(); Outcome::Rerender }
+            b'w' => { sp.request_close(sp.active); Outcome::Rerender }
+            _ => Outcome::Idle,
+        },
         Event::Action(ActionId(id)) => handle_action(sp, id),
         _ => Outcome::Idle,
     }

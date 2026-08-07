@@ -1206,6 +1206,33 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     // mutate the editor buffer, and emit Event::InputChange
                     // or Event::Action(on_submit). This runs BEFORE the
                     // Tab focus-nav below so a TextArea can claim Tab.
+                    // Ctrl chords the text editor doesn't own belong to the
+                    // app: Ctrl+S, Ctrl+O, … Routed BEFORE handle_input_key
+                    // because a focused Input/TextArea otherwise swallows
+                    // them whole — its clipboard arm consumes every
+                    // Ctrl+<letter> and drops the ones it has no case for,
+                    // so Ctrl+S used to do nothing at all. A/C/X/V stay with
+                    // the editor (select-all, copy, cut, paste).
+                    if event.modifiers.ctrl {
+                        let letter = match event.key {
+                            crate::input::KeyCode::Char(b) =>
+                                Some(if b < 0x20 { b | 0x60 } else { b.to_ascii_lowercase() }),
+                            _ => None,
+                        };
+                        if let Some(l) = letter {
+                            if l.is_ascii_lowercase() && !matches!(l, b'a' | b'c' | b'x' | b'v') {
+                                crate::shade::widgets::push_event(
+                                    widget_wid,
+                                    crate::shade::widgets::abi::Event::Chord {
+                                        letter: l,
+                                        shift:  event.modifiers.shift,
+                                        alt:    event.modifiers.alt,
+                                    },
+                                );
+                                continue;
+                            }
+                        }
+                    }
                     if crate::shade::widgets::handle_input_key(widget_wid, event.key, event.modifiers) {
                         continue;
                     }
