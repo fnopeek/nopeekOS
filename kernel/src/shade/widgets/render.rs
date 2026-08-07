@@ -413,6 +413,20 @@ pub(super) fn textarea_text_column(rect: Rect, mods: &[Modifier], total_lines: u
     (x, (right - x).max(0) as u32)
 }
 
+/// Width of the widest line in a `TextArea`, in px. **Shared by the layout
+/// (which turns it into the scrollable range) and the renderer (which sizes
+/// the scrollbar thumb from it).**
+///
+/// A `TextArea` is always Mono, and mono means a uniform advance — so the
+/// longest line by character count IS the widest one. Find it by counting
+/// and measure only that line, instead of measuring every line of the
+/// document on every keystroke.
+pub(super) fn textarea_content_w(value: &str, mods: &[Modifier]) -> u32 {
+    let px = super::layout::font_size_of(super::abi::TextStyle::Mono, mods);
+    let longest = value.split('\n').max_by_key(|l| l.chars().count()).unwrap_or("");
+    ceil_u32_local(crate::gui::text::measure_px(longest, super::abi::TextStyle::Mono, px))
+}
+
 fn paint_modifiers_eff(
     rast: &mut dyn Rasterizer,
     target: &mut RasterTarget,
@@ -821,6 +835,28 @@ fn paint_node_eff(
                 let thumb_x = rect.x + rect.w as i32 - 6;
                 rast.rect_rounded(target,
                     Rect { x: thumb_x, y: thumb_y, w: 4, h: thumb_h },
+                    Fill::Solid(Token::OnSurfaceMuted), 2);
+            }
+
+            // …and its sideways twin, along the bottom of the text column.
+            // Lines are never wrapped, so a single long line is enough to
+            // make it appear. Same content width the layout derived
+            // `max_scroll_x` from, so bar and offset can't disagree.
+            let content_w = textarea_content_w(live, eff);
+            if content_w > col_w && col_w > 0 {
+                let track_w = col_w as u64;
+                let thumb_w = ((track_w * track_w) / content_w.max(1) as u64)
+                    .max(24).min(track_w) as u32;
+                let travel = track_w - thumb_w as u64;
+                let max_off = (content_w - col_w) as u64;
+                // The caret may sit a margin past the end while the app has
+                // not re-committed the longer line yet — clamp the thumb
+                // rather than the offset, or the view would fight the caret.
+                let thumb_x = col_x + if max_off == 0 { 0 }
+                              else { (scroll_x as u64 * travel / max_off).min(travel) as i32 };
+                let thumb_y = rect.y + rect.h as i32 - 6;
+                rast.rect_rounded(target,
+                    Rect { x: thumb_x, y: thumb_y, w: thumb_w, h: 4 },
                     Fill::Solid(Token::OnSurfaceMuted), 2);
             }
         }

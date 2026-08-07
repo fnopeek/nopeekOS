@@ -95,6 +95,12 @@ pub struct LayoutOutput {
     /// Screen rect of the scrollable viewport (for the scrollbar hit-test /
     /// drag). Zero-sized when nothing scrolls.
     pub max_scroll_rect: Rect,
+    /// Sideways counterpart: how far the widest `TextArea` line overruns its
+    /// text column. Only an editor scrolls sideways — a `Widget::Scroll`
+    /// resolves its own horizontal axis during placement.
+    pub max_scroll_x: u32,
+    /// The text column that offset scrolls in (bar track + hit-test).
+    pub max_scroll_x_rect: Rect,
 }
 
 /// Threaded through placement so a `Widget::Scroll` can offset its child
@@ -107,7 +113,13 @@ struct ScrollCtx {
     /// Screen rect of the scrollable node that set `max` (the viewport) —
     /// the compositor hit-tests its right edge for scrollbar dragging.
     max_rect: Rect,
+    /// Sideways overflow of the widest TextArea, and the text column it
+    /// scrolls in (hit-tested along its bottom edge).
+    max_x:      u32,
+    max_x_rect: Rect,
 }
+
+const NO_RECT: Rect = Rect { x: 0, y: 0, w: 0, h: 0 };
 
 /// Lay out `root` inside `container` (absolute px). Returns the
 /// main layout tree, a NodeId→Rect lookup, and any floating popover
@@ -124,10 +136,14 @@ pub fn layout_scrolled(root: &Widget, container: Rect, scroll_y: u32) -> LayoutO
     // px of content; on a panel it cut visibly into the card, because the
     // root's Background paints on that rect (a 36 px bar rendered 28 px
     // tall and sat 5 px too low).
-    let mut ctx = ScrollCtx { offset: scroll_y, max: 0, max_rect: Rect { x: 0, y: 0, w: 0, h: 0 } };
+    let mut ctx = ScrollCtx {
+        offset: scroll_y, max: 0, max_rect: NO_RECT, max_x: 0, max_x_rect: NO_RECT,
+    };
     let tree = place(root, container, &mut ctx);
     let max_scroll_y = ctx.max;
     let max_scroll_rect = ctx.max_rect;
+    let max_scroll_x = ctx.max_x;
+    let max_scroll_x_rect = ctx.max_x_rect;
 
     // Pass 2: walk widget+layout in lockstep, record NodeId-tagged
     // rects so popovers (which always come after their anchor in
@@ -141,7 +157,8 @@ pub fn layout_scrolled(root: &Widget, container: Rect, scroll_y: u32) -> LayoutO
     let mut popovers: Vec<PopoverLayout> = Vec::new();
     collect_popovers(root, container, &anchors, &mut popovers);
 
-    LayoutOutput { tree, anchors, popovers, max_scroll_y, max_scroll_rect }
+    LayoutOutput { tree, anchors, popovers, max_scroll_y, max_scroll_rect,
+                   max_scroll_x, max_scroll_x_rect }
 }
 
 /// Walk widget+layout trees in lockstep, recording (NodeId, rect)
@@ -189,7 +206,9 @@ fn collect_popovers(
             let x = anchor_rect.x.min(max_x.max(window.x));
             let frect = Rect { x, y, w: csize.w, h: csize.h };
             // Popover content is floating chrome — never scrolled.
-            let mut pctx = ScrollCtx { offset: 0, max: 0, max_rect: Rect { x: 0, y: 0, w: 0, h: 0 } };
+            let mut pctx = ScrollCtx {
+                offset: 0, max: 0, max_rect: NO_RECT, max_x: 0, max_x_rect: NO_RECT,
+            };
             let layout = place(child, frect, &mut pctx);
             out.push(PopoverLayout {
                 on_dismiss:  *on_dismiss,
@@ -537,6 +556,16 @@ fn place(w: &Widget, inner: Rect, ctx: &mut ScrollCtx) -> LayoutNode {
             let total = value.split('\n').count();
             let max_off = (total.saturating_sub(visible)) as u32 * line_h;
             if max_off > ctx.max { ctx.max = max_off; ctx.max_rect = inner; }
+            // Sideways: how far the widest line overruns the text column.
+            // Lines are never wrapped, so a long one simply runs past the
+            // right edge — that overrun IS the scrollable range.
+            let (col_x, col_w) = super::render::textarea_text_column(inner, modifiers, total);
+            let max_x = super::render::textarea_content_w(value, modifiers)
+                .saturating_sub(col_w);
+            if max_x > ctx.max_x {
+                ctx.max_x = max_x;
+                ctx.max_x_rect = Rect { x: col_x, y: inner.y, w: col_w, h: inner.h };
+            }
             LayoutNode::leaf(inner)
         }
 
