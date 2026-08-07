@@ -7642,6 +7642,35 @@ fn dbg_wiki_shape() {
         assert!(btn.2 < 30, "only the icon counts, got {}px wide", btn.2);
     }
 
+    /// The presentational half of the old web: `<center>` is a BLOCK
+    /// (HTML rendering §15.3.2) and `bgcolor` is a background hint (§15.3.3).
+    /// Left as the initial `inline`, `<center>` swallows what it wraps into a
+    /// line box — and a `<table>` inside it collapses into running text.
+    /// Hacker News wraps its whole page in one and paints its masthead with
+    /// `bgcolor`, so it rendered as a single grey paragraph.
+    #[test]
+    fn center_is_a_block_and_bgcolor_paints() {
+        let l = lay(
+            "<body><center><table><tr><td>A1</td><td>A2</td></tr>\
+             <tr><td>A3</td></tr></table></center></body>",
+            500,
+        );
+        let ys: Vec<i32> = l.ops.iter().filter_map(|o| match o {
+            DrawOp::Text { y, text, .. } if text.trim() == "A1" || text.trim() == "A3" => Some(*y),
+            _ => None,
+        }).collect();
+        assert_eq!(ys.len(), 2, "two cells on two rows, got {:?}", l.ops.len());
+        assert!(ys[1] > ys[0], "the second row sits BELOW the first, not inline");
+        // `bgcolor` paints, and author CSS still outranks it.
+        let bg = |html: &str| {
+            rects(&lay(html, 500)).into_iter().map(|(_, _, _, _, c)| c).collect::<Vec<_>>()
+        };
+        assert!(bg("<body><table><tr><td bgcolor=\"#ff6600\">x</td></tr></table></body>")
+            .contains(&Rgb(255, 102, 0)));
+        assert!(bg("<body><table><tr><td bgcolor=\"#ff6600\" style=\"background:#00ff00\">x</td></tr></table></body>")
+            .contains(&Rgb(0, 255, 0)), "author CSS wins over the attribute");
+    }
+
     #[test]
     fn a_replaced_element_with_no_intrinsic_size_is_300_by_150() {
         // CSS2.1 §10.3.2 + §10.6.2. We never load a frame, a video or a canvas

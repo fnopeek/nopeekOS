@@ -22,10 +22,10 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-07, beak 0.4.9)
+### Current number (measured 2026-08-07, beak 0.4.10)
 
 ```
-4082 pass / 1526 fail / 178 inconclusive   (of 5786 vendored reftests)
+4083 pass / 1525 fail / 178 inconclusive   (of 5786 vendored reftests)
 = 72.8 % of the conclusive 5608
 ```
 
@@ -1545,6 +1545,47 @@ menu to pick from.
     class swapped by hand: the group lands at **478**, against article text at
     477. **We render it right; what we are missing is scripting**, and nudging
     the layout to hide that would have been exactly the wrong repair.
+
+44. ✅ **Erste neue Seitenklasse: `<center>` und `bgcolor` (0.4.10).** WPT
+    4082 → **4083**, 190 unit tests. The point of this round was to leave
+    Wikipedia and see what a DIFFERENT kind of page breaks — the answer arrived
+    on the first one.
+
+    **Hacker News rendered as a single running paragraph.** `<center>` was left
+    at the initial `display: inline`, so it swallowed what it wrapped into a
+    line box and the `<table>` inside collapsed into text. HN wraps its ENTIRE
+    page in one. It is `display: block; text-align: center` (HTML rendering
+    §15.3.2). Page height 387px → 1064px.
+
+    **`bgcolor` did not exist**, so the orange masthead and the beige page were
+    white. It is a background-color hint (§15.3.3), the same family as the
+    `<table border>`/`cellpadding` hints already handled, and it sits between
+    the UA sheet and the author cascade so author CSS still wins.
+
+    ### 📋 What the three new pages measured
+
+    | page | verdict |
+    |---|---|
+    | news.ycombinator.com | was completely broken, now recognisable |
+    | doc.rust-lang.org/book | renders cleanly — typography, margins, flow |
+    | srf.ch | **475 KB of HTML and 2 links** — a JS shell, nothing to render |
+
+    SRF is the finding that matters strategically: a modern news site ships an
+    empty frame. Together with today's GitHub measurement (197 viewport-unit and
+    173 box-shadow rules, nearly all on `.prc-Overlay`/`.prc-Dialog` that JS
+    creates) **the gate on the modern web is scripting, not CSS.** Server-
+    rendered pages — docs, forums, old-school table sites, Wikipedia — are where
+    the CSS engine still pays, and there it is now in good shape.
+
+    ### ⚠️ Known, deliberately not fixed: quirks mode
+
+    HN's titles are centred; in Firefox they are not. HN ships **no
+    `<!DOCTYPE>`**, so it is in quirks mode, where browsers apply
+    `table { text-align: start }` so `<center>` does not centre table text.
+    We have no quirks-mode concept at all (`dom.rs` skips the doctype as a
+    bogus construct). Adding one is a real feature — a document-level flag
+    threaded into the UA cascade — not a one-liner, and it changes behaviour on
+    every doctype-less page at once. Measure before building.
 
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the
