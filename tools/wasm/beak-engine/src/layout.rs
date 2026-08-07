@@ -1672,22 +1672,44 @@ impl<'a> Ctx<'a> {
             // page content. Same treatment in `collect_inline`, since most
             // controls sit inside inline context.
             if let Some(kind) = crate::forms::kind_of(el) {
-                if kind != ControlKind::Hidden {
-                    self.path.push(ElemInfo::of(el));
-                    // An absolutely-positioned control is out of flow, like any
-                    // other abspos box — the checkbox-hack toggle overlay
-                    // (`position:absolute; width:100%; height:100%; opacity:0`)
-                    // must NOT advance the line, or its full-size box inflates
-                    // the container by the whole page height.
-                    if matches!(st.position, Position::Absolute | Position::Fixed) {
-                        self.layout_abs(el, &st, x, anchor + open.value() as i32);
-                    } else {
-                        let ctl = self.control_box(el, &st, kind, w as f32);
-                        inline.control(ctl);
-                    }
-                    self.path.pop();
+                if kind == ControlKind::Hidden {
+                    continue;
                 }
-                continue;
+                // An absolutely-positioned control is out of flow, like any
+                // other abspos box — the checkbox-hack toggle overlay
+                // (`position:absolute; width:100%; height:100%; opacity:0`)
+                // must NOT advance the line, or its full-size box inflates
+                // the container by the whole page height.
+                if matches!(st.position, Position::Absolute | Position::Fixed) {
+                    self.path.push(ElemInfo::of(el));
+                    self.layout_abs(el, &st, x, anchor + open.value() as i32);
+                    self.path.pop();
+                    continue;
+                }
+                // A control the page made BLOCK-LEVEL falls through to the
+                // block path below, which paints it without a line box.
+                //
+                // An atomic inline sits on the baseline, so its parent comes out
+                // the control's height PLUS the descender — 2px on a 32px field.
+                // That is what doubles the bottom rule of a search box whose
+                // wrapper is pulled onto the group's border with `margin: -1px`:
+                // ours drew the field's edge 2px above the group's, where every
+                // browser has them coincide.
+                //
+                // Gated on a definite width, because this path takes the
+                // caller's width: `display:block` on a control means full width
+                // only when the page also asked for it, which the `display:block;
+                // width:100%` idiom (Codex, Bootstrap) always does. A bare
+                // block-level control keeps its intrinsic width as an inline.
+                let block_level = matches!(st.display, Display::Block | Display::Flex | Display::Grid)
+                    && !matches!(st.width, Len::Auto);
+                if !block_level {
+                    self.path.push(ElemInfo::of(el));
+                    let ctl = self.control_box(el, &st, kind, w as f32);
+                    inline.control(ctl);
+                    self.path.pop();
+                    continue;
+                }
             }
             // `position:absolute`/`fixed` are out of flow → laid at a
             // containing-block-relative position, not advancing the flow.
@@ -1777,7 +1799,11 @@ impl<'a> Ctx<'a> {
             // border box clear of active floats (CSS2.1 §9.5) and does not
             // collapse its margins with its children; its top margin still
             // collapses with the preceding flow, its bottom margin stays open.
-            let out = if establishes_bfc(&st) {
+            // A form control is atomic: it takes the box-making path so
+            // `layout_box` paints it as a CONTROL. Without this a block-level
+            // control fell into `flow_block_impl` and was laid out as an
+            // ordinary block — CSS border, no face, no value, no placeholder.
+            let out = if establishes_bfc(&st) || crate::forms::kind_of(el).is_some() {
                 let mut t = open;
                 t.add(st.margin_top);
                 let by = anchor + t.value() as i32;
@@ -2649,30 +2675,39 @@ impl<'a> Ctx<'a> {
         if layer.is_empty() {
             return;
         }
-        let n = layer.len();
-        for (i, op) in layer.into_iter().enumerate() {
-            self.ops.insert(bg_idx + i, op);
+        self.insert_ops_at(bg_idx, layer);
+    }
+
+    /// Splice ops into the display list at `at`, keeping every recorded
+    /// stacking/float range consistent.
+    ///
+    /// `insert` shifts every later op up by `n` slots — any already-recorded
+    /// range overlapping or after `at` (a descendant's tracked z-index range,
+    /// recorded before its ancestor's background gets painted in) must shift
+    /// too. Half-open `[s, e)`: a range that already ends at-or-before `at` is
+    /// untouched (`e > at`, strict — `e == at` means the insertion lands right
+    /// after the range, not inside it).
+    fn insert_ops_at(&mut self, at: usize, ops: Vec<DrawOp>) {
+        let n = ops.len();
+        if n == 0 {
+            return;
         }
-        // `insert` shifts every later op up by `n` slots — any already-recorded
-        // stacking range overlapping or after `bg_idx` (a descendant's tracked
-        // z-index range, recorded before this, its ancestor's own background
-        // gets painted in) must shift too. Half-open `[s, e)`: a range that
-        // already ends at-or-before `bg_idx` is untouched (`e > bg_idx`,
-        // strict — `e == bg_idx` means the insertion lands right after the
-        // range, not inside it).
+        for (i, op) in ops.into_iter().enumerate() {
+            self.ops.insert(at + i, op);
+        }
         for (_, _, s, e) in &mut self.stack_ops {
-            if *s >= bg_idx {
+            if *s >= at {
                 *s += n;
             }
-            if *e > bg_idx {
+            if *e > at {
                 *e += n;
             }
         }
         for (s, e) in &mut self.float_ops {
-            if *s >= bg_idx {
+            if *s >= at {
                 *s += n;
             }
-            if *e > bg_idx {
+            if *e > at {
                 *e += n;
             }
         }
@@ -2716,8 +2751,57 @@ impl<'a> Ctx<'a> {
             extern crate std;
             std::println!("[box] {who}: x={x} y={y} w={w} h={h}");
         }
+        // Background first, THEN the shadow — both splice in at `bg_idx`, so
+        // whatever is inserted last ends up underneath.
         self.insert_bg(st, x, y, w, h, bg_idx);
+        self.insert_shadow(st, x, y, w, h, bg_idx);
         border_ops(st, x, y, w, h, (true, true), &mut self.ops);
+    }
+
+    /// Paint the box's `box-shadow` behind its background. Only the zero-blur
+    /// case — which on real pages is a hairline separator, not a drop shadow.
+    /// MediaWiki draws the rule under the article tabs with
+    /// `box-shadow: 0 1px #c8ccd1`, and without this the page simply lacks it.
+    ///
+    /// Inserted at `bg_idx` BEFORE the background, so it ends up underneath;
+    /// `insert_bg` then shifts the recorded stacking ranges for its own ops the
+    /// same way, and both insertions are accounted for.
+    fn insert_shadow(&mut self, st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, bg_idx: usize) {
+        let Some(sh) = st.shadow else { return };
+        if sh.blur != 0.0 {
+            return;
+        }
+        let sx = x + sh.dx as i32 - sh.spread as i32;
+        let sy = y + sh.dy as i32 - sh.spread as i32;
+        let sw = w + 2 * sh.spread as i32;
+        let shh = h + 2 * sh.spread as i32;
+        if sw <= 0 || shh <= 0 {
+            return;
+        }
+        // An OUTER shadow is not painted inside the border box (CSS Backgrounds
+        // 3 §7.1.1) — the box is cut out of it. Without that the shadow is a
+        // full-size copy of the box, and since these boxes are usually
+        // transparent it floods the whole row instead of leaving the 1px strip
+        // the author wanted. Subtracting one rect from another gives at most
+        // four pieces: a band above, a band below, and the left/right slivers
+        // of the rows in between.
+        let color = sh.color.unwrap_or(st.color);
+        let (sx1, sy1) = (sx + sw, sy + shh);
+        let (x1, y1) = (x + w, y + h);
+        let mut parts: Vec<DrawOp> = Vec::new();
+        let mut push = |px: i32, py: i32, pw: i32, ph: i32| {
+            if pw > 0 && ph > 0 {
+                parts.push(DrawOp::Rect { x: px, y: py, w: pw, h: ph, color });
+            }
+        };
+        push(sx, sy, sw, y.min(sy1) - sy);
+        push(sx, y1.max(sy), sw, sy1 - y1.max(sy));
+        let (my0, my1) = (sy.max(y), sy1.min(y1));
+        if my1 > my0 {
+            push(sx, my0, x.min(sx1) - sx, my1 - my0);
+            push(x1.max(sx), my0, sx1 - x1.max(sx), my1 - my0);
+        }
+        self.insert_ops_at(bg_idx, parts);
     }
 
     /// Simplified table layout. Two column models: `table-layout: auto` sizes
@@ -7332,6 +7416,69 @@ fn dbg_wiki_shape() {
         let r = rects(&l);
         let blue = r.iter().find(|(_, _, _, _, c)| *c == Rgb(0, 0, 255)).expect("bordered item");
         assert_eq!(blue.3, 50, "border box matches the 50px line, borders included");
+    }
+
+    /// An OUTER `box-shadow` is cut out of its own border box (CSS Backgrounds 3
+    /// §7.1.1), so `0 1px <color>` leaves exactly a 1px strip below the box.
+    /// Real pages use that as a hairline separator far more often than as a drop
+    /// shadow — MediaWiki rules off its article tabs with it, and painting the
+    /// shadow as an unclipped copy floods the whole row instead.
+    #[test]
+    fn a_zero_blur_box_shadow_is_a_hairline_outside_the_box() {
+        let shadow_rects = |css: &str| -> Vec<(i32, i32, i32, i32, Rgb)> {
+            let l = lay(&alloc::format!("<body><div style=\"{css}\">x</div></body>"), 400);
+            rects(&l).into_iter().filter(|(_, _, _, _, c)| *c == Rgb(1, 2, 3)).collect()
+        };
+        // A rule under the box: one strip, its height the y-offset, and it sits
+        // BELOW the border box rather than over it.
+        let r = shadow_rects("height:20px;box-shadow:0 1px rgb(1,2,3)");
+        assert_eq!(r.len(), 1, "one strip, got {r:?}");
+        assert_eq!(r[0].3, 1, "1px tall");
+        assert_eq!(r[0].1, 8 + 20, "directly under the 20px box");
+        // A spread with no offset rings the box on all four sides.
+        assert_eq!(shadow_rects("height:20px;box-shadow:0 0 0 3px rgb(1,2,3)").len(), 4);
+        // Fully covered by its own box → nothing to paint.
+        assert!(shadow_rects("height:20px;box-shadow:0 0 rgb(1,2,3)").is_empty());
+        // A BLURRED shadow is skipped rather than drawn as a hard slab, and an
+        // inner one is a different paint entirely.
+        assert!(shadow_rects("height:20px;box-shadow:0 2px 8px rgb(1,2,3)").is_empty());
+        assert!(shadow_rects("height:20px;box-shadow:inset 0 1px rgb(1,2,3)").is_empty());
+        // `currentColor` is the LAST colour, not whatever was cascaded when the
+        // shadow was parsed — same rule the border sides follow.
+        let l = lay("<body><div style=\"height:20px;box-shadow:0 1px;color:rgb(1,2,3)\">x</div></body>", 400);
+        assert!(rects(&l).iter().any(|(_, _, _, h, c)| *h == 1 && *c == Rgb(1, 2, 3)));
+    }
+
+    /// A control the page made block-level is a BLOCK box, not an atomic inline.
+    /// An atomic inline sits on the baseline, so its parent came out the
+    /// control's height plus the descender — which drew a second rule 2px under
+    /// a search field whose wrapper is pulled onto the group border with
+    /// `margin: -1px`. It must still paint as a CONTROL (face, value,
+    /// placeholder), not as an ordinary block with a CSS border.
+    #[test]
+    fn a_block_level_control_is_a_block_box_and_still_paints_as_a_control() {
+        let l = lay(
+            "<body><div style=\"background:#0f0;width:300px\">\
+             <input style=\"display:block;width:100%;box-sizing:border-box;height:32px\" \
+             placeholder=\"such\"></div></body>",
+            400,
+        );
+        let r = rects(&l);
+        let parent = r.iter().find(|(_, _, _, _, c)| *c == Rgb(0, 255, 0)).expect("parent");
+        assert_eq!(parent.3, 32, "no line-box descender under the control");
+        assert!(
+            l.ops.iter().any(|o| matches!(o, DrawOp::Text { text, .. } if text == "such")),
+            "the placeholder must still be painted"
+        );
+        // The inline default keeps its line box — this changes only what the
+        // page explicitly asked to be block-level.
+        let inl = lay(
+            "<body><div style=\"background:#0f0;width:300px\">\
+             <input style=\"height:32px;box-sizing:border-box\"></div></body>",
+            400,
+        );
+        let p2 = *rects(&inl).iter().find(|(_, _, _, _, c)| *c == Rgb(0, 255, 0)).expect("parent");
+        assert!(p2.3 > 32, "an inline control still sits on a baseline, got {}", p2.3);
     }
 
     #[test]
