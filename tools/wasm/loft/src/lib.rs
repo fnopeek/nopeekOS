@@ -1761,8 +1761,16 @@ fn list_dir_internal(prefix: &str, recursive: i32) -> Vec<Entry> {
     if n <= 0 { return Vec::new(); }
     let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
     let mut out: Vec<Entry> = Vec::new();
-    for line in slice.split(|&b| b == b'\n') {
-        if let Some(e) = parse_entry(line) { out.push(e); }
+    for e in nopeek_widgets::fs::list_entries(slice) {
+        out.push(Entry {
+            name:          e.name.to_string(),
+            name_lc:       e.name.to_ascii_lowercase(),
+            size:          e.size,
+            is_dir:        e.is_dir,
+            files:         0,
+            stats_pending: false,
+            mtime:         e.mtime,
+        });
     }
     out.sort_by(|a, b| match (a.is_dir, b.is_dir) {
         (true, false) => core::cmp::Ordering::Less,
@@ -1811,13 +1819,9 @@ fn scan_folder_stats(path: &str) -> (u64, u64) {
     if n <= 0 { return (0, 0); }
     let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
     let (mut bytes, mut files) = (0u64, 0u64);
-    for line in slice.split(|&b| b == b'\n') {
-        let Some(nul) = line.iter().position(|&b| b == 0) else { continue };
-        let rest = &line[nul + 1..];
-        if rest.len() < 10 { continue; }
-        if rest[9] != 0 { continue; }            // directory → count files only
-        let Ok(b8) = rest[..8].try_into() else { continue };
-        bytes = bytes.saturating_add(u64::from_le_bytes(b8));
+    for e in nopeek_widgets::fs::list_entries(slice) {
+        if e.is_dir { continue; }                // directory → count files only
+        bytes = bytes.saturating_add(e.size);
         files += 1;
     }
     (bytes, files)
@@ -1936,24 +1940,6 @@ fn unique_in(dir: &str, name: &str) -> String {
 // kernel ≥ v0.146; older kernels stop after is_dir (10 trailing
 // bytes). Parse defensively — accept either shape so the loft
 // .wasm boots on a stale-kernel disk during dev cycles.
-fn parse_entry(line: &[u8]) -> Option<Entry> {
-    let nul = line.iter().position(|&b| b == 0)?;
-    let name = core::str::from_utf8(&line[..nul]).ok()?.to_string();
-    let rest = &line[nul + 1..];
-    if rest.len() < 10 { return None; }
-    let size = u64::from_le_bytes(rest[..8].try_into().ok()?);
-    let is_dir = rest[9] != 0;
-    // mtime tail (offset 10..19): 1 sep byte + 8 LE bytes. Absent on
-    // pre-v3 kernels → mtime stays 0 ("unknown").
-    let mtime = if rest.len() >= 19 {
-        u64::from_le_bytes(rest[11..19].try_into().ok()?)
-    } else {
-        0
-    };
-    let name_lc = name.to_ascii_lowercase();
-    Some(Entry { name, name_lc, size, is_dir, files: 0, stats_pending: false, mtime })
-}
-
 // ── Path helpers ──────────────────────────────────────────────────────
 
 fn parent_path(path: &str) -> String {

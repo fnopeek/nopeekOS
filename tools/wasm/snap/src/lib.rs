@@ -181,10 +181,8 @@ fn next_name(dir: &str) -> String {
     let mut max: u32 = 0;
     if n > 0 {
         let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
-        for line in slice.split(|&b| b == b'\n') {
-            let nul = match line.iter().position(|&b| b == 0) { Some(p) => p, None => continue };
-            let name = match core::str::from_utf8(&line[..nul]) { Ok(s) => s, Err(_) => continue };
-            if let Some(num) = name.strip_prefix("screenshot-").and_then(|s| s.strip_suffix(".png")) {
+        for e in nopeek_widgets::fs::list_entries(slice) {
+            if let Some(num) = e.name.strip_prefix("screenshot-").and_then(|s| s.strip_suffix(".png")) {
                 if let Ok(v) = num.parse::<u32>() { if v > max { max = v; } }
             }
         }
