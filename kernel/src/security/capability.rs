@@ -235,6 +235,61 @@ pub fn create_module_cap(rights: Rights, ttl_ticks: Option<u64>) -> Result<CapId
     VAULT.lock().create(root, ResourceKind::Execute, rights, ttl_ticks)
 }
 
+
+// ── Per-path grants ───────────────────────────────────────────────────
+//
+// The file dialog's whole point: a user picking a file in trusted UI is
+// the authorisation, so the app that asked never needs blanket WRITE.
+// `npk_pick` records a grant for exactly the chosen path against the
+// requester's capability; `npk_store` accepts it in place of the global
+// right.
+//
+// Narrow on purpose:
+//   - one exact path, no prefix matching, no directories
+//   - bound to the capability of the instance that asked, so it dies
+//     with the app
+//   - never covers `sys/wasm/` — that check runs before this one and a
+//     grant must not be a way around it
+//
+// Bounded array rather than a growing map: a runaway app must not be
+// able to make the kernel allocate. Oldest entry is evicted when full,
+// which at worst costs a user one re-pick.
+
+const MAX_PATH_GRANTS: usize = 64;
+
+#[derive(Clone)]
+struct PathGrant {
+    cap: CapId,
+    path: alloc::string::String,
+    rights: Rights,
+}
+
+static PATH_GRANTS: Mutex<alloc::vec::Vec<PathGrant>> = Mutex::new(alloc::vec::Vec::new());
+
+/// Record that `cap` may act on `path` with `rights`. Re-granting the
+/// same pair widens the existing entry rather than stacking duplicates.
+pub fn grant_path(cap: CapId, path: &str, rights: Rights) {
+    let mut g = PATH_GRANTS.lock();
+    if let Some(e) = g.iter_mut().find(|e| e.cap == cap && e.path == path) {
+        e.rights |= rights;
+        return;
+    }
+    if g.len() >= MAX_PATH_GRANTS { g.remove(0); }
+    g.push(PathGrant { cap, path: alloc::string::String::from(path), rights });
+}
+
+/// True if `cap` holds a grant covering exactly `path` with `rights`.
+pub fn check_path_grant(cap: &CapId, path: &str, rights: Rights) -> bool {
+    PATH_GRANTS.lock().iter()
+        .any(|e| &e.cap == cap && e.path == path && e.rights.contains(rights))
+}
+
+/// Drop every grant held by `cap` — called when an instance ends, so a
+/// recycled capability id can never inherit someone else's file.
+pub fn revoke_path_grants(cap: &CapId) {
+    PATH_GRANTS.lock().retain(|e| &e.cap != cap);
+}
+
 // ── Per-app capability declaration (`.npk.caps` section) ──────────────
 //
 // A widget app self-declares the rights it needs in a 1-byte custom

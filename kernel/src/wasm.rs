@@ -411,6 +411,12 @@ fn wasm_worker_task(arg: u64) {
     // Cleanup hardware resources before process exit
     cleanup_hw_state(store.data_mut());
 
+    // Drop this instance's per-path grants. They were handed out for one
+    // pick and must not outlive the app that got them — a later instance
+    // reusing the capability id would otherwise inherit a file it never
+    // asked for.
+    capability::revoke_path_grants(&store.data().cap_id);
+
     // Update final memory usage
     if let Some(mem) = instance.get_memory(&store, "memory") {
         crate::process::set_memory(pid, mem.data_size(&store) as u32);
@@ -802,20 +808,33 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         |caller: Caller<'_, HostState>, name_ptr: i32, name_len: i32,
          data_ptr: i32, data_len: i32| -> i32 {
             let cap_id = caller.data().cap_id;
-            if let Err(e) = capability::check_global(&cap_id, capability::Rights::WRITE) {
-                kprintln!("[npk] WASM: npk_store DENIED (cap_id={:08x}, {:?})",
-                    capability::short_id(&cap_id), e);
-                return -1;
-            }
-
             let name = match read_wasm_str(&caller, name_ptr, name_len) {
                 Some(s) => s,
                 None => return -1,
             };
 
             // Apps may not write the module store — see is_module_store_path.
+            // Checked BEFORE the grant path so a per-file grant can never
+            // become a way in there.
             if is_module_store_path(&name) {
                 kprintln!("[npk] WASM: npk_store DENIED (sys/wasm is read-only to apps)");
+                return -1;
+            }
+
+            // Three ways to be allowed to write, narrowest last:
+            //   1. blanket WRITE from `.npk.caps`
+            //   2. a grant for exactly this file — what the user handed over
+            //      by picking the path in a trusted dialog
+            //   3. the app's OWN settings file, `sys/config/<module>`. An
+            //      app that keeps preferences shouldn't need write access to
+            //      the whole store for it, and the name is the kernel's to
+            //      derive — a module can't claim someone else's.
+            let own_config = alloc::format!("sys/config/{}", caller.data().module_name);
+            if capability::check_global(&cap_id, capability::Rights::WRITE).is_err()
+                && !capability::check_path_grant(&cap_id, &name, capability::Rights::WRITE)
+                && name != own_config
+            {
+                kprintln!("[npk] WASM: npk_store DENIED (no WRITE, no grant for {})", name);
                 return -1;
             }
 
@@ -1056,6 +1075,13 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                         .map(|w| w.id)
                 }).flatten();
                 if let Some(id) = existing {
+                    // Same deal as a pick: the user pointed at this file
+                    // (a double-click in the file manager), so the app may
+                    // read and save it — and nothing else.
+                    if let Some(cap) = crate::shade::widgets::window_cap(id.0) {
+                        capability::grant_path(cap, &arg_str,
+                            capability::Rights::READ | capability::Rights::WRITE);
+                    }
                     crate::shade::widgets::push_event(
                         id.0, crate::shade::widgets::abi::Event::Open(arg_str));
                     crate::shade::with_compositor(|c| c.focus_window(id));
@@ -1074,6 +1100,13 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 Ok(id) => id,
                 Err(_) => return -1,
             };
+            // Launching an app ON a file is the user pointing at it — grant
+            // that one path so the app can save it back without holding
+            // WRITE over the whole store.
+            if let Some(a) = arg.as_deref() {
+                capability::grant_path(module_cap, a,
+                    capability::Rights::READ | capability::Rights::WRITE);
+            }
             // Create the widget window NOW (synchronously, titled with the
             // module name) instead of lazily on first scene_commit. The
             // app spawns asynchronously, so without this a rapid second
@@ -1214,7 +1247,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 Some(id) => id,
                 None => return -1,
             };
-            crate::shade::widgets::register_pick(win.0, requester, tag as u32);
+            crate::shade::widgets::register_pick(win.0, requester, tag as u32, cap_id, mode == 1);
             crate::shade::focus_window(win);
             crate::shade::request_render();
 
@@ -1335,6 +1368,10 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 kprintln!("[npk] WASM: npk_scene_commit DENIED (no RENDER)");
                 return -1;
             }
+            // Remember which capability owns this window, so a later grant
+            // (loft opening a file in an already-running editor) can find it.
+            let owner_wid = caller.data().widget_window_id;
+            if owner_wid != 0 { crate::shade::widgets::set_window_cap(owner_wid, cap_id); }
 
             let (bytes_start, bytes_end) = {
                 let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
