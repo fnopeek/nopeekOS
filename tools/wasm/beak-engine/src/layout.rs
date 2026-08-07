@@ -3872,6 +3872,22 @@ impl<'a> Ctx<'a> {
                 _ => (p + frame, m + frame),
             }
         };
+        // An atomic inline sits ON the current line — it does not end it.
+        // `inline-block`, an image, a form control: all of them are
+        // inline-LEVEL, so their widths add to the line's the same way a word
+        // does. Treating them as block-level children (which is what falling
+        // through to `pref.max(p)` below does) measures a container of two
+        // inline-blocks as ONE of them wide, and they then have no room beside
+        // each other and stack — Google's header bar is exactly this shape.
+        // (Reaching here with `display:inline` means an image, a form control
+        // or another replaced box — the plain-inline branch above already
+        // returned. A FLOATED box leaves the line, so it is not one of these.)
+        let atomic_inline = matches!(cs.display, Display::InlineBlock | Display::Inline);
+        if atomic_inline && cs.float == FloatKind::None {
+            run.atomic += p;
+            run.atomic_min = run.atomic_min.max(m);
+            return;
+        }
         flush_run(self.fonts, st, run, pref, min, horiz);
         if horiz {
             *pref += p;
@@ -5211,6 +5227,15 @@ struct Run {
     /// siblings. They sit SIDE BY SIDE, so at max-content they add up instead
     /// of competing; any non-float box ends the group.
     floats: f32,
+    /// Sum of the outer widths of the atomic inline boxes on this line —
+    /// `inline-block`, images, form controls. They sit ON the line next to the
+    /// text, so at max-content they add to it. Measuring them as block-level
+    /// children instead took the WIDEST of them, which is why a shrink-to-fit
+    /// box around two inline-blocks came out one-child wide and stacked them.
+    atomic: f32,
+    /// The widest min-content among those boxes. A line CAN break between two
+    /// of them, so at MIN-content they compete rather than add.
+    atomic_min: f32,
 }
 
 /// The horizontal space one inline box adds to its line. `flow` advances the
@@ -5232,10 +5257,12 @@ fn inline_frame(st: &ComputedStyle, cb: f32) -> f32 {
 /// indentation between sibling tags in pretty-printed markup — to one space
 /// first, or source formatting would count as visible width.
 fn flush_run(fonts: &crate::fonts::Fonts, st: &ComputedStyle, run: &mut Run, pref: &mut f32, min: &mut f32, horiz: bool) {
-    if run.text.is_empty() && run.frame == 0.0 {
+    if run.text.is_empty() && run.frame == 0.0 && run.atomic == 0.0 && run.atomic_min == 0.0 {
         return;
     }
     let frame = core::mem::take(&mut run.frame);
+    let atomic = core::mem::take(&mut run.atomic);
+    let atomic_min = core::mem::take(&mut run.atomic_min);
     // `white-space: pre` keeps the source line breaks, so each source line is
     // its own line box and the widest one wins — collapsing them into one
     // would measure a whole code block as a single enormous line.
@@ -5247,14 +5274,15 @@ fn flush_run(fonts: &crate::fonts::Fonts, st: &ComputedStyle, run: &mut Run, pre
             // (css-text-3 §8). Leading ones DO count under `pre`.
             widest = widest.max(measure(font, line.trim_end(), st.font_px));
         }
-        let widest = widest + frame;
+        let widest = widest + frame + atomic;
         run.text.clear();
+        let widest_min = widest.max(atomic_min);
         if horiz {
             *pref += widest;
-            *min += widest;
+            *min += widest_min;
         } else {
             *pref = pref.max(widest);
-            *min = min.max(widest);
+            *min = min.max(widest_min);
         }
         return;
     }
@@ -5265,14 +5293,17 @@ fn flush_run(fonts: &crate::fonts::Fonts, st: &ComputedStyle, run: &mut Run, pre
     // auto table column that holds code.
     let font = fonts.pick(st.bold, st.italic, st.mono);
     let size = st.font_px;
-    let p = measure(font, collapsed.trim(), size) + frame;
+    let p = measure(font, collapsed.trim(), size) + frame + atomic;
     // `white-space: nowrap` has no break opportunities, so min-content is the
     // whole line — not its widest word. Without this a shrink-to-fit box around
     // a nowrap run is sized to one word and the run hangs out of it.
     let m = if st.nowrap {
         p
     } else {
-        collapsed.split_whitespace().map(|wd| measure(font, wd, size)).fold(0.0f32, f32::max) + frame
+        let words = collapsed.split_whitespace().map(|wd| measure(font, wd, size)).fold(0.0f32, f32::max) + frame;
+        // The line may break either side of an atomic inline, so its own
+        // min-content competes with the widest word rather than adding to it.
+        words.max(atomic_min)
     };
     // Inside a row (or any inline-axis container) a run of stray inline content
     // is one anonymous cell sitting BESIDE its siblings, so it adds to the
@@ -6998,6 +7029,61 @@ mod tests {
         assert_eq!(outer("border:10px solid #f00;width:200px;height:60px"), 240);
         // … + 50px margins on each side.
         assert_eq!(outer("border:10px solid #f00;width:200px;height:60px;margin:0 50px"), 340);
+    }
+
+    /// Inline-blocks sit side by side ON a line, so a shrink-to-fit container
+    /// has to be wide enough for their SUM. Measuring them as block-level
+    /// children takes the widest instead, and they then have no room beside
+    /// each other and stack — which is how Google's `float:right` header bar
+    /// came out one word wide with "Gmail" and "Bilder" on separate lines.
+    #[test]
+    fn a_shrink_to_fit_box_fits_its_inline_blocks_side_by_side() {
+        let blue = Rgb(0, 0, 0xff);
+        let bar = |float: &str| {
+            let l = lay(
+                &format!(
+                    "<body style=\"margin:0\"><div style=\"{float}background:#00f\">\
+                     <div style=\"display:inline-block;width:60px;height:20px\"></div>\
+                     <div style=\"display:inline-block;width:60px;height:20px\"></div>\
+                     </div></body>"
+                ),
+                800,
+            );
+            rects(&l).into_iter().find(|(.., c)| *c == blue).map(|(_, _, w, h, _)| (w, h)).unwrap()
+        };
+        // Two 60px children beside each other: at least 120 wide, one row tall.
+        let (w, h) = bar("float:right;");
+        assert!(w >= 120, "float:right shrink-to-fit was {w}px, needs >= 120");
+        assert!(h < 40, "they stacked: {h}px tall");
+        let (w, h) = bar("float:left;");
+        assert!(w >= 120, "float:left shrink-to-fit was {w}px, needs >= 120");
+        assert!(h < 40, "they stacked: {h}px tall");
+    }
+
+    /// `<td width="25%">` is a presentational hint, not CSS — it carries no
+    /// unit, so the CSS length parser rejects it. Table-built pages centre
+    /// with exactly this (Google's home page puts the search box between two
+    /// 25% spacer cells); ignoring it collapses the spacer and slams the
+    /// content to the left edge.
+    #[test]
+    fn a_width_attribute_on_a_cell_is_a_presentational_hint() {
+        let red = Rgb(0xff, 0, 0);
+        let left_edge = |spacer: &str| {
+            let l = lay(
+                &format!(
+                    "<body style=\"margin:0\"><table cellpadding=\"0\" cellspacing=\"0\">\
+                     <tr><td {spacer}></td>\
+                     <td><div style=\"background:#f00;width:40px;height:20px\"></div></td></tr>\
+                     </table></body>"
+                ),
+                800,
+            );
+            rects(&l).into_iter().find(|(.., c)| *c == red).map(|(x, ..)| x).unwrap()
+        };
+        assert_eq!(left_edge("width=\"200\""), 200, "a bare number is pixels");
+        assert_eq!(left_edge("width=\"25%\""), 200, "25% of an 800px table");
+        // Author CSS still wins over the hint.
+        assert_eq!(left_edge("width=\"200\" style=\"width:100px\""), 100);
     }
 
     #[test]
