@@ -1220,7 +1220,9 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                             _ => None,
                         };
                         if let Some(l) = letter {
-                            if l.is_ascii_lowercase() && !matches!(l, b'a' | b'c' | b'x' | b'v') {
+                            // Any printable key, not just letters — zoom
+                            // lives on Ctrl+plus / minus / 0 everywhere.
+                            if l.is_ascii_graphic() && !matches!(l, b'a' | b'c' | b'x' | b'v') {
                                 crate::shade::widgets::push_event(
                                     widget_wid,
                                     crate::shade::widgets::abi::Event::Chord {
