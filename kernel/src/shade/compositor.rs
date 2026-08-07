@@ -1206,6 +1206,39 @@ impl Compositor {
         self.dock.map(|d| d.id) == Some(id) || self.top_strut.map(|s| s.id) == Some(id)
     }
 
+    /// A user gesture asked for `id` to close (Mod+Q, the title-bar X).
+    ///
+    /// A window that opted into `npk_window_set_close_guard` gets an
+    /// `Event::CloseRequest` and stays open so it can prompt about unsaved
+    /// work. Asking a second time closes it for real — the guard buys one
+    /// round of politeness, not a veto. Everything else closes at once,
+    /// exactly as before.
+    pub fn request_close_window(&mut self, id: WindowId) {
+        if crate::shade::widgets::is_close_guarded(id.0) {
+            let now = crate::interrupts::ticks();
+            if crate::shade::widgets::begin_close_request(id.0, now) {
+                crate::shade::widgets::push_event(
+                    id.0, crate::shade::widgets::abi::Event::CloseRequest);
+                return;
+            }
+            // Second gesture — the app had its chance.
+        }
+        self.close_window(id);
+    }
+
+    /// Close guarded windows that never answered their `CloseRequest`, so
+    /// a hung app can't leave an immortal window behind.
+    pub fn tick_close_requests(&mut self) -> bool {
+        let now = crate::interrupts::ticks();
+        let expired = crate::shade::widgets::expired_close_requests(now);
+        if expired.is_empty() { return false; }
+        for id in expired {
+            crate::kprintln!("[shade] close guard expired for window {} — closing", id);
+            self.close_window(WindowId(id));
+        }
+        true
+    }
+
     pub fn close_window(&mut self, id: WindowId) {
         // If the dock app's window goes away, forget the dock so the
         // reveal/tick machinery no-ops.
@@ -2328,7 +2361,7 @@ impl Compositor {
         // button-event path for the rationale).
         if !mod_held && self.mouse.left_clicked() {
             if let Some(wid) = self.close_button_at(mx, my) {
-                self.close_window(wid);
+                self.request_close_window(wid);
                 return true;
             }
         }
@@ -2430,7 +2463,7 @@ impl Compositor {
         // `!mod_held` to keep the two gestures from overlapping.
         if !mod_held && self.mouse.left_clicked() {
             if let Some(wid) = self.close_button_at(mx, my) {
-                self.close_window(wid);
+                self.request_close_window(wid);
                 return true;
             }
         }

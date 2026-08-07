@@ -55,6 +55,7 @@ unsafe extern "C" {
                 suggest_ptr: i32, suggest_len: i32, tag: i32) -> i32;
     fn npk_launch_arg(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_close_widget() -> i32;
+    fn npk_window_set_close_guard(on: i32) -> i32;
     fn npk_log_serial(ptr: i32, len: i32);
     fn npk_sleep(ms: i32) -> i32;
 }
@@ -83,6 +84,9 @@ struct Strings {
     unsaved_body:  &'static str,
     discard:       &'static str,
     cancel:        &'static str,
+    esc_cancels:   &'static str,
+    /// "{} of {}" — position in the quit sequence.
+    step_of:       &'static str,
     welcome:       &'static str,
 }
 
@@ -98,6 +102,8 @@ const EN: Strings = Strings {
     unsaved_title: "Unsaved changes",
     unsaved_body: "{} has unsaved changes.",
     discard: "Discard", cancel: "Cancel",
+    esc_cancels: "Esc cancels",
+    step_of: "{} of {}",
     welcome: "Welcome to Spell\n\nStart typing, or open a file via File \u{2192} Open\u{2026} \u{2014} or double-click in loft.\n\nMultiple files open as tabs. Save it with a name and the\nextension decides how it is highlighted.\n",
 };
 
@@ -113,6 +119,8 @@ const DE: Strings = Strings {
     unsaved_title: "Ungespeicherte Änderungen",
     unsaved_body: "{} hat ungespeicherte Änderungen.",
     discard: "Verwerfen", cancel: "Abbrechen",
+    esc_cancels: "Esc bricht ab",
+    step_of: "{} von {}",
     welcome: "Willkommen bei Spell\n\nTippe los, oder öffne eine Datei über Datei \u{2192} Öffnen\u{2026} \u{2014} oder Doppelklick in loft.\n\nMehrere Dateien liegen als Tabs nebeneinander. Speichere sie\nunter einem Namen, die Endung entscheidet über die Farben.\n",
 };
 
@@ -132,6 +140,29 @@ fn fill(template: &str, value: &str) -> String {
         }
         None => template.to_string(),
     }
+}
+
+fn push_usize(s: &mut String, mut n: usize) {
+    if n == 0 { s.push('0'); return; }
+    let mut buf = [0u8; 20];
+    let mut i = 0;
+    while n > 0 {
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        i += 1;
+    }
+    while i > 0 { i -= 1; s.push(buf[i] as char); }
+}
+
+/// "(2 of 3)" — `step_of` carries two placeholders, one more than
+/// `fill` handles, so substitute both here.
+fn step_label(n: usize, total: usize) -> String {
+    let mut a = String::with_capacity(8);
+    push_usize(&mut a, n);
+    let mut b = String::with_capacity(8);
+    push_usize(&mut b, total);
+    let once = fill(s().step_of, &a);
+    fill(&once, &b)
 }
 
 fn log(msg: &str) {
@@ -353,6 +384,14 @@ struct Spell {
     /// Tab index pending an unsaved-changes confirmation before close.
     /// `Some(i)` shows the "save changes?" dialog for tab `i`.
     confirm_close: Option<usize>,
+    /// A quit is in progress: the confirm dialog is walking the dirty
+    /// tabs one by one, and clearing the last one closes the app.
+    quitting:      bool,
+    /// How many dirty tabs the quit started with, and how many are done.
+    /// Counted at the start because the live count shrinks as tabs close
+    /// — deriving the step from it would show "1 of 3", "1 of 2", "1 of 1".
+    quit_total:    usize,
+    quit_done:     usize,
 }
 
 impl Spell {
@@ -362,6 +401,9 @@ impl Spell {
             active:    0,
             open_menu: None,
             confirm_close: None,
+            quitting:      false,
+            quit_total:    0,
+            quit_done:     0,
         };
 
         // Launched to open a specific file (loft file association)?
@@ -434,6 +476,56 @@ impl Spell {
         } else {
             self.close_tab(i);
         }
+    }
+
+    // ── Quitting ──────────────────────────────────────────────────────
+    //
+    // The window manager asks before closing us (`Event::CloseRequest`),
+    // so this is where unsaved work gets its say. One dialog per dirty
+    // tab, in order, with a counter — the same shape VS Code uses. Any
+    // Cancel abandons the whole quit, not just that one file.
+
+    /// Begin quitting. Returns true if we can go right now.
+    fn begin_quit(&mut self) -> bool {
+        self.open_menu = None;
+        self.confirm_close = None;
+        match self.first_dirty() {
+            None => true,
+            Some(i) => {
+                self.quitting = true;
+                self.quit_total = self.dirty_count();
+                self.quit_done = 0;
+                self.active = i;
+                self.confirm_close = Some(i);
+                false
+            }
+        }
+    }
+
+    fn first_dirty(&self) -> Option<usize> {
+        self.docs.iter().position(|d| d.dirty)
+    }
+
+    fn dirty_count(&self) -> usize {
+        self.docs.iter().filter(|d| d.dirty).count()
+    }
+
+    /// One dirty tab is settled; move to the next or finish. Returns true
+    /// when nothing is left and the app should close.
+    fn advance_quit(&mut self) -> bool {
+        if !self.quitting { return false; }
+        self.quit_done += 1;
+        match self.first_dirty() {
+            Some(i) => { self.active = i; self.confirm_close = Some(i); false }
+            None => true,
+        }
+    }
+
+    fn cancel_quit(&mut self) {
+        self.quitting = false;
+        self.quit_total = 0;
+        self.quit_done = 0;
+        self.confirm_close = None;
     }
 
     fn close_tab(&mut self, i: usize) {
@@ -763,18 +855,38 @@ fn render_body(sp: &Spell) -> Widget {
 
 /// Unsaved-changes confirmation shown when closing a dirty tab. Buttons
 /// only (no text input), so no focus dance needed.
+///
+/// While quitting this is one step of a sequence, so it carries a
+/// "(2 of 3)" counter — otherwise a second dialog appearing right after
+/// the first reads like the button didn't take.
 fn render_confirm_dialog(sp: &Spell) -> Widget {
-    let title = match sp.confirm_close.and_then(|i| sp.docs.get(i)) {
+    let idx = sp.confirm_close.unwrap_or(0);
+    let title = match sp.docs.get(idx) {
         Some(d) => d.title.clone(),
         None => s().menu_file.to_string(),
     };
+    let total = sp.quit_total;
+    let mut body: Vec<Widget> = Vec::with_capacity(3);
+    body.push(Widget::Text {
+        content:   fill(s().unsaved_body, &title),
+        style:     TextStyle::Body,
+        modifiers: alloc::vec![],
+    });
+    if sp.quitting && total > 1 {
+        body.push(Widget::Text {
+            content:   step_label(sp.quit_done + 1, total),
+            style:     TextStyle::Caption,
+            modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceFaint)],
+        });
+    }
     let card = prefab::dialog(
         s().unsaved_title,
         Widget::Column {
             children: alloc::vec![
-                Widget::Text {
-                    content:   fill(s().unsaved_body, &title),
-                    style:     TextStyle::Body,
+                Widget::Column {
+                    children:  body,
+                    spacing:   Spacing::Xs.as_u16(),
+                    align:     Align::Stretch,
                     modifiers: alloc::vec![],
                 },
                 Widget::Row {
@@ -793,7 +905,7 @@ fn render_confirm_dialog(sp: &Spell) -> Widget {
             align:     Align::Stretch,
             modifiers: alloc::vec![],
         },
-        Some("Esc bricht ab"),
+        Some(s().esc_cancels),
         380,
     );
     Widget::Column {
@@ -1081,17 +1193,18 @@ enum Outcome { Idle, Rerender, Exit }
 
 fn handle(sp: &mut Spell, ev: Event, payload: &str) -> Outcome {
     match ev {
+        // Esc backs out of whatever is open. It does NOT quit: in an
+        // editor Esc is the cancel key, and a stray press should never
+        // end the session. Closing is Mod+Q, the window's ×, or
+        // File → Close.
         Event::Key(KeyCode::Escape) => {
-            if sp.confirm_close.is_some() { sp.confirm_close = None; Outcome::Rerender }
+            if sp.confirm_close.is_some() { sp.cancel_quit(); Outcome::Rerender }
             else if sp.open_menu.is_some() { sp.open_menu = None; Outcome::Rerender }
-            // Quit only when nothing has unsaved changes; otherwise ask
-            // about the active tab first.
-            else if sp.cur().dirty { sp.request_close(sp.active); Outcome::Rerender }
-            else if sp.docs.iter().any(|d| d.dirty) {
-                if let Some(i) = sp.docs.iter().position(|d| d.dirty) { sp.request_close(i); }
-                Outcome::Rerender
-            }
-            else { Outcome::Exit }
+            else { Outcome::Idle }
+        }
+        // The window manager is asking whether it may close us.
+        Event::CloseRequest => {
+            if sp.begin_quit() { Outcome::Exit } else { Outcome::Rerender }
         }
         Event::InputChange { .. } => {
             // `payload` is the stabilized buffer value (the event's own
@@ -1113,6 +1226,7 @@ fn handle(sp: &mut Spell, ev: Event, payload: &str) -> Outcome {
                 let doc = (tag - TAG_SAVE_CLOSE_BASE) as usize;
                 sp.save_as(doc, payload);
                 sp.close_tab(doc);
+                if sp.advance_quit() { return Outcome::Exit; }
             } else if tag >= TAG_SAVE_BASE {
                 sp.save_as((tag - TAG_SAVE_BASE) as usize, payload);
             }
@@ -1159,19 +1273,26 @@ fn handle_action(sp: &mut Spell, id: u32) -> Outcome {
         ACT_FILE_CLOSE => { sp.open_menu = None; sp.request_close(sp.active); Outcome::Rerender }
         // Unsaved-changes dialog buttons.
         ACT_CLOSE_DISCARD => {
-            if let Some(i) = sp.confirm_close.take() { sp.close_tab(i); }
+            if let Some(i) = sp.confirm_close.take() {
+                sp.close_tab(i);
+                if sp.advance_quit() { return Outcome::Exit; }
+            }
             Outcome::Rerender
         }
-        ACT_CLOSE_CANCEL => { sp.confirm_close = None; Outcome::Rerender }
+        // Cancel abandons the whole quit, not just this one file — the
+        // user said "no" to closing, and losing the other tabs' prompts
+        // would be a surprise.
+        ACT_CLOSE_CANCEL => { sp.cancel_quit(); Outcome::Rerender }
         ACT_CLOSE_SAVE => {
             if let Some(i) = sp.confirm_close.take() {
                 sp.active = i;
                 if let Some(p) = sp.cur().path.clone() {
                     sp.write_to(&p);
                     sp.close_tab(i);
+                    if sp.advance_quit() { return Outcome::Exit; }
                 } else {
-                    // No filename yet → ask where to put it. The tab closes
-                    // when the picker replies (TAG_SAVE_CLOSE_BASE + i).
+                    // No filename yet → ask where to put it. The chain
+                    // resumes when the picker replies.
                     sp.ask_save_target(i, true);
                 }
             }
@@ -1235,6 +1356,9 @@ pub extern "C" fn _start() {
     let mut persistent_mark = alloc_mark();
 
     commit_tree(&sp);
+    // After the first commit — the window has to exist before it can be
+    // guarded. From here Mod+Q and the × ask us first.
+    unsafe { let _ = npk_window_set_close_guard(1); }
 
     loop {
         match poll_event() {

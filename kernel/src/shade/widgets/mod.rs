@@ -275,6 +275,7 @@ pub fn widget_window_exists(window_id: u32) -> bool {
 pub fn remove_event_queue(window_id: u32) {
     EVENT_QUEUES.lock().remove(&window_id);
     CLIPBOARD_SINKS.lock().remove(&window_id);
+    forget_close_state(window_id);
     // A picker closed by its window button (rather than by picking) still
     // owes its requester an answer, or the app waits for a dialog that no
     // longer exists. Report it as a cancel. `take_pick` first so the
@@ -303,6 +304,76 @@ pub fn set_clipboard_sink(window_id: u32) {
 /// True if `window_id` opted into `Event::Clipboard` delivery.
 pub fn is_clipboard_sink(window_id: u32) -> bool {
     CLIPBOARD_SINKS.lock().contains(&window_id)
+}
+
+// ── Close guard ───────────────────────────────────────────────────────
+//
+// Without this, Mod+Q and the title-bar X call `close_window` straight
+// away and an app with unsaved work never gets asked — it only learns
+// its window is gone when `npk_event_poll` returns -1, far too late to
+// prompt. This is our `WM_DELETE_WINDOW`.
+//
+// Opt-in, so every existing app keeps closing instantly. A guarded
+// window gets `Event::CloseRequest` and is expected to call
+// `npk_close_widget` when it's done. It is NOT a veto: a second close
+// gesture, or `CLOSE_GRACE_TICKS` of silence, closes it regardless — an
+// app must never be able to pin a window open.
+
+/// Windows that asked to be consulted before closing.
+static CLOSE_GUARDS: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
+
+/// Guarded windows with a close request outstanding: window → (tick it
+/// was sent, whether the app has shown any sign of life since).
+static PENDING_CLOSE: Mutex<BTreeMap<u32, (u64, bool)>> = Mutex::new(BTreeMap::new());
+
+/// How long a guarded window has to REACT to `CloseRequest` before the
+/// compositor closes it anyway. Ticks run at 100 Hz, so ~2 s.
+///
+/// This is a liveness check, not a patience limit: the moment the app
+/// commits a frame after being asked, the deadline is cancelled and it
+/// can take as long as the user needs to answer the dialog. Only an app
+/// that never reacts at all gets closed out from under itself.
+pub const CLOSE_GRACE_TICKS: u64 = 200;
+
+pub fn set_close_guard(window_id: u32, on: bool) {
+    let mut g = CLOSE_GUARDS.lock();
+    if on { g.insert(window_id); } else { g.remove(&window_id); }
+}
+
+pub fn is_close_guarded(window_id: u32) -> bool {
+    CLOSE_GUARDS.lock().contains(&window_id)
+}
+
+/// Record that `window_id` was asked to close at `now`. Returns false if
+/// a request was already outstanding — the caller takes that as "the user
+/// asked twice" and closes for real.
+pub fn begin_close_request(window_id: u32, now: u64) -> bool {
+    let mut p = PENDING_CLOSE.lock();
+    if p.contains_key(&window_id) { return false; }
+    p.insert(window_id, (now, false));
+    true
+}
+
+/// A guarded window drew a frame — proof it is processing events. Cancels
+/// the liveness deadline while leaving the request outstanding, so a
+/// second close gesture still closes immediately.
+pub fn note_close_request_alive(window_id: u32) {
+    if let Some(entry) = PENDING_CLOSE.lock().get_mut(&window_id) {
+        entry.1 = true;
+    }
+}
+
+/// Guarded windows that never reacted within the deadline.
+pub fn expired_close_requests(now: u64) -> alloc::vec::Vec<u32> {
+    PENDING_CLOSE.lock().iter()
+        .filter(|(_, (t, acked))| !*acked && now.saturating_sub(*t) >= CLOSE_GRACE_TICKS)
+        .map(|(id, _)| *id)
+        .collect()
+}
+
+fn forget_close_state(window_id: u32) {
+    CLOSE_GUARDS.lock().remove(&window_id);
+    PENDING_CLOSE.lock().remove(&window_id);
 }
 
 // ── File-picker portal ────────────────────────────────────────────────
@@ -1741,6 +1812,11 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
     if version != abi::WIRE_VERSION {
         return -1;
     }
+    // Committing a frame proves the app is still turning its event loop.
+    // If it was asked to close, that cancels the liveness deadline — the
+    // user may now take as long as they like with the prompt.
+    if window_id != 0 { note_close_request_alive(window_id); }
+
     let incoming_hash: [u8; 32] = *blake3::hash(bytes).as_bytes();
     if window_id != 0 {
         if let Some(cached_hash) = SCENES.lock().get(&window_id).map(|s| s.payload_hash) {

@@ -1261,6 +1261,26 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_window_set_close_guard(on) -> 0 / -1
+    // Ask to be consulted before this window closes. A guarded window gets
+    // `Event::CloseRequest` on Mod+Q / the title-bar X instead of vanishing,
+    // so an app with unsaved work can prompt.
+    //
+    // Not a veto: asking again, or staying silent for a few seconds, closes
+    // it anyway. Apps that don't opt in are unaffected.
+    linker.func_wrap("env", "npk_window_set_close_guard",
+        |caller: Caller<'_, HostState>, on: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                return -1;
+            }
+            let wid = caller.data().widget_window_id;
+            if wid == 0 { return -1; }
+            crate::shade::widgets::set_close_guard(wid, on != 0);
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_pick_mkdir(path_ptr, path_len) -> 0 / -1
     // Create a directory on behalf of an open file dialog.
     //

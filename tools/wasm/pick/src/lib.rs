@@ -273,12 +273,8 @@ struct Pick {
     entries:  Vec<Entry>,
     /// Index into `entries`, or None when nothing is picked yet.
     selected: Option<usize>,
-    /// Save mode: the filename stem being typed (without `ext`).
+    /// Save mode: the filename being typed, extension included.
     name:     String,
-    /// Save mode: the extension carried along from the caller's
-    /// suggestion, shown dimmed after the caret. Empty for a buffer that
-    /// has no type yet. Includes the leading dot.
-    ext:      String,
     /// Directories visited, for the Back arrow.
     history:  Vec<String>,
     /// Save mode: showing the "replace existing file?" confirmation.
@@ -302,13 +298,6 @@ impl Pick {
         let suggest = parts.next().unwrap_or("").trim();
 
         let dir = if start.is_empty() { read_home_dir() } else { start.to_string() };
-        // Split the suggestion so the extension can trail the caret dimmed
-        // — the user is naming a file, not retyping its type. A leading dot
-        // (".bashrc") is a name, not an extension.
-        let (stem, ext) = match suggest.rfind('.') {
-            Some(i) if i > 0 => (&suggest[..i], &suggest[i..]),
-            _ => (suggest, ""),
-        };
 
         let mut p = Pick {
             mode,
@@ -318,28 +307,19 @@ impl Pick {
             // Pre-allocate so typing doesn't reallocate past the
             // persistent mark and get freed by the next alloc_reset.
             name:     String::with_capacity(NAME_CAP),
-            ext:      String::with_capacity(16),
             history:  Vec::with_capacity(16),
             confirm_overwrite: false,
             new_folder: false,
             folder_name: String::with_capacity(NAME_CAP),
         };
-        p.name.push_str(clamp_str(stem, NAME_CAP));
-        p.ext.push_str(clamp_str(ext, 15));
+        p.name.push_str(clamp_str(suggest, NAME_CAP));
         p.reload();
         p
     }
 
-    /// Name as it will land on disk: what was typed, plus the carried
-    /// extension — unless the user typed their own dot, in which case
-    /// their name wins whole.
+    /// Name as it will land on disk — exactly what the field shows.
     fn full_name(&self) -> String {
-        let n = self.name.trim();
-        if self.ext.is_empty() || n.contains('.') {
-            n.to_string()
-        } else {
-            alloc::format!("{}{}", n, self.ext)
-        }
+        self.name.trim().to_string()
     }
 
     fn reload(&mut self) {
@@ -870,21 +850,21 @@ fn chevron(show: bool) -> Widget {
 /// extension trails the caret dimmed, so it reads as a suffix, not as
 /// part of the name you are typing.
 fn render_name_field(p: &Pick) -> Widget {
-    let mut field: Vec<Widget> = Vec::with_capacity(2);
-    field.push(Widget::Input {
-        value:       p.name.clone(),
-        placeholder: s().name_hint.to_string(),
-        on_submit:   ActionId(ACT_NAME_SUBMIT),
-        modifiers:   alloc::vec![Modifier::Autofocus],
-    });
-    if !p.ext.is_empty() {
-        field.push(Widget::Text {
-            content:   p.ext.clone(),
-            style:     TextStyle::Body,
-            modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceFaint)],
-        });
-    }
-    field.push(Widget::Spacer { flex: 1 });
+    // One field, whole filename. The extension used to sit beside the
+    // Input as its own dimmed Text, but `measure` floors an Input at
+    // 120 px so empty fields don't collapse — so on a short name the
+    // suffix drifted off to the right of that floor ("test|      .py")
+    // and crept back as you typed. Spans on an Input would fix it
+    // properly; that needs ABI the widget doesn't have. A single field
+    // also lets the user change the extension, which "save as" wants.
+    let field: Vec<Widget> = alloc::vec![
+        Widget::Input {
+            value:       p.name.clone(),
+            placeholder: s().name_hint.to_string(),
+            on_submit:   ActionId(ACT_NAME_SUBMIT),
+            modifiers:   alloc::vec![Modifier::Autofocus, Modifier::Flex(1)],
+        },
+    ];
 
     Widget::Row {
         children: alloc::vec![
