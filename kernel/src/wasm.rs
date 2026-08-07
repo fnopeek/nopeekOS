@@ -1261,6 +1261,40 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_pick_mkdir(path_ptr, path_len) -> 0 / -1
+    // Create a directory on behalf of an open file dialog.
+    //
+    // This exists so the picker can offer "New folder" WITHOUT holding
+    // WRITE. Giving it WRITE would hand the module that browses every
+    // file the right to overwrite them too — the one thing the portal is
+    // built to avoid. So the capability is this single verb instead:
+    // create a directory, nothing else. No writing files, no deleting,
+    // no renaming.
+    //
+    // Authorised exactly like `npk_pick_result` — the caller's window
+    // must be one the kernel itself registered as a picker. `sys/` stays
+    // off limits regardless.
+    linker.func_wrap("env", "npk_pick_mkdir",
+        |caller: Caller<'_, HostState>, path_ptr: i32, path_len: i32| -> i32 {
+            let me = caller.data().widget_window_id;
+            if me == 0 || !crate::shade::widgets::is_open_pick(me) { return -1; }
+            let path = match read_wasm_str(&caller, path_ptr, path_len) {
+                Some(s) => s,
+                None => return -1,
+            };
+            let clean = path.trim().trim_matches('/');
+            if clean.is_empty() || clean.contains("..") { return -1; }
+            if is_module_store_path(clean) || clean == "sys" || clean.starts_with("sys/") {
+                kprintln!("[npk] npk_pick_mkdir DENIED (sys is off limits)");
+                return -1;
+            }
+            match crate::npkfs::fs::mkdir(clean) {
+                Ok(()) => 0,
+                Err(_) => -1,
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_scene_commit(ptr, len) -> i32
     // Phase 10 widget pipeline: WASM app hands the kernel a version-
     // prefixed postcard-serialized Widget tree. Compositor does the
