@@ -1254,7 +1254,11 @@ pub fn layout(
 ) -> Layout {
     // The root element is never painted, but `html { … }` still cascades into
     // the document — and its `font-size` is the basis for every `rem`.
-    let initial = ComputedStyle::root(theme);
+    let mut initial = ComputedStyle::root(theme);
+    // Seed the viewport before the first cascade: `vw`/`vh` on `html` itself
+    // have to resolve, and every descendant inherits these two down.
+    initial.vw = width as f32;
+    initial.vh = viewport_h as f32;
     let html_el = dom.root_element();
     let mut root = style::resolve(html_el, &initial, theme, sheet, &[], &[], 0, width as f32);
     root.rem_base = root.font_px;

@@ -22,16 +22,16 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-06, beak 0.4.3)
+### Current number (measured 2026-08-07, beak 0.4.5)
 
 ```
-4064 pass / 1541 fail / 181 inconclusive   (of 5786 vendored reftests)
-= 72.5 % of the conclusive 5605
+4069 pass / 1538 fail / 179 inconclusive   (of 5786 vendored reftests)
+= 72.6 % of the conclusive 5607
 ```
 
 Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → 3746 → 3863 → 3869 →
 3870 (0.3.0) → 3880 (0.3.2) → 3926 (0.3.3) → 3959 (0.3.4) → 3963 (0.3.5) →
-**3967** (0.3.6) → 3967 (0.3.11) → 3978 (0.3.12) → 3997 (0.3.13) → 3998 (0.3.14) → 4012 (0.3.15) → 4036 (0.3.16) → 4056 (0.4.1) → **4064** (0.4.3). The inconclusive count fell 254 → 184 over
+**3967** (0.3.6) → 3967 (0.3.11) → 3978 (0.3.12) → 3997 (0.3.13) → 3998 (0.3.14) → 4012 (0.3.15) → 4036 (0.3.16) → 4056 (0.4.1) → 4064 (0.4.3) → **4069** (0.4.5). The inconclusive count fell 254 → 184 over
 that span: references that used to render blank — because `:root` was dropped,
 because an `inline-block` had no box, or because an inline box painted no
 background — now paint, so 73 more tests actually measure something.
@@ -1262,6 +1262,66 @@ menu to pick from.
     context and fails; a sibling `:has()` on an ancestor compound
     (`.a:has(+ .b) .c`) has no parent on the path and fails. Both are the same
     shape as the existing ancestor-context shortcut.
+
+39. ✅ **Viewport units — `vw`/`vh`/`vmin`/`vmax` (0.4.5).** WPT **4064 →
+    4069** (+8 / −3), 179 unit tests. Every gain is a `css-values` viewport
+    test and every one lands at **0.00 % diff** — pixel-exact, not "close
+    enough".
+
+    `values.rs` had resolved all four since it was written, but only custom
+    properties went through it. The box model went through `style.rs`, which
+    carried its **own** `Units` type holding just `em`/`rem`, so `width:50vw`
+    fell out of `parse_length` as `None` and became `auto`, and
+    `padding-left:10vw` became 0. Two types for one job — the same drift shape
+    as [[feedback-intrinsic-shared-path]].
+
+    `Units` now carries the viewport, and `ComputedStyle` carries it the way
+    it already carries `rem_base`: seeded on the initial style, copied down by
+    `inherit_reset`. That is why nothing had to be threaded through the
+    cascade — every `s.units()` site got it at once, so there is no half-
+    introduced path ([[feedback-measured-worse-may-mean-partial]]).
+
+    **`vmin` ends in `in`.** The absolute-unit table has an inch arm, so the
+    viewport arms have to be tested first or `10vmin` parses as `10vm` inches.
+    Pinned by the unit test, together with a `1in` assertion so a later edit
+    cannot fix one by breaking the other.
+
+    Two things came along because they are the same defect:
+    - **`calc()` was passing `vw: 0.0, vh: 0.0`** into the values resolver, so
+      `calc(100vw - 300px)` silently computed `-300px`. A parse-test would
+      have called that a success ([[feedback-paint-test-not-parse-test]]).
+    - **`parse_track` hardcoded `BASE_FONT_PX` for BOTH `em` and `rem`**, so
+      `grid-template-columns: 20em` ignored the element's font size. It now
+      takes the caller's `Units`.
+
+    **Both caches had to learn the viewport height** — the engine's stylesheet
+    cache (keyed on HTML+CSS+width+dark) and the shell's layout cache (keyed
+    on width+generation). Without that a purely VERTICAL window resize keeps
+    stale geometry for every `vh` box.
+
+    ### The three losses are the reference moving, for the 5th time
+
+    `stretch-quirk-001`/`-002` and `intrinsic-height-abspos-stretch-percentage-child`
+    were green because their references use `height:100vh`, which collapsed to
+    nothing — matching a test that collapses for an entirely DIFFERENT missing
+    reason (`height: stretch` / `-webkit-fill-available`, which we do not
+    implement). The reference now paints, so the honest verdict is fail.
+    **These three now name a real hole instead of hiding it**
+    ([[feedback-which-side-moved]]).
+
+    ### ⚠️ Correction: the real-web payoff is much smaller than this file said
+
+    The earlier note "389× GitHub" counted occurrences in CSS **text**. Three
+    real pages render **byte-identically** before and after
+    ([[feedback-byte-identical-render-gate]]): de.wikipedia/Stansstad,
+    MDN, and github.com/rust-lang/rust at 1900 px. Grouping GitHub's 197
+    viewport-unit rules by selector says why — they are almost all
+    `.prc-Overlay-*`, `.prc-Dialog-*`, `.prc-ActionMenu-*`, i.e. **popups JS
+    creates**, which do not exist in the static HTML we render. The value is
+    banked for when scripting arrives; today it is an oracle win and a
+    correctness win, not a visible one. (Verified live all the same: on a
+    synthetic page `50vw`→950, `25vmin`→150, `calc(100vw - 300px)`→1600 at a
+    1900×600 viewport — [[feedback-verify-the-call-path]].)
 
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the
