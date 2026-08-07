@@ -38,6 +38,15 @@ pub fn stop_capture() -> String {
     CAPTURE.lock().take().unwrap_or_default()
 }
 
+/// Copy what has been captured so far, leaving capture running. Used to
+/// persist the boot log without blinding `dmesg` for the rest of the session.
+pub fn capture_snapshot() -> String {
+    match *CAPTURE.lock() {
+        Some(ref buf) => buf.clone(),
+        None => String::new(),
+    }
+}
+
 /// Append to capture buffer if active (called from write_str).
 fn capture_bytes(s: &str) {
     if let Some(ref mut buf) = *CAPTURE.lock() {

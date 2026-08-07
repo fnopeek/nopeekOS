@@ -9,7 +9,7 @@ mod fs;
 pub(crate) mod http;
 pub(crate) mod http2;
 mod net;
-mod system;
+pub mod system;
 mod update;
 pub mod install;
 mod wallpaper;
@@ -1915,7 +1915,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             }
         }
         "dmesg" | "bootlog" => {
-            system::intent_dmesg();
+            system::intent_dmesg(args);
         }
         "gpu" => {
             system::intent_gpu(args);

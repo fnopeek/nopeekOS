@@ -106,8 +106,6 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
 
     // Framebuffer init (needs memory + paging for MMIO mapping)
     framebuffer::init_from_boot_info(boot_info);
-    // Set [npk] tag color immediately (consistent throughout boot)
-    framebuffer::set_npk_color(0x00FFB000); // nopeekOS amber
 
     // ACPI: cache the RSDP the UEFI stub picked up via the
     // EFI Configuration Table, then walk RSDT/XSDT for the FADT.
@@ -432,6 +430,9 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
         intent::random_wallpaper();
         shade::render_frame();
     }
+
+    // Everything above is now in the log; file it before the loop takes over.
+    intent::system::persist_boot_log();
 
     intent::run_loop(vault_ref, session_id);
 }

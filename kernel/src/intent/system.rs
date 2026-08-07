@@ -957,7 +957,25 @@ pub fn intent_shade(args: &str) {
     }
 }
 
-pub fn intent_dmesg() {
+/// Where `persist_boot_log` files this boot, and the one before it.
+pub const BOOT_LOG_DIR:       &str = "sys/log";
+pub const BOOT_LOG_PATH:      &str = "sys/log/boot";
+pub const BOOT_LOG_PREV_PATH: &str = "sys/log/boot.prev";
+
+pub fn intent_dmesg(args: &str) {
+    // A boot that ended in a reboot is exactly the one you want to read
+    // afterwards, and by then it is no longer in RAM.
+    if args.trim() == "prev" {
+        match crate::npkfs::fetch(BOOT_LOG_PREV_PATH) {
+            Ok((data, _)) => match core::str::from_utf8(&data) {
+                Ok(s)  => kprintln!("{}", s),
+                Err(_) => kprintln!("dmesg: {} is not text", BOOT_LOG_PREV_PATH),
+            },
+            Err(_) => kprintln!("dmesg: no previous boot log ({})", BOOT_LOG_PREV_PATH),
+        }
+        return;
+    }
+
     // Stop capture, print, restart — so dmesg output itself isn't appended
     let log = crate::serial::stop_capture();
     if log.is_empty() {
@@ -967,6 +985,37 @@ pub fn intent_dmesg() {
         kprintln!("{}", log);
     }
     crate::serial::start_capture();
+}
+
+/// File this boot's log in npkFS, keeping the previous one alongside it.
+///
+/// Called once the system is up: everything before this point is in the
+/// snapshot, and the master key exists so the object is encrypted at rest
+/// like every other. A boot that never gets here leaves the previous log
+/// untouched — which is the one worth reading in that case.
+pub fn persist_boot_log() {
+    let log = crate::serial::capture_snapshot();
+    if log.is_empty() { return; }
+
+    // `store` walks to the parent and fails if it isn't there — it creates
+    // no intermediate directories.
+    if !crate::npkfs::exists(BOOT_LOG_DIR) {
+        if let Err(e) = crate::npkfs::fs::mkdir(BOOT_LOG_DIR) {
+            kprintln!("[npk] boot log: mkdir {} failed: {:?}", BOOT_LOG_DIR, e);
+            return;
+        }
+    }
+
+    // Rotate by copy, not `rename`: rename refuses an existing target, and
+    // the store is content-addressed so this costs a reference, not bytes.
+    if let Ok((prev, _)) = crate::npkfs::fetch(BOOT_LOG_PATH) {
+        let _ = crate::npkfs::upsert(BOOT_LOG_PREV_PATH, &prev, crate::capability::CAP_NULL);
+    }
+    if let Err(e) = crate::npkfs::upsert(
+        BOOT_LOG_PATH, log.as_bytes(), crate::capability::CAP_NULL)
+    {
+        kprintln!("[npk] boot log: store failed: {:?}", e);
+    }
 }
 
 pub fn intent_uname(args: &str) {
@@ -1171,7 +1220,7 @@ pub fn intent_help_topic(topic: &str) {
             help_row("top", "Live processes and cores");
             help_row("uptime", "Time since boot");
             help_row("time", "Clock (also: date)");
-            help_row("dmesg", "Kernel log");
+            help_row("dmesg", "Kernel log (dmesg prev = last boot)");
             help_row("bootlog", "Log of the current boot");
             help_row("cores", "Per-core load and frequency");
             help_row("cpu", "CPU model and features");
