@@ -1131,6 +1131,24 @@ pub fn resolve(
         s.bg = Some(c);
     }
 
+    // `width`/`height` as presentational hints (HTML Rendering §15.3.5-6).
+    // Table-built pages do their centring with spacer cells — Google's home
+    // page is `<td width="25%">&nbsp;</td>` either side of the search box —
+    // and an ignored attribute collapses the spacer to nothing, which slams
+    // the content against the left edge. The value is a "dimension": a bare
+    // number is pixels, a trailing `%` a percentage.
+    //
+    // Images are NOT in this list: `img_box` already reads their attributes,
+    // and setting the property here too would apply the hint twice.
+    if matches!(el.tag.as_str(), "table" | "td" | "th" | "col" | "colgroup" | "hr") {
+        if let Some(l) = el.attr("width").and_then(parse_dimension_attr) {
+            s.width = l;
+        }
+        if let Some(l) = el.attr("height").and_then(parse_dimension_attr) {
+            s.height = l;
+        }
+    }
+
     // Author cascade WITH `!important` (CSS Cascade 4 §6.3): two passes. Normal
     // declarations first (UA < author-normal < inline-normal), then `!important`
     // on top (author-important < inline-important) — so an `!important` decl
@@ -2710,6 +2728,25 @@ fn size_non_negative(l: &Len) -> bool {
 
 /// Assign a size property only if the value is valid AND non-negative, else
 /// keep the prior value (invalid declaration dropped).
+/// Parse an HTML *dimension* attribute value: a bare number is pixels, a
+/// trailing `%` is a percentage (HTML §2.4.4.4). Deliberately NOT the CSS
+/// length parser — `width="200"` carries no unit and CSS would reject it,
+/// which is precisely how these attributes came to be ignored.
+fn parse_dimension_attr(v: &str) -> Option<Len> {
+    let v = v.trim();
+    let (num, pct) = match v.strip_suffix('%') {
+        Some(n) => (n.trim(), true),
+        None => (v, false),
+    };
+    // Trailing junk is not a number: HTML's own rule is to stop at the first
+    // non-digit, but a strict parse keeps a typo from becoming a silent 0.
+    let n: f32 = num.parse().ok()?;
+    if !n.is_finite() || n < 0.0 {
+        return None;
+    }
+    Some(if pct { Len::Pct(n) } else { Len::Px(n) })
+}
+
 fn set_size(slot: &mut Len, v: &str, u: Units) {
     if let Some(l) = parse_len_opt(v, u).filter(size_non_negative) {
         *slot = l;
