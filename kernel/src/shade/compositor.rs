@@ -1240,6 +1240,14 @@ impl Compositor {
     }
 
     pub fn close_window(&mut self, id: WindowId) {
+        // Any file dialog this window opened goes with it. Collected (and
+        // deregistered) first so closing them doesn't try to report a
+        // cancel back to the window we're about to remove. Recursion
+        // terminates: a picker owns no pickers of its own.
+        for picker in crate::shade::widgets::take_picks_for_requester(id.0) {
+            self.close_window(WindowId(picker));
+        }
+
         // If the dock app's window goes away, forget the dock so the
         // reveal/tick machinery no-ops.
         if self.dock.map(|d| d.id) == Some(id) {
