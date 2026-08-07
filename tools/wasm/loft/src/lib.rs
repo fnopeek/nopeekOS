@@ -685,11 +685,22 @@ impl Loft {
         }
     }
 
+    /// One row down. In the grid a row is `GRID_COLS` entries; in the list
+    /// — which is the default view — a row is ONE entry. Multiplying
+    /// unconditionally made Down skip three files at a time.
     fn select_delta_y(&mut self, dy: isize) {
-        self.move_selection(dy * GRID_COLS as isize);
+        let stride = match self.view_mode {
+            ViewMode::Grid => GRID_COLS as isize,
+            ViewMode::List => 1,
+        };
+        self.move_selection(dy * stride);
     }
 
+    /// Sideways only means something in the grid. In a one-per-row list it
+    /// would just duplicate Up/Down, which reads as the selection jumping
+    /// for no reason.
     fn select_delta_x(&mut self, dx: isize) {
+        if matches!(self.view_mode, ViewMode::List) { return; }
         self.move_selection(dx);
     }
 
