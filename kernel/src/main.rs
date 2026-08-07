@@ -426,8 +426,8 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
         // never via `run`, which would capture input. Names from the
         // `autostart` config key.
         shade::start_autostart();
-        // Random wallpaper on boot (if any in wallpapers/)
-        intent::random_wallpaper();
+        // The stored wallpaper, or a random one if none was ever chosen.
+        intent::apply_startup_wallpaper();
         shade::render_frame();
     }
 

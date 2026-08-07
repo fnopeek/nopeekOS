@@ -253,6 +253,33 @@ fn decode_with_wasm(name: &str, data: &[u8]) -> bool {
 }
 
 /// Set a random wallpaper from the user's collection.
+/// The wallpaper to bring up at boot.
+///
+/// A wallpaper someone chose outlives the boot that follows it — so the
+/// stored one wins, and the random pick is only for a system that has never
+/// been asked. Boot used to call `random_wallpaper` unconditionally, which
+/// not only ignored the choice but **overwrote** it: applying a wallpaper
+/// persists its name, so every boot silently replaced `wallpaper` in the
+/// config with whatever it had just rolled.
+pub fn apply_startup_wallpaper() {
+    match crate::config::get("wallpaper") {
+        // Explicitly cleared (`wallpaper clear` stores an empty value) —
+        // keep the default background, do not roll a new one.
+        Some(name) if name.is_empty() => {}
+        Some(name) => {
+            if let Ok((data, _)) = crate::npkfs::fetch(&name) {
+                apply_wallpaper_data(&name, &data);
+                return;
+            }
+            // Configured but gone (deleted, or a fresh install that never
+            // got the file) — fall back rather than boot to a bare desktop.
+            random_wallpaper();
+        }
+        // Never chosen → first impression is a random one.
+        None => random_wallpaper(),
+    }
+}
+
 pub fn random_wallpaper() {
     let names = get_wallpaper_names();
     if names.is_empty() {
