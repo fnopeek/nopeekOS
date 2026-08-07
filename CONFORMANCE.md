@@ -22,16 +22,16 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-07, beak 0.4.7)
+### Current number (measured 2026-08-07, beak 0.4.8)
 
 ```
-4079 pass / 1529 fail / 178 inconclusive   (of 5786 vendored reftests)
-= 72.7 % of the conclusive 5608
+4082 pass / 1526 fail / 178 inconclusive   (of 5786 vendored reftests)
+= 72.8 % of the conclusive 5608
 ```
 
 Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → 3746 → 3863 → 3869 →
 3870 (0.3.0) → 3880 (0.3.2) → 3926 (0.3.3) → 3959 (0.3.4) → 3963 (0.3.5) →
-**3967** (0.3.6) → 3967 (0.3.11) → 3978 (0.3.12) → 3997 (0.3.13) → 3998 (0.3.14) → 4012 (0.3.15) → 4036 (0.3.16) → 4056 (0.4.1) → 4064 (0.4.3) → 4069 (0.4.5) → 4074 (0.4.6) → **4079** (0.4.7). The inconclusive count fell 254 → 184 over
+**3967** (0.3.6) → 3967 (0.3.11) → 3978 (0.3.12) → 3997 (0.3.13) → 3998 (0.3.14) → 4012 (0.3.15) → 4036 (0.3.16) → 4056 (0.4.1) → 4064 (0.4.3) → 4069 (0.4.5) → 4074 (0.4.6) → 4079 (0.4.7) → **4082** (0.4.8). The inconclusive count fell 254 → 184 over
 that span: references that used to render blank — because `:root` was dropped,
 because an `inline-block` had no box, or because an inline box painted no
 background — now paint, so 73 more tests actually measure something.
@@ -1453,6 +1453,59 @@ menu to pick from.
     height and the icon landed inside by accident. Two real items behind it:
     `transform`, and a clip that drops a partially-overflowing op instead of
     cutting it.
+
+42. ✅ **Der Rest des Suchfelds: Flex-Hauptachse, `transform`, und der
+    Bezugsrahmen (0.4.8).** WPT **4079 → 4082** (+3 / −0), 187 unit tests.
+    The widget now matches Firefox: one rule, the magnifier centred, the button
+    flush with the group's right edge.
+
+    ### The flex main axis counted one item's chrome twice
+
+    `main_pad` was padding only, so every consumer that adds it to a content
+    size to get a border box was short by the border. And **`intrinsic_width`
+    reports a CONTENT width — except for a control**, which has no children to
+    measure, so `control_box` hands back the finished box. Used as a flex base
+    that reserves the control's chrome a second time (it is already out of the
+    line once, in `resolve_flex_line`'s `fixed`), and a growing sibling ends up
+    short by exactly that much: Wikipedia's field stopped **22px — its button's
+    padding** — before the group's right edge.
+
+    ⚠️ **A first, broader attempt subtracted the chrome from EVERY item's
+    intrinsic base and cost a WPT test** (`flexbox_flex-formatting-interop`,
+    a `border: 2px` item losing 4px). The control is the exception, not the
+    rule; narrowing it to controls turned −1 into +1. **`intrinsic_width`'s
+    contract differs between its branches, and that is worth remembering before
+    the next caller trusts it.**
+
+    ### `transform: translate(...)`
+
+    Parsed for `translate`/`translateX`/`translateY` and applied as a paint-time
+    shift — the same mechanism `position:relative` already uses — in flow AND
+    out of flow. Percentages resolve against **the box's own size**, which is
+    what makes `translate(-50%, -50%)` centre. Rotation and scale stay
+    unimplemented rather than approximated: half a transform puts a box where
+    neither the author nor the untransformed layout wanted it.
+
+    ### 🔑 The containing block for an abspos child has a USED height
+
+    §10.1: the containing block for an absolutely positioned descendant is the
+    positioned ancestor's **padding box** — a used height, definite once laid
+    out, even when `height` is `auto`. We took it from the SPECIFIED height, so
+    an auto-height ancestor left it indefinite, `top: 50%` was unresolvable, and
+    the child fell back to its static position. Combined with the
+    `top:50%`+`translate(-50%)` centring idiom that puts the box a full
+    box-height too low — the magnifier ended up below its field, half outside an
+    `overflow:hidden`.
+
+    **This is a different question from `cb_h`**, where §10.5 rightly leaves an
+    auto height indefinite for IN-FLOW children; conflating the two is what hid
+    it. Measuring the box needs a re-entry guard (the measurement re-enters the
+    same box and would ask for the same height again) — without it, a stack
+    overflow. **Measured cost: none** — the WPT suite is unchanged at 35s and
+    all three real pages still render in under 200ms.
+
+    +3, and two of them (`CSS2/absolute-replaced-height-028`/`-035`) are the
+    abspos containing block, not the search box.
 
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the

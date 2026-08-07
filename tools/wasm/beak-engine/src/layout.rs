@@ -376,6 +376,21 @@ fn clip_ops(ops: &mut Vec<DrawOp>, start: usize, cl: i32, ct: i32, cr: i32, cb: 
 
 /// `position:relative` paint offset (dx, dy): `left`/`top` win over `right`/
 /// `bottom`; `%` resolves against the containing block's content width.
+/// `transform: translate(...)` as whole pixels. Percentages are of the box's
+/// OWN border box (CSS Transforms 1 §8) — which is what makes
+/// `translate(-50%, -50%)` centre a box on the point it is positioned at, and
+/// why this cannot reuse `rel_offset`'s containing-block basis.
+fn translate_offset(st: &ComputedStyle, box_w: i32, box_h: i32) -> (i32, i32) {
+    let Some((tx, ty)) = st.translate else { return (0, 0) };
+    let at = |l: Len, basis: i32| match l {
+        Len::Px(p) => p as i32,
+        Len::Pct(p) => (p / 100.0 * basis as f32) as i32,
+        Len::Calc { pct, px } => (pct / 100.0 * basis as f32 + px) as i32,
+        Len::Auto => 0,
+    };
+    (at(tx, box_w), at(ty, box_h))
+}
+
 fn rel_offset(st: &ComputedStyle, cb_w: f32) -> (i32, i32) {
     let dx = st
         .left
@@ -985,6 +1000,10 @@ struct Ctx<'a> {
     /// repeatedly (a table sizes its columns over several passes) — without
     /// this the cascade work would multiply.
     intrinsic: BTreeMap<u32, (f32, f32)>,
+    /// Set while `measure_box_height` is resolving a positioned box's own
+    /// containing-block height. That measurement re-enters the same box, which
+    /// would ask for the same height again — one level is all the answer needs.
+    measuring_cb_h: core::cell::Cell<bool>,
     /// Memoised `style::resolve` results, keyed by a hash of everything the
     /// cascade reads (see `style_key`) — so this is a pure cache, not a policy.
     /// A real article cascades the SAME element about twelve times: every
@@ -1300,6 +1319,7 @@ pub fn layout(
         inspect,
         inspects: Vec::new(),
         intrinsic: BTreeMap::new(),
+        measuring_cb_h: core::cell::Cell::new(false),
         styles: core::cell::RefCell::new(BTreeMap::new()),
     };
 
@@ -1836,6 +1856,12 @@ impl<'a> Ctx<'a> {
                     self.shift_ops(op0, self.ops.len(), link0, self.links.len(), ctl0, dx, dy);
                 }
             }
+            // `transform: translate(...)` — the same paint-time shift, but its
+            // percentages are of the BOX, not the containing block.
+            let (tdx, tdy) = translate_offset(&st, out.box_w, out.bottom - out.top_y);
+            if tdx != 0 || tdy != 0 {
+                self.shift_ops(op0, self.ops.len(), link0, self.links.len(), ctl0, tdx, tdy);
+            }
             if track {
                 if let ZIndex::Value(z) = st.z_index {
                     self.record_stack_entry(z, LAYER_IN_FLOW, op0, self.ops.len(), link0, self.links.len());
@@ -2189,7 +2215,29 @@ impl<'a> Ctx<'a> {
         // top, so the padding edge is one border down.
         let prev_cb = self.cb;
         if st.position != Position::Static {
-            self.cb = padding_cb(st, content_x, prov_top_y + st.border_top.width as i32 + st.pad_top as i32, content_w);
+            let pad_top_y = prov_top_y + st.border_top.width as i32 + st.pad_top as i32;
+            let mut cb = padding_cb(st, content_x, pad_top_y, content_w);
+            // §10.1: the containing block for an absolutely positioned
+            // descendant is this box's PADDING box — a USED height, definite
+            // once laid out even when `height` is `auto`. That is a different
+            // question from `cb_h` below, where §10.5 rightly leaves an auto
+            // height indefinite for IN-FLOW children.
+            //
+            // Treating both as indefinite made `top: 50%` on an abspos child
+            // unresolvable, so it fell back to its static position. With the
+            // `top:50%` + `translate(-50%)` centring idiom that puts the box a
+            // full box-height too low — which is where Wikipedia's search
+            // magnifier ended up, half outside its `overflow:hidden` field.
+            if cb.3.is_none() && !self.measuring_cb_h.get() {
+                self.measuring_cb_h.set(true);
+                // `measure_box_height` returns the box's BORDER-box height; the
+                // containing block is its PADDING box, so the two borders come
+                // off.
+                let h = self.measure_box_height(el, st, content_x, content_w, prov_top_y);
+                self.measuring_cb_h.set(false);
+                cb.3 = Some((h - st.border_y() as i32).max(0));
+            }
+            self.cb = cb;
         }
         // This box's own content height is what a percentage height on a CHILD
         // resolves against — and only when it is definite. An `auto` height
@@ -2612,6 +2660,14 @@ impl<'a> Ctx<'a> {
             let ct = bt + top.map(|v| v as i32).unwrap_or(0);
             let cb = bt + cbot.map(|v| v as i32).unwrap_or(bb - bt);
             clip_ops(&mut self.ops, start, cl, ct, cr, cb);
+        }
+        // `transform: translate(...)`, same paint-time shift as in flow. This is
+        // where the `top:50%` + `translate(-50%)` centring idiom lands, so an
+        // out-of-flow box that skipped it sat half a box too low — far enough
+        // to be clipped away by an `overflow:hidden` parent.
+        let (tdx, tdy) = translate_offset(st, w_i, bottom - py as i32);
+        if tdx != 0 || tdy != 0 {
+            self.shift_ops(start, self.ops.len(), link_start, self.links.len(), ctl_start, tdx, tdy);
         }
         if track {
             if let ZIndex::Value(z) = st.z_index {
@@ -4610,7 +4666,8 @@ impl<'a> Ctx<'a> {
             for k in 0..ln {
                 let (el, s) = items[idx0 + k];
                 let s_meas = flex_item_style(&s, size[k], None, true);
-                h_nat[k] = self.measure_box_height(el, &s_meas, item_x[k] as i32, size[k].max(1.0) as i32, cross_y);
+                let box_main = (size[k] + li[k].main_pad).max(1.0) as i32;
+                h_nat[k] = self.measure_box_height(el, &s_meas, item_x[k] as i32, box_main, cross_y);
             }
 
             // Line cross size: a single unwrapped line fills a definite container
@@ -4655,7 +4712,12 @@ impl<'a> Ctx<'a> {
                 };
                 let s2 = flex_item_style(&s, size[k], forced_h, true);
                 self.path.push(ElemInfo::of(el));
-                let _ = self.layout_box(el, &s2, item_x[k] as i32, size[k].max(1.0) as i32, y);
+                // `layout_box` takes the box the caller resolved — the item's
+                // BORDER box. `size[k]` is its content size, so the item's own
+                // padding and border have to go back on, or a control (which
+                // paints exactly this width) loses them and clips its label.
+                let box_main = (size[k] + li[k].main_pad).max(1.0) as i32;
+                let _ = self.layout_box(el, &s2, item_x[k] as i32, box_main, y);
                 self.path.pop();
             }
 
@@ -4757,10 +4819,13 @@ impl<'a> Ctx<'a> {
     fn flex_metrics(&mut self, items: &[(&'a Element, ComputedStyle)], avail: f32, row: bool) -> Vec<FlexItem> {
         let mut out = Vec::with_capacity(items.len());
         for (el, s) in items {
+            // Padding AND border on each axis: every consumer below adds
+            // `main_pad` to a CONTENT size to get a border box, so leaving the
+            // border out makes each of them short by it.
             let (main_pad, cross_pad) = if row {
-                (s.pad_left + s.pad_right, s.pad_top + s.pad_bottom)
+                (s.pad_left + s.pad_right + s.border_x(), s.pad_top + s.pad_bottom + s.border_y())
             } else {
-                (s.pad_top + s.pad_bottom, s.pad_left + s.pad_right)
+                (s.pad_top + s.pad_bottom + s.border_y(), s.pad_left + s.pad_right + s.border_x())
             };
             // Main-axis leading/trailing margins (row: left/right; column: top/bottom).
             let (m_lead_len, m_trail_len) = if row {
@@ -4786,7 +4851,21 @@ impl<'a> Ctx<'a> {
             };
             let to_content = |px: f32| if s.box_border { (px - main_pad).max(0.0) } else { px };
             let spec = main_size.px(avail).map(to_content);
-            let (pref, minc) = self.intrinsic_width(el, s);
+            // `intrinsic_width` reports the element's CONTENT width — its own
+            // padding and border are added by whoever lays it out. A CONTROL is
+            // the exception: it has no children to measure, so `control_box`
+            // hands back the finished box, painted with the control's own
+            // chrome and ignoring the CSS padding entirely.
+            //
+            // The flex algorithm takes bases as content sizes and removes every
+            // item's padding+border from the line once, in `resolve_flex_line`'s
+            // `fixed`. So a control has to give that back, or it reserves chrome
+            // it never uses and a growing sibling is short by exactly that much
+            // — Wikipedia's search field stopped 22px (its button's padding)
+            // before the group's right edge.
+            let control_chrome = if crate::forms::kind_of(el).is_some() { main_pad } else { 0.0 };
+            let (pref_bb, minc_bb) = self.intrinsic_width(el, s);
+            let (pref, minc) = ((pref_bb - control_chrome).max(0.0), (minc_bb - control_chrome).max(0.0));
             let base = match s.flex_basis {
                 FlexBasis::Px(p) => to_content(p),
                 FlexBasis::Pct(p) => to_content(p / 100.0 * avail),
@@ -5038,8 +5117,9 @@ fn flex_item_style(s: &ComputedStyle, main: f32, forced_cross: Option<f32>, row:
     s2.margin_top = 0.0;
     s2.margin_bottom = 0.0;
     let main_px = |content: f32, pad: f32| Len::Px(if s.box_border { content + pad } else { content });
+    let main_chrome = s.pad_left + s.pad_right + s.border_x();
     if row {
-        s2.width = main_px(main, s.pad_left + s.pad_right);
+        s2.width = main_px(main, main_chrome);
         if let Some(c) = forced_cross {
             // `c` is the stretched BORDER-box cross size. `Len::Px` means a
             // border-box value under `box-sizing:border-box` and a content-box
@@ -5054,7 +5134,7 @@ fn flex_item_style(s: &ComputedStyle, main: f32, forced_cross: Option<f32>, row:
         }
     } else {
         // Column: main axis is vertical (height), cross is horizontal (width).
-        s2.width = main_px(main, s.pad_left + s.pad_right);
+        s2.width = main_px(main, main_chrome);
         let _ = forced_cross; // column forces cross via `width` above
     }
     s2
@@ -7479,6 +7559,46 @@ fn dbg_wiki_shape() {
         );
         let p2 = *rects(&inl).iter().find(|(_, _, _, _, c)| *c == Rgb(0, 255, 0)).expect("parent");
         assert!(p2.3 > 32, "an inline control still sits on a baseline, got {}", p2.3);
+    }
+
+    /// `transform: translate(...)` shifts the paint, and its percentages are of
+    /// the BOX — that is what makes `translate(-50%,-50%)` centre. Together with
+    /// `top: 50%` against a positioned ancestor of AUTO height (§10.1: the
+    /// containing block is its used padding box, definite once laid out) this is
+    /// the icon-centring idiom every component library uses. Taking the
+    /// containing block from the SPECIFIED height left `top:50%` unresolvable,
+    /// so the box fell back to its static position — a full box-height too low.
+    #[test]
+    fn an_icon_centres_with_top_50_percent_and_a_translate() {
+        let l = lay(
+            "<body><div style=\"position:relative;width:300px\">\
+             <div style=\"height:32px\"></div>\
+             <span style=\"position:absolute;top:50%;left:9px;width:20px;height:20px;\
+             background:#c00;transform:translateY(-50%)\"></span></div></body>",
+            400,
+        );
+        let icon = *rects(&l).iter().find(|(_, _, _, _, c)| *c == Rgb(204, 0, 0)).expect("icon");
+        // Parent's padding box is 32 tall from y=8 → 50 % is 24, less half the
+        // icon = y+6. Falling back to the static position would give y+32.
+        assert_eq!(icon.1, 8 + 6, "centred, not at its static position");
+        assert_eq!(icon.0, 8 + 9, "left is untouched by translateY");
+        // A pixel translate on an in-flow box shifts the paint without moving
+        // anything else, and `translate(x,y)` takes both axes.
+        let l2 = lay(
+            "<body><div style=\"width:50px;height:10px;background:#0c0;\
+             transform:translate(20px,5px)\"></div></body>",
+            400,
+        );
+        let b = *rects(&l2).iter().find(|(_, _, _, _, c)| *c == Rgb(0, 204, 0)).expect("box");
+        assert_eq!((b.0, b.1), (8 + 20, 8 + 5));
+        // Anything that is not a translation is dropped rather than guessed at.
+        let l3 = lay(
+            "<body><div style=\"width:50px;height:10px;background:#00c;\
+             transform:rotate(45deg)\"></div></body>",
+            400,
+        );
+        let c = *rects(&l3).iter().find(|(_, _, _, _, k)| *k == Rgb(0, 0, 204)).expect("box");
+        assert_eq!((c.0, c.1), (8, 8), "a rotation must not move the box instead");
     }
 
     #[test]
