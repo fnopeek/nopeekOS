@@ -719,7 +719,7 @@ impl Compositor {
         // that spawned us, so the user's next keystroke lands there.
         // But this insert(0) put us above the dock, so re-pin it on top.
         self.retile();
-        self.pin_dock_to_front();
+        self.pin_overlays_to_front();
         self.needs_full_redraw = true;
 
         id
@@ -743,7 +743,7 @@ impl Compositor {
         self.windows.push(win);
         self.z_order.insert(0, id);
         self.retile();
-        self.pin_dock_to_front();
+        self.pin_overlays_to_front();
         self.needs_full_redraw = true;
 
         id
@@ -843,6 +843,9 @@ impl Compositor {
     pub fn set_modal(&mut self, id: WindowId, modal: bool) -> bool {
         if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
             win.modal = modal;
+            // Raise it right away: from this moment it swallows clicks
+            // outside itself, so it had better be the thing on top.
+            if modal { self.pin_overlays_to_front(); }
             true
         } else {
             false
@@ -957,7 +960,7 @@ impl Compositor {
             // Pin the bar to the front of the z-order; keep the dock pinned too.
             self.z_order.retain(|&wid| wid != id);
             self.z_order.insert(0, id);
-            self.pin_dock_to_front();
+            self.pin_overlays_to_front();
             self.needs_full_redraw = true;
         }
         found
@@ -1050,7 +1053,7 @@ impl Compositor {
             // Overlay → tiling grid is untouched, but retile reclaims any
             // slot this window held if it was previously tiled.
             self.retile();
-            self.pin_dock_to_front();
+            self.pin_overlays_to_front();
             self.needs_full_redraw = true;
         }
         found
@@ -1390,16 +1393,25 @@ impl Compositor {
         }
         // The dock is never focused, so the insert(0) above would bury it
         // behind the just-focused window. Re-pin it to the very top.
-        self.pin_dock_to_front();
+        self.pin_overlays_to_front();
         // Don't set needs_full_redraw — render_damaged handles 2 windows only
     }
 
     /// Keep the dock window at the front of the z-order (topmost). Render
     /// passes iterate `z_order.rev()`, drawing index 0 last → on top.
-    fn pin_dock_to_front(&mut self) {
+    fn pin_overlays_to_front(&mut self) {
         if let Some(dock) = self.dock {
             self.z_order.retain(|&wid| wid != dock.id);
             self.z_order.insert(0, dock.id);
+        }
+        // A modal dialog must sit above everything, and this is not
+        // cosmetic: `modal_blocks` swallows every click outside it, so a
+        // buried modal would eat the pointer while invisible — the whole
+        // screen would go dead. Pinning it last puts it in front of the
+        // dock too.
+        if let Some(id) = self.modal_window() {
+            self.z_order.retain(|&wid| wid != id);
+            self.z_order.insert(0, id);
         }
     }
 
@@ -1452,7 +1464,7 @@ impl Compositor {
         }
 
         self.retile();
-        self.pin_dock_to_front();
+        self.pin_overlays_to_front();
         self.needs_full_redraw = true;
     }
 
@@ -2304,6 +2316,18 @@ impl Compositor {
         let mx = self.mouse.x;
         let my = self.mouse.y;
 
+        // A modal dialog owns the pointer. Swallow presses outside it so
+        // nothing behind takes focus and buries it. Motion still goes
+        // through (the cursor must keep moving) and drags in progress are
+        // let finish, so a resize started before the dialog opened doesn't
+        // stick.
+        if self.drag.is_none()
+            && (self.mouse.left_clicked() || self.mouse.right_clicked())
+            && self.modal_blocks(mx, my)
+        {
+            return false;
+        }
+
         let mod_held = crate::keyboard::is_super_held();
 
         // Handle active drag (swap or resize)
@@ -2392,6 +2416,12 @@ impl Compositor {
     /// Handle only button events (click, drag, release). Position already in self.mouse.
     /// Called from lock-free input path — only when buttons change.
     pub fn handle_mouse_buttons(&mut self) -> bool {
+        if self.drag.is_none()
+            && (self.mouse.left_clicked() || self.mouse.right_clicked())
+            && self.modal_blocks(self.mouse.x, self.mouse.y)
+        {
+            return false;
+        }
         let mx = self.mouse.x;
         let my = self.mouse.y;
         let mod_held = crate::keyboard::is_super_held();
@@ -2903,6 +2933,36 @@ impl Compositor {
     }
 
     /// Find the topmost window at screen coordinates (x, y).
+    /// The modal window on this workspace, if any — a dialog that owns the
+    /// pointer until it's answered.
+    fn modal_window(&self) -> Option<WindowId> {
+        self.windows.iter()
+            .find(|w| w.modal && w.workspace == self.active_workspace && w.visible)
+            .map(|w| w.id)
+    }
+
+    /// True if (x, y) lies outside an open modal dialog.
+    ///
+    /// Clicking there used to focus and raise the window behind, burying
+    /// the dialog with no way back — a file picker vanished behind its own
+    /// app and the user was stuck. A modal dialog blocks the pointer
+    /// instead: nothing behind it reacts. Deliberately NOT light-dismiss,
+    /// which is right for a casual overlay (the volume slider) but would
+    /// throw away a half-typed filename on a stray click.
+    fn modal_blocks(&self, x: i32, y: i32) -> bool {
+        match self.modal_window() {
+            None => false,
+            Some(id) => match self.windows.iter().find(|w| w.id == id) {
+                Some(win) => {
+                    let inside = x >= win.x as i32 && x < (win.x + win.width) as i32
+                              && y >= win.y as i32 && y < (win.y + win.height) as i32;
+                    !inside
+                }
+                None => false,
+            },
+        }
+    }
+
     pub fn window_at(&self, x: i32, y: i32) -> Option<WindowId> {
         // Z-order: front to back (first match = topmost)
         for &wid in &self.z_order {
