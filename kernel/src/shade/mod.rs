@@ -770,11 +770,22 @@ fn render_damaged_layered() {
         let (shadow, _) = fb.shadow_ptr();
 
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
+            // Erase → repaint → re-bake, never a bare `draw_cursor_on_shadow`:
+            // this is a PARTIAL repaint, so nothing here overwrites a cursor
+            // baked at the previous position. It went unnoticed while every
+            // mouse move was followed by `render_frame_cursor_only`, which
+            // cleaned up after it — but a scrollbar drag consumes the pointer
+            // event and leaves this pass as the only one running, so the
+            // cursor smeared a copy across the whole drag.
+            let old = cursor::saved_pos();
+            let had_old = cursor::save_valid();
+            cursor::restore_under(shadow, &info);
             let regions = comp.render_damaged(shadow, &info);
-            cursor::draw_cursor_on_shadow(shadow, &info);
+            cursor::save_under_and_bake(shadow, &info);
             for (x, y, w, h) in regions {
                 framebuffer::blit_rect(fb, x, y, w, h);
             }
+            blit_cursor_bbox(fb, old, had_old);
         }
     });
 }
@@ -824,11 +835,16 @@ fn render_damaged_legacy() {
         let (shadow, _) = fb.shadow_ptr();
 
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
+            // Same dance as the layered path — see the note there.
+            let old = cursor::saved_pos();
+            let had_old = cursor::save_valid();
+            cursor::restore_under(shadow, &info);
             let regions = comp.render_damaged(shadow, &info);
-            cursor::draw_cursor_on_shadow(shadow, &info);
+            cursor::save_under_and_bake(shadow, &info);
             for (x, y, w, h) in regions {
                 framebuffer::blit_rect(fb, x, y, w, h);
             }
+            blit_cursor_bbox(fb, old, had_old);
         }
     });
 }
@@ -1189,12 +1205,23 @@ pub fn render_input_line() {
                     let cw = win.content_w(comp.border).saturating_sub(pad * 2);
                     let ch = win.content_h(comp.border).saturating_sub(pad * 2);
 
-                    if let Some((x, y, w, h)) = terminal::render_input_line(
+                    // Partial repaint → erase, paint, re-bake (see
+                    // `render_damaged_layered`). A bare bake would leave the
+                    // pointer standing wherever it was when someone typed.
+                    let old = cursor::saved_pos();
+                    let had_old = cursor::save_valid();
+                    cursor::restore_under(shadow, &info);
+                    let painted = terminal::render_input_line(
                         shadow, &info, cx, cy, cw, ch, win.terminal_idx,
-                    ) {
-                        cursor::draw_cursor_on_shadow(shadow, &info);
+                    );
+                    cursor::save_under_and_bake(shadow, &info);
+                    if let Some((x, y, w, h)) = painted {
                         framebuffer::blit_rect(fb, x, y, w, h);
                     }
+                    // Unconditional: the bake above already moved the cursor
+                    // in the shadow, so skipping the blit when nothing was
+                    // painted would strand the old one on screen for good.
+                    blit_cursor_bbox(fb, old, had_old);
                 }
             }
         }
