@@ -628,31 +628,34 @@ impl Compositor {
             && !w.is_overlay)
     }
 
-    /// Which stored delta a resize gesture on `id` has to move, and with which
-    /// sign, for one axis (`beside` = the vertical line between side-by-side
-    /// tiles, else the horizontal one). `None` = no such line bounds it.
+    /// Which stored delta a resize gesture on `id` moves, for one axis
+    /// (`beside` = the vertical line between side-by-side tiles, else the
+    /// horizontal one). `None` = no such line bounds it.
     ///
     /// The delta lives on the window that DREW the line, so a window owns the
     /// line at only one of its edges; the opposite edge belongs to the last
-    /// child that split it, and pushing that one has to flip the sign. Adding
-    /// the delta to the focused window unconditionally was silently a no-op on
-    /// every root window — the one tile that has no line of its own.
+    /// child that split it. Adding the delta to the focused window
+    /// unconditionally was silently a no-op on every root window — the one
+    /// tile that has no line of its own.
     ///
-    /// Positive delta always GROWS the focused window, whichever edge moves.
-    fn resize_target(&self, id: WindowId, beside: bool) -> Option<(WindowId, i32)> {
+    /// No sign comes back any more. A delta always sits on the child that
+    /// drew the line and always pushes it towards the parent's origin
+    /// (left / up), so "move the line the way the arrow points" is a fixed
+    /// `- delta` for both callers — see `resize_focused`.
+    fn resize_target(&self, id: WindowId, beside: bool) -> Option<WindowId> {
         let mut cur = id;
         // Bounded walk: a corrupt parent chain must not spin the compositor.
         for _ in 0..self.windows.len() {
             let w = self.windows.iter().find(|w| w.id == cur)?;
             let parent = w.split_from.filter(|p| self.is_tiled(*p));
             if parent.is_some() && w.split_beside == beside {
-                return Some((cur, 1));
+                return Some(cur);
             }
             if let Some(kid) = self.windows.iter().rev()
                 .find(|c| c.split_from == Some(cur) && c.split_beside == beside && self.is_tiled(c.id))
                 .map(|c| c.id)
             {
-                return Some((kid, -1));
+                return Some(kid);
             }
             cur = parent?;
         }
@@ -2638,9 +2641,16 @@ impl Compositor {
         let mut moved = false;
         for (delta, beside) in [(dx, true), (dy, false)] {
             if delta == 0 { continue }
-            let Some((tid, sign)) = self.resize_target(fid, beside) else { continue };
+            let Some(tid) = self.resize_target(fid, beside) else { continue };
             if let Some(win) = self.windows.iter_mut().find(|w| w.id == tid) {
-                if beside { win.resize_w += sign * delta } else { win.resize_h += sign * delta }
+                // `- delta`, exactly like the mouse drag: the arrow moves the
+                // split line the way it points. It used to mean "make the
+                // focused window wider" (Hyprland's resizeactive), which is
+                // predictable in the abstract but looks wrong on screen —
+                // on a right-hand tile the LEFT edge moved, so pressing
+                // Right made the window grow leftwards. Keyboard and mouse
+                // now push the same line the same way.
+                if beside { win.resize_w -= delta } else { win.resize_h -= delta }
                 moved = true;
             }
         }
@@ -2671,8 +2681,8 @@ impl Compositor {
     /// Only WHICH line comes from `resize_target` — the sign doesn't, see
     /// `apply_resize_drag`.
     fn begin_resize_drag(&mut self, wid: WindowId, mx: i32, my: i32) {
-        let w_target = self.resize_target(wid, true).map(|(id, _)| id);
-        let h_target = self.resize_target(wid, false).map(|(id, _)| id);
+        let w_target = self.resize_target(wid, true);
+        let h_target = self.resize_target(wid, false);
         let delta_of = |s: &Self, t: Option<WindowId>, beside: bool| -> i32 {
             t.and_then(|id| s.windows.iter().find(|w| w.id == id))
                 .map(|w| if beside { w.resize_w } else { w.resize_h })
@@ -2691,13 +2701,12 @@ impl Compositor {
 
     /// Apply a resize drag: absolute against the deltas captured at drag start.
     ///
-    /// The mouse does NOT use `resize_target`'s grow-sign — dragging is direct
-    /// manipulation, so the border has to follow the hand: mouse right = line
+    /// Direct manipulation: the border follows the hand — mouse right = line
     /// right, whichever side of it the focused tile is on. A delta always sits
     /// on the child that drew the line and always moves it towards its parent's
     /// origin (left / up), so following the cursor is a fixed `- delta` on both
-    /// axes. The keys mean something else (Mod+Ctrl+Right = "make it wider",
-    /// like Hyprland's resizeactive) and keep the grow-sign.
+    /// axes. `resize_focused` (Mod+Ctrl+arrow) does the same thing, so a key
+    /// and a drag move the line identically.
     fn apply_resize_drag(&mut self, drag: &DragState, dx: i32, dy: i32) {
         if let Some(id) = drag.w_target {
             if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
