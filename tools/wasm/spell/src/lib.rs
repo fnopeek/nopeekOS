@@ -76,6 +76,8 @@ struct Strings {
     view_preview:  &'static str,
     about:         &'static str,
     untitled:      &'static str,
+    /// Default filename offered by the save dialog (no extension).
+    untitled_file: &'static str,
     placeholder:   &'static str,
     unsaved_title: &'static str,
     unsaved_body:  &'static str,
@@ -91,6 +93,7 @@ const EN: Strings = Strings {
     view_source: "Source", view_preview: "Preview",
     about: "About Spell",
     untitled: "Untitled",
+    untitled_file: "untitled",
     placeholder: "Start typing…",
     unsaved_title: "Unsaved changes",
     unsaved_body: "{} has unsaved changes.",
@@ -105,6 +108,7 @@ const DE: Strings = Strings {
     view_source: "Quelltext", view_preview: "Vorschau",
     about: "Über Spell",
     untitled: "Unbenannt",
+    untitled_file: "unbenannt",
     placeholder: "Tippe los…",
     unsaved_title: "Ungespeicherte Änderungen",
     unsaved_body: "{} hat ungespeicherte Änderungen.",
@@ -475,7 +479,10 @@ impl Spell {
         // Open where the file already lives; a fresh buffer starts wherever
         // the picker defaults to (the kernel resolves "" to the user's home).
         let start = d.path.as_deref().map(dirname).unwrap_or("");
-        let suggest = d.path.as_deref().map(basename).unwrap_or("");
+        // Suggest a name so the dialog's Save is usable straight away.
+        // No extension for a fresh buffer — the file has no type until the
+        // user gives it one, and whatever they type decides it.
+        let suggest = d.path.as_deref().map(basename).unwrap_or(s().untitled_file);
         let base = if then_close { TAG_SAVE_CLOSE_BASE } else { TAG_SAVE_BASE };
         pick(PICK_SAVE, start, suggest, base + doc as u32);
     }
