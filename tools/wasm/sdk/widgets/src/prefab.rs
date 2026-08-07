@@ -592,9 +592,17 @@ pub fn button(label: &str, style: ButtonStyle, on_click: ActionId) -> Widget {
         ButtonStyle::Ghost       => (Token::Surface,         Token::SurfaceMuted,  Token::Border),
         ButtonStyle::Destructive => (Token::Danger,          Token::Warning,       Token::Warning),
     };
-    let mut mods: Vec<Modifier> = Vec::with_capacity(6);
+    // Text colour has to follow the fill, or a filled button paints
+    // body-coloured text on its own Accent and reads as disabled. Ghost
+    // and Secondary sit on surface colours, so they keep the default.
+    let label_tint = match style {
+        ButtonStyle::Primary | ButtonStyle::Destructive => Some(Token::OnAccent),
+        ButtonStyle::Secondary | ButtonStyle::Ghost     => None,
+    };
+    let mut mods: Vec<Modifier> = Vec::with_capacity(7);
     mods.push(Modifier::Padding(Padding::Md.as_u16()));
     mods.push(Modifier::Background(bg));
+    if let Some(tok) = label_tint { mods.push(Modifier::Tint(tok)); }
     mods.push(Modifier::Rounded(Radius::Md.as_u8()));
     mods.push(Modifier::Hover(vec![
         Modifier::Background(hover_bg),

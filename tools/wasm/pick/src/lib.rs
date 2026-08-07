@@ -641,9 +641,11 @@ fn render_title_bar(title: &str) -> Widget {
                 size:      16,
                 modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceMuted)],
             },
+            // Body, not Title: Title is 24 px bold and shouted over a
+            // dialog whose every other line is 14 px.
             Widget::Text {
                 content:   title.to_string(),
-                style:     TextStyle::Title,
+                style:     TextStyle::Body,
                 modifiers: alloc::vec![],
             },
             Widget::Spacer { flex: 1 },
@@ -664,35 +666,42 @@ fn render_toolbar(p: &Pick) -> Widget {
             nav_icon(IconId::ArrowUp,   ACT_PARENT, can_go_up),
             prefab::breadcrumb(&crumbs(&p.dir)),
             Widget::Spacer { flex: 1 },
-            Widget::Row {
-                children: alloc::vec![
-                    Widget::Icon {
-                        id:        IconId::Folders,
-                        size:      16,
-                        modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceMuted)],
-                    },
-                    Widget::Text {
-                        content:   s().new_folder.to_string(),
-                        style:     TextStyle::Body,
-                        modifiers: alloc::vec![],
-                    },
-                ],
-                spacing:   Spacing::Xs.as_u16(),
-                align:     Align::Center,
-                modifiers: alloc::vec![
-                    Modifier::Padding(Padding::Xs.as_u16()),
-                    Modifier::Rounded(Radius::Sm.as_u8()),
-                    Modifier::OnClick(ActionId(ACT_NEW_FOLDER)),
-                    Modifier::Hover(alloc::vec![
-                        Modifier::Background(Token::SurfaceHover),
-                        Modifier::Rounded(Radius::Sm.as_u8()),
-                    ]),
-                ],
-            },
+            // Only when saving. Opening an existing file has no use for a
+            // new directory, and offering it there just invites a stray
+            // write on a dialog that is meant to be read-only.
+            if p.mode == Mode::Save { new_folder_button() } else { Widget::Spacer { flex: 0 } },
         ],
         spacing:   Spacing::Xs.as_u16(),
         align:     Align::Center,
         modifiers: alloc::vec![Modifier::Padding(Padding::Xs.as_u16())],
+    }
+}
+
+fn new_folder_button() -> Widget {
+    Widget::Row {
+        children: alloc::vec![
+            Widget::Icon {
+                id:        IconId::Folders,
+                size:      16,
+                modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceMuted)],
+            },
+            Widget::Text {
+                content:   s().new_folder.to_string(),
+                style:     TextStyle::Body,
+                modifiers: alloc::vec![],
+            },
+        ],
+        spacing:   Spacing::Xs.as_u16(),
+        align:     Align::Center,
+        modifiers: alloc::vec![
+            Modifier::Padding(Padding::Xs.as_u16()),
+            Modifier::Rounded(Radius::Sm.as_u8()),
+            Modifier::OnClick(ActionId(ACT_NEW_FOLDER)),
+            Modifier::Hover(alloc::vec![
+                Modifier::Background(Token::SurfaceHover),
+                Modifier::Rounded(Radius::Sm.as_u8()),
+            ]),
+        ],
     }
 }
 
