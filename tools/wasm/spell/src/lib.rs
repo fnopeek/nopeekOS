@@ -75,10 +75,14 @@ struct Strings {
     close:         &'static str,
     view_source:   &'static str,
     view_preview:  &'static str,
+    settings:      &'static str,
     zoom_in:       &'static str,
     zoom_out:      &'static str,
     /// "Actual size ({} px)" — shows where you'd land back.
     zoom_reset:    &'static str,
+    /// Header written above the settings, so the file explains itself
+    /// when someone opens it in spell.
+    cfg_header:    &'static str,
     about:         &'static str,
     untitled:      &'static str,
     /// Default filename offered by the save dialog (no extension).
@@ -99,8 +103,10 @@ const EN: Strings = Strings {
     new: "New", open: "Open…", save: "Save", save_as: "Save as…",
     close: "Close",
     view_source: "Source", view_preview: "Preview",
+    settings: "Settings",
     zoom_in: "Zoom in", zoom_out: "Zoom out",
     zoom_reset: "Actual size ({} px)",
+    cfg_header: "# spell settings — one key per line, # is a comment.\n# font: editor size in px (6-64), Ctrl+0 restores 13.\n",
     about: "About Spell",
     untitled: "Untitled",
     untitled_file: "untitled",
@@ -118,8 +124,10 @@ const DE: Strings = Strings {
     new: "Neu", open: "Öffnen…", save: "Speichern",
     save_as: "Speichern unter…", close: "Schließen",
     view_source: "Quelltext", view_preview: "Vorschau",
+    settings: "Einstellungen",
     zoom_in: "Vergrößern", zoom_out: "Verkleinern",
     zoom_reset: "Originalgröße ({} px)",
+    cfg_header: "# spell-Einstellungen — ein Schlüssel pro Zeile, # ist ein Kommentar.\n# font: Schriftgröße im Editor in px (6-64), Ctrl+0 stellt 13 her.\n",
     about: "Über Spell",
     untitled: "Unbenannt",
     untitled_file: "unbenannt",
@@ -293,6 +301,7 @@ const ACT_CLOSE_DISCARD: u32 = 6_008;
 const ACT_CLOSE_CANCEL:  u32 = 6_009;
 const ACT_VIEW_EDIT:    u32 = 6_100;
 const ACT_VIEW_PREVIEW: u32 = 6_101;
+const ACT_FILE_SETTINGS: u32 = 6_010;
 const ACT_ZOOM_IN:    u32 = 6_102;
 const ACT_ZOOM_OUT:   u32 = 6_103;
 const ACT_ZOOM_RESET: u32 = 6_104;
@@ -409,6 +418,11 @@ struct Spell {
     /// Editor font size in px. Ctrl+wheel moves it; every tab shares one
     /// setting, like a view preference rather than a per-file property.
     font_px:       u16,
+    /// What is actually on disk. A wheel spin fires a dozen zoom events
+    /// and each npkFS write costs an encrypt + hash + flush, so the file
+    /// is written when leaving, not per notch — this says whether that
+    /// write is still owed.
+    font_px_saved: u16,
     /// How many dirty tabs the quit started with, and how many are done.
     /// Counted at the start because the live count shrinks as tabs close
     /// — deriving the step from it would show "1 of 3", "1 of 2", "1 of 1".
@@ -418,13 +432,15 @@ struct Spell {
 
 impl Spell {
     fn new() -> Self {
+        let cfg_font = read_config_font();
         let mut sp = Spell {
             docs:      Vec::new(),
             active:    0,
             open_menu: None,
             confirm_close: None,
             quitting:      false,
-            font_px:       MONO_SIZE_PX,
+            font_px:       cfg_font,
+            font_px_saved: cfg_font,
             quit_total:    0,
             quit_done:     0,
         };
@@ -558,6 +574,14 @@ impl Spell {
         true
     }
 
+    /// Persist settings if they drifted from the file. Cheap no-op when
+    /// nothing changed, so it can sit on every exit path.
+    fn save_config(&mut self) {
+        if self.font_px == self.font_px_saved { return; }
+        write_config(self.font_px);
+        self.font_px_saved = self.font_px;
+    }
+
     fn cancel_quit(&mut self) {
         self.quitting = false;
         self.quit_total = 0;
@@ -594,6 +618,15 @@ impl Spell {
         };
         if r < 0 { log("[spell] save: store failed"); return; }
         self.cur_mut().dirty = false;
+        // Editing the settings file in spell itself is a stated use of
+        // having one. Adopt what was just saved — otherwise our in-memory
+        // value would be written back over it on the way out and the edit
+        // would silently undo itself.
+        if path == CONFIG_PATH {
+            let f = read_config_font();
+            self.font_px = f;
+            self.font_px_saved = f;
+        }
     }
 
     /// Ask the picker where to save tab `doc`. `then_close` remembers that
@@ -651,6 +684,56 @@ fn read_file(path: &str) -> Option<String> {
     if n <= 0 { return None; }
     let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
     core::str::from_utf8(slice).ok().map(|s| s.to_string())
+}
+
+// ── Config ────────────────────────────────────────────────────────────
+//
+// `sys/config/spell`, same shape as `sys/config/bar`: one `key: value`
+// per line, `#` starts a comment. Meant to be opened and edited in spell
+// itself, so it carries a header explaining what is in it and unknown
+// keys are ignored rather than rejected — a newer spell's settings must
+// not make an older one refuse the file.
+
+const CONFIG_PATH: &str = "sys/config/spell";
+const CONFIG_CAP: usize = 2048;
+static mut CONFIG_BUF: [u8; CONFIG_CAP] = [0; CONFIG_CAP];
+
+/// Read the saved font size. Anything missing or unparseable falls back
+/// to the default — a broken config should never keep the editor shut.
+fn read_config_font() -> u16 {
+    let p = core::ptr::addr_of_mut!(CONFIG_BUF) as *mut u8;
+    let n = unsafe {
+        npk_fetch(CONFIG_PATH.as_ptr() as i32, CONFIG_PATH.len() as i32,
+                  p as i32, CONFIG_CAP as i32)
+    };
+    if n <= 0 { return MONO_SIZE_PX; }
+    let bytes = unsafe { core::slice::from_raw_parts(p as *const u8, n as usize) };
+    let text = match core::str::from_utf8(bytes) { Ok(t) => t, Err(_) => return MONO_SIZE_PX };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') { continue; }
+        let Some((key, val)) = line.split_once(':') else { continue };
+        if key.trim() != "font" { continue; }
+        if let Ok(v) = val.trim().parse::<u16>() {
+            return v.clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
+        }
+    }
+    MONO_SIZE_PX
+}
+
+/// Write the config back, header and all. Called when settings change,
+/// not on every wheel notch — see `Event::Zoom`.
+fn write_config(font_px: u16) {
+    let mut out = String::with_capacity(256);
+    out.push_str(s().cfg_header);
+    out.push_str("font: ");
+    push_usize(&mut out, font_px as usize);
+    out.push('\n');
+    let r = unsafe {
+        npk_store(CONFIG_PATH.as_ptr() as i32, CONFIG_PATH.len() as i32,
+                  out.as_ptr() as i32, out.len() as i32)
+    };
+    if r < 0 { log("[spell] config: store failed"); }
 }
 
 // ── Path helpers ──────────────────────────────────────────────────────
@@ -724,7 +807,8 @@ fn render_dropdown(sp: &Spell, kind: OpenMenu) -> (u32, Widget) {
                 (s().save.to_string(), ActionId(ACT_FILE_SAVE)),
                 (s().save_as.to_string(), ActionId(ACT_FILE_SAVE_AS)),
                 (s().close.to_string(), ActionId(ACT_FILE_CLOSE)),
-            ], &["Ctrl+N", "Ctrl+O", "Ctrl+S", "Ctrl+Shift+S", "Ctrl+W"], None),
+                (s().settings.to_string(), ActionId(ACT_FILE_SETTINGS)),
+            ], &["Ctrl+N", "Ctrl+O", "Ctrl+S", "Ctrl+Shift+S", "Ctrl+W", ""], None),
         ),
         OpenMenu::View => (
             NODE_MENU_VIEW,
@@ -1377,6 +1461,15 @@ fn handle_action(sp: &mut Spell, id: u32) -> Outcome {
             }
             Outcome::Rerender
         }
+        ACT_FILE_SETTINGS => {
+            sp.open_menu = None;
+            // Write it first when it doesn't exist yet, so "Settings"
+            // always opens something — an empty editor with no file would
+            // just raise the question of where to put it.
+            if read_file(CONFIG_PATH).is_none() { write_config(sp.font_px); }
+            sp.open_path(CONFIG_PATH);
+            Outcome::Rerender
+        }
         ACT_ZOOM_IN  => { sp.open_menu = None; sp.zoom(Some(1));  Outcome::Rerender }
         ACT_ZOOM_OUT => { sp.open_menu = None; sp.zoom(Some(-1)); Outcome::Rerender }
         ACT_ZOOM_RESET => { sp.open_menu = None; sp.zoom(None);   Outcome::Rerender }
@@ -1450,11 +1543,13 @@ pub extern "C" fn _start() {
                 match outcome {
                     Outcome::Idle => {}
                     Outcome::Rerender => commit_tree(&sp),
-                    Outcome::Exit => { close_self(); return; }
+                    Outcome::Exit => { sp.save_config(); close_self(); return; }
                 }
             }
             PollResult::Empty => { unsafe { let _ = npk_sleep(16); } }
-            PollResult::WindowGone => return,
+            // Window pulled out from under us (hard close): the settings
+            // write still goes through, npkFS doesn't need the window.
+            PollResult::WindowGone => { sp.save_config(); return; }
         }
     }
 }
