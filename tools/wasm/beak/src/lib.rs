@@ -944,7 +944,7 @@ fn stroke_rect_bgra(buf: &mut [u8], w: i32, h: i32, x: i32, y: i32, rw: i32, rh:
     }
 }
 
-fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, u32)>, buf: &mut Vec<u8>, state: &FormState) {
+fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, buf: &mut Vec<u8>, state: &FormState) {
     let (_x, _y, w, h) = match canvas_rect() {
         Some(r) => r,
         None => return,
@@ -959,15 +959,18 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, u32)>, buf: &
         return;
     }
 
-    // (Re)lay out only when the content or width changed — NOT on every scroll.
-    // Reusing the cached layout for scroll is what keeps scrolling smooth.
+    // (Re)lay out only when the content or the viewport changed — NOT on every
+    // scroll. Reusing the cached layout for scroll is what keeps scrolling
+    // smooth. The HEIGHT is part of the key because `vh`/`vmin`/`vmax` resolve
+    // against it: a purely vertical resize changes the geometry of every box
+    // sized that way.
     let cur_gen = content_gen();
     let need_layout = match cache.as_ref() {
         None => true,
-        Some((_, cw, cg)) => *cw != w || *cg != cur_gen,
+        Some((_, cw, ch, cg)) => *cw != w || *ch != h || *cg != cur_gen,
     };
     if need_layout {
-        *cache = Some((do_layout(engine, w as u32, state), w, cur_gen));
+        *cache = Some((do_layout(engine, w as u32, state), w, h, cur_gen));
     }
     let layout = &cache.as_ref().unwrap().0;
 
@@ -1320,7 +1323,7 @@ fn activate(page: &mut Page, seq: u32) {
 
 /// Handle one event. Returns true if the chrome (address bar / title) should
 /// be re-committed.
-fn handle(engine: &Engine, ev: Event, cache: &Option<(Layout, i32, u32)>, page: &mut Page) -> bool {
+fn handle(engine: &Engine, ev: Event, cache: &Option<(Layout, i32, i32, u32)>, page: &mut Page) -> bool {
     match ev {
         // Keep URL_BUF synced with the address-bar edit buffer.
         Event::InputChange { value } => {
@@ -1452,7 +1455,7 @@ fn handle(engine: &Engine, ev: Event, cache: &Option<(Layout, i32, u32)>, page: 
                     // out on the fly (rare — only if a click races a resize).
                     let fresh;
                     let lay = match cache.as_ref() {
-                        Some((lay, cw, cg)) if *cw == w && *cg == content_gen() => lay,
+                        Some((lay, cw, ch, cg)) if *cw == w && *ch == h && *cg == content_gen() => lay,
                         _ => {
                             fresh = do_layout(engine, w as u32, &page.state);
                             &fresh
@@ -1621,7 +1624,7 @@ pub extern "C" fn _start() {
     }
 
     // Cached layout: (Layout, width it was laid out at, content generation).
-    let mut cache: Option<(Layout, i32, u32)> = None;
+    let mut cache: Option<(Layout, i32, i32, u32)> = None;
     // The page's forms + the user's edits, rebuilt on every navigation.
     let mut page = Page::new();
     let mut last_bg = unsafe { npk_theme_token(0) };
@@ -1700,7 +1703,7 @@ pub extern "C" fn _start() {
         // between, because a batch is small.
         let guessed: Vec<String> = cache
             .as_ref()
-            .map(|(l, _, _): &(Layout, i32, u32)| l.guessed_image_srcs.clone())
+            .map(|(l, _, _, _): &(Layout, i32, i32, u32)| l.guessed_image_srcs.clone())
             .unwrap_or_default();
         fetch_next_images(&mut engine, &mut pending_imgs, &guessed);
         // The layout reports which CSS images it needs, so this queue can only
@@ -1713,7 +1716,7 @@ pub extern "C" fn _start() {
         // NOT "already in the queue". The queue empties on every fetch, so
         // checking it re-requested all of them once a turn, for as long as the
         // page stayed open. Cleared on navigation, with the engine's cache.
-        if let Some((l, _, _)) = cache.as_ref() {
+        if let Some((l, _, _, _)) = cache.as_ref() {
             for (k, u) in &l.css_image_srcs {
                 if !css_asked.contains(k) {
                     css_asked.push(*k);

@@ -192,9 +192,13 @@ impl Engine {
         // properties into the text it hands on — so a light and a dark sheet
         // are different documents, not the same one read differently.
         let media = crate::css::Media::new(width as f32, self.theme.is_dark());
+        // The viewport HEIGHT is part of the identity too, since `resolve_vars`
+        // bakes custom properties down and one may hold a `vh` length. Without
+        // it a purely vertical window resize would keep the stale sheet.
         let key = fingerprint(html.as_bytes())
             ^ fingerprint(external_css.as_bytes()).rotate_left(17)
             ^ (width as u64) << 40
+            ^ (self.viewport_h.get() as u64).rotate_left(23)
             ^ (media.dark as u64) << 63;
         if self.sheet.borrow().as_ref().map(|(k, _)| *k) != Some(key) {
             *self.sheet.borrow_mut() = Some((key, crate::css::collect_all(&dom, external_css, media)));

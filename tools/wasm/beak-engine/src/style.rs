@@ -499,6 +499,12 @@ pub struct ComputedStyle {
     pub em_base: f32,
     /// The root element's computed `font-size` — the basis for `rem`.
     pub rem_base: f32,
+    /// The viewport, for `vw`/`vh`/`vmin`/`vmax`. Document-global like
+    /// `rem_base`, and carried the same way: seeded on the initial style and
+    /// copied down by `inherit_reset`, so every `s.units()` has it without
+    /// threading two more arguments through the cascade.
+    pub vw: f32,
+    pub vh: f32,
     pub bold: bool,
     pub italic: bool,
     pub mono: bool,
@@ -700,6 +706,11 @@ impl ComputedStyle {
             font_px: BASE_FONT_PX,
             em_base: BASE_FONT_PX,
             rem_base: BASE_FONT_PX,
+            // Overwritten by `layout()` with the real viewport. The default is
+            // the reftest canvas, so a bare `ComputedStyle::root()` in a unit
+            // test still resolves `vw`/`vh` to something meaningful.
+            vw: 800.0,
+            vh: 600.0,
             deco: 0,
             caption_bottom: false,
             break_word: false,
@@ -880,15 +891,20 @@ fn parse_deco(v: &str) -> u8 {
     d
 }
 
-/// The two font-relative bases a length may need: `em` (the element's own
-/// font-size, or its inherited one while `font-size` itself is being resolved)
-/// and `rem` (the ROOT element's computed font-size). They differ the moment a
+/// The bases a length may need that are not the containing block: `em` (the
+/// element's own font-size, or its inherited one while `font-size` itself is
+/// being resolved), `rem` (the ROOT element's computed font-size) and the
+/// viewport for `vw`/`vh`/`vmin`/`vmax`. `em` and `rem` differ the moment a
 /// document sets `html { font-size: … }` — the `62.5%` "1rem = 10px" idiom is
 /// everywhere, and treating `rem` as `em` scales such a page by 1.6x.
 #[derive(Clone, Copy, Debug)]
 pub struct Units {
     pub em: f32,
     pub rem: f32,
+    /// Viewport width in px — the basis for `vw`, and half of `vmin`/`vmax`.
+    pub vw: f32,
+    /// Viewport height in px — the basis for `vh`, and the other half.
+    pub vh: f32,
 }
 
 /// The starting point for any freshly-resolved style: the inherited slice
@@ -902,6 +918,9 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         em_base: parent.font_px,
         // `rem` is root-relative: inherited untouched, never reset per element.
         rem_base: parent.rem_base,
+        // Document-global, same as `rem_base`.
+        vw: parent.vw,
+        vh: parent.vh,
         bold: parent.bold,
         italic: parent.italic,
         mono: parent.mono,
@@ -1715,7 +1734,7 @@ fn apply_declarations_pass(decls: &str, theme: &Theme, s: &mut ComputedStyle, im
 impl ComputedStyle {
     /// The `em`/`rem` bases for parsing this element's declarations.
     pub fn units(&self) -> Units {
-        Units { em: self.font_px, rem: self.rem_base }
+        Units { em: self.font_px, rem: self.rem_base, vw: self.vw, vh: self.vh }
     }
 }
 
@@ -1830,7 +1849,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 "xx-large" => Some(BASE_FONT_PX * 2.0),
                 "larger" => Some(base * 1.2),
                 "smaller" => Some(base / 1.2),
-                _ => parse_length(&v, Units { em: base, rem: s.rem_base }),
+                _ => parse_length(&v, Units { em: base, ..s.units() }),
             };
             if let Some(px) = px {
                 s.font_px = px.clamp(6.0, 200.0);
@@ -2312,7 +2331,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
 
         // — grid —
         "grid-template-columns" => {
-            let t = parse_grid_tracks(&v);
+            let t = parse_grid_tracks(&v, s.units());
             s.grid_ncols = t.n;
             s.grid_tracks = t.tracks;
             s.grid_col_fill = t.fill;
@@ -2320,11 +2339,11 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             s.grid_col_fill_len = t.fill_len;
         }
         "grid-template-rows" => {
-            let t = parse_grid_tracks(&v);
+            let t = parse_grid_tracks(&v, s.units());
             s.grid_nrows = t.n;
             s.grid_row_tracks = t.tracks;
         }
-        "grid-auto-rows" => s.grid_auto_rows = parse_track(v.trim()),
+        "grid-auto-rows" => s.grid_auto_rows = parse_track(v.trim(), s.units()),
         "grid-template-areas" => set_grid_areas(s, &v),
         // `grid` / `grid-template` shorthand: `<rows> / <cols>` (areas/flow forms
         // are not supported — they fall through to the row/column split).
@@ -2334,10 +2353,10 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 set_grid_areas(s, &v);
             }
             if let Some((rows, cols)) = split_slash(&v) {
-                let r = parse_grid_tracks(rows.trim());
+                let r = parse_grid_tracks(rows.trim(), s.units());
                 s.grid_nrows = r.n;
                 s.grid_row_tracks = r.tracks;
-                let c = parse_grid_tracks(cols.trim());
+                let c = parse_grid_tracks(cols.trim(), s.units());
                 s.grid_ncols = c.n;
                 s.grid_tracks = c.tracks;
                 s.grid_col_fill = c.fill;
@@ -2635,16 +2654,15 @@ fn set_max(slot: &mut Len, v: &str, u: Units) {
 
 /// Resolve a `calc()` to affine `(pct, px)` form via the full values resolver:
 /// evaluate with a %-basis of 0 (→ the px part) and 100 (→ px + pct), so any
-/// `%`/px/em mix collapses to `pct% of basis + px`. `vw`/`vh` unavailable here
-/// (0) — covers the common `calc(% ± px/em/rem)` forms.
+/// `%`/px/em/vw mix collapses to `pct% of basis + px`.
 fn parse_calc_affine(v: &str, u: Units) -> Option<Len> {
     let at0 = crate::values::resolve_length(
         v,
-        &crate::values::LenCtx { em: u.em, rem: u.rem, pct_basis: 0.0, vw: 0.0, vh: 0.0 },
+        &crate::values::LenCtx { em: u.em, rem: u.rem, pct_basis: 0.0, vw: u.vw, vh: u.vh },
     )?;
     let at100 = crate::values::resolve_length(
         v,
-        &crate::values::LenCtx { em: u.em, rem: u.rem, pct_basis: 100.0, vw: 0.0, vh: 0.0 },
+        &crate::values::LenCtx { em: u.em, rem: u.rem, pct_basis: 100.0, vw: u.vw, vh: u.vh },
     )?;
     let pct = at100 - at0;
     if (-0.001..0.001).contains(&pct) {
@@ -2846,7 +2864,7 @@ pub struct TrackList {
 /// Parse a `grid-template-*` value, expanding `repeat(n, …)` and recording any
 /// `repeat(auto-fill|auto-fit, …)`. `[line-name]` tokens are skipped.
 /// Truncates at `MAX_GRID_COLS`.
-fn parse_grid_tracks(v: &str) -> TrackList {
+fn parse_grid_tracks(v: &str, u: Units) -> TrackList {
     let mut tracks = [GridTrack::Auto; MAX_GRID_COLS];
     let mut n = 0usize;
     let (mut fill, mut fill_start, mut fill_len) = (0u8, 0u8, 0u8);
@@ -2861,7 +2879,7 @@ fn parse_grid_tracks(v: &str) -> TrackList {
         if let Some(inner) = inner {
             let mut parts = inner.splitn(2, ',');
             let count_s = parts.next().unwrap_or("").trim();
-            let sub = parse_grid_tracks(parts.next().unwrap_or("").trim());
+            let sub = parse_grid_tracks(parts.next().unwrap_or("").trim(), u);
             let auto = match count_s {
                 "auto-fill" => 1u8,
                 "auto-fit" => 2u8,
@@ -2890,14 +2908,14 @@ fn parse_grid_tracks(v: &str) -> TrackList {
                 }
             }
         } else {
-            tracks[n] = parse_track(&tok);
+            tracks[n] = parse_track(&tok, u);
             n += 1;
         }
     }
     TrackList { n: n as u8, tracks, fill, fill_start, fill_len }
 }
 
-fn parse_track(t: &str) -> GridTrack {
+fn parse_track(t: &str, u: Units) -> GridTrack {
     let t = t.trim();
     if t == "auto" || t == "min-content" || t == "max-content" {
         GridTrack::Auto
@@ -2911,10 +2929,10 @@ fn parse_track(t: &str) -> GridTrack {
         // max-content, which blows a `minmax(0,59.25rem)` content column up to
         // the whole article's unwrapped width.
         let max_part = inner.split(',').nth(1).unwrap_or(inner).trim();
-        parse_track(max_part)
+        parse_track(max_part, u)
     } else {
-        // A fixed length: px/rem/em/pt/cm/… (rem/em resolve against the root font).
-        match parse_length(t, Units { em: BASE_FONT_PX, rem: BASE_FONT_PX }) {
+        // A fixed length: px/em/rem/pt/cm/vw/… against the element's own units.
+        match parse_length(t, u) {
             Some(px) => GridTrack::Fixed(px),
             None => GridTrack::Auto,
         }
@@ -3148,6 +3166,19 @@ fn parse_length(v: &str, u: Units) -> Option<f32> {
         // No containing measure here → treat % of em (rough; refined later).
         return n.trim().parse::<f32>().ok().map(|f| f * u.em / 100.0);
     }
+    // Viewport-percentage units (CSS Values 3 §5.1.2). BEFORE the absolute
+    // table: `vmin` ends in `in`, so the inch arm would eat it otherwise.
+    const VP: &[(&str, fn(&Units) -> f32)] = &[
+        ("vmin", |u| if u.vw < u.vh { u.vw } else { u.vh }),
+        ("vmax", |u| if u.vw > u.vh { u.vw } else { u.vh }),
+        ("vw", |u| u.vw),
+        ("vh", |u| u.vh),
+    ];
+    for (suf, basis) in VP {
+        if let Some(n) = v.strip_suffix(suf) {
+            return n.trim().parse::<f32>().ok().map(|f| f / 100.0 * basis(&u));
+        }
+    }
     // Absolute units → CSS reference pixels (1in = 96px, CSS Values 3 §5.2).
     const ABS: &[(&str, f32)] = &[
         ("px", 1.0),
@@ -3227,6 +3258,34 @@ mod tests {
         assert!(st.bold);
         assert!(st.font_px > BASE_FONT_PX * 1.5);
         assert_eq!(st.color, theme.heading);
+    }
+
+    /// The four viewport-percentage units, everywhere a length is read.
+    /// `vmin` is the one that needs care: it ends in `in`, so the inch arm of
+    /// the absolute table eats it unless the viewport arms come first.
+    #[test]
+    fn viewport_units_resolve_against_the_viewport() {
+        let st = |css: &str| {
+            let html = alloc::format!("<body><p style=\"{css}\">x</p></body>");
+            let dom = dom::parse(&html);
+            let theme = Theme::DARK;
+            let mut initial = ComputedStyle::root(&theme);
+            initial.vw = 1000.0;
+            initial.vh = 500.0;
+            resolve(first_el(&dom), &initial, &theme, &Stylesheet::empty(), &[], &[], 0, 1000.0)
+        };
+        assert_eq!(st("width:50vw").width, Len::Px(500.0));
+        assert_eq!(st("height:40vh").height, Len::Px(200.0));
+        assert_eq!(st("width:10vmin").width, Len::Px(50.0), "vmin is the SHORTER side");
+        assert_eq!(st("width:10vmax").width, Len::Px(100.0), "vmax is the longer one");
+        assert_eq!(st("max-width:25vw").max_width, Len::Px(250.0));
+        assert_eq!(st("padding-left:10vw").pad_left, 100.0);
+        // A viewport unit is a length like any other: it composes with `calc()`
+        // and it is a valid `font-size`, where it must NOT be read as an `em`.
+        assert_eq!(st("width:calc(50vw - 20px)").width, Len::Px(480.0));
+        assert_eq!(st("font-size:5vw").font_px, 50.0);
+        // Nothing above may disturb the inch/mm arms that follow it.
+        assert_eq!(st("width:1in").width, Len::Px(96.0));
     }
 
     /// `border-width` and `border-style` are independent halves and neither
