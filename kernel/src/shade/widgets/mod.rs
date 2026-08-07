@@ -640,6 +640,91 @@ fn descend_focusable(
     is_focusable(widget)
 }
 
+/// Path to a text field whose *surrounding row* was clicked.
+///
+/// An `Input` is only as wide as its text (over a 120 px floor), while the
+/// chrome a user reads as "the field" — the border, the padding, the label
+/// beside it — belongs to the container. Hit-testing the Input alone means
+/// you have to strike the glyphs themselves; a click on the empty right
+/// half of an address bar landed on the container, counted as "clicked
+/// nothing", and cleared focus instead of granting it.
+///
+/// So: descend to the deepest node under the cursor, and treat it as a
+/// field row if its subtree holds **exactly one** text widget and **no
+/// other click target**. That covers a bordered Row wrapping one Input
+/// (and makes its label clickable, like an HTML `<label for>`), while a
+/// panel or toolbar — which always carries buttons or clickable rows —
+/// is disqualified, so clicking empty chrome still releases focus.
+fn find_field_input_path(
+    widget: &abi::Widget,
+    layout: &layout::LayoutNode,
+    x: i32, y: i32,
+) -> Option<Vec<u32>> {
+    if !rect_contains(layout.rect, x, y) { return None; }
+    if is_disabled(widget) { return None; }
+    let mut path: Vec<u32> = Vec::new();
+    if descend_field_input(widget, layout, x, y, &mut path) { Some(path) } else { None }
+}
+
+fn descend_field_input(
+    widget: &abi::Widget,
+    layout: &layout::LayoutNode,
+    x: i32, y: i32,
+    out: &mut Vec<u32>,
+) -> bool {
+    // Deepest node under the cursor wins, same order as the focus walk.
+    let kids = widget_children_ref(widget);
+    for (i, (cw, cl)) in kids.iter().zip(layout.children.iter()).enumerate() {
+        if !rect_contains(cl.rect, x, y) { continue; }
+        if is_disabled(cw) { continue; }
+        out.push(i as u32);
+        if descend_field_input(cw, cl, x, y, out) { return true; }
+        out.pop();
+    }
+    // Nothing deeper claimed it — is this node a field row?
+    if subtree_click_targets(widget) > 0 { return false; }
+    let mut found: Option<Vec<u32>> = None;
+    let mut count = 0usize;
+    collect_text_widgets(widget, &mut Vec::new(), &mut found, &mut count);
+    if count != 1 { return false; }
+    match found {
+        Some(p) => { out.extend(p); true }
+        None => false,
+    }
+}
+
+/// Widgets in this subtree that act on a click of their own (buttons,
+/// anything carrying `OnClick`). A field row has none.
+fn subtree_click_targets(widget: &abi::Widget) -> usize {
+    let mut n = 0;
+    if matches!(widget, abi::Widget::Button { .. }) { n += 1; }
+    if modifiers_of_ref(widget).iter().any(|m| matches!(m, abi::Modifier::OnClick(_))) {
+        n += 1;
+    }
+    for c in widget_children_ref(widget) { n += subtree_click_targets(c); }
+    n
+}
+
+/// Record the path to the single text widget in a subtree; `count` says
+/// how many were seen, so callers can reject ambiguous rows.
+fn collect_text_widgets(
+    widget: &abi::Widget,
+    cursor: &mut Vec<u32>,
+    found: &mut Option<Vec<u32>>,
+    count: &mut usize,
+) {
+    if matches!(widget, abi::Widget::Input { .. } | abi::Widget::TextArea { .. }) {
+        *count += 1;
+        if found.is_none() { *found = Some(cursor.clone()); }
+        return;
+    }
+    for (i, c) in widget_children_ref(widget).iter().enumerate() {
+        cursor.push(i as u32);
+        collect_text_widgets(c, cursor, found, count);
+        cursor.pop();
+    }
+}
+
 pub fn update_hover(window_id: u32, x: i32, y: i32) {
     // Step 1 — recompute the hover path against the cached layout tree.
     // Cheap (one descent), avoids re-rendering on hover moves that
@@ -791,6 +876,9 @@ pub fn press_at(window_id: u32, x: i32, y: i32) -> bool {
     //
     // Active still tracks the press target so `:active` state on
     // buttons works visually during mouse-down.
+    // Set when focus came from the chrome around a field rather than from
+    // the glyphs — decides where the caret lands (see below).
+    let mut via_field_row = false;
     let (new_focus_opt, new_active, has_pseudo) = {
         let scenes = SCENES.lock();
         let scene = match scenes.get(&window_id) {
@@ -808,7 +896,13 @@ pub fn press_at(window_id: u32, x: i32, y: i32) -> bool {
                 widget_at_path(&scene.tree, p),
                 Some(abi::Widget::Input { .. }) | Some(abi::Widget::TextArea { .. })
             ) => Some(Some(p.clone())),
-            _ => Some(None),
+            // Not on the text itself — but possibly on the field around
+            // it. A field is the whole row a user sees, not just the run
+            // of glyphs inside it.
+            _ => match find_field_input_path(&scene.tree, &scene.layout_tree, x, y) {
+                Some(p) => { via_field_row = true; Some(Some(p)) }
+                None    => Some(None),
+            },
         };
         (new_focus_opt, press_path, scene.has_pseudo)
     };
@@ -859,6 +953,18 @@ pub fn press_at(window_id: u32, x: i32, y: i32) -> bool {
                     _ => None,
                 };
                 s.input_edit = compute_input_edit(&s.tree, &s.focus_path, resume.as_ref());
+                // Click ON the text positions the caret exactly there
+                // (`text_select_begin`, which needs the press inside the
+                // Input's own rect). A click on the field's chrome has no
+                // glyph to aim at, so the caret goes to the end — where
+                // you'd continue typing. Overrides a resumed caret too:
+                // the click is the more recent intent.
+                if via_field_row {
+                    if let Some(edit) = s.input_edit.as_mut() {
+                        edit.cursor = edit.value.len();
+                        edit.sel_anchor = None;
+                    }
+                }
             }
         }
         s.active_path = new_active;
