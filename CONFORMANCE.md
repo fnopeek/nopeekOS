@@ -22,16 +22,16 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-07, beak 0.4.6)
+### Current number (measured 2026-08-07, beak 0.4.7)
 
 ```
-4074 pass / 1533 fail / 179 inconclusive   (of 5786 vendored reftests)
-= 72.7 % of the conclusive 5607
+4079 pass / 1529 fail / 178 inconclusive   (of 5786 vendored reftests)
+= 72.7 % of the conclusive 5608
 ```
 
 Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → 3746 → 3863 → 3869 →
 3870 (0.3.0) → 3880 (0.3.2) → 3926 (0.3.3) → 3959 (0.3.4) → 3963 (0.3.5) →
-**3967** (0.3.6) → 3967 (0.3.11) → 3978 (0.3.12) → 3997 (0.3.13) → 3998 (0.3.14) → 4012 (0.3.15) → 4036 (0.3.16) → 4056 (0.4.1) → 4064 (0.4.3) → 4069 (0.4.5) → **4074** (0.4.6). The inconclusive count fell 254 → 184 over
+**3967** (0.3.6) → 3967 (0.3.11) → 3978 (0.3.12) → 3997 (0.3.13) → 3998 (0.3.14) → 4012 (0.3.15) → 4036 (0.3.16) → 4056 (0.4.1) → 4064 (0.4.3) → 4069 (0.4.5) → 4074 (0.4.6) → **4079** (0.4.7). The inconclusive count fell 254 → 184 over
 that span: references that used to render blank — because `:root` was dropped,
 because an `inline-block` had no box, or because an inline box painted no
 background — now paint, so 73 more tests actually measure something.
@@ -1392,6 +1392,67 @@ menu to pick from.
     versus Appendix E step 8. **11 WPT tests and this icon are the same fix.**
     Also open on it: `transform: translateY(-50%)` (the icon sits at the top
     instead of centred) and the group being 22px wider than its content.
+
+41. ✅ **Der Strich, der fehlte, und der Strich zu viel (0.4.7).** WPT
+    **4074 → 4079** (+7 / −2), 187 unit tests. Again from a device screenshot,
+    this time held against a Firefox render of the same page — the comparison
+    that [[feedback-browser-side-by-side]] exists for.
+
+    ### `box-shadow`, the zero-blur half
+
+    MediaWiki rules off its article tabs with
+    `box-shadow: 0 1px var(--border-color-subtle, #c8ccd1)`. **A zero-blur
+    shadow is a hairline separator standing in for a border the author did not
+    want in the box model** — and on the real web that use is far more visible
+    than the soft drop shadow the name suggests. So `blur == 0` is painted and a
+    blurred shadow is still skipped, rather than drawn as a hard slab.
+
+    Two things it must get right, both caught by rendering rather than by the
+    parse:
+    - **The shadow is cut out of its own border box** (§7.1.1). Painted as an
+      unclipped copy it floods the whole row, because these boxes are usually
+      transparent. Subtracting the box from the shadow gives at most four
+      pieces.
+    - **`currentColor` resolves at PAINT time.** `box-shadow` is routinely
+      written before `color` in the same block, so resolving at parse takes the
+      wrong value — the same trap the border sides already avoid with
+      `Option<Rgb>`.
+
+    +7, all `css-backgrounds/box-shadow-*`. The 2 losses
+    (`slice-block-fragmentation-001`/`-002`) are multi-column: the shadow is
+    right, it is simply not fragmented across `columns:3`, which we do not
+    implement. **That hole existed before and was invisible only because we
+    painted no shadow at all** — the fifth time a correct feature has exposed a
+    real gap instead of hiding it.
+
+    ### A block-level control is a BLOCK box
+
+    Codex (and Bootstrap, and GitHub) write `display:block; width:100%` on their
+    inputs. We treated every control as an atomic inline, so it sat on a
+    baseline and its parent came out **the control's height plus the
+    descender** — 2px on a 32px field. In a search group whose parts are pulled
+    onto the container's border with `margin: -1px`, that 2px is a **visible
+    second rule** under the field where every browser has one.
+
+    Two halves, and the second is what makes it correct rather than merely
+    shorter: the control must still take the box-making path, so `layout_box`
+    paints it as a CONTROL. Falling into `flow_block_impl` laid it out as an
+    ordinary block — CSS border, no face, no value, no placeholder.
+
+    Measured on three real pages: Wikipedia's double rule is gone, **GitHub's
+    search field renders a box for the first time** (it is `display:block` too)
+    and its page is 22px shorter, MDN is unchanged.
+
+    ### ⚠️ Where the magnifier actually stands now
+
+    `.cdx-text-input` is `position:relative; overflow:hidden` and is the icon's
+    containing block. With the field finally 32px tall, `top: 50%` resolves —
+    to 16px, and the 20px icon then runs from 16 to 36, out of a 32px clip, so
+    it is dropped. **It needs `transform: translateY(-50%)`**, which is what
+    centres it at 6. Before, `top:50%` collapsed to 0 for want of a definite
+    height and the icon landed inside by accident. Two real items behind it:
+    `transform`, and a clip that drops a partially-overflowing op instead of
+    cutting it.
 
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the

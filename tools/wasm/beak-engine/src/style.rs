@@ -486,6 +486,27 @@ pub enum ZIndex {
     Inherit,
 }
 
+/// One `box-shadow` layer, outer only and WITHOUT blur.
+///
+/// Real pages use two very different things under one name: a soft drop shadow
+/// (`0 2px 8px rgba(...)`) and a **hairline rule** (`0 1px #c8ccd1`), which is a
+/// zero-blur shadow standing in for a border the author did not want in the box
+/// model. The second is a plain rectangle and is what shows up as a missing
+/// separator; the first needs a blur kernel and looks fine while absent. So only
+/// `blur == 0` is painted, and a blurred shadow keeps being skipped rather than
+/// drawn as a hard slab.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoxShadow {
+    pub dx: f32,
+    pub dy: f32,
+    pub blur: f32,
+    pub spread: f32,
+    /// `None` = `currentColor`, resolved at PAINT time. Resolving it here would
+    /// take whatever `color` happened to be cascaded so far — and `box-shadow`
+    /// is routinely written before `color` in the same block.
+    pub color: Option<Rgb>,
+}
+
 /// The subset of computed properties the renderer consumes. Split by CSS
 /// inheritance: font/colour/`white-space` inherit; box/`display` do not.
 #[derive(Clone, Copy)]
@@ -662,6 +683,8 @@ pub struct ComputedStyle {
     /// allows an ellipse per corner (`r1 / r2`), we keep the horizontal radius.
     /// Percentages resolve against the border-box width at paint time.
     pub radius: [Len; 4],
+    /// `box-shadow`, first layer, outer, zero-blur only (see `BoxShadow`).
+    pub shadow: Option<BoxShadow>,
     /// `caption-side: bottom` — the caption renders below the table grid
     /// instead of above it. Inherited (CSS2.1 §17.4.1), so it can be set on
     /// either the `<table>` or the `<caption>`.
@@ -716,6 +739,7 @@ impl ComputedStyle {
             break_word: false,
             overflow_clip: false,
             radius: [Len::Px(0.0); 4],
+            shadow: None,
             bold: false,
             italic: false,
             mono: false,
@@ -942,6 +966,7 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         break_word: parent.break_word,
         overflow_clip: false,
         radius: [Len::Px(0.0); 4],
+        shadow: None,
         display: Display::Inline, // CSS initial `display` is inline
         width: Len::Auto,
         min_width: Len::Auto,
@@ -1794,6 +1819,14 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         "border-radius" => {
             if let Some(rs) = parse_radius_shorthand(&v, u) {
                 s.radius = rs;
+            }
+        }
+        "box-shadow" => {
+            let t = v.trim();
+            if t.eq_ignore_ascii_case("none") {
+                s.shadow = None;
+            } else if let Some(sh) = parse_box_shadow(first_layer(t), u) {
+                s.shadow = Some(sh);
             }
         }
         "border-top-left-radius" | "border-top-right-radius" | "border-bottom-right-radius"
@@ -2781,6 +2814,47 @@ fn margin_lr(v: &str, u: Units) -> Len {
 }
 
 /// A padding length. Negative is invalid (padding ≥ 0) → keeps `prior`.
+/// One `box-shadow` layer: `[<color>]? <dx> <dy> [<blur>] [<spread>] [<color>]?`.
+/// `inset` is recognised and rejected — an inner shadow is a different paint,
+/// and drawing it as an outer one would put a slab OUTSIDE the box.
+/// Lengths keep their order; the colour may sit at either end (CSS Backgrounds 3
+/// §7.1). An omitted colour stays `None` = `currentColor`, resolved at paint.
+fn parse_box_shadow(v: &str, u: Units) -> Option<BoxShadow> {
+    let mut lens: [f32; 4] = [0.0; 4];
+    let mut n = 0usize;
+    let mut color: Option<Rgb> = None;
+    for tok in css_tokens(v) {
+        if tok.eq_ignore_ascii_case("inset") {
+            return None;
+        }
+        if let Some(px) = parse_length(tok, u) {
+            if n < 4 {
+                lens[n] = px;
+                n += 1;
+            }
+            continue;
+        }
+        if let Some(c) = parse_color(tok, &Theme::DARK) {
+            color = Some(c);
+            continue;
+        }
+        // An unknown token invalidates the layer rather than being ignored —
+        // otherwise a value we cannot read paints something the author never
+        // asked for.
+        return None;
+    }
+    if n < 2 {
+        return None;
+    }
+    Some(BoxShadow {
+        dx: lens[0],
+        dy: lens[1],
+        blur: if n > 2 { lens[2] } else { 0.0 },
+        spread: if n > 3 { lens[3] } else { 0.0 },
+        color,
+    })
+}
+
 fn parse_pad(v: &str, u: Units, prior: f32) -> f32 {
     let v = v.trim();
     // `parse_length` knows units, not functions — so `padding: calc(…)` was
