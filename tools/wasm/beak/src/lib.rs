@@ -1432,7 +1432,20 @@ fn activate(page: &mut Page, seq: u32) {
 
 /// Handle one event. Returns true if the chrome (address bar / title) should
 /// be re-committed.
+///
+/// A navigation started INSIDE the page — submitting a form, following a
+/// link — changes the address without anyone touching the address bar, and
+/// every one of those paths used to return `false` here. The result was a
+/// browser that had loaded the new page but still displayed the old URL.
+/// Rather than remember to flag each path, compare the navigation counter
+/// that a real page load bumps: a path added later cannot forget it.
 fn handle(engine: &Engine, ev: Event, cache: &Option<(Layout, i32, i32, u32)>, page: &mut Page) -> bool {
+    let nav = nav_gen();
+    let chrome = handle_event(engine, ev, cache, page);
+    chrome || nav_gen() != nav
+}
+
+fn handle_event(engine: &Engine, ev: Event, cache: &Option<(Layout, i32, i32, u32)>, page: &mut Page) -> bool {
     match ev {
         // Keep URL_BUF synced with the address-bar edit buffer.
         Event::InputChange { value } => {
