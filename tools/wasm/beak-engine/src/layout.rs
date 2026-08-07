@@ -3771,6 +3771,17 @@ impl<'a> Ctx<'a> {
     /// `self.path` must already end at their parent.
     fn intrinsic_walk(&mut self, nodes: &'a [Node], st: &ComputedStyle, run: &mut Run, pref: &mut f32, min: &mut f32) {
         let horiz = side_by_side(st);
+        // The measure walk resolves styles the same way the LAYOUT walk does —
+        // with the preceding siblings and the sibling count. Passing `&[]`/`0`
+        // made every sibling-combinator rule (`+`, `~`) invisible to width
+        // measurement while layout applied it, so the two disagreed about the
+        // same box. Codex hides an icon-only button's label with
+        // `.cdx-button--icon-only span + span { position: absolute }`: layout
+        // took it out of flow, the measurement still counted its text, and
+        // Wikipedia's hamburger came out ~80px too wide — pushing the logo and
+        // the search box right across the whole header.
+        let mut siblings: Vec<ElemInfo> = Vec::new();
+        let sib_count = nodes.iter().filter(|n| matches!(n, Node::Element(_))).count() as u32;
         // A stray run of table parts (rows/cells with no table ancestor) is one
         // anonymous table box, measured as such — not as loose siblings.
         for seg in self.segment_table_runs(nodes, st) {
@@ -3786,7 +3797,12 @@ impl<'a> Ctx<'a> {
                         *min = min.max(m);
                     }
                 }
-                TableSeg::Node(n) => self.intrinsic_node(n, st, run, pref, min, horiz),
+                TableSeg::Node(n) => {
+                    self.intrinsic_node(n, st, run, pref, min, horiz, &siblings, sib_count);
+                    if let Node::Element(e) = n {
+                        siblings.push(ElemInfo::of(e));
+                    }
+                }
             }
         }
     }
@@ -3794,7 +3810,8 @@ impl<'a> Ctx<'a> {
     /// One node of a block container's content walk (see `intrinsic_walk`).
     /// `horiz` says whether this container's children sit side by side, so a
     /// finished box adds to the running width instead of competing with it.
-    fn intrinsic_node(&mut self, n: &'a Node, st: &ComputedStyle, run: &mut Run, pref: &mut f32, min: &mut f32, horiz: bool) {
+    #[allow(clippy::too_many_arguments)]
+    fn intrinsic_node(&mut self, n: &'a Node, st: &ComputedStyle, run: &mut Run, pref: &mut f32, min: &mut f32, horiz: bool, prev: &[ElemInfo<'a>], sib_count: u32) {
         let el = match n {
             Node::Text(t) => {
                 run.text.push_str(t);
@@ -3810,7 +3827,7 @@ impl<'a> Ctx<'a> {
             flush_run(self.fonts, st, run, pref, min, horiz);
             return;
         }
-        let cs = self.styled(el, st, &[], 0);
+        let cs = self.styled(el, st, prev, sib_count);
         // Not rendered, or out of flow → contributes no intrinsic width.
         if cs.display == Display::None || matches!(cs.position, Position::Absolute | Position::Fixed) {
             return;
@@ -7599,6 +7616,30 @@ fn dbg_wiki_shape() {
         );
         let c = *rects(&l3).iter().find(|(_, _, _, _, k)| *k == Rgb(0, 0, 204)).expect("box");
         assert_eq!((c.0, c.1), (8, 8), "a rotation must not move the box instead");
+    }
+
+    /// The width MEASUREMENT must resolve styles with the same sibling context
+    /// the layout walk uses, or a sibling-combinator rule is applied by one and
+    /// ignored by the other — and the two then disagree about the same box.
+    ///
+    /// Every component library hides an icon-only button's label with the
+    /// visually-hidden idiom on `span + span`. Measuring without the siblings
+    /// left the label in flow for sizing purposes, so the button came out as
+    /// wide as its hidden text: Wikipedia's hamburger was ~80px too wide and
+    /// shoved the logo and the search field right across the whole header.
+    #[test]
+    fn shrink_to_fit_sees_sibling_combinator_rules() {
+        let l = lay(
+            "<html><head><style>\
+             .btn span + span{position:absolute;width:1px;height:1px;overflow:hidden}\
+             .btn{display:inline-block;background:#0f0}\
+             </style></head><body>\
+             <span class=\"btn\"><span>I</span><span>Hauptmenü</span></span>\
+             </body></html>",
+            600,
+        );
+        let btn = *rects(&l).iter().find(|(_, _, _, _, c)| *c == Rgb(0, 255, 0)).expect("button");
+        assert!(btn.2 < 30, "only the icon counts, got {}px wide", btn.2);
     }
 
     #[test]
