@@ -560,8 +560,14 @@ fn diag() {
         let css = std::env::var("DCSS").ok().and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
         let w: u32 = std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(1000);
         let mut eng = Engine::new();
-        eng.set_theme(Theme { bg: Rgb(255,255,255), text: Rgb(33,37,41), heading: Rgb(33,37,41),
-                              link: Rgb(13,110,253), muted: Rgb(108,117,125), rule: Rgb(222,226,230) });
+        // DDARK=1 renders on the DARK palette — the device default, and the one
+        // difference that makes a page look fine here and black there.
+        eng.set_theme(if std::env::var("DDARK").is_ok() {
+            Theme::DARK
+        } else {
+            Theme { bg: Rgb(255,255,255), text: Rgb(33,37,41), heading: Rgb(33,37,41),
+                    link: Rgb(13,110,253), muted: Rgb(108,117,125), rule: Rgb(222,226,230) }
+        });
         let lay = eng.layout_ext(&html, &css, w);
         let h = lay.height.clamp(1, 6000);
         let mut buf = vec![0u8; (w * h * 4) as usize];
