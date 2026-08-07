@@ -153,9 +153,9 @@ pub struct WidgetScene {
     /// `Widget::Scroll` content, driven by the mouse wheel. Clamped to
     /// `max_scroll_y` after each layout.
     pub scroll_y:     u32,
-    /// Horizontal offset of the focused TextArea, in px. Only an editor
-    /// scrolls sideways — `Widget::Scroll` handles its own axis in layout,
-    /// so this lives here rather than in the layout pass.
+    /// Horizontal offset of the TextArea, in px. Only an editor scrolls
+    /// sideways — `Widget::Scroll` handles its own axis in layout, so this
+    /// lives here rather than in the layout pass.
     pub scroll_x:     u32,
     /// Largest legal `scroll_y` from the last layout (content − viewport
     /// over the tallest vertical Scroll). Zero → nothing scrolls.
@@ -163,6 +163,12 @@ pub struct WidgetScene {
     /// Screen rect of the scrollable viewport (from layout) — the
     /// compositor hit-tests its right edge for scrollbar dragging.
     pub scroll_viewport: abi::Rect,
+    /// Largest legal `scroll_x` (widest line − text column). Zero → the
+    /// document fits sideways and no horizontal bar is drawn.
+    pub max_scroll_x: u32,
+    /// The text column `scroll_x` moves in — bar track and the strip the
+    /// compositor hit-tests along its bottom edge.
+    pub scroll_viewport_x: abi::Rect,
 }
 
 static SCENES: Mutex<BTreeMap<u32, WidgetScene>> = Mutex::new(BTreeMap::new());
@@ -220,6 +226,44 @@ pub fn scroll_viewport_of(window_id: u32) -> Option<(abi::Rect, u32)> {
     let s = scenes.get(&window_id)?;
     if s.max_scroll_y == 0 { return None; }
     Some((s.scroll_viewport, s.max_scroll_y))
+}
+
+/// Adjust the sideways offset by `delta` px (positive = content moves left).
+/// Clamped to `[0, max_scroll_x]`. Returns true if it moved.
+pub fn scroll_by_x(window_id: u32, delta: i32) -> bool {
+    let changed = {
+        let mut scenes = SCENES.lock();
+        let s = match scenes.get_mut(&window_id) { Some(s) => s, None => return false };
+        if s.max_scroll_x == 0 { return false; }
+        let next = ((s.scroll_x as i64 + delta as i64)
+            .clamp(0, s.max_scroll_x as i64)) as u32;
+        if next == s.scroll_x { false } else { s.scroll_x = next; true }
+    };
+    if changed { rerender_window(window_id); }
+    changed
+}
+
+/// Set the absolute sideways offset (px), clamped. Used by the horizontal
+/// scrollbar drag. Returns true if it moved.
+pub fn set_scroll_x(window_id: u32, x: u32) -> bool {
+    let changed = {
+        let mut scenes = SCENES.lock();
+        let s = match scenes.get_mut(&window_id) { Some(s) => s, None => return false };
+        if s.max_scroll_x == 0 { return false; }
+        let next = x.min(s.max_scroll_x);
+        if next == s.scroll_x { false } else { s.scroll_x = next; true }
+    };
+    if changed { rerender_window(window_id); }
+    changed
+}
+
+/// Text column + max sideways offset for the horizontal scrollbar, or None
+/// when the document fits. Counterpart to `scroll_viewport_of`.
+pub fn scroll_viewport_x_of(window_id: u32) -> Option<(abi::Rect, u32)> {
+    let scenes = SCENES.lock();
+    let s = scenes.get(&window_id)?;
+    if s.max_scroll_x == 0 { return None; }
+    Some((s.scroll_viewport_x, s.max_scroll_x))
 }
 
 /// Drop a scene. Called from compositor::close_window when the
@@ -885,6 +929,8 @@ fn rerender_scene_pixels(window_id: u32, hover_path: &[u32]) {
     let anchors = lo.anchors;
     let popovers = lo.popovers;
     let max_scroll_y = lo.max_scroll_y;
+    let max_scroll_x = lo.max_scroll_x;
+    let max_scroll_x_rect = lo.max_scroll_x_rect;
     let max_scroll_rect = lo.max_scroll_rect;
     let h = if hover_path.is_empty() { None } else { Some(hover_path) };
     let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
@@ -902,6 +948,9 @@ fn rerender_scene_pixels(window_id: u32, hover_path: &[u32]) {
         s.hover_path  = hover_path.to_vec();
         s.max_scroll_y = max_scroll_y;
         s.scroll_viewport = max_scroll_rect;
+        s.max_scroll_x = max_scroll_x;
+        s.scroll_viewport_x = max_scroll_x_rect;
+        s.scroll_x    = s.scroll_x.min(max_scroll_x);
         s.scroll_y    = s.scroll_y.min(max_scroll_y);
     }
 }
@@ -1197,6 +1246,8 @@ fn rerender_state_only(window_id: u32) {
     let anchors = lo.anchors;
     let popovers = lo.popovers;
     let max_scroll_y = lo.max_scroll_y;
+    let max_scroll_x = lo.max_scroll_x;
+    let max_scroll_x_rect = lo.max_scroll_x_rect;
     let max_scroll_rect = lo.max_scroll_rect;
     let h: Option<&[u32]> = if hover_path.is_empty() { None } else { Some(&hover_path) };
     let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
@@ -1212,6 +1263,9 @@ fn rerender_state_only(window_id: u32) {
         s.popovers    = popovers;
         s.max_scroll_y = max_scroll_y;
         s.scroll_viewport = max_scroll_rect;
+        s.max_scroll_x = max_scroll_x;
+        s.scroll_viewport_x = max_scroll_x_rect;
+        s.scroll_x    = s.scroll_x.min(max_scroll_x);
         s.scroll_y    = s.scroll_y.min(max_scroll_y);
     }
 }
@@ -2158,6 +2212,8 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
     let anchors = lo.anchors;
     let popovers = lo.popovers;
     let max_scroll_y = lo.max_scroll_y;
+    let max_scroll_x = lo.max_scroll_x;
+    let max_scroll_x_rect = lo.max_scroll_x_rect;
     let max_scroll_rect = lo.max_scroll_rect;
     let scroll_y = prev_scroll_y.min(max_scroll_y);
     let density = classify_density(win_w);
@@ -2186,6 +2242,9 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
             None    => (Vec::new(), Vec::new(), None, None, None, 0, true),
         }
     };
+    // A commit that shortens the longest line must pull the view back with
+    // it, or the editor stays parked past the end of its own text.
+    let scroll_x = prev_scroll_x.min(max_scroll_x);
 
     // First commit auto-focuses the first focusable Widget::Input so
     // search bars / launchers Just Work without the user having to
@@ -2219,7 +2278,7 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
     let pixels = rasterize_buffer_with_overlays(
         target_id, &tree, &layout_tree, &popovers, layout_rect,
         hover_slice, focus_slice, active_slice,
-        density, input_edit.as_ref(), scroll_y, prev_scroll_x,
+        density, input_edit.as_ref(), scroll_y, scroll_x,
     );
 
     // Store into the per-window scene map. Keep a clone of the tree
@@ -2242,10 +2301,12 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
         has_pseudo,
         parked_edit: prev_parked,
         input_edit,
-        scroll_x: prev_scroll_x,
+        scroll_x,
         scroll_y,
         max_scroll_y,
         scroll_viewport: max_scroll_rect,
+        max_scroll_x,
+        scroll_viewport_x: max_scroll_x_rect,
     });
 
     // Mark the window dirty so shade paints it in the next render,
@@ -2396,6 +2457,9 @@ pub fn rerender_window(wid: u32) {
         scene.popovers    = new_lo.popovers;
         scene.max_scroll_y = new_lo.max_scroll_y;
         scene.scroll_viewport = new_lo.max_scroll_rect;
+        scene.max_scroll_x = new_lo.max_scroll_x;
+        scene.scroll_viewport_x = new_lo.max_scroll_x_rect;
+        scene.scroll_x    = scene.scroll_x.min(new_lo.max_scroll_x);
         scene.scroll_y    = scene.scroll_y.min(new_lo.max_scroll_y);
     }
     crate::shade::with_compositor(|c| {
@@ -2442,7 +2506,10 @@ pub fn relayout_scene(window_id: u32, new_x: i32, new_y: i32, new_w: u32, new_h:
     scene.popovers    = new_lo.popovers;
     scene.density     = new_density;
     scene.max_scroll_y = new_lo.max_scroll_y;
-        scene.scroll_viewport = new_lo.max_scroll_rect;
+    scene.scroll_viewport = new_lo.max_scroll_rect;
+    scene.max_scroll_x = new_lo.max_scroll_x;
+    scene.scroll_viewport_x = new_lo.max_scroll_x_rect;
+    scene.scroll_x    = scene.scroll_x.min(new_lo.max_scroll_x);
     scene.scroll_y    = scene.scroll_y.min(new_lo.max_scroll_y);
     scene.hover_path.clear();
     scene.active_path = None;

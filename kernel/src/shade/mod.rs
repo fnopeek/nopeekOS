@@ -134,6 +134,9 @@ struct ScrollDragState {
     window: u32,
     is_terminal: bool,
     term_idx: u8,
+    /// Sideways drag along a TextArea's bottom edge. The whole mapping runs
+    /// on the other axis then: track = `vw`, cursor = mx.
+    horizontal: bool,
     vx: i32, vy: i32, vw: u32, vh: u32,
     max_px: u32,            // widget: max scroll offset
     total: usize, rows: usize, // terminal: logical lines / visible rows
@@ -145,8 +148,28 @@ fn in_scroll_strip(mx: i32, my: i32, vx: i32, vy: i32, vw: u32, vh: u32) -> bool
         && my >= vy && my < vy + vh as i32
 }
 
-/// Map a drag cursor Y to a scroll offset and apply it.
+/// Bottom-edge counterpart of `in_scroll_strip`.
+#[inline]
+fn in_hscroll_strip(mx: i32, my: i32, vx: i32, vy: i32, vw: u32, vh: u32) -> bool {
+    my >= vy + vh as i32 - SCROLLBAR_STRIP && my < vy + vh as i32
+        && mx >= vx && mx < vx + vw as i32
+}
+
+/// Map a drag cursor position to a scroll offset and apply it. `my` is the
+/// cursor along the bar's own axis — Y for the usual vertical bar, X for a
+/// TextArea's bottom one.
 fn apply_scroll_drag(s: &ScrollDragState, my: i32) {
+    if s.horizontal {
+        let vw = s.vw as i64;
+        if vw <= 0 { return; }
+        let content_w = vw + s.max_px as i64;
+        let thumb_w = (vw * vw / content_w.max(1)).clamp(24, vw);
+        let travel = (vw - thumb_w).max(1);
+        let thumb_left = ((my as i64 - s.vx as i64) - thumb_w / 2).clamp(0, travel);
+        let off = (s.max_px as i64) * thumb_left / travel;
+        widgets::set_scroll_x(s.window, off as u32);
+        return;
+    }
     let vh = s.vh as i64;
     if vh <= 0 { return; }
     let thumb_h = if s.is_terminal {
@@ -185,12 +208,25 @@ fn scrollbar_grab(mx: i32, my: i32) -> Option<ScrollDragState> {
         let rows = (vh / hit.char_h.max(1)).max(1) as usize;
         if total <= rows || !in_scroll_strip(mx, my, vx, vy, vw, vh) { return None; }
         Some(ScrollDragState { window: hit.window, is_terminal: true, term_idx: hit.term_idx,
-            vx, vy, vw, vh, max_px: 0, total, rows })
+            horizontal: false, vx, vy, vw, vh, max_px: 0, total, rows })
     } else {
+        // Bottom edge first: where the two strips overlap in the corner, the
+        // vertical bar is the one drawn there, so it must win the grab.
+        if let Some((vp, max_px)) = widgets::scroll_viewport_x_of(hit.window) {
+            let on_vbar = widgets::scroll_viewport_of(hit.window)
+                .map(|(v, _)| in_scroll_strip(mx, my, v.x, v.y, v.w, v.h))
+                .unwrap_or(false);
+            if !on_vbar && in_hscroll_strip(mx, my, vp.x, vp.y, vp.w, vp.h) {
+                return Some(ScrollDragState { window: hit.window, is_terminal: false,
+                    term_idx: 0, horizontal: true,
+                    vx: vp.x, vy: vp.y, vw: vp.w, vh: vp.h, max_px, total: 0, rows: 0 });
+            }
+        }
         let (vp, max_px) = widgets::scroll_viewport_of(hit.window)?;
         if !in_scroll_strip(mx, my, vp.x, vp.y, vp.w, vp.h) { return None; }
         Some(ScrollDragState { window: hit.window, is_terminal: false, term_idx: 0,
-            vx: vp.x, vy: vp.y, vw: vp.w, vh: vp.h, max_px, total: 0, rows: 0 })
+            horizontal: false, vx: vp.x, vy: vp.y, vw: vp.w, vh: vp.h,
+            max_px, total: 0, rows: 0 })
     }
 }
 
@@ -206,7 +242,7 @@ fn handle_scrollbar_drag(mx: i32, my: i32, lmb: bool, was: bool) -> bool {
     }
     if let Some(s) = guard.as_ref().copied() {
         drop(guard);
-        apply_scroll_drag(&s, my);
+        apply_scroll_drag(&s, if s.horizontal { mx } else { my });
         render_damaged();
         return true;
     }
@@ -1514,6 +1550,12 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
                 return;
             }
             let delta = -(evt.scroll as i32) * WIDGET_SCROLL_STEP;
+            // Shift+wheel scrolls sideways — the editor idiom, and the only
+            // way to reach a long line with a mouse that has one wheel.
+            if crate::keyboard::is_shift_held() {
+                if widgets::scroll_by_x(wid, delta) { request_render(); }
+                return;
+            }
             if widgets::scroll_by(wid, delta) {
                 request_render();
             } else {
