@@ -13,6 +13,7 @@ exclude = [
     "tools/wasm/bar",
     "tools/wasm/loft",
     "tools/wasm/spell",
+    "tools/wasm/pick",
     "tools/wasm/iris",
     "tools/wasm/snap",
     "tools/wasm/volume",

@@ -262,7 +262,7 @@ impl Dock {
     fn load() -> Self {
         // Exclude the dock itself and drun — the trailing launcher
         // button already opens drun, so a separate drun tile is redundant.
-        let catalog = app_catalog::load(&["dock", "drun", "bar"]);
+        let catalog = app_catalog::load(&["dock", "drun", "bar", "pick"]);
         let initial: Vec<AppEntry> = match read_pins() {
             // File exists (incl. empty) → honour the user's choice,
             // even if it means an empty dock.

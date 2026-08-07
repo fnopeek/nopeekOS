@@ -71,6 +71,31 @@ static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
 /// Fuel budget for interactive apps and drivers — effectively unlimited.
 const INTERACTIVE_FUEL: u64 = u64::MAX / 2;
 
+/// Default dialog size for `npk_pick`. `set_overlay` clamps it to the
+/// screen, so these are an upper bound, not a requirement.
+const PICKER_W: u32 = 760;
+const PICKER_H: u32 = 520;
+
+/// Module that serves `npk_pick`, from `sys/config/picker` (default
+/// `pick`). Read here rather than hardcoded so the dialog is replaceable,
+/// but never taken from the caller — a requester that could name its own
+/// picker could show the user a fake dialog and answer it itself.
+fn picker_module_name() -> String {
+    const DEFAULT_PICKER: &str = "pick";
+    match crate::npkfs::fetch("sys/config/picker") {
+        Ok((bytes, _)) => {
+            let raw = core::str::from_utf8(&bytes).unwrap_or("").trim();
+            let cleaned: String = raw.chars().take_while(|c| !c.is_control()).take(64).collect();
+            if cleaned.is_empty() || cleaned.contains('/') || cleaned.contains("..") {
+                String::from(DEFAULT_PICKER)
+            } else {
+                cleaned
+            }
+        }
+        Err(_) => String::from(DEFAULT_PICKER),
+    }
+}
+
 // ── Worker-Core WASM Jobs ──────────────────────────────────────
 
 // Concurrent in-flight WASM spawn slots. A worker takes its slot out of
@@ -1095,6 +1120,144 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 Err(_) => return -1,
             };
             if spawn_on_worker_inner(bytes, module_cap, 255, &app, false, 0, arg) { 0 } else { -1 }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_pick(mode, start_ptr, start_len, suggest_ptr, suggest_len, tag) -> i32
+    // Open a file dialog and get the answer back as `Event::Picked`.
+    //
+    //   mode 0 = open an existing file, 1 = choose a save target
+    //   start   = directory to open in ("" → the user's home)
+    //   suggest = pre-filled filename, save mode only
+    //   tag     = returned unchanged in the event (the roundtrip is async,
+    //             so an app with several dialogs tells them apart by it)
+    //
+    // The picker module is named by `sys/config/picker` (default `pick`),
+    // NEVER by the caller: the whole point is that the dialog is a piece
+    // of trusted UI the requester cannot substitute. So this is RENDER-
+    // gated, not EXECUTE-gated — asking for a dialog must not require the
+    // right to launch arbitrary modules, or an app would need MORE
+    // authority to pick a file than to write one.
+    //
+    // The requester needs no READ to browse: the picker does the listing
+    // in its own sandbox and hands back a single path.
+    //
+    //   0  → dialog opened
+    //   -1 → cap denied / no window / bad args / picker module missing
+    //   -2 → this app already has a dialog open
+    linker.func_wrap("env", "npk_pick",
+        |caller: Caller<'_, HostState>, mode: i32, start_ptr: i32, start_len: i32,
+         suggest_ptr: i32, suggest_len: i32, tag: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                return -1;
+            }
+            if mode != 0 && mode != 1 { return -1; }
+
+            // Only a windowed app can receive the reply event.
+            let requester = caller.data().widget_window_id;
+            if requester == 0 { return -1; }
+            if crate::shade::widgets::has_open_pick(requester) { return -2; }
+
+            let start = if start_len > 0 {
+                read_wasm_str(&caller, start_ptr, start_len).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let suggest = if suggest_len > 0 {
+                read_wasm_str(&caller, suggest_ptr, suggest_len).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            // A start dir is a hint, not authority — the picker re-resolves
+            // it and the user can navigate anywhere regardless.
+            let start = if start.trim().is_empty() || start.contains("..") {
+                crate::intent::home_dir()
+            } else {
+                start
+            };
+            // The suggestion is a bare filename; a path here would let a
+            // caller pre-aim the save at a directory the user never saw.
+            let suggest = if suggest.contains('/') || suggest.contains("..") {
+                String::new()
+            } else {
+                suggest
+            };
+
+            let module = picker_module_name();
+            let path = alloc::format!("sys/wasm/{}", module);
+            let bytes = match crate::npkfs::fetch(&path) {
+                Ok((b, _)) => b,
+                Err(_) => {
+                    kprintln!("[npk] npk_pick: picker module `{}` not installed", module);
+                    return -1;
+                }
+            };
+            let rights = capability::widget_rights_from_wasm(&bytes);
+            let module_cap = match capability::create_module_cap(rights, Some(600_000)) {
+                Ok(id) => id,
+                Err(_) => return -1,
+            };
+
+            // Wire the request as the launch argument:
+            //   "<open|save>\0<start-dir>\0<suggested-name>"
+            let arg = alloc::format!("{}\0{}\0{}",
+                if mode == 1 { "save" } else { "open" }, start, suggest);
+
+            // Floating + centred, like the launcher — a dialog must not
+            // re-tile the workspace behind it.
+            let win = match crate::shade::with_compositor(|c| {
+                let id = c.create_widget_window(&module);
+                c.set_overlay(id, PICKER_W, PICKER_H);
+                id
+            }) {
+                Some(id) => id,
+                None => return -1,
+            };
+            crate::shade::widgets::register_pick(win.0, requester, tag as u32);
+            crate::shade::focus_window(win);
+            crate::shade::request_render();
+
+            if spawn_on_worker_inner(bytes, module_cap, 255, &module, false, win.0, Some(arg)) {
+                0
+            } else {
+                // Undo the half-open session, else the requester can never
+                // ask again (has_open_pick would keep saying "one is up").
+                if let Some(s) = crate::shade::widgets::take_pick(win.0) {
+                    crate::shade::widgets::finish_pick(s, String::new());
+                }
+                -1
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_pick_result(path_ptr, path_len) -> 0 / -1
+    // Report the picked path back to whoever opened this dialog. An empty
+    // path means the user cancelled.
+    //
+    // Authorisation is structural: the caller's window id must be one the
+    // kernel itself registered as a picker in `npk_pick`. An ordinary app
+    // calling this finds no session and gets -1, so it cannot forge a
+    // "the user chose this file" claim for another app.
+    linker.func_wrap("env", "npk_pick_result",
+        |caller: Caller<'_, HostState>, path_ptr: i32, path_len: i32| -> i32 {
+            let me = caller.data().widget_window_id;
+            if me == 0 { return -1; }
+            let session = match crate::shade::widgets::take_pick(me) {
+                Some(s) => s,
+                None => return -1,
+            };
+            let path = if path_len > 0 {
+                read_wasm_str(&caller, path_ptr, path_len).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            crate::shade::widgets::finish_pick(session, path);
+            // Hand focus back to the app that asked, so the user carries on
+            // where they left off instead of on a closing dialog.
+            crate::shade::focus_window(crate::shade::window::WindowId(session.requester));
+            crate::shade::request_render();
+            0
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 

@@ -217,6 +217,7 @@ fn _event_wire_position(e: &Event) -> usize {
         Event::Open(_)             => 7,
         Event::Wheel { .. }        => 8,
         Event::Clipboard(_)        => 9,
+        Event::Picked { .. }       => 10,
     }
 }
 

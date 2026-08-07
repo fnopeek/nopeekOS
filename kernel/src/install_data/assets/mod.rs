@@ -165,6 +165,11 @@ pub static BUNDLED_ASSETS: &[BundledAsset] = &[
         version: Some(include_str!("spell.version")),
     },
     BundledAsset {
+        fs_path: "sys/wasm/pick",
+        bytes:   include_bytes!("pick.wasm"),
+        version: Some(include_str!("pick.version")),
+    },
+    BundledAsset {
         fs_path: "sys/wasm/iris",
         bytes:   include_bytes!("iris.wasm"),
         version: Some(include_str!("iris.version")),
