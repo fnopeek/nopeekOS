@@ -1122,6 +1122,15 @@ pub fn resolve(
         }
     }
 
+    // `bgcolor` is a presentational hint for `background-color` (HTML §15.3.3),
+    // the same family as `<table border>`/`cellpadding` above, and it sits
+    // between the UA sheet and the author cascade so author CSS still wins.
+    // Old table-built pages carry their whole colour scheme in it — Hacker
+    // News' orange masthead is a `bgcolor` on a `<td>`.
+    if let Some(c) = el.attr("bgcolor").and_then(|v| parse_color(v.trim(), theme)) {
+        s.bg = Some(c);
+    }
+
     // Author cascade WITH `!important` (CSS Cascade 4 §6.3): two passes. Normal
     // declarations first (UA < author-normal < inline-normal), then `!important`
     // on top (author-important < inline-important) — so an `!important` decl
@@ -1588,6 +1597,15 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
         | "aside" | "figure" | "figcaption" | "form" | "address" | "details" | "summary"
         | "tbody" | "thead" | "tfoot" | "tr" | "fieldset" => {
             s.display = Display::Block;
+        }
+        // `<center>` is `display: block; text-align: center` (HTML rendering
+        // §15.3.2). Left as the initial `inline` it swallows whatever it wraps
+        // into a line box — and a `<table>` inside it collapses to running text.
+        // Hacker News wraps its ENTIRE page in one, so the whole site rendered
+        // as a single paragraph.
+        "center" => {
+            s.display = Display::Block;
+            s.text_align = TextAlign::Center;
         }
 
         // Tables. `<table>` gets the table formatting context; cells are block
