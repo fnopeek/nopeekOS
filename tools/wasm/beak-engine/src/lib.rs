@@ -16,6 +16,7 @@
 
 extern crate alloc;
 
+pub mod charset;
 pub mod color;
 pub mod css;
 pub mod dom;
