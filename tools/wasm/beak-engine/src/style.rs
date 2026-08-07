@@ -2441,13 +2441,24 @@ fn parse_len_opt(v: &str, u: Units) -> Option<Len> {
     if v == "auto" {
         return Some(Len::Auto);
     }
-    if v.len() >= 5 && v[..5].eq_ignore_ascii_case("calc(") {
+    if is_math_fn(v) {
         return parse_calc_affine(v, u);
     }
     if let Some(p) = v.strip_suffix('%') {
         return p.trim().parse::<f32>().ok().map(Len::Pct);
     }
     parse_length(v, u).map(Len::Px)
+}
+
+/// Does this value start with a CSS math function? `values.rs` evaluates all
+/// four; this is only the gate that sends them there. `min`/`max`/`clamp` were
+/// missing from it, so `width: max(20px, 10px)` fell through to a plain length
+/// parse, failed, and became `auto` — while the same expression inside a custom
+/// property resolved fine, because `vars.rs` calls the resolver directly.
+fn is_math_fn(v: &str) -> bool {
+    ["calc(", "min(", "max(", "clamp("]
+        .iter()
+        .any(|f| v.len() >= f.len() && v[..f.len()].eq_ignore_ascii_case(f))
 }
 
 fn parse_len(v: &str, u: Units) -> Len {
@@ -2771,7 +2782,20 @@ fn margin_lr(v: &str, u: Units) -> Len {
 
 /// A padding length. Negative is invalid (padding ≥ 0) → keeps `prior`.
 fn parse_pad(v: &str, u: Units, prior: f32) -> f32 {
-    match parse_length(v.trim(), u) {
+    let v = v.trim();
+    // `parse_length` knows units, not functions — so `padding: calc(…)` was
+    // dropped wholesale and the side kept its previous value. A percentage
+    // still resolves roughly here (it belongs to the containing block's WIDTH,
+    // which this parse cannot see); the math functions are exact.
+    let px = if is_math_fn(v) {
+        crate::values::resolve_length(
+            v,
+            &crate::values::LenCtx { em: u.em, rem: u.rem, pct_basis: 0.0, vw: u.vw, vh: u.vh },
+        )
+    } else {
+        parse_length(v, u)
+    };
+    match px {
         Some(p) if p >= 0.0 => p,
         _ => prior,
     }
@@ -3286,6 +3310,32 @@ mod tests {
         assert_eq!(st("font-size:5vw").font_px, 50.0);
         // Nothing above may disturb the inch/mm arms that follow it.
         assert_eq!(st("width:1in").width, Len::Px(96.0));
+    }
+
+    /// The CSS math functions have to reach the BOX MODEL, not just custom
+    /// properties. `values.rs` evaluated all four from the start, but
+    /// `parse_len_opt` only routed `calc(`, so `width: max(20px, 10px)` failed
+    /// its length parse and fell back to `auto`; and `parse_pad` called
+    /// `parse_length` directly, so `padding: calc(…)` was dropped entirely.
+    #[test]
+    fn math_functions_reach_the_box_model() {
+        let st = |css: &str| {
+            let html = alloc::format!("<body><p style=\"{css}\">x</p></body>");
+            let dom = dom::parse(&html);
+            let theme = Theme::DARK;
+            resolve(first_el(&dom), &ComputedStyle::root(&theme), &theme, &Stylesheet::empty(), &[], &[], 0, 1000.0)
+        };
+        assert_eq!(st("width:max(20px,10px)").width, Len::Px(20.0));
+        assert_eq!(st("width:min(20px,40px)").width, Len::Px(20.0));
+        assert_eq!(st("width:clamp(10px,20px,40px)").width, Len::Px(20.0));
+        assert_eq!(st("width:MAX(20px,10px)").width, Len::Px(20.0), "function names are case-insensitive");
+        // Nested, and mixed with the units a real page writes.
+        assert_eq!(st("width:max(calc(1rem + 4px),10px)").width, Len::Px(20.0));
+        assert_eq!(st("padding-left:calc(8px + 8px + calc(1rem + 4px))").pad_left, 36.0);
+        assert_eq!(st("padding-left:max(12px,4px)").pad_left, 12.0);
+        // A negative padding is invalid and must leave the side alone, exactly
+        // as a plain negative length does.
+        assert_eq!(st("padding-left:8px;padding-left:calc(0px - 4px)").pad_left, 8.0);
     }
 
     /// `border-width` and `border-style` are independent halves and neither

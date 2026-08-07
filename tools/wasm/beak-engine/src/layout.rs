@@ -2412,6 +2412,18 @@ impl<'a> Ctx<'a> {
         if let Some(mx) = st.max_width.px(avail) {
             w = w.min(mx as i32);
         }
+        if let Some(mn) = st.min_width.px(avail) {
+            w = w.max(mn as i32);
+        }
+        // `min-height` on a control is how real pages give a search field its
+        // height (Codex: `min-height: 32px`). Without it the control keeps its
+        // intrinsic line height and sits short inside its own flex row.
+        if let Some(mn) = vert_len(st.min_height, self.cb.3) {
+            h = h.max(if st.box_border { mn as i32 } else { mn as i32 + 2 * CTL_PAD_Y + 2 });
+        }
+        if let Some(mx) = vert_len(st.max_height, self.cb.3) {
+            h = h.min(if st.box_border { mx as i32 } else { mx as i32 + 2 * CTL_PAD_Y + 2 });
+        }
 
         // Caret: the shell keeps a byte offset; painting counts characters.
         let caret = if focused && kind.is_text() {
@@ -2430,6 +2442,7 @@ impl<'a> Ctx<'a> {
             focused,
             caret,
             bg: st.bg,
+            pad_l: (st.pad_left as i32).max(CTL_PAD_X),
             style: RunStyle { hidden: st.hidden, transparent: st.transparent, size, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: crate::style::VAlign::Baseline, deco: st.deco, break_word: st.break_word, nowrap: st.nowrap, lh: st.line_height.px(size).unwrap_or(0.0) },
         }
     }
@@ -4518,8 +4531,18 @@ impl<'a> Ctx<'a> {
 
             // Line cross size: a single unwrapped line fills a definite container
             // height; otherwise it's the tallest item margin box.
+            //
+            // The line is sized from each item's HYPOTHETICAL cross size
+            // (Flexbox §9.4 step 7) — the natural one clamped by its own
+            // `min-`/`max-height`. Using the raw natural height left the line
+            // short of any item held open by a `min-height`, and that item then
+            // hung out past the container: Wikipedia's search button is
+            // `min-height: 32px` inside a 30px-tall line.
             let nat_line = (0..ln)
-                .map(|k| li[k].cm_lead as i32 + h_nat[k] + li[k].cm_trail as i32)
+                .map(|k| {
+                    let hypo = clamp_cross(h_nat[k] as f32, li[k].min_cross, li[k].max_cross);
+                    li[k].cm_lead as i32 + hypo as i32 + li[k].cm_trail as i32
+                })
                 .max()
                 .unwrap_or(0);
             let line_cross = if lines.len() == 1 {
@@ -4934,8 +4957,16 @@ fn flex_item_style(s: &ComputedStyle, main: f32, forced_cross: Option<f32>, row:
     if row {
         s2.width = main_px(main, s.pad_left + s.pad_right);
         if let Some(c) = forced_cross {
-            let pad_v = s.pad_top + s.pad_bottom;
-            s2.height = Len::Px(if s.box_border { c } else { (c - pad_v).max(0.0) });
+            // `c` is the stretched BORDER-box cross size. `Len::Px` means a
+            // border-box value under `box-sizing:border-box` and a content-box
+            // one otherwise (see `content_height_of`), so the content-box case
+            // has to give back padding AND border. Leaving the border out made
+            // a bordered flex item exactly `border_y()` taller than the line it
+            // was stretched into — the same box-model twin that bucket item 31
+            // removed from `layout_flex` and `layout_grid`; this was the third
+            // copy.
+            let inner_v = s.pad_top + s.pad_bottom + s.border_y();
+            s2.height = Len::Px(if s.box_border { c } else { (c - inner_v).max(0.0) });
         }
     } else {
         // Column: main axis is vertical (height), cross is horizontal (width).
@@ -5434,6 +5465,12 @@ struct CtlBox {
     caret: Option<usize>,
     /// The control's own `background-color`, if the page styled it.
     bg: Option<Rgb>,
+    /// Leading text inset. Controls are atomic — we paint them with our own
+    /// metrics — but a page that reserves room for an icon does it with
+    /// `padding-left`, and ignoring that puts the text on top of the icon
+    /// (Wikipedia's search field asks for 36px to clear its magnifier). CSS
+    /// only ever WIDENS the inset; it cannot squeeze the text below `CTL_PAD_X`.
+    pad_l: i32,
     style: RunStyle,
 }
 
@@ -5582,13 +5619,13 @@ fn paint_control(
         _ => {
             ops.push(DrawOp::Rect { x, y: top, w, h, color: face });
             stroke_rect(ops, x, top, w, h, border);
-            let tx = x + CTL_PAD_X + 1;
+            let tx = x + ctl.pad_l + 1;
             let lh = ceil_i32(line_gap(font, ctl.style.size));
             let ty = top + (h - lh) / 2;
             if ctl.kind == ControlKind::TextArea {
                 // Multi-line: honour hard newlines and wrap on width, top-
                 // aligned, clipped to the rows that fit in the box.
-                let inner_w = (w - 2 * CTL_PAD_X - 2).max(1) as f32;
+                let inner_w = (w - ctl.pad_l - CTL_PAD_X - 2).max(1) as f32;
                 let rows = ((h - 2 * CTL_PAD_Y - 2) / lh.max(1)).max(1);
                 let mut ly = top + CTL_PAD_Y + 1;
                 let color = if ctl.ghost { theme.muted } else { ctl.style.color };
@@ -5611,7 +5648,7 @@ fn paint_control(
             if !ctl.text.is_empty() {
                 // Clip an over-long value to the box (no inner scrolling yet):
                 // keep the tail visible, which is where the caret is.
-                let inner = (w - 2 * CTL_PAD_X - 2).max(0) as f32;
+                let inner = (w - ctl.pad_l - CTL_PAD_X - 2).max(0) as f32;
                 let text = clip_text_tail(font, &ctl.text, ctl.style.size, inner);
                 // A button's label is centred in its box (HTML §button-layout);
                 // a field's value is not.
@@ -5651,7 +5688,7 @@ fn paint_control(
             if let Some(caret) = ctl.caret {
                 let upto: String = ctl.text.chars().take(caret).collect();
                 let cw = measure(font, &upto, ctl.style.size);
-                let inner = (w - 2 * CTL_PAD_X - 2) as f32;
+                let inner = (w - ctl.pad_l - CTL_PAD_X - 2) as f32;
                 let cx = tx + cw.min(inner.max(0.0)) as i32;
                 ops.push(DrawOp::Rect {
                     x: cx,
@@ -7246,6 +7283,55 @@ fn dbg_wiki_shape() {
             let h = lay(&alloc::format!("<html><head><style>{css}</style></head><body>{long}</body></html>"), 800).height;
             assert!(h > 2000, "{css}: page must stay scrollable, got {h}");
         }
+    }
+
+    /// Flexbox §9.4 step 7: a line is as tall as its items' HYPOTHETICAL cross
+    /// sizes — the natural size clamped by the item's own `min-`/`max-height`.
+    /// Sizing the line from the raw natural height left it short of any item
+    /// held open by a `min-height`, and that item then hung out below the
+    /// container. This is Wikipedia's search bar: a `min-height: 32px` button
+    /// beside a shorter field, and the button's border sat 2px past the group's.
+    #[test]
+    fn a_flex_line_is_as_tall_as_its_tallest_items_minimum() {
+        let l = lay(
+            "<body><div style=\"display:flex;background:#eee\">\
+             <div style=\"background:#0f0\">kurz</div>\
+             <div style=\"min-height:60px;background:#00f\">hoch</div>\
+             </div></body>",
+            800,
+        );
+        let r = rects(&l);
+        let find = |c: Rgb| *r.iter().find(|(_, _, _, _, k)| *k == c).unwrap_or_else(|| panic!("no {c:?} rect"));
+        let green = find(Rgb(0, 255, 0));
+        let blue = find(Rgb(0, 0, 255));
+        let container = find(Rgb(238, 238, 238));
+        assert_eq!(blue.3, 60, "the min-height item keeps its minimum");
+        assert_eq!(green.3, 60, "align-items:stretch pulls its neighbour to the same line");
+        assert!(
+            container.1 + container.3 >= blue.1 + blue.3,
+            "container bottom {} must not sit above the item's {}",
+            container.1 + container.3,
+            blue.1 + blue.3
+        );
+    }
+
+    /// A bordered flex item stretched to the line must end up exactly as tall
+    /// as the line — not `border_y()` taller. `flex_item_style` handed the
+    /// stretched BORDER-box size back as a content height with only the padding
+    /// removed, which is the same box-model twin bucket item 31 removed from
+    /// two other places.
+    #[test]
+    fn stretching_a_bordered_flex_item_does_not_add_its_border() {
+        let l = lay(
+            "<body><div style=\"display:flex\">\
+             <div style=\"height:50px;background:#0f0\">a</div>\
+             <div style=\"border:5px solid #000;background:#00f\">b</div>\
+             </div></body>",
+            800,
+        );
+        let r = rects(&l);
+        let blue = r.iter().find(|(_, _, _, _, c)| *c == Rgb(0, 0, 255)).expect("bordered item");
+        assert_eq!(blue.3, 50, "border box matches the 50px line, borders included");
     }
 
     #[test]
