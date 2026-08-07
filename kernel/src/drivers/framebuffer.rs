@@ -160,8 +160,20 @@ const FONT_WIDTH: u32 = 8;
 const FONT_HEIGHT: u32 = 16;
 const FG_COLOR: u32 = 0x00E8E8E8; // Near-white (was light gray)
 const BG_COLOR: u32 = 0x00000000; // Black
-/// Dynamic accent color for [npk] tag (set by GUI scheme, default amber)
-static NPK_TAG_COLOR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0x00FFB000);
+/// Colour of the `[npk]` tag. Neutral grey: dim enough to read as a tag
+/// rather than as content, without putting a hue on every boot line.
+static NPK_TAG_COLOR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0x00909090);
+
+/// Rows the console scrolls at once when it fills up.
+///
+/// A scroll repaints everything, and on real hardware the framebuffer is
+/// effectively uncached (firmware MTRR — see `diagnose_fb_memory_type`), so
+/// that full blit runs at ~155 MB/s: ~50 ms per scroll at 1080p, four times
+/// that at 4K. Scrolling one row per line spends it on EVERY line of boot
+/// output — measured 268 lines over 67 rows = ~200 full blits. Moving
+/// several rows at a time amortises it; the text jumps instead of sliding,
+/// which is what framebuffer consoles have always done at boot.
+const SCROLL_ROWS: u32 = 8;
 
 pub fn set_npk_color(color: u32) {
     NPK_TAG_COLOR.store(color, core::sync::atomic::Ordering::Release);
@@ -389,27 +401,35 @@ fn blit_char(console: &FbConsole, col: u32, row: u32) {
 }
 
 /// Scroll shadow buffer only (no MMIO blit — caller handles batching).
-fn scroll_shadow(console: &mut FbConsole) {
+/// Move the console up by `n` text rows, clearing the ones freed at the
+/// bottom. Returns the row the cursor lands on.
+fn scroll_shadow(console: &mut FbConsole, n: u32) -> u32 {
+    let total_rows = console.rows;
+    let n = n.clamp(1, total_rows);
     let row_bytes = console.info.pitch as usize * (FONT_HEIGHT * console.scale) as usize;
-    let total_rows = console.rows as usize;
+    let keep = (total_rows - n) as usize;
 
     unsafe {
-        core::ptr::copy(
-            console.shadow.add(row_bytes),
-            console.shadow,
-            row_bytes * (total_rows - 1),
-        );
+        if keep > 0 {
+            core::ptr::copy(
+                console.shadow.add(row_bytes * n as usize),
+                console.shadow,
+                row_bytes * keep,
+            );
+        }
         core::ptr::write_bytes(
-            console.shadow.add(row_bytes * (total_rows - 1)),
+            console.shadow.add(row_bytes * keep),
             0,
-            row_bytes,
+            row_bytes * n as usize,
         );
     }
+    total_rows - n
 }
 
 /// Scroll with immediate blit (for single-byte writes like write_byte).
 fn scroll(console: &mut FbConsole) {
-    scroll_shadow(console);
+    let row = scroll_shadow(console, SCROLL_ROWS);
+    console.row = row;
     blit_all(console);
 }
 
@@ -532,8 +552,7 @@ fn emit_char(console: &mut FbConsole, byte: u8, fg: u32,
             console.col = 0;
             console.row += 1;
             if console.row >= console.rows {
-                console.row = console.rows - 1;
-                scroll_shadow(console);
+                console.row = scroll_shadow(console, SCROLL_ROWS);
                 *scrolled = true;
             }
         }
@@ -555,8 +574,7 @@ fn emit_char(console: &mut FbConsole, byte: u8, fg: u32,
                 console.col = 0;
                 console.row += 1;
                 if console.row >= console.rows {
-                    console.row = console.rows - 1;
-                    scroll_shadow(console);
+                    console.row = scroll_shadow(console, SCROLL_ROWS);
                     *scrolled = true;
                 }
             }
@@ -625,7 +643,6 @@ pub fn write_byte(byte: u8) {
             console.col = 0;
             console.row += 1;
             if console.row >= console.rows {
-                console.row = console.rows - 1;
                 scroll(console);
             }
         }
@@ -645,7 +662,6 @@ pub fn write_byte(byte: u8) {
                 console.col = 0;
                 console.row += 1;
                 if console.row >= console.rows {
-                    console.row = console.rows - 1;
                     scroll(console);
                 }
             }

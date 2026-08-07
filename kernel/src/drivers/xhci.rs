@@ -620,8 +620,37 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
         }
     }
 
-    // Wait for device attachment + link training (500ms for all devices)
-    crate::interrupts::delay_ms(500);
+    // Wait for device attachment + link training. A flat 500 ms was half a
+    // second of every boot spent staring at ports that had already settled.
+    // Poll instead and leave once the picture stops changing: USB 2.0 §7.1.7.3
+    // wants 100 ms of connect debounce, so that is the floor, and a device
+    // that shows up late keeps the window open rather than being missed.
+    const POLL_MS:   u64 = 10;
+    const DEBOUNCE:  u64 = 100;   // §7.1.7.3 TATTDB
+    const SETTLE_MS: u64 = 100;   // quiet time before we call it done
+    const CAP_MS:    u64 = 500;   // what the flat wait used to be
+    let mut elapsed = 0u64;
+    let mut last_change = 0u64;
+    let mut connected = 0u32;
+    while elapsed < CAP_MS {
+        crate::interrupts::delay_ms(POLL_MS);
+        elapsed += POLL_MS;
+        let now = (0..max_ports)
+            .filter(|&p| r32(oper, portsc_off(p)) & PORTSC_CCS != 0)
+            .count() as u32;
+        if now != connected {
+            connected = now;
+            last_change = elapsed;
+        }
+        // Nothing connected yet → keep waiting; we cannot tell "empty port"
+        // from "slow device", so an idle controller still costs the full cap.
+        if connected > 0
+            && elapsed >= DEBOUNCE
+            && elapsed - last_change >= SETTLE_MS
+        {
+            break;
+        }
+    }
 
     // Debug: show all port states
     for p in 0..max_ports {
