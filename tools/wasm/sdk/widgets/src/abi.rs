@@ -355,6 +355,14 @@ pub enum Modifier {
     // Appended only.
 }
 
+/// Accepted range for `Modifier::FontSize`; the compositor clamps to it.
+/// Mirror of the kernel copy.
+pub const FONT_SIZE_MIN: u16 = 6;
+pub const FONT_SIZE_MAX: u16 = 64;
+
+/// Default size of `TextStyle::Mono` — the editor's starting point.
+pub const MONO_SIZE_PX: u16 = 13;
+
 // ── Widget ────────────────────────────────────────────────────────────
 
 #[non_exhaustive]
@@ -566,6 +574,15 @@ pub enum Event {
     /// otherwise tell Ctrl+S from a typed "s" — and while a text widget is
     /// focused it never saw the keystroke at all.
     Chord { letter: u8, shift: bool, alt: bool },
+    /// Ctrl+wheel over the focused app — a zoom request. `delta` is
+    /// positive for "bigger" (wheel up), negative for smaller; its
+    /// magnitude is notches, not pixels, so the app picks the step.
+    ///
+    /// Separate from `Wheel` because that one carries no modifiers, and
+    /// because Ctrl+wheel must NOT scroll: the compositor skips its own
+    /// scroll handling and sends this instead. An app that ignores it
+    /// simply doesn't zoom.
+    Zoom { delta: i32 },
     // Appended only.
 }
 

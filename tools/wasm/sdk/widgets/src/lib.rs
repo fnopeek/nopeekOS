@@ -109,6 +109,7 @@ pub use abi::{
     Action, ActionId, Align, Axis, CanvasId, ClipKind, Density, EffectId, Event,
     Fill, IconId, KeyCode, Modifier, MouseButton, NodeId, Palette, Point, Rect,
     Role, Shadow, Size, Span, TextStyle, Token, Transition, Widget,
+    FONT_SIZE_MAX, FONT_SIZE_MIN, MONO_SIZE_PX,
 };
 pub use app_meta::{AppMeta, AppMetaError, IconRef, APP_META_WIRE};
 pub use i18n::Lang;

@@ -1502,6 +1502,17 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
     // the compositor internally, so it must run outside any with_compositor.
     if evt.scroll != 0 {
         if let Some(wid) = focused_widget_id() {
+            // Ctrl+wheel is a zoom request, not a scroll. Sent to the app
+            // instead of moving the viewport — an app that doesn't zoom
+            // just ignores it (and deliberately doesn't scroll either,
+            // which is what every editor does).
+            if crate::keyboard::is_ctrl_held() {
+                widgets::push_event(wid, widgets::abi::Event::Zoom {
+                    delta: evt.scroll as i32,
+                });
+                request_render();
+                return;
+            }
             let delta = -(evt.scroll as i32) * WIDGET_SCROLL_STEP;
             if widgets::scroll_by(wid, delta) {
                 request_render();
