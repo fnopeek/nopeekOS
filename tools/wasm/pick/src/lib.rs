@@ -487,25 +487,18 @@ fn list_dir(dir: &str) -> Vec<Entry> {
     let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
 
     let mut out: Vec<Entry> = Vec::new();
-    for line in slice.split(|&b| b == b'\n') {
-        let nul = match line.iter().position(|&b| b == 0) { Some(i) => i, None => continue };
-        let name = match core::str::from_utf8(&line[..nul]) { Ok(s) => s, Err(_) => continue };
-        if name.is_empty() || name == ".dir" { continue; }
-        let rest = &line[nul + 1..];
-        if rest.len() < 10 { continue; }
-        let mut size_bytes = [0u8; 8];
-        size_bytes.copy_from_slice(&rest[0..8]);
-        let is_dir = rest[9] != 0;
-        let full = if dir.is_empty() { name.to_string() }
-                   else { alloc::format!("{}/{}", dir, name) };
+    for e in nopeek_widgets::fs::list_entries(slice) {
+        if e.name == ".dir" { continue; }
+        let full = if dir.is_empty() { e.name.to_string() }
+                   else { alloc::format!("{}/{}", dir, e.name) };
         // Count a folder's children so the right-hand column carries real
         // information. One extra listing per folder — fine for a dialog
         // showing one directory, and it is the number the user wants.
-        let items = if is_dir { Some(count_children(&full)) } else { None };
+        let items = if e.is_dir { Some(count_children(&full)) } else { None };
         out.push(Entry {
-            name:   name.to_string(),
-            is_dir,
-            size:   u64::from_le_bytes(size_bytes),
+            name:   e.name.to_string(),
+            is_dir: e.is_dir,
+            size:   e.size,
             items,
         });
     }
@@ -527,16 +520,8 @@ fn count_children(dir: &str) -> usize {
     };
     if n <= 0 { return 0; }
     let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
-    slice.split(|&b| b == b'\n')
-        .filter(|line| {
-            match line.iter().position(|&b| b == 0) {
-                Some(nul) => {
-                    let name = &line[..nul];
-                    !name.is_empty() && name != b".dir"
-                }
-                None => false,
-            }
-        })
+    nopeek_widgets::fs::list_entries(slice)
+        .filter(|e| e.name != ".dir")
         .count()
 }
 

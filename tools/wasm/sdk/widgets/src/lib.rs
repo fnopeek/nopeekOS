@@ -46,6 +46,7 @@ extern crate alloc;
 
 pub mod abi;
 pub mod app_meta;
+pub mod fs;
 pub mod i18n;
 pub mod prefab;
 pub mod style;

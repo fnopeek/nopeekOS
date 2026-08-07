@@ -1060,12 +1060,9 @@ fn list_images(dir: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     if n <= 0 { return out; }
     let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
-    for line in slice.split(|&b| b == b'\n') {
-        let nul = match line.iter().position(|&b| b == 0) { Some(p) => p, None => continue };
-        let name = match core::str::from_utf8(&line[..nul]) { Ok(s) => s, Err(_) => continue };
-        let rest = &line[nul + 1..];
-        if rest.len() >= 10 && rest[9] != 0 { continue; } // skip directories
-        if is_image(name) { out.push(name.to_string()); }
+    for e in nopeek_widgets::fs::list_entries(slice) {
+        if e.is_dir { continue; }
+        if is_image(e.name) { out.push(e.name.to_string()); }
     }
     out.sort();
     out
