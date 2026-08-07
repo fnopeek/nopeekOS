@@ -276,6 +276,7 @@ pub fn remove_event_queue(window_id: u32) {
     EVENT_QUEUES.lock().remove(&window_id);
     CLIPBOARD_SINKS.lock().remove(&window_id);
     forget_close_state(window_id);
+    WINDOW_CAPS.lock().remove(&window_id);
     // A picker closed by its window button (rather than by picking) still
     // owes its requester an answer, or the app waits for a dialog that no
     // longer exists. Report it as a cancel. `take_pick` first so the
@@ -304,6 +305,22 @@ pub fn set_clipboard_sink(window_id: u32) {
 /// True if `window_id` opted into `Event::Clipboard` delivery.
 pub fn is_clipboard_sink(window_id: u32) -> bool {
     CLIPBOARD_SINKS.lock().contains(&window_id)
+}
+
+
+/// Capability of the app that owns a widget window. Recorded on scene
+/// commit, so a path grant can be routed to an app that is ALREADY
+/// running — `npk_open` on a live singleton delivers `Event::Open`
+/// rather than spawning, and the grant has to follow the same way.
+static WINDOW_CAPS: Mutex<BTreeMap<u32, crate::security::capability::CapId>> =
+    Mutex::new(BTreeMap::new());
+
+pub fn set_window_cap(window_id: u32, cap: crate::security::capability::CapId) {
+    WINDOW_CAPS.lock().insert(window_id, cap);
+}
+
+pub fn window_cap(window_id: u32) -> Option<crate::security::capability::CapId> {
+    WINDOW_CAPS.lock().get(&window_id).copied()
 }
 
 // ── Close guard ───────────────────────────────────────────────────────
@@ -396,12 +413,18 @@ pub struct PickSession {
     pub requester: u32,
     /// Caller-owned correlation value, returned in `Event::Picked`.
     pub tag: u32,
+    /// Capability of the requesting instance — the grant for the chosen
+    /// path is written against it, so it dies when that instance does.
+    pub cap: crate::security::capability::CapId,
+    /// Save mode: the grant includes WRITE. Open mode: READ only.
+    pub writable: bool,
 }
 
 /// Register a picker window as belonging to `requester`. Called by
 /// `npk_pick` right after it creates the picker's window.
-pub fn register_pick(picker: u32, requester: u32, tag: u32) {
-    PICK_SESSIONS.lock().insert(picker, PickSession { requester, tag });
+pub fn register_pick(picker: u32, requester: u32, tag: u32,
+                     cap: crate::security::capability::CapId, writable: bool) {
+    PICK_SESSIONS.lock().insert(picker, PickSession { requester, tag, cap, writable });
 }
 
 /// True if `requester` already has a picker open — one dialog per app, so
@@ -445,6 +468,14 @@ pub fn take_pick(picker: u32) -> Option<PickSession> {
 
 /// Deliver the picker's answer to the requester. Empty `path` = cancelled.
 pub fn finish_pick(session: PickSession, path: alloc::string::String) {
+    // The click IS the authorisation: hand the requester a right to this
+    // one path, so it can open or save it without holding a blanket one.
+    // Nothing is granted on a cancel (empty path).
+    if !path.is_empty() {
+        use crate::security::capability::Rights;
+        let rights = if session.writable { Rights::READ | Rights::WRITE } else { Rights::READ };
+        crate::security::capability::grant_path(session.cap, &path, rights);
+    }
     push_event(session.requester, abi::Event::Picked { path, tag: session.tag });
 }
 

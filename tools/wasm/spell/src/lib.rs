@@ -32,15 +32,21 @@ use nopeek_widgets::*;
 static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.bin")).len()]
     = *include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.bin"));
 
-// Declared capabilities: read + write (save files) + render. No EXEC —
-// Spell never launches intents. The kernel grants exactly this.
+// Declared capabilities: read + render. **No WRITE** — an editor that can
+// overwrite any file in the store is exactly what the file-dialog portal
+// exists to avoid.
 //
-// Browsing is NOT among them: Open and Save go through `npk_pick`, which
-// runs the dialog in its own module. That module holds the listing right;
-// we only ever see the one path the user chose.
+// Saving still works, through two narrower routes the kernel grants:
+//   - the path the user picked in the dialog (`npk_pick` records it
+//     against this instance — the click IS the authorisation), and
+//   - `sys/config/spell`, our own settings file, whose name the kernel
+//     derives from the module name so we can't claim someone else's.
+//
+// Browsing is likewise not ours: the dialog runs in its own module and
+// hands back a single path.
 #[unsafe(link_section = ".npk.caps")]
 #[used]
-static NPK_CAPS: [u8; 1] = [caps::READ | caps::WRITE | caps::RENDER];
+static NPK_CAPS: [u8; 1] = [caps::READ | caps::RENDER];
 
 // Host functions are WASM imports from the `env` module, resolved by the
 // kernel at instantiation. Naming the module explicitly is what makes them
