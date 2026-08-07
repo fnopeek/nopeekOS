@@ -1447,36 +1447,75 @@ fn cursor_down(s: &str, cursor: usize) -> usize {
     clamp_boundary(s, next_ls + col.min(next_len))
 }
 
-/// Nudge a focused TextArea's vertical scroll so the caret line stays on
-/// screen. Called on every caret move / edit (incl. paste, which can jump
-/// the caret far). No-op for non-scrolling content.
+/// Breathing room kept between the caret and the edge of the text column,
+/// so typing at the end of a long line doesn't park the caret exactly on
+/// the boundary where the next glyph would already be clipped.
+const CARET_MARGIN_PX: u32 = 24;
+
+/// Nudge a focused TextArea's scroll so the caret stays on screen — down
+/// the lines and sideways along the current one. Called on every caret
+/// move / edit (incl. paste, which can jump the caret far).
+///
+/// Vertical and horizontal differ in one way: the vertical offset is also
+/// set by the wheel and the scrollbar drag, so it is clamped against
+/// `max_scroll_y`. Sideways only the caret ever scrolls, and moving onto a
+/// short line pulls the view back left on its own — so there is nothing to
+/// clamp against and no `max_scroll_x` to keep in sync.
 fn caret_follow_scroll(window_id: u32) {
     let mut scenes = SCENES.lock();
-    if let Some(s) = scenes.get_mut(&window_id) {
-        if s.scroll_viewport.h > 0 {
-            // Pull the focused widget's own size — a zoomed editor scrolls
-            // in its own line height, not the default one.
-            let px = match widget_at_path(&s.tree, &s.focus_path) {
-                Some(w) => layout::font_size_of(abi::TextStyle::Mono, modifiers_of_ref(w)),
-                None => crate::gui::text::style_desc(abi::TextStyle::Mono).size_px,
-            };
-            let line_h = (crate::gui::text::line_height_px(abi::TextStyle::Mono, px) as u32).max(1);
-            let visible = (s.scroll_viewport.h / line_h).max(1) as usize;
-            let max_sy = s.max_scroll_y;
-            let caret_line = match &s.input_edit {
-                Some(e) => {
-                    let cur = e.cursor.min(e.value.len());
-                    e.value[..cur].matches('\n').count()
-                }
-                None => 0,
-            };
-            let mut sl = (s.scroll_y / line_h) as usize;
-            if caret_line < sl {
-                sl = caret_line;
-            } else if caret_line + 1 > sl + visible {
-                sl = caret_line + 1 - visible;
+    let Some(s) = scenes.get_mut(&window_id) else { return };
+
+    // Resolve the focused editor's metrics in one immutable pass — a zoomed
+    // editor scrolls in its own line height, not the default one.
+    let (px, column) = match widget_at_path(&s.tree, &s.focus_path) {
+        Some(w) => {
+            let mods = modifiers_of_ref(w);
+            let total_lines = s.input_edit.as_ref()
+                .map(|e| e.value.split('\n').count()).unwrap_or(1);
+            let column = layout_node_at_path(&s.layout_tree, &s.focus_path)
+                .map(|n| render::textarea_text_column(n.rect, mods, total_lines));
+            (layout::font_size_of(abi::TextStyle::Mono, mods), column)
+        }
+        None => (crate::gui::text::style_desc(abi::TextStyle::Mono).size_px, None),
+    };
+    let line_h = (crate::gui::text::line_height_px(abi::TextStyle::Mono, px) as u32).max(1);
+
+    // Caret line + how far into that line it sits, in px.
+    let (caret_line, caret_x) = match &s.input_edit {
+        Some(e) => {
+            let cur = e.cursor.min(e.value.len());
+            let line = e.value[..cur].matches('\n').count();
+            let lstart = e.value[..cur].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let adv = ceil_u32(crate::gui::text::measure_px(
+                &e.value[lstart..cur], abi::TextStyle::Mono, px));
+            (line, adv)
+        }
+        None => (0, 0),
+    };
+
+    if s.scroll_viewport.h > 0 {
+        let visible = (s.scroll_viewport.h / line_h).max(1) as usize;
+        let max_sy = s.max_scroll_y;
+        let mut sl = (s.scroll_y / line_h) as usize;
+        if caret_line < sl {
+            sl = caret_line;
+        } else if caret_line + 1 > sl + visible {
+            sl = caret_line + 1 - visible;
+        }
+        s.scroll_y = ((sl as u32) * line_h).min(max_sy);
+    }
+
+    if let Some((_, col_w)) = column {
+        // A column narrower than the margin can't hold the caret anywhere —
+        // leave the view where it is rather than fight over sub-pixels.
+        if col_w > CARET_MARGIN_PX {
+            let mut sx = s.scroll_x;
+            if caret_x < sx.saturating_add(CARET_MARGIN_PX) {
+                sx = caret_x.saturating_sub(CARET_MARGIN_PX);
+            } else if caret_x + CARET_MARGIN_PX > sx + col_w {
+                sx = caret_x + CARET_MARGIN_PX - col_w;
             }
-            s.scroll_y = ((sl as u32) * line_h).min(max_sy);
+            s.scroll_x = sx;
         }
     }
 }
@@ -1663,10 +1702,12 @@ fn offset_at(scene: &WidgetScene, x: i32, y: i32, require_inside: bool) -> Optio
             let top_y = rect.y + pad + 4;
             let visible = (rect.h / line_h).max(1) as usize;
             let total_lines = value.split('\n').count();
-            // Same gutter width the renderer used, or clicks land a
-            // column off.
-            let text_x = text_x + render::textarea_gutter_w(
-                modifiers_of_ref(widget), total_lines) as i32;
+            // Same text column the renderer used, shifted by the same
+            // sideways offset — otherwise a click on a scrolled line lands
+            // on the character that WOULD be there at offset zero.
+            let (col_x, _) = render::textarea_text_column(
+                rect, modifiers_of_ref(widget), total_lines);
+            let text_x = col_x - scene.scroll_x as i32;
             let max_scroll = total_lines.saturating_sub(visible);
             let scroll = ((scene.scroll_y / line_h) as usize).min(max_scroll);
             let row = ((y - top_y).max(0) as u32 / line_h) as usize;

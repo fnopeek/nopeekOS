@@ -393,6 +393,26 @@ pub(super) fn textarea_gutter_w(mods: &[Modifier], total_lines: usize) -> u32 {
     num_w + GUTTER_PAD_L as u32 + GUTTER_PAD_R as u32
 }
 
+/// Width the TextArea's overlay scrollbar occupies on the right. Always
+/// reserved, drawn or not, so the text column doesn't change width the
+/// moment a line pushes the document past the viewport.
+const TEXTAREA_BAR_W: i32 = 6;
+
+/// A `TextArea`'s text column: left edge and visible width, both in screen
+/// px. **Shared by the renderer, the click-to-caret hit test and the
+/// caret-follow scroll** — `scroll_x` is derived from these, so if they
+/// disagree the caret scrolls to a different place than it is drawn.
+pub(super) fn textarea_text_column(rect: Rect, mods: &[Modifier], total_lines: usize)
+    -> (i32, u32)
+{
+    let pad = leaf_padding(mods).0 as i32;
+    let x = rect.x + pad + 4 + textarea_gutter_w(mods, total_lines) as i32;
+    // The scrollbar overlays the right padding band rather than sitting
+    // beside it, so the wider of the two is what the text must keep clear.
+    let right = rect.x + rect.w as i32 - pad.max(TEXTAREA_BAR_W);
+    (x, (right - x).max(0) as u32)
+}
+
 fn paint_modifiers_eff(
     rast: &mut dyn Rasterizer,
     target: &mut RasterTarget,
@@ -644,15 +664,14 @@ fn paint_node_eff(
 
             let total_lines_all = live.split('\n').count();
             let gutter_w = textarea_gutter_w(eff, total_lines_all) as i32;
-            let text_x = inner_x + 4 + gutter_w;
+            let (col_x, col_w) = textarea_text_column(rect, eff, total_lines_all);
+            // Sideways offset: the glyphs move left, the column does not.
+            // Everything drawn in text coordinates below goes through
+            // `text_x`, so the caret and the selection blocks can never
+            // drift apart from the glyphs they belong to.
+            let text_x = col_x - scroll_x as i32;
             let top_y  = inner_y + 4;
             let visible = (rect.h / line_h).max(1) as usize;
-
-            // Empty buffer → muted placeholder on the first line.
-            if live.is_empty() {
-                rast.text_px(target, placeholder, style, px, Token::OnSurfaceMuted,
-                          Point { x: text_x, y: top_y });
-            }
 
             // Caret line/column (byte prefix within the caret's line).
             let (caret_line, caret_prefix) = match edit_state {
@@ -694,6 +713,28 @@ fn paint_node_eff(
                     rast.text_px(target, &num, style, px, Token::OnSurfaceFaint,
                               Point { x: rule_x - GUTTER_PAD_R - w, y });
                 }
+            }
+
+            // From here on everything is drawn in text coordinates, which
+            // `scroll_x` can push left of the column — clip to the column so
+            // no glyph paints over the gutter or past the widget's edge. The
+            // gutter above and the scrollbar below stay outside the clip.
+            let saved_clip = target.clip;
+            {
+                let lx0 = col_x - target.origin.x;
+                let ly0 = rect.y - target.origin.y;
+                let (nx0, ny0) = (lx0, ly0);
+                let (nx1, ny1) = (lx0 + col_w as i32, ly0 + rect.h as i32);
+                target.clip = Some(match saved_clip {
+                    Some((a, b, c, d)) => (a.max(nx0), b.max(ny0), c.min(nx1), d.min(ny1)),
+                    None => (nx0, ny0, nx1, ny1),
+                });
+            }
+
+            // Empty buffer → muted placeholder on the first line.
+            if live.is_empty() {
+                rast.text_px(target, placeholder, style, px, Token::OnSurfaceMuted,
+                          Point { x: text_x, y: top_y });
             }
 
             // Selected byte range (anchor↔caret), painted as a highlight
@@ -764,6 +805,8 @@ fn paint_node_eff(
                     rast.rect(target, caret_rect, Fill::Solid(Token::OnSurface));
                 }
             }
+
+            target.clip = saved_clip;
 
             // Overlay scrollbar — only when the document overflows. Mirrors
             // paint_scrollbar (Widget::Scroll) so the editor and file views
