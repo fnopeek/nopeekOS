@@ -726,6 +726,14 @@ pub fn error_kind(msg: &str) -> &'static str {
         "HTTP non-2xx response" => "http.status",
         "cancelled" => "cancelled",
         m if m.starts_with("certificate:") => "cert.invalid",
+        // Matched against the constants, not copies of the text — see
+        // `tls::reasons`. The peer aborting the handshake is the common
+        // shape here (a server that dislikes our ClientHello), and it is
+        // NOT a certificate problem, so it must not read like one.
+        crate::tls::reasons::HANDSHAKE_REJECTED
+        | crate::tls::reasons::VERSION_UNSUPPORTED
+        | crate::tls::reasons::INSUFFICIENT_SECURITY
+        | crate::tls::reasons::SERVER_ALERT => "tls.handshake",
         m if m.starts_with("TLS ") => "tls.protocol",
         m if m.starts_with("redirect") => "http.redirect",
         "too many redirects" | "refusing http downgrade" => "http.redirect",

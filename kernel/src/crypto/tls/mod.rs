@@ -367,6 +367,17 @@ pub enum TlsError {
     RecordTooLarge,
 }
 
+/// Reason strings a peer can cause, named so the classifier that turns them
+/// into error kinds can match the CONSTANT rather than a copy of the text.
+/// Reworded literals in two places is how a message quietly becomes
+/// "unknown" on the error page — which is exactly what happened to alert 40.
+pub mod reasons {
+    pub const HANDSHAKE_REJECTED: &str = "server rejected handshake (alert 40)";
+    pub const VERSION_UNSUPPORTED: &str = "protocol version not supported";
+    pub const INSUFFICIENT_SECURITY: &str = "insufficient security";
+    pub const SERVER_ALERT: &str = "server sent alert";
+}
+
 impl TlsError {
     /// Static reason string, so the cause survives the trip up through the
     /// `&'static str`-typed HTTP layer to whoever asked for the page.
@@ -1013,10 +1024,10 @@ fn recv_handshake_message(handle: usize, expected_type: u8) -> Result<Vec<u8>, T
     if ct != CT_HANDSHAKE {
         if ct == CT_ALERT && payload.len() >= 2 {
             return Err(TlsError::HandshakeFailed(match payload[1] {
-                40 => "server rejected handshake (alert 40)",
-                70 => "protocol version not supported",
-                71 => "insufficient security",
-                _ => "server sent alert",
+                40 => reasons::HANDSHAKE_REJECTED,
+                70 => reasons::VERSION_UNSUPPORTED,
+                71 => reasons::INSUFFICIENT_SECURITY,
+                _ => reasons::SERVER_ALERT,
             }));
         }
         return Err(TlsError::UnexpectedMessage);

@@ -65,6 +65,14 @@ fn wording(kind: &str) -> (&'static str, &'static str, &'static [&'static str]) 
              exist, or name resolution isn't reaching anything right now.",
             &["Check the spelling of the address.", "Check the network connection."],
         ),
+        "tls.handshake" | "tls.protocol" => (
+            "This site refused to negotiate a secure connection",
+            "The server rejected the connection before any certificate was \
+             exchanged — so this is not a problem with its identity. Usually \
+             it wants an option this browser does not offer, or it is \
+             misconfigured.",
+            &[],
+        ),
         "net.connect" => (
             "This site didn't accept the connection",
             "The address resolved, but nothing answered on it. The server may be \
