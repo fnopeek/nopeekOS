@@ -75,6 +75,10 @@ struct Strings {
     close:         &'static str,
     view_source:   &'static str,
     view_preview:  &'static str,
+    zoom_in:       &'static str,
+    zoom_out:      &'static str,
+    /// "Actual size ({} px)" — shows where you'd land back.
+    zoom_reset:    &'static str,
     about:         &'static str,
     untitled:      &'static str,
     /// Default filename offered by the save dialog (no extension).
@@ -95,6 +99,8 @@ const EN: Strings = Strings {
     new: "New", open: "Open…", save: "Save", save_as: "Save as…",
     close: "Close",
     view_source: "Source", view_preview: "Preview",
+    zoom_in: "Zoom in", zoom_out: "Zoom out",
+    zoom_reset: "Actual size ({} px)",
     about: "About Spell",
     untitled: "Untitled",
     untitled_file: "untitled",
@@ -112,6 +118,8 @@ const DE: Strings = Strings {
     new: "Neu", open: "Öffnen…", save: "Speichern",
     save_as: "Speichern unter…", close: "Schließen",
     view_source: "Quelltext", view_preview: "Vorschau",
+    zoom_in: "Vergrößern", zoom_out: "Verkleinern",
+    zoom_reset: "Originalgröße ({} px)",
     about: "Über Spell",
     untitled: "Unbenannt",
     untitled_file: "unbenannt",
@@ -163,6 +171,14 @@ fn step_label(n: usize, total: usize) -> String {
     push_usize(&mut b, total);
     let once = fill(s().step_of, &a);
     fill(&once, &b)
+}
+
+/// "Originalgröße (13 px)" — naming the target makes the entry a status
+/// line too: you can see how far you have zoomed without counting.
+fn zoom_reset_label() -> String {
+    let mut target = String::with_capacity(4);
+    push_usize(&mut target, MONO_SIZE_PX as usize);
+    fill(s().zoom_reset, &target)
 }
 
 fn log(msg: &str) {
@@ -277,6 +293,9 @@ const ACT_CLOSE_DISCARD: u32 = 6_008;
 const ACT_CLOSE_CANCEL:  u32 = 6_009;
 const ACT_VIEW_EDIT:    u32 = 6_100;
 const ACT_VIEW_PREVIEW: u32 = 6_101;
+const ACT_ZOOM_IN:    u32 = 6_102;
+const ACT_ZOOM_OUT:   u32 = 6_103;
+const ACT_ZOOM_RESET: u32 = 6_104;
 const ACT_HELP_ABOUT: u32 = 6_300;
 
 // `npk_pick` modes.
@@ -525,6 +544,20 @@ impl Spell {
         }
     }
 
+    /// Step the editor font. `to = None` returns to the default — the
+    /// "actual size" entry every editor and browser has, because after a
+    /// few notches nobody remembers where they started.
+    fn zoom(&mut self, to: Option<i32>) -> bool {
+        let next = match to {
+            None => MONO_SIZE_PX as i32,
+            Some(d) => self.font_px as i32 + d,
+        };
+        let clamped = next.clamp(FONT_SIZE_MIN as i32, FONT_SIZE_MAX as i32) as u16;
+        if clamped == self.font_px { return false; }
+        self.font_px = clamped;
+        true
+    }
+
     fn cancel_quit(&mut self) {
         self.quitting = false;
         self.quit_total = 0;
@@ -695,10 +728,14 @@ fn render_dropdown(sp: &Spell, kind: OpenMenu) -> (u32, Widget) {
         ),
         OpenMenu::View => (
             NODE_MENU_VIEW,
-            prefab::popover_menu(&[
+            prefab::popover_menu_shortcuts(&[
                 (s().view_source.to_string(), ActionId(ACT_VIEW_EDIT)),
                 (s().view_preview.to_string(), ActionId(ACT_VIEW_PREVIEW)),
-            ], Some(match sp.cur().mode { Mode::Edit => 0, Mode::Preview => 1 })),
+                (s().zoom_in.to_string(), ActionId(ACT_ZOOM_IN)),
+                (s().zoom_out.to_string(), ActionId(ACT_ZOOM_OUT)),
+                (zoom_reset_label(), ActionId(ACT_ZOOM_RESET)),
+            ], &["", "", "Ctrl++", "Ctrl+-", "Ctrl+0"],
+               Some(match sp.cur().mode { Mode::Edit => 0, Mode::Preview => 1 })),
         ),
         OpenMenu::Help => (
             NODE_MENU_HELP,
@@ -1257,16 +1294,17 @@ fn handle(sp: &mut Spell, ev: Event, payload: &str) -> Outcome {
             }
             b'n' => { sp.new_doc(); Outcome::Rerender }
             b'w' => { sp.request_close(sp.active); Outcome::Rerender }
+            // Zoom. '=' comes along because on a US layout the '+' key is
+            // Shift+'=', and people press Ctrl+'=' without the Shift.
+            b'+' | b'=' => { sp.zoom(Some(1)); Outcome::Rerender }
+            b'-' => { sp.zoom(Some(-1)); Outcome::Rerender }
+            b'0' => { sp.zoom(None); Outcome::Rerender }
             _ => Outcome::Idle,
         },
         // Ctrl+wheel. One px per notch: small enough to land on the size
         // you want, and the compositor clamps the ends anyway.
         Event::Zoom { delta } => {
-            let next = sp.font_px as i32 + delta;
-            let clamped = next.clamp(FONT_SIZE_MIN as i32, FONT_SIZE_MAX as i32) as u16;
-            if clamped == sp.font_px { return Outcome::Idle; }
-            sp.font_px = clamped;
-            Outcome::Rerender
+            if sp.zoom(Some(delta)) { Outcome::Rerender } else { Outcome::Idle }
         }
         Event::Action(ActionId(id)) => handle_action(sp, id),
         _ => Outcome::Idle,
@@ -1339,6 +1377,9 @@ fn handle_action(sp: &mut Spell, id: u32) -> Outcome {
             }
             Outcome::Rerender
         }
+        ACT_ZOOM_IN  => { sp.open_menu = None; sp.zoom(Some(1));  Outcome::Rerender }
+        ACT_ZOOM_OUT => { sp.open_menu = None; sp.zoom(Some(-1)); Outcome::Rerender }
+        ACT_ZOOM_RESET => { sp.open_menu = None; sp.zoom(None);   Outcome::Rerender }
         ACT_HELP_ABOUT => {
             log("[spell] Spell 0.1 — nopeekOS text editor");
             sp.open_menu = None;
