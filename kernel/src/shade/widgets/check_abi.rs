@@ -220,6 +220,7 @@ fn _event_wire_position(e: &Event) -> usize {
         Event::Picked { .. }       => 10,
         Event::CloseRequest       => 11,
         Event::Chord { .. }      => 12,
+        Event::Zoom { .. }       => 13,
     }
 }
 

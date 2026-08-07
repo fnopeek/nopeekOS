@@ -1416,7 +1416,13 @@ fn caret_follow_scroll(window_id: u32) {
     let mut scenes = SCENES.lock();
     if let Some(s) = scenes.get_mut(&window_id) {
         if s.scroll_viewport.h > 0 {
-            let line_h = (crate::gui::text::line_height(abi::TextStyle::Mono) as u32).max(1);
+            // Pull the focused widget's own size — a zoomed editor scrolls
+            // in its own line height, not the default one.
+            let px = match widget_at_path(&s.tree, &s.focus_path) {
+                Some(w) => layout::font_size_of(abi::TextStyle::Mono, modifiers_of_ref(w)),
+                None => crate::gui::text::style_desc(abi::TextStyle::Mono).size_px,
+            };
+            let line_h = (crate::gui::text::line_height_px(abi::TextStyle::Mono, px) as u32).max(1);
             let visible = (s.scroll_viewport.h / line_h).max(1) as usize;
             let max_sy = s.max_scroll_y;
             let caret_line = match &s.input_edit {
@@ -1565,10 +1571,17 @@ fn layout_node_at_path<'a>(root: &'a layout::LayoutNode, path: &[u32])
 /// the text origin. Evaluates every char boundary (lines are short, so the
 /// O(n) `measure` calls are cheap) and picks the closest.
 fn byte_at_x(s: &str, style: abi::TextStyle, target_x: u32) -> usize {
+    let px = crate::gui::text::style_desc(style).size_px;
+    byte_at_x_px(s, style, px, target_x)
+}
+
+/// `byte_at_x` at an explicit size — the zoomable TextArea needs the same
+/// metrics the renderer drew with.
+fn byte_at_x_px(s: &str, style: abi::TextStyle, px: u16, target_x: u32) -> usize {
     let mut best = 0usize;
     let mut best_d = target_x; // distance at the 0-offset boundary (width 0)
     for b in s.char_indices().map(|(i, _)| i).skip(1).chain(core::iter::once(s.len())) {
-        let w = ceil_u32(crate::gui::text::measure(&s[..b], style));
+        let w = ceil_u32(crate::gui::text::measure_px(&s[..b], style, px));
         let d = if w >= target_x { w - target_x } else { target_x - w };
         if d < best_d { best_d = d; best = b; }
     }
@@ -1605,7 +1618,10 @@ fn offset_at(scene: &WidgetScene, x: i32, y: i32, require_inside: bool) -> Optio
         }
         abi::Widget::TextArea { .. } => {
             let style = abi::TextStyle::Mono;
-            let line_h = ceil_u32(crate::gui::text::line_height(style)).max(1);
+            // Same px the renderer used — otherwise a click lands on the
+            // wrong line the moment the app zooms.
+            let px = layout::font_size_of(style, modifiers_of_ref(widget));
+            let line_h = ceil_u32(crate::gui::text::line_height_px(style, px)).max(1);
             let top_y = rect.y + pad + 4;
             let visible = (rect.h / line_h).max(1) as usize;
             let total_lines = value.split('\n').count();
@@ -1618,7 +1634,7 @@ fn offset_at(scene: &WidgetScene, x: i32, y: i32, require_inside: bool) -> Optio
             let row = ((y - top_y).max(0) as u32 / line_h) as usize;
             let target_line = (scroll + row).min(total_lines.saturating_sub(1));
             let (line_start, line_str) = nth_line(value, target_line);
-            Some(line_start + byte_at_x(line_str, style, (x - text_x).max(0) as u32))
+            Some(line_start + byte_at_x_px(line_str, style, px, (x - text_x).max(0) as u32))
         }
         _ => None,
     }

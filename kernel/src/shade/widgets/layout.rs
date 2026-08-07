@@ -427,7 +427,8 @@ fn measure_intrinsic(w: &Widget) -> Size {
             // stretch) inside an `Align::Stretch` column (horizontal
             // stretch); the intrinsic size just keeps it from collapsing
             // to nothing in a degenerate layout.
-            let line_h = ceil_u32(crate::gui::text::line_height(TextStyle::Mono));
+            let px = font_size_of(TextStyle::Mono, modifiers);
+            let line_h = ceil_u32(crate::gui::text::line_height_px(TextStyle::Mono, px));
             let pad = padding(modifiers);
             Size { w: 280 + 8 + pad.0 * 2, h: line_h * 3 + 8 + pad.1 * 2 }
         }
@@ -525,12 +526,13 @@ fn place(w: &Widget, inner: Rect, ctx: &mut ScrollCtx) -> LayoutNode {
         // intrinsic-sized rect, so the small-widget case is unchanged;
         // an image viewer that Flex(1)-fills its body gets the whole
         // area and the rasterizer contain-fits the bitmap into it.
-        Widget::TextArea { value, .. } => {
+        Widget::TextArea { value, modifiers, .. } => {
             // Report how far the editor can scroll (content lines beyond the
             // viewport) so the compositor routes the wheel here; the render
             // applies the offset + keeps the caret visible. Mirrors the
             // render's `visible`/line-window math (Mono metrics, +4 inset).
-            let line_h = ceil_u32(crate::gui::text::line_height(TextStyle::Mono)).max(1);
+            let px = font_size_of(TextStyle::Mono, modifiers);
+            let line_h = ceil_u32(crate::gui::text::line_height_px(TextStyle::Mono, px)).max(1);
             let visible = (inner.h / line_h).max(1) as usize;
             let total = value.split('\n').count();
             let max_off = (total.saturating_sub(visible)) as u32 * line_h;

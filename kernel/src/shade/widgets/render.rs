@@ -374,6 +374,7 @@ const GUTTER_PAD_L: i32 = 10;
 /// **Shared by the renderer and the click-to-caret hit test** — if these
 /// two disagree, clicks land on the wrong column.
 pub(super) fn textarea_gutter_w(mods: &[Modifier], total_lines: usize) -> u32 {
+    let px = super::layout::font_size_of(super::abi::TextStyle::Mono, mods);
     let on = mods.iter().any(|m| matches!(m, Modifier::LineNumbers(true)));
     if !on { return 0; }
     let digits = {
@@ -385,7 +386,7 @@ pub(super) fn textarea_gutter_w(mods: &[Modifier], total_lines: usize) -> u32 {
     let mut widest = alloc::string::String::new();
     for _ in 0..digits { widest.push('0'); }
     let num_w = ceil_u32_local(
-        crate::gui::text::measure(&widest, super::abi::TextStyle::Mono));
+        crate::gui::text::measure_px(&widest, super::abi::TextStyle::Mono, px));
     num_w + GUTTER_PAD_L as u32 + GUTTER_PAD_R as u32
 }
 
@@ -628,7 +629,11 @@ fn paint_node_eff(
                 None    => value.as_str(),
             };
             let style = super::abi::TextStyle::Mono;
-            let line_h = ceil_u32_local(crate::gui::text::line_height(style)).max(1);
+            // Zoom: every metric below has to come from the SAME px, or the
+            // caret, the selection blocks and the gutter drift apart from
+            // the glyphs they belong to.
+            let px = super::layout::font_size_of(style, eff);
+            let line_h = ceil_u32_local(crate::gui::text::line_height_px(style, px)).max(1);
             // Resolve default text colour: OnSurface, Tint overrides.
             let mut color = Token::OnSurface;
             for m in eff { if let Modifier::Tint(tok) = m { color = *tok; } }
@@ -641,7 +646,7 @@ fn paint_node_eff(
 
             // Empty buffer → muted placeholder on the first line.
             if live.is_empty() {
-                rast.text(target, placeholder, style, Token::OnSurfaceMuted,
+                rast.text_px(target, placeholder, style, px, Token::OnSurfaceMuted,
                           Point { x: text_x, y: top_y });
             }
 
@@ -680,9 +685,9 @@ fn paint_node_eff(
                     let mut num = alloc::string::String::new();
                     let _ = core::fmt::Write::write_fmt(
                         &mut num, format_args!("{}", li + 1));
-                    let w = ceil_u32_local(crate::gui::text::measure(&num, style)) as i32;
+                    let w = ceil_u32_local(crate::gui::text::measure_px(&num, style, px)) as i32;
                     let y = top_y + (row as u32 * line_h) as i32;
-                    rast.text(target, &num, style, Token::OnSurfaceFaint,
+                    rast.text_px(target, &num, style, px, Token::OnSurfaceFaint,
                               Point { x: rule_x - GUTTER_PAD_R - w, y });
                 }
             }
@@ -710,8 +715,8 @@ fn paint_node_eff(
                     if sel_e > line_lo && sel_s <= line_hi {
                         let a = sel_s.max(line_lo) - line_lo;
                         let b = sel_e.min(line_hi) - line_lo;
-                        let ax = ceil_u32_local(crate::gui::text::measure(&line[..a], style));
-                        let mut w = ceil_u32_local(crate::gui::text::measure(&line[a..b], style));
+                        let ax = ceil_u32_local(crate::gui::text::measure_px(&line[..a], style, px));
+                        let mut w = ceil_u32_local(crate::gui::text::measure_px(&line[a..b], style, px));
                         if sel_e > line_hi { w += 6; } // newline included
                         if w < 2 { w = 6; }            // empty line / zero-width
                         rast.rect(target, Rect { x: text_x + ax as i32, y, w, h: line_h },
@@ -720,7 +725,7 @@ fn paint_node_eff(
                 }
                 if line.is_empty() { continue; }
                 if spans.is_empty() {
-                    rast.text(target, line, style, color, Point { x: text_x, y });
+                    rast.text_px(target, line, style, px, color, Point { x: text_x, y });
                     continue;
                 }
                 // Split the line into coloured runs.
@@ -731,20 +736,20 @@ fn paint_node_eff(
                     let tok = span_token_at(spans, line_start + b, color);
                     if tok != run_tok && b > run_start {
                         let seg = &line[run_start..b];
-                        rast.text(target, seg, style, run_tok, Point { x, y });
-                        x += ceil_u32_local(crate::gui::text::measure(seg, style)) as i32;
+                        rast.text_px(target, seg, style, px, run_tok, Point { x, y });
+                        x += ceil_u32_local(crate::gui::text::measure_px(seg, style, px)) as i32;
                         run_start = b;
                         run_tok = tok;
                     }
                 }
                 let seg = &line[run_start..];
-                rast.text(target, seg, style, run_tok, Point { x, y });
+                rast.text_px(target, seg, style, px, run_tok, Point { x, y });
             }
 
             // Caret (only when focused / editor present).
             if let Some(cl) = caret_line {
                 if cl >= scroll && cl - scroll < visible {
-                    let advance = ceil_u32_local(crate::gui::text::measure(caret_prefix, style));
+                    let advance = ceil_u32_local(crate::gui::text::measure_px(caret_prefix, style, px));
                     let y = top_y + ((cl - scroll) as u32 * line_h) as i32;
                     let caret_rect = Rect {
                         x: text_x + advance as i32,

@@ -387,6 +387,9 @@ struct Spell {
     /// A quit is in progress: the confirm dialog is walking the dirty
     /// tabs one by one, and clearing the last one closes the app.
     quitting:      bool,
+    /// Editor font size in px. Ctrl+wheel moves it; every tab shares one
+    /// setting, like a view preference rather than a per-file property.
+    font_px:       u16,
     /// How many dirty tabs the quit started with, and how many are done.
     /// Counted at the start because the live count shrinks as tabs close
     /// — deriving the step from it would show "1 of 3", "1 of 2", "1 of 1".
@@ -402,6 +405,7 @@ impl Spell {
             open_menu: None,
             confirm_close: None,
             quitting:      false,
+            font_px:       MONO_SIZE_PX,
             quit_total:    0,
             quit_done:     0,
         };
@@ -851,6 +855,7 @@ fn render_body(sp: &Spell) -> Widget {
             Modifier::Background(Token::Page),
             Modifier::Padding(Padding::Sm.as_u16()),
             Modifier::LineNumbers(true),
+            Modifier::FontSize(sp.font_px),
         ],
     }
 }
@@ -1254,6 +1259,15 @@ fn handle(sp: &mut Spell, ev: Event, payload: &str) -> Outcome {
             b'w' => { sp.request_close(sp.active); Outcome::Rerender }
             _ => Outcome::Idle,
         },
+        // Ctrl+wheel. One px per notch: small enough to land on the size
+        // you want, and the compositor clamps the ends anyway.
+        Event::Zoom { delta } => {
+            let next = sp.font_px as i32 + delta;
+            let clamped = next.clamp(FONT_SIZE_MIN as i32, FONT_SIZE_MAX as i32) as u16;
+            if clamped == sp.font_px { return Outcome::Idle; }
+            sp.font_px = clamped;
+            Outcome::Rerender
+        }
         Event::Action(ActionId(id)) => handle_action(sp, id),
         _ => Outcome::Idle,
     }
