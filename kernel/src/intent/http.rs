@@ -706,6 +706,34 @@ fn finish_conn(host: &str, tls: crate::tls::TlsSession, reusable: bool) {
     }
 }
 
+/// Classify a fetch failure into a stable token.
+///
+/// The message itself is written for a human reading the serial log and is
+/// free to be reworded; this token is the contract a client branches on.
+/// Keeping them apart means improving a message never silently changes
+/// which error page the browser shows.
+pub fn error_kind(msg: &str) -> &'static str {
+    match msg {
+        "certificate: untrusted root CA" => "cert.untrusted",
+        "certificate: expired" => "cert.expired",
+        "certificate: not yet valid" => "cert.not_yet_valid",
+        "certificate: hostname mismatch" => "cert.hostname",
+        "DNS resolution failed" => "dns.failed",
+        "TCP connect failed" | "connection failed" => "net.connect",
+        "recv timeout" => "net.timeout",
+        "recv error" | "connection reset after handshake" => "net.reset",
+        "empty body" => "http.empty",
+        "HTTP non-2xx response" => "http.status",
+        "cancelled" => "cancelled",
+        m if m.starts_with("certificate:") => "cert.invalid",
+        m if m.starts_with("TLS ") => "tls.protocol",
+        m if m.starts_with("redirect") => "http.redirect",
+        "too many redirects" | "refusing http downgrade" => "http.redirect",
+        m if m.starts_with("empty url") || m.starts_with("invalid url") => "url.invalid",
+        _ => "unknown",
+    }
+}
+
 /// Fresh DNS + ARP + TCP + TLS to `host:443`. Only paid on a pool miss.
 fn open_tls(host: &str) -> Result<crate::tls::TlsSession, &'static str> {
     let t_dns = crate::interrupts::ticks();
@@ -733,9 +761,14 @@ fn open_tls(host: &str) -> Result<crate::tls::TlsSession, &'static str> {
     let t_tls = crate::interrupts::ticks();
     let out = match crate::tls::tls_connect(handle, host) {
         Ok(s) => Ok(s),
-        Err(_) => {
+        Err(e) => {
+            // Keep the reason. Collapsing every handshake failure into one
+            // message is what left a browser with nothing to say but a blank
+            // page — "untrusted root CA" and "expired" are the two things the
+            // person in front of the screen actually needs to be told apart.
+            kprintln!("[npk] TLS error: {}", e);
             let _ = crate::net::tcp::close(handle);
-            Err("TLS handshake failed")
+            Err(e.reason())
         }
     };
     // Split so a slow connect names its own culprit. The whole thing swings

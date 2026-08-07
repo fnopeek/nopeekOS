@@ -987,6 +987,48 @@ sha384=${WP_SHA}
             done
         fi
 
+        # Root CA anchors — every DER in release/assets/certs/ is signed and
+        # listed as `[cert:<filename>]`, mapped to `sys/certs/<filename>`
+        # (intent/update.rs). Same deal as wallpapers: adding or replacing an
+        # anchor is dropping a file here, no kernel change.
+        #
+        # Adding a root CA means every certificate it signs is trusted by the
+        # whole system — a security boundary, not a bugfix. Check the SHA-256
+        # against the CA's published value before putting a file here:
+        #   openssl x509 -inform DER -in <file> -noout -subject -enddate \
+        #       -fingerprint -sha256
+        # The anchors needed to reach the update host itself are compiled
+        # into the kernel (crypto/tls/certstore.rs), so a mistake here can
+        # never lock a machine out of its own updates.
+        if [ -d "$RELEASE_DIR/assets/certs" ]; then
+            for ca in "$RELEASE_DIR/assets/certs/"*; do
+                [ -f "$ca" ] || continue
+                case "$ca" in *.sig|*.md) continue;; esac
+                CA_NAME=$(basename "$ca")
+                CA_SIZE=$(stat -c%s "$ca")
+                CA_SHA=$(openssl dgst -sha384 -hex "$ca" 2>/dev/null | awk '{print $NF}')
+
+                # Refuse to ship something that is not a certificate: a
+                # malformed anchor is skipped at load time on the device,
+                # which looks like the update silently not working.
+                if ! openssl x509 -inform DER -in "$ca" -noout >/dev/null 2>&1; then
+                    err "Not a DER certificate, refusing to ship: assets/certs/$CA_NAME"
+                    exit 1
+                fi
+
+                ASSET_MANIFEST="${ASSET_MANIFEST}[cert:${CA_NAME}]
+size=${CA_SIZE}
+sha384=${CA_SHA}
+
+"
+                if [ -f "$KEY_FILE" ]; then
+                    openssl dgst -sha384 -sign "$KEY_FILE" -out "${ca}.sig" "$ca"
+                    CA_SUBJ=$(openssl x509 -inform DER -in "$ca" -noout -subject 2>/dev/null | sed 's/^subject=//')
+                    ok "Signed cert: $CA_NAME ($CA_SUBJ)"
+                fi
+            done
+        fi
+
         # MicroVM initramfs — already built by build_microvm_initramfs()
         # called from build(); just sign + manifest it here. Phase 12.1.3.
         INITRAMFS_FILE="$RELEASE_DIR/assets/microvm-initramfs.cpio.gz"

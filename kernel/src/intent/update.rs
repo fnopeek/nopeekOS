@@ -287,8 +287,20 @@ fn apply_plan(plan: Plan) {
     }
 
     let mut assets = 0;
+    let mut certs_changed = false;
     for a in &plan.assets {
-        if apply_asset(a) { assets += 1; }
+        if apply_asset(a) {
+            assets += 1;
+            certs_changed |= a.entry.section.starts_with("cert:");
+        }
+    }
+    // New anchors are inert until reloaded — the store is held in memory so
+    // handshakes never touch npkFS. Without this, a freshly delivered CA
+    // would only take effect after the next reboot, which looks exactly
+    // like the update not having worked.
+    if certs_changed {
+        let n = crate::tls::certstore::load_store();
+        kprintln!("[npk]   * trust store reloaded — {} stored anchor(s)", n);
     }
 
     for name in &plan.wallpaper_copies {
@@ -442,10 +454,23 @@ fn plan_assets() -> (Vec<AssetJob>, usize, Vec<String>) {
                     alloc::format!("sys/wallpapers/{}", name),
                     alloc::format!("wallpapers/{}", name),
                 ),
-                None => {
-                    kprintln!("[npk]   . unknown asset [{}] (skipped)", entry.section);
-                    continue;
-                }
+                // Root CA anchors, same data-not-code deal as wallpapers:
+                // the section name IS the filename, so shipping or
+                // replacing an anchor is dropping a file into
+                // `release/assets/certs/` — no kernel change, no reinstall.
+                // The trust chain is unchanged: size and sha384 come from
+                // the manifest and every asset is checked against its own
+                // detached signature on apply, exactly like the kernel.
+                None => match entry.section.strip_prefix("cert:").filter(|n| safe_asset_name(n)) {
+                    Some(name) => (
+                        alloc::format!("{}/{}", crate::tls::certstore::STORE_DIR, name),
+                        alloc::format!("certs/{}", name),
+                    ),
+                    None => {
+                        kprintln!("[npk]   . unknown asset [{}] (skipped)", entry.section);
+                        continue;
+                    }
+                },
             },
         };
 

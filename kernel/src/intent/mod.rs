@@ -4,6 +4,7 @@
 //! Every intent requires a valid capability token.
 
 mod auth;
+mod cert;
 mod fs;
 pub(crate) mod http;
 pub(crate) mod http2;
@@ -2075,6 +2076,20 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
 
         "wallpaper" | "wp" => {
             wallpaper::intent_wallpaper(args);
+        }
+
+        // Reading the trust store is harmless; changing it is not. WRITE
+        // gates the whole intent rather than just `add`/`remove`, because
+        // the listing is also the thing that tells you what to remove.
+        "cert" | "certs" => {
+            let ro = args.split_whitespace().next().unwrap_or("list");
+            let needed = match ro {
+                "list" | "ls" | "show" | "info" => Rights::READ,
+                _ => Rights::WRITE,
+            };
+            if require_cap(vault, &session, needed, "cert") {
+                cert::intent_cert(args);
+            }
         }
 
         "theme" => {
