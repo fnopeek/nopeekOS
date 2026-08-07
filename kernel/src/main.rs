@@ -364,6 +364,13 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     // (sys/icons/phosphor), parsed + cached for the CPU rasterizer.
     gui::icons::init();
 
+    // Trust anchors delivered as data (sys/certs) — OTA assets plus
+    // whatever was trusted by hand. Loaded here, after login, because
+    // npkFS content is AEAD-encrypted and unreadable before the master
+    // key exists. Until this point the built-in floor is the trust set,
+    // which is exactly what the OTA path needs and no more.
+    tls::certstore::load_store();
+
     // GGTT slab allocator — bookkeeping for tile / comp-layer / glyph
     // slots in the GGTT slab region. Pure in-RAM tracker; actual GGTT
     // writes land once the rasterizer (P10.5) is wired up.

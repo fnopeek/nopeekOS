@@ -16,6 +16,8 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
+mod neterror;
+
 use beak_engine::forms::{self, ControlKind, FormState, Forms};
 use beak_engine::{Engine, Layout};
 use nopeek_widgets::i18n;
@@ -97,6 +99,8 @@ unsafe extern "C" {
     fn npk_event_poll(ptr: i32, max: i32) -> i32;
     fn npk_http_request(url_ptr: i32, url_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_http_final_url(buf_ptr: i32, buf_max: i32) -> i32;
+    /// Why the last request failed: `kind\tmessage`. Cleared on success.
+    fn npk_http_last_error(buf_ptr: i32, buf_max: i32) -> i32;
     /// Fetch a newline-separated list of URLs in one call, multiplexed over
     /// HTTP/2 where the host offers it. Bodies land back-to-back in `out`;
     /// `lens` receives one little-endian i32 per URL (bytes written, or -1).
@@ -492,6 +496,46 @@ fn content_gen() -> u32 {
     unsafe { core::ptr::addr_of!(CONTENT_GEN).read() }
 }
 
+/// Why the last fetch failed, as `(kind, message)`. `None` if the kernel
+/// reported nothing — which includes an older kernel without the host fn,
+/// so the caller must have a fallback rather than assume this is present.
+fn last_error() -> Option<(String, String)> {
+    const ERR_CAP: usize = 512;
+    static mut ERR_BUF: [u8; ERR_CAP] = [0; ERR_CAP];
+    let dst = core::ptr::addr_of_mut!(ERR_BUF) as *mut u8;
+    let n = unsafe { npk_http_last_error(dst as i32, ERR_CAP as i32) };
+    if n <= 0 {
+        return None;
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(dst as *const u8, n as usize) };
+    let s = core::str::from_utf8(bytes).ok()?;
+    let (kind, msg) = s.split_once('\t')?;
+    Some((kind.to_string(), msg.to_string()))
+}
+
+/// Replace the document with a diagnostic page. Sets HTML_BUF/HTML_LEN
+/// exactly as a successful fetch would, so everything downstream — layout,
+/// paint, scrolling — treats it as an ordinary page.
+fn show_error_page(url: &str) {
+    let (kind, message) = last_error()
+        // A -1 with no reason attached still has to say something. Silence
+        // here is the blank page this whole path exists to remove.
+        .unwrap_or_else(|| (String::from("unknown"), String::from("request failed")));
+    log(&alloc::format!("[beak] fetch failed: {} ({})", message, kind));
+
+    let doc = neterror::document(url, &kind, &message);
+    let len = doc.len().min(HTML_CAP);
+    unsafe {
+        let dst = core::ptr::addr_of_mut!(HTML_BUF) as *mut u8;
+        core::ptr::copy_nonoverlapping(doc.as_ptr(), dst, len);
+        core::ptr::addr_of_mut!(HTML_LEN).write(len);
+        // The page carries its own inline <style> and links nothing, so any
+        // leftover author CSS from the previous page must go — otherwise the
+        // last site's rules would style this one.
+        core::ptr::addr_of_mut!(CSS_LEN).write(0);
+    }
+}
+
 /// The URL the last fetch's body actually came from, after redirects.
 /// `None` if the kernel reported none (request failed, or an older kernel).
 fn fetched_from() -> Option<String> {
@@ -534,7 +578,11 @@ fn fetch(url: &str) -> bool {
         log_ms("fetch stylesheets", now_ms() - t_css);
         unsafe { core::ptr::addr_of_mut!(IMAGES_DIRTY).write(true) };
     } else {
-        unsafe { core::ptr::addr_of_mut!(CSS_LEN).write(0) };
+        // Failed, or succeeded with nothing in it. Either way the reader gets
+        // told what happened — a blank canvas is indistinguishable from a
+        // hung browser. The address bar keeps the URL that was ASKED for, not
+        // one derived from a response we never got.
+        show_error_page(url);
     }
     n >= 0
 }
@@ -715,9 +763,9 @@ fn fetch_stylesheets(base: &str) {
 /// Set the address + fetch, WITHOUT touching history (used by back/forward).
 fn fetch_url(url: &str) {
     set_url(url);
-    if !fetch(url) {
-        log("[beak] fetch failed");
-    }
+    // A failure is not silent any more — `fetch` puts a diagnostic page in
+    // the document and logs the reason, so there is nothing to add here.
+    let _ = fetch(url);
 }
 
 /// Navigate the address bar's typed text (normalise scheme) — new entry.

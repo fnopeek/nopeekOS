@@ -64,6 +64,11 @@ struct HostState {
     /// redirects. Read back via `npk_http_final_url` — a browser needs it
     /// as the document base URL for relative sub-resources.
     http_final_url: Option<String>,
+    /// Why the last `npk_http_request` failed, as `kind\tmessage`. Read
+    /// back via `npk_http_last_error`. Without it every failure reaches the
+    /// caller as a bare -1, which is how an untrusted certificate ended up
+    /// rendering as a blank page.
+    http_last_error: Option<String>,
 }
 
 static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
@@ -373,6 +378,7 @@ fn wasm_worker_task(arg: u64) {
         module_name: String::from(name_str),
         launch_arg: job.launch_arg.clone(),
         http_final_url: None,
+        http_last_error: None,
     });
     let _ = store.set_fuel(INTERACTIVE_FUEL);
 
@@ -474,6 +480,7 @@ pub fn execute_interactive(
         module_name: String::new(),
         launch_arg: None,
         http_final_url: None,
+        http_last_error: None,
     });
     store.set_fuel(INTERACTIVE_FUEL).map_err(|_| WasmError::ExecutionFailed)?;
 
@@ -519,6 +526,7 @@ fn execute_inner(
         module_name: String::new(),
         launch_arg: None,
         http_final_url: None,
+        http_last_error: None,
     });
     store.set_fuel(fuel).map_err(|_| WasmError::ExecutionFailed)?;
 
@@ -695,6 +703,12 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             // URL readable as if it were this one's.
             caller.data_mut().http_final_url =
                 if res.is_ok() && !final_url.is_empty() { Some(final_url) } else { None };
+            // Same rule for the reason: cleared on success, so a caller can
+            // never read a stale error and attribute it to this request.
+            caller.data_mut().http_last_error = match &res {
+                Ok(_) => None,
+                Err(e) => Some(alloc::format!("{}\t{}", crate::intent::http::error_kind(e), e)),
+            };
             if res.is_err() { return -1; }
 
             let write_len = out.len().min(cap);
@@ -803,6 +817,46 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_http_last_error(buf_ptr, buf_max) -> len, or -1
+    //
+    // Why the last npk_http_request failed: `kind\tmessage`, where kind is
+    // a stable token (`cert.untrusted`, `cert.expired`, `net.connect`, …)
+    // and message is the human wording. Cleared on success.
+    //
+    // Exists because the request itself can only answer "no": every failure
+    // arrives as -1, so a browser could not tell a rejected certificate from
+    // an empty document and drew nothing either way. NET-gated, like the
+    // request whose outcome it describes.
+    linker.func_wrap("env", "npk_http_last_error",
+        |mut caller: Caller<'_, HostState>, buf_ptr: i32, buf_max: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::NET).is_err() {
+                return -1;
+            }
+            if buf_ptr < 0 || buf_max <= 0 { return -1; }
+            let err = match &caller.data().http_last_error {
+                Some(e) => e.clone(),
+                None => return -1,
+            };
+            let n = err.len().min(buf_max as usize);
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data_mut(&mut caller);
+            let start = buf_ptr as usize;
+            // checked_add: a wrapping `start + n` would produce start > end and
+            // panic the KERNEL on the slice index — a guest-triggerable halt.
+            match start.checked_add(n) {
+                Some(end) if end <= data.len() => {
+                    data[start..end].copy_from_slice(&err.as_bytes()[..n]);
+                    n as i32
+                }
+                _ => -1,
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_store(name_ptr, name_len, data_ptr, data_len) -> 0 or -1
     linker.func_wrap("env", "npk_store",
         |caller: Caller<'_, HostState>, name_ptr: i32, name_len: i32,
@@ -813,11 +867,12 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 None => return -1,
             };
 
-            // Apps may not write the module store — see is_module_store_path.
+            // Apps may not write the module store or the trust store — see
+            // is_trust_critical_path.
             // Checked BEFORE the grant path so a per-file grant can never
             // become a way in there.
-            if is_module_store_path(&name) {
-                kprintln!("[npk] WASM: npk_store DENIED (sys/wasm is read-only to apps)");
+            if is_trust_critical_path(&name) {
+                kprintln!("[npk] WASM: npk_store DENIED ({} is read-only to apps)", name);
                 return -1;
             }
 
@@ -1337,7 +1392,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             };
             let clean = path.trim().trim_matches('/');
             if clean.is_empty() || clean.contains("..") { return -1; }
-            if is_module_store_path(clean) || clean == "sys" || clean.starts_with("sys/") {
+            if is_trust_critical_path(clean) || clean == "sys" || clean.starts_with("sys/") {
                 kprintln!("[npk] npk_pick_mkdir DENIED (sys is off limits)");
                 return -1;
             }
@@ -2663,9 +2718,10 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 Some(s) => s,
                 None => return -1,
             };
-            // Apps may not delete modules — see is_module_store_path.
-            if is_module_store_path(&name) {
-                kprintln!("[npk] WASM: npk_fs_delete DENIED (sys/wasm is read-only to apps)");
+            // Apps may not delete modules or trust anchors — see
+            // is_trust_critical_path.
+            if is_trust_critical_path(&name) {
+                kprintln!("[npk] WASM: npk_fs_delete DENIED ({} is read-only to apps)", name);
                 return -1;
             }
             match crate::npkfs::delete(&name) {
@@ -2694,10 +2750,10 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 Some(s) => s,
                 None => return -1,
             };
-            // Neither source nor destination may be the module store —
-            // renaming into sys/wasm would plant an unverified module.
-            if is_module_store_path(&old) || is_module_store_path(&new) {
-                kprintln!("[npk] WASM: npk_fs_rename DENIED (sys/wasm is read-only to apps)");
+            // Neither source nor destination may be module or trust store —
+            // renaming in would plant an unverified module or anchor.
+            if is_trust_critical_path(&old) || is_trust_critical_path(&new) {
+                kprintln!("[npk] WASM: npk_fs_rename DENIED (module/trust store is read-only to apps)");
                 return -1;
             }
             match crate::npkfs::rename(&old, &new) {
@@ -2726,8 +2782,8 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 Some(s) => s,
                 None => return -1,
             };
-            if is_module_store_path(&old) || is_module_store_path(&new) {
-                kprintln!("[npk] WASM: npk_fs_copy DENIED (sys/wasm is read-only to apps)");
+            if is_trust_critical_path(&old) || is_trust_critical_path(&new) {
+                kprintln!("[npk] WASM: npk_fs_copy DENIED (module/trust store is read-only to apps)");
                 return -1;
             }
             match crate::npkfs::copy(&old, &new) {
@@ -3851,8 +3907,12 @@ fn cleanup_hw_state(state: &mut HostState) {
     }
 }
 
-/// True if `name` targets the module store (`sys/wasm/…`). WASM apps
-/// must NOT write or delete there: it holds the executable modules plus
+/// True if `name` targets the module store (`sys/wasm/…`) or the trust
+/// store (`sys/certs/…`) — the two directories where a write is a
+/// privilege escalation rather than a file operation.
+///
+/// WASM apps must NOT write or delete in the module store: it holds the
+/// executable modules plus
 /// their `.npk.caps` declarations, and modules are NOT re-verified at
 /// launch — so an app with WRITE that could overwrite a module (or plant
 /// a new one with caps=ALL) would escalate to arbitrary rights. The
@@ -3860,9 +3920,23 @@ fn cleanup_hw_state(state: &mut HostState) {
 /// host fns, so they are unaffected. The paths layer rejects `.`/`..`
 /// segments, so after trimming slashes a literal `sys/wasm/` prefix is
 /// the only way to actually land in the module store.
-fn is_module_store_path(name: &str) -> bool {
+///
+/// The trust store is the same class of hole with a different blast
+/// radius: a file written under `sys/certs/` becomes a root CA the whole
+/// system honours, so an app that could write there could mint itself an
+/// anchor and silently authenticate any server it likes. Both directories
+/// are read-only to apps for the same reason — writing them is a
+/// privilege escalation, not a file operation.
+fn is_trust_critical_path(name: &str) -> bool {
     let c = name.trim_matches('/');
-    c == "sys/wasm" || c.starts_with("sys/wasm/")
+    if c == "sys/wasm" || c.starts_with("sys/wasm/") {
+        return true;
+    }
+    // Prefix match on a path SEGMENT — a plain `starts_with` would also
+    // catch a sibling like `sys/certsomething`, and missing the trailing
+    // separator is how this class of guard usually leaks.
+    let certs = crate::tls::certstore::STORE_DIR;
+    c == certs || (c.starts_with(certs) && c.as_bytes().get(certs.len()) == Some(&b'/'))
 }
 
 fn read_wasm_str(caller: &Caller<'_, HostState>, ptr: i32, len: i32) -> Option<String> {

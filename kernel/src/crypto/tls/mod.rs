@@ -367,6 +367,21 @@ pub enum TlsError {
     RecordTooLarge,
 }
 
+impl TlsError {
+    /// Static reason string, so the cause survives the trip up through the
+    /// `&'static str`-typed HTTP layer to whoever asked for the page.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            TlsError::Tcp(_) => "connection failed",
+            TlsError::HandshakeFailed(s) => s,
+            TlsError::CertificateError(e) => e.reason(),
+            TlsError::DecryptError => "TLS decryption failed",
+            TlsError::UnexpectedMessage => "TLS unexpected message",
+            TlsError::RecordTooLarge => "TLS record too large",
+        }
+    }
+}
+
 impl core::fmt::Display for TlsError {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         match self {
