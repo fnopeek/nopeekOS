@@ -351,8 +351,8 @@ impl Pick {
                 }
             }
             Mode::Save => {
+                if !can_commit_name(&self.name) { return false; }
                 let name = self.name.trim().to_string();
-                if name.is_empty() || name.contains('/') { return false; }
                 // Warn before clobbering — the requester writes blind, so
                 // this is the only place the user can be asked.
                 if !self.confirm_overwrite && path_exists(&self.join(&name)) {
@@ -458,14 +458,23 @@ fn render(p: &Pick) -> Widget {
         return render_overwrite(p);
     }
 
-    let mut children: Vec<Widget> = Vec::with_capacity(6);
+    let title = if p.mode == Mode::Save { s().save_title } else { s().open_title };
+    let hint = if p.mode == Mode::Save { s().hint_save } else { s().hint_open };
+
+    // Flat in the panel's own Column, with Flex(1) on the Scroll ITSELF.
+    // `measure` reports only a 24 px floor for a scroll container on its
+    // axis (that's what lets a flex parent size it), so a Flex wrapper
+    // around an unflexed Scroll hands the list 24 px and squashes the
+    // rows. loft puts the Flex on the Scroll for the same reason.
+    let mut children: Vec<Widget> = Vec::with_capacity(8);
+    children.push(prefab::title_bar(title));
+    children.push(Widget::Divider);
     children.push(prefab::breadcrumb(&crumbs(&p.dir)));
     children.push(render_list(p));
-    children.push(Widget::Spacer { flex: 1 });
 
     if p.mode == Mode::Save {
         children.push(Widget::Divider);
-        children.push(prefab::input(
+        children.push(prefab::input_autofocus(
             &p.name,
             s().name_hint,
             prefab::InputKind::Text,
@@ -476,21 +485,9 @@ fn render(p: &Pick) -> Widget {
 
     children.push(Widget::Divider);
     children.push(render_buttons(p));
+    children.push(prefab::footer(hint, &count_label(p)));
 
-    let title = if p.mode == Mode::Save { s().save_title } else { s().open_title };
-    let hint = if p.mode == Mode::Save { s().hint_save } else { s().hint_open };
-
-    prefab::panel(alloc::vec![
-        prefab::title_bar(title),
-        Widget::Divider,
-        Widget::Column {
-            children,
-            spacing:   Spacing::Sm.as_u16(),
-            align:     Align::Stretch,
-            modifiers: alloc::vec![Modifier::Flex(1)],
-        },
-        prefab::footer(hint, &count_label(p)),
-    ])
+    prefab::panel(children)
 }
 
 /// Path split into clickable segments, so the user can jump back up
@@ -518,10 +515,6 @@ fn render_list(p: &Pick) -> Widget {
         ));
     }
 
-    if p.entries.is_empty() && rows.is_empty() {
-        return prefab::empty_state(s().empty);
-    }
-
     for (i, e) in p.entries.iter().enumerate() {
         let subtitle = if e.is_dir { s().folder.to_string() } else { size_label(e.size) };
         rows.push(prefab::list_row(
@@ -538,26 +531,49 @@ fn render_list(p: &Pick) -> Widget {
         rows.push(prefab::empty_state(s().empty));
     }
 
-    Widget::Column {
-        children:  alloc::vec![prefab::scroll_list(rows)],
-        spacing:   0,
-        align:     Align::Stretch,
+    Widget::Scroll {
+        child: alloc::boxed::Box::new(Widget::Column {
+            children:  rows,
+            spacing:   Spacing::Xxs.as_u16(),
+            align:     Align::Stretch,
+            modifiers: alloc::vec![],
+        }),
+        axis:      Axis::Vertical,
+        // Flex on the Scroll: it swallows the leftover height, which is
+        // what pins the name field and buttons to the bottom.
         modifiers: alloc::vec![Modifier::Flex(1)],
     }
 }
 
 fn render_buttons(p: &Pick) -> Widget {
     let confirm = if p.mode == Mode::Save { s().save_btn } else { s().open_btn };
+    // A button that looks live but does nothing is worse than one that
+    // says it can't act yet: save needs a name, open needs a file picked.
+    let ready = match p.mode {
+        Mode::Save => can_commit_name(&p.name),
+        Mode::Open => p.selected_entry().is_some(),
+    };
+    let confirm_btn = if ready {
+        prefab::button(confirm, prefab::ButtonStyle::Primary, ActionId(ACT_CONFIRM))
+    } else {
+        prefab::button(confirm, prefab::ButtonStyle::Ghost, prefab::NO_ACTION)
+    };
     Widget::Row {
         children: alloc::vec![
             Widget::Spacer { flex: 1 },
             prefab::button(s().cancel, prefab::ButtonStyle::Secondary, ActionId(ACT_CANCEL)),
-            prefab::button(confirm, prefab::ButtonStyle::Primary, ActionId(ACT_CONFIRM)),
+            confirm_btn,
         ],
         spacing:   Spacing::Sm.as_u16(),
         align:     Align::Center,
         modifiers: alloc::vec![Modifier::Padding(Padding::Sm.as_u16())],
     }
+}
+
+/// A name is committable when it's non-empty and names a file, not a path.
+fn can_commit_name(name: &str) -> bool {
+    let n = name.trim();
+    !n.is_empty() && !n.contains('/') && n != "." && n != ".."
 }
 
 fn render_overwrite(p: &Pick) -> Widget {
