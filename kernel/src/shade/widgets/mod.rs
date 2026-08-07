@@ -339,6 +339,13 @@ pub fn has_open_pick(requester: u32) -> bool {
     PICK_SESSIONS.lock().values().any(|s| s.requester == requester)
 }
 
+/// True if `picker` is a live picker window. Same authorisation check as
+/// `take_pick`, without consuming the session — for verbs a dialog may
+/// use repeatedly while it's open (`npk_pick_mkdir`).
+pub fn is_open_pick(picker: u32) -> bool {
+    PICK_SESSIONS.lock().contains_key(&picker)
+}
+
 /// Consume the session owned by picker window `picker`. Returns None if
 /// the caller isn't a registered picker — which is also the authorisation
 /// check for `npk_pick_result`: only a window the kernel itself spawned as
