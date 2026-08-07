@@ -2578,7 +2578,7 @@ fn intent_cd(args: &str) {
 }
 
 /// Re-export public API for main.rs
-pub use wallpaper::random_wallpaper;
+pub use wallpaper::{apply_startup_wallpaper, random_wallpaper};
 pub use fs::crypto_bench;
 
 /// Create initial directory structure and set cwd to home.
