@@ -2981,6 +2981,12 @@ impl<'a> Ctx<'a> {
         let off = match (ml_len, mr_len) {
             (Len::Auto, Len::Auto) => ml + slack / 2,
             (Len::Auto, _) => ml + slack,
+            // Inside `<center>` a table is centred even with zero margins —
+            // that is what `-moz-center` does, and it is the whole reason the
+            // `<center><table>` idiom worked. Google's home page centres its
+            // search box that way, so without it a correctly sized table still
+            // sits hard against the left edge.
+            _ if st.center_blocks => ml + slack / 2,
             _ => ml,
         };
         let x = x + off;
@@ -3046,8 +3052,16 @@ impl<'a> Ctx<'a> {
     /// they overflow the available width; an explicit table `width` wider than
     /// the content spreads the slack across columns.
     fn auto_columns(&mut self, rows: &[Row<'a>], ncols: usize, st: &ComputedStyle, w: i32) -> Vec<i32> {
+        // A cell percentage is a fraction of the TABLE, not of whatever space
+        // the table was offered — resolving it against the available width
+        // makes `width="25%"` mean a quarter of the viewport in a narrower
+        // table.
+        let pct_basis = table_content_width(st, w as f32);
         let mut pref = vec![0.0f32; ncols];
         let mut minw = vec![0.0f32; ncols];
+        // Columns a cell pinned with an explicit `width`. Slack belongs to
+        // the OTHERS — see the distribution below.
+        let mut sized = vec![false; ncols];
         // Single-column cells define their column outright; cells spanning
         // several only have to fit ACROSS them, so they run in a second pass
         // once the single-span widths are known.
@@ -3061,10 +3075,13 @@ impl<'a> Ctx<'a> {
                     if c >= ncols || (span > 1) != pass_span {
                         continue;
                     }
-                    let (wp, wm) = self.cell_pref_min(&sc.cell, &sc.st, Some(w as f32), st.border_collapse);
+                    let (wp, wm) = self.cell_pref_min(&sc.cell, &sc.st, Some(pct_basis), st.border_collapse);
                     if span == 1 {
                         pref[c] = pref[c].max(wp);
                         minw[c] = minw[c].max(wm);
+                        if sc.st.width != Len::Auto {
+                            sized[c] = true;
+                        }
                     } else {
                         spread_span(&mut pref, c, span, wp);
                         spread_span(&mut minw, c, span, wm);
@@ -3114,9 +3131,28 @@ impl<'a> Ctx<'a> {
             // otherwise `table { width: 100px }` around empty cells collapses
             // to its border alone, which is what a `display: table` root with
             // an empty `<body>` does.
-            let extra = (content_w - total) / ncols as f32;
-            for c in 0..ncols {
-                colw[c] += extra;
+            //
+            // The slack goes to the columns that did NOT ask for a width
+            // (CSS2.1 §17.5.2.2). Spreading it over all of them widened the
+            // sized ones past what they asked for: `25% | auto | 25%` came out
+            // 41% | 18% | 41%, so the middle cell — the one holding the
+            // content — ended up the narrowest of the three. Only when every
+            // column is pinned does the slack spread across all of them,
+            // because then there is nowhere else for it to go.
+            let slack = content_w - total;
+            let free = sized.iter().filter(|s| !**s).count();
+            if free > 0 {
+                let extra = slack / free as f32;
+                for c in 0..ncols {
+                    if !sized[c] {
+                        colw[c] += extra;
+                    }
+                }
+            } else {
+                let extra = slack / ncols as f32;
+                for c in 0..ncols {
+                    colw[c] += extra;
+                }
             }
         }
         colw.iter().map(|v| (v + 0.5) as i32).collect()
@@ -7084,6 +7120,88 @@ mod tests {
         assert_eq!(left_edge("width=\"25%\""), 200, "25% of an 800px table");
         // Author CSS still wins over the hint.
         assert_eq!(left_edge("width=\"200\" style=\"width:100px\""), 100);
+    }
+
+    /// The other half of table-built centring: `<td width="25%">` spacers put
+    /// the CELL in the middle, `align="center"` puts the content in the middle
+    /// of the cell. With only the first, Google's search box sat at the left
+    /// edge of a correctly-placed cell.
+    #[test]
+    fn an_align_attribute_is_a_presentational_hint_for_text_align() {
+        let red = Rgb(0xff, 0, 0);
+        let left_edge = |align: &str| {
+            let l = lay(
+                &format!(
+                    "<body style=\"margin:0\"><table cellpadding=\"0\" cellspacing=\"0\">\
+                     <tr><td width=\"400\" {align}>\
+                     <div style=\"background:#f00;width:40px;height:20px;display:inline-block\"></div>\
+                     </td></tr></table></body>"
+                ),
+                800,
+            );
+            rects(&l).into_iter().find(|(.., c)| *c == red).map(|(x, ..)| x).unwrap()
+        };
+        assert_eq!(left_edge(""), 0, "no hint: content starts at the cell's edge");
+        assert_eq!(left_edge("align=\"center\""), 180, "(400 - 40) / 2");
+        assert_eq!(left_edge("align=\"right\""), 360, "400 - 40");
+        // Author CSS still wins over the hint.
+        assert_eq!(left_edge("align=\"center\" style=\"text-align:left\""), 0);
+    }
+
+    /// A table wider than its content hands the slack to the columns that did
+    /// NOT ask for a width. Spreading it over all of them widened the sized
+    /// ones past what they asked for: `25% | auto | 25%` came out 41/18/41,
+    /// so the middle column — the one with the content in it — ended up the
+    /// narrowest of the three.
+    #[test]
+    fn table_slack_goes_to_the_columns_without_a_width() {
+        let green = Rgb(0, 0x80, 0);
+        let middle = |mid: &str| {
+            let l = lay(
+                &format!(
+                    "<body style=\"margin:0\"><table cellpadding=\"0\" cellspacing=\"0\" style=\"width:800px\">\
+                     <tr><td width=\"25%\">&nbsp;</td>\
+                     <td {mid} style=\"background:#008000\">x</td>\
+                     <td width=\"25%\">&nbsp;</td></tr></table></body>"
+                ),
+                // Deliberately WIDER than the table: a cell percentage is a
+                // fraction of the table, not of the space it was offered.
+                900,
+            );
+            rects(&l).into_iter().find(|(.., c)| *c == green).map(|(x, _, w, ..)| (x, w)).unwrap()
+        };
+        // The auto column takes ALL of it: 800 - 200 - 200 = 400.
+        assert_eq!(middle(""), (200, 400));
+        // Spelling the same thing out explicitly must agree.
+        assert_eq!(middle("width=\"50%\""), (200, 400));
+    }
+
+    /// `<center>` centres block-level children, not only inline content —
+    /// browsers spell it `text-align: -moz-center`, and the `<center><table>`
+    /// idiom is built on it. Plain CSS `text-align: center` must NOT do this,
+    /// or every centred paragraph would drag its block children along.
+    #[test]
+    fn center_centres_a_table_but_plain_text_align_does_not() {
+        let green = Rgb(0, 0x80, 0);
+        let table_x = |wrap_open: &str, wrap_close: &str| {
+            let l = lay(
+                &format!(
+                    "<body style=\"margin:0\">{wrap_open}\
+                     <table cellpadding=\"0\" cellspacing=\"0\" style=\"background:#008000\">\
+                     <tr><td style=\"width:100px;height:20px\"></td></tr></table>\
+                     {wrap_close}</body>"
+                ),
+                500,
+            );
+            rects(&l).into_iter().find(|(.., c)| *c == green).map(|(x, ..)| x).unwrap()
+        };
+        assert_eq!(table_x("<center>", "</center>"), 200, "(500 - 100) / 2");
+        assert_eq!(table_x("<div align=\"center\">", "</div>"), 200, "the other spelling");
+        assert_eq!(
+            table_x("<div style=\"text-align:center\">", "</div>"),
+            0,
+            "plain CSS centring moves inline content only"
+        );
     }
 
     #[test]

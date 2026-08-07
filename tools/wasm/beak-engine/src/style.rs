@@ -552,6 +552,12 @@ pub struct ComputedStyle {
     pub opacity_zero: bool,
     pub color: Rgb,
     pub text_align: TextAlign,
+    /// `<center>` and `<div align=center>` centre BLOCK-level children too,
+    /// not just inline content — the behaviour browsers spell `text-align:
+    /// -moz-center`. Plain CSS `text-align: center` must NOT do this, which
+    /// is why it needs its own inherited flag rather than riding on the
+    /// alignment value. The `<center><table>` idiom depends on it entirely.
+    pub center_blocks: bool,
     pub list_style: ListStyle,
     pub line_height: LineHeight,
     /// `direction: rtl` — the inline base direction. This engine does no bidi
@@ -757,6 +763,7 @@ impl ComputedStyle {
             transparent: false,
             opacity_zero: false,
             text_align: TextAlign::Start,
+            center_blocks: false,
             list_style: ListStyle::Disc,
             line_height: LineHeight::Normal,
             rtl: false,
@@ -962,6 +969,7 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         opacity_zero: false,
         color: parent.color,
         text_align: parent.text_align,
+        center_blocks: parent.center_blocks,
         list_style: parent.list_style,
         line_height: parent.line_height,
         rtl: parent.rtl,
@@ -1146,6 +1154,35 @@ pub fn resolve(
         }
         if let Some(l) = el.attr("height").and_then(parse_dimension_attr) {
             s.height = l;
+        }
+    }
+
+    // `align` is a presentational hint for `text-align` (HTML Rendering
+    // §15.3.3). It is inherited, so a cell's `align="center"` centres
+    // everything inside it — which is the other half of how table-built pages
+    // centre: `<td width="25%">` spacers place the cell, `align="center"`
+    // places the content INSIDE it. With only the first, Google's search box
+    // sat at the left edge of a correctly-centred cell.
+    //
+    // `<table align>` is deliberately absent: there it means float/auto
+    // margins, not text alignment, and treating it as this would centre a
+    // table's text instead of the table.
+    if matches!(
+        el.tag.as_str(),
+        "td" | "th" | "tr" | "thead" | "tbody" | "tfoot" | "col" | "colgroup"
+            | "div" | "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+    ) {
+        match el.attr("align").map(str::trim) {
+            Some(v) if v.eq_ignore_ascii_case("center") => {
+                s.text_align = TextAlign::Center;
+                // `<div align=center>` is the other spelling of `<center>` and
+                // gets the same block-centring; a cell's `align` does not.
+                s.center_blocks = el.tag == "div";
+            }
+            Some(v) if v.eq_ignore_ascii_case("left") => s.text_align = TextAlign::Left,
+            Some(v) if v.eq_ignore_ascii_case("right") => s.text_align = TextAlign::Right,
+            Some(v) if v.eq_ignore_ascii_case("justify") => s.text_align = TextAlign::Justify,
+            _ => {}
         }
     }
 
@@ -1624,6 +1661,7 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
         "center" => {
             s.display = Display::Block;
             s.text_align = TextAlign::Center;
+            s.center_blocks = true;
         }
 
         // Tables. `<table>` gets the table formatting context; cells are block
