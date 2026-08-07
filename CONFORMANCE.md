@@ -22,7 +22,7 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-07, beak 0.4.8)
+### Current number (measured 2026-08-07, beak 0.4.9)
 
 ```
 4082 pass / 1526 fail / 178 inconclusive   (of 5786 vendored reftests)
@@ -1506,6 +1506,45 @@ menu to pick from.
 
     +3, and two of them (`CSS2/absolute-replaced-height-028`/`-035`) are the
     abspos containing block, not the search box.
+
+43. ✅ **Die Breitenmessung kannte ihre Geschwister nicht (0.4.9).** WPT
+    unchanged at 4082, 189 unit tests. Oracle-blind, and it moved Wikipedia's
+    entire header by ~90px.
+
+    `intrinsic_walk`/`intrinsic_node` resolved every child's style with
+    `self.styled(el, st, &[], 0)` — **no preceding siblings, no sibling count**.
+    The LAYOUT walk passes both. So any `+`/`~` rule was applied when laying out
+    and ignored when measuring, and the two paths disagreed about the same box.
+
+    Every component library hides an icon-only button's label with the
+    visually-hidden idiom on a sibling combinator:
+    `.cdx-button--icon-only span + span { position:absolute; width:1px }`.
+    Layout took the label out of flow; the measurement still counted its text,
+    so Wikipedia's hamburger was as wide as the word "Hauptmenü" — ~80px — and
+    that pushed the logo and the search field right across the header. Fixed:
+    hamburger 245 → 204, logo 326 → 234, and both now land on the header's
+    padding edge (152 + 3.25rem = 204).
+
+    Same shape as [[feedback-intrinsic-shared-path]] once more: **a measuring
+    path that is a second, lossier copy of the layout path's inputs.**
+
+    ### 🔑 What was NOT a bug — and must not be "fixed"
+
+    The search field still starts 25px right of the article text, and that is
+    **correct for the document we are served**. MediaWiki writes two rules onto
+    the same box:
+
+    ```
+    +26px   .cdx-typeahead-search--auto-expand-width          (always)
+    −24px   .client-js .vector-search-box-auto-expand-width   (JS only)
+    ```
+
+    The page arrives as `<html class="client-nojs">`; a browser with scripting
+    swaps that to `client-js`, both rules apply, and the net +2px is what makes
+    Firefox's field look flush. Proven by re-rendering the same file with the
+    class swapped by hand: the group lands at **478**, against article text at
+    477. **We render it right; what we are missing is scripting**, and nudging
+    the layout to hide that would have been exactly the wrong repair.
 
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the
