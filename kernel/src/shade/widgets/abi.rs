@@ -624,6 +624,15 @@ pub enum Event {
     /// app running several dialogs (open / save-as / …) uses it to tell
     /// which one came back. The kernel never interprets it.
     Picked { path: alloc::string::String, tag: u32 },
+    /// The user asked to close this window (Mod+Q, the title-bar X) and
+    /// the app opted into being asked via `npk_window_set_close_guard`.
+    /// The window is still open: save, prompt, then call
+    /// `npk_close_widget` to go — or ignore it to stay.
+    ///
+    /// Not a promise of veto power. A second close gesture, or a few
+    /// seconds of silence, closes the window anyway: an app must never be
+    /// able to make its window unclosable.
+    CloseRequest,
     // Appended only.
 }
 

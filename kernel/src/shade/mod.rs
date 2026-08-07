@@ -857,7 +857,7 @@ pub fn handle_action(action: input::ShadeAction) {
                     // managed chrome. Focus shouldn't land on one, but guard
                     // here too in case some path focuses a panel.
                     if !comp.is_panel(id) {
-                        comp.close_window(id);
+                        comp.request_close_window(id);
                     }
                 }
             });
@@ -1185,6 +1185,11 @@ pub fn poll_render() {
     }
 
     if !animating { tick_focus_glow(); }
+
+    // Reap close requests a guarded app never answered.
+    if with_compositor(|comp| comp.tick_close_requests()).unwrap_or(false) {
+        render_frame();
+    }
 
     // Drive the auto-hide dock. Feed it the current cursor Y so the reveal
     // dwell / hide debounce advance even while the cursor is parked, then
