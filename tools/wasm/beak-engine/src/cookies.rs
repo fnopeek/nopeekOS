@@ -206,15 +206,33 @@ fn parse_http_date(s: &str) -> Option<i64> {
 
 impl Jar {
 /// Take everything a response said with `Set-Cookie` and update the jar.
-/// `url` is the URL the response came from (after redirects), `headers` the
-/// raw response header block.
+///
+/// `headers` may cover a whole redirect CHAIN: the host writes a `:hop <url>`
+/// marker before each response's block. That is not a detail — a login is a
+/// POST answered by a 303 that carries the session cookie, and the cookie
+/// belongs to the host that SENT it, not to wherever the chain ended.
+/// `url` is the origin for a block that carries no marker.
+///
+/// ⚠ The marker is trusted, and it may be trusted for exactly one reason:
+/// no HTTP field name may begin with a colon, and the host DROPS any
+/// response line that does (`capture_headers`). A server that could write
+/// its own `:hop` would file its cookies against a host it does not own.
+/// Whoever changes either side owns both.
 pub fn store(&mut self, url: &str, headers: &str, now: i64) {
-    let (host, path, _) = split_url(url);
-    if host.is_empty() {
-        return;
-    }
+    let (mut host, mut path, _) = split_url(url);
     for line in headers.split('\n') {
         let line = line.trim_end_matches('\r');
+        if let Some(hop) = line.strip_prefix(":hop ") {
+            let (h, p, _) = split_url(hop.trim());
+            if !h.is_empty() {
+                host = h;
+                path = p;
+            }
+            continue;
+        }
+        if host.is_empty() {
+            continue;
+        }
         let Some((name, value)) = line.split_once(':') else { continue };
         if !name.trim().eq_ignore_ascii_case("set-cookie") {
             continue;
@@ -481,6 +499,52 @@ mod tests {
         let h = j.header_for("https://www.amazon.de/gp/cart", 1_786_294_929);
         assert!(h.contains("session-id=258-2923272-2531756"), "{h}");
         assert!(h.contains("i18n-prefs=CHF"), "{h}");
+    }
+
+    /// A login is a POST answered by a 303 that carries the session cookie.
+    /// Reading only the last response in the chain threw it away — Google's
+    /// consent page took the click, saved nothing, and sent you straight back
+    /// to itself.
+    #[test]
+    fn a_cookie_set_on_a_redirect_belongs_to_the_host_that_sent_it() {
+        let mut j = jar();
+        j.store(
+            "https://www.google.com/search?q=x",
+            concat!(
+                ":hop https://consent.google.com/save\r\n",
+                "set-cookie: SOCS=CAESHAgB; expires=Wed, 08-Sep-2027 17:02:09 GMT; path=/; domain=.google.com; Secure\r\n",
+                ":hop https://www.google.com/search?q=x\r\n",
+                "content-type: text/html\r\n",
+            ),
+            1_786_294_929,
+        );
+        // Set by consent.google.com with Domain=.google.com — so it rides the
+        // search request, which is the whole point of accepting it.
+        assert!(j.header_for("https://www.google.com/search?q=x", 1_786_294_929).contains("SOCS="));
+
+        // A hop that sets a HOST-ONLY cookie scopes it to that hop's host and
+        // to no other — the marker is what makes the difference visible.
+        let mut j = jar();
+        j.store(
+            "https://www.google.com/",
+            concat!(
+                ":hop https://consent.google.com/save\r\n",
+                "set-cookie: only=here\r\n",
+            ),
+            1000,
+        );
+        assert_eq!(j.header_for("https://consent.google.com/save", 1000), "only=here");
+        assert_eq!(j.header_for("https://www.google.com/", 1000), "");
+    }
+
+    /// Headers with no marker at all — every sub-resource response, and any
+    /// caller that hands over a single block — still scope to the URL given.
+    #[test]
+    fn an_unmarked_block_scopes_to_the_url_it_was_given() {
+        let mut j = jar();
+        j.store("https://example.com/app/x", "set-cookie: a=1\r\n", 1000);
+        assert_eq!(j.header_for("https://example.com/app/y", 1000), "a=1");
+        assert_eq!(j.header_for("https://other.test/", 1000), "");
     }
 
     /// A name that promises something has to keep it, or it means nothing

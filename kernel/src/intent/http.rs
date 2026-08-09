@@ -533,6 +533,48 @@ impl Default for HttpRequest<'_> {
     }
 }
 
+/// The response header block, minus the status line, capped and cleaned.
+///
+/// Drops any line starting with a colon. No HTTP field name may begin with
+/// one, so nothing legitimate is lost — and it is what keeps a server from
+/// writing its own `:hop https://yourbank.example` into its headers and
+/// having the browser file the cookies that follow against a host it does
+/// not own.
+fn capture_headers(hdr_str: &str) -> String {
+    let rest = match hdr_str.split_once("\r\n") {
+        Some((_, r)) => r,
+        None => return String::new(),
+    };
+    let mut out = String::new();
+    for line in rest.split("\r\n") {
+        if line.starts_with(':') || out.len() + line.len() + 2 > MAX_REPLY_HEADERS {
+            continue;
+        }
+        out.push_str(line);
+        out.push_str("\r\n");
+    }
+    out
+}
+
+/// Append one hop's response headers under a `:hop <url>` marker.
+///
+/// A redirect chain can cross origins, and a cookie belongs to the response
+/// that SENT it — filing a login cookie against the URL the chain happened to
+/// end at scopes it to the wrong host. So each block says where it came from.
+///
+/// `:hop` cannot be forged by a server: a field name may not start with a
+/// colon, and `capture_headers` drops any line that does.
+fn push_hop(out: &mut String, host: &str, path: &str, headers: &str) {
+    out.push_str(":hop https://");
+    out.push_str(host);
+    out.push_str(path);
+    out.push_str("\r\n");
+    out.push_str(headers);
+    if !headers.ends_with('\n') {
+        out.push_str("\r\n");
+    }
+}
+
 /// Response headers we hand back to a guest, capped. Big enough for a page
 /// that sets a dozen cookies, small enough that a hostile server cannot make
 /// the kernel hold an unbounded string per request.
@@ -725,9 +767,27 @@ pub fn https_request_streaming(
     // here on (RFC 9110 §15.4).
     let mut method = String::from(req.method);
     let mut body: &[u8] = req.body;
+    // Caller headers stop at the first hop that leaves the origin they were
+    // written for. The caller computed its `Cookie:` (and anything else
+    // sensitive) for THIS host; replaying it to whatever a redirect names
+    // hands one site's session to another. We follow redirects on the
+    // caller's behalf, so this rule is ours to keep — the same reason the
+    // redirect path already refuses an http downgrade.
+    let mut carry_headers = true;
+    // Every hop's response headers, each under a `:hop <url>` marker, so the
+    // caller can scope what it finds to the response that actually sent it.
+    // A cookie set by the 303 of a login POST lives HERE and nowhere else:
+    // reporting only the final response's headers drops it, and the login
+    // silently does not take.
+    let mut hops = String::new();
     for _ in 0..4 {
         let mut total: usize = 0;
-        let hop = HttpRequest { method: &method, headers: req.headers, body };
+        let no_headers: [String; 0] = [];
+        let hop = HttpRequest {
+            method: &method,
+            headers: if carry_headers { req.headers } else { &no_headers },
+            body,
+        };
         let resp = https_get_once(
             &cur_host,
             &cur_path,
@@ -758,13 +818,14 @@ pub fn https_request_streaming(
                     out.content_type.push_str(ct);
                 }
                 out.status = resp.status;
-                // The header block is copied only for the caller that asked
+                // The header blocks are copied only for the caller that asked
                 // to see statuses — the browser. A page load fans out to ~20
                 // sub-resource GETs, and none of them has any use for a
                 // second copy of their headers.
                 out.headers.clear();
                 if keep_status {
-                    out.headers.push_str(&resp.headers);
+                    out.headers.push_str(&hops);
+                    push_hop(&mut out.headers, &cur_host, &cur_path, &resp.headers);
                 }
             }
             return Ok(total);
@@ -773,7 +834,17 @@ pub fn https_request_streaming(
         // the consumer never sees any bytes from the redirect response. Safe
         // to retry against the Location target with a fresh TLS session.
         let loc = resp.location.ok_or("redirect without Location")?;
+        // A redirect's OWN headers matter: a login POST is answered with a
+        // 303 that carries `Set-Cookie: session=…`, and the page it points at
+        // is only reachable because of it. Keeping just the last response's
+        // headers threw the session away and the login quietly did not take.
+        if keep_status {
+            push_hop(&mut hops, &cur_host, &cur_path, &resp.headers);
+        }
         let (next_host, next_path) = parse_https_url(&loc, &cur_host)?;
+        if next_host != cur_host {
+            carry_headers = false;
+        }
         cur_host = next_host;
         cur_path = next_path;
         // 303 says so outright, and 301/302 after a POST is the behaviour
@@ -1250,12 +1321,9 @@ fn https_exchange(
         }
     };
     let status = parse_status_code(hdr_str).unwrap_or(0);
-    // Everything after the status line, verbatim and capped. `Set-Cookie`
-    // repeats, so handing back parsed single values could never carry it.
-    let reply_headers = String::from(match hdr_str.split_once("\r\n") {
-        Some((_, rest)) => &rest[..rest.len().min(MAX_REPLY_HEADERS)],
-        None => "",
-    });
+    // Everything after the status line, capped. `Set-Cookie` repeats, so
+    // handing back parsed single values could never carry it.
+    let reply_headers = capture_headers(hdr_str);
     let location = parse_header_value(hdr_str, "location").map(String::from);
     let content_type = parse_header_value(hdr_str, "content-type").map(String::from);
     let content_length = parse_header_value(hdr_str, "content-length")
@@ -1830,12 +1898,9 @@ fn http_get_once(
     let body_start = hdr_end + 4;
     let hdr_str = core::str::from_utf8(&raw[..hdr_end]).map_err(|_| "invalid header encoding")?;
     let status = parse_status_code(hdr_str).unwrap_or(0);
-    // Everything after the status line, verbatim and capped. `Set-Cookie`
-    // repeats, so handing back parsed single values could never carry it.
-    let reply_headers = String::from(match hdr_str.split_once("\r\n") {
-        Some((_, rest)) => &rest[..rest.len().min(MAX_REPLY_HEADERS)],
-        None => "",
-    });
+    // Everything after the status line, capped. `Set-Cookie` repeats, so
+    // handing back parsed single values could never carry it.
+    let reply_headers = capture_headers(hdr_str);
     let location = parse_header_value(hdr_str, "location").map(String::from);
     let content_type = parse_header_value(hdr_str, "content-type").map(String::from);
 
