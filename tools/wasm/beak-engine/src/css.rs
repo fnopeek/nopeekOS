@@ -491,14 +491,27 @@ pub struct MediaCond {
     /// `prefers-color-scheme` — `Some(true)` wants dark, `Some(false)` light.
     scheme_dark: Option<bool>,
     understood: bool,
+    /// A leading `not`, which negates the WHOLE query (Media Queries 4 §3.1),
+    /// not one feature of it. `@media not screen and (max-width: 480px)` is
+    /// how a mobile-first page states its desktop rules — dropping it leaves
+    /// a 1400px window rendering the phone layout, which is what Google's
+    /// consent page did: buttons at full window width, both the phone and the
+    /// desktop set of them on screen at once.
+    negated: bool,
 }
 
 impl MediaCond {
     fn matches(&self, m: Media) -> bool {
-        self.understood
-            && self.min_width.is_none_or(|v| m.width >= v)
+        // A query we did not understand never matches — not even negated.
+        // `not <something we cannot evaluate>` is not "true", it is unknown,
+        // and unknown has to fail closed in both directions.
+        if !self.understood {
+            return false;
+        }
+        let hit = self.min_width.is_none_or(|v| m.width >= v)
             && self.max_width.is_none_or(|v| m.width <= v)
-            && self.scheme_dark.is_none_or(|want| want == m.dark)
+            && self.scheme_dark.is_none_or(|want| want == m.dark);
+        hit != self.negated
     }
 }
 
@@ -1161,8 +1174,13 @@ fn parse_media_query(prelude: &str) -> Vec<MediaCond> {
     prelude
         .split(',')
         .map(|q| {
-            let mut cond = MediaCond { min_width: None, max_width: None, scheme_dark: None, understood: true };
-            let ql = q.to_ascii_lowercase();
+            let mut cond = MediaCond { min_width: None, max_width: None, scheme_dark: None, understood: true, negated: false };
+            let mut ql = q.to_ascii_lowercase();
+            // `not` leads the query and covers all of it.
+            if let Some(rest) = ql.trim_start().strip_prefix("not ") {
+                cond.negated = true;
+                ql = rest.to_string();
+            }
             for part in ql.split("and") {
                 let p = part.trim();
                 if p.is_empty() {
@@ -2049,6 +2067,16 @@ mod tests {
         // Narrow (500 < 768): only the base rule.
         assert_eq!(ss.matched(&e, &[], &[], 0, Media::new(500.0, false)).len(), 1, "media rule dropped narrow");
         // An un-evaluable feature never matches (rule dropped both ways).
+        // `not` negates the whole query — how a mobile-first page states its
+        // desktop rules. Without it a wide window renders the phone layout.
+        let ssn = parse("@media not screen and (max-width: 480px) { .w { width: auto } }");
+        assert!(!ssn.rules.is_empty());
+        let wide = Media::new(1400.0, false);
+        let phone = Media::new(400.0, false);
+        let hit = |m: Media| !ssn.matched(&info("div", None, &["w"]), &[], &[], 1, m).is_empty();
+        assert!(hit(wide), "1400px is NOT max-width:480 -> the negated query holds");
+        assert!(!hit(phone), "400px IS max-width:480 -> the negated query does not");
+
         let ss2 = parse("@media (prefers-color-scheme: dark) { .col { color: blue } }");
         assert!(ss2.matched(&e, &[], &[], 0, Media::new(1000.0, false)).is_empty(), "unknown feature never applies");
     }
