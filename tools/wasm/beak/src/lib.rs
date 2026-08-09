@@ -404,6 +404,47 @@ impl Page {
         self.nav = g;
         self.forms = forms::collect(&beak_engine::parse(html_str()));
         self.state.reset();
+        self.log_forms();
+    }
+
+    /// Report the forms this page offers, once per navigation.
+    ///
+    /// "The button does nothing" has several very different causes — a button
+    /// we never saw, one whose form we could not resolve, a form whose action
+    /// we misread — and from the outside they look identical. Three lines on
+    /// the serial tell them apart, which a screenshot cannot: a picture shows
+    /// the pixels, not who owns which control.
+    fn log_forms(&self) {
+        if self.forms.controls.is_empty() {
+            return;
+        }
+        let mut s = String::from("[beak] forms: ");
+        push_i64(&mut s, self.forms.forms.len() as i64);
+        s.push_str(", controls: ");
+        push_i64(&mut s, self.forms.controls.len() as i64);
+        log(&s);
+        for (i, f) in self.forms.forms.iter().enumerate().take(6) {
+            let mut s = String::from("[beak]   form#");
+            push_i64(&mut s, i as i64);
+            s.push(' ');
+            s.push_str(if f.method_get { "GET " } else { "POST " });
+            s.push_str(if f.action.is_empty() { "(dieses Dokument)" } else { &f.action });
+            log(&s);
+        }
+        // Only the controls that are supposed to DO something — a page can
+        // carry dozens of hidden fields and they are not the question.
+        for c in self.forms.controls.iter().filter(|c| c.kind.is_submit()).take(8) {
+            let mut s = String::from("[beak]   submit seq=");
+            push_i64(&mut s, c.seq as i64);
+            s.push_str(" form=");
+            match c.form {
+                Some(f) => push_i64(&mut s, f as i64),
+                None => s.push_str("KEINS"),
+            }
+            s.push_str(" name=");
+            s.push_str(if c.name.is_empty() { "-" } else { &c.name });
+            log(&s);
+        }
     }
     /// The focused control's current text + its kind.
     fn focused(&self) -> Option<(&forms::Control, &str)> {
@@ -972,7 +1013,15 @@ fn looks_like_url(t: &str) -> bool {
 fn submit_form(page: &Page, activated: Option<u32>) -> bool {
     let sub = match forms::submit(&page.forms, &page.state, activated) {
         Some(s) => s,
-        None => return false,
+        // Silence here reads as "the button is dead". It is not the same
+        // thing as a failed request, and the difference is the whole
+        // diagnosis: a button whose form we never resolved (nested outside
+        // it, or owned by a `form=` attribute we do not read) versus a form
+        // that submitted and came back wrong.
+        None => {
+            log("[beak] submit: kein zugehoeriges Formular");
+            return false;
+        }
     };
     // An empty action targets the current document; either way the form data
     // REPLACES the action's query string (HTML §4.10.21.3 "mutate action URL").
