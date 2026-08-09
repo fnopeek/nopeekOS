@@ -5944,10 +5944,17 @@ fn paint_control(
                 return;
             }
             if !ctl.text.is_empty() {
-                // Clip an over-long value to the box (no inner scrolling yet):
-                // keep the tail visible, which is where the caret is.
+                // Clip an over-long value to the box. WHICH END is dropped is
+                // not a detail: a field being typed into must keep its tail,
+                // where the caret is — but a LABEL must keep its head, because
+                // it is a name, and a name clipped at the front is a different
+                // word. Google's consent buttons read "lle ablehnen".
                 let inner = (w - ctl.pad_l - CTL_PAD_X - 2).max(0) as f32;
-                let text = clip_text_tail(font, &ctl.text, ctl.style.size, inner);
+                let text = if ctl.kind.is_submit() || ctl.kind == ControlKind::File {
+                    clip_text_head(font, &ctl.text, ctl.style.size, inner)
+                } else {
+                    clip_text_tail(font, &ctl.text, ctl.style.size, inner)
+                };
                 // A button's label is centred in its box (HTML §button-layout);
                 // a field's value is not.
                 let tx = match ctl.kind {
@@ -6075,6 +6082,25 @@ fn wrap_lines(font: &Font, text: &str, size: f32, max_w: f32, max_rows: usize) -
 
 /// Trim `text` from the LEFT until it fits `max_w` (the caret sits at the end
 /// of a field the user is typing into, so the tail is what matters).
+/// Trim from the END until it fits — for a label, which is read from the
+/// front. The counterpart of `clip_text_tail`, which trims from the front for
+/// a field whose caret is at the back.
+fn clip_text_head(font: &Font, text: &str, size: f32, max_w: f32) -> String {
+    if measure(font, text, size) <= max_w {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut end = chars.len();
+    while end > 0 {
+        let s: String = chars[..end].iter().collect();
+        if measure(font, &s, size) <= max_w {
+            return s;
+        }
+        end -= 1;
+    }
+    String::new()
+}
+
 fn clip_text_tail(font: &Font, text: &str, size: f32, max_w: f32) -> String {
     if measure(font, text, size) <= max_w {
         return text.to_string();

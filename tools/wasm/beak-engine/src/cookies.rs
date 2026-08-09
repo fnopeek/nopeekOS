@@ -561,6 +561,28 @@ mod tests {
         assert_eq!(j.header_for("https://example.com/", 1000), "__Host-d=4");
     }
 
+    /// The exact bytes Google answers a consent POST with, captured
+    /// 2026-08-09 — the 303 that carries the decision. If this cookie does
+    /// not land, the consent page sends you straight back to itself, forever.
+    #[test]
+    fn googles_consent_answer_is_stored_and_rides_the_next_search() {
+        let mut j = jar();
+        j.store(
+            "https://www.google.com/search?q=stansstad",
+            concat!(
+                ":hop https://consent.google.com/save\r\n",
+                "set-cookie: SOCS=CAESNQgCEitib3FfaWRl; Domain=.google.com; ",
+                "Expires=Wed, 08-Sep-2027 19:03:37 GMT; Path=/; Secure; SameSite=lax\r\n",
+            ),
+            1_786_303_417,
+        );
+        assert!(
+            j.header_for("https://www.google.com/search?q=stansstad", 1_786_303_417)
+                .contains("SOCS=CAESNQgCEitib3FfaWRl"),
+            "the consent decision has to ride the search that follows it"
+        );
+    }
+
     #[test]
     fn a_port_does_not_split_the_jar() {
         let mut j = jar();
