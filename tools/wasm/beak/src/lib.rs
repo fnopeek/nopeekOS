@@ -17,6 +17,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 mod neterror;
+use beak_engine::cookies;
 
 use beak_engine::charset;
 use beak_engine::forms::{self, ControlKind, FormState, Forms};
@@ -98,7 +99,27 @@ static NPK_CAPS: [u8; 2] = [caps::RENDER | caps::CANVAS, caps::ext::NET];
 unsafe extern "C" {
     fn npk_scene_commit(ptr: i32, len: i32) -> i32;
     fn npk_event_poll(ptr: i32, max: i32) -> i32;
-    fn npk_http_request(url_ptr: i32, url_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
+    /// The general request: any method, extra headers (newline-separated
+    /// `Name: value`), a body. A non-2xx comes back as bytes, not as an
+    /// error — a 404 page is a document.
+    fn npk_http_send(
+        method_ptr: i32,
+        method_len: i32,
+        url_ptr: i32,
+        url_len: i32,
+        hdrs_ptr: i32,
+        hdrs_len: i32,
+        body_ptr: i32,
+        body_len: i32,
+        buf_ptr: i32,
+        buf_max: i32,
+    ) -> i32;
+    /// The last `npk_http_send` response's header block, minus the status
+    /// line. `Set-Cookie` repeats, so it can only be handed over raw.
+    fn npk_http_response_headers(buf_ptr: i32, buf_max: i32) -> i32;
+    /// Seconds since the epoch, UTC. `npk_ticks` cannot stand in: it restarts
+    /// at every boot and a cookie's `Expires` is an absolute date.
+    fn npk_unix_time() -> i64;
     fn npk_http_final_url(buf_ptr: i32, buf_max: i32) -> i32;
     /// Why the last request failed: `kind\tmessage`. Cleared on success.
     fn npk_http_last_error(buf_ptr: i32, buf_max: i32) -> i32;
@@ -604,16 +625,80 @@ fn fetched_from() -> Option<String> {
     core::str::from_utf8(bytes).ok().map(|s| s.to_string())
 }
 
+/// Room for one response's header block — the kernel caps what it hands back
+/// at 8 KiB, and a page that sets a dozen cookies still fits.
+const HDR_CAP: usize = 8 * 1024;
+static mut HDR_BUF: [u8; HDR_CAP] = [0; HDR_CAP];
+
+/// Send one document request and file whatever cookies come back.
+///
+/// Every document goes through here — a plain navigation is a GET with an
+/// empty body. Keeping ONE path means a cookie cannot be filed on the reply
+/// to a form and then forgotten on the reply to the redirect it sends you to.
+fn send_document(method: &str, url: &str, body: &[u8], extra: &str) -> i32 {
+    let now = unsafe { npk_unix_time() };
+    let mut hdrs = String::new();
+    let jar = cookies::header_for(url, now);
+    if !jar.is_empty() {
+        hdrs.push_str("Cookie: ");
+        hdrs.push_str(&jar);
+    }
+    if !extra.is_empty() {
+        if !hdrs.is_empty() {
+            hdrs.push('\n');
+        }
+        hdrs.push_str(extra);
+    }
+    let dst = core::ptr::addr_of_mut!(HTML_BUF) as *mut u8;
+    let n = unsafe {
+        npk_http_send(
+            method.as_ptr() as i32, method.len() as i32,
+            url.as_ptr() as i32, url.len() as i32,
+            hdrs.as_ptr() as i32, hdrs.len() as i32,
+            body.as_ptr() as i32, body.len() as i32,
+            dst as i32, HTML_CAP as i32,
+        )
+    };
+    if n >= 0 {
+        let hp = core::ptr::addr_of_mut!(HDR_BUF) as *mut u8;
+        let hn = unsafe { npk_http_response_headers(hp as i32, HDR_CAP as i32) };
+        if hn > 0 {
+            let bytes = unsafe { core::slice::from_raw_parts(hp as *const u8, hn as usize) };
+            if let Ok(h) = core::str::from_utf8(bytes) {
+                // Cookies are scoped to where the response CAME from, after
+                // redirects — filing them against the URL we asked for would
+                // scope a login cookie to the wrong host.
+                let from = fetched_from().unwrap_or_else(|| url.to_string());
+                let before = cookies::count();
+                cookies::store(&from, h, now);
+                let after = cookies::count();
+                if after != before || h.to_ascii_lowercase().contains("set-cookie") {
+                    let mut m = String::from("[beak] cookies: ");
+                    push_i64(&mut m, after as i64);
+                    m.push_str(" held");
+                    log(&m);
+                }
+            }
+        }
+    }
+    n
+}
+
 /// Fetch `url` into HTML_BUF, then its linked stylesheets; resets scroll +
 /// marks dirty.
 fn fetch(url: &str) -> bool {
+    fetch_with("GET", url, &[], "")
+}
+
+/// The body of `fetch`, with the request spelled out — a form submission is
+/// the same navigation with a method and a body.
+fn fetch_with(method: &str, url: &str, body: &[u8], extra: &str) -> bool {
     let t_nav = now_ms();
     unsafe {
         core::ptr::addr_of_mut!(NAV_START_MS).write(t_nav);
         core::ptr::addr_of_mut!(NAV_REPORTED).write(false);
     }
-    let dst = core::ptr::addr_of_mut!(HTML_BUF) as *mut u8;
-    let n = unsafe { npk_http_request(url.as_ptr() as i32, url.len() as i32, dst as i32, HTML_CAP as i32) };
+    let n = send_document(method, url, body, extra);
     log_ms("fetch document", now_ms() - t_nav);
     let len = if n < 0 { 0 } else { n as usize };
     unsafe { core::ptr::addr_of_mut!(HTML_LEN).write(len) };
@@ -829,6 +914,15 @@ fn fetch_url(url: &str) {
     let _ = fetch(url);
 }
 
+/// Navigate by POSTing `body` to `url` (a form with `method=post`).
+fn post_url(url: &str, body: &[u8]) {
+    set_url(url);
+    let _ = fetch_with(
+        "POST", url, body,
+        "Content-Type: application/x-www-form-urlencoded",
+    );
+}
+
 /// Navigate the address bar's typed text (normalise scheme) — new entry.
 fn go(typed: &str) {
     let t = typed.trim();
@@ -873,27 +967,29 @@ fn looks_like_url(t: &str) -> bool {
     host == "localhost" || (host.contains('.') && !host.ends_with('.'))
 }
 
-/// Submit a form: build `action?name=value&…` and navigate there. GET only —
-/// a POST needs a request body, which `npk_http_request` cannot send yet.
+/// Submit a form. GET puts the data in the query string, POST in the request
+/// body — the same encoding either way (HTML §4.10.21.3).
 fn submit_form(page: &Page, activated: Option<u32>) -> bool {
     let sub = match forms::submit(&page.forms, &page.state, activated) {
         Some(s) => s,
         None => return false,
     };
-    if !sub.method_get {
-        log("[beak] POST-Formulare noch nicht unterstützt");
-        return false;
-    }
     // An empty action targets the current document; either way the form data
     // REPLACES the action's query string (HTML §4.10.21.3 "mutate action URL").
     let base = url_str().to_string();
     let action = if sub.action.is_empty() { base.clone() } else { resolve(&base, &sub.action) };
     let mut url = action.split(['?', '#']).next().unwrap_or(&action).to_string();
-    if !sub.query.is_empty() {
-        url.push('?');
-        url.push_str(&sub.query);
+    if sub.method_get {
+        if !sub.query.is_empty() {
+            url.push('?');
+            url.push_str(&sub.query);
+        }
+        fetch_url(&url);
+    } else {
+        // A POST keeps the action's own query string — only a GET replaces it.
+        let target = if action.contains('?') { action.clone() } else { url.clone() };
+        post_url(&target, sub.query.as_bytes());
     }
-    fetch_url(&url);
     hist_push(url_str());
     true
 }

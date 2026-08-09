@@ -1751,7 +1751,8 @@ boxes until Stage 1.
 | Button content layout | HTML §button-layout | 🟡 | label text centred in the box; the button's *children* are not laid out (an icon + markup inside a `<button>` collapses to its text) → the 3 `centering-00x` reftests fail on box size |
 | Text editing in a field | HTML §4.10.5 | 🟡 | insert/Backspace/Delete/arrows/Home/End + caret, per-control state; no selection, no clipboard, no IME, ASCII only |
 | Form submission (GET) | HTML §4.10.21/22 | ✅ | successful-control rules (named + enabled, only the activated button, checked boxes/radios), `application/x-www-form-urlencoded`, implicit submission via the default button, action query replaced |
-| Form submission (POST) | HTML §4.10.21 | ❌ | needs a request body — `npk_http_request` is GET-only |
+| Form submission (POST) | HTML §4.10.21 | 🟡 | `npk_http_send` carries method + body; `application/x-www-form-urlencoded`. A POST keeps the action's own query string (only a GET replaces it), and a 301/302/303 answer turns into a GET so the form is not submitted twice (RFC 9110 §15.4.3). No `multipart/form-data` → no file upload |
+| Cookies / sessions | RFC 6265 | 🟡 | `beak_engine::cookies`: domain + path matching, `Secure`, `Max-Age`/`Expires`, deletion by re-sending expired. **Session-only, nothing on disk.** No `SameSite`, no Public Suffix List (a crude registry check stands in), and only the DOCUMENT request carries cookies — not sub-resources |
 | Validation / `required` / `pattern` | HTML §4.10.20 | ❌ | reports through JS APIs → Stage 2 |
 | `<datalist>` / `<fieldset>` / `<label>` binding | HTML §4.10 | ❌ | labels render as plain text; clicking one does not focus its control |
 

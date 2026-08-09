@@ -241,8 +241,12 @@ but DOM host objects and a scoped `fetch`.
 - **HTTP/2** in the kernel — see §8, this is not a nicety: parts of the web
   now rate-limit HTTP/1.1 clients outright.
 - `@import` and relative `url()` *inside* CSS are not resolved.
-- Cookies, `POST` (`npk_http_request` has no request body), text selection
-  in form fields, non-ASCII keyboard input.
+- Text selection in form fields, non-ASCII keyboard input.
+- Cookies on SUB-RESOURCES: only the document request carries them, so an
+  image or stylesheet behind a login still comes back unauthenticated.
+  `npk_http_request_many` (the multiplexed sub-resource path) takes no
+  headers yet.
+- Cookie PERSISTENCE: the jar is session-only, see §5.1.
 
 **Verified against the tree (2026-07-03, all since confirmed by use):**
 - ABI is browser-ready: `Widget::Canvas` + `npk_canvas_commit` (CANVAS cap
@@ -355,7 +359,10 @@ box-tree + measure-fn model; we don't vendor it.
 - **Perf** — a bytecode interpreter is fine for content sites; the JS→WASM
   AOT tier (§9.1) is the lever if app-like sites demand it. Measure on HW
   (`memory/feedback_test_on_hw.md`), don't guess.
-- **Cookies / sessions** for real sites — still open, v2.
+- **Cookie persistence** — the jar exists (v0.263.0) but dies with the
+  process. A session cookie is a credential, and a credential at rest is its
+  own decision: where it lives, who else can read it, whether it is
+  encrypted. Closing beak logs you out until that is answered.
 
 ### 8.1 HTTP/1.1 is now a walled garden (measured 2026-07-22)
 
@@ -535,10 +542,25 @@ npk_http_final_url(buf_ptr, buf_max) -> len | -1                     // NET cap
 ```
 
 The proposal was a full request/response fn (method, headers, body, status).
-What shipped is narrower — GET, body only — which is all Stage 0 needed.
-The gaps that narrowing left are now visible and listed in §5: no `POST`
-(no request body), and no access to response headers, which is what a
-cookie jar and a `Retry-After` policy would both need.
+What shipped first was narrower — GET, body only — which is all Stage 0
+needed. **v0.263.0 built the rest of it**, because the two things that
+narrowing cost turned out to be the same two things a person needs to log in
+anywhere: `npk_http_send` (method, caller headers, request body) plus
+`npk_http_response_headers` / `npk_http_status`.
+
+Two rules the boundary enforces, both about the fact that a header block is
+just text a sandboxed app hands us:
+- **CR, LF and every other control character are refused** in a method or a
+  header line. A newline in a header VALUE ends the block early and what
+  follows is read as a second request — one check is what stops an app from
+  smuggling one through us.
+- **`Host`, `Content-Length`, `Transfer-Encoding` and `Connection` are ours**,
+  never the caller's. `Host` decides which virtual host answers; the other
+  three frame the message, and a body that disagrees with its announced
+  length is exactly the shape of a request-smuggling bug.
+
+Cookie POLICY stays out of the kernel: which cookie belongs on which request
+is RFC 6265, and that is the browser's job (`beak_engine::cookies`).
 
 The name `beak` (nopeek → the bird's beak) stuck, and follows the lowercase
 app-naming convention (loft, dock, bar, drun, spell, iris, snap, volume).
