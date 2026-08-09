@@ -2442,6 +2442,11 @@ impl<'a> Ctx<'a> {
         // Intrinsic size, then let a definite CSS width/height win (real pages
         // size their search fields in CSS, not with `size=`).
         let pad_x = CTL_PAD_X;
+        // The frame is part of the box, and it is the page's when the page
+        // styled it — a control with `border: none` is exactly as tall as its
+        // content, and a `border: 2px` one two pixels taller per side.
+        let border = ctl_border(st);
+        let (bx, by) = (border[1].w + border[3].w, border[0].w + border[2].w);
         let (mut w, mut h) = match kind {
             ControlKind::Checkbox | ControlKind::Radio => {
                 let s = (size * 0.9).max(12.0) as i32;
@@ -2451,29 +2456,29 @@ impl<'a> Ctx<'a> {
                 let cols = el.attr("cols").and_then(|c| c.trim().parse::<f32>().ok()).unwrap_or(30.0);
                 let rows = el.attr("rows").and_then(|r| r.trim().parse::<f32>().ok()).unwrap_or(3.0);
                 (
-                    (cols * ch_w) as i32 + 2 * pad_x + 2,
-                    (rows * line) as i32 + 2 * CTL_PAD_Y + 2,
+                    (cols * ch_w) as i32 + 2 * pad_x + bx,
+                    (rows * line) as i32 + 2 * CTL_PAD_Y + by,
                 )
             }
             ControlKind::Text | ControlKind::Password => {
                 let cols = el.attr("size").and_then(|c| c.trim().parse::<f32>().ok()).unwrap_or(20.0);
                 (
-                    (cols * ch_w) as i32 + 2 * pad_x + 2,
-                    ceil_i32(line) + 2 * CTL_PAD_Y + 2,
+                    (cols * ch_w) as i32 + 2 * pad_x + bx,
+                    ceil_i32(line) + 2 * CTL_PAD_Y + by,
                 )
             }
             ControlKind::Select => (
-                ceil_i32(measure(font, &text, size)) + 2 * pad_x + CTL_ARROW + 2,
-                ceil_i32(line) + 2 * CTL_PAD_Y + 2,
+                ceil_i32(measure(font, &text, size)) + 2 * pad_x + CTL_ARROW + bx,
+                ceil_i32(line) + 2 * CTL_PAD_Y + by,
             ),
             _ => (
-                ceil_i32(measure(font, &text, size)) + 2 * (pad_x + 4) + 2,
-                ceil_i32(line) + 2 * CTL_PAD_Y + 2,
+                ceil_i32(measure(font, &text, size)) + 2 * (pad_x + 4) + bx,
+                ceil_i32(line) + 2 * CTL_PAD_Y + by,
             ),
         };
         if let Some(cw) = st.width.px(avail) {
             // A CSS width is a content width unless `box-sizing: border-box`.
-            w = if st.box_border { cw as i32 } else { cw as i32 + 2 * pad_x + 2 };
+            w = if st.box_border { cw as i32 } else { cw as i32 + 2 * pad_x + bx };
         }
         // A percentage height resolves against the containing block's HEIGHT
         // (§10.5), never `avail` (its width) — the checkbox-hack overlay is
@@ -2481,7 +2486,7 @@ impl<'a> Ctx<'a> {
         // made it as tall as its container is wide. An indefinite CB height
         // leaves the percentage unresolvable, so the intrinsic height stands.
         if let Some(chh) = vert_len(st.height, self.cb.3) {
-            h = if st.box_border { chh as i32 } else { chh as i32 + 2 * CTL_PAD_Y + 2 };
+            h = if st.box_border { chh as i32 } else { chh as i32 + 2 * CTL_PAD_Y + by };
         }
         if let Some(mx) = st.max_width.px(avail) {
             w = w.min(mx as i32);
@@ -2493,10 +2498,10 @@ impl<'a> Ctx<'a> {
         // height (Codex: `min-height: 32px`). Without it the control keeps its
         // intrinsic line height and sits short inside its own flex row.
         if let Some(mn) = vert_len(st.min_height, self.cb.3) {
-            h = h.max(if st.box_border { mn as i32 } else { mn as i32 + 2 * CTL_PAD_Y + 2 });
+            h = h.max(if st.box_border { mn as i32 } else { mn as i32 + 2 * CTL_PAD_Y + by });
         }
         if let Some(mx) = vert_len(st.max_height, self.cb.3) {
-            h = h.min(if st.box_border { mx as i32 } else { mx as i32 + 2 * CTL_PAD_Y + 2 });
+            h = h.min(if st.box_border { mx as i32 } else { mx as i32 + 2 * CTL_PAD_Y + by });
         }
 
         // Caret: the shell keeps a byte offset; painting counts characters.
@@ -2517,6 +2522,7 @@ impl<'a> Ctx<'a> {
             caret,
             bg: st.bg,
             pad_l: (st.pad_left as i32).max(CTL_PAD_X),
+            border,
             style: RunStyle { hidden: st.hidden, transparent: st.transparent, size, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: crate::style::VAlign::Baseline, deco: st.deco, break_word: st.break_word, nowrap: st.nowrap, lh: st.line_height.px(size).unwrap_or(0.0) },
         }
     }
@@ -3717,8 +3723,21 @@ impl<'a> Ctx<'a> {
             if kind == ControlKind::Hidden {
                 (0.0, 0.0)
             } else {
-                let rst = ComputedStyle::root(self.theme);
-                let w = self.control_box(el, &rst, kind, 0.0).w as f32;
+                // Measure it with ITS OWN style, the way it will be painted. A
+                // root style here read the label at the root font size and lost
+                // every declared size and the page's frame, so a shrink-to-fit
+                // wrapper reserved 9px more than the control paints — Google's
+                // search button sat in a box wider than itself.
+                // [[feedback-intrinsic-shared-path]]
+                let mut mst = *st;
+                // Percentages have no basis while measuring, so they behave as
+                // `auto` (css-sizing-3 §4.1) rather than resolving against 0.
+                for len in [&mut mst.width, &mut mst.min_width, &mut mst.max_width] {
+                    if matches!(len, Len::Pct(_) | Len::Calc { .. }) {
+                        *len = Len::Auto;
+                    }
+                }
+                let w = self.control_box(el, &mst, kind, 0.0).w as f32;
                 (w, w)
             }
         } else {
@@ -5719,7 +5738,37 @@ struct CtlBox {
     /// (Wikipedia's search field asks for 36px to clear its magnifier). CSS
     /// only ever WIDENS the inset; it cannot squeeze the text below `CTL_PAD_X`.
     pad_l: i32,
+    /// The frame, in paint order top/right/bottom/left.
+    border: [CtlSide; 4],
     style: RunStyle,
+}
+
+/// One edge of a control's frame. The UA gives every control a 1px one; a page
+/// that writes any `border` longhand or shorthand owns all four instead —
+/// including `border: none`, which is a declaration and not an absence.
+#[derive(Clone, Copy)]
+struct CtlSide {
+    w: i32,
+    /// `None` = paint in the UA's frame colour (the page named none).
+    color: Option<Rgb>,
+    /// `border-color: transparent` — keeps the width, paints nothing.
+    transparent: bool,
+}
+
+/// A control's frame: the author's four sides once the page touched any of
+/// them, else the UA's 1px. Google wraps its search button in a bordered
+/// `<span>` and writes `border: none` on the `<input>`; painting our own frame
+/// anyway put a second rectangle 1px down and right of the first.
+fn ctl_border(st: &ComputedStyle) -> [CtlSide; 4] {
+    let sides = [&st.border_top, &st.border_right, &st.border_bottom, &st.border_left];
+    let owned = sides.iter().any(|s| s.specified);
+    sides.map(|s| CtlSide {
+        // An unstyled side still takes the author's `border-color` — the UA
+        // frame is a real border, so colouring it is all a page needs to do.
+        w: if owned { s.width as i32 } else { 1 },
+        color: s.color,
+        transparent: s.see_through,
+    })
 }
 
 /// The control's authored default value (what it shows before the user edits).
@@ -5840,6 +5889,7 @@ fn paint_control(
     // behind it, and dark text a light one.
     let theme = &surface_palette(theme, ctl.style.color);
     let border = if ctl.focused { theme.link } else { mix(theme.rule, theme.text, 40) };
+    let frame = |ops: &mut Vec<DrawOp>| stroke_frame(ops, x, top, w, h, &ctl.border, border, ctl.focused);
     // A page that styles its own button (`background-color`) wins; otherwise
     // the UA face is derived from the theme so it reads on light and dark.
     let face = ctl.bg.unwrap_or(match ctl.kind {
@@ -5852,7 +5902,7 @@ fn paint_control(
     match ctl.kind {
         ControlKind::Checkbox | ControlKind::Radio => {
             ops.push(DrawOp::Rect { x, y: top, w, h, color: face });
-            stroke_rect(ops, x, top, w, h, border);
+            frame(ops);
             if ctl.checked {
                 let i = (w / 4).max(2);
                 ops.push(DrawOp::Rect {
@@ -5866,7 +5916,7 @@ fn paint_control(
         }
         _ => {
             ops.push(DrawOp::Rect { x, y: top, w, h, color: face });
-            stroke_rect(ops, x, top, w, h, border);
+            frame(ops);
             let tx = x + ctl.pad_l + 1;
             let lh = ceil_i32(line_gap(font, ctl.style.size));
             let ty = top + (h - lh) / 2;
@@ -5949,6 +5999,40 @@ fn paint_control(
         }
     }
     controls.push(ControlRect { x, y: top, w, h, seq: ctl.seq, kind: ctl.kind });
+}
+
+/// Paint a control's frame: each side its own width and colour, `ua` standing
+/// in wherever the page named none. A side the page suppressed (`border: none`,
+/// `border-color: transparent`) paints nothing at all.
+///
+/// Focus is the one thing the page cannot take away: a control with no frame
+/// left still gets a 1px ring while it has the keyboard, because that ring is
+/// an OUTLINE — it says where typing goes, and a page hiding its border never
+/// meant to hide that.
+fn stroke_frame(ops: &mut Vec<DrawOp>, x: i32, y: i32, w: i32, h: i32, sides: &[CtlSide; 4], ua: Rgb, focused: bool) {
+    let visible = |s: &CtlSide| s.w > 0 && !s.transparent;
+    if focused && !sides.iter().any(visible) {
+        stroke_rect(ops, x, y, w, h, ua);
+        return;
+    }
+    let [t, r, b, l] = *sides;
+    // Widths are clamped to the box so a frame thicker than its control still
+    // reads as a frame instead of painting past the far edge.
+    for (side, rect) in [
+        (t, (x, y, w, t.w.min(h))),
+        (r, (x + w - r.w.min(w), y, r.w.min(w), h)),
+        (b, (x, y + h - b.w.min(h), w, b.w.min(h))),
+        (l, (x, y, l.w.min(w), h)),
+    ] {
+        if visible(&side) {
+            let (rx, ry, rw, rh) = rect;
+            // Focus recolours the whole frame, author colours included — the
+            // control has the keyboard, and that has to be visible on a page
+            // that gave its fields a colour of their own.
+            let color = if focused { ua } else { side.color.unwrap_or(ua) };
+            ops.push(DrawOp::Rect { x: rx, y: ry, w: rw, h: rh, color });
+        }
+    }
 }
 
 fn stroke_rect(ops: &mut Vec<DrawOp>, x: i32, y: i32, w: i32, h: i32, color: Rgb) {
@@ -8055,6 +8139,97 @@ fn dbg_wiki_shape() {
         assert!(t.iter().any(|(_, _, s)| *s == "Beta"), "select shows the selected option");
         assert!(!t.iter().any(|(_, _, s)| *s == "Alpha"), "unselected options stay hidden");
         assert!(t.iter().any(|(_, _, s)| *s == "Senden"));
+    }
+
+    /// Google wraps its search button in a bordered `<span>` and writes
+    /// `border: none` on the `<input>`. Painting our own frame regardless put a
+    /// second rectangle a pixel down and right of the wrapper's — the "shadow"
+    /// on both home-page buttons.
+    #[test]
+    fn a_page_that_styles_a_controls_border_owns_it() {
+        let plain = lay("<body><input type=submit value=OK></body>", 400);
+        let bare = lay(
+            "<body><input type=submit value=OK style=\"border:none\"></body>",
+            400,
+        );
+        // The UA frame is four 1px rects around the face; `border: none` is a
+        // declaration, not an absence, and removes all four.
+        assert_eq!(rects(&plain).len(), rects(&bare).len() + 4, "border:none keeps no frame");
+
+        // The page's own widths and colours, per side.
+        let styled = lay(
+            "<body><input type=submit value=OK \
+             style=\"border:3px solid #ff0000;border-bottom-width:7px\"></body>",
+            400,
+        );
+        let red: Vec<_> = rects(&styled).into_iter().filter(|r| r.4 == Rgb(255, 0, 0)).collect();
+        assert_eq!(red.len(), 4, "one rect per side, got {red:?}");
+        assert!(red.iter().any(|r| r.3 == 7), "the thick bottom side, got {red:?}");
+        assert_eq!(red.iter().filter(|r| r.2 == 3 || r.3 == 3).count(), 3, "three 3px sides");
+
+        // `border-color: transparent` keeps the width and paints nothing — the
+        // idiom for reserving a frame's space without showing it.
+        let clear = lay(
+            "<body><input type=submit value=OK \
+             style=\"border:3px solid transparent\"></body>",
+            400,
+        );
+        assert_eq!(rects(&clear).len(), 1, "only the face is painted");
+    }
+
+    /// A control measured with a ROOT style read its label at the root font
+    /// size and lost every declared size, so a shrink-to-fit wrapper reserved
+    /// more width than the control paints — the button sat in a box wider than
+    /// itself, with a strip of the wrapper showing on the right.
+    #[test]
+    fn a_control_measures_with_its_own_style_not_a_root_one() {
+        let l = lay(
+            "<body><span style=\"display:inline-block;background:#0f0\">\
+             <input type=submit value=\"Google Suche\" \
+             style=\"border:none;font-size:11px\"></span></body>",
+            800,
+        );
+        let r = rects(&l);
+        let wrapper = r.iter().find(|x| x.4 == Rgb(0, 255, 0)).expect("wrapper");
+        let face = r.iter().find(|x| x.4 != Rgb(0, 255, 0)).expect("control face");
+        assert_eq!(wrapper.2, face.2, "wrapper reserves exactly the control's width");
+    }
+
+    /// A button-like control is border-box in the UA sheet (HTML rendering
+    /// §15.5.1); a text field is not. Read as content-box, Google's
+    /// `height:30px` button came out 8px taller than the `height:30px` wrapper
+    /// it was built to fit and hung out the bottom.
+    #[test]
+    fn a_button_is_border_box_and_a_text_field_is_not() {
+        let face_h = |html: &str| rects(&lay(html, 400))[0].3;
+        assert_eq!(
+            face_h("<body><input type=submit value=OK style=\"height:30px;border:none\"></body>"),
+            30,
+            "a button's height is its whole box"
+        );
+        let field = face_h("<body><input type=text style=\"height:30px;border:none\"></body>");
+        assert!(field > 30, "a text field adds its padding to a content height, got {field}");
+        // An explicit `box-sizing` from the page still wins over the UA sheet.
+        assert!(
+            face_h(
+                "<body><input type=submit value=OK \
+                 style=\"height:30px;border:none;box-sizing:content-box\"></body>"
+            ) > 30,
+            "the page can opt back out"
+        );
+    }
+
+    /// Focus is the one part of the frame a page cannot take away: the ring
+    /// says where typing goes, and `border: none` was never meant to hide that.
+    #[test]
+    fn a_borderless_control_still_shows_a_focus_ring() {
+        let html = "<body><form action=/s><input name=q style=\"border:none\"></form></body>";
+        let l = lay(html, 400);
+        let seq = l.controls[0].seq;
+        let mut st = FormState::default();
+        st.focus = Some(seq);
+        let focused = lay_forms(html, 400, &st);
+        assert_eq!(rects(&focused).len(), rects(&l).len() + 4 + 1, "ring plus caret");
     }
 
     #[test]

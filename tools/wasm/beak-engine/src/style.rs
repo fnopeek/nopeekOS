@@ -19,6 +19,7 @@ use alloc::vec::Vec;
 use crate::css::{ElemInfo, PseudoElem, Stylesheet};
 use crate::dom::Element;
 use crate::layout::{Rgb, Theme};
+use crate::forms::ControlKind;
 
 /// CSS `display` — only the values our layout implements so far.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -288,6 +289,12 @@ pub struct BorderSide {
     /// its width and paints nothing, which differs from both a colour and from
     /// leaving the property unset (that means `currentColor`).
     pub see_through: bool,
+    /// A width or style declaration reached this side. `border: none` is a
+    /// DECLARATION, and it computes to the same used width as a side nobody
+    /// touched — only this bit tells them apart. It matters where the UA
+    /// supplies a frame of its own: a form control's, which the page then
+    /// suppresses (`paint_control`).
+    pub specified: bool,
 }
 
 /// `border-width`'s initial value, `medium`.
@@ -295,7 +302,7 @@ pub const BORDER_MEDIUM: f32 = 3.0;
 
 impl Default for BorderSide {
     fn default() -> BorderSide {
-        BorderSide { width: 0.0, color: None, hidden: false, spec_width: BORDER_MEDIUM, styled: false, see_through: false }
+        BorderSide { width: 0.0, color: None, hidden: false, spec_width: BORDER_MEDIUM, styled: false, see_through: false, specified: false }
     }
 }
 
@@ -308,6 +315,7 @@ impl BorderSide {
     }
     fn set_spec_width(&mut self, w: f32) {
         self.spec_width = w;
+        self.specified = true;
         self.sync();
     }
     /// Apply one `border-color` token, reporting whether it was one. A page
@@ -342,6 +350,7 @@ impl BorderSide {
             }
             _ => return,
         }
+        self.specified = true;
         self.sync();
     }
 }
@@ -1099,6 +1108,21 @@ pub fn resolve(
     if el.tag == "a" && el.attr("href").is_some() {
         s.deco |= DECO_UNDERLINE;
     }
+    // A button-like control is `box-sizing: border-box` in the UA sheet (HTML
+    // rendering §15.5.1) — unlike a text field, which stays content-box. It is
+    // what pages build on: Google puts a `height:30px` button inside a
+    // `height:30px` bordered wrapper and expects it to fit exactly. Read as
+    // content-box the button came out 8px taller than its own frame and hung
+    // out the bottom. `ua_rule` can't do this — it only sees the tag, and
+    // `<input>` is a button or a text field depending on its `type`.
+    if matches!(
+        crate::forms::kind_of(el),
+        Some(ControlKind::Submit | ControlKind::Reset | ControlKind::Button
+            | ControlKind::File | ControlKind::Select)
+    ) {
+        s.box_border = true;
+    }
+
     // HTML's `dir` attribute is a presentational hint for `direction`: it sits
     // between the UA sheet and the author cascade, so author CSS still wins.
     match el.attr("dir") {
@@ -3058,6 +3082,10 @@ fn parse_border_shorthand(v: &str, u: Units, theme: &Theme) -> BorderSide {
     if let Some(w) = width {
         side.set_spec_width(w);
     }
+    // The shorthand resets the whole side whatever it names, so writing it at
+    // all is taking control of the frame — `border: red` suppresses one just as
+    // `border: none` does.
+    side.specified = true;
     side
 }
 

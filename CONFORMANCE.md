@@ -22,16 +22,17 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-07, beak 0.8.0)
+### Current number (measured 2026-08-09, beak 0.9.0)
 
 ```
-4089 pass / 1519 fail / 178 inconclusive   (of 5786 vendored reftests)
+4088 pass / 1520 fail / 178 inconclusive   (of 5786 vendored reftests)
 = 72.9 % of the conclusive 5608
 ```
 
 Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → 3746 → 3863 → 3869 →
 3870 (0.3.0) → 3880 (0.3.2) → 3926 (0.3.3) → 3959 (0.3.4) → 3963 (0.3.5) →
-**3967** (0.3.6) → 3967 (0.3.11) → 3978 (0.3.12) → 3997 (0.3.13) → 3998 (0.3.14) → 4012 (0.3.15) → 4036 (0.3.16) → 4056 (0.4.1) → 4064 (0.4.3) → 4069 (0.4.5) → 4074 (0.4.6) → 4079 (0.4.7) → **4082** (0.4.8) → 4083 (0.4.10) → **4089** (0.7.0) → 4089 (0.8.0). The inconclusive count fell 254 → 184 over
+**3967** (0.3.6) → 3967 (0.3.11) → 3978 (0.3.12) → 3997 (0.3.13) → 3998 (0.3.14) → 4012 (0.3.15) → 4036 (0.3.16) → 4056 (0.4.1) → 4064 (0.4.3) → 4069 (0.4.5) → 4074 (0.4.6) → 4079 (0.4.7) → **4082** (0.4.8) → 4083 (0.4.10) → **4089** (0.7.0) → 4089 (0.8.0) → 4088 (0.9.0, one test traded for a
+form-control frame that obeys the page — point 45). The inconclusive count fell 254 → 184 over
 that span: references that used to render blank — because `:root` was dropped,
 because an `inline-block` had no box, or because an inline box painted no
 background — now paint, so 73 more tests actually measure something.
@@ -1586,6 +1587,67 @@ menu to pick from.
     bogus construct). Adding one is a real feature — a document-level flag
     threaded into the UA cascade — not a one-liner, and it changes behaviour on
     every doctype-less page at once. Measure before building.
+
+45. ✅ **A form control's frame belongs to the page (0.9.0).** WPT 4089 →
+    **4088**, 213 unit tests. The one loss is the whole oracle cost, and it
+    names a hole rather than hiding one (below). Reported from the device:
+    Google's "Google Suche" and "Auf gut Glück!" buttons each carried a second
+    rectangle, ~2px down and right — a "shadow".
+
+    Google's markup is three boxes: a `<span class=lsbb>` with
+    `border: solid 1px` around an `<input class=lsb>` with `border: none`.
+    **Exactly one frame is asked for, and we painted two.** The display list
+    named both stray rects in one look: the wrapper's frame at (12,11) 131×32
+    and the control's own at (13,12) 122×38.
+
+    Three defects, all general, none of them about Google:
+
+    - **`paint_control` always stroked a 1px UA frame** and never read the
+      author's border at all. `border: none` computes to the same used width as
+      a side nobody touched, so the two were indistinguishable — hence the new
+      `BorderSide::specified`. Once a page touches any border longhand or
+      shorthand it owns all four sides: widths, colours, and suppression.
+      Measured over the cascade on eight real pages, **57 of 122 form controls
+      (47 %) state their own frame and 31 (25 %) switch it off** — Bootstrap
+      does it on 24 of 25. A selector-text census cannot see this: pages style
+      controls through classes that never name `input`.
+    - **A control was measured with a ROOT style** (`intrinsic_width`), so its
+      label was read at the root font size and every declared size was lost. A
+      shrink-to-fit wrapper reserved 9px more than the control paints, leaving a
+      strip of wrapper showing. Third time this shape appears —
+      [[feedback-intrinsic-shared-path]].
+    - **A button-like control is `box-sizing: border-box`** in the UA sheet
+      (HTML rendering §15.5.1); a text field is not. Read as content-box,
+      `height:30px` made a button 8px taller than the `height:30px` wrapper it
+      was built to fit, and its face hung out the bottom. `ua_rule` cannot do
+      this — it only sees the tag, and `<input>` is a button or a text field
+      depending on its `type`.
+
+    **Measured, not guessed:** the overhang looked like our UA vertical padding
+    (3px against a browser's 1px), so that was tried first — `CTL_PAD_Y` at 1
+    and at 2 each cost 4 further tests, 3 is the optimum. The constant was not
+    the lever; a missing UA-sheet fact was. de.wikipedia, MDN and Hacker News
+    render **byte-identically** before and after ([[feedback-byte-identical-render-gate]]).
+
+    ### ⚠️ The one loss names `display: contents`
+
+    `css-display/display-contents-button` writes `border: 10px solid red;
+    display: contents` on a `<button>`; correctly it unboxes and only the word
+    PASS remains. **We have no `display: contents` at all** — it does not even
+    parse. The test was green because our wrong button wore a thin grey frame
+    that happened to sit close enough to the reference; now it wears the 10px
+    red frame the page actually asked for, and the missing feature is visible.
+    Building `contents` only for controls would be a half-introduced path
+    ([[feedback-measured-worse-may-mean-partial]]); it is a document-wide
+    feature — an element that generates no box while its children stay in flow.
+
+    ### 📋 Baseline resynced
+
+    `tests/wpt-baseline.tsv` had not been blessed since 0.4.10, so it carried
+    4083 while 0.8.0 measured 4089. The +6 that a delta run kept reporting were
+    the 0.5–0.8 rounds, not the current change — **worth a re-measure of the
+    unchanged tree before attributing any delta to your own work.** Blessed at
+    4088.
 
 **Explicitly not worth doing:** `run-in` (35 WPT, dead on the real web),
 `grid-lanes`/masonry (84, experimental), `cursor` (the compositor owns the
