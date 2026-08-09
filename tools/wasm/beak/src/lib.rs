@@ -138,7 +138,6 @@ unsafe extern "C" {
     ) -> i32;
     fn npk_canvas_commit(canvas_id: i32, ptr: i32, len: i32, w: i32, h: i32) -> i32;
     fn npk_canvas_rect(canvas_id: i32, out_ptr: i32) -> i32;
-    fn npk_theme_token(token_id: i32) -> i32;
     fn npk_launch_arg(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_close_widget() -> i32;
     fn npk_log_serial(ptr: i32, len: i32);
@@ -183,27 +182,32 @@ fn log(m: &str) {
     unsafe { npk_log_serial(m.as_ptr() as i32, m.len() as i32) };
 }
 
-/// Query one theme token's colour → Rgb (palette is 0xAARRGGBB, light/dark
-/// aware). This is why the page background follows the theme like the chrome.
-fn theme_rgb(token_id: i32) -> beak_engine::Rgb {
-    let c = unsafe { npk_theme_token(token_id) } as u32;
-    beak_engine::Rgb(((c >> 16) & 0xFF) as u8, ((c >> 8) & 0xFF) as u8, (c & 0xFF) as u8)
-}
-
-/// Resolve the page palette from the active theme (Surface bg, OnSurface text,
-/// Accent links …). Falls back to dark if the query returns nothing.
+/// The page palette: the canvas a document is painted on when it paints none
+/// of its own, and the colours it inherits.
+///
+/// **This is deliberately NOT the desktop theme.** It used to be, and that
+/// made every page built for a white canvas unreadable on a dark desktop:
+/// the page sets only its text colour — near-black, because it expects white
+/// behind it — and we put dark grey behind that. Google's consent page is the
+/// exact case, measured 2026-08-09: 19 KB of CSS, zero `color-scheme`, zero
+/// `prefers-color-scheme`, zero `light-dark()`, and a `body` rule that sets
+/// no background at all. A browser paints that white. So do we now.
+///
+/// The two halves of "dark mode" were one value here and they are not one
+/// thing: what the USER prefers (a media query) and what the CANVAS is (the
+/// used `color-scheme` of the root, which is light until a page opts in).
+/// Reporting a preference we cannot honour without making pages unreadable is
+/// the worse half to keep, so both are light until `color-scheme` is parsed —
+/// then a page that opts in gets a dark canvas AND a dark preference, which
+/// is the whole rule rather than half of it.
 fn query_theme() -> beak_engine::Theme {
-    let bg = theme_rgb(0); // Surface
-    if bg == beak_engine::Rgb(0, 0, 0) {
-        return beak_engine::Theme::DARK;
-    }
     beak_engine::Theme {
-        bg,
-        text: theme_rgb(3),    // OnSurface
-        heading: theme_rgb(3), // OnSurface
-        link: theme_rgb(6),    // Accent
-        muted: theme_rgb(4),   // OnSurfaceMuted
-        rule: theme_rgb(8),    // Border
+        bg: beak_engine::Rgb(255, 255, 255),
+        text: beak_engine::Rgb(0, 0, 0),
+        heading: beak_engine::Rgb(0, 0, 0),
+        link: beak_engine::Rgb(0, 0, 238),
+        muted: beak_engine::Rgb(96, 96, 96),
+        rule: beak_engine::Rgb(128, 128, 128),
     }
 }
 
@@ -1894,7 +1898,6 @@ pub extern "C" fn _start() {
     let mut cache: Option<(Layout, i32, i32, u32)> = None;
     // The page's forms + the user's edits, rebuilt on every navigation.
     let mut page = Page::new();
-    let mut last_bg = unsafe { npk_theme_token(0) };
     // Persistent paint buffer, reused across frames (see maybe_repaint).
     let mut paint_buf: Vec<u8> = Vec::new();
     // Image sources of the current page still to fetch, one per loop turn.
@@ -1938,16 +1941,11 @@ pub extern "C" fn _start() {
             render_chrome();
         }
         if !had_event {
-            // Idle: pick up a runtime theme switch (light ↔ dark) cheaply — one
-            // token read per idle frame; on change, re-resolve the palette and
-            // invalidate the layout so text colours update too.
-            let bg = unsafe { npk_theme_token(0) };
-            if bg != last_bg {
-                engine.set_theme(query_theme());
-                last_bg = bg;
-                bump_content_gen("theme-change");
-                mark_dirty();
-            }
+            // No theme watch here any more: the PAGE palette no longer
+            // follows the desktop (see `query_theme`), so a light/dark switch
+            // changes the chrome and nothing about the document. Re-laying the
+            // page out for it would cost a full layout — over five seconds on
+            // the device — for a picture that cannot change.
         }
         // A fresh page: drop the old page's decoded images and note which ones
         // it wants (fetching them happens after the repaint, one batch a turn).
