@@ -509,6 +509,80 @@ struct HttpResponse {
     /// it: a page declaring `charset=ISO-8859-1` is not UTF-8, and guessing
     /// wrong costs the whole document.
     content_type: Option<String>,
+    /// The response header block verbatim, minus the status line. A browser
+    /// needs headers the body cannot carry — `Set-Cookie` (which repeats, so
+    /// no single-value getter would do) and `Retry-After`. Capped, see
+    /// `MAX_REPLY_HEADERS`.
+    headers: String,
+}
+
+/// What to send. `GET`, no extra headers, no body — what every caller before
+/// the browser meant, and what [`HttpRequest::default`] gives you.
+pub struct HttpRequest<'a> {
+    pub method: &'a str,
+    /// Extra request headers as `Name: value`, without CRLF. The caller is
+    /// responsible for validating them; [`header_line_is_safe`] is the check
+    /// the WASM boundary uses.
+    pub headers: &'a [String],
+    pub body: &'a [u8],
+}
+
+impl Default for HttpRequest<'_> {
+    fn default() -> Self {
+        HttpRequest { method: "GET", headers: &[], body: &[] }
+    }
+}
+
+/// Response headers we hand back to a guest, capped. Big enough for a page
+/// that sets a dozen cookies, small enough that a hostile server cannot make
+/// the kernel hold an unbounded string per request.
+const MAX_REPLY_HEADERS: usize = 8 * 1024;
+
+/// Headers a guest may NOT set, because we own them.
+///
+/// `Host` decides which virtual host answers, and letting a caller state one
+/// that differs from the TLS SNI name is a request for the wrong origin's
+/// content under the wrong certificate. The other three frame the message: if
+/// a caller could state its own `Content-Length` or `Transfer-Encoding`, the
+/// body it sends and the body we announce could disagree, which is exactly
+/// the shape of a request-smuggling bug.
+const RESERVED_HEADERS: &[&str] =
+    &["host", "content-length", "transfer-encoding", "connection"];
+
+/// Is this a header line a guest is allowed to send?
+///
+/// Rejects CR, LF and NUL anywhere — a newline in a header VALUE ends the
+/// header block early and everything after it is read as another request, so
+/// this single check is what stops a sandboxed app from smuggling one. Also
+/// rejects a missing colon, an empty name, and the reserved names above.
+pub fn header_line_is_safe(line: &str) -> bool {
+    if line.is_empty() || line.len() > 2048 {
+        return false;
+    }
+    // No control characters anywhere. CR and LF are the smuggling vector, but
+    // the rest have no business in a field value either (RFC 9112 §5.5), and
+    // a NUL or a stray 0x01 is how a parser downstream gets confused. Tab is
+    // the one control character a value may legitimately hold.
+    if line.bytes().any(|b| (b < 0x20 && b != b'\t') || b == 0x7F) {
+        return false;
+    }
+    let Some((name, _)) = line.split_once(':') else { return false };
+    // NOT trimmed, deliberately. A leading space makes the line an obsolete
+    // folded continuation of the header before it, and a space before the
+    // colon is a name a server may read differently than we do. Both are
+    // ways to mean something other than what this line looks like, so both
+    // are refused: `is_ascii_graphic` excludes space and tab.
+    if name.is_empty() || !name.bytes().all(|b| b.is_ascii_graphic()) {
+        return false;
+    }
+    !RESERVED_HEADERS.iter().any(|r| name.eq_ignore_ascii_case(r))
+}
+
+/// Is this a method a guest is allowed to send? A token of ASCII letters,
+/// nothing else — the method sits at the very front of the request line, so
+/// a space or a newline there rewrites the whole request.
+pub fn method_is_safe(m: &str) -> bool {
+    !m.is_empty() && m.len() <= 16 && m.bytes().all(|b| b.is_ascii_uppercase())
 }
 
 /// What the caller learns about a response besides its bytes.
@@ -522,6 +596,12 @@ pub struct FetchInfo {
     pub final_url: String,
     /// The response's `Content-Type`, verbatim. Empty if the server sent none.
     pub content_type: String,
+    /// The final response's status. 0 if the exchange never got that far.
+    pub status: u16,
+    /// The final response's header block, minus the status line. Only filled
+    /// by [`https_request_streaming`] — a GET caller has no use for it and
+    /// would pay a copy per sub-resource.
+    pub headers: String,
 }
 
 /// Reusable HTTPS GET — returns the response body as Vec<u8>.
@@ -545,6 +625,7 @@ pub fn https_get(host: &str, path: &str, max_size: usize) -> Result<alloc::vec::
         let resp = https_get_once(
             &cur_host,
             &cur_path,
+            &HttpRequest::default(),
             max_size,
             &mut |chunk: &[u8]| -> Result<(), &'static str> {
                 if out.len().saturating_add(chunk.len()) > max_size {
@@ -609,15 +690,48 @@ pub fn https_get_streaming_ex(
     path: &str,
     max_size: usize,
     on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
+    info: Option<&mut FetchInfo>,
+) -> Result<usize, &'static str> {
+    let n = https_request_streaming(
+        host, path, &HttpRequest::default(), max_size, on_chunk, info, false)?;
+    if n == 0 {
+        return Err("empty body");
+    }
+    Ok(n)
+}
+
+/// The general exchange: any method, any (validated) headers, any body,
+/// following redirects.
+///
+/// `want_headers` fills `FetchInfo::headers` — off for sub-resource GETs,
+/// which have no use for it and would pay a copy each.
+///
+/// `keep_status` decides what a non-2xx means. An OTA download wants an
+/// error; a BROWSER wants the bytes, because a 404 page and a 403 explaining
+/// why are documents a person needs to read. With it set, the status is
+/// reported in `FetchInfo` and the body is delivered whatever it says.
+pub fn https_request_streaming(
+    host: &str,
+    path: &str,
+    req: &HttpRequest,
+    max_size: usize,
+    on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
     mut info: Option<&mut FetchInfo>,
+    keep_status: bool,
 ) -> Result<usize, &'static str> {
     let mut cur_host = String::from(host);
     let mut cur_path = String::from(path);
+    // A redirect can change the method, so the request travels by value from
+    // here on (RFC 9110 §15.4).
+    let mut method = String::from(req.method);
+    let mut body: &[u8] = req.body;
     for _ in 0..4 {
         let mut total: usize = 0;
+        let hop = HttpRequest { method: &method, headers: req.headers, body };
         let resp = https_get_once(
             &cur_host,
             &cur_path,
+            &hop,
             max_size,
             &mut |chunk: &[u8]| -> Result<(), &'static str> {
                 on_chunk(chunk)?;
@@ -625,35 +739,50 @@ pub fn https_get_streaming_ex(
                 Ok(())
             },
         )?;
-        match resp.status {
-            200..=299 => {
-                if total == 0 {
-                    return Err("empty body");
-                }
-                if let Some(out) = info.as_deref_mut() {
-                    out.final_url.clear();
-                    out.final_url.push_str("https://");
-                    out.final_url.push_str(&cur_host);
-                    out.final_url.push_str(&cur_path);
-                    out.content_type.clear();
-                    if let Some(ct) = &resp.content_type {
-                        out.content_type.push_str(ct);
-                    }
-                }
-                return Ok(total);
-            }
-            301 | 302 | 303 | 307 | 308 => {
-                // On 3xx the inner once-fn returns early without
-                // calling the sink, so the consumer never sees any
-                // bytes from the redirect response. Safe to retry
-                // against the Location target with a fresh TLS
-                // session.
-                let loc = resp.location.ok_or("redirect without Location")?;
-                let (next_host, next_path) = parse_https_url(&loc, &cur_host)?;
-                cur_host = next_host;
-                cur_path = next_path;
-            }
+        let done = match resp.status {
+            200..=299 => true,
+            301 | 302 | 303 | 307 | 308 => false,
+            // Any other status is a document too, once the caller asked for
+            // it. Without `keep_status` this stays the old hard error.
+            _ if keep_status => true,
             _ => return Err("HTTP non-2xx response"),
+        };
+        if done {
+            if let Some(out) = info.as_deref_mut() {
+                out.final_url.clear();
+                out.final_url.push_str("https://");
+                out.final_url.push_str(&cur_host);
+                out.final_url.push_str(&cur_path);
+                out.content_type.clear();
+                if let Some(ct) = &resp.content_type {
+                    out.content_type.push_str(ct);
+                }
+                out.status = resp.status;
+                // The header block is copied only for the caller that asked
+                // to see statuses — the browser. A page load fans out to ~20
+                // sub-resource GETs, and none of them has any use for a
+                // second copy of their headers.
+                out.headers.clear();
+                if keep_status {
+                    out.headers.push_str(&resp.headers);
+                }
+            }
+            return Ok(total);
+        }
+        // On 3xx the inner once-fn returns early without calling the sink, so
+        // the consumer never sees any bytes from the redirect response. Safe
+        // to retry against the Location target with a fresh TLS session.
+        let loc = resp.location.ok_or("redirect without Location")?;
+        let (next_host, next_path) = parse_https_url(&loc, &cur_host)?;
+        cur_host = next_host;
+        cur_path = next_path;
+        // 303 says so outright, and 301/302 after a POST is the behaviour
+        // every browser settled on (RFC 9110 §15.4.3 note): the redirect
+        // points at a RESULT page, and re-POSTing the form to it would
+        // submit twice. 307/308 exist precisely to keep method and body.
+        if matches!(resp.status, 301 | 302 | 303) && method != "GET" && method != "HEAD" {
+            method = String::from("GET");
+            body = &[];
         }
     }
     Err("too many redirects")
@@ -1048,15 +1177,30 @@ fn drain_body(
 fn https_exchange(
     host: &str,
     path: &str,
+    req: &HttpRequest,
     max_size: usize,
     mut tls: crate::tls::TlsSession,
     on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
 ) -> Result<HttpResponse, ExchangeErr> {
-    let request = alloc::format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: */*\r\nConnection: keep-alive\r\n\r\n",
-        path, host, USER_AGENT
+    let mut head = alloc::format!(
+        "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: */*\r\nConnection: keep-alive\r\n",
+        req.method, path, host, USER_AGENT
     );
-    if crate::tls::tls_send(&mut tls, request.as_bytes()).is_err() {
+    for line in req.headers {
+        head.push_str(line);
+        head.push_str("\r\n");
+    }
+    // We state the length ourselves — always, when there is a body, and never
+    // from a caller-supplied header (`RESERVED_HEADERS`). Announcing a length
+    // that disagrees with the bytes we then send is how a request gets split
+    // in two on the far side.
+    if !req.body.is_empty() {
+        head.push_str(&alloc::format!("Content-Length: {}\r\n", req.body.len()));
+    }
+    head.push_str("\r\n");
+    let mut request = head.into_bytes();
+    request.extend_from_slice(req.body);
+    if crate::tls::tls_send(&mut tls, &request).is_err() {
         // Stale pooled socket (or a send error) — nothing delivered, retry fresh.
         let _ = crate::tls::tls_close(&mut tls);
         return Err(ExchangeErr::Retry);
@@ -1106,6 +1250,12 @@ fn https_exchange(
         }
     };
     let status = parse_status_code(hdr_str).unwrap_or(0);
+    // Everything after the status line, verbatim and capped. `Set-Cookie`
+    // repeats, so handing back parsed single values could never carry it.
+    let reply_headers = String::from(match hdr_str.split_once("\r\n") {
+        Some((_, rest)) => &rest[..rest.len().min(MAX_REPLY_HEADERS)],
+        None => "",
+    });
     let location = parse_header_value(hdr_str, "location").map(String::from);
     let content_type = parse_header_value(hdr_str, "content-type").map(String::from);
     let content_length = parse_header_value(hdr_str, "content-length")
@@ -1136,7 +1286,7 @@ fn https_exchange(
         }
         let drained = drain_body(&mut tls, leading, content_length, chunked, &mut buf);
         finish_conn(host, tls, persistent && drained);
-        return Ok(HttpResponse { status, location, content_type });
+        return Ok(HttpResponse { status, location, content_type, headers: reply_headers });
     }
     if chatty() { kprintln!("[npk]   HTTP {} — receiving body", status); }
 
@@ -1213,7 +1363,7 @@ fn https_exchange(
     }
 
     finish_conn(host, tls, persistent && fully_drained);
-    Ok(HttpResponse { status, location, content_type })
+    Ok(HttpResponse { status, location, content_type, headers: reply_headers })
 }
 
 /// One HTTPS round-trip — no redirect following. Reuses a pooled
@@ -1223,12 +1373,13 @@ fn https_exchange(
 fn https_get_once(
     host: &str,
     path: &str,
+    req: &HttpRequest,
     max_size: usize,
     on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
 ) -> Result<HttpResponse, &'static str> {
     // Attempt 1: reuse a pooled session (no DNS/TCP/TLS handshake).
     if let Some(tls) = pool_take(host) {
-        match https_exchange(host, path, max_size, tls, on_chunk) {
+        match https_exchange(host, path, req, max_size, tls, on_chunk) {
             Ok(r) => return Ok(r),
             Err(ExchangeErr::Retry) => {} // stale — reconnect below
             Err(ExchangeErr::Fatal(e)) => return Err(e),
@@ -1236,7 +1387,7 @@ fn https_get_once(
     }
     // Attempt 2: fresh connection.
     let tls = open_tls(host)?;
-    match https_exchange(host, path, max_size, tls, on_chunk) {
+    match https_exchange(host, path, req, max_size, tls, on_chunk) {
         Ok(r) => Ok(r),
         Err(ExchangeErr::Retry) => Err("connection reset after handshake"),
         Err(ExchangeErr::Fatal(e)) => Err(e),
@@ -1560,7 +1711,7 @@ fn user_download_streaming(
     let mut use_tls = start_tls;
     for _ in 0..6 {
         let resp = if use_tls {
-            https_get_once(&cur_host, &cur_path, max_size, on_chunk)?
+            https_get_once(&cur_host, &cur_path, &HttpRequest::default(), max_size, on_chunk)?
         } else {
             http_get_once(&cur_host, &cur_path, max_size, on_chunk)?
         };
@@ -1679,6 +1830,12 @@ fn http_get_once(
     let body_start = hdr_end + 4;
     let hdr_str = core::str::from_utf8(&raw[..hdr_end]).map_err(|_| "invalid header encoding")?;
     let status = parse_status_code(hdr_str).unwrap_or(0);
+    // Everything after the status line, verbatim and capped. `Set-Cookie`
+    // repeats, so handing back parsed single values could never carry it.
+    let reply_headers = String::from(match hdr_str.split_once("\r\n") {
+        Some((_, rest)) => &rest[..rest.len().min(MAX_REPLY_HEADERS)],
+        None => "",
+    });
     let location = parse_header_value(hdr_str, "location").map(String::from);
     let content_type = parse_header_value(hdr_str, "content-type").map(String::from);
 
@@ -1689,7 +1846,7 @@ fn http_get_once(
             _ => {}
         }
         let _ = crate::net::tcp::close(handle);
-        return Ok(HttpResponse { status, location, content_type });
+        return Ok(HttpResponse { status, location, content_type, headers: reply_headers });
     }
     if chatty() { kprintln!("[npk]   HTTP {} — receiving body", status); }
 
@@ -1717,7 +1874,7 @@ fn http_get_once(
         }
     }
     let _ = crate::net::tcp::close(handle);
-    Ok(HttpResponse { status, location, content_type })
+    Ok(HttpResponse { status, location, content_type, headers: reply_headers })
 }
 
 /// Parse HTTP status code from first header line.

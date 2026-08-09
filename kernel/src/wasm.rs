@@ -73,6 +73,12 @@ struct HostState {
     /// caller as a bare -1, which is how an untrusted certificate ended up
     /// rendering as a blank page.
     http_last_error: Option<String>,
+    /// The last `npk_http_send` response's header block and status. Read back
+    /// via `npk_http_response_headers` / `npk_http_status`. A browser needs
+    /// headers the body cannot carry — `Set-Cookie` above all, which repeats
+    /// and so could never be a single-value getter.
+    http_reply_headers: Option<String>,
+    http_status: u16,
 }
 
 static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
@@ -384,6 +390,8 @@ fn wasm_worker_task(arg: u64) {
         http_final_url: None,
         http_content_type: None,
         http_last_error: None,
+        http_reply_headers: None,
+        http_status: 0,
     });
     let _ = store.set_fuel(INTERACTIVE_FUEL);
 
@@ -487,6 +495,8 @@ pub fn execute_interactive(
         http_final_url: None,
         http_content_type: None,
         http_last_error: None,
+        http_reply_headers: None,
+        http_status: 0,
     });
     store.set_fuel(INTERACTIVE_FUEL).map_err(|_| WasmError::ExecutionFailed)?;
 
@@ -534,6 +544,8 @@ fn execute_inner(
         http_final_url: None,
         http_content_type: None,
         http_last_error: None,
+        http_reply_headers: None,
+        http_status: 0,
     });
     store.set_fuel(fuel).map_err(|_| WasmError::ExecutionFailed)?;
 
@@ -727,6 +739,171 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             // Bounds-checked write: buf_ptr is guest-controlled, and a
             // wrapping `start + len` would panic the KERNEL on the slice index.
             write_wasm_bytes(&mut caller, buf_ptr, &out[..write_len])
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_http_send(method_ptr, method_len, url_ptr, url_len,
+    //               hdrs_ptr, hdrs_len, body_ptr, body_len,
+    //               buf_ptr, buf_max) -> bytes, or -1
+    //
+    // The general request `npk_http_request` was the narrow case of: any
+    // method, caller-supplied headers, a request body, and the response's
+    // status + headers readable afterwards. That is what a login (POST) and
+    // a cookie jar (`Set-Cookie`) need, and neither was expressible before.
+    //
+    // `hdrs` is newline-separated `Name: value` lines. Cookie POLICY stays
+    // out of the kernel — which cookie belongs on which request is RFC 6265,
+    // and that is the browser's job; the kernel only carries bytes.
+    //
+    // A non-2xx does NOT fail here: a 404 page and a 403 explaining itself
+    // are documents a person needs to read. The status comes back through
+    // `npk_http_status`.
+    //
+    // NET-gated, same capability as npk_http_request.
+    linker.func_wrap("env", "npk_http_send",
+        |mut caller: Caller<'_, HostState>, method_ptr: i32, method_len: i32,
+         url_ptr: i32, url_len: i32, hdrs_ptr: i32, hdrs_len: i32,
+         body_ptr: i32, body_len: i32, buf_ptr: i32, buf_max: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if let Err(e) = capability::check_global(&cap_id, capability::Rights::NET) {
+                kprintln!("[npk] WASM: npk_http_send DENIED (cap_id={:08x}, {:?})",
+                    capability::short_id(&cap_id), e);
+                return -1;
+            }
+            if buf_max <= 0 { return -1; }
+            let cap = buf_max as usize;
+
+            let method = match read_wasm_str(&caller, method_ptr, method_len) {
+                Some(s) => s,
+                None => return -1,
+            };
+            // The method sits at the very front of the request line and the
+            // headers end it — a newline in either rewrites the request, and
+            // everything after it is read as a SECOND one. This is the check
+            // that stops a sandboxed app from smuggling requests through us.
+            if !crate::intent::http::method_is_safe(&method) {
+                kprintln!("[npk] WASM: npk_http_send rejected method");
+                return -1;
+            }
+            let url = match read_wasm_str(&caller, url_ptr, url_len) {
+                Some(s) => s,
+                None => return -1,
+            };
+            let hdr_blob = if hdrs_len > 0 {
+                match read_wasm_str(&caller, hdrs_ptr, hdrs_len) {
+                    Some(s) => s,
+                    None => return -1,
+                }
+            } else {
+                String::new()
+            };
+            let mut headers: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+            for line in hdr_blob.split('\n').map(str::trim).filter(|l| !l.is_empty()) {
+                if !crate::intent::http::header_line_is_safe(line) {
+                    kprintln!("[npk] WASM: npk_http_send rejected a header");
+                    return -1;
+                }
+                headers.push(String::from(line));
+            }
+            let body = if body_len > 0 {
+                match read_wasm_bytes(&caller, body_ptr, body_len) {
+                    Some(b) => b,
+                    None => return -1,
+                }
+            } else {
+                alloc::vec::Vec::new()
+            };
+
+            let (host, path) = match crate::intent::http::parse_url(&url) {
+                Ok(hp) => hp,
+                Err(e) => {
+                    kprintln!("[npk] WASM: npk_http_send bad url: {}", e);
+                    return -1;
+                }
+            };
+
+            let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+            let mut info = crate::intent::http::FetchInfo::default();
+            let req = crate::intent::http::HttpRequest {
+                method: &method, headers: &headers, body: &body,
+            };
+            let res = crate::intent::http::https_request_streaming(
+                &host, &path, &req, cap,
+                &mut |chunk: &[u8]| -> Result<(), &'static str> {
+                    if out.len() < cap {
+                        let take = chunk.len().min(cap - out.len());
+                        out.extend_from_slice(&chunk[..take]);
+                    }
+                    Ok(())
+                },
+                Some(&mut info),
+                true,
+            );
+            // Same rule as npk_http_request throughout: everything is cleared
+            // on failure, so a caller can never read one request's answer and
+            // attribute it to the next.
+            let ok = res.is_ok();
+            caller.data_mut().http_final_url =
+                if ok && !info.final_url.is_empty() { Some(info.final_url) } else { None };
+            caller.data_mut().http_content_type =
+                if ok && !info.content_type.is_empty() { Some(info.content_type) } else { None };
+            caller.data_mut().http_reply_headers =
+                if ok { Some(info.headers) } else { None };
+            caller.data_mut().http_status = if ok { info.status } else { 0 };
+            caller.data_mut().http_last_error = match &res {
+                Ok(_) => None,
+                Err(e) => Some(alloc::format!("{}\t{}", crate::intent::http::error_kind(e), e)),
+            };
+            if res.is_err() { return -1; }
+
+            let write_len = out.len().min(cap);
+            write_wasm_bytes(&mut caller, buf_ptr, &out[..write_len])
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_http_response_headers(buf_ptr, buf_max) -> len, or -1
+    // The last npk_http_send response's header block, minus the status line.
+    // `Set-Cookie` repeats, so this is a raw block rather than a getter per
+    // name. NET-gated.
+    linker.func_wrap("env", "npk_http_response_headers",
+        |mut caller: Caller<'_, HostState>, buf_ptr: i32, buf_max: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::NET).is_err() {
+                return -1;
+            }
+            if buf_ptr < 0 || buf_max <= 0 { return -1; }
+            let hdrs = match &caller.data().http_reply_headers {
+                Some(h) => h.clone(),
+                None => return -1,
+            };
+            let n = hdrs.len().min(buf_max as usize);
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data_mut(&mut caller);
+            let start = buf_ptr as usize;
+            // checked_add: a wrapping `start + n` would panic the KERNEL on
+            // the slice index — a guest-triggerable halt.
+            match start.checked_add(n) {
+                Some(end) if end <= data.len() => {
+                    data[start..end].copy_from_slice(&hdrs.as_bytes()[..n]);
+                    n as i32
+                }
+                _ => -1,
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_http_status() -> status, or 0
+    // The last npk_http_send response's HTTP status. NET-gated.
+    linker.func_wrap("env", "npk_http_status",
+        |caller: Caller<'_, HostState>| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::NET).is_err() {
+                return 0;
+            }
+            caller.data().http_status as i32
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
@@ -1596,6 +1773,17 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     linker.func_wrap("env", "npk_ticks",
         |_caller: Caller<'_, HostState>| -> i64 {
             (crate::interrupts::ticks() as i64).saturating_mul(10)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_unix_time() -> seconds since the epoch, UTC, or 0 if the clock is
+    // not readable. Ungated, like npk_ticks: the wall clock is not a secret —
+    // it is on the bar and stamped into every npkFS entry. `npk_ticks` cannot
+    // stand in for it, because it restarts at every boot and a cookie's
+    // `Expires` is an absolute date.
+    linker.func_wrap("env", "npk_unix_time",
+        |_caller: Caller<'_, HostState>| -> i64 {
+            crate::rtc::read_unix_time().unwrap_or(0) as i64
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
