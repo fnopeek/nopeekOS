@@ -158,16 +158,26 @@ fn domain_ok(host: &str, domain: &str) -> bool {
     true
 }
 
-/// Parse the two-digit-year-free subset of an HTTP date that servers actually
-/// send for `Expires` (RFC 7231 §7.1.1.1 IMF-fixdate,
-/// `Wdy, DD Mon YYYY HH:MM:SS GMT`), into seconds since the epoch.
+/// Parse the `Expires` date, into seconds since the epoch.
+///
+/// TWO spellings are in live use and a jar has to take both — measured
+/// 2026-08-09 against six real sites:
+/// * `Wdy, DD Mon YYYY HH:MM:SS GMT` — RFC 7231 IMF-fixdate (Wikipedia,
+///   GitHub)
+/// * `Wdy, DD-Mon-YYYY HH:MM:SS GMT` — the old Netscape cookie date, which
+///   RFC 6265 §5.1.1 requires a parser to accept (Google, Amazon)
+///
+/// Reading only the first spelling turned every Google and Amazon cookie
+/// into a session cookie — and, worse, would have ignored a server logging
+/// you out with an expiry in the past, so we would have kept sending a
+/// cookie we were told to drop.
 ///
 /// Anything unparseable returns `None` → the cookie is treated as a session
 /// cookie. That is the safe direction: it lives no longer than beak does.
 fn parse_http_date(s: &str) -> Option<i64> {
     let s = s.trim();
     let rest = s.split_once(',').map(|(_, r)| r).unwrap_or(s).trim();
-    let mut it = rest.split_whitespace();
+    let mut it = rest.split(['-', ' ', '\t']).filter(|t| !t.is_empty());
     let day: i64 = it.next()?.parse().ok()?;
     let mon = it.next()?;
     let year: i64 = it.next()?.parse().ok()?;
@@ -251,6 +261,20 @@ fn store_one(&mut self, host: &str, req_path: &str, decl: &str, now: i64) {
         Some(secs) => Some(now.saturating_add(secs)),
         None => expires,
     };
+
+    // Cookie name prefixes (RFC 6265bis §4.1.3). These are a promise the NAME
+    // itself carries, so a server that breaks the promise gets nothing —
+    // otherwise `__Host-session` means nothing, and meaning nothing is worse
+    // than not existing. Google already ships `__Secure-ENID`.
+    if name.starts_with("__Secure-") && !secure {
+        return;
+    }
+    // `__Host-` demands the Path=/ ATTRIBUTE, not merely a path that happens
+    // to be "/": with no attribute the default path is the request's own
+    // directory, which is not the promise the name makes.
+    if name.starts_with("__Host-") && (!secure || !domain.is_empty() || path != "/") {
+        return;
+    }
 
     let host_only = domain.is_empty();
     let domain = if host_only {
@@ -392,6 +416,85 @@ mod tests {
         let mut j = jar();
         j.store("https://example.com/", "set-cookie: b=2; Expires=whenever\r\n", 1000);
         assert_eq!(j.header_for("https://example.com/", 2_000_000_000), "b=2");
+    }
+
+    /// Header blocks copied verbatim from live responses on 2026-08-09. The
+    /// synthetic tests above all used one date spelling; these caught that two
+    /// are in use, and that reading only one silently turned every Google and
+    /// Amazon cookie into a session cookie.
+    #[test]
+    fn real_sites_headers_land_in_the_jar_as_they_should() {
+        // Google: Netscape date (dashes), Domain=.google.com, a __Secure- name.
+        let mut j = jar();
+        j.store("https://www.google.com/", concat!(
+            "set-cookie: SOCS=CAAaBgiAht_TBg; expires=Wed, 08-Sep-2027 17:02:09 GMT; path=/; domain=.google.com; Secure; SameSite=lax\r\n",
+            "set-cookie: AEC=AdJVEas; expires=Fri, 05-Feb-2027 17:02:09 GMT; path=/; domain=.google.com; Secure; HttpOnly; SameSite=lax\r\n",
+            "set-cookie: __Secure-ENID=35.SE=Jkbdc; expires=Thu, 09-Sep-2027 09:20:27 GMT; path=/; domain=.google.com; Secure; HttpOnly; SameSite=lax\r\n",
+        ), 1_786_294_929);
+        let h = j.header_for("https://www.google.com/search?q=x", 1_786_294_929);
+        assert!(h.contains("SOCS=CAAaBgiAht_TBg"), "{h}");
+        assert!(h.contains("__Secure-ENID=35.SE=Jkbdc"), "{h}");
+        // Domain=.google.com reaches a sub-domain, but never a neighbour.
+        assert!(j.header_for("https://news.google.com/", 1_786_294_929).contains("SOCS="));
+        assert_eq!(j.header_for("https://google.com.evil.test/", 1_786_294_929), "");
+        // A dated cookie must OUTLIVE the session — that is the whole point
+        // of the date, and the dash spelling is what got it wrong.
+        assert!(!j.header_for("https://www.google.com/", 1_800_000_000).is_empty());
+        // …and still expire when it says. 2028-01-01 = 1830297600. This one
+        // goes LAST: reading the jar prunes what has expired, so a test that
+        // then asks about an earlier moment is asking a jar that already
+        // threw those cookies away. Time only moves forward in a browser.
+        assert_eq!(j.header_for("https://www.google.com/", 1_830_297_600), "");
+
+        // Wikipedia: no space after the semicolons, lowercase `secure`,
+        // RFC 1123 date, one host-only and one Domain cookie side by side.
+        let mut j = jar();
+        j.store("https://de.wikipedia.org/wiki/Schweiz", concat!(
+            "set-cookie: WMF-Last-Access=09-Aug-2026;Path=/;HttpOnly;secure;Expires=Thu, 10 Sep 2026 12:00:00 GMT\r\n",
+            "set-cookie: WMF-Last-Access-Global=09-Aug-2026;Path=/;Domain=.wikipedia.org;HttpOnly;secure;Expires=Thu, 10 Sep 2026 12:00:00 GMT\r\n",
+            "set-cookie: GeoIP=CH:ZH:Zweidlen-Dorf:47.56:8.47:v4; Path=/; secure; Domain=.wikipedia.org\r\n",
+        ), 1_786_294_929);
+        let h = j.header_for("https://de.wikipedia.org/wiki/X", 1_786_294_929);
+        assert!(h.contains("WMF-Last-Access=09-Aug-2026"), "{h}");
+        assert!(h.contains("GeoIP=CH:ZH:Zweidlen-Dorf:47.56:8.47:v4"), "a value may hold colons: {h}");
+        // The host-only one does NOT cross to another wikipedia sub-domain;
+        // the Domain= ones do.
+        let h2 = j.header_for("https://en.wikipedia.org/wiki/X", 1_786_294_929);
+        assert!(!h2.contains("WMF-Last-Access="), "{h2}");
+        assert!(h2.contains("WMF-Last-Access-Global="), "{h2}");
+
+        // GitHub's login page: the session cookie has no date at all, which is
+        // exactly what a login cookie looks like.
+        let mut j = jar();
+        j.store("https://github.com/login", concat!(
+            "set-cookie: _gh_sess=xQWvHNb1oK7%2Fiz; path=/; HttpOnly; secure; SameSite=Lax\r\n",
+            "set-cookie: logged_in=no; expires=Mon, 09 Aug 2027 17:02:09 GMT; domain=.github.com; path=/; HttpOnly; secure; SameSite=Lax\r\n",
+        ), 1_786_294_929);
+        assert!(j.header_for("https://github.com/", 1_786_294_929).contains("_gh_sess=xQWvHNb1oK7%2Fiz"));
+
+        // Amazon: Netscape dates again, everything on .amazon.de.
+        let mut j = jar();
+        j.store("https://www.amazon.de/", concat!(
+            "set-cookie: session-id=258-2923272-2531756; Domain=.amazon.de; Expires=Mon, 09-Aug-2027 17:02:10 GMT; Path=/; Secure\r\n",
+            "set-cookie: i18n-prefs=CHF; Domain=.amazon.de; Expires=Mon, 09-Aug-2027 17:02:10 GMT; Path=/\r\n",
+        ), 1_786_294_929);
+        let h = j.header_for("https://www.amazon.de/gp/cart", 1_786_294_929);
+        assert!(h.contains("session-id=258-2923272-2531756"), "{h}");
+        assert!(h.contains("i18n-prefs=CHF"), "{h}");
+    }
+
+    /// A name that promises something has to keep it, or it means nothing
+    /// (RFC 6265bis §4.1.3).
+    #[test]
+    fn a_prefixed_name_that_breaks_its_promise_is_refused() {
+        let mut j = jar();
+        j.store("https://example.com/", "set-cookie: __Secure-a=1\r\n", 1000);
+        j.store("https://example.com/app/x", "set-cookie: __Host-b=2; Secure\r\n", 1000);
+        j.store("https://example.com/", "set-cookie: __Host-c=3; Secure; Domain=example.com; Path=/\r\n", 1000);
+        assert_eq!(j.header_for("https://example.com/app/x", 1000), "");
+        // Kept when the promise holds.
+        j.store("https://example.com/", "set-cookie: __Host-d=4; Secure; Path=/\r\n", 1000);
+        assert_eq!(j.header_for("https://example.com/", 1000), "__Host-d=4");
     }
 
     #[test]
