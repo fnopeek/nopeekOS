@@ -106,6 +106,8 @@ pub fn parse(html: &str) -> Dom {
     let mut i = 0usize;
     let n = bytes.len();
     let mut text = String::new();
+    // Set once an <svg> start tag is seen; gates the foreign-content check.
+    let mut saw_svg = false;
 
     while i < n {
         if bytes[i] == b'<' && i + 1 < n && is_tagish(bytes[i + 1]) {
@@ -126,7 +128,15 @@ pub fn parse(html: &str) -> Dom {
             }
 
             if closing {
-                close_tag(&mut stack, &name);
+                // The end tag is lowercased like every other, so inside
+                // foreign content it has to be adjusted the same way or it
+                // never matches the start tag it closes.
+                let name = if saw_svg && stack.iter().any(|e| e.tag == "svg") {
+                    crate::svg::adjust_tag_name(&name)
+                } else {
+                    &name
+                };
+                close_tag(&mut stack, name);
                 continue;
             }
 
@@ -136,6 +146,21 @@ pub fn parse(html: &str) -> Dom {
             seq += 1;
             let mut el = Element::new(name.clone(), seq);
             parse_attrs(&raw, &mut el.attrs);
+            // Foreign content keeps its case (see `svg::adjust_tag_name`). The
+            // stack walk only runs on a document that has an <svg> in it at
+            // all, so the common page pays nothing.
+            if name == "svg" {
+                saw_svg = true;
+            }
+            if saw_svg && (name == "svg" || stack.iter().any(|e| e.tag == "svg")) {
+                el.tag = crate::svg::adjust_tag_name(&el.tag).to_string();
+                for (k, _) in el.attrs.iter_mut() {
+                    let fixed = crate::svg::adjust_attr_name(k);
+                    if fixed != k {
+                        *k = fixed.to_string();
+                    }
+                }
+            }
 
             if RAWTEXT.contains(&name.as_str()) {
                 let (content, after) = read_rawtext(html, i, &name);
@@ -582,6 +607,32 @@ mod tests {
         assert_eq!(child_tags(body), ["style", "p", "script"]);
         // The '<' inside the script did not break out into new elements.
         assert_eq!(text_of(&as_el(&body.children[1])), "keep");
+    }
+
+    #[test]
+    fn foreign_content_keeps_its_case() {
+        // SVG is case-sensitive; the HTML tokenizer is not. Without the spec's
+        // adjustment an inline icon arrives with `viewbox` and has no
+        // coordinate system at all.
+        let dom = parse(
+            "<body><svg viewBox=\"0 0 16 16\" width=\"16\"><clipPath id=\"c\">\
+             <path d=\"M0 0\"/></clipPath><lineargradient gradientUnits=\"userSpaceOnUse\"/>\
+             </svg><div viewBox=\"x\">after</div></body>",
+        );
+        let svg = as_el(&dom.body().children[0]);
+        assert_eq!(svg.attr("viewBox"), Some("0 0 16 16"));
+        assert_eq!(svg.attr("width"), Some("16"), "plain names are untouched");
+        assert_eq!(child_tags(svg), ["clipPath", "linearGradient"]);
+        // The end tag is lowercased too — if it were not adjusted, </clipPath>
+        // would not close its start tag and the tree would nest wrongly.
+        assert_eq!(child_tags(as_el(&svg.children[0])), ["path"]);
+        assert_eq!(
+            as_el(&svg.children[1]).attr("gradientUnits"),
+            Some("userSpaceOnUse")
+        );
+        // Outside foreign content nothing changes.
+        let div = as_el(&dom.body().children[1]);
+        assert_eq!(div.attr("viewbox"), Some("x"));
     }
 
     #[test]
