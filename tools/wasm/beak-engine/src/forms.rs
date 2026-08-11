@@ -191,9 +191,13 @@ fn control_of(e: &Element, kind: ControlKind, form: Option<usize>) -> Control {
             .or_else(|| options.first().map(|(v, _)| v.clone()))
             .unwrap_or_default();
     }
-    if kind.is_submit() && default_value.is_empty() && e.tag == "input" {
+    if kind.is_submit() && e.tag == "input" && e.attr("value").is_none() {
         // A bare `<input type=submit>` still submits a name=value pair using
-        // the UA's default label.
+        // the UA's default label. Only a MISSING `value` gets it: HTML
+        // §4.10.5.1.20 makes `value=""` an explicit empty label, and pages
+        // rely on that to put their own icon there by CSS — DDG's search
+        // button carries a magnifier that way, and stamping "Absenden" into it
+        // both hid the icon and submitted a value the page never asked for.
         default_value = "Absenden".to_string();
     }
     Control {

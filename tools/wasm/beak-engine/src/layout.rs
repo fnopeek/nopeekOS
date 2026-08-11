@@ -1829,12 +1829,23 @@ impl<'a> Ctx<'a> {
                 inline = Inline::new();
             }
             // `clear` introduces clearance, dropping the block below the floats
-            // and separating margins: commit the open margin, then clear.
+            // and separating margins. §9.5.2 measures against the box's
+            // HYPOTHETICAL position — where its border top edge would sit with
+            // `clear: none`, so with its own top margin already collapsed in —
+            // and then clearance SETS that edge: the margin is consumed, not
+            // added on top of it. Clearing against the bare anchor instead put
+            // every cleared box one whole top margin too low.
             if st.clear != ClearKind::None {
-                let base = anchor + open.value() as i32;
+                let mut hypo = open;
+                hypo.add(st.margin_top);
+                let own = Collapse::one(st.margin_top).value() as i32;
+                let base = anchor + hypo.value() as i32;
                 let cleared = self.clear_below(st.clear, base);
                 if cleared > base {
-                    anchor = cleared;
+                    // `flow_block_impl` re-adds the top margin to the anchor it
+                    // is handed, so hand it the one that lands the border edge
+                    // exactly on `cleared`.
+                    anchor = cleared - own;
                     open = Collapse::default();
                 }
             }
@@ -1914,6 +1925,39 @@ impl<'a> Ctx<'a> {
                 open = out.open;
             }
         }
+        // A generated `::after` carrying `clear` is BLOCK-level: the open line
+        // closes before it and it takes clearance like any other block. This is
+        // the clearfix idiom — `.cw::after { content: ""; display: block;
+        // clear: both }` — how a very large part of the real web makes a
+        // container contain its floats. The box is zero-sized by definition, so
+        // `pseudo_box` below drops it; what matters is that the content edge
+        // follows it down past the floats. On a line box `clear` means nothing.
+        if let Some(clear) = owner.and_then(|o| self.pseudo_clear(o, parent, PseudoElem::After)) {
+            if !inline.is_empty() {
+                let ly = anchor + open.value() as i32;
+                let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, parent.text_align, parent.text_align_last, parent.rtl, parent.text_indent.px(w as f32).unwrap_or(0.0), parent.line_height.px(parent.font_px).unwrap_or(0.0), &mut self.ops, &mut self.links, &mut self.controls, &mut self.inspects, &mut self.last_baseline);
+                if !committed {
+                    first_top = ly;
+                    committed = true;
+                }
+                anchor = nb;
+                open = Collapse::default();
+                inline = Inline::new();
+            }
+            let base = anchor + open.value() as i32;
+            // Clearance stops the top margin collapsing through, so the
+            // container's border box stays where the flow put it — the cleared
+            // box adds HEIGHT below, it does not drag the whole container down.
+            if !committed {
+                first_top = base;
+                committed = true;
+            }
+            let cleared = self.clear_below(clear, base);
+            if cleared > base {
+                anchor = cleared;
+                open = Collapse::default();
+            }
+        }
         // `owner::after` — appended behind the real children, before the
         // final line-box flush so it shares a line with trailing inline
         // content (or starts its own, if the last child was block-level).
@@ -1952,6 +1996,17 @@ impl<'a> Ctx<'a> {
         (ps.display == Display::Inline).then_some((text, ps))
     }
 
+    /// The `clear` on `owner`'s generated box, when it has one that takes part
+    /// in the flow. `None` for a text-only pseudo (`clear` needs a block box),
+    /// an out-of-flow one (it clears nothing) or no generated box at all.
+    fn pseudo_clear(&self, owner: &Element, own: &ComputedStyle, kind: PseudoElem) -> Option<ClearKind> {
+        let (_, ps) = self.pseudo_content(owner, own, kind)?;
+        (ps.clear != ClearKind::None
+            && ps.is_generated_box()
+            && !matches!(ps.position, Position::Absolute | Position::Fixed))
+        .then_some(ps.clear)
+    }
+
     fn pseudo_content(&self, owner: &Element, own: &ComputedStyle, kind: PseudoElem) -> Option<(String, ComputedStyle)> {
         let anc = self.path.len().saturating_sub(1);
         let (template, ps) =
@@ -1988,7 +2043,7 @@ impl<'a> Ctx<'a> {
             {
                 continue;
             }
-            let (aw, ah) = (pw as f32, ph as f32);
+            let aw = pw as f32;
             let frame_x = ps.pad_left + ps.pad_right + ps.border_x();
             let frame_y = ps.pad_top + ps.pad_bottom + ps.border_y();
             let font = self.fonts.pick(ps.bold, ps.italic, ps.mono);
@@ -2279,6 +2334,10 @@ impl<'a> Ctx<'a> {
         // percentages fall back to `auto` (§10.5).
         let prev_cb_h = self.cb_h;
         self.cb_h = content_height_of(st, st.height);
+        // Floats already active here belong to an enclosing formatting context;
+        // anything added below is this box's own (§10.6.7, resolved after the
+        // children).
+        let float0 = self.floats.len();
         let flow = if replaced_intrinsic(el).is_some() {
             // A replaced element's children are not page content — an
             // `<iframe>`'s fallback text, a `<video>`'s `<source>` list, a
@@ -2299,6 +2358,18 @@ impl<'a> Ctx<'a> {
         // box's border box sits at the first committed child's border-box top.
         let border_top_y = if collapse_top && flow.committed { flow.first_top } else { prov_top_y };
         let content_top = border_top_y + bt + pt;
+
+        // §10.6.7: a box that establishes a block formatting context and has an
+        // auto height grows to contain its own floats. A box that does NOT
+        // establish one never does — its floats escape to the enclosing
+        // context, which is exactly why a bare `<div>` around a float measures
+        // zero and an `overflow:hidden` wrapper must not. `isolated` marks the
+        // BFC roots the caller positions itself (float, cell, flex item,
+        // inline-block, abspos, root); `establishes_bfc` the in-flow ones.
+        let auto_height = !matches!(st.height, Len::Px(_));
+        let float_bottom = (auto_height && (isolated || establishes_bfc(st)))
+            .then(|| self.floats[float0..].iter().map(|f| f.bottom).max())
+            .flatten();
 
         // Explicit `height`/`min`/`max-height` (definite lengths only; `%` needs
         // a definite CB height we don't track). Border-box subtracts pad+border.
@@ -2328,6 +2399,11 @@ impl<'a> Ctx<'a> {
                     ch = ih as i32;
                 }
             }
+            // A container whose ONLY content is a float: no line box ever
+            // committed, so the float alone decides the height.
+            if let Some(fb) = float_bottom {
+                ch = ch.max(fb - content_top);
+            }
             if let Some(mn) = px_h(st.min_height) {
                 ch = ch.max(mn);
             }
@@ -2351,9 +2427,12 @@ impl<'a> Ctx<'a> {
         // Box with committed content. The last child's trailing margin
         // (`flow.open`) collapses with this box's bottom margin only when the
         // box has auto height and no bottom border/padding separating them.
-        let auto_height = !matches!(st.height, Len::Px(_));
         let collapse_bottom = !isolated && bb == 0 && pb == 0 && auto_height;
         let mut ch = (flow.bottom - content_top).max(0);
+        // A float reaching past the last line box extends the content edge.
+        if let Some(fb) = float_bottom {
+            ch = ch.max(fb - content_top);
+        }
         let out_open;
         if collapse_bottom {
             // `min-height` taller than the content introduces space below it,
@@ -2377,6 +2456,9 @@ impl<'a> Ctx<'a> {
             // Bottom border/padding or a definite height: commit the trailing
             // child margin into the content box.
             ch = (flow.bottom + flow.open.value() as i32 - content_top).max(0);
+            if let Some(fb) = float_bottom {
+                ch = ch.max(fb - content_top);
+            }
             if let Some(h) = px_h(st.height) {
                 ch = h;
             }
@@ -5887,6 +5969,13 @@ fn button_label(el: &Element, kind: ControlKind, value: &str) -> String {
     }
     if !value.is_empty() {
         return value.to_string();
+    }
+    // HTML §4.10.5.1.20: on an `<input>`, `value=""` is an explicit EMPTY
+    // label — only a MISSING attribute gets the UA default. Pages put their
+    // own icon on the button by CSS and rely on it staying empty; DDG's search
+    // button is a magnifier that way, and "Absenden" painted straight over it.
+    if el.tag == "input" && el.attr("value").is_some() {
+        return String::new();
     }
     match kind {
         ControlKind::Reset => "Zurücksetzen".to_string(),
