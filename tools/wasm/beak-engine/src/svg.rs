@@ -6,8 +6,12 @@
 //! supersampled scanline coverage rasteriser (nonzero / evenodd) into a
 //! straight-BGRA `Image`. Colours reuse `color::parse_color` (named + Color 4).
 //!
-//! v1 = fills only. Stroke, gradients, `<use>`/`<defs>`, inline `<svg>` in the
-//! DOM come next (see the SVG WPT oracle).
+//! Fills, strokes and (as one flat average colour) gradients. Renders both a
+//! standalone `<img src=*.svg>` and an inline `<svg>` straight out of the HTML
+//! DOM — the latter through `render_element`, which takes the element's
+//! computed `color` because `currentColor` is what icon sets paint with.
+//! Still missing: `<use>`, real gradient interpolation, `clip-path` (an icon's
+//! clip is its own box, so ignoring it is invisible; a clipping mask is not).
 
 use crate::color::parse_color;
 use crate::image::Image;
@@ -19,6 +23,137 @@ use libm::{ceilf, cosf, fabsf, floorf, sinf, sqrtf, tanf};
 const MAX_SIDE: u32 = 1024;
 const MAX_PIXELS: usize = 1_000_000; // caps the f32 accumulation buffer (~16 MB)
 const SS: usize = 4; // vertical supersampling for anti-aliasing
+
+// ── foreign-content name adjustment (HTML tree construction) ───────────────
+//
+// The HTML tokenizer lowercases every tag and attribute name. SVG is
+// case-SENSITIVE, so the spec puts the camel case back when it inserts a
+// foreign element ("adjust SVG tag names" / "adjust SVG attributes"). Without
+// it `viewBox` arrives as `viewbox` and an inline icon has no coordinate
+// system at all. The tables are the spec's, verbatim.
+
+/// Lowercased SVG element name → its real spelling. Unlisted names are already
+/// all-lowercase (`path`, `circle`, `g`, …) and pass through.
+pub fn adjust_tag_name(lower: &str) -> &str {
+    const T: &[(&str, &str)] = &[
+        ("altglyph", "altGlyph"),
+        ("altglyphdef", "altGlyphDef"),
+        ("altglyphitem", "altGlyphItem"),
+        ("animatecolor", "animateColor"),
+        ("animatemotion", "animateMotion"),
+        ("animatetransform", "animateTransform"),
+        ("clippath", "clipPath"),
+        ("feblend", "feBlend"),
+        ("fecolormatrix", "feColorMatrix"),
+        ("fecomponenttransfer", "feComponentTransfer"),
+        ("fecomposite", "feComposite"),
+        ("feconvolvematrix", "feConvolveMatrix"),
+        ("fediffuselighting", "feDiffuseLighting"),
+        ("fedisplacementmap", "feDisplacementMap"),
+        ("fedistantlight", "feDistantLight"),
+        ("fedropshadow", "feDropShadow"),
+        ("feflood", "feFlood"),
+        ("fefunca", "feFuncA"),
+        ("fefuncb", "feFuncB"),
+        ("fefuncg", "feFuncG"),
+        ("fefuncr", "feFuncR"),
+        ("fegaussianblur", "feGaussianBlur"),
+        ("feimage", "feImage"),
+        ("femerge", "feMerge"),
+        ("femergenode", "feMergeNode"),
+        ("femorphology", "feMorphology"),
+        ("feoffset", "feOffset"),
+        ("fepointlight", "fePointLight"),
+        ("fespecularlighting", "feSpecularLighting"),
+        ("fespotlight", "feSpotLight"),
+        ("fetile", "feTile"),
+        ("feturbulence", "feTurbulence"),
+        ("foreignobject", "foreignObject"),
+        ("glyphref", "glyphRef"),
+        ("lineargradient", "linearGradient"),
+        ("radialgradient", "radialGradient"),
+        ("textpath", "textPath"),
+    ];
+    lookup(T, lower)
+}
+
+/// Lowercased SVG attribute name → its real spelling.
+pub fn adjust_attr_name(lower: &str) -> &str {
+    const T: &[(&str, &str)] = &[
+        ("attributename", "attributeName"),
+        ("attributetype", "attributeType"),
+        ("basefrequency", "baseFrequency"),
+        ("baseprofile", "baseProfile"),
+        ("calcmode", "calcMode"),
+        ("clippathunits", "clipPathUnits"),
+        ("diffuseconstant", "diffuseConstant"),
+        ("edgemode", "edgeMode"),
+        ("filterunits", "filterUnits"),
+        ("glyphref", "glyphRef"),
+        ("gradienttransform", "gradientTransform"),
+        ("gradientunits", "gradientUnits"),
+        ("kernelmatrix", "kernelMatrix"),
+        ("kernelunitlength", "kernelUnitLength"),
+        ("keypoints", "keyPoints"),
+        ("keysplines", "keySplines"),
+        ("keytimes", "keyTimes"),
+        ("lengthadjust", "lengthAdjust"),
+        ("limitingconeangle", "limitingConeAngle"),
+        ("markerheight", "markerHeight"),
+        ("markerunits", "markerUnits"),
+        ("markerwidth", "markerWidth"),
+        ("maskcontentunits", "maskContentUnits"),
+        ("maskunits", "maskUnits"),
+        ("numoctaves", "numOctaves"),
+        ("pathlength", "pathLength"),
+        ("patterncontentunits", "patternContentUnits"),
+        ("patterntransform", "patternTransform"),
+        ("patternunits", "patternUnits"),
+        ("pointsatx", "pointsAtX"),
+        ("pointsaty", "pointsAtY"),
+        ("pointsatz", "pointsAtZ"),
+        ("preservealpha", "preserveAlpha"),
+        ("preserveaspectratio", "preserveAspectRatio"),
+        ("primitiveunits", "primitiveUnits"),
+        ("refx", "refX"),
+        ("refy", "refY"),
+        ("repeatcount", "repeatCount"),
+        ("repeatdur", "repeatDur"),
+        ("requiredextensions", "requiredExtensions"),
+        ("requiredfeatures", "requiredFeatures"),
+        ("specularconstant", "specularConstant"),
+        ("specularexponent", "specularExponent"),
+        ("spreadmethod", "spreadMethod"),
+        ("startoffset", "startOffset"),
+        ("stddeviation", "stdDeviation"),
+        ("stitchtiles", "stitchTiles"),
+        ("surfacescale", "surfaceScale"),
+        ("systemlanguage", "systemLanguage"),
+        ("tablevalues", "tableValues"),
+        ("targetx", "targetX"),
+        ("targety", "targetY"),
+        ("textlength", "textLength"),
+        ("viewbox", "viewBox"),
+        ("viewtarget", "viewTarget"),
+        ("xchannelselector", "xChannelSelector"),
+        ("ychannelselector", "yChannelSelector"),
+        ("zoomandpan", "zoomAndPan"),
+    ];
+    lookup(T, lower)
+}
+
+/// The tables are sorted, so this is a binary search; an unlisted name is
+/// returned unchanged (it is already spelled correctly in lower case).
+fn lookup<'a>(table: &[(&'static str, &'static str)], lower: &'a str) -> &'a str {
+    match table.binary_search_by(|(k, _)| (*k).cmp(lower)) {
+        Ok(i) => {
+            // SAFETY of the cast-free kind: the table value is 'static, which
+            // outlives 'a.
+            table[i].1
+        }
+        Err(_) => lower,
+    }
+}
 
 /// Detect an SVG document: skip a UTF-8 BOM / leading whitespace / an XML
 /// declaration / a doctype / comments, then look for `<svg`.
@@ -40,14 +175,56 @@ pub fn render(bytes: &[u8]) -> Option<Image> {
         // The document element must be <svg> (allow a namespace prefix).
         return None;
     }
+    // A standalone document has no CSS around it, so `currentColor` is the
+    // initial `color`.
+    render_tree(&root, Rgb(0, 0, 0), None)
+}
 
+/// Render an INLINE `<svg>` straight out of the HTML DOM.
+///
+/// `current` is the element's computed `color` — `currentColor` is what icon
+/// sets paint with, so without it every icon comes out black. `box_px` is the
+/// used box from layout: an inline `<svg>` is sized by CSS, not by its own
+/// `width`/`height` attributes, so the raster has to match that box or the
+/// icon is drawn at the wrong scale.
+pub fn render_element(el: &crate::dom::Element, current: Rgb, box_px: Option<(u32, u32)>) -> Option<Image> {
+    render_tree(&from_dom(el)?, current, box_px)
+}
+
+/// The HTML DOM and this module's XML tree hold the same data in the same
+/// shape; an inline icon is a handful of nodes, so mirroring it beats making
+/// every walker generic over two tree types.
+fn from_dom(el: &crate::dom::Element) -> Option<XmlEl> {
+    if local_name(&el.tag) != "svg" {
+        return None;
+    }
+    fn conv(el: &crate::dom::Element) -> XmlEl {
+        XmlEl {
+            tag: el.tag.clone(),
+            attrs: el.attrs.clone(),
+            children: el
+                .children
+                .iter()
+                .map(|n| match n {
+                    crate::dom::Node::Element(e) => XmlNode::El(conv(e)),
+                    crate::dom::Node::Text(t) => XmlNode::Text(t.clone()),
+                })
+                .collect(),
+        }
+    }
+    Some(conv(el))
+}
+
+fn render_tree(root: &XmlEl, current: Rgb, box_px: Option<(u32, u32)>) -> Option<Image> {
     // Intrinsic size + user→device root matrix.
-    let vb = attr(&root, "viewBox").and_then(parse_view_box);
-    let aw = attr(&root, "width").and_then(|v| parse_len(&v));
-    let ah = attr(&root, "height").and_then(|v| parse_len(&v));
-    let (dev_w, dev_h) = match (aw, ah, vb) {
-        (Some(w), Some(h), _) => (w, h),
-        (_, _, Some((_, _, vw, vh))) => (vw, vh),
+    let vb = attr(root, "viewBox").and_then(parse_view_box);
+    let aw = attr(root, "width").and_then(|v| parse_len(&v));
+    let ah = attr(root, "height").and_then(|v| parse_len(&v));
+    let (dev_w, dev_h) = match (box_px, aw, ah, vb) {
+        // Layout already decided the box; the viewBox maps into it.
+        (Some((bw, bh)), ..) if bw > 0 && bh > 0 => (bw as f32, bh as f32),
+        (_, Some(w), Some(h), _) => (w, h),
+        (_, _, _, Some((_, _, vw, vh))) => (vw, vh),
         _ => (300.0, 150.0),
     };
     if !(dev_w > 0.0) || !(dev_h > 0.0) {
@@ -79,8 +256,9 @@ pub fn render(bytes: &[u8]) -> Option<Image> {
         stroke_opacity: 1.0,
         cap: Cap::Butt,
     };
-    let grads = gradient_colors(text);
-    walk(&root, &root_mat, &base, &mut fills, &grads);
+    let mut grads = Vec::new();
+    gradient_colors(root, &mut grads);
+    walk(root, &root_mat, &base, &mut fills, &grads, current);
     if fills.is_empty() {
         // Nothing drawable — still return a transparent box so the <img> box
         // is sized (better than a placeholder for an empty/def-only SVG).
@@ -176,19 +354,19 @@ struct Fill {
     evenodd: bool,
 }
 
-fn walk(el: &XmlEl, ctm: &Mat, parent: &Paint, out: &mut Vec<Fill>, grads: &[(String, Rgb)]) {
+fn walk(el: &XmlEl, ctm: &Mat, parent: &Paint, out: &mut Vec<Fill>, grads: &[(String, Rgb)], current: Rgb) {
     let ctm = match attr(el, "transform") {
         Some(t) => ctm.mul(&parse_transform(&t)),
         None => *ctm,
     };
-    let paint = resolve_paint(el, parent, grads);
+    let paint = resolve_paint(el, parent, grads, current);
 
     let tag = local_name(&el.tag);
     match tag {
         "svg" | "g" | "a" | "switch" | "symbol" => {
             for ch in &el.children {
                 if let XmlNode::El(c) = ch {
-                    walk(c, &ctm, &paint, out, grads);
+                    walk(c, &ctm, &paint, out, grads, current);
                 }
             }
         }
@@ -227,40 +405,41 @@ fn walk(el: &XmlEl, ctm: &Mat, parent: &Paint, out: &mut Vec<Fill>, grads: &[(St
 /// v1 paints a gradient as ONE flat colour: the mean of its stops. A real
 /// gradient needs per-pixel interpolation in the rasteriser; the flat stand-in
 /// is what turns Wikipedia's logo from a black disc into a light sphere, and at
-/// icon size the difference from the real thing is small. Scanned off the raw
-/// text rather than the parsed tree because `<defs>` is skipped there.
-fn gradient_colors(text: &str) -> Vec<(String, Rgb)> {
-    let mut out = Vec::new();
-    let mut rest = text;
-    while let Some(i) = rest.find("Gradient") {
-        // `<linearGradient` / `<radialGradient` — anything else is not one.
-        let head = &rest[..i];
-        if !(head.ends_with("<linear") || head.ends_with("<radial")) {
-            rest = &rest[i + 8..];
-            continue;
-        }
-        let body = &rest[i..];
-        let Some(end) = body.find("Gradient>") else { break };
-        let block = &body[..end];
-        rest = &body[end + 9..];
-        let Some(id) = attr_value(block, "id") else { continue };
-        let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
-        for stop in block.split("<stop").skip(1) {
-            let c = attr_value(stop, "stop-color")
-                .or_else(|| style_value(stop, "stop-color"))
-                .and_then(|v| parse_color(&v));
-            if let Some(Rgb(cr, cg, cb)) = c {
-                r += cr as u32;
-                g += cg as u32;
-                b += cb as u32;
-                n += 1;
+/// icon size the difference from the real thing is small.
+///
+/// Walks the tree — `walk` skips `<defs>`, but this pass visits everything, so
+/// a gradient is found wherever it is declared. An inline `<svg>` has no source
+/// text to scan at all.
+fn gradient_colors(el: &XmlEl, out: &mut Vec<(String, Rgb)>) {
+    let tag = local_name(&el.tag);
+    if tag == "linearGradient" || tag == "radialGradient" {
+        if let Some(id) = attr(el, "id") {
+            let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
+            for c in &el.children {
+                let XmlNode::El(stop) = c else { continue };
+                if local_name(&stop.tag) != "stop" {
+                    continue;
+                }
+                let col = attr(stop, "stop-color")
+                    .or_else(|| attr(stop, "style").and_then(|s| style_value(&s, "stop-color")))
+                    .and_then(|v| parse_color(&v));
+                if let Some(Rgb(cr, cg, cb)) = col {
+                    r += cr as u32;
+                    g += cg as u32;
+                    b += cb as u32;
+                    n += 1;
+                }
+            }
+            if n > 0 {
+                out.push((id, Rgb((r / n) as u8, (g / n) as u8, (b / n) as u8)));
             }
         }
-        if n > 0 {
-            out.push((id, Rgb((r / n) as u8, (g / n) as u8, (b / n) as u8)));
+    }
+    for c in &el.children {
+        if let XmlNode::El(child) = c {
+            gradient_colors(child, out);
         }
     }
-    out
 }
 
 /// The value of `name="…"` in a raw tag slice.
@@ -303,7 +482,7 @@ fn url_ref(v: &str) -> Option<&str> {
     inner.strip_prefix('#').map(|s| s.trim_matches(|c| c == '"' || c == '\''))
 }
 
-fn resolve_paint(el: &XmlEl, parent: &Paint, grads: &[(String, Rgb)]) -> Paint {
+fn resolve_paint(el: &XmlEl, parent: &Paint, grads: &[(String, Rgb)], current: Rgb) -> Paint {
     let mut p = *parent;
     p.opacity = parent.opacity; // opacity does NOT inherit; applied multiplicatively
     // opacity is a property of THIS element only (reset), fill/fill-* inherit.
@@ -314,8 +493,9 @@ fn resolve_paint(el: &XmlEl, parent: &Paint, grads: &[(String, Rgb)]) -> Paint {
         match name {
             "fill" => {
                 p.fill = match val {
-                    "none" => None,
-                    "currentColor" | "context-fill" => Some(Rgb(0, 0, 0)),
+                    _ if val.eq_ignore_ascii_case("none") => None,
+                    _ if val.eq_ignore_ascii_case("currentcolor")
+                        || val.eq_ignore_ascii_case("context-fill") => Some(current),
                     v => url_ref(v)
                         .and_then(|id| grads.iter().find(|(g, _)| g == id).map(|(_, c)| *c))
                         .or_else(|| parse_color(v))
@@ -330,8 +510,9 @@ fn resolve_paint(el: &XmlEl, parent: &Paint, grads: &[(String, Rgb)]) -> Paint {
             "fill-rule" => p.evenodd = val == "evenodd",
             "stroke" => {
                 p.stroke = match val {
-                    "none" => None,
-                    "currentColor" | "context-stroke" => Some(Rgb(0, 0, 0)),
+                    _ if val.eq_ignore_ascii_case("none") => None,
+                    _ if val.eq_ignore_ascii_case("currentcolor")
+                        || val.eq_ignore_ascii_case("context-stroke") => Some(current),
                     v => parse_color(v).or(p.stroke),
                 }
             }

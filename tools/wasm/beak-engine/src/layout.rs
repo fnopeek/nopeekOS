@@ -235,6 +235,26 @@ fn band_of(floats: &[FloatRect], top: i32, bot: i32, cl: i32, cr: i32) -> (i32, 
 ///
 /// `<img>` is deliberately not here: it has real intrinsic dimensions once its
 /// pixels land, and its own path (`img_box`) tracks whether the box was guessed.
+
+/// The image-store key of an inline `<svg>`. `seq` is the document-order index
+/// the parser assigns, so the key is stable across re-layouts of the same
+/// document and cannot collide with a page's own `src` (no URL has this shape).
+fn svg_key(el: &Element) -> alloc::string::String {
+    alloc::format!("svg:{}", el.seq)
+}
+
+/// What to show if the raster fails. An icon's accessible name is its
+/// `aria-label`/`<title>`, which is also what a page gives a control whose
+/// only content is that icon.
+fn svg_alt(el: &Element, is_svg: bool) -> alloc::string::String {
+    if !is_svg {
+        return el.attr("alt").unwrap_or("").trim().to_string();
+    }
+    el.attr("aria-label")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
 fn replaced_intrinsic(el: &Element) -> Option<(f32, f32)> {
     if !matches!(el.tag.as_str(), "iframe" | "video" | "canvas" | "object" | "embed") {
         return None;
@@ -691,6 +711,15 @@ pub struct Layout {
     /// (key, URL) — `data:` URIs are resolved by the engine itself and never
     /// appear here. Filled in by `Engine::layout_ext`, which holds the sheet.
     pub css_image_srcs: Vec<(u64, String)>,
+    /// Inline `<svg>` elements this layout painted, as (seq, colour, w, h).
+    ///
+    /// An inline SVG is a replaced element with no `src`, and it cannot be
+    /// rasterised before the cascade runs: `currentColor` — what practically
+    /// every icon set paints with — IS the element's computed `color`, and the
+    /// box is decided by CSS, not by the SVG's own attributes. So layout states
+    /// what it needs and `Engine::resolve_inline_svgs` renders it afterwards,
+    /// the same split `css_image_srcs` already uses.
+    pub inline_svgs: Vec<(u32, Rgb, u32, u32)>,
     /// Element boxes for the inspect dev tool (empty unless inspection was on).
     pub inspect: Vec<InspectBox>,
 }
@@ -914,6 +943,8 @@ struct Ctx<'a> {
     /// a full re-layout even when all of ITS images had definite boxes. On a
     /// real article that was 5.7 s of frozen UI per batch.
     guessed: core::cell::RefCell<Vec<String>>,
+    /// Inline `<svg>` render requests — see `Layout::inline_svgs`.
+    inline_svgs: core::cell::RefCell<Vec<(u32, Rgb, u32, u32)>>,
     /// `url_key`s of the CSS images this layout referenced. Deliberately a
     /// SET (deduped on insert), not an append-only log: a throwaway
     /// measurement layout paints boxes too, and its entries must be
@@ -1289,6 +1320,7 @@ pub fn layout(
         sheet,
         images,
         guessed: core::cell::RefCell::new(Vec::new()),
+        inline_svgs: core::cell::RefCell::new(Vec::new()),
         css_images: core::cell::RefCell::new(Vec::new()),
         ops: Vec::new(),
         links: Vec::new(),
@@ -1404,6 +1436,7 @@ pub fn layout(
         guessed_image_srcs: ctx.guessed.into_inner(),
         css_image_keys: ctx.css_images.into_inner(),
         css_image_srcs: Vec::new(),
+        inline_svgs: ctx.inline_svgs.into_inner(),
         inspect: ctx.inspects,
     }
 }
@@ -1668,11 +1701,12 @@ impl<'a> Ctx<'a> {
             // (a lone `<img>` flows as one item → its own line; an `<img>` in an
             // `<a>`/`<span>` flows with the text). Nested imgs are handled in
             // `collect_inline`; this catches direct children of any display.
-            if el.tag == "img" {
+            if el.tag == "img" || el.tag == "svg" {
                 self.path.push(ElemInfo::of(el));
-                let (iw, ih) = self.img_box(el, &st);
-                let alt = el.attr("alt").unwrap_or("").trim().to_string();
-                let src = el.attr("src").unwrap_or("").to_string();
+                let svg = el.tag == "svg";
+                let (iw, ih) = if svg { self.svg_box(el, &st) } else { self.img_box(el, &st) };
+                let alt = svg_alt(el, svg);
+                let src = if svg { svg_key(el) } else { el.attr("src").unwrap_or("").to_string() };
                 inline.image(src, iw, ih, None, alt, st.hidden, st.transparent, self.image_deco(&st));
                 self.path.pop();
                 continue;
@@ -2370,6 +2404,43 @@ impl<'a> Ctx<'a> {
     /// pixels arriving later change nothing, so the shell can repaint instead
     /// of re-laying-out. Without them the box depends on the decoded size, and
     /// a later decode really does move the page.
+    /// The box of an inline `<svg>`, and the render request that fills it.
+    ///
+    /// Unlike an `<img>` this never has to be guessed: the intrinsic size is in
+    /// the markup (`width`/`height`, else the `viewBox`, else CSS's 300×150
+    /// default for a replaced element with no intrinsic size), so the box is
+    /// definite on the FIRST layout and arriving pixels only need a repaint.
+    fn svg_box(&self, el: &Element, st: &ComputedStyle) -> (i32, i32) {
+        let attr = |n: &str| el.attr(n).and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok());
+        let vb = el.attr("viewBox").and_then(|v| {
+            let n: Vec<f32> = v.split(|c: char| c == ',' || c.is_ascii_whitespace())
+                .filter(|t| !t.is_empty())
+                .filter_map(|t| t.parse::<f32>().ok())
+                .collect();
+            (n.len() == 4 && n[2] > 0.0 && n[3] > 0.0).then(|| (n[2], n[3]))
+        });
+        let css = |l: Len| match l {
+            Len::Px(v) if v >= 0.0 => Some(v),
+            _ => None,
+        };
+        let (aw, ah) = (css(st.width).or_else(|| attr("width")), css(st.height).or_else(|| attr("height")));
+        let (iw, ih) = vb.unwrap_or((300.0, 150.0));
+        // One given side keeps the intrinsic ratio, as for any replaced element.
+        let (w, h) = match (aw, ah) {
+            (Some(w), Some(h)) => (w, h),
+            (Some(w), None) => (w, w * ih / iw),
+            (None, Some(h)) => (h * iw / ih, h),
+            (None, None) => (iw, ih),
+        };
+        let (w, h) = (w.max(0.0) as i32, h.max(0.0) as i32);
+        if w > 0 && h > 0 {
+            self.inline_svgs
+                .borrow_mut()
+                .push((el.seq, st.color, w as u32, h as u32));
+        }
+        (w, h)
+    }
+
     fn img_box(&self, el: &Element, st: &ComputedStyle) -> (i32, i32) {
         let img = el.attr("src").and_then(|s| self.images.get(s));
         let (iw, ih) = img.map(|i| (i.w as f32, i.h as f32)).unwrap_or((0.0, 0.0));
@@ -5467,7 +5538,7 @@ impl<'a> Ctx<'a> {
     /// control and an `inline-block` are atomic — each already lays out and
     /// paints its own box — and a `<br>` has none at all.
     fn inline_box_of(&self, el: &Element, st: &ComputedStyle, cb_w: i32) -> Option<InlineBox> {
-        if st.is_break || st.display != Display::Inline || el.tag == "img" || crate::forms::kind_of(el).is_some() {
+        if st.is_break || st.display != Display::Inline || el.tag == "img" || el.tag == "svg" || crate::forms::kind_of(el).is_some() {
             return None;
         }
         let cb = cb_w as f32;
@@ -5542,10 +5613,11 @@ impl<'a> Ctx<'a> {
         // An `<img>` inside inline content (e.g. `<a><img></a>` — Wikipedia's
         // thumbnails) is an atomic inline box; carry the enclosing link so it
         // stays clickable.
-        if el.tag == "img" {
-            let (iw, ih) = self.img_box(el, st);
-            let src = el.attr("src").unwrap_or("").to_string();
-            inline.image(src, iw, ih, href, el.attr("alt").unwrap_or("").trim().to_string(), st.hidden, st.transparent, self.image_deco(st));
+        if el.tag == "img" || el.tag == "svg" {
+            let svg = el.tag == "svg";
+            let (iw, ih) = if svg { self.svg_box(el, st) } else { self.img_box(el, st) };
+            let src = if svg { svg_key(el) } else { el.attr("src").unwrap_or("").to_string() };
+            inline.image(src, iw, ih, href, svg_alt(el, svg), st.hidden, st.transparent, self.image_deco(st));
             return;
         }
         // …and every other replaced element, laid out through the block model

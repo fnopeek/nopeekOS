@@ -2033,8 +2033,8 @@ FAIL	CSS2/inline-block-replaced-height-004.xht
 FAIL	CSS2/inline-block-replaced-height-005.xht
 FAIL	CSS2/inline-block-replaced-height-007.xht
 FAIL	CSS2/inline-block-replaced-height-009.xht
-FAIL	CSS2/inline-block-replaced-width-007.xht
-FAIL	CSS2/inline-block-replaced-width-008.xht
+PASS	CSS2/inline-block-replaced-width-007.xht
+PASS	CSS2/inline-block-replaced-width-008.xht
 INCONCLUSIVE	CSS2/inline-block-valign-001.xht
 INCONCLUSIVE	CSS2/inline-block-valign-002.xht
 PASS	CSS2/inline-block-width-001a.xht
@@ -2063,8 +2063,8 @@ FAIL	CSS2/inline-replaced-height-004.xht
 FAIL	CSS2/inline-replaced-height-005.xht
 FAIL	CSS2/inline-replaced-height-007.xht
 FAIL	CSS2/inline-replaced-height-009.xht
-FAIL	CSS2/inline-replaced-width-008.xht
-FAIL	CSS2/inline-replaced-width-009.xht
+PASS	CSS2/inline-replaced-width-008.xht
+PASS	CSS2/inline-replaced-width-009.xht
 PASS	CSS2/inline-svg-intrinsic-size-100-percent-1.html
 FAIL	CSS2/inline-svg-intrinsic-size-100-percent-2.html
 FAIL	CSS2/inline-svg-margin-padding-border.html
@@ -3434,7 +3434,7 @@ PASS	css-backgrounds/border-bottom-width-thin.html
 FAIL	css-backgrounds/border-image-021.html
 FAIL	css-backgrounds/border-image-outset-003.html
 FAIL	css-backgrounds/border-image-repeat-005.html
-INCONCLUSIVE	css-backgrounds/border-image-repeat-1.html
+FAIL	css-backgrounds/border-image-repeat-1.html
 FAIL	css-backgrounds/border-image-width-should-extend-to-padding.html
 PASS	css-backgrounds/border-left-width-medium.html
 FAIL	css-backgrounds/border-left-width-thick.html
@@ -3550,7 +3550,7 @@ PASS	css-cascade/revert-layer-015.html
 PASS	css-cascade/revert-val-001.html
 PASS	css-cascade/revert-val-002.html
 INCONCLUSIVE	css-cascade/scope-featureless.html
-PASS	css-cascade/scope-implicit-003-print.html
+FAIL	css-cascade/scope-implicit-003-print.html
 FAIL	css-cascade/scope-pseudo-element.html
 FAIL	css-cascade/unset-val-001.html
 PASS	css-cascade/unset-val-002.html
@@ -5285,7 +5285,7 @@ FAIL	css-sizing/stretch-float-with-sibling.html
 FAIL	css-sizing/stretch-float.html
 FAIL	css-sizing/stretch-quirk-001.html
 FAIL	css-sizing/stretch-quirk-002.html
-INCONCLUSIVE	css-sizing/svg-intrinsic-size-005.html
+PASS	css-sizing/svg-intrinsic-size-005.html
 FAIL	css-sizing/svg-intrinsic-size-006.html
 PASS	css-sizing/table-child-percentage-height-with-border-box.html
 PASS	css-sizing/thin-element-render.html
@@ -5725,7 +5725,7 @@ PASS	css-values/calc-width-block-1.html
 PASS	css-values/calc-width-block-intrinsic-1.html
 INCONCLUSIVE	css-values/calc-width-table-auto-1.html
 INCONCLUSIVE	css-values/calc-width-table-fixed-1.html
-PASS	css-values/ch-unit-001.html
+FAIL	css-values/ch-unit-001.html
 FAIL	css-values/ch-unit-002.html
 FAIL	css-values/ch-unit-003.html
 FAIL	css-values/ch-unit-004.html

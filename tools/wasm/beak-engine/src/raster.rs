@@ -245,8 +245,47 @@ impl Engine {
         let sheet = &held.as_ref().unwrap().1;
         self.resolve_data_uri_images(&dom);
         let mut lay = crate::layout::layout(&self.fonts, &dom, sheet, &self.images.borrow(), width, self.viewport_h.get(), &self.theme, forms, self.inspect.get());
+        self.resolve_inline_svgs(&dom, &lay);
         self.resolve_css_images(sheet, &mut lay);
         lay
+    }
+
+    /// Rasterise the inline `<svg>`s a layout painted, under their store keys.
+    ///
+    /// This runs AFTER layout on purpose: `currentColor` is the element's
+    /// computed `color` and the box is CSS's, so neither is known before the
+    /// cascade. The box is definite from the markup either way, so nothing has
+    /// to be laid out twice.
+    fn resolve_inline_svgs(&self, dom: &crate::dom::Dom, lay: &Layout) {
+        if lay.inline_svgs.is_empty() {
+            return;
+        }
+        fn walk(el: &crate::dom::Element, lay: &Layout, eng: &Engine) {
+            for c in &el.children {
+                let crate::dom::Node::Element(e) = c else { continue };
+                if e.tag == "svg" {
+                    if let Some(&(_, color, w, h)) =
+                        lay.inline_svgs.iter().find(|(seq, ..)| *seq == e.seq)
+                    {
+                        let key = alloc::format!("svg:{}", e.seq);
+                        if !eng.images.borrow().contains_key(key.as_str()) {
+                            if let Some(img) =
+                                crate::svg::render_element(e, color, Some((w, h)))
+                            {
+                                if img.bgra.len() <= eng.img_budget.get() {
+                                    eng.img_budget.set(eng.img_budget.get() - img.bgra.len());
+                                    eng.images.borrow_mut().insert(key, alloc::rc::Rc::new(img));
+                                }
+                            }
+                        }
+                    }
+                    // An <svg> subtree holds no HTML; nothing below it to visit.
+                    continue;
+                }
+                walk(e, lay, eng);
+            }
+        }
+        walk(&dom.root, lay, self);
     }
 
     /// Turn the CSS image keys a layout needs back into URLs.
