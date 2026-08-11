@@ -1356,7 +1356,7 @@ pub fn resolve_pseudo(
     for (_, _, decls) in &matched {
         for (p, v) in *decls {
             if p == "content" {
-                content_vals.push(v.as_str());
+                content_vals.push(v);
             }
         }
     }
@@ -1916,7 +1916,19 @@ fn has_viewport_h_unit(v: &str) -> bool {
 }
 
 pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
-    let v = val.trim().to_ascii_lowercase();
+    // CSS keywords are case-insensitive, so this used to lowercase every value
+    // it was handed. On a real article that is ~152 000 declarations per
+    // layout of which ~500 actually carry an uppercase letter: 151 500 heap
+    // allocations to produce a copy identical to the input. Borrow instead,
+    // and only allocate for the 0.3 % that need it.
+    let t = val.trim();
+    let lowered: String;
+    let v: &str = if t.bytes().any(|b| b.is_ascii_uppercase()) {
+        lowered = t.to_ascii_lowercase();
+        &lowered
+    } else {
+        t
+    };
     // Only declarations that actually reach an element pass here, so this
     // counts MATCHED rules rather than occurrences in the stylesheet text —
     // Wikipedia's three stray `vh`s never match anything.
@@ -1934,7 +1946,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
     let u = s.units();
     match prop {
         "display" => {
-            s.display = match v.as_str() {
+            s.display = match v {
                 "none" => Display::None,
                 "list-item" => Display::ListItem,
                 "inline" => Display::Inline,
@@ -2007,7 +2019,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 s.radius[i] = n;
             }
         }
-        "caption-side" => match v.as_str() {
+        "caption-side" => match v {
             "bottom" => s.caption_bottom = true,
             "top" => s.caption_bottom = false,
             _ => {}
@@ -2026,17 +2038,17 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             }
         }
         "font-weight" => {
-            s.bold = matches!(v.as_str(), "bold" | "bolder" | "600" | "700" | "800" | "900");
+            s.bold = matches!(v, "bold" | "bolder" | "600" | "700" | "800" | "900");
         }
         "font-style" => {
-            s.italic = matches!(v.as_str(), "italic" | "oblique");
+            s.italic = matches!(v, "italic" | "oblique");
         }
         "font-size" => {
             // em/%/inherit/relative keywords resolve against the PARENT font
             // (em_base), NOT the running value — so nothing compounds and a
             // later cascade winner (incl. `inherit`) is exact, not multiplied.
             let base = s.em_base;
-            let px = match v.as_str() {
+            let px = match v {
                 "inherit" | "unset" => Some(base),
                 "xx-small" => Some(BASE_FONT_PX * 0.5625),
                 "x-small" => Some(BASE_FONT_PX * 0.625),
@@ -2083,7 +2095,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             }
         }
         "text-transform" => {
-            s.text_transform = match v.as_str() {
+            s.text_transform = match v {
                 "uppercase" => TextTransform::Upper,
                 "lowercase" => TextTransform::Lower,
                 "capitalize" => TextTransform::Capitalize,
@@ -2094,7 +2106,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         // Applies to the last line of a block (and so to a block with only
         // one). `auto` defers to `text-align`.
         "text-align-last" => {
-            s.text_align_last = match v.as_str() {
+            s.text_align_last = match v {
                 "left" => Some(TextAlign::Left),
                 "right" => Some(TextAlign::Right),
                 "center" => Some(TextAlign::Center),
@@ -2110,13 +2122,13 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 s.text_indent = l;
             }
         }
-        "direction" => match v.as_str() {
+        "direction" => match v {
             "rtl" => s.rtl = true,
             "ltr" => s.rtl = false,
             _ => {}
         },
         "text-align" => {
-            s.text_align = match v.as_str() {
+            s.text_align = match v {
                 "left" => TextAlign::Left,
                 "right" => TextAlign::Right,
                 "center" => TextAlign::Center,
@@ -2151,7 +2163,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         "counter-increment" => {
             parse_counter_ops(&v, &mut s.counter_increment, &mut s.counter_increment_n, 1)
         }
-        "white-space" => match v.as_str() {
+        "white-space" => match v {
             "pre" => {
                 s.pre = true;
                 s.nowrap = false;
@@ -2184,7 +2196,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 s.opacity_zero = o <= 0.001;
             }
         }
-        "visibility" => match v.as_str() {
+        "visibility" => match v {
             "hidden" | "collapse" => s.hidden = true,
             "visible" => s.hidden = false,
             _ => {}
@@ -2393,7 +2405,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
 
         // — positioning —
         "position" => {
-            s.position = match v.as_str() {
+            s.position = match v {
                 "relative" => Position::Relative,
                 "absolute" => Position::Absolute,
                 "fixed" => Position::Fixed,
@@ -2402,14 +2414,14 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             };
         }
         "float" => {
-            s.float = match v.as_str() {
+            s.float = match v {
                 "left" => FloatKind::Left,
                 "right" => FloatKind::Right,
                 _ => FloatKind::None,
             };
         }
         "clear" => {
-            s.clear = match v.as_str() {
+            s.clear = match v {
                 "left" => ClearKind::Left,
                 "right" => ClearKind::Right,
                 "both" => ClearKind::Both,
@@ -2450,7 +2462,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         "bottom" => s.bottom = parse_len(&v, u),
         "left" => s.left = parse_len(&v, u),
         "z-index" => {
-            s.z_index = match v.as_str() {
+            s.z_index = match v {
                 "auto" => ZIndex::Auto,
                 "inherit" => ZIndex::Inherit,
                 other => match parse_saturating_i32(other) {
@@ -2484,7 +2496,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             }
         }
         "justify-content" => {
-            s.justify = match v.as_str() {
+            s.justify = match v {
                 "flex-end" | "end" | "right" => Justify::End,
                 "center" => Justify::Center,
                 "space-between" => Justify::Between,
