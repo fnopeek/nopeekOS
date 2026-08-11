@@ -3,6 +3,12 @@
 **Status:** Design / not started. Implementation kicks off in a fresh session.
 **Stopgap shipped:** kernel v0.183.0 (idle HLT + interim 16 spawn slots).
 
+> **Stand 2026-08-11 (nachgetragen beim Doku-Aufräumen):** grösstenteils
+> umgesetzt — stackful Fibers liegen in `kernel/src/smp/fiber.rs` +
+> `trampoline.s`, blockierende Host-Calls geben den Core ab, die vCPU läuft
+> als Pool-Fiber. Offen ist der Multi-Core-Fan-out. Der "not started" oben
+> ist historisch; Details im Memory unter `project_fiber_scheduler`.
+
 ---
 
 ## The problem

@@ -841,7 +841,7 @@ fn render_dropdown(sp: &Spell, kind: OpenMenu) -> (u32, Widget) {
 /// Replaces the old filename+icons toolbar (save lives in the Datei
 /// menu, the markdown view toggle in the Ansicht menu).
 /// Fixed tab width — names ellipsize rather than letting the strip
-/// reflow as you open files (UI_REFRESH.md §3 `tab`).
+/// reflow as you open files (docs/spec/UI_REFRESH.md §3 `tab`).
 const TAB_W: u16 = 200;
 const TAB_H: u16 = 30;
 /// Rounded on top only would need per-corner radii; the strip clips the

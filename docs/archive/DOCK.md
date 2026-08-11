@@ -1,5 +1,10 @@
 # DOCK.md — Auto-Hide App Dock
 
+> **Archiv (2026-08-11).** Umgesetzt und danach überholt: der Dock läuft als
+> `dock.wasm`, das Auto-Hide-Verhalten wurde in das allgemeine Panel-Primitiv
+> verallgemeinert. Gültiger Vertrag ist `docs/spec/PANEL.md`; dieses Papier
+> steht nur noch für die ursprüngliche Herleitung.
+
 A bottom-edge, auto-hiding application dock for nopeekOS. A WASM app
 (`dock.wasm`) like `drun`, built on the existing widget ABI, plus one
 new generic compositor primitive. The dock is the fast-access surface

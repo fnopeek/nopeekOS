@@ -11,7 +11,7 @@
 //! dock" list of every catalog app not currently pinned. Mutations are
 //! persisted to `sys/config/dock` and applied live.
 //!
-//! See DOCK.md for the architecture.
+//! See docs/archive/DOCK.md for the architecture.
 
 #![no_std]
 
@@ -195,7 +195,7 @@ const MENU_MOVE:    u32 = 200_001;      // enter drag-to-reorder mode
 const MENU_DISMISS: u32 = 200_003;
 const ADD_BASE:     u32 = 300_000;      // ADD_BASE+catalog_idx : add to dock
 
-// Visual sizing (px at 1× scale) — UI_REFRESH.md §3 "dock".
+// Visual sizing (px at 1× scale) — docs/spec/UI_REFRESH.md §3 "dock".
 /// Glyph inside a cell tile.
 const ICON_SIZE: u16 = 24;
 /// Square tile the glyph sits in.

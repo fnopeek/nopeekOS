@@ -1,6 +1,6 @@
 //! Stackful fibers (green threads) for WASM apps.
 //!
-//! See `SCHEDULER_FIBERS.md`. A fiber is "a stack + a saved context that
+//! See `docs/plan/SCHEDULER_FIBERS.md`. A fiber is "a stack + a saved context that
 //! runs until it yields". wasmi cannot be paused mid-`_start`, so we give
 //! each app its own stack and switch the whole CPU context at the yield
 //! point (`npk_sleep`). The same primitive will later host guest-vCPU

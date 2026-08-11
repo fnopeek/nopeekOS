@@ -16,7 +16,7 @@
 /// Frozen: moving this value later rewrites every cached tile pointer and
 /// shifts every per-window tile-grid coordinate.
 ///
-/// Rationale (see PHASE10_WIDGETS.md "Raster granularity"):
+/// Rationale (see docs/archive/PHASE10_WIDGETS.md "Raster granularity"):
 ///   - 512×512 BGRA32 = 1 048 576 B = exact 1 MB slab bucket
 ///   - 4K window (3840×2160) = 8×5 = 40 tiles ≈ 40 MB residency
 ///   - Matches Blink/WebKit's post-2013 tile size class

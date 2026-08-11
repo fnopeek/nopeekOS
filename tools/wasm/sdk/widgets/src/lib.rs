@@ -4,7 +4,7 @@
 //! Apps build a `Widget` tree, call [`wire::encode`] to produce a
 //! version-prefixed byte buffer, and commit it via `npk_scene_commit`.
 //!
-//! See `PHASE10_WIDGETS.md` for the full architecture.
+//! See `docs/archive/PHASE10_WIDGETS.md` for the full architecture.
 //!
 //! # Layering rules
 //!
@@ -89,7 +89,7 @@ pub mod caps {
     /// access (the AML battery driver). Highly privileged: direct hardware I/O.
     pub const HARDWARE: u8 = 0x40;
     /// `npk_wifi_send_cmd` / `npk_wifi_poll_event` — WiFi-class control channel
-    /// manager side (the wifid supplicant). See WIFI_CLASS_ABI.md.
+    /// manager side (the wifid supplicant). See docs/spec/WIFI_CLASS_ABI.md.
     pub const NETCTL: u8 = 0x80;
 
     /// Second `.npk.caps` byte — the first byte's 8 bits above are full.

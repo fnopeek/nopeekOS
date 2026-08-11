@@ -3,6 +3,13 @@
 Status: **Hypothese, im Code verankert, noch nicht per Messung bestätigt.**
 Zuerst reproduzieren (Abschnitt 4), dann umbauen.
 
+> **Stand 2026-08-11 (nachgetragen beim Doku-Aufräumen):** die Reproduktion aus
+> Abschnitt 4 ist nie gelaufen — die Hypothese ist unbestätigt geblieben. Die
+> Netz-Perf-Arbeit lief seither an anderer Stelle weiter und landete bei
+> ~480–500/290 Mbit mit `csd_lock_wait` (~37 % IPI-Tax) als eigentlicher Wand
+> (Memory: `project_browser_net_perf`, `project_netbench_coldstart`). Vor dem
+> Umbau hier also erst messen, ob der Effekt überhaupt noch existiert.
+
 ## 1. Was beobachtet wurde
 
 Höhere Bildschirmauflösung → langsamerer Download im Browser-MicroVM.

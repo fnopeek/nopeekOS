@@ -715,7 +715,7 @@ pub const ETHERTYPE_EAPOL: u16 = 0x888E;
 pub const LLC_SNAP_HDR: [u8; 6] = [0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00];
 pub const DOT11_FC_TYPE_DATA: u8 = 0x08; // fc byte0 & 0x0c == data
 pub const DOT11_STYPE_QOS: u8 = 0x08;    // subtype bit → +2-byte QoS control
-// Control-channel wire ops (WIFI_CLASS_ABI.md). downlink = manager→driver.
+// Control-channel wire ops (docs/spec/WIFI_CLASS_ABI.md). downlink = manager→driver.
 pub const CMD_SET_KEY: u8 = 0x04;
 pub const CMD_TX_EAPOL: u8 = 0x05;
 pub const CMD_ASSOCIATED: u8 = 0x07;

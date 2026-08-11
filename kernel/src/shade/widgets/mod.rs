@@ -3,7 +3,7 @@
 //! Apps describe **what** to render (widget tree); Shade owns **how**
 //! (layout, rasterization, GPU compositing, animation, theming).
 //!
-//! See PHASE10_WIDGETS.md for the full spec.
+//! See docs/archive/PHASE10_WIDGETS.md for the full spec.
 //!
 //! Phase map:
 //!   P10.0 — abi, tile, check_abi, ggtt_layout constants

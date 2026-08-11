@@ -408,7 +408,7 @@ fn run_substrate_loop() -> Result<vmcs::LaunchOutcome, &'static str> {
 // The Linux run-loop is split into open() / run_slice() / close() so
 // the Core-0 event loop can interleave Shade rendering between bounded
 // slices instead of blocking until guest exit (see
-// PHASE12_DISPLAY_BRIDGE.md, R1). Step 1a is behaviour-preserving:
+// docs/archive/PHASE12_DISPLAY_BRIDGE.md, R1). Step 1a is behaviour-preserving:
 // `run_linux` calls run_slice(u32::MAX) once, identical to the old
 // `run_linux_loop`. Slicing + interleave is step 1b.
 //

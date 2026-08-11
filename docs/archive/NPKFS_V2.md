@@ -1,5 +1,9 @@
 # npkFS v2 — Real Content-Addressed Directories
 
+> **Archiv (2026-08-11).** Gebaut und überholt: npkFS steht auf Schema **v3**
+> (v2 + `TreeEntry.mtime`). Das Papier beschreibt den v2-Entwurf, also die
+> Herleitung der content-addressed Verzeichnisse — nicht das heutige Format.
+
 **Status:** future work, target Phase 11.5 (before AI integration drops
 serious load on the filesystem). Scoped on Florian's call: this is
 tech debt we must repay before it cascades into worse decisions.

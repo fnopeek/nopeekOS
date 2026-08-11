@@ -14,7 +14,7 @@ app inside the trust boundary. Untrusted web JS is *doubly contained*.
 > This document is both the design skeleton and the running status. Sections
 > §1, §2, §4, §7, §9 are the *vision* and have held up unchanged; §3, §5, §6
 > and §10 carry the **as-built** state and are updated as things land. The
-> per-feature conformance numbers live in `CONFORMANCE.md`.
+> per-feature conformance numbers live in `docs/spec/CONFORMANCE.md`.
 >
 > Relationship to the existing browser: the microVM+LibreWolf stays as the
 > **compatibility browser** (full modern web, JS-heavy SPA webapps). `beak`
@@ -498,7 +498,7 @@ This paid off more than anything else in the design: **5,786 WPT reftests**
 are vendored and run in ~5 minutes on the dev box (**3,626 passing** as of
 2026-07-22), and `tests/diag.rs` renders any real page to a BMP, so a
 rendering defect can be reproduced, bisected and fixed without hardware in
-the loop. Numbers and how to run it: `CONFORMANCE.md`.
+the loop. Numbers and how to run it: `docs/spec/CONFORMANCE.md`.
 
 **Bonus 2 — one binary, same sandbox:** on desktop, run the *same* `beak.wasm`
 under `wasmtime` with host-fn shims mirroring the nopeek ABI → identical

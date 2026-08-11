@@ -270,7 +270,7 @@ pub fn icon_button(icon: IconId, size: u16, on_click: Option<ActionId>, on_hover
     let mut mods: Vec<Modifier> = Vec::with_capacity(6);
     // A fixed square cell, not a padded glyph: the hit target then stays
     // the same whatever glyph size the caller asks for, and a row of
-    // these lines up (UI_REFRESH.md §3 `toolbar_button`).
+    // these lines up (docs/spec/UI_REFRESH.md §3 `toolbar_button`).
     mods.push(Modifier::MinWidth(TOOLBAR_BTN));
     mods.push(Modifier::MinHeight(TOOLBAR_BTN));
     mods.push(Modifier::Rounded(TOOLBAR_BTN_RADIUS));
@@ -296,7 +296,7 @@ const TOOLBAR_BTN_RADIUS: u8 = 7;
 
 /// Small uppercase section label above a group of `nav_row`s. Mono and
 /// `OnSurfaceFaint` so it reads as structure, not content
-/// (UI_REFRESH.md §5).
+/// (docs/spec/UI_REFRESH.md §5).
 pub fn sidebar_section(label: &str, items: Vec<Widget>) -> Widget {
     let mut children: Vec<Widget> = Vec::with_capacity(items.len() + 1);
     children.push(Widget::Text {
@@ -317,7 +317,7 @@ pub fn sidebar_section(label: &str, items: Vec<Widget>) -> Widget {
 }
 
 /// One entry inside a sidebar. Selection is an accent tint plus accent
-/// text and icon — no border, no full-strength fill (UI_REFRESH.md §3
+/// text and icon — no border, no full-strength fill (docs/spec/UI_REFRESH.md §3
 /// `list_row`).
 pub fn nav_row(
     icon: IconId,
@@ -823,7 +823,7 @@ pub fn menu_bar_with_anchors(
 
 /// Menu bar with the app's own glyph at the leading edge — the window's
 /// identity mark, the way every window in the design carries one
-/// (UI_REFRESH.md §5). Pass `IconId::None` for a bare bar.
+/// (docs/spec/UI_REFRESH.md §5). Pass `IconId::None` for a bare bar.
 pub fn menu_bar_with_icon(
     icon: IconId,
     labels: &[(String, ActionId)],
@@ -874,7 +874,7 @@ pub fn menu_bar_with_icon(
     }
 }
 
-/// Menu-bar band height (UI_REFRESH.md §5).
+/// Menu-bar band height (docs/spec/UI_REFRESH.md §5).
 const MENU_BAR_H: u16 = 36;
 
 /// Build a popover-content surface from a list of menu items.

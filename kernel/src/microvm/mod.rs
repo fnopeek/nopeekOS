@@ -9,7 +9,7 @@
 //! etc.; dispatch to the matching backend (Intel VMX or AMD SVM)
 //! happens in `cpu::*`.
 //!
-//! Long-term shape (`MICROKERNEL_REFACTOR.md`):
+//! Long-term shape (`docs/plan/MICROKERNEL_REFACTOR.md`):
 //! ```text
 //! microvm/
 //! ├── mod.rs         — public API re-export

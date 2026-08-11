@@ -1063,7 +1063,7 @@ fn search_input(query: &str) -> Widget {
             Modifier::Border { token: Token::Border, width: 1, radius: Radius::Md.as_u8() },
             Modifier::MinWidth(230),
             // 1 px accent border plus a 3 px ring, per the design's
-            // `text_field` focus state (UI_REFRESH.md §3).
+            // `text_field` focus state (docs/spec/UI_REFRESH.md §3).
             Modifier::Focus(alloc::vec![
                 Modifier::Border { token: Token::Accent, width: 1, radius: Radius::Md.as_u8() },
                 Modifier::Ring { token: Token::AccentRing, width: 3 },
@@ -1285,7 +1285,7 @@ fn list_header_row(lf: &Loft) -> Widget {
 }
 
 /// One clickable column header. Mono + faint, so the header band reads
-/// as structure rather than as another row of data (UI_REFRESH.md §5).
+/// as structure rather than as another row of data (docs/spec/UI_REFRESH.md §5).
 /// Appends a ↑/↓ marker on the active sort column; `flex` lets the Name
 /// header grow to fill the row.
 fn header_cell(lf: &Loft, label: &str, key: SortKey, action: u32,
@@ -1356,7 +1356,7 @@ fn list_data_row(e: &Entry, selected: bool, browsing: bool,
     let type_str   = type_for(e);
     let mtime_str  = format_mtime(e.mtime);
     // Selection reads as a tint plus a 2 px accent edge on the leading
-    // side — never a boxed-in row (UI_REFRESH.md §3 `list_row`). The
+    // side — never a boxed-in row (docs/spec/UI_REFRESH.md §3 `list_row`). The
     // edge occupies its space on every row so nothing shifts sideways
     // when the selection moves.
     let mut row_mods: Vec<Modifier> = alloc::vec![
@@ -1402,7 +1402,7 @@ fn list_cell_text(text: &str, min_w: u16) -> Widget {
     }
 }
 
-/// Sidebar width from the design (UI_REFRESH.md §5).
+/// Sidebar width from the design (docs/spec/UI_REFRESH.md §5).
 const SIDEBAR_W:    u16 = 176;
 const FIELD_H:      u16 = 30;
 const HEADER_ROW_H: u16 = 30;

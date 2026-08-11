@@ -1,8 +1,12 @@
 # Phase 12.4 — Shade ↔ MicroVM Display Bridge (design spike)
 
+> **Archiv (2026-08-11).** Der Spike ist gebaut: A1-A4 sind drin, die
+> MicroVM erscheint als gekacheltes Fenster (nie fullscreen). Cross-Domain
+> blieb wie vorgesehen de-scoped.
+
 Status: **DESIGN, not implemented.** Spike before code, per decision
 2026-05-15. Refines the "12.4 virtio-gpu cross-domain + Shade-Bridge"
-roadmap line in `PHASE12_MICROVM.md` into a concrete architecture and
+roadmap line in `docs/archive/PHASE12_MICROVM.md` into a concrete architecture and
 **de-scopes cross-domain** (it's a later performance axis, not the
 architecture-defining piece).
 
@@ -113,7 +117,7 @@ Lifecycle, both directions:
 
 `WindowKind` today is `Terminal | Widget`. Add **`Surface`** — a
 raw-bitmap window (no widget tree, no terminal). Conceptually this is
-the generalised "Canvas escape hatch" (`PHASE10_WIDGETS.md`) and will
+the generalised "Canvas escape hatch" (`docs/archive/PHASE10_WIDGETS.md`) and will
 also serve future non-VM raw-pixel apps. Kept distinct from `Widget`
 to avoid conflating a declarative tree with an opaque framebuffer.
 

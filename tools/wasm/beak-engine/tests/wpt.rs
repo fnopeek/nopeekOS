@@ -1,4 +1,4 @@
-//! WPT reftest oracle — the objective CSS-fidelity gate (BROWSER.md §10).
+//! WPT reftest oracle — the objective CSS-fidelity gate (docs/spec/BROWSER.md §10).
 //!
 //! For every vendored Web-Platform-Test reftest under `tests/wpt/`, render the
 //! TEST file and its `<link rel="match">` REFERENCE through the beak engine and

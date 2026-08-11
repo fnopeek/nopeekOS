@@ -1,5 +1,10 @@
 # Phase 12 — MicroVM Subsystem
 
+> **Archiv (2026-08-11).** Ausgeliefert: VT-x **und** AMD-V, eigener
+> Linux-6.18-nopeek-Build, virtio-blk/-net/-gpu/-input, 9p-npkFS-Brücke,
+> Profil-Persistenz, Gast-SMP — LibreWolf läuft als gekacheltes Fenster.
+> Roadmap-Zeilen hier sind erledigt oder verworfen; laufender Stand im Memory.
+
 **Goal:** A scharf umrissene Capability to run **legacy Linux GUI apps**
 (Browser, Office, evtl. Steam) inside a per-app VT-x VM with a
 hardware-enforced trust boundary. nopeekOS bleibt WASM-first für eigene
@@ -251,7 +256,7 @@ files        = { picker = true, downloads = "~/Downloads", mount = [] }
 Schema is **frozen per Wire-Version**. Adding a new cap = bump to
 `0x02`. Cap field types are append-only (you can add a new
 sub-field, you cannot rename or remove). Same discipline as
-`WIDGET_VOCAB.md`.
+`docs/spec/WIDGET_VOCAB.md`.
 
 **`display.mode` values** (append-only):
 - `"cross-domain"` — virtio-gpu cross-domain context (kernel ≥ 5.16,
@@ -834,5 +839,5 @@ When 12.1 ships:
 - Not a `npk_vm_*` host-fn implementation spec (12.0 deliverable, will
   live in `kernel/src/wasm.rs` doc-comments).
 - Not a manifest schema reference (will move to a separate
-  `MICROVM_MANIFEST.md` once stable, like `WIDGET_VOCAB.md`).
+  `MICROVM_MANIFEST.md` once stable, like `docs/spec/WIDGET_VOCAB.md`).
 - Not the build-pipeline spec (separate doc when 12.6 is closer).

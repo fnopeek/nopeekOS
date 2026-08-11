@@ -1,5 +1,10 @@
 # Phase 10 — Widget API & GUI Apps
 
+> **Archiv (2026-08-11).** Ausgeliefert. Die Widget-ABI ist seither weit über
+> diesen Entwurf hinausgewachsen (Popover, Scroll, TextArea, Panels, Alpha,
+> per-App-Capabilities). Verbindliche Referenz für App-Entwicklung ist
+> `docs/spec/WIDGET_VOCAB.md` + `docs/spec/UI_REFRESH.md`.
+
 **Goal:** Apps describe **what** to render (declarative widget tree). The Shade compositor owns **how** (layout, rasterization, GPU compositing, animation, theming). Apps never touch pixels for normal UI; a single tightly-scoped `Canvas` escape hatch exists for image/chart use cases.
 
 **Sweet spot between immediate-mode (App calls `draw_rect`) and full retained-mode (App holds scene-graph handles):** App calls `render()` whenever its state changes, builds a fresh tree as plain data, commits in one host call. Compositor diffs against previous tree and only re-rasterizes changed sub-trees.
@@ -695,7 +700,7 @@ Order matters — each phase produces something runnable.
 | P10.8 Animation | 🟡 scaffold | v0.61.0 | Q16.16 math + tick(); no active consumers until tree-diff lands |
 | P10.9 Icons | ✅ done | v0.62.0 | 18 Phosphor Regular, 149 KB atlas, OTA-updatable like font |
 | drun launcher | ✅ done | drun 0.5.10 / kernel 0.80.1 | Mod+D centred overlay, modal, keyboard nav, mockup-grade polish round 1–3 |
-| Vocab v2 (Tailwind-style) | ✅ done | v0.77.0 → v0.79.0 / sdk 0.4.0 | 9 new modifiers, pseudo-state engine, `WIDGET_VOCAB.md` |
+| Vocab v2 (Tailwind-style) | ✅ done | v0.77.0 → v0.79.0 / sdk 0.4.0 | 9 new modifiers, pseudo-state engine, `docs/spec/WIDGET_VOCAB.md` |
 | Mockup polish round 1–3 | ✅ done | v0.79.4 → v0.80.1 / sdk 0.5.1 | SDF corners, layout-rect fix, `TextStyle::Heading`, panel inset, `suppress_hover()` |
 | loft file browser | ✅ done | loft 0.1.10 | Thunar-clone (sidebar / breadcrumb / grid / toolbar) on the v2 prefab cookbook |
 | `Widget::Input` self-editing | ⏳ next | — | Compositor-side cursor + key routing + Submit-on-Enter (~2 d) |

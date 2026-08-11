@@ -1,6 +1,11 @@
 # npkFS — Work Paper: Performance & Korruptions-Sicherheit
 
 **Stand:** 2026-06-18 · kernel v0.224.0 · Session-Vorbereitung (morgen besprechen)
+
+> **Nachtrag 2026-08-11 (Doku-Aufräumen):** die Session hat stattgefunden.
+> Umgesetzt sind auto-gc, die NVMe-Write-Barriere und `fsck` (v0.224.1);
+> bare-metal läuft CLEAN durch. Offen aus diesem Paper: Commit-Batching.
+> Memory: `project_filesystem_perf`.
 **Scope:** zwei gekoppelte Themen am npkFS — (1) nichts darf korrupt gehen,
 (2) mehr Read/Write-Speed + weniger CPU-Verschwendung (Krypto, Multicore, I/O).
 

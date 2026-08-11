@@ -43,7 +43,7 @@ bitflags! {
         const HARDWARE  = 0b10_0000_0000;
         /// `npk_wifi_send_cmd` / `npk_wifi_poll_event` — the WiFi-class control
         /// channel manager side (wifid.wasm supplicant). Privileged: can scan,
-        /// connect, and read EAPOL handshake frames. See WIFI_CLASS_ABI.md.
+        /// connect, and read EAPOL handshake frames. See docs/spec/WIFI_CLASS_ABI.md.
         const NETCTL    = 0b100_0000_0000;
         /// `npk_http_request` — outbound HTTPS fetch for the native browser
         /// (beak). Distinct from NETCTL (WiFi-supplicant control): NET is

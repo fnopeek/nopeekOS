@@ -1,4 +1,4 @@
-//! WiFi-class control channel (WIFI_CLASS_ABI.md)
+//! WiFi-class control channel (docs/spec/WIFI_CLASS_ABI.md)
 //!
 //! A kernel-mediated mailbox pair between the vendor WiFi driver
 //! (`wifi_*.wasm`) and the device-independent supplicant (`wifid.wasm`).

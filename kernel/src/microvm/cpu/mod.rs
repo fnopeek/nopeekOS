@@ -387,7 +387,7 @@ const VM_EXITED: u8 = 3;
 /// the fiber path (REQUESTED → RUNNING → EXITED).
 static VM_RUN_STATE: AtomicU8 = AtomicU8::new(VM_IDLE);
 
-// ── vCPU-as-fiber (unified core pool, Stage: SCHEDULER_FIBERS.md) ───────
+// ── vCPU-as-fiber (unified core pool, Stage: docs/plan/SCHEDULER_FIBERS.md) ───────
 //
 // Instead of statically carving a core for the guest at boot, run the
 // guest's VMRESUME loop as a normal pool FIBER (smp::fiber): admitted when

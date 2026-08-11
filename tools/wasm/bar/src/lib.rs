@@ -6,7 +6,7 @@
 //! (`left`/`center`/`right`) listing built-in widgets — workspaces, title,
 //! clock, tray, power — from `sys/config/bar`. Live state (clock / focused
 //! title / active workspace) is polled from `npk_bar_state`; the tree is
-//! only re-committed when that state changes. See PANEL.md.
+//! only re-committed when that state changes. See docs/spec/PANEL.md.
 
 #![no_std]
 
@@ -49,7 +49,7 @@ fn log(msg: &str) {
     unsafe { npk_log_serial(msg.as_ptr() as i32, msg.len() as i32); }
 }
 
-// Panel edge/behavior (see PANEL.md / compositor set_panel).
+// Panel edge/behavior (see docs/spec/PANEL.md / compositor set_panel).
 const EDGE_TOP: i32 = 1;
 const BEHAVIOR_STRUT: i32 = 1;
 
@@ -61,7 +61,7 @@ const SHOT: u32  = 90_001;     // screenshot: left-click = region, right = full
 // right-click → mute.
 const VOL_OPEN: u32 = 90_002;
 
-// Chrome sizing — UI_REFRESH.md §4 "Panel".
+// Chrome sizing — docs/spec/UI_REFRESH.md §4 "Panel".
 /// Height of the bar's inner content band. The panel height is derived
 /// from it, so text and icons are capped to what fits inside: turning
 /// them up must never push the bar taller.
@@ -376,7 +376,7 @@ fn readout(icon: IconId, icon_mods: Vec<Modifier>, value: String,
 }
 
 /// Tray icon cell: rest is `OnSurfaceMuted` on no background, hover
-/// fills `SurfaceHover` (UI_REFRESH.md §3 `toolbar_button`).
+/// fills `SurfaceHover` (docs/spec/UI_REFRESH.md §3 `toolbar_button`).
 fn tray_cell(icon: IconId, click: Option<ActionId>, tint: Token) -> Widget {
     let mut mods: Vec<Modifier> = alloc::vec![
         Modifier::MinWidth(CELL_W),
@@ -523,7 +523,7 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
 }
 
 /// A zone → a plain Row of its segments. The chrome is no longer per
-/// zone: the design has ONE bar card holding all three (UI_REFRESH.md
+/// zone: the design has ONE bar card holding all three (docs/spec/UI_REFRESH.md
 /// §4). Empty zones collapse to a zero spacer so the left/center/right
 /// structure stays intact.
 fn zone(names: &[String], st: &BarState) -> Widget {

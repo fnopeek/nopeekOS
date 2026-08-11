@@ -767,7 +767,7 @@ fn toggle(cur: Option<OpenMenu>, want: OpenMenu) -> Option<OpenMenu> {
 // footer, all built from prefabs so the chrome tracks the design system
 // instead of drifting on its own hardcoded paddings.
 
-/// Toolbar chrome sizing — beak's `toolbar_button` (UI_REFRESH.md §5).
+/// Toolbar chrome sizing — beak's `toolbar_button` (docs/spec/UI_REFRESH.md §5).
 const NAV_BTN: u16 = 28;
 const NAV_BTN_RADIUS: u8 = 7;
 

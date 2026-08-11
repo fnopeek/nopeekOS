@@ -534,7 +534,7 @@ const EXIT_INVALID: u64 = 0xFFFF_FFFF_FFFF_FFFF;
 //
 // Same decomposition as vmx::enable: open() / run_slice(budget) /
 // close() so the Core-0 event loop can interleave Shade rendering
-// between bounded slices (PHASE12_DISPLAY_BRIDGE.md R1). SVM is
+// between bounded slices (docs/archive/PHASE12_DISPLAY_BRIDGE.md R1). SVM is
 // simpler than VMX: no VMXON/VMCS bracket — EFER.SVME stays on for
 // the life of the kernel (by design, see module header) and the VMCB
 // is a leaked Box, so close() is a no-op. Step 1c is

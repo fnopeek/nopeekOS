@@ -201,7 +201,7 @@ nichts** — Trennung der Geheimnisse.
 - **#3 connect = der erste TX-Datenpfad:** PHY_CONTEXT_CMD + BINDING_CONTEXT_CMD +
   ADD_STA v12 + dyn. gen2-TX-Queue (SCD_QUEUE_CONFIG + **bc_tbl**) + eingebettetes
   tx_cmd; Auth/Assoc-Frames baut `wifid` (TX_MGMT/RX_MGMT). Bisher nur Cmd-Queue+RX.
-  Voller Stage-Plan (5a–5e) in `WIFI_AX200.md`.
+  Voller Stage-Plan (5a–5e) in `docs/archive/WIFI_AX200.md`.
 - EAPOL-Demux (Ethertype 0x888E) + SET_KEY→**ADD_STA_KEY (0x17)** (diese FW,
   new_station_api; nicht SEC_KEY_CMD).
 - Data-Pfad: `npk_netdev_submit_rx`/`poll_tx`/`set_link` (Host-Fns ✅ in v0.205.0).

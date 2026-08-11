@@ -57,6 +57,7 @@ npk> find report         # Search object names   ·   grep TODO notes
 npk> https nopeek.ch /   # HTTPS GET (TLS 1.3, hardware AES) — add `> page` to store
 npk> install <module>    # Fetch + verify (ECDSA P-384) a signed WASM module
 npk> update              # OTA kernel update (signed, SHA-384 verified)
+npk> cert list           # TLS root store — inspect, add, drop a CA
 npk> driver wifi         # Bring up the AX200 WiFi driver + scan
 npk> cores               # Trustworthy per-core CPU instrumentation
 ```
@@ -136,8 +137,8 @@ system owns DNS, TCP, TLS, HTTP — you express intent, not protocol.
 
 ## What's Built
 
-Grouped by subsystem. Kernel is at **v0.228.12**; the full change history
-lives in the git log and `memory/`.
+Grouped by subsystem. Kernel is at **v0.264.0**; the full change history
+lives in the git log.
 
 **Kernel & SMP** — UEFI PE32+ boot straight to long mode; 4-level paging
 with NX + write-combining; growable heap (64 MB → 2 GB). All cores boot
@@ -148,8 +149,9 @@ of pinning a core. Per-core idle quiesces to real HLT.
 **Security & crypto** — 256-bit capability vault (delegation, temporal
 scoping, transitive revocation, audit log). AES-256-GCM at rest via
 AES-NI + PCLMULQDQ; BLAKE3 via AVX2. Full TLS 1.3 (RFC 8446, X25519 +
-ECDH P-384, three cipher suites, X.509 chain validation with 4 embedded
-root CAs) on RustCrypto primitives. Passphrase-derived identity
+ECDH P-384, three cipher suites, X.509 chain validation and expiry
+checks against 8 embedded root CAs, extendable at runtime through a
+`sys/certs` store) on RustCrypto primitives. Passphrase-derived identity
 (BLAKE3-KDF), no accounts. OTA updates signed with ECDSA P-384 + SHA-384.
 
 **npkFS v3** — content-addressed CoW B-tree, per-block BLAKE3, rotating
@@ -159,7 +161,9 @@ an N100 (encrypted, on top of NVMe).
 
 **Networking** — Ethernet / ARP / IPv4 / ICMP / UDP / TCP from scratch,
 plus DNS, DHCP, NTP, and an HTTP/HTTPS client with a keep-alive
-connection pool and TCP window scaling (RFC 7323, ~gigabit).
+connection pool and TCP window scaling (RFC 7323, ~gigabit). HTTP/2
+(HPACK, multiplexed streams) is implemented but has not yet been
+exercised on hardware — OTA deliberately stays on HTTP/1.1.
 
 **Drivers** — NVMe, xHCI USB (keyboard + mouse, HID boot protocol),
 Intel I226-V and RTL8153 USB Ethernet, Intel Xe GPU (native 4K@60Hz
@@ -208,24 +212,28 @@ It renders HTML → a real DOM → a full CSS cascade (UA sheet → author
 `<style>` and external `<link>` sheets with selectors/specificity →
 inline → `!important`) → layout → paint, all hand-rolled: block +
 inline flow, tables, flexbox, CSS Grid, the box model, positioning,
-custom properties, `calc()`, `@media`, CSS Color 4, PNG images and an
-SVG subset. Plus **HTML forms** — typing into a page's search box and
-pressing Enter submits it, no JavaScript involved. It fetches over the
-kernel's TLS stack, is theme-aware, and scrolls smoothly.
+custom properties, `calc()`, `@media`, CSS Color 4, PNG + JPEG images
+and an SVG subset. Plus **HTML forms** — GET *and* POST, so typing into
+a page's search box and pressing Enter submits it, no JavaScript
+involved — cookies, and the charset rules real pages depend on
+(header → `<meta>` → sniffing, cp1252). It fetches over the kernel's
+TLS stack, is theme-aware, and scrolls smoothly.
 
 Fidelity is measured, not guessed: the engine is a portable core with
 no host dependencies, and the official **WPT reftests** (5,786 of them)
 are vendored as a render-and-compare oracle that runs on the dev box —
-currently **3,626 passing** (1,898 fail, 262 inconclusive). Nearly every
-rendering bug this engine has had was found by rendering the real page
-to a bitmap on Linux, without booting the OS.
+currently **4,088 passing**, 1,520 failing, 178 inconclusive: **72.9 %**
+of the conclusive set. Nearly every rendering bug this engine has had
+was found by rendering the real page to a bitmap on Linux, without
+booting the OS.
 
 Honest gaps: no JavaScript yet (Stage 1 — an interpreter, never a JIT,
-since a JIT would need a hole in W^X; test262 is its oracle), JPEG
-images fall back to placeholders, and the kernel still speaks only
-HTTP/1.1 — which parts of the web now rate-limit outright. Spec and
-status live in `BROWSER.md`, per-feature conformance in
-`CONFORMANCE.md`.
+since a JIT would need a hole in W^X; test262 is its oracle), and beak
+still fetches over HTTP/1.1, which parts of the web now rate-limit
+outright — the kernel's HTTP/2 path exists but is unproven on hardware.
+Spec and status live in `docs/spec/BROWSER.md`, the measured per-feature
+number in `docs/spec/CONFORMANCE.md` (which is where that number lives —
+this paragraph will drift, that file will not).
 
 ---
 
@@ -313,6 +321,8 @@ Every kernel or module change ships to hardware through this loop:
 ```
 nopeekOS/
 ├── build.sh                  # Build + QEMU/VirtualBox/USB
+├── docs/                     # spec/ = living contracts · plan/ = open
+│                             # notes/ = how-tos · archive/ = shipped
 ├── kernel/src/
 │   ├── main.rs               # Entry, boot sequence
 │   ├── boot.s / boot_uefi.rs # UEFI _start, ExitBootServices, GDT
