@@ -17,8 +17,11 @@ See README.md for the full vision and phase planning.
 
 ## Code Rules
 
-- Language: Rust (no_std, nightly)
-- Target: x86_64-unknown-none
+- Language: Rust (no_std, nightly, edition 2024)
+- Target: `x86_64-nopeek` — our own spec in `targets/`, = bare metal WITH
+  SSE/AVX2/AES-NI. Do not go back to overriding features on
+  `x86_64-unknown-none`; that contradicts its softfloat ABI and rustc is
+  turning it into a hard error.
 - No POSIX, no libc, no std
 - Every resource is capability-gated
 - Panic = Kernel Panic = Halt (no recovery in Phase 1)
@@ -45,7 +48,7 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-08-11 · kernel v0.264.0 · beak 0.12.0**
+**Stand 2026-08-11 · kernel v0.265.1 · beak 0.14.1**
 
 Aktueller Fokus ist **`beak`**, der eigene Browser. Stage 0 (HTML, CSS,
 Layout, Paint — noch kein JavaScript) läuft auf Hardware; die Arbeit dreht
@@ -92,12 +95,21 @@ v0.85.x AES-GCM keycheck.
 Sequence for any kernel/module change:
 
 ```
+# bump the version, then sync the lock — builds run --locked, so a stale
+# Cargo.lock aborts the release instead of silently re-resolving:
+cargo update --offline -p nopeekos-kernel
+
 ./build.sh build      # verify it builds
 git commit -m "..."   # source change
 ./build.sh release    # target/ → signed release/
 git add release/ && git commit -m "release: sign + publish vX.Y.Z"
 git push
 ```
+
+`release` does NOT compile WASM. A changed module must be built and staged
+first (`tools/stage-module.sh <mod>`, which also writes `.version`);
+`aml` and `wifid` live one level deeper than the script expects and are
+staged by hand.
 
 USB reinstall pulls `target/` directly and bypasses this — that's why
 USB-installed builds appeared to work while OTA kept downgrading.
