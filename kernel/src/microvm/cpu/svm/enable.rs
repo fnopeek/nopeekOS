@@ -1001,26 +1001,6 @@ impl VmContext {
     }
 }
 
-/// Boot a Linux bzImage in our SVM substrate. Step 1c: open() then a
-/// single unbounded run_slice — byte-for-byte the old run_linux_loop.
-pub fn run_linux(
-    bzimage_bytes: &[u8],
-    cmdline: &[u8],
-    initramfs: Option<&[u8]>,
-    inject: &[u8],
-) -> Result<vmcb::LaunchOutcome, &'static str> {
-    let mut ctx = VmContext::open(bzimage_bytes, cmdline, initramfs, inject)?;
-    let result = loop {
-        match ctx.run_slice(u32::MAX) {
-            Ok(SliceOutcome::Exited(o)) => break Ok(o),
-            Ok(SliceOutcome::StillRunning) | Ok(SliceOutcome::Idle) => continue,
-            Err(e) => break Err(e),
-        }
-    };
-    ctx.close();
-    result
-}
-
 /// B3: allocate only the **contiguous boot window** (256 MiB or the
 /// whole guest if smaller); `[boot, guest_bytes)` is demand-paged
 /// 4 KB. Returns `(boot_base, npt_root=ncr3=pml4, boot_raw_base)`.

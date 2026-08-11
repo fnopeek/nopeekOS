@@ -5,7 +5,7 @@
 //!   * `linux/` — bzImage / Boot Protocol parsing + loading
 //!
 //! Public API is vendor-agnostic. Callers (`intent::microvm_*`)
-//! invoke `microvm::run_linux(...)`, `microvm::run_substrate_test()`
+//! invoke `microvm::vm_open(...)` / `run_substrate_test()`
 //! etc.; dispatch to the matching backend (Intel VMX or AMD SVM)
 //! happens in `cpu::*`.
 //!
@@ -28,7 +28,7 @@ pub mod linux;
 
 #[allow(unused_imports)] // LaunchOutcome is part of the public surface
 pub use cpu::{
-    decode_io_exit_qualification, init, report, run_linux, run_substrate_test, vm_active,
+    decode_io_exit_qualification, init, report, run_substrate_test, vm_active,
     vm_bind_window, vm_close_for_window, vm_core_serve, vm_open, vm_poll_slice, vm_window,
     LaunchOutcome,
 };

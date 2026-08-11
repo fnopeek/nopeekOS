@@ -23,6 +23,7 @@ const SYS_PAUSE: u64 = 34;
 const SYS_ACCESS: u64 = 21;
 const SYS_EXECVE: u64 = 59;
 const SYS_EXIT: u64 = 60;
+#[allow(dead_code)] // part of the syscall table; a map with holes is worse
 const SYS_LSEEK: u64 = 8;
 const SYS_MKDIR: u64 = 83;
 const SYS_CHDIR: u64 = 80;

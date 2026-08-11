@@ -1503,8 +1503,6 @@ pub fn dump_entry_fail_state() {
     const GUEST_SYSENTER_CS_F:  u64 = 0x482A;
     const GUEST_SYSENTER_ESP_F: u64 = 0x6824;
     const GUEST_SYSENTER_EIP_F: u64 = 0x6826;
-    const GUEST_FS_BASE_F:      u64 = 0x680E;
-    const GUEST_GS_BASE_F:      u64 = 0x6810;
     const VM_EXIT_REASON_F:     u64 = 0x4402;
     let cr0     = vmread(GUEST_CR0).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let cr3     = vmread(GUEST_CR3).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
@@ -1521,8 +1519,6 @@ pub fn dump_entry_fail_state() {
     let sysencs = vmread(GUEST_SYSENTER_CS_F).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let sysenes = vmread(GUEST_SYSENTER_ESP_F).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let sysenei = vmread(GUEST_SYSENTER_EIP_F).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
-    let fs_base = vmread(GUEST_FS_BASE_F).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
-    let gs_base = vmread(GUEST_GS_BASE_F).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let h_cr0   = vmread(HOST_CR0).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let h_cr3   = vmread(HOST_CR3).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let h_cr4   = vmread(HOST_CR4).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);

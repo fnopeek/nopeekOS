@@ -53,8 +53,6 @@ const ONE_GB: u64 = 1024 * 1024 * 1024;
 /// rearranging the MMIO hole or growing the EPT to a second PDPT.
 const MAX_GUEST_BYTES: u64 = 3 * ONE_GB;
 // Canonical size lives in `guest_mem`; this is its EPT-window twin.
-const GUEST_WINDOW_BYTES: u64 = crate::microvm::devices::guest_mem::GUEST_RAM_BYTES;
-
 /// Slack frames `boot_frames_for` adds so `allocate_contiguous` can be
 /// rounded up to a 2-MB boundary for the boot-window 2-MB leaves.
 const GUEST_RAM_ALIGN_SLACK: usize = 511;

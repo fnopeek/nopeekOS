@@ -182,13 +182,6 @@ where F: FnOnce(&WidgetScene) -> R,
     SCENES.lock().get(&window_id).map(f)
 }
 
-/// True if a widget scene with scrollable (overflowing) content exists
-/// for `window_id`. Lets shade route the mouse wheel to widget scroll
-/// instead of the terminal scrollback for the focused window.
-pub fn has_scrollable(window_id: u32) -> bool {
-    SCENES.lock().get(&window_id).map(|s| s.max_scroll_y > 0).unwrap_or(false)
-}
-
 /// Adjust a widget window's vertical scroll by `delta` px (positive =
 /// content moves up / scroll down). Clamped to `[0, max_scroll_y]`.
 /// Re-renders + marks dirty on change. Returns true if the offset moved.
@@ -594,21 +587,6 @@ fn is_focusable(w: &abi::Widget) -> bool {
         return true;
     }
     modifiers_of_ref(w).iter().any(|m| matches!(m, abi::Modifier::OnClick(_)))
-}
-
-/// Does (x, y) land inside a `Widget::Canvas`?
-///
-/// A canvas draws its own content and routes its own keyboard input (the
-/// browser types into a page's form fields, a game reads keys). Pressing into
-/// one must therefore RELEASE a text widget's focus — otherwise the app's own
-/// address/search bar keeps swallowing every key and the canvas never sees one.
-fn hits_canvas(widget: &abi::Widget, layout: &layout::LayoutNode, x: i32, y: i32) -> bool {
-    if !rect_contains(layout.rect, x, y) { return false; }
-    if matches!(widget, abi::Widget::Canvas { .. }) { return true; }
-    widget_children_ref(widget)
-        .iter()
-        .zip(layout.children.iter())
-        .any(|(cw, cl)| hits_canvas(cw, cl, x, y))
 }
 
 // Deduplicated OnHover target per window. Compositor calls update_hover

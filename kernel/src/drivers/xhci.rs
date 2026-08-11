@@ -591,7 +591,7 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
     }
     kprintln!("[npk] xhci: controller running");
 
-    let mut state = XhciState {
+    let state = XhciState {
         mmio, oper, rt, db, ctx_size, max_ports,
         dcbaa, cmd_ring, cmd_cycle: 1, cmd_enqueue: 0,
         evt_ring, evt_cycle: 1, evt_dequeue: 0, evt_seg_table,

@@ -22,7 +22,6 @@
 //! routes config-space dwords to/from there.
 
 use super::virtio_blk_pci::VirtioBlk;
-use super::virtio_gpu_pci::VirtioGpu;
 use super::virtio_input_pci::VirtioInput;
 use super::virtio_9p_pci::Virtio9p;
 use super::virtio_snd_pci::VirtioSnd;

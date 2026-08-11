@@ -96,19 +96,6 @@ pub fn run_substrate_test() -> Result<super::LaunchOutcome, &'static str> {
     }
 }
 
-pub fn run_linux(
-    bzimage: &[u8],
-    cmdline: &[u8],
-    initramfs: Option<&[u8]>,
-    inject: &[u8],
-) -> Result<super::LaunchOutcome, &'static str> {
-    match *PROBE.lock() {
-        ProbeState::Available(_) => enable::run_linux(bzimage, cmdline, initramfs, inject),
-        ProbeState::Unavailable(reason) => Err(reason),
-        ProbeState::NotProbed => Err("svm::init() not called yet"),
-    }
-}
-
 pub use enable::{kick_bsp_net_irq, SliceOutcome, VmContext};
 
 /// Open a re-entrant VM context (12.4 step 1b). Probe-gated like

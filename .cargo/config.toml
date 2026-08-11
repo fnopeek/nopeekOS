@@ -32,6 +32,11 @@
 # hardware-float ABI is now stated honestly in our own target spec
 # instead of being smuggled in past the stock one.
 
+# So a plain `cargo check --target x86_64-nopeek` from the repo root finds the
+# spec too, not just builds that go through build.sh.
+[env]
+RUST_TARGET_PATH = { value = "targets", relative = true }
+
 [target.x86_64-nopeek]
 runner = "bash build.sh run"
 

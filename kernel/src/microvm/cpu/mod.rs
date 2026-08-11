@@ -7,7 +7,7 @@
 //!   * `vmx` — Intel VT-x (VMCS, EPT)
 //!   * `svm` — AMD-V (VMCB, NPT)  — stub, returns Err for now
 //!
-//! Public API (`init`, `report`, `run_substrate_test`, `run_linux`,
+//! Public API (`init`, `report`, `run_substrate_test`, `vm_open`,
 //! `decode_io_exit_qualification`) is re-exported one level up at
 //! `crate::microvm` so callers stay vendor-agnostic.
 //!
@@ -176,30 +176,6 @@ impl FpuArea {
 // under the guest's XCR0 preserves the host's subset, and guest
 // save/restore under it covers all guest state.
 
-/// `xsave64 [area]`, all XCR0-enabled components (EDX:EAX = -1).
-#[inline(never)]
-pub(crate) unsafe fn fpu_xsave(area: *mut FpuArea) {
-    // SAFETY: CR4.OSXSAVE=1 on every core (trampoline.s — blake3 AVX2
-    // runs AP-side); area is valid + 64-aligned.
-    unsafe {
-        core::arch::asm!("xsave64 [{p}]", p = in(reg) area,
-            in("eax") 0xffff_ffffu32, in("edx") 0xffff_ffffu32,
-            options(nostack));
-    }
-}
-
-/// `xrstor64 [area]`, all XCR0-enabled components. Zeroed area =
-/// XSTATE_BV/XCOMP_BV 0 → architectural FPU init state (fresh guest).
-#[inline(never)]
-pub(crate) unsafe fn fpu_xrstor(area: *const FpuArea) {
-    // SAFETY: see fpu_xsave; area is a valid XSAVE image or zeroed.
-    unsafe {
-        core::arch::asm!("xrstor64 [{p}]", p = in(reg) area,
-            in("eax") 0xffff_ffffu32, in("edx") 0xffff_ffffu32,
-            options(nostack, readonly));
-    }
-}
-
 /// Guest-RAM size for the next VM, chosen at `vm_open` from live host
 /// free memory instead of a fixed 1 GiB constant.
 ///
@@ -309,24 +285,10 @@ pub fn run_substrate_test() -> Result<LaunchOutcome, &'static str> {
     }
 }
 
-/// Boot a Linux bzImage in the MicroVM (`microvm linux`).
-pub fn run_linux(
-    bzimage: &[u8],
-    cmdline: &[u8],
-    initramfs: Option<&[u8]>,
-    inject: &[u8],
-) -> Result<LaunchOutcome, &'static str> {
-    match *VENDOR.lock() {
-        Vendor::Intel => vmx::run_linux(bzimage, cmdline, initramfs, inject),
-        Vendor::Amd => svm::run_linux(bzimage, cmdline, initramfs, inject),
-        Vendor::Unknown(reason) => Err(reason),
-    }
-}
-
 // ── Re-entrant active VM (12.4 step 1b — Core-0 cooperative) ───────
 //
 // One backend-agnostic active VM, driven by the Core-0 event loop
-// via `vm_poll_slice()` instead of a blocking `run_linux`. Holds the
+// via `vm_poll_slice()` instead of a blocking whole-VM run. Holds the
 // VmContext so Shade keeps rendering between bounded slices. Single
 // global (one VM for now); keyed-registry generalisation deferred per
 // the forward-compat contract (consumer side never assumes count).
@@ -1160,12 +1122,6 @@ pub fn vm_core_serve() {
 /// and never re-checking VM_CLOSE_REQUESTED. 8 ms ≈ the old idle yield, but a
 /// download/active guest never reaches it.
 const PARK_SAFETY_MS: u64 = 8;
-
-/// vCPU-side halt-poll budget (µs) during an active transfer — the KVM
-/// `halt_poll_ns` analogue for the guest vCPU. ~500 µs bridges the inter-batch
-/// gap so the guest resumes warm and drains RX before its receive window can
-/// collapse to zero. Spent only while `recently_active`, on a non-Core-0 core.
-const VCPU_HALT_POLL_US: u64 = 500;
 
 /// Park the BSP vCPU fiber when the guest is idle — the unified block-on-event
 /// model (KVM `kvm_vcpu_block`): one park, woken by whichever event fires first.
