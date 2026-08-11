@@ -98,10 +98,12 @@ default-features = false
 # prefers AVX-512 and falls to soft there, while polyval 0.6 used the legacy
 # single-block PCLMULQDQ the N100 does accelerate.
 #
-# The regression was Atom-specific. Measured on the released 0.11 (2026-08-11,
-# dev host): AES-GCM enc 1469 → 2587 MB/s, dec 1577 → 2797 MB/s — +76 %, with
-# BLAKE3 (unchanged crate) moving 1.5 % as the control. Re-measure if the N100
-# ever becomes a target again.
+# Measured on the released 0.11 (2026-08-11, dev host under QEMU — NOT the
+# N100, and not bare metal): AES-GCM enc 1469 → 2587 MB/s, dec 1577 → 2797 MB/s,
+# +76 %, with BLAKE3 (unchanged crate) moving 1.5 % as the control. So the
+# regression looks Atom-specific rather than general — but the 718 → 243 figure
+# above came from bare-metal N100, so the two are not directly comparable.
+# Re-measure on bare metal, and on the N100 if it ever becomes a target again.
 version = "0.11"
 default-features = false
 features = ["aes", "alloc"]
