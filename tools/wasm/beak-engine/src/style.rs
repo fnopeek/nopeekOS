@@ -604,6 +604,14 @@ pub struct ComputedStyle {
     pub pad_bottom: f32,
     pub pad_left: f32,
     pub box_border: bool, // box-sizing: border-box
+    /// Which of this element's winning declarations carried a viewport-HEIGHT
+    /// unit (`vh`/`vmin`/`vmax`), as a bitmask: bit 0 = a property that sizes
+    /// or positions the box outright, bit 1 = `max-height`, bit 2 =
+    /// `min-height`. The caps are kept apart because a cap that never BINDS
+    /// changes no geometry at all — Wikipedia's menus are all
+    /// `max-height: 75vh` and never reach it — so layout can flag those only
+    /// when they actually clamp. Per-element, so deliberately NOT inherited.
+    pub vh_seen: u8,
     /// `appearance: none` — the page opts this form control OUT of the UA
     /// widget look (css-ui-4 §4) and draws the whole thing itself.
     pub appearance_none: bool,
@@ -802,6 +810,7 @@ impl ComputedStyle {
             pad_bottom: 0.0,
             pad_left: 0.0,
             box_border: false,
+            vh_seen: 0,
             appearance_none: false,
             contain_size: false,
             contain_intrinsic: None,
@@ -1016,6 +1025,7 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         pad_bottom: 0.0,
         pad_left: 0.0,
         box_border: false,
+        vh_seen: 0,
         appearance_none: false,
         contain_size: false,
         contain_intrinsic: None,
@@ -1878,8 +1888,45 @@ impl ComputedStyle {
     }
 }
 
+/// `vh_seen` bits — see `ComputedStyle::vh_seen`.
+pub const VH_DIRECT: u8 = 1;
+pub const VH_MAX_HEIGHT: u8 = 2;
+pub const VH_MIN_HEIGHT: u8 = 4;
+
+/// Does this declaration value carry a length relative to the viewport
+/// HEIGHT? `vw` alone does not: a width-only dependency is already covered by
+/// the layout width being part of the cache key.
+fn has_viewport_h_unit(v: &str) -> bool {
+    let b = v.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        // A unit only ever follows a digit or a '.', never a letter.
+        let starts = i > 0 && (b[i - 1].is_ascii_digit() || b[i - 1] == b'.');
+        if starts {
+            let rest = &v[i..];
+            for u in ["vmin", "vmax", "vh"] {
+                if rest.starts_with(u) && !rest[u.len()..].starts_with(|c: char| c.is_ascii_alphanumeric()) {
+                    return true;
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
 pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
     let v = val.trim().to_ascii_lowercase();
+    // Only declarations that actually reach an element pass here, so this
+    // counts MATCHED rules rather than occurrences in the stylesheet text —
+    // Wikipedia's three stray `vh`s never match anything.
+    if has_viewport_h_unit(&v) {
+        s.vh_seen |= match prop {
+            "max-height" => VH_MAX_HEIGHT,
+            "min-height" => VH_MIN_HEIGHT,
+            _ => VH_DIRECT,
+        };
+    }
     // Font-relative bases for this element, taken once: `apply_one` handles a
     // single declaration, so `font-size` (which uses its own inherited base)
     // is the only property that could move them, and it does so for the NEXT

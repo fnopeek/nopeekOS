@@ -646,3 +646,54 @@ fn diag_rects() {
 fn sizeof_style() {
     println!("sizeof(ComputedStyle) = {} B", std::mem::size_of::<beak_engine::style::ComputedStyle>());
 }
+
+/// DPHASE=<html> DCSS=<css> [DW=w] [DH=h] — split the one "parse+cascade+
+/// layout" number the device reports into its three phases, and time what a
+/// pure viewport-HEIGHT change actually costs. The dock bar shifting beak by a
+/// few pixels re-ran all three on device (~6.4 s each, twice per hover).
+#[test]
+fn phase() {
+    let Ok(hp) = std::env::var("DPHASE") else { return };
+    let html = fs::read_to_string(&hp).expect("html");
+    let css = std::env::var("DCSS").ok().and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
+    let w: u32 = std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(1880);
+    let h: u32 = std::env::var("DH").ok().and_then(|s| s.parse().ok()).unwrap_or(1000);
+    println!("html {} KiB, css {} KiB, {w}x{h}", html.len() / 1024, css.len() / 1024);
+
+    let t = std::time::Instant::now();
+    let dom = beak_engine::dom::parse(&html);
+    let t_parse = t.elapsed();
+
+    let media = beak_engine::css::Media::new(w as f32, false);
+    let t = std::time::Instant::now();
+    let sheet = beak_engine::css::collect_all(&dom, &css, media);
+    let t_css = t.elapsed();
+
+    // Whole-pipeline runs through the public entry, the way the app calls it.
+    let mut eng = Engine::new();
+    eng.set_theme(light());
+    eng.set_viewport_h(h);
+    let t = std::time::Instant::now();
+    let lay = eng.layout_ext(&html, &css, w);
+    let t_first = t.elapsed();
+    let vh_used = lay.viewport_h_used;
+
+    // Same size again: everything cached that can be.
+    let t = std::time::Instant::now();
+    let _ = eng.layout_ext(&html, &css, w);
+    let t_same = t.elapsed();
+
+    // ONLY the viewport height changes — the dock-hover case.
+    eng.set_viewport_h(h - 40);
+    let t = std::time::Instant::now();
+    let _ = eng.layout_ext(&html, &css, w);
+    let t_hchange = t.elapsed();
+
+    println!("  dom::parse        {:>7.0} ms", t_parse.as_secs_f64() * 1000.0);
+    println!("  css::collect_all  {:>7.0} ms  ({})", t_css.as_secs_f64() * 1000.0, if sheet.is_empty() { "empty" } else { "non-empty" });
+    println!("  full layout_ext   {:>7.0} ms  (first)", t_first.as_secs_f64() * 1000.0);
+    println!("  full layout_ext   {:>7.0} ms  (same size again)", t_same.as_secs_f64() * 1000.0);
+    println!("  full layout_ext   {:>7.0} ms  (HEIGHT changed only)", t_hchange.as_secs_f64() * 1000.0);
+    println!("  viewport_h_used = {vh_used}   -> height-only resize {}",
+             if vh_used { "MUST re-lay-out" } else { "can reuse the layout (repaint only)" });
+}

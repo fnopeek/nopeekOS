@@ -689,6 +689,14 @@ pub struct Layout {
     pub controls: Vec<ControlRect>,
     /// Total document height (px). May exceed the viewport → scroll.
     pub height: u32,
+    /// Did this layout actually depend on the viewport HEIGHT? When false, a
+    /// purely vertical resize cannot move a single box, so the shell may reuse
+    /// this layout and just re-clip — the difference between a repaint and a
+    /// full re-layout (~6.4 s on device for a big article).
+    ///
+    /// Sound in the direction that matters: it over-reports (value-equality on
+    /// the containing block, any matched `vh` rule), never under-reports.
+    pub viewport_h_used: bool,
     /// Canvas background — the `<body>` background propagated to the whole
     /// viewport (CSS backgrounds §3.11.2), else the theme background.
     pub bg: Rgb,
@@ -967,6 +975,9 @@ struct Ctx<'a> {
     cb: (i32, i32, i32, Option<i32>),
     /// Viewport width (px) — the layout width — for `@media` evaluation.
     viewport_w: f32,
+    /// The viewport height this layout was built for — the initial containing
+    /// block's height, and the basis every `vh` resolved against.
+    viewport_h: f32,
     /// Active floats in the current block formatting context — line boxes and
     /// later blocks flow around them. Saved/restored when entering a new BFC.
     floats: Vec<FloatRect>,
@@ -1026,6 +1037,15 @@ struct Ctx<'a> {
     /// When set, element boxes are recorded into `inspects` for the dev tool.
     inspect: bool,
     inspects: Vec<InspectBox>,
+    /// Did anything in this layout actually consume the viewport HEIGHT — a
+    /// `vh`/`vmin`/`vmax` length that won the cascade, or a box resolved
+    /// against the initial containing block? `Cell` because the style walk
+    /// runs behind `&self`.
+    vh_used: core::cell::Cell<bool>,
+    /// Set while laying out a box whose definite height came from the viewport
+    /// (a `%` against the ICB). Read by `flow_children` right after the box,
+    /// which knows whether anything follows it to be pushed around.
+    vp_height_box: core::cell::Cell<bool>,
     /// Memoised `intrinsic_width` results, keyed by element `seq`. Measuring a
     /// subtree now cascades every descendant, and the same element is asked
     /// repeatedly (a table sizes its columns over several passes) — without
@@ -1077,12 +1097,36 @@ impl<'a> Ctx<'a> {
     /// `style::resolve` through the memo. Every cascade inside the layout goes
     /// through here so a re-measured subtree costs a map lookup, not a full
     /// selector match against the page's stylesheet.
+    /// Record a viewport-HEIGHT dependency that is unconditional. A `vh` cap
+    /// (`max-`/`min-height`) is NOT one: it only moves geometry when it
+    /// actually clamps, which `clamp_vh` decides once the content height is
+    /// known.
+    fn note_vh(&self, s: &ComputedStyle) {
+        if s.vh_seen & crate::style::VH_DIRECT != 0 {
+            self.vh_used.set(true);
+        }
+    }
+
+    /// A `vh`-derived `max-height`/`min-height` that actually changed the used
+    /// height IS a viewport-height dependency; one that never binds is not.
+    fn note_vh_clamp(&self, st: &ComputedStyle, before: i32, after: i32) {
+        if before == after {
+            return;
+        }
+        let bit = if after < before { crate::style::VH_MAX_HEIGHT } else { crate::style::VH_MIN_HEIGHT };
+        if st.vh_seen & bit != 0 {
+            self.vh_used.set(true);
+        }
+    }
+
     fn styled(&self, el: &Element, parent: &ComputedStyle, prev: &[ElemInfo], sib_count: u32) -> ComputedStyle {
         let key = style_key(el, parent, &self.path, prev, sib_count);
         if let Some(s) = self.styles.borrow().get(&key) {
+            self.note_vh(s);
             return *s;
         }
         let s = style::resolve(el, parent, self.theme, self.sheet, &self.path, prev, sib_count, self.viewport_w);
+        self.note_vh(&s);
         self.styles.borrow_mut().insert(key, s);
         s
     }
@@ -1114,6 +1158,17 @@ impl<'a> Ctx<'a> {
             return None;
         }
         let cbh = self.cb_h;
+        // A percentage height resolving against the viewport does NOT by itself
+        // move anything: `html, body { height: 100% }` is on nearly every site
+        // and only fixes those boxes' own bottom edge, with nothing after them.
+        // What moves content is a box like that having FOLLOWING content — so
+        // the box is only marked here, and `flow_children` raises the flag if
+        // something actually comes after it. Compared by value, not identity:
+        // an ancestor that happens to be exactly one viewport tall
+        // over-reports, which only costs us today's re-layout.
+        if cbh == Some(self.viewport_h as f32) {
+            self.vp_height_box.set(true);
+        }
         // §10.5: against an indefinite containing block a percentage behaves as
         // `auto`. `min-height` is the exception the spec spells out — it falls
         // back to 0, which is its initial value anyway.
@@ -1335,6 +1390,9 @@ pub fn layout(
         // abspos box stretch to the window rather than collapse.
         cb: (0, 0, width as i32, Some(viewport_h as i32)),
         viewport_w: width as f32,
+        viewport_h: viewport_h as f32,
+        vh_used: core::cell::Cell::new(false),
+        vp_height_box: core::cell::Cell::new(false),
         abs_count: 0,
         fixed_count: 0,
         cb_h: Some(viewport_h as f32),
@@ -1437,6 +1495,7 @@ pub fn layout(
         css_image_keys: ctx.css_images.into_inner(),
         css_image_srcs: Vec::new(),
         inline_svgs: ctx.inline_svgs.into_inner(),
+        viewport_h_used: ctx.vh_used.get(),
         inspect: ctx.inspects,
     }
 }
@@ -1623,6 +1682,9 @@ impl<'a> Ctx<'a> {
         // stack back to here on the way out (css-lists-3 §4.4 scope boundary).
         let counter_base = self.counters.stack.len();
         let mut inline = Inline::new();
+        // A viewport-derived-height child is waiting to see whether anything
+        // follows it in this flow.
+        let mut vp_pending = false;
         // `owner::before` — an anonymous inline box carrying its `content`
         // string, inserted ahead of `owner`'s real children (CSS2.1 §12.1).
         // An anonymous `owner` (a table object with no source element) can't
@@ -1850,6 +1912,7 @@ impl<'a> Ctx<'a> {
                 }
             }
             self.path.push(ElemInfo::of(el));
+            let vp_mark = self.vp_height_box.replace(false);
             let op0 = self.ops.len();
             let link0 = self.links.len();
             let ctl0 = self.controls.len();
@@ -1893,6 +1956,18 @@ impl<'a> Ctx<'a> {
             };
             if track {
                 self.stack_depth -= 1;
+            }
+            // This child's height came from the viewport. That only MOVES
+            // anything if content follows it in this flow — `html, body
+            // { height: 100% }` has nothing after it, a mid-page `height: 50vh`
+            // banner has everything after it.
+            if self.vp_height_box.replace(vp_mark) && !out.through {
+                vp_pending = true;
+            } else if vp_pending {
+                // Something committed after such a box: its bottom edge, and so
+                // this content's position, tracks the viewport height.
+                self.vh_used.set(true);
+                vp_pending = false;
             }
             // `position:relative` stays in flow but its paint shifts by top/left.
             if st.position == Position::Relative {
@@ -2405,10 +2480,10 @@ impl<'a> Ctx<'a> {
                 ch = ch.max(fb - content_top);
             }
             if let Some(mn) = px_h(st.min_height) {
-                ch = ch.max(mn);
+                let was = ch; ch = ch.max(mn); self.note_vh_clamp(st, was, ch);
             }
             if let Some(mx) = px_h(st.max_height) {
-                ch = ch.min(mx);
+                let was = ch; ch = ch.min(mx); self.note_vh_clamp(st, was, ch);
             }
             // A box with no content, border, padding or height collapses through:
             // its top and bottom margins are adjoining.
@@ -2463,10 +2538,10 @@ impl<'a> Ctx<'a> {
                 ch = h;
             }
             if let Some(mn) = px_h(st.min_height) {
-                ch = ch.max(mn);
+                let was = ch; ch = ch.max(mn); self.note_vh_clamp(st, was, ch);
             }
             if let Some(mx) = px_h(st.max_height) {
-                ch = ch.min(mx);
+                let was = ch; ch = ch.min(mx); self.note_vh_clamp(st, was, ch);
             }
             out_open = out_bottom_margin;
         }
@@ -2692,6 +2767,18 @@ impl<'a> Ctx<'a> {
             self.abs_count += 1;
         }
         let (cbx, cby, cbw, cbh) = self.cb;
+        // An out-of-flow box against the INITIAL containing block moves with
+        // the viewport height only if it actually reads that height: `bottom`
+        // anchors it to the far edge, and a percentage `top`/`height` scales
+        // with it. A box placed by `top`/`left` alone does not care how tall
+        // the viewport is.
+        if cbh == Some(self.viewport_h as i32)
+            && (st.bottom != Len::Auto
+                || matches!(st.top, Len::Pct(_) | Len::Calc { .. })
+                || matches!(st.height, Len::Pct(_) | Len::Calc { .. }))
+        {
+            self.vh_used.set(true);
+        }
         // An out-of-flow box resolves its percentage height against the
         // containing block it is positioned in, not against whatever in-flow
         // ancestor happens to be open (§10.5 + §10.1).

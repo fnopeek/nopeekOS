@@ -1219,13 +1219,19 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
 
     // (Re)lay out only when the content or the viewport changed — NOT on every
     // scroll. Reusing the cached layout for scroll is what keeps scrolling
-    // smooth. The HEIGHT is part of the key because `vh`/`vmin`/`vmax` resolve
-    // against it: a purely vertical resize changes the geometry of every box
-    // sized that way.
+    // smooth. The HEIGHT counts only when the page's geometry actually depends
+    // on it — a `vh` length that won the cascade, a cap that really clamps, an
+    // out-of-flow box anchored to the viewport's bottom edge. `html, body
+    // { height: 100% }` is on nearly every site and moves nothing, so it must
+    // not count: the dock sliding this window up a few pixels was costing a
+    // full re-layout (~6.4 s on a big article) for a picture that could not
+    // change.
     let cur_gen = content_gen();
     let need_layout = match cache.as_ref() {
         None => true,
-        Some((_, cw, ch, cg)) => *cw != w || *ch != h || *cg != cur_gen,
+        Some((lay, cw, ch, cg)) => {
+            *cw != w || *cg != cur_gen || (*ch != h && lay.viewport_h_used)
+        }
     };
     if need_layout {
         *cache = Some((do_layout(engine, w as u32, state), w, h, cur_gen));
