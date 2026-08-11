@@ -335,7 +335,7 @@ fn spawn_on_worker_inner(
 
     // Run the app on a fiber (own stack) so it can yield at npk_sleep /
     // npk_event_wait instead of pinning its worker core — see smp::fiber
-    // + SCHEDULER_FIBERS.md. Native intents still use plain `spawn`.
+    // + docs/plan/SCHEDULER_FIBERS.md. Native intents still use plain `spawn`.
     crate::smp::scheduler::spawn_fiber(
         crate::smp::scheduler::Priority::Interactive,
         wasm_worker_task,
@@ -1769,7 +1769,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     // attribute phases of a page load, not enough to time a single glyph.
     //
     // Stage 1 needs this anyway for `setTimeout`/`requestAnimationFrame`
-    // (BROWSER.md §10 lists `now_ms` in the Platform surface).
+    // (docs/spec/BROWSER.md §10 lists `now_ms` in the Platform surface).
     linker.func_wrap("env", "npk_ticks",
         |_caller: Caller<'_, HostState>| -> i64 {
             (crate::interrupts::ticks() as i64).saturating_mul(10)
@@ -2491,7 +2491,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     ).map_err(|_| WasmError::HostFunctionError)?;
 
     // npk_window_set_panel(edge, behavior, w, h) -> i32
-    // Generalised edge panel (see PANEL.md): edge 0=Bottom 1=Top,
+    // Generalised edge panel (see docs/spec/PANEL.md): edge 0=Bottom 1=Top,
     // behavior 0=AutoHide overlay (dock) 1=Strut (bar). Creates/promotes
     // the caller's widget window WITHOUT grabbing focus (like the dock),
     // then hands it to the compositor's panel config. `set_dock` above is
@@ -3196,7 +3196,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     // per-core scheduler, which runs the core's other ready fibers while we
     // sleep. So dock+bar+loft+spell multiplex over a couple of workers
     // instead of each pinning a core (or nesting via the old next_task
-    // helper, which froze the dock — see SCHEDULER_FIBERS.md). The fiber is
+    // helper, which froze the dock — see docs/plan/SCHEDULER_FIBERS.md). The fiber is
     // resumed once the deadline passes.
     linker.func_wrap("env", "npk_sleep",
         |_caller: Caller<'_, HostState>, ms: i32| -> i32 {
@@ -3279,7 +3279,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 // Don't busy-spin, and don't run the old next_task helper
                 // here: stealing a fiber task and calling its func directly
                 // would bypass the fiber scheduler and re-introduce the
-                // nesting freeze (SCHEDULER_FIBERS.md). Just HLT until the
+                // nesting freeze (docs/plan/SCHEDULER_FIBERS.md). Just HLT until the
                 // next interrupt; the per-core 100 Hz timer wakes us to
                 // re-check the key buffer + deadline (≤10 ms latency).
                 // IF-preserving. (Only `wifi` uses npk_input_wait today; the
@@ -3968,7 +3968,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
-    // ── WiFi-class control channel (WIFI_CLASS_ABI.md) ───────────────────
+    // ── WiFi-class control channel (docs/spec/WIFI_CLASS_ABI.md) ───────────────────
     // A kernel-mediated mailbox pair routing opaque control messages between
     // the vendor driver (wifi_*.wasm) and the supplicant (wifid.wasm). The
     // kernel carries bytes only — no WPA / vendor knowledge. Manager side is

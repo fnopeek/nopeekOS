@@ -1,4 +1,4 @@
-//! beak — native, sandboxed web browser for nopeekOS (BROWSER.md).
+//! beak — native, sandboxed web browser for nopeekOS (docs/spec/BROWSER.md).
 //!
 //! Stage 0.1: the page is rendered by the portable `beak-engine` (own block
 //! layout + fontdue rasterisation) into a `Widget::Canvas`; the chrome
@@ -471,7 +471,7 @@ fn bump_nav_gen() {
 }
 
 // Reader-mode toggle: apply the site's own (external + <style>) CSS, or render
-// with just our UA sheet (BROWSER.md §9.7 — never worse than clean content).
+// with just our UA sheet (docs/spec/BROWSER.md §9.7 — never worse than clean content).
 static mut USE_SITE_CSS: bool = true;
 fn use_site_css() -> bool {
     unsafe { core::ptr::addr_of!(USE_SITE_CSS).read() }
@@ -1291,7 +1291,7 @@ fn render_chrome() {
     );
 
     // A lock in Success for https, the bird for anything else — the
-    // scheme belongs in the field, not in the URL text (UI_REFRESH.md §5).
+    // scheme belongs in the field, not in the URL text (docs/spec/UI_REFRESH.md §5).
     let url = url_str();
     let (lead_icon, lead_tint) = if url.starts_with("https://") {
         (IconId::Lock, Token::Success)
@@ -1400,7 +1400,7 @@ fn render_chrome() {
     }
 }
 
-/// Toolbar chrome sizing (UI_REFRESH.md §5).
+/// Toolbar chrome sizing (docs/spec/UI_REFRESH.md §5).
 const TOOLBAR_H: u16 = 44;
 const FIELD_H: u16 = 30;
 const NAV_BTN: u16 = 28;

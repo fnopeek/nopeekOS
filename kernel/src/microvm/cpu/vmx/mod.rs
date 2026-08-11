@@ -1,7 +1,7 @@
 //! VMX (Intel VT-x) — Phase 12 MicroVM substrate.
 //!
 //! Layered as `kernel-side primitives only` per
-//! `MICROKERNEL_REFACTOR.md` and `PHASE12_MICROVM.md`:
+//! `docs/plan/MICROKERNEL_REFACTOR.md` and `docs/archive/PHASE12_MICROVM.md`:
 //! kernel owns VMX/VMCS/EPT/VT-d/VCPU-threads, WASM-Manager owns
 //! lifecycle + bridges.
 //!

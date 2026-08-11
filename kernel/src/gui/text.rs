@@ -67,7 +67,7 @@ pub const fn is_mono(style: TextStyle) -> bool {
 // ── TextStyle → (size, weight) mapping ────────────────────────────────
 
 /// Logical pixel size + OpenType weight for a TextStyle. Frozen per
-/// PHASE10_WIDGETS.md "Typography" table.
+/// docs/archive/PHASE10_WIDGETS.md "Typography" table.
 ///
 /// NOTE: fontdue v0.9 renders the default weight (~400) regardless of
 /// the `weight` field — variable-axis switching is deferred to v2.
@@ -81,7 +81,7 @@ pub struct StyleDesc {
 
 pub const fn style_desc(style: TextStyle) -> StyleDesc {
     match style {
-        // Per the Typography table in PHASE10_WIDGETS.md.
+        // Per the Typography table in docs/archive/PHASE10_WIDGETS.md.
         TextStyle::Title   => StyleDesc { size_px: 22, weight: 600 },
         TextStyle::Heading => StyleDesc { size_px: 15, weight: 500 },
         TextStyle::Body    => StyleDesc { size_px: 13, weight: 400 },

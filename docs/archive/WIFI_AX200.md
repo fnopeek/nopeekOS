@@ -1,5 +1,10 @@
 # WIFI_AX200 — Intel Wi-Fi 6 AX200 als WASM-Driver
 
+> **Archiv (2026-08-11).** Der WLAN-Teil ist gebaut und an Hardware bestätigt
+> (`wifi_ax200` findet Netze, Vendor-Code 1:1 aus Linux). `bt_ax200` (Bluetooth)
+> wurde nie angefangen. Lebende Dokumente: `docs/spec/WIFI_CLASS_ABI.md` (Vertrag)
+> und `docs/spec/AX200_FUNC_MAP.md` (Linux-Gap-Karte).
+
 Plan für `wifi_ax200` (PCIe iwlwifi) + `bt_ax200` (USB btusb). Ziel:
 WLAN **und** BT auf dem HP-Notebook. Strikt 1:1 Linux 6.18.26
 (`~/.cache/nopeekos/linux-src/linux-6.18.26/drivers/net/wireless/intel/iwlwifi/`),
@@ -148,7 +153,7 @@ PHY_CONTEXT, BINDING, ADD_STA(=12 bekannt), ADD_STA_KEY, SCD_QUEUE_CONFIG, TX_CM
 **Treiber- vs ABI-Arbeit:** PHY/Bind/Sta/TXQ/Keys = reine Treiber-FW-Plumbing.
 Auth/Assoc/EAPOL-**Frames** baut die obere Schicht (`wifid`); der Treiber
 transportiert sie nur (TX_MGMT/RX_MGMT/EAPOL über die ABI). **ABI-Verfeinerung
-(in WIFI_CLASS_ABI.md nachziehen):** für die MLME-in-`wifid`-Trennung braucht's
+(in docs/spec/WIFI_CLASS_ABI.md nachziehen):** für die MLME-in-`wifid`-Trennung braucht's
 neben TX_EAPOL auch generisches TX_MGMT/RX_MGMT + Signale ASSOC_READY (FW geprepped)
 und ASSOCIATED{aid} (→ mac_ctxt is_assoc + update_sta) + AUTHORIZED.
 **Größte neue Infrastruktur:** dyn. gen2-Daten-TXQ, **bc_tbl**, eingebettetes tx_cmd.

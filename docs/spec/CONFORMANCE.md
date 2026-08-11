@@ -1777,4 +1777,4 @@ boxes until Stage 1.
    the JS engine lands. Then the `%` columns become real, measured numbers.
 4. No silent drift: a non-standard shortcut gets a row + a note saying so.
 
-Related: `BROWSER.md` (architecture, §8 test262, §10 host-testability).
+Related: `docs/spec/BROWSER.md` (architecture, §8 test262, §10 host-testability).

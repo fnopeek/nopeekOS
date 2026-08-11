@@ -2,14 +2,14 @@
 name = "beak-engine"
 version = "0.1.0"
 edition = "2024"
-description = "Portable browser engine core for beak (nopeekOS) — pure no_std+alloc, host-agnostic. See BROWSER.md §10."
+description = "Portable browser engine core for beak (nopeekOS) — pure no_std+alloc, host-agnostic. See docs/spec/BROWSER.md §10."
 
 [lib]
 # rlib: the nopeek shell (wasm) and native tests both depend on this.
 
 [dependencies]
 # fontdue: TTF glyph rasteriser (same crate + version the kernel UI uses).
-# no_std, pure Rust → ports to the desktop adapter too (BROWSER.md §10).
+# no_std, pure Rust → ports to the desktop adapter too (docs/spec/BROWSER.md §10).
 # The LAYOUT engine is hand-rolled; fontdue only turns glyph outlines into
 # coverage bitmaps (infrastructure, not "the engine").
 [dependencies.fontdue]

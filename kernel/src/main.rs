@@ -143,7 +143,7 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     smp::init();
 
     // Fiber scheduler Stage 1: validate the context-switch primitive on
-    // Core 0 (see SCHEDULER_FIBERS.md). Prints `[fiber] self-test OK`.
+    // Core 0 (see docs/plan/SCHEDULER_FIBERS.md). Prints `[fiber] self-test OK`.
     // Isolated — nothing in the live app path uses fibers yet.
     smp::fiber::self_test();
 

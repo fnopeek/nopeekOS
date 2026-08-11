@@ -15,7 +15,7 @@
 # Iteration 2: + Mesa + Wayland-libs (apk add).
 # Iteration 3: + LibreWolf (built from Alpine APKBUILD on top).
 #
-# Trust split (see PHASE12_MICROVM.md):
+# Trust split (see docs/archive/PHASE12_MICROVM.md):
 #   - Kernel + microvm-init: compiled + signed by us, fully audited.
 #   - Alpine minirootfs: pinned tarball + pinned sha256.
 #   - Future apks: pinned version + pinned blake3 per package

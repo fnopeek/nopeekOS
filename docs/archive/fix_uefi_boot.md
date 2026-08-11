@@ -1,5 +1,8 @@
 # fix_uefi_boot.md — Notebook bootet wieder ✅ (2026-06-02)
 
+> **Archiv (2026-08-11).** Gelöst und seither stabil; steht hier als
+> Fehlersuche-Protokoll, nicht als offene Arbeit.
+
 **Status: GELÖST.** Das HP-Notebook bootet wieder durch (Installer läuft).
 Drei verschiedene Probleme übereinander — alle gefunden + gefixt.
 

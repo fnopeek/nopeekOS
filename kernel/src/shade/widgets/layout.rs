@@ -18,7 +18,7 @@
 //!     sized placeholder — the compositor logs + rejects them.
 //!
 //! All sizes are **logical px at 1× HiDPI**. The rasterizer multiplies
-//! by the scale factor at raster time (per PHASE10_WIDGETS.md).
+//! by the scale factor at raster time (per docs/archive/PHASE10_WIDGETS.md).
 //!
 //! Two-pass algorithm — cheap, fits on the stack:
 //!

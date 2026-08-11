@@ -2,7 +2,7 @@
 name = "beak"
 version = "0.12.0"
 edition = "2024"
-description = "beak — the native, sandboxed web browser for nopeekOS. See BROWSER.md."
+description = "beak — the native, sandboxed web browser for nopeekOS. See docs/spec/BROWSER.md."
 
 [lib]
 crate-type = ["cdylib"]

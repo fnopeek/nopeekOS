@@ -1,7 +1,7 @@
 //! wifid.wasm — the WiFi connection manager (WPA2 supplicant).
 //!
 //! Vendor-independent: it drives any vendor WiFi driver (e.g. wifi_ax200) over
-//! the kernel-mediated WiFi-class control channel (see WIFI_CLASS_ABI.md). It
+//! the kernel-mediated WiFi-class control channel (see docs/spec/WIFI_CLASS_ABI.md). It
 //! owns the credentials and the WPA2 4-way handshake; the vendor driver only
 //! transports frames and installs the keys the supplicant computes.
 //!
@@ -77,7 +77,7 @@ fn log_hex(prefix: &str, bytes: &[u8]) {
     log("\n");
 }
 
-// ── control-channel wire format (WIFI_CLASS_ABI.md) ──────────────────────
+// ── control-channel wire format (docs/spec/WIFI_CLASS_ABI.md) ──────────────────────
 // downlink (manager → driver)
 const CMD_SET_KEY: u8 = 0x04;
 const CMD_TX_EAPOL: u8 = 0x05;

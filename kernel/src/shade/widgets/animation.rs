@@ -1,6 +1,6 @@
 //! Widget animation — Q16.16 fixed-point spring + linear tween.
 //!
-//! Per PHASE10_WIDGETS.md: interpolation lives in the compositor,
+//! Per docs/archive/PHASE10_WIDGETS.md: interpolation lives in the compositor,
 //! apps only declare intent via `Modifier::Transition(..)`. Math is
 //! deterministic fixed-point (floats drift across cores + variable
 //! wakeup latency).

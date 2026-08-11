@@ -1,5 +1,13 @@
 # Microkernel Driver Refactor
 
+> **Stand 2026-08-11 (nachgetragen beim Doku-Aufräumen):** teilweise gelaufen,
+> nie als Refactor am Stück. Als WASM-Driver leben heute `aml`, `wifi` /
+> `wifi_ax200` und `audio_hda` — der Weg über die `npk_pci_*`/`mmio_*`/`dma_*`-
+> ABI ist damit an echter Hardware bewiesen. Im Kernel stecken weiterhin NVMe,
+> xHCI, die NICs (I226-V, RTL8153), GPU, HDA-Transport, SMBus, EC, ACPI.
+> Der Plan unten ist als Zielbild gültig, die Reihenfolge darin aber nicht mehr
+> — sie wurde von Browser- und beak-Arbeit überholt.
+
 **Goal:** All hardware drivers exit the kernel and run as WASM drivers via the
 existing `npk_pci_*/mmio_*/dma_*` driver-ABI. The kernel keeps only HW-agnostic
 primitives (PCI enumeration, MSI/IRQ dispatch, MM, capabilities, crypto, WASM
@@ -245,7 +253,7 @@ milestone. The two pipelines are not blocking on each other.
 
 ---
 
-## Sequencing relative to PHASE12_MICROVM.md
+## Sequencing relative to docs/archive/PHASE12_MICROVM.md
 
 ```
 12.1 Hello Bash (PoC)            ← VMX/EPT/VCPU/virtio-console-backend bring-up
@@ -367,5 +375,5 @@ Treat as Phase 11 placeholder reuse?
 - Not a host-fn implementation spec (will live in `kernel/src/wasm.rs`
   doc-comments when steps land).
 - Not a manifest schema reference (separate `DRIVER_MANIFEST.md` once
-  stable, like `WIDGET_VOCAB.md`).
+  stable, like `docs/spec/WIDGET_VOCAB.md`).
 - Not a per-driver migration guide (each step gets its own commit-trail).

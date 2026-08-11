@@ -5,7 +5,7 @@
 //! variant order, #[repr] discriminants, and struct field order are all
 //! frozen at v1 (WIRE_VERSION = 0x01).
 //!
-//! Rules (see PHASE10_WIDGETS.md "ABI stability & future-proofing"):
+//! Rules (see docs/archive/PHASE10_WIDGETS.md "ABI stability & future-proofing"):
 //!   - All ABI-visible enums carry #[non_exhaustive]
 //!   - New variants appended only — never inserted, never reordered
 //!   - Removing a variant = wire-version bump
@@ -111,7 +111,7 @@ pub enum Token {
     Warning         = 10,
     Danger          = 11,
 
-    // UI-Refresh ramp extension (see UI_REFRESH.md §1).
+    // UI-Refresh ramp extension (see docs/spec/UI_REFRESH.md §1).
     /// Content canvas — below `Surface`. Editor body, page, terminal.
     Page            = 12,
     /// Hover fill / chips — above `SurfaceMuted`.

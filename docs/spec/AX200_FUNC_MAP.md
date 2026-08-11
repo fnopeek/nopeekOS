@@ -146,7 +146,7 @@ Keys + authorized; Daten-Pfad gebaut (wifi_ax200 0.30.3 + Kernel 0.207.0). DHCP 
 | → Ping/Browse | — | ❌ |
 
 ### Phase J — WiFi-Class-ABI-Integration (→ wifid) ❌
-Siehe `WIFI_CLASS_ABI.md` §8. Control-Channel-Host-Fns existieren im Kernel (v0.205.0),
+Siehe `docs/spec/WIFI_CLASS_ABI.md` §8. Control-Channel-Host-Fns existieren im Kernel (v0.205.0),
 sind aber im Treiber-Loop noch nicht verdrahtet.
 | Schritt | Status |
 |---|---|

@@ -545,7 +545,7 @@ fn path_exists(path: &str) -> bool {
 
 // ── Render ────────────────────────────────────────────────────────────
 //
-// Follows loft's list language (UI_REFRESH.md §3/§5): 34 px rows, icon +
+// Follows loft's list language (docs/spec/UI_REFRESH.md §3/§5): 34 px rows, icon +
 // name on the left, one mono column on the right carrying real
 // information, and a selection that reads as an accent tint plus a 2 px
 // leading edge — never a floating outline.

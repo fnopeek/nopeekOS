@@ -93,7 +93,7 @@ static WORK_START_TSC: [AtomicU64; 256] = {
 // believes were work. It cannot tell a halted core from one spinning
 // in a busy-loop — a spinner simply never accounts itself idle, so it
 // looks free while pegging the host vCPU at 100%. That is exactly the
-// idle-100% bug (`SCHEDULER_FIBERS.md`) and why `top` lies.
+// idle-100% bug (`docs/plan/SCHEDULER_FIBERS.md`) and why `top` lies.
 //
 // These counters measure the opposite, directly: TSC cycles a core
 // spends GENUINELY HALTED (HLT/MWAIT), recorded at every halt site.
@@ -313,7 +313,7 @@ pub fn init_dedicated_vm_core(worker_count: usize) {
     // vCPU-as-fiber (unified pool): when enabled, the guest runs as a
     // normal pool fiber on a DYNAMIC core — so we do NOT statically carve
     // one out here (that wasted a core whenever no VM ran, and stranded the
-    // app fibers already on it). See microvm::cpu / SCHEDULER_FIBERS.md.
+    // app fibers already on it). See microvm::cpu / docs/plan/SCHEDULER_FIBERS.md.
     // Intel parity (#3): also enable fiber mode on VMX (flag-gated), so the
     // browser leaves the cooperative Core-0 path. The per-core TSS the
     // worker needs for VMX host-state is installed lazily in vmx::vm_open.
