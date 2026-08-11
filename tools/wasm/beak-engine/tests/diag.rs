@@ -88,6 +88,7 @@ fn diag() {
     }
     // DJPEG=<file> — decode one JPEG and print the decoder's own error.
     if let Ok(fp) = std::env::var("DJPEG") {
+        use zune_core::bytestream::ZCursor;
         use zune_core::colorspace::ColorSpace;
         use zune_core::options::DecoderOptions;
         use zune_jpeg::JpegDecoder;
@@ -96,7 +97,7 @@ fn diag() {
             .jpeg_set_out_colorspace(ColorSpace::RGB)
             .set_max_width(8192)
             .set_max_height(8192);
-        let mut dec = JpegDecoder::new_with_options(&bytes[..], opts);
+        let mut dec = JpegDecoder::new_with_options(ZCursor::new(&bytes[..]), opts);
         match dec.decode_headers() {
             Err(e) => println!("headers: ERR {e:?}"),
             Ok(()) => println!("headers: ok, dims={:?}", dec.dimensions()),
