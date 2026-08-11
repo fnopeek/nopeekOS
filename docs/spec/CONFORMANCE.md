@@ -22,17 +22,17 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-09, beak 0.9.0)
+### Current number (measured 2026-08-11, beak 0.14.0)
 
 ```
-4088 pass / 1520 fail / 178 inconclusive   (of 5786 vendored reftests)
-= 72.9 % of the conclusive 5608
+4095 pass / 1514 fail / 177 inconclusive   (of 5786 vendored reftests)
+= 73.0 % of the conclusive 5609
 ```
 
 Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → 3746 → 3863 → 3869 →
 3870 (0.3.0) → 3880 (0.3.2) → 3926 (0.3.3) → 3959 (0.3.4) → 3963 (0.3.5) →
 **3967** (0.3.6) → 3967 (0.3.11) → 3978 (0.3.12) → 3997 (0.3.13) → 3998 (0.3.14) → 4012 (0.3.15) → 4036 (0.3.16) → 4056 (0.4.1) → 4064 (0.4.3) → 4069 (0.4.5) → 4074 (0.4.6) → 4079 (0.4.7) → **4082** (0.4.8) → 4083 (0.4.10) → **4089** (0.7.0) → 4089 (0.8.0) → 4088 (0.9.0, one test traded for a
-form-control frame that obeys the page — point 45). The inconclusive count fell 254 → 184 over
+form-control frame that obeys the page — point 45) → **4092** (0.13.0, alpha 0 is a value, not an absence) → **4095** (0.14.0, inline `<svg>` as a replaced element; two references that used to render blank now measure something and say we are wrong). The inconclusive count fell 254 → 177 over
 that span: references that used to render blank — because `:root` was dropped,
 because an `inline-block` had no box, or because an inline box painted no
 background — now paint, so 73 more tests actually measure something.
