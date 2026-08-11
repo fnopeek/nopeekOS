@@ -12,7 +12,7 @@
 //! (space) + child (`>`) combinators, comma lists. Right-to-left matching with
 //! an ancestor stack + `(id, class, type)` specificity. Unsupported bits
 //! (pseudo-classes, `[attr]`, `+`/`~` siblings, `@media` bodies) are dropped,
-//! not mis-applied — forward-compatible like a browser (CONFORMANCE.md).
+//! not mis-applied — forward-compatible like a browser (docs/spec/CONFORMANCE.md).
 //! External `<link>` stylesheets need a sub-resource fetch → later; the parser
 //! + cascade here are exactly what that will reuse.
 
@@ -1124,7 +1124,9 @@ fn supports_cond(cond: &str) -> bool {
 fn supports_decl(prop: &str, val: &str) -> bool {
     let p = prop.to_ascii_lowercase();
     if p == "color" || p == "background" || p == "fill" || p == "stroke" || p.ends_with("-color") {
-        return crate::color::parse_color(val).is_some();
+        // `transparent` IS a supported colour — ask the value parser, not the
+        // one that folds transparency into "no value".
+        return crate::color::parse_color_val(val).is_some();
     }
     !val.is_empty()
 }

@@ -121,23 +121,52 @@ fn decodable_type(t: &str) -> bool {
     matches!(t.as_str(), "image/png" | "image/jpeg" | "image/jpg" | "image/svg+xml")
 }
 
+/// Split a `srcset` into `(url, descriptor)` candidates — HTML "parse a srcset
+/// attribute".
+///
+/// The separator is WHITESPACE, not the comma: a URL is a run of non-whitespace
+/// characters, and only a comma that ends that run (or follows the descriptor)
+/// starts the next candidate. That is what makes a `data:` URI work, since its
+/// commas sit inside an unbroken run — splitting on ',' cuts it in half and
+/// hands the tail on as a URL of its own.
+fn srcset_candidates(srcset: &str) -> Vec<(&str, Option<&str>)> {
+    let mut out = Vec::new();
+    let mut rest = srcset;
+    loop {
+        rest = rest.trim_start_matches(|c: char| c.is_ascii_whitespace() || c == ',');
+        if rest.is_empty() {
+            return out;
+        }
+        // The URL runs to the next whitespace.
+        let end = rest
+            .find(|c: char| c.is_ascii_whitespace())
+            .unwrap_or(rest.len());
+        let (url, tail) = rest.split_at(end);
+        // A URL ending in commas takes no descriptor (spec step 5).
+        let trimmed = url.trim_end_matches(',');
+        if trimmed.len() != url.len() {
+            out.push((trimmed, None));
+            rest = tail;
+            continue;
+        }
+        // Otherwise the descriptors run to the next comma.
+        let dend = tail.find(',').unwrap_or(tail.len());
+        let (desc, after) = tail.split_at(dend);
+        let desc = desc.trim();
+        out.push((url, if desc.is_empty() { None } else { Some(desc) }));
+        rest = after;
+    }
+}
+
 /// Pick one candidate out of a `srcset`. Width (`Nw`) candidates resolve
 /// against `sizes` — defaulting to the viewport, as the spec does — and the
 /// narrowest one that still covers it wins. Density (`Nx`) candidates resolve
 /// at 1x.
 fn pick<'a>(srcset: &'a str, sizes: Option<&str>, viewport: f32) -> Option<&'a str> {
-    // `url [descriptor]`, comma-separated. Splitting on ',' would cut a `data:`
-    // URI in half, so those are left to the plain `src`.
     let mut widths: Vec<(f32, &str)> = Vec::new();
     let mut densities: Vec<(f32, &str)> = Vec::new();
-    for part in srcset.split(',') {
-        let part = part.trim();
-        if part.is_empty() || part.starts_with("data:") {
-            continue;
-        }
-        let mut it = part.split_whitespace();
-        let Some(url) = it.next() else { continue };
-        match it.next() {
+    for (url, desc) in srcset_candidates(srcset) {
+        match desc {
             Some(d) if d.ends_with('w') => {
                 if let Ok(v) = d[..d.len() - 1].parse::<f32>() {
                     widths.push((v, url));
@@ -242,6 +271,32 @@ mod tests {
         assert_eq!(pick("/a.png, /b.png 2x", None, 800.0), Some("/a.png"));
         // No 1x at all → the smallest above it.
         assert_eq!(pick("/b.png 2x, /c.png 3x", None, 800.0), Some("/b.png"));
+    }
+
+    #[test]
+    fn a_data_uri_survives_the_srcset_split() {
+        // DuckDuckGo's home page ships its logo as
+        // `<picture><source srcSet="data:image/svg+xml;base64,…">`. The commas
+        // inside a data: URI are not candidate separators — splitting on them
+        // handed the base64 tail on as a URL of its own, which no fetch can
+        // ever satisfy.
+        let uri = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iYSIvPg==";
+        assert_eq!(pick(uri, None, 800.0), Some(uri));
+        assert_eq!(pick(&alloc::format!("{uri} 2x"), None, 800.0), Some(uri));
+        // Still one candidate among several.
+        let set = alloc::format!("/a.png 1x, {uri} 2x");
+        assert_eq!(pick(&set, None, 800.0), Some("/a.png"));
+        let set = alloc::format!("{uri} 1x, /b.png 2x");
+        assert_eq!(pick(&set, None, 800.0), Some(uri));
+    }
+
+    #[test]
+    fn a_comma_only_separates_when_it_ends_the_url_run() {
+        // Trailing commas end the candidate and leave it descriptor-less …
+        assert_eq!(pick("/a.png,, /b.png 2x", None, 800.0), Some("/a.png"));
+        // … while a comma INSIDE the run is just part of the URL, which is the
+        // whole reason a data: URI survives.
+        assert_eq!(pick("/a,b.png 2x", None, 800.0), Some("/a,b.png"));
     }
 
     #[test]

@@ -1,9 +1,9 @@
 //! image.rs — raster image decode for `<img>`.
 //!
 //! PNG (grayscale/RGB/palette/gray+alpha, bit depths 1/2/4/8/16, non-interlaced,
-//! with PLTE + tRNS transparency) and JPEG (baseline + progressive, via the
-//! no_std zune-jpeg decoder). Other formats (SVG, GIF, WebP) fall back to a
-//! labelled placeholder box in layout. The
+//! with PLTE + tRNS transparency), JPEG (baseline + progressive, via the
+//! no_std zune-jpeg decoder), ICO (`ico`) and SVG (`svg`). Other formats (GIF,
+//! WebP) fall back to a labelled placeholder box in layout. The
 //! shell fetches the bytes (the engine is host-free); the engine decodes them
 //! into `Image`s keyed by the original `src`, ready for layout + paint.
 
@@ -30,7 +30,7 @@ const MAX_PIXELS: usize = 4_000_000; // ~16 MB BGRA
 /// Allocate `n` zeroed bytes WITHOUT aborting on OOM — `try_reserve` returns
 /// `Err` instead of calling `handle_alloc_error`, so an oversize image degrades
 /// to a placeholder (decode → `None`) rather than killing the whole app/tab.
-fn zeroed(n: usize) -> Option<Vec<u8>> {
+pub(crate) fn zeroed(n: usize) -> Option<Vec<u8>> {
     let mut v: Vec<u8> = Vec::new();
     v.try_reserve_exact(n).ok()?;
     v.resize(n, 0);
@@ -117,6 +117,8 @@ pub fn decode(bytes: &[u8]) -> Option<Image> {
         decode_png(bytes)
     } else if bytes.len() >= 3 && bytes[0..3] == [0xFF, 0xD8, 0xFF] {
         decode_jpeg(bytes)
+    } else if crate::ico::looks_like_ico(bytes) {
+        crate::ico::decode(bytes)
     } else if crate::svg::looks_like_svg(bytes) {
         crate::svg::render(bytes)
     } else {
