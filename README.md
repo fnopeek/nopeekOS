@@ -137,7 +137,7 @@ system owns DNS, TCP, TLS, HTTP — you express intent, not protocol.
 
 ## What's Built
 
-Grouped by subsystem. Kernel is at **v0.264.0**; the full change history
+Grouped by subsystem. Kernel is at **v0.265.1**; the full change history
 lives in the git log.
 
 **Kernel & SMP** — UEFI PE32+ boot straight to long mode; 4-level paging
@@ -242,6 +242,7 @@ this paragraph will drift, that file will not).
 | Area | Choice | Why |
 |------|--------|-----|
 | Language | Rust (`no_std`, nightly, edition 2024) | Memory safety, no GC |
+| Target | `x86_64-nopeek` (own spec) | Bare metal *with* SSE/AVX2/AES-NI |
 | Boot | UEFI (PE32+ direct) | Modern firmware, no GRUB |
 | Sandbox | wasmi (interpreter, fuel-metered) | `no_std`, one trust boundary |
 | Filesystem | npkFS (content-addressed, CoW) | BLAKE3, SSD-native, encrypted |
@@ -323,6 +324,7 @@ nopeekOS/
 ├── build.sh                  # Build + QEMU/VirtualBox/USB
 ├── docs/                     # spec/ = living contracts · plan/ = open
 │                             # notes/ = how-tos · archive/ = shipped
+├── targets/                  # x86_64-nopeek.json — the kernel's own target
 ├── kernel/src/
 │   ├── main.rs               # Entry, boot sequence
 │   ├── boot.s / boot_uefi.rs # UEFI _start, ExitBootServices, GDT

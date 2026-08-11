@@ -487,8 +487,12 @@ fn diagnose_fb_memory_type(fb_addr: u64) {
     unsafe fn rdmsr(msr: u32) -> u64 {
         let lo: u32;
         let hi: u32;
-        core::arch::asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi,
-            options(nomem, nostack, preserves_flags));
+        // SAFETY: architectural MTRR/PAT MSRs, read-only; the caller
+        // guarantees `msr` is one of them.
+        unsafe {
+            core::arch::asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi,
+                options(nomem, nostack, preserves_flags));
+        }
         ((hi as u64) << 32) | lo as u64
     }
     fn type_name(t: u8) -> &'static str {

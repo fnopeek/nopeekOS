@@ -9,8 +9,6 @@
 use core::sync::atomic::{AtomicU8, Ordering};
 use spin::Mutex;
 
-/// Fixed mixing format every submitter must use.
-pub const SAMPLE_RATE: usize = 48000;
 pub const CHANNELS: usize = 2;
 pub const BYTES_PER_FRAME: usize = CHANNELS * 2; // S16
 
@@ -170,16 +168,6 @@ pub fn buffered(slot: usize) -> usize {
     let slots = SLOTS.lock();
     if !slots[slot].active { return 0; }
     slots[slot].len
-}
-
-/// Total bytes `poll_mix` has pulled from a slot since it was opened — the
-/// real 48 kHz speaker clock. The virtio-snd bridge paces tx-buffer completion
-/// off this (instead of a separate host wall-clock) so the guest's audio clock
-/// tracks the actual HDA drain and doesn't drift. 0 if the slot is closed.
-pub fn drained(slot: usize) -> u64 {
-    if slot >= NUM_SLOTS { return 0; }
-    let slots = SLOTS.lock();
-    slots[slot].drained
 }
 
 /// Set master volume (0..=100 %).

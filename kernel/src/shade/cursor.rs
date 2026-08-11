@@ -230,11 +230,6 @@ pub fn atomic_buttons() -> (u8, u8) {
     (ATOMIC_BUTTONS.load(Ordering::Acquire), ATOMIC_PREV_BUTTONS.load(Ordering::Relaxed))
 }
 
-/// Check and clear dirty flag
-pub fn take_dirty() -> bool {
-    MOUSE_DIRTY.swap(false, Ordering::Acquire)
-}
-
 /// Was left button just clicked? (lock-free)
 #[allow(dead_code)]
 pub fn atomic_left_clicked() -> bool {
@@ -371,63 +366,6 @@ fn drawn_erase_dims() -> (u32, u32) {
     let w = DRAWN_LF_W.load(Ordering::Relaxed);
     let h = DRAWN_LF_H.load(Ordering::Relaxed);
     if w == 0 || h == 0 { eff_dims() } else { (w, h) }
-}
-
-/// Truly lock-free cursor redraw: NO CONSOLE lock, uses cached atomic pointers.
-/// Called from Core 0 after update_atomic(). Never blocks on render_frame.
-pub fn redraw_overlay_lockfree() {
-    if !take_dirty() { return; }
-
-    let shadow = crate::framebuffer::cached_shadow_front();
-    if shadow.is_null() { return; }
-
-    let mmio_addr = IRQ_FB_ADDR.load(Ordering::Relaxed);
-    if mmio_addr == 0 { return; }
-    let mmio = mmio_addr as *mut u8;
-    let pitch = IRQ_FB_PITCH.load(Ordering::Relaxed) as usize;
-    let sw = SCREEN_W.load(Ordering::Relaxed);
-    let sh = SCREEN_H.load(Ordering::Relaxed);
-
-    // Restore old cursor area from shadow_front → MMIO
-    if DRAWN_LF.load(Ordering::Relaxed) {
-        let dx = DRAWN_LF_X.load(Ordering::Relaxed);
-        let dy = DRAWN_LF_Y.load(Ordering::Relaxed);
-        blit_shadow_to_mmio(shadow, mmio, pitch, sw, sh, dx, dy, drawn_erase_dims().0, drawn_erase_dims().1);
-    }
-
-    // Draw cursor at current atomic position
-    let (cx, cy) = atomic_pos();
-    draw_cursor_on_mmio(mmio, shadow, pitch, sw, sh, cx, cy);
-
-    DRAWN_LF_X.store(cx, Ordering::Relaxed);
-    DRAWN_LF_Y.store(cy, Ordering::Relaxed);
-    DRAWN_LF.store(true, Ordering::Relaxed);
-}
-
-/// Inner cursor draw — called from render paths that already hold CONSOLE lock.
-/// Uses shared DRAWN_LF state so lock-free path and inner path stay in sync.
-pub fn redraw_overlay_lockfree_inner(fb: &mut crate::framebuffer::FbConsole) {
-    let info = fb.info();
-    let (shadow, _) = fb.shadow_ptr();
-    let mmio = info.addr as *mut u8;
-    let pitch = info.pitch as usize;
-    let sw = info.width as i32;
-    let sh = info.height as i32;
-
-    // Restore old cursor area from front → MMIO
-    if DRAWN_LF.load(Ordering::Relaxed) {
-        let dx = DRAWN_LF_X.load(Ordering::Relaxed);
-        let dy = DRAWN_LF_Y.load(Ordering::Relaxed);
-        blit_shadow_to_mmio(shadow, mmio, pitch, sw, sh, dx, dy, drawn_erase_dims().0, drawn_erase_dims().1);
-    }
-
-    // Draw cursor at current atomic position
-    let (cx, cy) = atomic_pos();
-    draw_cursor_on_mmio(mmio, shadow, pitch, sw, sh, cx, cy);
-
-    DRAWN_LF_X.store(cx, Ordering::Relaxed);
-    DRAWN_LF_Y.store(cy, Ordering::Relaxed);
-    DRAWN_LF.store(true, Ordering::Relaxed);
 }
 
 /// Draw cursor from IRQ context — no locks, no shadow restore.

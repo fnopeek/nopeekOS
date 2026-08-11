@@ -152,19 +152,6 @@ pub fn take_damage(window_id: u32) -> Option<(u32, u32, u32, u32)> {
     SURFACES.lock().get_mut(&window_id).and_then(|s| s.damage.take())
 }
 
-/// True (and clears the flag) if the surface changed since last call.
-pub fn take_dirty(window_id: u32) -> bool {
-    let mut map = SURFACES.lock();
-    match map.get_mut(&window_id) {
-        Some(s) => {
-            let d = s.dirty;
-            s.dirty = false;
-            d
-        }
-        None => false,
-    }
-}
-
 /// Shade tells the guest how big to render: the window's content
 /// rect. Called on window create + every retile. Creates the surface
 /// entry if absent so the size is known before the guest's first
@@ -230,11 +217,6 @@ pub fn take_display_dirty(window_id: u32) -> bool {
         }
         None => false,
     }
-}
-
-/// Whether a surface exists for this window.
-pub fn surface_exists(window_id: u32) -> bool {
-    SURFACES.lock().contains_key(&window_id)
 }
 
 /// Drop a window's surface (window closed / VM exited).

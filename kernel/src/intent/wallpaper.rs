@@ -159,7 +159,7 @@ fn apply_wallpaper_data(name: &str, data: &[u8]) {
 
     if is_png {
         // Try WASM PNG decoder module
-        if decode_with_wasm(name, data) {
+        if decode_with_wasm(name) {
             // The module already set the wallpaper + palette via
             // npk_set_wallpaper (which force_redraws), but that ran INSIDE the
             // wasm execution context mid-decode — it repaints the desktop but
@@ -205,8 +205,9 @@ fn apply_wallpaper_data(name: &str, data: &[u8]) {
     kprintln!("OK ({}x{}, theme applied)", w, h);
 }
 
-/// Decode PNG via WASM module and set as wallpaper.
-fn decode_with_wasm(name: &str, data: &[u8]) -> bool {
+/// Decode PNG via WASM module and set as wallpaper. The module fetches the
+/// image bytes itself through `npk_fetch`, so only the name goes across.
+fn decode_with_wasm(name: &str) -> bool {
     // Check if wallpaper WASM module is installed
     let (wasm_bytes, _) = match crate::npkfs::fetch("sys/wasm/wallpaper") {
         Ok(v) => v,

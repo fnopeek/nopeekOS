@@ -49,12 +49,6 @@ impl Drop for QuietGuard {
 /// layer for little gain.
 pub(crate) const USER_AGENT: &str = "beak/0.1 (nopeekOS)";
 
-/// Streaming-download progress heartbeat interval. A large download
-/// on the synchronous path blocks the shell until it finishes; a
-/// line every 8 MiB is the "still alive, not crashed" signal so the
-/// freeze is legible rather than alarming.
-const PROGRESS_STEP: usize = 8 * 1024 * 1024;
-
 /// Flags parsed from HTTP/HTTPS arguments.
 struct HttpFlags {
     headers_only: bool,  // -h: show only headers
@@ -1104,7 +1098,15 @@ fn h2_open(host: &str) -> Option<Http2> {
             mark_h2_refused(host);
             None
         }
-        Err(_) => None,
+        // Every other h2 failure falls back to HTTP/1.1 silently, which is the
+        // right behaviour but a terrible way to debug: the variants carry the
+        // reason, so say it when asked.
+        Err(e) => {
+            if chatty() {
+                kprintln!("[npk]   h2 {} failed ({:?}) — falling back to HTTP/1.1", host, e);
+            }
+            None
+        }
     }
 }
 
@@ -1280,15 +1282,16 @@ fn https_exchange(
     // ── Phase 1: read the header block (up to \r\n\r\n) ──
     let mut raw = alloc::vec::Vec::new();
     let mut buf = [0u8; 17000]; // >= max TLS record (16KB)
-    let mut header_end = None;
-    loop {
+    // The loop leaves only two ways: it breaks WITH the header offset, or it
+    // returns. Yielding the offset out of `break` says that in the types, so
+    // there is no "we got here without a header" case left to handle.
+    let hdr_end = loop {
         match tls_recv_poll(&mut tls, &mut buf) {
             Ok(0) => continue,
             Ok(n) => {
                 raw.extend_from_slice(&buf[..n]);
                 if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
-                    header_end = Some(pos);
-                    break;
+                    break pos;
                 }
             }
             Err(_) => {
@@ -1301,13 +1304,6 @@ fn https_exchange(
         if raw.len() > 32_768 {
             let _ = crate::tls::tls_close(&mut tls);
             return Err(ExchangeErr::Fatal("headers too large"));
-        }
-    }
-    let hdr_end = match header_end {
-        Some(p) => p,
-        None => {
-            let _ = crate::tls::tls_close(&mut tls);
-            return Err(ExchangeErr::Retry);
         }
     };
     let body_start = hdr_end + 4;

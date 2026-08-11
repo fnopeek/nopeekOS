@@ -3,7 +3,7 @@
 //! Exception handlers + timer IRQ for hlt wakeup.
 //! Phase 2+: keyboard IRQ, serial IRQ, TSS with IST for double fault
 
-use crate::serial::{outb, inb};
+use crate::serial::outb;
 use crate::kprintln;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -120,15 +120,21 @@ pub fn calibrate_tsc() {
 #[inline]
 unsafe fn cal_inb(port: u16) -> u8 {
     let v: u8;
-    core::arch::asm!("in al, dx", out("al") v, in("dx") port,
-                     options(nomem, nostack, preserves_flags));
+    // SAFETY: port I/O read; the caller picks the port (PIT calibration only).
+    unsafe {
+        core::arch::asm!("in al, dx", out("al") v, in("dx") port,
+                         options(nomem, nostack, preserves_flags));
+    }
     v
 }
 
 #[inline]
 unsafe fn cal_outb(port: u16, val: u8) {
-    core::arch::asm!("out dx, al", in("al") val, in("dx") port,
-                     options(nomem, nostack, preserves_flags));
+    // SAFETY: port I/O write; the caller picks the port (PIT calibration only).
+    unsafe {
+        core::arch::asm!("out dx, al", in("al") val, in("dx") port,
+                         options(nomem, nostack, preserves_flags));
+    }
 }
 
 /// Measure TSC over a fixed PIT channel-2 window (no IRQs needed —
@@ -189,7 +195,11 @@ pub fn delay_ms(ms: u64) {
     }
 }
 
+// Kept next to the ports we do drive: a register map with holes in it is
+// worse than one unused constant (see feedback_verify_reg_addrs).
+#[allow(dead_code)]
 const PIT_CHANNEL0: u16 = 0x40;
+#[allow(dead_code)]
 const PIT_COMMAND: u16 = 0x43;
 const PIT_BASE_FREQ: u32 = 1_193_182;
 const TARGET_FREQ: u32 = 100; // 100 Hz = 10ms per tick
@@ -254,6 +264,7 @@ const PIC2_CMD: u16 = 0xA0;
 const PIC2_DATA: u16 = 0xA1;
 const PIC_EOI: u8 = 0x20;
 const PIC_OFFSET_MASTER: u8 = 32; // IRQ0-7 → vectors 32-39
+#[allow(dead_code)] // the master's twin; the map stays complete
 const PIC_OFFSET_SLAVE: u8 = 40;  // IRQ8-15 → vectors 40-47
 
 pub fn init() {

@@ -970,27 +970,6 @@ impl VmContext {
     }
 }
 
-pub fn run_linux(
-    bzimage: &[u8],
-    cmdline: &[u8],
-    initramfs: Option<&[u8]>,
-    inject: &[u8],
-) -> Result<vmcs::LaunchOutcome, &'static str> {
-    let mut ctx = VmContext::open(bzimage, cmdline, initramfs, inject)?;
-    // Step 1a: single unbounded slice — identical to the old
-    // run_linux_loop. Step 1b bounds the budget and interleaves with
-    // Shade on the Core-0 event loop.
-    let result = loop {
-        match ctx.run_slice(u32::MAX) {
-            Ok(SliceOutcome::Exited(o)) => break Ok(o),
-            Ok(SliceOutcome::StillRunning) | Ok(SliceOutcome::Idle) => continue,
-            Err(e) => break Err(e),
-        }
-    };
-    ctx.close();
-    result
-}
-
 /// Per-guest serial UART state across exits.
 struct SerialState {
     /// LCR.DLAB bit. When set, OUT to 0x3F8 / 0x3F9 means

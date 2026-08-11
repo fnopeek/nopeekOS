@@ -431,7 +431,7 @@ impl FqCodel {
 // flow and ICMP stream lands in its own sub-queue; else the dst MAC. FNV-1a.
 fn flow_hash(frame: &[u8]) -> u32 {
     let mut h: u32 = 0x811c9dc5;
-    let mut mix = |b: u8, h: &mut u32| {
+    let mix = |b: u8, h: &mut u32| {
         *h ^= b as u32;
         *h = h.wrapping_mul(0x0100_0193);
     };

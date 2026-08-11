@@ -469,17 +469,6 @@ fn intent_ec_battery_dump() {
     }
 }
 
-/// AML NameString length at `p` (handles root/parent prefixes + dual/multi
-/// name prefixes; plain 4-char NameSeg otherwise).
-fn aml_name_len(b: &[u8], p: usize) -> usize {
-    match b.get(p).copied() {
-        Some(0x5C) | Some(0x5E) => 1 + aml_name_len(b, p + 1),
-        Some(0x2E) => 1 + 8,
-        Some(0x2F) => 2 + (b.get(p + 1).copied().unwrap_or(0) as usize) * 4,
-        _ => 4,
-    }
-}
-
 fn dsdt_dump_range(b: &[u8], label: &str, start: usize, count: usize) {
     let end = (start + count).min(b.len());
     kprintln!("  --- {} @ 0x{:x}..0x{:x} ---", label, start, end);

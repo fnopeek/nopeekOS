@@ -60,6 +60,7 @@ const VECTOR_MASK: u32 = 0xFF;
 const ICR_DM_MASK: u32 = 0x700;
 pub const ICR_DM_FIXED: u32 = 0x000;
 pub const ICR_DM_LOWEST: u32 = 0x100;
+#[allow(dead_code)] // completes the delivery-mode set next to FIXED/LOWEST
 pub const ICR_DM_INIT: u32 = 0x500;
 pub const ICR_DM_STARTUP: u32 = 0x600;
 

@@ -452,7 +452,7 @@ pub fn fill_rounded_chrome_aa(
 
     // Per-pixel SDF path — used for the border ring + the four rounded corners
     // (everything that is NOT the known-interior straight span).
-    let mut paint_px = |px: u32, py: u32| {
+    let paint_px = |px: u32, py: u32| {
         let outer = rect_coverage_sdf(px, py, x, y, w, h, r_out);
         if outer == 0 { return; }
         let border_color = if solid {

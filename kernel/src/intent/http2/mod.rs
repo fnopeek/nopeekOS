@@ -77,6 +77,10 @@ const READ_BUF: usize = 17 * 1024;
 /// cannot make us buffer beyond it.
 const MAX_BODY: usize = 24 * 1024 * 1024;
 
+// The `&str` payloads reach the log through the derived `Debug` (see the h2
+// fallback in intent/http.rs). rustc's dead-code lint does not count derived
+// impls as a read, so it flags them regardless.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum Http2Error {
     /// The peer did not select `h2` via ALPN.
