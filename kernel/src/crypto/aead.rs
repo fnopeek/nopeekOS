@@ -263,7 +263,7 @@ pub const TAG_SIZE: usize = 16;
 // File-system encryption uses AES-GCM; TLS keeps ChaCha20-Poly1305 for
 // cipher-suite compatibility with peers that negotiate it.
 
-use aes_gcm::aead::{Aead, AeadInPlace, KeyInit};
+use aes_gcm::aead::{Aead, AeadInOut, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce, Tag};
 
 /// Encrypt `plaintext` with AES-256-GCM. Returns ciphertext || 16-byte tag.
@@ -292,7 +292,7 @@ pub fn aead_decrypt_aes_in_place(
     let tag = Tag::from(tag_bytes);
 
     cipher
-        .decrypt_in_place_detached(&nonce, b"", &mut buf[..ct_len], &tag)
+        .decrypt_inout_detached(&nonce, b"", (&mut buf[..ct_len]).into(), &tag)
         .ok()?;
     buf.truncate(ct_len);
     Some(())

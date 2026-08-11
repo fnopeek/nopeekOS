@@ -1,6 +1,6 @@
 [package]
 name = "beak"
-version = "0.14.0"
+version = "0.14.1"
 edition = "2024"
 description = "beak — the native, sandboxed web browser for nopeekOS. See docs/spec/BROWSER.md."
 
@@ -17,8 +17,8 @@ beak-engine = { path = "../beak-engine" }
 # it into a quadratic crawl. Measured on the six faces: 683 ms and *rising per
 # face* (18 → 302 ms) vs talc's 36 ms flat (5.7-6.3 ms each). Under the wasmi
 # interpreter that was the difference between a 10 s and a sub-second start.
-talc = { version = "4", default-features = false, features = ["lock_api"] }
-spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex", "lock_api"] }
+talc = { version = "5", default-features = false }
+spin = { version = "0.12", default-features = false, features = ["mutex", "spin_mutex", "lock_api"] }
 
 [dependencies.postcard]
 version = "1.0"

@@ -20,7 +20,7 @@
 //!   - `aead_decrypt_aes_hw_in_place(&key, &nonce, &mut buf) -> Option<()>`
 
 use aes::Aes256;
-use aes::cipher::{KeyInit, BlockEncrypt, KeyIvInit, StreamCipher};
+use aes::cipher::{KeyInit, BlockCipherEncrypt, KeyIvInit, StreamCipher};
 use ctr::Ctr32BE;
 use ghash::GHash;
 use ghash::universal_hash::UniversalHash;

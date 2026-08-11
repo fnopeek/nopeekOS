@@ -49,7 +49,7 @@ DEVICE="$1"
 # Locate kernel
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-KERNEL_BIN="$PROJECT_DIR/target/x86_64-unknown-none/release/nopeekos-kernel"
+KERNEL_BIN="$PROJECT_DIR/target/x86_64-nopeek/release/nopeekos-kernel"
 
 [ ! -f "$KERNEL_BIN" ] && err "Kernel not found. Run './build.sh build' first."
 
@@ -197,6 +197,6 @@ log "  4. Choose a passphrase and you're in"
 echo ""
 log "To update the kernel later:"
 log "  sudo mount ${ESP_PART} /mnt"
-log "  sudo cp target/x86_64-unknown-none/release/nopeekos-kernel /mnt/boot/kernel.bin"
+log "  sudo cp target/x86_64-nopeek/release/nopeekos-kernel /mnt/boot/kernel.bin"
 log "  sudo umount /mnt"
 echo ""

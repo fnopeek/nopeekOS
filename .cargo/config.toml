@@ -10,25 +10,36 @@
 # directly and get the host triple + precompiled std — fast, portable,
 # no local overrides needed.
 #
-# The `[target.x86_64-unknown-none]` block below is a conditional
-# table: it only applies when cargo is actually building for the
-# bare-metal kernel target (triggered by build.sh's `--target` flag).
-# Host-side invocations never see these rustflags.
+# The `[target.x86_64-nopeek]` block below is a conditional table: it
+# only applies when cargo is actually building for the bare-metal kernel
+# target (triggered by build.sh's `--target` flag). Host-side
+# invocations never see these rustflags.
 #
-# target-feature overlays the built-in x86_64-unknown-none defaults
-# (which force +soft-float / -sse for "no FPU" kernels). We want SSE
-# + AVX2 + AES-NI + PCLMUL so the aes-gcm crate compiles in its
+# The CPU features live in `targets/x86_64-nopeek.json`, NOT here. We
+# want SSE + AVX2 + AES-NI + PCLMUL so the aes-gcm crate compiles in its
 # hardware backend (~50× faster than soft AES) and blake3 picks its
 # AVX2 backend (~2× faster than SSE4.1, the previous ceiling on read
 # throughput). CR0/CR4/XCR0 are configured in boot.s + smp/trampoline.s
 # before the first Rust instruction runs (CR4.OSXSAVE + XSETBV with
 # x87|SSE|AVX bits is what unlocks the YMM register file).
+#
+# This used to be a `-C target-feature=...,-soft-float` overlay on the
+# stock `x86_64-unknown-none`. That target declares `rustc-abi:
+# softfloat` — floats travel in general-purpose registers — and turning
+# SSE on underneath it contradicts the ABI the target promises. rustc
+# warned that flipping ABI-relevant features via `-C target-feature`
+# "will become a hard error in a future release" (rust#116344), so the
+# hardware-float ABI is now stated honestly in our own target spec
+# instead of being smuggled in past the stock one.
 
-[target.x86_64-unknown-none]
+[target.x86_64-nopeek]
 runner = "bash build.sh run"
 
 # Linker script (path relative to the kernel build's CWD = repo root).
 rustflags = [
+    # Loading a custom target spec (targets/x86_64-nopeek.json) is gated.
+    # We are on nightly anyway — the kernel needs -Zbuild-std regardless.
+    "-Z", "unstable-options",
     "-C", "link-arg=-Tkernel/linker.ld",
     # Position-independent image. We build as a PIE so the linker emits
     # R_X86_64_RELATIVE dynamic relocations for every absolute data
@@ -53,5 +64,4 @@ rustflags = [
     "-C", "link-arg=-pie",
     "-C", "link-arg=-znorelro",
     "-C", "link-arg=--pack-dyn-relocs=none",
-    "-C", "target-feature=+sse,+sse2,+ssse3,+sse4.1,+sse4.2,+avx,+avx2,+aes,+pclmulqdq,-soft-float",
 ]

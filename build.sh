@@ -30,7 +30,11 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TARGET="x86_64-unknown-none"
+# Our own target spec (targets/x86_64-nopeek.json): x86_64-unknown-none
+# with a hardware-float ABI, so SSE/AVX2/AES-NI are declared rather than
+# forced on past a softfloat target. See .cargo/config.toml.
+TARGET="x86_64-nopeek"
+export RUST_TARGET_PATH="$PROJECT_DIR/targets"
 KERNEL_BIN="$PROJECT_DIR/target/$TARGET/release/nopeekos-kernel"
 KERNEL_EFI="$PROJECT_DIR/target/kernel.efi"
 INSTALLER_DISK="$PROJECT_DIR/target/installer.img"
@@ -75,7 +79,7 @@ build_microvm_initramfs() {
         return
     fi
     log "Building microvm-init (Rust PID-1)..."
-    (cd "$INIT_DIR" && cargo build --release 2>&1 | tail -3)
+    (cd "$INIT_DIR" && cargo build --release --locked 2>&1 | tail -3)
     INIT_BIN="$INIT_DIR/target/x86_64-unknown-linux-gnu/release/microvm-init"
     if [ ! -f "$INIT_BIN" ]; then
         warn "microvm-init build failed — using committed cpio.gz"
@@ -122,6 +126,7 @@ build() {
     # Rust bare-metal build (nightly features via rust-toolchain.toml)
     cargo build \
         --release \
+        --locked \
         --target "$TARGET" \
         -Zbuild-std=core,alloc \
         -Zbuild-std-features=compiler-builtins-mem \
@@ -188,6 +193,7 @@ build_installer() {
 
     cargo build \
         --release \
+        --locked \
         --target "$TARGET" \
         -Zbuild-std=core,alloc \
         -Zbuild-std-features=compiler-builtins-mem \
@@ -346,6 +352,7 @@ build_installer() {
     fi
     cargo build \
         --release \
+        --locked \
         --target "$TARGET" \
         -Zbuild-std=core,alloc \
         -Zbuild-std-features=compiler-builtins-mem \

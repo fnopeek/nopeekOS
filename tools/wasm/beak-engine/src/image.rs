@@ -129,6 +129,7 @@ pub fn decode(bytes: &[u8]) -> Option<Image> {
 // ── JPEG (baseline + progressive, via zune-jpeg) ────────────────────────────
 
 fn decode_jpeg(bytes: &[u8]) -> Option<Image> {
+    use zune_core::bytestream::ZCursor;
     use zune_core::colorspace::ColorSpace;
     use zune_core::options::DecoderOptions;
     use zune_jpeg::JpegDecoder;
@@ -139,7 +140,9 @@ fn decode_jpeg(bytes: &[u8]) -> Option<Image> {
         .jpeg_set_out_colorspace(ColorSpace::RGB)
         .set_max_width(8192)
         .set_max_height(8192);
-    let mut dec = JpegDecoder::new_with_options(bytes, opts);
+    // zune 0.5 reads through `ZByteReaderTrait`, which a bare slice no longer
+    // implements — `ZCursor` is the zero-copy wrapper for an in-memory buffer.
+    let mut dec = JpegDecoder::new_with_options(ZCursor::new(bytes), opts);
     dec.decode_headers().ok()?;
     let (w, h) = dec.dimensions()?; // (width, height) in px
     if w == 0 || h == 0 || w.saturating_mul(h) > MAX_PIXELS {
