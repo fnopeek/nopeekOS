@@ -17,7 +17,7 @@ use aml_core::{find_batteries, read_battery, Ec, Namespace};
 
 // The driver needs raw firmware + EC access — declare the HARDWARE capability
 // (bit 0x40) so the kernel grants exactly that and nothing else.
-#[link_section = ".npk.caps"]
+#[unsafe(link_section = ".npk.caps")]
 #[used]
 static NPK_CAPS: [u8; 1] = [0x40];
 
@@ -27,6 +27,10 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
+// Host functions are WASM imports from the `env` module, resolved by the
+// kernel at instantiation. Naming the module explicitly is what makes them
+// imports rather than ordinary undefined C symbols, which rust-lld rejects.
+#[link(wasm_import_module = "env")]
 unsafe extern "C" {
     fn npk_acpi_dsdt(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_ec_read(addr: i32) -> i32;
@@ -81,7 +85,7 @@ impl Ec for HostEc {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     log("[aml] battery driver start");
 

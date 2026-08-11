@@ -17,10 +17,13 @@ version = "0.9"
 default-features = false
 features = ["hashbrown"]
 
+# hashbrown 0.15 replaced the `ahash` feature with `default-hasher`
+# (foldhash underneath). fontdue 0.9.4 requires ^0.15, so pinning the same
+# line here keeps exactly one hashbrown in the tree instead of two.
 [dependencies.hashbrown]
-version = "0.14"
+version = "0.15"
 default-features = false
-features = ["ahash"]
+features = ["default-hasher"]
 
 # miniz_oxide: no_std DEFLATE/inflate for PNG IDAT (same crate iris/wallpaper use).
 [dependencies.miniz_oxide]
@@ -38,10 +41,10 @@ default-features = false
 # case). Pure Rust, alloc-only — same "infrastructure decoder" role as
 # miniz_oxide for PNG. Output forced to interleaved RGB, we pack to BGRA.
 [dependencies.zune-jpeg]
-version = "0.4"
+version = "0.5"
 default-features = false
 [dependencies.zune-core]
-version = "0.4"
+version = "0.5"
 default-features = false
 
 [features]

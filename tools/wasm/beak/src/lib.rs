@@ -76,7 +76,7 @@ const DE: Strings = Strings {
 fn s() -> &'static Strings {
     match i18n::lang() { i18n::Lang::De => &DE, _ => &EN }
 }
-use talc::{ClaimOnOom, Span, Talc, Talck};
+use talc::{TalcLock, source::Claim};
 
 // ── App metadata + capabilities ───────────────────────────────────────────
 
@@ -1817,14 +1817,18 @@ fn poll_event() -> PollResult {
 const HEAP_SIZE: usize = 128 * 1024 * 1024;
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 
+// `TalcLock` (mutex-guarded), NOT talc's `WasmArenaTalc`/`TalcSyncCell`. The
+// cell variants are only sound on single-threaded WebAssembly and enforce that
+// with a target check, not the type system — so the day beak gets workers, or
+// wasmi turns on the threads proposal, they would go quietly unsound. The
+// uncontended spin lock costs a few instructions; that is the cheaper mistake.
+//
 // SAFETY: `HEAP` is a `static mut` we hand to the allocator exactly once, here,
 // before any allocation can happen (this is a `const` initialiser). Nothing else
 // ever reads or writes it, so the allocator holds the only reference.
 #[global_allocator]
-static ALLOCATOR: Talck<spin::Mutex<()>, ClaimOnOom> = Talc::new(unsafe {
-    ClaimOnOom::new(Span::from_array(core::ptr::addr_of!(HEAP) as *mut [u8; HEAP_SIZE]))
-})
-.lock();
+static ALLOCATOR: TalcLock<spin::Mutex<()>, Claim> =
+    TalcLock::new(unsafe { Claim::array(&raw mut HEAP) });
 
 // u32 → decimal &str in a static buffer (no alloc — safe in the panic handler
 // even when the panic is an allocation failure).

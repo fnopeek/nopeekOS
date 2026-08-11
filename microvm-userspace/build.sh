@@ -117,7 +117,7 @@ green "verified $TARBALL ($(stat -c%s "$CACHE/$TARBALL") bytes)"
 # ── Build PID-1 (idempotent — `cargo build --release` no-ops if fresh)
 
 cyan "building PID-1 (microvm-init)"
-(cd "$PID1_DIR" && cargo build --release >/dev/null 2>&1)
+(cd "$PID1_DIR" && cargo build --release --locked >/dev/null 2>&1)
 [ -f "$PID1_BIN" ] || { red "PID-1 build did not produce $PID1_BIN"; exit 1; }
 
 # ── Stage rootfs ─────────────────────────────────────────────────
