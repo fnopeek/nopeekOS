@@ -604,6 +604,9 @@ pub struct ComputedStyle {
     pub pad_bottom: f32,
     pub pad_left: f32,
     pub box_border: bool, // box-sizing: border-box
+    /// `appearance: none` — the page opts this form control OUT of the UA
+    /// widget look (css-ui-4 §4) and draws the whole thing itself.
+    pub appearance_none: bool,
     pub contain_size: bool, // `contain: size`/`strict` — content contributes no size
     pub contain_intrinsic: Option<(f32, f32)>, // `contain-intrinsic-size` (w, h) px
     pub bg: Option<Rgb>, // background-color (None = transparent)
@@ -799,6 +802,7 @@ impl ComputedStyle {
             pad_bottom: 0.0,
             pad_left: 0.0,
             box_border: false,
+            appearance_none: false,
             contain_size: false,
             contain_intrinsic: None,
             bg: None,
@@ -1012,6 +1016,7 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         pad_bottom: 0.0,
         pad_left: 0.0,
         box_border: false,
+        appearance_none: false,
         contain_size: false,
         contain_intrinsic: None,
         bg: None,
@@ -2148,6 +2153,11 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         "min-height" => set_size(&mut s.min_height, &v, u),
         "max-height" => set_max(&mut s.max_height, &v, u),
         "box-sizing" => s.box_border = v == "border-box",
+        // css-ui-4 §4. Only `none` concerns us: it says "do not draw the UA
+        // widget", and the page then supplies the whole look. Every other
+        // value (`auto`, `button`, `textfield`, …) keeps our chrome. The
+        // prefixed spellings still carry the real web's styled controls.
+        "appearance" | "-webkit-appearance" | "-moz-appearance" => s.appearance_none = v == "none",
         "contain" => s.contain_size = v.split_whitespace().any(|k| k == "size" || k == "strict"),
         "contain-intrinsic-size" => {
             // definite length(s): one → both axes, two → (width, height).

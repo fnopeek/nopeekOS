@@ -26,7 +26,7 @@ use crate::dom::{Dom, Element, Node};
 use crate::forms::{ControlKind, FormState};
 use crate::image::ImageMap;
 use crate::style::{
-    self, BgPos, BgSize, BorderSide, ClearKind, Clip, ComputedStyle, ContentPiece, CrossAlign,
+    self, BgLayer, BgPos, BgSize, BorderSide, ClearKind, Clip, ComputedStyle, ContentPiece, CrossAlign,
     Display, FlexBasis, FloatKind, GridTrack, Justify, Len, ListStyle, Position, TableLayout,
     TextAlign, TextTransform, ZIndex, BASE_FONT_PX,
 };
@@ -2674,6 +2674,8 @@ impl<'a> Ctx<'a> {
             focused,
             caret,
             bg: st.bg,
+            appearance_none: st.appearance_none,
+            bg_img: self.bg_key(st.bg_layer.image).map(|k| (k, st.bg_layer)),
             pad_l: (st.pad_left as i32).max(CTL_PAD_X),
             border,
             style: RunStyle { hidden: st.hidden, transparent: st.transparent, size, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: crate::style::VAlign::Baseline, deco: st.deco, break_word: st.break_word, nowrap: st.nowrap, lh: st.line_height.px(size).unwrap_or(0.0) },
@@ -5886,6 +5888,13 @@ struct CtlBox {
     caret: Option<usize>,
     /// The control's own `background-color`, if the page styled it.
     bg: Option<Rgb>,
+    /// `appearance: none` — the page draws this control itself, so we paint no
+    /// UA face at all (css-ui-4 §4).
+    appearance_none: bool,
+    /// The page's own `background-image` (resolved key + placement). A control
+    /// that opted out of the UA look carries its icon this way — DDG's search
+    /// button is a bare box with a magnifier here and nothing else.
+    bg_img: Option<(u64, BgLayer)>,
     /// Leading text inset. Controls are atomic — we paint them with our own
     /// metrics — but a page that reserves room for an icon does it with
     /// `padding-left`, and ignoring that puts the text on top of the icon
@@ -6053,16 +6062,42 @@ fn paint_control(
     let frame = |ops: &mut Vec<DrawOp>| stroke_frame(ops, x, top, w, h, &ctl.border, border, ctl.focused);
     // A page that styles its own button (`background-color`) wins; otherwise
     // the UA face is derived from the theme so it reads on light and dark.
-    let face = ctl.bg.unwrap_or(match ctl.kind {
-        // Buttons get a raised face; text fields stay flat like the page.
-        ControlKind::Submit | ControlKind::Reset | ControlKind::Button | ControlKind::File
-        | ControlKind::Select => mix(theme.bg, theme.text, 28),
-        _ => mix(theme.bg, theme.text, 8),
-    });
+    // `appearance: none` (css-ui-4 §4) removes the question: the page opted
+    // out of the UA widget, so there is NO default face — only what the page
+    // paints itself. Our chrome otherwise filled in a box over a control the
+    // page wanted bare, and `surface_palette` guessed that shade from the
+    // control's own text colour, so a white icon glyph turned it black on a
+    // white page.
+    let face: Option<Rgb> = match ctl.bg {
+        Some(c) => Some(c),
+        None if ctl.appearance_none => None,
+        None => Some(match ctl.kind {
+            // Buttons get a raised face; text fields stay flat like the page.
+            ControlKind::Submit | ControlKind::Reset | ControlKind::Button | ControlKind::File
+            | ControlKind::Select => mix(theme.bg, theme.text, 28),
+            _ => mix(theme.bg, theme.text, 8),
+        }),
+    };
 
+    // The page's own background image sits on the face, under the frame and
+    // any text — that is where an icon-only button keeps its icon.
+    let bg_img = |ops: &mut Vec<DrawOp>| {
+        if let Some((key, layer)) = ctl.bg_img {
+            ops.push(DrawOp::BgImage {
+                x, y: top, w, h, key,
+                repeat: layer.repeat,
+                pos: layer.pos,
+                size: layer.size,
+                tint: None,
+            });
+        }
+    };
     match ctl.kind {
         ControlKind::Checkbox | ControlKind::Radio => {
-            ops.push(DrawOp::Rect { x, y: top, w, h, color: face });
+            if let Some(face) = face {
+                ops.push(DrawOp::Rect { x, y: top, w, h, color: face });
+            }
+            bg_img(ops);
             frame(ops);
             if ctl.checked {
                 let i = (w / 4).max(2);
@@ -6076,7 +6111,10 @@ fn paint_control(
             }
         }
         _ => {
-            ops.push(DrawOp::Rect { x, y: top, w, h, color: face });
+            if let Some(face) = face {
+                ops.push(DrawOp::Rect { x, y: top, w, h, color: face });
+            }
+            bg_img(ops);
             frame(ops);
             let tx = x + ctl.pad_l + 1;
             let lh = ceil_i32(line_gap(font, ctl.style.size));
