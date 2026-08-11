@@ -2,7 +2,7 @@
 //! beak-engine — portable browser engine core (nopeekOS `beak`).
 //!
 //! Pure `no_std` + `alloc`, **no host-fn dependencies** → the whole engine
-//! builds and unit-tests on any target with no OS in the loop (BROWSER.md
+//! builds and unit-tests on any target with no OS in the loop (docs/spec/BROWSER.md
 //! §10). The pipeline is the real browser shape, grown incrementally:
 //!
 //! ```text
@@ -23,6 +23,7 @@ pub mod css;
 pub mod dom;
 pub mod fonts;
 pub mod forms;
+pub mod ico;
 pub mod image;
 pub mod layout;
 pub mod picture;
@@ -55,8 +56,14 @@ pub fn image_srcs(html: &str, width: u32) -> alloc::vec::Vec<alloc::string::Stri
             if let Node::Element(e) = c {
                 if e.tag == "img" {
                     if let Some(s) = e.attr("src") {
-                        if !s.trim().is_empty() {
-                            out.push(alloc::string::ToString::to_string(s.trim()));
+                        let s = s.trim();
+                        // A `data:` src carries its own bytes — the engine
+                        // decodes it during layout and the shell never hears
+                        // about it. Reporting it would send the whole payload
+                        // to the network as if it were a URL.
+                        let inline = s.starts_with("data:") || s.starts_with("DATA:");
+                        if !s.is_empty() && !inline {
+                            out.push(alloc::string::ToString::to_string(s));
                         }
                     }
                 }
@@ -72,7 +79,7 @@ pub fn image_srcs(html: &str, width: u32) -> alloc::vec::Vec<alloc::string::Stri
 }
 
 // Host demo: render a representative page to a BMP so the layout + text can be
-// eyeballed on the dev box without booting the OS (BROWSER.md §10).
+// eyeballed on the dev box without booting the OS (docs/spec/BROWSER.md §10).
 // Run: `cargo test --release render_sample_to_bmp -- --nocapture`
 // → writes `tools/wasm/beak-engine/sample.bmp`.
 #[cfg(test)]

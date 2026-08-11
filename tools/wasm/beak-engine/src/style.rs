@@ -1,6 +1,6 @@
 //! style.rs — computed style + the UA default stylesheet, as data.
 //!
-//! CONFORMANCE.md's rule: be *standard-shaped* from the start. Slice-0 baked
+//! docs/spec/CONFORMANCE.md's rule: be *standard-shaped* from the start. Slice-0 baked
 //! per-tag pixel sizes into the layout code; this replaces that with a real
 //! cascade seam:
 //!
@@ -16,6 +16,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use crate::color::ColorVal;
 use crate::css::{ElemInfo, PseudoElem, Stylesheet};
 use crate::dom::Element;
 use crate::layout::{Rgb, Theme};
@@ -322,16 +323,19 @@ impl BorderSide {
     /// that hides a button's frame writes `border-color: transparent`; treating
     /// that as "no colour parsed" drops the declaration and leaves the frame
     /// standing — which is how Wikipedia's icon buttons came out as empty
-    /// rectangles.
+    /// rectangles. `rgba(0,0,0,0)` says the same thing and must land here too:
+    /// it is how DuckDuckGo reserves the hover frame around every result.
     fn set_color(&mut self, tok: &str, theme: &Theme) -> bool {
-        if tok.eq_ignore_ascii_case("transparent") {
-            self.color = None;
-            self.see_through = true;
-        } else if let Some(c) = parse_color(tok, theme) {
-            self.color = Some(c);
-            self.see_through = false;
-        } else {
-            return false;
+        match parse_color_val(tok, theme) {
+            Some(ColorVal::Transparent) => {
+                self.color = None;
+                self.see_through = true;
+            }
+            Some(ColorVal::Rgb(c)) => {
+                self.color = Some(c);
+                self.see_through = false;
+            }
+            None => return false,
         }
         true
     }
@@ -1301,7 +1305,7 @@ pub fn resolve(
 /// declaration (by the same specificity/order cascade as any other property)
 /// plus the pseudo-element's own computed style. Returns `None` when there is
 /// no matching rule, `content` is `none`/`normal`/unparseable (`attr()`,
-/// `counter()`, `open-quote`, `url()`, … are out of scope — CONFORMANCE.md's
+/// `counter()`, `open-quote`, `url()`, … are out of scope — docs/spec/CONFORMANCE.md's
 /// forward-compatible rule: produce nothing rather than mis-render), or the
 /// pseudo box itself computes to `display: none`.
 ///
@@ -1359,7 +1363,7 @@ pub fn resolve_pseudo(
     // Layout only knows how to place the pseudo box as an anonymous INLINE
     // text run (see `layout.rs`'s `pseudo()`); `display: none` produces no
     // box. Any other display (`block`, `list-item`, …) is a box shape we
-    // don't lay out here — CONFORMANCE.md's forward-compatible rule: produce
+    // don't lay out here — docs/spec/CONFORMANCE.md's forward-compatible rule: produce
     // nothing rather than render it wrong. An explicit `width`/`height` is
     // the same story a level down: generated content is emitted as a plain
     // text run, so a sized spacer (the common `content: "…"; display:
@@ -1421,7 +1425,7 @@ pub enum ContentPiece {
 /// order. Any OTHER component (`open-quote`/`close-quote`, `url()`, an unknown
 /// identifier) is out of scope: rather than mis-render, the WHOLE value
 /// produces no content — the caller then generates nothing, per
-/// CONFORMANCE.md's forward-compatible rule. `none`/`normal` also produce
+/// docs/spec/CONFORMANCE.md's forward-compatible rule. `none`/`normal` also produce
 /// nothing (no box).
 pub fn parse_content_template(v: &str) -> Option<Vec<ContentPiece>> {
     let v = v.trim();
@@ -1459,7 +1463,7 @@ pub fn parse_content_template(v: &str) -> Option<Vec<ContentPiece>> {
             // the WHOLE `content` value invalid — it is dropped so an earlier
             // valid declaration wins (CSS Syntax 3 §4), and an unimplemented but
             // syntactically-valid style falls into the same "produce nothing"
-            // bucket per CONFORMANCE.md's forward-compatible rule.
+            // bucket per docs/spec/CONFORMANCE.md's forward-compatible rule.
             if lname == "counter" {
                 // `counter(name)` | `counter(name, <style>)`
                 if args.len() > 2 {
@@ -2205,21 +2209,27 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         // applied as a unit or not at all.
         "background-color" => {
             let vt = v.trim();
-            if vt == "none" || vt == "transparent" {
+            if vt == "none" {
                 s.bg = None;
-            } else if let Some(c) = parse_color(vt, theme) {
+            } else if let Some(cv) = parse_color_val(vt, theme) {
                 // Handles space-separated function colours like
                 // `rgb(0% 50% 0%)` / `hsl(120 100% 25%)`.
-                s.bg = Some(c);
+                s.bg = match cv {
+                    ColorVal::Rgb(c) => Some(c),
+                    ColorVal::Transparent => None,
+                };
             }
         }
         "background" => {
             let vt = v.trim();
-            if let Some(c) = parse_color(vt, theme) {
+            if let Some(cv) = parse_color_val(vt, theme) {
                 // The whole value is one colour — the overwhelmingly common
                 // case, and the only one where a function colour's internal
                 // spaces must not be read as separate tokens.
-                s.bg = Some(c);
+                s.bg = match cv {
+                    ColorVal::Rgb(c) => Some(c),
+                    ColorVal::Transparent => None,
+                };
                 s.bg_layer = BgLayer::NONE;
             } else if let Some((color, layer)) = parse_bg_shorthand(val, &v, u, theme) {
                 s.bg = color;
@@ -2748,10 +2758,11 @@ fn parse_bg_shorthand(
     for tok in css_tokens(&spaced) {
         if let Some(r) = parse_bg_repeat(tok) {
             layer.repeat = r;
-        } else if let Some(c) = parse_color(tok, theme) {
-            color = Some(c);
-        } else if tok == "transparent" {
-            color = None;
+        } else if let Some(cv) = parse_color_val(tok, theme) {
+            color = match cv {
+                ColorVal::Rgb(c) => Some(c),
+                ColorVal::Transparent => None,
+            };
         } else if matches!(
             tok,
             "scroll" | "fixed" | "local" | "border-box" | "padding-box" | "content-box" | "none"
@@ -3466,6 +3477,14 @@ fn parse_length(v: &str, u: Units) -> Option<f32> {
 /// `transparent`/unparseable), preserving the caller's contract.
 fn parse_color(v: &str, _theme: &Theme) -> Option<Rgb> {
     crate::color::parse_color(v)
+}
+
+/// As [`parse_color`], but keeps "fully transparent" apart from "no value".
+/// Use it wherever the property HAS a paint-nothing state (a border side, a
+/// background); `parse_color` alone silently turns `rgba(0,0,0,0)` into the
+/// inherited colour.
+fn parse_color_val(v: &str, _theme: &Theme) -> Option<ColorVal> {
+    crate::color::parse_color_val(v)
 }
 
 /// Split a CSS value on top-level whitespace, keeping parenthesised groups

@@ -5,9 +5,11 @@
 //! %), and the full CSS Color Module Level 4 named-colour set. Host-testable,
 //! no OS in the loop.
 //!
-//! Alpha is parsed but DROPPED: there is no compositing context yet, so the
-//! 4/8-digit hex forms and the `a` channel of rgba()/hsla()/slash-alpha are
-//! accepted (never a parse failure) and the opaque RGB is returned.
+//! Alpha is parsed. There is no compositing context yet, so a PARTIAL alpha is
+//! still dropped and the opaque RGB returned — but alpha ZERO is kept, because
+//! it is not a shade of a colour, it is the absence of one. Pages reserve a
+//! frame's space with `border: 1px solid rgba(0,0,0,0)`; painting that opaque
+//! puts a black box on the page.
 //!
 //! `no_std`-safe: only `core`/`alloc`. No libm — the float helpers avoid
 //! `round`/`floor`/`abs`/`rem_euclid` (std-only) and use casts + `%` + a
@@ -16,10 +18,37 @@
 use crate::layout::Rgb;
 use alloc::vec::Vec;
 
+/// A parsed `<color>`. `Transparent` is a VALUE, not an absence — see the
+/// module note. Callers that own a "paint nothing" state (a border side, a
+/// background) must honour it; the rest can use [`parse_color`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ColorVal {
+    Rgb(Rgb),
+    Transparent,
+}
+
+/// Parse a CSS `<color>`, keeping "fully transparent" apart from "no value".
+/// `None` means "keep the inherited value" — `currentcolor`/`inherit` and
+/// unparseable input (forward-compatible, like a browser).
+pub fn parse_color_val(v: &str) -> Option<ColorVal> {
+    let (rgb, a) = parse_rgba(v)?;
+    Some(if a == 0 { ColorVal::Transparent } else { ColorVal::Rgb(rgb) })
+}
+
 /// Parse a CSS `<color>` to an opaque `Rgb`. `None` means "keep the inherited
 /// value" — the caller relies on this for `currentcolor`/`inherit`/`transparent`
 /// and for unparseable input (forward-compatible, like a browser).
 pub fn parse_color(v: &str) -> Option<Rgb> {
+    match parse_color_val(v)? {
+        ColorVal::Rgb(c) => Some(c),
+        // A caller with no transparent state keeps the inherited value rather
+        // than painting the alpha-0 carrier colour (usually black).
+        ColorVal::Transparent => None,
+    }
+}
+
+/// The one dispatcher: every `<color>` syntax, with its alpha.
+fn parse_rgba(v: &str) -> Option<(Rgb, u8)> {
     let v = v.trim();
     if v.is_empty() {
         return None;
@@ -43,58 +72,83 @@ pub fn parse_color(v: &str) -> Option<Rgb> {
     if let Some(inner) = fn_body(l, "hsl") {
         return parse_hsl(inner);
     }
-    // CSS Color 4 functional forms.
+    // CSS Color 4 functional forms — alpha is always the `/ a` tail.
     if let Some(inner) = fn_body(l, "hwb") {
-        return parse_hwb(inner);
+        return Some((parse_hwb(inner)?, slash_alpha(inner)));
     }
     if let Some(inner) = fn_body(l, "oklch") {
-        return parse_lch(inner, true);
+        return Some((parse_lch(inner, true)?, slash_alpha(inner)));
     }
     if let Some(inner) = fn_body(l, "oklab") {
-        return parse_lab(inner, true);
+        return Some((parse_lab(inner, true)?, slash_alpha(inner)));
     }
     if let Some(inner) = fn_body(l, "lch") {
-        return parse_lch(inner, false);
+        return Some((parse_lch(inner, false)?, slash_alpha(inner)));
     }
     if let Some(inner) = fn_body(l, "lab") {
-        return parse_lab(inner, false);
+        return Some((parse_lab(inner, false)?, slash_alpha(inner)));
     }
     if let Some(inner) = fn_body(l, "color") {
-        return parse_color_fn(inner);
+        return Some((parse_color_fn(inner)?, slash_alpha(inner)));
     }
-    // Named colours. `transparent`/`currentcolor`/`inherit` are absent from the
-    // table → fall through to `None` (= keep inherited), as the contract wants.
-    named_color(l)
+    // `transparent` is `rgba(0,0,0,0)` per CSS Color 4 — a value, so it belongs
+    // here and not in a caller's string compare.
+    if l == "transparent" {
+        return Some((Rgb(0, 0, 0), 0));
+    }
+    // `currentcolor`/`inherit` are absent from the table → `None` (= keep
+    // inherited), as the contract wants.
+    named_color(l).map(|c| (c, 255))
+}
+
+/// An alpha token: `0`–`1` number or `0%`–`100%`, clamped. Anything we cannot
+/// read is OPAQUE — we never make content vanish on a guess.
+fn alpha_255(tok: &str) -> u8 {
+    let t = tok.trim();
+    if let Some(p) = t.strip_suffix('%') {
+        match p.trim().parse::<f32>() {
+            Ok(v) => round_u8(clamp(v, 0.0, 100.0) / 100.0 * 255.0),
+            Err(_) => 255,
+        }
+    } else {
+        match t.parse::<f32>() {
+            Ok(v) => round_u8(clamp(v, 0.0, 1.0) * 255.0),
+            Err(_) => 255,
+        }
+    }
 }
 
 // ── hex ──────────────────────────────────────────────────────────────────
 
-fn parse_hex(hex: &str) -> Option<Rgb> {
+fn parse_hex(hex: &str) -> Option<(Rgb, u8)> {
     let b = hex.as_bytes();
     match hex.len() {
         // #rgb — each nibble ×17 (0x0..0xF → 0x00..0xFF).
-        3 => Some(Rgb(
-            hex_digit(b[0])? * 17,
-            hex_digit(b[1])? * 17,
-            hex_digit(b[2])? * 17,
+        3 => Some((
+            Rgb(
+                hex_digit(b[0])? * 17,
+                hex_digit(b[1])? * 17,
+                hex_digit(b[2])? * 17,
+            ),
+            255,
         )),
-        // #rgba — parse the alpha nibble (validate), then drop it.
+        // #rgba — the 4th nibble is alpha, same ×17 scale.
         4 => {
             let r = hex_digit(b[0])? * 17;
             let g = hex_digit(b[1])? * 17;
             let bl = hex_digit(b[2])? * 17;
-            hex_digit(b[3])?; // alpha, dropped
-            Some(Rgb(r, g, bl))
+            let a = hex_digit(b[3])? * 17;
+            Some((Rgb(r, g, bl), a))
         }
         // #rrggbb
-        6 => Some(Rgb(hex2(b, 0)?, hex2(b, 2)?, hex2(b, 4)?)),
-        // #rrggbbaa — parse the alpha byte (validate), then drop it.
+        6 => Some((Rgb(hex2(b, 0)?, hex2(b, 2)?, hex2(b, 4)?), 255)),
+        // #rrggbbaa
         8 => {
             let r = hex2(b, 0)?;
             let g = hex2(b, 2)?;
             let bl = hex2(b, 4)?;
-            hex2(b, 6)?; // alpha, dropped
-            Some(Rgb(r, g, bl))
+            let a = hex2(b, 6)?;
+            Some((Rgb(r, g, bl), a))
         }
         _ => None,
     }
@@ -129,15 +183,16 @@ fn tokens(s: &str) -> Vec<&str> {
 }
 
 /// `rgb()`/`rgba()`. Comma- OR space-separated, modern `r g b / a` slash-alpha,
-/// channels as int (0–255) or percentage (0–100%). Alpha parsed then dropped.
-fn parse_rgb(inner: &str) -> Option<Rgb> {
-    let (channels, has_slash_alpha) = match inner.split_once('/') {
-        Some((c, _a)) => (c, true), // `_a` = alpha, dropped
-        None => (inner, false),
+/// channels as int (0–255) or percentage (0–100%).
+fn parse_rgb(inner: &str) -> Option<(Rgb, u8)> {
+    let slash = inner.split_once('/');
+    let channels = match slash {
+        Some((c, _)) => c,
+        None => inner,
     };
     let t = tokens(channels);
     // 3 channels; a 4th is the legacy comma-form alpha (only when no slash).
-    let ok = if has_slash_alpha {
+    let ok = if slash.is_some() {
         t.len() == 3
     } else {
         t.len() == 3 || t.len() == 4
@@ -145,18 +200,22 @@ fn parse_rgb(inner: &str) -> Option<Rgb> {
     if !ok {
         return None;
     }
-    Some(Rgb(channel_255(t[0])?, channel_255(t[1])?, channel_255(t[2])?))
+    let a = legacy_or_slash_alpha(slash, &t);
+    Some((
+        Rgb(channel_255(t[0])?, channel_255(t[1])?, channel_255(t[2])?),
+        a,
+    ))
 }
 
 /// `hsl()`/`hsla()`. Same separator rules; hue in degrees, s/l as percentages.
-/// Alpha parsed then dropped.
-fn parse_hsl(inner: &str) -> Option<Rgb> {
-    let (channels, has_slash_alpha) = match inner.split_once('/') {
-        Some((c, _a)) => (c, true),
-        None => (inner, false),
+fn parse_hsl(inner: &str) -> Option<(Rgb, u8)> {
+    let slash = inner.split_once('/');
+    let channels = match slash {
+        Some((c, _)) => c,
+        None => inner,
     };
     let t = tokens(channels);
-    let ok = if has_slash_alpha {
+    let ok = if slash.is_some() {
         t.len() == 3
     } else {
         t.len() == 3 || t.len() == 4
@@ -164,10 +223,21 @@ fn parse_hsl(inner: &str) -> Option<Rgb> {
     if !ok {
         return None;
     }
+    let a = legacy_or_slash_alpha(slash, &t);
     let h = parse_hue(t[0])?;
     let s = unit_pct(t[1])?;
     let l = unit_pct(t[2])?;
-    Some(hsl_to_rgb(h, s, l))
+    Some((hsl_to_rgb(h, s, l), a))
+}
+
+/// The alpha of a legacy `rgb()`/`hsl()` form: the `/ a` tail if present, else
+/// a 4th comma token, else opaque. Both spellings meet here so they cannot drift.
+fn legacy_or_slash_alpha(slash: Option<(&str, &str)>, t: &[&str]) -> u8 {
+    match slash {
+        Some((_, a)) => alpha_255(a),
+        None if t.len() == 4 => alpha_255(t[3]),
+        None => 255,
+    }
 }
 
 /// An rgb() channel: `0..255` int/float, or `0%..100%` → `0..255`. Clamped.
@@ -244,11 +314,19 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> Rgb {
 // is far looser than f32 rounding. Matrices/constants are the CSS Color 4
 // "Sample code for color conversions" values (drafts.csswg.org/css-color-4).
 
-/// Split off an optional `/ alpha` tail (dropped — no compositing yet).
+/// Split off an optional `/ alpha` tail, keeping the channels.
 fn split_slash(inner: &str) -> &str {
     match inner.split_once('/') {
         Some((c, _a)) => c,
         None => inner,
+    }
+}
+
+/// The other half of [`split_slash`]: the `/ alpha` tail, absent = opaque.
+fn slash_alpha(inner: &str) -> u8 {
+    match inner.split_once('/') {
+        Some((_, a)) => alpha_255(a),
+        None => 255,
     }
 }
 
@@ -791,6 +869,47 @@ mod tests {
         assert_eq!(parse_color("rgba(0, 128, 255, 1)"), Some(Rgb(0, 128, 255)));
         assert_eq!(parse_color("rgb(255 0 0 / 0.5)"), Some(Rgb(255, 0, 0)));
         assert_eq!(parse_color("rgba(10 20 30 / 50%)"), Some(Rgb(10, 20, 30)));
+    }
+
+    #[test]
+    fn alpha_zero_is_transparent_in_every_spelling() {
+        // Alpha 0 is not a shade of a colour, it is the absence of one. Every
+        // syntax that can carry it must arrive at the same answer.
+        for v in [
+            "transparent",
+            "TRANSPARENT",
+            "rgba(0,0,0,0)",
+            "rgba(255, 0, 0, 0)",
+            "rgb(255 0 0 / 0)",
+            "rgb(1 2 3 / 0%)",
+            "hsla(120, 100%, 50%, 0)",
+            "hsl(120 100% 50% / 0)",
+            "#0000",
+            "#12345600",
+            "oklch(0.5 0.1 200 / 0)",
+        ] {
+            assert_eq!(parse_color_val(v), Some(ColorVal::Transparent), "{v}");
+            // The opaque-only view keeps the inherited value rather than
+            // painting the alpha-0 carrier colour.
+            assert_eq!(parse_color(v), None, "{v}");
+        }
+    }
+
+    #[test]
+    fn partial_alpha_still_paints_opaque() {
+        // No compositing context yet — a partial alpha must NOT vanish.
+        for v in ["rgba(255,0,0,0.01)", "#ff000001", "rgb(255 0 0 / 1%)"] {
+            assert_eq!(parse_color_val(v), Some(ColorVal::Rgb(Rgb(255, 0, 0))), "{v}");
+        }
+    }
+
+    #[test]
+    fn an_unreadable_alpha_is_opaque_not_invisible() {
+        // We never make content disappear on a guess.
+        assert_eq!(
+            parse_color_val("rgba(1,2,3,none)"),
+            Some(ColorVal::Rgb(Rgb(1, 2, 3)))
+        );
     }
 
     #[test]

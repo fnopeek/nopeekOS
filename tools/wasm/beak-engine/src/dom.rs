@@ -5,7 +5,7 @@
 //! elements with attributes + children, and text nodes — with the tolerant
 //! recovery real pages rely on (implied `</p>`/`</li>`, unmatched end tags
 //! ignored, raw-text `<script>`/`<style>`). Not the full state machine yet;
-//! it grows toward it against html5lib-tests (CONFORMANCE.md).
+//! it grows toward it against html5lib-tests (docs/spec/CONFORMANCE.md).
 //!
 //! The tree is owned (no `Rc`/arena) — enough for a render-only pass. Live
 //! mutation (Stage 2, JS-driven) will move to an arena; the shape stays.

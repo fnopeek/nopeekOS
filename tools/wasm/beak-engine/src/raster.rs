@@ -4,7 +4,7 @@
 //! layout is ours. `paint` renders the visible slice at a scroll offset, so
 //! the buffer stays viewport-sized regardless of document length. Pure — the
 //! same code paints on nopeekOS (into a `Widget::Canvas`) and on the desktop
-//! adapter (into a window framebuffer), see BROWSER.md §10.
+//! adapter (into a window framebuffer), see docs/spec/BROWSER.md §10.
 
 use alloc::vec::Vec;
 use core::cell::RefCell;
@@ -23,8 +23,11 @@ pub struct Engine {
     glyphs: RefCell<HashMap<(u32, u32, u32), (Metrics, Vec<u8>)>>,
     /// Page colours (theme-resolved by the shell; dark until then).
     theme: Theme,
-    /// Decoded page images keyed by `<img src>` (set by the shell each nav).
-    images: crate::image::ImageMap,
+    /// Decoded page images keyed by `<img src>`. Fetched ones are handed in by
+    /// the shell each nav; a `data:` src carries its own bytes and is decoded
+    /// during layout — the same two clocks `css_images` runs on, which is why
+    /// this is a `RefCell` and not a plain map.
+    images: RefCell<crate::image::ImageMap>,
     /// Decoded CSS images (`background-image`/`mask-image`) keyed by
     /// `css::url_key`. Separate from `images` so a page's `<img src="x">` and
     /// a stylesheet's `url(x)` cannot collide, and because these are resolved
@@ -35,7 +38,7 @@ pub struct Engine {
     /// page full of icons cannot starve its `<img>`s (or the reverse).
     css_img_budget: core::cell::Cell<usize>,
     /// Remaining decoded-BGRA budget for the current page (streaming decode).
-    img_budget: usize,
+    img_budget: core::cell::Cell<usize>,
     /// Viewport height (px) — the initial containing block's height, which
     /// `top`/`bottom`/`height` percentages on root-level absolutely positioned
     /// boxes resolve against (CSS 2.1 §10.1). Device state like `theme`, not
@@ -85,10 +88,10 @@ impl Engine {
             fonts: Fonts::new(),
             glyphs: RefCell::new(HashMap::new()),
             theme: Theme::DARK,
-            images: crate::image::ImageMap::new(),
+            images: RefCell::new(crate::image::ImageMap::new()),
             css_images: RefCell::new(HashMap::new()),
             css_img_budget: core::cell::Cell::new(crate::image::CSS_BUDGET),
-            img_budget: crate::image::TOTAL_BUDGET,
+            img_budget: core::cell::Cell::new(crate::image::TOTAL_BUDGET),
             // 600 keeps the historical behaviour of the reftest canvas for any
             // caller that never sets it.
             viewport_h: core::cell::Cell::new(600),
@@ -121,8 +124,8 @@ impl Engine {
     /// AT A TIME (streaming) so the compressed bytes never pile up — decode the
     /// image, keep only its pixels, reuse the same fetch scratch for the next.
     pub fn images_begin(&mut self) {
-        self.images.clear();
-        self.img_budget = crate::image::TOTAL_BUDGET;
+        self.images.get_mut().clear();
+        self.img_budget.set(crate::image::TOTAL_BUDGET);
         // Drop the previous page's rasterised glyphs. The cache is keyed by
         // (char, size, face) and never evicts, so without this it grows across
         // every navigation (and every distinct font size) until the heap OOMs.
@@ -136,14 +139,49 @@ impl Engine {
     /// are retained. Over-budget / undecodable → skipped (renders a
     /// placeholder). Returns whether the image was stored.
     pub fn add_image(&mut self, src: &str, bytes: &[u8]) -> bool {
+        self.store_image(src, bytes)
+    }
+
+    /// The one place `<img>` pixels enter the store, shared by the shell's
+    /// fetched bytes and by a `data:` src decoded during layout, so the budget
+    /// is honoured on both paths.
+    fn store_image(&self, src: &str, bytes: &[u8]) -> bool {
         if let Some(img) = crate::image::decode(bytes) {
-            if img.bgra.len() <= self.img_budget {
-                self.img_budget -= img.bgra.len();
-                self.images.insert(src.into(), alloc::rc::Rc::new(img));
+            if img.bgra.len() <= self.img_budget.get() {
+                self.img_budget.set(self.img_budget.get() - img.bgra.len());
+                self.images
+                    .borrow_mut()
+                    .insert(src.into(), alloc::rc::Rc::new(img));
                 return true;
             }
         }
         false
+    }
+
+    /// Decode every `data:` `<img src>` in the document. Such a src carries its
+    /// own bytes — there is nothing to fetch, and the pixels must exist BEFORE
+    /// layout because the intrinsic size decides the box. Mirrors
+    /// `resolve_css_images`, which does the same for `url(data:…)`.
+    fn resolve_data_uri_images(&self, dom: &crate::dom::Dom) {
+        fn walk(el: &crate::dom::Element, eng: &Engine) {
+            for c in &el.children {
+                if let crate::dom::Node::Element(e) = c {
+                    if e.tag == "img" {
+                        if let Some(src) = e.attr("src").map(str::trim) {
+                            if (src.starts_with("data:") || src.starts_with("DATA:"))
+                                && !eng.images.borrow().contains_key(src)
+                            {
+                                if let Some(bytes) = crate::image::decode_data_uri(src) {
+                                    eng.store_image(src, &bytes);
+                                }
+                            }
+                        }
+                    }
+                    walk(e, eng);
+                }
+            }
+        }
+        walk(&dom.root, self);
     }
 
     /// Decode + store a whole batch at once (holds all compressed bytes) — kept
@@ -205,7 +243,8 @@ impl Engine {
         }
         let held = self.sheet.borrow();
         let sheet = &held.as_ref().unwrap().1;
-        let mut lay = crate::layout::layout(&self.fonts, &dom, sheet, &self.images, width, self.viewport_h.get(), &self.theme, forms, self.inspect.get());
+        self.resolve_data_uri_images(&dom);
+        let mut lay = crate::layout::layout(&self.fonts, &dom, sheet, &self.images.borrow(), width, self.viewport_h.get(), &self.theme, forms, self.inspect.get());
         self.resolve_css_images(sheet, &mut lay);
         lay
     }
@@ -258,7 +297,7 @@ impl Engine {
     }
 
     /// Lay out with the UA sheet ONLY — no author `<style>`/`<link>` CSS
-    /// (reader mode; BROWSER.md §9.7 "never worse than clean content").
+    /// (reader mode; docs/spec/BROWSER.md §9.7 "never worse than clean content").
     pub fn layout_ua(&self, html: &str, width: u32) -> Layout {
         self.layout_ua_forms(html, width, &crate::forms::FormState::default())
     }
@@ -267,11 +306,12 @@ impl Engine {
     pub fn layout_ua_forms(&self, html: &str, width: u32, forms: &crate::forms::FormState) -> Layout {
         let mut dom = crate::dom::parse(html);
         crate::picture::resolve(&mut dom, crate::css::Media::new(width as f32, self.theme.is_dark()));
+        self.resolve_data_uri_images(&dom);
         crate::layout::layout(
             &self.fonts,
             &dom,
             &crate::css::Stylesheet::empty(),
-            &self.images,
+            &self.images.borrow(),
             width,
             self.viewport_h.get(),
             &self.theme,
@@ -310,7 +350,7 @@ impl Engine {
                     // arrives after layout needs only a repaint. A miss (not
                     // fetched yet, or an undecodable format) draws the
                     // placeholder that layout used to emit as separate ops.
-                    match self.images.get(src) {
+                    match self.images.borrow().get(src) {
                         Some(img) => blit_image(out, wi, hi, *x, vy, *iw, *ih, img),
                         None => self.draw_img_placeholder(out, wi, hi, *x, vy, *iw, *ih, alt),
                     }

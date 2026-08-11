@@ -3403,7 +3403,7 @@ INCONCLUSIVE	css-backgrounds/background-color-animation-with-table1.html
 INCONCLUSIVE	css-backgrounds/background-color-animation-with-table2.html
 INCONCLUSIVE	css-backgrounds/background-color-animation-with-table3.html
 INCONCLUSIVE	css-backgrounds/background-color-animation-with-table4.html
-FAIL	css-backgrounds/background-color-animation-with-zero-alpha.html
+INCONCLUSIVE	css-backgrounds/background-color-animation-with-zero-alpha.html
 PASS	css-backgrounds/background-color-body-propagation-001.html
 PASS	css-backgrounds/background-color-body-propagation-002.html
 FAIL	css-backgrounds/background-color-body-propagation-008.html
@@ -3565,11 +3565,11 @@ PASS	css-color/background-color-hsl-004.html
 PASS	css-color/background-color-rgb-001.html
 PASS	css-color/background-color-rgb-002.html
 PASS	css-color/background-color-rgb-003.html
-FAIL	css-color/border-bottom-color.xht
+PASS	css-color/border-bottom-color.xht
 PASS	css-color/border-color-currentcolor.html
-FAIL	css-color/border-left-color.xht
-FAIL	css-color/border-right-color.xht
-FAIL	css-color/border-top-color.xht
+PASS	css-color/border-left-color.xht
+PASS	css-color/border-right-color.xht
+PASS	css-color/border-top-color.xht
 FAIL	css-color/clip-opacity-out-of-flow.html
 PASS	css-color/color-001.html
 PASS	css-color/color-002.html

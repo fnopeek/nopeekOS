@@ -7520,6 +7520,29 @@ fn dbg_wiki_shape() {
     }
 
     #[test]
+    fn a_fully_transparent_border_takes_space_but_paints_nothing() {
+        // DuckDuckGo reserves the hover frame around every search result with
+        // `border: 1px solid rgba(0,0,0,0)`. Painting the carrier colour put a
+        // black box around each result.
+        let boxes = |css: &str| {
+            let html = alloc::format!("<body><style>div{{{css}}}</style><div>hi</div></body>");
+            let l = lay(&html, 400);
+            let n = l
+                .ops
+                .iter()
+                .filter(|o| matches!(o, DrawOp::Rect { .. } | DrawOp::RoundRect { .. }))
+                .count();
+            (n, l.height)
+        };
+        let (opaque, h_opaque) = boxes("border:1px solid #000");
+        let (clear, h_clear) = boxes("border:1px solid rgba(0,0,0,0)");
+        assert!(opaque > 0, "an opaque border paints");
+        assert_eq!(clear, 0, "a transparent border paints nothing");
+        // It is a border, not an absence: the box is still the same size.
+        assert_eq!(h_opaque, h_clear, "transparent border still occupies space");
+    }
+
+    #[test]
     fn links_are_underlined_unless_the_author_says_otherwise() {
         let rects = |l: &Layout| l.ops.iter().filter(|o| matches!(o, DrawOp::Rect { .. })).count();
         // A real link gets a decoration rect …
