@@ -770,6 +770,15 @@ pub struct Layout {
     /// Sound in the direction that matters: it over-reports (value-equality on
     /// the containing block, any matched `vh` rule), never under-reports.
     pub viewport_h_used: bool,
+    /// What the three pipeline phases cost, in whatever unit the caller's
+    /// clock counts (see `Engine::set_clock`). Zero when no clock is set.
+    ///
+    /// The device reports parse+cascade+layout as ONE number, which is exactly
+    /// the number we cannot act on: a host profile says the box layout
+    /// dominates, but the host is not an interpreter and the phases do not
+    /// scale alike under one. Splitting it needs a clock, and the engine has
+    /// no host functions by design — so the caller lends it one.
+    pub phase: [u64; 3],
     /// Canvas background — the `<body>` background propagated to the whole
     /// viewport (CSS backgrounds §3.11.2), else the theme background.
     pub bg: Rgb,
@@ -1583,6 +1592,7 @@ pub fn layout(
         css_image_srcs: Vec::new(),
         inline_svgs: ctx.inline_svgs.into_inner(),
         viewport_h_used: ctx.vh_used.get(),
+        phase: [0; 3],
         inspect: ctx.inspects,
     }
 }

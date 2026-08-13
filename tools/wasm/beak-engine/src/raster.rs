@@ -50,6 +50,10 @@ pub struct Engine {
     /// tool). Off by default so the label-formatting cost is only paid while the
     /// user is inspecting; the shell toggles it and re-lays-out.
     inspect: core::cell::Cell<bool>,
+    /// A tick source lent by the shell, so a layout can report what each phase
+    /// cost on the machine that is actually slow. `None` on the host, where
+    /// `tests/diag.rs` times the phases from outside.
+    clock: core::cell::Cell<Option<fn() -> u64>>,
     /// The last parsed stylesheet with the fingerprint of the inputs that built
     /// it. Parsing a real page's CSS is a third of a layout, and a page is laid
     /// out several times over its life (images landing, a form key, a resize)
@@ -96,6 +100,7 @@ impl Engine {
             // caller that never sets it.
             viewport_h: core::cell::Cell::new(600),
             inspect: core::cell::Cell::new(false),
+            clock: core::cell::Cell::new(None),
             sheet: RefCell::new(None),
         }
     }
@@ -204,6 +209,13 @@ impl Engine {
     /// of the page's `<link rel=stylesheet>` files, which the shell fetches
     /// (the engine is host-free) and passes in. External CSS cascades before
     /// inline `<style>` (document/head order).
+    /// Lend the engine a monotonic tick source, so `Layout::phase` reports
+    /// what parse, cascade and layout each cost. Purely optional — the engine
+    /// stays free of host functions either way.
+    pub fn set_clock(&self, f: fn() -> u64) {
+        self.clock.set(Some(f));
+    }
+
     pub fn layout_ext(&self, html: &str, external_css: &str, width: u32) -> Layout {
         self.layout_forms(html, external_css, width, &crate::forms::FormState::default())
     }
@@ -218,6 +230,8 @@ impl Engine {
         width: u32,
         forms: &crate::forms::FormState,
     ) -> Layout {
+        let now = || self.clock.get().map_or(0, |f| f());
+        let t0 = now();
         let mut dom = crate::dom::parse(html);
         // `<picture>`/`srcset` is folded into the `<img>` before anything reads
         // a `src` — layout, the fetch list and the draw op then all see the one
@@ -229,6 +243,7 @@ impl Engine {
         // which rules apply, and `resolve_vars` BAKES the winning custom
         // properties into the text it hands on — so a light and a dark sheet
         // are different documents, not the same one read differently.
+        let t_parse = now();
         let media = crate::css::Media::new(width as f32, self.theme.is_dark());
         // The viewport HEIGHT is part of the identity too, since `resolve_vars`
         // bakes custom properties down and one may hold a `vh` length. Without
@@ -241,12 +256,14 @@ impl Engine {
         if self.sheet.borrow().as_ref().map(|(k, _)| *k) != Some(key) {
             *self.sheet.borrow_mut() = Some((key, crate::css::collect_all(&dom, external_css, media)));
         }
+        let t_css = now();
         let held = self.sheet.borrow();
         let sheet = &held.as_ref().unwrap().1;
         self.resolve_data_uri_images(&dom);
         let mut lay = crate::layout::layout(&self.fonts, &dom, sheet, &self.images.borrow(), width, self.viewport_h.get(), &self.theme, forms, self.inspect.get());
         self.resolve_inline_svgs(&dom, &lay);
         self.resolve_css_images(sheet, &mut lay);
+        lay.phase = [t_parse.wrapping_sub(t0), t_css.wrapping_sub(t_parse), now().wrapping_sub(t_css)];
         lay
     }
 
