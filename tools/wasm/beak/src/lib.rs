@@ -521,6 +521,16 @@ fn do_layout(engine: &Engine, w: u32, state: &FormState) -> Layout {
         engine.layout_ua_forms(html_str(), w, state)
     };
     log_ms("layout (parse+cascade+layout)", now_ms() - t0);
+    // ...and WHICH of the three it was. The host profile says the box layout
+    // dominates, but the host is not a WASM interpreter and the phases do not
+    // scale alike under one: beak 0.18.0 halved the box layout on the host and
+    // moved the device number by nothing at all. One number cannot say why.
+    let p = lay.phase;
+    if p[0] + p[1] + p[2] > 0 {
+        log_ms("  dom::parse", p[0] as i64);
+        log_ms("  css::cascade", p[1] as i64);
+        log_ms("  box layout", p[2] as i64);
+    }
     lay
 }
 fn payload_str(len: usize) -> &'static str {
@@ -1895,6 +1905,8 @@ pub extern "C" fn _start() {
 
     log("[beak] parsing font…");
     let mut engine = Engine::new();
+    // Lend the engine our tick source so it can report the per-phase split.
+    engine.set_clock(|| unsafe { npk_ticks() } as u64);
     engine.set_theme(query_theme());
     log("[beak] engine ready");
 
