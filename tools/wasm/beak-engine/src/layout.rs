@@ -31,6 +31,79 @@ use crate::style::{
     TextAlign, TextTransform, ZIndex, BASE_FONT_PX,
 };
 
+
+/// The deferred recipe for a positioned box's containing-block HEIGHT.
+///
+/// §10.1 makes a positioned box the containing block for its absolutely
+/// positioned descendants, and that block's height is a USED height — known
+/// only once the box has been laid out. Computing it eagerly means a full
+/// speculative layout of the whole box, and almost nothing ever reads the
+/// answer: only a descendant with `bottom`, or a percentage `top`/`height`,
+/// resolves against it. On a large article 266 boxes paid for that and it was
+/// over half of the layout.
+///
+/// So the recipe is kept instead, and run on the first read — in the context
+/// the eager measurement would have seen, which is what the saved `path_len`,
+/// `cb`, `cb_h` and `floats` restore. Everything here is either `Copy` or, in
+/// the case of `floats`, empty in the common case (an empty `Vec` clone does
+/// not allocate).
+struct PendingCbH<'a> {
+    el: &'a Element,
+    st: ComputedStyle,
+    x: i32,
+    w: i32,
+    y: i32,
+    /// Border box → padding box, subtracted from the measured height.
+    border_y: i32,
+    path_len: usize,
+    cb: PosCb,
+    cb_h: Option<f32>,
+    floats: Vec<FloatRect>,
+    /// The answer, once someone has asked. `cb.3` caches it too, but only for
+    /// as long as that particular `cb` value lives.
+    resolved: Option<i32>,
+}
+
+/// The positioned containing block: `(x, y, width, height)` plus, when the
+/// height is not yet known, the index of the recipe that computes it.
+/// Deliberately still `Copy` and still a tuple-ish value — the extra slot
+/// makes the compiler visit every site that installs or restores a containing
+/// block, which is the point: a pending recipe that outlives its `cb` would
+/// hand some unrelated descendant the wrong height.
+type PosCb = (i32, i32, i32, Option<i32>, Option<u32>);
+
+/// Sites that ask for a speculative height. Distinct keys in the `measured`
+/// memo, because the same element can be asked about by more than one — a
+/// flex item measured along the row axis and again along the column axis is
+/// two different questions with two different derived styles.
+const MEAS_FLEX_ROW: u8 = 0;
+const MEAS_FLEX_COL: u8 = 1;
+
+/// Identity of one speculative height measurement, for the `measured` memo.
+///
+/// `site` separates the call sites, because the same element can be measured
+/// by two of them with different styles — a `position: relative` flex item is
+/// measured once as a flex item (with `flex_item_style` applied) and once as
+/// its own containing block. The style itself is NOT hashed: at every site it
+/// is derived from the element's resolved style (which `styled` already keys
+/// by identity) plus `arg`, so the pair identifies it exactly.
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+struct MeasureKey {
+    site: u8,
+    seq: u32,
+    x: i32,
+    y: i32,
+    w: i32,
+    /// The site's own style-deriving argument (flex main size), as bits.
+    arg: u32,
+    /// Everything ambient that the measurement can read: the containing
+    /// block's height for percentages, and whether floats are in play (they
+    /// make the answer depend on where the box sits).
+    cb_h: u64,
+    cb_def_h: i64,
+    floats: u32,
+}
+
 /// An active float's exclusion rectangle (document space) within a block
 /// formatting context. Line boxes and later content avoid these.
 #[derive(Clone, Copy)]
@@ -972,7 +1045,10 @@ struct Ctx<'a> {
     /// establishing box has an explicit one: abspos children are laid out
     /// during the parent's child walk, so a content-derived height isn't
     /// known yet. `top`/`bottom` percentages need it (CSS 2.1 §9.3.2).
-    cb: (i32, i32, i32, Option<i32>),
+    cb: PosCb,
+    /// Deferred containing-block heights, indexed by `cb.4`. A stack: it is
+    /// truncated when the box that pushed its recipe goes out of scope.
+    cb_pend: Vec<PendingCbH<'a>>,
     /// Viewport width (px) — the layout width — for `@media` evaluation.
     viewport_w: f32,
     /// The viewport height this layout was built for — the initial containing
@@ -1055,6 +1131,15 @@ struct Ctx<'a> {
     /// containing-block height. That measurement re-enters the same box, which
     /// would ask for the same height again — one level is all the answer needs.
     measuring_cb_h: core::cell::Cell<bool>,
+    /// Memoised `measure_box_height` results — see `measured_h`. A speculative
+    /// measurement lays a whole subtree out and throws the result away, and
+    /// nested ones repeat: measuring a flex item that is itself a flex
+    /// container re-measures its items, and the enclosing box is measured
+    /// again for every level above it. On a real article that made the same
+    /// element's box run through layout 34 times on average and 256 times at
+    /// worst — powers of two, the signature of a doubling per nesting level.
+    /// This collapses that back to once per distinct question.
+    measured: core::cell::RefCell<BTreeMap<MeasureKey, i32>>,
     /// Memoised `style::resolve` results, keyed by a hash of everything the
     /// cascade reads (see `style_key`) — so this is a pure cache, not a policy.
     /// A real article cascades the SAME element about twelve times: every
@@ -1388,7 +1473,8 @@ pub fn layout(
         // edge, whatever inset the page content sits at. Its height is
         // definite, which is what makes `top:0; bottom:0` on a root-level
         // abspos box stretch to the window rather than collapse.
-        cb: (0, 0, width as i32, Some(viewport_h as i32)),
+        cb: (0, 0, width as i32, Some(viewport_h as i32), None),
+        cb_pend: Vec::new(),
         viewport_w: width as f32,
         viewport_h: viewport_h as f32,
         vh_used: core::cell::Cell::new(false),
@@ -1410,6 +1496,7 @@ pub fn layout(
         inspects: Vec::new(),
         intrinsic: BTreeMap::new(),
         measuring_cb_h: core::cell::Cell::new(false),
+        measured: core::cell::RefCell::new(BTreeMap::new()),
         styles: core::cell::RefCell::new(BTreeMap::new()),
     };
 
@@ -2378,6 +2465,7 @@ impl<'a> Ctx<'a> {
         // descendants — its PADDING box (§10.1). `prov_top_y` is the border-box
         // top, so the padding edge is one border down.
         let prev_cb = self.cb;
+        let prev_pend = self.cb_pend.len();
         if st.position != Position::Static {
             let pad_top_y = prov_top_y + st.border_top.width as i32 + st.pad_top as i32;
             let mut cb = padding_cb(st, content_x, pad_top_y, content_w);
@@ -2393,13 +2481,20 @@ impl<'a> Ctx<'a> {
             // full box-height too low — which is where Wikipedia's search
             // magnifier ended up, half outside its `overflow:hidden` field.
             if cb.3.is_none() && !self.measuring_cb_h.get() {
-                self.measuring_cb_h.set(true);
-                // `measure_box_height` returns the box's BORDER-box height; the
-                // containing block is its PADDING box, so the two borders come
-                // off.
-                let h = self.measure_box_height(el, st, content_x, content_w, prov_top_y);
-                self.measuring_cb_h.set(false);
-                cb.3 = Some((h - st.border_y() as i32).max(0));
+                cb.4 = Some(self.cb_pend.len() as u32);
+                self.cb_pend.push(PendingCbH {
+                    el,
+                    st: *st,
+                    x: content_x,
+                    w: content_w,
+                    y: prov_top_y,
+                    border_y: st.border_y() as i32,
+                    path_len: self.path.len(),
+                    cb: prev_cb,
+                    cb_h: self.cb_h,
+                    floats: self.floats.clone(),
+                    resolved: None,
+                });
             }
             self.cb = cb;
         }
@@ -2428,6 +2523,9 @@ impl<'a> Ctx<'a> {
         };
         self.cb_h = prev_cb_h;
         self.cb = prev_cb;
+        // The recipes pushed inside this box can no longer be reached: every
+        // `cb` that referred to one has been restored past it.
+        self.cb_pend.truncate(prev_pend);
 
         // Resolve the border-box top: when the top margin collapsed through, the
         // box's border box sits at the first committed child's border-box top.
@@ -2637,7 +2735,16 @@ impl<'a> Ctx<'a> {
     /// Measure a form control and capture what it displays right now (the
     /// user's typed value, else the authored default). Controls are atomic
     /// inline boxes — they never wrap, and their children never lay out.
-    fn control_box(&self, el: &Element, st: &ComputedStyle, kind: ControlKind, avail: f32) -> CtlBox {
+    fn control_box(&mut self, el: &Element, st: &ComputedStyle, kind: ControlKind, avail: f32) -> CtlBox {
+        // `&mut` only so a percentage height can ask for the containing
+        // block's height, which may still be a deferred recipe. The common
+        // case never asks — resolving would lay a whole box out.
+        let pct = |l: Len| matches!(l, Len::Pct(_) | Len::Calc { .. });
+        let cbh = if pct(st.height) || pct(st.min_height) || pct(st.max_height) {
+            self.cb_height()
+        } else {
+            self.cb.3
+        };
         let font = self.fonts.pick(st.bold, st.italic, st.mono);
         let size = st.font_px;
         let ch_w = measure(font, "0", size).max(1.0);
@@ -2713,7 +2820,7 @@ impl<'a> Ctx<'a> {
         // `width:100%; height:100%`, and measuring its height off the width
         // made it as tall as its container is wide. An indefinite CB height
         // leaves the percentage unresolvable, so the intrinsic height stands.
-        if let Some(chh) = vert_len(st.height, self.cb.3) {
+        if let Some(chh) = vert_len(st.height, cbh) {
             h = if st.box_border { chh as i32 } else { chh as i32 + 2 * CTL_PAD_Y + by };
         }
         if let Some(mx) = st.max_width.px(avail) {
@@ -2725,10 +2832,10 @@ impl<'a> Ctx<'a> {
         // `min-height` on a control is how real pages give a search field its
         // height (Codex: `min-height: 32px`). Without it the control keeps its
         // intrinsic line height and sits short inside its own flex row.
-        if let Some(mn) = vert_len(st.min_height, self.cb.3) {
+        if let Some(mn) = vert_len(st.min_height, cbh) {
             h = h.max(if st.box_border { mn as i32 } else { mn as i32 + 2 * CTL_PAD_Y + by });
         }
-        if let Some(mx) = vert_len(st.max_height, self.cb.3) {
+        if let Some(mx) = vert_len(st.max_height, cbh) {
             h = h.min(if st.box_border { mx as i32 } else { mx as i32 + 2 * CTL_PAD_Y + by });
         }
 
@@ -2766,7 +2873,10 @@ impl<'a> Ctx<'a> {
         } else {
             self.abs_count += 1;
         }
-        let (cbx, cby, cbw, cbh) = self.cb;
+        // The containing block's height may still be a deferred recipe — ask
+        // for it before anything reads it (§10.1).
+        let cbh = self.cb_height();
+        let (cbx, cby, cbw, ..) = self.cb;
         // An out-of-flow box against the INITIAL containing block moves with
         // the viewport height only if it actually reads that height: `bottom`
         // anchors it to the far edge, and a percentage `top`/`height` scales
@@ -3551,10 +3661,12 @@ impl<'a> Ctx<'a> {
             let row_part = self.part_start();
             let row_pos = row.el.map(|(_, rst)| rst.position != Position::Static).unwrap_or(false);
             if row_pos {
-                self.cb = (x, y, grid_w, Some(row_h));
+                self.cb = (x, y, grid_w, Some(row_h), None);
             } else if let Some((_, gst, _, top)) = group {
                 if gst.position != Position::Static {
-                    self.cb = (x, top, grid_w, None);
+                    // A row GROUP's height is not known yet, and unlike a
+                    // positioned block there is no box to measure for it.
+                    self.cb = (x, top, grid_w, None, None);
                 }
             }
             for (c, (cs, cell_x, cell_w, content_x, content_w)) in cells.iter().enumerate() {
@@ -3566,7 +3678,7 @@ impl<'a> Ctx<'a> {
                 let (link0, ctl0) = (self.links.len(), self.controls.len());
                 let cell_cb = self.cb;
                 if cs.position != Position::Static {
-                    self.cb = (*content_x, y, *content_w, Some(row_h));
+                    self.cb = (*content_x, y, *content_w, Some(row_h), None);
                 }
                 match row.cells[c].cell {
                     Cell::Real(e) => {
@@ -4758,6 +4870,82 @@ impl<'a> Ctx<'a> {
 
     /// Lay a box just to measure its natural height, discarding the emitted ops
     /// (used for grid auto-row sizing before the real placement pass).
+    /// The positioned containing block's height, running the deferred recipe
+    /// (`PendingCbH`) on first read and caching the answer into `cb.3`.
+    ///
+    /// Everything that resolves a percentage against the containing block's
+    /// height goes through here rather than reading `cb.3` — that is what
+    /// makes the deferral invisible.
+    fn cb_height(&mut self) -> Option<i32> {
+        if let Some(h) = self.cb.3 {
+            return Some(h);
+        }
+        let idx = self.cb.4? as usize;
+        if let Some(h) = self.cb_pend[idx].resolved {
+            self.cb.3 = Some(h);
+            return Some(h);
+        }
+        // The same guard the eager version had: measuring the box re-enters it
+        // and asks for its own height again. One level is all the answer needs.
+        if self.measuring_cb_h.get() {
+            return None;
+        }
+        self.measuring_cb_h.set(true);
+        // Restore the context the measurement would have run in eagerly: it
+        // happens now from somewhere inside the box's own subtree, where the
+        // ancestor path is longer and the containing block, its height and the
+        // active floats have all moved on.
+        let p = &self.cb_pend[idx];
+        let (el, st, x, w, y, border_y, path_len) = (p.el, p.st, p.x, p.w, p.y, p.border_y, p.path_len);
+        let (pcb, pcb_h) = (p.cb, p.cb_h);
+        let pfloats = p.floats.clone();
+        let tail = self.path.split_off(path_len);
+        let save_cb = core::mem::replace(&mut self.cb, pcb);
+        let save_cb_h = core::mem::replace(&mut self.cb_h, pcb_h);
+        let save_floats = core::mem::replace(&mut self.floats, pfloats);
+        let h = self.measure_box_height(el, &st, x, w, y);
+        self.floats = save_floats;
+        self.cb_h = save_cb_h;
+        self.cb = save_cb;
+        self.path.extend(tail);
+        self.measuring_cb_h.set(false);
+        // `measure_box_height` returns the BORDER-box height; the containing
+        // block is the PADDING box, so the two borders come off.
+        let used = Some((h - border_y).max(0));
+        self.cb_pend[idx].resolved = used;
+        self.cb.3 = used;
+        used
+    }
+
+    /// `measure_box_height` through the `measured` memo. `site` and `arg`
+    /// identify which question is being asked — see `MeasureKey`.
+    fn measured_h(&mut self, site: u8, arg: f32, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
+        let key = MeasureKey {
+            site,
+            seq: el.seq,
+            x,
+            y,
+            w,
+            arg: arg.to_bits(),
+            cb_h: self.cb_h.map(|v| v.to_bits() as u64).unwrap_or(u64::MAX),
+            // Not resolved on purpose: a pending containing block is
+            // identified by its recipe index, so two different ones cannot
+            // share a key without either being measured.
+            cb_def_h: match (self.cb.3, self.cb.4) {
+                (Some(h), _) => h as i64,
+                (None, Some(i)) => -2 - i as i64,
+                (None, None) => -1,
+            },
+            floats: self.floats.len() as u32,
+        };
+        if let Some(h) = self.measured.borrow().get(&key) {
+            return *h;
+        }
+        let h = self.measure_box_height(el, st, x, w, y);
+        self.measured.borrow_mut().insert(key, h);
+        h
+    }
+
     fn measure_box_height(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
         let (o, l, c) = (self.ops.len(), self.links.len(), self.controls.len());
         // Stacking ranges index into `ops`/`links`, so a discarded speculative
@@ -4997,7 +5185,7 @@ impl<'a> Ctx<'a> {
                 let (el, s) = items[idx0 + k];
                 let s_meas = flex_item_style(&s, size[k], None, true);
                 let box_main = (size[k] + li[k].main_pad).max(1.0) as i32;
-                h_nat[k] = self.measure_box_height(el, &s_meas, item_x[k] as i32, box_main, cross_y);
+                h_nat[k] = self.measured_h(MEAS_FLEX_ROW, size[k], el, &s_meas, item_x[k] as i32, box_main, cross_y);
             }
 
             // Line cross size: a single unwrapped line fills a definite container
@@ -5107,7 +5295,7 @@ impl<'a> Ctx<'a> {
             mm_lead[i] = s.margin_top;
             mm_trail[i] = s.margin_bottom;
             let s_meas = flex_item_style(s, wd, None, false);
-            h_nat[i] = self.measure_box_height(el, &s_meas, ix[i], wd.max(1.0) as i32, y0);
+            h_nat[i] = self.measured_h(MEAS_FLEX_COL, wd, el, &s_meas, ix[i], wd.max(1.0) as i32, y0);
         }
 
         // Total intrinsic main size (heights + vertical margins + gaps).
@@ -8987,11 +9175,12 @@ fn definite_cb_height(st: &ComputedStyle) -> Option<i32> {
 /// §10.1). Given the box's content origin and width, back out to the padding
 /// edges — `top: 0` sits just inside the border, and `left: 0` at the padding
 /// edge, so a padded container does not push its abspos children inwards.
-fn padding_cb(st: &ComputedStyle, content_x: i32, content_top: i32, content_w: i32) -> (i32, i32, i32, Option<i32>) {
+fn padding_cb(st: &ComputedStyle, content_x: i32, content_top: i32, content_w: i32) -> PosCb {
     (
         content_x - st.pad_left as i32,
         content_top - st.pad_top as i32,
         content_w + (st.pad_left + st.pad_right) as i32,
         definite_cb_height(st),
+        None,
     )
 }
