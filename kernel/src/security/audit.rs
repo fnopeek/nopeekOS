@@ -1,8 +1,17 @@
 //! Audit Log
 //!
-//! Immutable record of every capability operation.
-//! Ring buffer — oldest entries are overwritten when full.
-//! Every create, revoke, check, and deny is logged.
+//! Ring buffer of the capability operations worth keeping: create, revoke,
+//! deny, expire. Oldest entries are overwritten when full.
+//!
+//! A capability check that PASSES is deliberately not an entry, only a
+//! counter. It is the expected outcome of every gated host call, so recording
+//! it wrapped the 1024-entry ring roughly a thousand times per hour — the
+//! denials and grants the log exists for were gone within seconds, buried
+//! under routine successes. It also put one global lock in front of every
+//! host call on a six-core scheduler. Counting keeps the number and gives the
+//! ring back to the events that carry information.
+
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -12,13 +21,15 @@ use crate::capability::CapId;
 const MAX_ENTRIES: usize = 1024;
 
 static LOG: Mutex<AuditLog> = Mutex::new(AuditLog::new());
+/// Capability checks that passed. Relaxed: a running total nobody orders
+/// against, on the hottest path in the system.
+static CHECKS_PASSED: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub enum AuditOp {
     Create { parent_id: CapId, new_id: CapId },
     Revoke { revoker_id: CapId, target_id: CapId },
-    Check { cap_id: CapId },
     Denied { reason: DenyReason },
     Expired { cap_id: CapId },
 }
@@ -54,9 +65,11 @@ impl AuditLog {
     fn ensure_init(&mut self) {
         if self.entries.is_none() {
             let mut v = Vec::with_capacity(MAX_ENTRIES);
+            // Filler for the unwritten slots. `recent()` never returns them:
+            // it bounds the read by `total_count`.
             v.resize(MAX_ENTRIES, AuditEntry {
                 tick: 0,
-                op: AuditOp::Check { cap_id: [0u8; 32] },
+                op: AuditOp::Denied { reason: DenyReason::NotFound },
             });
             self.entries = Some(v);
         }
@@ -92,6 +105,15 @@ impl AuditLog {
 
 pub fn record(op: AuditOp) {
     LOG.lock().record(op);
+}
+
+/// A capability check passed. Counted, not recorded — see the module header.
+pub fn record_check_passed() {
+    CHECKS_PASSED.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn checks_passed() -> u64 {
+    CHECKS_PASSED.load(Ordering::Relaxed)
 }
 
 pub fn recent(count: usize) -> Vec<AuditEntry> {

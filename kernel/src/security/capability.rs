@@ -196,7 +196,7 @@ impl Vault {
             audit::record(AuditOp::Denied { reason: DenyReason::InsufficientRights });
             return Err(CapError::InsufficientRights);
         }
-        audit::record(AuditOp::Check { cap_id: *cap_id });
+        audit::record_check_passed();
         Ok(cap)
     }
 

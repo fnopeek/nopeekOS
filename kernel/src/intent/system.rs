@@ -8,6 +8,7 @@ pub fn intent_status(vault: &Vault) {
     let (free_frames, free_mb) = crate::memory::stats();
     let uptime = crate::interrupts::uptime_secs();
     let audit_count = crate::audit::total_count();
+    let checks_passed = crate::audit::checks_passed();
 
     kprintln!();
     kprintln!("  nopeekOS v{} – AI-native Operating System", env!("CARGO_PKG_VERSION"));
@@ -32,7 +33,7 @@ pub fn intent_status(vault: &Vault) {
     kprintln!("  Heap:          {} KB / {} MB", heap_used / 1024, heap_total / (1024 * 1024));
     kprintln!("  Paging:        {} x 2MB + {} x 4KB, NX enabled", huge_pages, small_pages);
     kprintln!("  Capabilities:  {}/{} active", active_caps, max_caps);
-    kprintln!("  Audit log:     {} events", audit_count);
+    kprintln!("  Audit log:     {} events, {} checks passed", audit_count, checks_passed);
     kprintln!("  WASM Runtime:  wasmi (interpreter)");
     if let Some(cap) = crate::blkdev::capacity() {
         let mb = (cap * 512) / (1024 * 1024);
@@ -1051,7 +1052,8 @@ pub fn intent_audit() {
     let total = audit::total_count();
 
     kprintln!();
-    kprintln!("  Audit Log ({} total events, showing last {})", total, entries.len());
+    kprintln!("  Audit Log ({} events, showing last {}; {} checks passed)",
+        total, entries.len(), audit::checks_passed());
     kprintln!("  ─────────────────────────────────────────────");
 
     if entries.is_empty() {
@@ -1067,9 +1069,6 @@ pub fn intent_audit() {
                 AuditOp::Revoke { revoker_id, target_id } =>
                     kprintln!("  [{:>4}.{:03}s] REVOKE {:08x} by {:08x}",
                         secs, ms, capability::short_id(&target_id), capability::short_id(&revoker_id)),
-                AuditOp::Check { cap_id } =>
-                    kprintln!("  [{:>4}.{:03}s] CHECK  {:08x} OK",
-                        secs, ms, capability::short_id(&cap_id)),
                 AuditOp::Denied { reason } =>
                     kprintln!("  [{:>4}.{:03}s] DENIED {:?}",
                         secs, ms, reason),
