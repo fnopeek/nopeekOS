@@ -630,12 +630,24 @@ pub fn connect(host: &str, ip: [u8; 4], port: u16) -> Result<Http2, Http2Error> 
     };
     // Which leg is slow? The connect swings between ~200 ms and ~2100 ms
     // across runs; 2 s is about a retransmission timeout, so name the leg.
-    kprintln!("[npk]   h2 tcp {} ms + tls {} ms",
-        t_tls.wrapping_sub(t_tcp) * 10,
-        crate::interrupts::ticks().wrapping_sub(t_tls) * 10);
+    // tcp+tls came to 90 ms while the caller measured 2100 for the same
+    // connect, so the preface — the first application write after the
+    // handshake — is timed too rather than left as the unnamed remainder.
+    let t_start = crate::interrupts::ticks();
+    let legs = |t_start: u64| {
+        kprintln!("[npk]   h2 tcp {} ms + tls {} ms + preface {} ms",
+            t_tls.wrapping_sub(t_tcp) * 10,
+            t_start.wrapping_sub(t_tls) * 10,
+            crate::interrupts::ticks().wrapping_sub(t_start) * 10);
+    };
     match tls.alpn() {
-        Some("h2") => Http2::start(tls),
+        Some("h2") => {
+            let c = Http2::start(tls);
+            legs(t_start);
+            c
+        }
         other => {
+            legs(t_start);
             kprintln!("[npk]   h2 not offered by {} (alpn={:?})", host, other);
             let mut tls = tls;
             let _ = crate::tls::tls_close(&mut tls);
