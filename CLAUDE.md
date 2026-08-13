@@ -48,7 +48,7 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-08-13 · kernel v0.265.2 · beak 0.18.0**
+**Stand 2026-08-13 · kernel v0.265.3 · beak 0.18.1**
 
 Aktueller Fokus ist **`beak`**, der eigene Browser. Stage 0 (HTML, CSS,
 Layout, Paint — noch kein JavaScript) läuft auf Hardware; die Arbeit dreht
