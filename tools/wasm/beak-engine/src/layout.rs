@@ -72,11 +72,26 @@ struct PendingCbH<'a> {
 /// hand some unrelated descendant the wrong height.
 type PosCb = (i32, i32, i32, Option<i32>, Option<u32>);
 
-/// Sites that ask for a speculative height. Distinct keys in the `measured`
-/// memo, because the same element can be asked about by more than one — a
-/// flex item measured along the row axis and again along the column axis is
-/// two different questions with two different derived styles.
-const MEAS_FLEX_ROW: u8 = 0;
+/// Where the display list and its side tables stood before a flex item was
+/// laid out — see `Ctx::flex_mark`.
+#[derive(Clone, Copy)]
+struct FlexMark {
+    ops: usize,
+    links: usize,
+    controls: usize,
+    stack_ops: usize,
+    stack_links: usize,
+    float_ops: usize,
+    float_links: usize,
+    floats: usize,
+    cb: PosCb,
+}
+
+/// Sites that ask for a speculative height. A distinct key per site in the
+/// `measured` memo, because the same element asked about by two of them is two
+/// different questions with two different derived styles. Only the column axis
+/// still measures speculatively — a flex ROW lays its items out for real and
+/// keeps the result (see `flex_row`).
 const MEAS_FLEX_COL: u8 = 1;
 
 /// Identity of one speculative height measurement, for the `measured` memo.
@@ -1149,6 +1164,16 @@ struct Ctx<'a> {
     /// worst — powers of two, the signature of a doubling per nesting level.
     /// This collapses that back to once per distinct question.
     measured: core::cell::RefCell<BTreeMap<MeasureKey, i32>>,
+    /// Memoised `style::resolve_pseudo` results — the SAME cascade work as
+    /// `styles`, for the `::before`/`::after` box, and it had no cache at all.
+    /// Measured under the interpreter it was 51 % of a whole layout: 62 340
+    /// calls for 2 316 elements, almost all of them searching the entire sheet
+    /// only to answer "this element generates nothing".
+    ///
+    /// Only the CASCADE result is cached. The content template is rendered
+    /// fresh on every hit, because `content: counter(x)` depends on the counter
+    /// state at that point in the walk, not on the element.
+    pseudos: core::cell::RefCell<BTreeMap<u64, Option<(Vec<crate::style::ContentPiece>, ComputedStyle)>>>,
     /// Memoised `style::resolve` results, keyed by a hash of everything the
     /// cascade reads (see `style_key`) — so this is a pure cache, not a policy.
     /// A real article cascades the SAME element about twelve times: every
@@ -1506,6 +1531,7 @@ pub fn layout(
         intrinsic: BTreeMap::new(),
         measuring_cb_h: core::cell::Cell::new(false),
         measured: core::cell::RefCell::new(BTreeMap::new()),
+        pseudos: core::cell::RefCell::new(BTreeMap::new()),
         styles: core::cell::RefCell::new(BTreeMap::new()),
     };
 
@@ -2181,8 +2207,17 @@ impl<'a> Ctx<'a> {
 
     fn pseudo_content(&self, owner: &Element, own: &ComputedStyle, kind: PseudoElem) -> Option<(String, ComputedStyle)> {
         let anc = self.path.len().saturating_sub(1);
-        let (template, ps) =
-            style::resolve_pseudo(owner, own, self.theme, self.sheet, &self.path[..anc], &[], 0, self.viewport_w, kind)?;
+        // Same inputs the cascade reads, plus which pseudo-element is asked
+        // about — `prev`/`sib_count` are constant here, so they add nothing.
+        let key = style_key(owner, own, &self.path[..anc], &[], 0) ^ ((kind as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        if let Some(hit) = self.pseudos.borrow().get(&key) {
+            let (template, ps) = hit.as_ref()?;
+            return Some((self.render_content(owner, template), *ps));
+        }
+        let got =
+            style::resolve_pseudo(owner, own, self.theme, self.sheet, &self.path[..anc], &[], 0, self.viewport_w, kind);
+        self.pseudos.borrow_mut().insert(key, got.clone());
+        let (template, ps) = got?;
         Some((self.render_content(owner, &template), ps))
     }
 
@@ -4956,6 +4991,35 @@ impl<'a> Ctx<'a> {
         h
     }
 
+    /// Everything one speculative flex-item placement can move — exactly the
+    /// state `measure_box_height` rolls back, so keeping a placement instead of
+    /// discarding it is the only difference between the two.
+    fn flex_mark(&self) -> FlexMark {
+        FlexMark {
+            ops: self.ops.len(),
+            links: self.links.len(),
+            controls: self.controls.len(),
+            stack_ops: self.stack_ops.len(),
+            stack_links: self.stack_links.len(),
+            float_ops: self.float_ops.len(),
+            float_links: self.float_links.len(),
+            floats: self.floats.len(),
+            cb: self.cb,
+        }
+    }
+
+    fn flex_rollback(&mut self, m: &FlexMark) {
+        self.ops.truncate(m.ops);
+        self.links.truncate(m.links);
+        self.controls.truncate(m.controls);
+        self.stack_ops.truncate(m.stack_ops);
+        self.stack_links.truncate(m.stack_links);
+        self.float_ops.truncate(m.float_ops);
+        self.float_links.truncate(m.float_links);
+        self.floats.truncate(m.floats);
+        self.cb = m.cb;
+    }
+
     fn measure_box_height(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
         let (o, l, c) = (self.ops.len(), self.links.len(), self.controls.len());
         // Stacking ranges index into `ops`/`links`, so a discarded speculative
@@ -5189,13 +5253,36 @@ impl<'a> Ctx<'a> {
                     + main_gap + extra_gap;
             }
 
-            // Natural cross size (height) at the resolved width, to size the line.
+            // Natural cross size (height) at the resolved width, to size the
+            // line — laid out AT the spot the item will most likely keep, and
+            // the ops KEPT instead of discarded.
+            //
+            // Measuring a flex item already lays its whole subtree out; the old
+            // code threw that away and then laid the identical thing again, so
+            // every nesting level doubled the work (2^5 on MediaWiki's header).
+            // Counted on real pages, 93–96 % of items end up at exactly
+            // `(item_x[k], cross_y)` with their natural height, so the second
+            // pass was almost always a byte-for-byte repeat of the first.
             let mut h_nat = alloc::vec![0i32; ln];
+            let mut marks: Vec<FlexMark> = Vec::with_capacity(ln);
             for k in 0..ln {
                 let (el, s) = items[idx0 + k];
                 let s_meas = flex_item_style(&s, size[k], None, true);
                 let box_main = (size[k] + li[k].main_pad).max(1.0) as i32;
-                h_nat[k] = self.measured_h(MEAS_FLEX_ROW, size[k], el, &s_meas, item_x[k] as i32, box_main, cross_y);
+                let mark = self.flex_mark();
+                self.path.push(ElemInfo::of(el));
+                let bottom = self.layout_box(el, &s_meas, item_x[k] as i32, box_main, cross_y);
+                self.path.pop();
+                h_nat[k] = bottom - cross_y;
+                // Keep the ops, but NOT the ambient state a discarded
+                // measurement used to drop: a flex item is its own block
+                // formatting context, so its floats must not reach its
+                // siblings, and the containing block it installed is gone with
+                // it. Leaving those standing made every later item on the line
+                // flow around phantom exclusions.
+                self.floats.truncate(mark.floats);
+                self.cb = mark.cb;
+                marks.push(mark);
             }
 
             // Line cross size: a single unwrapped line fills a definite container
@@ -5220,9 +5307,15 @@ impl<'a> Ctx<'a> {
                 nat_line
             };
 
-            // Place each item within the line box on the cross axis.
+            // Now that the line's cross size is known, work out where each item
+            // really goes, and find the FIRST one the speculative pass got
+            // wrong. A forced height counts as wrong even when the number
+            // matches: it changes the derived style, so the subtree below can
+            // resolve differently.
+            let mut first_redo = ln;
+            let mut plan: Vec<(Option<f32>, i32)> = Vec::with_capacity(ln);
             for k in 0..ln {
-                let (el, s) = items[idx0 + k];
+                let s = &items[idx0 + k].1;
                 let align = s.align_self.unwrap_or(st.align_items);
                 let inner = (line_cross - li[k].cm_lead as i32 - li[k].cm_trail as i32).max(0);
                 let stretch = align == CrossAlign::Stretch && li[k].cross_auto;
@@ -5238,15 +5331,31 @@ impl<'a> Ctx<'a> {
                     };
                     (None, y)
                 };
-                let s2 = flex_item_style(&s, size[k], forced_h, true);
-                self.path.push(ElemInfo::of(el));
-                // `layout_box` takes the box the caller resolved — the item's
-                // BORDER box. `size[k]` is its content size, so the item's own
-                // padding and border have to go back on, or a control (which
-                // paints exactly this width) loses them and clips its label.
-                let box_main = (size[k] + li[k].main_pad).max(1.0) as i32;
-                let _ = self.layout_box(el, &s2, item_x[k] as i32, box_main, y);
-                self.path.pop();
+                if first_redo == ln && (forced_h.is_some() || y != cross_y) {
+                    first_redo = k;
+                }
+                plan.push((forced_h, y));
+            }
+
+            // `ops` is one sequential list, so redoing item k means dropping
+            // everything emitted from k onward — hence the first mismatch, not
+            // each one. Worst case this is exactly the two passes it replaced.
+            if first_redo < ln {
+                self.flex_rollback(&marks[first_redo]);
+                for k in first_redo..ln {
+                    let (el, s) = items[idx0 + k];
+                    let (forced_h, y) = plan[k];
+                    let s2 = flex_item_style(&s, size[k], forced_h, true);
+                    self.path.push(ElemInfo::of(el));
+                    // `layout_box` takes the box the caller resolved — the
+                    // item's BORDER box. `size[k]` is its content size, so the
+                    // item's own padding and border have to go back on, or a
+                    // control (which paints exactly this width) loses them and
+                    // clips its label.
+                    let box_main = (size[k] + li[k].main_pad).max(1.0) as i32;
+                    let _ = self.layout_box(el, &s2, item_x[k] as i32, box_main, y);
+                    self.path.pop();
+                }
             }
 
             cross_y += line_cross + line_gap as i32;
@@ -5326,6 +5435,9 @@ impl<'a> Ctx<'a> {
         let mut y = y0 as f32 + offset;
         for (i, (el, s)) in items.iter().enumerate() {
             y += mm_lead[i];
+            if y as i32 == y0 {
+            } else {
+            }
             let s2 = flex_item_style(s, cross_w[i], None, false);
             self.path.push(ElemInfo::of(el));
             let bottom = self.layout_box(el, &s2, ix[i], cross_w[i].max(1.0) as i32, y as i32);
