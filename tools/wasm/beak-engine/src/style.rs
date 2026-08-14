@@ -17,7 +17,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::color::ColorVal;
-use crate::css::{ElemInfo, PseudoElem, Stylesheet};
+use crate::css::{ElemInfo, Prop, PseudoElem, Stylesheet};
 use crate::dom::Element;
 use crate::layout::{Rgb, Theme};
 use crate::forms::ControlKind;
@@ -1241,7 +1241,7 @@ pub fn resolve(
         // Pass 1 — normal <style> declarations, low→high specificity.
         for (_, _, decls, _) in &matched {
             for (p, v) in *decls {
-                apply_one(p, v, theme, &mut s);
+                apply_one(*p, v, theme, &mut s);
             }
         }
         if let Some(decls) = inline {
@@ -1250,7 +1250,7 @@ pub fn resolve(
         // Pass 2 — `!important` <style> declarations, low→high specificity.
         for (_, _, _, imp) in &matched {
             for (p, v) in *imp {
-                apply_one(p, v, theme, &mut s);
+                apply_one(*p, v, theme, &mut s);
             }
         }
         if let Some(decls) = inline {
@@ -1349,7 +1349,7 @@ pub fn resolve_pseudo(
     let mut content_vals: Vec<&str> = Vec::new();
     for (_, _, decls, imp) in &matched {
         for (p, v) in decls.iter().chain(imp.iter()) {
-            if p == "content" {
+            if *p == Prop::Content {
                 content_vals.push(v);
             }
         }
@@ -1359,10 +1359,10 @@ pub fn resolve_pseudo(
     for pass_imp in [false, true] {
         for (_, _, decls, imp) in &matched {
             for (p, v) in if pass_imp { *imp } else { *decls } {
-                if p == "content" {
+                if *p == Prop::Content {
                     continue;
                 }
-                apply_one(p, v, theme, &mut s);
+                apply_one(*p, v, theme, &mut s);
             }
         }
     }
@@ -1866,7 +1866,7 @@ fn apply_declarations_pass(decls: &str, theme: &Theme, s: &mut ComputedStyle, im
         if prop.is_empty() || val.is_empty() || imp != important {
             continue;
         }
-        apply_one(&prop, val, theme, s);
+        apply_one(crate::css::prop_key(&prop), val, theme, s);
     }
 }
 
@@ -1906,7 +1906,7 @@ fn has_viewport_h_unit(v: &str) -> bool {
     false
 }
 
-pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
+pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
     // CSS keywords are case-insensitive, so this used to lowercase every value
     // it was handed. On a real article that is ~152 000 declarations per
     // layout of which ~500 actually carry an uppercase letter: 151 500 heap
@@ -1925,8 +1925,8 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
     // Wikipedia's three stray `vh`s never match anything.
     if has_viewport_h_unit(&v) {
         s.vh_seen |= match prop {
-            "max-height" => VH_MAX_HEIGHT,
-            "min-height" => VH_MIN_HEIGHT,
+            Prop::MaxHeight => VH_MAX_HEIGHT,
+            Prop::MinHeight => VH_MIN_HEIGHT,
             _ => VH_DIRECT,
         };
     }
@@ -1936,7 +1936,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
     // call — matching the cascade's declaration order.
     let u = s.units();
     match prop {
-        "display" => {
+        Prop::Display => {
             s.display = match v {
                 "none" => Display::None,
                 "list-item" => Display::ListItem,
@@ -1956,12 +1956,12 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 _ => Display::Block,
             };
         }
-        "table-layout" => {
+        Prop::TableLayout => {
             s.table_layout = if v == "fixed" { TableLayout::Fixed } else { TableLayout::Auto };
         }
-        "border-collapse" => s.border_collapse = v == "collapse",
-        "empty-cells" => s.empty_cells_hide = v == "hide",
-        "vertical-align" => {
+        Prop::BorderCollapse => s.border_collapse = v == "collapse",
+        Prop::EmptyCells => s.empty_cells_hide = v == "hide",
+        Prop::VerticalAlign => {
             if let Some(a) = parse_valign(&v) {
                 s.valign = a;
             }
@@ -1972,24 +1972,24 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         // `break-all` is not distinguished from `break-word`.
         // Two values are `x y`; a single one applies to both. Only a box that
         // clips on BOTH axes is clipped here (see `overflow_clip`).
-        "overflow" => {
+        Prop::Overflow => {
             let mut it = v.split_whitespace();
             let x = it.next().unwrap_or("");
             let y = it.next().unwrap_or(x);
             let clips = |k: &str| k == "hidden" || k == "clip";
             s.overflow_clip = clips(x) && clips(y);
         }
-        "overflow-wrap" | "word-wrap" => s.break_word = v == "break-word" || v == "anywhere",
-        "word-break" => s.break_word = v == "break-all" || v == "break-word",
-        "border-radius" => {
+        Prop::OverflowWrap | Prop::WordWrap => s.break_word = v == "break-word" || v == "anywhere",
+        Prop::WordBreak => s.break_word = v == "break-all" || v == "break-word",
+        Prop::BorderRadius => {
             if let Some(rs) = parse_radius_shorthand(&v, u) {
                 s.radius = rs;
             }
         }
-        "transform" => {
+        Prop::Transform => {
             s.translate = parse_translate(&v, u);
         }
-        "box-shadow" => {
+        Prop::BoxShadow => {
             let t = v.trim();
             if t.eq_ignore_ascii_case("none") {
                 s.shadow = None;
@@ -1997,44 +1997,44 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 s.shadow = Some(sh);
             }
         }
-        "border-top-left-radius" | "border-top-right-radius" | "border-bottom-right-radius"
-        | "border-bottom-left-radius" => {
+        Prop::BorderTopLeftRadius | Prop::BorderTopRightRadius | Prop::BorderBottomRightRadius
+        | Prop::BorderBottomLeftRadius => {
             // One corner takes `h v`; we keep the horizontal radius.
             if let Some(n) = parse_len_opt(v.split_whitespace().next().unwrap_or(""), u) {
                 let i = match prop {
-                    "border-top-left-radius" => 0,
-                    "border-top-right-radius" => 1,
-                    "border-bottom-right-radius" => 2,
+                    Prop::BorderTopLeftRadius => 0,
+                    Prop::BorderTopRightRadius => 1,
+                    Prop::BorderBottomRightRadius => 2,
                     _ => 3,
                 };
                 s.radius[i] = n;
             }
         }
-        "caption-side" => match v {
+        Prop::CaptionSide => match v {
             "bottom" => s.caption_bottom = true,
             "top" => s.caption_bottom = false,
             _ => {}
         },
         // One length applies to both axes; two give horizontal then vertical.
-        "border-spacing" => {
+        Prop::BorderSpacing => {
             let mut it = v.split_whitespace().filter_map(|p| parse_length(p, u));
             if let Some(h) = it.next() {
                 let vert = it.next().unwrap_or(h);
                 s.border_spacing = (h.max(0.0), vert.max(0.0));
             }
         }
-        "color" => {
+        Prop::Color => {
             if let Some(c) = parse_color(&v, theme) {
                 s.color = c;
             }
         }
-        "font-weight" => {
+        Prop::FontWeight => {
             s.bold = matches!(v, "bold" | "bolder" | "600" | "700" | "800" | "900");
         }
-        "font-style" => {
+        Prop::FontStyle => {
             s.italic = matches!(v, "italic" | "oblique");
         }
-        "font-size" => {
+        Prop::FontSize => {
             // em/%/inherit/relative keywords resolve against the PARENT font
             // (em_base), NOT the running value — so nothing compounds and a
             // later cascade winner (incl. `inherit`) is exact, not multiplied.
@@ -2059,7 +2059,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         // `line-height: normal | <number> | <length> | <percentage>`. A bare
         // number stays a number (inherits as a ratio); everything else computes
         // to px against THIS element's font-size, per CSS 2.1 §10.8.1.
-        "line-height" => {
+        Prop::LineHeight => {
             let t = v.trim();
             s.line_height = if t == "normal" {
                 LineHeight::Normal
@@ -2077,15 +2077,15 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 }
             };
         }
-        "font" => apply_font_shorthand(&v, theme, s),
-        "text-decoration" | "text-decoration-line" => {
+        Prop::Font => apply_font_shorthand(&v, theme, s),
+        Prop::TextDecoration | Prop::TextDecorationLine => {
             // The shorthand resets the line to `none` when it names no line
             // keyword, so colour/style-only values legitimately clear it.
             if v != "inherit" && v != "unset" {
                 s.deco = parse_deco(&v);
             }
         }
-        "text-transform" => {
+        Prop::TextTransform => {
             s.text_transform = match v {
                 "uppercase" => TextTransform::Upper,
                 "lowercase" => TextTransform::Lower,
@@ -2096,7 +2096,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         }
         // Applies to the last line of a block (and so to a block with only
         // one). `auto` defers to `text-align`.
-        "text-align-last" => {
+        Prop::TextAlignLast => {
             s.text_align_last = match v {
                 "left" => Some(TextAlign::Left),
                 "right" => Some(TextAlign::Right),
@@ -2108,17 +2108,17 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 _ => s.text_align_last,
             };
         }
-        "text-indent" => {
+        Prop::TextIndent => {
             if let Some(l) = parse_len_opt(&v, u) {
                 s.text_indent = l;
             }
         }
-        "direction" => match v {
+        Prop::Direction => match v {
             "rtl" => s.rtl = true,
             "ltr" => s.rtl = false,
             _ => {}
         },
-        "text-align" => {
+        Prop::TextAlign => {
             s.text_align = match v {
                 "left" => TextAlign::Left,
                 "right" => TextAlign::Right,
@@ -2132,14 +2132,14 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 _ => s.text_align,
             };
         }
-        "list-style-type" => {
+        Prop::ListStyleType => {
             if let Some(ls) = parse_list_style(&v) {
                 s.list_style = ls;
             }
         }
         // `list-style: <type> || <position> || <image>` in any order; we only
         // consume the type keyword. `none` legitimately means "no marker".
-        "list-style" => {
+        Prop::ListStyle => {
             for part in v.split_whitespace() {
                 if let Some(ls) = parse_list_style(part) {
                     s.list_style = ls;
@@ -2150,11 +2150,11 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         // CSS counters (css-lists-3 §4). `content: counter(…)` reads these at
         // layout time; the values themselves are resolved in `layout.rs`, which
         // maintains the scoped counter stack.
-        "counter-reset" => parse_counter_ops(&v, &mut s.counter_reset, &mut s.counter_reset_n, 0),
-        "counter-increment" => {
+        Prop::CounterReset => parse_counter_ops(&v, &mut s.counter_reset, &mut s.counter_reset_n, 0),
+        Prop::CounterIncrement => {
             parse_counter_ops(&v, &mut s.counter_increment, &mut s.counter_increment_n, 1)
         }
-        "white-space" => match v {
+        Prop::WhiteSpace => match v {
             "pre" => {
                 s.pre = true;
                 s.nowrap = false;
@@ -2182,41 +2182,41 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         // `hidden`, and we have no row-removal to do.
         // Only fully-transparent is modelled: anything in between needs real
         // alpha compositing in the rasteriser. Never cleared — see the field.
-        "opacity" => {
+        Prop::Opacity => {
             if let Ok(o) = v.trim().parse::<f32>() {
                 s.opacity_zero = o <= 0.001;
             }
         }
-        "visibility" => match v {
+        Prop::Visibility => match v {
             "hidden" | "collapse" => s.hidden = true,
             "visible" => s.hidden = false,
             _ => {}
         },
-        "font-family" => {
+        Prop::FontFamily => {
             s.mono = v.contains("mono") || v.contains("courier") || v.contains("consol");
         }
         // — box model —
-        "width" => set_size(&mut s.width, &v, u),
-        "min-width" => set_size(&mut s.min_width, &v, u),
-        "max-width" => set_max(&mut s.max_width, &v, u),
-        "height" => set_size(&mut s.height, &v, u),
-        "min-height" => set_size(&mut s.min_height, &v, u),
-        "max-height" => set_max(&mut s.max_height, &v, u),
-        "box-sizing" => s.box_border = v == "border-box",
+        Prop::Width => set_size(&mut s.width, &v, u),
+        Prop::MinWidth => set_size(&mut s.min_width, &v, u),
+        Prop::MaxWidth => set_max(&mut s.max_width, &v, u),
+        Prop::Height => set_size(&mut s.height, &v, u),
+        Prop::MinHeight => set_size(&mut s.min_height, &v, u),
+        Prop::MaxHeight => set_max(&mut s.max_height, &v, u),
+        Prop::BoxSizing => s.box_border = v == "border-box",
         // css-ui-4 §4. Only `none` concerns us: it says "do not draw the UA
         // widget", and the page then supplies the whole look. Every other
         // value (`auto`, `button`, `textfield`, …) keeps our chrome. The
         // prefixed spellings still carry the real web's styled controls.
-        "appearance" | "-webkit-appearance" | "-moz-appearance" => s.appearance_none = v == "none",
-        "contain" => s.contain_size = v.split_whitespace().any(|k| k == "size" || k == "strict"),
-        "contain-intrinsic-size" => {
+        Prop::Appearance | Prop::WebkitAppearance | Prop::MozAppearance => s.appearance_none = v == "none",
+        Prop::Contain => s.contain_size = v.split_whitespace().any(|k| k == "size" || k == "strict"),
+        Prop::ContainIntrinsicSize => {
             // definite length(s): one → both axes, two → (width, height).
             let mut it = v.split_whitespace().filter_map(|t| parse_length(t, u));
             if let Some(a) = it.next() {
                 s.contain_intrinsic = Some((a, it.next().unwrap_or(a)));
             }
         }
-        "margin" => {
+        Prop::Margin => {
             let u = s.units();
             let (t, r, b, l) = four_values(&v);
             s.margin_top = margin_tb(t, u);
@@ -2224,23 +2224,23 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             s.margin_bottom = margin_tb(b, u);
             s.margin_left = margin_lr(l, u);
         }
-        "margin-top" | "margin-block-start" => s.margin_top = margin_tb(&v, u),
-        "margin-bottom" | "margin-block-end" => s.margin_bottom = margin_tb(&v, u),
-        "margin-left" | "margin-inline-start" => s.margin_left = margin_lr(&v, u),
-        "margin-right" | "margin-inline-end" => s.margin_right = margin_lr(&v, u),
+        Prop::MarginTop | Prop::MarginBlockStart => s.margin_top = margin_tb(&v, u),
+        Prop::MarginBottom | Prop::MarginBlockEnd => s.margin_bottom = margin_tb(&v, u),
+        Prop::MarginLeft | Prop::MarginInlineStart => s.margin_left = margin_lr(&v, u),
+        Prop::MarginRight | Prop::MarginInlineEnd => s.margin_right = margin_lr(&v, u),
         // Logical two-value shorthands, LTR/horizontal-tb: `margin-inline` is
         // (left, right), `margin-block` is (top, bottom); one value sets both.
-        "margin-inline" => {
+        Prop::MarginInline => {
             let p = split_sides(&v);
             s.margin_left = margin_lr(p[0], u);
             s.margin_right = margin_lr(p[1], u);
         }
-        "margin-block" => {
+        Prop::MarginBlock => {
             let p = split_sides(&v);
             s.margin_top = margin_tb(p[0], u);
             s.margin_bottom = margin_tb(p[1], u);
         }
-        "padding" => {
+        Prop::Padding => {
             let u = s.units();
             let (t, r, b, l) = four_values(&v);
             s.pad_top = parse_pad(t, u, 0.0);
@@ -2248,16 +2248,16 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             s.pad_bottom = parse_pad(b, u, 0.0);
             s.pad_left = parse_pad(l, u, 0.0);
         }
-        "padding-top" | "padding-block-start" => s.pad_top = parse_pad(&v, u, s.pad_top),
-        "padding-right" | "padding-inline-end" => s.pad_right = parse_pad(&v, u, s.pad_right),
-        "padding-bottom" | "padding-block-end" => s.pad_bottom = parse_pad(&v, u, s.pad_bottom),
-        "padding-left" | "padding-inline-start" => s.pad_left = parse_pad(&v, u, s.pad_left),
-        "padding-inline" => {
+        Prop::PaddingTop | Prop::PaddingBlockStart => s.pad_top = parse_pad(&v, u, s.pad_top),
+        Prop::PaddingRight | Prop::PaddingInlineEnd => s.pad_right = parse_pad(&v, u, s.pad_right),
+        Prop::PaddingBottom | Prop::PaddingBlockEnd => s.pad_bottom = parse_pad(&v, u, s.pad_bottom),
+        Prop::PaddingLeft | Prop::PaddingInlineStart => s.pad_left = parse_pad(&v, u, s.pad_left),
+        Prop::PaddingInline => {
             let p = split_sides(&v);
             s.pad_left = parse_pad(p[0], u, s.pad_left);
             s.pad_right = parse_pad(p[1], u, s.pad_right);
         }
-        "padding-block" => {
+        Prop::PaddingBlock => {
             let p = split_sides(&v);
             s.pad_top = parse_pad(p[0], u, s.pad_top);
             s.pad_bottom = parse_pad(p[1], u, s.pad_bottom);
@@ -2267,7 +2267,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         // `background-color` is a single property; `background` is a shorthand
         // that resets every longhand it covers — including the image — and is
         // applied as a unit or not at all.
-        "background-color" => {
+        Prop::BackgroundColor => {
             let vt = v.trim();
             if vt == "none" {
                 s.bg = None;
@@ -2280,7 +2280,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 };
             }
         }
-        "background" => {
+        Prop::Background => {
             let vt = v.trim();
             if let Some(cv) = parse_color_val(vt, theme) {
                 // The whole value is one colour — the overwhelmingly common
@@ -2296,57 +2296,57 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 s.bg_layer = layer;
             }
         }
-        "background-image" => s.bg_layer.image = parse_bg_image(val),
-        "background-repeat" => {
+        Prop::BackgroundImage => s.bg_layer.image = parse_bg_image(val),
+        Prop::BackgroundRepeat => {
             if let Some(r) = parse_bg_repeat(&v) {
                 s.bg_layer.repeat = r;
             }
         }
-        "background-position" => {
+        Prop::BackgroundPosition => {
             if let Some(p) = parse_bg_pos(&v, u) {
                 s.bg_layer.pos = p;
             }
         }
-        "background-size" => {
+        Prop::BackgroundSize => {
             if let Some(sz) = parse_bg_size(&v, u) {
                 s.bg_layer.size = sz;
             }
         }
         // `mask` is still shipped prefixed by the icon systems that use it, and
         // the two spellings are the same property to us.
-        "mask" | "-webkit-mask" => {
+        Prop::Mask | Prop::WebkitMask => {
             if let Some((_, layer)) = parse_bg_shorthand(val, &v, u, theme) {
                 s.mask_layer = layer;
             }
         }
-        "mask-image" | "-webkit-mask-image" => s.mask_layer.image = parse_bg_image(val),
-        "mask-repeat" | "-webkit-mask-repeat" => {
+        Prop::MaskImage | Prop::WebkitMaskImage => s.mask_layer.image = parse_bg_image(val),
+        Prop::MaskRepeat | Prop::WebkitMaskRepeat => {
             if let Some(r) = parse_bg_repeat(&v) {
                 s.mask_layer.repeat = r;
             }
         }
-        "mask-position" | "-webkit-mask-position" => {
+        Prop::MaskPosition | Prop::WebkitMaskPosition => {
             if let Some(p) = parse_bg_pos(&v, u) {
                 s.mask_layer.pos = p;
             }
         }
-        "mask-size" | "-webkit-mask-size" => {
+        Prop::MaskSize | Prop::WebkitMaskSize => {
             if let Some(sz) = parse_bg_size(&v, u) {
                 s.mask_layer.size = sz;
             }
         }
-        "border" => {
+        Prop::Border => {
             let side = parse_border_shorthand(&v, u, theme);
             s.border_top = side;
             s.border_right = side;
             s.border_bottom = side;
             s.border_left = side;
         }
-        "border-top" => s.border_top = parse_border_shorthand(&v, u, theme),
-        "border-right" => s.border_right = parse_border_shorthand(&v, u, theme),
-        "border-bottom" => s.border_bottom = parse_border_shorthand(&v, u, theme),
-        "border-left" => s.border_left = parse_border_shorthand(&v, u, theme),
-        "border-width" => {
+        Prop::BorderTop => s.border_top = parse_border_shorthand(&v, u, theme),
+        Prop::BorderRight => s.border_right = parse_border_shorthand(&v, u, theme),
+        Prop::BorderBottom => s.border_bottom = parse_border_shorthand(&v, u, theme),
+        Prop::BorderLeft => s.border_left = parse_border_shorthand(&v, u, theme),
+        Prop::BorderWidth => {
             let u = s.units();
             if let Some(t4) = four_sides(&css_tokens(&v)) {
                 for (side, tok) in [
@@ -2358,7 +2358,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 }
             }
         }
-        "border-color" => {
+        Prop::BorderColor => {
             if let Some(t4) = four_sides(&css_tokens(&v)) {
                 for (side, tok) in [
                     &mut s.border_top, &mut s.border_right, &mut s.border_bottom, &mut s.border_left,
@@ -2367,7 +2367,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 }
             }
         }
-        "border-style" => {
+        Prop::BorderStyle => {
             if let Some(t4) = four_sides(&css_tokens(&v)) {
                 for (side, tok) in [
                     &mut s.border_top, &mut s.border_right, &mut s.border_bottom, &mut s.border_left,
@@ -2376,26 +2376,26 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 }
             }
         }
-        "border-top-width" => set_side_width(&mut s.border_top, &v, u),
-        "border-right-width" => set_side_width(&mut s.border_right, &v, u),
-        "border-bottom-width" => set_side_width(&mut s.border_bottom, &v, u),
-        "border-left-width" => set_side_width(&mut s.border_left, &v, u),
-        "border-top-color" => { s.border_top.set_color(v.trim(), theme); }
-        "border-right-color" => { s.border_right.set_color(v.trim(), theme); }
-        "border-bottom-color" => { s.border_bottom.set_color(v.trim(), theme); }
-        "border-left-color" => { s.border_left.set_color(v.trim(), theme); }
-        "border-top-style" | "border-right-style" | "border-bottom-style" | "border-left-style" => {
+        Prop::BorderTopWidth => set_side_width(&mut s.border_top, &v, u),
+        Prop::BorderRightWidth => set_side_width(&mut s.border_right, &v, u),
+        Prop::BorderBottomWidth => set_side_width(&mut s.border_bottom, &v, u),
+        Prop::BorderLeftWidth => set_side_width(&mut s.border_left, &v, u),
+        Prop::BorderTopColor => { s.border_top.set_color(v.trim(), theme); }
+        Prop::BorderRightColor => { s.border_right.set_color(v.trim(), theme); }
+        Prop::BorderBottomColor => { s.border_bottom.set_color(v.trim(), theme); }
+        Prop::BorderLeftColor => { s.border_left.set_color(v.trim(), theme); }
+        Prop::BorderTopStyle | Prop::BorderRightStyle | Prop::BorderBottomStyle | Prop::BorderLeftStyle => {
             let side = match prop {
-                "border-top-style" => &mut s.border_top,
-                "border-right-style" => &mut s.border_right,
-                "border-bottom-style" => &mut s.border_bottom,
+                Prop::BorderTopStyle => &mut s.border_top,
+                Prop::BorderRightStyle => &mut s.border_right,
+                Prop::BorderBottomStyle => &mut s.border_bottom,
                 _ => &mut s.border_left,
             };
             side.set_style(&v);
         }
 
         // — positioning —
-        "position" => {
+        Prop::Position => {
             s.position = match v {
                 "relative" => Position::Relative,
                 "absolute" => Position::Absolute,
@@ -2404,14 +2404,14 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 _ => Position::Static,
             };
         }
-        "float" => {
+        Prop::Float => {
             s.float = match v {
                 "left" => FloatKind::Left,
                 "right" => FloatKind::Right,
                 _ => FloatKind::None,
             };
         }
-        "clear" => {
+        Prop::Clear => {
             s.clear = match v {
                 "left" => ClearKind::Left,
                 "right" => ClearKind::Right,
@@ -2419,7 +2419,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 _ => ClearKind::None,
             };
         }
-        "clip" => {
+        Prop::Clip => {
             let vt = v.trim();
             if vt == "auto" {
                 s.clip = Clip::Auto;
@@ -2448,11 +2448,11 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 }
             }
         }
-        "top" => s.top = parse_len(&v, u),
-        "right" => s.right = parse_len(&v, u),
-        "bottom" => s.bottom = parse_len(&v, u),
-        "left" => s.left = parse_len(&v, u),
-        "z-index" => {
+        Prop::Top => s.top = parse_len(&v, u),
+        Prop::Right => s.right = parse_len(&v, u),
+        Prop::Bottom => s.bottom = parse_len(&v, u),
+        Prop::Left => s.left = parse_len(&v, u),
+        Prop::ZIndex => {
             s.z_index = match v {
                 "auto" => ZIndex::Auto,
                 "inherit" => ZIndex::Inherit,
@@ -2466,12 +2466,12 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         }
 
         // — flex —
-        "flex-direction" => s.flex_row = !v.starts_with("column"),
-        "flex-wrap" => {
+        Prop::FlexDirection => s.flex_row = !v.starts_with("column"),
+        Prop::FlexWrap => {
             s.flex_balance = v == "balance";
             s.flex_wrap = v.starts_with("wrap") || s.flex_balance;
         }
-        "flex-flow" => {
+        Prop::FlexFlow => {
             for tok in v.split_whitespace() {
                 match tok {
                     "row" | "row-reverse" => s.flex_row = true,
@@ -2486,7 +2486,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 }
             }
         }
-        "justify-content" => {
+        Prop::JustifyContent => {
             s.justify = match v {
                 "flex-end" | "end" | "right" => Justify::End,
                 "center" => Justify::Center,
@@ -2496,10 +2496,10 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 _ => Justify::Start,
             };
         }
-        "align-items" => s.align_items = parse_cross(&v).unwrap_or(CrossAlign::Stretch),
-        "align-self" => s.align_self = parse_cross(&v),
+        Prop::AlignItems => s.align_items = parse_cross(&v).unwrap_or(CrossAlign::Stretch),
+        Prop::AlignSelf => s.align_self = parse_cross(&v),
         // `gap` shorthand is `<row-gap> <column-gap>`; the longhands set one axis.
-        "gap" | "grid-gap" => {
+        Prop::Gap | Prop::GridGap => {
             let mut it = v.split_whitespace();
             let row = it.next().and_then(|t| parse_length(t, u));
             let col = it.next().and_then(|t| parse_length(t, u)).or(row);
@@ -2511,38 +2511,38 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 s.grid_col_gap = c;
             }
         }
-        "column-gap" => {
+        Prop::ColumnGap => {
             if let Some(g) = parse_length(v.trim(), u) {
                 s.grid_col_gap = g;
                 s.gap = g;
             }
         }
-        "row-gap" => {
+        Prop::RowGap => {
             if let Some(g) = parse_length(v.trim(), u) {
                 s.grid_row_gap = g;
                 s.gap = g;
             }
         }
-        "flex-grow" => {
+        Prop::FlexGrow => {
             if let Ok(f) = v.parse::<f32>() {
                 s.flex_grow = f;
             }
         }
-        "flex-shrink" => {
+        Prop::FlexShrink => {
             if let Ok(f) = v.parse::<f32>() {
                 s.flex_shrink = f;
             }
         }
-        "flex-basis" => s.flex_basis = parse_basis(&v, u),
-        "order" => {
+        Prop::FlexBasis => s.flex_basis = parse_basis(&v, u),
+        Prop::Order => {
             if let Ok(o) = v.parse::<i32>() {
                 s.order = o;
             }
         }
-        "flex" => apply_flex_shorthand(&v, s),
+        Prop::Flex => apply_flex_shorthand(&v, s),
 
         // — grid —
-        "grid-template-columns" => {
+        Prop::GridTemplateColumns => {
             let t = parse_grid_tracks(&v, s.units());
             s.grid_ncols = t.n;
             s.grid_tracks = t.tracks;
@@ -2550,16 +2550,16 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             s.grid_col_fill_start = t.fill_start;
             s.grid_col_fill_len = t.fill_len;
         }
-        "grid-template-rows" => {
+        Prop::GridTemplateRows => {
             let t = parse_grid_tracks(&v, s.units());
             s.grid_nrows = t.n;
             s.grid_row_tracks = t.tracks;
         }
-        "grid-auto-rows" => s.grid_auto_rows = parse_track(v.trim(), s.units()),
-        "grid-template-areas" => set_grid_areas(s, &v),
+        Prop::GridAutoRows => s.grid_auto_rows = parse_track(v.trim(), s.units()),
+        Prop::GridTemplateAreas => set_grid_areas(s, &v),
         // `grid` / `grid-template` shorthand: `<rows> / <cols>` (areas/flow forms
         // are not supported — they fall through to the row/column split).
-        "grid" | "grid-template" => {
+        Prop::Grid | Prop::GridTemplate => {
             // The shorthand may carry `grid-template-areas` strings.
             if v.contains('"') || v.contains('\'') {
                 set_grid_areas(s, &v);
@@ -2576,19 +2576,19 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 s.grid_col_fill_len = c.fill_len;
             }
         }
-        "grid-column" => {
+        Prop::GridColumn => {
             let (start, span) = parse_line_placement(&v);
             s.grid_col_start = start;
             s.grid_col_span = span;
         }
-        "grid-row" => {
+        Prop::GridRow => {
             let (start, span) = parse_line_placement(&v);
             s.grid_row_start = start;
             s.grid_row_span = span;
         }
-        "grid-column-start" => s.grid_col_start = parse_line(v.trim()).unwrap_or(0),
-        "grid-row-start" => s.grid_row_start = parse_line(v.trim()).unwrap_or(0),
-        "grid-area" => {
+        Prop::GridColumnStart => s.grid_col_start = parse_line(v.trim()).unwrap_or(0),
+        Prop::GridRowStart => s.grid_row_start = parse_line(v.trim()).unwrap_or(0),
+        Prop::GridArea => {
             // `grid-area: <name>` (custom ident) → named placement. The numeric
             // `row / col / …` form is left to grid-row/grid-column longhands.
             let name = v.trim();
@@ -2600,16 +2600,16 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 s.grid_area = area_hash(name);
             }
         }
-        "justify-items" => s.justify_items = parse_cross(&v).unwrap_or(CrossAlign::Stretch),
-        "justify-self" => s.justify_self = parse_cross(&v),
-        "place-items" => {
+        Prop::JustifyItems => s.justify_items = parse_cross(&v).unwrap_or(CrossAlign::Stretch),
+        Prop::JustifySelf => s.justify_self = parse_cross(&v),
+        Prop::PlaceItems => {
             let mut it = v.split_whitespace();
             let a = it.next().unwrap_or("");
             let j = it.next().unwrap_or(a);
             s.align_items = parse_cross(a).unwrap_or(CrossAlign::Stretch);
             s.justify_items = parse_cross(j).unwrap_or(CrossAlign::Stretch);
         }
-        "place-self" => {
+        Prop::PlaceSelf => {
             let mut it = v.split_whitespace();
             let a = it.next().unwrap_or("");
             let j = it.next().unwrap_or(a);
@@ -2617,7 +2617,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             s.justify_self = parse_cross(j);
         }
 
-        _ => {}
+        Prop::Unknown | Prop::Content => {}
     }
 }
 
@@ -2966,14 +2966,14 @@ fn apply_font_shorthand(v: &str, theme: &Theme, s: &mut ComputedStyle) {
     s.bold = bold;
     s.italic = italic;
     s.line_height = LineHeight::Normal;
-    apply_one("font-size", size, theme, s);
+    apply_one(Prop::FontSize, size, theme, s);
     if let Some(lh) = lh {
         if !lh.is_empty() {
-            apply_one("line-height", &lh, theme, s);
+            apply_one(Prop::LineHeight, &lh, theme, s);
         }
     }
     if rest.len() > 1 {
-        apply_one("font-family", &rest[1..].join(" "), theme, s);
+        apply_one(Prop::FontFamily, &rest[1..].join(" "), theme, s);
     }
 }
 
