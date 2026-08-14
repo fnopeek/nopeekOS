@@ -14,6 +14,10 @@ const CACHE_SIZE: usize = 16;
 
 static DNS_SERVER: Mutex<[u8; 4]> = Mutex::new([10, 0, 2, 3]); // QEMU user-mode DNS
 
+/// The local port is fixed, so the transaction ID is the only thing that tells
+/// this query's reply from a late one for an earlier name.
+static NEXT_ID: Mutex<u16> = Mutex::new(0xABCD);
+
 struct DnsEntry {
     name: String,
     ip: [u8; 4],
@@ -37,32 +41,45 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
         }
     }
 
-    // Build DNS query
-    let query = build_query(name, 0xABCD);
-
-    // Ensure ARP for DNS server
-    let dns_server = *DNS_SERVER.lock();
-    super::arp::request(dns_server);
-    let arp_wait = crate::interrupts::ticks() + 10; // ~100ms
-    while crate::interrupts::ticks() < arp_wait {
-        super::poll();
-        core::hint::spin_loop();
-    }
-
-    // Send query
-    udp::listen(LOCAL_PORT);
-    udp::send(dns_server, LOCAL_PORT, DNS_PORT, &query);
-
-    // Poll for reply (2 second timeout)
-    let t0 = crate::interrupts::ticks();
-    let result = loop {
-        super::poll();
-        if let Some((_src_ip, _src_port, data)) = udp::recv(LOCAL_PORT) {
-            break parse_response(&data);
-        }
-        if crate::interrupts::ticks() - t0 > 200 { break None; }
-        core::hint::spin_loop();
+    let id = {
+        let mut n = NEXT_ID.lock();
+        *n = n.wrapping_add(1);
+        *n
     };
+    let query = build_query(name, id);
+
+    // Warm the next hop's MAC. `arp::resolve` returns at once on a cache hit;
+    // the blind 100 ms spin that stood here paid its timeout on EVERY uncached
+    // name — five per Wikipedia load — which is why `dns` read a constant
+    // ~110 ms while a TCP round trip to the same network took 20.
+    // `arp_target_for` because a resolver off our subnet answers via the
+    // gateway, and warming the resolver's own IP would never complete.
+    let dns_server = *DNS_SERVER.lock();
+    let _ = super::arp::resolve(super::ipv4::arp_target_for(dns_server), 10);
+
+    udp::listen(LOCAL_PORT);
+
+    // Same 2 s budget as before, but split into legs: UDP has no retransmit of
+    // its own, so a single dropped datagram used to cost the whole timeout AND
+    // then fail. Now it costs one leg.
+    const LEGS: [u64; 3] = [50, 50, 100]; // 100 Hz ticks
+    let mut result = None;
+    'legs: for leg in LEGS {
+        udp::send(dns_server, LOCAL_PORT, DNS_PORT, &query);
+        let t0 = crate::interrupts::ticks();
+        while crate::interrupts::ticks().wrapping_sub(t0) < leg {
+            super::poll();
+            if let Some((_src_ip, _src_port, data)) = udp::recv(LOCAL_PORT) {
+                // Only OUR reply ends the wait — a negative answer is an
+                // answer, a stale one is not.
+                if is_reply_to(&data, id) {
+                    result = parse_response(&data);
+                    break 'legs;
+                }
+            }
+            core::hint::spin_loop();
+        }
+    }
 
     udp::unlisten(LOCAL_PORT);
 
@@ -103,6 +120,13 @@ fn build_query(name: &str, id: u16) -> Vec<u8> {
     pkt.extend_from_slice(&1u16.to_be_bytes());  // QCLASS: IN
 
     pkt
+}
+
+/// Is this datagram a response carrying our transaction ID?
+fn is_reply_to(data: &[u8], id: u16) -> bool {
+    data.len() >= 12
+        && u16::from_be_bytes([data[0], data[1]]) == id
+        && u16::from_be_bytes([data[2], data[3]]) & 0x8000 != 0
 }
 
 fn parse_response(data: &[u8]) -> Option<[u8; 4]> {
