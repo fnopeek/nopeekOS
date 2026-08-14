@@ -35,13 +35,9 @@ pub fn sync(server_ip: [u8; 4]) -> bool {
     let mut req = [0u8; 48];
     req[0] = 0x23; // LI=0, Version=4, Mode=3 (client)
 
-    // Ensure ARP
-    super::arp::request(server_ip);
-    let arp_wait = crate::interrupts::ticks() + 10; // ~100ms
-    while crate::interrupts::ticks() < arp_wait {
-        super::poll();
-        core::hint::spin_loop();
-    }
+    // Warm the next hop's MAC — see `dns::resolve`: a blind spin pays its
+    // timeout even when the entry is already cached.
+    let _ = super::arp::resolve(super::ipv4::arp_target_for(server_ip), 10);
 
     udp::listen(LOCAL_PORT);
     udp::send(server_ip, LOCAL_PORT, NTP_PORT, &req);
