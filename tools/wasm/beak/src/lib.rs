@@ -1903,6 +1903,11 @@ pub extern "C" fn _start() {
     // and makes beak feel slower to start than font-free apps (spell/loft).
     render_chrome();
 
+    // Which build is actually running. Without this a serial trace cannot say
+    // whether a measurement belongs to the version that was just installed —
+    // and a perf number from the wrong build is worse than no number.
+    log(concat!("[beak] version ", env!("CARGO_PKG_VERSION")));
+
     log("[beak] parsing font…");
     let mut engine = Engine::new();
     // Lend the engine our tick source so it can report the per-phase split.
