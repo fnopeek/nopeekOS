@@ -1237,26 +1237,20 @@ pub fn resolve(
     if !sheet.is_empty() {
         let info = ElemInfo::of(el);
         let mut matched = sheet.matched(&info, ancestors, prev_siblings, sib_count, crate::css::Media::new(viewport_w, theme.is_dark()));
-        matched.sort_by_key(|(spec, order, _)| (*spec, *order));
+        matched.sort_by_key(|(spec, order, _, _)| (*spec, *order));
         // Pass 1 — normal <style> declarations, low→high specificity.
-        for (_, _, decls) in &matched {
+        for (_, _, decls, _) in &matched {
             for (p, v) in *decls {
-                let (val, imp) = split_important(v);
-                if !imp {
-                    apply_one(p, val, theme, &mut s);
-                }
+                apply_one(p, v, theme, &mut s);
             }
         }
         if let Some(decls) = inline {
             apply_declarations_pass(decls, theme, &mut s, false);
         }
         // Pass 2 — `!important` <style> declarations, low→high specificity.
-        for (_, _, decls) in &matched {
-            for (p, v) in *decls {
-                let (val, imp) = split_important(v);
-                if imp {
-                    apply_one(p, val, theme, &mut s);
-                }
+        for (_, _, _, imp) in &matched {
+            for (p, v) in *imp {
+                apply_one(p, v, theme, &mut s);
             }
         }
         if let Some(decls) = inline {
@@ -1346,15 +1340,15 @@ pub fn resolve_pseudo(
     if matched.is_empty() {
         return None;
     }
-    matched.sort_by_key(|(spec, order, _)| (*spec, *order));
+    matched.sort_by_key(|(spec, order, _, _)| (*spec, *order));
     // The `content` declarations in cascade order (later overrides earlier). An
     // INVALID one is dropped at parse time (CSS Syntax 3 §4), so the winner is
     // the LAST one that parses — not simply the last one. The template may
     // reference counters (`counter()`/`counters()`), resolved later against the
     // layout-time counter stack; a plain string is a single `Text` piece.
     let mut content_vals: Vec<&str> = Vec::new();
-    for (_, _, decls) in &matched {
-        for (p, v) in *decls {
+    for (_, _, decls, imp) in &matched {
+        for (p, v) in decls.iter().chain(imp.iter()) {
             if p == "content" {
                 content_vals.push(v);
             }
@@ -1363,15 +1357,12 @@ pub fn resolve_pseudo(
     let template = content_vals.iter().rev().find_map(|v| parse_content_template(v))?;
     let mut s = inherit_reset(own);
     for pass_imp in [false, true] {
-        for (_, _, decls) in &matched {
-            for (p, v) in *decls {
+        for (_, _, decls, imp) in &matched {
+            for (p, v) in if pass_imp { *imp } else { *decls } {
                 if p == "content" {
                     continue;
                 }
-                let (val, imp) = split_important(v);
-                if imp == pass_imp {
-                    apply_one(p, val, theme, &mut s);
-                }
+                apply_one(p, v, theme, &mut s);
             }
         }
     }
