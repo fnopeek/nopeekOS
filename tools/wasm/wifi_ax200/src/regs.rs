@@ -375,10 +375,13 @@ pub const MC_OFF_FILTER_FLAGS: usize = 52; // __le32
 // For the connect MODIFY (iwl_mvm_mac_ctxt_cmd_sta, unassoc branch) we set the
 // timing fields the firmware needs to schedule the auth/assoc on the target BSS.
 pub const MC_OFF_STA_IS_ASSOC: usize = 100; // __le32 (0 = not yet associated)
+pub const MC_OFF_STA_DTIM_TIME: usize = 104; // __le32 (device time of next DTIM)
+pub const MC_OFF_STA_DTIM_TSF: usize = 108;  // __le64 (AP TSF of next DTIM)
 pub const MC_OFF_STA_BI: usize = 116;        // __le32 beacon interval (TU)
 pub const MC_OFF_STA_DTIM_INTERVAL: usize = 124; // __le32 (bi * dtim_period)
 pub const MC_OFF_STA_LISTEN_INTERVAL: usize = 132; // __le32
 pub const MC_OFF_STA_ASSOC_ID: usize = 136;  // __le32 (aid; 0 before assoc)
+pub const MC_OFF_STA_BEACON_ARRIVE: usize = 140; // __le32 assoc_beacon_arrive_time
 // filter flags (enum iwl_mac_filter_flags): accept multicast + foreign beacons.
 pub const MAC_FILTER_ACCEPT_GRP: u32 = 1 << 2;
 pub const MAC_FILTER_IN_BEACON: u32 = 1 << 6;
@@ -491,9 +494,26 @@ pub const REPLY_RX_MPDU_CMD: u8 = 0xc1;
 pub const IWL_RX_DESC_SIZE_V1: usize = 48;
 // Field offsets within iwl_rx_mpdu_desc, relative to pkt->data (RX_PKT_DATA_OFF).
 pub const MPDU_OFF_MPDU_LEN: usize = 0; // __le16
+pub const MPDU_OFF_MAC_FLAGS1: usize = 2; // u8
+pub const MPDU_OFF_MAC_FLAGS2: usize = 3; // u8
+pub const MPDU_OFF_STATUS: usize = 12; // __le32 (enum iwl_rx_mpdu_status)
+pub const MPDU_OFF_RATE_N_FLAGS: usize = 28; // v1.rate_n_flags (union @20 + 8)
 pub const MPDU_OFF_ENERGY_A: usize = 32; // v1.energy_a (union @20 + v1 offset 12)
 pub const MPDU_OFF_ENERGY_B: usize = 33; // v1.energy_b
 pub const MPDU_OFF_CHANNEL: usize = 34; // v1.channel
+pub const MPDU_OFF_GP2_ON_AIR: usize = 36; // v1.gp2_on_air_rise __le32
+pub const MPDU_OFF_TSF_ON_AIR: usize = 40; // v1.tsf_on_air_rise __le64
+// mac_flags1: bits 7:4 = (MIC+CRC length / 2) the RADA may not have stripped.
+// iwl_mvm_create_skb: mic_crc_len = u8_get_bits(mac_flags1, 0xf0) << 1.
+pub const MFLG1_MIC_CRC_LEN_MASK: u8 = 0xf0;
+// mac_flags2: the firmware DWORD-aligns the payload by inserting 2 bytes AFTER
+// the IV when (802.11 header + IV) is not a multiple of 4 — which is exactly the
+// QoS-header + CCMP case (26 + 8 = 34). Missing this shifts every payload by 2.
+pub const MFLG2_PAD: u8 = 0x20;
+// iwl_rx_mpdu_status: which cipher the firmware decrypted with (→ IV length).
+pub const RX_STATUS_SEC_MASK: u32 = 0x7 << 8;
+pub const RX_STATUS_SEC_CCM: u32 = 0x2 << 8;
+pub const IEEE80211_CCMP_HDR_LEN: usize = 8;
 // 802.11 management frame (ieee80211_hdr + beacon/probe-response body).
 pub const DOT11_HDR_LEN: usize = 24; // fc(2)+dur(2)+addr1/2/3(18)+seq(2)
 pub const DOT11_OFF_ADDR1: usize = 4;  // DA (receiver)
@@ -562,12 +582,24 @@ pub const AS_OFF_STA_ID: usize = 16;      // u8
 pub const AS_OFF_STATION_FLAGS: usize = 20;     // __le32
 pub const AS_OFF_STATION_FLAGS_MSK: usize = 24; // __le32
 pub const AS_OFF_STATION_TYPE: usize = 35;      // u8
+pub const AS_OFF_ASSOC_ID: usize = 36;          // __le16 (set from IEEE80211_STA_ASSOC on)
 pub const IWL_STA_LINK: u8 = 0;           // enum iwl_sta_type
 pub const ADD_STA_SUCCESS: u32 = 0x1;
 pub const ADD_STA_STATUS_MASK: u32 = 0xff; // IWL_ADD_STA_STATUS_MASK
 pub const TID_DISABLE_AGG_INIT: u16 = 0xffff; // "No aggs at first" (sta.c:1779)
 // station_flags_msk for the add: FAT_EN(3<<26) | MIMO_EN(3<<28) | RTS_MIMO_PROT(BIT17).
 pub const STA_FLAGS_MSK_ADD: u32 = (3 << 26) | (3 << 28) | (1 << 17); // 0x3C020000
+// enum iwl_sta_flags (fw/api/sta.h). Applied at assoc once the peer's HT caps
+// are known (iwl_mvm_sta_send_to_fw): channel width, spatial streams, and the
+// A-MPDU limits the AP advertised. Without them the firmware keeps the station
+// at its "just added" defaults and TLC has nothing to scale into.
+pub const STA_FLG_FAT_EN_20MHZ: u32 = 0 << 26;
+pub const STA_FLG_MIMO_EN_SISO: u32 = 0 << 28;
+pub const STA_FLG_MIMO_EN_MIMO2: u32 = 1 << 28;
+pub const STA_FLG_MAX_AGG_SIZE_SHIFT: u32 = 19;
+pub const STA_FLG_MAX_AGG_SIZE_MSK: u32 = 0xf << 19;
+pub const STA_FLG_AGG_MPDU_DENS_SHIFT: u32 = 23;
+pub const STA_FLG_AGG_MPDU_DENS_MSK: u32 = 7 << 23;
 pub const AP_STA_ID: u8 = 0;              // first free station table index
 
 // SCD_QUEUE_CONFIG_CMD v3 (DATA_PATH_GROUP/0x17, struct iwl_scd_queue_cfg_cmd
@@ -614,6 +646,32 @@ pub const TLC_OFF_MAX_MPDU: usize = 24;    // __le16
 pub const TLC_OFF_MAX_TXOP: usize = 26;    // __le16
 pub const TLC_CH_WIDTH_20MHZ: u8 = 0;      // IWL_TLC_MNG_CH_WIDTH_20MHZ
 pub const TLC_MODE_NON_HT: u8 = 0;         // IWL_TLC_MNG_MODE_NON_HT
+pub const TLC_MODE_HT: u8 = 1;             // IWL_TLC_MNG_MODE_HT
+// ht_rates is __le16[IWL_TLC_NSS_MAX=2][IWL_TLC_MCS_PER_BW_NUM_V4=3]; HT only
+// ever fills the [nss][IWL_TLC_MCS_PER_BW_80=0] slot (rs_fw_set_supp_rates).
+pub const TLC_OFF_HT_RATES_NSS1: usize = TLC_OFF_HT_RATES;     // [0][0]
+pub const TLC_OFF_HT_RATES_NSS2: usize = TLC_OFF_HT_RATES + 6; // [1][0]
+// enum iwl_tlc_mng_cfg_flags
+pub const TLC_FLAGS_STBC: u16 = 1 << 0;
+pub const TLC_FLAGS_LDPC: u16 = 1 << 1;
+// TLC_MNG_UPDATE_NOTIF (DATA_PATH_GROUP/0xF7, notif_ver 3): the firmware reports
+// the rate it settled on. This is the ONLY way to see the negotiated air rate
+// from the host — without it we cannot tell 1 Mbit CCK from MCS 15.
+// struct iwl_tlc_update_notif: sta_id u8, reserved[3], flags __le32, rate __le32.
+pub const TLC_MNG_UPDATE_NOTIF: u8 = 0xF7;
+pub const TLC_NOTIF_OFF_RATE: usize = 8;   // __le32 rate_n_flags
+// rate_n_flags v2 field extraction (same format as the TX command, see below).
+pub const RATE_MCS_MOD_TYPE_POS: u32 = 8;
+pub const RATE_MCS_MOD_TYPE_MSK: u32 = 0x7 << 8;
+pub const RATE_MCS_MOD_TYPE_CCK: u32 = 0 << 8;
+pub const RATE_MCS_MOD_TYPE_LEGACY_OFDM: u32 = 1 << 8;
+pub const RATE_MCS_MOD_TYPE_HT: u32 = 2 << 8;
+pub const RATE_MCS_MOD_TYPE_VHT: u32 = 3 << 8;
+pub const RATE_MCS_MOD_TYPE_HE: u32 = 4 << 8;
+pub const RATE_MCS_CODE_MSK: u32 = 0x1f;   // MCS index / legacy rate index
+pub const RATE_MCS_NSS_MSK: u32 = 0x20;    // 0 = 1 stream, 1 = 2 streams
+pub const RATE_MCS_CHAN_WIDTH_POS: u32 = 11;
+pub const RATE_MCS_CHAN_WIDTH_MSK: u32 = 0x7 << 11;
 // Supported legacy-rate bitmap: BIT(hw_value) per rate (IWL_RATE_*_INDEX). Full
 // 2.4 GHz 11g = CCK 1/2/5.5/11 (bits 0-3) + OFDM 6..54 (bits 4-11) = 0x0FFF;
 // 5 GHz is OFDM-only (no CCK) = bits 4-11 = 0x0FF0.
@@ -638,6 +696,13 @@ pub const TXC_OFF_FRAME: usize = 24;    // 802.11 frame (hdr[]) starts here
 // iwl_tx_flags (NEW gen2 set — NOT the gen1 TX_CMD_FLG_*).
 pub const IWL_TX_FLAGS_CMD_RATE: u32 = 1 << 0; // use rate_n_flags from the cmd
 pub const IWL_TX_FLAGS_ENCRYPT_DIS: u32 = 1 << 1; // unencrypted
+// offload_assist (enum iwl_tx_offload_assist_flags_pos). iwl_mvm_tx_csum fills
+// MH_SIZE for EVERY frame — the 802.11 header length in 2-byte words — and sets
+// PAD when that length is not a multiple of 4, in which case the transport
+// inserts 2 bytes between header and payload to DWORD-align the payload. That
+// is exactly the QoS case (26 bytes); getting it wrong misplaces the CCMP IV.
+pub const TX_CMD_OFFLD_MH_SIZE_POS: u16 = 8;
+pub const TX_CMD_OFFLD_PAD: u16 = 1 << 13;
 // rate_n_flags (fw_rates_ver=2: TX_CMD cmd_ver 9 ≥8 <11). Modern format:
 // MOD_TYPE @ bit8 (CCK=0, LEGACY_OFDM=1<<8), legacy rate in bits 0-2, ANT @ bit14.
 // 1 Mbps CCK ant A = 0x4000; 6 Mbps OFDM ant A = 0x4100 (iwl_v3_rate_to_v2_v3).
@@ -669,9 +734,55 @@ pub const WLAN_CAP_SHORT_PREAMBLE: u16 = 1 << 5;
 pub const WLAN_CAP_SHORT_SLOT: u16 = 1 << 10;
 // information element ids.
 pub const WLAN_EID_SUPP_RATES: u8 = 1;
+pub const WLAN_EID_TIM: u8 = 5;
 pub const WLAN_EID_HT_CAPABILITY: u8 = 45;
 pub const WLAN_EID_RSN: u8 = 48;
 pub const WLAN_EID_EXT_SUPP_RATES: u8 = 50;
+pub const WLAN_EID_VENDOR_SPECIFIC: u8 = 221;
+
+// ── HT (802.11n) capability element — include/linux/ieee80211.h ──────
+// struct ieee80211_ht_cap, 26 bytes: cap_info(2) ampdu_params(1) mcs(16)
+// extended_ht_cap(2) tx_BF_cap(4) antenna_selection(1). Without this element in
+// the assoc request the AP treats us as an 802.11a/g station: 54 Mbit ceiling,
+// no aggregation, and the firmware's TLC has nothing above OFDM to scale into.
+pub const HT_CAP_IE_LEN: usize = 26;
+pub const HT_OFF_CAP_INFO: usize = 0;   // __le16
+pub const HT_OFF_AMPDU_PARAMS: usize = 2; // u8
+pub const HT_OFF_MCS_RX_MASK: usize = 3;  // u8[10] (mcs.rx_mask)
+pub const HT_OFF_MCS_TX_PARAMS: usize = 3 + 12; // mcs.tx_params (after rx_mask+rx_highest)
+pub const IEEE80211_HT_CAP_LDPC_CODING: u16 = 0x0001;
+pub const IEEE80211_HT_CAP_SM_PS_DISABLED: u16 = 3 << 2; // WLAN_HT_CAP_SM_PS_DISABLED
+pub const IEEE80211_HT_CAP_SGI_20: u16 = 0x0020;
+pub const IEEE80211_HT_CAP_RX_STBC_1: u16 = 1 << 8;  // 1 spatial stream
+pub const IEEE80211_HT_CAP_RX_STBC: u16 = 0x0300;
+pub const IEEE80211_HT_MCS_TX_DEFINED: u8 = 0x01;
+pub const IEEE80211_HT_AMPDU_PARM_FACTOR: u8 = 0x03;
+pub const IEEE80211_HT_AMPDU_PARM_DENSITY: u8 = 0x1C;
+pub const IEEE80211_HT_AMPDU_PARM_DENSITY_SHIFT: u8 = 2;
+// iwl_init_ht_hw_capab: the AX200 advertises 64 KB A-MPDU / 4 us MPDU density.
+pub const HT_AMPDU_FACTOR_64K: u8 = 3;
+pub const HT_AMPDU_DENSITY_4US: u8 = 5; // IEEE80211_HT_MPDU_DENSITY_4
+
+// WMM Information Element (WFA vendor-specific 221, OUI 00:50:F2 type 2
+// subtype 0 version 1, then a QoS-Info byte). An HT station is by definition a
+// QoS station; APs that see HT without WMM may refuse to use HT rates.
+pub const WMM_INFO_IE: [u8; 9] = [
+    WLAN_EID_VENDOR_SPECIFIC, 7, 0x00, 0x50, 0xf2, 0x02, 0x00, 0x01, 0x00,
+];
+
+// QoS data frames: subtype bit 3 set (0x88 with the data type) and a 2-byte QoS
+// control field after addr3/seq, so the header is 26 instead of 24 bytes.
+pub const DOT11_FC_QOS_DATA: u8 = 0x88; // type data(2), subtype 8 (QoS data)
+pub const DOT11_QOS_HDR_LEN: usize = 26;
+
+// Block-Ack action frames (802.11 category 3). We are not an aggregating
+// receiver yet, so an ADDBA request from the AP is answered with an explicit
+// decline — leaving it unanswered makes some APs hold the TID in limbo.
+pub const DOT11_STYPE_ACTION: u8 = 13;
+pub const WLAN_CATEGORY_BACK: u8 = 3;
+pub const WLAN_ACTION_ADDBA_REQ: u8 = 0;
+pub const WLAN_ACTION_ADDBA_RESP: u8 = 1;
+pub const WLAN_STATUS_REQUEST_DECLINED: u16 = 37;
 // privacy bit in a beacon's capability field (offset hdr+8+2 = 34).
 pub const DOT11_BEACON_CAP_OFF: usize = DOT11_HDR_LEN + 8 + 2; // 34
 pub const WLAN_CAP_PRIVACY_BIT: u8 = 0x10;

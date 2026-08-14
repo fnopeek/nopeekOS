@@ -75,6 +75,28 @@ enum RxKind {
     Ip(usize),
 }
 
+/// The AP's 802.11n capabilities, read from the HT Capability element of its
+/// beacon. Everything we do at HT level derives from these: what we may put in
+/// our own assoc request, the station flags, and the MCS set TLC scales over
+/// (rs_fw_set_supp_rates uses the PEER's rx_mask — what the AP can receive).
+#[derive(Clone, Copy)]
+struct HtCap {
+    cap_info: u16,
+    ampdu_factor: u8,  // A-MPDU length exponent (0-3)
+    ampdu_density: u8, // minimum MPDU start spacing (0-7)
+    mcs_rx: [u8; 2],   // rx_mask[0] = MCS 0-7, rx_mask[1] = MCS 8-15
+    present: bool,
+}
+impl HtCap {
+    const NONE: HtCap = HtCap {
+        cap_info: 0,
+        ampdu_factor: 0,
+        ampdu_density: 0,
+        mcs_rx: [0; 2],
+        present: false,
+    };
+}
+
 /// A discovered access point (from a scan beacon / probe response).
 #[derive(Clone, Copy)]
 struct Ap {
@@ -85,6 +107,8 @@ struct Ap {
     channel: u8,
     beacon_int: u16, // beacon interval (TU) — for the connect MAC context
     privacy: bool,   // capability Privacy bit (encrypted → needs RSN in assoc-req)
+    dtim_period: u8, // from the TIM element — the MAC context needs it to associate
+    ht: HtCap,
 }
 impl Ap {
     const EMPTY: Ap = Ap {
@@ -95,6 +119,8 @@ impl Ap {
         channel: 0,
         beacon_int: 0,
         privacy: false,
+        dtim_period: 0,
+        ht: HtCap::NONE,
     };
 }
 
@@ -137,6 +163,20 @@ struct Ax200 {
     target_ssid_len: u8,
     target_privacy: bool, // target is encrypted (WPA2) → assoc-req carries an RSN IE
     target_valid: bool,
+    // The target AP's HT capabilities + DTIM period (from its beacon during the
+    // scan) and the association id the AP handed us. `ht.present` gates the whole
+    // 802.11n path: HT + WMM elements in the assoc request, QoS data frames, HT
+    // station flags and TLC mode HT. An AP without HT keeps the legacy path.
+    target_ht: HtCap,
+    target_dtim_period: u8,
+    assoc_aid: u16,
+    qos: bool, // associated as an HT/QoS station → QoS data frames
+    // Beacon timing captured right after association (iwl_mvm_set_fw_dtim_tbtt):
+    // the AP's TSF and our device timestamp at the last beacon, plus the DTIM
+    // count still to run. The MAC context needs them to be marked associated.
+    sync_tsf: u64,
+    sync_device_ts: u32,
+    sync_dtim_count: u8,
     // gen2 management TX queue for the AP station (auth/assoc frames, 5b+).
     mgmt_tfd: Dma,      // TFD ring (iwl_tfh_tfd * IWL_MGMT_QUEUE_SIZE)
     mgmt_first_tb: Dma, // first-TB staging buffers
@@ -1306,9 +1346,12 @@ impl Ax200 {
             }
         }
 
-        // Walk the information elements for the SSID (element id 0).
+        // Walk the information elements: SSID (0), TIM (5) for the DTIM period,
+        // HT Capability (45) for the AP's 802.11n parameters.
         let mut ssid = [0u8; SSID_MAX];
         let mut ssid_len = 0u8;
+        let mut dtim_period = 0u8;
+        let mut ht = HtCap::NONE;
         let mut p = f + DOT11_OFF_IES;
         while p + 2 <= buf.len() {
             let id = buf[p];
@@ -1316,17 +1359,36 @@ impl Ax200 {
             if p + 2 + len > buf.len() {
                 break;
             }
-            if id == WLAN_EID_SSID {
-                let l = len.min(SSID_MAX);
-                ssid[..l].copy_from_slice(&buf[p + 2..p + 2 + l]);
-                ssid_len = l as u8;
-                break;
+            let body = p + 2;
+            match id {
+                WLAN_EID_SSID => {
+                    let l = len.min(SSID_MAX);
+                    ssid[..l].copy_from_slice(&buf[body..body + l]);
+                    ssid_len = l as u8;
+                }
+                // TIM: dtim_count, dtim_period, bitmap_control, virtual bitmap.
+                WLAN_EID_TIM if len >= 2 => dtim_period = buf[body + 1],
+                // struct ieee80211_ht_cap — see HT_OFF_* in regs.rs.
+                WLAN_EID_HT_CAPABILITY if len >= HT_CAP_IE_LEN => {
+                    ht.cap_info =
+                        u16::from_le_bytes([buf[body + HT_OFF_CAP_INFO], buf[body + HT_OFF_CAP_INFO + 1]]);
+                    let ampdu = buf[body + HT_OFF_AMPDU_PARAMS];
+                    ht.ampdu_factor = ampdu & IEEE80211_HT_AMPDU_PARM_FACTOR;
+                    ht.ampdu_density =
+                        (ampdu & IEEE80211_HT_AMPDU_PARM_DENSITY) >> IEEE80211_HT_AMPDU_PARM_DENSITY_SHIFT;
+                    ht.mcs_rx[0] = buf[body + HT_OFF_MCS_RX_MASK];
+                    ht.mcs_rx[1] = buf[body + HT_OFF_MCS_RX_MASK + 1];
+                    ht.present = true;
+                }
+                _ => {}
             }
             p += 2 + len;
         }
 
         if *n_aps < aps.len() {
-            aps[*n_aps] = Ap { bssid, ssid, ssid_len, rssi, channel, beacon_int, privacy };
+            aps[*n_aps] = Ap {
+                bssid, ssid, ssid_len, rssi, channel, beacon_int, privacy, dtim_period, ht,
+            };
             *n_aps += 1;
         }
     }
@@ -1452,7 +1514,27 @@ impl Ax200 {
                     self.target_ssid = aps[best].ssid;
                     self.target_ssid_len = aps[best].ssid_len;
                     self.target_privacy = aps[best].privacy;
+                    self.target_ht = aps[best].ht;
+                    self.target_dtim_period = aps[best].dtim_period;
                     self.target_valid = true;
+                    host::print("[ax200] target: ch ");
+                    host::print_dec(self.target_chan as u32);
+                    host::print(", dtim_period ");
+                    host::print_dec(self.target_dtim_period as u32);
+                    if self.target_ht.present {
+                        host::print(", HT cap=0x");
+                        host::print_hex16(self.target_ht.cap_info);
+                        host::print(" mcs=");
+                        host::print_hex8(self.target_ht.mcs_rx[1]);
+                        host::print_hex8(self.target_ht.mcs_rx[0]);
+                        host::print(" ampdu f/d=");
+                        host::print_dec(self.target_ht.ampdu_factor as u32);
+                        host::print("/");
+                        host::print_dec(self.target_ht.ampdu_density as u32);
+                        host::print("\n");
+                    } else {
+                        host::print(", NO HT element — legacy rates only\n");
+                    }
                 }
                 return true;
             }
@@ -1660,6 +1742,181 @@ impl Ax200 {
         self.send_hcmd(0, MAC_CONTEXT_CMD_OP, &cmd);
         host::dprint("[ax200] MAC_CONTEXT_CMD (modify, target BSSID) sent\n");
         self.pump_rx(50);
+
+        // Grab the beacon timing HERE, not after the association: this is the
+        // last point where nothing else is expected on the RX ring. Doing it
+        // after the assoc response would mean draining (and discarding) the
+        // frames the AP sends next — including the first EAPOL of the 4-way.
+        // Auth + assoc take a few ms, so the timing is still current.
+        if self.wait_beacon_sync(600) {
+            host::print("[ax200] beacon sync: dtim ");
+            host::print_dec(self.sync_dtim_count as u32);
+            host::print("/");
+            host::print_dec(self.target_dtim_period as u32);
+            host::print("\n");
+        } else {
+            host::print("[ax200] no beacon of our BSS within 600 ms — timing unsynced\n");
+        }
+    }
+
+    // ── Post-association: tell the firmware we are associated ─────────────
+    // Everything below runs once, right after the assoc response. Linux does it
+    // from the BSS_CHANGED_ASSOC / sta-state path; we had none of it, so the
+    // firmware kept a MAC context that still said "not associated" for the whole
+    // life of the link.
+
+    // Wait for one beacon of our BSS and capture the timing the MAC context
+    // needs (iwl_mvm_set_fw_dtim_tbtt reads exactly these three): the AP's TSF
+    // and our device timestamp at beacon arrival, plus the DTIM count still to
+    // run. Also picks up the DTIM period / HT element if the scan missed them.
+    // Returns false if no beacon arrived — then we cannot claim association.
+    fn wait_beacon_sync(&mut self, ms: u32) -> bool {
+        let bssid = self.target_bssid;
+        let mut got = false;
+        // Collected in locals: the RX closure borrows `self` for the drain.
+        let mut tsf_out = 0u64;
+        let mut gp2_out = 0u32;
+        let mut dtim_count = 0u8;
+        let mut dtim_period = 0u8;
+        for _ in 0..ms {
+            self.service_rx(|cmd, grp, rb| {
+                if cmd != REPLY_RX_MPDU_CMD || grp != 0 {
+                    return true;
+                }
+                let mut buf = [0u8; 384];
+                host::dma_read_buf(rb.handle, 0, &mut buf);
+                let d = RX_PKT_DATA_OFF;
+                let f = d + IWL_RX_DESC_SIZE_V1;
+                let fc = buf[f];
+                if fc & 0x0c != 0 || (fc >> 4) & 0xf != DOT11_STYPE_BEACON {
+                    return true;
+                }
+                if buf[f + DOT11_OFF_ADDR3..f + DOT11_OFF_ADDR3 + 6] != bssid[..] {
+                    return true; // a neighbour's beacon
+                }
+                let body = f + DOT11_HDR_LEN;
+                let mut tsf = [0u8; 8];
+                tsf.copy_from_slice(&buf[body..body + 8]);
+                tsf_out = u64::from_le_bytes(tsf);
+                gp2_out = le32(&buf, d + MPDU_OFF_GP2_ON_AIR);
+                // TIM element carries the live DTIM count (and the period).
+                let mut p = f + DOT11_OFF_IES;
+                while p + 2 <= buf.len() {
+                    let len = buf[p + 1] as usize;
+                    if p + 2 + len > buf.len() {
+                        break;
+                    }
+                    if buf[p] == WLAN_EID_TIM && len >= 2 {
+                        dtim_count = buf[p + 2];
+                        dtim_period = buf[p + 3];
+                        break;
+                    }
+                    p += 2 + len;
+                }
+                got = true;
+                false // stop draining, we have what we came for
+            });
+            if got {
+                self.sync_tsf = tsf_out;
+                self.sync_device_ts = gp2_out;
+                self.sync_dtim_count = dtim_count;
+                if dtim_period != 0 {
+                    self.target_dtim_period = dtim_period;
+                }
+                return true;
+            }
+            host::sleep_ms(1);
+        }
+        false
+    }
+
+    // iwl_mvm_mac_ctxt_cmd_sta, associated branch. Marks the MAC context as
+    // associated with the DTIM timing + AID, and drops MAC_FILTER_IN_BEACON
+    // (Linux only sets that while unassociated).
+    fn mac_ctxt_assoc(&mut self) {
+        let mut cmd = [0u8; MAC_CTX_CMD_LEN];
+        put_u32(&mut cmd, MC_OFF_ID_COLOR, 0);
+        put_u32(&mut cmd, MC_OFF_ACTION, FW_CTXT_ACTION_MODIFY);
+        put_u32(&mut cmd, MC_OFF_MAC_TYPE, FW_MAC_TYPE_BSS_STA);
+        put_u32(&mut cmd, MC_OFF_TSF_ID, 0);
+        cmd[MC_OFF_NODE_ADDR..MC_OFF_NODE_ADDR + 6].copy_from_slice(&self.mac);
+        cmd[MC_OFF_BSSID_ADDR..MC_OFF_BSSID_ADDR + 6].copy_from_slice(&self.target_bssid);
+        put_u32(&mut cmd, MC_OFF_CCK_RATES, MAC_CCK_RATES_DEFAULT);
+        put_u32(&mut cmd, MC_OFF_OFDM_RATES, MAC_OFDM_RATES_DEFAULT);
+        put_u32(&mut cmd, MC_OFF_FILTER_FLAGS, MAC_FILTER_ACCEPT_GRP);
+
+        // iwl_mvm_set_fw_dtim_tbtt: the DTIM count counts down, so the next DTIM
+        // TBTT is that many beacon intervals after the beacon we just heard.
+        // Beacon intervals are TU (1024 us).
+        let bi = self.target_beacon_int as u32;
+        let dtim_offs = (self.sync_dtim_count as u32) * bi * 1024;
+        put_u32(&mut cmd, MC_OFF_STA_IS_ASSOC, 1);
+        put_u32(&mut cmd, MC_OFF_STA_DTIM_TIME, self.sync_device_ts.wrapping_add(dtim_offs));
+        put_u64(&mut cmd, MC_OFF_STA_DTIM_TSF, self.sync_tsf.wrapping_add(dtim_offs as u64));
+        put_u32(&mut cmd, MC_OFF_STA_BI, bi);
+        put_u32(&mut cmd, MC_OFF_STA_DTIM_INTERVAL, bi * self.target_dtim_period as u32);
+        put_u32(&mut cmd, MC_OFF_STA_LISTEN_INTERVAL, DOT11_LISTEN_INTERVAL as u32);
+        put_u32(&mut cmd, MC_OFF_STA_ASSOC_ID, self.assoc_aid as u32);
+        put_u32(&mut cmd, MC_OFF_STA_BEACON_ARRIVE, self.sync_device_ts);
+        self.send_hcmd(0, MAC_CONTEXT_CMD_OP, &cmd);
+        host::print("[ax200] MAC_CONTEXT is_assoc=1 (aid ");
+        host::print_dec(self.assoc_aid as u32);
+        host::print(", bi ");
+        host::print_dec(bi);
+        host::print(", dtim ");
+        host::print_dec(self.target_dtim_period as u32);
+        host::print(")\n");
+    }
+
+    // iwl_mvm_sta_send_to_fw with update=true — the station flags the peer's HT
+    // capabilities imply, plus the AID. On a modify Linux leaves addr zeroed and
+    // lets station_flags_msk select which bits to apply.
+    fn sta_assoc_update(&mut self) {
+        let mut flags = STA_FLG_FAT_EN_20MHZ;
+        let mut msk = STA_FLAGS_MSK_ADD;
+        if self.target_ht.present {
+            // rx_nss: the AP's second-stream MCS mask decides 1 vs 2 streams.
+            flags |= if self.target_ht.mcs_rx[1] != 0 {
+                STA_FLG_MIMO_EN_MIMO2
+            } else {
+                STA_FLG_MIMO_EN_SISO
+            };
+            flags |= (self.target_ht.ampdu_factor as u32) << STA_FLG_MAX_AGG_SIZE_SHIFT;
+            flags |= (self.target_ht.ampdu_density as u32) << STA_FLG_AGG_MPDU_DENS_SHIFT;
+            msk |= STA_FLG_MAX_AGG_SIZE_MSK | STA_FLG_AGG_MPDU_DENS_MSK;
+        } else {
+            flags |= STA_FLG_MIMO_EN_SISO;
+        }
+
+        let mut sc = [0u8; ADD_STA_CMD_LEN];
+        sc[AS_OFF_ADD_MODIFY] = 1; // modify
+        put_u16(&mut sc, AS_OFF_TID_DISABLE, TID_DISABLE_AGG_INIT);
+        put_u32(&mut sc, AS_OFF_MAC_ID_COLOR, 0);
+        sc[AS_OFF_STA_ID] = AP_STA_ID;
+        put_u32(&mut sc, AS_OFF_STATION_FLAGS, flags);
+        put_u32(&mut sc, AS_OFF_STATION_FLAGS_MSK, msk);
+        sc[AS_OFF_STATION_TYPE] = IWL_STA_LINK;
+        put_u16(&mut sc, AS_OFF_ASSOC_ID, self.assoc_aid);
+        self.send_hcmd(0, ADD_STA, &sc);
+        host::print("[ax200] ADD_STA modify: station_flags=0x");
+        host::print_hex32(flags);
+        host::print("\n");
+    }
+
+    // The whole post-assoc chain, in Linux' order: mark the MAC context
+    // associated, update the station, then start rate scaling.
+    fn connect_post_assoc(&mut self) {
+        // No RX draining in here: the AP starts the 4-way immediately after the
+        // assoc response, and anything we drain now we throw away. The beacon
+        // timing was captured before the auth (connect_finish_chanctx).
+        // Linux: "We need the dtim_period to set the MAC as associated."
+        if self.target_dtim_period != 0 {
+            self.mac_ctxt_assoc();
+        } else {
+            host::print("[ax200] no DTIM period — MAC context stays unassociated\n");
+        }
+        self.sta_assoc_update();
+        self.connect_tlc_config();
     }
 
     // ── Reconnect after a link loss (mesh steering / deauth) ──────────────
@@ -1740,7 +1997,7 @@ impl Ax200 {
             ready[1..7].copy_from_slice(&self.target_bssid);
             ready[7..13].copy_from_slice(&our_mac);
             host::wifi_send_event(&ready);
-            self.connect_tlc_config();
+            self.connect_post_assoc();
         }
         associated
     }
@@ -1759,19 +2016,85 @@ impl Ax200 {
         let mut cmd = [0u8; TLC_CMD_LEN];
         cmd[TLC_OFF_STA_ID] = AP_STA_ID;
         cmd[TLC_OFF_MAX_CH_WIDTH] = TLC_CH_WIDTH_20MHZ;
-        cmd[TLC_OFF_MODE] = TLC_MODE_NON_HT;
         cmd[TLC_OFF_CHAINS] = ANT_AB as u8; // chain A|B = BIT(0)|BIT(1)
-        // sgi / flags / ht_rates / max_mpdu_len / max_tx_op stay 0 (legacy mode,
-        // no aggregation, no SGI — exactly the non-HT cfg Linux builds).
+        // non_ht_rates is filled in every mode (rs_fw_set_supp_rates sets it
+        // before the mode switch) — it is the fallback the firmware drops to.
         let non_ht = if self.target_band == PHY_BAND_24 as u8 {
             TLC_NON_HT_RATES_24
         } else {
             TLC_NON_HT_RATES_5
         };
         put_u16(&mut cmd, TLC_OFF_NON_HT_RATES, non_ht);
+
+        if self.target_ht.present {
+            cmd[TLC_OFF_MODE] = TLC_MODE_HT;
+            // ht_rates carries the PEER's receive MCS mask — what the AP can
+            // take from us — per spatial stream, in the "80 MHz and below" slot.
+            put_u16(&mut cmd, TLC_OFF_HT_RATES_NSS1, self.target_ht.mcs_rx[0] as u16);
+            put_u16(&mut cmd, TLC_OFF_HT_RATES_NSS2, self.target_ht.mcs_rx[1] as u16);
+            // rs_fw_sgi_cw_support: one bit per channel width, BIT(20 MHz) here.
+            if self.target_ht.cap_info & IEEE80211_HT_CAP_SGI_20 != 0 {
+                cmd[TLC_OFF_SGI] = 1 << TLC_CH_WIDTH_20MHZ;
+            }
+            let mut flags = 0u16;
+            if self.target_ht.cap_info & IEEE80211_HT_CAP_LDPC_CODING != 0 {
+                flags |= TLC_FLAGS_LDPC;
+            }
+            if self.target_ht.cap_info & IEEE80211_HT_CAP_RX_STBC != 0 {
+                flags |= TLC_FLAGS_STBC;
+            }
+            put_u16(&mut cmd, TLC_OFF_FLAGS, flags);
+            // max_mpdu_len stays 0: that field enables TX A-MSDU, and we build
+            // our own frames. max_tx_op 0 = no limit.
+            host::print("[ax200] TLC mode=HT mcs=");
+            host::print_hex8(self.target_ht.mcs_rx[1]);
+            host::print_hex8(self.target_ht.mcs_rx[0]);
+            host::print(" sgi=");
+            host::print_dec(cmd[TLC_OFF_SGI] as u32);
+            host::print(" flags=0x");
+            host::print_hex16(flags);
+            host::print("\n");
+        } else {
+            cmd[TLC_OFF_MODE] = TLC_MODE_NON_HT;
+            host::print("[ax200] TLC mode=NON_HT (legacy 1..54M)\n");
+        }
         self.send_hcmd(DATA_PATH_GROUP, TLC_MNG_CONFIG_CMD, &cmd);
-        host::dprint("[ax200] TLC_MNG_CONFIG_CMD sent — rate scaling on (legacy 1..54M)\n");
-        self.pump_rx(20);
+    }
+
+    /// Decode a v2 rate_n_flags into the log. Always prints the raw word too —
+    /// the decode is our reading of the format, the raw value is the truth.
+    fn log_rate(prefix: &str, rnf: u32) {
+        host::print(prefix);
+        host::print("0x");
+        host::print_hex32(rnf);
+        let code = rnf & RATE_MCS_CODE_MSK;
+        match rnf & RATE_MCS_MOD_TYPE_MSK {
+            RATE_MCS_MOD_TYPE_CCK => {
+                host::print(" CCK idx ");
+                host::print_dec(code);
+            }
+            RATE_MCS_MOD_TYPE_LEGACY_OFDM => {
+                host::print(" OFDM idx ");
+                host::print_dec(code);
+            }
+            RATE_MCS_MOD_TYPE_HT => {
+                host::print(" HT MCS ");
+                host::print_dec(code);
+                host::print(if rnf & RATE_MCS_NSS_MSK != 0 { " 2ss" } else { " 1ss" });
+            }
+            RATE_MCS_MOD_TYPE_VHT => {
+                host::print(" VHT MCS ");
+                host::print_dec(code);
+            }
+            RATE_MCS_MOD_TYPE_HE => {
+                host::print(" HE MCS ");
+                host::print_dec(code);
+            }
+            _ => host::print(" mod?"),
+        }
+        host::print(" bw");
+        host::print_dec((rnf & RATE_MCS_CHAN_WIDTH_MSK) >> RATE_MCS_CHAN_WIDTH_POS);
+        host::print("\n");
     }
 
     // ── gen2 mgmt-frame TX (iwl_txq_gen2_tx + iwl_txq_gen2_build_tx) ──────
@@ -1785,7 +2108,7 @@ impl Ax200 {
     // (short header + tx_cmd_v9 + frame) across the TFD's two TBs, fill the
     // byte-count table, bump the write pointer and ring the doorbell. Returns the
     // advanced write pointer. (The 802.11 frame is built by the caller.)
-    fn tx_raw(&self, qid: u16, wptr: u32, qsize: usize, tfd_ring: Dma, first_tb: Dma, payload: Dma, bc: Dma, flags: u32, frame: &[u8]) -> u32 {
+    fn tx_raw(&self, qid: u16, wptr: u32, qsize: usize, tfd_ring: Dma, first_tb: Dma, payload: Dma, bc: Dma, flags: u32, frame: &[u8], hdr_len: usize) -> u32 {
         let idx = (wptr & (qsize as u32 - 1)) as usize;
         let mut buf = [0u8; TX_PAYLOAD_STRIDE]; // dev_cmd header + tx_cmd + full frame
         buf[0] = TX_CMD;
@@ -1794,7 +2117,17 @@ impl Ax200 {
         buf[2..4].copy_from_slice(&seq.to_le_bytes());
         let frame_len = frame.len() as u16;
         put_u16(&mut buf, TXC_OFF_LEN, frame_len);
-        put_u16(&mut buf, TXC_OFF_OFFLOAD, 0);
+        // offload_assist (iwl_mvm_tx_csum): the 802.11 header length in 2-byte
+        // words for EVERY frame, plus PAD when it is not a multiple of 4 — then
+        // 2 bytes go between header and payload so the payload is DWORD-aligned
+        // (Linux does that alignment in the transport's TB1). A QoS header is 26
+        // bytes, so this is what makes the QoS data path work at all.
+        let pad = if hdr_len % 4 != 0 { 2usize } else { 0 };
+        let mut offload = ((hdr_len / 2) as u16) << TX_CMD_OFFLD_MH_SIZE_POS;
+        if pad != 0 {
+            offload |= TX_CMD_OFFLD_PAD;
+        }
+        put_u16(&mut buf, TXC_OFF_OFFLOAD, offload);
         put_u32(&mut buf, TXC_OFF_FLAGS, flags);
         let rate = if self.target_band == PHY_BAND_24 as u8 {
             RATE_1M_CCK_ANT_A
@@ -1802,8 +2135,10 @@ impl Ax200 {
             RATE_6M_OFDM_ANT_A
         };
         put_u32(&mut buf, TXC_OFF_RATE, rate);
-        buf[TXC_OFF_FRAME..TXC_OFF_FRAME + frame.len()].copy_from_slice(frame);
-        let total = TXC_OFF_FRAME + frame.len();
+        buf[TXC_OFF_FRAME..TXC_OFF_FRAME + hdr_len].copy_from_slice(&frame[..hdr_len]);
+        let body = TXC_OFF_FRAME + hdr_len + pad; // pad bytes stay zero
+        buf[body..body + frame.len() - hdr_len].copy_from_slice(&frame[hdr_len..]);
+        let total = body + frame.len() - hdr_len;
 
         // Per-slot staging: TB0 = this slot's first-TB buffer (first 20 bytes),
         // TB1 = this slot's payload region (the rest). Every in-flight TFD has
@@ -1840,7 +2175,30 @@ impl Ax200 {
             self.mgmt_bc_tbl,
             IWL_TX_FLAGS_ENCRYPT_DIS | IWL_TX_FLAGS_CMD_RATE,
             frame,
+            DOT11_HDR_LEN,
         );
+    }
+
+    /// Answer an ADDBA request with an explicit decline. We advertise HT rates
+    /// but do not run a receive reorder buffer yet, so we must not accept a
+    /// block-ack session — and leaving the request unanswered makes some APs sit
+    /// on the TID waiting. `req` is the action body: category, action, dialog
+    /// token, parameter set (2), timeout (2).
+    fn tx_addba_decline(&mut self, req: &[u8; 12]) {
+        let mut fr = [0u8; DOT11_HDR_LEN + 9];
+        fr[0] = (DOT11_STYPE_ACTION << 4) | 0x00; // management, subtype action
+        fr[DOT11_OFF_ADDR1..DOT11_OFF_ADDR1 + 6].copy_from_slice(&self.target_bssid);
+        fr[DOT11_OFF_ADDR2..DOT11_OFF_ADDR2 + 6].copy_from_slice(&self.mac);
+        fr[DOT11_OFF_ADDR3..DOT11_OFF_ADDR3 + 6].copy_from_slice(&self.target_bssid);
+        let b = DOT11_HDR_LEN;
+        fr[b] = WLAN_CATEGORY_BACK;
+        fr[b + 1] = WLAN_ACTION_ADDBA_RESP;
+        fr[b + 2] = req[2]; // echo the dialog token
+        put_u16(&mut fr, b + 3, WLAN_STATUS_REQUEST_DECLINED);
+        fr[b + 5..b + 7].copy_from_slice(&req[3..5]); // echo the parameter set
+        fr[b + 7..b + 9].copy_from_slice(&req[5..7]); // echo the timeout
+        self.tx_mgmt_frame(&fr);
+        host::print("[ax200] ADDBA request from AP → declined (no RX reorder buffer yet)\n");
     }
 
     // Transmit a payload as an 802.11 DATA frame on the data queue (toDS:
@@ -1858,17 +2216,24 @@ impl Ax200 {
         if self.data_in_flight >= TX_INFLIGHT_MAX {
             return false;
         }
+        // As a QoS (HT) station every data frame carries a QoS control field, so
+        // the header grows from 24 to 26 bytes. tx_raw derives offload_assist and
+        // the DWORD padding from the length we pass it.
+        let hdr_len = if self.qos { DOT11_QOS_HDR_LEN } else { DOT11_HDR_LEN };
         let mut fr = [0u8; 1600];
-        fr[0] = DOT11_FC_DATA;
+        fr[0] = if self.qos { DOT11_FC_QOS_DATA } else { DOT11_FC_DATA };
         fr[1] = DOT11_FC1_TODS;
         fr[DOT11_OFF_ADDR1..DOT11_OFF_ADDR1 + 6].copy_from_slice(&self.target_bssid);
         fr[DOT11_OFF_ADDR2..DOT11_OFF_ADDR2 + 6].copy_from_slice(&self.mac);
         fr[DOT11_OFF_ADDR3..DOT11_OFF_ADDR3 + 6].copy_from_slice(&dst);
         // Unique, incrementing sequence number (seq_num << 4, frag 0). Without it
         // every data frame is seq 0 → the AP's duplicate filter mangles the flow.
+        // For QoS frames the firmware would assign it (mac80211 sets ASSIGN_SEQ),
+        // but writing our own costs nothing and covers us if it does not.
         put_u16(&mut fr, DOT11_OFF_SEQ, (self.tx_seq & 0x0fff) << 4);
         self.tx_seq = self.tx_seq.wrapping_add(1);
-        let mut p = DOT11_HDR_LEN;
+        // QoS control: TID 0 (best effort), normal ack, no A-MSDU. Bytes stay 0.
+        let mut p = hdr_len;
         fr[p..p + 6].copy_from_slice(&LLC_SNAP_HDR);
         fr[p + 6] = (ethertype >> 8) as u8;
         fr[p + 7] = ethertype as u8;
@@ -1893,6 +2258,7 @@ impl Ax200 {
             self.data_bc_tbl,
             flags,
             &fr[..p],
+            hdr_len,
         );
         self.data_in_flight += 1;
         true
@@ -1973,9 +2339,10 @@ impl Ax200 {
     }
 
     // Extract an 802.11 management frame from an RX buffer if it is addressed to
-    // us (addr1 == our MAC). Returns (subtype, first 8 body bytes after the 24-byte
-    // header). Same RB layout as parse_beacon: frame @ RX_PKT_DATA_OFF + desc(48).
-    fn rx_mgmt_for_us(rb: &Dma, our_mac: &[u8; 6]) -> Option<(u8, [u8; 8])> {
+    // us (addr1 == our MAC). Returns (subtype, first 12 body bytes after the
+    // 24-byte header) — 12 covers the longest body we inspect, an ADDBA request.
+    // Same RB layout as parse_beacon: frame @ RX_PKT_DATA_OFF + desc(48).
+    fn rx_mgmt_for_us(rb: &Dma, our_mac: &[u8; 6]) -> Option<(u8, [u8; 12])> {
         let mut buf = [0u8; 96];
         host::dma_read_buf(rb.handle, 0, &mut buf);
         let f = RX_PKT_DATA_OFF + IWL_RX_DESC_SIZE_V1; // 56
@@ -1988,8 +2355,8 @@ impl Ax200 {
         }
         let subtype = (fc >> 4) & 0xf;
         let b = f + DOT11_HDR_LEN;
-        let mut body = [0u8; 8];
-        body.copy_from_slice(&buf[b..b + 8]);
+        let mut body = [0u8; 12];
+        body.copy_from_slice(&buf[b..b + 12]);
         Some((subtype, body))
     }
 
@@ -1997,7 +2364,22 @@ impl Ax200 {
     // Finds the LLC/SNAP header at the 802.11 header end or 8 bytes further (an
     // intact CCMP header on a just-decrypted frame). EAPOL → the self-describing
     // EAPOL frame in `out`; IP → an Ethernet frame [dst=us][src=addr3][etype][pl].
-    fn rx_classify(rb: &Dma, our_mac: &[u8; 6], out: &mut [u8]) -> RxKind {
+    /// Report that the payload was not where the descriptor said it would be.
+    /// Budgeted: if the computation is systematically wrong this fires on every
+    /// frame, and a log that writes the normal case is not a log any more.
+    fn note_llc_miss(budget: &mut u32, want: usize, found: usize) {
+        if *budget == 0 {
+            return;
+        }
+        *budget -= 1;
+        host::print("[ax200] RX payload offset mismatch: computed +");
+        host::print_dec(want as u32);
+        host::print(", found +");
+        host::print_dec(found as u32);
+        host::print("\n");
+    }
+
+    fn rx_classify(rb: &Dma, our_mac: &[u8; 6], out: &mut [u8], miss_log: &mut u32) -> RxKind {
         let mut buf = [0u8; 1600];
         host::dma_read_buf(rb.handle, 0, &mut buf);
         let d = RX_PKT_DATA_OFF;
@@ -2016,15 +2398,37 @@ impl Ax200 {
             return RxKind::None;
         }
         let subtype = (fc >> 4) & 0xf;
-        let hdrlen = if subtype & DOT11_STYPE_QOS != 0 { 26 } else { 24 };
-        // LLC/SNAP directly after the header, or after an 8-byte CCMP header.
-        let llc = if f + hdrlen + 6 <= buf.len() && buf[f + hdrlen..f + hdrlen + 6] == LLC_SNAP_HDR {
+        let hdrlen = if subtype & DOT11_STYPE_QOS != 0 { DOT11_QOS_HDR_LEN } else { DOT11_HDR_LEN };
+        // Where the payload actually starts, exactly as iwl_mvm_create_skb
+        // computes it: 802.11 header, then the IV the firmware left in place for
+        // the cipher it decrypted with, then the DWORD padding the firmware
+        // inserts when header+IV is not a multiple of 4 (the QoS+CCMP case).
+        let status = le32(&buf, d + MPDU_OFF_STATUS);
+        let crypt_len = if status & RX_STATUS_SEC_MASK == RX_STATUS_SEC_CCM {
+            IEEE80211_CCMP_HDR_LEN
+        } else {
+            0
+        };
+        let pad = if buf[d + MPDU_OFF_MAC_FLAGS2] & MFLG2_PAD != 0 { 2usize } else { 0 };
+        let want = f + hdrlen + crypt_len + pad;
+        let at = |o: usize| o + 6 <= buf.len() && buf[o..o + 6] == LLC_SNAP_HDR;
+        // If the computed position is not where LLC/SNAP actually sits, fall back
+        // to searching the two places it can be and say so — a silent mismatch
+        // here would drop every frame and look like a dead link.
+        let llc = if at(want) {
+            want
+        } else if at(f + hdrlen) {
+            Self::note_llc_miss(miss_log, want, f + hdrlen);
             f + hdrlen
-        } else if f + hdrlen + 14 <= buf.len() && buf[f + hdrlen + 8..f + hdrlen + 14] == LLC_SNAP_HDR {
-            f + hdrlen + 8
+        } else if at(f + hdrlen + IEEE80211_CCMP_HDR_LEN) {
+            Self::note_llc_miss(miss_log, want, f + hdrlen + IEEE80211_CCMP_HDR_LEN);
+            f + hdrlen + IEEE80211_CCMP_HDR_LEN
         } else {
             return RxKind::None;
         };
+        if llc + 8 > buf.len() {
+            return RxKind::None;
+        }
         let ethertype = ((buf[llc + 6] as u16) << 8) | buf[llc + 7] as u16;
         let pl = llc + 8; // payload after LLC/SNAP
         if ethertype == ETHERTYPE_EAPOL {
@@ -2045,7 +2449,16 @@ impl Ax200 {
                 return RxKind::None;
             }
             // Ethernet frame for the IP stack: dst = us (addr1), src = addr3 (SA).
-            let end = (f + mpdu_len).min(buf.len());
+            // mpdu_len spans the whole frame including the firmware's padding and
+            // whatever MIC/CRC the RADA left on the tail — strip both, exactly as
+            // iwl_mvm_create_skb does, or the stack sees trailing garbage.
+            // The payload always ends mic_crc_len before the end of the MPDU:
+            // mpdu_len covers header + IV + padding + payload + MIC, and the
+            // padding sits before the payload, so it cancels out. That makes the
+            // end independent of how the IV/padding split was determined above.
+            let mic_crc_len =
+                ((buf[d + MPDU_OFF_MAC_FLAGS1] & MFLG1_MIC_CRC_LEN_MASK) >> 4) as usize * 2;
+            let end = (f + mpdu_len.saturating_sub(mic_crc_len)).min(buf.len());
             if end <= pl || 14 + (end - pl) > out.len() {
                 return RxKind::None;
             }
@@ -2061,9 +2474,9 @@ impl Ax200 {
 
     // Drain the RX ring up to `ms` ms looking for a management frame of the given
     // subtype addressed to us; return its first 8 body bytes. Recycles RBs.
-    fn wait_mgmt_response(&mut self, want_subtype: u8, ms: u32) -> Option<[u8; 8]> {
+    fn wait_mgmt_response(&mut self, want_subtype: u8, ms: u32) -> Option<[u8; 12]> {
         let our_mac = self.mac;
-        let mut found: Option<[u8; 8]> = None;
+        let mut found: Option<[u8; 12]> = None;
         for _ in 0..ms {
             self.service_rx(|cmd, grp, rb| {
                 if cmd == REPLY_RX_MPDU_CMD && grp == 0 {
@@ -2187,6 +2600,38 @@ impl Ax200 {
             p += 2 + ext.len();
         }
 
+        // HT Capability element (802.11n). Only when the AP advertised HT — an
+        // AP without it would get an element it never asked for, and everything
+        // downstream (station flags, TLC mode HT) derives from its parameters.
+        // We claim 20 MHz only: the PHY context is IWL_PHY_CHANNEL_MODE20, so
+        // advertising 20/40 would invite frames the radio is not configured for.
+        if self.target_ht.present {
+            fr[p] = WLAN_EID_HT_CAPABILITY;
+            fr[p + 1] = HT_CAP_IE_LEN as u8;
+            let b = p + 2;
+            // SM Power Save disabled (both chains stay live), short GI at 20 MHz
+            // and RX-STBC one stream — each only if the AP supports it too.
+            let mut cap = IEEE80211_HT_CAP_SM_PS_DISABLED;
+            if self.target_ht.cap_info & IEEE80211_HT_CAP_LDPC_CODING != 0 {
+                cap |= IEEE80211_HT_CAP_LDPC_CODING;
+            }
+            if self.target_ht.cap_info & IEEE80211_HT_CAP_SGI_20 != 0 {
+                cap |= IEEE80211_HT_CAP_SGI_20;
+            }
+            if self.target_ht.cap_info & IEEE80211_HT_CAP_RX_STBC != 0 {
+                cap |= IEEE80211_HT_CAP_RX_STBC_1;
+            }
+            put_u16(&mut fr, b + HT_OFF_CAP_INFO, cap);
+            fr[b + HT_OFF_AMPDU_PARAMS] = HT_AMPDU_FACTOR_64K
+                | (HT_AMPDU_DENSITY_4US << IEEE80211_HT_AMPDU_PARM_DENSITY_SHIFT);
+            // Supported receive MCS set: both spatial streams, MCS 0-15 (2x2).
+            fr[b + HT_OFF_MCS_RX_MASK] = 0xff;
+            fr[b + HT_OFF_MCS_RX_MASK + 1] = 0xff;
+            // tx_params: TX MCS set defined and equal to the RX set (no TX_RX_DIFF).
+            fr[b + HT_OFF_MCS_TX_PARAMS] = IEEE80211_HT_MCS_TX_DEFINED;
+            p += 2 + HT_CAP_IE_LEN;
+        }
+
         // RSN element (WPA2-PSK-CCMP) for encrypted APs.
         if self.target_privacy {
             let rsn: [u8; 20] = [
@@ -2202,6 +2647,14 @@ impl Ax200 {
             p += 2 + rsn.len();
         }
 
+        // WMM information element — vendor-specific, so it goes last. An HT
+        // station is a QoS station; without this the AP has no reason to grant
+        // us EDCA parameters and may decline to use HT rates at all.
+        if self.target_ht.present {
+            fr[p..p + WMM_INFO_IE.len()].copy_from_slice(&WMM_INFO_IE);
+            p += WMM_INFO_IE.len();
+        }
+
         self.tx_mgmt_frame(&fr[..p]);
         host::dprint("[ax200] ASSOC request TX'd, waiting for response...\n");
 
@@ -2213,9 +2666,13 @@ impl Ax200 {
                 let aid =
                     u16::from_le_bytes([body[ASSOC_RESP_OFF_AID], body[ASSOC_RESP_OFF_AID + 1]]) & 0x3fff;
                 if status == DOT11_STATUS_SUCCESS {
+                    self.assoc_aid = aid;
+                    // We asked for HT + WMM and the AP accepted → from here on we
+                    // are a QoS station and send QoS data frames.
+                    self.qos = self.target_ht.present;
                     host::print("[ax200] *** ASSOCIATED *** aid=");
                     host::print_dec(aid as u32);
-                    host::print("\n");
+                    host::print(if self.qos { " (HT/QoS)\n" } else { " (legacy)\n" });
                     true
                 } else {
                     host::print("[ax200] ASSOC rejected: status=");
@@ -2260,10 +2717,11 @@ impl Ax200 {
             ready[7..13].copy_from_slice(&our_mac);
             host::wifi_send_event(&ready);
             host::dprint("[ax200] associated — READY sent, listening for EAPOL (4-way)\n");
-            // Configure firmware rate scaling for the station now (Linux does it
-            // at the assoc state change). Data only flows after AUTHORIZED, so
-            // TLC is always in place before the first IP frame.
-            self.connect_tlc_config();
+            // Tell the firmware we are associated (MAC context + station), then
+            // start rate scaling. Linux does all three at the assoc state change;
+            // data only flows after AUTHORIZED, so this is always in place before
+            // the first IP frame.
+            self.connect_post_assoc();
         } else {
             host::print("[ax200] NOT associated — wlan registered but link down (no 4-way)\n");
         }
@@ -2273,6 +2731,15 @@ impl Ax200 {
         let mut txbuf = [0u8; 1514];
         let mut rx_log = 0u32; // throttle the data-path diagnostics
         let mut tx_log = 0u32;
+        // Air-rate visibility. The firmware reports the TX rate it settled on
+        // via TLC_MNG_UPDATE_NOTIF; the RX descriptor carries the rate the AP
+        // used towards us. Log only when either CHANGES — a per-frame log would
+        // drown the ring, and the interesting event is the transition.
+        let mut last_tx_rate = u32::MAX;
+        let mut last_rx_rate = u32::MAX;
+        let mut rx_rate_tick = 0u32;
+        let mut llc_miss = 8u32; // budget for RX-offset mismatch reports
+        let mut addba: Option<[u8; 12]> = None;
         let mut stall = 0u32; // iterations the data queue has been stuck full
         let mut deauth_total = 0u32; // diagnostic: link-loss events seen
         loop {
@@ -2287,21 +2754,50 @@ impl Ax200 {
                 if c == TX_CMD && g == 0 {
                     // gen2 TX completion — one per transmitted data/mgmt frame.
                     tx_done += 1;
+                } else if c == TLC_MNG_UPDATE_NOTIF && g == DATA_PATH_GROUP {
+                    // The firmware's rate-scaling verdict: what it is actually
+                    // transmitting at. Without this the host is blind to the
+                    // negotiated air rate.
+                    let mut p = [0u8; 24];
+                    host::dma_read_buf(rb.handle, 0, &mut p);
+                    let rnf = le32(&p, RX_PKT_DATA_OFF + TLC_NOTIF_OFF_RATE);
+                    if rnf != last_tx_rate {
+                        last_tx_rate = rnf;
+                        Self::log_rate("[ax200] TX rate → ", rnf);
+                    }
                 } else if c == REPLY_RX_MPDU_CMD && g == 0 {
                     // DIAGNOSTIC ONLY: note a DEAUTH / DISASSOC addressed to us +
                     // its reason, but do NOT tear down or reconnect — a reconnect
                     // would just mask whatever made us lose the link (our bug vs a
                     // genuinely-absent AP). Keep draining so detection never
                     // disrupts a healthy link.
+                    // The AP's downlink rate, from the RX descriptor. Sampled,
+                    // not read per frame: this is an extra DMA read on the hot
+                    // path and the rate moves far slower than the frame rate.
+                    rx_rate_tick += 1;
+                    if rx_rate_tick & 0x3f == 0 {
+                        let mut rd = [0u8; 64];
+                        host::dma_read_buf(rb.handle, 0, &mut rd);
+                        let rnf = le32(&rd, RX_PKT_DATA_OFF + MPDU_OFF_RATE_N_FLAGS);
+                        if rnf != last_rx_rate {
+                            last_rx_rate = rnf;
+                            Self::log_rate("[ax200] RX rate → ", rnf);
+                        }
+                    }
                     if let Some((st, body)) = Self::rx_mgmt_for_us(rb, &our_mac) {
                         if st == DOT11_STYPE_DEAUTH || st == DOT11_STYPE_DISASSOC {
                             link_lost = true;
                             deauth_subtype = st;
                             deauth_reason = u16::from_le_bytes([body[0], body[1]]);
+                        } else if st == DOT11_STYPE_ACTION
+                            && body[0] == WLAN_CATEGORY_BACK
+                            && body[1] == WLAN_ACTION_ADDBA_REQ
+                        {
+                            addba = Some(body); // answered outside the closure
                         }
                         return true; // mgmt frame — not for the IP path
                     }
-                    match Self::rx_classify(rb, &our_mac, &mut rxbuf) {
+                    match Self::rx_classify(rb, &our_mac, &mut rxbuf, &mut llc_miss) {
                         RxKind::Eapol(n) => {
                             evt[0] = EV_EAPOL_RX;
                             evt[1] = (n & 0xff) as u8;
@@ -2333,6 +2829,11 @@ impl Ax200 {
             });
             // Free the data-queue slots the firmware just reported done.
             self.data_in_flight = self.data_in_flight.saturating_sub(tx_done);
+            // Answer a block-ack setup request (the TX has to happen outside the
+            // RX closure, which holds &mut self through service_rx).
+            if let Some(req) = addba.take() {
+                self.tx_addba_decline(&req);
+            }
             // DIAGNOSTIC: a DEAUTH (subtype 12) / DISASSOC (10) arrived. Log it
             // with the 802.11 reason code — do NOT reconnect (that would mask the
             // root cause). The reason tells us whether the AP genuinely dropped us
@@ -2647,7 +3148,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.43.0 — link-loss DIAGNOSTIC (no auto-reconnect)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.44.0 — HT rates + associated MAC context + rate telemetry\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -2700,6 +3201,13 @@ pub extern "C" fn _start() {
         target_ssid_len: 0,
         target_privacy: false,
         target_valid: false,
+        target_ht: HtCap::NONE,
+        target_dtim_period: 0,
+        assoc_aid: 0,
+        qos: false,
+        sync_tsf: 0,
+        sync_device_ts: 0,
+        sync_dtim_count: 0,
         mgmt_tfd: Dma::NONE,
         mgmt_first_tb: Dma::NONE,
         mgmt_payload: Dma::NONE,
