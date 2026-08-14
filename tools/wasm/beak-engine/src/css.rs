@@ -738,18 +738,26 @@ fn collect_urls(css: &str, out: &mut BTreeMap<u64, String>) {
 /// Candidate `(rule, selector)` pairs bucketed by the most selective simple
 /// selector of a selector's rightmost compound. A selector lives in exactly
 /// one bucket, so collecting several buckets cannot produce duplicates.
+/// A bucket entry: which rule + selector, and what that selector needs to
+/// find on the ancestor chain. Carrying the requirement HERE rather than
+/// looking it up through `rules[ri].selectors[si]` is what lets `candidates`
+/// reject before collecting: measured on Main_Page, the tag buckets offer
+/// 577 828 candidates per layout and 82 % of them cannot match.
+type Cand = (u32, u32, Bloom);
+
 #[derive(Default)]
 struct Index {
-    by_id: BTreeMap<String, Vec<(u32, u32)>>,
-    by_class: BTreeMap<String, Vec<(u32, u32)>>,
-    by_tag: BTreeMap<String, Vec<(u32, u32)>>,
+    by_id: BTreeMap<String, Vec<Cand>>,
+    by_class: BTreeMap<String, Vec<Cand>>,
+    by_tag: BTreeMap<String, Vec<Cand>>,
     /// Rightmost compound names no tag, id or class (`*`, `[attr]`, a bare
     /// `:not(...)`) — must be tried for every element.
-    universal: Vec<(u32, u32)>,
+    universal: Vec<Cand>,
 }
 
 impl Index {
-    fn insert(&mut self, key: (u32, u32), last: &Compound) {
+    fn insert(&mut self, key: (u32, u32), last: &Compound, need: Bloom) {
+        let key = (key.0, key.1, need);
         // Most selective first: an id narrows far more than a tag.
         if let Some(id) = &last.id {
             self.by_id.entry(id.clone()).or_default().push(key);
@@ -764,21 +772,28 @@ impl Index {
         }
     }
 
-    fn candidates(&self, subject: &ElemInfo, out: &mut Vec<(u32, u32)>) {
+    fn candidates(&self, subject: &ElemInfo, chain: &Bloom, out: &mut Vec<(u32, u32)>) {
+        let mut take = |v: &Vec<Cand>| {
+            for &(ri, si, need) in v {
+                if bloom_covers(&need, chain) {
+                    out.push((ri, si));
+                }
+            }
+        };
         if let Some(id) = subject.id() {
             if let Some(v) = self.by_id.get(id) {
-                out.extend_from_slice(v);
+                take(v);
             }
         }
         for c in &subject.classes {
             if let Some(v) = self.by_class.get(*c) {
-                out.extend_from_slice(v);
+                take(v);
             }
         }
         if let Some(v) = self.by_tag.get(subject.tag()) {
-            out.extend_from_slice(v);
+            take(v);
         }
-        out.extend_from_slice(&self.universal);
+        take(&self.universal);
     }
 }
 
@@ -813,9 +828,9 @@ impl Stylesheet {
                     None => continue,
                 };
                 if sel.pseudo == PseudoElem::None {
-                    self.normal.insert(key, last);
+                    self.normal.insert(key, last, sel.anc_bloom);
                 } else {
-                    self.pseudo.insert(key, last);
+                    self.pseudo.insert(key, last, sel.anc_bloom);
                 }
             }
         }
@@ -868,10 +883,10 @@ impl Stylesheet {
         // unchanged: same tests, same specificity, same result.
         // Measured on a real page: ~97 candidates per element, so an empty Vec
         // reallocates about seven times per call, 9 000 times per layout.
-        let mut cands: Vec<(u32, u32)> = Vec::with_capacity(128);
-        let index = if want == PseudoElem::None { &self.normal } else { &self.pseudo };
-        index.candidates(subject, &mut cands);
         let chain = ancestor_bloom(ancestors);
+        let mut cands: Vec<(u32, u32)> = Vec::with_capacity(32);
+        let index = if want == PseudoElem::None { &self.normal } else { &self.pseudo };
+        index.candidates(subject, &chain, &mut cands);
         // Group by rule so one rule contributes one entry, at the highest
         // specificity among its matching selectors (as before).
         cands.sort_unstable();
