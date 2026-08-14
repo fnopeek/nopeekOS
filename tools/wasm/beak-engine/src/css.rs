@@ -653,6 +653,20 @@ macro_rules! css_props {
                 _ => Prop::Unknown,
             }
         }
+
+        /// Number of variants incl. `Unknown` — the width of any per-property
+        /// table. A per-property census is then three lines: an
+        /// `[AtomicU64; PROP_N]`, one `fetch_add` at the top of `apply_one`,
+        /// and a dump keyed by `prop_name`.
+        pub const PROP_N: usize = 1 + [$($name),*].len();
+
+        /// The canonical name, for diagnostics.
+        pub fn prop_name(p: Prop) -> &'static str {
+            match p {
+                Prop::Unknown => "(unknown)",
+                $(Prop::$var => $name,)*
+            }
+        }
     };
 }
 

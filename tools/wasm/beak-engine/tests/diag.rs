@@ -155,8 +155,8 @@ fn diag() {
         let m = ss.matched(&el, &ancestors, &prev, 3, beak_engine::css::Media::new(w, false));
         for prop in ["position", "height", "display", "visibility", "opacity", "overflow"] {
             let mut all: Vec<(u32,u32,String)> = Vec::new();
-            for (spec, order, decls) in &m {
-                for (p,v) in decls.iter() { if p == prop { all.push((*spec,*order,v.clone())); } }
+            for (spec, order, decls, _imp) in &m {
+                for (p,v) in decls.iter() { if beak_engine::css::prop_name(*p) == prop { all.push((*spec,*order,v.clone())); } }
             }
             all.sort_by_key(|(s,o,_)| (*s,*o));
             let winner = all.last().map(|(_,_,v)| v.clone()).unwrap_or_else(|| "<none>".into());
@@ -284,8 +284,8 @@ fn diag() {
         let m = ss.matched(&el, &[], &[], 1, beak_engine::css::Media::new(w, false));
         if let Some(pr) = &prop {
             let mut all: Vec<(u32,u32,String)> = Vec::new();
-            for (spec, order, decls) in &m {
-                for (p,v) in decls.iter() { if p == pr { all.push((*spec,*order,v.clone())); } }
+            for (spec, order, decls, _imp) in &m {
+                for (p,v) in decls.iter() { if beak_engine::css::prop_name(*p) == pr.as_str() { all.push((*spec,*order,v.clone())); } }
             }
             all.sort_by_key(|(s,o,_)| (*s,*o));
             eprintln!("=== <{tag}>.{class} '{pr}' cascade (winner last) ===");
@@ -294,14 +294,15 @@ fn diag() {
         }
         eprintln!("=== matched rules for .{class} @ vw={w}: {} ===", m.len());
         let mut saw_grid = false;
-        for (spec, order, decls) in &m {
-            let has = decls.iter().any(|(p, _)| p == "display" || p.starts_with("grid"));
+        for (spec, order, decls, _imp) in &m {
+            let has = decls.iter().any(|(p, _)| { let n = beak_engine::css::prop_name(*p); n == "display" || n.starts_with("grid") });
             if has {
                 eprintln!("  spec={spec} order={order}:");
                 for (p, v) in decls.iter() {
-                    if p == "display" || p.starts_with("grid") || p == "column-gap" {
-                        eprintln!("      {p}: {v}");
-                        if p == "display" && v.contains("grid") { saw_grid = true; }
+                    let n = beak_engine::css::prop_name(*p);
+                    if n == "display" || n.starts_with("grid") || n == "column-gap" {
+                        eprintln!("      {n}: {v}");
+                        if n == "display" && v.contains("grid") { saw_grid = true; }
                     }
                 }
             }
@@ -454,6 +455,7 @@ fn diag() {
     // DTIME=<html> DCSS=<css> DW=<width> [DN=<runs>] — how long do parse+
     // cascade+layout and paint actually take? Native, so it is a LOWER bound
     // for the device, which runs the same code under the wasmi interpreter.
+
     if let Ok(hp) = std::env::var("DTIME") {
         let html = fs::read_to_string(&hp).expect("html");
         let css = std::env::var("DCSS").ok().and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
