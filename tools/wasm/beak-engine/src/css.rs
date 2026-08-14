@@ -618,16 +618,206 @@ impl Media {
 
 /// One `selectors { declarations }` rule; `order` is document position (for
 /// same-specificity tie-breaking, last wins). `media` is the `@media`
+
+/// Every property name the cascade can resolve, turned into a number ONCE —
+/// when the stylesheet is parsed.
+///
+/// A real page applies ~150 000 declarations per layout, and finding the right
+/// branch by comparing the name as a string cost ~10 % of the whole layout
+/// (measured 2026-08-14): a chain of ~120 comparisons, repeated for a mapping
+/// that never changes. With sequential discriminants the same dispatch is a
+/// jump table.
+///
+/// The macro is the single source of truth: the enum and `prop_key` come from
+/// one list, so a name can never point at a variant that does not exist. The
+/// match in `apply_one` is exhaustive, so a NEW variant fails to compile until
+/// somebody handles it.
+macro_rules! css_props {
+    ($($var:ident = $name:literal),* $(,)?) => {
+        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+        #[repr(u16)]
+        pub enum Prop {
+            /// Anything we do not implement. Custom properties land here too —
+            /// `vars.rs` substitutes `var()` textually before this point, so a
+            /// surviving `--name` declaration has nothing left to say.
+            Unknown,
+            $($var),*
+        }
+
+        /// Resolve a declaration's property name. An EXACT string match, so an
+        /// unknown name can never be mistaken for a supported one — which is
+        /// why this is not a hash.
+        pub fn prop_key(name: &str) -> Prop {
+            match name {
+                $($name => Prop::$var,)*
+                _ => Prop::Unknown,
+            }
+        }
+    };
+}
+
+css_props! {
+    Display = "display",
+    TableLayout = "table-layout",
+    BorderCollapse = "border-collapse",
+    EmptyCells = "empty-cells",
+    VerticalAlign = "vertical-align",
+    Overflow = "overflow",
+    OverflowWrap = "overflow-wrap",
+    WordWrap = "word-wrap",
+    WordBreak = "word-break",
+    BorderRadius = "border-radius",
+    Transform = "transform",
+    BoxShadow = "box-shadow",
+    BorderTopLeftRadius = "border-top-left-radius",
+    BorderTopRightRadius = "border-top-right-radius",
+    BorderBottomRightRadius = "border-bottom-right-radius",
+    BorderBottomLeftRadius = "border-bottom-left-radius",
+    CaptionSide = "caption-side",
+    BorderSpacing = "border-spacing",
+    Color = "color",
+    FontWeight = "font-weight",
+    FontStyle = "font-style",
+    FontSize = "font-size",
+    LineHeight = "line-height",
+    Font = "font",
+    TextDecoration = "text-decoration",
+    TextDecorationLine = "text-decoration-line",
+    TextTransform = "text-transform",
+    TextAlignLast = "text-align-last",
+    TextIndent = "text-indent",
+    Direction = "direction",
+    TextAlign = "text-align",
+    ListStyleType = "list-style-type",
+    ListStyle = "list-style",
+    CounterReset = "counter-reset",
+    CounterIncrement = "counter-increment",
+    WhiteSpace = "white-space",
+    Opacity = "opacity",
+    Visibility = "visibility",
+    FontFamily = "font-family",
+    Width = "width",
+    MinWidth = "min-width",
+    MaxWidth = "max-width",
+    Height = "height",
+    MinHeight = "min-height",
+    MaxHeight = "max-height",
+    BoxSizing = "box-sizing",
+    Appearance = "appearance",
+    WebkitAppearance = "-webkit-appearance",
+    MozAppearance = "-moz-appearance",
+    Contain = "contain",
+    ContainIntrinsicSize = "contain-intrinsic-size",
+    Margin = "margin",
+    MarginTop = "margin-top",
+    MarginBlockStart = "margin-block-start",
+    MarginBottom = "margin-bottom",
+    MarginBlockEnd = "margin-block-end",
+    MarginLeft = "margin-left",
+    MarginInlineStart = "margin-inline-start",
+    MarginRight = "margin-right",
+    MarginInlineEnd = "margin-inline-end",
+    MarginInline = "margin-inline",
+    MarginBlock = "margin-block",
+    Padding = "padding",
+    PaddingTop = "padding-top",
+    PaddingBlockStart = "padding-block-start",
+    PaddingRight = "padding-right",
+    PaddingInlineEnd = "padding-inline-end",
+    PaddingBottom = "padding-bottom",
+    PaddingBlockEnd = "padding-block-end",
+    PaddingLeft = "padding-left",
+    PaddingInlineStart = "padding-inline-start",
+    PaddingInline = "padding-inline",
+    PaddingBlock = "padding-block",
+    BackgroundColor = "background-color",
+    Background = "background",
+    BackgroundImage = "background-image",
+    BackgroundRepeat = "background-repeat",
+    BackgroundPosition = "background-position",
+    BackgroundSize = "background-size",
+    Mask = "mask",
+    WebkitMask = "-webkit-mask",
+    MaskImage = "mask-image",
+    WebkitMaskImage = "-webkit-mask-image",
+    MaskRepeat = "mask-repeat",
+    WebkitMaskRepeat = "-webkit-mask-repeat",
+    MaskPosition = "mask-position",
+    WebkitMaskPosition = "-webkit-mask-position",
+    MaskSize = "mask-size",
+    WebkitMaskSize = "-webkit-mask-size",
+    Border = "border",
+    BorderTop = "border-top",
+    BorderRight = "border-right",
+    BorderBottom = "border-bottom",
+    BorderLeft = "border-left",
+    BorderWidth = "border-width",
+    BorderColor = "border-color",
+    BorderStyle = "border-style",
+    BorderTopWidth = "border-top-width",
+    BorderRightWidth = "border-right-width",
+    BorderBottomWidth = "border-bottom-width",
+    BorderLeftWidth = "border-left-width",
+    BorderTopColor = "border-top-color",
+    BorderRightColor = "border-right-color",
+    BorderBottomColor = "border-bottom-color",
+    BorderLeftColor = "border-left-color",
+    BorderTopStyle = "border-top-style",
+    BorderRightStyle = "border-right-style",
+    BorderBottomStyle = "border-bottom-style",
+    BorderLeftStyle = "border-left-style",
+    Position = "position",
+    Float = "float",
+    Clear = "clear",
+    Clip = "clip",
+    Top = "top",
+    Right = "right",
+    Bottom = "bottom",
+    Left = "left",
+    ZIndex = "z-index",
+    FlexDirection = "flex-direction",
+    FlexWrap = "flex-wrap",
+    FlexFlow = "flex-flow",
+    JustifyContent = "justify-content",
+    AlignItems = "align-items",
+    AlignSelf = "align-self",
+    Gap = "gap",
+    GridGap = "grid-gap",
+    ColumnGap = "column-gap",
+    RowGap = "row-gap",
+    FlexGrow = "flex-grow",
+    FlexShrink = "flex-shrink",
+    FlexBasis = "flex-basis",
+    Order = "order",
+    Flex = "flex",
+    GridTemplateColumns = "grid-template-columns",
+    GridTemplateRows = "grid-template-rows",
+    GridAutoRows = "grid-auto-rows",
+    GridTemplateAreas = "grid-template-areas",
+    Grid = "grid",
+    GridTemplate = "grid-template",
+    GridColumn = "grid-column",
+    GridRow = "grid-row",
+    GridColumnStart = "grid-column-start",
+    GridRowStart = "grid-row-start",
+    GridArea = "grid-area",
+    JustifyItems = "justify-items",
+    JustifySelf = "justify-self",
+    PlaceItems = "place-items",
+    PlaceSelf = "place-self",
+    Content = "content",
+}
+
 /// condition list it sits inside (comma = OR), or `None` when unconditional.
 pub struct Rule {
     selectors: Vec<Selector>,
     /// Normal declarations, `!important` already stripped at PARSE time.
     /// The cascade runs two passes over every matched rule, so leaving the
     /// suffix on meant re-scanning every value's tail twice per element.
-    decls: Vec<(String, String)>,
+    decls: Vec<(Prop, String)>,
     /// The `!important` ones, same shape. Usually empty, which is the point:
     /// pass 2 then has nothing to walk.
-    decls_imp: Vec<(String, String)>,
+    decls_imp: Vec<(Prop, String)>,
     order: u32,
     media: Option<Vec<MediaCond>>,
 }
@@ -635,7 +825,7 @@ pub struct Rule {
 /// One rule that matched: `(specificity, document order, normal declarations,
 /// `!important` declarations)`. The caller sorts ascending and applies the
 /// normal pass first, then the important one.
-pub type Matched<'a> = (u32, u32, &'a [(String, String)], &'a [(String, String)]);
+pub type Matched<'a> = (u32, u32, &'a [(Prop, String)], &'a [(Prop, String)]);
 
 /// A parsed author stylesheet.
 ///
@@ -1177,12 +1367,13 @@ fn parse_into(
         let mut decls = Vec::with_capacity(parsed.len());
         let mut decls_imp = Vec::new();
         for (name, val) in parsed {
+            let key = prop_key(&name);
             let t = val.trim_end();
             let n = t.len();
             if n >= 10 && t.is_char_boundary(n - 10) && t[n - 10..].eq_ignore_ascii_case("!important") {
-                decls_imp.push((name, t[..n - 10].trim_end().into()));
+                decls_imp.push((key, t[..n - 10].trim_end().into()));
             } else {
-                decls.push((name, val));
+                decls.push((key, val));
             }
         }
         if !selectors.is_empty() && !(decls.is_empty() && decls_imp.is_empty()) {
