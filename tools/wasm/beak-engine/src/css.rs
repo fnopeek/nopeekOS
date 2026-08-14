@@ -43,6 +43,8 @@ pub struct ElemInfo<'a> {
     /// "never matches" special cases is what makes that a one-line change
     /// later instead of a hunt.
     pub state: ElemState,
+    /// This element's own Bloom bits (id + classes) — see `ancestor_bloom`.
+    bloom: Bloom,
 }
 
 /// Runtime state a selector can ask about (CSS Selectors 4 §4, §11).
@@ -71,8 +73,20 @@ impl<'a> ElemInfo<'a> {
     }
 
     pub fn with_state(el: &'a Element, state: ElemState) -> ElemInfo<'a> {
-        let classes = el.attr("class").map(|c| c.split_whitespace().collect()).unwrap_or_default();
-        ElemInfo { el, classes, state }
+        let classes: Vec<&str> =
+            el.attr("class").map(|c| c.split_whitespace().collect()).unwrap_or_default();
+        // The element's own filter bits, hashed ONCE here. `ancestor_bloom`
+        // used to hash every ancestor's id + classes on every `matched()`
+        // call — 12 % of a whole layout, measured under the interpreter, for
+        // a value that cannot change while the element exists.
+        let mut bloom = [0u64; 4];
+        if let Some(id) = el.attr("id").map(str::trim).filter(|s| !s.is_empty()) {
+            bloom_add(&mut bloom, id);
+        }
+        for c in &classes {
+            bloom_add(&mut bloom, c);
+        }
+        ElemInfo { el, classes, state, bloom }
     }
 
     pub fn tag(&self) -> &str {
@@ -152,12 +166,10 @@ fn bloom_covers(need: &Bloom, have: &Bloom) -> bool {
 pub fn ancestor_bloom(ancestors: &[ElemInfo]) -> Bloom {
     let mut f = [0u64; 4];
     for a in ancestors {
-        if let Some(id) = a.id() {
-            bloom_add(&mut f, id);
-        }
-        for c in &a.classes {
-            bloom_add(&mut f, c);
-        }
+        f[0] |= a.bloom[0];
+        f[1] |= a.bloom[1];
+        f[2] |= a.bloom[2];
+        f[3] |= a.bloom[3];
     }
     f
 }

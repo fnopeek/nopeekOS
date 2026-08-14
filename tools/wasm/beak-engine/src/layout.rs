@@ -1174,6 +1174,16 @@ struct Ctx<'a> {
     /// fresh on every hit, because `content: counter(x)` depends on the counter
     /// state at that point in the walk, not on the element.
     pseudos: core::cell::RefCell<BTreeMap<u64, Option<(Vec<crate::style::ContentPiece>, ComputedStyle)>>>,
+    /// Memoised `segment_table_runs` results. The measure walk
+    /// (`intrinsic_walk`) and the layout walk (`flow_children`) segment the
+    /// SAME child lists independently, and each classification cascades the
+    /// child to read its `display` — measured, 82 % of the calls repeat a list
+    /// already segmented, and the classification is 25 % of a whole layout.
+    ///
+    /// Keyed by the node slice's identity AND the ancestor chain, because the
+    /// cascade that decides a role reads the chain: the same `<div>` can be a
+    /// table row in one context and not in another.
+    segs: core::cell::RefCell<BTreeMap<u64, Vec<(u32, u32, bool)>>>,
     /// Memoised `style::resolve` results, keyed by a hash of everything the
     /// cascade reads (see `style_key`) — so this is a pure cache, not a policy.
     /// A real article cascades the SAME element about twelve times: every
@@ -1532,6 +1542,7 @@ pub fn layout(
         measuring_cb_h: core::cell::Cell::new(false),
         measured: core::cell::RefCell::new(BTreeMap::new()),
         pseudos: core::cell::RefCell::new(BTreeMap::new()),
+        segs: core::cell::RefCell::new(BTreeMap::new()),
         styles: core::cell::RefCell::new(BTreeMap::new()),
     };
 
@@ -4416,6 +4427,32 @@ impl<'a> Ctx<'a> {
         // just wrong for `:nth-child` — it also gives the cascade cache a
         // second, incompatible key for the same element, and those repeat
         // misses were 90 % of all repeat misses on a real page.
+        // Identity of this question: which node list, in which ancestor chain.
+        let key = {
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+            let mut mix = |v: u64| {
+                h ^= v;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            };
+            mix(nodes.as_ptr() as u64);
+            mix(nodes.len() as u64);
+            for a in &self.path {
+                mix(a.seq() as u64 | 0x1_0000_0000);
+            }
+            h
+        };
+        if let Some(hit) = self.segs.borrow().get(&key) {
+            return hit
+                .iter()
+                .map(|&(a, b, table)| {
+                    if table {
+                        TableSeg::Table(&nodes[a as usize..b as usize])
+                    } else {
+                        TableSeg::Node(&nodes[a as usize])
+                    }
+                })
+                .collect();
+        }
         let elems: Vec<ElemInfo> = nodes
             .iter()
             .filter_map(|n| match n {
@@ -4435,6 +4472,7 @@ impl<'a> Ctx<'a> {
             }
         }
         let mut segs = Vec::with_capacity(nodes.len());
+        let mut spans: Vec<(u32, u32, bool)> = Vec::with_capacity(nodes.len());
         let mut i = 0;
         while i < nodes.len() {
             let starts_run = matches!(&nodes[i], Node::Element(e) if is_table_part(self.table_role(e, parent, &elems[..before[i]], sib_count)));
@@ -4452,12 +4490,15 @@ impl<'a> Ctx<'a> {
                     }
                 }
                 segs.push(TableSeg::Table(&nodes[i..=last]));
+                spans.push((i as u32, last as u32 + 1, true));
                 i = last + 1;
             } else {
                 segs.push(TableSeg::Node(&nodes[i]));
+                spans.push((i as u32, i as u32 + 1, false));
                 i += 1;
             }
         }
+        self.segs.borrow_mut().insert(key, spans);
         segs
     }
 
