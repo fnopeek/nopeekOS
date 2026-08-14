@@ -613,10 +613,21 @@ impl Media {
 /// condition list it sits inside (comma = OR), or `None` when unconditional.
 pub struct Rule {
     selectors: Vec<Selector>,
+    /// Normal declarations, `!important` already stripped at PARSE time.
+    /// The cascade runs two passes over every matched rule, so leaving the
+    /// suffix on meant re-scanning every value's tail twice per element.
     decls: Vec<(String, String)>,
+    /// The `!important` ones, same shape. Usually empty, which is the point:
+    /// pass 2 then has nothing to walk.
+    decls_imp: Vec<(String, String)>,
     order: u32,
     media: Option<Vec<MediaCond>>,
 }
+
+/// One rule that matched: `(specificity, document order, normal declarations,
+/// `!important` declarations)`. The caller sorts ascending and applies the
+/// normal pass first, then the important one.
+pub type Matched<'a> = (u32, u32, &'a [(String, String)], &'a [(String, String)]);
 
 /// A parsed author stylesheet.
 ///
@@ -851,7 +862,7 @@ impl Stylesheet {
         prev_siblings: &[ElemInfo],
         sib_count: u32,
         media: Media,
-    ) -> Vec<(u32, u32, &'a [(String, String)])> {
+    ) -> Vec<Matched<'a>> {
         self.matched_filtered(subject, ancestors, prev_siblings, sib_count, media, PseudoElem::None)
     }
 
@@ -865,7 +876,7 @@ impl Stylesheet {
         sib_count: u32,
         media: Media,
         pseudo: PseudoElem,
-    ) -> Vec<(u32, u32, &'a [(String, String)])> {
+    ) -> Vec<Matched<'a>> {
         self.matched_filtered(subject, ancestors, prev_siblings, sib_count, media, pseudo)
     }
 
@@ -877,7 +888,7 @@ impl Stylesheet {
         sib_count: u32,
         media: Media,
         want: PseudoElem,
-    ) -> Vec<(u32, u32, &'a [(String, String)])> {
+    ) -> Vec<Matched<'a>> {
         // Only selectors whose rightmost compound could match this element are
         // worth testing — that is what the index buys. Everything else is
         // unchanged: same tests, same specificity, same result.
@@ -913,7 +924,7 @@ impl Stylesheet {
                 i += 1;
             }
             if let Some(spec) = best {
-                out.push((spec, rule.order, rule.decls.as_slice()));
+                out.push((spec, rule.order, rule.decls.as_slice(), rule.decls_imp.as_slice()));
             }
         }
         out
@@ -1154,9 +1165,20 @@ fn parse_into(
             i += 1; // '}'
         }
         let selectors = parse_selector_list(sel_text);
-        let decls = parse_decls(body);
-        if !selectors.is_empty() && !decls.is_empty() {
-            rules.push(Rule { selectors, decls, order: *order, media: media.cloned() });
+        let parsed = parse_decls(body);
+        let mut decls = Vec::with_capacity(parsed.len());
+        let mut decls_imp = Vec::new();
+        for (name, val) in parsed {
+            let t = val.trim_end();
+            let n = t.len();
+            if n >= 10 && t.is_char_boundary(n - 10) && t[n - 10..].eq_ignore_ascii_case("!important") {
+                decls_imp.push((name, t[..n - 10].trim_end().into()));
+            } else {
+                decls.push((name, val));
+            }
+        }
+        if !selectors.is_empty() && !(decls.is_empty() && decls_imp.is_empty()) {
+            rules.push(Rule { selectors, decls, decls_imp, order: *order, media: media.cloned() });
             *order += 1;
         }
     }
@@ -2100,7 +2122,7 @@ mod tests {
         let ss = parse("p { color: a } p.x { color: b } #p { color: c }");
         let e = info("p", Some("p"), &["x"]);
         let mut m = ss.matched(&e, &[], &[], 0, Media::new(1000.0, false));
-        m.sort_by_key(|(spec, order, _)| (*spec, *order));
+        m.sort_by_key(|(spec, order, _, _)| (*spec, *order));
         // ascending: type(p) < class(p.x) < id(#p)
         assert_eq!(m.len(), 3);
         assert!(m[0].0 < m[1].0 && m[1].0 < m[2].0);
@@ -2130,8 +2152,8 @@ mod tests {
         // `:root` and `html` both match; `:root.night` does not (no class).
         assert_eq!(m.len(), 2);
         // `:root` has class-level specificity, `html` only type-level.
-        let root_spec = m.iter().find(|(_, _, d)| d[0].1 == "a").unwrap().0;
-        let tag_spec = m.iter().find(|(_, _, d)| d[0].1 == "c").unwrap().0;
+        let root_spec = m.iter().find(|(_, _, d, _)| d[0].1 == "a").unwrap().0;
+        let tag_spec = m.iter().find(|(_, _, d, _)| d[0].1 == "c").unwrap().0;
         assert!(root_spec > tag_spec);
         // Not the root element → no match.
         assert!(ss.matched(&info("body", None, &[]), &[], &[], 0, Media::new(1000.0, false)).len() == 0);
@@ -2156,7 +2178,7 @@ mod tests {
         let dom = dom::parse("<html><head><style>p{color:blue}</style></head><body><p>x</p></body></html>");
         let ss = collect_all(&dom, "p { color: red }", Media::new(800.0, false));
         let mut m = ss.matched(&info("p", None, &[]), &[], &[], 0, Media::new(1000.0, false));
-        m.sort_by_key(|(spec, order, _)| (*spec, *order));
+        m.sort_by_key(|(spec, order, _, _)| (*spec, *order));
         assert_eq!(m.len(), 2, "both external + inline rules match");
         assert!(m[0].1 < m[1].1, "external rule has earlier document order");
     }
