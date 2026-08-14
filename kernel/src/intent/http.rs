@@ -1074,6 +1074,11 @@ fn h2_put(host: &str, conn: Http2) {
 }
 
 fn h2_open(host: &str) -> Option<Http2> {
+    // Everything before `t_dns` used to be the one unmeasured stretch of the
+    // connect, and a 2026-08-14 device log showed 2100 ms connect with every
+    // named leg at 90 ms. Do not "explain" that gap from a single clean run
+    // again — measure it.
+    let t_enter = crate::interrupts::ticks();
     if let Some(c) = h2_take(host) {
         return Some(c);
     }
@@ -1089,10 +1094,20 @@ fn h2_open(host: &str) -> Option<Http2> {
     let _ = crate::net::arp::resolve(gw, 100);
     let t_conn = crate::interrupts::ticks();
     if chatty() {
-        kprintln!("[npk]   h2 pre-connect {} (dns {} + arp {} ms)",
-            host, t_arp.wrapping_sub(t_dns) * 10, t_conn.wrapping_sub(t_arp) * 10);
+        kprintln!("[npk]   h2 pre-connect {} (pool {} + dns {} + arp {} ms)",
+            host, t_dns.wrapping_sub(t_enter) * 10,
+            t_arp.wrapping_sub(t_dns) * 10, t_conn.wrapping_sub(t_arp) * 10);
     }
-    match http2::connect(host, ip, 443) {
+    // The serial write above is itself unmeasured otherwise, and it sits
+    // INSIDE the span the caller reports as "connect".
+    let t_pre = crate::interrupts::ticks();
+    let r = http2::connect(host, ip, 443);
+    if chatty() {
+        let after = crate::interrupts::ticks();
+        kprintln!("[npk]   h2 connect() span {} ms (log {} ms before it)",
+            after.wrapping_sub(t_pre) * 10, t_pre.wrapping_sub(t_conn) * 10);
+    }
+    match r {
         Ok(c) => Some(c),
         Err(http2::Http2Error::NotNegotiated) => {
             mark_h2_refused(host);
@@ -1273,6 +1288,10 @@ fn https_exchange(
     head.push_str("\r\n");
     let mut request = head.into_bytes();
     request.extend_from_slice(req.body);
+    // h2 reports connect/transfer separately; h1 reported NOTHING between the
+    // handshake and "receiving body", which is where a 6.5 s document fetch
+    // hid on 2026-08-14 with every measured leg at 90 ms.
+    let t_send = crate::interrupts::ticks();
     if crate::tls::tls_send(&mut tls, &request).is_err() {
         // Stale pooled socket (or a send error) — nothing delivered, retry fresh.
         let _ = crate::tls::tls_close(&mut tls);
@@ -1285,6 +1304,7 @@ fn https_exchange(
     // The loop leaves only two ways: it breaks WITH the header offset, or it
     // returns. Yielding the offset out of `break` says that in the types, so
     // there is no "we got here without a header" case left to handle.
+    let t_hdr0 = crate::interrupts::ticks();
     let hdr_end = loop {
         match tls_recv_poll(&mut tls, &mut buf) {
             Ok(0) => continue,
@@ -1343,8 +1363,10 @@ fn https_exchange(
     // the Location back to the caller (no bytes go to the sink).
     if (300..400).contains(&status) {
         if chatty() {
+            let (send_ms, hdr_ms) = (t_hdr0.wrapping_sub(t_send) * 10,
+                                     crate::interrupts::ticks().wrapping_sub(t_hdr0) * 10);
             match &location {
-                Some(l) => kprintln!("[npk]   HTTP {} -> {}", status, l),
+                Some(l) => kprintln!("[npk]   HTTP {} (send {} + headers {} ms) -> {}", status, send_ms, hdr_ms, l),
                 None => kprintln!("[npk]   HTTP {} (redirect, no Location)", status),
             }
         }
@@ -1352,7 +1374,13 @@ fn https_exchange(
         finish_conn(host, tls, persistent && drained);
         return Ok(HttpResponse { status, location, content_type, headers: reply_headers });
     }
-    if chatty() { kprintln!("[npk]   HTTP {} — receiving body", status); }
+    let t_body0 = crate::interrupts::ticks();
+    if chatty() {
+        kprintln!("[npk]   HTTP {} — send {} ms + headers {} ms, receiving body",
+            status,
+            t_hdr0.wrapping_sub(t_send) * 10,
+            t_body0.wrapping_sub(t_hdr0) * 10);
+    }
 
     // 2xx / other: stream the body. The headers already proved the socket
     // live, so a failure HERE is a genuine mid-body drop (partial bytes are
@@ -1426,6 +1454,9 @@ fn https_exchange(
         fully_drained = false;
     }
 
+    if chatty() {
+        kprintln!("[npk]   HTTP body {} ms", crate::interrupts::ticks().wrapping_sub(t_body0) * 10);
+    }
     finish_conn(host, tls, persistent && fully_drained);
     Ok(HttpResponse { status, location, content_type, headers: reply_headers })
 }
