@@ -33,18 +33,12 @@ pub struct ElemInfo<'a> {
     /// needs — matching against a live tree, not against copies of it — so
     /// there is one matcher for the cascade and for scripting, not two.
     pub el: &'a Element,
-    /// `class` split once. Selector matching runs EVERY rule against this
-    /// element, so re-splitting per rule would dominate the cascade; the slices
-    /// borrow, so nothing is copied.
-    classes: Vec<&'a str>,
     /// What only the runtime knows. `:checked`/`:disabled` read it today;
     /// `:hover`/`:focus` are the same mechanism and stay `false` until there is
     /// an event loop to flip them. Keeping them HERE rather than as scattered
     /// "never matches" special cases is what makes that a one-line change
     /// later instead of a hunt.
     pub state: ElemState,
-    /// This element's own Bloom bits (id + classes) — see `ancestor_bloom`.
-    bloom: Bloom,
 }
 
 /// Runtime state a selector can ask about (CSS Selectors 4 §4, §11).
@@ -65,35 +59,37 @@ impl<'a> ElemInfo<'a> {
         ElemInfo::with_state(
             el,
             ElemState {
-                checked: el.attr("checked").is_some(),
-                disabled: el.attr("disabled").is_some(),
+                checked: el.checked_attr,
+                disabled: el.disabled_attr,
                 ..ElemState::default()
             },
         )
     }
 
+    /// Free — everything derived from the element now lives ON the element,
+    /// computed once by `Element::index_attrs` at parse time. This used to
+    /// split `class`, hash the Bloom bits and scan the attribute list four
+    /// times on EVERY construction, and it is constructed ~30 000× per layout:
+    /// 12.5 % of the layout, measured by doubling the work.
     pub fn with_state(el: &'a Element, state: ElemState) -> ElemInfo<'a> {
-        let classes: Vec<&str> =
-            el.attr("class").map(|c| c.split_whitespace().collect()).unwrap_or_default();
-        // The element's own filter bits, hashed ONCE here. `ancestor_bloom`
-        // used to hash every ancestor's id + classes on every `matched()`
-        // call — 12 % of a whole layout, measured under the interpreter, for
-        // a value that cannot change while the element exists.
-        let mut bloom = [0u64; 4];
-        if let Some(id) = el.attr("id").map(str::trim).filter(|s| !s.is_empty()) {
-            bloom_add(&mut bloom, id);
-        }
-        for c in &classes {
-            bloom_add(&mut bloom, c);
-        }
-        ElemInfo { el, classes, state, bloom }
+        ElemInfo { el, state }
+    }
+
+    /// `class`, split at parse time.
+    pub fn classes(&self) -> &'a [String] {
+        &self.el.classes
+    }
+
+    /// This element's own Bloom bits (id + classes) — see `ancestor_bloom`.
+    pub fn bloom(&self) -> &'a Bloom {
+        &self.el.bloom
     }
 
     pub fn tag(&self) -> &str {
         &self.el.tag
     }
-    pub fn id(&self) -> Option<&str> {
-        self.el.attr("id").map(str::trim).filter(|s| !s.is_empty())
+    pub fn id(&self) -> Option<&'a str> {
+        self.el.id.as_deref()
     }
     pub fn seq(&self) -> u32 {
         self.el.seq
@@ -140,6 +136,18 @@ enum Comb {
 /// name appearing, so including them would produce false NEGATIVES.
 pub type Bloom = [u64; 4];
 
+/// One element's filter bits. Called once per element at parse time.
+pub fn bloom_of(id: Option<&str>, classes: &[String]) -> Bloom {
+    let mut f = [0u64; 4];
+    if let Some(id) = id {
+        bloom_add(&mut f, id);
+    }
+    for c in classes {
+        bloom_add(&mut f, c);
+    }
+    f
+}
+
 fn bloom_add(f: &mut Bloom, s: &str) {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in s.as_bytes() {
@@ -166,10 +174,10 @@ fn bloom_covers(need: &Bloom, have: &Bloom) -> bool {
 pub fn ancestor_bloom(ancestors: &[ElemInfo]) -> Bloom {
     let mut f = [0u64; 4];
     for a in ancestors {
-        f[0] |= a.bloom[0];
-        f[1] |= a.bloom[1];
-        f[2] |= a.bloom[2];
-        f[3] |= a.bloom[3];
+        f[0] |= a.el.bloom[0];
+        f[1] |= a.el.bloom[1];
+        f[2] |= a.el.bloom[2];
+        f[3] |= a.el.bloom[3];
     }
     f
 }
@@ -392,7 +400,7 @@ impl Compound {
                 return false;
             }
         }
-        if !self.classes.iter().all(|c| e.classes.iter().any(|x| x == c)) {
+        if !self.classes.iter().all(|c| e.classes().iter().any(|x| x == c)) {
             return false;
         }
         if !self.attrs.iter().all(|a| a.matches(e)) {
@@ -796,8 +804,8 @@ impl Index {
                 take(v);
             }
         }
-        for c in &subject.classes {
-            if let Some(v) = self.by_class.get(*c) {
+        for c in subject.classes() {
+            if let Some(v) = self.by_class.get(c.as_str()) {
                 take(v);
             }
         }

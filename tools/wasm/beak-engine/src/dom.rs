@@ -30,11 +30,51 @@ pub struct Element {
     /// as the key: layout skips `display:none` subtrees, so any counter kept
     /// during layout would drift from one kept during a plain DOM walk.
     pub seq: u32,
+    /// Derived from `attrs` ONCE, by `index_attrs` at parse time. The DOM does
+    /// not change afterwards — there is no scripting — but `ElemInfo` used to
+    /// re-derive all of this on every construction, ~30 000× per layout.
+    /// Measured by doubling the work: **12.5 % of a whole layout**, spread so
+    /// thin across `flow_children` and the cascade that no single function
+    /// looked expensive.
+    pub classes: Vec<String>,
+    pub id: Option<String>,
+    pub bloom: crate::css::Bloom,
+    /// What the SOURCE said. Live form state (a box the reader ticked) is a
+    /// different thing and travels in `ElemState`.
+    pub checked_attr: bool,
+    pub disabled_attr: bool,
 }
 
 impl Element {
     fn new(tag: String, seq: u32) -> Element {
-        Element { tag, attrs: Vec::new(), children: Vec::new(), seq }
+        Element {
+            tag,
+            attrs: Vec::new(),
+            children: Vec::new(),
+            seq,
+            classes: Vec::new(),
+            id: None,
+            bloom: [0; 4],
+            checked_attr: false,
+            disabled_attr: false,
+        }
+    }
+
+    /// Fill the derived fields. MUST run after `attrs` is final — for foreign
+    /// content that is after the SVG name fixups, not before.
+    pub fn index_attrs(&mut self) {
+        let classes: Vec<String> = self
+            .attr("class")
+            .map(|c| c.split_whitespace().map(String::from).collect())
+            .unwrap_or_default();
+        let id = self.attr("id").map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+        let checked = self.attr("checked").is_some();
+        let disabled = self.attr("disabled").is_some();
+        self.bloom = crate::css::bloom_of(id.as_deref(), &classes);
+        self.classes = classes;
+        self.id = id;
+        self.checked_attr = checked;
+        self.disabled_attr = disabled;
     }
 
     /// Value of `name` (case-insensitive, already lowercased at parse time).
@@ -161,6 +201,7 @@ pub fn parse(html: &str) -> Dom {
                     }
                 }
             }
+            el.index_attrs();
 
             if RAWTEXT.contains(&name.as_str()) {
                 let (content, after) = read_rawtext(html, i, &name);
@@ -209,7 +250,9 @@ pub fn parse(html: &str) -> Dom {
 /// element keeps the index it was given.
 fn imply_html_body(root: &mut Element) {
     fn make(tag: &str, children: Vec<Node>) -> Element {
-        Element { tag: String::from(tag), attrs: Vec::new(), children, seq: 0 }
+        let mut el = Element::new(String::from(tag), 0);
+        el.children = children;
+        el
     }
     fn is_tag(n: &Node, tag: &str) -> bool {
         matches!(n, Node::Element(e) if e.tag == tag)
