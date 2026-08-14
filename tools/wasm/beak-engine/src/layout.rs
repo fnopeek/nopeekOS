@@ -3296,9 +3296,12 @@ impl<'a> Ctx<'a> {
     /// it.
     fn layout_captions(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y0: i32, bottom: bool) -> i32 {
         let mut y = y0;
+        let sib_count = el.children.iter().filter(|n| matches!(n, Node::Element(_))).count() as u32;
+        let mut siblings: Vec<ElemInfo> = Vec::new();
         for c in &el.children {
             if let Node::Element(e) = c {
-                let cs = self.styled(e, st, &[], 0);
+                let cs = self.styled(e, st, &siblings, sib_count);
+                siblings.push(ElemInfo::of(e));
                 if e.tag != "caption" && cs.display != Display::TableCaption {
                     continue;
                 }
@@ -3881,7 +3884,7 @@ impl<'a> Ctx<'a> {
 
     /// Classify a table child by tag, else by its computed `display` (CSS
     /// tables). Only elements are passed in.
-    fn table_role(&self, e: &Element, parent: &ComputedStyle) -> TableRole {
+    fn table_role(&self, e: &Element, parent: &ComputedStyle, prev: &[ElemInfo], sib_count: u32) -> TableRole {
         match e.tag.as_str() {
             "tr" => TableRole::Row,
             "thead" => TableRole::HeaderGroup,
@@ -3890,7 +3893,7 @@ impl<'a> Ctx<'a> {
             "td" | "th" => TableRole::Cell,
             "caption" | "col" | "colgroup" => TableRole::Skip,
             _ => {
-                let st = self.styled(e, parent, &[], 0);
+                let st = self.styled(e, parent, prev, sib_count);
                 match st.display {
                     Display::TableRow => TableRole::Row,
                     Display::TableRowGroup => TableRole::RowGroup,
@@ -3951,7 +3954,7 @@ impl<'a> Ctx<'a> {
         let sib_count = nodes.iter().filter(|n| matches!(n, Node::Element(_))).count() as u32;
         for (i, n) in nodes.iter().enumerate() {
             let role = match n {
-                Node::Element(e) => Some(self.table_role(e, parent)),
+                Node::Element(e) => Some(self.table_role(e, parent, &siblings, sib_count)),
                 Node::Text(_) => None,
             };
             match role {
@@ -4039,7 +4042,7 @@ impl<'a> Ctx<'a> {
         let anon = |cell| StyledCell { cell, st: style::anon_inherit(parent, Display::TableCell) };
         for (i, n) in nodes.iter().enumerate() {
             let role = match n {
-                Node::Element(e) => Some(self.table_role(e, parent)),
+                Node::Element(e) => Some(self.table_role(e, parent, &siblings, sib_count)),
                 Node::Text(_) => None,
             };
             match role {
@@ -4407,17 +4410,41 @@ impl<'a> Ctx<'a> {
         fn is_table_part(role: TableRole) -> bool {
             matches!(role, TableRole::Row | TableRole::RowGroup | TableRole::HeaderGroup | TableRole::FooterGroup | TableRole::Cell)
         }
+        // The sibling context every `table_role` here must see. Built once:
+        // `elems` is every element child in order, `before[i]` how many of them
+        // precede node `i`. Passing `&[], 0` instead (as this used to) is not
+        // just wrong for `:nth-child` — it also gives the cascade cache a
+        // second, incompatible key for the same element, and those repeat
+        // misses were 90 % of all repeat misses on a real page.
+        let elems: Vec<ElemInfo> = nodes
+            .iter()
+            .filter_map(|n| match n {
+                Node::Element(e) => Some(ElemInfo::of(e)),
+                _ => None,
+            })
+            .collect();
+        let sib_count = elems.len() as u32;
+        let mut before = Vec::with_capacity(nodes.len());
+        {
+            let mut k = 0usize;
+            for n in nodes {
+                before.push(k);
+                if matches!(n, Node::Element(_)) {
+                    k += 1;
+                }
+            }
+        }
         let mut segs = Vec::with_capacity(nodes.len());
         let mut i = 0;
         while i < nodes.len() {
-            let starts_run = matches!(&nodes[i], Node::Element(e) if is_table_part(self.table_role(e, parent)));
+            let starts_run = matches!(&nodes[i], Node::Element(e) if is_table_part(self.table_role(e, parent, &elems[..before[i]], sib_count)));
             if starts_run {
                 let mut last = i;
                 let mut j = i + 1;
                 while j < nodes.len() {
                     match &nodes[j] {
                         Node::Text(t) if t.trim().is_empty() => j += 1,
-                        Node::Element(e) if is_table_part(self.table_role(e, parent)) => {
+                        Node::Element(e) if is_table_part(self.table_role(e, parent, &elems[..before[j]], sib_count)) => {
                             last = j;
                             j += 1;
                         }
