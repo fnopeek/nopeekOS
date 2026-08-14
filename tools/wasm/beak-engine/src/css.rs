@@ -110,6 +110,58 @@ enum Comb {
     General,
 }
 
+/// A 256-bit Bloom filter over the id/class names on an element's ANCESTOR
+/// chain, so a descendant selector that cannot possibly match is rejected
+/// without walking the chain at all.
+///
+/// Right-to-left matching is cheap for the subject (the index already
+/// narrowed it) and expensive above it: `Comb::Descendant` walks every
+/// ancestor before giving up, and giving up is the common case — measured on
+/// Main_Page, ~14 600 interpreter instructions per candidate, which made
+/// `matched()` 61 % of a whole layout.
+///
+/// Only ids and classes go in, never tags: a tag is barely selective, and
+/// leaving it out keeps the filter sparse. Only the CONJUNCTIVE parts of a
+/// compound count — `:is()`/`:not()` alternatives may match without their
+/// name appearing, so including them would produce false NEGATIVES.
+pub type Bloom = [u64; 4];
+
+fn bloom_add(f: &mut Bloom, s: &str) {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    // Two bits per name, taken from separate stretches of the hash.
+    for bit in [(h >> 3) & 255, (h >> 33) & 255] {
+        f[(bit >> 6) as usize] |= 1u64 << (bit & 63);
+    }
+}
+
+/// Every bit the selector needs must be present in the chain's filter.
+#[inline]
+fn bloom_covers(need: &Bloom, have: &Bloom) -> bool {
+    (need[0] & !have[0]) == 0
+        && (need[1] & !have[1]) == 0
+        && (need[2] & !have[2]) == 0
+        && (need[3] & !have[3]) == 0
+}
+
+/// The filter for one ancestor chain (root → … → parent). Built once per
+/// `matched_filtered` call and shared by every candidate.
+pub fn ancestor_bloom(ancestors: &[ElemInfo]) -> Bloom {
+    let mut f = [0u64; 4];
+    for a in ancestors {
+        if let Some(id) = a.id() {
+            bloom_add(&mut f, id);
+        }
+        for c in &a.classes {
+            bloom_add(&mut f, c);
+        }
+    }
+    f
+}
+
 /// Which generated-content pseudo-element (if any) a selector targets. Only
 /// `::before`/`::after` (single- or double-colon) are recognised; every other
 /// pseudo-element (`::first-line`, `::placeholder`, …) is unsupported and
@@ -373,6 +425,10 @@ pub struct Selector {
     compounds: Vec<Compound>,
     combs: Vec<Comb>,
     spec: u32,
+    /// Names that MUST appear somewhere on the subject's ancestor chain —
+    /// see `Bloom`. Empty for a selector with no ancestor part, which then
+    /// always passes the pre-test.
+    anc_bloom: Bloom,
     /// `::before`/`::after` this selector targets (`None` = a normal
     /// selector, matching the real element).
     pseudo: PseudoElem,
@@ -383,7 +439,15 @@ impl Selector {
     /// compounds must match ancestors per their combinators. `ancestors` is
     /// root→…→parent order. Descendant matching is nearest-first (no backtrack —
     /// enough for content selectors; noted as a shortcut).
-    fn matches(&self, subject: &ElemInfo, ancestors: &[ElemInfo], prev_siblings: &[ElemInfo], sib_count: u32) -> bool {
+    fn matches(&self, subject: &ElemInfo, ancestors: &[ElemInfo], prev_siblings: &[ElemInfo], sib_count: u32, anc_bloom: &Bloom) -> bool {
+        // O(1) rejection before the ancestor walk: if a name this selector
+        // requires above the subject is absent from the whole chain, no amount
+        // of walking will find it. False positives are fine (the real match
+        // runs anyway); false negatives are not, which is why only conjunctive
+        // ids/classes went into the filter.
+        if !bloom_covers(&self.anc_bloom, anc_bloom) {
+            return false;
+        }
         // The subject's structural pseudo-classes evaluate against its 1-based
         // sibling index (preceding count + 1) and the total sibling count —
         // and, for `:*-of-type`, against the same pair restricted to its tag.
@@ -793,6 +857,7 @@ impl Stylesheet {
         let mut cands: Vec<(u32, u32)> = Vec::new();
         let index = if want == PseudoElem::None { &self.normal } else { &self.pseudo };
         index.candidates(subject, &mut cands);
+        let chain = ancestor_bloom(ancestors);
         // Group by rule so one rule contributes one entry, at the highest
         // specificity among its matching selectors (as before).
         cands.sort_unstable();
@@ -812,7 +877,7 @@ impl Stylesheet {
             while i < cands.len() && cands[i].0 == ri {
                 if media_ok {
                     let sel = &rule.selectors[cands[i].1 as usize];
-                    if sel.pseudo == want && sel.matches(subject, ancestors, prev_siblings, sib_count) {
+                    if sel.pseudo == want && sel.matches(subject, ancestors, prev_siblings, sib_count, &chain) {
                         best = Some(best.map_or(sel.spec, |b| b.max(sel.spec)));
                     }
                 }
@@ -1394,7 +1459,27 @@ fn parse_selector(text: &str) -> Option<Selector> {
     }
     let pseudo = compounds[last].pseudo;
     let spec = specificity(&compounds);
-    Some(Selector { compounds, combs, spec, pseudo })
+    // Walking right to left, every compound past the FIRST descendant/child
+    // combinator is guaranteed to sit on the ancestor chain. Sibling
+    // combinators stay at the subject's own level, so a compound reached
+    // only through them is not an ancestor and must not be required.
+    let mut anc_bloom: Bloom = [0u64; 4];
+    let mut on_chain = false;
+    for ci in (0..combs.len()).rev() {
+        if matches!(combs[ci], Comb::Descendant | Comb::Child) {
+            on_chain = true;
+        }
+        if on_chain {
+            let c = &compounds[ci];
+            if let Some(id) = &c.id {
+                bloom_add(&mut anc_bloom, id);
+            }
+            for cl in &c.classes {
+                bloom_add(&mut anc_bloom, cl);
+            }
+        }
+    }
+    Some(Selector { compounds, combs, spec, pseudo, anc_bloom })
 }
 
 /// Split into compound tokens + `>` tokens on whitespace / `>` boundaries.
