@@ -17,7 +17,7 @@
 //! + cascade here are exactly what that will reuse.
 
 use alloc::borrow::Cow;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -66,6 +66,21 @@ impl<'a> ElemInfo<'a> {
         )
     }
 
+    /// `of()` plus the pointer state: `hovered` is the ascending `seq` list of
+    /// the elements the pointer is inside (`Layout::hover_at`). A binary search
+    /// over a list that is empty on all but one path through the page.
+    pub fn of_hovered(el: &'a Element, hovered: &[u32]) -> ElemInfo<'a> {
+        ElemInfo::with_state(
+            el,
+            ElemState {
+                checked: el.checked_attr,
+                disabled: el.disabled_attr,
+                hover: !hovered.is_empty() && hovered.binary_search(&el.seq).is_ok(),
+                ..ElemState::default()
+            },
+        )
+    }
+
     /// Free — everything derived from the element now lives ON the element,
     /// computed once by `Element::index_attrs` at parse time. This used to
     /// split `class`, hash the Bloom bits and scan the attribute list four
@@ -107,6 +122,16 @@ impl<'a> ElemInfo<'a> {
             Node::Text(t) => t.trim().is_empty(),
             Node::Element(_) => false,
         })
+    }
+
+    /// `:any-link` — an `<a>`/`<area>`/`<link>` that carries an `href`
+    /// (Selectors 4 §8.1). A bare `<a name=…>` anchor is not a link.
+    ///
+    /// Read from `attrs` on demand rather than indexed onto `Element`: only a
+    /// selector that asks reaches here, while anything cached on the element
+    /// is paid ~30 000× per layout.
+    fn is_link(&self) -> bool {
+        matches!(self.el.tag.as_str(), "a" | "area" | "link") && self.el.attr("href").is_some()
     }
 }
 
@@ -346,6 +371,89 @@ impl HasArg {
     }
 }
 
+/// The elements a sheet's `:hover` rules could possibly react to — the same
+/// idea as Blink's invalidation sets, in the smallest form that pays.
+///
+/// It holds the names on the compound that CARRIES the `:hover`, not on the
+/// selector's subject: in `nav:hover a` the pointer has to be inside the
+/// `<nav>`, and the `<a>` restyles because of it. Since an ancestor's box
+/// encloses its descendant's, hit-testing only the carriers finds exactly the
+/// elements whose state can change.
+///
+/// Measured on Wikipedia's Main_Page: 8327 element boxes, of which a handful
+/// carry a hover rule. Collecting all of them made 98.7 % of pointer movement
+/// walk a list that could never answer anything but "no".
+#[derive(Default)]
+pub struct HoverSet {
+    ids: BTreeSet<String>,
+    classes: BTreeSet<String>,
+    tags: BTreeSet<String>,
+    /// A `:hover` compound that names nothing (`*:hover`, `[data-x]:hover`, or
+    /// a `:is(…)` whose alternatives carry the names) can match anything, so
+    /// no filtering is possible. Rare, and being wrong here would freeze the
+    /// page under the pointer — so it degrades to "collect everything".
+    any: bool,
+}
+
+impl HoverSet {
+    pub fn is_empty(&self) -> bool {
+        !self.any && self.ids.is_empty() && self.classes.is_empty() && self.tags.is_empty()
+    }
+
+    /// Could a `:hover` rule react to the pointer being inside this element?
+    /// Called once per element box per layout, so it answers "no" as early as
+    /// it can — an empty set is one bool.
+    pub fn may_match(&self, el: &Element) -> bool {
+        if self.is_empty() {
+            return false;
+        }
+        if self.any || self.tags.contains(&el.tag) {
+            return true;
+        }
+        if let Some(id) = &el.id {
+            if self.ids.contains(id) {
+                return true;
+            }
+        }
+        !self.classes.is_empty() && el.classes.iter().any(|c| self.classes.contains(c))
+    }
+
+    /// Record the names of a compound that tests `:hover`.
+    fn add(&mut self, c: &Compound) {
+        let mut named = false;
+        if let Some(id) = &c.id {
+            self.ids.insert(id.clone());
+            named = true;
+        }
+        for cl in &c.classes {
+            self.classes.insert(cl.clone());
+            named = true;
+        }
+        if let Some(t) = &c.tag {
+            self.tags.insert(t.clone());
+            named = true;
+        }
+        // Nothing to filter on — the safe answer is "anything".
+        if !named {
+            self.any = true;
+        }
+    }
+}
+
+/// Which link pseudo-class a compound asks for.
+///
+/// We keep no browsing history, so `:visited` matches NOTHING. That is not a
+/// gap to close later: a history-aware `:visited` is the classic history-leak
+/// side channel, which is why browsers restrict it to a handful of colour
+/// properties and lie to `getComputedStyle`. Never-visited is the honest and
+/// safe answer, and it makes `:link` and `:any-link` the same test.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum LinkSel {
+    Any,
+    Unvisited,
+    Visited,
+}
+
 /// A compound selector: optional type + id + classes + `[attr]` + `:not(…)` +
 /// structural pseudo-classes, all of which must hold.
 struct Compound {
@@ -376,6 +484,15 @@ struct Compound {
     /// once there is an event loop, which is why they live together.
     checked: Option<bool>,
     disabled: Option<bool>,
+    /// `:hover`. Reads `ElemState::hover`, which the shell sets from the
+    /// pointer position — so a rule only wins while the pointer is inside the
+    /// element's box, and every element the pointer is inside is hovered, not
+    /// just the innermost (`div:hover .child` is why).
+    hover: Option<bool>,
+    /// `:link` / `:visited` / `:any-link`. Before these existed the whole
+    /// selector was dropped, so `a:link{color:…}` — how a page states its link
+    /// colour — silently lost to the UA default.
+    link: Option<LinkSel>,
     /// One entry per `:has()` on this compound; the inner list is its
     /// comma-separated alternatives, so an entry matches if ANY of them does
     /// and several `:has()` all have to hold.
@@ -421,6 +538,20 @@ impl Compound {
         if self.disabled.is_some_and(|w| w != e.state.disabled) {
             return false;
         }
+        if self.hover.is_some_and(|w| w != e.state.hover) {
+            return false;
+        }
+        if let Some(l) = self.link {
+            let ok = match l {
+                // No history → nothing is visited, so `:link` degenerates to
+                // `:any-link` and `:visited` never matches. See `LinkSel`.
+                LinkSel::Any | LinkSel::Unvisited => e.is_link(),
+                LinkSel::Visited => false,
+            };
+            if !ok {
+                return false;
+            }
+        }
         // :not(x) — none of the negated compounds may match.
         if self.not.iter().any(|n| n.matches(e, ctx)) {
             return false;
@@ -436,6 +567,17 @@ impl Compound {
         // for nothing — `.foo:has(.bar)` descends only into elements that are
         // actually `.foo`.
         self.has.iter().all(|group| group.iter().any(|a| a.matches(e, ctx)))
+    }
+
+    /// Does this compound (or anything nested in it) test `:hover`? Nested
+    /// counts: `:is(a:hover, b)` and `:not(:hover)` both change what the
+    /// pointer does, and missing one would leave the page frozen under it.
+    fn wants_hover(&self) -> bool {
+        self.hover.is_some()
+            || self.not.iter().any(Compound::wants_hover)
+            || self.is_groups.iter().flatten().any(Compound::wants_hover)
+            || self.where_groups.iter().flatten().any(Compound::wants_hover)
+            || self.has.iter().flatten().any(|h| h.compound.wants_hover())
     }
 }
 
@@ -455,6 +597,15 @@ pub struct Selector {
 }
 
 impl Selector {
+    /// Record every compound of this selector that tests `:hover`. An ancestor
+    /// compound counts as much as the subject's — `nav:hover a` restyles the
+    /// link, and the pointer is inside the `<nav>`.
+    fn collect_hover(&self, out: &mut HoverSet) {
+        for c in self.compounds.iter().filter(|c| c.wants_hover()) {
+            out.add(c);
+        }
+    }
+
     /// Right-to-left match: the last compound must match `subject`, then earlier
     /// compounds must match ancestors per their combinators. `ancestors` is
     /// root→…→parent order. Descendant matching is nearest-first (no backtrack —
@@ -680,6 +831,11 @@ css_props! {
     OverflowWrap = "overflow-wrap",
     WordWrap = "word-wrap",
     WordBreak = "word-break",
+    Outline = "outline",
+    OutlineWidth = "outline-width",
+    OutlineStyle = "outline-style",
+    OutlineColor = "outline-color",
+    OutlineOffset = "outline-offset",
     BorderRadius = "border-radius",
     Transform = "transform",
     BoxShadow = "box-shadow",
@@ -860,6 +1016,10 @@ pub struct Stylesheet {
     /// generated box). Sharing one index made each pass walk the other
     /// two passes' candidates only to reject them.
     pseudo: Index,
+    /// Which elements a `:hover` rule here could possibly react to. On a page
+    /// without hover rules it is empty and pointer movement costs exactly
+    /// nothing; on a page with them it is a small fraction of the document.
+    pub hover_set: HoverSet,
     /// Every `url(…)` appearing anywhere in the sheet, keyed by `url_key`.
     ///
     /// `ComputedStyle` is `Copy`, so it cannot carry the URL itself — it
@@ -1026,6 +1186,7 @@ impl Stylesheet {
             rules: Vec::new(),
             normal: Index::default(),
             pseudo: Index::default(),
+            hover_set: HoverSet::default(),
             urls: BTreeMap::new(),
         }
     }
@@ -1256,7 +1417,12 @@ pub fn parse(css: &str) -> Stylesheet {
     parse_into(&css, 0, css.len(), None, &mut rules, &mut order);
     let mut urls = BTreeMap::new();
     collect_urls(&css, &mut urls);
-    let mut sheet = Stylesheet { rules, normal: Index::default(), pseudo: Index::default(), urls };
+    let mut hover_set = HoverSet::default();
+    for sel in rules.iter().flat_map(|r| &r.selectors) {
+        sel.collect_hover(&mut hover_set);
+    }
+    let mut sheet =
+        Stylesheet { rules, normal: Index::default(), pseudo: Index::default(), hover_set, urls };
     sheet.build_index();
     sheet
 }
@@ -1800,6 +1966,8 @@ fn parse_compound(tok: &str) -> Option<Compound> {
         empty: false,
         checked: None,
         disabled: None,
+        hover: None,
+        link: None,
         has: Vec::new(),
         pseudo: PseudoElem::None,
     };
@@ -1914,6 +2082,10 @@ fn parse_compound(tok: &str) -> Option<Compound> {
                     ("checked", None) => c.checked = Some(true),
                     ("disabled", None) => c.disabled = Some(true),
                     ("enabled", None) => c.disabled = Some(false),
+                    ("hover", None) => c.hover = Some(true),
+                    ("any-link", None) => c.link = Some(LinkSel::Any),
+                    ("link", None) => c.link = Some(LinkSel::Unvisited),
+                    ("visited", None) => c.link = Some(LinkSel::Visited),
                     ("first-child", None) => c.structural.push(Structural::FirstChild),
                     ("last-child", None) => c.structural.push(Structural::LastChild),
                     ("only-child", None) => c.structural.push(Structural::OnlyChild),
@@ -1951,7 +2123,9 @@ fn parse_compound(tok: &str) -> Option<Compound> {
 fn never_matches(sel: &str) -> bool {
     matches!(
         sel.trim().to_ascii_lowercase().as_str(),
-        ":hover" | ":focus" | ":focus-visible" | ":focus-within" | ":active" | ":target" | ":visited"
+        // `:hover` is NOT here any more — it is a real state now, so
+        // `:not(:hover)` has to be evaluated rather than assumed true.
+        ":focus" | ":focus-visible" | ":focus-within" | ":active" | ":target"
     )
 }
 
@@ -2049,7 +2223,9 @@ fn compound_spec(comp: &Compound) -> (u32, u32, u32) {
         + comp.root as usize
         + comp.empty as usize
         + comp.checked.is_some() as usize
-        + comp.disabled.is_some() as usize) as u32;
+        + comp.disabled.is_some() as usize
+        + comp.hover.is_some() as usize
+        + comp.link.is_some() as usize) as u32;
     // tag + a pseudo-element each count like a type selector (css-cascade §5.8.3).
     let mut c = comp.tag.is_some() as u32 + (comp.pseudo != PseudoElem::None) as u32;
     for n in &comp.not {

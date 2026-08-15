@@ -50,6 +50,10 @@ pub struct Engine {
     /// tool). Off by default so the label-formatting cost is only paid while the
     /// user is inspecting; the shell toggles it and re-lays-out.
     inspect: core::cell::Cell<bool>,
+    /// `seq`s of the elements the pointer is inside, ascending — what `:hover`
+    /// reads. Device state like `theme`, not page content, so it lives here
+    /// rather than in every layout signature.
+    hover: RefCell<Vec<u32>>,
     /// A tick source lent by the shell, so a layout can report what each phase
     /// cost on the machine that is actually slow. `None` on the host, where
     /// `tests/diag.rs` times the phases from outside.
@@ -100,6 +104,7 @@ impl Engine {
             // caller that never sets it.
             viewport_h: core::cell::Cell::new(600),
             inspect: core::cell::Cell::new(false),
+            hover: RefCell::new(Vec::new()),
             clock: core::cell::Cell::new(None),
             sheet: RefCell::new(None),
         }
@@ -116,6 +121,25 @@ impl Engine {
     /// an element box per node into `Layout::inspect`; the shell re-lays-out.
     pub fn set_inspect(&self, on: bool) {
         self.inspect.set(on);
+    }
+
+    /// Tell the engine which elements the pointer is inside — `Layout::hover_at`
+    /// produces the list from the previous layout. Returns whether it CHANGED,
+    /// which is the shell's signal to lay out again: a pointer that moved
+    /// within the same element must not cost anything.
+    pub fn set_hover(&self, seqs: Vec<u32>) -> bool {
+        let mut cur = self.hover.borrow_mut();
+        if *cur == seqs {
+            return false;
+        }
+        *cur = seqs;
+        true
+    }
+
+    /// Does the current page style anything on `:hover`? False means pointer
+    /// movement can be ignored outright — no hit-test, no layout.
+    pub fn page_has_hover(&self) -> bool {
+        self.sheet.borrow().as_ref().is_some_and(|(_, s)| !s.hover_set.is_empty())
     }
 
     /// Set the page colours (the shell resolves these from the compositor
@@ -260,7 +284,7 @@ impl Engine {
         let held = self.sheet.borrow();
         let sheet = &held.as_ref().unwrap().1;
         self.resolve_data_uri_images(&dom);
-        let mut lay = crate::layout::layout(&self.fonts, &dom, sheet, &self.images.borrow(), width, self.viewport_h.get(), &self.theme, forms, self.inspect.get());
+        let mut lay = crate::layout::layout(&self.fonts, &dom, sheet, &self.images.borrow(), width, self.viewport_h.get(), &self.theme, forms, self.inspect.get(), &self.hover.borrow());
         self.resolve_inline_svgs(&dom, &lay);
         self.resolve_css_images(sheet, &mut lay);
         lay.phase = [t_parse.wrapping_sub(t0), t_css.wrapping_sub(t_parse), now().wrapping_sub(t_css)];
@@ -373,6 +397,8 @@ impl Engine {
             &self.theme,
             forms,
             self.inspect.get(),
+            // Reader mode drops the page's sheet, so nothing can style `:hover`.
+            &[],
         )
     }
 
@@ -922,6 +948,73 @@ mod tests {
         );
         assert_eq!(pixel_at(&html, 4, 10), (255, 0, 0), "left half is stencilled red");
         assert_eq!(pixel_at(&html, 16, 10), (255, 255, 255), "right half stays clear");
+    }
+
+    /// An `outline` is drawn OUTSIDE the border box and takes no space — that
+    /// is the whole reason the property exists separately from `border`: a
+    /// focus ring has to appear without moving the page under the reader.
+    #[test]
+    fn an_outline_rings_the_box_from_outside_and_moves_nothing() {
+        let boxed = "<div style='width:20px;height:20px;background:#0000ff'></div>";
+        let ringed = "<div style='width:20px;height:20px;background:#0000ff;\
+                      outline:2px solid #ff0000'></div>";
+
+        // The box itself is untouched, and so is everything after it.
+        assert_eq!(pixel_at(boxed, 10, 10), (0, 0, 255));
+        assert_eq!(pixel_at(ringed, 10, 10), (0, 0, 255), "the box keeps its own paint");
+
+        // The ring sits in the two pixels OUTSIDE the border box.
+        assert_eq!(pixel_at(ringed, 10, 25), (255, 255, 255), "no ring below at rest…");
+        let off = "<div style='width:20px;height:20px;background:#0000ff;\
+                   outline:2px solid #ff0000;outline-offset:4px'></div>";
+        assert_eq!(pixel_at(off, 10, 25), (255, 0, 0), "…but there once offset pushes it out");
+
+        // It takes no space: a following box sits at exactly the same y.
+        let after = |css: &str| {
+            let html = alloc::format!(
+                "<div style='width:20px;height:20px;{css}'></div>\
+                 <div style='width:20px;height:6px;background:#00ff00'></div>"
+            );
+            let p = page(&html, 40, 40);
+            (0..40).find(|&y| p(2, y) == (0, 255, 0))
+        };
+        assert_eq!(after(""), after("outline:3px solid #f00"), "an outline must not shift the flow");
+    }
+
+    /// `:hover` all the way to a pixel: lay out once to learn the geometry, ask
+    /// the layout what the pointer is inside, hand that back to the engine, lay
+    /// out again — which is exactly the loop the shell runs on `MouseMove`.
+    ///
+    /// A cascade test would pass on a rule that resolves and never reaches the
+    /// screen; only the pixel says the feature works.
+    #[test]
+    fn hover_repaints_the_element_under_the_pointer() {
+        let html = "<style>div:hover{background:#ff0000}</style>\
+                    <div style='width:20px;height:20px'></div>";
+        let (w, h) = (PAD * 2 + 40, PAD * 2 + 40);
+        let mut eng = Engine::new();
+        eng.set_theme(light());
+
+        let rest = eng.layout(html, w);
+        let probe = |lay: &Layout| {
+            let mut buf = alloc::vec![0u8; (w * h * 4) as usize];
+            eng.paint(lay, w, h, 0, &mut buf);
+            let i = (((10 + PAD) * w + 10 + PAD) * 4) as usize;
+            (buf[i + 2], buf[i + 1], buf[i])
+        };
+        assert_eq!(probe(&rest), (255, 255, 255), "at rest the div is unpainted");
+
+        // The box is at the content origin; probe its middle in document space.
+        let hovered = rest.hover_at((PAD + 10) as i32, (PAD + 10) as i32);
+        assert!(!hovered.is_empty(), "the pointer is inside the div");
+        assert!(eng.set_hover(hovered.clone()), "a first hover is a change");
+        assert!(!eng.set_hover(hovered), "the same list twice is not — no relayout");
+
+        assert_eq!(probe(&eng.layout(html, w)), (255, 0, 0), "hovering paints it red");
+
+        // Leaving the element takes the colour away again.
+        assert!(eng.set_hover(alloc::vec![]));
+        assert_eq!(probe(&eng.layout(html, w)), (255, 255, 255));
     }
 
     /// Without a mask the same box is a plain filled rect — the guard that the

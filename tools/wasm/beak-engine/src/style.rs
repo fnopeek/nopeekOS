@@ -18,7 +18,6 @@ use alloc::vec::Vec;
 
 use crate::color::ColorVal;
 use crate::css::{ElemInfo, Prop, PseudoElem, Stylesheet};
-use crate::dom::Element;
 use crate::layout::{Rgb, Theme};
 use crate::forms::ControlKind;
 
@@ -298,8 +297,14 @@ pub struct BorderSide {
     pub specified: bool,
 }
 
+/// Inter's x-height and "0" advance as a fraction of the em, measured at
+/// size 100 (55.0 and 63.09). `parse_length` has no font to ask — it sees only
+/// `Units` — so the metrics come here as constants instead of being guessed.
+pub const EX_PER_EM: f32 = 0.55;
+pub const CH_PER_EM: f32 = 0.63;
+
 /// `border-width`'s initial value, `medium`.
-pub const BORDER_MEDIUM: f32 = 3.0;
+const BORDER_MEDIUM: f32 = 3.0;
 
 impl Default for BorderSide {
     fn default() -> BorderSide {
@@ -364,7 +369,7 @@ impl BorderSide {
 /// and `color: green; border-style: solid` have to mean the same thing.
 fn finish_borders(s: &mut ComputedStyle) {
     let c = s.color;
-    for side in [&mut s.border_top, &mut s.border_right, &mut s.border_bottom, &mut s.border_left] {
+    for side in [&mut s.border_top, &mut s.border_right, &mut s.border_bottom, &mut s.border_left, &mut s.outline] {
         if side.color.is_none() && !side.see_through && side.width > 0.0 {
             side.color = Some(c);
         }
@@ -629,6 +634,10 @@ pub struct ComputedStyle {
     pub border_right: BorderSide,
     pub border_bottom: BorderSide,
     pub border_left: BorderSide,
+    /// `outline` (css-ui-4 §3). A `BorderSide` because it has the same three
+    /// parts — but it never enters the box model: no layout code may read it.
+    pub outline: BorderSide,
+    pub outline_offset: f32,
     // — positioning —
     pub position: Position,
     pub top: Len,
@@ -821,6 +830,8 @@ impl ComputedStyle {
             border_right: BorderSide::default(),
             border_bottom: BorderSide::default(),
             border_left: BorderSide::default(),
+            outline: BorderSide::default(),
+            outline_offset: 0.0,
             position: Position::Static,
             top: Len::Auto,
             right: Len::Auto,
@@ -1036,6 +1047,9 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         border_right: BorderSide::default(),
         border_bottom: BorderSide::default(),
         border_left: BorderSide::default(),
+        // Not inherited: an outline belongs to the element that asked for it.
+        outline: BorderSide::default(),
+        outline_offset: 0.0,
         position: Position::Static,
         top: Len::Auto,
         right: Len::Auto,
@@ -1110,7 +1124,7 @@ pub fn anon_inherit(parent: &ComputedStyle, display: Display) -> ComputedStyle {
 /// specificity + order), then any inline `style="…"` (highest). `ancestors` is
 /// the root→…→parent chain, for descendant/child selector matching.
 pub fn resolve(
-    el: &Element,
+    subject: &ElemInfo,
     parent: &ComputedStyle,
     theme: &Theme,
     sheet: &Stylesheet,
@@ -1119,6 +1133,10 @@ pub fn resolve(
     sib_count: u32,
     viewport_w: f32,
 ) -> ComputedStyle {
+    // The SUBJECT arrives as an `ElemInfo`, not a bare `Element`: it carries the
+    // pointer state, and a caller that built it by hand would silently cascade
+    // `:hover` as false. The compiler now asks every call site for it.
+    let el = subject.el;
     let mut s = inherit_reset(parent);
     ua_rule(&el.tag, parent, theme, &mut s);
     // `:any-link { text-decoration: underline }` (HTML rendering §15.3.9). It
@@ -1235,8 +1253,7 @@ pub fn resolve(
     // wins its property regardless of specificity/order.
     let inline = el.attr("style");
     if !sheet.is_empty() {
-        let info = ElemInfo::of(el);
-        let mut matched = sheet.matched(&info, ancestors, prev_siblings, sib_count, crate::css::Media::new(viewport_w, theme.is_dark()));
+        let mut matched = sheet.matched(subject, ancestors, prev_siblings, sib_count, crate::css::Media::new(viewport_w, theme.is_dark()));
         matched.sort_by_key(|(spec, order, _, _)| (*spec, *order));
         // Pass 1 — normal <style> declarations, low→high specificity.
         for (_, _, decls, _) in &matched {
@@ -1322,7 +1339,7 @@ pub fn resolve(
 /// inherits from it exactly as a real child element would.
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_pseudo(
-    el: &Element,
+    subject: &ElemInfo,
     own: &ComputedStyle,
     theme: &Theme,
     sheet: &Stylesheet,
@@ -1335,8 +1352,7 @@ pub fn resolve_pseudo(
     if sheet.is_empty() {
         return None;
     }
-    let info = ElemInfo::of(el);
-    let mut matched = sheet.matched_pseudo(&info, ancestors, prev_siblings, sib_count, crate::css::Media::new(viewport_w, theme.is_dark()), pseudo);
+    let mut matched = sheet.matched_pseudo(subject, ancestors, prev_siblings, sib_count, crate::css::Media::new(viewport_w, theme.is_dark()), pseudo);
     if matched.is_empty() {
         return None;
     }
@@ -2341,6 +2357,33 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             s.border_right = side;
             s.border_bottom = side;
             s.border_left = side;
+        }
+        // `outline` reuses the border shorthand grammar (width || style ||
+        // colour) — css-ui-4 §3.5 defines it that way, minus `outline-style:
+        // auto`, which is the UA's own focus ring and not a value we can draw.
+        Prop::Outline => s.outline = parse_border_shorthand(&v, u, theme),
+        Prop::OutlineWidth => {
+            if let Some(w) = border_width_kw(v.trim(), s.units()) {
+                s.outline.set_spec_width(w);
+            }
+        }
+        // `auto` is a UA-defined ring; treat it as `solid` so a page asking for
+        // a focus ring gets one instead of nothing.
+        Prop::OutlineStyle => s.outline.set_style(match v.trim() {
+            "auto" => "solid",
+            other => other,
+        }),
+        Prop::OutlineColor => {
+            // `invert` has no equivalent here (we do not read back pixels);
+            // currentColor is the honest approximation and stays visible.
+            if v.trim() != "invert" {
+                s.outline.set_color(v.trim(), theme);
+            }
+        }
+        Prop::OutlineOffset => {
+            if let Some(px) = parse_length(v.trim(), s.units()) {
+                s.outline_offset = px;
+            }
         }
         Prop::BorderTop => s.border_top = parse_border_shorthand(&v, u, theme),
         Prop::BorderRight => s.border_right = parse_border_shorthand(&v, u, theme),
@@ -3496,6 +3539,18 @@ fn parse_length(v: &str, u: Units) -> Option<f32> {
     if let Some(n) = v.strip_suffix("em") {
         return n.trim().parse::<f32>().ok().map(|f| f * u.em);
     }
+    // `ex`/`ch`. Missing here they fell through as INVALID, which is not
+    // "ignore the unit" but "ignore the declaration": `outline-width: 0ex`
+    // then left the shorthand's `medium` in place and drew a ring the page had
+    // just switched off. The factors are MEASURED off our own font rather than
+    // both guessed at 0.5 — a `ch` is the "0" advance, and at 0.5 a
+    // `width: 20ch` column came out 26 % too narrow.
+    if let Some(n) = v.strip_suffix("ex") {
+        return n.trim().parse::<f32>().ok().map(|f| f * EX_PER_EM * u.em);
+    }
+    if let Some(n) = v.strip_suffix("ch") {
+        return n.trim().parse::<f32>().ok().map(|f| f * CH_PER_EM * u.em);
+    }
     if let Some(n) = v.strip_suffix('%') {
         // No containing measure here → treat % of em (rough; refined later).
         return n.trim().parse::<f32>().ok().map(|f| f * u.em / 100.0);
@@ -3583,6 +3638,7 @@ mod tests {
     use super::*;
     use crate::css;
     use crate::dom;
+    use crate::dom::Element;
 
     fn first_el(dom: &dom::Dom) -> &Element {
         match &dom.body().children[0] {
@@ -3591,15 +3647,61 @@ mod tests {
         }
     }
 
+    /// `resolve` takes the SUBJECT as an `ElemInfo` (it carries the pointer
+    /// state). A test that is not about `:hover` states the resting one.
+    fn subject(dom: &dom::Dom) -> css::ElemInfo<'_> {
+        css::ElemInfo::of(first_el(dom))
+    }
+
+    /// `apply_one` takes a resolved `Prop` since 0.24.1; a test states the
+    /// property the way a stylesheet does. Going through `prop_key` also means
+    /// a test naming a property that does not exist fails loudly (`Unknown`)
+    /// instead of quietly asserting on an untouched style.
+    fn apply_one(name: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
+        let p = css::prop_key(name);
+        assert_ne!(css::prop_name(p), "(unknown)", "no such property: {name}");
+        super::apply_one(p, val, theme, s);
+    }
+
     #[test]
     fn ua_sheet_gives_headings_size_weight_and_colour() {
         let dom = dom::parse("<body><h1>x</h1></body>");
         let theme = Theme::DARK;
-        let st = resolve(first_el(&dom), &ComputedStyle::root(&theme), &theme, &Stylesheet::empty(), &[], &[], 0, 1000.0);
+        let st = resolve(&subject(&dom), &ComputedStyle::root(&theme), &theme, &Stylesheet::empty(), &[], &[], 0, 1000.0);
         assert_eq!(st.display, Display::Block);
         assert!(st.bold);
         assert!(st.font_px > BASE_FONT_PX * 1.5);
         assert_eq!(st.color, theme.heading);
+    }
+
+    /// `:link` / `:any-link` are how a page states its link colour. Before they
+    /// parsed, the whole selector was dropped and the page silently kept the UA
+    /// colour — and it loses to a bare `a` rule only because `a:link` is one
+    /// class-level step more specific, which is exactly what the drop cost us.
+    #[test]
+    fn link_pseudo_classes_select_anchors_that_have_an_href() {
+        let theme = Theme::DARK;
+        let color = |html: &str, css: &str| {
+            let dom = dom::parse(html);
+            let sheet = css::parse(css);
+            resolve(&subject(&dom), &ComputedStyle::root(&theme), &theme, &sheet, &[], &[], 0, 1000.0).color
+        };
+        let red = crate::Rgb(255, 0, 0);
+        let lime = crate::Rgb(0, 255, 0);
+
+        let link = "<body><a href=\"/x\">x</a></body>";
+        assert_eq!(color(link, "a:link{color:red}"), red);
+        assert_eq!(color(link, "a:any-link{color:red}"), red);
+        // Specificity: `a:link` (0,1,1) beats a bare `a` (0,0,1) whatever the
+        // order — the reason dropping the selector was not merely a no-op.
+        assert_eq!(color(link, "a:link{color:red} a{color:lime}"), red);
+
+        // An anchor with no href is not a link (Selectors 4 §8.1).
+        let anchor = "<body><a name=\"top\">x</a></body>";
+        assert_eq!(color(anchor, "a{color:lime} a:link{color:red}"), lime);
+
+        // We keep no history, so nothing is ever `:visited` — see `LinkSel`.
+        assert_eq!(color(link, "a{color:lime} a:visited{color:red}"), lime);
     }
 
     /// The four viewport-percentage units, everywhere a length is read.
@@ -3614,7 +3716,7 @@ mod tests {
             let mut initial = ComputedStyle::root(&theme);
             initial.vw = 1000.0;
             initial.vh = 500.0;
-            resolve(first_el(&dom), &initial, &theme, &Stylesheet::empty(), &[], &[], 0, 1000.0)
+            resolve(&subject(&dom), &initial, &theme, &Stylesheet::empty(), &[], &[], 0, 1000.0)
         };
         assert_eq!(st("width:50vw").width, Len::Px(500.0));
         assert_eq!(st("height:40vh").height, Len::Px(200.0));
@@ -3641,7 +3743,7 @@ mod tests {
             let html = alloc::format!("<body><p style=\"{css}\">x</p></body>");
             let dom = dom::parse(&html);
             let theme = Theme::DARK;
-            resolve(first_el(&dom), &ComputedStyle::root(&theme), &theme, &Stylesheet::empty(), &[], &[], 0, 1000.0)
+            resolve(&subject(&dom), &ComputedStyle::root(&theme), &theme, &Stylesheet::empty(), &[], &[], 0, 1000.0)
         };
         assert_eq!(st("width:max(20px,10px)").width, Len::Px(20.0));
         assert_eq!(st("width:min(20px,40px)").width, Len::Px(20.0));
@@ -3666,7 +3768,7 @@ mod tests {
             let html = alloc::format!("<body><p style=\"{css}\">x</p></body>");
             let dom = dom::parse(&html);
             let theme = Theme::DARK;
-            resolve(first_el(&dom), &ComputedStyle::root(&theme), &theme, &Stylesheet::empty(), &[], &[], 0, 1000.0)
+            resolve(&subject(&dom), &ComputedStyle::root(&theme), &theme, &Stylesheet::empty(), &[], &[], 0, 1000.0)
                 .border_top
         };
         assert_eq!(side("border-top-width:5px").width, 0.0, "a width with no style is not a border");
@@ -3694,7 +3796,7 @@ mod tests {
     fn inline_style_attribute_is_parsed() {
         let dom = dom::parse("<body><p style=\"color:#ff0000; font-weight:bold; font-size:20px\">x</p></body>");
         let theme = Theme::DARK;
-        let st = resolve(first_el(&dom), &ComputedStyle::root(&theme), &theme, &Stylesheet::empty(), &[], &[], 0, 1000.0);
+        let st = resolve(&subject(&dom), &ComputedStyle::root(&theme), &theme, &Stylesheet::empty(), &[], &[], 0, 1000.0);
         assert_eq!(st.color, Rgb(255, 0, 0));
         assert!(st.bold);
         assert_eq!(st.font_px, 20.0);
@@ -3709,7 +3811,7 @@ mod tests {
         let sheet = css::parse(".lead { color: #ff0000; font-weight: bold }");
         let root = ComputedStyle::root(&theme);
         // 1st <p>: author sets red+bold, inline overrides colour to green.
-        let a = resolve(first_el(&dom), &root, &theme, &sheet, &[], &[], 0, 1000.0);
+        let a = resolve(&subject(&dom), &root, &theme, &sheet, &[], &[], 0, 1000.0);
         assert_eq!(a.color, Rgb(0, 255, 0));
         assert!(a.bold);
         // 2nd <p>: author red+bold, no inline.
@@ -3717,7 +3819,7 @@ mod tests {
             dom::Node::Element(e) => e,
             _ => panic!(),
         };
-        let b = resolve(p2, &root, &theme, &sheet, &[], &[], 0, 1000.0);
+        let b = resolve(&css::ElemInfo::of(p2), &root, &theme, &sheet, &[], &[], 0, 1000.0);
         assert_eq!(b.color, Rgb(255, 0, 0));
         assert!(b.bold);
     }
@@ -3729,17 +3831,17 @@ mod tests {
         // !important on a low-specificity class beats a higher-specificity #id.
         let dom = dom::parse("<body><p id=\"x\" class=\"b\">x</p></body>");
         let sheet = css::parse("#x{color:#ff0000} .b{color:#00ff00 !important}");
-        let st = resolve(first_el(&dom), &root, &theme, &sheet, &[], &[], 0, 1000.0);
+        let st = resolve(&subject(&dom), &root, &theme, &sheet, &[], &[], 0, 1000.0);
         assert_eq!(st.color, Rgb(0, 255, 0), "!important beats #id specificity");
         // author !important beats a normal inline style.
         let dom2 = dom::parse("<body><p class=\"b\" style=\"color:#ff0000\">x</p></body>");
         let sheet2 = css::parse(".b{color:#00ff00 !important}");
-        let st2 = resolve(first_el(&dom2), &root, &theme, &sheet2, &[], &[], 0, 1000.0);
+        let st2 = resolve(&subject(&dom2), &root, &theme, &sheet2, &[], &[], 0, 1000.0);
         assert_eq!(st2.color, Rgb(0, 255, 0), "author !important beats inline normal");
         // a later normal declaration must NOT override an earlier !important.
         let dom3 = dom::parse("<body><p class=\"b\">x</p></body>");
         let sheet3 = css::parse(".b{color:#00ff00 !important} p{color:#ff0000}");
-        let st3 = resolve(first_el(&dom3), &root, &theme, &sheet3, &[], &[], 0, 1000.0);
+        let st3 = resolve(&subject(&dom3), &root, &theme, &sheet3, &[], &[], 0, 1000.0);
         assert_eq!(st3.color, Rgb(0, 255, 0), "normal cannot override !important");
     }
 
@@ -3766,7 +3868,7 @@ mod tests {
                 None
             }
             let e = find(&dom.root, tag).expect(tag);
-            let st = resolve(e, &root, &theme, &Stylesheet::empty(), &[], &[], 0, 1000.0);
+            let st = resolve(&css::ElemInfo::of(e), &root, &theme, &Stylesheet::empty(), &[], &[], 0, 1000.0);
             assert_eq!(st.display, Display::None, "{tag}");
         }
     }

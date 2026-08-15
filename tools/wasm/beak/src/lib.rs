@@ -362,6 +362,11 @@ fn set_url(s: &str) {
     unsafe {
         core::ptr::copy_nonoverlapping(s.as_ptr(), core::ptr::addr_of_mut!(URL_BUF) as *mut u8, n);
         core::ptr::addr_of_mut!(URL_LEN).write(n);
+        // A new page gets its own verdict on whether it can afford `:hover` —
+        // and its own chance to say so once. Without this, one heavy page
+        // silences the pointer for every page after it.
+        core::ptr::addr_of_mut!(HOVER_REFUSED).write(false);
+        core::ptr::addr_of_mut!(LAST_LAYOUT_MS).write(0);
     }
 }
 fn url_str() -> &'static str {
@@ -520,7 +525,9 @@ fn do_layout(engine: &Engine, w: u32, state: &FormState) -> Layout {
     } else {
         engine.layout_ua_forms(html_str(), w, state)
     };
-    log_ms("layout (parse+cascade+layout)", now_ms() - t0);
+    let ms = now_ms() - t0;
+    log_ms("layout (parse+cascade+layout)", ms);
+    unsafe { core::ptr::addr_of_mut!(LAST_LAYOUT_MS).write(ms) };
     // ...and WHICH of the three it was. The host profile says the box layout
     // dominates, but the host is not a WASM interpreter and the phases do not
     // scale alike under one: beak 0.18.0 halved the box layout on the host and
@@ -573,6 +580,37 @@ fn bump_content_gen(why: &str) {
 }
 fn content_gen() -> u32 {
     unsafe { core::ptr::addr_of!(CONTENT_GEN).read() }
+}
+
+/// What the last full layout cost, ms. `:hover` needs one per element the
+/// pointer enters, so this is what decides whether the page can afford to
+/// react to the pointer at all.
+static mut LAST_LAYOUT_MS: i64 = 0;
+/// A pointer that costs more than this to follow makes the page feel broken —
+/// the window stops answering while it re-lays-out. Below it, hover is free
+/// enough to be worth having.
+const HOVER_BUDGET_MS: i64 = 250;
+/// Did we already say that this page is too heavy to hover? Said once per
+/// page, not once per mouse move ([[feedback-log-the-exception-not-the-rule]]).
+static mut HOVER_REFUSED: bool = false;
+
+/// Can this page afford to restyle on pointer movement?
+fn hover_affordable() -> bool {
+    let ms = unsafe { core::ptr::addr_of!(LAST_LAYOUT_MS).read() };
+    if ms <= HOVER_BUDGET_MS {
+        return true;
+    }
+    unsafe {
+        let p = core::ptr::addr_of_mut!(HOVER_REFUSED);
+        if !p.read() {
+            p.write(true);
+            let mut b = String::new();
+            b.push_str("[beak] :hover off — a layout costs ");
+            b.push_str(&alloc::format!("{ms} ms"));
+            log(&b);
+        }
+    }
+    false
 }
 
 /// Why the last fetch failed, as `(kind, message)`. `None` if the kernel
@@ -1784,6 +1822,39 @@ fn handle_event(engine: &Engine, ev: Event, cache: &Option<(Layout, i32, i32, u3
                         return true;
                     }
                 }
+            }
+            false
+        }
+        // `:hover`. A pointer state change means the cascade has to run again,
+        // and that is a whole layout — so this arm is a series of ever-cheaper
+        // ways to answer "nothing to do": no hover rules on the page at all,
+        // then no usable cached layout, then the same element as last time.
+        Event::MouseMove { x, y } => {
+            if !engine.page_has_hover() || !hover_affordable() {
+                return false;
+            }
+            let Some((rx, ry, w, h)) = canvas_rect() else {
+                return false;
+            };
+            // Leaving the canvas has to CLEAR the hover, or whatever the pointer
+            // left behind stays lit for good.
+            let inside = x >= rx && x < rx + w && y >= ry && y < ry + h;
+            let hovered = if inside {
+                match cache.as_ref() {
+                    Some((lay, cw, ch, cg)) if *cw == w && *ch == h && *cg == content_gen() => {
+                        lay.hover_at(x - rx, y - ry + scroll_y())
+                    }
+                    // No layout to hit-test against. Laying one out just to
+                    // answer where the pointer is would cost the very thing
+                    // this arm is trying to avoid.
+                    _ => return false,
+                }
+            } else {
+                Vec::new()
+            };
+            if engine.set_hover(hovered) {
+                bump_content_gen("hover");
+                mark_dirty();
             }
             false
         }
