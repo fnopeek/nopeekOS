@@ -30,7 +30,7 @@ static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
 /// carry it, so a device measurement can never be traced to the wrong build.
-const DRIVER_VERSION: &str = "0.52.0";
+const DRIVER_VERSION: &str = "0.53.0";
 
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
@@ -1969,6 +1969,10 @@ impl Ax200 {
         pc[PC_OFF_CI_WIDTH] = IWL_PHY_CHANNEL_MODE20;
         pc[PC_OFF_CI_CTRL_POS] = 0; // 20 MHz → control channel position 0
         put_u32(&mut pc, PC_OFF_LMAC_ID, IWL_LMAC_24G_INDEX); // no CDB → 0
+        // Receive chains. iwl_mvm_phy_ctxt_apply fills this field for cmd_ver 3+
+        // and sends RLC_CONFIG_CMD afterwards — both, not either. Left at zero
+        // the context declares no valid RX antenna.
+        put_u32(&mut pc, PC_OFF_RXCHAIN, RLC_RX_CHAIN_INFO_2X2);
         self.send_hcmd(0, PHY_CONTEXT_CMD, &pc); // legacy → LONG_GROUP
         host::dprint("[ax200] PHY_CONTEXT_CMD sent (ch ");
         host::dprint_dec(self.target_chan as u32);
@@ -2347,6 +2351,7 @@ impl Ax200 {
         pc[PC_OFF_CI_WIDTH] = IWL_PHY_CHANNEL_MODE20;
         pc[PC_OFF_CI_CTRL_POS] = 0;
         put_u32(&mut pc, PC_OFF_LMAC_ID, IWL_LMAC_24G_INDEX);
+        put_u32(&mut pc, PC_OFF_RXCHAIN, RLC_RX_CHAIN_INFO_2X2);
         self.send_hcmd(0, PHY_CONTEXT_CMD, &pc); // legacy → LONG_GROUP
         self.pump_rx(20);
     }
@@ -3762,6 +3767,14 @@ impl Ax200 {
                     self.st.tx_blocked = self.st.tx_blocked.wrapping_add(1);
                     break;
                 }
+                // Second line of defence: do not pull traffic before the
+                // station is authorized. The firmware cannot transmit for an
+                // unauthorized station, so those frames occupy TFD slots that
+                // are never completed — data_in_flight never returns to zero and
+                // the queue is wedged before the link is even up.
+                if !self.authorized {
+                    break;
+                }
                 let n = host::netdev_poll_tx(&mut txbuf);
                 if n == 0 {
                     break;
@@ -4285,11 +4298,19 @@ pub extern "C" fn _start() {
                             // exactly, power save and BT coex are off. What is
                             // left is that we start scanning sooner. Configurable
                             // so it can be measured rather than believed.
+                            // Default 0: the delay was a hypothesis, and the
+                            // hypothesis is dead — the device failed to come up
+                            // WITH the pause and without it. Kept configurable,
+                            // but it must PUMP the ring, never plain sleep: 2.5 s
+                            // without draining lets the firmware fill all
+                            // RX_NUM_RBS buffers with notifications, and then the
+                            // pool is empty exactly when the scan needs it. That
+                            // is a fault this code introduced, not one it found.
                             if dev.settle_ms > 0 {
-                                host::print("[ax200] letting the radio settle ");
+                                host::print("[ax200] settling ");
                                 host::print_dec(dev.settle_ms);
-                                host::print(" ms before scanning\n");
-                                host::sleep_ms(dev.settle_ms);
+                                host::print(" ms (draining) before scanning\n");
+                                dev.pump_rx(dev.settle_ms);
                             }
 
                             // ── Stage 4d2a: scan-config prerequisites ──

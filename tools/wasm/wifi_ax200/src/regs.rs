@@ -547,6 +547,13 @@ pub const PC_OFF_CI_BAND: usize = 12;     // ci.band u8 (PHY_BAND_24/5)
 pub const PC_OFF_CI_WIDTH: usize = 13;    // ci.width u8 (MODE20)
 pub const PC_OFF_CI_CTRL_POS: usize = 14; // ci.ctrl_pos u8 (0 for 20 MHz)
 pub const PC_OFF_LMAC_ID: usize = 16;     // __le32 (ci.reserved @15)
+// struct iwl_phy_context_cmd continues: rxchain_info @20, dsp_cfg_flags @24,
+// secondary_ctrl_chnl_loc @28. rxchain_info is the SAME encoding the RLC
+// command uses (iwl_mvm_phy_ctxt_set_rxchain fills both from one helper), and
+// leaving it zero means PHY_RX_CHAIN_VALID = 0 — no receive antennas declared
+// for this PHY context at all.
+pub const PC_OFF_RXCHAIN: usize = 20;     // __le32 rxchain_info
+pub const PC_OFF_DSP_CFG_FLAGS: usize = 24;
 // rxchain_info @20 (reserved in v4 → 0), dsp_cfg_flags @24,
 // secondary_ctrl_chnl_loc @28, reserved[3] @29 — all 0.
 
@@ -952,4 +959,4 @@ pub const BT_COEX_DISABLE: u32 = 0x0; // iwlwifi.bt_coex_active=0
 pub const RX_SILENCE_MS: u64 = 3000;
 
 // Pause between firmware bring-up and the first scan (sys/config/wifi_settle_ms).
-pub const SETTLE_MS_DEFAULT: u32 = 2500;
+pub const SETTLE_MS_DEFAULT: u32 = 0;

@@ -273,6 +273,17 @@ pub fn wasm_nic_poll_rx(buf: &mut [u8; MTU]) -> Option<usize> {
 }
 
 pub fn send(frame: &[u8]) -> Result<(), NetError> {
+    // Never hand a frame to an interface that has no link. active() falls back
+    // to mere PRESENCE when nothing has a carrier, which is right for display
+    // and wrong for the data path: on a machine whose only device is a WiFi card
+    // that has not finished associating, every DHCP attempt went to the driver,
+    // reached the firmware, and sat in its TX queue unsendable. in-flight never
+    // returned to zero and the association never completed — while the same
+    // machine with any wired device present worked, because the traffic went
+    // there instead and left the radio alone.
+    if !active_link_up() {
+        return Err(NetError::NotInitialized);
+    }
     match active() {
         Active::Wasm => {
             TX_ENQUEUED.fetch_add(1, Ordering::Relaxed);
