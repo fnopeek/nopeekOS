@@ -18,6 +18,19 @@ const MSG_REQUEST: u8  = 3;
 const MSG_ACK: u8      = 5;
 
 /// Run DHCP to get network configuration. Blocking.
+/// What to leave behind when DHCP fails. The QEMU user-mode address only means
+/// something under QEMU; on real hardware it is a fiction that makes `net` show
+/// an address nobody can reach — and, worse, makes the retry logic think a lease
+/// exists. Outside QEMU we leave 0.0.0.0, which is the truth and what the
+/// link-state tick keys its retry on.
+fn no_lease() {
+    if crate::virtio_net::is_available() {
+        arp::set_ip([10, 0, 2, 15]); // QEMU user-mode default
+    } else {
+        arp::set_ip([0, 0, 0, 0]);
+    }
+}
+
 pub fn configure() -> bool {
     let mac = match netdev::mac() {
         Some(m) => m,
@@ -54,7 +67,7 @@ pub fn configure() -> bool {
         None => {
             kprintln!("[npk] DHCP: no offer received after 3 attempts");
             udp::unlisten(CLIENT_PORT);
-            arp::set_ip([10, 0, 2, 15]); // fallback
+            no_lease();
             return false;
         }
     };
@@ -69,7 +82,7 @@ pub fn configure() -> bool {
         None => {
             kprintln!("[npk] DHCP: no ack received");
             udp::unlisten(CLIENT_PORT);
-            arp::set_ip([10, 0, 2, 15]);
+            no_lease();
             return false;
         }
     };

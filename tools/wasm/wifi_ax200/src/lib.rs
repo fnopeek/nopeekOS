@@ -30,7 +30,7 @@ static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
 /// carry it, so a device measurement can never be traced to the wrong build.
-const DRIVER_VERSION: &str = "0.49.0";
+const DRIVER_VERSION: &str = "0.50.0";
 
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
@@ -368,6 +368,7 @@ struct Ax200 {
     want_ssid_len: u8,
     band_pref: u8, // BAND_PREF_*
     want_power_save: bool,
+    want_bt_coex: bool,
     sync_ok: bool,
     blacklist: [[u8; 6]; 4],
     n_blacklist: usize,
@@ -1237,15 +1238,30 @@ impl Ax200 {
     // enabled_modules = SYNC2SCO (IWL_MVM_BT_COEX_SYNC2SCO=1, always) | MPLUT
     // (only if the BT_MPLUT_SUPPORT capability is present) | HIGH_BAND_RET.
     fn send_bt_init(&mut self) {
-        let mut modules = BT_COEX_SYNC2SCO_ENABLED | BT_COEX_HIGH_BAND_RET;
-        if fw_has_capa(CAPA_BT_MPLUT_SUPPORT) {
-            modules |= BT_COEX_MPLUT_ENABLED;
+        // BT_COEX_DISABLE unless sys/config/wifi_btcoex says otherwise — the
+        // same escape hatch Linux exposes as iwlwifi.bt_coex_active=0.
+        //
+        // The AX200 is a combo chip: WiFi hangs off PCIe, its Bluetooth off USB
+        // (8086:2723 + 8087:0029), and the two share the antenna through this
+        // coexistence logic. We implement no Bluetooth at all, so nothing here
+        // ever tells coex that BT is idle — and arbitrating an antenna on behalf
+        // of a radio that was never brought up can only cost airtime.
+        let on = self.want_bt_coex;
+        let mut modules = 0u32;
+        if on {
+            modules = BT_COEX_SYNC2SCO_ENABLED | BT_COEX_HIGH_BAND_RET;
+            if fw_has_capa(CAPA_BT_MPLUT_SUPPORT) {
+                modules |= BT_COEX_MPLUT_ENABLED;
+            }
         }
         let mut cmd = [0u8; BT_COEX_CMD_LEN];
-        put_u32(&mut cmd, 0, BT_COEX_NW);
+        put_u32(&mut cmd, 0, if on { BT_COEX_NW } else { BT_COEX_DISABLE });
         put_u32(&mut cmd, 4, modules);
         self.send_hcmd(0, BT_CONFIG, &cmd);
         self.pump_rx(20);
+        host::print("[ax200] BT coex: ");
+        host::print(if on { "network mode (sys/config/wifi_btcoex=on)" } else { "DISABLED, antenna is ours" });
+        host::print("\n");
     }
 
     // ── iwl_set_soc_latency (fw/init.c) ───────────────────────────
@@ -1812,6 +1828,10 @@ impl Ax200 {
         let mut pb = [0u8; 16];
         let pn = host::fetch("sys/config/wifi_ps", &mut pb);
         self.want_power_save = pn > 0 && (pb[..pn].starts_with(b"on") || pb[..pn].starts_with(b"1"));
+
+        let mut cb = [0u8; 16];
+        let cn = host::fetch("sys/config/wifi_btcoex", &mut cb);
+        self.want_bt_coex = cn > 0 && (cb[..cn].starts_with(b"on") || cb[..cn].starts_with(b"1"));
 
         host::print(", band ");
         host::print(match self.band_pref {
@@ -2733,6 +2753,8 @@ impl Ax200 {
         // find out whether a faster band was on the table.
         r.s("policy   power ");
         r.s(if self.want_power_save { "save (wifi_ps=on)" } else { "CAM (always on)" });
+        r.s(", btcoex ");
+        r.s(if self.want_bt_coex { "on" } else { "off" });
         r.s(", band ");
         r.s(match self.band_pref {
             BAND_PREF_5 => "5-only",
@@ -4105,6 +4127,7 @@ pub extern "C" fn _start() {
         want_ssid_len: 0,
         band_pref: BAND_PREF_AUTO,
         want_power_save: false,
+        want_bt_coex: false,
         sync_ok: false,
         blacklist: [[0u8; 6]; 4],
         n_blacklist: 0,
