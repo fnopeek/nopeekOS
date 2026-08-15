@@ -30,7 +30,7 @@ static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
 /// carry it, so a device measurement can never be traced to the wrong build.
-const DRIVER_VERSION: &str = "0.54.1";
+const DRIVER_VERSION: &str = "0.54.2";
 
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
@@ -371,6 +371,11 @@ struct Ax200 {
     want_bt_coex: bool,
     settle_ms: u32,
     sync_ok: bool,
+    /// 0 = unchecked, 1 = clean, else the LMAC error id. Sampled ONCE after
+    /// bring-up: reading it needs grab_nic_access + PRPH reads, and doing that
+    /// once a second from a status report pokes registers underneath a running
+    /// firmware. Diagnostics must not be able to break what they measure.
+    fw_assert: u32,
     blacklist: [[u8; 6]; 4],
     n_blacklist: usize,
     pick_reason: u8, // PICK_* — why the target was chosen, for the report
@@ -2820,21 +2825,10 @@ impl Ax200 {
         // which needs in-flight at the cap — a firmware that died at 6 in-flight
         // never triggered it and its error table was never looked at.
         r.s("fw       ");
-        if self.lmac_err_ptr != 0 && self.grab_nic_access() {
-            let mut l = [0u32; LERR_WORDS];
-            self.read_mem(self.lmac_err_ptr, &mut l);
-            if l[LERR_VALID] != 0 {
-                r.s("LMAC ASSERT valid=0x");
-                r.hex(l[LERR_VALID], 8);
-                r.s(" id=0x");
-                r.hex(l[LERR_ERROR_ID], 8);
-                r.s(" last-cmd=0x");
-                r.hex(l[LERR_LAST_CMD_ID], 8);
-            } else {
-                r.s("no assert (lmac err table clean)");
-            }
-        } else {
-            r.s("error table unreadable");
+        match self.fw_assert {
+            0 => r.s("not checked yet"),
+            1 => r.s("no assert"),
+            v => { r.s("LMAC ASSERT id=0x"); r.hex(v, 8); }
         }
         r.c(b'\n');
 
@@ -3558,6 +3552,12 @@ impl Ax200 {
         let mut addba: Option<[u8; 12]> = None;
         let mut stall = 0u32; // iterations the data queue has been stuck full
         let mut deauth_total = 0u32; // diagnostic: link-loss events seen
+        // One-shot: is the firmware healthy after bring-up?
+        if self.lmac_err_ptr != 0 && self.grab_nic_access() {
+            let mut l = [0u32; LERR_WORDS];
+            self.read_mem(self.lmac_err_ptr, &mut l);
+            self.fw_assert = if l[LERR_VALID] != 0 { l[LERR_ERROR_ID].max(2) } else { 1 };
+        }
         self.st.start_ms = host::now_ms();
         self.st.win_start_ms = self.st.start_ms;
         let mut next_report = self.st.start_ms + REPORT_PERIOD_MS;
@@ -4259,6 +4259,7 @@ pub extern "C" fn _start() {
         want_bt_coex: false,
         settle_ms: SETTLE_MS_DEFAULT,
         sync_ok: false,
+        fw_assert: 0,
         blacklist: [[0u8; 6]; 4],
         n_blacklist: 0,
         pick_reason: PICK_STRONGEST,
