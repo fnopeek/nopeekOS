@@ -187,6 +187,12 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     if netdev::is_available() {
         vga::show_status(b"Network online");
 
+        // Fill the carrier cache BEFORE the first DHCP. send() refuses to use an
+        // interface without a link, and the wired carrier is only known through
+        // this cache — which is otherwise first written by the ~1 Hz link tick,
+        // long after boot DHCP has already given up.
+        netdev::refresh_link_state();
+
         kprintln!("[npk] Running DHCP...");
         if net::dhcp::configure() {
             vga::show_status(b"DHCP configured");
