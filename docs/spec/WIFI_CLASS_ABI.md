@@ -97,6 +97,37 @@ npk_netdev_set_link(up) -> i32             // echter Link-State (assoziiert ja/n
 „State DOWN = nur nicht-primär"-Problem: `intent_net_info` (net.rs) zeigt jetzt
 den echten Link-State statt `primary==UP`.
 
+### Selbstauskunft des Treibers (v0.266.0, geräteklassen-neutral)
+```
+npk_driver_report(buf_ptr, len) -> 0 / -1   // ASCII-Schnappschuss veröffentlichen
+```
+Der Treiber legt einmal pro Sekunde einen **Klartext**-Statusblock ab; das
+Intent `wlan` druckt ihn zusammen mit der Kernel-Sicht (netdev-Ringe, fq_codel,
+aktive NIC). Der Kernel **parst nichts** — er speichert Bytes + Zeitstempel.
+Was berichtenswert ist, ist Gerätewissen und bleibt im Treiber; damit gilt die
+Fn für jeden Treiber, nicht nur WLAN. Treiberseitig gegated (gebundener
+Treiber), max. 4 KiB.
+
+**Warum das nötig ist:** die Luft ist für den Kernel unsichtbar. Aushandelte
+Rate, Retries, Airtime, A-MPDU-Zustand stehen nirgendwo sonst — ohne sie ist ein
+Link, der wegen Legacy-Rate langsam ist, nicht von einem zu unterscheiden, der
+wegen voller Queues langsam ist.
+
+### Verbindungs-Policy (Zwischenstand)
+`CONNECT 0x02` sieht vor, dass **`wifid`** den AP wählt. Solange der Treiber
+noch selbst verbindet, liest er die Policy aus npkFS — dieselbe Stelle, aus der
+`wifid` sein Credential nimmt:
+
+| Objekt | Wirkung |
+|--------|---------|
+| `sys/config/wifi_ssid` | nur APs dieses Netzes kommen als Ziel in Frage |
+| `sys/config/wifi_band` | `auto` (Standard, 5 GHz ab −70 dBm bevorzugt) · `5` · `2.4` |
+
+Ohne SSID-Filter nimmt der Treiber den lautesten AP **irgendeines** Netzes —
+inklusive dem des Nachbarn, für den `wifid` keinen PSK hat (stiller
+MIC-Fehlschlag). Ohne Band-Präferenz gewinnt im Mesh immer der nahe
+2,4-GHz-Knoten. Beides verschwindet, sobald `wifid` den `CONNECT` schickt.
+
 ---
 
 ## 4. Wire-Format der Nachrichten

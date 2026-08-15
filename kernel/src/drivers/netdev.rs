@@ -5,7 +5,7 @@
 use crate::{virtio_net, intel_nic, rtl8153};
 use crate::virtio_net::NetError;
 use spin::Mutex;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 pub const MTU: usize = 1514;
 
@@ -190,15 +190,64 @@ pub fn active_id() -> u8 {
     }
 }
 
+// ── WASM-NIC path counters (read by the `wlan` intent) ────────────────────
+// The whole point is to tell WHERE frames are lost between driver and stack:
+// a spill ring that overflows and an AQM that drops look identical from the
+// outside (throughput just sags), so each side counts its own drops.
+static RX_TO_RING: AtomicU64 = AtomicU64::new(0);   // frames put in the fallback ring
+static RX_RING_DROP: AtomicU64 = AtomicU64::new(0); // …and lost because it was full
+static TX_ENQUEUED: AtomicU64 = AtomicU64::new(0);  // frames handed to fq_codel
+static TX_DEQUEUED: AtomicU64 = AtomicU64::new(0);  // …and picked up by the driver
+
+pub struct WasmNicStats {
+    pub rx_to_ring: u64,
+    pub rx_ring_drops: u64,
+    pub tx_enqueued: u64,
+    pub tx_dequeued: u64,
+    pub tx_drops_aqm: u64,
+    pub tx_drops_full: u64,
+    pub tx_backlog: usize,
+}
+
+pub fn wasm_nic_stats() -> WasmNicStats {
+    let (aqm, full, backlog) = {
+        let n = WASM_NIC.lock();
+        let (a, f) = n.tx.drops_split();
+        (a, f, n.tx.backlog())
+    };
+    WasmNicStats {
+        rx_to_ring: RX_TO_RING.load(Ordering::Relaxed),
+        rx_ring_drops: RX_RING_DROP.load(Ordering::Relaxed),
+        tx_enqueued: TX_ENQUEUED.load(Ordering::Relaxed),
+        tx_dequeued: TX_DEQUEUED.load(Ordering::Relaxed),
+        tx_drops_aqm: aqm,
+        tx_drops_full: full,
+        tx_backlog: backlog,
+    }
+}
+
+pub fn wasm_nic_stats_reset() {
+    RX_TO_RING.store(0, Ordering::Relaxed);
+    RX_RING_DROP.store(0, Ordering::Relaxed);
+    TX_ENQUEUED.store(0, Ordering::Relaxed);
+    TX_DEQUEUED.store(0, Ordering::Relaxed);
+    WASM_NIC.lock().tx.reset_drops();
+}
+
 /// WASM driver calls this to submit a received frame to the kernel network stack
 pub fn wasm_nic_submit_rx(frame: &[u8]) {
     if frame.len() > MTU { return; }
-    WASM_NIC.lock().rx.push(frame);
+    RX_TO_RING.fetch_add(1, Ordering::Relaxed);
+    if !WASM_NIC.lock().rx.push(frame) {
+        RX_RING_DROP.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// WASM driver calls this to get a frame to transmit (fq_codel-scheduled)
 pub fn wasm_nic_poll_tx(buf: &mut [u8; MTU]) -> Option<usize> {
-    WASM_NIC.lock().tx.dequeue(buf)
+    let r = WASM_NIC.lock().tx.dequeue(buf);
+    if r.is_some() { TX_DEQUEUED.fetch_add(1, Ordering::Relaxed); }
+    r
 }
 
 /// Pop the oldest fallback-RX frame, if any. Used by net::wasm_deliver_rx to
@@ -210,7 +259,11 @@ pub fn wasm_nic_poll_rx(buf: &mut [u8; MTU]) -> Option<usize> {
 
 pub fn send(frame: &[u8]) -> Result<(), NetError> {
     match active() {
-        Active::Wasm => { WASM_NIC.lock().tx.enqueue(frame); Ok(()) }
+        Active::Wasm => {
+            TX_ENQUEUED.fetch_add(1, Ordering::Relaxed);
+            WASM_NIC.lock().tx.enqueue(frame);
+            Ok(())
+        }
         Active::Intel => intel_nic::send(frame),
         Active::Rtl => rtl8153::send(frame),
         Active::Virtio | Active::None => virtio_net::send(frame),

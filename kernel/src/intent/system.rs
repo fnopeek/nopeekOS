@@ -1156,9 +1156,13 @@ pub fn intent_help_topic(topic: &str) {
             help_row("dns <host>", "Resolver detail");
             help_row("traceroute <host>", "Path trace");
             help_row("nic", "USB-NIC scan (link + speed)");
+            help_row("wlan", "WiFi link diagnostics (rate, retries, drops)");
+            help_row("wlan reset", "Zero the counters before a measurement");
             help_row("netbench", "Throughput measurement");
             kprintln!("[npk]");
             help_note("save a download:  https example.com /page.html > page");
+            help_note("wifi:  store /sys/config/wifi_ssid <name>  +  wifi_psk <pass>");
+            help_note("       store /sys/config/wifi_band 5 | 2.4 | auto  (band preference)");
         }
         "packages" | "install" | "modules" | "update" | "assets" => {
             help_head("packages", "signed (ECDSA P-384) and verified on every path");
@@ -1268,7 +1272,7 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("[npk] nopeekOS v{}", env!("CARGO_PKG_VERSION"));
             kprintln!("[npk]");
             help_group("files", "ls  cd  cat  find  store  fetch  rm  fsinfo");
-            help_group("net", "ping  resolve  https  netstat  nic  dhcp");
+            help_group("net", "ping  resolve  https  netstat  nic  wlan  dhcp");
             help_group("packages", "modules  assets  install  update");
             help_group("apps", "run  driver  browser");
             help_group("desktop", "shade  wallpaper  theme  gpu  volume  battery");

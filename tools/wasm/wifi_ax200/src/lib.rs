@@ -28,6 +28,10 @@ fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
 /// rtw8852b_fw.bin. API 77 = the exact version Linux 6.18.26 requests.
 static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
+/// One source for the version string: the boot banner and every status snapshot
+/// carry it, so a device measurement can never be traced to the wrong build.
+const DRIVER_VERSION: &str = "0.45.0";
+
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
     u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
@@ -124,6 +128,122 @@ impl Ap {
     };
 }
 
+/// Everything the host cannot see for itself. The kernel routes our frames but
+/// knows nothing about the air: negotiated rate, retries, airtime. Without these
+/// a slow link is indistinguishable from a busy one, so they are collected
+/// always-on (not behind DEBUG) and published once a second via
+/// `npk_driver_report`.
+#[derive(Clone, Copy)]
+struct Stats {
+    // TX, cumulative.
+    tx_frames: u32,
+    tx_bytes: u64,
+    tx_blocked: u32, // times the in-flight cap stopped us pulling another frame
+    inflight_peak: u32,
+    // TX completions (iwl_tx_resp), cumulative.
+    tx_ok: u32,
+    tx_fail: u32,
+    tx_retries: u32,  // sum of failure_frame — retransmissions on the air
+    tx_rts_fail: u32, // sum of failure_rts
+    tx_airtime_us: u64,
+    last_status: u16,
+    last_init_rate: u32,
+    // RX, cumulative.
+    rx_frames: u32,
+    rx_bytes: u64,
+    rx_ip: u32,
+    rx_eapol: u32,
+    rx_mgmt: u32,
+    rx_drain_max: u32, // most frames drained in one pass — RX ring pressure
+    // Loop + events.
+    loop_iters: u32,
+    loop_busy: u32,
+    deauth: u32,
+    addba_declined: u32,
+    // Rates last reported by the firmware (raw rate_n_flags).
+    last_tx_rate: u32,
+    last_rx_rate: u32,
+    // Report window: throughput is computed here, where the counters and the
+    // clock both live, so the intent only has to print it.
+    win_start_ms: u64,
+    win_tx_bytes: u64,
+    win_rx_bytes: u64,
+    win_airtime_us: u64,
+    win_loop_iters: u32,
+    tput_tx_kbit: u32,
+    tput_rx_kbit: u32,
+    airtime_pct: u32,
+    passes_per_s: u32,
+    start_ms: u64,
+}
+
+impl Stats {
+    const NEW: Stats = Stats {
+        tx_frames: 0, tx_bytes: 0, tx_blocked: 0, inflight_peak: 0,
+        tx_ok: 0, tx_fail: 0, tx_retries: 0, tx_rts_fail: 0, tx_airtime_us: 0,
+        last_status: 0, last_init_rate: 0,
+        rx_frames: 0, rx_bytes: 0, rx_ip: 0, rx_eapol: 0, rx_mgmt: 0, rx_drain_max: 0,
+        loop_iters: 0, loop_busy: 0, deauth: 0, addba_declined: 0,
+        last_tx_rate: 0, last_rx_rate: 0,
+        win_start_ms: 0, win_tx_bytes: 0, win_rx_bytes: 0, win_airtime_us: 0,
+        win_loop_iters: 0,
+        tput_tx_kbit: 0, tput_rx_kbit: 0, airtime_pct: 0, passes_per_s: 0, start_ms: 0,
+    };
+}
+
+/// Fixed-size text builder for the status snapshot (no allocator in a driver).
+struct Rep {
+    b: [u8; REPORT_CAP],
+    n: usize,
+}
+
+impl Rep {
+    const fn new() -> Rep { Rep { b: [0; REPORT_CAP], n: 0 } }
+
+    fn s(&mut self, s: &str) {
+        for &c in s.as_bytes() {
+            if self.n < REPORT_CAP { self.b[self.n] = c; self.n += 1; }
+        }
+    }
+    fn c(&mut self, c: u8) {
+        if self.n < REPORT_CAP { self.b[self.n] = c; self.n += 1; }
+    }
+    fn d(&mut self, mut v: u64) {
+        if v == 0 { self.c(b'0'); return; }
+        let mut tmp = [0u8; 20];
+        let mut i = 20;
+        while v > 0 { i -= 1; tmp[i] = b'0' + (v % 10) as u8; v /= 10; }
+        for k in i..20 { self.c(tmp[k]); }
+    }
+    fn i(&mut self, v: i32) {
+        if v < 0 { self.c(b'-'); self.d((-(v as i64)) as u64); } else { self.d(v as u64); }
+    }
+    /// A value in thousandths printed as `x.y` — the driver has no float
+    /// formatting and 11.9 Mbit/s reads better than 11900 kbit/s.
+    fn kbit_as_mbit(&mut self, kbit: u32) {
+        self.d((kbit / 1000) as u64);
+        self.c(b'.');
+        self.d(((kbit % 1000) / 100) as u64);
+    }
+    fn hex(&mut self, v: u32, digits: usize) {
+        const H: &[u8; 16] = b"0123456789abcdef";
+        for k in (0..digits).rev() {
+            self.c(H[((v >> (k * 4)) & 0xf) as usize]);
+        }
+    }
+    fn mac(&mut self, m: &[u8; 6]) {
+        for (k, &b) in m.iter().enumerate() {
+            if k > 0 { self.c(b':'); }
+            self.hex(b as u32, 2);
+        }
+    }
+    fn pct(&mut self, part: u64, whole: u64) {
+        if whole == 0 { self.s("0%"); return; }
+        self.d(part * 100 / whole);
+        self.c(b'%');
+    }
+}
+
 /// AX200 transport state. Mirrors the bits of `struct iwl_trans_pcie` we use.
 struct Ax200 {
     mmio: i32,
@@ -200,6 +320,27 @@ struct Ax200 {
     // so every data frame must carry a unique, incrementing seq or the AP treats
     // distinct frames as duplicates (dropping TCP data, duplicating ACKed ones).
     tx_seq: u16,
+    // Diagnostics (see Stats) + what the scan found besides the chosen AP: the
+    // strongest same-SSID AP on the OTHER band. Picking purely by RSSI always
+    // lands on the near 2.4 GHz node, so the question "was there a 5 GHz one?"
+    // has to survive the scan to be answerable later.
+    st: Stats,
+    n_aps: u8,
+    alt_bssid: [u8; 6],
+    alt_chan: u8,
+    alt_rssi: i8,
+    alt_ht: bool,
+    alt_valid: bool,
+    authorized: bool,
+    // Connect policy, read once from npkFS at start-up (same place wifid takes
+    // its credential from). Picking the loudest AP of any network is wrong on
+    // two counts: on a dual-band mesh it is always the near 2.4 GHz node, and if
+    // a neighbour's network is louder we associate to a BSS whose PSK wifid does
+    // not have — a silent 4-way MIC failure.
+    want_ssid: [u8; SSID_MAX],
+    want_ssid_len: u8,
+    band_pref: u8, // BAND_PREF_*
+    pick_reason: u8, // PICK_* — why the target was chosen, for the report
 }
 
 impl Ax200 {
@@ -1497,13 +1638,7 @@ impl Ax200 {
                 host::dprint_dec(frames);
                 host::dprint("\n");
                 Self::print_aps(&aps, n_aps);
-                // Pick the strongest AP as the connect target (#3 connect).
-                let mut best = usize::MAX;
-                for i in 0..n_aps {
-                    if best == usize::MAX || aps[i].rssi > aps[best].rssi {
-                        best = i;
-                    }
-                }
+                let best = self.pick_target(&aps, n_aps);
                 if best != usize::MAX {
                     self.target_bssid = aps[best].bssid;
                     self.target_chan = aps[best].channel;
@@ -1517,6 +1652,31 @@ impl Ax200 {
                     self.target_ht = aps[best].ht;
                     self.target_dtim_period = aps[best].dtim_period;
                     self.target_valid = true;
+                    // Record what we passed over: the strongest AP carrying the
+                    // same SSID on the OTHER band. Choosing by RSSI alone always
+                    // lands on the nearest 2.4 GHz node, and without this the
+                    // question "was a 5 GHz radio even in range?" is unanswerable
+                    // after the scan buffer is gone.
+                    self.n_aps = n_aps.min(255) as u8;
+                    self.alt_valid = false;
+                    let chosen_5g = aps[best].channel > 14;
+                    for i in 0..n_aps {
+                        if i == best { continue; }
+                        if (aps[i].channel > 14) == chosen_5g { continue; }
+                        if aps[i].ssid_len != aps[best].ssid_len
+                            || aps[i].ssid[..aps[i].ssid_len as usize]
+                                != aps[best].ssid[..aps[best].ssid_len as usize]
+                        {
+                            continue;
+                        }
+                        if !self.alt_valid || aps[i].rssi > self.alt_rssi {
+                            self.alt_bssid = aps[i].bssid;
+                            self.alt_chan = aps[i].channel;
+                            self.alt_rssi = aps[i].rssi;
+                            self.alt_ht = aps[i].ht.present;
+                            self.alt_valid = true;
+                        }
+                    }
                     host::print("[ax200] target: ch ");
                     host::print_dec(self.target_chan as u32);
                     host::print(", dtim_period ");
@@ -1545,6 +1705,113 @@ impl Ax200 {
         host::dprint("\n");
         self.dump_fw_error_log();
         false
+    }
+
+    // Read the connect policy from npkFS. `wifi_ssid` is the network wifid holds
+    // the PSK for — associating to anything else can only end in a MIC failure.
+    // `wifi_band` is auto (default) / 5 / 2.4.
+    fn load_connect_policy(&mut self) {
+        let mut buf = [0u8; 64];
+        let n = host::fetch("sys/config/wifi_ssid", &mut buf);
+        // Trailing newline/space from `store` must not become part of the SSID.
+        let mut len = n;
+        while len > 0 && (buf[len - 1] == b'\n' || buf[len - 1] == b'\r' || buf[len - 1] == b' ') {
+            len -= 1;
+        }
+        if len > 0 && len <= SSID_MAX {
+            self.want_ssid[..len].copy_from_slice(&buf[..len]);
+            self.want_ssid_len = len as u8;
+        }
+
+        let mut bb = [0u8; 16];
+        let bn = host::fetch("sys/config/wifi_band", &mut bb);
+        self.band_pref = BAND_PREF_AUTO;
+        if bn > 0 {
+            if bb[..bn].starts_with(b"5") {
+                self.band_pref = BAND_PREF_5;
+            } else if bb[..bn].starts_with(b"2") {
+                self.band_pref = BAND_PREF_24;
+            }
+        }
+
+        host::print("[ax200] connect policy: ssid ");
+        if self.want_ssid_len > 0 {
+            host::print("\"");
+            for &b in &self.want_ssid[..self.want_ssid_len as usize] {
+                let s = [if (0x20..0x7f).contains(&b) { b } else { b'?' }];
+                host::print(unsafe { core::str::from_utf8_unchecked(&s) });
+            }
+            host::print("\"");
+        } else {
+            host::print("(any - set 'store /sys/config/wifi_ssid <name>')");
+        }
+        host::print(", band ");
+        host::print(match self.band_pref {
+            BAND_PREF_5 => "5 GHz only",
+            BAND_PREF_24 => "2.4 GHz only",
+            _ => "auto (prefer 5 GHz when strong enough)",
+        });
+        host::print("\n");
+    }
+
+    // Choose the connect target from the scan results. Returns usize::MAX when
+    // nothing qualifies.
+    fn pick_target(&mut self, aps: &[Ap], n_aps: usize) -> usize {
+        let want = &self.want_ssid[..self.want_ssid_len as usize];
+        let matches_ssid = |a: &Ap| -> bool {
+            want.is_empty() || (a.ssid_len as usize == want.len() && &a.ssid[..want.len()] == want)
+        };
+
+        // Strongest AP of our network per band.
+        let mut best_24 = usize::MAX;
+        let mut best_5 = usize::MAX;
+        let mut n_ours = 0usize;
+        for i in 0..n_aps {
+            if !matches_ssid(&aps[i]) { continue; }
+            n_ours += 1;
+            let slot = if aps[i].channel > 14 { &mut best_5 } else { &mut best_24 };
+            if *slot == usize::MAX || aps[i].rssi > aps[*slot].rssi {
+                *slot = i;
+            }
+        }
+
+        // Nothing with the configured SSID: fall back to the strongest AP of any
+        // network rather than refusing to connect, but say so — a 4-way that then
+        // fails on the MIC is otherwise a mystery.
+        if n_ours == 0 {
+            if !want.is_empty() {
+                host::print("[ax200] no AP with the configured SSID in range - taking the strongest\n");
+            }
+            let mut best = usize::MAX;
+            for i in 0..n_aps {
+                if best == usize::MAX || aps[i].rssi > aps[best].rssi { best = i; }
+            }
+            self.pick_reason = PICK_SSID_FILTERED;
+            return best;
+        }
+
+        match self.band_pref {
+            BAND_PREF_5 if best_5 != usize::MAX => {
+                self.pick_reason = PICK_BAND_FORCED;
+                best_5
+            }
+            BAND_PREF_24 if best_24 != usize::MAX => {
+                self.pick_reason = PICK_BAND_FORCED;
+                best_24
+            }
+            _ => {
+                // Auto: take 5 GHz when it is above the floor, even if a 2.4 GHz
+                // AP is louder. Below the floor the extra range of 2.4 wins.
+                if best_5 != usize::MAX && aps[best_5].rssi >= BAND_PREF_5_MIN_RSSI {
+                    self.pick_reason = PICK_5G_PREFERRED;
+                    return best_5;
+                }
+                self.pick_reason = PICK_STRONGEST;
+                if best_24 == usize::MAX { return best_5; }
+                if best_5 == usize::MAX { return best_24; }
+                if aps[best_5].rssi > aps[best_24].rssi { best_5 } else { best_24 }
+            }
+        }
     }
 
     // ── Stage 5a: PHY context + RLC + binding (connect step 1) ────
@@ -1929,7 +2196,6 @@ impl Ax200 {
     // 4-way. Returns true once associated.
 
     // PHY_CONTEXT_CMD v4 (action MODIFY) — re-point the PHY at the new channel.
-    #[allow(dead_code)] // re-enabled once link-loss root cause is fixed (genuine loss only)
     fn update_phy_context(&mut self) {
         let mut pc = [0u8; PHY_CTX_CMD_LEN];
         put_u32(&mut pc, PC_OFF_ID_COLOR, 0);
@@ -1944,7 +2210,7 @@ impl Ax200 {
     }
 
     // ADD_STA v12 (action MODIFY) — re-point the AP-peer station at the new BSSID.
-    #[allow(dead_code)]
+
     fn retarget_station(&mut self) {
         let mut sc = [0u8; ADD_STA_CMD_LEN];
         sc[AS_OFF_ADD_MODIFY] = 1; // modify
@@ -1959,7 +2225,6 @@ impl Ax200 {
         self.pump_rx(50);
     }
 
-    #[allow(dead_code)] // disabled: reconnect must not mask a code bug; only for genuine AP loss
     fn reconnect(&mut self) -> bool {
         host::print("[ax200] link lost — re-scanning to reconnect...\n");
         host::netdev_set_link(false);
@@ -2095,6 +2360,258 @@ impl Ax200 {
         host::print(" bw");
         host::print_dec((rnf & RATE_MCS_CHAN_WIDTH_MSK) >> RATE_MCS_CHAN_WIDTH_POS);
         host::print("\n");
+    }
+
+    // PHY rate of a rate_n_flags value in kbit/s, or 0 if we cannot tell. The
+    // raw word is always printed next to it — this is our reading of the format,
+    // the hex is the truth.
+    //
+    // Legacy code→rate mapping per iwl_mvm_legacy_hw_idx_to_mac80211_idx:
+    // OFDM code 0 is the FIRST OFDM rate (6M), CCK code 0 is 1M.
+    fn rate_kbit(rnf: u32) -> u32 {
+        const CCK: [u32; 4] = [1000, 2000, 5500, 11000];
+        const OFDM: [u32; 8] = [6000, 9000, 12000, 18000, 24000, 36000, 48000, 54000];
+        // HT per spatial stream, [bw20 lgi, bw20 sgi, bw40 lgi, bw40 sgi].
+        const HT: [[u32; 8]; 4] = [
+            [6500, 13000, 19500, 26000, 39000, 52000, 58500, 65000],
+            [7200, 14400, 21700, 28900, 43300, 57800, 65000, 72200],
+            [13500, 27000, 40500, 54000, 81000, 108000, 121500, 135000],
+            [15000, 30000, 45000, 60000, 90000, 120000, 135000, 150000],
+        ];
+        let code = (rnf & RATE_MCS_CODE_MSK) as usize;
+        let sgi = if rnf & RATE_MCS_SGI_MSK != 0 { 1 } else { 0 };
+        let bw = (rnf & RATE_MCS_CHAN_WIDTH_MSK) >> RATE_MCS_CHAN_WIDTH_POS;
+        let nss = if rnf & RATE_MCS_NSS_MSK != 0 { 2 } else { 1 };
+        match rnf & RATE_MCS_MOD_TYPE_MSK {
+            RATE_MCS_MOD_TYPE_CCK => if code < 4 { CCK[code] } else { 0 },
+            RATE_MCS_MOD_TYPE_LEGACY_OFDM => if code < 8 { OFDM[code] } else { 0 },
+            RATE_MCS_MOD_TYPE_HT => {
+                if code >= 8 || bw > 1 { return 0; }
+                HT[(bw as usize) * 2 + sgi][code] * nss
+            }
+            _ => 0, // VHT/HE: we never negotiate them, so no table for them
+        }
+    }
+
+    // One rate line: raw word, decoded modulation, and the PHY rate it implies.
+    fn rep_rate(r: &mut Rep, label: &str, rnf: u32) {
+        r.s(label);
+        if rnf == 0 || rnf == u32::MAX {
+            r.s("(none reported yet)\n");
+            return;
+        }
+        r.s("0x");
+        r.hex(rnf, 8);
+        r.s(" = ");
+        let code = rnf & RATE_MCS_CODE_MSK;
+        match rnf & RATE_MCS_MOD_TYPE_MSK {
+            RATE_MCS_MOD_TYPE_CCK => { r.s("CCK idx "); r.d(code as u64); }
+            RATE_MCS_MOD_TYPE_LEGACY_OFDM => { r.s("OFDM idx "); r.d(code as u64); }
+            RATE_MCS_MOD_TYPE_HT => {
+                r.s("HT MCS "); r.d(code as u64);
+                r.s(if rnf & RATE_MCS_NSS_MSK != 0 { " 2ss" } else { " 1ss" });
+            }
+            RATE_MCS_MOD_TYPE_VHT => { r.s("VHT MCS "); r.d(code as u64); }
+            RATE_MCS_MOD_TYPE_HE => { r.s("HE MCS "); r.d(code as u64); }
+            _ => r.s("mod?"),
+        }
+        r.s(" bw");
+        r.d(match (rnf & RATE_MCS_CHAN_WIDTH_MSK) >> RATE_MCS_CHAN_WIDTH_POS {
+            0 => 20, 1 => 40, 2 => 80, 3 => 160, _ => 0,
+        });
+        if rnf & RATE_MCS_SGI_MSK != 0 { r.s(" sgi"); }
+        if rnf & RATE_MCS_LDPC_MSK != 0 { r.s(" ldpc"); }
+        let kbit = Self::rate_kbit(rnf);
+        if kbit > 0 {
+            r.s(" -> ");
+            r.kbit_as_mbit(kbit);
+            r.s(" Mbit");
+        }
+        r.c(b'\n');
+    }
+
+    // Build and publish the status snapshot. Called from the resident loop once
+    // a second; everything it prints is already counted, so this only formats.
+    fn publish_report(&mut self, now_ms: u64) {
+        // Throughput + airtime over the window that just closed.
+        let win = now_ms.saturating_sub(self.st.win_start_ms).max(1);
+        self.st.tput_tx_kbit = ((self.st.tx_bytes - self.st.win_tx_bytes) * 8 / win) as u32;
+        self.st.tput_rx_kbit = ((self.st.rx_bytes - self.st.win_rx_bytes) * 8 / win) as u32;
+        self.st.airtime_pct =
+            ((self.st.tx_airtime_us - self.st.win_airtime_us) / (win * 10)) as u32;
+        self.st.passes_per_s =
+            (self.st.loop_iters.wrapping_sub(self.st.win_loop_iters) as u64 * 1000 / win) as u32;
+        self.st.win_start_ms = now_ms;
+        self.st.win_tx_bytes = self.st.tx_bytes;
+        self.st.win_rx_bytes = self.st.rx_bytes;
+        self.st.win_airtime_us = self.st.tx_airtime_us;
+        self.st.win_loop_iters = self.st.loop_iters;
+
+        let mut r = Rep::new();
+        r.s("wifi_ax200 ");
+        r.s(DRIVER_VERSION);
+        r.s("  up ");
+        r.d((now_ms.saturating_sub(self.st.start_ms)) / 1000);
+        r.s(" s\n");
+
+        r.s("state    assoc=");
+        r.s(if self.assoc_aid != 0 { "yes" } else { "NO" });
+        r.s(" authorized=");
+        r.s(if self.authorized { "yes" } else { "NO" });
+        r.s(" qos/ht=");
+        r.s(if self.qos { "yes" } else { "NO" });
+        r.s(" aid=");
+        r.d(self.assoc_aid as u64);
+        r.c(b'\n');
+
+        r.s("ap       ");
+        r.mac(&self.target_bssid);
+        r.s(" \"");
+        for &b in &self.target_ssid[..self.target_ssid_len as usize] {
+            r.c(if (0x20..0x7f).contains(&b) { b } else { b'?' });
+        }
+        r.s("\" ch ");
+        r.d(self.target_chan as u64);
+        r.s(if self.target_band == PHY_BAND_5_U8 { " (5 GHz)" } else { " (2.4 GHz)" });
+        r.s(" dtim ");
+        r.d(self.target_dtim_period as u64);
+        r.c(b'\n');
+
+        r.s("ap ht    ");
+        if self.target_ht.present {
+            r.s("cap 0x");
+            r.hex(self.target_ht.cap_info as u32, 4);
+            r.s(" mcs 0x");
+            r.hex(self.target_ht.mcs_rx[1] as u32, 2);
+            r.hex(self.target_ht.mcs_rx[0] as u32, 2);
+            r.s(" ampdu f/d ");
+            r.d(self.target_ht.ampdu_factor as u64);
+            r.c(b'/');
+            r.d(self.target_ht.ampdu_density as u64);
+        } else {
+            r.s("NONE - AP advertised no HT element, legacy rates only");
+        }
+        r.c(b'\n');
+
+        // Aggregation is the single biggest throughput lever we are NOT using,
+        // so it gets its own line rather than hiding in an event counter.
+        r.s("aggr     A-MPDU off (we decline ADDBA, no reorder buffer); declined ");
+        r.d(self.st.addba_declined as u64);
+        r.c(b'\n');
+
+        Self::rep_rate(&mut r, "rate tx  ", self.st.last_tx_rate);
+        Self::rep_rate(&mut r, "rate rx  ", self.st.last_rx_rate);
+        Self::rep_rate(&mut r, "rate ini ", self.st.last_init_rate);
+
+        r.s("tput     tx ");
+        r.kbit_as_mbit(self.st.tput_tx_kbit);
+        r.s(" Mbit/s  rx ");
+        r.kbit_as_mbit(self.st.tput_rx_kbit);
+        r.s(" Mbit/s  own airtime ");
+        r.d(self.st.airtime_pct as u64);
+        r.s("%\n");
+
+        r.s("tx       frames ");
+        r.d(self.st.tx_frames as u64);
+        r.s(" bytes ");
+        r.d(self.st.tx_bytes / 1024);
+        r.s(" KiB  blocked ");
+        r.d(self.st.tx_blocked as u64);
+        r.s("  inflight ");
+        r.d(self.data_in_flight as u64);
+        r.c(b'/');
+        r.d(TX_INFLIGHT_MAX as u64);
+        r.s(" peak ");
+        r.d(self.st.inflight_peak as u64);
+        r.c(b'\n');
+
+        r.s("tx resp  ok ");
+        r.d(self.st.tx_ok as u64);
+        r.s(" fail ");
+        r.d(self.st.tx_fail as u64);
+        r.s(" retries ");
+        r.d(self.st.tx_retries as u64);
+        r.s(" (");
+        r.pct(self.st.tx_retries as u64, (self.st.tx_ok + self.st.tx_fail).max(1) as u64);
+        r.s(" of frames) rts-fail ");
+        r.d(self.st.tx_rts_fail as u64);
+        r.s(" last-status 0x");
+        r.hex(self.st.last_status as u32, 4);
+        r.c(b'\n');
+
+        r.s("rx       frames ");
+        r.d(self.st.rx_frames as u64);
+        r.s(" bytes ");
+        r.d(self.st.rx_bytes / 1024);
+        r.s(" KiB  ip ");
+        r.d(self.st.rx_ip as u64);
+        r.s(" eapol ");
+        r.d(self.st.rx_eapol as u64);
+        r.s(" mgmt ");
+        r.d(self.st.rx_mgmt as u64);
+        r.s(" drain-peak ");
+        r.d(self.st.rx_drain_max as u64);
+        r.c(b'\n');
+
+        // The poll rate, and what it implies. The loop asks for a 1 ms sleep
+        // while busy, but a fiber whose core has nothing else runnable idles in
+        // HLT until the next 100 Hz worker tick — so the REAL period can be 10 ms,
+        // and then TX_INFLIGHT_MAX frames per pass is a hard throughput ceiling.
+        // Printing the implied ceiling makes that visible instead of theoretical.
+        r.s("loop     ");
+        r.d(self.st.passes_per_s as u64);
+        r.s(" passes/s (asks for 1 ms when busy) busy ");
+        r.pct(self.st.loop_busy as u64, self.st.loop_iters.max(1) as u64);
+        r.s(" iters ");
+        r.d(self.st.loop_iters as u64);
+        r.s(" deauth ");
+        r.d(self.st.deauth as u64);
+        r.c(b'\n');
+        r.s("tx cap   ");
+        r.d(TX_INFLIGHT_MAX as u64);
+        r.s(" frames/pass * ");
+        r.d(self.st.passes_per_s as u64);
+        r.s(" passes/s = ceiling ");
+        r.kbit_as_mbit(
+            (TX_INFLIGHT_MAX as u64 * self.st.passes_per_s as u64 * 1514 * 8 / 1000) as u32,
+        );
+        r.s(" Mbit/s\n");
+
+        // What else the scan saw. The target is picked by RSSI alone, which on a
+        // dual-band mesh always means the near 2.4 GHz node — this line is how we
+        // find out whether a faster band was on the table.
+        r.s("policy   band ");
+        r.s(match self.band_pref {
+            BAND_PREF_5 => "5-only",
+            BAND_PREF_24 => "2.4-only",
+            _ => "auto",
+        });
+        r.s(", picked because ");
+        r.s(match self.pick_reason {
+            PICK_5G_PREFERRED => "5 GHz was above the RSSI floor",
+            PICK_BAND_FORCED => "the band was forced by config",
+            PICK_SSID_FILTERED => "NO AP matched sys/config/wifi_ssid (fell back to loudest)",
+            _ => "it was the strongest of our SSID",
+        });
+        r.c(b'\n');
+
+        r.s("scan     ");
+        r.d(self.n_aps as u64);
+        r.s(" APs; same SSID on the other band: ");
+        if self.alt_valid {
+            r.s("ch ");
+            r.d(self.alt_chan as u64);
+            r.s(" rssi ");
+            r.i(self.alt_rssi as i32);
+            r.s(if self.alt_ht { " HT yes " } else { " HT no " });
+            r.mac(&self.alt_bssid);
+        } else {
+            r.s("none");
+        }
+        r.c(b'\n');
+
+        let n = r.n;
+        host::driver_report(&r.b[..n]);
     }
 
     // ── gen2 mgmt-frame TX (iwl_txq_gen2_tx + iwl_txq_gen2_build_tx) ──────
@@ -2742,6 +3259,10 @@ impl Ax200 {
         let mut addba: Option<[u8; 12]> = None;
         let mut stall = 0u32; // iterations the data queue has been stuck full
         let mut deauth_total = 0u32; // diagnostic: link-loss events seen
+        self.st.start_ms = host::now_ms();
+        self.st.win_start_ms = self.st.start_ms;
+        let mut next_report = self.st.start_ms + REPORT_PERIOD_MS;
+        let mut reconnect_cooldown = 0u64;
         loop {
             // RX: drain + recycle the ring. EAPOL-Key frames → wifid (the 4-way);
             // decrypted IP/other data → the kernel IP stack as Ethernet frames.
@@ -2750,10 +3271,46 @@ impl Ax200 {
             let mut link_lost = false;
             let mut deauth_reason = 0u16;
             let mut deauth_subtype = 0u8;
+            // Per-pass accumulators: the RX closure cannot touch `self` (it is
+            // borrowed by service_rx), so everything is folded in afterwards.
+            let mut a_ok = 0u32;
+            let mut a_fail = 0u32;
+            let mut a_retries = 0u32;
+            let mut a_rts = 0u32;
+            let mut a_airtime = 0u64;
+            let mut a_status = 0u16;
+            let mut a_init_rate = 0u32;
+            let mut a_ip = 0u32;
+            let mut a_eapol = 0u32;
+            let mut a_mgmt = 0u32;
+            let mut a_rx_bytes = 0u64;
             let rx_frames = self.service_rx(|c, g, rb| {
                 if c == TX_CMD && g == 0 {
                     // gen2 TX completion — one per transmitted data/mgmt frame.
+                    // struct iwl_tx_resp carries what it COST on the air: the
+                    // retry count, the rate the firmware started at and the
+                    // microseconds of airtime consumed. Reading it is the only
+                    // way to tell a slow link from a retrying one.
                     tx_done += 1;
+                    let mut tr = [0u8; RX_PKT_DATA_OFF + TX_RESP_LEN];
+                    host::dma_read_buf(rb.handle, 0, &mut tr);
+                    let base = RX_PKT_DATA_OFF;
+                    a_rts += tr[base + TXR_OFF_FAILURE_RTS] as u32;
+                    a_retries += tr[base + TXR_OFF_FAILURE_FRAME] as u32;
+                    a_init_rate = le32(&tr, base + TXR_OFF_INITIAL_RATE);
+                    a_airtime += u16::from_le_bytes([
+                        tr[base + TXR_OFF_MEDIA_TIME],
+                        tr[base + TXR_OFF_MEDIA_TIME + 1],
+                    ]) as u64;
+                    let st = u16::from_le_bytes([
+                        tr[base + TXR_OFF_STATUS],
+                        tr[base + TXR_OFF_STATUS + 1],
+                    ]);
+                    a_status = st;
+                    match st & TX_STATUS_MSK {
+                        TX_STATUS_SUCCESS | TX_STATUS_DIRECT_DONE => a_ok += 1,
+                        _ => a_fail += 1,
+                    }
                 } else if c == TLC_MNG_UPDATE_NOTIF && g == DATA_PATH_GROUP {
                     // The firmware's rate-scaling verdict: what it is actually
                     // transmitting at. Without this the host is blind to the
@@ -2785,6 +3342,7 @@ impl Ax200 {
                         }
                     }
                     if let Some((st, body)) = Self::rx_mgmt_for_us(rb, &our_mac) {
+                        a_mgmt += 1;
                         if st == DOT11_STYPE_DEAUTH || st == DOT11_STYPE_DISASSOC {
                             link_lost = true;
                             deauth_subtype = st;
@@ -2799,6 +3357,8 @@ impl Ax200 {
                     }
                     match Self::rx_classify(rb, &our_mac, &mut rxbuf, &mut llc_miss) {
                         RxKind::Eapol(n) => {
+                            a_eapol += 1;
+                            a_rx_bytes += n as u64;
                             evt[0] = EV_EAPOL_RX;
                             evt[1] = (n & 0xff) as u8;
                             evt[2] = (n >> 8) as u8;
@@ -2806,6 +3366,8 @@ impl Ax200 {
                             host::wifi_send_event(&evt[..3 + n]);
                         }
                         RxKind::Ip(n) => {
+                            a_ip += 1;
+                            a_rx_bytes += n as u64;
                             if rx_log < 12 {
                                 host::dprint("[ax200] data RX → IP stack (len ");
                                 host::dprint_dec(n as u32);
@@ -2829,10 +3391,28 @@ impl Ax200 {
             });
             // Free the data-queue slots the firmware just reported done.
             self.data_in_flight = self.data_in_flight.saturating_sub(tx_done);
+            // Fold this pass's accumulators into the running statistics.
+            self.st.loop_iters = self.st.loop_iters.wrapping_add(1);
+            self.st.rx_frames = self.st.rx_frames.wrapping_add(rx_frames);
+            self.st.rx_bytes += a_rx_bytes;
+            self.st.rx_ip = self.st.rx_ip.wrapping_add(a_ip);
+            self.st.rx_eapol = self.st.rx_eapol.wrapping_add(a_eapol);
+            self.st.rx_mgmt = self.st.rx_mgmt.wrapping_add(a_mgmt);
+            if rx_frames > self.st.rx_drain_max { self.st.rx_drain_max = rx_frames; }
+            self.st.tx_ok = self.st.tx_ok.wrapping_add(a_ok);
+            self.st.tx_fail = self.st.tx_fail.wrapping_add(a_fail);
+            self.st.tx_retries = self.st.tx_retries.wrapping_add(a_retries);
+            self.st.tx_rts_fail = self.st.tx_rts_fail.wrapping_add(a_rts);
+            self.st.tx_airtime_us += a_airtime;
+            if a_init_rate != 0 { self.st.last_init_rate = a_init_rate; }
+            if a_status != 0 { self.st.last_status = a_status; }
+            if last_tx_rate != u32::MAX { self.st.last_tx_rate = last_tx_rate; }
+            if last_rx_rate != u32::MAX { self.st.last_rx_rate = last_rx_rate; }
             // Answer a block-ack setup request (the TX has to happen outside the
             // RX closure, which holds &mut self through service_rx).
             if let Some(req) = addba.take() {
                 self.tx_addba_decline(&req);
+                self.st.addba_declined = self.st.addba_declined.wrapping_add(1);
             }
             // DIAGNOSTIC: a DEAUTH (subtype 12) / DISASSOC (10) arrived. Log it
             // with the 802.11 reason code — do NOT reconnect (that would mask the
@@ -2840,15 +3420,41 @@ impl Ax200 {
             // or our own behaviour provoked it:
             //   1=unspecified  2=prev-auth-invalid  4=inactivity  6/7=class2/3
             //   frame from nonassoc STA (= our state/TX bug)  15=4-way timeout.
+            // A DEAUTH (subtype 12) / DISASSOC (10) arrived. The reason code says
+            // whether the AP genuinely dropped us or our own behaviour provoked
+            // it: 1=unspecified 2=prev-auth-invalid 4=inactivity 6/7=class2/3
+            // frame from a nonassoc STA (= our state/TX bug) 15=4-way timeout.
+            // It is always logged and counted — then we reconnect, because in a
+            // mesh with one SSID on two APs a steering kick is NORMAL traffic
+            // and staying down until a human re-runs the driver is not an option.
             if link_lost {
                 deauth_total += 1;
-                host::print("[ax200] ** LINK-LOSS EVENT ** ");
+                self.st.deauth = deauth_total;
+                host::print("[ax200] ** LINK-LOSS ** ");
                 host::print(if deauth_subtype == DOT11_STYPE_DEAUTH { "DEAUTH" } else { "DISASSOC" });
                 host::print(" reason=");
                 host::print_dec(deauth_reason as u32);
                 host::print(" count=");
                 host::print_dec(deauth_total);
-                host::print(" (NOT reconnecting — diagnosing root cause)\n");
+                self.authorized = false;
+                let t = host::now_ms();
+                if t < reconnect_cooldown {
+                    // A failed reconnect just ran. Re-scanning on every kick of a
+                    // deauth storm would spend the whole time scanning and never
+                    // be listening when the AP is ready for us.
+                    host::print(" - in cooldown, not re-scanning yet\n");
+                } else {
+                    host::print(" - reconnecting\n");
+                    if self.reconnect() {
+                        reconnect_cooldown = 0;
+                    } else {
+                        host::print("[ax200] reconnect failed - retrying in 2 s\n");
+                        reconnect_cooldown = host::now_ms() + 2000;
+                    }
+                    // The scan inside reconnect drained the ring; restart the
+                    // window so the next report measures fresh traffic.
+                    next_report = host::now_ms() + REPORT_PERIOD_MS;
+                }
             }
             // TX: send every Ethernet frame the IP stack queued (DHCP, ARP, …),
             // but stop once the data queue is full — leave the rest in the kernel
@@ -2857,6 +3463,10 @@ impl Ax200 {
             let mut tx_any = false;
             loop {
                 if self.data_in_flight >= TX_INFLIGHT_MAX {
+                    // Not a drop: the frame stays in the kernel queue. But it IS
+                    // the moment the in-flight cap becomes the throughput limit,
+                    // so it has to be visible before anyone raises the cap.
+                    self.st.tx_blocked = self.st.tx_blocked.wrapping_add(1);
                     break;
                 }
                 let n = host::netdev_poll_tx(&mut txbuf);
@@ -2873,7 +3483,13 @@ impl Ax200 {
                     host::dprint(")\n");
                     tx_log += 1;
                 }
-                self.tx_eth(&txbuf[..n]);
+                if self.tx_eth(&txbuf[..n]) {
+                    self.st.tx_frames = self.st.tx_frames.wrapping_add(1);
+                    self.st.tx_bytes += n as u64;
+                    if self.data_in_flight > self.st.inflight_peak {
+                        self.st.inflight_peak = self.data_in_flight;
+                    }
+                }
             }
             // Control commands from wifid (TX_EAPOL / SET_KEY / AUTHORIZED).
             let clen = host::wifi_poll_cmd(&mut cmd);
@@ -2907,6 +3523,14 @@ impl Ax200 {
             // yielding the core (npk_sleep yields the fiber). A proper IRQ wake is
             // the eventual fix; 4 ms is the interim quick-win over the old 20 ms.
             let busy = rx_frames > 0 || tx_any || clen > 0 || self.data_in_flight > 0;
+            if busy { self.st.loop_busy = self.st.loop_busy.wrapping_add(1); }
+            // Publish the status snapshot once a second. Reading the clock is one
+            // host call per pass; formatting happens 1/1000 of those.
+            let now = host::now_ms();
+            if now >= next_report {
+                self.publish_report(now);
+                next_report = now + REPORT_PERIOD_MS;
+            }
             host::sleep_ms(if busy { 1 } else { 4 });
         }
     }
@@ -2938,6 +3562,7 @@ impl Ax200 {
             }
             // AUTHORIZED: 4-way done → carrier up, IP data path live.
             Some(CMD_AUTHORIZED) => {
+                self.authorized = true;
                 host::netdev_set_link(true);
                 host::print("[ax200] *** AUTHORIZED *** — link up, data path live 🎉\n");
                 let mut up = [0u8; 7];
@@ -3148,7 +3773,9 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.44.0 — HT rates + associated MAC context + rate telemetry\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v");
+    host::print(DRIVER_VERSION);
+    host::print(" - HT rates + live link diagnostics (run 'wlan')\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -3222,7 +3849,20 @@ pub extern "C" fn _start() {
         data_write_ptr: 0,
         data_in_flight: 0,
         tx_seq: 0,
+        st: Stats::NEW,
+        n_aps: 0,
+        alt_bssid: [0; 6],
+        alt_chan: 0,
+        alt_rssi: 0,
+        alt_ht: false,
+        alt_valid: false,
+        authorized: false,
+        want_ssid: [0; SSID_MAX],
+        want_ssid_len: 0,
+        band_pref: BAND_PREF_AUTO,
+        pick_reason: PICK_STRONGEST,
     };
+    dev.st.start_ms = host::now_ms();
 
     let hw_rev = dev.r32(CSR_HW_REV);
     dev.hw_rev = hw_rev;
@@ -3300,6 +3940,10 @@ pub extern "C" fn _start() {
                             // references (scan_start_mac_or_link_id → ctx id 0).
                             dev.add_mac_context();
                             host::dprint("[ax200] Stage 4d2b1b OK — MAC context added\n");
+
+                            // Which network, which band — read before the scan so
+                            // the target can be chosen by policy, not by loudness.
+                            dev.load_connect_policy();
 
                             // ── Stage 4d2b1/2: passive scan → SCAN_COMPLETE,
                             // parse beacons → access points (SSID/BSSID/RSSI). ──

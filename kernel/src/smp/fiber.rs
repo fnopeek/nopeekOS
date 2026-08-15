@@ -230,6 +230,30 @@ pub fn run_core_fibers(cid: usize) {
     }
 }
 
+/// The earliest TSC deadline any parked fiber on this core is waiting for, or
+/// None if nothing is waiting on time.
+///
+/// The idle path needs this. A fiber that asks for a 1 ms sleep is otherwise
+/// resumed only by the next 100 Hz worker tick, because `run_core_fibers`
+/// returns and the core HLTs — so every sub-10 ms sleep silently becomes 10 ms.
+/// For a polling driver that turns its poll period, and with it its throughput
+/// ceiling, into a property of the timer rate rather than of the device.
+pub fn earliest_deadline(cid: usize) -> Option<u64> {
+    if cid >= MAX_CORES {
+        return None;
+    }
+    let q = FIBER_QUEUES[cid].lock();
+    q.iter()
+        .filter_map(|f| match f.state {
+            FiberState::Ready => None,
+            FiberState::Sleeping(d) => Some(d),
+            FiberState::WaitingIrq { deadline, .. } => Some(deadline),
+            FiberState::WaitingKick { deadline, .. } => Some(deadline),
+            FiberState::Done => None,
+        })
+        .min()
+}
+
 /// Park the running fiber for `ms` and yield its core to peer fibers.
 /// Returns (resumes) once the scheduler re-runs it past the deadline.
 /// Returns `false` if not running inside a fiber (caller falls back to an

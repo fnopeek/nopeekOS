@@ -127,6 +127,11 @@ pub struct FqCodel {
     backlog: usize, // total queued bytes (for CoDel's "don't drop if tiny" rule)
     target: u64,    // ticks (5 ms)
     interval: u64,  // ticks (100 ms)
+    // Drop bookkeeping, split by cause: AQM drops mean CoDel is doing its job
+    // (queue standing too long), pool-full drops mean the driver is not keeping
+    // up at all. They call for opposite fixes, so never sum them into one number.
+    drops_aqm: u64,
+    drops_full: u64,
 }
 
 impl FqCodel {
@@ -144,8 +149,16 @@ impl FqCodel {
             backlog: 0,
             target: 0,
             interval: 0,
+            drops_aqm: 0,
+            drops_full: 0,
         }
     }
+
+    /// Frames discarded so far: (CoDel/AQM, pool-full).
+    pub fn drops_split(&self) -> (u64, u64) { (self.drops_aqm, self.drops_full) }
+    /// Bytes currently queued for the driver.
+    pub fn backlog(&self) -> usize { self.backlog }
+    pub fn reset_drops(&mut self) { self.drops_aqm = 0; self.drops_full = 0; }
 
     fn lazy_init(&mut self) {
         if self.interval == 0 {
@@ -218,11 +231,12 @@ impl FqCodel {
                 // Pool full: drop the head of the fattest flow to make room, so a
                 // new sparse flow's packet still gets in (fq_codel_drop).
                 if !self.drop_fattest() {
+                    self.drops_full += 1;
                     return;
                 }
                 match self.alloc_slot() {
                     Some(s) => s,
-                    None => return,
+                    None => { self.drops_full += 1; return; }
                 }
             }
         };
@@ -275,6 +289,7 @@ impl FqCodel {
         if let Some(s) = self.flow_pop(best) {
             self.backlog -= self.lens[s as usize] as usize;
             self.free_slot(s);
+            self.drops_full += 1;
             return true;
         }
         false
@@ -319,6 +334,7 @@ impl FqCodel {
                     self.flows[fi].codel.rec_inv_sqrt =
                         newton_step(c, self.flows[fi].codel.rec_inv_sqrt);
                     self.free_slot(slot); // drop
+                    self.drops_aqm += 1;
                     slot = match self.flow_pop(fi) {
                         Some(s) => s,
                         None => {
@@ -340,6 +356,7 @@ impl FqCodel {
         } else if drop {
             // First drop: discard this one, take the next, enter dropping state.
             self.free_slot(slot);
+            self.drops_aqm += 1;
             slot = match self.flow_pop(fi) {
                 Some(s) => s,
                 None => {

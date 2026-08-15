@@ -36,6 +36,8 @@ unsafe extern "C" {
     // Misc
     fn npk_memory_fence() -> i32;
     fn npk_sleep(ms: i32) -> i32;
+    fn npk_ticks() -> i64;
+    fn npk_driver_report(buf_ptr: i32, len: i32) -> i32;
     fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_netdev_register(mac_ptr: i32) -> i32;
     fn npk_input_wait(timeout_ms: i32) -> i32;
@@ -198,6 +200,30 @@ pub fn sleep_ms(ms: u32) {
 
 pub fn input_wait(timeout_ms: u32) -> i32 {
     unsafe { npk_input_wait(timeout_ms as i32) }
+}
+
+/// Milliseconds since boot (kernel tick counter × 10).
+pub fn now_ms() -> u64 {
+    let t = unsafe { npk_ticks() };
+    if t < 0 { 0 } else { t as u64 }
+}
+
+/// Publish a plain-text status snapshot for the `wlan` intent to print.
+pub fn driver_report(text: &[u8]) {
+    unsafe { npk_driver_report(text.as_ptr() as i32, text.len() as i32) };
+}
+
+/// Read an npkFS object into `buf`, returning the bytes read (0 = absent).
+/// Used for the connect policy in `sys/config/*` — never for secrets: the
+/// driver must not be able to see the PSK.
+pub fn fetch(name: &str, buf: &mut [u8]) -> usize {
+    let n = unsafe {
+        npk_fetch(
+            name.as_ptr() as i32, name.len() as i32,
+            buf.as_mut_ptr() as i32, buf.len() as i32,
+        )
+    };
+    if n > 0 { (n as usize).min(buf.len()) } else { 0 }
 }
 
 /// Register this driver as a network interface with the given MAC. The kernel

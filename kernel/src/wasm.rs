@@ -4020,6 +4020,25 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_driver_report(buf_ptr, len) -> 0 / -1 — a bound driver publishes a
+    // short plain-text status snapshot, read back with the `wlan` intent. The
+    // kernel stores the bytes and a timestamp and never parses them: what is
+    // worth reporting is device knowledge, and that stays in the driver.
+    linker.func_wrap("env", "npk_driver_report",
+        |caller: Caller<'_, HostState>, buf_ptr: i32, len: i32| -> i32 {
+            if caller.data().hw.is_none() { return -1; }
+            if len <= 0 || len as usize > crate::drivers::report::REPORT_MAX { return -1; }
+            match read_wasm_str(&caller, buf_ptr, len) {
+                Some(s) => {
+                    let name = caller.data().module_name.clone();
+                    crate::drivers::report::store(&name, &s);
+                    0
+                }
+                None => -1,
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // ── WiFi/NIC data path (driver ↔ kernel IP stack via the netdev mailbox) ─
 
     // npk_netdev_submit_rx(buf_ptr, len) -> 0 / -1 — driver hands a received
@@ -4127,6 +4146,8 @@ fn wifi_poll_into(
 
 /// Free all hardware resources allocated by a WASM driver module.
 fn cleanup_hw_state(state: &mut HostState) {
+    // A dead driver's snapshot must not read as live numbers.
+    crate::drivers::report::clear(&state.module_name);
     if let Some(hw) = state.hw.take() {
         let mut total_pages = 0usize;
         for &(phys, pages) in &hw.dma_allocs {
