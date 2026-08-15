@@ -1,4 +1,4 @@
-//! Network intents: ping, traceroute, netstat, resolve, net info
+//! Network intents: ping, traceroute, netstat, resolve, net info, wlan
 
 use crate::kprintln;
 use super::parse_ip;
@@ -117,6 +117,73 @@ pub fn intent_netstat() {
             kprintln!("  {:>6}  {}.{}.{}.{}:{:<5}  {}",
                 lport, rip[0], rip[1], rip[2], rip[3], rport, state);
         }
+    }
+    kprintln!();
+}
+
+/// `wlan` — one screen with everything needed to diagnose the WiFi link.
+///
+/// Two halves that must be read together: what the KERNEL sees of the WASM NIC
+/// (queues, drops, active interface) and what the DRIVER reports about the air
+/// (rates, retries, airtime). A link that is slow because the negotiated rate is
+/// legacy looks nothing like one that is slow because the TX queue keeps
+/// overflowing, and only both halves side by side tell them apart.
+///
+/// `wlan reset` zeroes the kernel counters so a single speed test can be
+/// measured on its own; the driver's counters are cumulative and it reports
+/// throughput over its own 1-second window regardless.
+pub fn intent_wlan(args: &str) {
+    if args.trim() == "reset" {
+        crate::netdev::wasm_nic_stats_reset();
+        kprintln!("[wlan] kernel-side counters cleared");
+        return;
+    }
+
+    let s = crate::netdev::wasm_nic_stats();
+    let registered = crate::netdev::wasm_nic_available();
+    let link = crate::netdev::wasm_nic_link_up();
+    let prefer = crate::config::get("net_prefer").unwrap_or_else(|| "lan".into());
+    let active = match crate::netdev::active() {
+        crate::netdev::Active::Intel => "intel (wired)",
+        crate::netdev::Active::Rtl => "rtl8153 (usb-lan)",
+        crate::netdev::Active::Wasm => "wlan (wifi)",
+        crate::netdev::Active::Virtio => "virtio-net",
+        crate::netdev::Active::None => "none",
+    };
+
+    kprintln!();
+    kprintln!("  Kernel view");
+    kprintln!("  ───────────");
+    kprintln!("  wlan       {}, carrier {}",
+        if registered { "registered" } else { "NOT registered — driver not running" },
+        if link { "UP" } else { "DOWN" });
+    kprintln!("  routing    active={}  net_prefer={}", active, prefer.trim());
+    kprintln!("  tx queue   enq {}  deq {}  backlog {} B", s.tx_enqueued, s.tx_dequeued, s.tx_backlog);
+    kprintln!("  tx drops   aqm {} (codel, latency control)  full {} (driver too slow)",
+        s.tx_drops_aqm, s.tx_drops_full);
+    kprintln!("  rx ring    in {}  dropped {} (ring full — driver outran core-0 drain)",
+        s.rx_to_ring, s.rx_ring_drops);
+
+    // The driver half. Printed verbatim: the kernel does not know what an
+    // AX200 rate code means, and should not have to.
+    let mut any = false;
+    for name in crate::drivers::report::names() {
+        if let Some((text, at_ms)) = crate::drivers::report::get(&name) {
+            let now = crate::interrupts::ticks().saturating_mul(10);
+            let age = now.saturating_sub(at_ms);
+            kprintln!();
+            kprintln!("  Driver report — {} ({} ms ago)", name, age);
+            kprintln!("  ───────────────");
+            for line in text.lines() {
+                kprintln!("  {}", line);
+            }
+            any = true;
+        }
+    }
+    if !any {
+        kprintln!();
+        kprintln!("  (no driver report — the driver is not running, or predates");
+        kprintln!("   npk_driver_report; start it with 'driver wifi_ax200')");
     }
     kprintln!();
 }

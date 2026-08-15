@@ -653,9 +653,22 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
         // next tick (≤10 ms latency; a targeted IPI wake is a future
         // optimization). sti-shadow arms HLT before the IRQ lands; the
         // trailing cli restores the IF=0 the loop body runs under.
+        // Tickless: a fiber that asked for a 1 ms sleep must not wait for the
+        // next 10 ms worker tick. Arm the LAPIC for the earliest parked deadline
+        // instead — still a real interrupt wake, no spinning. Without this every
+        // sub-10 ms sleep silently rounds up to 10 ms, which turns a polling
+        // driver's throughput ceiling into a function of the timer rate.
+        let now = crate::interrupts::rdtsc();
+        let mut reload = None;
+        match super::fiber::earliest_deadline(cid) {
+            Some(d) if d <= now => continue, // became runnable — round again
+            Some(d) => reload = crate::interrupts::arm_worker_wake_in(d - now),
+            None => {}
+        }
         let t0 = crate::interrupts::rdtsc();
         // SAFETY: ring-0 idle; wakes on the per-core timer (or any IRQ).
         unsafe { core::arch::asm!("sti; hlt; cli"); }
+        if let Some(prev) = reload { crate::interrupts::restore_worker_reload(prev); }
         record_halt(cid, crate::interrupts::rdtsc().saturating_sub(t0));
         record_wake(cid, WAKE_HLT_FALLBACK);
     }

@@ -663,6 +663,49 @@ pub fn set_worker_poll_hz(hz: u32) {
     }
 }
 
+/// Tickless idle: shorten the CALLING worker core's LAPIC timer so its HLT ends
+/// in ~`tsc_delta` cycles instead of at the next 100 Hz tick. Returns the reload
+/// count that was in place, to be handed back to `restore_worker_reload` after
+/// the wake — reading and restoring the exact previous value keeps this from
+/// fighting `set_worker_poll_hz` (a download in progress must keep its 10 kHz).
+///
+/// Only ever SHORTENS: if the current reload already fires sooner, nothing
+/// changes. Floored at 1/200 of a tick (~50 us) so a runaway deadline cannot
+/// turn into a timer storm.
+pub fn arm_worker_wake_in(tsc_delta: u64) -> Option<u32> {
+    if crate::smp::per_core::current_core_id() == 0 {
+        return None;
+    }
+    let base = WORKER_APIC_BASE.load(Ordering::Relaxed);
+    let cnt100 = WORKER_TIMER_INITIAL.load(Ordering::Relaxed);
+    let freq = TSC_FREQ.load(Ordering::Relaxed);
+    if base == 0 || cnt100 == 0 || freq == 0 {
+        return None;
+    }
+    let full = freq / 100; // TSC cycles in one 10 ms worker period
+    if full == 0 || tsc_delta >= full {
+        return None; // nothing sooner than the normal tick
+    }
+    let want = (((cnt100 as u64) * tsc_delta / full) as u32).max((cnt100 / 200).max(1));
+    // SAFETY: this core's own LAPIC timer initial-count register (readable).
+    let prev = unsafe { core::ptr::read_volatile((base + 0x380) as *const u32) };
+    if prev != 0 && want >= prev {
+        return None; // already firing at least as soon — leave it alone
+    }
+    // SAFETY: as above; writing initial-count restarts the periodic countdown.
+    unsafe { core::ptr::write_volatile((base + 0x380) as *mut u32, want); }
+    Some(prev)
+}
+
+/// Put back the reload count `arm_worker_wake_in` replaced.
+pub fn restore_worker_reload(prev: u32) {
+    let base = WORKER_APIC_BASE.load(Ordering::Relaxed);
+    if base != 0 && prev != 0 {
+        // SAFETY: this core's own LAPIC timer initial-count register.
+        unsafe { core::ptr::write_volatile((base + 0x380) as *mut u32, prev); }
+    }
+}
+
 /// Shared idle primitive for a worker-core busy-wait loop (the network recv
 /// loops: tcp_recv_poll, recv_blocking). HLT until the next IRQ (the per-core
 /// LAPIC timer — sped to ~10 kHz by set_worker_poll_hz during a download, else

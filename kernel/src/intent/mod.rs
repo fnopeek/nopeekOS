@@ -1966,6 +1966,11 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 net::intent_net_info();
             }
         }
+        "wlan" => {
+            if require_cap(vault, &session, Rights::READ, "wlan") {
+                net::intent_wlan(args);
+            }
+        }
 
         "mtrr" | "fbinfo" | "gfx" => {
             if require_cap(vault, &session, Rights::READ, "mtrr") {

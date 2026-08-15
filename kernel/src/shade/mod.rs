@@ -1155,11 +1155,20 @@ pub fn start_autostart() {
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
     {
-        launch_app(name);
+        launch_app_with_ttl(name, None);
     }
 }
 
 pub fn launch_app(name: &str) {
+    launch_app_with_ttl(name, Some(600_000));
+}
+
+/// `ttl_ticks` = None for a resident service. Autostart entries are exactly
+/// that: a WiFi driver, a supplicant, the dock. The default 600 000 ticks are
+/// 100 minutes at 100 Hz — after which every gated host call of a still-running
+/// module starts failing, which looks like the device breaking, not like a
+/// capability expiring.
+pub fn launch_app_with_ttl(name: &str, ttl_ticks: Option<u64>) {
     let already_open = with_compositor(|comp| {
         comp.windows.iter()
             .find(|w| w.kind == window::WindowKind::Widget && w.title == name)
@@ -1178,7 +1187,7 @@ pub fn launch_app(name: &str) {
     // Per-app rights from the module's `.npk.caps` section (no blanket
     // WRITE); absent → safe default.
     let rights = crate::capability::widget_rights_from_wasm(&bytes);
-    let module_cap = match crate::capability::create_module_cap(rights, Some(600_000)) {
+    let module_cap = match crate::capability::create_module_cap(rights, ttl_ticks) {
         Ok(id) => id,
         Err(e) => { crate::kprintln!("[npk] launch_app: cap failed: {}", e); return; }
     };

@@ -876,6 +876,47 @@ pub const STA_KEY_MULTICAST: u16 = 1 << 14;
 pub const DOT11_FC_DATA: u8 = 0x08; // type data, subtype 0
 pub const DOT11_FC1_TODS: u8 = 0x01;
 
+// ── TX completion (struct iwl_tx_resp, fw/api/tx.h) ──────────────
+// The new-tx-api variant, which is what a gen2 device sends
+// (iwl_mvm_get_agg_status → &((struct iwl_tx_resp *)tx_resp)->status). 44 bytes;
+// offsets relative to pkt->data (RX_PKT_DATA_OFF). This is the only place the
+// host learns what an on-air transmission actually cost: how many times it was
+// retried, and how many microseconds of airtime it burned.
+pub const TX_RESP_LEN: usize = 44;
+pub const TXR_OFF_FRAME_COUNT: usize = 0;  // u8
+pub const TXR_OFF_FAILURE_RTS: usize = 2;  // u8
+pub const TXR_OFF_FAILURE_FRAME: usize = 3; // u8 — retries; count = this + 1
+pub const TXR_OFF_INITIAL_RATE: usize = 4; // __le32 rate_n_flags
+pub const TXR_OFF_MEDIA_TIME: usize = 8;   // __le16 wireless_media_time (us)
+pub const TXR_OFF_BYTE_CNT: usize = 30;    // __le16
+pub const TXR_OFF_STATUS: usize = 40;      // __le16 status.status
+pub const TX_STATUS_MSK: u16 = 0x00ff;
+pub const TX_STATUS_SUCCESS: u16 = 0x01;
+pub const TX_STATUS_DIRECT_DONE: u16 = 0x02;
+// rate_n_flags v2, remaining fields we decode for the report (fw/api/rs.h).
+pub const RATE_MCS_SGI_MSK: u32 = 1 << 20;
+pub const RATE_MCS_LDPC_MSK: u32 = 1 << 16;
+
+// ── Connect policy (sys/config/wifi_ssid, sys/config/wifi_band) ──
+pub const BAND_PREF_AUTO: u8 = 0; // prefer 5 GHz when it is strong enough
+pub const BAND_PREF_5: u8 = 1;    // 5 GHz only (fall back if none)
+pub const BAND_PREF_24: u8 = 2;   // 2.4 GHz only (fall back if none)
+// Above this RSSI a 5 GHz AP is worth taking over a louder 2.4 GHz one: the
+// band is uncongested and, in a repeater mesh, usually the router itself rather
+// than a node whose backhaul halves the throughput. wpa_supplicant's band
+// preference works the same way — a signal floor, not a pure RSSI contest.
+pub const BAND_PREF_5_MIN_RSSI: i8 = -70;
+pub const PICK_STRONGEST: u8 = 0;
+pub const PICK_5G_PREFERRED: u8 = 1;
+pub const PICK_BAND_FORCED: u8 = 2;
+pub const PICK_SSID_FILTERED: u8 = 3;
+
+// Status snapshot published via npk_driver_report. One screen of text.
+pub const REPORT_CAP: usize = 1600;
+// How often the snapshot is refreshed. 1 s is short enough to show a speed test
+// live and long enough that formatting never lands in the hot path.
+pub const REPORT_PERIOD_MS: u64 = 1000;
+
 // ── PCIe capability layout (apm_config: ASPM / LTR detect) ───────
 pub const PCI_CAP_PTR: u8 = 0x34; // first capability pointer
 pub const PCI_CAP_ID_EXP: u8 = 0x10; // PCI Express capability
