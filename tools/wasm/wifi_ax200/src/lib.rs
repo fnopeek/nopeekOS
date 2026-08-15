@@ -30,7 +30,7 @@ static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
 /// carry it, so a device measurement can never be traced to the wrong build.
-const DRIVER_VERSION: &str = "0.46.0";
+const DRIVER_VERSION: &str = "0.47.0";
 
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
@@ -73,6 +73,10 @@ impl Dma {
 /// Classification of a received 802.11 data frame addressed to us.
 enum RxKind {
     None,
+    /// A data frame addressed to us whose payload we could not locate. Distinct
+    /// from None on purpose: "nothing arrives" and "everything arrives and we
+    /// drop it" are opposite faults and were indistinguishable before.
+    Undecoded,
     /// EAPOL-Key frame (the 4-way) → forward to wifid. `out` holds the frame.
     Eapol(usize),
     /// IP/other data → the kernel IP stack. `out` holds an Ethernet frame.
@@ -164,6 +168,10 @@ struct Stats {
     // rising count here means the poll loop is not keeping up, and no amount of
     // air rate will help until it does.
     rx_pool_exhausted: u32,
+    // Unicast frames carrying our address, whatever their type, and the subset
+    // we received but could not decode.
+    rx_to_us: u32,
+    rx_undecoded: u32,
     // Loop + events.
     loop_iters: u32,
     loop_busy: u32,
@@ -199,7 +207,7 @@ impl Stats {
         last_status: 0, last_init_rate: 0,
         rx_frames: 0, rx_bytes: 0, rx_ip: 0, rx_eapol: 0, rx_mgmt: 0, rx_drain_max: 0,
         tx_eapol: 0, keys_set: 0, ready_sent: 0,
-        rx_pool_exhausted: 0,
+        rx_pool_exhausted: 0, rx_to_us: 0, rx_undecoded: 0,
         loop_iters: 0, loop_busy: 0, deauth: 0, addba_declined: 0,
         last_tx_rate: 0, last_rx_rate: 0,
         win_start_ms: 0, win_tx_bytes: 0, win_rx_bytes: 0, win_airtime_us: 0,
@@ -359,6 +367,7 @@ struct Ax200 {
     want_ssid: [u8; SSID_MAX],
     want_ssid_len: u8,
     band_pref: u8, // BAND_PREF_*
+    want_power_save: bool,
     pick_reason: u8, // PICK_* — why the target was chosen, for the report
 }
 
@@ -1271,10 +1280,24 @@ impl Ax200 {
     // pins the driver core → freeze), so it is reverted. The latency spikes are
     // most likely fiber-starvation, not power-save — the WiFi-IRQ is the real fix.
     fn send_power(&mut self) {
+        // CAM (flags = 0, radio always on) unless sys/config/wifi_ps says
+        // otherwise — iwl_mvm_power_update_device with ps_disabled.
+        //
+        // We implement no dynamic power save: nothing here tracks DTIM wake
+        // windows or tells the AP when we are awake. Enabling device power save
+        // on top of that lets the firmware sleep between beacons on timing we
+        // never verified — and since 0.44.0 started sending is_assoc=1 with a
+        // DTIM period, it finally has the information to actually do it. A
+        // station that sleeps at the wrong moment does not look asleep; it looks
+        // associated and deaf, which is exactly the symptom being chased.
+        let ps = self.want_power_save;
         let mut cmd = [0u8; DEVICE_POWER_CMD_LEN];
-        put_u16(&mut cmd, 0, DEVICE_POWER_FLAGS_POWER_SAVE_ENA);
+        put_u16(&mut cmd, 0, if ps { DEVICE_POWER_FLAGS_POWER_SAVE_ENA } else { 0 });
         self.send_hcmd(0, POWER_TABLE_CMD, &cmd);
         self.pump_rx(20);
+        host::print("[ax200] device power: ");
+        host::print(if ps { "power-save enabled (sys/config/wifi_ps=on)" } else { "CAM, radio always on" });
+        host::print("\n");
     }
 
     // ── iwl_mvm_init_mcc → iwl_mvm_update_mcc (mvm/nvm.c) ──────────
@@ -1765,6 +1788,10 @@ impl Ax200 {
         } else {
             host::print("(any - set 'store /sys/config/wifi_ssid <name>')");
         }
+        let mut pb = [0u8; 16];
+        let pn = host::fetch("sys/config/wifi_ps", &mut pb);
+        self.want_power_save = pn > 0 && (pb[..pn].starts_with(b"on") || pb[..pn].starts_with(b"1"));
+
         host::print(", band ");
         host::print(match self.band_pref {
             BAND_PREF_5 => "5 GHz only",
@@ -2624,6 +2651,10 @@ impl Ax200 {
         r.d(self.st.rx_eapol as u64);
         r.s(" mgmt ");
         r.d(self.st.rx_mgmt as u64);
+        r.s(" to-us ");
+        r.d(self.st.rx_to_us as u64);
+        r.s(" undecoded ");
+        r.d(self.st.rx_undecoded as u64);
         r.s(" drain-peak ");
         r.d(self.st.rx_drain_max as u64);
         r.c(b'/');
@@ -2659,7 +2690,9 @@ impl Ax200 {
         // What else the scan saw. The target is picked by RSSI alone, which on a
         // dual-band mesh always means the near 2.4 GHz node — this line is how we
         // find out whether a faster band was on the table.
-        r.s("policy   band ");
+        r.s("policy   power ");
+        r.s(if self.want_power_save { "save (wifi_ps=on)" } else { "CAM (always on)" });
+        r.s(", band ");
         r.s(match self.band_pref {
             BAND_PREF_5 => "5-only",
             BAND_PREF_24 => "2.4-only",
@@ -2975,7 +3008,8 @@ impl Ax200 {
         host::print("\n");
     }
 
-    fn rx_classify(rb: &Dma, our_mac: &[u8; 6], out: &mut [u8], miss_log: &mut u32) -> RxKind {
+    fn rx_classify(rb: &Dma, our_mac: &[u8; 6], out: &mut [u8], miss_log: &mut u32,
+                   to_us: &mut u32) -> RxKind {
         let mut buf = [0u8; 1600];
         host::dma_read_buf(rb.handle, 0, &mut buf);
         let d = RX_PKT_DATA_OFF;
@@ -2984,6 +3018,12 @@ impl Ax200 {
             .min(buf.len() - d);
         let f = d + IWL_RX_DESC_SIZE_V1; // 56
         let fc = buf[f];
+        // Count anything unicast to our address, whatever its type. This is the
+        // one number that separates "the AP stopped talking to us" from "it is
+        // talking and we discard it" — and without it both look like silence.
+        if buf[f + DOT11_OFF_ADDR1..f + DOT11_OFF_ADDR1 + 6] == our_mac[..] {
+            *to_us += 1;
+        }
         if fc & 0x0c != DOT11_FC_TYPE_DATA {
             return RxKind::None;
         }
@@ -3020,7 +3060,10 @@ impl Ax200 {
             Self::note_llc_miss(miss_log, want, f + hdrlen + IEEE80211_CCMP_HDR_LEN);
             f + hdrlen + IEEE80211_CCMP_HDR_LEN
         } else {
-            return RxKind::None;
+            // Addressed to us, a data frame, and LLC/SNAP is at none of the three
+            // possible offsets. Silently dropping this was a blind spot.
+            Self::note_llc_miss(miss_log, want, 0);
+            return RxKind::Undecoded;
         };
         if llc + 8 > buf.len() {
             return RxKind::None;
@@ -3343,6 +3386,8 @@ impl Ax200 {
         self.st.win_start_ms = self.st.start_ms;
         let mut next_report = self.st.start_ms + REPORT_PERIOD_MS;
         let mut reconnect_cooldown = 0u64;
+        let mut assoc_at_ms = host::now_ms();
+        let mut handshake_deadline = assoc_at_ms + HANDSHAKE_TIMEOUT_MS;
         loop {
             // RX: drain + recycle the ring. EAPOL-Key frames → wifid (the 4-way);
             // decrypted IP/other data → the kernel IP stack as Ethernet frames.
@@ -3364,6 +3409,8 @@ impl Ax200 {
             let mut a_eapol = 0u32;
             let mut a_mgmt = 0u32;
             let mut a_rx_bytes = 0u64;
+            let mut a_to_us = 0u32;
+            let mut a_undecoded = 0u32;
             let rx_frames = self.service_rx(|c, g, rb| {
                 if c == TX_CMD && g == 0 {
                     // gen2 TX completion — one per transmitted data/mgmt frame.
@@ -3422,7 +3469,7 @@ impl Ax200 {
                         }
                         return true; // mgmt frame — not for the IP path
                     }
-                    match Self::rx_classify(rb, &our_mac, &mut rxbuf, &mut llc_miss) {
+                    match Self::rx_classify(rb, &our_mac, &mut rxbuf, &mut llc_miss, &mut a_to_us) {
                         RxKind::Eapol(n) => {
                             a_eapol += 1;
                             a_rx_bytes += n as u64;
@@ -3467,6 +3514,7 @@ impl Ax200 {
                             // connection drops; revisit with #2 WiFi-IRQ.)
                             host::netdev_submit_rx(&rxbuf[..n]);
                         }
+                        RxKind::Undecoded => { a_undecoded += 1; }
                         RxKind::None => {}
                     }
                 }
@@ -3481,6 +3529,8 @@ impl Ax200 {
             self.st.rx_ip = self.st.rx_ip.wrapping_add(a_ip);
             self.st.rx_eapol = self.st.rx_eapol.wrapping_add(a_eapol);
             self.st.rx_mgmt = self.st.rx_mgmt.wrapping_add(a_mgmt);
+            self.st.rx_to_us = self.st.rx_to_us.wrapping_add(a_to_us);
+            self.st.rx_undecoded = self.st.rx_undecoded.wrapping_add(a_undecoded);
             if rx_frames > self.st.rx_drain_max { self.st.rx_drain_max = rx_frames; }
             if rx_frames as usize >= RX_NUM_RBS - 2 {
                 self.st.rx_pool_exhausted = self.st.rx_pool_exhausted.wrapping_add(1);
@@ -3608,6 +3658,28 @@ impl Ax200 {
             // RX latency floor low (the ping/round-trip baseline) while still
             // yielding the core (npk_sleep yields the fiber). A proper IRQ wake is
             // the eventual fix; 4 ms is the interim quick-win over the old 20 ms.
+            // 4-way watchdog. An AP starts the handshake within milliseconds of
+            // the association response; if nothing has arrived after this long,
+            // either it gave up on us or we stopped hearing it — and in both
+            // cases waiting forever is the one useless option. mac80211 does the
+            // same (IEEE80211_ASSOC_TIMEOUT then a fresh attempt).
+            if associated && !self.authorized && self.st.rx_eapol == 0 {
+                let now = host::now_ms();
+                if now >= handshake_deadline {
+                    host::print("[ax200] no EAPOL ");
+                    host::print_dec(((now - assoc_at_ms) / 1000) as u32);
+                    host::print(" s after associating (frames to us: ");
+                    host::print_dec(self.st.rx_to_us);
+                    host::print(") - reconnecting\n");
+                    if self.reconnect() {
+                        assoc_at_ms = host::now_ms();
+                        handshake_deadline = assoc_at_ms + HANDSHAKE_TIMEOUT_MS;
+                        next_report = assoc_at_ms + REPORT_PERIOD_MS;
+                    } else {
+                        handshake_deadline = host::now_ms() + HANDSHAKE_TIMEOUT_MS;
+                    }
+                }
+            }
             let busy = rx_frames > 0 || tx_any || clen > 0 || self.data_in_flight > 0;
             if busy { self.st.loop_busy = self.st.loop_busy.wrapping_add(1); }
             // Publish the status snapshot once a second. Reading the clock is one
@@ -3949,6 +4021,7 @@ pub extern "C" fn _start() {
         want_ssid: [0; SSID_MAX],
         want_ssid_len: 0,
         band_pref: BAND_PREF_AUTO,
+        want_power_save: false,
         pick_reason: PICK_STRONGEST,
     };
     dev.st.start_ms = host::now_ms();
@@ -4021,6 +4094,11 @@ pub extern "C" fn _start() {
                             log_cmd_ver("SCAN_COMPLETE ", IWL_ALWAYS_LONG_GROUP, SCAN_COMPLETE_UMAC);
                             host::dprint("[ax200] Stage 4d1 OK — cmd versions read\n");
 
+                            // Which network, which band, radio power — read
+                            // before the prerequisites, because POWER_TABLE_CMD
+                            // goes out in there.
+                            dev.load_connect_policy();
+
                             // ── Stage 4d2a: scan-config prerequisites ──
                             dev.run_scan_prereqs();
                             host::dprint("[ax200] Stage 4d2a OK — full iwl_mvm_up pre-scan seq sent\n");
@@ -4029,10 +4107,6 @@ pub extern "C" fn _start() {
                             // references (scan_start_mac_or_link_id → ctx id 0).
                             dev.add_mac_context();
                             host::dprint("[ax200] Stage 4d2b1b OK — MAC context added\n");
-
-                            // Which network, which band — read before the scan so
-                            // the target can be chosen by policy, not by loudness.
-                            dev.load_connect_policy();
 
                             // ── Stage 4d2b1/2: passive scan → SCAN_COMPLETE,
                             // parse beacons → access points (SSID/BSSID/RSSI). ──

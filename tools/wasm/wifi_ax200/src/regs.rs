@@ -932,3 +932,9 @@ pub const PCI_EXP_LNKCTL: u8 = 0x10; // offset within PCIe cap
 pub const PCI_EXP_DEVCTL2: u8 = 0x28; // offset within PCIe cap
 pub const PCI_EXP_LNKCTL_ASPM_L0S: u16 = 0x0001;
 pub const PCI_EXP_DEVCTL2_LTR_EN: u16 = 0x0400;
+
+// How long to wait for the AP to start the 4-way after associating before
+// treating the association as dead and reconnecting. An AP normally sends msg1
+// within milliseconds; 8 s leaves room for a retransmit round without leaving a
+// silently-dead link up for minutes.
+pub const HANDSHAKE_TIMEOUT_MS: u64 = 8000;
