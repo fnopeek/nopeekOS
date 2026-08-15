@@ -30,7 +30,7 @@ static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
 /// carry it, so a device measurement can never be traced to the wrong build.
-const DRIVER_VERSION: &str = "0.45.2";
+const DRIVER_VERSION: &str = "0.45.3";
 
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
@@ -296,6 +296,7 @@ struct Ax200 {
     target_ssid: [u8; SSID_MAX],
     target_ssid_len: u8,
     target_privacy: bool, // target is encrypted (WPA2) → assoc-req carries an RSN IE
+    target_rssi: i8,
     target_valid: bool,
     // The target AP's HT capabilities + DTIM period (from its beacon during the
     // scan) and the association id the AP handed us. `ht.present` gates the whole
@@ -1663,6 +1664,7 @@ impl Ax200 {
                     self.target_ssid = aps[best].ssid;
                     self.target_ssid_len = aps[best].ssid_len;
                     self.target_privacy = aps[best].privacy;
+                    self.target_rssi = aps[best].rssi;
                     self.target_ht = aps[best].ht;
                     self.target_dtim_period = aps[best].dtim_period;
                     self.target_valid = true;
@@ -2510,6 +2512,8 @@ impl Ax200 {
         r.s("\" ch ");
         r.d(self.target_chan as u64);
         r.s(if self.target_band == PHY_BAND_5_U8 { " (5 GHz)" } else { " (2.4 GHz)" });
+        r.s(" rssi ");
+        r.i(self.target_rssi as i32);
         r.s(" dtim ");
         r.d(self.target_dtim_period as u64);
         r.c(b'\n');
@@ -3883,6 +3887,7 @@ pub extern "C" fn _start() {
         target_ssid: [0; SSID_MAX],
         target_ssid_len: 0,
         target_privacy: false,
+        target_rssi: 0,
         target_valid: false,
         target_ht: HtCap::NONE,
         target_dtim_period: 0,
