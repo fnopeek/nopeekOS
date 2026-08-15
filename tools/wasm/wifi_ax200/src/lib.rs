@@ -30,7 +30,7 @@ static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
 /// carry it, so a device measurement can never be traced to the wrong build.
-const DRIVER_VERSION: &str = "0.48.0";
+const DRIVER_VERSION: &str = "0.49.0";
 
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
@@ -369,6 +369,8 @@ struct Ax200 {
     band_pref: u8, // BAND_PREF_*
     want_power_save: bool,
     sync_ok: bool,
+    blacklist: [[u8; 6]; 4],
+    n_blacklist: usize,
     pick_reason: u8, // PICK_* — why the target was chosen, for the report
 }
 
@@ -1751,6 +1753,24 @@ impl Ax200 {
         false
     }
 
+    /// Stop considering the current target. Used when an association goes
+    /// nowhere: re-scanning and picking the same unreachable AP again is not a
+    /// retry, it is a loop. Oldest entry is evicted, so a roaming client cannot
+    /// blacklist its way out of every AP it has.
+    fn blacklist_target(&mut self) {
+        if self.blacklist.iter().take(self.n_blacklist).any(|b| *b == self.target_bssid) {
+            return;
+        }
+        if self.n_blacklist < self.blacklist.len() {
+            self.blacklist[self.n_blacklist] = self.target_bssid;
+            self.n_blacklist += 1;
+        } else {
+            self.blacklist.rotate_left(1);
+            self.blacklist[self.blacklist.len() - 1] = self.target_bssid;
+        }
+        host::print("[ax200] blacklisted this BSS for the next scan\n");
+    }
+
     // Read the connect policy from npkFS. `wifi_ssid` is the network wifid holds
     // the PSK for — associating to anything else can only end in a MIC failure.
     // `wifi_band` is auto (default) / 5 / 2.4.
@@ -1806,7 +1826,11 @@ impl Ax200 {
     // nothing qualifies.
     fn pick_target(&mut self, aps: &[Ap], n_aps: usize) -> usize {
         let want = &self.want_ssid[..self.want_ssid_len as usize];
+        let bl = &self.blacklist[..self.n_blacklist];
         let matches_ssid = |a: &Ap| -> bool {
+            if bl.iter().any(|b| *b == a.bssid) {
+                return false;
+            }
             want.is_empty() || (a.ssid_len as usize == want.len() && &a.ssid[..want.len()] == want)
         };
 
@@ -1851,8 +1875,19 @@ impl Ax200 {
                 // Auto: take 5 GHz when it is above the floor, even if a 2.4 GHz
                 // AP is louder. Below the floor the extra range of 2.4 wins.
                 if best_5 != usize::MAX && aps[best_5].rssi >= BAND_PREF_5_MIN_RSSI {
-                    self.pick_reason = PICK_5G_PREFERRED;
-                    return best_5;
+                    // Only when 2.4 GHz is not dramatically stronger. The wider
+                    // band is worth a handicap, not an arbitrary one.
+                    let penalty = if best_24 == usize::MAX {
+                        0
+                    } else {
+                        aps[best_24].rssi as i16 - aps[best_5].rssi as i16
+                    };
+                    if penalty <= BAND_PREF_5_MAX_PENALTY_DB {
+                        self.pick_reason = PICK_5G_PREFERRED;
+                        return best_5;
+                    }
+                    self.pick_reason = PICK_5G_TOO_WEAK;
+                    return best_24;
                 }
                 self.pick_reason = PICK_STRONGEST;
                 if best_24 == usize::MAX { return best_5; }
@@ -2071,7 +2106,11 @@ impl Ax200 {
             host::print_dec(self.target_dtim_period as u32);
             host::print("\n");
         } else {
-            host::print("[ax200] no beacon of our BSS within 600 ms — timing unsynced\n");
+            // Not a detail. Beacons are the most robust frame an AP sends; if
+            // none of ours arrives in 600 ms, the link budget to this BSS does
+            // not carry traffic either. Associating anyway produces exactly the
+            // observed failure: assoc succeeds, then nothing ever again.
+            host::print("[ax200] NO BEACON of our BSS in 600 ms - too weak, this AP will not work\n");
         }
     }
 
@@ -2705,6 +2744,7 @@ impl Ax200 {
             PICK_5G_PREFERRED => "5 GHz was above the RSSI floor",
             PICK_BAND_FORCED => "the band was forced by config",
             PICK_SSID_FILTERED => "NO AP matched sys/config/wifi_ssid (fell back to loudest)",
+            PICK_5G_TOO_WEAK => "2.4 GHz was far stronger than the 5 GHz AP",
             _ => "it was the strongest of our SSID",
         });
         r.c(b'\n');
@@ -3713,6 +3753,7 @@ impl Ax200 {
                     host::print(" s after associating (frames to us: ");
                     host::print_dec(self.st.rx_to_us);
                     host::print(") - reconnecting\n");
+                    self.blacklist_target();
                     if self.reconnect() {
                         assoc_at_ms = host::now_ms();
                         handshake_deadline = assoc_at_ms + HANDSHAKE_TIMEOUT_MS;
@@ -4065,6 +4106,8 @@ pub extern "C" fn _start() {
         band_pref: BAND_PREF_AUTO,
         want_power_save: false,
         sync_ok: false,
+        blacklist: [[0u8; 6]; 4],
+        n_blacklist: 0,
         pick_reason: PICK_STRONGEST,
     };
     dev.st.start_ms = host::now_ms();
