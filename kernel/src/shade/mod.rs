@@ -1150,14 +1150,31 @@ pub fn start_autostart() {
         Some(v) => v,
         None => return,
     };
+    let mut first = true;
     for name in list
         .split(|c| c == ',' || c == ' ')
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
     {
+        // Stagger the launches. Every entry is fetched from npkFS, spawned as a
+        // fiber and starts working immediately; firing them together makes the
+        // first seconds after boot the busiest the machine ever is. A hardware
+        // driver brought up in that window is running handshakes against
+        // firmware timeouts it cannot extend — measured: the WiFi driver comes
+        // up reliably when started by hand and not at all from autostart.
+        if !first {
+            let until = crate::interrupts::ticks() + AUTOSTART_STAGGER_TICKS;
+            while crate::interrupts::ticks() < until {
+                core::hint::spin_loop();
+            }
+        }
+        first = false;
         launch_app_with_ttl(name, None);
     }
 }
+
+/// Gap between autostart launches, in 100 Hz ticks.
+const AUTOSTART_STAGGER_TICKS: u64 = 40; // 400 ms
 
 pub fn launch_app(name: &str) {
     launch_app_with_ttl(name, Some(600_000));

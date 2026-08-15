@@ -30,7 +30,7 @@ static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
 /// carry it, so a device measurement can never be traced to the wrong build.
-const DRIVER_VERSION: &str = "0.54.0";
+const DRIVER_VERSION: &str = "0.54.1";
 
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
@@ -1620,9 +1620,12 @@ impl Ax200 {
 
     // Print the collected AP list (SSID, BSSID, RSSI, channel).
     fn print_aps(aps: &[Ap], n_aps: usize) {
-        host::print("[ax200] === access points found: ");
+        host::print("[ax200] scan: ");
         host::print_dec(n_aps as u32);
-        host::print(" ===\n");
+        host::print(" APs (full list needs DEBUG)\n");
+        if !host::DEBUG {
+            return;
+        }
         for ap in &aps[..n_aps] {
             host::print("[ax200]   ");
             // SSID (printable ASCII; hidden / empty → <hidden>).
@@ -2993,7 +2996,14 @@ impl Ax200 {
         fr[b + 5..b + 7].copy_from_slice(&req[3..5]); // echo the parameter set
         fr[b + 7..b + 9].copy_from_slice(&req[5..7]); // echo the timeout
         self.tx_mgmt_frame(&fr);
-        host::print("[ax200] ADDBA request from AP → declined (no RX reorder buffer yet)\n");
+        // Budgeted: the AP retries this every few seconds for the whole life of
+        // the link (132 in one measured run). In autostart the driver has no
+        // terminal of its own, so every print goes through kprint and renders a
+        // frame — a per-event log here is a per-event repaint of the screen.
+        // The running total is in the report.
+        if self.st.addba_declined < 3 {
+            host::print("[ax200] ADDBA request from AP declined (no RX reorder buffer yet)\n");
+        }
     }
 
     // Transmit a payload as an 802.11 DATA frame on the data queue (toDS:
