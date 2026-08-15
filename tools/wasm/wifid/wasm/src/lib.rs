@@ -112,19 +112,22 @@ pub extern "C" fn _start() {
     //   store /sys/config/wifi_psk  my secret pass
     // This plaintext-in-an-(at-rest-encrypted)-object is a bring-up provisional;
     // a capability-gated keystore replaces it later (see project_keystore).
-    let ssid = match read_cfg(b"sys/config/wifi_ssid", core::ptr::addr_of_mut!(SSID_BUF) as *mut u8, 64) {
-        Some(s) if !s.is_empty() => s,
-        _ => {
-            log("[wifid] no sys/config/wifi_ssid — set it: store /sys/config/wifi_ssid <name>. Idle.\n");
-            return;
+    // Wait for the credential rather than exiting without one. On autostart this
+    // races the rest of boot, and a single failed read used to end the process
+    // for good — after which the driver associates, sends READY into the void,
+    // the AP gets no answer to msg1 and deauthenticates us. That presents as
+    // "connected but no DHCP lease", pointing at the wrong layer entirely.
+    let (ssid, pass) = loop {
+        let ssid = read_cfg(b"sys/config/wifi_ssid", core::ptr::addr_of_mut!(SSID_BUF) as *mut u8, 64)
+            .filter(|s| !s.is_empty());
+        let pass = read_cfg(b"sys/config/wifi_psk", core::ptr::addr_of_mut!(PSK_BUF) as *mut u8, 128)
+            .filter(|p| p.len() >= 8);
+        match (ssid, pass) {
+            (Some(s), Some(p)) => break (s, p),
+            (None, _) => log("[wifid] waiting for sys/config/wifi_ssid (store /sys/config/wifi_ssid <name>)\n"),
+            (_, None) => log("[wifid] waiting for sys/config/wifi_psk (store /sys/config/wifi_psk <pass>)\n"),
         }
-    };
-    let pass = match read_cfg(b"sys/config/wifi_psk", core::ptr::addr_of_mut!(PSK_BUF) as *mut u8, 128) {
-        Some(p) if p.len() >= 8 => p,
-        _ => {
-            log("[wifid] no/short sys/config/wifi_psk — set it: store /sys/config/wifi_psk <pass>. Idle.\n");
-            return;
-        }
+        unsafe { npk_sleep(2000) };
     };
     log("[wifid] credential loaded for SSID '");
     log(unsafe { core::str::from_utf8_unchecked(ssid) });
@@ -140,6 +143,7 @@ pub extern "C" fn _start() {
     let ev_ptr = core::ptr::addr_of_mut!(EVENT_BUF) as *mut u8;
     let mut sup: Option<Supplicant> = None;
     let mut out = [0u8; 256];
+    let mut saw_event = false;
     loop {
         loop {
             let len = unsafe { npk_wifi_poll_event(ev_ptr as i32, 2048) };
@@ -148,8 +152,13 @@ pub extern "C" fn _start() {
             }
             let ev = unsafe { core::slice::from_raw_parts(ev_ptr as *const u8, len as usize) };
             handle_event(ev, &pmk, &mut sup, &mut out);
+            saw_event = true;
         }
-        unsafe { npk_sleep(50) };
+        // The 4-way is four messages, each waiting out one poll interval. At
+        // 50 ms that alone put 200 ms into a handshake the AP times out on and
+        // retries. Poll tightly while something is in flight, idle otherwise.
+        unsafe { npk_sleep(if saw_event || sup.is_some() { 4 } else { 50 }) };
+        saw_event = false;
     }
 }
 

@@ -23,15 +23,49 @@ const WIFI_QUEUE_DEPTH: usize = 16;
 static DOWNLINK: Mutex<VecDeque<Vec<u8>>> = Mutex::new(VecDeque::new()); // manager → driver
 static UPLINK: Mutex<VecDeque<Vec<u8>>> = Mutex::new(VecDeque::new());   // driver → manager
 
-fn push(q: &Mutex<VecDeque<Vec<u8>>>, msg: &[u8]) -> bool {
+// Traffic counters. A rejected push is not a hiccup: these carry the 4-way
+// handshake, and one lost EAPOL frame ends the association. An uplink that
+// fills up means the manager stopped draining — which looks from the outside
+// exactly like "WiFi connects but there is no DHCP lease".
+static CMDS_SENT: AtomicU32 = AtomicU32::new(0);
+static CMDS_DROPPED: AtomicU32 = AtomicU32::new(0);
+static EVENTS_SENT: AtomicU32 = AtomicU32::new(0);
+static EVENTS_DROPPED: AtomicU32 = AtomicU32::new(0);
+
+use core::sync::atomic::{AtomicU32, Ordering};
+
+pub struct ChannelStats {
+    pub cmds_sent: u32,
+    pub cmds_dropped: u32,
+    pub cmds_queued: usize,
+    pub events_sent: u32,
+    pub events_dropped: u32,
+    pub events_queued: usize,
+}
+
+pub fn stats() -> ChannelStats {
+    ChannelStats {
+        cmds_sent: CMDS_SENT.load(Ordering::Relaxed),
+        cmds_dropped: CMDS_DROPPED.load(Ordering::Relaxed),
+        cmds_queued: DOWNLINK.lock().len(),
+        events_sent: EVENTS_SENT.load(Ordering::Relaxed),
+        events_dropped: EVENTS_DROPPED.load(Ordering::Relaxed),
+        events_queued: UPLINK.lock().len(),
+    }
+}
+
+fn push(q: &Mutex<VecDeque<Vec<u8>>>, msg: &[u8], sent: &AtomicU32, dropped: &AtomicU32) -> bool {
     if msg.is_empty() || msg.len() > WIFI_MSG_MAX {
+        dropped.fetch_add(1, Ordering::Relaxed);
         return false;
     }
     let mut q = q.lock();
     if q.len() >= WIFI_QUEUE_DEPTH {
+        dropped.fetch_add(1, Ordering::Relaxed);
         return false; // back-pressure: caller retries
     }
     q.push_back(msg.to_vec());
+    sent.fetch_add(1, Ordering::Relaxed);
     true
 }
 
@@ -48,13 +82,13 @@ fn pop(q: &Mutex<VecDeque<Vec<u8>>>, out: &mut [u8]) -> Option<usize> {
 
 // ── Manager side (wifid.wasm) ──
 /// Enqueue a command for the driver. Returns false if full / oversized.
-pub fn send_cmd(msg: &[u8]) -> bool { push(&DOWNLINK, msg) }
+pub fn send_cmd(msg: &[u8]) -> bool { push(&DOWNLINK, msg, &CMDS_SENT, &CMDS_DROPPED) }
 /// Dequeue the next event from the driver into `out`; None if empty / too small.
 pub fn poll_event(out: &mut [u8]) -> Option<usize> { pop(&UPLINK, out) }
 
 // ── Driver side (wifi_*.wasm) ──
 /// Enqueue an event for the manager. Returns false if full / oversized.
-pub fn send_event(msg: &[u8]) -> bool { push(&UPLINK, msg) }
+pub fn send_event(msg: &[u8]) -> bool { push(&UPLINK, msg, &EVENTS_SENT, &EVENTS_DROPPED) }
 /// Dequeue the next command from the manager into `out`; None if empty / too small.
 pub fn poll_cmd(out: &mut [u8]) -> Option<usize> { pop(&DOWNLINK, out) }
 

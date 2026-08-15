@@ -30,7 +30,7 @@ static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
 /// carry it, so a device measurement can never be traced to the wrong build.
-const DRIVER_VERSION: &str = "0.45.3";
+const DRIVER_VERSION: &str = "0.46.0";
 
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
@@ -152,7 +152,10 @@ struct Stats {
     rx_frames: u32,
     rx_bytes: u64,
     rx_ip: u32,
-    rx_eapol: u32,
+    rx_eapol: u32,   // 4-way frames received from the AP
+    tx_eapol: u32,   // …and answers wifid asked us to send back
+    keys_set: u32,   // SET_KEY commands honoured (PTK + GTK = 2)
+    ready_sent: u32, // EV_READY handed to wifid (once per association)
     rx_mgmt: u32,
     rx_drain_max: u32, // most frames drained in one pass — RX ring pressure
     // Passes that drained (nearly) the whole RB pool. There are only RX_NUM_RBS
@@ -195,6 +198,7 @@ impl Stats {
         tx_ok: 0, tx_fail: 0, tx_retries: 0, tx_rts_fail: 0, tx_airtime_us: 0,
         last_status: 0, last_init_rate: 0,
         rx_frames: 0, rx_bytes: 0, rx_ip: 0, rx_eapol: 0, rx_mgmt: 0, rx_drain_max: 0,
+        tx_eapol: 0, keys_set: 0, ready_sent: 0,
         rx_pool_exhausted: 0,
         loop_iters: 0, loop_busy: 0, deauth: 0, addba_declined: 0,
         last_tx_rate: 0, last_rx_rate: 0,
@@ -2278,6 +2282,7 @@ impl Ax200 {
             ready[1..7].copy_from_slice(&self.target_bssid);
             ready[7..13].copy_from_slice(&our_mac);
             host::wifi_send_event(&ready);
+            self.st.ready_sent = self.st.ready_sent.wrapping_add(1);
             self.connect_post_assoc();
         }
         associated
@@ -2538,6 +2543,26 @@ impl Ax200 {
         // so it gets its own line rather than hiding in an event counter.
         r.s("aggr     A-MPDU off (we decline ADDBA, no reorder buffer); declined ");
         r.d(self.st.addba_declined as u64);
+        r.c(b'\n');
+
+        // The 4-way, step by step. A stalled association always stops at one
+        // specific rung, and which one names the culprit: no ready = never
+        // associated; ready but no eapol in = the AP stayed silent; eapol in
+        // but none out = wifid is not answering; keys but not authorized =
+        // wifid did not finish.
+        r.s("4-way    ready-sent ");
+        r.d(self.st.ready_sent as u64);
+        r.s("  eapol in ");
+        r.d(self.st.rx_eapol as u64);
+        r.s(" out ");
+        r.d(self.st.tx_eapol as u64);
+        r.s("  keys ");
+        r.d(self.st.keys_set as u64);
+        r.s("/2  authorized ");
+        r.s(if self.authorized { "yes" } else { "NO" });
+        if self.st.ready_sent > 0 && self.st.rx_eapol > 0 && self.st.tx_eapol == 0 {
+            r.s("  <- wifid never answered msg1");
+        }
         r.c(b'\n');
 
         Self::rep_rate(&mut r, "rate tx  ", self.st.last_tx_rate);
@@ -3287,6 +3312,7 @@ impl Ax200 {
             ready[1..7].copy_from_slice(&self.target_bssid);
             ready[7..13].copy_from_slice(&our_mac);
             host::wifi_send_event(&ready);
+            self.st.ready_sent = self.st.ready_sent.wrapping_add(1);
             host::dprint("[ax200] associated — READY sent, listening for EAPOL (4-way)\n");
             // Tell the firmware we are associated (MAC context + station), then
             // start rate scaling. Linux does all three at the assoc state change;
@@ -3600,6 +3626,7 @@ impl Ax200 {
         match cmd.first().copied() {
             // TX_EAPOL: [op][len u16][frame] → unencrypted EAPOL to the AP.
             Some(CMD_TX_EAPOL) if cmd.len() >= 3 => {
+                self.st.tx_eapol = self.st.tx_eapol.wrapping_add(1);
                 let len = ((cmd[2] as usize) << 8) | cmd[1] as usize;
                 if cmd.len() >= 3 + len {
                     host::dprint("[ax200] TX_EAPOL (len ");
@@ -3611,6 +3638,7 @@ impl Ax200 {
             }
             // SET_KEY: [op][key_type][key_idx][cipher][key_len][key..][rsc 6].
             Some(CMD_SET_KEY) if cmd.len() >= 5 => {
+                self.st.keys_set = self.st.keys_set.wrapping_add(1);
                 let key_type = cmd[1]; // 0=PTK/pairwise 1=GTK/group
                 let key_idx = cmd[2];
                 let key_len = cmd[4] as usize;
