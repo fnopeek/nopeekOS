@@ -913,7 +913,13 @@ pub const BAND_PREF_24: u8 = 2;   // 2.4 GHz only (fall back if none)
 // band is uncongested and, in a repeater mesh, usually the router itself rather
 // than a node whose backhaul halves the throughput. wpa_supplicant's band
 // preference works the same way — a signal floor, not a pure RSSI contest.
-pub const BAND_PREF_5_MIN_RSSI: i8 = -70;
+pub const BAND_PREF_5_MIN_RSSI: i8 = -60;
+// …and never more than this far below the best 2.4 GHz AP of the same network.
+// A floor alone is not enough: 5 GHz at -64 dBm clears any sane floor while a
+// 2.4 GHz radio of the same mesh sits at -46, and the wider band cannot make up
+// an 18 dB deficit. Measured case: at -64 not even a beacon of the chosen BSS
+// arrived, so the association completed and then nothing else ever did.
+pub const BAND_PREF_5_MAX_PENALTY_DB: i16 = 12;
 pub const PICK_STRONGEST: u8 = 0;
 pub const PICK_5G_PREFERRED: u8 = 1;
 pub const PICK_BAND_FORCED: u8 = 2;
@@ -938,3 +944,4 @@ pub const PCI_EXP_DEVCTL2_LTR_EN: u16 = 0x0400;
 // within milliseconds; 8 s leaves room for a retransmit round without leaving a
 // silently-dead link up for minutes.
 pub const HANDSHAKE_TIMEOUT_MS: u64 = 8000;
+pub const PICK_5G_TOO_WEAK: u8 = 4;
