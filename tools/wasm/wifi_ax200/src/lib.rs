@@ -30,7 +30,7 @@ static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
 /// carry it, so a device measurement can never be traced to the wrong build.
-const DRIVER_VERSION: &str = "0.45.0";
+const DRIVER_VERSION: &str = "0.45.1";
 
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
@@ -174,6 +174,12 @@ struct Stats {
     tput_rx_kbit: u32,
     airtime_pct: u32,
     passes_per_s: u32,
+    // Best window seen since start. A blocking load generator (netbench holds
+    // the terminal until it finishes) leaves nothing to read afterwards if only
+    // the live window is kept — by then the link is idle again.
+    peak_tput_tx_kbit: u32,
+    peak_tput_rx_kbit: u32,
+    peak_passes_per_s: u32,
     start_ms: u64,
 }
 
@@ -187,7 +193,8 @@ impl Stats {
         last_tx_rate: 0, last_rx_rate: 0,
         win_start_ms: 0, win_tx_bytes: 0, win_rx_bytes: 0, win_airtime_us: 0,
         win_loop_iters: 0,
-        tput_tx_kbit: 0, tput_rx_kbit: 0, airtime_pct: 0, passes_per_s: 0, start_ms: 0,
+        tput_tx_kbit: 0, tput_rx_kbit: 0, airtime_pct: 0, passes_per_s: 0,
+        peak_tput_tx_kbit: 0, peak_tput_rx_kbit: 0, peak_passes_per_s: 0, start_ms: 0,
     };
 }
 
@@ -2441,6 +2448,15 @@ impl Ax200 {
             ((self.st.tx_airtime_us - self.st.win_airtime_us) / (win * 10)) as u32;
         self.st.passes_per_s =
             (self.st.loop_iters.wrapping_sub(self.st.win_loop_iters) as u64 * 1000 / win) as u32;
+        if self.st.tput_tx_kbit > self.st.peak_tput_tx_kbit {
+            self.st.peak_tput_tx_kbit = self.st.tput_tx_kbit;
+        }
+        if self.st.tput_rx_kbit > self.st.peak_tput_rx_kbit {
+            self.st.peak_tput_rx_kbit = self.st.tput_rx_kbit;
+        }
+        if self.st.passes_per_s > self.st.peak_passes_per_s {
+            self.st.peak_passes_per_s = self.st.passes_per_s;
+        }
         self.st.win_start_ms = now_ms;
         self.st.win_tx_bytes = self.st.tx_bytes;
         self.st.win_rx_bytes = self.st.rx_bytes;
@@ -2509,7 +2525,16 @@ impl Ax200 {
         r.kbit_as_mbit(self.st.tput_rx_kbit);
         r.s(" Mbit/s  own airtime ");
         r.d(self.st.airtime_pct as u64);
-        r.s("%\n");
+        r.s("%  (live 1 s window)\n");
+        // Survives the end of the load, so one `wlan` AFTER a blocking transfer
+        // still answers "how fast did it actually go".
+        r.s("peak     tx ");
+        r.kbit_as_mbit(self.st.peak_tput_tx_kbit);
+        r.s(" Mbit/s  rx ");
+        r.kbit_as_mbit(self.st.peak_tput_rx_kbit);
+        r.s(" Mbit/s  ");
+        r.d(self.st.peak_passes_per_s as u64);
+        r.s(" passes/s  (best window since driver start)\n");
 
         r.s("tx       frames ");
         r.d(self.st.tx_frames as u64);
@@ -2573,9 +2598,9 @@ impl Ax200 {
         r.d(self.st.passes_per_s as u64);
         r.s(" passes/s = ceiling ");
         r.kbit_as_mbit(
-            (TX_INFLIGHT_MAX as u64 * self.st.passes_per_s as u64 * 1514 * 8 / 1000) as u32,
+            (TX_INFLIGHT_MAX as u64 * self.st.peak_passes_per_s as u64 * 1514 * 8 / 1000) as u32,
         );
-        r.s(" Mbit/s\n");
+        r.s(" Mbit/s (at peak pass rate)\n");
 
         // What else the scan saw. The target is picked by RSSI alone, which on a
         // dual-band mesh always means the near 2.4 GHz node — this line is how we
