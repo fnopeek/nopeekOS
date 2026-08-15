@@ -23,7 +23,12 @@ const MSG_ACK: u8      = 5;
 /// an address nobody can reach — and, worse, makes the retry logic think a lease
 /// exists. Outside QEMU we leave 0.0.0.0, which is the truth and what the
 /// link-state tick keys its retry on.
+/// MAC the current lease was issued to. A lease is only ours to re-request from
+/// the interface that got it.
+static LEASE_MAC: spin::Mutex<[u8; 6]> = spin::Mutex::new([0; 6]);
+
 fn no_lease() {
+    *LEASE_MAC.lock() = [0; 6];
     if crate::virtio_net::is_available() {
         arp::set_ip([10, 0, 2, 15]); // QEMU user-mode default
     } else {
@@ -38,9 +43,19 @@ pub fn configure() -> bool {
     };
 
     // Keep our previous lease if we had a real one, so re-running DHCP (e.g. on
-    // a link switch) doesn't needlessly churn the address.
+    // a link switch) doesn't needlessly churn the address — but ONLY if it was
+    // this interface's lease. The address is global state while a lease belongs
+    // to one MAC: hinting the wired NIC's address from the WiFi NIC asks the
+    // server for something it has already given to someone else, so it hands out
+    // a different one, and switching back repeats it in reverse. That is the
+    // .72/.73 ping-pong on a machine with both interfaces up.
     let prev = arp::our_ip();
-    let hint = if prev != [0, 0, 0, 0] && prev != [10, 0, 2, 15] { prev } else { [0; 4] };
+    let same_iface = *LEASE_MAC.lock() == mac;
+    let hint = if same_iface && prev != [0, 0, 0, 0] && prev != [10, 0, 2, 15] {
+        prev
+    } else {
+        [0; 4]
+    };
 
     // Temporarily set IP to 0.0.0.0 for DHCP
     arp::set_ip([0, 0, 0, 0]);
@@ -89,6 +104,7 @@ pub fn configure() -> bool {
 
     udp::unlisten(CLIENT_PORT);
 
+    *LEASE_MAC.lock() = mac;
     arp::set_ip(ack_ip);
     kprintln!("[npk] DHCP: configured {}.{}.{}.{}",
         ack_ip[0], ack_ip[1], ack_ip[2], ack_ip[3]);

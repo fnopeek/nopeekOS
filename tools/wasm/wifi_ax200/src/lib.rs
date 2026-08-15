@@ -30,7 +30,7 @@ static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
 /// carry it, so a device measurement can never be traced to the wrong build.
-const DRIVER_VERSION: &str = "0.51.0";
+const DRIVER_VERSION: &str = "0.52.0";
 
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
@@ -369,6 +369,7 @@ struct Ax200 {
     band_pref: u8, // BAND_PREF_*
     want_power_save: bool,
     want_bt_coex: bool,
+    settle_ms: u32,
     sync_ok: bool,
     blacklist: [[u8; 6]; 4],
     n_blacklist: usize,
@@ -1855,6 +1856,17 @@ impl Ax200 {
         let cn = host::fetch("sys/config/wifi_btcoex", &mut cb);
         self.want_bt_coex = cn > 0 && (cb[..cn].starts_with(b"on") || cb[..cn].starts_with(b"1"));
 
+        let mut sb = [0u8; 16];
+        let sn = host::fetch("sys/config/wifi_settle_ms", &mut sb);
+        if sn > 0 {
+            let mut v = 0u32;
+            let mut any = false;
+            for &c in &sb[..sn] {
+                if c.is_ascii_digit() { v = v * 10 + (c - b'0') as u32; any = true; } else { break; }
+            }
+            if any { self.settle_ms = v.min(20_000); }
+        }
+
         host::print(", band ");
         host::print(match self.band_pref {
             BAND_PREF_5 => "5 GHz only",
@@ -2777,6 +2789,9 @@ impl Ax200 {
         r.s(if self.want_power_save { "save (wifi_ps=on)" } else { "CAM (always on)" });
         r.s(", btcoex ");
         r.s(if self.want_bt_coex { "on" } else { "off" });
+        r.s(", settle ");
+        r.d(self.settle_ms as u64);
+        r.s(" ms");
         r.s(", band ");
         r.s(match self.band_pref {
             BAND_PREF_5 => "5-only",
@@ -4176,6 +4191,7 @@ pub extern "C" fn _start() {
         band_pref: BAND_PREF_AUTO,
         want_power_save: false,
         want_bt_coex: false,
+        settle_ms: SETTLE_MS_DEFAULT,
         sync_ok: false,
         blacklist: [[0u8; 6]; 4],
         n_blacklist: 0,
@@ -4255,6 +4271,26 @@ pub extern "C" fn _start() {
                             // before the prerequisites, because POWER_TABLE_CMD
                             // goes out in there.
                             dev.load_connect_policy();
+
+                            // Let the radio settle before scanning.
+                            //
+                            // The device only works when it was booted with a
+                            // USB dongle plugged in — which changes nothing
+                            // about this card except how long the rest of boot
+                            // takes (enumeration, plus a DHCP that succeeds
+                            // instead of running into three timeouts). Every
+                            // other difference has been ruled out by now: the
+                            // DMA addresses come out byte-identical, the init
+                            // sequence matches iwl_run_unified_mvm_ucode
+                            // exactly, power save and BT coex are off. What is
+                            // left is that we start scanning sooner. Configurable
+                            // so it can be measured rather than believed.
+                            if dev.settle_ms > 0 {
+                                host::print("[ax200] letting the radio settle ");
+                                host::print_dec(dev.settle_ms);
+                                host::print(" ms before scanning\n");
+                                host::sleep_ms(dev.settle_ms);
+                            }
 
                             // ── Stage 4d2a: scan-config prerequisites ──
                             dev.run_scan_prereqs();
