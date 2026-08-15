@@ -950,3 +950,6 @@ pub const BT_COEX_DISABLE: u32 = 0x0; // iwlwifi.bt_coex_active=0
 // Silence on the RX ring that cannot be the air: even an idle channel carries
 // beacons at ~10/s. Longer than this means the firmware has no buffer to fill.
 pub const RX_SILENCE_MS: u64 = 3000;
+
+// Pause between firmware bring-up and the first scan (sys/config/wifi_settle_ms).
+pub const SETTLE_MS_DEFAULT: u32 = 2500;
