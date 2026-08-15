@@ -179,6 +179,21 @@ pub fn active() -> Active {
     Active::None
 }
 
+/// Does the ACTIVE interface have a usable link right now? Distinct from
+/// `active_id`, which only says which interface would be used: a WiFi NIC is
+/// registered (and therefore "active" by fallback) from the moment the driver
+/// starts, long before it is associated and keyed. Anything that waits for the
+/// network to become usable has to look at this, not at the id.
+pub fn active_link_up() -> bool {
+    match active() {
+        Active::Intel => INTEL_LINK.load(Ordering::Relaxed),
+        Active::Wasm => wasm_nic_link_up(),
+        // No carrier detect on either — presence is all we have.
+        Active::Rtl | Active::Virtio => true,
+        Active::None => false,
+    }
+}
+
 /// A cheap numeric id of the active interface, for change detection.
 pub fn active_id() -> u8 {
     match active() {
