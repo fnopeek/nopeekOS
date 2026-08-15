@@ -48,7 +48,7 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-08-15 · kernel v0.267.7 · beak 0.24.1 · wifi_ax200 0.54.2 ·
+**Stand 2026-08-15 · kernel v0.267.8 · beak 0.25.0 · wifi_ax200 0.54.2 ·
 wifid 0.3.0**
 
 Zwei Fäden laufen parallel.
