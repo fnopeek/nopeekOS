@@ -48,13 +48,22 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-08-14 · kernel v0.265.3 · beak 0.23.1**
+**Stand 2026-08-15 · kernel v0.267.7 · beak 0.24.1 · wifi_ax200 0.54.2 ·
+wifid 0.3.0**
 
-Aktueller Fokus ist **`beak`**, der eigene Browser. Stage 0 (HTML, CSS,
-Layout, Paint — noch kein JavaScript) läuft auf Hardware; die Arbeit dreht
-sich um Konformität und um echte Seiten (POST, Cookies, Zeichensätze,
-TLS-Wurzelspeicher). Die gemessene WPT-Zahl steht in
-`docs/spec/CONFORMANCE.md` und nirgends sonst.
+Zwei Fäden laufen parallel.
+
+**`beak`**, der eigene Browser: Stage 0 (HTML, CSS, Layout, Paint — noch kein
+JavaScript) läuft auf Hardware; die Arbeit dreht sich um Konformität und um
+echte Seiten (POST, Cookies, Zeichensätze, TLS-Wurzelspeicher). Die gemessene
+WPT-Zahl steht in `docs/spec/CONFORMANCE.md` und nirgends sonst.
+
+**WLAN (AX200)**: lädt Wikipedia über Funk. Das Intent **`wlan`** ist das
+Werkzeug dafür — Kernel-Sicht plus ein Klartext-Report, den der Treiber selbst
+veröffentlicht (Rate, Retries, Airtime, 4-Way-Sprosse, Ring-Zustand) plus der
+wifid-Log. Offen: Stabilität über die Zeit, und Durchsatz — gemessen 16 Mbit/s
+bei 130 Mbit PHY, der Hebel ist A-MPDU. Fahrplan in
+`memory/project_wifi_ax200.md`.
 
 Alles darunter — Kernel, npkFS, Netz, Compositor, Panels, Apps, MicroVM —
 ist gebaut und in Betrieb. Überblick: `README.md`.
