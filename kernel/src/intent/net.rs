@@ -183,7 +183,11 @@ pub fn intent_wlan(args: &str) {
     kprintln!("             wifid→driver {} sent, {} queued, {} DROPPED",
         c.cmds_sent, c.cmds_queued, c.cmds_dropped);
     if c.events_sent > 0 && c.cmds_sent == 0 {
-        kprintln!("             ^ the driver spoke, wifid never answered — is wifid running?");
+        // Only meaningful once the driver has actually handed over something
+        // that needs an answer. A lone READY with no reply means the AP never
+        // started the handshake — the supplicant has nothing to answer yet, and
+        // blaming it here sent the last diagnosis down the wrong path.
+        kprintln!("             (no reply yet — expected while the AP has not sent EAPOL msg1)");
     }
 
     // The driver half. Printed verbatim: the kernel does not know what an
