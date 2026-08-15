@@ -30,7 +30,7 @@ static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
 /// carry it, so a device measurement can never be traced to the wrong build.
-const DRIVER_VERSION: &str = "0.53.1";
+const DRIVER_VERSION: &str = "0.54.0";
 
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
@@ -1856,16 +1856,7 @@ impl Ax200 {
         let cn = host::fetch("sys/config/wifi_btcoex", &mut cb);
         self.want_bt_coex = cn > 0 && (cb[..cn].starts_with(b"on") || cb[..cn].starts_with(b"1"));
 
-        let mut sb = [0u8; 16];
-        let sn = host::fetch("sys/config/wifi_settle_ms", &mut sb);
-        if sn > 0 {
-            let mut v = 0u32;
-            let mut any = false;
-            for &c in &sb[..sn] {
-                if c.is_ascii_digit() { v = v * 10 + (c - b'0') as u32; any = true; } else { break; }
-            }
-            if any { self.settle_ms = v.min(20_000); }
-        }
+        self.settle_ms = settle_ms_config();
 
         host::print(", band ");
         host::print(match self.band_pref {
@@ -4134,8 +4125,38 @@ fn pcie_find_cap(id: u8) -> u8 {
     0
 }
 
+/// Read `sys/config/wifi_settle_ms` before the device is bound.
+fn settle_ms_config() -> u32 {
+    let mut b = [0u8; 16];
+    let n = host::fetch("sys/config/wifi_settle_ms", &mut b);
+    if n == 0 {
+        return SETTLE_MS_DEFAULT;
+    }
+    let mut v = 0u32;
+    let mut any = false;
+    for &c in &b[..n] {
+        if c.is_ascii_digit() { v = v * 10 + (c - b'0') as u32; any = true; } else { break; }
+    }
+    if any { v.min(20_000) } else { SETTLE_MS_DEFAULT }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
+    // Wait before touching the card at all.
+    //
+    // The device comes up only when a USB dongle is present — and it does not
+    // matter whether that dongle has a cable. Mere presence makes
+    // netdev::is_available() true, which sends boot into a DHCP with three
+    // retries plus an NTP attempt: several seconds during which nobody touches
+    // this card. Without it autostart reaches the driver almost immediately
+    // after power-up. So the delay is the difference, and it belongs HERE,
+    // before pci_bind — not somewhere in the middle of bring-up, where a plain
+    // sleep would also strand the RX ring.
+    let settle = settle_ms_config();
+    if settle > 0 {
+        host::sleep_ms(settle); // no ring allocated yet — sleeping is safe here
+    }
+
     host::print("[ax200] Intel Wi-Fi 6 AX200 driver v");
     host::print(DRIVER_VERSION);
     host::print(" - HT rates + live link diagnostics (run 'wlan')\n");
@@ -4320,21 +4341,6 @@ pub extern "C" fn _start() {
                             // exactly, power save and BT coex are off. What is
                             // left is that we start scanning sooner. Configurable
                             // so it can be measured rather than believed.
-                            // Default 0: the delay was a hypothesis, and the
-                            // hypothesis is dead — the device failed to come up
-                            // WITH the pause and without it. Kept configurable,
-                            // but it must PUMP the ring, never plain sleep: 2.5 s
-                            // without draining lets the firmware fill all
-                            // RX_NUM_RBS buffers with notifications, and then the
-                            // pool is empty exactly when the scan needs it. That
-                            // is a fault this code introduced, not one it found.
-                            if dev.settle_ms > 0 {
-                                host::print("[ax200] settling ");
-                                host::print_dec(dev.settle_ms);
-                                host::print(" ms (draining) before scanning\n");
-                                dev.pump_rx(dev.settle_ms);
-                            }
-
                             // ── Stage 4d2a: scan-config prerequisites ──
                             dev.run_scan_prereqs();
                             host::dprint("[ax200] Stage 4d2a OK — full iwl_mvm_up pre-scan seq sent\n");
