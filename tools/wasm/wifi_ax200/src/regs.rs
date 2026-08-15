@@ -945,3 +945,4 @@ pub const PCI_EXP_DEVCTL2_LTR_EN: u16 = 0x0400;
 // silently-dead link up for minutes.
 pub const HANDSHAKE_TIMEOUT_MS: u64 = 8000;
 pub const PICK_5G_TOO_WEAK: u8 = 4;
+pub const BT_COEX_DISABLE: u32 = 0x0; // iwlwifi.bt_coex_active=0
