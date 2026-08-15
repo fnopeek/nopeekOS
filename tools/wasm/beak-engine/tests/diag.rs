@@ -58,7 +58,7 @@ fn diag() {
             let n = kids.len() as u32;
             let mut prev: Vec<ElemInfo> = Vec::new();
             for k in &kids {
-                let st = style::resolve(k, parent, theme, ss, anc, &prev, n, w);
+                let st = style::resolve(&beak_engine::css::ElemInfo::of(k), parent, theme, ss, anc, &prev, n, w);
                 let which = if st.mask_layer.image.is_some() { Some("mask") }
                             else if st.bg_layer.image.is_some() { Some("bg") } else { None };
                 if let Some(kind) = which {
@@ -698,4 +698,116 @@ fn phase() {
     println!("  full layout_ext   {:>7.0} ms  (HEIGHT changed only)", t_hchange.as_secs_f64() * 1000.0);
     println!("  viewport_h_used = {vh_used}   -> height-only resize {}",
              if vh_used { "MUST re-lay-out" } else { "can reuse the layout (repaint only)" });
+}
+
+/// DHOVER=<html> DCSS=<css> [DW=] — the census that decides how `:hover`
+/// should invalidate: lay the page out at rest, then with the pointer on each
+/// of a few real links, and count how many elements actually get a DIFFERENT
+/// computed style. If that is a handful, targeted invalidation is the answer;
+/// if it is hundreds, only a cheaper layout is.
+#[test]
+fn hover_cost_census() {
+    let Ok(hp) = std::env::var("DHOVER") else { return };
+    let css = std::env::var("DCSS").ok().and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
+    let w: u32 = std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(1880);
+    let html = fs::read_to_string(&hp).expect("DHOVER");
+
+    let eng = beak_engine::Engine::new();
+    eng.set_viewport_h(1000);
+
+    let t = std::time::Instant::now();
+    let rest = eng.layout_ext(&html, &css, w);
+    let first = t.elapsed();
+    let t = std::time::Instant::now();
+    let rest2 = eng.layout_ext(&html, &css, w);
+    let second = t.elapsed();
+    println!("layout: first {first:?}  second (sheet cached) {second:?}");
+    println!("hover_boxes: {}  ops: {}", rest.hover_boxes.len(), rest.ops.len());
+    drop(rest2);
+
+    if rest.hover_boxes.is_empty() {
+        println!("page has no :hover rules — nothing to measure");
+        return;
+    }
+
+    // Probe a grid over the VISIBLE area — a box below the fold cannot change
+    // a pixel, and the first census wasted every probe that way.
+    let (vw, vh) = (w, 1000u32);
+    let mut probes: Vec<(i32, i32)> = Vec::new();
+    for gy in (20..vh as i32).step_by(37) {
+        for gx in (20..vw as i32).step_by(53) {
+            probes.push((gx, gy));
+        }
+    }
+    println!("probing {} points over the visible area", probes.len());
+
+    let (mut hits, mut sum_px, mut sum_ms) = (0usize, 0usize, 0u128);
+    let mut worst = (0usize, (0, 0, 0, 0), (0, 0));
+    for (px, py) in probes {
+        let hovered = rest.hover_at(px, py);
+        if hovered.is_empty() {
+            continue;
+        }
+        eng.set_hover(hovered.clone());
+        let t = std::time::Instant::now();
+        let hot = eng.layout_ext(&html, &css, w);
+        let relayout = t.elapsed();
+        let (px_changed, _total, bbox) = pixels_differ(&eng, &rest, &hot, vw, vh);
+        eng.set_hover(Vec::new());
+        if px_changed == 0 {
+            continue;
+        }
+        hits += 1;
+        sum_px += px_changed;
+        sum_ms += relayout.as_millis();
+        if px_changed > worst.0 {
+            worst = (px_changed, bbox, (px, py));
+        }
+    }
+    let total_px = (vw * vh) as usize;
+    println!("--- {hits} of the probed points change ANY pixel ---");
+    if hits > 0 {
+        println!(
+            "average dirty area {:.4} % of the viewport, average relayout {} ms",
+            100.0 * (sum_px as f32 / hits as f32) / total_px as f32,
+            sum_ms / hits as u128,
+        );
+        println!(
+            "worst point {:?}: {} px ({:.4} %), dirty rect {:?}",
+            worst.2,
+            worst.0,
+            100.0 * worst.0 as f32 / total_px as f32,
+            worst.1,
+        );
+    }
+}
+
+/// Paint both layouts and count differing pixels, plus their bounding box —
+/// exactly what a damage-driven repaint would have to redraw.
+fn pixels_differ(
+    eng: &beak_engine::Engine,
+    a: &beak_engine::Layout,
+    b: &beak_engine::Layout,
+    w: u32,
+    h: u32,
+) -> (usize, usize, (i32, i32, i32, i32)) {
+    let mut pa = vec![0u8; (w * h * 4) as usize];
+    let mut pb = vec![0u8; (w * h * 4) as usize];
+    eng.paint(a, w, h, 0, &mut pa);
+    eng.paint(b, w, h, 0, &mut pb);
+    let (mut n, mut x0, mut y0, mut x1, mut y1) = (0usize, i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            let i = ((y as u32 * w + x as u32) * 4) as usize;
+            if pa[i..i + 3] != pb[i..i + 3] {
+                n += 1;
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x);
+                y1 = y1.max(y);
+            }
+        }
+    }
+    let bbox = if n == 0 { (0, 0, 0, 0) } else { (x0, y0, x1 - x0 + 1, y1 - y0 + 1) };
+    (n, (w * h) as usize, bbox)
 }

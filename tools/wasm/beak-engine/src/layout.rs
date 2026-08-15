@@ -731,6 +731,49 @@ fn border_ops(st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, sides: (bool, 
     if sides.1 {
         side(out, &st.border_right, (x + w - br, y, br, h));
     }
+    outline_ops(st, x, y, w, h, sides, out);
+}
+
+/// The `outline` ring (css-ui-4 §3). Unlike a border it takes NO space — it is
+/// drawn outside the border box, offset outwards by `outline-offset`, and the
+/// layout never sees it. That is the whole reason it exists: a focus ring has
+/// to be able to appear without moving the page under the reader.
+fn outline_ops(st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, sides: (bool, bool), out: &mut Vec<DrawOp>) {
+    let o = &st.outline;
+    let (Some(color), true) = (o.color, o.width > 0.0) else {
+        return;
+    };
+    let (ow, off) = (o.width as i32, st.outline_offset as i32);
+    // Grow the border box by the offset, then lay the ring OUTSIDE that.
+    let (rx, ry) = (x - off - ow, y - off - ow);
+    let (rw, rh) = (w + 2 * (off + ow), h + 2 * (off + ow));
+    if rw <= 0 || rh <= 0 {
+        return;
+    }
+    let r = radii_px(st, w);
+    if r.iter().any(|&v| v > 0.0) {
+        // A rounded box's outline follows its curve, widened by the ring's own
+        // distance from the box (css-ui-4 §3.4).
+        let grow = (off + ow) as f32;
+        let rr = [r[0] + grow, r[1] + grow, r[2] + grow, r[3] + grow];
+        out.push(DrawOp::RoundRect { x: rx, y: ry, w: rw, h: rh, r: rr, color, ring: o.width });
+        return;
+    }
+    let mut edge = |ex: i32, ey: i32, ew: i32, eh: i32| {
+        if ew > 0 && eh > 0 {
+            out.push(DrawOp::Rect { x: ex, y: ey, w: ew, h: eh, color });
+        }
+    };
+    edge(rx, ry, rw, ow);
+    edge(rx, ry + rh - ow, rw, ow);
+    // An inline box that continues onto the next line carries no side edge,
+    // exactly as its border does.
+    if sides.0 {
+        edge(rx, ry, ow, rh);
+    }
+    if sides.1 {
+        edge(rx + rw - ow, ry, ow, rh);
+    }
 }
 
 /// A clickable link's document-space rectangle.
@@ -827,6 +870,22 @@ pub struct Layout {
     pub inline_svgs: Vec<(u32, Rgb, u32, u32)>,
     /// Element boxes for the inspect dev tool (empty unless inspection was on).
     pub inspect: Vec<InspectBox>,
+    /// Element boxes for pointer hit-testing (empty unless the sheet has
+    /// `:hover` rules).
+    pub hover_boxes: Vec<HoverBox>,
+}
+
+/// An element's box, for deciding what the pointer is inside.
+///
+/// Deliberately not `InspectBox`: that one carries a formatted label, and this
+/// list exists on every page with a hover rule, not only while a developer is
+/// inspecting.
+pub struct HoverBox {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    pub seq: u32,
 }
 
 impl Layout {
@@ -848,6 +907,25 @@ impl Layout {
             .rev()
             .find(|l| x >= l.x && x < l.x + l.w && y >= l.y && y < l.y + l.h)
             .map(|l| l.href.as_str())
+    }
+
+    /// Every element the pointer is inside, at a document-space point —
+    /// ascending `seq`, which is document order.
+    ///
+    /// It is a LIST, not the innermost element: CSS hovers an element and all
+    /// its ancestors, which is what `nav:hover a` and every dropdown menu on
+    /// the web relies on. Containment does that for free — an ancestor's box
+    /// encloses its descendant's — without keeping a parent pointer per box.
+    pub fn hover_at(&self, x: i32, y: i32) -> Vec<u32> {
+        let mut v: Vec<u32> = self
+            .hover_boxes
+            .iter()
+            .filter(|b| x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h)
+            .map(|b| b.seq)
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
     }
 
     /// Form control at a document-space point. Checked BEFORE `hit_test` by the
@@ -1137,6 +1215,14 @@ struct Ctx<'a> {
     /// When set, element boxes are recorded into `inspects` for the dev tool.
     inspect: bool,
     inspects: Vec<InspectBox>,
+    /// `seq`s of the elements the pointer is currently inside, ascending.
+    /// Usually EMPTY, which is why every `ElemInfo` can afford to consult it:
+    /// the check is one `is_empty()` on a path walked ~30 000× per layout.
+    hover: &'a [u32],
+    /// Element boxes the shell hit-tests on pointer movement. Only collected
+    /// when the sheet has `:hover` rules at all — a page without them must not
+    /// pay for a list nobody reads.
+    hover_boxes: Vec<HoverBox>,
     /// Did anything in this layout actually consume the viewport HEIGHT — a
     /// `vh`/`vmin`/`vmax` length that won the cascade, or a box resolved
     /// against the initial containing block? `Cell` because the style walk
@@ -1223,6 +1309,14 @@ fn style_key(el: &Element, parent: &ComputedStyle, ancestors: &[ElemInfo], prev:
 }
 
 impl<'a> Ctx<'a> {
+    /// An `ElemInfo` that knows whether the pointer is inside this element.
+    /// Every construction inside the layout goes through here — a bare
+    /// `ElemInfo::of` would silently report "not hovered" and the page would
+    /// stay frozen under the pointer for exactly the elements it forgot.
+    fn info(&self, el: &'a Element) -> ElemInfo<'a> {
+        ElemInfo::of_hovered(el, self.hover)
+    }
+
     /// `style::resolve` through the memo. Every cascade inside the layout goes
     /// through here so a re-measured subtree costs a map lookup, not a full
     /// selector match against the page's stylesheet.
@@ -1254,7 +1348,7 @@ impl<'a> Ctx<'a> {
             self.note_vh(s);
             return *s;
         }
-        let s = style::resolve(el, parent, self.theme, self.sheet, &self.path, prev, sib_count, self.viewport_w);
+        let s = style::resolve(&self.info(el), parent, self.theme, self.sheet, &self.path, prev, sib_count, self.viewport_w);
         self.note_vh(&s);
         self.styles.borrow_mut().insert(key, s);
         s
@@ -1330,6 +1424,11 @@ impl<'a> Ctx<'a> {
     /// inspection is enabled, so the label formatting cost is only paid when the
     /// user is actually inspecting.
     fn record_inspect(&mut self, el: &Element, st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32) {
+        // Same call site, own switch: the pointer needs these boxes on any page
+        // with a `:hover` rule, whether or not anyone is inspecting.
+        if w > 0 && h > 0 && self.sheet.hover_set.may_match(el) {
+            self.hover_boxes.push(HoverBox { x, y, w, h, seq: el.seq });
+        }
         if !self.inspect {
             return;
         }
@@ -1485,6 +1584,7 @@ pub fn layout(
     theme: &Theme,
     forms: &FormState,
     inspect: bool,
+    hover: &[u32],
 ) -> Layout {
     // The root element is never painted, but `html { … }` still cascades into
     // the document — and its `font-size` is the basis for every `rem`.
@@ -1494,7 +1594,7 @@ pub fn layout(
     initial.vw = width as f32;
     initial.vh = viewport_h as f32;
     let html_el = dom.root_element();
-    let mut root = style::resolve(html_el, &initial, theme, sheet, &[], &[], 0, width as f32);
+    let mut root = style::resolve(&ElemInfo::of_hovered(html_el, hover), &initial, theme, sheet, &[], &[], 0, width as f32);
     root.rem_base = root.font_px;
     let cx = 0;
     let cw = (width as i32).max(60);
@@ -1538,6 +1638,8 @@ pub fn layout(
         counters: Counters::default(),
         inspect,
         inspects: Vec::new(),
+        hover,
+        hover_boxes: Vec::new(),
         intrinsic: BTreeMap::new(),
         measuring_cb_h: core::cell::Cell::new(false),
         measured: core::cell::RefCell::new(BTreeMap::new()),
@@ -1549,9 +1651,9 @@ pub fn layout(
     // Resolve <body> for the canvas-background rule below; layout reaches it
     // as an ordinary child of the root.
     let body = dom.body();
-    let html_info = [ElemInfo::of(html_el)];
+    let html_info = [ctx.info(html_el)];
     let anc: &[ElemInfo] = if core::ptr::eq(html_el, body) { &[] } else { &html_info };
-    let body_style = style::resolve(body, &root, theme, sheet, anc, &[], 0, width as f32);
+    let body_style = style::resolve(&ctx.info(body), &root, theme, sheet, anc, &[], 0, width as f32);
 
     // The ROOT ELEMENT IS A BOX. It used to be skipped — layout started at
     // `<body>`'s children, inside a hardcoded 20px page inset — so `html
@@ -1574,10 +1676,10 @@ pub fn layout(
         y = 0;
     } else if core::ptr::eq(html_el, body) {
         // A document with no `<html>` at all: the synthetic container is both.
-        ctx.path.push(ElemInfo::of(body));
+        ctx.path.push(ctx.info(body));
         y = ctx.layout_children(&body.children, &body_style, Some(body), cx, cw, 0);
     } else {
-        ctx.path.push(ElemInfo::of(html_el));
+        ctx.path.push(ctx.info(html_el));
         if matches!(root.position, Position::Absolute | Position::Fixed) {
             // An out-of-flow root resolves against the ICB like any other
             // out-of-flow box — it just has no in-flow position to fall back to.
@@ -1631,6 +1733,7 @@ pub fn layout(
         viewport_h_used: ctx.vh_used.get(),
         phase: [0; 3],
         inspect: ctx.inspects,
+        hover_boxes: ctx.hover_boxes,
     }
 }
 
@@ -1762,7 +1865,7 @@ impl<'a> Ctx<'a> {
         let mbox_left = if is_left { bl } else { (br - fw).max(bl) };
         // The border box sits below the margin box top by `margin-top`.
         let border_top = fy + st.margin_top as i32;
-        self.path.push(ElemInfo::of(el));
+        self.path.push(self.info(el));
         // The float's own contents establish a new BFC — isolate its inner floats.
         let saved = core::mem::take(&mut self.floats);
         // `layout_box` re-adds margin-left + padding from `mbox_left`; passing the
@@ -1877,7 +1980,7 @@ impl<'a> Ctx<'a> {
                 Node::Element(el) => el,
             };
             let st = self.styled(el, parent, &siblings, sib_count);
-            siblings.push(ElemInfo::of(el));
+            siblings.push(self.info(el));
             if st.display == Display::None {
                 continue;
             }
@@ -1898,7 +2001,7 @@ impl<'a> Ctx<'a> {
             // `<a>`/`<span>` flows with the text). Nested imgs are handled in
             // `collect_inline`; this catches direct children of any display.
             if el.tag == "img" || el.tag == "svg" {
-                self.path.push(ElemInfo::of(el));
+                self.path.push(self.info(el));
                 let svg = el.tag == "svg";
                 let (iw, ih) = if svg { self.svg_box(el, &st) } else { self.img_box(el, &st) };
                 let alt = svg_alt(el, svg);
@@ -1931,7 +2034,7 @@ impl<'a> Ctx<'a> {
                 // must NOT advance the line, or its full-size box inflates
                 // the container by the whole page height.
                 if matches!(st.position, Position::Absolute | Position::Fixed) {
-                    self.path.push(ElemInfo::of(el));
+                    self.path.push(self.info(el));
                     self.layout_abs(el, &st, x, anchor + open.value() as i32);
                     self.path.pop();
                     continue;
@@ -1954,7 +2057,7 @@ impl<'a> Ctx<'a> {
                 let block_level = matches!(st.display, Display::Block | Display::Flex | Display::Grid)
                     && !matches!(st.width, Len::Auto);
                 if !block_level {
-                    self.path.push(ElemInfo::of(el));
+                    self.path.push(self.info(el));
                     let ctl = self.control_box(el, &st, kind, w as f32);
                     inline.control(ctl);
                     self.path.pop();
@@ -1964,7 +2067,7 @@ impl<'a> Ctx<'a> {
             // `position:absolute`/`fixed` are out of flow → laid at a
             // containing-block-relative position, not advancing the flow.
             if matches!(st.position, Position::Absolute | Position::Fixed) {
-                self.path.push(ElemInfo::of(el));
+                self.path.push(self.info(el));
                 self.layout_abs(el, &st, x, anchor + open.value() as i32);
                 self.path.pop();
                 continue;
@@ -2003,7 +2106,7 @@ impl<'a> Ctx<'a> {
             }
             if matches!(st.display, Display::Inline | Display::InlineBlock) {
                 let ib = self.inline_box_of(el, &st, w).map(|b| inline.open_box(b));
-                self.path.push(ElemInfo::of(el));
+                self.path.push(self.info(el));
                 self.collect_inline(el, &st, None, &mut inline, x, w, anchor);
                 self.path.pop();
                 if let Some(i) = ib {
@@ -2015,7 +2118,7 @@ impl<'a> Ctx<'a> {
             // a line box separates margins, so the open margin commits here.
             if !inline.is_empty() {
                 let ly = anchor + open.value() as i32;
-                let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, parent.text_align, parent.text_align_last, parent.rtl, parent.text_indent.px(w as f32).unwrap_or(0.0), parent.line_height.px(parent.font_px).unwrap_or(0.0), &mut self.ops, &mut self.links, &mut self.controls, &mut self.inspects, &mut self.last_baseline);
+                let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, parent.text_align, parent.text_align_last, parent.rtl, parent.text_indent.px(w as f32).unwrap_or(0.0), parent.line_height.px(parent.font_px).unwrap_or(0.0), &mut self.ops, &mut self.links, &mut self.controls, &mut self.inspects, &mut self.hover_boxes, &mut self.last_baseline);
                 if !committed {
                     first_top = ly;
                     committed = true;
@@ -2045,7 +2148,7 @@ impl<'a> Ctx<'a> {
                     open = Collapse::default();
                 }
             }
-            self.path.push(ElemInfo::of(el));
+            self.path.push(self.info(el));
             let vp_mark = self.vp_height_box.replace(false);
             let op0 = self.ops.len();
             let link0 = self.links.len();
@@ -2144,7 +2247,7 @@ impl<'a> Ctx<'a> {
         if let Some(clear) = owner.and_then(|o| self.pseudo_clear(o, parent, PseudoElem::After)) {
             if !inline.is_empty() {
                 let ly = anchor + open.value() as i32;
-                let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, parent.text_align, parent.text_align_last, parent.rtl, parent.text_indent.px(w as f32).unwrap_or(0.0), parent.line_height.px(parent.font_px).unwrap_or(0.0), &mut self.ops, &mut self.links, &mut self.controls, &mut self.inspects, &mut self.last_baseline);
+                let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, parent.text_align, parent.text_align_last, parent.rtl, parent.text_indent.px(w as f32).unwrap_or(0.0), parent.line_height.px(parent.font_px).unwrap_or(0.0), &mut self.ops, &mut self.links, &mut self.controls, &mut self.inspects, &mut self.hover_boxes, &mut self.last_baseline);
                 if !committed {
                     first_top = ly;
                     committed = true;
@@ -2179,7 +2282,7 @@ impl<'a> Ctx<'a> {
         }
         if !inline.is_empty() {
             let ly = anchor + open.value() as i32;
-            let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, parent.text_align, parent.text_align_last, parent.rtl, parent.text_indent.px(w as f32).unwrap_or(0.0), parent.line_height.px(parent.font_px).unwrap_or(0.0), &mut self.ops, &mut self.links, &mut self.controls, &mut self.inspects, &mut self.last_baseline);
+            let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, parent.text_align, parent.text_align_last, parent.rtl, parent.text_indent.px(w as f32).unwrap_or(0.0), parent.line_height.px(parent.font_px).unwrap_or(0.0), &mut self.ops, &mut self.links, &mut self.controls, &mut self.inspects, &mut self.hover_boxes, &mut self.last_baseline);
             if !committed {
                 first_top = ly;
                 committed = true;
@@ -2226,7 +2329,7 @@ impl<'a> Ctx<'a> {
             return Some((self.render_content(owner, template), *ps));
         }
         let got =
-            style::resolve_pseudo(owner, own, self.theme, self.sheet, &self.path[..anc], &[], 0, self.viewport_w, kind);
+            style::resolve_pseudo(&self.info(owner), own, self.theme, self.sheet, &self.path[..anc], &[], 0, self.viewport_w, kind);
         self.pseudos.borrow_mut().insert(key, got.clone());
         let (template, ps) = got?;
         Some((self.render_content(owner, &template), ps))
@@ -3312,7 +3415,7 @@ impl<'a> Ctx<'a> {
         for c in &el.children {
             if let Node::Element(e) = c {
                 let cs = self.styled(e, st, &siblings, sib_count);
-                siblings.push(ElemInfo::of(e));
+                siblings.push(self.info(e));
                 if e.tag != "caption" && cs.display != Display::TableCaption {
                     continue;
                 }
@@ -3324,7 +3427,7 @@ impl<'a> Ctx<'a> {
                 // and `position: relative` moves it like any other box (the
                 // caller of `layout_box` normally applies that — here that
                 // caller is us).
-                self.path.push(ElemInfo::of(e));
+                self.path.push(self.info(e));
                 let part = self.part_start();
                 y = self.layout_box(e, &cs, x, w, y);
                 if cs.position == Position::Relative {
@@ -3623,10 +3726,10 @@ impl<'a> Ctx<'a> {
     fn push_row_path(&mut self, row: &Row<'a>) -> usize {
         let depth = self.path.len();
         if let Some((g, _)) = row.group {
-            self.path.push(ElemInfo::of(g));
+            self.path.push(self.info(g));
         }
         if let Some((e, _)) = row.el {
-            self.path.push(ElemInfo::of(e));
+            self.path.push(self.info(e));
         }
         depth
     }
@@ -3741,7 +3844,7 @@ impl<'a> Ctx<'a> {
                 }
                 match row.cells[c].cell {
                     Cell::Real(e) => {
-                        self.path.push(ElemInfo::of(e));
+                        self.path.push(self.info(e));
                         let _ = self.layout_children(&e.children, cs, Some(e), *content_x, *content_w, content_y);
                         self.path.pop();
                     }
@@ -3855,7 +3958,7 @@ impl<'a> Ctx<'a> {
         // leaks exclusion rects into the real one: the next float finds a BFC
         // that looks full and drops below phantom neighbours.
         let fl = self.floats.len();
-        self.path.push(ElemInfo::of(el));
+        self.path.push(self.info(el));
         let bottom = self.layout_children(&el.children, st, Some(el), x, w.max(0), y);
         self.path.pop();
         self.ops.truncate(o);
@@ -3984,19 +4087,19 @@ impl<'a> Ctx<'a> {
                         // need that, and it has to hold here because this is
                         // where a cell's style is settled for good.
                         Some(TableRole::Row) => {
-                            self.path.push(ElemInfo::of(e));
+                            self.path.push(self.info(e));
                             let cells = self.partition_cells(&e.children, &est);
                             self.path.pop();
                             body.push(Row { el: Some((e, est)), group, cells })
                         }
                         Some(TableRole::RowGroup) => {
-                            self.path.push(ElemInfo::of(e));
+                            self.path.push(self.info(e));
                             self.collect_rows_into(&e.children, &est, Some((e, est)), header, body, footer);
                             self.path.pop();
                         }
                         Some(TableRole::HeaderGroup) | Some(TableRole::FooterGroup) => {
                             let (mut h, mut b, mut f) = (Vec::new(), Vec::new(), Vec::new());
-                            self.path.push(ElemInfo::of(e));
+                            self.path.push(self.info(e));
                             self.collect_rows_into(&e.children, &est, Some((e, est)), &mut h, &mut b, &mut f);
                             self.path.pop();
                             let out = if role == Some(TableRole::HeaderGroup) { &mut *header } else { &mut *footer };
@@ -4025,7 +4128,7 @@ impl<'a> Ctx<'a> {
                 }
             }
             if let Node::Element(e) = n {
-                siblings.push(ElemInfo::of(e));
+                siblings.push(self.info(e));
             }
         }
         if let Some(s) = run_start {
@@ -4095,7 +4198,7 @@ impl<'a> Ctx<'a> {
                 }
             }
             if let Node::Element(e) = n {
-                siblings.push(ElemInfo::of(e));
+                siblings.push(self.info(e));
             }
         }
         if let Some(s) = run_start {
@@ -4161,7 +4264,7 @@ impl<'a> Ctx<'a> {
             // exactly what the anonymous-table-object reftests measure.
             let push = self.path.last().map(|p| p.seq()) != Some(el.seq);
             if push {
-                self.path.push(ElemInfo::of(el));
+                self.path.push(self.info(el));
             }
             let got = if st.display == Display::Table {
                 self.intrinsic_table(&el.children, st)
@@ -4268,7 +4371,7 @@ impl<'a> Ctx<'a> {
                 TableSeg::Node(n) => {
                     self.intrinsic_node(n, st, run, pref, min, horiz, &siblings, sib_count);
                     if let Node::Element(e) = n {
-                        siblings.push(ElemInfo::of(e));
+                        siblings.push(self.info(e));
                     }
                 }
             }
@@ -4307,7 +4410,7 @@ impl<'a> Ctx<'a> {
             && replaced_intrinsic(el).is_none()
         {
             run.frame += inline_frame(&cs, 0.0);
-            self.path.push(ElemInfo::of(el));
+            self.path.push(self.info(el));
             self.intrinsic_walk(&el.children, &cs, run, pref, min);
             self.path.pop();
             return;
@@ -4315,7 +4418,7 @@ impl<'a> Ctx<'a> {
         // Everything else is a box of its own: an atomic inline (image, form
         // control) or a block-level child. Either way it ends the current line.
         let (p, m) = if el.tag == "img" {
-            self.path.push(ElemInfo::of(el));
+            self.path.push(self.info(el));
             let (iw, _) = self.img_box(el, &cs);
             self.path.pop();
             (iw as f32, iw as f32)
@@ -4456,7 +4559,7 @@ impl<'a> Ctx<'a> {
         let elems: Vec<ElemInfo> = nodes
             .iter()
             .filter_map(|n| match n {
-                Node::Element(e) => Some(ElemInfo::of(e)),
+                Node::Element(e) => Some(self.info(e)),
                 _ => None,
             })
             .collect();
@@ -4658,7 +4761,7 @@ impl<'a> Ctx<'a> {
         for c in &el.children {
             if let Node::Element(ce) = c {
                 let mut cs = self.styled(ce, st, &siblings, sib_count);
-                siblings.push(ElemInfo::of(ce));
+                siblings.push(self.info(ce));
                 if matches!(cs.display, Display::Inline | Display::InlineBlock) {
                     cs.display = Display::Block;
                 }
@@ -4666,7 +4769,7 @@ impl<'a> Ctx<'a> {
                     continue;
                 }
                 if matches!(cs.position, Position::Absolute | Position::Fixed) {
-                    self.path.push(ElemInfo::of(ce));
+                    self.path.push(self.info(ce));
                     self.layout_abs(ce, &cs, self.cb.0, self.cb.1);
                     self.path.pop();
                     continue;
@@ -4954,7 +5057,7 @@ impl<'a> Ctx<'a> {
             let op0 = self.ops.len();
             let link0 = self.links.len();
             let ctl0 = self.controls.len();
-            self.path.push(ElemInfo::of(el_i));
+            self.path.push(self.info(el_i));
             // NOTE: css-grid-2 §6.6 says a grid item's percentage height
             // resolves against its GRID AREA, and the row tracks are sized by
             // now, so it could be answered right here — `self.cb_h =
@@ -5102,7 +5205,7 @@ impl<'a> Ctx<'a> {
         // that looks full and drops below phantom neighbours.
         let fl = self.floats.len();
         let prev_cb = self.cb;
-        self.path.push(ElemInfo::of(el));
+        self.path.push(self.info(el));
         let bottom = self.layout_box(el, st, x, w.max(1), y);
         self.path.pop();
         self.ops.truncate(o);
@@ -5134,7 +5237,7 @@ impl<'a> Ctx<'a> {
         for c in &el.children {
             if let Node::Element(ce) = c {
                 let mut cs = self.styled(ce, st, &siblings, sib_count);
-                siblings.push(ElemInfo::of(ce));
+                siblings.push(self.info(ce));
                 // A flex item is blockified (css-display-3 §2.7).
                 if matches!(cs.display, Display::Inline | Display::InlineBlock) {
                     cs.display = Display::Block;
@@ -5143,7 +5246,7 @@ impl<'a> Ctx<'a> {
                     continue;
                 }
                 if matches!(cs.position, Position::Absolute | Position::Fixed) {
-                    self.path.push(ElemInfo::of(ce));
+                    self.path.push(self.info(ce));
                     self.layout_abs(ce, &cs, self.cb.0, self.cb.1);
                     self.path.pop();
                     continue;
@@ -5338,7 +5441,7 @@ impl<'a> Ctx<'a> {
                 let s_meas = flex_item_style(&s, size[k], None, true);
                 let box_main = (size[k] + li[k].main_pad).max(1.0) as i32;
                 let mark = self.flex_mark();
-                self.path.push(ElemInfo::of(el));
+                self.path.push(self.info(el));
                 let bottom = self.layout_box(el, &s_meas, item_x[k] as i32, box_main, cross_y);
                 self.path.pop();
                 h_nat[k] = bottom - cross_y;
@@ -5414,7 +5517,7 @@ impl<'a> Ctx<'a> {
                     let (el, s) = items[idx0 + k];
                     let (forced_h, y) = plan[k];
                     let s2 = flex_item_style(&s, size[k], forced_h, true);
-                    self.path.push(ElemInfo::of(el));
+                    self.path.push(self.info(el));
                     // `layout_box` takes the box the caller resolved — the
                     // item's BORDER box. `size[k]` is its content size, so the
                     // item's own padding and border have to go back on, or a
@@ -5507,7 +5610,7 @@ impl<'a> Ctx<'a> {
             } else {
             }
             let s2 = flex_item_style(s, cross_w[i], None, false);
-            self.path.push(ElemInfo::of(el));
+            self.path.push(self.info(el));
             let bottom = self.layout_box(el, &s2, ix[i], cross_w[i].max(1.0) as i32, y as i32);
             self.path.pop();
             y = bottom as f32 + mm_trail[i];
@@ -6058,7 +6161,7 @@ impl<'a> Ctx<'a> {
         let i0 = self.inspects.len();
         let saved_floats = core::mem::take(&mut self.floats);
         let saved_baseline = self.last_baseline.take();
-        self.path.push(ElemInfo::of(el));
+        self.path.push(self.info(el));
         // `layout_box` re-adds margin-left + padding, so it gets the MARGIN-box
         // width — the same contract `place_float` uses.
         let border_bottom = self.layout_box(el, st, 0, outer_w, st.margin_top as i32);
@@ -6104,11 +6207,17 @@ impl<'a> Ctx<'a> {
             || edge(&st.border_right)
             || edge(&st.border_bottom)
             || edge(&st.border_left);
-        if !paints && lead == 0.0 && trail == 0.0 {
+        // A box that paints nothing and reserves no space normally has no
+        // reason to exist — but a hover rule needs its RECTANGLE even when it
+        // is invisible at rest, and a bare `<a href>` is exactly that box. Miss
+        // this and the pointer finds every element except the ones it aims at.
+        let hover_seq = self.sheet.hover_set.may_match(el).then_some(el.seq);
+        if !paints && lead == 0.0 && trail == 0.0 && hover_seq.is_none() {
             return None;
         }
         Some(InlineBox {
             st: *st,
+            hover_seq,
             bg: self.bg_key(st.bg_layer.image),
             mask: self.bg_key(st.mask_layer.image),
             lead,
@@ -6136,6 +6245,9 @@ impl<'a> Ctx<'a> {
         }
         Some(InlineBox {
             st: *st,
+            // An image's own box; a hover rule on it is caught by the element's
+            // block-level record, not here.
+            hover_seq: None,
             bg: None,
             mask: None,
             lead: st.border_left.width + st.pad_left,
@@ -6203,7 +6315,7 @@ impl<'a> Ctx<'a> {
                 Node::Text(t) => inline.text(t, st, href),
                 Node::Element(ce) => {
                     let cs = self.styled(ce, st, &siblings, sib_count);
-                    siblings.push(ElemInfo::of(ce));
+                    siblings.push(self.info(ce));
                     if cs.display == Display::None {
                         continue;
                     }
@@ -6215,7 +6327,7 @@ impl<'a> Ctx<'a> {
                         continue;
                     }
                     let ib = self.inline_box_of(ce, &cs, bw).map(|b| inline.open_box(b));
-                    self.path.push(ElemInfo::of(ce));
+                    self.path.push(self.info(ce));
                     self.collect_inline(ce, &cs, href, inline, bx, bw, by);
                     self.path.pop();
                     if let Some(i) = ib {
@@ -6295,6 +6407,11 @@ struct AtomicBox {
 /// line's height (CSS 2.1 §10.6.1); horizontal ones advance the flow.
 struct InlineBox {
     st: ComputedStyle,
+    /// `seq` of the element this box came from, but only if a `:hover` rule
+    /// could react to it. `None` for the overwhelming majority, which is what
+    /// keeps the hit-test list short — an inline box is where LINKS live, so
+    /// without this the pointer would miss exactly what it aims at.
+    hover_seq: Option<u32>,
     /// Image keys, already registered with the layout that needs them — `flow`
     /// paints without a `Ctx` to ask.
     bg: Option<u64>,
@@ -6917,6 +7034,7 @@ impl Inline {
         links: &mut Vec<LinkRect>,
         controls: &mut Vec<ControlRect>,
         inspects: &mut Vec<InspectBox>,
+        hover_boxes: &mut Vec<HoverBox>,
         last_baseline: &mut Option<i32>,
     ) -> i32 {
         // Each word/segment measures with its own face (a monospace run advances
@@ -6987,7 +7105,7 @@ impl Inline {
                         y += ceil_i32(strut_h);
                     } else {
                         *last_baseline = Some(y + line_ascent as i32);
-                        y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls, inspects);
+                        y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls, inspects, hover_boxes);
                     }
                     let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                     pen = bl as f32;
@@ -7004,7 +7122,7 @@ impl Inline {
                     if !style.nowrap && !line.is_empty() && pen + sw + ww > right {
                         *last_baseline = Some(y + line_ascent as i32);
                         break_frags(&mut open, &mut frags, pen);
-                        y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls, inspects);
+                        y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls, inspects, hover_boxes);
                         let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                         pen = bl as f32;
                         right = br as f32;
@@ -7028,7 +7146,7 @@ impl Inline {
                                 if !line.is_empty() {
                                     *last_baseline = Some(y + line_ascent as i32);
                                     break_frags(&mut open, &mut frags, pen);
-                                    y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls, inspects);
+                                    y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls, inspects, hover_boxes);
                                     let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                                     pen = bl as f32;
                                     right = br as f32;
@@ -7085,7 +7203,7 @@ impl Inline {
                     if !line.is_empty() && pen + sw + b.w as f32 > right {
                         *last_baseline = Some(y + line_ascent as i32);
                         break_frags(&mut open, &mut frags, pen);
-                        y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls, inspects);
+                        y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls, inspects, hover_boxes);
                         let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                         pen = bl as f32;
                         right = br as f32;
@@ -7133,7 +7251,7 @@ impl Inline {
                     if !line.is_empty() && pen + sw + bw as f32 > right {
                         *last_baseline = Some(y + line_ascent as i32);
                         break_frags(&mut open, &mut frags, pen);
-                        y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls, inspects);
+                        y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls, inspects, hover_boxes);
                         let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                         pen = bl as f32;
                         right = br as f32;
@@ -7163,7 +7281,7 @@ impl Inline {
                     if !line.is_empty() && pen + sw + ctl.w as f32 > right {
                         *last_baseline = Some(y + line_ascent as i32);
                         break_frags(&mut open, &mut frags, pen);
-                        y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls, inspects);
+                        y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(align, rtl, pen, right), ops, links, controls, inspects, hover_boxes);
                         let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                         pen = bl as f32;
                         right = br as f32;
@@ -7187,7 +7305,7 @@ impl Inline {
         if line_exists(&line, &frags) {
             let a = align_last.unwrap_or(align);
             *last_baseline = Some(y + line_ascent as i32);
-            y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(a, rtl, pen, right), ops, links, controls, inspects);
+            y = emit_line(fonts, theme, &mut line, &mut frags, &self.boxes, y, line_ascent, gap, align_dx(a, rtl, pen, right), ops, links, controls, inspects, hover_boxes);
         }
         y
     }
@@ -7446,6 +7564,7 @@ fn emit_line(
     links: &mut Vec<LinkRect>,
     controls: &mut Vec<ControlRect>,
     inspects: &mut Vec<InspectBox>,
+    hover_boxes: &mut Vec<HoverBox>,
 ) -> i32 {
     let line_top = y;
     let baseline = y + line_ascent as i32;
@@ -7457,7 +7576,17 @@ fn emit_line(
         let head = line.iter().map(placed_x).min().unwrap_or(0);
         frags.sort_by_key(|f| f.bx);
         for f in frags.drain(..) {
-            paint_frag(fonts, &boxes[f.bx], f.x0.unwrap_or(head) + dx, f.x1 + dx, baseline, (f.left, f.right), ops);
+            let b = &boxes[f.bx];
+            let (x0, x1) = (f.x0.unwrap_or(head) + dx, f.x1 + dx);
+            // A box spanning three lines leaves three fragments and therefore
+            // three hit rects — which is right: the pointer is inside the box
+            // wherever any of its fragments is.
+            if let Some(seq) = b.hover_seq {
+                if x1 > x0 {
+                    hover_boxes.push(HoverBox { x: x0, y: line_top, w: x1 - x0, h: box_h, seq });
+                }
+            }
+            paint_frag(fonts, b, x0, x1, baseline, (f.left, f.right), ops);
         }
     }
     for placed in line.drain(..) {
@@ -7577,13 +7706,83 @@ mod tests {
     fn lay(html: &str, w: u32) -> Layout {
         let dom = dom::parse(html);
         let sheet = crate::css::collect(&dom, crate::css::Media::new(800.0, false));
-        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, &FormState::default(), false)
+        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, &FormState::default(), false, &[])
     }
 
     fn lay_inspect(html: &str, w: u32) -> Layout {
         let dom = dom::parse(html);
         let sheet = crate::css::collect(&dom, crate::css::Media::new(800.0, false));
-        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, &FormState::default(), true)
+        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, &FormState::default(), true, &[])
+    }
+
+    fn lay_hover(html: &str, w: u32, hover: &[u32]) -> Layout {
+        let dom = dom::parse(html);
+        let sheet = crate::css::collect(&dom, crate::css::Media::new(800.0, false));
+        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, &FormState::default(), false, hover)
+    }
+
+    /// Only the elements a `:hover` rule can actually react to get a box —
+    /// the invalidation set. On Wikipedia's Main_Page that is the difference
+    /// between 8327 boxes and a handful, and it is what makes 98.7 % of
+    /// pointer movement cost nothing at all.
+    ///
+    /// The carrier of the `:hover` is what must be hit-testable, NOT the
+    /// selector's subject: in `nav:hover a` the pointer is inside the `<nav>`.
+    #[test]
+    fn only_hover_carriers_get_a_box() {
+        let page = |css: &str| {
+            let html = alloc::format!(
+                "<body><style>{css}</style><nav><a href=\"/\">x</a></nav></body>"
+            );
+            let l = lay_hover(&html, 400, &[]);
+            let mut tags: Vec<u32> = l.hover_boxes.iter().map(|b| b.seq).collect();
+            tags.sort_unstable();
+            tags
+        };
+
+        // `a:hover` — the link carries it, the `<nav>` around it does not.
+        let only_a = page("a:hover{background:#f00}");
+        assert_eq!(only_a.len(), 1, "just the link: {only_a:?}");
+
+        // `nav:hover a` — now the NAV is the carrier, and it is the one the
+        // pointer has to be found inside.
+        let only_nav = page("nav:hover a{color:#0f0}");
+        assert_eq!(only_nav.len(), 1, "just the nav: {only_nav:?}");
+        assert!(only_nav[0] < only_a[0], "the nav comes before the link in document order");
+
+        // A compound that names nothing can match anything → collect everything
+        // rather than freeze the page under the pointer.
+        assert!(page("*:hover{color:#f00}").len() > 2);
+    }
+
+    /// The pointer hovers the element it is inside AND every ancestor that
+    /// contains it — `nav:hover a` (every dropdown on the web) styles a
+    /// descendant from a state that lives on the parent.
+    ///
+    /// This is the geometry half; that the restyle reaches a PIXEL is
+    /// `raster::tests::hover_repaints_the_element_under_the_pointer`.
+    #[test]
+    fn the_pointer_hovers_an_element_and_every_ancestor_containing_it() {
+        // Both elements carry a hover rule, so both are hit-testable.
+        let html = "<body><style>nav:hover{background:#eee} a:hover{background:#f00}</style>\
+                    <nav><a href=\"/\">x</a></nav></body>";
+        let l = lay_hover(html, 400, &[]);
+        assert_eq!(l.hover_boxes.len(), 2);
+
+        let link = l.hover_boxes.iter().max_by_key(|b| b.seq).expect("a box");
+        let hovered = l.hover_at(link.x + link.w / 2, link.y + link.h / 2);
+        assert_eq!(hovered.len(), 2, "the link AND the nav around it: {hovered:?}");
+        assert!(hovered.windows(2).all(|w| w[0] < w[1]), "ascending — `of_hovered` bisects");
+
+        // A point outside every box hovers nothing.
+        assert!(l.hover_at(-5, -5).is_empty());
+    }
+
+    /// A page with no `:hover` rule must not pay for a list nobody reads.
+    #[test]
+    fn a_sheet_without_hover_rules_collects_no_boxes() {
+        let l = lay_hover("<body><style>a{color:#00f}</style><a href=\"/\">x</a></body>", 400, &[]);
+        assert!(l.hover_boxes.is_empty());
     }
 
     #[test]
@@ -8741,7 +8940,7 @@ fn dbg_wiki_shape() {
     fn lay_forms(html: &str, w: u32, st: &FormState) -> Layout {
         let dom = dom::parse(html);
         let sheet = crate::css::collect(&dom, crate::css::Media::new(800.0, false));
-        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, st, false)
+        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, st, false, &[])
     }
 
     #[test]
