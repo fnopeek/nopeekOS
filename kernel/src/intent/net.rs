@@ -164,6 +164,28 @@ pub fn intent_wlan(args: &str) {
     kprintln!("  rx ring    in {}  dropped {} (ring full — driver outran core-0 drain)",
         s.rx_to_ring, s.rx_ring_drops);
 
+    // Whether there is an address at all. "WiFi is up but there is no DHCP
+    // lease" and "the link never actually came up" look identical from a
+    // terminal, and they need opposite fixes.
+    let ip = crate::net::arp::our_ip();
+    if ip == [0, 0, 0, 0] {
+        kprintln!("  address    NONE — no lease (link must be AUTHORIZED first)");
+    } else {
+        kprintln!("  address    {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+    }
+
+    // The control channel between driver and supplicant. A dropped message here
+    // is a dropped 4-way handshake step, and events piling up means wifid has
+    // stopped reading — the usual reason a link associates but never authorizes.
+    let c = crate::wifi::stats();
+    kprintln!("  ctrl chan  driver→wifid {} sent, {} queued, {} DROPPED",
+        c.events_sent, c.events_queued, c.events_dropped);
+    kprintln!("             wifid→driver {} sent, {} queued, {} DROPPED",
+        c.cmds_sent, c.cmds_queued, c.cmds_dropped);
+    if c.events_sent > 0 && c.cmds_sent == 0 {
+        kprintln!("             ^ the driver spoke, wifid never answered — is wifid running?");
+    }
+
     // The driver half. Printed verbatim: the kernel does not know what an
     // AX200 rate code means, and should not have to.
     let mut any = false;
@@ -184,6 +206,28 @@ pub fn intent_wlan(args: &str) {
         kprintln!();
         kprintln!("  (no driver report — the driver is not running, or predates");
         kprintln!("   npk_driver_report; start it with 'driver wifi_ax200')");
+    }
+
+    // wifid runs in an invisible autostart window, so its log is the only place
+    // the supplicant's side of the handshake is visible at all. Show the tail —
+    // the interesting lines ("missed READY", "4-way FAILED", "Idle") are there.
+    kprintln!();
+    kprintln!("  Supplicant log — sys/log/wifid (tail)");
+    kprintln!("  ───────────────");
+    match crate::npkfs::fetch("sys/log/wifid") {
+        Ok((bytes, _)) => {
+            let text = alloc::string::String::from_utf8_lossy(&bytes);
+            let lines: alloc::vec::Vec<&str> =
+                text.lines().filter(|l| !l.trim().is_empty()).collect();
+            let start = lines.len().saturating_sub(12);
+            for line in &lines[start..] {
+                kprintln!("  {}", line);
+            }
+            if lines.is_empty() {
+                kprintln!("  (empty)");
+            }
+        }
+        Err(_) => kprintln!("  (no log — wifid has not run since the last install)"),
     }
     kprintln!();
 }
