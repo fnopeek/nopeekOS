@@ -670,6 +670,14 @@ pub const RATE_MCS_MOD_TYPE_VHT: u32 = 3 << 8;
 pub const RATE_MCS_MOD_TYPE_HE: u32 = 4 << 8;
 pub const RATE_MCS_CODE_MSK: u32 = 0x1f;   // MCS index / legacy rate index
 pub const RATE_MCS_NSS_MSK: u32 = 0x20;    // 0 = 1 stream, 1 = 2 streams
+// …but only in the v3 format. This firmware reports v2 (TX_CMD cmd_ver 9 < 11),
+// where the SAME field sits one bit lower. Everything else is identical —
+// iwl_v3_rate_from_v2_v3 does nothing but move this one bit. Read with the v3
+// mask, a v2 word turns "MCS 7, 2 streams" into "MCS 23, 1 stream": a rate that
+// does not exist, and no Mbit figure at all.
+pub const RATE_MCS_NSS_MSK_V2: u32 = 0x10;
+// fw_rates_ver: TX_CMD cmd_ver >= 11 means the firmware talks v3 (iwl_mvm_has_rate_v3).
+pub const TX_CMD_VER_RATE_V3: u8 = 11;
 pub const RATE_MCS_CHAN_WIDTH_POS: u32 = 11;
 pub const RATE_MCS_CHAN_WIDTH_MSK: u32 = 0x7 << 11;
 // Supported legacy-rate bitmap: BIT(hw_value) per rate (IWL_RATE_*_INDEX). Full
