@@ -30,7 +30,7 @@ static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
 /// carry it, so a device measurement can never be traced to the wrong build.
-const DRIVER_VERSION: &str = "0.47.0";
+const DRIVER_VERSION: &str = "0.47.1";
 
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
@@ -3457,6 +3457,7 @@ impl Ax200 {
                     // disrupts a healthy link.
                     if let Some((st, body)) = Self::rx_mgmt_for_us(rb, &our_mac) {
                         a_mgmt += 1;
+                        a_to_us += 1; // rx_classify never sees these — count here
                         if st == DOT11_STYPE_DEAUTH || st == DOT11_STYPE_DISASSOC {
                             link_lost = true;
                             deauth_subtype = st;
@@ -3469,6 +3470,7 @@ impl Ax200 {
                         }
                         return true; // mgmt frame — not for the IP path
                     }
+                    let uni_before = a_to_us;
                     match Self::rx_classify(rb, &our_mac, &mut rxbuf, &mut llc_miss, &mut a_to_us) {
                         RxKind::Eapol(n) => {
                             a_eapol += 1;
@@ -3488,8 +3490,14 @@ impl Ax200 {
                             // broadcast, and a beacon always goes out at the
                             // lowest basic rate: sampling those reported a 6 Mbit
                             // downlink on a link actually running HT.
+                            // …and only for UNICAST frames. Moving the sample out
+                            // of the ring loop was not enough: most IP frames on a
+                            // home network are broadcast (ARP, mDNS, SSDP), and
+                            // broadcast goes out at the lowest basic rate just like
+                            // a beacon. That is why this kept reading 6 Mbit on a
+                            // link running HT.
                             rx_rate_tick += 1;
-                            if rx_rate_tick & 0xf == 0 {
+                            if a_to_us > uni_before && rx_rate_tick & 0x7 == 0 {
                                 let mut rd = [0u8; 64];
                                 host::dma_read_buf(rb.handle, 0, &mut rd);
                                 let rnf = le32(&rd, RX_PKT_DATA_OFF + MPDU_OFF_RATE_N_FLAGS);
