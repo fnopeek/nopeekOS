@@ -30,7 +30,7 @@ static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
 /// carry it, so a device measurement can never be traced to the wrong build.
-const DRIVER_VERSION: &str = "0.50.0";
+const DRIVER_VERSION: &str = "0.51.0";
 
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
@@ -1439,10 +1439,32 @@ impl Ax200 {
         self.free_bd_write += 1;
     }
 
+    /// Hand every RB in the pool back to the firmware and publish the index.
+    ///
+    /// Recovery for the case where RX has gone quiet while we are associated:
+    /// with only RX_NUM_RBS buffers, a burst that empties the pool can leave
+    /// fewer than 8 recycled — and the write pointer is published rounded down
+    /// to 8, so those last ones stay invisible and the firmware has nowhere to
+    /// put the next frame. Re-arming the whole pool costs nothing and is the
+    /// only way out that does not involve a full reset.
+    fn restock_all_rbs(&mut self) {
+        for vid in 1..=RX_NUM_RBS as u32 {
+            self.recycle_rb(vid);
+        }
+        self.flush_free_bd();
+        host::print("[ax200] RX stalled - re-armed all ");
+        host::print_dec(RX_NUM_RBS as u32);
+        host::print(" receive buffers\n");
+    }
+
     // Push the recycled free-BD write index to the HW (round down to 8).
     fn flush_free_bd(&self) {
         host::fence();
-        self.w32(RFH_Q0_FRBDCB_WIDX_TRG, self.free_bd_write & !0x7);
+        // Mask into the ring before rounding: free_bd_write counts monotonically
+        // (recycle_rb masks only for the slot it writes), so past NUM_RBDS this
+        // handed the hardware an index outside its own ring.
+        let idx = self.free_bd_write & (NUM_RBDS as u32 - 1);
+        self.w32(RFH_Q0_FRBDCB_WIDX_TRG, idx & !0x7);
     }
 
     // ── iwl_mvm_scan_umac_v14_and_above (mvm/scan.c, version 15) ────
@@ -2777,6 +2799,21 @@ impl Ax200 {
         // else. This project already has one address-dependent fault on record
         // (MMIO map_page against 1 GB huge pages), so the addresses belong in
         // any report that gets compared across boots.
+        // RX ring bookkeeping. "Receives for a while, then stops" is the
+        // signature of a firmware that ran out of buffers, and only these three
+        // numbers moving together show that they are being handed back.
+        r.s("rxring   read ");
+        r.d(self.rxq_read as u64);
+        r.s("  closed ");
+        r.d((host::dma_r32(self.rxq_rb_stts.handle, 0) & RB_STTS_CLOSED_MASK) as u64);
+        r.s("  free-bd-write ");
+        r.d(self.free_bd_write as u64);
+        r.s(" (hw sees ");
+        r.d(((self.free_bd_write & (NUM_RBDS as u32 - 1)) & !0x7) as u64);
+        r.s(", pool ");
+        r.d(RX_NUM_RBS as u64);
+        r.s(")\n");
+
         r.s("dma      mmio h");
         r.d(self.mmio as u64);
         r.s("  rxq 0x");
@@ -3483,6 +3520,7 @@ impl Ax200 {
         let mut next_report = self.st.start_ms + REPORT_PERIOD_MS;
         let mut reconnect_cooldown = 0u64;
         let mut assoc_at_ms = host::now_ms();
+        let mut last_rx_ms = assoc_at_ms;
         let mut handshake_deadline = assoc_at_ms + HANDSHAKE_TIMEOUT_MS;
         loop {
             // RX: drain + recycle the ring. EAPOL-Key frames → wifid (the 4-way);
@@ -3762,6 +3800,16 @@ impl Ax200 {
             // RX latency floor low (the ping/round-trip baseline) while still
             // yielding the core (npk_sleep yields the fiber). A proper IRQ wake is
             // the eventual fix; 4 ms is the interim quick-win over the old 20 ms.
+            // RX-silence watchdog. Frames of some kind always arrive on a live
+            // channel — beacons alone are ~10/s. Total silence means the
+            // firmware has no buffer to fill, not that the air went quiet.
+            if rx_frames > 0 {
+                last_rx_ms = host::now_ms();
+            } else if host::now_ms().saturating_sub(last_rx_ms) > RX_SILENCE_MS {
+                self.restock_all_rbs();
+                last_rx_ms = host::now_ms();
+            }
+
             // 4-way watchdog. An AP starts the handshake within milliseconds of
             // the association response; if nothing has arrived after this long,
             // either it gave up on us or we stopped hearing it — and in both
