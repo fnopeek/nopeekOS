@@ -30,7 +30,7 @@ static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
 /// carry it, so a device measurement can never be traced to the wrong build.
-const DRIVER_VERSION: &str = "0.45.1";
+const DRIVER_VERSION: &str = "0.45.2";
 
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
@@ -155,6 +155,12 @@ struct Stats {
     rx_eapol: u32,
     rx_mgmt: u32,
     rx_drain_max: u32, // most frames drained in one pass — RX ring pressure
+    // Passes that drained (nearly) the whole RB pool. There are only RX_NUM_RBS
+    // buffers: once they are all full the firmware has nowhere to put the next
+    // frame and drops it, which TCP sees as loss and answers by backing off. A
+    // rising count here means the poll loop is not keeping up, and no amount of
+    // air rate will help until it does.
+    rx_pool_exhausted: u32,
     // Loop + events.
     loop_iters: u32,
     loop_busy: u32,
@@ -189,6 +195,7 @@ impl Stats {
         tx_ok: 0, tx_fail: 0, tx_retries: 0, tx_rts_fail: 0, tx_airtime_us: 0,
         last_status: 0, last_init_rate: 0,
         rx_frames: 0, rx_bytes: 0, rx_ip: 0, rx_eapol: 0, rx_mgmt: 0, rx_drain_max: 0,
+        rx_pool_exhausted: 0,
         loop_iters: 0, loop_busy: 0, deauth: 0, addba_declined: 0,
         last_tx_rate: 0, last_rx_rate: 0,
         win_start_ms: 0, win_tx_bytes: 0, win_rx_bytes: 0, win_airtime_us: 0,
@@ -2335,10 +2342,11 @@ impl Ax200 {
 
     /// Decode a v2 rate_n_flags into the log. Always prints the raw word too —
     /// the decode is our reading of the format, the raw value is the truth.
-    fn log_rate(prefix: &str, rnf: u32) {
+    fn log_rate(prefix: &str, raw: u32) {
         host::print(prefix);
         host::print("0x");
-        host::print_hex32(rnf);
+        host::print_hex32(raw);
+        let rnf = Self::rate_v3(raw);
         let code = rnf & RATE_MCS_CODE_MSK;
         match rnf & RATE_MCS_MOD_TYPE_MSK {
             RATE_MCS_MOD_TYPE_CCK => {
@@ -2375,6 +2383,17 @@ impl Ax200 {
     //
     // Legacy code→rate mapping per iwl_mvm_legacy_hw_idx_to_mac80211_idx:
     // OFDM code 0 is the FIRST OFDM rate (6M), CCK code 0 is 1M.
+    // iwl_v3_rate_from_v2_v3: lift a firmware rate_n_flags into the v3 layout.
+    // The only difference between the two is where the NSS bit lives, so this
+    // moves it from bit 4 to bit 5 and leaves the rest alone. Everything below
+    // then decodes one format instead of two.
+    fn rate_v3(rnf: u32) -> u32 {
+        if fw_cmd_ver(0, TX_CMD) >= TX_CMD_VER_RATE_V3 {
+            return rnf;
+        }
+        (rnf & !RATE_MCS_NSS_MSK_V2) | ((rnf & RATE_MCS_NSS_MSK_V2) << 1)
+    }
+
     fn rate_kbit(rnf: u32) -> u32 {
         const CCK: [u32; 4] = [1000, 2000, 5500, 11000];
         const OFDM: [u32; 8] = [6000, 9000, 12000, 18000, 24000, 36000, 48000, 54000];
@@ -2401,15 +2420,17 @@ impl Ax200 {
     }
 
     // One rate line: raw word, decoded modulation, and the PHY rate it implies.
-    fn rep_rate(r: &mut Rep, label: &str, rnf: u32) {
+    fn rep_rate(r: &mut Rep, label: &str, raw: u32) {
         r.s(label);
-        if rnf == 0 || rnf == u32::MAX {
+        if raw == 0 || raw == u32::MAX {
             r.s("(none reported yet)\n");
             return;
         }
+        // Print the RAW firmware word, decode the normalised one.
         r.s("0x");
-        r.hex(rnf, 8);
+        r.hex(raw, 8);
         r.s(" = ");
+        let rnf = Self::rate_v3(raw);
         let code = rnf & RATE_MCS_CODE_MSK;
         match rnf & RATE_MCS_MOD_TYPE_MSK {
             RATE_MCS_MOD_TYPE_CCK => { r.s("CCK idx "); r.d(code as u64); }
@@ -2576,6 +2597,10 @@ impl Ax200 {
         r.d(self.st.rx_mgmt as u64);
         r.s(" drain-peak ");
         r.d(self.st.rx_drain_max as u64);
+        r.c(b'/');
+        r.d(RX_NUM_RBS as u64);
+        r.s(" pool-exhausted ");
+        r.d(self.st.rx_pool_exhausted as u64);
         r.c(b'\n');
 
         // The poll rate, and what it implies. The loop asks for a 1 ms sleep
@@ -3353,19 +3378,6 @@ impl Ax200 {
                     // would just mask whatever made us lose the link (our bug vs a
                     // genuinely-absent AP). Keep draining so detection never
                     // disrupts a healthy link.
-                    // The AP's downlink rate, from the RX descriptor. Sampled,
-                    // not read per frame: this is an extra DMA read on the hot
-                    // path and the rate moves far slower than the frame rate.
-                    rx_rate_tick += 1;
-                    if rx_rate_tick & 0x3f == 0 {
-                        let mut rd = [0u8; 64];
-                        host::dma_read_buf(rb.handle, 0, &mut rd);
-                        let rnf = le32(&rd, RX_PKT_DATA_OFF + MPDU_OFF_RATE_N_FLAGS);
-                        if rnf != last_rx_rate {
-                            last_rx_rate = rnf;
-                            Self::log_rate("[ax200] RX rate → ", rnf);
-                        }
-                    }
                     if let Some((st, body)) = Self::rx_mgmt_for_us(rb, &our_mac) {
                         a_mgmt += 1;
                         if st == DOT11_STYPE_DEAUTH || st == DOT11_STYPE_DISASSOC {
@@ -3393,6 +3405,22 @@ impl Ax200 {
                         RxKind::Ip(n) => {
                             a_ip += 1;
                             a_rx_bytes += n as u64;
+                            // The AP's downlink rate, from the RX descriptor —
+                            // sampled HERE, not for every received frame. Most of
+                            // what the ring carries is beacons and other networks'
+                            // broadcast, and a beacon always goes out at the
+                            // lowest basic rate: sampling those reported a 6 Mbit
+                            // downlink on a link actually running HT.
+                            rx_rate_tick += 1;
+                            if rx_rate_tick & 0xf == 0 {
+                                let mut rd = [0u8; 64];
+                                host::dma_read_buf(rb.handle, 0, &mut rd);
+                                let rnf = le32(&rd, RX_PKT_DATA_OFF + MPDU_OFF_RATE_N_FLAGS);
+                                if rnf != last_rx_rate {
+                                    last_rx_rate = rnf;
+                                    Self::log_rate("[ax200] RX rate -> ", rnf);
+                                }
+                            }
                             if rx_log < 12 {
                                 host::dprint("[ax200] data RX → IP stack (len ");
                                 host::dprint_dec(n as u32);
@@ -3424,6 +3452,9 @@ impl Ax200 {
             self.st.rx_eapol = self.st.rx_eapol.wrapping_add(a_eapol);
             self.st.rx_mgmt = self.st.rx_mgmt.wrapping_add(a_mgmt);
             if rx_frames > self.st.rx_drain_max { self.st.rx_drain_max = rx_frames; }
+            if rx_frames as usize >= RX_NUM_RBS - 2 {
+                self.st.rx_pool_exhausted = self.st.rx_pool_exhausted.wrapping_add(1);
+            }
             self.st.tx_ok = self.st.tx_ok.wrapping_add(a_ok);
             self.st.tx_fail = self.st.tx_fail.wrapping_add(a_fail);
             self.st.tx_retries = self.st.tx_retries.wrapping_add(a_retries);
