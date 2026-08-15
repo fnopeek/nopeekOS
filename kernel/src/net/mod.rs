@@ -194,6 +194,7 @@ pub fn wasm_deliver_rx(frame: &[u8]) {
 /// associated) triggers a fresh IP config. 0xff = not yet seeded.
 static LAST_ACTIVE: AtomicU8 = AtomicU8::new(0xff);
 static NEXT_LINK_CHECK: AtomicU64 = AtomicU64::new(0);
+static NEXT_DHCP_RETRY: AtomicU64 = AtomicU64::new(0);
 
 /// Seed the active-interface tracker WITHOUT reconfiguring — call once after the
 /// boot-time DHCP so the first tick doesn't redundantly re-DHCP the same link.
@@ -215,8 +216,30 @@ pub fn tick_link_and_reconfigure() {
 
     netdev::refresh_link_state();
     let act = netdev::active_id();
-    if act != LAST_ACTIVE.swap(act, Ordering::Relaxed) && act != 0 {
+    let up = netdev::active_link_up();
+    // The trigger has to include the CARRIER, not just which interface is
+    // selected. A WiFi NIC counts as active from the moment its driver
+    // registers — which is before the association, let alone the 4-way. Keyed
+    // on the id alone, the only edge fires while the link is still down: DHCP
+    // goes out over a dead interface, gets no offer, and because the id never
+    // changes again no further attempt is ever made.
+    let state = act | if up { 0x10 } else { 0 };
+    let changed = state != LAST_ACTIVE.swap(state, Ordering::Relaxed);
+    if changed && act != 0 && up {
         reconfigure();
+        return;
+    }
+    // Belt and braces: a usable link but still no address means the edge was
+    // missed or the lease attempt failed. Keep asking on a slow retry instead
+    // of waiting for an edge that has already gone by — this is what a real
+    // DHCP client does, and it makes the outcome independent of boot ordering.
+    if up && act != 0 && arp::our_ip() == [0, 0, 0, 0] {
+        if now >= NEXT_DHCP_RETRY.load(Ordering::Relaxed) {
+            NEXT_DHCP_RETRY.store(
+                now + crate::interrupts::tsc_freq().saturating_mul(10), Ordering::Relaxed);
+            crate::kprintln!("[npk] net: link up but no address - retrying DHCP");
+            reconfigure();
+        }
     }
 }
 
@@ -235,7 +258,25 @@ fn reconfigure() {
         return;
     }
     crate::kprintln!("[npk] net: link changed -> requesting DHCP lease...");
-    let _ = dhcp::configure();
+    if dhcp::configure() {
+        prime_gateway_arp();
+    }
+}
+
+/// Resolve the gateway's MAC right after a lease instead of leaving it to
+/// whatever request happens to go out first. On a link that has just come up
+/// that first request is usually a DNS lookup, and it is the one that eats the
+/// ARP round trip — or fails outright, which reads as "name resolution is
+/// broken" rather than "the ARP cache was cold".
+fn prime_gateway_arp() {
+    let gw = ipv4::gateway();
+    if gw == [0, 0, 0, 0] {
+        return;
+    }
+    if arp::resolve(gw, 50).is_none() { // 100 Hz ticks → 500 ms
+        crate::kprintln!("[npk] net: gateway {}.{}.{}.{} did not answer ARP yet",
+            gw[0], gw[1], gw[2], gw[3]);
+    }
 }
 
 fn parse_ipv4(s: &str) -> Option<[u8; 4]> {

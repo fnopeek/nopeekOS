@@ -567,6 +567,12 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
         // re-taken at the next iteration's top.
         let console_gen = crate::serial::write_gen();
         crate::net::poll();
+        // Also while waiting for a line. run_loop calls this at the top of its
+        // iteration, but this reader blocks until Enter — so a link that comes
+        // up while the cursor sits at the prompt (WiFi finishing its handshake
+        // seconds after boot) was noticed only once the user typed something.
+        // Self-throttled to ~1 Hz, so this costs nothing per keystroke.
+        crate::net::tick_link_and_reconfigure();
         // A running microvm is the foreground task — give it a real
         // time budget per outer iteration. One 3 ms slice amortised
         // against net::poll + the Shade composite + a 10 ms hlt was
