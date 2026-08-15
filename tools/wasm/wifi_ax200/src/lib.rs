@@ -30,7 +30,7 @@ static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
 /// carry it, so a device measurement can never be traced to the wrong build.
-const DRIVER_VERSION: &str = "0.47.1";
+const DRIVER_VERSION: &str = "0.48.0";
 
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
@@ -368,6 +368,7 @@ struct Ax200 {
     want_ssid_len: u8,
     band_pref: u8, // BAND_PREF_*
     want_power_save: bool,
+    sync_ok: bool,
     pick_reason: u8, // PICK_* — why the target was chosen, for the report
 }
 
@@ -2062,7 +2063,8 @@ impl Ax200 {
         // after the assoc response would mean draining (and discarding) the
         // frames the AP sends next — including the first EAPOL of the 4-way.
         // Auth + assoc take a few ms, so the timing is still current.
-        if self.wait_beacon_sync(600) {
+        self.sync_ok = self.wait_beacon_sync(600);
+        if self.sync_ok {
             host::print("[ax200] beacon sync: dtim ");
             host::print_dec(self.sync_dtim_count as u32);
             host::print("/");
@@ -2705,6 +2707,38 @@ impl Ax200 {
             PICK_SSID_FILTERED => "NO AP matched sys/config/wifi_ssid (fell back to loudest)",
             _ => "it was the strongest of our SSID",
         });
+        r.c(b'\n');
+
+        // Physical addresses of the rings. A driver that works with a USB
+        // dongle plugged in and not without it is not talking to the dongle —
+        // but the dongle allocates memory first, so OUR buffers land somewhere
+        // else. This project already has one address-dependent fault on record
+        // (MMIO map_page against 1 GB huge pages), so the addresses belong in
+        // any report that gets compared across boots.
+        r.s("dma      mmio h");
+        r.d(self.mmio as u64);
+        r.s("  rxq 0x");
+        r.hex((self.rxq_bd.phys >> 32) as u32, 8);
+        r.hex(self.rxq_bd.phys as u32, 8);
+        r.s("  rb0 0x");
+        r.hex((self.rb_pool[0].phys >> 32) as u32, 8);
+        r.hex(self.rb_pool[0].phys as u32, 8);
+        r.s("  data 0x");
+        r.hex((self.data_tfd.phys >> 32) as u32, 8);
+        r.hex(self.data_tfd.phys as u32, 8);
+        r.c(b'\n');
+
+        // The timing the associated MAC context was built from. If this never
+        // arrived, the firmware got a made-up wake schedule.
+        r.s("sync     beacon ");
+        r.s(if self.sync_ok { "ok" } else { "NEVER ARRIVED" });
+        r.s("  tsf 0x");
+        r.hex((self.sync_tsf >> 32) as u32, 8);
+        r.hex(self.sync_tsf as u32, 8);
+        r.s("  gp2 0x");
+        r.hex(self.sync_device_ts, 8);
+        r.s("  dtim-count ");
+        r.d(self.sync_dtim_count as u64);
         r.c(b'\n');
 
         r.s("scan     ");
@@ -4030,6 +4064,7 @@ pub extern "C" fn _start() {
         want_ssid_len: 0,
         band_pref: BAND_PREF_AUTO,
         want_power_save: false,
+        sync_ok: false,
         pick_reason: PICK_STRONGEST,
     };
     dev.st.start_ms = host::now_ms();
