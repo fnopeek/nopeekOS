@@ -259,6 +259,10 @@ fn reconfigure() {
     }
     crate::kprintln!("[npk] net: link changed -> requesting DHCP lease...");
     if dhcp::configure() {
+        // Tell the segment which MAC now owns our address, then warm the
+        // gateway entry. Without the announcement the router keeps sending to
+        // the interface we just left.
+        arp::announce();
         prime_gateway_arp();
     }
 }

@@ -179,7 +179,11 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     }
 
     kprintln!("[npk] Probing network...");
-    let _net_up = virtio_net::init() || intel_nic::init() || rtl8153::init();
+    // Non-short-circuit `|` on purpose: `||` stops at the first NIC that comes
+    // up, so on a machine with two the second was never initialised at all.
+    // Which one got skipped depended on probe order, and the survivor then held
+    // the whole data path — including for traffic that belonged elsewhere.
+    let _net_up = virtio_net::init() | intel_nic::init() | rtl8153::init();
     if netdev::is_available() {
         vga::show_status(b"Network online");
 

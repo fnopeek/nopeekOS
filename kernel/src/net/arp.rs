@@ -79,6 +79,35 @@ pub fn request(target_ip: [u8; 4]) {
     let _ = eth::send_frame(&eth::BROADCAST, eth::ETHERTYPE_ARP, &pkt);
 }
 
+/// Announce our address on the current interface (gratuitous ARP: an ARP
+/// request for our OWN address, so everyone on the segment refreshes the
+/// IP→MAC binding).
+///
+/// The address is global state while the MAC belongs to whichever interface is
+/// active. Switching from wired to WiFi keeps the address and silently changes
+/// the MAC — but the router still has the old one cached and keeps sending our
+/// traffic to an interface we are no longer listening on, for as long as its
+/// ARP entry lives. Announcing is what makes the handover take effect.
+pub fn announce() {
+    let our_ip = *OUR_IP.lock();
+    if our_ip == [0, 0, 0, 0] {
+        return;
+    }
+    let our_mac = netdev::mac().unwrap_or([0; 6]);
+
+    let mut pkt = [0u8; 28];
+    pkt[0..2].copy_from_slice(&HTYPE_ETH.to_be_bytes());
+    pkt[2..4].copy_from_slice(&PTYPE_IPV4.to_be_bytes());
+    pkt[4] = 6;
+    pkt[5] = 4;
+    pkt[6..8].copy_from_slice(&ARP_REQUEST.to_be_bytes());
+    pkt[8..14].copy_from_slice(&our_mac);
+    pkt[14..18].copy_from_slice(&our_ip);
+    pkt[18..24].copy_from_slice(&[0; 6]);
+    pkt[24..28].copy_from_slice(&our_ip); // target = ourselves
+    let _ = eth::send_frame(&eth::BROADCAST, eth::ETHERTYPE_ARP, &pkt);
+}
+
 /// Lookup MAC for IP in ARP cache
 pub fn lookup(ip: [u8; 4]) -> Option<[u8; 6]> {
     let cache = CACHE.lock();
