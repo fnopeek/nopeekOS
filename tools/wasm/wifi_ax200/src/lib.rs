@@ -31,7 +31,7 @@ static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
 /// carry it, so a device measurement can never be traced to the wrong build.
-const DRIVER_VERSION: &str = "0.57.1";
+const DRIVER_VERSION: &str = "0.57.2";
 
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
@@ -290,13 +290,27 @@ struct Rep {
 impl Rep {
     const fn new() -> Rep { Rep { b: [0; REPORT_CAP], n: 0 } }
 
+    /// Reserve the tail for a marker: silent truncation cost a whole debugging
+    /// round once already (the last two lines were simply gone from the report).
+    const LIMIT: usize = REPORT_CAP - 16;
+
     fn s(&mut self, s: &str) {
         for &c in s.as_bytes() {
-            if self.n < REPORT_CAP { self.b[self.n] = c; self.n += 1; }
+            if self.n < Self::LIMIT { self.b[self.n] = c; self.n += 1; }
+            else { self.mark_truncated(); return; }
+        }
+    }
+
+    fn mark_truncated(&mut self) {
+        const MARK: &[u8] = b"\n[truncated]\n";
+        if self.n + MARK.len() <= REPORT_CAP && !self.b[..self.n].ends_with(MARK) {
+            self.b[self.n..self.n + MARK.len()].copy_from_slice(MARK);
+            self.n += MARK.len();
         }
     }
     fn c(&mut self, c: u8) {
-        if self.n < REPORT_CAP { self.b[self.n] = c; self.n += 1; }
+        if self.n < Self::LIMIT { self.b[self.n] = c; self.n += 1; }
+        else { self.mark_truncated(); }
     }
     fn d(&mut self, mut v: u64) {
         if v == 0 { self.c(b'0'); return; }

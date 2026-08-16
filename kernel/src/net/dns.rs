@@ -98,6 +98,8 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
     // it is twice.
     let mut seen = 0u32;
     let mut foreign_id = 0u16;
+    let udp_before = udp::rx_total();
+    let (nl_before, _) = udp::no_listener_stats();
     'legs: for (n, leg) in LEGS.iter().enumerate() {
         udp::send(dns_server, LOCAL_PORT, DNS_PORT, &query);
         let t0 = crate::interrupts::ticks();
@@ -142,10 +144,9 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
             if super::arp::lookup(hop).is_some() { "was resolved" } else { "still UNRESOLVED" },
             seen, id, foreign_id);
         let (nl, nlp) = udp::no_listener_stats();
-        if nl > 0 {
-            crate::kprintln!("[npk] dns: {} datagram(s) arrived with nobody listening (last port {})",
-                nl, nlp);
-        }
+        crate::kprintln!("[npk] dns: during this lookup {} UDP datagram(s) reached the stack, \
+                          {} of them with nobody listening (last such port {})",
+            udp::rx_total().saturating_sub(udp_before), nl.saturating_sub(nl_before), nlp);
         // Did the query even reach the air? Every layer between here and the NIC
         // throws the send Result away, so without this the question cannot be
         // asked at all.

@@ -35,12 +35,12 @@ pub fn handle_udp(ip_packet: &[u8], data: &[u8]) {
     if length < HEADER_LEN || length > data.len() { return; }
     let payload = &data[HEADER_LEN..length.min(data.len())];
     let src_ip = <[u8; 4]>::try_from(&ip_packet[12..16]).unwrap();
+    RX_TOTAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
     // Deliver to registered listener
     let mut listeners = LISTENERS.lock();
     for slot in listeners.iter_mut().flatten() {
         if slot.port == dst_port {
-            NO_LISTENER_PORT.store(0, core::sync::atomic::Ordering::Relaxed);
             let copy_len = payload.len().min(MAX_RECV_BUF);
             slot.buf.clear();
             slot.buf.extend_from_slice(&payload[..copy_len]);
@@ -64,6 +64,16 @@ pub fn no_listener_stats() -> (u32, u16) {
     (NO_LISTENER.load(core::sync::atomic::Ordering::Relaxed),
      NO_LISTENER_PORT.load(core::sync::atomic::Ordering::Relaxed))
 }
+
+/// Every UDP datagram that reached this layer, whoever it was for. Cumulative;
+/// callers take a snapshot and report the DELTA, because "2 since boot" says
+/// nothing about the lookup that just failed — which is exactly the mistake the
+/// first version of this counter invited.
+pub fn rx_total() -> u32 {
+    RX_TOTAL.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+static RX_TOTAL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 static NO_LISTENER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static NO_LISTENER_PORT: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
