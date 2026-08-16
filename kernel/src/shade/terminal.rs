@@ -355,7 +355,13 @@ pub fn clear_output_redirect() {
 /// Write to the active terminal (called from serial::write_str).
 /// If the current core has an output redirect set, writes to that terminal instead.
 pub fn write(s: &str) {
-    if !is_active() { return; }
+    if !is_active() {
+        // The screen may be gone; the remote console is not. Anything printed
+        // before the terminal exists (or after it goes away) is exactly what a
+        // developer watching from outside needs most.
+        stream_push(usize::MAX, s);
+        return;
+    }
 
     // Check per-core output redirect (workers running intents)
     let apic_base = crate::interrupts::apic_base();
@@ -1195,6 +1201,16 @@ static STREAM_SINKS: [AtomicPtr<StreamBuf>; MAX_SLOTS] = {
     [NULL; MAX_SLOTS]
 };
 
+/// A sink that gets EVERY write, whichever terminal it was addressed to.
+///
+/// Per-slot mirroring is not what a remote console wants: output is routed by
+/// the per-core redirect, so a background message goes to the primary loop, a
+/// command's output to the loop it was typed in, and a failing path may print
+/// from a core with no redirect at all. A mirror bound to one index then goes
+/// quiet while the machine is still talking — observed as "it takes my commands
+/// but sends nothing back".
+static GLOBAL_SINK: AtomicPtr<StreamBuf> = AtomicPtr::new(core::ptr::null_mut());
+
 /// Open a stream sink for a terminal. Idempotent — calling twice is a no-op.
 pub fn stream_open(idx: usize) -> bool {
     if idx >= MAX_SLOTS { return false; }
@@ -1235,10 +1251,42 @@ pub fn stream_close(idx: usize) {
 
 /// Internal: push bytes to sink if active. Called from write() and write_idx().
 fn stream_push(idx: usize, s: &str) {
+    let g = GLOBAL_SINK.load(Ordering::Acquire);
+    if !g.is_null() {
+        // SAFETY: ptr valid until stream_close_global. push uses internal Mutex.
+        unsafe { (*g).push(s.as_bytes()); }
+    }
     if idx >= MAX_SLOTS { return; }
     let ptr = STREAM_SINKS[idx].load(Ordering::Acquire);
     if !ptr.is_null() {
         // SAFETY: ptr valid until stream_close. push uses internal Mutex.
         unsafe { (*ptr).push(s.as_bytes()); }
+    }
+}
+
+/// Open/read/close the everything-sink. Index -1 on the ABI.
+pub fn stream_open_global() -> bool {
+    if !GLOBAL_SINK.load(Ordering::Acquire).is_null() { return true; }
+    let ptr = Box::into_raw(Box::new(StreamBuf::new()));
+    match GLOBAL_SINK.compare_exchange(
+        core::ptr::null_mut(), ptr, Ordering::AcqRel, Ordering::Acquire
+    ) {
+        Ok(_) => true,
+        Err(_) => { unsafe { drop(Box::from_raw(ptr)); } true }
+    }
+}
+
+pub fn stream_read_global(dst: &mut [u8]) -> usize {
+    let ptr = GLOBAL_SINK.load(Ordering::Acquire);
+    if ptr.is_null() { return 0; }
+    // SAFETY: valid until stream_close_global; pop_into takes the inner Mutex.
+    unsafe { (*ptr).pop_into(dst) }
+}
+
+pub fn stream_close_global() {
+    let ptr = GLOBAL_SINK.swap(core::ptr::null_mut(), Ordering::AcqRel);
+    if !ptr.is_null() {
+        // SAFETY: swapped out, no new reader can obtain it.
+        unsafe { drop(Box::from_raw(ptr)); }
     }
 }
