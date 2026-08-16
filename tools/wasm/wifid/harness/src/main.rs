@@ -165,7 +165,52 @@ fn four_way_roundtrip() -> bool {
     }
 
     println!("[{}] four_way_handshake (PTK/MIC/GTK roundtrip)", if ok { "PASS" } else { "FAIL" });
-    ok
+
+    // ── Group-key handshake (802.11-2020 §12.7.7) ──
+    //
+    // The AP renews the group key on its own schedule. Ignoring the message is
+    // not neutral — the AP retries and then deauthenticates — which is what a
+    // link that "dies after a while, at no sensible interval" looks like from
+    // the outside. Same shape as msg3 but with the pairwise bit CLEAR.
+    let mut gok = true;
+    let gtk2 = hexn("f0e1d2c3b4a596870123456789abcdef");
+    let mut kde2 = vec![0xdd, (6 + gtk2.len()) as u8, 0x00, 0x0f, 0xac, 0x01, 0x02, 0x00];
+    kde2.extend_from_slice(&gtk2);
+    while kde2.len() % 8 != 0 { kde2.push(0xdd); }
+    let mut wrapped2 = vec![0u8; kde2.len() + 8];
+    aes_wrap(&kek, &kde2, &mut wrapped2);
+    let mut grp = vec![0u8; 99 + wrapped2.len()];
+    grp[1] = 0x03;
+    put_be16(&mut grp, 2, (95 + wrapped2.len()) as u16);
+    grp[4] = 0x02;
+    // Ack | MIC | Secure | Encrypted — and NO Pairwise bit.
+    put_be16(&mut grp, 5, 0x0002 | (1 << 7) | (1 << 8) | (1 << 9) | (1 << 12));
+    grp[8] = 16;
+    grp[9 + 7] = 3; // replay counter = 3
+    put_be16(&mut grp, 97, wrapped2.len() as u16);
+    grp[99..].copy_from_slice(&wrapped2);
+    let gmic = hmac_sha1(&kck, &grp)[..16].to_vec();
+    grp[81..97].copy_from_slice(&gmic);
+
+    match sup.on_eapol(&grp, &mut out) {
+        Step::Rekey(n) => {
+            // The new GTK must be installed…
+            gok &= sup.gtk().map(|(g, id)| g == &gtk2[..] && id == 2).unwrap_or(false);
+            // …and the answer must echo the replay counter, carry a valid MIC,
+            // and leave the pairwise bit clear so the AP knows which key it is.
+            let ki = ((out[5] as u16) << 8) | out[6] as u16;
+            gok &= ki & (1 << 3) == 0;
+            gok &= ki & (1 << 8) != 0;
+            gok &= out[9 + 7] == 3;
+            let mut check = out[..n].to_vec();
+            for b in &mut check[81..97] { *b = 0; }
+            gok &= &out[81..97] == &hmac_sha1(&kck, &check)[..16];
+        }
+        _ => gok = false,
+    }
+    println!("[{}] group_rekey (new GTK installed + acknowledged)", if gok { "PASS" } else { "FAIL" });
+
+    ok && gok
 }
 
 fn put_be16(b: &mut [u8], o: usize, v: u16) {

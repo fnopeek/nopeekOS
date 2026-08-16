@@ -63,6 +63,9 @@ pub enum Step {
     Done(usize),
     /// A frame failed verification (bad MIC / unwrap) — abort the handshake.
     Fail,
+    /// Group-key handshake done: the AP handed us a NEW GTK. Reply `out[..len]`
+    /// and install the group key from `gtk()`; the pairwise key is untouched.
+    Rekey(usize),
 }
 
 pub struct Supplicant {
@@ -113,8 +116,28 @@ impl Supplicant {
             return Step::Ignore; // not EAPOL-Key
         }
         let ki = be16(frame, O_KEY_INFO);
-        if ki & KI_PAIRWISE == 0 || ki & KI_ACK == 0 {
-            return Step::Ignore; // not a 4-way msg from the AP
+        if ki & KI_ACK == 0 {
+            return Step::Ignore; // not a message the AP expects an answer to
+        }
+        if ki & KI_PAIRWISE == 0 {
+            // ── Group-key handshake (802.11-2020 §12.7.7.2) ──
+            //
+            // The AP renews the group key on its own schedule and expects an
+            // answer. Ignoring it is not neutral: the AP retries a few times and
+            // then DEAUTHENTICATES the station. That is the "connection dies
+            // after a while, and the interval makes no sense" fault — measured
+            // on the device as eapol in 10 / out 6 with deauth 3, all four
+            // unanswered frames being this message.
+            if !self.have_ptk {
+                return Step::Ignore; // no KCK yet — nothing we could verify with
+            }
+            if !self.verify_mic(frame) {
+                return Step::Fail;
+            }
+            if !self.extract_gtk(frame) {
+                return Step::Fail;
+            }
+            return Step::Rekey(self.build_group_msg2(frame, out));
         }
 
         if ki & KI_MIC == 0 {
@@ -218,6 +241,28 @@ impl Supplicant {
         out[O_NONCE..O_NONCE + 32].copy_from_slice(&self.snonce);
         put_be16(out, O_KEY_DATA_LEN, self.rsn_len as u16);
         out[O_KEY_DATA..total].copy_from_slice(&self.rsn_ie[..self.rsn_len]);
+        let mic = self.compute_mic(&out[..total]);
+        out[O_MIC..O_MIC + MIC_LEN].copy_from_slice(&mic);
+        total
+    }
+
+    /// The group handshake's answer: same shape as msg4 but with the pairwise
+    /// bit clear, so the AP knows which key it acknowledges.
+    fn build_group_msg2(&self, req: &[u8], out: &mut [u8]) -> usize {
+        let total = O_KEY_DATA; // empty key_data
+        for b in out[..total].iter_mut() {
+            *b = 0;
+        }
+        out[0] = req[0];
+        out[1] = 0x03;
+        put_be16(out, O_BODY_LEN, (total - 4) as u16);
+        out[4] = req[4];
+        put_be16(out, O_KEY_INFO, KEY_DESC_VER_2 | KI_MIC | KI_SECURE);
+        // key_length and the replay counter are echoed, as in every reply.
+        out[7] = req[7];
+        out[8] = req[8];
+        out[O_REPLAY..O_REPLAY + 8].copy_from_slice(&req[O_REPLAY..O_REPLAY + 8]);
+        put_be16(out, O_KEY_DATA_LEN, 0);
         let mic = self.compute_mic(&out[..total]);
         out[O_MIC..O_MIC + MIC_LEN].copy_from_slice(&mic);
         total

@@ -210,6 +210,15 @@ fn handle_event(ev: &[u8], pmk: &[u8; 32], sup: &mut Option<Supplicant>, out: &m
                     send_cmd(&[CMD_AUTHORIZED]);
                     log("[wifid] *** 4-way complete — AUTHORIZED ***\n");
                 }
+                Step::Rekey(m) => {
+                    // Answer first, install second: the AP starts using the new
+                    // group key as soon as it has our acknowledgement.
+                    log("[wifid] group rekey — new GTK, acknowledging\n");
+                    send_tx_eapol(&out[..m]);
+                    if let Some((gtk, id)) = s.gtk() {
+                        send_set_key(true, id, gtk, &[0u8; 6]);
+                    }
+                }
                 Step::Fail => log("[wifid] 4-way FAILED (bad MIC / unwrap)\n"),
                 Step::Ignore => {}
             }
