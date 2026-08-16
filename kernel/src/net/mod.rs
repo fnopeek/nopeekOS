@@ -247,15 +247,29 @@ pub fn tick_link_and_reconfigure() {
     // missed or the lease attempt failed. Keep asking on a slow retry instead
     // of waiting for an edge that has already gone by — this is what a real
     // DHCP client does, and it makes the outcome independent of boot ordering.
+    //
+    // Backing off matters as much as retrying. A lease attempt BLOCKS Core 0 for
+    // its whole timeout, and Core 0 is the terminal: against a link that answers
+    // nothing, a fixed 10 s retry took the machine away from its user every few
+    // seconds, for as long as the fault lasted. Doubling up to two minutes keeps
+    // the recovery and gives the prompt back.
     if up && act != 0 && arp::our_ip() == [0, 0, 0, 0] {
         if now >= NEXT_DHCP_RETRY.load(Ordering::Relaxed) {
+            let wait = DHCP_RETRY_S.load(Ordering::Relaxed);
             NEXT_DHCP_RETRY.store(
-                now + crate::interrupts::tsc_freq().saturating_mul(10), Ordering::Relaxed);
-            crate::kprintln!("[npk] net: link up but no address - retrying DHCP");
+                now + crate::interrupts::tsc_freq().saturating_mul(wait), Ordering::Relaxed);
+            DHCP_RETRY_S.store((wait * 2).min(DHCP_RETRY_MAX_S), Ordering::Relaxed);
+            crate::kprintln!("[npk] net: link up but no address - retrying DHCP (next in {} s)",
+                DHCP_RETRY_S.load(Ordering::Relaxed));
             reconfigure();
         }
     }
 }
+
+/// Seconds until the next unsolicited DHCP attempt, doubled per failure.
+static DHCP_RETRY_S: AtomicU64 = AtomicU64::new(DHCP_RETRY_MIN_S);
+const DHCP_RETRY_MIN_S: u64 = 10;
+const DHCP_RETRY_MAX_S: u64 = 120;
 
 /// Apply a static IP config if `static_ip` is set, else run DHCP. Sets gateway
 /// (`static_gw`) + DNS (`static_dns`) when given.
@@ -273,6 +287,8 @@ fn reconfigure() {
     }
     crate::kprintln!("[npk] net: link changed -> requesting DHCP lease...");
     if dhcp::configure() {
+        // A link that works again starts the backoff over.
+        DHCP_RETRY_S.store(DHCP_RETRY_MIN_S, Ordering::Relaxed);
         // Tell the segment which MAC now owns our address, then warm the
         // gateway entry. Without the announcement the router keeps sending to
         // the interface we just left.
