@@ -5,7 +5,7 @@
 use crate::{virtio_net, intel_nic, rtl8153};
 use crate::virtio_net::NetError;
 use spin::Mutex;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 pub const MTU: usize = 1514;
 
@@ -282,6 +282,7 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
     // machine with any wired device present worked, because the traffic went
     // there instead and left the radio alone.
     if !active_link_up() {
+        TX_REJECT_NO_LINK.fetch_add(1, Ordering::Relaxed);
         return Err(NetError::NotInitialized);
     }
     match active() {
@@ -294,7 +295,20 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
         Active::Rtl => rtl8153::send(frame),
         Active::Virtio | Active::None => virtio_net::send(frame),
     }
+    .inspect_err(|_| { TX_ERR.fetch_add(1, Ordering::Relaxed); })
 }
+
+/// Frames this guard refused, and frames a driver refused. Every caller above
+/// this line throws the Result away — `udp::send`, `ipv4::send` and
+/// `eth::send_frame` all say `let _ =` — so a packet that never reached the air
+/// is indistinguishable from one that got no answer. It cost two wrong theories
+/// about DNS before anyone could ask the question.
+pub fn tx_reject_stats() -> (u32, u32) {
+    (TX_REJECT_NO_LINK.load(Ordering::Relaxed), TX_ERR.load(Ordering::Relaxed))
+}
+
+static TX_REJECT_NO_LINK: AtomicU32 = AtomicU32::new(0);
+static TX_ERR: AtomicU32 = AtomicU32::new(0);
 
 pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
     match active() {
