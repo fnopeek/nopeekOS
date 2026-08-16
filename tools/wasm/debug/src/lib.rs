@@ -16,12 +16,21 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 
 mod host;
 
+/// One source for the version, printed in the banner.
+const VERSION: &str = "0.3.1";
+
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[debug] reverse-mirror v0.1\n");
+    // The banner carries the version because the failure mode of the OLD one —
+    // mirroring a single terminal, so the console goes quiet the moment output
+    // is routed elsewhere — looks exactly like a broken connection. Knowing
+    // which one is running is the first question, every time.
+    host::print("[debug] reverse-mirror ");
+    host::print(VERSION);
+    host::print(" (global mirror)\n");
 
     let ip = host::target_ip();
     let port = host::target_port();
