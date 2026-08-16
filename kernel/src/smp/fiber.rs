@@ -201,6 +201,16 @@ pub fn admit_with_stack(cid: usize, func: fn(u64), arg: u64, stack_bytes: usize)
 /// free precisely because no fiber is running on it. A no-op inside a fiber
 /// (that would recurse) and on Core 0, which has its own loop.
 pub fn pump_peers() {
+    // Throttled, because the check itself is not free: current_core_id reads the
+    // LAPIC over MMIO, and `poll_rx_only` spins about a million times a second.
+    // The comment above that function already warns about exactly this cost — a
+    // per-iteration core gate was once 30 % of its runtime — and the first
+    // version of this pump walked straight back into it. Yielding every 256th
+    // pass is just as good: it is a courtesy, not a deadline.
+    const EVERY: u32 = 256;
+    if PUMP_TICK.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % EVERY != 0 {
+        return;
+    }
     let cid = crate::smp::per_core::current_core_id();
     if cid == 0 || cid >= MAX_CORES {
         return;
@@ -211,6 +221,8 @@ pub fn pump_peers() {
     }
     run_core_fibers(cid);
 }
+
+static PUMP_TICK: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 pub fn run_core_fibers(cid: usize) {
     if cid >= MAX_CORES {
