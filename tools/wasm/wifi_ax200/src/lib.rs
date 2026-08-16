@@ -31,7 +31,7 @@ static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
 /// carry it, so a device measurement can never be traced to the wrong build.
-const DRIVER_VERSION: &str = "0.57.0";
+const DRIVER_VERSION: &str = "0.57.1";
 
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
@@ -229,6 +229,12 @@ struct Stats {
     prof_sleep_pp: u64,
     prof_drain_pp: u64,
     prof_us_frame: u64,
+    // …and the same four from the second with the highest RX throughput.
+    peak_work_pp: u64,
+    peak_sleep_pp: u64,
+    peak_drain_pp: u64,
+    peak_us_frame: u64,
+    peak_prof_passes: u64,
     // Rates last reported by the firmware (raw rate_n_flags).
     last_tx_rate: u32,
     last_rx_rate: u32,
@@ -265,6 +271,8 @@ impl Stats {
         mb_losses: 0,
         prof_work_us: 0, prof_rx_us: 0, prof_sleep_us: 0, prof_passes: 0, prof_frames: 0,
         prof_work_pp: 0, prof_sleep_pp: 0, prof_drain_pp: 0, prof_us_frame: 0,
+        peak_work_pp: 0, peak_sleep_pp: 0, peak_drain_pp: 0, peak_us_frame: 0,
+        peak_prof_passes: 0,
         last_tx_rate: 0, last_rx_rate: 0,
         win_start_ms: 0, win_tx_bytes: 0, win_rx_bytes: 0, win_airtime_us: 0,
         win_loop_iters: 0,
@@ -2678,9 +2686,6 @@ impl Ax200 {
         if self.st.tput_tx_kbit > self.st.peak_tput_tx_kbit {
             self.st.peak_tput_tx_kbit = self.st.tput_tx_kbit;
         }
-        if self.st.tput_rx_kbit > self.st.peak_tput_rx_kbit {
-            self.st.peak_tput_rx_kbit = self.st.tput_rx_kbit;
-        }
         if self.st.passes_per_s > self.st.peak_passes_per_s {
             self.st.peak_passes_per_s = self.st.passes_per_s;
         }
@@ -2698,6 +2703,17 @@ impl Ax200 {
         self.st.prof_us_frame = if self.st.prof_frames > 0 {
             self.st.prof_rx_us / self.st.prof_frames
         } else { 0 };
+        // Keep the profile of the BUSIEST second, not just the last one. A load
+        // generator holds the terminal for its whole run, so by the time anyone
+        // can type `wlan` the live window is idle again and shows nothing.
+        if self.st.tput_rx_kbit > self.st.peak_tput_rx_kbit {
+            self.st.peak_tput_rx_kbit = self.st.tput_rx_kbit;
+            self.st.peak_work_pp = self.st.prof_work_pp;
+            self.st.peak_sleep_pp = self.st.prof_sleep_pp;
+            self.st.peak_drain_pp = self.st.prof_drain_pp;
+            self.st.peak_us_frame = self.st.prof_us_frame;
+            self.st.peak_prof_passes = self.st.prof_passes;
+        }
         self.st.prof_work_us = 0;
         self.st.prof_rx_us = 0;
         self.st.prof_sleep_us = 0;
@@ -2912,6 +2928,27 @@ impl Ax200 {
         r.s("; sleep(1ms) took ");
         r.d(sleep_pp);
         r.s(" us\n");
+
+        // The same numbers from the busiest second — the only ones that matter
+        // when the load generator has the terminal.
+        let pw = self.st.peak_work_pp;
+        let ps = self.st.peak_sleep_pp;
+        let pwall = (pw + ps).max(1);
+        r.s("cpu peak work ");
+        r.d(pw);
+        r.s(" us/pass = ");
+        r.d(pw * 100 / pwall);
+        r.s("% of ");
+        r.d(pwall);
+        r.s(" us wall; drain ");
+        r.d(self.st.peak_drain_pp);
+        r.s(" us (");
+        r.d(self.st.peak_us_frame);
+        r.s(" us/frame); sleep(1ms) took ");
+        r.d(ps);
+        r.s(" us; passes ");
+        r.d(self.st.peak_prof_passes);
+        r.c(b'\n');
 
         r.s("loop     ");
         r.d(self.st.passes_per_s as u64);
