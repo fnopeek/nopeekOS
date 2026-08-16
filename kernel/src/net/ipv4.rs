@@ -105,11 +105,18 @@ pub fn send_with_ttl(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8) {
     // that can poll without holding network locks (see `arp::resolve`,
     // used by `tcp::connect`).
     let arp_target = arp_target_for(dst_ip);
-    let dst_mac = match arp::lookup(arp_target) {
-        Some(mac) => mac,
-        None => {
-            arp::request(arp_target);
-            eth::BROADCAST
+    let dst_mac = if arp_target == [255, 255, 255, 255] {
+        // A broadcast destination IS the broadcast MAC. Asking ARP who owns
+        // 255.255.255.255 put a nonsense request on the air before every DHCP
+        // packet, and the answer could only ever be "nobody".
+        eth::BROADCAST
+    } else {
+        match arp::lookup(arp_target) {
+            Some(mac) => mac,
+            None => {
+                arp::request(arp_target);
+                eth::BROADCAST
+            }
         }
     };
 

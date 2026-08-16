@@ -196,11 +196,25 @@ static LAST_ACTIVE: AtomicU8 = AtomicU8::new(0xff);
 static NEXT_LINK_CHECK: AtomicU64 = AtomicU64::new(0);
 static NEXT_DHCP_RETRY: AtomicU64 = AtomicU64::new(0);
 
+/// Interface id plus carrier in one byte — the value the link tick compares
+/// against. Seed and tick MUST encode it the same way; seeding the bare id left
+/// the carrier bit clear, so the very first tick saw a "change" and re-ran DHCP
+/// about a second after every boot.
+fn link_state_id() -> u8 {
+    netdev::active_id() | if netdev::active_link_up() { 0x10 } else { 0 }
+}
+
 /// Seed the active-interface tracker WITHOUT reconfiguring — call once after the
 /// boot-time DHCP so the first tick doesn't redundantly re-DHCP the same link.
+/// Warms the gateway's MAC too: with the tracker seeded correctly nothing else
+/// runs on this path at boot, and a cold ARP cache makes the first DNS query
+/// look like a broken resolver.
 pub fn seed_active() {
     netdev::refresh_link_state();
-    LAST_ACTIVE.store(netdev::active_id(), Ordering::Relaxed);
+    LAST_ACTIVE.store(link_state_id(), Ordering::Relaxed);
+    if arp::our_ip() != [0, 0, 0, 0] {
+        prime_gateway_arp();
+    }
 }
 
 /// Core 0, ~1 Hz: refresh the wired carrier cache, and when the active interface
@@ -223,7 +237,7 @@ pub fn tick_link_and_reconfigure() {
     // on the id alone, the only edge fires while the link is still down: DHCP
     // goes out over a dead interface, gets no offer, and because the id never
     // changes again no further attempt is ever made.
-    let state = act | if up { 0x10 } else { 0 };
+    let state = link_state_id();
     let changed = state != LAST_ACTIVE.swap(state, Ordering::Relaxed);
     if changed && act != 0 && up {
         reconfigure();
