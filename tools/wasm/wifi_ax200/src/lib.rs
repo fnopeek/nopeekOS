@@ -31,7 +31,7 @@ static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
 /// carry it, so a device measurement can never be traced to the wrong build.
-const DRIVER_VERSION: &str = "0.57.2";
+const DRIVER_VERSION: &str = "0.58.0";
 
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
@@ -427,6 +427,9 @@ struct Ax200 {
     tx_seq: u16,
     // An ADDBA request waiting for the firmware's verdict (see ba_request).
     ba_pending: Option<BaPending>,
+    /// Link state as the kernel currently sees it. The truth is `authorized`;
+    /// this is only what we last told netdev, so a missed edge can be noticed.
+    link_published: bool,
     want_ampdu: bool,
     // Diagnostics (see Stats) + what the scan found besides the chosen AP: the
     // strongest same-SSID AP on the OTHER band. Picking purely by RSSI always
@@ -2464,6 +2467,8 @@ impl Ax200 {
 
     fn reconnect(&mut self) -> bool {
         host::print("[ax200] link lost — re-scanning to reconnect...\n");
+        self.authorized = false;
+        self.link_published = false;
         host::netdev_set_link(false);
         let mut down = [0u8; 7];
         down[0] = EV_LINK_DOWN;
@@ -4291,6 +4296,22 @@ impl Ax200 {
                     }
                 }
             }
+            // Publish the link state from OUR state, every pass, instead of
+            // trusting one event to arrive. `false` was set at the top of
+            // reconnect() and `true` came only from wifid's AUTHORIZED — so a
+            // single missed message left the carrier down forever, and with it
+            // netdev::send refusing every packet: the link never came back by
+            // itself. Now the kernel's view follows the handshake, edge or no
+            // edge.
+            if self.authorized != self.link_published {
+                self.link_published = self.authorized;
+                host::netdev_set_link(self.authorized);
+                host::print(if self.authorized {
+                    "[ax200] carrier UP (authorized)\n"
+                } else {
+                    "[ax200] carrier DOWN (not authorized)\n"
+                });
+            }
             let busy = rx_frames > 0 || tx_any || clen > 0 || self.data_in_flight > 0;
             if busy { self.st.loop_busy = self.st.loop_busy.wrapping_add(1); }
             // Publish the status snapshot once a second. Reading the clock is one
@@ -4338,6 +4359,7 @@ impl Ax200 {
             // AUTHORIZED: 4-way done → carrier up, IP data path live.
             Some(CMD_AUTHORIZED) => {
                 self.authorized = true;
+                self.link_published = true;
                 host::netdev_set_link(true);
                 host::print("[ax200] *** AUTHORIZED *** — link up, data path live 🎉\n");
                 let mut up = [0u8; 7];
@@ -4676,6 +4698,7 @@ pub extern "C" fn _start() {
         pick_reason: PICK_STRONGEST,
         ba_pending: None,
         want_ampdu: false,
+        link_published: false,
     };
     dev.st.start_ms = host::now_ms();
 
