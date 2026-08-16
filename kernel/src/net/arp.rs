@@ -18,10 +18,21 @@ struct ArpEntry {
     ip: [u8; 4],
     mac: [u8; 6],
     valid: bool,
+    /// Tick the mapping was last confirmed. An entry that never expires cannot
+    /// be wrong only once: it is wrong until the next boot. Symptom seen on the
+    /// device — everything through the gateway silently failed (DNS, TCP to the
+    /// internet) while LAN-direct traffic kept working, which is exactly what a
+    /// stale next-hop MAC looks like from the outside.
+    at: u64,
 }
 
+/// How long a learned mapping is trusted. Linux revalidates a reachable
+/// neighbour after 30 s; we simply forget, which costs one ARP round trip on the
+/// next use and cannot outlive a topology change (an AP hand-off in a mesh).
+const ENTRY_TTL_TICKS: u64 = 3000; // 100 Hz → 30 s
+
 static CACHE: Mutex<[ArpEntry; CACHE_SIZE]> = Mutex::new(
-    [const { ArpEntry { ip: [0; 4], mac: [0; 6], valid: false } }; CACHE_SIZE]
+    [const { ArpEntry { ip: [0; 4], mac: [0; 6], valid: false, at: 0 } }; CACHE_SIZE]
 );
 
 /// Our IP address (set during network init)
@@ -110,8 +121,17 @@ pub fn announce() {
 
 /// Lookup MAC for IP in ARP cache
 pub fn lookup(ip: [u8; 4]) -> Option<[u8; 6]> {
-    let cache = CACHE.lock();
-    cache.iter().find(|e| e.valid && e.ip == ip).map(|e| e.mac)
+    let now = crate::interrupts::ticks();
+    let mut cache = CACHE.lock();
+    let e = cache.iter_mut().find(|e| e.valid && e.ip == ip)?;
+    if now.saturating_sub(e.at) > ENTRY_TTL_TICKS {
+        // Expired rather than refreshed in place: the next `resolve` re-asks,
+        // which is one round trip and the only way a mapping that changed
+        // underneath us can ever be corrected.
+        e.valid = false;
+        return None;
+    }
+    Some(e.mac)
 }
 
 /// Gap between ARP retransmits, in 100 Hz ticks. Linux waits a second between
@@ -150,13 +170,35 @@ pub fn resolve(ip: [u8; 4], timeout_ticks: u64) -> Option<[u8; 6]> {
 }
 
 fn cache_insert(ip: [u8; 4], mac: [u8; 6]) {
+    let now = crate::interrupts::ticks();
     let mut cache = CACHE.lock();
     // Update existing or find empty slot
     if let Some(entry) = cache.iter_mut().find(|e| e.valid && e.ip == ip) {
+        if entry.mac != mac {
+            crate::kprintln!("[npk] arp: {}.{}.{}.{} moved to a new MAC", ip[0], ip[1], ip[2], ip[3]);
+        }
         entry.mac = mac;
+        entry.at = now;
         return;
     }
+    // Prefer a free slot, else the oldest — a full table of stale entries must
+    // not lock out the one address we actually need.
     if let Some(entry) = cache.iter_mut().find(|e| !e.valid) {
-        *entry = ArpEntry { ip, mac, valid: true };
+        *entry = ArpEntry { ip, mac, valid: true, at: now };
+        return;
     }
+    if let Some(entry) = cache.iter_mut().min_by_key(|e| e.at) {
+        *entry = ArpEntry { ip, mac, valid: true, at: now };
+    }
+}
+
+/// Every mapping we currently trust, for `net` to print: (ip, mac, age in
+/// seconds). A wrong next hop is invisible from the outside — it looks like the
+/// far end is down — so the table has to be readable.
+pub fn table() -> alloc::vec::Vec<([u8; 4], [u8; 6], u64)> {
+    let now = crate::interrupts::ticks();
+    let cache = CACHE.lock();
+    cache.iter().filter(|e| e.valid)
+        .map(|e| (e.ip, e.mac, now.saturating_sub(e.at) / 100))
+        .collect()
 }

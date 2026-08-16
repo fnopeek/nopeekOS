@@ -86,18 +86,33 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
     const LEGS: [u64; 4] = [50, 100, 200, 200]; // 100 Hz ticks
     let mut result = None;
     let mut answered_on = 0usize;
+    // Datagrams that reached our port at all, and the id of the first one we
+    // rejected. "Nothing arrived", "something arrived that was not ours" and
+    // "ours arrived and parsed to nothing" are three different faults that all
+    // end as one silent failure, and we have now guessed wrong about which one
+    // it is twice.
+    let mut seen = 0u32;
+    let mut foreign_id = 0u16;
     'legs: for (n, leg) in LEGS.iter().enumerate() {
         udp::send(dns_server, LOCAL_PORT, DNS_PORT, &query);
         let t0 = crate::interrupts::ticks();
         while crate::interrupts::ticks().wrapping_sub(t0) < *leg {
             super::poll();
             if let Some((_src_ip, _src_port, data)) = udp::recv(LOCAL_PORT) {
+                seen += 1;
                 // Only OUR reply ends the wait — a negative answer is an
                 // answer, a stale one is not.
                 if is_reply_to(&data, id) {
                     result = parse_response(&data);
                     answered_on = n + 1;
+                    if result.is_none() {
+                        crate::kprintln!("[npk] dns: reply for {} carried no A record                                           ({} bytes, an={})", name, data.len(),
+                            if data.len() >= 8 { u16::from_be_bytes([data[6], data[7]]) } else { 0 });
+                    }
                     break 'legs;
+                }
+                if foreign_id == 0 && data.len() >= 2 {
+                    foreign_id = u16::from_be_bytes([data[0], data[1]]);
                 }
             }
             core::hint::spin_loop();
@@ -116,9 +131,11 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
     // was known decides where to look next, and reconstructing that afterwards
     // is impossible — by the time anyone asks, the cache is warm.
     if result.is_none() {
-        crate::kprintln!("[npk] dns: no answer for {} after 5.5 s ({} attempts), next hop {}",
+        crate::kprintln!("[npk] dns: no answer for {} after 5.5 s ({} attempts), next hop {}, \
+                          {} datagram(s) on our port (id 0x{:04x} wanted, 0x{:04x} seen)",
             name, LEGS.len(),
-            if super::arp::lookup(hop).is_some() { "was resolved" } else { "still UNRESOLVED" });
+            if super::arp::lookup(hop).is_some() { "was resolved" } else { "still UNRESOLVED" },
+            seen, id, foreign_id);
     }
 
     // Cache result
