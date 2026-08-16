@@ -31,7 +31,7 @@ static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
 /// carry it, so a device measurement can never be traced to the wrong build.
-const DRIVER_VERSION: &str = "0.56.0";
+const DRIVER_VERSION: &str = "0.57.0";
 
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
@@ -216,6 +216,19 @@ struct Stats {
     mb_expected: u32,
     mb_received: u32,
     mb_losses: u32,
+    // Where a pass spends its microseconds, summed since the last report. Per
+    // pass and per frame these say whether the interpreter is the ceiling.
+    prof_work_us: u64,
+    prof_rx_us: u64,
+    prof_sleep_us: u64,
+    prof_passes: u64,
+    prof_frames: u64,
+    // …reduced to per-pass values before the window is cleared, exactly like the
+    // throughput numbers above: the report is built AFTER the reset.
+    prof_work_pp: u64,
+    prof_sleep_pp: u64,
+    prof_drain_pp: u64,
+    prof_us_frame: u64,
     // Rates last reported by the firmware (raw rate_n_flags).
     last_tx_rate: u32,
     last_rx_rate: u32,
@@ -250,6 +263,8 @@ impl Stats {
         loop_iters: 0, loop_busy: 0, deauth: 0, addba_declined: 0, addba_accepted: 0,
         mb_notifs: 0, mb_consec: 0, mb_since_rx: 0, mb_expected: 0, mb_received: 0,
         mb_losses: 0,
+        prof_work_us: 0, prof_rx_us: 0, prof_sleep_us: 0, prof_passes: 0, prof_frames: 0,
+        prof_work_pp: 0, prof_sleep_pp: 0, prof_drain_pp: 0, prof_us_frame: 0,
         last_tx_rate: 0, last_rx_rate: 0,
         win_start_ms: 0, win_tx_bytes: 0, win_rx_bytes: 0, win_airtime_us: 0,
         win_loop_iters: 0,
@@ -2674,6 +2689,20 @@ impl Ax200 {
         self.st.win_rx_bytes = self.st.rx_bytes;
         self.st.win_airtime_us = self.st.tx_airtime_us;
         self.st.win_loop_iters = self.st.loop_iters;
+        // The profile is per WINDOW, not cumulative: an average over the whole
+        // uptime would drown the loaded second in idle ones.
+        let passes = self.st.prof_passes.max(1);
+        self.st.prof_work_pp = self.st.prof_work_us / passes;
+        self.st.prof_sleep_pp = self.st.prof_sleep_us / passes;
+        self.st.prof_drain_pp = self.st.prof_rx_us / passes;
+        self.st.prof_us_frame = if self.st.prof_frames > 0 {
+            self.st.prof_rx_us / self.st.prof_frames
+        } else { 0 };
+        self.st.prof_work_us = 0;
+        self.st.prof_rx_us = 0;
+        self.st.prof_sleep_us = 0;
+        self.st.prof_passes = 0;
+        self.st.prof_frames = 0;
 
         let mut r = Rep::new();
         r.s("wifi_ax200 ");
@@ -2859,6 +2888,31 @@ impl Ax200 {
         // HLT until the next 100 Hz worker tick — so the REAL period can be 10 ms,
         // and then TX_INFLIGHT_MAX frames per pass is a hard throughput ceiling.
         // Printing the implied ceiling makes that visible instead of theoretical.
+        // The cost of one pass, in the only unit that answers "are we CPU-bound":
+        // microseconds. work = everything between waking and sleeping; drain =
+        // the RX half of it; slept = what a 1 ms request really took. If work
+        // approaches the wall time per pass, more air rate buys nothing.
+        let work_pp = self.st.prof_work_pp;
+        let sleep_pp = self.st.prof_sleep_pp;
+        let wall_pp = (work_pp + sleep_pp).max(1);
+        r.s("cpu      work ");
+        r.d(work_pp);
+        r.s(" us/pass = ");
+        r.d(work_pp * 100 / wall_pp);
+        r.s("% of ");
+        r.d(wall_pp);
+        r.s(" us wall; drain ");
+        r.d(self.st.prof_drain_pp);
+        r.s(" us");
+        if self.st.prof_us_frame > 0 {
+            r.s(" (");
+            r.d(self.st.prof_us_frame);
+            r.s(" us/frame)");
+        }
+        r.s("; sleep(1ms) took ");
+        r.d(sleep_pp);
+        r.s(" us\n");
+
         r.s("loop     ");
         r.d(self.st.passes_per_s as u64);
         r.s(" passes/s (asks for 1 ms when busy) busy ");
@@ -3775,6 +3829,11 @@ impl Ax200 {
         let mut last_rx_ms = assoc_at_ms;
         let mut handshake_deadline = assoc_at_ms + HANDSHAKE_TIMEOUT_MS;
         loop {
+            // Where the pass's time actually goes. The old `busy` counter only
+            // said whether a pass FOUND work — it was read as CPU load (by
+            // Claude, and it was wrong). This measures: work microseconds, drain
+            // microseconds, and what a 1 ms sleep really costs.
+            let t_pass = host::now_us();
             // RX: drain + recycle the ring. EAPOL-Key frames → wifid (the 4-way);
             // decrypted IP/other data → the kernel IP stack as Ethernet frames.
             // TX completions (TX_CMD response) free data-queue slots.
@@ -3800,6 +3859,7 @@ impl Ax200 {
             let mut add_sta_status: Option<u32> = None;
             let mut delba = false;
             let mut mb: Option<(u32, u32, u32, u32)> = None;
+            let t_rx0 = host::now_us();
             let rx_frames = self.service_rx(|c, g, rb| {
                 if c == TX_CMD && g == 0 {
                     // gen2 TX completion — one per transmitted data/mgmt frame.
@@ -3954,6 +4014,8 @@ impl Ax200 {
                 }
                 true
             });
+            self.st.prof_rx_us += host::now_us().saturating_sub(t_rx0);
+            self.st.prof_frames += rx_frames as u64;
             // Free the data-queue slots the firmware just reported done.
             self.data_in_flight = self.data_in_flight.saturating_sub(tx_done);
             // Fold this pass's accumulators into the running statistics.
@@ -4187,7 +4249,11 @@ impl Ax200 {
                 self.publish_report(now);
                 next_report = now + REPORT_PERIOD_MS;
             }
+            let t_work = host::now_us();
+            self.st.prof_work_us += t_work.saturating_sub(t_pass);
+            self.st.prof_passes += 1;
             host::sleep_ms(if busy { 1 } else { 4 });
+            self.st.prof_sleep_us += host::now_us().saturating_sub(t_work);
         }
     }
 

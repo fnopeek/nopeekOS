@@ -37,6 +37,7 @@ unsafe extern "C" {
     fn npk_memory_fence() -> i32;
     fn npk_sleep(ms: i32) -> i32;
     fn npk_ticks() -> i64;
+    fn npk_now_us() -> i64;
     fn npk_driver_report(buf_ptr: i32, len: i32) -> i32;
     fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_netdev_register(mac_ptr: i32) -> i32;
@@ -205,6 +206,14 @@ pub fn input_wait(timeout_ms: u32) -> i32 {
 /// Milliseconds since boot (kernel tick counter × 10).
 pub fn now_ms() -> u64 {
     let t = unsafe { npk_ticks() };
+    if t < 0 { 0 } else { t as u64 }
+}
+
+/// Microseconds since boot. `now_ms` steps in 10 ms and cannot time one pass of
+/// the poll loop — which is exactly the number that says whether this driver is
+/// CPU-bound or waiting.
+pub fn now_us() -> u64 {
+    let t = unsafe { npk_now_us() };
     if t < 0 { 0 } else { t as u64 }
 }
 

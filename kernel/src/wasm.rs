@@ -1776,6 +1776,21 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_now_us() -> microseconds since boot, from the TSC, or 0.
+    //
+    // Same "clock, not calendar" argument as npk_ticks, so equally ungated — but
+    // fine enough to time ONE pass of a driver loop, which 10 ms steps cannot.
+    // That resolution is the whole difference between "the driver is busy" and
+    // "the driver is waiting": the WiFi driver's own busy counter only ever said
+    // whether a pass found work, and got read as CPU load (by me).
+    linker.func_wrap("env", "npk_now_us",
+        |_caller: Caller<'_, HostState>| -> i64 {
+            let f = crate::interrupts::tsc_freq();
+            if f == 0 { return 0; }
+            ((crate::interrupts::rdtsc() as u128 * 1_000_000) / f as u128) as i64
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_unix_time() -> seconds since the epoch, UTC, or 0 if the clock is
     // not readable. Ungated, like npk_ticks: the wall clock is not a secret —
     // it is on the bar and stamped into every npkFS entry. `npk_ticks` cannot
