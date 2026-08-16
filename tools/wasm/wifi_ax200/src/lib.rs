@@ -31,7 +31,7 @@ static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
 /// carry it, so a device measurement can never be traced to the wrong build.
-const DRIVER_VERSION: &str = "0.55.2";
+const DRIVER_VERSION: &str = "0.56.0";
 
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
@@ -209,6 +209,13 @@ struct Stats {
     deauth: u32,
     addba_declined: u32,
     addba_accepted: u32,
+    // What the firmware reports about the beacons we no longer see ourselves.
+    mb_notifs: u32,
+    mb_consec: u32,
+    mb_since_rx: u32,
+    mb_expected: u32,
+    mb_received: u32,
+    mb_losses: u32,
     // Rates last reported by the firmware (raw rate_n_flags).
     last_tx_rate: u32,
     last_rx_rate: u32,
@@ -241,6 +248,8 @@ impl Stats {
         tx_eapol: 0, keys_set: 0, ready_sent: 0,
         rx_pool_exhausted: 0, rx_to_us: 0, rx_undecoded: 0,
         loop_iters: 0, loop_busy: 0, deauth: 0, addba_declined: 0, addba_accepted: 0,
+        mb_notifs: 0, mb_consec: 0, mb_since_rx: 0, mb_expected: 0, mb_received: 0,
+        mb_losses: 0,
         last_tx_rate: 0, last_rx_rate: 0,
         win_start_ms: 0, win_tx_bytes: 0, win_rx_bytes: 0, win_airtime_us: 0,
         win_loop_iters: 0,
@@ -2940,10 +2949,30 @@ impl Ax200 {
         r.hex(self.data_tfd.phys as u32, 8);
         r.c(b'\n');
 
-        // The timing the associated MAC context was built from. If this never
-        // arrived, the firmware got a made-up wake schedule.
-        r.s("sync     beacon ");
-        r.s(if self.sync_ok { "ok" } else { "NEVER ARRIVED" });
+        // What the firmware reports about beacons — because WE no longer see
+        // them. Once associated it stops passing them to the host (Linux sets
+        // MAC_FILTER_IN_BEACON only while unassociated, mac-ctxt.c:704), so
+        // silence here is normal and this notification is the only beacon news
+        // there is. `losses` is how often it declared the AP gone: a mesh that
+        // steers between router and repeater shows up exactly there.
+        r.s("beacons  fw notifs ");
+        r.d(self.st.mb_notifs as u64);
+        r.s("  missed ");
+        r.d(self.st.mb_consec as u64);
+        r.s(" (");
+        r.d(self.st.mb_since_rx as u64);
+        r.s(" since RX)  expected ");
+        r.d(self.st.mb_expected as u64);
+        r.s(" got ");
+        r.d(self.st.mb_received as u64);
+        r.s("  declared-lost ");
+        r.d(self.st.mb_losses as u64);
+        r.c(b'\n');
+
+        // The timing the associated MAC context was built from — captured from
+        // the LAST pre-association beacon, which is the only one we ever see.
+        r.s("sync     pre-assoc beacon ");
+        r.s(if self.sync_ok { "ok" } else { "none (firmware got a made-up wake schedule)" });
         r.s("  tsf 0x");
         r.hex((self.sync_tsf >> 32) as u32, 8);
         r.hex(self.sync_tsf as u32, 8);
@@ -3770,6 +3799,7 @@ impl Ax200 {
             let mut a_undecoded = 0u32;
             let mut add_sta_status: Option<u32> = None;
             let mut delba = false;
+            let mut mb: Option<(u32, u32, u32, u32)> = None;
             let rx_frames = self.service_rx(|c, g, rb| {
                 if c == TX_CMD && g == 0 {
                     // gen2 TX completion — one per transmitted data/mgmt frame.
@@ -3803,6 +3833,15 @@ impl Ax200 {
                     let mut p = [0u8; RX_PKT_DATA_OFF + 4];
                     host::dma_read_buf(rb.handle, 0, &mut p);
                     add_sta_status = Some(le32(&p, RX_PKT_DATA_OFF));
+                } else if c == MISSED_BEACONS_NOTIFICATION && g == 0 {
+                    // iwl_mvm_handle_missed_beacons_notif (mvm/mac-ctxt.c:1615).
+                    let mut p = [0u8; RX_PKT_DATA_OFF + 20];
+                    host::dma_read_buf(rb.handle, 0, &mut p);
+                    let b = RX_PKT_DATA_OFF;
+                    mb = Some((le32(&p, b + MB_OFF_CONSEC),
+                               le32(&p, b + MB_OFF_SINCE_LAST_RX),
+                               le32(&p, b + MB_OFF_EXPECTED),
+                               le32(&p, b + MB_OFF_RECEIVED)));
                 } else if c == FRAME_RELEASE && g == 0 {
                     // The window moved without a frame for us: the firmware saw
                     // the MPDUs on air. Nothing here may be held back for them.
@@ -3941,6 +3980,35 @@ impl Ax200 {
             if last_rx_rate != u32::MAX { self.st.last_rx_rate = last_rx_rate; }
             // Answer a block-ack setup request (the TX has to happen outside the
             // RX closure, which holds &mut self through service_rx).
+            if let Some((consec, since_rx, expected, received)) = mb.take() {
+                self.st.mb_consec = consec;
+                self.st.mb_since_rx = since_rx;
+                self.st.mb_expected = expected;
+                self.st.mb_received = received;
+                self.st.mb_notifs = self.st.mb_notifs.wrapping_add(1);
+                // iwl_mvm_handle_missed_beacons_notif, verbatim in its thresholds:
+                // a long run of missed beacons AND nothing received since is a
+                // link that is gone. The same run WITH data still arriving is not
+                // — Linux stays connected there and says it expects trouble.
+                if consec >= IWL_MVM_MISSED_BEACONS_THRESHOLD_LONG {
+                    if since_rx >= IWL_MVM_MISSED_BEACONS_SINCE_RX_THOLD {
+                        host::print("[ax200] missed beacons ");
+                        host::print_dec(consec);
+                        host::print(" (");
+                        host::print_dec(since_rx);
+                        host::print(" since last RX) - treating the AP as gone\n");
+                        link_lost = true;
+                        self.st.mb_losses = self.st.mb_losses.wrapping_add(1);
+                    } else if self.st.mb_notifs < 4 {
+                        host::print("[ax200] missed beacons past threshold but data still \
+                                     arriving — staying connected\n");
+                    }
+                } else if since_rx > IWL_MVM_MISSED_BEACONS_THRESHOLD && self.st.mb_notifs < 8 {
+                    host::print("[ax200] beacon loss warning (missed since last RX: ");
+                    host::print_dec(since_rx);
+                    host::print(")\n");
+                }
+            }
             if let Some(status) = add_sta_status.take() {
                 self.ba_on_add_sta_status(status);
             }
@@ -3970,10 +4038,17 @@ impl Ax200 {
             if link_lost {
                 deauth_total += 1;
                 self.st.deauth = deauth_total;
+                // The cause is already printed for a beacon loss; a frame-borne
+                // loss names its subtype and reason code, which is the part that
+                // says whether the AP dropped us or our own behaviour did.
                 host::print("[ax200] ** LINK-LOSS ** ");
-                host::print(if deauth_subtype == DOT11_STYPE_DEAUTH { "DEAUTH" } else { "DISASSOC" });
-                host::print(" reason=");
-                host::print_dec(deauth_reason as u32);
+                if deauth_subtype == 0 {
+                    host::print("no beacons");
+                } else {
+                    host::print(if deauth_subtype == DOT11_STYPE_DEAUTH { "DEAUTH" } else { "DISASSOC" });
+                    host::print(" reason=");
+                    host::print_dec(deauth_reason as u32);
+                }
                 host::print(" count=");
                 host::print_dec(deauth_total);
                 self.authorized = false;

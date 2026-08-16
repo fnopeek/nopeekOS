@@ -519,6 +519,23 @@ pub const IWL_RX_MPDU_REORDER_BA_OLD_SN: u32 = 0x8000_0000;
 pub const IWL_RX_MPDU_STATUS_DUPLICATE: u32 = 1 << 22;
 pub const IWL_RX_MPDU_MFLG2_AMSDU: u8 = 0x40;
 pub const IWL_RX_MPDU_AMSDU_LAST_SUBFRAME: u8 = 0x80;
+// ── Missed beacons (fw/api/mac.h, mvm/mac-ctxt.c) ─────────────────────────
+// Once associated the firmware STOPS passing beacons to the host — Linux sets
+// MAC_FILTER_IN_BEACON only while unassociated (mac-ctxt.c:704-711). Noticing
+// that the AP is gone is therefore not our job but the firmware's, and this
+// notification is how it tells us. Ignoring it means sitting on a dead link:
+// exactly what an AP does when it steers a client to the other mesh node.
+pub const MISSED_BEACONS_NOTIFICATION: u8 = 0xa2;
+pub const MB_OFF_SINCE_LAST_RX: usize = 4;  // __le32 consec_missed_beacons_since_last_rx
+pub const MB_OFF_CONSEC: usize = 8;         // __le32 consec_missed_beacons
+pub const MB_OFF_EXPECTED: usize = 12;      // __le32 num_expected_beacons
+pub const MB_OFF_RECEIVED: usize = 16;      // __le32 num_recvd_beacons
+// iwl-modparams.h. Long threshold + "nothing received since" = the link is gone;
+// many missed beacons WHILE data still flows is not, and Linux says so out loud.
+pub const IWL_MVM_MISSED_BEACONS_SINCE_RX_THOLD: u32 = 4;
+pub const IWL_MVM_MISSED_BEACONS_THRESHOLD: u32 = 8;
+pub const IWL_MVM_MISSED_BEACONS_THRESHOLD_LONG: u32 = 19;
+
 // The firmware tells us the window may move even when no frame arrives (it saw
 // the frames on air but had nothing to deliver): baid, reserved, __le16 nssn.
 pub const FRAME_RELEASE: u8 = 0xc3;
