@@ -17,7 +17,7 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 mod host;
 
 /// One source for the version, printed in the banner.
-const VERSION: &str = "0.3.1";
+const VERSION: &str = "0.3.2";
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
@@ -77,7 +77,14 @@ pub extern "C" fn _start() {
         host::stream_close(sink);
         return;
     }
-    host::print("[debug] connected\n");
+    // Say who we are AFTER the sink and the socket exist — the banner above is
+    // printed before either, so it only ever reached the device's own screen.
+    // Which version is running, and whether it got the global mirror, is the
+    // first question when output stops arriving; it has to be answerable from
+    // the far end.
+    host::print("[debug] connected — reverse-mirror ");
+    host::print(VERSION);
+    host::print(if sink < 0 { " (global mirror)\n" } else { " (single terminal only)\n" });
 
     // Relay loop. Poll both directions with a short sleep to yield the core.
     let mut tx_buf = [0u8; 1024];
