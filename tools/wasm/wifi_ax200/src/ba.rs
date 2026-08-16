@@ -167,6 +167,13 @@ impl Reorder {
             slots[index][..frame.len()].copy_from_slice(frame);
             SLOT_LEN[index] = frame.len() as u16;
         }
+        if self.stored == 0 {
+            // The clock the stall release runs on starts when a hole appears —
+            // not on the last delivery. Refreshing it on every release would
+            // keep it from ever firing while traffic flows, which is exactly
+            // when a hole hurts.
+            self.last_move_ms = host::now_ms();
+        }
         self.stored += 1;
         self.buffered = self.buffered.wrapping_add(1);
         true
@@ -185,7 +192,6 @@ impl Reorder {
         if ahead && (nssn.wrapping_sub(self.head_sn) & (SN_MODULO - 1)) as usize > BA_WIN {
             self.flush();
             self.head_sn = nssn;
-            self.last_move_ms = host::now_ms();
             return;
         }
         let mut ssn = self.head_sn;
@@ -199,7 +205,6 @@ impl Reorder {
             ssn = sn_inc(ssn);
         }
         self.head_sn = nssn;
-        self.last_move_ms = host::now_ms();
     }
 
     /// A FRAME_RELEASE notification for our session: the firmware advanced the
@@ -268,14 +273,12 @@ impl Reorder {
         if self.stored == 0 && sn_less(sn, nssn) {
             if amsdu_last {
                 self.head_sn = nssn;
-                self.last_move_ms = host::now_ms();
             }
             return false;
         }
         if self.stored == 0 && sn == self.head_sn {
             if amsdu_last {
                 self.head_sn = sn_inc(self.head_sn);
-                self.last_move_ms = host::now_ms();
             }
             return false;
         }

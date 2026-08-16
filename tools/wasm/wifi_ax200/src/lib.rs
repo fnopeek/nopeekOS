@@ -31,7 +31,7 @@ static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
 /// carry it, so a device measurement can never be traced to the wrong build.
-const DRIVER_VERSION: &str = "0.55.0";
+const DRIVER_VERSION: &str = "0.55.1";
 
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
@@ -376,6 +376,7 @@ struct Ax200 {
     tx_seq: u16,
     // An ADDBA request waiting for the firmware's verdict (see ba_request).
     ba_pending: Option<BaPending>,
+    want_ampdu: bool,
     // Diagnostics (see Stats) + what the scan found besides the chosen AP: the
     // strongest same-SSID AP on the OTHER band. Picking purely by RSSI always
     // lands on the near 2.4 GHz node, so the question "was there a 5 GHz one?"
@@ -1863,6 +1864,15 @@ impl Ax200 {
             self.want_ssid_len = len as u8;
         }
 
+        // Escape hatch. Aggregation is the throughput lever, but it is also the
+        // one feature that can take the link down completely (a receiver that
+        // mis-parses an aggregate carries nothing), and recovering from that
+        // needs a network — the thing that just broke. `set wifi_ampdu off`
+        // works without one.
+        let mut ab = [0u8; 16];
+        let an = host::fetch("sys/config/wifi_ampdu", &mut ab);
+        self.want_ampdu = !(an > 0 && (ab[..an].starts_with(b"off") || ab[..an].starts_with(b"0")));
+
         let mut bb = [0u8; 16];
         let bn = host::fetch("sys/config/wifi_band", &mut bb);
         self.band_pref = BAND_PREF_AUTO;
@@ -3048,6 +3058,13 @@ impl Ax200 {
         let params = u16::from_le_bytes([req[3], req[4]]);
         let tid = ((params & BA_PARAM_TID_MASK) >> BA_PARAM_TID_SHIFT) as u8;
         let ssn = u16::from_le_bytes([req[7], req[8]]) >> BA_SSN_SHIFT;
+        if !self.want_ampdu {
+            let p = BaPending { tid, ssn, win: 1, dialog: req[2], params,
+                                timeout: u16::from_le_bytes([req[5], req[6]]) };
+            self.ba_reply(&p, WLAN_STATUS_REQUEST_DECLINED);
+            self.st.addba_declined = self.st.addba_declined.wrapping_add(1);
+            return;
+        }
         // Our window, not the AP's: it asks for up to 64 and a responder may
         // answer with less. 32 already collapses the per-frame overhead and
         // halves what we hold in linear memory.
@@ -3118,8 +3135,15 @@ impl Ax200 {
         }
     }
 
-    /// The ADDBA response frame. On accept the parameter set carries OUR buffer
-    /// size and keeps the AP's TID and policy; on decline it goes back verbatim.
+    /// The ADDBA response frame.
+    ///
+    /// The parameter set is built from scratch, exactly as
+    /// `ieee80211_send_addba_resp` does, and NOT echoed from the request. That
+    /// distinction cost a release: echoing kept the AP's A-MSDU bit, which told
+    /// it that it may pack several MSDUs into one MPDU — and `rx_classify`
+    /// decodes exactly one, so every aggregated frame turned to garbage and the
+    /// link carried nothing at all. mac80211 sets the bit from its OWN
+    /// capability (SUPPORTS_AMSDU_IN_AMPDU); ours is no.
     fn ba_reply(&mut self, p: &BaPending, status: u16) {
         let mut fr = [0u8; DOT11_HDR_LEN + 9];
         fr[0] = (DOT11_STYPE_ACTION << 4) | 0x00; // management, subtype action
@@ -3131,13 +3155,9 @@ impl Ax200 {
         fr[b + 1] = WLAN_ACTION_ADDBA_RESP;
         fr[b + 2] = p.dialog;
         put_u16(&mut fr, b + 3, status);
-        let params = if status == WLAN_STATUS_SUCCESS {
-            (p.params & !BA_PARAM_BUFSZ_MASK)
-                | BA_PARAM_POLICY_IMMEDIATE
-                | ((p.win << BA_PARAM_BUFSZ_SHIFT) & BA_PARAM_BUFSZ_MASK)
-        } else {
-            p.params
-        };
+        let params = BA_PARAM_POLICY_IMMEDIATE // A-MSDU bit deliberately 0
+            | (((p.tid as u16) << BA_PARAM_TID_SHIFT) & BA_PARAM_TID_MASK)
+            | ((p.win << BA_PARAM_BUFSZ_SHIFT) & BA_PARAM_BUFSZ_MASK);
         put_u16(&mut fr, b + 5, params);
         put_u16(&mut fr, b + 7, p.timeout);
         self.tx_mgmt_frame(&fr);
@@ -4452,6 +4472,7 @@ pub extern "C" fn _start() {
         n_blacklist: 0,
         pick_reason: PICK_STRONGEST,
         ba_pending: None,
+        want_ampdu: true,
     };
     dev.st.start_ms = host::now_ms();
 
