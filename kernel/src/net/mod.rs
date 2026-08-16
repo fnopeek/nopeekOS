@@ -108,6 +108,14 @@ pub fn poll() {
         tcp::tick_connections();
         POLLING.store(false, Ordering::Release);
     }
+    // Give this core's fibers a turn. Every blocking network wait in the kernel
+    // — ARP, DNS, ICMP, TCP connect — spins on this function, and every one of
+    // them runs as a NATIVE task on a worker core. A WASM NIC driver whose fiber
+    // sits on that same core is then frozen for the whole command, so the device
+    // is never polled and the answer we are waiting for is sitting in the card's
+    // ring. It arrives the moment the command gives up. No-op on Core 0 and
+    // inside a fiber.
+    crate::smp::fiber::pump_peers();
     // Flush the batched virtio-net TX doorbell once per cycle (send() defers the
     // per-frame notify to avoid a VM-exit per uploaded packet). No-op when no
     // virtio NIC / nothing pending.
@@ -151,6 +159,9 @@ pub fn poll_rx_only() {
         }
         POLLING.store(false, Ordering::Release);
     }
+    // Same reason as in poll(): this spin owns a worker core, and a driver fiber
+    // parked on it would never refill the ring this loop is draining.
+    crate::smp::fiber::pump_peers();
     let c = rd();
     crate::virtio_net::tx_flush();
     PROF_TXFLUSH.fetch_add(rd().wrapping_sub(c), Relaxed);
