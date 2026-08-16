@@ -184,6 +184,34 @@ pub fn admit_with_stack(cid: usize, func: fn(u64), arg: u64, stack_bytes: usize)
 /// waking any whose sleep deadline has passed. Returns when every fiber is
 /// sleeping (future deadline) or the queue is empty — the caller then idles
 /// on the worker timer and re-enters next tick.
+/// Let this core's fibers run from inside a native task.
+///
+/// Fibers are cooperative and only ever run from `run_core_fibers`, which is
+/// the core's scheduler loop. A native task — every intent is one — stands in
+/// front of that loop for its whole duration, so a WASM driver whose fiber
+/// lives on the same core stops polling its device until the command returns.
+///
+/// Measured, and it explains a day of ghosts: `ping` reported 100 % loss and
+/// then printed all four replies AFTER the command finished; a DNS lookup saw
+/// zero datagrams in 5.5 s and the same name resolved instantly on the next
+/// try. The frames were in the card's ring the whole time (rx drain-peak 55 of
+/// 64 buffers on an idle link) with nobody scheduled to fetch them.
+///
+/// Safe to call from a native task: the scheduler context for this core is
+/// free precisely because no fiber is running on it. A no-op inside a fiber
+/// (that would recurse) and on Core 0, which has its own loop.
+pub fn pump_peers() {
+    let cid = crate::smp::per_core::current_core_id();
+    if cid == 0 || cid >= MAX_CORES {
+        return;
+    }
+    // SAFETY: per-core slot, read from the core it belongs to.
+    if unsafe { !CURRENT_FIBER[cid].is_null() } {
+        return; // already inside a fiber — the loop below is our own caller
+    }
+    run_core_fibers(cid);
+}
+
 pub fn run_core_fibers(cid: usize) {
     if cid >= MAX_CORES {
         return;
