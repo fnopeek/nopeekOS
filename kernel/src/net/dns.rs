@@ -54,8 +54,13 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
     // ~110 ms while a TCP round trip to the same network took 20.
     // `arp_target_for` because a resolver off our subnet answers via the
     // gateway, and warming the resolver's own IP would never complete.
+    //
+    // 300 ms, not 100: the window is paid ONCE, on a cold cache, because every
+    // name shares the same next hop. 100 ms held exactly one WiFi round trip,
+    // so a single lost frame sent the query to L2 broadcast and the first
+    // lookup after boot failed.
     let dns_server = *DNS_SERVER.lock();
-    let _ = super::arp::resolve(super::ipv4::arp_target_for(dns_server), 10);
+    let _ = super::arp::resolve(super::ipv4::arp_target_for(dns_server), 30);
 
     udp::listen(LOCAL_PORT);
 

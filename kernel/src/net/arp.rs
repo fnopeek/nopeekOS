@@ -114,23 +114,39 @@ pub fn lookup(ip: [u8; 4]) -> Option<[u8; 6]> {
     cache.iter().find(|e| e.valid && e.ip == ip).map(|e| e.mac)
 }
 
-/// Resolve IP → MAC. On cache hit, returns immediately. On miss, sends an
-/// ARP request and polls the network stack until the reply lands or the
-/// timeout (in 100 Hz ticks) elapses.
+/// Gap between ARP retransmits, in 100 Hz ticks. Linux waits a second between
+/// probes; we retry inside a caller that is already blocked on the answer, so
+/// the useful interval is one WiFi round trip, not one second.
+const RETRANS_TICKS: u64 = 5; // 50 ms
+
+/// Resolve IP → MAC. On cache hit, returns immediately. On miss, sends an ARP
+/// request every `RETRANS_TICKS` and polls the network stack until the reply
+/// lands or the timeout (in 100 Hz ticks) elapses.
+///
+/// Retransmitting is the point. A single request is a coin flip over WiFi — the
+/// request is a broadcast frame, the reply a unicast one, and losing either left
+/// nothing to try again. The caller then sent its real packet to L2 broadcast,
+/// which the gateway drops: the first DNS query after boot failed until
+/// something else happened to warm the cache. Wired hid this for years.
 ///
 /// MUST NOT be called while holding any network-stack lock (CONNECTIONS,
 /// etc.) — `super::poll` dispatches through the same locks and would
 /// deadlock.
 pub fn resolve(ip: [u8; 4], timeout_ticks: u64) -> Option<[u8; 6]> {
     if let Some(mac) = lookup(ip) { return Some(mac); }
-    request(ip);
     let t0 = crate::interrupts::ticks();
-    while crate::interrupts::ticks().wrapping_sub(t0) < timeout_ticks {
+    let mut next_try = t0;
+    loop {
+        let now = crate::interrupts::ticks();
+        if now.wrapping_sub(t0) >= timeout_ticks { return None; }
+        if now >= next_try {
+            request(ip);
+            next_try = now + RETRANS_TICKS;
+        }
         super::poll();
         if let Some(mac) = lookup(ip) { return Some(mac); }
         core::hint::spin_loop();
     }
-    None
 }
 
 fn cache_insert(ip: [u8; 4], mac: [u8; 6]) {
