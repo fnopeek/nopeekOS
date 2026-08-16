@@ -40,6 +40,7 @@ pub fn handle_udp(ip_packet: &[u8], data: &[u8]) {
     let mut listeners = LISTENERS.lock();
     for slot in listeners.iter_mut().flatten() {
         if slot.port == dst_port {
+            NO_LISTENER_PORT.store(0, core::sync::atomic::Ordering::Relaxed);
             let copy_len = payload.len().min(MAX_RECV_BUF);
             slot.buf.clear();
             slot.buf.extend_from_slice(&payload[..copy_len]);
@@ -49,7 +50,23 @@ pub fn handle_udp(ip_packet: &[u8], data: &[u8]) {
             return;
         }
     }
+    // Nobody was home. A reply that arrives one microsecond after its waiter
+    // gave up, or on a port whose listener was never registered, is dropped
+    // here in silence — indistinguishable from a reply that never came.
+    NO_LISTENER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    NO_LISTENER_PORT.store(dst_port, core::sync::atomic::Ordering::Relaxed);
 }
+
+/// Datagrams dropped because no listener was registered, and the last such
+/// port. Read by the DNS failure path: "nothing arrived" and "it arrived and we
+/// had already stopped listening" are different faults.
+pub fn no_listener_stats() -> (u32, u16) {
+    (NO_LISTENER.load(core::sync::atomic::Ordering::Relaxed),
+     NO_LISTENER_PORT.load(core::sync::atomic::Ordering::Relaxed))
+}
+
+static NO_LISTENER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static NO_LISTENER_PORT: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
 
 /// Send a UDP datagram
 pub fn send(dst_ip: [u8; 4], src_port: u16, dst_port: u16, payload: &[u8]) {

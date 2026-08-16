@@ -70,7 +70,12 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
                           - query goes out to L2 broadcast", hop[0], hop[1], hop[2], hop[3]);
     }
 
-    udp::listen(LOCAL_PORT);
+    // The return value matters: eight listener slots exist, and a full table
+    // means we send four queries and listen on nothing at all.
+    if !udp::listen(LOCAL_PORT) {
+        crate::kprintln!("[npk] dns: no UDP listener slot free - the query would go out deaf");
+        return None;
+    }
 
     // Split into legs: UDP has no retransmit of its own, so a single dropped
     // datagram used to cost the whole timeout AND then fail. Now it costs one leg.
@@ -136,6 +141,19 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
             name, LEGS.len(),
             if super::arp::lookup(hop).is_some() { "was resolved" } else { "still UNRESOLVED" },
             seen, id, foreign_id);
+        let (nl, nlp) = udp::no_listener_stats();
+        if nl > 0 {
+            crate::kprintln!("[npk] dns: {} datagram(s) arrived with nobody listening (last port {})",
+                nl, nlp);
+        }
+        // Did the query even reach the air? Every layer between here and the NIC
+        // throws the send Result away, so without this the question cannot be
+        // asked at all.
+        let (no_link, tx_err) = crate::netdev::tx_reject_stats();
+        if no_link > 0 || tx_err > 0 {
+            crate::kprintln!("[npk] dns: TX refused since boot: {} for no link, {} by the driver",
+                no_link, tx_err);
+        }
     }
 
     // Cache result
