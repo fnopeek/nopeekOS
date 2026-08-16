@@ -31,7 +31,7 @@ static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
 /// carry it, so a device measurement can never be traced to the wrong build.
-const DRIVER_VERSION: &str = "0.55.1";
+const DRIVER_VERSION: &str = "0.55.2";
 
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
@@ -81,6 +81,11 @@ struct Agg {
     /// Not an A-MSDU, or the last sub-frame of one. NSSN advances on the FIRST
     /// sub-frame, so acting on it earlier releases frames still in flight.
     amsdu_last: bool,
+    /// Unicast QoS data — the only thing a block-ack session covers.
+    /// `iwl_mvm_reorder` bypasses everything else, and the frames it lets past
+    /// are exactly the ones a client without an address depends on: a DHCP offer
+    /// comes back to the broadcast address, and the window must never hold it.
+    reorderable: bool,
 }
 
 /// An ADDBA request we have asked the firmware about and not yet answered. The
@@ -1864,14 +1869,15 @@ impl Ax200 {
             self.want_ssid_len = len as u8;
         }
 
-        // Escape hatch. Aggregation is the throughput lever, but it is also the
-        // one feature that can take the link down completely (a receiver that
-        // mis-parses an aggregate carries nothing), and recovering from that
-        // needs a network — the thing that just broke. `set wifi_ampdu off`
-        // works without one.
+        // OFF by default, and it stays that way until a device measurement says
+        // otherwise. Aggregation is the throughput lever, but it is also the one
+        // feature that can take the whole link down (a receiver that mis-parses
+        // an aggregate carries nothing) — and recovering from that needs the
+        // network it just broke. Twice now. So the safe state is the default and
+        // the experiment is opt-in: `set wifi_ampdu on`.
         let mut ab = [0u8; 16];
         let an = host::fetch("sys/config/wifi_ampdu", &mut ab);
-        self.want_ampdu = !(an > 0 && (ab[..an].starts_with(b"off") || ab[..an].starts_with(b"0")));
+        self.want_ampdu = an > 0 && (ab[..an].starts_with(b"on") || ab[..an].starts_with(b"1"));
 
         let mut bb = [0u8; 16];
         let bn = host::fetch("sys/config/wifi_band", &mut bb);
@@ -2737,7 +2743,11 @@ impl Ax200 {
             r.d(self.st.addba_accepted as u64);
             r.c(b'\n');
         } else {
-            r.s("aggr     A-MPDU off — no block-ack session; declined ");
+            r.s(if self.want_ampdu {
+                "aggr     A-MPDU on but no session yet; declined "
+            } else {
+                "aggr     A-MPDU off (set wifi_ampdu on to try it); declined "
+            });
             r.d(self.st.addba_declined as u64);
             r.s(" accepted ");
             r.d(self.st.addba_accepted as u64);
@@ -3446,6 +3456,7 @@ impl Ax200 {
                 reorder: le32(&buf, d + MPDU_OFF_REORDER_DATA),
                 status,
                 amsdu_last: !amsdu || last,
+                reorderable: subtype & DOT11_STYPE_QOS != 0 && !multicast,
             })
         }
     }
@@ -3892,7 +3903,7 @@ impl Ax200 {
                             // (Direct in-fiber delivery via npk_netdev_rx_deliver
                             // exists but starved the Core-0 TCP tick under load →
                             // connection drops; revisit with #2 WiFi-IRQ.)
-                            if !ba::session().on_frame(
+                            if !agg.reorderable || !ba::session().on_frame(
                                 agg.reorder, agg.status, agg.amsdu_last, &rxbuf[..n])
                             {
                                 host::netdev_submit_rx(&rxbuf[..n]);
@@ -4472,7 +4483,7 @@ pub extern "C" fn _start() {
         n_blacklist: 0,
         pick_reason: PICK_STRONGEST,
         ba_pending: None,
-        want_ampdu: true,
+        want_ampdu: false,
     };
     dev.st.start_ms = host::now_ms();
 
