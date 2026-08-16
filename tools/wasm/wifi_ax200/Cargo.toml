@@ -1,6 +1,6 @@
 [package]
 name = "wifi_ax200"
-version = "0.58.0"
+version = "0.59.0"
 edition = "2024"
 
 [lib]

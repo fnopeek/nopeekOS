@@ -31,7 +31,7 @@ static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
 /// carry it, so a device measurement can never be traced to the wrong build.
-const DRIVER_VERSION: &str = "0.58.0";
+const DRIVER_VERSION: &str = "0.59.0";
 
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
@@ -430,6 +430,15 @@ struct Ax200 {
     /// Link state as the kernel currently sees it. The truth is `authorized`;
     /// this is only what we last told netdev, so a missed edge can be noticed.
     link_published: bool,
+    /// Consecutive unacknowledged transmissions, and when the firmware last
+    /// answered a transmission at all. An associated link that stops being
+    /// acknowledged is dead, and nothing else notices: a deauth never comes, the
+    /// missed-beacon notification has never once fired on this hardware, and the
+    /// 4-way watchdog only guards the time BEFORE authorization. So the link
+    /// stays "up" and every packet vanishes — measured: ping 100 % loss with
+    /// state UP, and it never recovered on its own.
+    tx_fail_streak: u32,
+    last_tx_resp_ms: u64,
     want_ampdu: bool,
     // Diagnostics (see Stats) + what the scan found besides the chosen AP: the
     // strongest same-SSID AP on the OTHER band. Picking purely by RSSI always
@@ -2890,7 +2899,9 @@ impl Ax200 {
         r.d(self.st.tx_retries as u64);
         r.s(" (");
         r.pct(self.st.tx_retries as u64, (self.st.tx_ok + self.st.tx_fail).max(1) as u64);
-        r.s(" of frames) rts-fail ");
+        r.s(" of frames) fail-streak ");
+        r.d(self.tx_fail_streak as u64);
+        r.s(" rts-fail ");
         r.d(self.st.tx_rts_fail as u64);
         r.s(" last-status 0x");
         r.hex(self.st.last_status as u32, 4);
@@ -4296,6 +4307,39 @@ impl Ax200 {
                     }
                 }
             }
+            // The AP still hears us — or it does not. This is the only signal we
+            // get for free on every frame, and it is the one Linux's connection
+            // monitor is built on (probe, N failures, connection loss).
+            let now_ms = host::now_ms();
+            if a_ok > 0 {
+                self.tx_fail_streak = 0;
+                self.last_tx_resp_ms = now_ms;
+            } else if a_fail > 0 {
+                self.tx_fail_streak = self.tx_fail_streak.saturating_add(a_fail);
+                self.last_tx_resp_ms = now_ms;
+            }
+            if self.last_tx_resp_ms == 0 { self.last_tx_resp_ms = now_ms; }
+            if self.authorized && !link_lost {
+                // Unacknowledged frames in a row: the AP is not hearing us.
+                if self.tx_fail_streak >= TX_FAIL_STREAK_MAX {
+                    host::print("[ax200] ");
+                    host::print_dec(self.tx_fail_streak);
+                    host::print(" transmissions in a row unacknowledged - link is gone\n");
+                    self.tx_fail_streak = 0;
+                    link_lost = true;
+                }
+                // Or the firmware stopped answering transmissions altogether
+                // while we keep handing it frames — a wedged queue looks exactly
+                // like a healthy idle link from every other counter.
+                else if self.data_in_flight > 0
+                    && now_ms.saturating_sub(self.last_tx_resp_ms) > TX_RESP_SILENCE_MS {
+                    host::print("[ax200] no transmit response for ");
+                    host::print_dec((now_ms.saturating_sub(self.last_tx_resp_ms)) as u32);
+                    host::print(" ms with frames in flight - link is gone\n");
+                    self.last_tx_resp_ms = now_ms;
+                    link_lost = true;
+                }
+            }
             // Publish the link state from OUR state, every pass, instead of
             // trusting one event to arrive. `false` was set at the top of
             // reconnect() and `true` came only from wifid's AUTHORIZED — so a
@@ -4699,6 +4743,8 @@ pub extern "C" fn _start() {
         ba_pending: None,
         want_ampdu: false,
         link_published: false,
+        tx_fail_streak: 0,
+        last_tx_resp_ms: 0,
     };
     dev.st.start_ms = host::now_ms();
 
