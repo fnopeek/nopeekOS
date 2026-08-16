@@ -27,8 +27,16 @@ const MSG_ACK: u8      = 5;
 /// the interface that got it.
 static LEASE_MAC: spin::Mutex<[u8; 6]> = spin::Mutex::new([0; 6]);
 
+/// The gateway's MAC at the time the lease was granted. If the same one answers
+/// after a link came back, we are on the same segment and the lease still holds:
+/// no DHCP is needed at all. This is what dhcpcd does before it considers any
+/// exchange, and it is what turns a mesh hand-off from a multi-second stall into
+/// one ARP round trip.
+static LEASE_GW_MAC: spin::Mutex<[u8; 6]> = spin::Mutex::new([0; 6]);
+
 fn no_lease() {
     *LEASE_MAC.lock() = [0; 6];
+    *LEASE_GW_MAC.lock() = [0; 6];
     if crate::virtio_net::is_available() {
         arp::set_ip([10, 0, 2, 15]); // QEMU user-mode default
     } else {
@@ -57,10 +65,55 @@ pub fn configure() -> bool {
         [0; 4]
     };
 
-    // Temporarily set IP to 0.0.0.0 for DHCP
-    arp::set_ip([0, 0, 0, 0]);
+    // ── Before starting over: is this even a different network? ──────────
+    //
+    // Re-running the full four-way exchange on every link event is not what a
+    // DHCP client is supposed to do, and it is expensive in exactly the moment
+    // it hurts: an AP hand-off inside one ESS keeps the subnet, so the lease we
+    // hold is still valid. RFC 2131 gives the ladder, cheapest first, and a link
+    // that came back on the same segment should never reach the bottom of it.
+    //
+    // Rung 0 (dhcpcd's shortcut, not in the RFC): ask the gateway who it is. The
+    // same MAC means the same segment, so there is nothing to renegotiate.
+    if hint != [0, 0, 0, 0] {
+        let gw = super::ipv4::gateway();
+        let known = *LEASE_GW_MAC.lock();
+        if gw != [0, 0, 0, 0] && known != [0; 6] {
+            if let Some(mac_now) = arp::resolve(gw, 30) {
+                if mac_now == known {
+                    kprintln!("[npk] DHCP: same gateway after link change - lease {}.{}.{}.{} kept",
+                        hint[0], hint[1], hint[2], hint[3]);
+                    return true;
+                }
+            }
+        }
+    }
 
     udp::listen(CLIENT_PORT);
+
+    // Rung 1, INIT-REBOOT (RFC 2131 §4.4.2): we still hold an address, so ask
+    // for THAT one — a broadcast REQUEST carrying it in option 50 and no server
+    // identifier. One round trip when the server still knows us, against
+    // DISCOVER/OFFER/REQUEST/ACK with up to three retries. A NAK or silence
+    // falls through to the full exchange below, which is the point of the rung.
+    if hint != [0, 0, 0, 0] {
+        arp::set_ip([0, 0, 0, 0]);
+        let reboot = build_dhcp(&mac, MSG_REQUEST, hint, [0; 4]);
+        udp::send([255, 255, 255, 255], CLIENT_PORT, SERVER_PORT, &reboot);
+        if let Some((ack_ip, _)) = wait_dhcp_reply(MSG_ACK) {
+            udp::unlisten(CLIENT_PORT);
+            *LEASE_MAC.lock() = mac;
+            arp::set_ip(ack_ip);
+            remember_gateway();
+            kprintln!("[npk] DHCP: lease {}.{}.{}.{} reconfirmed (no full exchange)",
+                ack_ip[0], ack_ip[1], ack_ip[2], ack_ip[3]);
+            return true;
+        }
+        kprintln!("[npk] DHCP: lease not reconfirmed - full exchange");
+    }
+
+    // Temporarily set IP to 0.0.0.0 for DHCP
+    arp::set_ip([0, 0, 0, 0]);
 
     // 1. DISCOVER (with retries), hinting our previous lease.
     let discover = build_dhcp(&mac, MSG_DISCOVER, hint, [0; 4]);
@@ -106,10 +159,23 @@ pub fn configure() -> bool {
 
     *LEASE_MAC.lock() = mac;
     arp::set_ip(ack_ip);
+    remember_gateway();
     kprintln!("[npk] DHCP: configured {}.{}.{}.{}",
         ack_ip[0], ack_ip[1], ack_ip[2], ack_ip[3]);
 
     true
+}
+
+/// Note whose MAC the gateway had for this lease, so the next link event can be
+/// answered with one ARP instead of a new lease.
+fn remember_gateway() {
+    let gw = super::ipv4::gateway();
+    if gw == [0, 0, 0, 0] {
+        return;
+    }
+    if let Some(m) = arp::resolve(gw, 50) {
+        *LEASE_GW_MAC.lock() = m;
+    }
 }
 
 fn wait_dhcp_reply(expected_type: u8) -> Option<([u8; 4], [u8; 4])> {
