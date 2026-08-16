@@ -44,10 +44,20 @@ pub extern "C" fn _start() {
     host::print_dec(my_term as u32);
     host::print(")\n");
 
-    // Open stream sink first so no output from the connect attempt is lost.
-    if host::stream_open(my_term) != 0 {
-        host::print("[debug] stream_open failed\n");
-        return;
+    // Open the everything-sink (-1): every write, whichever terminal the kernel
+    // routed it to. Bound to one index this mirror went quiet the moment output
+    // was redirected — background messages go to the primary loop, a command's
+    // output to the loop it was typed in — and it looked like the machine had
+    // stopped answering while it was still printing. Older kernels do not know
+    // -1, so fall back to our own terminal.
+    let mut sink = -1i32;
+    if host::stream_open(sink) != 0 {
+        sink = my_term;
+        if host::stream_open(sink) != 0 {
+            host::print("[debug] stream_open failed\n");
+            return;
+        }
+        host::print("[debug] kernel has no global mirror - only this terminal\n");
     }
 
     let sock = host::tcp_connect(ip, port);
@@ -55,7 +65,7 @@ pub extern "C" fn _start() {
         host::print("[debug] tcp_connect failed (is `nc -l ");
         host::print_dec(port as u32);
         host::print("` running?)\n");
-        host::stream_close(my_term);
+        host::stream_close(sink);
         return;
     }
     host::print("[debug] connected\n");
@@ -69,7 +79,7 @@ pub extern "C" fn _start() {
         let mut did_work = false;
 
         // Terminal output → TCP
-        let n = host::stream_read(my_term, &mut tx_buf);
+        let n = host::stream_read(sink, &mut tx_buf);
         if n > 0 {
             if host::tcp_send(sock, &tx_buf[..n as usize]) != 0 {
                 host::print("[debug] tcp_send failed — closing\n");
@@ -102,6 +112,6 @@ pub extern "C" fn _start() {
     }
 
     host::tcp_close(sock);
-    host::stream_close(my_term);
+    host::stream_close(sink);
     host::print("[debug] disconnected\n");
 }

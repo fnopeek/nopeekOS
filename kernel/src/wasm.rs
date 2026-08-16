@@ -3347,7 +3347,12 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     // npk_stream_open(idx) -> 0 ok, -1 error
     linker.func_wrap("env", "npk_stream_open",
         |_caller: Caller<'_, HostState>, idx: i32| -> i32 {
-            if idx < 0 { return -1; }
+            // -1 = the everything-sink: every write, whichever terminal it was
+            // routed to. A remote console bound to one index goes silent as soon
+            // as output is redirected elsewhere.
+            if idx < 0 {
+                return if crate::shade::terminal::stream_open_global() { 0 } else { -1 };
+            }
             if crate::shade::terminal::stream_open(idx as usize) { 0 } else { -1 }
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
@@ -3355,7 +3360,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     // npk_stream_read(idx, buf_ptr, buf_len) -> bytes read (>=0) or -1 on error
     linker.func_wrap("env", "npk_stream_read",
         |mut caller: Caller<'_, HostState>, idx: i32, buf_ptr: i32, buf_len: i32| -> i32 {
-            if idx < 0 || buf_len <= 0 { return 0; }
+            if buf_len <= 0 { return 0; }
             let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
                 Some(m) => m, None => return -1,
             };
@@ -3363,7 +3368,11 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             let start = buf_ptr as usize;
             let end = start.saturating_add(buf_len as usize);
             if end > data.len() { return -1; }
-            crate::shade::terminal::stream_read(idx as usize, &mut data[start..end]) as i32
+            if idx < 0 {
+                crate::shade::terminal::stream_read_global(&mut data[start..end]) as i32
+            } else {
+                crate::shade::terminal::stream_read(idx as usize, &mut data[start..end]) as i32
+            }
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
@@ -3371,6 +3380,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     linker.func_wrap("env", "npk_stream_close",
         |_caller: Caller<'_, HostState>, idx: i32| -> i32 {
             if idx >= 0 { crate::shade::terminal::stream_close(idx as usize); }
+            else { crate::shade::terminal::stream_close_global(); }
             0
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
