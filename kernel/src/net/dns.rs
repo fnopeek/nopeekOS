@@ -72,26 +72,42 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
 
     udp::listen(LOCAL_PORT);
 
-    // Same 2 s budget as before, but split into legs: UDP has no retransmit of
-    // its own, so a single dropped datagram used to cost the whole timeout AND
-    // then fail. Now it costs one leg.
-    const LEGS: [u64; 3] = [50, 50, 100]; // 100 Hz ticks
+    // Split into legs: UDP has no retransmit of its own, so a single dropped
+    // datagram used to cost the whole timeout AND then fail. Now it costs one leg.
+    //
+    // The total was 2 s and that was simply too short. Measured on the device:
+    // the first lookup after boot failed while the next hop's MAC was already
+    // known — so nothing was lost on our side, the resolver just had not answered
+    // yet. It is the RECURSION that takes the time; the same name a second later
+    // comes out of the router's cache instantly. glibc gives a server 5 s before
+    // it gives up, twice over, and undercutting that by more than half turned a
+    // slow answer into a failed one. 5.5 s, still front-loaded so the common fast
+    // case is unaffected.
+    const LEGS: [u64; 4] = [50, 100, 200, 200]; // 100 Hz ticks
     let mut result = None;
-    'legs: for leg in LEGS {
+    let mut answered_on = 0usize;
+    'legs: for (n, leg) in LEGS.iter().enumerate() {
         udp::send(dns_server, LOCAL_PORT, DNS_PORT, &query);
         let t0 = crate::interrupts::ticks();
-        while crate::interrupts::ticks().wrapping_sub(t0) < leg {
+        while crate::interrupts::ticks().wrapping_sub(t0) < *leg {
             super::poll();
             if let Some((_src_ip, _src_port, data)) = udp::recv(LOCAL_PORT) {
                 // Only OUR reply ends the wait — a negative answer is an
                 // answer, a stale one is not.
                 if is_reply_to(&data, id) {
                     result = parse_response(&data);
+                    answered_on = n + 1;
                     break 'legs;
                 }
             }
             core::hint::spin_loop();
         }
+    }
+    // Which leg answered is the whole question: leg 1 is a healthy resolver, a
+    // later one means the budget was the thing that used to fail us.
+    if answered_on > 1 {
+        crate::kprintln!("[npk] dns: {} answered on attempt {} (slow recursion, not a lost frame)",
+            name, answered_on);
     }
 
     udp::unlisten(LOCAL_PORT);
@@ -100,7 +116,7 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
     // was known decides where to look next, and reconstructing that afterwards
     // is impossible — by the time anyone asks, the cache is warm.
     if result.is_none() {
-        crate::kprintln!("[npk] dns: no answer for {} after 2 s ({} legs), next hop {}",
+        crate::kprintln!("[npk] dns: no answer for {} after 5.5 s ({} attempts), next hop {}",
             name, LEGS.len(),
             if super::arp::lookup(hop).is_some() { "was resolved" } else { "still UNRESOLVED" });
     }
