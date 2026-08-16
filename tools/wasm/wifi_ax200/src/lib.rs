@@ -31,7 +31,7 @@ static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
 /// carry it, so a device measurement can never be traced to the wrong build.
-const DRIVER_VERSION: &str = "0.60.0";
+const DRIVER_VERSION: &str = "0.60.1";
 
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
@@ -452,6 +452,7 @@ struct Ax200 {
     /// stays "up" and every packet vanishes — measured: ping 100 % loss with
     /// state UP, and it never recovered on its own.
     tx_fail_streak: u32,
+    tx_fail_streak_peak: u32,
     last_tx_resp_ms: u64,
     want_ampdu: bool,
     // Diagnostics (see Stats) + what the scan found besides the chosen AP: the
@@ -2891,6 +2892,8 @@ impl Ax200 {
         r.pct(self.st.tx_retries as u64, (self.st.tx_ok + self.st.tx_fail).max(1) as u64);
         r.s(" of frames) fail-streak ");
         r.d(self.tx_fail_streak as u64);
+        r.c(b'/');
+        r.d(self.tx_fail_streak_peak as u64);
         r.s(" rts-fail ");
         r.d(self.st.tx_rts_fail as u64);
         r.s(" last-status 0x");
@@ -4154,9 +4157,17 @@ impl Ax200 {
             // It is always logged and counted — then we reconnect, because in a
             // mesh with one SSID on two APs a steering kick is NORMAL traffic
             // and staying down until a human re-runs the driver is not an option.
-            // The AP still hears us — or it does not. This is the only signal we
-            // get for free on every frame, and it is the one Linux's connection
-            // monitor is built on (probe, N failures, connection loss).
+            // Count what the acknowledgements say, but do NOT act on it yet.
+            //
+            // The first version of this acted immediately and made things worse:
+            // "no transmit response for 5 s while frames are in flight" fires on
+            // an IDLE link the moment `data_in_flight` is stuck above zero — a
+            // single lost response and the driver tears down a healthy link,
+            // over and over. And eight unacknowledged frames in a row is a bad
+            // moment on a radio, not necessarily a dead AP.
+            //
+            // So: measure first. The streak is in the report; once we have seen
+            // what it does on a link that really dies, it can drive a reconnect.
             let now_ms = host::now_ms();
             if a_ok > 0 {
                 self.tx_fail_streak = 0;
@@ -4164,27 +4175,8 @@ impl Ax200 {
             } else if a_fail > 0 {
                 self.tx_fail_streak = self.tx_fail_streak.saturating_add(a_fail);
                 self.last_tx_resp_ms = now_ms;
-            }
-            if self.last_tx_resp_ms == 0 { self.last_tx_resp_ms = now_ms; }
-            if self.authorized && !link_lost {
-                // Unacknowledged frames in a row: the AP is not hearing us.
-                if self.tx_fail_streak >= TX_FAIL_STREAK_MAX {
-                    host::print("[ax200] ");
-                    host::print_dec(self.tx_fail_streak);
-                    host::print(" transmissions in a row unacknowledged - link is gone\n");
-                    self.tx_fail_streak = 0;
-                    link_lost = true;
-                }
-                // Or the firmware stopped answering transmissions altogether
-                // while we keep handing it frames — a wedged queue looks exactly
-                // like a healthy idle link from every other counter.
-                else if self.data_in_flight > 0
-                    && now_ms.saturating_sub(self.last_tx_resp_ms) > TX_RESP_SILENCE_MS {
-                    host::print("[ax200] no transmit response for ");
-                    host::print_dec((now_ms.saturating_sub(self.last_tx_resp_ms)) as u32);
-                    host::print(" ms with frames in flight - link is gone\n");
-                    self.last_tx_resp_ms = now_ms;
-                    link_lost = true;
+                if self.tx_fail_streak > self.tx_fail_streak_peak {
+                    self.tx_fail_streak_peak = self.tx_fail_streak;
                 }
             }
             if link_lost {
@@ -4734,6 +4726,7 @@ pub extern "C" fn _start() {
         want_ampdu: false,
         link_published: false,
         tx_fail_streak: 0,
+        tx_fail_streak_peak: 0,
         last_tx_resp_ms: 0,
     };
     dev.st.start_ms = host::now_ms();

@@ -1003,14 +1003,6 @@ pub const PICK_SSID_FILTERED: u8 = 3;
 // the report has outgrown 1600 — at which point `s()` silently stopped writing
 // and the last lines (sync, scan) vanished without a trace. Truncation now says
 // so, because a report that quietly ends early is worse than no report.
-/// Unacknowledged transmissions in a row before the link counts as gone. Linux's
-/// connection monitor gives an AP five probes; a data frame is already retried in
-/// hardware before it is reported as failed, so eight reported failures is well
-/// past "a bad moment".
-pub const TX_FAIL_STREAK_MAX: u32 = 8;
-/// …and how long the firmware may owe us an answer while frames are in flight.
-pub const TX_RESP_SILENCE_MS: u64 = 5000;
-
 pub const REPORT_CAP: usize = 3072;
 // How often the snapshot is refreshed. 1 s is short enough to show a speed test
 // live and long enough that formatting never lands in the hot path.
