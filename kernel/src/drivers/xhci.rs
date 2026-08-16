@@ -2122,8 +2122,17 @@ pub fn nic_speed_class() -> u8 {
 /// Find `vid:pid` on any xHCI controller, bring the controller up, address the
 /// device, set its configuration and configure bulk IN (EP `ep_in`) + bulk OUT
 /// (EP `ep_out`). On success the device is ready for nic_control / nic_bulk_*.
+///
+/// Destructive by nature: bringing a controller up halts and RESETS it, so every
+/// device already addressed there loses its slot while STATE keeps pointing at
+/// rings the hardware no longer uses. Nothing fails loudly — the keyboard simply
+/// stops delivering. Only call this when the NIC is worth that price.
 pub fn nic_attach(vid: u16, pid: u16, ep_in: u8, ep_out: u8) -> bool {
     if NIC.lock().is_some() { return true; }
+    if AVAILABLE.load(Ordering::Relaxed) || MOUSE_AVAILABLE.load(Ordering::Relaxed) {
+        kprintln!("[npk] xhci: USB-NIC scan resets every controller it probes — \
+                   keyboard/mouse on the same one will stop responding");
+    }
     for bus in 0u16..=255 {
         for dev_num in 0u8..32 {
             for func in 0u8..8 {

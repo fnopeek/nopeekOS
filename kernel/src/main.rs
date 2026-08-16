@@ -179,11 +179,19 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     }
 
     kprintln!("[npk] Probing network...");
-    // Non-short-circuit `|` on purpose: `||` stops at the first NIC that comes
-    // up, so on a machine with two the second was never initialised at all.
-    // Which one got skipped depended on probe order, and the survivor then held
-    // the whole data path — including for traffic that belonged elsewhere.
-    let _net_up = virtio_net::init() | intel_nic::init() | rtl8153::init();
+    // Both PCI NICs unconditionally (`|`, not `||`): a short circuit left the
+    // second one uninitialised on a machine with two, and the survivor then held
+    // the whole data path — including traffic that belonged elsewhere.
+    //
+    // The USB dongle is NOT free to probe: nic_attach halts and RESETS an xHCI
+    // controller, which drops every device already addressed on it. In QEMU that
+    // is the one controller carrying keyboard and mouse — probing for a dongle
+    // that isn't there killed the login keyboard. So it is only worth that price
+    // when no PCI NIC came up (the HP notebook, which has no wired port).
+    let net_up = virtio_net::init() | intel_nic::init();
+    if !net_up {
+        rtl8153::init();
+    }
     if netdev::is_available() {
         vga::show_status(b"Network online");
 
