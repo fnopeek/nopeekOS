@@ -31,7 +31,7 @@ static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
 /// carry it, so a device measurement can never be traced to the wrong build.
-const DRIVER_VERSION: &str = "0.59.0";
+const DRIVER_VERSION: &str = "0.60.0";
 
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
@@ -97,7 +97,6 @@ struct BaPending {
     ssn: u16,
     win: u16,
     dialog: u8,
-    params: u16,
     timeout: u16,
 }
 
@@ -148,9 +147,24 @@ struct Ap {
     privacy: bool,   // capability Privacy bit (encrypted → needs RSN in assoc-req)
     dtim_period: u8, // from the TIM element — the MAC context needs it to associate
     ht: HtCap,
+    // The beacon timing the associated MAC context is built from. Linux keeps
+    // exactly these three with the SCAN RESULT and reads them back at
+    // association (mac80211/mlme.c:9464 — sync_tsf from the stored beacon,
+    // sync_device_ts from bss->device_ts_beacon, sync_dtim_count from its TIM).
+    // It never waits for a fresh beacon, which is what we used to do — an extra
+    // step of our own invention that failed every time and left the firmware
+    // with a made-up wake schedule.
+    tsf: u64,
+    device_ts: u32,
+    dtim_count: u8,
+    has_beacon: bool, // a probe response carries no usable device timestamp
 }
 impl Ap {
     const EMPTY: Ap = Ap {
+        tsf: 0,
+        device_ts: 0,
+        dtim_count: 0,
+        has_beacon: false,
         bssid: [0; 6],
         ssid: [0; SSID_MAX],
         ssid_len: 0,
@@ -1659,11 +1673,28 @@ impl Ax200 {
         let beacon_int = u16::from_le_bytes([buf[bi_off], buf[bi_off + 1]]);
         // Privacy bit of the capability field → AP is encrypted (needs RSN).
         let privacy = buf[f + DOT11_BEACON_CAP_OFF] & WLAN_CAP_PRIVACY_BIT != 0;
-        // De-dup by BSSID; refresh RSSI if we hear a stronger beacon.
+        // Timing, from a BEACON only: a probe response answers our probe and its
+        // device timestamp says nothing about the AP's beacon schedule.
+        let is_beacon = subtype == DOT11_STYPE_BEACON;
+        let tsf = if is_beacon {
+            let t = f + DOT11_HDR_LEN;
+            u64::from_le_bytes([buf[t], buf[t+1], buf[t+2], buf[t+3],
+                                buf[t+4], buf[t+5], buf[t+6], buf[t+7]])
+        } else { 0 };
+        let device_ts = if is_beacon { le32(&buf, d + MPDU_OFF_GP2_ON_AIR) } else { 0 };
+
+        // De-dup by BSSID; refresh RSSI if we hear a stronger beacon, and the
+        // timing on EVERY beacon — the freshest one is the one to associate with.
         for i in 0..*n_aps {
             if aps[i].bssid == bssid {
                 if rssi > aps[i].rssi {
                     aps[i].rssi = rssi;
+                }
+                if is_beacon {
+                    aps[i].tsf = tsf;
+                    aps[i].device_ts = device_ts;
+                    aps[i].dtim_count = Self::dtim_count_of(&buf, f);
+                    aps[i].has_beacon = true;
                 }
                 return;
             }
@@ -1711,9 +1742,23 @@ impl Ax200 {
         if *n_aps < aps.len() {
             aps[*n_aps] = Ap {
                 bssid, ssid, ssid_len, rssi, channel, beacon_int, privacy, dtim_period, ht,
+                tsf, device_ts, dtim_count: Self::dtim_count_of(&buf, f), has_beacon: is_beacon,
             };
             *n_aps += 1;
         }
+    }
+
+    /// The live DTIM count from a frame's TIM element (0 if absent). Read on its
+    /// own because the de-dup path refreshes it without re-walking every element.
+    fn dtim_count_of(buf: &[u8], f: usize) -> u8 {
+        let mut p = f + DOT11_OFF_IES;
+        while p + 2 <= buf.len() {
+            let len = buf[p + 1] as usize;
+            if p + 2 + len > buf.len() { break; }
+            if buf[p] == WLAN_EID_TIM && len >= 2 { return buf[p + 2]; }
+            p += 2 + len;
+        }
+        0
     }
 
     // Print the collected AP list (SSID, BSSID, RSSI, channel).
@@ -1837,6 +1882,12 @@ impl Ax200 {
                     self.target_rssi = aps[best].rssi;
                     self.target_ht = aps[best].ht;
                     self.target_dtim_period = aps[best].dtim_period;
+                    // …and the beacon timing that came with it, exactly as
+                    // mac80211 reads it back out of the scan result.
+                    self.sync_tsf = aps[best].tsf;
+                    self.sync_device_ts = aps[best].device_ts;
+                    self.sync_dtim_count = aps[best].dtim_count;
+                    self.sync_ok = aps[best].has_beacon;
                     self.target_valid = true;
                     // Record what we passed over: the strongest AP carrying the
                     // same SSID on the OTHER band. Choosing by RSSI alone always
@@ -2258,19 +2309,18 @@ impl Ax200 {
         // after the assoc response would mean draining (and discarding) the
         // frames the AP sends next — including the first EAPOL of the 4-way.
         // Auth + assoc take a few ms, so the timing is still current.
-        self.sync_ok = self.wait_beacon_sync(600);
+        // The timing came with the scan result (see collect_ap). Waiting here for
+        // another beacon was a step of our own invention — mac80211 does not have
+        // it — and it never once succeeded, which is why the firmware kept
+        // getting a made-up wake schedule and never reported a missed beacon.
         if self.sync_ok {
-            host::print("[ax200] beacon sync: dtim ");
+            host::print("[ax200] beacon timing from scan: dtim ");
             host::print_dec(self.sync_dtim_count as u32);
             host::print("/");
             host::print_dec(self.target_dtim_period as u32);
             host::print("\n");
         } else {
-            // Not a detail. Beacons are the most robust frame an AP sends; if
-            // none of ours arrives in 600 ms, the link budget to this BSS does
-            // not carry traffic either. Associating anyway produces exactly the
-            // observed failure: assoc succeeds, then nothing ever again.
-            host::print("[ax200] NO BEACON of our BSS in 600 ms - too weak, this AP will not work\n");
+            host::print("[ax200] chosen AP was seen only as a probe response - no beacon timing\n");
         }
     }
 
@@ -2285,66 +2335,6 @@ impl Ax200 {
     // and our device timestamp at beacon arrival, plus the DTIM count still to
     // run. Also picks up the DTIM period / HT element if the scan missed them.
     // Returns false if no beacon arrived — then we cannot claim association.
-    fn wait_beacon_sync(&mut self, ms: u32) -> bool {
-        let bssid = self.target_bssid;
-        let mut got = false;
-        // Collected in locals: the RX closure borrows `self` for the drain.
-        let mut tsf_out = 0u64;
-        let mut gp2_out = 0u32;
-        let mut dtim_count = 0u8;
-        let mut dtim_period = 0u8;
-        for _ in 0..ms {
-            self.service_rx(|cmd, grp, rb| {
-                if cmd != REPLY_RX_MPDU_CMD || grp != 0 {
-                    return true;
-                }
-                let mut buf = [0u8; 384];
-                host::dma_read_buf(rb.handle, 0, &mut buf);
-                let d = RX_PKT_DATA_OFF;
-                let f = d + IWL_RX_DESC_SIZE_V1;
-                let fc = buf[f];
-                if fc & 0x0c != 0 || (fc >> 4) & 0xf != DOT11_STYPE_BEACON {
-                    return true;
-                }
-                if buf[f + DOT11_OFF_ADDR3..f + DOT11_OFF_ADDR3 + 6] != bssid[..] {
-                    return true; // a neighbour's beacon
-                }
-                let body = f + DOT11_HDR_LEN;
-                let mut tsf = [0u8; 8];
-                tsf.copy_from_slice(&buf[body..body + 8]);
-                tsf_out = u64::from_le_bytes(tsf);
-                gp2_out = le32(&buf, d + MPDU_OFF_GP2_ON_AIR);
-                // TIM element carries the live DTIM count (and the period).
-                let mut p = f + DOT11_OFF_IES;
-                while p + 2 <= buf.len() {
-                    let len = buf[p + 1] as usize;
-                    if p + 2 + len > buf.len() {
-                        break;
-                    }
-                    if buf[p] == WLAN_EID_TIM && len >= 2 {
-                        dtim_count = buf[p + 2];
-                        dtim_period = buf[p + 3];
-                        break;
-                    }
-                    p += 2 + len;
-                }
-                got = true;
-                false // stop draining, we have what we came for
-            });
-            if got {
-                self.sync_tsf = tsf_out;
-                self.sync_device_ts = gp2_out;
-                self.sync_dtim_count = dtim_count;
-                if dtim_period != 0 {
-                    self.target_dtim_period = dtim_period;
-                }
-                return true;
-            }
-            host::sleep_ms(1);
-        }
-        false
-    }
-
     // iwl_mvm_mac_ctxt_cmd_sta, associated branch. Marks the MAC context as
     // associated with the DTIM timing + AID, and drops MAC_FILTER_IN_BEACON
     // (Linux only sets that while unassociated).
@@ -3219,7 +3209,7 @@ impl Ax200 {
         let tid = ((params & BA_PARAM_TID_MASK) >> BA_PARAM_TID_SHIFT) as u8;
         let ssn = u16::from_le_bytes([req[7], req[8]]) >> BA_SSN_SHIFT;
         if !self.want_ampdu {
-            let p = BaPending { tid, ssn, win: 1, dialog: req[2], params,
+            let p = BaPending { tid, ssn, win: 1, dialog: req[2],
                                 timeout: u16::from_le_bytes([req[5], req[6]]) };
             self.ba_reply(&p, WLAN_STATUS_REQUEST_DECLINED);
             self.st.addba_declined = self.st.addba_declined.wrapping_add(1);
@@ -3232,7 +3222,7 @@ impl Ax200 {
             .min(ba::BA_WIN)
             .max(1) as u16;
         self.ba_pending = Some(BaPending { tid, ssn, win, dialog: req[2],
-                                           params, timeout: u16::from_le_bytes([req[5], req[6]]) });
+                                           timeout: u16::from_le_bytes([req[5], req[6]]) });
 
         let mut sc = [0u8; ADD_STA_CMD_LEN];
         sc[AS_OFF_ADD_MODIFY] = 1; // modify
@@ -4164,6 +4154,39 @@ impl Ax200 {
             // It is always logged and counted — then we reconnect, because in a
             // mesh with one SSID on two APs a steering kick is NORMAL traffic
             // and staying down until a human re-runs the driver is not an option.
+            // The AP still hears us — or it does not. This is the only signal we
+            // get for free on every frame, and it is the one Linux's connection
+            // monitor is built on (probe, N failures, connection loss).
+            let now_ms = host::now_ms();
+            if a_ok > 0 {
+                self.tx_fail_streak = 0;
+                self.last_tx_resp_ms = now_ms;
+            } else if a_fail > 0 {
+                self.tx_fail_streak = self.tx_fail_streak.saturating_add(a_fail);
+                self.last_tx_resp_ms = now_ms;
+            }
+            if self.last_tx_resp_ms == 0 { self.last_tx_resp_ms = now_ms; }
+            if self.authorized && !link_lost {
+                // Unacknowledged frames in a row: the AP is not hearing us.
+                if self.tx_fail_streak >= TX_FAIL_STREAK_MAX {
+                    host::print("[ax200] ");
+                    host::print_dec(self.tx_fail_streak);
+                    host::print(" transmissions in a row unacknowledged - link is gone\n");
+                    self.tx_fail_streak = 0;
+                    link_lost = true;
+                }
+                // Or the firmware stopped answering transmissions altogether
+                // while we keep handing it frames — a wedged queue looks exactly
+                // like a healthy idle link from every other counter.
+                else if self.data_in_flight > 0
+                    && now_ms.saturating_sub(self.last_tx_resp_ms) > TX_RESP_SILENCE_MS {
+                    host::print("[ax200] no transmit response for ");
+                    host::print_dec((now_ms.saturating_sub(self.last_tx_resp_ms)) as u32);
+                    host::print(" ms with frames in flight - link is gone\n");
+                    self.last_tx_resp_ms = now_ms;
+                    link_lost = true;
+                }
+            }
             if link_lost {
                 deauth_total += 1;
                 self.st.deauth = deauth_total;
@@ -4305,39 +4328,6 @@ impl Ax200 {
                     } else {
                         handshake_deadline = host::now_ms() + HANDSHAKE_TIMEOUT_MS;
                     }
-                }
-            }
-            // The AP still hears us — or it does not. This is the only signal we
-            // get for free on every frame, and it is the one Linux's connection
-            // monitor is built on (probe, N failures, connection loss).
-            let now_ms = host::now_ms();
-            if a_ok > 0 {
-                self.tx_fail_streak = 0;
-                self.last_tx_resp_ms = now_ms;
-            } else if a_fail > 0 {
-                self.tx_fail_streak = self.tx_fail_streak.saturating_add(a_fail);
-                self.last_tx_resp_ms = now_ms;
-            }
-            if self.last_tx_resp_ms == 0 { self.last_tx_resp_ms = now_ms; }
-            if self.authorized && !link_lost {
-                // Unacknowledged frames in a row: the AP is not hearing us.
-                if self.tx_fail_streak >= TX_FAIL_STREAK_MAX {
-                    host::print("[ax200] ");
-                    host::print_dec(self.tx_fail_streak);
-                    host::print(" transmissions in a row unacknowledged - link is gone\n");
-                    self.tx_fail_streak = 0;
-                    link_lost = true;
-                }
-                // Or the firmware stopped answering transmissions altogether
-                // while we keep handing it frames — a wedged queue looks exactly
-                // like a healthy idle link from every other counter.
-                else if self.data_in_flight > 0
-                    && now_ms.saturating_sub(self.last_tx_resp_ms) > TX_RESP_SILENCE_MS {
-                    host::print("[ax200] no transmit response for ");
-                    host::print_dec((now_ms.saturating_sub(self.last_tx_resp_ms)) as u32);
-                    host::print(" ms with frames in flight - link is gone\n");
-                    self.last_tx_resp_ms = now_ms;
-                    link_lost = true;
                 }
             }
             // Publish the link state from OUR state, every pass, instead of
