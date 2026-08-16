@@ -60,7 +60,15 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
     // so a single lost frame sent the query to L2 broadcast and the first
     // lookup after boot failed.
     let dns_server = *DNS_SERVER.lock();
-    let _ = super::arp::resolve(super::ipv4::arp_target_for(dns_server), 30);
+    let hop = super::ipv4::arp_target_for(dns_server);
+    if super::arp::resolve(hop, 30).is_none() {
+        // Say it. The first lookup after boot fails often enough to be a known
+        // annoyance, and from the outside "no MAC for the next hop" and "the
+        // resolver did not answer" are the same silence — with opposite causes.
+        // Only the failing case prints, so a warm cache stays quiet.
+        crate::kprintln!("[npk] dns: next hop {}.{}.{}.{} did not answer ARP in 300 ms \
+                          - query goes out to L2 broadcast", hop[0], hop[1], hop[2], hop[3]);
+    }
 
     udp::listen(LOCAL_PORT);
 
@@ -87,6 +95,15 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
     }
 
     udp::unlisten(LOCAL_PORT);
+
+    // A failed lookup names what it had to work with. Whether the next hop's MAC
+    // was known decides where to look next, and reconstructing that afterwards
+    // is impossible — by the time anyone asks, the cache is warm.
+    if result.is_none() {
+        crate::kprintln!("[npk] dns: no answer for {} after 2 s ({} legs), next hop {}",
+            name, LEGS.len(),
+            if super::arp::lookup(hop).is_some() { "was resolved" } else { "still UNRESOLVED" });
+    }
 
     // Cache result
     if let Some(ip) = result {
