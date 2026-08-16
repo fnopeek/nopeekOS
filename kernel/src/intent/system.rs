@@ -1144,7 +1144,7 @@ pub fn intent_help_topic(topic: &str) {
         }
         "net" | "network" | "http" | "https" => {
             help_head("net", "");
-            help_row("ping <host>", "ICMP echo (IP or hostname)");
+                        help_row("ping <host> [count]", "ICMP echo, 4 probes by default");
             help_row("resolve <host>", "DNS lookup");
             help_row("https <host> [path]", "HTTPS GET (TLS 1.3)");
             help_row("http <host> [path]", "HTTP GET (plaintext)");

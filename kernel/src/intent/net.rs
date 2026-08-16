@@ -4,9 +4,14 @@ use crate::kprintln;
 use super::parse_ip;
 
 pub fn intent_ping(args: &str) {
-    let host = args.trim();
+    let mut it = args.split_whitespace();
+    let host = it.next().unwrap_or("");
+    // One probe is a coin flip on a radio link — the same lesson ARP taught us
+    // today. A single lost echo said "the host is down" when the host was fine,
+    // so the default is four and the summary says how many came back.
+    let count: u16 = it.next().and_then(|s| s.parse().ok()).unwrap_or(4).clamp(1, 32);
     if host.is_empty() {
-        kprintln!("[npk] Usage: ping <host or ip>");
+        kprintln!("[npk] Usage: ping <host or ip> [count]");
         return;
     }
 
@@ -25,29 +30,51 @@ pub fn intent_ping(args: &str) {
         }
     };
 
-    // Send ARP first to resolve gateway
-    crate::net::arp::request([10, 0, 2, 2]);
-    // Brief poll to get ARP reply
-    for _ in 0..100_000 {
-        crate::net::poll();
-        core::hint::spin_loop();
+    // Resolve the next hop properly instead of firing a blind request at a
+    // hardcoded QEMU address and spinning 100 000 times: that helped only under
+    // QEMU and cost 100 ms everywhere else.
+    let hop = crate::net::ipv4::arp_target_for(ip);
+    if crate::net::arp::resolve(hop, 50).is_none() {
+        kprintln!("[npk] ping: {}.{}.{}.{} did not answer ARP - sending anyway",
+            hop[0], hop[1], hop[2], hop[3]);
     }
 
-    crate::net::icmp::ping(ip, 1);
+    let mut got = 0u16;
+    let mut best = u64::MAX;
+    let mut worst = 0u64;
+    let mut total = 0u64;
+    for seq in 1..=count {
+        let _ = crate::net::icmp::ping_received(); // clear any stale flag
+        let t0 = crate::interrupts::ticks();
+        crate::net::icmp::ping(ip, seq);
+        let mut hit = false;
+        while crate::interrupts::ticks().wrapping_sub(t0) < 100 { // 1 s per probe
+            crate::net::poll();
+            if crate::net::icmp::ping_received() { hit = true; break; }
+            core::hint::spin_loop();
+        }
+        if hit {
+            let ms = crate::interrupts::ticks().wrapping_sub(t0) * 10;
+            got += 1;
+            total += ms;
+            if ms < best { best = ms; }
+            if ms > worst { worst = ms; }
+        } else {
+            kprintln!("[npk] seq={} timeout", seq);
+        }
+        // Space the probes out; back to back they share one fate on a bad link.
+        if seq < count {
+            let until = crate::interrupts::ticks() + 20;
+            while crate::interrupts::ticks() < until { crate::net::poll(); }
+        }
+    }
 
-    // Poll for reply
-    let t0 = crate::interrupts::ticks();
-    loop {
-        crate::net::poll();
-        if crate::net::icmp::ping_received() {
-            break;
-        }
-        let elapsed = crate::interrupts::ticks() - t0;
-        if elapsed > 300 {
-            kprintln!("[npk] Ping timeout");
-            break;
-        }
-        core::hint::spin_loop();
+    kprintln!("[npk] {} sent, {} received, {}% lost{}",
+        count, got, (count - got) as u32 * 100 / count as u32,
+        if got > 0 { "" } else { " — nothing came back" });
+    if got > 0 {
+        kprintln!("[npk] rtt min/avg/max = {}/{}/{} ms (10 ms resolution)",
+            best, total / got as u64, worst);
     }
 }
 
