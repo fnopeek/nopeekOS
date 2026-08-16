@@ -17,6 +17,7 @@
 static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.bin")).len()]
     = *include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.bin"));
 
+mod ba;
 mod host;
 mod regs;
 use regs::*;
@@ -30,7 +31,7 @@ static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
 /// carry it, so a device measurement can never be traced to the wrong build.
-const DRIVER_VERSION: &str = "0.54.2";
+const DRIVER_VERSION: &str = "0.55.0";
 
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
@@ -70,6 +71,31 @@ impl Dma {
     fn ok(&self) -> bool { self.handle >= 0 }
 }
 
+/// What the firmware told us about a frame's place in its block-ack window.
+/// Read from the descriptor while it is already in hand — a second DMA read per
+/// received frame would cost more than the reordering saves.
+#[derive(Clone, Copy)]
+struct Agg {
+    reorder: u32,
+    status: u32,
+    /// Not an A-MSDU, or the last sub-frame of one. NSSN advances on the FIRST
+    /// sub-frame, so acting on it earlier releases frames still in flight.
+    amsdu_last: bool,
+}
+
+/// An ADDBA request we have asked the firmware about and not yet answered. The
+/// AP's dialog token, parameter set and timeout have to survive until the
+/// firmware replies, because its answer decides what we put in ours.
+#[derive(Clone, Copy)]
+struct BaPending {
+    tid: u8,
+    ssn: u16,
+    win: u16,
+    dialog: u8,
+    params: u16,
+    timeout: u16,
+}
+
 /// Classification of a received 802.11 data frame addressed to us.
 enum RxKind {
     None,
@@ -80,7 +106,7 @@ enum RxKind {
     /// EAPOL-Key frame (the 4-way) → forward to wifid. `out` holds the frame.
     Eapol(usize),
     /// IP/other data → the kernel IP stack. `out` holds an Ethernet frame.
-    Ip(usize),
+    Ip(usize, Agg),
 }
 
 /// The AP's 802.11n capabilities, read from the HT Capability element of its
@@ -177,6 +203,7 @@ struct Stats {
     loop_busy: u32,
     deauth: u32,
     addba_declined: u32,
+    addba_accepted: u32,
     // Rates last reported by the firmware (raw rate_n_flags).
     last_tx_rate: u32,
     last_rx_rate: u32,
@@ -208,7 +235,7 @@ impl Stats {
         rx_frames: 0, rx_bytes: 0, rx_ip: 0, rx_eapol: 0, rx_mgmt: 0, rx_drain_max: 0,
         tx_eapol: 0, keys_set: 0, ready_sent: 0,
         rx_pool_exhausted: 0, rx_to_us: 0, rx_undecoded: 0,
-        loop_iters: 0, loop_busy: 0, deauth: 0, addba_declined: 0,
+        loop_iters: 0, loop_busy: 0, deauth: 0, addba_declined: 0, addba_accepted: 0,
         last_tx_rate: 0, last_rx_rate: 0,
         win_start_ms: 0, win_tx_bytes: 0, win_rx_bytes: 0, win_airtime_us: 0,
         win_loop_iters: 0,
@@ -347,6 +374,8 @@ struct Ax200 {
     // so every data frame must carry a unique, incrementing seq or the AP treats
     // distinct frames as duplicates (dropping TCP data, duplicating ACKed ones).
     tx_seq: u16,
+    // An ADDBA request waiting for the firmware's verdict (see ba_request).
+    ba_pending: Option<BaPending>,
     // Diagnostics (see Stats) + what the scan found besides the chosen AP: the
     // strongest same-SSID AP on the OTHER band. Picking purely by RSSI always
     // lands on the near 2.4 GHz node, so the question "was there a 5 GHz one?"
@@ -2402,6 +2431,10 @@ impl Ax200 {
         if associated {
             host::print("[ax200] re-associated — re-running 4-way\n");
             self.data_in_flight = 0;
+            // The firmware's session died with the old association; anything the
+            // window still holds belongs to a link that no longer exists.
+            ba::session().stop();
+            self.ba_pending = None;
             let our_mac = self.mac;
             let mut ready = [0u8; 13];
             ready[0] = EV_READY;
@@ -2665,11 +2698,41 @@ impl Ax200 {
         }
         r.c(b'\n');
 
-        // Aggregation is the single biggest throughput lever we are NOT using,
-        // so it gets its own line rather than hiding in an event counter.
-        r.s("aggr     A-MPDU off (we decline ADDBA, no reorder buffer); declined ");
-        r.d(self.st.addba_declined as u64);
-        r.c(b'\n');
+        // Aggregation is the single biggest throughput lever, so it gets its own
+        // line. `held` standing still while `buffered` climbs is the healthy
+        // picture; `stalls` counts holes the AP never closed, which is the one
+        // failure mode a reorder buffer can add to a working link.
+        let s = ba::session();
+        if s.active() {
+            r.s("aggr     A-MPDU on  baid ");
+            r.d(s.baid as u64);
+            r.s(" tid ");
+            r.d(s.tid as u64);
+            r.s(" win ");
+            r.d(ba::BA_WIN as u64);
+            r.s("  delivered ");
+            r.d(s.delivered as u64);
+            r.s(" buffered ");
+            r.d(s.buffered as u64);
+            r.s(" held ");
+            r.d(s.stored as u64);
+            r.c(b'\n');
+            r.s("aggr     dups ");
+            r.d(s.dups as u64);
+            r.s(" old-sn ");
+            r.d(s.old_sn as u64);
+            r.s(" stalls ");
+            r.d(s.stalls as u64);
+            r.s(" (holes the AP never closed)  sessions ");
+            r.d(self.st.addba_accepted as u64);
+            r.c(b'\n');
+        } else {
+            r.s("aggr     A-MPDU off — no block-ack session; declined ");
+            r.d(self.st.addba_declined as u64);
+            r.s(" accepted ");
+            r.d(self.st.addba_accepted as u64);
+            r.c(b'\n');
+        }
 
         // The 4-way, step by step. A stalled association always stops at one
         // specific rung, and which one names the culprit: no ready = never
@@ -2971,12 +3034,93 @@ impl Ax200 {
         );
     }
 
-    /// Answer an ADDBA request with an explicit decline. We advertise HT rates
-    /// but do not run a receive reorder buffer yet, so we must not accept a
-    /// block-ack session — and leaving the request unanswered makes some APs sit
-    /// on the TID waiting. `req` is the action body: category, action, dialog
-    /// token, parameter set (2), timeout (2).
-    fn tx_addba_decline(&mut self, req: &[u8; 12]) {
+    /// An ADDBA request arrived (`req` = category, action, dialog token,
+    /// parameter set (2), timeout (2), start sequence control (2)).
+    ///
+    /// Order matters: the firmware has to know about the session BEFORE the AP
+    /// starts aggregating, because it is the firmware that stamps each frame
+    /// with the BAID and the window position we reorder by. So we ask it first
+    /// (`iwl_mvm_fw_baid_op_sta`) and answer the AP only once it has agreed —
+    /// the response is sent from the ADD_STA reply path, which also carries the
+    /// BAID. A firmware that refuses gets us back to declining, which is a
+    /// working link, just a slow one.
+    fn ba_request(&mut self, req: &[u8; 12]) {
+        let params = u16::from_le_bytes([req[3], req[4]]);
+        let tid = ((params & BA_PARAM_TID_MASK) >> BA_PARAM_TID_SHIFT) as u8;
+        let ssn = u16::from_le_bytes([req[7], req[8]]) >> BA_SSN_SHIFT;
+        // Our window, not the AP's: it asks for up to 64 and a responder may
+        // answer with less. 32 already collapses the per-frame overhead and
+        // halves what we hold in linear memory.
+        let win = (((params & BA_PARAM_BUFSZ_MASK) >> BA_PARAM_BUFSZ_SHIFT) as usize)
+            .min(ba::BA_WIN)
+            .max(1) as u16;
+        self.ba_pending = Some(BaPending { tid, ssn, win, dialog: req[2],
+                                           params, timeout: u16::from_le_bytes([req[5], req[6]]) });
+
+        let mut sc = [0u8; ADD_STA_CMD_LEN];
+        sc[AS_OFF_ADD_MODIFY] = 1; // modify
+        put_u32(&mut sc, AS_OFF_MAC_ID_COLOR, 0);
+        sc[AS_OFF_STA_ID] = AP_STA_ID;
+        sc[AS_OFF_MODIFY_MASK] = STA_MODIFY_ADD_BA_TID;
+        sc[AS_OFF_ADD_IMM_BA_TID] = tid;
+        put_u16(&mut sc, AS_OFF_ADD_IMM_BA_SSN, ssn);
+        put_u16(&mut sc, AS_OFF_RX_BA_WINDOW, win);
+        self.send_hcmd(0, ADD_STA, &sc);
+    }
+
+    /// Tear the session down in the firmware too (STA_MODIFY_REMOVE_BA_TID).
+    /// Dropping only our buffer would leave the firmware stamping BAIDs for a
+    /// session the AP has ended, and the next ADDBA would find the slot taken.
+    fn ba_remove(&mut self, tid: u8) {
+        let mut sc = [0u8; ADD_STA_CMD_LEN];
+        sc[AS_OFF_ADD_MODIFY] = 1; // modify
+        put_u32(&mut sc, AS_OFF_MAC_ID_COLOR, 0);
+        sc[AS_OFF_STA_ID] = AP_STA_ID;
+        sc[AS_OFF_MODIFY_MASK] = STA_MODIFY_REMOVE_BA_TID;
+        sc[AS_OFF_REMOVE_IMM_BA_TID] = tid;
+        self.send_hcmd(0, ADD_STA, &sc);
+    }
+
+    /// The firmware answered our ADD_STA. On a started session the status word
+    /// carries the BAID that will appear in every aggregated frame; only then do
+    /// we tell the AP it may aggregate.
+    fn ba_on_add_sta_status(&mut self, status: u32) {
+        let p = match self.ba_pending.take() {
+            Some(p) => p,
+            None => return, // an ADD_STA we sent for something else
+        };
+        let ok = status & ADD_STA_STATUS_MASK == ADD_STA_SUCCESS
+            && status & IWL_ADD_STA_BAID_VALID_MASK != 0;
+        if !ok {
+            self.ba_reply(&p, WLAN_STATUS_REQUEST_DECLINED);
+            self.st.addba_declined = self.st.addba_declined.wrapping_add(1);
+            host::print(if status & ADD_STA_STATUS_MASK == ADD_STA_IMMEDIATE_BA_FAILURE {
+                "[ax200] block-ack refused: firmware has no session slot left (0x"
+            } else {
+                "[ax200] block-ack refused by firmware (status 0x"
+            });
+            host::print_hex32(status);
+            host::print(")\n");
+            return;
+        }
+        let baid = ((status & IWL_ADD_STA_BAID_MASK) >> IWL_ADD_STA_BAID_SHIFT) as u8;
+        ba::session().start(baid, p.tid, p.ssn);
+        self.ba_reply(&p, WLAN_STATUS_SUCCESS);
+        self.st.addba_accepted = self.st.addba_accepted.wrapping_add(1);
+        if self.st.addba_accepted <= 2 {
+            host::print("[ax200] block-ack RX session up: baid ");
+            host::print_dec(baid as u32);
+            host::print(" tid ");
+            host::print_dec(p.tid as u32);
+            host::print(" window ");
+            host::print_dec(p.win as u32);
+            host::print("\n");
+        }
+    }
+
+    /// The ADDBA response frame. On accept the parameter set carries OUR buffer
+    /// size and keeps the AP's TID and policy; on decline it goes back verbatim.
+    fn ba_reply(&mut self, p: &BaPending, status: u16) {
         let mut fr = [0u8; DOT11_HDR_LEN + 9];
         fr[0] = (DOT11_STYPE_ACTION << 4) | 0x00; // management, subtype action
         fr[DOT11_OFF_ADDR1..DOT11_OFF_ADDR1 + 6].copy_from_slice(&self.target_bssid);
@@ -2985,19 +3129,18 @@ impl Ax200 {
         let b = DOT11_HDR_LEN;
         fr[b] = WLAN_CATEGORY_BACK;
         fr[b + 1] = WLAN_ACTION_ADDBA_RESP;
-        fr[b + 2] = req[2]; // echo the dialog token
-        put_u16(&mut fr, b + 3, WLAN_STATUS_REQUEST_DECLINED);
-        fr[b + 5..b + 7].copy_from_slice(&req[3..5]); // echo the parameter set
-        fr[b + 7..b + 9].copy_from_slice(&req[5..7]); // echo the timeout
+        fr[b + 2] = p.dialog;
+        put_u16(&mut fr, b + 3, status);
+        let params = if status == WLAN_STATUS_SUCCESS {
+            (p.params & !BA_PARAM_BUFSZ_MASK)
+                | BA_PARAM_POLICY_IMMEDIATE
+                | ((p.win << BA_PARAM_BUFSZ_SHIFT) & BA_PARAM_BUFSZ_MASK)
+        } else {
+            p.params
+        };
+        put_u16(&mut fr, b + 5, params);
+        put_u16(&mut fr, b + 7, p.timeout);
         self.tx_mgmt_frame(&fr);
-        // Budgeted: the AP retries this every few seconds for the whole life of
-        // the link (132 in one measured run). In autostart the driver has no
-        // terminal of its own, so every print goes through kprint and renders a
-        // frame — a per-event log here is a per-event repaint of the screen.
-        // The running total is in the report.
-        if self.st.addba_declined < 3 {
-            host::print("[ax200] ADDBA request from AP declined (no RX reorder buffer yet)\n");
-        }
     }
 
     // Transmit a payload as an 802.11 DATA frame on the data queue (toDS:
@@ -3277,7 +3420,13 @@ impl Ax200 {
             out[12] = (ethertype >> 8) as u8;
             out[13] = ethertype as u8;
             out[14..14 + plen].copy_from_slice(&buf[pl..end]);
-            RxKind::Ip(14 + plen)
+            let amsdu = buf[d + MPDU_OFF_MAC_FLAGS2] & IWL_RX_MPDU_MFLG2_AMSDU != 0;
+            let last = buf[d + MPDU_OFF_AMSDU_INFO] & IWL_RX_MPDU_AMSDU_LAST_SUBFRAME != 0;
+            RxKind::Ip(14 + plen, Agg {
+                reorder: le32(&buf, d + MPDU_OFF_REORDER_DATA),
+                status,
+                amsdu_last: !amsdu || last,
+            })
         }
     }
 
@@ -3588,6 +3737,8 @@ impl Ax200 {
             let mut a_rx_bytes = 0u64;
             let mut a_to_us = 0u32;
             let mut a_undecoded = 0u32;
+            let mut add_sta_status: Option<u32> = None;
+            let mut delba = false;
             let rx_frames = self.service_rx(|c, g, rb| {
                 if c == TX_CMD && g == 0 {
                     // gen2 TX completion — one per transmitted data/mgmt frame.
@@ -3615,6 +3766,23 @@ impl Ax200 {
                         TX_STATUS_SUCCESS | TX_STATUS_DIRECT_DONE => a_ok += 1,
                         _ => a_fail += 1,
                     }
+                } else if c == ADD_STA && g == IWL_ALWAYS_LONG_GROUP {
+                    // Only the block-ack setup sends ADD_STA while the loop runs;
+                    // its status word carries the session id (see ba_request).
+                    let mut p = [0u8; RX_PKT_DATA_OFF + 4];
+                    host::dma_read_buf(rb.handle, 0, &mut p);
+                    add_sta_status = Some(le32(&p, RX_PKT_DATA_OFF));
+                } else if c == FRAME_RELEASE && g == 0 {
+                    // The window moved without a frame for us: the firmware saw
+                    // the MPDUs on air. Nothing here may be held back for them.
+                    let mut p = [0u8; RX_PKT_DATA_OFF + 4];
+                    host::dma_read_buf(rb.handle, 0, &mut p);
+                    let baid = p[RX_PKT_DATA_OFF + FR_OFF_BAID];
+                    let nssn = u16::from_le_bytes([
+                        p[RX_PKT_DATA_OFF + FR_OFF_NSSN],
+                        p[RX_PKT_DATA_OFF + FR_OFF_NSSN + 1],
+                    ]);
+                    ba::session().on_frame_release(baid, nssn & 0x0fff);
                 } else if c == TLC_MNG_UPDATE_NOTIF && g == DATA_PATH_GROUP {
                     // The firmware's rate-scaling verdict: what it is actually
                     // transmitting at. Without this the host is blind to the
@@ -3639,11 +3807,12 @@ impl Ax200 {
                             link_lost = true;
                             deauth_subtype = st;
                             deauth_reason = u16::from_le_bytes([body[0], body[1]]);
-                        } else if st == DOT11_STYPE_ACTION
-                            && body[0] == WLAN_CATEGORY_BACK
-                            && body[1] == WLAN_ACTION_ADDBA_REQ
-                        {
-                            addba = Some(body); // answered outside the closure
+                        } else if st == DOT11_STYPE_ACTION && body[0] == WLAN_CATEGORY_BACK {
+                            match body[1] {
+                                WLAN_ACTION_ADDBA_REQ => addba = Some(body), // answered outside
+                                WLAN_ACTION_DELBA => delba = true,
+                                _ => {}
+                            }
                         }
                         return true; // mgmt frame — not for the IP path
                     }
@@ -3658,7 +3827,7 @@ impl Ax200 {
                             evt[3..3 + n].copy_from_slice(&rxbuf[..n]);
                             host::wifi_send_event(&evt[..3 + n]);
                         }
-                        RxKind::Ip(n) => {
+                        RxKind::Ip(n, agg) => {
                             a_ip += 1;
                             a_rx_bytes += n as u64;
                             // The AP's downlink rate, from the RX descriptor —
@@ -3692,12 +3861,22 @@ impl Ax200 {
                                 host::dprint(")\n");
                                 rx_log += 1;
                             }
+                            // Through the block-ack reorder buffer first: inside
+                            // an A-MPDU a retransmitted MPDU arrives after the
+                            // ones behind it, and handing that to TCP as-is costs
+                            // more than the aggregation gains. It returns true
+                            // when it took the frame (held for a hole, or dropped
+                            // as a duplicate); with no session it is a no-op.
                             // Hand the frame to the kernel via the relay ring;
                             // Core 0's net::poll drains it + runs the TCP tick.
                             // (Direct in-fiber delivery via npk_netdev_rx_deliver
                             // exists but starved the Core-0 TCP tick under load →
                             // connection drops; revisit with #2 WiFi-IRQ.)
-                            host::netdev_submit_rx(&rxbuf[..n]);
+                            if !ba::session().on_frame(
+                                agg.reorder, agg.status, agg.amsdu_last, &rxbuf[..n])
+                            {
+                                host::netdev_submit_rx(&rxbuf[..n]);
+                            }
                         }
                         RxKind::Undecoded => { a_undecoded += 1; }
                         RxKind::None => {}
@@ -3731,10 +3910,19 @@ impl Ax200 {
             if last_rx_rate != u32::MAX { self.st.last_rx_rate = last_rx_rate; }
             // Answer a block-ack setup request (the TX has to happen outside the
             // RX closure, which holds &mut self through service_rx).
-            if let Some(req) = addba.take() {
-                self.tx_addba_decline(&req);
-                self.st.addba_declined = self.st.addba_declined.wrapping_add(1);
+            if let Some(status) = add_sta_status.take() {
+                self.ba_on_add_sta_status(status);
             }
+            if let Some(req) = addba.take() {
+                self.ba_request(&req);
+            }
+            if delba && ba::session().active() {
+                let tid = ba::session().tid;
+                ba::session().stop();
+                self.ba_remove(tid);
+            }
+            // A hole the AP never fills must not park the window forever.
+            ba::session().tick();
             // DIAGNOSTIC: a DEAUTH (subtype 12) / DISASSOC (10) arrived. Log it
             // with the 802.11 reason code — do NOT reconnect (that would mask the
             // root cause). The reason tells us whether the AP genuinely dropped us
@@ -4263,6 +4451,7 @@ pub extern "C" fn _start() {
         blacklist: [[0u8; 6]; 4],
         n_blacklist: 0,
         pick_reason: PICK_STRONGEST,
+        ba_pending: None,
     };
     dev.st.start_ms = host::now_ms();
 

@@ -496,13 +496,34 @@ pub const IWL_RX_DESC_SIZE_V1: usize = 48;
 pub const MPDU_OFF_MPDU_LEN: usize = 0; // __le16
 pub const MPDU_OFF_MAC_FLAGS1: usize = 2; // u8
 pub const MPDU_OFF_MAC_FLAGS2: usize = 3; // u8
+pub const MPDU_OFF_AMSDU_INFO: usize = 4; // u8
 pub const MPDU_OFF_STATUS: usize = 12; // __le32 (enum iwl_rx_mpdu_status)
+pub const MPDU_OFF_REORDER_DATA: usize = 16; // __le32
 pub const MPDU_OFF_RATE_N_FLAGS: usize = 28; // v1.rate_n_flags (union @20 + 8)
 pub const MPDU_OFF_ENERGY_A: usize = 32; // v1.energy_a (union @20 + v1 offset 12)
 pub const MPDU_OFF_ENERGY_B: usize = 33; // v1.energy_b
 pub const MPDU_OFF_CHANNEL: usize = 34; // v1.channel
 pub const MPDU_OFF_GP2_ON_AIR: usize = 36; // v1.gp2_on_air_rise __le32
 pub const MPDU_OFF_TSF_ON_AIR: usize = 40; // v1.tsf_on_air_rise __le64
+// reorder_data (fw/api/rx.h): what the firmware knows about this MPDU's place in
+// its block-ack window. BAID 0x7f means "no session" — everything else is the
+// session id the firmware handed back when we started it. NSSN is the sequence
+// number the firmware considers the first unreceived one; SN is this frame's.
+pub const IWL_RX_REORDER_DATA_INVALID_BAID: u8 = 0x7f;
+pub const IWL_RX_MPDU_REORDER_NSSN_MASK: u32 = 0x0000_0fff;
+pub const IWL_RX_MPDU_REORDER_SN_MASK: u32 = 0x00ff_f000;
+pub const IWL_RX_MPDU_REORDER_SN_SHIFT: u32 = 12;
+pub const IWL_RX_MPDU_REORDER_BAID_MASK: u32 = 0x7f00_0000;
+pub const IWL_RX_MPDU_REORDER_BAID_SHIFT: u32 = 24;
+pub const IWL_RX_MPDU_REORDER_BA_OLD_SN: u32 = 0x8000_0000;
+pub const IWL_RX_MPDU_STATUS_DUPLICATE: u32 = 1 << 22;
+pub const IWL_RX_MPDU_MFLG2_AMSDU: u8 = 0x40;
+pub const IWL_RX_MPDU_AMSDU_LAST_SUBFRAME: u8 = 0x80;
+// The firmware tells us the window may move even when no frame arrives (it saw
+// the frames on air but had nothing to deliver): baid, reserved, __le16 nssn.
+pub const FRAME_RELEASE: u8 = 0xc3;
+pub const FR_OFF_BAID: usize = 0;
+pub const FR_OFF_NSSN: usize = 2;
 // mac_flags1: bits 7:4 = (MIC+CRC length / 2) the RADA may not have stripped.
 // iwl_mvm_create_skb: mic_crc_len = u8_get_bits(mac_flags1, 0xf0) << 1.
 pub const MFLG1_MIC_CRC_LEN_MASK: u8 = 0xf0;
@@ -593,6 +614,21 @@ pub const AS_OFF_ASSOC_ID: usize = 36;          // __le16 (set from IEEE80211_ST
 pub const IWL_STA_LINK: u8 = 0;           // enum iwl_sta_type
 pub const ADD_STA_SUCCESS: u32 = 0x1;
 pub const ADD_STA_STATUS_MASK: u32 = 0xff; // IWL_ADD_STA_STATUS_MASK
+// The immediate-block-ack fields of the same command (iwl_mvm_fw_baid_op_sta).
+// A modify carrying STA_MODIFY_ADD_BA_TID starts the RX aggregation session in
+// the firmware; the response's status word carries the session id (BAID) that
+// then appears in every aggregated frame's reorder_data.
+pub const AS_OFF_MODIFY_MASK: usize = 17;       // u8
+pub const AS_OFF_ADD_IMM_BA_TID: usize = 28;    // u8
+pub const AS_OFF_REMOVE_IMM_BA_TID: usize = 29; // u8
+pub const AS_OFF_ADD_IMM_BA_SSN: usize = 30;    // __le16
+pub const AS_OFF_RX_BA_WINDOW: usize = 44;      // __le16
+pub const STA_MODIFY_ADD_BA_TID: u8 = 1 << 3;
+pub const STA_MODIFY_REMOVE_BA_TID: u8 = 1 << 4;
+pub const IWL_ADD_STA_BAID_VALID_MASK: u32 = 0x8000;
+pub const IWL_ADD_STA_BAID_MASK: u32 = 0x7F00;
+pub const IWL_ADD_STA_BAID_SHIFT: u32 = 8;
+pub const ADD_STA_IMMEDIATE_BA_FAILURE: u32 = 0x2;
 pub const TID_DISABLE_AGG_INIT: u16 = 0xffff; // "No aggs at first" (sta.c:1779)
 // station_flags_msk for the add: FAT_EN(3<<26) | MIMO_EN(3<<28) | RTS_MIMO_PROT(BIT17).
 pub const STA_FLAGS_MSK_ADD: u32 = (3 << 26) | (3 << 28) | (1 << 17); // 0x3C020000
@@ -790,14 +826,27 @@ pub const WMM_INFO_IE: [u8; 9] = [
 pub const DOT11_FC_QOS_DATA: u8 = 0x88; // type data(2), subtype 8 (QoS data)
 pub const DOT11_QOS_HDR_LEN: usize = 26;
 
-// Block-Ack action frames (802.11 category 3). We are not an aggregating
-// receiver yet, so an ADDBA request from the AP is answered with an explicit
-// decline — leaving it unanswered makes some APs hold the TID in limbo.
+// Block-Ack action frames (802.11 category 3). Accepting one is what lets the
+// AP aggregate: without a session every MPDU pays its own preamble, SIFS and
+// ACK, which caps a 115 Mbit link at about a seventh of that.
 pub const DOT11_STYPE_ACTION: u8 = 13;
 pub const WLAN_CATEGORY_BACK: u8 = 3;
 pub const WLAN_ACTION_ADDBA_REQ: u8 = 0;
 pub const WLAN_ACTION_ADDBA_RESP: u8 = 1;
+pub const WLAN_ACTION_DELBA: u8 = 2;
+pub const WLAN_STATUS_SUCCESS: u16 = 0;
 pub const WLAN_STATUS_REQUEST_DECLINED: u16 = 37;
+
+// ADDBA request/response body (802.11-2020 9.6.3.1): category, action, dialog
+// token, then the Block Ack Parameter Set — AMSDU(0), policy(1, 1 = immediate),
+// TID(2..5), buffer size(6..15) — a timeout, and for the request a start
+// sequence control whose upper 12 bits are the SSN.
+pub const BA_PARAM_POLICY_IMMEDIATE: u16 = 0x0002;
+pub const BA_PARAM_TID_SHIFT: u16 = 2;
+pub const BA_PARAM_TID_MASK: u16 = 0x003C;
+pub const BA_PARAM_BUFSZ_SHIFT: u16 = 6;
+pub const BA_PARAM_BUFSZ_MASK: u16 = 0xFFC0;
+pub const BA_SSN_SHIFT: u16 = 4;
 // privacy bit in a beacon's capability field (offset hdr+8+2 = 34).
 pub const DOT11_BEACON_CAP_OFF: usize = DOT11_HDR_LEN + 8 + 2; // 34
 pub const WLAN_CAP_PRIVACY_BIT: u8 = 0x10;
