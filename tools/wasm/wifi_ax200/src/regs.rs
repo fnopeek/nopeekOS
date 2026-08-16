@@ -999,7 +999,11 @@ pub const PICK_BAND_FORCED: u8 = 2;
 pub const PICK_SSID_FILTERED: u8 = 3;
 
 // Status snapshot published via npk_driver_report. One screen of text.
-pub const REPORT_CAP: usize = 1600;
+// The kernel accepts REPORT_MAX = 4096; staying well under it costs nothing and
+// the report has outgrown 1600 — at which point `s()` silently stopped writing
+// and the last lines (sync, scan) vanished without a trace. Truncation now says
+// so, because a report that quietly ends early is worse than no report.
+pub const REPORT_CAP: usize = 3072;
 // How often the snapshot is refreshed. 1 s is short enough to show a speed test
 // live and long enough that formatting never lands in the hot path.
 pub const REPORT_PERIOD_MS: u64 = 1000;
