@@ -292,4 +292,22 @@ pub fn intent_net_info() {
     }
     kprintln!("  DNS      {}.{}.{}.{}", dns[0], dns[1], dns[2], dns[3]);
     kprintln!();
+
+    // The next-hop table. A wrong MAC here is invisible from the outside — it
+    // looks exactly like the far end being down, and it takes out everything
+    // that leaves the segment while LAN-direct traffic keeps working. The
+    // gateway's row is the one to check first, so it is marked.
+    let table = crate::net::arp::table();
+    kprintln!("  Neighbours");
+    kprintln!("  ──────────");
+    if table.is_empty() {
+        kprintln!("  (none learned yet)");
+    }
+    for (nip, nmac, age) in table {
+        kprintln!("  {}.{}.{}.{}{}  {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}  {} s ago",
+            nip[0], nip[1], nip[2], nip[3],
+            if nip == gw { " (gateway)" } else { "" },
+            nmac[0], nmac[1], nmac[2], nmac[3], nmac[4], nmac[5], age);
+    }
+    kprintln!();
 }
