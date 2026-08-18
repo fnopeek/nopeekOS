@@ -2904,8 +2904,8 @@ impl Ax200 {
             r.d(self.st.addba_accepted as u64);
             r.c(b'\n');
         } else {
-            r.s(if self.ba_fw_broken {
-                "aggr     A-MPDU on but the firmware ignored the setup — declining; declined "
+            r.s(if self.ba_fw_broken && self.want_ampdu {
+                "aggr     A-MPDU wants RX_BAID_ALLOCATION_CONFIG_CMD, not ported — declining; declined "
             } else if self.want_ampdu {
                 "aggr     A-MPDU on but no session yet; declined "
             } else {
@@ -4994,7 +4994,14 @@ pub extern "C" fn _start() {
         pick_reason: PICK_STRONGEST,
         ba_pending: None,
         want_ampdu: false,
-        ba_fw_broken: false,
+        // Starts TRUE, and that is not a placeholder. The ADD_STA path is the
+        // wrong command for this firmware — it answers nothing and stops
+        // completing transmissions, which costs the whole link (measured:
+        // 31 frames sent, 7 acknowledged, 500 refused, no DHCP). Linux would
+        // use RX_BAID_ALLOCATION_CONFIG_CMD here (iwl_mvm_fw_baid_op,
+        // sta.c:2860). Until that is ported, `ampdu: on` declines like `off`
+        // does — a slow link beats none, and ONE bad command is enough.
+        ba_fw_broken: true,
         link_published: false,
         tx_fail_streak: 0,
         tx_fail_streak_peak: 0,
