@@ -985,7 +985,7 @@ fn send_record(handle: usize, content_type: u8, payload: &[u8]) -> Result<(), Tl
     record.push(TLS_VERSION_12[1]);
     put_u16(&mut record, payload.len() as u16);
     record.extend_from_slice(payload);
-    tcp::send(handle, &record)?;
+    tcp::send_blocking(handle, &record, 1000)?;
     Ok(())
 }
 

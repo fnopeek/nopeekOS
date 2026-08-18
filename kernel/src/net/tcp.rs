@@ -132,6 +132,15 @@ const RETRY_TICKS_BASE: u64 = 100; // 1 second (100Hz)
 const ARP_RETRANS_TICKS: u64 = 5; // 50 ms
 const ARP_MAX_TRIES: u8 = 10;
 const FIN_TIMEOUT_TICKS: u64 = 6000; // 60 s, like Linux's tcp_fin_timeout
+// Retransmit timeout for DATA. Base 200 ms, doubled per attempt (RFC 6298
+// style), give up after MAX_DATA_RETRIES — ~6 s total, then the connection
+// is honestly dead instead of silently one-way.
+const RTO_TICKS_BASE: u64 = 20; // 200 ms
+const MAX_DATA_RETRIES: u8 = 5;
+// Ceiling on unacknowledged bytes held for retransmit. A peer that stops
+// acknowledging must not grow this without bound; `send` refuses past it,
+// which is the backpressure the caller needs to see.
+const MAX_UNACKED: usize = 256 * 1024;
 // 4 MiB receive buffer → ~4 MiB window with scaling → fills the bandwidth-delay
 // product for ~gigabit even at tens-of-ms RTT (1 MiB was the cap at ~11 ms;
 // higher-RTT CDNs need more). Grown lazily (VecDeque::new), so an idle
@@ -244,9 +253,18 @@ struct TcpConn {
     // (BDP) — so the window scales with the path, not a hardcoded value.
     srtt_ticks: u32,
 
-    // Retransmit
+    // Retransmit. `send_buf` holds every byte we sent and the peer has not
+    // acknowledged, starting at `snd_una`; `rto_tick` is when the oldest of
+    // them went out. Without this a single lost segment was lost FOREVER:
+    // the peer keeps a hole it can never fill, buffers everything after it
+    // out-of-order and delivers nothing more to its application, while our
+    // side happily reports every send as a success. Invisible for browsing
+    // (there the PEER retransmits to us and our own sends are one short
+    // request), fatal for anything that streams outward — `debug` went mute
+    // at the first radio loss while its keyboard direction kept working.
     retries: u8,
     last_send_tick: u64,
+    rto_tick: u64,
 
     // Delayed ACK
     ack_pending: bool,
@@ -344,6 +362,7 @@ pub fn connect_start(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpE
         send_buf: Vec::new(),
         retries: 0,
         last_send_tick: crate::interrupts::ticks(),
+        rto_tick: 0,
         ack_pending: false,
         ack_tick: 0,
         acks_held: 0,
@@ -387,8 +406,12 @@ pub fn connect_start(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpE
 pub fn connect_status(handle: usize) -> i32 {
     if handle >= MAX_CONNECTIONS { return -1; }
     match CONNECTIONS.lock()[handle] {
-        Some(ref c) if c.established => 1,
-        Some(ref c) if c.error || c.state == State::Closed => -1,
+        Some(ref c) if c.error || c.closed || c.state == State::Closed => -1,
+        // Same predicate as `conn_healthy`: a peer FIN moves us to CloseWait
+        // and sets `closed`, so a module polling this learns the far end hung
+        // up. `recv` never tells it — it just returns 0 bytes forever, which
+        // is why `debug` kept running after `nc` was closed.
+        Some(ref c) if c.established && c.state == State::Established => 1,
         Some(_) => 0,
         None => -1,
     }
@@ -447,6 +470,7 @@ pub fn listen(port: u16) -> Result<usize, TcpError> {
         send_buf: Vec::new(),
         retries: 0,
         last_send_tick: 0,
+        rto_tick: 0,
         ack_pending: false,
         ack_tick: 0,
         acks_held: 0,
@@ -529,6 +553,7 @@ pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
         send_buf: Vec::new(),
         retries: 0,
         last_send_tick: 0,
+        rto_tick: 0,
         ack_pending: false,
         ack_tick: 0,
         acks_held: 0,
@@ -548,21 +573,52 @@ pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
 }
 
 /// Send data on a connection. Buffers and sends immediately (no Nagle).
+///
+/// The bytes are ALSO kept in `send_buf` until the peer acknowledges them,
+/// so `tick_connections` can retransmit. Returns `WouldBlock` when too much
+/// is already unacknowledged — that is real backpressure, not an error:
+/// before, every send was reported as a success and a lost segment simply
+/// vanished.
 pub fn send(handle: usize, data: &[u8]) -> Result<(), TcpError> {
     let mut conns = CONNECTIONS.lock();
     let conn = conns[handle].as_mut().ok_or(TcpError::NotConnected)?;
     if conn.state != State::Established { return Err(TcpError::NotConnected); }
+    if conn.send_buf.len() + data.len() > MAX_UNACKED {
+        return Err(TcpError::WouldBlock);
+    }
+
+    let now = crate::interrupts::ticks();
+    // Oldest unacked byte starts its clock now if nothing was in flight.
+    if conn.send_buf.is_empty() { conn.rto_tick = now; conn.retries = 0; }
+    conn.send_buf.extend_from_slice(data);
 
     // Send in MSS-sized chunks immediately (no Nagle)
     for chunk in data.chunks(MSS as usize) {
         let seq = conn.snd_nxt;
         conn.snd_nxt = conn.snd_nxt.wrapping_add(chunk.len() as u32);
-        conn.last_send_tick = crate::interrupts::ticks();
+        conn.last_send_tick = now;
         let w = recv_window(conn);
         send_seg(conn, seq, conn.rcv_nxt, ACK | PSH, w, chunk);
     }
 
     Ok(())
+}
+
+/// Send, waiting out backpressure. NATIVE callers only — the same rule as
+/// `connect`: this polls, which pumps the peer fibers on a worker core. A
+/// module must handle `WouldBlock` itself and sleep between tries.
+pub fn send_blocking(handle: usize, data: &[u8], timeout_ticks: u64) -> Result<(), TcpError> {
+    let t0 = crate::interrupts::ticks();
+    loop {
+        match send(handle, data) {
+            Err(TcpError::WouldBlock) => {}
+            other => return other,
+        }
+        if crate::interrupts::ticks() - t0 > timeout_ticks { return Err(TcpError::Timeout); }
+        super::poll();
+        tick_connections();
+        core::hint::spin_loop();
+    }
 }
 
 /// Receive data. Returns available data (may be empty if nothing received yet).
@@ -850,7 +906,14 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
             // ACK processing
             if flags & ACK != 0 {
                 if ack_in_range(conn.snd_una, ack, conn.snd_nxt) {
+                    // Drop the acknowledged prefix from the retransmit queue
+                    // and restart the timer for whatever is still in flight.
+                    let acked = ack.wrapping_sub(conn.snd_una) as usize;
+                    let drop_n = acked.min(conn.send_buf.len());
+                    conn.send_buf.drain(..drop_n);
                     conn.snd_una = ack;
+                    conn.retries = 0;
+                    conn.rto_tick = crate::interrupts::ticks();
                 }
             }
 
@@ -1022,6 +1085,9 @@ pub fn tick_connections() {
     // Same reason: `arp::request` hits the NIC, so collect and fire after the
     // lock is gone.
     let mut arp_probes: alloc::vec::Vec<[u8; 4]> = alloc::vec::Vec::new();
+    // Retransmits carry a payload, so they cannot ride in `pending`.
+    let mut retrans: alloc::vec::Vec<(PendingSeg, alloc::vec::Vec<u8>)> =
+        alloc::vec::Vec::new();
     {
         let mut conns = CONNECTIONS.lock();
         for slot in conns.iter_mut().flatten() {
@@ -1090,6 +1156,35 @@ pub fn tick_connections() {
                 }
             }
 
+            // Data retransmit. `send_buf` starts at snd_una, so the head of
+            // it is exactly the segment the peer is missing.
+            if slot.state == State::Established && !slot.send_buf.is_empty() {
+                let rto = RTO_TICKS_BASE << slot.retries.min(5);
+                if now.saturating_sub(slot.rto_tick) > rto {
+                    if slot.retries >= MAX_DATA_RETRIES {
+                        slot.error = true;
+                        slot.state = State::Closed;
+                    } else {
+                        slot.retries += 1;
+                        slot.rto_tick = now;
+                        slot.last_send_tick = now;
+                        let n = slot.send_buf.len().min(MSS as usize);
+                        let w = recv_window(slot);
+                        let mut opts = [0u8; 40];
+                        let len = build_seg_opts(slot, ACK, &mut opts);
+                        retrans.push((
+                            PendingSeg {
+                                dst_ip: slot.remote_ip, src_port: slot.local_port,
+                                dst_port: slot.remote_port, seq: slot.snd_una,
+                                ack: slot.rcv_nxt, flags: ACK | PSH, window: w,
+                                opts, opts_len: len,
+                            },
+                            slot.send_buf[..n].to_vec(),
+                        ));
+                    }
+                }
+            }
+
             // TimeWait cleanup (2 seconds)
             if slot.state == State::TimeWait && now - slot.last_send_tick > 200 {
                 slot.state = State::Closed;
@@ -1109,6 +1204,11 @@ pub fn tick_connections() {
 
     for t in &arp_probes {
         arp::request(*t);
+    }
+    for (p, payload) in &retrans {
+        TCP_TX_SEGS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        send_segment_with_opts(p.dst_ip, p.src_port, p.dst_port,
+            p.seq, p.ack, p.flags, p.window, payload, &p.opts[..p.opts_len]);
     }
     for p in &pending {
         send_pending(p);
@@ -1454,11 +1554,14 @@ pub enum TcpError {
     ConnectionFailed,
     NotConnected,
     Timeout,
+    /// Too much already unacknowledged — retry the send later.
+    WouldBlock,
 }
 
 impl core::fmt::Display for TcpError {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         match self {
+            TcpError::WouldBlock => write!(f, "send buffer full"),
             TcpError::TooManyConnections => write!(f, "too many connections"),
             TcpError::ConnectionRefused => write!(f, "connection refused"),
             TcpError::ConnectionFailed => write!(f, "connection failed"),

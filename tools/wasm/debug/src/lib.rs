@@ -17,7 +17,7 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 mod host;
 
 /// One source for the version, printed in the banner.
-const VERSION: &str = "0.4.0";
+const VERSION: &str = "0.5.0";
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
@@ -112,12 +112,42 @@ pub extern "C" fn _start() {
     loop {
         let mut did_work = false;
 
+        // Did the far end hang up? `tcp_recv` never says so — it just returns
+        // 0 bytes forever in CloseWait, which is why closing `nc` used to
+        // leave this module running with nothing to talk to.
+        if host::tcp_status(sock) != 1 {
+            host::print("[debug] far end closed — disconnecting\n");
+            break;
+        }
+
         // Terminal output → TCP
         let n = host::stream_read(sink, &mut tx_buf);
         if n > 0 {
-            if host::tcp_send(sock, &tx_buf[..n as usize]) != 0 {
-                host::print("[debug] tcp_send failed — closing\n");
-                break;
+            match host::tcp_send(sock, &tx_buf[..n as usize]) {
+                0 => {}
+                // -2 = too much unacknowledged. Not a failure: give the
+                // retransmit a moment and offer the SAME bytes again, or the
+                // mirror loses exactly the output the developer is waiting for.
+                -2 => {
+                    let mut tries = 0;
+                    let mut sent = false;
+                    while tries < 200 {
+                        host::sleep(10);
+                        match host::tcp_send(sock, &tx_buf[..n as usize]) {
+                            0 => { sent = true; break; }
+                            -2 => tries += 1,
+                            _ => break,
+                        }
+                    }
+                    if !sent {
+                        host::print("[debug] link stalled — closing\n");
+                        break;
+                    }
+                }
+                _ => {
+                    host::print("[debug] tcp_send failed — closing\n");
+                    break;
+                }
             }
             did_work = true;
         }

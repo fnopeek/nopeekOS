@@ -319,7 +319,7 @@ fn do_http_request(args: &str, use_tls: bool) {
     let send_ok = if let Some(ref mut sess) = tls_session {
         crate::tls::tls_send(sess, request.as_bytes()).is_ok()
     } else {
-        crate::net::tcp::send(handle, request.as_bytes()).is_ok()
+        crate::net::tcp::send_blocking(handle, request.as_bytes(), 1000).is_ok()
     };
     if !send_ok {
         kprintln!("[npk] Send error");
@@ -1749,7 +1749,7 @@ fn http_post_zeros(host: &str, path: &str, total: usize) -> Result<String, &'sta
         "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
         path, host, total
     );
-    if crate::net::tcp::send(handle, req.as_bytes()).is_err() {
+    if crate::net::tcp::send_blocking(handle, req.as_bytes(), 1000).is_err() {
         let _ = crate::net::tcp::close(handle);
         return Err("send header failed");
     }
@@ -1758,7 +1758,7 @@ fn http_post_zeros(host: &str, path: &str, total: usize) -> Result<String, &'sta
     let mut sent = 0;
     while sent < total {
         let n = core::cmp::min(chunk.len(), total - sent);
-        if crate::net::tcp::send(handle, &chunk[..n]).is_err() {
+        if crate::net::tcp::send_blocking(handle, &chunk[..n], 1000).is_err() {
             let _ = crate::net::tcp::close(handle);
             return Err("send body failed");
         }
@@ -1887,7 +1887,7 @@ fn http_get_once(
         "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: */*\r\nConnection: close\r\n\r\n",
         path, host, USER_AGENT
     );
-    if crate::net::tcp::send(handle, request.as_bytes()).is_err() {
+    if crate::net::tcp::send_blocking(handle, request.as_bytes(), 1000).is_err() {
         let _ = crate::net::tcp::close(handle);
         return Err("HTTP send failed");
     }
