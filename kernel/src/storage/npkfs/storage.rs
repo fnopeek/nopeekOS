@@ -571,10 +571,18 @@ pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError
         let raw_end = write_data.len().min(consumed + span);
         let raw_len = raw_end.saturating_sub(consumed);
 
-        if raw_len == span {
+        // A failed device write must give the blocks BACK. Every other
+        // error path in this function rolls the allocation back (the
+        // DiskFull loop frees, the btree-insert failure calls
+        // rollback_alloc) — this one used to return through `?` and leak
+        // every extent it had just reserved. On a link that aborts
+        // transfers, that leak repeats per retry: a 249 MB asset can
+        // strand its blocks several times over, and the next symptom is
+        // DiskFull on a disk that looks half empty.
+        let res = if raw_len == span {
             crate::blkdev::write_extent(
                 ext.start_block, ext.block_count, &write_data[consumed..raw_end],
-            )?;
+            )
         } else {
             // Trailing extent contains a partial last block — pad with
             // zeros so the extent writer always sees a block-aligned
@@ -582,7 +590,13 @@ pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError
             // pre-padding length, so the read path strips the padding.
             let mut padded = alloc::vec![0u8; span];
             padded[..raw_len].copy_from_slice(&write_data[consumed..raw_end]);
-            crate::blkdev::write_extent(ext.start_block, ext.block_count, &padded)?;
+            crate::blkdev::write_extent(ext.start_block, ext.block_count, &padded)
+        };
+        if let Err(e) = res {
+            crate::kprintln!("[npk] npkfs: write failed for {:02x}{:02x}.. — freeing {} extent(s)",
+                hash[0], hash[1], all_extents.len());
+            rollback_alloc(fs, &all_extents, 0);
+            return Err(e.into());
         }
         consumed += span;
     }
