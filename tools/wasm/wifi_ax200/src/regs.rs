@@ -1009,6 +1009,10 @@ pub const KEY_OFF_RX_SEQ: usize = 36;      // u8[16] (rx_secur_seq_cnt / RSC)
 // iwl_sta_key_flag: CCMP encryption + key id + group/MFP.
 pub const STA_KEY_FLG_CCM: u16 = 2 << 0;
 pub const STA_KEY_FLG_KEYID_POS: u16 = 8;
+/// Firmware key-table size, `fw/api/sta.h:190`. We used exactly two of the
+/// sixteen — slot 0 for the pairwise key, slot 1 for EVERY group key.
+pub const STA_KEY_MAX_NUM: u8 = 16;
+pub const STA_KEY_IDX_INVALID: u8 = 0xff;
 pub const STA_KEY_MULTICAST: u16 = 1 << 14;
 // 802.11 data frame: frame_control byte0 = data(type 2), byte1 toDS for STA→AP.
 pub const DOT11_FC_DATA: u8 = 0x08; // type data, subtype 0

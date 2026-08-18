@@ -499,6 +499,13 @@ struct Ax200 {
     // Frames handed to the data queue but not yet reported complete by the FW
     // (TX_CMD response). Flow control: never enqueue past the queue depth, or we
     // overwrite a TFD the firmware is still transmitting → corruption/stall.
+    /// Firmware key-table bookkeeping (iwl_mvm_set_fw_key_idx). `freed`
+    /// counts how long each slot has been free; the previous group slot is
+    /// held until the one after it arrives, so a rekey never invalidates the
+    /// key the AP may still be transmitting with.
+    key_slot_used: [bool; STA_KEY_MAX_NUM as usize],
+    key_slot_freed: [u16; STA_KEY_MAX_NUM as usize],
+    key_slot_prev: Option<u8>,
     data_in_flight: u32,
     /// `now_ms` of the last TX completion, or of the last moment the queue was
     /// empty. The queue watchdog measures from here (iwl_txq_stuck_timer).
@@ -3786,10 +3793,53 @@ impl Ax200 {
 
     // ADD_STA_KEY (0x17, cmd_ver 3) — install a CCMP key the supplicant computed.
     // `group` = GTK (multicast) vs PTK (pairwise). rx_mic/tx_mic/tx_seq stay 0.
+    /// Pick a firmware key-table slot, `iwl_mvm_set_fw_key_idx` (sta.c:3457).
+    ///
+    /// Linux deliberately takes the unused slot that was freed LONGEST AGO —
+    /// that is what the per-slot `deleted` counters are for. We pinned every
+    /// group key to slot 1, so a GTK rekey overwrote the previous group key
+    /// the instant the new one arrived. The AP switches key ID 1<->2 across a
+    /// rekey and keeps sending with the OLD id for a moment; those frames then
+    /// have no key here and are dropped. Group key = BROADCAST, so ARP
+    /// requests and DHCP replies vanish while unicast (the pairwise key, its
+    /// own slot) carries on undisturbed — measured exactly so on the device.
+    fn alloc_key_slot(&mut self, group: bool) -> u8 {
+        if !group {
+            return 0; // pairwise: one station, one slot, never rotated
+        }
+        let mut best = STA_KEY_IDX_INVALID;
+        let mut best_age = -1i32;
+        for i in 1..STA_KEY_MAX_NUM {
+            if self.key_slot_used[i as usize] { continue; }
+            let age = self.key_slot_freed[i as usize] as i32;
+            if age > best_age {
+                best_age = age;
+                best = i;
+            }
+        }
+        if best == STA_KEY_IDX_INVALID {
+            // Every slot busy: free the oldest group key rather than refuse.
+            best = 1;
+        }
+        // Only TWO group keys can be live at once (802.11 key ids 1 and 2), so
+        // releasing the one before last keeps the table from filling while the
+        // previous key stays valid for the whole transition.
+        if let Some(old) = self.key_slot_prev.replace(best) {
+            self.key_slot_used[old as usize] = false;
+            for i in 0..STA_KEY_MAX_NUM as usize {
+                self.key_slot_freed[i] = self.key_slot_freed[i].saturating_add(1);
+            }
+            self.key_slot_freed[old as usize] = 0;
+        }
+        self.key_slot_used[best as usize] = true;
+        best
+    }
+
     fn install_key(&mut self, group: bool, key_idx: u8, key: &[u8], rsc: &[u8]) {
+        let slot = self.alloc_key_slot(group);
         let mut cmd = [0u8; ADD_STA_KEY_LEN];
         cmd[KEY_OFF_STA_ID] = AP_STA_ID;
-        cmd[KEY_OFF_KEY_OFFSET] = if group { 1 } else { 0 };
+        cmd[KEY_OFF_KEY_OFFSET] = slot;
         let mut flags = STA_KEY_FLG_CCM | ((key_idx as u16) << STA_KEY_FLG_KEYID_POS);
         if group {
             flags |= STA_KEY_MULTICAST;
@@ -3801,11 +3851,11 @@ impl Ax200 {
         cmd[KEY_OFF_RX_SEQ..KEY_OFF_RX_SEQ + rl].copy_from_slice(&rsc[..rl]);
         self.send_hcmd(0, ADD_STA_KEY_CMD, &cmd); // → LONG_GROUP(1)
         self.pump_rx(20);
-        host::dprint(if group {
-            "[ax200] ADD_STA_KEY GTK installed\n"
-        } else {
-            "[ax200] ADD_STA_KEY PTK installed\n"
-        });
+        host::print(if group { "[ax200] GTK installed: key id " } else { "[ax200] PTK installed: key id " });
+        host::print_dec(key_idx as u32);
+        host::print(" -> fw slot ");
+        host::print_dec(slot as u32);
+        host::print("\n");
     }
 
     // Extract an 802.11 management frame from an RX buffer if it is addressed to
@@ -5233,6 +5283,9 @@ pub extern "C" fn _start() {
         data_bc_tbl: Dma::NONE,
         data_queue_id: 0,
         data_write_ptr: 0,
+        key_slot_used: [false; STA_KEY_MAX_NUM as usize],
+        key_slot_freed: [0; STA_KEY_MAX_NUM as usize],
+        key_slot_prev: None,
         data_in_flight: 0,
         last_tx_done_ms: 0,
         tx_seq: 0,
