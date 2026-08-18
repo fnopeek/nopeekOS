@@ -926,6 +926,9 @@ fn hover_op_census() {
     let (vw, vh) = (w, 1000u32);
     let mut hits = 0usize;
     let (mut geom_stable, mut sum_repaint, mut sum_ins, mut sum_del) = (0usize, 0usize, 0usize, 0usize);
+    let (mut said_paint_only, mut wrong, mut missed) = (0usize, 0usize, 0usize);
+    let (mut tried, mut exact, mut wrong_patch) = (0usize, 0usize, 0usize);
+    let (mut sum_layout_us, mut sum_patch_us) = (0u128, 0u128);
     let (mut worst_repaint, mut worst_ins) = (0usize, 0usize);
     let mut seen: std::collections::HashSet<Vec<u32>> = Default::default();
     let mut examples: Vec<String> = Vec::new();
@@ -935,8 +938,41 @@ fn hover_op_census() {
             if hovered.is_empty() || !seen.insert(hovered.clone()) {
                 continue;
             }
-            eng.set_hover(hovered.clone());
+            // Lay the page out at rest, then hot, then PATCH the resting one
+            // and see whether it came out the same. That is the whole claim.
+            eng.set_hover(Vec::new());
+            let mut base = eng.layout_ext(&html, &css, w);
+            let verdict = eng.set_hover(hovered.clone());
+            let t = std::time::Instant::now();
             let hot = eng.layout_ext(&html, &css, w);
+            sum_layout_us += t.elapsed().as_micros();
+            let claims_paint_only =
+                matches!(verdict, beak_engine::raster::HoverChange::Changed { paint_only: true });
+            let t = std::time::Instant::now();
+            let patched = claims_paint_only && eng.repaint_hover(&mut base);
+            let patch_us = t.elapsed().as_micros();
+            if patched {
+                sum_patch_us += patch_us;
+            }
+            if patched {
+                tried += 1;
+                let got: Vec<String> = base.ops.iter().map(op_full).collect();
+                let want: Vec<String> = hot.ops.iter().map(op_full).collect();
+                if got == want {
+                    exact += 1;
+                } else {
+                    if wrong_patch < 3 {
+                        println!("  PATCH != LAYOUT for seqs {hovered:?}");
+                        for (i, (a, b)) in got.iter().zip(&want).enumerate().filter(|(_, (a, b))| a != b).take(3) {
+                            println!("      #{i} patched {a}\n      #{i} layout  {b}");
+                        }
+                        if got.len() != want.len() {
+                            println!("      op count {} vs {}", got.len(), want.len());
+                        }
+                    }
+                    wrong_patch += 1;
+                }
+            }
             eng.set_hover(Vec::new());
             let hot_full: Vec<String> = hot.ops.iter().map(op_full).collect();
             if hot_full == rest_full {
@@ -952,6 +988,19 @@ fn hover_op_census() {
             let ins = hot_full.len() - al.len();
             if ins == 0 && del == 0 {
                 geom_stable += 1;
+            }
+            // The engine's verdict against what the pixels actually did. An
+            // op that MOVED would prove the "paint only" claim wrong; ops
+            // added or removed at unchanged rects would not.
+            let moved = al.iter().any(|&(i, j)| rest_shape[i] != hot_shape[j]);
+            if claims_paint_only {
+                said_paint_only += 1;
+                if moved {
+                    wrong += 1;
+                    println!("  !!! claimed paint-only but geometry MOVED: seqs {hovered:?}");
+                }
+            } else if !moved {
+                missed += 1;
             }
             sum_repaint += repaint;
             sum_ins += ins;
@@ -994,6 +1043,20 @@ fn hover_op_census() {
              sum_repaint as f32 / hits as f32, rest_full.len(),
              100.0 * (sum_repaint as f32 / hits as f32) / rest_full.len() as f32);
     println!("  added ops:     avg {:.1}, worst {worst_ins}", sum_ins as f32 / hits as f32);
+    println!("\n  engine verdict `paint only`: {said_paint_only}/{hits}");
+    println!("    of those WRONG (something moved): {wrong}");
+    println!("    said relayout though nothing moved: {missed}");
+    println!("\n  REPAINT statt Layout: {tried}/{hits} gepatcht");
+    println!("    davon byte-gleich mit dem vollen Layout: {exact}");
+    println!("    davon ABWEICHEND: {wrong_patch}");
+    if tried > 0 {
+        println!(
+            "\n  Kosten je Zeigerwechsel: volles Layout {:.2} ms  vs  Repaint {:.3} ms  = {:.0}x",
+            sum_layout_us as f64 / hits as f64 / 1000.0,
+            sum_patch_us as f64 / tried as f64 / 1000.0,
+            (sum_layout_us as f64 / hits as f64) / (sum_patch_us as f64 / tried as f64),
+        );
+    }
     println!("  removed ops:   avg {:.1}", sum_del as f32 / hits as f32);
     println!("\nexamples:");
     for e in &examples {

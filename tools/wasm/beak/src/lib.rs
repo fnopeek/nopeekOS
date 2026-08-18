@@ -21,6 +21,7 @@ use beak_engine::cookies;
 
 use beak_engine::charset;
 use beak_engine::forms::{self, ControlKind, FormState, Forms};
+use beak_engine::raster::HoverChange;
 use beak_engine::{Engine, Layout};
 use nopeek_widgets::i18n;
 use nopeek_widgets::style::{Padding, Radius, Spacing};
@@ -588,7 +589,9 @@ fn content_gen() -> u32 {
 static mut LAST_LAYOUT_MS: i64 = 0;
 /// A pointer that costs more than this to follow makes the page feel broken —
 /// the window stops answering while it re-lays-out. Below it, hover is free
-/// enough to be worth having.
+/// enough to be worth having. Only the FALLBACK is measured against it: a
+/// pointer change the engine can answer by repainting costs a fraction of a
+/// millisecond and is never refused.
 const HOVER_BUDGET_MS: i64 = 250;
 /// Did we already say that this page is too heavy to hover? Said once per
 /// page, not once per mouse move ([[feedback-log-the-exception-not-the-rule]]).
@@ -605,7 +608,7 @@ fn hover_affordable() -> bool {
         if !p.read() {
             p.write(true);
             let mut b = String::new();
-            b.push_str("[beak] :hover off — a layout costs ");
+            b.push_str("[beak] :hover needs a layout here, and one costs ");
             b.push_str(&alloc::format!("{ms} ms"));
             log(&b);
         }
@@ -1642,13 +1645,13 @@ fn activate(page: &mut Page, seq: u32) {
 /// browser that had loaded the new page but still displayed the old URL.
 /// Rather than remember to flag each path, compare the navigation counter
 /// that a real page load bumps: a path added later cannot forget it.
-fn handle(engine: &Engine, ev: Event, cache: &Option<(Layout, i32, i32, u32)>, page: &mut Page) -> bool {
+fn handle(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32, u32)>, page: &mut Page) -> bool {
     let nav = nav_gen();
     let chrome = handle_event(engine, ev, cache, page);
     chrome || nav_gen() != nav
 }
 
-fn handle_event(engine: &Engine, ev: Event, cache: &Option<(Layout, i32, i32, u32)>, page: &mut Page) -> bool {
+fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32, u32)>, page: &mut Page) -> bool {
     match ev {
         // Keep URL_BUF synced with the address-bar edit buffer.
         Event::InputChange { value } => {
@@ -1825,12 +1828,14 @@ fn handle_event(engine: &Engine, ev: Event, cache: &Option<(Layout, i32, i32, u3
             }
             false
         }
-        // `:hover`. A pointer state change means the cascade has to run again,
-        // and that is a whole layout — so this arm is a series of ever-cheaper
-        // ways to answer "nothing to do": no hover rules on the page at all,
-        // then no usable cached layout, then the same element as last time.
+        // `:hover`. A series of ever-cheaper ways to answer "nothing to do":
+        // no hover rules on the page at all, then no usable cached layout,
+        // then the same element as last time. What is left is answered by
+        // repainting the display list in place where that is provably enough
+        // — measured on Wikipedia at 0.16 ms against 24 ms for a layout — and
+        // only otherwise by laying the page out again.
         Event::MouseMove { x, y } => {
-            if !engine.page_has_hover() || !hover_affordable() {
+            if !engine.page_has_hover() {
                 return false;
             }
             let Some((rx, ry, w, h)) = canvas_rect() else {
@@ -1852,9 +1857,24 @@ fn handle_event(engine: &Engine, ev: Event, cache: &Option<(Layout, i32, i32, u3
             } else {
                 Vec::new()
             };
-            if engine.set_hover(hovered) {
-                bump_content_gen("hover");
-                mark_dirty();
+            match engine.set_hover(hovered) {
+                HoverChange::Unchanged => {}
+                HoverChange::Changed { paint_only } => {
+                    let repainted = paint_only
+                        && cache.as_mut().is_some_and(|(lay, ..)| engine.repaint_hover(lay));
+                    if repainted {
+                        mark_dirty();
+                    } else if hover_affordable() {
+                        bump_content_gen("hover");
+                        mark_dirty();
+                    } else {
+                        // Neither cheap enough to repaint nor affordable to lay
+                        // out: put the state back, or the next layout that runs
+                        // for some other reason lights up a pointer that has
+                        // long moved on.
+                        engine.revert_hover();
+                    }
+                }
             }
             false
         }
@@ -2022,7 +2042,7 @@ pub extern "C" fn _start() {
             match poll_event() {
                 PollResult::Event(ev) => {
                     had_event = true;
-                    if handle(&engine, ev, &cache, &mut page) {
+                    if handle(&engine, ev, &mut cache, &mut page) {
                         chrome = true;
                     }
                 }

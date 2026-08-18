@@ -418,23 +418,25 @@ impl HoverSet {
         !self.classes.is_empty() && el.classes.iter().any(|c| self.classes.contains(c))
     }
 
-    /// Record the names of a compound that tests `:hover`.
+    /// Record a compound that tests `:hover`, under its MOST SELECTIVE name.
+    ///
+    /// Only one name, the way the sheet's own rule index picks one: every name
+    /// on the compound has to match for the selector to, so the narrowest of
+    /// them is enough — and `may_match` ORs what it is given. Recording all of
+    /// them made `li.gallerybox:hover` claim every `<li>` on the page and
+    /// `div.gallerytextwrapper:hover` every `<div>`. Harmless for hit-testing,
+    /// where a false yes only costs a rectangle, but fatal for deciding
+    /// whether a pointer move can be answered by repainting: one gallery rule
+    /// dragged a whole Wikipedia article onto the slow path.
     fn add(&mut self, c: &Compound) {
-        let mut named = false;
         if let Some(id) = &c.id {
             self.ids.insert(id.clone());
-            named = true;
-        }
-        for cl in &c.classes {
+        } else if let Some(cl) = c.classes.first() {
             self.classes.insert(cl.clone());
-            named = true;
-        }
-        if let Some(t) = &c.tag {
+        } else if let Some(t) = &c.tag {
             self.tags.insert(t.clone());
-            named = true;
-        }
-        // Nothing to filter on — the safe answer is "anything".
-        if !named {
+        } else {
+            // Nothing to filter on — the safe answer is "anything".
             self.any = true;
         }
     }
@@ -603,6 +605,24 @@ impl Selector {
     fn collect_hover(&self, out: &mut HoverSet) {
         for c in self.compounds.iter().filter(|c| c.wants_hover()) {
             out.add(c);
+        }
+    }
+
+    /// Record every `:hover` carrier whose rule restyles a SIBLING — anything
+    /// with `+` or `~` to the right of the carrier.
+    ///
+    /// `li:hover + li` is a real idiom, and what it restyles is not inside the
+    /// element the pointer is in. A repaint that walks the carrier's subtree
+    /// cannot see it, so those carriers take the slow path.
+    fn collect_hover_sideways(&self, out: &mut HoverSet) {
+        for (i, c) in self.compounds.iter().enumerate() {
+            if c.wants_hover()
+                && self.combs[i.min(self.combs.len())..]
+                    .iter()
+                    .any(|k| matches!(k, Comb::Adjacent | Comb::General))
+            {
+                out.add(c);
+            }
         }
     }
 
@@ -783,8 +803,26 @@ impl Media {
 /// one list, so a name can never point at a variant that does not exist. The
 /// match in `apply_one` is exhaustive, so a NEW variant fails to compile until
 /// somebody handles it.
+/// What a declaration of this property can move.
+///
+/// The point is the pointer: a `:hover` rule that only recolours something
+/// cannot move a single box, and answering it must not cost a layout. Blink
+/// carries the same idea as an invalidation class per property.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Class {
+    /// Can change geometry — a layout has to run.
+    Layout,
+    /// Can only change what a box looks like, never where anything sits.
+    Paint,
+    /// We do not implement it, so applying it changes NOTHING. `apply_one`
+    /// has no arm for it and a custom property has already been substituted
+    /// away by `vars.rs`. This is not a guess: an unknown declaration is a
+    /// no-op, so a rule made only of them is free to gain or lose.
+    Nothing,
+}
+
 macro_rules! css_props {
-    ($($var:ident = $name:literal),* $(,)?) => {
+    ($($var:ident = $name:literal @ $class:ident),* $(,)?) => {
         #[derive(Clone, Copy, PartialEq, Eq, Debug)]
         #[repr(u16)]
         pub enum Prop {
@@ -818,164 +856,174 @@ macro_rules! css_props {
                 $(Prop::$var => $name,)*
             }
         }
+
+        /// What a declaration of this property can move. The class is written
+        /// next to the name in the one list, so a NEW property cannot be added
+        /// without saying which it is.
+        pub fn prop_class(p: Prop) -> Class {
+            match p {
+                Prop::Unknown => Class::Nothing,
+                $(Prop::$var => Class::$class,)*
+            }
+        }
     };
 }
 
 css_props! {
-    Display = "display",
-    TableLayout = "table-layout",
-    BorderCollapse = "border-collapse",
-    EmptyCells = "empty-cells",
-    VerticalAlign = "vertical-align",
-    Overflow = "overflow",
-    OverflowWrap = "overflow-wrap",
-    WordWrap = "word-wrap",
-    WordBreak = "word-break",
-    Outline = "outline",
-    OutlineWidth = "outline-width",
-    OutlineStyle = "outline-style",
-    OutlineColor = "outline-color",
-    OutlineOffset = "outline-offset",
-    BorderRadius = "border-radius",
-    Transform = "transform",
-    BoxShadow = "box-shadow",
-    BorderTopLeftRadius = "border-top-left-radius",
-    BorderTopRightRadius = "border-top-right-radius",
-    BorderBottomRightRadius = "border-bottom-right-radius",
-    BorderBottomLeftRadius = "border-bottom-left-radius",
-    CaptionSide = "caption-side",
-    BorderSpacing = "border-spacing",
-    Color = "color",
-    FontWeight = "font-weight",
-    FontStyle = "font-style",
-    FontSize = "font-size",
-    LineHeight = "line-height",
-    Font = "font",
-    TextDecoration = "text-decoration",
-    TextDecorationLine = "text-decoration-line",
-    TextTransform = "text-transform",
-    TextAlignLast = "text-align-last",
-    TextIndent = "text-indent",
-    Direction = "direction",
-    TextAlign = "text-align",
-    ListStyleType = "list-style-type",
-    ListStyle = "list-style",
-    CounterReset = "counter-reset",
-    CounterIncrement = "counter-increment",
-    WhiteSpace = "white-space",
-    Opacity = "opacity",
-    Visibility = "visibility",
-    FontFamily = "font-family",
-    Width = "width",
-    MinWidth = "min-width",
-    MaxWidth = "max-width",
-    Height = "height",
-    MinHeight = "min-height",
-    MaxHeight = "max-height",
-    BoxSizing = "box-sizing",
-    Appearance = "appearance",
-    WebkitAppearance = "-webkit-appearance",
-    MozAppearance = "-moz-appearance",
-    Contain = "contain",
-    ContainIntrinsicSize = "contain-intrinsic-size",
-    Margin = "margin",
-    MarginTop = "margin-top",
-    MarginBlockStart = "margin-block-start",
-    MarginBottom = "margin-bottom",
-    MarginBlockEnd = "margin-block-end",
-    MarginLeft = "margin-left",
-    MarginInlineStart = "margin-inline-start",
-    MarginRight = "margin-right",
-    MarginInlineEnd = "margin-inline-end",
-    MarginInline = "margin-inline",
-    MarginBlock = "margin-block",
-    Padding = "padding",
-    PaddingTop = "padding-top",
-    PaddingBlockStart = "padding-block-start",
-    PaddingRight = "padding-right",
-    PaddingInlineEnd = "padding-inline-end",
-    PaddingBottom = "padding-bottom",
-    PaddingBlockEnd = "padding-block-end",
-    PaddingLeft = "padding-left",
-    PaddingInlineStart = "padding-inline-start",
-    PaddingInline = "padding-inline",
-    PaddingBlock = "padding-block",
-    BackgroundColor = "background-color",
-    Background = "background",
-    BackgroundImage = "background-image",
-    BackgroundRepeat = "background-repeat",
-    BackgroundPosition = "background-position",
-    BackgroundSize = "background-size",
-    Mask = "mask",
-    WebkitMask = "-webkit-mask",
-    MaskImage = "mask-image",
-    WebkitMaskImage = "-webkit-mask-image",
-    MaskRepeat = "mask-repeat",
-    WebkitMaskRepeat = "-webkit-mask-repeat",
-    MaskPosition = "mask-position",
-    WebkitMaskPosition = "-webkit-mask-position",
-    MaskSize = "mask-size",
-    WebkitMaskSize = "-webkit-mask-size",
-    Border = "border",
-    BorderTop = "border-top",
-    BorderRight = "border-right",
-    BorderBottom = "border-bottom",
-    BorderLeft = "border-left",
-    BorderWidth = "border-width",
-    BorderColor = "border-color",
-    BorderStyle = "border-style",
-    BorderTopWidth = "border-top-width",
-    BorderRightWidth = "border-right-width",
-    BorderBottomWidth = "border-bottom-width",
-    BorderLeftWidth = "border-left-width",
-    BorderTopColor = "border-top-color",
-    BorderRightColor = "border-right-color",
-    BorderBottomColor = "border-bottom-color",
-    BorderLeftColor = "border-left-color",
-    BorderTopStyle = "border-top-style",
-    BorderRightStyle = "border-right-style",
-    BorderBottomStyle = "border-bottom-style",
-    BorderLeftStyle = "border-left-style",
-    Position = "position",
-    Float = "float",
-    Clear = "clear",
-    Clip = "clip",
-    Top = "top",
-    Right = "right",
-    Bottom = "bottom",
-    Left = "left",
-    ZIndex = "z-index",
-    FlexDirection = "flex-direction",
-    FlexWrap = "flex-wrap",
-    FlexFlow = "flex-flow",
-    JustifyContent = "justify-content",
-    AlignItems = "align-items",
-    AlignSelf = "align-self",
-    Gap = "gap",
-    GridGap = "grid-gap",
-    ColumnGap = "column-gap",
-    RowGap = "row-gap",
-    FlexGrow = "flex-grow",
-    FlexShrink = "flex-shrink",
-    FlexBasis = "flex-basis",
-    Order = "order",
-    Flex = "flex",
-    GridTemplateColumns = "grid-template-columns",
-    GridTemplateRows = "grid-template-rows",
-    GridAutoRows = "grid-auto-rows",
-    GridTemplateAreas = "grid-template-areas",
-    Grid = "grid",
-    GridTemplate = "grid-template",
-    GridColumn = "grid-column",
-    GridRow = "grid-row",
-    GridColumnStart = "grid-column-start",
-    GridRowStart = "grid-row-start",
-    GridArea = "grid-area",
-    JustifyItems = "justify-items",
-    JustifySelf = "justify-self",
-    PlaceItems = "place-items",
-    PlaceSelf = "place-self",
-    Content = "content",
+    Display = "display" @ Layout,
+    TableLayout = "table-layout" @ Layout,
+    BorderCollapse = "border-collapse" @ Layout,
+    EmptyCells = "empty-cells" @ Layout,
+    VerticalAlign = "vertical-align" @ Layout,
+    Overflow = "overflow" @ Layout,
+    OverflowWrap = "overflow-wrap" @ Layout,
+    WordWrap = "word-wrap" @ Layout,
+    WordBreak = "word-break" @ Layout,
+    Outline = "outline" @ Paint,
+    OutlineWidth = "outline-width" @ Paint,
+    OutlineStyle = "outline-style" @ Paint,
+    OutlineColor = "outline-color" @ Paint,
+    OutlineOffset = "outline-offset" @ Paint,
+    BorderRadius = "border-radius" @ Paint,
+    Transform = "transform" @ Layout,
+    BoxShadow = "box-shadow" @ Paint,
+    BorderTopLeftRadius = "border-top-left-radius" @ Paint,
+    BorderTopRightRadius = "border-top-right-radius" @ Paint,
+    BorderBottomRightRadius = "border-bottom-right-radius" @ Paint,
+    BorderBottomLeftRadius = "border-bottom-left-radius" @ Paint,
+    CaptionSide = "caption-side" @ Layout,
+    BorderSpacing = "border-spacing" @ Layout,
+    Color = "color" @ Paint,
+    FontWeight = "font-weight" @ Layout,
+    FontStyle = "font-style" @ Layout,
+    FontSize = "font-size" @ Layout,
+    LineHeight = "line-height" @ Layout,
+    Font = "font" @ Layout,
+    TextDecoration = "text-decoration" @ Paint,
+    TextDecorationLine = "text-decoration-line" @ Paint,
+    TextTransform = "text-transform" @ Layout,
+    TextAlignLast = "text-align-last" @ Layout,
+    TextIndent = "text-indent" @ Layout,
+    Direction = "direction" @ Layout,
+    TextAlign = "text-align" @ Layout,
+    ListStyleType = "list-style-type" @ Layout,
+    ListStyle = "list-style" @ Layout,
+    CounterReset = "counter-reset" @ Layout,
+    CounterIncrement = "counter-increment" @ Layout,
+    WhiteSpace = "white-space" @ Layout,
+    Opacity = "opacity" @ Paint,
+    Visibility = "visibility" @ Layout,
+    FontFamily = "font-family" @ Layout,
+    Width = "width" @ Layout,
+    MinWidth = "min-width" @ Layout,
+    MaxWidth = "max-width" @ Layout,
+    Height = "height" @ Layout,
+    MinHeight = "min-height" @ Layout,
+    MaxHeight = "max-height" @ Layout,
+    BoxSizing = "box-sizing" @ Layout,
+    Appearance = "appearance" @ Layout,
+    WebkitAppearance = "-webkit-appearance" @ Layout,
+    MozAppearance = "-moz-appearance" @ Layout,
+    Contain = "contain" @ Layout,
+    ContainIntrinsicSize = "contain-intrinsic-size" @ Layout,
+    Margin = "margin" @ Layout,
+    MarginTop = "margin-top" @ Layout,
+    MarginBlockStart = "margin-block-start" @ Layout,
+    MarginBottom = "margin-bottom" @ Layout,
+    MarginBlockEnd = "margin-block-end" @ Layout,
+    MarginLeft = "margin-left" @ Layout,
+    MarginInlineStart = "margin-inline-start" @ Layout,
+    MarginRight = "margin-right" @ Layout,
+    MarginInlineEnd = "margin-inline-end" @ Layout,
+    MarginInline = "margin-inline" @ Layout,
+    MarginBlock = "margin-block" @ Layout,
+    Padding = "padding" @ Layout,
+    PaddingTop = "padding-top" @ Layout,
+    PaddingBlockStart = "padding-block-start" @ Layout,
+    PaddingRight = "padding-right" @ Layout,
+    PaddingInlineEnd = "padding-inline-end" @ Layout,
+    PaddingBottom = "padding-bottom" @ Layout,
+    PaddingBlockEnd = "padding-block-end" @ Layout,
+    PaddingLeft = "padding-left" @ Layout,
+    PaddingInlineStart = "padding-inline-start" @ Layout,
+    PaddingInline = "padding-inline" @ Layout,
+    PaddingBlock = "padding-block" @ Layout,
+    BackgroundColor = "background-color" @ Paint,
+    Background = "background" @ Paint,
+    BackgroundImage = "background-image" @ Paint,
+    BackgroundRepeat = "background-repeat" @ Paint,
+    BackgroundPosition = "background-position" @ Paint,
+    BackgroundSize = "background-size" @ Paint,
+    Mask = "mask" @ Paint,
+    WebkitMask = "-webkit-mask" @ Paint,
+    MaskImage = "mask-image" @ Paint,
+    WebkitMaskImage = "-webkit-mask-image" @ Paint,
+    MaskRepeat = "mask-repeat" @ Paint,
+    WebkitMaskRepeat = "-webkit-mask-repeat" @ Paint,
+    MaskPosition = "mask-position" @ Paint,
+    WebkitMaskPosition = "-webkit-mask-position" @ Paint,
+    MaskSize = "mask-size" @ Paint,
+    WebkitMaskSize = "-webkit-mask-size" @ Paint,
+    Border = "border" @ Layout,
+    BorderTop = "border-top" @ Layout,
+    BorderRight = "border-right" @ Layout,
+    BorderBottom = "border-bottom" @ Layout,
+    BorderLeft = "border-left" @ Layout,
+    BorderWidth = "border-width" @ Layout,
+    BorderColor = "border-color" @ Paint,
+    BorderStyle = "border-style" @ Layout,
+    BorderTopWidth = "border-top-width" @ Layout,
+    BorderRightWidth = "border-right-width" @ Layout,
+    BorderBottomWidth = "border-bottom-width" @ Layout,
+    BorderLeftWidth = "border-left-width" @ Layout,
+    BorderTopColor = "border-top-color" @ Paint,
+    BorderRightColor = "border-right-color" @ Paint,
+    BorderBottomColor = "border-bottom-color" @ Paint,
+    BorderLeftColor = "border-left-color" @ Paint,
+    BorderTopStyle = "border-top-style" @ Layout,
+    BorderRightStyle = "border-right-style" @ Layout,
+    BorderBottomStyle = "border-bottom-style" @ Layout,
+    BorderLeftStyle = "border-left-style" @ Layout,
+    Position = "position" @ Layout,
+    Float = "float" @ Layout,
+    Clear = "clear" @ Layout,
+    Clip = "clip" @ Layout,
+    Top = "top" @ Layout,
+    Right = "right" @ Layout,
+    Bottom = "bottom" @ Layout,
+    Left = "left" @ Layout,
+    ZIndex = "z-index" @ Layout,
+    FlexDirection = "flex-direction" @ Layout,
+    FlexWrap = "flex-wrap" @ Layout,
+    FlexFlow = "flex-flow" @ Layout,
+    JustifyContent = "justify-content" @ Layout,
+    AlignItems = "align-items" @ Layout,
+    AlignSelf = "align-self" @ Layout,
+    Gap = "gap" @ Layout,
+    GridGap = "grid-gap" @ Layout,
+    ColumnGap = "column-gap" @ Layout,
+    RowGap = "row-gap" @ Layout,
+    FlexGrow = "flex-grow" @ Layout,
+    FlexShrink = "flex-shrink" @ Layout,
+    FlexBasis = "flex-basis" @ Layout,
+    Order = "order" @ Layout,
+    Flex = "flex" @ Layout,
+    GridTemplateColumns = "grid-template-columns" @ Layout,
+    GridTemplateRows = "grid-template-rows" @ Layout,
+    GridAutoRows = "grid-auto-rows" @ Layout,
+    GridTemplateAreas = "grid-template-areas" @ Layout,
+    Grid = "grid" @ Layout,
+    GridTemplate = "grid-template" @ Layout,
+    GridColumn = "grid-column" @ Layout,
+    GridRow = "grid-row" @ Layout,
+    GridColumnStart = "grid-column-start" @ Layout,
+    GridRowStart = "grid-row-start" @ Layout,
+    GridArea = "grid-area" @ Layout,
+    JustifyItems = "justify-items" @ Layout,
+    JustifySelf = "justify-self" @ Layout,
+    PlaceItems = "place-items" @ Layout,
+    PlaceSelf = "place-self" @ Layout,
+    Content = "content" @ Layout,
 }
 
 /// condition list it sits inside (comma = OR), or `None` when unconditional.
@@ -1020,6 +1068,19 @@ pub struct Stylesheet {
     /// without hover rules it is empty and pointer movement costs exactly
     /// nothing; on a page with them it is a small fraction of the document.
     pub hover_set: HoverSet,
+    /// The subset of `hover_set` whose rules declare at least one property that
+    /// can MOVE something. A pointer entering an element outside this set can
+    /// only change how that element looks — which is the whole point: a repaint
+    /// instead of a layout.
+    ///
+    /// Split per RULE, not per page: one `:hover{display:none}` somewhere must
+    /// not make every recolouring hover on the page expensive.
+    pub hover_layout_set: HoverSet,
+    /// Carriers whose rules restyle a SIBLING (`li:hover + li`). Geometry may
+    /// well be untouched, so this is not about the layout claim — it is about
+    /// what a repaint can FIND: it walks the carrier's own subtree, and a
+    /// sibling is not in it.
+    pub hover_sideways_set: HoverSet,
     /// Every `url(…)` appearing anywhere in the sheet, keyed by `url_key`.
     ///
     /// `ComputedStyle` is `Copy`, so it cannot carry the URL itself — it
@@ -1187,6 +1248,8 @@ impl Stylesheet {
             normal: Index::default(),
             pseudo: Index::default(),
             hover_set: HoverSet::default(),
+            hover_layout_set: HoverSet::default(),
+            hover_sideways_set: HoverSet::default(),
             urls: BTreeMap::new(),
         }
     }
@@ -1418,11 +1481,35 @@ pub fn parse(css: &str) -> Stylesheet {
     let mut urls = BTreeMap::new();
     collect_urls(&css, &mut urls);
     let mut hover_set = HoverSet::default();
-    for sel in rules.iter().flat_map(|r| &r.selectors) {
-        sel.collect_hover(&mut hover_set);
+    let mut hover_layout_set = HoverSet::default();
+    let mut hover_sideways_set = HoverSet::default();
+    for r in &rules {
+        // A rule made only of properties we do not implement declares nothing
+        // at all — `apply_one` has no arm for them — so it can gain or lose
+        // without moving a pixel. MediaWiki's `:hover{cursor:pointer}` is
+        // exactly that, and it must not drag the page into a layout.
+        let moves = r
+            .decls
+            .iter()
+            .chain(r.decls_imp.iter())
+            .any(|(p, _)| prop_class(*p) == Class::Layout);
+        for sel in &r.selectors {
+            sel.collect_hover(&mut hover_set);
+            if moves {
+                sel.collect_hover(&mut hover_layout_set);
+            }
+            sel.collect_hover_sideways(&mut hover_sideways_set);
+        }
     }
-    let mut sheet =
-        Stylesheet { rules, normal: Index::default(), pseudo: Index::default(), hover_set, urls };
+    let mut sheet = Stylesheet {
+        rules,
+        normal: Index::default(),
+        pseudo: Index::default(),
+        hover_set,
+        hover_layout_set,
+        hover_sideways_set,
+        urls,
+    };
     sheet.build_index();
     sheet
 }

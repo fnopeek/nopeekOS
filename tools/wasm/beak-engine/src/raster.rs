@@ -15,6 +15,24 @@ use crate::fonts::Fonts;
 use crate::layout::{DrawOp, Layout, Rgb, Theme};
 use crate::style::{BgPos, BgSize};
 
+/// What a pointer move costs — the answer `Engine::set_hover` gives.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HoverChange {
+    /// The pointer is inside exactly the same elements as before.
+    Unchanged,
+    /// The state changed. `paint_only` means no rule that can gain or lose
+    /// here declares anything that moves a box, so the geometry of the whole
+    /// page is unchanged and only the look of those elements differs.
+    Changed { paint_only: bool },
+}
+
+impl HoverChange {
+    /// Did anything change at all?
+    pub fn is_changed(self) -> bool {
+        self != HoverChange::Unchanged
+    }
+}
+
 pub struct Engine {
     fonts: Fonts,
     /// Rasterised-glyph cache keyed by (char, size-bits, face-id). fontdue's
@@ -50,6 +68,10 @@ pub struct Engine {
     /// tool). Off by default so the label-formatting cost is only paid while the
     /// user is inspecting; the shell toggles it and re-lays-out.
     inspect: core::cell::Cell<bool>,
+    /// The pointer state the LAST layout was made with. `repaint_hover` needs
+    /// both: the style a box is painted with now, and the one it should be
+    /// painted with next.
+    hover_prev: RefCell<Vec<u32>>,
     /// `seq`s of the elements the pointer is inside, ascending — what `:hover`
     /// reads. Device state like `theme`, not page content, so it lives here
     /// rather than in every layout signature.
@@ -58,6 +80,16 @@ pub struct Engine {
     /// cost on the machine that is actually slow. `None` on the host, where
     /// `tests/diag.rs` times the phases from outside.
     clock: core::cell::Cell<Option<fn() -> u64>>,
+    /// The last parsed DOCUMENT with the fingerprint of the inputs that built
+    /// it. Parsing a real page is ~170 ms on the device, and a page is laid out
+    /// several times over its life from unchanged bytes — an image landing, a
+    /// form key, the pointer entering a link. Every one of those re-parsed the
+    /// whole HTML for nothing.
+    ///
+    /// The width and the palette are part of the identity because
+    /// `picture::resolve` BAKES the winning `srcset` candidate into the tree:
+    /// the same bytes at a different width are a different document.
+    dom: RefCell<Option<(u64, crate::dom::Dom)>>,
     /// The last parsed stylesheet with the fingerprint of the inputs that built
     /// it. Parsing a real page's CSS is a third of a layout, and a page is laid
     /// out several times over its life (images landing, a form key, a resize)
@@ -105,7 +137,9 @@ impl Engine {
             viewport_h: core::cell::Cell::new(600),
             inspect: core::cell::Cell::new(false),
             hover: RefCell::new(Vec::new()),
+            hover_prev: RefCell::new(Vec::new()),
             clock: core::cell::Cell::new(None),
+            dom: RefCell::new(None),
             sheet: RefCell::new(None),
         }
     }
@@ -124,16 +158,146 @@ impl Engine {
     }
 
     /// Tell the engine which elements the pointer is inside — `Layout::hover_at`
-    /// produces the list from the previous layout. Returns whether it CHANGED,
-    /// which is the shell's signal to lay out again: a pointer that moved
-    /// within the same element must not cost anything.
-    pub fn set_hover(&self, seqs: Vec<u32>) -> bool {
+    /// produces the list from the previous layout. Says what the change COSTS:
+    /// a pointer that stayed in the same elements must cost nothing, and one
+    /// that entered something which only recolours must not cost a layout.
+    pub fn set_hover(&self, seqs: Vec<u32>) -> HoverChange {
         let mut cur = self.hover.borrow_mut();
         if *cur == seqs {
-            return false;
+            return HoverChange::Unchanged;
         }
-        *cur = seqs;
-        true
+        // Only the elements that GAINED or LOST the state can restyle; one that
+        // is in both lists is unaffected by the move.
+        let moved: Vec<u32> = cur
+            .iter()
+            .chain(seqs.iter())
+            .filter(|s| (cur.contains(s) as u8 + seqs.contains(s) as u8) == 1)
+            .copied()
+            .collect();
+        *self.hover_prev.borrow_mut() = core::mem::replace(&mut *cur, seqs);
+        drop(cur);
+        HoverChange::Changed { paint_only: self.hover_is_paint_only(&moved) }
+    }
+
+    /// Can the elements whose pointer state just changed only be REPAINTED?
+    ///
+    /// True when no `:hover` rule that could gain or lose on any of them
+    /// declares a property that moves something. Conservative in the direction
+    /// that matters: an unknown answer is "no", which costs a layout we might
+    /// not have needed — never a stale page.
+    fn hover_is_paint_only(&self, moved: &[u32]) -> bool {
+        let held = self.sheet.borrow();
+        let Some((_, sheet)) = held.as_ref() else { return false };
+        // Nothing on the page styles geometry on hover — no lookup needed.
+        if sheet.hover_layout_set.is_empty() {
+            return true;
+        }
+        let held_dom = self.dom.borrow();
+        let Some((_, dom)) = held_dom.as_ref() else { return false };
+        fn walk(el: &crate::dom::Element, want: &[u32], set: &crate::css::HoverSet) -> bool {
+            for c in &el.children {
+                if let crate::dom::Node::Element(e) = c {
+                    if want.contains(&e.seq) && set.may_match(e) {
+                        return true;
+                    }
+                    if walk(e, want, set) {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+        !walk(&dom.root, moved, &sheet.hover_layout_set)
+    }
+
+    /// Answer a paint-only pointer change by patching the display list, with
+    /// no parse, no cascade over the page and no box arithmetic.
+    ///
+    /// Only call it after `set_hover` said `paint_only`. `false` means the
+    /// patch could not be made with certainty and the caller must lay out —
+    /// the layout it was given is then untouched, because every change is
+    /// applied only once all of them are known to be possible.
+    pub fn repaint_hover(&self, lay: &mut Layout) -> bool {
+        let (prev, cur) = (self.hover_prev.borrow(), self.hover.borrow());
+        let moved: Vec<u32> = prev
+            .iter()
+            .chain(cur.iter())
+            .filter(|s| (prev.contains(s) as u8 + cur.contains(s) as u8) == 1)
+            .copied()
+            .collect();
+        if moved.is_empty() {
+            return true;
+        }
+        let held = self.sheet.borrow();
+        let Some((_, sheet)) = held.as_ref() else { return false };
+        let held_dom = self.dom.borrow();
+        let Some((_, dom)) = held_dom.as_ref() else { return false };
+        let w = lay.width;
+        let vh = self.viewport_h.get();
+        // A rule that restyles a sibling of the element the pointer is in is
+        // out of reach for a subtree walk.
+        if !sheet.hover_sideways_set.is_empty() {
+            let mut hit = false;
+            fn walk(el: &crate::dom::Element, want: &[u32], set: &crate::css::HoverSet, hit: &mut bool) {
+                for c in &el.children {
+                    if let crate::dom::Node::Element(e) = c {
+                        if want.contains(&e.seq) && set.may_match(e) {
+                            *hit = true;
+                            return;
+                        }
+                        walk(e, want, set, hit);
+                    }
+                }
+            }
+            walk(&dom.root, &moved, &sheet.hover_sideways_set, &mut hit);
+            if hit {
+                return false;
+            }
+        }
+        let mut groups = Vec::new();
+        for &seq in &moved {
+            // Bounded on purpose: repainting an element at a time only beats a
+            // layout while the subtree is small. `nav:hover` over a menu of a
+            // few dozen items is worth it; the same rule on `<body>` is not.
+            const SUBTREE_CAP: usize = 128;
+            let mut kids_off = Vec::new();
+            let mut kids_on = Vec::new();
+            let one = |hover: &[u32], out: &mut Vec<crate::layout::StyleProbe>| {
+                crate::layout::resolve_out_of_band(dom, sheet, &self.theme, w, vh, seq, hover, SUBTREE_CAP, out)
+            };
+            let (Some(off), Some(on)) = (one(&prev, &mut kids_off), one(&cur, &mut kids_on)) else {
+                return false;
+            };
+            // The two descents visit the same tree in the same order, so a
+            // length mismatch would mean one of them stopped early.
+            if kids_off.len() != kids_on.len() {
+                return false;
+            }
+            let mut pairs = alloc::vec![(off, on)];
+            pairs.extend(kids_off.into_iter().zip(kids_on));
+            let mut text = alloc::string::String::new();
+            if let Some(el) = crate::layout::find_seq_pub(dom, seq) {
+                crate::layout::subtree_text(el, &mut text);
+            }
+            groups.push(crate::layout::HoverRepaint {
+                text,
+                rects: lay
+                    .hover_boxes
+                    .iter()
+                    .filter(|b| b.seq == seq)
+                    .map(|b| (b.x, b.y, b.w, b.h))
+                    .collect(),
+                pairs,
+            });
+        }
+        crate::layout::repaint_hover(lay, &self.fonts, &groups)
+    }
+
+    /// Put the pointer state back to what the last layout was made with —
+    /// for a change that could be neither repainted nor afforded.
+    pub fn revert_hover(&self) {
+        let prev = self.hover_prev.borrow().clone();
+        *self.hover.borrow_mut() = prev;
     }
 
     /// Does the current page style anything on `:hover`? False means pointer
@@ -256,11 +420,19 @@ impl Engine {
     ) -> Layout {
         let now = || self.clock.get().map_or(0, |f| f());
         let t0 = now();
-        let mut dom = crate::dom::parse(html);
-        // `<picture>`/`srcset` is folded into the `<img>` before anything reads
-        // a `src` — layout, the fetch list and the draw op then all see the one
-        // URL that actually won.
-        crate::picture::resolve(&mut dom, crate::css::Media::new(width as f32, self.theme.is_dark()));
+        let dom_key = fingerprint(html.as_bytes())
+            ^ (width as u64) << 40
+            ^ (self.theme.is_dark() as u64) << 63;
+        if self.dom.borrow().as_ref().map(|(k, _)| *k) != Some(dom_key) {
+            let mut dom = crate::dom::parse(html);
+            // `<picture>`/`srcset` is folded into the `<img>` before anything
+            // reads a `src` — layout, the fetch list and the draw op then all
+            // see the one URL that actually won.
+            crate::picture::resolve(&mut dom, crate::css::Media::new(width as f32, self.theme.is_dark()));
+            *self.dom.borrow_mut() = Some((dom_key, dom));
+        }
+        let held_dom = self.dom.borrow();
+        let dom = &held_dom.as_ref().unwrap().1;
         // The cascade also reads the document's own `<style>` blocks and the
         // viewport width (media queries), so both are part of the identity.
         // The theme is part of the identity too: `prefers-color-scheme` decides
@@ -1007,14 +1179,131 @@ mod tests {
         // The box is at the content origin; probe its middle in document space.
         let hovered = rest.hover_at((PAD + 10) as i32, (PAD + 10) as i32);
         assert!(!hovered.is_empty(), "the pointer is inside the div");
-        assert!(eng.set_hover(hovered.clone()), "a first hover is a change");
-        assert!(!eng.set_hover(hovered), "the same list twice is not — no relayout");
+        assert!(eng.set_hover(hovered.clone()).is_changed(), "a first hover is a change");
+        assert!(!eng.set_hover(hovered).is_changed(), "the same list twice is not — no relayout");
 
         assert_eq!(probe(&eng.layout(html, w)), (255, 0, 0), "hovering paints it red");
 
         // Leaving the element takes the colour away again.
-        assert!(eng.set_hover(alloc::vec![]));
+        assert!(eng.set_hover(alloc::vec![]).is_changed());
         assert_eq!(probe(&eng.layout(html, w)), (255, 255, 255));
+    }
+
+    /// The whole point: a pointer change that only recolours is answered by
+    /// PATCHING the display list, and the result has to be indistinguishable
+    /// from having laid the page out again.
+    ///
+    /// Measured on Wikipedia's Main_Page: 0.16 ms against 24 ms, and 55 of the
+    /// 64 hover targets on the page take this path — the rest fall back, which
+    /// is what every guard in `repaint_hover` exists to do.
+    #[test]
+    fn a_repaint_answers_a_hover_exactly_as_a_layout_would() {
+        let html = "<style>a{color:#0000ee}a:hover{color:#ff0000;text-decoration:underline}</style>\
+                    <p>text <a href=\"/x\">link</a> more</p>";
+        let w = 400;
+        let eng = Engine::new();
+        eng.set_hover(alloc::vec![]);
+        let mut base = eng.layout(html, w);
+        let hovered = base
+            .hover_boxes
+            .first()
+            .map(|b| base.hover_at(b.x + b.w / 2, b.y + b.h / 2))
+            .expect("the link is hit-testable");
+        assert!(!hovered.is_empty());
+
+        let change = eng.set_hover(hovered);
+        assert_eq!(change, HoverChange::Changed { paint_only: true }, "colour + underline move nothing");
+        let full = eng.layout(html, w);
+        assert!(eng.repaint_hover(&mut base), "the patch has to be possible here");
+        assert_eq!(dump_ops(&base), dump_ops(&full), "patched vs laid out");
+        // …and it really did something.
+        assert!(dump_ops(&full).contains("c=Rgb(255, 0, 0)"), "the link is red now");
+    }
+
+    /// A hover rule that can MOVE something is not a repaint, and the engine
+    /// has to say so before anyone tries.
+    #[test]
+    fn a_hover_that_moves_a_box_is_not_a_repaint() {
+        let probe = |rule: &str| {
+            let html = alloc::format!("<style>{rule}</style><p><a href=\"/x\">link</a></p>");
+            let eng = Engine::new();
+            eng.set_hover(alloc::vec![]);
+            let lay = eng.layout(&html, 400);
+            let b = lay.hover_boxes.first().copied().expect("hit-testable");
+            eng.set_hover(lay.hover_at(b.x + b.w / 2, b.y + b.h / 2))
+        };
+        assert_eq!(probe("a:hover{color:#f00}"), HoverChange::Changed { paint_only: true });
+        assert_eq!(probe("a:hover{padding-left:20px}"), HoverChange::Changed { paint_only: false });
+        // A property we do not implement cannot move anything — and MediaWiki
+        // writes `cursor:pointer` into a third of its hover rules.
+        assert_eq!(probe("a:hover{cursor:pointer;color:#f00}"), HoverChange::Changed { paint_only: true });
+        // …but one layout property in the same rule is enough.
+        assert_eq!(probe("a:hover{cursor:pointer;display:block}"), HoverChange::Changed { paint_only: false });
+    }
+
+    /// The guards. Each of these is a real page shape that a colour patch
+    /// cannot reproduce, and each has to end in "lay it out" rather than in a
+    /// wrong picture.
+    #[test]
+    fn a_repaint_gives_up_rather_than_get_it_wrong() {
+        let gives_up = |rule: &str, body: &str| {
+            let html = alloc::format!("<style>a{{color:#00e}}{rule}</style>{body}");
+            let eng = Engine::new();
+            eng.set_hover(alloc::vec![]);
+            let mut base = eng.layout(&html, 400);
+            let b = base.hover_boxes.first().copied().expect("hit-testable");
+            let hovered = base.hover_at(b.x + b.w / 2, b.y + b.h / 2);
+            assert!(!hovered.is_empty());
+            eng.set_hover(hovered);
+            let full = eng.layout(&html, 400);
+            let ok = eng.repaint_hover(&mut base);
+            // Whatever it decided, it must never leave a page that disagrees
+            // with what a layout would have produced.
+            if ok {
+                assert_eq!(dump_ops(&base), dump_ops(&full), "{rule}: patched but wrong");
+            }
+            !ok
+        };
+        // A background that APPEARS has no place in the list to appear at.
+        assert!(gives_up("a:hover{background:#f00}", "<p><a href=\"/x\">link</a></p>"));
+        // A pseudo-element's box was never recorded — this is how MediaWiki
+        // underlines the article tabs.
+        assert!(gives_up(
+            "a:hover::after{content:'x';background:#f00}",
+            "<p><a href=\"/x\">link</a></p>"
+        ));
+        // A rule that reaches sideways restyles something outside the subtree.
+        assert!(gives_up(
+            "li:hover + li a{color:#f00}",
+            "<ul><li><a href=\"/x\">one</a></li><li><a href=\"/y\">two</a></li></ul>"
+        ));
+    }
+
+    /// Everything a layout draws must survive being written down and read back
+    /// — the comparison the repaint tests lean on.
+    fn dump_ops(l: &Layout) -> alloc::string::String {
+        use core::fmt::Write;
+        let mut s = alloc::string::String::new();
+        for op in &l.ops {
+            match op {
+                DrawOp::Text { x, y, size, color, bold, italic, mono, text } => {
+                    let _ = write!(s, "T {x},{y} {size:.2} c={color:?} {bold}{italic}{mono} {text:?}\n");
+                }
+                DrawOp::Rect { x, y, w, h, color } => {
+                    let _ = write!(s, "R {x},{y} {w}x{h} c={color:?}\n");
+                }
+                DrawOp::RoundRect { x, y, w, h, r, color, ring } => {
+                    let _ = write!(s, "Q {x},{y} {w}x{h} {r:?} c={color:?} {ring:.2}\n");
+                }
+                DrawOp::Image { x, y, w, h, src, alt } => {
+                    let _ = write!(s, "I {x},{y} {w}x{h} {src} {alt}\n");
+                }
+                DrawOp::BgImage { x, y, w, h, key, .. } => {
+                    let _ = write!(s, "B {x},{y} {w}x{h} {key}\n");
+                }
+            }
+        }
+        s
     }
 
     /// Without a mask the same box is a plain filled rect — the guard that the
