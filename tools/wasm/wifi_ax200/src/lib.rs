@@ -267,6 +267,11 @@ struct Stats {
     loop_iters: u32,
     loop_busy: u32,
     deauth: u32,
+    // Requests SEEN, separate from answers given. With `ampdu on` we answer the
+    // AP only after the firmware hands back a BAID — so if that status never
+    // arrives, both answer counters stay 0 and the AP is left waiting with no
+    // reply at all. Without this number those two cases look identical.
+    addba_seen: u32,
     addba_declined: u32,
     addba_accepted: u32,
     // What the firmware reports about the beacons we no longer see ourselves.
@@ -333,7 +338,7 @@ impl Stats {
         rx_prot: 0, rx_mic_fail: 0, rx_sec_none: 0, rx_undecrypted: 0,
         tx_eapol: 0, keys_set: 0, ready_sent: 0,
         rx_pool_exhausted: 0, rx_to_us: 0, rx_undecoded: 0,
-        loop_iters: 0, loop_busy: 0, deauth: 0, addba_declined: 0, addba_accepted: 0,
+        loop_iters: 0, loop_busy: 0, deauth: 0, addba_seen: 0, addba_declined: 0, addba_accepted: 0,
         mb_notifs: 0, mb_consec: 0, mb_since_rx: 0, mb_expected: 0, mb_received: 0,
         mb_losses: 0,
         prof_work_us: 0, prof_rx_us: 0, prof_sleep_us: 0, prof_passes: 0, prof_frames: 0,
@@ -2892,6 +2897,12 @@ impl Ax200 {
             r.d(self.st.addba_declined as u64);
             r.s(" accepted ");
             r.d(self.st.addba_accepted as u64);
+            r.s(" of ");
+            r.d(self.st.addba_seen as u64);
+            r.s(" asked");
+            if self.st.addba_seen > self.st.addba_declined + self.st.addba_accepted {
+                r.s("  <- UNANSWERED");
+            }
             r.c(b'\n');
         }
 
@@ -4063,6 +4074,7 @@ impl Ax200 {
             let mut a_mgmt = 0u32;
             let mut a_crypt = [0u32; 4];
             let mut a_air = 0u64;
+            let mut a_addba = 0u32;
             let mut a_rx_bytes = 0u64;
             let mut a_to_us = 0u32;
             let mut a_undecoded = 0u32;
@@ -4149,7 +4161,10 @@ impl Ax200 {
                             deauth_reason = u16::from_le_bytes([body[0], body[1]]);
                         } else if st == DOT11_STYPE_ACTION && body[0] == WLAN_CATEGORY_BACK {
                             match body[1] {
-                                WLAN_ACTION_ADDBA_REQ => addba = Some(body), // answered outside
+                                WLAN_ACTION_ADDBA_REQ => {
+                                    a_addba += 1;
+                                    addba = Some(body); // answered outside
+                                }
                                 WLAN_ACTION_DELBA => delba = true,
                                 _ => {}
                             }
@@ -4235,6 +4250,7 @@ impl Ax200 {
             self.st.rx_ip = self.st.rx_ip.wrapping_add(a_ip);
             self.st.rx_eapol = self.st.rx_eapol.wrapping_add(a_eapol);
             self.st.rx_mgmt = self.st.rx_mgmt.wrapping_add(a_mgmt);
+            self.st.addba_seen = self.st.addba_seen.wrapping_add(a_addba);
             self.st.rx_airtime_us += a_air;
             self.st.rx_prot = self.st.rx_prot.wrapping_add(a_crypt[0]);
             self.st.rx_mic_fail = self.st.rx_mic_fail.wrapping_add(a_crypt[1]);
