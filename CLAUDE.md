@@ -48,7 +48,7 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-08-18 · beak 0.28.0** (Kernel-/WLAN-Versionen: `git log`)
+**Stand 2026-08-18 · beak 0.28.1** (Kernel-/WLAN-Versionen: `git log`)
 
 Zwei Fäden laufen parallel.
 
@@ -59,14 +59,17 @@ WPT-Zahl steht in `docs/spec/CONFORMANCE.md` und nirgends sonst. Seit 0.26.0
 gibt es einen Pfad **unterhalb** von „volles Layout": ein Zeigerwechsel, der nur
 malt, wird in der Anzeigeliste geflickt statt neu gerechnet — 151 von 165
 Zeigerpositionen auf zwei echten Seiten, byte-gleich mit dem vollen Layout.
-Noch nicht am Gerät nachgemessen.
+**Am Gerät noch nicht nachgemessen** — Rezept in `memory/`.
 
 **WLAN (AX200)**: lädt Wikipedia über Funk. Das Intent **`wlan`** ist das
 Werkzeug dafür — Kernel-Sicht plus ein Klartext-Report, den der Treiber selbst
 veröffentlicht (Rate, Retries, Airtime, 4-Way-Sprosse, Ring-Zustand) plus der
-wifid-Log. Offen: Stabilität über die Zeit, und Durchsatz — gemessen 16 Mbit/s
-bei 130 Mbit PHY, der Hebel ist A-MPDU. Fahrplan in
-`memory/project_wifi_ax200.md`.
+wifid-Log. Offen: Stabilität über die Zeit, und Durchsatz — 20 Mbit/s gegen
+eine Decke von 43 ohne Aggregation. Alles ausser der Luft ist als Ursache
+ausgeschlossen (Fenster, Verlust, RTT, Krypto, TCP-Stack). Der Hebel ist
+A-MPDU, aber dafür fehlt `RX_BAID_ALLOCATION_CONFIG_CMD`: wir schicken das
+alte `ADD_STA`, das diese Firmware lahmlegt.
+Start: `memory/project_wifi_stability_handover.md`.
 
 Alles darunter — Kernel, npkFS, Netz, Compositor, Panels, Apps, MicroVM —
 ist gebaut und in Betrieb. Überblick: `README.md`.
