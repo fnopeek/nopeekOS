@@ -825,9 +825,13 @@ impl Ax200 {
         let pages = ((bytes + 4095) / 4096) as u16;
         let handle = host::dma_alloc(pages);
         if handle < 0 {
-            host::dprint("[ax200] DMA alloc failed: ");
-            host::dprint(name);
-            host::dprint("\n");
+            // LOUD. A failed DMA allocation leaves a NONE handle that every
+            // later read and write silently ignores — the card simply never
+            // works, with no message anyone sees. `dprint` was the wrong
+            // channel for the one failure that makes the driver useless.
+            host::print("[ax200] FATAL: DMA alloc failed for ");
+            host::print(name);
+            host::print(" — the kernel's per-module allocation limit is full\n");
             return Dma::NONE;
         }
         Dma { handle, phys: host::dma_phys(handle) }
