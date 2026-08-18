@@ -237,6 +237,22 @@ struct Stats {
     rx_sec_none: u32,
     rx_undecrypted: u32,
     rx_drain_max: u32, // most frames drained in one pass — RX ring pressure
+    // Are we starved, or are we the bottleneck? With the air at 30 % and the
+    // window at 8 MB, that is the whole remaining question, and the shape of
+    // the arrivals answers it: steady frames mean the ceiling is ours, sparse
+    // bursts with idle gaps mean the AP is not delivering. Per WINDOW, then
+    // snapshot with the peak — an average over the whole uptime is idle time.
+    win_pass_empty: u32,
+    win_pass_few: u32,   // 1..=3
+    win_pass_many: u32,  // 4..=15
+    win_pass_burst: u32, // 16+
+    win_gap_max_us: u32, // longest run of passes that found nothing
+    last_rx_us: u64,
+    pk_pass_empty: u32,
+    pk_pass_few: u32,
+    pk_pass_many: u32,
+    pk_pass_burst: u32,
+    pk_gap_max_us: u32,
     // Passes that drained (nearly) the whole RB pool. There are only RX_NUM_RBS
     // buffers: once they are all full the firmware has nowhere to put the next
     // frame and drops it, which TCP sees as loss and answers by backing off. A
@@ -308,6 +324,10 @@ impl Stats {
         tx_ok: 0, tx_fail: 0, tx_retries: 0, tx_rts_fail: 0, tx_airtime_us: 0,
         last_status: 0, last_init_rate: 0,
         rx_frames: 0, rx_bytes: 0, rx_ip: 0, rx_eapol: 0, rx_mgmt: 0, rx_drain_max: 0,
+        win_pass_empty: 0, win_pass_few: 0, win_pass_many: 0, win_pass_burst: 0,
+        win_gap_max_us: 0, last_rx_us: 0,
+        pk_pass_empty: 0, pk_pass_few: 0, pk_pass_many: 0, pk_pass_burst: 0,
+        pk_gap_max_us: 0,
         rx_airtime_us: 0, rx_airtime_pct: 0, win_rx_airtime_us: 0,
         pk_rx_airtime_pct: 0, pk_tx_airtime_pct: 0, pk_retry_pct: 0, pk_drain: 0,
         rx_prot: 0, rx_mic_fail: 0, rx_sec_none: 0, rx_undecrypted: 0,
@@ -2735,6 +2755,11 @@ impl Ax200 {
         self.st.win_rx_bytes = self.st.rx_bytes;
         self.st.win_airtime_us = self.st.tx_airtime_us;
         self.st.win_rx_airtime_us = self.st.rx_airtime_us;
+        self.st.win_pass_empty = 0;
+        self.st.win_pass_few = 0;
+        self.st.win_pass_many = 0;
+        self.st.win_pass_burst = 0;
+        self.st.win_gap_max_us = 0;
         self.st.win_loop_iters = self.st.loop_iters;
         // The profile is per WINDOW, not cumulative: an average over the whole
         // uptime would drown the loaded second in idle ones.
@@ -2766,6 +2791,11 @@ impl Ax200 {
                 0
             };
             self.st.pk_drain = self.st.rx_drain_max;
+            self.st.pk_pass_empty = self.st.win_pass_empty;
+            self.st.pk_pass_few = self.st.win_pass_few;
+            self.st.pk_pass_many = self.st.win_pass_many;
+            self.st.pk_pass_burst = self.st.win_pass_burst;
+            self.st.pk_gap_max_us = self.st.win_gap_max_us;
         }
         self.st.prof_work_us = 0;
         self.st.prof_rx_us = 0;
@@ -2913,6 +2943,20 @@ impl Ax200 {
         r.s("%  drain ");
         r.d(self.st.pk_drain as u64);
         r.c(b'\n');
+        // The shape of the arrivals in that same second. Mostly-empty passes
+        // with a long gap = the AP is not delivering and the ceiling is not
+        // ours. Passes consistently carrying frames = we are the bottleneck.
+        r.s("arrive   passes empty ");
+        r.d(self.st.pk_pass_empty as u64);
+        r.s("  1-3 ");
+        r.d(self.st.pk_pass_few as u64);
+        r.s("  4-15 ");
+        r.d(self.st.pk_pass_many as u64);
+        r.s("  16+ ");
+        r.d(self.st.pk_pass_burst as u64);
+        r.s("  longest silence ");
+        r.d((self.st.pk_gap_max_us / 1000) as u64);
+        r.s(" ms\n");
 
         r.s("tx       frames ");
         r.d(self.st.tx_frames as u64);
@@ -4185,6 +4229,21 @@ impl Ax200 {
             self.st.rx_to_us = self.st.rx_to_us.wrapping_add(a_to_us);
             self.st.rx_undecoded = self.st.rx_undecoded.wrapping_add(a_undecoded);
             if rx_frames > self.st.rx_drain_max { self.st.rx_drain_max = rx_frames; }
+            // `t_pass` is read at the top of every pass anyway, so the shape of
+            // the arrivals costs a compare and an add.
+            match rx_frames {
+                0 => self.st.win_pass_empty = self.st.win_pass_empty.wrapping_add(1),
+                1..=3 => self.st.win_pass_few = self.st.win_pass_few.wrapping_add(1),
+                4..=15 => self.st.win_pass_many = self.st.win_pass_many.wrapping_add(1),
+                _ => self.st.win_pass_burst = self.st.win_pass_burst.wrapping_add(1),
+            }
+            if rx_frames > 0 {
+                if self.st.last_rx_us > 0 {
+                    let gap = t_pass.saturating_sub(self.st.last_rx_us) as u32;
+                    if gap > self.st.win_gap_max_us { self.st.win_gap_max_us = gap; }
+                }
+                self.st.last_rx_us = t_pass;
+            }
             if rx_frames as usize >= RX_NUM_RBS - 2 {
                 self.st.rx_pool_exhausted = self.st.rx_pool_exhausted.wrapping_add(1);
             }
