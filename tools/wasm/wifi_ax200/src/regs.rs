@@ -373,7 +373,11 @@ pub const MC_OFF_NODE_ADDR: usize = 16; // u8[6] (+ __le16 reserved @ 22)
 pub const MC_OFF_BSSID_ADDR: usize = 24; // u8[6] (+ __le16 reserved @ 30)
 pub const MC_OFF_CCK_RATES: usize = 32; // __le32
 pub const MC_OFF_OFDM_RATES: usize = 36; // __le32
-pub const MC_OFF_PROT_FLAGS: usize = 40; // __le32 (0, unassociated)
+pub const MC_OFF_PROT_FLAGS: usize = 40; // __le32 (enum iwl_mac_protection_flags)
+/// fw/api/mac.h:40 — what the firmware protects transmissions with.
+pub const MAC_PROT_FLG_TGG_PROTECT: u32 = 1 << 3;
+pub const MAC_PROT_FLG_HT_PROT: u32 = 1 << 23;
+pub const MAC_PROT_FLG_FAT_PROT: u32 = 1 << 24;
 pub const MC_OFF_FILTER_FLAGS: usize = 52; // __le32
 // cck_short_preamble @ 44, short_slot @ 48, qos_flags @ 56, ac[5] @ 60 — all 0.
 // union iwl_mac_data_sta @ 100 (after qos_flags @56 + ac[AC_NUM+1=5]*8 = 40).
@@ -875,6 +879,17 @@ pub const IEEE80211_HT_PARAM_CHA_SEC_OFFSET: u8 = 0x03;
 pub const IEEE80211_HT_PARAM_CHA_SEC_NONE: u8 = 0x00;
 pub const IEEE80211_HT_PARAM_CHA_SEC_ABOVE: u8 = 0x01;
 pub const IEEE80211_HT_PARAM_CHA_SEC_BELOW: u8 = 0x03;
+/// HT Operation `operation_mode`, ieee80211.h:2012. The AP states here which
+/// protection the BSS needs; the firmware cannot know it any other way.
+pub const HT_OP_OFF_OPERATION_MODE: usize = 2; // __le16
+pub const IEEE80211_HT_OP_MODE_PROTECTION: u16 = 0x0003;
+pub const IEEE80211_HT_OP_MODE_PROTECTION_NONE: u16 = 0;
+pub const IEEE80211_HT_OP_MODE_PROTECTION_NONMEMBER: u16 = 1;
+pub const IEEE80211_HT_OP_MODE_PROTECTION_20MHZ: u16 = 2;
+pub const IEEE80211_HT_OP_MODE_PROTECTION_NONHT_MIXED: u16 = 3;
+/// ERP information element (EID 42), ieee80211.h:3515.
+pub const WLAN_EID_ERP_INFO: u8 = 42;
+pub const WLAN_ERP_USE_PROTECTION: u8 = 1 << 1;
 /// ieee80211.h:1914/1919
 pub const IEEE80211_HT_CAP_SUP_WIDTH_20_40: u16 = 0x0002;
 pub const IEEE80211_HT_CAP_SGI_40: u16 = 0x0040;
