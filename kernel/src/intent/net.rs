@@ -159,6 +159,103 @@ pub fn intent_netstat() {
 /// `wlan reset` zeroes the kernel counters so a single speed test can be
 /// measured on its own; the driver's counters are cumulative and it reports
 /// throughput over its own 1-second window regardless.
+// ── `wlan set` — one file, one key at a time ─────────────────────────────
+//
+// The wifi settings live in a single `key: value` object, but `store` REPLACES
+// what it writes: typing a second key from the loop dropped the first, and no
+// app may write this file (a module only gets `sys/config/<its own name>`).
+// That left the file creatable and not editable. So the read-modify-write lives
+// here, where the capability already exists.
+
+const WIFI_CFG: &str = "sys/config/wifi";
+
+/// The keys the wifi stack actually reads. A typo that wrote silently is how an
+/// afternoon gets spent measuring a setting that never arrived.
+const WIFI_KEYS: &[&str] = &["ssid", "band", "ampdu", "ps", "btcoex", "settle_ms"];
+
+fn wlan_set_usage() {
+    kprintln!("[wlan] Usage: wlan set <key> <value> | wlan unset <key>");
+    kprintln!("[wlan]   ssid: <name>        the network to join (else: loudest)");
+    kprintln!("[wlan]   band: 5 | 2.4 | auto");
+    kprintln!("[wlan]   ampdu: on | off     RX aggregation (throughput)");
+    kprintln!("[wlan]   ps: on | off        power save (default off = CAM)");
+    kprintln!("[wlan]   btcoex: on | off");
+    kprintln!("[wlan]   settle_ms: <n>      pause before the first scan");
+    kprintln!("[wlan] the passphrase is separate: store /sys/config/wifi_psk <pass>");
+}
+
+pub fn intent_wlan_set(args: &str, cap_id: crate::capability::CapId) {
+    let a = args.trim();
+    let (rest, remove) = if let Some(r) = a.strip_prefix("unset") {
+        (r.trim(), true)
+    } else if let Some(r) = a.strip_prefix("set") {
+        (r.trim(), false)
+    } else {
+        wlan_set_usage();
+        return;
+    };
+    if rest.is_empty() {
+        wlan_set_usage();
+        return;
+    }
+    // Only the first space splits: an SSID may contain them.
+    let (key, value) = match rest.split_once(' ') {
+        Some((k, v)) => (k.trim().trim_end_matches(':'), v.trim()),
+        None => (rest.trim_end_matches(':'), ""),
+    };
+    if !WIFI_KEYS.contains(&key) {
+        kprintln!("[wlan] unknown key '{}'", key);
+        wlan_set_usage();
+        return;
+    }
+    if !remove && value.is_empty() {
+        wlan_set_usage();
+        return;
+    }
+
+    let current = crate::npkfs::fetch(WIFI_CFG).map(|(d, _)| d).unwrap_or_default();
+    let mut out = alloc::string::String::new();
+    let mut hit = false;
+    for line in core::str::from_utf8(&current).unwrap_or("").lines() {
+        let this = line.split_once(':').map(|(k, _)| k.trim()).unwrap_or("");
+        if this == key {
+            hit = true;
+            if remove {
+                continue;
+            }
+            out.push_str(key);
+            out.push_str(": ");
+            out.push_str(value);
+            out.push('\n');
+        } else if !line.trim().is_empty() {
+            out.push_str(line.trim());
+            out.push('\n');
+        }
+    }
+    if !hit {
+        if remove {
+            kprintln!("[wlan] '{}' was not set", key);
+            return;
+        }
+        out.push_str(key);
+        out.push_str(": ");
+        out.push_str(value);
+        out.push('\n');
+    }
+
+    super::ensure_parents("sys/config");
+    match crate::npkfs::upsert(WIFI_CFG, out.as_bytes(), cap_id) {
+        Ok(_) => {
+            kprintln!("[wlan] {} now reads:", WIFI_CFG);
+            for line in out.lines() {
+                kprintln!("[wlan]   {}", line);
+            }
+            kprintln!("[wlan] the driver reads this at start-up - restart it to apply");
+        }
+        Err(e) => kprintln!("[wlan] write failed: {}", e),
+    }
+}
+
 pub fn intent_wlan(args: &str) {
     if args.trim() == "reset" {
         crate::netdev::wasm_nic_stats_reset();
