@@ -3923,9 +3923,13 @@ impl Ax200 {
         *budget -= 1;
         host::print("[ax200] RX payload offset mismatch: computed +");
         host::print_dec(want as u32);
-        host::print(", found +");
-        host::print_dec(found as u32);
-        host::print("\n");
+        if found == usize::MAX {
+            host::print(", found NOWHERE — frame dropped\n");
+        } else {
+            host::print(", found +");
+            host::print_dec(found as u32);
+            host::print("\n");
+        }
     }
 
     fn rx_classify(rb: &Dma, our_mac: &[u8; 6], out: &mut [u8], miss_log: &mut u32,
@@ -3954,6 +3958,17 @@ impl Ax200 {
             return RxKind::None;
         }
         let subtype = (fc >> 4) & 0xf;
+        // Data subtypes with bit 2 set carry NO BODY: Null (4) and QoS Null (12)
+        // are the ones that occur — the AP's keepalive, and what Linux sends in
+        // `ieee80211_mgd_probe_ap`. They have no LLC/SNAP because they have no
+        // payload, and treating that as a decode failure made a perfectly normal
+        // frame look like corruption: it counted into `undecoded` and burned the
+        // budget of a log meant for real misses. Observed as a recurring
+        // "RX payload offset mismatch: computed +88" — 56 + 24 + 8, i.e. exactly
+        // a non-QoS data header with CCMP.
+        if subtype & DOT11_STYPE_NODATA != 0 {
+            return RxKind::None;
+        }
         let hdrlen = if subtype & DOT11_STYPE_QOS != 0 { DOT11_QOS_HDR_LEN } else { DOT11_HDR_LEN };
         // Where the payload actually starts, exactly as iwl_mvm_create_skb
         // computes it: 802.11 header, then the IV the firmware left in place for
@@ -4022,9 +4037,11 @@ impl Ax200 {
             Self::note_llc_miss(miss_log, want, f + hdrlen + IEEE80211_CCMP_HDR_LEN);
             f + hdrlen + IEEE80211_CCMP_HDR_LEN
         } else {
-            // Addressed to us, a data frame, and LLC/SNAP is at none of the three
-            // possible offsets. Silently dropping this was a blind spot.
-            Self::note_llc_miss(miss_log, want, 0);
+            // Addressed to us, a data frame WITH a body, and LLC/SNAP is at none
+            // of the possible offsets. Silently dropping this was a blind spot.
+            // `usize::MAX` = nowhere; `0` used to be the sentinel and read like
+            // a real offset ("found +0"), which is its own small lie.
+            Self::note_llc_miss(miss_log, want, usize::MAX);
             return RxKind::Undecoded;
         };
         if llc + 8 > buf.len() {
