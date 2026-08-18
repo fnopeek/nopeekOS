@@ -401,12 +401,18 @@ pub fn connect_start(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpE
     Ok(handle)
 }
 
-/// Handshake progress of a `connect_start` handle: 1 = established,
-/// 0 = still handshaking, -1 = failed (refused, timed out, slot gone).
+/// Connection state: 1 = usable, 0 = still handshaking, -1 = the peer hung up
+/// cleanly, -2 = it FAILED (reset, or we ran out of retransmits — i.e. the
+/// link stopped acknowledging).
+///
+/// The two negatives are worth separating: "the far end closed" and "the link
+/// went dead under us" look identical to a caller that only sees failure, and
+/// they are opposite faults.
 pub fn connect_status(handle: usize) -> i32 {
     if handle >= MAX_CONNECTIONS { return -1; }
     match CONNECTIONS.lock()[handle] {
-        Some(ref c) if c.error || c.closed || c.state == State::Closed => -1,
+        Some(ref c) if c.error => -2,
+        Some(ref c) if c.closed || c.state == State::Closed => -1,
         // Same predicate as `conn_healthy`: a peer FIN moves us to CloseWait
         // and sets `closed`, so a module polling this learns the far end hung
         // up. `recv` never tells it — it just returns 0 bytes forever, which
@@ -432,7 +438,7 @@ pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> 
 
         match connect_status(handle) {
             1 => break,
-            -1 => {
+            n if n < 0 => {
                 close_cleanup(handle);
                 return Err(TcpError::ConnectionRefused);
             }

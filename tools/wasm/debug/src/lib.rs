@@ -17,7 +17,7 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 mod host;
 
 /// One source for the version, printed in the banner.
-const VERSION: &str = "0.5.0";
+const VERSION: &str = "0.5.1";
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
@@ -115,9 +115,20 @@ pub extern "C" fn _start() {
         // Did the far end hang up? `tcp_recv` never says so — it just returns
         // 0 bytes forever in CloseWait, which is why closing `nc` used to
         // leave this module running with nothing to talk to.
-        if host::tcp_status(sock) != 1 {
-            host::print("[debug] far end closed — disconnecting\n");
-            break;
+        match host::tcp_status(sock) {
+            1 => {}
+            // -2 is the interesting one: the connection did not end, it FAILED
+            // — five retransmits with no acknowledgement, i.e. the link went
+            // dead under us for about six seconds. Printing the same words for
+            // both hid exactly the event worth chasing.
+            -2 => {
+                host::print("[debug] link went dead (no ACK for ~6 s) — disconnecting\n");
+                break;
+            }
+            _ => {
+                host::print("[debug] far end closed — disconnecting\n");
+                break;
+            }
         }
 
         // Terminal output → TCP

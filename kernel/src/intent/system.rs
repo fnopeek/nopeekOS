@@ -958,13 +958,45 @@ pub const BOOT_LOG_DIR:       &str = "sys/log";
 pub const BOOT_LOG_PATH:      &str = "sys/log/boot";
 pub const BOOT_LOG_PREV_PATH: &str = "sys/log/boot.prev";
 
+/// Print only the lines containing `pat` (case-insensitive), or everything
+/// when `pat` is empty. A boot log is thousands of lines; the one line that
+/// answers the question is somewhere in the middle, and there is no generic
+/// `>` redirect to pipe it through `grep`.
+fn print_log(log: &str, pat: &str) {
+    if pat.is_empty() {
+        kprintln!("{}", log);
+        return;
+    }
+    let needle = pat.to_ascii_lowercase();
+    let mut hits = 0usize;
+    for line in log.lines() {
+        if line.to_ascii_lowercase().contains(needle.as_str()) {
+            kprintln!("{}", line);
+            hits += 1;
+        }
+    }
+    if hits == 0 {
+        kprintln!("dmesg: no line contains '{}'", pat);
+    } else {
+        kprintln!("[npk] {} line(s) matching '{}'", hits, pat);
+    }
+}
+
 pub fn intent_dmesg(args: &str) {
+    // `dmesg [prev] [pattern]` — the pattern is what makes a boot log usable
+    // when the interesting line scrolled past twenty minutes ago.
+    let a = args.trim();
+    let (prev, pat) = match a.strip_prefix("prev") {
+        Some(rest) => (true, rest.trim()),
+        None => (false, a),
+    };
+
     // A boot that ended in a reboot is exactly the one you want to read
     // afterwards, and by then it is no longer in RAM.
-    if args.trim() == "prev" {
+    if prev {
         match crate::npkfs::fetch(BOOT_LOG_PREV_PATH) {
             Ok((data, _)) => match core::str::from_utf8(&data) {
-                Ok(s)  => kprintln!("{}", s),
+                Ok(s)  => print_log(s, pat),
                 Err(_) => kprintln!("dmesg: {} is not text", BOOT_LOG_PREV_PATH),
             },
             Err(_) => kprintln!("dmesg: no previous boot log ({})", BOOT_LOG_PREV_PATH),
@@ -978,7 +1010,7 @@ pub fn intent_dmesg(args: &str) {
         kprintln!("(no boot log captured)");
     } else {
         // Print without going through capture (direct serial + framebuffer)
-        kprintln!("{}", log);
+        print_log(&log, pat);
     }
     crate::serial::start_capture();
 }
@@ -1225,7 +1257,7 @@ pub fn intent_help_topic(topic: &str) {
             help_row("top", "Live processes and cores");
             help_row("uptime", "Time since boot");
             help_row("time", "Clock (also: date)");
-            help_row("dmesg", "Kernel log (dmesg prev = last boot)");
+            help_row("dmesg [pat]", "Kernel log (dmesg prev = last boot; pat filters lines)");
             help_row("bootlog", "Log of the current boot");
             help_row("cores", "Per-core load and frequency");
             help_row("cpu", "CPU model and features");
