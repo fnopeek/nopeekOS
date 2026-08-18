@@ -2755,11 +2755,6 @@ impl Ax200 {
         self.st.win_rx_bytes = self.st.rx_bytes;
         self.st.win_airtime_us = self.st.tx_airtime_us;
         self.st.win_rx_airtime_us = self.st.rx_airtime_us;
-        self.st.win_pass_empty = 0;
-        self.st.win_pass_few = 0;
-        self.st.win_pass_many = 0;
-        self.st.win_pass_burst = 0;
-        self.st.win_gap_max_us = 0;
         self.st.win_loop_iters = self.st.loop_iters;
         // The profile is per WINDOW, not cumulative: an average over the whole
         // uptime would drown the loaded second in idle ones.
@@ -2797,6 +2792,15 @@ impl Ax200 {
             self.st.pk_pass_burst = self.st.win_pass_burst;
             self.st.pk_gap_max_us = self.st.win_gap_max_us;
         }
+        // Reset only AFTER the snapshot above has read them. The first version
+        // cleared them 36 lines earlier, with the window's other state, so the
+        // snapshot copied zeros — and a diagnostic that reports zero reads as
+        // "nothing happened" rather than "the instrument is broken".
+        self.st.win_pass_empty = 0;
+        self.st.win_pass_few = 0;
+        self.st.win_pass_many = 0;
+        self.st.win_pass_burst = 0;
+        self.st.win_gap_max_us = 0;
         self.st.prof_work_us = 0;
         self.st.prof_rx_us = 0;
         self.st.prof_sleep_us = 0;
