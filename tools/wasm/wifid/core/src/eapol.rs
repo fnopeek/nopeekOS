@@ -34,7 +34,16 @@ const KI_ACK: u16 = 1 << 7;
 const KI_MIC: u16 = 1 << 8;
 const KI_SECURE: u16 = 1 << 9;
 const KI_ENCRYPTED: u16 = 1 << 12;
-const KEY_DESC_VER_2: u16 = 2; // AES / HMAC-SHA1-128
+/// Key Descriptor Version, bits 0-2 (`WPA_KEY_INFO_TYPE_MASK`, wpa_common.h:217).
+/// wpa_supplicant echoes the REQUEST's version into every reply instead of
+/// asserting one of its own.
+const KI_TYPE_MASK: u16 = 0x0007;
+/// Key Index, bits 4-5 (`WPA_KEY_INFO_KEY_INDEX_MASK`, wpa_common.h:224).
+/// `wpa_supplicant_send_2_of_2` keeps these from the request; we dropped them.
+const KI_KEY_INDEX_MASK: u16 = 0x0030;
+/// Key Length offset (__be16). For RSN every reply carries ZERO here —
+/// wpa_supplicant mirrors the request's value only for legacy WPA.
+const O_KEY_LENGTH: usize = 7;
 
 fn be16(b: &[u8], o: usize) -> u16 {
     ((b[o] as u16) << 8) | b[o + 1] as u16
@@ -233,10 +242,10 @@ impl Supplicant {
         out[1] = 0x03; // EAPOL-Key
         put_be16(out, O_BODY_LEN, (total - 4) as u16);
         out[4] = msg1[4]; // descriptor type (echo)
-        put_be16(out, O_KEY_INFO, KEY_DESC_VER_2 | KI_PAIRWISE | KI_MIC);
-        // key_length echoes msg1; replay counter echoes msg1.
-        out[7] = msg1[7];
-        out[8] = msg1[8];
+        // `wpa_supplicant_send_2_of_4`: version echoed, key_length zero for RSN.
+        let ki_req = be16(msg1, O_KEY_INFO);
+        put_be16(out, O_KEY_INFO, (ki_req & KI_TYPE_MASK) | KI_PAIRWISE | KI_MIC);
+        put_be16(out, O_KEY_LENGTH, 0);
         out[O_REPLAY..O_REPLAY + 8].copy_from_slice(&msg1[O_REPLAY..O_REPLAY + 8]);
         out[O_NONCE..O_NONCE + 32].copy_from_slice(&self.snonce);
         put_be16(out, O_KEY_DATA_LEN, self.rsn_len as u16);
@@ -257,10 +266,20 @@ impl Supplicant {
         out[1] = 0x03;
         put_be16(out, O_BODY_LEN, (total - 4) as u16);
         out[4] = req[4];
-        put_be16(out, O_KEY_INFO, KEY_DESC_VER_2 | KI_MIC | KI_SECURE);
-        // key_length and the replay counter are echoed, as in every reply.
-        out[7] = req[7];
-        out[8] = req[8];
+        // `wpa_supplicant_send_2_of_2` (rsn_supp/wpa.c), field for field:
+        //
+        //     key_info &= WPA_KEY_INFO_KEY_INDEX_MASK;
+        //     key_info |= ver | WPA_KEY_INFO_SECURE | WPA_KEY_INFO_MIC;
+        //     if (proto == RSN) WPA_PUT_BE16(reply->key_length, 0);
+        //
+        // We dropped the Key Index bits AND mirrored key_length. Measured on
+        // the device: the AP repeated the same rekey four times over, always
+        // `key id 1`, never alternating — that is a RETRY, not a schedule. It
+        // was rejecting our answer, and afterwards it stops talking to us.
+        let ki_req = be16(req, O_KEY_INFO);
+        put_be16(out, O_KEY_INFO,
+            (ki_req & KI_KEY_INDEX_MASK) | (ki_req & KI_TYPE_MASK) | KI_MIC | KI_SECURE);
+        put_be16(out, O_KEY_LENGTH, 0);
         out[O_REPLAY..O_REPLAY + 8].copy_from_slice(&req[O_REPLAY..O_REPLAY + 8]);
         put_be16(out, O_KEY_DATA_LEN, 0);
         let mic = self.compute_mic(&out[..total]);
@@ -277,9 +296,13 @@ impl Supplicant {
         out[1] = 0x03;
         put_be16(out, O_BODY_LEN, (total - 4) as u16);
         out[4] = msg3[4];
-        put_be16(out, O_KEY_INFO, KEY_DESC_VER_2 | KI_PAIRWISE | KI_MIC | KI_SECURE);
-        out[7] = msg3[7];
-        out[8] = msg3[8];
+        // `wpa_supplicant_send_4_of_4`: Secure carried over from msg3, version
+        // echoed, key_length zero for RSN. This path already worked — the
+        // change is conformance, not a fix.
+        let ki_req = be16(msg3, O_KEY_INFO);
+        put_be16(out, O_KEY_INFO,
+            (ki_req & KI_SECURE) | (ki_req & KI_TYPE_MASK) | KI_PAIRWISE | KI_MIC);
+        put_be16(out, O_KEY_LENGTH, 0);
         out[O_REPLAY..O_REPLAY + 8].copy_from_slice(&msg3[O_REPLAY..O_REPLAY + 8]);
         put_be16(out, O_KEY_DATA_LEN, 0);
         let mic = self.compute_mic(&out[..total]);
