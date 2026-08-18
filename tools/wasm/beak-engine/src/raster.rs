@@ -1315,10 +1315,10 @@ mod tests {
             }
             !ok
         };
-        // A pseudo-element's box was never recorded — this is how MediaWiki
-        // underlines the article tabs.
+        // A pseudo-element with TEXT of its own: `content` is not part of what
+        // the element says, so its run cannot be identified.
         assert!(gives_up(
-            "a:hover::after{content:'x';background:#f00}",
+            "a:hover::after{content:'x';color:#f00}",
             "<p><a href=\"/x\">link</a></p>"
         ));
         // A rule that reaches sideways restyles something outside the subtree.
@@ -1326,6 +1326,53 @@ mod tests {
             "li:hover + li a{color:#f00}",
             "<ul><li><a href=\"/x\">one</a></li><li><a href=\"/y\">two</a></li></ul>"
         ));
+    }
+
+    /// A hover rule reaches a pseudo-element, and MediaWiki underlines the
+    /// article tabs with exactly that: an absolutely positioned `::after` that
+    /// is 2 px tall, transparent at rest and coloured under the pointer.
+    ///
+    /// Its box is generated during layout and paints NOTHING at rest, so there
+    /// is no op to replace and none inside it to insert ahead of. What it can
+    /// name is its predecessor — everything its element painted comes first.
+    #[test]
+    fn a_pseudo_element_that_lights_up_is_repainted_too() {
+        // The real shape: a tab link is itself a flex box (that is how Vector
+        // centres its label), and the underline hangs off it as an absolutely
+        // positioned `::after`.
+        let html = "<style>a{display:flex;position:relative;color:#00e;width:80px;height:24px}\
+                    a::after{content:'';display:block;position:absolute;left:0;bottom:0;width:100%;height:2px}\
+                    a:hover::after{background-color:#f00}</style>\
+                    <a href=\"/x\"><span>link</span></a>";
+        let eng = Engine::new();
+        eng.set_hover(alloc::vec![]);
+        let mut base = eng.layout(html, 400);
+        let b = base.hover_boxes.first().copied().expect("hit-testable");
+        let hovered = base.hover_at(b.x + b.w / 2, b.y + b.h / 2);
+        assert!(!hovered.is_empty());
+        eng.set_hover(hovered);
+        let full = eng.layout(html, 400);
+        assert!(eng.repaint_hover(&mut base), "{}", eng.repaint_bail());
+        assert_eq!(dump_ops(&base), dump_ops(&full));
+        assert!(dump_ops(&full).contains("c=Rgb(255, 0, 0)"), "the underline is there");
+    }
+
+    /// A pseudo-element's box is for repainting, not for hit-testing: it must
+    /// not widen where the pointer counts as being inside the element.
+    #[test]
+    fn a_pseudo_elements_box_does_not_widen_the_pointer_target() {
+        let html = "<style>a{display:flex;position:relative;color:#00e;width:80px;height:24px}\
+                    a::after{content:'';display:block;position:absolute;left:0;top:40px;width:100%;height:20px;\
+                    background:#0f0}a:hover{color:#f00}</style>\
+                    <a href=\"/x\"><span>link</span></a>";
+        let eng = Engine::new();
+        eng.set_hover(alloc::vec![]);
+        let lay = eng.layout(html, 400);
+        // The `::after` sits 40 px below the link. A point inside IT is not
+        // inside the link.
+        let b = lay.hover_boxes.iter().find(|b| b.pseudo == crate::css::PseudoElem::None).copied().expect("own box");
+        assert!(lay.hover_at(b.x + 2, b.y + 50).is_empty(), "the pseudo must not be a target");
+        assert!(!lay.hover_at(b.x + 2, b.y + b.h / 2).is_empty(), "the link itself is one");
     }
 
     /// Everything a layout draws must survive being written down and read back

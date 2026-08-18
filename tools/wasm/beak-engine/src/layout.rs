@@ -950,6 +950,19 @@ pub struct HoverBox {
     pub sides: (bool, bool),
     /// A block box paints its `box-shadow`; an inline fragment does not.
     pub shadow: bool,
+    /// Which pseudo-element this box belongs to. `None` is the element itself;
+    /// a `::before`/`::after` gets its own box because a hover rule reaches it
+    /// — MediaWiki underlines the article tabs with `a:hover::after`, and a
+    /// repaint that had no rectangle for it could only give up.
+    pub pseudo: crate::css::PseudoElem,
+    /// The anchor names the op the decoration goes AFTER, not before it. An
+    /// absolutely positioned pseudo is appended at the end of what its
+    /// originating element painted, so what it can name is its predecessor.
+    pub anchor_after: bool,
+    /// Does this box paint text of its own? A pseudo's `content` string is not
+    /// part of what the element SAYS, so a colour change on one cannot be
+    /// repainted from the display list alone.
+    pub has_text: bool,
 }
 
 /// Enough of an op to find it again: kind, position, and the two numbers that
@@ -1009,6 +1022,10 @@ impl Layout {
         let mut v: Vec<u32> = self
             .hover_boxes
             .iter()
+            // A pseudo-element's box is recorded for repainting, not for
+            // hit-testing — extending the pointer's reach would change which
+            // element it is inside, which is a different question.
+            .filter(|b| b.pseudo == crate::css::PseudoElem::None)
             .filter(|b| x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h)
             .map(|b| b.seq)
             .collect();
@@ -1527,6 +1544,9 @@ impl<'a> Ctx<'a> {
                 paint: (x, y, w, h),
                 sides: (true, true),
                 shadow: true,
+                pseudo: PseudoElem::None,
+                anchor_after: false,
+                has_text: false,
             });
         }
         if !self.inspect {
@@ -2496,6 +2516,28 @@ impl<'a> Ctx<'a> {
                 (None, Some(b)) => py + ph - h - b as i32,
                 _ => py,
             };
+            // A pointer rule can reach this box (`a:hover::after` is how
+            // MediaWiki underlines the article tabs), and repainting it needs
+            // a rectangle. It goes in AFTER whatever the element has painted
+            // so far — which, when the box paints nothing at rest, is the only
+            // thing there is to name it by.
+            if self.sheet.hover_set.may_match(el) {
+                let anchor = self.ops.last().map(op_key);
+                self.hover_boxes.push(HoverBox {
+                    x,
+                    y,
+                    w,
+                    h,
+                    seq: el.seq,
+                    anchor,
+                    paint: (x, y, w, h),
+                    sides: (true, true),
+                    shadow: false,
+                    pseudo: kind,
+                    anchor_after: true,
+                    has_text: !text.trim().is_empty(),
+                });
+            }
             let mut ops: Vec<DrawOp> = Vec::new();
             bg_ops(&ps, self.bg_key(ps.bg_layer.image), self.bg_key(ps.mask_layer.image), x, y, w, h, &mut ops);
             border_ops(&ps, x, y, w, h, (true, true), &mut ops);
@@ -8014,11 +8056,6 @@ struct Sub {
     on: ComputedStyle,
 }
 
-/// What a run looks like to the line builder — the tuple it merges on.
-fn run_face(op: &DrawOp, recolour: Option<Rgb>) -> Option<(i32, Rgb, u32, bool, bool, bool)> {
-    let DrawOp::Text { y, size, color, bold, italic, mono, .. } = op else { return None };
-    Some((*y, recolour.unwrap_or(*color), size.to_bits(), *bold, *italic, *mono))
-}
 
 /// `Err` = cannot be done with certainty, lay out instead. The reason is
 /// carried out so a page that keeps taking the slow path can say WHY once,
@@ -8029,45 +8066,83 @@ fn plan_one(
     g: &HoverRepaint,
     edits: &mut Vec<Edit>,
 ) -> Result<(), &'static str> {
-    // A pseudo-element that repaints is out of reach: its box is generated
-    // during layout and its rect was never recorded.
-    if g.pairs.iter().any(|(a, b)| pseudos_differ(a, b)) {
-        return Err("a pseudo-element repaints");
+    // A DESCENDANT's pseudo-element has no recorded rect — only the carrier's
+    // do — so one that repaints is out of reach.
+    if g.pairs[1..].iter().any(|(a, b)| pseudos_differ(a, b)) {
+        return Err("a descendant's pseudo-element repaints");
     }
-    let (own_off, own_on) = (&g.pairs[0].0.own, &g.pairs[0].1.own);
+    let (off_probe, on_probe) = (&g.pairs[0].0, &g.pairs[0].1);
+    let (own_off, own_on) = (&off_probe.own, &on_probe.own);
 
-    // ── the element's own box decoration ──────────────────────────────────
-    // The rect is its border box, which a paint-only change cannot have moved.
-    if box_differs(own_off, own_on) {
-        for b in &g.boxes {
-            let (Some(was), Some(now)) = (deco_ops(own_off, b), deco_ops(own_on, b)) else {
-                return Err("a background image");
+    // ── every box this element paints: its own, and its pseudo-elements ───
+    // Each rect is a border box, which a paint-only change cannot have moved.
+    for b in &g.boxes {
+        let (off, on) = match b.pseudo {
+            PseudoElem::None => (own_off, own_on),
+            PseudoElem::Before => match (&off_probe.before, &on_probe.before) {
+                (Some(a), Some(c)) => (a, c),
+                _ => return Err("a pseudo-element appears or vanishes"),
+            },
+            PseudoElem::After => match (&off_probe.after, &on_probe.after) {
+                (Some(a), Some(c)) => (a, c),
+                _ => return Err("a pseudo-element appears or vanishes"),
+            },
+        };
+        if !box_differs(off, on) {
+            continue;
+        }
+        // A pseudo's `content` string is not part of what the element SAYS, so
+        // its own run cannot be identified the way the element's runs are.
+        if b.has_text && (off.color != on.color || off.deco != on.deco) {
+            return Err("a pseudo-element's own text would have to be repainted");
+        }
+        let (Some(was), Some(now)) = (deco_ops(off, b), deco_ops(on, b)) else {
+            return Err("a background image");
+        };
+        if was.len() == now.len() && was.iter().zip(&now).all(|(a, c)| op_eq(a, c)) {
+            continue; // this box looks the same in both states
+        }
+        if !was.is_empty() {
+            // There is something to replace, and it has to be found where it is
+            // replaced. The two lists may differ in length: a border that gains
+            // a side, a background that goes away entirely.
+            let Some(at) = find_once(&lay.ops, &was) else {
+                return Err("the old decoration is not findable");
             };
-            if was.len() == now.len() && was.iter().zip(&now).all(|(a, c)| op_eq(a, c)) {
-                continue; // this box looks the same in both states
-            }
-            if !was.is_empty() {
-                // There is something to replace, and it has to be found where
-                // it is replaced. The two lists may differ in length: a border
-                // that gains a side, a background that goes away entirely.
-                let Some(at) = find_once(&lay.ops, &was) else {
-                    return Err("the old decoration is not findable");
-                };
-                edits.push(Edit { at, len: was.len(), ops: now });
-            } else {
-                // Nothing to replace — a background that only exists under the
-                // pointer. A box puts its decoration in AHEAD of everything it
-                // paints, and the anchor is what sits there.
-                let Some(key) = b.anchor else {
-                    return Err("the box painted nothing to insert ahead of");
-                };
-                let Some(at) = find_key_once(&lay.ops, key) else {
-                    return Err("the anchor is gone or ambiguous");
-                };
-                edits.push(Edit { at, len: 0, ops: now });
-            }
+            edits.push(Edit { at, len: was.len(), ops: now });
+        } else {
+            // Nothing to replace — a background that only exists under the
+            // pointer. A box puts its decoration in AHEAD of everything it
+            // paints; an absolutely positioned pseudo goes in AFTER everything
+            // its element painted. The anchor says by what, and which side.
+            let Some(key) = b.anchor else {
+                return Err("the box painted nothing to anchor to");
+            };
+            let Some(at) = find_key_once(&lay.ops, key) else {
+                return Err("the anchor is gone or ambiguous");
+            };
+            edits.push(Edit { at: at + b.anchor_after as usize, len: 0, ops: now });
         }
     }
+    // A pseudo-element that repaints but has no rectangle of its own: the
+    // inline and flex paths generate one without recording it.
+    for (kind, off, on) in [
+        (PseudoElem::Before, &off_probe.before, &on_probe.before),
+        (PseudoElem::After, &off_probe.after, &on_probe.after),
+    ] {
+        let (Some(off), Some(on)) = (off, on) else {
+            if off.is_some() != on.is_some() {
+                return Err("a pseudo-element appears or vanishes");
+            }
+            continue;
+        };
+        if (box_differs(off, on) || off.color != on.color || off.deco != on.deco)
+            && !g.boxes.iter().any(|b| b.pseudo == kind)
+        {
+            return Err("a pseudo-element repaints and has no rectangle");
+        }
+    }
+
     // A DESCENDANT that repaints its own box is out of reach: its rect was
     // never recorded, only the carrier's.
     if g.pairs[1..].iter().any(|(a, b)| box_differs(&a.own, &b.own)) {
@@ -8326,6 +8401,9 @@ fn emit_line(
                         paint: frag_rect(fonts, b, x0, x1, baseline),
                         sides: (f.left, f.right),
                         shadow: false,
+                        pseudo: crate::css::PseudoElem::None,
+                        anchor_after: false,
+                        has_text: false,
                     });
                 }
             }
