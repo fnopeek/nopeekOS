@@ -929,6 +929,9 @@ fn hover_op_census() {
     let (mut said_paint_only, mut wrong, mut missed) = (0usize, 0usize, 0usize);
     let (mut tried, mut exact, mut wrong_patch) = (0usize, 0usize, 0usize);
     let (mut sum_layout_us, mut sum_patch_us) = (0u128, 0u128);
+    let mut bail: std::collections::BTreeMap<&str, usize> = Default::default();
+    let (mut idle, mut idle_repainted) = (0usize, 0usize);
+    let mut idle_bail: std::collections::BTreeMap<&str, usize> = Default::default();
     let (mut worst_repaint, mut worst_ins) = (0usize, 0usize);
     let mut seen: std::collections::HashSet<Vec<u32>> = Default::default();
     let mut examples: Vec<String> = Vec::new();
@@ -951,34 +954,51 @@ fn hover_op_census() {
             let t = std::time::Instant::now();
             let patched = claims_paint_only && eng.repaint_hover(&mut base);
             let patch_us = t.elapsed().as_micros();
+            let why = if patched {
+                ""
+            } else if claims_paint_only {
+                eng.repaint_bail()
+            } else {
+                "not paint-only"
+            };
             if patched {
                 sum_patch_us += patch_us;
-            }
-            if patched {
-                tried += 1;
-                let got: Vec<String> = base.ops.iter().map(op_full).collect();
-                let want: Vec<String> = hot.ops.iter().map(op_full).collect();
-                if got == want {
-                    exact += 1;
-                } else {
-                    if wrong_patch < 3 {
-                        println!("  PATCH != LAYOUT for seqs {hovered:?}");
-                        for (i, (a, b)) in got.iter().zip(&want).enumerate().filter(|(_, (a, b))| a != b).take(3) {
-                            println!("      #{i} patched {a}\n      #{i} layout  {b}");
-                        }
-                        if got.len() != want.len() {
-                            println!("      op count {} vs {}", got.len(), want.len());
-                        }
-                    }
-                    wrong_patch += 1;
-                }
             }
             eng.set_hover(Vec::new());
             let hot_full: Vec<String> = hot.ops.iter().map(op_full).collect();
             if hot_full == rest_full {
-                continue; // this element styles nothing on hover
+                // The pointer is inside something a rule COULD match, but no
+                // rule applies: a full layout would produce the same list, so
+                // answering it without one is the whole point.
+                idle += 1;
+                if patched {
+                    idle_repainted += 1;
+                } else {
+                    *idle_bail.entry(why).or_insert(0usize) += 1;
+                }
+                continue;
             }
             hits += 1;
+            if patched {
+                tried += 1;
+                let got: Vec<String> = base.ops.iter().map(op_full).collect();
+                if got == hot_full {
+                    exact += 1;
+                } else {
+                    if wrong_patch < 3 {
+                        println!("  PATCH != LAYOUT for seqs {hovered:?}");
+                        for (i, (a, b)) in got.iter().zip(&hot_full).enumerate().filter(|(_, (a, b))| a != b).take(3) {
+                            println!("      #{i} patched {a}\n      #{i} layout  {b}");
+                        }
+                        if got.len() != hot_full.len() {
+                            println!("      op count {} vs {}", got.len(), hot_full.len());
+                        }
+                    }
+                    wrong_patch += 1;
+                }
+            } else {
+                *bail.entry(why).or_insert(0usize) += 1;
+            }
             let hot_shape: Vec<String> = hot.ops.iter().map(op_shape).collect();
             // Align on GEOMETRY: ops that keep their kind+rect are the same box
             // painted again. What is left over is a true insert or delete.
@@ -1034,6 +1054,14 @@ fn hover_op_census() {
         }
     }
 
+    println!("\n  {idle} Ziele, bei denen ein volles Layout dieselbe Liste liefert — davon {idle_repainted} ohne Layout beantwortet");
+    {
+        let mut v: Vec<_> = idle_bail.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1));
+        for (why, n) in v {
+            println!("      {n:>3}x  {why}");
+        }
+    }
     println!("\n--- {hits} distinct hover targets that change the display list ---");
     if hits == 0 {
         return;
@@ -1049,6 +1077,14 @@ fn hover_op_census() {
     println!("\n  REPAINT statt Layout: {tried}/{hits} gepatcht");
     println!("    davon byte-gleich mit dem vollen Layout: {exact}");
     println!("    davon ABWEICHEND: {wrong_patch}");
+    if !bail.is_empty() {
+        let mut v: Vec<_> = bail.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1));
+        println!("  warum die uebrigen ein Layout brauchen:");
+        for (why, n) in v {
+            println!("    {n:>3}x  {why}");
+        }
+    }
     if tried > 0 {
         println!(
             "\n  Kosten je Zeigerwechsel: volles Layout {:.2} ms  vs  Repaint {:.3} ms  = {:.0}x",

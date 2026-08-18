@@ -928,6 +928,53 @@ pub struct HoverBox {
     pub w: i32,
     pub h: i32,
     pub seq: u32,
+    /// Where this element's box decoration BELONGS in the display list, named
+    /// by the op that sits there rather than by an index.
+    ///
+    /// A background that only exists while the pointer is inside has nothing
+    /// to replace — it has to be inserted, and a box inserts its decoration
+    /// ahead of everything it paints. An index would be the obvious way to say
+    /// where that is and the wrong one: the list is still inserted into,
+    /// clipped and reordered by z after this is recorded, and every one of
+    /// those moves it. Content does not move.
+    ///
+    /// `None` when the box painted nothing at all — then there is no "ahead of"
+    /// to speak of, and a repaint hands the page to a layout.
+    pub anchor: Option<OpKey>,
+    /// Where this fragment's own decoration is painted, which is NOT the hit
+    /// rect: an inline box's background covers its font's ascent + descent plus
+    /// padding, not the line box (CSS 2.1 §10.6.1).
+    pub paint: (i32, i32, i32, i32),
+    /// Which of the left/right borders this fragment draws — a box broken
+    /// across lines draws them only on its outer ends.
+    pub sides: (bool, bool),
+    /// A block box paints its `box-shadow`; an inline fragment does not.
+    pub shadow: bool,
+}
+
+/// Enough of an op to find it again: kind, position, and the two numbers that
+/// tell same-shaped ops apart. Deliberately small and `Copy` — one of these
+/// hangs off every hit rect on the page.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct OpKey {
+    kind: u8,
+    x: i32,
+    y: i32,
+    a: i32,
+    b: i32,
+}
+
+/// The key of an op, for `HoverBox::anchor`.
+fn op_key(op: &DrawOp) -> OpKey {
+    match op {
+        DrawOp::Text { x, y, size, text, .. } => {
+            OpKey { kind: 0, x: *x, y: *y, a: size.to_bits() as i32, b: text.len() as i32 }
+        }
+        DrawOp::Rect { x, y, w, h, .. } => OpKey { kind: 1, x: *x, y: *y, a: *w, b: *h },
+        DrawOp::RoundRect { x, y, w, h, .. } => OpKey { kind: 2, x: *x, y: *y, a: *w, b: *h },
+        DrawOp::Image { x, y, w, h, .. } => OpKey { kind: 3, x: *x, y: *y, a: *w, b: *h },
+        DrawOp::BgImage { x, y, w, h, .. } => OpKey { kind: 4, x: *x, y: *y, a: *w, b: *h },
+    }
 }
 
 impl Layout {
@@ -1465,11 +1512,22 @@ impl<'a> Ctx<'a> {
     /// Record `el`'s box `(x, y, w, h)` for the inspect dev tool. No-op unless
     /// inspection is enabled, so the label formatting cost is only paid when the
     /// user is actually inspecting.
-    fn record_inspect(&mut self, el: &Element, st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32) {
+    fn record_inspect(&mut self, el: &Element, st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, op0: usize) {
         // Same call site, own switch: the pointer needs these boxes on any page
         // with a `:hover` rule, whether or not anyone is inspecting.
         if w > 0 && h > 0 && self.sheet.hover_set.may_match(el) {
-            self.hover_boxes.push(HoverBox { x, y, w, h, seq: el.seq });
+            let anchor = self.ops.get(op0).map(op_key);
+            self.hover_boxes.push(HoverBox {
+                x,
+                y,
+                w,
+                h,
+                seq: el.seq,
+                anchor,
+                paint: (x, y, w, h),
+                sides: (true, true),
+                shadow: true,
+            });
         }
         if !self.inspect {
             return;
@@ -1913,8 +1971,9 @@ impl<'a> Ctx<'a> {
         let saved = core::mem::take(&mut self.floats);
         // `layout_box` re-adds margin-left + padding from `mbox_left`; passing the
         // margin-box width lets an `auto`-width child fill the shrink-to-fit box.
+        let op0 = self.ops.len();
         let border_bottom = self.layout_box(el, st, mbox_left, fw, border_top);
-        self.record_inspect(el, st, mbox_left + ml as i32, border_top, (fw as f32 - ml - mr) as i32, border_bottom - border_top);
+        self.record_inspect(el, st, mbox_left + ml as i32, border_top, (fw as f32 - ml - mr) as i32, border_bottom - border_top, op0);
         self.floats = saved;
         self.path.pop();
         self.floats.push(FloatRect {
@@ -2215,11 +2274,13 @@ impl<'a> Ctx<'a> {
                 let by = anchor + t.value() as i32;
                 let (bx, bw, byy) = self.avoid_floats_bfc(&st, x, w, by);
                 let saved = core::mem::take(&mut self.floats);
+                let op0 = self.ops.len();
                 let bottom = self.layout_box(el, &st, bx, bw, byy);
-                self.record_inspect(el, &st, bx, byy, bw, bottom - byy);
+                self.record_inspect(el, &st, bx, byy, bw, bottom - byy, op0);
                 self.floats = saved;
                 BoxOut { bottom, top_y: byy, open: Collapse::one(st.margin_bottom), through: false, box_x: bx, box_w: bw }
             } else {
+                let op0 = self.ops.len();
                 let o = self.flow_block_impl(el, &st, x, w, anchor, open, false);
                 if !o.through {
                     // The box's OWN border box. Reporting the containing
@@ -2228,7 +2289,7 @@ impl<'a> Ctx<'a> {
                     // `.mw-page-container` (max-width 99.75rem, margin 0 auto)
                     // paints 1596 px wide at x=162 and was reported as
                     // 1920 wide at x=0.
-                    self.record_inspect(el, &st, o.box_x, o.top_y, o.box_w, o.bottom - o.top_y);
+                    self.record_inspect(el, &st, o.box_x, o.top_y, o.box_w, o.bottom - o.top_y, op0);
                 }
                 o
             };
@@ -3228,7 +3289,7 @@ impl<'a> Ctx<'a> {
         }
         // The out-of-flow box, at its final (post-bottom-shift) position.
         let dy = bottom - box_bottom;
-        self.record_inspect(el, st, px as i32, py as i32 + dy, w_i, box_bottom - py as i32);
+        self.record_inspect(el, st, px as i32, py as i32 + dy, w_i, box_bottom - py as i32, m0.ops);
         self.cb_h = prev_cb_h;
     }
 
@@ -5750,6 +5811,15 @@ impl<'a> Ctx<'a> {
         for b in &mut self.hover_boxes[m.hover_boxes..] {
             b.x += dx;
             b.y += dy;
+            // The anchor names an op inside this very range, so it moves with
+            // it — a shifted box pointing at an unshifted anchor would look up
+            // an op that no longer exists.
+            b.paint.0 += dx;
+            b.paint.1 += dy;
+            if let Some(a) = &mut b.anchor {
+                a.x += dx;
+                a.y += dy;
+            }
         }
         for b in &mut self.inspects[m.inspects..] {
             b.x += dx;
@@ -7756,34 +7826,41 @@ fn descend<'a>(
 /// `push_decorations`), and the old state is regenerated too and has to be
 /// found in the list exactly where it is replaced. Anything ambiguous returns
 /// `false` and the caller lays out, which is what it did before.
-pub fn repaint_hover(lay: &mut Layout, fonts: &crate::fonts::Fonts, groups: &[HoverRepaint]) -> bool {
+pub fn repaint_hover(
+    lay: &mut Layout,
+    fonts: &crate::fonts::Fonts,
+    groups: &[HoverRepaint],
+) -> Result<(), &'static str> {
     // Plan every edit first and apply nothing until all of them are known to
     // be possible: a pass that patched as it went left a half-repainted page
     // behind whenever it gave up in the middle.
     let mut edits: Vec<Edit> = Vec::new();
     for g in groups {
-        if g.rects.is_empty() {
-            return false;
+        if g.boxes.is_empty() {
+            return Err("no recorded box");
         }
-        if plan_one(lay, fonts, g, &mut edits).is_none() {
-            return false;
-        }
+        plan_one(lay, fonts, g, &mut edits)?;
     }
-    if edits.is_empty() {
-        // Something changed — `set_hover` said so — and if this pass found
-        // nothing to do then it did not understand what changed. Handing that
-        // to a layout is slow; leaving the page as it is would be wrong.
-        return false;
-    }
+    // Nothing to do is a RESULT, not a failure — and the common one. Most of a
+    // page sits inside something a `:hover` rule COULD match without any rule
+    // actually applying, and `border-color` on a side with no width is a style
+    // that changes and paints nothing. Each of those pointer moves used to cost
+    // a full layout that produced a byte-identical display list.
+    //
+    // What must not pass silently is a change this pass did not account for —
+    // and that is decided per element in `plan_one`, by comparing the ops the
+    // two styles PRODUCE rather than the fields they differ in.
     // Two elements laying claim to the same op cannot both be right.
     edits.sort_by_key(|e| e.at);
-    if edits.windows(2).any(|w| w[0].at + w[0].len > w[1].at) {
-        return false;
+    // Two elements laying claim to the same slot cannot both be right, and two
+    // insertions at the same index have no order between them.
+    if edits.windows(2).any(|w| w[0].at + w[0].len > w[1].at || w[0].at == w[1].at) {
+        return Err("two elements claim the same op");
     }
     for e in edits.into_iter().rev() {
         lay.ops.splice(e.at..e.at + e.len, e.ops);
     }
-    true
+    Ok(())
 }
 
 /// One planned replacement: `ops[at .. at+len]` becomes `ops`.
@@ -7796,8 +7873,9 @@ struct Edit {
 /// One element the pointer entered or left, with everything needed to repaint
 /// it: where it painted, and how it and its subtree are styled before and after.
 pub struct HoverRepaint {
-    /// The element's own fragments — one per line for an inline box.
-    pub rects: Vec<(i32, i32, i32, i32)>,
+    /// The element's own fragments — one per line for an inline box — each
+    /// with the anchor that says where its decoration belongs.
+    pub boxes: Vec<HoverBox>,
     /// The element itself, then every descendant, before and after. The
     /// unchanged ones are here too: a run painted in a colour some OTHER
     /// element also uses cannot be told apart, and this pass has to know that
@@ -7816,8 +7894,8 @@ pub struct HoverRepaint {
 }
 
 /// Is `(x, y)` inside any of the element's fragments?
-fn in_rects(rects: &[(i32, i32, i32, i32)], x: i32, y: i32) -> bool {
-    rects.iter().any(|(rx, ry, rw, rh)| x >= *rx && x < rx + rw && y >= *ry && y < ry + rh)
+fn in_boxes(boxes: &[HoverBox], x: i32, y: i32) -> bool {
+    boxes.iter().any(|b| x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h)
 }
 
 /// The box decoration this style paints at `rect`, in display-list order.
@@ -7825,17 +7903,20 @@ fn in_rects(rects: &[(i32, i32, i32, i32)], x: i32, y: i32) -> bool {
 /// A background IMAGE is deliberately not resolved: its key belongs to the
 /// layout, and a repaint that guessed one would paint the wrong picture. A
 /// style that wants one gives up instead.
-fn deco_ops(st: &ComputedStyle, (x, y, w, h): (i32, i32, i32, i32)) -> Option<Vec<DrawOp>> {
+fn deco_ops(st: &ComputedStyle, b: &HoverBox) -> Option<Vec<DrawOp>> {
     if st.bg_layer.image.is_some() || st.mask_layer.image.is_some() {
         return None;
     }
+    let (x, y, w, h) = b.paint;
     if st.hidden || st.transparent || w <= 0 || h <= 0 {
         return Some(Vec::new());
     }
     let mut v = Vec::new();
-    shadow_ops(st, x, y, w, h, &mut v);
+    if b.shadow {
+        shadow_ops(st, x, y, w, h, &mut v);
+    }
     bg_ops(st, None, None, x, y, w, h, &mut v);
-    border_ops(st, x, y, w, h, (true, true), &mut v);
+    border_ops(st, x, y, w, h, b.sides, &mut v);
     Some(v)
 }
 
@@ -7874,6 +7955,22 @@ fn op_eq(a: &DrawOp, b: &DrawOp) -> bool {
         ) => (ax, ay, ac, ab, ai, am, at) == (bx, by, bc, bb, bi, bm, bt) && asz == bsz,
         _ => false,
     }
+}
+
+/// Where the op with this key sits, if it sits there exactly once. The key
+/// names an op by content, so it survives every insertion, clip and z-reorder
+/// that happened after it was recorded.
+fn find_key_once(ops: &[DrawOp], key: OpKey) -> Option<usize> {
+    let mut at = None;
+    for (i, op) in ops.iter().enumerate() {
+        if op_key(op) == key {
+            if at.is_some() {
+                return None;
+            }
+            at = Some(i);
+        }
+    }
+    at
 }
 
 /// Where `want` sits in `ops`, if it sits there exactly once.
@@ -7923,42 +8020,66 @@ fn run_face(op: &DrawOp, recolour: Option<Rgb>) -> Option<(i32, Rgb, u32, bool, 
     Some((*y, recolour.unwrap_or(*color), size.to_bits(), *bold, *italic, *mono))
 }
 
-/// `None` = cannot be done with certainty, lay out instead.
+/// `Err` = cannot be done with certainty, lay out instead. The reason is
+/// carried out so a page that keeps taking the slow path can say WHY once,
+/// rather than looking like the feature simply does not work.
 fn plan_one(
     lay: &Layout,
     fonts: &crate::fonts::Fonts,
     g: &HoverRepaint,
     edits: &mut Vec<Edit>,
-) -> Option<()> {
+) -> Result<(), &'static str> {
     // A pseudo-element that repaints is out of reach: its box is generated
     // during layout and its rect was never recorded.
     if g.pairs.iter().any(|(a, b)| pseudos_differ(a, b)) {
-        return None;
+        return Err("a pseudo-element repaints");
     }
     let (own_off, own_on) = (&g.pairs[0].0.own, &g.pairs[0].1.own);
 
     // ── the element's own box decoration ──────────────────────────────────
     // The rect is its border box, which a paint-only change cannot have moved.
     if box_differs(own_off, own_on) {
-        for r in &g.rects {
-            let (was, now) = (deco_ops(own_off, *r)?, deco_ops(own_on, *r)?);
-            if was.len() != now.len() {
-                // A background or border APPEARS or vanishes, and where it
-                // belongs in the list is the box's own insertion point — which
-                // the finished display list no longer remembers.
-                return None;
+        for b in &g.boxes {
+            let (Some(was), Some(now)) = (deco_ops(own_off, b), deco_ops(own_on, b)) else {
+                return Err("a background image");
+            };
+            if was.len() == now.len() && was.iter().zip(&now).all(|(a, c)| op_eq(a, c)) {
+                continue; // this box looks the same in both states
             }
-            if was.iter().zip(&now).all(|(a, b)| op_eq(a, b)) {
-                continue;
+            if !was.is_empty() {
+                // There is something to replace, and it has to be found where
+                // it is replaced. The two lists may differ in length: a border
+                // that gains a side, a background that goes away entirely.
+                let Some(at) = find_once(&lay.ops, &was) else {
+                    return Err("the old decoration is not findable");
+                };
+                edits.push(Edit { at, len: was.len(), ops: now });
+            } else {
+                // Nothing to replace — a background that only exists under the
+                // pointer. A box puts its decoration in AHEAD of everything it
+                // paints, and the anchor is what sits there.
+                let Some(key) = b.anchor else {
+                    return Err("the box painted nothing to insert ahead of");
+                };
+                let Some(at) = find_key_once(&lay.ops, key) else {
+                    return Err("the anchor is gone or ambiguous");
+                };
+                edits.push(Edit { at, len: 0, ops: now });
             }
-            let at = find_once(&lay.ops, &was)?;
-            edits.push(Edit { at, len: was.len(), ops: now });
         }
     }
     // A DESCENDANT that repaints its own box is out of reach: its rect was
     // never recorded, only the carrier's.
     if g.pairs[1..].iter().any(|(a, b)| box_differs(&a.own, &b.own)) {
-        return None;
+        return Err("a descendant repaints its own box");
+    }
+    // Becoming invisible does not recolour anything — it takes whole ops out
+    // of the list, text included, and puts them back later.
+    if g.pairs.iter().any(|(a, b)| {
+        (a.own.hidden, a.own.transparent, a.own.opacity_zero)
+            != (b.own.hidden, b.own.transparent, b.own.opacity_zero)
+    }) {
+        return Err("something becomes invisible");
     }
 
     // ── the text inside it ────────────────────────────────────────────────
@@ -7970,7 +8091,7 @@ fn plan_one(
         // Two elements in this subtree painted in the same colour that must
         // now become different ones — a run cannot be assigned to either.
         if subs.iter().any(|s| s.off.color == off.color && (s.on.color != on.color || s.on.deco != on.deco)) {
-            return None;
+            return Err("two elements share a colour and must not share the next");
         }
         subs.push(Sub { off: *off, on: *on });
     }
@@ -7979,14 +8100,14 @@ fn plan_one(
     if g.pairs.iter().map(|(a, b)| (&a.own, &b.own)).any(|(off, on)| {
         off.color == on.color && off.deco == on.deco && subs.iter().any(|s| s.off.color == off.color)
     }) {
-        return None;
+        return Err("an unchanged element shares the colour");
     }
     if subs.is_empty() {
-        return Some(());
+        return Ok(());
     }
     let sub_for = |op: &DrawOp| -> Option<&Sub> {
         let DrawOp::Text { x, y, color, text, .. } = op else { return None };
-        if !in_rects(&g.rects, *x, *y) || !says(&g.text, text) {
+        if !in_boxes(&g.boxes, *x, *y) || !says(&g.text, text) {
             return None;
         }
         subs.iter().find(|s| s.off.color == *color)
@@ -8020,10 +8141,11 @@ fn plan_one(
         }
         let DrawOp::Text { x: bx, .. } = b else { continue };
         if face(a) == face(b) && (right_edge(a) - bx).abs() <= 1 {
-            return None;
+            return Err("recolouring would merge two runs");
         }
     }
 
+    let mut touched = 0usize;
     for (i, op) in lay.ops.iter().enumerate() {
         let Some(sub) = sub_for(op) else { continue };
         let DrawOp::Text { x, y, size, bold, italic, mono, text, .. } = op else { continue };
@@ -8066,13 +8188,35 @@ fn plan_one(
         });
 
         // A run's decorations sit immediately before it.
-        let start = i.checked_sub(was.len())?;
+        let Some(start) = i.checked_sub(was.len()) else {
+            return Err("a run's decorations are not where they should be");
+        };
         if !(0..was.len()).all(|k| op_eq(&lay.ops[start + k], &was[k])) {
-            return None;
+            return Err("a run's decorations are not where they should be");
         }
         edits.push(Edit { at: start, len: was.len() + 1, ops: now });
+        touched += 1;
     }
-    Some(())
+    // A colour changed and not one run carried it. That is the ordinary case
+    // for a container whose text belongs to a link with a colour of its own —
+    // the link keeps its colour, so there is genuinely nothing to repaint, and
+    // a full layout produces a byte-identical list. What must not be mistaken
+    // for it is a run this pass SKIPPED: one that carries the colour but could
+    // not be shown to be part of what the element says.
+    if touched == 0 {
+        let skipped = lay.ops.iter().any(|op| match op {
+            DrawOp::Text { x, y, color, text, .. } => {
+                in_boxes(&g.boxes, *x, *y)
+                    && subs.iter().any(|s| s.off.color == *color)
+                    && !says(&g.text, text)
+            }
+            _ => false,
+        });
+        if skipped {
+            return Err("a run that might belong to this element was skipped");
+        }
+    }
+    Ok(())
 }
 
 /// Where a placed item starts on its line — the left edge of a fragment that
@@ -8101,18 +8245,35 @@ fn paint_frag(
     if st.hidden || st.transparent {
         return;
     }
+    let (x, y, w, h) = frag_rect(fonts, b, x0, x1, baseline);
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    bg_ops(st, b.bg, b.mask, x, y, w, h, ops);
+    border_ops(st, x, y, w, h, sides, ops);
+}
+
+/// The rectangle one fragment of an inline box decorates — NOT its line box.
+///
+/// One source, because the pointer repaint has to regenerate exactly what
+/// `paint_frag` produced. Handing it the hit rect instead made every inline
+/// background one pixel too tall, which is the difference between a patch that
+/// matches a layout and one that does not.
+fn frag_rect(
+    fonts: &crate::fonts::Fonts,
+    b: &InlineBox,
+    x0: i32,
+    x1: i32,
+    baseline: i32,
+) -> (i32, i32, i32, i32) {
+    let st = &b.st;
     let font = fonts.pick(st.bold, st.italic, st.mono);
     let m = font.horizontal_line_metrics(st.font_px);
     let asc = m.map(|m| m.ascent).unwrap_or(st.font_px);
     let desc = m.map(|m| m.descent.abs()).unwrap_or(0.0);
     let top = baseline - (asc + st.pad_top + st.border_top.width) as i32;
     let h = (asc + desc + st.pad_top + st.pad_bottom + st.border_y()) as i32;
-    let w = x1 - x0;
-    if w <= 0 || h <= 0 {
-        return;
-    }
-    bg_ops(st, b.bg, b.mask, x0, top, w, h, ops);
-    border_ops(st, x0, top, w, h, sides, ops);
+    (x0, top, x1 - x0, h)
 }
 
 fn emit_line(
@@ -8134,6 +8295,12 @@ fn emit_line(
     let line_top = y;
     let baseline = y + line_ascent as i32;
     let box_h = ceil_i32(gap).max(1);
+    // An inline box's decoration goes in where the fragment begins — but that
+    // op does not exist yet when the hit rect is recorded, so the index is
+    // parked and turned into a content key once the line is done. Within this
+    // function `ops` is only ever APPENDED to, so an index taken here still
+    // means the same slot at the end of it.
+    let mut pending_anchor: Vec<(usize, usize)> = Vec::new();
     // Inline-box decoration goes down before anything on the line, so text sits
     // on its own background. Sorted by box index — allocation order is tree
     // order, which puts an ancestor's background under its descendant's.
@@ -8148,7 +8315,18 @@ fn emit_line(
             // wherever any of its fragments is.
             if let Some(seq) = b.hover_seq {
                 if x1 > x0 {
-                    hover_boxes.push(HoverBox { x: x0, y: line_top, w: x1 - x0, h: box_h, seq });
+                    pending_anchor.push((hover_boxes.len(), ops.len()));
+                    hover_boxes.push(HoverBox {
+                        x: x0,
+                        y: line_top,
+                        w: x1 - x0,
+                        h: box_h,
+                        seq,
+                        anchor: None,
+                        paint: frag_rect(fonts, b, x0, x1, baseline),
+                        sides: (f.left, f.right),
+                        shadow: false,
+                    });
                 }
             }
             paint_frag(fonts, b, x0, x1, baseline, (f.left, f.right), ops);
@@ -8225,6 +8403,12 @@ fn emit_line(
                 for b in &mut box_.hover_boxes {
                     b.x += dx;
                     b.y += dy;
+                    b.paint.0 += dx;
+                    b.paint.1 += dy;
+                    if let Some(a) = &mut b.anchor {
+                        a.x += dx;
+                        a.y += dy;
+                    }
                 }
                 ops.append(&mut box_.ops);
                 links.append(&mut box_.links);
@@ -8260,6 +8444,9 @@ fn emit_line(
                 }
             }
         }
+    }
+    for (hb, at) in pending_anchor {
+        hover_boxes[hb].anchor = ops.get(at).map(op_key);
     }
     line_top + box_h
 }

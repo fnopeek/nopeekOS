@@ -80,6 +80,8 @@ pub struct Engine {
     /// cost on the machine that is actually slow. `None` on the host, where
     /// `tests/diag.rs` times the phases from outside.
     clock: core::cell::Cell<Option<fn() -> u64>>,
+    /// Why the last pointer repaint gave up — see `Engine::repaint_bail`.
+    repaint_bail: core::cell::Cell<&'static str>,
     /// The last parsed DOCUMENT with the fingerprint of the inputs that built
     /// it. Parsing a real page is ~170 ms on the device, and a page is laid out
     /// several times over its life from unchanged bytes — an image landing, a
@@ -139,6 +141,7 @@ impl Engine {
             hover: RefCell::new(Vec::new()),
             hover_prev: RefCell::new(Vec::new()),
             clock: core::cell::Cell::new(None),
+            repaint_bail: core::cell::Cell::new(""),
             dom: RefCell::new(None),
             sheet: RefCell::new(None),
         }
@@ -218,6 +221,24 @@ impl Engine {
     /// the layout it was given is then untouched, because every change is
     /// applied only once all of them are known to be possible.
     pub fn repaint_hover(&self, lay: &mut Layout) -> bool {
+        match self.try_repaint_hover(lay) {
+            Ok(()) => true,
+            Err(why) => {
+                self.repaint_bail.set(why);
+                false
+            }
+        }
+    }
+
+    /// Why the last `repaint_hover` handed the page to a layout. `""` when the
+    /// last one succeeded. Worth saying ONCE per page on the device: a browser
+    /// that quietly lays out on every pointer move looks like the feature was
+    /// never built ([[feedback-log-the-exception-not-the-rule]]).
+    pub fn repaint_bail(&self) -> &'static str {
+        self.repaint_bail.get()
+    }
+
+    fn try_repaint_hover(&self, lay: &mut Layout) -> Result<(), &'static str> {
         let (prev, cur) = (self.hover_prev.borrow(), self.hover.borrow());
         let moved: Vec<u32> = prev
             .iter()
@@ -226,12 +247,12 @@ impl Engine {
             .copied()
             .collect();
         if moved.is_empty() {
-            return true;
+            return Ok(());
         }
         let held = self.sheet.borrow();
-        let Some((_, sheet)) = held.as_ref() else { return false };
+        let Some((_, sheet)) = held.as_ref() else { return Err("no sheet") };
         let held_dom = self.dom.borrow();
-        let Some((_, dom)) = held_dom.as_ref() else { return false };
+        let Some((_, dom)) = held_dom.as_ref() else { return Err("no cached document") };
         let w = lay.width;
         let vh = self.viewport_h.get();
         // A rule that restyles a sibling of the element the pointer is in is
@@ -251,7 +272,7 @@ impl Engine {
             }
             walk(&dom.root, &moved, &sheet.hover_sideways_set, &mut hit);
             if hit {
-                return false;
+                return Err("a rule restyles a sibling");
             }
         }
         let mut groups = Vec::new();
@@ -266,12 +287,12 @@ impl Engine {
                 crate::layout::resolve_out_of_band(dom, sheet, &self.theme, w, vh, seq, hover, SUBTREE_CAP, out)
             };
             let (Some(off), Some(on)) = (one(&prev, &mut kids_off), one(&cur, &mut kids_on)) else {
-                return false;
+                return Err("the subtree is too big to repaint one box at a time");
             };
             // The two descents visit the same tree in the same order, so a
             // length mismatch would mean one of them stopped early.
             if kids_off.len() != kids_on.len() {
-                return false;
+                return Err("the two descents disagree");
             }
             let mut pairs = alloc::vec![(off, on)];
             pairs.extend(kids_off.into_iter().zip(kids_on));
@@ -281,12 +302,7 @@ impl Engine {
             }
             groups.push(crate::layout::HoverRepaint {
                 text,
-                rects: lay
-                    .hover_boxes
-                    .iter()
-                    .filter(|b| b.seq == seq)
-                    .map(|b| (b.x, b.y, b.w, b.h))
-                    .collect(),
+                boxes: lay.hover_boxes.iter().filter(|b| b.seq == seq).copied().collect(),
                 pairs,
             });
         }
@@ -1220,6 +1236,41 @@ mod tests {
         assert!(dump_ops(&full).contains("c=Rgb(255, 0, 0)"), "the link is red now");
     }
 
+    /// A background that only exists under the pointer has nothing to replace
+    /// — it has to be INSERTED, and where it goes is the box's own insertion
+    /// point. The finished display list no longer holds an index for that, so
+    /// each hit rect carries the op that sits there, by content.
+    ///
+    /// The rect it is painted at is not the hit rect: an inline box's
+    /// background covers its font's ascent + descent, not the line box, and
+    /// getting that wrong makes the patch one pixel taller than the layout.
+    #[test]
+    fn a_background_that_appears_under_the_pointer_is_inserted_in_the_right_place() {
+        for body in [
+            // inline: painted at the font's box, and split across lines draws
+            // only the outer borders
+            "<p>text <a href=\"/x\">link</a> more</p>",
+            // block: painted at the border box
+            "<a href=\"/x\" style=\"display:block;width:60px;height:20px\">link</a>",
+        ] {
+            // Only paint-class properties: a `border-left` would ADVANCE the
+            // inline flow, which is a layout and `set_hover` says so.
+            let html = alloc::format!(
+                "<style>a{{color:#00e}}a:hover{{background:#f00;border-bottom-color:#0f0}}</style>{body}"
+            );
+            let eng = Engine::new();
+            eng.set_hover(alloc::vec![]);
+            let mut base = eng.layout(&html, 400);
+            let b = base.hover_boxes.first().copied().expect("hit-testable");
+            let hovered = base.hover_at(b.x + b.w / 2, b.y + b.h / 2);
+            eng.set_hover(hovered);
+            let full = eng.layout(&html, 400);
+            assert!(eng.repaint_hover(&mut base), "{body}: {}", eng.repaint_bail());
+            assert_eq!(dump_ops(&base), dump_ops(&full), "{body}");
+            assert!(dump_ops(&full).contains("c=Rgb(255, 0, 0)"), "{body}: the background is there");
+        }
+    }
+
     /// A hover rule that can MOVE something is not a repaint, and the engine
     /// has to say so before anyone tries.
     #[test]
@@ -1264,8 +1315,6 @@ mod tests {
             }
             !ok
         };
-        // A background that APPEARS has no place in the list to appear at.
-        assert!(gives_up("a:hover{background:#f00}", "<p><a href=\"/x\">link</a></p>"));
         // A pseudo-element's box was never recorded — this is how MediaWiki
         // underlines the article tabs.
         assert!(gives_up(
