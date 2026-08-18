@@ -510,6 +510,38 @@ pub const MPDU_OFF_TSF_ON_AIR: usize = 40; // v1.tsf_on_air_rise __le64
 // session id the firmware handed back when we started it. NSSN is the sequence
 // number the firmware considers the first unreceived one; SN is this frame's.
 pub const IWL_RX_REORDER_DATA_INVALID_BAID: u8 = 0x7f;
+
+// ── RX block-ack allocation — RX_BAID_ALLOCATION_CONFIG_CMD (DATA_PATH/0x16) ──
+//
+// iwl_mvm_fw_baid_op (mvm/sta.c) picks between TWO ways to open an RX
+// aggregation session, and we had ported only one of them. Firmware that
+// advertises IWL_UCODE_TLV_CAPA_BAID_ML_SUPPORT wants THIS command; the
+// ADD_STA route with STA_MODIFY_ADD_BA_TID is the fallback for older
+// firmware. Sending the fallback to a card that wants this one is not merely
+// ignored — the firmware answers nothing and stops completing transmissions,
+// which costs the whole link.
+pub const RX_BAID_ALLOCATION_CONFIG_CMD: u8 = 0x16;
+pub const IWL_UCODE_TLV_CAPA_BAID_ML_SUPPORT: u32 = 63;
+
+// enum iwl_rx_baid_action
+pub const IWL_RX_BAID_ACTION_ADD: u32 = 0;
+pub const IWL_RX_BAID_ACTION_REMOVE: u32 = 2;
+
+// struct iwl_rx_baid_cfg_cmd: __le32 action, then a union. The `alloc` arm is
+// __le32 sta_id_mask, u8 tid, u8 reserved[3], __le16 ssn, __le16 win_size;
+// the `remove` arm is __le32 sta_id_mask, __le32 tid. 16 bytes either way.
+pub const BAID_CFG_CMD_LEN: usize = 16;
+pub const BAID_OFF_ACTION: usize = 0;
+pub const BAID_OFF_STA_MASK: usize = 4;   // shared by alloc and remove
+pub const BAID_OFF_ALLOC_TID: usize = 8;  // u8
+pub const BAID_OFF_ALLOC_SSN: usize = 12; // __le16
+pub const BAID_OFF_ALLOC_WIN: usize = 14; // __le16
+pub const BAID_OFF_REMOVE_TID: usize = 8; // __le32
+
+// struct iwl_rx_baid_cfg_resp is a bare __le32 baid. Linux rejects anything
+// outside the map (IWL_MAX_BAID); a firmware error arrives as a negative,
+// which reaches us as a very large unsigned value.
+pub const IWL_MAX_BAID: u32 = 32;
 pub const IWL_RX_MPDU_REORDER_NSSN_MASK: u32 = 0x0000_0fff;
 pub const IWL_RX_MPDU_REORDER_SN_MASK: u32 = 0x00ff_f000;
 pub const IWL_RX_MPDU_REORDER_SN_SHIFT: u32 = 12;
