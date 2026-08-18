@@ -1360,6 +1360,10 @@ struct Ctx<'a> {
     /// another explicit `z-index`, are out of scope — sibling ordering is
     /// the common case these reftests need).
     stack_depth: u32,
+    /// Set for the duration of ONE `layout_abs` call: an out-of-flow box was
+    /// reached while a line box was still open. It has to sort above that
+    /// line's ops even though it was emitted first — see `LAYER_POSITIONED`.
+    abs_over_open_line: bool,
     /// Nesting guard for float ranges, independent of `stack_depth`.
     float_depth: u32,
     /// The list counter for the `display:list-item` box about to be laid out.
@@ -1675,6 +1679,21 @@ fn display_name(d: Display) -> &'static str {
 const LAYER_IN_FLOW: i32 = 0;
 /// Non-positioned floats: above the in-flow block boxes around them.
 const LAYER_FLOAT: i32 = 1;
+/// An out-of-flow box that was emitted while a line box was still open.
+///
+/// Appendix E paints positioned boxes in step 8, after the in-flow inline
+/// content of step 7 — but the display list is built in visit order, and a line
+/// is not written until it BREAKS. So an abspos box reached mid-line lands in
+/// the list ahead of text that precedes it in the document, and paints under it.
+///
+/// Flushing the line instead would be wrong: `foo<div style=position:absolute>
+/// </div>bar` is one line, and breaking it early moves `bar`. So the box is
+/// lifted over exactly that line and nothing else. Lifting positioned boxes
+/// wholesale was measured twice and is worse both times: out-of-flow only gives
+/// +25/-21 (`border-005` — an absolute box FIRST, a `position: relative` box
+/// after it, both step 8, so document order must decide and lifting one of them
+/// hands it to the loser), and every positioned box gives +16/-46.
+const LAYER_POSITIONED: i32 = 2;
 
 /// Merge the float ranges into the tracked z-index ranges so `reorder_by_z`
 /// still sees a disjoint, ascending list. A float inside a tracked range would
@@ -1809,6 +1828,7 @@ pub fn layout(
         float_ops: Vec::new(),
         float_links: Vec::new(),
         stack_depth: 0,
+        abs_over_open_line: false,
         float_depth: 0,
         marker_ord: 0,
         counters: Counters::default(),
@@ -2248,7 +2268,9 @@ impl<'a> Ctx<'a> {
             // containing-block-relative position, not advancing the flow.
             if matches!(st.position, Position::Absolute | Position::Fixed) {
                 self.path.push(self.info(el));
+                self.abs_over_open_line = !inline.is_empty();
                 self.layout_abs(el, &st, x, anchor + open.value() as i32);
+                self.abs_over_open_line = false;
                 self.path.pop();
                 continue;
             }
@@ -3230,6 +3252,10 @@ impl<'a> Ctx<'a> {
     /// from the containing block (`self.cb`) + `top`/`right`/`bottom`/`left`.
     /// The element is `el`, already pushed onto `self.path` by the caller.
     fn layout_abs(&mut self, el: &'a Element, st: &ComputedStyle, static_x: i32, static_y: i32) {
+        // Read FIRST. Resolving the containing block below can lay this very
+        // box out speculatively and roll it back, and that pass would otherwise
+        // consume the flag and leave the real pass with nothing.
+        let over_line = core::mem::take(&mut self.abs_over_open_line);
         if st.position == Position::Fixed {
             self.fixed_count += 1;
         } else {
@@ -3333,8 +3359,9 @@ impl<'a> Ctx<'a> {
         let start = m0.ops;
         // An explicit `z-index` on this positioned box opens a tracked
         // stacking range for it (CSS2.1 §9.9) — unless it's already nested
-        // inside another tracked range, which absorbs it instead.
-        let track = self.should_track_stack(st);
+        // inside another tracked range, which absorbs it instead. A box
+        // reached mid-line opens one too, to climb over that line.
+        let track = (self.should_track_stack(st) || over_line) && self.stack_depth == 0;
         if track {
             self.stack_depth += 1;
         }
@@ -3383,9 +3410,11 @@ impl<'a> Ctx<'a> {
             self.shift_ops(&m0, tdx, tdy);
         }
         if track {
-            if let ZIndex::Value(z) = st.z_index {
-                self.record_stack_entry(z, LAYER_IN_FLOW, m0.ops, self.ops.len(), m0.links, self.links.len());
-            }
+            let (z, layer) = match st.z_index {
+                ZIndex::Value(z) => (z, LAYER_IN_FLOW),
+                _ => (0, LAYER_POSITIONED),
+            };
+            self.record_stack_entry(z, layer, m0.ops, self.ops.len(), m0.links, self.links.len());
         }
         // The out-of-flow box, at its final (post-bottom-shift) position.
         let dy = bottom - box_bottom;
@@ -9911,6 +9940,48 @@ fn dbg_wiki_shape() {
             .contains(&Rgb(255, 102, 0)));
         assert!(bg("<body><table><tr><td bgcolor=\"#ff6600\" style=\"background:#00ff00\">x</td></tr></table></body>")
             .contains(&Rgb(0, 255, 0)), "author CSS wins over the attribute");
+    }
+
+    /// A line box is not written until it BREAKS, so an out-of-flow box reached
+    /// mid-line lands in the display list ahead of text that precedes it in the
+    /// document — and paints under it. CSS 2.1 Appendix E puts positioned boxes
+    /// in step 8, after that inline content in step 7.
+    ///
+    /// The box is lifted over exactly that one line. Flushing the line instead
+    /// would break `foo<div style=position:absolute></div>bar` onto two lines,
+    /// and lifting positioned boxes wholesale is worse: out-of-flow-only
+    /// measured +25/−21 against the reftests, every positioned box +16/−46.
+    #[test]
+    fn an_abspos_box_reached_mid_line_paints_over_that_line() {
+        let order = |html: &str| -> Vec<Rgb> {
+            rects(&lay(html, 800)).into_iter().map(|(_, _, _, _, c)| c).collect()
+        };
+        // The green box covers the red one exactly; only paint order decides
+        // whether any red is left, and the green one comes LATER in the source.
+        let ops = order(
+            "<body><div style=\"position:relative\">\
+             <iframe style=\"display:inline;border:3px solid rgb(255,0,0)\"></iframe>\
+             <div style=\"position:absolute;top:0;width:300px;height:150px;\
+             border:3px solid rgb(0,128,0)\"></div></div></body>",
+        );
+        let red = ops.iter().position(|c| *c == Rgb(255, 0, 0));
+        let green = ops.iter().rposition(|c| *c == Rgb(0, 128, 0));
+        assert!(red.is_some() && green.is_some(), "both boxes painted: {ops:?}");
+        assert!(green > red, "the abspos box paints last: {ops:?}");
+        // …and it is lifted over the line only, not over a box that FOLLOWS it.
+        // Both of these are step 8, so document order decides and the blue one
+        // wins — this is the shape (`CSS2/border-005`) that a blanket hoist got
+        // wrong.
+        let ops = order(
+            "<body><div style=\"position:relative\">\
+             <div style=\"position:absolute;top:0;width:99px;height:99px;\
+             background:rgb(255,0,0)\"></div>\
+             <div style=\"position:relative;width:99px;height:99px;\
+             background:rgb(0,0,255)\"></div></div></body>",
+        );
+        let red = ops.iter().rposition(|c| *c == Rgb(255, 0, 0));
+        let blue = ops.iter().rposition(|c| *c == Rgb(0, 0, 255));
+        assert!(blue > red, "an in-flow positioned box after it still wins: {ops:?}");
     }
 
     #[test]
