@@ -61,6 +61,25 @@ pub fn mount() -> Result<(), FsError> {
 
 pub fn is_mounted() -> bool { storage::is_mounted() }
 
+/// Make everything durable, then return. For shutdown and reboot.
+///
+/// `halt` used to power the machine off with `out dx, al` three lines after
+/// printing "Goodbye" — no drain, no cache flush, no device flush. The COW
+/// design is meant to survive exactly that, and mostly it does. But during a
+/// streaming download hundreds of megabytes of allocation, a moved object
+/// btree root and the whole deferred `pending_old_blocks` batch live only in
+/// memory, and pulling the power there has never been tested. Florian reaches
+/// for `halt` precisely when a download has hung — i.e. always in that state.
+///
+/// Draining first costs one four-phase commit and removes the entire question.
+pub fn sync() {
+    if !storage::is_mounted() { return; }
+    if let Err(e) = storage::flush_pending() {
+        crate::kprintln!("[npk] npkfs: sync failed ({:?}) — powering off anyway", e);
+    }
+    let _ = crate::blkdev::flush();
+}
+
 pub fn install_salt() -> Option<[u8; 16]> { storage::install_salt() }
 
 pub fn stats() -> Option<(u64, u64, u64, u64)> { storage::stats() }

@@ -1438,6 +1438,7 @@ pub fn intent_config() {
 pub fn intent_reboot() -> ! {
     kprintln!();
     kprintln!("[npk] Rebooting...");
+    crate::npkfs::sync();
     kprintln!();
     unsafe {
         // Disable interrupts first
@@ -1724,6 +1725,7 @@ fn pci_device_name(vendor: u16, device: u16) -> &'static str {
 pub fn intent_halt() -> ! {
     kprintln!();
     kprintln!("[npk] Shutting down...");
+    crate::npkfs::sync();
     kprintln!("[npk] Goodbye.");
     kprintln!();
     unsafe {
