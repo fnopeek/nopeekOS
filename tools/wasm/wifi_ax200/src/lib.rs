@@ -31,7 +31,10 @@ static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
 /// carry it, so a device measurement can never be traced to the wrong build.
-const DRIVER_VERSION: &str = "0.60.1";
+// From Cargo.toml, never by hand: this string stood at 0.60.1 for three
+// releases while the module was 0.63.0, and a report that misstates its own
+// version makes every number in it suspect.
+const DRIVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // Little-endian readers over the embedded firmware.
 fn le32(b: &[u8], off: usize) -> u32 {
