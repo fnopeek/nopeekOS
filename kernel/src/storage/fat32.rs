@@ -368,13 +368,29 @@ impl Fat32Reader {
             .map_err(|_| "FAT32 read error")
     }
 
+    /// Every raw block write on this path lands OUTSIDE npkFS, so a sector
+    /// number that has run past the partition writes into whatever follows it
+    /// — which on this disk is the filesystem. Nothing bounded it: the chain
+    /// is followed through the on-disk FAT, and one bad entry there is enough
+    /// to send `cluster_to_sector` anywhere. Refusing is always better than
+    /// scribbling; a failed kernel update leaves the old one bootable, a
+    /// scribbled npkFS does not.
     fn write_sector(&self, rel_sector: u32, buf: &[u8; 512]) -> Result<(), &'static str> {
+        if rel_sector >= self.total_sectors {
+            crate::kprintln!(
+                "[npk] ESP: REFUSING write at sector {} — partition holds {}",
+                rel_sector, self.total_sectors);
+            return Err("ESP write past the end of the partition");
+        }
         nvme::write_sector(self.part_start + rel_sector as u64, buf)
             .map_err(|_| "FAT32 write error")
     }
 
     fn cluster_to_sector(&self, cluster: u32) -> u32 {
-        self.data_start + (cluster - 2) * self.spc
+        // Saturating: cluster 0/1 are reserved and would underflow, and an
+        // overflow here used to wrap into a plausible-looking sector.
+        self.data_start
+            .saturating_add(cluster.saturating_sub(2).saturating_mul(self.spc))
     }
 
     /// Read next cluster from FAT chain.
