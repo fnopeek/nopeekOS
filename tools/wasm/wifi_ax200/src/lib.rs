@@ -3064,7 +3064,15 @@ impl Ax200 {
                 r.s("  width 40 MHz (sec ");
                 r.s(if self.target_ht.sec_chan_offs == IEEE80211_HT_PARAM_CHA_SEC_BELOW
                     { "below" } else { "above" });
-                r.s(self.target_ht.vht.then_some(", AP has VHT but runs HT)").unwrap_or(")"));
+                // Say WHOSE decision it was. "AP has VHT but runs HT" blamed
+                // the AP even when the reason was our own `vht` switch.
+                r.s(if !self.want_vht && self.target_ht.vht {
+                    ", AP offers VHT — `wlan set vht on` to use it)"
+                } else if self.target_ht.vht {
+                    ", AP has VHT but runs HT)"
+                } else {
+                    ")"
+                });
             } else {
                 r.s("  width 20 MHz (");
                 if self.target_ht.cap_info & IEEE80211_HT_CAP_SUP_WIDTH_20_40 == 0 {
