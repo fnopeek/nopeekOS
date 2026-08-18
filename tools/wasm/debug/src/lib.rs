@@ -17,7 +17,7 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 mod host;
 
 /// One source for the version, printed in the banner.
-const VERSION: &str = "0.5.1";
+const VERSION: &str = "0.6.0";
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
@@ -108,6 +108,8 @@ pub extern "C" fn _start() {
     let mut tx_buf = [0u8; 1024];
     let mut rx_buf = [0u8; 256];
     let mut idle_rounds: u32 = 0;
+    let mut dropped: u32 = 0;
+    let mut round: u32 = 0;
 
     loop {
         let mut did_work = false;
@@ -115,7 +117,12 @@ pub extern "C" fn _start() {
         // Did the far end hang up? `tcp_recv` never says so — it just returns
         // 0 bytes forever in CloseWait, which is why closing `nc` used to
         // leave this module running with nothing to talk to.
-        match host::tcp_status(sock) {
+        // Every 16th round only: this takes the kernel's CONNECTIONS lock,
+        // and under load the RX path takes the same lock tens of thousands
+        // of times a second. Asking every round put a third acquisition in
+        // the hot loop for an answer that changes once per session.
+        round = round.wrapping_add(1);
+        match if round % 16 == 0 { host::tcp_status(sock) } else { 1 } {
             1 => {}
             // -2 is the interesting one: the connection did not end, it FAILED
             // — five retransmits with no acknowledgement, i.e. the link went
@@ -142,7 +149,7 @@ pub extern "C" fn _start() {
                 -2 => {
                     let mut tries = 0;
                     let mut sent = false;
-                    while tries < 200 {
+                    while tries < 50 {
                         host::sleep(10);
                         match host::tcp_send(sock, &tx_buf[..n as usize]) {
                             0 => { sent = true; break; }
@@ -151,8 +158,17 @@ pub extern "C" fn _start() {
                         }
                     }
                     if !sent {
-                        host::print("[debug] link stalled — closing\n");
-                        break;
+                        // Backpressure is not failure. A MIRROR may lose lines
+                        // — the sink ring already drops the oldest on overflow
+                        // — but it must never disconnect over it. Closing here
+                        // meant that under a saturating download the mirror
+                        // shut itself down after two seconds, and announced it
+                        // over the very connection it was closing: from the far
+                        // end, silence with no reason given.
+                        dropped = dropped.saturating_add(1);
+                        if dropped == 1 {
+                            host::print("[debug] mirror behind — dropping output, staying connected\n");
+                        }
                     }
                 }
                 _ => {
