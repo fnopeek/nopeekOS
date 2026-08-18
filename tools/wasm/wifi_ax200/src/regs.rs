@@ -960,6 +960,9 @@ pub const LLC_SNAP_HDR: [u8; 6] = [0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00];
 pub const DOT11_FC_TYPE_DATA: u8 = 0x08; // fc byte0 & 0x0c == data
 pub const DOT11_FC_PROTECTED: u8 = 0x40;  // fc byte1 — payload is encrypted
 pub const DOT11_STYPE_QOS: u8 = 0x08;    // subtype bit → +2-byte QoS control
+/// Data subtypes with this bit carry NO BODY — Null (4) and QoS Null (12).
+/// `ieee80211_is_nullfunc` / `ieee80211_is_qos_nullfunc` in Linux.
+pub const DOT11_STYPE_NODATA: u8 = 0x04;
 // Control-channel wire ops (docs/spec/WIFI_CLASS_ABI.md). downlink = manager→driver.
 pub const CMD_SET_KEY: u8 = 0x04;
 pub const CMD_TX_EAPOL: u8 = 0x05;
