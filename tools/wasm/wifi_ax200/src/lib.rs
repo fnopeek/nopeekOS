@@ -4655,8 +4655,17 @@ impl Ax200 {
                     // stated outright — no need to count.
                     let seq = u16::from_le_bytes([tr[6], tr[7]]) as u32;
                     if (seq >> 8) & 0x1f == a_dataq {
+                        // Mask to the QUEUE WINDOW, not to 256. The write
+                        // pointer wraps at MAX_TFD_QUEUE_SIZE while the data
+                        // queue holds IWL_DATA_QUEUE_SIZE entries and indexes
+                        // with `wptr & (qsize-1)`. Differencing across the two
+                        // moduli produced in-flight counts like 198 against a
+                        // cap of 16 — which blocked every transmission and
+                        // read on the device as a dead link (8 Mbit, 41 %
+                        // retries). Masked to the window the result is bounded
+                        // 0..63 by construction and can never wedge the queue.
                         a_read_ptr = Some((seq & 0xff).wrapping_add(1)
-                            & (MAX_TFD_QUEUE_SIZE - 1));
+                            & (IWL_DATA_QUEUE_SIZE as u32 - 1));
                     }
                     let base = RX_PKT_DATA_OFF;
                     a_rts += tr[base + TXR_OFF_FAILURE_RTS] as u32;
@@ -4841,8 +4850,8 @@ impl Ax200 {
             // handshake.
             if let Some(rp) = a_read_ptr {
                 self.data_read_ptr = rp;
-                let derived = self.data_write_ptr
-                    .wrapping_sub(rp) & (MAX_TFD_QUEUE_SIZE - 1);
+                let derived = (self.data_write_ptr & (IWL_DATA_QUEUE_SIZE as u32 - 1))
+                    .wrapping_sub(rp) & (IWL_DATA_QUEUE_SIZE as u32 - 1);
                 // Say when the two disagree by more than the frames completed
                 // in this pass — that difference IS the leak, and until now it
                 // was invisible.
