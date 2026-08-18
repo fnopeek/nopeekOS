@@ -508,6 +508,12 @@ struct Ax200 {
     key_slot_used: [bool; STA_KEY_MAX_NUM as usize],
     key_slot_freed: [u16; STA_KEY_MAX_NUM as usize],
     key_slot_prev: Option<u8>,
+    /// Is the pairwise key installed? It decides whether an EAPOL frame goes
+    /// out in the clear. mac80211 (`ieee80211_tx_h_select_key`) picks the
+    /// station's PTK for EVERY frame with a payload — an EAPOL-Key frame is
+    /// one — and only the pre-key control port carries
+    /// `IEEE80211_TX_INTFL_DONT_ENCRYPT`.
+    ptk_installed: bool,
     data_in_flight: u32,
     /// `now_ms` of the last TX completion, or of the last moment the queue was
     /// empty. The queue watchdog measures from here (iwl_txq_stuck_timer).
@@ -2546,6 +2552,7 @@ impl Ax200 {
     fn reconnect(&mut self) -> bool {
         host::print("[ax200] link lost — re-scanning to reconnect...\n");
         self.authorized = false;
+        self.ptk_installed = false;
         self.link_published = false;
         // The association is gone too — this is a real carrier loss, not a
         // dormant phase.
@@ -3879,6 +3886,8 @@ impl Ax200 {
         self.pump_rx(20);
         if group {
             self.st.gtk_installs = self.st.gtk_installs.wrapping_add(1);
+        } else {
+            self.ptk_installed = true;
         }
         host::print(if group { "[ax200] GTK installed: key id " } else { "[ax200] PTK installed: key id " });
         host::print_dec(key_idx as u32);
@@ -4975,7 +4984,18 @@ impl Ax200 {
                     // And never `let _ =` on it — a handshake frame that failed
                     // to go out is the single most important thing the log can
                     // say, and it used to say nothing at all.
-                    if !self.tx_8023(dst, ETHERTYPE_EAPOL, &cmd[3..3 + len], false, true) {
+                    // Encrypt once the pairwise key exists. The 4-way's own
+                    // msg2/msg4 go out before it is installed — plaintext, as
+                    // they must be. But a GROUP REKEY arrives minutes later,
+                    // with the PTK long in place, and mac80211 protects that
+                    // frame like any other data frame
+                    // (`ieee80211_tx_h_select_key`: the key is kept for
+                    // anything with `ieee80211_is_data_present`). We sent every
+                    // EAPOL frame in the clear, so the AP discarded our rekey
+                    // answer, retried four times and then stopped talking to
+                    // us — no deauth, association still "up".
+                    let enc = self.ptk_installed;
+                    if !self.tx_8023(dst, ETHERTYPE_EAPOL, &cmd[3..3 + len], enc, true) {
                         self.st.tx_eapol_dropped = self.st.tx_eapol_dropped.wrapping_add(1);
                         host::print("[ax200] EAPOL TX DROPPED — the AP will retry and then give up\n");
                     }
@@ -5343,6 +5363,7 @@ pub extern "C" fn _start() {
         key_slot_used: [false; STA_KEY_MAX_NUM as usize],
         key_slot_freed: [0; STA_KEY_MAX_NUM as usize],
         key_slot_prev: None,
+        ptk_installed: false,
         data_in_flight: 0,
         last_tx_done_ms: 0,
         tx_seq: 0,
