@@ -4869,6 +4869,7 @@ impl Ax200 {
             // Measured before this: 8 of 16 slots lost for 314 s, and an OTA
             // update that failed because a one-second stall killed its TLS
             // handshake.
+            let counted = self.data_in_flight.saturating_sub(tx_done);
             if let Some(rp) = a_read_ptr {
                 self.data_read_ptr = rp;
                 let derived = (self.data_write_ptr & (IWL_DATA_QUEUE_SIZE as u32 - 1))
@@ -4876,19 +4877,25 @@ impl Ax200 {
                 // Say when the two disagree by more than the frames completed
                 // in this pass — that difference IS the leak, and until now it
                 // was invisible.
-                if derived + tx_done < self.data_in_flight
-                    && self.st.inflight_corrections < 8
+                if derived < counted && self.st.inflight_corrections < 8
                 {
                     self.st.inflight_corrections += 1;
-                    host::print("[ax200] in-flight was ");
-                    host::print_dec(self.data_in_flight);
+                    host::print("[ax200] in-flight counted ");
+                    host::print_dec(counted);
                     host::print(", firmware says ");
                     host::print_dec(derived);
                     host::print(" — correcting\n");
                 }
-                self.data_in_flight = derived;
+                // Only ever LOWER the count. The derived value exists to
+                // repair a leak; it must never be able to create one. Getting
+                // the two pointers into different moduli once already wedged
+                // transmission completely (in-flight 198 against a cap of 16,
+                // 8 Mbit, dead link), and a diagnostic that can block the
+                // queue is worse than the leak it fixes. Taking the minimum
+                // means a disagreement — whatever its cause — costs nothing.
+                self.data_in_flight = counted.min(derived);
             } else {
-                self.data_in_flight = self.data_in_flight.saturating_sub(tx_done);
+                self.data_in_flight = counted;
             }
             // Fold this pass's accumulators into the running statistics.
             self.st.loop_iters = self.st.loop_iters.wrapping_add(1);
