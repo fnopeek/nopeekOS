@@ -22,11 +22,11 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-18, beak 0.29.0)
+### Current number (measured 2026-08-18, beak 0.29.1)
 
 ```
-4195 pass / 1414 fail / 177 inconclusive   (of 5786 vendored reftests)
-= 74.8 % of the conclusive 5609
+4204 pass / 1405 fail / 177 inconclusive   (of 5786 vendored reftests)
+= 74.9 % of the conclusive 5609
 ```
 
 Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → 3746 → 3863 → 3869 →
@@ -63,7 +63,22 @@ The test carries `fuzzy maxDifference=0-60`, so a real browser reconciles the
 two through `background-attachment: local` + `overflow: hidden` clipping the
 background to the padding box. We implement neither `background-attachment` nor
 `background-clip`, so this is a named pre-existing gap the change merely
-exposed). The inconclusive count fell 254 → 177 over
+exposed) → **4204** (0.29.1, +9/−0 — paint order, and the third time that has
+been the cheapest win in this file. A line box is not written until it BREAKS,
+so an out-of-flow box reached mid-line lands in the display list ahead of text
+that PRECEDES it in the document and paints under it; Appendix E puts positioned
+boxes in step 8, after that inline content in step 7. The box is lifted over
+exactly that one line. Two blunter versions were measured and thrown away
+first: lifting every out-of-flow box regardless gives +25/−21, because
+`CSS2/border-005` puts an absolute box FIRST and a `position: relative` box
+after it — both step 8, so document order must decide, and lifting one of them
+hands the overlap to the loser — and lifting every positioned box gives
++16/−46. Flushing the line instead is not available either: it would break
+`foo<div style=position:absolute></div>bar` onto two lines. Six of the nine are
+the `*-replaced-height-004/005/007` triple across the inline, inline-block and
+float families, where the two boxes were already pixel-identical and only the
+order was wrong. All six real-page renderings stay byte-identical and the layout
+costs 0.015 % more fuel). The inconclusive count fell 254 → 177 over
 that span: references that used to render blank — because `:root` was dropped,
 because an `inline-block` had no box, or because an inline box painted no
 background — now paint, so 73 more tests actually measure something.
