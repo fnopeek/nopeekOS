@@ -48,7 +48,7 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-08-18 · beak 0.27.0** (Kernel-/WLAN-Versionen: `git log`)
+**Stand 2026-08-18 · beak 0.28.0** (Kernel-/WLAN-Versionen: `git log`)
 
 Zwei Fäden laufen parallel.
 
@@ -57,8 +57,9 @@ JavaScript) läuft auf Hardware; die Arbeit dreht sich um Konformität und um
 echte Seiten (POST, Cookies, Zeichensätze, TLS-Wurzelspeicher). Die gemessene
 WPT-Zahl steht in `docs/spec/CONFORMANCE.md` und nirgends sonst. Seit 0.26.0
 gibt es einen Pfad **unterhalb** von „volles Layout": ein Zeigerwechsel, der nur
-malt, wird in der Anzeigeliste geflickt statt neu gerechnet — 140 von 165
+malt, wird in der Anzeigeliste geflickt statt neu gerechnet — 151 von 165
 Zeigerpositionen auf zwei echten Seiten, byte-gleich mit dem vollen Layout.
+Noch nicht am Gerät nachgemessen.
 
 **WLAN (AX200)**: lädt Wikipedia über Funk. Das Intent **`wlan`** ist das
 Werkzeug dafür — Kernel-Sicht plus ein Klartext-Report, den der Treiber selbst
