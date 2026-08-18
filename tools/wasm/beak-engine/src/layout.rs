@@ -72,10 +72,13 @@ struct PendingCbH<'a> {
 /// hand some unrelated descendant the wrong height.
 type PosCb = (i32, i32, i32, Option<i32>, Option<u32>);
 
-/// Where the display list and its side tables stood before a flex item was
-/// laid out — see `Ctx::flex_mark`.
+/// Where everything a layout RECORDS stood before a speculative run — see
+/// `Ctx::spec_mark`. One list, deliberately: a recorded vector that is not
+/// rolled back leaks trial-run entries into the real page, and that has now
+/// happened twice (`stack_ops`/`floats`, then `hover_boxes`). A new side table
+/// is added here and is then rolled back by every speculative site at once.
 #[derive(Clone, Copy)]
-struct FlexMark {
+struct SpecMark {
     ops: usize,
     links: usize,
     controls: usize,
@@ -84,6 +87,14 @@ struct FlexMark {
     float_ops: usize,
     float_links: usize,
     floats: usize,
+    inspects: usize,
+    hover_boxes: usize,
+}
+
+/// A speculative flex-item placement additionally moves the containing block.
+#[derive(Clone, Copy)]
+struct FlexMark {
+    spec: SpecMark,
     cb: PosCb,
 }
 
@@ -269,11 +280,7 @@ struct Row<'a> {
 /// from here on belongs to it, which is what lets its background go BEHIND its
 /// cells and `position: relative` move the whole thing afterwards.
 #[derive(Clone, Copy)]
-struct TablePart {
-    op: usize,
-    link: usize,
-    ctl: usize,
-}
+
 
 /// One segment of a `flow_children` node list: either a single node laid out
 /// normally, or a maximal run of stray table-part siblings (CSS2 §17.2.1)
@@ -392,26 +399,6 @@ fn resolve_block_h(st: &ComputedStyle, avail: f32) -> (f32, f32) {
     (cw.max(1.0), ml + st.pad_left + st.border_left.width)
 }
 
-/// Clip the display-list ops in `ops[start..]` to the document-space rectangle
-/// `[cl, ct) .. [cr, cb)`. Filled rects are intersected (pixel-exact); text and
-/// images are kept whole if their box overlaps the rect, dropped otherwise (a
-/// flat display list can't clip glyph runs mid-way). An empty rect removes the
-/// whole range — the CSS 2.1 `clip` case where nothing of the box is painted.
-/// Slide a range of already-emitted draw ops vertically. Used to place a
-/// bottom-anchored absolutely positioned box, whose final y is only known once
-/// its height has been laid out.
-fn translate_ops(ops: &mut [DrawOp], dy: i32) {
-    for op in ops {
-        match op {
-            DrawOp::Rect { y, .. }
-            | DrawOp::RoundRect { y, .. }
-            | DrawOp::Text { y, .. }
-            | DrawOp::Image { y, .. }
-            | DrawOp::BgImage { y, .. } => *y += dy,
-        }
-    }
-}
-
 /// Move a detached op list (an `inline-block`'s, laid out at the origin) to
 /// where its line box put it.
 fn translate_op_list(ops: &mut [DrawOp], dx: i32, dy: i32) {
@@ -429,6 +416,11 @@ fn translate_op_list(ops: &mut [DrawOp], dx: i32, dy: i32) {
     }
 }
 
+/// Clip the display-list ops in `ops[start..]` to the document-space rectangle
+/// `[cl, ct) .. [cr, cb)`. Filled rects are intersected (pixel-exact); text and
+/// images are kept whole if their box overlaps the rect, dropped otherwise (a
+/// flat display list can't clip glyph runs mid-way). An empty rect removes the
+/// whole range — the CSS 2.1 `clip` case where nothing of the box is painted.
 fn clip_ops(ops: &mut Vec<DrawOp>, start: usize, cl: i32, ct: i32, cr: i32, cb: i32) {
     if start >= ops.len() {
         return;
@@ -2150,9 +2142,7 @@ impl<'a> Ctx<'a> {
             }
             self.path.push(self.info(el));
             let vp_mark = self.vp_height_box.replace(false);
-            let op0 = self.ops.len();
-            let link0 = self.links.len();
-            let ctl0 = self.controls.len();
+            let m0 = self.spec_mark();
             // An explicit `z-index` on a positioned (relative/sticky) box
             // opens a tracked stacking range (CSS2.1 §9.9), same as abspos —
             // unless already nested inside another tracked range.
@@ -2210,18 +2200,18 @@ impl<'a> Ctx<'a> {
             if st.position == Position::Relative {
                 let (dx, dy) = rel_offset(&st, w as f32);
                 if dx != 0 || dy != 0 {
-                    self.shift_ops(op0, self.ops.len(), link0, self.links.len(), ctl0, dx, dy);
+                    self.shift_ops(&m0, dx, dy);
                 }
             }
             // `transform: translate(...)` — the same paint-time shift, but its
             // percentages are of the BOX, not the containing block.
             let (tdx, tdy) = translate_offset(&st, out.box_w, out.bottom - out.top_y);
             if tdx != 0 || tdy != 0 {
-                self.shift_ops(op0, self.ops.len(), link0, self.links.len(), ctl0, tdx, tdy);
+                self.shift_ops(&m0, tdx, tdy);
             }
             if track {
                 if let ZIndex::Value(z) = st.z_index {
-                    self.record_stack_entry(z, LAYER_IN_FLOW, op0, self.ops.len(), link0, self.links.len());
+                    self.record_stack_entry(z, LAYER_IN_FLOW, m0.ops, self.ops.len(), m0.links, self.links.len());
                 }
             }
             self.path.pop();
@@ -2480,6 +2470,7 @@ impl<'a> Ctx<'a> {
             links: Vec::new(),
             controls: Vec::new(),
             inspects: Vec::new(),
+            hover_boxes: Vec::new(),
             w: bw + (ml + mr) as i32,
             h,
             baseline: h,
@@ -3126,9 +3117,8 @@ impl<'a> Ctx<'a> {
         };
         // layout_box → layout_block re-establishes the CB for its own children.
         let w_i = width.max(1.0) as i32;
-        let start = self.ops.len();
-        let link_start = self.links.len();
-        let ctl_start = self.controls.len();
+        let m0 = self.spec_mark();
+        let start = m0.ops;
         // An explicit `z-index` on this positioned box opens a tracked
         // stacking range for it (CSS2.1 §9.9) — unless it's already nested
         // inside another tracked range, which absorbs it instead.
@@ -3147,13 +3137,7 @@ impl<'a> Ctx<'a> {
         let bottom = if let Some(target) = shift_to_bottom {
             let dy = (target - box_bottom as f32) as i32;
             if dy != 0 {
-                translate_ops(&mut self.ops[start..], dy);
-                for l in &mut self.links[link_start..] {
-                    l.y += dy;
-                }
-                for c in &mut self.controls[ctl_start..] {
-                    c.y += dy;
-                }
+                self.shift_ops(&m0, 0, dy);
             }
             box_bottom + dy
         } else {
@@ -3184,11 +3168,11 @@ impl<'a> Ctx<'a> {
         // to be clipped away by an `overflow:hidden` parent.
         let (tdx, tdy) = translate_offset(st, w_i, bottom - py as i32);
         if tdx != 0 || tdy != 0 {
-            self.shift_ops(start, self.ops.len(), link_start, self.links.len(), ctl_start, tdx, tdy);
+            self.shift_ops(&m0, tdx, tdy);
         }
         if track {
             if let ZIndex::Value(z) = st.z_index {
-                self.record_stack_entry(z, LAYER_IN_FLOW, start, self.ops.len(), link_start, self.links.len());
+                self.record_stack_entry(z, LAYER_IN_FLOW, m0.ops, self.ops.len(), m0.links, self.links.len());
             }
         }
         // The out-of-flow box, at its final (post-bottom-shift) position.
@@ -3433,7 +3417,7 @@ impl<'a> Ctx<'a> {
                 if cs.position == Position::Relative {
                     let (dx, dy) = rel_offset(&cs, w as f32);
                     if dx != 0 || dy != 0 {
-                        self.shift_ops(part.op, self.ops.len(), part.link, self.links.len(), part.ctl, dx, dy);
+                        self.shift_ops(&part, dx, dy);
                     }
                 }
                 self.path.pop();
@@ -3545,8 +3529,8 @@ impl<'a> Ctx<'a> {
         table_bottom
     }
 
-    fn part_start(&self) -> TablePart {
-        TablePart { op: self.ops.len(), link: self.links.len(), ctl: self.controls.len() }
+    fn part_start(&self) -> SpecMark {
+        self.spec_mark()
     }
 
     /// Close a table row or row-group box around everything emitted since
@@ -3555,12 +3539,12 @@ impl<'a> Ctx<'a> {
     /// background but never a border — the separated model ignores border
     /// properties on them (CSS2.1 §17.6.1), and the collapsed model resolves
     /// every grid line at the cells.
-    fn finish_table_part(&mut self, cs: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, part: TablePart, cb_w: f32) {
-        self.insert_bg(cs, x, y, w, h, part.op);
+    fn finish_table_part(&mut self, cs: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, part: SpecMark, cb_w: f32) {
+        self.insert_bg(cs, x, y, w, h, part.ops);
         if cs.position == Position::Relative {
             let (dx, dy) = rel_offset(cs, cb_w);
             if dx != 0 || dy != 0 {
-                self.shift_ops(part.op, self.ops.len(), part.link, self.links.len(), part.ctl, dx, dy);
+                self.shift_ops(&part, dx, dy);
             }
         }
     }
@@ -3759,7 +3743,7 @@ impl<'a> Ctx<'a> {
         // The open row group: its style, where its box and ops start, and the
         // bottom of its last row so far. Rows of one group are contiguous, so
         // the group closes when a row with a different one comes along.
-        let mut group: Option<(u32, ComputedStyle, TablePart, i32)> = None;
+        let mut group: Option<(u32, ComputedStyle, SpecMark, i32)> = None;
         let mut last_bottom = y0;
         for (ri, row) in rows.iter().enumerate() {
             if let Some((seq, gst, part, top)) = group {
@@ -3836,8 +3820,8 @@ impl<'a> Ctx<'a> {
                     continue;
                 }
                 let content_y = y + cell_borders(cs, collapse).2 as i32 + cs.pad_top as i32;
-                let bg_idx = self.ops.len();
-                let (link0, ctl0) = (self.links.len(), self.controls.len());
+                let m0 = self.spec_mark();
+                let bg_idx = m0.ops;
                 let cell_cb = self.cb;
                 if cs.position != Position::Static {
                     self.cb = (*content_x, y, *content_w, Some(row_h), None);
@@ -3866,7 +3850,7 @@ impl<'a> Ctx<'a> {
                     _ => 0,
                 };
                 if dy != 0 {
-                    self.shift_ops(bg_idx, self.ops.len(), link0, self.links.len(), ctl0, 0, dy);
+                    self.shift_ops(&m0, 0, dy);
                 }
                 if collapse {
                     // Each grid line is drawn exactly once, by the cell above/
@@ -3921,7 +3905,7 @@ impl<'a> Ctx<'a> {
                 if cs.position == Position::Relative {
                     let (dx, dy) = rel_offset(cs, grid_w as f32);
                     if dx != 0 || dy != 0 {
-                        self.shift_ops(bg_idx, self.ops.len(), link0, self.links.len(), ctl0, dx, dy);
+                        self.shift_ops(&m0, dx, dy);
                     }
                 }
             }
@@ -3946,29 +3930,11 @@ impl<'a> Ctx<'a> {
     /// Lay an element's children to measure their flowed height without emitting
     /// any draw ops (used to size table rows before painting cell boxes).
     fn measure_children_height(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
-        let (o, l, c) = (self.ops.len(), self.links.len(), self.controls.len());
-        // Stacking ranges index into `ops`/`links`, so a discarded speculative
-        // layout has to drop the ones it recorded too — otherwise they survive
-        // pointing into a vector that was truncated behind them, and
-        // `reorder_by_z` (which needs disjoint ascending ranges) slices the
-        // real display list at the wrong offsets.
-        let (so, sl) = (self.stack_ops.len(), self.stack_links.len());
-        let (fo, flk) = (self.float_ops.len(), self.float_links.len());
-        // Floats live on past the box that placed them, so a discarded layout
-        // leaks exclusion rects into the real one: the next float finds a BFC
-        // that looks full and drops below phantom neighbours.
-        let fl = self.floats.len();
+        let m = self.spec_mark();
         self.path.push(self.info(el));
         let bottom = self.layout_children(&el.children, st, Some(el), x, w.max(0), y);
         self.path.pop();
-        self.ops.truncate(o);
-        self.links.truncate(l);
-        self.controls.truncate(c);
-        self.stack_ops.truncate(so);
-        self.stack_links.truncate(sl);
-        self.float_ops.truncate(fo);
-        self.float_links.truncate(flk);
-        self.floats.truncate(fl);
+        self.spec_rollback(&m);
         (bottom - y).max(0)
     }
 
@@ -3978,19 +3944,9 @@ impl<'a> Ctx<'a> {
         match cell {
             Cell::Real(e) => self.measure_children_height(e, st, x, w, y),
             Cell::Anon(nodes) => {
-                let (o, l, c) = (self.ops.len(), self.links.len(), self.controls.len());
-                let (so, sl) = (self.stack_ops.len(), self.stack_links.len());
-                let (fo, flk) = (self.float_ops.len(), self.float_links.len());
-                let fl = self.floats.len();
+                let m = self.spec_mark();
                 let bottom = self.layout_children(nodes, st, None, x, w.max(0), y);
-                self.ops.truncate(o);
-                self.links.truncate(l);
-                self.controls.truncate(c);
-                self.stack_ops.truncate(so);
-                self.stack_links.truncate(sl);
-                self.float_ops.truncate(fo);
-                self.float_links.truncate(flk);
-                self.floats.truncate(fl);
+                self.spec_rollback(&m);
                 (bottom - y).max(0)
             }
         }
@@ -5054,9 +5010,7 @@ impl<'a> Ctx<'a> {
             if aself == CrossAlign::Stretch && height_auto && cell_h > 0.0 {
                 s2.height = Len::Px(cell_h);
             }
-            let op0 = self.ops.len();
-            let link0 = self.links.len();
-            let ctl0 = self.controls.len();
+            let m0 = self.spec_mark();
             self.path.push(self.info(el_i));
             // NOTE: css-grid-2 §6.6 says a grid item's percentage height
             // resolves against its GRID AREA, and the row tracks are sized by
@@ -5077,7 +5031,7 @@ impl<'a> Ctx<'a> {
                 _ => 0,
             };
             if dy != 0 {
-                self.shift_ops(op0, self.ops.len(), link0, self.links.len(), ctl0, 0, dy);
+                self.shift_ops(&m0, 0, dy);
             }
         }
 
@@ -5166,7 +5120,17 @@ impl<'a> Ctx<'a> {
     /// state `measure_box_height` rolls back, so keeping a placement instead of
     /// discarding it is the only difference between the two.
     fn flex_mark(&self) -> FlexMark {
-        FlexMark {
+        FlexMark { spec: self.spec_mark(), cb: self.cb }
+    }
+
+    fn flex_rollback(&mut self, m: &FlexMark) {
+        self.spec_rollback(&m.spec);
+        self.cb = m.cb;
+    }
+
+    /// Where every recorded vector stands right now.
+    fn spec_mark(&self) -> SpecMark {
+        SpecMark {
             ops: self.ops.len(),
             links: self.links.len(),
             controls: self.controls.len(),
@@ -5175,11 +5139,24 @@ impl<'a> Ctx<'a> {
             float_ops: self.float_ops.len(),
             float_links: self.float_links.len(),
             floats: self.floats.len(),
-            cb: self.cb,
+            inspects: self.inspects.len(),
+            hover_boxes: self.hover_boxes.len(),
         }
     }
 
-    fn flex_rollback(&mut self, m: &FlexMark) {
+    /// Drop everything a discarded layout recorded.
+    ///
+    /// Stacking ranges index into `ops`/`links`, so a speculative run has to
+    /// drop the ones it recorded too — otherwise they survive pointing into a
+    /// vector that was truncated behind them, and `reorder_by_z` (which needs
+    /// disjoint ascending ranges) slices the real display list at the wrong
+    /// offsets. Floats live on past the box that placed them, so a leak puts
+    /// exclusion rects into the real layout: the next float finds a BFC that
+    /// looks full and drops below phantom neighbours. And `hover_boxes` /
+    /// `inspects` are hit-test geometry — a trial run records them at trial
+    /// COORDINATES, so the pointer lights up an element the page never painted
+    /// there.
+    fn spec_rollback(&mut self, m: &SpecMark) {
         self.ops.truncate(m.ops);
         self.links.truncate(m.links);
         self.controls.truncate(m.controls);
@@ -5188,34 +5165,17 @@ impl<'a> Ctx<'a> {
         self.float_ops.truncate(m.float_ops);
         self.float_links.truncate(m.float_links);
         self.floats.truncate(m.floats);
-        self.cb = m.cb;
+        self.inspects.truncate(m.inspects);
+        self.hover_boxes.truncate(m.hover_boxes);
     }
 
     fn measure_box_height(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
-        let (o, l, c) = (self.ops.len(), self.links.len(), self.controls.len());
-        // Stacking ranges index into `ops`/`links`, so a discarded speculative
-        // layout has to drop the ones it recorded too — otherwise they survive
-        // pointing into a vector that was truncated behind them, and
-        // `reorder_by_z` (which needs disjoint ascending ranges) slices the
-        // real display list at the wrong offsets.
-        let (so, sl) = (self.stack_ops.len(), self.stack_links.len());
-        let (fo, flk) = (self.float_ops.len(), self.float_links.len());
-        // Floats live on past the box that placed them, so a discarded layout
-        // leaks exclusion rects into the real one: the next float finds a BFC
-        // that looks full and drops below phantom neighbours.
-        let fl = self.floats.len();
+        let m = self.spec_mark();
         let prev_cb = self.cb;
         self.path.push(self.info(el));
         let bottom = self.layout_box(el, st, x, w.max(1), y);
         self.path.pop();
-        self.ops.truncate(o);
-        self.links.truncate(l);
-        self.controls.truncate(c);
-        self.stack_ops.truncate(so);
-        self.stack_links.truncate(sl);
-        self.float_ops.truncate(fo);
-        self.float_links.truncate(flk);
-        self.floats.truncate(fl);
+        self.spec_rollback(&m);
         self.cb = prev_cb;
         bottom - y
     }
@@ -5451,7 +5411,7 @@ impl<'a> Ctx<'a> {
                 // siblings, and the containing block it installed is gone with
                 // it. Leaving those standing made every later item on the line
                 // flow around phantom exclusions.
-                self.floats.truncate(mark.floats);
+                self.floats.truncate(mark.spec.floats);
                 self.cb = mark.cb;
                 marks.push(mark);
             }
@@ -5726,11 +5686,16 @@ impl<'a> Ctx<'a> {
         out
     }
 
-    /// Shift a contiguous slice of already-emitted ops + links by `(dx, dy)` —
-    /// used to place a flex item on the cross axis, and to offset a
-    /// `position:relative` box after it is laid in flow.
-    fn shift_ops(&mut self, o0: usize, o1: usize, l0: usize, l1: usize, c0: usize, dx: i32, dy: i32) {
-        for op in &mut self.ops[o0..o1] {
+    /// Shift everything recorded since `m` by `(dx, dy)` — used to place a
+    /// flex item on the cross axis, and to offset a `position:relative` box
+    /// after it is laid in flow.
+    ///
+    /// It takes the whole mark rather than a few explicit indices so that a
+    /// side table added later cannot be forgotten here: hit rects that do not
+    /// follow their painted box put the pointer where the box used to be, and
+    /// `hover_boxes` shipped in 0.25.0 with exactly that defect.
+    fn shift_ops(&mut self, m: &SpecMark, dx: i32, dy: i32) {
+        for op in &mut self.ops[m.ops..] {
             match op {
                 DrawOp::Text { x, y, .. }
                 | DrawOp::Rect { x, y, .. }
@@ -5742,15 +5707,24 @@ impl<'a> Ctx<'a> {
                 }
             }
         }
-        for lk in &mut self.links[l0..l1] {
+        for lk in &mut self.links[m.links..] {
             lk.x += dx;
             lk.y += dy;
         }
-        // Control hit rects must follow their painted box (relative offsets,
-        // flex cross-alignment) or clicks land where the box used to be.
-        for c in &mut self.controls[c0..] {
+        // Hit rects must follow their painted box (relative offsets, flex
+        // cross-alignment) or the click — or the pointer — lands where the box
+        // used to be.
+        for c in &mut self.controls[m.controls..] {
             c.x += dx;
             c.y += dy;
+        }
+        for b in &mut self.hover_boxes[m.hover_boxes..] {
+            b.x += dx;
+            b.y += dy;
+        }
+        for b in &mut self.inspects[m.inspects..] {
+            b.x += dx;
+            b.y += dy;
         }
     }
 }
@@ -6158,7 +6132,7 @@ impl<'a> Ctx<'a> {
         let outer_w = ceil_i32(content_w + pad_border + ml + mr).max(1);
 
         let (o0, l0, c0) = (self.ops.len(), self.links.len(), self.controls.len());
-        let i0 = self.inspects.len();
+        let (i0, h0) = (self.inspects.len(), self.hover_boxes.len());
         let saved_floats = core::mem::take(&mut self.floats);
         let saved_baseline = self.last_baseline.take();
         self.path.push(self.info(el));
@@ -6174,6 +6148,7 @@ impl<'a> Ctx<'a> {
         let links: Vec<LinkRect> = self.links.drain(l0..).collect();
         let controls: Vec<ControlRect> = self.controls.drain(c0..).collect();
         let inspects: Vec<InspectBox> = self.inspects.drain(i0..).collect();
+        let hover_boxes: Vec<HoverBox> = self.hover_boxes.drain(h0..).collect();
         let h = (border_bottom + st.margin_bottom as i32).max(0);
         // The box aligns on its LAST line box's baseline; with no in-flow line
         // box, or when it clips its overflow, it aligns on its bottom margin
@@ -6182,7 +6157,7 @@ impl<'a> Ctx<'a> {
             Some(b) if !st.overflow_clip => b.clamp(0, h),
             _ => h,
         };
-        Some(AtomicBox { ops, links, controls, inspects, w: outer_w, h, baseline, valign: st.valign })
+        Some(AtomicBox { ops, links, controls, inspects, hover_boxes, w: outer_w, h, baseline, valign: st.valign })
     }
 
     /// The inline box an inline-level child needs, if any: one that paints
@@ -6382,11 +6357,13 @@ struct AtomicBox {
     ops: Vec<DrawOp>,
     links: Vec<LinkRect>,
     controls: Vec<ControlRect>,
-    /// Inspect boxes recorded while laying this box out at the origin. They
-    /// move with it — without that the dev tool reports every box inside an
-    /// `inline-block` at the page's top-left corner, which reads as a layout
-    /// bug that is not there.
+    /// Hit rects recorded while laying this box out at the origin. They move
+    /// with it — without that every box inside an `inline-block` is reported at
+    /// the page's top-left corner, which reads as a layout bug that is not
+    /// there. It was one for `:hover`: the pointer lit up links it was nowhere
+    /// near, and the real link answered to nothing.
     inspects: Vec<InspectBox>,
+    hover_boxes: Vec<HoverBox>,
     /// Margin-box size — what the line reserves.
     w: i32,
     h: i32,
@@ -7657,10 +7634,15 @@ fn emit_line(
                     b.x += dx;
                     b.y += dy;
                 }
+                for b in &mut box_.hover_boxes {
+                    b.x += dx;
+                    b.y += dy;
+                }
                 ops.append(&mut box_.ops);
                 links.append(&mut box_.links);
                 controls.append(&mut box_.controls);
                 inspects.append(&mut box_.inspects);
+                hover_boxes.append(&mut box_.hover_boxes);
             }
             Placed::Control { x, ctl } => {
                 let top = baseline - (ctl.h - CTL_PAD_Y);
@@ -7776,6 +7758,65 @@ mod tests {
 
         // A point outside every box hovers nothing.
         assert!(l.hover_at(-5, -5).is_empty());
+    }
+
+    /// A hit rect has to sit where the box is PAINTED, on every path that
+    /// moves a box after laying it out.
+    ///
+    /// An `inline-block` is laid out at the ORIGIN and translated onto its
+    /// line; a `position:relative` box is laid in flow and then offset; a
+    /// `vertical-align`ed table cell slides its content down. Every one of
+    /// those moved the ops and left the hit rects behind — so the pointer lit
+    /// up elements it was nowhere near (Wikipedia's whole sister-project row
+    /// answered to the top-left corner) and the link actually under the
+    /// pointer answered to nothing.
+    #[test]
+    fn a_hit_rect_follows_its_box_when_the_box_moves() {
+        let check = |inner: &str, what: &str| {
+            let html = alloc::format!(
+                "<body style=\"margin:0\"><style>a:hover{{color:#0f0}}</style>{inner}</body>"
+            );
+            let l = lay_hover(&html, 400, &[]);
+            let b = l.hover_boxes.iter().max_by_key(|b| b.seq).expect(what);
+            let red = rects(&l).into_iter().find(|(.., c)| *c == Rgb(0xff, 0, 0)).expect(what);
+            assert_eq!((b.x, b.y), (red.0, red.1), "{what}: hit rect vs painted box");
+        };
+        const LINK: &str = "<a href=\"/\" style=\"display:block;width:30px;height:20px;background:#f00\"></a>";
+        // Laid out at the origin, then translated onto the line box.
+        check(
+            &alloc::format!("<p style=\"margin:40px\">t <span style=\"display:inline-block\">{LINK}</span></p>"),
+            "inline-block",
+        );
+        // Laid out in flow, then offset by `position:relative`.
+        check(
+            "<a href=\"/\" style=\"display:block;position:relative;left:25px;top:15px;\
+             width:30px;height:20px;background:#f00\"></a>",
+            "position:relative",
+        );
+        // A flex item is measured, discarded, then laid out for real.
+        check(
+            &alloc::format!("<div style=\"display:flex;flex-direction:column;height:200px\"><div>{LINK}</div></div>"),
+            "flex column item",
+        );
+    }
+
+    /// A discarded trial layout must not leave its hit rects behind. It
+    /// records them at TRIAL coordinates, so a leak points the pointer at a
+    /// rectangle the page never painted — and records the same element once
+    /// per trial, which is how Wikipedia's Main_Page came to carry 5131 hit
+    /// rects for 656 real ones.
+    #[test]
+    fn a_speculative_layout_leaves_no_hit_rects_behind() {
+        let html = "<body style=\"margin:0\"><style>a:hover{color:#0f0}</style>\
+                    <div style=\"display:flex;flex-direction:column;height:200px\"><div>\
+                    <a href=\"/\" style=\"display:block;width:30px;height:20px;background:#f00\"></a>\
+                    </div></div></body>";
+        let l = lay_hover(html, 400, &[]);
+        assert_eq!(
+            l.hover_boxes.len(), 1,
+            "one element, one rect: {:?}",
+            l.hover_boxes.iter().map(|b| (b.seq, b.x, b.y)).collect::<alloc::vec::Vec<_>>(),
+        );
     }
 
     /// A page with no `:hover` rule must not pay for a list nobody reads.

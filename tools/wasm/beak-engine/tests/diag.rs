@@ -811,3 +811,251 @@ fn pixels_differ(
     let bbox = if n == 0 { (0, 0, 0, 0) } else { (x0, y0, x1 - x0 + 1, y1 - y0 + 1) };
     (n, (w * h) as usize, bbox)
 }
+
+// ── DHOPS: the op-level hover census ───────────────────────────────────────
+// The pixel census (DHOVER) said HOW MUCH changes. This says WHAT changes in
+// the display list, which is what decides the shape of a paint-only path:
+// if the op COUNT is stable and only colour fields move, a patch is enough;
+// if ops appear/disappear, the list has to be re-emitted.
+//
+//   DHOPS=<html> DCSS=<css> [DW=1880] [DN=40]
+//     cargo test --release --test diag hover_op_census -- --nocapture
+
+/// Everything about an op that the rasteriser reads, as text — so two ops
+/// compare field-by-field without the engine needing `PartialEq`.
+fn op_full(op: &DrawOp) -> String {
+    match op {
+        DrawOp::Text { x, y, size, color, bold, italic, mono, text } => format!(
+            "T x={x} y={y} s={size:.2} c={color:?} b={bold} i={italic} m={mono} {text:?}"
+        ),
+        DrawOp::Rect { x, y, w, h, color } => format!("R x={x} y={y} w={w} h={h} c={color:?}"),
+        DrawOp::RoundRect { x, y, w, h, r, color, ring } => {
+            format!("Q x={x} y={y} w={w} h={h} r={r:?} c={color:?} ring={ring:.2}")
+        }
+        DrawOp::Image { x, y, w, h, src, alt } => {
+            format!("I x={x} y={y} w={w} h={h} {src:?} {alt:?}")
+        }
+        DrawOp::BgImage { x, y, w, h, key, repeat, pos, size, tint } => format!(
+            "B x={x} y={y} w={w} h={h} k={key} rep={repeat:?} p={pos:?} sz={size:?} t={tint:?}"
+        ),
+    }
+}
+
+/// The part of an op that a paint-only change must NOT be able to move: kind
+/// plus geometry. Two ops with the same shape differ only in appearance.
+fn op_shape(op: &DrawOp) -> String {
+    match op {
+        DrawOp::Text { x, y, size, text, .. } => format!("T x={x} y={y} s={size:.2} n={}", text.len()),
+        DrawOp::Rect { x, y, w, h, .. } => format!("R x={x} y={y} w={w} h={h}"),
+        DrawOp::RoundRect { x, y, w, h, .. } => format!("Q x={x} y={y} w={w} h={h}"),
+        DrawOp::Image { x, y, w, h, .. } => format!("I x={x} y={y} w={w} h={h}"),
+        DrawOp::BgImage { x, y, w, h, .. } => format!("B x={x} y={y} w={w} h={h}"),
+    }
+}
+
+#[test]
+fn hover_op_census() {
+    let Ok(hp) = std::env::var("DHOPS") else { return };
+    let css = std::env::var("DCSS").ok().and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
+    let w: u32 = std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(1880);
+    let want: usize = std::env::var("DN").ok().and_then(|s| s.parse().ok()).unwrap_or(40);
+    let html = fs::read_to_string(&hp).expect("DHOPS");
+
+    // What do the sheet's `:hover` rules even DECLARE? A text census over the
+    // whole sheet is an upper bound (not every rule matches), but it is the
+    // cheap half of the answer and it names the properties to classify first.
+    {
+        let mut props: std::collections::BTreeMap<String, usize> = Default::default();
+        let mut blocks = 0usize;
+        let b = css.as_bytes();
+        let mut i = 0usize;
+        while let Some(p) = css[i..].find(":hover") {
+            let at = i + p;
+            // the selector this compound belongs to ends at the next `{`
+            let Some(open) = css[at..].find('{') else { break };
+            let open = at + open;
+            // …but only if no `}` or `;` intervenes (else the `:hover` was in
+            // a value or a comment, not a selector)
+            if css[at..open].contains('}') || css[at..open].contains(';') {
+                i = at + 6;
+                continue;
+            }
+            let Some(close) = css[open..].find('}') else { break };
+            let close = open + close;
+            blocks += 1;
+            for decl in css[open + 1..close].split(';') {
+                if let Some(c) = decl.find(':') {
+                    let name = decl[..c].trim().to_ascii_lowercase();
+                    if !name.is_empty() && name.len() < 40 {
+                        *props.entry(name).or_default() += 1;
+                    }
+                }
+            }
+            i = close.min(b.len());
+        }
+        let mut v: Vec<_> = props.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1));
+        println!("--- sheet census: {blocks} `:hover` blocks declare ---");
+        for (name, n) in v.iter().take(25) {
+            println!("  {n:>4}x  {name}");
+        }
+        if v.len() > 25 {
+            println!("  … {} more property names", v.len() - 25);
+        }
+    }
+
+    let eng = Engine::new();
+    eng.set_viewport_h(1000);
+    let rest = eng.layout_ext(&html, &css, w);
+    println!("\nrest: {} ops, {} hover_boxes, height {}", rest.ops.len(), rest.hover_boxes.len(), rest.height);
+    if rest.hover_boxes.is_empty() {
+        println!("page has no :hover rules — nothing to measure");
+        return;
+    }
+    let rest_full: Vec<String> = rest.ops.iter().map(op_full).collect();
+    let rest_shape: Vec<String> = rest.ops.iter().map(op_shape).collect();
+    {
+        let mut kinds: std::collections::BTreeMap<char, usize> = Default::default();
+        for f in &rest_full {
+            *kinds.entry(f.as_bytes()[0] as char).or_default() += 1;
+        }
+        println!("  op kinds {kinds:?}   links {}", rest.links.len());
+    }
+
+    // Probe the visible area, same grid as DHOVER, but stop after DN hits.
+    let (vw, vh) = (w, 1000u32);
+    let mut hits = 0usize;
+    let (mut geom_stable, mut sum_repaint, mut sum_ins, mut sum_del) = (0usize, 0usize, 0usize, 0usize);
+    let (mut worst_repaint, mut worst_ins) = (0usize, 0usize);
+    let mut seen: std::collections::HashSet<Vec<u32>> = Default::default();
+    let mut examples: Vec<String> = Vec::new();
+    'probe: for gy in (20..vh as i32).step_by(17) {
+        for gx in (20..vw as i32).step_by(23) {
+            let hovered = rest.hover_at(gx, gy);
+            if hovered.is_empty() || !seen.insert(hovered.clone()) {
+                continue;
+            }
+            eng.set_hover(hovered.clone());
+            let hot = eng.layout_ext(&html, &css, w);
+            eng.set_hover(Vec::new());
+            let hot_full: Vec<String> = hot.ops.iter().map(op_full).collect();
+            if hot_full == rest_full {
+                continue; // this element styles nothing on hover
+            }
+            hits += 1;
+            let hot_shape: Vec<String> = hot.ops.iter().map(op_shape).collect();
+            // Align on GEOMETRY: ops that keep their kind+rect are the same box
+            // painted again. What is left over is a true insert or delete.
+            let al = lcs(&rest_shape, &hot_shape);
+            let repaint = al.iter().filter(|&&(i, j)| rest_full[i] != hot_full[j]).count();
+            let del = rest_full.len() - al.len();
+            let ins = hot_full.len() - al.len();
+            if ins == 0 && del == 0 {
+                geom_stable += 1;
+            }
+            sum_repaint += repaint;
+            sum_ins += ins;
+            sum_del += del;
+            worst_repaint = worst_repaint.max(repaint);
+            worst_ins = worst_ins.max(ins);
+            if examples.len() < 8 {
+                let mut e = format!(
+                    "  seqs {:?} at ({gx},{gy}): {} -> {} ops | {repaint} repainted, {ins} added, {del} removed",
+                    if hovered.len() > 6 { &hovered[..6] } else { &hovered[..] },
+                    rest_full.len(), hot_full.len(),
+                );
+                for &(i, j) in al.iter().filter(|&&(i, j)| rest_full[i] != hot_full[j]).take(2) {
+                    e.push_str(&format!("\n      was {}\n      now {}", rest_full[i], hot_full[j]));
+                }
+                let mut k = 0usize;
+                let inserted: Vec<usize> = {
+                    let keep: std::collections::HashSet<usize> = al.iter().map(|&(_, j)| j).collect();
+                    (0..hot_full.len()).filter(|j| !keep.contains(j)).collect()
+                };
+                for j in inserted.iter().take(2) {
+                    e.push_str(&format!("\n      ADDED {}", hot_full[*j]));
+                    k += 1;
+                }
+                let _ = k;
+                examples.push(e);
+            }
+            if hits >= want {
+                break 'probe;
+            }
+        }
+    }
+
+    println!("\n--- {hits} distinct hover targets that change the display list ---");
+    if hits == 0 {
+        return;
+    }
+    println!("  geometry FULLY stable:  {geom_stable}/{hits}  (no op added or removed)");
+    println!("  repainted ops: avg {:.1}, worst {worst_repaint}  of {} total ({:.3} %)",
+             sum_repaint as f32 / hits as f32, rest_full.len(),
+             100.0 * (sum_repaint as f32 / hits as f32) / rest_full.len() as f32);
+    println!("  added ops:     avg {:.1}, worst {worst_ins}", sum_ins as f32 / hits as f32);
+    println!("  removed ops:   avg {:.1}", sum_del as f32 / hits as f32);
+    println!("\nexamples:");
+    for e in &examples {
+        println!("{e}");
+    }
+}
+
+/// Longest common subsequence as index pairs. The op lists are in document
+/// order and edits are local, so this aligns "the same box, painted again"
+/// against "an op that genuinely appeared" — an index-wise diff cannot, it
+/// reports every op after an insertion as changed.
+fn lcs(a: &[String], b: &[String]) -> Vec<(usize, usize)> {
+    let (n, m) = (a.len(), b.len());
+    let mut dp = vec![0u32; (n + 1) * (m + 1)];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            dp[i * (m + 1) + j] = if a[i] == b[j] {
+                dp[(i + 1) * (m + 1) + j + 1] + 1
+            } else {
+                dp[(i + 1) * (m + 1) + j].max(dp[i * (m + 1) + j + 1])
+            };
+        }
+    }
+    let (mut i, mut j, mut out) = (0usize, 0usize, Vec::new());
+    while i < n && j < m {
+        if a[i] == b[j] {
+            out.push((i, j));
+            i += 1;
+            j += 1;
+        } else if dp[(i + 1) * (m + 1) + j] >= dp[i * (m + 1) + j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    out
+}
+
+/// DHBOX=<html> DCSS=<css> [DW=] [DX= DY=] — dump the hover boxes that contain
+/// a point, with their rects. A box whose rect contains the point but whose
+/// paint is elsewhere means the hit-test geometry is wrong.
+#[test]
+fn hover_box_dump() {
+    let Ok(hp) = std::env::var("DHBOX") else { return };
+    let css = std::env::var("DCSS").ok().and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
+    let w: u32 = std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(1880);
+    let x: i32 = std::env::var("DX").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
+    let y: i32 = std::env::var("DY").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
+    let html = fs::read_to_string(&hp).expect("DHBOX");
+    let eng = Engine::new();
+    eng.set_viewport_h(1000);
+    let lay = eng.layout_ext(&html, &css, w);
+    println!("{} hover_boxes; those containing ({x},{y}):", lay.hover_boxes.len());
+    for b in lay.hover_boxes.iter().filter(|b| x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h) {
+        println!("  seq {:>5}  x={:<5} y={:<5} w={:<5} h={:<4}", b.seq, b.x, b.y, b.w, b.h);
+    }
+    // …and the same seqs' OTHER boxes, if any (an inline box spanning lines).
+    let hit: Vec<u32> = lay.hover_at(x, y);
+    println!("hover_at -> {hit:?}");
+    for s in hit.iter().take(8) {
+        for b in lay.hover_boxes.iter().filter(|b| b.seq == *s) {
+            println!("  seq {s} box x={} y={} w={} h={}", b.x, b.y, b.w, b.h);
+        }
+    }
+}
