@@ -211,6 +211,24 @@ struct Stats {
     // saying it did not decrypt a frame whose Protected bit is set — a key it
     // does not have. Both are silent today: the frame goes up the stack as
     // whatever the bytes happen to be, and shows up as `undecoded`.
+    // Air the AP's transmissions to us occupied, estimated per frame from the
+    // rate the descriptor reports and the length: preamble + data + the SIFS
+    // and ACK we are required to answer with. Backoff and DIFS are NOT counted,
+    // so this is a LOWER bound — which is the safe direction, because the
+    // question it answers is "is the channel full?" and an under-estimate can
+    // only argue for "no".
+    //
+    // `own airtime` alone could never answer that: it is TX time, and during a
+    // download our TX is nothing but acknowledgements.
+    rx_airtime_us: u64,
+    rx_airtime_pct: u32,
+    win_rx_airtime_us: u64,
+    // The window that carried the most bytes, kept whole. A blocking transfer
+    // takes the terminal with it, so the numbers have to survive it.
+    pk_rx_airtime_pct: u32,
+    pk_tx_airtime_pct: u32,
+    pk_retry_pct: u32,
+    pk_drain: u32,
     rx_prot: u32,
     rx_mic_fail: u32,
     rx_sec_none: u32,
@@ -287,6 +305,8 @@ impl Stats {
         tx_ok: 0, tx_fail: 0, tx_retries: 0, tx_rts_fail: 0, tx_airtime_us: 0,
         last_status: 0, last_init_rate: 0,
         rx_frames: 0, rx_bytes: 0, rx_ip: 0, rx_eapol: 0, rx_mgmt: 0, rx_drain_max: 0,
+        rx_airtime_us: 0, rx_airtime_pct: 0, win_rx_airtime_us: 0,
+        pk_rx_airtime_pct: 0, pk_tx_airtime_pct: 0, pk_retry_pct: 0, pk_drain: 0,
         rx_prot: 0, rx_mic_fail: 0, rx_sec_none: 0, rx_undecrypted: 0,
         tx_eapol: 0, keys_set: 0, ready_sent: 0,
         rx_pool_exhausted: 0, rx_to_us: 0, rx_undecoded: 0,
@@ -2697,6 +2717,8 @@ impl Ax200 {
         self.st.tput_rx_kbit = ((self.st.rx_bytes - self.st.win_rx_bytes) * 8 / win) as u32;
         self.st.airtime_pct =
             ((self.st.tx_airtime_us - self.st.win_airtime_us) / (win * 10)) as u32;
+        self.st.rx_airtime_pct =
+            ((self.st.rx_airtime_us - self.st.win_rx_airtime_us) / (win * 10)) as u32;
         self.st.passes_per_s =
             (self.st.loop_iters.wrapping_sub(self.st.win_loop_iters) as u64 * 1000 / win) as u32;
         if self.st.tput_tx_kbit > self.st.peak_tput_tx_kbit {
@@ -2709,6 +2731,7 @@ impl Ax200 {
         self.st.win_tx_bytes = self.st.tx_bytes;
         self.st.win_rx_bytes = self.st.rx_bytes;
         self.st.win_airtime_us = self.st.tx_airtime_us;
+        self.st.win_rx_airtime_us = self.st.rx_airtime_us;
         self.st.win_loop_iters = self.st.loop_iters;
         // The profile is per WINDOW, not cumulative: an average over the whole
         // uptime would drown the loaded second in idle ones.
@@ -2729,6 +2752,17 @@ impl Ax200 {
             self.st.peak_drain_pp = self.st.prof_drain_pp;
             self.st.peak_us_frame = self.st.prof_us_frame;
             self.st.peak_prof_passes = self.st.prof_passes;
+            // Taken WITH the peak, not as separate maxima: three maxima from
+            // three different seconds would describe a second that never
+            // happened, and the question is what the fastest one looked like.
+            self.st.pk_rx_airtime_pct = self.st.rx_airtime_pct;
+            self.st.pk_tx_airtime_pct = self.st.airtime_pct;
+            self.st.pk_retry_pct = if self.st.tx_frames > 0 {
+                (self.st.tx_retries as u64 * 100 / self.st.tx_frames as u64) as u32
+            } else {
+                0
+            };
+            self.st.pk_drain = self.st.rx_drain_max;
         }
         self.st.prof_work_us = 0;
         self.st.prof_rx_us = 0;
@@ -2864,6 +2898,18 @@ impl Ax200 {
         r.s(" Mbit/s  ");
         r.d(self.st.peak_passes_per_s as u64);
         r.s(" passes/s  (best window since driver start)\n");
+        // The line that decides whether the AIR was the limit in that fastest
+        // second. Near 100 = the channel was full and aggregation is the lever.
+        // Well under it = the channel was idle and the ceiling is on our side.
+        r.s("air      in that window: rx ");
+        r.d(self.st.pk_rx_airtime_pct as u64);
+        r.s("% tx ");
+        r.d(self.st.pk_tx_airtime_pct as u64);
+        r.s("% (lower bound)  retries ");
+        r.d(self.st.pk_retry_pct as u64);
+        r.s("%  drain ");
+        r.d(self.st.pk_drain as u64);
+        r.c(b'\n');
 
         r.s("tx       frames ");
         r.d(self.st.tx_frames as u64);
@@ -3504,7 +3550,7 @@ impl Ax200 {
     }
 
     fn rx_classify(rb: &Dma, our_mac: &[u8; 6], out: &mut [u8], miss_log: &mut u32,
-                   to_us: &mut u32, crypt: &mut [u32; 4]) -> RxKind {
+                   to_us: &mut u32, crypt: &mut [u32; 4], air_us: &mut u64) -> RxKind {
         let mut buf = [0u8; 1600];
         host::dma_read_buf(rb.handle, 0, &mut buf);
         let d = RX_PKT_DATA_OFF;
@@ -3534,6 +3580,20 @@ impl Ax200 {
         // computes it: 802.11 header, then the IV the firmware left in place for
         // the cipher it decrypted with, then the DWORD padding the firmware
         // inserts when header+IV is not a multiple of 4 (the QoS+CCMP case).
+        // Air this frame occupied. `mpdu_len` and the rate are both already in
+        // the buffer we just read, so this costs an integer divide, no DMA.
+        let rnf = le32(&buf, d + MPDU_OFF_RATE_N_FLAGS);
+        let kbit = Self::rate_kbit(Self::rate_v3(rnf));
+        if kbit > 0 {
+            let preamble = match rnf & RATE_MCS_MOD_TYPE_MSK {
+                RATE_MCS_MOD_TYPE_CCK => 96,  // short preamble
+                RATE_MCS_MOD_TYPE_HT => 36,   // HT-mixed
+                _ => 20,                      // legacy OFDM
+            };
+            // +60 for the SIFS and the ACK the standard makes us send back.
+            *air_us += preamble + 60 + (mpdu_len as u64 * 8 * 1000 / kbit as u64);
+        }
+
         let status = le32(&buf, d + MPDU_OFF_STATUS);
         // Did the firmware actually decrypt this? We do not drop on the answer —
         // the point is to learn whether a link that looks alive is receiving
@@ -3941,6 +4001,7 @@ impl Ax200 {
             let mut a_eapol = 0u32;
             let mut a_mgmt = 0u32;
             let mut a_crypt = [0u32; 4];
+            let mut a_air = 0u64;
             let mut a_rx_bytes = 0u64;
             let mut a_to_us = 0u32;
             let mut a_undecoded = 0u32;
@@ -4035,7 +4096,7 @@ impl Ax200 {
                         return true; // mgmt frame — not for the IP path
                     }
                     let uni_before = a_to_us;
-                    match Self::rx_classify(rb, &our_mac, &mut rxbuf, &mut llc_miss, &mut a_to_us, &mut a_crypt) {
+                    match Self::rx_classify(rb, &our_mac, &mut rxbuf, &mut llc_miss, &mut a_to_us, &mut a_crypt, &mut a_air) {
                         RxKind::Eapol(n) => {
                             a_eapol += 1;
                             a_rx_bytes += n as u64;
@@ -4113,6 +4174,7 @@ impl Ax200 {
             self.st.rx_ip = self.st.rx_ip.wrapping_add(a_ip);
             self.st.rx_eapol = self.st.rx_eapol.wrapping_add(a_eapol);
             self.st.rx_mgmt = self.st.rx_mgmt.wrapping_add(a_mgmt);
+            self.st.rx_airtime_us += a_air;
             self.st.rx_prot = self.st.rx_prot.wrapping_add(a_crypt[0]);
             self.st.rx_mic_fail = self.st.rx_mic_fail.wrapping_add(a_crypt[1]);
             self.st.rx_sec_none = self.st.rx_sec_none.wrapping_add(a_crypt[2]);
