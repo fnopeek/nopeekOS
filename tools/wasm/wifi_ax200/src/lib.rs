@@ -2534,7 +2534,9 @@ impl Ax200 {
         host::print("[ax200] link lost — re-scanning to reconnect...\n");
         self.authorized = false;
         self.link_published = false;
-        host::netdev_set_link(false);
+        // The association is gone too — this is a real carrier loss, not a
+        // dormant phase.
+        host::netdev_set_link_state(false, false);
         let mut down = [0u8; 7];
         down[0] = EV_LINK_DOWN;
         down[1..7].copy_from_slice(&self.target_bssid);
@@ -2563,10 +2565,9 @@ impl Ax200 {
         if associated {
             host::print("[ax200] re-associated — re-running 4-way\n");
             self.data_in_flight = 0;
-            // The firmware's session died with the old association; anything the
-            // window still holds belongs to a link that no longer exists.
-            ba::session().stop();
-            self.ba_pending = None;
+            // The firmware's sessions died with the old association; anything
+            // the windows still hold belongs to a link that no longer exists.
+            self.ba_stop_all();
             let our_mac = self.mac;
             let mut ready = [0u8; 13];
             ready[0] = EV_READY;
@@ -2884,28 +2885,44 @@ impl Ax200 {
         // line. `held` standing still while `buffered` climbs is the healthy
         // picture; `stalls` counts holes the AP never closed, which is the one
         // failure mode a reorder buffer can add to a working link.
-        let s = ba::session();
-        if s.active() {
-            r.s("aggr     A-MPDU on  baid ");
-            r.d(s.baid as u64);
-            r.s(" tid ");
-            r.d(s.tid as u64);
-            r.s(" win ");
-            r.d(ba::BA_WIN as u64);
-            r.s("  delivered ");
-            r.d(s.delivered as u64);
+        let live = ba::sessions().iter().filter(|s| s.active()).count();
+        if live > 0 {
+            let (delivered, buffered, dups, old_sn, stalls, held) = ba::totals();
+            // One line PER live session: which TID carries the traffic is the
+            // question the single-session report could not answer — it showed
+            // tid 6 with `delivered 0` while every byte arrived on tid 0.
+            for sess in ba::sessions().iter().filter(|s| s.active()) {
+                r.s("aggr     A-MPDU on  baid ");
+                r.d(sess.baid as u64);
+                r.s(" tid ");
+                r.d(sess.tid as u64);
+                r.s(" win ");
+                r.d(ba::BA_WIN as u64);
+                r.s("  delivered ");
+                r.d(sess.delivered as u64);
+                r.s(" held ");
+                r.d(sess.stored as u64);
+                r.s(" timeout ");
+                r.d(sess.timeout_tu as u64);
+                r.s(" TU\n");
+            }
+            r.s("aggr     total delivered ");
+            r.d(delivered as u64);
             r.s(" buffered ");
-            r.d(s.buffered as u64);
+            r.d(buffered as u64);
             r.s(" held ");
-            r.d(s.stored as u64);
-            r.c(b'\n');
-            r.s("aggr     dups ");
-            r.d(s.dups as u64);
+            r.d(held as u64);
+            r.s(" dups ");
+            r.d(dups as u64);
             r.s(" old-sn ");
-            r.d(s.old_sn as u64);
+            r.d(old_sn as u64);
             r.s(" stalls ");
-            r.d(s.stalls as u64);
-            r.s(" (holes the AP never closed)  sessions ");
+            r.d(stalls as u64);
+            r.s(" (holes the AP never closed)  live ");
+            r.d(live as u64);
+            r.s(" of ");
+            r.d(ba::NUM_TIDS as u64);
+            r.s(" tids  accepted ");
             r.d(self.st.addba_accepted as u64);
             r.c(b'\n');
         } else {
@@ -3354,22 +3371,73 @@ impl Ax200 {
         let params = u16::from_le_bytes([req[3], req[4]]);
         let tid = ((params & BA_PARAM_TID_MASK) >> BA_PARAM_TID_SHIFT) as u8;
         let ssn = u16::from_le_bytes([req[7], req[8]]) >> BA_SSN_SHIFT;
-        if !self.want_ampdu || self.ba_fw_broken {
-            let p = BaPending { tid, ssn, win: 1, dialog: req[2],
-                                timeout: u16::from_le_bytes([req[5], req[6]]),
-                                asked_ms: 0 };
-            self.ba_reply(&p, WLAN_STATUS_REQUEST_DECLINED);
-            self.st.addba_declined = self.st.addba_declined.wrapping_add(1);
+        let dialog = req[2];
+        let timeout = u16::from_le_bytes([req[5], req[6]]);
+        let asked = (params & BA_PARAM_BUFSZ_MASK) >> BA_PARAM_BUFSZ_SHIFT;
+        let immediate = params & BA_PARAM_POLICY_IMMEDIATE != 0;
+
+        let decline = |me: &mut Self, status: u16| {
+            let p = BaPending { tid, ssn, win: 1, dialog, timeout, asked_ms: 0 };
+            me.ba_reply(&p, status);
+            me.st.addba_declined = me.st.addba_declined.wrapping_add(1);
+        };
+
+        // ieee80211_process_addba_request, in its order.
+        //
+        // Block-ack is defined for TIDs 0-7; at IEEE80211_FIRST_TSPEC_TSID and
+        // above Linux declines outright.
+        if tid as usize >= ba::NUM_TIDS {
+            decline(self, WLAN_STATUS_REQUEST_DECLINED);
             return;
         }
+        // We only implement immediate block ack, and a buffer larger than the
+        // HT maximum is a malformed request — both are INVALID_QOS_PARAM, not
+        // a plain decline, so the AP learns WHY.
+        if !immediate || asked as usize > IEEE80211_MAX_AMPDU_BUF_HT {
+            decline(self, WLAN_STATUS_INVALID_QOS_PARAM);
+            return;
+        }
+        if !self.want_ampdu || self.ba_fw_broken {
+            decline(self, WLAN_STATUS_REQUEST_DECLINED);
+            return;
+        }
+
+        // A repeat request on a live session. Same dialog token = the AP is
+        // only updating the timeout; we have no way to change it in the
+        // firmware, so we accept it unchanged and decline a real change,
+        // WITHOUT disturbing the session.
+        if let Some(sess) = ba::by_tid(tid) {
+            if sess.active() {
+                if sess.dialog == dialog {
+                    let status = if sess.timeout_tu == timeout {
+                        WLAN_STATUS_SUCCESS
+                    } else {
+                        WLAN_STATUS_REQUEST_DECLINED
+                    };
+                    let p = BaPending { tid, ssn, win: ba::BA_WIN as u16,
+                                        dialog, timeout: sess.timeout_tu, asked_ms: 0 };
+                    self.ba_reply(&p, status);
+                    return;
+                }
+                // A genuinely new session on a TID that already has one. Linux
+                // tears the old one down FIRST (agg-rx.c:379) and sends no
+                // DELBA for it — the AP is replacing it on purpose. Skipping
+                // this is what leaked the firmware BAID: we overwrote the slot
+                // and could no longer name the old id to free it.
+                host::print("[ax200] ADDBA replaces the session on tid ");
+                host::print_dec(tid as u32);
+                host::print(" — removing the old one first\n");
+                self.ba_stop(tid, false, 0);
+            }
+        }
+
         // Our window, not the AP's: it asks for up to 64 and a responder may
         // answer with less. 32 already collapses the per-frame overhead and
         // halves what we hold in linear memory.
-        let win = (((params & BA_PARAM_BUFSZ_MASK) >> BA_PARAM_BUFSZ_SHIFT) as usize)
+        let win = (if asked == 0 { IEEE80211_MAX_AMPDU_BUF_HT as u16 } else { asked } as usize)
             .min(ba::BA_WIN)
             .max(1) as u16;
-        self.ba_pending = Some(BaPending { tid, ssn, win, dialog: req[2],
-                                           timeout: u16::from_le_bytes([req[5], req[6]]),
+        self.ba_pending = Some(BaPending { tid, ssn, win, dialog, timeout,
                                            asked_ms: host::now_ms() });
         if self.st.addba_seen <= 3 {
             host::print("[ax200] ADDBA request tid ");
@@ -3404,6 +3472,59 @@ impl Ax200 {
         }
     }
 
+    /// End one TID's session: drop our buffer, free the firmware BAID, and —
+    /// only when WE are the one ending it — tell the AP with a DELBA.
+    ///
+    /// `__ieee80211_stop_rx_ba_session`: the DELBA goes out only for
+    /// `initiator == WLAN_BACK_RECIPIENT && tx`. A session the AP itself ended
+    /// (DELBA received) or replaced (new ADDBA on the same TID) gets none.
+    fn ba_stop(&mut self, tid: u8, tell_ap: bool, reason: u16) {
+        let baid = match ba::by_tid(tid) {
+            Some(s) if s.active() => {
+                let b = s.baid;
+                s.stop();
+                b
+            }
+            _ => return,
+        };
+        self.ba_remove(tid, baid);
+        if tell_ap {
+            self.send_delba(tid, WLAN_BACK_RECIPIENT, reason);
+        }
+    }
+
+    /// Every session down — the firmware's are gone with the association, and
+    /// a BAID we no longer remember is one we can never free. Linux does this
+    /// in `iwl_mvm_rm_sta`; we kept the station across a reconnect (MODIFY,
+    /// not remove/re-add) and so have to do it explicitly.
+    fn ba_stop_all(&mut self) {
+        for tid in 0..ba::NUM_TIDS as u8 {
+            if ba::by_tid(tid).map(|s| s.active()).unwrap_or(false) {
+                if let Some(s) = ba::by_tid(tid) { s.stop(); }
+            }
+        }
+        self.ba_pending = None;
+    }
+
+    /// DELBA action frame (802.11 §9.6.5.4): category, action, params, reason.
+    fn send_delba(&mut self, tid: u8, initiator: u16, reason: u16) {
+        let mut fr = [0u8; DOT11_HDR_LEN + 6];
+        fr[0] = (DOT11_STYPE_ACTION << 4) | 0x00;
+        fr[DOT11_OFF_ADDR1..DOT11_OFF_ADDR1 + 6].copy_from_slice(&self.target_bssid);
+        fr[DOT11_OFF_ADDR2..DOT11_OFF_ADDR2 + 6].copy_from_slice(&self.mac);
+        fr[DOT11_OFF_ADDR3..DOT11_OFF_ADDR3 + 6].copy_from_slice(&self.target_bssid);
+        let b = DOT11_HDR_LEN;
+        fr[b] = WLAN_CATEGORY_BACK;
+        fr[b + 1] = WLAN_ACTION_DELBA;
+        let params = (((tid as u16) << IEEE80211_DELBA_PARAM_TID_SHIFT)
+                        & IEEE80211_DELBA_PARAM_TID_MASK)
+            | ((initiator << IEEE80211_DELBA_PARAM_INITIATOR_SHIFT)
+                        & IEEE80211_DELBA_PARAM_INITIATOR_MASK);
+        put_u16(&mut fr, b + 2, params);
+        put_u16(&mut fr, b + 4, reason);
+        self.tx_mgmt_frame(&fr);
+    }
+
     /// The allocation command answers with a bare BAID (iwl_rx_baid_cfg_resp).
     /// Unlike ADD_STA there is no status word: an error arrives as a value
     /// outside the map, exactly as Linux checks it.
@@ -3420,7 +3541,9 @@ impl Ax200 {
             host::print(")\n");
             return;
         }
-        ba::session().start(baid as u8, p.tid, p.ssn);
+        if let Some(sess) = ba::by_tid(p.tid) {
+            sess.start(baid as u8, p.tid, p.ssn, p.dialog, p.timeout);
+        }
         self.ba_reply(&p, WLAN_STATUS_SUCCESS);
         self.st.addba_accepted = self.st.addba_accepted.wrapping_add(1);
         if self.st.addba_accepted <= 2 {
@@ -3437,12 +3560,21 @@ impl Ax200 {
     /// Tear the session down in the firmware too (STA_MODIFY_REMOVE_BA_TID).
     /// Dropping only our buffer would leave the firmware stamping BAIDs for a
     /// session the AP has ended, and the next ADDBA would find the slot taken.
-    fn ba_remove(&mut self, tid: u8) {
+    fn ba_remove(&mut self, tid: u8, baid: u8) {
         if fw_has_capa(IWL_UCODE_TLV_CAPA_BAID_ML_SUPPORT) {
             let mut c = [0u8; BAID_CFG_CMD_LEN];
             put_u32(&mut c, BAID_OFF_ACTION, IWL_RX_BAID_ACTION_REMOVE);
-            put_u32(&mut c, BAID_OFF_STA_MASK, 1u32 << AP_STA_ID);
-            put_u32(&mut c, BAID_OFF_REMOVE_TID, tid as u32);
+            // iwl_mvm_fw_baid_op_cmd (sta.c:2833) has a THIRD branch we had
+            // skipped: at command version 1 the remove payload is a bare
+            // `__le32 baid` (remove_v1), not sta_id_mask + tid. Sending the v2
+            // form to a v1 firmware would have it read our station mask
+            // (BIT(0) = 1) as the BAID to free — i.e. free the wrong session.
+            if fw_cmd_ver(DATA_PATH_GROUP, RX_BAID_ALLOCATION_CONFIG_CMD) == 1 {
+                put_u32(&mut c, BAID_OFF_STA_MASK, baid as u32);
+            } else {
+                put_u32(&mut c, BAID_OFF_STA_MASK, 1u32 << AP_STA_ID);
+                put_u32(&mut c, BAID_OFF_REMOVE_TID, tid as u32);
+            }
             self.send_hcmd(DATA_PATH_GROUP, RX_BAID_ALLOCATION_CONFIG_CMD, &c);
             return;
         }
@@ -3486,7 +3618,9 @@ impl Ax200 {
             return;
         }
         let baid = ((status & IWL_ADD_STA_BAID_MASK) >> IWL_ADD_STA_BAID_SHIFT) as u8;
-        ba::session().start(baid, p.tid, p.ssn);
+        if let Some(sess) = ba::by_tid(p.tid) {
+            sess.start(baid, p.tid, p.ssn, p.dialog, p.timeout);
+        }
         self.ba_reply(&p, WLAN_STATUS_SUCCESS);
         self.st.addba_accepted = self.st.addba_accepted.wrapping_add(1);
         if self.st.addba_accepted <= 2 {
@@ -4175,7 +4309,7 @@ impl Ax200 {
             let mut a_undecoded = 0u32;
             let mut add_sta_status: Option<u32> = None;
             let mut baid_alloc: Option<u32> = None;
-            let mut delba = false;
+            let mut delba: Option<(u8, u16)> = None;
             let mut mb: Option<(u32, u32, u32, u32)> = None;
             let t_rx0 = host::now_us();
             let rx_frames = self.service_rx(|c, g, rb| {
@@ -4235,7 +4369,9 @@ impl Ax200 {
                         p[RX_PKT_DATA_OFF + FR_OFF_NSSN],
                         p[RX_PKT_DATA_OFF + FR_OFF_NSSN + 1],
                     ]);
-                    ba::session().on_frame_release(baid, nssn & 0x0fff);
+                    if let Some(sess) = ba::by_baid(baid) {
+                        sess.on_frame_release(nssn & 0x0fff);
+                    }
                 } else if c == TLC_MNG_UPDATE_NOTIF && g == DATA_PATH_GROUP {
                     // The firmware's rate-scaling verdict: what it is actually
                     // transmitting at. Without this the host is blind to the
@@ -4266,7 +4402,14 @@ impl Ax200 {
                                     a_addba += 1;
                                     addba = Some(body); // answered outside
                                 }
-                                WLAN_ACTION_DELBA => delba = true,
+                                WLAN_ACTION_DELBA => {
+                                    let params = u16::from_le_bytes([body[2], body[3]]);
+                                    let t = ((params & IEEE80211_DELBA_PARAM_TID_MASK)
+                                        >> IEEE80211_DELBA_PARAM_TID_SHIFT) as u8;
+                                    let ini = (params & IEEE80211_DELBA_PARAM_INITIATOR_MASK)
+                                        >> IEEE80211_DELBA_PARAM_INITIATOR_SHIFT;
+                                    delba = Some((t, ini));
+                                }
                                 _ => {}
                             }
                         }
@@ -4328,9 +4471,19 @@ impl Ax200 {
                             // (Direct in-fiber delivery via npk_netdev_rx_deliver
                             // exists but starved the Core-0 TCP tick under load →
                             // connection drops; revisit with #2 WiFi-IRQ.)
-                            if !agg.reorderable || !ba::session().on_frame(
-                                agg.reorder, agg.status, agg.amsdu_last, &rxbuf[..n])
-                            {
+                            // The descriptor names the BAID, not the TID, so
+                            // the session is looked up by it — with one session
+                            // per TID there is more than one candidate now.
+                            let taken = agg.reorderable && {
+                                let b = ((agg.reorder & IWL_RX_MPDU_REORDER_BAID_MASK)
+                                    >> IWL_RX_MPDU_REORDER_BAID_SHIFT) as u8;
+                                match ba::by_baid(b) {
+                                    Some(sess) => sess.on_frame(
+                                        agg.reorder, agg.status, agg.amsdu_last, &rxbuf[..n]),
+                                    None => false,
+                                }
+                            };
+                            if !taken {
                                 host::netdev_submit_rx(&rxbuf[..n]);
                             }
                         }
@@ -4447,13 +4600,31 @@ impl Ax200 {
                     }
                 }
             }
-            if delba && ba::session().active() {
-                let tid = ba::session().tid;
-                ba::session().stop();
-                self.ba_remove(tid);
+            // `ieee80211_process_delba`: the frame names the TID and who is
+            // ending it. Only an INITIATOR-side DELBA concerns our RX session,
+            // and we send none back — the AP already knows. A single global
+            // flag used to tear down whichever session happened to be in the
+            // one slot, regardless of the TID the AP named.
+            if let Some((tid, initiator)) = delba.take() {
+                if initiator == WLAN_BACK_INITIATOR {
+                    self.ba_stop(tid, false, 0);
+                }
             }
             // A hole the AP never fills must not park the window forever.
-            ba::session().tick();
+            ba::tick_all();
+            // sta_rx_agg_session_timer_expired: a session the AP has gone quiet
+            // on for longer than it asked for is stale. Linux tears it down and
+            // sends a DELBA with WLAN_REASON_QSTA_TIMEOUT. We kept such a
+            // session forever, holding a firmware BAID nothing would ever use.
+            let now_ms = host::now_ms();
+            for tid in 0..ba::NUM_TIDS as u8 {
+                if ba::by_tid(tid).map(|s| s.timed_out(now_ms)).unwrap_or(false) {
+                    host::print("[ax200] block-ack session on tid ");
+                    host::print_dec(tid as u32);
+                    host::print(" timed out — removing\n");
+                    self.ba_stop(tid, true, WLAN_REASON_QSTA_TIMEOUT);
+                }
+            }
             // DIAGNOSTIC: a DEAUTH (subtype 12) / DISASSOC (10) arrived. Log it
             // with the 802.11 reason code — do NOT reconnect (that would mask the
             // root cause). The reason tells us whether the AP genuinely dropped us
@@ -4639,9 +4810,13 @@ impl Ax200 {
             // netdev::send refusing every packet: the link never came back by
             // itself. Now the kernel's view follows the handshake, edge or no
             // edge.
+            // Carrier follows the ASSOCIATION, dormant follows the
+            // authorization. Reported as one flag, the seconds between
+            // association and the end of the 4-way read to the kernel as "the
+            // link went away", and it answered with a full DHCP round.
             if self.authorized != self.link_published {
                 self.link_published = self.authorized;
-                host::netdev_set_link(self.authorized);
+                host::netdev_set_link_state(self.assoc_aid != 0, !self.authorized);
                 host::print(if self.authorized {
                     "[ax200] carrier UP (authorized)\n"
                 } else {

@@ -211,6 +211,25 @@ static NEXT_DHCP_RETRY: AtomicU64 = AtomicU64::new(0);
 /// against. Seed and tick MUST encode it the same way; seeding the bare id left
 /// the carrier bit clear, so the very first tick saw a "change" and re-ran DHCP
 /// about a second after every boot.
+/// How long a carrier has to stay down before it counts as a link change.
+/// Covers a reconnect (scan + auth + assoc + 4-way) that succeeds — the address
+/// and the gateway are unchanged across it, so there is nothing to reconfigure.
+const LINK_DOWN_GRACE_S: u64 = 5;
+/// TSC at which the current carrier-down started, 0 = carrier is up.
+static DOWN_SINCE: AtomicU64 = AtomicU64::new(0);
+
+/// Interface name for a previously-recorded `link_state_id` (the live one comes
+/// from `netdev::active_name`).
+fn iface_name(id: u8) -> &'static str {
+    match id {
+        1 => "intel",
+        2 => "usb-lan",
+        3 => "wifi",
+        4 => "virtio",
+        _ => "none",
+    }
+}
+
 fn link_state_id() -> u8 {
     netdev::active_id() | if netdev::active_link_up() { 0x10 } else { 0 }
 }
@@ -252,11 +271,50 @@ pub fn tick_link_and_reconfigure() {
     // on the id alone, the only edge fires while the link is still down: DHCP
     // goes out over a dead interface, gets no offer, and because the id never
     // changes again no further attempt is ever made.
+    // Linux does NOT act on a carrier edge directly. `link_watch.c` queues the
+    // event and runs its worker at most once a second — with one asymmetry:
+    //
+    //     /* Minimise down-time: drop delay for up event. */
+    //
+    // UP is urgent, DOWN is delayed, and a link that returns inside the window
+    // produces no event at all. We treated both directions alike at a 1 Hz
+    // sample, so ONE sample of a down carrier — a reconnect that succeeded
+    // three seconds later, nothing more — cost a full DHCP round, and the
+    // address went with it. Observed as `link changed -> requesting DHCP` out
+    // of nowhere, after which nothing worked.
     let state = link_state_id();
-    let changed = state != LAST_ACTIVE.swap(state, Ordering::Relaxed);
-    if changed && act != 0 && up {
-        reconfigure();
-        return;
+    let prev = LAST_ACTIVE.load(Ordering::Relaxed);
+    if state != prev {
+        let iface_changed = (state & 0x0F) != (prev & 0x0F);
+        let now_up = state & 0x10 != 0;
+        if now_up || iface_changed {
+            // Urgent: coming up, or a genuinely different interface.
+            LAST_ACTIVE.store(state, Ordering::Relaxed);
+            DOWN_SINCE.store(0, Ordering::Relaxed);
+            crate::kprintln!("[npk] net: link {} ({}) -> {} ({})",
+                iface_name(prev & 0x0F), if prev & 0x10 != 0 { "up" } else { "down" },
+                netdev::active_name(), if now_up { "up" } else { "down" });
+            if act != 0 && up {
+                reconfigure();
+                return;
+            }
+        } else {
+            // Carrier lost on the SAME interface. Let it prove itself: while
+            // LAST_ACTIVE still says "up", a return needs no event at all.
+            let since = DOWN_SINCE.load(Ordering::Relaxed);
+            if since == 0 {
+                DOWN_SINCE.store(now, Ordering::Relaxed);
+            } else if now.saturating_sub(since)
+                >= crate::interrupts::tsc_freq().saturating_mul(LINK_DOWN_GRACE_S)
+            {
+                LAST_ACTIVE.store(state, Ordering::Relaxed);
+                DOWN_SINCE.store(0, Ordering::Relaxed);
+                crate::kprintln!("[npk] net: link {} down for {} s — giving up on it",
+                    netdev::active_name(), LINK_DOWN_GRACE_S);
+            }
+        }
+    } else {
+        DOWN_SINCE.store(0, Ordering::Relaxed);
     }
     // Belt and braces: a usable link but still no address means the edge was
     // missed or the lease attempt failed. Keep asking on a slow retry instead

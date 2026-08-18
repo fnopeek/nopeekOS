@@ -15,6 +15,13 @@
 //! Frames are stored DECODED (Ethernet, as `rx_classify` produced them) — the
 //! 802.11 header has done its job by then and the reorder decision needs only
 //! the descriptor.
+//!
+//! One session PER TID, as Linux keeps them (`sta->ampdu_mlme.tid_rx[]`). A
+//! single shared session was wrong in both directions: a second ADDBA silently
+//! overwrote the first — leaking its firmware BAID, which we then could not
+//! even name to free — and a DELBA for one TID tore down whichever session
+//! happened to be in the slot. Measured on the device as `sessions 2` with one
+//! live BAID.
 
 use crate::host;
 use crate::regs::*;
@@ -28,6 +35,10 @@ pub const BA_WIN: usize = 32;
 
 /// Longest frame we keep. `rx_classify` already caps decoded frames at 1600.
 const BA_FRAME_MAX: usize = 1600;
+
+/// Block-ack is defined for TIDs 0-7; `IEEE80211_FIRST_TSPEC_TSID` is 8 and
+/// Linux declines any ADDBA at or above it (`ieee80211_process_addba_request`).
+pub const NUM_TIDS: usize = 8;
 
 /// Sequence numbers are 12-bit and wrap.
 const SN_MODULO: u16 = 1 << 12;
@@ -43,27 +54,75 @@ pub fn sn_add(sn: u16, n: u16) -> u16 {
     (sn + n) & (SN_MODULO - 1)
 }
 
-/// Frame storage. Static rather than a field of the driver struct: the driver
-/// lives on the stack in `_start`, and 51 KB of window does not belong there.
-static mut SLOT: [[u8; BA_FRAME_MAX]; BA_WIN] = [[0; BA_FRAME_MAX]; BA_WIN];
+/// Frame storage, one window per TID. Static rather than a field of the driver
+/// struct: the driver lives on the stack in `_start`, and 400 KB of window does
+/// not belong there. It is zero-initialised .bss, so it costs nothing in the
+/// module binary.
+static mut SLOT: [[[u8; BA_FRAME_MAX]; BA_WIN]; NUM_TIDS] =
+    [[[0; BA_FRAME_MAX]; BA_WIN]; NUM_TIDS];
 /// Payload length per slot, 0 = empty.
-static mut SLOT_LEN: [u16; BA_WIN] = [0; BA_WIN];
+static mut SLOT_LEN: [[u16; BA_WIN]; NUM_TIDS] = [[0; BA_WIN]; NUM_TIDS];
 
-static mut REORDER: Reorder = Reorder::NEW;
+static mut REORDER: [Reorder; NUM_TIDS] = [Reorder::NEW; NUM_TIDS];
 
-/// The one session. Free function rather than a driver field because the RX path
+/// All sessions. Free function rather than a driver field because the RX path
 /// classifies frames inside a closure that cannot also borrow the driver.
-pub fn session() -> &'static mut Reorder {
+pub fn sessions() -> &'static mut [Reorder; NUM_TIDS] {
     // SAFETY: single-threaded WASM module; no host call re-enters the RX path.
     unsafe { &mut *(&raw mut REORDER) }
 }
 
-/// One RX aggregation session. We run at most one — the AP opens BE (TID 0) for
-/// bulk traffic, and a second session on another TID would need its own window.
+/// The session for a TID, or None for a TID block-ack does not cover.
+pub fn by_tid(tid: u8) -> Option<&'static mut Reorder> {
+    let t = tid as usize;
+    if t >= NUM_TIDS { return None; }
+    Some(&mut sessions()[t])
+}
+
+/// The session the firmware stamped this BAID with. Frames and FRAME_RELEASE
+/// notifications name the BAID, not the TID, so this is the RX-path lookup.
+pub fn by_baid(baid: u8) -> Option<&'static mut Reorder> {
+    if baid == IWL_RX_REORDER_DATA_INVALID_BAID { return None; }
+    sessions().iter_mut().find(|s| s.active() && s.baid == baid)
+}
+
+/// Sum a counter across sessions — the report shows one aggregate line.
+pub fn totals() -> (u32, u32, u32, u32, u32, u16) {
+    let mut t = (0u32, 0u32, 0u32, 0u32, 0u32, 0u16);
+    for s in sessions().iter() {
+        t.0 = t.0.wrapping_add(s.delivered);
+        t.1 = t.1.wrapping_add(s.buffered);
+        t.2 = t.2.wrapping_add(s.dups);
+        t.3 = t.3.wrapping_add(s.old_sn);
+        t.4 = t.4.wrapping_add(s.stalls);
+        t.5 = t.5.wrapping_add(s.stored);
+    }
+    t
+}
+
+/// Release held frames on every session whose hole has stood too long.
+pub fn tick_all() {
+    for s in sessions().iter_mut() {
+        if s.active() { s.tick(); }
+    }
+}
+
+/// One RX aggregation session, one per TID.
+#[derive(Clone, Copy)]
 pub struct Reorder {
     /// Firmware session id, or INVALID while no session is up.
     pub baid: u8,
     pub tid: u8,
+    /// The AP's dialog token for this session. A repeat ADDBA carrying the SAME
+    /// token is a timeout update, not a new session — Linux answers it without
+    /// touching the session (`ieee80211_process_addba_request`).
+    pub dialog: u8,
+    /// Inactivity timeout from the ADDBA request, in TU (0 = none). Linux arms
+    /// a timer on it and tears the session down when it runs out, sending a
+    /// DELBA with WLAN_REASON_QSTA_TIMEOUT.
+    pub timeout_tu: u16,
+    /// `now_ms` of the last frame on this session, for that timeout.
+    pub last_rx_ms: u64,
     /// Next sequence number we expect to deliver.
     pub head_sn: u16,
     pub stored: u16,
@@ -91,6 +150,9 @@ impl Reorder {
     pub const NEW: Reorder = Reorder {
         baid: IWL_RX_REORDER_DATA_INVALID_BAID,
         tid: 0,
+        dialog: 0,
+        timeout_tu: 0,
+        last_rx_ms: 0,
         head_sn: 0,
         stored: 0,
         valid: false,
@@ -106,14 +168,26 @@ impl Reorder {
         self.baid != IWL_RX_REORDER_DATA_INVALID_BAID
     }
 
-    /// Session accepted by the firmware: it answered our ADD_STA with this id.
-    pub fn start(&mut self, baid: u8, tid: u8, ssn: u16) {
+    /// Session accepted by the firmware: it answered with this id.
+    pub fn start(&mut self, baid: u8, tid: u8, ssn: u16, dialog: u8, timeout_tu: u16) {
         self.flush();
         self.baid = baid;
         self.tid = tid;
+        self.dialog = dialog;
+        self.timeout_tu = timeout_tu;
+        self.last_rx_ms = host::now_ms();
         self.head_sn = ssn;
         self.valid = false;
-        self.last_move_ms = host::now_ms();
+        self.last_move_ms = self.last_rx_ms;
+    }
+
+    /// Has the AP gone quiet on this session for longer than it asked for?
+    /// `sta_rx_agg_session_timer_expired`: the timer is reset by every frame,
+    /// and expiry means the session is stale. 1 TU = 1024 us.
+    pub fn timed_out(&self, now_ms: u64) -> bool {
+        if !self.active() || self.timeout_tu == 0 { return false; }
+        let limit_ms = (self.timeout_tu as u64 * 1024) / 1000;
+        now_ms.wrapping_sub(self.last_rx_ms) > limit_ms
     }
 
     /// Session gone (DELBA, deauth, reassociation). Everything still held goes
@@ -136,16 +210,18 @@ impl Reorder {
     }
 
     fn emit_slot(&mut self, index: usize) {
+        let t = self.tid as usize;
+        if t >= NUM_TIDS { return; }
         // SAFETY: single-threaded module; the slot arrays are touched only here
         // and in `store`, never across a host call that could re-enter.
-        let len = unsafe { SLOT_LEN[index] } as usize;
+        let len = unsafe { SLOT_LEN[t][index] } as usize;
         if len == 0 {
             return;
         }
         unsafe {
-            SLOT_LEN[index] = 0;
+            SLOT_LEN[t][index] = 0;
             let slots = &*(&raw const SLOT);
-            host::netdev_submit_rx(&slots[index][..len]);
+            host::netdev_submit_rx(&slots[t][index][..len]);
         }
         self.delivered = self.delivered.wrapping_add(1);
     }
@@ -154,18 +230,22 @@ impl Reorder {
         if frame.len() > BA_FRAME_MAX {
             return false;
         }
+        let t = self.tid as usize;
+        if t >= NUM_TIDS {
+            return false;
+        }
         let index = (sn as usize) % BA_WIN;
         // SAFETY: as in emit_slot.
         unsafe {
-            if SLOT_LEN[index] != 0 {
+            if SLOT_LEN[t][index] != 0 {
                 // Slot occupied by a frame a full window away — the window has
                 // outrun itself. Release the old one rather than lose it.
                 self.emit_slot(index);
                 self.stored = self.stored.saturating_sub(1);
             }
             let slots = &mut *(&raw mut SLOT);
-            slots[index][..frame.len()].copy_from_slice(frame);
-            SLOT_LEN[index] = frame.len() as u16;
+            slots[t][index][..frame.len()].copy_from_slice(frame);
+            SLOT_LEN[t][index] = frame.len() as u16;
         }
         if self.stored == 0 {
             // The clock the stall release runs on starts when a hole appears —
@@ -194,11 +274,13 @@ impl Reorder {
             self.head_sn = nssn;
             return;
         }
+        let t = self.tid as usize;
+        if t >= NUM_TIDS { return; }
         let mut ssn = self.head_sn;
         while sn_less(ssn, nssn) {
             let index = (ssn as usize) % BA_WIN;
             // SAFETY: as in emit_slot.
-            if unsafe { SLOT_LEN[index] } != 0 {
+            if unsafe { SLOT_LEN[t][index] } != 0 {
                 self.emit_slot(index);
                 self.stored = self.stored.saturating_sub(1);
             }
@@ -209,10 +291,7 @@ impl Reorder {
 
     /// A FRAME_RELEASE notification for our session: the firmware advanced the
     /// window without giving us a frame (it saw the MPDUs on air).
-    pub fn on_frame_release(&mut self, baid: u8, nssn: u16) {
-        if !self.active() || baid != self.baid {
-            return;
-        }
+    pub fn on_frame_release(&mut self, nssn: u16) {
         self.release_upto(nssn);
     }
 
@@ -244,6 +323,9 @@ impl Reorder {
         if baid == IWL_RX_REORDER_DATA_INVALID_BAID || !self.active() || baid != self.baid {
             return false;
         }
+        // Every frame on the session resets its inactivity timer, exactly as
+        // Linux does in `ieee80211_sta_reorder_release`'s caller.
+        self.last_rx_ms = host::now_ms();
 
         let nssn = (reorder & IWL_RX_MPDU_REORDER_NSSN_MASK) as u16;
         let sn = ((reorder & IWL_RX_MPDU_REORDER_SN_MASK) >> IWL_RX_MPDU_REORDER_SN_SHIFT) as u16;
