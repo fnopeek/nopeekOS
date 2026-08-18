@@ -16,6 +16,7 @@ unsafe extern "C" {
     fn npk_key_inject(byte: i32) -> i32;
 
     fn npk_tcp_connect(ip_packed: i32, port: i32) -> i32;
+    fn npk_tcp_status(handle: i32) -> i32;
     fn npk_tcp_send(handle: i32, buf_ptr: i32, buf_len: i32) -> i32;
     fn npk_tcp_recv(handle: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_tcp_close(handle: i32) -> i32;
@@ -39,6 +40,7 @@ pub fn stream_close(idx: i32) { unsafe { npk_stream_close(idx); } }
 pub fn key_inject(byte: u8) { unsafe { npk_key_inject(byte as i32); } }
 
 pub fn tcp_connect(ip: i32, port: i32) -> i32 { unsafe { npk_tcp_connect(ip, port) } }
+pub fn tcp_status(handle: i32) -> i32 { unsafe { npk_tcp_status(handle) } }
 pub fn tcp_send(handle: i32, buf: &[u8]) -> i32 {
     unsafe { npk_tcp_send(handle, buf.as_ptr() as i32, buf.len() as i32) }
 }

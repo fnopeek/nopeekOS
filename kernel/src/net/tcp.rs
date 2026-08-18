@@ -126,6 +126,11 @@ fn ooo_runs_trim(runs: &mut BTreeMap<u32, u32>, want: u32) {
 }
 const MAX_RETRIES: u8 = 3;
 const RETRY_TICKS_BASE: u64 = 100; // 1 second (100Hz)
+// Cold-cache ARP while a SYN waits: one WiFi round trip between probes, and a
+// total budget matching the old blocking pre-resolve (~500 ms) before the SYN
+// goes out to broadcast regardless.
+const ARP_RETRANS_TICKS: u64 = 5; // 50 ms
+const ARP_MAX_TRIES: u8 = 10;
 // 4 MiB receive buffer → ~4 MiB window with scaling → fills the bandwidth-delay
 // product for ~gigabit even at tens-of-ms RTT (1 MiB was the cap at ~11 ms;
 // higher-RTT CDNs need more). Grown lazily (VecDeque::new), so an idle
@@ -275,6 +280,12 @@ struct TcpConn {
     // instead of everything past the cumulative ACK — the difference between a
     // loss collapsing throughput and a one-segment recovery.
     sack_ok: bool,
+
+    // Next-hop MAC not yet known: the SYN is held back until ARP answers.
+    // Sending it to L2 broadcast instead is what most gateways drop, and the
+    // recovery is then a full 1 s SYN retry.
+    arp_pending: bool,
+    arp_tries: u8,
 }
 
 static CONNECTIONS: Mutex<[Option<TcpConn>; MAX_CONNECTIONS]> = Mutex::new(
@@ -290,18 +301,29 @@ fn alloc_port() -> u16 {
     p
 }
 
-/// Open a TCP connection. Returns connection handle (index). Blocking until established.
-pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> {
+/// Open a TCP connection WITHOUT waiting for the handshake: the handle comes
+/// back at once, the caller asks `connect_status` until it answers.
+///
+/// This is the form modules get. A blocking wait inside a host call freezes
+/// every other fiber on that worker core — including the WiFi driver, whose
+/// card then goes unpolled for the whole wait (the RB pool holds milliseconds).
+/// `fiber::pump_peers` cannot cover it: it returns early when called from
+/// inside a fiber, and a module IS a fiber.
+///
+/// The cold-cache ARP wait becomes part of the same state machine: we ask
+/// once here and hold the SYN back (`arp_pending`) until `tick_connections`
+/// sees the answer. Sending it to broadcast meanwhile is what most gateways
+/// drop — the symptom was `debug <ip> <port>` needing 2–3 attempts on a
+/// fresh boot unless a `ping` had warmed the cache.
+pub fn connect_start(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> {
     let local_port = alloc_port();
     let iss = generate_isn(arp::our_ip(), remote_ip, local_port, remote_port);
 
-    // Pre-resolve the next-hop MAC before any CONNECTIONS lock. Without this
-    // the first SYN goes to L2 broadcast on a cold cache and is dropped by
-    // most gateways; TCP retransmit kicks in 1 s later and only succeeds
-    // once the cache passively learns the gateway MAC. Symptom in practice:
-    // `debug <ip> <port>` needs 2–3 attempts on fresh boot, fixed by a prior
-    // `ping`. ~500 ms cap; on timeout we still proceed and let TCP retry.
-    let _ = arp::resolve(super::ipv4::arp_target_for(remote_ip), 50);
+    // Non-blocking lookup — no CONNECTIONS lock held yet, but no waiting either.
+    let arp_target = super::ipv4::arp_target_for(remote_ip);
+    let arp_pending = arp_target != [255, 255, 255, 255]
+        && arp::lookup(arp_target).is_none();
+    if arp_pending { arp::request(arp_target); }
 
     let conn = TcpConn {
         state: State::SynSent,
@@ -320,7 +342,7 @@ pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> 
         srtt_ticks: 0,
         send_buf: Vec::new(),
         retries: 0,
-        last_send_tick: 0,
+        last_send_tick: crate::interrupts::ticks(),
         ack_pending: false,
         ack_tick: 0,
         acks_held: 0,
@@ -333,6 +355,8 @@ pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> 
         ts_ok: false,
         ts_recent: 0,
         sack_ok: false,
+        arp_pending,
+        arp_tries: 1,
     };
 
     // Find free slot
@@ -351,8 +375,30 @@ pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> 
         slot
     };
 
-    // Send SYN
-    send_syn(handle)?;
+    // Only when the next hop is known. Otherwise `tick_connections` releases it.
+    if !arp_pending { send_syn(handle)?; }
+
+    Ok(handle)
+}
+
+/// Handshake progress of a `connect_start` handle: 1 = established,
+/// 0 = still handshaking, -1 = failed (refused, timed out, slot gone).
+pub fn connect_status(handle: usize) -> i32 {
+    if handle >= MAX_CONNECTIONS { return -1; }
+    match CONNECTIONS.lock()[handle] {
+        Some(ref c) if c.established => 1,
+        Some(ref c) if c.error || c.state == State::Closed => -1,
+        Some(_) => 0,
+        None => -1,
+    }
+}
+
+/// Open a TCP connection, blocking until established. NATIVE callers only —
+/// they run as a task on a worker core, where `super::poll` pumps the peer
+/// fibers so the NIC keeps being drained while we wait. A module must use
+/// `connect_start` + `connect_status` instead; see the note there.
+pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> {
+    let handle = connect_start(remote_ip, remote_port)?;
 
     // Wait for ESTABLISHED (blocking poll)
     let t0 = crate::interrupts::ticks();
@@ -360,18 +406,14 @@ pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> 
         super::poll();
         tick_connections();
 
-        let conns = CONNECTIONS.lock();
-        if let Some(ref c) = conns[handle] {
-            if c.established { break; }
-            if c.error {
-                drop(conns);
+        match connect_status(handle) {
+            1 => break,
+            -1 => {
                 close_cleanup(handle);
                 return Err(TcpError::ConnectionRefused);
             }
-        } else {
-            return Err(TcpError::ConnectionFailed);
+            _ => {}
         }
-        drop(conns);
 
         if crate::interrupts::ticks() - t0 > 1000 { // 10s timeout
             close_cleanup(handle);
@@ -416,6 +458,8 @@ pub fn listen(port: u16) -> Result<usize, TcpError> {
         ts_ok: false,
         ts_recent: 0,
         sack_ok: false,
+        arp_pending: false,
+        arp_tries: 0,
     };
 
     let mut conns = CONNECTIONS.lock();
@@ -496,6 +540,8 @@ pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
         ts_ok: false,
         ts_recent: 0,
         sack_ok: false,
+        arp_pending: false,
+        arp_tries: 0,
     };
     Ok(())
 }
@@ -947,6 +993,9 @@ pub fn tick_connections() {
     // across the TX doorbell blocked worker-core `recv` behind Core-0's
     // periodic ACKs/retries (contention ④).
     let mut pending: alloc::vec::Vec<PendingSeg> = alloc::vec::Vec::new();
+    // Same reason: `arp::request` hits the NIC, so collect and fire after the
+    // lock is gone.
+    let mut arp_probes: alloc::vec::Vec<[u8; 4]> = alloc::vec::Vec::new();
     {
         let mut conns = CONNECTIONS.lock();
         for slot in conns.iter_mut().flatten() {
@@ -966,21 +1015,52 @@ pub fn tick_connections() {
 
             // SYN retry
             if slot.state == State::SynSent {
-                let retry_interval = RETRY_TICKS_BASE << slot.retries.min(4);
-                if now - slot.last_send_tick > retry_interval {
-                    if slot.retries >= MAX_RETRIES {
-                        slot.error = true;
-                        slot.state = State::Closed;
-                    } else {
-                        slot.retries += 1;
+                let mut opts = [0u8; 40];
+                let opts_len = syn_opts(&mut opts);
+                let mut send_syn_now = false;
+
+                if slot.arp_pending {
+                    // Next hop still unknown, SYN held back. Re-ask every
+                    // RETRANS window — one request is a coin flip over WiFi,
+                    // and both the request and the reply can be the loss.
+                    let target = ipv4::arp_target_for(slot.remote_ip);
+                    if arp::lookup(target).is_some() {
+                        slot.arp_pending = false;
+                        send_syn_now = true;
+                    } else if now.wrapping_sub(slot.last_send_tick) >= ARP_RETRANS_TICKS {
+                        slot.arp_tries += 1;
                         slot.last_send_tick = now;
-                        pending.push(PendingSeg {
-                            dst_ip: slot.remote_ip, src_port: slot.local_port,
-                            dst_port: slot.remote_port, seq: slot.snd_iss,
-                            ack: 0, flags: SYN, window: INITIAL_WINDOW,
-                            opts: [0u8; 40], opts_len: 0,
-                        });
+                        if slot.arp_tries > ARP_MAX_TRIES {
+                            // Give up asking and send anyway (to broadcast),
+                            // exactly as the old ~500 ms pre-resolve did on
+                            // timeout. From here the normal SYN retry runs.
+                            slot.arp_pending = false;
+                            send_syn_now = true;
+                        } else {
+                            arp_probes.push(target);
+                        }
                     }
+                } else {
+                    let retry_interval = RETRY_TICKS_BASE << slot.retries.min(4);
+                    if now - slot.last_send_tick > retry_interval {
+                        if slot.retries >= MAX_RETRIES {
+                            slot.error = true;
+                            slot.state = State::Closed;
+                        } else {
+                            slot.retries += 1;
+                            send_syn_now = true;
+                        }
+                    }
+                }
+
+                if send_syn_now {
+                    slot.last_send_tick = now;
+                    pending.push(PendingSeg {
+                        dst_ip: slot.remote_ip, src_port: slot.local_port,
+                        dst_port: slot.remote_port, seq: slot.snd_iss,
+                        ack: 0, flags: SYN, window: INITIAL_WINDOW,
+                        opts, opts_len,
+                    });
                 }
             }
 
@@ -991,6 +1071,9 @@ pub fn tick_connections() {
         }
     }
 
+    for t in &arp_probes {
+        arp::request(*t);
+    }
     for p in &pending {
         send_pending(p);
     }
@@ -998,14 +1081,14 @@ pub fn tick_connections() {
 
 // === Internal ===
 
-fn send_syn(handle: usize) -> Result<(), TcpError> {
-    let mut conns = CONNECTIONS.lock();
-    let conn = conns[handle].as_mut().ok_or(TcpError::NotConnected)?;
-    conn.last_send_tick = crate::interrupts::ticks();
-
-    // SYN options: MSS(4) + SACK-permitted(2) + NOP,NOP + Timestamp(kind=8,10) +
-    // NOP + WScale(3) = 22 (padded to 24).
-    let mut opts = [0u8; 24];
+/// SYN options: MSS(4) + SACK-permitted(2) + NOP,NOP + Timestamp(kind=8,10) +
+/// NOP + WScale(3) = 22, padded to 24. Returns the length written.
+///
+/// Shared by the first SYN and every retransmit. The retry used to send a
+/// bare SYN: whenever the first one was lost — the normal case on a cold ARP
+/// cache — the connection silently came up without window scaling, SACK or
+/// timestamps, i.e. capped at a 64 KiB window for its whole life.
+fn syn_opts(opts: &mut [u8; 40]) -> usize {
     opts[0] = 2;  // MSS option kind
     opts[1] = 4;  // MSS option length
     opts[2..4].copy_from_slice(&MSS.to_be_bytes());
@@ -1017,15 +1100,24 @@ fn send_syn(handle: usize) -> Result<(), TcpError> {
     opts[9] = 10;           // length
     let tsval = crate::interrupts::ticks() as u32;
     opts[10..14].copy_from_slice(&tsval.to_be_bytes()); // TSval
-    // opts[14..18] TSecr = 0 on the initial SYN
+    // opts[14..18] TSecr = 0 on a SYN
     opts[18] = 1;           // NOP — align the 3-byte WScale to a 4-byte boundary
     opts[19] = 3;           // Window Scale option kind
     opts[20] = 3;           // length
     opts[21] = OUR_WSCALE;  // shift count
+    24
+}
 
+fn send_syn(handle: usize) -> Result<(), TcpError> {
+    let mut conns = CONNECTIONS.lock();
+    let conn = conns[handle].as_mut().ok_or(TcpError::NotConnected)?;
+    conn.last_send_tick = crate::interrupts::ticks();
+
+    let mut opts = [0u8; 40];
+    let len = syn_opts(&mut opts);
     send_segment_with_opts(
         conn.remote_ip, conn.local_port, conn.remote_port,
-        conn.snd_iss, 0, SYN, INITIAL_WINDOW, &[], &opts,
+        conn.snd_iss, 0, SYN, INITIAL_WINDOW, &[], &opts[..len],
     );
     Ok(())
 }

@@ -17,7 +17,7 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 mod host;
 
 /// One source for the version, printed in the banner.
-const VERSION: &str = "0.3.2";
+const VERSION: &str = "0.4.0";
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
@@ -69,8 +69,26 @@ pub extern "C" fn _start() {
         host::print("[debug] kernel has no global mirror - only this terminal\n");
     }
 
+    // Dial, then wait OUTSIDE the host call. The connect used to block in the
+    // kernel until ESTABLISHED or a 10 s timeout — and this module is a fiber,
+    // so those 10 s froze every other fiber on the same worker core, the WiFi
+    // driver included: a failing `debug` took the link down with it. Sleeping
+    // between polls leaves the core, so the driver keeps draining its card.
     let sock = host::tcp_connect(ip, port);
-    if sock < 0 {
+    let mut connected = sock >= 0;
+    if connected {
+        // 10 s at 20 ms — same ceiling the kernel used to enforce.
+        connected = false;
+        for _ in 0..500 {
+            match host::tcp_status(sock) {
+                1 => { connected = true; break; }
+                0 => host::sleep(20),
+                _ => break,
+            }
+        }
+    }
+    if !connected {
+        if sock >= 0 { host::tcp_close(sock); }
         host::print("[debug] tcp_connect failed (is `nc -l ");
         host::print_dec(port as u32);
         host::print("` running?)\n");
