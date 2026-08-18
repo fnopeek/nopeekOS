@@ -2068,6 +2068,11 @@ impl Ax200 {
             _ => BAND_PREF_AUTO,
         };
 
+        host::print(if fw_has_capa(IWL_UCODE_TLV_CAPA_BAID_ML_SUPPORT) {
+            "[ax200] block-ack via RX_BAID_ALLOCATION_CONFIG_CMD (fw has BAID_ML)\n"
+        } else {
+            "[ax200] block-ack via ADD_STA (fw without BAID_ML)\n"
+        });
         host::print("[ax200] connect policy: ssid ");
         if self.want_ssid_len > 0 {
             host::print("\"");
@@ -3372,21 +3377,75 @@ impl Ax200 {
             host::print(" — asking firmware for a session\n");
         }
 
-        let mut sc = [0u8; ADD_STA_CMD_LEN];
-        sc[AS_OFF_ADD_MODIFY] = 1; // modify
-        put_u32(&mut sc, AS_OFF_MAC_ID_COLOR, 0);
-        sc[AS_OFF_STA_ID] = AP_STA_ID;
-        sc[AS_OFF_MODIFY_MASK] = STA_MODIFY_ADD_BA_TID;
-        sc[AS_OFF_ADD_IMM_BA_TID] = tid;
-        put_u16(&mut sc, AS_OFF_ADD_IMM_BA_SSN, ssn);
-        put_u16(&mut sc, AS_OFF_RX_BA_WINDOW, win);
-        self.send_hcmd(0, ADD_STA, &sc);
+        // iwl_mvm_fw_baid_op (mvm/sta.c): the capability decides which of the
+        // two commands opens the session. Skipping this branch is what cost us
+        // the link — the fallback command is not ignored by a firmware that
+        // wants the other one, it stops completing transmissions.
+        if fw_has_capa(IWL_UCODE_TLV_CAPA_BAID_ML_SUPPORT) {
+            let mut c = [0u8; BAID_CFG_CMD_LEN];
+            put_u32(&mut c, BAID_OFF_ACTION, IWL_RX_BAID_ACTION_ADD);
+            // iwl_mvm_sta_fw_id_mask with link -1 on a non-MLD station is
+            // simply BIT(sta_id) (mvm/mld-sta.c).
+            put_u32(&mut c, BAID_OFF_STA_MASK, 1u32 << AP_STA_ID);
+            c[BAID_OFF_ALLOC_TID] = tid;
+            put_u16(&mut c, BAID_OFF_ALLOC_SSN, ssn);
+            put_u16(&mut c, BAID_OFF_ALLOC_WIN, win);
+            self.send_hcmd(DATA_PATH_GROUP, RX_BAID_ALLOCATION_CONFIG_CMD, &c);
+        } else {
+            let mut sc = [0u8; ADD_STA_CMD_LEN];
+            sc[AS_OFF_ADD_MODIFY] = 1; // modify
+            put_u32(&mut sc, AS_OFF_MAC_ID_COLOR, 0);
+            sc[AS_OFF_STA_ID] = AP_STA_ID;
+            sc[AS_OFF_MODIFY_MASK] = STA_MODIFY_ADD_BA_TID;
+            sc[AS_OFF_ADD_IMM_BA_TID] = tid;
+            put_u16(&mut sc, AS_OFF_ADD_IMM_BA_SSN, ssn);
+            put_u16(&mut sc, AS_OFF_RX_BA_WINDOW, win);
+            self.send_hcmd(0, ADD_STA, &sc);
+        }
+    }
+
+    /// The allocation command answers with a bare BAID (iwl_rx_baid_cfg_resp).
+    /// Unlike ADD_STA there is no status word: an error arrives as a value
+    /// outside the map, exactly as Linux checks it.
+    fn ba_on_baid_alloc(&mut self, baid: u32) {
+        let p = match self.ba_pending.take() {
+            Some(p) => p,
+            None => return,
+        };
+        if baid >= IWL_MAX_BAID {
+            self.ba_reply(&p, WLAN_STATUS_REQUEST_DECLINED);
+            self.st.addba_declined = self.st.addba_declined.wrapping_add(1);
+            host::print("[ax200] block-ack refused by firmware (baid 0x");
+            host::print_hex32(baid);
+            host::print(")\n");
+            return;
+        }
+        ba::session().start(baid as u8, p.tid, p.ssn);
+        self.ba_reply(&p, WLAN_STATUS_SUCCESS);
+        self.st.addba_accepted = self.st.addba_accepted.wrapping_add(1);
+        if self.st.addba_accepted <= 2 {
+            host::print("[ax200] block-ack RX session up: baid ");
+            host::print_dec(baid);
+            host::print(" tid ");
+            host::print_dec(p.tid as u32);
+            host::print(" window ");
+            host::print_dec(p.win as u32);
+            host::print("\n");
+        }
     }
 
     /// Tear the session down in the firmware too (STA_MODIFY_REMOVE_BA_TID).
     /// Dropping only our buffer would leave the firmware stamping BAIDs for a
     /// session the AP has ended, and the next ADDBA would find the slot taken.
     fn ba_remove(&mut self, tid: u8) {
+        if fw_has_capa(IWL_UCODE_TLV_CAPA_BAID_ML_SUPPORT) {
+            let mut c = [0u8; BAID_CFG_CMD_LEN];
+            put_u32(&mut c, BAID_OFF_ACTION, IWL_RX_BAID_ACTION_REMOVE);
+            put_u32(&mut c, BAID_OFF_STA_MASK, 1u32 << AP_STA_ID);
+            put_u32(&mut c, BAID_OFF_REMOVE_TID, tid as u32);
+            self.send_hcmd(DATA_PATH_GROUP, RX_BAID_ALLOCATION_CONFIG_CMD, &c);
+            return;
+        }
         let mut sc = [0u8; ADD_STA_CMD_LEN];
         sc[AS_OFF_ADD_MODIFY] = 1; // modify
         put_u32(&mut sc, AS_OFF_MAC_ID_COLOR, 0);
@@ -4115,6 +4174,7 @@ impl Ax200 {
             let mut a_to_us = 0u32;
             let mut a_undecoded = 0u32;
             let mut add_sta_status: Option<u32> = None;
+            let mut baid_alloc: Option<u32> = None;
             let mut delba = false;
             let mut mb: Option<(u32, u32, u32, u32)> = None;
             let t_rx0 = host::now_us();
@@ -4151,6 +4211,11 @@ impl Ax200 {
                     let mut p = [0u8; RX_PKT_DATA_OFF + 4];
                     host::dma_read_buf(rb.handle, 0, &mut p);
                     add_sta_status = Some(le32(&p, RX_PKT_DATA_OFF));
+                } else if c == RX_BAID_ALLOCATION_CONFIG_CMD && g == DATA_PATH_GROUP {
+                    // iwl_rx_baid_cfg_resp — a bare __le32 baid.
+                    let mut p = [0u8; RX_PKT_DATA_OFF + 4];
+                    host::dma_read_buf(rb.handle, 0, &mut p);
+                    baid_alloc = Some(le32(&p, RX_PKT_DATA_OFF));
                 } else if c == MISSED_BEACONS_NOTIFICATION && g == 0 {
                     // iwl_mvm_handle_missed_beacons_notif (mvm/mac-ctxt.c:1615).
                     let mut p = [0u8; RX_PKT_DATA_OFF + 20];
@@ -4355,6 +4420,9 @@ impl Ax200 {
             }
             if let Some(status) = add_sta_status.take() {
                 self.ba_on_add_sta_status(status);
+            }
+            if let Some(baid) = baid_alloc.take() {
+                self.ba_on_baid_alloc(baid);
             }
             if let Some(req) = addba.take() {
                 self.ba_request(&req);
@@ -4994,14 +5062,7 @@ pub extern "C" fn _start() {
         pick_reason: PICK_STRONGEST,
         ba_pending: None,
         want_ampdu: false,
-        // Starts TRUE, and that is not a placeholder. The ADD_STA path is the
-        // wrong command for this firmware — it answers nothing and stops
-        // completing transmissions, which costs the whole link (measured:
-        // 31 frames sent, 7 acknowledged, 500 refused, no DHCP). Linux would
-        // use RX_BAID_ALLOCATION_CONFIG_CMD here (iwl_mvm_fw_baid_op,
-        // sta.c:2860). Until that is ported, `ampdu: on` declines like `off`
-        // does — a slow link beats none, and ONE bad command is enough.
-        ba_fw_broken: true,
+        ba_fw_broken: false,
         link_published: false,
         tx_fail_streak: 0,
         tx_fail_streak_peak: 0,
