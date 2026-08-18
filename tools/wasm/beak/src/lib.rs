@@ -367,6 +367,8 @@ fn set_url(s: &str) {
         // and its own chance to say so once. Without this, one heavy page
         // silences the pointer for every page after it.
         core::ptr::addr_of_mut!(HOVER_REFUSED).write(false);
+        core::ptr::addr_of_mut!(HOVER_SAID_FAST).write(false);
+        core::ptr::addr_of_mut!(HOVER_SAID_SLOW).write(false);
         core::ptr::addr_of_mut!(LAST_LAYOUT_MS).write(0);
     }
 }
@@ -596,6 +598,41 @@ const HOVER_BUDGET_MS: i64 = 250;
 /// Did we already say that this page is too heavy to hover? Said once per
 /// page, not once per mouse move ([[feedback-log-the-exception-not-the-rule]]).
 static mut HOVER_REFUSED: bool = false;
+/// Has the first pointer answer on this page been reported yet — the repaint
+/// with what it cost, and separately the first fallback with its reason?
+///
+/// Once each per page, for the same reason. Without them a pointer answered by
+/// repainting is INVISIBLE in the log, so a device run cannot tell "it works"
+/// from "it never happened" — which is exactly what the first 0.28.0 log could
+/// not say ([[feedback-log-the-version-in-the-trace]]).
+static mut HOVER_SAID_FAST: bool = false;
+static mut HOVER_SAID_SLOW: bool = false;
+
+/// Say ONCE per page how the pointer is being answered here.
+fn say_hover_once(fast: bool, ms: i64, why: &str) {
+    unsafe {
+        let p = if fast {
+            core::ptr::addr_of_mut!(HOVER_SAID_FAST)
+        } else {
+            core::ptr::addr_of_mut!(HOVER_SAID_SLOW)
+        };
+        if p.read() {
+            return;
+        }
+        p.write(true);
+    }
+    let mut b = String::new();
+    if fast {
+        b.push_str("[beak] :hover repainted in ");
+        b.push_str(&alloc::format!("{ms} ms (a layout here costs {})", unsafe {
+            core::ptr::addr_of!(LAST_LAYOUT_MS).read()
+        }));
+    } else {
+        b.push_str("[beak] :hover needs a layout: ");
+        b.push_str(why);
+    }
+    log(&b);
+}
 
 /// Can this page afford to restyle on pointer movement?
 fn hover_affordable() -> bool {
@@ -1860,11 +1897,18 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
             match engine.set_hover(hovered) {
                 HoverChange::Unchanged => {}
                 HoverChange::Changed { paint_only } => {
+                    let t0 = now_ms();
                     let repainted = paint_only
                         && cache.as_mut().is_some_and(|(lay, ..)| engine.repaint_hover(lay));
                     if repainted {
+                        say_hover_once(true, now_ms() - t0, "");
                         mark_dirty();
                     } else if hover_affordable() {
+                        say_hover_once(
+                            false,
+                            0,
+                            if paint_only { engine.repaint_bail() } else { "a rule moves a box" },
+                        );
                         bump_content_gen("hover");
                         mark_dirty();
                     } else {
