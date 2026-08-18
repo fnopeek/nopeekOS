@@ -4832,12 +4832,16 @@ impl Ax200 {
             if tx_done > 0 || self.data_in_flight == 0 {
                 self.last_tx_done_ms = now_ms_pass;
             } else if now_ms_pass.wrapping_sub(self.last_tx_done_ms) > TX_WD_TIMEOUT_MS {
-                host::print("[ax200] TX queue stuck: ");
-                host::print_dec(self.data_in_flight);
-                host::print(" frame(s) unacknowledged for ");
-                host::print_dec((TX_WD_TIMEOUT_MS / 1000) as u32);
-                host::print(" s — reclaiming the slots\n");
-                self.dump_fw_error_log();
+                // Budgeted: if this fires continuously the log stops being a
+                // log. The report keeps the running count either way.
+                if self.st.tx_wd_recoveries < 8 {
+                    host::print("[ax200] TX queue stuck: ");
+                    host::print_dec(self.data_in_flight);
+                    host::print(" frame(s) unacknowledged for ");
+                    host::print_dec(TX_WD_TIMEOUT_MS as u32);
+                    host::print(" ms — reclaiming the slots\n");
+                    self.dump_fw_error_log();
+                }
                 // Linux forces an NMI and restarts the firmware here. We cannot
                 // do that cheaply, so we reclaim instead — the slots are lost
                 // either way, and a half-width queue that keeps shrinking ends

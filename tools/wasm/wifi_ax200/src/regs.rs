@@ -987,10 +987,22 @@ pub const IWL_DATA_QUEUE_SIZE: usize = 64;
 // achieved rate keeps throughput while slashing latency-under-load. Raise once
 // HT/A-MPDU lifts the air rate (then the BDP grows). Must stay < QUEUE_SIZE-1.
 pub const TX_INFLIGHT_MAX: u32 = 16;
-/// TX queue watchdog, `cfg/22000.c:32` → `IWL_LONG_WD_TIMEOUT` (iwl-config.h:87).
-/// Linux arms it whenever the queue is NOT EMPTY and pushes it forward on every
-/// completion; it does not care how full the queue is.
-pub const TX_WD_TIMEOUT_MS: u64 = 10_000;
+/// TX queue watchdog. Linux arms it whenever the queue is NOT EMPTY and pushes
+/// it forward on every completion; it does not care how full the queue is.
+///
+/// The INTERVAL is deliberately not Linux's: `IWL_LONG_WD_TIMEOUT` is 10 s
+/// (`cfg/22000.c:32`) because Linux's reaction is to force an NMI and restart
+/// the firmware — a sledgehammer you want to be very sure about. Ours only
+/// hands leaked slots back, and it cannot lap the firmware: the ring holds 256
+/// TFDs while `TX_INFLIGHT_MAX` caps us at 16, so even an early reclaim leaves
+/// ~32 of 256 outstanding at worst.
+///
+/// Measured on the device at 10 s: four leaked slots cost a 100 MB transfer
+/// 26 s for what the server sent in 9.2 s, with the server reporting a 333 ms
+/// RTT — a third of a second of ACKs we could not send. A frame that has not
+/// been acknowledged after a second is lost; the firmware's own retry sequence
+/// is over long before that.
+pub const TX_WD_TIMEOUT_MS: u64 = 1_000;
 pub const DATA_QUEUE_CB_SIZE: u32 = 3; // TFD_QUEUE_CB_SIZE(64) = ilog2(64)-3
 // Per-slot TX staging stride. Each in-flight TFD's TB1 must point at its OWN
 // payload region, or back-to-back frames clobber each other's data before the
