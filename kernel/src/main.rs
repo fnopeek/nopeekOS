@@ -202,7 +202,9 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
         netdev::refresh_link_state();
 
         kprintln!("[npk] Running DHCP...");
-        if net::dhcp::configure() {
+        // Boot is the one place where waiting is right: nothing else runs yet,
+        // there is no prompt to take away, and NTP below wants an address.
+        if net::dhcp::run_blocking(5000) {
             vga::show_status(b"DHCP configured");
         }
         // Seed the active-interface tracker so the periodic link tick only
