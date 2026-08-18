@@ -1161,8 +1161,12 @@ pub fn intent_help_topic(topic: &str) {
             help_row("netbench", "Throughput measurement");
             kprintln!("[npk]");
             help_note("save a download:  https example.com /page.html > page");
-            help_note("wifi:  store /sys/config/wifi_ssid <name>  +  wifi_psk <pass>");
-            help_note("       store /sys/config/wifi_band 5 | 2.4 | auto  (band preference)");
+            help_note("wifi:  store /sys/config/wifi_psk <pass>   (the passphrase, on its own)");
+            help_note("       store /sys/config/wifi ssid: <name>   (everything else, one file)");
+            help_note("       more lines: band: 5|2.4|auto  ampdu: on|off  ps: on|off");
+            help_note("                   btcoex: on|off  settle_ms: <n>");
+            help_note("       `store` writes an npkFS object; `set` writes kernel config -");
+            help_note("       module settings live under sys/config/, so they need `store`");
         }
         "packages" | "install" | "modules" | "update" | "assets" => {
             help_head("packages", "signed (ECDSA P-384) and verified on every path");

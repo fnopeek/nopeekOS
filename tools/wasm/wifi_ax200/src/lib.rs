@@ -1352,7 +1352,7 @@ impl Ax200 {
     // enabled_modules = SYNC2SCO (IWL_MVM_BT_COEX_SYNC2SCO=1, always) | MPLUT
     // (only if the BT_MPLUT_SUPPORT capability is present) | HIGH_BAND_RET.
     fn send_bt_init(&mut self) {
-        // BT_COEX_DISABLE unless sys/config/wifi_btcoex says otherwise — the
+        // BT_COEX_DISABLE unless `btcoex:` in sys/config/wifi says otherwise — the
         // same escape hatch Linux exposes as iwlwifi.bt_coex_active=0.
         //
         // The AX200 is a combo chip: WiFi hangs off PCIe, its Bluetooth off USB
@@ -1374,7 +1374,7 @@ impl Ax200 {
         self.send_hcmd(0, BT_CONFIG, &cmd);
         self.pump_rx(20);
         host::print("[ax200] BT coex: ");
-        host::print(if on { "network mode (sys/config/wifi_btcoex=on)" } else { "DISABLED, antenna is ours" });
+        host::print(if on { "network mode (btcoex: on)" } else { "DISABLED, antenna is ours" });
         host::print("\n");
     }
 
@@ -1413,7 +1413,7 @@ impl Ax200 {
     // pins the driver core → freeze), so it is reverted. The latency spikes are
     // most likely fiber-starvation, not power-save — the WiFi-IRQ is the real fix.
     fn send_power(&mut self) {
-        // CAM (flags = 0, radio always on) unless sys/config/wifi_ps says
+        // CAM (flags = 0, radio always on) unless `ps:` in sys/config/wifi says
         // otherwise — iwl_mvm_power_update_device with ps_disabled.
         //
         // We implement no dynamic power save: nothing here tracks DTIM wake
@@ -1429,7 +1429,7 @@ impl Ax200 {
         self.send_hcmd(0, POWER_TABLE_CMD, &cmd);
         self.pump_rx(20);
         host::print("[ax200] device power: ");
-        host::print(if ps { "power-save enabled (sys/config/wifi_ps=on)" } else { "CAM, radio always on" });
+        host::print(if ps { "power-save enabled (ps: on)" } else { "CAM, radio always on" });
         host::print("\n");
     }
 
@@ -1963,42 +1963,37 @@ impl Ax200 {
         host::print("[ax200] blacklisted this BSS for the next scan\n");
     }
 
-    // Read the connect policy from npkFS. `wifi_ssid` is the network wifid holds
-    // the PSK for — associating to anything else can only end in a MIC failure.
-    // `wifi_band` is auto (default) / 5 / 2.4.
+    // Read the connect policy from `sys/config/wifi` — one file, `key: value`
+    // per line. `ssid` is the network wifid holds the PSK for; associating to
+    // anything else can only end in a MIC failure.
     fn load_connect_policy(&mut self) {
-        let mut buf = [0u8; 64];
-        let n = host::fetch("sys/config/wifi_ssid", &mut buf);
-        // Trailing newline/space from `store` must not become part of the SSID.
-        let mut len = n;
-        while len > 0 && (buf[len - 1] == b'\n' || buf[len - 1] == b'\r' || buf[len - 1] == b' ') {
-            len -= 1;
-        }
-        if len > 0 && len <= SSID_MAX {
-            self.want_ssid[..len].copy_from_slice(&buf[..len]);
-            self.want_ssid_len = len as u8;
+        let mut cfg = [0u8; WIFI_CFG_MAX];
+        let n = host::fetch(WIFI_CFG_PATH, &mut cfg);
+        let text = &cfg[..n];
+
+        if let Some(v) = cfg_get(text, b"ssid") {
+            let len = v.len().min(SSID_MAX);
+            if len > 0 {
+                self.want_ssid[..len].copy_from_slice(&v[..len]);
+                self.want_ssid_len = len as u8;
+            }
         }
 
         // OFF by default, and it stays that way until a device measurement says
         // otherwise. Aggregation is the throughput lever, but it is also the one
         // feature that can take the whole link down (a receiver that mis-parses
         // an aggregate carries nothing) — and recovering from that needs the
-        // network it just broke. Twice now. So the safe state is the default and
-        // the experiment is opt-in: `set wifi_ampdu on`.
-        let mut ab = [0u8; 16];
-        let an = host::fetch("sys/config/wifi_ampdu", &mut ab);
-        self.want_ampdu = an > 0 && (ab[..an].starts_with(b"on") || ab[..an].starts_with(b"1"));
+        // network it just broke. Twice now. So the safe state is the default.
+        self.want_ampdu = cfg_on(cfg_get(text, b"ampdu"));
+        self.want_power_save = cfg_on(cfg_get(text, b"ps"));
+        self.want_bt_coex = cfg_on(cfg_get(text, b"btcoex"));
+        self.settle_ms = cfg_settle_ms(text);
 
-        let mut bb = [0u8; 16];
-        let bn = host::fetch("sys/config/wifi_band", &mut bb);
-        self.band_pref = BAND_PREF_AUTO;
-        if bn > 0 {
-            if bb[..bn].starts_with(b"5") {
-                self.band_pref = BAND_PREF_5;
-            } else if bb[..bn].starts_with(b"2") {
-                self.band_pref = BAND_PREF_24;
-            }
-        }
+        self.band_pref = match cfg_get(text, b"band") {
+            Some(v) if v.starts_with(b"5") => BAND_PREF_5,
+            Some(v) if v.starts_with(b"2") => BAND_PREF_24,
+            _ => BAND_PREF_AUTO,
+        };
 
         host::print("[ax200] connect policy: ssid ");
         if self.want_ssid_len > 0 {
@@ -2009,24 +2004,16 @@ impl Ax200 {
             }
             host::print("\"");
         } else {
-            host::print("(any - set 'store /sys/config/wifi_ssid <name>')");
+            host::print("(any - no `ssid:` line in sys/config/wifi)");
         }
-        let mut pb = [0u8; 16];
-        let pn = host::fetch("sys/config/wifi_ps", &mut pb);
-        self.want_power_save = pn > 0 && (pb[..pn].starts_with(b"on") || pb[..pn].starts_with(b"1"));
-
-        let mut cb = [0u8; 16];
-        let cn = host::fetch("sys/config/wifi_btcoex", &mut cb);
-        self.want_bt_coex = cn > 0 && (cb[..cn].starts_with(b"on") || cb[..cn].starts_with(b"1"));
-
-        self.settle_ms = settle_ms_config();
-
         host::print(", band ");
         host::print(match self.band_pref {
             BAND_PREF_5 => "5 GHz only",
             BAND_PREF_24 => "2.4 GHz only",
             _ => "auto (prefer 5 GHz when strong enough)",
         });
+        host::print(", a-mpdu ");
+        host::print(if self.want_ampdu { "on" } else { "off" });
         host::print("\n");
     }
 
@@ -2819,7 +2806,7 @@ impl Ax200 {
             r.s(if self.want_ampdu {
                 "aggr     A-MPDU on but no session yet; declined "
             } else {
-                "aggr     A-MPDU off (set wifi_ampdu on to try it); declined "
+                "aggr     A-MPDU off (`ampdu: on` in sys/config/wifi); declined "
             });
             r.d(self.st.addba_declined as u64);
             r.s(" accepted ");
@@ -2996,7 +2983,7 @@ impl Ax200 {
         // dual-band mesh always means the near 2.4 GHz node — this line is how we
         // find out whether a faster band was on the table.
         r.s("policy   power ");
-        r.s(if self.want_power_save { "save (wifi_ps=on)" } else { "CAM (always on)" });
+        r.s(if self.want_power_save { "save (ps: on)" } else { "CAM (always on)" });
         r.s(", btcoex ");
         r.s(if self.want_bt_coex { "on" } else { "off" });
         r.s(", settle ");
@@ -3012,7 +2999,7 @@ impl Ax200 {
         r.s(match self.pick_reason {
             PICK_5G_PREFERRED => "5 GHz was above the RSSI floor",
             PICK_BAND_FORCED => "the band was forced by config",
-            PICK_SSID_FILTERED => "NO AP matched sys/config/wifi_ssid (fell back to loudest)",
+            PICK_SSID_FILTERED => "NO AP matched `ssid:` in sys/config/wifi (fell back to loudest)",
             PICK_5G_TOO_WEAK => "2.4 GHz was far stronger than the 5 GHz AP",
             _ => "it was the strongest of our SSID",
         });
@@ -4594,19 +4581,47 @@ fn pcie_find_cap(id: u8) -> u8 {
     0
 }
 
-/// Read `sys/config/wifi_settle_ms` before the device is bound.
-fn settle_ms_config() -> u32 {
-    let mut b = [0u8; 16];
-    let n = host::fetch("sys/config/wifi_settle_ms", &mut b);
-    if n == 0 {
-        return SETTLE_MS_DEFAULT;
+/// Strip spaces, tabs and CR from both ends of a config token.
+fn cfg_trim(v: &[u8]) -> &[u8] {
+    let (mut a, mut b) = (0, v.len());
+    while a < b && matches!(v[a], b' ' | b'\t' | b'\r') { a += 1; }
+    while b > a && matches!(v[b - 1], b' ' | b'\t' | b'\r') { b -= 1; }
+    &v[a..b]
+}
+
+/// Value of `key` in a `key: value` config, or None. `#` starts a comment;
+/// only the first colon splits, so a value may contain more of them.
+fn cfg_get<'a>(text: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
+    for line in text.split(|&b| b == b'\n') {
+        let line = cfg_trim(line);
+        if line.is_empty() || line[0] == b'#' { continue; }
+        let Some(c) = line.iter().position(|&b| b == b':') else { continue };
+        if cfg_trim(&line[..c]) == key {
+            return Some(cfg_trim(&line[c + 1..]));
+        }
     }
-    let mut v = 0u32;
+    None
+}
+
+fn cfg_on(v: Option<&[u8]>) -> bool {
+    matches!(v, Some(v) if v.starts_with(b"on") || v.starts_with(b"1"))
+}
+
+fn cfg_settle_ms(text: &[u8]) -> u32 {
+    let Some(v) = cfg_get(text, b"settle_ms") else { return SETTLE_MS_DEFAULT };
+    let mut n = 0u32;
     let mut any = false;
-    for &c in &b[..n] {
-        if c.is_ascii_digit() { v = v * 10 + (c - b'0') as u32; any = true; } else { break; }
+    for &c in v {
+        if c.is_ascii_digit() { n = n * 10 + (c - b'0') as u32; any = true; } else { break; }
     }
-    if any { v.min(20_000) } else { SETTLE_MS_DEFAULT }
+    if any { n.min(20_000) } else { SETTLE_MS_DEFAULT }
+}
+
+/// The settle pause, read before the driver struct exists.
+fn settle_ms_config() -> u32 {
+    let mut cfg = [0u8; WIFI_CFG_MAX];
+    let n = host::fetch(WIFI_CFG_PATH, &mut cfg);
+    cfg_settle_ms(&cfg[..n])
 }
 
 #[unsafe(no_mangle)]
