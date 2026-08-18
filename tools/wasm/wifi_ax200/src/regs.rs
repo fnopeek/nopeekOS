@@ -1041,5 +1041,10 @@ pub const BT_COEX_DISABLE: u32 = 0x0; // iwlwifi.bt_coex_active=0
 // beacons at ~10/s. Longer than this means the firmware has no buffer to fill.
 pub const RX_SILENCE_MS: u64 = 3000;
 
+// How long the firmware gets to answer a block-ack setup before we tell the
+// AP no. Generous: the command queue is shallow and the answer is normally
+// one poll pass away.
+pub const BA_SETUP_MS: u64 = 300;
+
 // Pause between firmware bring-up and the first scan (`settle_ms` in sys/config/wifi).
 pub const SETTLE_MS_DEFAULT: u32 = 4000;

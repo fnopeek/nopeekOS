@@ -101,6 +101,12 @@ struct BaPending {
     win: u16,
     dialog: u8,
     timeout: u16,
+    /// When we asked the firmware. The AP gets its answer only after the
+    /// firmware hands back a BAID — so if that never comes, the AP is left
+    /// waiting for a reply that never arrives, and at least one AP answers
+    /// that by sending NO DATA AT ALL on the TID: association up, DHCP
+    /// never completes. A pending request must therefore expire.
+    asked_ms: u64,
 }
 
 /// Classification of a received 802.11 data frame addressed to us.
@@ -272,6 +278,7 @@ struct Stats {
     // arrives, both answer counters stay 0 and the AP is left waiting with no
     // reply at all. Without this number those two cases look identical.
     addba_seen: u32,
+    addba_timeouts: u32,
     addba_declined: u32,
     addba_accepted: u32,
     // What the firmware reports about the beacons we no longer see ourselves.
@@ -338,7 +345,7 @@ impl Stats {
         rx_prot: 0, rx_mic_fail: 0, rx_sec_none: 0, rx_undecrypted: 0,
         tx_eapol: 0, keys_set: 0, ready_sent: 0,
         rx_pool_exhausted: 0, rx_to_us: 0, rx_undecoded: 0,
-        loop_iters: 0, loop_busy: 0, deauth: 0, addba_seen: 0, addba_declined: 0, addba_accepted: 0,
+        loop_iters: 0, loop_busy: 0, deauth: 0, addba_seen: 0, addba_timeouts: 0, addba_declined: 0, addba_accepted: 0,
         mb_notifs: 0, mb_consec: 0, mb_since_rx: 0, mb_expected: 0, mb_received: 0,
         mb_losses: 0,
         prof_work_us: 0, prof_rx_us: 0, prof_sleep_us: 0, prof_passes: 0, prof_frames: 0,
@@ -2903,6 +2910,10 @@ impl Ax200 {
             if self.st.addba_seen > self.st.addba_declined + self.st.addba_accepted {
                 r.s("  <- UNANSWERED");
             }
+            if self.st.addba_timeouts > 0 {
+                r.s("  fw-silent ");
+                r.d(self.st.addba_timeouts as u64);
+            }
             r.c(b'\n');
         }
 
@@ -3330,7 +3341,8 @@ impl Ax200 {
         let ssn = u16::from_le_bytes([req[7], req[8]]) >> BA_SSN_SHIFT;
         if !self.want_ampdu {
             let p = BaPending { tid, ssn, win: 1, dialog: req[2],
-                                timeout: u16::from_le_bytes([req[5], req[6]]) };
+                                timeout: u16::from_le_bytes([req[5], req[6]]),
+                                asked_ms: 0 };
             self.ba_reply(&p, WLAN_STATUS_REQUEST_DECLINED);
             self.st.addba_declined = self.st.addba_declined.wrapping_add(1);
             return;
@@ -3342,7 +3354,13 @@ impl Ax200 {
             .min(ba::BA_WIN)
             .max(1) as u16;
         self.ba_pending = Some(BaPending { tid, ssn, win, dialog: req[2],
-                                           timeout: u16::from_le_bytes([req[5], req[6]]) });
+                                           timeout: u16::from_le_bytes([req[5], req[6]]),
+                                           asked_ms: host::now_ms() });
+        if self.st.addba_seen <= 3 {
+            host::print("[ax200] ADDBA request tid ");
+            host::print_dec(tid as u32);
+            host::print(" — asking firmware for a session\n");
+        }
 
         let mut sc = [0u8; ADD_STA_CMD_LEN];
         sc[AS_OFF_ADD_MODIFY] = 1; // modify
@@ -3374,7 +3392,15 @@ impl Ax200 {
     fn ba_on_add_sta_status(&mut self, status: u32) {
         let p = match self.ba_pending.take() {
             Some(p) => p,
-            None => return, // an ADD_STA we sent for something else
+            None => {
+                // An ADD_STA we sent for something else — or the answer to a
+                // request that already timed out above. Worth saying once:
+                // both counters staying at zero looked like "never called".
+                if self.st.addba_seen > 0 && self.st.addba_timeouts == 0 {
+                    host::print("[ax200] ADD_STA status arrived with no block-ack pending\n");
+                }
+                return;
+            }
         };
         let ok = status & ADD_STA_STATUS_MASK == ADD_STA_SUCCESS
             && status & IWL_ADD_STA_BAID_VALID_MASK != 0;
@@ -4322,6 +4348,22 @@ impl Ax200 {
             }
             if let Some(req) = addba.take() {
                 self.ba_request(&req);
+            }
+            // A firmware that never answers must not cost us the link. Linux
+            // treats a refusal as "decline and carry on"; silence has to mean
+            // the same, or the AP waits for a reply forever and stops sending.
+            // Declining is a working link, just a slow one.
+            if let Some(p) = self.ba_pending.as_ref() {
+                if p.asked_ms > 0 && host::now_ms().saturating_sub(p.asked_ms) > BA_SETUP_MS {
+                    let p = self.ba_pending.take().unwrap();
+                    self.ba_reply(&p, WLAN_STATUS_REQUEST_DECLINED);
+                    self.st.addba_declined = self.st.addba_declined.wrapping_add(1);
+                    self.st.addba_timeouts = self.st.addba_timeouts.wrapping_add(1);
+                    if self.st.addba_timeouts <= 3 {
+                        host::print("[ax200] firmware did not answer the block-ack setup \
+                                     in time — declining so the AP keeps sending\n");
+                    }
+                }
             }
             if delba && ba::session().active() {
                 let tid = ba::session().tid;
