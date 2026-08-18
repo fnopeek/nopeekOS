@@ -98,7 +98,7 @@ const RSN_IE: [u8; 22] = [
     0x00, 0x0f, 0xac, 0x02, 0x00, 0x00,
 ];
 
-static mut SSID_BUF: [u8; 64] = [0; 64];
+static mut SSID_BUF: [u8; 512] = [0; 512];
 static mut PSK_BUF: [u8; 128] = [0; 128];
 static mut EVENT_BUF: [u8; 2048] = [0; 2048];
 
@@ -106,10 +106,11 @@ static mut EVENT_BUF: [u8; 2048] = [0; 2048];
 pub extern "C" fn _start() {
     log("[wifid] WiFi manager start (WPA2 supplicant)\n");
 
-    // ── Load the credential from npkFS — two objects so SSID and passphrase
-    // can both contain spaces (set from the loop, e.g.
-    //   store /sys/config/wifi_ssid My Network
-    //   store /sys/config/wifi_psk  my secret pass
+    // ── Load the credential from npkFS. The network settings live in one
+    // `key: value` file shared with the driver; the passphrase keeps its own
+    // object, because nothing but this module has business holding it:
+    //   store /sys/config/wifi     ssid: My Network
+    //   store /sys/config/wifi_psk my secret pass
     // This plaintext-in-an-(at-rest-encrypted)-object is a bring-up provisional;
     // a capability-gated keystore replaces it later (see project_keystore).
     // Wait for the credential rather than exiting without one. On autostart this
@@ -118,13 +119,14 @@ pub extern "C" fn _start() {
     // the AP gets no answer to msg1 and deauthenticates us. That presents as
     // "connected but no DHCP lease", pointing at the wrong layer entirely.
     let (ssid, pass) = loop {
-        let ssid = read_cfg(b"sys/config/wifi_ssid", core::ptr::addr_of_mut!(SSID_BUF) as *mut u8, 64)
+        let ssid = read_cfg(b"sys/config/wifi", core::ptr::addr_of_mut!(SSID_BUF) as *mut u8, 512)
+            .and_then(|c| cfg_get(c, b"ssid"))
             .filter(|s| !s.is_empty());
         let pass = read_cfg(b"sys/config/wifi_psk", core::ptr::addr_of_mut!(PSK_BUF) as *mut u8, 128)
             .filter(|p| p.len() >= 8);
         match (ssid, pass) {
             (Some(s), Some(p)) => break (s, p),
-            (None, _) => log("[wifid] waiting for sys/config/wifi_ssid (store /sys/config/wifi_ssid <name>)\n"),
+            (None, _) => log("[wifid] waiting for an `ssid:` line in sys/config/wifi\n"),
             (_, None) => log("[wifid] waiting for sys/config/wifi_psk (store /sys/config/wifi_psk <pass>)\n"),
         }
         unsafe { npk_sleep(2000) };
@@ -257,6 +259,27 @@ fn send_set_key(group: bool, key_idx: u8, key: &[u8], rsc: &[u8; 6]) {
 
 /// Fetch a config object into `buf` and return its value with trailing
 /// whitespace (newline a text editor may append) trimmed. None on miss.
+fn cfg_trim(v: &[u8]) -> &[u8] {
+    let (mut a, mut b) = (0, v.len());
+    while a < b && matches!(v[a], b' ' | b'\t' | b'\r') { a += 1; }
+    while b > a && matches!(v[b - 1], b' ' | b'\t' | b'\r') { b -= 1; }
+    &v[a..b]
+}
+
+/// Value of `key` in a `key: value` config, or None. `#` starts a comment;
+/// only the first colon splits, so a passphrase-like value keeps its colons.
+fn cfg_get<'a>(text: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
+    for line in text.split(|&b| b == b'\n') {
+        let line = cfg_trim(line);
+        if line.is_empty() || line[0] == b'#' { continue; }
+        let Some(c) = line.iter().position(|&b| b == b':') else { continue };
+        if cfg_trim(&line[..c]) == key {
+            return Some(cfg_trim(&line[c + 1..]));
+        }
+    }
+    None
+}
+
 fn read_cfg(name: &[u8], buf: *mut u8, max: i32) -> Option<&'static [u8]> {
     let n = unsafe { npk_fetch(name.as_ptr() as i32, name.len() as i32, buf as i32, max) };
     if n <= 0 {

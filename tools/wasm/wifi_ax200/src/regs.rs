@@ -978,7 +978,13 @@ pub const TX_STATUS_DIRECT_DONE: u16 = 0x02;
 pub const RATE_MCS_SGI_MSK: u32 = 1 << 20;
 pub const RATE_MCS_LDPC_MSK: u32 = 1 << 16;
 
-// ── Connect policy (sys/config/wifi_ssid, sys/config/wifi_band) ──
+// ── Connect policy (sys/config/wifi) ──
+// One file, `key: value` per line, same shape as `sys/config/bar`. Keys:
+// ssid, band, ampdu, ps, btcoex, settle_ms. The passphrase stays in its own
+// object (`sys/config/wifi_psk`): only wifid needs it, and nothing else should
+// hold it in a buffer.
+pub const WIFI_CFG_PATH: &str = "sys/config/wifi";
+pub const WIFI_CFG_MAX: usize = 512;
 pub const BAND_PREF_AUTO: u8 = 0; // prefer 5 GHz when it is strong enough
 pub const BAND_PREF_5: u8 = 1;    // 5 GHz only (fall back if none)
 pub const BAND_PREF_24: u8 = 2;   // 2.4 GHz only (fall back if none)
@@ -1028,5 +1034,5 @@ pub const BT_COEX_DISABLE: u32 = 0x0; // iwlwifi.bt_coex_active=0
 // beacons at ~10/s. Longer than this means the firmware has no buffer to fill.
 pub const RX_SILENCE_MS: u64 = 3000;
 
-// Pause between firmware bring-up and the first scan (sys/config/wifi_settle_ms).
+// Pause between firmware bring-up and the first scan (`settle_ms` in sys/config/wifi).
 pub const SETTLE_MS_DEFAULT: u32 = 4000;
