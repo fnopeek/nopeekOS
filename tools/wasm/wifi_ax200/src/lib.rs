@@ -132,6 +132,10 @@ struct HtCap {
     ampdu_factor: u8,  // A-MPDU length exponent (0-3)
     ampdu_density: u8, // minimum MPDU start spacing (0-7)
     mcs_rx: [u8; 2],   // rx_mask[0] = MCS 0-7, rx_mask[1] = MCS 8-15
+    /// From the HT OPERATION element, not the capability one: where the
+    /// secondary 20 MHz channel sits. NONE means the AP runs 20 MHz only, and
+    /// then a 40 MHz PHY context would be pointing at nothing.
+    sec_chan_offs: u8,
     present: bool,
 }
 impl HtCap {
@@ -140,6 +144,7 @@ impl HtCap {
         ampdu_factor: 0,
         ampdu_density: 0,
         mcs_rx: [0; 2],
+        sec_chan_offs: IEEE80211_HT_PARAM_CHA_SEC_NONE,
         present: false,
     };
 }
@@ -1827,6 +1832,13 @@ impl Ax200 {
                     ht.mcs_rx[1] = buf[body + HT_OFF_MCS_RX_MASK + 1];
                     ht.present = true;
                 }
+                // The capability element says the AP CAN do 40 MHz; only the
+                // operation element says whether it currently DOES, and on
+                // which side the secondary channel sits.
+                WLAN_EID_HT_OPERATION if len >= 2 => {
+                    ht.sec_chan_offs =
+                        buf[body + HT_OP_OFF_HT_PARAM] & IEEE80211_HT_PARAM_CHA_SEC_OFFSET;
+                }
                 _ => {}
             }
             p += 2 + len;
@@ -2204,8 +2216,9 @@ impl Ax200 {
         put_u32(&mut pc, PC_OFF_ACTION, FW_CTXT_ACTION_ADD);
         put_u32(&mut pc, PC_OFF_CI_CHANNEL, self.target_chan as u32);
         pc[PC_OFF_CI_BAND] = self.target_band;
-        pc[PC_OFF_CI_WIDTH] = IWL_PHY_CHANNEL_MODE20;
-        pc[PC_OFF_CI_CTRL_POS] = 0; // 20 MHz → control channel position 0
+        let wide = self.use_ht40();
+        pc[PC_OFF_CI_WIDTH] = if wide { IWL_PHY_CHANNEL_MODE40 } else { IWL_PHY_CHANNEL_MODE20 };
+        pc[PC_OFF_CI_CTRL_POS] = if wide { self.ctrl_pos() } else { 0 };
         put_u32(&mut pc, PC_OFF_LMAC_ID, IWL_LMAC_24G_INDEX); // no CDB → 0
         // Receive chains. iwl_mvm_phy_ctxt_apply fills this field for cmd_ver 3+
         // and sends RLC_CONFIG_CMD afterwards — both, not either. Left at zero
@@ -2549,6 +2562,27 @@ impl Ax200 {
         self.pump_rx(50);
     }
 
+    /// 40 MHz only when ALL THREE agree: the AP says it can (capability
+    /// element), it says it currently does and on which side (operation
+    /// element), and the band has the room. Anything less stays at 20 —
+    /// a PHY context wider than the AP's actual channel points at silence.
+    fn use_ht40(&self) -> bool {
+        self.target_ht.present
+            && self.target_ht.cap_info & IEEE80211_HT_CAP_SUP_WIDTH_20_40 != 0
+            && self.target_ht.sec_chan_offs != IEEE80211_HT_PARAM_CHA_SEC_NONE
+    }
+
+    /// `iwl_mvm_get_ctrl_pos` for the HT case. The control channel is the
+    /// UPPER of the pair exactly when the secondary sits BELOW it; for 40 MHz
+    /// the offset term of that function is zero, so only the ABOVE bit is left.
+    fn ctrl_pos(&self) -> u8 {
+        if self.target_ht.sec_chan_offs == IEEE80211_HT_PARAM_CHA_SEC_BELOW {
+            IWL_PHY_CTRL_POS_ABOVE
+        } else {
+            0
+        }
+    }
+
     fn reconnect(&mut self) -> bool {
         host::print("[ax200] link lost — re-scanning to reconnect...\n");
         self.authorized = false;
@@ -2630,9 +2664,17 @@ impl Ax200 {
             // take from us — per spatial stream, in the "80 MHz and below" slot.
             put_u16(&mut cmd, TLC_OFF_HT_RATES_NSS1, self.target_ht.mcs_rx[0] as u16);
             put_u16(&mut cmd, TLC_OFF_HT_RATES_NSS2, self.target_ht.mcs_rx[1] as u16);
-            // rs_fw_sgi_cw_support: one bit per channel width, BIT(20 MHz) here.
+            // rs_fw_sgi_cw_support: one bit per channel width. And
+            // max_ch_width has to say 40 too, or the rate control never picks a
+            // 40 MHz rate no matter how the PHY is configured.
             if self.target_ht.cap_info & IEEE80211_HT_CAP_SGI_20 != 0 {
-                cmd[TLC_OFF_SGI] = 1 << TLC_CH_WIDTH_20MHZ;
+                cmd[TLC_OFF_SGI] |= 1 << TLC_CH_WIDTH_20MHZ;
+            }
+            if self.use_ht40() {
+                cmd[TLC_OFF_MAX_CH_WIDTH] = TLC_CH_WIDTH_40MHZ;
+                if self.target_ht.cap_info & IEEE80211_HT_CAP_SGI_40 != 0 {
+                    cmd[TLC_OFF_SGI] |= 1 << TLC_CH_WIDTH_40MHZ;
+                }
             }
             let mut flags = 0u16;
             if self.target_ht.cap_info & IEEE80211_HT_CAP_LDPC_CODING != 0 {
@@ -2896,6 +2938,17 @@ impl Ax200 {
             r.d(self.target_ht.ampdu_factor as u64);
             r.c(b'/');
             r.d(self.target_ht.ampdu_density as u64);
+            // The negotiated width, and WHY — a link that quietly fell back to
+            // 20 MHz looks identical to one that never tried.
+            r.s(if self.use_ht40() { "  width 40 MHz (sec " } else { "  width 20 MHz (" });
+            if self.use_ht40() {
+                r.s(if self.target_ht.sec_chan_offs == IEEE80211_HT_PARAM_CHA_SEC_BELOW
+                    { "below)" } else { "above)" });
+            } else if self.target_ht.cap_info & IEEE80211_HT_CAP_SUP_WIDTH_20_40 == 0 {
+                r.s("AP cannot do 40)");
+            } else {
+                r.s("AP runs 20 only)");
+            }
         } else {
             r.s("NONE - AP advertised no HT element, legacy rates only");
         }
@@ -4237,8 +4290,10 @@ impl Ax200 {
         // HT Capability element (802.11n). Only when the AP advertised HT — an
         // AP without it would get an element it never asked for, and everything
         // downstream (station flags, TLC mode HT) derives from its parameters.
-        // We claim 20 MHz only: the PHY context is IWL_PHY_CHANNEL_MODE20, so
-        // advertising 20/40 would invite frames the radio is not configured for.
+        // The claimed width MUST match the PHY context: advertising 20/40 with
+        // a 20 MHz radio invites frames it cannot receive, and claiming 20 with
+        // a 40 MHz context wastes the half we configured. Both follow
+        // `use_ht40`, which is the single place that decides.
         if self.target_ht.present {
             fr[p] = WLAN_EID_HT_CAPABILITY;
             fr[p + 1] = HT_CAP_IE_LEN as u8;
@@ -4251,6 +4306,12 @@ impl Ax200 {
             }
             if self.target_ht.cap_info & IEEE80211_HT_CAP_SGI_20 != 0 {
                 cap |= IEEE80211_HT_CAP_SGI_20;
+            }
+            if self.use_ht40() {
+                cap |= IEEE80211_HT_CAP_SUP_WIDTH_20_40;
+                if self.target_ht.cap_info & IEEE80211_HT_CAP_SGI_40 != 0 {
+                    cap |= IEEE80211_HT_CAP_SGI_40;
+                }
             }
             if self.target_ht.cap_info & IEEE80211_HT_CAP_RX_STBC != 0 {
                 cap |= IEEE80211_HT_CAP_RX_STBC_1;

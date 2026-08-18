@@ -610,6 +610,12 @@ pub const SSID_MAX: usize = 32;
 // BINDING v2 (BINDING_CDB_SUPPORT=yes → full struct), CDB_SUPPORT=no → lmac_id 0.
 pub const PHY_BAND_5_U8: u8 = 0; // PHY_BAND_5
 pub const IWL_PHY_CHANNEL_MODE20: u8 = 0;
+/// fw/api/phy-ctxt.h:17. MODE80 = 0x2 and MODE160 = 0x3 exist too — the next
+/// rung, once VHT is negotiated.
+pub const IWL_PHY_CHANNEL_MODE40: u8 = 1;
+/// Control-channel position (phy-ctxt.h:35). For HT the bit simply means "the
+/// control channel is the UPPER of the two", i.e. the secondary sits below.
+pub const IWL_PHY_CTRL_POS_ABOVE: u8 = 0x4;
 pub const IWL_LMAC_24G_INDEX: u32 = 0; // no CDB → lmac_id always 0
 pub const FW_CTXT_INVALID: u32 = 0xffff_ffff;
 
@@ -743,6 +749,7 @@ pub const TLC_OFF_HT_RATES: usize = 12;    // __le16[2][3] (12 B, 0 for legacy)
 pub const TLC_OFF_MAX_MPDU: usize = 24;    // __le16
 pub const TLC_OFF_MAX_TXOP: usize = 26;    // __le16
 pub const TLC_CH_WIDTH_20MHZ: u8 = 0;      // IWL_TLC_MNG_CH_WIDTH_20MHZ
+pub const TLC_CH_WIDTH_40MHZ: u8 = 1;      // IWL_TLC_MNG_CH_WIDTH_40MHZ
 pub const TLC_MODE_NON_HT: u8 = 0;         // IWL_TLC_MNG_MODE_NON_HT
 pub const TLC_MODE_HT: u8 = 1;             // IWL_TLC_MNG_MODE_HT
 // ht_rates is __le16[IWL_TLC_NSS_MAX=2][IWL_TLC_MCS_PER_BW_NUM_V4=3]; HT only
@@ -842,6 +849,18 @@ pub const WLAN_CAP_SHORT_SLOT: u16 = 1 << 10;
 pub const WLAN_EID_SUPP_RATES: u8 = 1;
 pub const WLAN_EID_TIM: u8 = 5;
 pub const WLAN_EID_HT_CAPABILITY: u8 = 45;
+/// struct ieee80211_ht_operation: primary_chan(1), ht_param(1), ...
+pub const WLAN_EID_HT_OPERATION: u8 = 61;
+pub const HT_OP_OFF_PRIMARY_CHAN: usize = 0;
+pub const HT_OP_OFF_HT_PARAM: usize = 1;
+/// ieee80211.h:2004 — secondary channel offset, bits 0-1 of ht_param.
+pub const IEEE80211_HT_PARAM_CHA_SEC_OFFSET: u8 = 0x03;
+pub const IEEE80211_HT_PARAM_CHA_SEC_NONE: u8 = 0x00;
+pub const IEEE80211_HT_PARAM_CHA_SEC_ABOVE: u8 = 0x01;
+pub const IEEE80211_HT_PARAM_CHA_SEC_BELOW: u8 = 0x03;
+/// ieee80211.h:1914/1919
+pub const IEEE80211_HT_CAP_SUP_WIDTH_20_40: u16 = 0x0002;
+pub const IEEE80211_HT_CAP_SGI_40: u16 = 0x0040;
 pub const WLAN_EID_RSN: u8 = 48;
 pub const WLAN_EID_EXT_SUPP_RATES: u8 = 50;
 pub const WLAN_EID_VENDOR_SPECIFIC: u8 = 221;
