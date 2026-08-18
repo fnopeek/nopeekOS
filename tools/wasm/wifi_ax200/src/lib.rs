@@ -199,6 +199,7 @@ struct Stats {
     tx_blocked: u32, // times the in-flight cap stopped us pulling another frame
     tx_wd_recoveries: u32, // times the queue watchdog reclaimed leaked TX slots
     gtk_installs: u32,     // group keys installed = 4-way once + one per rekey
+    tx_eapol_dropped: u32, // handshake replies that never reached the air
     inflight_peak: u32,
     // TX completions (iwl_tx_resp), cumulative.
     tx_ok: u32,
@@ -334,7 +335,7 @@ struct Stats {
 
 impl Stats {
     const NEW: Stats = Stats {
-        tx_frames: 0, tx_bytes: 0, tx_blocked: 0, tx_wd_recoveries: 0, gtk_installs: 0, inflight_peak: 0,
+        tx_frames: 0, tx_bytes: 0, tx_blocked: 0, tx_wd_recoveries: 0, gtk_installs: 0, tx_eapol_dropped: 0, inflight_peak: 0,
         tx_ok: 0, tx_fail: 0, tx_retries: 0, tx_rts_fail: 0, tx_airtime_us: 0,
         last_status: 0, last_init_rate: 0,
         rx_frames: 0, rx_bytes: 0, rx_ip: 0, rx_eapol: 0, rx_mgmt: 0, rx_drain_max: 0,
@@ -2985,6 +2986,11 @@ impl Ax200 {
             r.s("  group rekeys ");
             r.d((self.st.gtk_installs - 1) as u64);
         }
+        if self.st.tx_eapol_dropped > 0 {
+            r.s("  DROPPED ");
+            r.d(self.st.tx_eapol_dropped as u64);
+            r.s(" (never reached the air)");
+        }
         if self.st.ready_sent > 0 && self.st.rx_eapol > 0 && self.st.tx_eapol == 0 {
             r.s("  <- wifid never answered msg1");
         }
@@ -3695,12 +3701,22 @@ impl Ax200 {
     // Returns false if the frame was dropped because the data queue is full
     // (the firmware hasn't drained it yet) — the caller leaves it to the IP
     // stack to retransmit rather than overwrite an in-flight TFD.
-    fn tx_8023(&mut self, dst: [u8; 6], ethertype: u16, payload: &[u8], encrypt: bool) -> bool {
+    /// `critical` = this frame has NOBODY behind it to retransmit, so it must
+    /// not be refused for flow control. EAPOL is the case that matters: wifid
+    /// hands the group-rekey reply down exactly once. Dropped, the AP retries,
+    /// we drop again, and after a few rounds it simply stops talking to us —
+    /// no deauth, no error, the association still "up". Measured on the
+    /// device as four identical rekeys followed by a dead link.
+    ///
+    /// Bypassing the cap is safe: it exists against bufferbloat, and the ring
+    /// holds 256 TFDs against a cap of 16.
+    fn tx_8023(&mut self, dst: [u8; 6], ethertype: u16, payload: &[u8], encrypt: bool,
+               critical: bool) -> bool {
         // Flow control + anti-bufferbloat: cap in-flight at TX_INFLIGHT_MAX (well
         // below the ring depth) so write_ptr never laps the firmware's read
         // pointer AND a latency-sensitive packet never waits behind a deep
         // backlog. Caller leaves the rest in the kernel mailbox for retransmit.
-        if self.data_in_flight >= TX_INFLIGHT_MAX {
+        if !critical && self.data_in_flight >= TX_INFLIGHT_MAX {
             return false;
         }
         // As a QoS (HT) station every data frame carries a QoS control field, so
@@ -3761,7 +3777,7 @@ impl Ax200 {
         let mut dst = [0u8; 6];
         dst.copy_from_slice(&eth[0..6]);
         let ethertype = ((eth[12] as u16) << 8) | eth[13] as u16;
-        self.tx_8023(dst, ethertype, &eth[14..], true)
+        self.tx_8023(dst, ethertype, &eth[14..], true, false)
     }
 
     // Allocate a gen2 data TX queue (tid 0) for the AP station, so EAPOL frames
@@ -4938,7 +4954,14 @@ impl Ax200 {
                     host::dprint_dec(len as u32);
                     host::dprint(")\n");
                     let dst = self.target_bssid;
-                    let _ = self.tx_8023(dst, ETHERTYPE_EAPOL, &cmd[3..3 + len], false);
+                    // `critical`: there is no retransmit behind an EAPOL reply.
+                    // And never `let _ =` on it — a handshake frame that failed
+                    // to go out is the single most important thing the log can
+                    // say, and it used to say nothing at all.
+                    if !self.tx_8023(dst, ETHERTYPE_EAPOL, &cmd[3..3 + len], false, true) {
+                        self.st.tx_eapol_dropped = self.st.tx_eapol_dropped.wrapping_add(1);
+                        host::print("[ax200] EAPOL TX DROPPED — the AP will retry and then give up\n");
+                    }
                 }
             }
             // SET_KEY: [op][key_type][key_idx][cipher][key_len][key..][rsc 6].
