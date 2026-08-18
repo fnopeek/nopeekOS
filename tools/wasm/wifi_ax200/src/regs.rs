@@ -702,6 +702,12 @@ pub const STA_FLAGS_MSK_ADD: u32 = (3 << 26) | (3 << 28) | (1 << 17); // 0x3C020
 // A-MPDU limits the AP advertised. Without them the firmware keeps the station
 // at its "just added" defaults and TLC has nothing to scale into.
 pub const STA_FLG_FAT_EN_20MHZ: u32 = 0 << 26;
+/// fw/api/sta.h:87 — the station's TX channel width. A two-bit FIELD, so the
+/// value replaces rather than ORs; 20 MHz being 0 is why leaving it unset
+/// silently pins transmission to 20 MHz however wide the PHY is configured.
+pub const STA_FLG_FAT_EN_40MHZ: u32 = 1 << 26;
+pub const STA_FLG_FAT_EN_80MHZ: u32 = 2 << 26;
+pub const STA_FLG_FAT_EN_MSK: u32 = 3 << 26;
 pub const STA_FLG_MIMO_EN_SISO: u32 = 0 << 28;
 pub const STA_FLG_MIMO_EN_MIMO2: u32 = 1 << 28;
 pub const STA_FLG_MAX_AGG_SIZE_SHIFT: u32 = 19;
