@@ -1161,12 +1161,13 @@ pub fn intent_help_topic(topic: &str) {
             help_row("netbench", "Throughput measurement");
             kprintln!("[npk]");
             help_note("save a download:  https example.com /page.html > page");
-            help_note("wifi:  store /sys/config/wifi_psk <pass>   (the passphrase, on its own)");
-            help_note("       store /sys/config/wifi ssid: <name>   (everything else, one file)");
-            help_note("       more lines: band: 5|2.4|auto  ampdu: on|off  ps: on|off");
-            help_note("                   btcoex: on|off  settle_ms: <n>");
-            help_note("       `store` writes an npkFS object; `set` writes kernel config -");
-            help_note("       module settings live under sys/config/, so they need `store`");
+            help_row("wlan set <key> <val>", "Change one wifi setting (wlan set band 2.4)");
+            help_row("wlan unset <key>", "Drop one wifi setting");
+            kprintln!("[npk]");
+            help_note("wifi keys: ssid, band (5|2.4|auto), ampdu, ps, btcoex, settle_ms");
+            help_note("      all in one object, sys/config/wifi - `wlan set` edits it in");
+            help_note("      place, because plain `store` would replace the whole file");
+            help_note("passphrase, kept apart:  store /sys/config/wifi_psk <pass>");
         }
         "packages" | "install" | "modules" | "update" | "assets" => {
             help_head("packages", "signed (ECDSA P-384) and verified on every path");
