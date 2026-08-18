@@ -2010,8 +2010,15 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 // before a WiFi link existed). Brings up IP over `wlan` once the
                 // 4-way completed and it's the active interface.
                 kprintln!("[npk] DHCP: requesting a lease...");
-                if crate::net::dhcp::configure() {
+                // Typed by hand, so waiting for the answer is what the user
+                // asked for — unlike the ~1 Hz link tick, which must never take
+                // the terminal away. Same state machine either way.
+                if crate::net::dhcp::run_blocking(5000) {
                     kprintln!("[npk] DHCP: configured — run `net` for the address");
+                } else if crate::net::dhcp::is_running() {
+                    // Out of patience, not out of exchange: it keeps going on
+                    // the link tick, so saying "failed" here would be a lie.
+                    kprintln!("[npk] DHCP: still trying — run `net` in a moment");
                 } else {
                     kprintln!("[npk] DHCP: failed (no offer)");
                 }

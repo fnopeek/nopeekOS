@@ -235,6 +235,10 @@ pub fn seed_active() {
 /// USB reads + DHCP can block); call from the Core 0 shell loop.
 pub fn tick_link_and_reconfigure() {
     if crate::smp::per_core::current_core_id() != 0 { return; }
+    // Before the throttle: a lease in flight is stepped on EVERY pass, not once
+    // a second. It is a `udp::recv` peek and a deadline compare, and nothing at
+    // all when no exchange is running.
+    dhcp::tick();
     let now = crate::interrupts::rdtsc();
     if now < NEXT_LINK_CHECK.load(Ordering::Relaxed) { return; }
     NEXT_LINK_CHECK.store(now + crate::interrupts::tsc_freq(), Ordering::Relaxed); // +~1 s
@@ -259,20 +263,25 @@ pub fn tick_link_and_reconfigure() {
     // of waiting for an edge that has already gone by — this is what a real
     // DHCP client does, and it makes the outcome independent of boot ordering.
     //
-    // Backing off matters as much as retrying. A lease attempt BLOCKS Core 0 for
-    // its whole timeout, and Core 0 is the terminal: against a link that answers
-    // nothing, a fixed 10 s retry took the machine away from its user every few
-    // seconds, for as long as the fault lasted. Doubling up to two minutes keeps
-    // the recovery and gives the prompt back.
-    if up && act != 0 && arp::our_ip() == [0, 0, 0, 0] {
-        if now >= NEXT_DHCP_RETRY.load(Ordering::Relaxed) {
-            let wait = DHCP_RETRY_S.load(Ordering::Relaxed);
-            NEXT_DHCP_RETRY.store(
-                now + crate::interrupts::tsc_freq().saturating_mul(wait), Ordering::Relaxed);
-            DHCP_RETRY_S.store((wait * 2).min(DHCP_RETRY_MAX_S), Ordering::Relaxed);
-            crate::kprintln!("[npk] net: link up but no address - retrying DHCP (next in {} s)",
-                DHCP_RETRY_S.load(Ordering::Relaxed));
-            reconfigure();
+    // The backoff no longer buys back a frozen terminal (the exchange is
+    // asynchronous now); it is there so a link that answers nothing is not
+    // broadcast at every second for as long as the fault lasts.
+    if up && act != 0 {
+        if arp::our_ip() == [0, 0, 0, 0] {
+            if !dhcp::is_running() && now >= NEXT_DHCP_RETRY.load(Ordering::Relaxed) {
+                let wait = DHCP_RETRY_S.load(Ordering::Relaxed);
+                NEXT_DHCP_RETRY.store(
+                    now + crate::interrupts::tsc_freq().saturating_mul(wait), Ordering::Relaxed);
+                DHCP_RETRY_S.store((wait * 2).min(DHCP_RETRY_MAX_S), Ordering::Relaxed);
+                crate::kprintln!("[npk] net: link up but no address - retrying DHCP (next in {} s)",
+                    DHCP_RETRY_S.load(Ordering::Relaxed));
+                reconfigure();
+            }
+        } else {
+            // An address arrived — the lease may have landed a second or a
+            // minute after the call that asked for it, so the reset belongs
+            // here rather than at a return value nobody waits for any more.
+            DHCP_RETRY_S.store(DHCP_RETRY_MIN_S, Ordering::Relaxed);
         }
     }
 }
@@ -297,14 +306,11 @@ fn reconfigure() {
         return;
     }
     crate::kprintln!("[npk] net: link changed -> requesting DHCP lease...");
-    if dhcp::configure() {
-        // A link that works again starts the backoff over.
+    // Returns at once. The ARP announcement and the gateway warm-up moved into
+    // the exchange itself (dhcp::succeed) — they belong where the lease lands,
+    // which is no longer here.
+    if let dhcp::Start::Kept = dhcp::start() {
         DHCP_RETRY_S.store(DHCP_RETRY_MIN_S, Ordering::Relaxed);
-        // Tell the segment which MAC now owns our address, then warm the
-        // gateway entry. Without the announcement the router keeps sending to
-        // the interface we just left.
-        arp::announce();
-        prime_gateway_arp();
     }
 }
 
