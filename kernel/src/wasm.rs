@@ -3468,10 +3468,12 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
-    // npk_tcp_close(handle) -> 0
+    // npk_tcp_close(handle) -> 0. Sends the FIN and returns; the graceful
+    // wait is the kernel's job, not a module's — it spun up to 2 s here,
+    // and 2 s of a frozen worker core is the WiFi driver not draining.
     linker.func_wrap("env", "npk_tcp_close",
         |_caller: Caller<'_, HostState>, handle: i32| -> i32 {
-            if handle >= 0 { let _ = crate::net::tcp::close(handle as usize); }
+            if handle >= 0 { let _ = crate::net::tcp::close_nowait(handle as usize); }
             0
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
