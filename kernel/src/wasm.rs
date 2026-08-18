@@ -4129,12 +4129,26 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
-    // npk_netdev_set_link(up) -> 0 — driver reports carrier state (associated +
-    // keyed). Lets `net` show a real UP/DOWN for the wlan interface.
+    // npk_netdev_set_link(up) -> 0 — the single-flag form. Kept for drivers
+    // that know only "usable / not usable"; it reports `up` as carrier with no
+    // dormant phase.
     linker.func_wrap("env", "npk_netdev_set_link",
         |caller: Caller<'_, HostState>, up: i32| -> i32 {
             if caller.data().hw.is_none() { return -1; }
             crate::netdev::set_wasm_nic_link(up != 0);
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_netdev_set_link_state(carrier, dormant) -> 0 — the RFC 2863 pair
+    // Linux keeps (`rfc2863_policy`): `carrier` = the association exists,
+    // `dormant` = it exists but is not usable yet (WPA not done). operstate
+    // is UP only when carrier && !dormant. One flag for all three meanings
+    // made every authorization phase look like the link had gone away.
+    linker.func_wrap("env", "npk_netdev_set_link_state",
+        |caller: Caller<'_, HostState>, carrier: i32, dormant: i32| -> i32 {
+            if caller.data().hw.is_none() { return -1; }
+            crate::netdev::set_wasm_nic_link_state(carrier != 0, dormant != 0);
             0
         },
     ).map_err(|_| WasmError::HostFunctionError)?;

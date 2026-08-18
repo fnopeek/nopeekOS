@@ -890,6 +890,20 @@ pub const WLAN_ACTION_ADDBA_REQ: u8 = 0;
 pub const WLAN_ACTION_ADDBA_RESP: u8 = 1;
 pub const WLAN_ACTION_DELBA: u8 = 2;
 pub const WLAN_STATUS_SUCCESS: u16 = 0;
+// include/linux/ieee80211.h — verified against 6.18.26, not remembered.
+pub const WLAN_STATUS_UNSPECIFIED_QOS: u16 = 32;
+pub const WLAN_STATUS_INVALID_QOS_PARAM: u16 = 38;
+pub const WLAN_REASON_UNSPECIFIED: u16 = 1;
+pub const WLAN_REASON_QSTA_TIMEOUT: u16 = 39;
+pub const WLAN_BACK_RECIPIENT: u16 = 0;
+pub const WLAN_BACK_INITIATOR: u16 = 1;
+/// The largest reorder window an HT peer may ask for (ieee80211.h:2046).
+pub const IEEE80211_MAX_AMPDU_BUF_HT: usize = 0x40;
+/// DELBA parameter set (ieee80211.h:2036) — TID in 15:12, initiator in bit 11.
+pub const IEEE80211_DELBA_PARAM_TID_MASK: u16 = 0xF000;
+pub const IEEE80211_DELBA_PARAM_TID_SHIFT: u16 = 12;
+pub const IEEE80211_DELBA_PARAM_INITIATOR_MASK: u16 = 0x0800;
+pub const IEEE80211_DELBA_PARAM_INITIATOR_SHIFT: u16 = 11;
 pub const WLAN_STATUS_REQUEST_DECLINED: u16 = 37;
 
 // ADDBA request/response body (802.11-2020 9.6.3.1): category, action, dialog

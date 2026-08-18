@@ -102,14 +102,47 @@ pub fn wasm_nic_available() -> bool {
     WASM_NIC_ACTIVE.load(Ordering::Acquire)
 }
 
-/// Driver reports its carrier/link state (associated + keyed) via
-/// npk_netdev_set_link. Lets `net` show a real UP/DOWN for `wlan`.
-pub fn set_wasm_nic_link(up: bool) {
-    WASM_NIC.lock().link_up = up;
+// RFC 2863, as Linux implements it in `link_watch.c` / `rfc2863_policy`: a
+// link has TWO independent facts, not one.
+//
+//   carrier — the physical/association link exists
+//   dormant — it exists but is not usable yet (802.1X / WPA not done)
+//   operstate UP = carrier && !dormant
+//
+// We had a single `link_up` carrying all three meanings, so every 4-way
+// handshake — a second of `authorized == false` on a perfectly healthy
+// association — read as "the link went away" and re-ran DHCP.
+static WASM_CARRIER: AtomicBool = AtomicBool::new(false);
+static WASM_DORMANT: AtomicBool = AtomicBool::new(false);
+
+/// Driver reports carrier and dormant separately (npk_netdev_set_link_state).
+pub fn set_wasm_nic_link_state(carrier: bool, dormant: bool) {
+    WASM_CARRIER.store(carrier, Ordering::Release);
+    WASM_DORMANT.store(dormant, Ordering::Release);
+    WASM_NIC.lock().link_up = carrier && !dormant;
 }
 
+/// Legacy single-flag form (npk_netdev_set_link): a driver that knows only
+/// "usable / not usable" reports it as carrier with no dormant phase.
+pub fn set_wasm_nic_link(up: bool) {
+    set_wasm_nic_link_state(up, false);
+}
+
+/// operstate: usable right now.
 pub fn wasm_nic_link_up() -> bool {
-    wasm_nic_available() && WASM_NIC.lock().link_up
+    wasm_nic_available() && WASM_CARRIER.load(Ordering::Acquire)
+        && !WASM_DORMANT.load(Ordering::Acquire)
+}
+
+/// Association exists, whether or not it is keyed yet. This is what must NOT
+/// flap during a rekey, and what the link-change logic keys on.
+pub fn wasm_nic_carrier() -> bool {
+    wasm_nic_available() && WASM_CARRIER.load(Ordering::Acquire)
+}
+
+/// Link is up but still being authorized.
+pub fn wasm_nic_dormant() -> bool {
+    wasm_nic_available() && WASM_DORMANT.load(Ordering::Acquire)
 }
 
 // ── Wired link-state cache + active-NIC selection ─────────────────────────
@@ -191,6 +224,20 @@ pub fn active_link_up() -> bool {
         // No carrier detect on either — presence is all we have.
         Active::Rtl | Active::Virtio => true,
         Active::None => false,
+    }
+}
+
+/// Name of the active interface, for the one log line that has to say WHY the
+/// link "changed". Without it a WiFi carrier that blinks for a single sample
+/// reads as "link changed -> requesting DHCP" with no hint that the stack
+/// briefly routed over a cable-less NIC and back.
+pub fn active_name() -> &'static str {
+    match active() {
+        Active::None => "none",
+        Active::Intel => "intel",
+        Active::Rtl => "usb-lan",
+        Active::Wasm => "wifi",
+        Active::Virtio => "virtio",
     }
 }
 

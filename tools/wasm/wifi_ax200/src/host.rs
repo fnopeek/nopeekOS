@@ -52,6 +52,7 @@ unsafe extern "C" {
     fn npk_netdev_rx_deliver(buf_ptr: i32, len: i32) -> i32;
     fn npk_netdev_poll_tx(buf_ptr: i32, max: i32) -> i32;
     fn npk_netdev_set_link(up: i32) -> i32;
+    fn npk_netdev_set_link_state(carrier: i32, dormant: i32) -> i32;
 }
 
 // ── Safe wrappers ────────────────────────────────────────────────
@@ -273,6 +274,14 @@ pub fn netdev_poll_tx(buf: &mut [u8]) -> usize {
 }
 
 /// Report carrier state (associated + keyed → data path live).
+/// RFC 2863 pair: `carrier` = the association exists, `dormant` = it exists
+/// but is not usable yet (WPA not done). operstate is UP only when
+/// carrier && !dormant.
+pub fn netdev_set_link_state(carrier: bool, dormant: bool) {
+    unsafe { npk_netdev_set_link_state(if carrier { 1 } else { 0 },
+                                       if dormant { 1 } else { 0 }) };
+}
+
 pub fn netdev_set_link(up: bool) {
     unsafe { npk_netdev_set_link(if up { 1 } else { 0 }) };
 }
