@@ -2942,7 +2942,7 @@ impl Ax200 {
         r.d(self.st.pk_rx_airtime_pct as u64);
         r.s("% tx ");
         r.d(self.st.pk_tx_airtime_pct as u64);
-        r.s("% (lower bound)  retries ");
+        r.s("% (incl. IFS+backoff)  retries ");
         r.d(self.st.pk_retry_pct as u64);
         r.s("%  drain ");
         r.d(self.st.pk_drain as u64);
@@ -3636,13 +3636,23 @@ impl Ax200 {
         let rnf = le32(&buf, d + MPDU_OFF_RATE_N_FLAGS);
         let kbit = Self::rate_kbit(Self::rate_v3(rnf));
         if kbit > 0 {
+            // The whole exchange, not just the bits on the wire. The first
+            // version counted preamble + SIFS + ACK and called itself a lower
+            // bound — but DIFS and the average backoff are the BIGGEST term at
+            // HT rates (102 of 268 µs for a 1500-byte frame at 144 Mbit), so
+            // that "bound" read 1.5x low and argued the channel was idle when
+            // it was about half full. A number that misleads by 1.5x is worse
+            // than no number.
+            let cck = rnf & RATE_MCS_MOD_TYPE_MSK == RATE_MCS_MOD_TYPE_CCK;
             let preamble = match rnf & RATE_MCS_MOD_TYPE_MSK {
-                RATE_MCS_MOD_TYPE_CCK => 96,  // short preamble
-                RATE_MCS_MOD_TYPE_HT => 36,   // HT-mixed
-                _ => 20,                      // legacy OFDM
+                RATE_MCS_MOD_TYPE_CCK => 96,       // short preamble
+                RATE_MCS_MOD_TYPE_HT => 40,        // HT-mixed, 2 spatial streams
+                _ => 20,                           // legacy OFDM
             };
-            // +60 for the SIFS and the ACK the standard makes us send back.
-            *air_us += preamble + 60 + (mpdu_len as u64 * 8 * 1000 / kbit as u64);
+            // SIFS + ACK + DIFS + mean backoff (CWmin 15 for best effort, so
+            // 7.5 slots). Slot and SIFS differ between the DSSS and OFDM PHYs.
+            let overhead = if cck { 10 + 40 + 50 + 150 } else { 16 + 28 + 34 + 68 };
+            *air_us += preamble + overhead + (mpdu_len as u64 * 8 * 1000 / kbit as u64);
         }
 
         let status = le32(&buf, d + MPDU_OFF_STATUS);
