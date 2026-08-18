@@ -520,6 +520,14 @@ struct Ax200 {
     tx_fail_streak_peak: u32,
     last_tx_resp_ms: u64,
     want_ampdu: bool,
+    /// Set once the firmware has ignored a block-ack setup. Asking again costs
+    /// another silent 300 ms AND wedges the transmit path: measured on the
+    /// device, 31 frames sent / 7 acknowledged / 500 refused, and no ping.
+    /// Linux would not be sending this command at all on a firmware that
+    /// advertises BAID_ML_SUPPORT (it uses RX_BAID_ALLOCATION_CONFIG_CMD via
+    /// iwl_mvm_fw_baid_op, sta.c:2860) — until we implement that, one refusal
+    /// is all the evidence needed to stop asking.
+    ba_fw_broken: bool,
     // Diagnostics (see Stats) + what the scan found besides the chosen AP: the
     // strongest same-SSID AP on the OTHER band. Picking purely by RSSI always
     // lands on the near 2.4 GHz node, so the question "was there a 5 GHz one?"
@@ -2896,7 +2904,9 @@ impl Ax200 {
             r.d(self.st.addba_accepted as u64);
             r.c(b'\n');
         } else {
-            r.s(if self.want_ampdu {
+            r.s(if self.ba_fw_broken {
+                "aggr     A-MPDU on but the firmware ignored the setup — declining; declined "
+            } else if self.want_ampdu {
                 "aggr     A-MPDU on but no session yet; declined "
             } else {
                 "aggr     A-MPDU off (`ampdu: on` in sys/config/wifi); declined "
@@ -3339,7 +3349,7 @@ impl Ax200 {
         let params = u16::from_le_bytes([req[3], req[4]]);
         let tid = ((params & BA_PARAM_TID_MASK) >> BA_PARAM_TID_SHIFT) as u8;
         let ssn = u16::from_le_bytes([req[7], req[8]]) >> BA_SSN_SHIFT;
-        if !self.want_ampdu {
+        if !self.want_ampdu || self.ba_fw_broken {
             let p = BaPending { tid, ssn, win: 1, dialog: req[2],
                                 timeout: u16::from_le_bytes([req[5], req[6]]),
                                 asked_ms: 0 };
@@ -4359,6 +4369,10 @@ impl Ax200 {
                     self.ba_reply(&p, WLAN_STATUS_REQUEST_DECLINED);
                     self.st.addba_declined = self.st.addba_declined.wrapping_add(1);
                     self.st.addba_timeouts = self.st.addba_timeouts.wrapping_add(1);
+                    // Once is enough. Every further attempt is another 300 ms of
+                    // silence towards the AP and another command the firmware
+                    // does not finish.
+                    self.ba_fw_broken = true;
                     if self.st.addba_timeouts <= 3 {
                         host::print("[ax200] firmware did not answer the block-ack setup \
                                      in time — declining so the AP keeps sending\n");
@@ -4980,6 +4994,7 @@ pub extern "C" fn _start() {
         pick_reason: PICK_STRONGEST,
         ba_pending: None,
         want_ampdu: false,
+        ba_fw_broken: false,
         link_published: false,
         tx_fail_streak: 0,
         tx_fail_streak_peak: 0,
