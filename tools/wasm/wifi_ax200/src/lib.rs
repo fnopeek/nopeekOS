@@ -198,6 +198,7 @@ struct Stats {
     tx_bytes: u64,
     tx_blocked: u32, // times the in-flight cap stopped us pulling another frame
     tx_wd_recoveries: u32, // times the queue watchdog reclaimed leaked TX slots
+    gtk_installs: u32,     // group keys installed = 4-way once + one per rekey
     inflight_peak: u32,
     // TX completions (iwl_tx_resp), cumulative.
     tx_ok: u32,
@@ -333,7 +334,7 @@ struct Stats {
 
 impl Stats {
     const NEW: Stats = Stats {
-        tx_frames: 0, tx_bytes: 0, tx_blocked: 0, tx_wd_recoveries: 0, inflight_peak: 0,
+        tx_frames: 0, tx_bytes: 0, tx_blocked: 0, tx_wd_recoveries: 0, gtk_installs: 0, inflight_peak: 0,
         tx_ok: 0, tx_fail: 0, tx_retries: 0, tx_rts_fail: 0, tx_airtime_us: 0,
         last_status: 0, last_init_rate: 0,
         rx_frames: 0, rx_bytes: 0, rx_ip: 0, rx_eapol: 0, rx_mgmt: 0, rx_drain_max: 0,
@@ -2975,6 +2976,15 @@ impl Ax200 {
         r.d(self.st.keys_set as u64);
         r.s("/2  authorized ");
         r.s(if self.authorized { "yes" } else { "NO" });
+        // The 4-way installs one GTK; every further one is a rekey. A rekey
+        // only ever announced itself as a log LINE, and background output is
+        // pinned to the first loop window — so in any other window it was
+        // invisible, and it was very nearly missed. A standing number cannot
+        // scroll past.
+        if self.st.gtk_installs > 1 {
+            r.s("  group rekeys ");
+            r.d((self.st.gtk_installs - 1) as u64);
+        }
         if self.st.ready_sent > 0 && self.st.rx_eapol > 0 && self.st.tx_eapol == 0 {
             r.s("  <- wifid never answered msg1");
         }
@@ -3851,6 +3861,9 @@ impl Ax200 {
         cmd[KEY_OFF_RX_SEQ..KEY_OFF_RX_SEQ + rl].copy_from_slice(&rsc[..rl]);
         self.send_hcmd(0, ADD_STA_KEY_CMD, &cmd); // → LONG_GROUP(1)
         self.pump_rx(20);
+        if group {
+            self.st.gtk_installs = self.st.gtk_installs.wrapping_add(1);
+        }
         host::print(if group { "[ax200] GTK installed: key id " } else { "[ax200] PTK installed: key id " });
         host::print_dec(key_idx as u32);
         host::print(" -> fw slot ");
