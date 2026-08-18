@@ -206,6 +206,15 @@ struct Stats {
     keys_set: u32,   // SET_KEY commands honoured (PTK + GTK = 2)
     ready_sent: u32, // EV_READY handed to wifid (once per association)
     rx_mgmt: u32,
+    // Encrypted RX, counted but never acted on. `mic_fail` is the frame Linux
+    // drops in iwl_mvm_rx_crypto (rxmq.c:452); `sec_none` is the firmware
+    // saying it did not decrypt a frame whose Protected bit is set — a key it
+    // does not have. Both are silent today: the frame goes up the stack as
+    // whatever the bytes happen to be, and shows up as `undecoded`.
+    rx_prot: u32,
+    rx_mic_fail: u32,
+    rx_sec_none: u32,
+    rx_undecrypted: u32,
     rx_drain_max: u32, // most frames drained in one pass — RX ring pressure
     // Passes that drained (nearly) the whole RB pool. There are only RX_NUM_RBS
     // buffers: once they are all full the firmware has nowhere to put the next
@@ -278,6 +287,7 @@ impl Stats {
         tx_ok: 0, tx_fail: 0, tx_retries: 0, tx_rts_fail: 0, tx_airtime_us: 0,
         last_status: 0, last_init_rate: 0,
         rx_frames: 0, rx_bytes: 0, rx_ip: 0, rx_eapol: 0, rx_mgmt: 0, rx_drain_max: 0,
+        rx_prot: 0, rx_mic_fail: 0, rx_sec_none: 0, rx_undecrypted: 0,
         tx_eapol: 0, keys_set: 0, ready_sent: 0,
         rx_pool_exhausted: 0, rx_to_us: 0, rx_undecoded: 0,
         loop_iters: 0, loop_busy: 0, deauth: 0, addba_declined: 0, addba_accepted: 0,
@@ -2921,6 +2931,18 @@ impl Ax200 {
         let work_pp = self.st.prof_work_pp;
         let sleep_pp = self.st.prof_sleep_pp;
         let wall_pp = (work_pp + sleep_pp).max(1);
+        // Encrypted RX, the one number that separates "the AP went quiet" from
+        // "the AP is talking and we cannot read it". mic-fail is what Linux
+        // drops; sec-none is a protected frame the firmware never decrypted.
+        r.s("crypto   protected ");
+        r.d(self.st.rx_prot as u64);
+        r.s("  mic-fail ");
+        r.d(self.st.rx_mic_fail as u64);
+        r.s("  sec-none ");
+        r.d(self.st.rx_sec_none as u64);
+        r.s("  never-decrypted ");
+        r.d(self.st.rx_undecrypted as u64);
+        r.c(b'\n');
         r.s("cpu      work ");
         r.d(work_pp);
         r.s(" us/pass = ");
@@ -3482,7 +3504,7 @@ impl Ax200 {
     }
 
     fn rx_classify(rb: &Dma, our_mac: &[u8; 6], out: &mut [u8], miss_log: &mut u32,
-                   to_us: &mut u32) -> RxKind {
+                   to_us: &mut u32, crypt: &mut [u32; 4]) -> RxKind {
         let mut buf = [0u8; 1600];
         host::dma_read_buf(rb.handle, 0, &mut buf);
         let d = RX_PKT_DATA_OFF;
@@ -3513,6 +3535,24 @@ impl Ax200 {
         // the cipher it decrypted with, then the DWORD padding the firmware
         // inserts when header+IV is not a multiple of 4 (the QoS+CCMP case).
         let status = le32(&buf, d + MPDU_OFF_STATUS);
+        // Did the firmware actually decrypt this? We do not drop on the answer —
+        // the point is to learn whether a link that looks alive is receiving
+        // frames it cannot read. See iwl_mvm_rx_crypto (rxmq.c:414).
+        if buf[f + 1] & DOT11_FC_PROTECTED != 0 {
+            crypt[0] += 1;
+            match status & RX_STATUS_SEC_MASK {
+                RX_STATUS_SEC_CCM => {
+                    if status & RX_STATUS_MIC_OK == 0 {
+                        crypt[1] += 1;
+                    }
+                }
+                RX_STATUS_SEC_NONE => crypt[2] += 1,
+                _ => {}
+            }
+            if status & RX_STATUS_DECRYPTED == 0 {
+                crypt[3] += 1;
+            }
+        }
         let crypt_len = if status & RX_STATUS_SEC_MASK == RX_STATUS_SEC_CCM {
             IEEE80211_CCMP_HDR_LEN
         } else {
@@ -3900,6 +3940,7 @@ impl Ax200 {
             let mut a_ip = 0u32;
             let mut a_eapol = 0u32;
             let mut a_mgmt = 0u32;
+            let mut a_crypt = [0u32; 4];
             let mut a_rx_bytes = 0u64;
             let mut a_to_us = 0u32;
             let mut a_undecoded = 0u32;
@@ -3994,7 +4035,7 @@ impl Ax200 {
                         return true; // mgmt frame — not for the IP path
                     }
                     let uni_before = a_to_us;
-                    match Self::rx_classify(rb, &our_mac, &mut rxbuf, &mut llc_miss, &mut a_to_us) {
+                    match Self::rx_classify(rb, &our_mac, &mut rxbuf, &mut llc_miss, &mut a_to_us, &mut a_crypt) {
                         RxKind::Eapol(n) => {
                             a_eapol += 1;
                             a_rx_bytes += n as u64;
@@ -4072,6 +4113,10 @@ impl Ax200 {
             self.st.rx_ip = self.st.rx_ip.wrapping_add(a_ip);
             self.st.rx_eapol = self.st.rx_eapol.wrapping_add(a_eapol);
             self.st.rx_mgmt = self.st.rx_mgmt.wrapping_add(a_mgmt);
+            self.st.rx_prot = self.st.rx_prot.wrapping_add(a_crypt[0]);
+            self.st.rx_mic_fail = self.st.rx_mic_fail.wrapping_add(a_crypt[1]);
+            self.st.rx_sec_none = self.st.rx_sec_none.wrapping_add(a_crypt[2]);
+            self.st.rx_undecrypted = self.st.rx_undecrypted.wrapping_add(a_crypt[3]);
             self.st.rx_to_us = self.st.rx_to_us.wrapping_add(a_to_us);
             self.st.rx_undecoded = self.st.rx_undecoded.wrapping_add(a_undecoded);
             if rx_frames > self.st.rx_drain_max { self.st.rx_drain_max = rx_frames; }

@@ -551,6 +551,12 @@ pub const MFLG2_PAD: u8 = 0x20;
 // iwl_rx_mpdu_status: which cipher the firmware decrypted with (→ IV length).
 pub const RX_STATUS_SEC_MASK: u32 = 0x7 << 8;
 pub const RX_STATUS_SEC_CCM: u32 = 0x2 << 8;
+pub const RX_STATUS_SEC_NONE: u32 = 0x0 << 8;
+// …and whether it worked. For CCM/GCM iwl_mvm_rx_crypto checks exactly one bit
+// and drops the frame when it is clear (rxmq.c:452). We only count — a
+// diagnostic that changes the data path cannot measure the data path.
+pub const RX_STATUS_MIC_OK: u32 = 1 << 6;
+pub const RX_STATUS_DECRYPTED: u32 = 1 << 11;
 pub const IEEE80211_CCMP_HDR_LEN: usize = 8;
 // 802.11 management frame (ieee80211_hdr + beacon/probe-response body).
 pub const DOT11_HDR_LEN: usize = 24; // fc(2)+dur(2)+addr1/2/3(18)+seq(2)
@@ -906,6 +912,7 @@ pub const POWER_KEEP_ALIVE_PERIOD_SEC: u16 = 25; // max(3*dtim*bi, this); dtim=0
 pub const ETHERTYPE_EAPOL: u16 = 0x888E;
 pub const LLC_SNAP_HDR: [u8; 6] = [0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00];
 pub const DOT11_FC_TYPE_DATA: u8 = 0x08; // fc byte0 & 0x0c == data
+pub const DOT11_FC_PROTECTED: u8 = 0x40;  // fc byte1 — payload is encrypted
 pub const DOT11_STYPE_QOS: u8 = 0x08;    // subtype bit → +2-byte QoS control
 // Control-channel wire ops (docs/spec/WIFI_CLASS_ABI.md). downlink = manager→driver.
 pub const CMD_SET_KEY: u8 = 0x04;
