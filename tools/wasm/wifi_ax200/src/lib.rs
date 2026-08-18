@@ -145,6 +145,11 @@ struct HtCap {
     vht_chan_width: u8,
     /// Centre-frequency channel index of the 80 MHz block.
     vht_seg0: u8,
+    /// HT Operation `operation_mode` — the AP states here what protection the
+    /// BSS needs, and it is the only place that information exists.
+    ht_op_mode: u16,
+    /// ERP Use_Protection: legacy 802.11b stations present.
+    erp_protect: bool,
     present: bool,
 }
 impl HtCap {
@@ -159,6 +164,8 @@ impl HtCap {
         vht_rx_mcs_map: 0,
         vht_chan_width: IEEE80211_VHT_CHANWIDTH_USE_HT,
         vht_seg0: 0,
+        ht_op_mode: 0,
+        erp_protect: false,
         present: false,
     };
 }
@@ -1844,6 +1851,9 @@ impl Ax200 {
                 }
                 // TIM: dtim_count, dtim_period, bitmap_control, virtual bitmap.
                 WLAN_EID_TIM if len >= 2 => dtim_period = buf[body + 1],
+                WLAN_EID_ERP_INFO if len >= 1 => {
+                    ht.erp_protect = buf[body] & WLAN_ERP_USE_PROTECTION != 0;
+                }
                 // struct ieee80211_ht_cap — see HT_OFF_* in regs.rs.
                 WLAN_EID_HT_CAPABILITY if len >= HT_CAP_IE_LEN => {
                     ht.cap_info =
@@ -1862,6 +1872,11 @@ impl Ax200 {
                 WLAN_EID_HT_OPERATION if len >= 2 => {
                     ht.sec_chan_offs =
                         buf[body + HT_OP_OFF_HT_PARAM] & IEEE80211_HT_PARAM_CHA_SEC_OFFSET;
+                    if len >= 4 {
+                        ht.ht_op_mode = u16::from_le_bytes([
+                            buf[body + HT_OP_OFF_OPERATION_MODE],
+                            buf[body + HT_OP_OFF_OPERATION_MODE + 1]]);
+                    }
                 }
                 WLAN_EID_VHT_CAPABILITY if len >= VHT_CAP_IE_LEN => {
                     ht.vht = true;
@@ -2492,6 +2507,11 @@ impl Ax200 {
         put_u32(&mut cmd, MC_OFF_CCK_RATES, MAC_CCK_RATES_DEFAULT);
         put_u32(&mut cmd, MC_OFF_OFDM_RATES, MAC_OFDM_RATES_DEFAULT);
         put_u32(&mut cmd, MC_OFF_FILTER_FLAGS, MAC_FILTER_ACCEPT_GRP);
+        // What the BSS asks us to protect against. Sent as 0 until now, i.e.
+        // "nothing" — the firmware could not know that legacy or non-member
+        // stations share this channel.
+        let prot = self.protection_flags();
+        put_u32(&mut cmd, MC_OFF_PROT_FLAGS, prot);
 
         // iwl_mvm_set_fw_dtim_tbtt: the DTIM count counts down, so the next DTIM
         // TBTT is that many beacon intervals after the beacon we just heard.
@@ -2634,6 +2654,41 @@ impl Ax200 {
     /// actually says 80 (USE_HT means it is running an HT width after all),
     /// and it offers at least two spatial streams at MCS 0-9. Anything less
     /// falls through to `use_ht40`.
+    /// `iwl_mvm_set_fw_protection_flags` (mvm/mac-ctxt.c), branch for branch.
+    ///
+    /// We sent 0 unconditionally — "no protection needed" — whatever the AP
+    /// said. The firmware then has no way to know that legacy or non-member
+    /// stations share the channel, and every transmission takes its chances.
+    /// Measured on the device: `rts-fail` at 22 % of 122407 frames.
+    ///
+    /// Note this may make the firmware protect MORE, not less. That is the
+    /// point: protection costs airtime and buys collisions avoided, and the AP
+    /// is the only party that knows which trade its BSS needs.
+    fn protection_flags(&self) -> u32 {
+        let mut flags = 0u32;
+        if self.target_ht.erp_protect {
+            flags |= MAC_PROT_FLG_TGG_PROTECT;
+        }
+        // "for both sta and ap, ht_operation_mode hold the protection_mode",
+        // and Linux treats a zero operation_mode as "HT protection not in use".
+        if self.target_ht.ht_op_mode & IEEE80211_HT_OP_MODE_PROTECTION == 0 {
+            return flags;
+        }
+        // The firmware does not distinguish HT from FAT, so Linux sets both.
+        let ht_flag = MAC_PROT_FLG_HT_PROT | MAC_PROT_FLG_FAT_PROT;
+        match self.target_ht.ht_op_mode & IEEE80211_HT_OP_MODE_PROTECTION {
+            IEEE80211_HT_OP_MODE_PROTECTION_NONE => {}
+            IEEE80211_HT_OP_MODE_PROTECTION_NONMEMBER
+            | IEEE80211_HT_OP_MODE_PROTECTION_NONHT_MIXED => flags |= ht_flag,
+            IEEE80211_HT_OP_MODE_PROTECTION_20MHZ => {
+                // Only when we are actually wider than 20 MHz.
+                if self.use_ht40() { flags |= ht_flag; }
+            }
+            _ => {}
+        }
+        flags
+    }
+
     fn use_vht80(&self) -> bool {
         self.want_vht
             && self.target_ht.vht
@@ -3048,6 +3103,12 @@ impl Ax200 {
             r.s(" mcs 0x");
             r.hex(self.target_ht.mcs_rx[1] as u32, 2);
             r.hex(self.target_ht.mcs_rx[0] as u32, 2);
+            r.s(" prot 0x");
+            r.hex(self.protection_flags(), 8);
+            r.s(" (op-mode 0x");
+            r.hex(self.target_ht.ht_op_mode as u32, 4);
+            r.s(self.target_ht.erp_protect.then_some(", ERP").unwrap_or(""));
+            r.c(b')');
             r.s(" ampdu f/d ");
             r.d(self.target_ht.ampdu_factor as u64);
             r.c(b'/');
