@@ -3398,8 +3398,14 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     // ── TCP Socket Host Functions (debug shell + future apps) ────
 
     // npk_tcp_connect(ip_packed, port) -> handle (>=0) or -1 on error.
-    // ip_packed = (a << 24) | (b << 16) | (c << 8) | d. Blocks until
-    // ESTABLISHED or 10s timeout. Runs on worker core only.
+    // ip_packed = (a << 24) | (b << 16) | (c << 8) | d.
+    //
+    // NON-BLOCKING: returns as soon as the handshake is started. Ask
+    // `npk_tcp_status` until it answers; `npk_tcp_send` refuses until then.
+    // It used to block up to 10 s, and a module IS a fiber — so a failing
+    // `debug` froze every other fiber on its worker core for those 10 s,
+    // the WiFi driver among them. Its card went unpolled (64 RX buffers =
+    // milliseconds), and the link died with the command.
     linker.func_wrap("env", "npk_tcp_connect",
         |_caller: Caller<'_, HostState>, ip_packed: i32, port: i32| -> i32 {
             let ip = [
@@ -3409,10 +3415,20 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 (ip_packed & 0xFF) as u8,
             ];
             if port <= 0 || port > 65535 { return -1; }
-            match crate::net::tcp::connect(ip, port as u16) {
+            match crate::net::tcp::connect_start(ip, port as u16) {
                 Ok(h) => h as i32,
                 Err(_) => -1,
             }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_tcp_status(handle) -> 1 established, 0 still handshaking, -1 failed.
+    // The polling half of the non-blocking connect above. The module sleeps
+    // between calls; Core 0's run loop drives the stack meanwhile.
+    linker.func_wrap("env", "npk_tcp_status",
+        |_caller: Caller<'_, HostState>, handle: i32| -> i32 {
+            if handle < 0 { return -1; }
+            crate::net::tcp::connect_status(handle as usize)
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
