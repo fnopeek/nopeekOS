@@ -410,7 +410,7 @@ fn diag() {
         }
         println!("CSS images loaded from disk: {css_ok}");
         // The tallest filled rects — an enormous empty box shows up here.
-        let mut rects: Vec<(i32,i32,i32,i32,beak_engine::Rgb)> = lay.ops.iter().filter_map(|o| match o {
+        let mut rects: Vec<(i32,i32,i32,i32,beak_engine::layout::Rgba)> = lay.ops.iter().filter_map(|o| match o {
             beak_engine::layout::DrawOp::RoundRect { x, y, w, h, color, .. }
             | beak_engine::layout::DrawOp::Rect { x, y, w, h, color } => Some((*h,*y,*x,*w,*color)),
             _ => None,
@@ -418,7 +418,7 @@ fn diag() {
         rects.sort_by_key(|r| -r.0);
         println!("hoechste Rects (h, y, x, w, farbe):");
         for (h,y,x,w,c) in rects.iter().take(10) {
-            println!("   h={h:>6} y={y:>6} x={x:>5} w={w:>5}  #{:02x}{:02x}{:02x}", c.0, c.1, c.2);
+            println!("   h={h:>6} y={y:>6} x={x:>5} w={w:>5}  #{:02x}{:02x}{:02x} a={}", c.c.0, c.c.1, c.c.2, c.a);
         }
         if let Ok(out_path) = std::env::var("DOUT") {
             let h = lay.height.clamp(1, 12000);

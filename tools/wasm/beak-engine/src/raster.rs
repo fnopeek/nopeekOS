@@ -12,7 +12,7 @@ use fontdue::Metrics;
 use hashbrown::HashMap;
 
 use crate::fonts::Fonts;
-use crate::layout::{DrawOp, Layout, Rgb, Theme};
+use crate::layout::{DrawOp, Layout, Rgb, Rgba, Theme};
 use crate::style::{BgPos, BgSize};
 
 /// What a pointer move costs — the answer `Engine::set_hover` gives.
@@ -595,7 +595,7 @@ impl Engine {
     pub fn paint(&self, layout: &Layout, w: u32, h: u32, scroll_y: i32, out: &mut [u8]) {
         let (wi, hi) = (w as i32, h as i32);
         // Canvas = the propagated body background (falls back to theme bg).
-        fill(out, wi, hi, 0, 0, wi, hi, layout.bg);
+        fill(out, wi, hi, 0, 0, wi, hi, layout.bg.into());
         for op in &layout.ops {
             match op {
                 DrawOp::Rect { x, y, w: rw, h: rh, color } => {
@@ -658,13 +658,13 @@ impl Engine {
         h: i32,
         alt: &str,
     ) {
-        let c = self.theme.rule;
+        let c = Rgba::opaque(self.theme.rule);
         fill(out, wi, hi, x, y, w, 1, c);
         fill(out, wi, hi, x, y + h - 1, w, 1, c);
         fill(out, wi, hi, x, y, 1, h, c);
         fill(out, wi, hi, x + w - 1, y, 1, h, c);
         if !alt.is_empty() && w > 24 {
-            self.draw_run(out, wi, hi, x + 4, y + 4, 13.0, self.theme.muted, false, false, false, alt);
+            self.draw_run(out, wi, hi, x + 4, y + 4, 13.0, self.theme.muted.into(), false, false, false, alt);
         }
     }
 
@@ -679,7 +679,7 @@ impl Engine {
         x: i32,
         y: i32,
         size: f32,
-        color: Rgb,
+        color: Rgba,
         bold: bool,
         italic: bool,
         mono: bool,
@@ -709,9 +709,12 @@ impl Engine {
                 let row = (py - gy0) as usize * m.width + (cx0 - gx0) as usize;
                 let mut i = idx(w, cx0, py);
                 for gx in 0..(cx1 - cx0) as usize {
-                    let a = cov[row + gx];
+                    // Glyph coverage times the colour's own alpha — a
+                    // translucent text colour dims the whole run, it does not
+                    // sharpen its edges.
+                    let a = mul255(cov[row + gx], color.a);
                     if a != 0 {
-                        blend_at(out, i, color, a);
+                        blend_at(out, i, color.c, a);
                     }
                     i += 4;
                 }
@@ -735,7 +738,7 @@ fn idx(w: i32, x: i32, y: i32) -> usize {
 /// `copy_within` compiles to `memory.copy`, a single instruction the host
 /// executes as a native memmove, so an N-pixel row costs log2(N) copies to
 /// build plus one copy per further row instead of 4·N·rows stores.
-fn fill(out: &mut [u8], w: i32, h: i32, x: i32, y: i32, rw: i32, rh: i32, c: Rgb) {
+fn fill(out: &mut [u8], w: i32, h: i32, x: i32, y: i32, rw: i32, rh: i32, c: Rgba) {
     let x0 = x.max(0);
     let y0 = y.max(0);
     let x1 = (x + rw).min(w);
@@ -743,6 +746,22 @@ fn fill(out: &mut [u8], w: i32, h: i32, x: i32, y: i32, rw: i32, rh: i32, c: Rgb
     if x1 <= x0 || y1 <= y0 {
         return;
     }
+    // A translucent fill has to READ each destination pixel, so none of the
+    // row-copy trick below applies — every pixel is its own blend. Kept behind
+    // this branch rather than folded into the loop so the opaque case, which is
+    // the overwhelming majority and the hottest loop in the app, still costs
+    // one `memory.copy` per row.
+    if !c.is_opaque() {
+        for py in y0..y1 {
+            let mut i = idx(w, x0, py);
+            for _ in x0..x1 {
+                blend_at(out, i, c.c, c.a);
+                i += 4;
+            }
+        }
+        return;
+    }
+    let c = c.c;
     let row = ((x1 - x0) * 4) as usize;
     let first = idx(w, x0, y0);
     out[first] = c.2; // B
@@ -790,7 +809,7 @@ fn round_insets(row_y: f32, rh: f32, r: [f32; 4]) -> (f32, f32) {
 /// Fill one row's horizontal span with fractional ends: the interior is a solid
 /// run, the two boundary pixels get partial coverage. That antialiasing is what
 /// keeps a 2px corner from looking like a chopped pixel.
-fn fill_span(out: &mut [u8], w: i32, h: i32, y: i32, xl: f32, xr: f32, c: Rgb) {
+fn fill_span(out: &mut [u8], w: i32, h: i32, y: i32, xl: f32, xr: f32, c: Rgba) {
     if y < 0 || y >= h || xr <= xl {
         return;
     }
@@ -803,7 +822,10 @@ fn fill_span(out: &mut [u8], w: i32, h: i32, y: i32, xl: f32, xr: f32, c: Rgb) {
     let mut edge = |px: f32, cov: f32| {
         let xi = px as i32;
         if cov > 0.004 && xi >= 0 && xi < w {
-            blend_at(out, idx(w, xi, y), c, (cov.min(1.0) * 255.0) as u8);
+            // Two coverages multiply: how much of the pixel the shape covers,
+            // and how opaque the colour itself is.
+            let a = (cov.min(1.0) * c.a as f32) as u8;
+            blend_at(out, idx(w, xi, y), c.c, a);
         }
     };
     // A span narrower than one pixel covers a single pixel partially.
@@ -823,7 +845,7 @@ fn fill_span(out: &mut [u8], w: i32, h: i32, y: i32, xl: f32, xr: f32, c: Rgb) {
 /// costs one `memory.copy` per row instead of a per-pixel loop over millions
 /// of pixels.
 #[allow(clippy::too_many_arguments)]
-fn fill_round(out: &mut [u8], w: i32, h: i32, x: i32, y: i32, rw: i32, rh: i32, r: [f32; 4], c: Rgb, ring: f32) {
+fn fill_round(out: &mut [u8], w: i32, h: i32, x: i32, y: i32, rw: i32, rh: i32, r: [f32; 4], c: Rgba, ring: f32) {
     if rw <= 0 || rh <= 0 {
         return;
     }
@@ -886,6 +908,14 @@ fn fill_round(out: &mut [u8], w: i32, h: i32, x: i32, y: i32, rw: i32, rh: i32, 
 /// `ceil` as an i32 — `core` has no `f32::ceil` in `no_std`.
 fn ceil_f(v: f32) -> i32 {
     libm::ceilf(v.max(0.0)) as i32
+}
+
+/// Two 0..255 coverages multiplied, rounded — `255 * x == x`, so an opaque
+/// colour leaves a coverage untouched and the antialiasing is bit-identical to
+/// what it was before alpha existed.
+#[inline]
+fn mul255(x: u8, y: u8) -> u8 {
+    ((x as u32 * y as u32 + 127) / 255) as u8
 }
 
 /// Blend `c` at `a`/255 coverage over the pixel starting at byte `i`. Takes the
@@ -963,7 +993,7 @@ fn blit_bg(
     repeat: (bool, bool),
     pos: (BgPos, BgPos),
     size: BgSize,
-    tint: Option<crate::layout::Rgb>,
+    tint: Option<crate::layout::Rgba>,
 ) {
     if dw <= 0 || dh <= 0 || img.w == 0 || img.h == 0 {
         return;
@@ -1014,12 +1044,18 @@ fn blit_bg(
                 let mut di = idx(w, x0, py);
                 for &sx in &cols {
                     let si = srow + sx;
-                    let a = img.bgra[si + 3] as u32;
+                    // A translucent tint multiplies into the mask's own
+                    // alpha, so a 50 %-opaque tint through a solid stencil is
+                    // half-covered rather than solid.
+                    let a = match tint {
+                        Some(c) => mul255(img.bgra[si + 3], c.a) as u32,
+                        None => img.bgra[si + 3] as u32,
+                    };
                     if a != 0 {
                         // A mask takes only the alpha and paints the tint
                         // through it; a background image paints its own pixels.
                         let src = match tint {
-                            Some(c) => [c.2, c.1, c.0],
+                            Some(c) => [c.c.2, c.c.1, c.c.0],
                             None => [img.bgra[si], img.bgra[si + 1], img.bgra[si + 2]],
                         };
                         if a == 255 {
@@ -1233,7 +1269,7 @@ mod tests {
         assert!(eng.repaint_hover(&mut base), "the patch has to be possible here");
         assert_eq!(dump_ops(&base), dump_ops(&full), "patched vs laid out");
         // …and it really did something.
-        assert!(dump_ops(&full).contains("c=Rgb(255, 0, 0)"), "the link is red now");
+        assert!(dump_ops(&full).contains("Rgb(255, 0, 0), a: 255"), "the link is red now");
     }
 
     /// A background that only exists under the pointer has nothing to replace
@@ -1267,7 +1303,7 @@ mod tests {
             let full = eng.layout(&html, 400);
             assert!(eng.repaint_hover(&mut base), "{body}: {}", eng.repaint_bail());
             assert_eq!(dump_ops(&base), dump_ops(&full), "{body}");
-            assert!(dump_ops(&full).contains("c=Rgb(255, 0, 0)"), "{body}: the background is there");
+            assert!(dump_ops(&full).contains("Rgb(255, 0, 0), a: 255"), "{body}: the background is there");
         }
     }
 
@@ -1354,7 +1390,7 @@ mod tests {
         let full = eng.layout(html, 400);
         assert!(eng.repaint_hover(&mut base), "{}", eng.repaint_bail());
         assert_eq!(dump_ops(&base), dump_ops(&full));
-        assert!(dump_ops(&full).contains("c=Rgb(255, 0, 0)"), "the underline is there");
+        assert!(dump_ops(&full).contains("Rgb(255, 0, 0), a: 255"), "the underline is there");
     }
 
     /// A pseudo-element's box is for repainting, not for hit-testing: it must
