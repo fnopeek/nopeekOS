@@ -22,17 +22,30 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-15, beak 0.25.0)
+### Current number (measured 2026-08-18, beak 0.26.0)
 
 ```
-4128 pass / 1481 fail / 177 inconclusive   (of 5786 vendored reftests)
-= 73.6 % of the conclusive 5609
+4190 pass / 1419 fail / 177 inconclusive   (of 5786 vendored reftests)
+= 74.7 % of the conclusive 5609
 ```
 
 Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → 3746 → 3863 → 3869 →
 3870 (0.3.0) → 3880 (0.3.2) → 3926 (0.3.3) → 3959 (0.3.4) → 3963 (0.3.5) →
 **3967** (0.3.6) → 3967 (0.3.11) → 3978 (0.3.12) → 3997 (0.3.13) → 3998 (0.3.14) → 4012 (0.3.15) → 4036 (0.3.16) → 4056 (0.4.1) → 4064 (0.4.3) → 4069 (0.4.5) → 4074 (0.4.6) → 4079 (0.4.7) → **4082** (0.4.8) → 4083 (0.4.10) → **4089** (0.7.0) → 4089 (0.8.0) → 4088 (0.9.0, one test traded for a
-form-control frame that obeys the page — point 45) → **4092** (0.13.0, alpha 0 is a value, not an absence) → **4095** (0.14.0, inline `<svg>` as a replaced element; two references that used to render blank now measure something and say we are wrong) → **4111** (0.15.0, a container finally grows around its floats — §10.6.7 for the BFC roots, a block-level clearfix `::after` for the rest — and clearance measured against the box's HYPOTHETICAL position, +16/−0) → **4112** (0.18.0, a performance change that was meant to be render-neutral and gained one test: deferring a positioned box's containing-block height means it is resolved once the box is laid out rather than speculatively, which is what `row-subgrid-abs-pos-001` wanted, +1/−0) → **4128** (0.25.0, +24/−8 — and NONE of it from the four features that round shipped. `:hover`, `:link`/`:visited`/`:any-link` and `outline` are all oracle-neutral by construction: a reftest renders statically and cannot point at anything. What moved the number was a defect `outline` exposed on its way in — `parse_length` did not know `ex`/`ch`, so `outline-width: 0ex` was not "a width of zero" but an INVALID declaration, leaving the shorthand's `medium` in place and painting a ring the page had just switched off. The same hole had been swallowing `ex`/`ch` on `width`, `padding` and `border-width` all along, unnoticed because no property that used it was implemented. Fixing it also split the two units, which `values.rs` had both approximated at 0.5em: measured against our own font they are 0.55em and 0.63em, so every `ch` length had been 26 % too narrow — a `width: 60ch` column came out at 47 characters. `css-values/ch-unit-008` passes for the first time. The eight losses are all `text-wrap-balance-*`, where a corrected width lands the balance point on a different word). The inconclusive count fell 254 → 177 over
+form-control frame that obeys the page — point 45) → **4092** (0.13.0, alpha 0 is a value, not an absence) → **4095** (0.14.0, inline `<svg>` as a replaced element; two references that used to render blank now measure something and say we are wrong) → **4111** (0.15.0, a container finally grows around its floats — §10.6.7 for the BFC roots, a block-level clearfix `::after` for the rest — and clearance measured against the box's HYPOTHETICAL position, +16/−0) → **4112** (0.18.0, a performance change that was meant to be render-neutral and gained one test: deferring a positioned box's containing-block height means it is resolved once the box is laid out rather than speculatively, which is what `row-subgrid-abs-pos-001` wanted, +1/−0) → **4128** (0.25.0, +24/−8 — and NONE of it from the four features that round shipped. `:hover`, `:link`/`:visited`/`:any-link` and `outline` are all oracle-neutral by construction: a reftest renders statically and cannot point at anything. What moved the number was a defect `outline` exposed on its way in — `parse_length` did not know `ex`/`ch`, so `outline-width: 0ex` was not "a width of zero" but an INVALID declaration, leaving the shorthand's `medium` in place and painting a ring the page had just switched off. The same hole had been swallowing `ex`/`ch` on `width`, `padding` and `border-width` all along, unnoticed because no property that used it was implemented. Fixing it also split the two units, which `values.rs` had both approximated at 0.5em: measured against our own font they are 0.55em and 0.63em, so every `ch` length had been 26 % too narrow — a `width: 60ch` column came out at 47 characters. `css-values/ch-unit-008` passes for the first time. The eight losses are all `text-wrap-balance-*`, where a corrected width lands the balance point on a different word). → **4190** (0.25.2, +62/−0 from three lines: a box paints its BORDER before any
+descendant, not after. CSS 2.1 Appendix E orders a box as background, border,
+then descendants; the background already spliced in at the box's own insertion
+point and the border was appended after the content, which put it on top of the
+box's own children. Invisible while a child stays inside its parent's content
+box — and wrong the moment one does not, which is exactly what a negative
+margin is FOR. The CSS2.1 suite tests that idiom by the dozen: pull a child left
+by the parent's border width so its own border covers it, then check no red
+shows. Whole families went green at once — `margin-left`/`margin-right`,
+`padding-left`, `left`, `bottom`, `margin-bottom`, `abspos-containing-block`.
+On real pages nothing appeared or vanished: op and link counts unchanged, and
+0.0004–0.02 % of pixels moved, every one of them a seam where a child sits on a
+border line) → 4190 (0.26.0, +0/−0 — the pointer repaint is oracle-neutral by
+construction, since a reftest renders statically). The inconclusive count fell 254 → 177 over
 that span: references that used to render blank — because `:root` was dropped,
 because an `inline-block` had no box, or because an inline box painted no
 background — now paint, so 73 more tests actually measure something.
@@ -73,6 +86,18 @@ and they all sat at 0.63–0.70 % diff, i.e. one missing string away from green.
 Picking it came out of a census of the 1680 remaining failures by family
 rather than by suite — the biggest was `CSS2/content` at 51, and reading what
 those values actually asked for is what identified the single lever.
+
+### Families that are NOT ours to win
+
+**`css-fonts/font-family-name` — 18 failures, none over 0.86 %, and not one of
+them is an engine gap.** The family renders the literal words `PASS` and `FAIL`
+in the W3C CSSTest faces and compares the pixels; without those font files
+installed the test page says `FAIL` where the reference says `PASS`, so the diff
+is the width of one word. The eight that "pass" do so because their test body
+happens to read `PASS` in the same places as the reference. Shipping the fonts
+is the only way to move it, and it would measure font matching, not layout.
+Recorded here so the biggest near-miss in the census is not mistaken for the
+cheapest win a second time.
 
 Per suite (pass / total of that suite, inconclusive included in the total):
 
