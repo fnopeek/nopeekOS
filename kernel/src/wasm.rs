@@ -36,7 +36,7 @@ const MAX_MMIO_MAPS: usize = 4;
 /// headroom at 64 Mbit, against a `worker_idle_hlt` that parks the core for up
 /// to 10 ms between drains. Linux allocates 2048 for this chip. Each slot is a
 /// (phys, pages) pair, so the ceiling is bookkeeping, not memory.
-const MAX_DMA_ALLOCS: usize = 512;
+const MAX_DMA_ALLOCS: usize = 1024;
 const MAX_DMA_PAGES: usize = 2048; // 8MB total (iwlwifi FW sections ~1.3MB)
 const MAX_DMA_PAGES_PER_CALL: usize = 1024; // 4MB; a single FW section can exceed 256KB
 
