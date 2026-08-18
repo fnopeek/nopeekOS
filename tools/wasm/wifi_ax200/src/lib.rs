@@ -2513,8 +2513,21 @@ impl Ax200 {
     // capabilities imply, plus the AID. On a modify Linux leaves addr zeroed and
     // lets station_flags_msk select which bits to apply.
     fn sta_assoc_update(&mut self) {
-        let mut flags = STA_FLG_FAT_EN_20MHZ;
-        let mut msk = STA_FLAGS_MSK_ADD;
+        // The station's TX width has to match the PHY context. Left at 20 MHz
+        // it produced exactly the asymmetry measured on the device once VHT80
+        // came up: RX at 650 Mbit, TX at 26, heavy loss, then a dropped link —
+        // the receive path ran at 80 MHz while transmission was pinned to 20
+        // and the rate control had to reconcile the two.
+        // `iwl_mvm_sta_send_to_fw` sets this from the peer's bandwidth.
+        let mut flags = if self.use_vht80() {
+            STA_FLG_FAT_EN_80MHZ
+        } else if self.use_ht40() {
+            STA_FLG_FAT_EN_40MHZ
+        } else {
+            STA_FLG_FAT_EN_20MHZ
+        };
+        // …and the mask has to select it, or a modify leaves the old value.
+        let mut msk = STA_FLAGS_MSK_ADD | STA_FLG_FAT_EN_MSK;
         if self.target_ht.present {
             // rx_nss: the AP's second-stream MCS mask decides 1 vs 2 streams.
             flags |= if self.target_ht.mcs_rx[1] != 0 {
