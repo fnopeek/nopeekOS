@@ -136,6 +136,15 @@ struct HtCap {
     /// secondary 20 MHz channel sits. NONE means the AP runs 20 MHz only, and
     /// then a 40 MHz PHY context would be pointing at nothing.
     sec_chan_offs: u8,
+    /// VHT capability element present, and its two fields we act on.
+    vht: bool,
+    vht_cap_info: u32,
+    vht_rx_mcs_map: u16,
+    /// From the VHT OPERATION element: USE_HT (fall back to the HT width) or
+    /// 80MHZ. As with HT, the capability says CAN, the operation says DOES.
+    vht_chan_width: u8,
+    /// Centre-frequency channel index of the 80 MHz block.
+    vht_seg0: u8,
     present: bool,
 }
 impl HtCap {
@@ -145,6 +154,11 @@ impl HtCap {
         ampdu_density: 0,
         mcs_rx: [0; 2],
         sec_chan_offs: IEEE80211_HT_PARAM_CHA_SEC_NONE,
+        vht: false,
+        vht_cap_info: 0,
+        vht_rx_mcs_map: 0,
+        vht_chan_width: IEEE80211_VHT_CHANWIDTH_USE_HT,
+        vht_seg0: 0,
         present: false,
     };
 }
@@ -1839,6 +1853,16 @@ impl Ax200 {
                     ht.sec_chan_offs =
                         buf[body + HT_OP_OFF_HT_PARAM] & IEEE80211_HT_PARAM_CHA_SEC_OFFSET;
                 }
+                WLAN_EID_VHT_CAPABILITY if len >= VHT_CAP_IE_LEN => {
+                    ht.vht = true;
+                    ht.vht_cap_info = le32(&buf, body + VHT_OFF_CAP_INFO);
+                    ht.vht_rx_mcs_map = u16::from_le_bytes([
+                        buf[body + VHT_OFF_RX_MCS_MAP], buf[body + VHT_OFF_RX_MCS_MAP + 1]]);
+                }
+                WLAN_EID_VHT_OPERATION if len >= 3 => {
+                    ht.vht_chan_width = buf[body + VHT_OP_OFF_CHAN_WIDTH];
+                    ht.vht_seg0 = buf[body + VHT_OP_OFF_SEG0];
+                }
                 _ => {}
             }
             p += 2 + len;
@@ -2216,9 +2240,14 @@ impl Ax200 {
         put_u32(&mut pc, PC_OFF_ACTION, FW_CTXT_ACTION_ADD);
         put_u32(&mut pc, PC_OFF_CI_CHANNEL, self.target_chan as u32);
         pc[PC_OFF_CI_BAND] = self.target_band;
-        let wide = self.use_ht40();
-        pc[PC_OFF_CI_WIDTH] = if wide { IWL_PHY_CHANNEL_MODE40 } else { IWL_PHY_CHANNEL_MODE20 };
-        pc[PC_OFF_CI_CTRL_POS] = if wide { self.ctrl_pos() } else { 0 };
+        pc[PC_OFF_CI_WIDTH] = if self.use_vht80() {
+            IWL_PHY_CHANNEL_MODE80
+        } else if self.use_ht40() {
+            IWL_PHY_CHANNEL_MODE40
+        } else {
+            IWL_PHY_CHANNEL_MODE20
+        };
+        pc[PC_OFF_CI_CTRL_POS] = if self.use_ht40() { self.ctrl_pos() } else { 0 };
         put_u32(&mut pc, PC_OFF_LMAC_ID, IWL_LMAC_24G_INDEX); // no CDB → 0
         // Receive chains. iwl_mvm_phy_ctxt_apply fills this field for cmd_ver 3+
         // and sends RLC_CONFIG_CMD afterwards — both, not either. Left at zero
@@ -2572,15 +2601,42 @@ impl Ax200 {
             && self.target_ht.sec_chan_offs != IEEE80211_HT_PARAM_CHA_SEC_NONE
     }
 
+    /// 80 MHz when the AP carries both VHT elements, the operation element
+    /// actually says 80 (USE_HT means it is running an HT width after all),
+    /// and it offers at least two spatial streams at MCS 0-9. Anything less
+    /// falls through to `use_ht40`.
+    fn use_vht80(&self) -> bool {
+        self.target_ht.vht
+            && self.target_ht.vht_chan_width == IEEE80211_VHT_CHANWIDTH_80MHZ
+            && self.use_ht40()
+    }
+
     /// `iwl_mvm_get_ctrl_pos` for the HT case. The control channel is the
     /// UPPER of the pair exactly when the secondary sits BELOW it; for 40 MHz
     /// the offset term of that function is zero, so only the ABOVE bit is left.
     fn ctrl_pos(&self) -> u8 {
-        if self.target_ht.sec_chan_offs == IEEE80211_HT_PARAM_CHA_SEC_BELOW {
-            IWL_PHY_CTRL_POS_ABOVE
-        } else {
-            0
+        if !self.use_vht80() {
+            // 40 MHz: the offset term of iwl_mvm_get_ctrl_pos is zero, so only
+            // the ABOVE bit remains — set when the secondary half is below.
+            return if self.target_ht.sec_chan_offs == IEEE80211_HT_PARAM_CHA_SEC_BELOW {
+                IWL_PHY_CTRL_POS_ABOVE
+            } else {
+                0
+            };
         }
+        // 80 MHz: iwl_mvm_get_ctrl_pos in full. Channel numbers are 5 MHz
+        // apart, so the control channel sits 10 or 30 MHz from the centre.
+        //     ret = (abs_offs - 10) / 20   →  0 or 1
+        //     ret |= (offs > 0) * ABOVE
+        let offs = (self.target_chan as i32 - self.target_ht.vht_seg0 as i32) * 5;
+        if offs == 0 {
+            return 0;
+        }
+        let mut ret = ((offs.abs() - 10) / 20) as u8 & IWL_PHY_CTRL_POS_OFFS_MSK;
+        if offs > 0 {
+            ret |= IWL_PHY_CTRL_POS_ABOVE;
+        }
+        ret
     }
 
     fn reconnect(&mut self) -> bool {
@@ -2676,6 +2732,18 @@ impl Ax200 {
                     cmd[TLC_OFF_SGI] |= 1 << TLC_CH_WIDTH_40MHZ;
                 }
             }
+            if self.use_vht80() {
+                // The rate table is VHT's, not HT's: MCS 0-9 per stream. The
+                // ht_rates field carries it — the firmware reads it by `mode`.
+                cmd[TLC_OFF_MODE] = TLC_MODE_VHT;
+                cmd[TLC_OFF_MAX_CH_WIDTH] = TLC_CH_WIDTH_80MHZ;
+                let vht_mcs = 0x03ffu16; // MCS 0-9
+                put_u16(&mut cmd, TLC_OFF_HT_RATES_NSS1, vht_mcs);
+                put_u16(&mut cmd, TLC_OFF_HT_RATES_NSS2, vht_mcs);
+                if self.target_ht.vht_cap_info & IEEE80211_VHT_CAP_SHORT_GI_80 != 0 {
+                    cmd[TLC_OFF_SGI] |= 1 << TLC_CH_WIDTH_80MHZ;
+                }
+            }
             let mut flags = 0u16;
             if self.target_ht.cap_info & IEEE80211_HT_CAP_LDPC_CODING != 0 {
                 flags |= TLC_FLAGS_LDPC;
@@ -2765,6 +2833,18 @@ impl Ax200 {
             [13500, 27000, 40500, 54000, 81000, 108000, 121500, 135000],
             [15000, 30000, 45000, 60000, 90000, 120000, 135000, 150000],
         ];
+        // VHT per spatial stream, [bw20 lgi, bw20 sgi, bw40 …, bw80 …].
+        // Derived from the 802.11ac formula rather than copied: data
+        // subcarriers (52 / 108 / 234) x bits-per-subcarrier x coding rate,
+        // over the 4.0 us symbol (3.6 us with short GI).
+        const VHT: [[u32; 10]; 6] = [
+            [6500, 13000, 19500, 26000, 39000, 52000, 58500, 65000, 78000, 86667],
+            [7222, 14444, 21667, 28889, 43333, 57778, 65000, 72222, 86667, 96296],
+            [13500, 27000, 40500, 54000, 81000, 108000, 121500, 135000, 162000, 180000],
+            [15000, 30000, 45000, 60000, 90000, 120000, 135000, 150000, 180000, 200000],
+            [29250, 58500, 87750, 117000, 175500, 234000, 263250, 292500, 351000, 390000],
+            [32500, 65000, 97500, 130000, 195000, 260000, 292500, 325000, 390000, 433333],
+        ];
         let code = (rnf & RATE_MCS_CODE_MSK) as usize;
         let sgi = if rnf & RATE_MCS_SGI_MSK != 0 { 1 } else { 0 };
         let bw = (rnf & RATE_MCS_CHAN_WIDTH_MSK) >> RATE_MCS_CHAN_WIDTH_POS;
@@ -2776,7 +2856,11 @@ impl Ax200 {
                 if code >= 8 || bw > 1 { return 0; }
                 HT[(bw as usize) * 2 + sgi][code] * nss
             }
-            _ => 0, // VHT/HE: we never negotiate them, so no table for them
+            RATE_MCS_MOD_TYPE_VHT => {
+                if code >= 10 || bw > 2 { return 0; }
+                VHT[(bw as usize) * 2 + sgi][code] * nss
+            }
+            _ => 0, // HE: not negotiated, so no table for it
         }
     }
 
@@ -2940,14 +3024,24 @@ impl Ax200 {
             r.d(self.target_ht.ampdu_density as u64);
             // The negotiated width, and WHY — a link that quietly fell back to
             // 20 MHz looks identical to one that never tried.
-            r.s(if self.use_ht40() { "  width 40 MHz (sec " } else { "  width 20 MHz (" });
-            if self.use_ht40() {
+            if self.use_vht80() {
+                r.s("  width 80 MHz VHT (seg0 ch ");
+                r.d(self.target_ht.vht_seg0 as u64);
+                r.s(", ctrl-pos 0x");
+                r.hex(self.ctrl_pos() as u32, 1);
+                r.c(b')');
+            } else if self.use_ht40() {
+                r.s("  width 40 MHz (sec ");
                 r.s(if self.target_ht.sec_chan_offs == IEEE80211_HT_PARAM_CHA_SEC_BELOW
-                    { "below)" } else { "above)" });
-            } else if self.target_ht.cap_info & IEEE80211_HT_CAP_SUP_WIDTH_20_40 == 0 {
-                r.s("AP cannot do 40)");
+                    { "below" } else { "above" });
+                r.s(self.target_ht.vht.then_some(", AP has VHT but runs HT)").unwrap_or(")"));
             } else {
-                r.s("AP runs 20 only)");
+                r.s("  width 20 MHz (");
+                if self.target_ht.cap_info & IEEE80211_HT_CAP_SUP_WIDTH_20_40 == 0 {
+                    r.s("AP cannot do 40)");
+                } else {
+                    r.s("AP runs 20 only)");
+                }
             }
         } else {
             r.s("NONE - AP advertised no HT element, legacy rates only");
@@ -4325,6 +4419,28 @@ impl Ax200 {
             // tx_params: TX MCS set defined and equal to the RX set (no TX_RX_DIFF).
             fr[b + HT_OFF_MCS_TX_PARAMS] = IEEE80211_HT_MCS_TX_DEFINED;
             p += 2 + HT_CAP_IE_LEN;
+        }
+
+        // VHT capabilities — only when we actually run 80 MHz. Same rule as
+        // HT: what we claim has to match the PHY context, or the AP sends at a
+        // width the radio is not listening on.
+        if self.use_vht80() {
+            fr[p] = WLAN_EID_VHT_CAPABILITY;
+            fr[p + 1] = VHT_CAP_IE_LEN as u8;
+            let b = p + 2;
+            let mut cap = 0u32; // MAX_MPDU_LENGTH_3895 is 0
+            if self.target_ht.vht_cap_info & IEEE80211_VHT_CAP_RXLDPC != 0 {
+                cap |= IEEE80211_VHT_CAP_RXLDPC;
+            }
+            if self.target_ht.vht_cap_info & IEEE80211_VHT_CAP_SHORT_GI_80 != 0 {
+                cap |= IEEE80211_VHT_CAP_SHORT_GI_80;
+            }
+            put_u32(&mut fr, b + VHT_OFF_CAP_INFO, cap);
+            // Two spatial streams at MCS 0-9, the rest marked unused.
+            put_u16(&mut fr, b + VHT_OFF_RX_MCS_MAP, VHT_MCS_MAP_2SS);
+            put_u16(&mut fr, b + VHT_OFF_TX_MCS_MAP, VHT_MCS_MAP_2SS);
+            // rx_highest / tx_highest stay 0: "no specified maximum".
+            p += 2 + VHT_CAP_IE_LEN;
         }
 
         // RSN element (WPA2-PSK-CCMP) for encrypted APs.

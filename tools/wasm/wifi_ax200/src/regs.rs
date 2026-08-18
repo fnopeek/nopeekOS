@@ -613,6 +613,10 @@ pub const IWL_PHY_CHANNEL_MODE20: u8 = 0;
 /// fw/api/phy-ctxt.h:17. MODE80 = 0x2 and MODE160 = 0x3 exist too — the next
 /// rung, once VHT is negotiated.
 pub const IWL_PHY_CHANNEL_MODE40: u8 = 1;
+pub const IWL_PHY_CHANNEL_MODE80: u8 = 2;
+/// phy-ctxt.h:37 — for VHT, bits 1:0 are the control channel's distance from
+/// the centre in 20 MHz steps; bit 2 says it sits above.
+pub const IWL_PHY_CTRL_POS_OFFS_MSK: u8 = 0x3;
 /// Control-channel position (phy-ctxt.h:35). For HT the bit simply means "the
 /// control channel is the UPPER of the two", i.e. the secondary sits below.
 pub const IWL_PHY_CTRL_POS_ABOVE: u8 = 0x4;
@@ -750,8 +754,10 @@ pub const TLC_OFF_MAX_MPDU: usize = 24;    // __le16
 pub const TLC_OFF_MAX_TXOP: usize = 26;    // __le16
 pub const TLC_CH_WIDTH_20MHZ: u8 = 0;      // IWL_TLC_MNG_CH_WIDTH_20MHZ
 pub const TLC_CH_WIDTH_40MHZ: u8 = 1;      // IWL_TLC_MNG_CH_WIDTH_40MHZ
+pub const TLC_CH_WIDTH_80MHZ: u8 = 2;      // IWL_TLC_MNG_CH_WIDTH_80MHZ
 pub const TLC_MODE_NON_HT: u8 = 0;         // IWL_TLC_MNG_MODE_NON_HT
 pub const TLC_MODE_HT: u8 = 1;             // IWL_TLC_MNG_MODE_HT
+pub const TLC_MODE_VHT: u8 = 2;            // IWL_TLC_MNG_MODE_VHT
 // ht_rates is __le16[IWL_TLC_NSS_MAX=2][IWL_TLC_MCS_PER_BW_NUM_V4=3]; HT only
 // ever fills the [nss][IWL_TLC_MCS_PER_BW_80=0] slot (rs_fw_set_supp_rates).
 pub const TLC_OFF_HT_RATES_NSS1: usize = TLC_OFF_HT_RATES;     // [0][0]
@@ -861,6 +867,29 @@ pub const IEEE80211_HT_PARAM_CHA_SEC_BELOW: u8 = 0x03;
 /// ieee80211.h:1914/1919
 pub const IEEE80211_HT_CAP_SUP_WIDTH_20_40: u16 = 0x0002;
 pub const IEEE80211_HT_CAP_SGI_40: u16 = 0x0040;
+
+// ── VHT (802.11ac) ────────────────────────────────────────────────────
+pub const WLAN_EID_VHT_CAPABILITY: u8 = 191;
+pub const WLAN_EID_VHT_OPERATION: u8 = 192;
+/// struct ieee80211_vht_cap: __le32 vht_cap_info, then supp_mcs (8 B).
+pub const VHT_CAP_IE_LEN: usize = 12;
+pub const VHT_OFF_CAP_INFO: usize = 0;      // __le32
+pub const VHT_OFF_RX_MCS_MAP: usize = 4;    // __le16
+pub const VHT_OFF_RX_HIGHEST: usize = 6;    // __le16
+pub const VHT_OFF_TX_MCS_MAP: usize = 8;    // __le16
+pub const VHT_OFF_TX_HIGHEST: usize = 10;   // __le16
+/// struct ieee80211_vht_operation: chan_width, seg0, seg1, basic_mcs_set.
+pub const VHT_OP_OFF_CHAN_WIDTH: usize = 0;
+pub const VHT_OP_OFF_SEG0: usize = 1;
+/// ieee80211.h:2137
+pub const IEEE80211_VHT_CHANWIDTH_USE_HT: u8 = 0;
+pub const IEEE80211_VHT_CHANWIDTH_80MHZ: u8 = 1;
+/// ieee80211.h:2438/2439
+pub const IEEE80211_VHT_CAP_RXLDPC: u32 = 0x0000_0010;
+pub const IEEE80211_VHT_CAP_SHORT_GI_80: u32 = 0x0000_0020;
+/// Two bits per spatial stream: 2 = MCS 0-9 supported, 3 = stream unused.
+/// 2x2 → streams 1 and 2 get 0b10, the other six 0b11.
+pub const VHT_MCS_MAP_2SS: u16 = 0xFFFA;
 pub const WLAN_EID_RSN: u8 = 48;
 pub const WLAN_EID_EXT_SUPP_RATES: u8 = 50;
 pub const WLAN_EID_VENDOR_SPECIFIC: u8 = 221;
