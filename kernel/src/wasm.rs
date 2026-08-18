@@ -3432,7 +3432,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
-    // npk_tcp_send(handle, buf_ptr, buf_len) -> 0 on success, -1 on error
+    // npk_tcp_send(handle, buf_ptr, buf_len) -> 0 ok, -2 retry later, -1 error
     linker.func_wrap("env", "npk_tcp_send",
         |caller: Caller<'_, HostState>, handle: i32, buf_ptr: i32, buf_len: i32| -> i32 {
             if handle < 0 || buf_len <= 0 { return -1; }
@@ -3445,6 +3445,9 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             if end > data.len() { return -1; }
             match crate::net::tcp::send(handle as usize, &data[start..end]) {
                 Ok(_) => 0,
+                // Backpressure, not a failure: too much is still unacked.
+                // A module that treats this as fatal drops a live connection.
+                Err(crate::net::tcp::TcpError::WouldBlock) => -2,
                 Err(_) => -1,
             }
         },

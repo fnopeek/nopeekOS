@@ -608,7 +608,7 @@ pub fn intent_dsdt_send(ip: [u8; 4], port: u16) {
     let mut off = 0usize;
     while off < len {
         let end = (off + 1024).min(len);
-        if crate::net::tcp::send(handle, &b[off..end]).is_err() {
+        if crate::net::tcp::send_blocking(handle, &b[off..end], 1000).is_err() {
             kprintln!("[npk] send failed at offset {}", off);
             let _ = crate::net::tcp::close(handle);
             return;
