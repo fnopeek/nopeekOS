@@ -14,6 +14,7 @@
 //! clip is its own box, so ignoring it is invisible; a clipping mask is not).
 
 use crate::color::parse_color;
+use crate::layout::Rgba;
 use crate::image::Image;
 use crate::layout::Rgb;
 use alloc::string::{String, ToString};
@@ -247,7 +248,7 @@ fn render_tree(root: &XmlEl, current: Rgb, box_px: Option<(u32, u32)>) -> Option
     // Walk the tree into an ordered fill list.
     let mut fills: Vec<Fill> = Vec::new();
     let base = Paint {
-        fill: Some(Rgb(0, 0, 0)),
+        fill: Some(Rgba::opaque(Rgb(0, 0, 0))),
         fill_opacity: 1.0,
         evenodd: false,
         opacity: 1.0,
@@ -328,11 +329,11 @@ enum Cap {
 
 #[derive(Clone, Copy)]
 struct Paint {
-    fill: Option<Rgb>,
+    fill: Option<Rgba>,
     fill_opacity: f32,
     evenodd: bool,
     opacity: f32,
-    stroke: Option<Rgb>,
+    stroke: Option<Rgba>,
     stroke_width: f32,
     stroke_opacity: f32,
     cap: Cap,
@@ -382,8 +383,11 @@ fn walk(el: &XmlEl, ctm: &Mat, parent: &Paint, out: &mut Vec<Fill>, grads: &[(St
             // fill first (paints under the stroke)
             if let Some(fill) = paint.fill {
                 let polys: Vec<Vec<(f32, f32)>> = subs.iter().map(|s| s.pts.clone()).collect();
-                let a = (paint.fill_opacity * paint.opacity).clamp(0.0, 1.0);
-                out.push(Fill { subs: polys, r: fill.0, g: fill.1, b: fill.2, a, evenodd: paint.evenodd });
+                // A colour's own alpha is a third opacity and multiplies
+                // with the other two — SVG already had `fill-opacity` and
+                // `opacity`, `rgba()` just adds one more.
+                let a = (paint.fill_opacity * paint.opacity * fill.a as f32 / 255.0).clamp(0.0, 1.0);
+                out.push(Fill { subs: polys, r: fill.c.0, g: fill.c.1, b: fill.c.2, a, evenodd: paint.evenodd });
             }
             // stroke on top
             if let Some(sc) = paint.stroke {
@@ -391,8 +395,9 @@ fn walk(el: &XmlEl, ctm: &Mat, parent: &Paint, out: &mut Vec<Fill>, grads: &[(St
                 if dw > 0.02 {
                     let pieces = stroke_polys(&subs, dw / 2.0, paint.cap);
                     if !pieces.is_empty() {
-                        let a = (paint.stroke_opacity * paint.opacity).clamp(0.0, 1.0);
-                        out.push(Fill { subs: pieces, r: sc.0, g: sc.1, b: sc.2, a, evenodd: false });
+                        let a = (paint.stroke_opacity * paint.opacity * sc.a as f32 / 255.0)
+                            .clamp(0.0, 1.0);
+                        out.push(Fill { subs: pieces, r: sc.c.0, g: sc.c.1, b: sc.c.2, a, evenodd: false });
                     }
                 }
             }
@@ -423,7 +428,7 @@ fn gradient_colors(el: &XmlEl, out: &mut Vec<(String, Rgb)>) {
                 let col = attr(stop, "stop-color")
                     .or_else(|| attr(stop, "style").and_then(|s| style_value(&s, "stop-color")))
                     .and_then(|v| parse_color(&v));
-                if let Some(Rgb(cr, cg, cb)) = col {
+                if let Some(Rgba { c: Rgb(cr, cg, cb), .. }) = col {
                     r += cr as u32;
                     g += cg as u32;
                     b += cb as u32;
@@ -495,9 +500,9 @@ fn resolve_paint(el: &XmlEl, parent: &Paint, grads: &[(String, Rgb)], current: R
                 p.fill = match val {
                     _ if val.eq_ignore_ascii_case("none") => None,
                     _ if val.eq_ignore_ascii_case("currentcolor")
-                        || val.eq_ignore_ascii_case("context-fill") => Some(current),
+                        || val.eq_ignore_ascii_case("context-fill") => Some(current.into()),
                     v => url_ref(v)
-                        .and_then(|id| grads.iter().find(|(g, _)| g == id).map(|(_, c)| *c))
+                        .and_then(|id| grads.iter().find(|(g, _)| g == id).map(|(_, c)| (*c).into()))
                         .or_else(|| parse_color(v))
                         .or(p.fill),
                 }
@@ -512,7 +517,7 @@ fn resolve_paint(el: &XmlEl, parent: &Paint, grads: &[(String, Rgb)], current: R
                 p.stroke = match val {
                     _ if val.eq_ignore_ascii_case("none") => None,
                     _ if val.eq_ignore_ascii_case("currentcolor")
-                        || val.eq_ignore_ascii_case("context-stroke") => Some(current),
+                        || val.eq_ignore_ascii_case("context-stroke") => Some(current.into()),
                     v => parse_color(v).or(p.stroke),
                 }
             }

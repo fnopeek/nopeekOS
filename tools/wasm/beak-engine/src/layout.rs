@@ -427,7 +427,7 @@ fn translate_op_list(ops: &mut [DrawOp], dx: i32, dy: i32) {
 /// underline behind while recolouring the text above it.
 fn shadow_ops(st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, out: &mut Vec<DrawOp>) {
     let Some(sh) = st.shadow else { return };
-    if sh.blur != 0.0 {
+    if !sh.paints() {
         return;
     }
     let sx = x + sh.dx as i32 - sh.spread as i32;
@@ -578,6 +578,59 @@ fn solve_h(width: Len, ml: Len, mr: Len, avail: f32, pad: f32, border_box: bool)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rgb(pub u8, pub u8, pub u8);
 
+/// 8-bit RGB plus the alpha a page asked for. `Rgb` stays the opaque value the
+/// theme, the image decoders and the compositor speak; alpha lives only on the
+/// path a `<color>` travels — cascade → display list → rasteriser — because
+/// that is the only path where a page can ask for it and the backdrop it must
+/// composite over is known (at paint time, not before).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rgba {
+    pub c: Rgb,
+    pub a: u8,
+}
+
+impl Rgba {
+    pub const fn opaque(c: Rgb) -> Rgba {
+        Rgba { c, a: 255 }
+    }
+    /// The fast paths (`memory.copy` fills, direct stores) are only valid for
+    /// an opaque colour; everything else has to read the destination back.
+    pub const fn is_opaque(&self) -> bool {
+        self.a == 255
+    }
+}
+
+impl Rgba {
+    /// This colour composited over an opaque one. The canvas is the only place
+    /// that must flatten early: it IS the ground, so there is nothing left to
+    /// blend against at paint time.
+    pub fn over(self, dst: Rgb) -> Rgb {
+        if self.is_opaque() {
+            return self.c;
+        }
+        let (a, ia) = (self.a as u32, 255 - self.a as u32);
+        let ch = |s: u8, d: u8| ((s as u32 * a + d as u32 * ia) / 255) as u8;
+        Rgb(ch(self.c.0, dst.0), ch(self.c.1, dst.1), ch(self.c.2, dst.2))
+    }
+}
+
+/// Unit tests state colours as opaque `Rgb` literals; comparing the two
+/// directly keeps those assertions about the CHANNELS rather than restating the
+/// wrapper on every line. Deliberately test-only — production code that means
+/// "opaque and this colour" should say so.
+#[cfg(test)]
+impl PartialEq<Rgb> for Rgba {
+    fn eq(&self, other: &Rgb) -> bool {
+        self.is_opaque() && self.c == *other
+    }
+}
+
+impl From<Rgb> for Rgba {
+    fn from(c: Rgb) -> Rgba {
+        Rgba::opaque(c)
+    }
+}
+
 /// Resolved page colours for the active theme. The shell fills these from the
 /// compositor palette (npk_theme_token) so the page follows light/dark like
 /// the rest of the UI; `DARK` is the fallback before the query.
@@ -612,14 +665,14 @@ impl Theme {
 /// One paint instruction, positioned in document space (pre-scroll).
 pub enum DrawOp {
     /// A run of already-wrapped, same-style text; `y` is the run's top.
-    Text { x: i32, y: i32, size: f32, color: Rgb, bold: bool, italic: bool, mono: bool, text: String },
+    Text { x: i32, y: i32, size: f32, color: Rgba, bold: bool, italic: bool, mono: bool, text: String },
     /// A filled rectangle (divider, list bullet).
-    Rect { x: i32, y: i32, w: i32, h: i32, color: Rgb },
+    Rect { x: i32, y: i32, w: i32, h: i32, color: Rgba },
     /// A `border-radius` box. `r` is `[tl, tr, br, bl]` in px; `ring` is 0 for
     /// a solid fill, or the border thickness to stroke along the inside edge.
     /// Kept apart from `Rect` so the plain case stays one `memory.copy` per
     /// row — the rounded one has to walk its corner rows.
-    RoundRect { x: i32, y: i32, w: i32, h: i32, r: [f32; 4], color: Rgb, ring: f32 },
+    RoundRect { x: i32, y: i32, w: i32, h: i32, r: [f32; 4], color: Rgba, ring: f32 },
     /// A decoded image, scaled to `w`×`h` at blit time.
     /// An `<img>` box. Carries the `src` KEY, not the decoded pixels: the
     /// rasteriser looks the image up when it paints, and draws a placeholder
@@ -643,7 +696,7 @@ pub enum DrawOp {
         repeat: (bool, bool),
         pos: (BgPos, BgPos),
         size: BgSize,
-        tint: Option<Rgb>,
+        tint: Option<Rgba>,
     },
 }
 
@@ -671,7 +724,7 @@ fn radii_px(st: &ComputedStyle, w: i32) -> [f32; 4] {
 
 /// The border's `(width, colour)` when all four sides carry the same visible
 /// one, else `None`.
-fn uniform_border(st: &ComputedStyle) -> Option<(f32, Rgb)> {
+fn uniform_border(st: &ComputedStyle) -> Option<(f32, Rgba)> {
     let t = &st.border_top;
     let (w, c) = (t.width, t.color?);
     if w <= 0.0 {
@@ -1409,7 +1462,10 @@ fn style_key(el: &Element, parent: &ComputedStyle, ancestors: &[ElemInfo], prev:
         mix(p.seq() as u64 | 0x2_0000_0000);
     }
     mix(parent.font_px.to_bits() as u64);
-    mix(parent.color.0 as u64 | (parent.color.1 as u64) << 8 | (parent.color.2 as u64) << 16);
+    mix(parent.color.c.0 as u64
+        | (parent.color.c.1 as u64) << 8
+        | (parent.color.c.2 as u64) << 16
+        | (parent.color.a as u64) << 24);
     mix(parent.bold as u64 | (parent.italic as u64) << 1 | (parent.mono as u64) << 2 | (parent.rtl as u64) << 3);
     h
 }
@@ -1580,7 +1636,7 @@ impl<'a> Ctx<'a> {
             label.push_str(" visibility:hidden");
         }
         if let Some(bg) = st.bg {
-            label.push_str(&alloc::format!(" bg:#{:02x}{:02x}{:02x}", bg.0, bg.1, bg.2));
+            label.push_str(&alloc::format!(" bg:#{:02x}{:02x}{:02x}{:02x}", bg.c.0, bg.c.1, bg.c.2, bg.a));
         }
         self.inspects.push(InspectBox { x, y, w, h, depth: self.path.len() as u16, label });
     }
@@ -1827,7 +1883,9 @@ pub fn layout(
     // propagated to the canvas; `<body>`'s is used only when the root's is
     // transparent. Honouring `html { color }` without this paints white text
     // on a white canvas for every "this page should be green" reftest.
-    let canvas_bg = root.bg.or(body_style.bg).unwrap_or(theme.bg);
+    // The canvas is the ground: a translucent body background has nothing
+    // under it but the theme, so it is flattened here rather than at paint.
+    let canvas_bg = root.bg.or(body_style.bg).map_or(theme.bg, |c| c.over(theme.bg));
     // z-index stacking order (CSS2.1 §9.9 / Appendix E): reorder the flat,
     // tree-order display list so negative-z ranges paint first (behind) and
     // positive-z ranges paint last (in front) of everything else.
@@ -2729,7 +2787,7 @@ impl<'a> Ctx<'a> {
         if st.is_rule {
             let y = prov_top_y + bt + pt;
             if !st.hidden && !st.transparent {
-                self.ops.push(DrawOp::Rect { x: content_x, y: y + 1, w: content_w.max(1), h: 1, color: self.theme.rule });
+                self.ops.push(DrawOp::Rect { x: content_x, y: y + 1, w: content_w.max(1), h: 1, color: self.theme.rule.into() });
             }
             return BoxOut { bottom: y + 3 + pb, top_y: prov_top_y, open: Collapse::one(if isolated { 0.0 } else { st.margin_bottom }), through: false, box_x: box_left, box_w };
         }
@@ -2745,7 +2803,7 @@ impl<'a> Ctx<'a> {
                     y: top + (st.font_px * 0.55) as i32,
                     w: s,
                     h: s,
-                    color: self.theme.muted,
+                    color: self.theme.muted.into(),
                 });
             } else {
                 // A counter marker is right-aligned against the content edge,
@@ -2995,7 +3053,7 @@ impl<'a> Ctx<'a> {
         if w > 0 && h > 0 {
             self.inline_svgs
                 .borrow_mut()
-                .push((el.seq, st.color, w as u32, h as u32));
+                .push((el.seq, st.color.c, w as u32, h as u32));
         }
         (w, h)
     }
@@ -6476,7 +6534,7 @@ struct RunStyle {
     /// `opacity:0` on the run: painted as nothing, but still a click target.
     transparent: bool,
     size: f32,
-    color: Rgb,
+    color: Rgba,
     bold: bool,
     italic: bool,
     mono: bool,
@@ -6587,7 +6645,7 @@ struct CtlBox {
     /// Caret position in characters, when this control has keyboard focus.
     caret: Option<usize>,
     /// The control's own `background-color`, if the page styled it.
-    bg: Option<Rgb>,
+    bg: Option<Rgba>,
     /// `appearance: none` — the page draws this control itself, so we paint no
     /// UA face at all (css-ui-4 §4).
     appearance_none: bool,
@@ -6613,7 +6671,7 @@ struct CtlBox {
 struct CtlSide {
     w: i32,
     /// `None` = paint in the UA's frame colour (the page named none).
-    color: Option<Rgb>,
+    color: Option<Rgba>,
     /// `border-color: transparent` — keeps the width, paints nothing.
     transparent: bool,
 }
@@ -6757,8 +6815,8 @@ fn paint_control(
     // black box on a white page. The signal that is actually to hand is the
     // control's own inherited text colour: light text means a dark surface
     // behind it, and dark text a light one.
-    let theme = &surface_palette(theme, ctl.style.color);
-    let border = if ctl.focused { theme.link } else { mix(theme.rule, theme.text, 40) };
+    let theme = &surface_palette(theme, ctl.style.color.c);
+    let border = Rgba::opaque(if ctl.focused { theme.link } else { mix(theme.rule, theme.text, 40) });
     let frame = |ops: &mut Vec<DrawOp>| stroke_frame(ops, x, top, w, h, &ctl.border, border, ctl.focused);
     // A page that styles its own button (`background-color`) wins; otherwise
     // the UA face is derived from the theme so it reads on light and dark.
@@ -6768,14 +6826,14 @@ fn paint_control(
     // page wanted bare, and `surface_palette` guessed that shade from the
     // control's own text colour, so a white icon glyph turned it black on a
     // white page.
-    let face: Option<Rgb> = match ctl.bg {
+    let face: Option<Rgba> = match ctl.bg {
         Some(c) => Some(c),
         None if ctl.appearance_none => None,
         None => Some(match ctl.kind {
             // Buttons get a raised face; text fields stay flat like the page.
             ControlKind::Submit | ControlKind::Reset | ControlKind::Button | ControlKind::File
-            | ControlKind::Select => mix(theme.bg, theme.text, 28),
-            _ => mix(theme.bg, theme.text, 8),
+            | ControlKind::Select => mix(theme.bg, theme.text, 28).into(),
+            _ => mix(theme.bg, theme.text, 8).into(),
         }),
     };
 
@@ -6806,7 +6864,7 @@ fn paint_control(
                     y: top + i,
                     w: w - 2 * i,
                     h: h - 2 * i,
-                    color: theme.link,
+                    color: theme.link.into(),
                 });
             }
         }
@@ -6825,7 +6883,7 @@ fn paint_control(
                 let inner_w = (w - ctl.pad_l - CTL_PAD_X - 2).max(1) as f32;
                 let rows = ((h - 2 * CTL_PAD_Y - 2) / lh.max(1)).max(1);
                 let mut ly = top + CTL_PAD_Y + 1;
-                let color = if ctl.ghost { theme.muted } else { ctl.style.color };
+                let color = if ctl.ghost { theme.muted.into() } else { ctl.style.color };
                 for line in wrap_lines(font, &ctl.text, ctl.style.size, inner_w, rows as usize) {
                     ops.push(DrawOp::Text {
                         x: tx,
@@ -6868,7 +6926,7 @@ fn paint_control(
                     x: tx,
                     y: ty,
                     size: ctl.style.size,
-                    color: if ctl.ghost { theme.muted } else { ctl.style.color },
+                    color: if ctl.ghost { theme.muted.into() } else { ctl.style.color },
                     bold: ctl.style.bold,
                     italic: ctl.style.italic,
                     mono: ctl.style.mono,
@@ -6899,7 +6957,7 @@ fn paint_control(
                     y: ty + 1,
                     w: 1,
                     h: ceil_i32(line_gap(font, ctl.style.size)) - 2,
-                    color: theme.link,
+                    color: theme.link.into(),
                 });
             }
         }
@@ -6915,7 +6973,7 @@ fn paint_control(
 /// left still gets a 1px ring while it has the keyboard, because that ring is
 /// an OUTLINE — it says where typing goes, and a page hiding its border never
 /// meant to hide that.
-fn stroke_frame(ops: &mut Vec<DrawOp>, x: i32, y: i32, w: i32, h: i32, sides: &[CtlSide; 4], ua: Rgb, focused: bool) {
+fn stroke_frame(ops: &mut Vec<DrawOp>, x: i32, y: i32, w: i32, h: i32, sides: &[CtlSide; 4], ua: Rgba, focused: bool) {
     let visible = |s: &CtlSide| s.w > 0 && !s.transparent;
     if focused && !sides.iter().any(visible) {
         stroke_rect(ops, x, y, w, h, ua);
@@ -6941,7 +6999,7 @@ fn stroke_frame(ops: &mut Vec<DrawOp>, x: i32, y: i32, w: i32, h: i32, sides: &[
     }
 }
 
-fn stroke_rect(ops: &mut Vec<DrawOp>, x: i32, y: i32, w: i32, h: i32, color: Rgb) {
+fn stroke_rect(ops: &mut Vec<DrawOp>, x: i32, y: i32, w: i32, h: i32, color: Rgba) {
     ops.push(DrawOp::Rect { x, y, w, h: 1, color });
     ops.push(DrawOp::Rect { x, y: y + h - 1, w, h: 1, color });
     ops.push(DrawOp::Rect { x, y, w: 1, h, color });
@@ -8198,7 +8256,7 @@ fn plan_one(
     // looking like the run it TOUCHES. Whether they really merge also depends
     // on the `href` behind them, which the display list no longer carries — so
     // the only honest answer from here is "maybe", and maybe means lay out.
-    let face = |op: &DrawOp| -> Option<(i32, Rgb, u32, bool, bool, bool)> {
+    let face = |op: &DrawOp| -> Option<(i32, Rgba, u32, bool, bool, bool)> {
         let DrawOp::Text { y, size, color, bold, italic, mono, .. } = op else { return None };
         let c = sub_for(op).map_or(*color, |s| s.on.color);
         Some((*y, c, size.to_bits(), *bold, *italic, *mono))
@@ -9249,7 +9307,7 @@ fn dbg_wiki_shape() {
     );
     for o in l.ops.iter() {
         match o {
-            DrawOp::Rect { x, y, w, h, color } => std::println!("RECT {x} {y} {w} {h} {:?}", (color.0, color.1, color.2)),
+            DrawOp::Rect { x, y, w, h, color } => std::println!("RECT {x} {y} {w} {h} {:?}", (color.c.0, color.c.1, color.c.2, color.a)),
             DrawOp::Text { x, y, text, .. } => std::println!("TEXT {x} {y} {text}"),
             _ => {}
         }
@@ -9379,7 +9437,7 @@ fn dbg_wiki_shape() {
         l.ops
             .iter()
             .filter_map(|o| match o {
-                DrawOp::Rect { x, y, w, h, color } => Some((*x, *y, *w, *h, *color)),
+                DrawOp::Rect { x, y, w, h, color } => Some((*x, *y, *w, *h, color.c)),
                 _ => None,
             })
             .collect()
@@ -9507,9 +9565,9 @@ fn dbg_wiki_shape() {
                 _ => None,
             })
         };
-        assert_eq!(color_of("red"), Some(Rgb(255, 0, 0)));
-        assert_eq!(color_of("blue"), Some(Rgb(0, 0, 255))); // #id wins over p
-        assert_eq!(color_of("green"), Some(Rgb(0, 255, 0))); // .box a matched
+        assert_eq!(color_of("red"), Some(Rgba::opaque(Rgb(255, 0, 0))));
+        assert_eq!(color_of("blue"), Some(Rgba::opaque(Rgb(0, 0, 255)))); // #id wins over p
+        assert_eq!(color_of("green"), Some(Rgba::opaque(Rgb(0, 255, 0)))); // .box a matched
     }
 
     #[test]
@@ -9679,6 +9737,55 @@ fn dbg_wiki_shape() {
         // shadow was parsed — same rule the border sides follow.
         let l = lay("<body><div style=\"height:20px;box-shadow:0 1px;color:rgb(1,2,3)\">x</div></body>", 400);
         assert!(rects(&l).iter().any(|(_, _, _, h, c)| *h == 1 && *c == Rgb(1, 2, 3)));
+    }
+
+    /// A `box-shadow` list is painted from the first layer we HAVE a paint for,
+    /// not from layer one. DuckDuckGo's searchbox ring is the third layer of
+    /// `0 10px 20px …, 0 2px 6px …, 0 0 0 1px rgba(0,0,0,.08)`; taking layer one
+    /// picked a blurred shadow, which paint then skipped, so the box lost its
+    /// outline entirely. Measured over duckduckgo.com and two Wikipedia
+    /// articles: 7 declarations hide their only sharp layer behind a blurred
+    /// one, and none has two paintable layers.
+    #[test]
+    fn a_shadow_list_paints_its_first_paintable_layer_not_its_first() {
+        let shadow_rects = |css: &str| -> Vec<(i32, i32, i32, i32, Rgb)> {
+            let l = lay(&alloc::format!("<body><div style=\"{css}\">x</div></body>"), 400);
+            rects(&l).into_iter().filter(|(_, _, _, _, c)| *c == Rgb(1, 2, 3)).collect()
+        };
+        // The DDG shape: two blurred layers, then the 1px spread that is the
+        // visible ring. Four sides, because a pure spread rings the box.
+        assert_eq!(
+            shadow_rects(
+                "height:20px;box-shadow:0 10px 20px rgb(9,9,9),0 2px 6px rgb(9,9,9),\
+                 0 0 0 1px rgb(1,2,3)"
+            )
+            .len(),
+            4,
+            "the sharp third layer rings the box"
+        );
+        // An `inset` layer is skipped like a blurred one — we have no inner
+        // shadow — and the search continues past it.
+        let r = shadow_rects("height:20px;box-shadow:inset 0 0 0 2px rgb(9,9,9),0 1px rgb(1,2,3)");
+        assert_eq!(r.len(), 1, "one strip below, got {r:?}");
+        assert_eq!(r[0].1, 8 + 20);
+        // A list with nothing paintable in it paints nothing.
+        assert!(shadow_rects("height:20px;box-shadow:0 2px 8px rgb(1,2,3),inset 0 1px rgb(1,2,3)")
+            .is_empty());
+        // `inset` is VALID CSS, just unpaintable — so it REPLACES an earlier
+        // shadow rather than being dropped as a bad value and leaving it up.
+        assert!(
+            shadow_rects("height:20px;box-shadow:0 1px rgb(1,2,3);box-shadow:inset 0 1px rgb(1,2,3)")
+                .is_empty(),
+            "the inset declaration wins the cascade and paints nothing"
+        );
+        // A layer we cannot READ still invalidates the whole declaration, so
+        // the box keeps the shadow it already had.
+        assert_eq!(
+            shadow_rects("height:20px;box-shadow:0 1px rgb(1,2,3);box-shadow:0 1px wobble(3)")
+                .len(),
+            1,
+            "an unreadable value drops the declaration, not the previous shadow"
+        );
     }
 
     /// A control the page made block-level is a BLOCK box, not an atomic inline.

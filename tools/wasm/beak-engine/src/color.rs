@@ -5,17 +5,18 @@
 //! %), and the full CSS Color Module Level 4 named-colour set. Host-testable,
 //! no OS in the loop.
 //!
-//! Alpha is parsed. There is no compositing context yet, so a PARTIAL alpha is
-//! still dropped and the opaque RGB returned — but alpha ZERO is kept, because
-//! it is not a shade of a colour, it is the absence of one. Pages reserve a
-//! frame's space with `border: 1px solid rgba(0,0,0,0)`; painting that opaque
-//! puts a black box on the page.
+//! Alpha is parsed and KEPT. It travels as `Rgba` to the display list, where
+//! the rasteriser composites it over whatever is already in the buffer — the
+//! backdrop is only known there, never here. Alpha ZERO stays a case of its
+//! own: it is not a shade of a colour, it is the absence of one. Pages reserve
+//! a frame's space with `border: 1px solid rgba(0,0,0,0)`, and that must paint
+//! nothing rather than blend nothing.
 //!
 //! `no_std`-safe: only `core`/`alloc`. No libm — the float helpers avoid
 //! `round`/`floor`/`abs`/`rem_euclid` (std-only) and use casts + `%` + a
 //! hand-rolled `fabs`.
 
-use crate::layout::Rgb;
+use crate::layout::{Rgb, Rgba};
 use alloc::vec::Vec;
 
 /// A parsed `<color>`. `Transparent` is a VALUE, not an absence — see the
@@ -23,7 +24,7 @@ use alloc::vec::Vec;
 /// background) must honour it; the rest can use [`parse_color`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ColorVal {
-    Rgb(Rgb),
+    Rgb(Rgba),
     Transparent,
 }
 
@@ -32,13 +33,13 @@ pub enum ColorVal {
 /// unparseable input (forward-compatible, like a browser).
 pub fn parse_color_val(v: &str) -> Option<ColorVal> {
     let (rgb, a) = parse_rgba(v)?;
-    Some(if a == 0 { ColorVal::Transparent } else { ColorVal::Rgb(rgb) })
+    Some(if a == 0 { ColorVal::Transparent } else { ColorVal::Rgb(Rgba { c: rgb, a }) })
 }
 
-/// Parse a CSS `<color>` to an opaque `Rgb`. `None` means "keep the inherited
-/// value" — the caller relies on this for `currentcolor`/`inherit`/`transparent`
-/// and for unparseable input (forward-compatible, like a browser).
-pub fn parse_color(v: &str) -> Option<Rgb> {
+/// Parse a CSS `<color>`. `None` means "keep the inherited value" — the caller
+/// relies on this for `currentcolor`/`inherit`/`transparent` and for
+/// unparseable input (forward-compatible, like a browser).
+pub fn parse_color(v: &str) -> Option<Rgba> {
     match parse_color_val(v)? {
         ColorVal::Rgb(c) => Some(c),
         // A caller with no transparent state keeps the inherited value rather
@@ -808,6 +809,13 @@ static NAMED: &[(&str, u8, u8, u8)] = &[
 mod tests {
     use super::*;
 
+    /// Most assertions below predate alpha and are about the CHANNELS; keep
+    /// them speaking plain `Rgb` rather than restating `Rgba::opaque` 80 times.
+    /// The alpha-specific tests call `parse_color_val` and see it.
+    fn parse_color(v: &str) -> Option<Rgb> {
+        super::parse_color(v).map(|c| c.c)
+    }
+
     #[test]
     fn hex3_expands_each_nibble_times_17() {
         assert_eq!(parse_color("#f00"), Some(Rgb(255, 0, 0)));
@@ -895,12 +903,21 @@ mod tests {
         }
     }
 
+    /// A partial alpha is carried, not flattened and not dropped. All three
+    /// spellings of "1 % red" mean the same colour, and the rasteriser is what
+    /// finally composites it — duckduckgo.com draws its searchbox outline as
+    /// `rgba(0,0,0,.08)`, which painted opaque is a hard black rule where the
+    /// page asked for a hairline you can barely see.
     #[test]
-    fn partial_alpha_still_paints_opaque() {
-        // No compositing context yet — a partial alpha must NOT vanish.
+    fn a_partial_alpha_is_carried_to_the_display_list() {
         for v in ["rgba(255,0,0,0.01)", "#ff000001", "rgb(255 0 0 / 1%)"] {
-            assert_eq!(parse_color_val(v), Some(ColorVal::Rgb(Rgb(255, 0, 0))), "{v}");
+            let Some(ColorVal::Rgb(c)) = parse_color_val(v) else { panic!("{v}") };
+            assert_eq!(c.c, Rgb(255, 0, 0), "{v}");
+            assert!(c.a > 0 && c.a < 8, "{v}: 1 % of 255, got {}", c.a);
+            assert!(!c.is_opaque(), "{v}");
         }
+        // …and a colour written without one is still fully opaque.
+        assert_eq!(parse_color_val("#f00"), Some(ColorVal::Rgb(Rgba::opaque(Rgb(255, 0, 0)))));
     }
 
     #[test]
@@ -908,7 +925,7 @@ mod tests {
         // We never make content disappear on a guess.
         assert_eq!(
             parse_color_val("rgba(1,2,3,none)"),
-            Some(ColorVal::Rgb(Rgb(1, 2, 3)))
+            Some(ColorVal::Rgb(Rgba::opaque(Rgb(1, 2, 3))))
         );
     }
 

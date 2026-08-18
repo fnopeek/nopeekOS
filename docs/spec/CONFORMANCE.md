@@ -22,11 +22,11 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-18, beak 0.26.0)
+### Current number (measured 2026-08-18, beak 0.29.0)
 
 ```
-4190 pass / 1419 fail / 177 inconclusive   (of 5786 vendored reftests)
-= 74.7 % of the conclusive 5609
+4195 pass / 1414 fail / 177 inconclusive   (of 5786 vendored reftests)
+= 74.8 % of the conclusive 5609
 ```
 
 Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → 3746 → 3863 → 3869 →
@@ -45,7 +45,25 @@ shows. Whole families went green at once — `margin-left`/`margin-right`,
 On real pages nothing appeared or vanished: op and link counts unchanged, and
 0.0004–0.02 % of pixels moved, every one of them a seam where a child sits on a
 border line) → 4190 (0.26.0, +0/−0 — the pointer repaint is oracle-neutral by
-construction, since a reftest renders statically). The inconclusive count fell 254 → 177 over
+construction, since a reftest renders statically) → **4195** (0.29.0, +6/−1 —
+a partial alpha is no longer dropped. `color.rs` had parsed alpha all along and
+thrown it away for want of a compositing context, but the context was always
+there: the rasteriser owns the destination buffer, which is the only place the
+backdrop is ever known. Colours travel to the display list as `Rgba` and are
+composited at paint; the opaque case keeps its `memory.copy` row fill, so the
+hottest loop is untouched and the layout burns 0.27 % LESS fuel than before.
+All six gains are `css-color` — `t422-rgba-*`, `t425-hsla-*` — which is the
+family this is. The one loss is
+`css-backgrounds/background-attachment-local-hidden`, and it was an accidental
+pass: test and reference BOTH write `rgba(255,0,0,0.5)`, so while alpha was
+dropped they painted identical solid red. Rendered honestly they differ —
+(214,107,114) against (255,127,127) — because the test's `background-color`
+extends under its own border while the reference's inner box is inset by it.
+The test carries `fuzzy maxDifference=0-60`, so a real browser reconciles the
+two through `background-attachment: local` + `overflow: hidden` clipping the
+background to the padding box. We implement neither `background-attachment` nor
+`background-clip`, so this is a named pre-existing gap the change merely
+exposed). The inconclusive count fell 254 → 177 over
 that span: references that used to render blank — because `:root` was dropped,
 because an `inline-block` had no box, or because an inline box painted no
 background — now paint, so 73 more tests actually measure something.

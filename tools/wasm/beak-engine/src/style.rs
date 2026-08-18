@@ -18,7 +18,8 @@ use alloc::vec::Vec;
 
 use crate::color::ColorVal;
 use crate::css::{ElemInfo, Prop, PseudoElem, Stylesheet};
-use crate::layout::{Rgb, Theme};
+#[cfg_attr(not(test), allow(unused_imports))]
+use crate::layout::{Rgb, Rgba, Theme};
 use crate::forms::ControlKind;
 
 /// CSS `display` — only the values our layout implements so far.
@@ -273,7 +274,7 @@ pub struct BorderSide {
     /// `None` means `currentColor` — the initial value, and still unresolved.
     /// `finish_borders` turns it into the element's own `color` once the whole
     /// cascade has run, so a later `color` declaration still reaches it.
-    pub color: Option<Rgb>,
+    pub color: Option<Rgba>,
     /// `border-style: hidden`. Paints exactly like `none` on its own box, but
     /// in a collapsed table it is not the same thing: `hidden` SUPPRESSES the
     /// grid line it meets, beating every other border there (CSS2.1 §17.6.2
@@ -522,7 +523,16 @@ pub struct BoxShadow {
     /// `None` = `currentColor`, resolved at PAINT time. Resolving it here would
     /// take whatever `color` happened to be cascaded so far — and `box-shadow`
     /// is routinely written before `color` in the same block.
-    pub color: Option<Rgb>,
+    pub color: Option<Rgba>,
+}
+
+impl BoxShadow {
+    /// Whether we have a paint for this layer at all. The single source for it:
+    /// `paintable_shadow` picks the layer with it and `shadow_ops` draws the
+    /// layer with it, so neither can drift into painting what the other skipped.
+    pub fn paints(&self) -> bool {
+        self.blur == 0.0
+    }
 }
 
 /// The subset of computed properties the renderer consumes. Split by CSS
@@ -568,7 +578,7 @@ pub struct ComputedStyle {
     /// Kept apart so a later declaration in the same cascade can undo an
     /// earlier one, while an ANCESTOR's transparency still can't be undone.
     pub opacity_zero: bool,
-    pub color: Rgb,
+    pub color: Rgba,
     pub text_align: TextAlign,
     /// `<center>` and `<div align=center>` centre BLOCK-level children too,
     /// not just inline content — the behaviour browsers spell `text-align:
@@ -622,7 +632,7 @@ pub struct ComputedStyle {
     pub appearance_none: bool,
     pub contain_size: bool, // `contain: size`/`strict` — content contributes no size
     pub contain_intrinsic: Option<(f32, f32)>, // `contain-intrinsic-size` (w, h) px
-    pub bg: Option<Rgb>, // background-color (None = transparent)
+    pub bg: Option<Rgba>, // background-color (None = transparent)
     /// `background-image` + its placement properties.
     pub bg_layer: BgLayer,
     /// `mask-image` + its placement. A mask does not paint the image: it
@@ -722,7 +732,8 @@ pub struct ComputedStyle {
     /// allows an ellipse per corner (`r1 / r2`), we keep the horizontal radius.
     /// Percentages resolve against the border-box width at paint time.
     pub radius: [Len; 4],
-    /// `box-shadow`, first layer, outer, zero-blur only (see `BoxShadow`).
+    /// `box-shadow`: the first OUTER, zero-blur layer of the list — see
+    /// `paintable_shadow` for why the first *paintable* one and not the first.
     pub shadow: Option<BoxShadow>,
     /// `transform: translate(...)` as a paint-time offset, in px and in
     /// PERCENT of the box's own size (`Len::Pct`) — the `translate(-50%,-50%)`
@@ -791,7 +802,7 @@ impl ComputedStyle {
             mono: false,
             nowrap: false,
             pre: false,
-            color: theme.text,
+            color: Rgba::opaque(theme.text),
             hidden: false,
             transparent: false,
             opacity_zero: false,
@@ -1185,7 +1196,7 @@ pub fn resolve(
                 for side in [&mut s.border_top, &mut s.border_right, &mut s.border_bottom, &mut s.border_left] {
                     side.set_style("solid");
                     side.set_spec_width(n);
-                    side.color = Some(theme.rule);
+                    side.color = Some(theme.rule.into());
                 }
             }
         }
@@ -1741,7 +1752,7 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
                 for side in [&mut s.border_top, &mut s.border_right, &mut s.border_bottom, &mut s.border_left] {
                     side.set_style("solid");
                     side.set_spec_width(1.0);
-                    side.color = Some(theme.rule);
+                    side.color = Some(theme.rule.into());
                 }
             }
             if tag == "th" {
@@ -1794,7 +1805,7 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
             s.pad_left = 24.0;
             s.margin_top = em * 0.6;
             s.margin_bottom = em * 0.6;
-            s.color = theme.muted;
+            s.color = theme.muted.into();
         }
         "pre" => {
             s.display = Display::Block;
@@ -1814,7 +1825,7 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
         // Inline styling.
         "a" => {
             s.is_link = true;
-            s.color = theme.link;
+            s.color = theme.link.into();
         }
         "b" | "strong" => s.bold = true,
         "u" | "ins" => s.deco |= DECO_UNDERLINE,
@@ -1823,7 +1834,7 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
         "code" | "kbd" | "samp" | "tt" => s.mono = true,
         "small" => s.font_px = em * 0.85,
         "big" => s.font_px = em * 1.15,
-        "mark" => s.color = theme.link,
+        "mark" => s.color = theme.link.into(),
         "br" => s.is_break = true,
         // Superscript / subscript: smaller, raised/lowered off the baseline.
         "sup" => {
@@ -1843,7 +1854,7 @@ fn heading(s: &mut ComputedStyle, theme: &Theme, em: f32, scale: f32, margin_em:
     s.display = Display::Block;
     s.font_px = em * scale;
     s.bold = true;
-    s.color = theme.heading;
+    s.color = theme.heading.into();
     s.margin_top = s.font_px * margin_em;
     s.margin_bottom = s.font_px * margin_em * 0.7;
 }
@@ -2009,8 +2020,8 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             let t = v.trim();
             if t.eq_ignore_ascii_case("none") {
                 s.shadow = None;
-            } else if let Some(sh) = parse_box_shadow(first_layer(t), u) {
-                s.shadow = Some(sh);
+            } else if let Some(sh) = paintable_shadow(t, u) {
+                s.shadow = sh;
             }
         }
         Prop::BorderTopLeftRadius | Prop::BorderTopRightRadius | Prop::BorderBottomRightRadius
@@ -2725,6 +2736,13 @@ fn parse_len(v: &str, u: Units) -> Len {
 /// The first layer of a comma-separated `<bg-layer>` list. Splitting has to be
 /// paren-aware: a `data:` URI is full of commas.
 fn first_layer(v: &str) -> &str {
+    next_layer(v).0
+}
+
+/// One layer off the front of a comma-separated list, plus what is left. `""`
+/// as the rest means the list is done — a trailing comma yields one empty
+/// final layer, which every caller rejects on its own terms.
+fn next_layer(v: &str) -> (&str, &str) {
     let b = v.as_bytes();
     let (mut depth, mut quote) = (0i32, 0u8);
     for i in 0..b.len() {
@@ -2733,11 +2751,11 @@ fn first_layer(v: &str) -> &str {
             q if q == quote => quote = 0,
             b'(' if quote == 0 => depth += 1,
             b')' if quote == 0 => depth = (depth - 1).max(0),
-            b',' if quote == 0 && depth == 0 => return v[..i].trim(),
+            b',' if quote == 0 && depth == 0 => return (v[..i].trim(), &v[i + 1..]),
             _ => {}
         }
     }
-    v.trim()
+    (v.trim(), "")
 }
 
 /// `background-image`/`mask-image` → a URL key. Values we cannot paint
@@ -2849,7 +2867,7 @@ fn parse_bg_shorthand(
     v: &str,
     u: Units,
     theme: &Theme,
-) -> Option<(Option<Rgb>, BgLayer)> {
+) -> Option<(Option<Rgba>, BgLayer)> {
     let mut layer = BgLayer::NONE;
     let mut color = None;
     layer.image = parse_bg_image(val);
@@ -3089,18 +3107,55 @@ fn parse_translate(v: &str, u: Units) -> Option<(Len, Len)> {
     }
 }
 
-/// One `box-shadow` layer: `[<color>]? <dx> <dy> [<blur>] [<spread>] [<color>]?`.
-/// `inset` is recognised and rejected — an inner shadow is a different paint,
-/// and drawing it as an outer one would put a slab OUTSIDE the box.
+/// One `box-shadow` layer: `[inset]? [<color>]? <dx> <dy> [<blur>] [<spread>]
+/// [<color>]?` → `(inset, layer)`. `None` means the layer is INVALID, which is
+/// not the same as "we don't paint it": `inset` is perfectly valid CSS we
+/// simply have no inner-shadow paint for, so it comes back as
+/// `Some((true, …))` and lets the declaration REPLACE whatever stood before.
+/// Returning `None` for it left the previous shadow painted instead.
 /// Lengths keep their order; the colour may sit at either end (CSS Backgrounds 3
 /// §7.1). An omitted colour stays `None` = `currentColor`, resolved at paint.
-fn parse_box_shadow(v: &str, u: Units) -> Option<BoxShadow> {
+/// The one layer of a `box-shadow` list we can actually paint, or `None` for a
+/// list where no layer is paintable. The outer `Option` is VALIDITY: `None`
+/// means some layer failed to parse, so the whole declaration is dropped and
+/// the box keeps the shadow it had (CSS Syntax 3 §9 — a bad value invalidates
+/// the declaration, not just the layer).
+///
+/// Which layer: the FIRST paintable one, not the first one. Layers paint
+/// front-to-back, so the first paintable layer is also the topmost one we would
+/// draw. Taking layer 1 unconditionally cost DuckDuckGo its searchbox ring —
+/// `0 10px 20px …, 0 2px 6px …, 0 0 0 1px rgba(0,0,0,.08)` puts the only sharp
+/// layer LAST, and the two blurred ones ahead of it are skipped at paint time.
+///
+/// Measured across duckduckgo.com and two Wikipedia articles: 7 declarations
+/// hide their ring behind a blurred layer this way, and **no** declaration has
+/// more than one paintable layer — so a list of layers would cost every
+/// `ComputedStyle` copy several more words for a case real pages do not write.
+fn paintable_shadow(v: &str, u: Units) -> Option<Option<BoxShadow>> {
+    let mut rest = v;
+    let mut hit: Option<BoxShadow> = None;
+    loop {
+        let (layer, tail) = next_layer(rest);
+        let (inset, sh) = parse_box_shadow(layer, u)?;
+        if hit.is_none() && !inset && sh.paints() {
+            hit = Some(sh);
+        }
+        if tail.is_empty() {
+            return Some(hit);
+        }
+        rest = tail;
+    }
+}
+
+fn parse_box_shadow(v: &str, u: Units) -> Option<(bool, BoxShadow)> {
     let mut lens: [f32; 4] = [0.0; 4];
     let mut n = 0usize;
-    let mut color: Option<Rgb> = None;
+    let mut color: Option<Rgba> = None;
+    let mut inset = false;
     for tok in css_tokens(v) {
         if tok.eq_ignore_ascii_case("inset") {
-            return None;
+            inset = true;
+            continue;
         }
         if let Some(px) = parse_length(tok, u) {
             if n < 4 {
@@ -3121,13 +3176,16 @@ fn parse_box_shadow(v: &str, u: Units) -> Option<BoxShadow> {
     if n < 2 {
         return None;
     }
-    Some(BoxShadow {
-        dx: lens[0],
-        dy: lens[1],
-        blur: if n > 2 { lens[2] } else { 0.0 },
-        spread: if n > 3 { lens[3] } else { 0.0 },
-        color,
-    })
+    Some((
+        inset,
+        BoxShadow {
+            dx: lens[0],
+            dy: lens[1],
+            blur: if n > 2 { lens[2] } else { 0.0 },
+            spread: if n > 3 { lens[3] } else { 0.0 },
+            color,
+        },
+    ))
 }
 
 fn parse_pad(v: &str, u: Units, prior: f32) -> f32 {
@@ -3590,7 +3648,7 @@ fn parse_length(v: &str, u: Units) -> Option<f32> {
 /// (#rgb/#rgba/#rrggbb/#rrggbbaa), rgb()/rgba()/hsl()/hsla(), and all 148 CSS
 /// named colours. `None` keeps the inherited value (`currentcolor`/`inherit`/
 /// `transparent`/unparseable), preserving the caller's contract.
-fn parse_color(v: &str, _theme: &Theme) -> Option<Rgb> {
+fn parse_color(v: &str, _theme: &Theme) -> Option<Rgba> {
     crate::color::parse_color(v)
 }
 
@@ -3779,7 +3837,7 @@ mod tests {
         // An invalid width leaves the specified one alone — it does not fall
         // back to 0, which is what `border-top-width-012` checks.
         assert_eq!(side("border-top-style:solid;border-top-width:-1pt").width, 3.0);
-        let c = Rgb(0, 128, 0);
+        let c = Rgba::opaque(Rgb(0, 128, 0));
         assert_eq!(side("border-top-style:solid;color:#008000").color, Some(c), "currentColor, resolved late");
         assert_eq!(side("color:#008000;border-top-style:solid").color, Some(c), "either order");
         // `transparent` is a VALUE: the width stays, nothing paints, and it is
@@ -3789,7 +3847,10 @@ mod tests {
         assert_eq!(t.color, None, "and paints nothing");
         assert_eq!(side("border-top:1px solid transparent").color, None, "also in the shorthand");
         // …and a real colour after it wins back.
-        assert_eq!(side("border-top-color:transparent;border-top:1px solid #f00").color, Some(Rgb(255, 0, 0)));
+        assert_eq!(
+            side("border-top-color:transparent;border-top:1px solid #f00").color,
+            Some(Rgba::opaque(Rgb(255, 0, 0)))
+        );
     }
 
     #[test]
