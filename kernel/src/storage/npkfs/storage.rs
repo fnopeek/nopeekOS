@@ -417,6 +417,29 @@ pub fn current_root() -> Option<[u8; 32]> {
 /// and bitmap+journal updates from the batch. A crash before this
 /// returns leaves the SB on disk pointing at the previous root —
 /// the in-cache uncommitted changes vanish, FS is consistent.
+/// Commit everything `put` has deferred, WITHOUT touching the path tree.
+///
+/// `put` defers its commit on the documented assumption of "N puts, then
+/// exactly one `commit_root`" — true for a file write, wildly false for a
+/// streaming download, which does hundreds of puts and commits once at the
+/// very end. Until then the in-memory bitmap, the object btree and
+/// `pending_old_blocks` all run far ahead of the disk, and any UNRELATED
+/// writer that commits in that window takes the whole batch with it.
+/// Bounding the batch keeps the two views close and makes a long download's
+/// progress durable as it goes.
+pub fn flush_pending() -> Result<(), FsError> {
+    let root = {
+        let lock = FS.lock();
+        let fs = lock.as_ref().ok_or(FsError::NotMounted)?;
+        if fs.pending_old_blocks.is_empty() {
+            return Ok(());
+        }
+        fs.sb.root_tree_hash
+    };
+    // Same root = no path-tree flip; this only drains the deferred batch.
+    commit_root(root)
+}
+
 pub fn commit_root(new_root: [u8; 32]) -> Result<(), FsError> {
     let mut lock = FS.lock();
     let fs = lock.as_mut().ok_or(FsError::NotMounted)?;

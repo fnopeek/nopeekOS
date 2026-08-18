@@ -596,6 +596,9 @@ fn stitch_chunked(total_size: u64, chunks: &[[u8; 32]]) -> Result<Vec<u8>, PathE
 /// path tree is only updated atomically at `finish`. This is the
 /// failure mode we want: a partial download never appears as a
 /// half-written file.
+/// Chunks between deferred-batch flushes during a streaming write.
+const STREAM_COMMIT_EVERY: usize = 16;
+
 pub struct StreamingWriter {
     path: alloc::string::String,
     chunk_size: usize,
@@ -637,6 +640,17 @@ impl StreamingWriter {
         }
         self.chunk_hashes.push(hash);
         self.written += chunk_len as u64;
+        // Drain the deferred batch every so often. Without this a 249 MB
+        // download runs its ENTIRE length with the bitmap, the object btree
+        // and `pending_old_blocks` uncommitted — and the first unrelated
+        // writer to commit (over WiFi that is wifid's log, constantly) takes
+        // that whole batch with it. Committing here costs one four-phase
+        // flush per `STREAM_COMMIT_EVERY` chunks, which is noise next to the
+        // transfer itself, and it does NOT publish the file: the path tree is
+        // still only touched by `finish`.
+        if self.chunk_hashes.len() % STREAM_COMMIT_EVERY == 0 {
+            storage::flush_pending()?;
+        }
         Ok(())
     }
 
