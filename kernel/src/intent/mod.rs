@@ -6,6 +6,7 @@
 mod auth;
 mod cert;
 mod fs;
+pub mod history;
 pub(crate) mod http;
 pub(crate) mod http2;
 mod net;
@@ -119,56 +120,63 @@ pub fn confirm(question: &str) -> bool {
 }
 
 // -- Command history --
-const HIST_MAX: usize = 32;
-const HIST_LINE: usize = 256;
+/// Lines a session keeps for Up/Down. The persistent log has its own,
+/// larger ring; this is only what one window walks.
+const HIST_MAX: usize = 200;
 
 pub(crate) struct History {
-    lines: [[u8; HIST_LINE]; HIST_MAX],
-    lens: [usize; HIST_MAX],
-    count: usize,
+    /// Oldest first.
+    lines: alloc::vec::Vec<String>,
+    /// Index into `lines`; `== lines.len()` means "on the fresh line".
     cursor: usize,
 }
 
 impl History {
-    fn push(&mut self, line: &[u8]) {
-        if line.is_empty() { return; }
-        let len = line.len().min(HIST_LINE);
-        // Skip duplicate of last entry
-        if self.count > 0 {
-            let last = (self.count - 1) % HIST_MAX;
-            if self.lens[last] == len && self.lines[last][..len] == line[..len] {
-                self.cursor = self.count;
-                return;
-            }
+    /// Seeded from the persistent log, so a fresh window (and the first
+    /// window after a reboot) opens with what was typed before.
+    fn new() -> Self {
+        let mut lines = history::snapshot();
+        if lines.len() > HIST_MAX {
+            let drop = lines.len() - HIST_MAX;
+            lines.drain(..drop);
         }
-        let idx = self.count % HIST_MAX;
-        self.lines[idx][..len].copy_from_slice(&line[..len]);
-        self.lens[idx] = len;
-        self.count += 1;
-        self.cursor = self.count;
+        let cursor = lines.len();
+        History { lines, cursor }
     }
 
-    fn up(&mut self) -> Option<(&[u8], usize)> {
-        if self.count == 0 || self.cursor == 0 { return None; }
-        let start = if self.count > HIST_MAX { self.count - HIST_MAX } else { 0 };
-        if self.cursor <= start { return None; }
+    fn push(&mut self, line: &[u8]) {
+        let Ok(text) = core::str::from_utf8(line) else { return };
+        if text.is_empty() { return; }
+        if self.lines.last().map(|l| l.as_str()) != Some(text) {
+            self.lines.push(String::from(text));
+            if self.lines.len() > HIST_MAX { self.lines.remove(0); }
+        }
+        self.cursor = self.lines.len();
+        history::push(text);
+    }
+
+    fn up(&mut self) -> Option<&str> {
+        if self.cursor == 0 { return None; }
         self.cursor -= 1;
-        let idx = self.cursor % HIST_MAX;
-        Some((&self.lines[idx], self.lens[idx]))
+        self.lines.get(self.cursor).map(|l| l.as_str())
     }
 
-    fn down(&mut self) -> Option<(&[u8], usize)> {
-        if self.cursor >= self.count { return None; }
+    fn down(&mut self) -> Option<&str> {
+        if self.cursor >= self.lines.len() { return None; }
         self.cursor += 1;
-        if self.cursor >= self.count {
+        if self.cursor >= self.lines.len() {
             return None; // back to empty line
         }
-        let idx = self.cursor % HIST_MAX;
-        Some((&self.lines[idx], self.lens[idx]))
+        self.lines.get(self.cursor).map(|l| l.as_str())
     }
 
     fn reset_cursor(&mut self) {
-        self.cursor = self.count;
+        self.cursor = self.lines.len();
+    }
+
+    fn clear(&mut self) {
+        self.lines.clear();
+        self.cursor = 0;
     }
 }
 
@@ -197,12 +205,7 @@ impl IntentSession {
             input_buf: [0u8; INPUT_BUF_SIZE],
             pos: 0,
             cursor: 0,
-            history: History {
-                lines: [[0; HIST_LINE]; HIST_MAX],
-                lens: [0; HIST_MAX],
-                count: 0,
-                cursor: 0,
-            },
+            history: History::new(),
             prompt_len: 0,
             terminal_idx,
         }
@@ -745,12 +748,12 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
 
         match event.key {
             KeyCode::Up => {
-                if let Some((line, len)) = session.history.up() {
-                    let len = len.min(session.input_buf.len());
+                if let Some(line) = session.history.up() {
+                    let len = line.len().min(session.input_buf.len());
                     if !crate::shade::is_active() {
                         for _ in 0..session.pos { kprint!("\x08 \x08"); }
                     }
-                    session.input_buf[..len].copy_from_slice(&line[..len]);
+                    session.input_buf[..len].copy_from_slice(&line.as_bytes()[..len]);
                     session.pos = len;
                     session.cursor = len;
                     if crate::shade::is_active() {
@@ -764,9 +767,9 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
                 if !crate::shade::is_active() {
                     for _ in 0..session.pos { kprint!("\x08 \x08"); }
                 }
-                if let Some((line, len)) = session.history.down() {
-                    let len = len.min(session.input_buf.len());
-                    session.input_buf[..len].copy_from_slice(&line[..len]);
+                if let Some(line) = session.history.down() {
+                    let len = line.len().min(session.input_buf.len());
+                    session.input_buf[..len].copy_from_slice(&line.as_bytes()[..len]);
                     session.pos = len;
                     session.cursor = len;
                     if crate::shade::is_active() {
@@ -1930,7 +1933,12 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             system::intent_shade(args);
         }
         "history" => {
-            system::intent_history();
+            // Printing is a read; clearing rewrites a stored object.
+            if args.trim().is_empty() {
+                system::intent_history(args);
+            } else if require_cap(vault, &session, Rights::WRITE, "history") {
+                system::intent_history(args);
+            }
         }
         "time" | "clock" | "date" => {
             if require_cap(vault, &session, Rights::READ, "time") {
@@ -2636,24 +2644,30 @@ pub fn get_cwd_for_shell() -> String {
 pub fn print_active_history() {
     let term = crate::shade::terminal::active_idx();
     // SAFETY: Core 0 only (history is a Core 0-only intent)
-    // SAFETY: Core 0 only (history is a Core 0-only intent)
     let session = unsafe { (*sessions_ptr()).get(&term) };
-    if let Some(s) = session {
-        let hist = &s.history;
-        if hist.count == 0 {
-            kprintln!("(no history)");
-            return;
-        }
-        let start = if hist.count > HIST_MAX { hist.count - HIST_MAX } else { 0 };
-        for i in start..hist.count {
-            let idx = i % HIST_MAX;
-            if let Ok(text) = core::str::from_utf8(&hist.lines[idx][..hist.lens[idx]]) {
-                kprintln!("  {:3}  {}", i + 1, text);
-            }
-        }
-    } else {
+    let Some(s) = session else {
         kprintln!("(no history)");
+        return;
+    };
+    if s.history.lines.is_empty() {
+        kprintln!("(no history)");
+        return;
     }
+    for (i, line) in s.history.lines.iter().enumerate() {
+        kprintln!("  {:3}  {}", i + 1, line);
+    }
+}
+
+/// `history clear` — drop the stored log and every window's ring.
+pub fn clear_all_history() {
+    let stored = history::clear();
+    // SAFETY: Core 0 only (intents run on Core 0)
+    unsafe {
+        for s in (*sessions_ptr()).values_mut() {
+            s.history.clear();
+        }
+    }
+    kprintln!("[npk] history cleared ({} stored)", stored);
 }
 
 /// Execute an intent from remote shell (dispatch without the loop).
