@@ -197,6 +197,7 @@ struct Stats {
     tx_frames: u32,
     tx_bytes: u64,
     tx_blocked: u32, // times the in-flight cap stopped us pulling another frame
+    tx_wd_recoveries: u32, // times the queue watchdog reclaimed leaked TX slots
     inflight_peak: u32,
     // TX completions (iwl_tx_resp), cumulative.
     tx_ok: u32,
@@ -332,7 +333,7 @@ struct Stats {
 
 impl Stats {
     const NEW: Stats = Stats {
-        tx_frames: 0, tx_bytes: 0, tx_blocked: 0, inflight_peak: 0,
+        tx_frames: 0, tx_bytes: 0, tx_blocked: 0, tx_wd_recoveries: 0, inflight_peak: 0,
         tx_ok: 0, tx_fail: 0, tx_retries: 0, tx_rts_fail: 0, tx_airtime_us: 0,
         last_status: 0, last_init_rate: 0,
         rx_frames: 0, rx_bytes: 0, rx_ip: 0, rx_eapol: 0, rx_mgmt: 0, rx_drain_max: 0,
@@ -499,6 +500,9 @@ struct Ax200 {
     // (TX_CMD response). Flow control: never enqueue past the queue depth, or we
     // overwrite a TFD the firmware is still transmitting → corruption/stall.
     data_in_flight: u32,
+    /// `now_ms` of the last TX completion, or of the last moment the queue was
+    /// empty. The queue watchdog measures from here (iwl_txq_stuck_timer).
+    last_tx_done_ms: u64,
     // 802.11 sequence number for non-QoS data frames. mac80211 assigns this per
     // frame (ieee80211_tx_h_sequence); the gen2 firmware does NOT do it for us,
     // so every data frame must carry a unique, incrementing seq or the AP treats
@@ -3028,6 +3032,11 @@ impl Ax200 {
         r.d(TX_INFLIGHT_MAX as u64);
         r.s(" peak ");
         r.d(self.st.inflight_peak as u64);
+        if self.st.tx_wd_recoveries > 0 {
+            r.s("  WD-RECLAIM ");
+            r.d(self.st.tx_wd_recoveries as u64);
+            r.s(" (firmware swallowed completions)");
+        }
         r.c(b'\n');
 
         r.s("tx resp  ok ");
@@ -4261,7 +4270,6 @@ impl Ax200 {
         let mut rx_rate_tick = 0u32;
         let mut llc_miss = 8u32; // budget for RX-offset mismatch reports
         let mut addba: Option<[u8; 12]> = None;
-        let mut stall = 0u32; // iterations the data queue has been stuck full
         let mut deauth_total = 0u32; // diagnostic: link-loss events seen
         // One-shot: is the firmware healthy after bring-up?
         if self.lmac_err_ptr != 0 && self.grab_nic_access() {
@@ -4744,25 +4752,36 @@ impl Ax200 {
             if clen > 0 {
                 self.handle_wifi_cmd(&cmd[..clen as usize]);
             }
-            // Stall watchdog: a TRUE wedge = the in-flight cap is hit AND no TX
-            // completion arrived this pass for ~0.5 s (FW stopped draining). Note
-            // the `tx_done == 0` guard: with the low BQL cap a sustained upload
-            // legitimately sits at the cap, but completions keep flowing — that
-            // must NOT trip the watchdog (resetting in-flight mid-flight would let
-            // write_ptr lap the FW read pointer).
-            if self.data_in_flight >= TX_INFLIGHT_MAX && tx_done == 0 {
-                stall += 1;
-                if stall == 500 {
-                    host::dprint("[ax200] WARNING: data TX queue stuck full — FW not draining\n");
-                    self.dump_fw_error_log();
-                    // Recover rather than wedge TX forever: if completions were
-                    // somehow missed, clear the in-flight count so TX resumes.
-                    // (Better one possible overwrite than a permanently dead link.)
-                    self.data_in_flight = 0;
-                    stall = 0;
-                }
-            } else {
-                stall = 0;
+            // Queue watchdog, `iwl_txq_stuck_timer` / tx.c:1055 verbatim in its
+            // condition:
+            //
+            //     if (txq->read_ptr == txq->write_ptr) delete timer;
+            //     else                                 mod_timer(+wd_timeout);
+            //
+            // NOT EMPTY arms it, every completion pushes it forward. Fullness
+            // does not enter into it — and that was our bug: we required
+            // `data_in_flight >= TX_INFLIGHT_MAX`, so a PARTIAL leak was
+            // invisible. Measured on the device: 8 of 16 slots held frames the
+            // firmware never completed, for 314 s, with nothing queued behind
+            // them. Half the transmit capacity gone for the rest of the boot,
+            // every pass resetting the counter, the watchdog never firing.
+            let now_ms_pass = host::now_ms();
+            if tx_done > 0 || self.data_in_flight == 0 {
+                self.last_tx_done_ms = now_ms_pass;
+            } else if now_ms_pass.wrapping_sub(self.last_tx_done_ms) > TX_WD_TIMEOUT_MS {
+                host::print("[ax200] TX queue stuck: ");
+                host::print_dec(self.data_in_flight);
+                host::print(" frame(s) unacknowledged for ");
+                host::print_dec((TX_WD_TIMEOUT_MS / 1000) as u32);
+                host::print(" s — reclaiming the slots\n");
+                self.dump_fw_error_log();
+                // Linux forces an NMI and restarts the firmware here. We cannot
+                // do that cheaply, so we reclaim instead — the slots are lost
+                // either way, and a half-width queue that keeps shrinking ends
+                // as a dead link.
+                self.data_in_flight = 0;
+                self.st.tx_wd_recoveries = self.st.tx_wd_recoveries.wrapping_add(1);
+                self.last_tx_done_ms = now_ms_pass;
             }
             // Adaptive pacing: while frames are flowing OR completions are still
             // pending, poll again in 1 ms so the RX ring is drained before it
@@ -5215,6 +5234,7 @@ pub extern "C" fn _start() {
         data_queue_id: 0,
         data_write_ptr: 0,
         data_in_flight: 0,
+        last_tx_done_ms: 0,
         tx_seq: 0,
         st: Stats::NEW,
         n_aps: 0,

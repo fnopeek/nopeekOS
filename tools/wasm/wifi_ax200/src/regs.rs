@@ -987,6 +987,10 @@ pub const IWL_DATA_QUEUE_SIZE: usize = 64;
 // achieved rate keeps throughput while slashing latency-under-load. Raise once
 // HT/A-MPDU lifts the air rate (then the BDP grows). Must stay < QUEUE_SIZE-1.
 pub const TX_INFLIGHT_MAX: u32 = 16;
+/// TX queue watchdog, `cfg/22000.c:32` → `IWL_LONG_WD_TIMEOUT` (iwl-config.h:87).
+/// Linux arms it whenever the queue is NOT EMPTY and pushes it forward on every
+/// completion; it does not care how full the queue is.
+pub const TX_WD_TIMEOUT_MS: u64 = 10_000;
 pub const DATA_QUEUE_CB_SIZE: u32 = 3; // TFD_QUEUE_CB_SIZE(64) = ilog2(64)-3
 // Per-slot TX staging stride. Each in-flight TFD's TB1 must point at its OWN
 // payload region, or back-to-back frames clobber each other's data before the
