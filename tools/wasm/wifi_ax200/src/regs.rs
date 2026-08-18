@@ -148,7 +148,7 @@ pub const RFH_Q0_FRBDCB_WIDX_TRG: u32 = 0x1C80;
 // drains: one millisecond of margin, and `drain-peak 56/64` on the device.
 // Linux allocates IWL_NUM_RBDS_HE (2048) for this chip; 256 pages = 1 MB is a
 // modest step that gives ~48 ms of headroom. Each RB = 1 page.
-pub const RX_NUM_RBS: usize = 256;
+pub const RX_NUM_RBS: usize = 512;
 pub const RB_SIZE_BYTES: usize = 4096; // IWL_AMSDU_4K
 // rb_stts.closed_rb_num producer index mask.
 pub const RB_STTS_CLOSED_MASK: u32 = 0x0FFF;
@@ -1063,7 +1063,16 @@ pub const IWL_DATA_QUEUE_SIZE: usize = 64;
 // the full 63-deep queue is tens of ms of bufferbloat. ~1 BDP at the current
 // achieved rate keeps throughput while slashing latency-under-load. Raise once
 // HT/A-MPDU lifts the air rate (then the BDP grows). Must stay < QUEUE_SIZE-1.
-pub const TX_INFLIGHT_MAX: u32 = 16;
+/// In-flight cap for the data queue (IWL_DATA_QUEUE_SIZE = 64 slots).
+///
+/// 16 was picked as "well below the ring depth" for flow control and against
+/// bufferbloat. At 99 Mbit the receive side needs a steady stream of ACKs, and
+/// the cap blocked 4100 times while fq_codel dropped 3267 frames the driver
+/// never took ("driver too slow") — a quarter of everything the stack queued.
+/// Half the queue keeps the anti-bufferbloat intent and stops the cap being
+/// the throughput limit. Safe now that in-flight is derived from the
+/// firmware's read pointer rather than counted.
+pub const TX_INFLIGHT_MAX: u32 = 32;
 /// TX queue watchdog. Linux arms it whenever the queue is NOT EMPTY and pushes
 /// it forward on every completion; it does not care how full the queue is.
 ///
