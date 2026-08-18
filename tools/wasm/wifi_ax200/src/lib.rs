@@ -4673,8 +4673,13 @@ impl Ax200 {
                         // read on the device as a dead link (8 Mbit, 41 %
                         // retries). Masked to the window the result is bounded
                         // 0..63 by construction and can never wedge the queue.
-                        a_read_ptr = Some((seq & 0xff).wrapping_add(1)
-                            & (IWL_DATA_QUEUE_SIZE as u32 - 1));
+                        // No `+1`: measured on the device, the reported
+                        // index is already the NEXT slot to read, not the last
+                        // one completed. Adding one made the derived value
+                        // trail the counter by exactly one on every single
+                        // pass — five samples in a row, all off by one, with
+                        // only the first (9 vs 0) a real leak.
+                        a_read_ptr = Some((seq & 0xff) & (IWL_DATA_QUEUE_SIZE as u32 - 1));
                     }
                     let base = RX_PKT_DATA_OFF;
                     a_rts += tr[base + TXR_OFF_FAILURE_RTS] as u32;
@@ -4877,7 +4882,9 @@ impl Ax200 {
                 // Say when the two disagree by more than the frames completed
                 // in this pass — that difference IS the leak, and until now it
                 // was invisible.
-                if derived < counted && self.st.inflight_corrections < 8
+                // Only a gap of two or more is news. One is noise, and a
+                // log that writes the normal case is not a log.
+                if derived + 1 < counted && self.st.inflight_corrections < 8
                 {
                     self.st.inflight_corrections += 1;
                     host::print("[ax200] in-flight counted ");
