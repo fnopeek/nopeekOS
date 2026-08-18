@@ -131,6 +131,7 @@ const RETRY_TICKS_BASE: u64 = 100; // 1 second (100Hz)
 // goes out to broadcast regardless.
 const ARP_RETRANS_TICKS: u64 = 5; // 50 ms
 const ARP_MAX_TRIES: u8 = 10;
+const FIN_TIMEOUT_TICKS: u64 = 6000; // 60 s, like Linux's tcp_fin_timeout
 // 4 MiB receive buffer → ~4 MiB window with scaling → fills the bandwidth-delay
 // product for ~gigabit even at tens-of-ms RTT (1 MiB was the cap at ~11 ms;
 // higher-RTT CDNs need more). Grown lazily (VecDeque::new), so an idle
@@ -664,6 +665,31 @@ pub fn conn_healthy(handle: usize) -> bool {
 }
 
 /// Close a connection gracefully (sends FIN).
+/// Close without waiting for the peer's FIN. For MODULES: the waiting form
+/// below spins up to 2 s, and a host call that spins freezes every other
+/// fiber on that worker core — the same trap as the old blocking connect.
+/// Aborting a connection that never came up costs those 2 s for nothing:
+/// its state is SynSent, which the wait loop does not even accept as an end.
+///
+/// The FIN goes out, the slot stays in FinWait1, and `tick_connections`
+/// reaps it if the peer never answers.
+pub fn close_nowait(handle: usize) -> Result<(), TcpError> {
+    if handle >= MAX_CONNECTIONS { return Err(TcpError::NotConnected); }
+    let mut conns = CONNECTIONS.lock();
+    let conn = conns[handle].as_mut().ok_or(TcpError::NotConnected)?;
+    if conn.state == State::Established {
+        let seq = conn.snd_nxt;
+        conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
+        conn.state = State::FinWait1;
+        conn.last_send_tick = crate::interrupts::ticks();
+        send_seg(conn, seq, conn.rcv_nxt, FIN | ACK, 0, &[]);
+    } else {
+        // Never established, or already shutting down — nothing to say.
+        conns[handle] = None;
+    }
+    Ok(())
+}
+
 pub fn close(handle: usize) -> Result<(), TcpError> {
     let mut conns = CONNECTIONS.lock();
     let conn = conns[handle].as_mut().ok_or(TcpError::NotConnected)?;
@@ -1066,6 +1092,16 @@ pub fn tick_connections() {
 
             // TimeWait cleanup (2 seconds)
             if slot.state == State::TimeWait && now - slot.last_send_tick > 200 {
+                slot.state = State::Closed;
+            }
+
+            // Half-closed with a peer that never answers. `close_nowait`
+            // leaves FinWait1 behind on purpose and nothing else frees it —
+            // without this the slot is pinned for the rest of the boot.
+            // 60 s = Linux's tcp_fin_timeout.
+            if matches!(slot.state, State::FinWait1 | State::FinWait2 | State::LastAck)
+                && now.saturating_sub(slot.last_send_tick) > FIN_TIMEOUT_TICKS
+            {
                 slot.state = State::Closed;
             }
         }
