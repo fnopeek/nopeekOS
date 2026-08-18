@@ -4584,6 +4584,7 @@ impl Ax200 {
         let mut cmd = [0u8; 600];
         let mut txbuf = [0u8; 1514];
         let mut rx_log = 0u32; // throttle the data-path diagnostics
+        let mut rate_log = 0u32; // …and the rate-change lines, which flap at VHT80
         let mut tx_log = 0u32;
         // Air-rate visibility. The firmware reports the TX rate it settled on
         // via TLC_MNG_UPDATE_NOTIF; the RX descriptor carries the rate the AP
@@ -4734,7 +4735,10 @@ impl Ax200 {
                     let rnf = le32(&p, RX_PKT_DATA_OFF + TLC_NOTIF_OFF_RATE);
                     if rnf != last_tx_rate {
                         last_tx_rate = rnf;
-                        Self::log_rate("[ax200] TX rate → ", rnf);
+                        if rate_log < 8 {
+                            rate_log += 1;
+                            Self::log_rate("[ax200] TX rate → ", rnf);
+                        }
                     }
                 } else if c == REPLY_RX_MPDU_CMD && g == 0 {
                     // DIAGNOSTIC ONLY: note a DEAUTH / DISASSOC addressed to us +
@@ -4801,7 +4805,16 @@ impl Ax200 {
                                 let rnf = le32(&rd, RX_PKT_DATA_OFF + MPDU_OFF_RATE_N_FLAGS);
                                 if rnf != last_rx_rate {
                                     last_rx_rate = rnf;
-                                    Self::log_rate("[ax200] RX rate -> ", rnf);
+                                    // Budgeted. At VHT80 the rate flaps between
+                                    // MCS 8 and 9 continuously, and every line
+                                    // goes to the terminal, the global mirror
+                                    // AND out over TCP — in the middle of the
+                                    // measurement it is meant to inform. The
+                                    // report carries the current rate anyway.
+                                    if rate_log < 8 {
+                                        rate_log += 1;
+                                        Self::log_rate("[ax200] RX rate -> ", rnf);
+                                    }
                                 }
                             }
                             if rx_log < 12 {
