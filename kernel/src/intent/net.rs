@@ -171,13 +171,14 @@ const WIFI_CFG: &str = "sys/config/wifi";
 
 /// The keys the wifi stack actually reads. A typo that wrote silently is how an
 /// afternoon gets spent measuring a setting that never arrived.
-const WIFI_KEYS: &[&str] = &["ssid", "band", "ampdu", "ps", "btcoex", "settle_ms"];
+const WIFI_KEYS: &[&str] = &["ssid", "band", "ampdu", "vht", "ps", "btcoex", "settle_ms"];
 
 fn wlan_set_usage() {
     kprintln!("[wlan] Usage: wlan set <key> <value> | wlan unset <key>");
     kprintln!("[wlan]   ssid: <name>        the network to join (else: loudest)");
     kprintln!("[wlan]   band: 5 | 2.4 | auto");
     kprintln!("[wlan]   ampdu: on | off     RX aggregation (throughput)");
+    kprintln!("[wlan]   vht: on | off       80 MHz (EXPERIMENTAL — TX is broken)");
     kprintln!("[wlan]   ps: on | off        power save (default off = CAM)");
     kprintln!("[wlan]   btcoex: on | off");
     kprintln!("[wlan]   settle_ms: <n>      pause before the first scan");

@@ -567,6 +567,7 @@ struct Ax200 {
     tx_fail_streak_peak: u32,
     last_tx_resp_ms: u64,
     want_ampdu: bool,
+    want_vht: bool,
     /// Set once the firmware has ignored a block-ack setup. Asking again costs
     /// another silent 300 ms AND wedges the transmit path: measured on the
     /// device, 31 frames sent / 7 acknowledged / 500 refused, and no ping.
@@ -2122,6 +2123,12 @@ impl Ax200 {
         // an aggregate carries nothing) — and recovering from that needs the
         // network it just broke. Twice now. So the safe state is the default.
         self.want_ampdu = cfg_on(cfg_get(text, b"ampdu"));
+        // VHT80 is OFF by default. Measured on the device: receiving at 80 MHz
+        // works (292 Mbit), transmitting does not — 41 % retries, more RTS
+        // failures than frames sent, and the rate control walking back down to
+        // 20 MHz. HT40 measured 81 Mbit/s with a stable link, so that is the
+        // safe state until the transmit side is understood.
+        self.want_vht = cfg_on(cfg_get(text, b"vht"));
         self.want_power_save = cfg_on(cfg_get(text, b"ps"));
         self.want_bt_coex = cfg_on(cfg_get(text, b"btcoex"));
         self.settle_ms = cfg_settle_ms(text);
@@ -2628,7 +2635,8 @@ impl Ax200 {
     /// and it offers at least two spatial streams at MCS 0-9. Anything less
     /// falls through to `use_ht40`.
     fn use_vht80(&self) -> bool {
-        self.target_ht.vht
+        self.want_vht
+            && self.target_ht.vht
             && self.target_ht.vht_chan_width == IEEE80211_VHT_CHANWIDTH_80MHZ
             && self.use_ht40()
     }
@@ -5631,6 +5639,7 @@ pub extern "C" fn _start() {
         pick_reason: PICK_STRONGEST,
         ba_pending: None,
         want_ampdu: false,
+        want_vht: false,
         ba_fw_broken: false,
         link_published: false,
         tx_fail_streak: 0,
