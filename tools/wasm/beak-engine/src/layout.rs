@@ -3308,11 +3308,21 @@ impl<'a> Ctx<'a> {
             extern crate std;
             std::println!("[box] {who}: x={x} y={y} w={w} h={h}");
         }
-        // Background first, THEN the shadow — both splice in at `bg_idx`, so
-        // whatever is inserted last ends up underneath.
+        // CSS 2.1 Appendix E paints a box as shadow, background, border — and
+        // ALL of it before any descendant. All three splice in at `bg_idx`, so
+        // whatever is inserted last ends up underneath: border, background,
+        // shadow, in that order.
+        //
+        // The border used to be APPENDED instead, which put it on top of the
+        // box's own descendants. That is invisible while a child stays inside
+        // its parent's content box — and wrong the moment one does not, which
+        // is exactly what a negative margin is for: the child's border landed
+        // UNDER the parent's instead of over it.
+        let mut border: Vec<DrawOp> = Vec::new();
+        border_ops(st, x, y, w, h, (true, true), &mut border);
+        self.insert_ops_at(bg_idx, border);
         self.insert_bg(st, x, y, w, h, bg_idx);
         self.insert_shadow(st, x, y, w, h, bg_idx);
-        border_ops(st, x, y, w, h, (true, true), &mut self.ops);
     }
 
     /// Paint the box's `box-shadow` behind its background. Only the zero-blur
@@ -7758,6 +7768,47 @@ mod tests {
 
         // A point outside every box hovers nothing.
         assert!(l.hover_at(-5, -5).is_empty());
+    }
+
+    /// CSS 2.1 Appendix E: a box paints its background AND its border before
+    /// any descendant. The background already did; the border was appended
+    /// after the content, so it landed on top of the box's own children.
+    ///
+    /// Invisible while a child stays inside its parent's content box — and
+    /// wrong the moment one does not, which is what a negative margin is FOR.
+    /// The CSS2.1 suite tests exactly that idiom: pull a child left by the
+    /// parent's border width so its own border covers it, and check no red
+    /// shows. 62 of those went from fail to pass.
+    #[test]
+    fn a_box_paints_its_border_under_its_descendants() {
+        // The child's black border is pulled onto the parent's red one.
+        let l = lay(
+            "<body style=\"margin:0\"><div style=\"border-left:20px solid #f00;height:50px\">\
+             <div style=\"border-left:20px solid #000;margin-left:-20px;height:50px\"></div>\
+             </div></body>",
+            800,
+        );
+        let seen: alloc::vec::Vec<Rgb> = rects(&l)
+            .into_iter()
+            .filter(|(x, _, w, ..)| *x == 0 && *w == 20)
+            .map(|(.., c)| c)
+            .collect();
+        assert_eq!(
+            seen,
+            alloc::vec![Rgb(0xff, 0, 0), Rgb(0, 0, 0)],
+            "parent's border first, child's over it",
+        );
+
+        // And the background still goes under the border of the SAME box.
+        let l = lay(
+            "<body style=\"margin:0\"><div style=\"background:#00f;border:10px solid #0f0;\
+             width:100px;height:50px\"></div></body>",
+            800,
+        );
+        let order: alloc::vec::Vec<Rgb> = rects(&l).into_iter().map(|(.., c)| c).collect();
+        let bg = order.iter().position(|c| *c == Rgb(0, 0, 0xff)).expect("background");
+        let bd = order.iter().position(|c| *c == Rgb(0, 0xff, 0)).expect("border");
+        assert!(bg < bd, "background under its own border: {order:?}");
     }
 
     /// A hit rect has to sit where the box is PAINTED, on every path that
