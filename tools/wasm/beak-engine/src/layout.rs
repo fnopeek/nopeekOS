@@ -416,6 +416,51 @@ fn translate_op_list(ops: &mut [DrawOp], dx: i32, dy: i32) {
     }
 }
 
+/// The box's `box-shadow`, painted behind its background. Only the zero-blur
+/// case — which on real pages is a hairline separator, not a drop shadow.
+/// MediaWiki draws the rule under the article tabs with
+/// `box-shadow: 0 1px #c8ccd1`, and without this the page simply lacks it.
+///
+/// A free function, not a method, because `repaint_hover` has to produce the
+/// very same ops from the very same style — a second copy of the rule there
+/// would drift, and one that merely FORGOT the shadow silently left the tab
+/// underline behind while recolouring the text above it.
+fn shadow_ops(st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, out: &mut Vec<DrawOp>) {
+    let Some(sh) = st.shadow else { return };
+    if sh.blur != 0.0 {
+        return;
+    }
+    let sx = x + sh.dx as i32 - sh.spread as i32;
+    let sy = y + sh.dy as i32 - sh.spread as i32;
+    let sw = w + 2 * sh.spread as i32;
+    let shh = h + 2 * sh.spread as i32;
+    if sw <= 0 || shh <= 0 {
+        return;
+    }
+    // An OUTER shadow is not painted inside the border box (CSS Backgrounds
+    // 3 §7.1.1) — the box is cut out of it. Without that the shadow is a
+    // full-size copy of the box, and since these boxes are usually
+    // transparent it floods the whole row instead of leaving the 1px strip
+    // the author wanted. Subtracting one rect from another gives at most
+    // four pieces: a band above, a band below, and the left/right slivers
+    // of the rows in between.
+    let color = sh.color.unwrap_or(st.color);
+    let (sx1, sy1) = (sx + sw, sy + shh);
+    let (x1, y1) = (x + w, y + h);
+    let mut push = |px: i32, py: i32, pw: i32, ph: i32| {
+        if pw > 0 && ph > 0 {
+            out.push(DrawOp::Rect { x: px, y: py, w: pw, h: ph, color });
+        }
+    };
+    push(sx, sy, sw, y.min(sy1) - sy);
+    push(sx, y1.max(sy), sw, sy1 - y1.max(sy));
+    let (my0, my1) = (sy.max(y), sy1.min(y1));
+    if my1 > my0 {
+        push(sx, my0, x.min(sx1) - sx, my1 - my0);
+        push(x1.max(sx), my0, sx1 - x1.max(sx), my1 - my0);
+    }
+}
+
 /// Clip the display-list ops in `ops[start..]` to the document-space rectangle
 /// `[cl, ct) .. [cr, cb)`. Filled rects are intersected (pixel-exact); text and
 /// images are kept whole if their box overlaps the rect, dropped otherwise (a
@@ -808,6 +853,10 @@ pub struct ControlRect {
 
 pub struct Layout {
     pub ops: Vec<DrawOp>,
+    /// The viewport width this was laid out at. A layout that does not say so
+    /// cannot be re-read later — `repaint_hover` has to resolve a style the
+    /// same way the layout did, and `vw`/media queries are part of that.
+    pub width: u32,
     pub links: Vec<LinkRect>,
     pub controls: Vec<ControlRect>,
     /// Total document height (px). May exceed the viewport → scroll.
@@ -872,6 +921,7 @@ pub struct Layout {
 /// Deliberately not `InspectBox`: that one carries a formatted label, and this
 /// list exists on every page with a hover rule, not only while a developer is
 /// inspecting.
+#[derive(Clone, Copy)]
 pub struct HoverBox {
     pub x: i32,
     pub y: i32,
@@ -1726,6 +1776,7 @@ pub fn layout(
         phase: [0; 3],
         inspect: ctx.inspects,
         hover_boxes: ctx.hover_boxes,
+        width,
     }
 }
 
@@ -3334,40 +3385,8 @@ impl<'a> Ctx<'a> {
     /// `insert_bg` then shifts the recorded stacking ranges for its own ops the
     /// same way, and both insertions are accounted for.
     fn insert_shadow(&mut self, st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, bg_idx: usize) {
-        let Some(sh) = st.shadow else { return };
-        if sh.blur != 0.0 {
-            return;
-        }
-        let sx = x + sh.dx as i32 - sh.spread as i32;
-        let sy = y + sh.dy as i32 - sh.spread as i32;
-        let sw = w + 2 * sh.spread as i32;
-        let shh = h + 2 * sh.spread as i32;
-        if sw <= 0 || shh <= 0 {
-            return;
-        }
-        // An OUTER shadow is not painted inside the border box (CSS Backgrounds
-        // 3 §7.1.1) — the box is cut out of it. Without that the shadow is a
-        // full-size copy of the box, and since these boxes are usually
-        // transparent it floods the whole row instead of leaving the 1px strip
-        // the author wanted. Subtracting one rect from another gives at most
-        // four pieces: a band above, a band below, and the left/right slivers
-        // of the rows in between.
-        let color = sh.color.unwrap_or(st.color);
-        let (sx1, sy1) = (sx + sw, sy + shh);
-        let (x1, y1) = (x + w, y + h);
-        let mut parts: Vec<DrawOp> = Vec::new();
-        let mut push = |px: i32, py: i32, pw: i32, ph: i32| {
-            if pw > 0 && ph > 0 {
-                parts.push(DrawOp::Rect { x: px, y: py, w: pw, h: ph, color });
-            }
-        };
-        push(sx, sy, sw, y.min(sy1) - sy);
-        push(sx, y1.max(sy), sw, sy1 - y1.max(sy));
-        let (my0, my1) = (sy.max(y), sy1.min(y1));
-        if my1 > my0 {
-            push(sx, my0, x.min(sx1) - sx, my1 - my0);
-            push(x1.max(sx), my0, sx1 - x1.max(sx), my1 - my0);
-        }
+        let mut parts = Vec::new();
+        shadow_ops(st, x, y, w, h, &mut parts);
         self.insert_ops_at(bg_idx, parts);
     }
 
@@ -7495,6 +7514,565 @@ fn push_decorations(style: &RunStyle, x: i32, w: i32, baseline: i32, ops: &mut V
     if style.deco & crate::style::DECO_OVERLINE != 0 {
         line(baseline - (style.size * 0.78) as i32);
     }
+}
+
+/// Resolve ONE element's computed style outside a layout, with a given pointer
+/// state — by descending from the root exactly the way `layout` does, through
+/// the same `style::resolve`.
+///
+/// `subtree` also resolves the element's descendants, up to that many. A hover
+/// rule does not only restyle what the pointer is IN — `nav:hover a`, every
+/// dropdown on the web, styles a DESCENDANT from a state that lives on the
+/// ancestor. Resolving only the carrier left those runs painted in the resting
+/// colour with nothing to say that anything had been missed.
+///
+/// The descent is the price of not keeping a computed style per element alive
+/// between layouts: it is one `resolve` per ancestor plus one per preceding
+/// sibling at each level, against ~8300 for a page. It is not a second copy of
+/// the cascade; the function it calls is the one layout calls.
+pub fn resolve_out_of_band(
+    dom: &Dom,
+    sheet: &Stylesheet,
+    theme: &Theme,
+    width: u32,
+    viewport_h: u32,
+    seq: u32,
+    hover: &[u32],
+    subtree: usize,
+    out: &mut Vec<StyleProbe>,
+) -> Option<StyleProbe> {
+    let mut initial = ComputedStyle::root(theme);
+    initial.vw = width as f32;
+    initial.vh = viewport_h as f32;
+    let html_el = dom.root_element();
+    let mut root = style::resolve(
+        &ElemInfo::of_hovered(html_el, hover), &initial, theme, sheet, &[], &[], 0, width as f32,
+    );
+    root.rem_base = root.font_px;
+    let mut anc = vec![ElemInfo::of_hovered(html_el, hover)];
+    let own = if html_el.seq == seq {
+        Some(StyleProbe { own: root, before: None, after: None })
+    } else {
+        descend(html_el, &root, &mut anc, seq, u32::MAX, sheet, theme, width as f32, hover)
+    }?;
+    if subtree > 0 {
+        let el = find_seq(html_el, seq)?;
+        if !resolve_kids(el, &own.own, &mut anc, sheet, theme, width as f32, hover, subtree, out) {
+            return None; // bigger than the fast path is worth
+        }
+    }
+    Some(own)
+}
+
+/// One element's computed style, plus the pseudo-elements that hang off it.
+///
+/// `::before`/`::after` are here because a hover rule reaches them —
+/// MediaWiki underlines the article tabs with `a:hover::after{background}`,
+/// so a pass that looked only at real elements saw a colour change on the
+/// text and quietly missed the line under it. Their boxes are generated
+/// during layout and never recorded, so a changed one gives up.
+#[derive(Clone, Copy)]
+pub struct StyleProbe {
+    pub own: ComputedStyle,
+    pub before: Option<ComputedStyle>,
+    pub after: Option<ComputedStyle>,
+}
+
+/// Do these two probes paint their pseudo-elements differently?
+pub fn pseudos_differ(a: &StyleProbe, b: &StyleProbe) -> bool {
+    let one = |x: &Option<ComputedStyle>, y: &Option<ComputedStyle>| match (x, y) {
+        (None, None) => false,
+        (Some(p), Some(q)) => box_differs(p, q) || p.color != q.color || p.deco != q.deco,
+        _ => true,
+    };
+    one(&a.before, &b.before) || one(&a.after, &b.after)
+}
+
+/// Resolve one element's style and its two pseudo-elements.
+#[allow(clippy::too_many_arguments)]
+fn probe_of<'a>(
+    e: &'a Element,
+    own: ComputedStyle,
+    anc: &[ElemInfo<'a>],
+    prev: &[ElemInfo<'a>],
+    sib_count: u32,
+    sheet: &Stylesheet,
+    theme: &Theme,
+    vw: f32,
+    hover: &[u32],
+) -> StyleProbe {
+    let info = ElemInfo::of_hovered(e, hover);
+    let one = |which| {
+        style::resolve_pseudo(&info, &own, theme, sheet, anc, prev, sib_count, vw, which)
+            .map(|(_, st)| st)
+    };
+    StyleProbe {
+        own,
+        before: one(crate::css::PseudoElem::Before),
+        after: one(crate::css::PseudoElem::After),
+    }
+}
+
+/// The element with this `seq`, or `None`.
+fn find_seq(el: &Element, seq: u32) -> Option<&Element> {
+    if el.seq == seq {
+        return Some(el);
+    }
+    for c in &el.children {
+        if let Node::Element(e) = c {
+            if let Some(f) = find_seq(e, seq) {
+                return Some(f);
+            }
+        }
+    }
+    None
+}
+
+/// The element with this `seq`, for callers outside this module.
+pub fn find_seq_pub(dom: &Dom, seq: u32) -> Option<&Element> {
+    find_seq(&dom.root, seq)
+}
+
+/// Everything an element's subtree says, whitespace collapsed — see
+/// `HoverRepaint::text`.
+pub fn subtree_text(el: &Element, out: &mut String) {
+    for c in &el.children {
+        match c {
+            Node::Text(t) => {
+                for w in t.split_whitespace() {
+                    if !out.is_empty() {
+                        out.push(' ');
+                    }
+                    out.push_str(w);
+                }
+            }
+            Node::Element(e) => subtree_text(e, out),
+        }
+    }
+}
+
+/// Resolve every descendant of `el`, appending to `out`. False once more than
+/// `budget` of them exist — a subtree that large is not worth repainting one
+/// element at a time, and laying out is the honest answer.
+#[allow(clippy::too_many_arguments)]
+fn resolve_kids<'a>(
+    el: &'a Element,
+    own: &ComputedStyle,
+    anc: &mut Vec<ElemInfo<'a>>,
+    sheet: &Stylesheet,
+    theme: &Theme,
+    vw: f32,
+    hover: &[u32],
+    budget: usize,
+    out: &mut Vec<StyleProbe>,
+) -> bool {
+    let kids: Vec<&Element> = el
+        .children
+        .iter()
+        .filter_map(|n| match n {
+            Node::Element(e) => Some(e),
+            _ => None,
+        })
+        .collect();
+    let sib_count = kids.len() as u32;
+    let mut prev: Vec<ElemInfo> = Vec::new();
+    anc.push(ElemInfo::of_hovered(el, hover));
+    for e in &kids {
+        if out.len() >= budget {
+            anc.pop();
+            return false;
+        }
+        let st = style::resolve(&ElemInfo::of_hovered(e, hover), own, theme, sheet, anc, &prev, sib_count, vw);
+        out.push(probe_of(e, st, anc, &prev, sib_count, sheet, theme, vw, hover));
+        if !resolve_kids(e, &st, anc, sheet, theme, vw, hover, budget, out) {
+            anc.pop();
+            return false;
+        }
+        prev.push(ElemInfo::of_hovered(e, hover));
+    }
+    anc.pop();
+    true
+}
+
+/// Walk into the child whose subtree holds `seq`. Seqs are handed out in
+/// document order, so a child's subtree is `[child.seq, next_sibling.seq)` —
+/// which is what `bound` carries for the last child.
+#[allow(clippy::too_many_arguments)]
+fn descend<'a>(
+    el: &'a Element,
+    parent: &ComputedStyle,
+    anc: &mut Vec<ElemInfo<'a>>,
+    seq: u32,
+    bound: u32,
+    sheet: &Stylesheet,
+    theme: &Theme,
+    vw: f32,
+    hover: &[u32],
+) -> Option<StyleProbe> {
+    let kids: Vec<&Element> = el
+        .children
+        .iter()
+        .filter_map(|n| match n {
+            Node::Element(e) => Some(e),
+            _ => None,
+        })
+        .collect();
+    let sib_count = kids.len() as u32;
+    let mut prev: Vec<ElemInfo> = Vec::new();
+    for (i, e) in kids.iter().enumerate() {
+        let info = ElemInfo::of_hovered(e, hover);
+        let st = style::resolve(&info, parent, theme, sheet, anc, &prev, sib_count, vw);
+        if e.seq == seq {
+            return Some(probe_of(e, st, anc, &prev, sib_count, sheet, theme, vw, hover));
+        }
+        let next = kids.get(i + 1).map_or(bound, |n| n.seq);
+        if seq > e.seq && seq < next {
+            anc.push(ElemInfo::of_hovered(e, hover));
+            let r = descend(e, &st, anc, seq, next, sheet, theme, vw, hover);
+            // On success the chain STAYS — the caller resolves the element's
+            // descendants next, and they need their real ancestors. Popping it
+            // here left `.tabs li:hover a` unable to match anything, so a rule
+            // that styles a descendant quietly did nothing.
+            if r.is_none() {
+                anc.pop();
+            }
+            return r;
+        }
+        prev.push(ElemInfo::of_hovered(e, hover));
+    }
+    None
+}
+
+/// Repaint one element in a finished display list, for a pointer change that
+/// cannot move anything (`css::Class::Paint`).
+///
+/// The point is what it does NOT do: no parse, no cascade over the page, no
+/// box arithmetic. A pointer entering a link on Wikipedia's Main_Page changes
+/// 1 op of 723 and adds 1 more — measured — and used to cost a full layout,
+/// 25 ms on the dev box and ~1950 ms on the device, for 0.06 % of the viewport.
+///
+/// Correctness is CHECKED, not argued. Everything this touches is regenerated
+/// through the very functions layout used (`bg_ops`, `border_ops`,
+/// `push_decorations`), and the old state is regenerated too and has to be
+/// found in the list exactly where it is replaced. Anything ambiguous returns
+/// `false` and the caller lays out, which is what it did before.
+pub fn repaint_hover(lay: &mut Layout, fonts: &crate::fonts::Fonts, groups: &[HoverRepaint]) -> bool {
+    // Plan every edit first and apply nothing until all of them are known to
+    // be possible: a pass that patched as it went left a half-repainted page
+    // behind whenever it gave up in the middle.
+    let mut edits: Vec<Edit> = Vec::new();
+    for g in groups {
+        if g.rects.is_empty() {
+            return false;
+        }
+        if plan_one(lay, fonts, g, &mut edits).is_none() {
+            return false;
+        }
+    }
+    if edits.is_empty() {
+        // Something changed — `set_hover` said so — and if this pass found
+        // nothing to do then it did not understand what changed. Handing that
+        // to a layout is slow; leaving the page as it is would be wrong.
+        return false;
+    }
+    // Two elements laying claim to the same op cannot both be right.
+    edits.sort_by_key(|e| e.at);
+    if edits.windows(2).any(|w| w[0].at + w[0].len > w[1].at) {
+        return false;
+    }
+    for e in edits.into_iter().rev() {
+        lay.ops.splice(e.at..e.at + e.len, e.ops);
+    }
+    true
+}
+
+/// One planned replacement: `ops[at .. at+len]` becomes `ops`.
+struct Edit {
+    at: usize,
+    len: usize,
+    ops: Vec<DrawOp>,
+}
+
+/// One element the pointer entered or left, with everything needed to repaint
+/// it: where it painted, and how it and its subtree are styled before and after.
+pub struct HoverRepaint {
+    /// The element's own fragments — one per line for an inline box.
+    pub rects: Vec<(i32, i32, i32, i32)>,
+    /// The element itself, then every descendant, before and after. The
+    /// unchanged ones are here too: a run painted in a colour some OTHER
+    /// element also uses cannot be told apart, and this pass has to know that
+    /// rather than recolour the wrong text.
+    pub pairs: Vec<(StyleProbe, StyleProbe)>,
+    /// Everything this element's subtree says, whitespace collapsed.
+    ///
+    /// A rectangle is not proof of ownership: an element's border box can
+    /// enclose text that belongs to something else entirely — a table cell's
+    /// box contains the footnote marker of a link that is not inside it — and
+    /// two links on a page share a colour. Requiring the run to be part of what
+    /// this element actually SAYS is what tells them apart. A run that is not
+    /// found is left alone, and if that leaves nothing to do the page is laid
+    /// out instead.
+    pub text: String,
+}
+
+/// Is `(x, y)` inside any of the element's fragments?
+fn in_rects(rects: &[(i32, i32, i32, i32)], x: i32, y: i32) -> bool {
+    rects.iter().any(|(rx, ry, rw, rh)| x >= *rx && x < rx + rw && y >= *ry && y < ry + rh)
+}
+
+/// The box decoration this style paints at `rect`, in display-list order.
+///
+/// A background IMAGE is deliberately not resolved: its key belongs to the
+/// layout, and a repaint that guessed one would paint the wrong picture. A
+/// style that wants one gives up instead.
+fn deco_ops(st: &ComputedStyle, (x, y, w, h): (i32, i32, i32, i32)) -> Option<Vec<DrawOp>> {
+    if st.bg_layer.image.is_some() || st.mask_layer.image.is_some() {
+        return None;
+    }
+    if st.hidden || st.transparent || w <= 0 || h <= 0 {
+        return Some(Vec::new());
+    }
+    let mut v = Vec::new();
+    shadow_ops(st, x, y, w, h, &mut v);
+    bg_ops(st, None, None, x, y, w, h, &mut v);
+    border_ops(st, x, y, w, h, (true, true), &mut v);
+    Some(v)
+}
+
+/// Do these two styles paint the element's own BOX differently? Text aside,
+/// this is everything a box draws for itself.
+fn box_differs(a: &ComputedStyle, b: &ComputedStyle) -> bool {
+    a.bg != b.bg
+        || a.bg_layer != b.bg_layer
+        || a.mask_layer != b.mask_layer
+        || a.border_top != b.border_top
+        || a.border_right != b.border_right
+        || a.border_bottom != b.border_bottom
+        || a.border_left != b.border_left
+        || a.outline != b.outline
+        || a.outline_offset != b.outline_offset
+        || a.radius != b.radius
+        || a.shadow != b.shadow
+        || a.hidden != b.hidden
+        || a.transparent != b.transparent
+}
+
+/// Two ops the rasteriser would draw identically.
+fn op_eq(a: &DrawOp, b: &DrawOp) -> bool {
+    match (a, b) {
+        (
+            DrawOp::Rect { x: ax, y: ay, w: aw, h: ah, color: ac },
+            DrawOp::Rect { x: bx, y: by, w: bw, h: bh, color: bc },
+        ) => (ax, ay, aw, ah, ac) == (bx, by, bw, bh, bc),
+        (
+            DrawOp::RoundRect { x: ax, y: ay, w: aw, h: ah, r: ar, color: ac, ring: ag },
+            DrawOp::RoundRect { x: bx, y: by, w: bw, h: bh, r: br, color: bc, ring: bg },
+        ) => (ax, ay, aw, ah, ac) == (bx, by, bw, bh, bc) && ar == br && ag == bg,
+        (
+            DrawOp::Text { x: ax, y: ay, size: asz, color: ac, bold: ab, italic: ai, mono: am, text: at },
+            DrawOp::Text { x: bx, y: by, size: bsz, color: bc, bold: bb, italic: bi, mono: bm, text: bt },
+        ) => (ax, ay, ac, ab, ai, am, at) == (bx, by, bc, bb, bi, bm, bt) && asz == bsz,
+        _ => false,
+    }
+}
+
+/// Where `want` sits in `ops`, if it sits there exactly once.
+fn find_once(ops: &[DrawOp], want: &[DrawOp]) -> Option<usize> {
+    if want.is_empty() || want.len() > ops.len() {
+        return None;
+    }
+    let mut at = None;
+    for i in 0..=ops.len() - want.len() {
+        if (0..want.len()).all(|k| op_eq(&ops[i + k], &want[k])) {
+            if at.is_some() {
+                return None; // two boxes look alike — patch neither
+            }
+            at = Some(i);
+        }
+    }
+    at
+}
+
+/// Is this run part of what the element says? Whitespace is collapsed on both
+/// sides because a run is already wrapped and the source is not.
+fn says(subtree: &str, run: &str) -> bool {
+    let norm = |t: &str| {
+        let mut o = String::with_capacity(t.len());
+        for w in t.split_whitespace() {
+            if !o.is_empty() {
+                o.push(' ');
+            }
+            o.push_str(w);
+        }
+        o
+    };
+    let r = norm(run);
+    !r.is_empty() && subtree.contains(&r)
+}
+
+/// One text substitution: runs painted in `off` become `on`, and their
+/// decorations are re-emitted.
+struct Sub {
+    off: ComputedStyle,
+    on: ComputedStyle,
+}
+
+/// What a run looks like to the line builder — the tuple it merges on.
+fn run_face(op: &DrawOp, recolour: Option<Rgb>) -> Option<(i32, Rgb, u32, bool, bool, bool)> {
+    let DrawOp::Text { y, size, color, bold, italic, mono, .. } = op else { return None };
+    Some((*y, recolour.unwrap_or(*color), size.to_bits(), *bold, *italic, *mono))
+}
+
+/// `None` = cannot be done with certainty, lay out instead.
+fn plan_one(
+    lay: &Layout,
+    fonts: &crate::fonts::Fonts,
+    g: &HoverRepaint,
+    edits: &mut Vec<Edit>,
+) -> Option<()> {
+    // A pseudo-element that repaints is out of reach: its box is generated
+    // during layout and its rect was never recorded.
+    if g.pairs.iter().any(|(a, b)| pseudos_differ(a, b)) {
+        return None;
+    }
+    let (own_off, own_on) = (&g.pairs[0].0.own, &g.pairs[0].1.own);
+
+    // ── the element's own box decoration ──────────────────────────────────
+    // The rect is its border box, which a paint-only change cannot have moved.
+    if box_differs(own_off, own_on) {
+        for r in &g.rects {
+            let (was, now) = (deco_ops(own_off, *r)?, deco_ops(own_on, *r)?);
+            if was.len() != now.len() {
+                // A background or border APPEARS or vanishes, and where it
+                // belongs in the list is the box's own insertion point — which
+                // the finished display list no longer remembers.
+                return None;
+            }
+            if was.iter().zip(&now).all(|(a, b)| op_eq(a, b)) {
+                continue;
+            }
+            let at = find_once(&lay.ops, &was)?;
+            edits.push(Edit { at, len: was.len(), ops: now });
+        }
+    }
+    // A DESCENDANT that repaints its own box is out of reach: its rect was
+    // never recorded, only the carrier's.
+    if g.pairs[1..].iter().any(|(a, b)| box_differs(&a.own, &b.own)) {
+        return None;
+    }
+
+    // ── the text inside it ────────────────────────────────────────────────
+    let mut subs: Vec<Sub> = Vec::new();
+    for (off, on) in g.pairs.iter().map(|(a, b)| (&a.own, &b.own)) {
+        if off.color == on.color && off.deco == on.deco {
+            continue;
+        }
+        // Two elements in this subtree painted in the same colour that must
+        // now become different ones — a run cannot be assigned to either.
+        if subs.iter().any(|s| s.off.color == off.color && (s.on.color != on.color || s.on.deco != on.deco)) {
+            return None;
+        }
+        subs.push(Sub { off: *off, on: *on });
+    }
+    // A run painted in a colour that some UNCHANGED element also uses would be
+    // recoloured by mistake.
+    if g.pairs.iter().map(|(a, b)| (&a.own, &b.own)).any(|(off, on)| {
+        off.color == on.color && off.deco == on.deco && subs.iter().any(|s| s.off.color == off.color)
+    }) {
+        return None;
+    }
+    if subs.is_empty() {
+        return Some(());
+    }
+    let sub_for = |op: &DrawOp| -> Option<&Sub> {
+        let DrawOp::Text { x, y, color, text, .. } = op else { return None };
+        if !in_rects(&g.rects, *x, *y) || !says(&g.text, text) {
+            return None;
+        }
+        subs.iter().find(|s| s.off.color == *color)
+    };
+
+    // Recolouring can MERGE two runs. The line builder joins neighbouring
+    // segments that share a face, so two runs the page painted apart —
+    // `46° 58′ 50″ N, 8° 20′ 20″ O` split across three links — become ONE op
+    // the moment they agree on a colour, with a single underline across the
+    // whole thing instead of three. A patch cannot produce that.
+    //
+    // The test is deliberately blunt: give up whenever a repainted run ends up
+    // looking like the run it TOUCHES. Whether they really merge also depends
+    // on the `href` behind them, which the display list no longer carries — so
+    // the only honest answer from here is "maybe", and maybe means lay out.
+    let face = |op: &DrawOp| -> Option<(i32, Rgb, u32, bool, bool, bool)> {
+        let DrawOp::Text { y, size, color, bold, italic, mono, .. } = op else { return None };
+        let c = sub_for(op).map_or(*color, |s| s.on.color);
+        Some((*y, c, size.to_bits(), *bold, *italic, *mono))
+    };
+    let right_edge = |op: &DrawOp| -> i32 {
+        let DrawOp::Text { x, size, bold, italic, mono, text, .. } = op else { return i32::MIN };
+        x + ceil_i32(measure(fonts.pick(*bold, *italic, *mono), text, *size))
+    };
+    let texts: Vec<usize> =
+        (0..lay.ops.len()).filter(|i| matches!(lay.ops[*i], DrawOp::Text { .. })).collect();
+    for w in texts.windows(2) {
+        let (a, b) = (&lay.ops[w[0]], &lay.ops[w[1]]);
+        if sub_for(a).is_none() && sub_for(b).is_none() {
+            continue;
+        }
+        let DrawOp::Text { x: bx, .. } = b else { continue };
+        if face(a) == face(b) && (right_edge(a) - bx).abs() <= 1 {
+            return None;
+        }
+    }
+
+    for (i, op) in lay.ops.iter().enumerate() {
+        let Some(sub) = sub_for(op) else { continue };
+        let DrawOp::Text { x, y, size, bold, italic, mono, text, .. } = op else { continue };
+        // Everything `push_decorations` was given, recovered from the op it was
+        // emitted next to — the run's own width and baseline, measured with the
+        // same face at the same size. No second copy of the rule.
+        let (x, y, size) = (*x, *y, *size);
+        let font = fonts.pick(*bold, *italic, *mono);
+        let run_w = ceil_i32(measure(font, text, size));
+        let baseline = y + ascent_i(font, size);
+        let mut run = RunStyle {
+            hidden: false,
+            transparent: false,
+            size,
+            color: sub.off.color,
+            bold: *bold,
+            italic: *italic,
+            mono: *mono,
+            valign: sub.off.valign,
+            deco: sub.off.deco,
+            break_word: false,
+            nowrap: false,
+            lh: 0.0,
+        };
+        let mut was = Vec::new();
+        push_decorations(&run, x, run_w, baseline, &mut was);
+        run.color = sub.on.color;
+        run.deco = sub.on.deco;
+        let mut now = Vec::new();
+        push_decorations(&run, x, run_w, baseline, &mut now);
+        now.push(DrawOp::Text {
+            x,
+            y,
+            size,
+            color: sub.on.color,
+            bold: *bold,
+            italic: *italic,
+            mono: *mono,
+            text: text.clone(),
+        });
+
+        // A run's decorations sit immediately before it.
+        let start = i.checked_sub(was.len())?;
+        if !(0..was.len()).all(|k| op_eq(&lay.ops[start + k], &was[k])) {
+            return None;
+        }
+        edits.push(Edit { at: start, len: was.len() + 1, ops: now });
+    }
+    Some(())
 }
 
 /// Where a placed item starts on its line — the left edge of a fragment that
