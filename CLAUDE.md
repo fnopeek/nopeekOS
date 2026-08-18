@@ -48,15 +48,16 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-08-15 · kernel v0.267.8 · beak 0.25.0 · wifi_ax200 0.54.2 ·
-wifid 0.3.0**
+**Stand 2026-08-18 · beak 0.26.0** (Kernel-/WLAN-Versionen: `git log`)
 
 Zwei Fäden laufen parallel.
 
 **`beak`**, der eigene Browser: Stage 0 (HTML, CSS, Layout, Paint — noch kein
 JavaScript) läuft auf Hardware; die Arbeit dreht sich um Konformität und um
 echte Seiten (POST, Cookies, Zeichensätze, TLS-Wurzelspeicher). Die gemessene
-WPT-Zahl steht in `docs/spec/CONFORMANCE.md` und nirgends sonst.
+WPT-Zahl steht in `docs/spec/CONFORMANCE.md` und nirgends sonst. Seit 0.26.0
+gibt es einen Pfad **unterhalb** von „volles Layout": ein Zeigerwechsel, der nur
+malt, wird in der Anzeigeliste geflickt statt neu gerechnet.
 
 **WLAN (AX200)**: lädt Wikipedia über Funk. Das Intent **`wlan`** ist das
 Werkzeug dafür — Kernel-Sicht plus ein Klartext-Report, den der Treiber selbst
