@@ -338,8 +338,14 @@ pub fn intent_cores() {
     kprintln!();
 }
 
-pub fn intent_history() {
-    super::print_active_history();
+/// `history` prints this window's lines, `history clear` wipes the log
+/// that survives the reboot along with every window's ring.
+pub fn intent_history(args: &str) {
+    match args.trim() {
+        "" => super::print_active_history(),
+        "clear" | "-c" | "wipe" => super::clear_all_history(),
+        _ => kprintln!("[npk] usage: history [clear]"),
+    }
 }
 
 /// `akku` / `battery` — Smart-Battery diagnostic. Shows whether the i801
@@ -1224,7 +1230,7 @@ pub fn intent_help_topic(topic: &str) {
             help_row("cores", "Per-core load and frequency");
             help_row("cpu", "CPU model and features");
             help_row("slab", "Allocator statistics");
-            help_row("history", "Previous intents");
+            help_row("history", "Previous intents (history clear wipes them)");
             help_row("clear", "Clear the window");
             help_row("version", "Kernel version (also: uname, about)");
             help_row("reboot", "Restart");
