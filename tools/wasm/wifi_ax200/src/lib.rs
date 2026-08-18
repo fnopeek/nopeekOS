@@ -217,6 +217,7 @@ struct Stats {
     tx_bytes: u64,
     tx_blocked: u32, // times the in-flight cap stopped us pulling another frame
     tx_wd_recoveries: u32, // times the queue watchdog reclaimed leaked TX slots
+    inflight_corrections: u32, // times the derived read pointer beat the counter
     gtk_installs: u32,     // group keys installed = 4-way once + one per rekey
     tx_eapol_dropped: u32, // handshake replies that never reached the air
     inflight_peak: u32,
@@ -354,7 +355,7 @@ struct Stats {
 
 impl Stats {
     const NEW: Stats = Stats {
-        tx_frames: 0, tx_bytes: 0, tx_blocked: 0, tx_wd_recoveries: 0, gtk_installs: 0, tx_eapol_dropped: 0, inflight_peak: 0,
+        tx_frames: 0, tx_bytes: 0, tx_blocked: 0, tx_wd_recoveries: 0, inflight_corrections: 0, gtk_installs: 0, tx_eapol_dropped: 0, inflight_peak: 0,
         tx_ok: 0, tx_fail: 0, tx_retries: 0, tx_rts_fail: 0, tx_airtime_us: 0,
         last_status: 0, last_init_rate: 0,
         rx_frames: 0, rx_bytes: 0, rx_ip: 0, rx_eapol: 0, rx_mgmt: 0, rx_drain_max: 0,
@@ -517,6 +518,14 @@ struct Ax200 {
     data_bc_tbl: Dma,
     data_queue_id: u16,
     data_write_ptr: u32,
+    /// The firmware's read pointer for the data queue, derived from the TFD
+    /// index every TX response carries in its header sequence
+    /// (`SEQ_TO_INDEX`, cmdhdr.h:20) — the same source `iwl_pcie_reclaim`
+    /// uses. `data_in_flight` used to be a COUNTER: incremented per submit,
+    /// decremented per completion, and therefore permanently wrong the moment
+    /// one completion went missing. Derived from the two pointers it is
+    /// self-correcting: the very next completion snaps it back to the truth.
+    data_read_ptr: u32,
     // Frames handed to the data queue but not yet reported complete by the FW
     // (TX_CMD response). Flow control: never enqueue past the queue depth, or we
     // overwrite a TFD the firmware is still transmitting → corruption/stall.
@@ -3212,7 +3221,11 @@ impl Ax200 {
         if self.st.tx_wd_recoveries > 0 {
             r.s("  WD-RECLAIM ");
             r.d(self.st.tx_wd_recoveries as u64);
-            r.s(" (firmware swallowed completions)");
+        }
+        if self.st.inflight_corrections > 0 {
+            r.s("  corrected ");
+            r.d(self.st.inflight_corrections as u64);
+            r.s(" (counter drifted from the firmware's read pointer)");
         }
         r.c(b'\n');
 
@@ -4601,6 +4614,9 @@ impl Ax200 {
             let mut baid_alloc: Option<u32> = None;
             let mut delba: Option<(u8, u16)> = None;
             let mut mb: Option<(u32, u32, u32, u32)> = None;
+            // The data queue id, captured before the closure borrows self.
+            let a_dataq = self.data_queue_id as u32;
+            let mut a_read_ptr: Option<u32> = None;
             let t_rx0 = host::now_us();
             let rx_frames = self.service_rx(|c, g, rb| {
                 if c == TX_CMD && g == 0 {
@@ -4612,6 +4628,15 @@ impl Ax200 {
                     tx_done += 1;
                     let mut tr = [0u8; RX_PKT_DATA_OFF + TX_RESP_LEN];
                     host::dma_read_buf(rb.handle, 0, &mut tr);
+                    // The response header carries the TFD index it completes
+                    // (`SEQ_TO_INDEX`, cmdhdr.h:20) and the queue it belongs to
+                    // (`SEQ_TO_QUEUE`). That is the firmware's read pointer,
+                    // stated outright — no need to count.
+                    let seq = u16::from_le_bytes([tr[6], tr[7]]) as u32;
+                    if (seq >> 8) & 0x1f == a_dataq {
+                        a_read_ptr = Some((seq & 0xff).wrapping_add(1)
+                            & (MAX_TFD_QUEUE_SIZE - 1));
+                    }
                     let base = RX_PKT_DATA_OFF;
                     a_rts += tr[base + TXR_OFF_FAILURE_RTS] as u32;
                     a_retries += tr[base + TXR_OFF_FAILURE_FRAME] as u32;
@@ -4786,7 +4811,34 @@ impl Ax200 {
             self.st.prof_rx_us += host::now_us().saturating_sub(t_rx0);
             self.st.prof_frames += rx_frames as u64;
             // Free the data-queue slots the firmware just reported done.
-            self.data_in_flight = self.data_in_flight.saturating_sub(tx_done);
+            //
+            // Derived, not counted: `(write - read) & 255` is what the firmware
+            // and we actually disagree about, and a swallowed completion is
+            // repaired by the next one instead of leaking a slot forever.
+            // Measured before this: 8 of 16 slots lost for 314 s, and an OTA
+            // update that failed because a one-second stall killed its TLS
+            // handshake.
+            if let Some(rp) = a_read_ptr {
+                self.data_read_ptr = rp;
+                let derived = self.data_write_ptr
+                    .wrapping_sub(rp) & (MAX_TFD_QUEUE_SIZE - 1);
+                // Say when the two disagree by more than the frames completed
+                // in this pass — that difference IS the leak, and until now it
+                // was invisible.
+                if derived + tx_done < self.data_in_flight
+                    && self.st.inflight_corrections < 8
+                {
+                    self.st.inflight_corrections += 1;
+                    host::print("[ax200] in-flight was ");
+                    host::print_dec(self.data_in_flight);
+                    host::print(", firmware says ");
+                    host::print_dec(derived);
+                    host::print(" — correcting\n");
+                }
+                self.data_in_flight = derived;
+            } else {
+                self.data_in_flight = self.data_in_flight.saturating_sub(tx_done);
+            }
             // Fold this pass's accumulators into the running statistics.
             self.st.loop_iters = self.st.loop_iters.wrapping_add(1);
             self.st.rx_frames = self.st.rx_frames.wrapping_add(rx_frames);
@@ -5537,6 +5589,7 @@ pub extern "C" fn _start() {
         data_bc_tbl: Dma::NONE,
         data_queue_id: 0,
         data_write_ptr: 0,
+        data_read_ptr: 0,
         key_slot_used: [false; STA_KEY_MAX_NUM as usize],
         key_slot_freed: [0; STA_KEY_MAX_NUM as usize],
         key_slot_prev: None,
