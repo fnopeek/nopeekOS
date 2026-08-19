@@ -517,6 +517,11 @@ pub const MPDU_OFF_MPDU_LEN: usize = 0; // __le16
 pub const MPDU_OFF_MAC_FLAGS1: usize = 2; // u8
 pub const MPDU_OFF_MAC_FLAGS2: usize = 3; // u8
 pub const MPDU_OFF_AMSDU_INFO: usize = 4; // u8
+pub const MPDU_OFF_PHY_INFO: usize = 5; // __le16 (enum iwl_rx_mpdu_phy_info)
+// fw/api/rx.h: the firmware flips TOGGLE at the start of every new aggregate,
+// which is how iwl_mvm_rx_mpdu_mq tells one A-MPDU from the next.
+pub const IWL_RX_MPDU_PHY_AMPDU: u16 = 1 << 5;
+pub const IWL_RX_MPDU_PHY_AMPDU_TOGGLE: u16 = 1 << 6;
 pub const MPDU_OFF_STATUS: usize = 12; // __le32 (enum iwl_rx_mpdu_status)
 pub const MPDU_OFF_REORDER_DATA: usize = 16; // __le32
 pub const MPDU_OFF_RATE_N_FLAGS: usize = 28; // v1.rate_n_flags (union @20 + 8)
@@ -1089,7 +1094,13 @@ pub const IWL_DATA_QUEUE_SIZE: usize = 64;
 /// darf von diesem Commit nichts uebrig bleiben. Damit ist der Treiber
 /// funktional wieder 0.81.0 plus die Ringdisziplin. Die 4100 blockierten Sendungen
 /// waren gemessen — 32 kommt zurueck, sobald der Link steht, als EIGENER Schritt.
-pub const TX_INFLIGHT_MAX: u32 = 32;
+/// 2026-08-19, dritte Messung dieser Zahl und jedes Mal mit Beleg. Bei 70 Mbit
+/// Download am Geraet: `tx blocked 768`, `inflight peak 32/32` und
+/// `tx drops full 620 (driver too slow)` — fq_codel warf 620 unserer ACKs weg,
+/// die Gegenseite sah fehlende Quittungen und brach ein (`ssthresh=7`,
+/// `retrans=1202`). Der Deckel war wieder die Durchsatzgrenze.
+/// 48 laesst Luft und bleibt unter QUEUE_SIZE-1 = 63.
+pub const TX_INFLIGHT_MAX: u32 = 48;
 /// TX queue watchdog. Linux arms it whenever the queue is NOT EMPTY and pushes
 /// it forward on every completion; it does not care how full the queue is.
 ///
