@@ -132,11 +132,14 @@ const RETRY_TICKS_BASE: u64 = 100; // 1 second (100Hz)
 const ARP_RETRANS_TICKS: u64 = 5; // 50 ms
 const ARP_MAX_TRIES: u8 = 10;
 const FIN_TIMEOUT_TICKS: u64 = 6000; // 60 s, like Linux's tcp_fin_timeout
-// Retransmit timeout for DATA. Base 200 ms, doubled per attempt (RFC 6298
-// style), give up after MAX_DATA_RETRIES — ~6 s total, then the connection
-// is honestly dead instead of silently one-way.
+// Retransmit timeout for DATA. Base 200 ms (= Linux TCP_RTO_MIN, HZ/5),
+// doubled per attempt (RFC 6298 style). 5 attempts was a number without a
+// model: ~6 s, and a 1 GB transfer that saturated the send path killed the
+// debug mirror mid-flight. Linux gives TCP_RETR2 = 15 (include/net/tcp.h).
+// With the shift capped at 5 the RTO tops out at 6.4 s, so 15 attempts span
+// ~70 s — patient and still bounded.
 const RTO_TICKS_BASE: u64 = 20; // 200 ms
-const MAX_DATA_RETRIES: u8 = 5;
+const MAX_DATA_RETRIES: u8 = 15;
 // Ceiling on unacknowledged bytes held for retransmit. A peer that stops
 // acknowledging must not grow this without bound; `send` refuses past it,
 // which is the backpressure the caller needs to see.

@@ -13,13 +13,23 @@ pub const MTU: usize = 1514;
 
 static WASM_NIC_ACTIVE: AtomicBool = AtomicBool::new(false);
 static WASM_NIC: Mutex<WasmNic> = Mutex::new(WasmNic::empty());
+/// The spill ring lives in its OWN static, and that is not cosmetic: a static
+/// goes into `.bss` only if it is entirely zero, and the granularity is the
+/// whole symbol. Sharing one with `FqCodel` — whose `link: [EMPTY; CAP]` is
+/// `[0xFFFF; 64]` — put 128 non-zero bytes next to a megabyte of zeros and
+/// wrote the whole thing into the kernel image. Measured at RX_RING 512:
+/// `.data` 351 672 -> 1 030 840, `.bss` unchanged, kernel.efi +663 KB, on an
+/// image that ships over the very WiFi link it is meant to fix.
+/// Never nest this lock inside another; `register_wasm_nic` is the one place
+/// that takes both, and it takes WASM_NIC first.
+static WASM_NIC_RX: Mutex<Ring<RX_RING>> = Mutex::new(Ring::new());
 
 // Frame ring between the kernel net stack and a WASM NIC driver. Unlike a
 // single-slot mailbox (which overwrites — and so DROPS — an undrained frame on
 // the next submit), this absorbs bursts: the producer drops only when the ring
 // is genuinely full, never clobbering a frame already queued. One slot is kept
-// empty to distinguish full from empty. All access is under the WASM_NIC lock,
-// so plain indices suffice (no atomics needed).
+// empty to distinguish full from empty. All access is under the WASM_NIC_RX
+// lock, so plain indices suffice (no atomics needed).
 struct Ring<const N: usize> {
     bufs: [[u8; MTU]; N],
     lens: [u16; N],
@@ -55,12 +65,18 @@ impl<const N: usize> Ring<N> {
 // RX is a FALLBACK: the driver normally delivers each frame straight into the IP
 // stack from its own fiber (net::wasm_deliver_rx, the NAPI topology) and only
 // spills to this ring when Core 0 holds the drain guard.
-const RX_RING: usize = 64;
+// 64 was sized for "occasionally, briefly". Measured on the device at ~100
+// Mbit: `rx ring in 798365 dropped 1508 (ring full — driver outran core-0
+// drain)`, while the DRIVER's own pool reported `pool-exhausted 0` — the
+// frames survived the radio, survived the card, and were thrown away here.
+// Every one is a retransmission the sender then has to make.
+// 512 entries. Costs nothing in the image now that the ring has its own
+// all-zero static (see WASM_NIC_RX); the first attempt at this number went
+// into `.data` and put 663 KB into every OTA kernel download.
+const RX_RING: usize = 512;
 
 struct WasmNic {
     mac_addr: [u8; 6],
-    /// Frames the WASM driver received, waiting for the kernel to consume.
-    rx: Ring<RX_RING>,
     /// Frames the kernel queued for the driver to transmit. fq_codel (Linux
     /// "Make WiFi Fast"): per-flow fair queueing + CoDel AQM so a ping isn't
     /// stuck behind a bulk backlog and stale packets are dropped, not delayed.
@@ -75,7 +91,6 @@ impl WasmNic {
     const fn empty() -> Self {
         WasmNic {
             mac_addr: [0; 6],
-            rx: Ring::new(),
             tx: crate::net::fq_codel::FqCodel::new(),
             link_up: false,
         }
@@ -86,7 +101,7 @@ impl WasmNic {
 pub fn register_wasm_nic(mac: [u8; 6]) {
     let mut nic = WASM_NIC.lock();
     nic.mac_addr = mac;
-    nic.rx.clear();
+    WASM_NIC_RX.lock().clear();
     nic.tx.clear();
     nic.link_up = false;
     WASM_NIC_ACTIVE.store(true, Ordering::Release);
@@ -300,7 +315,7 @@ pub fn wasm_nic_stats_reset() {
 pub fn wasm_nic_submit_rx(frame: &[u8]) {
     if frame.len() > MTU { return; }
     RX_TO_RING.fetch_add(1, Ordering::Relaxed);
-    if !WASM_NIC.lock().rx.push(frame) {
+    if !WASM_NIC_RX.lock().push(frame) {
         RX_RING_DROP.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -316,7 +331,7 @@ pub fn wasm_nic_poll_tx(buf: &mut [u8; MTU]) -> Option<usize> {
 /// flush frames that spilled to the ring (while Core 0 held the drain guard)
 /// before the freshly-delivered one — preserving FIFO order.
 pub fn wasm_nic_poll_rx(buf: &mut [u8; MTU]) -> Option<usize> {
-    WASM_NIC.lock().rx.pop(buf)
+    WASM_NIC_RX.lock().pop(buf)
 }
 
 pub fn send(frame: &[u8]) -> Result<(), NetError> {
@@ -359,7 +374,7 @@ static TX_ERR: AtomicU32 = AtomicU32::new(0);
 
 pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
     match active() {
-        Active::Wasm => WASM_NIC.lock().rx.pop(buf),
+        Active::Wasm => WASM_NIC_RX.lock().pop(buf),
         Active::Intel => intel_nic::recv(buf),
         Active::Rtl => rtl8153::recv(buf),
         Active::Virtio | Active::None => virtio_net::recv(buf),
