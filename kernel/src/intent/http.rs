@@ -660,6 +660,15 @@ pub fn https_get(host: &str, path: &str, max_size: usize) -> Result<alloc::vec::
     for _ in 0..4 {
         // Vec-mode: accumulate into out, sink just extends it.
         let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        // Progress heartbeat. The streaming asset path reports every 8 MiB —
+        // but a kernel is ~4 MB and a module ~1.4 MB, so NEITHER ever crossed
+        // that threshold and both downloaded in complete silence. Over a slow
+        // WiFi link that is indistinguishable from a hang, and it is the path
+        // every update takes. Step from the expected size so any real download
+        // reports about eight times; manifests and signatures never reach
+        // 256 KiB and stay quiet.
+        let step = core::cmp::max(max_size / 8, 256 * 1024);
+        let mut next_report = step;
         let resp = https_get_once(
             &cur_host,
             &cur_path,
@@ -668,11 +677,16 @@ pub fn https_get(host: &str, path: &str, max_size: usize) -> Result<alloc::vec::
             &mut |chunk: &[u8]| -> Result<(), &'static str> {
                 if out.len().saturating_add(chunk.len()) > max_size {
                     out.extend_from_slice(&chunk[..max_size.saturating_sub(out.len())]);
-                    Ok(())
                 } else {
                     out.extend_from_slice(chunk);
-                    Ok(())
                 }
+                if out.len() >= next_report && max_size > 0 {
+                    crate::kprintln!("[npk]     {} / {} KiB ({}%)",
+                        out.len() / 1024, max_size / 1024,
+                        out.len() * 100 / max_size);
+                    next_report = out.len() + step;
+                }
+                Ok(())
             },
         )?;
         match resp.status {
@@ -1474,6 +1488,20 @@ fn https_get_once(
     max_size: usize,
     on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
 ) -> Result<HttpResponse, &'static str> {
+    // Timer-NAPI, for the handshake AND the body. `http_get_once` has done this
+    // since it was written; the TLS path never did — so every OTA download
+    // polled its socket at 100 Hz and slept up to 10 ms between looks, while
+    // `netbench` over plain HTTP got 10 kHz and a 100 µs floor. A factor of a
+    // hundred on the receive path, and exactly the asymmetry we kept blaming on
+    // TLS itself: "update crawls, netbench flies". The guard restores 100 Hz on
+    // every exit path, including the `?` returns below.
+    crate::interrupts::set_worker_poll_hz(10_000);
+    struct PollHzGuard;
+    impl Drop for PollHzGuard {
+        fn drop(&mut self) { crate::interrupts::set_worker_poll_hz(100); }
+    }
+    let _hz = PollHzGuard;
+
     // Attempt 1: reuse a pooled session (no DNS/TCP/TLS handshake).
     if let Some(tls) = pool_take(host) {
         match https_exchange(host, path, req, max_size, tls, on_chunk) {
