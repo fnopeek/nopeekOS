@@ -1116,7 +1116,15 @@ pub const TX_INFLIGHT_MAX: u32 = 48;
 /// RTT — a third of a second of ACKs we could not send. A frame that has not
 /// been acknowledged after a second is lost; the firmware's own retry sequence
 /// is over long before that.
-pub const TX_WD_TIMEOUT_MS: u64 = 1_000;
+/// Linux: `cfg/22000.c` sets `.wd_timeout = IWL_LONG_WD_TIMEOUT` = 10000 for
+/// this family (iwl-config.h:87). Ours was 1000 — our own number, from the
+/// commit that "lowered it from 10 s to 1 s". On a saturated channel a frame
+/// legitimately takes more than a second to get out, so the watchdog declared
+/// a healthy queue stuck and set `data_in_flight = 0` — which is not true, the
+/// slots are not free — and then we oversubscribed the queue on top of an
+/// already busy link. Measured during an OTA over WiFi: it fired again and
+/// again while the update crawled. Back to the value Linux uses.
+pub const TX_WD_TIMEOUT_MS: u64 = 10_000;
 pub const DATA_QUEUE_CB_SIZE: u32 = 3; // TFD_QUEUE_CB_SIZE(64) = ilog2(64)-3
 // Per-slot TX staging stride. Each in-flight TFD's TB1 must point at its OWN
 // payload region, or back-to-back frames clobber each other's data before the
