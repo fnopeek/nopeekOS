@@ -31,7 +31,14 @@ struct HwDriverState {
 }
 
 const MAX_MMIO_MAPS: usize = 4;
-const MAX_DMA_ALLOCS: usize = 128;
+/// Per-module DMA allocation slots. 128 left the AX200 driver at 127 of 128
+/// with a 64-buffer receive pool: 3 RX rings + 3 command + 48 firmware
+/// sections + 1 context info + 64 RBs + 8 queue buffers. One slot of headroom,
+/// and a driver that exceeds it fails SILENTLY (`alloc_dma` hands back a NONE
+/// handle every later access quietly ignores). A slot is a (phys, pages)
+/// pair, so this ceiling is bookkeeping, not memory. Linux allocates 2048
+/// receive buffers for this chip.
+const MAX_DMA_ALLOCS: usize = 512;
 const MAX_DMA_PAGES: usize = 2048; // 8MB total (iwlwifi FW sections ~1.3MB)
 const MAX_DMA_PAGES_PER_CALL: usize = 1024; // 4MB; a single FW section can exceed 256KB
 

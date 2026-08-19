@@ -141,9 +141,20 @@ pub const CMD_QUEUE_CB_SIZE: u8 = 2; // TFD_QUEUE_CB_SIZE(32) = ilog2(32)-3
 // ── Stage 3: RX restock + ALIVE notification ─────────────────────
 // RFH free-RBD write-pointer trigger (direct MMIO in BAR0, gen2 < BZ).
 pub const RFH_Q0_FRBDCB_WIDX_TRG: u32 = 0x1C80;
-// RB pool size: enough to receive the alive notification (kept small to
-// stay under MAX_DMA_ALLOCS; no npk_dma_free in the ABI). Each RB = 1 page.
-pub const RX_NUM_RBS: usize = 64;
+// RB pool size. 64 was a bring-up number — "enough to receive the alive
+// notification", capped by MAX_DMA_ALLOCS — and never revisited for
+// throughput. At 64 Mbit those 64 pages hold ~12 ms, against a
+// `worker_idle_hlt` that parks the core for up to 10 ms between drains: one
+// millisecond of margin, and the device reported `drain-peak 56/64`. It also
+// left the driver at 127 of 128 allocation slots, one away from a SILENT
+// failure. Linux allocates IWL_NUM_RBDS_HE (2048) for this chip; 256 pages =
+// 1 MB gives ~48 ms. Each RB = 1 page. 512 was tried and is NOT the reason the
+// link broke (that was the width negotiation) — but it stays out until the
+// link has been stable at 256. Requires MAX_DMA_ALLOCS >= 512 in the kernel.
+pub const RX_NUM_RBS: usize = 256;
+// The ring rule, machine-checked instead of remembered: a pool larger than the
+// ring cannot be posted, and Linux itself stops one short (num_rbds - 1).
+const _: () = assert!(RX_NUM_RBS < NUM_RBDS);
 pub const RB_SIZE_BYTES: usize = 4096; // IWL_AMSDU_4K
 // rb_stts.closed_rb_num producer index mask.
 pub const RB_STTS_CLOSED_MASK: u32 = 0x0FFF;
