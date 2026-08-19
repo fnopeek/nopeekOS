@@ -31,6 +31,13 @@ use regs::*;
 /// referenced by the panic site, not a symbol.
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
+    // Two channels on purpose. `print` reaches the terminal this driver was
+    // launched from and is worker-core safe, so it lands where someone is
+    // looking right now. `log` goes through kprintln to the serial capture,
+    // which is the ONLY thing `dmesg` reads — without it the line dies with
+    // the scrollback and cannot be recovered after a reboot. Print first: if
+    // the kprintln path stalls (it routes through shade), the visible half has
+    // already happened, and we are on our way to `loop {}` regardless.
     host::print("\n[ax200] PANIC — driver stopped");
     if let Some(l) = info.location() {
         host::print(" at ");
@@ -39,6 +46,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         host::print_dec(l.line());
     }
     host::print("\n");
+    host::log("[ax200] PANIC — driver stopped (see the line above for file:line)");
     loop {}
 }
 
