@@ -48,22 +48,8 @@ const LOG_CAP: usize = 8192;
 static mut LOG_BUF: [u8; LOG_CAP] = [0; LOG_CAP];
 static mut LOG_LEN: usize = 0;
 
-/// Bytes already persisted. `log` only APPENDS to the buffer; `log_flush`
-/// writes it out, and the main loop calls that once per poll round.
-static mut LOG_FLUSHED: usize = 0;
-
 // Log to the terminal AND persist to npkFS `sys/log/wifid` — wifid runs in an
 // invisible autostart window, so its log is read back with `fetch /sys/log/wifid`.
-//
-// The store used to happen on EVERY line, and `log_hex` calls this once per
-// BYTE PAIR — a 32-byte key dump was 32 stores. Each store is an `fs::write`,
-// which is N puts plus a full four-phase `commit_root`. Over WiFi, where this
-// module talks constantly (rekeys, link changes, reconnects), those commits
-// land in the middle of an OTA streaming download — and npkFS's `put`
-// deliberately DEFERS its commit on the documented assumption of "N puts then
-// exactly one commit_root". Over a cable this module is silent and the
-// assumption holds; over WiFi it does not. Suspected in the repeated npkFS
-// damage after OTA over WiFi, not proven.
 fn log(s: &str) {
     unsafe { npk_print(s.as_ptr() as i32, s.len() as i32) };
     unsafe {
@@ -77,20 +63,6 @@ fn log(s: &str) {
             }
         }
         len_ptr.write(l);
-    }
-}
-
-/// Persist the log if it grew. One store per poll round instead of one per
-/// line — and none at all while nothing is happening.
-fn log_flush() {
-    unsafe {
-        let l = core::ptr::addr_of_mut!(LOG_LEN).read();
-        let flushed_ptr = core::ptr::addr_of_mut!(LOG_FLUSHED);
-        if l == flushed_ptr.read() {
-            return;
-        }
-        flushed_ptr.write(l);
-        let buf = core::ptr::addr_of_mut!(LOG_BUF) as *mut u8;
         let name = b"sys/log/wifid";
         npk_store(name.as_ptr() as i32, name.len() as i32, buf as i32, l as i32);
     }
@@ -184,8 +156,6 @@ pub extern "C" fn _start() {
             handle_event(ev, &pmk, &mut sup, &mut out);
             saw_event = true;
         }
-        // One store per round, not one per line.
-        log_flush();
         // The 4-way is four messages, each waiting out one poll interval. At
         // 50 ms that alone put 200 ms into a handshake the AP times out on and
         // retries. Poll tightly while something is in flight, idle otherwise.
