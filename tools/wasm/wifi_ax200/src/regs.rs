@@ -141,14 +141,22 @@ pub const CMD_QUEUE_CB_SIZE: u8 = 2; // TFD_QUEUE_CB_SIZE(32) = ilog2(32)-3
 // ── Stage 3: RX restock + ALIVE notification ─────────────────────
 // RFH free-RBD write-pointer trigger (direct MMIO in BAR0, gen2 < BZ).
 pub const RFH_Q0_FRBDCB_WIDX_TRG: u32 = 0x1C80;
-// RB pool size. 64 was a bring-up number — "enough to receive the alive
-// notification", capped by MAX_DMA_ALLOCS — and was never revisited for
-// throughput. At 64 Mbit those 64 pages hold about 12 ms of traffic, while a
-// TLS receive parks the core in `worker_idle_hlt` for up to 10 ms between
-// drains: one millisecond of margin, and `drain-peak 56/64` on the device.
-// Linux allocates IWL_NUM_RBDS_HE (2048) for this chip; 256 pages = 1 MB is a
-// modest step that gives ~48 ms of headroom. Each RB = 1 page.
-pub const RX_NUM_RBS: usize = 512;
+// RB pool size. Three numbers have stood here: 64 ("enough for the alive
+// notification"), 256, then 512. The last one took the link down, so it is out
+// again — 256 is the only value this driver has been MEASURED at (99 Mbit,
+// drain-peak 241/256). Each RB = 1 page.
+//
+// Linux does not pick this number, it derives it: the pool is
+// `trans_pcie->num_rx_bufs - 1` = NUM_RBDS - 1 = 2047 buffers in a 2048-slot
+// ring (pcie/gen1_2/rx.c, iwl_pcie_rx_init). The -1 is the ring rule, spelled
+// out in rx.c:126 — write == read must mean EMPTY, so N slots can hold at most
+// N-1 entries. Raising this towards 2047 is a throughput question and needs a
+// device measurement per step plus room in the kernel's MAX_DMA_ALLOCS /
+// MAX_DMA_PAGES; it is no longer a correctness question, because the free-BD
+// ring now tracks buffer ownership instead of trusting the pool to be small.
+pub const RX_NUM_RBS: usize = 256;
+// The ring rule, machine-checked instead of remembered.
+const _: () = assert!(RX_NUM_RBS < NUM_RBDS);
 pub const RB_SIZE_BYTES: usize = 4096; // IWL_AMSDU_4K
 // rb_stts.closed_rb_num producer index mask.
 pub const RB_STTS_CLOSED_MASK: u32 = 0x0FFF;

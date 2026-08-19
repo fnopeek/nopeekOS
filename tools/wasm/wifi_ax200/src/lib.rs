@@ -295,6 +295,17 @@ struct Stats {
     // rising count here means the poll loop is not keeping up, and no amount of
     // air rate will help until it does.
     rx_pool_exhausted: u32,
+    // Free-BD ring health. `rb_bad_vid` = the firmware handed back a buffer id
+    // outside the pool or one we never posted (Linux: WARN + iwl_force_nmi).
+    // `rb_double_post` = we tried to post a buffer the firmware already owns —
+    // impossible by construction in Linux, so any count here is our bug.
+    // `rx_wd_fires` = RX-silence watchdog rounds, `rx_wd_dry` = consecutive
+    // rounds that found nothing to re-arm, which means the pool is not the
+    // fault and the firmware itself has stopped.
+    rb_bad_vid: u32,
+    rb_double_post: u32,
+    rx_wd_fires: u32,
+    rx_wd_dry: u32,
     // Unicast frames carrying our address, whatever their type, and the subset
     // we received but could not decode.
     rx_to_us: u32,
@@ -375,6 +386,7 @@ impl Stats {
         rx_prot: 0, rx_mic_fail: 0, rx_sec_none: 0, rx_undecrypted: 0,
         tx_eapol: 0, keys_set: 0, ready_sent: 0,
         rx_pool_exhausted: 0, rx_to_us: 0, rx_undecoded: 0,
+        rb_bad_vid: 0, rb_double_post: 0, rx_wd_fires: 0, rx_wd_dry: 0,
         loop_iters: 0, loop_busy: 0, deauth: 0, addba_seen: 0, addba_timeouts: 0, addba_declined: 0, addba_accepted: 0,
         mb_notifs: 0, mb_consec: 0, mb_since_rx: 0, mb_expected: 0, mb_received: 0,
         mb_losses: 0,
@@ -474,6 +486,13 @@ struct Ax200 {
     // RX RB pool (vid v → rb_pool[v-1]) + our read index into the used-BD ring
     // + the free-BD ring write index (for recycling RBs during the scan).
     rb_pool: [Dma; RX_NUM_RBS],
+    /// iwl_rx_mem_buffer.invalid, inverted: true while the buffer sits in the
+    /// free-BD ring and the firmware owns it, false while it is ours. Linux
+    /// keeps the same fact as list membership (rx_free / posted / rx_used) and
+    /// restocks strictly from rx_free. A buffer can therefore be in the ring at
+    /// most once, which is what keeps the write index from ever lapping the
+    /// firmware's read index — no matter how big the pool gets.
+    rb_in_fw: [bool; RX_NUM_RBS],
     rxq_read: u32,
     free_bd_write: u32,
     // Firmware error-table SRAM pointers (from the ALIVE notification), for
@@ -1056,6 +1075,10 @@ impl Ax200 {
                 return None;
             }
             self.rb_pool[i] = rb;
+            // Posted straight into slots 0..RX_NUM_RBS-1, so the firmware owns
+            // every one of them from here on (recycle_rb is bypassed, hence the
+            // explicit flag).
+            self.rb_in_fw[i] = true;
             // vid = i + 1; page is 4K-aligned so the low bits hold the vid.
             let entry = rb.phys | (i as u64 + 1);
             bd[i * 8..i * 8 + 8].copy_from_slice(&entry.to_le_bytes());
@@ -1064,7 +1087,7 @@ impl Ax200 {
         host::fence();
 
         // iwl_pcie_rxq_inc_wr_ptr: write_actual = round_down(write, 8).
-        self.free_bd_write = RX_NUM_RBS as u32; // 64 RBs posted at slots 0..63
+        self.free_bd_write = RX_NUM_RBS as u32; // RBs posted at slots 0..N-1
         let write_actual = self.free_bd_write & !0x7;
         self.w32(RFH_Q0_FRBDCB_WIDX_TRG, write_actual);
 
@@ -1089,11 +1112,13 @@ impl Ax200 {
         // The FW reports each filled RB in the used-BD ring (vid). Read used_bd[0]
         // to find which RB holds the first frame (iwl_pcie_get_rxb, < AX210 path).
         let vid = host::dma_r32(self.rxq_used_bd.handle, 0) & RX_VID_MASK;
-        if vid == 0 || vid as usize > RX_NUM_RBS {
-            host::dprint("[ax200] bad RX vid\n");
-            return None;
-        }
-        let rb0 = self.rb_pool[vid as usize - 1];
+        let rb0 = match self.claim_rb(vid) {
+            Some(rb) => rb,
+            None => {
+                host::dprint("[ax200] bad RX vid\n");
+                return None;
+            }
+        };
         self.rxq_read = 1; // consumed used_bd[0]
 
         // Dump the first RB header (iwl_rx_packet: len_n_flags, cmd, group_id).
@@ -1266,13 +1291,12 @@ impl Ax200 {
     // are plenty for the handful of init/NVM frames.
     fn drain_rx_until(&mut self, want_cmd: u8, want_group: u8) -> Option<Dma> {
         host::fence();
-        let r = host::dma_r32(self.rxq_rb_stts.handle, 0) & RB_STTS_CLOSED_MASK;
+        let r = self.closed_rb();
         while self.rxq_read != r {
             let i = self.rxq_read as usize;
             let vid = host::dma_r32(self.rxq_used_bd.handle, (i * 4) as u32) & RX_VID_MASK;
             let mut matched = None;
-            if vid >= 1 && vid as usize <= RX_NUM_RBS {
-                let rb = self.rb_pool[vid as usize - 1];
+            if let Some(rb) = self.claim_rb(vid) {
                 let mut hdr = [0u8; 8];
                 host::dma_read_buf(rb.handle, 0, &mut hdr);
                 let cmd = hdr[4];
@@ -1673,34 +1697,86 @@ impl Ax200 {
         }
     }
 
+    /// iwl_get_closed_rb_stts plus the mask Linux applies right after it
+    /// (rx.c: `r &= (rxq->queue_size - 1)`, the 9000-A0 wrap-around W/A).
+    /// `RB_STTS_CLOSED_MASK` is 12 bits = 0..4095, the ring is 2048 — without
+    /// the second mask a closed index above the ring never equals our read
+    /// index and the drain loop below never terminates.
+    fn closed_rb(&self) -> u32 {
+        (host::dma_r32(self.rxq_rb_stts.handle, 0) & RB_STTS_CLOSED_MASK)
+            & (NUM_RBDS as u32 - 1)
+    }
+
+    /// iwl_pcie_get_rxb: take a returned buffer out of the firmware's hands.
+    /// A vid outside the pool, or one we never posted, means the firmware and
+    /// this ring disagree about who owns the page. Linux answers that with
+    /// `iwl_force_nmi()` and a firmware restart; we count it and drop the
+    /// entry, because handing the same page out twice is worse than losing it.
+    fn claim_rb(&mut self, vid: u32) -> Option<Dma> {
+        if vid == 0 || vid as usize > RX_NUM_RBS {
+            self.st.rb_bad_vid = self.st.rb_bad_vid.wrapping_add(1);
+            return None;
+        }
+        let i = vid as usize - 1;
+        if !self.rb_in_fw[i] {
+            self.st.rb_bad_vid = self.st.rb_bad_vid.wrapping_add(1);
+            return None;
+        }
+        self.rb_in_fw[i] = false;
+        Some(self.rb_pool[i])
+    }
+
     // ── iwl_pcie_rxmq_restock — recycle one consumed RB ────────────
     // Re-post the RB identified by `vid` into the free-BD ring at the next write
     // slot so the firmware can fill it again. The page is the same; only its
     // ring position changes (bd[slot] = page_dma | vid, gen2 < AX210).
     fn recycle_rb(&mut self, vid: u32) {
+        let i = vid as usize - 1;
+        if self.rb_in_fw[i] {
+            // The same page twice in the ring, and a write index advanced past
+            // what we can back with buffers. Linux cannot even express this —
+            // restock pulls from rx_free, and a posted buffer is not on it.
+            self.st.rb_double_post = self.st.rb_double_post.wrapping_add(1);
+            return;
+        }
         let slot = (self.free_bd_write & (NUM_RBDS as u32 - 1)) as usize;
-        let rb = self.rb_pool[vid as usize - 1];
+        let rb = self.rb_pool[i];
         let entry = rb.phys | vid as u64;
         host::dma_write_buf(self.rxq_bd.handle, (slot * 8) as u32, &entry.to_le_bytes());
+        self.rb_in_fw[i] = true;
         self.free_bd_write += 1;
     }
 
-    /// Hand every RB in the pool back to the firmware and publish the index.
+    /// Hand back every RB the firmware does NOT currently own, and publish the
+    /// index. Returns how many were posted.
     ///
-    /// Recovery for the case where RX has gone quiet while we are associated:
-    /// with only RX_NUM_RBS buffers, a burst that empties the pool can leave
-    /// fewer than 8 recycled — and the write pointer is published rounded down
-    /// to 8, so those last ones stay invisible and the firmware has nowhere to
-    /// put the next frame. Re-arming the whole pool costs nothing and is the
-    /// only way out that does not involve a full reset.
-    fn restock_all_rbs(&mut self) {
+    /// Recovery for RX going quiet while associated: buffers can be stranded on
+    /// our side (a matched RB read during bring-up is never recycled), and the
+    /// write pointer is published rounded down to 8, so a tail of fewer than 8
+    /// stays invisible to the firmware.
+    ///
+    /// It used to re-post the whole pool unconditionally. That is a producer
+    /// that ignores its consumer: every fire advanced the write index by
+    /// RX_NUM_RBS whether or not the firmware had consumed anything, so a
+    /// firmware that had stopped for its own reasons got the ring walked all
+    /// the way round onto its own read index — published as EMPTY, and then it
+    /// could never recover. Linux has no such path at all: a wedged RX path
+    /// gets `iwl_force_nmi()` and a firmware restart, never a ring poke.
+    ///
+    /// A return of 0 is the useful answer: the firmware still holds every
+    /// buffer, so an empty pool was never the cause and re-arming is not a cure.
+    fn restock_all_rbs(&mut self) -> u32 {
+        let mut armed = 0u32;
         for vid in 1..=RX_NUM_RBS as u32 {
-            self.recycle_rb(vid);
+            if !self.rb_in_fw[vid as usize - 1] {
+                self.recycle_rb(vid);
+                armed += 1;
+            }
         }
-        self.flush_free_bd();
-        host::print("[ax200] RX stalled - re-armed all ");
-        host::print_dec(RX_NUM_RBS as u32);
-        host::print(" receive buffers\n");
+        if armed > 0 {
+            self.flush_free_bd();
+        }
+        armed
     }
 
     // Push the recycled free-BD write index to the HW (round down to 8).
@@ -1964,15 +2040,14 @@ impl Ax200 {
     // the one place that walks used_bd → rb_pool → recycle.
     fn service_rx<F: FnMut(u8, u8, &Dma) -> bool>(&mut self, mut on_frame: F) -> u32 {
         host::fence();
-        let r = host::dma_r32(self.rxq_rb_stts.handle, 0) & RB_STTS_CLOSED_MASK;
+        let r = self.closed_rb();
         let mut frames = 0u32;
         let mut recycled = false;
         let mut stop = false;
         while self.rxq_read != r && !stop {
             let i = self.rxq_read as usize;
             let vid = host::dma_r32(self.rxq_used_bd.handle, (i * 4) as u32) & RX_VID_MASK;
-            if vid >= 1 && vid as usize <= RX_NUM_RBS {
-                let rb = self.rb_pool[vid as usize - 1];
+            if let Some(rb) = self.claim_rb(vid) {
                 let mut hdr = [0u8; 8];
                 host::dma_read_buf(rb.handle, 0, &mut hdr);
                 frames += 1;
@@ -3494,14 +3569,30 @@ impl Ax200 {
         r.s("rxring   read ");
         r.d(self.rxq_read as u64);
         r.s("  closed ");
-        r.d((host::dma_r32(self.rxq_rb_stts.handle, 0) & RB_STTS_CLOSED_MASK) as u64);
+        r.d(self.closed_rb() as u64);
         r.s("  free-bd-write ");
         r.d(self.free_bd_write as u64);
         r.s(" (hw sees ");
         r.d(((self.free_bd_write & (NUM_RBDS as u32 - 1)) & !0x7) as u64);
         r.s(", pool ");
         r.d(RX_NUM_RBS as u64);
+        r.s(", fw holds ");
+        let held = self.rb_in_fw.iter().filter(|b| **b).count();
+        r.d(held as u64);
         r.s(")\n");
+        // Only when something is off — a ring that reports its normal state
+        // every time is not a report.
+        if self.st.rx_wd_fires > 0 || self.st.rb_bad_vid > 0 || self.st.rb_double_post > 0 {
+            r.s("rxfault  silence-watchdog ");
+            r.d(self.st.rx_wd_fires as u64);
+            r.s(" (");
+            r.d(self.st.rx_wd_dry as u64);
+            r.s(" consecutive with nothing to re-arm)  bad-vid ");
+            r.d(self.st.rb_bad_vid as u64);
+            r.s("  double-post ");
+            r.d(self.st.rb_double_post as u64);
+            r.c(b'\n');
+        }
 
         r.s("dma      mmio h");
         r.d(self.mmio as u64);
@@ -5262,8 +5353,40 @@ impl Ax200 {
             // firmware has no buffer to fill, not that the air went quiet.
             if rx_frames > 0 {
                 last_rx_ms = host::now_ms();
+                self.st.rx_wd_dry = 0;
             } else if host::now_ms().saturating_sub(last_rx_ms) > RX_SILENCE_MS {
-                self.restock_all_rbs();
+                let armed = self.restock_all_rbs();
+                self.st.rx_wd_fires = self.st.rx_wd_fires.wrapping_add(1);
+                if armed == 0 {
+                    self.st.rx_wd_dry = self.st.rx_wd_dry.wrapping_add(1);
+                }
+                // Budgeted like the TX watchdog above. This used to print
+                // unconditionally on every round, so a permanent fault read as
+                // an endless loop and the log stopped being a log. `armed` is
+                // the fact worth having: 0 means the firmware still holds every
+                // buffer, so the pool was never the cause.
+                if self.st.rx_wd_fires <= 4 {
+                    host::print("[ax200] RX silent - re-armed ");
+                    host::print_dec(armed);
+                    host::print(" of ");
+                    host::print_dec(RX_NUM_RBS as u32);
+                    host::print(" receive buffers\n");
+                }
+                // Linux answers a wedged RX path with iwl_force_nmi() and a
+                // firmware restart. We cannot restart the firmware cheaply, so
+                // after three rounds with nothing to re-arm take the one
+                // escalation we have — read the error table once, then rebuild
+                // the association instead of poking the ring forever.
+                if self.st.rx_wd_dry == 3 {
+                    host::print("[ax200] RX silent and the firmware holds every buffer — error log:\n");
+                    self.dump_fw_error_log();
+                    if self.reconnect() {
+                        assoc_at_ms = host::now_ms();
+                        handshake_deadline = assoc_at_ms + HANDSHAKE_TIMEOUT_MS;
+                        next_report = assoc_at_ms + REPORT_PERIOD_MS;
+                    }
+                    self.st.rx_wd_dry = 0;
+                }
                 last_rx_ms = host::now_ms();
             }
 
@@ -5683,6 +5806,7 @@ pub extern "C" fn _start() {
         cmd_data: Dma::NONE,
         cmd_write_ptr: 0,
         rb_pool: [Dma::NONE; RX_NUM_RBS],
+        rb_in_fw: [false; RX_NUM_RBS],
         rxq_read: 0,
         free_bd_write: 0,
         lmac_err_ptr: 0,
@@ -5873,7 +5997,11 @@ pub extern "C" fn _start() {
                                     // first EAPOL frame, and the post-assoc listen
                                     // can begin immediately.
                                     if !dev.alloc_data_queue() {
-                                        host::dprint("[ax200] data queue alloc FAILED\n");
+                                        // Without this queue there is no path
+                                        // for EAPOL, so the 4-way cannot run and
+                                        // the link can never authorize. `dprint`
+                                        // was the wrong channel for that.
+                                        host::print("[ax200] FATAL: data TX queue DMA alloc failed — no 4-way, no traffic\n");
                                     }
                                     // ── Stage 5c/5d: AUTH → ASSOC mgmt dialog ──
                                     // Retry the whole auth+assoc up to 3× like
