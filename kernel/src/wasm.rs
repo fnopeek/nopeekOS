@@ -154,6 +154,15 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtOrd};
 
 const APP_KEY_BUF_SIZE: usize = 32;
 const MAX_APP_BUFS: usize = 256;
+/// `terminal_idx` sentinel for "whatever terminal is focused". Spawn paths that
+/// have no window of their own pass it (drivers from autostart, sandboxed
+/// runs). It MUST be excluded before treating the index as a slot: 255 is
+/// smaller than MAX_APP_BUFS, so it used to pass the bounds check, land in
+/// `write_idx(255)` — a slot that is never allocated — and be dropped without
+/// a trace. Every line an autostarted driver printed went there. Four kernel
+/// lines and nothing from the driver is what that looks like from the outside,
+/// and it cost an evening.
+const TERM_IDX_ACTIVE: u8 = 255;
 
 static mut APP_KEY_BUFS: [([u8; APP_KEY_BUF_SIZE], AtomicUsize, AtomicUsize); MAX_APP_BUFS] = {
     const INIT: ([u8; APP_KEY_BUF_SIZE], AtomicUsize, AtomicUsize) =
@@ -595,7 +604,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             if let Some(s) = read_wasm_str(&caller, ptr, len) {
                 if caller.data().direct_output {
                     let idx = caller.data().terminal_idx;
-                    if (idx as usize) < MAX_APP_BUFS {
+                    if idx != TERM_IDX_ACTIVE && (idx as usize) < MAX_APP_BUFS {
                         // Write to specific terminal (worker-core safe)
                         crate::shade::terminal::write_idx(idx as usize, &s);
                     } else {
