@@ -1094,12 +1094,17 @@ pub const IWL_DATA_QUEUE_SIZE: usize = 64;
 /// darf von diesem Commit nichts uebrig bleiben. Damit ist der Treiber
 /// funktional wieder 0.81.0 plus die Ringdisziplin. Die 4100 blockierten Sendungen
 /// waren gemessen — 32 kommt zurueck, sobald der Link steht, als EIGENER Schritt.
-/// 2026-08-19, dritte Messung dieser Zahl und jedes Mal mit Beleg. Bei 70 Mbit
-/// Download am Geraet: `tx blocked 768`, `inflight peak 32/32` und
-/// `tx drops full 620 (driver too slow)` — fq_codel warf 620 unserer ACKs weg,
-/// die Gegenseite sah fehlende Quittungen und brach ein (`ssthresh=7`,
-/// `retrans=1202`). Der Deckel war wieder die Durchsatzgrenze.
-/// 48 laesst Luft und bleibt unter QUEUE_SIZE-1 = 63.
+/// 2026-08-19 am Geraet, mit A-MPDU und 20 MHz, GERAETESEITIG gemessen:
+///
+///     Deckel 32:  46 Mbit (Server 53)  retrans 101
+///     Deckel 48:  57 Mbit (Server 69)  retrans 5  ssthresh 364  rtt 65 ms
+///
+/// Offen und ehrlich dazu: `tx drops full` stieg von 620 auf 2794. Das kostet
+/// hier wenig, weil TCP-ACKs kumulativ sind — ein verworfener wird vom
+/// naechsten mitabgedeckt, und `retrans 5` beweist es. Es ist trotzdem ein
+/// Zeichen, dass fq_codels 64 Plaetze ueberlaufen, waehrend der Treiber am
+/// Deckel steht. Der naechste Hebel liegt dort, nicht bei dieser Zahl.
+/// Muss unter QUEUE_SIZE-1 = 63 bleiben.
 pub const TX_INFLIGHT_MAX: u32 = 48;
 /// TX queue watchdog. Linux arms it whenever the queue is NOT EMPTY and pushes
 /// it forward on every completion; it does not care how full the queue is.
