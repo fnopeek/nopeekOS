@@ -1080,7 +1080,13 @@ pub const IWL_DATA_QUEUE_SIZE: usize = 64;
 /// Half the queue keeps the anti-bufferbloat intent and stops the cap being
 /// the throughput limit. Safe now that in-flight is derived from the
 /// firmware's read pointer rather than counted.
-pub const TX_INFLIGHT_MAX: u32 = 32;
+///
+/// 2026-08-19 zurueck auf 16: das ist die andere Haelfte desselben Commits wie
+/// RX_NUM_RBS 512, und beim Suchen nach "die Karte geht gar nicht mehr online"
+/// darf von diesem Commit nichts uebrig bleiben. Damit ist der Treiber
+/// funktional wieder 0.81.0 plus die Ringdisziplin. Die 4100 blockierten Sendungen
+/// waren gemessen — 32 kommt zurueck, sobald der Link steht, als EIGENER Schritt.
+pub const TX_INFLIGHT_MAX: u32 = 16;
 /// TX queue watchdog. Linux arms it whenever the queue is NOT EMPTY and pushes
 /// it forward on every completion; it does not care how full the queue is.
 ///
