@@ -141,19 +141,24 @@ pub const CMD_QUEUE_CB_SIZE: u8 = 2; // TFD_QUEUE_CB_SIZE(32) = ilog2(32)-3
 // ── Stage 3: RX restock + ALIVE notification ─────────────────────
 // RFH free-RBD write-pointer trigger (direct MMIO in BAR0, gen2 < BZ).
 pub const RFH_Q0_FRBDCB_WIDX_TRG: u32 = 0x1C80;
-// RB pool size. 64 was a bring-up number — "enough to receive the alive
-// notification", capped by MAX_DMA_ALLOCS — and never revisited for
-// throughput. At 64 Mbit those 64 pages hold ~12 ms, against a
-// `worker_idle_hlt` that parks the core for up to 10 ms between drains: one
-// millisecond of margin, and the device reported `drain-peak 56/64`. It also
-// left the driver at 127 of 128 allocation slots, one away from a SILENT
-// failure. Linux allocates IWL_NUM_RBDS_HE (2048) for this chip; 256 pages =
-// 1 MB gives ~48 ms. Each RB = 1 page. 512 was tried and is NOT the reason the
-// link broke (that was the width negotiation) — but it stays out until the
-// link has been stable at 256. Requires MAX_DMA_ALLOCS >= 512 in the kernel.
-pub const RX_NUM_RBS: usize = 256;
-// The ring rule, machine-checked instead of remembered: a pool larger than the
-// ring cannot be posted, and Linux itself stops one short (num_rbds - 1).
+// RB pool size. Three numbers have stood here: 64 ("enough for the alive
+// notification"), 256, then 512. The last one took the link down, so it is out
+// again — 256 is the only value this driver has been MEASURED at (99 Mbit,
+// drain-peak 241/256). Each RB = 1 page.
+//
+// Linux does not pick this number, it derives it: the pool is
+// `trans_pcie->num_rx_bufs - 1` = NUM_RBDS - 1 = 2047 buffers in a 2048-slot
+// ring (pcie/gen1_2/rx.c, iwl_pcie_rx_init). The -1 is the ring rule, spelled
+// out in rx.c:126 — write == read must mean EMPTY, so N slots can hold at most
+// N-1 entries. Raising this towards 2047 is a throughput question and needs a
+// device measurement per step plus room in the kernel's MAX_DMA_ALLOCS /
+// MAX_DMA_PAGES; it is no longer a correctness question, because the free-BD
+// ring now tracks buffer ownership instead of trusting the pool to be small.
+pub const RX_NUM_RBS: usize = 512;
+// The ring rule, machine-checked instead of remembered: Linux itself stops one
+// short of the ring (num_rbds - 1 = 2047 for this chip).
+const _: () = assert!(RX_NUM_RBS < NUM_RBDS);
+// The ring rule, machine-checked instead of remembered.
 const _: () = assert!(RX_NUM_RBS < NUM_RBDS);
 pub const RB_SIZE_BYTES: usize = 4096; // IWL_AMSDU_4K
 // rb_stts.closed_rb_num producer index mask.
@@ -379,7 +384,11 @@ pub const MC_OFF_NODE_ADDR: usize = 16; // u8[6] (+ __le16 reserved @ 22)
 pub const MC_OFF_BSSID_ADDR: usize = 24; // u8[6] (+ __le16 reserved @ 30)
 pub const MC_OFF_CCK_RATES: usize = 32; // __le32
 pub const MC_OFF_OFDM_RATES: usize = 36; // __le32
-pub const MC_OFF_PROT_FLAGS: usize = 40; // __le32 (0, unassociated)
+pub const MC_OFF_PROT_FLAGS: usize = 40; // __le32 (enum iwl_mac_protection_flags)
+/// fw/api/mac.h:40 — what the firmware protects transmissions with.
+pub const MAC_PROT_FLG_TGG_PROTECT: u32 = 1 << 3;
+pub const MAC_PROT_FLG_HT_PROT: u32 = 1 << 23;
+pub const MAC_PROT_FLG_FAT_PROT: u32 = 1 << 24;
 pub const MC_OFF_FILTER_FLAGS: usize = 52; // __le32
 // cck_short_preamble @ 44, short_slot @ 48, qos_flags @ 56, ac[5] @ 60 — all 0.
 // union iwl_mac_data_sta @ 100 (after qos_flags @56 + ac[AC_NUM+1=5]*8 = 40).
@@ -621,6 +630,16 @@ pub const SSID_MAX: usize = 32;
 // BINDING v2 (BINDING_CDB_SUPPORT=yes → full struct), CDB_SUPPORT=no → lmac_id 0.
 pub const PHY_BAND_5_U8: u8 = 0; // PHY_BAND_5
 pub const IWL_PHY_CHANNEL_MODE20: u8 = 0;
+/// fw/api/phy-ctxt.h:17. MODE80 = 0x2 and MODE160 = 0x3 exist too — the next
+/// rung, once VHT is negotiated.
+pub const IWL_PHY_CHANNEL_MODE40: u8 = 1;
+pub const IWL_PHY_CHANNEL_MODE80: u8 = 2;
+/// phy-ctxt.h:37 — for VHT, bits 1:0 are the control channel's distance from
+/// the centre in 20 MHz steps; bit 2 says it sits above.
+pub const IWL_PHY_CTRL_POS_OFFS_MSK: u8 = 0x3;
+/// Control-channel position (phy-ctxt.h:35). For HT the bit simply means "the
+/// control channel is the UPPER of the two", i.e. the secondary sits below.
+pub const IWL_PHY_CTRL_POS_ABOVE: u8 = 0x4;
 pub const IWL_LMAC_24G_INDEX: u32 = 0; // no CDB → lmac_id always 0
 pub const FW_CTXT_INVALID: u32 = 0xffff_ffff;
 
@@ -703,6 +722,12 @@ pub const STA_FLAGS_MSK_ADD: u32 = (3 << 26) | (3 << 28) | (1 << 17); // 0x3C020
 // A-MPDU limits the AP advertised. Without them the firmware keeps the station
 // at its "just added" defaults and TLC has nothing to scale into.
 pub const STA_FLG_FAT_EN_20MHZ: u32 = 0 << 26;
+/// fw/api/sta.h:87 — the station's TX channel width. A two-bit FIELD, so the
+/// value replaces rather than ORs; 20 MHz being 0 is why leaving it unset
+/// silently pins transmission to 20 MHz however wide the PHY is configured.
+pub const STA_FLG_FAT_EN_40MHZ: u32 = 1 << 26;
+pub const STA_FLG_FAT_EN_80MHZ: u32 = 2 << 26;
+pub const STA_FLG_FAT_EN_MSK: u32 = 3 << 26;
 pub const STA_FLG_MIMO_EN_SISO: u32 = 0 << 28;
 pub const STA_FLG_MIMO_EN_MIMO2: u32 = 1 << 28;
 pub const STA_FLG_MAX_AGG_SIZE_SHIFT: u32 = 19;
@@ -754,8 +779,11 @@ pub const TLC_OFF_HT_RATES: usize = 12;    // __le16[2][3] (12 B, 0 for legacy)
 pub const TLC_OFF_MAX_MPDU: usize = 24;    // __le16
 pub const TLC_OFF_MAX_TXOP: usize = 26;    // __le16
 pub const TLC_CH_WIDTH_20MHZ: u8 = 0;      // IWL_TLC_MNG_CH_WIDTH_20MHZ
+pub const TLC_CH_WIDTH_40MHZ: u8 = 1;      // IWL_TLC_MNG_CH_WIDTH_40MHZ
+pub const TLC_CH_WIDTH_80MHZ: u8 = 2;      // IWL_TLC_MNG_CH_WIDTH_80MHZ
 pub const TLC_MODE_NON_HT: u8 = 0;         // IWL_TLC_MNG_MODE_NON_HT
 pub const TLC_MODE_HT: u8 = 1;             // IWL_TLC_MNG_MODE_HT
+pub const TLC_MODE_VHT: u8 = 2;            // IWL_TLC_MNG_MODE_VHT
 // ht_rates is __le16[IWL_TLC_NSS_MAX=2][IWL_TLC_MCS_PER_BW_NUM_V4=3]; HT only
 // ever fills the [nss][IWL_TLC_MCS_PER_BW_80=0] slot (rs_fw_set_supp_rates).
 pub const TLC_OFF_HT_RATES_NSS1: usize = TLC_OFF_HT_RATES;     // [0][0]
@@ -853,6 +881,52 @@ pub const WLAN_CAP_SHORT_SLOT: u16 = 1 << 10;
 pub const WLAN_EID_SUPP_RATES: u8 = 1;
 pub const WLAN_EID_TIM: u8 = 5;
 pub const WLAN_EID_HT_CAPABILITY: u8 = 45;
+/// struct ieee80211_ht_operation: primary_chan(1), ht_param(1), ...
+pub const WLAN_EID_HT_OPERATION: u8 = 61;
+pub const HT_OP_OFF_PRIMARY_CHAN: usize = 0;
+pub const HT_OP_OFF_HT_PARAM: usize = 1;
+/// ieee80211.h:2004 — secondary channel offset, bits 0-1 of ht_param.
+pub const IEEE80211_HT_PARAM_CHA_SEC_OFFSET: u8 = 0x03;
+pub const IEEE80211_HT_PARAM_CHA_SEC_NONE: u8 = 0x00;
+pub const IEEE80211_HT_PARAM_CHA_SEC_ABOVE: u8 = 0x01;
+pub const IEEE80211_HT_PARAM_CHA_SEC_BELOW: u8 = 0x03;
+/// HT Operation `operation_mode`, ieee80211.h:2012. The AP states here which
+/// protection the BSS needs; the firmware cannot know it any other way.
+pub const HT_OP_OFF_OPERATION_MODE: usize = 2; // __le16
+pub const IEEE80211_HT_OP_MODE_PROTECTION: u16 = 0x0003;
+pub const IEEE80211_HT_OP_MODE_PROTECTION_NONE: u16 = 0;
+pub const IEEE80211_HT_OP_MODE_PROTECTION_NONMEMBER: u16 = 1;
+pub const IEEE80211_HT_OP_MODE_PROTECTION_20MHZ: u16 = 2;
+pub const IEEE80211_HT_OP_MODE_PROTECTION_NONHT_MIXED: u16 = 3;
+/// ERP information element (EID 42), ieee80211.h:3515.
+pub const WLAN_EID_ERP_INFO: u8 = 42;
+pub const WLAN_ERP_USE_PROTECTION: u8 = 1 << 1;
+/// ieee80211.h:1914/1919
+pub const IEEE80211_HT_CAP_SUP_WIDTH_20_40: u16 = 0x0002;
+pub const IEEE80211_HT_CAP_SGI_40: u16 = 0x0040;
+
+// ── VHT (802.11ac) ────────────────────────────────────────────────────
+pub const WLAN_EID_VHT_CAPABILITY: u8 = 191;
+pub const WLAN_EID_VHT_OPERATION: u8 = 192;
+/// struct ieee80211_vht_cap: __le32 vht_cap_info, then supp_mcs (8 B).
+pub const VHT_CAP_IE_LEN: usize = 12;
+pub const VHT_OFF_CAP_INFO: usize = 0;      // __le32
+pub const VHT_OFF_RX_MCS_MAP: usize = 4;    // __le16
+pub const VHT_OFF_RX_HIGHEST: usize = 6;    // __le16
+pub const VHT_OFF_TX_MCS_MAP: usize = 8;    // __le16
+pub const VHT_OFF_TX_HIGHEST: usize = 10;   // __le16
+/// struct ieee80211_vht_operation: chan_width, seg0, seg1, basic_mcs_set.
+pub const VHT_OP_OFF_CHAN_WIDTH: usize = 0;
+pub const VHT_OP_OFF_SEG0: usize = 1;
+/// ieee80211.h:2137
+pub const IEEE80211_VHT_CHANWIDTH_USE_HT: u8 = 0;
+pub const IEEE80211_VHT_CHANWIDTH_80MHZ: u8 = 1;
+/// ieee80211.h:2438/2439
+pub const IEEE80211_VHT_CAP_RXLDPC: u32 = 0x0000_0010;
+pub const IEEE80211_VHT_CAP_SHORT_GI_80: u32 = 0x0000_0020;
+/// Two bits per spatial stream: 2 = MCS 0-9 supported, 3 = stream unused.
+/// 2x2 → streams 1 and 2 get 0b10, the other six 0b11.
+pub const VHT_MCS_MAP_2SS: u16 = 0xFFFA;
 pub const WLAN_EID_RSN: u8 = 48;
 pub const WLAN_EID_EXT_SUPP_RATES: u8 = 50;
 pub const WLAN_EID_VENDOR_SPECIFIC: u8 = 221;
@@ -1000,7 +1074,22 @@ pub const IWL_DATA_QUEUE_SIZE: usize = 64;
 // the full 63-deep queue is tens of ms of bufferbloat. ~1 BDP at the current
 // achieved rate keeps throughput while slashing latency-under-load. Raise once
 // HT/A-MPDU lifts the air rate (then the BDP grows). Must stay < QUEUE_SIZE-1.
-pub const TX_INFLIGHT_MAX: u32 = 16;
+/// In-flight cap for the data queue (IWL_DATA_QUEUE_SIZE = 64 slots).
+///
+/// 16 was picked as "well below the ring depth" for flow control and against
+/// bufferbloat. At 99 Mbit the receive side needs a steady stream of ACKs, and
+/// the cap blocked 4100 times while fq_codel dropped 3267 frames the driver
+/// never took ("driver too slow") — a quarter of everything the stack queued.
+/// Half the queue keeps the anti-bufferbloat intent and stops the cap being
+/// the throughput limit. Safe now that in-flight is derived from the
+/// firmware's read pointer rather than counted.
+///
+/// 2026-08-19 zurueck auf 16: das ist die andere Haelfte desselben Commits wie
+/// RX_NUM_RBS 512, und beim Suchen nach "die Karte geht gar nicht mehr online"
+/// darf von diesem Commit nichts uebrig bleiben. Damit ist der Treiber
+/// funktional wieder 0.81.0 plus die Ringdisziplin. Die 4100 blockierten Sendungen
+/// waren gemessen — 32 kommt zurueck, sobald der Link steht, als EIGENER Schritt.
+pub const TX_INFLIGHT_MAX: u32 = 32;
 /// TX queue watchdog. Linux arms it whenever the queue is NOT EMPTY and pushes
 /// it forward on every completion; it does not care how full the queue is.
 ///
