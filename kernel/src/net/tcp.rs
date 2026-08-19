@@ -714,14 +714,7 @@ pub fn recv_blocking(handle: usize, buf: &mut [u8], timeout_ticks: u64) -> Resul
         }
 
         if crate::interrupts::ticks() - t0 > timeout_ticks {
-            // `Err(Timeout)`, NOT `Ok(0)`. Both used to mean the same thing
-            // here, and `Ok(0)` is how a caller learns the peer hung up — so a
-            // link that merely went quiet for the timeout read as end-of-file.
-            // Measured: an OTA module download reported
-            // "short download (113728 of 1432235)" after a run of one-second
-            // transmit stalls. The transfer was not aborted; it was declared
-            // finished. A caller that can distinguish the two can wait longer.
-            return Err(TcpError::Timeout);
+            return Ok(0);
         }
         // Timer-NAPI: HLT instead of spinning (the OTA-update / https core-peg
         // Florian saw — same root as tcp_recv_poll). Records the halt so `cores`

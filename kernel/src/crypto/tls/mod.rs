@@ -1009,24 +1009,12 @@ fn recv_record(handle: usize) -> Result<(u8, Vec<u8>), TlsError> {
 
 fn recv_exact(handle: usize, buf: &mut [u8]) -> Result<(), TlsError> {
     let mut filled = 0;
-    // A quiet link is not a closed one. Each attempt waits 10 s; six of them
-    // give a minute of patience before we call it dead, which is the same
-    // order as the TCP retransmit budget (TCP_RETR2). Under a run of transmit
-    // stalls the old single attempt ended the record — and the caller saw a
-    // truncated body it could only report as "short download".
-    let mut quiet = 0;
     while filled < buf.len() {
-        match tcp::recv_blocking(handle, &mut buf[filled..], 1000) {
-            Ok(0) => return Err(TlsError::HandshakeFailed("connection closed")),
-            Ok(n) => { filled += n; quiet = 0; }
-            Err(tcp::TcpError::Timeout) => {
-                quiet += 1;
-                if quiet >= 6 {
-                    return Err(TlsError::HandshakeFailed("stream went quiet"));
-                }
-            }
-            Err(e) => return Err(e.into()),
+        let n = tcp::recv_blocking(handle, &mut buf[filled..], 1000)?; // 10s timeout
+        if n == 0 {
+            return Err(TlsError::HandshakeFailed("connection closed"));
         }
+        filled += n;
     }
     Ok(())
 }
