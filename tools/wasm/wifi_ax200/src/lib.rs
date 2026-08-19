@@ -918,9 +918,12 @@ impl Ax200 {
         self.w32(CSR_FH_INT_STATUS, 0xFFFF_FFFF);
 
         // iwl_pcie_check_hw_rf_kill: bit clear == radio killed.
-        let gp = self.r32(CSR_GP_CNTRL);
-        if gp & CSR_GP_CNTRL_REG_FLAG_HW_RF_KILL_SW == 0 {
-            host::dprint("[ax200] WARNING: HW RF-kill asserted — firmware may not boot\n");
+        if self.rf_killed() {
+            // A killed radio means the firmware boots, answers commands and
+            // keeps every receive buffer — and not one frame ever arrives. That
+            // is indistinguishable from a driver bug unless someone says it, so
+            // it goes over `print`.
+            host::print("[ax200] HW RF-KILL asserted — the radio is off (switch/Fn key/BIOS). No frame can arrive until it is cleared.\n");
         }
 
         // make sure rfkill handshake bits are cleared
@@ -1695,6 +1698,13 @@ impl Ax200 {
             }
             host::dprint_hex8(mac[i]);
         }
+    }
+
+    /// iwl_is_rfkill_set (pcie/gen1_2/internal.h): the bit is CLEAR when the
+    /// radio is killed. Linux polls this and reports it up; we never showed it
+    /// at all, so an off switch looked exactly like a broken receive path.
+    fn rf_killed(&self) -> bool {
+        self.r32(CSR_GP_CNTRL) & CSR_GP_CNTRL_REG_FLAG_HW_RF_KILL_SW == 0
     }
 
     /// iwl_get_closed_rb_stts plus the mask Linux applies right after it
@@ -3566,6 +3576,13 @@ impl Ax200 {
         }
         r.c(b'\n');
 
+        r.s("radio    ");
+        if self.rf_killed() {
+            r.s("RF-KILL asserted — the radio is OFF, no frame can arrive\n");
+        } else {
+            r.s("on\n");
+        }
+
         r.s("rxring   read ");
         r.d(self.rxq_read as u64);
         r.s("  closed ");
@@ -5377,7 +5394,15 @@ impl Ax200 {
                 // after three rounds with nothing to re-arm take the one
                 // escalation we have — read the error table once, then rebuild
                 // the association instead of poking the ring forever.
-                if self.st.rx_wd_dry == 3 {
+                if self.st.rx_wd_dry == 3 && self.rf_killed() {
+                    // Re-scanning against a dead radio is a loop, not a
+                    // recovery: wait for the switch instead. Budgeted, because
+                    // this is a state, not an event.
+                    if self.st.rx_wd_fires <= 12 {
+                        host::print("[ax200] RX silent because the radio is OFF (HW RF-kill) — not a driver fault\n");
+                    }
+                    self.st.rx_wd_dry = 0;
+                } else if self.st.rx_wd_dry == 3 {
                     host::print("[ax200] RX silent and the firmware holds every buffer — error log:\n");
                     self.dump_fw_error_log();
                     if self.reconnect() {
