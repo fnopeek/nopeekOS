@@ -22,8 +22,25 @@ mod host;
 mod regs;
 use regs::*;
 
+/// A panic used to spin here in silence: `loop {}` with the argument thrown
+/// away. The module then hangs with every counter frozen at the instant it
+/// died, the report stops being republished, and from the outside it is
+/// indistinguishable from "the AP went quiet" — which cost an entire evening
+/// of chasing the radio while the driver was standing still. Say where it
+/// happened; `Location` survives `strip = true` because it is static data
+/// referenced by the panic site, not a symbol.
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    host::print("\n[ax200] PANIC — driver stopped");
+    if let Some(l) = info.location() {
+        host::print(" at ");
+        host::print(l.file());
+        host::print(":");
+        host::print_dec(l.line());
+    }
+    host::print("\n");
+    loop {}
+}
 
 /// AX200 runtime firmware (unified ucode), embedded like the RTL driver embeds
 /// rtw8852b_fw.bin. API 77 = the exact version Linux 6.18.26 requests.
