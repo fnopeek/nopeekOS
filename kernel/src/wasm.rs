@@ -31,12 +31,7 @@ struct HwDriverState {
 }
 
 const MAX_MMIO_MAPS: usize = 4;
-/// Per-module DMA allocation slots. Was 128, which the AX200 driver hit with
-/// 64 one-page receive buffers plus its rings — and 64 buffers is 12 ms of
-/// headroom at 64 Mbit, against a `worker_idle_hlt` that parks the core for up
-/// to 10 ms between drains. Linux allocates 2048 for this chip. Each slot is a
-/// (phys, pages) pair, so the ceiling is bookkeeping, not memory.
-const MAX_DMA_ALLOCS: usize = 512;
+const MAX_DMA_ALLOCS: usize = 128;
 const MAX_DMA_PAGES: usize = 2048; // 8MB total (iwlwifi FW sections ~1.3MB)
 const MAX_DMA_PAGES_PER_CALL: usize = 1024; // 4MB; a single FW section can exceed 256KB
 

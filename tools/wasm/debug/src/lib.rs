@@ -17,7 +17,7 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 mod host;
 
 /// One source for the version, printed in the banner.
-const VERSION: &str = "0.7.0";
+const VERSION: &str = "0.6.0";
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
@@ -74,15 +74,6 @@ pub extern "C" fn _start() {
     // so those 10 s froze every other fiber on the same worker core, the WiFi
     // driver included: a failing `debug` took the link down with it. Sleeping
     // between polls leaves the core, so the driver keeps draining its card.
-    // Outer loop: a mirror that gives up the moment the link hiccups is
-    // useless exactly when it is needed. The far end must keep listening too
-    // (`nc -lk`, or `while true; do nc -l PORT; done`) — plain `nc -l` takes
-    // ONE connection and exits.
-    //
-    // The sink stays open across reconnects, so output produced while we were
-    // away is still in its 64 KB ring when we come back.
-    let mut attempt: u32 = 0;
-    loop {
     let sock = host::tcp_connect(ip, port);
     let mut connected = sock >= 0;
     if connected {
@@ -98,20 +89,12 @@ pub extern "C" fn _start() {
     }
     if !connected {
         if sock >= 0 { host::tcp_close(sock); }
-        attempt = attempt.saturating_add(1);
-        // Say it the first few times, then stop — the retry itself is silent
-        // work and this print goes to the device's own screen.
-        if attempt <= 3 {
-            host::print("[debug] connect failed (is `nc -lk ");
-            host::print_dec(port as u32);
-            host::print("` running?) — retrying\n");
-        }
-        // 2 s, 4 s, 8 s … capped at 30 s.
-        let back = 2000u32.saturating_mul(1 << attempt.min(4)) / 2;
-        host::sleep(back.min(30000) as i32);
-        continue;
+        host::print("[debug] tcp_connect failed (is `nc -l ");
+        host::print_dec(port as u32);
+        host::print("` running?)\n");
+        host::stream_close(sink);
+        return;
     }
-    attempt = 0;
     // Say who we are AFTER the sink and the socket exist — the banner above is
     // printed before either, so it only ever reached the device's own screen.
     // Which version is running, and whether it got the global mirror, is the
@@ -219,11 +202,7 @@ pub extern "C" fn _start() {
         }
     }
 
-    // Relay ended. Close OUR side and dial again — the reason was already
-    // printed above, and how long the gap lasted is visible from the two
-    // timestamps in the surrounding log.
     host::tcp_close(sock);
-    host::print("[debug] reconnecting in 2 s\n");
-    host::sleep(2000);
-    }
+    host::stream_close(sink);
+    host::print("[debug] disconnected\n");
 }

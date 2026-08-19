@@ -141,14 +141,9 @@ pub const CMD_QUEUE_CB_SIZE: u8 = 2; // TFD_QUEUE_CB_SIZE(32) = ilog2(32)-3
 // ── Stage 3: RX restock + ALIVE notification ─────────────────────
 // RFH free-RBD write-pointer trigger (direct MMIO in BAR0, gen2 < BZ).
 pub const RFH_Q0_FRBDCB_WIDX_TRG: u32 = 0x1C80;
-// RB pool size. 64 was a bring-up number — "enough to receive the alive
-// notification", capped by MAX_DMA_ALLOCS — and was never revisited for
-// throughput. At 64 Mbit those 64 pages hold about 12 ms of traffic, while a
-// TLS receive parks the core in `worker_idle_hlt` for up to 10 ms between
-// drains: one millisecond of margin, and `drain-peak 56/64` on the device.
-// Linux allocates IWL_NUM_RBDS_HE (2048) for this chip; 256 pages = 1 MB is a
-// modest step that gives ~48 ms of headroom. Each RB = 1 page.
-pub const RX_NUM_RBS: usize = 256;
+// RB pool size: enough to receive the alive notification (kept small to
+// stay under MAX_DMA_ALLOCS; no npk_dma_free in the ABI). Each RB = 1 page.
+pub const RX_NUM_RBS: usize = 64;
 pub const RB_SIZE_BYTES: usize = 4096; // IWL_AMSDU_4K
 // rb_stts.closed_rb_num producer index mask.
 pub const RB_STTS_CLOSED_MASK: u32 = 0x0FFF;
@@ -373,11 +368,7 @@ pub const MC_OFF_NODE_ADDR: usize = 16; // u8[6] (+ __le16 reserved @ 22)
 pub const MC_OFF_BSSID_ADDR: usize = 24; // u8[6] (+ __le16 reserved @ 30)
 pub const MC_OFF_CCK_RATES: usize = 32; // __le32
 pub const MC_OFF_OFDM_RATES: usize = 36; // __le32
-pub const MC_OFF_PROT_FLAGS: usize = 40; // __le32 (enum iwl_mac_protection_flags)
-/// fw/api/mac.h:40 — what the firmware protects transmissions with.
-pub const MAC_PROT_FLG_TGG_PROTECT: u32 = 1 << 3;
-pub const MAC_PROT_FLG_HT_PROT: u32 = 1 << 23;
-pub const MAC_PROT_FLG_FAT_PROT: u32 = 1 << 24;
+pub const MC_OFF_PROT_FLAGS: usize = 40; // __le32 (0, unassociated)
 pub const MC_OFF_FILTER_FLAGS: usize = 52; // __le32
 // cck_short_preamble @ 44, short_slot @ 48, qos_flags @ 56, ac[5] @ 60 — all 0.
 // union iwl_mac_data_sta @ 100 (after qos_flags @56 + ac[AC_NUM+1=5]*8 = 40).
@@ -879,17 +870,6 @@ pub const IEEE80211_HT_PARAM_CHA_SEC_OFFSET: u8 = 0x03;
 pub const IEEE80211_HT_PARAM_CHA_SEC_NONE: u8 = 0x00;
 pub const IEEE80211_HT_PARAM_CHA_SEC_ABOVE: u8 = 0x01;
 pub const IEEE80211_HT_PARAM_CHA_SEC_BELOW: u8 = 0x03;
-/// HT Operation `operation_mode`, ieee80211.h:2012. The AP states here which
-/// protection the BSS needs; the firmware cannot know it any other way.
-pub const HT_OP_OFF_OPERATION_MODE: usize = 2; // __le16
-pub const IEEE80211_HT_OP_MODE_PROTECTION: u16 = 0x0003;
-pub const IEEE80211_HT_OP_MODE_PROTECTION_NONE: u16 = 0;
-pub const IEEE80211_HT_OP_MODE_PROTECTION_NONMEMBER: u16 = 1;
-pub const IEEE80211_HT_OP_MODE_PROTECTION_20MHZ: u16 = 2;
-pub const IEEE80211_HT_OP_MODE_PROTECTION_NONHT_MIXED: u16 = 3;
-/// ERP information element (EID 42), ieee80211.h:3515.
-pub const WLAN_EID_ERP_INFO: u8 = 42;
-pub const WLAN_ERP_USE_PROTECTION: u8 = 1 << 1;
 /// ieee80211.h:1914/1919
 pub const IEEE80211_HT_CAP_SUP_WIDTH_20_40: u16 = 0x0002;
 pub const IEEE80211_HT_CAP_SGI_40: u16 = 0x0040;

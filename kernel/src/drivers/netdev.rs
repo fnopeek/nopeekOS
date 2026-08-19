@@ -55,17 +55,7 @@ impl<const N: usize> Ring<N> {
 // RX is a FALLBACK: the driver normally delivers each frame straight into the IP
 // stack from its own fiber (net::wasm_deliver_rx, the NAPI topology) and only
 // spills to this ring when Core 0 holds the drain guard.
-//
-// 64 was sized for "occasionally, briefly". Measured on the device at ~100
-// Mbit: `rx ring in 798365 dropped 1508 (ring full — driver outran core-0
-// drain)`, while the DRIVER's own pool reported `pool-exhausted 0` — so the
-// frames survived the radio, survived the card, and were thrown away here.
-// Every one of them is a retransmission the sender then has to make, which is
-// what kept the congestion window small all evening.
-//
-// 512 entries ≈ 775 KB. The guard is held for the length of one Core-0 drain,
-// and at 100 Mbit 64 frames is under a millisecond of cover.
-const RX_RING: usize = 512;
+const RX_RING: usize = 64;
 
 struct WasmNic {
     mac_addr: [u8; 6],
