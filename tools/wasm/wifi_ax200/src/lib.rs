@@ -132,19 +132,6 @@ struct HtCap {
     ampdu_factor: u8,  // A-MPDU length exponent (0-3)
     ampdu_density: u8, // minimum MPDU start spacing (0-7)
     mcs_rx: [u8; 2],   // rx_mask[0] = MCS 0-7, rx_mask[1] = MCS 8-15
-    /// From the HT OPERATION element, not the capability one: where the
-    /// secondary 20 MHz channel sits. NONE means the AP runs 20 MHz only, and
-    /// then a 40 MHz PHY context would be pointing at nothing.
-    sec_chan_offs: u8,
-    /// VHT capability element present, and its two fields we act on.
-    vht: bool,
-    vht_cap_info: u32,
-    vht_rx_mcs_map: u16,
-    /// From the VHT OPERATION element: USE_HT (fall back to the HT width) or
-    /// 80MHZ. As with HT, the capability says CAN, the operation says DOES.
-    vht_chan_width: u8,
-    /// Centre-frequency channel index of the 80 MHz block.
-    vht_seg0: u8,
     present: bool,
 }
 impl HtCap {
@@ -153,12 +140,6 @@ impl HtCap {
         ampdu_factor: 0,
         ampdu_density: 0,
         mcs_rx: [0; 2],
-        sec_chan_offs: IEEE80211_HT_PARAM_CHA_SEC_NONE,
-        vht: false,
-        vht_cap_info: 0,
-        vht_rx_mcs_map: 0,
-        vht_chan_width: IEEE80211_VHT_CHANWIDTH_USE_HT,
-        vht_seg0: 0,
         present: false,
     };
 }
@@ -217,7 +198,6 @@ struct Stats {
     tx_bytes: u64,
     tx_blocked: u32, // times the in-flight cap stopped us pulling another frame
     tx_wd_recoveries: u32, // times the queue watchdog reclaimed leaked TX slots
-    inflight_corrections: u32, // times the derived read pointer beat the counter
     gtk_installs: u32,     // group keys installed = 4-way once + one per rekey
     tx_eapol_dropped: u32, // handshake replies that never reached the air
     inflight_peak: u32,
@@ -355,7 +335,7 @@ struct Stats {
 
 impl Stats {
     const NEW: Stats = Stats {
-        tx_frames: 0, tx_bytes: 0, tx_blocked: 0, tx_wd_recoveries: 0, inflight_corrections: 0, gtk_installs: 0, tx_eapol_dropped: 0, inflight_peak: 0,
+        tx_frames: 0, tx_bytes: 0, tx_blocked: 0, tx_wd_recoveries: 0, gtk_installs: 0, tx_eapol_dropped: 0, inflight_peak: 0,
         tx_ok: 0, tx_fail: 0, tx_retries: 0, tx_rts_fail: 0, tx_airtime_us: 0,
         last_status: 0, last_init_rate: 0,
         rx_frames: 0, rx_bytes: 0, rx_ip: 0, rx_eapol: 0, rx_mgmt: 0, rx_drain_max: 0,
@@ -518,14 +498,6 @@ struct Ax200 {
     data_bc_tbl: Dma,
     data_queue_id: u16,
     data_write_ptr: u32,
-    /// The firmware's read pointer for the data queue, derived from the TFD
-    /// index every TX response carries in its header sequence
-    /// (`SEQ_TO_INDEX`, cmdhdr.h:20) — the same source `iwl_pcie_reclaim`
-    /// uses. `data_in_flight` used to be a COUNTER: incremented per submit,
-    /// decremented per completion, and therefore permanently wrong the moment
-    /// one completion went missing. Derived from the two pointers it is
-    /// self-correcting: the very next completion snaps it back to the truth.
-    data_read_ptr: u32,
     // Frames handed to the data queue but not yet reported complete by the FW
     // (TX_CMD response). Flow control: never enqueue past the queue depth, or we
     // overwrite a TFD the firmware is still transmitting → corruption/stall.
@@ -567,7 +539,6 @@ struct Ax200 {
     tx_fail_streak_peak: u32,
     last_tx_resp_ms: u64,
     want_ampdu: bool,
-    want_vht: bool,
     /// Set once the firmware has ignored a block-ack setup. Asking again costs
     /// another silent 300 ms AND wedges the transmit path: measured on the
     /// device, 31 frames sent / 7 acknowledged / 500 refused, and no ping.
@@ -1856,23 +1827,6 @@ impl Ax200 {
                     ht.mcs_rx[1] = buf[body + HT_OFF_MCS_RX_MASK + 1];
                     ht.present = true;
                 }
-                // The capability element says the AP CAN do 40 MHz; only the
-                // operation element says whether it currently DOES, and on
-                // which side the secondary channel sits.
-                WLAN_EID_HT_OPERATION if len >= 2 => {
-                    ht.sec_chan_offs =
-                        buf[body + HT_OP_OFF_HT_PARAM] & IEEE80211_HT_PARAM_CHA_SEC_OFFSET;
-                }
-                WLAN_EID_VHT_CAPABILITY if len >= VHT_CAP_IE_LEN => {
-                    ht.vht = true;
-                    ht.vht_cap_info = le32(&buf, body + VHT_OFF_CAP_INFO);
-                    ht.vht_rx_mcs_map = u16::from_le_bytes([
-                        buf[body + VHT_OFF_RX_MCS_MAP], buf[body + VHT_OFF_RX_MCS_MAP + 1]]);
-                }
-                WLAN_EID_VHT_OPERATION if len >= 3 => {
-                    ht.vht_chan_width = buf[body + VHT_OP_OFF_CHAN_WIDTH];
-                    ht.vht_seg0 = buf[body + VHT_OP_OFF_SEG0];
-                }
                 _ => {}
             }
             p += 2 + len;
@@ -2123,12 +2077,6 @@ impl Ax200 {
         // an aggregate carries nothing) — and recovering from that needs the
         // network it just broke. Twice now. So the safe state is the default.
         self.want_ampdu = cfg_on(cfg_get(text, b"ampdu"));
-        // VHT80 is OFF by default. Measured on the device: receiving at 80 MHz
-        // works (292 Mbit), transmitting does not — 41 % retries, more RTS
-        // failures than frames sent, and the rate control walking back down to
-        // 20 MHz. HT40 measured 81 Mbit/s with a stable link, so that is the
-        // safe state until the transmit side is understood.
-        self.want_vht = cfg_on(cfg_get(text, b"vht"));
         self.want_power_save = cfg_on(cfg_get(text, b"ps"));
         self.want_bt_coex = cfg_on(cfg_get(text, b"btcoex"));
         self.settle_ms = cfg_settle_ms(text);
@@ -2256,14 +2204,8 @@ impl Ax200 {
         put_u32(&mut pc, PC_OFF_ACTION, FW_CTXT_ACTION_ADD);
         put_u32(&mut pc, PC_OFF_CI_CHANNEL, self.target_chan as u32);
         pc[PC_OFF_CI_BAND] = self.target_band;
-        pc[PC_OFF_CI_WIDTH] = if self.use_vht80() {
-            IWL_PHY_CHANNEL_MODE80
-        } else if self.use_ht40() {
-            IWL_PHY_CHANNEL_MODE40
-        } else {
-            IWL_PHY_CHANNEL_MODE20
-        };
-        pc[PC_OFF_CI_CTRL_POS] = if self.use_ht40() { self.ctrl_pos() } else { 0 };
+        pc[PC_OFF_CI_WIDTH] = IWL_PHY_CHANNEL_MODE20;
+        pc[PC_OFF_CI_CTRL_POS] = 0; // 20 MHz → control channel position 0
         put_u32(&mut pc, PC_OFF_LMAC_ID, IWL_LMAC_24G_INDEX); // no CDB → 0
         // Receive chains. iwl_mvm_phy_ctxt_apply fills this field for cmd_ver 3+
         // and sends RLC_CONFIG_CMD afterwards — both, not either. Left at zero
@@ -2520,21 +2462,8 @@ impl Ax200 {
     // capabilities imply, plus the AID. On a modify Linux leaves addr zeroed and
     // lets station_flags_msk select which bits to apply.
     fn sta_assoc_update(&mut self) {
-        // The station's TX width has to match the PHY context. Left at 20 MHz
-        // it produced exactly the asymmetry measured on the device once VHT80
-        // came up: RX at 650 Mbit, TX at 26, heavy loss, then a dropped link —
-        // the receive path ran at 80 MHz while transmission was pinned to 20
-        // and the rate control had to reconcile the two.
-        // `iwl_mvm_sta_send_to_fw` sets this from the peer's bandwidth.
-        let mut flags = if self.use_vht80() {
-            STA_FLG_FAT_EN_80MHZ
-        } else if self.use_ht40() {
-            STA_FLG_FAT_EN_40MHZ
-        } else {
-            STA_FLG_FAT_EN_20MHZ
-        };
-        // …and the mask has to select it, or a modify leaves the old value.
-        let mut msk = STA_FLAGS_MSK_ADD | STA_FLG_FAT_EN_MSK;
+        let mut flags = STA_FLG_FAT_EN_20MHZ;
+        let mut msk = STA_FLAGS_MSK_ADD;
         if self.target_ht.present {
             // rx_nss: the AP's second-stream MCS mask decides 1 vs 2 streams.
             flags |= if self.target_ht.mcs_rx[1] != 0 {
@@ -2620,55 +2549,6 @@ impl Ax200 {
         self.pump_rx(50);
     }
 
-    /// 40 MHz only when ALL THREE agree: the AP says it can (capability
-    /// element), it says it currently does and on which side (operation
-    /// element), and the band has the room. Anything less stays at 20 —
-    /// a PHY context wider than the AP's actual channel points at silence.
-    fn use_ht40(&self) -> bool {
-        self.target_ht.present
-            && self.target_ht.cap_info & IEEE80211_HT_CAP_SUP_WIDTH_20_40 != 0
-            && self.target_ht.sec_chan_offs != IEEE80211_HT_PARAM_CHA_SEC_NONE
-    }
-
-    /// 80 MHz when the AP carries both VHT elements, the operation element
-    /// actually says 80 (USE_HT means it is running an HT width after all),
-    /// and it offers at least two spatial streams at MCS 0-9. Anything less
-    /// falls through to `use_ht40`.
-    fn use_vht80(&self) -> bool {
-        self.want_vht
-            && self.target_ht.vht
-            && self.target_ht.vht_chan_width == IEEE80211_VHT_CHANWIDTH_80MHZ
-            && self.use_ht40()
-    }
-
-    /// `iwl_mvm_get_ctrl_pos` for the HT case. The control channel is the
-    /// UPPER of the pair exactly when the secondary sits BELOW it; for 40 MHz
-    /// the offset term of that function is zero, so only the ABOVE bit is left.
-    fn ctrl_pos(&self) -> u8 {
-        if !self.use_vht80() {
-            // 40 MHz: the offset term of iwl_mvm_get_ctrl_pos is zero, so only
-            // the ABOVE bit remains — set when the secondary half is below.
-            return if self.target_ht.sec_chan_offs == IEEE80211_HT_PARAM_CHA_SEC_BELOW {
-                IWL_PHY_CTRL_POS_ABOVE
-            } else {
-                0
-            };
-        }
-        // 80 MHz: iwl_mvm_get_ctrl_pos in full. Channel numbers are 5 MHz
-        // apart, so the control channel sits 10 or 30 MHz from the centre.
-        //     ret = (abs_offs - 10) / 20   →  0 or 1
-        //     ret |= (offs > 0) * ABOVE
-        let offs = (self.target_chan as i32 - self.target_ht.vht_seg0 as i32) * 5;
-        if offs == 0 {
-            return 0;
-        }
-        let mut ret = ((offs.abs() - 10) / 20) as u8 & IWL_PHY_CTRL_POS_OFFS_MSK;
-        if offs > 0 {
-            ret |= IWL_PHY_CTRL_POS_ABOVE;
-        }
-        ret
-    }
-
     fn reconnect(&mut self) -> bool {
         host::print("[ax200] link lost — re-scanning to reconnect...\n");
         self.authorized = false;
@@ -2750,29 +2630,9 @@ impl Ax200 {
             // take from us — per spatial stream, in the "80 MHz and below" slot.
             put_u16(&mut cmd, TLC_OFF_HT_RATES_NSS1, self.target_ht.mcs_rx[0] as u16);
             put_u16(&mut cmd, TLC_OFF_HT_RATES_NSS2, self.target_ht.mcs_rx[1] as u16);
-            // rs_fw_sgi_cw_support: one bit per channel width. And
-            // max_ch_width has to say 40 too, or the rate control never picks a
-            // 40 MHz rate no matter how the PHY is configured.
+            // rs_fw_sgi_cw_support: one bit per channel width, BIT(20 MHz) here.
             if self.target_ht.cap_info & IEEE80211_HT_CAP_SGI_20 != 0 {
-                cmd[TLC_OFF_SGI] |= 1 << TLC_CH_WIDTH_20MHZ;
-            }
-            if self.use_ht40() {
-                cmd[TLC_OFF_MAX_CH_WIDTH] = TLC_CH_WIDTH_40MHZ;
-                if self.target_ht.cap_info & IEEE80211_HT_CAP_SGI_40 != 0 {
-                    cmd[TLC_OFF_SGI] |= 1 << TLC_CH_WIDTH_40MHZ;
-                }
-            }
-            if self.use_vht80() {
-                // The rate table is VHT's, not HT's: MCS 0-9 per stream. The
-                // ht_rates field carries it — the firmware reads it by `mode`.
-                cmd[TLC_OFF_MODE] = TLC_MODE_VHT;
-                cmd[TLC_OFF_MAX_CH_WIDTH] = TLC_CH_WIDTH_80MHZ;
-                let vht_mcs = 0x03ffu16; // MCS 0-9
-                put_u16(&mut cmd, TLC_OFF_HT_RATES_NSS1, vht_mcs);
-                put_u16(&mut cmd, TLC_OFF_HT_RATES_NSS2, vht_mcs);
-                if self.target_ht.vht_cap_info & IEEE80211_VHT_CAP_SHORT_GI_80 != 0 {
-                    cmd[TLC_OFF_SGI] |= 1 << TLC_CH_WIDTH_80MHZ;
-                }
+                cmd[TLC_OFF_SGI] = 1 << TLC_CH_WIDTH_20MHZ;
             }
             let mut flags = 0u16;
             if self.target_ht.cap_info & IEEE80211_HT_CAP_LDPC_CODING != 0 {
@@ -2863,18 +2723,6 @@ impl Ax200 {
             [13500, 27000, 40500, 54000, 81000, 108000, 121500, 135000],
             [15000, 30000, 45000, 60000, 90000, 120000, 135000, 150000],
         ];
-        // VHT per spatial stream, [bw20 lgi, bw20 sgi, bw40 …, bw80 …].
-        // Derived from the 802.11ac formula rather than copied: data
-        // subcarriers (52 / 108 / 234) x bits-per-subcarrier x coding rate,
-        // over the 4.0 us symbol (3.6 us with short GI).
-        const VHT: [[u32; 10]; 6] = [
-            [6500, 13000, 19500, 26000, 39000, 52000, 58500, 65000, 78000, 86667],
-            [7222, 14444, 21667, 28889, 43333, 57778, 65000, 72222, 86667, 96296],
-            [13500, 27000, 40500, 54000, 81000, 108000, 121500, 135000, 162000, 180000],
-            [15000, 30000, 45000, 60000, 90000, 120000, 135000, 150000, 180000, 200000],
-            [29250, 58500, 87750, 117000, 175500, 234000, 263250, 292500, 351000, 390000],
-            [32500, 65000, 97500, 130000, 195000, 260000, 292500, 325000, 390000, 433333],
-        ];
         let code = (rnf & RATE_MCS_CODE_MSK) as usize;
         let sgi = if rnf & RATE_MCS_SGI_MSK != 0 { 1 } else { 0 };
         let bw = (rnf & RATE_MCS_CHAN_WIDTH_MSK) >> RATE_MCS_CHAN_WIDTH_POS;
@@ -2886,11 +2734,7 @@ impl Ax200 {
                 if code >= 8 || bw > 1 { return 0; }
                 HT[(bw as usize) * 2 + sgi][code] * nss
             }
-            RATE_MCS_MOD_TYPE_VHT => {
-                if code >= 10 || bw > 2 { return 0; }
-                VHT[(bw as usize) * 2 + sgi][code] * nss
-            }
-            _ => 0, // HE: not negotiated, so no table for it
+            _ => 0, // VHT/HE: we never negotiate them, so no table for them
         }
     }
 
@@ -3052,35 +2896,6 @@ impl Ax200 {
             r.d(self.target_ht.ampdu_factor as u64);
             r.c(b'/');
             r.d(self.target_ht.ampdu_density as u64);
-            // The negotiated width, and WHY — a link that quietly fell back to
-            // 20 MHz looks identical to one that never tried.
-            if self.use_vht80() {
-                r.s("  width 80 MHz VHT (seg0 ch ");
-                r.d(self.target_ht.vht_seg0 as u64);
-                r.s(", ctrl-pos 0x");
-                r.hex(self.ctrl_pos() as u32, 1);
-                r.c(b')');
-            } else if self.use_ht40() {
-                r.s("  width 40 MHz (sec ");
-                r.s(if self.target_ht.sec_chan_offs == IEEE80211_HT_PARAM_CHA_SEC_BELOW
-                    { "below" } else { "above" });
-                // Say WHOSE decision it was. "AP has VHT but runs HT" blamed
-                // the AP even when the reason was our own `vht` switch.
-                r.s(if !self.want_vht && self.target_ht.vht {
-                    ", AP offers VHT — `wlan set vht on` to use it)"
-                } else if self.target_ht.vht {
-                    ", AP has VHT but runs HT)"
-                } else {
-                    ")"
-                });
-            } else {
-                r.s("  width 20 MHz (");
-                if self.target_ht.cap_info & IEEE80211_HT_CAP_SUP_WIDTH_20_40 == 0 {
-                    r.s("AP cannot do 40)");
-                } else {
-                    r.s("AP runs 20 only)");
-                }
-            }
         } else {
             r.s("NONE - AP advertised no HT element, legacy rates only");
         }
@@ -3250,11 +3065,7 @@ impl Ax200 {
         if self.st.tx_wd_recoveries > 0 {
             r.s("  WD-RECLAIM ");
             r.d(self.st.tx_wd_recoveries as u64);
-        }
-        if self.st.inflight_corrections > 0 {
-            r.s("  corrected ");
-            r.d(self.st.inflight_corrections as u64);
-            r.s(" (counter drifted from the firmware's read pointer)");
+            r.s(" (firmware swallowed completions)");
         }
         r.c(b'\n');
 
@@ -4426,10 +4237,8 @@ impl Ax200 {
         // HT Capability element (802.11n). Only when the AP advertised HT — an
         // AP without it would get an element it never asked for, and everything
         // downstream (station flags, TLC mode HT) derives from its parameters.
-        // The claimed width MUST match the PHY context: advertising 20/40 with
-        // a 20 MHz radio invites frames it cannot receive, and claiming 20 with
-        // a 40 MHz context wastes the half we configured. Both follow
-        // `use_ht40`, which is the single place that decides.
+        // We claim 20 MHz only: the PHY context is IWL_PHY_CHANNEL_MODE20, so
+        // advertising 20/40 would invite frames the radio is not configured for.
         if self.target_ht.present {
             fr[p] = WLAN_EID_HT_CAPABILITY;
             fr[p + 1] = HT_CAP_IE_LEN as u8;
@@ -4443,12 +4252,6 @@ impl Ax200 {
             if self.target_ht.cap_info & IEEE80211_HT_CAP_SGI_20 != 0 {
                 cap |= IEEE80211_HT_CAP_SGI_20;
             }
-            if self.use_ht40() {
-                cap |= IEEE80211_HT_CAP_SUP_WIDTH_20_40;
-                if self.target_ht.cap_info & IEEE80211_HT_CAP_SGI_40 != 0 {
-                    cap |= IEEE80211_HT_CAP_SGI_40;
-                }
-            }
             if self.target_ht.cap_info & IEEE80211_HT_CAP_RX_STBC != 0 {
                 cap |= IEEE80211_HT_CAP_RX_STBC_1;
             }
@@ -4461,28 +4264,6 @@ impl Ax200 {
             // tx_params: TX MCS set defined and equal to the RX set (no TX_RX_DIFF).
             fr[b + HT_OFF_MCS_TX_PARAMS] = IEEE80211_HT_MCS_TX_DEFINED;
             p += 2 + HT_CAP_IE_LEN;
-        }
-
-        // VHT capabilities — only when we actually run 80 MHz. Same rule as
-        // HT: what we claim has to match the PHY context, or the AP sends at a
-        // width the radio is not listening on.
-        if self.use_vht80() {
-            fr[p] = WLAN_EID_VHT_CAPABILITY;
-            fr[p + 1] = VHT_CAP_IE_LEN as u8;
-            let b = p + 2;
-            let mut cap = 0u32; // MAX_MPDU_LENGTH_3895 is 0
-            if self.target_ht.vht_cap_info & IEEE80211_VHT_CAP_RXLDPC != 0 {
-                cap |= IEEE80211_VHT_CAP_RXLDPC;
-            }
-            if self.target_ht.vht_cap_info & IEEE80211_VHT_CAP_SHORT_GI_80 != 0 {
-                cap |= IEEE80211_VHT_CAP_SHORT_GI_80;
-            }
-            put_u32(&mut fr, b + VHT_OFF_CAP_INFO, cap);
-            // Two spatial streams at MCS 0-9, the rest marked unused.
-            put_u16(&mut fr, b + VHT_OFF_RX_MCS_MAP, VHT_MCS_MAP_2SS);
-            put_u16(&mut fr, b + VHT_OFF_TX_MCS_MAP, VHT_MCS_MAP_2SS);
-            // rx_highest / tx_highest stay 0: "no specified maximum".
-            p += 2 + VHT_CAP_IE_LEN;
         }
 
         // RSN element (WPA2-PSK-CCMP) for encrypted APs.
@@ -4584,7 +4365,6 @@ impl Ax200 {
         let mut cmd = [0u8; 600];
         let mut txbuf = [0u8; 1514];
         let mut rx_log = 0u32; // throttle the data-path diagnostics
-        let mut rate_log = 0u32; // …and the rate-change lines, which flap at VHT80
         let mut tx_log = 0u32;
         // Air-rate visibility. The firmware reports the TX rate it settled on
         // via TLC_MNG_UPDATE_NOTIF; the RX descriptor carries the rate the AP
@@ -4644,9 +4424,6 @@ impl Ax200 {
             let mut baid_alloc: Option<u32> = None;
             let mut delba: Option<(u8, u16)> = None;
             let mut mb: Option<(u32, u32, u32, u32)> = None;
-            // The data queue id, captured before the closure borrows self.
-            let a_dataq = self.data_queue_id as u32;
-            let mut a_read_ptr: Option<u32> = None;
             let t_rx0 = host::now_us();
             let rx_frames = self.service_rx(|c, g, rb| {
                 if c == TX_CMD && g == 0 {
@@ -4658,24 +4435,6 @@ impl Ax200 {
                     tx_done += 1;
                     let mut tr = [0u8; RX_PKT_DATA_OFF + TX_RESP_LEN];
                     host::dma_read_buf(rb.handle, 0, &mut tr);
-                    // The response header carries the TFD index it completes
-                    // (`SEQ_TO_INDEX`, cmdhdr.h:20) and the queue it belongs to
-                    // (`SEQ_TO_QUEUE`). That is the firmware's read pointer,
-                    // stated outright — no need to count.
-                    let seq = u16::from_le_bytes([tr[6], tr[7]]) as u32;
-                    if (seq >> 8) & 0x1f == a_dataq {
-                        // Mask to the QUEUE WINDOW, not to 256. The write
-                        // pointer wraps at MAX_TFD_QUEUE_SIZE while the data
-                        // queue holds IWL_DATA_QUEUE_SIZE entries and indexes
-                        // with `wptr & (qsize-1)`. Differencing across the two
-                        // moduli produced in-flight counts like 198 against a
-                        // cap of 16 — which blocked every transmission and
-                        // read on the device as a dead link (8 Mbit, 41 %
-                        // retries). Masked to the window the result is bounded
-                        // 0..63 by construction and can never wedge the queue.
-                        a_read_ptr = Some((seq & 0xff).wrapping_add(1)
-                            & (IWL_DATA_QUEUE_SIZE as u32 - 1));
-                    }
                     let base = RX_PKT_DATA_OFF;
                     a_rts += tr[base + TXR_OFF_FAILURE_RTS] as u32;
                     a_retries += tr[base + TXR_OFF_FAILURE_FRAME] as u32;
@@ -4735,10 +4494,7 @@ impl Ax200 {
                     let rnf = le32(&p, RX_PKT_DATA_OFF + TLC_NOTIF_OFF_RATE);
                     if rnf != last_tx_rate {
                         last_tx_rate = rnf;
-                        if rate_log < 8 {
-                            rate_log += 1;
-                            Self::log_rate("[ax200] TX rate → ", rnf);
-                        }
+                        Self::log_rate("[ax200] TX rate → ", rnf);
                     }
                 } else if c == REPLY_RX_MPDU_CMD && g == 0 {
                     // DIAGNOSTIC ONLY: note a DEAUTH / DISASSOC addressed to us +
@@ -4805,16 +4561,7 @@ impl Ax200 {
                                 let rnf = le32(&rd, RX_PKT_DATA_OFF + MPDU_OFF_RATE_N_FLAGS);
                                 if rnf != last_rx_rate {
                                     last_rx_rate = rnf;
-                                    // Budgeted. At VHT80 the rate flaps between
-                                    // MCS 8 and 9 continuously, and every line
-                                    // goes to the terminal, the global mirror
-                                    // AND out over TCP — in the middle of the
-                                    // measurement it is meant to inform. The
-                                    // report carries the current rate anyway.
-                                    if rate_log < 8 {
-                                        rate_log += 1;
-                                        Self::log_rate("[ax200] RX rate -> ", rnf);
-                                    }
+                                    Self::log_rate("[ax200] RX rate -> ", rnf);
                                 }
                             }
                             if rx_log < 12 {
@@ -4862,41 +4609,7 @@ impl Ax200 {
             self.st.prof_rx_us += host::now_us().saturating_sub(t_rx0);
             self.st.prof_frames += rx_frames as u64;
             // Free the data-queue slots the firmware just reported done.
-            //
-            // Derived, not counted: `(write - read) & 255` is what the firmware
-            // and we actually disagree about, and a swallowed completion is
-            // repaired by the next one instead of leaking a slot forever.
-            // Measured before this: 8 of 16 slots lost for 314 s, and an OTA
-            // update that failed because a one-second stall killed its TLS
-            // handshake.
-            let counted = self.data_in_flight.saturating_sub(tx_done);
-            if let Some(rp) = a_read_ptr {
-                self.data_read_ptr = rp;
-                let derived = (self.data_write_ptr & (IWL_DATA_QUEUE_SIZE as u32 - 1))
-                    .wrapping_sub(rp) & (IWL_DATA_QUEUE_SIZE as u32 - 1);
-                // Say when the two disagree by more than the frames completed
-                // in this pass — that difference IS the leak, and until now it
-                // was invisible.
-                if derived < counted && self.st.inflight_corrections < 8
-                {
-                    self.st.inflight_corrections += 1;
-                    host::print("[ax200] in-flight counted ");
-                    host::print_dec(counted);
-                    host::print(", firmware says ");
-                    host::print_dec(derived);
-                    host::print(" — correcting\n");
-                }
-                // Only ever LOWER the count. The derived value exists to
-                // repair a leak; it must never be able to create one. Getting
-                // the two pointers into different moduli once already wedged
-                // transmission completely (in-flight 198 against a cap of 16,
-                // 8 Mbit, dead link), and a diagnostic that can block the
-                // queue is worse than the leak it fixes. Taking the minimum
-                // means a disagreement — whatever its cause — costs nothing.
-                self.data_in_flight = counted.min(derived);
-            } else {
-                self.data_in_flight = counted;
-            }
+            self.data_in_flight = self.data_in_flight.saturating_sub(tx_done);
             // Fold this pass's accumulators into the running statistics.
             self.st.loop_iters = self.st.loop_iters.wrapping_add(1);
             self.st.rx_frames = self.st.rx_frames.wrapping_add(rx_frames);
@@ -5647,7 +5360,6 @@ pub extern "C" fn _start() {
         data_bc_tbl: Dma::NONE,
         data_queue_id: 0,
         data_write_ptr: 0,
-        data_read_ptr: 0,
         key_slot_used: [false; STA_KEY_MAX_NUM as usize],
         key_slot_freed: [0; STA_KEY_MAX_NUM as usize],
         key_slot_prev: None,
@@ -5676,7 +5388,6 @@ pub extern "C" fn _start() {
         pick_reason: PICK_STRONGEST,
         ba_pending: None,
         want_ampdu: false,
-        want_vht: false,
         ba_fw_broken: false,
         link_published: false,
         tx_fail_streak: 0,
