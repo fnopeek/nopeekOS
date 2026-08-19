@@ -4341,8 +4341,11 @@ impl Ax200 {
         }
     }
 
+    /// `ampdu_tog` carries the aggregate we are inside of across calls:
+    /// `0xFF` = not in one, otherwise the firmware's TOGGLE bit as 0 or 1.
     fn rx_classify(rb: &Dma, our_mac: &[u8; 6], out: &mut [u8], miss_log: &mut u32,
-                   to_us: &mut u32, crypt: &mut [u32; 4], air_us: &mut u64) -> RxKind {
+                   to_us: &mut u32, crypt: &mut [u32; 4], air_us: &mut u64,
+                   ampdu_tog: &mut u8) -> RxKind {
         let mut buf = [0u8; 1600];
         host::dma_read_buf(rb.handle, 0, &mut buf);
         let d = RX_PKT_DATA_OFF;
@@ -4404,7 +4407,26 @@ impl Ax200 {
             // SIFS + ACK + DIFS + mean backoff (CWmin 15 for best effort, so
             // 7.5 slots). Slot and SIFS differ between the DSSS and OFDM PHYs.
             let overhead = if cck { 10 + 40 + 50 + 150 } else { 16 + 28 + 34 + 68 };
-            *air_us += preamble + overhead + (mpdu_len as u64 * 8 * 1000 / kbit as u64);
+            // In an A-MPDU the preamble, SIFS, block-ack, DIFS and backoff are
+            // paid ONCE for the whole aggregate — not per subframe. Charging
+            // them per subframe made the report claim `rx 186 %` of a window,
+            // which is not a busy channel but a broken ruler. The firmware
+            // flips PHY_AMPDU_TOGGLE at the start of every new aggregate
+            // (iwl_mvm_rx_mpdu_mq), so a subframe whose toggle matches the one
+            // before it costs data time only.
+            let phy_info = (buf[d + MPDU_OFF_PHY_INFO] as u16)
+                | ((buf[d + MPDU_OFF_PHY_INFO + 1] as u16) << 8);
+            let first_of_aggregate = if phy_info & IWL_RX_MPDU_PHY_AMPDU != 0 {
+                let t = if phy_info & IWL_RX_MPDU_PHY_AMPDU_TOGGLE != 0 { 1u8 } else { 0u8 };
+                let is_new = *ampdu_tog != t;
+                *ampdu_tog = t;
+                is_new
+            } else {
+                *ampdu_tog = 0xFF; // outside an aggregate every frame pays in full
+                true
+            };
+            *air_us += (mpdu_len as u64 * 8 * 1000 / kbit as u64)
+                + if first_of_aggregate { preamble + overhead } else { 0 };
         }
 
         let status = le32(&buf, d + MPDU_OFF_STATUS);
@@ -4805,6 +4827,8 @@ impl Ax200 {
         let mut last_rx_rate = u32::MAX;
         let mut rx_rate_tick = 0u32;
         let mut llc_miss = 8u32; // budget for RX-offset mismatch reports
+        // Which A-MPDU we are inside of, so its fixed overhead is charged once.
+        let mut ampdu_tog = 0xFFu8;
         let mut addba: Option<[u8; 12]> = None;
         let mut deauth_total = 0u32; // diagnostic: link-loss events seen
         // One-shot: is the firmware healthy after bring-up?
@@ -4989,7 +5013,7 @@ impl Ax200 {
                         return true; // mgmt frame — not for the IP path
                     }
                     let uni_before = a_to_us;
-                    match Self::rx_classify(rb, &our_mac, &mut rxbuf, &mut llc_miss, &mut a_to_us, &mut a_crypt, &mut a_air) {
+                    match Self::rx_classify(rb, &our_mac, &mut rxbuf, &mut llc_miss, &mut a_to_us, &mut a_crypt, &mut a_air, &mut ampdu_tog) {
                         RxKind::Eapol(n) => {
                             a_eapol += 1;
                             a_rx_bytes += n as u64;
