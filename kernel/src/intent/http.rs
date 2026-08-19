@@ -360,6 +360,8 @@ fn do_http_request(args: &str, use_tls: bool) {
             match crate::net::tcp::recv_blocking(handle, &mut buf, 500) {
                 Ok(0) => break,
                 Ok(n) => response.extend_from_slice(&buf[..n]),
+                // A timeout now arrives as an error rather than as Ok(0); for
+                // this plain-HTTP reader both still mean "stop".
                 Err(_) => break,
             }
             if response.len() > HTTP_MAX_RESPONSE { break; }

@@ -1202,7 +1202,7 @@ pub fn intent_help_topic(topic: &str) {
             help_row("wlan set <key> <val>", "Change one wifi setting (wlan set band 2.4)");
             help_row("wlan unset <key>", "Drop one wifi setting");
             kprintln!("[npk]");
-            help_note("wifi keys: ssid, band (5|2.4|auto), ampdu, ps, btcoex, settle_ms");
+            help_note("wifi keys: ssid, band (5|2.4|auto), ampdu, ht40, vht, ps, btcoex, settle_ms");
             help_note("      all in one object, sys/config/wifi - `wlan set` edits it in");
             help_note("      place, because plain `store` would replace the whole file");
             help_note("passphrase, kept apart:  store /sys/config/wifi_psk <pass>");
