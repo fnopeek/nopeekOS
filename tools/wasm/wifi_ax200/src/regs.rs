@@ -410,7 +410,25 @@ pub const MAC_QOS_FLG_TGN: u32 = 1 << 1;
 // `mac80211_ac_to_ucode_ac` (mvm/utils.c:175) and `iwl_mvm_ac_to_tx_fifo`
 // (mvm/mac-ctxt.c:17) are.
 pub const AC_TO_UCODE_AC: [usize; 4] = [3, 2, 1, 0]; // AC_VO, AC_VI, AC_BE, AC_BK
-pub const AC_TO_TX_FIFO: [u8; 4] = [3, 2, 1, 0];     // VO, VI, BE, BK
+// `iwl_mvm_mac_ac_to_tx_fifo` (mvm/mvm.h) picks between THREE tables, and the
+// one printed at mac-ctxt.c:17 is the LEGACY one:
+//
+//     if (device_family >= IWL_DEVICE_FAMILY_BZ) return iwl_mvm_ac_to_bz_tx_fifo[ac];
+//     if (iwl_mvm_has_new_tx_api(mvm))           return iwl_mvm_ac_to_gen2_tx_fifo[ac];
+//     return iwl_mvm_ac_to_tx_fifo[ac];
+//
+// We are 22000 with the new TX API, so it is the GEN2 table — and gen2
+// numbers the FIFOs differently (`enum iwl_gen2_tx_fifo`, fw/api/txq.h:57):
+// CMD = 0, EDCA_BK = 1, EDCA_BE = 2, EDCA_VI = 3, EDCA_VO = 4.
+// 0.95.0 shipped the legacy [3,2,1,0]: BE landed in BK's FIFO and BK in the
+// COMMAND FIFO. Measured: `blocked` 45 -> 21570, `tx drops full` 0 -> 7569.
+pub const AC_TO_TX_FIFO: [u8; 4] = [4, 3, 2, 1];     // VO, VI, BE, BK (gen2)
+// Aggregation-manager experiment. Linux keeps tid_disable_tx at 0xffff on
+// TLC-offload firmware (mac80211 never opens a TX BA session, so nothing ever
+// clears it). Three attempts have not produced a single aggregate, so this is
+// the switch that tests the field itself instead of arguing about it.
+pub const STA_MODIFY_TID_DISABLE_TX: u8 = 1 << 1;
+pub const TID_DISABLE_AGG_NONE: u16 = 0x0000;
 
 // ── WMM Parameter element (vendor-specific 221) ──────────────────
 // OUI 00:50:F2, type 2, subtype 1 is the PARAMETER element (subtype 0 is the
