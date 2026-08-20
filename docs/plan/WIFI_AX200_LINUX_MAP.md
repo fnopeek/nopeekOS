@@ -1,6 +1,6 @@
 # AX200-Treiber gegen Linux — die Karte
 
-**Stand:** 2026-08-20 · wifi_ax200 0.95.0 · Referenz: Linux **6.18.26**,
+**Stand:** 2026-08-20 · wifi_ax200 0.96.0 · Referenz: Linux **6.18.26**,
 `~/.cache/nopeekos/linux-src/linux-6.18.26/` (iwlwifi 290 Dateien + mac80211 +
 cfg80211, siehe `memory/project_wifi_linux_gap_audit.md`).
 
@@ -239,6 +239,31 @@ AIFSN im unteren Nibble, ECWmin/ECWmax im nächsten Byte, TXOP als LE16) und
 füllt beides in **jeden** MAC-Kontext-Befehl, wie
 `iwl_mvm_mac_ctxt_cmd_common` es tut. Neue Report-Zeile `ap qos` zeigt die
 Tabelle, damit „QoS-BSS" prüfbar ist statt geglaubt.
+
+### C1d. QoS-Block war es auch nicht — und die FIFO-Tabelle war falsch
+
+0.95.0 am Gerät: `ap qos vo a2 cw3/7 txop 1504 · vi a2 cw7/15 txop 3008 ·
+be a3 cw15/1023 txop 0 · bk a7 cw15/1023 txop 0 · tgn yes`. Das
+WMM-Parameter-Element wird gelesen, `MAC_QOS_FLG_TGN` steht. **`aggregated 0`
+trotzdem.** Der QoS-Block ist damit als alleinige Ursache widerlegt.
+
+Dazu eine selbstverschuldete Regression: `blocked` 45 → **21570**,
+`tx drops full` 0 → **7569**. `iwl_mvm_mac_ac_to_tx_fifo` (mvm/mvm.h) wählt
+zwischen drei Tabellen; die bei `mac-ctxt.c:17` ist die **Legacy**-Variante,
+zehn Zeilen darunter steht `iwl_mvm_ac_to_gen2_tx_fifo`, und gen2 nummeriert
+anders (`CMD = 0`, EDCA_BK = 1, BE = 2, VI = 3, VO = 4). Mit der falschen
+Tabelle landete BE in BKs FIFO und BK im Kommando-FIFO. Korrigiert in
+**0.96.0** auf `[4, 3, 2, 1]`.
+
+Stand der Ursachensuche für `aggregated 0` — geprüft und ausgeschlossen:
+
+| Kandidat | Ergebnis |
+|---|---|
+| Sequenznummer selbst geschrieben | echter Fehler, behoben (0.94.0), `dups` 1930 → 0 — **nicht die Ursache** |
+| `qos_flags` / EDCA-Tabelle leer | echter Fehler, behoben (0.95.0) — **nicht die Ursache** |
+| `tid_disable_tx = 0xffff` | Linux lässt es stehen; **als Experiment schaltbar** seit 0.96.0 (`wlan set txagg on`) |
+| `agg_size` aus HT statt VHT | offen, echter Port (`iwl_mvm_get_sta_ampdu_dens`, sta.c:80) |
+| `uapsd_acs` / `sp_length` | offen, wir setzen sie gar nicht |
 
 ### C2. A-MSDU-Empfang fehlt → wir löschen das Bit in der ADDBA-Antwort
 
