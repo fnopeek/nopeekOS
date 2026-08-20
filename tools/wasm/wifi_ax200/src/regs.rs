@@ -390,6 +390,37 @@ pub const MAC_PROT_FLG_TGG_PROTECT: u32 = 1 << 3;
 pub const MAC_PROT_FLG_HT_PROT: u32 = 1 << 23;
 pub const MAC_PROT_FLG_FAT_PROT: u32 = 1 << 24;
 pub const MC_OFF_FILTER_FLAGS: usize = 52; // __le32
+// ── MAC_QOS_PARAM_API_S_VER_1, inside struct iwl_mac_ctx_cmd ──────
+// We left both of these at zero since the first port. That tells the firmware
+// there is no EDCA configuration and this is not an 802.11n BSS — and a
+// firmware that does not know it is in an HT/QoS BSS has no reason to open a
+// TX aggregation session. `iwl_mvm_set_fw_qos_params` (mvm/mac-ctxt.c:475).
+pub const MC_OFF_QOS_FLAGS: usize = 56;  // __le32
+pub const MC_OFF_AC: usize = 60;         // struct iwl_ac_qos ac[AC_NUM + 1]
+pub const AC_QOS_LEN: usize = 8;
+pub const ACQ_OFF_CW_MIN: usize = 0;     // __le16
+pub const ACQ_OFF_CW_MAX: usize = 2;     // __le16
+pub const ACQ_OFF_AIFSN: usize = 4;      // u8
+pub const ACQ_OFF_FIFOS_MASK: usize = 5; // u8
+pub const ACQ_OFF_EDCA_TXOP: usize = 6;  // __le16, microseconds
+pub const MAC_QOS_FLG_UPDATE_EDCA: u32 = 1 << 0;
+pub const MAC_QOS_FLG_TGN: u32 = 1 << 1;
+// enum iwl_ac (fw/api/mac.h:22) and enum iwl_mvm_tx_fifo (fw/api/txq.h:48),
+// both indexed by the mac80211 AC number (VO, VI, BE, BK) exactly as
+// `mac80211_ac_to_ucode_ac` (mvm/utils.c:175) and `iwl_mvm_ac_to_tx_fifo`
+// (mvm/mac-ctxt.c:17) are.
+pub const AC_TO_UCODE_AC: [usize; 4] = [3, 2, 1, 0]; // AC_VO, AC_VI, AC_BE, AC_BK
+pub const AC_TO_TX_FIFO: [u8; 4] = [3, 2, 1, 0];     // VO, VI, BE, BK
+
+// ── WMM Parameter element (vendor-specific 221) ──────────────────
+// OUI 00:50:F2, type 2, subtype 1 is the PARAMETER element (subtype 0 is the
+// shorter Information element, which carries no EDCA table).
+pub const WMM_OUI: [u8; 3] = [0x00, 0x50, 0xf2];
+pub const WMM_OUI_TYPE: u8 = 2;
+pub const WMM_OUI_SUBTYPE_PARAM: u8 = 1;
+pub const WMM_PARAM_IE_LEN: usize = 24;
+pub const WMM_PARAM_OFF_AC: usize = 8; // after oui(3) type subtype version qos_info reserved
+
 // cck_short_preamble @ 44, short_slot @ 48, qos_flags @ 56, ac[5] @ 60 — all 0.
 // union iwl_mac_data_sta @ 100 (after qos_flags @56 + ac[AC_NUM+1=5]*8 = 40).
 // For the connect MODIFY (iwl_mvm_mac_ctxt_cmd_sta, unassoc branch) we set the

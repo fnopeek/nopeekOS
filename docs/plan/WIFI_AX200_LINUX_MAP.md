@@ -1,6 +1,6 @@
 # AX200-Treiber gegen Linux — die Karte
 
-**Stand:** 2026-08-20 · wifi_ax200 0.94.0 · Referenz: Linux **6.18.26**,
+**Stand:** 2026-08-20 · wifi_ax200 0.95.0 · Referenz: Linux **6.18.26**,
 `~/.cache/nopeekos/linux-src/linux-6.18.26/` (iwlwifi 290 Dateien + mac80211 +
 cfg80211, siehe `memory/project_wifi_linux_gap_audit.md`).
 
@@ -176,6 +176,69 @@ es `aggregated 0 of 21583`.
 bekommen weiter eine von uns, weil darunter kein mac80211 liegt, das sie schon
 vergeben hätte. Ob das die ganze Ursache ist, entscheidet die nächste `tx
 agg`-Zeile — nicht dieser Absatz.
+
+### C1c. Der MAC-Kontext sagte der Firmware nie, dass dies ein QoS/HT-BSS ist
+
+0.94.0 hat die Sequenznummer der Firmware überlassen. Ergebnis am Gerät:
+
+| | 0.93.0 | 0.94.0 |
+|---|---|---|
+| `dups` | 1930 | **0** |
+| `retries` | 2968 (13 %) | **801 (3 %)** |
+| `rts-fail` | 12217 | 7195 |
+| `tx drops full` | 25 | **0** |
+| `longest silence` | 13 ms | 3 ms |
+| `aggregated` | 0 | **0** |
+
+Ein echter Fehler weniger — der AP schickt kein einziges Frame mehr doppelt —
+aber nicht die Aggregation.
+
+Die fehlt woanders. `struct iwl_mac_ctx_cmd` trägt ab Offset 56 den
+QoS-Block:
+
+```c
+	__le32 filter_flags;                   /* 52 */
+	/* MAC_QOS_PARAM_API_S_VER_1 */
+	__le32 qos_flags;                      /* 56 */
+	struct iwl_ac_qos ac[AC_NUM + 1];      /* 60 .. 100 */
+```
+
+**Wir haben beide seit dem ersten Port auf null gelassen.** Unsere `MC_OFF_*`
+sprangen von `PROT_FLAGS` (40) direkt auf `FILTER_FLAGS` (52) und dann auf
+`STA_IS_ASSOC` (100) — der ganze Block dazwischen blieb leer. Linux füllt ihn
+in `iwl_mvm_set_fw_qos_params` (`mvm/mac-ctxt.c:475`):
+
+```c
+	for (i = 0; i < IEEE80211_NUM_ACS; i++) {
+		u8 txf = iwl_mvm_mac_ac_to_tx_fifo(mvm, i);
+		u8 ucode_ac = iwl_mvm_mac80211_ac_to_ucode_ac(i);
+		ac[ucode_ac].cw_min = ...; ac[ucode_ac].cw_max = ...;
+		ac[ucode_ac].edca_txop = cpu_to_le16(queue_params[i].txop * 32);
+		ac[ucode_ac].aifsn = queue_params[i].aifs;
+		ac[ucode_ac].fifos_mask = BIT(txf);
+	}
+	if (link_conf->qos)
+		*qos_flags |= cpu_to_le32(MAC_QOS_FLG_UPDATE_EDCA);
+	if (link_conf->chanreq.oper.width != NL80211_CHAN_WIDTH_20_NOHT)
+		*qos_flags |= cpu_to_le32(MAC_QOS_FLG_TGN);
+```
+
+`qos_flags = 0` sagt der Firmware zwei Dinge: keine EDCA-Konfiguration, und
+**`MAC_QOS_FLG_TGN` nicht gesetzt — also kein 802.11n-BSS.** Auf dieser ucode
+führt die Firmware den TX-Aggregationsmanager selbst (C1); sie hat keinen
+Grund, für ein BSS eine Sitzung zu eröffnen, von dem sie weiß, dass es weder
+QoS noch HT ist. Dass der Empfang trotzdem aggregiert wird, passt dazu: den
+ADDBA schickt dort der AP, wir vergeben nur eine BAID.
+
+Dazu fehlte die Quelle der Werte: das **WMM-Parameter-Element** des AP
+(vendor 221, OUI 00:50:F2, Typ 2, **Subtyp 1**) haben wir nie gelesen. Wir
+schicken selbst nur das kürzere Information-Element im Assoc-Request.
+
+**wifi_ax200 0.95.0** liest es (`ieee80211_sta_wmm_params`: ACI in Bit 5-6,
+AIFSN im unteren Nibble, ECWmin/ECWmax im nächsten Byte, TXOP als LE16) und
+füllt beides in **jeden** MAC-Kontext-Befehl, wie
+`iwl_mvm_mac_ctxt_cmd_common` es tut. Neue Report-Zeile `ap qos` zeigt die
+Tabelle, damit „QoS-BSS" prüfbar ist statt geglaubt.
 
 ### C2. A-MSDU-Empfang fehlt → wir löschen das Bit in der ADDBA-Antwort
 

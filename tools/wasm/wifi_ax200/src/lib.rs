@@ -185,6 +185,13 @@ struct HtCap {
     /// ERP Use_Protection: legacy 802.11b stations present.
     erp_protect: bool,
     present: bool,
+    /// EDCA parameters from the AP's WMM Parameter element, indexed by the
+    /// mac80211 AC number (VO, VI, BE, BK) — the same shape as Linux'
+    /// `queue_params[]`. Without these the MAC context carries an all-zero
+    /// EDCA table and no `MAC_QOS_FLG_UPDATE_EDCA`.
+    wmm: bool,
+    /// (aifs, cw_min, cw_max, txop) per AC. cw_* already expanded from ECW.
+    edca: [(u8, u16, u16, u16); 4],
 }
 impl HtCap {
     const NONE: HtCap = HtCap {
@@ -205,6 +212,8 @@ impl HtCap {
         ht_op_mode: 0,
         erp_protect: false,
         present: false,
+        wmm: false,
+        edca: [(0, 0, 0, 0); 4],
     };
 }
 
@@ -2060,6 +2069,37 @@ impl Ax200 {
                     ht.vht_chan_width = buf[body + VHT_OP_OFF_CHAN_WIDTH];
                     ht.vht_seg0 = buf[body + VHT_OP_OFF_SEG0];
                 }
+                // WMM Parameter element — the AP's EDCA table.
+                // `ieee80211_sta_wmm_params` (mac80211/mlme.c): ACI in bits
+                // 5-6 selects the AC, AIFSN is the low nibble, the next byte
+                // is ECWmin in its low nibble and ECWmax in its high one, then
+                // a little-endian TXOP limit.
+                WLAN_EID_VENDOR_SPECIFIC
+                    if len >= WMM_PARAM_IE_LEN
+                        && buf[body..body + 3] == WMM_OUI
+                        && buf[body + 3] == WMM_OUI_TYPE
+                        && buf[body + 4] == WMM_OUI_SUBTYPE_PARAM =>
+                {
+                    let ecw2cw = |e: u8| -> u16 { (1u16 << e) - 1 };
+                    for k in 0..4 {
+                        let r = body + WMM_PARAM_OFF_AC + k * 4;
+                        let aci = (buf[r] >> 5) & 0x03;
+                        // ACI 0=BE, 1=BK, 2=VI, 3=VO → mac80211 AC index.
+                        let ac = match aci {
+                            1 => 3usize, // BK
+                            2 => 1,      // VI
+                            3 => 0,      // VO
+                            _ => 2,      // BE
+                        };
+                        // "AP has invalid WMM params (AIFSN=%d), will use 2"
+                        let aifs = (buf[r] & 0x0f).max(2);
+                        let cw_min = ecw2cw(buf[r + 1] & 0x0f);
+                        let cw_max = ecw2cw((buf[r + 1] & 0xf0) >> 4);
+                        let txop = u16::from_le_bytes([buf[r + 2], buf[r + 3]]);
+                        ht.edca[ac] = (aifs, cw_min, cw_max, txop);
+                    }
+                    ht.wmm = true;
+                }
                 // HE capability / operation live behind the extension ID.
                 WLAN_EID_EXTENSION if len >= 1 => match buf[body] {
                     WLAN_EID_EXT_HE_CAPABILITY => ht.he = true,
@@ -2647,6 +2687,9 @@ impl Ax200 {
         put_u32(&mut cmd, MC_OFF_CCK_RATES, MAC_CCK_RATES_DEFAULT);
         put_u32(&mut cmd, MC_OFF_OFDM_RATES, MAC_OFDM_RATES_DEFAULT);
         put_u32(&mut cmd, MC_OFF_FILTER_FLAGS, MAC_FILTER_ACCEPT_GRP | MAC_FILTER_IN_BEACON);
+        // Every MAC context command goes through iwl_mvm_mac_ctxt_cmd_common,
+        // and that always fills the QoS block — not only the associated one.
+        self.fill_qos_params(&mut cmd);
         // iwl_mac_data_sta (unassoc): is_assoc = 0, bi = beacon interval, dtim
         // unknown pre-assoc (→ 0), assoc_id = 0.
         put_u32(&mut cmd, MC_OFF_STA_IS_ASSOC, 0);
@@ -2689,6 +2732,39 @@ impl Ax200 {
     // iwl_mvm_mac_ctxt_cmd_sta, associated branch. Marks the MAC context as
     // associated with the DTIM timing + AID, and drops MAC_FILTER_IN_BEACON
     // (Linux only sets that while unassociated).
+    /// `iwl_mvm_set_fw_qos_params` (mvm/mac-ctxt.c:475), line for line.
+    ///
+    /// Both fields were left at zero since the first port. `qos_flags = 0`
+    /// says: no EDCA configuration, and NOT an 802.11n BSS. The firmware runs
+    /// the TX aggregation manager itself on this ucode (TLC offload), and it
+    /// has no reason to open a session for a BSS it was told is neither QoS
+    /// nor HT. Measured before this: `tx agg aggregated 0 of 22353`.
+    fn fill_qos_params(&self, cmd: &mut [u8]) {
+        if self.target_ht.wmm {
+            for i in 0..4 {
+                let (aifs, cw_min, cw_max, txop) = self.target_ht.edca[i];
+                let a = MC_OFF_AC + AC_TO_UCODE_AC[i] * AC_QOS_LEN;
+                put_u16(cmd, a + ACQ_OFF_CW_MIN, cw_min);
+                put_u16(cmd, a + ACQ_OFF_CW_MAX, cw_max);
+                cmd[a + ACQ_OFF_AIFSN] = aifs;
+                cmd[a + ACQ_OFF_FIFOS_MASK] = 1 << AC_TO_TX_FIFO[i];
+                // mac80211 keeps txop in 32 us units; the firmware wants us.
+                put_u16(cmd, a + ACQ_OFF_EDCA_TXOP, txop.saturating_mul(32));
+            }
+        }
+        let mut qos = 0u32;
+        if self.target_ht.wmm {
+            qos |= MAC_QOS_FLG_UPDATE_EDCA;
+        }
+        // "if chanreq.oper.width != NL80211_CHAN_WIDTH_20_NOHT" — i.e. any
+        // width that is not the legacy no-HT one. We are an HT station
+        // whenever the AP carries an HT element, 20 MHz included.
+        if self.target_ht.present {
+            qos |= MAC_QOS_FLG_TGN;
+        }
+        put_u32(cmd, MC_OFF_QOS_FLAGS, qos);
+    }
+
     fn mac_ctxt_assoc(&mut self) {
         let mut cmd = [0u8; MAC_CTX_CMD_LEN];
         put_u32(&mut cmd, MC_OFF_ID_COLOR, 0);
@@ -2705,6 +2781,7 @@ impl Ax200 {
         // stations share this channel.
         let prot = self.protection_flags();
         put_u32(&mut cmd, MC_OFF_PROT_FLAGS, prot);
+        self.fill_qos_params(&mut cmd);
 
         // iwl_mvm_set_fw_dtim_tbtt: the DTIM count counts down, so the next DTIM
         // TBTT is that many beacon intervals after the beacon we just heard.
@@ -3357,6 +3434,29 @@ impl Ax200 {
         } else {
             r.s("NONE - AP advertised no HT element, legacy rates only");
         }
+        r.c(b'\n');
+
+        // The EDCA table we hand the firmware, so "QoS BSS" is checkable.
+        r.s("ap qos   ");
+        if self.target_ht.wmm {
+            for (i, name) in ["vo", "vi", "be", "bk"].iter().enumerate() {
+                let (aifs, cw_min, cw_max, txop) = self.target_ht.edca[i];
+                r.s(name);
+                r.s(" a");
+                r.d(aifs as u64);
+                r.s(" cw");
+                r.d(cw_min as u64);
+                r.c(b'/');
+                r.d(cw_max as u64);
+                r.s(" txop ");
+                r.d(txop.saturating_mul(32) as u64);
+                r.s("  ");
+            }
+        } else {
+            r.s("AP sent no WMM parameter element");
+        }
+        r.s(" tgn ");
+        r.s(if self.target_ht.present { "yes" } else { "no" });
         r.c(b'\n');
 
         // The bytes the width decision rests on, so the line above can be
