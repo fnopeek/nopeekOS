@@ -272,6 +272,16 @@ struct Stats {
     tx_retries: u32,  // sum of failure_frame — retransmissions on the air
     tx_rts_fail: u32, // sum of failure_rts
     tx_airtime_us: u64,
+    // Is the firmware aggregating what we transmit? `frame_count` in every TX
+    // response answers it outright (1 = no aggregation, >1 = aggregation), and
+    // the compressed block-ack notification is the second witness. We read
+    // neither until now, which is why "no TX aggregation" was an assumption.
+    tx_subframes: u64, // sum of frame_count over all responses
+    tx_agg_resp: u32,  // responses with frame_count > 1
+    tx_agg_max: u8,    // largest frame_count seen
+    ba_notifs: u32,    // BA_NOTIF received
+    ba_txed: u64,      // MPDUs the firmware says it sent in aggregates
+    ba_done: u64,      // …and how many were acknowledged
     last_status: u16,
     last_init_rate: u32,
     // RX, cumulative.
@@ -413,6 +423,8 @@ impl Stats {
     const NEW: Stats = Stats {
         tx_frames: 0, tx_bytes: 0, tx_blocked: 0, tx_wd_recoveries: 0, inflight_corrections: 0, gtk_installs: 0, tx_eapol_dropped: 0, inflight_peak: 0,
         tx_ok: 0, tx_fail: 0, tx_retries: 0, tx_rts_fail: 0, tx_airtime_us: 0,
+        tx_subframes: 0, tx_agg_resp: 0, tx_agg_max: 0,
+        ba_notifs: 0, ba_txed: 0, ba_done: 0,
         last_status: 0, last_init_rate: 0,
         rx_frames: 0, rx_bytes: 0, rx_ip: 0, rx_eapol: 0, rx_mgmt: 0, rx_drain_max: 0,
         win_pass_empty: 0, win_pass_few: 0, win_pass_many: 0, win_pass_burst: 0,
@@ -3562,6 +3574,27 @@ impl Ax200 {
         r.hex(self.st.last_status as u32, 4);
         r.c(b'\n');
 
+        // Is the firmware aggregating what we hand it? `frame_count` says so
+        // per response (1 = single MPDU), the compressed block-ack says it
+        // again from the other side. Without this line "no TX aggregation" was
+        // an assumption; `tx frames` counts what we QUEUED, not what went on
+        // the air as one aggregate.
+        r.s("tx agg   subframes ");
+        r.d(self.st.tx_subframes);
+        r.s(" over ");
+        r.d((self.st.tx_ok + self.st.tx_fail) as u64);
+        r.s(" resp; aggregated ");
+        r.d(self.st.tx_agg_resp as u64);
+        r.s(" max ");
+        r.d(self.st.tx_agg_max as u64);
+        r.s("  ba-notif ");
+        r.d(self.st.ba_notifs as u64);
+        r.s(" txed ");
+        r.d(self.st.ba_txed);
+        r.s(" done ");
+        r.d(self.st.ba_done);
+        r.c(b'\n');
+
         r.s("rx       frames ");
         r.d(self.st.rx_frames as u64);
         r.s(" bytes ");
@@ -4961,6 +4994,12 @@ impl Ax200 {
             let mut a_fail = 0u32;
             let mut a_retries = 0u32;
             let mut a_rts = 0u32;
+            let mut a_subframes = 0u64;
+            let mut a_agg_resp = 0u32;
+            let mut a_agg_max = 0u8;
+            let mut a_ba_notifs = 0u32;
+            let mut a_ba_txed = 0u64;
+            let mut a_ba_done = 0u64;
             let mut a_airtime = 0u64;
             let mut a_status = 0u16;
             let mut a_init_rate = 0u32;
@@ -5015,6 +5054,13 @@ impl Ax200 {
                         a_read_ptr = Some((seq & 0xff) & (IWL_DATA_QUEUE_SIZE as u32 - 1));
                     }
                     let base = RX_PKT_DATA_OFF;
+                    // "frame_count: 1 no aggregation, >1 aggregation"
+                    // (fw/api/tx.h). The field has been in the struct since the
+                    // first port and unread ever since — the compiler said so.
+                    let fc = tr[base + TXR_OFF_FRAME_COUNT];
+                    a_subframes += fc.max(1) as u64;
+                    if fc > 1 { a_agg_resp += 1; }
+                    if fc > a_agg_max { a_agg_max = fc; }
                     a_rts += tr[base + TXR_OFF_FAILURE_RTS] as u32;
                     a_retries += tr[base + TXR_OFF_FAILURE_FRAME] as u32;
                     a_init_rate = le32(&tr, base + TXR_OFF_INITIAL_RATE);
@@ -5031,6 +5077,18 @@ impl Ax200 {
                         TX_STATUS_SUCCESS | TX_STATUS_DIRECT_DONE => a_ok += 1,
                         _ => a_fail += 1,
                     }
+                } else if c == BA_NOTIF && g == 0 {
+                    // iwl_mvm_rx_ba_notif, new-tx-api path. On TLC-offload
+                    // firmware this is where an aggregate reports itself:
+                    // `txed` MPDUs went out, `done` were acknowledged.
+                    let mut bn = [0u8; RX_PKT_DATA_OFF + CBA_HDR_LEN];
+                    host::dma_read_buf(rb.handle, 0, &mut bn);
+                    let b = RX_PKT_DATA_OFF;
+                    a_ba_notifs += 1;
+                    a_ba_txed += u16::from_le_bytes(
+                        [bn[b + CBA_OFF_TXED], bn[b + CBA_OFF_TXED + 1]]) as u64;
+                    a_ba_done += u16::from_le_bytes(
+                        [bn[b + CBA_OFF_DONE], bn[b + CBA_OFF_DONE + 1]]) as u64;
                 } else if c == ADD_STA && g == IWL_ALWAYS_LONG_GROUP {
                     // Only the block-ack setup sends ADD_STA while the loop runs;
                     // its status word carries the session id (see ba_request).
@@ -5246,6 +5304,12 @@ impl Ax200 {
             self.st.rx_mgmt = self.st.rx_mgmt.wrapping_add(a_mgmt);
             self.st.addba_seen = self.st.addba_seen.wrapping_add(a_addba);
             self.st.rx_airtime_us += a_air;
+            self.st.tx_subframes += a_subframes;
+            self.st.tx_agg_resp = self.st.tx_agg_resp.wrapping_add(a_agg_resp);
+            if a_agg_max > self.st.tx_agg_max { self.st.tx_agg_max = a_agg_max; }
+            self.st.ba_notifs = self.st.ba_notifs.wrapping_add(a_ba_notifs);
+            self.st.ba_txed += a_ba_txed;
+            self.st.ba_done += a_ba_done;
             self.st.rx_prot = self.st.rx_prot.wrapping_add(a_crypt[0]);
             self.st.rx_mic_fail = self.st.rx_mic_fail.wrapping_add(a_crypt[1]);
             self.st.rx_sec_none = self.st.rx_sec_none.wrapping_add(a_crypt[2]);

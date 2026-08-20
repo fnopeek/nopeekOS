@@ -1,6 +1,6 @@
 # AX200-Treiber gegen Linux — die Karte
 
-**Stand:** 2026-08-20 · wifi_ax200 0.92.0 · Referenz: Linux **6.18.26**,
+**Stand:** 2026-08-20 · wifi_ax200 0.93.0 · Referenz: Linux **6.18.26**,
 `~/.cache/nopeekos/linux-src/linux-6.18.26/` (iwlwifi 290 Dateien + mac80211 +
 cfg80211, siehe `memory/project_wifi_linux_gap_audit.md`).
 
@@ -68,36 +68,69 @@ hier, damit niemand sie für Linux hält.
 
 ## C — Der Deckel, der uns heute wirklich bremst
 
-### C1. TX-Aggregation ist in der Firmware ABGESCHALTET — dauerhaft
+### C1. TX-Aggregation — die Firmware macht sie selbst, und wir sehen nicht nach
 
-`iwl_mvm_sta_send_to_fw` schickt `tid_disable_tx = mvm_sta->tid_disable_agg`.
-Der Startwert ist `0xffff` („No aggs at first", `sta.c:1779`) und wird pro TID
-**gelöscht**, sobald mac80211 eine TX-Session öffnet:
+> **Korrektur 2026-08-20, gleicher Tag.** Hier stand zuerst: „TX-Aggregation ist
+> per `tid_disable_tx = 0xffff` dauerhaft abgeschaltet." **Das ist falsch.**
+> Weiterlesen in Linux hat es widerlegt, und der falsche Befund war schon
+> committet. Was wirklich gilt:
+
+Unsere Firmware hat **TLC-Offload** (`IWL_UCODE_TLV_CAPA_TLC_OFFLOAD` — wir
+schicken `TLC_MNG_CONFIG_CMD`, und die Ratensteuerung läuft). Für genau diesen
+Fall setzt iwlwifi
 
 ```c
-/* iwl_mvm_sta_tx_agg, mvm/sta.c:3020 */
-if (start) {
-        mvm_sta->tfd_queue_msk |= BIT(queue);
-        mvm_sta->tid_disable_agg &= ~BIT(tid);
+/* mvm/mac80211.c:396 */
+if (iwl_mvm_has_tlc_offload(mvm)) {
+        ieee80211_hw_set(hw, TX_AMPDU_SETUP_IN_HW);
+        ieee80211_hw_set(hw, HAS_RATE_CONTROL);
 }
-cmd.modify_mask |= STA_MODIFY_TID_DISABLE_TX;
-cmd.tid_disable_tx = cpu_to_le16(mvm_sta->tid_disable_agg);
 ```
 
-Wir schicken `TID_DISABLE_AGG_INIT = 0xffff` in **allen drei** ADD_STA-Aufrufen
-(`connect_add_station`, `sta_assoc_update`, `retarget_station`) und löschen es
-**nie**. Es gibt keinen `iwl_mvm_sta_tx_agg`-Gegenpart im Treiber.
+`IEEE80211_HW_TX_AMPDU_SETUP_IN_HW` heißt laut `mac80211.h:2711`: *„The device
+handles TX A-MPDU session setup strictly in HW. mac80211 should not attempt to
+do this in software."* Und `ieee80211_start_tx_ba_session` weigert sich dann
+auch:
 
-Folge: **jedes** gesendete Frame ist ein einzelnes MPDU mit eigener Präambel,
-eigenem SIFS, eigenem ACK, eigenem DIFS und eigenem Backoff. Am Gerät waren das
-im VHT80-Lauf **45 069 Einzel-Frames** — fast alles TCP-ACKs. Nicht die
-Luftzeit ist das Problem (7–10 %), sondern dass wir für jedes ACK einzeln um
-das Medium kämpfen. Das ist die Quelle der Latenz, und Latenz ist bei
-`cwnd/RTT` der Durchsatz.
+```c
+/* net/mac80211/agg-tx.c:626 */
+if ((tid >= IEEE80211_NUM_TIDS) ||
+    !ieee80211_hw_check(&local->hw, AMPDU_AGGREGATION) ||
+    ieee80211_hw_check(&local->hw, TX_AMPDU_SETUP_IN_HW))
+        return -EINVAL;
+```
 
-Das erklärt auch, warum `tx drops full` bei jeder Breite auftaucht
-(20 MHz: 620 · HT40: 583 · VHT80: 13 bei entsprechend kleinerem Durchsatz):
-der Deckel ist breitenunabhängig, weil er nicht in der Luft sitzt.
+Damit wird `IEEE80211_AMPDU_TX_OPERATIONAL` nie erreicht,
+`iwl_mvm_sta_tx_agg_oper` nie aufgerufen (seine eigene erste Zeile sagt das:
+`WARN_ON_ONCE(iwl_mvm_has_tlc_offload(mvm))`), `iwl_mvm_sta_tx_agg` nie — und
+**Linux lässt `tid_disable_agg` auf dieser Firmware genauso bei `0xffff`
+stehen wie wir.** Es ist kein Schalter, den wir vergessen haben. Die Firmware
+handelt die ADDBA-Sitzung selbst mit dem AP aus.
+
+Ebenso hinfällig: „45 069 Einzel-Frames". `tx frames` zählt, was wir der
+Firmware **übergeben** haben — ein Frame pro Paket, aggregiert oder nicht. Die
+Aggregation passiert unter uns. Die Zahl sagt über sie gar nichts.
+
+**Was wirklich offen ist: wir sehen nicht nach.** Zwei Zeugen liegen bereit und
+wurden nie gelesen:
+
+- `frame_count` in **jeder** TX-Antwort — „1 no aggregation, >1 aggregation"
+  (`fw/api/tx.h:497`). Die Konstante `TXR_OFF_FRAME_COUNT` steht seit dem
+  ersten Port in `regs.rs`; der Compiler meldet sie als *never used*.
+- **`BA_NOTIF` (0xc5)**, `struct iwl_compressed_ba_notif` — pro Aggregat mit
+  `txed` und `done`. Treffer im Treiber vor 0.93.0: **null**. Wir haben die
+  Meldung schlicht nicht angesehen.
+
+**wifi_ax200 0.93.0** liest beide und meldet sie, ohne irgendein Verhalten zu
+ändern:
+
+```
+tx agg   subframes N over M resp; aggregated K max X  ba-notif B txed T done D
+```
+
+`aggregated 0, max 1, ba-notif 0` ⇒ die Firmware aggregiert nicht, und **dann**
+ist zu suchen, warum. `max 20` ⇒ sie aggregiert längst, der Engpass liegt
+woanders, und C4 rückt nach vorn. Erst messen, dann bauen.
 
 ### C2. A-MSDU-Empfang fehlt → wir löschen das Bit in der ADDBA-Antwort
 
@@ -129,7 +162,7 @@ lang. Linux behandelt das in `iwl_mvm_rx_tx_cmd_single` über die
 
 | Fehlt | Linux | Was es kostet |
 |---|---|---|
-| **TX-A-MPDU** | `iwl_mvm_mac_ampdu_action` / `IEEE80211_AMPDU_TX_START` → `iwl_mvm_sta_tx_agg` | siehe C1 — der größte Posten |
+| **TX-A-MPDU-Sicht** | `frame_count` (`fw/api/tx.h:497`), `iwl_mvm_rx_ba_notif` / `iwl_compressed_ba_notif` | Der Aufbau liegt bei der Firmware (C1), aber wir hatten **keinen Blick darauf**, ob sie läuft. Seit 0.93.0 gelesen und gemeldet. |
 | **A-MSDU** rx+tx | `iwl_mvm_rx_mpdu_mq` AMSDU-Pfad, `IWL_UCODE_TLV_CAPA_AMSDU_IN_AMPDU` | siehe C2 |
 | **HE (802.11ax)** | `iwl_mvm_cfg_he_sta`, HE-Cap im Assoc-Request, `RATE_MCS_MOD_TYPE_HE`, HE-TLC | Treffer für HE im Treiber: **0** (die Konstante existiert, wird nirgends benutzt). Die AX200 ist 2x2 Wi-Fi 6: HE80 2ss MCS11 = **1201 Mbit** gegen VHT80 MCS9 = 866. Wichtiger als die rohe Zahl: HE-Symbole sind 12,8 µs statt 3,2 — deutlich robuster bei genau dem Rand, an dem uns VHT80 gerade wegbricht. |
 | **Mehrere TX-Queues (DQA)** | `iwl_mvm_sta_alloc_queue`, `iwl_mvm_tx_mpdu` TID-Auswahl | siehe C3 |
@@ -168,11 +201,10 @@ lang. Linux behandelt das in `iwl_mvm_rx_tx_cmd_single` über die
 Nach erwartetem Ertrag, jeweils **eine Änderung, eine Gerätemessung**
 (`netbench get 192.168.178.97 /get?mb=200` + `wlan`).
 
-1. **TX-A-MPDU** (C1). `iwl_mvm_sta_tx_agg` portieren: ADDBA-Request an den AP
-   senden, `tid_disable_agg` per TID löschen, `STA_MODIFY_TID_DISABLE_TX` im
-   modify_mask, TX-BA-Session-Zustand führen. Dazu `IWL_DATA_QUEUE_SIZE` auf
-   Linux' 256. Erwartung: die 45 069 Einzel-Frames werden ein Bruchteil davon,
-   RTT fällt, `cwnd/RTT` steigt.
+1. **Nachsehen, ob TX-Aggregation läuft** (C1) — 0.93.0, gebaut, wartet auf die
+   Gerätemessung. Die `tx agg`-Zeile entscheidet, ob Schritt 1b überhaupt
+   existiert und wie er aussieht. **Nichts weiter bauen, bis diese Zahl da
+   ist.**
 2. **A-MSDU-Empfang** (C2). `iwl_mvm_rx_mpdu_mq`-AMSDU-Pfad, danach das Bit in
    der ADDBA-Antwort stehen lassen.
 3. **`BA_WIN` 32 → 64** (B). Eine Zeile plus .bss.
