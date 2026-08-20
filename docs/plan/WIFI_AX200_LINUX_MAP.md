@@ -1,6 +1,6 @@
 # AX200-Treiber gegen Linux — die Karte
 
-**Stand:** 2026-08-20 · wifi_ax200 0.93.0 · Referenz: Linux **6.18.26**,
+**Stand:** 2026-08-20 · wifi_ax200 0.94.0 · Referenz: Linux **6.18.26**,
 `~/.cache/nopeekos/linux-src/linux-6.18.26/` (iwlwifi 290 Dateien + mac80211 +
 cfg80211, siehe `memory/project_wifi_linux_gap_audit.md`).
 
@@ -132,6 +132,51 @@ tx agg   subframes N over M resp; aggregated K max X  ba-notif B txed T done D
 ist zu suchen, warum. `max 20` ⇒ sie aggregiert längst, der Engpass liegt
 woanders, und C4 rückt nach vorn. Erst messen, dann bauen.
 
+### C1b. GEMESSEN: sie aggregiert nicht — und wir schreiben die Sequenznummer
+
+wifi_ax200 0.93.0 am Gerät, VHT80, 200 MB:
+
+```
+tx agg   subframes 21583 over 21583 resp; aggregated 0 max 1  ba-notif 0 txed 0 done 0
+```
+
+**Jede** der 21 583 TX-Antworten meldet `frame_count = 1`, keine einzige
+Block-Ack-Meldung. Die Firmware aggregiert nichts.
+
+Aus der Firmware-TLV selbst gelesen (`iwlwifi-cc-a0-77.ucode`, CAPA-Wörter
+`0x9def037f 0xbf7ffaee 0xdb91eedb 0x002052ae`): **Bit 43
+`IWL_UCODE_TLV_CAPA_TLC_OFFLOAD` = gesetzt.** Der Aufbau liegt also tatsächlich
+bei der Firmware — C1 gilt.
+
+Die Abweichung von Linux, die dazu passt, steht in `iwl_mvm_tx_mpdu`
+(`mvm/tx.c:1174`) — mit einem ausdrücklichen Guard:
+
+```c
+if (ieee80211_is_data_qos(fc) && !ieee80211_is_qos_nullfunc(fc)) {
+        seq_number = mvmsta->tid_data[tid].seq_number;
+        seq_number &= IEEE80211_SCTL_SEQ;
+
+        if (!iwl_mvm_has_new_tx_api(mvm)) {          /* <- nur ALTE TX-API */
+                hdr->seq_ctrl &= cpu_to_le16(IEEE80211_SCTL_FRAG);
+                hdr->seq_ctrl |= cpu_to_le16(seq_number);
+        }
+}
+```
+
+Auf der **neuen** TX-API — unser gen2-Gerät — schreibt Linux die Sequenznummer
+eines QoS-Frames **nicht**. Die Firmware besitzt sie, und sie besitzt sie, weil
+das Block-Ack-Fenster darauf aufbaut. In den Gen2-TX-Flags (`IWL_TX_FLAGS_*`)
+gibt es dafür auch kein Bit — es ist schlicht die Firmware.
+
+Wir haben sie in jedes Frame geschrieben. Der Kommentar an der Stelle sagte:
+*„writing our own costs nothing and covers us if it does not."* Gemessen kostet
+es `aggregated 0 of 21583`.
+
+**wifi_ax200 0.94.0** überlässt sie bei QoS-Frames der Firmware; Nicht-QoS-Daten
+bekommen weiter eine von uns, weil darunter kein mac80211 liegt, das sie schon
+vergeben hätte. Ob das die ganze Ursache ist, entscheidet die nächste `tx
+agg`-Zeile — nicht dieser Absatz.
+
 ### C2. A-MSDU-Empfang fehlt → wir löschen das Bit in der ADDBA-Antwort
 
 Wir können kein A-MSDU auspacken, also verbieten wir es dem AP. Damit trägt
@@ -201,10 +246,13 @@ lang. Linux behandelt das in `iwl_mvm_rx_tx_cmd_single` über die
 Nach erwartetem Ertrag, jeweils **eine Änderung, eine Gerätemessung**
 (`netbench get 192.168.178.97 /get?mb=200` + `wlan`).
 
-1. **Nachsehen, ob TX-Aggregation läuft** (C1) — 0.93.0, gebaut, wartet auf die
-   Gerätemessung. Die `tx agg`-Zeile entscheidet, ob Schritt 1b überhaupt
-   existiert und wie er aussieht. **Nichts weiter bauen, bis diese Zahl da
-   ist.**
+1. ~~Nachsehen, ob TX-Aggregation läuft~~ — **gemessen: sie läuft nicht**
+   (0.93.0, `aggregated 0 of 21583`). Erste Gegenmaßnahme in **0.94.0**: die
+   Sequenznummer von QoS-Frames der Firmware überlassen, wie Linux es auf der
+   neuen TX-API tut (C1b). Messen. Bleibt `aggregated 0`, ist der nächste
+   Verdächtige die A-MPDU-Größe aus der VHT- statt der HT-Fähigkeit
+   (`iwl_mvm_get_sta_ampdu_dens`) und danach `uapsd_acs`/`sp_length`, die wir
+   im ADD_STA gar nicht setzen.
 2. **A-MSDU-Empfang** (C2). `iwl_mvm_rx_mpdu_mq`-AMSDU-Pfad, danach das Bit in
    der ADDBA-Antwort stehen lassen.
 3. **`BA_WIN` 32 → 64** (B). Eine Zeile plus .bss.
