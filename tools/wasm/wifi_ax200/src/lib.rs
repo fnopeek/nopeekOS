@@ -661,6 +661,7 @@ struct Ax200 {
     /// `wlan unset ht40` is one command away when it goes dark again.
     want_ht40: bool,
     want_vht: bool,
+    want_txagg: bool,
     /// Set once the firmware has ignored a block-ack setup. Asking again costs
     /// another silent 300 ms AND wedges the transmit path: measured on the
     /// device, 31 frames sent / 7 acknowledged / 500 refused, and no ping.
@@ -2373,6 +2374,11 @@ impl Ax200 {
         // 20 MHz. HT40 measured 81 Mbit/s with a stable link, so that is the
         // safe state until the transmit side is understood.
         // 40 MHz is opt-in until the width path is understood; VHT80 needs it.
+        // EXPERIMENT, not a port: Linux leaves tid_disable_tx at 0xffff on this
+        // firmware, and the firmware is supposed to run the aggregation manager
+        // itself. It does not — `aggregated 0` in three measured runs. `on`
+        // sends 0x0000 instead, which is the one thing the field could mean.
+        self.want_txagg = cfg_on(cfg_get(text, b"txagg"));
         self.want_ht40 = cfg_on(cfg_get(text, b"ht40"));
         self.want_vht = cfg_on(cfg_get(text, b"vht"));
         self.want_power_save = cfg_on(cfg_get(text, b"ps"));
@@ -2409,6 +2415,8 @@ impl Ax200 {
         });
         host::print(", a-mpdu ");
         host::print(if self.want_ampdu { "on" } else { "off" });
+        host::print(", txagg ");
+        host::print(if self.want_txagg { "on (EXPERIMENT: tid_disable_tx=0)" } else { "off (Linux: 0xffff)" });
         host::print(", ht40 ");
         host::print(if self.want_ht40 { "on" } else { "off (20 MHz)" });
         host::print("\n");
@@ -2575,7 +2583,7 @@ impl Ax200 {
         // ADD_STA v12 (action ADD) — the AP peer station.
         let mut sc = [0u8; ADD_STA_CMD_LEN];
         sc[AS_OFF_ADD_MODIFY] = 0; // add (not modify)
-        put_u16(&mut sc, AS_OFF_TID_DISABLE, TID_DISABLE_AGG_INIT);
+        put_u16(&mut sc, AS_OFF_TID_DISABLE, self.tid_disable_tx());
         put_u32(&mut sc, AS_OFF_MAC_ID_COLOR, 0); // FW_CMD_ID_AND_COLOR(mac 0, 0)
         sc[AS_OFF_ADDR..AS_OFF_ADDR + 6].copy_from_slice(&self.target_bssid);
         sc[AS_OFF_STA_ID] = AP_STA_ID;
@@ -2841,7 +2849,11 @@ impl Ax200 {
 
         let mut sc = [0u8; ADD_STA_CMD_LEN];
         sc[AS_OFF_ADD_MODIFY] = 1; // modify
-        put_u16(&mut sc, AS_OFF_TID_DISABLE, TID_DISABLE_AGG_INIT);
+        if self.want_txagg {
+            // A modify only applies the fields modify_mask selects.
+            sc[AS_OFF_MODIFY_MASK] |= STA_MODIFY_TID_DISABLE_TX;
+        }
+        put_u16(&mut sc, AS_OFF_TID_DISABLE, self.tid_disable_tx());
         put_u32(&mut sc, AS_OFF_MAC_ID_COLOR, 0);
         sc[AS_OFF_STA_ID] = AP_STA_ID;
         put_u32(&mut sc, AS_OFF_STATION_FLAGS, flags);
@@ -2899,7 +2911,11 @@ impl Ax200 {
     fn retarget_station(&mut self) {
         let mut sc = [0u8; ADD_STA_CMD_LEN];
         sc[AS_OFF_ADD_MODIFY] = 1; // modify
-        put_u16(&mut sc, AS_OFF_TID_DISABLE, TID_DISABLE_AGG_INIT);
+        if self.want_txagg {
+            // A modify only applies the fields modify_mask selects.
+            sc[AS_OFF_MODIFY_MASK] |= STA_MODIFY_TID_DISABLE_TX;
+        }
+        put_u16(&mut sc, AS_OFF_TID_DISABLE, self.tid_disable_tx());
         put_u32(&mut sc, AS_OFF_MAC_ID_COLOR, 0);
         sc[AS_OFF_ADDR..AS_OFF_ADDR + 6].copy_from_slice(&self.target_bssid);
         sc[AS_OFF_STA_ID] = AP_STA_ID;
@@ -2914,6 +2930,15 @@ impl Ax200 {
     /// element), it says it currently does and on which side (operation
     /// element), and the band has the room. Anything less stays at 20 —
     /// a PHY context wider than the AP's actual channel points at silence.
+    /// `iwl_mvm_sta_send_to_fw`: `tid_disable_tx = mvm_sta->tid_disable_agg`,
+    /// which starts at 0xffff and is only ever cleared by `iwl_mvm_sta_tx_agg`
+    /// — unreachable on TLC-offload firmware. So 0xffff IS Linux' value here,
+    /// and it stays the default. `wlan set txagg on` sends 0x0000 to find out
+    /// whether the firmware honours the field anyway.
+    fn tid_disable_tx(&self) -> u16 {
+        if self.want_txagg { TID_DISABLE_AGG_NONE } else { TID_DISABLE_AGG_INIT }
+    }
+
     fn use_ht40(&self) -> bool {
         self.want_ht40
             && self.target_ht.present
@@ -6241,6 +6266,7 @@ pub extern "C" fn _start() {
         want_ampdu: false,
         want_ht40: false,
         want_vht: false,
+        want_txagg: false,
         ba_fw_broken: false,
         link_published: false,
         tx_fail_streak: 0,
