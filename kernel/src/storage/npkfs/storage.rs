@@ -22,6 +22,7 @@ use super::format::{
 #[allow(dead_code)]
 const AEAD_TAG_LEN_DOC: usize = 16; // tag size appended by aead_encrypt; documented for future readers
 use super::sb_io;
+pub use super::sb_io::SbProbe;
 use crate::{blkdev, crypto, kprintln};
 
 struct State {
@@ -54,6 +55,38 @@ fn halt_for_legacy_disk(version: u8) -> ! {
     kprintln!("[npk] │ shape changed). Boot the installer USB and reinstall to  │");
     kprintln!("[npk] │ continue. Previous data is unrecoverable from this       │");
     kprintln!("[npk] │ kernel — restore from backup if you have one.            │");
+    kprintln!("[npk] └──────────────────────────────────────────────────────────┘");
+    kprintln!("");
+    loop { unsafe { core::arch::asm!("cli; hlt"); } }
+}
+
+/// Halt when the disk holds an npkFS that would not mount. NOTHING has been
+/// written at this point, and nothing will be — that is the whole purpose of
+/// this function.
+///
+/// Boot used to answer this situation with `mkfs()`. A hung download followed
+/// by `halt`, one unreadable superblock, a GPT probe that came back empty
+/// because NVMe was not ready yet — each of them ended in a formatted disk
+/// and a setup wizard, which reads from the outside exactly like "the
+/// filesystem broke". It did not break; we overwrote it, and with it every
+/// trace of why the mount failed.
+pub fn halt_for_unmountable_disk(p: &sb_io::SbProbe) -> ! {
+    kprintln!("");
+    kprintln!("[npk] ┌──────────────────────────────────────────────────────────┐");
+    kprintln!("[npk] │ npkFS could not be mounted — and NOTHING was changed.    │");
+    kprintln!("[npk] │                                                          │");
+    kprintln!("[npk] │ The disk is not blank, so formatting it here would be    │");
+    kprintln!("[npk] │ data loss, not an installation. Superblock ring:         │");
+    kprintln!("[npk] │                                                          │");
+    kprintln!("[npk] │   {} valid · {} bad checksum · {} legacy                      │",
+              p.valid, p.bad_checksum, p.legacy);
+    kprintln!("[npk] │   {} foreign · {} blank · {} unreadable                       │",
+              p.foreign, p.blank, p.read_errors);
+    kprintln!("[npk] │                                                          │");
+    kprintln!("[npk] │ Unreadable slots point at the device or the partition    │");
+    kprintln!("[npk] │ offset, not at the filesystem — power-cycle and retry    │");
+    kprintln!("[npk] │ before anything else. To reinstall deliberately, boot    │");
+    kprintln!("[npk] │ the installer USB.                                       │");
     kprintln!("[npk] └──────────────────────────────────────────────────────────┘");
     kprintln!("");
     loop { unsafe { core::arch::asm!("cli; hlt"); } }
@@ -121,6 +154,15 @@ pub fn mkfs() -> Result<(), FsError> {
         total_blocks, total_blocks * BLOCK_SIZE as u64 / (1024 * 1024), data_start,
     );
     Ok(())
+}
+
+/// Classify the superblock ring without mounting and without changing a
+/// byte. Boot calls this after a failed `mount()`: "the disk is blank" and
+/// "there is an npkFS here that I could not read" are different facts, and
+/// only the first one makes formatting harmless.
+pub fn probe_disk() -> Result<sb_io::SbProbe, FsError> {
+    let mut cache = BlockCache::new()?;
+    Ok(sb_io::probe(&mut cache))
 }
 
 /// Mount an existing v3 disk. Errors with `NotFormatted` if no v3

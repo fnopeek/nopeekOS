@@ -59,6 +59,16 @@ pub fn mount() -> Result<(), FsError> {
     storage::mount()
 }
 
+/// Refuse to continue on a disk that holds data we could not mount.
+pub fn halt_for_unmountable_disk(p: &storage::SbProbe) -> ! {
+    storage::halt_for_unmountable_disk(p)
+}
+
+/// What the superblock ring holds, without mounting or writing.
+pub fn probe_disk() -> Result<storage::SbProbe, FsError> {
+    storage::probe_disk()
+}
+
 pub fn is_mounted() -> bool { storage::is_mounted() }
 
 /// Make everything durable, then return. For shutdown and reboot.

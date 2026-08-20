@@ -76,6 +76,20 @@ pub fn detect_npkfs_offset() -> Option<u64> {
     Some(detect_npkfs_partition()?.0)
 }
 
+/// Is there a GPT header on this device at all? `Some(true)` = yes,
+/// `Some(false)` = read fine, no signature, `None` = the read failed.
+///
+/// `detect_npkfs_partition` collapses all three into `None`, and boot then
+/// could not tell "raw disk, offset 0 is ours" from "our partition table is
+/// there but I could not read it" — the second one must never lead to a
+/// format at offset 0, which is where the GPT and the ESP live.
+pub fn has_gpt_header() -> Option<bool> {
+    if !nvme::is_available() { return Some(false); }
+    let mut hdr = [0u8; 512];
+    nvme::read_sector(1, &mut hdr).ok()?;
+    Some(&hdr[0..8] == b"EFI PART")
+}
+
 /// Detect existing GPT and return npkFS partition (block_offset, block_count).
 /// Both values are in 4 KB blocks. Used by the boot path so blkdev knows
 /// both the start and the size of our partition — without the size,
