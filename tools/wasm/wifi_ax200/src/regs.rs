@@ -1181,6 +1181,27 @@ pub const DOT11_FC1_TODS: u8 = 0x01;
 // offsets relative to pkt->data (RX_PKT_DATA_OFF). This is the only place the
 // host learns what an on-air transmission actually cost: how many times it was
 // retried, and how many microseconds of airtime it burned.
+// ── BA_NOTIF (0xc5, group 0) — struct iwl_compressed_ba_notif ──────
+// With TLC offload the FIRMWARE runs the TX aggregation manager: mac80211 sets
+// IEEE80211_HW_TX_AMPDU_SETUP_IN_HW and ieee80211_start_tx_ba_session refuses
+// to do it in software (agg-tx.c:628). The host never sends an ADDBA request
+// and never clears tid_disable_tx — Linux keeps 0xffff on this firmware too.
+// What the host DOES get is this notification per aggregate, and it is the
+// only place we can see whether our transmissions are being aggregated at all.
+pub const BA_NOTIF: u8 = 0xc5;
+pub const CBA_OFF_STA_ID: usize = 4;      // u8
+pub const CBA_OFF_TXED: usize = 14;       // __le16 — MPDUs sent in the aggregate
+pub const CBA_OFF_DONE: usize = 16;       // __le16 — MPDUs acknowledged
+pub const CBA_OFF_RTS_RETRY: usize = 18;  // u8
+pub const CBA_OFF_WIRELESS_TIME: usize = 20; // __le32
+pub const CBA_OFF_TFD_CNT: usize = 28;    // __le16
+pub const CBA_HDR_LEN: usize = 32;        // flex array starts here
+// struct iwl_compressed_ba_tfd, 8 bytes each
+pub const CBA_TFD_Q_NUM: usize = 0;       // __le16
+pub const CBA_TFD_INDEX: usize = 2;       // __le16 — the queue's new read ptr
+pub const CBA_TFD_TID: usize = 5;         // u8
+pub const CBA_TFD_LEN: usize = 8;
+
 pub const TX_RESP_LEN: usize = 44;
 pub const TXR_OFF_FRAME_COUNT: usize = 0;  // u8
 pub const TXR_OFF_FAILURE_RTS: usize = 2;  // u8
