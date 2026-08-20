@@ -1,6 +1,6 @@
 # AX200-Treiber gegen Linux — die Karte
 
-**Stand:** 2026-08-20 · wifi_ax200 0.96.0 · Referenz: Linux **6.18.26**,
+**Stand:** 2026-08-20 · wifi_ax200 0.97.0 · Referenz: Linux **6.18.26**,
 `~/.cache/nopeekos/linux-src/linux-6.18.26/` (iwlwifi 290 Dateien + mac80211 +
 cfg80211, siehe `memory/project_wifi_linux_gap_audit.md`).
 
@@ -264,6 +264,50 @@ Stand der Ursachensuche für `aggregated 0` — geprüft und ausgeschlossen:
 | `tid_disable_tx = 0xffff` | Linux lässt es stehen; **als Experiment schaltbar** seit 0.96.0 (`wlan set txagg on`) |
 | `agg_size` aus HT statt VHT | offen, echter Port (`iwl_mvm_get_sta_ampdu_dens`, sta.c:80) |
 | `uapsd_acs` / `sp_length` | offen, wir setzen sie gar nicht |
+
+### C1e. Der Zustandsübergang ASSOC → AUTHORIZED fehlte vollständig
+
+Gefunden, indem `iwl_mvm_mac_sta_state` und ihre vier Teilfunktionen **am
+Stück** gelesen wurden — nicht als nächster Verdächtiger.
+
+Linux führt die Station durch NOTEXIST → NONE → AUTH → ASSOC → AUTHORIZED, und
+bei jedem Übergang gehen Befehle an die Firmware. Wir haben NONE..ASSOC
+nachgebaut und den letzten Übergang **gar nicht**.
+`iwl_mvm_sta_state_assoc_to_authorized` (mvm/mac80211.c:3901):
+
+```c
+	iwl_mvm_enable_beacon_filter(mvm, vif);
+	mvmvif->authorized = 1;
+	callbacks->mac_ctxt_changed(mvm, vif, false);   /* MAC_CONTEXT_CMD  */
+	mvm_sta->authorized = true;
+	if (!sta->mfp) callbacks->update_sta(...)       /* ADD_STA modify   */
+	iwl_mvm_rs_rate_init_all_links(mvm, vif, sta);  /* TLC_MNG_CONFIG   */
+```
+
+Unser `CMD_AUTHORIZED`-Handler setzte ein `bool`, meldete den Link nach oben
+und schickte der Firmware **nichts**. Sie führte die Station damit für die
+gesamte Verbindung im Zustand *vor* der Autorisierung.
+
+Genau den liest die Ratensteuerung (`rs-fw.c:587`):
+
+```c
+	.max_ch_width = mvmsta->authorized ?
+			rs_fw_bw_from_sta_bw(link_sta)
+		      : IWL_TLC_MNG_CH_WIDTH_20MHZ,
+```
+
+Linux konfiguriert den TLC also **zweimal** — bei ASSOC mit 20 MHz, nach der
+Autorisierung mit der echten Breite. Wir haben ihn genau einmal geschickt, bei
+ASSOC, sofort mit voller Breite, und danach nie wieder.
+
+Der Aggregationsmanager der Firmware hängt an derselben Struktur. Eine
+Firmware, die eine Station als nicht autorisiert führt, hat keinen Grund, mit
+ihr eine TX-Block-Ack-Sitzung zu eröffnen. **Erste Erklärung für
+`aggregated 0`, die nicht auf einem geratenen Flag steht, sondern auf einem
+fehlenden Zustandsübergang.** Portiert in **0.97.0**.
+
+Aus derselben Funktion noch offen: `iwl_mvm_enable_beacon_filter` — deshalb
+steht `fw notifs 0` in jedem Report.
 
 ### C2. A-MSDU-Empfang fehlt → wir löschen das Bit in der ADDBA-Antwort
 
