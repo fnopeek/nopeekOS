@@ -911,6 +911,24 @@ pub const IEEE80211_HT_CAP_SUP_WIDTH_20_40: u16 = 0x0002;
 pub const IEEE80211_HT_CAP_SGI_40: u16 = 0x0040;
 
 // ── VHT (802.11ac) ────────────────────────────────────────────────────
+// ── HE (802.11ax) — carried inside the extension element (255) ──
+// An AX200 talking to a Wi-Fi 6 AP gets its operating width from HERE, not
+// from the standalone VHT Operation element: `ieee80211_determine_ap_chan`
+// (mac80211/mlme.c) takes the 3-byte VHT Operation Information out of the HE
+// Operation element whenever the AP carries HE Capability and sets the
+// VHT_OPER_INFO bit, and only falls back to element 192 otherwise.
+pub const WLAN_EID_EXTENSION: u8 = 255;
+pub const WLAN_EID_EXT_HE_CAPABILITY: u8 = 35;
+pub const WLAN_EID_EXT_HE_OPERATION: u8 = 36;
+// struct ieee80211_he_operation: __le32 he_oper_params, __le16 he_mcs_nss_set,
+// u8 optional[]. Offsets are from the element body, i.e. including the leading
+// extension-ID byte. ieee80211_he_oper_size: the VHT Operation Information is
+// the FIRST optional field, so it starts right after he_mcs_nss_set.
+pub const HE_OP_OFF_PARAMS: usize = 1;        // __le32
+pub const HE_OP_OFF_VHT_OPER_INFO: usize = 7; // 1 + 4 + 2
+pub const HE_OP_MIN_LEN: usize = 7;
+pub const IEEE80211_HE_OPERATION_VHT_OPER_INFO: u32 = 0x0000_4000;
+
 pub const WLAN_EID_VHT_CAPABILITY: u8 = 191;
 pub const WLAN_EID_VHT_OPERATION: u8 = 192;
 /// struct ieee80211_vht_cap: __le32 vht_cap_info, then supp_mcs (8 B).

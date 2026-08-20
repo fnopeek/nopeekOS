@@ -170,6 +170,15 @@ struct HtCap {
     vht_chan_width: u8,
     /// Centre-frequency channel index of the 80 MHz block.
     vht_seg0: u8,
+    /// The HE (802.11ax) elements. For an AP that carries HE Capability AND an
+    /// HE Operation with the VHT-Operation-Info bit, those three bytes ARE the
+    /// operating width — `ieee80211_determine_ap_chan` reads them and never
+    /// looks at element 192. A Wi-Fi 6 AP is the normal case here, so without
+    /// this the width question is answered from the wrong element.
+    he: bool,
+    he_oper_params: u32,
+    he_vht_op: [u8; 3],
+    he_vht_op_present: bool,
     /// HT Operation `operation_mode` — the AP states here what protection the
     /// BSS needs, and it is the only place that information exists.
     ht_op_mode: u16,
@@ -189,6 +198,10 @@ impl HtCap {
         vht_rx_mcs_map: 0,
         vht_chan_width: IEEE80211_VHT_CHANWIDTH_USE_HT,
         vht_seg0: 0,
+        he: false,
+        he_oper_params: 0,
+        he_vht_op: [0; 3],
+        he_vht_op_present: false,
         ht_op_mode: 0,
         erp_protect: false,
         present: false,
@@ -1896,7 +1909,12 @@ impl Ax200 {
     // to dBm), and the channel, de-duplicating by BSSID. Only beacon / probe-
     // response management frames carry these, so other subtypes are skipped.
     fn parse_beacon(rb: &Dma, aps: &mut [Ap], n_aps: &mut usize) {
-        let mut buf = [0u8; 384];
+        // 384 bytes left 292 for the elements. A Wi-Fi 6 beacon carries RSN,
+        // Extended Capabilities, WMM, WPS and the mesh vendor blocks BEFORE
+        // VHT Operation (192) and the HE elements (255) — those fell off the
+        // end, and the walk below stopped on the cut without a word. 1600 is
+        // the buffer the data RX path already uses.
+        let mut buf = [0u8; 1600];
         host::dma_read_buf(rb.handle, 0, &mut buf);
         let d = RX_PKT_DATA_OFF; // iwl_rx_mpdu_desc base
 
@@ -1916,6 +1934,25 @@ impl Ax200 {
         if subtype != DOT11_STYPE_BEACON && subtype != DOT11_STYPE_PROBE_RESP {
             return;
         }
+        // The frame ends where the descriptor says (`iwl_mvm_rx_mpdu_mq`:
+        // len = le16(desc->mpdu_len)); past it lies the next packet in the RB.
+        // EVERY element walk below stops here, not at the buffer's end.
+        let mpdu_len = u16::from_le_bytes([
+            buf[d + MPDU_OFF_MPDU_LEN], buf[d + MPDU_OFF_MPDU_LEN + 1]]) as usize;
+        if f + mpdu_len > RB_SIZE_BYTES {
+            return; // iwl_mvm_rx_mpdu_mq: "FW lied about packet len"
+        }
+        let end = if f + mpdu_len > buf.len() {
+            // OUR limit, not the firmware's — and the exception gets a line.
+            // This is the failure that hid VHT and HE from us, and a silent
+            // one is what let "the AP runs 20 MHz" stand for two days.
+            host::print("[ax200] beacon ");
+            host::print_dec(mpdu_len as u32);
+            host::print(" B > parse buffer - elements past the cut are unseen\n");
+            buf.len()
+        } else {
+            f + mpdu_len
+        };
 
         let mut bssid = [0u8; 6];
         bssid.copy_from_slice(&buf[f + DOT11_OFF_ADDR3..f + DOT11_OFF_ADDR3 + 6]);
@@ -1945,7 +1982,7 @@ impl Ax200 {
                 if is_beacon {
                     aps[i].tsf = tsf;
                     aps[i].device_ts = device_ts;
-                    aps[i].dtim_count = Self::dtim_count_of(&buf, f);
+                    aps[i].dtim_count = Self::dtim_count_of(&buf[..end], f);
                     aps[i].has_beacon = true;
                 }
                 return;
@@ -1959,10 +1996,10 @@ impl Ax200 {
         let mut dtim_period = 0u8;
         let mut ht = HtCap::NONE;
         let mut p = f + DOT11_OFF_IES;
-        while p + 2 <= buf.len() {
+        while p + 2 <= end {
             let id = buf[p];
             let len = buf[p + 1] as usize;
-            if p + 2 + len > buf.len() {
+            if p + 2 + len > end {
                 break;
             }
             let body = p + 2;
@@ -2011,6 +2048,23 @@ impl Ax200 {
                     ht.vht_chan_width = buf[body + VHT_OP_OFF_CHAN_WIDTH];
                     ht.vht_seg0 = buf[body + VHT_OP_OFF_SEG0];
                 }
+                // HE capability / operation live behind the extension ID.
+                WLAN_EID_EXTENSION if len >= 1 => match buf[body] {
+                    WLAN_EID_EXT_HE_CAPABILITY => ht.he = true,
+                    WLAN_EID_EXT_HE_OPERATION if len >= HE_OP_MIN_LEN => {
+                        ht.he_oper_params = le32(&buf, body + HE_OP_OFF_PARAMS);
+                        if ht.he_oper_params & IEEE80211_HE_OPERATION_VHT_OPER_INFO != 0
+                            && len >= HE_OP_OFF_VHT_OPER_INFO + 3
+                        {
+                            ht.he_vht_op.copy_from_slice(
+                                &buf[body + HE_OP_OFF_VHT_OPER_INFO
+                                    ..body + HE_OP_OFF_VHT_OPER_INFO + 3],
+                            );
+                            ht.he_vht_op_present = true;
+                        }
+                    }
+                    _ => {}
+                },
                 _ => {}
             }
             p += 2 + len;
@@ -2019,7 +2073,8 @@ impl Ax200 {
         if *n_aps < aps.len() {
             aps[*n_aps] = Ap {
                 bssid, ssid, ssid_len, rssi, channel, beacon_int, privacy, dtim_period, ht,
-                tsf, device_ts, dtim_count: Self::dtim_count_of(&buf, f), has_beacon: is_beacon,
+                tsf, device_ts, dtim_count: Self::dtim_count_of(&buf[..end], f),
+                has_beacon: is_beacon,
             };
             *n_aps += 1;
         }
@@ -2816,10 +2871,23 @@ impl Ax200 {
         flags
     }
 
+    /// Where the VHT operation info comes from, per `ieee80211_determine_ap_chan`:
+    /// an AP with HE Capability whose HE Operation sets VHT_OPER_INFO carries it
+    /// in THOSE three bytes, and element 192 is then not consulted at all. Any
+    /// other AP answers from element 192. Returns (chan_width, seg0, from_he).
+    fn vht_oper(&self) -> (u8, u8, bool) {
+        let h = &self.target_ht;
+        if h.he && h.he_vht_op_present {
+            (h.he_vht_op[0], h.he_vht_op[1], true)
+        } else {
+            (h.vht_chan_width, h.vht_seg0, false)
+        }
+    }
+
     fn use_vht80(&self) -> bool {
         self.want_vht
             && self.target_ht.vht
-            && self.target_ht.vht_chan_width == IEEE80211_VHT_CHANWIDTH_80MHZ
+            && self.vht_oper().0 == IEEE80211_VHT_CHANWIDTH_80MHZ
             && self.use_ht40()
     }
 
@@ -2840,7 +2908,7 @@ impl Ax200 {
         // apart, so the control channel sits 10 or 30 MHz from the centre.
         //     ret = (abs_offs - 10) / 20   →  0 or 1
         //     ret |= (offs > 0) * ABOVE
-        let offs = (self.target_chan as i32 - self.target_ht.vht_seg0 as i32) * 5;
+        let offs = (self.target_chan as i32 - self.vht_oper().1 as i32) * 5;
         if offs == 0 {
             return 0;
         }
@@ -3244,7 +3312,7 @@ impl Ax200 {
             // 20 MHz looks identical to one that never tried.
             if self.use_vht80() {
                 r.s("  width 80 MHz VHT (seg0 ch ");
-                r.d(self.target_ht.vht_seg0 as u64);
+                r.d(self.vht_oper().1 as u64);
                 r.s(", ctrl-pos 0x");
                 r.hex(self.ctrl_pos() as u32, 1);
                 r.c(b')');
@@ -3263,7 +3331,12 @@ impl Ax200 {
                 });
             } else {
                 r.s("  width 20 MHz (");
-                if self.target_ht.cap_info & IEEE80211_HT_CAP_SUP_WIDTH_20_40 == 0 {
+                // WHOSE decision — `ht40` is off by DEFAULT, and this branch
+                // printed "AP runs 20 only" for it. That sentence is what the
+                // handover note rests on; it was our own switch talking.
+                if !self.want_ht40 {
+                    r.s("WE ask for 20 - `wlan set ht40 on`)");
+                } else if self.target_ht.cap_info & IEEE80211_HT_CAP_SUP_WIDTH_20_40 == 0 {
                     r.s("AP cannot do 40)");
                 } else {
                     r.s("AP runs 20 only)");
@@ -3273,6 +3346,31 @@ impl Ax200 {
             r.s("NONE - AP advertised no HT element, legacy rates only");
         }
         r.c(b'\n');
+
+        // The bytes the width decision rests on, so the line above can be
+        // checked instead of believed.
+        if self.target_ht.present {
+            let (cw, seg0, from_he) = self.vht_oper();
+            r.s("ap width sec ");
+            r.s(match self.target_ht.sec_chan_offs {
+                IEEE80211_HT_PARAM_CHA_SEC_ABOVE => "above",
+                IEEE80211_HT_PARAM_CHA_SEC_BELOW => "below",
+                _ => "none",
+            });
+            r.s("  vht-op cw ");
+            r.d(cw as u64);
+            r.s(" seg0 ");
+            r.d(seg0 as u64);
+            r.s(if from_he { " (from HE oper)" } else { " (from VHT oper)" });
+            r.s("  he ");
+            if self.target_ht.he {
+                r.s("cap yes, oper 0x");
+                r.hex(self.target_ht.he_oper_params, 8);
+            } else {
+                r.s("absent");
+            }
+            r.c(b'\n');
+        }
 
         // Aggregation is the single biggest throughput lever, so it gets its own
         // line. `held` standing still while `buffered` climbs is the healthy
