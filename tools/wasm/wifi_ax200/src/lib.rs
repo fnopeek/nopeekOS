@@ -4267,12 +4267,30 @@ impl Ax200 {
         fr[DOT11_OFF_ADDR1..DOT11_OFF_ADDR1 + 6].copy_from_slice(&self.target_bssid);
         fr[DOT11_OFF_ADDR2..DOT11_OFF_ADDR2 + 6].copy_from_slice(&self.mac);
         fr[DOT11_OFF_ADDR3..DOT11_OFF_ADDR3 + 6].copy_from_slice(&dst);
-        // Unique, incrementing sequence number (seq_num << 4, frag 0). Without it
-        // every data frame is seq 0 → the AP's duplicate filter mangles the flow.
-        // For QoS frames the firmware would assign it (mac80211 sets ASSIGN_SEQ),
-        // but writing our own costs nothing and covers us if it does not.
-        put_u16(&mut fr, DOT11_OFF_SEQ, (self.tx_seq & 0x0fff) << 4);
-        self.tx_seq = self.tx_seq.wrapping_add(1);
+        // Sequence control. `iwl_mvm_tx_mpdu` (mvm/tx.c:1174) writes it into the
+        // header ONLY on the OLD TX API, and the guard is explicit:
+        //
+        //     if (ieee80211_is_data_qos(fc) && !ieee80211_is_qos_nullfunc(fc)) {
+        //             seq_number = mvmsta->tid_data[tid].seq_number;
+        //             if (!iwl_mvm_has_new_tx_api(mvm)) {
+        //                     hdr->seq_ctrl &= cpu_to_le16(IEEE80211_SCTL_FRAG);
+        //                     hdr->seq_ctrl |= cpu_to_le16(seq_number);
+        //             }
+        //     }
+        //
+        // We are a gen2 device, i.e. the NEW TX API, so on a QoS frame the
+        // FIRMWARE owns the sequence number — and it owns it because the
+        // block-ack window is built on it. Our comment here used to say
+        // "writing our own costs nothing and covers us if it does not".
+        // Measured: `tx agg aggregated 0 max 1 ba-notif 0` over 21583
+        // transmissions. It costs every aggregate we never got.
+        //
+        // Non-QoS data still needs a number from us: there is no mac80211
+        // underneath that would already have assigned one.
+        if !self.qos {
+            put_u16(&mut fr, DOT11_OFF_SEQ, (self.tx_seq & 0x0fff) << 4);
+            self.tx_seq = self.tx_seq.wrapping_add(1);
+        }
         // QoS control: TID 0 (best effort), normal ack, no A-MSDU. Bytes stay 0.
         let mut p = hdr_len;
         fr[p..p + 6].copy_from_slice(&LLC_SNAP_HDR);
