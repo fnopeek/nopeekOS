@@ -3120,7 +3120,7 @@ impl Ax200 {
             if self.target_ht.cap_info & IEEE80211_HT_CAP_SGI_20 != 0 {
                 cmd[TLC_OFF_SGI] |= 1 << TLC_CH_WIDTH_20MHZ;
             }
-            if self.use_ht40() {
+            if self.use_ht40() && self.authorized {
                 cmd[TLC_OFF_MAX_CH_WIDTH] = TLC_CH_WIDTH_40MHZ;
                 if self.target_ht.cap_info & IEEE80211_HT_CAP_SGI_40 != 0 {
                     cmd[TLC_OFF_SGI] |= 1 << TLC_CH_WIDTH_40MHZ;
@@ -3130,7 +3130,9 @@ impl Ax200 {
                 // The rate table is VHT's, not HT's: MCS 0-9 per stream. The
                 // ht_rates field carries it — the firmware reads it by `mode`.
                 cmd[TLC_OFF_MODE] = TLC_MODE_VHT;
-                cmd[TLC_OFF_MAX_CH_WIDTH] = TLC_CH_WIDTH_80MHZ;
+                if self.authorized {
+                    cmd[TLC_OFF_MAX_CH_WIDTH] = TLC_CH_WIDTH_80MHZ;
+                }
                 let vht_mcs = 0x03ffu16; // MCS 0-9
                 put_u16(&mut cmd, TLC_OFF_HT_RATES_NSS1, vht_mcs);
                 put_u16(&mut cmd, TLC_OFF_HT_RATES_NSS2, vht_mcs);
@@ -5890,6 +5892,22 @@ impl Ax200 {
             // AUTHORIZED: 4-way done → carrier up, IP data path live.
             Some(CMD_AUTHORIZED) => {
                 self.authorized = true;
+                // `iwl_mvm_sta_state_assoc_to_authorized` (mvm/mac80211.c:3901).
+                // We used to set a bool and publish the link — the firmware was
+                // never told. It kept the station in the pre-authorized state
+                // for the rest of the connection, and `rs_fw_rate_init` reads
+                // exactly that:
+                //
+                //     .max_ch_width = mvmsta->authorized ?
+                //             rs_fw_bw_from_sta_bw(link_sta)
+                //           : IWL_TLC_MNG_CH_WIDTH_20MHZ,
+                //
+                // Linux sends the same three commands again, in this order.
+                // (`iwl_mvm_enable_beacon_filter` also belongs here and is
+                // still missing — that is why `fw notifs 0` never moves.)
+                self.mac_ctxt_assoc();      // callbacks->mac_ctxt_changed
+                self.sta_assoc_update();    // callbacks->update_sta
+                self.connect_tlc_config();  // iwl_mvm_rs_rate_init_all_links
                 self.link_published = true;
                 host::netdev_set_link(true);
                 host::print("[ax200] *** AUTHORIZED *** — link up, data path live 🎉\n");
