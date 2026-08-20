@@ -265,30 +265,71 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
             // Set BOTH offset AND size — without the size, block_count()
             // overshoots into the backup-GPT region and the bitmap can
             // hand out blocks that fail to write with OutOfRange.
-            if nvme::is_available() {
-                if let Some((offset, size)) = gpt::detect_npkfs_partition() {
-                    blkdev::set_partition_offset(offset);
-                    blkdev::set_partition_size(size);
-                }
-            }
-
-            if npkfs::mount().is_ok() {
-                mounted = true;
-                vga::show_status(b"npkFS mounted");
-            } else if blkdev::is_available() {
-                // No existing npkFS: format and mount
-                kprintln!("[npk] npkfs: not found, formatting...");
-                match npkfs::mkfs() {
-                    Ok(()) => {
-                        if npkfs::mount().is_ok() {
-                            mounted = true;
-                            vga::show_status(b"npkFS formatted");
-                        } else {
-                            kprintln!("[npk] npkfs: mount after format failed");
-                        }
+            // A GPT we cannot read is not the same as a disk without one.
+            // Collapsing both into "offset stays 0" pointed the superblock
+            // ring at the GPT and the ESP — and the format below at them too.
+            let partition_found = if nvme::is_available() {
+                match gpt::detect_npkfs_partition() {
+                    Some((offset, size)) => {
+                        blkdev::set_partition_offset(offset);
+                        blkdev::set_partition_size(size);
+                        true
                     }
-                    Err(e) => kprintln!("[npk] npkfs: format failed: {}", e),
+                    None => {
+                        kprintln!("[npk] npkfs: no npkFS partition in the GPT — offset stays 0");
+                        false
+                    }
                 }
+            } else {
+                false
+            };
+
+            match npkfs::mount() {
+                Ok(()) => {
+                    mounted = true;
+                    vga::show_status(b"npkFS mounted");
+                }
+                Err(e) if blkdev::is_available() => {
+                    // "mount failed" and "there is no filesystem here" are
+                    // different facts. This branch used to format on either,
+                    // so a single unreadable superblock destroyed the
+                    // installation it was meant to open — and looked, from
+                    // the outside, like the filesystem had broken by itself.
+                    kprintln!("[npk] npkfs: mount failed: {}", e);
+                    let probe = match npkfs::probe_disk() {
+                        Ok(p) => p,
+                        Err(pe) => {
+                            kprintln!("[npk] npkfs: superblock ring unreadable: {}", pe);
+                            npkfs::halt_for_unmountable_disk(&Default::default());
+                        }
+                    };
+                    kprintln!(
+                        "[npk] npkfs: sb ring — {} valid, {} bad csum, {} legacy, {} foreign, {} blank, {} unreadable",
+                        probe.valid, probe.bad_checksum, probe.legacy,
+                        probe.foreign, probe.blank, probe.read_errors,
+                    );
+                    // Format ONLY on a disk that is provably empty where we
+                    // would write: every slot read, every slot zero, and no
+                    // partition table we failed to place ourselves inside of.
+                    let gpt_says_raw = matches!(gpt::has_gpt_header(), Some(false));
+                    if probe.is_pristine() && (partition_found || gpt_says_raw) {
+                        kprintln!("[npk] npkfs: disk is blank — formatting");
+                        match npkfs::mkfs() {
+                            Ok(()) => {
+                                if npkfs::mount().is_ok() {
+                                    mounted = true;
+                                    vga::show_status(b"npkFS formatted");
+                                } else {
+                                    kprintln!("[npk] npkfs: mount after format failed");
+                                }
+                            }
+                            Err(e) => kprintln!("[npk] npkfs: format failed: {}", e),
+                        }
+                    } else {
+                        npkfs::halt_for_unmountable_disk(&probe);
+                    }
+                }
+                Err(e) => kprintln!("[npk] npkfs: mount failed, no block device: {}", e),
             }
         }
     }
