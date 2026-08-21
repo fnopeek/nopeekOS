@@ -215,6 +215,17 @@ fn bridge_report() {
         kprintln!("  gro           on   {} frames  {} segments merged",
             b.gro_frames, b.gro_segs);
     }
+    // The guest's own heartbeat, and the second Intel-only suspect.
+    //
+    // `nat::pump` returns false immediately on AMD (the off-vCPU worker owns
+    // RX), so `pumped` is never true there and the guest timer never competes
+    // for the single inject slot. On Intel it returns real work, so under load
+    // the vCPU loop takes the net branch and `continue`s past the timer until
+    // the 30 ms anti-starvation floor forces it. A guest whose jiffies crawl at
+    // ~33 Hz loses its TCP timers, its NAPI and its workqueues — and looks
+    // perfectly alive while doing it. Compare against the ~1000/s it programmed.
+    kprintln!("  guest clock   {} timer irq/s   bridge pumped {}/s",
+        b.gtimer_ps, b.pump_ps);
     // The vCPU that pumps this bridge is the SAME fiber that copies the guest's
     // framebuffer, ~8 MB a frame, inline on its MMIO exit — on Intel, where the
     // net has no off-vCPU worker to fall back on. Printed next to `rx wait` on

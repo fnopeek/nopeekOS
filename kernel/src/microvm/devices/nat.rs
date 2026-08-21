@@ -1796,6 +1796,7 @@ pub struct BridgeStats {
     pub net_irq: u64,
     pub gro: bool, pub gro_frames: u64, pub gro_segs: u64,
     pub gpu_kb: u64, pub gpu_xfers: u64, pub gpu_kbps: u64,
+    pub gtimer_ps: u64, pub pump_ps: u64,
 }
 
 // Previous snapshot, so a second `netstat` a few seconds later reads as a RATE.
@@ -1806,6 +1807,8 @@ static RPT_TSC: AtomicU64 = AtomicU64::new(0);
 static RPT_RX: AtomicU64 = AtomicU64::new(0);
 static RPT_TX: AtomicU64 = AtomicU64::new(0);
 static RPT_GPU: AtomicU64 = AtomicU64::new(0);
+static RPT_GT: AtomicU64 = AtomicU64::new(0);
+static RPT_PUMP: AtomicU64 = AtomicU64::new(0);
 
 pub fn bridge_stats() -> BridgeStats {
     let now = crate::interrupts::rdtsc();
@@ -1818,6 +1821,10 @@ pub fn bridge_stats() -> BridgeStats {
     let prev_tx = RPT_TX.swap(tx_pkts, AtOrd::Relaxed);
     let gpu_bytes = NS_GPU_BYTES.load(AtOrd::Relaxed);
     let prev_gpu = RPT_GPU.swap(gpu_bytes, AtOrd::Relaxed);
+    let gt = NS_GTIMER.load(AtOrd::Relaxed);
+    let prev_gt = RPT_GT.swap(gt, AtOrd::Relaxed);
+    let pumps = NS_PUMP_CALLS.load(AtOrd::Relaxed);
+    let prev_pump = RPT_PUMP.swap(pumps, AtOrd::Relaxed);
     let window_ms = if prev_tsc == 0 { 0 } else { now.wrapping_sub(prev_tsc) / khz };
     let per_s = |d: u64| if window_ms > 0 { d * 1000 / window_ms } else { 0 };
     let n = NS_RXLAT_N.load(AtOrd::Relaxed);
@@ -1854,6 +1861,8 @@ pub fn bridge_stats() -> BridgeStats {
         gpu_kb: gpu_bytes / 1024,
         gpu_xfers: NS_GPU_XFERS.load(AtOrd::Relaxed),
         gpu_kbps: per_s(gpu_bytes.saturating_sub(prev_gpu)) / 1024,
+        gtimer_ps: per_s(gt.saturating_sub(prev_gt)),
+        pump_ps: per_s(pumps.saturating_sub(prev_pump)),
     }
 }
 
@@ -1892,7 +1901,8 @@ pub fn reset_counters() {
               &NS_TCP_FLOWS, &NS_UDP_FLOWS, &NS_GRO_FRAMES, &NS_GRO_SEGS,
               &NS_NET_IRQ, &RPT_TSC, &RPT_RX, &RPT_TX,
               &NS_GUEST_KICKS, &NS_GUEST_FRAMES, &NS_GUEST_ARP, &NS_GUEST_OTHER,
-              &NS_GPU_BYTES, &NS_GPU_XFERS, &RPT_GPU] {
+              &NS_GPU_BYTES, &NS_GPU_XFERS, &RPT_GPU,
+              &NS_GTIMER, &NS_PUMP_CALLS, &RPT_GT, &RPT_PUMP] {
         c.store(0, AtOrd::Relaxed);
     }
     NS_START_TICK.store(crate::interrupts::ticks().max(1), AtOrd::Relaxed);
