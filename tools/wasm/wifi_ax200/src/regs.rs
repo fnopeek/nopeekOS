@@ -1160,26 +1160,49 @@ pub const IWL_DATA_TID: u8 = 0;
 // match the size). Costs 592 KB of DMA against 148 KB at 64 slots.
 pub const IWL_DATA_QUEUE_SIZE: usize = 256;
 
-// Anti-bufferbloat cap for the data queue. BQL measures BYTES, and so does
-// this: the airtime a latency-sensitive packet waits behind is a function of
-// how many bytes sit ahead of it, not how many frames.
+// ── AQL — Airtime Queue Limits (net/mac80211) ────────────────────────────
 //
-// It was a FRAME count until 0.98.0, and the unit was the bug. The intent
-// ("~48 x 1.5 KB = ~72 KB in flight") only held for full-size frames. During a
-// download our TX is nothing but TCP ACKs — 19618 frames, 1285 KiB, 67 bytes
-// each — so the cap bit at 3 KB of real queue instead of 72 KB. Measured at
-// 74 Mbit: blocked 3253, and fq_codel dropped 3166 of 22827 ACKs the driver
-// never took ("driver too slow"). 14 % of our ACKs never reached the air; the
-// server answered with ssthresh 95 and cwnd stuck at 124.
+// The anti-bufferbloat cap on the data queue, and it counts MICROSECONDS OF
+// AIRTIME, not bytes and not frames.
 //
-// 64 KiB keeps the old intent for full-size frames (43 in flight, was 48) and
-// stops punishing small ones.
-pub const TX_INFLIGHT_BYTES: u32 = 65536;
+// It was a frame count until 0.98.0 and a byte count until 0.104.0. Both were
+// our own numbers, and both were wrong for the same reason: what a queued
+// frame costs the medium is a TIME, and that time depends on the rate the
+// firmware happens to be using. 43 full-size frames are 52 us each at
+// 240 Mbit and 2069 us each at 6 Mbit — the same byte cap is a reasonable
+// queue in one case and two and a half seconds of bufferbloat in the other.
+// Linux solved this in 2019 and the mechanism has a name.
+//
+// `ieee80211_txq_airtime_check` (mac80211/tx.c:4164) admits a frame when
+//
+//     pending < aql_limit_low                                      -> yes
+//     total_pending < aql_threshold && pending < aql_limit_high     -> yes
+//     otherwise                                                     -> no
+//
+// with the defaults from include/net/cfg80211.h:3602. We have ONE station and
+// in practice one AC, so `total_pending` and this station's `pending` are the
+// same counter and the 24000 ceiling can never bind before the 12000 one —
+// the branch is kept anyway, so the day a second station exists it is already
+// right.
+pub const AQL_LIMIT_LOW_US: u32 = 5_000;    // IEEE80211_DEFAULT_AQL_TXQ_LIMIT_L
+pub const AQL_LIMIT_HIGH_US: u32 = 12_000;  // IEEE80211_DEFAULT_AQL_TXQ_LIMIT_H
+pub const AQL_THRESHOLD_US: u32 = 24_000;   // IEEE80211_AQL_THRESHOLD
+
+/// `AVG_PKT_SIZE` (mac80211/airtime.c:11). The rate tables are built for a
+/// packet of this size and scaled to the real length.
+pub const AQL_AVG_PKT_SIZE: u32 = 1024;
+
+/// `len += 38` at the top of `ieee80211_calc_expected_tx_airtime` — the
+/// Ethernet header allowance it adds before doing anything else.
+pub const AQL_LEN_OVERHEAD: u32 = 38;
+
+/// Lower bound of `ieee80211_calc_expected_tx_airtime`: `max_t(u32, duration, 4)`.
+pub const AQL_MIN_US: u32 = 4;
 
 /// Ring guard, not a policy: the write pointer must never lap the firmware's
-/// read pointer. `TX_INFLIGHT_BYTES` is what limits us in practice for
-/// full-size frames; this is the wall behind it, and for a queue of 67-byte
-/// ACKs it is the only one that can bite. Must stay < QUEUE_SIZE-1.
+/// read pointer. AQL is what limits us in practice; this is the wall behind it,
+/// and it binds only when the airtime estimate is so small that thousands of
+/// frames would fit in 12 ms. Must stay < QUEUE_SIZE-1.
 ///
 /// History of the frame cap this replaced, kept because the numbers were
 /// measured on the device and the next size change has to beat them:
