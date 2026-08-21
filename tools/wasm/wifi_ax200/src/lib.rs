@@ -135,6 +135,53 @@ struct BaPending {
 }
 
 /// Classification of a received 802.11 data frame addressed to us.
+/// Running signal strength, `DECLARE_EWMA(signal, 10, 8)` (mac80211/sta_info.h:424)
+/// — 1/8 weight on each new sample, carried at 2^10 precision so the average
+/// does not quantise to whole dBm.
+///
+/// It exists because `rssi` in the report was written ONCE, at association
+/// (`target_rssi`, from the scan), and never again. Carrying the laptop up to
+/// the AP and back changed nothing in the report, which is exactly what the
+/// number could do: it was minutes old and about a different position.
+#[derive(Clone, Copy)]
+pub struct SignalAvg {
+    /// dBm << 10, or 0 while nothing has been measured.
+    scaled: i32,
+    pub samples: u32,
+}
+
+impl SignalAvg {
+    pub const NEW: SignalAvg = SignalAvg { scaled: 0, samples: 0 };
+
+    pub fn add(&mut self, dbm: i16) {
+        let v = (dbm as i32) << 10;
+        if self.samples == 0 {
+            self.scaled = v;
+        } else {
+            // ewma_add: avg += (new - avg) / weight, weight = 8.
+            self.scaled += (v - self.scaled) / 8;
+        }
+        self.samples = self.samples.saturating_add(1);
+    }
+
+    /// Fold a pass' worth of samples into a longer-lived average.
+    pub fn merge(&mut self, other: &SignalAvg) {
+        if other.samples == 0 {
+            return;
+        }
+        if self.samples == 0 {
+            *self = *other;
+        } else {
+            self.scaled += (other.scaled - self.scaled) / 8;
+            self.samples = self.samples.saturating_add(other.samples);
+        }
+    }
+
+    pub fn dbm(&self) -> i32 {
+        if self.samples == 0 { -128 } else { self.scaled >> 10 }
+    }
+}
+
 enum RxKind {
     None,
     /// A data frame addressed to us whose payload we could not locate. Distinct
@@ -576,7 +623,11 @@ struct Ax200 {
     target_ssid: [u8; SSID_MAX],
     target_ssid_len: u8,
     target_privacy: bool, // target is encrypted (WPA2) → assoc-req carries an RSN IE
+    /// RSSI from the scan, at the moment we associated. Kept because it is what
+    /// the AP choice was made on — but it is NOT the link's signal now.
     target_rssi: i8,
+    /// The live one, averaged over every frame the AP sends us.
+    link_sig: SignalAvg,
     target_valid: bool,
     // The target AP's HT capabilities + DTIM period (from its beacon during the
     // scan) and the association id the AP handed us. `ht.present` gates the whole
@@ -3427,7 +3478,17 @@ impl Ax200 {
         r.d(self.target_chan as u64);
         r.s(if self.target_band == PHY_BAND_5_U8 { " (5 GHz)" } else { " (2.4 GHz)" });
         r.s(" rssi ");
-        r.i(self.target_rssi as i32);
+        if self.link_sig.samples > 0 {
+            r.i(self.link_sig.dbm());
+            r.s(" (live, ");
+            r.d(self.link_sig.samples as u64);
+            r.s(" frames; at assoc ");
+            r.i(self.target_rssi as i32);
+            r.c(b')');
+        } else {
+            r.i(self.target_rssi as i32);
+            r.s(" (at assoc — no frame measured yet)");
+        }
         r.s(" dtim ");
         r.d(self.target_dtim_period as u64);
         r.c(b'\n');
@@ -4796,7 +4857,7 @@ impl Ax200 {
     /// `0xFF` = not in one, otherwise the firmware's TOGGLE bit as 0 or 1.
     fn rx_classify(rb: &Dma, our_mac: &[u8; 6], out: &mut [u8], miss_log: &mut u32,
                    to_us: &mut u32, crypt: &mut [u32; 4], air_us: &mut u64,
-                   ampdu_tog: &mut u8) -> RxKind {
+                   ampdu_tog: &mut u8, sig: &mut SignalAvg) -> RxKind {
         let mut buf = [0u8; 1600];
         host::dma_read_buf(rb.handle, 0, &mut buf);
         let d = RX_PKT_DATA_OFF;
@@ -4810,6 +4871,20 @@ impl Ax200 {
         // talking and we discard it" — and without it both look like silence.
         if buf[f + DOT11_OFF_ADDR1..f + DOT11_OFF_ADDR1 + 6] == our_mac[..] {
             *to_us += 1;
+            // `ieee80211_rx_h_sta_process` (mac80211/rx.c:1807) feeds the signal
+            // of every frame from the station into an EWMA. Frames addressed to
+            // us in a BSS come from the AP, so this is the same set.
+            //
+            // `iwl_mvm_get_signal_strength` (mvm/rxmq.c:306): a zero chain means
+            // "not measured", not 0 dBm, and the stronger of the two chains
+            // wins.
+            let to_dbm = |e: u8| if e != 0 { -(e as i16) } else { -128 };
+            let a = to_dbm(buf[d + MPDU_OFF_ENERGY_A]);
+            let b = to_dbm(buf[d + MPDU_OFF_ENERGY_B]);
+            let max = if a > b { a } else { b };
+            if max > -128 {
+                sig.add(max);
+            }
         }
         if fc & 0x0c != DOT11_FC_TYPE_DATA {
             return RxKind::None;
@@ -5330,6 +5405,7 @@ impl Ax200 {
             let mut a_mgmt = 0u32;
             let mut a_crypt = [0u32; 4];
             let mut a_air = 0u64;
+            let mut a_sig = SignalAvg::NEW;
             let mut a_addba = 0u32;
             let mut a_rx_bytes = 0u64;
             let mut a_to_us = 0u32;
@@ -5534,7 +5610,7 @@ impl Ax200 {
                         return true; // mgmt frame — not for the IP path
                     }
                     let uni_before = a_to_us;
-                    match Self::rx_classify(rb, &our_mac, &mut rxbuf, &mut llc_miss, &mut a_to_us, &mut a_crypt, &mut a_air, &mut ampdu_tog) {
+                    match Self::rx_classify(rb, &our_mac, &mut rxbuf, &mut llc_miss, &mut a_to_us, &mut a_crypt, &mut a_air, &mut ampdu_tog, &mut a_sig) {
                         RxKind::Eapol(n) => {
                             a_eapol += 1;
                             a_rx_bytes += n as u64;
@@ -5676,6 +5752,7 @@ impl Ax200 {
             self.st.rx_mgmt = self.st.rx_mgmt.wrapping_add(a_mgmt);
             self.st.addba_seen = self.st.addba_seen.wrapping_add(a_addba);
             self.st.rx_airtime_us += a_air;
+            self.link_sig.merge(&a_sig);
             self.st.tx_subframes += a_subframes;
             self.st.tx_agg_resp = self.st.tx_agg_resp.wrapping_add(a_agg_resp);
             if a_agg_max > self.st.tx_agg_max { self.st.tx_agg_max = a_agg_max; }
@@ -6485,6 +6562,7 @@ pub extern "C" fn _start() {
         target_ssid_len: 0,
         target_privacy: false,
         target_rssi: 0,
+        link_sig: SignalAvg::NEW,
         target_valid: false,
         target_ht: HtCap::NONE,
         target_dtim_period: 0,
