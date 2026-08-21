@@ -166,10 +166,23 @@ pub fn intent_netstat() {
 /// twice a few seconds apart — the per-second figures come from the gap.
 fn bridge_report() {
     let b = crate::microvm::devices::nat::bridge_stats();
-    if !b.active && b.rx_pkts == 0 && b.tx_pkts == 0 && b.live == 0 {
+    let up = crate::microvm::guest_running();
+    if !up && !b.active && b.rx_pkts == 0 && b.tx_pkts == 0 && b.live == 0 {
         return;
     }
     kprintln!();
+    if up && b.tx_pkts == 0 {
+        // Say it out loud rather than printing a page of zeroes. A guest that is
+        // up and has never had one packet cross the masquerade is a different
+        // fault from one whose traffic died after five seconds, and the two are
+        // indistinguishable from a silent report.
+        kprintln!("  microVM bridge — guest is UP and NOT ONE packet has crossed");
+        kprintln!("  ─────────────────────────────");
+        kprintln!("  nothing reached nat::process_tx: no ARP, no DHCP, no SYN.");
+        kprintln!("  the guest TX doorbell is not reaching us — look at the");
+        kprintln!("  virtio-net queue-1 kick, not at the masquerade.");
+        return;
+    }
     kprintln!("  microVM bridge (L3 masquerade){}",
         if b.active { "" } else { "  — idle, no flow yet" });
     kprintln!("  ─────────────────────────────");

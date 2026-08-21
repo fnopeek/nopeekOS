@@ -1841,12 +1841,26 @@ pub fn reset_sessions() {
     // Belt-and-suspenders: clear the shared NIC-drain guard so a microvm run
     // can never leave the HOST's own networking (DNS / OTA) bricked.
     crate::net::reset_poll_guard();
+    // The COUNTERS deliberately survive teardown — see `reset_counters`.
+}
+
+/// Zero the bridge counters. At VM **start**, not at teardown.
+///
+/// They used to be zeroed here on the way out, which meant the numbers existed
+/// only while the guest was alive: close the browser, ask `netstat` what
+/// happened, get nothing. The one moment anyone wants a post-mortem is right
+/// after the thing died, and that was exactly the moment the evidence was
+/// erased. Zeroing on the way IN gives every run a clean window and leaves the
+/// last run readable until the next launch.
+pub fn reset_counters() {
     for c in [&NS_RX_BYTES, &NS_RX_PKTS, &NS_TX_BYTES, &NS_TX_PKTS,
               &NS_DROP_QUEUE, &NS_DROP_TABLE, &NS_DROP_EGRESS,
               &NS_HIGHWATER, &NS_LAST_TICK, &NS_IQ_HI,
-              &NS_RXLAT_SUM, &NS_RXLAT_N, &NS_RXLAT_MAX,
-              &NS_TCP_FLOWS, &NS_UDP_FLOWS, &NS_GRO_FRAMES, &NS_GRO_SEGS] {
+              &NS_RXLAT_SUM, &NS_RXLAT_N, &NS_RXLAT_MAX, &NS_INJECT_FALSE,
+              &NS_TCP_FLOWS, &NS_UDP_FLOWS, &NS_GRO_FRAMES, &NS_GRO_SEGS,
+              &NS_NET_IRQ, &RPT_TSC, &RPT_RX, &RPT_TX] {
         c.store(0, AtOrd::Relaxed);
     }
+    NS_RXRING_MIN.store(u64::MAX, AtOrd::Relaxed);
     NS_LAST_ACTIVITY.store(0, AtOrd::Relaxed);
 }

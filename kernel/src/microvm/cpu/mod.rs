@@ -765,6 +765,16 @@ const SLICE_BUDGET: u32 = 4096;
 /// spin — it idles/composites normally and reaps via `vm_poll_slice`.
 /// Hence: false on the dedicated path (the guest is still composited
 /// through the `focused_surface_id` branch, independent of this).
+/// Is a guest running right now, on ANY path?
+///
+/// `vm_active` is NOT this question despite the name — it answers "is a guest
+/// running on the cooperative Core-0 path" and returns false for every
+/// fiber-mode guest, which is all of them today. Anything that means "is there
+/// a guest" wants this one.
+pub fn guest_running() -> bool {
+    VM_RUN_STATE.load(Ordering::Acquire) == VM_RUNNING || vm_active()
+}
+
 pub fn vm_active() -> bool {
     if vm_fiber_mode() || crate::smp::per_core::dedicated_vm_core().is_some() {
         return false;
@@ -1233,6 +1243,10 @@ fn vcpu_fiber_task(_arg: u64) {
     // Mark the network's cores taken so no AP vCPU and no offload worker is ever
     // placed there.
     VM_CORE_MASK.fetch_or(protected_cores(), Ordering::AcqRel);
+    // Clean counter window for this run. Deliberately here and not at teardown,
+    // so the numbers from the last run survive it — a post-mortem is the one
+    // time anyone reads them.
+    crate::microvm::devices::nat::reset_counters();
 
     // 1 kHz wake source on THIS core so the fiber's idle yields resume
     // promptly (the 100 Hz worker timer alone would stretch a 2 ms idle
