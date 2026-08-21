@@ -1784,11 +1784,22 @@ fn http_post_zeros(host: &str, path: &str, total: usize) -> Result<String, &'sta
         return Err("send header failed");
     }
 
-    let chunk = alloc::vec![0u8; 256 * 1024];
+    // 64 KiB, not 256. `tcp::send` refuses when `send_buf.len() + data.len()`
+    // exceeds MAX_UNACKED, which is itself 256 KiB — so a 256 KiB chunk could
+    // only ever be accepted with the send buffer at EXACTLY zero. That is
+    // stop-and-wait dressed up as a stream: every chunk had to be fully
+    // acknowledged before the next one could be queued, and one delayed ACK
+    // inside the 10 s window failed the whole transfer. A quarter of the cap
+    // leaves three chunks in flight.
+    let chunk = alloc::vec![0u8; 64 * 1024];
     let mut sent = 0;
     while sent < total {
         let n = core::cmp::min(chunk.len(), total - sent);
-        if crate::net::tcp::send_blocking(handle, &chunk[..n], 1000).is_err() {
+        // Say WHICH failure it was. "send body failed" covers a peer that
+        // closed the connection and a send window that never opened, and those
+        // want opposite investigations.
+        if let Err(e) = crate::net::tcp::send_blocking(handle, &chunk[..n], 1000) {
+            kprintln!("[netbench] PUT stalled after {} of {} bytes: {}", sent, total, e);
             let _ = crate::net::tcp::close(handle);
             return Err("send body failed");
         }
