@@ -13,6 +13,7 @@ mod net;
 pub mod system;
 mod update;
 pub mod install;
+mod python;
 mod wallpaper;
 mod wasm;
 
@@ -1645,6 +1646,11 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         "top" | "htop" => {
             wasm::intent_run_interactive("top");
         }
+        "python" | "py" | "python3" => {
+            if require_cap(vault, &session, Rights::EXECUTE, "python") {
+                python::intent_python(args, vault, session);
+            }
+        }
         "cores" | "cpu" => {
             system::intent_cores();
         }
@@ -2403,12 +2409,26 @@ tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
         let _ = write!(s, " nopeektime={}", epoch);
     }
     // Guest-side diagnostic probe: PID-1 forks a 1 s busybox loop that dumps the
-    // GUEST's own view (per-vCPU busy/softirq %, download-socket cwnd/rtt/retrans,
-    // softnet drops/squeeze) to /dev/kmsg → our console as `[gdiag]`. We have only
-    // ever measured the bridge from the HOST side; this is the missing inside view
-    // for the loaded-latency-under-download question (is the guest CPU/softirq
-    // bound, or is the buffer ours?). Strip the flag to silence it.
-    let _ = write!(s, " nopeekgdiag=1");
+    // GUEST's own view (per-vCPU busy/softirq %, socket cwnd/rtt/retrans, softnet
+    // drops/squeeze) to /dev/kmsg → our console as `[gdiag]`.
+    //
+    // OFF by default since 0.294.0. It was on for everyone, and it is not free:
+    // the guest writes it through the emulated 8250, which is ONE VM-EXIT PER
+    // BYTE, and each finished line leaves as a blocking UART write from inside
+    // that exit handler — on the BSP vCPU fiber, the same one that services the
+    // virtio-net doorbell. The softnet line alone is ~700 bytes a second, so the
+    // probe cost about 700 extra exits and ~60 ms of UART spin per second,
+    // forever, on the network's own critical path. A measuring tool that slows
+    // the thing it measures is the third time we have paid for this.
+    //
+    //     store sys/config/microvm_gdiag on
+    //
+    // turns it back on for a session that actually wants the inside view.
+    if crate::config::get("microvm_gdiag")
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("on"))
+    {
+        let _ = write!(s, " nopeekgdiag=1");
+    }
     // Diagnostic pure-bridge throughput run: PID-1 sees `nopeekbench=` and runs
     // a busybox wget loop through the nat bridge instead of cage/browser.
     if let Some(mb) = bench_mb {

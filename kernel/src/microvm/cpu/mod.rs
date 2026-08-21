@@ -422,40 +422,47 @@ pub fn guest_vcpus() -> u8 {
     if reserve_gpu_core() {
         workers = workers.saturating_sub(1);
     }
-    // And one for a WASM NIC driver, if one is up — see `nic_core`.
-    if nic_core().is_some() {
-        workers = workers.saturating_sub(1);
-    }
+    // And one per core carrying the network's own fibers — see `protected_cores`.
+    workers = workers.saturating_sub(protected_cores().count_ones() as usize);
     workers.clamp(1, MAX_VCPUS_CAP) as u8
 }
 
-/// The core a WASM NIC driver polls its card from, when it has to be kept clear
-/// of vCPUs.
+/// Bitmask of cores that must stay clear of vCPUs: the WASM NIC driver's, and
+/// the WiFi manager's.
 ///
-/// A vCPU fiber and a driver fiber on one core are cooperative peers: the driver
-/// runs only when the vCPU yields, which is once per `SLICE_MS` (3 ms) at best
-/// and longer whenever a single exit handler runs long — the inline GPU
-/// framebuffer copy on VMX, an npkFS write behind a 9p access. The card holds
-/// about 50 ms of receive buffers at 116 Mbit. Past that the firmware has
-/// nowhere to put frames, and since the host's own stack rides the same driver,
-/// the machine loses its network entirely, not just the guest.
+/// A vCPU fiber and a driver fiber on one core are cooperative peers — the
+/// driver runs only when the vCPU yields, once per `SLICE_MS` (3 ms) at best and
+/// longer whenever a single exit handler runs long (the inline GPU framebuffer
+/// copy on VMX, an npkFS write behind a 9p access). Two different things break:
 ///
-/// AMD never hit this because `reserve_offload_core` already leaves a worker
-/// core free; on Intel every worker core gets a vCPU. Needs >= 3 cores — below
-/// that, starving the guest to nothing is the worse trade.
-fn nic_core() -> Option<usize> {
-    if crate::smp::per_core::core_count() < 3 { return None; }
-    crate::netdev::wasm_nic_core()
+///   * the driver holds about 50 ms of receive buffers at 116 Mbit, and past
+///     that the firmware has nowhere left to put frames;
+///   * the manager runs the 4-way, and while it is not running the driver never
+///     reports authorized — at which point `netdev::send` refuses every frame.
+///
+/// Either way the whole machine loses its network, not just the guest, because
+/// the host's own stack rides the same driver. AMD never hit this: its
+/// `reserve_offload_core` already leaves a worker core free. On Intel every
+/// worker core gets a vCPU.
+///
+/// Needs >= 3 cores — below that, starving the guest to nothing is the worse
+/// trade.
+fn protected_cores() -> u32 {
+    if crate::smp::per_core::core_count() < 3 { return 0; }
+    let mut mask = 0u32;
+    if let Some(c) = crate::netdev::wasm_nic_core() { mask |= 1 << c; }
+    if let Some(c) = crate::wifi::manager_core() { mask |= 1 << c; }
+    mask
 }
 
-/// Lowest worker core that is not the WASM NIC driver's. Whichever core picks up
-/// the BSP vCPU fiber owns the guest for its whole lifetime, so the choice is
-/// made here rather than left to work-stealing.
+/// Lowest worker core the network does not need. Whichever core picks up the BSP
+/// vCPU fiber owns the guest for its whole lifetime, so the choice is made here
+/// rather than left to work-stealing.
 fn pick_vcpu_core() -> usize {
     let n = crate::smp::per_core::core_count();
     if n <= 1 { return 0; }
-    let avoid = nic_core();
-    (1..n).find(|c| Some(*c) != avoid).unwrap_or(n - 1)
+    let avoid = protected_cores();
+    (1..n).find(|c| avoid & (1 << c) == 0).unwrap_or(n - 1)
 }
 
 /// EXPERIMENT toggle: reserve a dedicated worker core for the off-vCPU net
@@ -1223,11 +1230,9 @@ fn vcpu_fiber_task(_arg: u64) {
     // not OR, so a relaunch starts clean. Runs before the guest boots → before
     // any SIPI → the reaper always sees the BSP bit.
     VM_CORE_MASK.store((1u32 << 0) | (1u32 << cid), Ordering::Release);
-    // Mark the WASM NIC driver's core taken so no AP vCPU and no offload worker
-    // is ever placed there.
-    if let Some(nic) = nic_core() {
-        VM_CORE_MASK.fetch_or(1u32 << nic, Ordering::AcqRel);
-    }
+    // Mark the network's cores taken so no AP vCPU and no offload worker is ever
+    // placed there.
+    VM_CORE_MASK.fetch_or(protected_cores(), Ordering::AcqRel);
 
     // 1 kHz wake source on THIS core so the fiber's idle yields resume
     // promptly (the 100 Hz worker timer alone would stretch a 2 ms idle

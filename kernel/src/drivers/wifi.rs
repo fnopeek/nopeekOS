@@ -32,7 +32,38 @@ static CMDS_DROPPED: AtomicU32 = AtomicU32::new(0);
 static EVENTS_SENT: AtomicU32 = AtomicU32::new(0);
 static EVENTS_DROPPED: AtomicU32 = AtomicU32::new(0);
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+// Core the manager (`wifid`) polls this channel from, +1, plus the tick of its
+// last poll. It is a SECOND fiber beside the driver's, and just as load-bearing:
+// without it no 4-way completes, the driver never reports authorized, and
+// `netdev::send` then refuses every frame — host traffic as much as the guest's.
+// The microvm keeps vCPUs off both cores; protecting only the driver's left this
+// one sharing with a vCPU.
+static MGR_CORE: AtomicU32 = AtomicU32::new(0);
+static MGR_SEEN: AtomicU64 = AtomicU64::new(0);
+
+/// Called from the manager's own fiber, on every event poll.
+pub fn note_manager_core() {
+    MGR_CORE.store(
+        crate::smp::per_core::current_core_id() as u32 + 1, Ordering::Relaxed);
+    MGR_SEEN.store(crate::interrupts::ticks(), Ordering::Relaxed);
+}
+
+/// The manager's core, if one has polled recently. Self-healing rather than
+/// registered: a manager that exited simply stops refreshing, so a dead
+/// supplicant does not cost the guest a vCPU for the rest of the boot. `1` maps
+/// to Core 0, which never carries a vCPU anyway.
+pub fn manager_core() -> Option<usize> {
+    // The manager polls every 4-50 ms, so anything past ~2 s is gone.
+    const STALE_TICKS: u64 = 200;
+    let c = MGR_CORE.load(Ordering::Relaxed);
+    if c <= 1 { return None; }
+    let age = crate::interrupts::ticks()
+        .wrapping_sub(MGR_SEEN.load(Ordering::Relaxed));
+    if age >= STALE_TICKS { return None; }
+    Some(c as usize - 1)
+}
 
 pub struct ChannelStats {
     pub cmds_sent: u32,
