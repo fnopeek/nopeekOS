@@ -1,0 +1,12 @@
+[package]
+name = "wasi-path-test"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "wasi-path-test"
+path = "src/main.rs"
+
+# Standalone: this is a host test of kernel code, not part of the
+# bare-metal workspace, and it must not drag the kernel target with it.
+[workspace]

@@ -67,6 +67,15 @@ const ASSETS: &[AssetSpec] = &[
     // a tmpfs initramfs. The RAM-efficient daily-driver path; supersedes
     // the cpio entry above once it's the only shipped form.
     AssetSpec { section: "microvm:userspace-sqfs", remote_filename: "microvm-userspace.sqfs",  npkfs_path: "sys/microvm/userspace.sqfs" },
+    // CPython's standard library, as one zip. Stored uncompressed on
+    // purpose: this interpreter has no zlib, so a deflated zip raises
+    // ZipImportError at the first import. Costs ~5 MB over the wire and
+    // saves decompressing on every import — a fair trade on a machine
+    // where the interpreter is already the slow part.
+    //
+    // Not bundled into the installer: like microvm:userspace, Python is
+    // something you fetch, not something every USB stick carries.
+    AssetSpec { section: "python:stdlib",       remote_filename: "python313.zip",             npkfs_path: "sys/python/lib/python313.zip" },
 ];
 
 struct AssetEntry {
