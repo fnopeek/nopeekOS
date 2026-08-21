@@ -447,6 +447,20 @@ pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> 
 
         match connect_status(handle) {
             1 => break,
+            // -2 is our own retry budget running out; -1 is the peer closing
+            // the connection (a RST answers a SYN with a refusal). Reporting
+            // both as ConnectionRefused told us "nothing is listening" when the
+            // truth was "we gave up asking" — opposite investigations, third
+            // time today that one message covered two causes.
+            -2 => {
+                if let Some(ref c) = CONNECTIONS.lock()[handle] {
+                    crate::kprintln!(
+                        "[tcp] connect gave up: state {:?} arp_tries {} syn_retries {}",
+                        c.state, c.arp_tries, c.retries);
+                }
+                close_cleanup(handle);
+                return Err(TcpError::Timeout);
+            }
             n if n < 0 => {
                 close_cleanup(handle);
                 return Err(TcpError::ConnectionRefused);
@@ -455,6 +469,16 @@ pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> 
         }
 
         if crate::interrupts::ticks() - t0 > 1000 { // 10s timeout
+            // Say HOW FAR it got. A connect that dies has three distinct
+            // shapes and one message: next hop never resolved (`arp_pending`
+            // still set, or it gave up and broadcast), SYN sent and never
+            // answered (`retries` climbing), or the state machine stuck
+            // somewhere else entirely. Guessing between them costs an evening.
+            if let Some(ref c) = CONNECTIONS.lock()[handle] {
+                crate::kprintln!(
+                    "[tcp] connect timeout: state {:?} arp_pending {} arp_tries {} syn_retries {}",
+                    c.state, c.arp_pending, c.arp_tries, c.retries);
+            }
             close_cleanup(handle);
             return Err(TcpError::Timeout);
         }
