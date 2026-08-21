@@ -1133,12 +1133,28 @@ pub const EV_READY: u8 = 0x83;
 
 // ── Stage 5e: data TX queue (tid 0) + key install ────────────────
 pub const IWL_DATA_TID: u8 = 0;
-// Data TX queue depth. 16 was too shallow once rate scaling lifted throughput
-// from 1 Mbit to tens of Mbit: under a burst the firmware's read pointer lags
-// (TX retries) and the ring overflows. 64 gives headroom over the kernel's
-// 16-slot TX mailbox while staying well within the gen2 max (256). The TFD slot
-// index = write_ptr & (size-1); cb_size = ilog2(size)-3 (must match the size).
-pub const IWL_DATA_QUEUE_SIZE: usize = 64;
+// Data TX queue depth. 256 is what Linux gives this hardware, and the number is
+// derived, not chosen. `iwl_mvm_get_queue_size` (mvm/sta.c:812) asks for 1024 on
+// an HE peer — ours is one — but the transport clamps it twice in
+// `iwl_txq_dyn_alloc` (pcie/gen1_2/tx-gen2.c:1033):
+//
+//     size = min(size, bc_tbl_size / sizeof(u16));   // 320 on this family
+//     size = rounddown_pow_of_two(size);             // -> 256
+//
+// `bc_tbl_size` follows `TFD_QUEUE_BC_SIZE` = TFD_QUEUE_SIZE_MAX + BC_DUP =
+// 256 + 64 (iwl-fh.h:594), and cfg/22000.c:29 sets `.max_tfd_queue_size = 256`.
+// 256 is also the ceiling of the reclaim path: the TX response states the read
+// pointer in 8 bits of the header sequence (`SEQ_TO_INDEX`), so a deeper queue
+// would alias. Three independent limits, all at 256.
+//
+// 64 was our own number. Measured at 74 Mbit with the byte cap in place
+// (0.98.0): the byte cap never fired once, the RING guard fired 4565 times and
+// sat at peak 62/62, and fq_codel dropped 2292 of 21487 ACKs the driver could
+// not take. The queue depth WAS the throughput limit, and it said so itself.
+//
+// The TFD slot index = write_ptr & (size-1); cb_size = ilog2(size)-3 (must
+// match the size). Costs 592 KB of DMA against 148 KB at 64 slots.
+pub const IWL_DATA_QUEUE_SIZE: usize = 256;
 
 // Anti-bufferbloat cap for the data queue. BQL measures BYTES, and so does
 // this: the airtime a latency-sensitive packet waits behind is a function of
@@ -1157,8 +1173,9 @@ pub const IWL_DATA_QUEUE_SIZE: usize = 64;
 pub const TX_INFLIGHT_BYTES: u32 = 65536;
 
 /// Ring guard, not a policy: the write pointer must never lap the firmware's
-/// read pointer. `TX_INFLIGHT_BYTES` is what limits us in practice; this is the
-/// wall behind it. Must stay < QUEUE_SIZE-1 = 63.
+/// read pointer. `TX_INFLIGHT_BYTES` is what limits us in practice for
+/// full-size frames; this is the wall behind it, and for a queue of 67-byte
+/// ACKs it is the only one that can bite. Must stay < QUEUE_SIZE-1.
 ///
 /// History of the frame cap this replaced, kept because the numbers were
 /// measured on the device and the next size change has to beat them:
@@ -1194,7 +1211,7 @@ pub const TX_INFLIGHT_MAX: u32 = IWL_DATA_QUEUE_SIZE as u32 - 2;
 /// already busy link. Measured during an OTA over WiFi: it fired again and
 /// again while the update crawled. Back to the value Linux uses.
 pub const TX_WD_TIMEOUT_MS: u64 = 10_000;
-pub const DATA_QUEUE_CB_SIZE: u32 = 3; // TFD_QUEUE_CB_SIZE(64) = ilog2(64)-3
+pub const DATA_QUEUE_CB_SIZE: u32 = 5; // TFD_QUEUE_CB_SIZE(256) = ilog2(256)-3
 // Per-slot TX staging stride. Each in-flight TFD's TB1 must point at its OWN
 // payload region, or back-to-back frames clobber each other's data before the
 // firmware DMAs it (the bug behind "dies under load once the rate went up").
