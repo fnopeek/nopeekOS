@@ -101,6 +101,13 @@ impl WasmNic {
     }
 }
 
+/// Core the WASM NIC driver polls its card from, +1 (0 = none registered).
+/// Recorded at registration because the driver registers from its own fiber,
+/// and a fiber does not migrate. Read by the microvm so it never puts a vCPU on
+/// that core: the two would be cooperative peers, and the driver would poll only
+/// when the vCPU yields.
+static WASM_NIC_CORE: AtomicU32 = AtomicU32::new(0);
+
 /// Called by WASM host function npk_netdev_register
 pub fn register_wasm_nic(mac: [u8; 6]) {
     let mut nic = WASM_NIC.lock();
@@ -108,13 +115,25 @@ pub fn register_wasm_nic(mac: [u8; 6]) {
     WASM_NIC_RX.lock().clear();
     nic.tx.clear();
     nic.link_up = false;
+    WASM_NIC_CORE.store(
+        crate::smp::per_core::current_core_id() as u32 + 1, Ordering::Release);
     WASM_NIC_ACTIVE.store(true, Ordering::Release);
 }
 
 /// Called by cleanup_hw_state when WASM driver exits
 pub fn unregister_wasm_nic() {
     WASM_NIC.lock().link_up = false;
+    WASM_NIC_CORE.store(0, Ordering::Release);
     WASM_NIC_ACTIVE.store(false, Ordering::Release);
+}
+
+/// The core a registered WASM NIC driver runs on. `None` when no such driver is
+/// up, or when it sits on Core 0 (which never carries a vCPU anyway).
+pub fn wasm_nic_core() -> Option<usize> {
+    match WASM_NIC_CORE.load(Ordering::Acquire) {
+        0 | 1 => None,
+        n => Some(n as usize - 1),
+    }
 }
 
 pub fn wasm_nic_available() -> bool {

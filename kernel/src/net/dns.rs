@@ -3,6 +3,7 @@
 //! Stub resolver over UDP port 53.
 //! Queries A records, caches results.
 
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -10,7 +11,10 @@ use super::udp;
 
 const DNS_PORT: u16 = 53;
 const LOCAL_PORT: u16 = 10053;
-const CACHE_SIZE: usize = 16;
+/// 16 was one page load. A browser opening a single site touches twenty to
+/// forty names, so every entry was evicted before it was used twice and the
+/// cache never answered anything.
+const CACHE_SIZE: usize = 64;
 
 static DNS_SERVER: Mutex<[u8; 4]> = Mutex::new([10, 0, 2, 3]); // QEMU user-mode DNS
 
@@ -21,15 +25,102 @@ static NEXT_ID: Mutex<u16> = Mutex::new(0xABCD);
 struct DnsEntry {
     name: String,
     ip: [u8; 4],
+    /// true = an address. false = the resolver tried and got nothing; the entry
+    /// exists to keep the next asker from starting the same doomed lookup.
     valid: bool,
+    /// Tick this entry was written. Evicts the oldest instead of always slot 0,
+    /// and expires a negative entry.
+    stamp: u64,
 }
 
 static CACHE: Mutex<[Option<DnsEntry>; CACHE_SIZE]> = Mutex::new(
     [const { None }; CACHE_SIZE]
 );
 
+/// How long a failed lookup keeps a name out of the resolver. Without it a name
+/// that does not resolve is retried on every single query for it — and each
+/// retry costs the full budget.
+const NEG_TTL_TICKS: u64 = 3_000; // ~30 s at 100 Hz
+
+/// Names queued for the background resolver. Filled by `want()` from callers
+/// that must not block, drained by `pump_wanted()` on Core 0.
+static WANTED: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+const WANTED_MAX: usize = 16;
+
+/// What the cache knows about a name, without touching the network.
+pub enum Cached {
+    Ip([u8; 4]),
+    /// Looked up and failed, recently enough to still count.
+    Failed,
+    Unknown,
+}
+
 pub fn set_server(ip: [u8; 4]) { *DNS_SERVER.lock() = ip; }
 pub fn server() -> [u8; 4] { *DNS_SERVER.lock() }
+
+/// Cache-only lookup. Never sends, never waits.
+///
+/// For callers that MUST NOT block. The microvm data plane is one: it runs on
+/// the vCPU fiber inside the virtio-net MMIO exit, and a blocking resolve there
+/// does not just freeze the guest — `fiber::pump_peers()` bails out inside a
+/// fiber, so the WASM NIC driver fiber sharing that core stops posting receive
+/// buffers. The card has ~50 ms of them at 116 Mbit. After that the answer we
+/// are waiting for is one of the frames that can no longer arrive, so the wait
+/// runs its full budget and the radio is gone with it.
+pub fn cached(name: &str) -> Cached {
+    let now = crate::interrupts::ticks();
+    let cache = CACHE.lock();
+    match cache.iter().flatten().find(|e| e.name == name) {
+        Some(e) if e.valid => Cached::Ip(e.ip),
+        Some(e) if now.wrapping_sub(e.stamp) < NEG_TTL_TICKS => Cached::Failed,
+        _ => Cached::Unknown,
+    }
+}
+
+/// Queue a name for the background resolver. Deduplicates against the cache and
+/// against the queue; drops silently when the queue is full — the caller that
+/// could not be answered asks again, and that retry IS the retry.
+pub fn want(name: &str) {
+    if name.is_empty() || name.len() > 255 { return; }
+    if !matches!(cached(name), Cached::Unknown) { return; }
+    let mut q = WANTED.lock();
+    if q.len() >= WANTED_MAX || q.iter().any(|n| n == name) { return; }
+    q.push_back(String::from(name));
+}
+
+/// Resolve one queued name. Core 0 only — it is the one context that may block
+/// here: it runs no fibers, so no driver starves behind it, and `net::poll()`
+/// keeps rendering the compositor while it waits.
+pub fn pump_wanted() {
+    if crate::smp::per_core::current_core_id() != 0 { return; }
+    let name = { WANTED.lock().pop_front() };
+    let Some(name) = name else { return };
+    if resolve(&name).is_none() {
+        remember(&name, [0; 4], false);
+    }
+}
+
+/// Write an entry, replacing the oldest when the table is full.
+fn remember(name: &str, ip: [u8; 4], valid: bool) {
+    let stamp = crate::interrupts::ticks();
+    let mut cache = CACHE.lock();
+    if let Some(slot) = cache.iter_mut().find(|s| {
+        s.as_ref().is_some_and(|e| e.name == name)
+    }) {
+        *slot = Some(DnsEntry { name: String::from(name), ip, valid, stamp });
+        return;
+    }
+    if let Some(slot) = cache.iter_mut().find(|s| s.is_none()) {
+        *slot = Some(DnsEntry { name: String::from(name), ip, valid, stamp });
+        return;
+    }
+    let oldest = cache
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, s)| s.as_ref().map_or(0, |e| e.stamp))
+        .map_or(0, |(i, _)| i);
+    cache[oldest] = Some(DnsEntry { name: String::from(name), ip, valid, stamp });
+}
 
 /// Resolve a hostname to IPv4 address. Blocking (polls for reply).
 pub fn resolve(name: &str) -> Option<[u8; 4]> {
@@ -159,13 +250,7 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
 
     // Cache result
     if let Some(ip) = result {
-        let mut cache = CACHE.lock();
-        let name_str = String::from(name);
-        if let Some(slot) = cache.iter_mut().find(|s| s.is_none()) {
-            *slot = Some(DnsEntry { name: name_str, ip, valid: true });
-        } else if let Some(slot) = cache.iter_mut().find(|s| s.is_some()) {
-            *slot = Some(DnsEntry { name: name_str, ip, valid: true });
-        }
+        remember(name, ip, true);
     }
 
     result
