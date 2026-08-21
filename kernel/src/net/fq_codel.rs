@@ -23,7 +23,25 @@ pub const MTU: usize = 1514;
 
 const FLOWS: usize = 16; // per-flow sub-queues (power of two)
 const FLOW_MASK: u32 = FLOWS as u32 - 1;
-const CAP: usize = 64; // total packet slots shared across all flows
+// Total packet slots shared across all flows.
+//
+// 64 was far below anything CoDel can work with — Linux's fq_codel defaults to
+// 10240 packets. A tail-drop queue that shallow defeats the AQM it sits under:
+// CoDel decides by how long a packet SAT in the queue, and it needs room to
+// observe that. Below it, the queue just overflows.
+//
+// It showed the moment this system sent bulk data for the first time.
+// `tcp::send` bursts a whole 64 KiB chunk — 45 segments — in one call, and
+// MAX_UNACKED lets ~180 segments go out before any ACK. Against 64 slots the
+// overflow is arithmetic, not bad luck: measured `drops full 76` on a link with
+// 4 % air retries and every block-ack acknowledged. The air was fine; the queue
+// was three times too small for what TCP is allowed to have in flight.
+//
+// 256 slots = 388 KB, and it holds a full MAX_UNACKED window (181 segments)
+// with room for CoDel to do its job. It costs nothing in the kernel image: the
+// struct is all-zero-initialised and lives in .bss — see `new()` below, which
+// is deliberately NOT allowed to write a sentinel.
+const CAP: usize = 256;
 const EMPTY: u16 = u16::MAX;
 const QUANTUM: i32 = MTU as i32; // DRR quantum (bytes)
 
@@ -79,6 +97,11 @@ struct Flow {
 }
 
 impl Flow {
+    /// All-zero, for the const initialiser ONLY. `head`/`tail` are not valid
+    /// yet — `lazy_init` sets them to EMPTY before anything reads them.
+    const fn zeroed() -> Self {
+        Flow { head: 0, tail: 0, deficit: 0, in_list: 0, codel: Codel::new() }
+    }
     const fn new() -> Self {
         Flow { head: EMPTY, tail: EMPTY, deficit: 0, in_list: 0, codel: Codel::new() }
     }
@@ -136,13 +159,18 @@ pub struct FqCodel {
 }
 
 impl FqCodel {
+    /// EVERY field here must be zero. A single non-zero byte — `EMPTY` is
+    /// 0xffff — drags the whole 388 KB struct out of .bss and into the kernel
+    /// image as literal bytes. It did: `WASM_NIC` sat in .data at 98 KB because
+    /// `link` and `Flow::head/tail` were initialised to EMPTY, and both are
+    /// rebuilt by `lazy_init` before anything reads them anyway.
     pub const fn new() -> Self {
-        const F: Flow = Flow::new();
+        const F: Flow = Flow::zeroed();
         FqCodel {
             bufs: [[0; MTU]; CAP],
             lens: [0; CAP],
             ts: [0; CAP],
-            link: [EMPTY; CAP],
+            link: [0; CAP],
             free: 0,
             flows: [F; FLOWS],
             new_q: FlowQ::new(),
@@ -177,6 +205,11 @@ impl FqCodel {
                 self.link[i] = if i + 1 < CAP { (i + 1) as u16 } else { EMPTY };
             }
             self.free = 0;
+            // …and give the flows their sentinel. The const initialiser could
+            // not: a non-zero byte there costs 388 KB of kernel image.
+            for f in self.flows.iter_mut() {
+                *f = Flow::new();
+            }
         }
     }
 
