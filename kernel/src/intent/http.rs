@@ -1767,7 +1767,16 @@ fn http_post_zeros(host: &str, path: &str, total: usize) -> Result<String, &'sta
     let ip = parse_ip(host).or_else(|| crate::net::dns::resolve(host)).ok_or("DNS/IP failed")?;
     let gw = crate::net::ipv4::gateway();
     let _ = crate::net::arp::resolve(gw, 100); // see open_tls: not a blind spin
-    let handle = crate::net::tcp::connect(ip, 80).map_err(|_| "TCP connect failed")?;
+    // Name the failure. ConnectionRefused means the peer answered with a RST —
+    // nothing is listening there, go look at the server. Timeout means nobody
+    // answered at all — go look at ARP, routing, the air. Collapsing both into
+    // "TCP connect failed" sent us hunting the radio while a Python process on
+    // the other end had simply exited.
+    let handle = crate::net::tcp::connect(ip, 80).map_err(|e| {
+        kprintln!("[netbench] connect to {}.{}.{}.{}:80 failed: {}",
+                  ip[0], ip[1], ip[2], ip[3], e);
+        "TCP connect failed"
+    })?;
     crate::interrupts::set_worker_poll_hz(10_000);
     struct PollHzGuard;
     impl Drop for PollHzGuard {
