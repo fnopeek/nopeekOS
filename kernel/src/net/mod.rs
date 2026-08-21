@@ -64,6 +64,23 @@ static PROF_TXFLUSH: AtomicU64 = AtomicU64::new(0);
 static PROF_RENDER: AtomicU64 = AtomicU64::new(0);
 static PROF_PKTS: AtomicU64 = AtomicU64::new(0);
 
+/// Frames actually pulled off the host NIC, and passes that pulled NOTHING
+/// because another core held the single-drainer guard.
+///
+/// Without these, "the worker ran 372 times per second" is compatible with 372
+/// real drains AND with 372 complete no-ops: `poll_rx_only` returns normally
+/// when the CAS fails, and the producer counter is incremented by its CALLER,
+/// before the call. That blind spot is the difference between "nothing arrived
+/// on the wire" and "we never looked", which is the whole question when the
+/// staging queue is empty and the consumer is alive.
+static NIC_FRAMES: AtomicU64 = AtomicU64::new(0);
+static NIC_SKIPPED: AtomicU64 = AtomicU64::new(0);
+
+/// (frames pulled off the NIC, passes that lost the drain guard). Monotonic.
+pub fn nic_drain_stats() -> (u64, u64) {
+    (NIC_FRAMES.load(Ordering::Relaxed), NIC_SKIPPED.load(Ordering::Relaxed))
+}
+
 /// (netdev_cyc, stack_cyc, txflush_cyc, render_cyc, packets) since last call; resets.
 pub fn take_poll_prof() -> (u64, u64, u64, u64, u64) {
     use core::sync::atomic::Ordering::Relaxed;
@@ -101,12 +118,15 @@ pub fn poll() {
     {
         let mut buf = [0u8; netdev::MTU];
         while let Some(len) = netdev::recv(&mut buf) {
+            NIC_FRAMES.fetch_add(1, Ordering::Relaxed);
             if len >= 14 {
                 eth::handle_frame(&buf[..len]);
             }
         }
         tcp::tick_connections();
         POLLING.store(false, Ordering::Release);
+    } else if !skip_nic_drain {
+        NIC_SKIPPED.fetch_add(1, Ordering::Relaxed);
     }
     // Give this core's fibers a turn. Every blocking network wait in the kernel
     // — ARP, DNS, ICMP, TCP connect — spins on this function, and every one of
@@ -150,6 +170,7 @@ pub fn poll_rx_only() {
             PROF_NETDEV.fetch_add(b.wrapping_sub(a), Relaxed);
             match r {
                 Some(len) => {
+                    NIC_FRAMES.fetch_add(1, Ordering::Relaxed);
                     if len >= 14 { eth::handle_frame(&buf[..len]); }
                     PROF_STACK.fetch_add(rd().wrapping_sub(b), Relaxed);
                     PROF_PKTS.fetch_add(1, Relaxed);
@@ -158,6 +179,8 @@ pub fn poll_rx_only() {
             }
         }
         POLLING.store(false, Ordering::Release);
+    } else {
+        NIC_SKIPPED.fetch_add(1, Ordering::Relaxed);
     }
     // Same reason as in poll(): this spin owns a worker core, and a driver fiber
     // parked on it would never refill the ring this loop is draining.
