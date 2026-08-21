@@ -1055,6 +1055,25 @@ sha384=${INITRAMFS_SHA}
             fi
         fi
 
+        # CPython standard library — placed under release/assets/ by
+        # tools/stage-python.sh. Optional: absent entry means OTA leaves
+        # whatever is already installed alone.
+        if [ -f "$RELEASE_DIR/assets/python313.zip" ]; then
+            PYLIB_SIZE=$(stat -c%s "$RELEASE_DIR/assets/python313.zip")
+            PYLIB_SHA=$(openssl dgst -sha384 -hex "$RELEASE_DIR/assets/python313.zip" 2>/dev/null | awk '{print $NF}')
+
+            ASSET_MANIFEST="${ASSET_MANIFEST}[python:stdlib]
+size=${PYLIB_SIZE}
+sha384=${PYLIB_SHA}
+
+"
+            if [ -f "$KEY_FILE" ]; then
+                openssl dgst -sha384 -sign "$KEY_FILE" \
+                    -out "$RELEASE_DIR/assets/python313.zip.sig" "$RELEASE_DIR/assets/python313.zip"
+                ok "Signed stdlib: python313.zip ($PYLIB_SIZE bytes)"
+            fi
+        fi
+
         # Linux-virt bzImage — placed manually under release/assets/
         # by the maintainer (Alpine v3.23 main/x86_64 linux-virt apk →
         # boot/vmlinuz-virt). Phase 12.1.1c-3+ MicroVM payload.

@@ -48,6 +48,7 @@ mod intent;
 mod config;
 mod vga;
 mod wasm;
+mod wasi;
 mod shell;
 mod setup;
 mod gpu;
