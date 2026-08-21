@@ -399,12 +399,25 @@ impl VirtioNet {
                 if self.device_status == 0 {
                     self.reset();
                 } else if self.device_status & VIRTIO_STATUS_DRIVER_OK != 0 {
-                    super::nat::set_gro_enabled(self.guest_gso_ok());
+                    // GRO exists ONLY on this path. The AMD backend uses
+                    // `l3_rewrite_inbound`, which is pure: no coalescing, no
+                    // staging queue. So every super-frame we assemble here has
+                    // never run anywhere but on Intel hardware, and it is the
+                    // one place inbound where we take what Linux is about to
+                    // receive, rebuild it, and put our own caps on it.
+                    //
+                    //     store sys/config/microvm_gro off
+                    //
+                    // forces it off for an A/B without a rebuild. `microvm
+                    // benchvm` with and without answers it in two runs.
+                    let gro_off = crate::config::get("microvm_gro")
+                        .is_some_and(|v| v.trim().eq_ignore_ascii_case("off"));
+                    super::nat::set_gro_enabled(self.guest_gso_ok() && !gro_off);
                     kprintln!(
-                        "[net-dev] DRIVER_OK lo=0x{:08x} hi=0x{:08x} mrg={} eventidx={} gso={}",
+                        "[net-dev] DRIVER_OK lo=0x{:08x} hi=0x{:08x} mrg={} eventidx={} gso={} gro={}",
                         self.driver_features[0], self.driver_features[1],
                         self.driver_features[0] & (1 << VIRTIO_NET_F_MRG_RXBUF) != 0,
-                        self.event_idx_on(), self.guest_gso_ok(),
+                        self.event_idx_on(), self.guest_gso_ok(), !gro_off,
                     );
                 }
             }
