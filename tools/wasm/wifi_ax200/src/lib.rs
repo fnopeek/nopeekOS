@@ -5231,7 +5231,10 @@ impl Ax200 {
                         // cap of 16 — which blocked every transmission and
                         // read on the device as a dead link (8 Mbit, 41 %
                         // retries). Masked to the window the result is bounded
-                        // 0..63 by construction and can never wedge the queue.
+                        // 0..QUEUE_SIZE-1 by construction and can never wedge
+                        // the queue. At 256 slots the two masks coincide, which
+                        // is exactly why 256 is the ceiling: an 8-bit index
+                        // cannot address a deeper queue.
                         // No `+1`: measured on the device, the reported
                         // index is already the NEXT slot to read, not the last
                         // one completed. Adding one made the derived value
