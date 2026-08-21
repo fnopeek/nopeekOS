@@ -171,16 +171,21 @@ fn bridge_report() {
         return;
     }
     kprintln!();
-    if up && b.tx_pkts == 0 {
-        // Say it out loud rather than printing a page of zeroes. A guest that is
-        // up and has never had one packet cross the masquerade is a different
-        // fault from one whose traffic died after five seconds, and the two are
-        // indistinguishable from a silent report.
-        kprintln!("  microVM bridge — guest is UP and NOT ONE packet has crossed");
+    if up && b.frames_in == 0 {
+        // Say what is true and no more. `tx_pkts` counts only MASQUERADED
+        // egress, so gating on it called a guest that had sent nothing but ARP
+        // "silent". `frames_in` is counted at the door, before classification.
+        kprintln!("  microVM bridge — guest up {} s, {} frames from it",
+            b.up_s, b.frames_in);
         kprintln!("  ─────────────────────────────");
-        kprintln!("  nothing reached nat::process_tx: no ARP, no DHCP, no SYN.");
-        kprintln!("  the guest TX doorbell is not reaching us — look at the");
-        kprintln!("  virtio-net queue-1 kick, not at the masquerade.");
+        if b.kicks == 0 {
+            kprintln!("  the guest has not rung the TX doorbell once. Either it has");
+            kprintln!("  nothing to send yet (userspace still booting — check `up`");
+            kprintln!("  above) or its queue-1 kick never reaches our MMIO handler.");
+        } else {
+            kprintln!("  {} doorbells, but its TX ring was empty every time —", b.kicks);
+            kprintln!("  we are looking at the ring wrong, not at the masquerade.");
+        }
         return;
     }
     kprintln!("  microVM bridge (L3 masquerade){}",
@@ -196,6 +201,8 @@ fn bridge_report() {
         kprintln!("  host → guest  {:>8} pkt  {:>7} KB   (run again for a rate)",
             b.rx_pkts, b.rx_bytes / 1024);
     }
+    kprintln!("  from guest    {} frames in {} doorbells   {} arp  {} non-ip   (up {} s)",
+        b.frames_in, b.kicks, b.arp_in, b.other_in, b.up_s);
     kprintln!("  flows         {} tcp  {} udp opened   {} live of {}",
         b.flows_tcp, b.flows_udp, b.live, b.cap);
     kprintln!("  staging       queue {} (peak {} of {})   guest rx ring low-water {}",
