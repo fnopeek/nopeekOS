@@ -5414,6 +5414,19 @@ impl Ax200 {
                         [bn[b + CBA_OFF_TXED], bn[b + CBA_OFF_TXED + 1]]) as u64;
                     a_ba_done += u16::from_le_bytes(
                         [bn[b + CBA_OFF_DONE], bn[b + CBA_OFF_DONE + 1]]) as u64;
+                    // Airtime for the whole aggregate (`iwl_mvm_tx_airtime`,
+                    // mvm/tx.c:2151, from `ba_res->wireless_time`). The TX_CMD
+                    // response carries `wireless_media_time` and we have read it
+                    // since the first port — but an aggregated MPDU produces no
+                    // TX_CMD response, so on an upload only 405 of 147379 frames
+                    // reported any airtime at all and `air … tx` showed 0 %.
+                    // Same shape as the read pointer: one of two sources read.
+                    a_airtime += u32::from_le_bytes([
+                        bn[b + CBA_OFF_WIRELESS_TIME],
+                        bn[b + CBA_OFF_WIRELESS_TIME + 1],
+                        bn[b + CBA_OFF_WIRELESS_TIME + 2],
+                        bn[b + CBA_OFF_WIRELESS_TIME + 3],
+                    ]) as u64;
                     // The RECLAIM half, and the reason 0.99.0 collapsed to
                     // 16 Mbit: an aggregated MPDU gets NO TX_CMD response. Its
                     // TFD slot is freed here or it is never freed at all. Linux
