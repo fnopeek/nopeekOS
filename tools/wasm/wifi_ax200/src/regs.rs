@@ -1056,6 +1056,10 @@ pub const WLAN_BACK_RECIPIENT: u16 = 0;
 pub const WLAN_BACK_INITIATOR: u16 = 1;
 /// The largest reorder window an HT peer may ask for (ieee80211.h:2046).
 pub const IEEE80211_MAX_AMPDU_BUF_HT: usize = 0x40;
+/// ieee80211.h:2047. An HE peer may run a 256-MPDU reorder window, and iwlwifi
+/// reports exactly this as `hw->max_rx_aggregation_subframes` for everything
+/// below BZ (mvm/ops.c:1233).
+pub const IEEE80211_MAX_AMPDU_BUF_HE: usize = 0x100;
 /// DELBA parameter set (ieee80211.h:2036) — TID in 15:12, initiator in bit 11.
 pub const IEEE80211_DELBA_PARAM_TID_MASK: u16 = 0xF000;
 pub const IEEE80211_DELBA_PARAM_TID_SHIFT: u16 = 12;

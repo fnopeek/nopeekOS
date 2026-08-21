@@ -3539,7 +3539,7 @@ impl Ax200 {
                 r.s(" tid ");
                 r.d(sess.tid as u64);
                 r.s(" win ");
-                r.d(ba::BA_WIN as u64);
+                r.d(sess.buf_size as u64);
                 r.s("  delivered ");
                 r.d(sess.delivered as u64);
                 r.s(" held ");
@@ -3566,6 +3566,19 @@ impl Ax200 {
             r.d(ba::NUM_TIDS as u64);
             r.s(" tids  accepted ");
             r.d(self.st.addba_accepted as u64);
+            // Storage is shared and finite now. `pool` says how close the held
+            // frames come to it; `POOL-FULL` says it was not enough and a frame
+            // went up out of order. Both are the exception, so only the second
+            // one shouts.
+            r.s("  pool ");
+            r.d(ba::pool_used() as u64);
+            r.c(b'/');
+            r.d(ba::BA_POOL as u64);
+            if ba::pool_full() > 0 {
+                r.s("  POOL-FULL ");
+                r.d(ba::pool_full() as u64);
+                r.s(" (held frames exceeded storage — delivered out of order)");
+            }
             r.c(b'\n');
         } else {
             r.s(if self.ba_fw_broken && self.want_ampdu {
@@ -4140,7 +4153,7 @@ impl Ax200 {
                     } else {
                         WLAN_STATUS_REQUEST_DECLINED
                     };
-                    let p = BaPending { tid, ssn, win: ba::BA_WIN as u16,
+                    let p = BaPending { tid, ssn, win: sess.buf_size,
                                         dialog, timeout: sess.timeout_tu, asked_ms: 0 };
                     self.ba_reply(&p, status);
                     return;
@@ -4157,11 +4170,20 @@ impl Ax200 {
             }
         }
 
-        // Our window, not the AP's: it asks for up to 64 and a responder may
-        // answer with less. 32 already collapses the per-frame overhead and
-        // halves what we hold in linear memory.
-        let win = (if asked == 0 { IEEE80211_MAX_AMPDU_BUF_HT as u16 } else { asked } as usize)
-            .min(ba::BA_WIN)
+        // `ieee80211_process_addba_request` (agg-rx.c:319): the ceiling comes
+        // from the PEER's capability, not from a constant of ours. An HE AP may
+        // run 256, a plain HT one 64. `buf_size == 0` means "your maximum".
+        //
+        // Then the local hardware limit, which for this family is 256 as well
+        // (`hw->max_rx_aggregation_subframes`, mvm/ops.c:1233) — the same value
+        // `BA_WIN_MAX` is sized for.
+        let max_buf = if self.target_ht.he {
+            IEEE80211_MAX_AMPDU_BUF_HE as u16
+        } else {
+            IEEE80211_MAX_AMPDU_BUF_HT as u16
+        };
+        let win = (if asked == 0 { max_buf } else { asked.min(max_buf) } as usize)
+            .min(ba::BA_WIN_MAX)
             .max(1) as u16;
         self.ba_pending = Some(BaPending { tid, ssn, win, dialog, timeout,
                                            asked_ms: host::now_ms() });
@@ -4268,7 +4290,7 @@ impl Ax200 {
             return;
         }
         if let Some(sess) = ba::by_tid(p.tid) {
-            sess.start(baid as u8, p.tid, p.ssn, p.dialog, p.timeout);
+            sess.start(baid as u8, p.tid, p.ssn, p.dialog, p.timeout, p.win);
         }
         self.ba_reply(&p, WLAN_STATUS_SUCCESS);
         self.st.addba_accepted = self.st.addba_accepted.wrapping_add(1);
@@ -4345,7 +4367,7 @@ impl Ax200 {
         }
         let baid = ((status & IWL_ADD_STA_BAID_MASK) >> IWL_ADD_STA_BAID_SHIFT) as u8;
         if let Some(sess) = ba::by_tid(p.tid) {
-            sess.start(baid, p.tid, p.ssn, p.dialog, p.timeout);
+            sess.start(baid, p.tid, p.ssn, p.dialog, p.timeout, p.win);
         }
         self.ba_reply(&p, WLAN_STATUS_SUCCESS);
         self.st.addba_accepted = self.st.addba_accepted.wrapping_add(1);

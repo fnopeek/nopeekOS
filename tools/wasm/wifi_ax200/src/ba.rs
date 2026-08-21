@@ -26,12 +26,30 @@
 use crate::host;
 use crate::regs::*;
 
-/// Window we advertise in the ADDBA response, in MPDUs. The AP usually asks for
-/// 64; a responder may answer with less and 32 already collapses the per-frame
-/// overhead (32 frames share one preamble and one block ack). It also halves the
-/// memory: the buffer is real storage in our linear memory, not a pointer list
-/// like Linux's skb queue.
-pub const BA_WIN: usize = 32;
+/// Largest window we can address, in MPDUs. `IEEE80211_MAX_AMPDU_BUF_HE`, which
+/// is also what iwlwifi reports as `hw->max_rx_aggregation_subframes` for this
+/// family (`mvm/ops.c:1233`, the pre-BZ branch). The size actually used is
+/// negotiated per session — see `Reorder::buf_size`.
+///
+/// It was 32 until 0.101.0, and that was the ceiling nothing else could lift.
+/// Measured at 585 Mbit (VHT80): 32 outstanding MPDUs are through in 600 us, so
+/// the per-aggregate overhead — preamble, block ack, AIFS, backoff — could not
+/// be spread over enough frames. Airtime per received frame was 29.3 us against
+/// 9.4 us at HT40, three times worse, while the medium sat half idle. A window
+/// is a count, and a count divides by the rate.
+pub const BA_WIN_MAX: usize = 256;
+
+/// Frames held at once, ACROSS all sessions. Storage is decoupled from the
+/// WINDOW: the window says how far ahead of a hole the AP may run, storage only
+/// has to cover the frames actually held while one stands open. Every device
+/// measurement so far reports `held 0` — holes are rare and shallow, so eight
+/// private windows of 32 were the wrong shape twice over.
+///
+/// 256 shared slots is the same 410 KB the eight fixed windows cost, with a
+/// window eight times as wide. Running dry is not a loss: `store` declines and
+/// the caller delivers the frame immediately, out of order, which is what the
+/// stall release does anyway.
+pub const BA_POOL: usize = 256;
 
 /// Longest frame we keep. `rx_classify` already caps decoded frames at 1600.
 const BA_FRAME_MAX: usize = 1600;
@@ -54,14 +72,58 @@ pub fn sn_add(sn: u16, n: u16) -> u16 {
     (sn + n) & (SN_MODULO - 1)
 }
 
-/// Frame storage, one window per TID. Static rather than a field of the driver
-/// struct: the driver lives on the stack in `_start`, and 400 KB of window does
-/// not belong there. It is zero-initialised .bss, so it costs nothing in the
-/// module binary.
-static mut SLOT: [[[u8; BA_FRAME_MAX]; BA_WIN]; NUM_TIDS] =
-    [[[0; BA_FRAME_MAX]; BA_WIN]; NUM_TIDS];
-/// Payload length per slot, 0 = empty.
-static mut SLOT_LEN: [[u16; BA_WIN]; NUM_TIDS] = [[0; BA_WIN]; NUM_TIDS];
+/// Frame storage, shared by every session. Static rather than a field of the
+/// driver struct: the driver lives on the stack in `_start`, and 400 KB of
+/// buffer does not belong there. Zero-initialised .bss, so it costs nothing in
+/// the module binary.
+static mut POOL: [[u8; BA_FRAME_MAX]; BA_POOL] = [[0; BA_FRAME_MAX]; BA_POOL];
+/// Payload length per pool slot. 0 = free, and it is the only free-list we need:
+/// a decoded Ethernet frame is never shorter than its header.
+static mut POOL_LEN: [u16; BA_POOL] = [0; BA_POOL];
+/// Where the next search for a free slot starts. Turns the scan into O(1)
+/// amortised without a second array to keep in step.
+static mut POOL_CURSOR: usize = 0;
+
+/// Window position -> pool slot, per TID. Holds `slot + 1` so that 0 means
+/// empty: an array whose empty value is 0xffff would be 4 KB of non-zero bytes
+/// dragged out of .bss and into the module image.
+static mut SLOT_IDX: [[u16; BA_WIN_MAX]; NUM_TIDS] = [[0; BA_WIN_MAX]; NUM_TIDS];
+
+/// Times the pool ran dry and a frame went up out of order instead of being
+/// held. Zero in a healthy run; anything else means the sessions are holding
+/// more than `BA_POOL` frames at once and the window outgrew its storage.
+static mut POOL_FULL: u32 = 0;
+
+pub fn pool_full() -> u32 {
+    // SAFETY: single-threaded module.
+    unsafe { POOL_FULL }
+}
+
+/// How many pool slots are held right now — the high-water mark is what says
+/// whether `BA_POOL` is sized right.
+pub fn pool_used() -> u32 {
+    // SAFETY: single-threaded module.
+    unsafe {
+        let lens = &*(&raw const POOL_LEN);
+        lens.iter().filter(|&&l| l != 0).count() as u32
+    }
+}
+
+/// Take a free pool slot, or None when every one is held.
+fn pool_alloc() -> Option<usize> {
+    // SAFETY: single-threaded module; the pool is touched only from the RX path.
+    unsafe {
+        let lens = &mut *(&raw mut POOL_LEN);
+        for k in 0..BA_POOL {
+            let i = (POOL_CURSOR + k) % BA_POOL;
+            if lens[i] == 0 {
+                POOL_CURSOR = (i + 1) % BA_POOL;
+                return Some(i);
+            }
+        }
+        None
+    }
+}
 
 static mut REORDER: [Reorder; NUM_TIDS] = [Reorder::NEW; NUM_TIDS];
 
@@ -123,6 +185,10 @@ pub struct Reorder {
     pub timeout_tu: u16,
     /// `now_ms` of the last frame on this session, for that timeout.
     pub last_rx_ms: u64,
+    /// Negotiated window for THIS session, in MPDUs — `tid_rx->buf_size` in
+    /// Linux, and what `iwl_mvm_reorder` indexes with (`sn % buf_size`). Never
+    /// larger than `BA_WIN_MAX`.
+    pub buf_size: u16,
     /// Next sequence number we expect to deliver.
     pub head_sn: u16,
     pub stored: u16,
@@ -153,6 +219,7 @@ impl Reorder {
         dialog: 0,
         timeout_tu: 0,
         last_rx_ms: 0,
+        buf_size: BA_WIN_MAX as u16,
         head_sn: 0,
         stored: 0,
         valid: false,
@@ -169,8 +236,13 @@ impl Reorder {
     }
 
     /// Session accepted by the firmware: it answered with this id.
-    pub fn start(&mut self, baid: u8, tid: u8, ssn: u16, dialog: u8, timeout_tu: u16) {
+    pub fn start(&mut self, baid: u8, tid: u8, ssn: u16, dialog: u8, timeout_tu: u16,
+                 buf_size: u16) {
+        // Flush FIRST, while `buf_size` still describes the window the held
+        // frames were stored in. Assigning the new one first would walk the
+        // wrong positions and leak every pool slot beyond it.
         self.flush();
+        self.buf_size = buf_size.clamp(1, BA_WIN_MAX as u16);
         self.baid = baid;
         self.tid = tid;
         self.dialog = dialog;
@@ -203,7 +275,7 @@ impl Reorder {
         if self.stored == 0 {
             return;
         }
-        for i in 0..BA_WIN {
+        for i in 0..self.buf_size as usize {
             self.emit_slot(i);
         }
         self.stored = 0;
@@ -211,41 +283,63 @@ impl Reorder {
 
     fn emit_slot(&mut self, index: usize) {
         let t = self.tid as usize;
-        if t >= NUM_TIDS { return; }
-        // SAFETY: single-threaded module; the slot arrays are touched only here
-        // and in `store`, never across a host call that could re-enter.
-        let len = unsafe { SLOT_LEN[t][index] } as usize;
-        if len == 0 {
-            return;
-        }
+        if t >= NUM_TIDS || index >= BA_WIN_MAX { return; }
+        // SAFETY: single-threaded module; the pool and the index array are
+        // touched only here and in `store`, never across a host call that could
+        // re-enter.
+        let slot = match unsafe { SLOT_IDX[t][index] } {
+            0 => return,
+            v => (v - 1) as usize,
+        };
+        let len = unsafe { POOL_LEN[slot] } as usize;
         unsafe {
-            SLOT_LEN[t][index] = 0;
-            let slots = &*(&raw const SLOT);
-            host::netdev_submit_rx(&slots[t][index][..len]);
+            SLOT_IDX[t][index] = 0;
+            POOL_LEN[slot] = 0;
+            if len != 0 {
+                let pool = &*(&raw const POOL);
+                host::netdev_submit_rx(&pool[slot][..len]);
+            }
         }
-        self.delivered = self.delivered.wrapping_add(1);
+        if len != 0 {
+            self.delivered = self.delivered.wrapping_add(1);
+        }
     }
 
     fn store(&mut self, sn: u16, frame: &[u8]) -> bool {
-        if frame.len() > BA_FRAME_MAX {
+        if frame.len() > BA_FRAME_MAX || frame.is_empty() {
             return false;
         }
         let t = self.tid as usize;
         if t >= NUM_TIDS {
             return false;
         }
-        let index = (sn as usize) % BA_WIN;
+        let index = (sn as usize) % self.buf_size as usize;
         // SAFETY: as in emit_slot.
         unsafe {
-            if SLOT_LEN[t][index] != 0 {
+            if SLOT_IDX[t][index] != 0 {
                 // Slot occupied by a frame a full window away — the window has
                 // outrun itself. Release the old one rather than lose it.
                 self.emit_slot(index);
                 self.stored = self.stored.saturating_sub(1);
             }
-            let slots = &mut *(&raw mut SLOT);
-            slots[t][index][..frame.len()].copy_from_slice(frame);
-            SLOT_LEN[t][index] = frame.len() as u16;
+        }
+        // Storage is shared now, so it can genuinely run out. Declining is the
+        // right answer: the caller then delivers this frame straight away, out
+        // of order — the same trade the stall release makes.
+        let slot = match pool_alloc() {
+            Some(i) => i,
+            None => {
+                // SAFETY: single-threaded module.
+                unsafe { POOL_FULL = POOL_FULL.wrapping_add(1) };
+                return false;
+            }
+        };
+        // SAFETY: as in emit_slot.
+        unsafe {
+            let pool = &mut *(&raw mut POOL);
+            pool[slot][..frame.len()].copy_from_slice(frame);
+            POOL_LEN[slot] = frame.len() as u16;
+            SLOT_IDX[t][index] = (slot + 1) as u16;
         }
         if self.stored == 0 {
             // The clock the stall release runs on starts when a hole appears —
@@ -269,7 +363,9 @@ impl Reorder {
         // legitimately sit behind head_sn after a stall release, and treating
         // that as a jump would drag the window backwards.
         let ahead = sn_less(self.head_sn, nssn);
-        if ahead && (nssn.wrapping_sub(self.head_sn) & (SN_MODULO - 1)) as usize > BA_WIN {
+        if ahead && (nssn.wrapping_sub(self.head_sn) & (SN_MODULO - 1)) as usize
+            > self.buf_size as usize
+        {
             self.flush();
             self.head_sn = nssn;
             return;
@@ -278,9 +374,9 @@ impl Reorder {
         if t >= NUM_TIDS { return; }
         let mut ssn = self.head_sn;
         while sn_less(ssn, nssn) {
-            let index = (ssn as usize) % BA_WIN;
+            let index = (ssn as usize) % self.buf_size as usize;
             // SAFETY: as in emit_slot.
-            if unsafe { SLOT_LEN[t][index] } != 0 {
+            if unsafe { SLOT_IDX[t][index] } != 0 {
                 self.emit_slot(index);
                 self.stored = self.stored.saturating_sub(1);
             }
@@ -307,7 +403,7 @@ impl Reorder {
         self.stalls = self.stalls.wrapping_add(1);
         // Release the whole window: head_sn moves past everything we hold, so a
         // late arrival is then correctly treated as old rather than re-buffered.
-        let upto = sn_add(self.head_sn, BA_WIN as u16);
+        let upto = sn_add(self.head_sn, self.buf_size);
         self.release_upto(upto);
     }
 
