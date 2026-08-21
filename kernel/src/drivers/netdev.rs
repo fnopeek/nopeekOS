@@ -287,14 +287,15 @@ pub struct WasmNicStats {
     pub tx_dequeued: u64,
     pub tx_drops_aqm: u64,
     pub tx_drops_full: u64,
+    pub tx_drops_oversize: u64,
     pub tx_backlog: usize,
 }
 
 pub fn wasm_nic_stats() -> WasmNicStats {
-    let (aqm, full, backlog) = {
+    let (aqm, full, oversize, backlog) = {
         let n = WASM_NIC.lock();
         let (a, f) = n.tx.drops_split();
-        (a, f, n.tx.backlog())
+        (a, f, n.tx.drops_oversize(), n.tx.backlog())
     };
     WasmNicStats {
         rx_to_ring: RX_TO_RING.load(Ordering::Relaxed),
@@ -303,6 +304,7 @@ pub fn wasm_nic_stats() -> WasmNicStats {
         tx_dequeued: TX_DEQUEUED.load(Ordering::Relaxed),
         tx_drops_aqm: aqm,
         tx_drops_full: full,
+        tx_drops_oversize: oversize,
         tx_backlog: backlog,
     }
 }
@@ -353,9 +355,14 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
     }
     match active() {
         Active::Wasm => {
-            TX_ENQUEUED.fetch_add(1, Ordering::Relaxed);
-            WASM_NIC.lock().tx.enqueue(frame);
-            Ok(())
+            // Count what was TAKEN, not what was offered. The old order counted
+            // first and threw the result away, so a refused frame read as sent.
+            if WASM_NIC.lock().tx.enqueue(frame) {
+                TX_ENQUEUED.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            } else {
+                Err(NetError::NotInitialized)
+            }
         }
         Active::Intel => intel_nic::send(frame),
         Active::Rtl => rtl8153::send(frame),

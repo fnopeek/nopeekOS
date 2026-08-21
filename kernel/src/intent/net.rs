@@ -287,6 +287,10 @@ pub fn intent_wlan(args: &str) {
         if link { "UP" } else { "DOWN" });
     kprintln!("  routing    active={}  net_prefer={}", active, prefer.trim());
     kprintln!("  tx queue   enq {}  deq {}  backlog {} B", s.tx_enqueued, s.tx_dequeued, s.tx_backlog);
+    if s.tx_drops_oversize > 0 {
+        kprintln!("  tx OVERSIZE {} frames past the {}-byte MTU — a BUG upstream, not congestion",
+                  s.tx_drops_oversize, crate::netdev::MTU);
+    }
     kprintln!("  tx drops   aqm {} (codel, latency control)  full {} (driver too slow)",
         s.tx_drops_aqm, s.tx_drops_full);
     kprintln!("  rx ring    in {}  dropped {} (ring full — driver outran core-0 drain)",
