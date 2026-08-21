@@ -171,7 +171,7 @@ const WIFI_CFG: &str = "sys/config/wifi";
 
 /// The keys the wifi stack actually reads. A typo that wrote silently is how an
 /// afternoon gets spent measuring a setting that never arrived.
-const WIFI_KEYS: &[&str] = &["ssid", "band", "ampdu", "txagg", "ht40", "vht", "bawin", "ps", "btcoex", "settle_ms"];
+const WIFI_KEYS: &[&str] = &["ssid", "band", "ampdu", "txagg", "ht40", "vht", "bawin", "txbytes", "ps", "btcoex", "settle_ms"];
 
 fn wlan_set_usage() {
     kprintln!("[wlan] Usage: wlan set <key> <value> | wlan unset <key>");
@@ -182,6 +182,8 @@ fn wlan_set_usage() {
     kprintln!("[wlan]   ht40: on | off      40 MHz (measured best: on)");
     kprintln!("[wlan]   vht: on | off       80 MHz (needs ht40 on; measured SLOWER than 40)");
     kprintln!("[wlan]   bawin: <n>          cap the RX reorder window (0/unset = what the AP asks)");
+    kprintln!("[wlan]   txbytes: <KiB>      in-flight send cap (0/unset = 64). Raises upload,");
+    kprintln!("[wlan]                       costs latency under load — measure both.");
     kprintln!("[wlan]   ps: on | off        power save (default off = CAM)");
     kprintln!("[wlan]   btcoex: on | off");
     kprintln!("[wlan]   settle_ms: <n>      pause before the first scan");

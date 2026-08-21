@@ -678,6 +678,11 @@ struct Ax200 {
     /// widths, and comparing across sessions — different rssi, different rate
     /// scaling, different loop rate — cannot settle that.
     want_bawin: u16,
+    /// Override for the in-flight BYTE cap, from `sys/config/wifi txbytes`
+    /// (in KiB). 0 = `TX_INFLIGHT_BYTES`. The upload is the first workload that
+    /// ever made this cap fire — 19754 times over 404644 frames — so it is now
+    /// the one regulator left on the send path, and it is OUR number.
+    want_tx_kib: u32,
     want_txagg: bool,
     /// Set once the firmware has ignored a block-ack setup. Asking again costs
     /// another silent 300 ms AND wedges the transmit path: measured on the
@@ -2399,6 +2404,7 @@ impl Ax200 {
         self.want_ht40 = cfg_on(cfg_get(text, b"ht40"));
         self.want_vht = cfg_on(cfg_get(text, b"vht"));
         self.want_bawin = cfg_u16(cfg_get(text, b"bawin"), 0, ba::BA_WIN_MAX as u16);
+        self.want_tx_kib = cfg_u16(cfg_get(text, b"txbytes"), 0, 1024) as u32;
         self.want_power_save = cfg_on(cfg_get(text, b"ps"));
         self.want_bt_coex = cfg_on(cfg_get(text, b"btcoex"));
         self.settle_ms = cfg_settle_ms(text);
@@ -3710,7 +3716,7 @@ impl Ax200 {
         r.s(" ring  inflight ");
         r.d(self.data_bytes_in_flight as u64 / 1024);
         r.s(" KiB/");
-        r.d(TX_INFLIGHT_BYTES as u64 / 1024);
+        r.d(self.tx_byte_cap() as u64 / 1024);
         r.s(" KiB, ");
         r.d(self.data_in_flight as u64);
         r.c(b'/');
@@ -3871,16 +3877,20 @@ impl Ax200 {
         r.d(self.st.deauth as u64);
         r.c(b'\n');
         r.s("tx cap   ");
-        r.d(TX_INFLIGHT_BYTES as u64 / 1024);
+        r.d(self.tx_byte_cap() as u64 / 1024);
         r.s(" KiB/pass * ");
         r.d(self.st.passes_per_s as u64);
         r.s(" passes/s = ceiling ");
         r.kbit_as_mbit(
-            (TX_INFLIGHT_BYTES as u64 * self.st.peak_passes_per_s as u64 * 8 / 1000) as u32,
+            (self.tx_byte_cap() as u64 * self.st.peak_passes_per_s as u64 * 8 / 1000) as u32,
         );
         r.s(" Mbit/s (at peak pass rate), or ");
         r.d(TX_INFLIGHT_MAX as u64 * self.st.peak_passes_per_s as u64);
-        r.s(" frames/s at the ring guard\n");
+        r.s(" frames/s at the ring guard");
+        if self.want_tx_kib != 0 {
+            r.s("  (cap set by `txbytes`)");
+        }
+        r.c(b'\n');
 
         // What else the scan saw. The target is picked by RSSI alone, which on a
         // dual-band mesh always means the near 2.4 GHz node — this line is how we
@@ -4449,7 +4459,7 @@ impl Ax200 {
         // 67-byte ACK does not cost what a 1514-byte frame costs, with the ring
         // guard behind it so write_ptr never laps the firmware's read pointer.
         // Caller leaves the rest in the kernel mailbox for retransmit.
-        if !critical && (self.data_bytes_in_flight >= TX_INFLIGHT_BYTES
+        if !critical && (self.data_bytes_in_flight >= self.tx_byte_cap()
             || self.data_in_flight >= TX_INFLIGHT_MAX)
         {
             return false;
@@ -4531,6 +4541,13 @@ impl Ax200 {
     /// authority as the frame count, so a correction there corrects this too —
     /// and a swallowed completion cannot leak bytes forever any more than it
     /// can leak slots.
+    /// The in-flight byte cap in force: the config override if set, otherwise
+    /// the built-in. One place decides, so the report and the two check sites
+    /// can never disagree about it.
+    fn tx_byte_cap(&self) -> u32 {
+        if self.want_tx_kib != 0 { self.want_tx_kib * 1024 } else { TX_INFLIGHT_BYTES }
+    }
+
     fn rederive_bytes_in_flight(&mut self) {
         let mask = IWL_DATA_QUEUE_SIZE as u32 - 1;
         let n = self.data_in_flight.min(IWL_DATA_QUEUE_SIZE as u32);
@@ -5789,7 +5806,7 @@ impl Ax200 {
                 // needs IWL_DATA_QUEUE_SIZE to move with it. Which one bites is
                 // the whole question for the next size change, and one shared
                 // counter could not answer it.
-                if self.data_bytes_in_flight >= TX_INFLIGHT_BYTES {
+                if self.data_bytes_in_flight >= self.tx_byte_cap() {
                     // Not a drop: the frame stays in the kernel queue. But it IS
                     // the moment the cap becomes the throughput limit, so it has
                     // to be visible before anyone raises it.
@@ -6443,6 +6460,7 @@ pub extern "C" fn _start() {
         want_ht40: false,
         want_vht: false,
         want_bawin: 0,
+        want_tx_kib: 0,
         want_txagg: false,
         ba_fw_broken: false,
         link_published: false,
