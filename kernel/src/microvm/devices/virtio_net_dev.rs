@@ -614,11 +614,18 @@ impl VirtioNet {
         let evidx = self.event_idx_on();
         {
             let q = &mut self.queues[1];
-            if !q.ready() { self.tx_scratch = frame; return payloads; }
+            if !q.ready() {
+                super::nat::note_tx_ring_bad();
+                self.tx_scratch = frame; return payloads;
+            }
             let start_used = q.used_idx;
             let mut nused: u16 = 0;
             let mut avail_top = match avail_idx(mem, q.avail_gpa()) {
-                Some(v) => v, None => { self.tx_scratch = frame; return payloads; }
+                Some(v) => v,
+                None => {
+                    super::nat::note_tx_ring_bad();
+                    self.tx_scratch = frame; return payloads;
+                }
             };
 
             // EVENT_IDX "process, then arm notification, then re-check" loop:
@@ -633,7 +640,13 @@ impl VirtioNet {
                     let mut off = 0usize;
                     let mut idx = head;
                     loop {
-                        let d = match read_desc(mem, q.desc_gpa(), idx, q.size) { Some(d) => d, None => break };
+                        // A broken chain pushes what we have so far as if it were
+                        // a whole frame. Nothing downstream can tell a truncated
+                        // packet from a short one, so say it here.
+                        let d = match read_desc(mem, q.desc_gpa(), idx, q.size) {
+                            Some(d) => d,
+                            None => { super::nat::note_tx_truncated(); break }
+                        };
                         let take = (d.len as usize).min(frame.len().saturating_sub(off));
                         if take > 0 { mem.read_bytes(d.addr, &mut frame[off..off + take]); off += take; }
                         if d.flags & VRING_DESC_F_NEXT == 0 { break; }

@@ -71,13 +71,15 @@ pub fn handle_ipv4(data: &[u8]) {
     }
 }
 
-/// Send an IPv4 packet
-pub fn send(dst_ip: [u8; 4], protocol: u8, payload: &[u8]) {
-    send_with_ttl(dst_ip, protocol, payload, 64);
+/// Send an IPv4 packet. Returns false if the next hop's MAC was unknown and the
+/// frame went to L2 broadcast — most gateways drop that, so for the masquerade
+/// it is a silent loss and the caller wants to count it.
+pub fn send(dst_ip: [u8; 4], protocol: u8, payload: &[u8]) -> bool {
+    send_with_ttl(dst_ip, protocol, payload, 64)
 }
 
 /// Send an IPv4 packet with custom TTL (for traceroute)
-pub fn send_with_ttl(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8) {
+pub fn send_with_ttl(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8) -> bool {
     let src_ip = arp::our_ip();
     let total_len = (HEADER_LEN + payload.len()) as u16;
 
@@ -104,6 +106,7 @@ pub fn send_with_ttl(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8) {
     // dropped by most gateways. Active resolution is left to callers
     // that can poll without holding network locks (see `arp::resolve`,
     // used by `tcp::connect`).
+    let mut resolved = true;
     let arp_target = arp_target_for(dst_ip);
     let dst_mac = if arp_target == [255, 255, 255, 255] {
         // A broadcast destination IS the broadcast MAC. Asking ARP who owns
@@ -115,12 +118,14 @@ pub fn send_with_ttl(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8) {
             Some(mac) => mac,
             None => {
                 arp::request(arp_target);
+                resolved = false;
                 eth::BROADCAST
             }
         }
     };
 
     let _ = eth::send_frame(&dst_mac, eth::ETHERTYPE_IPV4, &pkt);
+    resolved
 }
 
 /// Send a TCP segment with HOST-NIC checksum + TSO offload (the microvm

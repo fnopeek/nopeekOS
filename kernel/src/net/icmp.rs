@@ -54,7 +54,7 @@ fn send_echo_reply(dst_ip: [u8; 4], request: &[u8]) {
     let checksum = icmp_checksum(&reply);
     reply[2..4].copy_from_slice(&checksum.to_be_bytes());
 
-    ipv4::send(dst_ip, ipv4::PROTO_ICMP, &reply);
+    let _ = ipv4::send(dst_ip, ipv4::PROTO_ICMP, &reply);
 }
 
 /// Send a ping (echo request) to the given IP
@@ -75,7 +75,7 @@ pub fn ping(dst_ip: [u8; 4], seq: u16) {
     let checksum = icmp_checksum(&pkt);
     pkt[2..4].copy_from_slice(&checksum.to_be_bytes());
 
-    ipv4::send(dst_ip, ipv4::PROTO_ICMP, &pkt);
+    let _ = ipv4::send(dst_ip, ipv4::PROTO_ICMP, &pkt);
     kprintln!("[npk] PING {}.{}.{}.{} seq={}",
         dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3], seq);
 }
@@ -89,7 +89,7 @@ pub fn ping_ttl(dst_ip: [u8; 4], seq: u16, ttl: u8) {
     for i in 8..64 { pkt[i] = i as u8; }
     let checksum = icmp_checksum(&pkt);
     pkt[2..4].copy_from_slice(&checksum.to_be_bytes());
-    super::ipv4::send_with_ttl(dst_ip, super::ipv4::PROTO_ICMP, &pkt, ttl);
+    let _ = super::ipv4::send_with_ttl(dst_ip, super::ipv4::PROTO_ICMP, &pkt, ttl);
 }
 
 fn icmp_checksum(data: &[u8]) -> u16 {
