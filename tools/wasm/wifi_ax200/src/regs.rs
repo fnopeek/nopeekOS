@@ -1140,39 +1140,36 @@ pub const IWL_DATA_TID: u8 = 0;
 // index = write_ptr & (size-1); cb_size = ilog2(size)-3 (must match the size).
 pub const IWL_DATA_QUEUE_SIZE: usize = 64;
 
-// BQL-style anti-bufferbloat cap: never let more than this many data frames sit
-// in-flight in the FW queue, even though the ring holds 64. Each in-flight frame
-// = ~1.5 KB of airtime a latency-sensitive packet (a ping) must wait behind, so
-// the full 63-deep queue is tens of ms of bufferbloat. ~1 BDP at the current
-// achieved rate keeps throughput while slashing latency-under-load. Raise once
-// HT/A-MPDU lifts the air rate (then the BDP grows). Must stay < QUEUE_SIZE-1.
-/// In-flight cap for the data queue (IWL_DATA_QUEUE_SIZE = 64 slots).
+// Anti-bufferbloat cap for the data queue. BQL measures BYTES, and so does
+// this: the airtime a latency-sensitive packet waits behind is a function of
+// how many bytes sit ahead of it, not how many frames.
+//
+// It was a FRAME count until 0.98.0, and the unit was the bug. The intent
+// ("~48 x 1.5 KB = ~72 KB in flight") only held for full-size frames. During a
+// download our TX is nothing but TCP ACKs — 19618 frames, 1285 KiB, 67 bytes
+// each — so the cap bit at 3 KB of real queue instead of 72 KB. Measured at
+// 74 Mbit: blocked 3253, and fq_codel dropped 3166 of 22827 ACKs the driver
+// never took ("driver too slow"). 14 % of our ACKs never reached the air; the
+// server answered with ssthresh 95 and cwnd stuck at 124.
+//
+// 64 KiB keeps the old intent for full-size frames (43 in flight, was 48) and
+// stops punishing small ones.
+pub const TX_INFLIGHT_BYTES: u32 = 65536;
+
+/// Ring guard, not a policy: the write pointer must never lap the firmware's
+/// read pointer. `TX_INFLIGHT_BYTES` is what limits us in practice; this is the
+/// wall behind it. Must stay < QUEUE_SIZE-1 = 63.
 ///
-/// 16 was picked as "well below the ring depth" for flow control and against
-/// bufferbloat. At 99 Mbit the receive side needs a steady stream of ACKs, and
-/// the cap blocked 4100 times while fq_codel dropped 3267 frames the driver
-/// never took ("driver too slow") — a quarter of everything the stack queued.
-/// Half the queue keeps the anti-bufferbloat intent and stops the cap being
-/// the throughput limit. Safe now that in-flight is derived from the
-/// firmware's read pointer rather than counted.
+/// History of the frame cap this replaced, kept because the numbers were
+/// measured on the device and the next size change has to beat them:
 ///
-/// 2026-08-19 zurueck auf 16: das ist die andere Haelfte desselben Commits wie
-/// RX_NUM_RBS 512, und beim Suchen nach "die Karte geht gar nicht mehr online"
-/// darf von diesem Commit nichts uebrig bleiben. Damit ist der Treiber
-/// funktional wieder 0.81.0 plus die Ringdisziplin. Die 4100 blockierten Sendungen
-/// waren gemessen — 32 kommt zurueck, sobald der Link steht, als EIGENER Schritt.
-/// 2026-08-19 am Geraet, mit A-MPDU und 20 MHz, GERAETESEITIG gemessen:
-///
+///     Deckel 16:  blocked 4100, fq_codel verwarf 3267 ("driver too slow")
 ///     Deckel 32:  46 Mbit (Server 53)  retrans 101
 ///     Deckel 48:  57 Mbit (Server 69)  retrans 5  ssthresh 364  rtt 65 ms
 ///
-/// Offen und ehrlich dazu: `tx drops full` stieg von 620 auf 2794. Das kostet
-/// hier wenig, weil TCP-ACKs kumulativ sind — ein verworfener wird vom
-/// naechsten mitabgedeckt, und `retrans 5` beweist es. Es ist trotzdem ein
-/// Zeichen, dass fq_codels 64 Plaetze ueberlaufen, waehrend der Treiber am
-/// Deckel steht. Der naechste Hebel liegt dort, nicht bei dieser Zahl.
-/// Muss unter QUEUE_SIZE-1 = 63 bleiben.
-pub const TX_INFLIGHT_MAX: u32 = 48;
+/// Schon damals notiert: "fq_codels Plaetze laufen ueber, waehrend der Treiber
+/// am Deckel steht. Der naechste Hebel liegt dort, nicht bei dieser Zahl."
+pub const TX_INFLIGHT_MAX: u32 = IWL_DATA_QUEUE_SIZE as u32 - 2;
 /// TX queue watchdog. Linux arms it whenever the queue is NOT EMPTY and pushes
 /// it forward on every completion; it does not care how full the queue is.
 ///

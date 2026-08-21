@@ -269,7 +269,8 @@ struct Stats {
     // TX, cumulative.
     tx_frames: u32,
     tx_bytes: u64,
-    tx_blocked: u32, // times the in-flight cap stopped us pulling another frame
+    tx_blocked: u32, // times the in-flight BYTE cap stopped us pulling another frame
+    tx_blocked_ring: u32, // times the ring guard did instead — the byte cap was not the limit
     tx_wd_recoveries: u32, // times the queue watchdog reclaimed leaked TX slots
     inflight_corrections: u32, // times the derived read pointer beat the counter
     gtk_installs: u32,     // group keys installed = 4-way once + one per rekey
@@ -430,7 +431,7 @@ struct Stats {
 
 impl Stats {
     const NEW: Stats = Stats {
-        tx_frames: 0, tx_bytes: 0, tx_blocked: 0, tx_wd_recoveries: 0, inflight_corrections: 0, gtk_installs: 0, tx_eapol_dropped: 0, inflight_peak: 0,
+        tx_frames: 0, tx_bytes: 0, tx_blocked: 0, tx_blocked_ring: 0, tx_wd_recoveries: 0, inflight_corrections: 0, gtk_installs: 0, tx_eapol_dropped: 0, inflight_peak: 0,
         tx_ok: 0, tx_fail: 0, tx_retries: 0, tx_rts_fail: 0, tx_airtime_us: 0,
         tx_subframes: 0, tx_agg_resp: 0, tx_agg_max: 0,
         ba_notifs: 0, ba_txed: 0, ba_done: 0,
@@ -628,6 +629,14 @@ struct Ax200 {
     /// `IEEE80211_TX_INTFL_DONT_ENCRYPT`.
     ptk_installed: bool,
     data_in_flight: u32,
+    /// Bytes sitting in the slots `data_in_flight` covers. Kept the same way
+    /// the frame count is: incremented on submit, re-derived once per pass from
+    /// the firmware's read pointer, so it inherits the self-correction instead
+    /// of becoming a second, drifting truth.
+    data_bytes_in_flight: u32,
+    /// On-air length of the frame staged in each TFD slot. The only thing the
+    /// byte accounting needs that the two pointers cannot tell us.
+    slot_bytes: [u16; IWL_DATA_QUEUE_SIZE],
     /// `now_ms` of the last TX completion, or of the last moment the queue was
     /// empty. The queue watchdog measures from here (iwl_txq_stuck_timer).
     last_tx_done_ms: u64,
@@ -3069,6 +3078,7 @@ impl Ax200 {
         if associated {
             host::print("[ax200] re-associated — re-running 4-way\n");
             self.data_in_flight = 0;
+            self.data_bytes_in_flight = 0;
             // The firmware's sessions died with the old association; anything
             // the windows still hold belongs to a link that no longer exists.
             self.ba_stop_all();
@@ -3666,11 +3676,17 @@ impl Ax200 {
         r.d(self.st.tx_bytes / 1024);
         r.s(" KiB  blocked ");
         r.d(self.st.tx_blocked as u64);
-        r.s("  inflight ");
+        r.s(" bytes / ");
+        r.d(self.st.tx_blocked_ring as u64);
+        r.s(" ring  inflight ");
+        r.d(self.data_bytes_in_flight as u64 / 1024);
+        r.s(" KiB/");
+        r.d(TX_INFLIGHT_BYTES as u64 / 1024);
+        r.s(" KiB, ");
         r.d(self.data_in_flight as u64);
         r.c(b'/');
         r.d(TX_INFLIGHT_MAX as u64);
-        r.s(" peak ");
+        r.s(" slots peak ");
         r.d(self.st.inflight_peak as u64);
         if self.st.tx_wd_recoveries > 0 {
             r.s("  WD-RECLAIM ");
@@ -3747,7 +3763,7 @@ impl Ax200 {
         // The poll rate, and what it implies. The loop asks for a 1 ms sleep
         // while busy, but a fiber whose core has nothing else runnable idles in
         // HLT until the next 100 Hz worker tick — so the REAL period can be 10 ms,
-        // and then TX_INFLIGHT_MAX frames per pass is a hard throughput ceiling.
+        // and then one pass' worth of TX_INFLIGHT_BYTES is a hard throughput ceiling.
         // Printing the implied ceiling makes that visible instead of theoretical.
         // The cost of one pass, in the only unit that answers "are we CPU-bound":
         // microseconds. work = everything between waking and sleeping; drain =
@@ -3817,14 +3833,16 @@ impl Ax200 {
         r.d(self.st.deauth as u64);
         r.c(b'\n');
         r.s("tx cap   ");
-        r.d(TX_INFLIGHT_MAX as u64);
-        r.s(" frames/pass * ");
+        r.d(TX_INFLIGHT_BYTES as u64 / 1024);
+        r.s(" KiB/pass * ");
         r.d(self.st.passes_per_s as u64);
         r.s(" passes/s = ceiling ");
         r.kbit_as_mbit(
-            (TX_INFLIGHT_MAX as u64 * self.st.peak_passes_per_s as u64 * 1514 * 8 / 1000) as u32,
+            (TX_INFLIGHT_BYTES as u64 * self.st.peak_passes_per_s as u64 * 8 / 1000) as u32,
         );
-        r.s(" Mbit/s (at peak pass rate)\n");
+        r.s(" Mbit/s (at peak pass rate), or ");
+        r.d(TX_INFLIGHT_MAX as u64 * self.st.peak_passes_per_s as u64);
+        r.s(" frames/s at the ring guard\n");
 
         // What else the scan saw. The target is picked by RSSI alone, which on a
         // dual-band mesh always means the near 2.4 GHz node — this line is how we
@@ -4377,11 +4395,13 @@ impl Ax200 {
     /// holds 256 TFDs against a cap of 16.
     fn tx_8023(&mut self, dst: [u8; 6], ethertype: u16, payload: &[u8], encrypt: bool,
                critical: bool) -> bool {
-        // Flow control + anti-bufferbloat: cap in-flight at TX_INFLIGHT_MAX (well
-        // below the ring depth) so write_ptr never laps the firmware's read
-        // pointer AND a latency-sensitive packet never waits behind a deep
-        // backlog. Caller leaves the rest in the kernel mailbox for retransmit.
-        if !critical && self.data_in_flight >= TX_INFLIGHT_MAX {
+        // Flow control + anti-bufferbloat, in bytes (TX_INFLIGHT_BYTES) so a
+        // 67-byte ACK does not cost what a 1514-byte frame costs, with the ring
+        // guard behind it so write_ptr never laps the firmware's read pointer.
+        // Caller leaves the rest in the kernel mailbox for retransmit.
+        if !critical && (self.data_bytes_in_flight >= TX_INFLIGHT_BYTES
+            || self.data_in_flight >= TX_INFLIGHT_MAX)
+        {
             return false;
         }
         // As a QoS (HT) station every data frame carries a QoS control field, so
@@ -4434,6 +4454,7 @@ impl Ax200 {
             // EAPOL during the 4-way: robust fixed 1 Mbit CCK, unencrypted.
             IWL_TX_FLAGS_ENCRYPT_DIS | IWL_TX_FLAGS_CMD_RATE
         };
+        let wptr_before = self.data_write_ptr;
         self.data_write_ptr = self.tx_raw(
             self.data_queue_id,
             self.data_write_ptr,
@@ -4446,8 +4467,29 @@ impl Ax200 {
             &fr[..p],
             hdr_len,
         );
+        // Record what this slot now holds BEFORE the pointer moved on, so the
+        // per-pass re-derivation can walk back over it.
+        let slot = (wptr_before & (IWL_DATA_QUEUE_SIZE as u32 - 1)) as usize;
+        self.slot_bytes[slot] = p as u16;
+        self.data_bytes_in_flight = self.data_bytes_in_flight.saturating_add(p as u32);
         self.data_in_flight += 1;
         true
+    }
+
+    /// Re-derive the in-flight byte count from the slots `data_in_flight`
+    /// covers. Walking back from the write pointer ties it to the same
+    /// authority as the frame count, so a correction there corrects this too —
+    /// and a swallowed completion cannot leak bytes forever any more than it
+    /// can leak slots.
+    fn rederive_bytes_in_flight(&mut self) {
+        let mask = IWL_DATA_QUEUE_SIZE as u32 - 1;
+        let n = self.data_in_flight.min(IWL_DATA_QUEUE_SIZE as u32);
+        let mut total = 0u32;
+        for k in 1..=n {
+            let slot = (self.data_write_ptr.wrapping_sub(k) & mask) as usize;
+            total += self.slot_bytes[slot] as u32;
+        }
+        self.data_bytes_in_flight = total;
     }
 
     // Convert an Ethernet frame from the IP stack ([dst 6][src 6][etype 2][pl])
@@ -5440,6 +5482,7 @@ impl Ax200 {
             } else {
                 self.data_in_flight = counted;
             }
+            self.rederive_bytes_in_flight();
             // Fold this pass's accumulators into the running statistics.
             self.st.loop_iters = self.st.loop_iters.wrapping_add(1);
             self.st.rx_frames = self.st.rx_frames.wrapping_add(rx_frames);
@@ -5651,11 +5694,20 @@ impl Ax200 {
             // firmware's read pointer).
             let mut tx_any = false;
             loop {
-                if self.data_in_flight >= TX_INFLIGHT_MAX {
+                // Two different walls, counted apart: the byte cap is policy and
+                // can be raised on its own; the ring guard is the queue depth and
+                // needs IWL_DATA_QUEUE_SIZE to move with it. Which one bites is
+                // the whole question for the next size change, and one shared
+                // counter could not answer it.
+                if self.data_bytes_in_flight >= TX_INFLIGHT_BYTES {
                     // Not a drop: the frame stays in the kernel queue. But it IS
-                    // the moment the in-flight cap becomes the throughput limit,
-                    // so it has to be visible before anyone raises the cap.
+                    // the moment the cap becomes the throughput limit, so it has
+                    // to be visible before anyone raises it.
                     self.st.tx_blocked = self.st.tx_blocked.wrapping_add(1);
+                    break;
+                }
+                if self.data_in_flight >= TX_INFLIGHT_MAX {
+                    self.st.tx_blocked_ring = self.st.tx_blocked_ring.wrapping_add(1);
                     break;
                 }
                 // Second line of defence: do not pull traffic before the
@@ -5725,6 +5777,7 @@ impl Ax200 {
                 // either way, and a half-width queue that keeps shrinking ends
                 // as a dead link.
                 self.data_in_flight = 0;
+                self.data_bytes_in_flight = 0;
                 self.st.tx_wd_recoveries = self.st.tx_wd_recoveries.wrapping_add(1);
                 self.last_tx_done_ms = now_ms_pass;
             }
@@ -6259,6 +6312,8 @@ pub extern "C" fn _start() {
         key_slot_prev: None,
         ptk_installed: false,
         data_in_flight: 0,
+    data_bytes_in_flight: 0,
+    slot_bytes: [0; IWL_DATA_QUEUE_SIZE],
         last_tx_done_ms: 0,
         tx_seq: 0,
         st: Stats::NEW,
