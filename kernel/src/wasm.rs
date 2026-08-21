@@ -40,9 +40,9 @@ const MAX_DMA_ALLOCS: usize = 1024;
 const MAX_DMA_PAGES: usize = 2048; // 8MB total (iwlwifi FW sections ~1.3MB)
 const MAX_DMA_PAGES_PER_CALL: usize = 1024; // 4MB; a single FW section can exceed 256KB
 
-struct HostState {
+pub(crate) struct HostState {
     output: String,
-    cap_id: CapId,
+    pub(crate) cap_id: CapId,
     /// When true, npk_print writes directly to terminal instead of buffering
     direct_output: bool,
     /// Terminal index for direct output (255 = use active terminal via kprint)
@@ -84,6 +84,13 @@ struct HostState {
     /// and so could never be a single-value getter.
     http_reply_headers: Option<String>,
     http_status: u16,
+    /// A `wasi_snapshot_preview1` grant, or None.
+    ///
+    /// The namespace is linked for every module, but every function in
+    /// it bounces on `ENOTCAPABLE` unless this is `Some`. So "can this
+    /// program see a filesystem" is decided once, here, by whoever
+    /// spawned it — not by what the program chooses to import.
+    pub(crate) wasi: Option<alloc::boxed::Box<crate::wasi::WasiCtx>>,
 }
 
 static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
@@ -406,6 +413,7 @@ fn wasm_worker_task(arg: u64) {
         http_last_error: None,
         http_reply_headers: None,
         http_status: 0,
+        wasi: None,
     });
     let _ = store.set_fuel(INTERACTIVE_FUEL);
 
@@ -511,6 +519,7 @@ pub fn execute_interactive(
         http_last_error: None,
         http_reply_headers: None,
         http_status: 0,
+        wasi: None,
     });
     store.set_fuel(INTERACTIVE_FUEL).map_err(|_| WasmError::ExecutionFailed)?;
 
@@ -560,6 +569,7 @@ fn execute_inner(
         http_last_error: None,
         http_reply_headers: None,
         http_status: 0,
+        wasi: None,
     });
     store.set_fuel(fuel).map_err(|_| WasmError::ExecutionFailed)?;
 
@@ -597,8 +607,90 @@ fn execute_inner(
     Ok(WasmResult { output: store.data().output.clone() })
 }
 
+/// Run a `wasm32-wasip1` module: instantiate, call `_start`, return its
+/// exit status.
+///
+/// Separate from `execute_inner` because a wasi module is a different
+/// animal: it has no `npk_*` entry point to name, it ends by trapping
+/// out of `proc_exit` rather than returning, and a non-zero exit is a
+/// result to report — not a kernel-side failure.
+pub fn execute_wasi(
+    wasm_bytes: &[u8],
+    cap_id: CapId,
+    fuel: u64,
+    ctx: alloc::boxed::Box<crate::wasi::WasiCtx>,
+    terminal_idx: u8,
+) -> Result<i32, WasmError> {
+    let engine = {
+        let guard = ENGINE.lock();
+        guard.as_ref().ok_or(WasmError::NotInitialized)?.clone()
+    };
+    let module = Module::new(&engine, wasm_bytes)
+        .map_err(|_| WasmError::InvalidModule)?;
+
+    let mut store = Store::new(&engine, HostState {
+        output: String::new(),
+        cap_id,
+        direct_output: true,
+        terminal_idx,
+        core_id: 0,
+        pid: 0,
+        hw: None,
+        widget_window_id: 0,
+        module_name: String::new(),
+        launch_arg: None,
+        http_final_url: None,
+        http_content_type: None,
+        http_last_error: None,
+        http_reply_headers: None,
+        http_status: 0,
+        wasi: Some(ctx),
+    });
+    store.set_fuel(fuel).map_err(|_| WasmError::ExecutionFailed)?;
+
+    let mut linker = <Linker<HostState>>::new(&engine);
+    register_host_functions(&mut linker)?;
+
+    let instance = linker.instantiate_and_start(&mut store, &module)
+        .map_err(|_| WasmError::InstantiationFailed)?;
+
+    let start = instance.get_typed_func::<(), ()>(&store, "_start")
+        .map_err(|_| WasmError::FunctionNotFound)?;
+
+    match start.call(&mut store, ()) {
+        Ok(()) => Ok(0),
+        // `proc_exit` leaves through a trap carrying the status. That is
+        // the normal way a wasi program finishes, including a clean one.
+        Err(e) => match e.kind().as_i32_exit_status() {
+            Some(code) => Ok(code),
+            None => Err(map_exec_error(e)),
+        },
+    }
+}
+
+/// Route a string to wherever this run's output belongs: straight to a
+/// specific terminal on a worker core, to the active terminal via
+/// `kprint`, or into the buffer a one-shot `run` prints at the end.
+pub(crate) fn emit_output(state: &mut HostState, s: &str) {
+    if state.direct_output {
+        let idx = state.terminal_idx;
+        if idx != TERM_IDX_ACTIVE && (idx as usize) < MAX_APP_BUFS {
+            crate::shade::terminal::write_idx(idx as usize, s);
+        } else {
+            kprint!("{}", s);
+        }
+    } else {
+        state.output.push_str(s);
+    }
+}
+
 fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmError> {
+    // The second ABI. Inert without a grant in HostState.wasi.
+    crate::wasi::link(linker).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_print(ptr, len) — write to output buffer or directly to terminal
+    // Where an app's output goes, in one place — npk_print and the
+    // wasi fd_write path must not drift apart.
     linker.func_wrap("env", "npk_print",
         |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| {
             if let Some(s) = read_wasm_str(&caller, ptr, len) {
@@ -4049,6 +4141,9 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             if capability::check_global(&cap_id, capability::Rights::NETCTL).is_err() {
                 return -1;
             }
+            // The manager's own fiber is calling: remember its core so the
+            // microvm keeps vCPUs off it (see wifi::note_manager_core).
+            crate::wifi::note_manager_core();
             wifi_poll_into(&mut caller, buf_ptr, max, crate::wifi::poll_event)
         },
     ).map_err(|_| WasmError::HostFunctionError)?;

@@ -1463,9 +1463,14 @@ impl VmContext {
         // ~14 exits. Shows EXACTLY when the guest enters long mode (CS.L
         // / EFER.LMA flip 0→1) and whether re-entry into long mode
         // succeeds — so we can tell "first long-mode entry fails" from
-        // "only the post-external-interrupt re-entry fails". Bounded to
-        // early boot so it doesn't spam a running browser. VMX-only.
-        if self.vcpu.iter <= 14 {
+        // "only the post-external-interrupt re-entry fails".
+        //
+        // The bug it was cut for is long fixed, and "bounded to early boot" is
+        // 14 lines PER vCPU: six of them on this notebook, 84 lines before the
+        // guest has printed its first word. Off unless someone is chasing a
+        // long-mode entry again.
+        const ITER_TRACE: bool = false;
+        if ITER_TRACE && self.vcpu.iter <= 14 {
             let efer = vmcs::read_guest_efer().unwrap_or(0);
             let cs_ar = vmcs::read_guest_cs_ar().unwrap_or(0);
             kprintln!(
