@@ -203,6 +203,8 @@ fn bridge_report() {
     }
     kprintln!("  from guest    {} frames in {} doorbells   {} arp  {} non-ip   (up {} s)",
         b.frames_in, b.kicks, b.arp_in, b.other_in, b.up_s);
+    kprintln!("  swallowed     {} malformed  {} to-gateway  {} dns  {} other-proto",
+        b.ip_malformed, b.ip_to_gw, b.ip_dns, b.ip_proto);
     kprintln!("  flows         {} tcp  {} udp opened   {} live of {}",
         b.flows_tcp, b.flows_udp, b.live, b.cap);
     kprintln!("  staging       queue {} (peak {} of {})   guest rx ring low-water {}",
