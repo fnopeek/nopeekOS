@@ -631,14 +631,20 @@ struct Ax200 {
     /// `IEEE80211_TX_INTFL_DONT_ENCRYPT`.
     ptk_installed: bool,
     data_in_flight: u32,
-    /// Bytes sitting in the slots `data_in_flight` covers. Kept the same way
-    /// the frame count is: incremented on submit, re-derived once per pass from
-    /// the firmware's read pointer, so it inherits the self-correction instead
-    /// of becoming a second, drifting truth.
-    data_bytes_in_flight: u32,
-    /// On-air length of the frame staged in each TFD slot. The only thing the
-    /// byte accounting needs that the two pointers cannot tell us.
-    slot_bytes: [u16; IWL_DATA_QUEUE_SIZE],
+    /// `aql_tx_pending` — estimated airtime, in microseconds, of the frames
+    /// sitting in the slots `data_in_flight` covers. Kept the way the frame
+    /// count is: added on submit, re-derived once per pass from the firmware's
+    /// read pointer, so it inherits the self-correction instead of becoming a
+    /// second, drifting truth.
+    ///
+    /// Linux subtracts on completion the SAME estimate it added on submit
+    /// (`ieee80211_info_get_tx_time_est`, status.c:1158) rather than the real
+    /// airtime the hardware reports. The accounting has to balance; being
+    /// right about the past is what the airtime STATISTICS are for.
+    aql_pending_us: u32,
+    /// Per-slot estimate, so the re-derivation can walk back over it. This is
+    /// the `tx_time_est` Linux stashes in each skb's control block.
+    slot_airtime_us: [u16; IWL_DATA_QUEUE_SIZE],
     /// `now_ms` of the last TX completion, or of the last moment the queue was
     /// empty. The queue watchdog measures from here (iwl_txq_stuck_timer).
     last_tx_done_ms: u64,
@@ -678,11 +684,6 @@ struct Ax200 {
     /// widths, and comparing across sessions — different rssi, different rate
     /// scaling, different loop rate — cannot settle that.
     want_bawin: u16,
-    /// Override for the in-flight BYTE cap, from `sys/config/wifi txbytes`
-    /// (in KiB). 0 = `TX_INFLIGHT_BYTES`. The upload is the first workload that
-    /// ever made this cap fire — 19754 times over 404644 frames — so it is now
-    /// the one regulator left on the send path, and it is OUR number.
-    want_tx_kib: u32,
     want_txagg: bool,
     /// Set once the firmware has ignored a block-ack setup. Asking again costs
     /// another silent 300 ms AND wedges the transmit path: measured on the
@@ -2404,7 +2405,6 @@ impl Ax200 {
         self.want_ht40 = cfg_on(cfg_get(text, b"ht40"));
         self.want_vht = cfg_on(cfg_get(text, b"vht"));
         self.want_bawin = cfg_u16(cfg_get(text, b"bawin"), 0, ba::BA_WIN_MAX as u16);
-        self.want_tx_kib = cfg_u16(cfg_get(text, b"txbytes"), 0, 1024) as u32;
         self.want_power_save = cfg_on(cfg_get(text, b"ps"));
         self.want_bt_coex = cfg_on(cfg_get(text, b"btcoex"));
         self.settle_ms = cfg_settle_ms(text);
@@ -3093,7 +3093,7 @@ impl Ax200 {
         if associated {
             host::print("[ax200] re-associated — re-running 4-way\n");
             self.data_in_flight = 0;
-            self.data_bytes_in_flight = 0;
+            self.aql_pending_us = 0;
             // The firmware's sessions died with the old association; anything
             // the windows still hold belongs to a link that no longer exists.
             self.ba_stop_all();
@@ -3714,10 +3714,10 @@ impl Ax200 {
         r.s(" bytes / ");
         r.d(self.st.tx_blocked_ring as u64);
         r.s(" ring  inflight ");
-        r.d(self.data_bytes_in_flight as u64 / 1024);
-        r.s(" KiB/");
-        r.d(self.tx_byte_cap() as u64 / 1024);
-        r.s(" KiB, ");
+        r.d(self.aql_pending_us as u64);
+        r.s(" us/");
+        r.d(AQL_LIMIT_HIGH_US as u64);
+        r.s(" us airtime, ");
         r.d(self.data_in_flight as u64);
         r.c(b'/');
         r.d(TX_INFLIGHT_MAX as u64);
@@ -3807,7 +3807,7 @@ impl Ax200 {
         // The poll rate, and what it implies. The loop asks for a 1 ms sleep
         // while busy, but a fiber whose core has nothing else runnable idles in
         // HLT until the next 100 Hz worker tick — so the REAL period can be 10 ms,
-        // and then one pass' worth of TX_INFLIGHT_BYTES is a hard throughput ceiling.
+        // and then one pass' worth of AQL-admitted frames is a hard ceiling.
         // Printing the implied ceiling makes that visible instead of theoretical.
         // The cost of one pass, in the only unit that answers "are we CPU-bound":
         // microseconds. work = everything between waking and sleeping; drain =
@@ -3876,20 +3876,22 @@ impl Ax200 {
         r.s(" deauth ");
         r.d(self.st.deauth as u64);
         r.c(b'\n');
-        r.s("tx cap   ");
-        r.d(self.tx_byte_cap() as u64 / 1024);
-        r.s(" KiB/pass * ");
-        r.d(self.st.passes_per_s as u64);
-        r.s(" passes/s = ceiling ");
-        r.kbit_as_mbit(
-            (self.tx_byte_cap() as u64 * self.st.peak_passes_per_s as u64 * 8 / 1000) as u32,
-        );
-        r.s(" Mbit/s (at peak pass rate), or ");
-        r.d(TX_INFLIGHT_MAX as u64 * self.st.peak_passes_per_s as u64);
-        r.s(" frames/s at the ring guard");
-        if self.want_tx_kib != 0 {
-            r.s("  (cap set by `txbytes`)");
-        }
+        // AQL in the only units that make it checkable: what one full frame is
+        // estimated to cost right now, and how many of them the limit therefore
+        // allows. Both move with the rate — that is the whole point of it.
+        let est = self.expected_tx_airtime(1514);
+        r.s("tx aql   ");
+        r.d(AQL_LIMIT_LOW_US as u64);
+        r.s("/");
+        r.d(AQL_LIMIT_HIGH_US as u64);
+        r.s(" us low/high, thresh ");
+        r.d(AQL_THRESHOLD_US as u64);
+        r.s(" us; a 1514-B frame costs ~");
+        r.d(est as u64);
+        r.s(" us at this rate = ");
+        r.d((AQL_LIMIT_HIGH_US / est.max(1)) as u64);
+        r.s(" frames in flight, ring guard ");
+        r.d(TX_INFLIGHT_MAX as u64);
         r.c(b'\n');
 
         // What else the scan saw. The target is picked by RSSI alone, which on a
@@ -4455,13 +4457,12 @@ impl Ax200 {
     /// holds 256 TFDs against a cap of 16.
     fn tx_8023(&mut self, dst: [u8; 6], ethertype: u16, payload: &[u8], encrypt: bool,
                critical: bool) -> bool {
-        // Flow control + anti-bufferbloat, in bytes (TX_INFLIGHT_BYTES) so a
-        // 67-byte ACK does not cost what a 1514-byte frame costs, with the ring
-        // guard behind it so write_ptr never laps the firmware's read pointer.
-        // Caller leaves the rest in the kernel mailbox for retransmit.
-        if !critical && (self.data_bytes_in_flight >= self.tx_byte_cap()
-            || self.data_in_flight >= TX_INFLIGHT_MAX)
-        {
+        // Flow control + anti-bufferbloat: AQL, so what a queued frame costs is
+        // measured in AIRTIME at the current rate — a 67-byte ACK and a
+        // 1514-byte frame at 6 Mbit and at 300 Mbit are four different prices.
+        // Ring guard behind it so write_ptr never laps the firmware's read
+        // pointer. Caller leaves the rest in the kernel mailbox for retransmit.
+        if !critical && (!self.aql_admits() || self.data_in_flight >= TX_INFLIGHT_MAX) {
             return false;
         }
         // As a QoS (HT) station every data frame carries a QoS control field, so
@@ -4530,8 +4531,10 @@ impl Ax200 {
         // Record what this slot now holds BEFORE the pointer moved on, so the
         // per-pass re-derivation can walk back over it.
         let slot = (wptr_before & (IWL_DATA_QUEUE_SIZE as u32 - 1)) as usize;
-        self.slot_bytes[slot] = p as u16;
-        self.data_bytes_in_flight = self.data_bytes_in_flight.saturating_add(p as u32);
+        // `ieee80211_sta_update_pending_airtime(..., tx_completed = false)`.
+        let est = self.expected_tx_airtime(p).min(u16::MAX as u32);
+        self.slot_airtime_us[slot] = est as u16;
+        self.aql_pending_us = self.aql_pending_us.saturating_add(est);
         self.data_in_flight += 1;
         true
     }
@@ -4541,11 +4544,74 @@ impl Ax200 {
     /// authority as the frame count, so a correction there corrects this too —
     /// and a swallowed completion cannot leak bytes forever any more than it
     /// can leak slots.
-    /// The in-flight byte cap in force: the config override if set, otherwise
-    /// the built-in. One place decides, so the report and the two check sites
-    /// can never disagree about it.
-    fn tx_byte_cap(&self) -> u32 {
-        if self.want_tx_kib != 0 { self.want_tx_kib * 1024 } else { TX_INFLIGHT_BYTES }
+    /// `ieee80211_calc_expected_tx_airtime` (mac80211/airtime.c:756) for the
+    /// path we actually take: an HT/VHT station on a non-VO access category,
+    /// i.e. the aggregated branch.
+    ///
+    /// Linux looks the per-MCS duration up in `airtime_mcs_groups`, a table of
+    /// transmit times for an `AVG_PKT_SIZE` packet, then scales it by the real
+    /// length. That table IS a rate table — and we already decode the exact
+    /// rate the firmware last used (`rate_kbit`, the same numbers printed as
+    /// `rate tx`). So the lookup is replaced by the rate we have; the formula,
+    /// the overhead term and the aggregation thresholds are Linux's, unchanged.
+    ///
+    /// The `agg_shift` ladder is the interesting part and the reason a byte cap
+    /// can never do this: Linux divides the fixed per-PPDU overhead by an
+    /// assumed aggregate length, and assumes MORE aggregation the faster the
+    /// link is. Its thresholds are stated in duration-per-AVG_PKT_SIZE, so they
+    /// are compared against exactly that.
+    fn expected_tx_airtime(&self, len: usize) -> u32 {
+        let len = len as u32 + AQL_LEN_OVERHEAD;
+        let rnf = Self::rate_v3(self.st.last_tx_rate);
+        let kbit = Self::rate_kbit(rnf);
+        if kbit == 0 {
+            // No rate reported yet. Linux falls back to the lowest basic rate
+            // here; before the first TX response we have no station rate at
+            // all, and the frames sent in that window are `critical` anyway
+            // (they bypass the cap), so the floor is the honest answer.
+            return AQL_MIN_US;
+        }
+        // Raw data time for `len` bytes at this rate, in microseconds.
+        let data_us = ((len as u64) * 8 * 1000 / kbit as u64) as u32;
+        let modt = rnf & RATE_MCS_MOD_TYPE_MSK;
+        let aggregated =
+            matches!(modt, RATE_MCS_MOD_TYPE_HT | RATE_MCS_MOD_TYPE_VHT | RATE_MCS_MOD_TYPE_HE);
+        if !aggregated {
+            // `stat.encoding == RX_ENC_LEGACY || !ampdu` -> the un-aggregated
+            // path, where the whole per-frame overhead is paid once per frame.
+            let streams = 1u32;
+            return (data_us + 36 + (streams << 2)).max(AQL_MIN_US);
+        }
+        let streams = if rnf & RATE_MCS_NSS_MSK != 0 { 2u32 } else { 1u32 };
+        let overhead = 36 + (streams << 2);
+        // The ladder's thresholds are durations for an AVG_PKT_SIZE packet.
+        let avg_us = ((AQL_AVG_PKT_SIZE as u64) * 8 * 1000 / kbit as u64) as u32;
+        let agg_shift = if avg_us > 400 {
+            1
+        } else if avg_us > 250 {
+            2
+        } else if avg_us > 150 {
+            3
+        } else if avg_us > 70 {
+            4
+        } else if modt != RATE_MCS_MOD_TYPE_HE || avg_us > 20 {
+            5
+        } else {
+            6
+        };
+        (data_us + (overhead >> agg_shift)).max(AQL_MIN_US)
+    }
+
+    /// `ieee80211_txq_airtime_check` (mac80211/tx.c:4164), branch for branch.
+    /// Returns true when the frame may be queued.
+    fn aql_admits(&self) -> bool {
+        if self.aql_pending_us < AQL_LIMIT_LOW_US {
+            return true;
+        }
+        // `total_pending` is this station's pending for us — one station, one
+        // AC. The branch stays whole so a second station finds it correct.
+        let total_pending = self.aql_pending_us;
+        total_pending < AQL_THRESHOLD_US && self.aql_pending_us < AQL_LIMIT_HIGH_US
     }
 
     fn rederive_bytes_in_flight(&mut self) {
@@ -4554,9 +4620,9 @@ impl Ax200 {
         let mut total = 0u32;
         for k in 1..=n {
             let slot = (self.data_write_ptr.wrapping_sub(k) & mask) as usize;
-            total += self.slot_bytes[slot] as u32;
+            total += self.slot_airtime_us[slot] as u32;
         }
-        self.data_bytes_in_flight = total;
+        self.aql_pending_us = total;
     }
 
     // Convert an Ethernet frame from the IP stack ([dst 6][src 6][etype 2][pl])
@@ -5806,7 +5872,7 @@ impl Ax200 {
                 // needs IWL_DATA_QUEUE_SIZE to move with it. Which one bites is
                 // the whole question for the next size change, and one shared
                 // counter could not answer it.
-                if self.data_bytes_in_flight >= self.tx_byte_cap() {
+                if !self.aql_admits() {
                     // Not a drop: the frame stays in the kernel queue. But it IS
                     // the moment the cap becomes the throughput limit, so it has
                     // to be visible before anyone raises it.
@@ -5884,7 +5950,7 @@ impl Ax200 {
                 // either way, and a half-width queue that keeps shrinking ends
                 // as a dead link.
                 self.data_in_flight = 0;
-                self.data_bytes_in_flight = 0;
+                self.aql_pending_us = 0;
                 self.st.tx_wd_recoveries = self.st.tx_wd_recoveries.wrapping_add(1);
                 self.last_tx_done_ms = now_ms_pass;
             }
@@ -6432,8 +6498,8 @@ pub extern "C" fn _start() {
         key_slot_prev: None,
         ptk_installed: false,
         data_in_flight: 0,
-    data_bytes_in_flight: 0,
-    slot_bytes: [0; IWL_DATA_QUEUE_SIZE],
+    aql_pending_us: 0,
+    slot_airtime_us: [0; IWL_DATA_QUEUE_SIZE],
         last_tx_done_ms: 0,
         tx_seq: 0,
         st: Stats::NEW,
@@ -6460,7 +6526,6 @@ pub extern "C" fn _start() {
         want_ht40: false,
         want_vht: false,
         want_bawin: 0,
-        want_tx_kib: 0,
         want_txagg: false,
         ba_fw_broken: false,
         link_published: false,
