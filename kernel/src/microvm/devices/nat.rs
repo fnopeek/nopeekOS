@@ -658,8 +658,27 @@ fn l3_map_in(proto: u8, hport: u16, rip: [u8; 4], rport: u16, now: u64) -> Optio
 }
 
 /// Recompute the TCP/UDP checksum after an address/port rewrite.
-/// TCP checksum is mandatory; UDP-over-IPv4 may be zero, which we use
-/// (cheaper, always valid) so QUIC payload size isn't a concern.
+///
+/// UDP used to be handled by ZEROING the field, on the grounds that a zero
+/// checksum is legal for UDP-over-IPv4 (RFC 768) and cheaper than a pass over
+/// the payload. Both halves of that are true and the conclusion is still wrong
+/// for a masquerade: the datagram ARRIVED with a checksum, and throwing it away
+/// is not translation, it is damage. What we hand on is a packet that claims to
+/// be unprotected — and the far end is entitled to treat it accordingly.
+///
+/// It hid for as long as it did because of who reads the packet next. Under
+/// QEMU the masqueraded datagram goes to slirp, a userspace stack that
+/// terminates the flow and re-originates it on the outside; it never looks at
+/// the field. On real hardware the very same packet goes straight onto the
+/// wire to a real server. And the guest is a browser: `flows 6 tcp 25 udp` —
+/// four out of five of its connections are HTTP/3, which is QUIC, which is UDP.
+///
+/// Outbound we must compute in full: with `VIRTIO_NET_F_CSUM` negotiated the
+/// guest hands us CHECKSUM_PARTIAL, so the field holds a pseudo-header seed and
+/// not a checksum. Inbound the datagram arrives complete and we could update
+/// incrementally, but the same full pass keeps ONE implementation for both
+/// directions — a few hundred nanoseconds against a class of bug that cost an
+/// evening.
 fn fix_l4_checksum(proto: u8, src_ip: [u8; 4], dst_ip: [u8; 4], l4: &mut [u8]) {
     if proto == PROTO_TCP {
         if l4.len() < TCP_HDR_LEN { return; }
@@ -668,8 +687,45 @@ fn fix_l4_checksum(proto: u8, src_ip: [u8; 4], dst_ip: [u8; 4], l4: &mut [u8]) {
         l4[16..18].copy_from_slice(&c.to_be_bytes());
     } else if proto == PROTO_UDP {
         if l4.len() < UDP_HDR_LEN { return; }
-        l4[6] = 0; l4[7] = 0; // 0 = checksum disabled (valid for IPv4)
+        // The length FIELD is the authority, not the slice: a minimum-size
+        // ethernet frame carries padding that is not part of the datagram, and
+        // checksumming it would produce a value the receiver cannot reproduce.
+        let declared = u16::from_be_bytes([l4[4], l4[5]]) as usize;
+        let len = if declared >= UDP_HDR_LEN && declared <= l4.len() {
+            declared
+        } else {
+            l4.len()
+        };
+        l4[6] = 0; l4[7] = 0;
+        let c = udp_checksum(src_ip, dst_ip, &l4[..len]);
+        l4[6..8].copy_from_slice(&c.to_be_bytes());
     }
+}
+
+/// UDP checksum over the IPv4 pseudo-header + datagram (RFC 768). A computed
+/// zero goes on the wire as 0xFFFF, because zero is the "no checksum" escape and
+/// would undo the whole point.
+fn udp_checksum(src_ip: [u8; 4], dst_ip: [u8; 4], udp: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+    sum += u16::from_be_bytes([src_ip[0], src_ip[1]]) as u32;
+    sum += u16::from_be_bytes([src_ip[2], src_ip[3]]) as u32;
+    sum += u16::from_be_bytes([dst_ip[0], dst_ip[1]]) as u32;
+    sum += u16::from_be_bytes([dst_ip[2], dst_ip[3]]) as u32;
+    sum += PROTO_UDP as u32;
+    sum += udp.len() as u32;
+    let mut i = 0;
+    while i + 1 < udp.len() {
+        sum += u16::from_be_bytes([udp[i], udp[i + 1]]) as u32;
+        i += 2;
+    }
+    if i < udp.len() {
+        sum += (udp[i] as u32) << 8;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    let c = !(sum as u16);
+    if c == 0 { 0xFFFF } else { c }
 }
 
 /// Incremental ones-complement checksum update (RFC 1624). Adjust an existing
@@ -989,7 +1045,7 @@ pub fn l3_inbound(ip: &[u8]) -> bool {
         frame[l4_off + 2..l4_off + 4].copy_from_slice(&gport.to_be_bytes());
         frame[l4_off + 16..l4_off + 18].copy_from_slice(&new_check.to_be_bytes());
     } else {
-        // UDP: checksum set to 0 (disabled, valid for IPv4) — already cheap.
+        // UDP: recomputed, not zeroed — see fix_l4_checksum.
         frame[l4_off + 2..l4_off + 4].copy_from_slice(&gport.to_be_bytes());
         fix_l4_checksum(proto, src_ip, GUEST_IP, &mut frame[l4_off..]);
     }
