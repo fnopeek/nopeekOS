@@ -1264,6 +1264,10 @@ pub const CBA_TFD_Q_NUM: usize = 0;       // __le16
 pub const CBA_TFD_INDEX: usize = 2;       // __le16 — the queue's new read ptr
 pub const CBA_TFD_TID: usize = 5;         // u8
 pub const CBA_TFD_LEN: usize = 8;
+/// Entries of the flex array we walk. `tfd_cnt` is one per (queue, TID) the
+/// aggregate touched, so 8 TIDs is the real ceiling; 16 is slack. Truncation is
+/// counted, never silent — an unread entry is a TFD slot that never comes back.
+pub const CBA_TFD_MAX: usize = 16;
 
 pub const TX_RESP_LEN: usize = 44;
 pub const TXR_OFF_FRAME_COUNT: usize = 0;  // u8
