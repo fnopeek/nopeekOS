@@ -28,7 +28,7 @@ pub mod svm;
 pub mod vmx;
 
 use spin::Mutex;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
 // ── VM-exit reason histogram (diagnosis) ───────────────────────────
 //
@@ -771,6 +771,29 @@ const SLICE_BUDGET: u32 = 4096;
 /// running on the cooperative Core-0 path" and returns false for every
 /// fiber-mode guest, which is all of them today. Anything that means "is there
 /// a guest" wants this one.
+/// Host core running the BSP vCPU fiber, or `usize::MAX`. Vendor-neutral, so
+/// the RX producer can wake the consumer on BOTH backends — SVM had
+/// `kick_bsp_net_irq` and VMX had nothing at all.
+static BSP_HOST_CORE: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+/// Wake the core running the BSP vCPU so it takes a VM-exit NOW and pumps the
+/// bridge, instead of waiting for its next natural exit.
+///
+/// Without this the inline (Intel) path delivers guest-bound packets only when
+/// the guest itself touches virtio-net — i.e. while it is SENDING — or on the
+/// host's 100 Hz timer. A guest waiting for a reply generates no MMIO exits, so
+/// every reply waited half a tick: measured on the notebook, `rx wait avg
+/// 4988 us` with nothing dropped and 3 interrupts raised in a whole run. That is
+/// a page that loads for a second while the browser talks and dies the moment it
+/// starts listening.
+pub fn kick_bsp_vcpu() {
+    let hc = BSP_HOST_CORE.load(Ordering::Relaxed);
+    if hc == usize::MAX || hc == crate::smp::per_core::current_core_id() {
+        return; // not mapped yet, or we ARE the consumer — it will pump anyway
+    }
+    crate::smp::kick_host_core(hc);
+}
+
 pub fn guest_running() -> bool {
     VM_RUN_STATE.load(Ordering::Acquire) == VM_RUNNING || vm_active()
 }
@@ -928,6 +951,7 @@ pub fn vm_poll_slice() {
             crate::microvm::devices::net_dataplane::stop_worker();
             crate::microvm::devices::p9_async::stop_worker();
             crate::microvm::devices::nat::reset_sessions();
+            BSP_HOST_CORE.store(usize::MAX, Ordering::Release);
             crate::microvm::cpu::rip_sample::reset();
             teardown_vm_window();
             VM_CLOSE_REQUESTED.store(false, Ordering::Release);
@@ -1233,6 +1257,7 @@ fn vcpu_fiber_task(_arg: u64) {
     VM_RUN_STATE.store(VM_RUNNING, Ordering::Release);
 
     let cid = crate::smp::per_core::current_core_id();
+    BSP_HOST_CORE.store(cid, Ordering::Release);
     crate::kprintln!("[microvm] vCPU fiber opening guest on core {}", cid);
 
     // Guest SMP: (re)initialise the vCPU-core mask with the BSP's own core so

@@ -853,6 +853,26 @@ fn fix_icmp_checksum(icmp: &mut [u8]) {
 /// our IP. If it matches a masquerade mapping, rewrite it back to the
 /// guest, enqueue for `pump`, and return true (consume — the host
 /// stack must NOT also process it). Cheap `false` when no VM is up.
+/// Wake the consumer after a frame lands in the staging queue.
+///
+/// Only on the empty -> non-empty edge: during a burst the queue stays occupied
+/// and the pump drains it in one pass, so a burst costs ONE interrupt, not one
+/// per packet. The time floor on top of that bounds the pathological case where
+/// the pump keeps up exactly well enough to empty the queue between every
+/// packet — which would otherwise be an IPI per frame at line rate.
+const KICK_GAP_US: u64 = 50;
+static LAST_KICK_TSC: AtomicU64 = AtomicU64::new(0);
+
+fn wake_consumer(was_empty: bool) {
+    if !was_empty || super::net_backend::full_active() { return; }
+    let now = crate::interrupts::rdtsc();
+    let gap = (crate::interrupts::tsc_freq() / 1_000_000).max(1) * KICK_GAP_US;
+    if now.wrapping_sub(LAST_KICK_TSC.load(AtOrd::Relaxed)) < gap { return; }
+    LAST_KICK_TSC.store(now, AtOrd::Relaxed);
+    note_decoupled_kick();
+    crate::microvm::cpu::kick_bsp_vcpu();
+}
+
 pub fn l3_inbound(ip: &[u8]) -> bool {
     if !L3_ACTIVE.load(AtOrd::Acquire) { return false; }
     if ip.len() < IPV4_HDR_LEN { return false; }
@@ -932,10 +952,20 @@ pub fn l3_inbound(ip: &[u8]) -> bool {
     if proto == PROTO_TCP && GRO_ENABLED.load(AtOrd::Relaxed) {
         match gro_offer(frame) {
             None => return true,
-            Some(f) => { INBOUND_Q.lock().push_back((crate::interrupts::rdtsc(), f)); }
+            Some(f) => {
+                let mut q = INBOUND_Q.lock();
+                let was_empty = q.is_empty();
+                q.push_back((crate::interrupts::rdtsc(), f));
+                drop(q);
+                wake_consumer(was_empty);
+            }
         }
     } else {
-        INBOUND_Q.lock().push_back((crate::interrupts::rdtsc(), frame));
+        let mut q = INBOUND_Q.lock();
+        let was_empty = q.is_empty();
+        q.push_back((crate::interrupts::rdtsc(), frame));
+        drop(q);
+        wake_consumer(was_empty);
     }
     true
 }
@@ -1797,6 +1827,7 @@ pub struct BridgeStats {
     pub gro: bool, pub gro_frames: u64, pub gro_segs: u64,
     pub gpu_kb: u64, pub gpu_xfers: u64, pub gpu_kbps: u64,
     pub gtimer_ps: u64, pub pump_ps: u64,
+    pub kicks_out: u64,
 }
 
 // Previous snapshot, so a second `netstat` a few seconds later reads as a RATE.
@@ -1863,6 +1894,7 @@ pub fn bridge_stats() -> BridgeStats {
         gpu_kbps: per_s(gpu_bytes.saturating_sub(prev_gpu)) / 1024,
         gtimer_ps: per_s(gt.saturating_sub(prev_gt)),
         pump_ps: per_s(pumps.saturating_sub(prev_pump)),
+        kicks_out: NS_KICK_DECOUPLED.load(AtOrd::Relaxed),
     }
 }
 
@@ -1902,7 +1934,8 @@ pub fn reset_counters() {
               &NS_NET_IRQ, &RPT_TSC, &RPT_RX, &RPT_TX,
               &NS_GUEST_KICKS, &NS_GUEST_FRAMES, &NS_GUEST_ARP, &NS_GUEST_OTHER,
               &NS_GPU_BYTES, &NS_GPU_XFERS, &RPT_GPU,
-              &NS_GTIMER, &NS_PUMP_CALLS, &RPT_GT, &RPT_PUMP] {
+              &NS_GTIMER, &NS_PUMP_CALLS, &RPT_GT, &RPT_PUMP,
+              &NS_KICK_DECOUPLED, &LAST_KICK_TSC] {
         c.store(0, AtOrd::Relaxed);
     }
     NS_START_TICK.store(crate::interrupts::ticks().max(1), AtOrd::Relaxed);

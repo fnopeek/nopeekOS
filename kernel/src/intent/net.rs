@@ -224,8 +224,8 @@ fn bridge_report() {
     // the 30 ms anti-starvation floor forces it. A guest whose jiffies crawl at
     // ~33 Hz loses its TCP timers, its NAPI and its workqueues — and looks
     // perfectly alive while doing it. Compare against the ~1000/s it programmed.
-    kprintln!("  guest clock   {} timer irq/s   bridge pumped {}/s",
-        b.gtimer_ps, b.pump_ps);
+    kprintln!("  guest clock   {} timer irq/s   bridge pumped {}/s   {} wakes sent",
+        b.gtimer_ps, b.pump_ps, b.kicks_out);
     // The vCPU that pumps this bridge is the SAME fiber that copies the guest's
     // framebuffer, ~8 MB a frame, inline on its MMIO exit — on Intel, where the
     // net has no off-vCPU worker to fall back on. Printed next to `rx wait` on
