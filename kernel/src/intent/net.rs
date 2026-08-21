@@ -215,6 +215,14 @@ fn bridge_report() {
         kprintln!("  gro           on   {} frames  {} segments merged",
             b.gro_frames, b.gro_segs);
     }
+    // The vCPU that pumps this bridge is the SAME fiber that copies the guest's
+    // framebuffer, ~8 MB a frame, inline on its MMIO exit — on Intel, where the
+    // net has no off-vCPU worker to fall back on. Printed next to `rx wait` on
+    // purpose: a browser that starts painting and a delivery latency that goes
+    // to milliseconds in the same breath is the whole story, and neither number
+    // says it alone.
+    kprintln!("  gpu on vcpu   {} KB copied in {} transfers   {} KB/s now",
+        b.gpu_kb, b.gpu_xfers, b.gpu_kbps);
     let (no_link, by_driver) = crate::netdev::tx_reject_stats();
     if no_link > 0 || by_driver > 0 {
         kprintln!("  egress        REFUSED since boot: {} no-link  {} by the driver",
