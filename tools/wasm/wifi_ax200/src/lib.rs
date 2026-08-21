@@ -3711,7 +3711,7 @@ impl Ax200 {
         r.d(self.st.tx_bytes / 1024);
         r.s(" KiB  blocked ");
         r.d(self.st.tx_blocked as u64);
-        r.s(" bytes / ");
+        r.s(" aql / ");
         r.d(self.st.tx_blocked_ring as u64);
         r.s(" ring  inflight ");
         r.d(self.aql_pending_us as u64);
