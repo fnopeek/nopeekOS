@@ -474,17 +474,28 @@ pub const RESERVE_OFFLOAD_CORE: bool = true;
 /// RX+TX backend, AMD/SVM only today) AND the reservation experiment is on AND
 /// there is a core to spare. Mirrors the `full_backend` gate at `start_worker`.
 fn reserve_offload_core() -> bool {
-    RESERVE_OFFLOAD_CORE
-        && crate::microvm::devices::net_backend::FULL_RX_BACKEND
-        // detect_vendor() (raw CPUID, lock-free) — NOT current_vendor(): the
-        // latter takes VENDOR.lock(), but guest_vcpus() is called from the
-        // MP-table build + SIPI loop INSIDE `match *VENDOR.lock()` (the whole
-        // guest run holds it) → reentrant lock = deadlock (hang right after the
-        // net-worker spawn). CPUID is the same on every core, so this is sound.
-        && matches!(detect_vendor(), Vendor::Amd)
-        // Need ≥3 cores: Core 0 (BSP) + ≥1 vCPU + 1 worker. Below that, fall
-        // back to co-location rather than starving the guest to a single vCPU.
-        && crate::smp::per_core::core_count() >= 3
+    // NOT vendor-gated any more, and the AMD gate was the bug.
+    //
+    // On Intel the worker runs in PRODUCER-ONLY mode, and in that mode it is not
+    // an optimisation — it is the machine's ONLY drainer of the host NIC:
+    //
+    //   * `net::poll()` on Core 0 skips the drain while `net_dataplane::active()`
+    //   * `nat::pump()` skips it too once a producer exists (nat.rs: `if producer
+    //     { tx_flush() } else { net::poll() }`)
+    //   * `pump_fast` still drains, but it only runs on a virtio-net MMIO exit —
+    //     i.e. only while the GUEST is talking
+    //
+    // So the moment the guest goes quiet and waits for a reply, one fiber carries
+    // the whole inbound path — for the guest AND for the host's own sockets. And
+    // `pick_offload_core()` hands it a core without MARKING it, so an AP vCPU is
+    // placed on top of it at the next guest SIPI. Measured: a host TCP connection
+    // to GitHub sat ESTABLISHED with nothing arriving, at the same time as the
+    // guest's network died. AMD never showed it because this reservation already
+    // gave the worker a core of its own there.
+    //
+    // Needs >= 3 cores: Core 0 + >= 1 vCPU + 1 worker. Below that, co-location is
+    // the lesser evil against starving the guest to nothing.
+    RESERVE_OFFLOAD_CORE && crate::smp::per_core::core_count() >= 3
 }
 
 /// Reserve a SECOND dedicated worker core for the off-vCPU GPU backend (the
