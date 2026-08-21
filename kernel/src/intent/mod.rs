@@ -2439,10 +2439,23 @@ tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
         // sits at our host-NIC gateway, so the SAME bench works on slirp (10.0.2.2)
         // and tap/vhost (e.g. 172.30.0.1) without a rebuild — that is the tap test
         // that bypasses the single-threaded slirp ceiling (build.sh QEMU_NET=tap).
-        let gw = crate::net::ipv4::gateway();
+        // The gateway default is a QEMU habit: on slirp the bench server sits at
+        // 10.0.2.2, which IS the gateway, and on tap it is 172.30.0.1. On real
+        // hardware the gateway is the ROUTER, and the bench would wget a box that
+        // has never heard of it — a failure that looks exactly like the bridge
+        // being broken and is not. Name the server instead:
+        //
+        //     store sys/config/benchhost 192.168.178.97
+        //
+        // Falls back to the gateway, so every QEMU invocation keeps working.
+        let host = crate::config::get("benchhost")
+            .and_then(|v| parse_ip(v.trim()))
+            .unwrap_or_else(crate::net::ipv4::gateway);
+        kprintln!("[microvm] benchvm target {}.{}.{}.{}:80 ({} MB)",
+            host[0], host[1], host[2], host[3], mb);
         let _ = write!(
             s, " nopeekbenchhost={}.{}.{}.{} nopeekbench={}",
-            gw[0], gw[1], gw[2], gw[3], mb,
+            host[0], host[1], host[2], host[3], mb,
         );
     }
     let cmdline: alloc::vec::Vec<u8> = s.into_bytes();
