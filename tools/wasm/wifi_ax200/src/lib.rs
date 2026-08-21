@@ -290,6 +290,8 @@ struct Stats {
     tx_agg_resp: u32,  // responses with frame_count > 1
     tx_agg_max: u8,    // largest frame_count seen
     ba_notifs: u32,    // BA_NOTIF received
+    ba_reclaims: u32,  // TFD read pointers taken from them — the aggregated TX return path
+    ba_tfd_over: u32,  // tfd_cnt beyond CBA_TFD_MAX: slots we could NOT reclaim
     ba_txed: u64,      // MPDUs the firmware says it sent in aggregates
     ba_done: u64,      // …and how many were acknowledged
     last_status: u16,
@@ -434,7 +436,7 @@ impl Stats {
         tx_frames: 0, tx_bytes: 0, tx_blocked: 0, tx_blocked_ring: 0, tx_wd_recoveries: 0, inflight_corrections: 0, gtk_installs: 0, tx_eapol_dropped: 0, inflight_peak: 0,
         tx_ok: 0, tx_fail: 0, tx_retries: 0, tx_rts_fail: 0, tx_airtime_us: 0,
         tx_subframes: 0, tx_agg_resp: 0, tx_agg_max: 0,
-        ba_notifs: 0, ba_txed: 0, ba_done: 0,
+        ba_notifs: 0, ba_reclaims: 0, ba_tfd_over: 0, ba_txed: 0, ba_done: 0,
         last_status: 0, last_init_rate: 0,
         rx_frames: 0, rx_bytes: 0, rx_ip: 0, rx_eapol: 0, rx_mgmt: 0, rx_drain_max: 0,
         win_pass_empty: 0, win_pass_few: 0, win_pass_many: 0, win_pass_burst: 0,
@@ -3736,6 +3738,15 @@ impl Ax200 {
         r.d(self.st.ba_txed);
         r.s(" done ");
         r.d(self.st.ba_done);
+        // Whether the aggregated TX return path RAN. Without it the slots those
+        // MPDUs sat in are never freed, and the queue wedges at its own depth.
+        r.s(" reclaims ");
+        r.d(self.st.ba_reclaims as u64);
+        if self.st.ba_tfd_over > 0 {
+            r.s("  TFD-OVERFLOW ");
+            r.d(self.st.ba_tfd_over as u64);
+            r.s(" (entries past CBA_TFD_MAX — slots not reclaimed)");
+        }
         r.c(b'\n');
 
         r.s("rx       frames ");
@@ -5185,6 +5196,8 @@ impl Ax200 {
             let mut a_agg_resp = 0u32;
             let mut a_agg_max = 0u8;
             let mut a_ba_notifs = 0u32;
+            let mut a_ba_reclaims = 0u32;
+            let mut a_ba_over = 0u32;
             let mut a_ba_txed = 0u64;
             let mut a_ba_done = 0u64;
             let mut a_airtime = 0u64;
@@ -5279,6 +5292,33 @@ impl Ax200 {
                         [bn[b + CBA_OFF_TXED], bn[b + CBA_OFF_TXED + 1]]) as u64;
                     a_ba_done += u16::from_le_bytes(
                         [bn[b + CBA_OFF_DONE], bn[b + CBA_OFF_DONE + 1]]) as u64;
+                    // The RECLAIM half, and the reason 0.99.0 collapsed to
+                    // 16 Mbit: an aggregated MPDU gets NO TX_CMD response. Its
+                    // TFD slot is freed here or it is never freed at all. Linux
+                    // does exactly this — `iwl_mvm_rx_ba_notif` walks the tfd
+                    // array and hands each `tfd_index` to `iwl_mvm_tx_reclaim`
+                    // as the queue's new read pointer (mvm/tx.c, new-tx-api
+                    // path). We read `txed`/`done` from this notification since
+                    // 0.93.0 and left the two fields next to them unread.
+                    let tfd_cnt = u16::from_le_bytes(
+                        [bn[b + CBA_OFF_TFD_CNT], bn[b + CBA_OFF_TFD_CNT + 1]]) as usize;
+                    if tfd_cnt > CBA_TFD_MAX {
+                        a_ba_over += 1;
+                    }
+                    for i in 0..tfd_cnt.min(CBA_TFD_MAX) {
+                        let off = (RX_PKT_DATA_OFF + CBA_HDR_LEN + i * CBA_TFD_LEN) as u32;
+                        let mut e = [0u8; CBA_TFD_LEN];
+                        host::dma_read_buf(rb.handle, off, &mut e);
+                        let q_num = u16::from_le_bytes(
+                            [e[CBA_TFD_Q_NUM], e[CBA_TFD_Q_NUM + 1]]) as u32;
+                        if q_num != a_dataq {
+                            continue;
+                        }
+                        a_read_ptr = Some(u16::from_le_bytes(
+                            [e[CBA_TFD_INDEX], e[CBA_TFD_INDEX + 1]]) as u32
+                            & (IWL_DATA_QUEUE_SIZE as u32 - 1));
+                        a_ba_reclaims += 1;
+                    }
                 } else if c == ADD_STA && g == IWL_ALWAYS_LONG_GROUP {
                     // Only the block-ack setup sends ADD_STA while the loop runs;
                     // its status word carries the session id (see ba_request).
@@ -5465,7 +5505,13 @@ impl Ax200 {
                 // was invisible.
                 // Only a gap of two or more is news. One is noise, and a
                 // log that writes the normal case is not a log.
-                if derived + 1 < counted && self.st.inflight_corrections < 8
+                // …but not while an aggregate just reclaimed. With TLC-offload
+                // aggregation on, `counted` drifts high every single pass
+                // because most frames never produce a TX_CMD response at all.
+                // That is the design working, not a leak, and a log that writes
+                // the normal case is not a log.
+                if derived + 1 < counted && a_ba_reclaims == 0
+                    && self.st.inflight_corrections < 8
                 {
                     self.st.inflight_corrections += 1;
                     host::print("[ax200] in-flight counted ");
@@ -5499,6 +5545,8 @@ impl Ax200 {
             self.st.tx_agg_resp = self.st.tx_agg_resp.wrapping_add(a_agg_resp);
             if a_agg_max > self.st.tx_agg_max { self.st.tx_agg_max = a_agg_max; }
             self.st.ba_notifs = self.st.ba_notifs.wrapping_add(a_ba_notifs);
+            self.st.ba_reclaims = self.st.ba_reclaims.wrapping_add(a_ba_reclaims);
+            self.st.ba_tfd_over = self.st.ba_tfd_over.wrapping_add(a_ba_over);
             self.st.ba_txed += a_ba_txed;
             self.st.ba_done += a_ba_done;
             self.st.rx_prot = self.st.rx_prot.wrapping_add(a_crypt[0]);
@@ -5762,7 +5810,7 @@ impl Ax200 {
             // them. Half the transmit capacity gone for the rest of the boot,
             // every pass resetting the counter, the watchdog never firing.
             let now_ms_pass = host::now_ms();
-            if tx_done > 0 || self.data_in_flight == 0 {
+            if tx_done > 0 || a_ba_reclaims > 0 || self.data_in_flight == 0 {
                 self.last_tx_done_ms = now_ms_pass;
             } else if now_ms_pass.wrapping_sub(self.last_tx_done_ms) > TX_WD_TIMEOUT_MS {
                 // Budgeted: if this fires continuously the log stops being a
