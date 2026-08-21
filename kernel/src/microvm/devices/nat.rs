@@ -1767,7 +1767,9 @@ pub fn rx_health_snapshot() -> (u64, u64, u64) {
 /// "graphics?" hypothesis, measured.
 static NS_GPU_BYTES: AtomicU64 = AtomicU64::new(0);
 static NS_GPU_XFERS: AtomicU64 = AtomicU64::new(0);
-pub fn note_gpu_transfer(bytes: u64) {
+static NS_GPU_CYC: AtomicU64 = AtomicU64::new(0);
+pub fn note_gpu_transfer(bytes: u64, cycles: u64) {
+    NS_GPU_CYC.fetch_add(cycles, AtOrd::Relaxed);
     NS_GPU_BYTES.fetch_add(bytes, AtOrd::Relaxed);
     NS_GPU_XFERS.fetch_add(1, AtOrd::Relaxed);
 }
@@ -1880,6 +1882,8 @@ pub struct BridgeStats {
     pub net_irq: u64,
     pub gro: bool, pub gro_frames: u64, pub gro_segs: u64,
     pub gpu_kb: u64, pub gpu_xfers: u64, pub gpu_kbps: u64,
+    /// Percent of the last window the vCPU spent inside the framebuffer copy.
+    pub gpu_pct: u64, pub gpu_us_each: u64,
     pub gtimer_ps: u64, pub pump_ps: u64,
     pub kicks_out: u64,
     pub ip_malformed: u64, pub ip_to_gw: u64, pub ip_dns: u64, pub ip_proto: u64,
@@ -1896,6 +1900,8 @@ static RPT_RX: AtomicU64 = AtomicU64::new(0);
 static RPT_TX: AtomicU64 = AtomicU64::new(0);
 static RPT_GPU: AtomicU64 = AtomicU64::new(0);
 static RPT_GT: AtomicU64 = AtomicU64::new(0);
+static RPT_GPUCYC: AtomicU64 = AtomicU64::new(0);
+static RPT_GPUXF: AtomicU64 = AtomicU64::new(0);
 static RPT_PUMP: AtomicU64 = AtomicU64::new(0);
 
 pub fn bridge_stats() -> BridgeStats {
@@ -1909,11 +1915,18 @@ pub fn bridge_stats() -> BridgeStats {
     let prev_tx = RPT_TX.swap(tx_pkts, AtOrd::Relaxed);
     let gpu_bytes = NS_GPU_BYTES.load(AtOrd::Relaxed);
     let prev_gpu = RPT_GPU.swap(gpu_bytes, AtOrd::Relaxed);
+    let gcyc = NS_GPU_CYC.load(AtOrd::Relaxed);
+    let prev_gcyc = RPT_GPUCYC.swap(gcyc, AtOrd::Relaxed);
+    let gxf = NS_GPU_XFERS.load(AtOrd::Relaxed);
+    let prev_gxf = RPT_GPUXF.swap(gxf, AtOrd::Relaxed);
+    let d_gcyc = gcyc.saturating_sub(prev_gcyc);
+    let d_gxf = gxf.saturating_sub(prev_gxf);
     let gt = NS_GTIMER.load(AtOrd::Relaxed);
     let prev_gt = RPT_GT.swap(gt, AtOrd::Relaxed);
     let pumps = NS_PUMP_CALLS.load(AtOrd::Relaxed);
     let prev_pump = RPT_PUMP.swap(pumps, AtOrd::Relaxed);
     let window_ms = if prev_tsc == 0 { 0 } else { now.wrapping_sub(prev_tsc) / khz };
+    let win_cyc = window_ms.saturating_mul(khz);
     let per_s = |d: u64| if window_ms > 0 { d * 1000 / window_ms } else { 0 };
     let n = NS_RXLAT_N.load(AtOrd::Relaxed);
     let rxring_min = NS_RXRING_MIN.load(AtOrd::Relaxed);
@@ -1949,6 +1962,8 @@ pub fn bridge_stats() -> BridgeStats {
         gpu_kb: gpu_bytes / 1024,
         gpu_xfers: NS_GPU_XFERS.load(AtOrd::Relaxed),
         gpu_kbps: per_s(gpu_bytes.saturating_sub(prev_gpu)) / 1024,
+        gpu_pct: if win_cyc > 0 { (d_gcyc.saturating_mul(100)) / win_cyc } else { 0 },
+        gpu_us_each: if d_gxf > 0 { d_gcyc / d_gxf / mhz } else { 0 },
         gtimer_ps: per_s(gt.saturating_sub(prev_gt)),
         pump_ps: per_s(pumps.saturating_sub(prev_pump)),
         kicks_out: NS_KICK_DECOUPLED.load(AtOrd::Relaxed),
@@ -2000,7 +2015,8 @@ pub fn reset_counters() {
               &NS_TCP_FLOWS, &NS_UDP_FLOWS, &NS_GRO_FRAMES, &NS_GRO_SEGS,
               &NS_NET_IRQ, &RPT_TSC, &RPT_RX, &RPT_TX,
               &NS_GUEST_KICKS, &NS_GUEST_FRAMES, &NS_GUEST_ARP, &NS_GUEST_OTHER,
-              &NS_GPU_BYTES, &NS_GPU_XFERS, &RPT_GPU,
+              &NS_GPU_BYTES, &NS_GPU_XFERS, &RPT_GPU, &NS_GPU_CYC,
+              &RPT_GPUCYC, &RPT_GPUXF,
               &NS_GTIMER, &NS_PUMP_CALLS, &RPT_GT, &RPT_PUMP,
               &NS_KICK_DECOUPLED, &LAST_KICK_TSC,
               &NS_IP_MALFORMED, &NS_IP_TO_GW, &NS_IP_DNS, &NS_IP_PROTO,

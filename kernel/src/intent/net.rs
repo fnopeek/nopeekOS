@@ -198,8 +198,9 @@ fn bridge_report() {
             b.rx_pkts, b.rx_bytes / 1024, b.rx_pps, b.window_ms);
     } else {
         kprintln!("  guest → host  {:>8} pkt  {:>7} KB", b.tx_pkts, b.tx_bytes / 1024);
-        kprintln!("  host → guest  {:>8} pkt  {:>7} KB   (run again for a rate)",
-            b.rx_pkts, b.rx_bytes / 1024);
+        kprintln!("  host → guest  {:>8} pkt  {:>7} KB", b.rx_pkts, b.rx_bytes / 1024);
+        kprintln!("  ── totals only. RUN netstat AGAIN for the per-second rates,");
+        kprintln!("     which are the ones that say whether it is working NOW. ──");
     }
     kprintln!("  from guest    {} frames in {} doorbells   {} arp  {} non-ip   (up {} s)",
         b.frames_in, b.kicks, b.arp_in, b.other_in, b.up_s);
@@ -230,16 +231,29 @@ fn bridge_report() {
     // the 30 ms anti-starvation floor forces it. A guest whose jiffies crawl at
     // ~33 Hz loses its TCP timers, its NAPI and its workqueues — and looks
     // perfectly alive while doing it. Compare against the ~1000/s it programmed.
-    kprintln!("  guest clock   {} timer irq/s   bridge pumped {}/s   {} wakes sent",
-        b.gtimer_ps, b.pump_ps, b.kicks_out);
+    // A rate needs two readings. On the first call there is no window, so these
+    // are not "zero" — they are "not measured yet", and printing a 0 for them
+    // reads as a stopped guest clock. Say which it is.
+    if b.window_ms > 0 {
+        kprintln!("  guest clock   {} timer irq/s   bridge pumped {}/s   {} wakes sent",
+            b.gtimer_ps, b.pump_ps, b.kicks_out);
+    } else {
+        kprintln!("  guest clock   -- timer irq/s   bridge pumped --/s   {} wakes sent   (no window yet)",
+            b.kicks_out);
+    }
     // The vCPU that pumps this bridge is the SAME fiber that copies the guest's
     // framebuffer, ~8 MB a frame, inline on its MMIO exit — on Intel, where the
     // net has no off-vCPU worker to fall back on. Printed next to `rx wait` on
     // purpose: a browser that starts painting and a delivery latency that goes
     // to milliseconds in the same breath is the whole story, and neither number
     // says it alone.
-    kprintln!("  gpu on vcpu   {} KB copied in {} transfers   {} KB/s now",
-        b.gpu_kb, b.gpu_xfers, b.gpu_kbps);
+    if b.window_ms > 0 {
+        kprintln!("  gpu on vcpu   {} KB in {} transfers   {} KB/s   {} us each   {}% OF THE vCPU",
+            b.gpu_kb, b.gpu_xfers, b.gpu_kbps, b.gpu_us_each, b.gpu_pct);
+    } else {
+        kprintln!("  gpu on vcpu   {} KB copied in {} transfers   -- KB/s",
+            b.gpu_kb, b.gpu_xfers);
+    }
     let (no_link, by_driver) = crate::netdev::tx_reject_stats();
     if no_link > 0 || by_driver > 0 {
         kprintln!("  egress        REFUSED since boot: {} no-link  {} by the driver",

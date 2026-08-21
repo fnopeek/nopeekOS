@@ -738,15 +738,23 @@ impl VirtioGpu {
         // `offset` (relative to the backing). We translate (row, col)
         // → linear offset → page-walk.
         let row_bytes = w as usize * bpp;
+        let t0 = crate::interrupts::rdtsc();
         for row in 0..h as usize {
             let src_lin = offset as usize + (y as usize + row) * stride + x as usize * bpp;
             let dst_lin = (y as usize + row) * stride + x as usize * bpp;
             if dst_lin + row_bytes > host_buf.len() { break; }
             copy_from_backing(mem, &r.backing, src_lin, &mut host_buf[dst_lin..dst_lin + row_bytes]);
         }
-        // Measure the per-frame pixel-copy cost on the vCPU core (framebuffer↔
-        // pump contention probe — does the browser's rendering steal net cycles?).
-        crate::microvm::devices::nat::note_gpu_transfer((h as u64) * (row_bytes as u64));
+        // The per-frame pixel-copy cost on the vCPU core — in CYCLES, not just
+        // bytes. The comment here has claimed to measure this for months while
+        // recording only the byte count, and bytes cannot answer the question:
+        // 179 MB/s is either 3 % of a core or 90 % of one depending entirely on
+        // how fast `copy_from_backing` walks the guest's backing pages. That
+        // difference is the difference between "the browser renders" and "the
+        // browser renders INSTEAD of running its network stack".
+        crate::microvm::devices::nat::note_gpu_transfer(
+            (h as u64) * (row_bytes as u64),
+            crate::interrupts::rdtsc().wrapping_sub(t0));
 
         // One-time bring-up confirmation; the pixel pipeline is proven
         // (LibreWolf renders) so the per-frame churn is just noise.

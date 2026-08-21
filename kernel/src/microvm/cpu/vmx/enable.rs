@@ -1856,6 +1856,10 @@ impl VmContext {
                     // is drained from pending_irqs at the top of this block.)
                     if pumped {
                         let vector = sh.pic.vector_for_irq(10);
+                        // Count it like the MMIO path does — this arm raised
+                        // IRQ10 without telling anyone, so `irq raised` in the
+                        // report read as ~0 while the guest was being woken.
+                        crate::microvm::devices::nat::note_net_irq();
                         let _ = vmcs::inject_external_irq(vector);
                         self.vcpu.consecutive_idle = 0;
                         continue;
