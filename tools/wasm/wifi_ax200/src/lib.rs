@@ -3685,7 +3685,7 @@ impl Ax200 {
         r.d(self.st.pk_rx_airtime_pct as u64);
         r.s("% tx ");
         r.d(self.st.pk_tx_airtime_pct as u64);
-        r.s("% (incl. IFS+backoff)  retries ");
+        r.s("% (preamble+data+SIFS+ACK; AIFS/backoff NOT counted, so both are a FLOOR)  retries ");
         r.d(self.st.pk_retry_pct as u64);
         r.s("%  drain ");
         r.d(self.st.pk_drain as u64);
