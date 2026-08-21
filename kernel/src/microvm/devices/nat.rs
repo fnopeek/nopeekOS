@@ -120,6 +120,20 @@ static NS_TX_PKTS: AtomicU64 = AtomicU64::new(0);
 /// and an egress refusal means the frame never reached the wire. They look
 /// identical from outside — throughput just sags — and only apart do they say
 /// where to look.
+/// What the guest actually handed us, before any classification. `NS_TX_PKTS`
+/// counts only MASQUERADED egress, so a guest that has sent nothing but ARP and
+/// IPv6 router solicitations reads as zero there — and "the guest never spoke"
+/// and "the guest spoke and we dropped it" are opposite faults. Counted here,
+/// at the door.
+static NS_GUEST_KICKS: AtomicU64 = AtomicU64::new(0);   // guest rang the TX doorbell
+static NS_GUEST_FRAMES: AtomicU64 = AtomicU64::new(0);  // frames taken off its TX ring
+static NS_GUEST_ARP: AtomicU64 = AtomicU64::new(0);     // …of which ARP
+static NS_GUEST_OTHER: AtomicU64 = AtomicU64::new(0);   // …neither ARP nor IPv4 (IPv6…)
+/// Tick the guest started, so a report can say how long it has had to speak.
+static NS_START_TICK: AtomicU64 = AtomicU64::new(0);
+
+pub fn note_guest_kick() { NS_GUEST_KICKS.fetch_add(1, AtOrd::Relaxed); }
+
 static NS_DROP_QUEUE: AtomicU64 = AtomicU64::new(0);  // INBOUND_Q overflow
 static NS_DROP_TABLE: AtomicU64 = AtomicU64::new(0);  // L3 masquerade table full
 static NS_DROP_EGRESS: AtomicU64 = AtomicU64::new(0); // host NIC refused the frame
@@ -1039,15 +1053,18 @@ pub fn process_tx(payload: &[u8], caps: &NetCaps) -> Vec<Vec<u8>> {
     };
     let frame = &payload[VNET_HDR_LEN..];
     let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
+    NS_GUEST_FRAMES.fetch_add(1, AtOrd::Relaxed);
 
     match ethertype {
         ETHERTYPE_ARP => {
+            NS_GUEST_ARP.fetch_add(1, AtOrd::Relaxed);
             if let Some(rep) = handle_arp(frame) { out.push(rep); }
         }
         ETHERTYPE_IPV4 => {
             if let Some(rep) = handle_ipv4(frame, caps, gso_size) { out.push(rep); }
         }
         _ => {
+            NS_GUEST_OTHER.fetch_add(1, AtOrd::Relaxed);
             // Quiet: IPv6 / LLDP / STP / etc. — guest has nothing
             // useful to do with them on this synthetic link.
         }
@@ -1764,6 +1781,8 @@ fn drain_inbound(
 /// tell the failures APART rather than watching a single "throughput sagged".
 pub struct BridgeStats {
     pub active: bool,
+    pub up_s: u64,
+    pub kicks: u64, pub frames_in: u64, pub arp_in: u64, pub other_in: u64,
     pub rx_pkts: u64, pub rx_bytes: u64, pub rx_pps: u64,
     pub tx_pkts: u64, pub tx_bytes: u64, pub tx_pps: u64,
     pub window_ms: u64,
@@ -1799,8 +1818,14 @@ pub fn bridge_stats() -> BridgeStats {
     let per_s = |d: u64| if window_ms > 0 { d * 1000 / window_ms } else { 0 };
     let n = NS_RXLAT_N.load(AtOrd::Relaxed);
     let rxring_min = NS_RXRING_MIN.load(AtOrd::Relaxed);
+    let start = NS_START_TICK.load(AtOrd::Relaxed);
     BridgeStats {
         active: L3_ACTIVE.load(AtOrd::Acquire),
+        up_s: if start == 0 { 0 } else { crate::interrupts::ticks().wrapping_sub(start) / 100 },
+        kicks: NS_GUEST_KICKS.load(AtOrd::Relaxed),
+        frames_in: NS_GUEST_FRAMES.load(AtOrd::Relaxed),
+        arp_in: NS_GUEST_ARP.load(AtOrd::Relaxed),
+        other_in: NS_GUEST_OTHER.load(AtOrd::Relaxed),
         rx_pkts, rx_bytes: NS_RX_BYTES.load(AtOrd::Relaxed),
         rx_pps: per_s(rx_pkts.saturating_sub(prev_rx)),
         tx_pkts, tx_bytes: NS_TX_BYTES.load(AtOrd::Relaxed),
@@ -1858,9 +1883,11 @@ pub fn reset_counters() {
               &NS_HIGHWATER, &NS_LAST_TICK, &NS_IQ_HI,
               &NS_RXLAT_SUM, &NS_RXLAT_N, &NS_RXLAT_MAX, &NS_INJECT_FALSE,
               &NS_TCP_FLOWS, &NS_UDP_FLOWS, &NS_GRO_FRAMES, &NS_GRO_SEGS,
-              &NS_NET_IRQ, &RPT_TSC, &RPT_RX, &RPT_TX] {
+              &NS_NET_IRQ, &RPT_TSC, &RPT_RX, &RPT_TX,
+              &NS_GUEST_KICKS, &NS_GUEST_FRAMES, &NS_GUEST_ARP, &NS_GUEST_OTHER] {
         c.store(0, AtOrd::Relaxed);
     }
+    NS_START_TICK.store(crate::interrupts::ticks().max(1), AtOrd::Relaxed);
     NS_RXRING_MIN.store(u64::MAX, AtOrd::Relaxed);
     NS_LAST_ACTIVITY.store(0, AtOrd::Relaxed);
 }

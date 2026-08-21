@@ -589,6 +589,7 @@ impl VirtioNet {
     /// the expensive `process_tx` emit run OUTSIDE the device mutex (the TX half
     /// of the v0.226.63 ACK-jitter fix; see net_dataplane::service_full).
     fn service_tx(&mut self, mem: &GuestMem) -> bool {
+        super::nat::note_guest_kick();
         let self_caps = self.caps;
         let payloads = self.drain_tx_payloads(mem);
         let advanced = !payloads.is_empty();
