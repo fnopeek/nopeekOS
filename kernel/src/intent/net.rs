@@ -205,6 +205,10 @@ fn bridge_report() {
         b.frames_in, b.kicks, b.arp_in, b.other_in, b.up_s);
     kprintln!("  swallowed     {} malformed  {} to-gateway  {} dns  {} other-proto",
         b.ip_malformed, b.ip_to_gw, b.ip_dns, b.ip_proto);
+    kprintln!("  tx faults     {} runt  {} bad-tcp-hdr  {} ARP-MISS(broadcast)  {} ring  {} truncated",
+        b.tx_runt, b.tx_badtcp, b.tx_arpmiss, b.tx_ringbad, b.tx_trunc);
+    kprintln!("  rx UNMATCHED  {}   <- host stack RSTs these; that is us killing the guest",
+        b.rx_unmatched);
     kprintln!("  flows         {} tcp  {} udp opened   {} live of {}",
         b.flows_tcp, b.flows_udp, b.live, b.cap);
     kprintln!("  staging       queue {} (peak {} of {})   guest rx ring low-water {}",

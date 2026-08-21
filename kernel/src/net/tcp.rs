@@ -1348,7 +1348,7 @@ fn send_segment_with_opts(
     let checksum = tcp_checksum(&src_ip, &dst_ip, &pkt);
     pkt[16..18].copy_from_slice(&checksum.to_be_bytes());
 
-    ipv4::send(dst_ip, ipv4::PROTO_TCP, &pkt);
+    let _ = ipv4::send(dst_ip, ipv4::PROTO_TCP, &pkt);
 }
 
 fn tcp_checksum(src_ip: &[u8; 4], dst_ip: &[u8; 4], segment: &[u8]) -> u16 {

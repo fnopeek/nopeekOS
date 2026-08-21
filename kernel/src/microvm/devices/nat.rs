@@ -143,6 +143,23 @@ static NS_IP_MALFORMED: AtomicU64 = AtomicU64::new(0); // length / total-len cla
 static NS_IP_TO_GW: AtomicU64 = AtomicU64::new(0);     // addressed to the gateway, not DNS
 static NS_IP_DNS: AtomicU64 = AtomicU64::new(0);       // answered (or queued) by our resolver
 static NS_IP_PROTO: AtomicU64 = AtomicU64::new(0);     // not TCP / UDP / ICMP
+/// The rest of the silent exits, outbound and in. Every one of these could
+/// swallow a guest's whole session while the report showed zeroes everywhere.
+static NS_TX_RUNT: AtomicU64 = AtomicU64::new(0);      // frame shorter than vnet+eth
+static NS_TX_BADTCP: AtomicU64 = AtomicU64::new(0);    // emit_tcp_out bailed on the header
+static NS_TX_ARPMISS: AtomicU64 = AtomicU64::new(0);   // went out to L2 broadcast
+static NS_TX_RINGBAD: AtomicU64 = AtomicU64::new(0);   // guest TX queue unusable
+static NS_TX_TRUNC: AtomicU64 = AtomicU64::new(0);     // descriptor chain broke mid-frame
+/// An inbound TCP segment addressed to a port in OUR masquerade range that
+/// matched no mapping. It does not stop here: `l3_inbound` returns false, the
+/// host stack takes it, finds no socket, and answers the server with a RST
+/// (tcp.rs:894). That is our own machine tearing down the guest's connection.
+/// A page that loads for a second and then dies looks exactly like this, and
+/// nothing counted it.
+static NS_RX_UNMATCHED: AtomicU64 = AtomicU64::new(0);
+
+pub fn note_tx_ring_bad() { NS_TX_RINGBAD.fetch_add(1, AtOrd::Relaxed); }
+pub fn note_tx_truncated() { NS_TX_TRUNC.fetch_add(1, AtOrd::Relaxed); }
 
 static NS_DROP_QUEUE: AtomicU64 = AtomicU64::new(0);  // INBOUND_Q overflow
 static NS_DROP_TABLE: AtomicU64 = AtomicU64::new(0);  // L3 masquerade table full
@@ -688,7 +705,7 @@ fn l3_outbound(proto: u8, src_port: u16, dst_ip: [u8; 4],
         let mut seg = l4.to_vec();
         seg[0..2].copy_from_slice(&hp.to_be_bytes());        // src port → host port
         fix_l4_checksum(proto, our_ip, dst_ip, &mut seg);
-        crate::net::ipv4::send(dst_ip, proto, &seg);
+        if !crate::net::ipv4::send(dst_ip, proto, &seg) { NS_TX_ARPMISS.fetch_add(1, AtOrd::Relaxed); }
     }
     L3_ACTIVE.store(true, AtOrd::Release);
     None
@@ -703,9 +720,11 @@ fn l3_outbound(proto: u8, src_port: u16, dst_ip: [u8; 4],
 /// header (src/total-len/checksum), so we only fix up the TCP header here.
 fn emit_tcp_out(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4],
                 l4: &[u8], gso_size: u16) {
-    if l4.len() < TCP_HDR_LEN { return; }
+    if l4.len() < TCP_HDR_LEN { NS_TX_BADTCP.fetch_add(1, AtOrd::Relaxed); return; }
     let thlen = ((l4[12] >> 4) & 0x0F) as usize * 4;
-    if thlen < TCP_HDR_LEN || l4.len() < thlen { return; }
+    if thlen < TCP_HDR_LEN || l4.len() < thlen {
+        NS_TX_BADTCP.fetch_add(1, AtOrd::Relaxed); return;
+    }
     let payload = &l4[thlen..];
     let mss = gso_size as usize;
 
@@ -718,7 +737,7 @@ fn emit_tcp_out(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4],
         seg[16..18].copy_from_slice(&c.to_be_bytes());
         NS_TX_PKTS.fetch_add(1, AtOrd::Relaxed);
         NS_TX_BYTES.fetch_add(seg.len() as u64, AtOrd::Relaxed);
-        crate::net::ipv4::send(dst_ip, PROTO_TCP, &seg);
+        if !crate::net::ipv4::send(dst_ip, PROTO_TCP, &seg) { NS_TX_ARPMISS.fetch_add(1, AtOrd::Relaxed); }
         return;
     }
 
@@ -750,7 +769,7 @@ fn emit_tcp_out(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4],
 
         NS_TX_PKTS.fetch_add(1, AtOrd::Relaxed);
         NS_TX_BYTES.fetch_add(seg.len() as u64, AtOrd::Relaxed);
-        crate::net::ipv4::send(dst_ip, PROTO_TCP, &seg);
+        if !crate::net::ipv4::send(dst_ip, PROTO_TCP, &seg) { NS_TX_ARPMISS.fetch_add(1, AtOrd::Relaxed); }
         off += this;
     }
 }
@@ -830,7 +849,7 @@ fn l3_icmp_outbound(dst_ip: [u8; 4], l4: &[u8]) -> Option<Vec<u8>> {
     let mut seg = l4.to_vec();
     seg[4..6].copy_from_slice(&hp.to_be_bytes()); // id → masquerade id
     fix_icmp_checksum(&mut seg);
-    crate::net::ipv4::send(dst_ip, PROTO_ICMP, &seg);
+    if !crate::net::ipv4::send(dst_ip, PROTO_ICMP, &seg) { NS_TX_ARPMISS.fetch_add(1, AtOrd::Relaxed); }
     L3_ACTIVE.store(true, AtOrd::Release);
     None
 }
@@ -904,7 +923,16 @@ pub fn l3_inbound(ip: &[u8]) -> bool {
     let now = crate::interrupts::ticks();
     let gport = match l3_map_in(proto, host_port, src_ip, remote_port, now) {
         Some(g) => g,
-        None => return false,
+        None => {
+            // Not ours by the mapping — but a port inside our masquerade range
+            // is not the host's either, and the host stack will RST it at
+            // tcp.rs:894. Count it: that RST is our own machine tearing down the
+            // guest's connection.
+            if proto == PROTO_TCP && (L3_PORT_LO..L3_PORT_HI).contains(&host_port) {
+                NS_RX_UNMATCHED.fetch_add(1, AtOrd::Relaxed);
+            }
+            return false;
+        }
     };
     // Backpressure: if the guest can't drain its RX queue fast enough, don't
     // grow the staging queue without bound (→ OOM). Drop → guest TCP
@@ -1082,7 +1110,10 @@ pub fn l3_reset() {
 /// cap-rejects so the operator can see why a packet went nowhere.
 pub fn process_tx(payload: &[u8], caps: &NetCaps) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
-    if payload.len() < VNET_HDR_LEN + ETH_HDR_LEN { return out; }
+    if payload.len() < VNET_HDR_LEN + ETH_HDR_LEN {
+        NS_TX_RUNT.fetch_add(1, AtOrd::Relaxed);
+        return out;
+    }
     // virtio-net header (12 B): byte 1 = gso_type, bytes 4..6 = gso_size (LE).
     // With TX-GSO the guest hands us one ≤64 KB TCPv4 super-frame; gso_size is
     // the MSS we re-segment to. Mask off the ECN flag (0x80) before comparing.
@@ -1852,6 +1883,8 @@ pub struct BridgeStats {
     pub gtimer_ps: u64, pub pump_ps: u64,
     pub kicks_out: u64,
     pub ip_malformed: u64, pub ip_to_gw: u64, pub ip_dns: u64, pub ip_proto: u64,
+    pub tx_runt: u64, pub tx_badtcp: u64, pub tx_arpmiss: u64,
+    pub tx_ringbad: u64, pub tx_trunc: u64, pub rx_unmatched: u64,
 }
 
 // Previous snapshot, so a second `netstat` a few seconds later reads as a RATE.
@@ -1923,6 +1956,12 @@ pub fn bridge_stats() -> BridgeStats {
         ip_to_gw: NS_IP_TO_GW.load(AtOrd::Relaxed),
         ip_dns: NS_IP_DNS.load(AtOrd::Relaxed),
         ip_proto: NS_IP_PROTO.load(AtOrd::Relaxed),
+        tx_runt: NS_TX_RUNT.load(AtOrd::Relaxed),
+        tx_badtcp: NS_TX_BADTCP.load(AtOrd::Relaxed),
+        tx_arpmiss: NS_TX_ARPMISS.load(AtOrd::Relaxed),
+        tx_ringbad: NS_TX_RINGBAD.load(AtOrd::Relaxed),
+        tx_trunc: NS_TX_TRUNC.load(AtOrd::Relaxed),
+        rx_unmatched: NS_RX_UNMATCHED.load(AtOrd::Relaxed),
     }
 }
 
@@ -1964,7 +2003,9 @@ pub fn reset_counters() {
               &NS_GPU_BYTES, &NS_GPU_XFERS, &RPT_GPU,
               &NS_GTIMER, &NS_PUMP_CALLS, &RPT_GT, &RPT_PUMP,
               &NS_KICK_DECOUPLED, &LAST_KICK_TSC,
-              &NS_IP_MALFORMED, &NS_IP_TO_GW, &NS_IP_DNS, &NS_IP_PROTO] {
+              &NS_IP_MALFORMED, &NS_IP_TO_GW, &NS_IP_DNS, &NS_IP_PROTO,
+              &NS_TX_RUNT, &NS_TX_BADTCP, &NS_TX_ARPMISS, &NS_TX_RINGBAD,
+              &NS_TX_TRUNC, &NS_RX_UNMATCHED] {
         c.store(0, AtOrd::Relaxed);
     }
     NS_START_TICK.store(crate::interrupts::ticks().max(1), AtOrd::Relaxed);

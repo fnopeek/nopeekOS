@@ -89,7 +89,7 @@ pub fn send(dst_ip: [u8; 4], src_port: u16, dst_port: u16, payload: &[u8]) {
     // pkt[6..8] = checksum (0 = disabled for UDP over IPv4)
     pkt[HEADER_LEN..].copy_from_slice(payload);
 
-    ipv4::send(dst_ip, ipv4::PROTO_UDP, &pkt);
+    let _ = ipv4::send(dst_ip, ipv4::PROTO_UDP, &pkt);
 }
 
 /// Register a listener on a UDP port. Returns false if no slot available.
