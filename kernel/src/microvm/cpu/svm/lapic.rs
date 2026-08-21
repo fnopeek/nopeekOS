@@ -24,6 +24,7 @@
 //! behaviour.
 
 use crate::interrupts::rdtsc;
+use crate::microvm::devices::pit8253::MAX_PENDING;
 
 /// Guest-physical base of the LAPIC MMIO page (architectural default,
 /// `APIC_DEFAULT_PHYS_BASE`). One 4 KiB page; registers live in the
@@ -118,6 +119,23 @@ pub struct LocalApic {
     /// worse" symptom). The guest tolerates 1 ms granularity (its jiffies tick),
     /// so cap delivery at ~1 kHz and let IRQ10 keep its slots.
     last_fire_tsc: u64,
+    /// Ticks owed to the guest but not yet delivered.
+    ///
+    /// The old code computed `periods = elapsed / period`, advanced the origin
+    /// by all of them, and delivered ONE — nine out of ten ticks vanished
+    /// whenever the vCPU had been away for ten periods. That is invisible for a
+    /// wall-clock (Linux reads the TSC) but fatal for `calibrate_APIC_clock`,
+    /// which counts LAPIC ticks against JIFFIES and requires one per one. Two
+    /// sources that both drop their backlog only stay in step while neither is
+    /// starved; the moment one loses a slot to the other, the ratio breaks and
+    /// Linux answers with "APIC timer disabled due to verification failure" —
+    /// after which the guest has no hrtimers on any CPU, and TCP loses pacing,
+    /// TSQ, TLP and RACK.
+    ///
+    /// So a missed tick is owed, not lost. Bounded, because repaying a long
+    /// stall in full would be the interrupt storm the rate cap exists to stop.
+    /// Mirrors `pit8253::Pit` exactly — the two are compared to each other.
+    pending: u32,
 }
 
 impl LocalApic {
@@ -132,7 +150,9 @@ impl LocalApic {
         // Reset state: APIC software-disabled, spurious vector 0xFF,
         // all LVTs masked (Linux clears + re-enables in setup_local_APIC).
         regs[idx(APIC_LVTT)] = LVT_MASKED;
-        LocalApic { regs, timer_start_tsc: 0, timer_fired: false, last_fire_tsc: 0 }
+        LocalApic {
+            regs, timer_start_tsc: 0, timer_fired: false, last_fire_tsc: 0, pending: 0,
+        }
     }
 
     /// True once Linux has software-enabled the APIC (SPIV bit 8).
@@ -203,6 +223,7 @@ impl LocalApic {
                 self.regs[idx(APIC_TMICT)] = val;
                 self.timer_start_tsc = rdtsc();
                 self.timer_fired = false; // re-armed → one-shot may fire again
+                self.pending = 0;         // …and owes nothing from the old arming
             }
             APIC_TDCR => self.regs[idx(APIC_TDCR)] = val & 0xB,
             // ICR low: clear BUSY (Linux polls it for idle), store, and
@@ -253,27 +274,38 @@ impl LocalApic {
             return false;
         }
         let now = rdtsc();
-        // Rate-cap at ~1 kHz: never deliver two ticks closer than 1 ms apart,
-        // however short the guest's programmed oneshot is (anti-IRQ10-starvation).
-        let min_gap = (crate::interrupts::tsc_freq() / 1000).max(1);
-        if now.wrapping_sub(self.last_fire_tsc) < min_gap {
+        // Accrue first: whatever periods have elapsed are OWED, even if the cap
+        // below forbids delivering them this instant. Advancing the origin
+        // without booking the ticks is what silently dropped nine out of ten.
+        let elapsed = now.saturating_sub(self.timer_start_tsc);
+        let periods = elapsed / period;
+        if periods > 0 {
+            self.timer_start_tsc = self.timer_start_tsc.wrapping_add(periods * period);
+            let periodic = self.regs[idx(APIC_LVTT)] & LVT_TIMER_PERIODIC != 0;
+            let owed = if periodic {
+                periods.min(u64::from(MAX_PENDING)) as u32
+            } else if !self.timer_fired {
+                self.timer_fired = true;
+                1
+            } else {
+                0
+            };
+            self.pending = (self.pending + owed).min(MAX_PENDING);
+        }
+        if self.pending == 0 {
             return false;
         }
-        let elapsed = now.saturating_sub(self.timer_start_tsc);
-        if elapsed < period {
+        // Deliver at most ~1 kHz, however short the guest's programmed oneshot
+        // is (TCP pacing arms ~40 µs one-shots at connection setup; firing every
+        // one starves IRQ10). This paces DELIVERY — the rest stays owed.
+        let gap = (crate::interrupts::tsc_freq()
+            / crate::microvm::devices::pit8253::MIN_TICK_GAP_HZ).max(1);
+        if now.wrapping_sub(self.last_fire_tsc) < gap {
             return false;
         }
         self.last_fire_tsc = now;
-        if self.regs[idx(APIC_LVTT)] & LVT_TIMER_PERIODIC != 0 {
-            let periods = elapsed / period;
-            self.timer_start_tsc = self.timer_start_tsc.wrapping_add(periods * period);
-            true
-        } else if !self.timer_fired {
-            self.timer_fired = true;
-            true
-        } else {
-            false
-        }
+        self.pending -= 1;
+        true
     }
 
     /// Non-consuming peek: would `timer_due()` fire RIGHT NOW? Same predicate,
@@ -294,9 +326,13 @@ impl LocalApic {
             return false;
         }
         let now = rdtsc();
-        let min_gap = (crate::interrupts::tsc_freq() / 1000).max(1);
-        if now.wrapping_sub(self.last_fire_tsc) < min_gap {
+        let gap = (crate::interrupts::tsc_freq()
+            / crate::microvm::devices::pit8253::MIN_TICK_GAP_HZ).max(1);
+        if now.wrapping_sub(self.last_fire_tsc) < gap {
             return false;
+        }
+        if self.pending > 0 {
+            return true; // already owed — the accrual happened in timer_due
         }
         if now.saturating_sub(self.timer_start_tsc) < period {
             return false;

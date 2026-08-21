@@ -586,11 +586,6 @@ pub struct VmShared {
     /// Host tick of the last injected guest timer IRQ0 (≈100 Hz). The only
     /// thing that wakes a time-blocked guest task (no PIT/LAPIC source).
     last_timer_tick: u64,
-    /// Host TSC of the last TSC-paced PIT IRQ0. The PIT has no i8254 reload
-    /// tracking, so we pace it at ~1 kHz off the TSC to MATCH the guest's
-    /// programmed LAPIC-timer rate (CONFIG_HZ=1000) — see the guest-timer
-    /// block. SVM's `last_pit_tsc` twin.
-    last_pit_tsc: u64,
     /// Host TSC of the last raised net-RX IRQ10 — interrupt moderation (ITR).
     /// Firing IRQ10 on every net-MMIO exit (~14k/s) gave the guest ~1 interrupt
     /// per packet (io=18170/s EOI storm) → NAPI defeated, the vCPU pegged on
@@ -611,7 +606,10 @@ pub struct VmShared {
     /// i8253 after adopting the LAPIC timer. Gates IRQ0 so jiffies don't
     /// double-count. During calibration BOTH tick 1:1 (else "APIC timer
     /// disabled").
-    pit_enabled: bool,
+    /// i8253 channel 0. Was a bare `pit_enabled: bool` with no reload value,
+    /// which left the tick with no period — it had to be guessed at a hardcoded
+    /// 1 kHz to match the LAPIC. See `pit8253` for why the guess is the bug.
+    pit: crate::microvm::devices::pit8253::Pit,
     /// Pending IPI vectors per target vCPU, indexed by apic_id: a 256-bit
     /// bitmap each. A vCPU's ICR (FIXED) write sets bits in the target's word;
     /// each vCPU drains its own word + injects the lowest pending vector when
@@ -797,11 +795,10 @@ impl VmContext {
                     pci: crate::microvm::devices::PciBus::new(),
                     pic: crate::microvm::devices::pic8259::Pic8259::new(),
                     last_timer_tick: 0,
-                    last_pit_tsc: 0,
                     last_net_irq_tsc: 0,
                     last_cfg_tick: 0,
                     pending_irqs: 0,
-                    pit_enabled: true,
+                    pit: crate::microvm::devices::pit8253::Pit::new(),
                     ipi_pending: [[0; 4]; MAX_VCPUS],
                 }),
                 vcpu: Vcpu {
@@ -1659,22 +1656,26 @@ impl VmContext {
                         continue;
                     }
                 }
-                // PIT (IRQ0): boot + the LVTT-vs-PIT 1:1 verification only. No
-                // i8254 reload tracking, so pace at ~1 kHz off the TSC to MATCH
-                // the LAPIC timer's programmed rate (else verification fails and
-                // Linux drops the LVTT). Disabled once Linux adopts the LVTT.
-                if is_bsp && sh.pic.irq_unmasked(0) && sh.pit_enabled {
-                    let tsc_ms = (crate::interrupts::tsc_freq() / 1000).max(1);
-                    let now_tsc = crate::interrupts::rdtsc();
-                    if now_tsc.wrapping_sub(sh.last_pit_tsc) >= tsc_ms {
-                        sh.last_pit_tsc = now_tsc;
-                        sh.last_timer_tick = crate::interrupts::ticks();
-                        let vector = sh.pic.vector_for_irq(0);
-                        let _ = vmcs::inject_external_irq(vector);
-                        self.vcpu.consecutive_idle = 0;
-                        crate::microvm::devices::nat::note_guest_timer();
-                        continue;
-                    }
+                // PIT (IRQ0) — the guest's jiffy source, at the period the
+                // GUEST programmed into channel 0, with the same delivery cap
+                // and the same owed-tick backlog as the LVTT above.
+                //
+                // It used to be a hardcoded 1 kHz off the TSC, with a comment
+                // saying it had to "MATCH the LAPIC timer's programmed rate
+                // (else verification fails)". That is the right invariant and
+                // the wrong way to hold it: two clocks paced by two different
+                // rules agree only while neither is starved, and both dropped
+                // their backlog on every missed slot. The LVTT is checked first
+                // and `continue`s, so under load it takes the slots and the PIT
+                // falls behind — the ratio breaks, and Linux answers with
+                // "APIC timer disabled due to verification failure".
+                if is_bsp && sh.pic.irq_unmasked(0) && sh.pit.due() {
+                    sh.last_timer_tick = crate::interrupts::ticks();
+                    let vector = sh.pic.vector_for_irq(0);
+                    let _ = vmcs::inject_external_irq(vector);
+                    self.vcpu.consecutive_idle = 0;
+                    crate::microvm::devices::nat::note_guest_timer();
+                    continue;
                 }
                 // External interrupt — host IRQ that arrived during
                 // guest run. The `sti` at the tail of run_guest_once
@@ -1740,7 +1741,7 @@ impl VmContext {
                 if is_bsp && sh.pending_irqs != 0 {
                     let now_t = crate::interrupts::ticks();
                     let timer_overdue = (sh.pic.irq_unmasked(0)
-                        && sh.pit_enabled
+                        && sh.pit.live()
                         && now_t.wrapping_sub(sh.last_timer_tick) >= 3)
                         || (vmx_lapic_on()
                             && self.vcpu.lapic.timer_tick_vector().is_some()
@@ -1809,12 +1810,12 @@ impl VmContext {
                 // Two timer sources, both paced at the host 100 Hz `ticks()`
                 // so their rates match 1:1 — what Linux's APIC-timer
                 // calibration verification needs (else "APIC timer disabled").
-                // PIT IRQ0 until Linux disables the i8253 (pit_enabled → false
+                // PIT IRQ0 until Linux disables the i8253 (mode 0 → not live
                 // after a mode-0 write); the LAPIC LVTT vector once Linux
                 // software-enables + unmasks it. One inject slot per VM-entry
                 // → whichever isn't taken lands next entry (≥1 kHz). LAPIC
                 // emulation (#2) only — None when booting `nolapic`.
-                let pit_live = is_bsp && sh.pic.irq_unmasked(0) && sh.pit_enabled;
+                let pit_live = is_bsp && sh.pic.irq_unmasked(0) && sh.pit.live();
                 let lapic_vec = if vmx_lapic_on() {
                     self.vcpu.lapic.timer_tick_vector()
                 } else {
@@ -1924,6 +1925,13 @@ impl VmContext {
                 // the old global `recently_active` spin: no core pegged at 100%
                 // unless it's doing real work; idle vCPUs shrink toward the
                 // floor and park; a latency-sensitive vCPU grows toward the cap.
+                // Never park with a tick already owed. The backlog exists so a
+                // missed slot is repaid rather than dropped; sleeping on top of
+                // one would hand the drop back through the other door, and it is
+                // the LVTT-vs-PIT ratio that Linux checks.
+                if is_bsp && sh.pit.pending_now() {
+                    continue;
+                }
                 if self.vcpu.consecutive_idle >= IDLE_YIELD {
                     let now_tsc = crate::interrupts::rdtsc();
                     if self.vcpu.halt_poll_deadline == 0 {
@@ -2065,7 +2073,7 @@ impl VmContext {
                 if port == 0x3F8 && !dir_in && !sh.serial.dlab && size == 1 {
                     self.vcpu.io_stats.record_serial_byte((self.vcpu.regs.rax & 0xFF) as u8);
                 }
-                handle_linux_io(&mut sh.serial, &mut sh.pci, &mut sh.pic, &mut self.vcpu.regs, port, dir_in, size, &mut self.vcpu.io_dropped, &mut sh.pit_enabled);
+                handle_linux_io(&mut sh.serial, &mut sh.pci, &mut sh.pic, &mut self.vcpu.regs, port, dir_in, size, &mut self.vcpu.io_dropped, &mut sh.pit);
                 vmcs::advance_guest_rip()?;
                 last_outcome = Some(outcome);
             }
@@ -2413,7 +2421,7 @@ fn handle_linux_io(
     dir_in: bool,
     size: u8,
     io_dropped: &mut u32,
-    pit_enabled: &mut bool,
+    pit: &mut crate::microvm::devices::pit8253::Pit,
 ) {
     use crate::microvm::devices::{handle_pci_io, PCI_CONFIG_ADDR, PCI_CONFIG_DATA_END, PCI_CONFIG_DATA_START};
     use crate::microvm::devices::pic8259::{handle_pic_io, PIC_MASTER_CMD, PIC_MASTER_IMR, PIC_SLAVE_CMD, PIC_SLAVE_IMR};
@@ -2440,18 +2448,11 @@ fn handle_linux_io(
     }
 
     match (port, dir_in) {
-        // i8253 PIT mode/command (0x43) write. Track whether channel 0 is
-        // still generating the timer tick: a mode-set (access bits 5:4 != 0)
-        // on channel 0 (bits 7:6 == 0) sets pit_enabled = (operating mode !=
-        // 0). Linux shuts the PIT down with mode 0 (0x30) after adopting the
-        // LAPIC timer; periodic (0x34) / oneshot (0x38) keep it live. Latch
-        // commands (bits 5:4 == 0) don't change the mode. Mirrors svm.
-        (0x43, false) => {
-            let v = val_out as u8;
-            if (v >> 6) & 0x3 == 0 && (v >> 4) & 0x3 != 0 {
-                *pit_enabled = ((v >> 1) & 0x7) != 0;
-            }
-        }
+        // i8253 channel 0: mode/command (0x43) and the counter itself (0x40).
+        // The counter write is new — it was dropped on the floor before, which
+        // is why the tick had no period of its own.
+        (0x43, false) => pit.command(val_out as u8),
+        (0x40, false) => pit.write_counter(val_out as u8),
         // COM1 OUT.
         (0x3F8, false) => {
             if !serial.dlab {
@@ -2666,7 +2667,7 @@ fn try_prompt_device_irq(vcpu: &mut Vcpu, sh: &mut VmShared) {
     }
     let now = crate::interrupts::ticks();
     let timer_overdue = (sh.pic.irq_unmasked(0)
-        && sh.pit_enabled
+        && sh.pit.live()
         && now.wrapping_sub(sh.last_timer_tick) >= 3)
         || (vmx_lapic_on()
             && vcpu.lapic.timer_tick_vector().is_some()
