@@ -132,6 +132,7 @@ pub struct FqCodel {
     // up at all. They call for opposite fixes, so never sum them into one number.
     drops_aqm: u64,
     drops_full: u64,
+    drops_oversize: u64,
 }
 
 impl FqCodel {
@@ -151,14 +152,20 @@ impl FqCodel {
             interval: 0,
             drops_aqm: 0,
             drops_full: 0,
+            drops_oversize: 0,
         }
     }
 
     /// Frames discarded so far: (CoDel/AQM, pool-full).
     pub fn drops_split(&self) -> (u64, u64) { (self.drops_aqm, self.drops_full) }
+    pub fn drops_oversize(&self) -> u64 { self.drops_oversize }
     /// Bytes currently queued for the driver.
     pub fn backlog(&self) -> usize { self.backlog }
-    pub fn reset_drops(&mut self) { self.drops_aqm = 0; self.drops_full = 0; }
+    pub fn reset_drops(&mut self) {
+        self.drops_aqm = 0;
+        self.drops_full = 0;
+        self.drops_oversize = 0;
+    }
 
     fn lazy_init(&mut self) {
         if self.interval == 0 {
@@ -218,9 +225,18 @@ impl FqCodel {
 
     /// Enqueue one Ethernet frame. Drops (tail / fattest-flow) if the pool is
     /// full — never blocks.
-    pub fn enqueue(&mut self, frame: &[u8]) {
+    /// Returns false when the frame was NOT taken. It used to return nothing,
+    /// and the caller counted every call as enqueued — so a frame refused here
+    /// was indistinguishable from one that went out. That is how 186 of 237
+    /// TX frames vanished with `drops 0` and `backlog 0`.
+    pub fn enqueue(&mut self, frame: &[u8]) -> bool {
         if frame.is_empty() || frame.len() > MTU {
-            return;
+            // An over-MTU frame is a BUG upstream, not congestion: nothing here
+            // can make it fit, and dropping it silently makes the sender look
+            // like a dead peer. Counted apart from congestion drops so the two
+            // can never be confused again.
+            if !frame.is_empty() { self.drops_oversize += 1; }
+            return false;
         }
         self.lazy_init();
         let now = rdtsc();
@@ -232,11 +248,11 @@ impl FqCodel {
                 // new sparse flow's packet still gets in (fq_codel_drop).
                 if !self.drop_fattest() {
                     self.drops_full += 1;
-                    return;
+                    return false;
                 }
                 match self.alloc_slot() {
                     Some(s) => s,
-                    None => { self.drops_full += 1; return; }
+                    None => { self.drops_full += 1; return false; }
                 }
             }
         };
@@ -265,6 +281,7 @@ impl FqCodel {
             self.flows[fi].codel.dropping = false;
             self.new_q.push(fi);
         }
+        true
     }
 
     // Drop the head packet of whichever flow has the most queued bytes.

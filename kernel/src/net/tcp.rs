@@ -607,8 +607,10 @@ pub fn send(handle: usize, data: &[u8]) -> Result<(), TcpError> {
     if conn.send_buf.is_empty() { conn.rto_tick = now; conn.retries = 0; }
     conn.send_buf.extend_from_slice(data);
 
-    // Send in MSS-sized chunks immediately (no Nagle)
-    for chunk in data.chunks(MSS as usize) {
+    // Send in effective-MSS chunks immediately (no Nagle). Effective, not MSS:
+    // the option bytes come out of the same 1514.
+    let mss = eff_mss(conn);
+    for chunk in data.chunks(mss) {
         let seq = conn.snd_nxt;
         conn.snd_nxt = conn.snd_nxt.wrapping_add(chunk.len() as u32);
         conn.last_send_tick = now;
@@ -1117,7 +1119,7 @@ pub fn tick_connections() {
             if slot.ack_pending && now - slot.ack_tick >= DELAYED_ACK_TICKS {
                 let w = recv_window(slot);
                 let mut opts = [0u8; 40];
-                let len = build_seg_opts(slot, ACK, &mut opts);
+                let len = build_seg_opts(slot, ACK, &mut opts, false);
                 pending.push(PendingSeg {
                     dst_ip: slot.remote_ip, src_port: slot.local_port,
                     dst_port: slot.remote_port, seq: slot.snd_nxt,
@@ -1190,10 +1192,14 @@ pub fn tick_connections() {
                         slot.retries += 1;
                         slot.rto_tick = now;
                         slot.last_send_tick = now;
-                        let n = slot.send_buf.len().min(MSS as usize);
+                        // Effective MSS here too: this one carries payload, so
+                        // a full-MSS retransmit overran the MTU exactly like the
+                        // original — and was dropped the same silent way. The
+                        // retry path could never repair what the first send lost.
+                        let n = slot.send_buf.len().min(eff_mss(slot));
                         let w = recv_window(slot);
                         let mut opts = [0u8; 40];
-                        let len = build_seg_opts(slot, ACK, &mut opts);
+                        let len = build_seg_opts(slot, ACK, &mut opts, true);
                         retrans.push((
                             PendingSeg {
                                 dst_ip: slot.remote_ip, src_port: slot.local_port,
@@ -1473,7 +1479,25 @@ fn parse_tsecr(seg: &[u8], data_offset: usize) -> Option<u32> {
 /// returning its length. Shared by the inline `send_seg` and the deferred
 /// tick path, which materializes segments under the CONNECTIONS lock and
 /// sends them after dropping it.
-fn build_seg_opts(conn: &TcpConn, flags: u8, opts: &mut [u8; 40]) -> usize {
+/// Bytes `build_seg_opts` will add to a DATA segment on this connection. The
+/// payload has to shrink by exactly this much, or the frame overruns the MTU.
+///
+/// It did. With timestamps negotiated every segment carries 12 option bytes, so
+/// a full-size one was 14 + 20 + (20+12) + 1460 = 1526 against an MTU of 1514,
+/// and `fq_codel::enqueue` dropped it without a word. Pure ACKs are 66 bytes
+/// and sailed through, which is why every download worked and the first upload
+/// ever attempted stalled after exactly MAX_UNACKED bytes with zero ACKs back.
+fn data_opts_len(conn: &TcpConn) -> usize {
+    if conn.ts_ok { 12 } else { 0 }
+}
+
+/// Payload per segment for this connection. `MSS` is the wire budget; what is
+/// left for data is that minus the options every segment carries.
+fn eff_mss(conn: &TcpConn) -> usize {
+    (MSS as usize).saturating_sub(data_opts_len(conn)).max(1)
+}
+
+fn build_seg_opts(conn: &TcpConn, flags: u8, opts: &mut [u8; 40], has_payload: bool) -> usize {
     let mut len = 0;
     if conn.ts_ok {
         opts[len] = 1; opts[len + 1] = 1;          // NOP, NOP
@@ -1485,7 +1509,10 @@ fn build_seg_opts(conn: &TcpConn, flags: u8, opts: &mut [u8; 40]) -> usize {
     }
     // SACK blocks: only on a pure ACK while we hold out-of-order data (a gap).
     // Never on a SYN — that advertises SACK-permitted instead.
-    if conn.sack_ok && flags & SYN == 0 && !conn.ooo.is_empty() {
+    // SACK blocks ride on a PURE ACK only. On a data segment they would push
+    // the frame past the MTU again — `eff_mss` budgets for the timestamp and
+    // nothing else, and a variable option length cannot be budgeted for at all.
+    if conn.sack_ok && flags & SYN == 0 && !has_payload && !conn.ooo.is_empty() {
         let mut sack = [0u8; 26]; // 2 + 8*3
         let slen = build_sack_blocks(conn, &mut sack);
         if slen > 0 && len + 2 + slen <= opts.len() {
@@ -1500,7 +1527,7 @@ fn build_seg_opts(conn: &TcpConn, flags: u8, opts: &mut [u8; 40]) -> usize {
 fn send_seg(conn: &TcpConn, seq: u32, ack: u32, flags: u8, window: u16, payload: &[u8]) {
     TCP_TX_SEGS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let mut opts = [0u8; 40];
-    let len = build_seg_opts(conn, flags, &mut opts);
+    let len = build_seg_opts(conn, flags, &mut opts, !payload.is_empty());
     if len > 0 {
         send_segment_with_opts(conn.remote_ip, conn.local_port, conn.remote_port,
             seq, ack, flags, window, payload, &opts[..len]);
