@@ -1148,15 +1148,32 @@ enum DnsOutcome {
     NxDomain,         // name does not exist
 }
 
-/// Parse a DNS query, resolve A records via the host resolver, and
-/// synthesize the reply with the correct rcode.
+/// Parse a DNS query, answer it from the host resolver's CACHE, and synthesize
+/// the reply with the correct rcode.
+///
+/// Cache only. This runs on the vCPU fiber, inside the virtio-net MMIO exit,
+/// with the device mutex held — `net::dns::resolve` would spin here for up to
+/// its whole 5.5 s budget. That is not merely a frozen guest: `pump_peers()`
+/// bails out inside a fiber, so the WASM NIC driver fiber sharing this core
+/// stops posting receive buffers, the card runs dry after its ~50 ms worth, and
+/// the reply that would end the wait is one of the frames that can no longer
+/// arrive. Measured on the notebook: one page loaded, then the radio was gone
+/// and the host had no network either.
+///
+/// So: hit → answer, known-bad → NXDOMAIN, unknown → hand the name to Core 0
+/// and drop the query. UDP DNS is retried by whoever asked, and the retry
+/// finds a warm cache.
 fn handle_dns(src_ip: [u8; 4], src_port: u16, dgram: &[u8]) -> Option<Vec<u8>> {
     let q = parse_dns_query(dgram)?;
 
     let outcome = if q.qtype == 1 {
-        match crate::net::dns::resolve(q.name.as_str()) {
-            Some(ip) => DnsOutcome::Answer(ip),
-            None     => DnsOutcome::NxDomain,
+        match crate::net::dns::cached(q.name.as_str()) {
+            crate::net::dns::Cached::Ip(ip) => DnsOutcome::Answer(ip),
+            crate::net::dns::Cached::Failed => DnsOutcome::NxDomain,
+            crate::net::dns::Cached::Unknown => {
+                crate::net::dns::want(q.name.as_str());
+                return None;
+            }
         }
     } else {
         // AAAA / HTTPS-SVCB / etc.: we don't serve the record, but the
