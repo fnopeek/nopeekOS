@@ -19,6 +19,7 @@ pub mod net_dataplane;
 pub mod p9_async;
 pub mod pci_bus;
 pub mod pic8259;
+pub mod pit8253;
 pub mod virtio_blk_pci;
 pub mod virtio_gpu_pci;
 pub mod virtio_input_pci;
