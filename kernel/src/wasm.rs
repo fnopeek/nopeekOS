@@ -1826,21 +1826,13 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
                 return 0;
             }
-            use crate::shade::widgets::abi::Token;
-            let token = match token_id {
-                0 => Token::Surface,
-                1 => Token::SurfaceElevated,
-                2 => Token::SurfaceMuted,
-                3 => Token::OnSurface,
-                4 => Token::OnSurfaceMuted,
-                5 => Token::OnAccent,
-                6 => Token::Accent,
-                7 => Token::AccentMuted,
-                8 => Token::Border,
-                9 => Token::Success,
-                10 => Token::Warning,
-                11 => Token::Danger,
-                _ => return 0,
+            // One table, in palette.rs — the local copy here stopped at
+            // Danger and silently answered 0 for Page/AccentRing/… long
+            // after those tokens existed.
+            if token_id < 0 { return 0; }
+            let token = match crate::shade::widgets::palette::token_from_id(token_id as usize) {
+                Some(t) => t,
+                None => return 0,
             };
             crate::shade::widgets::palette::resolve(token) as i32
         },

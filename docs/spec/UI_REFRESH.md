@@ -30,6 +30,46 @@ blau-violetten) plus eine dritte Textstufe. Reihenfolge dunkel → hell:
 `chrome` und `chrome-2` des Mockups liegen 3 Stufen auseinander — das ist
 unter der Wahrnehmungsschwelle. Beide sind `SurfaceElevated`.
 
+## 1a. Code-Rampe (Syntax)
+
+Die Rampe oben beschreibt **Chrome**. Quelltext braucht eine zweite,
+unabhängige — ein Editor zeigt beides gleichzeitig, und solange
+Schlüsselwörter auf `Accent` lagen, hing die Syntaxfarbe am Wallpaper und
+eine ganze Sprache kam mit drei Farben aus.
+
+Neun Tokens, angehängt ab 17 (ABI: nur anhängen, Werte eingefroren):
+
+| Token          | Wert | Rolle                                              |
+|----------------|------|----------------------------------------------------|
+| `CodeKeyword`  | 17   | Deklaration/Storage: `fn` `let` `def` `class` `int` |
+| `CodeControl`  | 18   | Fluss + Import: `if` `for` `return` `import`        |
+| `CodeString`   | 19   | String- und Zeichenliterale, Anführungszeichen mit  |
+| `CodeComment`  | 20   | Kommentare                                          |
+| `CodeNumber`   | 21   | Zahlliterale                                        |
+| `CodeFunction` | 22   | Funktionsnamen, Deklaration und Aufruf              |
+| `CodeType`     | 23   | Typ-/Klassennamen, Markup-Tagnamen                  |
+| `CodeVariable` | 24   | Attributnamen, JSON-Schlüssel, Dekoratoren          |
+| `CodeConstant` | 25   | `true` `None` `null`, Entities, ALLCAPS-Namen       |
+
+Aufgelöst wird **nicht** über den Akzent, sondern über ein benanntes
+Schema: `set code.scheme <name>`. Die Werte stammen 1:1 aus VSCodiums
+eingebauten Themes, aufgelöst wie TextMate auflöst (spezifischster Scope
+gewinnt):
+
+`auto` (Vorgabe, folgt dem Theme) · `dark-plus` · `light-plus` ·
+`monokai` · `solarized-dark` · `solarized-light` · `abyss` ·
+`kimbie-dark` · `quiet-light`
+
+**Ein Schema liefert nur diese neun Farben.** Leinwand bleibt `Page`,
+Fließtext bleibt `OnSurface`. Das eigene Hintergrundbild eines Schemas
+mitzunehmen würde gegen die Glasflächen arbeiten — und ein dunkles Schema
+unter hellem Theme malte dann dunkel auf weiß. Präferenz und Leinwand
+sind zwei Dinge; dieser Schalter bewegt nur die Präferenz. Ein explizit
+gesetzter Widerspruch wird ausgeführt, aber `set` sagt es an.
+
+Ohne Deckung durch eine Span rendert ein Byte in `OnSurface` — das ist
+der Normalfall und der Grund, warum die Rampe klein bleiben kann.
+
 ## 2. Akzent
 
 Vier Presets aus dem Design, plus `auto` (Wallpaper-Extraktion, wie

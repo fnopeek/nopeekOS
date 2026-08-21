@@ -30,7 +30,16 @@ const _: () = {
     assert!(Token::OnSurfaceFaint  as u8 == 14);
     assert!(Token::AccentRing      as u8 == 15);
     assert!(Token::AccentLine      as u8 == 16);
-    assert!((Token::AccentLine as usize) < PALETTE_SLOTS);
+    assert!(Token::CodeKeyword     as u8 == 17);
+    assert!(Token::CodeControl     as u8 == 18);
+    assert!(Token::CodeString      as u8 == 19);
+    assert!(Token::CodeComment     as u8 == 20);
+    assert!(Token::CodeNumber      as u8 == 21);
+    assert!(Token::CodeFunction    as u8 == 22);
+    assert!(Token::CodeType        as u8 == 23);
+    assert!(Token::CodeVariable    as u8 == 24);
+    assert!(Token::CodeConstant    as u8 == 25);
+    assert!((Token::CodeConstant as usize) < PALETTE_SLOTS);
 
     // Role
     assert!(Role::None      as u8 == 0);

@@ -87,6 +87,33 @@ pub enum Token {
     /// Accent at 22 % over `Surface` — focus rings.
     AccentRing      = 15,
     /// Accent at 45 % over `Surface` — focused window border.
+
+    // ── Code tokens (syntax highlighting) ─────────────────────────────
+    //
+    // A second, independent ramp. The tokens above describe *chrome*;
+    // these describe *source text*. An editor needs both at once, and
+    // reusing `Accent`/`Warning` for keywords and strings tied the
+    // syntax colours to the wallpaper — a whole language got three
+    // colours. Resolved from the active code scheme (`set code.scheme`),
+    // never from the accent.
+    /// Declaration / storage keywords: `fn` `let` `def` `class` `int`.
+    CodeKeyword     = 17,
+    /// Control flow and imports: `if` `for` `return` `import` `match`.
+    CodeControl     = 18,
+    /// String and character literals, quotes included.
+    CodeString      = 19,
+    /// Comments, any syntax.
+    CodeComment     = 20,
+    /// Numeric literals.
+    CodeNumber      = 21,
+    /// Function names — declaration and call site.
+    CodeFunction    = 22,
+    /// Type / class names and markup tag names.
+    CodeType        = 23,
+    /// Attribute names, JSON keys, decorators.
+    CodeVariable    = 24,
+    /// Language constants (`true` `None` `null`) and escape sequences.
+    CodeConstant    = 25,
     AccentLine      = 16,
     // Appended only.
 }
@@ -626,4 +653,4 @@ pub struct Palette {
 }
 
 /// Slots in a `Palette` — must stay > the highest `Token` discriminant.
-pub const PALETTE_SLOTS: usize = 24;
+pub const PALETTE_SLOTS: usize = 32;
