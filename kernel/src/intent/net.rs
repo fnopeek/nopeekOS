@@ -145,7 +145,55 @@ pub fn intent_netstat() {
                 lport, rip[0], rip[1], rip[2], rip[3], rport, state);
         }
     }
+    if crate::microvm::vm_active() {
+        bridge_report();
+    }
     kprintln!();
+}
+
+/// The microVM's side of the wire, printed only while a VM is up.
+///
+/// Read it as a decision tree, top to bottom. `guest -> host` still climbing
+/// says the guest is alive and the masquerade is taking its packets; if
+/// `host -> guest` has stopped with it, the replies are not coming back or the
+/// mapping no longer matches. If BOTH climb and the guest still sees nothing,
+/// the loss is in delivery, and the three `lost` numbers say which wall: a full
+/// staging queue is backpressure, a full table means no new connection can open
+/// at all, and an egress refusal means the frame never reached the wire. Call it
+/// twice a few seconds apart — the per-second figures come from the gap.
+fn bridge_report() {
+    let b = crate::microvm::devices::nat::bridge_stats();
+    kprintln!();
+    kprintln!("  microVM bridge (L3 masquerade){}",
+        if b.active { "" } else { "  — idle, no flow yet" });
+    kprintln!("  ─────────────────────────────");
+    if b.window_ms > 0 {
+        kprintln!("  guest → host  {:>8} pkt  {:>7} KB   {:>6} pkt/s",
+            b.tx_pkts, b.tx_bytes / 1024, b.tx_pps);
+        kprintln!("  host → guest  {:>8} pkt  {:>7} KB   {:>6} pkt/s   (over {} ms)",
+            b.rx_pkts, b.rx_bytes / 1024, b.rx_pps, b.window_ms);
+    } else {
+        kprintln!("  guest → host  {:>8} pkt  {:>7} KB", b.tx_pkts, b.tx_bytes / 1024);
+        kprintln!("  host → guest  {:>8} pkt  {:>7} KB   (run again for a rate)",
+            b.rx_pkts, b.rx_bytes / 1024);
+    }
+    kprintln!("  flows         {} tcp  {} udp opened   {} live of {}",
+        b.flows_tcp, b.flows_udp, b.live, b.cap);
+    kprintln!("  staging       queue {} (peak {} of {})   guest rx ring low-water {}",
+        b.iq, b.iq_hi, b.iq_cap, b.rxring_min);
+    kprintln!("  lost          {} queue-full   {} TABLE-FULL   {} egress-refused   {} guest-ring-full",
+        b.drop_queue, b.drop_table, b.drop_egress, b.inject_false);
+    kprintln!("  delivery      rx wait avg {} us  max {} us   {} irq raised",
+        b.rxlat_avg_us, b.rxlat_max_us, b.net_irq);
+    if b.gro {
+        kprintln!("  gro           on   {} frames  {} segments merged",
+            b.gro_frames, b.gro_segs);
+    }
+    let (no_link, by_driver) = crate::netdev::tx_reject_stats();
+    if no_link > 0 || by_driver > 0 {
+        kprintln!("  egress        REFUSED since boot: {} no-link  {} by the driver",
+            no_link, by_driver);
+    }
 }
 
 /// `wlan` — one screen with everything needed to diagnose the WiFi link.

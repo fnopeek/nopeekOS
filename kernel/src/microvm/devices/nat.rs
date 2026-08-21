@@ -113,7 +113,16 @@ static NS_RX_BYTES: AtomicU64 = AtomicU64::new(0);
 static NS_RX_PKTS: AtomicU64 = AtomicU64::new(0);
 static NS_TX_BYTES: AtomicU64 = AtomicU64::new(0);
 static NS_TX_PKTS: AtomicU64 = AtomicU64::new(0);
-static NS_DROPS: AtomicU64 = AtomicU64::new(0);
+/// Three different walls, counted apart. One shared counter is how the ax200
+/// TX path hid a partial leak for a boot, and the same trap sits here: a full
+/// staging queue is BACKPRESSURE (healthy, TCP slows down), a full masquerade
+/// table means NO NEW FLOW CAN OPEN (the browser dies while old sockets live),
+/// and an egress refusal means the frame never reached the wire. They look
+/// identical from outside — throughput just sags — and only apart do they say
+/// where to look.
+static NS_DROP_QUEUE: AtomicU64 = AtomicU64::new(0);  // INBOUND_Q overflow
+static NS_DROP_TABLE: AtomicU64 = AtomicU64::new(0);  // L3 masquerade table full
+static NS_DROP_EGRESS: AtomicU64 = AtomicU64::new(0); // host NIC refused the frame
 static NS_HIGHWATER: AtomicU64 = AtomicU64::new(0);
 static NS_LAST_TICK: AtomicU64 = AtomicU64::new(0);
 /// High-water mark of the INBOUND_Q staging depth. If this rides near
@@ -542,6 +551,17 @@ fn gro_offer(frame: Vec<u8>) -> Option<Vec<u8>> {
 
 /// Find an existing mapping for this guest flow or allocate one.
 /// Returns the masquerade host port.
+/// The masquerade table is full: no new flow can open. Budgeted, because if it
+/// fires it fires for every packet of every new connection — and a log that
+/// writes the flood is no longer a log. `netstat` carries the running count.
+fn note_table_full() {
+    let n = NS_DROP_TABLE.fetch_add(1, AtOrd::Relaxed);
+    if n < 4 {
+        kprintln!("[nat] masquerade table full ({} flows) - no new connection \
+                   can open; see netstat", L3_MAX);
+    }
+}
+
 fn l3_map_out(proto: u8, gport: u16, rip: [u8; 4], rport: u16, now: u64) -> Option<u16> {
     let mut tbl = L3.lock();
     // Existing?
@@ -625,7 +645,7 @@ fn l3_outbound(proto: u8, src_port: u16, dst_ip: [u8; 4],
     let now = crate::interrupts::ticks();
     let hp = match l3_map_out(proto, src_port, dst_ip, dst_port, now) {
         Some(p) => p,
-        None => { NS_DROPS.fetch_add(1, AtOrd::Relaxed); kprintln!("[nat] L3 table full, dropping flow"); return None; }
+        None => { note_table_full(); return None; }
     };
     let our_ip = crate::net::arp::our_ip();
     if proto == PROTO_TCP {
@@ -724,7 +744,7 @@ fn l3_outbound_offload(src_port: u16, dst_ip: [u8; 4], dst_port: u16,
     let now = crate::interrupts::ticks();
     let hp = match l3_map_out(PROTO_TCP, src_port, dst_ip, dst_port, now) {
         Some(p) => p,
-        None => { NS_DROPS.fetch_add(1, AtOrd::Relaxed); return None; }
+        None => { note_table_full(); return None; }
     };
     let mut seg = l4.to_vec();
     seg[0..2].copy_from_slice(&hp.to_be_bytes()); // src port → masquerade port
@@ -750,7 +770,7 @@ fn l3_outbound_offload(src_port: u16, dst_ip: [u8; 4], dst_port: u16,
     NS_TX_PKTS.fetch_add(1, AtOrd::Relaxed);
     NS_TX_BYTES.fetch_add(seg.len() as u64, AtOrd::Relaxed);
     if !crate::net::ipv4::send_offload(dst_ip, PROTO_TCP, &seg, gso_size) {
-        NS_DROPS.fetch_add(1, AtOrd::Relaxed); // NIC couldn't take it; TCP retransmits
+        NS_DROP_EGRESS.fetch_add(1, AtOrd::Relaxed); // NIC refused it; TCP retransmits
     }
     L3_ACTIVE.store(true, AtOrd::Release);
     None
@@ -847,7 +867,7 @@ pub fn l3_inbound(ip: &[u8]) -> bool {
     // retransmits + slows. Still `true` (consumed — it IS guest traffic, the
     // host stack must not also process it).
     if INBOUND_Q.lock().len() >= INBOUND_MAX {
-        NS_DROPS.fetch_add(1, AtOrd::Relaxed);
+        NS_DROP_QUEUE.fetch_add(1, AtOrd::Relaxed);
         return true;
     }
     NS_RX_PKTS.fetch_add(1, AtOrd::Relaxed);
@@ -1461,7 +1481,7 @@ pub fn pump(
                 rxirq_per_s, rx_vec,
                 NS_IQ_HI.load(AtOrd::Relaxed), INBOUND_MAX,
                 NS_TCP_FLOWS.load(AtOrd::Relaxed), NS_UDP_FLOWS.load(AtOrd::Relaxed),
-                NS_DROPS.load(AtOrd::Relaxed),
+                NS_DROP_QUEUE.load(AtOrd::Relaxed),
                 pumps / secs, injfalse / secs, batch,
             );
             kprintln!(
@@ -1636,7 +1656,7 @@ pub fn ringfull_kick_count() -> u64 { NS_KICK_RINGFULL.load(AtOrd::Relaxed) }
 /// rxlat_max = worst staging latency (TSC ticks). Cumulative per VM run. If drops
 /// climb during a slow GET, the lottery is server-cwnd-collapse from our drops.
 pub fn rx_health_snapshot() -> (u64, u64, u64) {
-    (NS_DROPS.load(AtOrd::Relaxed),
+    (NS_DROP_QUEUE.load(AtOrd::Relaxed),
      NS_INJECT_FALSE.load(AtOrd::Relaxed),
      NS_RXLAT_MAX.load(AtOrd::Relaxed))
 }
@@ -1735,6 +1755,76 @@ fn drain_inbound(
     RxDrain { injected: any, want_irq: any && net.rx_wants_irq(mem), pending: stalled }
 }
 
+/// Everything the bridge knows about itself, for `netstat`.
+///
+/// The counters were always there; they lived behind a `NETSTAT_DEBUG` const
+/// that has been `false` for months, so the one path nobody could see was the
+/// one between the guest and the wire. This is the `wlan` treatment: no console
+/// traffic, one screen on demand, and the numbers arranged so the reader can
+/// tell the failures APART rather than watching a single "throughput sagged".
+pub struct BridgeStats {
+    pub active: bool,
+    pub rx_pkts: u64, pub rx_bytes: u64, pub rx_pps: u64,
+    pub tx_pkts: u64, pub tx_bytes: u64, pub tx_pps: u64,
+    pub window_ms: u64,
+    pub flows_tcp: u64, pub flows_udp: u64,
+    pub live: usize, pub cap: usize,
+    pub iq: usize, pub iq_hi: u64, pub iq_cap: usize,
+    pub rxring_min: u64,
+    pub drop_queue: u64, pub drop_table: u64, pub drop_egress: u64,
+    pub inject_false: u64,
+    pub rxlat_avg_us: u64, pub rxlat_max_us: u64,
+    pub net_irq: u64,
+    pub gro: bool, pub gro_frames: u64, pub gro_segs: u64,
+}
+
+// Previous snapshot, so a second `netstat` a few seconds later reads as a RATE.
+// Cumulative counters answer "did this ever work"; only the rate answers "is it
+// working right now", which is the whole question when a link dies after five
+// seconds.
+static RPT_TSC: AtomicU64 = AtomicU64::new(0);
+static RPT_RX: AtomicU64 = AtomicU64::new(0);
+static RPT_TX: AtomicU64 = AtomicU64::new(0);
+
+pub fn bridge_stats() -> BridgeStats {
+    let now = crate::interrupts::rdtsc();
+    let khz = (crate::interrupts::tsc_freq() / 1000).max(1);
+    let mhz = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
+    let rx_pkts = NS_RX_PKTS.load(AtOrd::Relaxed);
+    let tx_pkts = NS_TX_PKTS.load(AtOrd::Relaxed);
+    let prev_tsc = RPT_TSC.swap(now, AtOrd::Relaxed);
+    let prev_rx = RPT_RX.swap(rx_pkts, AtOrd::Relaxed);
+    let prev_tx = RPT_TX.swap(tx_pkts, AtOrd::Relaxed);
+    let window_ms = if prev_tsc == 0 { 0 } else { now.wrapping_sub(prev_tsc) / khz };
+    let per_s = |d: u64| if window_ms > 0 { d * 1000 / window_ms } else { 0 };
+    let n = NS_RXLAT_N.load(AtOrd::Relaxed);
+    let rxring_min = NS_RXRING_MIN.load(AtOrd::Relaxed);
+    BridgeStats {
+        active: L3_ACTIVE.load(AtOrd::Acquire),
+        rx_pkts, rx_bytes: NS_RX_BYTES.load(AtOrd::Relaxed),
+        rx_pps: per_s(rx_pkts.saturating_sub(prev_rx)),
+        tx_pkts, tx_bytes: NS_TX_BYTES.load(AtOrd::Relaxed),
+        tx_pps: per_s(tx_pkts.saturating_sub(prev_tx)),
+        window_ms,
+        flows_tcp: NS_TCP_FLOWS.load(AtOrd::Relaxed),
+        flows_udp: NS_UDP_FLOWS.load(AtOrd::Relaxed),
+        live: L3.lock().iter().flatten().count(), cap: L3_MAX,
+        iq: INBOUND_Q.lock().len(),
+        iq_hi: NS_IQ_HI.load(AtOrd::Relaxed), iq_cap: INBOUND_MAX,
+        rxring_min: if rxring_min == u64::MAX { 0 } else { rxring_min },
+        drop_queue: NS_DROP_QUEUE.load(AtOrd::Relaxed),
+        drop_table: NS_DROP_TABLE.load(AtOrd::Relaxed),
+        drop_egress: NS_DROP_EGRESS.load(AtOrd::Relaxed),
+        inject_false: NS_INJECT_FALSE.load(AtOrd::Relaxed),
+        rxlat_avg_us: if n > 0 { NS_RXLAT_SUM.load(AtOrd::Relaxed) / n / mhz } else { 0 },
+        rxlat_max_us: NS_RXLAT_MAX.load(AtOrd::Relaxed) / mhz,
+        net_irq: NS_NET_IRQ.load(AtOrd::Relaxed),
+        gro: GRO_ENABLED.load(AtOrd::Relaxed),
+        gro_frames: NS_GRO_FRAMES.load(AtOrd::Relaxed),
+        gro_segs: NS_GRO_SEGS.load(AtOrd::Relaxed),
+    }
+}
+
 /// Number of currently-active (non-closed) TCP sessions. The run_linux
 /// idle-detection uses this to extend the timeout when traffic is in
 /// flight.
@@ -1752,7 +1842,8 @@ pub fn reset_sessions() {
     // can never leave the HOST's own networking (DNS / OTA) bricked.
     crate::net::reset_poll_guard();
     for c in [&NS_RX_BYTES, &NS_RX_PKTS, &NS_TX_BYTES, &NS_TX_PKTS,
-              &NS_DROPS, &NS_HIGHWATER, &NS_LAST_TICK, &NS_IQ_HI,
+              &NS_DROP_QUEUE, &NS_DROP_TABLE, &NS_DROP_EGRESS,
+              &NS_HIGHWATER, &NS_LAST_TICK, &NS_IQ_HI,
               &NS_RXLAT_SUM, &NS_RXLAT_N, &NS_RXLAT_MAX,
               &NS_TCP_FLOWS, &NS_UDP_FLOWS, &NS_GRO_FRAMES, &NS_GRO_SEGS] {
         c.store(0, AtOrd::Relaxed);
