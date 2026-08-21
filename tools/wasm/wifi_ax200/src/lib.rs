@@ -672,6 +672,12 @@ struct Ax200 {
     /// `wlan unset ht40` is one command away when it goes dark again.
     want_ht40: bool,
     want_vht: bool,
+    /// Upper bound we put on the negotiated reorder window, from
+    /// `sys/config/wifi bawin`. 0 = no bound of ours, take what the AP asks
+    /// for. Exists because two device runs said 64 was SLOWER than 32 in both
+    /// widths, and comparing across sessions — different rssi, different rate
+    /// scaling, different loop rate — cannot settle that.
+    want_bawin: u16,
     want_txagg: bool,
     /// Set once the firmware has ignored a block-ack setup. Asking again costs
     /// another silent 300 ms AND wedges the transmit path: measured on the
@@ -2392,6 +2398,7 @@ impl Ax200 {
         self.want_txagg = cfg_on(cfg_get(text, b"txagg"));
         self.want_ht40 = cfg_on(cfg_get(text, b"ht40"));
         self.want_vht = cfg_on(cfg_get(text, b"vht"));
+        self.want_bawin = cfg_u16(cfg_get(text, b"bawin"), 0, ba::BA_WIN_MAX as u16);
         self.want_power_save = cfg_on(cfg_get(text, b"ps"));
         self.want_bt_coex = cfg_on(cfg_get(text, b"btcoex"));
         self.settle_ms = cfg_settle_ms(text);
@@ -3574,6 +3581,13 @@ impl Ax200 {
             r.d(ba::pool_used() as u64);
             r.c(b'/');
             r.d(ba::BA_POOL as u64);
+            // Whose decision the window was. Without this, `win 32` reads as
+            // "the AP asked for 32" when it may be our own bound.
+            if self.want_bawin != 0 {
+                r.s("  win capped by `bawin ");
+                r.d(self.want_bawin as u64);
+                r.c(b'`');
+            }
             if ba::pool_full() > 0 {
                 r.s("  POOL-FULL ");
                 r.d(ba::pool_full() as u64);
@@ -4182,9 +4196,12 @@ impl Ax200 {
         } else {
             IEEE80211_MAX_AMPDU_BUF_HT as u16
         };
-        let win = (if asked == 0 { max_buf } else { asked.min(max_buf) } as usize)
+        let mut win = (if asked == 0 { max_buf } else { asked.min(max_buf) } as usize)
             .min(ba::BA_WIN_MAX)
             .max(1) as u16;
+        if self.want_bawin != 0 {
+            win = win.min(self.want_bawin);
+        }
         self.ba_pending = Some(BaPending { tid, ssn, win, dialog, timeout,
                                            asked_ms: host::now_ms() });
         if self.st.addba_seen <= 3 {
@@ -6269,6 +6286,19 @@ fn cfg_on(v: Option<&[u8]>) -> bool {
     matches!(v, Some(v) if v.starts_with(b"on") || v.starts_with(b"1"))
 }
 
+/// A plain number from the config, clamped. 0 (and anything unparsable) means
+/// "not set" — the caller decides what that implies.
+fn cfg_u16(v: Option<&[u8]>, dflt: u16, max: u16) -> u16 {
+    let Some(v) = v else { return dflt };
+    let mut n = 0u32;
+    let mut any = false;
+    for &c in v {
+        if c.is_ascii_digit() { n = n * 10 + (c - b'0') as u32; any = true; } else { break; }
+        if n > max as u32 { return max; }
+    }
+    if any { n as u16 } else { dflt }
+}
+
 fn cfg_settle_ms(text: &[u8]) -> u32 {
     let Some(v) = cfg_get(text, b"settle_ms") else { return SETTLE_MS_DEFAULT };
     let mut n = 0u32;
@@ -6412,6 +6442,7 @@ pub extern "C" fn _start() {
         want_ampdu: false,
         want_ht40: false,
         want_vht: false,
+        want_bawin: 0,
         want_txagg: false,
         ba_fw_broken: false,
         link_published: false,
