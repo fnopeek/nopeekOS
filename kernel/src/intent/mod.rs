@@ -2448,9 +2448,14 @@ tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
         //     store sys/config/benchhost 192.168.178.97
         //
         // Falls back to the gateway, so every QEMU invocation keeps working.
+        // Hardcoded fallback, on request, until the bridge is fixed: the gateway
+        // default is a QEMU habit (slirp's server IS the gateway) and on real
+        // hardware it points the bench at the ROUTER, which fails for a reason
+        // that has nothing to do with what we are measuring. TEMPORARY.
+        const BENCH_FALLBACK: [u8; 4] = [192, 168, 178, 97];
         let host = crate::config::get("benchhost")
             .and_then(|v| parse_ip(v.trim()))
-            .unwrap_or_else(crate::net::ipv4::gateway);
+            .unwrap_or(BENCH_FALLBACK);
         kprintln!("[microvm] benchvm target {}.{}.{}.{}:80 ({} MB)",
             host[0], host[1], host[2], host[3], mb);
         let _ = write!(

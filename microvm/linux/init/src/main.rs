@@ -173,59 +173,102 @@ fn launch_wayland(kmsg_fd: i64) {
     // OCSP, telemetry, addons — like a fresh install. The previous
     // crippled set masked real bugs; we'd rather debug LibreWolf with
     // a real LibreWolf.
-    // Measure what ARRIVED, not what was asked for. The old script divided a
-    // hardcoded 150 MB by the elapsed time and threw wget's exit status away, so
-    // a connection that failed in 50 ms printed "24000 Mbit" — a measuring tool
-    // that reports success for a failure is worse than none. It also ignored
-    // `nopeekbench=<MB>` entirely and always asked for 150.
     let arg2 = b"exec >/dev/kmsg 2>&1; \
+                 NPT=$(sed -n 's/.*nopeektime=\\([0-9][0-9]*\\).*/\\1/p' /proc/cmdline); \
+                 [ -n \"$NPT\" ] && date -s @\"$NPT\" >/dev/null 2>&1; \
+                 echo 1 > /proc/sys/kernel/print-fatal-signals 2>/dev/null; \
+                 echo 1 > /proc/sys/kernel/printk 2>/dev/null; \
+                 echo on > /proc/sys/kernel/printk_devkmsg 2>/dev/null; \
+                 if echo always > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null; then \
+                   echo madvise > /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null; \
+                   echo '<0>[thp] transparent_hugepage=always (cut TLB shootdowns / csd)' > /dev/kmsg; \
+                 else echo '<0>[thp] THP sysfs ABSENT - not compiled in, kernel rebuild needed' > /dev/kmsg; fi; \
+                 hostname nopeek 2>/dev/null \
+                   || echo nopeek > /proc/sys/kernel/hostname 2>/dev/null; \
+                 mkdir -p /tmp/xrt; chmod 0700 /tmp/xrt; \
+                 mount -t tmpfs -o mode=0755 tmpfs /run 2>/dev/null; \
+                 mkdir -p /dev/shm 2>/dev/null; mount -t tmpfs -o mode=1777 tmpfs /dev/shm 2>/dev/null; \
+                 mkdir -p /run/udev; \
+                 udevd --daemon 2>/dev/null; \
+                 udevadm trigger --type=devices --action=add 2>/dev/null; \
+                 udevadm settle --timeout=10 2>/dev/null; \
                  IFACE=$(for d in /sys/class/net/*; do n=${d##*/}; [ \"$n\" = lo ] || { echo $n; break; }; done); \
-                 ip link set \"$IFACE\" up 2>/dev/null || ifconfig \"$IFACE\" up 2>/dev/null; \
+                 ip link set \"$IFACE\" up 2>/dev/null \
+                   || ifconfig \"$IFACE\" up 2>/dev/null; \
                  ip addr add 10.99.0.2/24 dev \"$IFACE\" 2>/dev/null \
                    || ifconfig \"$IFACE\" 10.99.0.2 netmask 255.255.255.0 2>/dev/null; \
                  ip route add default via 10.99.0.1 2>/dev/null \
                    || route add default gw 10.99.0.1 2>/dev/null; \
-                 H=$(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^nopeekbenchhost=//p'); \
-                 [ -z \"$H\" ] && H=10.0.2.2; \
-                 MB=$(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^nopeekbench=//p'); \
-                 case \"$MB\" in ''|*[!0-9]*) MB=50 ;; esac; \
-                 echo \"<0>[netbench-vm] iface=$IFACE server=$H size=${MB}MB\" > /dev/kmsg; \
-                 echo \"<0>[netbench-vm] === idle RTT (ping x8) ===\" > /dev/kmsg; \
-                 ping -c 8 \"$H\" 2>&1 | tail -3; \
-                 echo 1 > /proc/sys/net/ipv4/tcp_no_metrics_save 2>/dev/null; \
-                 echo \"<0>[netbench-vm] --- guest Tcp: BEFORE (compare InSegs with the host's host-to-guest count) ---\" > /dev/kmsg; \
-                 grep '^Tcp:' /proc/net/snmp; \
-                 echo \"<0>[netbench-vm] === GET x2 wget + x2 nc - BYTES COUNTED, not assumed ===\" > /dev/kmsg; \
-                 for I in 1 2; do \
-                   T0=$(cut -d' ' -f1 /proc/uptime); \
-                   N=$(wget -q -O - \"http://$H/get?mb=$MB\" 2>/dev/null | wc -c); \
-                   T1=$(cut -d' ' -f1 /proc/uptime); \
-                   awk -v a=$T0 -v b=$T1 -v i=$I -v n=$N -v w=$MB 'BEGIN{d=b-a;if(d<=0)d=0.001; \
-                     if(n<1){printf \"<0>[netbench-vm] GET wget#%s FAILED after %.2fs - 0 bytes (server unreachable, or the bridge dropped it)\\n\",i,d} \
-                     else{printf \"<0>[netbench-vm] GET wget#%s %d of %d MB in %.2fs = %.0f Mbit\\n\",i,n/1048576,w,d,n*8/d/1000000}}' > /dev/kmsg; \
+                 echo 1000 > /proc/sys/net/core/netdev_budget 2>/dev/null; \
+                 echo 8000 > /proc/sys/net/core/netdev_budget_usecs 2>/dev/null; \
+                 echo 32768 > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null; \
+                 echo f > /sys/class/net/\"$IFACE\"/queues/rx-0/rps_cpus 2>/dev/null; \
+                 echo 4096 > /sys/class/net/\"$IFACE\"/queues/rx-0/rps_flow_cnt 2>/dev/null; \
+                 echo \"<0>[rxtune] budget=$(cat /proc/sys/net/core/netdev_budget) rps_cpus=$(cat /sys/class/net/$IFACE/queues/rx-0/rps_cpus 2>/dev/null)\" > /dev/kmsg; \
+                 printf 'nameserver 1.1.1.1\nnameserver 1.0.0.1\n' > /tmp/resolv.conf; \
+                 mount --bind /tmp/resolv.conf /etc/resolv.conf 2>/dev/null; \
+                 mkdir -p /tmp/moz /tmp/bcache /tmp/gleandb; \
+                 ( [ -b /dev/vda ] && echo '<0>[moz-disk] /dev/vda present' > /dev/kmsg || echo '<0>[moz-disk] /dev/vda ABSENT' > /dev/kmsg ); \
+                 if mount -t ext4 /dev/vda /tmp/moz 2>/tmp/mnterr; then \
+                   echo '<0>[moz-disk] ext4 mounted at /tmp/moz (persist OK)' > /dev/kmsg; \
+                 else \
+                   echo '<0>[moz-disk] ext4 mount FAILED -> profile lives in RAM, NO persist:' > /dev/kmsg; \
+                   cat /tmp/mnterr > /dev/kmsg 2>/dev/null; \
+                 fi; \
+                 rm -rf /tmp/moz/datareporting 2>/dev/null; \
+                 ln -s /tmp/gleandb /tmp/moz/datareporting 2>/dev/null; \
+                 mkdir -p /tmp/npkhome; \
+                 mount -t 9p -o trans=virtio,version=9p2000.L,access=any,msize=131072 npkhome /tmp/npkhome 2>/dev/null \
+                   && echo '<0>[9p] npkhome mounted at /tmp/npkhome' > /dev/kmsg \
+                   || echo '<0>[9p] mount FAILED (read path)' > /dev/kmsg; \
+                 : > /tmp/moz/user.js; \
+                 for p in \
+                   'layers.gpu-process.enabled|false' \
+                   'gfx.webrender.software|true' \
+                   'gfx.canvas.accelerated|false' \
+                   'widget.dmabuf.force-enabled|false' \
+                   'browser.shell.checkDefaultBrowser|false' \
+                   'ui.systemUsesDarkTheme|1' \
+                   'browser.theme.toolbar-theme|0' \
+                   'browser.theme.content-theme|0' \
+                   'layout.css.prefers-color-scheme.content-override|0' \
+                   'security.sandbox.warn_unprivileged_namespaces|false' \
+                   'media.av1.enabled|false' \
+                   'browser.startup.page|3' \
+                   'browser.sessionstore.interval|5000' \
+                   'browser.cache.disk.enable|false' \
+                   'datareporting.healthreport.uploadEnabled|false' \
+                   'datareporting.policy.dataSubmissionEnabled|false' \
+                   'toolkit.telemetry.enabled|false' \
+                   'toolkit.telemetry.unified|false' \
+                   'toolkit.telemetry.archive.enabled|false' \
+                   'browser.download.folderList|2' \
+                   'browser.download.useDownloadDir|true' \
+                   'toolkit.legacyUserProfileCustomizations.stylesheets|true'; \
+                 do k=${p%|*}; v=${p#*|}; \
+                   echo \"user_pref(\\\"$k\\\", $v);\" >> /tmp/moz/user.js; \
                  done; \
-                 for I in 1 2; do \
-                   T0=$(cut -d' ' -f1 /proc/uptime); \
-                   N=$(printf 'GET /get?mb='\"$MB\"' HTTP/1.0\\r\\nHost: '\"$H\"'\\r\\n\\r\\n' | nc -w 20 \"$H\" 80 2>/dev/null | wc -c); \
-                   T1=$(cut -d' ' -f1 /proc/uptime); \
-                   awk -v a=$T0 -v b=$T1 -v i=$I -v n=$N -v w=$MB 'BEGIN{d=b-a;if(d<=0)d=0.001; \
-                     if(n<1){printf \"<0>[netbench-vm] GET nc#%s FAILED after %.2fs - 0 bytes\\n\",i,d} \
-                     else{printf \"<0>[netbench-vm] GET nc#%s %d of %d MB in %.2fs = %.0f Mbit\\n\",i,n/1048576,w,d,n*8/d/1000000}}' > /dev/kmsg; \
-                 done; \
-                 echo \"<0>[netbench-vm] === PUT ${MB} MB ===\" > /dev/kmsg; \
-                 B=$((MB*1024*1024)); \
-                 T0=$(cut -d' ' -f1 /proc/uptime); \
-                 { printf 'POST /upload HTTP/1.1\\r\\nHost: '\"$H\"'\\r\\nContent-Length: %d\\r\\nConnection: close\\r\\n\\r\\n' \"$B\"; \
-                   dd if=/dev/zero bs=1M count=$MB 2>/dev/null; } | nc -w 30 \"$H\" 80 > /dev/null 2>&1; \
-                 T1=$(cut -d' ' -f1 /proc/uptime); \
-                 awk -v a=$T0 -v b=$T1 -v w=$MB 'BEGIN{d=b-a;if(d<=0)d=0.001;printf \"<0>[netbench-vm] PUT %d MB in %.2fs = %.0f Mbit (check the server logged it)\\n\",w,d,w*8/d}' > /dev/kmsg; \
-                 echo \"<0>[netbench-vm] --- guest Tcp: AFTER ---\" > /dev/kmsg; \
-                 grep '^Tcp:' /proc/net/snmp; \
-                 echo \"<0>[netbench-vm] --- named loss/reorder counters (netstat -s) ---\" > /dev/kmsg; \
-                 netstat -s 2>/dev/null | grep -iE 'reorder|out.of.order|retrans|sack|lost|recover|prune|collaps|drop|fail|dupl|checksum'; \
-                 echo \"<0>[netbench-vm] --- TcpExt + IpExt counters (value > 100) ---\" > /dev/kmsg; \
-                 awk '/^(TcpExt|IpExt):/{if(!h[$1]){for(i=2;i<=NF;i++)n[$1,i]=$i;h[$1]=1;next}for(i=2;i<=NF;i++)if($i+0>100)print $1,n[$1,i],$i}' /proc/net/netstat; \
-                 echo \"<0>[netbench-vm] done -- halting\" > /dev/kmsg; \
+                 echo 'user_pref(\"browser.cache.disk.parent_directory\", \"/tmp/bcache\");' >> /tmp/moz/user.js; \
+                 echo 'user_pref(\"browser.download.dir\", \"/tmp/npkhome/downloads\");' >> /tmp/moz/user.js; \
+                 echo 'user_pref(\"media.cubeb.backend\", \"alsa\");' >> /tmp/moz/user.js; \
+                 echo 'user_pref(\"media.cubeb.sandbox\", false);' >> /tmp/moz/user.js; \
+                 echo 'user_pref(\"media.audioipc.shm_area_size\", 262144);' >> /tmp/moz/user.js; \
+                 echo 'user_pref(\"media.cubeb_latency_playback_ms\", 2000);' >> /tmp/moz/user.js; \
+                 sync; \
+                 mkdir -p /tmp/moz/chrome; \
+                 echo '.titlebar-min, .titlebar-max, .titlebar-maximize, .titlebar-restore { display: none !important; }' > /tmp/moz/chrome/userChrome.css; \
+                 export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
+                 WLR_RENDERER=pixman WLR_BACKENDS=libinput,drm \
+                 LIBSEAT_BACKEND=seatd \
+                 XDG_CONFIG_HOME=/tmp HOME=/tmp \
+                 MOZ_ENABLE_WAYLAND=1 \
+                 MOZ_DISABLE_UTILITY_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1; \
+                 seatd -g root > /tmp/seatd.log 2>&1 & \
+                 ( while true; do sync 2>/dev/null; sleep 3; done ) & \
+                 sleep 1; \
+                 cage -- librewolf --no-remote --profile /tmp/moz \
+                   > /tmp/cage.log 2>&1; \
+                 rc=$?; echo \"<0>[wl] browser exited rc=$rc\" > /dev/kmsg; \
                  sync 2>/dev/null; halt -f 2>/dev/null; poweroff -f 2>/dev/null; \
                  while true; do sleep 3600; done\0".as_ptr();
     let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
@@ -284,6 +327,10 @@ fn launch_bench(kmsg_fd: i64) {
     let prog = b"/bin/sh\0".as_ptr();
     let arg0 = b"/bin/sh\0".as_ptr();
     let arg1 = b"-c\0".as_ptr();
+    // Measure what ARRIVED, not what was asked for. The old script divided a
+    // hardcoded 150 MB by the elapsed time and threw wget's exit status away, so
+    // a connection that failed in 50 ms printed "24000 Mbit" -- a measuring tool
+    // that reports success for a failure is worse than none.
     let arg2 = b"exec >/dev/kmsg 2>&1; \
                  IFACE=$(for d in /sys/class/net/*; do n=${d##*/}; [ \"$n\" = lo ] || { echo $n; break; }; done); \
                  ip link set \"$IFACE\" up 2>/dev/null || ifconfig \"$IFACE\" up 2>/dev/null; \
@@ -293,45 +340,44 @@ fn launch_bench(kmsg_fd: i64) {
                    || route add default gw 10.99.0.1 2>/dev/null; \
                  H=$(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^nopeekbenchhost=//p'); \
                  [ -z \"$H\" ] && H=10.0.2.2; \
-                 echo \"<0>[netbench-vm] iface=$IFACE server=$H -- SHORT bench (run 'cores' during a GET) ===\" > /dev/kmsg; \
+                 MB=$(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^nopeekbench=//p'); \
+                 case \"$MB\" in ''|*[!0-9]*) MB=50 ;; esac; \
+                 echo \"<0>[netbench-vm] iface=$IFACE server=$H size=${MB}MB\" > /dev/kmsg; \
                  echo \"<0>[netbench-vm] === idle RTT (ping x8) ===\" > /dev/kmsg; \
                  ping -c 8 \"$H\" 2>&1 | tail -3; \
                  echo 1 > /proc/sys/net/ipv4/tcp_no_metrics_save 2>/dev/null; \
-                 echo 1 > /proc/sys/net/ipv4/tcp_no_ssthresh_metrics_save 2>/dev/null; \
-                 NMS=$(cat /proc/sys/net/ipv4/tcp_no_metrics_save 2>/dev/null); \
-                 echo \"<0>[netbench-vm] === GET 3x wget + 3x nc (is busybox wget the bottleneck?) ===\" > /dev/kmsg; \
-                 for I in 1 2 3; do \
+                 echo \"<0>[netbench-vm] --- guest Tcp: BEFORE (hold InSegs against the host's host-to-guest count) ---\" > /dev/kmsg; \
+                 grep '^Tcp:' /proc/net/snmp; \
+                 echo \"<0>[netbench-vm] === GET x2 wget + x2 nc - BYTES COUNTED, not assumed ===\" > /dev/kmsg; \
+                 for I in 1 2; do \
                    T0=$(cut -d' ' -f1 /proc/uptime); \
-                   wget -q -O /dev/null \"http://$H/get?mb=150\" 2>/dev/null; \
+                   N=$(wget -q -O - \"http://$H/get?mb=$MB\" 2>/dev/null | wc -c); \
                    T1=$(cut -d' ' -f1 /proc/uptime); \
-                   awk -v a=$T0 -v b=$T1 -v i=$I 'BEGIN{d=b-a;if(d<=0)d=0.001;printf \"<0>[netbench-vm] GET wget#%s 150MB: %.2fs = %.0f Mbit\\n\",i,d,150*8/d}' > /dev/kmsg; \
+                   awk -v a=$T0 -v b=$T1 -v i=$I -v n=$N -v w=$MB 'BEGIN{d=b-a;if(d<=0)d=0.001; \
+                     if(n<1){printf \"<0>[netbench-vm] GET wget#%s FAILED after %.2fs - 0 bytes (server unreachable, or the bridge ate it)\\n\",i,d} \
+                     else{printf \"<0>[netbench-vm] GET wget#%s %d of %d MB in %.2fs = %.0f Mbit\\n\",i,n/1048576,w,d,n*8/d/1000000}}' > /dev/kmsg; \
                  done; \
-                 for I in 1 2 3; do \
+                 for I in 1 2; do \
                    T0=$(cut -d' ' -f1 /proc/uptime); \
-                   printf 'GET /get?mb=150 HTTP/1.0\\r\\nHost: '\"$H\"'\\r\\n\\r\\n' | nc -w 20 \"$H\" 80 > /dev/null 2>&1; \
+                   N=$(printf 'GET /get?mb='\"$MB\"' HTTP/1.0\\r\\nHost: '\"$H\"'\\r\\n\\r\\n' | nc -w 20 \"$H\" 80 2>/dev/null | wc -c); \
                    T1=$(cut -d' ' -f1 /proc/uptime); \
-                   awk -v a=$T0 -v b=$T1 -v i=$I 'BEGIN{d=b-a;if(d<=0)d=0.001;printf \"<0>[netbench-vm] GET nc#%s 150MB: %.2fs = %.0f Mbit\\n\",i,d,150*8/d}' > /dev/kmsg; \
+                   awk -v a=$T0 -v b=$T1 -v i=$I -v n=$N -v w=$MB 'BEGIN{d=b-a;if(d<=0)d=0.001; \
+                     if(n<1){printf \"<0>[netbench-vm] GET nc#%s FAILED after %.2fs - 0 bytes\\n\",i,d} \
+                     else{printf \"<0>[netbench-vm] GET nc#%s %d of %d MB in %.2fs = %.0f Mbit\\n\",i,n/1048576,w,d,n*8/d/1000000}}' > /dev/kmsg; \
                  done; \
-                 echo \"<0>[netbench-vm] === PUT 300 (+ mid-flight upload-socket cwnd/rtt) ===\" > /dev/kmsg; \
-                 B=$((300*1024*1024)); \
+                 echo \"<0>[netbench-vm] === PUT ${MB} MB ===\" > /dev/kmsg; \
+                 B=$((MB*1024*1024)); \
                  T0=$(cut -d' ' -f1 /proc/uptime); \
                  { printf 'POST /upload HTTP/1.1\\r\\nHost: '\"$H\"'\\r\\nContent-Length: %d\\r\\nConnection: close\\r\\n\\r\\n' \"$B\"; \
-                   dd if=/dev/zero bs=1M count=300 2>/dev/null; } | nc \"$H\" 80 & \
-                 NCJOB=$!; \
-                 sleep 2; \
-                 if command -v ss >/dev/null 2>&1; then \
-                   echo \"<0>[netbench-vm] --- ss -tin upload socket (mid-flight: snd_cwnd/rtt) ---\" > /dev/kmsg; \
-                   ss -tin 2>/dev/null | grep -A1 \"$H:80\"; \
-                 else echo \"<0>[netbench-vm] ss absent (busybox) -- read host 'cores' net TX + worker BUSY% for b1/b2\" > /dev/kmsg; fi; \
-                 wait $NCJOB; \
+                   dd if=/dev/zero bs=1M count=$MB 2>/dev/null; } | nc -w 30 \"$H\" 80 > /dev/null 2>&1; \
                  T1=$(cut -d' ' -f1 /proc/uptime); \
-                 echo \"<0>[netbench-vm] PUT 300 MB: guest uptime $T0 -> $T1\" > /dev/kmsg; \
-                 echo \"<0>[netbench-vm] === guest TCP counters (loss/reorder evidence) ===\" > /dev/kmsg; \
+                 awk -v a=$T0 -v b=$T1 -v w=$MB 'BEGIN{d=b-a;if(d<=0)d=0.001;printf \"<0>[netbench-vm] PUT %d MB in %.2fs = %.0f Mbit (check the server logged it)\\n\",w,d,w*8/d}' > /dev/kmsg; \
+                 echo \"<0>[netbench-vm] --- guest Tcp: AFTER ---\" > /dev/kmsg; \
                  grep '^Tcp:' /proc/net/snmp; \
-                 echo \"<0>[netbench-vm] --- named loss/reorder counters (netstat -s) ---\" > /dev/kmsg; \
-                 netstat -s 2>/dev/null | grep -iE 'reorder|out.of.order|retrans|sack|lost|recover|prune|collaps|drop|fail|dupl'; \
-                 echo \"<0>[netbench-vm] --- named TcpExt counters (value > 100) ---\" > /dev/kmsg; \
-                 awk '/^TcpExt:/{if(!h){for(i=2;i<=NF;i++)n[i]=$i;h=1;next}for(i=2;i<=NF;i++)if($i+0>100)print n[i],$i}' /proc/net/netstat; \
+                 echo \"<0>[netbench-vm] --- loss/reorder/checksum counters ---\" > /dev/kmsg; \
+                 netstat -s 2>/dev/null | grep -iE 'reorder|out.of.order|retrans|sack|lost|recover|prune|collaps|drop|fail|dupl|checksum'; \
+                 echo \"<0>[netbench-vm] --- TcpExt/IpExt counters (value > 100) ---\" > /dev/kmsg; \
+                 awk '/^(TcpExt|IpExt):/{if(!h[$1]){for(i=2;i<=NF;i++)n[$1,i]=$i;h[$1]=1;next}for(i=2;i<=NF;i++)if($i+0>100)print $1,n[$1,i],$i}' /proc/net/netstat; \
                  echo \"<0>[netbench-vm] done -- halting\" > /dev/kmsg; \
                  sync 2>/dev/null; halt -f 2>/dev/null; poweroff -f 2>/dev/null; \
                  while true; do sleep 3600; done\0".as_ptr();

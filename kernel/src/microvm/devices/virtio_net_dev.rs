@@ -143,6 +143,11 @@ struct VirtQueue {
     /// `vring_need_event`. Lets us interrupt only when used.idx crosses the
     /// guest's `used_event` since we last told it.
     last_irq_used_idx: u16,
+    /// QEMU's `signalled_used_valid`: false until the first notify decision on
+    /// this queue. Without it there is no guaranteed first interrupt after a
+    /// reset — the first crossing depends on the guest's zeroed `used_event`
+    /// happening to land inside the window.
+    signalled_used_valid: bool,
 }
 
 impl VirtQueue {
@@ -254,6 +259,7 @@ impl VirtioNet {
                 desc_lo: 0, desc_hi: 0, driver_lo: 0, driver_hi: 0,
                 device_lo: 0, device_hi: 0,
                 last_avail_idx: 0, used_idx: 0, last_irq_used_idx: 0,
+                signalled_used_valid: false,
             }; NUM_QUEUES as usize],
             isr: 0,
             pending_kick_queue: None,
@@ -442,6 +448,7 @@ impl VirtioNet {
                 desc_lo: 0, desc_hi: 0, driver_lo: 0, driver_hi: 0,
                 device_lo: 0, device_hi: 0,
                 last_avail_idx: 0, used_idx: 0, last_irq_used_idx: 0,
+                signalled_used_valid: false,
             };
         }
         self.driver_features = [0; 2];
@@ -563,6 +570,24 @@ impl VirtioNet {
     pub fn rx_should_interrupt(&mut self, mem: &GuestMem) -> bool {
         let q = &mut self.queues[0];
         if !q.ready() { return false; }
+        // QEMU virtio_should_notify opens with `smp_mb()` and the comment "We
+        // need to expose used array entries before checking used event." That
+        // barrier was not ported, and on x86 it is the ONE reordering the
+        // hardware allows: our store of used.idx may still sit in the store
+        // buffer while the load of used_event below executes. The guest does its
+        // half correctly (store used_event; mfence; load used.idx), so a missing
+        // fence on our side is a textbook Dekker miss — both sides read stale and
+        // neither wakes the other.
+        //
+        // Ordinarily a lost notification is a hiccup. Here it is terminal,
+        // because `last_irq_used_idx` below only moves FORWARD: once it has
+        // passed the guest's used_event, `need_event` is false for every future
+        // check, and the guest can only move used_event from inside NAPI, which
+        // only runs on an interrupt. Nothing in the device re-opens that loop —
+        // and with the RX ring drained, nothing is injected either, so the
+        // decision is never even re-evaluated. That is the absorbing state:
+        // works, then one handshake is missed, then silence.
+        fence(Ordering::SeqCst);
         if self.driver_features[0] & (1 << VIRTIO_RING_F_EVENT_IDX) != 0 {
             let ev = used_event(mem, q.avail_gpa(), q.size);
             // QEMU virtio_should_notify: `old = signalled_used; signalled_used =
@@ -571,8 +596,14 @@ impl VirtioNet {
             // ahead of the guest's used_event and need_event stays false forever
             // (no IRQ → idle NAPI never wakes → network hangs after a while).
             let old = q.last_irq_used_idx;
+            let valid = q.signalled_used_valid;
+            q.signalled_used_valid = true;
             q.last_irq_used_idx = q.used_idx;
-            need_event(ev, q.used_idx, old)
+            // `!v || need_event(...)`, QEMU's exact expression. The first
+            // decision after a reset has no meaningful `old`, so it must always
+            // notify — otherwise the very first crossing can be swallowed and
+            // there is no second chance.
+            !valid || need_event(ev, q.used_idx, old)
         } else {
             avail_flags(mem, q.avail_gpa()) & VRING_AVAIL_F_NO_INTERRUPT == 0
         }
@@ -722,11 +753,14 @@ impl VirtioNet {
     fn tx_should_interrupt(&mut self, mem: &GuestMem) -> bool {
         let q = &mut self.queues[1];
         if !q.ready() { return false; }
+        fence(Ordering::SeqCst); // same barrier, same reason as the RX side
         if self.driver_features[0] & (1 << VIRTIO_RING_F_EVENT_IDX) != 0 {
             let ev = used_event(mem, q.avail_gpa(), q.size);
             let old = q.last_irq_used_idx;
+            let valid = q.signalled_used_valid;
+            q.signalled_used_valid = true;
             q.last_irq_used_idx = q.used_idx;   // signalled_used every check (QEMU)
-            need_event(ev, q.used_idx, old)
+            !valid || need_event(ev, q.used_idx, old)
         } else {
             avail_flags(mem, q.avail_gpa()) & VRING_AVAIL_F_NO_INTERRUPT == 0
         }
