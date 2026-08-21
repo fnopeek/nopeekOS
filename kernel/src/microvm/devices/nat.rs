@@ -482,7 +482,16 @@ fn tcp_pseudo_partial(src: [u8; 4], dst: [u8; 4]) -> u16 {
 fn gro_flush_slot(tbl: &mut [Option<GroCtx>; GRO_SLOTS], i: usize) {
     if let Some(mut c) = tbl[i].take() {
         gro_finalize(&mut c);
-        INBOUND_Q.lock().push_back((crate::interrupts::rdtsc(), c.frame));
+        // The THIRD push into the staging queue, and the one that carries the
+        // payload. 0.296.0 gave the queue a wake so a reply no longer waited for
+        // the next accidental VM-exit — and wired it into the two pushes in
+        // `l3_inbound` while this one sat here unwoken. Every coalesced bulk
+        // frame, which is to say every download, took the old slow path.
+        let mut q = INBOUND_Q.lock();
+        let was_empty = q.is_empty();
+        q.push_back((crate::interrupts::rdtsc(), c.frame));
+        drop(q);
+        wake_consumer(was_empty);
     }
 }
 
