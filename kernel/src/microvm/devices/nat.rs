@@ -134,6 +134,16 @@ static NS_START_TICK: AtomicU64 = AtomicU64::new(0);
 
 pub fn note_guest_kick() { NS_GUEST_KICKS.fetch_add(1, AtOrd::Relaxed); }
 
+/// Where a guest IPv4 frame goes when it does NOT come out the other side.
+/// `handle_ipv4` has five silent `return None`s; between them they can swallow
+/// every packet a guest sends and leave the report showing a healthy zero in
+/// every loss column. Counted, so the gap between "frames in" and "packets out"
+/// has to name itself.
+static NS_IP_MALFORMED: AtomicU64 = AtomicU64::new(0); // length / total-len clamp
+static NS_IP_TO_GW: AtomicU64 = AtomicU64::new(0);     // addressed to the gateway, not DNS
+static NS_IP_DNS: AtomicU64 = AtomicU64::new(0);       // answered (or queued) by our resolver
+static NS_IP_PROTO: AtomicU64 = AtomicU64::new(0);     // not TCP / UDP / ICMP
+
 static NS_DROP_QUEUE: AtomicU64 = AtomicU64::new(0);  // INBOUND_Q overflow
 static NS_DROP_TABLE: AtomicU64 = AtomicU64::new(0);  // L3 masquerade table full
 static NS_DROP_EGRESS: AtomicU64 = AtomicU64::new(0); // host NIC refused the frame
@@ -1133,10 +1143,10 @@ fn handle_arp(frame: &[u8]) -> Option<Vec<u8>> {
 /// IPv4 dispatch: only UDP→10.99.0.1:53 has a real handler today.
 /// Everything else logs a cap-reject and returns None.
 fn handle_ipv4(frame: &[u8], caps: &NetCaps, gso_size: u16) -> Option<Vec<u8>> {
-    if frame.len() < ETH_HDR_LEN + IPV4_HDR_LEN { return None; }
+    if frame.len() < ETH_HDR_LEN + IPV4_HDR_LEN { NS_IP_MALFORMED.fetch_add(1, AtOrd::Relaxed); return None; }
     let ip = &frame[ETH_HDR_LEN..];
     let ihl = (ip[0] & 0x0F) as usize * 4;
-    if ihl < IPV4_HDR_LEN || frame.len() < ETH_HDR_LEN + ihl { return None; }
+    if ihl < IPV4_HDR_LEN || frame.len() < ETH_HDR_LEN + ihl { NS_IP_MALFORMED.fetch_add(1, AtOrd::Relaxed); return None; }
 
     let proto = ip[9];
     let src_ip: [u8; 4] = ip[12..16].try_into().ok()?;
@@ -1147,12 +1157,12 @@ fn handle_ipv4(frame: &[u8], caps: &NetCaps, gso_size: u16) -> Option<Vec<u8>> {
     // misframes the response → Firefox reads a wild length → ~4 GiB
     // alloc → crash. Inbound is already clamped in net/ipv4.rs.
     let ip_total = u16::from_be_bytes([ip[2], ip[3]]) as usize;
-    if ip_total < ihl || ip_total > ip.len() { return None; }
+    if ip_total < ihl || ip_total > ip.len() { NS_IP_MALFORMED.fetch_add(1, AtOrd::Relaxed); return None; }
     let l4 = &ip[ihl..ip_total];
 
     match proto {
         PROTO_UDP => {
-            if l4.len() < UDP_HDR_LEN { return None; }
+            if l4.len() < UDP_HDR_LEN { NS_IP_MALFORMED.fetch_add(1, AtOrd::Relaxed); return None; }
             let src_port = u16::from_be_bytes([l4[0], l4[1]]);
             let dst_port = u16::from_be_bytes([l4[2], l4[3]]);
             let udp_len  = u16::from_be_bytes([l4[4], l4[5]]) as usize;
@@ -1164,8 +1174,10 @@ fn handle_ipv4(frame: &[u8], caps: &NetCaps, gso_size: u16) -> Option<Vec<u8>> {
                     kprintln!("[nat] DNS query dropped (cap allow_dns=false)");
                     return None;
                 }
+                NS_IP_DNS.fetch_add(1, AtOrd::Relaxed);
                 handle_dns(src_ip, src_port, dgram)
             } else if dst_ip == GATEWAY_IP {
+                NS_IP_TO_GW.fetch_add(1, AtOrd::Relaxed);
                 None    // other gateway-directed UDP: nothing here
             } else {
                 if !caps.allow_udp {
@@ -1200,7 +1212,7 @@ fn handle_ipv4(frame: &[u8], caps: &NetCaps, gso_size: u16) -> Option<Vec<u8>> {
             }
             l3_icmp_outbound(dst_ip, l4)
         }
-        _ => None,
+        _ => { NS_IP_PROTO.fetch_add(1, AtOrd::Relaxed); None }
     }
 }
 
@@ -1482,9 +1494,20 @@ pub fn pump(
     if iq > NS_IQ_HI.load(AtOrd::Relaxed) {
         NS_IQ_HI.store(iq, AtOrd::Relaxed);
     }
+    // The window block below CONSUMES its counters with `swap(0)`. That was fine
+    // while it was the only reader — it printed them and moved on. It is not fine
+    // now that `netstat` reads the same statics on demand: the swap ran every 5 s
+    // whether or not anything was printed (NETSTAT_DEBUG has been false for
+    // months), so every total the report showed was really "since some tick in
+    // the last five seconds". It cost an evening reading `6 pkt` next to
+    // `65 flows opened` and looking for the packets that were never missing.
+    //
+    // A counter with two readers cannot be reset by one of them. The whole block
+    // is now gated on the flag that decides whether it prints at all.
+    const NETSTAT_WINDOW: bool = false;
     let last = NS_LAST_TICK.load(AtOrd::Relaxed);
     let dt = now.wrapping_sub(last);
-    if last != 0 && dt >= 500 {
+    if NETSTAT_WINDOW && last != 0 && dt >= 500 {
         let rxb = NS_RX_BYTES.swap(0, AtOrd::Relaxed);
         let rxp = NS_RX_PKTS.swap(0, AtOrd::Relaxed);
         let txb = NS_TX_BYTES.swap(0, AtOrd::Relaxed);
@@ -1828,6 +1851,7 @@ pub struct BridgeStats {
     pub gpu_kb: u64, pub gpu_xfers: u64, pub gpu_kbps: u64,
     pub gtimer_ps: u64, pub pump_ps: u64,
     pub kicks_out: u64,
+    pub ip_malformed: u64, pub ip_to_gw: u64, pub ip_dns: u64, pub ip_proto: u64,
 }
 
 // Previous snapshot, so a second `netstat` a few seconds later reads as a RATE.
@@ -1895,6 +1919,10 @@ pub fn bridge_stats() -> BridgeStats {
         gtimer_ps: per_s(gt.saturating_sub(prev_gt)),
         pump_ps: per_s(pumps.saturating_sub(prev_pump)),
         kicks_out: NS_KICK_DECOUPLED.load(AtOrd::Relaxed),
+        ip_malformed: NS_IP_MALFORMED.load(AtOrd::Relaxed),
+        ip_to_gw: NS_IP_TO_GW.load(AtOrd::Relaxed),
+        ip_dns: NS_IP_DNS.load(AtOrd::Relaxed),
+        ip_proto: NS_IP_PROTO.load(AtOrd::Relaxed),
     }
 }
 
@@ -1935,7 +1963,8 @@ pub fn reset_counters() {
               &NS_GUEST_KICKS, &NS_GUEST_FRAMES, &NS_GUEST_ARP, &NS_GUEST_OTHER,
               &NS_GPU_BYTES, &NS_GPU_XFERS, &RPT_GPU,
               &NS_GTIMER, &NS_PUMP_CALLS, &RPT_GT, &RPT_PUMP,
-              &NS_KICK_DECOUPLED, &LAST_KICK_TSC] {
+              &NS_KICK_DECOUPLED, &LAST_KICK_TSC,
+              &NS_IP_MALFORMED, &NS_IP_TO_GW, &NS_IP_DNS, &NS_IP_PROTO] {
         c.store(0, AtOrd::Relaxed);
     }
     NS_START_TICK.store(crate::interrupts::ticks().max(1), AtOrd::Relaxed);
