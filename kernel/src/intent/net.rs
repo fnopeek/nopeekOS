@@ -145,13 +145,16 @@ pub fn intent_netstat() {
                 lport, rip[0], rip[1], rip[2], rip[3], rport, state);
         }
     }
-    if crate::microvm::vm_active() {
-        bridge_report();
-    }
+    bridge_report();
     kprintln!();
 }
 
-/// The microVM's side of the wire, printed only while a VM is up.
+/// The microVM's side of the wire. Prints itself only when the bridge has
+/// something to say — not gated on `vm_active()`, which despite the name means
+/// "a VM is running on the COOPERATIVE Core-0 path" and is therefore always
+/// false for the fiber-mode guest this report exists for. The counters are their
+/// own gate: they are zeroed at VM teardown, so a host without a guest stays
+/// silent, and a guest whose network just died still answers.
 ///
 /// Read it as a decision tree, top to bottom. `guest -> host` still climbing
 /// says the guest is alive and the masquerade is taking its packets; if
@@ -163,6 +166,9 @@ pub fn intent_netstat() {
 /// twice a few seconds apart — the per-second figures come from the gap.
 fn bridge_report() {
     let b = crate::microvm::devices::nat::bridge_stats();
+    if !b.active && b.rx_pkts == 0 && b.tx_pkts == 0 && b.live == 0 {
+        return;
+    }
     kprintln!();
     kprintln!("  microVM bridge (L3 masquerade){}",
         if b.active { "" } else { "  — idle, no flow yet" });
