@@ -1288,6 +1288,9 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("[npk]");
             help_note("keys: name, timezone, keyboard, lang, accent, theme, launcher,");
             help_note("      autostart, mouse_speed, shade.* (see 'help desktop')");
+            help_note("      code.scheme — syntax colours in spell: auto, dark-plus,");
+            help_note("      light-plus, monokai, solarized-dark/-light, abyss,");
+            help_note("      kimbie-dark, quiet-light");
         }
         "hardware" | "hw" | "disk" | "blk" | "pci" | "usb" => {
             help_head("hardware", "");
@@ -1376,6 +1379,32 @@ pub fn intent_set(args: &str) {
             kprintln!("[npk] Usage: set <key> <value>");
             return;
         }
+        // `code.scheme` is a closed set — a typo would otherwise store
+        // silently and fall back to auto, which looks like the key did
+        // nothing at all.
+        if key == "code.scheme" {
+            use crate::shade::widgets::palette as pal;
+            if !pal::code_scheme_exists(value) {
+                kprintln!("[npk] unknown code scheme '{}'", value);
+                kprint!("[npk] known: auto");
+                for n in pal::code_scheme_names() { kprint!(", {}", n); }
+                kprintln!();
+                return;
+            }
+            // Honour an explicit mismatch, but say it out loud — a light
+            // scheme on a dark canvas is legible-ish, the other way round
+            // is not.
+            if let (Some(scheme_light), theme_light) =
+                (pal::code_scheme_is_light(value), pal::is_light_theme())
+            {
+                if scheme_light != theme_light {
+                    kprintln!("[npk] note: '{}' is a {} scheme, theme is {}",
+                        value,
+                        if scheme_light { "light" } else { "dark" },
+                        if theme_light { "light" } else { "dark" });
+                }
+            }
+        }
         crate::config::set(key, value);
         kprintln!("[npk] {} = {}", key, value);
         // The shared panel knob is the master: it drops any per-panel
@@ -1389,7 +1418,8 @@ pub fn intent_set(args: &str) {
         // shade.light_tint) so tuning shows at once, not on the next
         // incidental redraw. Struct-cached keys (opacity) still need a
         // compositor rebuild — unchanged.
-        if key.starts_with("shade.") || key == "theme" || key == "accent" {
+        if key.starts_with("shade.") || key.starts_with("code.")
+            || key == "theme" || key == "accent" {
             // Panel translucency is baked into the panel's pixel buffer at
             // rasterize time, so a recomposite alone would show the old
             // value until the app next commits (up to a minute for the

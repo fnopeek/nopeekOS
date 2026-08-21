@@ -68,6 +68,102 @@ const ACCENT_PRESETS: [(&str, u32); 4] = [
 
 const DEFAULT_ACCENT: u32 = 0xFFE39BAB;
 
+
+// ── Code schemes (syntax colours) ─────────────────────────────────────
+//
+// Values taken verbatim from VSCodium's built-in theme JSONs, resolved
+// the way TextMate resolves scopes (most specific scope wins). A scheme
+// supplies ONLY these nine colours — the canvas stays `Page` and plain
+// text stays `OnSurface`. Importing a scheme's own background too would
+// fight the glass surfaces, and a dark scheme picked under a light theme
+// would then paint dark-on-white. Preference and canvas are two separate
+// things; this knob only moves the preference.
+
+struct CodeScheme {
+    name:     &'static str,
+    /// True if the scheme was authored for a light canvas. Only used to
+    /// warn on an obvious mismatch — an explicit choice is still honoured.
+    light:    bool,
+    keyword:  u32,
+    control:  u32,
+    string:   u32,
+    comment:  u32,
+    number:   u32,
+    function: u32,
+    typ:      u32,
+    variable: u32,
+    constant: u32,
+}
+
+/// Every scheme `set code.scheme <name>` accepts. `auto` (the default)
+/// picks `dark-plus` or `light-plus` from the active theme.
+const CODE_SCHEMES: [CodeScheme; 8] = [
+    CodeScheme { name: "dark-plus", light: false,
+        keyword: 0xFF569CD6, control: 0xFFC586C0, string:   0xFFCE9178,
+        comment: 0xFF6A9955, number:  0xFFB5CEA8, function: 0xFFDCDCAA,
+        typ:     0xFF4EC9B0, variable: 0xFF9CDCFE, constant: 0xFF569CD6 },
+    CodeScheme { name: "light-plus", light: true,
+        keyword: 0xFF0000FF, control: 0xFFAF00DB, string:   0xFFA31515,
+        comment: 0xFF008000, number:  0xFF098658, function: 0xFF795E26,
+        typ:     0xFF267F99, variable: 0xFF001080, constant: 0xFF0000FF },
+    CodeScheme { name: "monokai", light: false,
+        keyword: 0xFF66D9EF, control: 0xFFF92672, string:   0xFFE6DB74,
+        comment: 0xFF88846F, number:  0xFFAE81FF, function: 0xFFA6E22E,
+        typ:     0xFFA6E22E, variable: 0xFFF8F8F2, constant: 0xFFAE81FF },
+    CodeScheme { name: "solarized-dark", light: false,
+        keyword: 0xFF93A1A1, control: 0xFF859900, string:   0xFF2AA198,
+        comment: 0xFF586E75, number:  0xFFD33682, function: 0xFF268BD2,
+        typ:     0xFFCB4B16, variable: 0xFF93A1A1, constant: 0xFFB58900 },
+    CodeScheme { name: "solarized-light", light: true,
+        keyword: 0xFF586E75, control: 0xFF859900, string:   0xFF2AA198,
+        comment: 0xFF93A1A1, number:  0xFFD33682, function: 0xFF268BD2,
+        typ:     0xFFCB4B16, variable: 0xFF93A1A1, constant: 0xFFB58900 },
+    CodeScheme { name: "abyss", light: false,
+        keyword: 0xFF9966B8, control: 0xFF225588, string:   0xFF22AA44,
+        comment: 0xFF384887, number:  0xFFF280D0, function: 0xFFDDBB88,
+        typ:     0xFFFFEEBB, variable: 0xFF6688CC, constant: 0xFFF280D0 },
+    CodeScheme { name: "kimbie-dark", light: false,
+        keyword: 0xFF98676A, control: 0xFF98676A, string:   0xFF889B4A,
+        comment: 0xFFA57A4C, number:  0xFFF79A32, function: 0xFF8AB1B0,
+        typ:     0xFFF06431, variable: 0xFFDC3958, constant: 0xFFF79A32 },
+    CodeScheme { name: "quiet-light", light: true,
+        keyword: 0xFF7A3E9D, control: 0xFF4B69C6, string:   0xFF448C27,
+        comment: 0xFFAAAAAA, number:  0xFF9C5D27, function: 0xFFAA3731,
+        typ:     0xFF7A3E9D, variable: 0xFF7A3E9D, constant: 0xFF9C5D27 },
+];
+
+/// Scheme names, for `set code.scheme` and its error message.
+pub fn code_scheme_names() -> &'static [&'static str] {
+    const NAMES: [&str; 8] = [
+        "dark-plus", "light-plus", "monokai", "solarized-dark",
+        "solarized-light", "abyss", "kimbie-dark", "quiet-light",
+    ];
+    &NAMES
+}
+
+/// Is `name` a scheme we know? `auto` counts.
+pub fn code_scheme_exists(name: &str) -> bool {
+    name == "auto" || CODE_SCHEMES.iter().any(|s| s.name == name)
+}
+
+/// Does `name` target a light canvas? `None` for unknown / `auto`.
+pub fn code_scheme_is_light(name: &str) -> Option<bool> {
+    CODE_SCHEMES.iter().find(|s| s.name == name).map(|s| s.light)
+}
+
+fn code_scheme() -> &'static CodeScheme {
+    let want = crate::config::get("code.scheme").unwrap_or_default();
+    let want = want.trim();
+    if !want.is_empty() && want != "auto" {
+        if let Some(s) = CODE_SCHEMES.iter().find(|s| s.name == want) {
+            return s;
+        }
+    }
+    // auto — follow the theme.
+    let idx = if is_light_theme() { 1 } else { 0 };
+    &CODE_SCHEMES[idx]
+}
+
 pub fn current() -> Palette {
     let mut colors = [0u32; super::abi::PALETTE_SLOTS];
     for (i, slot) in colors.iter_mut().enumerate() {
@@ -160,6 +256,17 @@ pub fn resolve(token: Token) -> u32 {
         Token::AccentRing      => accent_over(t.surface, 56),
         Token::AccentLine      => accent_over(t.surface, 115),
         Token::OnAccent        => on_accent(t.surface),
+
+        // Code tokens come from the scheme, not the theme ramp.
+        Token::CodeKeyword     => code_scheme().keyword,
+        Token::CodeControl     => code_scheme().control,
+        Token::CodeString      => code_scheme().string,
+        Token::CodeComment     => code_scheme().comment,
+        Token::CodeNumber      => code_scheme().number,
+        Token::CodeFunction    => code_scheme().function,
+        Token::CodeType        => code_scheme().typ,
+        Token::CodeVariable    => code_scheme().variable,
+        Token::CodeConstant    => code_scheme().constant,
     }
 }
 
@@ -303,8 +410,11 @@ fn darken(color: u32, delta: u8) -> u32 {
     a | (r << 16) | (g << 8) | b
 }
 
-fn token_at(idx: usize) -> Token {
-    match idx {
+/// Wire id → token. The single table: `current()` fills the palette
+/// through it and `npk_theme_token` answers apps through it, so an
+/// appended token reaches the rasterizer and the SDK in one edit.
+pub fn token_from_id(id: usize) -> Option<Token> {
+    Some(match id {
         0  => Token::Surface,
         1  => Token::SurfaceElevated,
         2  => Token::SurfaceMuted,
@@ -322,8 +432,21 @@ fn token_at(idx: usize) -> Token {
         14 => Token::OnSurfaceFaint,
         15 => Token::AccentRing,
         16 => Token::AccentLine,
-        _  => Token::Surface,
-    }
+        17 => Token::CodeKeyword,
+        18 => Token::CodeControl,
+        19 => Token::CodeString,
+        20 => Token::CodeComment,
+        21 => Token::CodeNumber,
+        22 => Token::CodeFunction,
+        23 => Token::CodeType,
+        24 => Token::CodeVariable,
+        25 => Token::CodeConstant,
+        _  => return None,
+    })
+}
+
+fn token_at(idx: usize) -> Token {
+    token_from_id(idx).unwrap_or(Token::Surface)
 }
 
 pub fn scale_alpha(alpha: u8, opacity: u8) -> u8 {

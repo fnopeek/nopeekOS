@@ -122,6 +122,33 @@ pub enum Token {
     AccentRing      = 15,
     /// Accent at 45 % over `Surface` — focused window border.
     AccentLine      = 16,
+
+    // ── Code tokens (syntax highlighting) ─────────────────────────────
+    //
+    // A second, independent ramp. The tokens above describe *chrome*;
+    // these describe *source text*. An editor needs both at once, and
+    // reusing `Accent`/`Warning` for keywords and strings tied the
+    // syntax colours to the wallpaper — a whole language got three
+    // colours. Resolved from the active code scheme (`set code.scheme`),
+    // never from the accent.
+    /// Declaration / storage keywords: `fn` `let` `def` `class` `int`.
+    CodeKeyword     = 17,
+    /// Control flow and imports: `if` `for` `return` `import` `match`.
+    CodeControl     = 18,
+    /// String and character literals, quotes included.
+    CodeString      = 19,
+    /// Comments, any syntax.
+    CodeComment     = 20,
+    /// Numeric literals.
+    CodeNumber      = 21,
+    /// Function names — declaration and call site.
+    CodeFunction    = 22,
+    /// Type / class names and markup tag names.
+    CodeType        = 23,
+    /// Attribute names, JSON keys, decorators.
+    CodeVariable    = 24,
+    /// Language constants (`true` `None` `null`) and escape sequences.
+    CodeConstant    = 25,
     // Appended only — values frozen forever.
 }
 
@@ -709,7 +736,7 @@ pub struct Palette {
 
 /// Slots in a `Palette`. Must stay > the highest `Token` discriminant —
 /// the rasterizer indexes with `token as usize` and does not bounds-check.
-pub const PALETTE_SLOTS: usize = 24;
+pub const PALETTE_SLOTS: usize = 32;
 
 /// A raster destination. Either a tile in the GGTT slab, or a composition
 /// layer — from the rasterizer's perspective they are identical: a BGRA32

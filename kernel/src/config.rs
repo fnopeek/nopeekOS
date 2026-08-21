@@ -181,4 +181,5 @@ pub const KNOWN_KEYS: &[(&str, &str)] = &[
     ("static_gw", "Static default gateway (with static_ip)"),
     ("static_dns", "Static DNS server (with static_ip)"),
     ("net_prefer", "Preferred NIC: 'wifi' or 'lan' (default lan); falls back if no link"),
+    ("code.scheme", "Syntax colours: auto, dark-plus, light-plus, monokai, abyss, ..."),
 ];

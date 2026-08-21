@@ -347,7 +347,7 @@ enum OpenMenu { File, View, Help }
 enum Kind { Markdown, Code(Lang), Plain, Untyped }
 
 /// Languages with a preview highlighter. Markup = HTML/XML (tag-based);
-/// the rest share the C-like tokenizer parameterised by `lang_spec`.
+/// the rest share the C-like scanner parameterised by `syntax_for`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Lang { Rust, C, Js, Python, Shell, Json, Markup }
 
@@ -1159,166 +1159,578 @@ fn code_block(lines: &[String]) -> Widget {
 
 // ── Syntax highlighting → colour spans (live in the TextArea) ─────────
 //
-// The tokenizers walk the whole buffer and emit `Span { start, len,
-// token }` byte ranges for non-default tokens (keywords → Accent,
-// strings → Warning, comments → Muted). Uncovered bytes render in the
-// default colour. Spans come out sorted by `start` (left-to-right scan),
-// which the compositor's renderer relies on.
+// One pass over the whole buffer, not line by line. Block comments,
+// triple-quoted strings and JS templates all run across newlines, and a
+// per-line scanner has to guess at every line start which construct it
+// is standing inside — it guesses wrong on exactly the files people
+// write.
+//
+// Spans cover only what is NOT default-coloured; uncovered bytes render
+// in `OnSurface`, which is most of a file. They come out sorted by
+// `start` (the scan only ever moves forward), which the compositor's
+// renderer relies on.
 
 fn push_span(out: &mut Vec<Span>, start: usize, len: usize, token: Token) {
     if len == 0 { return; }
     out.push(Span { start: start as u32, len: len as u32, token });
 }
 
+/// Per-language lexer knobs.
+///
+/// `decl` and `ctrl` are split the way the themes split them —
+/// storage/declaration against control flow and imports. VSCodium paints
+/// those two different colours, and collapsing them into one bucket was
+/// half of why source here read as flat.
+struct Syntax {
+    decl:      &'static [&'static str],
+    ctrl:      &'static [&'static str],
+    consts:    &'static [&'static str],
+    /// Built-in type names that are not keywords: `u32`, `str`, `bytes`.
+    types:     &'static [&'static str],
+    /// Names that are callable without parentheses (shell builtins).
+    builtins:  &'static [&'static str],
+    /// Line-comment marker, or "" for none.
+    line:      &'static str,
+    block:     Option<(&'static str, &'static str)>,
+    /// Rust nests `/* /* */ */`; C and JS do not.
+    nest_block: bool,
+    /// `'x'` is a string. False for Rust, where `'a` is a lifetime.
+    squote:    bool,
+    /// `'x'` is a char literal — only when a closing quote really follows.
+    char_lit:  bool,
+    /// `` `…` `` template literal, newlines allowed.
+    backtick:  bool,
+    /// `"""…"""` / `'''…'''`.
+    triple:    bool,
+    /// `r"…"`, `r#"…"#`, `b"…"`, `br#"…"#`.
+    raw_str:   bool,
+    /// `$VAR`, `${VAR}`, `$1`, `$?`.
+    dollar:    bool,
+    /// `@name` decorator.
+    decorator: bool,
+    /// `#directive`, and `<stdio.h>` after `#include`.
+    preproc:   bool,
+    /// Literal prefixes that belong to the string they precede:
+    /// `f"…"`, `b'…'`, `r#"…"#`.
+    str_prefix: &'static [&'static str],
+    /// `$(…)` is a command substitution — inside a double-quoted shell
+    /// string it opens a fresh quoting context, so the string does not
+    /// end at the next quote it contains.
+    subst:     bool,
+}
+
+const NONE: &[&str] = &[];
+
+const RUST: Syntax = Syntax {
+    decl: &["fn","let","mut","const","static","pub","use","mod","crate","struct",
+            "enum","impl","trait","type","where","self","Self","as","ref","move",
+            "dyn","unsafe","extern","super","union","macro_rules"],
+    ctrl: &["if","else","match","for","while","loop","return","break","continue",
+            "in","async","await","yield","try"],
+    consts: &["true","false"],
+    types: &["u8","u16","u32","u64","u128","usize","i8","i16","i32","i64",
+             "i128","isize","f32","f64","bool","char","str"],
+    builtins: NONE,
+    line: "//", block: Some(("/*","*/")), nest_block: true,
+    squote: false, char_lit: true, backtick: false, triple: false,
+    raw_str: true, dollar: false, decorator: false, preproc: false,
+    str_prefix: &["r","b","br"], subst: false,
+};
+
+const CLANG: Syntax = Syntax {
+    decl: &["auto","char","const","double","enum","extern","float","inline","int",
+            "long","register","restrict","short","signed","static","struct",
+            "typedef","union","unsigned","void","volatile","_Bool","size_t",
+            "ssize_t","uint8_t","uint16_t","uint32_t","uint64_t",
+            "int8_t","int16_t","int32_t","int64_t"],
+    ctrl: &["break","case","continue","default","do","else","for","goto","if",
+            "return","switch","while","sizeof",
+            // preprocessor directives, reached through the '#' branch
+            "include","define","undef","ifdef","ifndef","endif","pragma","elif","error"],
+    consts: &["NULL","true","false"],
+    types: NONE,
+    builtins: NONE,
+    line: "//", block: Some(("/*","*/")), nest_block: false,
+    squote: false, char_lit: true, backtick: false, triple: false,
+    raw_str: false, dollar: false, decorator: false, preproc: true,
+    str_prefix: NONE, subst: false,
+};
+
+const JS: Syntax = Syntax {
+    decl: &["var","let","const","function","class","extends","static","get","set",
+            "interface","implements","declare","namespace","abstract","readonly",
+            "public","private","protected","enum"],
+    ctrl: &["return","if","else","for","while","do","switch","case","default",
+            "break","continue","new","delete","typeof","instanceof","in","of",
+            "throw","try","catch","finally","yield","await","async","import",
+            "export","from","as"],
+    consts: &["true","false","null","undefined","NaN","Infinity","this","super"],
+    types: &["string","number","boolean","any","void","never","unknown","symbol",
+             "bigint","object"],
+    builtins: NONE,
+    line: "//", block: Some(("/*","*/")), nest_block: false,
+    squote: true, char_lit: false, backtick: true, triple: false,
+    raw_str: false, dollar: false, decorator: true, preproc: false,
+    str_prefix: NONE, subst: false,
+};
+
+const PY: Syntax = Syntax {
+    decl: &["def","class","lambda","global","nonlocal","import","from","as","with"],
+    ctrl: &["return","if","elif","else","for","while","break","continue","pass",
+            "try","except","finally","raise","yield","await","async","del",
+            "assert","in","is","not","and","or"],
+    consts: &["None","True","False","self","cls","__name__","__main__"],
+    types: &["int","float","complex","str","bytes","bytearray","bool","list",
+             "dict","set","frozenset","tuple","object","type"],
+    builtins: NONE,
+    line: "#", block: None, nest_block: false,
+    squote: true, char_lit: false, backtick: false, triple: true,
+    raw_str: false, dollar: false, decorator: true, preproc: false,
+    str_prefix: &["f","F","r","R","b","B","u","U","rb","rf","br","fr"],
+    subst: false,
+};
+
+const SH: Syntax = Syntax {
+    decl: &["function","local","readonly","declare","export","typeset","alias"],
+    ctrl: &["if","then","else","elif","fi","for","while","until","do","done",
+            "case","esac","in","select","return","exit","break","continue",
+            "source","trap"],
+    consts: &["true","false"],
+    types: NONE,
+    builtins: &["echo","printf","read","cd","set","unset","shift","test","eval",
+                "exec","pwd","kill","wait","umask","getopts"],
+    line: "#", block: None, nest_block: false,
+    squote: true, char_lit: false, backtick: false, triple: false,
+    raw_str: false, dollar: true, decorator: false, preproc: false,
+    str_prefix: NONE, subst: true,
+};
+
+fn syntax_for(lang: Lang) -> &'static Syntax {
+    match lang {
+        Lang::Rust   => &RUST,
+        Lang::C      => &CLANG,
+        Lang::Js     => &JS,
+        Lang::Python => &PY,
+        Lang::Shell  => &SH,
+        // Handled by their own scanners — never reached.
+        Lang::Json | Lang::Markup => &RUST,
+    }
+}
+
 /// Tokenise the whole document into colour spans for the given language.
 fn code_spans(text: &str, lang: Lang) -> Vec<Span> {
-    let mut out: Vec<Span> = Vec::new();
-    let mut base = 0usize;
-    let markup = matches!(lang, Lang::Markup);
-    let (kw, comment, squote) = lang_spec(lang);
-    for line in text.split('\n') {
-        if markup {
-            markup_line_spans(line, base, &mut out);
-        } else {
-            clike_line_spans(line, base, kw, comment, squote, &mut out);
-        }
-        base += line.len() + 1; // include the '\n'
-    }
-    out
-}
-
-// Keyword sets — not full lexers, just enough for the visual signal.
-const KW_RUST: &[&str] = &[
-    "fn","let","mut","const","static","pub","use","mod","crate","struct","enum",
-    "impl","trait","type","for","while","loop","if","else","match","return","self",
-    "Self","as","in","ref","move","where","async","await","dyn","unsafe","extern",
-    "break","continue","true","false","Some","None","Ok","Err","super",
-];
-const KW_C: &[&str] = &[
-    "auto","break","case","char","const","continue","default","do","double","else",
-    "enum","extern","float","for","goto","if","inline","int","long","register",
-    "return","short","signed","sizeof","static","struct","switch","typedef","union",
-    "unsigned","void","volatile","while","include","define","ifdef","ifndef","endif",
-    "pragma","sizeof","NULL","true","false",
-];
-const KW_JS: &[&str] = &[
-    "var","let","const","function","return","if","else","for","while","do","switch",
-    "case","default","break","continue","new","delete","typeof","instanceof","this",
-    "class","extends","super","import","export","from","async","await","yield","try",
-    "catch","finally","throw","null","undefined","true","false","in","of","void","static",
-];
-const KW_PY: &[&str] = &[
-    "def","class","return","if","elif","else","for","while","break","continue","import",
-    "from","as","pass","with","try","except","finally","raise","yield","lambda","global",
-    "nonlocal","and","or","not","in","is","None","True","False","async","await","del","assert",
-];
-const KW_SH: &[&str] = &[
-    "if","then","else","elif","fi","for","while","until","do","done","case","esac",
-    "function","in","select","echo","export","local","readonly","return","exit",
-    "source","alias","unset","set","cd","then",
-];
-const KW_JSON: &[&str] = &["true","false","null"];
-
-/// `(keywords, line-comment prefix or None, treat single-quotes as strings)`.
-fn lang_spec(lang: Lang) -> (&'static [&'static str], Option<&'static str>, bool) {
     match lang {
-        Lang::Rust   => (KW_RUST, Some("//"), false), // ' is a lifetime, not a string
-        Lang::C      => (KW_C,    Some("//"), true),
-        Lang::Js     => (KW_JS,   Some("//"), true),
-        Lang::Python => (KW_PY,   Some("#"),  true),
-        Lang::Shell  => (KW_SH,   Some("#"),  true),
-        Lang::Json   => (KW_JSON, None,       false),
-        Lang::Markup => (&[],     None,       false), // handled separately
+        Lang::Markup => markup_spans(text),
+        Lang::Json   => json_spans(text),
+        other        => clike_spans(text, syntax_for(other)),
     }
 }
+
+// ── Scanning primitives ───────────────────────────────────────────────
 
 fn char_len(s: &str, i: usize) -> usize {
     s[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1)
 }
 
-/// Tokenise one C-like line into spans (absolute byte base). Keywords →
-/// Accent, `"…"`/`'…'` strings → Warning, line comments → Muted; the
-/// rest is left uncovered (default colour). UTF-8-safe.
-fn clike_line_spans(
-    line: &str, base: usize, keywords: &[&str], comment: Option<&str>,
-    squote: bool, out: &mut Vec<Span>,
-) {
-    // Whole-line comment.
-    if let Some(c) = comment {
-        if line.trim_start().starts_with(c) {
-            push_span(out, base, line.len(), Token::OnSurfaceMuted);
-            return;
-        }
-    }
-    let bytes = line.as_bytes();
-    let mut i = 0;
-    let mut word_start: Option<usize> = None;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b.is_ascii_alphanumeric() || b == b'_' {
-            if word_start.is_none() { word_start = Some(i); }
-            i += 1;
-            continue;
-        }
-        if let Some(ws) = word_start.take() {
-            let w = &line[ws..i];
-            if keywords.contains(&w) { push_span(out, base + ws, i - ws, Token::Accent); }
-        }
-        // Mid-line comment to end of line.
-        if let Some(c) = comment {
-            if line[i..].starts_with(c) {
-                push_span(out, base + i, line.len() - i, Token::OnSurfaceMuted);
-                return;
-            }
-        }
-        // String / char literal (quote is ASCII → boundaries are safe).
-        if b == b'"' || (squote && b == b'\'') {
-            let quote = b;
-            let start = i;
-            i += 1;
-            while i < bytes.len() {
-                if bytes[i] == b'\\' {
-                    i += 1;
-                    if i < bytes.len() { i += char_len(line, i); }
-                    continue;
-                }
-                if bytes[i] == quote { i += 1; break; }
-                i += char_len(line, i);
-            }
-            push_span(out, base + start, i - start, Token::Warning);
-            continue;
-        }
-        // Default char — no span.
-        i += char_len(line, i);
-    }
-    if let Some(ws) = word_start.take() {
-        let w = &line[ws..];
-        if keywords.contains(&w) { push_span(out, base + ws, line.len() - ws, Token::Accent); }
-    }
+fn is_ident(b: u8) -> bool { b.is_ascii_alphanumeric() || b == b'_' }
+fn is_ident_start(b: u8) -> bool { b.is_ascii_alphabetic() || b == b'_' }
+
+fn line_end(b: &[u8], from: usize) -> usize {
+    let mut i = from;
+    while i < b.len() && b[i] != b'\n' { i += 1; }
+    i
 }
 
-/// HTML/XML line → spans: tags `<…>` → Accent, `<!-- … -->` → Muted,
-/// text left uncovered. Split points are ASCII, so boundaries are safe.
-fn markup_line_spans(line: &str, base: usize, out: &mut Vec<Span>) {
-    let mut i = 0;
-    while i < line.len() {
-        if line[i..].starts_with("<!--") {
-            let end = line[i..].find("-->").map(|p| i + p + 3).unwrap_or(line.len());
-            push_span(out, base + i, end - i, Token::OnSurfaceMuted);
-            i = end;
+/// End offset of a block comment starting at `start`. Unterminated runs
+/// to EOF — that is what an editor should show while you are still
+/// typing the closing marker.
+fn scan_block(text: &str, start: usize, open: &str, close: &str, nest: bool) -> usize {
+    let mut i = start + open.len();
+    let mut depth = 1usize;
+    while i < text.len() {
+        if nest && text[i..].starts_with(open) { depth += 1; i += open.len(); continue; }
+        if text[i..].starts_with(close) {
+            i += close.len();
+            depth -= 1;
+            if depth == 0 { return i; }
             continue;
         }
-        if line.as_bytes()[i] == b'<' {
-            let end = line[i..].find('>').map(|p| i + p + 1).unwrap_or(line.len());
-            push_span(out, base + i, end - i, Token::Accent);
-            i = end;
-            continue;
-        }
-        // Plain text up to the next tag — no span.
-        let mut end = line[i..].find('<').map(|p| i + p).unwrap_or(line.len());
-        if end <= i { end = line.len(); }
-        i = end;
+        i += char_len(text, i);
     }
+    text.len()
+}
+
+/// End offset of a string starting at `start`. A plain quoted string
+/// stops at the newline if it is unterminated, so one stray `"` cannot
+/// paint the rest of the file.
+fn scan_string(text: &str, start: usize, quote: u8, triple: bool, subst: bool) -> usize {
+    let b = text.as_bytes();
+    if triple && b.len() >= start + 3 && b[start + 1] == quote && b[start + 2] == quote {
+        let mut i = start + 3;
+        while i + 2 < b.len() {
+            if b[i] == b'\\' { i += 2; continue; }
+            if b[i] == quote && b[i + 1] == quote && b[i + 2] == quote { return i + 3; }
+            i += 1;
+        }
+        return b.len();
+    }
+    let mut i = start + 1;
+    while i < b.len() {
+        if b[i] == b'\\' {
+            i += 1;
+            if i < b.len() { i += char_len(text, i); }
+            continue;
+        }
+        // `"$(cd "$dir" && pwd)"` is ONE string — the quotes inside the
+        // substitution belong to it, not to us. Skip to the balanced `)`.
+        if subst && b[i] == b'$' && i + 1 < b.len() && b[i + 1] == b'(' {
+            let mut depth = 1usize;
+            let mut k = i + 2;
+            while k < b.len() && depth > 0 {
+                match b[k] {
+                    b'(' => depth += 1,
+                    b')' => depth -= 1,
+                    _ => {}
+                }
+                k += 1;
+            }
+            i = k;
+            continue;
+        }
+        if b[i] == quote { return i + 1; }
+        if b[i] == b'\n' && quote != b'`' { return i; }
+        i += char_len(text, i);
+    }
+    b.len()
+}
+
+/// Rust `r"…"` / `r#"…"#`. `at` points just past the `r`/`b`/`br` prefix.
+/// Returns `None` if no raw string actually follows.
+fn scan_raw_string(text: &str, at: usize) -> Option<usize> {
+    let b = text.as_bytes();
+    let mut i = at;
+    let mut hashes = 0usize;
+    while i < b.len() && b[i] == b'#' { hashes += 1; i += 1; }
+    if i >= b.len() || b[i] != b'"' { return None; }
+    i += 1;
+    while i < b.len() {
+        if b[i] == b'"' {
+            let mut k = i + 1;
+            let mut n = 0usize;
+            while k < b.len() && n < hashes && b[k] == b'#' { k += 1; n += 1; }
+            if n == hashes { return Some(k); }
+        }
+        i += char_len(text, i);
+    }
+    Some(b.len())
+}
+
+/// `'x'` / `'\n'` / `'\u{1F600}'` — but NOT `'a`, which is a lifetime.
+/// `None` unless a closing quote really follows.
+fn scan_char_lit(text: &str, start: usize) -> Option<usize> {
+    let b = text.as_bytes();
+    let mut i = start + 1;
+    if i >= b.len() { return None; }
+    if b[i] == b'\\' {
+        i += 1;
+        if i >= b.len() { return None; }
+        if b[i] == b'u' {
+            i += 1;
+            if i < b.len() && b[i] == b'{' {
+                i = text[i..].find('}').map(|p| i + p + 1)?;
+            }
+        } else {
+            i += char_len(text, i);
+        }
+    } else {
+        i += char_len(text, i);
+    }
+    if i < b.len() && b[i] == b'\'' { Some(i + 1) } else { None }
+}
+
+fn scan_number(text: &str, start: usize) -> usize {
+    let b = text.as_bytes();
+    let mut i = start;
+    // 0x… / 0b… / 0o… — one run, digits and separators alike.
+    if b[i] == b'0' && i + 1 < b.len() && matches!(b[i + 1] | 0x20, b'x' | b'b' | b'o') {
+        i += 2;
+        while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') { i += 1; }
+        return i;
+    }
+    while i < b.len() && (b[i].is_ascii_digit() || b[i] == b'_') { i += 1; }
+    // A fraction, but `1..2` is a range — the digit after the dot decides.
+    if i + 1 < b.len() && b[i] == b'.' && b[i + 1].is_ascii_digit() {
+        i += 1;
+        while i < b.len() && (b[i].is_ascii_digit() || b[i] == b'_') { i += 1; }
+    }
+    if i < b.len() && (b[i] | 0x20) == b'e' {
+        let mut k = i + 1;
+        if k < b.len() && (b[k] == b'+' || b[k] == b'-') { k += 1; }
+        if k < b.len() && b[k].is_ascii_digit() {
+            i = k;
+            while i < b.len() && b[i].is_ascii_digit() { i += 1; }
+        }
+    }
+    // Type suffix: 1u32, 3.14f64, 10UL.
+    while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') { i += 1; }
+    i
+}
+
+/// Which colour an identifier gets. There is no symbol table here, so
+/// after the keyword lists it is shape that carries the signal: a name
+/// with a `(` behind it is a call, `HttpRequest` is a type, `MAX_LEN` is
+/// a constant, and `count` is none of the three and stays default.
+fn classify(w: &str, b: &[u8], after: usize, sx: &Syntax) -> Option<Token> {
+    if sx.ctrl.contains(&w)     { return Some(Token::CodeControl); }
+    if sx.decl.contains(&w)     { return Some(Token::CodeKeyword); }
+    if sx.consts.contains(&w)   { return Some(Token::CodeConstant); }
+    if sx.types.contains(&w)    { return Some(Token::CodeType); }
+    if sx.builtins.contains(&w) { return Some(Token::CodeFunction); }
+    // Shape is checked BEFORE the call site: `new Error(…)` and
+    // `Downloader(url)` are a type being used, and colouring them as
+    // calls made every constructor in the file look like a free function.
+    let first = w.as_bytes()[0];
+    if first.is_ascii_uppercase() {
+        if w.bytes().any(|c| c.is_ascii_lowercase()) { return Some(Token::CodeType); }
+        if w.len() > 1 { return Some(Token::CodeConstant); }
+    }
+    let mut k = after;
+    while k < b.len() && (b[k] == b' ' || b[k] == b'\t') { k += 1; }
+    if k < b.len() && b[k] == b'(' { return Some(Token::CodeFunction); }
+    None
+}
+
+// ── The C-like scanner ────────────────────────────────────────────────
+
+fn clike_spans(text: &str, sx: &Syntax) -> Vec<Span> {
+    let b = text.as_bytes();
+    let mut out: Vec<Span> = Vec::new();
+    let mut i = 0usize;
+    // Set while inside a `#include` line, so `<stdio.h>` reads as a path
+    // and not as two comparisons.
+    let mut include_line = false;
+
+    while i < b.len() {
+        let c = b[i];
+        if c == b'\n' { include_line = false; i += 1; continue; }
+        if c == b' ' || c == b'\t' || c == b'\r' { i += 1; continue; }
+
+        if !sx.line.is_empty() && text[i..].starts_with(sx.line) {
+            let end = line_end(b, i);
+            push_span(&mut out, i, end - i, Token::CodeComment);
+            i = end;
+            continue;
+        }
+        if let Some((open, close)) = sx.block {
+            if text[i..].starts_with(open) {
+                let end = scan_block(text, i, open, close, sx.nest_block);
+                push_span(&mut out, i, end - i, Token::CodeComment);
+                i = end;
+                continue;
+            }
+        }
+
+        if sx.preproc && c == b'#' {
+            let mut j = i + 1;
+            while j < b.len() && (b[j] == b' ' || b[j] == b'\t') { j += 1; }
+            let ns = j;
+            while j < b.len() && is_ident(b[j]) { j += 1; }
+            push_span(&mut out, i, 1, Token::CodeControl);
+            if j > ns {
+                push_span(&mut out, ns, j - ns, Token::CodeControl);
+                if &text[ns..j] == "include" { include_line = true; }
+            }
+            i = j;
+            continue;
+        }
+        if include_line && c == b'<' {
+            let end = text[i..].find('>').map(|p| i + p + 1).unwrap_or_else(|| line_end(b, i));
+            push_span(&mut out, i, end - i, Token::CodeString);
+            i = end;
+            continue;
+        }
+        if sx.decorator && c == b'@' && i + 1 < b.len() && is_ident_start(b[i + 1]) {
+            let mut j = i + 1;
+            while j < b.len() && (is_ident(b[j]) || b[j] == b'.') { j += 1; }
+            push_span(&mut out, i, j - i, Token::CodeFunction);
+            i = j;
+            continue;
+        }
+        if sx.dollar && c == b'$' {
+            // `$(…)` is a command substitution. Stepping over just the
+            // `$(` lets the command inside keep its own colours.
+            if i + 1 < b.len() && b[i + 1] == b'(' { i += 2; continue; }
+            let mut j = i + 1;
+            if j < b.len() && b[j] == b'{' {
+                j = text[i..].find('}').map(|p| i + p + 1).unwrap_or(b.len());
+            } else {
+                while j < b.len() && is_ident(b[j]) { j += 1; }
+                // $? $@ $# $* — one punctuation byte is still a variable.
+                if j == i + 1 && j < b.len() { j += 1; }
+            }
+            push_span(&mut out, i, j - i, Token::CodeVariable);
+            i = j;
+            continue;
+        }
+
+        if c == b'"' || (sx.squote && c == b'\'') || (sx.backtick && c == b'`') {
+            let end = scan_string(text, i, c, sx.triple, sx.subst);
+            push_span(&mut out, i, end - i, Token::CodeString);
+            i = end;
+            continue;
+        }
+        if sx.char_lit && c == b'\'' {
+            if let Some(end) = scan_char_lit(text, i) {
+                push_span(&mut out, i, end - i, Token::CodeString);
+                i = end;
+                continue;
+            }
+            // A lifetime. Step over the quote and read the name normally.
+            i += 1;
+            continue;
+        }
+
+        if c.is_ascii_digit() {
+            let end = scan_number(text, i);
+            push_span(&mut out, i, end - i, Token::CodeNumber);
+            i = end;
+            continue;
+        }
+
+        if is_ident_start(c) {
+            let start = i;
+            let mut j = i;
+            while j < b.len() && is_ident(b[j]) { j += 1; }
+            let w = &text[start..j];
+            // `f"…"`, `b'…'`, `r#"…"#` — the prefix is part of the literal.
+            if sx.str_prefix.contains(&w) && j < b.len() {
+                if sx.raw_str && (b[j] == b'"' || b[j] == b'#') {
+                    if let Some(end) = scan_raw_string(text, j) {
+                        push_span(&mut out, start, end - start, Token::CodeString);
+                        i = end;
+                        continue;
+                    }
+                }
+                if b[j] == b'"' || (sx.squote && b[j] == b'\'') {
+                    let end = scan_string(text, j, b[j], sx.triple, sx.subst);
+                    push_span(&mut out, start, end - start, Token::CodeString);
+                    i = end;
+                    continue;
+                }
+            }
+            if let Some(t) = classify(w, b, j, sx) {
+                push_span(&mut out, start, j - start, t);
+            }
+            i = j;
+            continue;
+        }
+
+        i += char_len(text, i);
+    }
+    out
+}
+
+// ── JSON ──────────────────────────────────────────────────────────────
+
+/// Keys and values are both quoted strings, so the next non-space byte
+/// after a string is what tells them apart.
+fn json_spans(text: &str) -> Vec<Span> {
+    let b = text.as_bytes();
+    let mut out: Vec<Span> = Vec::new();
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'"' {
+            let end = scan_string(text, i, b'"', false, false);
+            let mut k = end;
+            while k < b.len() && (b[k] == b' ' || b[k] == b'\t' || b[k] == b'\n' || b[k] == b'\r') {
+                k += 1;
+            }
+            let tok = if k < b.len() && b[k] == b':' { Token::CodeVariable } else { Token::CodeString };
+            push_span(&mut out, i, end - i, tok);
+            i = end;
+            continue;
+        }
+        if c.is_ascii_digit() || (c == b'-' && i + 1 < b.len() && b[i + 1].is_ascii_digit()) {
+            let start = i;
+            if c == b'-' { i += 1; }
+            let end = scan_number(text, i);
+            push_span(&mut out, start, end - start, Token::CodeNumber);
+            i = end;
+            continue;
+        }
+        if c.is_ascii_alphabetic() {
+            let start = i;
+            while i < b.len() && b[i].is_ascii_alphabetic() { i += 1; }
+            if matches!(&text[start..i], "true" | "false" | "null") {
+                push_span(&mut out, start, i - start, Token::CodeConstant);
+            }
+            continue;
+        }
+        i += char_len(text, i);
+    }
+    out
+}
+
+// ── HTML / XML ────────────────────────────────────────────────────────
+
+/// Tag names → type colour, attribute names → variable, attribute values
+/// → string, `<!-- -->` → comment, `&entity;` → constant. The angle
+/// brackets themselves stay default: colouring the punctuation too turns
+/// a page of markup into one solid block.
+fn markup_spans(text: &str) -> Vec<Span> {
+    let b = text.as_bytes();
+    let mut out: Vec<Span> = Vec::new();
+    let mut i = 0usize;
+    while i < b.len() {
+        if text[i..].starts_with("<!--") {
+            let end = text[i..].find("-->").map(|p| i + p + 3).unwrap_or(text.len());
+            push_span(&mut out, i, end - i, Token::CodeComment);
+            i = end;
+            continue;
+        }
+        if b[i] == b'&' {
+            let mut j = i + 1;
+            while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'#') { j += 1; }
+            if j > i + 1 && j < b.len() && b[j] == b';' {
+                push_span(&mut out, i, j + 1 - i, Token::CodeConstant);
+                i = j + 1;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if b[i] != b'<' { i += char_len(text, i); continue; }
+
+        i += 1;
+        if i < b.len() && matches!(b[i], b'/' | b'!' | b'?') { i += 1; }
+        let ns = i;
+        while i < b.len() && (b[i].is_ascii_alphanumeric() || matches!(b[i], b'-' | b'_' | b':')) {
+            i += 1;
+        }
+        push_span(&mut out, ns, i - ns, Token::CodeType);
+
+        while i < b.len() && b[i] != b'>' {
+            let c = b[i];
+            if c == b'"' || c == b'\'' {
+                let end = scan_string(text, i, c, false, false);
+                push_span(&mut out, i, end - i, Token::CodeString);
+                i = end;
+                continue;
+            }
+            if is_ident_start(c) {
+                let start = i;
+                while i < b.len() && (b[i].is_ascii_alphanumeric() || matches!(b[i], b'-' | b'_' | b':')) {
+                    i += 1;
+                }
+                push_span(&mut out, start, i - start, Token::CodeVariable);
+                continue;
+            }
+            i += char_len(text, i);
+        }
+        if i < b.len() { i += 1; }
+    }
+    out
 }
 
 // ── Events ────────────────────────────────────────────────────────────
