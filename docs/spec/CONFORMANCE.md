@@ -22,11 +22,11 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-22, beak 0.30.0)
+### Current number (measured 2026-08-22, beak 0.31.0)
 
 ```
-4293 pass / 1349 fail / 144 inconclusive   (of 5786 vendored reftests)
-= 76.1 % of the conclusive 5642
+4328 pass / 1314 fail / 144 inconclusive   (of 5786 vendored reftests)
+= 76.7 % of the conclusive 5642
 ```
 
 Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → 3746 → 3863 → 3869 →
@@ -132,7 +132,28 @@ floats over its whole border box rather than its first row (+7), `aspect-ratio`
 
 Two losses stand and are named: `CSS2/letter-spacing-102` sets the property
 from `onload` and cannot be won without JS, and `css-text/letter-spacing-percent-001`
-needs `calc(0.05em + 5%)`.)
+needs `calc(0.05em + 5%)`.) → **4328** (0.31.0, +35/−9, two out-of-flow
+rules. **An absolutely positioned box ignored its own vertical margins** (+22):
+`layout_box` is handed the BORDER-box top, so §10.6.4's `top + margin-top` and
+the static position's `margin-top` both belong in `layout_abs`, and neither was
+there. It cost thirteen `CSS2/top-*` (the same two cases in five unit
+spellings) and nine more elsewhere; on a real page it put every overlay nudged
+by `margin` instead of `top` exactly its own margin too high. **A positioned
+grid child is contained by its grid area** (+13 net, css-grid §9): the abspos
+children were laid out in the collection loop, before a single track had a
+size, so they could only be placed against the container's padding box. They
+are deferred to the end of `grid_content` now and the two axes are decided
+separately — an axis that names no line keeps the padding box. The nine losses
+are all `subgrid`, named grid lines or `display: grid-lanes`, none of which we
+implement; they were passing because both sides rendered the same wrong thing.
+
+Measured and REJECTED in the same round, for the third time: lifting every
+out-of-flow box to `LAYER_POSITIONED` gives +16/−30. Appendix E is right that
+every positioned box paints in step 8 in tree order — but `stack_ops` is a FLAT
+list of ranges, so a lifted box swallows its descendants' ranges instead of
+nesting them. `CSS2/abspos-014`/`-016` (a `position: fixed` box painted under a
+static sibling that follows it) stay failing on purpose: they need nested
+stacking contexts, not another layer constant.
 
 **0.3.7 through 0.3.11 moved the oracle by exactly zero** — re-measured
 2026-08-05, same 3967 / 1639 / 180. That is not a failure: every one of those
@@ -1805,7 +1826,7 @@ cursor), `user-select`/`touch-action`/`overflow-anchor`/`scroll-margin`
 | Text wrapping / `white-space` | css-text-3 | 🟡 | `normal` collapse+wrap, `pre` (each source line its own line box, trailing spaces hang, §8) and **`nowrap`** (spaces collapse but are not break opportunities; min-content is the whole line); `<br>` forces a break even under max-content. **`word-break`/`overflow-wrap`/`word-wrap: break-word`** split an over-long word at the last character that fits, never inside a grapheme cluster (ZWJ sequences, variation selectors, skin tones, keycaps, combining marks, flags, tag sequences). `pre-wrap`/`pre-line` are **not** distinguished from `pre`. The collapsible set is the CSS one — space, tab, the newlines — so `&nbsp;` neither collapses nor offers a break, and the other space separators (U+1680, U+2000–200A, U+202F, U+205F, U+3000) hang at the end of a line instead of widening it. **`letter-spacing`/`word-spacing`**: spacing after every typographic character unit (not after a zero-width format character), on the word separators §8.1 names (not U+3000); measurement and paint read one value, so a run cannot drift from the line box that reserved it. Percentages resolve against the font-size; `calc()` with one does not. No `hyphens`, no UAX-14 line breaking, no bidi reordering |
 | Tables (`table`/`tr`/`td`/`th`) | css-tables-3 | 🟡 | `layout.rs`: §17.2.1 anonymous-box fixup, auto **and** `table-layout: fixed` column algorithms, `colspan` (spanning cells distribute only the shortfall), **both border models** — `border-collapse` (winner-takes-the-edge, half the collapsed line per cell, incl. in column widths) and separated with `border-spacing` + `empty-cells` — the `border`/`cellpadding`/`cellspacing` presentation attributes, table border box + `auto` horizontal centring, `<caption>`. **`caption-side`** and per-cell **`vertical-align`** (`top`/`middle`/`bottom`; `baseline` degrades to `top` — no cross-cell baseline alignment). A table is a **shrink-to-fit** box: under `table-layout: fixed` with `width: auto` it is exactly as wide as the first row pins it, and a table with no rows at all still paints its own box at its `width`/`height`. No `rowspan`, `display:inline-table` is block-level |
 | Flexbox | css-flexbox-1 | 🟡 | `layout.rs::layout_flex`: row/column, **multi-line wrap**, `flex-grow`/`-shrink`/`-basis` + `flex` shorthand, `gap`, `justify-content` (all 6), `align-items`/`align-self`, `order`, per-item `margin:auto`, automatic content minimum size (zero for a scroll container, §4.5), **`align-content`** (all seven, with the spec'd fallbacks for negative free space) and `place-content`. Percentage `gap`, and the row/column gaps kept apart so `gap: 10px 20px` puts the COLUMN gap between the items of a row. No reverse directions, no baseline alignment, no writing modes |
-| Grid | css-grid-2 | 🟡 | `layout.rs::layout_grid`: `grid-template-columns`/`-rows` (px/%/`fr`/`auto`/`repeat()`/`minmax()`≈), `grid-template-areas`, `grid-auto-rows`/`grid-auto-columns`, row-major auto-placement, `grid-column`/`-row` (`span N`, `A / B`), `grid-area`, `gap` (incl. percentages and the `grid-*-gap` spellings), `justify-items`/`justify-self`/`place-*`. No dense flow, no implicit columns, no abspos-in-grid, no orthogonal/RTL flows |
+| Grid | css-grid-2 | 🟡 | `layout.rs::layout_grid`: `grid-template-columns`/`-rows` (px/%/`fr`/`auto`/`repeat()`/`minmax()`≈), `grid-template-areas`, `grid-auto-rows`/`grid-auto-columns`, row-major auto-placement, `grid-column`/`-row` (`span N`, `A / B`), `grid-area`, `gap` (incl. percentages and the `grid-*-gap` spellings), `justify-items`/`justify-self`/`place-*`, and **positioned children contained by their grid area** (§9, per axis — an axis naming no line keeps the padding box). No dense flow, no implicit columns, no named grid lines, no subgrid, no orthogonal/RTL flows |
 | Positioning (rel/abs/fixed/sticky) | css-position-3 | 🟡 | `relative` (in-flow paint offset) + `absolute`/`fixed` (out of flow, positioned vs nearest `position!=static` ancestor's box / page). `top`/`left`/`right`/**`bottom`** (§10.6.4); `top`/`bottom` percentages resolve against the containing block's **height** (§9.3.2). **`z-index`** via recorded display-list ranges stable-sorted at the end of layout (§9.9) — the ranges must stay disjoint, a leaking throwaway measurement corrupts the whole list. `sticky` parses but lays out without offsets; `fixed` scrolls with the page |
 | Values & units (px/em/%/rem/…) | css-values-4 | 🟡 | `values.rs`: `px`/`em`/`rem`/`ex`/`ch`/`%`/`vw`/`vh`/`vmin`/`vmax`/`pt`/`pc`/`cm`/`mm`/`in`/`Q`, `auto`, `fr`, plus **`calc()`** with `+ - * /` and nesting (one code path for a bare `16px`, a `50%` and a full `calc(100% - 3rem)`). plus **`min()`/`max()`** (variadic) and **`clamp()`**, nestable in any combination with `calc()`. `rem` resolves against the root element, not the parent. `attr()` works in `content` (see Generated content); as a LENGTH (css-values-5) it still drops the declaration, as does `env()` |
 
