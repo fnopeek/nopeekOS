@@ -805,6 +805,22 @@ pub fn kick_bsp_vcpu() {
     crate::smp::kick_host_core(hc);
 }
 
+/// The wake half of irqfd (`virt/kvm/eventfd.c`): an RX-ready signal both RAISES
+/// the guest's IRQ line and WAKES the vCPU, in one act. `net_backend::raise_irq`
+/// is the raise; this is the wake — kick the core running the BSP vCPU so it
+/// takes an exit and folds the line into `pending_irqs`.
+///
+/// Vendor-neutral on purpose. It lived under `svm/` and keyed off SVM's own
+/// `VCPU_HOST_CORE`, so on Intel the off-vCPU data plane had no way to wake the
+/// guest at all — and both target machines are Intel. `BSP_HOST_CORE` is written
+/// by `vcpu_fiber_task` before either vendor's run loop starts.
+pub fn kick_bsp_net_irq() {
+    let hc = BSP_HOST_CORE.load(Ordering::Relaxed);
+    if hc != usize::MAX {
+        crate::smp::kick_host_core(hc);
+    }
+}
+
 pub fn guest_running() -> bool {
     VM_RUN_STATE.load(Ordering::Acquire) == VM_RUNNING || vm_active()
 }
