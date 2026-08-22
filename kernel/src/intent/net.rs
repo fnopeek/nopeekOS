@@ -227,34 +227,23 @@ fn bridge_report() {
         b.rx_unmatched);
     kprintln!("  flows         {} tcp  {} udp opened   {} live of {}",
         b.flows_tcp, b.flows_udp, b.live, b.cap);
-    kprintln!("  staging       queue {} (peak {} of {})   guest rx ring low-water {}",
-        b.iq, b.iq_hi, b.iq_cap, b.rxring_min);
-    kprintln!("  lost          {} queue-full   {} TABLE-FULL   {} egress-refused   {} guest-ring-full",
-        b.drop_queue, b.drop_table, b.drop_egress, b.inject_false);
-    kprintln!("  delivery      rx wait avg {} us  max {} us   {} irq raised",
-        b.rxlat_avg_us, b.rxlat_max_us, b.net_irq);
-    if b.gro {
-        kprintln!("  gro           on   {} frames  {} segments merged",
-            b.gro_frames, b.gro_segs);
-    }
-    // The guest's own heartbeat, and the second Intel-only suspect.
-    //
-    // `nat::pump` returns false immediately on AMD (the off-vCPU worker owns
-    // RX), so `pumped` is never true there and the guest timer never competes
-    // for the single inject slot. On Intel it returns real work, so under load
-    // the vCPU loop takes the net branch and `continue`s past the timer until
-    // the 30 ms anti-starvation floor forces it. A guest whose jiffies crawl at
-    // ~33 Hz loses its TCP timers, its NAPI and its workqueues — and looks
-    // perfectly alive while doing it. Compare against the ~1000/s it programmed.
-    // A rate needs two readings. On the first call there is no window, so these
-    // are not "zero" — they are "not measured yet", and printing a 0 for them
-    // reads as a stopped guest clock. Say which it is.
+    // Three walls, never one number. A full tap is BACKPRESSURE and healthy in
+    // moderation; a full table means no new connection can open at all; an
+    // egress refusal means the frame never reached the wire. From outside all
+    // three look like "throughput sagged".
+    kprintln!("  lost          {} tap-full(backpressure)   {} TABLE-FULL   {} egress-refused",
+        b.tap_full, b.drop_table, b.drop_egress);
+    kprintln!("  delivery      {} guest-ring-full (guest is the limiter)   {} irq raised",
+        b.inject_false, b.net_irq);
+    // The guest's own heartbeat. A guest whose jiffies crawl loses its TCP
+    // timers, its NAPI and its workqueues — and looks perfectly alive while
+    // doing it. Compare against the ~1000/s it programmed. A rate needs two
+    // readings: on the first call these are "not measured yet", not "zero",
+    // and printing 0 reads as a stopped guest clock. Say which it is.
     if b.window_ms > 0 {
-        kprintln!("  guest clock   {} timer irq/s   bridge pumped {}/s   {} wakes sent",
-            b.gtimer_ps, b.pump_ps, b.kicks_out);
+        kprintln!("  guest clock   {} timer irq/s", b.gtimer_ps);
     } else {
-        kprintln!("  guest clock   -- timer irq/s   bridge pumped --/s   {} wakes sent   (no window yet)",
-            b.kicks_out);
+        kprintln!("  guest clock   -- timer irq/s   (no window yet)");
     }
     // The vCPU that pumps this bridge is the SAME fiber that copies the guest's
     // framebuffer, ~8 MB a frame, inline on its MMIO exit — on Intel, where the

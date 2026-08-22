@@ -92,21 +92,8 @@ pub fn take_irq() -> bool { NET_IRQ_PENDING.swap(false, Ordering::AcqRel) }
 #[inline]
 pub fn irq_pending() -> bool { NET_IRQ_PENDING.load(Ordering::Acquire) }
 
-/// Stage 2b master switch: the full off-vCPU RX backend. When on, the dedicated
-/// `net_dataplane` fiber owns the RX data-plane (host-NIC drain + `inject_rx`)
-/// on its own core, so the BSP vCPU does NO net RX work — it only folds the
-/// lock-free net-IRQ and is kicked to inject IRQ10. Frees the bottleneck core
-/// (the BSP was 2× the hottest vCPU under download: pump + GPU copy + guest RX
-/// softirq all on it). SVM only (the IRQ fold + BSP kick live there); enabled
-/// per-VM by the AMD open path. Compile-time gate for clean OTA rollback.
-///
-/// First HW test (v0.226.9) broke guest networking (RX+TX near-zero, socket
-/// errors): the cross-core RX-IRQ delivery (worker inject → kick BSP → fold →
-/// inject IRQ10) didn't wake the guest reliably. Debugging that path.
-pub const FULL_RX_BACKEND: bool = true;
-
-/// Runtime state of the full RX backend (set true only on the AMD open path, so
-/// the vCPU knows to skip its own RX pump and the worker knows to consume).
+/// True while the data-plane worker owns the guest's rings. The vCPU reads it
+/// to know that a TX kick belongs on the doorbell, not in its own hands.
 static FULL_ACTIVE: AtomicBool = AtomicBool::new(false);
 #[inline]
 pub fn full_active() -> bool { FULL_ACTIVE.load(Ordering::Acquire) }

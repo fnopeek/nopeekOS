@@ -474,24 +474,15 @@ pub const RESERVE_OFFLOAD_CORE: bool = true;
 /// RX+TX backend, AMD/SVM only today) AND the reservation experiment is on AND
 /// there is a core to spare. Mirrors the `full_backend` gate at `start_worker`.
 fn reserve_offload_core() -> bool {
-    // NOT vendor-gated any more, and the AMD gate was the bug.
-    //
-    // On Intel the worker runs in PRODUCER-ONLY mode, and in that mode it is not
-    // an optimisation — it is the machine's ONLY drainer of the host NIC:
-    //
-    //   * `net::poll()` on Core 0 skips the drain while `net_dataplane::active()`
-    //   * `nat::pump()` skips it too once a producer exists (nat.rs: `if producer
-    //     { tx_flush() } else { net::poll() }`)
-    //   * `pump_fast` still drains, but it only runs on a virtio-net MMIO exit —
-    //     i.e. only while the GUEST is talking
-    //
-    // So the moment the guest goes quiet and waits for a reply, one fiber carries
-    // the whole inbound path — for the guest AND for the host's own sockets. And
-    // `pick_offload_core()` hands it a core without MARKING it, so an AP vCPU is
-    // placed on top of it at the next guest SIPI. Measured: a host TCP connection
-    // to GitHub sat ESTABLISHED with nothing arriving, at the same time as the
-    // guest's network died. AMD never showed it because this reservation already
-    // gave the worker a core of its own there.
+    // NOT vendor-gated, and the AMD gate was the bug: the reservation existed
+    // only where it was least needed. The worker owns the guest's rings and, for
+    // a card that raises no RX interrupt, polls that card as well — so it is the
+    // machine's inbound path for the guest AND, while it holds the drain guard,
+    // for the host's own sockets. `pick_offload_core()` hands out a core without
+    // MARKING it, so an AP vCPU lands on top of it at the next guest SIPI.
+    // Measured: a host TCP connection to GitHub sat ESTABLISHED with nothing
+    // arriving, at the same moment the guest's network died. AMD never showed it
+    // because the reservation already gave the worker a core of its own there.
     //
     // Needs >= 3 cores: Core 0 + >= 1 vCPU + 1 worker. Below that, co-location is
     // the lesser evil against starving the guest to nothing.
@@ -786,24 +777,6 @@ const SLICE_BUDGET: u32 = 4096;
 /// the RX producer can wake the consumer on BOTH backends — SVM had
 /// `kick_bsp_net_irq` and VMX had nothing at all.
 static BSP_HOST_CORE: AtomicUsize = AtomicUsize::new(usize::MAX);
-
-/// Wake the core running the BSP vCPU so it takes a VM-exit NOW and pumps the
-/// bridge, instead of waiting for its next natural exit.
-///
-/// Without this the inline (Intel) path delivers guest-bound packets only when
-/// the guest itself touches virtio-net — i.e. while it is SENDING — or on the
-/// host's 100 Hz timer. A guest waiting for a reply generates no MMIO exits, so
-/// every reply waited half a tick: measured on the notebook, `rx wait avg
-/// 4988 us` with nothing dropped and 3 interrupts raised in a whole run. That is
-/// a page that loads for a second while the browser talks and dies the moment it
-/// starts listening.
-pub fn kick_bsp_vcpu() {
-    let hc = BSP_HOST_CORE.load(Ordering::Relaxed);
-    if hc == usize::MAX || hc == crate::smp::per_core::current_core_id() {
-        return; // not mapped yet, or we ARE the consumer — it will pump anyway
-    }
-    crate::smp::kick_host_core(hc);
-}
 
 /// The wake half of irqfd (`virt/kvm/eventfd.c`): an RX-ready signal both RAISES
 /// the guest's IRQ line and WAKES the vCPU, in one act. `net_backend::raise_irq`
@@ -1308,12 +1281,11 @@ fn vcpu_fiber_task(_arg: u64) {
     // tap and the guest rings, so THIS BSP vCPU does no net work beyond the TX
     // doorbell and its IRQ. Stopped in this fiber's teardown + vm_poll_slice.
     //
-    // No vendor condition. It carried `&& Amd` because the IRQ fold and the BSP
-    // kick lived under `svm/`, which meant the development machine (AMD) and
-    // both target machines (Intel) ran DIFFERENT programs — months of hunting a
-    // fault on hardware that the test machine could not possibly reproduce.
-    // Both vendors fold and kick now; there is one data path and everyone runs it.
-    let full_backend = crate::microvm::devices::net_backend::FULL_RX_BACKEND;
+    // No vendor condition, and no switch. It carried `&& Amd` because the IRQ
+    // fold and the BSP kick lived under `svm/`, which meant the development
+    // machine (AMD) and both target machines (Intel) ran DIFFERENT programs —
+    // months of hunting a fault on hardware the test machine could not
+    // reproduce. There is one data path and every machine runs it.
     // When the reservation experiment is on, guest_vcpus() left one worker core
     // free and claim_offload_core() marks it so the SIPI'd APs skip it → the net
     // worker runs on its OWN core (no vCPU co-location → no csd_lock_wait spin).
@@ -1326,7 +1298,7 @@ fn vcpu_fiber_task(_arg: u64) {
         "[microvm] net worker core {} (vCPUs={}, reserve={})",
         worker_core, guest_vcpus(), reserve_offload_core()
     );
-    crate::microvm::devices::net_dataplane::start_worker(worker_core, full_backend);
+    crate::microvm::devices::net_dataplane::start_worker(worker_core);
 
     // Off-vCPU GPU worker (Stage 2): on AMD with a spare core, claim a SECOND
     // reserved core and run the ~8 MB/frame framebuffer copy + write_frame there,

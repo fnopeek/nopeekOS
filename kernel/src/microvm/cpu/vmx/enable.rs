@@ -592,7 +592,6 @@ pub struct VmShared {
     /// IRQ-entry/EOI instead of processing. Frames are still delivered into the
     /// ring every exit; the interrupt is raised at most ~1 per NET_IRQ_GAP_US so
     /// the guest's NAPI drains big batches like on a real NIC with coalescing.
-    last_net_irq_tsc: u64,
     /// `ticks()` of the last virtio-gpu display config-change IRQ — rate-
     /// limits the resize round-trip (R2 debounce).
     last_cfg_tick: u64,
@@ -795,7 +794,6 @@ impl VmContext {
                     pci: crate::microvm::devices::PciBus::new(),
                     pic: crate::microvm::devices::pic8259::Pic8259::new(),
                     last_timer_tick: 0,
-                    last_net_irq_tsc: 0,
                     last_cfg_tick: 0,
                     pending_irqs: 0,
                     pit: crate::microvm::devices::pit8253::Pit::new(),
@@ -1855,8 +1853,12 @@ impl VmContext {
                 // BSP-only: the AP never pumps the NAT (stays false).
                 let mut pumped = false;
                 if is_bsp {
-                    pumped = crate::microvm::devices::nat::pump(
-                        &mut *crate::microvm::devices::net_backend::lock(), sh.guest_mem);
+                    // The worker owns RX; the BSP only reaps idle mappings and
+                    // reads whether the data plane moved anything (idle
+                    // accounting). RX IRQ10 arrives via the fold at the top of
+                    // this loop, exactly as on SVM.
+                    crate::microvm::devices::nat::housekeep();
+                    pumped = crate::microvm::devices::nat::recently_active();
                     if sh.pci.virtio_input.drain_injected(sh.guest_mem) {
                         let vector = sh.pic.vector_for_irq(12);
                         let _ = vmcs::inject_external_irq(vector);
@@ -1865,16 +1867,6 @@ impl VmContext {
                     }
                     // (snd pump moved to the per-exit common path above; its IRQ
                     // is drained from pending_irqs at the top of this block.)
-                    if pumped {
-                        let vector = sh.pic.vector_for_irq(10);
-                        // Count it like the MMIO path does — this arm raised
-                        // IRQ10 without telling anyone, so `irq raised` in the
-                        // report read as ~0 while the guest was being woken.
-                        crate::microvm::devices::nat::note_net_irq();
-                        let _ = vmcs::inject_external_irq(vector);
-                        self.vcpu.consecutive_idle = 0;
-                        continue;
-                    }
                 }
                 // (Normal 100 Hz PIT/LAPIC slots removed — the guest timer is now
                 // delivered at its programmed ~1 kHz rate in the priority block at
@@ -2169,19 +2161,6 @@ impl VmContext {
                     // vCPU touches it; the off-vCPU backend lands in Stage 2).
                     let mut net = crate::microvm::devices::net_backend::lock();
                     if handle_mmio_ept_net(&mut self.vcpu.regs, &mut *net, &sh.pic, &mut sh.pending_irqs, gpa, sh.guest_mem) {
-                        // The guest just touched virtio-net (queue notify / ISR
-                        // read) — drain RX into it NOW instead of waiting for the
-                        // ~1500/s timer/HLT pump. This tracks RX delivery to the
-                        // guest's device activity (~15k/s), lifting the download
-                        // ceiling (pump/s was ≪ VM-exits/s). BSP only.
-                        if is_bsp
-                            && crate::microvm::devices::nat::pump_fast(&mut *net, sh.guest_mem)
-                        {
-                            // Interrupt moderation: frames are already delivered
-                            // into the ring; raise IRQ10 at most ~1 per gap so
-                            // NAPI drains batches (not the io=18170 EOI storm).
-                            if net_irq_due(sh) { sh.pending_irqs |= 1 << 10; }
-                        }
                         drop(net);
                         // Deliver a deferred device IRQ (esp. an async 9p
                         // write-completion) NOW rather than at the next
@@ -2203,20 +2182,6 @@ impl VmContext {
                     }
                 } else if sh.pci.virtio_9p.bar0_in_range(gpa) {
                     if handle_mmio_ept_p9(&mut self.vcpu.regs, &mut sh.pci.virtio_9p, &sh.pic, &mut sh.pending_irqs, gpa, sh.guest_mem) {
-                        // A 9p access (e.g. a download write) runs the npkFS
-                        // write INLINE here — during which the net RX pump does
-                        // not run, so the staging queue overflows and RX drops
-                        // (the download-to-disk sawtooth). Drain RX right after,
-                        // so disk activity no longer starves it. BSP only.
-                        if is_bsp
-                            && crate::microvm::devices::nat::pump_fast(
-                                &mut *crate::microvm::devices::net_backend::lock(), sh.guest_mem)
-                        {
-                            // Interrupt moderation: frames are already delivered
-                            // into the ring; raise IRQ10 at most ~1 per gap so
-                            // NAPI drains batches (not the io=18170 EOI storm).
-                            if net_irq_due(sh) { sh.pending_irqs |= 1 << 10; }
-                        }
                         // Deliver the freshly-completed 9p write-reply IRQ NOW
                         // (latched by drain_async_done at the loop top) instead
                         // of waiting for the next reason-1/12 exit.
@@ -2647,24 +2612,6 @@ fn deliver_irq_vmx(
 ///     timer-force isn't pushed further out. The host 100 Hz timer keeps
 ///     producing reason-1 exits regardless of guest MMIO, so the timer still
 ///     fires ≤30 ms — the central RCU-stall invariant holds.
-/// Interrupt moderation (ITR) for the net-RX IRQ10. Returns true at most once per
-/// `NET_IRQ_GAP_US`; the caller raises IRQ10 only then. Frames are delivered into
-/// the guest RX ring on every exit regardless — this throttles only the interrupt,
-/// so the guest's NAPI drains big batches instead of taking ~1 IRQ/packet (the
-/// `io=18170/s` EOI storm that pegged the guest vCPU at ~158 Mbit). BSP-only.
-fn net_irq_due(sh: &mut VmShared) -> bool {
-    const NET_IRQ_GAP_US: u64 = 250;
-    let now = crate::interrupts::rdtsc();
-    let gap = (crate::interrupts::tsc_freq() / 1_000_000).max(1) * NET_IRQ_GAP_US;
-    if now.wrapping_sub(sh.last_net_irq_tsc) >= gap {
-        sh.last_net_irq_tsc = now;
-        crate::microvm::devices::nat::note_net_irq();
-        true
-    } else {
-        false
-    }
-}
-
 fn try_prompt_device_irq(vcpu: &mut Vcpu, sh: &mut VmShared) {
     if vcpu.apic_id != 0 || sh.pending_irqs == 0 || vcpu.reinject != 0 {
         return;
