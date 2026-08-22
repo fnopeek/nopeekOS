@@ -1304,15 +1304,16 @@ fn vcpu_fiber_task(_arg: u64) {
     // yield to ~10 ms). Restored to the worker timer when the guest ends.
     crate::interrupts::arm_dedicated_vm_timer();
 
-    // Spawn the dedicated host-NIC RX producer on another core (the Linux-NAPI
-    // split): it drains the NIC + IP stack + GRO into INBOUND_Q, event-driven on
-    // the RX IRQ, so THIS BSP vCPU only injects — the two halves pipeline instead
-    // of serializing on one core. Stopped in this fiber's teardown + vm_poll_slice.
-    // Full off-vCPU RX backend (Stage 2b) is SVM-only (the IRQ fold + BSP kick
-    // live in svm::enable). `current_vendor()` is safe here — the BSP hasn't
-    // taken the VENDOR lock for its run loop yet (that's the match below).
-    let full_backend = crate::microvm::devices::net_backend::FULL_RX_BACKEND
-        && matches!(current_vendor(), Vendor::Amd);
+    // Spawn the data-plane worker on another core: it moves frames between the
+    // tap and the guest rings, so THIS BSP vCPU does no net work beyond the TX
+    // doorbell and its IRQ. Stopped in this fiber's teardown + vm_poll_slice.
+    //
+    // No vendor condition. It carried `&& Amd` because the IRQ fold and the BSP
+    // kick lived under `svm/`, which meant the development machine (AMD) and
+    // both target machines (Intel) ran DIFFERENT programs — months of hunting a
+    // fault on hardware that the test machine could not possibly reproduce.
+    // Both vendors fold and kick now; there is one data path and everyone runs it.
+    let full_backend = crate::microvm::devices::net_backend::FULL_RX_BACKEND;
     // When the reservation experiment is on, guest_vcpus() left one worker core
     // free and claim_offload_core() marks it so the SIPI'd APs skip it → the net
     // worker runs on its OWN core (no vCPU co-location → no csd_lock_wait spin).

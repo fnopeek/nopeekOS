@@ -134,6 +134,32 @@ pub fn route_to_current(vector: u8) {
     }
 }
 
+/// Route an already-registered device IRQ to `core`, which need not be the core
+/// running this code. The host NIC's RX interrupt belongs on whichever core
+/// DRAINS the card; while a microvm owns the tap that is Core 0, and Core 0
+/// idles in `hlt` — so without this the card's arrival interrupt wakes a core
+/// that isn't looking, and the drain falls back to the 100 Hz timer.
+/// No-op if `vector` isn't registered, or `core` is unknown.
+pub fn route_to_core(vector: u8, core: usize) {
+    if vector == 0 {
+        return;
+    }
+    let apic = {
+        let cores = crate::smp::per_core::CORES.lock();
+        match cores.get(core) {
+            Some(c) => c.apic_id,
+            None => return,
+        }
+    };
+    let mut reg = IRQ_REG.lock();
+    if let Some(r) = reg[vector as usize].as_mut() {
+        if r.last_dest != apic {
+            pci::msix_set_dest(r.dev, r.entry, apic);
+            r.last_dest = apic;
+        }
+    }
+}
+
 /// Park the current fiber until `vector` fires (its count moves past `since`)
 /// or `timeout_ms` elapses. Returns true if the IRQ fired, false on timeout.
 /// MUST be called from inside a fiber (returns false otherwise — the caller

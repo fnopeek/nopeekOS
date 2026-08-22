@@ -30,76 +30,16 @@
 //!     the BSP kick, so this mode is on its way out; the vendor gate that still
 //!     forces it on Intel falls next.
 
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use alloc::collections::VecDeque;
-use spin::Mutex;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-/// Lock-free RX_STAGE depth + last-drained host-NIC RX used.idx, so the busy-poll
-/// can test "is there RX/ACK work?" without taking any lock (the cheap condition
-/// that keeps it from being the reverted lock-hammer spin).
-static RX_STAGE_LEN: AtomicUsize = AtomicUsize::new(0);
-static LAST_RX_SEQ: AtomicU64 = AtomicU64::new(0);
-
-/// True iff there is RX or TX work to service RIGHT NOW — a fresh host-NIC RX
-/// frame (used.idx moved past what we last drained) or a queued ACK (TX kick).
-/// Lock-free. Deliberately does NOT include the RX stage: a stage that can't
-/// drain because the guest ring is full must NOT busy-spin (the guest frees
-/// buffers asynchronously; the next real RX/TX event drains the stage). The
-/// `RX_STAGE_LEN` counter is kept for diagnostics / future use.
+/// True iff there is RX or TX work RIGHT NOW — a frame in the tap or a queued
+/// guest TX kick. Lock-free, and card-neutral: this used to compare the QEMU
+/// virtio NIC's used.idx, which on both target machines reads 0 forever, so the
+/// test was `0 != 0` and the worker believed there was never anything to do.
 #[inline]
 fn has_work() -> bool {
-    let _ = RX_STAGE_LEN.load(Ordering::Relaxed);
-    crate::netdev::rx_seq() != LAST_RX_SEQ.load(Ordering::Relaxed)
+    crate::microvm::devices::nat::tap_len() > 0
         || crate::microvm::devices::net_backend::tx_kick_pending()
-}
-
-/// Worker-local RX overflow stage. The host NIC RX ring MUST be kept empty every
-/// pass — leaving frames in it lets it overflow → QEMU/slirp drops → the server
-/// retransmits → its cwnd collapses (the download lottery). So we ALWAYS drain
-/// the whole NIC ring; a frame the guest ring can't take this instant is staged
-/// here (lossless) and re-injected oldest-first next pass. Only the data-plane
-/// fiber touches it (single consumer). Bounded: on sustained overload (the guest
-/// genuinely can't keep up) the oldest staged frame is dropped — but a transient
-/// guest-slow window (the common case) is absorbed, never lost.
-static RX_STAGE: Mutex<VecDeque<alloc::vec::Vec<u8>>> = Mutex::new(VecDeque::new());
-/// ~3 MB of frames ≈ 24 ms at 1 Gbit — far more than any guest-slow transient.
-const RX_STAGE_MAX: usize = 2048;
-
-/// Stage a frame the guest ring couldn't take. Drops (recycles) the OLDEST on
-/// sustained overload to bound memory; the NIC ring is still emptied either way.
-fn stage_push(frame: alloc::vec::Vec<u8>) {
-    let mut s = RX_STAGE.lock();
-    if s.len() >= RX_STAGE_MAX {
-        if let Some(old) = s.pop_front() {
-            crate::microvm::devices::nat::recycle_frame(old);
-        }
-    }
-    s.push_back(frame);
-    RX_STAGE_LEN.store(s.len(), Ordering::Relaxed);
-}
-
-/// Re-inject staged frames (oldest first) while the guest ring has room.
-fn inject_stage(
-    dev: &mut crate::microvm::devices::virtio_net_dev::VirtioNet,
-    gm: &crate::microvm::devices::guest_mem::GuestMem,
-    injected: &mut bool,
-) {
-    let mut s = RX_STAGE.lock();
-    while !s.is_empty() && dev.rx_avail_count(gm) > 0 {
-        let f = s.pop_front().unwrap();
-        if dev.inject_rx(gm, &f) { *injected = true; }
-        crate::microvm::devices::nat::recycle_frame(f);
-    }
-    RX_STAGE_LEN.store(s.len(), Ordering::Relaxed);
-}
-
-/// Drop the RX stage at VM teardown so a stale frame can't leak into the next run.
-pub fn reset_stage() {
-    let mut s = RX_STAGE.lock();
-    while let Some(f) = s.pop_front() {
-        crate::microvm::devices::nat::recycle_frame(f);
-    }
-    RX_STAGE_LEN.store(0, Ordering::Relaxed);
 }
 
 /// Worker wakeup attribution (surfaced in `cores`): irq = host RX MSI-X woke us
@@ -227,8 +167,25 @@ pub fn start_worker(core: usize, full: bool) {
     if !full && crate::netdev::rx_wake_vector().is_some() { return; }
     if WORKER_RUNNING.swap(true, Ordering::AcqRel) { return; }
     STOP.store(false, Ordering::Release);
+    // The card's RX interrupt belongs on the core that DRAINS it, and that is
+    // Core 0 — it runs the IP stack and idles in `hlt` between wakes. Not on
+    // this worker: it reads the tap, not a card, and an interrupt that wakes a
+    // core which then looks at nothing is worse than no interrupt at all.
+    // No-op for a card that has no RX vector (intel / rtl8153 / AX200).
+    if let Some(v) = crate::netdev::rx_wake_vector() {
+        crate::irq::route_to_core(v, 0);
+    }
     crate::smp::fiber::admit_with_stack(core, worker_entry, full as u64, WORKER_STACK_BYTES);
 }
+
+/// The active card raises no RX interrupt, so SOMEBODY has to poll it — Linux
+/// gives such a device a poller too. Doing it here is not the old "the worker
+/// drains the NIC and therefore only ever sees what IT pulled": the frames go
+/// through the same one door as everyone else's (`eth::handle_frame` →
+/// `nat::tap_inbound`), and the worker's own wake still hangs on its doorbell,
+/// not on this card.
+#[inline]
+fn nic_needs_polling() -> bool { crate::netdev::rx_wake_vector().is_none() }
 
 /// Stop the fiber at VM teardown and wait (bounded) for it to exit so the host's
 /// own networking reclaims the NIC drain.
@@ -246,68 +203,52 @@ pub fn stop_worker() {
         if !WORKER_RUNNING.load(Ordering::Acquire) { break; }
         core::hint::spin_loop();
     }
-    reset_stage();
+    crate::microvm::devices::nat::tap_reset();
 }
 
-/// vhost `handle_rx` + `handle_tx` for the full off-vCPU path: one pass on this
-/// core, then wake the guest.
+/// `VHOST_NET_PKT_WEIGHT` (drivers/vhost/net.c): frames one pass may move before
+/// yielding, so a saturated link cannot starve everything else on this core.
+const RX_PKT_WEIGHT: u64 = 256;
+
+/// vhost `handle_rx` + `handle_tx`: one pass on this core, then wake the guest.
 ///
-/// Lock discipline (the ACK-jitter fix): the host-NIC drain + L3 rewrite is the
-/// SLOW part (per-frame DMA copy + masquerade) and touches ONLY the host NIC +
-/// NAT — NOT the guest device — so it runs WITHOUT `net_backend` (POLLING guard
-/// only). The device mutex is then held for just the SHORT guest-ring critical
-/// section (inject + TX service). The vCPU spins on that same mutex for its
-/// per-IRQ ISR read, which sits on the guest's ACK/NAPI path; holding it across
-/// the whole drain (the old code) stalled ACK egress → spurious TLP. Keep it short.
+/// The fiber does NOT touch a network card. Whoever drains the host NIC — Core
+/// 0, a recv spin, or the AX200's WASM driver from its own fiber — ends in
+/// `nat::tap_inbound`, and this reads the tap. That is what makes one data path
+/// possible: where a frame ENTERS no longer decides whether this worker can see
+/// it. Under the old shape the WASM driver delivered straight into
+/// `eth::handle_frame`, which this function never looked at.
+///
+/// Lock discipline (the ACK-jitter fix): the device mutex is held only for the
+/// SHORT guest-ring section (inject + TX ring walk). The vCPU spins on that same
+/// mutex for its per-IRQ ISR read, which sits on the guest's ACK/NAPI path, so
+/// the expensive masquerade + segmentation runs outside it.
 fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
     use crate::microvm::devices::{nat, net_backend};
 
-    // ── Phase 1: drain the host NIC LOCK-FREE (POLLING guard only) and rewrite
-    //    each masqueraded frame into a staging Vec. No net_backend lock held, so
-    //    the vCPU's ISR-read / ACK MMIO exits never wait on this slow host I/O. ──
-    let mut rewritten: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
-    let mut host_frames: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
-    if crate::net::try_acquire_drain() {
-        let mut buf = [0u8; crate::netdev::MTU];
-        while let Some(len) = crate::netdev::recv(&mut buf) {
-            if len < 14 { continue; }
-            let ethertype = u16::from_be_bytes([buf[12], buf[13]]);
-            if ethertype == crate::net::eth::ETHERTYPE_IPV4 {
-                if let Some(gframe) = nat::l3_rewrite_inbound(&buf[14..len]) {
-                    rewritten.push(gframe);
-                    continue;
-                }
-            }
-            // Not masqueraded guest traffic (ARP / host IPv4) — host stack, later.
-            host_frames.push(buf[..len].to_vec());
-        }
-        crate::net::release_drain();
-        // Mark the NIC drained to here so has_work() only fires on a NEW frame.
-        LAST_RX_SEQ.store(crate::netdev::rx_seq(), Ordering::Relaxed);
-    }
-    // Full-path RX cadence diagnostic (the only place that sees the real batch).
-    if !rewritten.is_empty() {
-        note_rx_pass(rewritten.len() as u64, crate::interrupts::rdtsc());
-    }
-
-    // ── Phase 2: SHORT device-mutex section — guest-ring work only. Inject any
-    //    previously staged frames first (in order), then the freshly drained ones;
-    //    a frame the guest ring can't take is STAGED (lossless), never dropped /
-    //    left in the NIC ring. Then service the guest TX ring (symmetric with RX,
-    //    polled every pass). ──
+    // ── handle_rx: move frames from the TAP into the guest RX ring while the
+    //    guest has buffers, and STOP when it doesn't. vhost leaves the frame in
+    //    the socket and waits to be told buffers were refilled — it stages it
+    //    nowhere else. That is the whole of the backpressure: the tap fills,
+    //    the producer counts a drop, the far end slows down. ──
     let mut injected = false;
-    // Phase 2a — SHORT locked section: RX inject + the CHEAP guest-TX ring drain
-    // only (walk avail ring, copy frame bytes out, publish used). The expensive
-    // SW-TSO emit is deferred to Phase 2b, lock-free.
+    let mut rx_frames = 0u64;
     let (rx_raise, tx_payloads, caps) = {
         let mut dev = net_backend::lock();
-        inject_stage(&mut dev, gm, &mut injected);
-        for gframe in rewritten {
-            if dev.rx_avail_count(gm) > 0 && dev.inject_rx(gm, &gframe) {
+        while rx_frames < RX_PKT_WEIGHT {
+            if dev.rx_avail_count(gm) == 0 { break; }   // get_rx_bufs -> 0
+            let Some(frame) = nat::tap_pop() else { break };
+            if dev.inject_rx(gm, &frame) {
                 injected = true;
-                nat::recycle_frame(gframe);
+                rx_frames += 1;
+                nat::note_tap_delivered();
+                nat::recycle_frame(frame);
             } else {
-                stage_push(gframe);
+                // `vhost_discard_vq_desc`: inject_rx rolled its descriptors back,
+                // so this frame was never consumed. Return it to the head and
+                // stop — the guest must run before retrying is worth anything.
+                nat::tap_push_front(frame);
+                break;
             }
         }
         // vhost_signal (RX): raise IRQ10 only when used.idx crossed used_event.
@@ -318,42 +259,40 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
         let tx_payloads = dev.drain_tx_payloads(gm);
         let caps = dev.caps();
         (rx_raise, tx_payloads, caps)
-    }; // device mutex released — vCPU ACK exits wait on neither the RX drain NOR
-       // the TX emit now (the TX half of the v0.226.63 ACK-jitter fix).
+    }; // device mutex released.
+    if rx_frames > 0 {
+        note_rx_pass(rx_frames, crate::interrupts::rdtsc());
+    }
 
-    // Phase 2b — LOCK-FREE: software-segment + per-segment checksum + host-NIC
-    // send, the mirror of Phase 1's lock-free RX drain. On a bulk upload this is
-    // the long pole; running it OUTSIDE the guest device mutex stops it from
-    // stalling the vCPU's ACK/ping ISR reads (svm/enable.rs net-MMIO exits).
+    // ── handle_tx, lock-free: masquerade + segment + hand to the host NIC. On a
+    //    bulk upload this is the long pole; outside the device mutex it cannot
+    //    stall the vCPU's ACK/ISR exits. ──
     let tx_advanced = !tx_payloads.is_empty();
     let mut tx_replies: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
     for p in &tx_payloads {
-        for rep in nat::process_tx(p, &caps) { tx_replies.push(rep); }
+        for rep in nat::tap_outbound(p, &caps) { tx_replies.push(rep); }
     }
 
-    // Phase 2c — SHORT locked section: set TX ISR, inject any synthetic replies,
-    // decide the raise. The worker is the sole TX (and RX) consumer in full mode
-    // (the vCPU only note_tx_kick's), so dropping the lock between 2a and 2c is
-    // race-free: no other context touches the guest TX/RX rings.
+    // Short locked section: set the TX ISR, inject any synthetic replies (ARP /
+    // DNS), decide the raise. This fiber is the sole consumer of both guest
+    // rings, so dropping the lock in between is race-free.
     let tx_raise = {
         let mut dev = net_backend::lock();
         dev.tx_finish(gm, tx_advanced, &tx_replies)
     };
 
-    // Host-stack frames (outside the device lock).
-    for f in &host_frames { crate::net::eth::handle_frame(f); }
-    // Flush any guest TX / host egress queued into the host NIC TX ring.
-    crate::virtio_net::tx_flush();
+    // Flush any guest egress batched into the host NIC's TX ring. Host-stack
+    // frames are no longer this fiber's business — it does not drain a card.
+    crate::netdev::tx_flush();
 
-    // Mark the data plane active so the worker's halt-poll (recently_active)
-    // stays warm through this transfer — RX in or an ACK out both count.
+    // Mark the data plane active so the halt-poll stays warm through a transfer.
     if injected || tx_raise {
         nat::mark_active();
     }
 
     // irqfd: wake the guest. Raise IRQ10 when EVENT_IDX says so; otherwise still
-    // kick the vCPU scheduler so a parked vCPU NAPI-polls the non-empty ring (a
-    // parked vCPU can't poll on its own).
+    // kick the vCPU so a parked one NAPI-polls the non-empty ring (a parked vCPU
+    // cannot poll on its own).
     if rx_raise || tx_raise {
         net_backend::raise_irq();
         crate::microvm::cpu::kick_bsp_net_irq();
@@ -376,6 +315,9 @@ fn worker_entry(arg: u64) {
             WORKER_RUNNING.store(false, Ordering::Release);
             return;
         }
+
+        let polled = nic_needs_polling();
+        if polled { crate::net::poll_rx_only(); }
 
         if full {
             if let Some(gm) = crate::microvm::devices::guest_mem::active() {
@@ -411,6 +353,7 @@ fn worker_entry(arg: u64) {
             let mut got = false;
             let mut spins: u32 = 0;
             loop {
+                if polled { crate::net::poll_rx_only(); }
                 if has_work() { got = true; break; }
                 spins = spins.wrapping_add(1);
                 if WARM_THROUGH_TRANSFER {
@@ -435,29 +378,24 @@ fn worker_entry(arg: u64) {
             // through to the event-park (HLT) so an idle worker never burns the core.
         }
 
-        // Park EVENT-DRIVEN on the host NIC RX IRQ (routed to this core). Arm
-        // AFTER the drain, then drain once more, so a frame that arrived in the
-        // arming window already advanced the fired count → irq_wait returns at
-        // once (no lost wakeup). The TX doorbell also wakes us: `note_tx_kick`
-        // bumps this vector's fired count + IPIs this core.
-        let vec = crate::netdev::rx_wake_vector();
-        if let Some(vec) = vec {
-            let since = crate::irq::arm(vec);
-            if full {
-                if let Some(gm) = crate::microvm::devices::guest_mem::active() {
-                    service_full(gm);
-                }
-            } else {
-                crate::microvm::devices::nat::rx_producer_drain();
-            }
-            if crate::smp::fiber::irq_wait(vec, since, PARK_SAFETY_MS) {
-                WAKE_IRQ.fetch_add(1, Ordering::Relaxed);
-            } else {
-                WAKE_TIMEOUT.fetch_add(1, Ordering::Relaxed);
-            }
+        // Park on OUR OWN doorbell — never on some card's MSI-X. `tap_push` wakes
+        // this core on the tap's empty→occupied edge and `note_tx_kick` on a
+        // guest TX kick; both go through `kick_host_core`, which bumps this
+        // core's kick generation BEFORE the IPI. Announce the park first, then
+        // re-check, so a frame that lands in the arming window is never lost:
+        // either we see it here, or the producer sees `parked` and kicks, and the
+        // scheduler re-tests the generation on every scan.
+        crate::microvm::devices::nat::set_worker_parked(true);
+        if has_work() {
+            crate::microvm::devices::nat::set_worker_parked(false);
+            continue;
+        }
+        let woke = crate::smp::fiber::kick_wait(PARK_SAFETY_MS);
+        crate::microvm::devices::nat::set_worker_parked(false);
+        if woke {
+            WAKE_IRQ.fetch_add(1, Ordering::Relaxed);
         } else {
-            WAKE_POLLED.fetch_add(1, Ordering::Relaxed);
-            crate::smp::fiber::yield_sleep(1);
+            WAKE_TIMEOUT.fetch_add(1, Ordering::Relaxed);
         }
     }
 }

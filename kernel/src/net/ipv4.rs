@@ -50,13 +50,24 @@ pub fn handle_ipv4(data: &[u8]) {
     let _src_ip = &data[12..16];
     let dst_ip = <[u8; 4]>::try_from(&data[16..20]).unwrap();
 
+    // The microvm tap gets first refusal, BEFORE the filter below. A guest flow
+    // is keyed on the address it went OUT with; asking "is this addressed to the
+    // address we happen to hold right now" first throws the reply away whenever
+    // that address has moved — a DHCP renewal, a carrier blink — and every live
+    // flow dies silently at this line. The tap's own test is "does it match a
+    // mapping", which is the question that has an answer. Cheap no-op when no
+    // VM is up.
+    if crate::microvm::devices::nat::tap_inbound(&data[..total_len.min(data.len())]) {
+        return;
+    }
+
     // Accept packets for our IP, broadcast, or during DHCP (IP = 0.0.0.0)
     let our_ip = arp::our_ip();
     if dst_ip != our_ip && dst_ip != [255, 255, 255, 255] && our_ip != [0, 0, 0, 0] { return; }
 
-    // L3 masquerade: if this reply belongs to a running microvm's NAT
-    // flow it is rewritten back to the guest and consumed here — the
-    // host stack must NOT also process it. Cheap no-op when no VM up.
+    // Legacy inline intercept — unreachable now that the tap runs first (same
+    // table, so anything it would claim the tap already claimed). Goes with the
+    // rest of the inline path.
     if crate::microvm::devices::nat::l3_inbound(&data[..total_len.min(data.len())]) {
         return;
     }

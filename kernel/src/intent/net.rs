@@ -191,6 +191,21 @@ fn bridge_report() {
     kprintln!("  microVM bridge (L3 masquerade){}",
         if b.active { "" } else { "  — idle, no flow yet" });
     kprintln!("  ─────────────────────────────");
+    // The identity line. QEMU, the NUC and the notebook must print the SAME
+    // path id: for months they did not, and no number gathered on one of them
+    // said anything about the others.
+    match b.worker_core {
+        Some(c) => kprintln!("  path          {}  ·  kernel {}  ·  {}  ·  nic {}  ·  worker core {}",
+            b.path, b.version, b.vendor, b.nic, c),
+        None => kprintln!("  path          {}  ·  kernel {}  ·  {}  ·  nic {}  ·  NO WORKER",
+            b.path, b.version, b.vendor, b.nic),
+    }
+    kprintln!("  tap           {} of {} deep   {} delivered ({}/s)   {} dropped (ring full)",
+        b.tap, b.tap_cap, b.tap_delivered, b.tap_delivered_ps, b.tap_full);
+    if b.rehomed > 0 {
+        kprintln!("  rehomed       {} flows retired — the host address moved under them",
+            b.rehomed);
+    }
     if b.window_ms > 0 {
         kprintln!("  guest → host  {:>8} pkt  {:>7} KB   {:>6} pkt/s",
             b.tx_pkts, b.tx_bytes / 1024, b.tx_pps);

@@ -2847,10 +2847,19 @@ fn handle_mmio_ept_net(
     }
 
     if let Some(qidx) = net.take_pending_kick() {
-        let advanced = net.service_queues(qidx, mem);
-        if advanced {
-            // virtio-net IRQ line = 10 (per pci config 0x3C).
-            deliver_irq_vmx(pending, pic, 10);
+        if crate::microvm::devices::net_backend::full_active() && qidx == 1 {
+            // The worker owns the guest TX ring. Ring its doorbell instead of
+            // draining the ring here — two consumers on one virtqueue is
+            // corruption, not a race you get away with. SVM has had this guard
+            // since the off-vCPU TX landed; VMX did not, because on Intel the
+            // worker never ran. It runs now.
+            crate::microvm::devices::net_backend::note_tx_kick();
+        } else {
+            let advanced = net.service_queues(qidx, mem);
+            if advanced {
+                // virtio-net IRQ line = 10 (per pci config 0x3C).
+                deliver_irq_vmx(pending, pic, 10);
+            }
         }
     }
 
