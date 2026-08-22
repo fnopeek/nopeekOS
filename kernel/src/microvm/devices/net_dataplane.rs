@@ -26,9 +26,9 @@
 //!     model above. The vCPU does no net work beyond the TX doorbell + IRQ reap.
 //!   * producer-only (`!full`, a POLLED bare-metal NIC with no RX MSI-X): the
 //!     legacy path — drain the NIC into the BSP-consumed staging queue
-//!     (`nat::rx_producer_drain`), because that NIC needs an independent drainer
-//!     but the off-vCPU inject/IRQ-fold is SVM-only today. Migrated to the full
-//!     vhost path when VMX mirrors the BSP-kick.
+//!     (`nat::rx_producer_drain`). Both vendors now fold the net-IRQ and honour
+//!     the BSP kick, so this mode is on its way out; the vendor gate that still
+//!     forces it on Intel falls next.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use alloc::collections::VecDeque;
@@ -356,9 +356,9 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
     // parked vCPU can't poll on its own).
     if rx_raise || tx_raise {
         net_backend::raise_irq();
-        crate::microvm::cpu::svm::kick_bsp_net_irq();
+        crate::microvm::cpu::kick_bsp_net_irq();
     } else if injected {
-        crate::microvm::cpu::svm::kick_bsp_net_irq();
+        crate::microvm::cpu::kick_bsp_net_irq();
     }
 }
 

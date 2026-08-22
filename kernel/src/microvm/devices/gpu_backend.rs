@@ -126,7 +126,7 @@ fn worker_entry(_arg: u64) {
                 let advanced = GPU.lock().service_queues(qidx, gm);
                 if advanced {
                     raise_irq();
-                    crate::microvm::cpu::svm::kick_bsp_net_irq();
+                    crate::microvm::cpu::kick_bsp_net_irq();
                 }
             }
         }

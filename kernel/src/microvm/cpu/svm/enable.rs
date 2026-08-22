@@ -2639,18 +2639,6 @@ fn handle_mmio_npf_lapic(
     true
 }
 
-/// Kick the BSP (vCPU 0) out of VMRUN so it promptly folds the lock-free net-IRQ
-/// (raised by the off-vCPU RX backend on another core) into `pending_irqs` and
-/// injects IRQ10. Called from the `net_dataplane` fiber after it injects RX into
-/// the guest. No-op if the BSP isn't mapped yet (early boot) — the BSP folds the
-/// signal on its next natural exit anyway.
-pub fn kick_bsp_net_irq() {
-    let hc = VCPU_HOST_CORE[0].load(Ordering::Relaxed);
-    if hc != usize::MAX {
-        crate::smp::kick_host_core(hc);
-    }
-}
-
 /// Kick vCPU `target`'s host core out of VMRUN so it injects the just-set IPI
 /// promptly. Skips an unmapped target and the sender's own core (`self_core`).
 fn kick_vcpu_core(target: u8, self_core: usize) {

@@ -1521,6 +1521,16 @@ impl VmContext {
             sh.pending_irqs |= 1 << sh.pci.virtio_9p.irq_line();
         }
 
+        // Fold the lock-free net-IRQ the off-vCPU data plane raised on another
+        // core (`net_backend::raise_irq`) into `pending_irqs`; the 1|12 drain
+        // below injects it at a safe point. The mirror of the SVM path — until
+        // now the fold existed only there, so an off-vCPU worker on an Intel
+        // host could inject RX into the ring and had no way to tell the guest.
+        // Inert while nothing raises the signal.
+        if is_bsp && crate::microvm::devices::net_backend::take_irq() {
+            sh.pending_irqs |= 1 << 10;
+        }
+
         match basic {
             0 => {
                 // Exception/NMI. EXCEPTION_BITMAP=0 in production —

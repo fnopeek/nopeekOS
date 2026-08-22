@@ -96,7 +96,7 @@ pub fn run_substrate_test() -> Result<super::LaunchOutcome, &'static str> {
     }
 }
 
-pub use enable::{kick_bsp_net_irq, SliceOutcome, VmContext};
+pub use enable::{SliceOutcome, VmContext};
 
 /// Open a re-entrant VM context (12.4 step 1b). Probe-gated like
 /// `run_linux`. The caller drives `run_slice` + `close`.
