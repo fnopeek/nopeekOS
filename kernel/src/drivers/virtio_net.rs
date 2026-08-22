@@ -3,27 +3,7 @@
 //! Legacy (0.9.5) VirtIO PCI transport with RX/TX virtqueues.
 //! Provides Ethernet frame send/receive for the TCP/IP stack.
 
-use core::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
-
-/// Host TX offload (VIRTIO_NET_F_CSUM + _HOST_TSO4) negotiated with QEMU. When
-/// set, the masquerade TX path forwards the guest's GSO super-frame to the host
-/// NIC AS-IS (device does checksum + TCP segmentation) — the symmetric twin of RX
-/// (`inject_rx`): rewrite the address, carry the virtio_net_hdr, forward. No
-/// per-segment SW re-segmentation/checksum. Falls back to `emit_tcp_out` if unset.
-static HOST_OFFLOAD: AtomicBool = AtomicBool::new(false);
-
-/// Master switch for the TX offload path. DISABLED: first HW test hung the
-/// download after the TCP handshake — the offloaded data frame is malformed for
-/// QEMU's legacy F_GSO (SYN went through, then the connection stalled). The path
-/// (negotiation + send_offload + l3_outbound_offload) stays in the tree for
-/// debugging; flip true to retest. With it false, TX falls back to the working
-/// SW path (`emit_tcp_out`).
-const TX_OFFLOAD_ENABLED: bool = false;
-
-/// True iff the host NIC accepts offloaded (CSUM+TSO) TX frames via `send_offload`.
-pub fn host_offload_ok() -> bool {
-    TX_OFFLOAD_ENABLED && HOST_OFFLOAD.load(Ordering::Relaxed)
-}
+use core::sync::atomic::{fence, AtomicU64, Ordering};
 
 /// Lock-free pointer to the host NIC RX used.idx (`rx_used_base + 2`), published
 /// at init. Lets the off-vCPU data-plane busy-poll for RX arrival WITHOUT taking
@@ -76,8 +56,6 @@ const F_GSO: u32       = 1 << 6;   // VIRTIO_NET_F_GSO (legacy) — device handl
                                    // per-type HOST_TSO4) to a legacy driver.
 const F_HOST_TSO4: u32 = 1 << 11;  // VIRTIO_NET_F_HOST_TSO4 — device segments TSOv4
 /// virtio_net_hdr.flags / gso_type for offloaded TX (host does csum + TCP-GSO).
-const VNET_HDR_F_NEEDS_CSUM: u8 = 1;
-const VNET_HDR_GSO_TCPV4: u8    = 1;
 #[allow(dead_code)]
 const F_STATUS: u32    = 1 << 16;
 
@@ -210,10 +188,10 @@ pub fn init() -> bool {
 
         let features = inl(io + REG_DEV_FEATURES);
 
-        // Accept MAC, plus CSUM+TSO4 offload if BOTH are offered (needed to
-        // forward the guest's GSO super-frames AS-IS — symmetric TX, see
-        // `send_offload`). Only enable offload when both are present so we never
-        // promise a GSO frame the device can't segment.
+        // Accept MAC, plus CSUM+TSO4 if BOTH are offered. These are DEVICE
+        // capabilities (it can segment and checksum for us); we do not currently
+        // hand it a GSO frame, and accepting them costs nothing. Only when both
+        // are present, so we never promise a frame the device can't segment.
         let mut accepted = features & F_MAC;
         // Prefer the modern per-type bits; fall back to the legacy combined F_GSO
         // (what QEMU's transitional device offers a legacy driver). Either lets us
@@ -233,7 +211,6 @@ pub fn init() -> bool {
             kprintln!("[npk] virtio-net: TX offload negotiated ({})",
                       if modern { "CSUM+HOST_TSO4" } else { "legacy GSO" });
         }
-        HOST_OFFLOAD.store(offload, Ordering::Relaxed);
         outl(io + REG_DRV_FEATURES, accepted);
 
         // Read MAC address
@@ -494,105 +471,6 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
     Ok(())
 }
 
-/// Send an Ethernet frame to the host NIC WITH a 10-byte virtio_net_hdr (CSUM/TSO
-/// offload) — the symmetric TX twin of RX `inject_rx`: forward the frame as-is and
-/// let the DEVICE do the checksum + TCP segmentation, instead of re-segmenting +
-/// SW-checksumming each MSS in our hot path. `frame` (ethernet) may be a GSO
-/// super-frame up to ~64 KB; it is split across CHAINED MTU-sized descriptors
-/// (hdr → data → data → …), so no large contiguous DMA buffer is needed. Only
-/// valid when `host_offload_ok()`; the caller falls back to `send()` otherwise.
-///
-/// `gso_size` = TCP MSS (0 ⇒ checksum-only, no segmentation). `csum_start` =
-/// byte offset of the TCP header from the ethernet frame start (14 + IHL);
-/// `csum_offset` = 16 (TCP checksum field); `hdr_len` = csum_start + TCP header
-/// length. The frame's TCP checksum field must already hold the pseudo-header
-/// partial (NEEDS_CSUM); the device completes it.
-pub fn send_offload(frame: &[u8], gso_size: u16, csum_start: u16,
-                    csum_offset: u16, hdr_len: u16) -> Result<(), NetError> {
-    let mut lock = DEVICE.lock();
-    let dev = lock.as_mut().ok_or(NetError::NotInitialized)?;
-
-    let nchunks = frame.len().div_ceil(MTU).max(1);
-    let need = (nchunks + 1) as u16; // 1 hdr descriptor + one per data chunk
-
-    dev.reclaim_tx();
-    if dev.tx_num_free < need {
-        let mut spins = 0;
-        while dev.tx_num_free < need && spins < TX_RECLAIM_SPINS {
-            core::hint::spin_loop();
-            dev.reclaim_tx();
-            spins += 1;
-        }
-        if dev.tx_num_free < need { return Err(NetError::QueueFull); }
-    }
-
-    // hdr descriptor (d0): the 10-byte virtio_net_hdr (CSUM + optional TCP-GSO).
-    let d0 = dev.alloc_tx_desc().ok_or(NetError::QueueFull)?;
-    let hdr_addr = dev.tx_hdrs + d0 as u64 * NET_HDR_SIZE as u64;
-    let mut h = [0u8; NET_HDR_SIZE];
-    // GSO frames NEED the device to checksum (the per-segment checksums don't
-    // exist yet). Non-GSO frames carry a complete SW checksum already (this
-    // device's legacy F_GSO NEEDS_CSUM proved unreliable for small frames), so
-    // they go out as a plain frame — no offload flag, csum fields zero.
-    if gso_size > 0 {
-        h[0] = VNET_HDR_F_NEEDS_CSUM;
-        h[1] = VNET_HDR_GSO_TCPV4;
-        h[2..4].copy_from_slice(&hdr_len.to_le_bytes());
-        h[4..6].copy_from_slice(&gso_size.to_le_bytes());
-        h[6..8].copy_from_slice(&csum_start.to_le_bytes());
-        h[8..10].copy_from_slice(&csum_offset.to_le_bytes());
-    }
-    // SAFETY: pre-allocated DMA buffers + this core's own descriptor table.
-    unsafe {
-        core::ptr::copy_nonoverlapping(h.as_ptr(), hdr_addr as *mut u8, NET_HDR_SIZE);
-        let dd0 = (dev.tx_desc_base + d0 as u64 * 16) as *mut VringDesc;
-        (*dd0).addr = hdr_addr;
-        (*dd0).len = NET_HDR_SIZE as u32;
-        (*dd0).flags = 0; // linked below
-        (*dd0).next = 0;
-    }
-
-    // Data descriptors (one MTU chunk each), chained off d0.
-    let mut prev = d0;
-    let mut off = 0usize;
-    for _ in 0..nchunks {
-        let di = dev.alloc_tx_desc().ok_or(NetError::QueueFull)?;
-        let take = (frame.len() - off).min(MTU);
-        let data_addr = dev.tx_data + di as u64 * MTU as u64;
-        // SAFETY: as above; `take` ≤ MTU = the slot size.
-        unsafe {
-            core::ptr::copy_nonoverlapping(frame[off..off + take].as_ptr(),
-                                           data_addr as *mut u8, take);
-            let dd = (dev.tx_desc_base + di as u64 * 16) as *mut VringDesc;
-            (*dd).addr = data_addr;
-            (*dd).len = take as u32;
-            (*dd).flags = 0;
-            (*dd).next = 0;
-            // Link prev → di (prev keeps its addr/len).
-            let dp = (dev.tx_desc_base + prev as u64 * 16) as *mut VringDesc;
-            (*dp).flags |= DESC_F_NEXT;
-            (*dp).next = di;
-        }
-        prev = di;
-        off += take;
-    }
-
-    // Publish the chain head (d0) on the avail ring.
-    // SAFETY: this core's own virtqueue memory; release-fenced.
-    unsafe {
-        let avail_ring = dev.tx_avail_base + 4;
-        let slot = (avail_ring + (dev.tx_avail_idx % dev.tx_queue_size) as u64 * 2) as *mut u16;
-        core::ptr::write_volatile(slot, d0);
-        fence(Ordering::SeqCst);
-        let avail_idx_ptr = (dev.tx_avail_base + 2) as *mut u16;
-        dev.tx_avail_idx = dev.tx_avail_idx.wrapping_add(1);
-        core::ptr::write_volatile(avail_idx_ptr, dev.tx_avail_idx);
-        fence(Ordering::SeqCst);
-    }
-    dev.tx_notify_pending = true;
-    if dev.tx_num_free < 16 { dev.tx_kick(); }
-    Ok(())
-}
 
 /// Receive an Ethernet frame. Returns frame data (without virtio net header).
 /// Returns None if no packet available.

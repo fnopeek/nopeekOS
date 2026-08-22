@@ -9,8 +9,9 @@
 //!   * everything else (TCP/UDP/QUIC to real remotes) → **L3
 //!     masquerade**: we do NOT terminate. Outbound packets are SNAT'd
 //!     to our host IP + a masquerade port and sent via the host IP
-//!     layer; replies are intercepted in `net::ipv4` (`l3_inbound`),
-//!     rewritten back to the guest, and injected by `pump`. The
+//!     layer; replies are intercepted in `net::ipv4` (`tap_inbound`),
+//!     rewritten back to the guest, put in the tap, and injected by the
+//!     data-plane worker. The
 //!     guest's real Linux TCP/UDP/QUIC runs end-to-end with the
 //!     server — reliability/ordering/SACK/window-scaling are theirs,
 //!     not ours. See the `L3 masquerade NAT` section below.
@@ -23,7 +24,6 @@
 
 extern crate alloc;
 use crate::kprintln;
-use super::guest_mem::GuestMem;
 use alloc::vec::Vec;
 use alloc::string::String;
 use spin::Mutex;
@@ -59,6 +59,16 @@ const PORT_DNS: u16 = 53;
 /// TCP header length without options — used to bound L4 checksum
 /// recompute in the L3 path.
 const TCP_HDR_LEN: usize = 20;
+
+/// TCP flags the outbound segmenter has to carry correctly across a split
+/// (`tcp_gso_segment`, net/ipv4/tcp_offload.c).
+const TCP_FIN: u8 = 0x01;
+const TCP_PSH: u8 = 0x08;
+const TCP_CWR: u8 = 0x80;
+/// virtio-net header gso_type for a TCPv4 super-frame on guest TX (the ECN flag
+/// 0x80 is OR'd on top and must be masked off before comparing).
+const VNET_HDR_GSO_TCPV4: u8 = 1;
+const VNET_HDR_GSO_ECN: u8 = 0x80;
 
 /// Per-VM network policy. The browser default (`dns_tcp`) allows DNS +
 /// TCP + UDP (QUIC) through the L3 masquerade; ICMP still needs an
@@ -100,7 +110,6 @@ impl Default for NetCaps {
 // ===========================================================================
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtOrd};
-use alloc::collections::VecDeque;
 
 const L3_MAX: usize = 1024;
 
@@ -151,7 +160,7 @@ static NS_TX_ARPMISS: AtomicU64 = AtomicU64::new(0);   // went out to L2 broadca
 static NS_TX_RINGBAD: AtomicU64 = AtomicU64::new(0);   // guest TX queue unusable
 static NS_TX_TRUNC: AtomicU64 = AtomicU64::new(0);     // descriptor chain broke mid-frame
 /// An inbound TCP segment addressed to a port in OUR masquerade range that
-/// matched no mapping. It does not stop here: `l3_inbound` returns false, the
+/// matched no mapping. It does not stop here: `tap_inbound` returns false, the
 /// host stack takes it, finds no socket, and answers the server with a RST
 /// (tcp.rs:894). That is our own machine tearing down the guest's connection.
 /// A page that loads for a second and then dies looks exactly like this, and
@@ -161,47 +170,17 @@ static NS_RX_UNMATCHED: AtomicU64 = AtomicU64::new(0);
 pub fn note_tx_ring_bad() { NS_TX_RINGBAD.fetch_add(1, AtOrd::Relaxed); }
 pub fn note_tx_truncated() { NS_TX_TRUNC.fetch_add(1, AtOrd::Relaxed); }
 
-static NS_DROP_QUEUE: AtomicU64 = AtomicU64::new(0);  // INBOUND_Q overflow
 static NS_DROP_TABLE: AtomicU64 = AtomicU64::new(0);  // L3 masquerade table full
 static NS_DROP_EGRESS: AtomicU64 = AtomicU64::new(0); // host NIC refused the frame
 static NS_HIGHWATER: AtomicU64 = AtomicU64::new(0);
 static NS_LAST_TICK: AtomicU64 = AtomicU64::new(0);
-/// High-water mark of the INBOUND_Q staging depth. If this rides near
-/// INBOUND_MAX the download is backpressure-capped; if shallow, the cap is
-/// upstream (slirp/NIC).
-static NS_IQ_HI: AtomicU64 = AtomicU64::new(0);
-/// RX delivery latency = how long a guest-bound packet sat in INBOUND_Q before
-/// the BSP pump injected it (TSC ticks, summed + counted for an avg, plus a
-/// max). THE decisive page-load metric: high (~ms) ⇒ our RX delivery is the
-/// bottleneck (the BSP parks between bursts → event-driven wake is the fix);
-/// low (~µs) ⇒ the cap is upstream (RTT / DNS / QUIC / server), not our code.
-static NS_RXLAT_SUM: AtomicU64 = AtomicU64::new(0);
-static NS_RXLAT_N: AtomicU64 = AtomicU64::new(0);
-static NS_RXLAT_MAX: AtomicU64 = AtomicU64::new(0);
-/// Consumer-bottleneck diagnostics (which serial limit caps RX): how often the
-/// pump runs, how often inject_rx bailed because the guest RX ring had no buffer
-/// (= guest-NAPI-bound), and total injected (→ avg batch per pump call).
-static NS_PUMP_CALLS: AtomicU64 = AtomicU64::new(0);
+/// The guest RX ring had no buffer posted, so the frame stayed in the tap.
+/// High = the GUEST is the limiter, not us.
 static NS_INJECT_FALSE: AtomicU64 = AtomicU64::new(0);
 /// New-flow counts by transport, to spot QUIC: a cold page that opens lots of
-/// UDP flows is using HTTP/3 — if those churn/stall it points at QUIC-over-NAT.
+/// UDP flows is using HTTP/3.
 static NS_TCP_FLOWS: AtomicU64 = AtomicU64::new(0);
 static NS_UDP_FLOWS: AtomicU64 = AtomicU64::new(0);
-/// TEMP profiler: total TSC cycles spent inside net.inject_rx (the consumer /
-/// guest-side cost — guest-mem walk + scatter write + used-ring). Divided by
-/// NS_RXLAT_N (successful injects) → cycles per delivered packet. Tells us
-/// whether the bridge cap is per-packet inject cost vs pump cadence. Strip when
-/// done (same dev-tool class as the http -d poll-split profiler).
-static NS_INJECT_CYC: AtomicU64 = AtomicU64::new(0);
-/// Pump-starvation probe: longest gap (TSC) between two `drain_inbound` calls
-/// this window. If `drainmax` (µs) tracks `rxlat max`, the latency spikes are
-/// the BSP pump not running (vCPU busy / descheduled), NOT guest ring
-/// exhaustion (injfalse) or INBOUND_Q backlog (iq). Plus the min count of RX
-/// buffers the guest had posted (`rxring min`) — near 0 ⇒ shallow big-packets
-/// ring is the limiter. Both reset per window.
-static NS_DRAIN_GAP_MAX: AtomicU64 = AtomicU64::new(0);
-static NS_LAST_DRAIN: AtomicU64 = AtomicU64::new(0);
-static NS_RXRING_MIN: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// Last successful RX inject (TSC). Drives the BSP vCPU's idle park decision:
 /// while RX is recently active the vCPU parks event-driven on the host NIC RX
@@ -237,8 +216,7 @@ pub fn recently_active() -> bool {
 
 /// Mark the data plane active NOW (a frame moved RX or TX). The off-vCPU
 /// `net_dataplane` worker calls this each pass it does real work, so
-/// `recently_active()` gates its halt-poll (the legacy `drain_inbound` that used
-/// to set this isn't on the full-mode path).
+/// `recently_active()` gates its halt-poll.
 pub fn mark_active() {
     NS_LAST_ACTIVITY.store(crate::interrupts::rdtsc(), AtOrd::Relaxed);
 }
@@ -304,31 +282,25 @@ impl L3Table {
 }
 
 static L3: Mutex<L3Table> = Mutex::new(L3Table::new());
-/// Gates the host-RX inbound intercept. Off ⇒ `l3_inbound` is a cheap
+/// Gates the host-RX inbound intercept. Off ⇒ `tap_inbound` is a cheap
 /// `false` so a guest-less host (plain OTA/https) is never touched.
 static L3_ACTIVE: AtomicBool = AtomicBool::new(false);
-/// Rewritten guest-bound frames produced from the host-RX context,
-/// drained + injected by `pump` on the VM thread (same split the old
-/// termination pump used, to keep virtio access on one thread).
-/// (push TSC, frame) — the TSC lets the pump measure RX delivery latency.
-static INBOUND_Q: Mutex<VecDeque<(u64, Vec<u8>)>> = Mutex::new(VecDeque::new());
-
 /// Recycled frame buffers for the inbound staging path. Each download packet
 /// used to `vec![0u8; ~1514]` (allocator free-list walk + memset) and free it
 /// after injection — the dominant inbound per-packet cost (~2.6µs/pkt: the
 /// first-fit allocator walks an O(n) free list under churn, plus the memset).
 /// Linux solves this with skb pools; we keep a small ring of buffers that the
-/// producer (l3_inbound) borrows and the consumer (drain_inbound) returns, so
+/// producer (tap_inbound) borrows and the consumer (the worker) returns, so
 /// after warmup the datapath does ZERO heap alloc/free — only the unavoidable
 /// payload memcpy. Bounded so it can't grow without limit; only used while a VM
 /// is active (the BSP is the sole accessor, so the lock is uncontended).
 static FRAME_POOL: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
-const FRAME_POOL_MAX: usize = INBOUND_MAX + 16;
+const FRAME_POOL_MAX: usize = TAP_RING + 16;
 const FRAME_BUF_CAP: usize = 2048; // ≥ vnet+eth+MTU, so resize never reallocs
 
 /// Borrow a frame buffer sized to `len` from the pool (or allocate once if the
 /// pool is cold). The contents are uninitialised beyond what the caller writes —
-/// l3_inbound overwrites every byte (vnet hdr + eth hdr + full IP copy).
+/// tap_inbound overwrites every byte (vnet hdr + eth hdr + full IP copy).
 fn frame_pool_get(len: usize) -> Vec<u8> {
     let mut buf = FRAME_POOL.lock().pop()
         .unwrap_or_else(|| Vec::with_capacity(FRAME_BUF_CAP.max(len)));
@@ -349,298 +321,6 @@ fn frame_pool_put(buf: Vec<u8>) {
     let mut pool = FRAME_POOL.lock();
     if pool.len() < FRAME_POOL_MAX { pool.push(buf); }
 }
-/// Backpressure cap on the staging queue between the NIC drain and the guest
-/// inject. ANTI-BUFFERBLOAT: kept SMALL (≈2× the guest's 256-entry RX queue) on
-/// purpose — a big queue lets TCP fill it, ballooning the latency under load
-/// (measured: 600 ms loaded latency vs ~20 ms native), which is what makes page
-/// loads crawl (every round-trip waits behind a fat download queue). Small ⇒ it
-/// fills fast ⇒ we drop ⇒ TCP backs off ⇒ the queue (and latency) stays short.
-/// For a browser low latency beats peak throughput. Also bounds staging memory.
-///
-/// 2026-06-09: the drops were NOT really a consume-rate problem. Diagnostics
-/// showed injfalse=0 (the guest ALWAYS had RX buffers) yet tens of thousands of
-/// drops — because Core 0 was racing the BSP pump to fill this queue and winning
-/// (it can't drain — no VmContext). Fixed by making the BSP pump the sole NIC
-/// drainer while a VM is active (net::poll skip on Core 0).
-///
-/// 2026-06-19: that old 256 ("one fat burst") rested on a regime where the pump
-/// drained every call. Today's bottleneck is different: during a download-to-disk
-/// the inline 9p→npkFS write stalls the pump for whole `rxlat max` windows (8–16
-/// ms), and at ~1 Gbit the host NIC fills the queue in those windows → overflow
-/// drops → TCP sawtooth (~10 MB/s where QEMU should do 80–90). 256 is now the
-/// binding cap, not bufferbloat protection. Bumped to 1024 ≈ one 12 ms stall
-/// burst at line rate, so a transient stall is absorbed instead of dropped. This
-/// is NOT bufferbloat as long as the queue still drains between stalls (the pump
-/// now also runs on 9p exits) — and `rxlat avg` in [netstat] MEASURES that: if it
-/// stays low the deep buffer only absorbs transients; if it balloons, switch to
-/// time-based AQM (drop by head-of-queue standing age via the per-packet
-/// `push_tsc` we already record), which gives low latency AND throughput.
-const INBOUND_MAX: usize = 1024;
-
-// ─── RX GRO (generic receive offload) ──────────────────────────────────────
-// At ~1 Gbit the guest sees ~30–44k packets/s of 1.5 KB TCP segments. Without
-// offload the guest vCPU is CPU-bound just running its per-packet RX path
-// (NAPI/softirq/TCP) → throughput caps at ~½ the host-direct rate AND latency-
-// sensitive traffic (a speedtest ping) starves behind the bulk backlog INSIDE
-// the guest (measured: ~500 ms loaded latency vs ~21 ms native; our own rxlat
-// is only ~2.5 ms → the delay is in the guest, not our delivery).
-//
-// Fix: coalesce contiguous, same-flow bulk TCP segments into one large GSO
-// frame before injecting — host-side GRO, exactly what a NIC's LRO does. The
-// guest negotiates VIRTIO_NET_F_GUEST_TSO4 → "big packets" mode (page-chain RX
-// buffers, which inject_rx already walks). One ~60 KB super-frame replaces ~40
-// segments → ~40× fewer packets up the guest stack.
-//
-// Only FULL-size bulk segments are ever held; ACKs, SYN/FIN/RST, small packets
-// and the latency probe pass through instantly, and GRO_TIMEOUT_US bounds any
-// hold. Gated on the guest actually negotiating the feature → inert otherwise.
-
-/// Set by the emulated virtio-net device once the driver negotiates
-/// VIRTIO_NET_F_GUEST_TSO4 (DRIVER_OK); cleared on reset / VM teardown.
-static GRO_ENABLED: AtomicBool = AtomicBool::new(false);
-pub fn set_gro_enabled(on: bool) { GRO_ENABLED.store(on, AtOrd::Relaxed); }
-
-// GRO effectiveness counters (printed in [netstat]): coalesced GSO frames
-// emitted + total segments merged into them → avg segs/frame is the win factor.
-static NS_GRO_FRAMES: AtomicU64 = AtomicU64::new(0);
-static NS_GRO_SEGS:   AtomicU64 = AtomicU64::new(0);
-
-/// Isolation switch: when false, the device still advertises the offloads
-/// (guest in big-packets mode) but `gro_offer` passes every frame through
-/// unchanged — no coalescing, no GSO frame.
-///
-/// v0.225.9 fixed the real root cause (feature-word read bug) → big-packets RX
-/// confirmed working (gso_ok=true, injects deliver). Now TRUE for the actual
-/// GRO test: coalesce bulk TCP into NEEDS_CSUM/CHECKSUM_PARTIAL GSO superframes.
-/// The earlier "GSO frame broke the internet" results were the negotiation bug,
-/// not the frame — this is the first clean test of the GSO frame itself.
-// TEST (2026-06-25): single-connection download caps at ~2.2 MB/s = a ~33 KB
-// guest receive window at ~15 ms RTT (host-direct uses ~1.2 MB). Hypothesis:
-// GRO delivers one ~35 KB superframe per RTT (avg 24 segs/frame) instead of a
-// smooth segment stream, so the guest's rcv_rtt_est / receive-buffer
-// auto-tuning underestimates the BDP and never scales the window past ~33 KB.
-// Set false to deliver frames individually (smooth) and see if the single-conn
-// window ramps. If it does, GRO's burstiness is the cap → redesign GRO to pace
-// delivery instead of one-burst-per-RTT.
-const GRO_COALESCE: bool = true;
-
-const GRO_SLOTS:       usize = 16;      // concurrent flows we coalesce
-const GRO_MAX_PAYLOAD: usize = 60_000;  // < 64 KiB IP total-length limit
-const GRO_MAX_SEGS:    usize = 44;      // ~ one 64 KB superframe of MSS≈1448
-const GRO_START_MIN:   usize = 1000;    // only hold near-full (mid-burst) segs
-const GRO_TIMEOUT_US:  u64   = 200;     // max hold before a forced flush
-
-const VNET_HDR_F_NEEDS_CSUM: u8 = 1;
-const VNET_HDR_GSO_TCPV4:    u8 = 1;
-const TCP_CSUM_OFF:         u16 = 16; // checksum field offset within the TCP header
-const TCP_FIN: u8 = 0x01;
-const TCP_SYN: u8 = 0x02;
-const TCP_RST: u8 = 0x04;
-const TCP_PSH: u8 = 0x08;
-const TCP_URG: u8 = 0x20;
-const TCP_CWR: u8 = 0x80;
-/// virtio-net header gso_type for a TCPv4 GSO/TSO super-frame on TX (the ECN
-/// flag 0x80 is OR'd on top and must be masked off before comparing).
-const VNET_HDR_GSO_ECN: u8 = 0x80;
-
-struct GroCtx {
-    gport: u16,
-    remote_ip: [u8; 4],
-    remote_port: u16,
-    next_seq: u32,        // sequence number the next segment must carry
-    mss: u16,             // payload size of the merged segments (= gso_size)
-    seg_count: usize,
-    payload_bytes: usize,
-    ip_off: usize,
-    l4_off: usize,        // TCP header offset in the base frame
-    tcp_hl: usize,
-    last_tsc: u64,
-    frame: Vec<u8>,       // accumulating vnet+eth+ip+tcp+payload frame
-}
-
-static GRO: Mutex<[Option<GroCtx>; GRO_SLOTS]> = Mutex::new([const { None }; GRO_SLOTS]);
-
-/// IP total-length + checksum, then the virtio-net GSO header (only when >1
-/// segment was actually merged; a lone segment keeps its original checksum).
-fn gro_finalize(c: &mut GroCtx) {
-    let ip_off = c.ip_off;
-    let ihl = (c.frame[ip_off] & 0x0F) as usize * 4;
-    let total = ihl + c.tcp_hl + c.payload_bytes;
-    c.frame[ip_off + 2..ip_off + 4].copy_from_slice(&(total as u16).to_be_bytes());
-    c.frame[ip_off + 10] = 0; c.frame[ip_off + 11] = 0;
-    let ipc = ipv4_checksum(&c.frame[ip_off..ip_off + ihl]);
-    c.frame[ip_off + 10..ip_off + 12].copy_from_slice(&ipc.to_be_bytes());
-    if c.seg_count > 1 {
-        // An LRO'd TCPv4 frame of `mss`-sized segments. Use NEEDS_CSUM +
-        // CHECKSUM_PARTIAL semantics — exactly what Linux's own
-        // virtio_net_hdr_from_skb emits for a GSO skb — so the guest takes the
-        // well-trodden skb_partial_csum_set path (the DATA_VALID variant hit a
-        // fragile flow-dissect path and the merged frames got dropped). The
-        // TCP checksum field holds the pseudo-header partial (length 0); the
-        // guest completes/validates it per segment.
-        let l4 = c.l4_off;
-        let src: [u8; 4] = c.frame[ip_off + 12..ip_off + 16].try_into().unwrap();
-        let dst: [u8; 4] = c.frame[ip_off + 16..ip_off + 20].try_into().unwrap();
-        let partial = tcp_pseudo_partial(src, dst);
-        c.frame[l4 + 16..l4 + 18].copy_from_slice(&partial.to_be_bytes());
-
-        c.frame[0] = VNET_HDR_F_NEEDS_CSUM;
-        c.frame[1] = VNET_HDR_GSO_TCPV4;
-        let hdr_len = (ETH_HDR_LEN + ihl + c.tcp_hl) as u16;
-        let csum_start = (ETH_HDR_LEN + ihl) as u16; // TCP offset from eth start
-        c.frame[2..4].copy_from_slice(&hdr_len.to_le_bytes());
-        c.frame[4..6].copy_from_slice(&c.mss.to_le_bytes());
-        c.frame[6..8].copy_from_slice(&csum_start.to_le_bytes());
-        c.frame[8..10].copy_from_slice(&TCP_CSUM_OFF.to_le_bytes());
-        c.frame[10..12].copy_from_slice(&1u16.to_le_bytes()); // num_buffers
-        NS_GRO_FRAMES.fetch_add(1, AtOrd::Relaxed);
-        NS_GRO_SEGS.fetch_add(c.seg_count as u64, AtOrd::Relaxed);
-        // Active-download signal for the GPU-copy throttle. A GRO super-frame of
-        // several segments only forms under sustained bulk RX (never idle or
-        // browsing) — this is the POST-coalesce point, unlike the broken pre-GRO
-        // per-packet check (always <1500 B → `dl N`, throttle never engaged).
-        if c.seg_count >= 4 {
-            DL_LAST_BULK_TSC.store(crate::interrupts::rdtsc(), AtOrd::Relaxed);
-        }
-    } else {
-        c.frame[0..12].fill(0);
-    }
-}
-
-/// One's-complement folded sum of the TCP pseudo-header with length 0 — the
-/// CHECKSUM_PARTIAL seed for a GSO frame (the guest adds per-segment length +
-/// data when completing each segment's checksum). Matches `~csum_tcpudp_magic
-/// (src, dst, 0, IPPROTO_TCP, 0)`.
-fn tcp_pseudo_partial(src: [u8; 4], dst: [u8; 4]) -> u16 {
-    let mut sum: u32 = (u16::from_be_bytes([src[0], src[1]]) as u32)
-        + (u16::from_be_bytes([src[2], src[3]]) as u32)
-        + (u16::from_be_bytes([dst[0], dst[1]]) as u32)
-        + (u16::from_be_bytes([dst[2], dst[3]]) as u32)
-        + PROTO_TCP as u32; // + length 0
-    while sum >> 16 != 0 { sum = (sum & 0xFFFF) + (sum >> 16); }
-    sum as u16
-}
-
-fn gro_flush_slot(tbl: &mut [Option<GroCtx>; GRO_SLOTS], i: usize) {
-    if let Some(mut c) = tbl[i].take() {
-        gro_finalize(&mut c);
-        // The THIRD push into the staging queue, and the one that carries the
-        // payload. 0.296.0 gave the queue a wake so a reply no longer waited for
-        // the next accidental VM-exit — and wired it into the two pushes in
-        // `l3_inbound` while this one sat here unwoken. Every coalesced bulk
-        // frame, which is to say every download, took the old slow path.
-        let mut q = INBOUND_Q.lock();
-        let was_empty = q.is_empty();
-        q.push_back((crate::interrupts::rdtsc(), c.frame));
-        drop(q);
-        wake_consumer(was_empty);
-    }
-}
-
-/// Flush contexts idle longer than GRO_TIMEOUT_US so a stalled burst is never
-/// held back. Called from the pump (frequent, cheap).
-fn gro_flush_expired(now: u64) {
-    let timeout = (crate::interrupts::tsc_freq() / 1_000_000).max(1) * GRO_TIMEOUT_US;
-    let mut tbl = GRO.lock();
-    for i in 0..GRO_SLOTS {
-        let stale = matches!(tbl[i].as_ref(), Some(c) if now.wrapping_sub(c.last_tsc) > timeout);
-        if stale { gro_flush_slot(&mut tbl, i); }
-    }
-}
-
-/// A free slot, or the least-recently-appended flow evicted (flushed).
-fn gro_alloc_slot(tbl: &mut [Option<GroCtx>; GRO_SLOTS], now: u64) -> usize {
-    if let Some(i) = tbl.iter().position(|c| c.is_none()) { return i; }
-    let (mut oldest, mut oldest_age) = (0usize, 0u64);
-    for (i, c) in tbl.iter().enumerate() {
-        if let Some(c) = c {
-            let age = now.wrapping_sub(c.last_tsc);
-            if age >= oldest_age { oldest_age = age; oldest = i; }
-        }
-    }
-    gro_flush_slot(tbl, oldest);
-    oldest
-}
-
-/// Offer a freshly-rewritten inbound TCP frame to the GRO engine. Returns
-/// `None` if consumed (held or appended), or `Some(frame)` to inject as-is.
-fn gro_offer(frame: Vec<u8>) -> Option<Vec<u8>> {
-    if !GRO_COALESCE { return Some(frame); } // diagnostic: big-packets, no coalesce
-    let ip_off = VNET_HDR_LEN + ETH_HDR_LEN;
-    if frame.len() < ip_off + IPV4_HDR_LEN { return Some(frame); }
-    let ihl = (frame[ip_off] & 0x0F) as usize * 4;
-    let l4_off = ip_off + ihl;
-    if ihl < IPV4_HDR_LEN || frame.len() < l4_off + TCP_HDR_LEN { return Some(frame); }
-    let tcp_hl = ((frame[l4_off + 12] >> 4) & 0x0F) as usize * 4;
-    let payload_off = l4_off + tcp_hl;
-    if tcp_hl < TCP_HDR_LEN || frame.len() < payload_off { return Some(frame); }
-    let payload_len = frame.len() - payload_off;
-    let flags = frame[l4_off + 13];
-    let seq = u32::from_be_bytes([frame[l4_off + 4], frame[l4_off + 5], frame[l4_off + 6], frame[l4_off + 7]]);
-    let remote_ip = [frame[ip_off + 12], frame[ip_off + 13], frame[ip_off + 14], frame[ip_off + 15]];
-    let remote_port = u16::from_be_bytes([frame[l4_off], frame[l4_off + 1]]);
-    let gport = u16::from_be_bytes([frame[l4_off + 2], frame[l4_off + 3]]);
-    let now = crate::interrupts::rdtsc();
-
-    let mut tbl = GRO.lock();
-    let slot = tbl.iter().position(|c| matches!(c, Some(c)
-        if c.gport == gport && c.remote_port == remote_port && c.remote_ip == remote_ip));
-
-    // Control / zero-payload segments are never coalesced: flush this flow's
-    // pending data first (ordering), then inject this one directly.
-    if payload_len == 0 || flags & (TCP_SYN | TCP_FIN | TCP_RST | TCP_URG) != 0 {
-        if let Some(i) = slot { gro_flush_slot(&mut tbl, i); }
-        return Some(frame);
-    }
-
-    if let Some(i) = slot {
-        let c = tbl[i].as_mut().unwrap();
-        let appendable = seq == c.next_seq
-            && payload_len <= c.mss as usize
-            && c.payload_bytes + payload_len <= GRO_MAX_PAYLOAD
-            && c.seg_count < GRO_MAX_SEGS;
-        if appendable {
-            c.frame.extend_from_slice(&frame[payload_off..]);
-            c.next_seq = c.next_seq.wrapping_add(payload_len as u32);
-            c.payload_bytes += payload_len;
-            c.seg_count += 1;
-            c.last_tsc = now;
-            // Carry the latest ACK + window into the merged TCP header.
-            let bl4 = c.l4_off;
-            c.frame[bl4 + 8..bl4 + 12].copy_from_slice(&frame[l4_off + 8..l4_off + 12]);
-            c.frame[bl4 + 14..bl4 + 16].copy_from_slice(&frame[l4_off + 14..l4_off + 16]);
-            let tail = payload_len < c.mss as usize;
-            if tail || flags & TCP_PSH != 0
-                || c.payload_bytes >= GRO_MAX_PAYLOAD || c.seg_count >= GRO_MAX_SEGS {
-                gro_flush_slot(&mut tbl, i);
-            }
-            frame_pool_put(frame);
-            return None;
-        }
-        // Not contiguous / size change: flush the open burst, then maybe start
-        // a fresh one with this segment below.
-        gro_flush_slot(&mut tbl, i);
-    }
-
-    // Hold only a near-full, non-PSH segment (likely mid-burst). PSH or small
-    // ⇒ end-of-burst ⇒ inject directly (no latency hold).
-    if payload_len >= GRO_START_MIN && flags & TCP_PSH == 0 {
-        let i = gro_alloc_slot(&mut tbl, now);
-        tbl[i] = Some(GroCtx {
-            gport, remote_ip, remote_port,
-            next_seq: seq.wrapping_add(payload_len as u32),
-            mss: payload_len as u16,
-            seg_count: 1,
-            payload_bytes: payload_len,
-            ip_off, l4_off, tcp_hl,
-            last_tsc: now,
-            frame,
-        });
-        return None;
-    }
-    Some(frame)
-}
-
 /// Find an existing mapping for this guest flow or allocate one.
 /// Returns the masquerade host port.
 /// The masquerade table is full: no new flow can open. Budgeted, because if it
@@ -903,65 +583,6 @@ fn emit_tcp_out(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4],
     }
 }
 
-/// vhost-style TX (symmetric with RX `l3_rewrite_inbound`): masquerade the
-/// guest's outbound TCP segment IN PLACE — rewrite src port + adjust the
-/// CHECKSUM_PARTIAL pseudo-header for the src-IP change (O(1), no full checksum,
-/// no re-segmentation) — and hand the WHOLE frame (GSO super-frame and all) to
-/// the host NIC, which segments + checksums it. The exact mirror of the inbound
-/// rewrite — one data plane, same behaviour both directions. Returns None (the
-/// frame went straight to the host NIC; TCP retransmits on any drop).
-fn l3_outbound_offload(src_port: u16, dst_ip: [u8; 4], dst_port: u16,
-                       l4: &[u8], gso_size: u16) -> Option<Vec<u8>> {
-    if l4.len() < TCP_HDR_LEN { return None; }
-    let now = crate::interrupts::ticks();
-    let hp = match l3_map_out(PROTO_TCP, src_port, dst_ip, dst_port, now) {
-        Some(p) => p,
-        None => { note_table_full(); return None; }
-    };
-    let mut seg = l4.to_vec();
-    seg[0..2].copy_from_slice(&hp.to_be_bytes()); // src port → masquerade port
-    let our_ip = crate::net::arp::our_ip();
-    if gso_size > 0 {
-        // GSO super-frame: the device segments + checksums per segment, so we only
-        // adjust the pseudo-header PARTIAL for the src-IP rewrite (GUEST_IP →
-        // our_ip) — the incremental inbound csum mirror, minus the final
-        // complement (CHECKSUM_PARTIAL stores the un-complemented sum).
-        let old = u16::from_be_bytes([seg[16], seg[17]]);
-        let new = adjust_partial(old, GUEST_IP, our_ip);
-        seg[16..18].copy_from_slice(&new.to_be_bytes());
-    } else {
-        // Non-GSO frame (ACK / control / ≤ one MSS): compute the FULL TCP checksum
-        // in SW (cheap) — this device's legacy F_GSO NEEDS_CSUM is unreliable for
-        // small frames (HW test: download crawled to 9 Mbit). Still passthrough,
-        // no re-segmentation.
-        seg[16] = 0; seg[17] = 0;
-        let c = tcp_checksum(our_ip, dst_ip, &seg);
-        seg[16..18].copy_from_slice(&c.to_be_bytes());
-    }
-
-    NS_TX_PKTS.fetch_add(1, AtOrd::Relaxed);
-    NS_TX_BYTES.fetch_add(seg.len() as u64, AtOrd::Relaxed);
-    if !crate::net::ipv4::send_offload(dst_ip, PROTO_TCP, &seg, gso_size) {
-        NS_DROP_EGRESS.fetch_add(1, AtOrd::Relaxed); // NIC refused it; TCP retransmits
-    }
-    L3_ACTIVE.store(true, AtOrd::Release);
-    None
-}
-
-/// Incremental update of a CHECKSUM_PARTIAL (un-complemented pseudo-header sum)
-/// for a 4-byte source-address change — like the inbound `csum_update` (RFC 1624)
-/// but WITHOUT the final ones-complement (the device completes the un-complemented
-/// partial).
-fn adjust_partial(partial: u16, old_ip: [u8; 4], new_ip: [u8; 4]) -> u16 {
-    let mut sum = partial as u32;
-    sum += (!u16::from_be_bytes([old_ip[0], old_ip[1]])) as u32 & 0xFFFF;
-    sum += (!u16::from_be_bytes([old_ip[2], old_ip[3]])) as u32 & 0xFFFF;
-    sum += u16::from_be_bytes([new_ip[0], new_ip[1]]) as u32;
-    sum += u16::from_be_bytes([new_ip[2], new_ip[3]]) as u32;
-    while sum >> 16 != 0 { sum = (sum & 0xFFFF) + (sum >> 16); }
-    sum as u16
-}
-
 /// Outbound NAT for a guest ICMP echo request (so ping + the browser's
 /// reachability probes to the DNS servers work instead of cap-rejecting). The
 /// ICMP Identifier is the flow key, masqueraded like a port; only echo
@@ -1011,135 +632,8 @@ fn fix_icmp_checksum(icmp: &mut [u8]) {
 /// our IP. If it matches a masquerade mapping, rewrite it back to the
 /// guest, enqueue for `pump`, and return true (consume — the host
 /// stack must NOT also process it). Cheap `false` when no VM is up.
-/// Wake the consumer after a frame lands in the staging queue.
-///
-/// Only on the empty -> non-empty edge: during a burst the queue stays occupied
-/// and the pump drains it in one pass, so a burst costs ONE interrupt, not one
-/// per packet. The time floor on top of that bounds the pathological case where
-/// the pump keeps up exactly well enough to empty the queue between every
-/// packet — which would otherwise be an IPI per frame at line rate.
-const KICK_GAP_US: u64 = 50;
-static LAST_KICK_TSC: AtomicU64 = AtomicU64::new(0);
-
-fn wake_consumer(was_empty: bool) {
-    if !was_empty || super::net_backend::full_active() { return; }
-    let now = crate::interrupts::rdtsc();
-    let gap = (crate::interrupts::tsc_freq() / 1_000_000).max(1) * KICK_GAP_US;
-    if now.wrapping_sub(LAST_KICK_TSC.load(AtOrd::Relaxed)) < gap { return; }
-    LAST_KICK_TSC.store(now, AtOrd::Relaxed);
-    note_decoupled_kick();
-    crate::microvm::cpu::kick_bsp_vcpu();
-}
-
-pub fn l3_inbound(ip: &[u8]) -> bool {
-    if !L3_ACTIVE.load(AtOrd::Acquire) { return false; }
-    if ip.len() < IPV4_HDR_LEN { return false; }
-    let ihl = (ip[0] & 0x0F) as usize * 4;
-    if ihl < IPV4_HDR_LEN || ip.len() < ihl { return false; }
-    let proto = ip[9];
-    if proto != PROTO_TCP && proto != PROTO_UDP && proto != PROTO_ICMP { return false; }
-    let src_ip: [u8; 4] = ip[12..16].try_into().unwrap();
-    let l4 = &ip[ihl..];
-    // ICMP echo reply: the Identifier (l4[4..6]) is the masquerade key (no
-    // ports). TCP/UDP: remote port + masquerade host port are l4[0..2]/[2..4].
-    let (remote_port, host_port) = if proto == PROTO_ICMP {
-        if l4.len() < 8 || l4[0] != ICMP_ECHO_REPLY { return false; }
-        (0u16, u16::from_be_bytes([l4[4], l4[5]]))
-    } else {
-        if l4.len() < 4 { return false; }
-        (u16::from_be_bytes([l4[0], l4[1]]), u16::from_be_bytes([l4[2], l4[3]]))
-    };
-    let now = crate::interrupts::ticks();
-    let dst_ip: [u8; 4] = ip[16..20].try_into().unwrap();
-    let gport = match l3_map_in(proto, dst_ip, host_port, src_ip, remote_port, now) {
-        Some(g) => g,
-        None => {
-            // Not ours by the mapping — but a port inside our masquerade range
-            // is not the host's either, and the host stack will RST it at
-            // tcp.rs:894. Count it: that RST is our own machine tearing down the
-            // guest's connection.
-            if proto == PROTO_TCP && (L3_PORT_LO..L3_PORT_HI).contains(&host_port) {
-                NS_RX_UNMATCHED.fetch_add(1, AtOrd::Relaxed);
-            }
-            return false;
-        }
-    };
-    // Backpressure: if the guest can't drain its RX queue fast enough, don't
-    // grow the staging queue without bound (→ OOM). Drop → guest TCP
-    // retransmits + slows. Still `true` (consumed — it IS guest traffic, the
-    // host stack must not also process it).
-    if INBOUND_Q.lock().len() >= INBOUND_MAX {
-        NS_DROP_QUEUE.fetch_add(1, AtOrd::Relaxed);
-        return true;
-    }
-    NS_RX_PKTS.fetch_add(1, AtOrd::Relaxed);
-    NS_RX_BYTES.fetch_add(ip.len() as u64, AtOrd::Relaxed);
-
-    // Rewrite: dst IP → guest, L4 dst port → guest port; recompute
-    // both checksums. Wrap in vnet + eth (gateway → guest). Buffer is borrowed
-    // from the recycle pool (no per-packet heap alloc/memset); every byte below
-    // is written: vnet hdr zeroed, eth hdr, then the full IP copy.
-    let mut frame = frame_pool_get(VNET_HDR_LEN + ETH_HDR_LEN + ip.len());
-    frame[..VNET_HDR_LEN].fill(0); // empty virtio-net header
-    write_eth(&mut frame, &GUEST_MAC, &GATEWAY_MAC, ETHERTYPE_IPV4);
-    let ip_off = VNET_HDR_LEN + ETH_HDR_LEN;
-    frame[ip_off..].copy_from_slice(ip);
-    frame[ip_off + 16..ip_off + 20].copy_from_slice(&GUEST_IP);
-    frame[ip_off + 10] = 0; frame[ip_off + 11] = 0;
-    let ipc = ipv4_checksum(&frame[ip_off..ip_off + ihl]);
-    frame[ip_off + 10..ip_off + 12].copy_from_slice(&ipc.to_be_bytes());
-    let l4_off = ip_off + ihl;
-    if proto == PROTO_ICMP {
-        // Rewrite the echo-reply Identifier back to the guest's + recompute
-        // the ICMP checksum (the IP dst rewrite above doesn't affect it).
-        frame[l4_off + 4..l4_off + 6].copy_from_slice(&gport.to_be_bytes());
-        fix_icmp_checksum(&mut frame[l4_off..]);
-    } else if proto == PROTO_TCP && frame[l4_off..].len() >= TCP_HDR_LEN {
-        // Incremental TCP checksum (RFC 1624): only the dst IP (host → guest, in
-        // the pseudo-header) and the dst port changed, so adjust the server's
-        // checksum in O(1) instead of recomputing over the whole ~1500 B segment
-        // (that full recompute was the dominant inbound per-packet cost). Must
-        // read the old values before overwriting the port bytes; `ip[16..20]` is
-        // the original (host) dst IP, pre-rewrite.
-        let old_check = u16::from_be_bytes([frame[l4_off + 16], frame[l4_off + 17]]);
-        let new_check = csum_update(old_check, &[
-            (u16::from_be_bytes([ip[16], ip[17]]), u16::from_be_bytes([GUEST_IP[0], GUEST_IP[1]])),
-            (u16::from_be_bytes([ip[18], ip[19]]), u16::from_be_bytes([GUEST_IP[2], GUEST_IP[3]])),
-            (host_port, gport),
-        ]);
-        frame[l4_off + 2..l4_off + 4].copy_from_slice(&gport.to_be_bytes());
-        frame[l4_off + 16..l4_off + 18].copy_from_slice(&new_check.to_be_bytes());
-    } else {
-        // UDP: recomputed, not zeroed — see fix_l4_checksum.
-        frame[l4_off + 2..l4_off + 4].copy_from_slice(&gport.to_be_bytes());
-        fix_l4_checksum(proto, src_ip, GUEST_IP, &mut frame[l4_off..]);
-    }
-
-    // TCP bulk → host-side GRO (coalesce into GSO superframes); everything
-    // else (and GRO pass-throughs) goes straight to the staging queue.
-    if proto == PROTO_TCP && GRO_ENABLED.load(AtOrd::Relaxed) {
-        match gro_offer(frame) {
-            None => return true,
-            Some(f) => {
-                let mut q = INBOUND_Q.lock();
-                let was_empty = q.is_empty();
-                q.push_back((crate::interrupts::rdtsc(), f));
-                drop(q);
-                wake_consumer(was_empty);
-            }
-        }
-    } else {
-        let mut q = INBOUND_Q.lock();
-        let was_empty = q.is_empty();
-        q.push_back((crate::interrupts::rdtsc(), frame));
-        drop(q);
-        wake_consumer(was_empty);
-    }
-    true
-}
-
-/// Return a frame buffer (from `tap_inbound`) to the recycle pool after
-/// it's been injected into the guest ring — no per-packet heap churn.
+/// Return a frame buffer (from `tap_inbound`) to the recycle pool after it has
+/// been injected into the guest ring — no per-packet heap churn.
 pub fn recycle_frame(buf: Vec<u8>) { frame_pool_put(buf); }
 
 // ===========================================================================
@@ -1385,9 +879,6 @@ pub fn l3_reset() {
     L3_ACTIVE.store(false, AtOrd::Release);
     *L3.lock() = L3Table::new();
     tap_reset();
-    INBOUND_Q.lock().clear();
-    *GRO.lock() = [const { None }; GRO_SLOTS]; // drop held GRO bursts
-    GRO_ENABLED.store(false, AtOrd::Relaxed);
     *FRAME_POOL.lock() = Vec::new(); // release recycled buffers
 }
 
@@ -1513,15 +1004,7 @@ fn handle_ipv4(frame: &[u8], caps: &NetCaps, gso_size: u16) -> Option<Vec<u8>> {
                 cap_reject("TCP", dst_ip, dst_port);
                 return None;
             }
-            // Unified data plane: when the host NIC does checksum + TSO, forward
-            // the guest's GSO super-frame AS-IS (rewrite + incremental csum, the
-            // mirror of RX) instead of SW re-segmenting it. Fall back to the SW
-            // path only when offload isn't available.
-            if crate::netdev::tx_offload_ok() {
-                l3_outbound_offload(src_port, dst_ip, dst_port, l4, gso_size)
-            } else {
-                l3_outbound(PROTO_TCP, src_port, dst_ip, dst_port, l4, gso_size)
-            }
+            l3_outbound(PROTO_TCP, src_port, dst_ip, dst_port, l4, gso_size)
         }
         PROTO_ICMP => {
             if !caps.allow_icmp {
@@ -1760,240 +1243,6 @@ fn tcp_checksum(src_ip: [u8; 4], dst_ip: [u8; 4], tcp_segment: &[u8]) -> u16 {
     !(sum as u16)
 }
 
-/// Drain host-side TCP recv buffers for every active session and
-/// inject the resulting TCP segments into the guest's RX queue. Called
-/// from the timer-tick path so async response data reaches the guest
-/// without it having to emit fresh traffic.
-///
-/// Returns `true` iff at least one segment was injected (caller fires
-/// IRQ 10 to wake the guest's virtio-net driver).
-pub fn pump(
-    net: &mut super::virtio_net_dev::VirtioNet,
-    mem: &GuestMem,
-) -> bool {
-    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-    static PUMP_LOG: AtomicU32 = AtomicU32::new(0);
-    static RX_IRQ_ROUTED: AtomicBool = AtomicBool::new(false);
-    static NS_LAST_RXIRQ: AtomicU64 = AtomicU64::new(0); // for net-RX IRQ rate
-
-    NS_PUMP_CALLS.fetch_add(1, AtOrd::Relaxed);
-
-    let producer = super::net_dataplane::active();
-
-    // net-RX: route the host NIC's RX IRQ to THIS (BSP-pump) core once, so RX
-    // arrival wakes this core out of HLT → this pump delivers it promptly. Skip
-    // when the dedicated producer is active — IT owns the RX IRQ (routed to its
-    // own core); routing it here too would steal the wake from the producer.
-    if !producer && !RX_IRQ_ROUTED.swap(true, Ordering::Relaxed) {
-        if let Some(v) = crate::netdev::rx_wake_vector() {
-            crate::irq::route_to_current(v);
-        }
-    }
-
-    // Drain the host NIC RX ring (handle_frame → l3_inbound). The dedicated
-    // producer does this on its own core when active, so the BSP must NOT also
-    // drain (single-consumer ring); it only flushes the guest's batched TX
-    // doorbell so host-originated/ACK egress isn't stranded.
-    if producer {
-        crate::virtio_net::tx_flush();
-    } else {
-        crate::net::poll();
-    }
-
-    let now = crate::interrupts::ticks();
-    l3_reap(now);
-
-    // Track NAT-table high-water + emit a host-side [netstat] summary every
-    // ~5 s (≈500 ticks @ 100 Hz) so page-load slowness is diagnosable as
-    // throughput vs NAT drops vs latency. Host log only — no [guest] spam.
-    let inuse = L3.lock().maps.iter().flatten().count() as u64;
-    if inuse > NS_HIGHWATER.load(AtOrd::Relaxed) {
-        NS_HIGHWATER.store(inuse, AtOrd::Relaxed);
-    }
-    let iq = INBOUND_Q.lock().len() as u64;
-    if iq > NS_IQ_HI.load(AtOrd::Relaxed) {
-        NS_IQ_HI.store(iq, AtOrd::Relaxed);
-    }
-    // The window block below CONSUMES its counters with `swap(0)`. That was fine
-    // while it was the only reader — it printed them and moved on. It is not fine
-    // now that `netstat` reads the same statics on demand: the swap ran every 5 s
-    // whether or not anything was printed (NETSTAT_DEBUG has been false for
-    // months), so every total the report showed was really "since some tick in
-    // the last five seconds". It cost an evening reading `6 pkt` next to
-    // `65 flows opened` and looking for the packets that were never missing.
-    //
-    // A counter with two readers cannot be reset by one of them. The whole block
-    // is now gated on the flag that decides whether it prints at all.
-    const NETSTAT_WINDOW: bool = false;
-    let last = NS_LAST_TICK.load(AtOrd::Relaxed);
-    let dt = now.wrapping_sub(last);
-    if NETSTAT_WINDOW && last != 0 && dt >= 500 {
-        let rxb = NS_RX_BYTES.swap(0, AtOrd::Relaxed);
-        let rxp = NS_RX_PKTS.swap(0, AtOrd::Relaxed);
-        let txb = NS_TX_BYTES.swap(0, AtOrd::Relaxed);
-        let txp = NS_TX_PKTS.swap(0, AtOrd::Relaxed);
-        let secs = dt / 100; // ticks → seconds (≥5)
-        // RX delivery latency this window (TSC → µs): avg + max.
-        let lat_n = NS_RXLAT_N.swap(0, AtOrd::Relaxed);
-        let lat_sum = NS_RXLAT_SUM.swap(0, AtOrd::Relaxed);
-        let lat_max = NS_RXLAT_MAX.swap(0, AtOrd::Relaxed);
-        let mhz = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
-        let lat_avg_us = if lat_n > 0 { (lat_sum / lat_n) / mhz } else { 0 };
-        let lat_max_us = lat_max / mhz;
-        let pumps = NS_PUMP_CALLS.swap(0, AtOrd::Relaxed);
-        let injfalse = NS_INJECT_FALSE.swap(0, AtOrd::Relaxed);
-        // avg packets injected per pump call (batch size) — low pumps/s with a
-        // big batch = pump-cadence-bound; high injfalse = guest-NAPI-bound.
-        let batch = if pumps > 0 { rxp / pumps } else { 0 };
-        // TEMP per-packet profiler: inject (consumer) ns/pkt + producer split
-        // from poll_rx_only (netdev drain + l3_inbound "stack" + tx_flush).
-        let inj_cyc = NS_INJECT_CYC.swap(0, AtOrd::Relaxed);
-        let inj_ns = if lat_n > 0 { (inj_cyc / lat_n) * 1000 / mhz } else { 0 };
-        let (p_netdev, p_stack, p_txflush, _p_render, p_pkts) = crate::net::take_poll_prof();
-        let ns = |cyc: u64, n: u64| if n > 0 { (cyc / n) * 1000 / mhz } else { 0 };
-        // Per-second microvm net stats. Re-enabled to verify net-RX: rxlat
-        // (the latency root — should DROP), pump/s (should track RX), and the
-        // RX-IRQ fire rate `rxirq/s` (proves the IRQ fires vs polling fallback).
-        // The 5 s [netstat] dump BLOCKS the pump core ~60-120ms on the UART THRE
-        // spin (serial.rs:93) — but v0.226.17 proved it's NOT the latency brake,
-        // and we need `gpu KB/s` + `dl` to verify the GPU throttle engages.
-        const NETSTAT_DEBUG: bool = false;
-        // net-RX IRQ fire rate this window (0 + v0x0 = polling, IRQ never set up).
-        let rx_vec = crate::netdev::rx_wake_vector();
-        let rxirq_now = rx_vec.map_or(0, crate::irq::fired_count);
-        let rxirq_per_s = rxirq_now
-            .saturating_sub(NS_LAST_RXIRQ.swap(rxirq_now, AtOrd::Relaxed)) / secs;
-        if NETSTAT_DEBUG && secs > 0 && (rxp + txp) > 0 {
-            kprintln!(
-                "[netstat] rx {} KB/s ({} pkt/s) tx {} KB/s ({} pkt/s) | rxlat avg {}us max {}us | rxirq {}/s (v{:#04x}) | iq hi {}/{} | flows {}tcp {}udp | {} drops | pump {}/s injfalse {}/s batch {}",
-                rxb / 1024 / secs, rxp / secs, txb / 1024 / secs, txp / secs,
-                lat_avg_us, lat_max_us,
-                rxirq_per_s, rx_vec.unwrap_or(0),
-                NS_IQ_HI.load(AtOrd::Relaxed), INBOUND_MAX,
-                NS_TCP_FLOWS.load(AtOrd::Relaxed), NS_UDP_FLOWS.load(AtOrd::Relaxed),
-                NS_DROP_QUEUE.load(AtOrd::Relaxed),
-                pumps / secs, injfalse / secs, batch,
-            );
-            kprintln!(
-                "[netstat]   per-pkt: inject={}ns (consumer) | producer: netdev={}ns stack={}ns/pkt txflush={}ns/poll  poll_pkts={}",
-                inj_ns, ns(p_netdev, p_pkts), ns(p_stack, p_pkts), ns(p_txflush, pumps), p_pkts,
-            );
-            // RX-GRO effectiveness: coalesced GSO frames/s + avg segments each
-            // (the packet-reduction factor seen by the guest).
-            let gro_frames = NS_GRO_FRAMES.swap(0, AtOrd::Relaxed);
-            let gro_segs = NS_GRO_SEGS.swap(0, AtOrd::Relaxed);
-            if GRO_ENABLED.load(AtOrd::Relaxed) {
-                kprintln!(
-                    "[netstat]   gro {}/s frames | avg {} segs/frame | {} segs/s merged",
-                    gro_frames / secs,
-                    if gro_frames > 0 { gro_segs / gro_frames } else { 0 },
-                    gro_segs / secs,
-                );
-            }
-            // Latency-spike attribution: drainmax = longest pump gap (µs),
-            // rxring min = fewest RX buffers the guest had ready. If drainmax
-            // ≈ rxlat max ⇒ pump starvation; if rxring min ≈ 0 ⇒ shallow ring.
-            let drain_max = NS_DRAIN_GAP_MAX.swap(0, AtOrd::Relaxed);
-            let rxring_min = NS_RXRING_MIN.swap(u64::MAX, AtOrd::Relaxed);
-            let prod_drains = NS_PRODUCER_DRAINS.swap(0, AtOrd::Relaxed);
-            let gtimer = NS_GTIMER.swap(0, AtOrd::Relaxed);
-            let net_irq = NS_NET_IRQ.swap(0, AtOrd::Relaxed);
-            let gpu_bytes = NS_GPU_BYTES.swap(0, AtOrd::Relaxed);
-            let gpu_xfers = NS_GPU_XFERS.swap(0, AtOrd::Relaxed);
-            let wraise = NS_WORKER_RAISE.swap(0, AtOrd::Relaxed);
-            kprintln!(
-                "[netstat]   drainmax {}us | rxring min {} | producer {} ({}/s) | gtimer {}/s | netirq {}/s wraise {}/s | gpu {}KB/s ({}/s) | dl {}",
-                drain_max / mhz,
-                if rxring_min == u64::MAX { 0 } else { rxring_min },
-                if super::net_dataplane::active() { "on" } else { "off" },
-                prod_drains / secs,
-                gtimer / secs,
-                net_irq / secs,
-                wraise / secs,
-                gpu_bytes / secs / 1024,
-                gpu_xfers / secs,
-                if download_active() { "Y" } else { "N" },
-            );
-        }
-        NS_LAST_TICK.store(now, AtOrd::Relaxed);
-    } else if last == 0 {
-        NS_LAST_TICK.store(now, AtOrd::Relaxed);
-    }
-
-    let _ = PUMP_LOG;
-    // Full RX backend: the worker fiber is the SOLE RX consumer. The BSP must NOT
-    // also drain_inbound here — two consumers both call inject_rx +
-    // rx_should_interrupt, and the double EVENT_IDX `signalled_used` update
-    // corrupts the IRQ decision (the guest misses RX IRQs → NAPI stalls → no ACKs
-    // → traffic dies). The tx_flush + reap + netstat above still run on the BSP.
-    if super::net_backend::full_active() {
-        return false;
-    }
-    drain_inbound(net, mem).want_irq
-}
-
-/// Lightweight pump for the HOT device-exit path: pull the host NIC + deliver to
-/// the guest, WITHOUT the periodic NAT reap / netstat bookkeeping that pump()
-/// does. Called on every guest virtio-net MMIO exit so RX delivery tracks the
-/// guest's device activity instead of starving at the ~1500/s timer/HLT rate
-/// (that starvation was the download ceiling: pump/s ≪ VM-exits/s).
-pub fn pump_fast(
-    net: &mut super::virtio_net_dev::VirtioNet,
-    mem: &GuestMem,
-) -> bool {
-    NS_PUMP_CALLS.fetch_add(1, AtOrd::Relaxed);
-    // Full backend (vhost): the `net_dataplane` worker is the SOLE RX consumer
-    // (drains the NIC + injects directly) AND the TX servicer. The BSP must NOT
-    // call drain_inbound — a SECOND `inject_rx` + `rx_should_interrupt` consumer
-    // double-updates the EVENT_IDX `signalled_used`, corrupting the RX-IRQ
-    // decision (the guest then misses RX IRQs → NAPI stalls → no ACKs → the
-    // server's ACK-clock collapses). Only flush the guest's batched TX doorbell
-    // so a host-originated frame egresses promptly between worker passes.
-    if super::net_backend::full_active() {
-        crate::virtio_net::tx_flush();
-        return false;
-    }
-    // No producer: BSP is the sole drainer (legacy / VMX path). Drain backlog
-    // FIRST so INBOUND_Q has headroom before poll_rx_only refills it (else a full
-    // NIC-ring burst overflows an already-occupied queue → l3_inbound drops). Then
-    // NIC-drain-only (NOT full poll(): the hot ~15k/s device-exit path must not run
-    // tcp::tick_connections or shade::poll_render every call).
-    let mut fired = drain_inbound(net, mem).want_irq;
-    crate::net::poll_rx_only();
-    fired |= drain_inbound(net, mem).want_irq;
-    fired
-}
-
-/// Backend consumer half (Stage 2b): drain INBOUND_Q into the guest RX ring on
-/// the dedicated worker core — the NIC drain (producer) already filled the queue
-/// via `rx_producer_drain`. Returns true iff the guest wants its RX IRQ raised
-/// (the worker then signals + kicks the BSP to inject IRQ10). Lets the whole RX
-/// data-plane run off the vCPU.
-pub fn drain_to_guest(
-    net: &mut super::virtio_net_dev::VirtioNet,
-    mem: &GuestMem,
-) -> RxDrain {
-    drain_inbound(net, mem)
-}
-
-/// Producer half (runs on the dedicated `net_dataplane` fiber, a separate core):
-/// drain the host NIC RX ring through the IP stack into INBOUND_Q + flush any
-/// GRO burst past its latency budget. Deliberately does NOT touch the guest
-/// virtqueue — the BSP vCPU owns inject_rx. Keeps producer (NIC→queue) and
-/// consumer (queue→guest) on different cores so they pipeline.
-pub fn rx_producer_drain() {
-    NS_PRODUCER_DRAINS.fetch_add(1, AtOrd::Relaxed);
-    crate::net::poll_rx_only();
-    if GRO_ENABLED.load(AtOrd::Relaxed) {
-        gro_flush_expired(crate::interrupts::rdtsc());
-    }
-}
-
-/// How often the dedicated RX producer fiber ran a drain pass this window
-/// (printed in [netstat]). High = it's keeping up with the RX IRQ; the BSP's
-/// `drainmax`/`pump` then reflect only the consumer (inject) cadence.
-static NS_PRODUCER_DRAINS: AtomicU64 = AtomicU64::new(0);
-
 /// Guest timer-IRQ injections this window (PIT IRQ0 + LAPIC LVTT). Confirms the
 /// CONFIG_HZ=1000 fix: should read ~1000/s (the guest's programmed rate), not
 /// the old ~100/s (our wall-clock pacing). Incremented from the SVM inject path.
@@ -2018,38 +1267,17 @@ pub fn tx_stats() -> (u64, u64) {
 /// vs the per-packet rate it would be without — the io-EOI-storm signal.
 static NS_NET_IRQ: AtomicU64 = AtomicU64::new(0);
 pub fn note_net_irq() { NS_NET_IRQ.fetch_add(1, AtOrd::Relaxed); }
-/// DEBUG (Stage 2b): times the off-vCPU worker decided the guest wants an RX IRQ
-/// (raise_irq + kick BSP). Compare to `netirq` (BSP actually injected IRQ10):
-/// wraise≫netirq ⇒ the kick/inject isn't delivering; wraise≈netirq ⇒ delivery
-/// is fine and any cap is RX volume / TX, not the IRQ path.
-static NS_WORKER_RAISE: AtomicU64 = AtomicU64::new(0);
-pub fn note_worker_raise() { NS_WORKER_RAISE.fetch_add(1, AtOrd::Relaxed); }
-/// Times the worker kicked the parked BSP vCPU to inject RX it had STAGED while
-/// the guest's EVENT_IDX suppressed the IRQ line (`injected && !want_irq`). Before
-/// the scheduler-wake/IRQ-raise split these never woke the vCPU → it ate the 2ms
-/// park timeout (the measured `kick_wait timeout` → the download throughput
-/// lottery). High here = the decoupled wake is doing real work.
-static NS_KICK_DECOUPLED: AtomicU64 = AtomicU64::new(0);
-pub fn note_decoupled_kick() { NS_KICK_DECOUPLED.fetch_add(1, AtOrd::Relaxed); }
-pub fn decoupled_kick_count() -> u64 { NS_KICK_DECOUPLED.load(AtOrd::Relaxed) }
-/// Times the worker kicked the BSP because the guest RX ring was FULL (pending,
-/// nothing injected) so the guest must run to drain+repost. High = the guest's
-/// NAPI/repost is the limiter and the ring-full stall was real.
-static NS_KICK_RINGFULL: AtomicU64 = AtomicU64::new(0);
-pub fn note_ringfull_kick() { NS_KICK_RINGFULL.fetch_add(1, AtOrd::Relaxed); }
-pub fn ringfull_kick_count() -> u64 { NS_KICK_RINGFULL.load(AtOrd::Relaxed) }
-
-/// Bridge RX-backpressure health for `cores`, to find the SLOW-regime root:
-/// (drops, inject_false, rxlat_max_tsc). drops = INBOUND_Q overflow drops — the
-/// guest can't drain fast enough so RX is dropped → the SERVER retransmits +
-/// collapses cwnd → the slow download regime. inject_false = guest RX ring full.
-/// rxlat_max = worst staging latency (TSC ticks). Cumulative per VM run. If drops
-/// climb during a slow GET, the lottery is server-cwnd-collapse from our drops.
-pub fn rx_health_snapshot() -> (u64, u64, u64) {
-    (NS_DROP_QUEUE.load(AtOrd::Relaxed),
-     NS_INJECT_FALSE.load(AtOrd::Relaxed),
-     NS_RXLAT_MAX.load(AtOrd::Relaxed))
+/// Bridge RX health for `cores`: (tap ring-full drops, guest-ring-full stalls).
+/// A ring-full drop is BACKPRESSURE — the producer outran the guest and the far
+/// end slows down. `inject_false` is the guest being the limiter: it had no RX
+/// buffer posted, so the frame stayed in the tap and nothing was lost.
+pub fn rx_health_snapshot() -> (u64, u64) {
+    (NS_TAP_FULL.load(AtOrd::Relaxed), NS_INJECT_FALSE.load(AtOrd::Relaxed))
 }
+
+/// The guest RX ring was full — the frame went back to the head of the tap.
+pub fn note_inject_false() { NS_INJECT_FALSE.fetch_add(1, AtOrd::Relaxed); }
+
 /// virtio-gpu TRANSFER_TO_HOST pixel bytes copied on the vCPU core (the browser
 /// rendering). If high during a download, the framebuffer copy is stealing vCPU
 /// cycles from the net pump (the framebuffer↔pump contention) — Florian's
@@ -2063,95 +1291,11 @@ pub fn note_gpu_transfer(bytes: u64, cycles: u64) {
     NS_GPU_XFERS.fetch_add(1, AtOrd::Relaxed);
 }
 
-/// Outcome of one staging-queue → guest RX-ring drain pass.
-#[derive(Clone, Copy, Default)]
-pub struct RxDrain {
-    /// At least one RX buffer was injected into the guest this pass. Drives the
-    /// vCPU SCHEDULER wake (a parked vCPU can't NAPI-poll a non-empty ring).
-    pub injected: bool,
-    /// The guest wants its RX IRQ line raised: EVENT_IDX threshold crossed AND
-    /// NAPI hasn't suppressed. Drives `raise_irq` only. Implies `injected`.
-    pub want_irq: bool,
-    /// We had staged RX but the guest RX ring was FULL (inject_rx=false) — the
-    /// frame is requeued. The guest must RUN to drain its ring + repost buffers,
-    /// so the BSP must be kicked even though nothing was injected. Without this
-    /// the parked BSP eats the full 2ms kick_wait timeout before reposting (the
-    /// confirmed ring-full stall = a chunk of the download lottery).
-    pub pending: bool,
-}
-
-/// Drain the staging queue into the guest RX ring. Shared by pump() + pump_fast().
-fn drain_inbound(
-    net: &mut super::virtio_net_dev::VirtioNet,
-    mem: &GuestMem,
-) -> RxDrain {
-    // Pump-starvation probe: longest gap between drain passes this window.
-    let drain_now = crate::interrupts::rdtsc();
-    let last_drain = NS_LAST_DRAIN.swap(drain_now, AtOrd::Relaxed);
-    if last_drain != 0 {
-        let gap = drain_now.wrapping_sub(last_drain);
-        if gap > NS_DRAIN_GAP_MAX.load(AtOrd::Relaxed) {
-            NS_DRAIN_GAP_MAX.store(gap, AtOrd::Relaxed);
-        }
-    }
-    // Min RX buffers the guest had ready at the start of a drain pass.
-    let ring = net.rx_avail_count(mem);
-    if ring < NS_RXRING_MIN.load(AtOrd::Relaxed) {
-        NS_RXRING_MIN.store(ring, AtOrd::Relaxed);
-    }
-
-    // Push out any GRO burst that's been held past its latency budget, so its
-    // superframe is delivered in this same drain pass.
-    if GRO_ENABLED.load(AtOrd::Relaxed) {
-        gro_flush_expired(crate::interrupts::rdtsc());
-    }
-    let mut any = false;
-    let mut stalled = false;
-    loop {
-        let item = { INBOUND_Q.lock().pop_front() };
-        let Some((push_tsc, frame)) = item else { break };
-        // RX is flowing — mark activity even if the inject below fails on a full
-        // guest ring, so the BSP keeps parking event-driven on the RX IRQ
-        // (recently_active) through ring-full stretches instead of falling back
-        // to the 10 ms timer sleep exactly when it's busiest.
-        NS_LAST_ACTIVITY.store(drain_now, AtOrd::Relaxed);
-        let inj_t0 = crate::interrupts::rdtsc();
-        let injected = net.inject_rx(mem, &frame);
-        NS_INJECT_CYC.fetch_add(crate::interrupts::rdtsc().saturating_sub(inj_t0), AtOrd::Relaxed);
-        if injected {
-            any = true;
-            // RX delivery latency: how long this packet waited in the queue.
-            let lat = crate::interrupts::rdtsc().saturating_sub(push_tsc);
-            NS_RXLAT_SUM.fetch_add(lat, AtOrd::Relaxed);
-            NS_RXLAT_N.fetch_add(1, AtOrd::Relaxed);
-            if lat > NS_RXLAT_MAX.load(AtOrd::Relaxed) {
-                NS_RXLAT_MAX.store(lat, AtOrd::Relaxed);
-            }
-            frame_pool_put(frame); // recycle the buffer (no per-packet free)
-        } else {
-            // Guest RX queue full (no avail buffer) — requeue + retry next pump.
-            // High rate here = the GUEST is the limiter (NAPI/repost too slow).
-            NS_INJECT_FALSE.fetch_add(1, AtOrd::Relaxed);
-            INBOUND_Q.lock().push_front((push_tsc, frame));
-            stalled = true;
-            break;
-        }
-    }
-    // Fire the guest's RX IRQ only if we delivered something AND the driver
-    // hasn't suppressed interrupts (NAPI poll sets VIRTQ_AVAIL_F_NO_INTERRUPT).
-    // Firing IRQ10 during a NAPI poll preempts the guest's ring-drain → it
-    // reposts RX buffers slower → the ring exhausts (injfalse) → INBOUND_Q
-    // overflows → drops → TCP sawtooth (the speedtest "200→60→200" oscillation).
-    // The guest re-checks the used ring when it re-enables interrupts, so a
-    // suppressed packet is never stranded.
-    RxDrain { injected: any, want_irq: any && net.rx_wants_irq(mem), pending: stalled }
-}
-
 /// Everything the bridge knows about itself, for `netstat`.
 ///
-/// The counters were always there; they lived behind a `NETSTAT_DEBUG` const
-/// that has been `false` for months, so the one path nobody could see was the
-/// one between the guest and the wire. This is the `wlan` treatment: no console
+/// The counters were always there; they lived behind a debug const that had
+/// been `false` for months, so the one path nobody could see was the one
+/// between the guest and the wire. This is the `wlan` treatment: no console
 /// traffic, one screen on demand, and the numbers arranged so the reader can
 /// tell the failures APART rather than watching a single "throughput sagged".
 pub struct BridgeStats {
@@ -2177,18 +1321,13 @@ pub struct BridgeStats {
     pub window_ms: u64,
     pub flows_tcp: u64, pub flows_udp: u64,
     pub live: usize, pub cap: usize,
-    pub iq: usize, pub iq_hi: u64, pub iq_cap: usize,
-    pub rxring_min: u64,
-    pub drop_queue: u64, pub drop_table: u64, pub drop_egress: u64,
+    pub drop_table: u64, pub drop_egress: u64,
     pub inject_false: u64,
-    pub rxlat_avg_us: u64, pub rxlat_max_us: u64,
     pub net_irq: u64,
-    pub gro: bool, pub gro_frames: u64, pub gro_segs: u64,
     pub gpu_kb: u64, pub gpu_xfers: u64, pub gpu_kbps: u64,
     /// Percent of the last window the vCPU spent inside the framebuffer copy.
     pub gpu_pct: u64, pub gpu_us_each: u64,
-    pub gtimer_ps: u64, pub pump_ps: u64,
-    pub kicks_out: u64,
+    pub gtimer_ps: u64,
     pub ip_malformed: u64, pub ip_to_gw: u64, pub ip_dns: u64, pub ip_proto: u64,
     pub tx_runt: u64, pub tx_badtcp: u64, pub tx_arpmiss: u64,
     pub tx_ringbad: u64, pub tx_trunc: u64, pub rx_unmatched: u64,
@@ -2205,7 +1344,6 @@ static RPT_GPU: AtomicU64 = AtomicU64::new(0);
 static RPT_GT: AtomicU64 = AtomicU64::new(0);
 static RPT_GPUCYC: AtomicU64 = AtomicU64::new(0);
 static RPT_GPUXF: AtomicU64 = AtomicU64::new(0);
-static RPT_PUMP: AtomicU64 = AtomicU64::new(0);
 static RPT_TAPDEL: AtomicU64 = AtomicU64::new(0);
 
 pub fn bridge_stats() -> BridgeStats {
@@ -2227,13 +1365,9 @@ pub fn bridge_stats() -> BridgeStats {
     let d_gxf = gxf.saturating_sub(prev_gxf);
     let gt = NS_GTIMER.load(AtOrd::Relaxed);
     let prev_gt = RPT_GT.swap(gt, AtOrd::Relaxed);
-    let pumps = NS_PUMP_CALLS.load(AtOrd::Relaxed);
-    let prev_pump = RPT_PUMP.swap(pumps, AtOrd::Relaxed);
     let window_ms = if prev_tsc == 0 { 0 } else { now.wrapping_sub(prev_tsc) / khz };
     let win_cyc = window_ms.saturating_mul(khz);
     let per_s = |d: u64| if window_ms > 0 { d * 1000 / window_ms } else { 0 };
-    let n = NS_RXLAT_N.load(AtOrd::Relaxed);
-    let rxring_min = NS_RXRING_MIN.load(AtOrd::Relaxed);
     let start = NS_START_TICK.load(AtOrd::Relaxed);
     let delivered = NS_TAP_DELIVERED.load(AtOrd::Relaxed);
     let prev_deliv = RPT_TAPDEL.swap(delivered, AtOrd::Relaxed);
@@ -2266,27 +1400,16 @@ pub fn bridge_stats() -> BridgeStats {
         flows_tcp: NS_TCP_FLOWS.load(AtOrd::Relaxed),
         flows_udp: NS_UDP_FLOWS.load(AtOrd::Relaxed),
         live: L3.lock().maps.iter().flatten().count(), cap: L3_MAX,
-        iq: INBOUND_Q.lock().len(),
-        iq_hi: NS_IQ_HI.load(AtOrd::Relaxed), iq_cap: INBOUND_MAX,
-        rxring_min: if rxring_min == u64::MAX { 0 } else { rxring_min },
-        drop_queue: NS_DROP_QUEUE.load(AtOrd::Relaxed),
         drop_table: NS_DROP_TABLE.load(AtOrd::Relaxed),
         drop_egress: NS_DROP_EGRESS.load(AtOrd::Relaxed),
         inject_false: NS_INJECT_FALSE.load(AtOrd::Relaxed),
-        rxlat_avg_us: if n > 0 { NS_RXLAT_SUM.load(AtOrd::Relaxed) / n / mhz } else { 0 },
-        rxlat_max_us: NS_RXLAT_MAX.load(AtOrd::Relaxed) / mhz,
         net_irq: NS_NET_IRQ.load(AtOrd::Relaxed),
-        gro: GRO_ENABLED.load(AtOrd::Relaxed),
-        gro_frames: NS_GRO_FRAMES.load(AtOrd::Relaxed),
-        gro_segs: NS_GRO_SEGS.load(AtOrd::Relaxed),
         gpu_kb: gpu_bytes / 1024,
         gpu_xfers: NS_GPU_XFERS.load(AtOrd::Relaxed),
         gpu_kbps: per_s(gpu_bytes.saturating_sub(prev_gpu)) / 1024,
         gpu_pct: if win_cyc > 0 { (d_gcyc.saturating_mul(100)) / win_cyc } else { 0 },
         gpu_us_each: if d_gxf > 0 { d_gcyc / d_gxf / mhz } else { 0 },
         gtimer_ps: per_s(gt.saturating_sub(prev_gt)),
-        pump_ps: per_s(pumps.saturating_sub(prev_pump)),
-        kicks_out: NS_KICK_DECOUPLED.load(AtOrd::Relaxed),
         ip_malformed: NS_IP_MALFORMED.load(AtOrd::Relaxed),
         ip_to_gw: NS_IP_TO_GW.load(AtOrd::Relaxed),
         ip_dns: NS_IP_DNS.load(AtOrd::Relaxed),
@@ -2306,8 +1429,7 @@ pub fn bridge_stats() -> BridgeStats {
 pub fn active_session_count() -> usize {
     // Drives VM idle-detection: keep the guest scheduled while any
     // masquerade flow is live or a reply is still queued.
-    L3.lock().maps.iter().flatten().count() + INBOUND_Q.lock().len()
-        + tap_len() as usize
+    L3.lock().maps.iter().flatten().count() + tap_len() as usize
 }
 
 /// Tear down NAT state when a microvm run ends so the next launch —
@@ -2330,16 +1452,14 @@ pub fn reset_sessions() {
 /// last run readable until the next launch.
 pub fn reset_counters() {
     for c in [&NS_RX_BYTES, &NS_RX_PKTS, &NS_TX_BYTES, &NS_TX_PKTS,
-              &NS_DROP_QUEUE, &NS_DROP_TABLE, &NS_DROP_EGRESS,
-              &NS_HIGHWATER, &NS_LAST_TICK, &NS_IQ_HI,
-              &NS_RXLAT_SUM, &NS_RXLAT_N, &NS_RXLAT_MAX, &NS_INJECT_FALSE,
-              &NS_TCP_FLOWS, &NS_UDP_FLOWS, &NS_GRO_FRAMES, &NS_GRO_SEGS,
+              &NS_DROP_TABLE, &NS_DROP_EGRESS,
+              &NS_HIGHWATER, &NS_LAST_TICK, &NS_INJECT_FALSE,
+              &NS_TCP_FLOWS, &NS_UDP_FLOWS,
               &NS_NET_IRQ, &RPT_TSC, &RPT_RX, &RPT_TX,
               &NS_GUEST_KICKS, &NS_GUEST_FRAMES, &NS_GUEST_ARP, &NS_GUEST_OTHER,
               &NS_GPU_BYTES, &NS_GPU_XFERS, &RPT_GPU, &NS_GPU_CYC,
               &RPT_GPUCYC, &RPT_GPUXF,
-              &NS_GTIMER, &NS_PUMP_CALLS, &RPT_GT, &RPT_PUMP,
-              &NS_KICK_DECOUPLED, &LAST_KICK_TSC, &RPT_TAPDEL,
+              &NS_GTIMER, &RPT_GT, &RPT_TAPDEL,
               &NS_IP_MALFORMED, &NS_IP_TO_GW, &NS_IP_DNS, &NS_IP_PROTO,
               &NS_TX_RUNT, &NS_TX_BADTCP, &NS_TX_ARPMISS, &NS_TX_RINGBAD,
               &NS_TX_TRUNC, &NS_RX_UNMATCHED,
@@ -2347,6 +1467,5 @@ pub fn reset_counters() {
         c.store(0, AtOrd::Relaxed);
     }
     NS_START_TICK.store(crate::interrupts::ticks().max(1), AtOrd::Relaxed);
-    NS_RXRING_MIN.store(u64::MAX, AtOrd::Relaxed);
     NS_LAST_ACTIVITY.store(0, AtOrd::Relaxed);
 }

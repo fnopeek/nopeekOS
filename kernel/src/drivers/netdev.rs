@@ -481,10 +481,6 @@ pub fn tx_flush() {
     if matches!(active(), Active::Virtio | Active::None) { virtio_net::tx_flush(); }
 }
 
-/// Does the active card take checksum+TSO-offloaded TX frames (`send_offload`)?
-pub fn tx_offload_ok() -> bool {
-    matches!(active(), Active::Virtio | Active::None) && virtio_net::host_offload_ok()
-}
 
 pub fn mac() -> Option<[u8; 6]> {
     match active() {

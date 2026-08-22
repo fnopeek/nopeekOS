@@ -1593,26 +1593,6 @@ impl VmContext {
             }
         }
 
-        // Deliver microvm RX on EVERY exit — OUTSIDE VM_BIG_LOCK. pump_fast no
-        // longer touches VmShared (the net device + guest_mem live in their own
-        // statics now), so running it here means an AP taking a TLB-shootdown
-        // exit no longer blocks behind it on VM_BIG_LOCK while the BSP injects RX
-        // — that queuing was a chunk of the csd_lock_wait spin (rip_sample ~40%).
-        // The guest IRQ10 is signalled lock-free (`raise_irq`) and folded into
-        // pending_irqs by the BSP below. BSP-only; NET is released (temporary
-        // guard) before VM_BIG_LOCK is requested, so no lock cycle.
-        // Skipped entirely when the full off-vCPU RX backend (Stage 2b) owns the
-        // RX data-plane on its own core — then the BSP does NO net RX work here.
-        if self.vcpu.apic_id == 0 && !crate::microvm::devices::net_backend::full_active() {
-            if let Some(gm) = crate::microvm::devices::guest_mem::active() {
-                if crate::microvm::devices::nat::pump_fast(
-                    &mut *crate::microvm::devices::net_backend::lock(), gm)
-                {
-                    crate::microvm::devices::net_backend::raise_irq();
-                }
-            }
-        }
-
         // Take the big-VM lock around this exit's device/memory handling
         // when an AP shares the VM (guest SMP), so the two vCPUs serialize
         // access to `VmShared`. Both `_big` and `sh` are dropped at the end
@@ -2012,14 +1992,8 @@ impl VmContext {
                     // (set by the worker) feeds idle-accounting; the worker's RX
                     // IRQ10 is folded lock-free into `pending_irqs` and injected at
                     // the top of this block, so we must NOT inject it again here.
-                    let full = crate::microvm::devices::net_backend::full_active();
-                    if full {
-                        crate::microvm::devices::nat::housekeep();
-                        pumped = crate::microvm::devices::nat::recently_active();
-                    } else {
-                        pumped = crate::microvm::devices::nat::pump(
-                            &mut *crate::microvm::devices::net_backend::lock(), sh.guest_mem);
-                    }
+                    crate::microvm::devices::nat::housekeep();
+                    pumped = crate::microvm::devices::nat::recently_active();
                     if sh.pci.virtio_input.drain_injected(sh.guest_mem) {
                         let vector = sh.pic.vector_for_irq(12);
                         let info: u64 = (vector as u64) | (1u64 << 31);
@@ -2027,9 +2001,9 @@ impl VmContext {
                         self.vcpu.consecutive_idle = 0;
                         continue;
                     }
-                    // Non-full only: the legacy pump injected RX → raise IRQ10.
-                    // In full mode the worker's raise_irq handles this (above).
-                    if pumped && !full {
+                    // The worker's `raise_irq` carries RX now (folded at the top
+                    // of this block); `pumped` only feeds idle accounting.
+                    if false {
                         let vector = sh.pic.vector_for_irq(10);
                         let info: u64 = (vector as u64) | (1u64 << 31);
                         self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
@@ -2267,15 +2241,6 @@ impl VmContext {
                     // only the vCPU touches it; the off-vCPU backend lands in Stage 2).
                     let mut net = crate::microvm::devices::net_backend::lock();
                     if handle_mmio_npf_net(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut *net, &sh.pic, &mut sh.pending_irqs, gpa, sh.guest_mem) {
-                        // Drain RX into the guest on its virtio-net access (was
-                        // starved at the ~1500/s timer/HLT pump → download cap).
-                        // Skipped in full-backend mode (the worker owns RX).
-                        if self.vcpu.apic_id == 0
-                            && !crate::microvm::devices::net_backend::full_active()
-                            && crate::microvm::devices::nat::pump_fast(&mut *net, sh.guest_mem)
-                        {
-                            sh.pending_irqs |= 1 << 10;
-                        }
                         drop(net);
                         // Deliver a deferred device IRQ (esp. an async 9p
                         // write-completion) NOW rather than at the next
@@ -2297,19 +2262,6 @@ impl VmContext {
                     }
                 } else if sh.pci.virtio_9p.bar0_in_range(gpa) {
                     if handle_mmio_npf_p9(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut sh.pci.virtio_9p, &sh.pic, &mut sh.pending_irqs, gpa, sh.guest_mem) {
-                        // A 9p access (e.g. a download write) runs the npkFS
-                        // write INLINE here — during which the net RX pump does
-                        // not run, so the staging queue overflows and RX drops
-                        // (the download-to-disk sawtooth). Drain RX right after,
-                        // so disk activity no longer starves it. BSP only; skipped
-                        // in full-backend mode (the worker owns RX on its core).
-                        if self.vcpu.apic_id == 0
-                            && !crate::microvm::devices::net_backend::full_active()
-                            && crate::microvm::devices::nat::pump_fast(
-                                &mut *crate::microvm::devices::net_backend::lock(), sh.guest_mem)
-                        {
-                            sh.pending_irqs |= 1 << 10;
-                        }
                         // Deliver the freshly-completed 9p write-reply IRQ NOW
                         // (latched by drain_async_done at the loop top) instead
                         // of waiting for the next EXIT_INTR/EXIT_HLT.

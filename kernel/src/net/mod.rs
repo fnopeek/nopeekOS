@@ -37,24 +37,6 @@ pub fn reset_poll_guard() {
     POLLING.store(false, Ordering::Release);
 }
 
-/// Acquire the single-consumer NIC-drain guard for the off-vCPU data plane
-/// (`net_dataplane`), which pulls host-NIC frames one at a time (`netdev::recv`)
-/// and decides per-frame whether to keep pulling — vhost-net backpressure: stop
-/// when the guest RX ring is full, so the NIC ring fills and the sender flow-
-/// controls, instead of a synthetic staging-queue drop. Returns false if Core 0
-/// is mid-`poll()`; the worker then skips this pass (Core 0 already skips the
-/// drain while the data plane is `active()`, so this is just the race backstop).
-pub fn try_acquire_drain() -> bool {
-    POLLING
-        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_ok()
-}
-
-/// Release the guard taken by [`try_acquire_drain`].
-pub fn release_drain() {
-    POLLING.store(false, Ordering::Release);
-}
-
 // TEMP profiler: split poll_rx_only's per-call cost. TSC cycles in the netdev
 // drain (driver + virtio doorbells), the IP/TCP stack (handle_frame), tx_flush,
 // and poll_render — plus packets processed. Read+reset via take_poll_prof().
@@ -97,13 +79,6 @@ pub fn poll() {
     // load, so if Core 0's poll() returned early here it would never render or
     // poll the mouse → UI + mouse freeze (observed as a notebook kernel freeze:
     // a slow NIC keeps the BSP pumping ~continuously → Core 0 fully starved).
-    // While a microvm is active, Core 0 must NOT drain the host NIC: it pulls
-    // guest-bound (slirp) packets into the NAT's INBOUND_Q but CANNOT inject them
-    // (no VmContext) — only the BSP vCPU pump can. Core 0 winning the drain race
-    // outran the pump, overflowing INBOUND_Q → packet drops EVEN THOUGH the guest
-    // always had RX buffers (measured: injfalse=0 yet ~49k drops). So the BSP
-    // pump (a worker core, calls net::poll() itself) becomes the sole NIC drainer:
-    // fill + inject happen together, no race, no drops, throughput = pump rate.
     // Core 0 drains the host NIC even while a microvm runs. That used to be
     // forbidden because what it pulled in landed in a queue only the vCPU could
     // empty — Core 0 filled it, could not inject, and overflowed it. With the tap

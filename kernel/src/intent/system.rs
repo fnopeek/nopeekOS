@@ -88,8 +88,6 @@ pub fn intent_cores() {
     let wk0 = crate::microvm::devices::net_dataplane::wake_snapshot();
     let kw0 = crate::smp::fiber::kick_wait_snapshot();
     let kl0 = crate::smp::fiber::kick_latency_snapshot(); // clears max
-    let dk0 = crate::microvm::devices::nat::decoupled_kick_count();
-    let rf0 = crate::microvm::devices::nat::ringfull_kick_count();
     let rh0 = crate::microvm::devices::nat::rx_health_snapshot();
     let gt0 = crate::microvm::devices::nat::guest_timer_count();
     let tx0 = crate::microvm::devices::nat::tx_stats();
@@ -124,8 +122,6 @@ pub fn intent_cores() {
     let wk1 = crate::microvm::devices::net_dataplane::wake_snapshot();
     let kw1 = crate::smp::fiber::kick_wait_snapshot();
     let kl1 = crate::smp::fiber::kick_latency_snapshot();
-    let dk1 = crate::microvm::devices::nat::decoupled_kick_count();
-    let rf1 = crate::microvm::devices::nat::ringfull_kick_count();
     let rh1 = crate::microvm::devices::nat::rx_health_snapshot();
     let gt1 = crate::microvm::devices::nat::guest_timer_count();
     let tx1 = crate::microvm::devices::nat::tx_stats();
@@ -251,15 +247,9 @@ pub fn intent_cores() {
         // BSP consumer park: kicked = the worker's kick woke it (event-driven);
         // timeout = it fell to the 2ms fallback = the typical ~3ms cold floor.
         let (kk, kt) = (kw1.0.saturating_sub(kw0.0), kw1.1.saturating_sub(kw0.1));
-        // decoupled = kicks issued for STAGED-but-IRQ-suppressed RX (injected &&
-        // !want_irq). These used to be lost wakes → the 2ms `timeout` stalls; now
-        // they wake the vCPU. timeout should fall toward 0 as decoupled rises.
-        let dk = dk1.saturating_sub(dk0);
-        let rf = rf1.saturating_sub(rf0);
         if kk + kt > 0 {
-            kprintln!("    bsp kick_wait/s: kicked={} timeout={} decoupled={} ringfull={}",
-                      kk * 1000 / window_ms, kt * 1000 / window_ms,
-                      dk * 1000 / window_ms, rf * 1000 / window_ms);
+            kprintln!("    bsp kick_wait/s: kicked={} timeout={}",
+                      kk * 1000 / window_ms, kt * 1000 / window_ms);
         }
         // kick→resume LATENCY (the irqfd-gap probe): how long from the worker's RX
         // kick to the parked BSP vCPU actually resuming. µs = IPI-prompt (3ms RTT
@@ -272,14 +262,13 @@ pub fn intent_cores() {
             kprintln!("    bsp kick→resume: avg={}us max={}us (n={}/s)",
                       avg_us, max_us, kln * 1000 / window_ms);
         }
-        // Bridge RX backpressure: drops/s = INBOUND_Q overflow (→ server retransmit
-        // → cwnd collapse → the slow regime). If this climbs during a SLOW GET, the
-        // lottery is server-cwnd-collapse from our drops, not park latency.
-        let drops = rh1.0.saturating_sub(rh0.0);
+        // Tap backpressure: tapfull/s = the ring was full, so the producer
+        // dropped (healthy in moderation — the far end slows down). injfalse/s =
+        // the GUEST had no RX buffer, so the frame stayed in the tap.
+        let tapfull = rh1.0.saturating_sub(rh0.0);
         let injf = rh1.1.saturating_sub(rh0.1);
-        let rxlat_us = rh1.2.saturating_mul(1_000_000) / tsc_hz.max(1);
-        kprintln!("    net bridge backpressure: drops={}/s injfalse={}/s rxlat_max={}us",
-                  drops * 1000 / window_ms, injf * 1000 / window_ms, rxlat_us);
+        kprintln!("    net tap backpressure: tapfull={}/s injfalse={}/s",
+                  tapfull * 1000 / window_ms, injf * 1000 / window_ms);
         // Outbound TX rate (the b1-vs-b2 upload discriminator). Read TOGETHER with
         // the worker core's BUSY% above: high segs/s + worker pegged ~100% = the
         // SW-TSO emit pipeline is the cap (b1); the same Mbit with the worker idle

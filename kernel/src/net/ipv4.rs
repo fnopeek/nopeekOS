@@ -65,13 +65,6 @@ pub fn handle_ipv4(data: &[u8]) {
     let our_ip = arp::our_ip();
     if dst_ip != our_ip && dst_ip != [255, 255, 255, 255] && our_ip != [0, 0, 0, 0] { return; }
 
-    // Legacy inline intercept — unreachable now that the tap runs first (same
-    // table, so anything it would claim the tap already claimed). Goes with the
-    // rest of the inline path.
-    if crate::microvm::devices::nat::l3_inbound(&data[..total_len.min(data.len())]) {
-        return;
-    }
-
     let payload = &data[ihl..total_len.min(data.len())];
 
     match protocol {
@@ -137,53 +130,6 @@ pub fn send_with_ttl(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8) -> 
 
     let _ = eth::send_frame(&dst_mac, eth::ETHERTYPE_IPV4, &pkt);
     resolved
-}
-
-/// Send a TCP segment with HOST-NIC checksum + TSO offload (the microvm
-/// masquerade TX fast path — symmetric with RX: forward the frame, let the
-/// device segment + checksum). `tcp_seg` is the (port-rewritten) TCP header +
-/// payload whose checksum field already holds the pseudo-header PARTIAL
-/// (CHECKSUM_PARTIAL); `gso_size` is the MSS (0 ⇒ checksum-only). Builds the IP +
-/// ethernet headers like `send`, then hands the whole frame to
-/// `virtio_net::send_offload` (no SW segmentation / checksum). Returns false (and
-/// the caller may retry via the SW path) if the NIC can't take it.
-pub fn send_offload(dst_ip: [u8; 4], protocol: u8, tcp_seg: &[u8], gso_size: u16) -> bool {
-    if tcp_seg.len() < 20 { return false; }
-    let src_ip = arp::our_ip();
-    let total_len = HEADER_LEN + tcp_seg.len();
-    if total_len > 0xFFFF { return false; } // IP total-length is u16
-    // IP packet (the device recomputes per-segment total-length + checksum).
-    let mut pkt = alloc::vec![0u8; total_len];
-    pkt[0] = 0x45;
-    pkt[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
-    pkt[8] = 64;
-    pkt[9] = protocol;
-    pkt[12..16].copy_from_slice(&src_ip);
-    pkt[16..20].copy_from_slice(&dst_ip);
-    let checksum = ipv4_checksum(&pkt[..HEADER_LEN]);
-    pkt[10..12].copy_from_slice(&checksum.to_be_bytes());
-    pkt[HEADER_LEN..].copy_from_slice(tcp_seg);
-
-    let arp_target = arp_target_for(dst_ip);
-    let dst_mac = match arp::lookup(arp_target) {
-        Some(mac) => mac,
-        None => { arp::request(arp_target); return false; } // no L2-broadcast for bulk TX
-    };
-    let src_mac = crate::netdev::mac().unwrap_or([0; 6]);
-
-    // Ethernet frame for the host NIC.
-    let mut frame = alloc::vec![0u8; eth::HEADER_LEN + pkt.len()];
-    frame[0..6].copy_from_slice(&dst_mac);
-    frame[6..12].copy_from_slice(&src_mac);
-    frame[12..14].copy_from_slice(&eth::ETHERTYPE_IPV4.to_be_bytes());
-    frame[eth::HEADER_LEN..].copy_from_slice(&pkt);
-
-    // csum_start = eth(14) + IP(20) = TCP offset; csum_offset = 16 (TCP check);
-    // hdr_len = csum_start + TCP header length.
-    let tcp_hl = (((tcp_seg[12] >> 4) & 0x0F) as usize * 4) as u16;
-    let csum_start = (eth::HEADER_LEN + HEADER_LEN) as u16;
-    let hdr_len = csum_start + tcp_hl;
-    crate::virtio_net::send_offload(&frame, gso_size, csum_start, 16, hdr_len).is_ok()
 }
 
 fn ipv4_checksum(header: &[u8]) -> u16 {
