@@ -41,13 +41,13 @@ pub fn note_tx_kick() {
     if !TX_KICK.swap(true, Ordering::AcqRel) {
         let c = WORKER_CORE.load(Ordering::Acquire);
         if c != usize::MAX {
-            // The worker parks in irq_wait on the RX IRQ vector (it resumes when
-            // fired_count(rx_vec) advances). Bump that count so the scheduler
-            // resumes it to service this TX kick, then wake its core (if idle/
-            // HLTed) to run the scheduler. On a polled NIC (vec 0) it yield_sleeps
-            // → the kick wakes the core and the short sleep bounds TX latency.
-            let rx_vec = crate::drivers::virtio_net::rx_irq_vector();
-            if rx_vec != 0 {
+            // The worker parks in irq_wait on the active card's RX IRQ vector
+            // (it resumes when fired_count advances). Bump that count so the
+            // scheduler resumes it to service this TX kick, then wake its core
+            // (if idle/HLTed) to run the scheduler. On a polled card (no vector)
+            // it yield_sleeps → the kick wakes the core and the short sleep
+            // bounds TX latency.
+            if let Some(rx_vec) = crate::netdev::rx_wake_vector() {
                 crate::irq::note_fired(rx_vec);
             }
             crate::smp::kick_host_core(c);

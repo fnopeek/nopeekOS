@@ -30,7 +30,7 @@
 //!     but the off-vCPU inject/IRQ-fold is SVM-only today. Migrated to the full
 //!     vhost path when VMX mirrors the BSP-kick.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use alloc::collections::VecDeque;
 use spin::Mutex;
 
@@ -38,7 +38,7 @@ use spin::Mutex;
 /// can test "is there RX/ACK work?" without taking any lock (the cheap condition
 /// that keeps it from being the reverted lock-hammer spin).
 static RX_STAGE_LEN: AtomicUsize = AtomicUsize::new(0);
-static LAST_RX_USED: AtomicU32 = AtomicU32::new(0);
+static LAST_RX_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// True iff there is RX or TX work to service RIGHT NOW — a fresh host-NIC RX
 /// frame (used.idx moved past what we last drained) or a queued ACK (TX kick).
@@ -49,7 +49,7 @@ static LAST_RX_USED: AtomicU32 = AtomicU32::new(0);
 #[inline]
 fn has_work() -> bool {
     let _ = RX_STAGE_LEN.load(Ordering::Relaxed);
-    crate::drivers::virtio_net::rx_used_idx() as u32 != LAST_RX_USED.load(Ordering::Relaxed)
+    crate::netdev::rx_seq() != LAST_RX_SEQ.load(Ordering::Relaxed)
         || crate::microvm::devices::net_backend::tx_kick_pending()
 }
 
@@ -224,7 +224,7 @@ const WARM_THROUGH_TRANSFER: bool = false;
 /// fiber is a NO-OP there; it runs `!full` only for a POLLED NIC that needs an
 /// independent drainer.
 pub fn start_worker(core: usize, full: bool) {
-    if !full && crate::drivers::virtio_net::rx_irq_vector() != 0 { return; }
+    if !full && crate::netdev::rx_wake_vector().is_some() { return; }
     if WORKER_RUNNING.swap(true, Ordering::AcqRel) { return; }
     STOP.store(false, Ordering::Release);
     crate::smp::fiber::admit_with_stack(core, worker_entry, full as u64, WORKER_STACK_BYTES);
@@ -268,7 +268,7 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
     let mut rewritten: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
     let mut host_frames: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
     if crate::net::try_acquire_drain() {
-        let mut buf = [0u8; crate::drivers::virtio_net::MTU];
+        let mut buf = [0u8; crate::netdev::MTU];
         while let Some(len) = crate::netdev::recv(&mut buf) {
             if len < 14 { continue; }
             let ethertype = u16::from_be_bytes([buf[12], buf[13]]);
@@ -283,8 +283,7 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
         }
         crate::net::release_drain();
         // Mark the NIC drained to here so has_work() only fires on a NEW frame.
-        LAST_RX_USED.store(
-            crate::drivers::virtio_net::rx_used_idx() as u32, Ordering::Relaxed);
+        LAST_RX_SEQ.store(crate::netdev::rx_seq(), Ordering::Relaxed);
     }
     // Full-path RX cadence diagnostic (the only place that sees the real batch).
     if !rewritten.is_empty() {
@@ -441,8 +440,8 @@ fn worker_entry(arg: u64) {
         // arming window already advanced the fired count → irq_wait returns at
         // once (no lost wakeup). The TX doorbell also wakes us: `note_tx_kick`
         // bumps this vector's fired count + IPIs this core.
-        let vec = crate::drivers::virtio_net::rx_irq_vector();
-        if vec != 0 {
+        let vec = crate::netdev::rx_wake_vector();
+        if let Some(vec) = vec {
             let since = crate::irq::arm(vec);
             if full {
                 if let Some(gm) = crate::microvm::devices::guest_mem::active() {

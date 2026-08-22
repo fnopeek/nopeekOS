@@ -340,6 +340,7 @@ pub fn wasm_nic_stats_reset() {
 pub fn wasm_nic_submit_rx(frame: &[u8]) {
     if frame.len() > MTU { return; }
     RX_TO_RING.fetch_add(1, Ordering::Relaxed);
+    bump_rx_seq();
     if !WASM_NIC_RX.lock().push(frame) {
         RX_RING_DROP.fetch_add(1, Ordering::Relaxed);
     }
@@ -404,11 +405,78 @@ static TX_ERR: AtomicU32 = AtomicU32::new(0);
 
 pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
     match active() {
+        // Already counted at `wasm_nic_submit_rx` / `note_rx_available`.
         Active::Wasm => WASM_NIC_RX.lock().pop(buf),
-        Active::Intel => intel_nic::recv(buf),
-        Active::Rtl => rtl8153::recv(buf),
+        Active::Intel => intel_nic::recv(buf).inspect(|_| { bump_rx_seq(); }),
+        Active::Rtl => rtl8153::recv(buf).inspect(|_| { bump_rx_seq(); }),
+        // Sequence comes from the device's own used.idx — see `rx_seq`.
         Active::Virtio | Active::None => virtio_net::recv(buf),
     }
+}
+
+// ── RX wake signal, card-neutral ──────────────────────────────────────────
+//
+// The microvm data plane used to ask `drivers::virtio_net` directly whether an
+// RX IRQ existed and how far the device's used ring had advanced. On the two
+// target machines there IS no virtio NIC, so both answers were 0: the worker's
+// "is there work" test became `0 != 0`, and the vector it parked on and routed
+// was vector zero. That is not a regression — that path never ran on this
+// hardware. Every card answers for itself here instead.
+
+/// Frames a POLLED driver has handed the stack (intel / rtl8153 / WASM NIC).
+/// Monotonic; only ever compared for inequality against a caller's snapshot.
+static RX_SEQ: AtomicU64 = AtomicU64::new(0);
+/// 64-bit extension of the virtio device's 16-bit RX used.idx.
+static VIRTIO_RX_SEQ: AtomicU64 = AtomicU64::new(0);
+
+#[inline]
+fn bump_rx_seq() { RX_SEQ.fetch_add(1, Ordering::Relaxed); }
+
+/// A driver made `n` received frames available to the stack. Called where the
+/// frame ARRIVES, not where it is drained, so a consumer that is behind still
+/// sees the sequence move.
+#[inline]
+pub fn note_rx_available(n: u64) { RX_SEQ.fetch_add(n, Ordering::Relaxed); }
+
+/// Widen the device's wrapping 16-bit used.idx to a monotonic 64-bit count.
+/// A concurrent caller can at worst make this return a value one wrap stale,
+/// which costs one extra poll and never a missed frame.
+fn virtio_rx_seq() -> u64 {
+    let raw = virtio_net::rx_used_idx() as u64;
+    let prev = VIRTIO_RX_SEQ.load(Ordering::Relaxed);
+    let mut ext = (prev & !0xFFFF) | raw;
+    if ext < prev { ext += 0x1_0000; }
+    VIRTIO_RX_SEQ.store(ext, Ordering::Relaxed);
+    ext
+}
+
+/// LAPIC vector to park on for RX arrival, or `None` when the active card has
+/// no RX MSI-X and must be polled. Only virtio-net has one today; the intel
+/// NIC, the USB dongle and a WASM-driven card are all polled.
+pub fn rx_wake_vector() -> Option<u8> {
+    match active() {
+        Active::Virtio | Active::None => match virtio_net::rx_irq_vector() {
+            0 => None,
+            v => Some(v),
+        },
+        _ => None,
+    }
+}
+
+/// Monotonic count of frames the ACTIVE driver has provided. Changes when a
+/// frame arrives, whether or not anyone has drained it. Switching cards
+/// switches counters, so this is only ever compared for inequality — never
+/// subtracted across a link change.
+pub fn rx_seq() -> u64 {
+    match active() {
+        Active::Virtio | Active::None => virtio_rx_seq(),
+        _ => RX_SEQ.load(Ordering::Relaxed),
+    }
+}
+
+/// Does the active card take checksum+TSO-offloaded TX frames (`send_offload`)?
+pub fn tx_offload_ok() -> bool {
+    matches!(active(), Active::Virtio | Active::None) && virtio_net::host_offload_ok()
 }
 
 pub fn mac() -> Option<[u8; 6]> {

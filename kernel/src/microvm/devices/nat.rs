@@ -1295,7 +1295,7 @@ fn handle_ipv4(frame: &[u8], caps: &NetCaps, gso_size: u16) -> Option<Vec<u8>> {
             // the guest's GSO super-frame AS-IS (rewrite + incremental csum, the
             // mirror of RX) instead of SW re-segmenting it. Fall back to the SW
             // path only when offload isn't available.
-            if crate::drivers::virtio_net::host_offload_ok() {
+            if crate::netdev::tx_offload_ok() {
                 l3_outbound_offload(src_port, dst_ip, dst_port, l4, gso_size)
             } else {
                 l3_outbound(PROTO_TCP, src_port, dst_ip, dst_port, l4, gso_size)
@@ -1563,7 +1563,9 @@ pub fn pump(
     // when the dedicated producer is active — IT owns the RX IRQ (routed to its
     // own core); routing it here too would steal the wake from the producer.
     if !producer && !RX_IRQ_ROUTED.swap(true, Ordering::Relaxed) {
-        crate::irq::route_to_current(crate::drivers::virtio_net::rx_irq_vector());
+        if let Some(v) = crate::netdev::rx_wake_vector() {
+            crate::irq::route_to_current(v);
+        }
     }
 
     // Drain the host NIC RX ring (handle_frame → l3_inbound). The dedicated
@@ -1635,8 +1637,8 @@ pub fn pump(
         // and we need `gpu KB/s` + `dl` to verify the GPU throttle engages.
         const NETSTAT_DEBUG: bool = false;
         // net-RX IRQ fire rate this window (0 + v0x0 = polling, IRQ never set up).
-        let rx_vec = crate::drivers::virtio_net::rx_irq_vector();
-        let rxirq_now = if rx_vec != 0 { crate::irq::fired_count(rx_vec) } else { 0 };
+        let rx_vec = crate::netdev::rx_wake_vector();
+        let rxirq_now = rx_vec.map_or(0, crate::irq::fired_count);
         let rxirq_per_s = rxirq_now
             .saturating_sub(NS_LAST_RXIRQ.swap(rxirq_now, AtOrd::Relaxed)) / secs;
         if NETSTAT_DEBUG && secs > 0 && (rxp + txp) > 0 {
@@ -1644,7 +1646,7 @@ pub fn pump(
                 "[netstat] rx {} KB/s ({} pkt/s) tx {} KB/s ({} pkt/s) | rxlat avg {}us max {}us | rxirq {}/s (v{:#04x}) | iq hi {}/{} | flows {}tcp {}udp | {} drops | pump {}/s injfalse {}/s batch {}",
                 rxb / 1024 / secs, rxp / secs, txb / 1024 / secs, txp / secs,
                 lat_avg_us, lat_max_us,
-                rxirq_per_s, rx_vec,
+                rxirq_per_s, rx_vec.unwrap_or(0),
                 NS_IQ_HI.load(AtOrd::Relaxed), INBOUND_MAX,
                 NS_TCP_FLOWS.load(AtOrd::Relaxed), NS_UDP_FLOWS.load(AtOrd::Relaxed),
                 NS_DROP_QUEUE.load(AtOrd::Relaxed),
