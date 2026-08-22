@@ -246,6 +246,83 @@ pub enum Justify {
     Evenly,
 }
 
+/// `overflow-x` / `overflow-y`. Kept as the keyword rather than a pair of
+/// booleans because two different questions are asked of it and they do not
+/// agree: whether the box CLIPS its paint (`hidden`/`clip`), and whether it is
+/// a scroll container (`hidden`/`scroll`/`auto` — `clip` is not one, which is
+/// exactly what stops it zeroing a flex item's automatic minimum size).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Overflow {
+    Visible,
+    Hidden,
+    Clip,
+    Scroll,
+    Auto,
+}
+
+impl Overflow {
+    /// Paint outside the padding box is cut away. `auto`/`scroll` deliberately
+    /// do NOT: without in-page scroll containers, clipping there would hide
+    /// content the user is meant to be able to reach.
+    pub fn clips(self) -> bool {
+        matches!(self, Overflow::Hidden | Overflow::Clip)
+    }
+
+    /// A scroll container (css-overflow-3 §3.3).
+    pub fn scrolls(self) -> bool {
+        matches!(self, Overflow::Hidden | Overflow::Scroll | Overflow::Auto)
+    }
+}
+
+/// Which of a box's three nested rectangles a background is measured against:
+/// `background-clip` says where it is PAINTED, `background-origin` where the
+/// image is positioned from. Defaults differ — clip is the border box, origin
+/// the padding box — so one enum with two fields, not one shared setting.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BoxEdge {
+    Border,
+    Padding,
+    Content,
+}
+
+impl BoxEdge {
+    /// Shrink a BORDER box to this edge. Returns `(x, y, w, h)`.
+    pub fn shrink(self, st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32) -> (i32, i32, i32, i32) {
+        let (mut l, mut t, mut r, mut b) = match self {
+            BoxEdge::Border => return (x, y, w, h),
+            _ => (
+                st.border_left.width,
+                st.border_top.width,
+                st.border_right.width,
+                st.border_bottom.width,
+            ),
+        };
+        if self == BoxEdge::Content {
+            l += st.pad_left;
+            t += st.pad_top;
+            r += st.pad_right;
+            b += st.pad_bottom;
+        }
+        let (l, t, r, b) = (l as i32, t as i32, r as i32, b as i32);
+        (x + l, y + t, (w - l - r).max(0), (h - t - b).max(0))
+    }
+}
+
+/// `align-content` — how a multi-line flex container packs its LINES (and a
+/// grid its row tracks) in whatever cross space is left over. The six
+/// distributions are `Justify`'s; `stretch` belongs to this property alone and
+/// is its initial value, which is why it is not folded into that enum.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ContentAlign {
+    Stretch,
+    Start,
+    End,
+    Center,
+    Between,
+    Around,
+    Evenly,
+}
+
 /// `align-items` / `align-self` — cross-axis placement.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CrossAlign {
@@ -601,6 +678,12 @@ pub struct ComputedStyle {
     /// content edge. Inherited; a percentage resolves against the containing
     /// block's width. Negative values hang the first line out to the left.
     pub text_indent: Len,
+    /// `letter-spacing` in px — extra advance after EVERY character of a run,
+    /// the last one included, which is what browsers measure an inline box as.
+    /// Inherited. `normal` is 0.
+    pub letter_spacing: f32,
+    /// `word-spacing` in px — extra advance on every word separator. Inherited.
+    pub word_spacing: f32,
     // — not inherited —
     pub display: Display,
     // — box model (block) —
@@ -619,6 +702,11 @@ pub struct ComputedStyle {
     pub pad_bottom: f32,
     pub pad_left: f32,
     pub box_border: bool, // box-sizing: border-box
+    /// `aspect-ratio` as width÷height. A box with one axis definite and the
+    /// other `auto` derives the auto one from this (css-sizing-4 §4). The ratio
+    /// governs the box `box-sizing` names — the content box by default, the
+    /// border box under `border-box`.
+    pub aspect_ratio: Option<f32>,
     /// Which of this element's winning declarations carried a viewport-HEIGHT
     /// unit (`vh`/`vmin`/`vmax`), as a bitmask: bit 0 = a property that sizes
     /// or positions the box outright, bit 1 = `max-height`, bit 2 =
@@ -635,6 +723,14 @@ pub struct ComputedStyle {
     pub bg: Option<Rgba>, // background-color (None = transparent)
     /// `background-image` + its placement properties.
     pub bg_layer: BgLayer,
+    /// `background-clip` — which box the background (colour AND image) is
+    /// painted inside. A page uses it to keep a background off a translucent
+    /// or dashed border, which is exactly where the difference shows.
+    pub bg_clip: BoxEdge,
+    /// `background-origin` — which box `background-position` and a percentage
+    /// `background-size` resolve against. The padding box by default, so a
+    /// bordered box centres its image inside the border, not across it.
+    pub bg_origin: BoxEdge,
     /// `mask-image` + its placement. A mask does not paint the image: it
     /// stencils the element's own `background-color` through the image's alpha
     /// — which is how icon systems (MediaWiki's Vector, Codex) draw a
@@ -666,13 +762,18 @@ pub struct ComputedStyle {
     /// we inherit, which paints the same pixels for every construct we have —
     /// the difference only shows where a descendant tries to *cancel* one.
     pub deco: u8,
+    /// `text-decoration-color`. `None` = `currentColor`, which is the initial
+    /// value and what the line used to be painted in unconditionally.
+    pub deco_color: Option<Rgba>,
     // — flex container —
     pub flex_row: bool, // flex-direction: row (true) vs column (false)
     pub flex_wrap: bool,
     pub flex_balance: bool, // flex-wrap: balance (css-flexbox-2 line balancing)
     pub justify: Justify,
     pub align_items: CrossAlign,
-    pub gap: f32,
+    /// `align-content` — line packing on the cross axis. Container-level, so a
+    /// flex ITEM never reads it.
+    pub align_content: ContentAlign,
     // — flex item —
     pub flex_grow: f32,
     pub flex_shrink: f32,
@@ -685,8 +786,16 @@ pub struct ComputedStyle {
     pub grid_nrows: u8,
     pub grid_row_tracks: [GridTrack; MAX_GRID_COLS],
     pub grid_auto_rows: GridTrack,
-    pub grid_col_gap: f32,
-    pub grid_row_gap: f32,
+    /// `grid-auto-columns` — the size of an IMPLICIT column, one past the last
+    /// `grid-template-columns` track. Without it every implicit column fell back
+    /// to the `auto` default and a `grid-auto-columns: 100px` row came out
+    /// content-sized.
+    pub grid_auto_cols: GridTrack,
+    /// `column-gap` / `row-gap`. A `Len`, because a percentage gap resolves
+    /// against the container's own content box on that axis — and dropping the
+    /// percentage silently made `gap: 10%` a gap of nothing.
+    pub grid_col_gap: Len,
+    pub grid_row_gap: Len,
     pub justify_items: CrossAlign,
     // `grid-template-areas` — named regions (container), 0-count = none.
     pub grid_areas: [GridArea; GRID_AREAS_MAX],
@@ -719,11 +828,15 @@ pub struct ComputedStyle {
     /// `border-collapse: collapse` — cell borders merge with their neighbours'
     /// and with the table's, and `border-spacing` no longer applies.
     pub border_collapse: bool,
-    /// `overflow: hidden`/`clip` on BOTH axes — the box paints nothing of its
-    /// content outside its padding box. `auto`/`scroll` deliberately do NOT
-    /// set this: without in-page scroll containers, clipping there would hide
-    /// content the user is meant to be able to reach.
-    pub overflow_clip: bool,
+    /// `overflow-x`/`overflow-y` are `hidden`/`clip` — the box paints nothing
+    /// of its content past its padding box on that axis. `auto`/`scroll`
+    /// deliberately do NOT set these: without in-page scroll containers,
+    /// clipping there would hide content the user is meant to be able to reach.
+    /// Two axes, because a page that scrolls a panel vertically and forbids
+    /// horizontal overflow writes exactly `overflow-x: hidden; overflow-y:
+    /// auto`, and a single flag can only get one of those two right.
+    pub overflow_x: Overflow,
+    pub overflow_y: Overflow,
     /// `overflow-wrap`/`word-wrap: break-word` or `word-break: break-all`/
     /// `break-word` — a word longer than its line may be split mid-word rather
     /// than overflowing the box. Inherited, like both source properties.
@@ -770,6 +883,12 @@ pub struct ComputedStyle {
 pub const COUNTER_OPS_MAX: usize = 4;
 
 impl ComputedStyle {
+    /// Clips on BOTH axes — what a baseline or a formatting-context decision
+    /// asks about, as opposed to which edge a paint is cut against.
+    pub fn overflow_clip(&self) -> bool {
+        self.overflow_x.clips() && self.overflow_y.clips()
+    }
+
     /// Total horizontal border (left + right) contribution to the box.
     pub fn border_x(&self) -> f32 {
         self.border_left.width + self.border_right.width
@@ -791,9 +910,11 @@ impl ComputedStyle {
             vw: 800.0,
             vh: 600.0,
             deco: 0,
+            deco_color: None,
             caption_bottom: false,
             break_word: false,
-            overflow_clip: false,
+            overflow_x: Overflow::Visible,
+            overflow_y: Overflow::Visible,
             radius: [Len::Px(0.0); 4],
             shadow: None,
             translate: None,
@@ -814,6 +935,8 @@ impl ComputedStyle {
             text_transform: TextTransform::None,
             text_align_last: None,
             text_indent: Len::Px(0.0),
+            letter_spacing: 0.0,
+            word_spacing: 0.0,
             display: Display::Block,
             width: Len::Auto,
             min_width: Len::Auto,
@@ -830,11 +953,14 @@ impl ComputedStyle {
             pad_bottom: 0.0,
             pad_left: 0.0,
             box_border: false,
+            aspect_ratio: None,
             vh_seen: 0,
             appearance_none: false,
             contain_size: false,
             contain_intrinsic: None,
             bg: None,
+            bg_clip: BoxEdge::Border,
+            bg_origin: BoxEdge::Padding,
             bg_layer: BgLayer::NONE,
             mask_layer: BgLayer::NONE,
             border_top: BorderSide::default(),
@@ -858,7 +984,7 @@ impl ComputedStyle {
             flex_balance: false,
             justify: Justify::Start,
             align_items: CrossAlign::Stretch,
-            gap: 0.0,
+            align_content: ContentAlign::Stretch,
             flex_grow: 0.0,
             flex_shrink: 1.0,
             flex_basis: FlexBasis::Auto,
@@ -869,8 +995,9 @@ impl ComputedStyle {
             grid_nrows: 0,
             grid_row_tracks: [GridTrack::Auto; MAX_GRID_COLS],
             grid_auto_rows: GridTrack::Auto,
-            grid_col_gap: 0.0,
-            grid_row_gap: 0.0,
+            grid_auto_cols: GridTrack::Auto,
+            grid_col_gap: Len::Px(0.0),
+            grid_row_gap: Len::Px(0.0),
             justify_items: CrossAlign::Stretch,
             grid_areas: [GridArea::EMPTY; GRID_AREAS_MAX],
             grid_area_count: 0,
@@ -1024,10 +1151,14 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         text_transform: parent.text_transform,
         text_align_last: parent.text_align_last,
         text_indent: parent.text_indent,
+        letter_spacing: parent.letter_spacing,
+        word_spacing: parent.word_spacing,
         deco: parent.deco,
+        deco_color: parent.deco_color,
         caption_bottom: parent.caption_bottom,
         break_word: parent.break_word,
-        overflow_clip: false,
+        overflow_x: Overflow::Visible,
+        overflow_y: Overflow::Visible,
         radius: [Len::Px(0.0); 4],
         shadow: None,
         translate: None,
@@ -1047,11 +1178,14 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         pad_bottom: 0.0,
         pad_left: 0.0,
         box_border: false,
+        aspect_ratio: None,
         vh_seen: 0,
         appearance_none: false,
         contain_size: false,
         contain_intrinsic: None,
         bg: None,
+        bg_clip: BoxEdge::Border,
+        bg_origin: BoxEdge::Padding,
         bg_layer: BgLayer::NONE,
         mask_layer: BgLayer::NONE,
         border_top: BorderSide::default(),
@@ -1076,7 +1210,7 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         flex_balance: false,
         justify: Justify::Start,
         align_items: CrossAlign::Stretch,
-        gap: 0.0,
+        align_content: ContentAlign::Stretch,
         flex_grow: 0.0,
         flex_shrink: 1.0,
         flex_basis: FlexBasis::Auto,
@@ -1087,8 +1221,9 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         grid_nrows: 0,
         grid_row_tracks: [GridTrack::Auto; MAX_GRID_COLS],
         grid_auto_rows: GridTrack::Auto,
-        grid_col_gap: 0.0,
-        grid_row_gap: 0.0,
+        grid_auto_cols: GridTrack::Auto,
+        grid_col_gap: Len::Px(0.0),
+        grid_row_gap: Len::Px(0.0),
         justify_items: CrossAlign::Stretch,
         grid_areas: [GridArea::EMPTY; GRID_AREAS_MAX],
         grid_area_count: 0,
@@ -1302,17 +1437,54 @@ pub fn resolve(
     // becomes `visible` (css-overflow-3 §3.3). So the box itself neither clips
     // nor establishes a formatting context.
     if el.tag == "html" || el.tag == "body" {
-        s.overflow_clip = false;
+        s.overflow_x = Overflow::Visible;
+        s.overflow_y = Overflow::Visible;
     }
     // A float or an out-of-flow box is blockified (css-display-3 §2.7): it
     // never joins a line box, so `inline`/`inline-block` there is just a block.
     // `inline` matters for generated content — a page underlines its active tab
     // with `a::after { position: absolute; … }` and states no display at all,
     // relying on exactly this rule to give it a box.
-    if matches!(s.display, Display::Inline | Display::InlineBlock)
-        && (s.float != FloatKind::None || matches!(s.position, Position::Absolute | Position::Fixed))
+    // The internal table displays blockify too, and that is the whole of what
+    // `top`/`left` "do not apply" to them means: out of flow, the box is no
+    // longer a row or a cell, so the offsets it was given are an ordinary
+    // absolutely positioned block's.
+    let out_of_flow =
+        s.float != FloatKind::None || matches!(s.position, Position::Absolute | Position::Fixed);
+    if out_of_flow
+        && matches!(
+            s.display,
+            Display::Inline
+                | Display::InlineBlock
+                | Display::TableRow
+                | Display::TableRowGroup
+                | Display::TableHeaderGroup
+                | Display::TableFooterGroup
+                | Display::TableColumn
+                | Display::TableColumnGroup
+                | Display::TableCell
+                | Display::TableCaption
+        )
     {
         s.display = Display::Block;
+    }
+    // `margin` does not apply to a box with an internal table display
+    // (CSS2.1 §8.3): the border model and `border-spacing` decide the distance
+    // between rows and cells, and a margin there has nothing to move.
+    if matches!(
+        s.display,
+        Display::TableRow
+            | Display::TableRowGroup
+            | Display::TableHeaderGroup
+            | Display::TableFooterGroup
+            | Display::TableColumn
+            | Display::TableColumnGroup
+            | Display::TableCell
+    ) {
+        s.margin_top = 0.0;
+        s.margin_bottom = 0.0;
+        s.margin_left = Len::Px(0.0);
+        s.margin_right = Len::Px(0.0);
     }
     // `vertical-align` applies to inline-level boxes and table cells only
     // (CSS2.1 §10.8.1). An out-of-flow or block-level box is never aligned in
@@ -2003,9 +2175,11 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             let mut it = v.split_whitespace();
             let x = it.next().unwrap_or("");
             let y = it.next().unwrap_or(x);
-            let clips = |k: &str| k == "hidden" || k == "clip";
-            s.overflow_clip = clips(x) && clips(y);
+            s.overflow_x = parse_overflow(x);
+            s.overflow_y = parse_overflow(y);
         }
+        Prop::OverflowX => s.overflow_x = parse_overflow(v.trim()),
+        Prop::OverflowY => s.overflow_y = parse_overflow(v.trim()),
         Prop::OverflowWrap | Prop::WordWrap => s.break_word = v == "break-word" || v == "anywhere",
         Prop::WordBreak => s.break_word = v == "break-all" || v == "break-word",
         Prop::BorderRadius => {
@@ -2111,6 +2285,36 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             if v != "inherit" && v != "unset" {
                 s.deco = parse_deco(&v);
             }
+        }
+        // `normal` is zero extra advance; anything else is a length. A
+        // percentage is only legal on `word-spacing` and resolves against the
+        // space's own advance, which is not known here — dropped, not guessed.
+        Prop::LetterSpacing | Prop::WordSpacing => {
+            let t = v.trim();
+            // A percentage resolves against the element's own font-size
+            // (css-text-4 §8.1/§8.2) — not against a containing block, which is
+            // what `parse_length` would do with it.
+            let px = if t == "normal" {
+                Some(0.0)
+            } else if let Some(n) = t.strip_suffix('%') {
+                n.trim().parse::<f32>().ok().map(|p| p / 100.0 * s.font_px)
+            } else {
+                parse_length(t, u)
+            };
+            if let Some(px) = px {
+                if prop == Prop::LetterSpacing {
+                    s.letter_spacing = px;
+                } else {
+                    s.word_spacing = px;
+                }
+            }
+        }
+        Prop::TextDecorationColor => {
+            s.deco_color = match parse_color_val(v.trim(), theme) {
+                Some(ColorVal::Rgb(c)) => Some(c),
+                Some(ColorVal::Transparent) => Some(Rgba { c: crate::layout::Rgb(0, 0, 0), a: 0 }),
+                None => s.deco_color,
+            };
         }
         Prop::TextTransform => {
             s.text_transform = match v {
@@ -2223,13 +2427,31 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             s.mono = v.contains("mono") || v.contains("courier") || v.contains("consol");
         }
         // — box model —
-        Prop::Width => set_size(&mut s.width, &v, u),
-        Prop::MinWidth => set_size(&mut s.min_width, &v, u),
-        Prop::MaxWidth => set_max(&mut s.max_width, &v, u),
-        Prop::Height => set_size(&mut s.height, &v, u),
-        Prop::MinHeight => set_size(&mut s.min_height, &v, u),
-        Prop::MaxHeight => set_max(&mut s.max_height, &v, u),
+        Prop::Width | Prop::InlineSize => set_size(&mut s.width, &v, u),
+        Prop::MinWidth | Prop::MinInlineSize => set_size(&mut s.min_width, &v, u),
+        Prop::MaxWidth | Prop::MaxInlineSize => set_max(&mut s.max_width, &v, u),
+        Prop::Height | Prop::BlockSize => set_size(&mut s.height, &v, u),
+        Prop::MinHeight | Prop::MinBlockSize => set_size(&mut s.min_height, &v, u),
+        Prop::MaxHeight | Prop::MaxBlockSize => set_max(&mut s.max_height, &v, u),
         Prop::BoxSizing => s.box_border = v == "border-box",
+        // `<number>` or `<ratio>` (`16 / 9`); `auto` and a degenerate ratio
+        // both mean "no preferred ratio".
+        Prop::AspectRatio => {
+            let t = v.trim();
+            s.aspect_ratio = if t == "auto" {
+                None
+            } else {
+                let t = t.strip_prefix("auto ").unwrap_or(t).trim();
+                let (a, b) = match t.split_once('/') {
+                    Some((a, b)) => (a.trim(), b.trim()),
+                    None => (t, "1"),
+                };
+                match (a.parse::<f32>(), b.parse::<f32>()) {
+                    (Ok(w), Ok(h)) if w > 0.0 && h > 0.0 => Some(w / h),
+                    _ => s.aspect_ratio,
+                }
+            };
+        }
         // css-ui-4 §4. Only `none` concerns us: it says "do not draw the UA
         // widget", and the page then supplies the whole look. Every other
         // value (`auto`, `button`, `textfield`, …) keeps our chrome. The
@@ -2318,12 +2540,29 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                     ColorVal::Transparent => None,
                 };
                 s.bg_layer = BgLayer::NONE;
-            } else if let Some((color, layer)) = parse_bg_shorthand(val, &v, u, theme) {
+                s.bg_origin = BoxEdge::Padding;
+                s.bg_clip = BoxEdge::Border;
+            } else if let Some((color, layer, origin, clip)) = parse_bg_shorthand(val, &v, u, theme) {
                 s.bg = color;
                 s.bg_layer = layer;
+                s.bg_origin = origin;
+                s.bg_clip = clip;
             }
         }
         Prop::BackgroundImage => s.bg_layer.image = parse_bg_image(val),
+        // `background-clip: text` stencils the background through the glyphs —
+        // a different mechanism, not a smaller box — so it is left alone rather
+        // than approximated by one of the three rectangles.
+        Prop::BackgroundClip | Prop::WebkitBackgroundClip => {
+            if let Some(e) = parse_box_edge(&v) {
+                s.bg_clip = e;
+            }
+        }
+        Prop::BackgroundOrigin => {
+            if let Some(e) = parse_box_edge(&v) {
+                s.bg_origin = e;
+            }
+        }
         Prop::BackgroundRepeat => {
             if let Some(r) = parse_bg_repeat(&v) {
                 s.bg_layer.repeat = r;
@@ -2342,7 +2581,7 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         // `mask` is still shipped prefixed by the icon systems that use it, and
         // the two spellings are the same property to us.
         Prop::Mask | Prop::WebkitMask => {
-            if let Some((_, layer)) = parse_bg_shorthand(val, &v, u, theme) {
+            if let Some((_, layer, ..)) = parse_bg_shorthand(val, &v, u, theme) {
                 s.mask_layer = layer;
             }
         }
@@ -2506,6 +2745,31 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         Prop::Right => s.right = parse_len(&v, u),
         Prop::Bottom => s.bottom = parse_len(&v, u),
         Prop::Left => s.left = parse_len(&v, u),
+        // The logical inset properties. This engine lays out horizontal-tb
+        // only, so `inline` is the left/right axis and `block` top/bottom; the
+        // `start`/`end` mapping follows `direction`, which we do honour.
+        Prop::Inset => {
+            let (t, r, b, l) = four_values(&v);
+            s.top = parse_len(t, u);
+            s.right = parse_len(r, u);
+            s.bottom = parse_len(b, u);
+            s.left = parse_len(l, u);
+        }
+        Prop::InsetInline => {
+            let p = split_sides(&v);
+            let (a, b) = if s.rtl { (p[1], p[0]) } else { (p[0], p[1]) };
+            s.left = parse_len(a, u);
+            s.right = parse_len(b, u);
+        }
+        Prop::InsetBlock => {
+            let p = split_sides(&v);
+            s.top = parse_len(p[0], u);
+            s.bottom = parse_len(p[1], u);
+        }
+        Prop::InsetInlineStart => *(if s.rtl { &mut s.right } else { &mut s.left }) = parse_len(&v, u),
+        Prop::InsetInlineEnd => *(if s.rtl { &mut s.left } else { &mut s.right }) = parse_len(&v, u),
+        Prop::InsetBlockStart => s.top = parse_len(&v, u),
+        Prop::InsetBlockEnd => s.bottom = parse_len(&v, u),
         Prop::ZIndex => {
             s.z_index = match v {
                 "auto" => ZIndex::Auto,
@@ -2540,41 +2804,32 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 }
             }
         }
-        Prop::JustifyContent => {
-            s.justify = match v {
-                "flex-end" | "end" | "right" => Justify::End,
-                "center" => Justify::Center,
-                "space-between" => Justify::Between,
-                "space-around" => Justify::Around,
-                "space-evenly" => Justify::Evenly,
-                _ => Justify::Start,
-            };
-        }
+        Prop::JustifyContent => s.justify = parse_justify(&v),
+        Prop::AlignContent => s.align_content = parse_content_align(&v),
         Prop::AlignItems => s.align_items = parse_cross(&v).unwrap_or(CrossAlign::Stretch),
         Prop::AlignSelf => s.align_self = parse_cross(&v),
         // `gap` shorthand is `<row-gap> <column-gap>`; the longhands set one axis.
         Prop::Gap | Prop::GridGap => {
             let mut it = v.split_whitespace();
-            let row = it.next().and_then(|t| parse_length(t, u));
-            let col = it.next().and_then(|t| parse_length(t, u)).or(row);
+            let row = it.next().map(|t| parse_len(t, u)).filter(|l| *l != Len::Auto);
+            let col = it.next().map(|t| parse_len(t, u)).filter(|l| *l != Len::Auto).or(row);
             if let Some(r) = row {
                 s.grid_row_gap = r;
-                s.gap = r;
             }
             if let Some(c) = col {
                 s.grid_col_gap = c;
             }
         }
-        Prop::ColumnGap => {
-            if let Some(g) = parse_length(v.trim(), u) {
+        Prop::ColumnGap | Prop::GridColumnGap => {
+            let g = parse_len(v.trim(), u);
+            if g != Len::Auto {
                 s.grid_col_gap = g;
-                s.gap = g;
             }
         }
-        Prop::RowGap => {
-            if let Some(g) = parse_length(v.trim(), u) {
+        Prop::RowGap | Prop::GridRowGap => {
+            let g = parse_len(v.trim(), u);
+            if g != Len::Auto {
                 s.grid_row_gap = g;
-                s.gap = g;
             }
         }
         Prop::FlexGrow => {
@@ -2610,6 +2865,7 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             s.grid_row_tracks = t.tracks;
         }
         Prop::GridAutoRows => s.grid_auto_rows = parse_track(v.trim(), s.units()),
+        Prop::GridAutoColumns => s.grid_auto_cols = parse_track(v.trim(), s.units()),
         Prop::GridTemplateAreas => set_grid_areas(s, &v),
         // `grid` / `grid-template` shorthand: `<rows> / <cols>` (areas/flow forms
         // are not supported — they fall through to the row/column split).
@@ -2662,6 +2918,14 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             let j = it.next().unwrap_or(a);
             s.align_items = parse_cross(a).unwrap_or(CrossAlign::Stretch);
             s.justify_items = parse_cross(j).unwrap_or(CrossAlign::Stretch);
+        }
+        // `place-content: <align-content> <justify-content>`; one value sets both.
+        Prop::PlaceContent => {
+            let mut it = v.split_whitespace();
+            let a = it.next().unwrap_or("");
+            let j = it.next().unwrap_or(a);
+            s.align_content = parse_content_align(a);
+            s.justify = parse_justify(j);
         }
         Prop::PlaceSelf => {
             let mut it = v.split_whitespace();
@@ -2762,6 +3026,25 @@ fn next_layer(v: &str) -> (&str, &str) {
 /// (gradients, `none`, `element()`) leave the layer imageless.
 fn parse_bg_image(val: &str) -> Option<u64> {
     crate::css::url_value(first_layer(val)).map(|u| crate::css::url_key(&u))
+}
+
+fn parse_overflow(v: &str) -> Overflow {
+    match v {
+        "hidden" => Overflow::Hidden,
+        "clip" => Overflow::Clip,
+        "scroll" => Overflow::Scroll,
+        "auto" => Overflow::Auto,
+        _ => Overflow::Visible,
+    }
+}
+
+fn parse_box_edge(v: &str) -> Option<BoxEdge> {
+    Some(match v.trim() {
+        "border-box" => BoxEdge::Border,
+        "padding-box" => BoxEdge::Padding,
+        "content-box" => BoxEdge::Content,
+        _ => return None,
+    })
 }
 
 fn parse_bg_repeat(v: &str) -> Option<(bool, bool)> {
@@ -2867,9 +3150,13 @@ fn parse_bg_shorthand(
     v: &str,
     u: Units,
     theme: &Theme,
-) -> Option<(Option<Rgba>, BgLayer)> {
+) -> Option<(Option<Rgba>, BgLayer, BoxEdge, BoxEdge)> {
     let mut layer = BgLayer::NONE;
     let mut color = None;
+    // A `<box>` in the shorthand sets ORIGIN; a second one sets clip. With only
+    // one, both take it (css-backgrounds-3 §3.10) — which is why they are
+    // tracked as one `Option` that fills twice.
+    let (mut origin, mut clip) = (None, None);
     layer.image = parse_bg_image(val);
     // Position and size are written `<position> / <size>`; everything else is
     // order-free. Collect the unclaimed tokens and split them on the slash.
@@ -2884,16 +3171,15 @@ fn parse_bg_shorthand(
                 ColorVal::Rgb(c) => Some(c),
                 ColorVal::Transparent => None,
             };
-        } else if matches!(
-            tok,
-            "scroll" | "fixed" | "local" | "border-box" | "padding-box" | "content-box" | "none"
-        ) || tok.starts_with("url(")
+        } else if let Some(e) = parse_box_edge(tok) {
+            if origin.is_none() { origin = Some(e) } else { clip = Some(e) }
+        } else if matches!(tok, "scroll" | "fixed" | "local" | "none") || tok.starts_with("url(")
             // A gradient is valid CSS we cannot paint. Accepting it keeps the
             // reset (`background: <gradient>` HAS no colour) instead of
             // dropping the declaration and leaving a stale one in place.
             || tok.contains("-gradient(")
         {
-            // attachment / origin / clip / the image — not the layer's placement
+            // attachment / the image — not the layer's placement
         } else {
             parts.push(tok);
         }
@@ -2909,7 +3195,12 @@ fn parse_bg_shorthand(
     if !size_toks.is_empty() {
         layer.size = parse_bg_size(&size_toks.join(" "), u)?;
     }
-    Some((color, layer))
+    Some((
+        color,
+        layer,
+        origin.unwrap_or(BoxEdge::Padding),
+        clip.or(origin).unwrap_or(BoxEdge::Border),
+    ))
 }
 
 /// `width`/`height`/`min`/`max` reject negative used lengths as invalid.
@@ -3515,7 +3806,51 @@ fn parse_line_placement(v: &str) -> (i16, u16) {
     }
 }
 
+/// `justify-content` / the second half of `place-content`. `<overflow-position>`
+/// (`safe`/`unsafe`) only says what to do when the content does not fit, which
+/// never changes where it sits when it does — so the keyword is skipped and the
+/// position behind it decides.
+fn parse_justify(v: &str) -> Justify {
+    match v.trim_start().strip_prefix("safe ").or_else(|| v.trim_start().strip_prefix("unsafe ")).unwrap_or(v).trim() {
+        "flex-end" | "end" | "right" => Justify::End,
+        "center" => Justify::Center,
+        "space-between" => Justify::Between,
+        "space-around" => Justify::Around,
+        "space-evenly" => Justify::Evenly,
+        _ => Justify::Start,
+    }
+}
+
+/// `align-content` — the six distributions plus `stretch`, which is the
+/// initial value and the one no other alignment property has.
+fn parse_content_align(v: &str) -> ContentAlign {
+    let v = v.trim();
+    let v = v.strip_prefix("safe ").or_else(|| v.strip_prefix("unsafe ")).unwrap_or(v).trim();
+    match v {
+        "stretch" | "normal" => ContentAlign::Stretch,
+        "flex-end" | "end" | "self-end" => ContentAlign::End,
+        "center" => ContentAlign::Center,
+        "space-between" => ContentAlign::Between,
+        "space-around" => ContentAlign::Around,
+        "space-evenly" => ContentAlign::Evenly,
+        // `baseline` on a line-packing property falls back to `start`
+        // (css-align-3 §4.3), which is also where every unknown value lands.
+        _ => ContentAlign::Start,
+    }
+}
+
 fn parse_cross(v: &str) -> Option<CrossAlign> {
+    // `<baseline-position>` is two words (`first baseline` / `last baseline`)
+    // and `<overflow-position>` prefixes one (`safe center`). Dropping the
+    // qualifier leaves the position that decides where the box goes; keeping
+    // the whole string made the value UNKNOWN, and an unknown `align-items`
+    // fell back to `stretch` — which sizes the item instead of aligning it.
+    let v = v.trim();
+    let v = ["first ", "last ", "safe ", "unsafe "]
+        .iter()
+        .find_map(|q| v.strip_prefix(q))
+        .unwrap_or(v)
+        .trim();
     Some(match v {
         "flex-start" | "start" | "self-start" | "baseline" => CrossAlign::Start,
         "flex-end" | "end" | "self-end" => CrossAlign::End,

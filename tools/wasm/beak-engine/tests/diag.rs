@@ -825,7 +825,7 @@ fn pixels_differ(
 /// compare field-by-field without the engine needing `PartialEq`.
 fn op_full(op: &DrawOp) -> String {
     match op {
-        DrawOp::Text { x, y, size, color, bold, italic, mono, text } => format!(
+        DrawOp::Text { x, y, size, color, bold, italic, mono, text, .. } => format!(
             "T x={x} y={y} s={size:.2} c={color:?} b={bold} i={italic} m={mono} {text:?}"
         ),
         DrawOp::Rect { x, y, w, h, color } => format!("R x={x} y={y} w={w} h={h} c={color:?}"),
@@ -835,7 +835,7 @@ fn op_full(op: &DrawOp) -> String {
         DrawOp::Image { x, y, w, h, src, alt } => {
             format!("I x={x} y={y} w={w} h={h} {src:?} {alt:?}")
         }
-        DrawOp::BgImage { x, y, w, h, key, repeat, pos, size, tint } => format!(
+        DrawOp::BgImage { x, y, w, h, key, repeat, pos, size, tint, .. } => format!(
             "B x={x} y={y} w={w} h={h} k={key} rep={repeat:?} p={pos:?} sz={size:?} t={tint:?}"
         ),
     }
