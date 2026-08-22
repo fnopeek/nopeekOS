@@ -104,12 +104,12 @@ pub fn poll() {
     // always had RX buffers (measured: injfalse=0 yet ~49k drops). So the BSP
     // pump (a worker core, calls net::poll() itself) becomes the sole NIC drainer:
     // fill + inject happen together, no race, no drops, throughput = pump rate.
-    // Core 0 must not drain the host NIC while a microvm owns it: either the old
-    // BSP-pump-as-sole-drainer mode (vm_active) OR the dedicated RX producer
-    // fiber (net_dataplane::active). In both cases Core 0 would fill INBOUND_Q it
-    // cannot inject, racing the real drainer and overflowing the queue.
-    let skip_nic_drain = (crate::microvm::vm_active()
-        || crate::microvm::devices::net_dataplane::active())
+    // Core 0 drains the host NIC even while a microvm runs. That used to be
+    // forbidden because what it pulled in landed in a queue only the vCPU could
+    // empty — Core 0 filled it, could not inject, and overflowed it. With the tap
+    // there IS an consumer: whatever Core 0 puts in, the data-plane worker takes
+    // out. The old guard, on hardware, meant nobody drained the card at all.
+    let skip_nic_drain = crate::microvm::vm_active()
         && crate::smp::per_core::current_core_id() == 0;
     if !skip_nic_drain
         && POLLING

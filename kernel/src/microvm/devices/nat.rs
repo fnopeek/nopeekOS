@@ -257,11 +257,53 @@ struct L3Map {
     guest_port: u16,
     remote_ip: [u8; 4],
     remote_port: u16,
+    /// The host address this flow went out with. NOT `arp::our_ip()` at read
+    /// time: a DHCP renewal or a carrier blink mid-session changes that, and a
+    /// mapping keyed on "the address we happen to hold now" is silently orphaned
+    /// the moment it moves — outbound leaves under a port the server never saw,
+    /// inbound is discarded before anything looks at it. The flow is keyed on
+    /// the address it was BORN with, which is the address the replies carry.
+    host_ip: [u8; 4],
     host_port: u16,
     last_tick: u64,
 }
 
-static L3: Mutex<[Option<L3Map>; L3_MAX]> = Mutex::new([const { None }; L3_MAX]);
+/// Masquerade table plus a bit per host port in `[L3_PORT_LO, L3_PORT_HI)`.
+/// One lock over both, so the index can never disagree with the table.
+struct L3Table {
+    maps: [Option<L3Map>; L3_MAX],
+    used: [u64; PORT_WORDS],
+}
+
+const PORT_RANGE: usize = (L3_PORT_HI - L3_PORT_LO) as usize;
+const PORT_WORDS: usize = PORT_RANGE.div_ceil(64);
+/// `nf_nat_l4proto_unique_tuple` probes at most this many ports before giving
+/// up and re-rolling the offset — "we are in softirq; doing a search of the
+/// entire range risks soft lockup when all tuples are already used".
+const NAT_MAX_ATTEMPTS: usize = 128;
+
+impl L3Table {
+    const fn new() -> Self {
+        L3Table { maps: [const { None }; L3_MAX], used: [0; PORT_WORDS] }
+    }
+    #[inline]
+    fn port_used(&self, hp: u16) -> bool {
+        let i = (hp - L3_PORT_LO) as usize;
+        self.used[i / 64] & (1u64 << (i % 64)) != 0
+    }
+    #[inline]
+    fn set_port(&mut self, hp: u16, on: bool) {
+        let i = (hp - L3_PORT_LO) as usize;
+        let (w, b) = (i / 64, 1u64 << (i % 64));
+        if on { self.used[w] |= b; } else { self.used[w] &= !b; }
+    }
+    /// Free slot `i` and its port together.
+    fn release(&mut self, i: usize) {
+        if let Some(m) = self.maps[i].take() { self.set_port(m.host_port, false); }
+    }
+}
+
+static L3: Mutex<L3Table> = Mutex::new(L3Table::new());
 /// Gates the host-RX inbound intercept. Off ⇒ `l3_inbound` is a cheap
 /// `false` so a guest-less host (plain OTA/https) is never touched.
 static L3_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -613,26 +655,47 @@ fn note_table_full() {
 }
 
 fn l3_map_out(proto: u8, gport: u16, rip: [u8; 4], rport: u16, now: u64) -> Option<u16> {
+    let our_ip = crate::net::arp::our_ip();
     let mut tbl = L3.lock();
-    // Existing?
-    for m in tbl.iter_mut().flatten() {
+    // Existing? A hit whose `host_ip` is no longer ours describes a flow the
+    // far end can no longer answer — the address moved. Retire it here instead
+    // of leaving it to time out; the caller gets a fresh mapping on the new
+    // address, which is the only thing that can still work.
+    for i in 0..L3_MAX {
+        let Some(m) = tbl.maps[i].as_mut() else { continue };
         if m.proto == proto && m.guest_port == gport
             && m.remote_ip == rip && m.remote_port == rport
         {
-            m.last_tick = now;
-            return Some(m.host_port);
+            if m.host_ip == our_ip {
+                m.last_tick = now;
+                return Some(m.host_port);
+            }
+            tbl.release(i);
+            NS_MAP_REHOMED.fetch_add(1, AtOrd::Relaxed);
+            break;
         }
     }
-    // Allocate a host port not currently in the table.
-    let mut hp = L3_PORT_LO;
-    'scan: while hp < L3_PORT_HI {
-        if !tbl.iter().flatten().any(|m| m.host_port == hp) { break 'scan; }
-        hp += 1;
+    // `nf_nat_l4proto_unique_tuple`: start at a varying offset, probe forward
+    // with an O(1) used-test, and give up after a BOUNDED number of attempts
+    // (then re-roll once). The old code walked all 1024 entries per candidate
+    // port — ~10^6 comparisons under the lock for one new flow on a full table,
+    // and a browser opens ~65 UDP flows per page.
+    let mut off = (crate::interrupts::rdtsc() as usize) % PORT_RANGE;
+    let mut hp: Option<u16> = None;
+    for _round in 0..2 {
+        for i in 0..NAT_MAX_ATTEMPTS.min(PORT_RANGE) {
+            let cand = L3_PORT_LO + ((off + i) % PORT_RANGE) as u16;
+            if !tbl.port_used(cand) { hp = Some(cand); break; }
+        }
+        if hp.is_some() { break; }
+        off = (off + PORT_RANGE / 2 + 1) % PORT_RANGE;
     }
-    if hp >= L3_PORT_HI { return None; }
-    let slot = tbl.iter_mut().find(|s| s.is_none())?;
-    *slot = Some(L3Map { proto, guest_port: gport, remote_ip: rip,
-                          remote_port: rport, host_port: hp, last_tick: now });
+    let hp = hp?;
+    let slot = (0..L3_MAX).find(|&i| tbl.maps[i].is_none())?;
+    tbl.maps[slot] = Some(L3Map { proto, guest_port: gport, remote_ip: rip,
+                                   remote_port: rport, host_ip: our_ip,
+                                   host_port: hp, last_tick: now });
+    tbl.set_port(hp, true);
     // New flow — count by transport (UDP-heavy cold load = QUIC/HTTP-3).
     match proto {
         PROTO_TCP => { NS_TCP_FLOWS.fetch_add(1, AtOrd::Relaxed); }
@@ -644,10 +707,11 @@ fn l3_map_out(proto: u8, gport: u16, rip: [u8; 4], rport: u16, now: u64) -> Opti
 
 /// Reverse lookup for an inbound reply: (proto, host_port) + remote
 /// must match. Returns the guest port to deliver to.
-fn l3_map_in(proto: u8, hport: u16, rip: [u8; 4], rport: u16, now: u64) -> Option<u16> {
+fn l3_map_in(proto: u8, dst_ip: [u8; 4], hport: u16, rip: [u8; 4], rport: u16,
+             now: u64) -> Option<u16> {
     let mut tbl = L3.lock();
-    for m in tbl.iter_mut().flatten() {
-        if m.proto == proto && m.host_port == hport
+    for m in tbl.maps.iter_mut().flatten() {
+        if m.proto == proto && m.host_port == hport && m.host_ip == dst_ip
             && m.remote_ip == rip && m.remote_port == rport
         {
             m.last_tick = now;
@@ -986,7 +1050,8 @@ pub fn l3_inbound(ip: &[u8]) -> bool {
         (u16::from_be_bytes([l4[0], l4[1]]), u16::from_be_bytes([l4[2], l4[3]]))
     };
     let now = crate::interrupts::ticks();
-    let gport = match l3_map_in(proto, host_port, src_ip, remote_port, now) {
+    let dst_ip: [u8; 4] = ip[16..20].try_into().unwrap();
+    let gport = match l3_map_in(proto, dst_ip, host_port, src_ip, remote_port, now) {
         Some(g) => g,
         None => {
             // Not ours by the mapping — but a port inside our masquerade range
@@ -1073,33 +1138,187 @@ pub fn l3_inbound(ip: &[u8]) -> bool {
     true
 }
 
-/// vhost `handle_rx` rewrite (the new off-vCPU data plane, `net_dataplane`).
-/// Translate ONE inbound host-network IPv4 packet back to the guest (dst IP/port
-/// → guest, checksums fixed incrementally) and return the guest-bound ethernet
-/// frame (vnet+eth+ip), or `None` if it isn't masqueraded guest traffic. PURE —
-/// no staging queue, no GRO, no synthetic drop: the caller injects the returned
-/// frame straight into the guest RX ring and applies real backpressure (stop
-/// draining the NIC when the guest ring is full), exactly like vhost-net reading
-/// a tap. `ip` is the IPv4 packet (no ethernet header). Recycle the returned
-/// buffer via [`recycle_frame`] after injecting.
-pub fn l3_rewrite_inbound(ip: &[u8]) -> Option<Vec<u8>> {
-    if !L3_ACTIVE.load(AtOrd::Acquire) { return None; }
-    if ip.len() < IPV4_HDR_LEN { return None; }
+/// Return a frame buffer (from `tap_inbound`) to the recycle pool after
+/// it's been injected into the guest ring — no per-packet heap churn.
+pub fn recycle_frame(buf: Vec<u8>) { frame_pool_put(buf); }
+
+// ===========================================================================
+// The tap — drivers/net/tun.c
+//
+// One ring between whoever drains the host NIC and the one worker that feeds
+// the guest. `tun_net_xmit` produces into a `ptr_ring` and, when it is full,
+// takes SKB_DROP_REASON_FULL_RING and bumps `tx_dropped` — a counted drop, not
+// a silent overwrite; `tun_do_read` consumes and blocks on the socket's wait
+// queue when it is empty.
+//
+// This replaces "the worker drains the host NIC". Where a frame ENTERS used to
+// depend on the card — cable/virtio came through `netdev::recv` behind the
+// POLLING guard the worker took for itself, while the AX200's WASM driver
+// delivers straight into `eth::handle_frame`, which the worker could not see at
+// all. Now every card ends in the same place and the worker never touches a NIC.
+// ===========================================================================
+
+/// tun's `dev->tx_queue_len = TUN_READQ_SIZE` is 500. 512 keeps the power of two.
+const TAP_RING: usize = 512;
+
+struct Tap {
+    slots: [Option<Vec<u8>>; TAP_RING],
+    head: usize, // consumer
+    tail: usize, // producer
+    len: usize,
+}
+
+impl Tap {
+    const fn new() -> Self {
+        Tap { slots: [const { None }; TAP_RING], head: 0, tail: 0, len: 0 }
+    }
+}
+
+static TAP: Mutex<Tap> = Mutex::new(Tap::new());
+/// Lock-free depth, so the worker's "is there work" test takes no lock.
+static TAP_LEN: AtomicU64 = AtomicU64::new(0);
+/// `tun_net_xmit`'s `tx_dropped`: the ring was full. This is BACKPRESSURE and
+/// healthy in moderation — it is not the masquerade table filling up and not an
+/// egress refusal, and the whole point of counting the three apart is that from
+/// outside all three look like "throughput sagged" (see the note at the top).
+static NS_TAP_FULL: AtomicU64 = AtomicU64::new(0);
+/// Frames actually handed to the guest. PROGRESS, not fill level: a ring that
+/// sits at 40 of 512 tells you nothing, a delivered-count that stops moving
+/// tells you everything.
+static NS_TAP_DELIVERED: AtomicU64 = AtomicU64::new(0);
+/// Flows retired because the host address moved under them (DHCP renewal,
+/// carrier blink). Zero on a healthy link; non-zero explains a stall that looks
+/// like the far end went quiet.
+static NS_MAP_REHOMED: AtomicU64 = AtomicU64::new(0);
+/// The worker is parked on its doorbell. Linux's wait queue: `sk_data_ready`
+/// wakes nobody when no reader sleeps there, so a producer feeding a RUNNING
+/// consumer sends no wakeup at all. Without this the empty→occupied edge would
+/// IPI a busy-polling worker at line rate.
+static WORKER_PARKED: AtomicBool = AtomicBool::new(false);
+
+/// The worker announces whether it is about to sleep on the tap.
+pub fn set_worker_parked(parked: bool) { WORKER_PARKED.store(parked, AtOrd::SeqCst); }
+
+/// Lock-free depth for the worker's poll condition.
+pub fn tap_len() -> u64 { TAP_LEN.load(AtOrd::Relaxed) }
+
+/// `ptr_ring_produce` + `sk_data_ready`. False ⇒ the ring was full and the frame
+/// was dropped (counted); the buffer goes back to the pool either way.
+fn tap_push(frame: Vec<u8>) -> bool {
+    let mut t = TAP.lock();
+    if t.len == TAP_RING {
+        drop(t);
+        NS_TAP_FULL.fetch_add(1, AtOrd::Relaxed);
+        frame_pool_put(frame);
+        return false;
+    }
+    let was_empty = t.len == 0;
+    let tail = t.tail;
+    t.slots[tail] = Some(frame);
+    t.tail = (tail + 1) % TAP_RING;
+    t.len += 1;
+    TAP_LEN.store(t.len as u64, AtOrd::Relaxed);
+    drop(t);
+    // Wake the reader only on the empty→occupied edge, and only if one is
+    // actually asleep. During a burst the ring stays occupied, so a burst costs
+    // one wakeup, not one per frame.
+    if was_empty && WORKER_PARKED.load(AtOrd::SeqCst) {
+        if let Some(c) = super::net_backend::worker_core() {
+            // Bumps the target core's kick generation BEFORE the IPI, so a wake
+            // racing the park is never lost — the scheduler re-tests the
+            // generation every scan and finds the fiber runnable.
+            crate::smp::kick_host_core(c);
+        }
+    }
+    true
+}
+
+/// `ptr_ring_consume`. The worker is the only caller.
+pub fn tap_pop() -> Option<Vec<u8>> {
+    let mut t = TAP.lock();
+    if t.len == 0 { return None; }
+    let head = t.head;
+    let f = t.slots[head].take();
+    t.head = (head + 1) % TAP_RING;
+    t.len -= 1;
+    TAP_LEN.store(t.len as u64, AtOrd::Relaxed);
+    f
+}
+
+/// `vhost_discard_vq_desc`: `inject_rx` rolled its descriptors back, so this
+/// frame was never consumed. Put it back at the head — order matters on a TCP
+/// stream. Only the worker calls this, between a pop and the next pop.
+pub fn tap_push_front(frame: Vec<u8>) {
+    let mut t = TAP.lock();
+    if t.len == TAP_RING {
+        drop(t);
+        NS_TAP_FULL.fetch_add(1, AtOrd::Relaxed);
+        frame_pool_put(frame);
+        return;
+    }
+    t.head = (t.head + TAP_RING - 1) % TAP_RING;
+    let head = t.head;
+    t.slots[head] = Some(frame);
+    t.len += 1;
+    TAP_LEN.store(t.len as u64, AtOrd::Relaxed);
+}
+
+/// One frame reached the guest.
+pub fn note_tap_delivered() { NS_TAP_DELIVERED.fetch_add(1, AtOrd::Relaxed); }
+
+/// Empty the tap (VM teardown), returning every buffer to the pool.
+pub fn tap_reset() {
+    let mut t = TAP.lock();
+    while t.len > 0 {
+        let head = t.head;
+        if let Some(f) = t.slots[head].take() { frame_pool_put(f); }
+        t.head = (head + 1) % TAP_RING;
+        t.len -= 1;
+    }
+    t.head = 0;
+    t.tail = 0;
+    TAP_LEN.store(0, AtOrd::Relaxed);
+    WORKER_PARKED.store(false, AtOrd::SeqCst);
+}
+
+/// THE inbound acceptance test, and the only translation. Called from
+/// `ipv4::handle_ipv4` for every received IPv4 packet, BEFORE the "is this
+/// addressed to the address we happen to hold right now" filter: a guest flow is
+/// keyed on the address it went out with, and asking the other question first
+/// discards the reply before anything has looked at it.
+///
+/// Returns true if the packet was guest traffic and is now the tap's problem —
+/// the host stack must not also process it. A cheap `false` when no VM is up.
+pub fn tap_inbound(ip: &[u8]) -> bool {
+    if !L3_ACTIVE.load(AtOrd::Acquire) { return false; }
+    if ip.len() < IPV4_HDR_LEN { return false; }
     let ihl = (ip[0] & 0x0F) as usize * 4;
-    if ihl < IPV4_HDR_LEN || ip.len() < ihl { return None; }
+    if ihl < IPV4_HDR_LEN || ip.len() < ihl { return false; }
     let proto = ip[9];
-    if proto != PROTO_TCP && proto != PROTO_UDP && proto != PROTO_ICMP { return None; }
+    if proto != PROTO_TCP && proto != PROTO_UDP && proto != PROTO_ICMP { return false; }
     let src_ip: [u8; 4] = ip[12..16].try_into().unwrap();
+    let dst_ip: [u8; 4] = ip[16..20].try_into().unwrap();
     let l4 = &ip[ihl..];
     let (remote_port, host_port) = if proto == PROTO_ICMP {
-        if l4.len() < 8 || l4[0] != ICMP_ECHO_REPLY { return None; }
+        if l4.len() < 8 || l4[0] != ICMP_ECHO_REPLY { return false; }
         (0u16, u16::from_be_bytes([l4[4], l4[5]]))
     } else {
-        if l4.len() < 4 { return None; }
+        if l4.len() < 4 { return false; }
         (u16::from_be_bytes([l4[0], l4[1]]), u16::from_be_bytes([l4[2], l4[3]]))
     };
     let now = crate::interrupts::ticks();
-    let gport = l3_map_in(proto, host_port, src_ip, remote_port, now)?;
+    let gport = match l3_map_in(proto, dst_ip, host_port, src_ip, remote_port, now) {
+        Some(g) => g,
+        None => {
+            // Not ours by the mapping. A TCP port inside our masquerade range is
+            // not the host's either, and the host stack answers it with a RST —
+            // our own machine tearing down the guest's connection.
+            if proto == PROTO_TCP && (L3_PORT_LO..L3_PORT_HI).contains(&host_port) {
+                NS_RX_UNMATCHED.fetch_add(1, AtOrd::Relaxed);
+            }
+            return false;
+        }
+    };
     NS_RX_PKTS.fetch_add(1, AtOrd::Relaxed);
     NS_RX_BYTES.fetch_add(ip.len() as u64, AtOrd::Relaxed);
 
@@ -1120,8 +1339,8 @@ pub fn l3_rewrite_inbound(ip: &[u8]) -> Option<Vec<u8>> {
         // Incremental TCP checksum (RFC 1624): only dst IP + dst port changed.
         let old_check = u16::from_be_bytes([frame[l4_off + 16], frame[l4_off + 17]]);
         let new_check = csum_update(old_check, &[
-            (u16::from_be_bytes([ip[16], ip[17]]), u16::from_be_bytes([GUEST_IP[0], GUEST_IP[1]])),
-            (u16::from_be_bytes([ip[18], ip[19]]), u16::from_be_bytes([GUEST_IP[2], GUEST_IP[3]])),
+            (u16::from_be_bytes([dst_ip[0], dst_ip[1]]), u16::from_be_bytes([GUEST_IP[0], GUEST_IP[1]])),
+            (u16::from_be_bytes([dst_ip[2], dst_ip[3]]), u16::from_be_bytes([GUEST_IP[2], GUEST_IP[3]])),
             (host_port, gport),
         ]);
         frame[l4_off + 2..l4_off + 4].copy_from_slice(&gport.to_be_bytes());
@@ -1130,12 +1349,14 @@ pub fn l3_rewrite_inbound(ip: &[u8]) -> Option<Vec<u8>> {
         frame[l4_off + 2..l4_off + 4].copy_from_slice(&gport.to_be_bytes());
         fix_l4_checksum(proto, src_ip, GUEST_IP, &mut frame[l4_off..]);
     }
-    Some(frame)
+    tap_push(frame);
+    true
 }
 
-/// Return a frame buffer (from `l3_rewrite_inbound`) to the recycle pool after
-/// it's been injected into the guest ring — no per-packet heap churn.
-pub fn recycle_frame(buf: Vec<u8>) { frame_pool_put(buf); }
+/// Which data path this kernel is running, for `netstat`. QEMU, the NUC and the
+/// notebook must all print the SAME id — that, not any throughput number, is
+/// the acceptance of the rebuild: one path, taken by every machine.
+pub fn path_id() -> &'static str { "tap-v1" }
 
 /// Lock-free NAT housekeeping for the full off-vCPU data plane: reap idle
 /// masquerade mappings so the table can't fill over a long session. In full mode
@@ -1150,30 +1371,31 @@ pub fn housekeep() {
 /// Drop idle mappings so the table can't fill over a long session.
 fn l3_reap(now: u64) {
     let mut tbl = L3.lock();
-    for slot in tbl.iter_mut() {
-        if let Some(m) = slot.as_ref() {
-            let idle = now.wrapping_sub(m.last_tick);
-            let max = if m.proto == PROTO_TCP { L3_TCP_IDLE_TICKS }
-                      else { L3_UDP_IDLE_TICKS };
-            if idle > max { *slot = None; }
-        }
+    for i in 0..L3_MAX {
+        let Some(m) = tbl.maps[i].as_ref() else { continue };
+        let idle = now.wrapping_sub(m.last_tick);
+        let max = if m.proto == PROTO_TCP { L3_TCP_IDLE_TICKS }
+                  else { L3_UDP_IDLE_TICKS };
+        if idle > max { tbl.release(i); }
     }
 }
 
 /// Tear down all L3 state (VM stopped). Idempotent.
 pub fn l3_reset() {
     L3_ACTIVE.store(false, AtOrd::Release);
-    *L3.lock() = [const { None }; L3_MAX];
+    *L3.lock() = L3Table::new();
+    tap_reset();
     INBOUND_Q.lock().clear();
     *GRO.lock() = [const { None }; GRO_SLOTS]; // drop held GRO bursts
     GRO_ENABLED.store(false, AtOrd::Relaxed);
     *FRAME_POOL.lock() = Vec::new(); // release recycled buffers
 }
 
-/// Classify a guest TX frame (virtio-net hdr + ethernet) and produce
-/// zero or more RX frames to inject back. Side-effects: kprintln on
+/// Egress half of the tap, symmetric with [`tap_inbound`]: classify a guest TX
+/// frame (virtio-net hdr + ethernet) and produce zero or more RX frames to
+/// inject back. Side-effects: kprintln on
 /// cap-rejects so the operator can see why a packet went nowhere.
-pub fn process_tx(payload: &[u8], caps: &NetCaps) -> Vec<Vec<u8>> {
+pub fn tap_outbound(payload: &[u8], caps: &NetCaps) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     if payload.len() < VNET_HDR_LEN + ETH_HDR_LEN {
         NS_TX_RUNT.fetch_add(1, AtOrd::Relaxed);
@@ -1584,7 +1806,7 @@ pub fn pump(
     // Track NAT-table high-water + emit a host-side [netstat] summary every
     // ~5 s (≈500 ticks @ 100 Hz) so page-load slowness is diagnosable as
     // throughput vs NAT drops vs latency. Host log only — no [guest] spam.
-    let inuse = L3.lock().iter().flatten().count() as u64;
+    let inuse = L3.lock().maps.iter().flatten().count() as u64;
     if inuse > NS_HIGHWATER.load(AtOrd::Relaxed) {
         NS_HIGHWATER.store(inuse, AtOrd::Relaxed);
     }
@@ -1935,6 +2157,20 @@ fn drain_inbound(
 pub struct BridgeStats {
     pub active: bool,
     pub up_s: u64,
+    /// Identity of the data path, so the three machines can be COMPARED rather
+    /// than each believed on its own. Same path id on QEMU, NUC and notebook is
+    /// the acceptance test of the whole rebuild.
+    pub path: &'static str,
+    pub version: &'static str,
+    pub vendor: &'static str,
+    pub nic: &'static str,
+    pub worker_core: Option<usize>,
+    /// Tap: current depth, capacity, frames delivered to the guest, and the
+    /// ring-full drops. Progress (`tap_delivered`) is the number that matters —
+    /// a fill level says nothing (feedback_watchdog_that_only_fires_at_full).
+    pub tap: u64, pub tap_cap: usize,
+    pub tap_delivered: u64, pub tap_delivered_ps: u64, pub tap_full: u64,
+    pub rehomed: u64,
     pub kicks: u64, pub frames_in: u64, pub arp_in: u64, pub other_in: u64,
     pub rx_pkts: u64, pub rx_bytes: u64, pub rx_pps: u64,
     pub tx_pkts: u64, pub tx_bytes: u64, pub tx_pps: u64,
@@ -1970,6 +2206,7 @@ static RPT_GT: AtomicU64 = AtomicU64::new(0);
 static RPT_GPUCYC: AtomicU64 = AtomicU64::new(0);
 static RPT_GPUXF: AtomicU64 = AtomicU64::new(0);
 static RPT_PUMP: AtomicU64 = AtomicU64::new(0);
+static RPT_TAPDEL: AtomicU64 = AtomicU64::new(0);
 
 pub fn bridge_stats() -> BridgeStats {
     let now = crate::interrupts::rdtsc();
@@ -1998,9 +2235,25 @@ pub fn bridge_stats() -> BridgeStats {
     let n = NS_RXLAT_N.load(AtOrd::Relaxed);
     let rxring_min = NS_RXRING_MIN.load(AtOrd::Relaxed);
     let start = NS_START_TICK.load(AtOrd::Relaxed);
+    let delivered = NS_TAP_DELIVERED.load(AtOrd::Relaxed);
+    let prev_deliv = RPT_TAPDEL.swap(delivered, AtOrd::Relaxed);
     BridgeStats {
         active: L3_ACTIVE.load(AtOrd::Acquire),
         up_s: if start == 0 { 0 } else { crate::interrupts::ticks().wrapping_sub(start) / 100 },
+        path: path_id(),
+        version: env!("CARGO_PKG_VERSION"),
+        vendor: match crate::microvm::cpu::current_vendor() {
+            crate::microvm::cpu::Vendor::Amd => "AMD/SVM",
+            crate::microvm::cpu::Vendor::Intel => "Intel/VMX",
+            _ => "none",
+        },
+        nic: crate::netdev::active_name(),
+        worker_core: super::net_backend::worker_core(),
+        tap: tap_len(), tap_cap: TAP_RING,
+        tap_delivered: delivered,
+        tap_delivered_ps: per_s(delivered.saturating_sub(prev_deliv)),
+        tap_full: NS_TAP_FULL.load(AtOrd::Relaxed),
+        rehomed: NS_MAP_REHOMED.load(AtOrd::Relaxed),
         kicks: NS_GUEST_KICKS.load(AtOrd::Relaxed),
         frames_in: NS_GUEST_FRAMES.load(AtOrd::Relaxed),
         arp_in: NS_GUEST_ARP.load(AtOrd::Relaxed),
@@ -2012,7 +2265,7 @@ pub fn bridge_stats() -> BridgeStats {
         window_ms,
         flows_tcp: NS_TCP_FLOWS.load(AtOrd::Relaxed),
         flows_udp: NS_UDP_FLOWS.load(AtOrd::Relaxed),
-        live: L3.lock().iter().flatten().count(), cap: L3_MAX,
+        live: L3.lock().maps.iter().flatten().count(), cap: L3_MAX,
         iq: INBOUND_Q.lock().len(),
         iq_hi: NS_IQ_HI.load(AtOrd::Relaxed), iq_cap: INBOUND_MAX,
         rxring_min: if rxring_min == u64::MAX { 0 } else { rxring_min },
@@ -2053,7 +2306,8 @@ pub fn bridge_stats() -> BridgeStats {
 pub fn active_session_count() -> usize {
     // Drives VM idle-detection: keep the guest scheduled while any
     // masquerade flow is live or a reply is still queued.
-    L3.lock().iter().flatten().count() + INBOUND_Q.lock().len()
+    L3.lock().maps.iter().flatten().count() + INBOUND_Q.lock().len()
+        + tap_len() as usize
 }
 
 /// Tear down NAT state when a microvm run ends so the next launch —
@@ -2085,10 +2339,11 @@ pub fn reset_counters() {
               &NS_GPU_BYTES, &NS_GPU_XFERS, &RPT_GPU, &NS_GPU_CYC,
               &RPT_GPUCYC, &RPT_GPUXF,
               &NS_GTIMER, &NS_PUMP_CALLS, &RPT_GT, &RPT_PUMP,
-              &NS_KICK_DECOUPLED, &LAST_KICK_TSC,
+              &NS_KICK_DECOUPLED, &LAST_KICK_TSC, &RPT_TAPDEL,
               &NS_IP_MALFORMED, &NS_IP_TO_GW, &NS_IP_DNS, &NS_IP_PROTO,
               &NS_TX_RUNT, &NS_TX_BADTCP, &NS_TX_ARPMISS, &NS_TX_RINGBAD,
-              &NS_TX_TRUNC, &NS_RX_UNMATCHED] {
+              &NS_TX_TRUNC, &NS_RX_UNMATCHED,
+              &NS_TAP_FULL, &NS_TAP_DELIVERED, &NS_MAP_REHOMED] {
         c.store(0, AtOrd::Relaxed);
     }
     NS_START_TICK.store(crate::interrupts::ticks().max(1), AtOrd::Relaxed);

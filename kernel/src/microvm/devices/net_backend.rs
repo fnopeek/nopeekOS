@@ -35,6 +35,15 @@ static WORKER_CORE: AtomicUsize = AtomicUsize::new(usize::MAX);
 /// Worker records its core at startup so TX-kicks can target it.
 pub fn set_worker_core(core: usize) { WORKER_CORE.store(core, Ordering::Release); }
 
+/// Core the data-plane worker fiber runs on, if one is up. The tap's producer
+/// side needs it to ring the doorbell.
+pub fn worker_core() -> Option<usize> {
+    match WORKER_CORE.load(Ordering::Acquire) {
+        usize::MAX => None,
+        c => Some(c),
+    }
+}
+
 /// vCPU: the guest kicked TX (q1). Set the doorbell and, on the empty→set edge,
 /// wake the worker's core (coalesced like the IPI kick).
 pub fn note_tx_kick() {

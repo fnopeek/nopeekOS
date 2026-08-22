@@ -474,6 +474,13 @@ pub fn rx_seq() -> u64 {
     }
 }
 
+/// Flush a batched TX doorbell. `send` defers the per-frame notify on virtio to
+/// avoid a VM-exit per packet; the other drivers post as they go, so this is a
+/// no-op for them. Card-neutral so the microvm data plane never names a driver.
+pub fn tx_flush() {
+    if matches!(active(), Active::Virtio | Active::None) { virtio_net::tx_flush(); }
+}
+
 /// Does the active card take checksum+TSO-offloaded TX frames (`send_offload`)?
 pub fn tx_offload_ok() -> bool {
     matches!(active(), Active::Virtio | Active::None) && virtio_net::host_offload_ok()

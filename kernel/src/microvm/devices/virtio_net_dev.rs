@@ -27,7 +27,7 @@
 //!
 //! The synthetic gateway (ARP/DNS/NAT/GRO/TX-GSO) still lives in `super::nat`;
 //! this file owns only the wire-level device. TX (incl. TX-GSO segmentation via
-//! `nat::process_tx`/`emit_tcp_out`) is unchanged in spirit, ported here.
+//! `nat::tap_outbound`/`emit_tcp_out`) is unchanged in spirit, ported here.
 
 #![allow(dead_code)]
 
@@ -639,7 +639,7 @@ impl VirtioNet {
         let advanced = !payloads.is_empty();
         let mut pending_rx: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
         for p in &payloads {
-            for rep in super::nat::process_tx(p, &self_caps) { pending_rx.push(rep); }
+            for rep in super::nat::tap_outbound(p, &self_caps) { pending_rx.push(rep); }
         }
         self.tx_finish(mem, advanced, &pending_rx)
     }
@@ -647,7 +647,7 @@ impl VirtioNet {
     /// Phase 2a (under the device mutex, CHEAP): walk the guest TX avail ring,
     /// copy each frame's bytes into an owned Vec, publish the used ring. No
     /// segmentation / checksum / host-NIC send here — those are the expensive
-    /// part and run lock-free in the caller (`nat::process_tx`). Returns one
+    /// part and run lock-free in the caller (`nat::tap_outbound`). Returns one
     /// owned payload per consumed frame (len == frames consumed = "advanced").
     pub fn drain_tx_payloads(&mut self, mem: &GuestMem) -> alloc::vec::Vec<alloc::vec::Vec<u8>> {
         let mut payloads: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
@@ -747,7 +747,7 @@ impl VirtioNet {
     }
 
     /// The negotiated capability mask (Copy) — the worker reads it once under the
-    /// device lock, then drives `nat::process_tx` lock-free.
+    /// device lock, then drives `nat::tap_outbound` lock-free.
     pub fn caps(&self) -> NetCaps { self.caps }
 
     fn tx_should_interrupt(&mut self, mem: &GuestMem) -> bool {
