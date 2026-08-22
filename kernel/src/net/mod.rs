@@ -217,6 +217,7 @@ pub fn wasm_deliver_rx(frame: &[u8]) {
                 eth::handle_frame(&buf[..len]);
             }
         }
+        netdev::note_rx_available(1);
         eth::handle_frame(frame);
         POLLING.store(false, Ordering::Release);
     } else {
