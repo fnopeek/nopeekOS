@@ -26,8 +26,9 @@ use crate::dom::{Dom, Element, Node};
 use crate::forms::{ControlKind, FormState};
 use crate::image::ImageMap;
 use crate::style::{
-    self, BgLayer, BgPos, BgSize, BorderSide, ClearKind, Clip, ComputedStyle, ContentPiece, CrossAlign,
-    Display, FlexBasis, FloatKind, GridTrack, Justify, Len, ListStyle, Position, TableLayout,
+    self, BgLayer, BgPos, BgSize, BorderSide, ClearKind, Clip, ComputedStyle, ContentAlign,
+    ContentPiece, CrossAlign, Display, FlexBasis, FloatKind, GridTrack, Justify, Len, ListStyle,
+    Overflow, Position, TableLayout,
     TextAlign, TextTransform, ZIndex, BASE_FONT_PX,
 };
 
@@ -145,7 +146,9 @@ struct FloatRect {
 /// border box must not overlap floats (CSS2.1 §9.4.1): the formatting-context
 /// displays (flex/grid/table) and a box that clips its overflow.
 fn establishes_bfc(st: &ComputedStyle) -> bool {
-    matches!(st.display, Display::Flex | Display::Grid | Display::Table) || st.overflow_clip
+    matches!(st.display, Display::Flex | Display::Grid | Display::Table)
+        || st.overflow_x != Overflow::Visible
+        || st.overflow_y != Overflow::Visible
 }
 
 /// A set of adjoining vertical margins (CSS2.1 §8.3.1). Collapsing margins do
@@ -665,7 +668,19 @@ impl Theme {
 /// One paint instruction, positioned in document space (pre-scroll).
 pub enum DrawOp {
     /// A run of already-wrapped, same-style text; `y` is the run's top.
-    Text { x: i32, y: i32, size: f32, color: Rgba, bold: bool, italic: bool, mono: bool, text: String },
+    /// `sp` is `(letter-spacing, word-spacing)` in px — the run measures and
+    /// paints at the same advance only because both read this one value.
+    Text {
+        x: i32,
+        y: i32,
+        size: f32,
+        color: Rgba,
+        bold: bool,
+        italic: bool,
+        mono: bool,
+        sp: (f32, f32),
+        text: String,
+    },
     /// A filled rectangle (divider, list bullet).
     Rect { x: i32, y: i32, w: i32, h: i32, color: Rgba },
     /// A `border-radius` box. `r` is `[tl, tr, br, bl]` in px; `ring` is 0 for
@@ -692,6 +707,11 @@ pub enum DrawOp {
         y: i32,
         w: i32,
         h: i32,
+        /// The painting area (`background-clip`) as `(x, y, w, h)`. `x..h` above
+        /// are the POSITIONING area (`background-origin`); the two are the same
+        /// rectangle only when neither property is set and the box has no
+        /// border.
+        clip: (i32, i32, i32, i32),
         key: u64,
         repeat: (bool, bool),
         pos: (BgPos, BgPos),
@@ -744,12 +764,21 @@ fn uniform_border(st: &ComputedStyle) -> Option<(f32, Rgba)> {
 /// their line's text. The keys are resolved by the caller — only it knows
 /// where to register the image the layout still needs.
 fn bg_ops(st: &ComputedStyle, bg: Option<u64>, mask: Option<u64>, x: i32, y: i32, w: i32, h: i32, out: &mut Vec<DrawOp>) {
+    // Three rectangles, two of them used here: `background-clip` says where the
+    // paint may land, `background-origin` where the image is anchored and what
+    // a percentage size resolves against. They default DIFFERENTLY — border box
+    // and padding box — so a bordered box with a centred image centres it
+    // inside the border while its colour still runs under it.
+    let (cx, cy, cw, ch) = st.bg_clip.shrink(st, x, y, w, h);
+    let (ox, oy, ow, oh) = st.bg_origin.shrink(st, x, y, w, h);
+    let clip = (cx, cy, cw, ch);
     match (st.bg, mask) {
         (Some(color), Some(key)) => out.push(DrawOp::BgImage {
-            x,
-            y,
-            w,
-            h,
+            x: ox,
+            y: oy,
+            w: ow,
+            h: oh,
+            clip,
             key,
             repeat: st.mask_layer.repeat,
             pos: st.mask_layer.pos,
@@ -757,11 +786,24 @@ fn bg_ops(st: &ComputedStyle, bg: Option<u64>, mask: Option<u64>, x: i32, y: i32
             tint: Some(color),
         }),
         (Some(color), None) => {
+            if cw <= 0 || ch <= 0 {
+                return;
+            }
+            // A corner radius is measured on the border box; clipping the
+            // background inwards pulls the curve in with it by the same amount
+            // (css-backgrounds-3 §5.3), never below zero.
             let r = radii_px(st, w);
+            let inset = (cx - x).max(cy - y) as f32;
+            let r = [
+                (r[0] - inset).max(0.0),
+                (r[1] - inset).max(0.0),
+                (r[2] - inset).max(0.0),
+                (r[3] - inset).max(0.0),
+            ];
             out.push(if r.iter().any(|&v| v > 0.0) {
-                DrawOp::RoundRect { x, y, w, h, r, color, ring: 0.0 }
+                DrawOp::RoundRect { x: cx, y: cy, w: cw, h: ch, r, color, ring: 0.0 }
             } else {
-                DrawOp::Rect { x, y, w, h, color }
+                DrawOp::Rect { x: cx, y: cy, w: cw, h: ch, color }
             });
         }
         // A mask with no colour to stencil paints nothing at all.
@@ -769,10 +811,11 @@ fn bg_ops(st: &ComputedStyle, bg: Option<u64>, mask: Option<u64>, x: i32, y: i32
     }
     if let Some(key) = bg {
         out.push(DrawOp::BgImage {
-            x,
-            y,
-            w,
-            h,
+            x: ox,
+            y: oy,
+            w: ow,
+            h: oh,
+            clip,
             key,
             repeat: st.bg_layer.repeat,
             pos: st.bg_layer.pos,
@@ -1111,18 +1154,67 @@ fn ceil_i32(x: f32) -> i32 {
     let c = x as i32;
     if (c as f32) < x { c + 1 } else { c }
 }
+/// The characters CSS collapses (css-text-3 §4.1.1: the "white space"
+/// characters are space, tab and the newlines). Rust's `char::is_whitespace`
+/// is the Unicode `White_Space` property, which also covers U+00A0 and U+3000 —
+/// and both of those exist precisely so they do NOT collapse or offer a break.
+fn is_css_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{000C}')
+}
+
+/// A character that HANGS at the end of a line: it is painted, but it does not
+/// count towards the line's width (css-text-3 §4.1.3 phase II removes a
+/// trailing sequence of collapsible spaces AND other space separators). These
+/// are the space separators that do not collapse — U+00A0 is deliberately not
+/// among them, since a no-break space is content.
+fn is_hangable_space(c: char) -> bool {
+    is_css_space(c)
+        || matches!(c, '\u{1680}' | '\u{2000}'..='\u{200A}' | '\u{2028}' | '\u{2029}'
+            | '\u{202F}' | '\u{205F}' | '\u{3000}')
+}
+
+/// A zero-width formatting character: it is not a typographic character unit,
+/// so no letter-spacing is added after it (css-text-3 §8.2).
+fn is_zero_width_format(c: char) -> bool {
+    matches!(c,
+        '\u{200B}'..='\u{200F}' | '\u{2060}'..='\u{2064}' | '\u{206A}'..='\u{206F}'
+        | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}' | '\u{00AD}')
+}
+
+/// The extra advance `sp` adds after `c`.
+pub(crate) fn char_spacing(c: char, sp: (f32, f32)) -> f32 {
+    if is_zero_width_format(c) {
+        return 0.0;
+    }
+    // Word-spacing lands on the word separators css-text-3 §8.1 names —
+    // notably NOT U+3000 IDEOGRAPHIC SPACE.
+    let ws = matches!(c, ' ' | '\u{00A0}' | '\u{1361}' | '\u{10100}' | '\u{10101}' | '\u{1039F}' | '\u{1091F}');
+    sp.0 + if ws { sp.1 } else { 0.0 }
+}
+
 fn measure(font: &Font, s: &str, size: f32) -> f32 {
     s.chars().map(|c| font.metrics(c, size).advance_width).sum()
+}
+
+/// `measure` plus `(letter-spacing, word-spacing)`. Letter-spacing lands after
+/// EVERY character including the last — that is what an inline box measures as
+/// in every engine, and the reftests are written against it. Word-spacing lands
+/// on the word separator itself (css-text-3 §8.1: U+0020 and U+00A0).
+fn measure_sp(font: &Font, s: &str, size: f32, sp: (f32, f32)) -> f32 {
+    if sp == (0.0, 0.0) {
+        return measure(font, s, size);
+    }
+    s.chars().map(|c| font.metrics(c, size).advance_width + char_spacing(c, sp)).sum()
 }
 /// Byte length of the longest prefix of `s` that fits in `avail` px, snapped
 /// back to a legal break. Returns 0 when not even the first cluster fits — the
 /// caller decides whether to try a fresh line or force one through (never
 /// returning 0 forever is the caller's job, not this function's).
-fn fit_prefix(font: &Font, s: &str, size: f32, avail: f32) -> usize {
+fn fit_prefix(font: &Font, s: &str, size: f32, avail: f32, sp: (f32, f32)) -> usize {
     let mut used = 0.0;
     let mut end = s.len();
     for (i, c) in s.char_indices() {
-        let adv = font.metrics(c, size).advance_width;
+        let adv = font.metrics(c, size).advance_width + char_spacing(c, sp);
         if used + adv > avail {
             end = i;
             break;
@@ -1177,8 +1269,10 @@ fn first_cluster(s: &str) -> usize {
     n
 }
 
-fn space_width(font: &Font, size: f32) -> f32 {
-    font.metrics(' ', size).advance_width
+/// The advance of the space BETWEEN two words. `sp` is the run's
+/// `(letter-spacing, word-spacing)`: both apply to a word separator.
+fn space_width(font: &Font, size: f32, sp: (f32, f32)) -> f32 {
+    font.metrics(' ', size).advance_width + sp.0 + sp.1
 }
 fn ascent_i(font: &Font, size: f32) -> i32 {
     font.horizontal_line_metrics(size).map(|m| m.ascent).unwrap_or(size) as i32
@@ -1947,7 +2041,16 @@ impl<'a> Ctx<'a> {
     /// overlap active floats (CSS2.1 §9.5): shift it into the widest available
     /// band at its top, dropping below any float a definite width can't fit
     /// beside. Returns the adjusted (margin-box left, available width, top).
-    fn avoid_floats_bfc(&self, st: &ComputedStyle, x: i32, w: i32, y: i32) -> (i32, i32, i32) {
+    fn avoid_floats_bfc(
+        &mut self,
+        // `None` for an ANONYMOUS box: there is no element to lay out twice,
+        // so it keeps the first-row placement.
+        el: Option<&'a Element>,
+        st: &ComputedStyle,
+        x: i32,
+        w: i32,
+        y: i32,
+    ) -> (i32, i32, i32) {
         if self.floats.is_empty() {
             return (x, w, y);
         }
@@ -1974,6 +2077,28 @@ impl<'a> Ctx<'a> {
                 None => true,
             };
             if fits || avail >= w {
+                break;
+            }
+            let next = self.floats.iter().filter(|f| f.bottom > by).map(|f| f.bottom).min();
+            match next {
+                Some(nb) if nb > by => by = nb,
+                _ => break,
+            }
+        }
+        // The whole BORDER BOX has to clear the floats, not just its first row
+        // (CSS2.1 §9.5): a float whose top is BELOW this box's top still
+        // overlaps it, and the box has no way to narrow partway down. Its
+        // height is only known by laying it out, so the candidate position is
+        // measured and the box dropped past whatever cuts into it. Bounded,
+        // because each retry starts below one more float bottom and a page can
+        // stack a lot of them.
+        for _ in 0..8 {
+            let Some(el) = el else { break };
+            let (bl, br) = self.float_band(by, by + 1, x, x + w);
+            let (bx, bw) = (bl.max(x), (br - bl).max(1));
+            let h = self.measure_box_height(el, st, bx, bw, by).max(1);
+            let (bl2, br2) = self.float_band(by, by + h, x, x + w);
+            if bl2 <= bl && br2 >= br {
                 break;
             }
             let next = self.floats.iter().filter(|f| f.bottom > by).map(|f| f.bottom).min();
@@ -2158,7 +2283,7 @@ impl<'a> Ctx<'a> {
                     let mut t = open;
                     t.add(anon_st.margin_top);
                     let by = anchor + t.value() as i32;
-                    let (bx, bw, byy) = self.avoid_floats_bfc(&anon_st, x, w, by);
+                    let (bx, bw, byy) = self.avoid_floats_bfc(None, &anon_st, x, w, by);
                     let saved = core::mem::take(&mut self.floats);
                     let bottom = self.layout_table_body(run, &anon_st, bx, bw, byy);
                     self.floats = saved;
@@ -2372,7 +2497,7 @@ impl<'a> Ctx<'a> {
                 let mut t = open;
                 t.add(st.margin_top);
                 let by = anchor + t.value() as i32;
-                let (bx, bw, byy) = self.avoid_floats_bfc(&st, x, w, by);
+                let (bx, bw, byy) = self.avoid_floats_bfc(Some(el), &st, x, w, by);
                 let saved = core::mem::take(&mut self.floats);
                 let op0 = self.ops.len();
                 let bottom = self.layout_box(el, &st, bx, bw, byy);
@@ -2572,7 +2697,7 @@ impl<'a> Ctx<'a> {
             let font = self.fonts.pick(ps.bold, ps.italic, ps.mono);
             let cw = match ps.width.px(aw) {
                 Some(v) if v >= 0.0 => v,
-                _ => measure(font, text.trim(), ps.font_px),
+                _ => measure_sp(font, text.trim(), ps.font_px, (ps.letter_spacing, ps.word_spacing)),
             };
             let ch = match vert_len(ps.height, Some(ph)) {
                 Some(v) if v >= 0.0 => v,
@@ -2630,6 +2755,7 @@ impl<'a> Ctx<'a> {
                     bold: ps.bold,
                     italic: ps.italic,
                     mono: ps.mono,
+                    sp: (ps.letter_spacing, ps.word_spacing),
                     text: text.trim().into(),
                 });
             }
@@ -2666,7 +2792,7 @@ impl<'a> Ctx<'a> {
         let font = self.fonts.pick(ps.bold, ps.italic, ps.mono);
         let cw = match ps.width.px(cbw) {
             Some(v) if v >= 0.0 => v,
-            _ => measure(font, text.trim(), ps.font_px),
+            _ => measure_sp(font, text.trim(), ps.font_px, (ps.letter_spacing, ps.word_spacing)),
         };
         let ch = match ps.height.px(cbw) {
             Some(v) if v >= 0.0 => v,
@@ -2695,6 +2821,7 @@ impl<'a> Ctx<'a> {
                 bold: ps.bold,
                 italic: ps.italic,
                 mono: ps.mono,
+                sp: (ps.letter_spacing, ps.word_spacing),
                 text: text.trim().into(),
             });
         }
@@ -2775,6 +2902,8 @@ impl<'a> Ctx<'a> {
             let frame = st.pad_left + st.pad_right + st.border_x();
             cw = clamp_len(iw + frame, st.min_width, st.max_width, st.box_border, frame) - frame;
         }
+        let aspect = with_aspect_height(st, cw);
+        let st = aspect.as_ref().unwrap_or(st);
         let content_x = x + off_left as i32;
         let content_w = cw.max(1.0) as i32;
 
@@ -2840,6 +2969,7 @@ impl<'a> Ctx<'a> {
                     bold: st.bold,
                     italic: st.italic,
                     mono: st.mono,
+                    sp: (0.0, 0.0),
                     text: label,
                 });
             }
@@ -3244,7 +3374,7 @@ impl<'a> Ctx<'a> {
             bg_img: self.bg_key(st.bg_layer.image).map(|k| (k, st.bg_layer)),
             pad_l: (st.pad_left as i32).max(CTL_PAD_X),
             border,
-            style: RunStyle { hidden: st.hidden, transparent: st.transparent, size, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: crate::style::VAlign::Baseline, deco: st.deco, break_word: st.break_word, nowrap: st.nowrap, lh: st.line_height.px(size).unwrap_or(0.0) },
+            style: RunStyle { hidden: st.hidden, transparent: st.transparent, size, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: crate::style::VAlign::Baseline, deco: st.deco, deco_color: st.deco_color, break_word: st.break_word, nowrap: st.nowrap, lh: st.line_height.px(size).unwrap_or(0.0), sp: (st.letter_spacing, st.word_spacing) },
         }
     }
 
@@ -3441,7 +3571,7 @@ impl<'a> Ctx<'a> {
     /// is a far worse defect than an unclipped overflow.
     fn clip_overflow(&mut self, st: &ComputedStyle, marks: (usize, u32, u32), box_left: i32, box_top: i32, box_w: i32, box_h: i32) {
         let (start, abs0, fixed0) = marks;
-        if !st.overflow_clip || start >= self.ops.len() {
+        if (!st.overflow_x.clips() && !st.overflow_y.clips()) || start >= self.ops.len() {
             return;
         }
         if self.stack_ops.iter().any(|(_, _, _, e)| *e > start) {
@@ -3456,10 +3586,18 @@ impl<'a> Ctx<'a> {
         if self.fixed_count > fixed0 || (st.position == Position::Static && self.abs_count > abs0) {
             return;
         }
-        let cl = box_left + st.border_left.width as i32;
-        let ct = box_top + st.border_top.width as i32;
-        let cr = box_left + box_w - st.border_right.width as i32;
-        let cb = box_top + box_h - st.border_bottom.width as i32;
+        // An axis that does not clip is given the whole plane, so one call
+        // covers `overflow-x: hidden; overflow-y: auto` without a second path.
+        let (cl, cr) = if st.overflow_x.clips() {
+            (box_left + st.border_left.width as i32, box_left + box_w - st.border_right.width as i32)
+        } else {
+            (i32::MIN / 4, i32::MAX / 4)
+        };
+        let (ct, cb) = if st.overflow_y.clips() {
+            (box_top + st.border_top.width as i32, box_top + box_h - st.border_bottom.width as i32)
+        } else {
+            (i32::MIN / 4, i32::MAX / 4)
+        };
         clip_ops(&mut self.ops, start, cl, ct, cr, cb);
     }
 
@@ -3656,7 +3794,25 @@ impl<'a> Ctx<'a> {
         rows.retain(|r| !r.cells.is_empty());
         let ncols = rows.iter().map(|r| row_columns(&r.cells).1).max().unwrap_or(0).min(64);
         if ncols == 0 {
-            return y0;
+            // A table with no rows is still a BOX. `width`/`height` on it are
+            // content-box dimensions like anywhere else, so a bordered empty
+            // table paints a frame of exactly that size — dropping out here
+            // painted nothing at all, which is what an empty `<table>` with a
+            // background looked like.
+            let bg_idx = self.ops.len();
+            let cbw = w as f32;
+            let frame_x = st.pad_left + st.pad_right + st.border_x();
+            let frame_y = st.pad_top + st.pad_bottom + st.border_y();
+            let cw = st.width.px(cbw).map(|v| if st.box_border { v - frame_x } else { v }).unwrap_or(0.0);
+            let ch = match st.height {
+                Len::Px(h) if st.box_border => h - frame_y,
+                Len::Px(h) => h,
+                _ => 0.0,
+            };
+            let (bw, bh) = ((cw + frame_x).max(0.0) as i32, (ch + frame_y).max(0.0) as i32);
+            let ml = st.margin_left.px(cbw).unwrap_or(0.0) as i32;
+            self.paint_box_decoration(st, x + ml, y0, bw, bh, bg_idx);
+            return y0 + bh;
         }
 
         // `fixed` tables paint each cell's own box (backgrounds/borders are the
@@ -3908,6 +4064,15 @@ impl<'a> Ctx<'a> {
         }
         let sum_fixed: f32 = fixed.iter().filter_map(|o| *o).sum();
         let auto_count = fixed.iter().filter(|o| o.is_none()).count();
+        // A table is a shrink-to-fit box: with `width: auto` and every column
+        // pinned by the first row, the table is exactly those columns wide. It
+        // does NOT fill its container the way a block does — which is what put
+        // a 200px cell's border across the whole page.
+        let content_w = if st.width == Len::Auto && auto_count == 0 {
+            sum_fixed.min(content_w)
+        } else {
+            content_w
+        };
         let leftover = content_w - sum_fixed;
         // Remaining table space is divided equally between auto columns; if every
         // column is sized, the slack is spread over all of them instead.
@@ -4838,6 +5003,8 @@ impl<'a> Ctx<'a> {
         // same as the flex container: `width` is the CONTENT box, the border
         // box is that plus padding and border.
         let (cw, off_left) = resolve_block_h(st, w as f32);
+        let aspect = with_aspect_height(st, cw);
+        let st = aspect.as_ref().unwrap_or(st);
         let content_x = x + off_left as i32;
         let content_w = cw.max(1.0) as i32;
         let box_left = content_x - st.pad_left as i32 - st.border_left.width as i32;
@@ -4887,7 +5054,7 @@ impl<'a> Ctx<'a> {
             let start = st.grid_col_fill_start as usize;
             let len = st.grid_col_fill_len as usize;
             let avail = w as f32;
-            let g = st.grid_col_gap;
+            let g = st.grid_col_gap.px(avail).unwrap_or(0.0);
             let px_of = |t: GridTrack| match t {
                 GridTrack::Fixed(p) => Some(p),
                 GridTrack::Pct(p) => Some(p / 100.0 * avail),
@@ -4925,7 +5092,9 @@ impl<'a> Ctx<'a> {
             }
         }
         if tracks.is_empty() {
-            tracks.push(GridTrack::Auto); // rows-only grid → one implicit column
+            // Rows-only grid → one IMPLICIT column, which `grid-auto-columns`
+            // sizes exactly as `grid-auto-rows` sizes an implicit row.
+            tracks.push(st.grid_auto_cols);
         }
         let ncols = tracks.len();
 
@@ -4953,8 +5122,13 @@ impl<'a> Ctx<'a> {
             }
         }
 
-        let col_gap = st.grid_col_gap;
-        let row_gap = st.grid_row_gap;
+        // A percentage gap resolves against the container's own content box
+        // on that axis; an indefinite height makes a percentage row-gap zero.
+        let col_gap = st.grid_col_gap.px(w as f32).unwrap_or(0.0);
+        let row_gap = st
+            .grid_row_gap
+            .px(content_height_of(st, st.height).unwrap_or(0.0))
+            .unwrap_or(0.0);
 
         // Definite container content height (for %/fr row resolution).
         let def_h: Option<f32> = content_height_of(st, st.height);
@@ -5457,6 +5631,8 @@ impl<'a> Ctx<'a> {
         // 642px border box like any other block, and leaving it out made every
         // bordered flex container two pixels narrow AND shifted its content.
         let (cw, off_left) = resolve_block_h(st, w as f32);
+        let aspect = with_aspect_height(st, cw);
+        let st = aspect.as_ref().unwrap_or(st);
         let content_x = x + off_left as i32;
         let content_w = cw.max(1.0) as i32;
         let box_left = content_x - st.pad_left as i32 - st.border_left.width as i32;
@@ -5548,8 +5724,12 @@ impl<'a> Ctx<'a> {
         def_cross: Option<f32>,
     ) -> i32 {
         let avail = w as f32;
-        let main_gap = st.gap;
-        let line_gap = st.grid_row_gap; // cross-axis gap between wrapped lines
+        // Row flex: the MAIN axis is horizontal, so the gap between items is
+        // `column-gap` and the gap between wrapped lines is `row-gap`. Reading
+        // one value for both made `gap: 10px 20px` put the row gap between the
+        // items instead of between the lines.
+        let main_gap = st.grid_col_gap.px(avail).unwrap_or(0.0);
+        let line_gap = st.grid_row_gap.px(def_cross.unwrap_or(0.0)).unwrap_or(0.0);
 
         // — per-item metrics (content-box main size = width) —
         let m = self.flex_metrics(items, avail, true);
@@ -5557,161 +5737,248 @@ impl<'a> Ctx<'a> {
         // — line breaking (flex-wrap) —
         let lines = flex_break_lines(&m, avail, main_gap, st.flex_wrap, st.flex_balance);
 
-        let mut cross_y = y0;
-        for line in &lines {
-            let (idx0, idx1) = (line.0, line.1);
-            let li = &m[idx0..idx1];
-            let ln = li.len();
-            let gaps_total = main_gap * (ln as f32 - 1.0).max(0.0);
-
-            // Resolve flexible lengths within this line's available main size.
-            let size = resolve_flex_line(li, avail, gaps_total);
-
-            // Leftover main space → justify-content, unless main-axis auto margins
-            // absorb it.
-            let used: f32 = li
-                .iter()
-                .zip(&size)
-                .map(|(it, &sz)| it.m_lead + it.m_trail + sz + it.main_pad)
-                .sum::<f32>()
-                + gaps_total;
-            let leftover = avail - used;
-            let n_auto: usize = li.iter().map(|it| it.m_lead_auto as usize + it.m_trail_auto as usize).sum();
-            let (offset, extra_gap, auto_each) = if leftover > 0.5 && n_auto > 0 {
-                (0.0, 0.0, leftover / n_auto as f32)
-            } else {
-                let lo = leftover.max(0.0);
-                let (o, g) = match st.justify {
-                    Justify::Start => (0.0, 0.0),
-                    Justify::End => (lo, 0.0),
-                    Justify::Center => (lo / 2.0, 0.0),
-                    Justify::Between => (0.0, if ln > 1 { lo / (ln as f32 - 1.0) } else { 0.0 }),
-                    Justify::Around => (lo / (2.0 * ln as f32), lo / ln as f32),
-                    Justify::Evenly => (lo / (ln as f32 + 1.0), lo / (ln as f32 + 1.0)),
-                };
-                (o, g, 0.0)
-            };
-
-            // Main-axis positions (border-box left) per item.
-            let mut item_x = alloc::vec![0.0f32; ln];
-            let mut main = x as f32 + offset;
-            for k in 0..ln {
-                main += li[k].m_lead + if li[k].m_lead_auto { auto_each } else { 0.0 };
-                item_x[k] = main;
-                let box_main = size[k] + li[k].main_pad;
-                main += box_main + li[k].m_trail + if li[k].m_trail_auto { auto_each } else { 0.0 }
-                    + main_gap + extra_gap;
+        // `align-content` packs the LINES in whatever cross space the container
+        // has left over, so every line's cross size must be known before the
+        // first line is placed. A multi-line container therefore lays its lines
+        // out once to measure them, throws that placement away, and does it
+        // again where they really go. Single-line containers keep the one-pass
+        // path: align-content has no effect on them (css-flexbox-1 §8.4), and
+        // neither does the packing default `start`.
+        let n_lines = lines.len();
+        let pack = n_lines > 1 && st.align_content != ContentAlign::Start;
+        let mut forced: Vec<Option<i32>> = alloc::vec![None; n_lines];
+        let (mut offset_cross, mut extra_line_gap) = (0i32, 0i32);
+        if pack && let Some(cross) = def_cross {
+            let mark = self.flex_mark();
+            let mut nat: Vec<i32> = Vec::with_capacity(n_lines);
+            let mut y = y0;
+            for &line in &lines {
+                let h = self.flex_row_line(items, st, &m, x, avail, main_gap, line, y, None);
+                nat.push(h);
+                y += h + line_gap as i32;
             }
-
-            // Natural cross size (height) at the resolved width, to size the
-            // line — laid out AT the spot the item will most likely keep, and
-            // the ops KEPT instead of discarded.
-            //
-            // Measuring a flex item already lays its whole subtree out; the old
-            // code threw that away and then laid the identical thing again, so
-            // every nesting level doubled the work (2^5 on MediaWiki's header).
-            // Counted on real pages, 93–96 % of items end up at exactly
-            // `(item_x[k], cross_y)` with their natural height, so the second
-            // pass was almost always a byte-for-byte repeat of the first.
-            let mut h_nat = alloc::vec![0i32; ln];
-            let mut marks: Vec<FlexMark> = Vec::with_capacity(ln);
-            for k in 0..ln {
-                let (el, s) = items[idx0 + k];
-                let s_meas = flex_item_style(&s, size[k], None, true);
-                let box_main = (size[k] + li[k].main_pad).max(1.0) as i32;
-                let mark = self.flex_mark();
-                self.path.push(self.info(el));
-                let bottom = self.layout_box(el, &s_meas, item_x[k] as i32, box_main, cross_y);
-                self.path.pop();
-                h_nat[k] = bottom - cross_y;
-                // Keep the ops, but NOT the ambient state a discarded
-                // measurement used to drop: a flex item is its own block
-                // formatting context, so its floats must not reach its
-                // siblings, and the containing block it installed is gone with
-                // it. Leaving those standing made every later item on the line
-                // flow around phantom exclusions.
-                self.floats.truncate(mark.spec.floats);
-                self.cb = mark.cb;
-                marks.push(mark);
-            }
-
-            // Line cross size: a single unwrapped line fills a definite container
-            // height; otherwise it's the tallest item margin box.
-            //
-            // The line is sized from each item's HYPOTHETICAL cross size
-            // (Flexbox §9.4 step 7) — the natural one clamped by its own
-            // `min-`/`max-height`. Using the raw natural height left the line
-            // short of any item held open by a `min-height`, and that item then
-            // hung out past the container: Wikipedia's search button is
-            // `min-height: 32px` inside a 30px-tall line.
-            let nat_line = (0..ln)
-                .map(|k| {
-                    let hypo = clamp_cross(h_nat[k] as f32, li[k].min_cross, li[k].max_cross);
-                    li[k].cm_lead as i32 + hypo as i32 + li[k].cm_trail as i32
-                })
-                .max()
-                .unwrap_or(0);
-            let line_cross = if lines.len() == 1 {
-                def_cross.map(|c| c as i32).unwrap_or(nat_line)
-            } else {
-                nat_line
-            };
-
-            // Now that the line's cross size is known, work out where each item
-            // really goes, and find the FIRST one the speculative pass got
-            // wrong. A forced height counts as wrong even when the number
-            // matches: it changes the derived style, so the subtree below can
-            // resolve differently.
-            let mut first_redo = ln;
-            let mut plan: Vec<(Option<f32>, i32)> = Vec::with_capacity(ln);
-            for k in 0..ln {
-                let s = &items[idx0 + k].1;
-                let align = s.align_self.unwrap_or(st.align_items);
-                let inner = (line_cross - li[k].cm_lead as i32 - li[k].cm_trail as i32).max(0);
-                let stretch = align == CrossAlign::Stretch && li[k].cross_auto;
-                let (forced_h, y) = if stretch {
-                    let target = clamp_cross(inner as f32, li[k].min_cross, li[k].max_cross);
-                    (Some(target), cross_y + li[k].cm_lead as i32)
-                } else {
-                    let h = h_nat[k];
-                    let y = match align {
-                        CrossAlign::End => cross_y + line_cross - li[k].cm_trail as i32 - h,
-                        CrossAlign::Center => cross_y + li[k].cm_lead as i32 + (inner - h) / 2,
-                        _ => cross_y + li[k].cm_lead as i32, // start / stretch-with-def-size / baseline
-                    };
-                    (None, y)
-                };
-                if first_redo == ln && (forced_h.is_some() || y != cross_y) {
-                    first_redo = k;
+            self.flex_rollback(&mark);
+            let gaps = line_gap * (n_lines as f32 - 1.0);
+            // NOT clamped at zero: the default overflow behaviour is `unsafe`
+            // (css-align-3 §5.3), so `center` on lines that do not fit spills
+            // equally out of both ends rather than piling up at the start.
+            // Only the distributions have a spec'd fallback, below.
+            let free = cross - nat.iter().sum::<i32>() as f32 - gaps;
+            let nf = n_lines as f32;
+            match st.align_content {
+                // Every line grows by an equal share. The share is taken
+                // CUMULATIVELY so the integer rounding cannot drift: the last
+                // line still ends exactly on the container's content edge.
+                ContentAlign::Stretch if free > 0.0 => {
+                    for (i, h) in nat.iter().enumerate() {
+                        let so_far = (free * i as f32 / nf) as i32;
+                        let upto = (free * (i + 1) as f32 / nf) as i32;
+                        forced[i] = Some(h + upto - so_far);
+                    }
                 }
-                plan.push((forced_h, y));
-            }
-
-            // `ops` is one sequential list, so redoing item k means dropping
-            // everything emitted from k onward — hence the first mismatch, not
-            // each one. Worst case this is exactly the two passes it replaced.
-            if first_redo < ln {
-                self.flex_rollback(&marks[first_redo]);
-                for k in first_redo..ln {
-                    let (el, s) = items[idx0 + k];
-                    let (forced_h, y) = plan[k];
-                    let s2 = flex_item_style(&s, size[k], forced_h, true);
-                    self.path.push(self.info(el));
-                    // `layout_box` takes the box the caller resolved — the
-                    // item's BORDER box. `size[k]` is its content size, so the
-                    // item's own padding and border have to go back on, or a
-                    // control (which paints exactly this width) loses them and
-                    // clips its label.
-                    let box_main = (size[k] + li[k].main_pad).max(1.0) as i32;
-                    let _ = self.layout_box(el, &s2, item_x[k] as i32, box_main, y);
-                    self.path.pop();
+                ContentAlign::End => offset_cross = free as i32,
+                ContentAlign::Center => offset_cross = (free / 2.0) as i32,
+                ContentAlign::Between if free > 0.0 => {
+                    extra_line_gap = (free / (nf - 1.0)) as i32;
                 }
+                ContentAlign::Around | ContentAlign::Evenly if free <= 0.0 => {
+                    // Both fall back to `center` when the lines overflow
+                    // (css-align-3 §5.4), not to `start`.
+                    offset_cross = (free / 2.0) as i32;
+                }
+                ContentAlign::Around => {
+                    offset_cross = (free / (2.0 * nf)) as i32;
+                    extra_line_gap = (free / nf) as i32;
+                }
+                ContentAlign::Evenly => {
+                    offset_cross = (free / (nf + 1.0)) as i32;
+                    extra_line_gap = (free / (nf + 1.0)) as i32;
+                }
+                // `stretch` cannot shrink a line and `space-between` piles up
+                // at the start — both are `flex-start` once the space is gone.
+                ContentAlign::Start | ContentAlign::Stretch | ContentAlign::Between => {}
             }
-
-            cross_y += line_cross + line_gap as i32;
+        } else if n_lines == 1 {
+            forced[0] = def_cross.map(|c| c as i32);
         }
-        (cross_y - line_gap.max(0.0) as i32 - y0).max(0)
+
+        let mut cross_y = y0 + offset_cross;
+        for (i, &line) in lines.iter().enumerate() {
+            let line_cross =
+                self.flex_row_line(items, st, &m, x, avail, main_gap, line, cross_y, forced[i]);
+            cross_y += line_cross;
+            if i + 1 < n_lines {
+                cross_y += line_gap as i32 + extra_line_gap;
+            }
+        }
+        (cross_y - y0).max(0)
     }
+
+    /// Lay one flex line out at `cross_y` and return the cross size it used.
+    /// `forced_cross` is the size the line was GIVEN (a single line filling a
+    /// definite container, or a share handed out by `align-content: stretch`);
+    /// `None` means it sizes to its tallest item, which is also what the
+    /// measuring pass asks for.
+    #[allow(clippy::too_many_arguments)]
+    fn flex_row_line(
+        &mut self,
+        items: &[(&'a Element, ComputedStyle)],
+        st: &ComputedStyle,
+        m: &[FlexItem],
+        x: i32,
+        avail: f32,
+        main_gap: f32,
+        line: (usize, usize),
+        cross_y: i32,
+        forced_cross: Option<i32>,
+    ) -> i32 {
+        let (idx0, idx1) = (line.0, line.1);
+        let li = &m[idx0..idx1];
+        let ln = li.len();
+        let gaps_total = main_gap * (ln as f32 - 1.0).max(0.0);
+
+        // Resolve flexible lengths within this line's available main size.
+        let size = resolve_flex_line(li, avail, gaps_total);
+
+        // Leftover main space → justify-content, unless main-axis auto margins
+        // absorb it.
+        let used: f32 = li
+            .iter()
+            .zip(&size)
+            .map(|(it, &sz)| it.m_lead + it.m_trail + sz + it.main_pad)
+            .sum::<f32>()
+            + gaps_total;
+        let leftover = avail - used;
+        let n_auto: usize = li.iter().map(|it| it.m_lead_auto as usize + it.m_trail_auto as usize).sum();
+        let (offset, extra_gap, auto_each) = if leftover > 0.5 && n_auto > 0 {
+            (0.0, 0.0, leftover / n_auto as f32)
+        } else {
+            let lo = leftover.max(0.0);
+            let (o, g) = match st.justify {
+                Justify::Start => (0.0, 0.0),
+                Justify::End => (lo, 0.0),
+                Justify::Center => (lo / 2.0, 0.0),
+                Justify::Between => (0.0, if ln > 1 { lo / (ln as f32 - 1.0) } else { 0.0 }),
+                Justify::Around => (lo / (2.0 * ln as f32), lo / ln as f32),
+                Justify::Evenly => (lo / (ln as f32 + 1.0), lo / (ln as f32 + 1.0)),
+            };
+            (o, g, 0.0)
+        };
+
+        // Main-axis positions (border-box left) per item.
+        let mut item_x = alloc::vec![0.0f32; ln];
+        let mut main = x as f32 + offset;
+        for k in 0..ln {
+            main += li[k].m_lead + if li[k].m_lead_auto { auto_each } else { 0.0 };
+            item_x[k] = main;
+            let box_main = size[k] + li[k].main_pad;
+            main += box_main + li[k].m_trail + if li[k].m_trail_auto { auto_each } else { 0.0 }
+                + main_gap + extra_gap;
+        }
+
+        // Natural cross size (height) at the resolved width, to size the
+        // line — laid out AT the spot the item will most likely keep, and
+        // the ops KEPT instead of discarded.
+        //
+        // Measuring a flex item already lays its whole subtree out; the old
+        // code threw that away and then laid the identical thing again, so
+        // every nesting level doubled the work (2^5 on MediaWiki's header).
+        // Counted on real pages, 93–96 % of items end up at exactly
+        // `(item_x[k], cross_y)` with their natural height, so the second
+        // pass was almost always a byte-for-byte repeat of the first.
+        let mut h_nat = alloc::vec![0i32; ln];
+        let mut marks: Vec<FlexMark> = Vec::with_capacity(ln);
+        for k in 0..ln {
+            let (el, s) = items[idx0 + k];
+            let s_meas = flex_item_style(&s, size[k], None, true);
+            let box_main = (size[k] + li[k].main_pad).max(1.0) as i32;
+            let mark = self.flex_mark();
+            self.path.push(self.info(el));
+            let bottom = self.layout_box(el, &s_meas, item_x[k] as i32, box_main, cross_y);
+            self.path.pop();
+            h_nat[k] = bottom - cross_y;
+            // Keep the ops, but NOT the ambient state a discarded
+            // measurement used to drop: a flex item is its own block
+            // formatting context, so its floats must not reach its
+            // siblings, and the containing block it installed is gone with
+            // it. Leaving those standing made every later item on the line
+            // flow around phantom exclusions.
+            self.floats.truncate(mark.spec.floats);
+            self.cb = mark.cb;
+            marks.push(mark);
+        }
+
+        // Line cross size: a single unwrapped line fills a definite container
+        // height; otherwise it's the tallest item margin box.
+        //
+        // The line is sized from each item's HYPOTHETICAL cross size
+        // (Flexbox §9.4 step 7) — the natural one clamped by its own
+        // `min-`/`max-height`. Using the raw natural height left the line
+        // short of any item held open by a `min-height`, and that item then
+        // hung out past the container: Wikipedia's search button is
+        // `min-height: 32px` inside a 30px-tall line.
+        let nat_line = (0..ln)
+            .map(|k| {
+                let hypo = clamp_cross(h_nat[k] as f32, li[k].min_cross, li[k].max_cross);
+                li[k].cm_lead as i32 + hypo as i32 + li[k].cm_trail as i32
+            })
+            .max()
+            .unwrap_or(0);
+        let line_cross = forced_cross.unwrap_or(nat_line);
+
+        // Now that the line's cross size is known, work out where each item
+        // really goes, and find the FIRST one the speculative pass got
+        // wrong. A forced height counts as wrong even when the number
+        // matches: it changes the derived style, so the subtree below can
+        // resolve differently.
+        let mut first_redo = ln;
+        let mut plan: Vec<(Option<f32>, i32)> = Vec::with_capacity(ln);
+        for k in 0..ln {
+            let s = &items[idx0 + k].1;
+            let align = s.align_self.unwrap_or(st.align_items);
+            let inner = (line_cross - li[k].cm_lead as i32 - li[k].cm_trail as i32).max(0);
+            let stretch = align == CrossAlign::Stretch && li[k].cross_auto;
+            let (forced_h, y) = if stretch {
+                let target = clamp_cross(inner as f32, li[k].min_cross, li[k].max_cross);
+                (Some(target), cross_y + li[k].cm_lead as i32)
+            } else {
+                let h = h_nat[k];
+                let y = match align {
+                    CrossAlign::End => cross_y + line_cross - li[k].cm_trail as i32 - h,
+                    CrossAlign::Center => cross_y + li[k].cm_lead as i32 + (inner - h) / 2,
+                    _ => cross_y + li[k].cm_lead as i32, // start / stretch-with-def-size / baseline
+                };
+                (None, y)
+            };
+            if first_redo == ln && (forced_h.is_some() || y != cross_y) {
+                first_redo = k;
+            }
+            plan.push((forced_h, y));
+        }
+
+        // `ops` is one sequential list, so redoing item k means dropping
+        // everything emitted from k onward — hence the first mismatch, not
+        // each one. Worst case this is exactly the two passes it replaced.
+        if first_redo < ln {
+            self.flex_rollback(&marks[first_redo]);
+            for k in first_redo..ln {
+                let (el, s) = items[idx0 + k];
+                let (forced_h, y) = plan[k];
+                let s2 = flex_item_style(&s, size[k], forced_h, true);
+                self.path.push(self.info(el));
+                // `layout_box` takes the box the caller resolved — the
+                // item's BORDER box. `size[k]` is its content size, so the
+                // item's own padding and border have to go back on, or a
+                // control (which paints exactly this width) loses them and
+                // clips its label.
+                let box_main = (size[k] + li[k].main_pad).max(1.0) as i32;
+                let _ = self.layout_box(el, &s2, item_x[k] as i32, box_main, y);
+                self.path.pop();
+            }
+        }
+        line_cross
+    }
+
 
     /// Column flex (main axis = vertical, cross axis = horizontal). `def_cross`
     /// is the container's definite content height (main size) if any.
@@ -5726,7 +5993,9 @@ impl<'a> Ctx<'a> {
     ) -> i32 {
         let n = items.len();
         let avail = w as f32; // cross-axis available (width)
-        let gap = st.gap;
+        // Column flex: the main axis is vertical, so `row-gap` separates the
+        // items, resolved against the container's own definite height.
+        let gap = st.grid_row_gap.px(def_cross.unwrap_or(0.0)).unwrap_or(0.0);
 
         // Cross-axis (horizontal) width + position, plus main-axis (vertical)
         // margins, per item. Cross axis is never flexed (grow/shrink are main).
@@ -5861,8 +6130,12 @@ impl<'a> Ctx<'a> {
                 FlexBasis::Pct(p) => to_content(p / 100.0 * avail),
                 FlexBasis::Auto => spec.unwrap_or(pref),
             };
-            // Automatic minimum size = min(content min, specified suggestion).
-            let mut floor = minc.min(spec.unwrap_or(minc));
+            // Automatic minimum size = min(content min, specified suggestion) —
+            // but only while the item's overflow is `visible` on the main axis.
+            // A scroll container has no automatic minimum (css-flexbox-1 §4.5):
+            // its content is meant to be clipped, so it may shrink to nothing.
+            let scrolls = if row { s.overflow_x.scrolls() } else { s.overflow_y.scrolls() };
+            let mut floor = if scrolls { 0.0 } else { minc.min(spec.unwrap_or(minc)) };
             if let Some(mn) = min_size.px(avail) {
                 floor = floor.max(to_content(mn));
             }
@@ -6187,6 +6460,7 @@ fn layout_pre(
                 bold: st.bold,
                 italic: st.italic,
                 mono: st.mono,
+                sp: (st.letter_spacing, st.word_spacing),
                 text,
             });
         }
@@ -6243,6 +6517,7 @@ fn flush_run(fonts: &crate::fonts::Fonts, st: &ComputedStyle, run: &mut Run, pre
     let frame = core::mem::take(&mut run.frame);
     let atomic = core::mem::take(&mut run.atomic);
     let atomic_min = core::mem::take(&mut run.atomic_min);
+    let sp = (st.letter_spacing, st.word_spacing);
     // `white-space: pre` keeps the source line breaks, so each source line is
     // its own line box and the widest one wins — collapsing them into one
     // would measure a whole code block as a single enormous line.
@@ -6252,7 +6527,7 @@ fn flush_run(fonts: &crate::fonts::Fonts, st: &ComputedStyle, run: &mut Run, pre
         for line in run.text.lines() {
             // Trailing spaces hang past the line box, so they never widen it
             // (css-text-3 §8). Leading ones DO count under `pre`.
-            widest = widest.max(measure(font, line.trim_end(), st.font_px));
+            widest = widest.max(measure_sp(font, line.trim_end_matches(is_hangable_space), st.font_px, sp));
         }
         let widest = widest + frame + atomic;
         run.text.clear();
@@ -6273,14 +6548,26 @@ fn flush_run(fonts: &crate::fonts::Fonts, st: &ComputedStyle, run: &mut Run, pre
     // auto table column that holds code.
     let font = fonts.pick(st.bold, st.italic, st.mono);
     let size = st.font_px;
-    let p = measure(font, collapsed.trim(), size) + frame + atomic;
+    let p = measure_sp(
+        font,
+        collapsed.trim_start_matches(is_css_space).trim_end_matches(is_hangable_space),
+        size,
+        sp,
+    ) + frame
+        + atomic;
     // `white-space: nowrap` has no break opportunities, so min-content is the
     // whole line — not its widest word. Without this a shrink-to-fit box around
     // a nowrap run is sized to one word and the run hangs out of it.
     let m = if st.nowrap {
         p
     } else {
-        let words = collapsed.split_whitespace().map(|wd| measure(font, wd, size)).fold(0.0f32, f32::max) + frame;
+        let words =
+            collapsed
+                .split(is_css_space)
+                .filter(|w| !w.is_empty())
+                .map(|wd| measure_sp(font, wd, size, sp))
+                .fold(0.0f32, f32::max)
+                + frame;
         // The line may break either side of an atomic inline, so its own
         // min-content competes with the widest word rather than adding to it.
         words.max(atomic_min)
@@ -6313,7 +6600,7 @@ fn collapse_whitespace(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut in_ws = false;
     for ch in s.chars() {
-        if ch.is_whitespace() {
+        if is_css_space(ch) {
             if !in_ws {
                 out.push(' ');
             }
@@ -6382,7 +6669,7 @@ impl<'a> Ctx<'a> {
         // box, or when it clips its overflow, it aligns on its bottom margin
         // edge instead (CSS2.1 §10.8.1).
         let baseline = match inner_baseline {
-            Some(b) if !st.overflow_clip => b.clamp(0, h),
+            Some(b) if !st.overflow_clip() => b.clamp(0, h),
             _ => h,
         };
         Some(AtomicBox { ops, links, controls, inspects, hover_boxes, w: outer_w, h, baseline, valign: st.valign })
@@ -6570,6 +6857,8 @@ struct RunStyle {
     valign: crate::style::VAlign,
     /// `text-decoration-line` bits (`style::DECO_*`).
     deco: u8,
+    /// `text-decoration-color`; `None` = `currentColor`.
+    deco_color: Option<Rgba>,
     /// `overflow-wrap`/`word-break` allow splitting this run mid-word.
     break_word: bool,
     /// `white-space: nowrap` — this run's spaces are not break opportunities,
@@ -6577,6 +6866,10 @@ struct RunStyle {
     nowrap: bool,
     /// Used `line-height` in px, or 0 for `normal` (use the face's metrics).
     lh: f32,
+    /// `(letter-spacing, word-spacing)` in px. Every width in this file that
+    /// belongs to a run goes through `measure_sp`, so a run measures and paints
+    /// at the same advance — the two must not drift apart.
+    sp: (f32, f32),
 }
 
 /// An inline-block's finished display list, laid out at the origin and
@@ -6871,7 +7164,7 @@ fn paint_control(
     let bg_img = |ops: &mut Vec<DrawOp>| {
         if let Some((key, layer)) = ctl.bg_img {
             ops.push(DrawOp::BgImage {
-                x, y: top, w, h, key,
+                x, y: top, w, h, clip: (x, top, w, h), key,
                 repeat: layer.repeat,
                 pos: layer.pos,
                 size: layer.size,
@@ -6922,6 +7215,7 @@ fn paint_control(
                         bold: ctl.style.bold,
                         italic: ctl.style.italic,
                         mono: ctl.style.mono,
+                        sp: ctl.style.sp,
                         text: line,
                     });
                     ly += lh;
@@ -6959,6 +7253,7 @@ fn paint_control(
                     bold: ctl.style.bold,
                     italic: ctl.style.italic,
                     mono: ctl.style.mono,
+                    sp: ctl.style.sp,
                     text,
                 });
             }
@@ -7124,10 +7419,10 @@ impl Inline {
 
     /// Add collapsed text from one text node under style `st`.
     fn text(&mut self, raw: &str, st: &ComputedStyle, href: Option<&str>) {
-        let rs = RunStyle { hidden: st.hidden, transparent: st.transparent, size: st.font_px, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: st.valign, deco: st.deco, break_word: st.break_word, nowrap: st.nowrap, lh: st.line_height.px(st.font_px).unwrap_or(0.0) };
+        let rs = RunStyle { hidden: st.hidden, transparent: st.transparent, size: st.font_px, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: st.valign, deco: st.deco, deco_color: st.deco_color, break_word: st.break_word, nowrap: st.nowrap, lh: st.line_height.px(st.font_px).unwrap_or(0.0), sp: (st.letter_spacing, st.word_spacing) };
         let mut word = String::new();
         for ch in raw.chars() {
-            if ch.is_whitespace() {
+            if is_css_space(ch) {
                 if !word.is_empty() {
                     let w = transform_word(core::mem::take(&mut word), st.text_transform);
                     self.push_word(w, rs, href);
@@ -7206,9 +7501,11 @@ impl Inline {
             mono: st.mono,
             valign: st.valign,
             deco: st.deco,
+            deco_color: st.deco_color,
             break_word: st.break_word,
             nowrap: st.nowrap,
             lh: st.line_height.px(st.font_px).unwrap_or(0.0),
+            sp: (st.letter_spacing, st.word_spacing),
         }));
     }
 
@@ -7282,7 +7579,11 @@ impl Inline {
                         // the font of the run whose space this is, so it is the
                         // closest thing to hand — and a monospace space is much
                         // wider than a proportional one.
-                        pen += space_width(fonts.pick(b.st.bold, b.st.italic, b.st.mono), b.st.font_px);
+                        pen += space_width(
+                            fonts.pick(b.st.bold, b.st.italic, b.st.mono),
+                            b.st.font_px,
+                            (b.st.letter_spacing, b.st.word_spacing),
+                        );
                     }
                     open.push(OpenFrag { bx: *bx, x0: Some((pen + b.margin_left) as i32), left: true });
                     pen += b.lead;
@@ -7320,8 +7621,9 @@ impl Inline {
                     gap = 0.0;
                 }
                 Item::Word { text, style, href, space_before } => {
-                    let ww = measure(face(style), text, style.size);
-                    let sw = if *space_before { space_width(face(style), style.size) } else { 0.0 };
+                    let ww = measure_sp(face(style), text, style.size, style.sp);
+                    let sw =
+                        if *space_before { space_width(face(style), style.size, style.sp) } else { 0.0 };
                     // `white-space: nowrap`: the space before this word is not a
                     // break opportunity, so the line overflows instead.
                     if !style.nowrap && !line.is_empty() && pen + sw + ww > right {
@@ -7346,7 +7648,7 @@ impl Inline {
                         let f = face(style);
                         let mut rest = text.as_str();
                         while !rest.is_empty() {
-                            let mut n = fit_prefix(f, rest, style.size, right - pen - lead);
+                            let mut n = fit_prefix(f, rest, style.size, right - pen - lead, style.sp);
                             if n == 0 {
                                 if !line.is_empty() {
                                     *last_baseline = Some(y + line_ascent as i32);
@@ -7373,7 +7675,7 @@ impl Inline {
                                 style: *style,
                                 href: href.clone(),
                             }));
-                            pen += lead + measure(f, head, style.size);
+                            pen += lead + measure_sp(f, head, style.size, style.sp);
                             run_end = pen;
                             lead = 0.0;
                             let (asc, lb) = run_metrics(f, style.size, style.lh);
@@ -7404,7 +7706,7 @@ impl Inline {
                 }
                 Item::Atomic { box_, space_before } => {
                     let Some(b) = box_.borrow_mut().take() else { continue };
-                    let sw = if *space_before { space_width(fonts.regular(), BASE_FONT_PX) } else { 0.0 };
+                    let sw = if *space_before { space_width(fonts.regular(), BASE_FONT_PX, (0.0, 0.0)) } else { 0.0 };
                     if !line.is_empty() && pen + sw + b.w as f32 > right {
                         *last_baseline = Some(y + line_ascent as i32);
                         break_frags(&mut open, &mut frags, pen);
@@ -7452,7 +7754,7 @@ impl Inline {
                         bw = w as f32;
                     }
                     let (bw, bh) = (bw.max(1.0) as i32, bh.max(1.0) as i32);
-                    let sw = if *space_before { space_width(fonts.regular(), BASE_FONT_PX) } else { 0.0 };
+                    let sw = if *space_before { space_width(fonts.regular(), BASE_FONT_PX, (0.0, 0.0)) } else { 0.0 };
                     if !line.is_empty() && pen + sw + bw as f32 > right {
                         *last_baseline = Some(y + line_ascent as i32);
                         break_frags(&mut open, &mut frags, pen);
@@ -7482,7 +7784,7 @@ impl Inline {
                     gap = gap.max(bh as f32 + 2.0);
                 }
                 Item::Control { ctl, space_before } => {
-                    let sw = if *space_before { space_width(fonts.regular(), BASE_FONT_PX) } else { 0.0 };
+                    let sw = if *space_before { space_width(fonts.regular(), BASE_FONT_PX, (0.0, 0.0)) } else { 0.0 };
                     if !line.is_empty() && pen + sw + ctl.w as f32 > right {
                         *last_baseline = Some(y + line_ascent as i32);
                         break_frags(&mut open, &mut frags, pen);
@@ -7703,7 +8005,11 @@ fn push_decorations(style: &RunStyle, x: i32, w: i32, baseline: i32, ops: &mut V
         return;
     }
     let h = ((style.size / 14.0) as i32).max(1);
-    let mut line = |y: i32| ops.push(DrawOp::Rect { x, y, w, h, color: style.color });
+    let color = style.deco_color.unwrap_or(style.color);
+    if color.a == 0 {
+        return;
+    }
+    let mut line = |y: i32| ops.push(DrawOp::Rect { x, y, w, h, color });
     if style.deco & crate::style::DECO_UNDERLINE != 0 {
         line(baseline + (style.size * 0.08) as i32);
     }
@@ -8079,9 +8385,9 @@ fn op_eq(a: &DrawOp, b: &DrawOp) -> bool {
             DrawOp::RoundRect { x: bx, y: by, w: bw, h: bh, r: br, color: bc, ring: bg },
         ) => (ax, ay, aw, ah, ac) == (bx, by, bw, bh, bc) && ar == br && ag == bg,
         (
-            DrawOp::Text { x: ax, y: ay, size: asz, color: ac, bold: ab, italic: ai, mono: am, text: at },
-            DrawOp::Text { x: bx, y: by, size: bsz, color: bc, bold: bb, italic: bi, mono: bm, text: bt },
-        ) => (ax, ay, ac, ab, ai, am, at) == (bx, by, bc, bb, bi, bm, bt) && asz == bsz,
+            DrawOp::Text { x: ax, y: ay, size: asz, color: ac, bold: ab, italic: ai, mono: am, sp: asp, text: at },
+            DrawOp::Text { x: bx, y: by, size: bsz, color: bc, bold: bb, italic: bi, mono: bm, sp: bsp, text: bt },
+        ) => (ax, ay, ac, ab, ai, am, at) == (bx, by, bc, bb, bi, bm, bt) && asz == bsz && asp == bsp,
         _ => false,
     }
 }
@@ -8291,8 +8597,8 @@ fn plan_one(
         Some((*y, c, size.to_bits(), *bold, *italic, *mono))
     };
     let right_edge = |op: &DrawOp| -> i32 {
-        let DrawOp::Text { x, size, bold, italic, mono, text, .. } = op else { return i32::MIN };
-        x + ceil_i32(measure(fonts.pick(*bold, *italic, *mono), text, *size))
+        let DrawOp::Text { x, size, bold, italic, mono, sp, text, .. } = op else { return i32::MIN };
+        x + ceil_i32(measure_sp(fonts.pick(*bold, *italic, *mono), text, *size, *sp))
     };
     let texts: Vec<usize> =
         (0..lay.ops.len()).filter(|i| matches!(lay.ops[*i], DrawOp::Text { .. })).collect();
@@ -8310,13 +8616,14 @@ fn plan_one(
     let mut touched = 0usize;
     for (i, op) in lay.ops.iter().enumerate() {
         let Some(sub) = sub_for(op) else { continue };
-        let DrawOp::Text { x, y, size, bold, italic, mono, text, .. } = op else { continue };
+        let DrawOp::Text { x, y, size, bold, italic, mono, sp, text, .. } = op else { continue };
         // Everything `push_decorations` was given, recovered from the op it was
         // emitted next to — the run's own width and baseline, measured with the
-        // same face at the same size. No second copy of the rule.
+        // same face at the same size AND the same spacing. No second copy of
+        // the rule.
         let (x, y, size) = (*x, *y, *size);
         let font = fonts.pick(*bold, *italic, *mono);
-        let run_w = ceil_i32(measure(font, text, size));
+        let run_w = ceil_i32(measure_sp(font, text, size, *sp));
         let baseline = y + ascent_i(font, size);
         let mut run = RunStyle {
             hidden: false,
@@ -8328,14 +8635,17 @@ fn plan_one(
             mono: *mono,
             valign: sub.off.valign,
             deco: sub.off.deco,
+            deco_color: sub.off.deco_color,
             break_word: false,
             nowrap: false,
             lh: 0.0,
+            sp: *sp,
         };
         let mut was = Vec::new();
         push_decorations(&run, x, run_w, baseline, &mut was);
         run.color = sub.on.color;
         run.deco = sub.on.deco;
+        run.deco_color = sub.on.deco_color;
         let mut now = Vec::new();
         push_decorations(&run, x, run_w, baseline, &mut now);
         now.push(DrawOp::Text {
@@ -8346,6 +8656,7 @@ fn plan_one(
             bold: *bold,
             italic: *italic,
             mono: *mono,
+            sp: *sp,
             text: text.clone(),
         });
 
@@ -8512,12 +8823,12 @@ fn emit_line(
                 // A hidden run is not a click target either — otherwise a
                 // collapsed dropdown leaves invisible links over the article.
                 if let (Some(h), false) = (&seg.href, seg.style.hidden) {
-                    let sw = measure(font, &seg.text, seg.style.size);
+                    let sw = measure_sp(font, &seg.text, seg.style.size, seg.style.sp);
                     links.push(LinkRect { x: seg.x + dx, y: line_top, w: ceil_i32(sw), h: box_h, href: h.clone() });
                 }
                 if !seg.style.hidden && !seg.style.transparent {
                     if seg.style.deco != 0 {
-                        let w = ceil_i32(measure(font, &seg.text, seg.style.size));
+                        let w = ceil_i32(measure_sp(font, &seg.text, seg.style.size, seg.style.sp));
                         let run_baseline = top + ascent_i(font, seg.style.size);
                         push_decorations(&seg.style, seg.x + dx, w, run_baseline, ops);
                     }
@@ -8529,6 +8840,7 @@ fn emit_line(
                         bold: seg.style.bold,
                         italic: seg.style.italic,
                         mono: seg.style.mono,
+                        sp: seg.style.sp,
                         text: seg.text,
                     });
                 }
@@ -10374,6 +10686,78 @@ fn dbg_wiki_shape() {
     }
 
     #[test]
+    fn letter_spacing_widens_a_run_and_moves_what_follows() {
+        // `letter-spacing` lands after every character, so a right-aligned run
+        // of five characters starts 5 × the spacing further left.
+        let plain = lay("<body><div style=\"width:400px;text-align:right\">abcde</div></body>", 800);
+        let spaced =
+            lay("<body><div style=\"width:400px;text-align:right;letter-spacing:4px\">abcde</div></body>", 800);
+        let x = |l: &Layout| {
+            l.ops
+                .iter()
+                .find_map(|o| match o {
+                    DrawOp::Text { x, text, .. } if text == "abcde" => Some(*x),
+                    _ => None,
+                })
+                .expect("the run")
+        };
+        assert_eq!(x(&plain) - x(&spaced), 20, "five characters, 4px each");
+    }
+
+    #[test]
+    fn nbsp_is_not_a_break_opportunity_and_has_a_width() {
+        // `&nbsp;` exists so a line does NOT break there. It is also not
+        // collapsible, so four of them are four characters wide, not one space.
+        let one = lay("<body><div style=\"width:400px\">a\u{00A0}b</div></body>", 800);
+        let four = lay("<body><div style=\"width:400px\">a\u{00A0}\u{00A0}\u{00A0}\u{00A0}b</div></body>", 800);
+        let wid = |l: &Layout| {
+            l.ops
+                .iter()
+                .find_map(|o| match o {
+                    DrawOp::Text { text, .. } if text.contains('b') => Some(text.chars().count()),
+                    _ => None,
+                })
+                .unwrap_or(0)
+        };
+        assert_eq!(wid(&one), 3, "one nbsp stays one character in the run");
+        assert_eq!(wid(&four), 6, "four nbsp do not collapse into one");
+    }
+
+    #[test]
+    fn align_content_centers_the_lines_in_a_taller_container() {
+        // Two 120px items in a 200px wrap container = two 40px lines, packed
+        // into 200px of cross space: 120px is left over, half of it above.
+        let l = lay(
+            "<body><div style=\"display:flex; flex-wrap:wrap; width:200px; height:200px; \
+             align-content:center\"><div style=\"width:120px; height:40px\">a</div>\
+             <div style=\"width:120px; height:40px\">b</div></div></body>",
+            800,
+        );
+        let t = texts(&l);
+        let a = *t.iter().find(|(_, _, s)| *s == "a").expect("a");
+        let b = *t.iter().find(|(_, _, s)| *s == "b").expect("b");
+        assert!(a.1 >= 60, "the first line starts well below the container top, was y={}", a.1);
+        assert_eq!(b.1 - a.1, 40, "the lines stay their own size, one below the other");
+    }
+
+    #[test]
+    fn align_content_stretch_grows_every_line_to_fill_the_container() {
+        // The initial value: no leftover cross space survives, so the second
+        // line starts halfway down a 200px container.
+        let l = lay(
+            "<body><div style=\"display:flex; flex-wrap:wrap; width:200px; height:200px\">\
+             <div style=\"width:120px; height:40px\">a</div>\
+             <div style=\"width:120px; height:40px\">b</div></div></body>",
+            800,
+        );
+        let t = texts(&l);
+        let a = *t.iter().find(|(_, _, s)| *s == "a").expect("a");
+        let b = *t.iter().find(|(_, _, s)| *s == "b").expect("b");
+        assert_eq!(a.1, 8, "the first line still starts at the container top (body margin)");
+        assert_eq!(b.1 - a.1, 100, "each line took half the container, was {}", b.1 - a.1);
+    }
+
+    #[test]
     fn flex_wrap_moves_overflowing_item_to_next_line() {
         // Two 120px items in a 200px wrap container → the 2nd wraps below the 1st.
         let l = lay(
@@ -10653,6 +11037,25 @@ fn vert_len(len: Len, cbh: Option<i32>) -> Option<f32> {
 /// flex and grid each subtracted only the padding, so every bordered container
 /// with a definite height came out two border-widths too tall — and a root
 /// `display:flex` stretched between `top`/`bottom` overshot the viewport.
+/// Resolve `aspect-ratio` into a used height, once the box's content width is
+/// known. Only the width→height direction: that is the one pages use (a card,
+/// a video embed, an image placeholder holding its shape while it loads), and
+/// the other needs a definite height that a block box in flow does not have.
+fn with_aspect_height(st: &ComputedStyle, cw: f32) -> Option<ComputedStyle> {
+    let r = st.aspect_ratio?;
+    if !matches!(st.height, Len::Auto) {
+        return None;
+    }
+    let mut s = *st;
+    // The ratio governs whichever box `box-sizing` names, so under
+    // `border-box` the width it divides is the border-box width — and the
+    // height it yields is one too, which is exactly what `content_height_of`
+    // then takes the frame back off.
+    let frame = if s.box_border { s.pad_left + s.pad_right + s.border_x() } else { 0.0 };
+    s.height = Len::Px(((cw + frame) / r).max(0.0));
+    Some(s)
+}
+
 fn content_height_of(st: &ComputedStyle, len: Len) -> Option<f32> {
     match len {
         Len::Px(h) if st.box_border => Some((h - st.pad_top - st.pad_bottom - st.border_y()).max(0.0)),

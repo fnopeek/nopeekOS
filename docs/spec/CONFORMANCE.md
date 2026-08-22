@@ -22,11 +22,11 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-18, beak 0.29.1)
+### Current number (measured 2026-08-22, beak 0.30.0)
 
 ```
-4204 pass / 1405 fail / 177 inconclusive   (of 5786 vendored reftests)
-= 74.9 % of the conclusive 5609
+4293 pass / 1349 fail / 144 inconclusive   (of 5786 vendored reftests)
+= 76.1 % of the conclusive 5642
 ```
 
 Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → 3746 → 3863 → 3869 →
@@ -81,7 +81,58 @@ order was wrong. All six real-page renderings stay byte-identical and the layout
 costs 0.015 % more fuel). The inconclusive count fell 254 → 177 over
 that span: references that used to render blank — because `:root` was dropped,
 because an `inline-block` had no box, or because an inline box painted no
-background — now paint, so 73 more tests actually measure something.
+background — now paint, so 73 more tests actually measure something. → **4293** (0.30.0, +89/−0 net over eleven changes, every one of them a
+property or a rule a real page uses. Ranked before anything was written: for
+each unimplemented property name, how many FAILING reftests mention it, crossed
+with how often it appears in `bootstrap.min.css` and in Wikipedia's resolved
+sheet. That put `background-clip` (39 failing tests, 14 Bootstrap
+declarations) and `align-content` (33 / 36) at the top, and it kept
+`grid-auto-flow` out — 42 failing tests mention it and 39 of them are
+`display: grid-lanes`, the experimental masonry proposal, which no page runs.
+
+The two biggest single wins were not properties at all. **A table is a
+shrink-to-fit box** (+27): under `table-layout: fixed` with `width: auto`,
+`fixed_columns` handed the columns the whole containing block instead of the
+width the first row asked for, so a 200px cell painted its border across the
+page. **An empty table is still a box** (+14): `layout_table_body` returned at
+`ncols == 0`, so a `display: table` with a width, a height and a border painted
+nothing whatsoever.
+
+Next, blockification (+15): `top`/`left` "do not apply" to an internal table
+display because an out-of-flow box is BLOCKIFIED (css-display-3 §2.7) — the
+rule was there for `inline`/`inline-block` and stopped short of the eight table
+displays, which is the whole of `CSS2/left-applies-to` and `CSS2/top-applies-to`.
+
+`align-content` (+15) needed the line-packing pass flex never had: a multi-line
+container measures its lines, throws that placement away, and lays them out
+again where `align-content` puts them — negative free space included, since the
+default overflow alignment is `unsafe`. On the way in it exposed that
+`align-items: last baseline` parsed as unknown and fell back to `stretch`, which
+SIZES an item instead of aligning it. `background-clip`/`background-origin`
+(+26) split the background's painting area from its positioning area — the two
+have different initial values, so a bordered box had been centring its image
+across its border all along.
+
+`letter-spacing`/`word-spacing` are oracle-neutral on their own (+7/−7) and
+were built anyway, because they are on nearly every designed page. What they
+DID move is the whitespace set underneath them: `char::is_whitespace` is the
+Unicode `White_Space` property, and it swallowed U+00A0 and U+3000 — so
+`&nbsp;` collapsed and offered a line break, which is the one thing it exists to
+prevent. CSS collapses space, tab and the newlines and nothing else; the other
+space separators HANG at the end of a line instead (css-text-3 §4.1.3).
+
+The rest: `overflow-x`/`overflow-y` as a keyword per axis (+3, and a flex item's
+automatic minimum size is zero only for a scroll container, which `overflow:
+clip` is not), percentage `gap` (+5 — and `gap: 10px 20px` on a row flex
+container had been putting the ROW gap between the items), a BFC root clearing
+floats over its whole border box rather than its first row (+7), `aspect-ratio`
+(+1 net, 3 gained and 2 pre-existing gaps exposed), the logical `inline-size`/
+`block-size`/`inset` families, `grid-row-gap`/`grid-column-gap`,
+`grid-auto-columns` on the implicit column, and `text-decoration-color`.
+
+Two losses stand and are named: `CSS2/letter-spacing-102` sets the property
+from `onload` and cannot be won without JS, and `css-text/letter-spacing-percent-001`
+needs `calc(0.05em + 5%)`.)
 
 **0.3.7 through 0.3.11 moved the oracle by exactly zero** — re-measured
 2026-08-05, same 3967 / 1639 / 180. That is not a failure: every one of those
@@ -330,11 +381,10 @@ The older per-suite table, kept for the shape of it:
 
 ## Known holes, by kind
 
-**Properties not parsed at all** (`style.rs::apply_one` has ~135 arms; these
-aren't among them): `box-shadow`,
-`text-shadow`, `letter-spacing`, `word-spacing`, `hyphens`, `cursor`, `outline*`, `transform`, `transition`,
-`animation`, `aspect-ratio`, `object-fit`, `filter`, `quotes`,
-`appearance`, `resize`, `writing-mode`.
+**Properties not parsed at all** (`style.rs::apply_one`; these aren't among
+its arms): `text-shadow`, `hyphens`, `cursor`, `transition`, `animation`,
+`object-fit`, `text-overflow`, `filter`, `quotes`, `resize`, `columns`,
+`list-style-position`, `writing-mode`.
 
 **Selectors that drop the whole rule** (`css.rs` returns `None` → the rule is
 discarded rather than mis-applied): every pseudo-class outside
@@ -1749,13 +1799,13 @@ cursor), `user-select`/`touch-action`/`overflow-anchor`/`scroll-margin`
 |---------|------|--------|-------|
 | Block flow (vertical stacking) | CSS2.1 §9 | ✅ | block formatting context (`layout.rs`): stack + adjacent-sibling **margin collapse**; anonymous inline runs flushed at block boundaries |
 | Inline flow / line boxes | CSS2.1 §9.4.2 | ✅ | line boxes with **mixed-style runs** (size/colour/weight/italic) sharing a baseline; greedy wrap; `<a>`/`<b>`/`<i>`/`<code>` flow inline; `<br>` breaks. Atomic inline boxes: `<img>`, form controls and **`display: inline-block`** (a full block box laid out at the origin, then translated into its line; aligned on its own last line box's baseline). **Non-atomic inline boxes carry a box too** (0.3.2): horizontal margin/border/padding advance the flow and each line box gets a decoration rectangle, sliced so only the first/last fragment carries the left/right edge. A `display: block` child does not split its inline ancestor into anonymous boxes yet. No bidi/UAX-14 yet |
-| Box model (margin/border/padding) | css-box-3 | 🟡 | full block box model: `width`/`min-width`/`max-width`, `margin` (4-side + **`auto` centering**, §10.3.3 + §10.4 min/max redo), `padding` (4-side), **per-side borders** (width/style/colour), `box-sizing`, logical `margin-inline`/`-block` + `padding-inline`/`-block`, vertical margin collapse → **centered `max-width` containers work**. No `border-radius` |
+| Box model (margin/border/padding) | css-box-3 | 🟡 | full block box model: `width`/`min-width`/`max-width`, `margin` (4-side + **`auto` centering**, §10.3.3 + §10.4 min/max redo), `padding` (4-side), **per-side borders** (width/style/colour), `box-sizing`, **`aspect-ratio`** (width→height, on whichever box `box-sizing` names), the logical families — `margin-inline`/`-block`, `padding-inline`/`-block`, `inline-size`/`block-size` with their `min-`/`max-`, and `inset` with its four longhands — vertical margin collapse → **centered `max-width` containers work**. Margin does not apply to an internal table display (§8.3). No `border-radius` |
 | Generated content (`::before`/`::after`) | CSS2.1 §12 | 🟡 | `content` as concatenated `<string>` tokens (with css-syntax-3 §4.3.7 escapes), **`counter()`/`counters()`** against a real counter scope (`counter-reset`/`counter-increment`, nesting by tree depth) and **`attr(X)`** — the originating element's attribute, empty string when absent. Any other component (`open-quote`/`close-quote`, `url()`, an unknown identifier) makes the WHOLE value produce nothing rather than render half of it. A generated element is a text run when it is `inline`, and **a real box** (background, border, size) for `block`/`inline-block`/`list-item`/`flex`/`grid`/`table` — the CSS-icon idiom. `display: none`, `display: contents` and the table-internal roles produce nothing, as does an out-of-flow one (no containing block resolved for pseudo-elements yet). In a flex container only the LEADING box is placed. `html::before`/`head::before` never render because layout starts at `<body>` |
 | `text-indent` | css-text-3 §7 | 🟡 | the block's FIRST line box starts in from the content edge (lengths, percentages of the containing block, negative hanging values). Inherited. **Not counted in intrinsic widths** — a shrink-to-fit box around indented text comes out that much too narrow |
-| Text wrapping / `white-space` | css-text-3 | 🟡 | `normal` collapse+wrap, `pre` (each source line its own line box, trailing spaces hang, §8) and **`nowrap`** (spaces collapse but are not break opportunities; min-content is the whole line); `<br>` forces a break even under max-content. **`word-break`/`overflow-wrap`/`word-wrap: break-word`** split an over-long word at the last character that fits, never inside a grapheme cluster (ZWJ sequences, variation selectors, skin tones, keycaps, combining marks, flags, tag sequences). `pre-wrap`/`pre-line` are **not** distinguished from `pre`. No `hyphens`, no UAX-14 line breaking, no bidi reordering |
-| Tables (`table`/`tr`/`td`/`th`) | css-tables-3 | 🟡 | `layout.rs`: §17.2.1 anonymous-box fixup, auto **and** `table-layout: fixed` column algorithms, `colspan` (spanning cells distribute only the shortfall), **both border models** — `border-collapse` (winner-takes-the-edge, half the collapsed line per cell, incl. in column widths) and separated with `border-spacing` + `empty-cells` — the `border`/`cellpadding`/`cellspacing` presentation attributes, table border box + `auto` horizontal centring, `<caption>`. **`caption-side`** and per-cell **`vertical-align`** (`top`/`middle`/`bottom`; `baseline` degrades to `top` — no cross-cell baseline alignment). No `rowspan`, `display:inline-table` is block-level |
-| Flexbox | css-flexbox-1 | 🟡 | `layout.rs::layout_flex`: row/column, **multi-line wrap**, `flex-grow`/`-shrink`/`-basis` + `flex` shorthand, `gap`, `justify-content` (all 6), `align-items`/`align-self`, `order`, per-item `margin:auto`, automatic content minimum size. No reverse directions, no baseline alignment, no `align-content`, no writing modes. **Weakest suite at 25.7 %** — see the gap map |
-| Grid | css-grid-2 | 🟡 | `layout.rs::layout_grid`: `grid-template-columns`/`-rows` (px/%/`fr`/`auto`/`repeat()`/`minmax()`≈), `grid-template-areas`, `grid-auto-rows`, row-major auto-placement, `grid-column`/`-row` (`span N`, `A / B`), `grid-area`, `gap`, `justify-items`/`justify-self`/`place-*`. No dense flow, no abspos-in-grid, no orthogonal/RTL flows |
+| Text wrapping / `white-space` | css-text-3 | 🟡 | `normal` collapse+wrap, `pre` (each source line its own line box, trailing spaces hang, §8) and **`nowrap`** (spaces collapse but are not break opportunities; min-content is the whole line); `<br>` forces a break even under max-content. **`word-break`/`overflow-wrap`/`word-wrap: break-word`** split an over-long word at the last character that fits, never inside a grapheme cluster (ZWJ sequences, variation selectors, skin tones, keycaps, combining marks, flags, tag sequences). `pre-wrap`/`pre-line` are **not** distinguished from `pre`. The collapsible set is the CSS one — space, tab, the newlines — so `&nbsp;` neither collapses nor offers a break, and the other space separators (U+1680, U+2000–200A, U+202F, U+205F, U+3000) hang at the end of a line instead of widening it. **`letter-spacing`/`word-spacing`**: spacing after every typographic character unit (not after a zero-width format character), on the word separators §8.1 names (not U+3000); measurement and paint read one value, so a run cannot drift from the line box that reserved it. Percentages resolve against the font-size; `calc()` with one does not. No `hyphens`, no UAX-14 line breaking, no bidi reordering |
+| Tables (`table`/`tr`/`td`/`th`) | css-tables-3 | 🟡 | `layout.rs`: §17.2.1 anonymous-box fixup, auto **and** `table-layout: fixed` column algorithms, `colspan` (spanning cells distribute only the shortfall), **both border models** — `border-collapse` (winner-takes-the-edge, half the collapsed line per cell, incl. in column widths) and separated with `border-spacing` + `empty-cells` — the `border`/`cellpadding`/`cellspacing` presentation attributes, table border box + `auto` horizontal centring, `<caption>`. **`caption-side`** and per-cell **`vertical-align`** (`top`/`middle`/`bottom`; `baseline` degrades to `top` — no cross-cell baseline alignment). A table is a **shrink-to-fit** box: under `table-layout: fixed` with `width: auto` it is exactly as wide as the first row pins it, and a table with no rows at all still paints its own box at its `width`/`height`. No `rowspan`, `display:inline-table` is block-level |
+| Flexbox | css-flexbox-1 | 🟡 | `layout.rs::layout_flex`: row/column, **multi-line wrap**, `flex-grow`/`-shrink`/`-basis` + `flex` shorthand, `gap`, `justify-content` (all 6), `align-items`/`align-self`, `order`, per-item `margin:auto`, automatic content minimum size (zero for a scroll container, §4.5), **`align-content`** (all seven, with the spec'd fallbacks for negative free space) and `place-content`. Percentage `gap`, and the row/column gaps kept apart so `gap: 10px 20px` puts the COLUMN gap between the items of a row. No reverse directions, no baseline alignment, no writing modes |
+| Grid | css-grid-2 | 🟡 | `layout.rs::layout_grid`: `grid-template-columns`/`-rows` (px/%/`fr`/`auto`/`repeat()`/`minmax()`≈), `grid-template-areas`, `grid-auto-rows`/`grid-auto-columns`, row-major auto-placement, `grid-column`/`-row` (`span N`, `A / B`), `grid-area`, `gap` (incl. percentages and the `grid-*-gap` spellings), `justify-items`/`justify-self`/`place-*`. No dense flow, no implicit columns, no abspos-in-grid, no orthogonal/RTL flows |
 | Positioning (rel/abs/fixed/sticky) | css-position-3 | 🟡 | `relative` (in-flow paint offset) + `absolute`/`fixed` (out of flow, positioned vs nearest `position!=static` ancestor's box / page). `top`/`left`/`right`/**`bottom`** (§10.6.4); `top`/`bottom` percentages resolve against the containing block's **height** (§9.3.2). **`z-index`** via recorded display-list ranges stable-sorted at the end of layout (§9.9) — the ranges must stay disjoint, a leaking throwaway measurement corrupts the whole list. `sticky` parses but lays out without offsets; `fixed` scrolls with the page |
 | Values & units (px/em/%/rem/…) | css-values-4 | 🟡 | `values.rs`: `px`/`em`/`rem`/`ex`/`ch`/`%`/`vw`/`vh`/`vmin`/`vmax`/`pt`/`pc`/`cm`/`mm`/`in`/`Q`, `auto`, `fr`, plus **`calc()`** with `+ - * /` and nesting (one code path for a bare `16px`, a `50%` and a full `calc(100% - 3rem)`). plus **`min()`/`max()`** (variadic) and **`clamp()`**, nestable in any combination with `calc()`. `rem` resolves against the root element, not the parent. `attr()` works in `content` (see Generated content); as a LENGTH (css-values-5) it still drops the declaration, as does `env()` |
 
@@ -1764,12 +1814,12 @@ cursor), `user-select`/`touch-action`/`overflow-anchor`/`scroll-margin`
 | Feature | Spec | Status | Notes |
 |---------|------|--------|-------|
 | Color / text color | css-color-4 | ✅ | `color.rs`: `#rgb`/`#rrggbb`/`#rgba`, the named-colour table, `rgb()`/`hsl()`/`hwb()`/`lab()`/`lch()`/`oklab()`/`oklch()`/`color()`, alpha and modern slash syntax |
-| Backgrounds / borders | css-backgrounds-3 | 🟡 | `background`/`background-color` fill (inserted behind content at a recorded op index) + **per-side** `border` (width/style/colour, incl. the shorthands and `border-collapse` edge resolution) + **`border-radius`** (shorthand with `/`, four corner longhands, percentages, §5.5 corner scaling; antialiased fill, and a uniform border stroked as one rounded ring — a non-uniform one keeps square corners) + **`background-image`/`mask-image`** with `-repeat`/`-position`/`-size`, on block AND inline boxes. No gradients, no `background-clip`/`-origin`/`-attachment`, one layer per element, no `box-shadow`, no `border-image`. **`border-width` and `border-style` are independent** (0.3.3): `BorderSide` keeps the specified width beside the used one, so a width with no style paints nothing and a style with no width is `medium`, in either declaration order. A negative width is invalid and keeps the previous value rather than becoming 0. `border-color` defaults to `currentColor`, resolved after the whole cascade so `border-style: solid; color: green` and the reverse agree |
+| Backgrounds / borders | css-backgrounds-3 | 🟡 | `background`/`background-color` fill (inserted behind content at a recorded op index) + **per-side** `border` (width/style/colour, incl. the shorthands and `border-collapse` edge resolution) + **`border-radius`** (shorthand with `/`, four corner longhands, percentages, §5.5 corner scaling; antialiased fill, and a uniform border stroked as one rounded ring — a non-uniform one keeps square corners) + **`background-image`/`mask-image`** with `-repeat`/`-position`/`-size`, on block AND inline boxes, plus **`background-clip`/`background-origin`** — the painting area and the positioning area are separate rectangles, which is why a bordered box centres its image inside the border and not across it. No gradients, no `background-attachment`, no `background-clip: text`, one layer per element, no `border-image`. **`border-width` and `border-style` are independent** (0.3.3): `BorderSide` keeps the specified width beside the used one, so a width with no style paints nothing and a style with no width is `medium`, in either declaration order. A negative width is invalid and keeps the previous value rather than becoming 0. `border-color` defaults to `currentColor`, resolved after the whole cascade so `border-style: solid; color: green` and the reverse agree |
 | Font size / weight / family | css-fonts-4 | 🟡 | em-relative `font-size` cascade with correct compounding; **six real subsetted faces** (Inter regular/bold/italic/bold-italic + mono/mono-bold, `fonts.rs`) — synthetic bold/italic retired. No `@font-face` / webfonts / family fallback lists |
-| Text decoration | css-text-decor-3 | 🟡 | `text-decoration`/`-line`: underline / line-through / overline as rects in the run's colour, at metric-free approximations of the font's decoration positions. UA rules: `:any-link` (href-gated), `<u>`/`<ins>`, `<s>`/`<del>`/`<strike>`. Inherited rather than propagated (§1.2) — same pixels for every construct we have. No `-color`/`-style`/`-thickness`, no `text-underline-offset` |
+| Text decoration | css-text-decor-3 | 🟡 | `text-decoration`/`-line`: underline / line-through / overline as rects in the run's colour, at metric-free approximations of the font's decoration positions. UA rules: `:any-link` (href-gated), `<u>`/`<ins>`, `<s>`/`<del>`/`<strike>`. Inherited rather than propagated (§1.2) — same pixels for every construct we have. **`text-decoration-color`** (a fully transparent one draws nothing). No `-style`/`-thickness`, no `text-underline-offset` |
 | Glyph rasterisation + AA | — | ✅ | fontdue + coverage blend, warm glyph cache; `fill` builds one row and `copy_within`s it (a per-pixel loop cost ~10× under wasmi) |
 | Transforms / filters / shadows | css-transforms/… | ❌ | §9 frontier — `transform`, `filter`, `text-shadow`, `box-shadow` all unparsed |
-| `overflow` | css-overflow-3 | 🟡 | `hidden`/`clip` on both axes drop what the box's content painted outside its padding box, and establish a block formatting context (CSS2.1 §9.4.1). Honours the containing-block rule for out-of-flow descendants (§11.1.1) and viewport propagation from `html`/`body` (§3.3). `auto`/`scroll` do **not** clip — there is no in-page scroll container to reach the hidden part with. No scrollbars, and the clip is skipped inside a z-index stacking range |
+| `overflow` | css-overflow-3 | 🟡 | `hidden`/`clip` drop what the box's content painted outside its padding box, and establish a block formatting context (CSS2.1 §9.4.1). Kept as the KEYWORD per axis, because two different questions are asked of it and they disagree: which edge cuts the paint (`hidden`/`clip`) and whether the box is a scroll container (`hidden`/`scroll`/`auto` — `clip` is not, which is what keeps it from zeroing a flex item's automatic minimum size). `overflow-x: hidden; overflow-y: auto` clips one axis and leaves the other alone. Honours the containing-block rule for out-of-flow descendants (§11.1.1) and viewport propagation from `html`/`body` (§3.3). `auto`/`scroll` do **not** clip — there is no in-page scroll container to reach the hidden part with. No scrollbars, and the clip is skipped inside a z-index stacking range |
 | `opacity` / `visibility` | css-color-4 / css-display | 🟡 | `visibility: hidden/collapse` inherits and suppresses bg/border/text/image/marker (and removes the element as a click target); `opacity: 0` groups its subtree (a descendant can't take it back) but **stays hit-testable** — that is the point of the checkbox-hack overlay. No fractional opacity compositing |
 
 ## Images

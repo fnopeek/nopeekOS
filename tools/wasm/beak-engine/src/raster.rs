@@ -604,12 +604,12 @@ impl Engine {
                 DrawOp::RoundRect { x, y, w: rw, h: rh, r, color, ring } => {
                     fill_round(out, wi, hi, *x, *y - scroll_y, *rw, *rh, *r, *color, *ring);
                 }
-                DrawOp::Text { x, y, size, color, bold, italic, mono, text } => {
+                DrawOp::Text { x, y, size, color, bold, italic, mono, sp, text } => {
                     let vy = *y - scroll_y;
                     if vy > hi || vy + (*size as i32) + 6 < 0 {
                         continue; // fully off-screen line → skip
                     }
-                    self.draw_run(out, wi, hi, *x, vy, *size, *color, *bold, *italic, *mono, text);
+                    self.draw_run(out, wi, hi, *x, vy, *size, *color, *bold, *italic, *mono, *sp, text);
                 }
                 DrawOp::Image { x, y, w: iw, h: ih, src, alt } => {
                     let vy = *y - scroll_y;
@@ -625,17 +625,18 @@ impl Engine {
                         None => self.draw_img_placeholder(out, wi, hi, *x, vy, *iw, *ih, alt),
                     }
                 }
-                DrawOp::BgImage { x, y, w: bw, h: bh, key, repeat, pos, size, tint } => {
+                DrawOp::BgImage { x, y, w: bw, h: bh, clip, key, repeat, pos, size, tint } => {
                     let vy = *y - scroll_y;
                     if vy > hi || vy + *bh < 0 {
                         continue;
                     }
+                    let cl = (clip.0, clip.1 - scroll_y, clip.2, clip.3);
                     // A missing background draws NOTHING — unlike `<img>`,
                     // there is no placeholder for one: the box is styled and
                     // sized either way, so an absent decoration must simply be
                     // absent rather than a grey frame over the content.
                     if let Some(img) = self.css_images.borrow().get(key) {
-                        blit_bg(out, wi, hi, *x, vy, *bw, *bh, img, *repeat, *pos, *size, *tint);
+                        blit_bg(out, wi, hi, *x, vy, *bw, *bh, cl, img, *repeat, *pos, *size, *tint);
                     }
                 }
             }
@@ -664,7 +665,7 @@ impl Engine {
         fill(out, wi, hi, x, y, 1, h, c);
         fill(out, wi, hi, x + w - 1, y, 1, h, c);
         if !alt.is_empty() && w > 24 {
-            self.draw_run(out, wi, hi, x + 4, y + 4, 13.0, self.theme.muted.into(), false, false, false, alt);
+            self.draw_run(out, wi, hi, x + 4, y + 4, 13.0, self.theme.muted.into(), false, false, false, (0.0, 0.0), alt);
         }
     }
 
@@ -683,6 +684,10 @@ impl Engine {
         bold: bool,
         italic: bool,
         mono: bool,
+        // `(letter-spacing, word-spacing)` — the SAME pair layout measured the
+        // run with. Advancing the pen by anything else puts the glyphs somewhere
+        // the line box did not reserve.
+        sp: (f32, f32),
         text: &str,
     ) {
         let font = self.fonts.pick(bold, italic, mono);
@@ -697,7 +702,7 @@ impl Engine {
             let (m, cov) = cache.entry(key).or_insert_with(|| font.rasterize(ch, size));
             let gx0 = pen as i32 + m.xmin;
             let gy0 = baseline - m.ymin - m.height as i32;
-            pen += m.advance_width;
+            pen += m.advance_width + crate::layout::char_spacing(ch, sp);
             // Clip the glyph box against the buffer once; the inner loop then
             // walks a row by offset and never re-tests a bound.
             let (cx0, cx1) = (gx0.max(0), (gx0 + m.width as i32).min(w));
@@ -989,6 +994,9 @@ fn blit_bg(
     dy: i32,
     dw: i32,
     dh: i32,
+    // The painting area (`background-clip`). `d*` above is the POSITIONING
+    // area, which is what the tile grid is anchored to and measured against.
+    clip: (i32, i32, i32, i32),
     img: &crate::image::Image,
     repeat: (bool, bool),
     pos: (BgPos, BgPos),
@@ -1011,12 +1019,12 @@ fn blit_bg(
         let hi = (box_hi - origin - 1).div_euclid(tile).max(0);
         (lo, hi)
     };
-    let (ix0, ix1) = span(ox, dx, dx + dw, tw, repeat.0);
-    let (iy0, iy1) = span(oy, dy, dy + dh, th, repeat.1);
-    // Clip to the box AND to the surface in one rect, so the inner loop never
-    // tests bounds per pixel.
-    let (cx0, cx1) = (dx.max(0), (dx + dw).min(w));
-    let (cy0, cy1) = (dy.max(0), (dy + dh).min(h));
+    let (ix0, ix1) = span(ox, clip.0, clip.0 + clip.2, tw, repeat.0);
+    let (iy0, iy1) = span(oy, clip.1, clip.1 + clip.3, th, repeat.1);
+    // Clip to the painting area AND to the surface in one rect, so the inner
+    // loop never tests bounds per pixel.
+    let (cx0, cx1) = (clip.0.max(0), (clip.0 + clip.2).min(w));
+    let (cy0, cy1) = (clip.1.max(0), (clip.1 + clip.3).min(h));
     if cx1 <= cx0 || cy1 <= cy0 {
         return;
     }
@@ -1418,8 +1426,8 @@ mod tests {
         let mut s = alloc::string::String::new();
         for op in &l.ops {
             match op {
-                DrawOp::Text { x, y, size, color, bold, italic, mono, text } => {
-                    let _ = write!(s, "T {x},{y} {size:.2} c={color:?} {bold}{italic}{mono} {text:?}\n");
+                DrawOp::Text { x, y, size, color, bold, italic, mono, sp, text } => {
+                    let _ = write!(s, "T {x},{y} {size:.2} c={color:?} {bold}{italic}{mono} {sp:?} {text:?}\n");
                 }
                 DrawOp::Rect { x, y, w, h, color } => {
                     let _ = write!(s, "R {x},{y} {w}x{h} c={color:?}\n");
