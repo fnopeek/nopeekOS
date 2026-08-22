@@ -3478,10 +3478,18 @@ impl<'a> Ctx<'a> {
         // at the static position and slide the finished box (and everything it
         // emitted) into place. With neither offset the static position is the
         // answer already (§10.6.4).
+        // `layout_box` is handed the BORDER-box top, so the vertical margins
+        // belong here: §10.6.4 puts the box at `top + margin-top` below the
+        // containing block's edge, and the static position is where its MARGIN
+        // box would have sat. Leaving them out placed an absolutely positioned
+        // box its own `margin-top` too high — visible the moment a page uses
+        // `margin` instead of `top` to nudge an overlay.
+        let mt = st.margin_top;
+        let mb = st.margin_bottom;
         let (py, shift_to_bottom) = match (top, bottom, cbh) {
-            (Some(t), _, _) => (cby as f32 + t, None),
-            (None, Some(b), Some(h)) => (static_y as f32, Some(cby as f32 + h as f32 - b)),
-            _ => (static_y as f32, None),
+            (Some(t), _, _) => (cby as f32 + t + mt, None),
+            (None, Some(b), Some(h)) => (static_y as f32 + mt, Some(cby as f32 + h as f32 - b - mb)),
+            _ => (static_y as f32 + mt, None),
         };
         // layout_box → layout_block re-establishes the CB for its own children.
         let w_i = width.max(1.0) as i32;
@@ -5100,6 +5108,7 @@ impl<'a> Ctx<'a> {
 
         // Grid items = in-flow child elements; abspos children are out of flow.
         let mut items: Vec<(&Element, ComputedStyle)> = Vec::new();
+        let mut abs_items: Vec<(&Element, ComputedStyle)> = Vec::new();
         let sib_count = el.children.iter().filter(|n| matches!(n, Node::Element(_))).count() as u32;
         let mut siblings: Vec<ElemInfo> = Vec::new();
         for c in &el.children {
@@ -5113,9 +5122,11 @@ impl<'a> Ctx<'a> {
                     continue;
                 }
                 if matches!(cs.position, Position::Absolute | Position::Fixed) {
-                    self.path.push(self.info(ce));
-                    self.layout_abs(ce, &cs, self.cb.0, self.cb.1);
-                    self.path.pop();
+                    // Deferred: a positioned child that names a grid line has
+                    // that GRID AREA as its containing block (css-grid §9), and
+                    // no track has a size yet. One that names none keeps the
+                    // container's padding box.
+                    abs_items.push((ce, cs));
                     continue;
                 }
                 items.push((ce, cs));
@@ -5427,6 +5438,46 @@ impl<'a> Ctx<'a> {
                 self.shift_ops(&m0, 0, dy);
             }
         }
+
+        // — positioned children, now that every track has a size —
+        //
+        // css-grid §9: an absolutely positioned child whose `grid-row`/
+        // `grid-column` names lines is contained by that GRID AREA; on an axis
+        // where it names none, the containing block stays the grid container's
+        // padding box. The two axes are decided separately, which is why this
+        // is not one `if`.
+        let prev_cb = self.cb;
+        for (el_i, s) in &abs_items {
+            let (px0, py0, pw, ph, pend) = prev_cb;
+            let (mut ax, mut aw) = (px0, pw);
+            let (mut ay, mut ah) = (py0, ph);
+            if ncols > 0 && s.grid_col_start != 0 {
+                let c = resolve_col(s.grid_col_start).min(ncols - 1);
+                let cspan = (s.grid_col_span as usize).clamp(1, ncols - c);
+                ax = colx[c] as i32;
+                aw = cell_width(c, cspan).max(1.0) as i32;
+            }
+            if nrows > 0 && s.grid_row_start != 0 {
+                let r = resolve_row(s.grid_row_start).min(nrows - 1);
+                let rspan = (s.grid_row_span as usize).clamp(1, nrows - r);
+                ay = row_y[r];
+                let mut h = row_gap * (rspan as f32 - 1.0).max(0.0);
+                for k in 0..rspan {
+                    h += row_h[r + k];
+                }
+                ah = Some(h as i32);
+            }
+            self.cb = if ah == ph && ax == px0 && aw == pw && ay == py0 {
+                prev_cb
+            } else {
+                (ax, ay, aw, ah, if ah == ph { pend } else { None })
+            };
+            let (sx, sy) = (self.cb.0, self.cb.1);
+            self.path.push(self.info(el_i));
+            self.layout_abs(el_i, s, sx, sy);
+            self.path.pop();
+        }
+        self.cb = prev_cb;
 
         yy - y0
     }
