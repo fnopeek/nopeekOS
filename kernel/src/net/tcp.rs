@@ -768,16 +768,19 @@ pub fn conn_healthy(handle: usize) -> bool {
         if c.state == State::Established && !c.closed && !c.error)
 }
 
-/// Close a connection gracefully (sends FIN).
-/// Close without waiting for the peer's FIN. For MODULES: the waiting form
-/// below spins up to 2 s, and a host call that spins freezes every other
-/// fiber on that worker core — the same trap as the old blocking connect.
-/// Aborting a connection that never came up costs those 2 s for nothing:
-/// its state is SynSent, which the wait loop does not even accept as an end.
+/// Close a connection gracefully (sends FIN) and return at once.
+///
+/// Linux's `close()` does not wait either: the socket lingers in the
+/// background and only `SO_LINGER` — off by default — makes it block.
+/// Waiting here spun on the caller's core for up to 2 s. Measured on the
+/// device: a peer that answers `Connection: close` turned a 140 ms document
+/// fetch into 2150 ms, and the time landed outside every span the HTTP client
+/// prints, so it read as an unexplained gap. A host call that spins also
+/// freezes every other fiber on that worker core.
 ///
 /// The FIN goes out, the slot stays in FinWait1, and `tick_connections`
-/// reaps it if the peer never answers.
-pub fn close_nowait(handle: usize) -> Result<(), TcpError> {
+/// carries it to TimeWait or reaps it if the peer never answers.
+pub fn close(handle: usize) -> Result<(), TcpError> {
     if handle >= MAX_CONNECTIONS { return Err(TcpError::NotConnected); }
     let mut conns = CONNECTIONS.lock();
     let conn = conns[handle].as_mut().ok_or(TcpError::NotConnected)?;
@@ -791,38 +794,6 @@ pub fn close_nowait(handle: usize) -> Result<(), TcpError> {
         // Never established, or already shutting down — nothing to say.
         conns[handle] = None;
     }
-    Ok(())
-}
-
-pub fn close(handle: usize) -> Result<(), TcpError> {
-    let mut conns = CONNECTIONS.lock();
-    let conn = conns[handle].as_mut().ok_or(TcpError::NotConnected)?;
-
-    if conn.state == State::Established {
-        let seq = conn.snd_nxt;
-        conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
-        conn.state = State::FinWait1;
-        send_seg(conn, seq, conn.rcv_nxt, FIN | ACK, 0, &[]);
-    }
-    drop(conns);
-
-    // Wait briefly for FIN-ACK
-    let t0 = crate::interrupts::ticks();
-    loop {
-        super::poll();
-        tick_connections();
-
-        let conns = CONNECTIONS.lock();
-        match conns[handle].as_ref().map(|c| c.state) {
-            Some(State::TimeWait) | Some(State::Closed) | None => break,
-            _ => {}
-        }
-        drop(conns);
-        if crate::interrupts::ticks() - t0 > 200 { break; } // 2s
-        core::hint::spin_loop();
-    }
-
-    close_cleanup(handle);
     Ok(())
 }
 
@@ -1242,7 +1213,7 @@ pub fn tick_connections() {
                 slot.state = State::Closed;
             }
 
-            // Half-closed with a peer that never answers. `close_nowait`
+            // Half-closed with a peer that never answers. `close`
             // leaves FinWait1 behind on purpose and nothing else frees it —
             // without this the slot is pinned for the rest of the boot.
             // 60 s = Linux's tcp_fin_timeout.

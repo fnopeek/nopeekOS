@@ -3574,7 +3574,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     // and 2 s of a frozen worker core is the WiFi driver not draining.
     linker.func_wrap("env", "npk_tcp_close",
         |_caller: Caller<'_, HostState>, handle: i32| -> i32 {
-            if handle >= 0 { let _ = crate::net::tcp::close_nowait(handle as usize); }
+            if handle >= 0 { let _ = crate::net::tcp::close(handle as usize); }
             0
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
