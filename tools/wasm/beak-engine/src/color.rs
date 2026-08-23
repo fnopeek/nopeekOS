@@ -1048,3 +1048,171 @@ mod tests {
         assert_eq!(parse_color("WindowText"), parse_color("CanvasText"));
     }
 }
+
+// ── filter: the colour functions (filter-effects-1 §18.1) ─────────────────
+
+/// A `filter` chain reduced to ONE colour transform.
+///
+/// Every colour filter the spec defines — `grayscale`, `sepia`, `saturate`,
+/// `hue-rotate`, `invert`, `brightness`, `contrast`, `opacity` — is given
+/// there as a matrix over the RGB triple, and matrices compose. So a chain of
+/// any length costs one 3x4 multiply per pixel rather than a walk over the
+/// list, and `ComputedStyle` carries a fixed 52 bytes instead of a `Vec`.
+///
+/// `blur` and `drop-shadow` are deliberately NOT here: they MOVE pixels rather
+/// than recolour them, so no matrix can express them. Neither appears in
+/// `assets/bootstrap.min.css` or Wikipedia's `resolved.css` — measured, all 46
+/// `filter` declarations there are `invert`, `grayscale`, `brightness` and
+/// `hue-rotate` — and between them they carry two reftests. A declaration that
+/// names one is dropped whole (the chain is all-or-nothing), so a page gets
+/// its unfiltered pixels rather than a wrong approximation of a blur.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct ColorFilter {
+    /// Three rows of `[r, g, b, offset]`, over channels in 0..1.
+    pub m: [f32; 12],
+    /// `opacity()` — the one filter that touches alpha instead of colour.
+    pub a: f32,
+}
+
+impl ColorFilter {
+    pub const IDENTITY: ColorFilter =
+        ColorFilter { m: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0], a: 1.0 };
+
+    /// `self` applied first, then `next`.
+    pub fn then(self, next: ColorFilter) -> ColorFilter {
+        let mut m = [0.0f32; 12];
+        for r in 0..3 {
+            for c in 0..3 {
+                m[r * 4 + c] = (0..3).map(|k| next.m[r * 4 + k] * self.m[k * 4 + c]).sum();
+            }
+            m[r * 4 + 3] =
+                (0..3).map(|k| next.m[r * 4 + k] * self.m[k * 4 + 3]).sum::<f32>() + next.m[r * 4 + 3];
+        }
+        ColorFilter { m, a: self.a * next.a }
+    }
+
+    /// The transform, on 8-bit channels. Alpha is scaled by `opacity()`.
+    pub fn apply(&self, c: Rgba) -> Rgba {
+        let (r, g, b) = (c.c.0 as f32 / 255.0, c.c.1 as f32 / 255.0, c.c.2 as f32 / 255.0);
+        let ch = |i: usize| {
+            round_u8(clamp(self.m[i] * r + self.m[i + 1] * g + self.m[i + 2] * b + self.m[i + 3], 0.0, 1.0) * 255.0)
+        };
+        Rgba { c: Rgb(ch(0), ch(4), ch(8)), a: round_u8(clamp(c.a as f32 * self.a, 0.0, 255.0)) }
+    }
+
+    /// The same transform on one BGRA source pixel, for the image paths — the
+    /// only place the pixels exist at all, since an image travels to the
+    /// display list as a key.
+    pub fn apply_bgra(&self, px: [u8; 4]) -> [u8; 4] {
+        let out = self.apply(Rgba { c: Rgb(px[2], px[1], px[0]), a: px[3] });
+        [out.c.2, out.c.1, out.c.0, out.a]
+    }
+}
+
+/// Parse a `filter` list into one composed transform.
+///
+/// All-or-nothing: an unknown function, or one this engine cannot express as a
+/// colour matrix (`blur`, `drop-shadow`, `url()`), invalidates the whole
+/// declaration — a half-applied chain would be a colour the page never asked
+/// for. `none` parses to the identity, which is how a page turns an inherited
+/// filter back off.
+pub fn parse_filter(v: &str) -> Option<ColorFilter> {
+    let v = v.trim();
+    if v.eq_ignore_ascii_case("none") {
+        return Some(ColorFilter::IDENTITY);
+    }
+    let mut out = ColorFilter::IDENTITY;
+    let mut rest = v;
+    let mut any = false;
+    while !rest.is_empty() {
+        let rem = rest.trim_start();
+        if rem.is_empty() {
+            break;
+        }
+        let open = rem.find('(')?;
+        let close = rem.find(')')?;
+        if close < open {
+            return None;
+        }
+        let name = rem[..open].trim().to_ascii_lowercase();
+        let arg = rem[open + 1..close].trim();
+        out = out.then(filter_fn(&name, arg)?);
+        any = true;
+        rest = &rem[close + 1..];
+    }
+    any.then_some(out)
+}
+
+/// One filter function as a matrix. `amount` is a `<number>` or a
+/// `<percentage>`; the default when omitted differs per function.
+fn filter_fn(name: &str, arg: &str) -> Option<ColorFilter> {
+    // `hue-rotate` takes an angle, everything else a number/percentage.
+    if name == "hue-rotate" {
+        let deg = if arg.is_empty() { 0.0 } else { parse_hue(arg)? };
+        let rad = deg * core::f32::consts::PI / 180.0;
+        let (c, s) = (libm::cosf(rad), libm::sinf(rad));
+        return Some(ColorFilter {
+            m: [
+                0.213 + c * 0.787 - s * 0.213, 0.715 - c * 0.715 - s * 0.715, 0.072 - c * 0.072 + s * 0.928, 0.0,
+                0.213 - c * 0.213 + s * 0.143, 0.715 + c * 0.285 + s * 0.140, 0.072 - c * 0.072 - s * 0.283, 0.0,
+                0.213 - c * 0.213 - s * 0.787, 0.715 - c * 0.715 + s * 0.715, 0.072 + c * 0.928 + s * 0.072, 0.0,
+            ],
+            a: 1.0,
+        });
+    }
+    // The default amount is 1 for every one of these — `invert()` with no
+    // argument is a full inversion.
+    let amount = if arg.is_empty() { 1.0 } else { num_or_pct_val(arg)? };
+    // `grayscale`, `sepia`, `invert` and `opacity` saturate at 1; `saturate`,
+    // `brightness` and `contrast` have no upper bound. Bootstrap writes
+    // `grayscale(100)` — a plain number, not a percentage — and means 1.
+    let unit = clamp(amount, 0.0, 1.0);
+    let diag = |k: f32, off: f32| ColorFilter {
+        m: [k, 0.0, 0.0, off, 0.0, k, 0.0, off, 0.0, 0.0, k, off],
+        a: 1.0,
+    };
+    Some(match name {
+        // `grayscale(x)` is `saturate(1 - x)`, and `sepia` interpolates the
+        // same way towards its own fixed matrix.
+        "grayscale" => saturate_matrix(1.0 - unit),
+        "saturate" => saturate_matrix(amount.max(0.0)),
+        "sepia" => {
+            let s = 1.0 - unit;
+            ColorFilter {
+                m: [
+                    0.393 + 0.607 * s, 0.769 - 0.769 * s, 0.189 - 0.189 * s, 0.0,
+                    0.349 - 0.349 * s, 0.686 + 0.314 * s, 0.168 - 0.168 * s, 0.0,
+                    0.272 - 0.272 * s, 0.534 - 0.534 * s, 0.131 + 0.869 * s, 0.0,
+                ],
+                a: 1.0,
+            }
+        }
+        // c' = a(1-c) + (1-a)c
+        "invert" => diag(1.0 - 2.0 * unit, unit),
+        "brightness" => diag(amount.max(0.0), 0.0),
+        "contrast" => diag(amount.max(0.0), 0.5 - 0.5 * amount.max(0.0)),
+        "opacity" => ColorFilter { a: unit, ..ColorFilter::IDENTITY },
+        // `blur`, `drop-shadow`, `url` — see the type's note.
+        _ => return None,
+    })
+}
+
+fn saturate_matrix(s: f32) -> ColorFilter {
+    ColorFilter {
+        m: [
+            0.213 + 0.787 * s, 0.715 - 0.715 * s, 0.072 - 0.072 * s, 0.0,
+            0.213 - 0.213 * s, 0.715 + 0.285 * s, 0.072 - 0.072 * s, 0.0,
+            0.213 - 0.213 * s, 0.715 - 0.715 * s, 0.072 + 0.928 * s, 0.0,
+        ],
+        a: 1.0,
+    }
+}
+
+/// A filter amount: `<number>` or `<percentage>`. Unlike `unit_pct` this does
+/// not clamp — `brightness(200%)` is a legal 2.
+fn num_or_pct_val(tok: &str) -> Option<f32> {
+    match tok.strip_suffix('%') {
+        Some(n) => n.trim().parse::<f32>().ok().map(|v| v / 100.0),
+        None => tok.parse::<f32>().ok(),
+    }
+}

@@ -523,6 +523,15 @@ fn clip_ops(ops: &mut Vec<DrawOp>, start: usize, cl: i32, ct: i32, cr: i32, cb: 
     }
 }
 
+/// Intern one `filter` transform, deduped, and return its 1-based index.
+fn filter_key(table: &mut Vec<crate::color::ColorFilter>, f: crate::color::ColorFilter) -> u16 {
+    let i = table.iter().position(|e| *e == f).unwrap_or_else(|| {
+        table.push(f);
+        table.len() - 1
+    });
+    (i + 1).min(u16::MAX as usize) as u16
+}
+
 /// `position:relative` paint offset (dx, dy): `left`/`top` win over `right`/
 /// `bottom`; `%` resolves against the containing block's content width.
 /// `transform: translate(...)` as whole pixels. Percentages are of the box's
@@ -699,7 +708,10 @@ pub enum DrawOp {
     /// `fit` is `object-fit`: the box is `w`×`h` either way, the picture
     /// inside it is placed by the rasteriser, which is the only place the
     /// intrinsic size is known (the pixels are looked up at paint time).
-    Image { x: i32, y: i32, w: i32, h: i32, src: String, alt: String, fit: ObjectFit },
+    /// `filter` is a 1-based index into `Layout::filters`, 0 for none — the
+    /// pixels only exist at paint time, so the transform has to travel with
+    /// the op rather than being applied to a colour here.
+    Image { x: i32, y: i32, w: i32, h: i32, src: String, alt: String, fit: ObjectFit, filter: u16 },
     /// A `background-image` or `mask-image` layer over the box `x,y,w,h` (the
     /// background positioning area). Carries the `url_key`, not the pixels —
     /// same reason as `Image`: an asset arriving late costs a repaint, never a
@@ -722,6 +734,10 @@ pub enum DrawOp {
         pos: (BgPos, BgPos),
         size: BgSize,
         tint: Option<Rgba>,
+        /// Same 1-based index as `Image::filter`. A MASK never uses it: it
+        /// paints `tint` through the image's alpha, so the transform lands on
+        /// that colour at layout time instead.
+        filter: u16,
     },
 }
 
@@ -789,6 +805,7 @@ fn bg_ops(st: &ComputedStyle, bg: Option<u64>, mask: Option<u64>, x: i32, y: i32
             pos: st.mask_layer.pos,
             size: st.mask_layer.size,
             tint: Some(color),
+            filter: 0,
         }),
         (Some(color), None) => {
             if cw <= 0 || ch <= 0 {
@@ -826,6 +843,7 @@ fn bg_ops(st: &ComputedStyle, bg: Option<u64>, mask: Option<u64>, x: i32, y: i32
             pos: st.bg_layer.pos,
             size: st.bg_layer.size,
             tint: None,
+            filter: 0,
         });
     }
 }
@@ -1015,6 +1033,12 @@ pub struct Layout {
     /// Element boxes for pointer hit-testing (empty unless the sheet has
     /// `:hover` rules).
     pub hover_boxes: Vec<HoverBox>,
+    /// The `filter` colour transforms this layout used, referenced by the
+    /// 1-based index an image op carries. A side table rather than a field on
+    /// the op: a `ColorFilter` is 52 bytes and `filter` is rare, so carrying
+    /// one per op would roughly double the display list on every page that has
+    /// no filter at all.
+    pub filters: Vec<crate::color::ColorFilter>,
 }
 
 /// An element's box, for deciding what the pointer is inside.
@@ -1395,6 +1419,8 @@ struct Ctx<'a> {
     ops: Vec<DrawOp>,
     links: Vec<LinkRect>,
     controls: Vec<ControlRect>,
+    /// `filter` transforms, deduped; an image op holds a 1-based index here.
+    filters: Vec<crate::color::ColorFilter>,
     /// Live form-control state (typed values, checked boxes, focus) — read
     /// only; the shell owns it and re-lays out when it changes.
     forms: &'a FormState,
@@ -1940,6 +1966,7 @@ pub fn layout(
         ops: Vec::new(),
         links: Vec::new(),
         controls: Vec::new(),
+        filters: Vec::new(),
         forms,
         path: Vec::new(),
         // Initial containing block: the viewport, anchored at the CANVAS
@@ -2068,6 +2095,7 @@ pub fn layout(
         phase: [0; 3],
         inspect: ctx.inspects,
         hover_boxes: ctx.hover_boxes,
+        filters: ctx.filters,
         width,
     }
 }
@@ -2402,7 +2430,8 @@ impl<'a> Ctx<'a> {
                 let (iw, ih) = if svg { self.svg_box(el, &st) } else { self.img_box(el, &st) };
                 let alt = svg_alt(el, svg);
                 let src = if svg { svg_key(el) } else { el.attr("src").unwrap_or("").to_string() };
-                inline.image(src, iw, ih, None, alt, st.hidden, st.transparent, st.object_fit, self.image_deco(&st));
+                let fx = self.filter_index(&st);
+                inline.image(src, iw, ih, None, alt, st.hidden, st.transparent, st.object_fit, fx, self.image_deco(&st));
                 self.path.pop();
                 continue;
             }
@@ -3197,6 +3226,7 @@ impl<'a> Ctx<'a> {
             let box_bottom = border_top_y + bt + pt + ch + pb + bb;
             self.clip_overflow(st, clip_marks, box_left, border_top_y, box_w, box_bottom - border_top_y);
             self.paint_box_decoration(st, box_left, border_top_y, box_w, box_bottom - border_top_y, bg_idx);
+            self.apply_filter(st, bg_idx);
             return BoxOut { bottom: box_bottom, top_y: border_top_y, open: out_bottom_margin, through: false, box_x: box_left, box_w };
         }
 
@@ -3249,6 +3279,7 @@ impl<'a> Ctx<'a> {
         let box_bottom = content_top + ch + pb + bb;
         self.clip_overflow(st, clip_marks, box_left, border_top_y, box_w, box_bottom - border_top_y);
         self.paint_box_decoration(st, box_left, border_top_y, box_w, box_bottom - border_top_y, bg_idx);
+        self.apply_filter(st, bg_idx);
         BoxOut { bottom: box_bottom, top_y: border_top_y, open: out_open, through: false, box_x: box_left, box_w }
     }
 
@@ -3730,6 +3761,61 @@ impl<'a> Ctx<'a> {
             let keep = fit_prefix(font, text, *size, avail, *sp);
             text.truncate(keep);
             text.push('\u{2026}');
+        }
+    }
+
+    /// `filter` — recolour everything the box painted, itself and its subtree.
+    ///
+    /// The property applies to the whole subtree and cannot be cancelled from
+    /// inside it, which in a FLAT display list is exactly the op range the box
+    /// produced. Called after `paint_box_decoration`, so the box's own
+    /// background and border — spliced in at the head of that range — are in it.
+    ///
+    /// Colours are transformed here rather than at paint, because here they are
+    /// known. An image's pixels are not: it travels as a key and is looked up
+    /// when it is drawn, so those ops get an index into `filters` instead.
+    /// Applying the matrix twice IS the composition of two filters, which is
+    /// what a filtered box inside a filtered box means — the image index is
+    /// composed by hand for the same reason.
+    fn apply_filter(&mut self, st: &ComputedStyle, start: usize) {
+        let Some(f) = st.filter else { return };
+        if start >= self.ops.len() {
+            return;
+        }
+        let mut table = core::mem::take(&mut self.filters);
+        for op in &mut self.ops[start..] {
+            match op {
+                DrawOp::Text { color, .. }
+                | DrawOp::Rect { color, .. }
+                | DrawOp::RoundRect { color, .. } => *color = f.apply(*color),
+                DrawOp::Image { filter, .. } => {
+                    let inner = (*filter as usize).checked_sub(1).map(|i| table[i]);
+                    *filter = filter_key(&mut table, inner.map_or(f, |i| i.then(f)));
+                }
+                // A mask paints `tint` THROUGH the image's alpha, so the
+                // filter belongs on that colour, not on the stencil's pixels.
+                DrawOp::BgImage { tint: Some(c), .. } => *c = f.apply(*c),
+                DrawOp::BgImage { filter, .. } => {
+                    let inner = (*filter as usize).checked_sub(1).map(|i| table[i]);
+                    *filter = filter_key(&mut table, inner.map_or(f, |i| i.then(f)));
+                }
+            }
+        }
+        self.filters = table;
+    }
+
+    /// Register a `filter` and hand back the 1-based index an image op carries.
+    /// An `<img>` with a filter of its OWN needs this before its op exists:
+    /// the op is emitted from the line box, which has no `Ctx` to ask.
+    fn filter_index(&mut self, st: &ComputedStyle) -> u16 {
+        match st.filter {
+            None => 0,
+            Some(f) => {
+                let mut table = core::mem::take(&mut self.filters);
+                let i = filter_key(&mut table, f);
+                self.filters = table;
+                i
+            }
         }
     }
 
@@ -5114,12 +5200,18 @@ impl<'a> Ctx<'a> {
         // directly from the flow loop too); the other three come through here.
         let resolved = self.resolve_pct_heights(st);
         let st = resolved.as_ref().unwrap_or(st);
-        match st.display {
+        // `flow_block_impl` applies its own `filter` over its own op range —
+        // doing it again here would compose the transform with itself, and an
+        // inversion applied twice is no inversion at all.
+        let f0 = self.ops.len();
+        let bottom = match st.display {
             Display::Table => self.layout_table(el, st, x, w, y),
             Display::Flex => self.layout_flex(el, st, x, w, y),
             Display::Grid => self.layout_grid(el, st, x, w, y),
-            _ => self.layout_block(el, st, x, w, y),
-        }
+            _ => return self.layout_block(el, st, x, w, y),
+        };
+        self.apply_filter(st, f0);
+        bottom
     }
 
     /// Grid layout (css-grid-2 subset). Handles the container box model (width/
@@ -6961,7 +7053,8 @@ impl<'a> Ctx<'a> {
             let svg = el.tag == "svg";
             let (iw, ih) = if svg { self.svg_box(el, st) } else { self.img_box(el, st) };
             let src = if svg { svg_key(el) } else { el.attr("src").unwrap_or("").to_string() };
-            inline.image(src, iw, ih, href, svg_alt(el, svg), st.hidden, st.transparent, st.object_fit, self.image_deco(st));
+            let fx = self.filter_index(st);
+            inline.image(src, iw, ih, href, svg_alt(el, svg), st.hidden, st.transparent, st.object_fit, fx, self.image_deco(st));
             return;
         }
         // …and every other replaced element, laid out through the block model
@@ -7134,7 +7227,7 @@ enum Item {
     /// style="line-height:5"></span>X` is a tall line — but it never makes a
     /// line non-empty, so a line holding nothing else is still not generated.
     Strut(RunStyle),
-    Image { src: String, w: i32, h: i32, href: Option<String>, alt: String, space_before: bool, hidden: bool, transparent: bool, fit: ObjectFit, deco: Option<alloc::boxed::Box<InlineBox>> },
+    Image { src: String, w: i32, h: i32, href: Option<String>, alt: String, space_before: bool, hidden: bool, transparent: bool, fit: ObjectFit, filter: u16, deco: Option<alloc::boxed::Box<InlineBox>> },
     Control { ctl: CtlBox, space_before: bool },
     /// `display: inline-block` — laid out already, waiting for its position.
     /// The finished display list is MOVED out when the line box places it;
@@ -7366,6 +7459,7 @@ fn paint_control(
                 pos: layer.pos,
                 size: layer.size,
                 tint: None,
+                filter: 0,
             });
         }
     };
@@ -7646,10 +7740,10 @@ impl Inline {
     /// Add an atomic `<img>` (decoded or a placeholder) to the inline run,
     /// carrying the enclosing link so an image-in-a-link stays clickable.
     #[allow(clippy::too_many_arguments)]
-    fn image(&mut self, src: String, w: i32, h: i32, href: Option<&str>, alt: String, hidden: bool, transparent: bool, fit: ObjectFit, deco: Option<InlineBox>) {
+    fn image(&mut self, src: String, w: i32, h: i32, href: Option<&str>, alt: String, hidden: bool, transparent: bool, fit: ObjectFit, filter: u16, deco: Option<InlineBox>) {
         let space_before = self.pending_space && !self.items.is_empty();
         self.pending_space = false;
-        self.items.push(Item::Image { src, w, h, href: href.map(|s| s.to_string()), alt, space_before, hidden, transparent, fit, deco: deco.map(alloc::boxed::Box::new) });
+        self.items.push(Item::Image { src, w, h, href: href.map(|s| s.to_string()), alt, space_before, hidden, transparent, fit, filter, deco: deco.map(alloc::boxed::Box::new) });
     }
 
     /// Add a laid-out `inline-block` to the inline run.
@@ -7939,7 +8033,7 @@ impl Inline {
                     gap = gap.max(b.h as f32).max(line_ascent + line_below);
                     line.push(Placed::Atomic { x: (pen - b.w as f32) as i32, box_: b });
                 }
-                Item::Image { src, w: iw, h: ih, href, alt, space_before, hidden, transparent, fit, deco } => {
+                Item::Image { src, w: iw, h: ih, href, alt, space_before, hidden, transparent, fit, filter, deco } => {
                     // The frame an `<img>` paints around itself is part of the
                     // space it takes on the line — measure with it, or the
                     // border overlaps whatever comes next.
@@ -7975,6 +8069,7 @@ impl Inline {
                         hidden: *hidden,
                         transparent: *transparent,
                         fit: *fit,
+                        filter: *filter,
                         deco: deco.clone(),
                     });
                     pen += lead + fl + bw as f32 + fr;
@@ -8021,7 +8116,7 @@ impl Inline {
 enum Placed<'a> {
     Text(Seg),
     Atomic { x: i32, box_: AtomicBox },
-    Image { x: i32, w: i32, h: i32, src: String, href: Option<String>, alt: String, hidden: bool, transparent: bool, fit: ObjectFit, deco: Option<alloc::boxed::Box<InlineBox>> },
+    Image { x: i32, w: i32, h: i32, src: String, href: Option<String>, alt: String, hidden: bool, transparent: bool, fit: ObjectFit, filter: u16, deco: Option<alloc::boxed::Box<InlineBox>> },
     Control { x: i32, ctl: &'a CtlBox },
 }
 
@@ -9164,7 +9259,7 @@ fn emit_line(
                 let top = baseline - (ctl.h - CTL_PAD_Y);
                 paint_control(fonts, theme, ctl, x + dx, top, ops, controls);
             }
-            Placed::Image { x, w, h, src, href, alt, hidden, transparent, fit, deco } => {
+            Placed::Image { x, w, h, src, href, alt, hidden, transparent, fit, filter, deco } => {
                 let x = x + dx;
                 let top = baseline - h; // image bottom sits on the baseline
                 if let (Some(href), false) = (&href, hidden) {
@@ -9184,7 +9279,7 @@ fn emit_line(
                         bg_ops(st, None, None, bx, by, bw, bh, ops);
                         border_ops(st, bx, by, bw, bh, (true, true), ops);
                     }
-                    ops.push(DrawOp::Image { x, y: top, w, h, src, alt, fit });
+                    ops.push(DrawOp::Image { x, y: top, w, h, src, alt, fit, filter });
                 }
             }
         }

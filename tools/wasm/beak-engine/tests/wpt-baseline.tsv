@@ -3581,7 +3581,7 @@ PASS	css-color/color-mix-currentcolor-nested-for-color-property.html
 PASS	css-color/color-mix-currentcolor-visited.html
 FAIL	css-color/color-mix-percents-01.html
 FAIL	css-color/color-mix-percents-02.html
-FAIL	css-color/composited-filters-under-opacity.html
+PASS	css-color/composited-filters-under-opacity.html
 FAIL	css-color/contrast-color-001.html
 FAIL	css-color/currentcolor-001.html
 FAIL	css-color/currentcolor-002.html

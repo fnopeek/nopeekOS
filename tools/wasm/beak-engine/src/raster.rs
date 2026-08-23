@@ -13,6 +13,7 @@ use hashbrown::HashMap;
 
 use crate::fonts::Fonts;
 use crate::layout::{DrawOp, Layout, Rgb, Rgba, Theme};
+use crate::color::ColorFilter;
 use crate::style::{BgPos, BgSize, ObjectFit};
 
 /// What a pointer move costs — the answer `Engine::set_hover` gives.
@@ -611,7 +612,7 @@ impl Engine {
                     }
                     self.draw_run(out, wi, hi, *x, vy, *size, *color, *bold, *italic, *mono, *sp, text);
                 }
-                DrawOp::Image { x, y, w: iw, h: ih, src, alt, fit } => {
+                DrawOp::Image { x, y, w: iw, h: ih, src, alt, fit, filter } => {
                     let vy = *y - scroll_y;
                     if vy > hi || vy + *ih < 0 {
                         continue;
@@ -621,11 +622,11 @@ impl Engine {
                     // fetched yet, or an undecodable format) draws the
                     // placeholder that layout used to emit as separate ops.
                     match self.images.borrow().get(src) {
-                        Some(img) => blit_image(out, wi, hi, *x, vy, *iw, *ih, img, *fit),
+                        Some(img) => blit_image(out, wi, hi, *x, vy, *iw, *ih, img, *fit, filt(layout, *filter)),
                         None => self.draw_img_placeholder(out, wi, hi, *x, vy, *iw, *ih, alt),
                     }
                 }
-                DrawOp::BgImage { x, y, w: bw, h: bh, clip, key, repeat, pos, size, tint } => {
+                DrawOp::BgImage { x, y, w: bw, h: bh, clip, key, repeat, pos, size, tint, filter } => {
                     let vy = *y - scroll_y;
                     if vy > hi || vy + *bh < 0 {
                         continue;
@@ -636,7 +637,7 @@ impl Engine {
                     // sized either way, so an absent decoration must simply be
                     // absent rather than a grey frame over the content.
                     if let Some(img) = self.css_images.borrow().get(key) {
-                        blit_bg(out, wi, hi, *x, vy, *bw, *bh, cl, img, *repeat, *pos, *size, *tint);
+                        blit_bg(out, wi, hi, *x, vy, *bw, *bh, cl, img, *repeat, *pos, *size, *tint, filt(layout, *filter));
                     }
                 }
             }
@@ -1002,6 +1003,7 @@ fn blit_bg(
     pos: (BgPos, BgPos),
     size: BgSize,
     tint: Option<crate::layout::Rgba>,
+    filter: Option<ColorFilter>,
 ) {
     if dw <= 0 || dh <= 0 || img.w == 0 || img.h == 0 {
         return;
@@ -1062,9 +1064,14 @@ fn blit_bg(
                     if a != 0 {
                         // A mask takes only the alpha and paints the tint
                         // through it; a background image paints its own pixels.
-                        let src = match tint {
-                            Some(c) => [c.c.2, c.c.1, c.c.0],
-                            None => [img.bgra[si], img.bgra[si + 1], img.bgra[si + 2]],
+                        let src = match (tint, filter) {
+                            // A mask's tint was already filtered at layout.
+                            (Some(c), _) => [c.c.2, c.c.1, c.c.0],
+                            (None, None) => [img.bgra[si], img.bgra[si + 1], img.bgra[si + 2]],
+                            (None, Some(f)) => {
+                                let p = f.apply_bgra([img.bgra[si], img.bgra[si + 1], img.bgra[si + 2], img.bgra[si + 3]]);
+                                [p[0], p[1], p[2]]
+                            }
                         };
                         if a == 255 {
                             out[di] = src[0];
@@ -1110,7 +1117,14 @@ fn object_rect(fit: ObjectFit, dx: i32, dy: i32, dw: i32, dh: i32, iw: i32, ih: 
     (dx + (dw - rw) / 2, dy + (dh - rh) / 2, rw, rh)
 }
 
-fn blit_image(out: &mut [u8], w: i32, h: i32, dx: i32, dy: i32, dw: i32, dh: i32, img: &crate::image::Image, fit: ObjectFit) {
+/// An image op's `filter` index resolved against the layout's side table.
+/// 0 is "none", so the unfiltered path never touches the table at all.
+fn filt(layout: &Layout, idx: u16) -> Option<ColorFilter> {
+    layout.filters.get((idx as usize).checked_sub(1)?).copied()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn blit_image(out: &mut [u8], w: i32, h: i32, dx: i32, dy: i32, dw: i32, dh: i32, img: &crate::image::Image, fit: ObjectFit, filter: Option<ColorFilter>) {
     if dw <= 0 || dh <= 0 || img.w == 0 || img.h == 0 {
         return;
     }
@@ -1135,14 +1149,21 @@ fn blit_image(out: &mut [u8], w: i32, h: i32, dx: i32, dy: i32, dw: i32, dh: i32
         let mut di = idx(w, x0, py);
         for &sx in &cols {
             let si = srow + sx;
-            let a = img.bgra[si + 3];
+            // `filter` recolours the SOURCE pixel. Read through a local copy
+            // only when there is one, so the unfiltered blit keeps indexing
+            // straight into the decoded buffer.
+            let px = match filter {
+                None => [img.bgra[si], img.bgra[si + 1], img.bgra[si + 2], img.bgra[si + 3]],
+                Some(f) => f.apply_bgra([img.bgra[si], img.bgra[si + 1], img.bgra[si + 2], img.bgra[si + 3]]),
+            };
+            let a = px[3];
             if a == 255 {
-                out[di..di + 4].copy_from_slice(&img.bgra[si..si + 4]);
+                out[di..di + 4].copy_from_slice(&px);
             } else if a != 0 {
                 let (a, ia) = (a as u32, 255 - a as u32);
-                out[di] = ((img.bgra[si] as u32 * a + out[di] as u32 * ia) / 255) as u8;
-                out[di + 1] = ((img.bgra[si + 1] as u32 * a + out[di + 1] as u32 * ia) / 255) as u8;
-                out[di + 2] = ((img.bgra[si + 2] as u32 * a + out[di + 2] as u32 * ia) / 255) as u8;
+                out[di] = ((px[0] as u32 * a + out[di] as u32 * ia) / 255) as u8;
+                out[di + 1] = ((px[1] as u32 * a + out[di + 1] as u32 * ia) / 255) as u8;
+                out[di + 2] = ((px[2] as u32 * a + out[di + 2] as u32 * ia) / 255) as u8;
                 out[di + 3] = 255;
             }
             di += 4;
@@ -1462,6 +1483,45 @@ mod tests {
             "li:hover + li a{color:#f00}",
             "<ul><li><a href=\"/x\">one</a></li><li><a href=\"/y\">two</a></li></ul>"
         ));
+    }
+
+    /// `filter` recolours the element AND its whole subtree — the box's own
+    /// background, the text inside it, and an image's pixels, which are only
+    /// looked up at paint time and so travel as an index instead of a colour.
+    #[test]
+    fn filter_recolours_the_box_and_its_subtree() {
+        // `invert(100%)` on yellow is blue — the css-color reftest's case.
+        let inv = "<div style='width:20px;height:20px;background:#ffff00;filter:invert(100%)'></div>";
+        assert_eq!(pixel_at(inv, 10, 10), (0, 0, 255));
+
+        // …and it reaches a descendant's background, which a page cannot
+        // cancel from inside the subtree.
+        let nested = "<div style='filter:invert(100%)'>\
+                      <div style='width:20px;height:20px;background:#ffff00'></div></div>";
+        assert_eq!(pixel_at(nested, 10, 10), (0, 0, 255));
+
+        // An image's pixels: the 4x1 stripes, first column red → cyan.
+        let html = alloc::format!(
+            "<img src='{STRIPES_4X1}' style='display:block;width:20px;height:20px;filter:invert(1)'>"
+        );
+        let p = page(&html, 40, 40);
+        assert_eq!(p(2, 10), (0, 255, 255), "red inverts to cyan");
+
+        // A chain composes into ONE transform: inverting twice is identity.
+        let twice = "<div style='width:20px;height:20px;background:#ffff00;\
+                     filter:invert(1) invert(1)'></div>";
+        assert_eq!(pixel_at(twice, 10, 10), (255, 255, 0));
+
+        // `grayscale(100)` — Bootstrap writes the amount as a bare number and
+        // means 1. Luma of pure red is 0.213 → 54.
+        let gray = "<div style='width:20px;height:20px;background:#ff0000;filter:grayscale(100)'></div>";
+        assert_eq!(pixel_at(gray, 10, 10), (54, 54, 54));
+
+        // `blur` cannot be a matrix, so the whole declaration is dropped
+        // rather than half-applied — the box keeps its own colour.
+        let blur = "<div style='width:20px;height:20px;background:#ffff00;\
+                    filter:invert(1) blur(2px)'></div>";
+        assert_eq!(pixel_at(blur, 10, 10), (255, 255, 0));
     }
 
     /// `display: contents` generates no box: no border, and the children take
