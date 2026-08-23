@@ -48,28 +48,31 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-08-18 · beak 0.28.1** (Kernel-/WLAN-Versionen: `git log`)
+**Stand 2026-08-23 · beak 0.35.0** (Kernel-/WLAN-Versionen: `git log`)
 
 Zwei Fäden laufen parallel.
 
 **`beak`**, der eigene Browser: Stage 0 (HTML, CSS, Layout, Paint — noch kein
-JavaScript) läuft auf Hardware; die Arbeit dreht sich um Konformität und um
-echte Seiten (POST, Cookies, Zeichensätze, TLS-Wurzelspeicher). Die gemessene
-WPT-Zahl steht in `docs/spec/CONFORMANCE.md` und nirgends sonst. Seit 0.26.0
-gibt es einen Pfad **unterhalb** von „volles Layout": ein Zeigerwechsel, der nur
-malt, wird in der Anzeigeliste geflickt statt neu gerechnet — 151 von 165
-Zeigerpositionen auf zwei echten Seiten, byte-gleich mit dem vollen Layout.
-**Am Gerät noch nicht nachgemessen** — Rezept in `memory/`.
+JavaScript) läuft auf Hardware. **Die CSS-Runde ist zu Ende gebracht**: das
+Eigenschafts-Gap ist geschlossen, die Vor-JS-Liste aus
+`docs/plan/CSS_GAP_2026_08.md` abgearbeitet, und 93,7 % der Deklarationen auf
+Bootstrap + Wikipedia sind abgedeckt. Die gemessene WPT-Zahl steht in
+`docs/spec/CONFORMANCE.md` und nirgends sonst — **zwei Nenner**, roh und ohne
+Testvehikel, und der zweite wird mit `tools/wasm/beak-engine/tests/vehicles.py`
+aus der gesegneten Baseline HERGELEITET, nie weitergetragen. Nächster grosser
+Schritt ist JavaScript: was ein wachsender Teil des Webs ausliefert, ist ohne
+Skript gar kein Inhalt. Seit 0.26.0 gibt es ausserdem einen Pfad **unterhalb**
+von „volles Layout": ein Zeigerwechsel, der nur malt, wird in der Anzeigeliste
+geflickt statt neu gerechnet — **am Gerät noch nicht nachgemessen**, Rezept in
+`memory/`.
 
-**WLAN (AX200)**: lädt Wikipedia über Funk. Das Intent **`wlan`** ist das
-Werkzeug dafür — Kernel-Sicht plus ein Klartext-Report, den der Treiber selbst
-veröffentlicht (Rate, Retries, Airtime, 4-Way-Sprosse, Ring-Zustand) plus der
-wifid-Log. Offen: Stabilität über die Zeit, und Durchsatz — 20 Mbit/s gegen
-eine Decke von 43 ohne Aggregation. Alles ausser der Luft ist als Ursache
-ausgeschlossen (Fenster, Verlust, RTT, Krypto, TCP-Stack). Der Hebel ist
-A-MPDU, aber dafür fehlt `RX_BAID_ALLOCATION_CONFIG_CMD`: wir schicken das
-alte `ADD_STA`, das diese Firmware lahmlegt.
-Start: `memory/project_wifi_stability_handover.md`.
+**WLAN (AX200)**: ⏸ pausiert, die Verbindung läuft (Download 116 Mbit auf HT40,
+Upload erstmals möglich). Das Intent **`wlan`** ist das Werkzeug dafür —
+Kernel-Sicht plus ein Klartext-Report, den der Treiber selbst veröffentlicht
+(Rate, Retries, Airtime, 4-Way-Sprosse, Ring-Zustand) plus der wifid-Log.
+Beim Wiedereinstieg NUR den obersten Abschnitt von
+`memory/project_wifi_stability_handover.md` lesen — er hat Stand,
+Betriebspunkt und die nächsten Schritte.
 
 Alles darunter — Kernel, npkFS, Netz, Compositor, Panels, Apps, MicroVM —
 ist gebaut und in Betrieb. Überblick: `README.md`.
