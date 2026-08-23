@@ -784,6 +784,12 @@ pub struct ComputedStyle {
     /// `appearance: none` — the page opts this form control OUT of the UA
     /// widget look (css-ui-4 §4) and draws the whole thing itself.
     pub appearance_none: bool,
+    /// `display: flow-root` — a block box whose ONLY difference from `block`
+    /// is that it establishes a block formatting context. A flag rather than a
+    /// `Display` variant precisely because that is the whole difference:
+    /// everything that matches on `display` would otherwise need an arm that
+    /// says "same as block".
+    pub bfc_root: bool,
     pub contain_size: bool, // `contain: size`/`strict` — content contributes no size
     pub contain_intrinsic: Option<(f32, f32)>, // `contain-intrinsic-size` (w, h) px
     pub bg: Option<Rgba>, // background-color (None = transparent)
@@ -1022,6 +1028,7 @@ impl ComputedStyle {
             aspect_ratio: None,
             vh_seen: 0,
             appearance_none: false,
+            bfc_root: false,
             contain_size: false,
             contain_intrinsic: None,
             bg: None,
@@ -1247,6 +1254,7 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         aspect_ratio: None,
         vh_seen: 0,
         appearance_none: false,
+        bfc_root: false,
         contain_size: false,
         contain_intrinsic: None,
         bg: None,
@@ -1477,7 +1485,9 @@ pub fn resolve(
         let dead = if has_revert { resolve_revert_layers(&matched, false) } else { Vec::new() };
         for (layer, _, _, decls, _) in &matched {
             for (p, v) in *decls {
-                if !dead.is_empty() && dead.contains(&(*p, *layer)) {
+                if !dead.is_empty()
+                    && (dead.contains(&(*p, *layer)) || dead.contains(&(Prop::All, *layer)))
+                {
                     continue;
                 }
                 if is_revert_layer(v) {
@@ -1496,7 +1506,9 @@ pub fn resolve(
         let dead_imp = if has_revert { resolve_revert_layers(&matched, true) } else { Vec::new() };
         for (layer, _, _, _, imp) in &matched {
             for (p, v) in *imp {
-                if !dead_imp.is_empty() && dead_imp.contains(&(*p, *layer)) {
+                if !dead_imp.is_empty()
+                    && (dead_imp.contains(&(*p, *layer)) || dead_imp.contains(&(Prop::All, *layer)))
+                {
                     continue;
                 }
                 if is_revert_layer(v) {
@@ -2215,7 +2227,9 @@ fn resolve_revert_layers(matched: &[crate::css::Matched], important: bool) -> Ve
         let mut winner: Vec<(Prop, u16, bool)> = Vec::new();
         for (layer, _, _, decls, imp) in matched {
             for (p, v) in if important { *imp } else { *decls } {
-                if dead.contains(&(*p, *layer)) {
+                // `all: revert-layer` reverts the layer for EVERY property, so
+                // a dead `All` takes the whole layer with it.
+                if dead.contains(&(*p, *layer)) || dead.contains(&(Prop::All, *layer)) {
                     continue;
                 }
                 let rev = is_revert_layer(v);
@@ -2311,6 +2325,31 @@ pub fn apply_wide(prop: Prop, kw: Wide, parent: &ComputedStyle, theme: &Theme, s
         }
     };
     match prop {
+        // `all` is every property at once, minus `direction`/`unicode-bidi`,
+        // which css-cascade-5 §3.2 excludes by name. Everything else in the
+        // struct that is NOT a property has to survive: the document-global
+        // bases, the presentational-attribute hints, and the element-identity
+        // flags the UA sheet set.
+        Prop::All => {
+            let rtl = s.rtl;
+            let (rem, vw, vh, seen) = (s.rem_base, s.vw, s.vh, s.vh_seen);
+            let (acb, acp) = (s.attr_cell_border, s.attr_cell_padding);
+            let (link, rule, brk) = (s.is_link, s.is_rule, s.is_break);
+            *s = *src;
+            s.rtl = rtl;
+            s.rem_base = rem;
+            s.vw = vw;
+            s.vh = vh;
+            s.vh_seen = seen;
+            s.attr_cell_border = acb;
+            s.attr_cell_padding = acp;
+            s.is_link = link;
+            s.is_rule = rule;
+            s.is_break = brk;
+            // Later declarations in the same block measure `em` against the
+            // size `all` just installed.
+            s.em_base = s.font_px;
+        }
         Prop::Color => s.color = src.color,
         Prop::BackgroundColor => s.bg = src.bg,
         Prop::BackgroundImage => s.bg_layer = src.bg_layer,
@@ -2484,12 +2523,21 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
     // call — matching the cascade's declaration order.
     let u = s.units();
     match prop {
+        // `all` only ever carries a CSS-wide keyword, and `apply_wide` has
+        // already taken those. Anything else is an invalid declaration.
+        Prop::All => {}
         Prop::Display => {
             s.display = match v {
                 "none" => Display::None,
                 "list-item" => Display::ListItem,
                 "inline" => Display::Inline,
                 "inline-block" => Display::InlineBlock,
+                // A block box that establishes a BFC — the explicit spelling
+                // of the `overflow: hidden` clearfix, without the clipping.
+                "flow-root" => {
+                    s.bfc_root = true;
+                    Display::Block
+                }
                 "table" | "inline-table" => Display::Table,
                 "table-caption" => Display::TableCaption,
                 "table-row" => Display::TableRow,
