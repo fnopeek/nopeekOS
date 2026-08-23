@@ -429,6 +429,30 @@ impl BorderSide {
         true
     }
 
+    /// Take only the WIDTH half from another side — `border-top-width:
+    /// inherit` must not drag the style or colour along with it.
+    fn copy_width(&mut self, from: &BorderSide) {
+        self.spec_width = from.spec_width;
+        self.specified = true;
+        self.sync();
+    }
+
+    /// Take only the STYLE half. `styled` decides the used width, so `sync`
+    /// has to run after it.
+    fn copy_style(&mut self, from: &BorderSide) {
+        self.styled = from.styled;
+        self.hidden = from.hidden;
+        self.specified = true;
+        self.sync();
+    }
+
+    /// Take only the COLOUR half, `transparent` included — that is carried by
+    /// `see_through`, not by the colour being absent.
+    fn copy_color(&mut self, from: &BorderSide) {
+        self.color = from.color;
+        self.see_through = from.see_through;
+    }
+
     /// Apply one `border-style` token. An unknown one is invalid and leaves the
     /// side alone.
     fn set_style(&mut self, tok: &str) {
@@ -1459,11 +1483,11 @@ pub fn resolve(
                 if is_revert_layer(v) {
                     continue;
                 }
-                apply_one(*p, v, theme, &mut s);
+                apply_decl(*p, v, theme, Some(parent), &mut s);
             }
         }
         if let Some(decls) = inline {
-            apply_declarations_pass(decls, theme, &mut s, false);
+            apply_declarations_pass(decls, theme, Some(parent), &mut s, false);
         }
         // Pass 2 — `!important`, where the layer axis reverses (css-cascade-5
         // §6.4.4): the FIRST layer wins, and an unlayered important loses to
@@ -1478,15 +1502,15 @@ pub fn resolve(
                 if is_revert_layer(v) {
                     continue;
                 }
-                apply_one(*p, v, theme, &mut s);
+                apply_decl(*p, v, theme, Some(parent), &mut s);
             }
         }
         if let Some(decls) = inline {
-            apply_declarations_pass(decls, theme, &mut s, true);
+            apply_declarations_pass(decls, theme, Some(parent), &mut s, true);
         }
     } else if let Some(decls) = inline {
-        apply_declarations_pass(decls, theme, &mut s, false);
-        apply_declarations_pass(decls, theme, &mut s, true);
+        apply_declarations_pass(decls, theme, Some(parent), &mut s, false);
+        apply_declarations_pass(decls, theme, Some(parent), &mut s, true);
     }
     // `clip: inherit` takes the parent's computed value (clip is not inherited
     // by default, so this is resolved here rather than in the initial slice).
@@ -2115,7 +2139,7 @@ fn split_important(v: &str) -> (&str, bool) {
 
 /// Apply the `style="…"` declarations whose importance matches `important`, so
 /// callers run the two cascade passes. css-syntax-3 syntax, unknown props skipped.
-fn apply_declarations_pass(decls: &str, theme: &Theme, s: &mut ComputedStyle, important: bool) {
+fn apply_declarations_pass(decls: &str, theme: &Theme, parent: Option<&ComputedStyle>, s: &mut ComputedStyle, important: bool) {
     for decl in crate::css::split_decls(decls) {
         let mut it = decl.splitn(2, ':');
         let prop = match it.next() {
@@ -2130,7 +2154,7 @@ fn apply_declarations_pass(decls: &str, theme: &Theme, s: &mut ComputedStyle, im
         if prop.is_empty() || val.is_empty() || imp != important {
             continue;
         }
-        apply_one(crate::css::prop_key(&prop), val, theme, s);
+        apply_decl(crate::css::prop_key(&prop), val, theme, parent, s);
     }
 }
 
@@ -2217,6 +2241,217 @@ fn resolve_revert_layers(matched: &[crate::css::Matched], important: bool) -> Ve
             return dead;
         }
     }
+}
+
+/// One declaration, with the CSS-wide keywords taken first. `parent` is what
+/// `inherit` reads; a caller with no parent to hand (the UA sheet, which never
+/// writes one) passes `None` and gets the old behaviour.
+fn apply_decl(prop: Prop, v: &str, theme: &Theme, parent: Option<&ComputedStyle>, s: &mut ComputedStyle) {
+    if let (Some(kw), Some(p)) = (wide_keyword(v), parent) {
+        if apply_wide(prop, kw, p, theme, s) {
+            return;
+        }
+    }
+    apply_one(prop, v, theme, s);
+}
+
+/// A CSS-wide keyword (css-cascade-5 §7). `revert` is deliberately absent:
+/// it rolls back to the UA ORIGIN, which would mean snapshotting every
+/// element's style after `ua_rule` and before the author cascade — a copy of
+/// a large `Copy` struct per element, for a keyword six tests in the whole
+/// corpus write. It keeps its previous per-property handling.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Wide {
+    Inherit,
+    Initial,
+    Unset,
+}
+
+/// Is this declaration value a CSS-wide keyword? These apply to EVERY
+/// property, so before this they were handled property by property — a
+/// handful had an arm, and on the rest `border-bottom-color: inherit` simply
+/// failed to parse and left the previous declaration standing.
+pub fn wide_keyword(v: &str) -> Option<Wide> {
+    let v = v.trim();
+    // Cheap gate: the three keywords are 5-7 bytes and start with i/u.
+    if !(5..=7).contains(&v.len()) {
+        return None;
+    }
+    if v.eq_ignore_ascii_case("inherit") {
+        Some(Wide::Inherit)
+    } else if v.eq_ignore_ascii_case("initial") {
+        Some(Wide::Initial)
+    } else if v.eq_ignore_ascii_case("unset") {
+        Some(Wide::Unset)
+    } else {
+        None
+    }
+}
+
+/// Apply a CSS-wide keyword to one property.
+///
+/// `inherit` takes the parent's computed value. `unset` takes whichever of
+/// inherit/initial the property's inheritance says — which `inherit_reset`
+/// already encodes exactly: what it copies from the parent is inherited, what
+/// it leaves at the default is not. `initial` reads from a fresh root style.
+///
+/// Returns false for a property with no arm here, so the caller can fall
+/// through to the old per-property handling rather than silently dropping it.
+pub fn apply_wide(prop: Prop, kw: Wide, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedStyle) -> bool {
+    let owned;
+    let src: &ComputedStyle = match kw {
+        Wide::Inherit => parent,
+        Wide::Unset => {
+            owned = inherit_reset(parent);
+            &owned
+        }
+        Wide::Initial => {
+            owned = ComputedStyle::root(theme);
+            &owned
+        }
+    };
+    match prop {
+        Prop::Color => s.color = src.color,
+        Prop::BackgroundColor => s.bg = src.bg,
+        Prop::BackgroundImage => s.bg_layer = src.bg_layer,
+        Prop::Background => {
+            s.bg = src.bg;
+            s.bg_layer = src.bg_layer;
+            s.bg_clip = src.bg_clip;
+            s.bg_origin = src.bg_origin;
+        }
+        // Border: the shorthands copy whole sides, the longhands one field of
+        // one side — the same split the parser makes.
+        Prop::Border => {
+            s.border_top = src.border_top;
+            s.border_right = src.border_right;
+            s.border_bottom = src.border_bottom;
+            s.border_left = src.border_left;
+        }
+        Prop::BorderTop => s.border_top = src.border_top,
+        Prop::BorderRight => s.border_right = src.border_right,
+        Prop::BorderBottom => s.border_bottom = src.border_bottom,
+        Prop::BorderLeft => s.border_left = src.border_left,
+        Prop::BorderWidth => {
+            for (d, w) in [
+                (&mut s.border_top, src.border_top),
+                (&mut s.border_right, src.border_right),
+                (&mut s.border_bottom, src.border_bottom),
+                (&mut s.border_left, src.border_left),
+            ] {
+                d.copy_width(&w);
+            }
+        }
+        Prop::BorderTopWidth => s.border_top.copy_width(&src.border_top),
+        Prop::BorderRightWidth => s.border_right.copy_width(&src.border_right),
+        Prop::BorderBottomWidth => s.border_bottom.copy_width(&src.border_bottom),
+        Prop::BorderLeftWidth => s.border_left.copy_width(&src.border_left),
+        Prop::BorderColor => {
+            s.border_top.copy_color(&src.border_top);
+            s.border_right.copy_color(&src.border_right);
+            s.border_bottom.copy_color(&src.border_bottom);
+            s.border_left.copy_color(&src.border_left);
+        }
+        Prop::BorderTopColor => s.border_top.copy_color(&src.border_top),
+        Prop::BorderRightColor => s.border_right.copy_color(&src.border_right),
+        Prop::BorderBottomColor => s.border_bottom.copy_color(&src.border_bottom),
+        Prop::BorderLeftColor => s.border_left.copy_color(&src.border_left),
+        Prop::BorderStyle => {
+            for (d, w) in [
+                (&mut s.border_top, src.border_top),
+                (&mut s.border_right, src.border_right),
+                (&mut s.border_bottom, src.border_bottom),
+                (&mut s.border_left, src.border_left),
+            ] {
+                d.copy_style(&w);
+            }
+        }
+        Prop::BorderTopStyle => s.border_top.copy_style(&src.border_top),
+        Prop::BorderRightStyle => s.border_right.copy_style(&src.border_right),
+        Prop::BorderBottomStyle => s.border_bottom.copy_style(&src.border_bottom),
+        Prop::BorderLeftStyle => s.border_left.copy_style(&src.border_left),
+        Prop::Width => s.width = src.width,
+        Prop::Height => s.height = src.height,
+        Prop::MinWidth => s.min_width = src.min_width,
+        Prop::MaxWidth => s.max_width = src.max_width,
+        Prop::MinHeight => s.min_height = src.min_height,
+        Prop::MaxHeight => s.max_height = src.max_height,
+        Prop::Margin => {
+            s.margin_top = src.margin_top;
+            s.margin_right = src.margin_right;
+            s.margin_bottom = src.margin_bottom;
+            s.margin_left = src.margin_left;
+        }
+        Prop::MarginTop => s.margin_top = src.margin_top,
+        Prop::MarginRight => s.margin_right = src.margin_right,
+        Prop::MarginBottom => s.margin_bottom = src.margin_bottom,
+        Prop::MarginLeft => s.margin_left = src.margin_left,
+        Prop::Padding => {
+            s.pad_top = src.pad_top;
+            s.pad_right = src.pad_right;
+            s.pad_bottom = src.pad_bottom;
+            s.pad_left = src.pad_left;
+        }
+        Prop::PaddingTop => s.pad_top = src.pad_top,
+        Prop::PaddingRight => s.pad_right = src.pad_right,
+        Prop::PaddingBottom => s.pad_bottom = src.pad_bottom,
+        Prop::PaddingLeft => s.pad_left = src.pad_left,
+        Prop::Top => s.top = src.top,
+        Prop::Right => s.right = src.right,
+        Prop::Bottom => s.bottom = src.bottom,
+        Prop::Left => s.left = src.left,
+        Prop::Display => s.display = src.display,
+        Prop::Position => s.position = src.position,
+        Prop::Float => s.float = src.float,
+        Prop::Clear => s.clear = src.clear,
+        Prop::Visibility => s.hidden = src.hidden,
+        Prop::Overflow => {
+            s.overflow_x = src.overflow_x;
+            s.overflow_y = src.overflow_y;
+        }
+        Prop::OverflowX => s.overflow_x = src.overflow_x,
+        Prop::OverflowY => s.overflow_y = src.overflow_y,
+        Prop::TextAlign => {
+            s.text_align = src.text_align;
+            s.center_blocks = src.center_blocks;
+        }
+        Prop::LineHeight => s.line_height = src.line_height,
+        Prop::VerticalAlign => s.valign = src.valign,
+        // `font-size` moves the em basis every later declaration measures
+        // against, so it has to travel with the size.
+        Prop::FontSize => {
+            s.font_px = src.font_px;
+            s.em_base = src.font_px;
+        }
+        Prop::FontWeight => s.bold = src.bold,
+        Prop::FontStyle => s.italic = src.italic,
+        Prop::FontFamily => s.mono = src.mono,
+        Prop::WhiteSpace => {
+            s.pre = src.pre;
+            s.nowrap = src.nowrap;
+        }
+        Prop::TextDecoration => {
+            s.deco = src.deco;
+            s.deco_color = src.deco_color;
+        }
+        Prop::ListStyleType => s.list_style = src.list_style,
+        Prop::ZIndex => s.z_index = src.z_index,
+        Prop::BoxSizing => s.box_border = src.box_border,
+        Prop::Opacity => {
+            s.transparent = src.transparent;
+            s.opacity_zero = src.opacity_zero;
+        }
+        Prop::TextIndent => s.text_indent = src.text_indent,
+        Prop::LetterSpacing => s.letter_spacing = src.letter_spacing,
+        Prop::WordSpacing => s.word_spacing = src.word_spacing,
+        Prop::TextTransform => s.text_transform = src.text_transform,
+        Prop::Direction => s.rtl = src.rtl,
+        Prop::BorderCollapse => s.border_collapse = src.border_collapse,
+        Prop::BorderSpacing => s.border_spacing = src.border_spacing,
+        Prop::TableLayout => s.table_layout = src.table_layout,
+        _ => return false,
+    }
+    true
 }
 
 pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
@@ -4180,6 +4415,56 @@ mod tests {
         let p = css::prop_key(name);
         assert_ne!(css::prop_name(p), "(unknown)", "no such property: {name}");
         super::apply_one(p, val, theme, s);
+    }
+
+    /// A CSS-wide keyword applies to EVERY property. Before this it was
+    /// handled property by property, so `border-bottom-color: inherit` did not
+    /// parse — and a failed parse leaves the PREVIOUS declaration standing,
+    /// which is how a rule that says "red, then inherit" painted red.
+    #[test]
+    fn css_wide_keywords_reach_every_property() {
+        let theme = Theme::DARK;
+        let st = |css: &str, html: &str| {
+            let dom = dom::parse(html);
+            let sheet = css::parse(css);
+            let mut root = ComputedStyle::root(&theme);
+            root.display = Display::Block;
+            resolve(&subject(&dom), &root, &theme, &sheet, &[], &[], 0, 1000.0)
+        };
+        // `inherit` on a NON-inherited property: the parent's value, not the
+        // initial one. Declared after `red`, so it also proves the earlier
+        // declaration is overridden rather than left in place.
+        let mut parent = ComputedStyle::root(&theme);
+        parent.border_bottom.set_style("solid");
+        parent.border_bottom.color = Some(Rgba::opaque(Rgb(0, 128, 0)));
+        let dom = dom::parse("<body><div>x</div></body>");
+        let sheet = css::parse("div { border-bottom-color: red; border-bottom-color: inherit }");
+        let got = resolve(&subject(&dom), &parent, &theme, &sheet, &[], &[], 0, 1000.0);
+        assert_eq!(got.border_bottom.color, Some(Rgba::opaque(Rgb(0, 128, 0))));
+
+        // `initial` on an inherited property drops the inherited value.
+        let mut p2 = ComputedStyle::root(&theme);
+        p2.letter_spacing = 7.0;
+        let dom2 = dom::parse("<body><div>x</div></body>");
+        let sheet2 = css::parse("div { letter-spacing: initial }");
+        assert_eq!(resolve(&subject(&dom2), &p2, &theme, &sheet2, &[], &[], 0, 1000.0).letter_spacing, 0.0);
+
+        // `unset` follows the property's own inheritance: inherited for
+        // `letter-spacing`, initial for `width`.
+        let sheet3 = css::parse("div { letter-spacing: unset; width: unset }");
+        let g3 = resolve(&subject(&dom2), &p2, &theme, &sheet3, &[], &[], 0, 1000.0);
+        assert_eq!(g3.letter_spacing, 7.0);
+        assert_eq!(g3.width, Len::Auto);
+
+        // A longhand takes only its own half of the side.
+        let mut p4 = ComputedStyle::root(&theme);
+        p4.border_top.set_spec_width(9.0);
+        p4.border_top.color = Some(Rgba::opaque(Rgb(1, 2, 3)));
+        let sheet4 = css::parse("div { border-top-style: solid; border-top-width: inherit }");
+        let g4 = resolve(&subject(&dom2), &p4, &theme, &sheet4, &[], &[], 0, 1000.0);
+        assert_eq!(g4.border_top.width, 9.0, "width inherited");
+        assert_ne!(g4.border_top.color, p4.border_top.color, "colour did NOT ride along");
+        let _ = st;
     }
 
     #[test]
