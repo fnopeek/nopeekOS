@@ -882,6 +882,8 @@ css_props! {
     OverflowX = "overflow-x" @ Layout,
     OverflowY = "overflow-y" @ Layout,
     TextOverflow = "text-overflow" @ Paint,
+    Filter = "filter" @ Paint,
+    WebkitFilter = "-webkit-filter" @ Paint,
     // Opera's prefix, and the only one Bootstrap still ships for `object-fit`.
     ObjectFit = "object-fit" @ Paint,
     OObjectFit = "-o-object-fit" @ Paint,

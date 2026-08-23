@@ -939,6 +939,11 @@ pub struct ComputedStyle {
     /// `object-fit` — how a replaced element's pixels fill the content box.
     /// Not inherited.
     pub object_fit: ObjectFit,
+    /// `filter`, as the one colour transform the whole chain composes to.
+    /// Not inherited, but it does apply to the element's whole SUBTREE — which
+    /// layout does by walking the op range the box produced, not by passing it
+    /// down the cascade (a descendant must not be able to cancel it).
+    pub filter: Option<crate::color::ColorFilter>,
     /// `overflow-wrap`/`word-wrap: break-word` or `word-break: break-all`/
     /// `break-word` — a word longer than its line may be split mid-word rather
     /// than overflowing the box. Inherited, like both source properties.
@@ -1019,6 +1024,7 @@ impl ComputedStyle {
             overflow_y: Overflow::Visible,
             ellipsis: false,
             object_fit: ObjectFit::Fill,
+            filter: None,
             radius: [Len::Px(0.0); 4],
             shadow: None,
             translate: None,
@@ -1266,6 +1272,7 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         overflow_y: Overflow::Visible,
         ellipsis: false,
         object_fit: ObjectFit::Fill,
+        filter: None,
         radius: [Len::Px(0.0); 4],
         shadow: None,
         translate: None,
@@ -2527,6 +2534,7 @@ pub fn apply_wide(prop: Prop, kw: Wide, parent: &ComputedStyle, theme: &Theme, s
         Prop::OverflowX => s.overflow_x = src.overflow_x,
         Prop::OverflowY => s.overflow_y = src.overflow_y,
         Prop::TextOverflow => s.ellipsis = src.ellipsis,
+        Prop::Filter | Prop::WebkitFilter => s.filter = src.filter,
         Prop::ObjectFit | Prop::OObjectFit => s.object_fit = src.object_fit,
         Prop::TextAlign => {
             s.text_align = src.text_align;
@@ -2661,6 +2669,16 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         // one-value form sets exactly that. A `<string>` custom ellipsis is
         // parsed as "not `clip`" rather than rendered literally.
         Prop::TextOverflow => s.ellipsis = v.split_whitespace().next_back().is_some_and(|t| t != "clip"),
+        // A chain of only colour functions composes to one matrix; anything
+        // else (`blur`, `drop-shadow`, `url()`) leaves the property alone, so
+        // the page gets its own pixels rather than a guess at a blur.
+        // The identity is kept as `None` — it is `filter: none`, and carrying
+        // it would put every op of the subtree through a no-op transform.
+        Prop::Filter | Prop::WebkitFilter => {
+            if let Some(f) = crate::color::parse_filter(v) {
+                s.filter = (f != crate::color::ColorFilter::IDENTITY).then_some(f);
+            }
+        }
         Prop::ObjectFit | Prop::OObjectFit => {
             // `object-fit` also accepts `scale-down` paired with `none`; the
             // pair is what `scale-down` already means, so the keyword decides.
