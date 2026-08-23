@@ -2908,6 +2908,19 @@ impl<'a> Ctx<'a> {
             let frame = st.pad_left + st.pad_right + st.border_x();
             cw = clamp_len(iw + frame, st.min_width, st.max_width, st.box_border, frame) - frame;
         }
+        // NOTE: an intrinsic keyword on an IN-FLOW block's `width` is left on
+        // the `auto` path deliberately. Sizing it from `intrinsic_width` was
+        // built and MEASURED: +12/−12 and three references that stopped
+        // rendering. `intrinsic_width` walks children as block content, so on
+        // a grid, flex or table box it answers about the wrong formatting
+        // context — and `width: fit-content` on a `display:grid` wrapper is
+        // how several grid REFERENCES frame themselves, which turns the error
+        // into losses in families that have nothing to do with sizing.
+        // Restricting it by the box's own display did not help, because the
+        // keyword usually sits on a plain wrapper AROUND such a box. This
+        // wants a display-aware intrinsic measurement, not a special case.
+        // The out-of-flow, float, flex-item and grid-item paths DO honour it —
+        // those measure the box themselves.
         let aspect = with_aspect_height(st, cw);
         let st = aspect.as_ref().unwrap_or(st);
         let content_x = x + off_left as i32;
@@ -3076,25 +3089,28 @@ impl<'a> Ctx<'a> {
         };
         let out_bottom_margin = Collapse::one(if isolated { 0.0 } else { st.margin_bottom });
 
-        if !flow.committed {
+        // Size containment takes this branch even with content in it: under
+        // `contain: size` the content contributes NO size (css-contain-2 §3.1),
+        // so the box is measured exactly as if it were empty — the content
+        // still paints, it just overflows.
+        if !flow.committed || st.contain_size {
             // No in-flow content. Its explicit box height, if any.
             let mut ch = 0;
             if let Some(h) = px_h(st.height) {
                 ch = h;
+            } else if st.contain_size {
+                if let Some((_, ih)) = st.contain_intrinsic {
+                    ch = ih as i32;
+                }
             } else if let Some((_, ih)) = replaced_intrinsic(el) {
                 // §10.6.2: `height: auto` on a replaced element is its
                 // intrinsic height, not the zero its (unrendered) content says.
                 ch = ih as i32;
-            } else if st.contain_size {
-                // Size containment: content contributes no size, so an auto
-                // height falls back to `contain-intrinsic-size`'s height.
-                if let Some((_, ih)) = st.contain_intrinsic {
-                    ch = ih as i32;
-                }
             }
             // A container whose ONLY content is a float: no line box ever
-            // committed, so the float alone decides the height.
-            if let Some(fb) = float_bottom {
+            // committed, so the float alone decides the height. A contained
+            // box takes nothing from its floats either.
+            if let (Some(fb), false) = (float_bottom, st.contain_size) {
                 ch = ch.max(fb - content_top);
             }
             if let Some(mn) = px_h(st.min_height) {
@@ -3105,7 +3121,9 @@ impl<'a> Ctx<'a> {
             }
             // A box with no content, border, padding or height collapses through:
             // its top and bottom margins are adjoining.
-            if collapse_top && bb == 0 && pb == 0 && ch == 0 {
+            // Collapsing through needs the box to be genuinely empty; a
+            // contained box holds content and must not let margins meet.
+            if collapse_top && bb == 0 && pb == 0 && ch == 0 && !flow.committed {
                 let mut open = top;
                 open.merge(flow.open);
                 open.add(st.margin_bottom);
@@ -4582,10 +4600,16 @@ impl<'a> Ctx<'a> {
         if let Some(hit) = self.intrinsic.get(&el.seq) {
             return *hit;
         }
-        // A replaced element measures as its intrinsic width, both ways — it
-        // neither wraps nor shrinks below itself. Without this it sizes to 0 as
-        // a flex/grid item, a table cell or a shrink-to-fit out-of-flow box.
-        let out = if let Some((iw, _)) = replaced_intrinsic(el) {
+        // Size containment: the content contributes NOTHING to the box's own
+        // size (css-contain-2 §3.1), so both intrinsic widths come from
+        // `contain-intrinsic-size` — or are zero when it says nothing. This
+        // has to sit ahead of every content-measuring branch below, including
+        // the replaced one: the point of the property is that the box sizes
+        // as if it held a single child of exactly that size.
+        let out = if st.contain_size {
+            let w = st.contain_intrinsic.map_or(0.0, |(iw, _)| iw);
+            (w, w)
+        } else if let Some((iw, _)) = replaced_intrinsic(el) {
             (iw, iw)
         // A control has no text children to measure — without this it sizes to
         // 0 as a flex/grid item and disappears.
