@@ -22,12 +22,32 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-22, beak 0.31.0)
+### Current number (measured 2026-08-23, beak 0.34.0)
 
 ```
-4328 pass / 1314 fail / 144 inconclusive   (of 5786 vendored reftests)
-= 76.7 % of the conclusive 5642
+4414 pass / 1228 fail / 144 inconclusive   (of 5786 vendored reftests)
+= 78.2 % of the conclusive 5642
 ```
+
+**Two denominators, and the second one is the honest one.** 452 of the 1228
+failures are tests for specs no page on the web runs — they were counted by
+CONTENT, not by filename, because the filename does not say so
+(`css-grid/column-align-items-001.html` is a `display: grid-lanes` test):
+
+| | failing | what it is |
+|---|---:|---|
+| `grid-lanes` | 346 | masonry, css-grid-3 — an unshipped proposal |
+| `writing-mode: vertical` | 49 | a project of its own |
+| `display: run-in` | 35 | dropped from CSS 2.1 by every engine |
+| `subgrid` | 22 | |
+
+Against the corpus that a real page can actually exercise — 5190 tests —
+the number is **4414 / 5190 = 85.0 %**. Both are worth tracking: the raw one
+never lies about the suite, and the second one is the one that predicts what a
+page looks like. Neither is allowed to move without a measured run.
+
+A hard ceiling inside the real corpus: `css-fonts/font-family-name` (18 tests)
+demands the W3C CSSTest fonts be installed. It is not winnable here, ever.
 
 Session arc: 3682 (0.1.64) → 3683 → 3688 → 3723 → 3745 → 3746 → 3863 → 3869 →
 3870 (0.3.0) → 3880 (0.3.2) → 3926 (0.3.3) → 3959 (0.3.4) → 3963 (0.3.5) →
@@ -78,7 +98,25 @@ hands the overlap to the loser — and lifting every positioned box gives
 the `*-replaced-height-004/005/007` triple across the inline, inline-block and
 float families, where the two boxes were already pixel-identical and only the
 order was wrong. All six real-page renderings stay byte-identical and the layout
-costs 0.015 % more fuel). The inconclusive count fell 254 → 177 over
+costs 0.015 % more fuel). → **4370** (0.32.1, +5 — `contain: size` means the content contributes no
+size, which the code read as "when there IS no content": the height fell back
+to `contain-intrinsic-size` only if nothing had flowed. Also measured and
+REMOVED: an intrinsic keyword on an in-flow block's `width`, +12/−12 and three
+references that stopped rendering, because `intrinsic_width` walks children as
+block content and so answers about the wrong formatting context on a grid or
+flex box — and `width: fit-content` on a `display:grid` wrapper is how several
+grid REFERENCES frame themselves) → **4414** (0.33.0 + 0.34.0, +44/−0, and it
+was not on any list. It was found by sorting the failures by their pixel-diff
+percentage: 91 of them sat at EXACTLY 2.08 %, which is 100×100 on 800×600 —
+"a green square" tests, missed whole. A sample of three turned up
+`border-bottom-color: inherit`, and counting the corpus said 99 failing tests
+write a CSS-wide keyword. `inherit`/`initial`/`unset` had arms for seven
+properties; everywhere else `inherit` simply did not parse — and a failed parse
+leaves the PREVIOUS declaration standing, so a rule reading "red, then inherit"
+painted red. Now general over ~70 properties, plus the `all` shorthand.
+`revert` is deliberately still per-property: it rolls back to the UA origin,
+which would cost a snapshot of a large `Copy` struct per element for a keyword
+six tests in the corpus write). The inconclusive count fell 254 → 177 over
 that span: references that used to render blank — because `:root` was dropped,
 because an `inline-block` had no box, or because an inline box painted no
 background — now paint, so 73 more tests actually measure something. → **4293** (0.30.0, +89/−0 net over eleven changes, every one of them a
