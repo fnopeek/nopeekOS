@@ -26,14 +26,104 @@ use alloc::vec::Vec;
 pub enum ColorVal {
     Rgb(Rgba),
     Transparent,
+    /// `currentcolor` — the element's OWN computed `color`, and NOT resolved
+    /// here. It cannot be: css-color-4 §6.2 resolves it at used-value time, so
+    /// a computed value that still says `currentcolor` is what a descendant
+    /// inherits, and the descendant resolves it against its own `color`. That
+    /// is the whole of `background-color: inherit` under a `currentcolor`
+    /// background — resolving early makes the child wear its parent's colour.
+    ///
+    /// Kept apart from `None` for the same reason `Transparent` is: `None`
+    /// means "this declaration said nothing usable, keep the previous one",
+    /// which is the opposite of what `currentcolor` asks for.
+    CurrentColor,
 }
 
 /// Parse a CSS `<color>`, keeping "fully transparent" apart from "no value".
 /// `None` means "keep the inherited value" — `currentcolor`/`inherit` and
 /// unparseable input (forward-compatible, like a browser).
 pub fn parse_color_val(v: &str) -> Option<ColorVal> {
+    let t = v.trim();
+    if t.eq_ignore_ascii_case("currentcolor") {
+        return Some(ColorVal::CurrentColor);
+    }
+    if let Some(rel) = parse_relative(t) {
+        return Some(rel);
+    }
     let (rgb, a) = parse_rgba(v)?;
     Some(if a == 0 { ColorVal::Transparent } else { ColorVal::Rgb(Rgba { c: rgb, a }) })
+}
+
+/// CSS Color 5 relative syntax — `<fn>(from <origin> <channels>)`.
+///
+/// Only the IDENTITY channel list is accepted: the three channel keywords of
+/// that function, in order, and an optional `/ alpha`. Then the result IS the
+/// origin, whatever colour space the function names, and the origin's own
+/// `currentcolor`-ness travels with it — which is exactly what the sixteen
+/// `css-color/relative-currentcolor-*` reftests are about (measured: fourteen
+/// of them write the identity, and relative syntax appears NOWHERE else in the
+/// corpus, so this is the whole of what the form is worth here).
+///
+/// Anything else — a substituted channel (`hsl(from C 120 s l)`), a
+/// permutation (`rgb(from C g r b)`), a `calc()` over a channel — returns
+/// `None`, so the declaration is left alone rather than painted as its origin.
+fn parse_relative(v: &str) -> Option<ColorVal> {
+    let open = v.find('(')?;
+    let name = v[..open].trim().to_ascii_lowercase();
+    let inner = v[open + 1..].strip_suffix(')')?;
+    let rest = inner.trim_start();
+    let rest = rest.strip_prefix("from ").or_else(|| rest.strip_prefix("FROM "))?;
+    let (origin, mut args) = split_origin(rest.trim())?;
+    // `color()` names its space before the channels, and the channel letters
+    // depend on it: an xyz space is `x y z`, every rgb-like one is `r g b`.
+    let want: &[&str] = if name == "color" {
+        let (space, tail) = args.split_once(|c: char| c.is_ascii_whitespace())?;
+        args = tail.trim();
+        if space.to_ascii_lowercase().starts_with("xyz") { &["x", "y", "z"] } else { &["r", "g", "b"] }
+    } else {
+        match name.as_str() {
+            "rgb" | "rgba" => &["r", "g", "b"],
+            "hsl" | "hsla" => &["h", "s", "l"],
+            "hwb" => &["h", "w", "b"],
+            "lab" | "oklab" => &["l", "a", "b"],
+            "lch" | "oklch" => &["l", "c", "h"],
+            _ => return None,
+        }
+    };
+    // `/ alpha` is the identity for the alpha channel; a number there is not.
+    let (channels, alpha) = match args.split_once('/') {
+        Some((c, a)) => (c, Some(a.trim())),
+        None => (args, None),
+    };
+    if alpha.is_some_and(|a| !a.eq_ignore_ascii_case("alpha")) {
+        return None;
+    }
+    let got = tokens(channels);
+    if got.len() != 3 || !got.iter().zip(want).all(|(g, w)| g.eq_ignore_ascii_case(w)) {
+        return None;
+    }
+    if origin.eq_ignore_ascii_case("currentcolor") {
+        return Some(ColorVal::CurrentColor);
+    }
+    // A concrete origin resolves now; a relative colour over one is not
+    // deferred by anything.
+    parse_color_val(origin)
+}
+
+/// Split `<origin> <rest>` where the origin may itself be a parenthesised
+/// function (`rgb(from rgb(0 0 0) r g b)`), so the split has to count parens
+/// rather than take the first space.
+fn split_origin(s: &str) -> Option<(&str, &str)> {
+    let mut depth = 0i32;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            c if c.is_ascii_whitespace() && depth == 0 => return Some((&s[..i], s[i..].trim_start())),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Parse a CSS `<color>`. `None` means "keep the inherited value" — the caller
@@ -45,6 +135,9 @@ pub fn parse_color(v: &str) -> Option<Rgba> {
         // A caller with no transparent state keeps the inherited value rather
         // than painting the alpha-0 carrier colour (usually black).
         ColorVal::Transparent => None,
+        // A caller with no deferral either — same rule: keep the inherited
+        // value rather than freeze `currentcolor` to the wrong element's.
+        ColorVal::CurrentColor => None,
     }
 }
 
@@ -390,6 +483,10 @@ fn parse_color_fn(inner: &str) -> Option<Rgb> {
         "display-p3" => {
             xyz_to_lin_srgb(mat(&P3_TO_XYZ_D65, [srgb_lin(c[0]), srgb_lin(c[1]), srgb_lin(c[2])]))
         }
+        // The same primaries with no transfer function — the channels are
+        // already linear, so the only difference from `display-p3` is that
+        // there is no gamma to undo.
+        "display-p3-linear" => xyz_to_lin_srgb(mat(&P3_TO_XYZ_D65, c)),
         "a98-rgb" => {
             xyz_to_lin_srgb(mat(&A98_TO_XYZ_D65, [a98_lin(c[0]), a98_lin(c[1]), a98_lin(c[2])]))
         }
@@ -427,14 +524,21 @@ fn num_or_pct(tok: &str) -> Option<f32> {
 }
 
 /// lab/oklab lightness. lab: `%`=0..100 or number; oklab: `%`=0..1 or number.
+///
+/// CLAMPED, which is not the same as clipping the result: css-color-4 §9.2
+/// makes lightness itself range-limited, so `lab(150 …)` IS `lab(100 …)` and
+/// the two must come out byte-identical. Letting 150 through fed a lightness
+/// no colour has into the conversion and landed somewhere else entirely.
 fn lab_l(tok: &str, ok: bool) -> Option<f32> {
     if tok == "none" {
         return Some(0.0);
     }
-    match tok.strip_suffix('%') {
-        Some(p) => Some(p.parse::<f32>().ok()? / 100.0 * if ok { 1.0 } else { 100.0 }),
-        None => tok.parse().ok(),
-    }
+    let top = if ok { 1.0 } else { 100.0 };
+    let v = match tok.strip_suffix('%') {
+        Some(p) => p.parse::<f32>().ok()? / 100.0 * top,
+        None => tok.parse().ok()?,
+    };
+    Some(clamp(v, 0.0, top))
 }
 
 /// lab/oklab a/b axis. `%` reference: lab ±125, oklab ±0.4.
@@ -814,6 +918,70 @@ mod tests {
     /// The alpha-specific tests call `parse_color_val` and see it.
     fn parse_color(v: &str) -> Option<Rgb> {
         super::parse_color(v).map(|c| c.c)
+    }
+
+    /// `currentcolor` is a VALUE, not a failure to parse — the difference is
+    /// what lets a background follow the element's own text colour instead of
+    /// keeping whatever the previous declaration said.
+    #[test]
+    fn currentcolor_is_a_value_of_its_own() {
+        assert_eq!(parse_color_val("currentcolor"), Some(ColorVal::CurrentColor));
+        assert_eq!(parse_color_val("currentColor"), Some(ColorVal::CurrentColor));
+        // A caller that cannot defer still reads it as "keep what you had".
+        assert_eq!(parse_color("currentcolor"), None);
+    }
+
+    /// Relative syntax with the IDENTITY channel list is its origin, in every
+    /// colour space — including when the origin is `currentcolor`, whose
+    /// deferral has to survive the trip.
+    #[test]
+    fn relative_syntax_with_identity_channels_is_the_origin() {
+        for v in [
+            "rgb(from currentColor r g b)",
+            "hsl(from currentColor h s l)",
+            "hwb(from currentColor h w b)",
+            "lab(from currentColor l a b)",
+            "lch(from currentColor l c h)",
+            "oklab(from currentColor l a b)",
+            "oklch(from currentColor l c h)",
+            "color(from currentColor rec2020 r g b)",
+            "color(from currentColor xyz-d50 x y z)",
+            "rgb(from currentColor r g b / alpha)",
+        ] {
+            assert_eq!(parse_color_val(v), Some(ColorVal::CurrentColor), "{v}");
+        }
+        // A concrete origin resolves right here — nothing to defer.
+        assert_eq!(parse_color("rgb(from red r g b)"), Some(Rgb(255, 0, 0)));
+
+        // Anything but the identity is left alone rather than painted as its
+        // origin: a swapped channel, a substituted one, a numeric alpha.
+        for v in [
+            "rgb(from currentColor g r b)",
+            "hsl(from currentColor 120 s l)",
+            "rgb(from red r g calc(b * 2))",
+            "rgb(from currentColor r g b / 0.5)",
+            "lch(from currentColor l a b)",
+        ] {
+            assert_eq!(parse_color_val(v), None, "{v}");
+        }
+    }
+
+    /// Lightness is range-limited by the spec, so an over-range one is the
+    /// same colour as the limit — not a different one that happens to clip.
+    #[test]
+    fn lightness_over_range_is_the_same_colour_as_the_limit() {
+        assert_eq!(parse_color("lab(150 150 20)"), parse_color("lab(100 150 20)"));
+        assert_eq!(parse_color("oklch(1.5 0.5 50)"), parse_color("oklch(1 0.5 50)"));
+        assert_eq!(parse_color("lch(-20 40 50)"), parse_color("lch(0 40 50)"));
+    }
+
+    /// `display-p3-linear` is `display-p3`'s primaries with no transfer
+    /// function — sRGB green is 0.0383 0.2087 0.0156 there.
+    #[test]
+    fn display_p3_linear_needs_no_gamma_undone() {
+        let green = parse_color("color(display-p3-linear 0.0383 0.2087 0.0156)").expect("parses");
+        assert!(green.1 > 120 && green.1 < 136, "green channel ~128, got {green:?}");
+        assert!(green.0 < 8 && green.2 < 8, "red/blue near zero, got {green:?}");
     }
 
     #[test]
