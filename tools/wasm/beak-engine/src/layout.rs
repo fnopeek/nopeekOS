@@ -28,7 +28,7 @@ use crate::image::ImageMap;
 use crate::style::{
     self, BgLayer, BgPos, BgSize, BorderSide, ClearKind, Clip, ComputedStyle, ContentAlign,
     ContentPiece, CrossAlign, Display, FlexBasis, FloatKind, GridTrack, Intrinsic, Justify, Len, ListStyle,
-    Overflow, Position, TableLayout,
+    ObjectFit, Overflow, Position, TableLayout,
     TextAlign, TextTransform, ZIndex, BASE_FONT_PX,
 };
 
@@ -696,7 +696,10 @@ pub enum DrawOp {
     /// on a miss. That way an image arriving after layout costs a repaint
     /// instead of a full re-layout — which on a real article is the
     /// difference between ~15 ms and ~145 ms, per image batch.
-    Image { x: i32, y: i32, w: i32, h: i32, src: String, alt: String },
+    /// `fit` is `object-fit`: the box is `w`×`h` either way, the picture
+    /// inside it is placed by the rasteriser, which is the only place the
+    /// intrinsic size is known (the pixels are looked up at paint time).
+    Image { x: i32, y: i32, w: i32, h: i32, src: String, alt: String, fit: ObjectFit },
     /// A `background-image` or `mask-image` layer over the box `x,y,w,h` (the
     /// background positioning area). Carries the `url_key`, not the pixels —
     /// same reason as `Image`: an asset arriving late costs a repaint, never a
@@ -1579,6 +1582,43 @@ impl<'a> Ctx<'a> {
         ElemInfo::of_hovered(el, self.hover)
     }
 
+    /// Does a `display: contents` element hold nothing but inline-level
+    /// content? Then its children belong in the line box the parent is already
+    /// building, and putting them anywhere else splits a line the reference
+    /// keeps whole (`P<fieldset style=display:contents>A…` is one word).
+    ///
+    /// If ANY child is block-level the parent's flow has to break for it
+    /// regardless, and a transparent block — which is what `resolve` has
+    /// already made of this style, zero margins and all — lands the same
+    /// pixels while keeping the block/anonymous-block split intact.
+    ///
+    /// Costs one style resolve per child, paid only for `display: contents`.
+    /// `styled` memoises on the same key the real walk uses, so the walk that
+    /// follows reads them back out of the map.
+    fn contents_is_inline(&mut self, el: &'a Element, st: &ComputedStyle) -> bool {
+        self.path.push(self.info(el));
+        let n = el.children.iter().filter(|c| matches!(c, Node::Element(_))).count() as u32;
+        let mut sibs: Vec<ElemInfo> = Vec::new();
+        let mut inline_only = true;
+        for c in &el.children {
+            let Node::Element(ce) = c else { continue };
+            let cs = self.styled(ce, st, &sibs, n);
+            sibs.push(self.info(ce));
+            inline_only = match cs.display {
+                Display::None | Display::Inline | Display::InlineBlock => true,
+                // Nested unboxing — `details, summary { display: contents }`
+                // is one element's contents inside another's.
+                Display::Contents => self.contents_is_inline(ce, &cs),
+                _ => false,
+            };
+            if !inline_only {
+                break;
+            }
+        }
+        self.path.pop();
+        inline_only
+    }
+
     /// `style::resolve` through the memo. Every cascade inside the layout goes
     /// through here so a re-measured subtree costs a map lookup, not a full
     /// selector match against the page's stylesheet.
@@ -2314,7 +2354,7 @@ impl<'a> Ctx<'a> {
                 }
                 Node::Element(el) => el,
             };
-            let st = self.styled(el, parent, &siblings, sib_count);
+            let mut st = self.styled(el, parent, &siblings, sib_count);
             siblings.push(self.info(el));
             if st.display == Display::None {
                 continue;
@@ -2331,6 +2371,27 @@ impl<'a> Ctx<'a> {
                     .unwrap_or(list_ord + 1);
                 self.marker_ord = list_ord;
             }
+            // `display: contents` generates no box: the children go where this
+            // element's box would have been. Inline-level content joins the
+            // line box already open here; anything else takes the block path
+            // below, where the style `resolve` stripped makes the box it
+            // builds transparent — zero margins, no border, no background,
+            // `width: auto` — so it neither paints nor moves its children.
+            if st.display == Display::Contents {
+                // `white-space: pre` is a whole-BOX path here (`layout_pre`
+                // owns the element's text, newlines and all), so an unboxed
+                // element would never reach it and its source line breaks
+                // would collapse. The transparent block is where that path
+                // still runs — and it is what a bare `pre` block renders as
+                // anyway, so this loses nothing the inline route would give.
+                if !st.pre && self.contents_is_inline(el, &st) {
+                    self.path.push(self.info(el));
+                    self.collect_inline(el, &st, None, &mut inline, x, w, anchor);
+                    self.path.pop();
+                    continue;
+                }
+                st.display = Display::Block;
+            }
             // `<img>` is an atomic inline box: add it to the current inline run
             // (a lone `<img>` flows as one item → its own line; an `<img>` in an
             // `<a>`/`<span>` flows with the text). Nested imgs are handled in
@@ -2341,7 +2402,7 @@ impl<'a> Ctx<'a> {
                 let (iw, ih) = if svg { self.svg_box(el, &st) } else { self.img_box(el, &st) };
                 let alt = svg_alt(el, svg);
                 let src = if svg { svg_key(el) } else { el.attr("src").unwrap_or("").to_string() };
-                inline.image(src, iw, ih, None, alt, st.hidden, st.transparent, self.image_deco(&st));
+                inline.image(src, iw, ih, None, alt, st.hidden, st.transparent, st.object_fit, self.image_deco(&st));
                 self.path.pop();
                 continue;
             }
@@ -3634,7 +3695,42 @@ impl<'a> Ctx<'a> {
         } else {
             (i32::MIN / 4, i32::MAX / 4)
         };
+        if st.ellipsis && st.overflow_x.clips() {
+            self.ellipsize(start, cr);
+        }
         clip_ops(&mut self.ops, start, cl, ct, cr, cb);
+    }
+
+    /// `text-overflow: ellipsis` — a text run that would cross the box's right
+    /// clip edge is cut back and ends in `…` instead (css-ui-4 §5.2).
+    ///
+    /// Done here, on the finished display list, rather than during line
+    /// breaking: the property does not change layout at all — the line is
+    /// measured, broken and positioned as if it were `clip`, and only what
+    /// gets PAINTED differs. Doing it any earlier would move the box.
+    ///
+    /// `clip_ops` keeps a text run whole when it merely overlaps the clip
+    /// (glyphs are not clipped per pixel), so without this a `.text-truncate`
+    /// box does not just lack the `…` — its text runs on out of the box.
+    fn ellipsize(&mut self, start: usize, cr: i32) {
+        for op in &mut self.ops[start..] {
+            let DrawOp::Text { x, size, bold, italic, mono, sp, text, .. } = op else { continue };
+            let font = self.fonts.pick(*bold, *italic, *mono);
+            if *x + ceil_i32(measure_sp(font, text, *size, *sp)) <= cr {
+                continue;
+            }
+            let dots = measure_sp(font, "\u{2026}", *size, *sp);
+            let avail = (cr - *x) as f32 - dots;
+            // No room for even the ellipsis: the run is past the edge entirely
+            // and `clip_ops` will drop it, so leave it be rather than emitting
+            // a lone `…` at a position the line never reserved.
+            if avail <= 0.0 {
+                continue;
+            }
+            let keep = fit_prefix(font, text, *size, avail, *sp);
+            text.truncate(keep);
+            text.push('\u{2026}');
+        }
     }
 
     fn insert_bg(&mut self, st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, bg_idx: usize) {
@@ -6865,7 +6961,7 @@ impl<'a> Ctx<'a> {
             let svg = el.tag == "svg";
             let (iw, ih) = if svg { self.svg_box(el, st) } else { self.img_box(el, st) };
             let src = if svg { svg_key(el) } else { el.attr("src").unwrap_or("").to_string() };
-            inline.image(src, iw, ih, href, svg_alt(el, svg), st.hidden, st.transparent, self.image_deco(st));
+            inline.image(src, iw, ih, href, svg_alt(el, svg), st.hidden, st.transparent, st.object_fit, self.image_deco(st));
             return;
         }
         // …and every other replaced element, laid out through the block model
@@ -6876,7 +6972,11 @@ impl<'a> Ctx<'a> {
             }
             return;
         }
-        if let Some(kind) = crate::forms::kind_of(el) {
+        // A `<button>` under `display: contents` is unboxed like any other
+        // element — its label becomes ordinary inline content of the parent,
+        // and the UA widget it would otherwise draw is exactly the box the
+        // property says must not exist.
+        if let Some(kind) = crate::forms::kind_of(el).filter(|_| st.display != Display::Contents) {
             if kind != ControlKind::Hidden {
                 let ctl = self.control_box(el, st, kind, bw as f32);
                 inline.control(ctl);
@@ -7034,7 +7134,7 @@ enum Item {
     /// style="line-height:5"></span>X` is a tall line — but it never makes a
     /// line non-empty, so a line holding nothing else is still not generated.
     Strut(RunStyle),
-    Image { src: String, w: i32, h: i32, href: Option<String>, alt: String, space_before: bool, hidden: bool, transparent: bool, deco: Option<alloc::boxed::Box<InlineBox>> },
+    Image { src: String, w: i32, h: i32, href: Option<String>, alt: String, space_before: bool, hidden: bool, transparent: bool, fit: ObjectFit, deco: Option<alloc::boxed::Box<InlineBox>> },
     Control { ctl: CtlBox, space_before: bool },
     /// `display: inline-block` — laid out already, waiting for its position.
     /// The finished display list is MOVED out when the line box places it;
@@ -7546,10 +7646,10 @@ impl Inline {
     /// Add an atomic `<img>` (decoded or a placeholder) to the inline run,
     /// carrying the enclosing link so an image-in-a-link stays clickable.
     #[allow(clippy::too_many_arguments)]
-    fn image(&mut self, src: String, w: i32, h: i32, href: Option<&str>, alt: String, hidden: bool, transparent: bool, deco: Option<InlineBox>) {
+    fn image(&mut self, src: String, w: i32, h: i32, href: Option<&str>, alt: String, hidden: bool, transparent: bool, fit: ObjectFit, deco: Option<InlineBox>) {
         let space_before = self.pending_space && !self.items.is_empty();
         self.pending_space = false;
-        self.items.push(Item::Image { src, w, h, href: href.map(|s| s.to_string()), alt, space_before, hidden, transparent, deco: deco.map(alloc::boxed::Box::new) });
+        self.items.push(Item::Image { src, w, h, href: href.map(|s| s.to_string()), alt, space_before, hidden, transparent, fit, deco: deco.map(alloc::boxed::Box::new) });
     }
 
     /// Add a laid-out `inline-block` to the inline run.
@@ -7839,7 +7939,7 @@ impl Inline {
                     gap = gap.max(b.h as f32).max(line_ascent + line_below);
                     line.push(Placed::Atomic { x: (pen - b.w as f32) as i32, box_: b });
                 }
-                Item::Image { src, w: iw, h: ih, href, alt, space_before, hidden, transparent, deco } => {
+                Item::Image { src, w: iw, h: ih, href, alt, space_before, hidden, transparent, fit, deco } => {
                     // The frame an `<img>` paints around itself is part of the
                     // space it takes on the line — measure with it, or the
                     // border overlaps whatever comes next.
@@ -7874,6 +7974,7 @@ impl Inline {
                         alt: alt.clone(),
                         hidden: *hidden,
                         transparent: *transparent,
+                        fit: *fit,
                         deco: deco.clone(),
                     });
                     pen += lead + fl + bw as f32 + fr;
@@ -7920,7 +8021,7 @@ impl Inline {
 enum Placed<'a> {
     Text(Seg),
     Atomic { x: i32, box_: AtomicBox },
-    Image { x: i32, w: i32, h: i32, src: String, href: Option<String>, alt: String, hidden: bool, transparent: bool, deco: Option<alloc::boxed::Box<InlineBox>> },
+    Image { x: i32, w: i32, h: i32, src: String, href: Option<String>, alt: String, hidden: bool, transparent: bool, fit: ObjectFit, deco: Option<alloc::boxed::Box<InlineBox>> },
     Control { x: i32, ctl: &'a CtlBox },
 }
 
@@ -9063,7 +9164,7 @@ fn emit_line(
                 let top = baseline - (ctl.h - CTL_PAD_Y);
                 paint_control(fonts, theme, ctl, x + dx, top, ops, controls);
             }
-            Placed::Image { x, w, h, src, href, alt, hidden, transparent, deco } => {
+            Placed::Image { x, w, h, src, href, alt, hidden, transparent, fit, deco } => {
                 let x = x + dx;
                 let top = baseline - h; // image bottom sits on the baseline
                 if let (Some(href), false) = (&href, hidden) {
@@ -9083,7 +9184,7 @@ fn emit_line(
                         bg_ops(st, None, None, bx, by, bw, bh, ops);
                         border_ops(st, bx, by, bw, bh, (true, true), ops);
                     }
-                    ops.push(DrawOp::Image { x, y: top, w, h, src, alt });
+                    ops.push(DrawOp::Image { x, y: top, w, h, src, alt, fit });
                 }
             }
         }

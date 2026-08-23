@@ -28,6 +28,14 @@ pub enum Display {
     None,
     Block,
     Inline,
+    /// `display: contents` — the element generates NO box at all; its children
+    /// lay out as if they were the parent's (css-display-3 §3.1). Kept as its
+    /// own value rather than resolved away in the cascade because which box
+    /// the CHILDREN need decides how the parent's flow takes them: all-inline
+    /// children join the line box being built, a block-level one gets a
+    /// transparent block. `resolve` has already stripped every property that
+    /// only describes a box, so neither choice can paint or move anything.
+    Contents,
     /// `display: inline-block` — a block box inside, an atomic inline box
     /// outside: it takes part in a line box like an image, but lays its own
     /// content out with the full block box model.
@@ -278,6 +286,20 @@ impl Overflow {
     pub fn scrolls(self) -> bool {
         matches!(self, Overflow::Hidden | Overflow::Scroll | Overflow::Auto)
     }
+}
+
+/// `object-fit` (css-images-3 §5.5) — how a replaced element's own pixels are
+/// scaled into the content box the layout gave it. Purely a paint decision:
+/// the box keeps the size `width`/`height` resolved either way, only the
+/// picture inside it moves. `Fill` is the initial value and is the stretch
+/// every `<img>` got before this existed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ObjectFit {
+    Fill,
+    Contain,
+    Cover,
+    None,
+    ScaleDown,
 }
 
 /// Which of a box's three nested rectangles a background is measured against:
@@ -909,6 +931,14 @@ pub struct ComputedStyle {
     /// auto`, and a single flag can only get one of those two right.
     pub overflow_x: Overflow,
     pub overflow_y: Overflow,
+    /// `text-overflow: ellipsis` — a line the box clips on the inline axis
+    /// ends in `…` instead of being cut mid-glyph. Not inherited (css-ui-4
+    /// §5.2); it is read on the box that does the clipping, and applies to
+    /// every text run inside it.
+    pub ellipsis: bool,
+    /// `object-fit` — how a replaced element's pixels fill the content box.
+    /// Not inherited.
+    pub object_fit: ObjectFit,
     /// `overflow-wrap`/`word-wrap: break-word` or `word-break: break-all`/
     /// `break-word` — a word longer than its line may be split mid-word rather
     /// than overflowing the box. Inherited, like both source properties.
@@ -987,6 +1017,8 @@ impl ComputedStyle {
             break_word: false,
             overflow_x: Overflow::Visible,
             overflow_y: Overflow::Visible,
+            ellipsis: false,
+            object_fit: ObjectFit::Fill,
             radius: [Len::Px(0.0); 4],
             shadow: None,
             translate: None,
@@ -1232,6 +1264,8 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         break_word: parent.break_word,
         overflow_x: Overflow::Visible,
         overflow_y: Overflow::Visible,
+        ellipsis: false,
+        object_fit: ObjectFit::Fill,
         radius: [Len::Px(0.0); 4],
         shadow: None,
         translate: None,
@@ -1608,7 +1642,49 @@ pub fn resolve(
     // this element declares, but within this element the cascade decides.
     s.transparent |= s.opacity_zero;
     finish_borders(&mut s);
+    unbox_contents(&el.tag, &mut s);
     s
+}
+
+/// `display: contents` — the element generates no box (css-display-3 §3.1).
+///
+/// Everything that only describes a box has nothing left to describe, and
+/// `inherit_reset` is exactly that split already: what it copies from its
+/// argument is the INHERITED half of the style, what it writes literally is
+/// the initial value of the non-inherited half. Applying it to the element's
+/// own computed style therefore keeps `color`/`font`/`text-align` — which the
+/// children must still inherit through it — and drops the margins, padding,
+/// borders, background, size, `position`, `float` and `overflow` in one go,
+/// with no list of properties to keep in step with the struct.
+///
+/// A replaced or void element has no children to put in its place, so there
+/// `display: contents` computes to `none` instead (css-display-4 §3.3).
+fn unbox_contents(tag: &str, s: &mut ComputedStyle) {
+    if s.display != Display::Contents {
+        return;
+    }
+    if matches!(
+        tag,
+        "br" | "wbr" | "img" | "input" | "select" | "textarea" | "canvas" | "video" | "audio"
+            | "object" | "embed" | "iframe" | "frame" | "hr"
+    ) {
+        s.display = Display::None;
+        return;
+    }
+    // Element identity and the counter mechanism are not box properties: a
+    // counter is defined on the element, and `<a>` is still a link.
+    let (link, rule, brk) = (s.is_link, s.is_rule, s.is_break);
+    let (cr, crn) = (s.counter_reset, s.counter_reset_n);
+    let (ci, cin) = (s.counter_increment, s.counter_increment_n);
+    *s = inherit_reset(s);
+    s.display = Display::Contents;
+    s.is_link = link;
+    s.is_rule = rule;
+    s.is_break = brk;
+    s.counter_reset = cr;
+    s.counter_reset_n = crn;
+    s.counter_increment = ci;
+    s.counter_increment_n = cin;
 }
 
 /// Resolve `el`'s `::before`/`::after` generated box: the winning `content`
@@ -2450,6 +2526,8 @@ pub fn apply_wide(prop: Prop, kw: Wide, parent: &ComputedStyle, theme: &Theme, s
         }
         Prop::OverflowX => s.overflow_x = src.overflow_x,
         Prop::OverflowY => s.overflow_y = src.overflow_y,
+        Prop::TextOverflow => s.ellipsis = src.ellipsis,
+        Prop::ObjectFit | Prop::OObjectFit => s.object_fit = src.object_fit,
         Prop::TextAlign => {
             s.text_align = src.text_align;
             s.center_blocks = src.center_blocks;
@@ -2531,6 +2609,7 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 "none" => Display::None,
                 "list-item" => Display::ListItem,
                 "inline" => Display::Inline,
+                "contents" => Display::Contents,
                 "inline-block" => Display::InlineBlock,
                 // A block box that establishes a BFC — the explicit spelling
                 // of the `overflow: hidden` clearfix, without the clipping.
@@ -2577,6 +2656,23 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         }
         Prop::OverflowX => s.overflow_x = parse_overflow(v.trim()),
         Prop::OverflowY => s.overflow_y = parse_overflow(v.trim()),
+        // `text-overflow` takes two values in css-ui-4 (line-start, line-end);
+        // only the END one is ever anything but `clip` on a real page, and the
+        // one-value form sets exactly that. A `<string>` custom ellipsis is
+        // parsed as "not `clip`" rather than rendered literally.
+        Prop::TextOverflow => s.ellipsis = v.split_whitespace().next_back().is_some_and(|t| t != "clip"),
+        Prop::ObjectFit | Prop::OObjectFit => {
+            // `object-fit` also accepts `scale-down` paired with `none`; the
+            // pair is what `scale-down` already means, so the keyword decides.
+            s.object_fit = match v.trim() {
+                "contain" => ObjectFit::Contain,
+                "cover" => ObjectFit::Cover,
+                "none" => ObjectFit::None,
+                "scale-down" => ObjectFit::ScaleDown,
+                "fill" => ObjectFit::Fill,
+                _ => s.object_fit,
+            }
+        }
         Prop::OverflowWrap | Prop::WordWrap => s.break_word = v == "break-word" || v == "anywhere",
         Prop::WordBreak => s.break_word = v == "break-all" || v == "break-word",
         Prop::BorderRadius => {

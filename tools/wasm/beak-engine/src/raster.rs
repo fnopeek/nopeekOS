@@ -13,7 +13,7 @@ use hashbrown::HashMap;
 
 use crate::fonts::Fonts;
 use crate::layout::{DrawOp, Layout, Rgb, Rgba, Theme};
-use crate::style::{BgPos, BgSize};
+use crate::style::{BgPos, BgSize, ObjectFit};
 
 /// What a pointer move costs — the answer `Engine::set_hover` gives.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -611,7 +611,7 @@ impl Engine {
                     }
                     self.draw_run(out, wi, hi, *x, vy, *size, *color, *bold, *italic, *mono, *sp, text);
                 }
-                DrawOp::Image { x, y, w: iw, h: ih, src, alt } => {
+                DrawOp::Image { x, y, w: iw, h: ih, src, alt, fit } => {
                     let vy = *y - scroll_y;
                     if vy > hi || vy + *ih < 0 {
                         continue;
@@ -621,7 +621,7 @@ impl Engine {
                     // fetched yet, or an undecodable format) draws the
                     // placeholder that layout used to emit as separate ops.
                     match self.images.borrow().get(src) {
-                        Some(img) => blit_image(out, wi, hi, *x, vy, *iw, *ih, img),
+                        Some(img) => blit_image(out, wi, hi, *x, vy, *iw, *ih, img, *fit),
                         None => self.draw_img_placeholder(out, wi, hi, *x, vy, *iw, *ih, alt),
                     }
                 }
@@ -1086,23 +1086,51 @@ fn blit_bg(
     }
 }
 
-fn blit_image(out: &mut [u8], w: i32, h: i32, dx: i32, dy: i32, dw: i32, dh: i32, img: &crate::image::Image) {
+/// Where a replaced element's pixels land inside the content box the layout
+/// gave it — `object-fit` (css-images-3 §5.5). Returns the rectangle the
+/// picture is DRAWN into, which for `cover`/`none` may be larger than the box
+/// (the caller clips) and for `contain`/`scale-down` smaller (it letterboxes).
+///
+/// `object-position` is not implemented; the picture is centred, which is that
+/// property's initial value (`50% 50%`) and what every use of `object-fit` on
+/// the two vendored sheets asks for.
+fn object_rect(fit: ObjectFit, dx: i32, dy: i32, dw: i32, dh: i32, iw: i32, ih: i32) -> (i32, i32, i32, i32) {
+    let (bw, bh, sw, sh) = (dw as f32, dh as f32, iw as f32, ih as f32);
+    let scale = match fit {
+        // The initial value: stretch to the box on both axes, aspect ignored.
+        ObjectFit::Fill => return (dx, dy, dw, dh),
+        ObjectFit::Contain => (bw / sw).min(bh / sh),
+        ObjectFit::Cover => (bw / sw).max(bh / sh),
+        ObjectFit::None => 1.0,
+        // `scale-down` is `none` and `contain`, whichever comes out smaller —
+        // an image that already fits keeps its own size instead of growing.
+        ObjectFit::ScaleDown => (bw / sw).min(bh / sh).min(1.0),
+    };
+    let (rw, rh) = ((sw * scale + 0.5).max(1.0) as i32, (sh * scale + 0.5).max(1.0) as i32);
+    (dx + (dw - rw) / 2, dy + (dh - rh) / 2, rw, rh)
+}
+
+fn blit_image(out: &mut [u8], w: i32, h: i32, dx: i32, dy: i32, dw: i32, dh: i32, img: &crate::image::Image, fit: ObjectFit) {
     if dw <= 0 || dh <= 0 || img.w == 0 || img.h == 0 {
         return;
     }
     let (iw, ih) = (img.w as i32, img.h as i32);
-    let x0 = dx.max(0);
-    let x1 = (dx + dw).min(w);
-    let y0 = dy.max(0);
-    let y1 = (dy + dh).min(h);
+    // Two rectangles once `object-fit` is not `fill`: the picture is scaled
+    // into `p*` and painted only where that meets the box, so `cover` crops
+    // instead of overflowing and `contain` leaves the rest of the box alone.
+    let (ox, oy, ow, oh) = object_rect(fit, dx, dy, dw, dh, iw, ih);
+    let x0 = ox.max(dx).max(0);
+    let x1 = (ox + ow).min(dx + dw).min(w);
+    let y0 = oy.max(dy).max(0);
+    let y1 = (oy + oh).min(dy + dh).min(h);
     if x1 <= x0 || y1 <= y0 {
         return;
     }
     // The source column for each destination column, resolved once for the
     // whole blit instead of a multiply, divide and clamp per pixel.
-    let cols: Vec<usize> = (x0..x1).map(|px| ((px - dx) * iw / dw).clamp(0, iw - 1) as usize * 4).collect();
+    let cols: Vec<usize> = (x0..x1).map(|px| ((px - ox) * iw / ow).clamp(0, iw - 1) as usize * 4).collect();
     for py in y0..y1 {
-        let sy = ((py - dy) * ih / dh).clamp(0, ih - 1);
+        let sy = ((py - oy) * ih / oh).clamp(0, ih - 1);
         let srow = (sy * iw) as usize * 4;
         let mut di = idx(w, x0, py);
         for &sx in &cols {
@@ -1166,6 +1194,70 @@ mod tests {
             let i = (((y + PAD) * w + x + PAD) * 4) as usize;
             (buf[i + 2], buf[i + 1], buf[i])
         }
+    }
+
+    /// A 4x1 PNG — red, green, blue, yellow — as a `data:` URI, so a test can
+    /// say where the picture landed without a fetch. Four columns and one row
+    /// make the aspect ratio (4:1) unmistakable against a square box.
+    const STRIPES_4X1: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAQAAAABCAIAAAB2Xpia\
+        AAAAEklEQVR42mP4z8DAAMb//zMAABzwBPxjoz6tAAAAAElFTkSuQmCC";
+
+    fn stripes(fit: &str) -> alloc::string::String {
+        alloc::format!(
+            "<img src='{STRIPES_4X1}' style='display:block;width:20px;height:20px;object-fit:{fit}'>"
+        )
+    }
+
+    /// `object-fit` decides how a replaced element's pixels fill the box the
+    /// layout gave it — the box itself is 20x20 in every one of these.
+    #[test]
+    fn object_fit_places_the_picture_inside_the_box() {
+        // `fill` is the initial value: stretched to the box, aspect ignored,
+        // so the four source columns become four 5px stripes.
+        let html = stripes("fill");
+        let p = page(&html, 40, 40);
+        assert_eq!(p(2, 10), (255, 0, 0), "fill: stretched, first stripe at the left edge");
+        assert_eq!(p(17, 10), (255, 255, 0), "fill: fourth stripe at the right edge");
+        assert_eq!(p(2, 2), (255, 0, 0), "fill: the box is full top to bottom");
+
+        // `contain`: scaled down to 20x5 and centred — letterboxed above/below.
+        let html = stripes("contain");
+        let p = page(&html, 40, 40);
+        assert_eq!(p(2, 10), (255, 0, 0), "contain: full width, all four stripes");
+        assert_eq!(p(17, 10), (255, 255, 0));
+        assert_eq!(p(2, 2), (255, 255, 255), "contain: letterbox above the picture");
+
+        // `cover`: scaled UP to 80x20 and cropped to the box — only the two
+        // middle stripes survive, and nothing spills outside the box.
+        let html = stripes("cover");
+        let p = page(&html, 40, 40);
+        assert_eq!(p(4, 10), (0, 255, 0), "cover: cropped to the middle two stripes");
+        assert_eq!(p(16, 10), (0, 0, 255));
+        assert_eq!(p(2, 2), (0, 255, 0), "cover: fills the box top to bottom");
+        assert_eq!(p(25, 10), (255, 255, 255), "cover: crops, never overflows the box");
+
+        // `none`: the intrinsic 4x1, centred. `scale-down` is the smaller of
+        // that and `contain`, which here is the same 4x1.
+        for fit in ["none", "scale-down"] {
+            let html = stripes(fit);
+            let p = page(&html, 40, 40);
+            assert_eq!(p(8, 9), (255, 0, 0), "{fit}: intrinsic size, centred");
+            assert_eq!(p(11, 9), (255, 255, 0));
+            assert_eq!(p(2, 10), (255, 255, 255), "{fit}: nothing outside the 4x1");
+        }
+    }
+
+    /// Bootstrap ships `object-fit` only behind Opera's prefix in its utility
+    /// classes, so the unprefixed name alone would leave `.object-fit-cover`
+    /// doing nothing on a real page.
+    #[test]
+    fn the_opera_prefix_is_the_same_property() {
+        let html = alloc::format!(
+            "<img src='{STRIPES_4X1}' style='display:block;width:20px;height:20px;\
+             -o-object-fit:cover'>"
+        );
+        let p = page(&html, 40, 40);
+        assert_eq!(p(4, 10), (0, 255, 0), "-o-object-fit: cover crops like the plain name");
     }
 
     /// A mask paints the element's own background-colour through the image's
@@ -1372,6 +1464,49 @@ mod tests {
         ));
     }
 
+    /// `display: contents` generates no box: no border, and the children take
+    /// the place the box would have had. Inline-level content joins the line
+    /// its parent is building — which is the half a transparent block cannot
+    /// do, and the half every one of these tests turns on.
+    #[test]
+    fn display_contents_generates_no_box() {
+        let eng = Engine::new();
+        let unboxed = "<div>P<span style='display:contents;border:10px solid #f00'>A</span>SS</div>";
+        let plain = "<div>PASS</div>";
+        let dump = dump_ops(&eng.layout(unboxed, 400));
+        assert!(!dump.contains("Rgb(255, 0, 0)"), "no border is painted: {dump}");
+        // One line, laid out at the same y as if the span were not there.
+        let (a, b) = (dump_ops(&eng.layout(unboxed, 400)), dump_ops(&eng.layout(plain, 400)));
+        let y = |d: &str| d.lines().find(|l| l.starts_with('T')).map(|l| l.split(' ').nth(1).unwrap().to_string());
+        assert_eq!(y(&a), y(&b), "the content sits where it would without the wrapper");
+
+        // A block-level child still gets a block: the wrapper is transparent,
+        // not a licence to flatten a paragraph into the line above it.
+        let blocks = "<div>P<div style='display:contents'><div>A</div><div>S</div></div></div>";
+        let rows: alloc::vec::Vec<_> =
+            dump_ops(&eng.layout(blocks, 400)).lines().filter(|l| l.starts_with('T')).map(|l| l.to_string()).collect();
+        assert_eq!(rows.len(), 3, "three line boxes, one per block: {rows:?}");
+    }
+
+    /// `text-overflow: ellipsis` — Bootstrap's `.text-truncate` idiom. The box
+    /// keeps the width it was given; only what is painted inside it changes.
+    #[test]
+    fn text_overflow_ends_a_clipped_line_in_an_ellipsis() {
+        let truncate = "<div style='width:60px;overflow:hidden;white-space:nowrap;\
+                        text-overflow:ellipsis'>a long line that will not fit</div>";
+        let eng = Engine::new();
+        let dump = dump_ops(&eng.layout(truncate, 400));
+        let run = dump.lines().find(|l| l.starts_with('T')).expect("one text run");
+        assert!(run.ends_with("\u{2026}\"", ), "the run ends in an ellipsis: {run}");
+        assert!(!run.contains("not fit"), "and the tail it replaced is gone: {run}");
+
+        // `clip` is the initial value, and the same box under it keeps the
+        // whole run — the difference is the property, not the overflow.
+        let clipped = truncate.replace("text-overflow:ellipsis", "text-overflow:clip");
+        let dump = dump_ops(&eng.layout(&clipped, 400));
+        assert!(dump.contains("not fit"), "text-overflow:clip changes nothing");
+    }
+
     /// A hover rule reaches a pseudo-element, and MediaWiki underlines the
     /// article tabs with exactly that: an absolutely positioned `::after` that
     /// is 2 px tall, transparent at rest and coloured under the pointer.
@@ -1435,7 +1570,7 @@ mod tests {
                 DrawOp::RoundRect { x, y, w, h, r, color, ring } => {
                     let _ = write!(s, "Q {x},{y} {w}x{h} {r:?} c={color:?} {ring:.2}\n");
                 }
-                DrawOp::Image { x, y, w, h, src, alt } => {
+                DrawOp::Image { x, y, w, h, src, alt, .. } => {
                     let _ = write!(s, "I {x},{y} {w}x{h} {src} {alt}\n");
                 }
                 DrawOp::BgImage { x, y, w, h, key, .. } => {

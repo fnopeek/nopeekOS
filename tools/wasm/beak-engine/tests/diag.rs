@@ -155,7 +155,7 @@ fn diag() {
         let m = ss.matched(&el, &ancestors, &prev, 3, beak_engine::css::Media::new(w, false));
         for prop in ["position", "height", "display", "visibility", "opacity", "overflow"] {
             let mut all: Vec<(u32,u32,String)> = Vec::new();
-            for (spec, order, decls, _imp) in &m {
+            for (_layer, spec, order, decls, _imp) in &m {
                 for (p,v) in decls.iter() { if beak_engine::css::prop_name(*p) == prop { all.push((*spec,*order,v.clone())); } }
             }
             all.sort_by_key(|(s,o,_)| (*s,*o));
@@ -284,7 +284,7 @@ fn diag() {
         let m = ss.matched(&el, &[], &[], 1, beak_engine::css::Media::new(w, false));
         if let Some(pr) = &prop {
             let mut all: Vec<(u32,u32,String)> = Vec::new();
-            for (spec, order, decls, _imp) in &m {
+            for (_layer, spec, order, decls, _imp) in &m {
                 for (p,v) in decls.iter() { if beak_engine::css::prop_name(*p) == pr.as_str() { all.push((*spec,*order,v.clone())); } }
             }
             all.sort_by_key(|(s,o,_)| (*s,*o));
@@ -294,7 +294,7 @@ fn diag() {
         }
         eprintln!("=== matched rules for .{class} @ vw={w}: {} ===", m.len());
         let mut saw_grid = false;
-        for (spec, order, decls, _imp) in &m {
+        for (_layer, spec, order, decls, _imp) in &m {
             let has = decls.iter().any(|(p, _)| { let n = beak_engine::css::prop_name(*p); n == "display" || n.starts_with("grid") });
             if has {
                 eprintln!("  spec={spec} order={order}:");
@@ -832,7 +832,7 @@ fn op_full(op: &DrawOp) -> String {
         DrawOp::RoundRect { x, y, w, h, r, color, ring } => {
             format!("Q x={x} y={y} w={w} h={h} r={r:?} c={color:?} ring={ring:.2}")
         }
-        DrawOp::Image { x, y, w, h, src, alt } => {
+        DrawOp::Image { x, y, w, h, src, alt, .. } => {
             format!("I x={x} y={y} w={w} h={h} {src:?} {alt:?}")
         }
         DrawOp::BgImage { x, y, w, h, key, repeat, pos, size, tint, .. } => format!(
