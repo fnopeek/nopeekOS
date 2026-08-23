@@ -881,6 +881,10 @@ css_props! {
     Overflow = "overflow" @ Layout,
     OverflowX = "overflow-x" @ Layout,
     OverflowY = "overflow-y" @ Layout,
+    TextOverflow = "text-overflow" @ Paint,
+    // Opera's prefix, and the only one Bootstrap still ships for `object-fit`.
+    ObjectFit = "object-fit" @ Paint,
+    OObjectFit = "-o-object-fit" @ Paint,
     OverflowWrap = "overflow-wrap" @ Layout,
     WordWrap = "word-wrap" @ Layout,
     WordBreak = "word-break" @ Layout,
