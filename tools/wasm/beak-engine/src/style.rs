@@ -446,6 +446,14 @@ impl BorderSide {
                 self.color = Some(c);
                 self.see_through = false;
             }
+            // A side with no colour already MEANS `currentcolor` — that is
+            // its initial value, and `finish_borders` fills it in from the
+            // element's own `color` after the whole cascade has run. So the
+            // deferral this keyword needs is the state the field starts in.
+            Some(ColorVal::CurrentColor) => {
+                self.color = None;
+                self.see_through = false;
+            }
             None => return false,
         }
         true
@@ -939,6 +947,14 @@ pub struct ComputedStyle {
     /// `object-fit` — how a replaced element's pixels fill the content box.
     /// Not inherited.
     pub object_fit: ObjectFit,
+    /// `background-color` was declared as `currentcolor` (or as a relative
+    /// colour over it). Kept as a FLAG beside the resolved colour, not folded
+    /// into it, because css-color-4 §6.2 resolves the keyword at used-value
+    /// time: a child that writes `background-color: inherit` inherits the
+    /// unresolved value and resolves it against ITS OWN `color`. Every other
+    /// colour field already defers by having `None` mean `currentcolor` —
+    /// `bg`'s `None` means transparent, so this one needs the flag.
+    pub bg_cc: bool,
     /// `filter`, as the one colour transform the whole chain composes to.
     /// Not inherited, but it does apply to the element's whole SUBTREE — which
     /// layout does by walking the op range the box produced, not by passing it
@@ -1024,6 +1040,7 @@ impl ComputedStyle {
             overflow_y: Overflow::Visible,
             ellipsis: false,
             object_fit: ObjectFit::Fill,
+            bg_cc: false,
             filter: None,
             radius: [Len::Px(0.0); 4],
             shadow: None,
@@ -1272,6 +1289,7 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         overflow_y: Overflow::Visible,
         ellipsis: false,
         object_fit: ObjectFit::Fill,
+        bg_cc: false,
         filter: None,
         radius: [Len::Px(0.0); 4],
         shadow: None,
@@ -1648,6 +1666,12 @@ pub fn resolve(
     // Opacity groups the subtree: a transparent ancestor wins over anything
     // this element declares, but within this element the cascade decides.
     s.transparent |= s.opacity_zero;
+    // `currentcolor` is a used-value keyword: it reads the `color` this element
+    // ended up with, whatever order the declarations came in and whether the
+    // value arrived through `inherit`.
+    if s.bg_cc {
+        s.bg = Some(s.color);
+    }
     finish_borders(&mut s);
     unbox_contents(&el.tag, &mut s);
     s
@@ -1769,6 +1793,12 @@ pub fn resolve_pseudo(
         s.display = Display::Block;
     }
     s.transparent |= s.opacity_zero;
+    // `currentcolor` is a used-value keyword: it reads the `color` this element
+    // ended up with, whatever order the declarations came in and whether the
+    // value arrived through `inherit`.
+    if s.bg_cc {
+        s.bg = Some(s.color);
+    }
     finish_borders(&mut s);
     Some((template, s))
 }
@@ -2434,10 +2464,14 @@ pub fn apply_wide(prop: Prop, kw: Wide, parent: &ComputedStyle, theme: &Theme, s
             s.em_base = s.font_px;
         }
         Prop::Color => s.color = src.color,
-        Prop::BackgroundColor => s.bg = src.bg,
+        Prop::BackgroundColor => {
+            s.bg = src.bg;
+            s.bg_cc = src.bg_cc;
+        }
         Prop::BackgroundImage => s.bg_layer = src.bg_layer,
         Prop::Background => {
             s.bg = src.bg;
+            s.bg_cc = src.bg_cc;
             s.bg_layer = src.bg_layer;
             s.bg_clip = src.bg_clip;
             s.bg_origin = src.bg_origin;
@@ -2824,6 +2858,8 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             s.deco_color = match parse_color_val(v.trim(), theme) {
                 Some(ColorVal::Rgb(c)) => Some(c),
                 Some(ColorVal::Transparent) => Some(Rgba { c: crate::layout::Rgb(0, 0, 0), a: 0 }),
+                // `None` on this field is `currentColor` — its initial value.
+                Some(ColorVal::CurrentColor) => None,
                 None => s.deco_color,
             };
         }
@@ -3037,7 +3073,9 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 s.bg = match cv {
                     ColorVal::Rgb(c) => Some(c),
                     ColorVal::Transparent => None,
+                    ColorVal::CurrentColor => Some(s.color),
                 };
+                s.bg_cc = cv == ColorVal::CurrentColor;
             }
         }
         Prop::Background => {
@@ -3049,15 +3087,21 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 s.bg = match cv {
                     ColorVal::Rgb(c) => Some(c),
                     ColorVal::Transparent => None,
+                    ColorVal::CurrentColor => Some(s.color),
                 };
+                s.bg_cc = cv == ColorVal::CurrentColor;
                 s.bg_layer = BgLayer::NONE;
                 s.bg_origin = BoxEdge::Padding;
                 s.bg_clip = BoxEdge::Border;
-            } else if let Some((color, layer, origin, clip)) = parse_bg_shorthand(val, &v, u, theme) {
-                s.bg = color;
-                s.bg_layer = layer;
-                s.bg_origin = origin;
-                s.bg_clip = clip;
+            } else {
+                let mut cc = false;
+                if let Some((color, layer, origin, clip)) = parse_bg_shorthand(val, &v, u, theme, &mut cc) {
+                    s.bg = if cc { Some(s.color) } else { color };
+                    s.bg_cc = cc;
+                    s.bg_layer = layer;
+                    s.bg_origin = origin;
+                    s.bg_clip = clip;
+                }
             }
         }
         Prop::BackgroundImage => s.bg_layer.image = parse_bg_image(val),
@@ -3092,7 +3136,10 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         // `mask` is still shipped prefixed by the icon systems that use it, and
         // the two spellings are the same property to us.
         Prop::Mask | Prop::WebkitMask => {
-            if let Some((_, layer, ..)) = parse_bg_shorthand(val, &v, u, theme) {
+            // A mask takes no colour of its own — it stencils the element's
+            // `background-color` — so the shorthand's colour, `currentcolor`
+            // included, has nothing to land on here.
+            if let Some((_, layer, ..)) = parse_bg_shorthand(val, &v, u, theme, &mut false) {
                 s.mask_layer = layer;
             }
         }
@@ -3670,6 +3717,9 @@ fn parse_bg_shorthand(
     v: &str,
     u: Units,
     theme: &Theme,
+    // `cc` is set when the colour in the shorthand was `currentcolor`:
+    // resolving it needs the element's own `color`, which this walk cannot see.
+    cc: &mut bool,
 ) -> Option<(Option<Rgba>, BgLayer, BoxEdge, BoxEdge)> {
     let mut layer = BgLayer::NONE;
     let mut color = None;
@@ -3687,9 +3737,12 @@ fn parse_bg_shorthand(
         if let Some(r) = parse_bg_repeat(tok) {
             layer.repeat = r;
         } else if let Some(cv) = parse_color_val(tok, theme) {
+            // Inside the shorthand's token walk there is no `ComputedStyle` to
+            // read `color` from; the caller applies the flag.
+            *cc = cv == ColorVal::CurrentColor;
             color = match cv {
                 ColorVal::Rgb(c) => Some(c),
-                ColorVal::Transparent => None,
+                ColorVal::Transparent | ColorVal::CurrentColor => None,
             };
         } else if let Some(e) = parse_box_edge(tok) {
             if origin.is_none() { origin = Some(e) } else { clip = Some(e) }
