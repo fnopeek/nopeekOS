@@ -284,16 +284,63 @@ enum Structural {
 struct SibCtx<'a> {
     idx: u32,
     count: u32,
-    idx_of_type: u32,
-    count_of_type: u32,
+    /// The of-type pair, counted on first ask — see `OfType`.
+    of_type: &'a OfType<'a>,
     /// The subject's parent, for looking at siblings that come AFTER it —
     /// `:has(+ x)`, `:has(~ x)`. `None` when the caller supplied no ancestors.
     parent: Option<&'a Element>,
 }
 
+/// `:*-of-type`'s two counters, computed on the FIRST selector that asks and
+/// remembered for the rest of the element.
+///
+/// They cost two tag-comparing walks over the sibling list, and they used to
+/// run eagerly at the top of every `Selector::matches` — i.e. once per
+/// CANDIDATE selector, not once per element. Measured on a Tailwind-built page
+/// (692 KB CSS, 61 candidate selectors per element) that was **57.5 % of the
+/// whole layout**, spent filling in a pair that no selector on the page reads:
+/// `:*-of-type` is rare, and the four cheap `:*-child` counters next to it are
+/// free (`prev_siblings.len()`, `sib_count`).
+///
+/// So: one per element, borrowed by every candidate's `SibCtx`, evaluated only
+/// if a `Structural::*OfType` actually reaches for it.
+struct OfType<'a> {
+    tag: &'a str,
+    prev: &'a [ElemInfo<'a>],
+    parent: Option<&'a Element>,
+    memo: core::cell::Cell<Option<(u32, u32)>>,
+}
+
+impl<'a> OfType<'a> {
+    fn new(tag: &'a str, prev: &'a [ElemInfo<'a>], parent: Option<&'a Element>) -> OfType<'a> {
+        OfType { tag, prev, parent, memo: core::cell::Cell::new(None) }
+    }
+
+    /// `(idx, count)`, 1-based, among siblings sharing the subject's tag.
+    fn get(&self) -> (u32, u32) {
+        if let Some(v) = self.memo.get() {
+            return v;
+        }
+        let idx = self.prev.iter().filter(|p| p.tag() == self.tag).count() as u32 + 1;
+        let count = self
+            .parent
+            .map(|p| {
+                p.children
+                    .iter()
+                    .filter(|n| matches!(n, Node::Element(e) if e.tag == self.tag))
+                    .count() as u32
+            })
+            // No parent on the path (the root, or a caller that did not supply
+            // one): the subject is the only element of its type we can see.
+            .unwrap_or(idx);
+        self.memo.set(Some((idx, count)));
+        (idx, count)
+    }
+}
+
 impl Structural {
     fn matches(&self, ctx: Option<SibCtx>) -> bool {
-        let Some(SibCtx { idx, count, idx_of_type, count_of_type, .. }) = ctx else { return false }; // no sibling context → can't evaluate
+        let Some(SibCtx { idx, count, of_type, .. }) = ctx else { return false }; // no sibling context → can't evaluate
         // i == a*n + b for some integer n ≥ 0 (handles a ≤ 0 too).
         let nth = |a: i32, b: i32, i: u32| {
             let i = i as i32;
@@ -310,12 +357,16 @@ impl Structural {
             Structural::OnlyChild => count == 1,
             Structural::NthChild(a, b) => nth(a, b, idx),
             Structural::NthLastChild(a, b) => count >= idx && nth(a, b, count - idx + 1),
-            Structural::FirstOfType => idx_of_type == 1,
-            Structural::LastOfType => idx_of_type == count_of_type,
-            Structural::OnlyOfType => count_of_type == 1,
-            Structural::NthOfType(a, b) => nth(a, b, idx_of_type),
+            Structural::FirstOfType => of_type.get().0 == 1,
+            Structural::LastOfType => {
+                let (i, n) = of_type.get();
+                i == n
+            }
+            Structural::OnlyOfType => of_type.get().1 == 1,
+            Structural::NthOfType(a, b) => nth(a, b, of_type.get().0),
             Structural::NthLastOfType(a, b) => {
-                count_of_type >= idx_of_type && nth(a, b, count_of_type - idx_of_type + 1)
+                let (i, n) = of_type.get();
+                n >= i && nth(a, b, n - i + 1)
             }
         }
     }
@@ -632,7 +683,7 @@ impl Selector {
     /// compounds must match ancestors per their combinators. `ancestors` is
     /// root→…→parent order. Descendant matching is nearest-first (no backtrack —
     /// enough for content selectors; noted as a shortcut).
-    fn matches(&self, subject: &ElemInfo, ancestors: &[ElemInfo], prev_siblings: &[ElemInfo], sib_count: u32, anc_bloom: &Bloom) -> bool {
+    fn matches(&self, subject: &ElemInfo, ancestors: &[ElemInfo], prev_siblings: &[ElemInfo], sib_count: u32, anc_bloom: &Bloom, of_type: &OfType) -> bool {
         // O(1) rejection before the ancestor walk: if a name this selector
         // requires above the subject is absent from the whole chain, no amount
         // of walking will find it. False positives are fine (the real match
@@ -644,26 +695,13 @@ impl Selector {
         // The subject's structural pseudo-classes evaluate against its 1-based
         // sibling index (preceding count + 1) and the total sibling count —
         // and, for `:*-of-type`, against the same pair restricted to its tag.
-        // The of-type COUNT needs siblings that come after the subject too, so
-        // it is read off the parent's children.
-        let tag = subject.tag();
-        let idx_of_type = prev_siblings.iter().filter(|p| p.tag() == tag).count() as u32 + 1;
-        let count_of_type = ancestors
-            .last()
-            .map(|p| {
-                p.el.children
-                    .iter()
-                    .filter(|n| matches!(n, Node::Element(e) if e.tag == tag))
-                    .count() as u32
-            })
-            // No parent on the path (the root, or a caller that did not supply
-            // one): the subject is the only element of its type we can see.
-            .unwrap_or(idx_of_type);
+        // Those two are the expensive half and are shared across every
+        // candidate selector of this element, counted only if one asks (see
+        // `OfType`); the `:*-child` pair below is free.
         let subj_ctx = Some(SibCtx {
             idx: prev_siblings.len() as u32 + 1,
             count: sib_count,
-            idx_of_type,
-            count_of_type,
+            of_type,
             parent: ancestors.last().map(|p| p.el),
         });
         let last = self.compounds.len() - 1;
@@ -1437,6 +1475,8 @@ impl Stylesheet {
         // Measured on a real page: ~97 candidates per element, so an empty Vec
         // reallocates about seven times per call, 9 000 times per layout.
         let chain = ancestor_bloom(ancestors);
+        // One per element, shared by every candidate below.
+        let of_type = OfType::new(subject.tag(), prev_siblings, ancestors.last().map(|p| p.el));
         let mut cands: Vec<(u32, u32)> = Vec::with_capacity(32);
         let index = if want == PseudoElem::None { &self.normal } else { &self.pseudo };
         index.candidates(subject, &chain, &mut cands);
@@ -1459,7 +1499,7 @@ impl Stylesheet {
             while i < cands.len() && cands[i].0 == ri {
                 if media_ok {
                     let sel = &rule.selectors[cands[i].1 as usize];
-                    if sel.pseudo == want && sel.matches(subject, ancestors, prev_siblings, sib_count, &chain) {
+                    if sel.pseudo == want && sel.matches(subject, ancestors, prev_siblings, sib_count, &chain, &of_type) {
                         best = Some(best.map_or(sel.spec, |b| b.max(sel.spec)));
                     }
                 }
