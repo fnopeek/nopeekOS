@@ -22,16 +22,16 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-23, beak 0.34.0)
+### Current number (measured 2026-08-23, beak 0.35.0)
 
 ```
-4414 pass / 1228 fail / 144 inconclusive   (of 5786 vendored reftests)
-= 78.2 % of the conclusive 5642
+4456 pass / 1186 fail / 144 inconclusive   (of 5786 vendored reftests)
+= 79.0 % of the conclusive 5642
 ```
 
-**Two denominators, and the second one is the honest one.** 452 of the 1228
-failures are tests for specs no page on the web runs — they were counted by
-CONTENT, not by filename, because the filename does not say so
+**Two denominators, and the second one is the honest one.** 448 of the 1186
+failures are tests for specs no page on the web runs — counted by CONTENT, not
+by filename, because the filename does not say so
 (`css-grid/column-align-items-001.html` is a `display: grid-lanes` test):
 
 | | failing | what it is |
@@ -39,12 +39,21 @@ CONTENT, not by filename, because the filename does not say so
 | `grid-lanes` | 346 | masonry, css-grid-3 — an unshipped proposal |
 | `writing-mode: vertical` | 49 | a project of its own |
 | `display: run-in` | 35 | dropped from CSS 2.1 by every engine |
-| `subgrid` | 22 | |
+| `subgrid` | 18 | |
 
-Against the corpus that a real page can actually exercise — 5190 tests —
-the number is **4414 / 5190 = 85.0 %**. Both are worth tracking: the raw one
+Against the corpus that a real page can actually exercise — 5194 tests —
+the number is **4456 / 5194 = 85.8 %**. Both are worth tracking: the raw one
 never lies about the suite, and the second one is the one that predicts what a
 page looks like. Neither is allowed to move without a measured run.
+
+**Re-derive the second one, do not carry it forward.** `tests/vehicles.py`
+reads the blessed baseline and prints both numbers, so the denominator is a
+measurement rather than a remembered constant. It also settles which bucket a
+test that names two of these falls into — the table is a breakdown of the
+UNION, first match wins, which is why `subgrid` reads 18 here and 22 in
+`docs/plan/CSS_GAP_2026_08.md`: four subgrid tests also set a vertical writing
+mode, and that paper's hand count put them on the other side. The union — the
+only figure the denominator uses — is the same either way.
 
 A hard ceiling inside the real corpus: `css-fonts/font-family-name` (18 tests)
 demands the W3C CSSTest fonts be installed. It is not winnable here, ever.
@@ -119,7 +128,59 @@ which would cost a snapshot of a large `Copy` struct per element for a keyword
 six tests in the corpus write). The inconclusive count fell 254 → 177 over
 that span: references that used to render blank — because `:root` was dropped,
 because an `inline-block` had no box, or because an inline box painted no
-background — now paint, so 73 more tests actually measure something. → **4293** (0.30.0, +89/−0 net over eleven changes, every one of them a
+background — now paint, so 73 more tests actually measure something. → **4456**
+(0.35.0, +42/−0 over four features, and the interesting half of it is where the
+plan for them was WRONG — each item's payload was named from a property count
+and the values underneath said something else.
+
+**`object-fit` + `text-overflow: ellipsis`** are oracle-neutral by
+construction, as predicted (+0), and were built for the 70 declarations
+Bootstrap and Wikipedia write. `text-overflow` turned out to be two defects,
+not one: `clip_ops` keeps a text run WHOLE when it merely crosses the clip edge
+(glyphs are not clipped per pixel), so a `.text-truncate` box was not just
+missing its `…` — its text ran on out of the box.
+
+**`display: contents`** (+8) generates no box, and the property-stripping is
+`inherit_reset` applied to the element's own computed style: what it copies is
+the inherited half, what it writes is the initial value of the other, so no
+list of fields has to be kept in step with the struct. Which box the CHILDREN
+need then decides how the parent's flow takes them — all-inline children join
+the line box already open (`P<fieldset style=display:contents>A…` is one word),
+anything else gets a transparent block. The one exception is `white-space:
+pre`, which is a whole-BOX path here (`layout_pre` owns the element's text,
+newlines and all) that an unboxed element can never reach; the single measured
+loss came from exactly there and the block route took it back.
+
+**`filter`** (+1). The plan named `blur` + `drop-shadow`. Counted, all 46
+`filter` declarations on the two vendored sheets are `invert` (29),
+`grayscale`, `brightness` and `hue-rotate` — `blur` and `drop-shadow` appear
+ZERO times, and carry two reftests between them. So: the colour functions,
+which the spec gives as matrices, composed to one 3×4 per chain. A chain that
+names `blur` is dropped whole rather than half-applied. Applied over the op
+range the box produced — in a flat display list that is exactly the subtree
+`filter` acts on, and exactly the subtree that cannot cancel it.
+
+**Modern colour** (+33) is the round's real yield, and again not where the plan
+put it: relative syntax measured alone is worth NOTHING, because all sixteen
+relative-syntax tests in the corpus are `relative-currentcolor-*` and the form
+appears nowhere else. `currentcolor` is a VALUE now, not a failed parse — the
+distinction is the whole point, since `None` means "keep the previous
+declaration", the opposite of what the keyword asks. It resolves after the
+cascade against the colour the element ended up with, so declaration order
+stops mattering and `background-color: inherit` under a `currentcolor`
+background carries the UNRESOLVED value into the child, which resolves it
+against its own colour (css-color-4 §6.2). That is a flag beside the colour,
+not a second colour type: every other colour field already defers, because
+there `None` already means `currentcolor` — `bg`'s `None` means transparent,
+and it is the only one that needed anything. Relative syntax rides on top for
+the identity channel list, where the result IS the origin whatever space is
+named (+16 with the plain keyword). Two neighbours fell out of reading that
+code: lab/oklab lightness is RANGE-LIMITED by spec, so `lab(150 …)` is the same
+colour as `lab(100 …)` and not a different one that happens to clip (+8), and
+`display-p3-linear` was missing from the colour-space list — the same primaries
+as `display-p3` with no gamma to undo (+6). Still open, and needing a stored
+recipe rather than a flag: a relative colour with a substituted or permuted
+channel, `hsl(from currentColor 120 s l)`.) → **4293** (0.30.0, +89/−0 net over eleven changes, every one of them a
 property or a rule a real page uses. Ranked before anything was written: for
 each unimplemented property name, how many FAILING reftests mention it, crossed
 with how often it appears in `bootstrap.min.css` and in Wikipedia's resolved
@@ -352,7 +413,7 @@ whether ignoring it is actually wrong:
 | `user-select` (+`-moz-`/`-webkit-`) | 112 | `none` | harmless — no selection yet anyway |
 | `transition-property`/`-duration` (+`transition`) | 71 | — | harmless — ignoring = jump straight to the final state |
 | `cursor` | 30 | 22× `pointer` | cosmetic — the *compositor* owns the cursor, not us |
-| `text-overflow` | 24 | `ellipsis` | **wrong** — truncated labels run on |
+| ~~`text-overflow`~~ | 24 | `ellipsis` | shipped 0.35.0 — was **wrong**: truncated labels ran on |
 | `unicode-bidi` | 21 | `isolate` | **wrong**, but blocked on bidi generally |
 | `scroll-margin-top` | 15 | `75px` | harmless — no smooth scrolling to anchor |
 | `box-shadow` | 10 | `0 2px 6px -1px rgba(…)` | cosmetic |
@@ -442,8 +503,10 @@ The older per-suite table, kept for the shape of it:
 
 **Properties not parsed at all** (`style.rs::apply_one`; these aren't among
 its arms): `text-shadow`, `hyphens`, `cursor`, `transition`, `animation`,
-`object-fit`, `text-overflow`, `filter`, `quotes`, `resize`, `columns`,
-`list-style-position`, `writing-mode`.
+`quotes`, `resize`, `columns`, `list-style-position`, `writing-mode`.
+`object-fit`, `text-overflow` and `filter` left this list in 0.35.0 —
+`filter` only for the colour functions, since `blur` and `drop-shadow` move
+pixels rather than recolour them and no matrix expresses that.
 
 **Selectors that drop the whole rule** (`css.rs` returns `None` → the rule is
 discarded rather than mis-applied): every pseudo-class outside
@@ -474,8 +537,10 @@ this page's icons entirely, not the image machinery.
 `@supports` conditions *are* evaluated.)
 
 **Layout:** `rowspan` (colspan works), sticky positioning (parsed, behaves as
-relative), bidi reordering, UAX-14 line breaking, `display: contents`,
-multi-column, writing modes.
+relative), bidi reordering, UAX-14 line breaking, multi-column, writing modes.
+`display: contents` shipped in 0.35.0; what it still cannot do is join a flex
+or grid container's item list — an unboxed wrapper there is laid out as a
+transparent block, not dissolved into its parent's items.
 
 **Percentage padding resolves against the FONT SIZE, not the containing
 block.** `pad_left` and its siblings are a resolved `f32` on `ComputedStyle`,
@@ -964,8 +1029,9 @@ menu to pick from.
       at the container's far edge instead (`flexbox_generated` measures that
       gap). Waits until generated content is a real flex item.
 
-    Still open here: `display: contents` on a generated element (we have no
-    such display at all) and the trailing flex box.
+    Still open here: `display: contents` on a generated element (the value
+    exists since 0.35.0, but a generated box never asks for it) and the
+    trailing flex box.
 
 25. ✅ **`min-width` on an out-of-flow box, and SVG gradient fills (0.3.9).**
     WPT-neutral again — zero status changes — both from looking at the render.
