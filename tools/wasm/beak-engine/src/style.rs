@@ -131,6 +131,12 @@ pub enum ListStyle {
     UpperAlpha,
     LowerRoman,
     UpperRoman,
+    /// The 24 Greek letters, final sigma excluded (css-counter-styles-3).
+    LowerGreek,
+    /// Additive, 1..=9999.
+    Armenian,
+    /// Additive, 1..=19999.
+    Georgian,
 }
 
 impl ListStyle {
@@ -465,17 +471,53 @@ pub enum Len {
     /// `calc()` in affine form `pct% of basis + px` — calc is linear in the
     /// percentage basis, so any mix of `%`/px/em resolves to (pct, px).
     Calc { pct: f32, px: f32 },
+    /// `min-content` / `max-content` / `fit-content`: a size the CONTENT
+    /// decides, not the containing block. Which of the three it is only
+    /// matters on the inline axis; on the block axis all three are the
+    /// content height.
+    Intrinsic(Intrinsic),
+}
+
+/// Which intrinsic size a `Len::Intrinsic` asks for (css-sizing-3 §5).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Intrinsic {
+    /// `min-content` — as narrow as the content allows.
+    Min,
+    /// `max-content` — as wide as the content wants, no wrapping.
+    Max,
+    /// `fit-content` — max-content, clamped into the available space.
+    Fit,
 }
 
 impl Len {
     /// Resolve to px against a containing-block width; `Auto` → `None`.
+    ///
+    /// An intrinsic keyword is `None` here too: the containing block cannot
+    /// answer it, only the content can. Every caller that can measure content
+    /// asks `intrinsic()` first; the rest treat it as `auto`, which is the
+    /// right fallback because both mean "not a length the parent dictates".
     pub fn px(self, cb: f32) -> Option<f32> {
         match self {
-            Len::Auto => None,
+            Len::Auto | Len::Intrinsic(_) => None,
             Len::Px(p) => Some(p),
             Len::Pct(p) => Some(p / 100.0 * cb),
             Len::Calc { pct, px } => Some(pct / 100.0 * cb + px),
         }
+    }
+
+    /// The intrinsic keyword, if this is one.
+    pub fn intrinsic(self) -> Option<Intrinsic> {
+        match self {
+            Len::Intrinsic(k) => Some(k),
+            _ => None,
+        }
+    }
+
+    /// `auto` in the sense that matters to sizing: no length from the parent.
+    /// An intrinsic keyword is NOT auto for stretching — that is the whole
+    /// difference — so callers that stretch must ask `intrinsic()` too.
+    pub fn is_auto(self) -> bool {
+        matches!(self, Len::Auto)
     }
 }
 
@@ -1400,19 +1442,42 @@ pub fn resolve(
     let inline = el.attr("style");
     if !sheet.is_empty() {
         let mut matched = sheet.matched(subject, ancestors, prev_siblings, sib_count, crate::css::Media::new(viewport_w, theme.is_dark()));
-        matched.sort_by_key(|(spec, order, _, _)| (*spec, *order));
-        // Pass 1 — normal <style> declarations, low→high specificity.
-        for (_, _, decls, _) in &matched {
+        matched.sort_by_key(|(layer, spec, order, _, _)| (*layer, *spec, *order));
+        // Pass 1 — normal <style> declarations, low→high layer/specificity.
+        // `revert-layer` needs to know which layer a declaration came from, so
+        // it is resolved before anything is applied — and only when the sheet
+        // actually contains one, which no page but a cascade reftest does.
+        let has_revert = matched
+            .iter()
+            .any(|(_, _, _, d, i)| d.iter().chain(i.iter()).any(|(_, v)| is_revert_layer(v)));
+        let dead = if has_revert { resolve_revert_layers(&matched, false) } else { Vec::new() };
+        for (layer, _, _, decls, _) in &matched {
             for (p, v) in *decls {
+                if !dead.is_empty() && dead.contains(&(*p, *layer)) {
+                    continue;
+                }
+                if is_revert_layer(v) {
+                    continue;
+                }
                 apply_one(*p, v, theme, &mut s);
             }
         }
         if let Some(decls) = inline {
             apply_declarations_pass(decls, theme, &mut s, false);
         }
-        // Pass 2 — `!important` <style> declarations, low→high specificity.
-        for (_, _, _, imp) in &matched {
+        // Pass 2 — `!important`, where the layer axis reverses (css-cascade-5
+        // §6.4.4): the FIRST layer wins, and an unlayered important loses to
+        // every layered one. Specificity and order keep their direction.
+        matched.sort_by_key(|(layer, spec, order, _, _)| (crate::css::imp_rank(*layer), *spec, *order));
+        let dead_imp = if has_revert { resolve_revert_layers(&matched, true) } else { Vec::new() };
+        for (layer, _, _, _, imp) in &matched {
             for (p, v) in *imp {
+                if !dead_imp.is_empty() && dead_imp.contains(&(*p, *layer)) {
+                    continue;
+                }
+                if is_revert_layer(v) {
+                    continue;
+                }
                 apply_one(*p, v, theme, &mut s);
             }
         }
@@ -1539,14 +1604,14 @@ pub fn resolve_pseudo(
     if matched.is_empty() {
         return None;
     }
-    matched.sort_by_key(|(spec, order, _, _)| (*spec, *order));
+    matched.sort_by_key(|(layer, spec, order, _, _)| (*layer, *spec, *order));
     // The `content` declarations in cascade order (later overrides earlier). An
     // INVALID one is dropped at parse time (CSS Syntax 3 §4), so the winner is
     // the LAST one that parses — not simply the last one. The template may
     // reference counters (`counter()`/`counters()`), resolved later against the
     // layout-time counter stack; a plain string is a single `Text` piece.
     let mut content_vals: Vec<&str> = Vec::new();
-    for (_, _, decls, imp) in &matched {
+    for (_, _, _, decls, imp) in &matched {
         for (p, v) in decls.iter().chain(imp.iter()) {
             if *p == Prop::Content {
                 content_vals.push(v);
@@ -1556,7 +1621,7 @@ pub fn resolve_pseudo(
     let template = content_vals.iter().rev().find_map(|v| parse_content_template(v))?;
     let mut s = inherit_reset(own);
     for pass_imp in [false, true] {
-        for (_, _, decls, imp) in &matched {
+        for (_, _, _, decls, imp) in &matched {
             for (p, v) in if pass_imp { *imp } else { *decls } {
                 if *p == Prop::Content {
                     continue;
@@ -2103,6 +2168,55 @@ fn has_viewport_h_unit(v: &str) -> bool {
         i += 1;
     }
     false
+}
+
+/// The `revert-layer` keyword (css-cascade-5 §7.4): roll this property back to
+/// what it would be if the declaring layer had never said anything about it.
+fn is_revert_layer(v: &str) -> bool {
+    let v = v.trim();
+    v.len() == 12 && v.eq_ignore_ascii_case("revert-layer")
+}
+
+/// Which `(property, layer)` pairs a winning `revert-layer` removes from the
+/// cascade. `matched` is in ascending cascade order, so a property's winner is
+/// its LAST declaration; if that one says `revert-layer`, its whole layer goes
+/// out for that property and the next-lower layer's declaration takes over —
+/// which may itself be a `revert-layer`, hence the loop.
+///
+/// Unlayered rules revert against the UA sheet, which is already applied by
+/// the time this runs, so taking them out leaves exactly the right value.
+fn resolve_revert_layers(matched: &[crate::css::Matched], important: bool) -> Vec<(Prop, u16)> {
+    let mut dead: Vec<(Prop, u16)> = Vec::new();
+    loop {
+        let mut winner: Vec<(Prop, u16, bool)> = Vec::new();
+        for (layer, _, _, decls, imp) in matched {
+            for (p, v) in if important { *imp } else { *decls } {
+                if dead.contains(&(*p, *layer)) {
+                    continue;
+                }
+                let rev = is_revert_layer(v);
+                match winner.iter_mut().find(|w| w.0 == *p) {
+                    Some(w) => {
+                        w.1 = *layer;
+                        w.2 = rev;
+                    }
+                    None => winner.push((*p, *layer, rev)),
+                }
+            }
+        }
+        // Each round kills at least one (property, layer) pair or stops, and
+        // there are finitely many, so this terminates.
+        let mut changed = false;
+        for (p, layer, rev) in winner {
+            if rev && !dead.contains(&(p, layer)) {
+                dead.push((p, layer));
+                changed = true;
+            }
+        }
+        if !changed {
+            return dead;
+        }
+    }
 }
 
 pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
@@ -2971,6 +3085,12 @@ fn parse_len_opt(v: &str, u: Units) -> Option<Len> {
     if v == "auto" {
         return Some(Len::Auto);
     }
+    match v {
+        "min-content" | "-webkit-min-content" => return Some(Len::Intrinsic(Intrinsic::Min)),
+        "max-content" | "-webkit-max-content" => return Some(Len::Intrinsic(Intrinsic::Max)),
+        "fit-content" | "-webkit-fit-content" => return Some(Len::Intrinsic(Intrinsic::Fit)),
+        _ => {}
+    }
     if is_math_fn(v) {
         return parse_calc_affine(v, u);
     }
@@ -2986,9 +3106,12 @@ fn parse_len_opt(v: &str, u: Units) -> Option<Len> {
 /// parse, failed, and became `auto` — while the same expression inside a custom
 /// property resolved fine, because `vars.rs` calls the resolver directly.
 fn is_math_fn(v: &str) -> bool {
+    // `get` rather than a range index: a value may now begin with a multi-byte
+    // character — an escape that decoded to U+FFFD is one — and slicing to a
+    // byte length would land inside it and panic.
     ["calc(", "min(", "max(", "clamp("]
         .iter()
-        .any(|f| v.len() >= f.len() && v[..f.len()].eq_ignore_ascii_case(f))
+        .any(|f| v.get(..f.len()).is_some_and(|h| h.eq_ignore_ascii_case(f)))
 }
 
 fn parse_len(v: &str, u: Units) -> Len {
@@ -3207,7 +3330,7 @@ fn parse_bg_shorthand(
 fn size_non_negative(l: &Len) -> bool {
     match l {
         Len::Px(p) | Len::Pct(p) => *p >= 0.0,
-        Len::Auto | Len::Calc { .. } => true,
+        Len::Auto | Len::Calc { .. } | Len::Intrinsic(_) => true,
     }
 }
 
@@ -3346,6 +3469,9 @@ fn parse_list_style(v: &str) -> Option<ListStyle> {
         "square" => ListStyle::Square,
         "decimal" => ListStyle::Decimal,
         "decimal-leading-zero" => ListStyle::DecimalLeadingZero,
+        "lower-greek" => ListStyle::LowerGreek,
+        "armenian" | "upper-armenian" => ListStyle::Armenian,
+        "georgian" => ListStyle::Georgian,
         "lower-alpha" | "lower-latin" => ListStyle::LowerAlpha,
         "upper-alpha" | "upper-latin" => ListStyle::UpperAlpha,
         "lower-roman" => ListStyle::LowerRoman,

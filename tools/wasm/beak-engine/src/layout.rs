@@ -27,7 +27,7 @@ use crate::forms::{ControlKind, FormState};
 use crate::image::ImageMap;
 use crate::style::{
     self, BgLayer, BgPos, BgSize, BorderSide, ClearKind, Clip, ComputedStyle, ContentAlign,
-    ContentPiece, CrossAlign, Display, FlexBasis, FloatKind, GridTrack, Justify, Len, ListStyle,
+    ContentPiece, CrossAlign, Display, FlexBasis, FloatKind, GridTrack, Intrinsic, Justify, Len, ListStyle,
     Overflow, Position, TableLayout,
     TextAlign, TextTransform, ZIndex, BASE_FONT_PX,
 };
@@ -534,7 +534,8 @@ fn translate_offset(st: &ComputedStyle, box_w: i32, box_h: i32) -> (i32, i32) {
         Len::Px(p) => p as i32,
         Len::Pct(p) => (p / 100.0 * basis as f32) as i32,
         Len::Calc { pct, px } => (pct / 100.0 * basis as f32 + px) as i32,
-        Len::Auto => 0,
+        // `translate` takes no intrinsic keyword; `auto` there is zero.
+        Len::Auto | Len::Intrinsic(_) => 0,
     };
     (at(tx, box_w), at(ty, box_h))
 }
@@ -2146,6 +2147,11 @@ impl<'a> Ctx<'a> {
                 let (pref, min) = self.intrinsic_width(el, st);
                 let avail = (w as f32 - ml - mr - pad_border).max(0.0);
                 pref.min(avail).max(min).max(0.0)
+            }
+            Len::Intrinsic(k) => {
+                let (pref, min) = self.intrinsic_width(el, st);
+                let avail = (w as f32 - ml - mr - pad_border).max(0.0);
+                intrinsic_size(k, pref, min, avail)
             }
             other => {
                 let v = other.px(w as f32).unwrap_or(0.0);
@@ -5314,6 +5320,10 @@ impl<'a> Ctx<'a> {
             } else {
                 let uw = match s.width {
                     Len::Auto => self.intrinsic_width(el_i, s).0,
+                    Len::Intrinsic(k) => {
+                        let (pref, min) = self.intrinsic_width(el_i, s);
+                        intrinsic_size(k, pref, min, cw)
+                    }
                     other => other.px(cw).unwrap_or(0.0),
                 }
                 .min(cw)
@@ -6065,6 +6075,9 @@ impl<'a> Ctx<'a> {
             let stretch = align == CrossAlign::Stretch && width_auto;
             let mut wd = if stretch {
                 (avail - ml - mr).max(1.0)
+            } else if let Len::Intrinsic(k) = s.width {
+                let (pref, min) = self.intrinsic_width(el, s);
+                intrinsic_size(k, pref, min, (avail - ml - mr).max(0.0))
             } else {
                 s.width.px(avail).map(to_content).unwrap_or_else(|| self.intrinsic_width(el, s).0)
             };
@@ -6689,6 +6702,11 @@ impl<'a> Ctx<'a> {
                 let (pref, min) = self.intrinsic_width(el, st);
                 let room = (cbw - ml - mr - pad_border).max(0.0);
                 pref.min(room).max(min).max(0.0)
+            }
+            Len::Intrinsic(k) => {
+                let (pref, min) = self.intrinsic_width(el, st);
+                let room = (cbw - ml - mr - pad_border).max(0.0);
+                intrinsic_size(k, pref, min, room)
             }
             other => {
                 let v = other.px(cbw).unwrap_or(0.0);
@@ -7959,6 +7977,9 @@ fn marker_label(ls: ListStyle, n: i32) -> String {
         ListStyle::UpperAlpha => alloc::format!("{}.", alpha_counter(n, true)),
         ListStyle::LowerRoman => alloc::format!("{}.", roman_counter(n, false)),
         ListStyle::UpperRoman => alloc::format!("{}.", roman_counter(n, true)),
+        ListStyle::LowerGreek => alloc::format!("{}.", greek_counter(n)),
+        ListStyle::Armenian => alloc::format!("{}.", additive_counter(n, &ARMENIAN)),
+        ListStyle::Georgian => alloc::format!("{}.", additive_counter(n, &GEORGIAN)),
         _ => String::new(),
     }
 }
@@ -7973,6 +7994,9 @@ fn format_counter(style: ListStyle, n: i32) -> String {
         ListStyle::UpperAlpha => alpha_counter(n, true),
         ListStyle::LowerRoman => roman_counter(n, false),
         ListStyle::UpperRoman => roman_counter(n, true),
+        ListStyle::LowerGreek => greek_counter(n),
+        ListStyle::Armenian => additive_counter(n, &ARMENIAN),
+        ListStyle::Georgian => additive_counter(n, &GEORGIAN),
         // Pad 1..9 to two digits (`01`); everything else is plain decimal.
         ListStyle::DecimalLeadingZero => alloc::format!("{n:02}"),
         ListStyle::Disc => "•".into(),
@@ -7982,6 +8006,69 @@ fn format_counter(style: ListStyle, n: i32) -> String {
         _ => alloc::format!("{n}"),
     }
 }
+
+/// `lower-greek`: bijective base-24 over α..ω with FINAL SIGMA left out
+/// (css-counter-styles-3 §6.1) — 24 letters, not the 25 the block holds.
+fn greek_counter(n: i32) -> String {
+    const G: [char; 24] = [
+        '\u{3b1}', '\u{3b2}', '\u{3b3}', '\u{3b4}', '\u{3b5}', '\u{3b6}', '\u{3b7}', '\u{3b8}',
+        '\u{3b9}', '\u{3ba}', '\u{3bb}', '\u{3bc}', '\u{3bd}', '\u{3be}', '\u{3bf}', '\u{3c0}',
+        '\u{3c1}', '\u{3c3}', '\u{3c4}', '\u{3c5}', '\u{3c6}', '\u{3c7}', '\u{3c8}', '\u{3c9}',
+    ];
+    if n < 1 {
+        return alloc::format!("{n}");
+    }
+    let mut out: Vec<char> = Vec::new();
+    let mut v = n;
+    while v > 0 {
+        out.push(G[((v - 1) % 24) as usize]);
+        v = (v - 1) / 24;
+    }
+    out.reverse();
+    out.into_iter().collect()
+}
+
+/// An additive counter style: the largest weight that fits, repeatedly. Used
+/// by `armenian` and `georgian`, which have no positional notation at all.
+/// Out of range falls back to decimal, as CSS requires of an exhausted style.
+fn additive_counter(n: i32, table: &[(i32, char)]) -> String {
+    let max: i32 = table.iter().map(|(w, _)| *w).max().unwrap_or(0) * 10 - 1;
+    if n < 1 || n > max {
+        return alloc::format!("{n}");
+    }
+    let mut v = n;
+    let mut out = String::new();
+    for &(w, ch) in table {
+        while v >= w {
+            out.push(ch);
+            v -= w;
+        }
+    }
+    out
+}
+
+const ARMENIAN: [(i32, char); 36] = [
+    (9000, '\u{554}'), (8000, '\u{553}'), (7000, '\u{552}'), (6000, '\u{551}'), (5000, '\u{550}'),
+    (4000, '\u{54f}'), (3000, '\u{54e}'), (2000, '\u{54d}'), (1000, '\u{54c}'),
+    (900, '\u{54b}'), (800, '\u{54a}'), (700, '\u{549}'), (600, '\u{548}'), (500, '\u{547}'),
+    (400, '\u{546}'), (300, '\u{545}'), (200, '\u{544}'), (100, '\u{543}'),
+    (90, '\u{542}'), (80, '\u{541}'), (70, '\u{540}'), (60, '\u{53f}'), (50, '\u{53e}'),
+    (40, '\u{53d}'), (30, '\u{53c}'), (20, '\u{53b}'), (10, '\u{53a}'),
+    (9, '\u{539}'), (8, '\u{538}'), (7, '\u{537}'), (6, '\u{536}'), (5, '\u{535}'),
+    (4, '\u{534}'), (3, '\u{533}'), (2, '\u{532}'), (1, '\u{531}'),
+];
+
+const GEORGIAN: [(i32, char); 37] = [
+    (10000, '\u{10f5}'), (9000, '\u{10f0}'), (8000, '\u{10ef}'), (7000, '\u{10f4}'),
+    (6000, '\u{10ee}'), (5000, '\u{10ed}'), (4000, '\u{10ec}'), (3000, '\u{10eb}'),
+    (2000, '\u{10ea}'), (1000, '\u{10e9}'),
+    (900, '\u{10e8}'), (800, '\u{10e7}'), (700, '\u{10e6}'), (600, '\u{10e5}'), (500, '\u{10e4}'),
+    (400, '\u{10f3}'), (300, '\u{10e2}'), (200, '\u{10e1}'), (100, '\u{10e0}'),
+    (90, '\u{10df}'), (80, '\u{10de}'), (70, '\u{10dd}'), (60, '\u{10f2}'), (50, '\u{10dc}'),
+    (40, '\u{10db}'), (30, '\u{10da}'), (20, '\u{10d9}'), (10, '\u{10d8}'),
+    (9, '\u{10d7}'), (8, '\u{10f1}'), (7, '\u{10d6}'), (6, '\u{10d5}'), (5, '\u{10d4}'),
+    (4, '\u{10d3}'), (3, '\u{10d2}'), (2, '\u{10d1}'), (1, '\u{10d0}'),
+];
 
 /// Bijective base-26: 1→a, 26→z, 27→aa. Out-of-range ordinals fall back to the
 /// decimal representation, as CSS requires of an exhausted counter style.
@@ -8983,6 +9070,35 @@ fn emit_line(
 mod tests {
     use super::*;
     use crate::dom;
+
+    /// Every weight in an additive table must be positive: a zero would make
+    /// `while v >= w` spin forever, and a counter style is reachable from any
+    /// page's CSS.
+    #[test]
+    fn additive_counter_tables_have_no_zero_weight() {
+        for (w, _) in ARMENIAN.iter().chain(GEORGIAN.iter()) {
+            assert!(*w > 0, "zero weight would not terminate");
+        }
+        // Strictly descending, or the greedy loop emits the wrong glyph.
+        for t in [&ARMENIAN[..], &GEORGIAN[..]] {
+            assert!(t.windows(2).all(|p| p[0].0 > p[1].0));
+        }
+    }
+
+    #[test]
+    fn greek_armenian_and_georgian_counters_read_right() {
+        assert_eq!(greek_counter(1), "\u{3b1}");
+        assert_eq!(greek_counter(24), "\u{3c9}");
+        // 25 wraps to a two-letter form — 24 letters, final sigma excluded.
+        assert_eq!(greek_counter(25), "\u{3b1}\u{3b1}");
+        assert_eq!(additive_counter(1, &ARMENIAN), "\u{531}");
+        // 1988 = 1000 + 900 + 80 + 8
+        assert_eq!(additive_counter(1988, &ARMENIAN), "\u{54c}\u{54b}\u{541}\u{538}");
+        assert_eq!(additive_counter(1, &GEORGIAN), "\u{10d0}");
+        // Out of range falls back to decimal rather than looping or truncating.
+        assert_eq!(additive_counter(0, &ARMENIAN), "0");
+        assert_eq!(additive_counter(999_999, &GEORGIAN), "999999");
+    }
 
     fn fonts() -> crate::fonts::Fonts {
         crate::fonts::Fonts::new()
@@ -11069,13 +11185,28 @@ fn side_by_side(st: &ComputedStyle) -> bool {
     }
 }
 
+/// The used size an intrinsic keyword asks for, given the box's own
+/// (max-content, min-content) pair and the room it has — css-sizing-3 §5.
+///
+/// `fit-content` is the shrink-to-fit formula CSS2.1 already used for floats;
+/// naming it as a keyword only lets the author ask for it explicitly.
+fn intrinsic_size(k: Intrinsic, max_c: f32, min_c: f32, avail: f32) -> f32 {
+    match k {
+        Intrinsic::Min => min_c,
+        Intrinsic::Max => max_c,
+        Intrinsic::Fit => max_c.min(avail.max(min_c)),
+    }
+}
+
 /// Resolve a vertical length against a containing-block height (CSS2.1 §9.3.2 /
 /// §10.5). A percentage needs a definite CB height; an indefinite one (the
 /// parent's content height doesn't exist yet while its children lay out) leaves
 /// it unresolvable, which behaves as `auto`.
 fn vert_len(len: Len, cbh: Option<i32>) -> Option<f32> {
     match len {
-        Len::Auto => None,
+        // An intrinsic keyword on the block axis is the CONTENT height, which
+        // no containing block can supply — unresolvable here, like `auto`.
+        Len::Auto | Len::Intrinsic(_) => None,
         Len::Px(p) => Some(p),
         Len::Pct(p) => cbh.map(|h| p / 100.0 * h as f32),
         Len::Calc { pct, px } if pct == 0.0 => Some(px),

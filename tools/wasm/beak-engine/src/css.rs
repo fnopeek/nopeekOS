@@ -19,6 +19,8 @@
 use alloc::borrow::Cow;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
+use alloc::format;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::dom::{Dom, Element, Node};
@@ -1065,12 +1067,98 @@ pub struct Rule {
     decls_imp: Vec<(Prop, String)>,
     order: u32,
     media: Option<Vec<MediaCond>>,
+    /// Cascade-layer rank (css-cascade-5 §6.4.4). `UNLAYERED` for a rule that
+    /// sits outside every `@layer`; otherwise the layer's position in
+    /// declaration order, so a LATER layer wins a normal declaration.
+    layer: u16,
 }
 
-/// One rule that matched: `(specificity, document order, normal declarations,
-/// `!important` declarations)`. The caller sorts ascending and applies the
-/// normal pass first, then the important one.
-pub type Matched<'a> = (u32, u32, &'a [(Prop, String)], &'a [(Prop, String)]);
+/// Rank of a rule that is in no layer. Normal declarations from unlayered
+/// rules beat every layered one, so it sorts highest; the `!important` pass
+/// reverses the axis (`imp_rank`), which drops it to the bottom there.
+pub const UNLAYERED: u16 = u16::MAX;
+
+/// Layer priority for the `!important` pass, where the whole layer axis
+/// reverses: the FIRST-declared layer wins, and unlayered loses to all.
+#[inline]
+pub fn imp_rank(layer: u16) -> u16 {
+    UNLAYERED - layer
+}
+
+/// The layers a stylesheet declared — css-cascade-5 §6.4.
+///
+/// A layer's position is fixed by its FIRST declaration, whether that came
+/// from `@layer a, b;` (order only) or `@layer a { … }` (order + rules), and
+/// nesting makes a dotted path. Ranks cannot be handed out while parsing:
+/// `@layer a; @layer b; @layer a.c;` has to sort `a.c` INSIDE `a`, which
+/// moves `b` after every rule tagged `b` already exists. So this is a
+/// push-only arena of ids, and `ranks()` turns ids into positions once the
+/// sheet is fully read.
+#[derive(Default)]
+struct Layers {
+    names: Vec<String>,
+}
+
+impl Layers {
+    /// Stable id for `name`, registering it — and any missing ancestor, since
+    /// `@layer a.b` alone still creates `a` — on first sight.
+    fn id(&mut self, name: &str) -> u16 {
+        if let Some(cut) = name.rfind('.') {
+            self.id(&name[..cut]);
+        }
+        if let Some(i) = self.names.iter().position(|n| n == name) {
+            return i as u16;
+        }
+        self.names.push(String::from(name));
+        (self.names.len() - 1) as u16
+    }
+
+    /// A fresh anonymous layer (`@layer { … }`), which no later rule can name.
+    /// The NUL keeps the generated name out of the author's namespace.
+    fn anon(&mut self, parent: &str) -> (u16, String) {
+        let n = self.names.len();
+        let name = if parent.is_empty() {
+            format!("\u{0}{n}")
+        } else {
+            format!("{parent}.\u{0}{n}")
+        };
+        (self.id(&name), name)
+    }
+
+    /// `id -> rank`, in tree order. A layer's sort key is the chain of ids of
+    /// its own prefixes: `a.c` keys as `[id(a), id(a.c)]`, which puts it after
+    /// `a` and before any later sibling of `a`, at any nesting depth.
+    fn ranks(&self) -> Vec<u16> {
+        let key = |name: &str| -> Vec<u16> {
+            let mut k = Vec::new();
+            let mut at = 0;
+            loop {
+                let cut = name[at..].find('.').map(|c| at + c);
+                let prefix = &name[..cut.unwrap_or(name.len())];
+                k.push(self.names.iter().position(|n| n == prefix).unwrap_or(0) as u16);
+                match cut {
+                    Some(c) => at = c + 1,
+                    None => break,
+                }
+            }
+            k
+        };
+        let mut ord: Vec<u16> = (0..self.names.len() as u16).collect();
+        ord.sort_by_cached_key(|&i| key(&self.names[i as usize]));
+        let mut rank = vec![0u16; self.names.len()];
+        for (pos, &id) in ord.iter().enumerate() {
+            rank[id as usize] = pos as u16;
+        }
+        rank
+    }
+}
+
+/// One rule that matched: `(layer rank, specificity, document order, normal
+/// declarations, `!important` declarations)`. The caller sorts ascending and
+/// applies the normal pass first, then the important one — and because the
+/// layer axis reverses between the two passes, the important pass re-sorts on
+/// `imp_rank` rather than reusing pass 1's order.
+pub type Matched<'a> = (u16, u32, u32, &'a [(Prop, String)], &'a [(Prop, String)]);
 
 /// A parsed author stylesheet.
 ///
@@ -1160,29 +1248,13 @@ fn url_at(text: &str, from: usize) -> Option<(Cow<'_, str>, usize)> {
     Some((unescape(text.get(start..end)?.trim()), after.max(open)))
 }
 
-/// Undo CSS string escaping (`\"` → `"`). Hex escapes (`\41`) are left alone:
-/// they do not occur in the URLs real pages ship, and guessing at one would
-/// corrupt more than it fixes.
+/// Undo CSS string escaping in a URL. This used to leave hex escapes alone
+/// on the grounds that decoding one would corrupt more than it fixed; now
+/// that there is a spec-correct decoder it must use the SAME one the
+/// declaration parser does, or the `url()` table and the declaration that
+/// names it disagree about the key and the image never resolves.
 fn unescape(s: &str) -> Cow<'_, str> {
-    if !s.contains('\\') {
-        return Cow::Borrowed(s);
-    }
-    let mut out = String::with_capacity(s.len());
-    let mut it = s.chars();
-    while let Some(c) = it.next() {
-        match c {
-            '\\' => match it.next() {
-                Some(n) if n.is_ascii_hexdigit() => {
-                    out.push('\\');
-                    out.push(n);
-                }
-                Some(n) => out.push(n),
-                None => {}
-            },
-            _ => out.push(c),
-        }
-    }
-    Cow::Owned(out)
+    css_unescape(s)
 }
 
 /// The first `url(…)` in a declaration value, unquoted and unescaped.
@@ -1387,7 +1459,7 @@ impl Stylesheet {
                 i += 1;
             }
             if let Some(spec) = best {
-                out.push((spec, rule.order, rule.decls.as_slice(), rule.decls_imp.as_slice()));
+                out.push((rule.layer, spec, rule.order, rule.decls.as_slice(), rule.decls_imp.as_slice()));
             }
         }
         out
@@ -1504,7 +1576,17 @@ pub fn parse(css: &str) -> Stylesheet {
     let css = strip_comments(&css);
     let mut rules = Vec::new();
     let mut order = 0u32;
-    parse_into(&css, 0, css.len(), None, &mut rules, &mut order);
+    let mut layers = Layers::default();
+    parse_into(&css, 0, css.len(), None, &mut rules, &mut order, "", &mut layers);
+    // Ids became positions only now that every layer is known.
+    if !layers.names.is_empty() {
+        let rank = layers.ranks();
+        for r in &mut rules {
+            if r.layer != UNLAYERED {
+                r.layer = rank[r.layer as usize];
+            }
+        }
+    }
     let mut urls = BTreeMap::new();
     collect_urls(&css, &mut urls);
     let mut hover_set = HoverSet::default();
@@ -1551,6 +1633,8 @@ fn parse_into(
     media: Option<&Vec<MediaCond>>,
     rules: &mut Vec<Rule>,
     order: &mut u32,
+    layer: &str,
+    layers: &mut Layers,
 ) {
     let bytes = css.as_bytes();
     let mut i = start;
@@ -1578,7 +1662,7 @@ fn parse_into(
                 }
                 let conds = parse_media_query(&css[j..k]);
                 let close = matching_brace(bytes, k, end);
-                parse_into(css, k + 1, close, Some(&conds), rules, order);
+                parse_into(css, k + 1, close, Some(&conds), rules, order, layer, layers);
                 i = (close + 1).min(end);
             } else if css[i + 1..j].eq_ignore_ascii_case("supports") {
                 // Descend into `@supports` when the condition holds; else skip
@@ -1593,8 +1677,39 @@ fn parse_into(
                 }
                 let close = matching_brace(bytes, k, end);
                 if supports_cond(&css[j..k]) {
-                    parse_into(css, k + 1, close, media, rules, order);
+                    parse_into(css, k + 1, close, media, rules, order, layer, layers);
                 }
+                i = (close + 1).min(end);
+            } else if css[i + 1..j].eq_ignore_ascii_case("layer") {
+                // `@layer a, b;` declares order only; `@layer a { … }` and the
+                // anonymous `@layer { … }` also carry rules. Skipping the block
+                // — which is what an unknown at-rule gets — drops the whole
+                // sheet on a page that wraps its CSS in layers, which is what
+                // the current generation of CSS frameworks does.
+                let mut k = j;
+                while k < end && bytes[k] != b'{' && bytes[k] != b';' {
+                    k += 1;
+                }
+                let names = css[j..k.min(end)].trim();
+                if k >= end || bytes[k] == b';' {
+                    for n in names.split(',') {
+                        let n = n.trim();
+                        if !n.is_empty() {
+                            layers.id(&qualify(layer, n));
+                        }
+                    }
+                    i = (k + 1).min(end);
+                    continue;
+                }
+                let (id, full) = if names.is_empty() {
+                    layers.anon(layer)
+                } else {
+                    let full = qualify(layer, names);
+                    (layers.id(&full), full)
+                };
+                let close = matching_brace(bytes, k, end);
+                parse_into(css, k + 1, close, media, rules, order, &full, layers);
+                let _ = id;
                 i = (close + 1).min(end);
             } else {
                 i = skip_at_rule(bytes, i).min(end);
@@ -1602,8 +1717,12 @@ fn parse_into(
             continue;
         }
         let sel_start = i;
+        // `p \{ … \}` is a selector containing two escaped braces, not a rule:
+        // skipping the escape is what makes the block opener the NEXT real
+        // `{`, which swallows the rule after it — exactly as the spec says an
+        // unmatched selector should.
         while i < end && bytes[i] != b'{' && bytes[i] != b'}' {
-            i += 1;
+            i += if bytes[i] == b'\\' { 2 } else { 1 };
         }
         if i >= end {
             break;
@@ -1671,7 +1790,11 @@ fn parse_into(
             }
         }
         if !selectors.is_empty() && !(decls.is_empty() && decls_imp.is_empty()) {
-            rules.push(Rule { selectors, decls, decls_imp, order: *order, media: media.cloned() });
+            // The layer id is stable; `parse` turns it into a rank once the
+            // whole sheet is read (a nested layer declared late moves its
+            // siblings, so a rank handed out here would go stale).
+            let lid = if layer.is_empty() { UNLAYERED } else { layers.id(layer) };
+            rules.push(Rule { selectors, decls, decls_imp, order: *order, media: media.cloned(), layer: lid });
             *order += 1;
         }
     }
@@ -1682,6 +1805,11 @@ pub(crate) fn matching_brace(bytes: &[u8], open: usize, end: usize) -> usize {
     let mut depth = 0i32;
     let mut i = open;
     while i < end {
+        // An escaped brace is a character in a name, not a block boundary.
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
         match bytes[i] {
             b'{' => depth += 1,
             b'}' => {
@@ -1742,7 +1870,9 @@ fn supports_decl(prop: &str, val: &str) -> bool {
 
 /// Case-insensitive prefix strip.
 fn strip_ci_prefix<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
-    if s.len() >= prefix.len() && s[..prefix.len()].eq_ignore_ascii_case(prefix) {
+    // `get`, not a range index: a decoded escape can put a multi-byte
+    // character at the front, and `prefix.len()` may then fall inside it.
+    if s.get(..prefix.len()).is_some_and(|h| h.eq_ignore_ascii_case(prefix)) {
         Some(&s[prefix.len()..])
     } else {
         None
@@ -1904,6 +2034,16 @@ fn strip_comments(css: &str) -> String {
     out
 }
 
+/// Full name of a layer named `name` inside the layer `parent` (empty at the
+/// top level). `@layer a { @layer b { … } }` is the layer `a.b`.
+fn qualify(parent: &str, name: &str) -> String {
+    if parent.is_empty() {
+        String::from(name)
+    } else {
+        format!("{parent}.{name}")
+    }
+}
+
 fn skip_at_rule(bytes: &[u8], start: usize) -> usize {
     let mut i = start;
     while i < bytes.len() && bytes[i] != b';' && bytes[i] != b'{' {
@@ -2027,11 +2167,26 @@ fn parse_selector(text: &str) -> Option<Selector> {
 }
 
 /// Split into compound tokens + `>` tokens on whitespace / `>` boundaries.
+///
+/// An escape is copied through whole, terminating whitespace included: the
+/// space in `.c\06C ass` belongs to the escape, so it is NOT a descendant
+/// combinator, and `\>` is a character in a name rather than a child
+/// combinator. Decoding happens later, in `parse_compound`.
 fn tokenize_selector(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut depth = 0i32; // inside [...] or :not(...) — don't split on combinators there
-    for ch in text.chars() {
+    let b = text.as_bytes();
+    let mut i = 0usize;
+    while i < b.len() {
+        if b[i] == b'\\' {
+            let (_, next) = escape_at(text, i);
+            cur.push_str(&text[i..next]);
+            i = next;
+            continue;
+        }
+        let ch = text[i..].chars().next().unwrap();
+        i += ch.len_utf8();
         match ch {
             '[' | '(' => {
                 depth += 1;
@@ -2089,29 +2244,25 @@ fn parse_compound(tok: &str) -> Option<Compound> {
     // Leading type selector or universal `*`.
     if b[0] == b'*' {
         i = 1;
-    } else if b[0].is_ascii_alphabetic() {
-        let s = i;
-        while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'-') {
-            i += 1;
-        }
-        c.tag = Some(tok[s..i].to_ascii_lowercase());
+    } else if b[0].is_ascii_alphabetic() || b[0] == b'\\' {
+        let (name, next) = ident_at(tok, i);
+        i = next;
+        c.tag = Some(name.to_ascii_lowercase());
     }
     while i < b.len() {
         match b[i] {
             b'.' | b'#' => {
                 let marker = b[i];
                 i += 1;
-                let s = i;
-                while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'-' || b[i] == b'_') {
-                    i += 1;
-                }
-                if i == s {
+                let (name, next) = ident_at(tok, i);
+                if next == i {
                     return None;
                 }
+                i = next;
                 if marker == b'.' {
-                    c.classes.push(tok[s..i].to_string());
+                    c.classes.push(name);
                 } else {
-                    c.id = Some(tok[s..i].to_string());
+                    c.id = Some(name);
                 }
             }
             b'[' => {
@@ -2392,7 +2543,10 @@ pub fn split_decls(body: &str) -> Vec<&str> {
     let mut i = 0usize;
     while i < b.len() {
         match b[i] {
-            b'\\' if quote != 0 => i += 1, // escaped char inside a string
+            // Escaped anything — inside a string it protects a quote, outside
+            // it makes `;` or `:` part of a name. Either way the next byte is
+            // not a delimiter.
+            b'\\' => i += 1,
             q @ (b'"' | b'\'') if quote == 0 => quote = q,
             q if quote != 0 && q == quote => quote = 0,
             b'(' if quote == 0 => depth += 1,
@@ -2412,16 +2566,178 @@ pub fn split_decls(body: &str) -> Vec<&str> {
 fn parse_decls(body: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for decl in split_decls(body) {
-        let mut it = decl.splitn(2, ':');
-        let (p, v) = match (it.next(), it.next()) {
-            (Some(p), Some(v)) => (p.trim(), v.trim()),
-            _ => continue,
+        // The first UNESCAPED colon. `background\\: red` escapes it, so the
+        // whole thing is one property name with no value — an invalid
+        // declaration, which is what the test of that idiom checks.
+        let db = decl.as_bytes();
+        let mut k = 0usize;
+        let cut = loop {
+            if k >= db.len() {
+                break None;
+            }
+            match db[k] {
+                b'\\' => k += 2,
+                b':' => break Some(k),
+                _ => k += 1,
+            }
+        };
+        let (p, v) = match cut {
+            Some(k) => (decl[..k].trim(), decl[k + 1..].trim()),
+            None => continue,
         };
         if !p.is_empty() && !v.is_empty() {
-            out.push((p.to_ascii_lowercase(), v.to_string()));
+            // A property name and a keyword value are ident tokens, so an
+            // escape in either is part of the NAME: `bac\kground: g\reen` is
+            // `background: green` (css-syntax-3 §4.3.7).
+            //
+            // A value carrying a string or a `url()` is left alone, because
+            // there the backslash is doing the opposite job: it PROTECTS a
+            // quote from ending the token. Decoding it here would hand
+            // `url("data:…<svg xmlns=\"…\">")` on to a parser that then stops
+            // at the first inner quote — which is the spelling MediaWiki
+            // ships, and it decodes to a blank image rather than an error.
+            // Those tokens are unescaped where they are consumed instead.
+            let val = if v.contains('"') || v.contains('\'') || v.contains("url(") {
+                String::from(v)
+            } else {
+                // An escape that decodes to whitespace or a control character
+                // leaves an ident that CONTAINS that character — `red\9` is
+                // not the keyword `red` — so nothing can ever match it and the
+                // declaration is invalid. Decoding it and moving on would let
+                // the trim in `apply_one` turn it back into the keyword.
+                match unescape_value(v) {
+                    Some(x) => x,
+                    None => continue,
+                }
+            };
+            let name = match unescape_value(p) {
+                Some(x) => x.to_ascii_lowercase(),
+                None => continue,
+            };
+            out.push((name, val));
         }
     }
     out
+}
+
+/// One `\…` escape starting at `i` (which must be the backslash): the code
+/// point it stands for, and the index just past it — css-syntax-3 §4.3.7.
+///
+/// The hex form takes up to SIX digits and then swallows one following
+/// whitespace, which is the only way to write `\6C` before a letter that is
+/// itself a hex digit. Anything else escapes the next character literally,
+/// and that is the form that matters on real pages: it is how a class name
+/// gets to contain `:` or `/`.
+fn escape_at(s: &str, i: usize) -> (Option<char>, usize) {
+    let b = s.as_bytes();
+    let mut j = i + 1;
+    if j >= b.len() {
+        // A trailing backslash is U+FFFD, not a parse error (§4.3.7).
+        return (Some('\u{FFFD}'), j);
+    }
+    if !b[j].is_ascii_hexdigit() {
+        // `\<newline>` is a line continuation inside a string: it stands for
+        // nothing at all.
+        if b[j] == b'\n' {
+            return (None, j + 1);
+        }
+        let ch = s[j..].chars().next().unwrap_or('\u{FFFD}');
+        return (Some(ch), j + ch.len_utf8());
+    }
+    let start = j;
+    while j < b.len() && j - start < 6 && b[j].is_ascii_hexdigit() {
+        j += 1;
+    }
+    let cp = u32::from_str_radix(&s[start..j], 16).unwrap_or(0);
+    if j < b.len() {
+        match b[j] {
+            b'\r' if b.get(j + 1) == Some(&b'\n') => j += 2,
+            b' ' | b'\t' | b'\n' | b'\r' | 0x0c => j += 1,
+            _ => {}
+        }
+    }
+    // NUL, a surrogate, and anything past the last code point are U+FFFD.
+    let ch = if cp == 0 { None } else { char::from_u32(cp) };
+    (Some(ch.unwrap_or('\u{FFFD}')), j)
+}
+
+/// Resolve every escape in `s`. Borrows unchanged when there is none, which is
+/// every declaration on almost every page.
+fn css_unescape(s: &str) -> Cow<'_, str> {
+    if !s.contains('\\') {
+        return Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        if s.as_bytes()[i] == b'\\' {
+            let (ch, next) = escape_at(s, i);
+            if let Some(ch) = ch {
+                out.push(ch);
+            }
+            i = next;
+        } else {
+            let ch = s[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    Cow::Owned(out)
+}
+
+/// Unescape an unquoted value or a property name, or `None` when an escape
+/// decoded to whitespace or a control character — see the call site.
+fn unescape_value(s: &str) -> Option<String> {
+    if !s.contains('\\') {
+        return Some(String::from(s));
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        if s.as_bytes()[i] == b'\\' {
+            let (ch, next) = escape_at(s, i);
+            if let Some(ch) = ch {
+                if ch.is_whitespace() || ch.is_control() {
+                    return None;
+                }
+                out.push(ch);
+            }
+            i = next;
+        } else {
+            let ch = s[i..].chars().next()?;
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    Some(out)
+}
+
+/// Consume a CSS identifier at `i`, honouring escapes: the unescaped name and
+/// the index after it.
+///
+/// The escape is what makes punctuation part of a NAME rather than a
+/// delimiter — `.md\:flex` is one class, not a class followed by a pseudo —
+/// which is how every utility-CSS framework spells a variant.
+fn ident_at(s: &str, mut i: usize) -> (String, usize) {
+    let b = s.as_bytes();
+    let mut out = String::new();
+    while i < b.len() {
+        let c = b[i];
+        if c == b'\\' {
+            let (ch, next) = escape_at(s, i);
+            if let Some(ch) = ch {
+                out.push(ch);
+            }
+            i = next;
+        } else if c.is_ascii_alphanumeric() || c == b'-' || c == b'_' || c >= 0x80 {
+            let ch = s[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    (out, i)
 }
 
 #[cfg(test)]
@@ -2625,10 +2941,48 @@ mod tests {
         let ss = parse("p { color: a } p.x { color: b } #p { color: c }");
         let e = info("p", Some("p"), &["x"]);
         let mut m = ss.matched(&e, &[], &[], 0, Media::new(1000.0, false));
-        m.sort_by_key(|(spec, order, _, _)| (*spec, *order));
+        m.sort_by_key(|(layer, spec, order, _, _)| (*layer, *spec, *order));
         // ascending: type(p) < class(p.x) < id(#p)
         assert_eq!(m.len(), 3);
-        assert!(m[0].0 < m[1].0 && m[1].0 < m[2].0);
+        assert!(m[0].1 < m[1].1 && m[1].1 < m[2].1);
+    }
+
+    #[test]
+    /// A rule inside `@layer` used to be dropped with the block, which on a
+    /// sheet that puts EVERYTHING in layers — what the current generation of
+    /// CSS frameworks emits — is the whole page unstyled.
+    #[test]
+    fn layered_rules_survive_and_order_by_layer_not_source() {
+        let ss = parse("@layer a, b; @layer b { p { color: b } } @layer a { p { color: a } }");
+        let mut m = ss.matched(&info("p", None, &[]), &[], &[], 0, Media::new(800.0, false));
+        assert_eq!(m.len(), 2, "both layered rules kept");
+        m.sort_by_key(|(layer, spec, order, _, _)| (*layer, *spec, *order));
+        // `@layer a, b` fixed the order, so `b` wins even though `a`'s rule is
+        // written last — layer beats document order.
+        assert_eq!(m.last().unwrap().3[0].1, "b");
+    }
+
+    #[test]
+    fn unlayered_beats_every_layer_and_important_reverses_it() {
+        let ss = parse("@layer a { p { color: a } } p { color: plain }");
+        let mut m = ss.matched(&info("p", None, &[]), &[], &[], 0, Media::new(800.0, false));
+        m.sort_by_key(|(layer, spec, order, _, _)| (*layer, *spec, *order));
+        assert_eq!(m.last().unwrap().3[0].1, "plain", "unlayered wins a normal decl");
+        // The `!important` pass runs the layer axis the other way round, so the
+        // same unlayered rule is the WEAKEST there (css-cascade-5 §6.4.4).
+        m.sort_by_key(|(layer, spec, order, _, _)| (imp_rank(*layer), *spec, *order));
+        assert_eq!(m.first().unwrap().3[0].1, "plain");
+    }
+
+    /// `@layer a; @layer b; @layer a.c;` has to sort `a.c` INSIDE `a` — after
+    /// `b` already exists — which is why ranks are assigned once at the end.
+    #[test]
+    fn a_nested_layer_sorts_inside_its_parent_not_at_the_end() {
+        let ss = parse("@layer a; @layer b; @layer a.c { p { color: ac } } @layer b { p { color: b } }");
+        let mut m = ss.matched(&info("p", None, &[]), &[], &[], 0, Media::new(800.0, false));
+        m.sort_by_key(|(layer, spec, order, _, _)| (*layer, *spec, *order));
+        assert_eq!(m.first().unwrap().3[0].1, "ac", "a.c sits inside a, before b");
+        assert_eq!(m.last().unwrap().3[0].1, "b");
     }
 
     #[test]
@@ -2655,8 +3009,8 @@ mod tests {
         // `:root` and `html` both match; `:root.night` does not (no class).
         assert_eq!(m.len(), 2);
         // `:root` has class-level specificity, `html` only type-level.
-        let root_spec = m.iter().find(|(_, _, d, _)| d[0].1 == "a").unwrap().0;
-        let tag_spec = m.iter().find(|(_, _, d, _)| d[0].1 == "c").unwrap().0;
+        let root_spec = m.iter().find(|(_, _, _, d, _)| d[0].1 == "a").unwrap().1;
+        let tag_spec = m.iter().find(|(_, _, _, d, _)| d[0].1 == "c").unwrap().1;
         assert!(root_spec > tag_spec);
         // Not the root element → no match.
         assert!(ss.matched(&info("body", None, &[]), &[], &[], 0, Media::new(1000.0, false)).len() == 0);
@@ -2681,9 +3035,9 @@ mod tests {
         let dom = dom::parse("<html><head><style>p{color:blue}</style></head><body><p>x</p></body></html>");
         let ss = collect_all(&dom, "p { color: red }", Media::new(800.0, false));
         let mut m = ss.matched(&info("p", None, &[]), &[], &[], 0, Media::new(1000.0, false));
-        m.sort_by_key(|(spec, order, _, _)| (*spec, *order));
+        m.sort_by_key(|(layer, spec, order, _, _)| (*layer, *spec, *order));
         assert_eq!(m.len(), 2, "both external + inline rules match");
-        assert!(m[0].1 < m[1].1, "external rule has earlier document order");
+        assert!(m[0].2 < m[1].2, "external rule has earlier document order");
     }
 
     #[test]
