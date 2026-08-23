@@ -1480,33 +1480,39 @@ impl Stylesheet {
         let mut cands: Vec<(u32, u32)> = Vec::with_capacity(32);
         let index = if want == PseudoElem::None { &self.normal } else { &self.pseudo };
         index.candidates(subject, &chain, &mut cands);
-        // Group by rule so one rule contributes one entry, at the highest
-        // specificity among its matching selectors (as before).
-        cands.sort_unstable();
 
-        let mut out = Vec::with_capacity(16);
-        let mut i = 0;
-        while i < cands.len() {
-            let ri = cands[i].0;
+        // One rule contributes one entry, at the highest specificity among its
+        // matching selectors. That grouping used to be bought with a sort over
+        // every candidate; it is cheaper to dedupe the HITS, because there are
+        // ~73 candidates per element and ~2 of them match. `rule.order` is
+        // unique per rule and identifies it. Output order is not a contract —
+        // every caller sorts by (layer, spec, order) before reading.
+        let mut out: Vec<Matched<'a>> = Vec::with_capacity(16);
+        for &(ri, si) in &cands {
             let rule = &self.rules[ri as usize];
+            let sel = &rule.selectors[si as usize];
+            if sel.pseudo != want {
+                continue;
+            }
             // Skip rules inside an `@media` block whose condition doesn't hold
             // at this viewport width.
-            let media_ok = match &rule.media {
-                Some(conds) => conds.iter().any(|c| c.matches(media)),
-                None => true,
-            };
-            let mut best: Option<u32> = None;
-            while i < cands.len() && cands[i].0 == ri {
-                if media_ok {
-                    let sel = &rule.selectors[cands[i].1 as usize];
-                    if sel.pseudo == want && sel.matches(subject, ancestors, prev_siblings, sib_count, &chain, &of_type) {
-                        best = Some(best.map_or(sel.spec, |b| b.max(sel.spec)));
-                    }
+            if let Some(conds) = &rule.media {
+                if !conds.iter().any(|c| c.matches(media)) {
+                    continue;
                 }
-                i += 1;
             }
-            if let Some(spec) = best {
-                out.push((rule.layer, spec, rule.order, rule.decls.as_slice(), rule.decls_imp.as_slice()));
+            if !sel.matches(subject, ancestors, prev_siblings, sib_count, &chain, &of_type) {
+                continue;
+            }
+            match out.iter_mut().find(|e| e.2 == rule.order) {
+                Some(e) => e.1 = e.1.max(sel.spec),
+                None => out.push((
+                    rule.layer,
+                    sel.spec,
+                    rule.order,
+                    rule.decls.as_slice(),
+                    rule.decls_imp.as_slice(),
+                )),
             }
         }
         out
