@@ -146,7 +146,8 @@ struct FloatRect {
 /// border box must not overlap floats (CSS2.1 §9.4.1): the formatting-context
 /// displays (flex/grid/table) and a box that clips its overflow.
 fn establishes_bfc(st: &ComputedStyle) -> bool {
-    matches!(st.display, Display::Flex | Display::Grid | Display::Table)
+    st.bfc_root
+        || matches!(st.display, Display::Flex | Display::Grid | Display::Table)
         || st.overflow_x != Overflow::Visible
         || st.overflow_y != Overflow::Visible
 }
@@ -2057,15 +2058,18 @@ impl<'a> Ctx<'a> {
         }
         let ml = st.margin_left.px(w as f32).unwrap_or(0.0).max(0.0);
         let mr = st.margin_right.px(w as f32).unwrap_or(0.0).max(0.0);
-        // Outer (margin-box) width a definite width demands; `auto` fills the band.
+        // Outer (margin-box) width the box demands.
+        let frame = st.pad_left + st.pad_right + st.border_x();
         let need = match st.width {
-            Len::Auto => None,
+            // `auto` shrinks into the band — but the MARGINS and the frame do
+            // not shrink with it. If they alone do not fit, the border box
+            // would sit inside the float, which §9.5 forbids a BFC root, so
+            // the box goes below instead. Treating auto as "always fits" put
+            // a `margin-left` wide enough to clear the float straight on top
+            // of it.
+            Len::Auto | Len::Intrinsic(_) => Some(ceil_i32(ml + mr + frame)),
             other => other.px(w as f32).map(|v| {
-                let border = if st.box_border {
-                    v
-                } else {
-                    v + st.pad_left + st.pad_right + st.border_x()
-                };
+                let border = if st.box_border { v } else { v + frame };
                 ceil_i32(border + ml + mr)
             }),
         };

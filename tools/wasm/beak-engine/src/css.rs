@@ -872,6 +872,7 @@ macro_rules! css_props {
 }
 
 css_props! {
+    All = "all" @ Layout,
     Display = "display" @ Layout,
     TableLayout = "table-layout" @ Layout,
     BorderCollapse = "border-collapse" @ Layout,
