@@ -45,6 +45,7 @@ Mod+D                    # App launcher (drun) — search + Enter to launch
 loft                     # File browser: grid/list, copy/cut/paste, sortable columns
 spell                    # Text editor: tabs, syntax highlight, save to npkFS
 iris                     # Image viewer (PNG)
+tune                     # Audio player (MP3, WAV) — folder as playlist
 snap                     # Screenshot → npkFS
 beak                     # Native web browser (from scratch, no Linux)
 browser                  # LibreWolf in a Linux microVM (compatibility browser)
@@ -188,7 +189,8 @@ Input, Phosphor icon atlas, per-app capabilities, and file associations
 
 **Apps** — `loft` (file browser: sidebar, grid/list, sortable columns,
 copy/cut/paste/rename), `spell` (text editor: tabs, multi-language
-syntax highlight, markdown preview), `iris` (image viewer), `snap`
+syntax highlight, markdown preview), `iris` (image viewer), `tune`
+(audio player: MP3 + WAV, folder as playlist, seek), `snap`
 (screenshot), `drun` (launcher), `top`/`cores` (system monitors).
 
 **MicroVM** — a per-app KVM-style hypervisor inside the kernel (Intel
@@ -343,6 +345,7 @@ nopeekOS/
 └── tools/wasm/               # WASM apps & drivers
     ├── beak/ + beak-engine/  #   Native browser + portable render engine
     ├── loft/ spell/ iris/    #   File browser, editor, image viewer
+    ├── tune/                 #   Audio player (MP3/WAV -> kernel mixer)
     ├── snap/ drun/ top/      #   Screenshot, launcher, monitor
     ├── bar/ dock/ volume/    #   Panels + volume overlay
     ├── wifi/ aml/ audio_hda/ #   Hardware drivers as WASM

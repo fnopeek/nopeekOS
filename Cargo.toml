@@ -15,6 +15,7 @@ exclude = [
     "tools/wasm/spell",
     "tools/wasm/pick",
     "tools/wasm/iris",
+    "tools/wasm/tune",
     "tools/wasm/snap",
     "tools/wasm/volume",
     "tools/wasm/beak",

@@ -1,0 +1,28 @@
+[package]
+name = "tune"
+version = "0.1.0"
+edition = "2024"
+description = "tune — audio player for nopeekOS."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+nopeek_widgets = { path = "../sdk/widgets" }
+# minimp3 transliterated to safe-ish Rust: no_std, no allocation, no
+# dependencies, no libm — the whole decoder is tables. Measured against
+# ffmpeg on 30 s of real material: correlation 0.9999, max error 2 LSB.
+nanomp3 = "0.1"
+
+[dependencies.postcard]
+version = "1.0"
+default-features = false
+features = ["alloc"]
+
+[build-dependencies]
+nopeek_widgets = { path = "../sdk/widgets" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
