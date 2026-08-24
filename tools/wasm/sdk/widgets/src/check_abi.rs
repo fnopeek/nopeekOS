@@ -92,6 +92,12 @@ const _: () = {
     assert!(IconId::CaretRight        as u16 == 26);
     assert!(IconId::ArrowClockwise    as u16 == 27);
     assert!(IconId::Globe             as u16 == 28);
+    assert!(IconId::MusicNotes        as u16 == 44);
+    assert!(IconId::Play              as u16 == 45);
+    assert!(IconId::Pause             as u16 == 46);
+    assert!(IconId::SkipBack          as u16 == 47);
+    assert!(IconId::SkipForward       as u16 == 48);
+    assert!(IconId::FileAudio         as u16 == 49);
 
     // Align / Axis
     assert!(Align::Start   as u8 == 0);

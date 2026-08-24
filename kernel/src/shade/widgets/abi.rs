@@ -210,6 +210,12 @@ pub enum IconId {
     Minus               = 41,
     Plus                = 42,
     Bird                = 43,
+    MusicNotes          = 44,
+    Play                = 45,
+    Pause               = 46,
+    SkipBack            = 47,
+    SkipForward         = 48,
+    FileAudio           = 49,
     // Appended only.
 }
 
