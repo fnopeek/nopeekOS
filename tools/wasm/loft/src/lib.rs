@@ -483,6 +483,9 @@ impl Loft {
             | "xml" | "html" | "htm" | "c" | "h" | "py" | "js" | "ts"
                 => Some("spell".to_string()),
             "png" => Some("iris".to_string()),
+            // Only what tune can actually decode today; a .flac would open
+            // a player that can say nothing but "unsupported format".
+            "mp3" | "wav" => Some("tune".to_string()),
             _ => None,
         }
     }
@@ -2045,6 +2048,8 @@ fn icon_for(e: &Entry) -> IconId {
         "md" | "txt" | "log" | "cfg" | "toml" | "json" | "yaml" | "yml" => IconId::FileText,
         "rs" | "wasm" | "sh" | "py" | "c" | "h" | "hpp" | "cpp" | "go" => IconId::Code,
         "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "svg" => IconId::Image,
+        // The icon says what the file IS, not what we can play yet.
+        "mp3" | "wav" | "flac" | "ogg" | "opus" | "m4a" | "aac" => IconId::FileAudio,
         _ => IconId::File,
     }
 }
