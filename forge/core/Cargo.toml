@@ -1,0 +1,25 @@
+[package]
+name = "forge_core"
+version = "0.1.0"
+edition = "2024"
+description = "WASM -> x86-64, single pass, at install time"
+
+# no_std + alloc rlib. Builds for x86_64-nopeek AND for the std harness.
+[lib]
+crate-type = ["rlib"]
+
+[features]
+# Per-function opcode sets. Host tooling only — the kernel has no use for
+# them and should not pay the allocations.
+census = []
+
+# Exactly the wasmparser the kernel already carries through wasmi — same
+# version, same features, so the tree keeps ONE copy of it.
+[dependencies.wasmparser]
+version = "0.239.0"
+default-features = false
+features = ["validate", "features"]
+
+[profile.release]
+opt-level = 2
+lto = true

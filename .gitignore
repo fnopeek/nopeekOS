@@ -1,6 +1,7 @@
 /target
 tools/**/target
 microvm/**/target
+forge/**/target
 *.iso
 *.o
 *.bin

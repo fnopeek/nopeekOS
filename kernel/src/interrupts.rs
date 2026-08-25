@@ -270,12 +270,15 @@ const PIC_OFFSET_SLAVE: u8 = 40;  // IRQ8-15 → vectors 40-47
 pub fn init() {
     unsafe {
         // Exception handlers
-        IDT[0].set_handler(divide_error_handler as *const () as u64);
+        // Both go through a stub that first asks whether the fault came from
+        // compiled wasm; if it did, it is that module's trap and not the
+        // kernel's. Anything else lands on the handler that was here before.
+        IDT[0].set_handler(crate::forge_rt::forge_de_stub as *const () as u64);
         IDT[3].set_handler(breakpoint_handler as *const () as u64);
         IDT[6].set_handler(invalid_opcode_handler as *const () as u64);
         IDT[8].set_handler(double_fault_handler as *const () as u64);
         IDT[13].set_handler(gp_fault_handler as *const () as u64);
-        IDT[14].set_handler(page_fault_handler as *const () as u64);
+        IDT[14].set_handler(crate::forge_rt::forge_pf_stub as *const () as u64);
 
         // Hardware interrupt handlers
         IDT[PIC_OFFSET_MASTER as usize].set_handler(timer_handler as *const () as u64);
@@ -332,6 +335,9 @@ unsafe fn pic_eoi(irq: u8) {
 
 // === Exception Handlers ===
 
+// Reached from `forge_de_stub` when the fault did not come from compiled
+// wasm. Named for the assembler, which cannot see through Rust's mangling.
+#[unsafe(no_mangle)]
 extern "x86-interrupt" fn divide_error_handler(frame: InterruptStackFrame) {
     kprintln!();
     kprintln!("[npk] !!! DIVIDE ERROR (INT 0) !!!");
@@ -371,6 +377,7 @@ extern "x86-interrupt" fn gp_fault_handler(frame: InterruptStackFrame, error_cod
     halt_loop();
 }
 
+#[unsafe(no_mangle)]
 extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, error_code: u64) {
     let cr2: u64;
     // SAFETY: Reading CR2 is side-effect-free
