@@ -361,6 +361,17 @@ static mut SCROLL_Y: i32 = 0;
 static mut DIRTY: bool = true; // page content needs a repaint
 static mut LAST_W: i32 = -1;
 static mut LAST_H: i32 = -1;
+/// The scroll offset the buffer currently HOLDS, so the next frame knows how
+/// far the picture has to move.
+static mut LAST_SY: i32 = 0;
+/// Something other than scrolling wants a repaint.
+///
+/// Scrolling does not change the page, it moves it — so a frame that is dirty
+/// for scrolling ALONE can be blitted and have one band redrawn. Anything else
+/// (a hover, a form key, a new layout) sets this and gets the whole viewport.
+/// It is set, never cleared, until a frame is actually painted: a hover
+/// followed by a scroll must still repaint everything.
+static mut NEED_FULL: bool = true;
 
 fn set_url(s: &str) {
     let n = s.len().min(URL_CAP);
@@ -567,6 +578,14 @@ fn set_scroll(y: i32) {
     unsafe { core::ptr::addr_of_mut!(SCROLL_Y).write(y) };
 }
 fn mark_dirty() {
+    unsafe {
+        core::ptr::addr_of_mut!(DIRTY).write(true);
+        core::ptr::addr_of_mut!(NEED_FULL).write(true);
+    }
+}
+
+/// Dirty because the viewport MOVED — the display list is untouched.
+fn mark_dirty_scrolled() {
     unsafe { core::ptr::addr_of_mut!(DIRTY).write(true) };
 }
 
@@ -1426,11 +1445,52 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
     // `vec![0; w*h*4]` per frame was a ~5 MB alloc+zero+free on EVERY scroll
     // repaint (heap churn + latency).
     let need = (w as usize) * (h as usize) * 4;
-    if buf.len() != need {
+    let resized = buf.len() != need;
+    if resized {
         buf.resize(need, 0);
     }
+
+    // Scrolling does not change the page; it moves it. When nothing else asked
+    // for a repaint, shift the pixels that merely moved and draw only the band
+    // that came into view — 1902x1000 is 7,6 MB of fill, ~60-80 ms on the
+    // device, and a scroll exposes a few dozen rows of it.
+    //
+    // The inspect overlay is drawn OVER the frame rather than being part of the
+    // display list, so a blit would smear it; that mode takes the full path.
+    let dy = sy - unsafe { core::ptr::addr_of!(LAST_SY).read() };
+    let full = unsafe { core::ptr::addr_of!(NEED_FULL).read() }
+        || need_layout
+        || resized
+        || inspect_mode()
+        || dy.abs() >= h;
+    // A scroll that the clamp swallowed — at the top or the bottom of the page
+    // the offset does not move, so the buffer already holds this exact frame.
+    // Repainting it was 60-80 ms for a picture that cannot differ, and holding
+    // the wheel at the foot of an article does it every turn.
+    if dy == 0 && !full {
+        unsafe {
+            core::ptr::addr_of_mut!(DIRTY).write(false);
+        }
+        return;
+    }
     let t_paint = now_ms();
-    engine.paint(layout, w as u32, h as u32, sy, buf);
+    if !full {
+        let stride = w as usize * 4;
+        let rows = h as usize;
+        let moved = dy.unsigned_abs() as usize;
+        if dy > 0 {
+            // Scrolled down: the picture moves UP, the new band is at the foot.
+            buf.copy_within(moved * stride..rows * stride, 0);
+            engine.paint_band(layout, w as u32, h as u32, sy, buf,
+                              (rows - moved) as u32, rows as u32);
+        } else {
+            // Scrolled up: the picture moves DOWN, the new band is at the head.
+            buf.copy_within(0..(rows - moved) * stride, moved * stride);
+            engine.paint_band(layout, w as u32, h as u32, sy, buf, 0, moved as u32);
+        }
+    } else {
+        engine.paint(layout, w as u32, h as u32, sy, buf);
+    }
     // Inspect overlay: outline the selected element box (document → screen).
     if inspect_mode() {
         if let Some((bx, by, bw, bh)) = selected_rect() {
@@ -1439,7 +1499,14 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
     }
     let t_commit = now_ms();
     unsafe { npk_canvas_commit(CANVAS_ID, buf.as_ptr() as i32, buf.len() as i32, w, h) };
-    log_ms("paint", t_commit - t_paint);
+    // Say WHICH path ran. A fast path that never says so looks exactly like one
+    // that never happened, and the whole point of this one is a number.
+    if full {
+        log_ms("paint", t_commit - t_paint);
+    } else {
+        log(&alloc::format!("[beak] paint band {}px: {} ms",
+            dy.unsigned_abs(), t_commit - t_paint));
+    }
     log_ms("canvas commit", now_ms() - t_commit);
     // The number that matters: navigation → first pixels.
     unsafe {
@@ -1452,6 +1519,8 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
     unsafe {
         core::ptr::addr_of_mut!(LAST_W).write(w);
         core::ptr::addr_of_mut!(LAST_H).write(h);
+        core::ptr::addr_of_mut!(LAST_SY).write(sy);
+        core::ptr::addr_of_mut!(NEED_FULL).write(false);
         core::ptr::addr_of_mut!(DIRTY).write(false);
     }
 }
@@ -1814,7 +1883,7 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
                 _ => return false,
             };
             set_scroll(scroll_y().saturating_add(step));
-            mark_dirty();
+            mark_dirty_scrolled();
             false
         }
         Event::Action(ActionId(id)) => match id {
@@ -2015,7 +2084,7 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
         }
         Event::Wheel { dy } => {
             set_scroll(scroll_y() + dy);
-            mark_dirty();
+            mark_dirty_scrolled();
             false
         }
         Event::Open(s) => {
