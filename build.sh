@@ -74,8 +74,8 @@ build_microvm_initramfs() {
     INIT_DIR="$PROJECT_DIR/microvm/linux/init"
     INIT_OUT="$PROJECT_DIR/release/assets/microvm-initramfs.cpio.gz"
     if [ ! -d "$INIT_DIR" ]; then return; fi
-    if ! command -v bsdtar >/dev/null 2>&1; then
-        warn "bsdtar missing — skipping microvm-init rebuild (using committed cpio.gz)"
+    if ! command -v cpio >/dev/null 2>&1 && ! command -v bsdtar >/dev/null 2>&1; then
+        warn "no cpio/bsdtar — skipping microvm-init rebuild (using committed cpio.gz)"
         return
     fi
     log "Building microvm-init (Rust PID-1)..."
@@ -89,7 +89,21 @@ build_microvm_initramfs() {
     INITRAMFS_TMP=$(mktemp -d)
     cp "$INIT_BIN" "$INITRAMFS_TMP/init"
     chmod +x "$INITRAMFS_TMP/init"
-    (cd "$INITRAMFS_TMP" && bsdtar --format newc -cf - init | gzip -9 > "$INIT_OUT")
+    # Reproducible, and that is not cosmetic: the kernel embeds this file, so a
+    # byte that changes for no reason changes the kernel hash — and every OTA
+    # then reports "+ asset sys/microvm/initramfs.cpio.gz" for a file nobody
+    # touched. `newc` carries an mtime AND an inode number, and a fresh mktemp
+    # dir supplies a new one of each per build; gzip stamps its own mtime on
+    # top. `--reproducible` zeroes the first two, `-n` drops the third, and
+    # `touch -d @0` settles the file's own timestamp. Verified: two runs a
+    # second apart, identical sha256.
+    touch -d @0 "$INITRAMFS_TMP/init"
+    if command -v cpio >/dev/null 2>&1; then
+        (cd "$INITRAMFS_TMP" && echo init | cpio -o -H newc --reproducible 2>/dev/null | gzip -n9 > "$INIT_OUT")
+    else
+        # No `--reproducible` equivalent here, so this path still churns.
+        (cd "$INITRAMFS_TMP" && bsdtar --format newc --uid 0 --gid 0 -cf - init | gzip -n9 > "$INIT_OUT")
+    fi
     rm -rf "$INITRAMFS_TMP"
     ok "microvm-initramfs.cpio.gz ($(stat -c%s "$INIT_OUT") bytes)"
 }
