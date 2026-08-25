@@ -611,8 +611,18 @@ impl Http2 {
                 .and_then(|h| h.value.parse::<u16>().ok())
                 .unwrap_or(0);
             if let Some(s) = find(streams, id) {
-                // A second HEADERS is trailers; keep the informational ones
-                // out of the way by letting later fields append.
+                // A 1xx is informational and the answer is still coming. Drop
+                // it: keeping its fields would leave TWO `:status` on the
+                // stream, and a reader that takes the first one reads 103
+                // Early Hints as the response — which is what a CDN sends
+                // before the document, over h2 far more often than over
+                // HTTP/1.1. A client that does not use the hints is required
+                // to be able to ignore them (RFC 9110 §15.2).
+                if (100..200).contains(&status) {
+                    return Ok(());
+                }
+                // A second HEADERS after that is trailers; later fields
+                // append.
                 s.headers.extend(decoded);
                 if end_stream {
                     s.done = true;
