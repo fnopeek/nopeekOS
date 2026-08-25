@@ -529,7 +529,14 @@ fn do_layout(engine: &Engine, w: u32, state: &FormState) -> Layout {
         engine.layout_ua_forms(html_str(), w, state)
     };
     let ms = now_ms() - t0;
-    log_ms("layout (parse+cascade+layout)", ms);
+    // The width belongs IN the number. A device timing without it cannot be
+    // compared with anything -- 1000 px against 1880 px is a factor of 1.75 --
+    // and reading it off the screen means opening a window, which changes the
+    // very width being measured.
+    let mut label = String::from("layout @");
+    push_i64(&mut label, w as i64);
+    label.push_str("px (parse+cascade+layout)");
+    log_ms(&label, ms);
     unsafe { core::ptr::addr_of_mut!(LAST_LAYOUT_MS).write(ms) };
     // ...and WHICH of the three it was. The host profile says the box layout
     // dominates, but the host is not a WASM interpreter and the phases do not
