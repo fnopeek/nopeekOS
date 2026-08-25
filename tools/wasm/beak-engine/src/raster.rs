@@ -72,6 +72,11 @@ pub struct Engine {
     img_cache: RefCell<Vec<(alloc::string::String, alloc::rc::Rc<crate::image::Image>)>>,
     /// Bytes of BGRA currently in `img_cache`.
     img_cache_bytes: core::cell::Cell<usize>,
+    /// The same cache for `background-image`/`mask-image` layers. Separate
+    /// from `img_cache` for the reason `css_images` is separate from `images`:
+    /// a page's `<img src=x>` and a sheet's `url(x)` must not collide.
+    css_cache: RefCell<Vec<(alloc::string::String, alloc::rc::Rc<crate::image::Image>)>>,
+    css_cache_bytes: core::cell::Cell<usize>,
     /// Viewport height (px) — the initial containing block's height, which
     /// `top`/`bottom`/`height` percentages on root-level absolutely positioned
     /// boxes resolve against (CSS 2.1 §10.1). Device state like `theme`, not
@@ -106,12 +111,32 @@ pub struct Engine {
     /// The width and the palette are part of the identity because
     /// `picture::resolve` BAKES the winning `srcset` candidate into the tree:
     /// the same bytes at a different width are a different document.
-    dom: RefCell<Option<(u64, crate::dom::Dom)>>,
+    /// Parsed documents, most-recently-used FIRST — **index 0 is the current
+    /// page** and every reader below takes that one.
+    ///
+    /// More than one slot because going back is the most common navigation
+    /// there is, and the DOM the reader is returning to was thrown away by the
+    /// page in between. Measured on the device: revisiting an article whose
+    /// bytes had not changed cost 110 ms parse + 710 ms cascade a second time,
+    /// purely because one other page had been visited.
+    ///
+    /// Keyed by content (plus width and theme), so it can only ever hand back
+    /// a document identical to the one that would have been parsed. A page
+    /// that answers differently every request — a live front page — misses by
+    /// construction, and that is correct rather than unfortunate.
+    dom: RefCell<Vec<(u64, crate::dom::Dom)>>,
     /// The last parsed stylesheet with the fingerprint of the inputs that built
     /// it. Parsing a real page's CSS is a third of a layout, and a page is laid
     /// out several times over its life (images landing, a form key, a resize)
     /// from unchanged bytes — so the parse is repeated for nothing.
-    sheet: RefCell<Option<(u64, crate::css::Stylesheet)>>,
+    /// Collected stylesheets, same shape and same rule as `dom`: index 0 is
+    /// the current page's.
+    sheet: RefCell<Vec<(u64, crate::css::Stylesheet)>>,
+    /// How often a document was really parsed, and a sheet really collected.
+    /// The point of the slots above is that these stop counting on a revisit,
+    /// and a time is too noisy to assert on.
+    docs_parsed: core::cell::Cell<u64>,
+    sheets_collected: core::cell::Cell<u64>,
 }
 
 /// Cheap content fingerprint (FNV-1a over 8-byte words). Identity by pointer
@@ -137,6 +162,66 @@ impl Default for Engine {
     }
 }
 
+/// Insert into a cross-navigation cache, oldest-first, evicting from the front
+/// until the budget holds.
+///
+/// An evicted entry's pixels stay alive as long as a page still references them
+/// (`Rc`) — eviction bounds the CACHE, not the page. Both caches share this one
+/// routine and one budget, so they cannot drift apart.
+fn cache_put(
+    slots: &RefCell<alloc::vec::Vec<(alloc::string::String, alloc::rc::Rc<crate::image::Image>)>>,
+    bytes: &core::cell::Cell<usize>,
+    budget: usize,
+    url: &str,
+    img: alloc::rc::Rc<crate::image::Image>,
+) {
+    let n = img.bgra.len();
+    if n > budget {
+        return; // one picture may not evict the whole cache for itself
+    }
+    {
+        let mut c = slots.borrow_mut();
+        if let Some(pos) = c.iter().position(|(u, _)| u == url) {
+            let (_, old) = c.remove(pos);
+            bytes.set(bytes.get() - old.bgra.len());
+        }
+        c.push((alloc::string::String::from(url), img));
+    }
+    bytes.set(bytes.get() + n);
+    while bytes.get() > budget {
+        let mut c = slots.borrow_mut();
+        if c.is_empty() {
+            break;
+        }
+        let (_, old) = c.remove(0);
+        bytes.set(bytes.get() - old.bgra.len());
+    }
+}
+
+/// How many parsed documents (and stylesheets) to keep.
+///
+/// Three, not more: a `Dom` plus its `Stylesheet` for a real article is
+/// megabytes, and this shares a 128 MB heap with a 24 MB page image budget and
+/// an 8 MB image cache. Three covers what it is for — the page you are on, the
+/// one you came from, and the one before that.
+const DOC_SLOTS: usize = 3;
+
+/// Move the entry keyed `key` to the front and say whether it was there.
+///
+/// Front means current: every reader takes index 0, so a hit has to be
+/// promoted and not merely found.
+fn promote<T>(slots: &mut alloc::vec::Vec<(u64, T)>, key: u64) -> bool {
+    match slots.iter().position(|(k, _)| *k == key) {
+        Some(0) => true,
+        Some(pos) => {
+            let e = slots.remove(pos);
+            slots.insert(0, e);
+            true
+        }
+        None => false,
+    }
+}
+
 impl Engine {
     /// Parse the embedded font faces. Cheap enough to build once and reuse
     /// across page loads (the shell keeps one `Engine`).
@@ -151,6 +236,8 @@ impl Engine {
             img_budget: core::cell::Cell::new(crate::image::TOTAL_BUDGET),
             img_cache: RefCell::new(Vec::new()),
             img_cache_bytes: core::cell::Cell::new(0),
+            css_cache: RefCell::new(Vec::new()),
+            css_cache_bytes: core::cell::Cell::new(0),
             // 600 keeps the historical behaviour of the reftest canvas for any
             // caller that never sets it.
             viewport_h: core::cell::Cell::new(600),
@@ -159,8 +246,10 @@ impl Engine {
             hover_prev: RefCell::new(Vec::new()),
             clock: core::cell::Cell::new(None),
             repaint_bail: core::cell::Cell::new(""),
-            dom: RefCell::new(None),
-            sheet: RefCell::new(None),
+            dom: RefCell::new(Vec::new()),
+            sheet: RefCell::new(Vec::new()),
+            docs_parsed: core::cell::Cell::new(0),
+            sheets_collected: core::cell::Cell::new(0),
         }
     }
 
@@ -207,13 +296,13 @@ impl Engine {
     /// not have needed — never a stale page.
     fn hover_is_paint_only(&self, moved: &[u32]) -> bool {
         let held = self.sheet.borrow();
-        let Some((_, sheet)) = held.as_ref() else { return false };
+        let Some((_, sheet)) = held.first() else { return false };
         // Nothing on the page styles geometry on hover — no lookup needed.
         if sheet.hover_layout_set.is_empty() {
             return true;
         }
         let held_dom = self.dom.borrow();
-        let Some((_, dom)) = held_dom.as_ref() else { return false };
+        let Some((_, dom)) = held_dom.first() else { return false };
         fn walk(el: &crate::dom::Element, want: &[u32], set: &crate::css::HoverSet) -> bool {
             for c in &el.children {
                 if let crate::dom::Node::Element(e) = c {
@@ -267,9 +356,9 @@ impl Engine {
             return Ok(());
         }
         let held = self.sheet.borrow();
-        let Some((_, sheet)) = held.as_ref() else { return Err("no sheet") };
+        let Some((_, sheet)) = held.first() else { return Err("no sheet") };
         let held_dom = self.dom.borrow();
-        let Some((_, dom)) = held_dom.as_ref() else { return Err("no cached document") };
+        let Some((_, dom)) = held_dom.first() else { return Err("no cached document") };
         let w = lay.width;
         let vh = self.viewport_h.get();
         // A rule that restyles a sibling of the element the pointer is in is
@@ -336,7 +425,7 @@ impl Engine {
     /// Does the current page style anything on `:hover`? False means pointer
     /// movement can be ignored outright — no hit-test, no layout.
     pub fn page_has_hover(&self) -> bool {
-        self.sheet.borrow().as_ref().is_some_and(|(_, s)| !s.hover_set.is_empty())
+        self.sheet.borrow().first().is_some_and(|(_, s)| !s.hover_set.is_empty())
     }
 
     /// Set the page colours (the shell resolves these from the compositor
@@ -416,32 +505,20 @@ impl Engine {
     /// long as a page still references them (`Rc`) — eviction bounds the
     /// CACHE, not the page.
     fn cache_put(&mut self, url: &str, img: alloc::rc::Rc<crate::image::Image>) {
-        let n = img.bgra.len();
-        if n > crate::image::IMG_CACHE_BUDGET {
-            return; // one picture may not evict the whole cache for itself
-        }
-        {
-            let mut c = self.img_cache.borrow_mut();
-            if let Some(pos) = c.iter().position(|(u, _)| u == url) {
-                let (_, old) = c.remove(pos);
-                self.img_cache_bytes.set(self.img_cache_bytes.get() - old.bgra.len());
-            }
-            c.push((alloc::string::String::from(url), img));
-        }
-        self.img_cache_bytes.set(self.img_cache_bytes.get() + n);
-        while self.img_cache_bytes.get() > crate::image::IMG_CACHE_BUDGET {
-            let mut c = self.img_cache.borrow_mut();
-            if c.is_empty() {
-                break;
-            }
-            let (_, old) = c.remove(0);
-            self.img_cache_bytes.set(self.img_cache_bytes.get() - old.bgra.len());
-        }
+        cache_put(&self.img_cache, &self.img_cache_bytes,
+                  crate::image::IMG_CACHE_BUDGET, url, img);
     }
 
-    /// Bytes and entries the cross-navigation image cache holds, for the trace.
+    /// How many documents this engine has actually parsed, and how many
+    /// stylesheets it has actually collected, since it was created.
+    pub fn parse_counts(&self) -> (u64, u64) {
+        (self.docs_parsed.get(), self.sheets_collected.get())
+    }
+
+    /// Entries and bytes BOTH cross-navigation caches hold, for the trace.
     pub fn img_cache_stats(&self) -> (usize, usize) {
-        (self.img_cache.borrow().len(), self.img_cache_bytes.get())
+        (self.img_cache.borrow().len() + self.css_cache.borrow().len(),
+         self.img_cache_bytes.get() + self.css_cache_bytes.get())
     }
 
     /// The one place `<img>` pixels enter the store, shared by the shell's
@@ -532,16 +609,20 @@ impl Engine {
         let dom_key = fingerprint(html.as_bytes())
             ^ (width as u64) << 40
             ^ (self.theme.is_dark() as u64) << 63;
-        if self.dom.borrow().as_ref().map(|(k, _)| *k) != Some(dom_key) {
+        let dom_hit = promote(&mut self.dom.borrow_mut(), dom_key);
+        if !dom_hit {
             let mut dom = crate::dom::parse(html);
             // `<picture>`/`srcset` is folded into the `<img>` before anything
             // reads a `src` — layout, the fetch list and the draw op then all
             // see the one URL that actually won.
             crate::picture::resolve(&mut dom, crate::css::Media::new(width as f32, self.theme.is_dark()));
-            *self.dom.borrow_mut() = Some((dom_key, dom));
+            self.docs_parsed.set(self.docs_parsed.get() + 1);
+            let mut held = self.dom.borrow_mut();
+            held.insert(0, (dom_key, dom));
+            held.truncate(DOC_SLOTS);
         }
         let held_dom = self.dom.borrow();
-        let dom = &held_dom.as_ref().unwrap().1;
+        let dom = &held_dom[0].1;
         // The cascade also reads the document's own `<style>` blocks and the
         // viewport width (media queries), so both are part of the identity.
         // The theme is part of the identity too: `prefers-color-scheme` decides
@@ -558,12 +639,17 @@ impl Engine {
             ^ (width as u64) << 40
             ^ (self.viewport_h.get() as u64).rotate_left(23)
             ^ (media.dark as u64) << 63;
-        if self.sheet.borrow().as_ref().map(|(k, _)| *k) != Some(key) {
-            *self.sheet.borrow_mut() = Some((key, crate::css::collect_all(&dom, external_css, media)));
+        let sheet_hit = promote(&mut self.sheet.borrow_mut(), key);
+        if !sheet_hit {
+            let collected = crate::css::collect_all(&dom, external_css, media);
+            self.sheets_collected.set(self.sheets_collected.get() + 1);
+            let mut held = self.sheet.borrow_mut();
+            held.insert(0, (key, collected));
+            held.truncate(DOC_SLOTS);
         }
         let t_css = now();
         let held = self.sheet.borrow();
-        let sheet = &held.as_ref().unwrap().1;
+        let sheet = &held[0].1;
         self.resolve_data_uri_images(&dom);
         let mut lay = crate::layout::layout(&self.fonts, &dom, sheet, &self.images.borrow(), width, self.viewport_h.get(), &self.theme, forms, self.inspect.get(), &self.hover.borrow());
         self.resolve_inline_svgs(&dom, &lay);
@@ -651,7 +737,41 @@ impl Engine {
         self.store_css_image(key, bytes)
     }
 
-    /// Drop the previous page's CSS images (called on navigation).
+    /// As [`Self::add_css_image`], and keep the pixels under `url` for the next
+    /// navigation.
+    ///
+    /// `url_key` is a hash of the `url()` text as the sheet wrote it, so it is
+    /// unique only WITHIN one document — two sites both saying `url(/bg.png)`
+    /// share a key. Across navigations the RESOLVED url is the only honest
+    /// identity, exactly as for `<img>`.
+    pub fn add_css_image_cached(&self, key: u64, url: &str, bytes: &[u8]) -> bool {
+        if !self.store_css_image(key, bytes) {
+            return false;
+        }
+        let Some(img) = self.css_images.borrow().get(&key).cloned() else { return true };
+        cache_put(&self.css_cache, &self.css_cache_bytes,
+                  crate::image::CSS_CACHE_BUDGET, url, img);
+        true
+    }
+
+    /// Serve one background layer from the cross-navigation cache. True on a
+    /// hit — the shell then does not queue it for fetching.
+    pub fn adopt_css_cached(&self, key: u64, url: &str) -> bool {
+        let hit = self.css_cache.borrow().iter()
+            .find(|(u, _)| u == url)
+            .map(|(_, img)| img.clone());
+        let Some(img) = hit else { return false };
+        let n = img.bgra.len();
+        if n > self.css_img_budget.get() {
+            return false;
+        }
+        self.css_img_budget.set(self.css_img_budget.get() - n);
+        self.css_images.borrow_mut().insert(key, img);
+        true
+    }
+
+    /// Drop the previous page's CSS images (called on navigation). The
+    /// cross-navigation cache is untouched, same as `images_begin`.
     pub fn css_images_begin(&self) {
         self.css_images.borrow_mut().clear();
         self.css_img_budget.set(crate::image::CSS_BUDGET);
@@ -1273,6 +1393,36 @@ mod tests {
     const RED_10: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="red"/></svg>"#;
 
     #[test]
+    fn a_document_survives_a_visit_to_another_page() {
+        let eng = Engine::new();
+        let (a, b) = ("<body><p>page A</p></body>", "<body><p>page B</p></body>");
+        eng.layout(a, 800);
+        eng.layout(b, 800);
+        assert_eq!(eng.parse_counts().0, 2, "two pages, two parses");
+        eng.layout(a, 800); // back
+        eng.layout(b, 800); // forward
+        assert_eq!(eng.parse_counts().0, 2, "back and forward re-parse nothing");
+        assert_eq!(eng.parse_counts().1, 2, "and neither re-collects a sheet");
+    }
+
+    #[test]
+    fn the_oldest_document_is_the_one_that_goes() {
+        // DOC_SLOTS = 3. A fourth page pushes the least recently used out —
+        // and the two still held stay free.
+        let eng = Engine::new();
+        let pages = ["<p>1</p>", "<p>2</p>", "<p>3</p>", "<p>4</p>"];
+        for p in pages {
+            eng.layout(p, 800);
+        }
+        assert_eq!(eng.parse_counts().0, 4);
+        eng.layout(pages[3], 800);
+        eng.layout(pages[2], 800);
+        assert_eq!(eng.parse_counts().0, 4, "the two newest are still held");
+        eng.layout(pages[0], 800);
+        assert_eq!(eng.parse_counts().0, 5, "the oldest had to go");
+    }
+
+    #[test]
     fn the_image_cache_is_keyed_by_url_not_by_src() {
         let mut eng = Engine::new();
         assert!(eng.add_image_cached("logo.png", "https://a.example/logo.png", RED_10));
@@ -1293,6 +1443,22 @@ mod tests {
         )]);
         assert_eq!(hit.len(), 1, "same url -> hit");
         assert_eq!(hit[0], "assets/l.png");
+    }
+
+    #[test]
+    fn the_css_image_cache_is_keyed_by_url_too() {
+        let eng = Engine::new();
+        // `url_key` 7 is whatever site A's sheet hashed `url(/bg.png)` to.
+        assert!(eng.add_css_image_cached(7, "https://a.example/bg.png", RED_10));
+        eng.css_images_begin(); // a navigation
+
+        // Another site writing the SAME `url(/bg.png)` hashes to the same key
+        // and is a different picture. The key alone would have served it.
+        assert!(!eng.adopt_css_cached(7, "https://b.example/bg.png"),
+            "same url_key, other host -> miss");
+        // The same picture under another key (a sheet that wrote it absolute).
+        assert!(eng.adopt_css_cached(99, "https://a.example/bg.png"),
+            "same url -> hit");
     }
 
     #[test]
