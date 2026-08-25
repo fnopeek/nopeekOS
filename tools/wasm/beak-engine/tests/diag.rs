@@ -1188,6 +1188,15 @@ fn img_visibility_census() {
             _ => {}
         }
     }
+    // A GUESSED box is the expensive kind: when its pixels land the page moves
+    // and the shell pays a FULL re-layout, wherever the image sits. On the
+    // device that was 1110-1710 ms on an article — more than the fetch and the
+    // repaints together.
+    println!("  guessed boxes  {:>4} of {} distinct srcs: {:?}",
+             lay.guessed_image_srcs.len(),
+             lay.ops.iter().filter(|o| matches!(o, DrawOp::Image { .. })).count(),
+             lay.guessed_image_srcs.iter().take(6).collect::<Vec<_>>());
+
     let visible = |top: i32, bot: i32| top < vh && bot > 0;
     let img_vis = imgs.iter().filter(|(_, t, b)| visible(*t, *b)).count();
     let bg_vis = bgs.iter().filter(|(_, t, b)| visible(*t, *b)).count();
