@@ -1,6 +1,7 @@
 [workspace]
-members = ["kernel"]
+members = ["kernel", "forge/core"]
 exclude = [
+    "forge/harness",
     "tools/wasm/wallpaper",
     "tools/wasm/top",
     "tools/wasm/wifi",

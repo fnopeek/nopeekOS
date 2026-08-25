@@ -1,6 +1,6 @@
 [package]
 name = "nopeekos-kernel"
-version = "0.307.2"
+version = "0.308.0"
 edition = "2024"
 authors = ["nopeek"]
 description = "nopeekOS – AI-native Operating System Kernel"
@@ -16,6 +16,12 @@ bundle-userspace = []
 
 [dependencies]
 spin = "0.12"         # Spinlock (no_std mutex)
+
+# forge: our own WASM-to-x86-64 compiler. no_std + alloc, and its only
+# dependency is the wasmparser wasmi already brings — so it adds a code
+# generator to the tree, not a dependency tree.
+forge_core = { path = "../forge/core" }
+
 bitflags = "2.13"     # Flag-basierte Enums
 
 [dependencies.wasmi]

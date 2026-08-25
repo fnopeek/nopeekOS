@@ -5,6 +5,7 @@
 
 mod auth;
 mod cert;
+mod forge;
 mod fs;
 pub(crate) mod gzip;
 pub mod history;
@@ -2052,6 +2053,12 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 wasm::intent_run(args);
             }
         }
+        "forge" => {
+            if require_cap(vault, &session, Rights::EXECUTE, "forge") {
+                forge::intent_forge(args);
+            }
+        }
+
         "driver" => {
             if require_cap(vault, &session, Rights::EXECUTE, "driver") {
                 wasm::intent_run_driver(args);

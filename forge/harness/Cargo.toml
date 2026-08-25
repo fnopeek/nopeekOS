@@ -1,0 +1,26 @@
+[package]
+name = "forge_harness"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "forge_harness"
+path = "src/main.rs"
+
+[dependencies]
+forge_core = { path = "../core", features = ["census"] }
+
+# Host-only. `wat` builds the differential test cases from text, `libc` maps
+# the generated code W^X the way the kernel will have to, and wasmi is the
+# oracle — in exactly the kernel's configuration, so a disagreement is a real
+# disagreement.
+wat = "1.239"
+libc = "0.2"
+
+[dependencies.wasmi]
+version = "1.1"
+default-features = false
+features = ["prefer-btree-collections"]
+
+[profile.release]
+opt-level = 2

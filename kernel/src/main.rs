@@ -47,6 +47,8 @@ mod audio;
 mod intent;
 mod config;
 mod vga;
+mod forge_rt;
+mod forge_tests;
 mod wasm;
 mod wasi;
 mod shell;
