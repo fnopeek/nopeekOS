@@ -6,6 +6,7 @@
 mod auth;
 mod cert;
 mod fs;
+pub(crate) mod gzip;
 pub mod history;
 pub(crate) mod http;
 pub(crate) mod http2;

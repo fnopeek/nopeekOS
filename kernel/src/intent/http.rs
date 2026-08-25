@@ -521,11 +521,19 @@ pub struct HttpRequest<'a> {
     /// the WASM boundary uses.
     pub headers: &'a [String],
     pub body: &'a [u8],
+    /// Ask for `gzip` and inflate the answer here, before the sink sees it.
+    ///
+    /// Off by default, and that is deliberate: OTA downloads are already
+    /// compressed and signed, so for them this would be work without an
+    /// answer. It is the BROWSER that pays for its absence — the same
+    /// document arrives 4,1x to 9,9x larger without it, measured across the
+    /// target corpus (`docs/plan/JS_SCOPE_CONTENT_WEB.md` §8).
+    pub accept_gzip: bool,
 }
 
 impl Default for HttpRequest<'_> {
     fn default() -> Self {
-        HttpRequest { method: "GET", headers: &[], body: &[] }
+        HttpRequest { method: "GET", headers: &[], body: &[], accept_gzip: false }
     }
 }
 
@@ -584,8 +592,12 @@ const MAX_REPLY_HEADERS: usize = 8 * 1024;
 /// a caller could state its own `Content-Length` or `Transfer-Encoding`, the
 /// body it sends and the body we announce could disagree, which is exactly
 /// the shape of a request-smuggling bug.
+// `accept-encoding` is ours for the same reason the framing headers are:
+// we decode the answer. An app that asks for an encoding we do not unpack
+// gets bytes it cannot read, and one that asks for none while we inflate
+// anyway would be lied to about what came back.
 const RESERVED_HEADERS: &[&str] =
-    &["host", "content-length", "transfer-encoding", "connection"];
+    &["host", "content-length", "transfer-encoding", "connection", "accept-encoding"];
 
 /// Is this a header line a guest is allowed to send?
 ///
@@ -655,6 +667,14 @@ pub struct FetchInfo {
 /// GitHub Releases work — `github.com/.../releases/download/...`
 /// always 302s to a signed `objects.githubusercontent.com` URL).
 pub fn https_get(host: &str, path: &str, max_size: usize) -> Result<alloc::vec::Vec<u8>, &'static str> {
+    // OTA and module installs land here: signed, already-compressed payloads.
+    https_get_ex(host, path, max_size, false)
+}
+
+/// As [`https_get`], but the caller says whether it wants the transfer
+/// compressed. The browser does; nothing else in the tree does.
+pub fn https_get_ex(host: &str, path: &str, max_size: usize, accept_gzip: bool)
+    -> Result<alloc::vec::Vec<u8>, &'static str> {
     let mut cur_host = String::from(host);
     let mut cur_path = String::from(path);
     for _ in 0..4 {
@@ -672,7 +692,7 @@ pub fn https_get(host: &str, path: &str, max_size: usize) -> Result<alloc::vec::
         let resp = https_get_once(
             &cur_host,
             &cur_path,
-            &HttpRequest::default(),
+            &HttpRequest { accept_gzip, ..HttpRequest::default() },
             max_size,
             &mut |chunk: &[u8]| -> Result<(), &'static str> {
                 if out.len().saturating_add(chunk.len()) > max_size {
@@ -725,7 +745,9 @@ pub fn https_get_streaming(
     max_size: usize,
     on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
 ) -> Result<usize, &'static str> {
-    https_get_streaming_ex(host, path, max_size, on_chunk, None)
+    // OTA: the payload is already compressed and signed — asking for gzip
+    // would be a round of work with nothing at the end of it.
+    https_get_streaming_ex(host, path, max_size, on_chunk, None, false)
 }
 
 /// As [`https_get_streaming`], but also reports what the caller needs to
@@ -743,9 +765,11 @@ pub fn https_get_streaming_ex(
     max_size: usize,
     on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
     info: Option<&mut FetchInfo>,
+    accept_gzip: bool,
 ) -> Result<usize, &'static str> {
+    let req = HttpRequest { accept_gzip, ..HttpRequest::default() };
     let n = https_request_streaming(
-        host, path, &HttpRequest::default(), max_size, on_chunk, info, false)?;
+        host, path, &req, max_size, on_chunk, info, false)?;
     if n == 0 {
         return Err("empty body");
     }
@@ -797,6 +821,7 @@ pub fn https_request_streaming(
             method: &method,
             headers: if carry_headers { req.headers } else { &no_headers },
             body,
+            accept_gzip: req.accept_gzip,
         };
         let resp = https_get_once(
             &cur_host,
@@ -1179,14 +1204,41 @@ pub fn https_get_many(urls: &[String], max_size: usize) -> alloc::vec::Vec<Optio
             let t_conn = crate::interrupts::ticks();
             let paths: alloc::vec::Vec<&str> =
                 idxs.iter().map(|&i| parsed[i].as_ref().unwrap().1.as_str()).collect();
-            match conn.get_all(host, &paths, USER_AGENT) {
+            match conn.get_all(host, &paths, USER_AGENT, true) {
                 Ok(results) => {
                     let mut ok = 0usize;
+                    let (mut gz_raw, mut gz_out) = (0usize, 0usize);
                     for (slot, res) in idxs.iter().zip(results) {
                         match res {
                             Ok(r) if (200..300).contains(&r.status) => {
-                                ok += 1;
-                                out[*slot] = Some(r.body);
+                                // h2 buffers a stream's DATA frames into one
+                                // Vec, so there is nothing to stream here —
+                                // but the same cap applies.
+                                let gz = r.header("content-encoding")
+                                    .map(|v| v.trim().eq_ignore_ascii_case("gzip"))
+                                    .unwrap_or(false);
+                                let body = if gz {
+                                    match crate::intent::gzip::inflate_all(&r.body, max_size) {
+                                        Ok(b) => {
+                                            gz_raw += r.body.len();
+                                            gz_out += b.len();
+                                            Some(b)
+                                        }
+                                        Err(e) => {
+                                            kprintln!("[npk]   h2 gzip: {}", e);
+                                            None
+                                        }
+                                    }
+                                } else {
+                                    Some(r.body)
+                                };
+                                // A damaged stream leaves the slot unset, so
+                                // the h1 fallback below picks the URL up again
+                                // — the same door a redirect goes through.
+                                if let Some(b) = body {
+                                    ok += 1;
+                                    out[*slot] = Some(b);
+                                }
                             }
                             // A redirect needs the h1 path's follow logic (it
                             // may cross hosts); leave it unset and let the
@@ -1205,6 +1257,11 @@ pub fn https_get_many(urls: &[String], max_size: usize) -> alloc::vec::Vec<Optio
                     kprintln!("[npk]   h2 {}: {}/{} over one connection ({} ms connect + {} ms transfer)",
                         host, ok, idxs.len(),
                         t_conn.wrapping_sub(t0) * 10, now.wrapping_sub(t_conn) * 10);
+                    if gz_raw > 0 {
+                        let r10 = gz_out * 10 / gz_raw;
+                        kprintln!("[npk]   h2 {}: gzip {} -> {} B ({}.{}x)",
+                            host, gz_raw, gz_out, r10 / 10, r10 % 10);
+                    }
                     served = true;
                     if conn.is_healthy() {
                         h2_put(host, conn);
@@ -1226,7 +1283,7 @@ pub fn https_get_many(urls: &[String], max_size: usize) -> alloc::vec::Vec<Optio
                 continue;
             }
             let (h, p) = parsed[i].as_ref().unwrap();
-            if let Ok(body) = https_get(h, p, max_size) {
+            if let Ok(body) = https_get_ex(h, p, max_size, true) {
                 out[i] = Some(body);
             }
         }
@@ -1290,6 +1347,9 @@ fn https_exchange(
         "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: */*\r\nConnection: keep-alive\r\n",
         req.method, path, host, USER_AGENT
     );
+    if req.accept_gzip {
+        head.push_str("Accept-Encoding: gzip\r\n");
+    }
     for line in req.headers {
         head.push_str(line);
         head.push_str("\r\n");
@@ -1398,6 +1458,23 @@ fn https_exchange(
             t_body0.wrapping_sub(t_hdr0) * 10);
     }
 
+    // `Content-Encoding: gzip` — inflate between the transport and the sink,
+    // streaming, so the compressed body is never held a second time. The cap
+    // handed to the inflater is the caller's own `max_size`: a zip bomb is
+    // then no more dangerous than an uncompressed body of the size the caller
+    // already said it could take, and it is clipped in the same place.
+    let mut gunzip = match parse_header_value(hdr_str, "content-encoding") {
+        Some(v) if v.trim().eq_ignore_ascii_case("gzip") =>
+            Some(crate::intent::gzip::GzipInflate::new(max_size)),
+        _ => None,
+    };
+    let mut sink = |chunk: &[u8]| -> Result<(), &'static str> {
+        match gunzip.as_mut() {
+            Some(g) => g.feed(chunk, on_chunk),
+            None => on_chunk(chunk),
+        }
+    };
+
     // 2xx / other: stream the body. The headers already proved the socket
     // live, so a failure HERE is a genuine mid-body drop (partial bytes are
     // already in the sink) → Fatal, never a retry.
@@ -1407,7 +1484,7 @@ fn https_exchange(
         let n_leading = core::cmp::min(leading.len(), cap);
         let mut delivered = 0usize;
         if n_leading > 0 {
-            if on_chunk(&leading[..n_leading]).is_err() {
+            if sink(&leading[..n_leading]).is_err() {
                 finish_conn(host, tls, false);
                 return Err(ExchangeErr::Fatal("sink write failed"));
             }
@@ -1418,7 +1495,7 @@ fn https_exchange(
                 Ok(0) => continue,
                 Ok(n) => {
                     let take = core::cmp::min(n, cap - delivered);
-                    if on_chunk(&buf[..take]).is_err() {
+                    if sink(&buf[..take]).is_err() {
                         finish_conn(host, tls, false);
                         return Err(ExchangeErr::Fatal("sink write failed"));
                     }
@@ -1434,7 +1511,7 @@ fn https_exchange(
         // True streaming chunked decoder (RFC 7230 §4.1) — GitHub codeload
         // serves dynamically-generated tarballs chunked + binary, so the
         // body can't be buffer-then-scanned.
-        match stream_chunked_body(leading, &mut tls, &mut buf, max_size, on_chunk) {
+        match stream_chunked_body(leading, &mut tls, &mut buf, max_size, &mut sink) {
             Ok(_) => fully_drained = true,
             Err(e) => {
                 finish_conn(host, tls, false);
@@ -1447,7 +1524,7 @@ fn https_exchange(
         let mut delivered = 0usize;
         if !leading.is_empty() {
             let take = core::cmp::min(leading.len(), max_size);
-            if on_chunk(&leading[..take]).is_err() {
+            if sink(&leading[..take]).is_err() {
                 finish_conn(host, tls, false);
                 return Err(ExchangeErr::Fatal("sink write failed"));
             }
@@ -1458,7 +1535,7 @@ fn https_exchange(
                 Ok(0) => continue,
                 Ok(n) => {
                     let take = core::cmp::min(n, max_size - delivered);
-                    if on_chunk(&buf[..take]).is_err() {
+                    if sink(&buf[..take]).is_err() {
                         finish_conn(host, tls, false);
                         return Err(ExchangeErr::Fatal("sink write failed"));
                     }
@@ -1472,6 +1549,19 @@ fn https_exchange(
 
     if chatty() {
         kprintln!("[npk]   HTTP body {} ms", crate::interrupts::ticks().wrapping_sub(t_body0) * 10);
+        // Say that it ran. A gzip that quietly did not happen looks exactly
+        // like one that did, and the whole point of this path is a number.
+        // Silence used to be ambiguous three ways — old kernel, we never
+        // asked, or the server answered identity. Each now says which.
+        match (gunzip.as_ref(), req.accept_gzip) {
+            (Some(g), _) => {
+                let (raw, out) = g.ratio();
+                let r10 = out * 10 / core::cmp::max(raw, 1);
+                kprintln!("[npk]   gzip {} -> {} B ({}.{}x)", raw, out, r10 / 10, r10 % 10);
+            }
+            (None, true) => kprintln!("[npk]   gzip asked, server answered identity"),
+            (None, false) => {}
+        }
     }
     finish_conn(host, tls, persistent && fully_drained);
     Ok(HttpResponse { status, location, content_type, headers: reply_headers })

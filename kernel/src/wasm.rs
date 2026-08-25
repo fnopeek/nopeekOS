@@ -823,6 +823,9 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                     Ok(())
                 },
                 Some(&mut info),
+                // The document itself: 4,1x-9,9x fewer bytes on the wire,
+                // measured (docs/plan/JS_SCOPE_CONTENT_WEB.md §8).
+                true,
             );
             // A failed request must not leave the previous request's final
             // URL readable as if it were this one's.
@@ -932,6 +935,9 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             let mut info = crate::intent::http::FetchInfo::default();
             let req = crate::intent::http::HttpRequest {
                 method: &method, headers: &headers, body: &body,
+                // The browser asks for gzip and the kernel unpacks it; an app
+                // cannot set `Accept-Encoding` itself (RESERVED_HEADERS).
+                accept_gzip: true,
             };
             let res = crate::intent::http::https_request_streaming(
                 &host, &path, &req, cap,

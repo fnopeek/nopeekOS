@@ -225,11 +225,15 @@ impl Http2 {
     /// This is the whole point of the module: the requests all go out before
     /// any response is read, so the round-trips overlap instead of stacking.
     /// Results come back positionally, one per requested path.
+    /// `accept_gzip` asks for the transfer compressed. The caller unpacks —
+    /// see `intent::gzip`. Measured 4,1x-9,9x fewer bytes per page on the
+    /// browser's target corpus (`docs/plan/JS_SCOPE_CONTENT_WEB.md` §8).
     pub fn get_all(
         &mut self,
         authority: &str,
         paths: &[&str],
         user_agent: &str,
+        accept_gzip: bool,
     ) -> Result<Vec<Result<Response, Http2Error>>, Http2Error> {
         if self.goaway {
             return Err(Http2Error::Closed);
@@ -239,14 +243,18 @@ impl Http2 {
         for path in paths {
             let id = self.next_id;
             self.next_id += 2;
-            let block = hpack::encode(&[
+            let mut fields: Vec<(&str, &str)> = alloc::vec![
                 (":method", "GET"),
                 (":scheme", "https"),
                 (":authority", authority),
                 (":path", path),
                 ("user-agent", user_agent),
                 ("accept", "*/*"),
-            ]);
+            ];
+            if accept_gzip {
+                fields.push(("accept-encoding", "gzip"));
+            }
+            let block = hpack::encode(&fields);
             // A block longer than one frame would need CONTINUATION on send.
             // Request headers are far below that, so treat it as a bug rather
             // than growing an encoder path nothing exercises.
