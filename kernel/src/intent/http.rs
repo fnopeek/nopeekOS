@@ -46,8 +46,22 @@ impl Drop for QuietGuard {
 ///
 /// One string covers OTA as well as page fetches, since both go through this
 /// client. Splitting them would mean threading a parameter through every
-/// layer for little gain.
-pub(crate) const USER_AGENT: &str = "beak/0.1 (nopeekOS)";
+/// layer for little gain -- which is also why the name here is the OS and not
+/// `beak`: an OTA request does not come from the browser.
+///
+/// Two things the honest string still got wrong, both found on 2026-08-25 when
+/// Wikimedia answered a test burst with 429 and a pointer to its robot policy:
+///
+/// * **It said `0.1` while beak stood at 0.35.3.** A version that is typed by
+///   hand goes stale the moment nobody remembers it exists. `env!` cannot.
+/// * **It named no contact.** Wikimedia's User-Agent policy asks for a way to
+///   reach whoever is running the client, and an unidentifiable client is the
+///   one that gets throttled. Adding that is the OPPOSITE of the masquerade
+///   this comment argues against: it says MORE about who we are, not less.
+pub(crate) const USER_AGENT: &str = concat!(
+    "nopeekOS/", env!("CARGO_PKG_VERSION"),
+    " (+https://github.com/fnopeek/nopeekOS)"
+);
 
 /// Flags parsed from HTTP/HTTPS arguments.
 struct HttpFlags {
