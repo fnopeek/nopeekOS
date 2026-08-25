@@ -2145,9 +2145,16 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
     let em = parent.font_px;
     match tag {
         // Non-rendered subtrees.
-        "head" | "title" | "meta" | "link" | "script" | "style" | "noscript" | "template" => {
+        "head" | "title" | "meta" | "link" | "script" | "style" | "template" => {
             s.display = Display::None;
         }
+        // `<noscript>` is deliberately NOT in that list. A browser hides it only
+        // while scripting is ENABLED (HTML §15.3.1) — with scripting off its
+        // children are ordinary markup and render, which is literally beak's
+        // case. `dom.rs` already parses the contents as markup rather than raw
+        // text, so the element only had to stop being hidden. It stays inline,
+        // as the initial value says; the lazy-loading `<img>` fallbacks pages
+        // put there are what this brings back.
 
         // `<body>` is the block container that insets the page, and the inset
         // is its UA MARGIN (HTML's rendering section says 8px) — not a fixed
