@@ -1249,6 +1249,26 @@ pub fn stream_close(idx: usize) {
     }
 }
 
+/// Push to the everything-sink ONLY, touching no terminal slot.
+///
+/// `npk_log_serial` exists precisely to bypass the terminal write path -- a
+/// widget-only app may run when no terminal has a backing buffer, and
+/// `kprintln` can stall there. That bypass also made every such app invisible
+/// to the remote mirror, which calls itself the everything-sink and was not
+/// one: beak, loft, spell, iris, drun, dock, bar, snap and volume all log this
+/// way, so on hardware their output existed only on the physical UART.
+///
+/// This closes the gap without giving the bypass back what it was avoiding:
+/// one atomic load and a push into the sink's own buffer, no terminal slot,
+/// no terminal lock.
+pub fn stream_push_global(s: &str) {
+    let g = GLOBAL_SINK.load(Ordering::Acquire);
+    if !g.is_null() {
+        // SAFETY: ptr valid until stream_close_global. push uses internal Mutex.
+        unsafe { (*g).push(s.as_bytes()); }
+    }
+}
+
 /// Internal: push bytes to sink if active. Called from write() and write_idx().
 fn stream_push(idx: usize, s: &str) {
     let g = GLOBAL_SINK.load(Ordering::Acquire);

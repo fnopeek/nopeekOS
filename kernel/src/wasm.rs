@@ -732,13 +732,20 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     linker.func_wrap("env", "npk_log_serial",
         |caller: Caller<'_, HostState>, ptr: i32, len: i32| {
             if let Some(s) = read_wasm_str(&caller, ptr, len) {
-                let serial = crate::drivers::serial::SERIAL.lock();
-                for byte in s.bytes() {
-                    if byte == b'\n' { serial.write_byte(b'\r'); }
-                    serial.write_byte(byte);
+                {
+                    let serial = crate::drivers::serial::SERIAL.lock();
+                    for byte in s.bytes() {
+                        if byte == b'\n' { serial.write_byte(b'\r'); }
+                        serial.write_byte(byte);
+                    }
+                    serial.write_byte(b'\r');
+                    serial.write_byte(b'\n');
                 }
-                serial.write_byte(b'\r');
-                serial.write_byte(b'\n');
+                // ...and to the remote mirror, which was blind to every app
+                // that logs this way. Outside the SERIAL lock: the sink takes
+                // its own, and holding two is how a deadlock is built.
+                crate::shade::terminal::stream_push_global(&s);
+                crate::shade::terminal::stream_push_global("\n");
             }
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
