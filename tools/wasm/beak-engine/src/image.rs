@@ -421,6 +421,14 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
 /// stay placeholders so an image-heavy page can't exhaust the shell heap.
 pub(crate) const TOTAL_BUDGET: usize = 24 * 1024 * 1024; // bytes of BGRA
 
+/// Decoded-BGRA budget for images kept ACROSS navigations.
+///
+/// Deliberately a third of one page's budget. The cache exists to make going
+/// back to a page you just left free, not to hold a browsing session — and the
+/// pictures a live page is still using cost nothing here (`Rc`), so this bounds
+/// only what NO page holds any more.
+pub(crate) const IMG_CACHE_BUDGET: usize = 8 * 1024 * 1024;
+
 /// Decoded-BGRA budget for CSS images. Smaller than the `<img>` one on
 /// purpose: these are icons and tiles, and a page's whole icon set is a few
 /// hundred KB — a `background-image` big enough to blow this is a page doing
