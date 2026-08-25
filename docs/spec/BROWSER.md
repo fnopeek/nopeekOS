@@ -404,6 +404,20 @@ Planned simplification: advertise `SETTINGS_HEADER_TABLE_SIZE = 0` so the
 server may not use HPACK's dynamic table and our decoder needs only the
 static one — fully spec-compliant, and it removes a whole moving part.
 
+**Status.** Sub-resources went over h2 first (`get_all`, one connection per
+host, bodies buffered). The DOCUMENT stayed on HTTP/1.1 until v0.307.0 — and
+so stayed the only request Wikimedia still throttled, four of them per page
+load (301, document, auth 302, auth 200) inside two seconds, which is a 429
+on the second visit. Since v0.307.0 the document speaks h2 too: one streamed
+request (`Http2::request`), placed BELOW the redirect logic in
+`https_get_once`, so `https_request_streaming` remains the only place that
+follows a 3xx and keeps its three rules — the 301/302/303 method switch,
+dropping the caller's headers when a hop leaves the origin, and keeping each
+hop's `Set-Cookie`. Every login is a redirect chain, so that placement is the
+whole design. OTA still asks for HTTP/1.1 (`HttpRequest::try_h2` is off by
+default): an update that cannot download is the one failure that cannot be
+fixed over the air.
+
 Details and the repro recipe: `memory/project_beak_http_fetch.md`.
 
 ---

@@ -77,6 +77,13 @@ const READ_BUF: usize = 17 * 1024;
 /// cannot make us buffer beyond it.
 const MAX_BODY: usize = 24 * 1024 * 1024;
 
+/// Cap on one header block, assembled across HEADERS + CONTINUATION. Each
+/// frame is bounded by `MAX_FRAME`, but the number of CONTINUATIONs is not —
+/// without this a peer can grow one Vec until the kernel is out of memory.
+/// Generous: this is the HPACK-compressed size, and the HTTP/1.1 path stops
+/// at 32 KiB of plain text.
+const MAX_HEADER_BLOCK: usize = 64 * 1024;
+
 // The `&str` payloads reach the log through the derived `Debug` (see the h2
 // fallback in intent/http.rs). rustc's dead-code lint does not count derived
 // impls as a read, so it flags them regardless.
@@ -152,6 +159,30 @@ struct Stream {
     consumed: u32,
     done: bool,
     failed: Option<&'static str>,
+    /// The final (non-1xx) header block has been handed to a `BodySink`.
+    /// Trailers arrive as a second HEADERS and must not report a second time.
+    head_seen: bool,
+}
+
+// ── Where a response body goes ──────────────────────────────────────────────
+
+/// Receiver for a streamed response.
+///
+/// `head` runs once, before the first body byte, because the caller cannot
+/// decode what follows without the headers: `Content-Encoding: gzip` decides
+/// whether an inflater belongs between the wire and the sink, and a 3xx body
+/// is courtesy text nobody may see — the redirect is followed instead.
+pub trait BodySink {
+    fn head(&mut self, status: u16, headers: &[Header]) -> Result<(), &'static str>;
+    fn data(&mut self, chunk: &[u8]) -> Result<(), &'static str>;
+}
+
+/// `get_all` fetches a batch and hands back Vecs, so it buffers. The document
+/// path hands every byte straight on — a page is the largest thing we fetch
+/// and the one thing we must not hold a second time.
+enum Dest<'a> {
+    Buffer,
+    Sink(&'a mut dyn BodySink),
 }
 
 // ── Connection ──────────────────────────────────────────────────────────────
@@ -169,6 +200,14 @@ pub struct Http2 {
     /// A header block is being assembled; only CONTINUATION for this stream
     /// is legal until it ends (§6.10).
     expect_continuation: Option<u32>,
+    /// What the peer still lets us send on the connection before it grants
+    /// more (§6.9). Starts at the protocol default and grows with every
+    /// connection-level WINDOW_UPDATE.
+    conn_send_window: u32,
+    /// The per-stream send window the peer announces. `request` refuses a
+    /// body that does not fit it rather than waiting for credit, so no send
+    /// ever blocks on a WINDOW_UPDATE.
+    peer_initial_window: u32,
 }
 
 impl Http2 {
@@ -186,6 +225,8 @@ impl Http2 {
             conn_consumed: 0,
             goaway: false,
             expect_continuation: None,
+            conn_send_window: 65_535,
+            peer_initial_window: 65_535,
         };
         c.send_preface()?;
         Ok(c)
@@ -276,10 +317,11 @@ impl Http2 {
                 consumed: 0,
                 done: false,
                 failed: None,
+                head_seen: false,
             });
         }
         self.write(&out)?;
-        self.pump(&mut streams)?;
+        self.pump(&mut streams, &mut Dest::Buffer)?;
 
         Ok(streams
             .into_iter()
@@ -299,8 +341,122 @@ impl Http2 {
             .collect())
     }
 
+    /// One request over this connection, streamed.
+    ///
+    /// The document path's shape, as opposed to `get_all`'s batch: one
+    /// stream, any method, a body if there is one, and DATA handed to `sink`
+    /// as it arrives. It exists because the document fetch was the last
+    /// caller still on HTTP/1.1 — and therefore the only one Wikimedia still
+    /// throttles (§8.1). Redirects are NOT followed here: the host may
+    /// change, so that decision stays one layer up, with the caller that
+    /// already owns the method switch and the per-hop headers.
+    ///
+    /// Returns the response's header fields; the status is in `:status`.
+    pub fn request(
+        &mut self,
+        authority: &str,
+        method: &str,
+        path: &str,
+        extra: &[String],
+        body: &[u8],
+        user_agent: &str,
+        accept_gzip: bool,
+        sink: &mut dyn BodySink,
+    ) -> Result<Vec<Header>, Http2Error> {
+        if self.goaway {
+            return Err(Http2Error::Closed);
+        }
+        // Send flow control, decided before a byte goes out: a body larger
+        // than the credit we already hold would have to wait for a
+        // WINDOW_UPDATE mid-send, and this connection has no way to read one
+        // while writing. Refuse it instead and let the caller use HTTP/1.1 —
+        // a form post is a few hundred bytes against a 64 KiB default.
+        let room = self.conn_send_window.min(self.peer_initial_window) as usize;
+        if body.len() > room {
+            return Err(Http2Error::TooLarge);
+        }
+
+        // Caller headers, lowercased (§8.2.1 — an uppercase name makes the
+        // message malformed).
+        let mut owned: Vec<(String, String)> = Vec::new();
+        for line in extra {
+            let Some((name, value)) = line.split_once(':') else { continue };
+            let name = name.trim().to_ascii_lowercase();
+            // §8.2.2: connection-specific fields have no meaning in h2 and
+            // make the message malformed. Most are already refused at the
+            // sandbox boundary, but `keep-alive`, `upgrade`, `te` and
+            // `proxy-connection` are not on that list — they are dropped
+            // here, where the reason is the protocol rather than the guest.
+            if matches!(name.as_str(),
+                "connection" | "keep-alive" | "proxy-connection" | "transfer-encoding"
+                | "upgrade" | "te" | "host" | "content-length" | "accept-encoding") {
+                continue;
+            }
+            owned.push((name, String::from(value.trim())));
+        }
+
+        let content_length;
+        let mut fields: Vec<(&str, &str)> = alloc::vec![
+            (":method", method),
+            (":scheme", "https"),
+            (":authority", authority),
+            (":path", path),
+            ("user-agent", user_agent),
+            ("accept", "*/*"),
+        ];
+        if accept_gzip {
+            fields.push(("accept-encoding", "gzip"));
+        }
+        if !body.is_empty() {
+            // We state the length ourselves, never from a caller header —
+            // the same rule the HTTP/1.1 path keeps, for the same reason.
+            content_length = alloc::format!("{}", body.len());
+            fields.push(("content-length", &content_length));
+        }
+        for (name, value) in &owned {
+            fields.push((name.as_str(), value.as_str()));
+        }
+
+        let block = hpack::encode(&fields);
+        if block.len() > self.peer_max_frame {
+            return Err(Http2Error::TooLarge);
+        }
+        let id = self.next_id;
+        self.next_id += 2;
+
+        let mut out = Vec::new();
+        let end = if body.is_empty() { FLAG_END_STREAM } else { 0 };
+        frame(&mut out, FRAME_HEADERS, FLAG_END_HEADERS | end, id, &block);
+        let mut sent = 0usize;
+        for chunk in body.chunks(self.peer_max_frame) {
+            sent += chunk.len();
+            let last = if sent == body.len() { FLAG_END_STREAM } else { 0 };
+            frame(&mut out, FRAME_DATA, last, id, chunk);
+        }
+        self.conn_send_window -= body.len() as u32;
+        self.write(&out)?;
+
+        let mut streams = alloc::vec![Stream {
+            id,
+            block: Vec::new(),
+            headers: Vec::new(),
+            body: Vec::new(),
+            consumed: 0,
+            done: false,
+            failed: None,
+            head_seen: false,
+        }];
+        self.pump(&mut streams, &mut Dest::Sink(sink))?;
+        let s = streams.pop().expect("one stream in, one stream out");
+        match s.failed {
+            Some(e) => Err(Http2Error::Protocol(e)),
+            None if !s.done => Err(Http2Error::Closed),
+            None => Ok(s.headers),
+        }
+    }
+
     /// Read frames until every stream has ended.
-    fn pump(&mut self, streams: &mut [Stream]) -> Result<(), Http2Error> {
+    fn pump(&mut self, streams: &mut [Stream], dest: &mut Dest<'_>) -> Result<(), Http2Error> {
         while streams.iter().any(|s| !s.done && s.failed.is_none()) {
             let hdr = match self.next_frame_header()? {
                 Some(h) => h,
@@ -316,7 +472,7 @@ impl Http2 {
                 return Err(Http2Error::Protocol("frame exceeds our max size"));
             }
             let payload = self.read_exact(hdr.len)?;
-            self.dispatch(&hdr, &payload, streams)?;
+            self.dispatch(&hdr, &payload, streams, dest)?;
             if self.goaway && streams.iter().all(|s| s.done || s.failed.is_some()) {
                 break;
             }
@@ -329,6 +485,7 @@ impl Http2 {
         hdr: &FrameHeader,
         payload: &[u8],
         streams: &mut [Stream],
+        dest: &mut Dest<'_>,
     ) -> Result<(), Http2Error> {
         // §6.10: once a header block starts, nothing but its CONTINUATION may
         // appear. Enforcing it keeps the HPACK stream in step.
@@ -363,7 +520,16 @@ impl Http2 {
                     s.failed.get_or_insert("refused by GOAWAY");
                 }
             }
-            FRAME_WINDOW_UPDATE => {} // we never fill our send window (GET only)
+            FRAME_WINDOW_UPDATE => {
+                // Credit for OUR send direction. Only the connection-level
+                // grant is banked: `request` refuses a body that does not fit
+                // the window it already holds, so a per-stream grant always
+                // arrives too late to change a decision.
+                if hdr.stream == 0 {
+                    let inc = payload.get(..4).map(be32).unwrap_or(0) & 0x7FFF_FFFF;
+                    self.conn_send_window = self.conn_send_window.saturating_add(inc);
+                }
+            }
             FRAME_RST_STREAM => {
                 if let Some(s) = find(streams, hdr.stream) {
                     s.failed.get_or_insert("stream reset by peer");
@@ -374,10 +540,10 @@ impl Http2 {
                 return Err(Http2Error::Protocol("PUSH_PROMISE despite ENABLE_PUSH=0"));
             }
             FRAME_HEADERS | FRAME_CONTINUATION => {
-                self.on_headers(hdr, payload, streams)?;
+                self.on_headers(hdr, payload, streams, dest)?;
             }
             FRAME_DATA => {
-                self.on_data(hdr, payload, streams)?;
+                self.on_data(hdr, payload, streams, dest)?;
             }
             _ => {} // unknown frame types must be ignored (§4.1)
         }
@@ -389,6 +555,7 @@ impl Http2 {
         hdr: &FrameHeader,
         payload: &[u8],
         streams: &mut [Stream],
+        dest: &mut Dest<'_>,
     ) -> Result<(), Http2Error> {
         let body = if hdr.kind == FRAME_HEADERS {
             strip_headers_padding(hdr.flags, payload)
@@ -406,6 +573,9 @@ impl Http2 {
             match find(streams, hdr.stream) {
                 Some(s) => {
                     s.block.extend_from_slice(body);
+                    if s.block.len() > MAX_HEADER_BLOCK {
+                        return Err(Http2Error::TooLarge);
+                    }
                     if !end_headers {
                         self.expect_continuation = Some(hdr.stream);
                         return Ok(());
@@ -432,12 +602,28 @@ impl Http2 {
             .map_err(|_| Http2Error::Protocol("HPACK decode failed"))?;
 
         if let Some(id) = target {
+            // This block's OWN status, not the first one on the stream: a 1xx
+            // is informational and the response we are here for is still
+            // coming, so the sink must not be told it has arrived.
+            let status = decoded
+                .iter()
+                .find(|h| h.name == ":status")
+                .and_then(|h| h.value.parse::<u16>().ok())
+                .unwrap_or(0);
             if let Some(s) = find(streams, id) {
                 // A second HEADERS is trailers; keep the informational ones
                 // out of the way by letting later fields append.
                 s.headers.extend(decoded);
                 if end_stream {
                     s.done = true;
+                }
+                if let Dest::Sink(sink) = dest {
+                    if status >= 200 && !s.head_seen {
+                        s.head_seen = true;
+                        if let Err(e) = sink.head(status, &s.headers) {
+                            s.failed.get_or_insert(e);
+                        }
+                    }
                 }
             }
         }
@@ -449,6 +635,7 @@ impl Http2 {
         hdr: &FrameHeader,
         payload: &[u8],
         streams: &mut [Stream],
+        dest: &mut Dest<'_>,
     ) -> Result<(), Http2Error> {
         // The whole padded length counts against flow control, even the part
         // we discard (§6.1).
@@ -459,10 +646,22 @@ impl Http2 {
         let end_stream = hdr.flags & FLAG_END_STREAM != 0;
         let mut refill_stream = None;
         if let Some(s) = find(streams, hdr.stream) {
-            if s.body.len() + data.len() > MAX_BODY {
-                s.failed.get_or_insert("response body too large");
-            } else {
-                s.body.extend_from_slice(data);
+            match dest {
+                Dest::Buffer => {
+                    if s.body.len() + data.len() > MAX_BODY {
+                        s.failed.get_or_insert("response body too large");
+                    } else {
+                        s.body.extend_from_slice(data);
+                    }
+                }
+                // Straight through. MAX_BODY is the buffered path's rule
+                // because it is the buffered path that holds the bytes; a
+                // sink states its own cap and clips there.
+                Dest::Sink(sink) => {
+                    if let Err(e) = sink.data(data) {
+                        s.failed.get_or_insert(e);
+                    }
+                }
             }
             s.consumed += counted;
             if s.consumed >= WINDOW_REFILL_AT && !end_stream {
@@ -506,6 +705,14 @@ impl Http2 {
         for chunk in payload.chunks_exact(6) {
             let id = u16::from_be_bytes([chunk[0], chunk[1]]);
             let value = be32(&chunk[2..6]);
+            if id == SETTINGS_INITIAL_WINDOW_SIZE {
+                // §6.5.2: above 2^31-1 is a connection error. It bounds what
+                // we may send on a stream, which used to be nothing at all.
+                if value > 0x7FFF_FFFF {
+                    return Err(Http2Error::Protocol("illegal INITIAL_WINDOW_SIZE"));
+                }
+                self.peer_initial_window = value;
+            }
             if id == SETTINGS_MAX_FRAME_SIZE {
                 if !(16_384..=16_777_215).contains(&value) {
                     return Err(Http2Error::Protocol("illegal MAX_FRAME_SIZE"));

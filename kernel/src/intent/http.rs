@@ -543,11 +543,21 @@ pub struct HttpRequest<'a> {
     /// document arrives 4,1x to 9,9x larger without it, measured across the
     /// target corpus (`docs/plan/JS_SCOPE_CONTENT_WEB.md` §8).
     pub accept_gzip: bool,
+    /// Offer HTTP/2 for this request, falling back to HTTP/1.1 when the host
+    /// does not speak it.
+    ///
+    /// Off by default, and that is a decision about blast radius, not about
+    /// h2: OTA and module installs come down this same path, and an update
+    /// that cannot download is the one failure this project cannot fix over
+    /// the air. The browser — which is the caller Wikimedia throttles (§8.1)
+    /// — asks for it. Flip the default once a release has h2 documents on
+    /// hardware behind it.
+    pub try_h2: bool,
 }
 
 impl Default for HttpRequest<'_> {
     fn default() -> Self {
-        HttpRequest { method: "GET", headers: &[], body: &[], accept_gzip: false }
+        HttpRequest { method: "GET", headers: &[], body: &[], accept_gzip: false, try_h2: false }
     }
 }
 
@@ -689,6 +699,15 @@ pub fn https_get(host: &str, path: &str, max_size: usize) -> Result<alloc::vec::
 /// compressed. The browser does; nothing else in the tree does.
 pub fn https_get_ex(host: &str, path: &str, max_size: usize, accept_gzip: bool)
     -> Result<alloc::vec::Vec<u8>, &'static str> {
+    https_get_req(host, path, max_size,
+        &HttpRequest { accept_gzip, ..HttpRequest::default() })
+}
+
+/// As [`https_get_ex`], but the caller states the whole request — which is
+/// how the browser's sub-resource fallback asks for HTTP/2 and an OTA
+/// download does not.
+fn https_get_req(host: &str, path: &str, max_size: usize, req: &HttpRequest)
+    -> Result<alloc::vec::Vec<u8>, &'static str> {
     let mut cur_host = String::from(host);
     let mut cur_path = String::from(path);
     for _ in 0..4 {
@@ -706,7 +725,7 @@ pub fn https_get_ex(host: &str, path: &str, max_size: usize, accept_gzip: bool)
         let resp = https_get_once(
             &cur_host,
             &cur_path,
-            &HttpRequest { accept_gzip, ..HttpRequest::default() },
+            req,
             max_size,
             &mut |chunk: &[u8]| -> Result<(), &'static str> {
                 if out.len().saturating_add(chunk.len()) > max_size {
@@ -761,7 +780,7 @@ pub fn https_get_streaming(
 ) -> Result<usize, &'static str> {
     // OTA: the payload is already compressed and signed — asking for gzip
     // would be a round of work with nothing at the end of it.
-    https_get_streaming_ex(host, path, max_size, on_chunk, None, false)
+    https_get_streaming_ex(host, path, max_size, on_chunk, None, &HttpRequest::default())
 }
 
 /// As [`https_get_streaming`], but also reports what the caller needs to
@@ -779,11 +798,10 @@ pub fn https_get_streaming_ex(
     max_size: usize,
     on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
     info: Option<&mut FetchInfo>,
-    accept_gzip: bool,
+    req: &HttpRequest,
 ) -> Result<usize, &'static str> {
-    let req = HttpRequest { accept_gzip, ..HttpRequest::default() };
     let n = https_request_streaming(
-        host, path, &req, max_size, on_chunk, info, false)?;
+        host, path, req, max_size, on_chunk, info, false)?;
     if n == 0 {
         return Err("empty body");
     }
@@ -836,6 +854,7 @@ pub fn https_request_streaming(
             headers: if carry_headers { req.headers } else { &no_headers },
             body,
             accept_gzip: req.accept_gzip,
+            try_h2: req.try_h2,
         };
         let resp = https_get_once(
             &cur_host,
@@ -923,7 +942,18 @@ pub fn https_request_streaming(
 struct PooledConn {
     host: String,
     tls: crate::tls::TlsSession,
+    /// When it went idle. A server keeps a connection open for 5-75 s and
+    /// then closes it; `is_healthy` sees only the LOCAL TCP state, so a peer
+    /// that hung up quietly still looks alive here. The age is what catches
+    /// that — one wasted round-trip per stale socket, and the delayed-ACK-
+    /// shaped 230 ms header times all sat on pooled connections.
+    idle_since: u64,
 }
+
+/// How long a pooled connection may sit unused. Under every common server
+/// keep-alive (nginx 75 s, most CDNs 5-10 s), above any page load's own
+/// fan-out — the reuse we actually want is measured in the same second.
+const POOL_MAX_IDLE_TICKS: u64 = 500; // 5 s at 100 Hz
 const CONN_POOL_SIZE: usize = 8;
 static CONN_POOL: spin::Mutex<[Option<PooledConn>; CONN_POOL_SIZE]> =
     spin::Mutex::new([const { None }; CONN_POOL_SIZE]);
@@ -933,10 +963,13 @@ static CONN_POOL: spin::Mutex<[Option<PooledConn>; CONN_POOL_SIZE]> =
 /// closed and skipped here, so the caller never sends on a dead socket.
 fn pool_take(host: &str) -> Option<crate::tls::TlsSession> {
     let mut pool = CONN_POOL.lock();
+    let now = crate::interrupts::ticks();
     for slot in pool.iter_mut() {
         if matches!(slot, Some(c) if c.host == host) {
-            let mut tls = slot.take().unwrap().tls;
-            if tls.is_healthy() {
+            let c = slot.take().unwrap();
+            let fresh = now.wrapping_sub(c.idle_since) < POOL_MAX_IDLE_TICKS;
+            let mut tls = c.tls;
+            if fresh && tls.is_healthy() {
                 return Some(tls);
             }
             let _ = crate::tls::tls_close(&mut tls);
@@ -950,13 +983,18 @@ fn pool_take(host: &str) -> Option<crate::tls::TlsSession> {
 /// slot when the pool is full.
 fn pool_put(host: &str, tls: crate::tls::TlsSession) {
     let mut pool = CONN_POOL.lock();
+    let conn = PooledConn {
+        host: String::from(host),
+        tls,
+        idle_since: crate::interrupts::ticks(),
+    };
     for slot in pool.iter_mut() {
         if slot.is_none() {
-            *slot = Some(PooledConn { host: String::from(host), tls });
+            *slot = Some(conn);
             return;
         }
     }
-    if let Some(mut old) = pool[0].replace(PooledConn { host: String::from(host), tls }) {
+    if let Some(mut old) = pool[0].replace(conn) {
         let _ = crate::tls::tls_close(&mut old.tls);
     }
 }
@@ -1063,17 +1101,17 @@ fn open_tls(host: &str) -> Result<crate::tls::TlsSession, &'static str> {
     out
 }
 
-// ── HTTP/2 batch fetch ──────────────────────────────────────────────────────
+// ── HTTP/2 ──────────────────────────────────────────────────────────────────
 //
-// Used by the browser's sub-resource loading, NOT by OTA. OTA stays on the
-// HTTP/1.1 path deliberately: it works, it reaches gigabit, and it streams
-// into a sink, whereas an h2 response is buffered whole. Once this path has
-// proven itself on hardware, OTA can move over too.
+// Two callers: the browser's batch fetch for sub-resources (`get_all`, whole
+// bodies buffered) and the document fetch (`request`, streamed into the
+// caller's sink). NOT OTA — see `HttpRequest::try_h2` for why that is a
+// decision about blast radius rather than about the protocol.
 
 use super::http2::{self, Http2};
 
 const H2_POOL_SIZE: usize = 4;
-static H2_POOL: spin::Mutex<[Option<(String, Http2)>; H2_POOL_SIZE]> =
+static H2_POOL: spin::Mutex<[Option<(String, Http2, u64)>; H2_POOL_SIZE]> =
     spin::Mutex::new([const { None }; H2_POOL_SIZE]);
 
 /// Hosts that turned out not to speak h2. Without this, every batch pays a
@@ -1101,13 +1139,15 @@ fn mark_h2_refused(host: &str) {
 
 fn h2_take(host: &str) -> Option<Http2> {
     let mut pool = H2_POOL.lock();
+    let now = crate::interrupts::ticks();
     for slot in pool.iter_mut() {
-        if matches!(slot, Some((h, _)) if h == host) {
-            let (_, conn) = slot.take().unwrap();
-            if conn.is_healthy() {
+        if matches!(slot, Some((h, _, _)) if h == host) {
+            let (_, mut conn, idle_since) = slot.take().unwrap();
+            // Same rule as the HTTP/1.1 pool: a GOAWAY we have not read yet
+            // is indistinguishable from a quiet connection.
+            if now.wrapping_sub(idle_since) < POOL_MAX_IDLE_TICKS && conn.is_healthy() {
                 return Some(conn);
             }
-            let mut conn = conn;
             conn.close();
             return None;
         }
@@ -1117,26 +1157,34 @@ fn h2_take(host: &str) -> Option<Http2> {
 
 fn h2_put(host: &str, conn: Http2) {
     let mut pool = H2_POOL.lock();
+    let entry = (String::from(host), conn, crate::interrupts::ticks());
     for slot in pool.iter_mut() {
         if slot.is_none() {
-            *slot = Some((String::from(host), conn));
+            *slot = Some(entry);
             return;
         }
     }
-    if let Some((_, mut old)) = pool[0].replace((String::from(host), conn)) {
+    if let Some((_, mut old, _)) = pool[0].replace(entry) {
         old.close();
     }
 }
 
+/// A connection for `host`: the pooled one if it is still fresh, otherwise a
+/// new one. The batch fetch's entry point.
 fn h2_open(host: &str) -> Option<Http2> {
+    h2_take(host).or_else(|| h2_connect(host))
+}
+
+/// A NEW connection — no pool. Split out because the document path needs to
+/// be able to say "not that one": a pooled connection can carry a GOAWAY we
+/// have not read yet, and giving up on h2 for that would put the document
+/// back under the HTTP/1.1 rate limit this whole path exists to leave.
+fn h2_connect(host: &str) -> Option<Http2> {
     // Everything before `t_dns` used to be the one unmeasured stretch of the
     // connect, and a 2026-08-14 device log showed 2100 ms connect with every
     // named leg at 90 ms. Do not "explain" that gap from a single clean run
     // again — measure it.
     let t_enter = crate::interrupts::ticks();
-    if let Some(c) = h2_take(host) {
-        return Some(c);
-    }
     if h2_refused(host) {
         return None;
     }
@@ -1149,7 +1197,7 @@ fn h2_open(host: &str) -> Option<Http2> {
     let _ = crate::net::arp::resolve(gw, 100);
     let t_conn = crate::interrupts::ticks();
     if chatty() {
-        kprintln!("[npk]   h2 pre-connect {} (pool {} + dns {} + arp {} ms)",
+        kprintln!("[npk]   h2 pre-connect {} (refused-check {} + dns {} + arp {} ms)",
             host, t_dns.wrapping_sub(t_enter) * 10,
             t_arp.wrapping_sub(t_dns) * 10, t_conn.wrapping_sub(t_arp) * 10);
     }
@@ -1297,7 +1345,11 @@ pub fn https_get_many(urls: &[String], max_size: usize) -> alloc::vec::Vec<Optio
                 continue;
             }
             let (h, p) = parsed[i].as_ref().unwrap();
-            if let Ok(body) = https_get_ex(h, p, max_size, true) {
+            // Still h2 where the host offers it — this door is the one a
+            // redirect goes through, and a redirected sub-resource is no
+            // less throttled than a direct one.
+            let req = HttpRequest { accept_gzip: true, try_h2: true, ..HttpRequest::default() };
+            if let Ok(body) = https_get_req(h, p, max_size, &req) {
                 out[i] = Some(body);
             }
         }
@@ -1308,11 +1360,213 @@ pub fn https_get_many(urls: &[String], max_size: usize) -> alloc::vec::Vec<Optio
 
 /// Exchange failure mode. `Retry` = failed in the send/header phase,
 /// before any body byte reached the sink → safe to retry on a fresh
-/// connection (this is how a stale pooled socket surfaces). `Fatal` =
-/// failed mid-body or a protocol error → propagate.
+/// connection (this is how a stale pooled socket surfaces, and how an h2
+/// attempt hands the request to HTTP/1.1). `Fatal` = failed mid-body or a
+/// protocol error → propagate, because a retry would deliver twice.
 enum ExchangeErr {
     Retry,
     Fatal(&'static str),
+}
+
+// ── The document fetch over HTTP/2 ──────────────────────────────────────────
+
+/// Adapter between an h2 stream and the sink the caller handed us. It exists
+/// so that nothing above `https_get_once` has to know which protocol carried
+/// the bytes: same clipping, same gzip, same "a 3xx never reaches the sink".
+struct H2Sink<'a> {
+    max_size: usize,
+    delivered: usize,
+    /// A 3xx body is courtesy text. `https_request_streaming` follows the
+    /// redirect instead and counts on the sink having stayed untouched.
+    ///
+    /// Starts TRUE and is decided in `head`: DATA before HEADERS is a broken
+    /// (or hostile) peer, and the safe reading of "we do not know what this
+    /// response is yet" is that the caller may not have it.
+    discard: bool,
+    gunzip: Option<crate::intent::gzip::GzipInflate>,
+    on_chunk: &'a mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
+    /// Set once the body has started. After that, falling back to HTTP/1.1
+    /// would deliver the document twice.
+    touched: bool,
+    /// When the response headers landed, so the trace splits the wait from
+    /// the transfer the way the HTTP/1.1 path does.
+    t_head: u64,
+}
+
+impl http2::BodySink for H2Sink<'_> {
+    fn head(&mut self, status: u16, headers: &[http2::Header]) -> Result<(), &'static str> {
+        self.t_head = crate::interrupts::ticks();
+        self.discard = (300..400).contains(&status);
+        // Same link in the chain as HTTP/1.1 puts it: between the transport
+        // and the sink, streaming, with the caller's own cap as the budget —
+        // a zip bomb is then no more dangerous than a body of the size the
+        // caller already said it could take.
+        if headers.iter().any(|h| {
+            h.name == "content-encoding" && h.value.trim().eq_ignore_ascii_case("gzip")
+        }) {
+            self.gunzip = Some(crate::intent::gzip::GzipInflate::new(self.max_size));
+        }
+        Ok(())
+    }
+
+    fn data(&mut self, chunk: &[u8]) -> Result<(), &'static str> {
+        if self.discard || chunk.is_empty() {
+            return Ok(());
+        }
+        self.touched = true;
+        let Self { max_size, delivered, gunzip, on_chunk, .. } = self;
+        let mut clip = |c: &[u8]| -> Result<(), &'static str> {
+            if *delivered >= *max_size {
+                return Ok(());
+            }
+            let take = c.len().min(*max_size - *delivered);
+            *delivered += take;
+            on_chunk(&c[..take])
+        };
+        match gunzip.as_mut() {
+            Some(g) => g.feed(chunk, &mut clip),
+            None => clip(chunk),
+        }
+    }
+}
+
+/// The response header block in the shape every caller above already reads:
+/// one `Name: value` line per field, capped.
+///
+/// Pseudo-headers are dropped for the same reason `capture_headers` drops
+/// colon-prefixed lines — no HTTP field name may start with a colon, so
+/// nothing legitimate is lost, and it is what stops a server from writing
+/// its own `:hop` marker into the block.
+fn h2_header_block(headers: &[http2::Header]) -> String {
+    let mut out = String::new();
+    for h in headers {
+        if h.name.starts_with(':')
+            || out.len() + h.name.len() + h.value.len() + 4 > MAX_REPLY_HEADERS
+        {
+            continue;
+        }
+        out.push_str(&h.name);
+        out.push_str(": ");
+        out.push_str(&h.value);
+        out.push_str("\r\n");
+    }
+    out
+}
+
+/// Field lookup. h2 field names are lowercase on the wire (§8.2.1), so this
+/// is an exact match and not a case-insensitive one.
+fn h2_value<'a>(headers: &'a [http2::Header], name: &str) -> Option<&'a str> {
+    headers.iter().find(|h| h.name == name).map(|h| h.value.as_str())
+}
+
+/// One HTTPS round-trip over HTTP/2, when the host speaks it.
+///
+/// `Retry` means nothing was delivered — no h2 here, no connection, or a
+/// failure before the first body byte — so the caller may run the same
+/// request over HTTP/1.1. `Fatal` means the sink has already seen bytes.
+///
+/// Redirects come back exactly as the HTTP/1.1 path hands them back: status
+/// plus Location, body dropped. Following them stays one layer up, in
+/// `https_request_streaming`, which is where the method switch, the
+/// origin-crossing header rule and the per-hop `Set-Cookie` already live —
+/// and every login runs through all three.
+fn h2_once(
+    host: &str,
+    path: &str,
+    req: &HttpRequest,
+    max_size: usize,
+    on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
+) -> Result<HttpResponse, ExchangeErr> {
+    // Attempt 1: the pooled connection. Same ladder as HTTP/1.1 below, for
+    // the same reason — the peer may have hung up while it sat idle.
+    if let Some(conn) = h2_take(host) {
+        match h2_exchange(host, path, req, max_size, on_chunk, conn) {
+            Ok(r) => return Ok(r),
+            Err(ExchangeErr::Fatal(e)) => return Err(ExchangeErr::Fatal(e)),
+            Err(ExchangeErr::Retry) => {}
+        }
+    }
+    // Attempt 2: a fresh one. `None` here means this host does not speak h2.
+    let Some(conn) = h2_connect(host) else {
+        return Err(ExchangeErr::Retry);
+    };
+    h2_exchange(host, path, req, max_size, on_chunk, conn)
+}
+
+/// The exchange itself, over a connection the caller already holds.
+fn h2_exchange(
+    host: &str,
+    path: &str,
+    req: &HttpRequest,
+    max_size: usize,
+    on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
+    mut conn: Http2,
+) -> Result<HttpResponse, ExchangeErr> {
+    let t_send = crate::interrupts::ticks();
+    let mut sink = H2Sink {
+        max_size,
+        delivered: 0,
+        discard: true,
+        gunzip: None,
+        on_chunk,
+        touched: false,
+        t_head: t_send,
+    };
+    let result = conn.request(
+        host, req.method, path, req.headers, req.body,
+        USER_AGENT, req.accept_gzip, &mut sink,
+    );
+    let (touched, t_head) = (sink.touched, sink.t_head);
+    let gz = sink.gunzip.as_ref().map(|g| g.ratio());
+
+    match result {
+        Ok(headers) => {
+            if conn.is_healthy() {
+                h2_put(host, conn);
+            } else {
+                conn.close();
+            }
+            let status = h2_value(&headers, ":status")
+                .and_then(|v| v.parse::<u16>().ok())
+                .unwrap_or(0);
+            let location = h2_value(&headers, "location").map(String::from);
+            let content_type = h2_value(&headers, "content-type").map(String::from);
+            let redirect = (300..400).contains(&status);
+            if chatty() {
+                let now = crate::interrupts::ticks();
+                let hdr_ms = t_head.wrapping_sub(t_send) * 10;
+                match (&location, redirect) {
+                    (Some(l), true) =>
+                        kprintln!("[npk]   h2 HTTP {} (headers {} ms) -> {}", status, hdr_ms, l),
+                    _ => kprintln!("[npk]   h2 HTTP {} {} — headers {} ms + body {} ms",
+                        status, req.method, hdr_ms, now.wrapping_sub(t_head) * 10),
+                }
+                // Say that gzip ran. Silence is ambiguous three ways — never
+                // asked, server answered identity, or the path lost it — and
+                // the whole point of asking is a number.
+                match (gz, req.accept_gzip, redirect) {
+                    (Some((raw, out)), _, _) => {
+                        let r10 = out * 10 / core::cmp::max(raw, 1);
+                        kprintln!("[npk]   gzip {} -> {} B ({}.{}x)", raw, out, r10 / 10, r10 % 10);
+                    }
+                    (None, true, false) => kprintln!("[npk]   gzip asked, server answered identity"),
+                    _ => {}
+                }
+            }
+            Ok(HttpResponse { status, location, content_type, headers: h2_header_block(&headers) })
+        }
+        Err(e) => {
+            conn.close();
+            if chatty() {
+                kprintln!("[npk]   h2 {}{} failed ({:?})", host, path, e);
+            }
+            if touched {
+                Err(ExchangeErr::Fatal("h2 stream failed mid-body"))
+            } else {
+                Err(ExchangeErr::Retry)
+            }
+        }
+    }
 }
 
 /// Discard a redirect's (small) body so the socket is left at a clean
@@ -1581,10 +1835,17 @@ fn https_exchange(
     Ok(HttpResponse { status, location, content_type, headers: reply_headers })
 }
 
-/// One HTTPS round-trip — no redirect following. Reuses a pooled
-/// keep-alive session for `host` when one is available, transparently
-/// falling back to a fresh connection if the pooled socket turned out
-/// stale. Body bytes are pushed through `on_chunk` as they arrive.
+/// One HTTPS round-trip — no redirect following. Tries HTTP/2 when the
+/// caller asked for it, then a pooled HTTP/1.1 keep-alive session for `host`,
+/// then a fresh one. Body bytes are pushed through `on_chunk` as they arrive.
+///
+/// This is the layer h2 belongs in, and the reason is the redirect: a
+/// redirect may change the host, and everything that follows from that —
+/// the method switch, dropping the caller's headers at an origin boundary,
+/// keeping each hop's `Set-Cookie` — lives ABOVE here, in
+/// `https_request_streaming`. Lifting the document onto h2 anywhere higher
+/// would have traded a throttling problem for a redirect problem, and every
+/// login is a redirect chain.
 fn https_get_once(
     host: &str,
     path: &str,
@@ -1605,6 +1866,18 @@ fn https_get_once(
         fn drop(&mut self) { crate::interrupts::set_worker_poll_hz(100); }
     }
     let _hz = PollHzGuard;
+
+    // Attempt 0: HTTP/2. Wikimedia throttles HTTP/1.1 to ~0.5 requests/s and
+    // exempts h2 (§8.1, measured) — and one page load is FOUR document
+    // requests inside two seconds, so this path was the only one still
+    // paying. `Retry` means nothing was delivered; HTTP/1.1 runs below.
+    if req.try_h2 {
+        match h2_once(host, path, req, max_size, on_chunk) {
+            Ok(r) => return Ok(r),
+            Err(ExchangeErr::Fatal(e)) => return Err(e),
+            Err(ExchangeErr::Retry) => {}
+        }
+    }
 
     // Attempt 1: reuse a pooled session (no DNS/TCP/TLS handshake).
     if let Some(tls) = pool_take(host) {
