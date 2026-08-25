@@ -805,6 +805,39 @@ impl Engine {
 
     /// Paint the slice `[scroll_y, scroll_y + h)` into `out` (must be
     /// `w * h * 4` BGRA bytes).
+    /// Paint only the viewport rows `y0..y1` — the same picture [`Self::paint`]
+    /// would put there, without touching the rest of the buffer.
+    ///
+    /// This is what makes a scroll cheap. Scrolling does not change the page;
+    /// it moves it. The pixels that merely moved are shifted with one
+    /// `copy_within`, and only the newly exposed band is drawn — against ~60-80
+    /// ms for a full 1902x1000 repaint on the device, which is what every
+    /// scroll used to cost.
+    ///
+    /// No clipping had to be added anywhere for this, and that is the whole
+    /// trick: every drawing primitive already clips against `(0, 0, w, h)` of
+    /// the buffer it is handed. A band is just a narrower buffer — hand over
+    /// those rows' slice, say `h = y1 - y0`, and move the scroll offset down by
+    /// `y0` so document coordinates still land where they belong.
+    pub fn paint_band(
+        &self,
+        layout: &Layout,
+        w: u32,
+        h: u32,
+        scroll_y: i32,
+        out: &mut [u8],
+        y0: u32,
+        y1: u32,
+    ) {
+        let (y0, y1) = (y0.min(h), y1.min(h));
+        if y1 <= y0 {
+            return;
+        }
+        let stride = w as usize * 4;
+        let band = &mut out[y0 as usize * stride..y1 as usize * stride];
+        self.paint(layout, w, y1 - y0, scroll_y + y0 as i32, band);
+    }
+
     pub fn paint(&self, layout: &Layout, w: u32, h: u32, scroll_y: i32, out: &mut [u8]) {
         let (wi, hi) = (w as i32, h as i32);
         // Canvas = the propagated body background (falls back to theme bg).
@@ -1391,6 +1424,40 @@ mod tests {
     /// A decodable image in plain bytes — SVG is one of the formats
     /// `image::decode` accepts, so a test needs no binary fixture.
     const RED_10: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="red"/></svg>"#;
+
+    #[test]
+    fn a_band_paints_exactly_what_a_full_frame_would() {
+        // The claim behind the cheap scroll: painting rows y0..y1 into a slice
+        // produces the same bytes a whole frame would have in those rows.
+        // Deliberately with boxes and text that STRADDLE the band edges — an
+        // op crossing a boundary is where a missing clip would show.
+        let eng = Engine::new();
+        let html = "<body style=\"background:#123\">\
+            <div style=\"height:80px;background:#c00\">Erste Zeile mit Text</div>\
+            <p style=\"margin:0;padding:20px\">Ein Absatz, der ueber mehrere Zeilen laeuft \
+             und dabei genau die Kante zwischen zwei Streifen kreuzt.</p>\
+            <div style=\"height:400px;background:#0a0;border:6px solid #00f\">tief unten</div>\
+            </body>";
+        let lay = eng.layout(html, 400);
+        let (w, h) = (400u32, 300u32);
+        let px = (w * h * 4) as usize;
+
+        let mut full = alloc::vec![0u8; px];
+        eng.paint(&lay, w, h, 40, &mut full);
+
+        // Bands chosen to cut through content, not between elements.
+        let mut banded = alloc::vec![0u8; px];
+        for (y0, y1) in [(0u32, 37u32), (37, 111), (111, 298), (298, 300)] {
+            eng.paint_band(&lay, w, h, 40, &mut banded, y0, y1);
+        }
+        assert!(full == banded, "a band must be byte-identical to the full frame");
+
+        // And a band outside the viewport is a no-op rather than a panic.
+        let before = banded.clone();
+        eng.paint_band(&lay, w, h, 40, &mut banded, 400, 500);
+        eng.paint_band(&lay, w, h, 40, &mut banded, 200, 200);
+        assert!(before == banded, "an empty or out-of-range band draws nothing");
+    }
 
     #[test]
     fn a_document_survives_a_visit_to_another_page() {
