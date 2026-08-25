@@ -2491,6 +2491,20 @@ impl<'a> Ctx<'a> {
             // `<a>`/`<span>` flows with the text). Nested imgs are handled in
             // `collect_inline`; this catches direct children of any display.
             if el.tag == "img" || el.tag == "svg" {
+                // Out of flow FIRST, exactly as the control branch below does.
+                // This branch matches on the TAG, so the blockification in
+                // `styled` does not route an abspos image past it the way it
+                // does every other replaced element — it landed on the line and
+                // grew the page by its own height. Found via Wikipedia's 1×1
+                // autologin pixel; a 40×40 overlay image cost 40px.
+                if matches!(st.position, Position::Absolute | Position::Fixed) {
+                    self.path.push(self.info(el));
+                    self.abs_over_open_line = !inline.is_empty();
+                    self.layout_abs(el, &st, x, anchor + open.value() as i32);
+                    self.abs_over_open_line = false;
+                    self.path.pop();
+                    continue;
+                }
                 self.path.push(self.info(el));
                 let svg = el.tag == "svg";
                 let (iw, ih) = if svg { self.svg_box(el, &st) } else { self.img_box(el, &st) };
@@ -3718,6 +3732,37 @@ impl<'a> Ctx<'a> {
             self.stack_depth += 1;
         }
         let box_bottom = self.layout_box(el, st, px as i32, w_i, py as i32);
+        // A replaced element out of flow still has to be PAINTED. `layout_box`
+        // gives it a rectangle — borders, background, the space it occupies —
+        // but the picture itself is only ever emitted by the inline path, so
+        // routing an abspos `<img>` here left an empty box behind. The render
+        // gate is what said so: `tailwind` lost seven draw ops at unchanged
+        // height the moment images stopped riding on the line.
+        //
+        // The size comes from `img_box`, not from `w_i`: a positioned replaced
+        // element with `width: auto` takes its INTRINSIC width (§10.3.7), while
+        // `w_i` is what a non-replaced block would have stretched to.
+        if el.tag == "img" || el.tag == "svg" {
+            let svg = el.tag == "svg";
+            let (iw, ih) = if svg { self.svg_box(el, st) } else { self.img_box(el, st) };
+            // No `hidden`/`transparent` guard: the inline path emits the op
+            // either way and lets paint decide, and dropping it here made the
+            // op counts disagree between the two paths for the same picture.
+            if iw > 0 && ih > 0 {
+                let src = if svg { svg_key(el) } else { el.attr("src").unwrap_or("").to_string() };
+                let (alt, fit, filter) = (svg_alt(el, svg), st.object_fit, self.filter_index(st));
+                self.ops.push(DrawOp::Image {
+                    x: px as i32 + (st.border_left.width + st.pad_left) as i32,
+                    y: py as i32 + (st.border_top.width + st.pad_top) as i32,
+                    w: iw,
+                    h: ih,
+                    src,
+                    alt,
+                    fit,
+                    filter,
+                });
+            }
+        }
         if track {
             self.stack_depth -= 1;
         }
@@ -7194,6 +7239,22 @@ impl<'a> Ctx<'a> {
                         continue;
                     }
                     self.counters.enter(&cs, self.path.len());
+                    // `position:absolute`/`fixed` leaves the inline flow the same
+                    // way it leaves the block flow — `flow_children` has had this
+                    // branch all along and this one did not, so an out-of-flow box
+                    // that happened to be INLINE-level stayed on the line and grew
+                    // the page with it. Wikipedia's 1×1 autologin pixel is exactly
+                    // that shape, and a 40×40 abspos `<img>` added its full height.
+                    // Ahead of the float test because `float` computes to `none` on
+                    // a positioned box (css-display-3 §2.7).
+                    if matches!(cs.position, Position::Absolute | Position::Fixed) {
+                        self.path.push(self.info(ce));
+                        self.abs_over_open_line = !inline.is_empty();
+                        self.layout_abs(ce, &cs, bx, by);
+                        self.abs_over_open_line = false;
+                        self.path.pop();
+                        continue;
+                    }
                     // A floated inline element leaves the inline flow and is placed
                     // as a float; surrounding text wraps around it.
                     if cs.float != FloatKind::None {
@@ -10443,6 +10504,34 @@ fn dbg_wiki_shape() {
             800,
         );
         assert!(texts(&forced).iter().any(|(_, _, s)| *s == "modal"));
+    }
+
+    /// `<noscript>` renders when scripting is off (HTML §15.3.1) — and beak has
+    /// no scripting at all. Pages put lazy-loading `<img>` fallbacks in there,
+    /// which is content we were throwing away.
+    #[test]
+    fn noscript_content_renders_because_we_have_no_script() {
+        let l = lay("<body><p>a</p><noscript><p>fallback</p></noscript></body>", 800);
+        let t: Vec<&str> = texts(&l).iter().map(|(_, _, s)| *s).collect();
+        assert!(t.contains(&"fallback"), "{t:?}");
+
+        // An `<img>` inside it has to reach the shell's fetch list, or the
+        // fallback renders as an empty box.
+        let l2 = lay(
+            "<body><noscript><img src=\'/late.png\' width=\'40\' height=\'20\'></noscript></body>",
+            800,
+        );
+        assert!(
+            l2.ops.iter().any(|o| matches!(o, DrawOp::Image { src, .. } if src == "/late.png")),
+            "the fallback image must be laid out"
+        );
+
+        // `<script>`/`<style>` stay hidden — only noscript moved.
+        let l3 = lay("<body><script>var x = 1</script><style>p{}</style>after</body>", 800);
+        let t3: Vec<&str> = texts(&l3).iter().map(|(_, _, s)| *s).collect();
+        assert!(!t3.iter().any(|s| s.contains("var x")), "{t3:?}");
+        assert!(!t3.iter().any(|s| s.contains("p{}")), "{t3:?}");
+        assert!(t3.iter().any(|s| s.contains("after")), "{t3:?}");
     }
 
     fn rects(l: &Layout) -> Vec<(i32, i32, i32, i32, Rgb)> {

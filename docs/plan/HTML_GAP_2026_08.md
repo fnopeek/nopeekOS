@@ -88,8 +88,26 @@ Skript rendert den Inhalt (HTML §4.12.2) — das ist wörtlich beaks Fall. Der
 Parser macht es schon richtig: `RAWTEXT` in `dom.rs` ist nur `script`/`style`,
 der Inhalt ist also als Markup geparst und liegt bereit.
 
-8 Vorkommen auf 6 Seiten, 1535 Bytes, darunter 3 `<img>`-Fallbacks für
-Lazy-Loading (srf, wikipedia_de, wikipedia_en). Klein — aber eine Zeile.
+8 Vorkommen auf 6 Seiten, 1535 Bytes. **Nachgemessen am 2026-08-25, und die
+erste Zählung war falsch:** es sind keine Lazy-Load-Fallbacks. Hineingesehen:
+
+| Seite | Inhalt | wert? |
+|---|---|---|
+| wikipedia_de/en | 1×1-`CentralAutoLogin`-Zählpixel, `position:absolute` | nein |
+| news_srf | `<noscript class="nojs-banner">` — „bitte JS einschalten" | nein |
+| mdn_docs | „Enable JavaScript to view this browser compatibility table." | nein |
+| rustdoc | `<link rel=stylesheet href=noscript.css>` — **eigenes Stylesheet für skriptlose Browser** | **ja** |
+| marginalia | zwei Blöcke, ungeprüft | ? |
+
+Gebaut und getestet (295 Tests grün), aber **nicht ausgeliefert**: das Gate sagt
++19 px leere Zeile auf beiden Wikipedias (der `<noscript>`-Inline erzeugt eine
+Zeilenbox, obwohl sein einziges Kind out-of-flow ist) für null Inhalt — und
+beak würde anfangen, Wikipedias Zählpixel zu holen. Auf einem System namens
+nopeekOS ist „die Spec sagt es" dafür kein ausreichender Grund; das ist eine
+Entscheidung, keine Regelbefolgung.
+
+Der eine echte Ertrag ist rustdocs `noscript.css`. Wenn `<noscript>` kommt,
+dann dafür — und dann gehört die leere Zeilenbox vorher gefixt.
 
 ## Rang 4 — `@font-face`
 

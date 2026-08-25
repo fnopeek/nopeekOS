@@ -25,7 +25,7 @@ pub type ImageMap = HashMap<String, Rc<Image>>;
 
 /// Cap on decoded pixels per image — skip decoding anything larger so a single
 /// huge asset can't exhaust the shell heap (it degrades to a placeholder).
-const MAX_PIXELS: usize = 4_000_000; // ~16 MB BGRA
+pub(crate) const MAX_PIXELS: usize = 4_000_000; // ~16 MB BGRA
 
 /// Allocate `n` zeroed bytes WITHOUT aborting on OOM — `try_reserve` returns
 /// `Err` instead of calling `handle_alloc_error`, so an oversize image degrades
@@ -121,6 +121,8 @@ pub fn decode(bytes: &[u8]) -> Option<Image> {
         crate::ico::decode(bytes)
     } else if crate::svg::looks_like_svg(bytes) {
         crate::svg::render(bytes)
+    } else if crate::webp::looks_like_webp(bytes) {
+        crate::webp::decode(bytes)
     } else {
         None
     }

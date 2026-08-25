@@ -118,6 +118,21 @@ fn set_attr(el: &mut Element, name: &str, value: &str) {
 /// The formats `image::decode` handles. Anything else must not be selected.
 fn decodable_type(t: &str) -> bool {
     let t = t.trim().to_ascii_lowercase();
+    // `image/webp` is deliberately NOT here, even though `webp::decode` exists
+    // since 0.40.0. Two measured reasons, both against taking it:
+    //
+    // 1. The type says nothing about lossy vs lossless. We decode `VP8 ` only,
+    //    so an `image/webp` source could still be a `VP8L` we have to decline —
+    //    and by then the `<img>` fallback is already gone. That is the exact
+    //    trade the skip below was written for.
+    // 2. It costs more. Under wasmi the same picture is 597 instructions per
+    //    pixel as WebP against 220 as JPEG (beakbench, 2026-08-25). The
+    //    `<picture>` markup on the corpus pairs every webp source with a JPEG
+    //    one-for-one (236 : 236), so declining loses no image at all — it just
+    //    takes the cheaper of two encodings of the same photo.
+    //
+    // The decoder earns its keep on the OTHER case: a bare `<img src="…webp">`
+    // with no fallback, which is 87 of 118 images on srf.ch.
     matches!(t.as_str(), "image/png" | "image/jpeg" | "image/jpg" | "image/svg+xml")
 }
 
