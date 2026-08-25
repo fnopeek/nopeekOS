@@ -77,7 +77,7 @@ const DE: Strings = Strings {
 fn s() -> &'static Strings {
     match i18n::lang() { i18n::Lang::De => &DE, _ => &EN }
 }
-use talc::{TalcLock, source::Claim};
+use talc::TalcLock;
 
 // ── App metadata + capabilities ───────────────────────────────────────────
 
@@ -285,7 +285,11 @@ const IMG_FETCH_CAP: usize = 6 * 1024 * 1024;
 /// de.wikipedia/Stansstad has 20 distinct sources whose pixels come to a
 /// couple of MB, so the byte budget never came near, and #17/#19/#20 (a navbox
 /// coat of arms and both footer icons) silently kept their placeholders.
-const MAX_IMAGES: usize = 64;
+// A fetch-queue bound, NOT a memory bound — the pixel budget in the engine is
+// what stops a page from eating the machine, and the heap grows now. This only
+// keeps one absurd document from queueing thousands of round-trips, and it says
+// so when it bites.
+const MAX_IMAGES: usize = 512;
 static mut IMG_FETCH_BUF: [u8; IMG_FETCH_CAP] = [0; IMG_FETCH_CAP];
 
 /// How many images one batch asks for. Small on purpose: the batch is a
@@ -979,7 +983,14 @@ fn fetch_next_images(
         let bytes = unsafe { core::slice::from_raw_parts(dst.add(off) as *const u8, n) };
         // Decode now, drop the compressed bytes — and keep the pixels under
         // their url so the next navigation to this page needs neither.
-        engine.add_image_cached(src, url, bytes);
+        if !engine.add_image_cached(src, url, bytes) {
+            // Undecodable, or past the page's pixel budget. Either way the
+            // box keeps its placeholder, and a picture that silently does not
+            // appear is the kind of bug that gets blamed on layout for weeks.
+            log(&alloc::format!("[beak] image dropped ({} B): undecodable or over budget — {}",
+                n, src));
+            continue;
+        }
         arrived.push(src.as_str());
         if layout.is_some_and(|l| l.guessed_image_srcs.iter().any(|g| g == src)) {
             moved = true;
@@ -1041,13 +1052,16 @@ fn fetch_next_css_images(
     let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
     let spans = fetch_batch(&urls, dst, IMG_FETCH_CAP);
     let mut arrived: Vec<u64> = Vec::new();
-    for ((key, _), (off, n)) in want.iter().zip(spans) {
+    for (((key, _), url), (off, n)) in want.iter().zip(urls.iter()).zip(spans) {
         if n == 0 {
             continue; // failed or did not fit → the box stays undecorated
         }
         let bytes = unsafe { core::slice::from_raw_parts(dst.add(off) as *const u8, n) };
-        if engine.add_css_image(*key, bytes) {
+        if engine.add_css_image_cached(*key, url, bytes) {
             arrived.push(*key);
+        } else {
+            log(&alloc::format!("[beak] background dropped ({} B): undecodable or over budget — {}",
+                n, url));
         }
     }
     if arrived.is_empty() {
@@ -2037,26 +2051,91 @@ fn poll_event() -> PollResult {
 // ── Heap: a real free-list allocator. The six font faces (persistent) + each
 //    frame's layout + paint buffer are freed on drop, unlike a bump heap. ───
 
-// 128 MB: 64 MB was too tight for one heavy page — the image budget alone is
-// 24 MB, the six faces parse to ~6 MB, plus paint buffer + layout + glyph cache
-// + transient DOM/CSS peaked over the cap (OOM on real sites). wasmi backs the
-// linear memory with one contiguous alloc, so 128 MB is the safe headroom step;
-// go higher only if a specific page still trips it.
-const HEAP_SIZE: usize = 128 * 1024 * 1024;
-static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
+// ── The heap GROWS; it is not guessed ───────────────────────────────────────
+
+/// Ported from talc's own `WasmGrowAndExtend` (talc 5.0.4, `src/wasm.rs`) with
+/// exactly one change: the growth STEP.
+///
+/// Talc grows by just enough for the allocation that failed. That is right
+/// where `memory.grow` is cheap. Under wasmi it is not — linear memory is one
+/// contiguous buffer, so every grow copies all of it, and growing a page at a
+/// time up to a 60 MB working set would copy tens of gigabytes. Doubling makes
+/// the number of grows logarithmic and the total copying linear in the final
+/// size, at the cost of holding up to twice the peak.
+///
+/// What it replaces: `static mut HEAP: [u8; 128 MB]` — a ceiling nobody
+/// measured. And it was not free headroom: wasmi allocates the whole linear
+/// memory eagerly, so that array cost 128 MB on every start, while a page that
+/// wanted more died against it anyway.
+#[derive(Debug)]
+struct GrowingHeap {
+    /// End of the arena talc last received, so a contiguous grow can EXTEND it
+    /// instead of starting a second heap. Zero means "nothing handed over yet".
+    ///
+    /// An address and not a `NonNull`, which is what talc's own source stores:
+    /// `NonNull` is not `Send`, and this allocator sits behind a mutex on
+    /// purpose (see the note where it is declared) rather than behind talc's
+    /// single-threaded cell.
+    end: usize,
+}
+
+impl GrowingHeap {
+    const fn new() -> Self {
+        GrowingHeap { end: 0 }
+    }
+}
+
+const WASM_PAGE: usize = 64 * 1024;
+
+// SAFETY: `acquire` hands talc only memory that `memory.grow` just returned —
+// freshly mapped pages past the previous end of linear memory, which nothing
+// else can reach. It allocates nothing itself. That is talc's own
+// `WasmGrowAndExtend` contract, kept.
+unsafe impl talc::source::Source for GrowingHeap {
+    fn acquire<B: talc::base::binning::Binning>(
+        talc: &mut talc::base::Talc<Self, B>,
+        layout: core::alloc::Layout,
+    ) -> Result<(), ()> {
+        // Over-estimate deliberately: talc warns that UNDER-sizing here loops
+        // forever, handing over heaps that can never fit the allocation.
+        let need = layout.size() + layout.align() + 4 * WASM_PAGE;
+        let need_pages = need.div_ceil(WASM_PAGE);
+        let have_pages = core::arch::wasm32::memory_size::<0>();
+        let delta = need_pages.max(have_pages.max(1));
+
+        let prev_end = core::arch::wasm32::memory_grow::<0>(delta);
+        if prev_end == usize::MAX {
+            return Err(()); // the host said no — the machine really is full
+        }
+        let base = (prev_end * WASM_PAGE) as *mut u8;
+        let size = delta * WASM_PAGE;
+
+        let old_end = core::mem::replace(&mut talc.source.end, 0);
+        if old_end == base as usize {
+            // SAFETY: contiguous with the arena we handed over last time, and
+            // `old_end` came from talc itself, so it is non-null.
+            let new_end = unsafe {
+                talc.extend(
+                    core::ptr::NonNull::new_unchecked(base),
+                    base.wrapping_add(size),
+                )
+            };
+            talc.source.end = new_end.as_ptr() as usize;
+            return Ok(());
+        }
+        // SAFETY: fresh pages, owned by nothing else.
+        talc.source.end = unsafe { talc.claim(base, size) }.map_or(0, |e| e.as_ptr() as usize);
+        Ok(())
+    }
+}
 
 // `TalcLock` (mutex-guarded), NOT talc's `WasmArenaTalc`/`TalcSyncCell`. The
 // cell variants are only sound on single-threaded WebAssembly and enforce that
 // with a target check, not the type system — so the day beak gets workers, or
 // wasmi turns on the threads proposal, they would go quietly unsound. The
 // uncontended spin lock costs a few instructions; that is the cheaper mistake.
-//
-// SAFETY: `HEAP` is a `static mut` we hand to the allocator exactly once, here,
-// before any allocation can happen (this is a `const` initialiser). Nothing else
-// ever reads or writes it, so the allocator holds the only reference.
 #[global_allocator]
-static ALLOCATOR: TalcLock<spin::Mutex<()>, Claim> =
-    TalcLock::new(unsafe { Claim::array(&raw mut HEAP) });
+static ALLOCATOR: TalcLock<spin::Mutex<()>, GrowingHeap> = TalcLock::new(GrowingHeap::new());
 
 // u32 → decimal &str in a static buffer (no alloc — safe in the panic handler
 // even when the panic is an allocation failure).
@@ -2230,12 +2309,31 @@ pub extern "C" fn _start() {
         // NOT "already in the queue". The queue empties on every fetch, so
         // checking it re-requested all of them once a turn, for as long as the
         // page stayed open. Cleared on navigation, with the engine's cache.
+        let mut css_adopted: Vec<u64> = Vec::new();
         if let Some((l, _, _, _)) = cache.as_ref() {
             for (k, u) in &l.css_image_srcs {
-                if !css_asked.contains(k) {
-                    css_asked.push(*k);
+                if css_asked.contains(k) {
+                    continue;
+                }
+                css_asked.push(*k);
+                // Same question as for `<img>`, one layer later: the layout
+                // only names its background images AFTER it has run, so this
+                // cannot happen in `begin_images`. The url is resolved exactly
+                // as `fetch_next_css_images` resolves it, or put and get would
+                // use different keys for one picture.
+                if engine.adopt_css_cached(*k, &resolve(url_str(), u)) {
+                    css_adopted.push(*k);
+                } else {
                     pending_css_imgs.push((*k, u.clone()));
                 }
+            }
+        }
+        // An adopted layer arrives after this turn's paint, so it needs the
+        // next one — but only if it would show. Same test the fetched ones get.
+        if !css_adopted.is_empty() {
+            match cache.as_ref() {
+                Some((l, _, _, _)) if !l.css_images_in_band(&css_adopted, band.0, band.1) => {}
+                _ => mark_dirty(),
             }
         }
         let layout = cache.as_ref().map(|(l, _, _, _): &(Layout, i32, i32, u32)| l);
