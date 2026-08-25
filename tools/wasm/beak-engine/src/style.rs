@@ -145,12 +145,22 @@ pub enum ListStyle {
     Armenian,
     /// Additive, 1..=19999.
     Georgian,
+    /// A `<summary>`'s disclosure triangle, pointing right (closed).
+    DisclosureClosed,
+    /// The same, pointing down (open).
+    DisclosureOpen,
 }
 
 impl ListStyle {
     /// A glyph marker (bullet) rather than a counter string.
     pub fn is_bullet(self) -> bool {
         matches!(self, ListStyle::Disc | ListStyle::Circle | ListStyle::Square)
+    }
+    /// A disclosure triangle. Drawn as a shape, not as a glyph: the subsetted
+    /// Inter faces carry no U+25B8/U+25BE (`assets/subset.sh` keeps
+    /// U+0000-2E7F, and Inter simply has no small triangles in it).
+    pub fn is_disclosure(self) -> bool {
+        matches!(self, ListStyle::DisclosureClosed | ListStyle::DisclosureOpen)
     }
 }
 
@@ -856,6 +866,13 @@ pub struct ComputedStyle {
     pub is_link: bool,
     pub is_rule: bool, // <hr> — painted as a divider
     pub is_break: bool, // <br> — forced line break in inline flow
+    /// This element is a `<details>`'s disclosure control — its first
+    /// `<summary>` child. Element identity, not a box property, so it is NOT
+    /// settable from CSS: a page that writes `summary { list-style: none }`
+    /// (most of them do) removes the triangle, and the box must stay clickable
+    /// anyway. `record_inspect` turns this into the toggle rect the shell
+    /// hit-tests.
+    pub is_summary: bool,
     /// `vertical-align` — not inherited. On a table cell it aligns the content
     /// box in the row; on an inline-level box it shifts the box on the line.
     pub valign: VAlign,
@@ -1106,6 +1123,7 @@ impl ComputedStyle {
             is_link: false,
             is_rule: false,
             is_break: false,
+            is_summary: false,
             valign: VAlign::Baseline,
             flex_row: true,
             flex_wrap: false,
@@ -1337,6 +1355,7 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         is_link: false,
         is_rule: false,
         is_break: false,
+        is_summary: false,
         valign: VAlign::Baseline,
         flex_row: true,
         flex_wrap: false,
@@ -1423,6 +1442,36 @@ pub fn resolve(
     // anchor is not a link and is not underlined.
     if el.tag == "a" && el.attr("href").is_some() {
         s.deco |= DECO_UNDERLINE;
+    }
+    // A `<dialog>` without `open` is not rendered (HTML §4.11.4). This IS an
+    // ordinary UA-sheet rule — it sits before the author cascade, so a page
+    // that shows its own dialog with CSS still can.
+    if el.tag == "dialog" && el.attr("open").is_none() {
+        s.display = Display::None;
+    }
+    // `<details>`/`<summary>` (HTML §4.11.1). The FIRST `<summary>` child is
+    // the disclosure control: it renders whatever the state, and carries the
+    // marker. A `<summary>` anywhere else is a plain block, which is why this
+    // cannot live in `ua_rule` — that only sees the tag.
+    //
+    // The marker is set here, before the author cascade, so `summary {
+    // list-style: none }` (which most pages write) removes it. `is_summary` is
+    // NOT: the box has to stay clickable even with the triangle gone, or the
+    // reader can never open the section.
+    if el.tag == "summary"
+        && ancestors.last().is_some_and(|p| p.el.tag == "details")
+        && !prev_siblings.iter().any(|p| p.el.tag == "summary")
+    {
+        let open = ancestors.last().is_some_and(|p| p.el.attr("open").is_some());
+        s.display = Display::ListItem;
+        s.list_style =
+            if open { ListStyle::DisclosureOpen } else { ListStyle::DisclosureClosed };
+        // Room for the marker. A list marker is painted OUTSIDE the content
+        // edge (there is no `list-style-position` yet), and a `<summary>` has
+        // no `<ul>` around it to have paid for that space — the triangle would
+        // land in the margin, and at the left edge of the page outside it.
+        s.pad_left = 16.0;
+        s.is_summary = true;
     }
     // A button-like control is `box-sizing: border-box` in the UA sheet (HTML
     // rendering §15.5.1) — unlike a text field, which stays content-box. It is
@@ -1592,6 +1641,23 @@ pub fn resolve(
     if matches!(s.z_index, ZIndex::Inherit) {
         s.z_index = parent.z_index;
     }
+    // A CLOSED `<details>` renders only its disclosure control; the rest is
+    // skipped (HTML §4.11.1). This runs AFTER the author cascade on purpose:
+    // a browser hides the skipped contents through the shadow tree, where no
+    // author rule can reach them, so `details:not([open]) > div { display:
+    // block }` must not reveal them either.
+    //
+    // Element children only. A bare text node directly inside `<details>` is
+    // not covered — measured at 0 of 446 in the corpus (see
+    // `docs/plan/HTML_GAP_2026_08.md`), and covering it would mean a guard at
+    // each of the eleven places layout turns a `Node::Text` into a run.
+    if !s.is_summary
+        && ancestors
+            .last()
+            .is_some_and(|p| p.el.tag == "details" && p.el.attr("open").is_none())
+    {
+        s.display = Display::None;
+    }
     // `overflow` on the root element — and on `<body>` while the root keeps
     // `visible` — propagates to the VIEWPORT, and the element's own used value
     // becomes `visible` (css-overflow-3 §3.3). So the box itself neither clips
@@ -1704,7 +1770,7 @@ fn unbox_contents(tag: &str, s: &mut ComputedStyle) {
     }
     // Element identity and the counter mechanism are not box properties: a
     // counter is defined on the element, and `<a>` is still a link.
-    let (link, rule, brk) = (s.is_link, s.is_rule, s.is_break);
+    let (link, rule, brk, summ) = (s.is_link, s.is_rule, s.is_break, s.is_summary);
     let (cr, crn) = (s.counter_reset, s.counter_reset_n);
     let (ci, cin) = (s.counter_increment, s.counter_increment_n);
     *s = inherit_reset(s);
@@ -1712,6 +1778,7 @@ fn unbox_contents(tag: &str, s: &mut ComputedStyle) {
     s.is_link = link;
     s.is_rule = rule;
     s.is_break = brk;
+    s.is_summary = summ;
     s.counter_reset = cr;
     s.counter_reset_n = crn;
     s.counter_increment = ci;
@@ -2447,7 +2514,7 @@ pub fn apply_wide(prop: Prop, kw: Wide, parent: &ComputedStyle, theme: &Theme, s
             let rtl = s.rtl;
             let (rem, vw, vh, seen) = (s.rem_base, s.vw, s.vh, s.vh_seen);
             let (acb, acp) = (s.attr_cell_border, s.attr_cell_padding);
-            let (link, rule, brk) = (s.is_link, s.is_rule, s.is_break);
+            let (link, rule, brk, summ) = (s.is_link, s.is_rule, s.is_break, s.is_summary);
             *s = *src;
             s.rtl = rtl;
             s.rem_base = rem;
@@ -2459,6 +2526,7 @@ pub fn apply_wide(prop: Prop, kw: Wide, parent: &ComputedStyle, theme: &Theme, s
             s.is_link = link;
             s.is_rule = rule;
             s.is_break = brk;
+            s.is_summary = summ;
             // Later declarations in the same block measure `em` against the
             // size `all` just installed.
             s.em_base = s.font_px;
@@ -3926,6 +3994,8 @@ fn parse_list_style(v: &str) -> Option<ListStyle> {
         "upper-alpha" | "upper-latin" => ListStyle::UpperAlpha,
         "lower-roman" => ListStyle::LowerRoman,
         "upper-roman" => ListStyle::UpperRoman,
+        "disclosure-closed" => ListStyle::DisclosureClosed,
+        "disclosure-open" => ListStyle::DisclosureOpen,
         _ => return None,
     })
 }

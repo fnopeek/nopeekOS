@@ -1088,6 +1088,20 @@ pub struct HoverBox {
     /// part of what the element SAYS, so a colour change on one cannot be
     /// repainted from the display list alone.
     pub has_text: bool,
+    /// Does this box take part in `:hover`? False for one recorded only so a
+    /// `<summary>` can be clicked — the pointer being inside it is not a
+    /// cascade event, and reporting it would repaint on every page that has a
+    /// `<details>` and no hover rule at all.
+    pub hoverable: bool,
+    /// Clicking this box opens/closes its `<details>`.
+    ///
+    /// It rides in `hover_boxes` rather than in a list of its own because this
+    /// list is ALREADY carried through everything a hit rect has to survive:
+    /// the rollback mark, the relative-offset shift, and the drain into an
+    /// `AtomicBox`. A fourth parallel list would have to repeat all three, and
+    /// the one time that was done by hand it shipped with a missing shift
+    /// (0.25.0, see `shift_since`).
+    pub toggle: bool,
 }
 
 /// Enough of an op to find it again: kind, position, and the two numbers that
@@ -1163,6 +1177,17 @@ impl Layout {
             .max_by_key(|b| b.depth)
     }
 
+    /// The `<summary>` at a document-space point, by element `seq` — the
+    /// disclosure control the shell toggles. Innermost wins, so a `<details>`
+    /// nested inside another one's summary opens the inner section.
+    pub fn hit_toggle(&self, x: i32, y: i32) -> Option<u32> {
+        self.hover_boxes
+            .iter()
+            .filter(|b| b.toggle && x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h)
+            .max_by_key(|b| b.seq)
+            .map(|b| b.seq)
+    }
+
     /// Link href at a document-space point (caller adds scroll to screen y).
     pub fn hit_test(&self, x: i32, y: i32) -> Option<&str> {
         // Reverse so a link painted later (on top) wins an overlap.
@@ -1187,7 +1212,7 @@ impl Layout {
             // A pseudo-element's box is recorded for repainting, not for
             // hit-testing — extending the pointer's reach would change which
             // element it is inside, which is a different question.
-            .filter(|b| b.pseudo == crate::css::PseudoElem::None)
+            .filter(|b| b.pseudo == crate::css::PseudoElem::None && b.hoverable)
             .filter(|b| x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h)
             .map(|b| b.seq)
             .collect();
@@ -1790,8 +1815,10 @@ impl<'a> Ctx<'a> {
     /// user is actually inspecting.
     fn record_inspect(&mut self, el: &Element, st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, op0: usize) {
         // Same call site, own switch: the pointer needs these boxes on any page
-        // with a `:hover` rule, whether or not anyone is inspecting.
-        if w > 0 && h > 0 && self.sheet.hover_set.may_match(el) {
+        // with a `:hover` rule, whether or not anyone is inspecting — and a
+        // `<summary>` needs one whether or not the page hovers anything.
+        let hoverable = self.sheet.hover_set.may_match(el);
+        if w > 0 && h > 0 && (hoverable || st.is_summary) {
             let anchor = self.ops.get(op0).map(op_key);
             self.hover_boxes.push(HoverBox {
                 x,
@@ -1806,6 +1833,8 @@ impl<'a> Ctx<'a> {
                 pseudo: PseudoElem::None,
                 anchor_after: false,
                 has_text: false,
+                hoverable,
+                toggle: st.is_summary,
             });
         }
         if !self.inspect {
@@ -2878,6 +2907,8 @@ impl<'a> Ctx<'a> {
                     pseudo: kind,
                     anchor_after: true,
                     has_text: !text.trim().is_empty(),
+                    hoverable: true,
+                    toggle: false,
                 });
             }
             let mut ops: Vec<DrawOp> = Vec::new();
@@ -3097,7 +3128,33 @@ impl<'a> Ctx<'a> {
         // lists rely on that, and a bullet there is pure noise.
         if st.display == Display::ListItem && st.list_style != ListStyle::None && !st.hidden && !st.transparent {
             let top = prov_top_y + bt + pt;
-            if st.list_style.is_bullet() {
+            if st.list_style.is_disclosure() {
+                // A triangle out of rows of `Rect`, not a glyph: the subsetted
+                // Inter faces carry no U+25B8/U+25BE, so a text marker would
+                // paint nothing on exactly the pages that need it. `n` steps
+                // give a 2n-1 wide, n tall triangle.
+                let n = ((st.font_px * 0.30) as i32).clamp(3, 7);
+                // Both orientations centre on the same point, so the marker
+                // does not jump sideways when the section is opened.
+                let (cx, cy) = (content_x - 12 + n / 2, top + (st.font_px * 0.55) as i32);
+                let open = st.list_style == ListStyle::DisclosureOpen;
+                let (x0, y0) = if open {
+                    (cx - (2 * n - 1) / 2, cy - n / 2)
+                } else {
+                    (cx - n / 2, cy - (2 * n - 1) / 2)
+                };
+                let c = self.theme.muted.into();
+                for i in 0..n {
+                    let (x, y, w, h) = if open {
+                        // Pointing down: rows narrowing towards the tip.
+                        (x0 + i, y0 + i, 2 * (n - i) - 1, 1)
+                    } else {
+                        // Pointing right: columns shortening towards the tip.
+                        (x0 + i, y0 + i, 1, 2 * (n - i) - 1)
+                    };
+                    self.ops.push(DrawOp::Rect { x, y, w, h, color: c });
+                }
+            } else if st.list_style.is_bullet() {
                 let s = 4;
                 self.ops.push(DrawOp::Rect {
                     x: content_x - 12,
@@ -8263,6 +8320,10 @@ fn format_counter(style: ListStyle, n: i32) -> String {
         ListStyle::Disc => "•".into(),
         ListStyle::Circle => "◦".into(),
         ListStyle::Square => "▪".into(),
+        // As `counter()` text these are characters, not the drawn triangle a
+        // `<summary>` marker gets — css-counter-styles-3 names exactly these.
+        ListStyle::DisclosureClosed => "▸".into(),
+        ListStyle::DisclosureOpen => "▾".into(),
         ListStyle::None => String::new(),
         _ => alloc::format!("{n}"),
     }
@@ -9201,6 +9262,8 @@ fn emit_line(
                         pseudo: crate::css::PseudoElem::None,
                         anchor_after: false,
                         has_text: false,
+                        hoverable: true,
+                        toggle: false,
                     });
                 }
             }
@@ -10200,6 +10263,186 @@ fn dbg_wiki_shape() {
                 _ => None,
             })
             .collect()
+    }
+
+
+    // ── <details>/<summary> (HTML §4.11.1) ─────────────────────────────────
+
+    /// The whole point: a CLOSED `<details>` shows its summary and nothing
+    /// else. Measured on MDN, 117 of 119 sections are closed — rendered open
+    /// they turn the page into one endless scroll.
+    #[test]
+    fn a_closed_details_renders_only_its_summary() {
+        let html = "<body><details><summary>head</summary><p>body text</p></details></body>";
+        let l = lay(html, 800);
+        let t: Vec<&str> = texts(&l).iter().map(|(_, _, s)| *s).collect();
+        assert!(t.contains(&"head"), "{t:?}");
+        assert!(!t.iter().any(|s| s.contains("body text")), "closed content leaked: {t:?}");
+
+        let open = lay(
+            "<body><details open><summary>head</summary><p>body text</p></details></body>",
+            800,
+        );
+        let t2: Vec<&str> = texts(&open).iter().map(|(_, _, s)| *s).collect();
+        assert!(t2.iter().any(|s| s.contains("body text")), "open content missing: {t2:?}");
+        assert!(open.height > l.height, "open must be taller: {} !> {}", open.height, l.height);
+    }
+
+    /// Author CSS must not be able to reveal the skipped contents: a browser
+    /// hides them through the shadow tree, where no page rule reaches.
+    #[test]
+    fn author_css_cannot_reveal_a_closed_details() {
+        let l = lay(
+            "<body><style>details:not([open]) > p { display: block !important }</style>\
+             <details><summary>head</summary><p>body text</p></details></body>",
+            800,
+        );
+        let t: Vec<&str> = texts(&l).iter().map(|(_, _, s)| *s).collect();
+        assert!(!t.iter().any(|s| s.contains("body text")), "{t:?}");
+    }
+
+    /// Only the FIRST `<summary>` is the control; a second one is ordinary
+    /// content and is skipped with the rest.
+    #[test]
+    fn only_the_first_summary_is_the_control() {
+        let l = lay(
+            "<body><details><summary>one</summary><summary>two</summary></details></body>",
+            800,
+        );
+        let t: Vec<&str> = texts(&l).iter().map(|(_, _, s)| *s).collect();
+        assert!(t.contains(&"one"), "{t:?}");
+        assert!(!t.contains(&"two"), "{t:?}");
+        assert_eq!(l.hover_boxes.iter().filter(|b| b.toggle).count(), 1);
+    }
+
+    /// No `<summary>` child means the UA provides the legend. Without one the
+    /// element renders as nothing at all and its contents become unreachable
+    /// — worse than showing everything.
+    #[test]
+    fn a_details_without_a_summary_gets_the_ua_legend() {
+        let l = lay("<body><details><p>body text</p></details></body>", 800);
+        let t: Vec<&str> = texts(&l).iter().map(|(_, _, s)| *s).collect();
+        assert!(t.contains(&"Details"), "{t:?}");
+        assert!(!t.iter().any(|s| s.contains("body text")), "{t:?}");
+        assert_eq!(l.hover_boxes.iter().filter(|b| b.toggle).count(), 1, "must be clickable");
+    }
+
+    /// A `<summary>` outside a `<details>` is a plain block: no marker, and
+    /// nothing to click.
+    #[test]
+    fn a_stray_summary_is_a_plain_block() {
+        let l = lay("<body><summary>lonely</summary></body>", 800);
+        assert!(texts(&l).iter().any(|(_, _, s)| *s == "lonely"));
+        assert_eq!(l.hover_boxes.iter().filter(|b| b.toggle).count(), 0);
+    }
+
+    /// The marker is drawn, points the right way, and stays clickable when the
+    /// page removes it — most pages write `summary { list-style: none }`.
+    #[test]
+    fn the_disclosure_marker_turns_and_the_box_stays_clickable() {
+        let closed = lay("<body><details><summary>x</summary><p>y</p></details></body>", 800);
+        let open = lay("<body><details open><summary>x</summary><p>y</p></details></body>", 800);
+        // A right-pointing triangle is columns (w == 1), a down-pointing one
+        // is rows (h == 1).
+        let cols = |l: &Layout| {
+            l.ops.iter().filter(|o| matches!(o, DrawOp::Rect { w: 1, h, .. } if *h > 1)).count()
+        };
+        let rows = |l: &Layout| {
+            l.ops.iter().filter(|o| matches!(o, DrawOp::Rect { h: 1, w, .. } if *w > 1)).count()
+        };
+        assert!(cols(&closed) > 0 && rows(&closed) == 0, "closed must point right");
+        assert!(rows(&open) > 0 && cols(&open) == 0, "open must point down");
+
+        let bare = lay(
+            "<body><style>summary { list-style: none }</style>\
+             <details><summary>x</summary><p>y</p></details></body>",
+            800,
+        );
+        assert_eq!(cols(&bare), 0, "the page removed the marker");
+        assert_eq!(
+            bare.hover_boxes.iter().filter(|b| b.toggle).count(),
+            1,
+            "…but the section must still be openable"
+        );
+    }
+
+    /// The toggle rect covers the summary, and hit-testing finds it there and
+    /// not over the rest of the page.
+    #[test]
+    fn hit_toggle_finds_the_summary_and_only_there() {
+        let l = lay("<body><details open><summary>head</summary><p>body</p></details></body>", 800);
+        let b = *l.hover_boxes.iter().find(|b| b.toggle).expect("a toggle rect");
+        assert_eq!(l.hit_toggle(b.x + b.w / 2, b.y + b.h / 2), Some(b.seq));
+        assert_eq!(l.hit_toggle(b.x + b.w / 2, b.y + b.h + 40), None, "below the summary");
+    }
+
+    /// `display: contents` does NOT reparent: a `<summary>` under an unboxed
+    /// `<div>` is still not the `<details>`' control, and the whole `<div>` is
+    /// skipped with everything in it (css-display-3, and the wpt reftest
+    /// `display-contents-details-001`). The mirror risk is the one that would
+    /// hurt: if the ancestor chain dropped unboxed elements, every grandchild
+    /// of a closed `<details>` would look like a child and vanish.
+    #[test]
+    fn display_contents_does_not_reparent_a_summary() {
+        let l = lay(
+            "<body><details><div style=\'display:contents\'>\
+             <summary>inner</summary>deep</div></details></body>",
+            800,
+        );
+        let t: Vec<&str> = texts(&l).iter().map(|(_, _, s)| *s).collect();
+        assert!(t.contains(&"Details"), "the UA legend stands in: {t:?}");
+        assert!(!t.contains(&"inner"), "a nested summary is not the control: {t:?}");
+        assert!(!t.iter().any(|s| s.contains("deep")), "{t:?}");
+
+        // The mirror: an OPEN details must still show what is nested under an
+        // unboxed child.
+        let o = lay(
+            "<body><details open><summary>head</summary>\
+             <div style=\'display:contents\'><p>deep</p></div></details></body>",
+            800,
+        );
+        let t2: Vec<&str> = texts(&o).iter().map(|(_, _, s)| *s).collect();
+        assert!(t2.iter().any(|s| s.contains("deep")), "{t2:?}");
+    }
+
+    /// A grandchild is not a child: only the `<details>`' own element children
+    /// are skipped, and they take their subtrees with them because they are
+    /// `display:none`. If the ancestor chain were ever flattened this test
+    /// would keep the page from silently losing everything one level down.
+    #[test]
+    fn only_direct_children_of_a_details_are_skipped() {
+        let l = lay(
+            "<body><section><details open><summary>head</summary>\
+             <div><p>deep</p></div></details></section></body>",
+            800,
+        );
+        let t: Vec<&str> = texts(&l).iter().map(|(_, _, s)| *s).collect();
+        assert!(t.iter().any(|s| s.contains("deep")), "{t:?}");
+    }
+
+    /// A `<dialog>` without `open` is not rendered (HTML §4.11.4). Left
+    /// visible, a modal's content lands in the middle of the flow — and the
+    /// page's own `dialog[open]` rules would never have hidden it, because a
+    /// browser does that in the UA sheet.
+    #[test]
+    fn a_dialog_renders_only_when_open() {
+        let shut = lay("<body><p>page</p><dialog><p>modal</p></dialog></body>", 800);
+        let t: Vec<&str> = texts(&shut).iter().map(|(_, _, s)| *s).collect();
+        assert!(t.contains(&"page"), "{t:?}");
+        assert!(!t.contains(&"modal"), "{t:?}");
+
+        let open = lay("<body><p>page</p><dialog open><p>modal</p></dialog></body>", 800);
+        let t2: Vec<&str> = texts(&open).iter().map(|(_, _, s)| *s).collect();
+        assert!(t2.contains(&"modal"), "{t2:?}");
+
+        // Unlike a closed `<details>`, this one IS an ordinary UA rule: a page
+        // that shows its dialog with CSS still can.
+        let forced = lay(
+            "<body><style>dialog { display: block }</style>\
+             <dialog><p>modal</p></dialog></body>",
+            800,
+        );
+        assert!(texts(&forced).iter().any(|(_, _, s)| *s == "modal"));
     }
 
     fn rects(l: &Layout) -> Vec<(i32, i32, i32, i32, Rgb)> {
