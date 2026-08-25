@@ -58,6 +58,20 @@ pub struct Engine {
     css_img_budget: core::cell::Cell<usize>,
     /// Remaining decoded-BGRA budget for the current page (streaming decode).
     img_budget: core::cell::Cell<usize>,
+    /// Decoded `<img>` pixels kept ACROSS navigations, keyed by the RESOLVED
+    /// url and oldest-first.
+    ///
+    /// Keyed by url and NOT by the `src` attribute, which is what `images` uses
+    /// — `/logo.png` is a different picture on a different host, and a cache
+    /// that confused the two would show one site's image on another's page.
+    ///
+    /// `Rc` is what makes it cheap: an image the next page uses again costs
+    /// its pixels ONCE, shared between this cache and the page map. Only
+    /// pictures no live page holds are paid for twice, and `IMG_CACHE_BUDGET`
+    /// bounds those.
+    img_cache: RefCell<Vec<(alloc::string::String, alloc::rc::Rc<crate::image::Image>)>>,
+    /// Bytes of BGRA currently in `img_cache`.
+    img_cache_bytes: core::cell::Cell<usize>,
     /// Viewport height (px) — the initial containing block's height, which
     /// `top`/`bottom`/`height` percentages on root-level absolutely positioned
     /// boxes resolve against (CSS 2.1 §10.1). Device state like `theme`, not
@@ -135,6 +149,8 @@ impl Engine {
             css_images: RefCell::new(HashMap::new()),
             css_img_budget: core::cell::Cell::new(crate::image::CSS_BUDGET),
             img_budget: core::cell::Cell::new(crate::image::TOTAL_BUDGET),
+            img_cache: RefCell::new(Vec::new()),
+            img_cache_bytes: core::cell::Cell::new(0),
             // 600 keeps the historical behaviour of the reftest canvas for any
             // caller that never sets it.
             viewport_h: core::cell::Cell::new(600),
@@ -333,6 +349,8 @@ impl Engine {
     /// per-page budget. The shell then fetches + `add_image`s each `<img>` ONE
     /// AT A TIME (streaming) so the compressed bytes never pile up — decode the
     /// image, keep only its pixels, reuse the same fetch scratch for the next.
+    /// `images_begin` clears the PAGE map, never the cross-navigation cache —
+    /// that is the whole point of the cache surviving a navigation.
     pub fn images_begin(&mut self) {
         self.images.get_mut().clear();
         self.img_budget.set(crate::image::TOTAL_BUDGET);
@@ -350,6 +368,80 @@ impl Engine {
     /// placeholder). Returns whether the image was stored.
     pub fn add_image(&mut self, src: &str, bytes: &[u8]) -> bool {
         self.store_image(src, bytes)
+    }
+
+    /// As [`Self::add_image`], and also keep the pixels under `url` for the
+    /// next navigation. The shell resolves the url; the engine never sees a
+    /// base to resolve against.
+    pub fn add_image_cached(&mut self, src: &str, url: &str, bytes: &[u8]) -> bool {
+        if !self.store_image(src, bytes) {
+            return false;
+        }
+        let Some(img) = self.images.borrow().get(src).cloned() else { return true };
+        self.cache_put(url, img);
+        true
+    }
+
+    /// Serve `pairs` of `(src, url)` from the cross-navigation cache.
+    ///
+    /// Returns the `src`s that were served — the shell drops those from its
+    /// fetch queue. Called BEFORE the first layout, which is where it pays
+    /// twice: no request, no decode, and the box is definite on the first
+    /// layout instead of being guessed and moving the page later.
+    pub fn adopt_cached(&mut self, pairs: &[(alloc::string::String, alloc::string::String)])
+        -> Vec<alloc::string::String>
+    {
+        let mut served = Vec::new();
+        for (src, url) in pairs {
+            let hit = self.img_cache.borrow().iter()
+                .find(|(u, _)| u == url)
+                .map(|(_, img)| img.clone());
+            if let Some(img) = hit {
+                // Charged against the page budget like any other image: the
+                // pixels are live for this page whether or not they are shared.
+                let n = img.bgra.len();
+                if n > self.img_budget.get() {
+                    continue;
+                }
+                self.img_budget.set(self.img_budget.get() - n);
+                self.images.get_mut().insert(src.clone(), img);
+                served.push(src.clone());
+            }
+        }
+        served
+    }
+
+    /// Insert into the cross-navigation cache, oldest-first, evicting from the
+    /// front until the budget holds. An evicted entry's pixels stay alive as
+    /// long as a page still references them (`Rc`) — eviction bounds the
+    /// CACHE, not the page.
+    fn cache_put(&mut self, url: &str, img: alloc::rc::Rc<crate::image::Image>) {
+        let n = img.bgra.len();
+        if n > crate::image::IMG_CACHE_BUDGET {
+            return; // one picture may not evict the whole cache for itself
+        }
+        {
+            let mut c = self.img_cache.borrow_mut();
+            if let Some(pos) = c.iter().position(|(u, _)| u == url) {
+                let (_, old) = c.remove(pos);
+                self.img_cache_bytes.set(self.img_cache_bytes.get() - old.bgra.len());
+            }
+            c.push((alloc::string::String::from(url), img));
+        }
+        self.img_cache_bytes.set(self.img_cache_bytes.get() + n);
+        while self.img_cache_bytes.get() > crate::image::IMG_CACHE_BUDGET {
+            let mut c = self.img_cache.borrow_mut();
+            if c.is_empty() {
+                break;
+            }
+            let (_, old) = c.remove(0);
+            self.img_cache_bytes.set(self.img_cache_bytes.get() - old.bgra.len());
+        }
+    }
+
+    /// Bytes and entries the cross-navigation image cache holds, for the trace.
+    pub fn img_cache_stats(&self) -> (usize, usize) {
+        (self.img_cache.borrow().len(), self.img_cache_bytes.get())
     }
 
     /// The one place `<img>` pixels enter the store, shared by the shell's
@@ -1175,6 +1267,55 @@ fn blit_image(out: &mut [u8], w: i32, h: i32, dx: i32, dy: i32, dw: i32, dh: i32
 mod tests {
     use super::*;
     use crate::layout::{Rgb, Theme};
+
+    /// A decodable image in plain bytes — SVG is one of the formats
+    /// `image::decode` accepts, so a test needs no binary fixture.
+    const RED_10: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="red"/></svg>"#;
+
+    #[test]
+    fn the_image_cache_is_keyed_by_url_not_by_src() {
+        let mut eng = Engine::new();
+        assert!(eng.add_image_cached("logo.png", "https://a.example/logo.png", RED_10));
+        eng.images_begin(); // a navigation: the page map goes, the cache stays
+
+        // The SAME src string on ANOTHER host is another picture. Serving it
+        // from the cache would put one site's image on another site's page.
+        let miss = eng.adopt_cached(&[(
+            alloc::string::String::from("logo.png"),
+            alloc::string::String::from("https://b.example/logo.png"),
+        )]);
+        assert!(miss.is_empty(), "same src, other host -> miss");
+
+        // The same URL under a different src is the same picture.
+        let hit = eng.adopt_cached(&[(
+            alloc::string::String::from("assets/l.png"),
+            alloc::string::String::from("https://a.example/logo.png"),
+        )]);
+        assert_eq!(hit.len(), 1, "same url -> hit");
+        assert_eq!(hit[0], "assets/l.png");
+    }
+
+    #[test]
+    fn an_adopted_image_makes_the_box_definite() {
+        // The point of adopting BEFORE the first layout: with the pixels
+        // already here the box is not guessed, so the arriving image never
+        // moves the page — which is the full re-layout that cost 1110-1710 ms
+        // on the device.
+        let mut eng = Engine::new();
+        eng.add_image_cached("/x.svg", "https://a.example/x.svg", RED_10);
+        eng.images_begin();
+        eng.adopt_cached(&[(
+            alloc::string::String::from("/x.svg"),
+            alloc::string::String::from("https://a.example/x.svg"),
+        )]);
+        let l = eng.layout("<body><img src=\"/x.svg\"></body>", 800);
+        assert!(l.guessed_image_srcs.is_empty(), "cached pixels -> definite box, no re-layout");
+
+        // Without the cache the same markup has to guess.
+        let mut cold = Engine::new();
+        let l2 = cold.layout("<body><img src=\"/x.svg\"></body>", 800);
+        assert_eq!(l2.guessed_image_srcs.len(), 1, "no pixels -> guessed box");
+    }
 
     /// An inline SVG `data:` URI, quote-safe: the SVG's own attribute quotes
     /// are percent-encoded, so the URI survives being nested inside a CSS

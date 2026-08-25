@@ -898,6 +898,22 @@ fn begin_images(engine: &mut Engine) -> Vec<String> {
             pending.push(src.clone());
         }
     }
+    // Serve what the last pages already decoded, BEFORE the first layout.
+    // That is where it pays twice: no request, no decode — and the box is
+    // DEFINITE on the very first layout instead of being guessed and moving
+    // the page a second later.
+    //
+    // Keyed by the resolved url, because the `src` attribute alone is
+    // ambiguous across sites (`/logo.png`).
+    let pairs: Vec<(String, String)> =
+        pending.iter().map(|s| (s.clone(), resolve(url_str(), s))).collect();
+    let served = engine.adopt_cached(&pairs);
+    if !served.is_empty() {
+        pending.retain(|s| !served.iter().any(|d| d == s));
+        let (n, bytes) = engine.img_cache_stats();
+        log(&alloc::format!("[beak] images: {} from cache, {} to fetch (cache {} imgs, {} KiB)",
+            served.len(), pending.len(), n, bytes / 1024));
+    }
     bump_content_gen("images-begin"); // lay out with placeholders
     mark_dirty();
     pending
@@ -934,6 +950,21 @@ fn fetch_next_images(
     if pending.is_empty() {
         return;
     }
+    // Layout-affecting first. An image whose box was GUESSED moves the page
+    // when it lands, and that costs a FULL re-layout wherever it sits —
+    // measured on the device: 1110-1710 ms on an article, against ~540 ms for
+    // the whole page's image traffic. Fetching it in the FIRST batch pays that
+    // once, immediately, instead of after two repaints the re-layout then
+    // throws away — and the page settles before the reader has started
+    // reading. On de.wikipedia/Stansstad exactly ONE `<img>` of 17 is such a
+    // box (a MediaWiki timeline, no width/height); the Hauptseite has none,
+    // which is why only the article ever showed the jump.
+    if let Some(l) = layout {
+        if !l.guessed_image_srcs.is_empty() {
+            // Stable, so document order survives inside each group.
+            pending.sort_by_key(|s| !l.guessed_image_srcs.iter().any(|g| g == s));
+        }
+    }
     let take = pending.len().min(IMG_BATCH);
     let srcs: Vec<String> = pending.drain(..take).collect();
     let urls: Vec<String> = srcs.iter().map(|s| resolve(url_str(), s)).collect();
@@ -941,12 +972,14 @@ fn fetch_next_images(
     let spans = fetch_batch(&urls, dst, IMG_FETCH_CAP);
     let mut arrived: Vec<&str> = Vec::new();
     let mut moved = false;
-    for (src, (off, n)) in srcs.iter().zip(spans) {
+    for ((src, url), (off, n)) in srcs.iter().zip(urls.iter()).zip(spans) {
         if n == 0 {
             continue; // failed or did not fit → keeps its placeholder
         }
         let bytes = unsafe { core::slice::from_raw_parts(dst.add(off) as *const u8, n) };
-        engine.add_image(src, bytes); // decode now, drop compressed
+        // Decode now, drop the compressed bytes — and keep the pixels under
+        // their url so the next navigation to this page needs neither.
+        engine.add_image_cached(src, url, bytes);
         arrived.push(src.as_str());
         if layout.is_some_and(|l| l.guessed_image_srcs.iter().any(|g| g == src)) {
             moved = true;
