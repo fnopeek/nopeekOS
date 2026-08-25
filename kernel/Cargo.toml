@@ -1,6 +1,6 @@
 [package]
 name = "nopeekos-kernel"
-version = "0.305.0"
+version = "0.306.0"
 edition = "2024"
 authors = ["nopeek"]
 description = "nopeekOS – AI-native Operating System Kernel"
@@ -22,6 +22,15 @@ bitflags = "2.13"     # Flag-basierte Enums
 version = "1.1"
 default-features = false
 features = ["prefer-btree-collections"]
+
+# miniz_oxide: no_std inflate fuer `Content-Encoding: gzip` auf dem
+# Empfangsweg. Gemessen 4,1-9,9x weniger Bytes je Seite des beak-Zielkorpus
+# (docs/plan/JS_SCOPE_CONTENT_WEB.md). Dieselbe Crate, die iris/wallpaper/
+# beak-engine fuer PNG benutzen.
+[dependencies.miniz_oxide]
+version = "0.9"
+default-features = false
+features = ["with-alloc"]
 
 [dependencies.blake3]
 version = "1.8"
