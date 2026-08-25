@@ -574,6 +574,41 @@ hinter der Tabelle meldet `TABLE_OUT_OF_BOUNDS`, und `INT_MIN % -1` meldet
 gar nichts, weil es antworten muss. Auf dem heissen Pfad kostet das nichts —
 es sind ausschliesslich kalte Stümpfe.
 
+### Am Gerät gelaufen (v0.308.0/0.308.1)
+
+`forge selftest`: **18/18 wie auf dem Host**, unter QEMU und auf dem Blech —
+Wachseite, Tabellengrenze, Division, `unreachable` und Fuel melden sich mit
+demselben Grund. Und die erzeugte Codegrösse ist auf allen drei Maschinen
+**byte-identisch**: beak 3 876 815 B, python 17 036 090 B.
+
+Beim Übersetzen zeigte sich etwas, das man nur im Verhältnis sieht. Auf dem
+Entwicklungsrechner skaliert es linear mit der Ausgabegrösse (python 4,4× so
+gross, 4,25× so lang); am Gerät brauchte dasselbe Verhältnis **33,7×**. Ein
+konstanter Aufschlag kann eine Kurve nicht krümmen — was sie krümmt, muss mit
+der Aufgabengrösse mitwachsen und nur auf einer Seite existieren. Das war der
+Kernel-Allokator (`heap.rs`, eine einfach verkettete Freiliste) in Verbindung
+mit einem Entwurfsfehler in forge: es hielt alle 9 939 Funktionspuffer
+gleichzeitig am Leben und baute erst am Ende zusammen.
+
+Der Linker nimmt die Bytes jeder Funktion jetzt sofort und gibt ihren Puffer
+zurück:
+
+| | Host | QEMU vorher | QEMU nachher | Blech vorher | Blech nachher |
+|---|---:|---:|---:|---:|---:|
+| beak | 28 ms | 280 | **100** | 490 | **240** |
+| python | 119 ms | 5300 | **530** | 16 510 | **1450** |
+
+Das Verhältnis python/beak fiel dabei von 33,7× auf 6,0× (Blech) und von
+18,9× auf 5,3× (QEMU) — der Host liegt bei 4,25×. **Auf dem Host war von
+alldem nichts zu messen**, dort war der Fix sogar fünf Millisekunden
+schlechter. Wer ihn dort bewertet hätte, hätte ihn verworfen.
+
+Nebenbei ordnet sich damit auch QEMU ein: das Blech ist 2,78× langsamer als
+der Entwicklungsrechner, 240 ms / 2,78 sind 86 ms, und QEMU misst 100. Dieses
+QEMU läuft also praktisch nativ, und der verbleibende Abstand zum Host von
+rund 3,3× ist nicht Hardware, sondern die Kernel-Umgebung — dieselbe einfach
+verkettete Freiliste, nur nicht mehr quadratisch belastet.
+
 ### Was das am Gerät hiesse
 
 Mit dem gemessenen Verhältnis auf die bekannten Gerätezahlen angewandt —
