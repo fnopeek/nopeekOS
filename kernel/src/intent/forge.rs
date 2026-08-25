@@ -125,13 +125,17 @@ pub fn intent_forge(args: &str) {
     }
     let instrs: u64 = m.plan.total_instrs();
 
+    // Tenths, printed with the point where it belongs — the value is around
+    // eight, and "84" reads like a different number entirely.
+    let tenths = if instrs > 0 { m.code.len() as u64 * 10 / instrs } else { 0 };
     kprintln!(
-        "[npk] forge: {}/{} Funktionen, {} Instruktionen -> {} B x86 ({} B je Instr)",
+        "[npk] forge: {}/{} Funktionen, {} Instruktionen -> {} B x86 ({}.{} B je Instr)",
         done,
         total,
         instrs,
         m.code.len(),
-        if instrs > 0 { m.code.len() as u64 * 10 / instrs } else { 0 }
+        tenths / 10,
+        tenths % 10
     );
     kprint!("[npk] forge: {} ms", dt);
     if instrs > 0 && dt > 0 {

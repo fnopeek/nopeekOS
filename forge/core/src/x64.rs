@@ -84,6 +84,15 @@ impl Asm {
         Self::default()
     }
 
+    /// Start with room for `n` bytes. A single-pass generator knows roughly
+    /// how much it will emit, and growing a buffer is pure copying.
+    pub fn with_capacity(n: usize) -> Self {
+        Asm {
+            code: Vec::with_capacity(n),
+            open: 0,
+        }
+    }
+
     pub fn pos(&self) -> usize {
         self.code.len()
     }

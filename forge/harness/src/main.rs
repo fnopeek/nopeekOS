@@ -152,6 +152,7 @@ fn report_roadmap(f: &str) {
     };
     // The headline comes from the generator, not from a list of opcode names:
     // a function counts only when `compile()` actually produced code for it.
+    let t0 = std::time::Instant::now();
     let m = match forge_core::compile(&bytes) {
         Ok(m) => m,
         Err(e) => {
@@ -159,6 +160,7 @@ fn report_roadmap(f: &str) {
             return;
         }
     };
+    let compile_ms = t0.elapsed().as_secs_f64() * 1000.0;
     let p = &m.plan;
     let (mut done_fn, mut done_instr) = (0usize, 0u64);
     let mut blocked: BTreeMap<&str, usize> = BTreeMap::new();
@@ -236,6 +238,7 @@ fn report_roadmap(f: &str) {
         .filter(|(o, _)| matches!(o, forge_core::codegen::Outcome::Done(_)))
         .map(|(_, b)| b.instrs as u64)
         .sum();
+    println!("  uebersetzt in {compile_ms:.0} ms");
     println!(
         "  erzeugt: {} B x86 fuer {} wasm-Instruktionen ({:.1} B je Instruktion)",
         m.code.len(),

@@ -384,8 +384,9 @@ impl CompiledModule {
 /// Validate and generate. A function that meets an opcode the generator does
 /// not emit comes back as `Unsupported(name)` — never as wrong code.
 pub fn compile(wasm: &[u8]) -> Result<CompiledModule, Error> {
-    let (plan, funcs) = walk(wasm, true)?;
-    let l = link(&plan, &funcs);
+    let mut lk = Linker::new(wasm.len());
+    let (plan, funcs) = walk(wasm, Some(&mut lk))?;
+    let l = lk.finish(&plan, &funcs);
     Ok(CompiledModule {
         plan,
         funcs,
@@ -411,108 +412,158 @@ struct Linked {
     de_entry: usize,
 }
 
-fn link(plan: &ModulePlan, funcs: &[codegen::Outcome]) -> Linked {
-    let mut code: Vec<u8> = Vec::new();
-    // The trampoline first, so its offset is trivially known, then the trap
-    // routine right behind it.
-    let entry = {
+/// Places functions as they come out of the generator, instead of collecting
+/// them all and concatenating at the end.
+///
+/// The difference is not tidiness. Holding every function's buffer until the
+/// end means thousands of live blocks in a heap whose free list is walked on
+/// every allocation — and on the device that turned a translation that scales
+/// linearly with output size into one that scales eight times worse. Taking
+/// each function's bytes immediately, and letting its buffer go, keeps the
+/// number of live blocks roughly flat no matter how large the module is.
+struct Linker {
+    code: Vec<u8>,
+    offsets: Vec<Option<usize>>,
+    /// (offset of the rel32, target function index) — absolute in `code`.
+    relocs: Vec<(usize, u32)>,
+    trap_relocs: Vec<usize>,
+    entry_offset: usize,
+    trap_routine: usize,
+    pf_entry: usize,
+    de_entry: usize,
+}
+
+impl Linker {
+    /// `wasm_len` only sizes the first allocation. Generated code runs between
+    /// one and a half and two and a half times the whole module's bytes, so
+    /// twice is a guess that usually holds and never costs more than one
+    /// growth if it does not.
+    fn new(wasm_len: usize) -> Linker {
+        let mut code: Vec<u8> = Vec::with_capacity(wasm_len * 2 + 4096);
+
+        let entry_offset = 0usize;
         let mut a = x64::Asm::new();
         codegen::emit_entry(&mut a);
         code.extend_from_slice(&a.finish().unwrap_or_default());
-        0usize
-    };
-    let trap_routine = {
-        let at = code.len();
+
+        let trap_routine = code.len();
         let mut a = x64::Asm::new();
         codegen::emit_trap_routine(&mut a);
         code.extend_from_slice(&a.finish().unwrap_or_default());
-        at
-    };
-    // One entry per processor fault the generator relies on. A handler only
-    // has to point the interrupted instruction pointer at the right one.
-    let mut fault_entry = |code_val: u32, code: &mut Vec<u8>| -> usize {
-        let at = code.len();
-        let mut a = x64::Asm::new();
-        a.mov_r32_imm32(x64::Reg::Rax, code_val as i32);
-        let hole = a.jmp_rel32_blank();
-        let bytes = a.finish().unwrap_or_default();
-        code.extend_from_slice(&bytes);
-        let here = at + hole;
-        let rel = trap_routine as i64 - (here as i64 + 4);
-        code[here..here + 4].copy_from_slice(&(rel as i32).to_le_bytes());
-        at
-    };
-    let pf_entry = fault_entry(trap::MEMORY_OUT_OF_BOUNDS, &mut code);
-    let de_entry = fault_entry(trap::DIVIDE_ERROR, &mut code);
-    let mut offsets: Vec<Option<usize>> = Vec::with_capacity(funcs.len());
 
-    for out in funcs {
-        match out {
-            codegen::Outcome::Done(cf) => {
-                offsets.push(Some(code.len()));
-                code.extend_from_slice(&cf.code);
-            }
-            codegen::Outcome::Unsupported(_) => offsets.push(None),
-        }
-    }
-
-    // Where a call to a function the generator refused lands. It reports
-    // itself like any other trap instead of faulting.
-    let trap = code.len();
-    {
-        let mut a = x64::Asm::new();
-        a.mov_r32_imm32(x64::Reg::Rax, trap::UNCOMPILED as i32);
-        let at = a.jmp_rel32_blank();
-        let bytes = a.finish().unwrap_or_default();
-        let here = trap + at;
-        code.extend_from_slice(&bytes);
-        let rel = trap_routine as i64 - (here as i64 + 4);
-        code[here..here + 4].copy_from_slice(&(rel as i32).to_le_bytes());
-    }
-
-    let n_imported = plan.imported_funcs.len() as u32;
-    for (i, out) in funcs.iter().enumerate() {
-        let codegen::Outcome::Done(cf) = out else {
-            continue;
+        // One entry per processor fault the generator relies on. A handler
+        // only has to point the interrupted instruction pointer at the right
+        // one; the entry names the reason itself.
+        let mut fault_entry = |code: &mut Vec<u8>, reason: u32| -> usize {
+            let at = code.len();
+            let mut a = x64::Asm::new();
+            a.mov_r32_imm32(x64::Reg::Rax, reason as i32);
+            let hole = a.jmp_rel32_blank();
+            let bytes = a.finish().unwrap_or_default();
+            code.extend_from_slice(&bytes);
+            let here = at + hole;
+            let rel = trap_routine as i64 - (here as i64 + 4);
+            code[here..here + 4].copy_from_slice(&(rel as i32).to_le_bytes());
+            at
         };
-        let Some(base) = offsets[i] else { continue };
-        for &at in &cf.trap_relocs {
-            let at = base + at;
-            let rel = trap_routine as i64 - (at as i64 + 4);
-            code[at..at + 4].copy_from_slice(&(rel as i32).to_le_bytes());
-        }
-        for r in &cf.relocs {
-            let dst = r
-                .target
-                .checked_sub(n_imported)
-                .and_then(|d| offsets.get(d as usize).copied().flatten())
-                .unwrap_or(trap);
-            let at = base + r.at;
-            let rel = dst as i64 - (at as i64 + 4);
-            code[at..at + 4].copy_from_slice(&(rel as i32).to_le_bytes());
+        let pf_entry = fault_entry(&mut code, trap::MEMORY_OUT_OF_BOUNDS);
+        let de_entry = fault_entry(&mut code, trap::DIVIDE_ERROR);
+
+        Linker {
+            code,
+            offsets: Vec::new(),
+            relocs: Vec::new(),
+            trap_relocs: Vec::new(),
+            entry_offset,
+            trap_routine,
+            pf_entry,
+            de_entry,
         }
     }
-    Linked {
-        code,
-        offsets,
-        trap_offset: trap,
-        entry_offset: entry,
-        trap_routine,
-        pf_entry,
-        de_entry,
+
+    /// Take one function's bytes and let go of its buffer.
+    fn push(&mut self, out: &mut codegen::Outcome) {
+        let codegen::Outcome::Done(cf) = out else {
+            self.offsets.push(None);
+            return;
+        };
+        let base = self.code.len();
+        self.offsets.push(Some(base));
+        self.code.extend_from_slice(&cf.code);
+        for r in &cf.relocs {
+            self.relocs.push((base + r.at, r.target));
+        }
+        for at in &cf.trap_relocs {
+            self.trap_relocs.push(base + at);
+        }
+        // Handed over: the module owns these bytes now, and one fewer live
+        // block is one fewer stop on every future walk of the free list.
+        cf.code = Vec::new();
+        cf.relocs = Vec::new();
+        cf.trap_relocs = Vec::new();
+    }
+
+    fn finish(mut self, plan: &ModulePlan, _funcs: &[codegen::Outcome]) -> Linked {
+        // Where a call to a function the generator refused lands. It reports
+        // itself like any other trap instead of faulting.
+        let trap = self.code.len();
+        {
+            let mut a = x64::Asm::new();
+            a.mov_r32_imm32(x64::Reg::Rax, trap::UNCOMPILED as i32);
+            let hole = a.jmp_rel32_blank();
+            let bytes = a.finish().unwrap_or_default();
+            let here = trap + hole;
+            self.code.extend_from_slice(&bytes);
+            let rel = self.trap_routine as i64 - (here as i64 + 4);
+            self.code[here..here + 4].copy_from_slice(&(rel as i32).to_le_bytes());
+        }
+
+        for at in &self.trap_relocs {
+            let rel = self.trap_routine as i64 - (*at as i64 + 4);
+            self.code[*at..*at + 4].copy_from_slice(&(rel as i32).to_le_bytes());
+        }
+
+        let n_imported = plan.imported_funcs.len() as u32;
+        for (at, target) in &self.relocs {
+            let dst = target
+                .checked_sub(n_imported)
+                .and_then(|d| self.offsets.get(d as usize).copied().flatten())
+                .unwrap_or(trap);
+            let rel = dst as i64 - (*at as i64 + 4);
+            self.code[*at..*at + 4].copy_from_slice(&(rel as i32).to_le_bytes());
+        }
+
+        Linked {
+            code: self.code,
+            offsets: self.offsets,
+            trap_offset: trap,
+            entry_offset: self.entry_offset,
+            trap_routine: self.trap_routine,
+            pf_entry: self.pf_entry,
+            de_entry: self.de_entry,
+        }
     }
 }
 
+/// The loop the code generator will live in: read an operator, hand it to the
+/// validator, then emit. Here it only measures — but the shape is final.
 /// Validate a module against `features()` and collect what the code generator
 /// needs. One pass: the validator's type stack is the same one the register
 /// allocator will ride on, so nothing is walked twice.
 pub fn plan(wasm: &[u8]) -> Result<ModulePlan, Error> {
-    Ok(walk(wasm, false)?.0)
+    Ok(walk(wasm, None)?.0)
 }
 
-fn walk(wasm: &[u8], generate: bool) -> Result<(ModulePlan, Vec<codegen::Outcome>), Error> {
+fn walk(
+    wasm: &[u8],
+    mut lk: Option<&mut Linker>,
+) -> Result<(ModulePlan, Vec<codegen::Outcome>), Error> {
+    let generate = lk.is_some();
     let mut out: Vec<codegen::Outcome> = Vec::new();
     let mut plan = ModulePlan::default();
+    // One buffer for the operator list, reused for every function. A fresh
+    // one per function is ten thousand allocations that say nothing.
+    let mut ops_buf: Vec<Operator> = Vec::new();
     let mut validator = Validator::new_with_features(features());
     let mut allocs = FuncValidatorAllocations::default();
 
@@ -633,11 +684,16 @@ fn walk(wasm: &[u8], generate: bool) -> Result<(ModulePlan, Vec<codegen::Outcome
 
         if let ValidPayload::Func(to_validate, body) = valid {
             let mut fv = to_validate.into_validator(core::mem::take(&mut allocs));
-            let (fp, ops) = walk_body(&mut fv, &body, generate)?;
+            ops_buf.clear();
+            let fp = walk_body(&mut fv, &body, generate, &mut ops_buf)?;
             allocs = fv.into_allocations();
 
-            if generate {
-                out.push(generate_one(&plan, &fp, &body, &ops));
+            if let Some(l) = lk.as_deref_mut() {
+                let mut o = generate_one(&plan, &fp, &body, &ops_buf);
+                // Straight into the module buffer, and the function's own
+                // buffer goes back to the heap right away.
+                l.push(&mut o);
+                out.push(o);
             }
             plan.bodies.push(fp);
         }
@@ -681,14 +737,12 @@ fn generate_one(
     codegen::compile_func(params, results, &decls, ops, &m)
 }
 
-/// The loop the code generator will live in: read an operator, hand it to the
-/// validator, then emit. Here it only measures — but the shape is final.
 fn walk_body<'a, T: wasmparser::WasmModuleResources>(
     fv: &mut wasmparser::FuncValidator<T>,
     body: &FunctionBody<'a>,
     keep_ops: bool,
-) -> Result<(FuncPlan, Vec<Operator<'a>>), Error> {
-    let mut kept: Vec<Operator<'a>> = Vec::new();
+    kept: &mut Vec<Operator<'a>>,
+) -> Result<FuncPlan, Error> {
     let mut p = FuncPlan {
         func_index: fv.index(),
         ..Default::default()
@@ -749,7 +803,7 @@ fn walk_body<'a, T: wasmparser::WasmModuleResources>(
     }
 
     ops.finish().map_err(reject)?;
-    Ok((p, kept))
+    Ok(p)
 }
 
 /// Accesses to linear memory — the ones that ride the guard-page reservation
