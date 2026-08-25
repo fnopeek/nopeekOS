@@ -428,6 +428,54 @@ impl Engine {
         self.sheet.borrow().first().is_some_and(|(_, s)| !s.hover_set.is_empty())
     }
 
+    /// Open/close the `<details>` owning the `<summary>` at `seq`
+    /// (`Layout::hit_toggle` names it). Returns whether anything changed — the
+    /// caller re-lays-out only then.
+    ///
+    /// This EDITS the cached document: the `open` content attribute is what
+    /// the state actually is, so `details[open] > summary` in the page's own
+    /// stylesheet gets the right answer for free — rustdoc and MDN both style
+    /// the open state that way. Keeping the state beside the DOM instead would
+    /// have meant two truths and one of them invisible to the cascade.
+    ///
+    /// It lives as long as the parsed document does: navigating away and back
+    /// re-parses and starts closed again, which is what a browser does too.
+    pub fn toggle_details(&self, seq: u32) -> bool {
+        let mut held = self.dom.borrow_mut();
+        let Some((_, dom)) = held.first_mut() else { return false };
+        /// The element whose child subtree holds `seq`.
+        fn parent_of(el: &mut crate::dom::Element, seq: u32) -> Option<&mut crate::dom::Element> {
+            let mine = el.children.iter().any(
+                |c| matches!(c, crate::dom::Node::Element(e) if e.seq == seq),
+            );
+            if mine {
+                return Some(el);
+            }
+            for c in &mut el.children {
+                if let crate::dom::Node::Element(e) = c {
+                    if let Some(f) = parent_of(e, seq) {
+                        return Some(f);
+                    }
+                }
+            }
+            None
+        }
+        let Some(det) = parent_of(&mut dom.root, seq) else { return false };
+        if det.tag != "details" {
+            return false;
+        }
+        match det.attrs.iter().position(|(k, _)| k == "open") {
+            Some(i) => {
+                det.attrs.remove(i);
+            }
+            None => det.attrs.push((
+                alloc::string::String::from("open"),
+                alloc::string::String::new(),
+            )),
+        }
+        true
+    }
+
     /// Set the page colours (the shell resolves these from the compositor
     /// palette so the page follows light/dark).
     pub fn set_theme(&mut self, theme: Theme) {
@@ -2107,5 +2155,32 @@ mod tests {
         assert_eq!(at(6, 1), (255, 0, 0), "which the background follows");
         assert_eq!(at(6, 21), (255, 0, 0), "the second line carries the background too");
         assert_eq!(at(1, 21), (255, 0, 0), "but not the left border a second time");
+    }
+
+    /// Clicking a `<summary>` opens its section and closing it puts the page
+    /// back. The state is the `open` CONTENT attribute, so the page's own
+    /// `details[open]` rules see it — rustdoc and MDN both style that state.
+    #[test]
+    fn toggling_a_details_opens_and_closes_it() {
+        let html = "<body><details><summary>head</summary><p>body text</p></details></body>";
+        let eng = Engine::new();
+        let shut = eng.layout_ext(html, "", 800);
+        let seq = shut
+            .hover_boxes
+            .iter()
+            .find(|b| b.toggle)
+            .expect("the summary is clickable")
+            .seq;
+
+        assert!(eng.toggle_details(seq), "the click changed something");
+        let open = eng.layout_ext(html, "", 800);
+        assert!(open.height > shut.height, "{} !> {}", open.height, shut.height);
+
+        assert!(eng.toggle_details(seq));
+        let shut2 = eng.layout_ext(html, "", 800);
+        assert_eq!(shut2.height, shut.height, "closing must return to where it was");
+
+        // A seq that is not a summary changes nothing — an unknown one too.
+        assert!(!eng.toggle_details(u32::MAX), "no such element");
     }
 }

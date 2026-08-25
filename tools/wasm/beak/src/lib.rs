@@ -2021,6 +2021,16 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
                         follow(&href);
                         return true;
                     }
+                    // A `<summary>` opens/closes its section. It comes AFTER
+                    // the control and the link: a link inside a summary
+                    // navigates, which is what a browser does too.
+                    if let Some(seq) = lay.hit_toggle(cx, cy) {
+                        if engine.toggle_details(seq) {
+                            bump_content_gen("details-toggle");
+                            mark_dirty();
+                        }
+                        return true;
+                    }
                 }
             }
             false

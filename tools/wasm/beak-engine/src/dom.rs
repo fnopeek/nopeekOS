@@ -30,9 +30,12 @@ pub struct Element {
     /// as the key: layout skips `display:none` subtrees, so any counter kept
     /// during layout would drift from one kept during a plain DOM walk.
     pub seq: u32,
-    /// Derived from `attrs` ONCE, by `index_attrs` at parse time. The DOM does
-    /// not change afterwards — there is no scripting — but `ElemInfo` used to
-    /// re-derive all of this on every construction, ~30 000× per layout.
+    /// Derived from `attrs` ONCE, by `index_attrs` at parse time. There is no
+    /// scripting, and the two things that DO edit the tree afterwards —
+    /// `picture::resolve` folding a `<source>` into an `<img>`, and
+    /// `Engine::toggle_details` flipping `open` — touch neither class, id nor
+    /// tag, so none of this goes stale. `ElemInfo` used to re-derive all of it
+    /// on every construction, ~30 000× per layout.
     /// Measured by doubling the work: **12.5 % of a whole layout**, spread so
     /// thin across `flow_children` and the cascade that no single function
     /// looked expensive.
@@ -238,7 +241,37 @@ pub fn parse(html: &str) -> Dom {
     }
     let mut root = stack.pop().unwrap();
     imply_html_body(&mut root);
+    imply_details_summary(&mut root, &mut seq);
     Dom { root }
+}
+
+/// "If there is no child summary element, the user agent should provide its own
+/// legend" (HTML §4.11.1). Without one a closed `<details>` renders as NOTHING
+/// — no triangle, no label, no box to click — and its contents are unreachable
+/// rather than merely folded away. That is a worse page than showing
+/// everything, so the control is not optional.
+///
+/// A browser puts this in the shadow tree; we insert it into the DOM, which
+/// costs the `<details>`' own children one position in `:nth-child`. Measured
+/// before choosing: 0 of 533 `<details>` in the page corpus and 4 of 7 in WPT
+/// lack a summary, and none of those is selected by index.
+fn imply_details_summary(root: &mut Element, seq: &mut u32) {
+    fn walk(el: &mut Element, seq: &mut u32) {
+        if el.tag == "details"
+            && !el.children.iter().any(|c| matches!(c, Node::Element(e) if e.tag == "summary"))
+        {
+            *seq += 1;
+            let mut s = Element::new(String::from("summary"), *seq);
+            s.children.push(Node::Text(String::from("Details")));
+            el.children.insert(0, Node::Element(s));
+        }
+        for c in &mut el.children {
+            if let Node::Element(e) = c {
+                walk(e, seq);
+            }
+        }
+    }
+    walk(root, seq);
 }
 
 /// HTML's tree construction inserts `<html>` and `<body>` even when the source
