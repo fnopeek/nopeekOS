@@ -915,13 +915,22 @@ fn begin_images(engine: &mut Engine) -> Vec<String> {
 /// scratch buffer for the next. We never hold all the compressed image bytes
 /// at once (the old `pairs` approach peaked at ~16 blobs → the heap-OOM the
 /// fast keep-alive pool exposed).
-/// `guessed` lists the `src`s whose box the last layout had to guess. Only if
-/// one of THOSE arrives does the page move and a re-layout pay for itself;
-/// everything else is a repaint. That is ~15 ms instead of ~145 ms of engine
-/// work per batch on a real article — and under the wasmi interpreter on the
-/// device, the difference between a page that scrolls while it loads and one
-/// that freezes for seconds at a time.
-fn fetch_next_images(engine: &mut Engine, pending: &mut Vec<String>, guessed: &[String]) {
+/// The last layout's `guessed_image_srcs` lists the `src`s whose box it had to
+/// guess. Only if one of THOSE arrives does the page move and a re-layout pay
+/// for itself; everything else is a repaint. That is ~15 ms instead of ~145 ms
+/// of engine work per batch on a real article — and under the wasmi
+/// interpreter on the device, the difference between a page that scrolls while
+/// it loads and one that freezes for seconds at a time.
+///
+/// `band` is the visible document band `(scroll_y, scroll_y + viewport_h)`.
+/// A repaint is the WHOLE viewport, so an image below the fold is paid for in
+/// full and shows nothing — see `Layout::images_in_band`.
+fn fetch_next_images(
+    engine: &mut Engine,
+    pending: &mut Vec<String>,
+    layout: Option<&Layout>,
+    band: (i32, i32),
+) {
     if pending.is_empty() {
         return;
     }
@@ -930,7 +939,7 @@ fn fetch_next_images(engine: &mut Engine, pending: &mut Vec<String>, guessed: &[
     let urls: Vec<String> = srcs.iter().map(|s| resolve(url_str(), s)).collect();
     let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
     let spans = fetch_batch(&urls, dst, IMG_FETCH_CAP);
-    let mut any = false;
+    let mut arrived: Vec<&str> = Vec::new();
     let mut moved = false;
     for (src, (off, n)) in srcs.iter().zip(spans) {
         if n == 0 {
@@ -938,16 +947,31 @@ fn fetch_next_images(engine: &mut Engine, pending: &mut Vec<String>, guessed: &[
         }
         let bytes = unsafe { core::slice::from_raw_parts(dst.add(off) as *const u8, n) };
         engine.add_image(src, bytes); // decode now, drop compressed
-        any = true;
-        if guessed.iter().any(|g| g == src) {
+        arrived.push(src.as_str());
+        if layout.is_some_and(|l| l.guessed_image_srcs.iter().any(|g| g == src)) {
             moved = true;
         }
     }
-    if any {
-        if moved {
-            bump_content_gen("image-arrived"); // a guessed box moves once the real size lands
-        }
-        mark_dirty(); // otherwise just paint: the display list is unchanged
+    if arrived.is_empty() {
+        return;
+    }
+    if moved {
+        // A guessed box moves once the real size lands: the page below it
+        // shifts and the scroll extent changes, so this one must re-lay-out
+        // wherever it sits.
+        bump_content_gen("image-arrived");
+        mark_dirty();
+        return;
+    }
+    // Pure repaint. Ask first whether it would show anything: measured on the
+    // Hauptseite, ONE navigation paid eight full-viewport repaints (~50 ms
+    // each) for image batches, and the page is 3421 px tall against a ~1000 px
+    // viewport — most of those pictures were below the fold and could not
+    // change a pixel. Scrolling marks the page dirty on its own, so nothing
+    // is lost; it is drawn the moment it can be seen.
+    match layout {
+        Some(l) if !l.images_in_band(&arrived, band.0, band.1) => {}
+        _ => mark_dirty(),
     }
 }
 
@@ -969,7 +993,12 @@ fn images_dirty() -> bool {
 /// concatenates the sheets into one buffer, so the per-sheet base is gone by
 /// here. Absolute and root-relative urls — which is what real sheets ship —
 /// resolve identically either way.
-fn fetch_next_css_images(engine: &Engine, pending: &mut Vec<(u64, String)>) {
+fn fetch_next_css_images(
+    engine: &Engine,
+    pending: &mut Vec<(u64, String)>,
+    layout: Option<&Layout>,
+    band: (i32, i32),
+) {
     if pending.is_empty() {
         return;
     }
@@ -978,16 +1007,24 @@ fn fetch_next_css_images(engine: &Engine, pending: &mut Vec<(u64, String)>) {
     let urls: Vec<String> = want.iter().map(|(_, u)| resolve(url_str(), u)).collect();
     let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
     let spans = fetch_batch(&urls, dst, IMG_FETCH_CAP);
-    let mut any = false;
+    let mut arrived: Vec<u64> = Vec::new();
     for ((key, _), (off, n)) in want.iter().zip(spans) {
         if n == 0 {
             continue; // failed or did not fit → the box stays undecorated
         }
         let bytes = unsafe { core::slice::from_raw_parts(dst.add(off) as *const u8, n) };
-        any |= engine.add_css_image(*key, bytes);
+        if engine.add_css_image(*key, bytes) {
+            arrived.push(*key);
+        }
     }
-    if any {
-        mark_dirty();
+    if arrived.is_empty() {
+        return;
+    }
+    // No `moved` case here at all — a background can never change geometry —
+    // so the visibility question is the only one.
+    match layout {
+        Some(l) if !l.css_images_in_band(&arrived, band.0, band.1) => {}
+        _ => mark_dirty(),
     }
 }
 
@@ -2132,14 +2169,24 @@ pub extern "C" fn _start() {
             css_asked.clear();
         }
         maybe_repaint(&engine, &mut cache, &mut paint_buf, &page.state);
+        // The visible document band, read AFTER the repaint clamped the scroll
+        // offset. Without a canvas the band is everything, so an arriving
+        // image always repaints — the conservative direction.
+        let band = match canvas_rect() {
+            Some((_, _, _, h)) => {
+                let sy = scroll_y();
+                (sy, sy.saturating_add(h))
+            }
+            None => (0, i32::MAX),
+        };
         // Text and layout are on screen now — pull in the next few images,
         // then come back round and paint them. Scrolling keeps working in
-        // between, because a batch is small.
-        let guessed: Vec<String> = cache
-            .as_ref()
-            .map(|(l, _, _, _): &(Layout, i32, i32, u32)| l.guessed_image_srcs.clone())
-            .unwrap_or_default();
-        fetch_next_images(&mut engine, &mut pending_imgs, &guessed);
+        // between, because a batch is small. The layout goes in whole rather
+        // than a cloned `guessed_image_srcs`: it answers both questions this
+        // needs (did a guessed box land, and is the picture even on screen),
+        // and the clone happened every turn of the loop.
+        let layout = cache.as_ref().map(|(l, _, _, _): &(Layout, i32, i32, u32)| l);
+        fetch_next_images(&mut engine, &mut pending_imgs, layout, band);
         // The layout reports which CSS images it needs, so this queue can only
         // be filled AFTER a layout — unlike `<img>`, whose srcs are in the HTML
         // and are queued once by `begin_images`.
@@ -2158,7 +2205,8 @@ pub extern "C" fn _start() {
                 }
             }
         }
-        fetch_next_css_images(&engine, &mut pending_css_imgs);
+        let layout = cache.as_ref().map(|(l, _, _, _): &(Layout, i32, i32, u32)| l);
+        fetch_next_css_images(&engine, &mut pending_css_imgs, layout, band);
         // ALWAYS yield so this worker core can halt — a cooperative fiber that
         // never sleeps pins its core at 100%. A short nap while interacting
         // stays responsive; a longer one when idle keeps the core asleep.

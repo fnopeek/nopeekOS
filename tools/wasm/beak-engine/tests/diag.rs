@@ -1158,3 +1158,57 @@ fn hover_box_dump() {
         }
     }
 }
+
+/// How much does the "is it even visible?" test before a repaint save?
+///
+/// DIMG=<page.html> DCSS=<page.css> DW=1902 DVH=1000 \
+///   cargo test --release --test diag -- --nocapture img_visibility_census
+///
+/// Counts image boxes by where they sit: a batch that lands entirely below the
+/// fold used to cost a full-viewport repaint (~50 ms on the device) and show
+/// nothing.
+#[test]
+fn img_visibility_census() {
+    let Ok(hp) = std::env::var("DIMG") else { return };
+    let css = std::env::var("DCSS").ok().and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
+    let w: u32 = std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(1902);
+    let vh: i32 = std::env::var("DVH").ok().and_then(|s| s.parse().ok()).unwrap_or(1000);
+    let html = fs::read_to_string(&hp).expect("DIMG");
+
+    let eng = beak_engine::Engine::new();
+    eng.set_viewport_h(vh as u32);
+    let lay = eng.layout_ext(&html, &css, w);
+
+    let mut imgs: Vec<(String, i32, i32)> = Vec::new();
+    let mut bgs: Vec<(u64, i32, i32)> = Vec::new();
+    for op in &lay.ops {
+        match op {
+            DrawOp::Image { y, h, src, .. } => imgs.push((src.clone(), *y, *y + *h)),
+            DrawOp::BgImage { clip, key, .. } => bgs.push((*key, clip.1, clip.1 + clip.3)),
+            _ => {}
+        }
+    }
+    let visible = |top: i32, bot: i32| top < vh && bot > 0;
+    let img_vis = imgs.iter().filter(|(_, t, b)| visible(*t, *b)).count();
+    let bg_vis = bgs.iter().filter(|(_, t, b)| visible(*t, *b)).count();
+    println!("page height {} px, viewport {}x{}", lay.height, w, vh);
+    println!("  <img> ops      {:>4} total, {:>4} in the first viewport, {:>4} below the fold",
+             imgs.len(), img_vis, imgs.len() - img_vis);
+    println!("  background ops {:>4} total, {:>4} in the first viewport, {:>4} below the fold",
+             bgs.len(), bg_vis, bgs.len() - bg_vis);
+
+    // The shell fetches in batches, in document order — so simulate the batches
+    // and count how many of them would have repainted for nothing.
+    let batch: usize = std::env::var("DBATCH").ok().and_then(|s| s.parse().ok()).unwrap_or(4);
+    let mut srcs: Vec<String> = Vec::new();
+    for (s, _, _) in &imgs {
+        if !srcs.contains(s) { srcs.push(s.clone()); }
+    }
+    let (mut paid, mut skipped) = (0, 0);
+    for chunk in srcs.chunks(batch) {
+        let refs: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
+        if lay.images_in_band(&refs, 0, vh) { paid += 1 } else { skipped += 1 }
+    }
+    println!("  {} distinct srcs in batches of {} -> {} repaints kept, {} skipped",
+             srcs.len(), batch, paid, skipped);
+}

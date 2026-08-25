@@ -1116,6 +1116,43 @@ fn op_key(op: &DrawOp) -> OpKey {
 }
 
 impl Layout {
+    /// Does any box this layout painted for one of `srcs` reach into the
+    /// vertical band `[top, bottom)` of the document?
+    ///
+    /// The shell asks this before repainting for an arriving `<img>`. A
+    /// repaint is the WHOLE viewport — 1902x1000x4 = 7,6 MB of fill, ~50 ms
+    /// on the device — and an image that landed below the fold cannot change
+    /// a single visible pixel. Painting for it is all of the cost and none of
+    /// the picture. Nothing is lost: scrolling marks the page dirty anyway,
+    /// so the image is drawn the moment it can be seen.
+    ///
+    /// Answered from the display list rather than from a side table, because
+    /// the display list is where an image's PLACED box lives — `img_box` only
+    /// measures, and the y a repaint cares about is decided when the box is
+    /// flowed. One pass per arriving batch, not per image.
+    pub fn images_in_band(&self, srcs: &[&str], top: i32, bottom: i32) -> bool {
+        self.ops.iter().any(|op| match op {
+            DrawOp::Image { y, h, src, .. } => {
+                *y < bottom && y + h > top && srcs.iter().any(|s| *s == src.as_str())
+            }
+            _ => false,
+        })
+    }
+
+    /// As [`Self::images_in_band`], for `background-image`/`mask-image` layers.
+    ///
+    /// Tested against the op's CLIP rectangle, not its positioning area: the
+    /// clip is what actually gets painted, and with `background-origin` or a
+    /// border the two are different rectangles.
+    pub fn css_images_in_band(&self, keys: &[u64], top: i32, bottom: i32) -> bool {
+        self.ops.iter().any(|op| match op {
+            DrawOp::BgImage { clip, key, .. } => {
+                clip.1 < bottom && clip.1 + clip.3 > top && keys.contains(key)
+            }
+            _ => false,
+        })
+    }
+
     /// The deepest (most specific) inspect box containing a document-space
     /// point, for the inspect dev tool. Ties break toward the one recorded
     /// later (painted on top).
@@ -10750,6 +10787,43 @@ fn dbg_wiki_shape() {
         // later decode really does move the page and the shell must re-lay-out.
         let l = lay("<body><img src=\"/x.png\" alt=\"Foto\"></body>", 800);
         assert_eq!(l.guessed_image_srcs, vec!["/x.png".to_string()], "guessed box → re-layout needed");
+    }
+
+    #[test]
+    fn an_image_below_the_fold_is_not_in_the_visible_band() {
+        // A repaint is the whole viewport, so the shell asks before paying for
+        // one. Two images, one on screen and one far below a 500 px fold.
+        let l = lay(
+            "<body><img src=\"/top.png\" width=\"100\" height=\"100\">\
+             <div style=\"height:2000px\"></div>\
+             <img src=\"/low.png\" width=\"100\" height=\"100\"></body>",
+            800,
+        );
+        assert!(l.images_in_band(&["/top.png"], 0, 500), "on screen → repaint");
+        assert!(!l.images_in_band(&["/low.png"], 0, 500), "below the fold → nothing to show");
+        // Scrolled down to it, the same image is worth a repaint — which is why
+        // skipping one loses nothing: scrolling marks the page dirty anyway.
+        assert!(l.images_in_band(&["/low.png"], 1800, 2800), "scrolled to → repaint");
+        // A batch repaints if ANY of its images is visible.
+        assert!(l.images_in_band(&["/low.png", "/top.png"], 0, 500), "one visible is enough");
+        // A src this layout never placed cannot be visible.
+        assert!(!l.images_in_band(&["/nowhere.png"], 0, 100_000), "not painted → not visible");
+    }
+
+    #[test]
+    fn a_background_below_the_fold_is_not_in_the_visible_band() {
+        let l = lay(
+            "<body><div style=\"height:2000px\"></div>\
+             <div id=x style=\"height:100px;background-image:url(/bg.png)\"></div></body>",
+            800,
+        );
+        let keys: Vec<u64> = l.ops.iter().filter_map(|o| match o {
+            DrawOp::BgImage { key, .. } => Some(*key),
+            _ => None,
+        }).collect();
+        assert_eq!(keys.len(), 1, "one background layer");
+        assert!(!l.css_images_in_band(&keys, 0, 500), "below the fold");
+        assert!(l.css_images_in_band(&keys, 1900, 2900), "scrolled to");
     }
 
     /// Lay out with live form state (what the shell does while the user types).
