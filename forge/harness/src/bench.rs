@@ -210,7 +210,7 @@ pub fn run(args: &[String]) -> bool {
     };
     println!("{path}  Seite {page}  {width}x{vh}  {reps} Wiederholungen\n");
 
-    let Some((w, fuel)) = under_wasmi(&wasm, page, width, vh, reps) else {
+    let Some((w, _fuel)) = under_wasmi(&wasm, page, width, vh, reps) else {
         println!("wasmi konnte nicht laufen");
         return false;
     };

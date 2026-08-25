@@ -25,8 +25,8 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 
-/// Where a finishing run reports how long it took. A wasi program leaves
-/// through `proc_exit`, so the time has to be taken on the way out.
+// Where a finishing run reports how long it took. A wasi program leaves
+// through `proc_exit`, so the time has to be taken on the way out.
 thread_local! {
     static REPORT: std::cell::Cell<(i32, Option<std::time::Instant>)> =
         const { std::cell::Cell::new((-1, None)) };
