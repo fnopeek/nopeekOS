@@ -1205,6 +1205,22 @@ impl Layout {
     /// its ancestors, which is what `nav:hover a` and every dropdown menu on
     /// the web relies on. Containment does that for free — an ancestor's box
     /// encloses its descendant's — without keeping a parent pointer per box.
+    /// Die `seq`-Kette unter dem Punkt — ALLE Elemente, nicht nur die
+    /// `:hover`-faehigen. Der Weg vom Klickpunkt zum Knoten fuer die
+    /// Ereigniszustellung; braucht `Engine::set_hit_all`.
+    pub fn element_chain(&self, x: i32, y: i32) -> Vec<u32> {
+        let mut v: Vec<u32> = self
+            .hover_boxes
+            .iter()
+            .filter(|b| b.pseudo == crate::css::PseudoElem::None)
+            .filter(|b| x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h)
+            .map(|b| b.seq)
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
     pub fn hover_at(&self, x: i32, y: i32) -> Vec<u32> {
         let mut v: Vec<u32> = self
             .hover_boxes
@@ -1821,8 +1837,13 @@ impl<'a> Ctx<'a> {
         // Same call site, own switch: the pointer needs these boxes on any page
         // with a `:hover` rule, whether or not anyone is inspecting — and a
         // `<summary>` needs one whether or not the page hovers anything.
-        let hoverable = self.hit_all || self.sheet.hover_set.may_match(el);
-        if w > 0 && h > 0 && (hoverable || st.is_summary) {
+        // ZWEI Fragen, und sie zusammenzulegen war ein Fehler mit Messwert:
+        // „darf der Zeiger diesen Kasten TREFFEN" ist nicht „reagiert dieses
+        // Element auf `:hover`". Mit `hit_all` bekam jedes Element
+        // `hoverable = true`, also galt jede Mausbewegung als Stilwechsel —
+        // auf Wikipedia sechs volle Layouts a 130 ms fuer nichts.
+        let hoverable = self.sheet.hover_set.may_match(el);
+        if w > 0 && h > 0 && (hoverable || st.is_summary || self.hit_all) {
             let anchor = self.ops.get(op0).map(op_key);
             self.hover_boxes.push(HoverBox {
                 x,

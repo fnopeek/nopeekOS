@@ -45,7 +45,7 @@ fn main() {
     let (bx, by) = lay.ops.iter().find_map(|o| match o {
         beak_engine::layout::DrawOp::Rect { x, y, w, h, .. } if *w == 80 && *h == 24 => Some((*x+5, *y+5)),
         _ => None }).unwrap_or((5, 5));
-    let chain = lay.hover_at(bx, by);
+    let chain = lay.element_chain(bx, by);
     println!("Treffer bei ({bx},{by}) -> seq-Kette {chain:?}");
 
     // seq -> Arena-Knoten
