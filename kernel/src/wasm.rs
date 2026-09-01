@@ -741,8 +741,13 @@ pub fn execute_wasi(
         let guard = ENGINE.lock();
         guard.as_ref().ok_or(WasmError::NotInitialized)?.clone()
     };
+    // Dieselbe Teilung wie im forge-Pfad, sonst sind die Spalten nicht
+    // vergleichbar: auch wasmi bereitet das Modul einmal auf.
+    let t_c = crate::interrupts::ticks();
     let module = Module::new(&engine, wasm_bytes)
         .map_err(|_| WasmError::InvalidModule)?;
+    kprintln!("[npk]   wasmi: vorbereiten {} ms",
+        crate::interrupts::ticks().saturating_sub(t_c) * 10);
 
     let mut store = Store::new(&engine, HostState {
         output: String::new(),
@@ -773,7 +778,11 @@ pub fn execute_wasi(
     let start = instance.get_typed_func::<(), ()>(&store, "_start")
         .map_err(|_| WasmError::FunctionNotFound)?;
 
-    match start.call(&mut store, ()) {
+    let t_r = crate::interrupts::ticks();
+    let r = start.call(&mut store, ());
+    kprintln!("[npk]   wasmi: laufen {} ms",
+        crate::interrupts::ticks().saturating_sub(t_r) * 10);
+    match r {
         Ok(()) => Ok(0),
         // `proc_exit` leaves through a trap carrying the status. That is
         // the normal way a wasi program finishes, including a clean one.
@@ -799,7 +808,12 @@ pub fn execute_wasi_forge(
     ctx: alloc::boxed::Box<crate::wasi::WasiCtx>,
     terminal_idx: u8,
 ) -> Result<i32, WasmError> {
+    // Eine Gesamtzahl verbirgt, welche Haelfte sich bewegt hat. Bei forge ist
+    // die eine Haelfte das Uebersetzen des ganzen Moduls — bei python 7,44 MB,
+    // und das faellt bei JEDEM Start an, solange der Codeblob nicht liegt.
+    let t_c = crate::interrupts::ticks();
     let m = forge_core::compile(wasm_bytes).map_err(|_| WasmError::InvalidModule)?;
+    let compile_ms = crate::interrupts::ticks().saturating_sub(t_c) * 10;
     let entry = m.plan.exports.iter().find(|(n, _)| n == "_start").map(|(_, i)| *i)
         .and_then(|i| m.offset_of(i))
         .ok_or(WasmError::FunctionNotFound)?;
@@ -834,7 +848,11 @@ pub fn execute_wasi_forge(
     }
     inst.set_fuel(fuel.min(i64::MAX as u64) as i64);
 
+    kprintln!("[npk]   forge: uebersetzen {} ms ({} B x86)", compile_ms, m.code.len());
+    let t_r = crate::interrupts::ticks();
     let (_ret, trap) = inst.call(entry, 0, 0, 0);
+    kprintln!("[npk]   forge: laufen {} ms",
+        crate::interrupts::ticks().saturating_sub(t_r) * 10);
     match trap {
         // Sauber aus `_start` zurueck: ein wasi-Programm tut das selten, aber
         // es ist erlaubt und bedeutet Status 0.
