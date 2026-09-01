@@ -1289,8 +1289,10 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) {
     // laufen lassen — viele Seiten stellen ihre Oberflaeche in einem
     // `setTimeout(…, 0)` fertig.
     let timers = sess.interp.run_timers();
+    let mut listeners = false;
     if let Some(d) = sess.interp.doc.as_mut() {
-        engine.set_hit_all(d.has_listeners);
+        listeners = d.has_listeners;
+        engine.set_hit_all(listeners);
         engine.set_scripted_dom(Some(d.to_dom()));
     }
     unsafe { core::ptr::addr_of_mut!(JS).write(Some(sess)) };
@@ -1304,6 +1306,11 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) {
     push_i64(&mut m, (now_ms() - t0) as i64);
     m.push_str(" ms");
     if timers > 0 { m.push_str(", "); push_i64(&mut m, timers as i64); m.push_str(" Zeitgeber"); }
+    // Ob die Zustellung ueberhaupt scharf ist, gehoert EINMAL je Seite ins
+    // Log. Ohne diese Zeile ist "kein Klick kam an" nicht von "die Seite hat
+    // keine Behandler" zu unterscheiden — und das ist genau der Unterschied,
+    // den man sucht ([[feedback_the_fast_path_must_say_it_ran]]).
+    m.push_str(if listeners { ", Ereignisse SCHARF" } else { ", keine Behandler" });
     log(&m);
 }
 
@@ -1314,7 +1321,7 @@ fn dispatch_click(engine: &Engine, lay: &Layout, cx: i32, cy: i32) -> bool {
     let Some(sess) = js_session() else { return false };
     // Die seq-Kette unter dem Zeiger, vom aeussersten zum innersten. Das
     // Layout gibt sie schon aus — dieselbe Liste, aus der `:hover` lebt.
-    let chain = lay.hover_at(cx, cy);
+    let chain = lay.element_chain(cx, cy);
     if chain.is_empty() { return false; }
     let Some(doc) = sess.interp.doc.as_ref() else { return false };
     if !doc.has_listeners { return false; }
