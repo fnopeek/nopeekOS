@@ -147,6 +147,7 @@ pub enum ObjKind {
     NumWrap(f64),
     StrWrap(Rc<str>),
     Arguments,
+    Regex(Rc<crate::js::regexp::Regex>),
 }
 
 pub struct Object {

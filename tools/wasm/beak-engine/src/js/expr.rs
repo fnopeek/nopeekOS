@@ -19,12 +19,7 @@ impl Interp {
             Expr::This => Ok(env_this(env)),
             Expr::BigInt(_) => self.type_err("BigInt is not supported"),
             Expr::Ident(n) => self.load_ident(n, env),
-            Expr::Regex { .. } => {
-                // Kein RegExp-Motor. Ein Objekt zurueckzugeben, das nicht
-                // funktioniert, waere schlimmer als ein klarer Fehler: der
-                // Lauf zaehlt ihn, ein stiller Platzhalter waere unsichtbar.
-                self.type_err("regular expressions are not supported")
-            }
+            Expr::Regex { body, flags } => super::regexp::make(self, body, flags),
             Expr::Array(items) => {
                 let mut out = Vec::with_capacity(items.len());
                 for it in items {

@@ -49,6 +49,7 @@ pub fn make_realm() -> Realm {
                     ObjKind::NumWrap(_) => "Number",
                     ObjKind::BoolWrap(_) => "Boolean",
                     ObjKind::Arguments => "Arguments",
+                    ObjKind::Regex(_) => "RegExp",
                     ObjKind::Plain => "Object",
                 };
                 alloc::format!("[object {tag}]")
@@ -539,6 +540,33 @@ pub fn make_realm() -> Realm {
             None => s.to_string(),
         }))
     }, 2, fp);
+    def(&string_proto, "lastIndexOf", |i, t, a| {
+        let s = i.to_string(&t)?;
+        let n = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        Ok(Value::Num(match s.rfind(&*n) { Some(b) => s[..b].chars().count() as f64, None => -1.0 }))
+    }, 1, fp);
+    def(&string_proto, "at", |i, t, a| {
+        let s = i.to_string(&t)?;
+        let len = s.chars().count() as i64;
+        let mut k = to_integer(i.to_number(a.first().unwrap_or(&Value::Num(0.0)))?) as i64;
+        if k < 0 { k += len; }
+        Ok(match s.chars().nth(k.max(0) as usize) {
+            Some(c) if k >= 0 && k < len => { let mut x = String::new(); x.push(c); Value::string(x) }
+            _ => Value::Undefined })
+    }, 1, fp);
+    def(&string_proto, "trimStart", |i, t, _| {
+        let s = i.to_string(&t)?; Ok(Value::str(s.trim_start()))
+    }, 0, fp);
+    def(&string_proto, "trimEnd", |i, t, _| {
+        let s = i.to_string(&t)?; Ok(Value::str(s.trim_end()))
+    }, 0, fp);
+    def(&string_proto, "padStart", |i, t, a| pad(i, t, a, true), 2, fp);
+    def(&string_proto, "padEnd", |i, t, a| pad(i, t, a, false), 2, fp);
+    def(&string_proto, "concat", |i, t, a| {
+        let mut s = i.to_string(&t)?.to_string();
+        for v in a { s.push_str(&i.to_string(v)?); }
+        Ok(Value::string(s))
+    }, 1, fp);
     def(&string_proto, "toUpperCase", |i, this, _| {
         let s = i.to_string(&this)?; Ok(Value::string(s.to_uppercase()))
     }, 0, fp);
@@ -685,6 +713,18 @@ pub fn make_realm() -> Realm {
             out.push(i.new_array(alloc::vec![Value::Str(k), v]));
         }
         Ok(i.new_array(out))
+    }, 1, fp);
+    def(&object_ctor, "fromEntries", |i, _, a| {
+        let src = a.first().cloned().unwrap_or(Value::Undefined);
+        let items = i.iterate(&src)?;
+        let g = new_obj(Some(i.realm.object_proto.clone()));
+        for it in items {
+            let k = i.get(&it, "0")?;
+            let v = i.get(&it, "1")?;
+            let ks = i.to_string(&k)?;
+            g.borrow_mut().set_prop(ks, Prop::data(v));
+        }
+        Ok(Value::Obj(g))
     }, 1, fp);
     def(&object_ctor, "setPrototypeOf", |i, _, a| {
         let Some(Value::Obj(o)) = a.first() else {
@@ -858,6 +898,173 @@ pub fn make_realm() -> Realm {
         Ok(Value::Num(t[..end].parse::<f64>().unwrap_or(f64::NAN)))
     }, 1, fp);
 
+    // ── Map und Set ──────────────────────────────────────────────────────
+    //
+    // Auf einem gewoehnlichen Objekt aufgesetzt: die Eintraege liegen unter
+    // einem Praefix, das kein Skript sieht. Der Preis ist ehrlich zu nennen —
+    // ein `Map`-Schluessel ist damit seine ZEICHENKETTE, nicht seine
+    // Identitaet. `m.set({}, 1); m.set({}, 2)` hat bei uns EINEN Eintrag, in
+    // einem Browser zwei. Fuer Konfigurationskarten (und genau dafuer
+    // benutzen die Zielseiten es) stimmt es; fuer Objektschluessel nicht.
+    // `native` nimmt einen Funktionszeiger, keinen Abschluss — deshalb kommt
+    // der Konstruktor von aussen herein statt hier eingefangen zu werden.
+    let collection = |name: &'static str, ctor_fn: NativeFn, object_proto: &Gc,
+                      function_proto: &Gc, global: &Gc| {
+        let proto = new_obj(Some(object_proto.clone()));
+        let d = |o: &Gc, n: &str, f: NativeFn, l: usize| {
+            let g = native(Some(function_proto.clone()), f, n, l, false);
+            o.borrow_mut().define(n, Prop::builtin(Value::Obj(g)));
+        };
+        d(&proto, "has", |i, t, a| {
+            let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+            let key = alloc::format!("@{k}");
+            Ok(Value::Bool(matches!(&t, Value::Obj(o) if o.borrow().has_own(&key))))
+        }, 1);
+        d(&proto, "get", |i, t, a| {
+            let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+            let key = alloc::format!("@{k}");
+            Ok(match i.get(&t, &key)? { Value::Undefined => Value::Undefined, v => v })
+        }, 1);
+        d(&proto, "set", |i, t, a| {
+            let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+            let v = a.get(1).cloned().unwrap_or(Value::Undefined);
+            if let Value::Obj(o) = &t {
+                o.borrow_mut().define(&alloc::format!("@{k}"), Prop {
+                    value: Some(v), get: None, set: None,
+                    writable: true, enumerable: false, configurable: true });
+            }
+            Ok(t)
+        }, 2);
+        d(&proto, "add", |i, t, a| {
+            let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+            if let Value::Obj(o) = &t {
+                o.borrow_mut().define(&alloc::format!("@{k}"), Prop {
+                    value: Some(Value::Str(k)), get: None, set: None,
+                    writable: true, enumerable: false, configurable: true });
+            }
+            Ok(t)
+        }, 1);
+        d(&proto, "delete", |i, t, a| {
+            let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+            let key = alloc::format!("@{k}");
+            Ok(Value::Bool(matches!(&t, Value::Obj(o) if o.borrow_mut().remove(&key))))
+        }, 1);
+        d(&proto, "clear", |_, t, _| {
+            if let Value::Obj(o) = &t {
+                let ks = o.borrow().own_keys();
+                for k in ks { if k.starts_with('@') { o.borrow_mut().remove(&k); } }
+            }
+            Ok(Value::Undefined)
+        }, 0);
+        d(&proto, "forEach", |i, t, a| {
+            let f = a.first().cloned().unwrap_or(Value::Undefined);
+            if !i.is_callable(&f) { return i.type_err("callback is not a function"); }
+            let Value::Obj(o) = &t else { return Ok(Value::Undefined) };
+            let ks: Vec<Rc<str>> = o.borrow().own_keys().into_iter()
+                .filter(|k| k.starts_with('@')).collect();
+            for k in ks {
+                i.tick()?;
+                let v = i.get(&t, &k)?;
+                i.call(&f, Value::Undefined, &[v, Value::str(&k[1..]), t.clone()])?;
+            }
+            Ok(Value::Undefined)
+        }, 1);
+        let size = native(Some(function_proto.clone()), |_, t, _| {
+            let Value::Obj(o) = &t else { return Ok(Value::Num(0.0)) };
+            let n = o.borrow().own_keys().iter().filter(|k| k.starts_with('@')).count();
+            Ok(Value::Num(n as f64))
+        }, "size", 0, false);
+        proto.borrow_mut().define("size", Prop {
+            value: None, get: Some(Value::Obj(size)), set: None,
+            writable: false, enumerable: false, configurable: true });
+
+        let ctor = native(Some(function_proto.clone()), ctor_fn, name, 0, true);
+        ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(proto.clone())));
+        proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(ctor.clone())));
+        global.borrow_mut().define(name, Prop::builtin(Value::Obj(ctor)));
+    };
+    collection("Map", |i, _, a| coll_new(i, "Map", true, a), &object_proto, &function_proto, &global);
+    collection("Set", |i, _, a| coll_new(i, "Set", false, a), &object_proto, &function_proto, &global);
+    collection("WeakMap", |i, _, a| coll_new(i, "WeakMap", true, a), &object_proto, &function_proto, &global);
+    collection("WeakSet", |i, _, a| coll_new(i, "WeakSet", false, a), &object_proto, &function_proto, &global);
+
+    // ── Zeitgeber ────────────────────────────────────────────────────────
+    //
+    // Angemeldet, nicht ausgefuehrt. Sofort zu rufen waere falsch (eine
+    // Abfrageschleife wuerde endlos rekursieren), und gar nicht zu haben ist
+    // ein Fehler, der das Skript beendet. Die Warteschlange ist die Stelle,
+    // an der beaks Ereignisschleife spaeter ansetzt — dieselbe Form wie bei
+    // `addEventListener`.
+    for n in ["setTimeout", "setInterval", "requestAnimationFrame", "requestIdleCallback",
+              "queueMicrotask"] {
+        let g = native(Some(function_proto.clone()), |i, _, a| {
+            let f = a.first().cloned().unwrap_or(Value::Undefined);
+            if i.is_callable(&f) { i.timers.push(f); }
+            Ok(Value::Num(i.timers.len() as f64))
+        }, n, 2, false);
+        global.borrow_mut().define(n, Prop::builtin(Value::Obj(g)));
+    }
+    for n in ["clearTimeout", "clearInterval", "cancelAnimationFrame", "cancelIdleCallback"] {
+        let g = native(Some(function_proto.clone()), |_, _, _| Ok(Value::Undefined), n, 1, false);
+        global.borrow_mut().define(n, Prop::builtin(Value::Obj(g)));
+    }
+
+    // ── Storage ──────────────────────────────────────────────────────────
+    //
+    // Im Speicher, nicht auf der Platte. Ein Skript, das `localStorage`
+    // ABFRAGT (und das tun sie, als Vertraeglichkeitspruefung), bekommt eine
+    // Antwort; was es hineinlegt, ueberlebt die Seite nicht. Das ist eine
+    // benannte Luecke — beak muesste es an npkFS haengen, und dann waere die
+    // Frage, wem der Speicher gehoert.
+    let make_storage = |object_proto: &Gc, function_proto: &Gc| -> Gc {
+        let st = new_obj(Some(object_proto.clone()));
+        let d = |o: &Gc, n: &str, f: NativeFn, l: usize| {
+            let g = native(Some(function_proto.clone()), f, n, l, false);
+            o.borrow_mut().define(n, Prop::builtin(Value::Obj(g)));
+        };
+        d(&st, "getItem", |i, t, a| {
+            let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+            let key = alloc::format!("__s_{k}");
+            Ok(match i.get(&t, &key)? { Value::Undefined => Value::Null, v => v })
+        }, 1);
+        d(&st, "setItem", |i, t, a| {
+            let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+            let v = i.to_string(a.get(1).unwrap_or(&Value::Undefined))?;
+            let key = alloc::format!("__s_{k}");
+            if let Value::Obj(o) = &t {
+                o.borrow_mut().define(&key, Prop {
+                    value: Some(Value::Str(v)), get: None, set: None,
+                    writable: true, enumerable: false, configurable: true });
+            }
+            Ok(Value::Undefined)
+        }, 2);
+        d(&st, "removeItem", |i, t, a| {
+            let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+            let key = alloc::format!("__s_{k}");
+            if let Value::Obj(o) = &t { o.borrow_mut().remove(&key); }
+            Ok(Value::Undefined)
+        }, 1);
+        d(&st, "clear", |_, t, _| {
+            if let Value::Obj(o) = &t {
+                let keys = o.borrow().own_keys();
+                for k in keys { if k.starts_with("__s_") { o.borrow_mut().remove(&k); } }
+            }
+            Ok(Value::Undefined)
+        }, 0);
+        d(&st, "key", |i, t, a| {
+            let n = i.to_number(a.first().unwrap_or(&Value::Undefined))? as usize;
+            let Value::Obj(o) = &t else { return Ok(Value::Null) };
+            let keys: Vec<Rc<str>> = o.borrow().own_keys().into_iter()
+                .filter(|k| k.starts_with("__s_")).collect();
+            Ok(match keys.get(n) { Some(k) => Value::str(&k[4..]), None => Value::Null })
+        }, 1);
+        st
+    };
+    let ls = make_storage(&object_proto, &function_proto);
+    let ss = make_storage(&object_proto, &function_proto);
+    global.borrow_mut().define("localStorage", Prop::builtin(Value::Obj(ls)));
+    global.borrow_mut().define("sessionStorage", Prop::builtin(Value::Obj(ss)));
+
     // ── Function ─────────────────────────────────────────────────────────
     // 9261 Tests scheiterten allein an `Function is not defined` — mehr als
     // an jeder anderen einzelnen Ursache. Die meisten greifen nur auf
@@ -965,7 +1172,8 @@ pub fn make_realm() -> Realm {
     let ph = || new_obj(Some(object_proto.clone()));
     Realm { global, global_env, object_proto: object_proto.clone(), function_proto, array_proto,
             string_proto, number_proto, boolean_proto, error_proto, error_ctors,
-            node_proto: ph(), element_proto: ph(), text_proto: ph(), document_proto: ph() }
+            node_proto: ph(), element_proto: ph(), text_proto: ph(), document_proto: ph(),
+            regexp_proto: ph() }
 }
 
 /// `this.length` als Zahl. Eigene Funktion, weil `i.to_number(&i.get(...))`
@@ -981,6 +1189,40 @@ fn rebuild(i: &mut Interp, this: &Value, items: Vec<Value>) -> C<()> {
         o.borrow_mut().set_prop(Rc::from(num_to_string(k as f64).as_str()), Prop::data(v));
     }
     i.set(this, "length", Value::Num(n as f64))
+}
+
+/// Der gemeinsame Rumpf der vier Sammlungs-Konstruktoren.
+fn coll_new(i: &mut Interp, name: &str, is_map: bool, a: &[Value]) -> C<Value> {
+    let pv = i.get(&Value::Obj(i.realm.global.clone()), name)?;
+    let proto = match i.get(&pv, "prototype")? { Value::Obj(p) => Some(p), _ => None };
+    let out = Value::Obj(new_obj(proto));
+    if let Some(src) = a.first() {
+        if !matches!(src, Value::Undefined | Value::Null) {
+            for it in i.iterate(src)? {
+                let (k, v) = if is_map { (i.get(&it, "0")?, i.get(&it, "1")?) } else { (it.clone(), it) };
+                let ks = i.to_string(&k)?;
+                if let Value::Obj(o) = &out {
+                    o.borrow_mut().define(&alloc::format!("@{ks}"), Prop {
+                        value: Some(v), get: None, set: None,
+                        writable: true, enumerable: false, configurable: true });
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn pad(i: &mut Interp, t: Value, a: &[Value], start: bool) -> C<Value> {
+    let s = i.to_string(&t)?;
+    let want = to_integer(i.to_number(a.first().unwrap_or(&Value::Num(0.0)))?) as usize;
+    let fill = match a.get(1) { None | Some(Value::Undefined) => Rc::from(" "), Some(v) => i.to_string(v)? };
+    let have = s.chars().count();
+    if want <= have || fill.is_empty() { return Ok(Value::Str(s)); }
+    if want > (1 << 22) { return i.range_err("padding too large"); }
+    let mut p = String::new();
+    while p.chars().count() < want - have { p.push_str(&fill); }
+    let p: String = p.chars().take(want - have).collect();
+    Ok(Value::string(if start { p + &s } else { s.to_string() + &p }))
 }
 
 fn array_len(i: &mut Interp, this: &Value) -> C<f64> {
