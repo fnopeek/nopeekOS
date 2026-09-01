@@ -41,8 +41,25 @@ impl Interp {
                 Ok(self.new_array(out))
             }
             Expr::Object(props) => self.eval_object(props, env),
-            Expr::Func(f) => Ok(self.make_closure(f.clone(), env,
-                if f.is_arrow { Some(env_this(env)) } else { None })),
+            Expr::Func(f) => {
+                // Eine benannte Funktions-EXPRESSION sieht ihren eigenen Namen
+                // in ihrem Rumpf — `(function e(){ … e … })`. Das ist der Weg,
+                // auf dem minifizierter Code rekursiert, und ohne ihn stirbt er
+                // an einem einbuchstabigen `ReferenceError`. Eine DEKLARATION
+                // bekommt diese Bindung NICHT: dort steht der Name schon
+                // aussen, und eine innere wuerde eine Neuzuweisung verdecken.
+                if !f.is_arrow {
+                    if let Some(n) = &f.name {
+                        let inner = Env::new(Some(env.clone()), false);
+                        let cl = self.make_closure(f.clone(), &inner, None);
+                        inner.borrow_mut().vars.insert(Rc::from(n.as_str()),
+                            Binding { value: cl.clone(), mutable: false, initialized: true });
+                        return Ok(cl);
+                    }
+                }
+                Ok(self.make_closure(f.clone(), env,
+                    if f.is_arrow { Some(env_this(env)) } else { None }))
+            }
             Expr::Class(c) => self.eval_class(c, env),
             Expr::Template { quasis, exprs } => {
                 let mut s = String::new();
