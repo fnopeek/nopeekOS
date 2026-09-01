@@ -31,12 +31,21 @@ fn main() {
 
     let mut hist: std::collections::BTreeMap<String, usize> = Default::default();
     let (mut ok, mut n) = (0usize, 0usize);
-    println!("\n── Echter Korpus, je Seite EINE Umgebung, ohne DOM ──\n");
+    println!("\n── Echter Korpus: eine Umgebung je Seite, MIT ihrem DOM ──\n");
     for (page, files) in &pages {
         let (mut pok, mut pn) = (0usize, 0usize);
         // Eine Umgebung fuer die ganze Seite. Ein Absturz in Skript 3 darf die
         // Umgebung nicht mitnehmen, also faengt jeder Lauf fuer sich.
         let mut sess = beak_engine::js::Session::new(2_000_000);
+        // Das ECHTE HTML der Seite dazu — `measure.mjs` hat es neben den
+        // Skripten abgelegt. Ohne Dokument misst dieser Lauf nur die Sprache;
+        // mit ihm misst er, was ein Skript im Browser vorfindet.
+        let html_path = std::path::Path::new(&root).parent().unwrap()
+            .join("html").join(format!("{page}.html"));
+        if let Ok(html) = std::fs::read_to_string(&html_path) {
+            let dom = beak_engine::dom::parse(&html);
+            sess.interp.set_document(beak_engine::js::dombind::Doc::from_dom(&dom));
+        }
         for f in files {
             let Ok(src) = std::fs::read_to_string(f) else { continue };
             n += 1; pn += 1;

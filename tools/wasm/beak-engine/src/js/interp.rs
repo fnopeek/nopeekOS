@@ -88,6 +88,10 @@ pub struct Realm {
     pub error_proto: Gc,
     /// Name -> Prototyp der Fehlerarten, fuer `throw_type` & Co.
     pub error_ctors: HashMap<&'static str, Gc>,
+    pub node_proto: Gc,
+    pub element_proto: Gc,
+    pub text_proto: Gc,
+    pub document_proto: Gc,
 }
 
 pub struct Interp {
@@ -106,6 +110,10 @@ pub struct Interp {
     /// Eine Uhr, die nur steigt. Ersatz, bis beak die echte einreicht —
     /// `beak-engine` ist hostfrei und hat keine.
     pub fake_now: f64,
+    /// Das Dokument, auf dem `document` arbeitet. `None`, solange keins
+    /// eingereicht wurde — dann gibt es `document` gar nicht erst, statt eins
+    /// vorzutaeuschen, das nichts enthaelt.
+    pub doc: Option<super::dombind::Doc>,
 }
 
 pub const MAX_DEPTH: usize = 400;
@@ -135,8 +143,20 @@ pub const TEST_STEPS: u64 = 200_000;
 
 impl Interp {
     pub fn new() -> Interp {
-        let realm = super::builtins::make_realm();
-        Interp { realm, depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX, fake_now: 0.0 }
+        let mut realm = super::builtins::make_realm();
+        super::dombind::install(&mut realm);
+        Interp { realm, depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX, fake_now: 0.0, doc: None }
+    }
+
+    /// Ein Dokument einreichen und `document` global sichtbar machen.
+    ///
+    /// Erst hier entsteht `document` — vorher gibt es den Namen nicht, und ein
+    /// Skript, das ihn prueft, bekommt die Wahrheit statt eine leere Huelle.
+    pub fn set_document(&mut self, doc: super::dombind::Doc) {
+        let root = doc.doc;
+        self.doc = Some(doc);
+        let v = super::dombind::wrap(self, root);
+        self.realm.global.borrow_mut().define("document", Prop::builtin(v));
     }
 
     /// Ein Arbeitsschritt in einer EINGEBAUTEN Schleife.

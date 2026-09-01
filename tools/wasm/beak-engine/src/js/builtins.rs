@@ -959,8 +959,13 @@ pub fn make_realm() -> Realm {
     def(&date_ctor, "now", |i, _, _| { i.fake_now += 1.0; Ok(Value::Num(i.fake_now)) }, 0, fp);
     global.borrow_mut().define("Date", Prop::builtin(Value::Obj(date_ctor)));
 
-    Realm { global, global_env, object_proto, function_proto, array_proto,
-            string_proto, number_proto, boolean_proto, error_proto, error_ctors }
+    // Platzhalter — `dombind::install` ersetzt sie sofort. Sie stehen hier,
+    // weil ein Realm ohne sie nicht baubar waere und `install` den fertigen
+    // Realm braucht, um die Prototypen daranzuhaengen.
+    let ph = || new_obj(Some(object_proto.clone()));
+    Realm { global, global_env, object_proto: object_proto.clone(), function_proto, array_proto,
+            string_proto, number_proto, boolean_proto, error_proto, error_ctors,
+            node_proto: ph(), element_proto: ph(), text_proto: ph(), document_proto: ph() }
 }
 
 /// `this.length` als Zahl. Eigene Funktion, weil `i.to_number(&i.get(...))`
