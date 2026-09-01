@@ -55,15 +55,19 @@ pub struct DomNode {
     pub children: Vec<u32>,
     /// Einmal gebaut, dann behalten — sonst waere `el === el` falsch.
     pub js: Option<Gc>,
-    /// Angemeldete Behandler. Noch wird nichts zugestellt; sie hier zu HALTEN
-    /// kostet nichts und ist die Stelle, an der die Zustellung ansetzt.
+    /// Angemeldete Behandler, je Ereignisart.
     pub listeners: Vec<(Rc<str>, Value)>,
+    /// Die `seq` desselben Elements in beaks Baum — die Bruecke zwischen
+    /// Klickpunkt und Knoten. `to_dom` vergibt sie und schreibt sie HIER
+    /// zurueck; das Layout gibt sie beim Treffer aus. Ohne diese Brueckenzahl
+    /// gibt es keinen Weg von „hier wurde geklickt" zu „dieser Knoten".
+    pub seq: u32,
 }
 
 impl DomNode {
     fn new(kind: f64, tag: &str) -> DomNode {
         DomNode { kind, tag: Rc::from(tag), attrs: Vec::new(), text: Rc::from(""),
-                  parent: None, children: Vec::new(), js: None, listeners: Vec::new() }
+                  parent: None, children: Vec::new(), js: None, listeners: Vec::new(), seq: 0 }
     }
     pub fn attr(&self, k: &str) -> Option<&Rc<str>> {
         self.attrs.iter().find(|(n, _)| &**n == k).map(|(_, v)| v)
@@ -82,13 +86,23 @@ pub struct Doc {
     pub html: Option<u32>,
     pub body: Option<u32>,
     pub head: Option<u32>,
+    /// Hat sich seit dem letzten Zurueckschreiben etwas geaendert?
+    ///
+    /// Ohne diese Fahne muesste JEDER Klick den Baum neu aufbauen und die
+    /// Seite neu auslegen — 130 ms auf dem Geraet, fuer nichts, wenn der
+    /// Behandler nur etwas gezaehlt hat.
+    pub dirty: bool,
+    /// Hat die Seite ueberhaupt Behandler? Solange nicht, braucht das Layout
+    /// keine Treffer-Kaesten aufzuzeichnen.
+    pub has_listeners: bool,
 }
 
 impl Doc {
     pub fn empty() -> Doc {
         let mut nodes = Vec::new();
         nodes.push(DomNode::new(DOCUMENT_NODE, "#document"));
-        Doc { nodes, doc: 0, html: None, body: None, head: None }
+        Doc { nodes, doc: 0, html: None, body: None, head: None,
+              dirty: false, has_listeners: false }
     }
 
     /// Aus beaks geparstem Baum. Der `seq` des Originals wird NICHT
@@ -101,6 +115,8 @@ impl Doc {
         d.html = d.find_tag(d.doc, "html");
         d.body = d.find_tag(d.doc, "body");
         d.head = d.find_tag(d.doc, "head");
+        // Der Aufbau selbst ist keine Aenderung.
+        d.dirty = false;
         d
     }
 
@@ -124,6 +140,7 @@ impl Doc {
     }
 
     pub fn push(&mut self, n: DomNode, parent: u32) -> u32 {
+        self.dirty = true;
         let id = self.nodes.len() as u32;
         self.nodes.push(n);
         self.nodes[id as usize].parent = Some(parent);
@@ -133,6 +150,7 @@ impl Doc {
 
     /// Frei stehender Knoten, noch ohne Elternteil (`createElement`).
     pub fn create(&mut self, kind: f64, tag: &str) -> u32 {
+        self.dirty = true;
         let id = self.nodes.len() as u32;
         self.nodes.push(DomNode::new(kind, tag));
         id
@@ -149,6 +167,7 @@ impl Doc {
     /// Aus dem alten Elternteil aushaengen. Muss VOR jedem Einhaengen laufen,
     /// sonst steht ein Knoten in zwei Kinderlisten und der Baum ist keiner mehr.
     pub fn detach(&mut self, id: u32) {
+        self.dirty = true;
         if let Some(p) = self.nodes[id as usize].parent {
             self.nodes[p as usize].children.retain(|&c| c != id);
         }
@@ -156,12 +175,14 @@ impl Doc {
     }
 
     pub fn append(&mut self, parent: u32, child: u32) {
+        self.dirty = true;
         self.detach(child);
         self.nodes[child as usize].parent = Some(parent);
         self.nodes[parent as usize].children.push(child);
     }
 
     pub fn insert_before(&mut self, parent: u32, child: u32, before: Option<u32>) {
+        self.dirty = true;
         self.detach(child);
         self.nodes[child as usize].parent = Some(parent);
         let at = match before {
@@ -267,6 +288,7 @@ impl Doc {
 
     /// Alle Kinder eines Knotens loesen (fuer `innerHTML =`).
     pub fn clear_children(&mut self, id: u32) {
+        self.dirty = true;
         let old: Vec<u32> = self.nodes[id as usize].children.clone();
         for c in old { self.nodes[c as usize].parent = None; }
         self.nodes[id as usize].children.clear();
@@ -304,29 +326,38 @@ impl Doc {
     /// `seq` wird NEU vergeben, in Dokumentreihenfolge — genau wie der Parser
     /// es tut. Damit stimmt die Identitaet, an der die Formularzustaende
     /// haengen, fuer alles, was der Skriptlauf nicht angefasst hat.
-    pub fn to_dom(&self) -> crate::dom::Dom {
+    pub fn to_dom(&mut self) -> crate::dom::Dom {
         let mut seq = 0u32;
         let mut root = crate::dom::Element::bare("#root".into(), seq);
-        for &c in &self.nodes[self.doc as usize].children.clone() {
+        for c in self.nodes[self.doc as usize].children.clone() {
             if let Some(n) = self.to_node(c, &mut seq) { root.children.push(n); }
         }
         root.index_attrs();
+        self.dirty = false;
         crate::dom::Dom { root }
     }
 
-    fn to_node(&self, id: u32, seq: &mut u32) -> Option<crate::dom::Node> {
-        let n = &self.nodes[id as usize];
-        if n.kind == TEXT_NODE {
-            return Some(crate::dom::Node::Text(n.text.to_string()));
-        }
-        if n.kind != ELEMENT_NODE { return None; }
+    /// Der Arena-Knoten zu einer `seq` aus dem Layout.
+    pub fn by_seq(&self, seq: u32) -> Option<u32> {
+        self.nodes.iter().position(|n| n.kind == ELEMENT_NODE && n.seq == seq).map(|i| i as u32)
+    }
+
+    fn to_node(&mut self, id: u32, seq: &mut u32) -> Option<crate::dom::Node> {
+        let (kind, tag, attrs, text, kids) = {
+            let n = &self.nodes[id as usize];
+            (n.kind, n.tag.clone(), n.attrs.clone(), n.text.clone(), n.children.clone())
+        };
+        if kind == TEXT_NODE { return Some(crate::dom::Node::Text(text.to_string())); }
+        if kind != ELEMENT_NODE { return None; }
         *seq += 1;
-        let mut e = crate::dom::Element::bare(n.tag.to_string(), *seq);
-        for (k, v) in &n.attrs { e.attrs.push((k.to_string(), v.to_string())); }
+        // Die Bruecke: dieselbe Zahl steht jetzt hier und im Layout.
+        self.nodes[id as usize].seq = *seq;
+        let mut e = crate::dom::Element::bare(tag.to_string(), *seq);
+        for (k, v) in &attrs { e.attrs.push((k.to_string(), v.to_string())); }
         // MUSS nach den Attributen laufen — sonst sind Klassen, id und der
         // Bloom-Filter leer und kein Selektor trifft mehr.
         e.index_attrs();
-        for &c in &n.children {
+        for c in kids {
             if let Some(x) = self.to_node(c, seq) { e.children.push(x); }
         }
         Some(crate::dom::Node::Element(e))
@@ -666,7 +697,11 @@ pub fn install(realm: &mut Realm) {
         let id = node_of(i, &t)?;
         let ev = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         let f = a.get(1).cloned().unwrap_or(Value::Undefined);
-        if let Some(d) = &mut i.doc { d.nodes[id as usize].listeners.push((ev, f)); }
+        if let Some(d) = &mut i.doc {
+            d.nodes[id as usize].listeners.push((ev, f));
+            // Sobald EIN Behandler da ist, braucht das Layout Treffer-Kaesten.
+            d.has_listeners = true;
+        }
         Ok(Value::Undefined)
     }, 2, &fp);
     meth(&node_proto, "removeEventListener", |i, t, a| {
@@ -696,12 +731,12 @@ pub fn install(realm: &mut Realm) {
     accessor(&element_proto, "id",
         |i, t, _| with_node!(i, t, |n| Ok(match n.attr("id") { Some(v) => Value::Str(v.clone()), None => Value::str("") })),
         |i, t, a| { let id = node_of(i, &t)?; let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-                    if let Some(d) = &mut i.doc { d.nodes[id as usize].set_attr("id", &v); }
+                    if let Some(d) = &mut i.doc { d.dirty = true; d.nodes[id as usize].set_attr("id", &v); }
                     Ok(Value::Undefined) }, &fp);
     accessor(&element_proto, "className",
         |i, t, _| with_node!(i, t, |n| Ok(match n.attr("class") { Some(v) => Value::Str(v.clone()), None => Value::str("") })),
         |i, t, a| { let id = node_of(i, &t)?; let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-                    if let Some(d) = &mut i.doc { d.nodes[id as usize].set_attr("class", &v); }
+                    if let Some(d) = &mut i.doc { d.dirty = true; d.nodes[id as usize].set_attr("class", &v); }
                     Ok(Value::Undefined) }, &fp);
     meth(&element_proto, "getAttribute", |i, t, a| {
         let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
@@ -715,13 +750,13 @@ pub fn install(realm: &mut Realm) {
         let id = node_of(i, &t)?;
         let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         let v = i.to_string(a.get(1).unwrap_or(&Value::Undefined))?;
-        if let Some(d) = &mut i.doc { d.nodes[id as usize].set_attr(&k, &v); }
+        if let Some(d) = &mut i.doc { d.dirty = true; d.nodes[id as usize].set_attr(&k, &v); }
         Ok(Value::Undefined)
     }, 2, &fp);
     meth(&element_proto, "removeAttribute", |i, t, a| {
         let id = node_of(i, &t)?;
         let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-        if let Some(d) = &mut i.doc { d.nodes[id as usize].attrs.retain(|(n, _)| *n != k); }
+        if let Some(d) = &mut i.doc { d.dirty = true; d.nodes[id as usize].attrs.retain(|(n, _)| *n != k); }
         Ok(Value::Undefined)
     }, 1, &fp);
     meth(&element_proto, "matches", |i, t, a| {
@@ -818,6 +853,7 @@ pub fn install(realm: &mut Realm) {
             for v in a {
                 let k = i.to_string(v)?;
                 let Some(d) = &mut i.doc else { break };
+                d.dirty = true;
                 let mut cs = d.classes(id);
                 if !cs.iter().any(|c| *c == k) { cs.push(k); }
                 let joined = cs.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
@@ -830,6 +866,7 @@ pub fn install(realm: &mut Realm) {
             for v in a {
                 let k = i.to_string(v)?;
                 let Some(d) = &mut i.doc else { break };
+                d.dirty = true;
                 let cs: Vec<Rc<str>> = d.classes(id).into_iter().filter(|c| *c != k).collect();
                 let joined = cs.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
                 d.nodes[id as usize].set_attr("class", &joined);
@@ -841,6 +878,7 @@ pub fn install(realm: &mut Realm) {
             let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
             let has = i.doc.as_ref().is_some_and(|d| d.classes(id).iter().any(|c| *c == k));
             let Some(d) = &mut i.doc else { return Ok(Value::Bool(false)) };
+            d.dirty = true;
             let mut cs: Vec<Rc<str>> = d.classes(id).into_iter().filter(|c| *c != k).collect();
             if !has { cs.push(k); }
             let joined = cs.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
@@ -949,4 +987,69 @@ fn sibling(i: &mut Interp, this: &Value, dir: i32) -> C<Value> {
     let next = if dir > 0 { pos.checked_add(1) } else { pos.checked_sub(1) };
     let target = next.and_then(|k| cs.get(k).copied());
     Ok(match target { Some(x) => wrap(i, x), None => Value::Null })
+}
+
+
+// ── Ereigniszustellung ──────────────────────────────────────────────────────
+
+/// Ein Ereignis an `target` zustellen und die Kette hinauf blasen.
+///
+/// `chain` kommt aus dem Layout: die `seq`-Kette unter dem Zeiger, vom
+/// aeussersten zum innersten. Zugestellt wird UMGEKEHRT — vom Ziel nach
+/// aussen, so wie ein Browser blaest. Die Einfangphase gibt es nicht; sie
+/// braucht ein drittes Argument an `addEventListener`, das kaum eine Seite
+/// benutzt, und ohne sie stimmt die Reihenfolge fuer alles Uebrige.
+///
+/// Liefert true, wenn ein Behandler `preventDefault` gerufen hat — dann
+/// unterbleibt, was beak sonst getan haette (einem Link folgen).
+pub fn dispatch(i: &mut Interp, kind: &str, chain: &[u32]) -> C<bool> {
+    if chain.is_empty() { return Ok(false); }
+    let target = wrap(i, chain[chain.len() - 1]);
+    let ev = new_obj(Some(i.realm.object_proto.clone()));
+    {
+        let mut o = ev.borrow_mut();
+        o.define("type", Prop::data(Value::str(kind)));
+        o.define("target", Prop::data(target.clone()));
+        o.define("bubbles", Prop::data(Value::Bool(true)));
+        o.define("defaultPrevented", Prop::data(Value::Bool(false)));
+        o.define("__stop", Prop { value: Some(Value::Bool(false)), get: None, set: None,
+            writable: true, enumerable: false, configurable: false });
+    }
+    let fp = i.realm.function_proto.clone();
+    let pd = native(Some(fp.clone()), |_, t, _| {
+        if let Value::Obj(o) = &t { o.borrow_mut().define("defaultPrevented", Prop::data(Value::Bool(true))); }
+        Ok(Value::Undefined)
+    }, "preventDefault", 0, false);
+    let sp = native(Some(fp.clone()), |_, t, _| {
+        if let Value::Obj(o) = &t {
+            o.borrow_mut().define("__stop", Prop { value: Some(Value::Bool(true)), get: None,
+                set: None, writable: true, enumerable: false, configurable: false });
+        }
+        Ok(Value::Undefined)
+    }, "stopPropagation", 0, false);
+    ev.borrow_mut().define("preventDefault", Prop::builtin(Value::Obj(pd)));
+    ev.borrow_mut().define("stopPropagation", Prop::builtin(Value::Obj(sp.clone())));
+    ev.borrow_mut().define("stopImmediatePropagation", Prop::builtin(Value::Obj(sp)));
+    let evv = Value::Obj(ev.clone());
+
+    for &node in chain.iter().rev() {
+        let listeners: Vec<Value> = match &i.doc {
+            Some(d) => d.nodes[node as usize].listeners.iter()
+                .filter(|(k, _)| &**k == kind).map(|(_, f)| f.clone()).collect(),
+            None => Vec::new(),
+        };
+        if listeners.is_empty() { continue; }
+        let this_node = wrap(i, node);
+        ev.borrow_mut().define("currentTarget", Prop::data(this_node.clone()));
+        for f in listeners {
+            // Ein Behandler, der wirft, darf die naechsten nicht mitnehmen —
+            // so macht es ein Browser auch.
+            let _ = i.call(&f, this_node.clone(), &[evv.clone()]);
+        }
+        let stop = matches!(ev.borrow().get_own("__stop").and_then(|p| p.value.clone()),
+                            Some(Value::Bool(true)));
+        if stop { break; }
+    }
+    Ok(matches!(ev.borrow().get_own("defaultPrevented").and_then(|p| p.value.clone()),
+                Some(Value::Bool(true))))
 }

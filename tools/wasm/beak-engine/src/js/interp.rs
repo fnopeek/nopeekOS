@@ -153,6 +153,21 @@ impl Interp {
         Interp { realm, depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX, fake_now: 0.0, doc: None, timers: Vec::new() }
     }
 
+    /// Die angemeldeten Zeitgeber EINMAL durchlaufen.
+    ///
+    /// Einmal, nicht bis die Schlange leer ist: ein `setTimeout`, das sich
+    /// selbst neu anmeldet, ist ein voellig normales Muster (Abfrageschleifen,
+    /// Animationen) und wuerde die Schleife sonst nie verlassen. Was waehrend
+    /// des Laufs dazukommt, ist beim naechsten Mal dran.
+    pub fn run_timers(&mut self) -> usize {
+        let due = core::mem::take(&mut self.timers);
+        let n = due.len();
+        for f in due {
+            let _ = self.call(&f, Value::Undefined, &[]);
+        }
+        n
+    }
+
     /// Ein Dokument einreichen und `document` global sichtbar machen.
     ///
     /// Erst hier entsteht `document` — vorher gibt es den Namen nicht, und ein

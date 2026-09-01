@@ -905,6 +905,10 @@ fn nav_begin(engine: &Engine, method: &str, url: &str, body: &[u8], extra: &str,
     // Und den vom Skript veraenderten Baum, sonst zeigt die naechste Seite den
     // der vorigen — der Zwischenspeicher haengt am HTML, nicht am Baum.
     engine.set_scripted_dom(None);
+    engine.set_hit_all(false);
+    // Die Sitzung gehoert der Seite, die gerade verlassen wird: ihre
+    // Behandler zeigen auf Knoten, die es gleich nicht mehr gibt.
+    unsafe { core::ptr::addr_of_mut!(JS).write(None) };
 
     let now = unsafe { npk_unix_time() };
     let mut hdrs = String::new();
@@ -1095,6 +1099,16 @@ static mut NAV_CSS_COUNT: usize = 0;
 /// Die Skripte der Seite in Dokumentreihenfolge, waehrend die externen noch
 /// unterwegs sind. `None` heisst: keine offene Skriptrunde.
 static mut NAV_SCRIPTS: Option<Vec<PendingScript>> = None;
+/// Die JS-Sitzung DIESER Seite.
+///
+/// Sie muss die Skriptrunde ueberleben: die Behandler, die ein Skript
+/// anmeldet, leben in ihr, und ohne sie waere jeder `addEventListener` beim
+/// Verlassen der Funktion wieder weg. Eine Navigation wirft sie weg.
+static mut JS: Option<beak_engine::js::Session> = None;
+
+fn js_session() -> Option<&'static mut beak_engine::js::Session> {
+    unsafe { (*core::ptr::addr_of_mut!(JS)).as_mut() }
+}
 /// Wie viele externe Adressen das Buendel angefordert hat.
 static mut NAV_JS_COUNT: usize = 0;
 
@@ -1271,9 +1285,15 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) {
         // macht es ein Browser auch.
         match sess.run(&prog) { Ok(()) => ran += 1, Err(_) => failed += 1 }
     }
-    if let Some(d) = sess.interp.doc.as_ref() {
+    // Die Zeitgeber, die waehrend des Ladens angemeldet wurden, einmal
+    // laufen lassen — viele Seiten stellen ihre Oberflaeche in einem
+    // `setTimeout(…, 0)` fertig.
+    let timers = sess.interp.run_timers();
+    if let Some(d) = sess.interp.doc.as_mut() {
+        engine.set_hit_all(d.has_listeners);
         engine.set_scripted_dom(Some(d.to_dom()));
     }
+    unsafe { core::ptr::addr_of_mut!(JS).write(Some(sess)) };
     let mut m = String::from("[beak] scripts: ");
     push_i64(&mut m, ran as i64);
     m.push_str(" gelaufen, ");
@@ -1283,7 +1303,50 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) {
     m.push_str(" KB, ");
     push_i64(&mut m, (now_ms() - t0) as i64);
     m.push_str(" ms");
+    if timers > 0 { m.push_str(", "); push_i64(&mut m, timers as i64); m.push_str(" Zeitgeber"); }
     log(&m);
+}
+
+/// Einen Klick an die Seite zustellen. Liefert true, wenn ein Behandler
+/// `preventDefault` gerufen hat — dann unterbleibt, was beak sonst getan
+/// haette (einem Link folgen, ein Steuerelement bedienen).
+fn dispatch_click(engine: &Engine, lay: &Layout, cx: i32, cy: i32) -> bool {
+    let Some(sess) = js_session() else { return false };
+    // Die seq-Kette unter dem Zeiger, vom aeussersten zum innersten. Das
+    // Layout gibt sie schon aus — dieselbe Liste, aus der `:hover` lebt.
+    let chain = lay.hover_at(cx, cy);
+    if chain.is_empty() { return false; }
+    let Some(doc) = sess.interp.doc.as_ref() else { return false };
+    if !doc.has_listeners { return false; }
+    let nodes: Vec<u32> = chain.iter().filter_map(|s| doc.by_seq(*s)).collect();
+    if nodes.is_empty() { return false; }
+    let t0 = now_ms();
+    let prevented = matches!(
+        beak_engine::js::dombind::dispatch(&mut sess.interp, "click", &nodes), Ok(true));
+    let timers = sess.interp.run_timers();
+    // NUR wenn sich etwas geaendert hat. Ein Behandler, der bloss zaehlt,
+    // darf keine 130 ms Layout kosten.
+    let changed = sess.interp.doc.as_ref().is_some_and(|d| d.dirty);
+    if changed {
+        if let Some(d) = sess.interp.doc.as_mut() {
+            engine.set_scripted_dom(Some(d.to_dom()));
+        }
+        bump_content_gen("script");
+        mark_dirty();
+    }
+    if changed || prevented || timers > 0 {
+        let mut m = String::from("[beak] click -> js: ");
+        push_i64(&mut m, nodes.len() as i64);
+        m.push_str(" Knoten, ");
+        m.push_str(if changed { "Baum geaendert" } else { "unveraendert" });
+        if prevented { m.push_str(", preventDefault"); }
+        if timers > 0 { m.push_str(", "); push_i64(&mut m, timers as i64); m.push_str(" Zeitgeber"); }
+        m.push_str(", ");
+        push_i64(&mut m, (now_ms() - t0) as i64);
+        m.push_str(" ms");
+        log(&m);
+    }
+    prevented
 }
 
 /// Was ein Seitenskript an Schritten bekommt.
@@ -2455,6 +2518,11 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
                             &fresh
                         }
                     };
+                    // Die Seite bekommt den Klick ZUERST. Ruft ein Behandler
+                    // `preventDefault`, ist der Klick verbraucht — sonst
+                    // wuerde beak zusaetzlich dem Link folgen, den die Seite
+                    // gerade abgefangen hat.
+                    if dispatch_click(engine, lay, cx, cy) { return true; }
                     // Inspect mode intercepts the click: select the deepest
                     // element box under the cursor (shown as an outline + a
                     // status-bar label) instead of following a link.
