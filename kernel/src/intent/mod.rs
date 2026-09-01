@@ -5,6 +5,7 @@
 
 mod auth;
 mod cert;
+pub(crate) mod fetch;
 mod forge;
 mod fs;
 pub(crate) mod gzip;

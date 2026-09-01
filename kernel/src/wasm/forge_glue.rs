@@ -705,6 +705,42 @@ extern "C" fn f_npk_http_send(vm: *const u64, method_ptr: i32, method_len: i32, 
     host_core::npk_http_send(mem, ctx, method_ptr, method_len, url_ptr, url_len, hdrs_ptr, hdrs_len, body_ptr, body_len, buf_ptr, buf_max)
 }
 
+extern "C" fn f_npk_http_begin(vm: *const u64, method_ptr: i32, method_len: i32, url_ptr: i32, url_len: i32, hdrs_ptr: i32, hdrs_len: i32, body_ptr: i32, body_len: i32, buf_max: i32) -> i32 {
+    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    let (mem, ctx) = unsafe { parts(vm) };
+    host_core::npk_http_begin(mem, ctx, method_ptr, method_len, url_ptr, url_len, hdrs_ptr, hdrs_len, body_ptr, body_len, buf_max)
+}
+
+extern "C" fn f_npk_http_begin_many(vm: *const u64, urls_ptr: i32, urls_len: i32, out_max: i32) -> i32 {
+    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    let (mem, ctx) = unsafe { parts(vm) };
+    host_core::npk_http_begin_many(mem, ctx, urls_ptr, urls_len, out_max)
+}
+
+extern "C" fn f_npk_http_poll(vm: *const u64, handle: i32) -> i32 {
+    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    let ctx = unsafe { ctx_of(vm) };
+    host_core::npk_http_poll(ctx, handle)
+}
+
+extern "C" fn f_npk_http_take(vm: *const u64, handle: i32, buf_ptr: i32, buf_max: i32) -> i32 {
+    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    let (mem, ctx) = unsafe { parts(vm) };
+    host_core::npk_http_take(mem, ctx, handle, buf_ptr, buf_max)
+}
+
+extern "C" fn f_npk_http_take_many(vm: *const u64, handle: i32, out_ptr: i32, out_max: i32, lens_ptr: i32, lens_max: i32) -> i32 {
+    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    let (mem, ctx) = unsafe { parts(vm) };
+    host_core::npk_http_take_many(mem, ctx, handle, out_ptr, out_max, lens_ptr, lens_max)
+}
+
+extern "C" fn f_npk_http_cancel(vm: *const u64, handle: i32) -> i32 {
+    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    let ctx = unsafe { ctx_of(vm) };
+    host_core::npk_http_cancel(ctx, handle)
+}
+
 extern "C" fn f_npk_http_request_many(vm: *const u64, urls_ptr: i32, urls_len: i32, out_ptr: i32, out_max: i32, lens_ptr: i32, lens_max: i32) -> i32 {
     // SAFETY: `vm` ist der vmctx des rufenden Moduls.
     let (mem, ctx) = unsafe { parts(vm) };
@@ -921,6 +957,12 @@ pub(crate) fn resolve(module: &str, name: &str) -> Option<u64> {
         "npk_http_request" => f_npk_http_request as *const () as u64,
         "npk_http_send" => f_npk_http_send as *const () as u64,
         "npk_http_request_many" => f_npk_http_request_many as *const () as u64,
+        "npk_http_begin" => f_npk_http_begin as *const () as u64,
+        "npk_http_begin_many" => f_npk_http_begin_many as *const () as u64,
+        "npk_http_poll" => f_npk_http_poll as *const () as u64,
+        "npk_http_take" => f_npk_http_take as *const () as u64,
+        "npk_http_take_many" => f_npk_http_take_many as *const () as u64,
+        "npk_http_cancel" => f_npk_http_cancel as *const () as u64,
         "npk_open" => f_npk_open as *const () as u64,
         "npk_launch" => f_npk_launch as *const () as u64,
         "npk_pick" => f_npk_pick as *const () as u64,

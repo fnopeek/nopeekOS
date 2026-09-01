@@ -100,10 +100,13 @@ static NPK_CAPS: [u8; 2] = [caps::RENDER | caps::CANVAS, caps::ext::NET];
 unsafe extern "C" {
     fn npk_scene_commit(ptr: i32, len: i32) -> i32;
     fn npk_event_poll(ptr: i32, max: i32) -> i32;
-    /// The general request: any method, extra headers (newline-separated
-    /// `Name: value`), a body. A non-2xx comes back as bytes, not as an
-    /// error — a 404 page is a document.
-    fn npk_http_send(
+    /// Start the general request — any method, extra headers
+    /// (newline-separated `Name: value`), a body — and come straight back
+    /// with a handle. Nothing here waits for a network: the kernel waits on a
+    /// fiber of its own while this loop keeps painting and reading keys.
+    /// A non-2xx comes back as bytes, not as an error — a 404 page is a
+    /// document.
+    fn npk_http_begin(
         method_ptr: i32,
         method_len: i32,
         url_ptr: i32,
@@ -112,10 +115,19 @@ unsafe extern "C" {
         hdrs_len: i32,
         body_ptr: i32,
         body_len: i32,
-        buf_ptr: i32,
         buf_max: i32,
     ) -> i32;
-    /// The last `npk_http_send` response's header block, minus the status
+    /// 1 = the answer is here, 0 = still running, -1 = it failed, -2 = no
+    /// such handle.
+    fn npk_http_poll(handle: i32) -> i32;
+    /// Collect a finished request: bytes written, -1 if it failed (the reason
+    /// is in `npk_http_last_error`), -2 unknown handle, -3 still running.
+    /// Frees the handle and fills the four response getters below.
+    fn npk_http_take(handle: i32, buf_ptr: i32, buf_max: i32) -> i32;
+    /// Give up on a handle. Idempotent — a navigation cancels whatever the
+    /// last one left in the air without having to know which state it caught.
+    fn npk_http_cancel(handle: i32) -> i32;
+    /// The last collected response's header block, minus the status
     /// line. `Set-Cookie` repeats, so it can only be handed over raw.
     fn npk_http_response_headers(buf_ptr: i32, buf_max: i32) -> i32;
     /// Seconds since the epoch, UTC. `npk_ticks` cannot stand in: it restarts
@@ -126,12 +138,15 @@ unsafe extern "C" {
     fn npk_http_last_error(buf_ptr: i32, buf_max: i32) -> i32;
     /// The last response's Content-Type, verbatim. -1 if the server sent none.
     fn npk_http_content_type(buf_ptr: i32, buf_max: i32) -> i32;
-    /// Fetch a newline-separated list of URLs in one call, multiplexed over
-    /// HTTP/2 where the host offers it. Bodies land back-to-back in `out`;
-    /// `lens` receives one little-endian i32 per URL (bytes written, or -1).
-    fn npk_http_request_many(
-        urls_ptr: i32,
-        urls_len: i32,
+    /// Start a newline-separated list of URLs in one call, multiplexed over
+    /// HTTP/2 where the host offers it. Same handle discipline as
+    /// `npk_http_begin`.
+    fn npk_http_begin_many(urls_ptr: i32, urls_len: i32, out_max: i32) -> i32;
+    /// Collect a finished batch: the bodies back-to-back in `out`, one
+    /// little-endian i32 per URL in `lens` (bytes written, or -1). Returns
+    /// how many URLs the batch had, or -1 / -2 / -3 as above.
+    fn npk_http_take_many(
+        handle: i32,
         out_ptr: i32,
         out_max: i32,
         lens_ptr: i32,
@@ -219,6 +234,10 @@ const ACT_GO: u32 = 1;
 const ACT_BACK: u32 = 2;
 const ACT_FORWARD: u32 = 3;
 const ACT_RELOAD: u32 = 4;
+/// Give up on the page being loaded. The reload button becomes this while a
+/// navigation is in the air — which is only possible now that one IS in the
+/// air rather than in a host call nobody can interrupt.
+const ACT_STOP: u32 = 5;
 
 // Menu-bar labels (toggle a dropdown)
 const ACT_MENU_FILE: u32 = 5_000;
@@ -298,16 +317,12 @@ static mut IMG_FETCH_BUF: [u8; IMG_FETCH_CAP] = [0; IMG_FETCH_CAP];
 /// round-trips while a turn of the loop stays short.
 const IMG_BATCH: usize = 4;
 
-/// Receives the per-URL length table from `npk_http_request_many`. Sized for
+/// Receives the per-URL length table from `npk_http_take_many`. Sized for
 /// the largest batch either caller asks for.
 static mut LENS_BUF: [u8; 4 * MAX_CSS_LINKS] = [0; 4 * MAX_CSS_LINKS];
 
-/// Fetch a batch of URLs into `dst`, returning each body as a slice.
-///
-/// Returns an empty vec if the host call fails, which the callers treat the
-/// same as "none of them loaded" — every one of them degrades to a
-/// placeholder or to unstyled content rather than to a blank page.
-fn fetch_batch(urls: &[String], dst: *mut u8, cap: usize) -> Vec<(usize, usize)> {
+/// The URL list a batch call wants: one per line.
+fn url_lines(urls: &[String]) -> String {
     let mut blob = String::new();
     for (i, u) in urls.iter().enumerate() {
         if i > 0 {
@@ -315,11 +330,27 @@ fn fetch_batch(urls: &[String], dst: *mut u8, cap: usize) -> Vec<(usize, usize)>
         }
         blob.push_str(u);
     }
+    blob
+}
+
+/// Start a batch and return its handle, or -1. `cap` is the room the bodies
+/// may take together.
+fn begin_batch(urls: &[String], cap: usize) -> i32 {
+    let blob = url_lines(urls);
+    unsafe { npk_http_begin_many(blob.as_ptr() as i32, blob.len() as i32, cap as i32) }
+}
+
+/// Collect a finished batch into `dst`, returning each body as a
+/// `(offset, len)` span.
+///
+/// Returns an empty vec if the batch failed, which the callers treat the
+/// same as "none of them loaded" — every one of them degrades to a
+/// placeholder or to unstyled content rather than to a blank page.
+fn take_batch(handle: i32, dst: *mut u8, cap: usize, want: usize) -> Vec<(usize, usize)> {
     let lens = core::ptr::addr_of_mut!(LENS_BUF) as *mut u8;
     let n = unsafe {
-        npk_http_request_many(
-            blob.as_ptr() as i32,
-            blob.len() as i32,
+        npk_http_take_many(
+            handle,
             dst as i32,
             cap as i32,
             lens as i32,
@@ -331,7 +362,7 @@ fn fetch_batch(urls: &[String], dst: *mut u8, cap: usize) -> Vec<(usize, usize)>
         return spans;
     }
     let mut off = 0usize;
-    for i in 0..(n as usize).min(urls.len()) {
+    for i in 0..(n as usize).min(want) {
         let mut raw = [0u8; 4];
         unsafe { core::ptr::copy_nonoverlapping(lens.add(i * 4), raw.as_mut_ptr(), 4) };
         let len = i32::from_le_bytes(raw);
@@ -793,12 +824,81 @@ fn fetched_from() -> Option<String> {
 const HDR_CAP: usize = 8 * 1024;
 static mut HDR_BUF: [u8; HDR_CAP] = [0; HDR_CAP];
 
-/// Send one document request and file whatever cookies come back.
-///
-/// Every document goes through here — a plain navigation is a GET with an
-/// empty body. Keeping ONE path means a cookie cannot be filed on the reply
-/// to a form and then forgotten on the reply to the redirect it sends you to.
-fn send_document(method: &str, url: &str, body: &[u8], extra: &str) -> i32 {
+// ── A navigation that runs while the window stays alive ───────────────────
+//
+// A page load is two round trips — the document, then its stylesheets — and
+// neither may be waited for. Both are started here and collected by
+// `nav_pump` on a later turn of the loop, so between them beak paints,
+// scrolls and answers keys exactly as it does when idle.
+//
+// The two stages stay strictly ordered, and NOTHING is painted between them:
+// stylesheets are render-blocking, and drawing the bare document first would
+// cost a full layout (1,7 s on the device) that the arriving CSS throws away
+// on the very next turn.
+
+#[derive(Clone, Copy, PartialEq)]
+enum NavStage {
+    Doc,
+    Css,
+}
+
+/// Handle of the navigation in flight, or -1.
+static mut NAV_JOB: i32 = -1;
+static mut NAV_STAGE: NavStage = NavStage::Doc;
+/// The address that was ASKED for. The diagnostic page names it, and it
+/// stands in for the base URL if the response never said where it came from.
+static mut NAV_URL: Option<String> = None;
+/// Record the landing address in the history once the document is here.
+/// Where we LANDED, not where we aimed — otherwise every trip back through
+/// history replays the redirect.
+static mut NAV_PUSH_HIST: bool = false;
+/// When the stage in flight started, so each round trip reports its own span
+/// instead of the navigation's total.
+static mut NAV_STAGE_MS: i64 = 0;
+
+fn nav_job() -> i32 {
+    unsafe { core::ptr::addr_of!(NAV_JOB).read() }
+}
+
+/// Is a page load in the air? The toolbar asks (its reload button becomes a
+/// stop button), and so does the idle nap.
+fn nav_busy() -> bool {
+    nav_job() >= 0
+}
+
+fn nav_clear() {
+    unsafe {
+        core::ptr::addr_of_mut!(NAV_JOB).write(-1);
+        core::ptr::addr_of_mut!(NAV_URL).write(None);
+        core::ptr::addr_of_mut!(NAV_PUSH_HIST).write(false);
+    }
+}
+
+/// Drop a navigation still in the air — a second click, or Stop. The kernel
+/// throws its answer away; nothing on screen changes, so the page that is
+/// already there stays readable.
+fn nav_cancel() {
+    let h = nav_job();
+    if h >= 0 {
+        unsafe { npk_http_cancel(h) };
+    }
+    nav_clear();
+}
+
+/// The address the navigation in flight asked for.
+fn nav_asked() -> String {
+    unsafe { (*core::ptr::addr_of!(NAV_URL)).clone() }.unwrap_or_default()
+}
+
+/// Start a navigation and return at once. `push_hist` records the address we
+/// land on once the document is here.
+fn nav_begin(method: &str, url: &str, body: &[u8], extra: &str, push_hist: bool) {
+    // A new navigation replaces the old one, and takes the page it was
+    // loading for with it — a browser that keeps fetching the pictures of the
+    // page you just left is spending the network on nothing.
+    nav_cancel();
+    subresources_cancel();
+
     let now = unsafe { npk_unix_time() };
     let mut hdrs = String::new();
     let jar = cookies::header_for(url, now);
@@ -812,87 +912,218 @@ fn send_document(method: &str, url: &str, body: &[u8], extra: &str) -> i32 {
         }
         hdrs.push_str(extra);
     }
-    let dst = core::ptr::addr_of_mut!(HTML_BUF) as *mut u8;
-    let n = unsafe {
-        npk_http_send(
-            method.as_ptr() as i32, method.len() as i32,
-            url.as_ptr() as i32, url.len() as i32,
-            hdrs.as_ptr() as i32, hdrs.len() as i32,
-            body.as_ptr() as i32, body.len() as i32,
-            dst as i32, HTML_CAP as i32,
-        )
-    };
-    if n >= 0 {
-        let hp = core::ptr::addr_of_mut!(HDR_BUF) as *mut u8;
-        let hn = unsafe { npk_http_response_headers(hp as i32, HDR_CAP as i32) };
-        if hn > 0 {
-            let bytes = unsafe { core::slice::from_raw_parts(hp as *const u8, hn as usize) };
-            if let Ok(h) = core::str::from_utf8(bytes) {
-                // Cookies are scoped to where the response CAME from, after
-                // redirects — filing them against the URL we asked for would
-                // scope a login cookie to the wrong host.
-                let from = fetched_from().unwrap_or_else(|| url.to_string());
-                let before = cookies::count();
-                cookies::store(&from, h, now);
-                let after = cookies::count();
-                if after != before || h.to_ascii_lowercase().contains("set-cookie") {
-                    let mut m = String::from("[beak] cookies: ");
-                    push_i64(&mut m, after as i64);
-                    m.push_str(" held");
-                    log(&m);
-                }
-            }
-        }
-    }
-    n
-}
-
-/// Fetch `url` into HTML_BUF, then its linked stylesheets; resets scroll +
-/// marks dirty.
-fn fetch(url: &str) -> bool {
-    fetch_with("GET", url, &[], "")
-}
-
-/// The body of `fetch`, with the request spelled out — a form submission is
-/// the same navigation with a method and a body.
-fn fetch_with(method: &str, url: &str, body: &[u8], extra: &str) -> bool {
     let t_nav = now_ms();
     unsafe {
         core::ptr::addr_of_mut!(NAV_START_MS).write(t_nav);
         core::ptr::addr_of_mut!(NAV_REPORTED).write(false);
+        core::ptr::addr_of_mut!(NAV_STAGE_MS).write(t_nav);
     }
-    let n = send_document(method, url, body, extra);
-    log_ms("fetch document", now_ms() - t_nav);
-    let len = if n < 0 { 0 } else { n as usize };
-    unsafe { core::ptr::addr_of_mut!(HTML_LEN).write(len) };
-    // Before anything reads the document: its bytes are not UTF-8 just
-    // because we would like them to be.
-    decode_document();
-    let len = unsafe { core::ptr::addr_of!(HTML_LEN).read() };
+    let h = unsafe {
+        npk_http_begin(
+            method.as_ptr() as i32, method.len() as i32,
+            url.as_ptr() as i32, url.len() as i32,
+            hdrs.as_ptr() as i32, hdrs.len() as i32,
+            body.as_ptr() as i32, body.len() as i32,
+            HTML_CAP as i32,
+        )
+    };
+    unsafe {
+        core::ptr::addr_of_mut!(NAV_URL).write(Some(url.to_string()));
+        core::ptr::addr_of_mut!(NAV_PUSH_HIST).write(push_hist);
+        core::ptr::addr_of_mut!(NAV_STAGE).write(NavStage::Doc);
+        core::ptr::addr_of_mut!(NAV_JOB).write(h);
+    }
+    if h < 0 {
+        // Refused at the door — a malformed address, or the kernel's fetch
+        // table full. That is as much a failed navigation as a refused
+        // certificate, and it names itself through the same getter.
+        nav_fail(url);
+    }
+}
+
+/// The document did not arrive. Put a diagnostic page where it should have
+/// been: a blank canvas is indistinguishable from a hung browser, and the
+/// address bar keeps the URL that was ASKED for rather than one derived from
+/// a response we never got.
+fn nav_fail(url: &str) {
     set_scroll(0);
-    mark_dirty();
     bump_content_gen("navigation");
     bump_nav_gen();
-    if len > 0 {
-        // Relative sub-resources resolve against the URL the document came
-        // FROM, not the one we asked for (RFC 3986 §5.1.3). Getting this
-        // wrong made every stylesheet and image repeat the document's own
-        // redirect — two requests each, which is what walked us into
-        // Wikimedia's rate limit (a wall of HTTP 429).
-        let base = fetched_from().unwrap_or_else(|| url.to_string());
-        set_url(&base);
-        let t_css = now_ms();
-        fetch_stylesheets(&base);
-        log_ms("fetch stylesheets", now_ms() - t_css);
-        unsafe { core::ptr::addr_of_mut!(IMAGES_DIRTY).write(true) };
-    } else {
-        // Failed, or succeeded with nothing in it. Either way the reader gets
-        // told what happened — a blank canvas is indistinguishable from a
-        // hung browser. The address bar keeps the URL that was ASKED for, not
-        // one derived from a response we never got.
-        show_error_page(url);
+    show_error_page(url);
+    mark_dirty();
+    nav_clear();
+}
+
+/// File whatever `Set-Cookie` the response carried.
+///
+/// Cookies are scoped to where the response CAME from, after redirects —
+/// filing them against the URL we asked for would scope a login cookie to the
+/// wrong host.
+fn file_cookies(asked: &str) {
+    let now = unsafe { npk_unix_time() };
+    let hp = core::ptr::addr_of_mut!(HDR_BUF) as *mut u8;
+    let hn = unsafe { npk_http_response_headers(hp as i32, HDR_CAP as i32) };
+    if hn <= 0 {
+        return;
     }
-    n >= 0
+    let bytes = unsafe { core::slice::from_raw_parts(hp as *const u8, hn as usize) };
+    let Ok(h) = core::str::from_utf8(bytes) else { return };
+    let from = fetched_from().unwrap_or_else(|| asked.to_string());
+    let before = cookies::count();
+    cookies::store(&from, h, now);
+    let after = cookies::count();
+    if after != before || h.to_ascii_lowercase().contains("set-cookie") {
+        let mut m = String::from("[beak] cookies: ");
+        push_i64(&mut m, after as i64);
+        m.push_str(" held");
+        log(&m);
+    }
+}
+
+/// Collect whichever half of the navigation has finished. Returns true if the
+/// chrome needs redrawing — the address changed, or the stop button goes back
+/// to being a reload button.
+fn nav_pump() -> bool {
+    let h = nav_job();
+    if h < 0 {
+        return false;
+    }
+    // 0 = still running. Everything else (done, failed, or a handle the
+    // kernel no longer knows) is answered by collecting it.
+    if unsafe { npk_http_poll(h) } == 0 {
+        return false;
+    }
+    match unsafe { core::ptr::addr_of!(NAV_STAGE).read() } {
+        NavStage::Doc => nav_document_arrived(),
+        NavStage::Css => nav_stylesheets_arrived(),
+    }
+    true
+}
+
+fn nav_document_arrived() {
+    let h = nav_job();
+    let asked = nav_asked();
+    let dst = core::ptr::addr_of_mut!(HTML_BUF) as *mut u8;
+    let n = unsafe { npk_http_take(h, dst as i32, HTML_CAP as i32) };
+    log_ms("fetch document", now_ms() - unsafe { core::ptr::addr_of!(NAV_STAGE_MS).read() });
+    if n < 0 {
+        nav_fail(&asked);
+        return;
+    }
+    // Before anything downstream: the cookies belong to THIS response, and
+    // the getters that carry them are overwritten by the next `take`.
+    file_cookies(&asked);
+    unsafe { core::ptr::addr_of_mut!(HTML_LEN).write(n as usize) };
+    // The bytes are not UTF-8 just because we would like them to be, and the
+    // stylesheet scan below reads `html_str()`.
+    decode_document();
+    let len = unsafe { core::ptr::addr_of!(HTML_LEN).read() };
+    if len == 0 {
+        // Succeeded with nothing in it. The reader gets told, same as for a
+        // refusal, and `nav_fail` does the bookkeeping below itself.
+        nav_fail(&asked);
+        return;
+    }
+    set_scroll(0);
+    bump_content_gen("navigation");
+    bump_nav_gen();
+    // Relative sub-resources resolve against the URL the document came FROM,
+    // not the one we asked for (RFC 3986 §5.1.3). Getting this wrong made
+    // every stylesheet and image repeat the document's own redirect.
+    let base = fetched_from().unwrap_or(asked);
+    set_url(&base);
+    if unsafe { core::ptr::addr_of!(NAV_PUSH_HIST).read() } {
+        hist_push(url_str());
+    }
+    nav_begin_stylesheets(&base);
+}
+
+/// Start the second round trip: every `<link rel=stylesheet>` of the document
+/// that just landed, in ONE batch. They are render-blocking, so this is where
+/// overlapping the round trips is worth the most. Bounded by CSS_CAP +
+/// MAX_CSS_LINKS.
+fn nav_begin_stylesheets(base: &str) {
+    let links = beak_engine::stylesheet_links(html_str());
+    let mut urls: Vec<String> = Vec::new();
+    for href in links.iter() {
+        if urls.len() >= MAX_CSS_LINKS {
+            // Say so. A silently dropped stylesheet looks like a layout bug
+            // and sends the next session hunting in the engine.
+            log(&alloc::format!("[beak] stylesheet cap hit: {} of {} linked sheets used",
+                MAX_CSS_LINKS, links.len()));
+            break;
+        }
+        let abs = resolve(base, href);
+        // The same sheet linked twice fetches identical bytes; dedupe on the
+        // resolved URL, since two different hrefs can resolve to one file.
+        if !urls.contains(&abs) {
+            urls.push(abs);
+        }
+    }
+    if urls.is_empty() {
+        unsafe { core::ptr::addr_of_mut!(CSS_LEN).write(0) };
+        nav_finish();
+        return;
+    }
+    let h = begin_batch(&urls, CSS_CAP);
+    if h < 0 {
+        // No stylesheets is not a failed page — it renders against our UA
+        // sheet — so this ends the navigation rather than diagnosing it.
+        log("[beak] stylesheet fetch could not start — rendering unstyled");
+        unsafe { core::ptr::addr_of_mut!(CSS_LEN).write(0) };
+        nav_finish();
+        return;
+    }
+    unsafe {
+        core::ptr::addr_of_mut!(NAV_STAGE).write(NavStage::Css);
+        core::ptr::addr_of_mut!(NAV_JOB).write(h);
+        core::ptr::addr_of_mut!(NAV_CSS_COUNT).write(urls.len());
+        core::ptr::addr_of_mut!(NAV_STAGE_MS).write(now_ms());
+    }
+}
+
+/// How many sheets the batch in flight asked for.
+static mut NAV_CSS_COUNT: usize = 0;
+
+fn nav_stylesheets_arrived() {
+    let h = nav_job();
+    let want = unsafe { core::ptr::addr_of!(NAV_CSS_COUNT).read() };
+    // Fetched into a scratch buffer first because the bodies come back
+    // concatenated, and they need a separator between them: without one, a
+    // sheet not ending in `}` would merge into the next sheet's first rule.
+    let mut scratch: Vec<u8> = Vec::with_capacity(CSS_CAP);
+    let spans = take_batch(h, scratch.as_mut_ptr(), CSS_CAP, want);
+    let total = spans.iter().map(|(o, l)| o + l).max().unwrap_or(0);
+    unsafe { scratch.set_len(total.min(CSS_CAP)) };
+
+    let dst = core::ptr::addr_of_mut!(CSS_BUF) as *mut u8;
+    let mut len = 0usize;
+    for (off, n) in spans {
+        if n == 0 || off + n > scratch.len() || len + n + 1 >= CSS_CAP {
+            if n > 0 && len + n + 1 >= CSS_CAP {
+                log(&alloc::format!("[beak] CSS buffer full at {len} B — dropped a {n} B sheet"));
+            }
+            continue;
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(scratch.as_ptr().add(off), dst.add(len), n);
+            len += n;
+            *dst.add(len) = b'\n';
+        }
+        len += 1;
+    }
+    unsafe { core::ptr::addr_of_mut!(CSS_LEN).write(len) };
+    log_ms("fetch stylesheets", now_ms() - unsafe { core::ptr::addr_of!(NAV_STAGE_MS).read() });
+    nav_finish();
+}
+
+/// Document and stylesheets are both in: the page may be drawn, and its
+/// images may start arriving.
+fn nav_finish() {
+    decode_css();
+    unsafe { core::ptr::addr_of_mut!(IMAGES_DIRTY).write(true) };
+    mark_dirty();
+    nav_clear();
 }
 
 /// Start a page's image load: drop the old pixels and return the list of
@@ -942,34 +1173,40 @@ fn begin_images(engine: &mut Engine) -> Vec<String> {
     pending
 }
 
-/// Fetch exactly ONE pending image and hand it to the engine to decode.
+/// Ask for the next few images, and take delivery of the last few.
 ///
-/// One per main-loop turn, NOT a batch: images are not render-blocking (only
-/// stylesheets are), so the page must already be on screen and scrollable
-/// while they trickle in. Fetches are blocking, and a rate-limited host can
-/// stall one for seconds — batching them froze the whole app until the last
-/// one landed.
+/// One batch in flight at a time, NOT a whole page: a batch is answered in one
+/// go, so asking for everything at once would put the page's whole image
+/// traffic between two repaints. Small batches let the reader scroll through a
+/// loading page.
 ///
-/// STREAMING: fetch → decode now → keep only its pixels → reuse the same
-/// scratch buffer for the next. We never hold all the compressed image bytes
-/// at once (the old `pairs` approach peaked at ~16 blobs → the heap-OOM the
-/// fast keep-alive pool exposed).
 /// The last layout's `guessed_image_srcs` lists the `src`s whose box it had to
 /// guess. Only if one of THOSE arrives does the page move and a re-layout pay
 /// for itself; everything else is a repaint. That is ~15 ms instead of ~145 ms
-/// of engine work per batch on a real article — and under the wasmi
-/// interpreter on the device, the difference between a page that scrolls while
-/// it loads and one that freezes for seconds at a time.
+/// of engine work per batch on a real article — and on the device, the
+/// difference between a page that scrolls while it loads and one that freezes
+/// for seconds at a time.
 ///
 /// `band` is the visible document band `(scroll_y, scroll_y + viewport_h)`.
 /// A repaint is the WHOLE viewport, so an image below the fold is paid for in
 /// full and shows nothing — see `Layout::images_in_band`.
-fn fetch_next_images(
+fn pump_images(
     engine: &mut Engine,
     pending: &mut Vec<String>,
     layout: Option<&Layout>,
     band: (i32, i32),
 ) {
+    let h = img_job();
+    if h >= 0 {
+        if unsafe { npk_http_poll(h) } == 0 {
+            return; // still on the wire — come back next turn
+        }
+        images_arrived(engine, h, layout, band);
+    }
+    images_start(pending, layout);
+}
+
+fn images_start(pending: &mut Vec<String>, layout: Option<&Layout>) {
     if pending.is_empty() {
         return;
     }
@@ -978,9 +1215,8 @@ fn fetch_next_images(
     // measured on the device: 1110-1710 ms on an article, against ~540 ms for
     // the whole page's image traffic. Fetching it in the FIRST batch pays that
     // once, immediately, instead of after two repaints the re-layout then
-    // throws away — and the page settles before the reader has started
-    // reading. On de.wikipedia/Stansstad exactly ONE `<img>` of 17 is such a
-    // box (a MediaWiki timeline, no width/height); the Hauptseite has none,
+    // throws away. On de.wikipedia/Stansstad exactly ONE `<img>` of 17 is such
+    // a box (a MediaWiki timeline, no width/height); the Hauptseite has none,
     // which is why only the article ever showed the jump.
     if let Some(l) = layout {
         if !l.guessed_image_srcs.is_empty() {
@@ -991,11 +1227,34 @@ fn fetch_next_images(
     let take = pending.len().min(IMG_BATCH);
     let srcs: Vec<String> = pending.drain(..take).collect();
     let urls: Vec<String> = srcs.iter().map(|s| resolve(url_str(), s)).collect();
+    let h = begin_batch(&urls, IMG_FETCH_CAP);
+    if h < 0 {
+        // Could not even be asked for. These keep their placeholders rather
+        // than being retried every turn for as long as the page stays open.
+        log(&alloc::format!("[beak] image batch of {} could not start", urls.len()));
+        return;
+    }
+    unsafe {
+        core::ptr::addr_of_mut!(IMG_JOB_SRCS)
+            .write(Some(srcs.into_iter().zip(urls).collect()));
+        core::ptr::addr_of_mut!(IMG_JOB).write(h);
+    }
+}
+
+fn images_arrived(
+    engine: &mut Engine,
+    handle: i32,
+    layout: Option<&Layout>,
+    band: (i32, i32),
+) {
+    let want: Vec<(String, String)> =
+        unsafe { (*core::ptr::addr_of_mut!(IMG_JOB_SRCS)).take() }.unwrap_or_default();
+    unsafe { core::ptr::addr_of_mut!(IMG_JOB).write(-1) };
     let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
-    let spans = fetch_batch(&urls, dst, IMG_FETCH_CAP);
+    let spans = take_batch(handle, dst, IMG_FETCH_CAP, want.len());
     let mut arrived: Vec<&str> = Vec::new();
     let mut moved = false;
-    for ((src, url), (off, n)) in srcs.iter().zip(urls.iter()).zip(spans) {
+    for ((src, url), (off, n)) in want.iter().zip(spans) {
         if n == 0 {
             continue; // failed or did not fit → keeps its placeholder
         }
@@ -1042,36 +1301,69 @@ fn images_dirty() -> bool {
     unsafe { core::ptr::addr_of!(IMAGES_DIRTY).read() }
 }
 
-/// Fetch the CSS images (`background-image`/`mask-image`) the last layout
-/// asked for, one batch a turn.
+/// Ask for the CSS images (`background-image`/`mask-image`) the last layout
+/// wanted, and take delivery of the last batch — one batch in flight, like
+/// `<img>`.
 ///
-/// Kept apart from `fetch_next_images` for one reason that matters: a CSS
-/// image can never move a box, so an arriving one is ALWAYS just a repaint —
-/// there is no `guessed` case and no `bump_content_gen`. The engine already
-/// resolved every `data:` URI itself, so this list is only what genuinely
-/// needs the network.
+/// Kept apart from `pump_images` for one reason that matters: a CSS image can
+/// never move a box, so an arriving one is ALWAYS just a repaint — there is no
+/// `guessed` case and no `bump_content_gen`. The engine already resolved every
+/// `data:` URI itself, so this list is only what genuinely needs the network.
 ///
 /// The URL is resolved against the DOCUMENT, not the stylesheet that declared
 /// it. Those differ only for a relative url() in a linked sheet; the shell
 /// concatenates the sheets into one buffer, so the per-sheet base is gone by
 /// here. Absolute and root-relative urls — which is what real sheets ship —
 /// resolve identically either way.
-fn fetch_next_css_images(
+fn pump_css_images(
     engine: &Engine,
     pending: &mut Vec<(u64, String)>,
     layout: Option<&Layout>,
     band: (i32, i32),
 ) {
+    let h = cssimg_job();
+    if h >= 0 {
+        if unsafe { npk_http_poll(h) } == 0 {
+            return;
+        }
+        css_images_arrived(engine, h, layout, band);
+    }
+    css_images_start(pending);
+}
+
+fn css_images_start(pending: &mut Vec<(u64, String)>) {
     if pending.is_empty() {
         return;
     }
     let take = pending.len().min(IMG_BATCH);
     let want: Vec<(u64, String)> = pending.drain(..take).collect();
     let urls: Vec<String> = want.iter().map(|(_, u)| resolve(url_str(), u)).collect();
+    let h = begin_batch(&urls, IMG_FETCH_CAP);
+    if h < 0 {
+        log(&alloc::format!("[beak] background batch of {} could not start", urls.len()));
+        return;
+    }
+    let keys: Vec<(u64, String)> =
+        want.into_iter().map(|(k, _)| k).zip(urls).collect();
+    unsafe {
+        core::ptr::addr_of_mut!(CSSIMG_JOB_KEYS).write(Some(keys));
+        core::ptr::addr_of_mut!(CSSIMG_JOB).write(h);
+    }
+}
+
+fn css_images_arrived(
+    engine: &Engine,
+    handle: i32,
+    layout: Option<&Layout>,
+    band: (i32, i32),
+) {
+    let want: Vec<(u64, String)> =
+        unsafe { (*core::ptr::addr_of_mut!(CSSIMG_JOB_KEYS)).take() }.unwrap_or_default();
+    unsafe { core::ptr::addr_of_mut!(CSSIMG_JOB).write(-1) };
     let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
-    let spans = fetch_batch(&urls, dst, IMG_FETCH_CAP);
+    let spans = take_batch(handle, dst, IMG_FETCH_CAP, want.len());
     let mut arrived: Vec<u64> = Vec::new();
-    for (((key, _), url), (off, n)) in want.iter().zip(urls.iter()).zip(spans) {
+    for ((key, url), (off, n)) in want.iter().zip(spans) {
         if n == 0 {
             continue; // failed or did not fit → the box stays undecorated
         }
@@ -1094,75 +1386,70 @@ fn fetch_next_css_images(
     }
 }
 
-/// Fetch every `<link rel=stylesheet>` of the just-loaded page into CSS_BUF
-/// (concatenated), resolving hrefs against `base`. Bounded by CSS_CAP +
-/// MAX_CSS_LINKS. Each is a blocking sub-resource request (adds latency).
-fn fetch_stylesheets(base: &str) {
-    let links = beak_engine::stylesheet_links(html_str());
-    let base = base.to_string();
-    let mut urls: Vec<String> = Vec::new();
-    for href in links.iter() {
-        if urls.len() >= MAX_CSS_LINKS {
-            // Say so. A silently dropped stylesheet looks like a layout bug
-            // and sends the next session hunting in the engine.
-            log(&alloc::format!("[beak] stylesheet cap hit: {} of {} linked sheets used", MAX_CSS_LINKS, links.len()));
-            break;
-        }
-        let abs = resolve(&base, href);
-        // The same sheet linked twice fetches identical bytes; dedupe on the
-        // resolved URL, since two different hrefs can resolve to one file.
-        if !urls.contains(&abs) {
-            urls.push(abs);
-        }
-    }
-    let mut len = 0usize;
-    if !urls.is_empty() {
-        // One batch, not one request per sheet. Stylesheets are
-        // render-blocking — nothing paints until the last one arrives — so
-        // this is where overlapping the round-trips is worth the most.
-        // Fetched into a scratch buffer first because the bodies come back
-        // concatenated, and they need a separator between them: without one,
-        // a sheet not ending in `}` would merge into the next sheet's first
-        // rule.
-        let mut scratch: Vec<u8> = Vec::with_capacity(CSS_CAP);
-        let spans = fetch_batch(&urls, scratch.as_mut_ptr(), CSS_CAP);
-        let total = spans.iter().map(|(o, l)| o + l).max().unwrap_or(0);
-        unsafe { scratch.set_len(total.min(CSS_CAP)) };
+// ── Sub-resource batches in flight ────────────────────────────────────────
 
-        let dst = core::ptr::addr_of_mut!(CSS_BUF) as *mut u8;
-        for (off, n) in spans {
-            if n == 0 || off + n > scratch.len() || len + n + 1 >= CSS_CAP {
-                if n > 0 && len + n + 1 >= CSS_CAP {
-                    log(&alloc::format!("[beak] CSS buffer full at {len} B — dropped a {n} B sheet"));
-                }
-                continue;
-            }
-            unsafe {
-                core::ptr::copy_nonoverlapping(scratch.as_ptr().add(off), dst.add(len), n);
-                len += n;
-                *dst.add(len) = b'\n';
-            }
-            len += 1;
-        }
-    }
-    unsafe { core::ptr::addr_of_mut!(CSS_LEN).write(len) };
-    decode_css();
+/// The `<img>` batch on the wire and the `(src, resolved url)` pairs it was
+/// asked for, so an arriving body can be filed under the src the page named
+/// it by. -1 / None when nothing is in flight.
+static mut IMG_JOB: i32 = -1;
+static mut IMG_JOB_SRCS: Option<Vec<(String, String)>> = None;
+/// The same for backgrounds, keyed the way the layout names them.
+static mut CSSIMG_JOB: i32 = -1;
+static mut CSSIMG_JOB_KEYS: Option<Vec<(u64, String)>> = None;
+
+fn img_job() -> i32 {
+    unsafe { core::ptr::addr_of!(IMG_JOB).read() }
+}
+fn cssimg_job() -> i32 {
+    unsafe { core::ptr::addr_of!(CSSIMG_JOB).read() }
 }
 
-/// Set the address + fetch, WITHOUT touching history (used by back/forward).
+/// Drop the sub-resource batches of a page that is being replaced. A browser
+/// that keeps fetching the pictures of the page you just left spends the
+/// network on nothing — and with one kernel fetch queue behind them, it also
+/// makes the new document wait its turn.
+fn subresources_cancel() {
+    unsafe {
+        let p = core::ptr::addr_of_mut!(IMG_JOB);
+        if p.read() >= 0 {
+            npk_http_cancel(p.read());
+            p.write(-1);
+        }
+        core::ptr::addr_of_mut!(IMG_JOB_SRCS).write(None);
+        let p = core::ptr::addr_of_mut!(CSSIMG_JOB);
+        if p.read() >= 0 {
+            npk_http_cancel(p.read());
+            p.write(-1);
+        }
+        core::ptr::addr_of_mut!(CSSIMG_JOB_KEYS).write(None);
+    }
+}
+
+/// Set the address + start fetching, WITHOUT touching history (reload,
+/// back/forward — those addresses are already in it).
+///
+/// A failure is not silent: `nav_fail` puts a diagnostic page in the document
+/// and logs the reason, so there is nothing to add here.
 fn fetch_url(url: &str) {
     set_url(url);
-    // A failure is not silent any more — `fetch` puts a diagnostic page in
-    // the document and logs the reason, so there is nothing to add here.
-    let _ = fetch(url);
+    nav_begin("GET", url, &[], "", false);
+}
+
+/// The same, but the address we LAND on joins the history — a click, a typed
+/// address, a form. Recorded when the document arrives, not now: recording
+/// where we aimed would make every trip back replay the redirect.
+fn nav_goto(url: &str) {
+    set_url(url);
+    nav_begin("GET", url, &[], "", true);
 }
 
 /// Navigate by POSTing `body` to `url` (a form with `method=post`).
 fn post_url(url: &str, body: &[u8]) {
     set_url(url);
-    let _ = fetch_with(
+    nav_begin(
         "POST", url, body,
         "Content-Type: application/x-www-form-urlencoded",
+        true,
     );
 }
 
@@ -1186,10 +1473,7 @@ fn go(typed: &str) {
         s.push_str(&q);
         s
     };
-    fetch_url(&abs);
-    // Record where we LANDED, not where we aimed — otherwise every trip back
-    // through history replays the redirect.
-    hist_push(url_str());
+    nav_goto(&abs);
 }
 
 /// A typed address that is not a URL becomes a web search. Marginalia is the
@@ -1235,13 +1519,12 @@ fn submit_form(page: &Page, activated: Option<u32>) -> bool {
             url.push('?');
             url.push_str(&sub.query);
         }
-        fetch_url(&url);
+        nav_goto(&url);
     } else {
         // A POST keeps the action's own query string — only a GET replaces it.
         let target = if action.contains('?') { action.clone() } else { url.clone() };
         post_url(&target, sub.query.as_bytes());
     }
-    hist_push(url_str());
     true
 }
 
@@ -1249,10 +1532,7 @@ fn submit_form(page: &Page, activated: Option<u32>) -> bool {
 fn follow(href: &str) {
     let base = url_str().to_string();
     let abs = resolve(&base, href);
-    fetch_url(&abs);
-    // Record where we LANDED, not where we aimed — otherwise every trip back
-    // through history replays the redirect.
-    hist_push(url_str());
+    nav_goto(&abs);
 }
 
 // ── Back/forward history (fixed-size static ring of URLs) ──────────────────
@@ -1509,8 +1789,12 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
     }
     log_ms("canvas commit", now_ms() - t_commit);
     // The number that matters: navigation → first pixels.
+    //
+    // Not while one is still in the air: the OLD page keeps repainting for
+    // scrolls and hovers during a load now, and reporting one of those would
+    // credit the new navigation with a picture of the previous page.
     unsafe {
-        if !core::ptr::addr_of!(NAV_REPORTED).read() {
+        if !core::ptr::addr_of!(NAV_REPORTED).read() && !nav_busy() {
             core::ptr::addr_of_mut!(NAV_REPORTED).write(true);
             log_ms("=== navigation -> first paint", now_ms() - core::ptr::addr_of!(NAV_START_MS).read());
         }
@@ -1589,7 +1873,14 @@ fn render_chrome() {
         children: vec![
             nav_button(IconId::ArrowLeft, ActionId(ACT_BACK)),
             nav_button(IconId::ArrowRight, ActionId(ACT_FORWARD)),
-            nav_button(IconId::ArrowClockwise, ActionId(ACT_RELOAD)),
+            // One button, two jobs: reload when the page is settled, stop
+            // while it is loading. It is also the only thing on screen that
+            // says a fetch is running at all.
+            if nav_busy() {
+                nav_button(IconId::X, ActionId(ACT_STOP))
+            } else {
+                nav_button(IconId::ArrowClockwise, ActionId(ACT_RELOAD))
+            },
             address,
         ],
         spacing: Spacing::Sm.as_u16(),
@@ -1842,6 +2133,10 @@ fn activate(page: &mut Page, seq: u32) {
 /// browser that had loaded the new page but still displayed the old URL.
 /// Rather than remember to flag each path, compare the navigation counter
 /// that a real page load bumps: a path added later cannot forget it.
+///
+/// A navigation no longer COMPLETES in here — it is started and picked up by
+/// `nav_pump`, which reports its own redraw — so this guard now only catches
+/// a path that bumps the counter without waiting for a network.
 fn handle(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32, u32)>, page: &mut Page) -> bool {
     let nav = nav_gen();
     let chrome = handle_event(engine, ev, cache, page);
@@ -1898,6 +2193,12 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
                 if !t.is_empty() {
                     fetch_url(&t);
                 }
+                set_open_menu(0);
+                true
+            }
+            ACT_STOP => {
+                nav_cancel();
+                subresources_cancel();
                 set_open_menu(0);
                 true
             }
@@ -2306,8 +2607,6 @@ pub extern "C" fn _start() {
     // stays undecorated until the next navigation.
     let mut css_asked: Vec<u64> = Vec::new();
     loop {
-        // Pick up a navigation: re-parse the document's forms, drop old edits.
-        page.sync();
         // Drain the ENTIRE event queue this tick, THEN repaint once. Wheel
         // events used to be handled one-per-loop with a full repaint (and a
         // ~5 MB buffer alloc) each — a burst of scroll notches backed up so the
@@ -2334,6 +2633,16 @@ pub extern "C" fn _start() {
                 }
             }
         }
+        // Take delivery of whatever the kernel finished while we were
+        // painting: the document, or its stylesheets. THIS is where a
+        // navigation completes now — no path through `handle` waits for one.
+        if nav_pump() {
+            chrome = true;
+        }
+        // …and only then re-parse the document's forms, so the page that just
+        // arrived is laid out against its OWN controls rather than the
+        // previous page's. Cheap when nothing navigated.
+        page.sync();
         if chrome {
             render_chrome();
         }
@@ -2347,12 +2656,12 @@ pub extern "C" fn _start() {
         // A fresh page: drop the old page's decoded images and note which ones
         // it wants (fetching them happens after the repaint, one batch a turn).
         //
-        // This has to sit RIGHT BEFORE the repaint, not at the top of the loop.
-        // A navigation happens while the event queue above is being drained, so
-        // from the top of the loop it is always one turn late: the page was laid
-        // out once against the PREVIOUS page's images, and clearing them a turn
-        // later invalidated that layout and laid it out again. Two full layouts
-        // per navigation, and on the device a layout is over five seconds.
+        // This has to sit AFTER `nav_pump` and BEFORE the repaint. A page is
+        // completed by `nav_pump`, so from the top of the loop this would
+        // always be one turn late: the page was laid out once against the
+        // PREVIOUS page's images, and clearing them a turn later invalidated
+        // that layout and laid it out again. Two full layouts per navigation,
+        // and on the device a layout is over five seconds.
         if images_dirty() {
             pending_imgs = begin_images(&mut engine);
             engine.css_images_begin();
@@ -2377,7 +2686,7 @@ pub extern "C" fn _start() {
         // needs (did a guessed box land, and is the picture even on screen),
         // and the clone happened every turn of the loop.
         let layout = cache.as_ref().map(|(l, _, _, _): &(Layout, i32, i32, u32)| l);
-        fetch_next_images(&mut engine, &mut pending_imgs, layout, band);
+        pump_images(&mut engine, &mut pending_imgs, layout, band);
         // The layout reports which CSS images it needs, so this queue can only
         // be filled AFTER a layout — unlike `<img>`, whose srcs are in the HTML
         // and are queued once by `begin_images`.
@@ -2398,7 +2707,7 @@ pub extern "C" fn _start() {
                 // Same question as for `<img>`, one layer later: the layout
                 // only names its background images AFTER it has run, so this
                 // cannot happen in `begin_images`. The url is resolved exactly
-                // as `fetch_next_css_images` resolves it, or put and get would
+                // as `pump_css_images` resolves it, or put and get would
                 // use different keys for one picture.
                 if engine.adopt_css_cached(*k, &resolve(url_str(), u)) {
                     css_adopted.push(*k);
@@ -2416,12 +2725,20 @@ pub extern "C" fn _start() {
             }
         }
         let layout = cache.as_ref().map(|(l, _, _, _): &(Layout, i32, i32, u32)| l);
-        fetch_next_css_images(&engine, &mut pending_css_imgs, layout, band);
+        pump_css_images(&engine, &mut pending_css_imgs, layout, band);
         // ALWAYS yield so this worker core can halt — a cooperative fiber that
         // never sleeps pins its core at 100%. A short nap while interacting
         // stays responsive; a longer one when idle keeps the core asleep.
         unsafe {
-            let nap = if had_event || !pending_imgs.is_empty() || !pending_css_imgs.is_empty() { 4 } else { 16 };
+            // Anything on the wire keeps the short nap: that is how often we
+            // ask the kernel whether the answer is here, and it is the whole
+            // latency the split costs. 4 ms against a round trip is nothing.
+            let waiting = nav_busy() || img_job() >= 0 || cssimg_job() >= 0;
+            let busy = had_event
+                || waiting
+                || !pending_imgs.is_empty()
+                || !pending_css_imgs.is_empty();
+            let nap = if busy { 4 } else { 16 };
             let _ = npk_sleep(nap);
         }
     }
