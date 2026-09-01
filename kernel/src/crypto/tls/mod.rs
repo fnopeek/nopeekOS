@@ -487,7 +487,7 @@ pub fn tls_connect_alpn(
     let mut negotiated_alpn: Option<String> = None;
 
     loop {
-        let (ct, record) = recv_record(tcp_handle, QUIET_TRANSFER)?;
+        let (ct, record) = recv_record(tcp_handle, QUIET_TRANSFER, ATTEMPT_TICKS)?;
 
         if ct == CT_CHANGE_CIPHER_SPEC {
             continue;
@@ -666,16 +666,16 @@ pub fn tls_send(session: &mut TlsSession, data: &[u8]) -> Result<(), TlsError> {
 
 /// Receive application data over TLS.
 pub fn tls_recv(session: &mut TlsSession, buf: &mut [u8]) -> Result<usize, TlsError> {
-    tls_recv_patient(session, buf, QUIET_TRANSFER)
+    tls_recv_patient(session, buf, QUIET_TRANSFER, ATTEMPT_TICKS)
 }
 
 /// Wie `tls_recv`, aber der Aufrufer bestimmt, wie lange auf den Anfang einer
 /// Antwort gewartet wird. Wer weiss, dass noch KEIN Byte gekommen ist, nimmt
 /// `QUIET_FIRST_BYTE`; wer mitten im Koerper steht, `QUIET_TRANSFER`.
 pub fn tls_recv_patient(
-    session: &mut TlsSession, buf: &mut [u8], max_quiet: u32,
+    session: &mut TlsSession, buf: &mut [u8], max_quiet: u32, attempt: u64,
 ) -> Result<usize, TlsError> {
-    let (ct, record) = recv_record(session.tcp_handle, max_quiet)?;
+    let (ct, record) = recv_record(session.tcp_handle, max_quiet, attempt)?;
 
     if ct == CT_CHANGE_CIPHER_SPEC {
         return Ok(0);
@@ -998,11 +998,13 @@ fn send_record(handle: usize, content_type: u8, payload: &[u8]) -> Result<(), Tl
     Ok(())
 }
 
-fn recv_record(handle: usize, max_quiet: u32) -> Result<(u8, Vec<u8>), TlsError> {
+fn recv_record(
+    handle: usize, max_quiet: u32, attempt: u64,
+) -> Result<(u8, Vec<u8>), TlsError> {
     // Read 5-byte header. Die Geduld gilt dem KOPF — sobald er da ist, ist die
     // Gegenstelle am Antworten und die Nutzlast bekommt die volle Nachsicht.
     let mut header = [0u8; 5];
-    recv_exact(handle, &mut header, max_quiet)?;
+    recv_exact(handle, &mut header, max_quiet, attempt)?;
 
     let content_type = header[0];
     let length = ((header[3] as usize) << 8) | header[4] as usize;
@@ -1012,7 +1014,7 @@ fn recv_record(handle: usize, max_quiet: u32) -> Result<(u8, Vec<u8>), TlsError>
     }
 
     let mut payload = alloc::vec![0u8; length];
-    recv_exact(handle, &mut payload, QUIET_TRANSFER)?;
+    recv_exact(handle, &mut payload, QUIET_TRANSFER, ATTEMPT_TICKS)?;
 
     Ok((content_type, payload))
 }
@@ -1024,21 +1026,33 @@ fn recv_record(handle: usize, max_quiet: u32) -> Result<(u8, Vec<u8>), TlsError>
 /// body it could only report as "short download".
 pub const QUIET_TRANSFER: u32 = 6;
 
-/// Patience for the FIRST byte of an answer. A peer that has not begun to
-/// reply on an established connection is almost always gone, not slow — das
-/// ist der Fall einer wiederverwendeten Verbindung, die der Server zwischen
-/// zwei Benutzungen geschlossen hat. Eine Minute darauf zu warten hat einen
-/// Bildabruf schon 60 s gekostet, obwohl der frische Verbindungsaufbau
-/// unmittelbar danach in 40 ms lieferte.
-/// Vgl. [[feedback-a-constant-right-at-bringup-is-wrong-later]]: dieselbe
-/// Zahl war fuer die Fortsetzung richtig und fuer den Anfang falsch.
+/// Wie lange ein Versuch wartet, in Ticks (100 Hz).
+pub const ATTEMPT_TICKS: u64 = 1000; // 10 s
+
+/// Patience for the FIRST byte of an answer, auf einer FRISCHEN Verbindung.
+/// Ein Server darf sich Zeit lassen, bevor er zu antworten beginnt.
 pub const QUIET_FIRST_BYTE: u32 = 1;
 
-fn recv_exact(handle: usize, buf: &mut [u8], max_quiet: u32) -> Result<(), TlsError> {
+/// Und auf einer WIEDERVERWENDETEN. Hier ist die Wette eine andere: der
+/// Server kann zwischen zwei Benutzungen weggegangen sein, ohne FIN und ohne
+/// RST — gemessen an thumb.wikimedia.org, das nach jeder bedienten Runde
+/// still nicht mehr antwortet. Vorhersagen laesst sich das nicht (nach
+/// `poll_rx_only` sah die Verbindung gesund aus), also zaehlt nur, wie
+/// schnell es auffaellt.
+///
+/// Die Zahl ist am PREIS DER ALTERNATIVE bemessen, nicht geraten: ein
+/// frischer Aufbau zu diesem Host kostet gemessen 50-80 ms (`tcp 20 + tls 30
+/// + preface 0`). Laenger als gut zehnmal so lange zu warten, nur um ihn zu
+/// sparen, ist ein schlechtes Geschaeft.
+pub const ATTEMPT_TICKS_REUSED: u64 = 100; // 1 s
+
+fn recv_exact(
+    handle: usize, buf: &mut [u8], max_quiet: u32, attempt: u64,
+) -> Result<(), TlsError> {
     let mut filled = 0;
     let mut quiet = 0;
     while filled < buf.len() {
-        match tcp::recv_blocking(handle, &mut buf[filled..], 1000) {
+        match tcp::recv_blocking(handle, &mut buf[filled..], attempt) {
             Ok(0) => return Err(TlsError::HandshakeFailed("connection closed")),
             Ok(n) => { filled += n; quiet = 0; }
             Err(tcp::TcpError::Timeout) => {
@@ -1054,7 +1068,7 @@ fn recv_exact(handle: usize, buf: &mut [u8], max_quiet: u32) -> Result<(), TlsEr
 }
 
 fn recv_handshake_message(handle: usize, expected_type: u8) -> Result<Vec<u8>, TlsError> {
-    let (ct, payload) = recv_record(handle, QUIET_TRANSFER)?;
+    let (ct, payload) = recv_record(handle, QUIET_TRANSFER, ATTEMPT_TICKS)?;
     if ct != CT_HANDSHAKE {
         if ct == CT_ALERT && payload.len() >= 2 {
             return Err(TlsError::HandshakeFailed(match payload[1] {
