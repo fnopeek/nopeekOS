@@ -25,6 +25,7 @@ pub mod fonts;
 pub mod forms;
 pub mod ico;
 pub mod image;
+pub mod js;
 pub mod webp;
 pub mod layout;
 pub mod picture;
