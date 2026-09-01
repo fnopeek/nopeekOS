@@ -1126,10 +1126,20 @@ pub fn make_realm() -> Realm {
     global.borrow_mut().define("performance", Prop::builtin(Value::Obj(perf)));
 
     let console = new_obj(Some(object_proto.clone()));
-    for m in ["log", "warn", "error", "info", "debug", "trace", "dir", "group", "groupEnd"] {
-        // Still. Die Ausgabe eines Skripts gehoert auf beaks Serienleitung,
-        // und die haengt hier nicht dran — `beak-engine` ist hostfrei.
-        let g = native(Some(function_proto.clone()), |_, _, _| Ok(Value::Undefined), m, 0, false);
+    // Nicht mehr still. `beak-engine` hat keine Serienleitung, aber der Wirt
+    // hat eine: die Zeilen werden gesammelt, und beak holt sie ab. Eine
+    // Seite, deren eigene Diagnose ins Leere geht, kann man aus der Ferne
+    // nicht befragen — und genau das ist die Lage am Geraet.
+    for (m, tag) in [("log", ""), ("info", ""), ("debug", ""), ("dir", ""),
+                     ("group", ""), ("groupEnd", ""), ("warn", "warn: "),
+                     ("error", "error: "), ("trace", "trace: ")] {
+        let f: fn(&mut Interp, Value, &[Value]) -> C<Value> = match tag {
+            "warn: " => |i, _, a| { let l = console_join(i, a, "warn: "); i.console_push(l); Ok(Value::Undefined) },
+            "error: " => |i, _, a| { let l = console_join(i, a, "error: "); i.console_push(l); Ok(Value::Undefined) },
+            "trace: " => |i, _, a| { let l = console_join(i, a, "trace: "); i.console_push(l); Ok(Value::Undefined) },
+            _ => |i, _, a| { let l = console_join(i, a, ""); i.console_push(l); Ok(Value::Undefined) },
+        };
+        let g = native(Some(function_proto.clone()), f, m, 0, false);
         console.borrow_mut().define(m, Prop::builtin(Value::Obj(g)));
     }
     global.borrow_mut().define("console", Prop::builtin(Value::Obj(console)));
@@ -1240,4 +1250,22 @@ fn make_error(i: &mut Interp, kind: &'static str, a: &[Value]) -> C<Value> {
         }
     }
     Ok(Value::Obj(e))
+}
+
+
+/// Die Argumente eines `console`-Aufrufs zu einer Zeile machen.
+///
+/// Ein `toString`, das selbst wirft, darf den Aufruf nicht zum Ausnahmefall
+/// machen: eine Ausgabe, die das Programm anhaelt, ist schlimmer als eine
+/// unvollstaendige.
+fn console_join(i: &mut Interp, args: &[Value], prefix: &str) -> String {
+    let mut out = String::from(prefix);
+    for (n, a) in args.iter().enumerate() {
+        if n > 0 { out.push(' '); }
+        match i.to_string(a) {
+            Ok(s) => out.push_str(&s),
+            Err(_) => out.push_str("<nicht darstellbar>"),
+        }
+    }
+    out
 }

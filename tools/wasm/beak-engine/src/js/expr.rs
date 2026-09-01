@@ -1,7 +1,8 @@
 //! Ausdruecke auswerten.
 
+use alloc::boxed::Box;
 use alloc::rc::Rc;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
@@ -93,6 +94,11 @@ impl Interp {
             }
             Expr::Assign { op, left, right } => self.eval_assign(*op, left, right, env),
             Expr::Member { obj, prop, optional } => {
+                if matches!(**obj, Expr::Super) {
+                    let key = self.member_key2(prop, env)?;
+                    let (f, _) = self.super_lookup(&key, env)?;
+                    return Ok(f);
+                }
                 let base = self.eval(obj, env)?;
                 if *optional && matches!(base, Value::Undefined | Value::Null) {
                     return Ok(Value::Undefined);
@@ -133,6 +139,28 @@ impl Interp {
         self.ref_err(&alloc::format!("{n} is not defined"))
     }
 
+    /// Der Prototyp, auf dem `super` sucht: der des Heimatobjekts.
+    fn super_parent(&mut self, env: &Rc<RefCell<Env>>) -> C<Gc> {
+        let Some(home) = env_home(env) else {
+            return self.type_err("'super' outside of a method");
+        };
+        let proto = home.borrow().proto.clone();
+        match proto {
+            Some(p) => Ok(p),
+            None => self.type_err("'super' in a class without a base"),
+        }
+    }
+
+    /// `super.k` aufloesen: der Wert kommt von OBEN, `this` bleibt unten.
+    /// Genau diese Trennung ist der Sinn von `super` — der gefundene Wert
+    /// wird gleich mit dem eigenen Empfaenger gerufen.
+    fn super_lookup(&mut self, key: &str, env: &Rc<RefCell<Env>>) -> C<(Value, Value)> {
+        let parent = self.super_parent(env)?;
+        let this_val = env_this(env);
+        let f = self.get(&Value::Obj(parent), key)?;
+        Ok((f, this_val))
+    }
+
     fn member_key2(&mut self, p: &MemberProp, env: &Rc<RefCell<Env>>) -> C<Rc<str>> {
         Ok(match p {
             MemberProp::Ident(n) => Rc::from(n.as_str()),
@@ -157,7 +185,30 @@ impl Interp {
         // `a.b()` bindet `this` an `a` — deshalb wird der Empfaenger hier
         // getrennt geholt und nicht ueber `eval(callee)`, das ihn verlieren
         // wuerde.
+        // `super(...)` ruft den Konstruktor der Elternklasse auf DIESEM `this`.
+        // Kein eigener Empfaenger, kein eigenes Objekt: das Objekt gibt es
+        // schon, `construct` hat es angelegt, bevor der Koerper lief.
+        if matches!(callee, Expr::Super) {
+            let this_val = env_this(env);
+            let parent = self.super_parent(env)?;
+            let ctor = self.get(&Value::Obj(parent), "constructor")?;
+            if !self.is_callable(&ctor) {
+                return self.type_err("super: the parent class has no constructor");
+            }
+            let a = self.eval_args(args, env)?;
+            self.call(&ctor, this_val, &a)?;
+            return Ok(Value::Undefined);
+        }
         let (this_val, f) = match callee {
+            Expr::Member { obj, prop, optional: mopt } if matches!(**obj, Expr::Super) => {
+                let key = self.member_key2(prop, env)?;
+                let _ = mopt;
+                let (f, this_val) = self.super_lookup(&key, env)?;
+                if !self.is_callable(&f) {
+                    return self.type_err(&alloc::format!("super.{key} is not a function"));
+                }
+                (this_val, f)
+            }
             Expr::Member { obj, prop, optional: mopt } => {
                 let base = self.eval(obj, env)?;
                 if *mopt && matches!(base, Value::Undefined | Value::Null) {
@@ -263,12 +314,27 @@ impl Interp {
         });
         let ctor_fn = match ctor_node {
             Some(f) => f,
+            // Ein FEHLENDER Konstruktor ist nicht dasselbe wie ein leerer:
+            // in einer abgeleiteten Klasse reicht er seine Argumente an die
+            // Elternklasse durch (`constructor(...a) { super(...a) }`). Ohne
+            // das liefe `class B extends A {}` nie durch A's Konstruktor und
+            // eine Instanz haette keins ihrer Felder.
+            None if c.super_class.is_some() => Rc::new(Func {
+                name: c.name.clone(),
+                params: alloc::vec![Pat::Rest(Box::new(Pat::Ident(String::from("args"))))],
+                body: alloc::vec![Stmt::Expr(Expr::Call {
+                    callee: Box::new(Expr::Super),
+                    args: alloc::vec![Arg::Spread(Expr::Ident(String::from("args")))],
+                    optional: false,
+                })],
+                is_async: false, is_generator: false, is_arrow: false, expr_body: false,
+            }),
             None => Rc::new(Func {
                 name: c.name.clone(), params: Vec::new(), body: Vec::new(),
                 is_async: false, is_generator: false, is_arrow: false, expr_body: false,
             }),
         };
-        let ctor = self.make_closure(ctor_fn, env, None);
+        let ctor = self.make_method(ctor_fn, env, None, Some(proto.clone()));
         if let Value::Obj(co) = &ctor {
             co.borrow_mut().define("prototype", Prop {
                 value: Some(Value::Obj(proto.clone())), get: None, set: None,
@@ -285,7 +351,7 @@ impl Interp {
                     if *kind == MethodKind::Constructor { continue; }
                     let target = if *is_static { ctor.as_obj().unwrap().clone() } else { proto.clone() };
                     let k = self.prop_key(key, env)?;
-                    let v = self.make_closure(func.clone(), env, None);
+                    let v = self.make_method(func.clone(), env, None, Some(target.clone()));
                     match kind {
                         MethodKind::Get | MethodKind::Set => {
                             let mut p = target.borrow().get_own(&k).cloned().unwrap_or(Prop {

@@ -17,6 +17,7 @@ pub mod ast;
 pub mod builtins;
 pub mod dombind;
 pub mod eval;
+pub mod json;
 pub mod expr;
 pub mod interp;
 pub mod lexer;
