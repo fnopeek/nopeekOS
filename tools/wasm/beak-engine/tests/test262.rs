@@ -43,6 +43,7 @@ const SKIP_FEATURES: &[&str] = &[
 
 #[derive(Default)]
 struct Meta {
+    description: String,
     flags: Vec<String>,
     features: Vec<String>,
     negative_parse: bool,
@@ -69,6 +70,13 @@ fn frontmatter(src: &str) -> Meta {
     };
     m.flags = list("flags:");
     m.features = list("features:");
+    for line in y.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("description:") {
+            m.description = rest.trim().to_string();
+            break;
+        }
+    }
     if let Some(np) = y.find("negative:") {
         let tail = &y[np..];
         if tail.contains("phase: parse") { m.negative_parse = true; } else { m.negative_other = true; }
@@ -155,8 +163,17 @@ fn test262_parse() {
                     // Nach Familie gebuendelt statt einzeln: 5000 Pfade sind
                     // keine Information, "welche Fruehfehler-Familie fehlt"
                     // ist eine ([[feedback_census_by_family_not_suite]]).
-                    let fam: String = rel.split('/').take(3).collect::<Vec<_>>().join("/");
-                    *accept_fam.entry(fam).or_insert(0usize) += 1;
+                    // Nach der REGEL gebuendelt, nicht nach dem Verzeichnis:
+                    // test262 nennt sie in `description`, und "Klassen 1810"
+                    // ist eine Adresse, keine Diagnose. Der Teil vor dem
+                    // ersten Doppelpunkt/Klammer traegt die Regel.
+                    let d = m.description.trim_start_matches(['|', '>', ' ']);
+                    let rule: String = d.split(['(', ':']).next().unwrap_or(d)
+                        .chars().take(64).collect();
+                    let rule = if rule.trim().is_empty() {
+                        rel.split('/').take(3).collect::<Vec<_>>().join("/")
+                    } else { rule.trim().to_string() };
+                    *accept_fam.entry(rule).or_insert(0usize) += 1;
                     if wrong_accept.len() < 40 {
                         wrong_accept.push(format!("{rel}{}", if strict { " [strict]" } else { "" }));
                     }
@@ -191,8 +208,8 @@ fn test262_parse() {
 
     let mut fams: Vec<_> = accept_fam.into_iter().collect();
     fams.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
-    eprintln!("\n   Fehlende Fruehfehler, nach Familie:");
-    for (f, n) in fams.iter().take(18) { eprintln!("      {n:5}  {f}"); }
+    eprintln!("\n   Fehlende Fruehfehler, nach REGEL:");
+    for (f, n) in fams.iter().take(28) { eprintln!("      {n:5}  {f}"); }
 }
 
 /// Die zweite Zahl, und fuer beak die wichtigere: parst das, was der

@@ -578,12 +578,19 @@ die guten JS-Parser sind gross, `std`-gebunden und arenenbasiert.
 
 Zwei Zahlen, beide aus `cargo test --test test262`:
 
-| | |
-|---|---|
-| **test262, Parse-Orakel** | **94,39 %** von 91 523 Varianten |
-| — faelschlich abgelehnt | **36** (kostet die Seite) |
-| — faelschlich angenommen | 5 102 (fehlender Fruehfehler; die Seite laeuft) |
-| **Zielkorpus, echter Code** | **437 von 437 Skripten = 100 %** |
+| | 0.42.0 | 0.43.0 |
+|---|---|---|
+| **test262, Parse-Orakel** | 94,39 % | **96,84 %** von 91 523 Varianten |
+| — faelschlich abgelehnt | 36 | **36** (kostet die Seite) |
+| — faelschlich angenommen | 5 102 | **2 859** (fehlender Fruehfehler; die Seite laeuft) |
+| **Zielkorpus, echter Code** | 437/437 | **437 von 437 = 100 %** |
+
+0.43.0 baut die Fruehfehler: `delete a.#x`, Rest-Element-Regeln, `import()`
+ohne Spread, `await`/`yield` als Bindungsname in async/Generator (auch
+GEFLUECHTET: `\u0061wait`), `arguments` im Feld-Initialisierer, `super()`
+darin, doppelte Parameter, `"use strict"` neben nicht-einfachen Parametern,
+Zifferntrenner, Alt-Oktal im strengen Modus, doppelte lexikalische
+Deklaration.
 
 Die zweite Zahl ist fuer beak die wichtigere: das sind die Skripte, die
 Chromium beim Laden der zwoelf Seiten wirklich geparst hat — minifiziert,

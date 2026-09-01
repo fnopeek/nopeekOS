@@ -138,6 +138,10 @@ pub struct Lexer<'a> {
     pub pos: usize,
     /// Der Quelltext als `str`, fuer Ausschnitte mit Mehrbyte-Zeichen.
     text: &'a str,
+    /// War die zuletzt gelesene Zahl ein Alt-Oktal (`0755`) oder eine
+    /// Nicht-Oktal-Ziffernfolge mit fuehrender Null (`089`)? Im strengen Modus
+    /// beides ein Fruehfehler — und ob der gilt, weiss nur der Parser.
+    pub legacy_octal: bool,
 }
 
 /// Ist `c` ein Zeichen, mit dem ein Bezeichner anfangen darf?
@@ -176,7 +180,7 @@ impl<'a> Lexer<'a> {
                 pos += 1;
             }
         }
-        Lexer { src: text.as_bytes(), pos, text }
+        Lexer { src: text.as_bytes(), pos, text, legacy_octal: false }
     }
 
     fn at(&self, i: usize) -> u8 { if i < self.src.len() { self.src[i] } else { 0 } }
@@ -452,8 +456,30 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Ziffern zur Basis `radix` lesen, mit den Regeln fuer den Trenner:
+    /// `_` muss ZWISCHEN zwei Ziffern stehen. `1_0` ja, `1_`/`_1`/`1__0` nein.
+    /// Liefert die Anzahl gelesener Ziffern.
+    fn digits(&mut self, radix: u32) -> Result<usize, LexError> {
+        let mut n = 0;
+        let mut prev_sep = false;
+        let mut any = false;
+        while self.pos < self.src.len() {
+            let c = self.src[self.pos];
+            if c == b'_' {
+                // Kein Trenner am Anfang, keiner doppelt, keiner am Ende.
+                if !any || prev_sep { return Err(LexError { msg: "misplaced numeric separator", at: self.pos }); }
+                prev_sep = true; self.pos += 1; continue;
+            }
+            if (c as char).to_digit(radix).is_none() { break; }
+            prev_sep = false; any = true; n += 1; self.pos += 1;
+        }
+        if prev_sep { return Err(LexError { msg: "trailing numeric separator", at: self.pos }); }
+        Ok(n)
+    }
+
     fn number(&mut self) -> Result<Tok, LexError> {
         let start = self.pos;
+        self.legacy_octal = false;
         let mut is_int_radix = false;
         if self.src[self.pos] == b'0' && self.pos + 1 < self.src.len() {
             let k = self.at(self.pos + 1) | 0x20;
@@ -462,16 +488,14 @@ impl<'a> Lexer<'a> {
                 let radix = match k { b'x' => 16, b'o' => 8, _ => 2 };
                 self.pos += 2;
                 let ds = self.pos;
-                let mut v = 0f64;
-                while self.pos < self.src.len() {
-                    let c = self.src[self.pos];
-                    if c == b'_' { self.pos += 1; continue; }
-                    match (c as char).to_digit(radix) {
-                        Some(d) => { v = v * radix as f64 + d as f64; self.pos += 1; }
-                        None => break,
-                    }
+                if self.digits(radix)? == 0 {
+                    return Err(LexError { msg: "missing digits", at: self.pos });
                 }
-                if self.pos == ds { return Err(LexError { msg: "missing digits", at: self.pos }); }
+                let mut v = 0f64;
+                for &c in &self.src[ds..self.pos] {
+                    if c == b'_' { continue; }
+                    v = v * radix as f64 + (c as char).to_digit(radix).unwrap_or(0) as f64;
+                }
                 if self.at(self.pos) == b'n' {
                     self.pos += 1;
                     return Ok(Tok::BigInt(self.text[start..self.pos - 1].into()));
@@ -480,16 +504,25 @@ impl<'a> Lexer<'a> {
             }
         }
         let _ = is_int_radix;
-        // Dezimal, inklusive Legacy-Oktal (`0755`) — das ist im strengen Modus
-        // ein Fruehfehler, aber kein Lexfehler.
-        while self.pos < self.src.len()
-            && (self.src[self.pos].is_ascii_digit() || self.src[self.pos] == b'_') { self.pos += 1; }
+        // Dezimal, inklusive Legacy-Oktal (`0755`) und der Nicht-Oktal-Form
+        // (`089`) — beides im strengen Modus ein Fruehfehler, aber kein
+        // Lexfehler. Beide duerfen keinen Trenner tragen, deshalb erst pruefen.
+        let lead_zero = self.src[self.pos] == b'0';
+        if lead_zero && self.at(self.pos + 1).is_ascii_digit() {
+            self.legacy_octal = true;
+            while self.pos < self.src.len() && self.src[self.pos].is_ascii_digit() { self.pos += 1; }
+            if self.at(self.pos) == b'_' {
+                return Err(LexError { msg: "separator in legacy octal", at: self.pos });
+            }
+        } else {
+            self.digits(10)?;
+        }
         let mut is_float = false;
         if self.at(self.pos) == b'.' {
+            if self.legacy_octal { return Err(LexError { msg: "legacy octal with a fraction", at: self.pos }); }
             is_float = true;
             self.pos += 1;
-            while self.pos < self.src.len()
-                && (self.src[self.pos].is_ascii_digit() || self.src[self.pos] == b'_') { self.pos += 1; }
+            self.digits(10)?;
         }
         if self.at(self.pos) | 0x20 == b'e' {
             let save = self.pos;
@@ -498,13 +531,14 @@ impl<'a> Lexer<'a> {
             if self.at(self.pos).is_ascii_digit() {
                 is_float = true;
                 // `_` gilt auch hier: `1e1_0` ist gueltig (ES2021).
-                while self.pos < self.src.len()
-                    && (self.src[self.pos].is_ascii_digit() || self.src[self.pos] == b'_') {
-                    self.pos += 1;
-                }
+                self.digits(10)?;
             } else { self.pos = save; }
         }
         if !is_float && self.at(self.pos) == b'n' {
+            // `01n` gibt es nicht — ein BigInt hat keine fuehrende Null.
+            if self.legacy_octal || (lead_zero && self.pos > start + 1) {
+                return Err(LexError { msg: "legacy octal bigint", at: self.pos });
+            }
             self.pos += 1;
             return Ok(Tok::BigInt(self.text[start..self.pos - 1].replace('_', "")));
         }
@@ -600,7 +634,20 @@ impl<'a> Lexer<'a> {
                     b'.' => Dot, b':' => Colon, b'?' => Question, b'+' => Plus,
                     b'-' => Minus, b'*' => Star, b'/' => Slash, b'%' => Percent,
                     b'<' => Lt, b'>' => Gt, b'&' => Amp, b'|' => Pipe, b'^' => Caret,
-                    b'!' => Bang, b'~' => Tilde, b'=' => Eq, b'#' => Hash,
+                    b'!' => Bang, b'~' => Tilde, b'=' => Eq,
+                    // `# x` gibt es nicht: zwischen dem Zeichen und dem Namen
+                    // darf nichts stehen (ES 12.6.1). Die Pruefung MUSS hier
+                    // sitzen — eine Zeile spaeter hat `skip_trivia` den
+                    // Leerraum schon geschluckt und der Unterschied ist weg.
+                    b'#' => {
+                        let nxt = self.at(self.pos + 1);
+                        let ok = nxt == b'\\' || {
+                            let (c, _) = self.char_at(self.pos + 1);
+                            nxt != 0 && id_start(c)
+                        };
+                        if !ok { return Err(LexError { msg: "space between # and name", at: self.pos }); }
+                        Hash
+                    }
                     _ => return Err(LexError { msg: "unexpected character", at: self.pos }),
                 };
                 (one, 1)

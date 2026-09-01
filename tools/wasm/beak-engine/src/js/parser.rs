@@ -61,6 +61,17 @@ pub struct Parser<'a> {
     /// War der zuletzt gelesene Operand geklammert? `(a && b) ?? c` ist
     /// erlaubt, `a && b ?? c` nicht — und im Baum sieht beides gleich aus.
     just_paren: bool,
+    /// Stehen wir in einem Feld-Initialisierer einer Klasse? Dort ist
+    /// `arguments` verboten. Pfeile erben das (sie haben kein eigenes
+    /// `arguments`), gewoehnliche Funktionen setzen es zurueck.
+    in_class_field: bool,
+    /// Was `params()` zuletzt gelesen hat — `block_body_with_prologue` holt es
+    /// sich, weil die Regel „use strict neben nicht-einfachen Parametern" erst
+    /// beim Direktiven-Vorspann entscheidbar ist.
+    pend_simple: bool,
+    pend_names: Vec<String>,
+    /// War `cur` eine Zahl in Alt-Oktal-Form?
+    num_legacy_octal: bool,
 }
 
 type R<T> = Result<T, ParseError>;
@@ -69,10 +80,12 @@ impl<'a> Parser<'a> {
     pub fn new(src: &'a str, module: bool) -> R<Self> {
         let mut lx = Lexer::new(src);
         let cur = lx.next(true).map_err(|e| ParseError { msg: e.msg.to_string(), at: e.at })?;
+        let first_legacy = lx.legacy_octal;
         Ok(Parser {
             lx, cur_start: 0, cur, strict: module, module,
             in_func: false, in_gen: false, in_async: module, in_loop: 0, in_switch: 0,
-            just_paren: false,
+            just_paren: false, in_class_field: false,
+            pend_simple: true, pend_names: Vec::new(), num_legacy_octal: first_legacy,
         })
     }
 
@@ -83,7 +96,11 @@ impl<'a> Parser<'a> {
     fn bump(&mut self) -> R<()> {
         let ok = regex_allowed_after(&self.cur.tok);
         self.cur_start = self.lx.pos;
+        self.lx.legacy_octal = false;
         self.cur = self.lx.next(ok).map_err(|e| ParseError { msg: e.msg.to_string(), at: e.at })?;
+        // Gehoert zum GERADE GELESENEN Token, nicht zum Lexer — der naechste
+        // `bump` setzt es zurueck.
+        self.num_legacy_octal = self.lx.legacy_octal;
         Ok(())
     }
 
@@ -115,6 +132,15 @@ impl<'a> Parser<'a> {
             Tok::Keyword(Kw::Await) if !self.in_async && !self.module => "await".to_string(),
             _ => return self.err("expected identifier"),
         };
+        // Am NAMEN geprueft, nicht am Token: `\u0061wait` kommt als Bezeichner
+        // herein (eine Flucht macht aus einem Schluesselwort keines mehr), und
+        // eine Pruefung auf `Tok::Keyword` sieht davon nichts. 294 Tests.
+        if name == "await" && (self.in_async || self.module) {
+            return self.err("await is reserved here");
+        }
+        if name == "yield" && (self.in_gen || self.strict) {
+            return self.err("yield is reserved here");
+        }
         self.bump()?;
         Ok(name)
     }
@@ -186,6 +212,7 @@ impl<'a> Parser<'a> {
             out.push(st);
         }
         let _ = top;
+        self.check_scope(&out)?;
         Ok(out)
     }
 
@@ -202,6 +229,7 @@ impl<'a> Parser<'a> {
                     body.push(self.statement()?);
                 }
                 self.bump()?;
+                self.check_scope(&body)?;
                 Ok(Stmt::Block(body))
             }
             Tok::Punct(P::Semi) => { self.bump()?; Ok(Stmt::Empty) }
@@ -496,6 +524,7 @@ impl<'a> Parser<'a> {
             out.push(self.statement()?);
         }
         self.bump()?;
+        self.check_scope(&out)?;
         Ok(out)
     }
 
@@ -526,6 +555,10 @@ impl<'a> Parser<'a> {
         }
         self.in_switch -= 1;
         self.bump()?;
+        // Der ganze switch-Koerper ist EIN Bereich, ueber alle Faelle hinweg:
+        // `case 1: let x; case 2: let x;` ist ein Fehler.
+        let all: Vec<Stmt> = cases.iter().flat_map(|c| c.body.iter().cloned()).collect();
+        self.check_scope(&all)?;
         Ok(Stmt::Switch { disc, cases })
     }
 
@@ -638,28 +671,139 @@ impl<'a> Parser<'a> {
 
         let (og, oa, of) = (self.in_gen, self.in_async, self.in_func);
         self.in_gen = is_generator; self.in_async = is_async; self.in_func = true;
+        let ocf = core::mem::replace(&mut self.in_class_field, false);
         let params = self.params()?;
         let outer_strict = self.strict;
         let body = self.block_body_with_prologue()?;
         self.strict = outer_strict;
+        self.in_class_field = ocf;
         self.in_gen = og; self.in_async = oa; self.in_func = of;
 
         Ok(Func { name, params, body, is_async, is_generator, is_arrow: false, expr_body: false })
     }
 
     fn block_body_with_prologue(&mut self) -> R<Vec<Stmt>> {
+        // Die Parameter, die gerade gelesen wurden — der Vorspann braucht sie:
+        // `"use strict"` neben einer nicht-einfachen Parameterliste ist ein
+        // Fruehfehler, und dieselbe Direktive macht doppelte Namen nachtraeglich
+        // unzulaessig. Beides ist erst HIER entscheidbar.
+        let simple = core::mem::replace(&mut self.pend_simple, true);
+        let names = core::mem::take(&mut self.pend_names);
+        let was_strict = self.strict;
         self.expect_p(P::LBrace)?;
         let out = self.directive_prologue_and_body(false)?;
+        if !was_strict && self.strict {
+            if !simple {
+                return self.err("use strict directive with a non-simple parameter list");
+            }
+            let mut seen = names;
+            seen.sort();
+            if seen.windows(2).any(|w| w[0] == w[1]) {
+                return self.err("duplicate parameter name in strict mode");
+            }
+        }
         self.expect_p(P::RBrace)?;
         Ok(out)
     }
 
-    fn params(&mut self) -> R<Vec<Pat>> {
+    /// Prueft EINE Anweisungsliste auf doppelte Deklarationen.
+    ///
+    /// Bewusst nur der gleiche Bereich, ohne die Hochwanderung von `var` durch
+    /// verschachtelte Bloecke: `{ let x; { var x; } }` faellt hier NICHT auf.
+    /// Das ist eine Teilmenge der Regel und keine falsche — was fehlt, steht
+    /// im test262-Lauf als „faelschlich angenommen" und ist damit gezaehlt
+    /// statt vergessen.
+    ///
+    /// Die Richtung ist unsymmetrisch, und das ist die Regel selbst:
+    /// `var x; var x;` ist erlaubt, `let x; let x;` nicht, und `var x; let x;`
+    /// scheitert an der lexikalischen Seite.
+    fn check_scope(&self, stmts: &[Stmt]) -> R<()> {
+        // (Name, ist_lexikalisch)
+        let mut seen: Vec<(String, bool)> = Vec::new();
+        let mut add = |name: String, lexical: bool, p: &Parser| -> R<()> {
+            if let Some((_, prev_lex)) = seen.iter().find(|(n, _)| *n == name) {
+                if lexical || *prev_lex {
+                    return p.err("duplicate lexical declaration");
+                }
+                return Ok(());
+            }
+            seen.push((name, lexical));
+            Ok(())
+        };
+        for st in stmts {
+            // Ein Label davor aendert nichts an der Deklaration dahinter.
+            let mut cur = st;
+            while let Stmt::Labeled { body, .. } = cur { cur = body; }
+            match cur {
+                Stmt::VarDecl(d) => {
+                    let lexical = d.kind != VarKind::Var;
+                    for decl in &d.decls {
+                        let mut names = Vec::new();
+                        Self::bound_names(&decl.id, &mut names);
+                        for n in names { add(n, lexical, self)?; }
+                    }
+                }
+                Stmt::Func(f) => { if let Some(n) = &f.name { add(n.clone(), false, self)?; } }
+                Stmt::Class(c) => { if let Some(n) = &c.name { add(n.clone(), true, self)?; } }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Sammelt die gebundenen Namen eines Musters. Grundlage fuer „doppelter
+    /// Parameter" und spaeter fuer „doppelte lexikalische Deklaration".
+    fn bound_names(p: &Pat, out: &mut Vec<String>) {
+        match p {
+            Pat::Ident(n) => out.push(n.clone()),
+            Pat::Array(items) => for it in items.iter().flatten() { Self::bound_names(it, out) },
+            Pat::Object { props, rest } => {
+                for pr in props { Self::bound_names(&pr.value, out); }
+                if let Some(r) = rest { Self::bound_names(r, out); }
+            }
+            Pat::Assign { left, .. } => Self::bound_names(left, out),
+            Pat::Rest(inner) => Self::bound_names(inner, out),
+            Pat::Expr(_) => {}
+        }
+    }
+
+    /// Nach dem Lesen einer Parameterliste: Einfachheit und Namen festhalten,
+    /// und die Doppelung pruefen, wo sie schon jetzt entscheidbar ist.
+    ///
+    /// `unique` = die Stelle verlangt Eindeutigkeit unabhaengig vom Modus
+    /// (Methoden, Pfeile, Setter). Sonst gilt sie im strengen Modus und bei
+    /// jeder nicht-einfachen Liste — und ausserdem noch einmal spaeter, wenn
+    /// eine `"use strict"`-Direktive im Koerper den Modus umlegt.
+    fn finish_params(&mut self, params: &[Pat], unique: bool) -> R<()> {
+        let simple = params.iter().all(|p| matches!(p, Pat::Ident(_)));
+        let mut names = Vec::new();
+        for p in params { Self::bound_names(p, &mut names); }
+        if unique || self.strict || !simple {
+            let mut seen = names.clone();
+            seen.sort();
+            if seen.windows(2).any(|w| w[0] == w[1]) {
+                return self.err("duplicate parameter name");
+            }
+        }
+        self.pend_simple = simple;
+        self.pend_names = names;
+        Ok(())
+    }
+
+    fn params(&mut self) -> R<Vec<Pat>> { self.params_ex(false) }
+
+    fn params_ex(&mut self, unique: bool) -> R<Vec<Pat>> {
         self.expect_p(P::LParen)?;
         let mut out = Vec::new();
         while !self.is_p(P::RParen) {
             if self.eat_p(P::Ellipsis)? {
-                out.push(Pat::Rest(Box::new(self.binding_pattern()?)));
+                let r = self.binding_pattern()?;
+                // Ein Rest-Parameter nimmt keinen Vorgabewert und duldet
+                // nichts hinter sich — auch kein Schlusskomma. Der alte Code
+                // brach hier einfach ab und liess beides durchgehen.
+                if self.is_p(P::Eq) { return self.err("rest parameter cannot have a default"); }
+                out.push(Pat::Rest(Box::new(r)));
+                if self.is_p(P::Comma) { return self.err("rest parameter must be last"); }
                 break;
             }
             let p = self.binding_pattern()?;
@@ -670,6 +814,7 @@ impl<'a> Parser<'a> {
             if !self.eat_p(P::Comma)? { break; }
         }
         self.expect_p(P::RParen)?;
+        self.finish_params(&out, unique)?;
         Ok(out)
     }
 
@@ -703,8 +848,11 @@ impl<'a> Parser<'a> {
             if self.is_p(P::Eq) || self.is_p(P::Semi) || self.is_p(P::RBrace) || self.is_p(P::LParen) {
                 self.restore(save);
             } else if self.is_p(P::LBrace) {
-                // Statischer Initialisierungsblock (ES2022).
+                // Statischer Initialisierungsblock (ES2022) — auch dort gibt
+                // es kein `arguments`.
+                let ocf = core::mem::replace(&mut self.in_class_field, true);
                 let body = self.block_body()?;
+                self.in_class_field = ocf;
                 return Ok(ClassMember::StaticBlock(body));
             } else { is_static = true; }
         }
@@ -741,14 +889,21 @@ impl<'a> Parser<'a> {
             }
             let (og, oa, of) = (self.in_gen, self.in_async, self.in_func);
             self.in_gen = is_generator; self.in_async = is_async; self.in_func = true;
-            let params = self.params()?;
+            let ocf = core::mem::replace(&mut self.in_class_field, false);
+            let params = self.params_ex(true)?;
             let body = self.block_body_with_prologue()?;
+            self.in_class_field = ocf;
             self.in_gen = og; self.in_async = oa; self.in_func = of;
             let func = Func { name: None, params, body, is_async, is_generator, is_arrow: false, expr_body: false };
             return Ok(ClassMember::Method { key, func: Box::new(func), kind, is_static, computed });
         }
         // Feld.
-        let value = if self.eat_p(P::Eq)? { Some(self.assign_expr()?) } else { None };
+        let value = if self.eat_p(P::Eq)? {
+            let ocf = core::mem::replace(&mut self.in_class_field, true);
+            let v = self.assign_expr()?;
+            self.in_class_field = ocf;
+            Some(v)
+        } else { None };
         self.semicolon()?;
         Ok(ClassMember::Field { key, value, is_static, computed })
     }
@@ -888,6 +1043,8 @@ impl<'a> Parser<'a> {
     }
 
     fn arrow_body(&mut self, params: Vec<Pat>, is_async: bool) -> R<Expr> {
+        // Ein Pfeil duldet doppelte Parameter NIE — auch im lockeren Modus.
+        self.finish_params(&params, true)?;
         let (og, oa, of) = (self.in_gen, self.in_async, self.in_func);
         // Ein Pfeil hat kein eigenes `yield`-Verhalten; `in_gen` bleibt aussen
         // stehen, weil `yield` im Pfeilkoerper den umgebenden Generator meint.
@@ -1013,6 +1170,13 @@ impl<'a> Parser<'a> {
             if op == UnaryOp::Delete && self.strict && matches!(arg, Expr::Ident(_)) {
                 return self.err("delete of an unqualified identifier in strict mode");
             }
+            // `delete a.#x` ebenso — und ohne Modus-Frage, denn ein privater
+            // Name kann nur in einem Klassenkoerper stehen, und der ist immer
+            // streng. Klammern heben es nicht auf: der Baum hat sie nicht mehr,
+            // also greift die Pruefung ohnehin durch.
+            if op == UnaryOp::Delete && deletes_private(&arg) {
+                return self.err("delete of a private member");
+            }
             // `-a ** b` ist mehrdeutig und deshalb verboten.
             if self.is_p(P::StarStar) { return self.err("unparenthesized unary before **"); }
             return Ok(Expr::Unary { op, arg: Box::new(arg) });
@@ -1100,7 +1264,17 @@ impl<'a> Parser<'a> {
             if p != "target" { return self.err("expected new.target"); }
             return Ok(Expr::MetaProp { meta: "new".to_string(), prop: "target".to_string() });
         }
+        // `new import(…)` gibt es nicht — ImportCall ist eine CallExpression
+        // und kein Konstruktorziel. Zwei Nachbarn, die es SEHR WOHL gibt und
+        // die beide an einer zu breiten Fassung gescheitert sind:
+        // `new import.meta.Foo()` (MetaProperty) und `new (import(x))` (die
+        // Klammer macht daraus einen gewoehnlichen Operanden). Deshalb wird
+        // hier die DIREKTE Form gemerkt, bevor gelesen wird.
+        let direct_import = self.is_kw(Kw::Import);
         let callee = if self.is_kw(Kw::New) { self.new_expr()? } else { self.primary()? };
+        if direct_import && matches!(callee, Expr::ImportCall(_)) {
+            return self.err("new import() is not allowed");
+        }
         // Die Glieder VOR den Argumenten gehoeren noch zum Konstruktor:
         // `new a.b.C()` ruft `a.b.C`.
         let mut callee = callee;
@@ -1156,7 +1330,16 @@ impl<'a> Parser<'a> {
 
     fn primary(&mut self) -> R<Expr> {
         match self.cur.tok.clone() {
-            Tok::Num(n) => { self.bump()?; Ok(Expr::Num(n)) }
+            Tok::Num(n) => {
+                // `010` und `089` sind im strengen Modus Fruehfehler. Der Lexer
+                // merkt sich nur, DASS es die Form war — ob sie zaehlt, weiss
+                // erst der Parser, weil eine Direktive den Modus umlegt.
+                if self.strict && self.num_legacy_octal {
+                    return self.err("legacy octal literal in strict mode");
+                }
+                self.bump()?;
+                Ok(Expr::Num(n))
+            }
             Tok::BigInt(s) => { self.bump()?; Ok(Expr::BigInt(s)) }
             Tok::Str(s) => { self.bump()?; Ok(Expr::Str(s)) }
             Tok::Regex(b, f) => { self.bump()?; Ok(Expr::Regex { body: b, flags: f }) }
@@ -1164,7 +1347,17 @@ impl<'a> Parser<'a> {
                 let (quasis, exprs) = self.template_parts()?;
                 Ok(Expr::Template { quasis, exprs })
             }
-            Tok::Ident(_) => Ok(Expr::Ident(self.ident_name()?)),
+            Tok::Ident(_) => {
+                let n = self.ident_name()?;
+                // Ein Feld-Initialisierer laeuft ohne eigenes `arguments`, also
+                // ist der Name dort ein Fruehfehler. Ein PFEIL darin erbt das
+                // (auch er hat keins); eine gewoehnliche Funktion setzt es
+                // zurueck, deshalb steht das Sichern in `function`, nicht hier.
+                if self.in_class_field && n == "arguments" {
+                    return self.err("arguments in a class field initializer");
+                }
+                Ok(Expr::Ident(n))
+            }
             Tok::Punct(P::Hash) => {
                 // `#x in obj` — die Pruefung auf ein privates Feld.
                 self.bump()?;
@@ -1189,7 +1382,16 @@ impl<'a> Parser<'a> {
             Tok::Punct(P::LBrace) => self.object_literal(),
             Tok::Keyword(k) => match k {
                 Kw::This => { self.bump()?; Ok(Expr::This) }
-                Kw::Super => { self.bump()?; Ok(Expr::Super) }
+                Kw::Super => {
+                    self.bump()?;
+                    // `super()` ruft den Basiskonstruktor — in einem
+                    // Feld-Initialisierer oder statischen Block gibt es keinen
+                    // zu rufen. `super.x` bleibt dort erlaubt.
+                    if self.in_class_field && self.is_p(P::LParen) {
+                        return self.err("super() in a class field initializer");
+                    }
+                    Ok(Expr::Super)
+                }
                 Kw::True => { self.bump()?; Ok(Expr::Bool(true)) }
                 Kw::False => { self.bump()?; Ok(Expr::Bool(false)) }
                 Kw::Null => { self.bump()?; Ok(Expr::Null) }
@@ -1207,7 +1409,15 @@ impl<'a> Parser<'a> {
                         if p != "meta" { return self.err("expected import.meta"); }
                         return Ok(Expr::MetaProp { meta: "import".to_string(), prop: "meta".to_string() });
                     }
-                    Ok(Expr::ImportCall(self.arguments()?))
+                    let args = self.arguments()?;
+                    // `import()` ist keine gewoehnliche Funktion: kein Spread,
+                    // mindestens ein und hoechstens zwei Argumente (ES 13.3.10).
+                    if args.is_empty() { return self.err("import() requires an argument"); }
+                    if args.len() > 2 { return self.err("import() takes at most two arguments"); }
+                    if args.iter().any(|a| matches!(a, Arg::Spread(_))) {
+                        return self.err("import() does not take a rest argument");
+                    }
+                    Ok(Expr::ImportCall(args))
                 }
                 _ if !k.is_reserved() => Ok(Expr::Ident(self.ident_name()?)),
                 Kw::Yield if !self.in_gen && !self.strict => Ok(Expr::Ident(self.ident_name()?)),
@@ -1295,8 +1505,15 @@ impl<'a> Parser<'a> {
             if kind != 0 {
                 let (og, oa, of) = (self.in_gen, self.in_async, self.in_func);
                 self.in_gen = false; self.in_async = false; self.in_func = true;
-                let params = self.params()?;
+                // Auch ein Getter im Objektliteral hat sein EIGENES
+                // `arguments` — steht das Literal in einem Feld-Initialisierer,
+                // gilt die Sperre darin nicht mehr. Genau daran ist
+                // `context={…,get(){…arguments…}}` aus dem Discourse-Bundle
+                // gescheitert.
+                let ocf = core::mem::replace(&mut self.in_class_field, false);
+                let params = self.params_ex(true)?;
                 let body = self.block_body_with_prologue()?;
+                self.in_class_field = ocf;
                 self.in_gen = og; self.in_async = oa; self.in_func = of;
                 let f = Box::new(Func { name: None, params, body, is_async: false,
                     is_generator: false, is_arrow: false, expr_body: false });
@@ -1307,8 +1524,10 @@ impl<'a> Parser<'a> {
             } else if self.is_p(P::LParen) {
                 let (og, oa, of) = (self.in_gen, self.in_async, self.in_func);
                 self.in_gen = is_generator; self.in_async = is_async; self.in_func = true;
-                let params = self.params()?;
+                let ocf = core::mem::replace(&mut self.in_class_field, false);
+                let params = self.params_ex(true)?;
                 let body = self.block_body_with_prologue()?;
+                self.in_class_field = ocf;
                 self.in_gen = og; self.in_async = oa; self.in_func = of;
                 props.push(ObjProp {
                     key, computed, shorthand: false,
@@ -1366,6 +1585,12 @@ impl<'a> Parser<'a> {
                         None => None,
                         Some(Expr::Spread(inner)) => {
                             if i + 1 != n { return self.err("rest element must be last"); }
+                            // `[...a = 1]` gibt es nicht, und `[...a,]` auch
+                            // nicht — ein Schlusskomma HINTER dem Rest ist ein
+                            // eigenes (leeres) Element und faellt oben durch.
+                            if matches!(*inner, Expr::Assign { .. }) {
+                                return self.err("rest element cannot have a default");
+                            }
                             Some(Pat::Rest(Box::new(self.expr_to_pattern(*inner, binding)?)))
                         }
                         Some(x) => Some(self.expr_to_pattern(x, binding)?),
@@ -1381,7 +1606,16 @@ impl<'a> Parser<'a> {
                     match p.value {
                         ObjPropValue::Spread(inner) => {
                             if i + 1 != n { return self.err("rest property must be last"); }
-                            rest = Some(Box::new(self.expr_to_pattern(inner, binding)?));
+                            if matches!(inner, Expr::Assign { .. }) {
+                                return self.err("rest property cannot have a default");
+                            }
+                            // In einer BINDUNG muss der Rest ein blosser Name
+                            // sein: `{...{a}} = x` ist keine Bindung.
+                            let p = self.expr_to_pattern(inner, binding)?;
+                            if binding && !matches!(p, Pat::Ident(_)) {
+                                return self.err("rest property must be an identifier");
+                            }
+                            rest = Some(Box::new(p));
                         }
                         ObjPropValue::Init(v) => {
                             let value = self.expr_to_pattern(v, binding)?;
@@ -1401,4 +1635,19 @@ impl<'a> Parser<'a> {
 /// Ein Programm parsen. `module` waehlt die Grammatik, nicht nur einen Schalter.
 pub fn parse(src: &str, module: bool) -> Result<Program, ParseError> {
     Parser::new(src, module)?.parse_program()
+}
+
+
+/// Loescht `delete e` einen privaten Namen?
+///
+/// Nur das AEUSSERSTE Glied zaehlt: `delete a.#x` ist verboten, `delete
+/// a.#x.y` erlaubt — dort faellt `y`, nicht `#x`. Die erste Fassung rekursierte
+/// in den Empfaenger und lehnte damit `delete this.#b.data[k]` ab, das auf
+/// srf.ch und im Discourse-Forum ausgeliefert wird. Gegen V8 geprueft.
+fn deletes_private(e: &Expr) -> bool {
+    match e {
+        Expr::Chain(inner) => deletes_private(inner),
+        Expr::Member { prop, .. } => matches!(**prop, MemberProp::Private(_)),
+        _ => false,
+    }
 }
