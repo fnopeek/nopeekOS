@@ -75,18 +75,29 @@ struct FreeNode {
     next: *mut FreeNode,
 }
 
-/// 0..15 in 32-Byte-Schritten bis 512, danach je eine Zweierpotenz. Der
-/// gesuchte Kasten wird aus der UNTEREN Schranke des Bedarfs bestimmt, also
-/// sitzt der erste Treffer fast immer; nachgerechnet wird trotzdem je Block,
-/// weil die Ausrichtung den Bedarf um bis zu 15 Bytes anhebt.
-const NBINS: usize = 28;
+/// Bis 512 ein Kasten je 16 Bytes, darueber je eine Zweierpotenz.
+///
+/// **Die 16 sind kein Geschmack, sie sind die Ausrichtung.** Blockgroessen
+/// sind Vielfache von `BLOCK_ALIGN` (16), also haelt jeder Kasten unterhalb
+/// von 512 GENAU EINE Groesse — der erste Block darin passt immer, und die
+/// Suche ist O(1).
+///
+/// Mit 32-Byte-Kaesten (0.314.x) hielt ein Kasten ZWEI Groessen, und wer die
+/// groessere brauchte, lief an allen kleineren vorbei. Am Geraet gemessen:
+/// 5,5 bis 32,2 besuchte Knoten je Belegung, je nach Zustand der Freiliste,
+/// und die Uebersetzungszeit folgte dem monoton (150 ms bei 5,5 Schritten,
+/// 190 ms bei 32,2).
+///
+/// Ueber 512 bleibt die Spanne, also auch die Suche — das sind aber nur ~8 %
+/// der Anforderungen.
+const NBINS: usize = 52;
 
 #[inline]
 fn bin_of(size: usize) -> usize {
     if size < 512 {
-        size / 32
+        size / 16
     } else {
-        let mut b = 16;
+        let mut b = 32;
         let mut s = 512usize;
         while b < NBINS - 1 && s * 2 <= size {
             s *= 2;
