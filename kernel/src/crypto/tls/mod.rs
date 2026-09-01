@@ -487,7 +487,7 @@ pub fn tls_connect_alpn(
     let mut negotiated_alpn: Option<String> = None;
 
     loop {
-        let (ct, record) = recv_record(tcp_handle)?;
+        let (ct, record) = recv_record(tcp_handle, QUIET_TRANSFER)?;
 
         if ct == CT_CHANGE_CIPHER_SPEC {
             continue;
@@ -666,7 +666,16 @@ pub fn tls_send(session: &mut TlsSession, data: &[u8]) -> Result<(), TlsError> {
 
 /// Receive application data over TLS.
 pub fn tls_recv(session: &mut TlsSession, buf: &mut [u8]) -> Result<usize, TlsError> {
-    let (ct, record) = recv_record(session.tcp_handle)?;
+    tls_recv_patient(session, buf, QUIET_TRANSFER)
+}
+
+/// Wie `tls_recv`, aber der Aufrufer bestimmt, wie lange auf den Anfang einer
+/// Antwort gewartet wird. Wer weiss, dass noch KEIN Byte gekommen ist, nimmt
+/// `QUIET_FIRST_BYTE`; wer mitten im Koerper steht, `QUIET_TRANSFER`.
+pub fn tls_recv_patient(
+    session: &mut TlsSession, buf: &mut [u8], max_quiet: u32,
+) -> Result<usize, TlsError> {
+    let (ct, record) = recv_record(session.tcp_handle, max_quiet)?;
 
     if ct == CT_CHANGE_CIPHER_SPEC {
         return Ok(0);
@@ -989,10 +998,11 @@ fn send_record(handle: usize, content_type: u8, payload: &[u8]) -> Result<(), Tl
     Ok(())
 }
 
-fn recv_record(handle: usize) -> Result<(u8, Vec<u8>), TlsError> {
-    // Read 5-byte header
+fn recv_record(handle: usize, max_quiet: u32) -> Result<(u8, Vec<u8>), TlsError> {
+    // Read 5-byte header. Die Geduld gilt dem KOPF — sobald er da ist, ist die
+    // Gegenstelle am Antworten und die Nutzlast bekommt die volle Nachsicht.
     let mut header = [0u8; 5];
-    recv_exact(handle, &mut header)?;
+    recv_exact(handle, &mut header, max_quiet)?;
 
     let content_type = header[0];
     let length = ((header[3] as usize) << 8) | header[4] as usize;
@@ -1002,18 +1012,30 @@ fn recv_record(handle: usize) -> Result<(u8, Vec<u8>), TlsError> {
     }
 
     let mut payload = alloc::vec![0u8; length];
-    recv_exact(handle, &mut payload)?;
+    recv_exact(handle, &mut payload, QUIET_TRANSFER)?;
 
     Ok((content_type, payload))
 }
 
-fn recv_exact(handle: usize, buf: &mut [u8]) -> Result<(), TlsError> {
+/// Patience for a record that is already flowing: a quiet link is not a
+/// closed one. Each attempt waits 10 s; six of them give a minute, the same
+/// order as the TCP retransmit budget (TCP_RETR2). Under a run of transmit
+/// stalls a single attempt ended the record — and the caller saw a truncated
+/// body it could only report as "short download".
+pub const QUIET_TRANSFER: u32 = 6;
+
+/// Patience for the FIRST byte of an answer. A peer that has not begun to
+/// reply on an established connection is almost always gone, not slow — das
+/// ist der Fall einer wiederverwendeten Verbindung, die der Server zwischen
+/// zwei Benutzungen geschlossen hat. Eine Minute darauf zu warten hat einen
+/// Bildabruf schon 60 s gekostet, obwohl der frische Verbindungsaufbau
+/// unmittelbar danach in 40 ms lieferte.
+/// Vgl. [[feedback-a-constant-right-at-bringup-is-wrong-later]]: dieselbe
+/// Zahl war fuer die Fortsetzung richtig und fuer den Anfang falsch.
+pub const QUIET_FIRST_BYTE: u32 = 1;
+
+fn recv_exact(handle: usize, buf: &mut [u8], max_quiet: u32) -> Result<(), TlsError> {
     let mut filled = 0;
-    // A quiet link is not a closed one. Each attempt waits 10 s; six of them
-    // give a minute of patience before we call it dead, which is the same
-    // order as the TCP retransmit budget (TCP_RETR2). Under a run of transmit
-    // stalls the old single attempt ended the record — and the caller saw a
-    // truncated body it could only report as "short download".
     let mut quiet = 0;
     while filled < buf.len() {
         match tcp::recv_blocking(handle, &mut buf[filled..], 1000) {
@@ -1021,7 +1043,7 @@ fn recv_exact(handle: usize, buf: &mut [u8]) -> Result<(), TlsError> {
             Ok(n) => { filled += n; quiet = 0; }
             Err(tcp::TcpError::Timeout) => {
                 quiet += 1;
-                if quiet >= 6 {
+                if quiet >= max_quiet {
                     return Err(TlsError::HandshakeFailed("stream went quiet"));
                 }
             }
@@ -1032,7 +1054,7 @@ fn recv_exact(handle: usize, buf: &mut [u8]) -> Result<(), TlsError> {
 }
 
 fn recv_handshake_message(handle: usize, expected_type: u8) -> Result<Vec<u8>, TlsError> {
-    let (ct, payload) = recv_record(handle)?;
+    let (ct, payload) = recv_record(handle, QUIET_TRANSFER)?;
     if ct != CT_HANDSHAKE {
         if ct == CT_ALERT && payload.len() >= 2 {
             return Err(TlsError::HandshakeFailed(match payload[1] {

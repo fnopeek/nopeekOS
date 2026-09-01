@@ -192,6 +192,9 @@ pub struct Http2 {
     dec: hpack::Decoder,
     /// Undecoded bytes left over from the last read.
     rx: Vec<u8>,
+    /// Ob seit dem letzten Senden auf dieser Verbindung ueberhaupt ein Byte
+    /// kam. Entscheidet, wie lange auf Daten gewartet wird — siehe `fill_to`.
+    answered: bool,
     next_id: u32,
     peer_max_frame: usize,
     conn_consumed: u32,
@@ -220,6 +223,7 @@ impl Http2 {
             tls,
             dec: hpack::Decoder::new(),
             rx: Vec::new(),
+            answered: false,
             next_id: 1, // client streams are odd (§5.1.1)
             peer_max_frame: MAX_FRAME,
             conn_consumed: 0,
@@ -320,6 +324,11 @@ impl Http2 {
                 head_seen: false,
             });
         }
+        // Neuer Austausch: bis zur ersten Antwort gilt die kurze Geduld. Eine
+        // Verbindung aus dem Pool HAT frueher geantwortet — ohne dieses
+        // Zuruecksetzen greift die Unterscheidung genau im Fall nicht, fuer
+        // den sie da ist.
+        self.answered = false;
         self.write(&out)?;
         self.pump(&mut streams, &mut Dest::Buffer)?;
 
@@ -434,6 +443,7 @@ impl Http2 {
             frame(&mut out, FRAME_DATA, last, id, chunk);
         }
         self.conn_send_window -= body.len() as u32;
+        self.answered = false; // wie in `get_all`
         self.write(&out)?;
 
         let mut streams = alloc::vec![Stream {
@@ -774,7 +784,18 @@ impl Http2 {
         let start = crate::interrupts::ticks();
         while self.rx.len() < n {
             crate::net::poll_rx_only();
-            match crate::tls::tls_recv(&mut self.tls, &mut buf) {
+            // Solange auf DIESER Verbindung seit dem Senden noch nichts kam,
+            // ist die kurze Geduld richtig: eine aus dem Pool genommene
+            // Verbindung, die der Server inzwischen geschlossen hat, sieht
+            // lokal lebendig aus (siehe `PooledConn` in `intent/http.rs`) und
+            // hat einen Bildabruf 60 s gekostet. Sobald das erste Byte da ist,
+            // gilt wieder die volle Nachsicht fuer stockende Uebertragungen.
+            let patience = if self.answered {
+                crate::tls::QUIET_TRANSFER
+            } else {
+                crate::tls::QUIET_FIRST_BYTE
+            };
+            match crate::tls::tls_recv_patient(&mut self.tls, &mut buf, patience) {
                 Ok(0) => {
                     // Either a record carrying no application data (session
                     // tickets arrive this way) or nothing ready yet.
@@ -783,7 +804,10 @@ impl Http2 {
                     }
                     core::hint::spin_loop();
                 }
-                Ok(got) => self.rx.extend_from_slice(&buf[..got]),
+                Ok(got) => {
+                    self.answered = true;
+                    self.rx.extend_from_slice(&buf[..got]);
+                }
                 Err(_) => return Ok(false),
             }
         }
