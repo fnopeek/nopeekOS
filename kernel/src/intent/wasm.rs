@@ -37,11 +37,21 @@ pub fn intent_run(args: &str) {
     // before the module's first host-fn call; the old 60 s TTL was
     // expired by the time WASM actually started running. 100 min is
     // generous + bounded so a hung worker still gets reaped.
+    // Was die feste Liste seit v0.83.x vergibt, PLUS was das Modul in
+    // `.npk.caps` deklariert. Der Klickweg (`npk_spawn_module`) liest die
+    // Deklaration laengst; der Terminalweg tat es nicht — deshalb hatte beak
+    // vom Prompt aus kein NET und kein CANVAS, iris kein CANVAS, snap kein
+    // CAPTURE. Vereinigung statt Ersetzung: so verliert kein Modul ein Recht,
+    // auf das es sich hier bisher verlassen konnte. Dass die feste Liste ein
+    // WRITE an neun Module verschenkt, die es nie deklariert haben, bleibt
+    // offen — das ist eine eigene Entscheidung und ein eigener Commit.
+    let declared = capability::widget_rights_from_wasm(&wasm_bytes);
     let module_cap = match capability::create_module_cap(
         capability::Rights::READ
             | capability::Rights::WRITE
             | capability::Rights::EXECUTE
-            | capability::Rights::RENDER,
+            | capability::Rights::RENDER
+            | declared,
         Some(600_000),
     ) {
         Ok(id) => id,
@@ -95,11 +105,21 @@ pub fn intent_run_background(module_name: &str) {
         }
     };
 
+    // Was die feste Liste seit v0.83.x vergibt, PLUS was das Modul in
+    // `.npk.caps` deklariert. Der Klickweg (`npk_spawn_module`) liest die
+    // Deklaration laengst; der Terminalweg tat es nicht — deshalb hatte beak
+    // vom Prompt aus kein NET und kein CANVAS, iris kein CANVAS, snap kein
+    // CAPTURE. Vereinigung statt Ersetzung: so verliert kein Modul ein Recht,
+    // auf das es sich hier bisher verlassen konnte. Dass die feste Liste ein
+    // WRITE an neun Module verschenkt, die es nie deklariert haben, bleibt
+    // offen — das ist eine eigene Entscheidung und ein eigener Commit.
+    let declared = capability::widget_rights_from_wasm(&wasm_bytes);
     let module_cap = match capability::create_module_cap(
         capability::Rights::READ
             | capability::Rights::WRITE
             | capability::Rights::EXECUTE
-            | capability::Rights::RENDER,
+            | capability::Rights::RENDER
+            | declared,
         Some(600_000),
     ) {
         Ok(id) => id,
@@ -142,11 +162,21 @@ fn run_interactive_on(module_name: &str, use_forge: bool) {
         }
     };
 
+    // Was die feste Liste seit v0.83.x vergibt, PLUS was das Modul in
+    // `.npk.caps` deklariert. Der Klickweg (`npk_spawn_module`) liest die
+    // Deklaration laengst; der Terminalweg tat es nicht — deshalb hatte beak
+    // vom Prompt aus kein NET und kein CANVAS, iris kein CANVAS, snap kein
+    // CAPTURE. Vereinigung statt Ersetzung: so verliert kein Modul ein Recht,
+    // auf das es sich hier bisher verlassen konnte. Dass die feste Liste ein
+    // WRITE an neun Module verschenkt, die es nie deklariert haben, bleibt
+    // offen — das ist eine eigene Entscheidung und ein eigener Commit.
+    let declared = capability::widget_rights_from_wasm(&wasm_bytes);
     let module_cap = match capability::create_module_cap(
         capability::Rights::READ
             | capability::Rights::WRITE
             | capability::Rights::EXECUTE
-            | capability::Rights::RENDER,
+            | capability::Rights::RENDER
+            | declared,
         Some(600_000),
     ) {
         Ok(id) => id,
