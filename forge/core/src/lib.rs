@@ -92,6 +92,11 @@ pub mod trap {
     pub const OUT_OF_FUEL: u32 = 6;
     /// A call reached a function the generator refused to translate.
     pub const UNCOMPILED: u32 = 7;
+    /// A host function ended the run instead of returning. wasi programs leave
+    /// this way — through `proc_exit`, a clean finish included. The status
+    /// itself does NOT travel here; it belongs to the embedder's state, which
+    /// the host function already holds.
+    pub const EXIT: u32 = 8;
 
     pub fn name(code: u32) -> &'static str {
         match code {
@@ -103,6 +108,7 @@ pub mod trap {
             DIVIDE_ERROR => "Division durch null oder Ueberlauf",
             OUT_OF_FUEL => "Fuel aufgebraucht",
             UNCOMPILED => "Funktion nicht uebersetzt",
+            EXIT => "vom Programm selbst beendet",
             _ => "unbekannt",
         }
     }
