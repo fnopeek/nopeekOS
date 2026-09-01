@@ -171,8 +171,30 @@ pub fn intent_forge(args: &str, vault: &'static spin::Mutex<crate::security::cap
         super::wasm::intent_run_interactive_forge(m);
         return;
     }
+    // Der Schalter, der einen Neustart uebersteht. `dock`, `bar`, `audio_hda`
+    // und `wifid` startet niemand von Hand — die kommen ueber Autostart und
+    // den Treiberweg, und nur so lassen sie sich unter forge pruefen.
+    if let Some(rest) = name.strip_prefix("default") {
+        let arg = rest.trim();
+        match arg {
+            "on" | "forge" => {
+                crate::wasm::set_engine_default(true);
+                kprintln!("[npk] forge ist ab dem naechsten Start der Vorgabemotor");
+                kprintln!("[npk] (laufende Module bleiben auf dem Motor, mit dem sie gestartet sind)");
+            }
+            "off" | "wasmi" => {
+                crate::wasm::set_engine_default(false);
+                kprintln!("[npk] wasmi ist ab dem naechsten Start der Vorgabemotor");
+            }
+            "" => kprintln!("[npk] Vorgabemotor: {}",
+                if crate::wasm::forge_is_default() { "forge" } else { "wasmi" }),
+            _ => kprintln!("[npk] Usage: forge default [on|off]"),
+        }
+        return;
+    }
     if name.is_empty() {
-        kprintln!("[npk] Usage: forge <module> | forge run <module> | forge python <args> | forge selftest");
+        kprintln!("[npk] Usage: forge <module> | forge run <module> | forge python <args>");
+        kprintln!("[npk]        forge default [on|off] | forge selftest");
         return;
     }
 

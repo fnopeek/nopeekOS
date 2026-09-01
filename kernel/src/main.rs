@@ -409,6 +409,10 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
 
     // Load system config (after identity — config is encrypted at rest)
     config::load();
+    // Welcher Motor die Module faehrt, steht in der Konfiguration und
+    // uebersteht damit einen Neustart — nur so laesst sich pruefen, was ueber
+    // Autostart und den Treiberweg hochkommt.
+    wasm::load_engine_default();
     xhci::cache_keyboard_layout();
     if let Some(v) = config::get("mouse_speed") {
         if let Ok(n) = v.trim().parse::<i32>() { shade::cursor::set_speed(n); }
