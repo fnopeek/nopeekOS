@@ -2272,6 +2272,204 @@ pub(crate) fn npk_http_send(mem: &mut [u8], ctx: &mut HostState, method_ptr: i32
     write_bytes(mem, buf_ptr, &out[..write_len])
 }
 
+// ── Fetching without standing still ────────────────────────────────────────
+//
+// The same two requests as `npk_http_send` / `npk_http_request_many`, split
+// into "start it" and "collect it". Between the two the module keeps running:
+// it paints, it reads keys, its peer fibers get their turns. The wait happens
+// on a worker fiber on another core (`intent::fetch`).
+//
+// A handle is answered only to the process that opened it — `ctx.pid`, not
+// the caller's word — so guessing a small integer cannot read another app's
+// document.
+
+/// Start one request. Returns a handle (>= 1), or -1 with the reason in
+/// `npk_http_last_error`. Same validation as `npk_http_send`: it is the same
+/// request, only nobody waits for it here.
+pub(crate) fn npk_http_begin(
+    mem: &mut [u8], ctx: &mut HostState,
+    method_ptr: i32, method_len: i32, url_ptr: i32, url_len: i32,
+    hdrs_ptr: i32, hdrs_len: i32, body_ptr: i32, body_len: i32,
+    buf_max: i32,
+) -> i32 {
+    let cap_id = ctx.cap_id;
+    if let Err(e) = capability::check_global(&cap_id, capability::Rights::NET) {
+        kprintln!("[npk] WASM: npk_http_begin DENIED (cap_id={:08x}, {:?})",
+            capability::short_id(&cap_id), e);
+        return -1;
+    }
+    if buf_max <= 0 { return -1; }
+    let cap = buf_max as usize;
+
+    let method = match read_str(mem, method_ptr, method_len) {
+        Some(s) => s,
+        None => return -1,
+    };
+    if !crate::intent::http::method_is_safe(&method) {
+        kprintln!("[npk] WASM: npk_http_begin rejected method");
+        return -1;
+    }
+    let url = match read_str(mem, url_ptr, url_len) {
+        Some(s) => s,
+        None => return -1,
+    };
+    let hdr_blob = if hdrs_len > 0 {
+        match read_str(mem, hdrs_ptr, hdrs_len) {
+            Some(s) => s,
+            None => return -1,
+        }
+    } else {
+        String::new()
+    };
+    let mut headers: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+    for line in hdr_blob.split('\n').map(str::trim).filter(|l| !l.is_empty()) {
+        if !crate::intent::http::header_line_is_safe(line) {
+            kprintln!("[npk] WASM: npk_http_begin rejected a header");
+            return -1;
+        }
+        headers.push(String::from(line));
+    }
+    let body = if body_len > 0 {
+        match read_bytes(mem, body_ptr, body_len) {
+            Some(b) => b,
+            None => return -1,
+        }
+    } else {
+        alloc::vec::Vec::new()
+    };
+    let (host, path) = match crate::intent::http::parse_url(&url) {
+        Ok(hp) => hp,
+        Err(e) => {
+            // A refusal at the door has to name itself the same way a failed
+            // exchange does, or the caller's error page says "unknown".
+            ctx.http_last_error = Some(alloc::format!("url\t{}", e));
+            return -1;
+        }
+    };
+
+    match crate::intent::fetch::begin_one(
+        ctx.pid, ctx.core_id, method, host, path, headers, body, cap,
+    ) {
+        Ok(h) => h,
+        Err(e) => {
+            ctx.http_last_error = Some(alloc::format!("queue\t{}", e));
+            -1
+        }
+    }
+}
+
+/// Start a batch. Returns a handle (>= 1) or -1; the answer comes back
+/// through `npk_http_take_many`.
+pub(crate) fn npk_http_begin_many(
+    mem: &mut [u8], ctx: &mut HostState,
+    urls_ptr: i32, urls_len: i32, out_max: i32,
+) -> i32 {
+    let cap_id = ctx.cap_id;
+    if let Err(e) = capability::check_global(&cap_id, capability::Rights::NET) {
+        kprintln!("[npk] WASM: npk_http_begin_many DENIED (cap_id={:08x}, {:?})",
+            capability::short_id(&cap_id), e);
+        return -1;
+    }
+    if out_max <= 0 { return -1; }
+    let blob = match read_str(mem, urls_ptr, urls_len) {
+        Some(s) => s,
+        None => return -1,
+    };
+    let urls: alloc::vec::Vec<String> = blob
+        .split('\n')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+    match crate::intent::fetch::begin_many(ctx.pid, ctx.core_id, urls, out_max as usize) {
+        Ok(h) => h,
+        Err(e) => {
+            ctx.http_last_error = Some(alloc::format!("queue\t{}", e));
+            -1
+        }
+    }
+}
+
+/// 1 = an answer is waiting, 0 = still running, -1 = it failed (call
+/// `npk_http_take` for the reason), -2 = no such handle.
+pub(crate) fn npk_http_poll(ctx: &mut HostState, handle: i32) -> i32 {
+    crate::intent::fetch::poll(ctx.pid, handle)
+}
+
+/// Collect a finished single request. Bytes written on success; -1 if the
+/// request failed; -2 if the handle is unknown; -3 while it is still running
+/// (and only then does the job survive the call).
+///
+/// Fills exactly the five getters `npk_http_send` fills, and clears them the
+/// same way — a caller must never read one request's answer and attribute it
+/// to the next.
+pub(crate) fn npk_http_take(mem: &mut [u8], ctx: &mut HostState, handle: i32, buf_ptr: i32, buf_max: i32) -> i32 {
+    if buf_max < 0 { return -1; }
+    let reply = match crate::intent::fetch::take(ctx.pid, handle) {
+        crate::intent::fetch::Take::Got(r) => r,
+        crate::intent::fetch::Take::NotReady => return -3,
+        crate::intent::fetch::Take::Unknown => return -2,
+    };
+    let ok = reply.error.is_empty();
+    ctx.http_final_url =
+        if ok && !reply.final_url.is_empty() { Some(reply.final_url) } else { None };
+    ctx.http_content_type =
+        if ok && !reply.content_type.is_empty() { Some(reply.content_type) } else { None };
+    ctx.http_reply_headers = if ok { Some(reply.headers) } else { None };
+    ctx.http_status = if ok { reply.status } else { 0 };
+    ctx.http_last_error = if ok { None } else { Some(reply.error) };
+    if !ok { return -1; }
+
+    let write_len = reply.body.len().min(buf_max as usize);
+    write_bytes(mem, buf_ptr, &reply.body[..write_len])
+}
+
+/// Collect a finished batch: the bodies back to back in `out`, one
+/// little-endian i32 length per URL in `lens` (-1 for one that failed).
+/// Returns how many URLs the batch had, or -1 / -2 / -3 as above.
+///
+/// Touches none of the response getters — a batch has one status per URL and
+/// no headers, exactly as `npk_http_request_many` has always had it, and
+/// clobbering the document's headers with a picture's would be worse than
+/// silence.
+pub(crate) fn npk_http_take_many(
+    mem: &mut [u8], ctx: &mut HostState,
+    handle: i32, out_ptr: i32, out_max: i32, lens_ptr: i32, lens_max: i32,
+) -> i32 {
+    if out_max <= 0 || lens_max <= 0 || out_ptr < 0 || lens_ptr < 0 { return -1; }
+    // Asked BEFORE taking: `take` destroys the job, so a length table too
+    // small to hold the answer has to be refused while the answer still
+    // exists — otherwise a caller that sized it wrong loses the batch.
+    match crate::intent::fetch::result_count(ctx.pid, handle) {
+        Some(n) if (lens_max as usize) < n * 4 => return -1,
+        _ => {}
+    }
+    let reply = match crate::intent::fetch::take(ctx.pid, handle) {
+        crate::intent::fetch::Take::Got(r) => r,
+        crate::intent::fetch::Take::NotReady => return -3,
+        crate::intent::fetch::Take::Unknown => return -2,
+    };
+    if !reply.error.is_empty() {
+        ctx.http_last_error = Some(reply.error);
+        return -1;
+    }
+    let mut lens: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    for n in &reply.lens {
+        lens.extend_from_slice(&n.to_le_bytes());
+    }
+    if write_bytes(mem, lens_ptr, &lens) < 0 { return -1; }
+    let write_len = reply.body.len().min(out_max as usize);
+    if write_len > 0 && write_bytes(mem, out_ptr, &reply.body[..write_len]) < 0 { return -1; }
+    reply.lens.len() as i32
+}
+
+/// Stop caring about a handle. Always 0 — a browser cancels on every
+/// navigation and must not have to know which state it caught.
+pub(crate) fn npk_http_cancel(ctx: &mut HostState, handle: i32) -> i32 {
+    crate::intent::fetch::cancel(ctx.pid, handle);
+    0
+}
+
 pub(crate) fn npk_http_request_many(mem: &mut [u8], ctx: &mut HostState, urls_ptr: i32, urls_len: i32, out_ptr: i32, out_max: i32, lens_ptr: i32, lens_max: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if let Err(e) = capability::check_global(&cap_id, capability::Rights::NET) {

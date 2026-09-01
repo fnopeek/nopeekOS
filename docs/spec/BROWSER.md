@@ -576,5 +576,63 @@ just text a sandboxed app hands us:
 Cookie POLICY stays out of the kernel: which cookie belongs on which request
 is RFC 6265, and that is the browser's job (`beak_engine::cookies`).
 
+### Fetching without standing still (v0.318.0)
+
+Both requests above are synchronous: the calling module sits INSIDE the host
+call for the whole exchange — DNS, TCP, TLS, the wait for the first byte — and
+a WASM fiber in a host call cannot paint, cannot read a key and cannot let its
+peers run. For a browser that is the whole complaint, and no timeout is short
+enough to make freezing acceptable: a server that goes quiet froze the window
+for as long as it stayed quiet.
+
+So the wait moved off the caller's stack. Same requests, split in two:
+
+```
+npk_http_begin(method_ptr, method_len, url_ptr, url_len,
+               hdrs_ptr, hdrs_len, body_ptr, body_len, buf_max)
+    -> handle >= 1, or -1 (reason via npk_http_last_error)
+npk_http_begin_many(urls_ptr, urls_len, out_max) -> handle >= 1, or -1
+
+npk_http_poll(handle)   ->  1 answer waiting · 0 running
+                           -1 failed · -2 no such handle
+
+npk_http_take(handle, buf_ptr, buf_max)
+    -> bytes · -1 failed · -2 unknown · -3 still running
+       Frees the handle and fills the same five getters npk_http_send fills.
+npk_http_take_many(handle, out_ptr, out_max, lens_ptr, lens_max)
+    -> count · -1 · -2 · -3.  Touches none of the getters: a batch has one
+       status per URL and no headers, and clobbering the document's headers
+       with a picture's would be worse than silence.
+
+npk_http_cancel(handle) -> 0.  Idempotent.
+```
+
+The kernel side is `intent::fetch`: a job table plus a worker fiber that runs
+exactly the same synchronous client (`https_request_streaming` /
+`https_get_many`, unchanged — there is deliberately no second HTTP
+implementation) on a core that is never Core 0, never the microvm's, and never
+the caller's. The HTTP client did NOT become asynchronous; its blocking recv
+loops now block a fiber nobody is waiting on.
+
+Three rules the boundary keeps:
+
+- **A handle is only answered to its owner** (the caller's pid, not its word),
+  so guessing a small integer cannot read another app's document. A caller
+  with no process — the inline execution paths — is refused outright and uses
+  the synchronous pair, which is right for it anyway.
+- **`take` always frees**, on success and on failure alike, and it is the only
+  thing that publishes into the response getters. A caller can never read one
+  request's answer and attribute it to the next.
+- **Cancelling never interrupts an exchange.** It takes effect at the next
+  chunk boundary and otherwise just discards the answer — which is all the
+  caller can observe, since it stopped waiting the moment it got its handle.
+
+beak's side is a two-stage navigation (`nav_begin` → `nav_pump`): the document,
+then its stylesheets, strictly ordered, with nothing painted between them —
+stylesheets are render-blocking, and drawing the bare document first costs a
+full layout the arriving CSS throws away. Images and backgrounds run as one
+batch in flight each. The reload button becomes a stop button while a page is
+loading, which is only possible now that the fetch is something one can stop.
+
 The name `beak` (nopeek → the bird's beak) stuck, and follows the lowercase
 app-naming convention (loft, dock, bar, drun, spell, iris, snap, volume).

@@ -520,7 +520,7 @@ fn wasm_worker_task(arg: u64) {
     let _ = func.call(&mut store, &[], &mut []);
 
     // Cleanup hardware resources before process exit
-    cleanup_hw_state(store.data_mut());
+    cleanup_instance_state(store.data_mut());
 
     // Drop this instance's per-path grants. They were handed out for one
     // pick and must not outlive the app that got them — a later instance
@@ -626,7 +626,7 @@ fn forge_worker_task(slot: usize, job: WasmJob) {
 
     // Wie im Interpreterpfad: Hardware zurueck, Pfadrechte weg. Beide
     // arbeiten schon auf `&mut HostState`, also gilt hier dasselbe.
-    cleanup_hw_state(&mut hs);
+    cleanup_instance_state(&mut hs);
     capability::revoke_path_grants(&hs.cap_id);
     crate::process::set_memory(pid, inst.memory_size() as u32);
     done(pid, terminal_idx, slot);
@@ -848,7 +848,7 @@ fn execute_inner_forge(
     let a = |i: usize| args.get(i).and_then(|v| v.i32()).unwrap_or(0) as u32;
     let (_ret, trap) = inst.call(off, a(0), a(1), a(2));
 
-    cleanup_hw_state(&mut hs);
+    cleanup_instance_state(&mut hs);
     capability::revoke_path_grants(&hs.cap_id);
     Some(match trap {
         forge_core::trap::NONE => Ok(WasmResult { output: hs.output }),
@@ -1085,6 +1085,77 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 else { return -1 };
             let (mem, ctx) = m.data_and_store_mut(&mut caller);
             host_core::npk_http_request_many(mem, ctx, urls_ptr, urls_len, out_ptr, out_max, lens_ptr, lens_max)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // ── Fetching without standing still ────────────────────────────────
+    //
+    // The two requests above, split into "start it" and "collect it". A
+    // module that calls npk_http_send is INSIDE the host call until the
+    // exchange ends — it cannot paint, cannot read a key, and its peer
+    // fibers do not run. These five let it keep its loop: begin -> handle,
+    // poll between frames, take when the answer is there. The wait itself
+    // happens on a worker fiber on another core (intent::fetch).
+    //
+    // NET-gated, same capability as the synchronous pair.
+
+    // npk_http_begin(method_ptr, method_len, url_ptr, url_len,
+    //                hdrs_ptr, hdrs_len, body_ptr, body_len, buf_max)
+    //   -> handle >= 1, or -1 (reason via npk_http_last_error)
+    linker.func_wrap("env", "npk_http_begin",
+        |mut caller: Caller<'_, HostState>, method_ptr: i32, method_len: i32, url_ptr: i32, url_len: i32, hdrs_ptr: i32, hdrs_len: i32, body_ptr: i32, body_len: i32, buf_max: i32| -> i32 {
+            let Some(m) = caller.get_export("memory").and_then(|e| e.into_memory())
+                else { return -1 };
+            let (mem, ctx) = m.data_and_store_mut(&mut caller);
+            host_core::npk_http_begin(mem, ctx, method_ptr, method_len, url_ptr, url_len, hdrs_ptr, hdrs_len, body_ptr, body_len, buf_max)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_http_begin_many(urls_ptr, urls_len, out_max) -> handle >= 1, or -1
+    linker.func_wrap("env", "npk_http_begin_many",
+        |mut caller: Caller<'_, HostState>, urls_ptr: i32, urls_len: i32, out_max: i32| -> i32 {
+            let Some(m) = caller.get_export("memory").and_then(|e| e.into_memory())
+                else { return -1 };
+            let (mem, ctx) = m.data_and_store_mut(&mut caller);
+            host_core::npk_http_begin_many(mem, ctx, urls_ptr, urls_len, out_max)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_http_poll(handle) -> 1 answer waiting, 0 running, -1 failed,
+    //                          -2 no such handle
+    linker.func_wrap("env", "npk_http_poll",
+        |mut caller: Caller<'_, HostState>, handle: i32| -> i32 {
+            host_core::npk_http_poll(caller.data_mut(), handle)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_http_take(handle, buf_ptr, buf_max) -> bytes, -1 failed,
+    //                                            -2 unknown, -3 still running
+    // Frees the job and fills the same five getters npk_http_send fills.
+    linker.func_wrap("env", "npk_http_take",
+        |mut caller: Caller<'_, HostState>, handle: i32, buf_ptr: i32, buf_max: i32| -> i32 {
+            let Some(m) = caller.get_export("memory").and_then(|e| e.into_memory())
+                else { return -1 };
+            let (mem, ctx) = m.data_and_store_mut(&mut caller);
+            host_core::npk_http_take(mem, ctx, handle, buf_ptr, buf_max)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_http_take_many(handle, out_ptr, out_max, lens_ptr, lens_max)
+    //   -> count, -1 failed, -2 unknown, -3 still running
+    linker.func_wrap("env", "npk_http_take_many",
+        |mut caller: Caller<'_, HostState>, handle: i32, out_ptr: i32, out_max: i32, lens_ptr: i32, lens_max: i32| -> i32 {
+            let Some(m) = caller.get_export("memory").and_then(|e| e.into_memory())
+                else { return -1 };
+            let (mem, ctx) = m.data_and_store_mut(&mut caller);
+            host_core::npk_http_take_many(mem, ctx, handle, out_ptr, out_max, lens_ptr, lens_max)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_http_cancel(handle) -> 0. Idempotent.
+    linker.func_wrap("env", "npk_http_cancel",
+        |mut caller: Caller<'_, HostState>, handle: i32| -> i32 {
+            host_core::npk_http_cancel(caller.data_mut(), handle)
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
@@ -2444,10 +2515,14 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     Ok(())
 }
 
-/// Free all hardware resources allocated by a WASM driver module.
-fn cleanup_hw_state(state: &mut HostState) {
+/// Free everything an instance leaves behind: its driver's hardware, and any
+/// fetch it started and never collected.
+fn cleanup_instance_state(state: &mut HostState) {
     // A dead driver's snapshot must not read as live numbers.
     crate::drivers::report::clear(&state.module_name);
+    // A browser closed mid-load would otherwise hold its slots — and its
+    // megabytes of reserved answer — until the next boot.
+    crate::intent::fetch::release_owner(state.pid);
     if let Some(hw) = state.hw.take() {
         let mut total_pages = 0usize;
         for &(phys, pages) in &hw.dma_allocs {
