@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="de"><head><meta charset="utf-8"><title>beak Selbsttest</title>
+<style>
+ body { font: 15px/1.5 sans-serif; margin: 0 auto; padding: 16px 20px 48px; max-width: 46em; }
+ h1 { font-size: 20px; margin: 0 0 4px; }
+ h2 { font-size: 15px; margin: 20px 0 6px; border-bottom: 1px solid #bbb; padding-bottom: 3px; }
+ p.lead { color: #555; margin: 0 0 8px; }
+ #verdict { font-weight: bold; padding: 6px 9px; border-radius: 4px; background: #fde7e7; color: #8a1b1b; }
+ #verdict.ok { background: #e6f4e6; color: #1d5c1d; }
+ table { border-collapse: collapse; width: 100%; }
+ td { padding: 2px 6px; border-bottom: 1px solid #eee; vertical-align: top; }
+ td.n { width: 4.5em; font-weight: bold; }
+ td.d { color: #777; font-size: 13px; }
+ tr.pass td.n { color: #1d5c1d; }
+ tr.fail td.n { color: #8a1b1b; }
+ button { font: inherit; padding: 4px 12px; margin-right: 6px; }
+ .hit { background: #ffe9a8; }
+ ul { margin: 6px 0; }
+ code { background: #f0f0f0; padding: 0 3px; }
+</style>
+</head>
+<body>
+<h1>beak &middot; Selbsttest</h1>
+<p class="lead">Diese Seite kommt aus beak selbst. Sie holt nichts.</p>
+<p id="verdict">Ohne Skript. Bleibt diese Zeile rot stehen, ist JavaScript gar nicht gelaufen.</p>
+
+<h2>Sprache</h2>
+<table id="lang"><tbody></tbody></table>
+
+<h2>Dokument</h2>
+<table id="dom"><tbody></tbody></table>
+
+<h2>Ereignisse &mdash; hier musst du klicken</h2>
+<p>
+ <button id="b1">Z&auml;hler</button>
+ <span id="count">noch nie geklickt</span>
+</p>
+<p>
+ <button id="b2" onclick="document.getElementById('inline').textContent='inline-onclick lief'">onclick-Attribut</button>
+ <span id="inline">nicht geklickt</span>
+</p>
+<p>
+ <button id="b3">Knoten anh&auml;ngen</button>
+ <button id="b4">Blase pr&uuml;fen</button>
+ <span id="bubble">nicht geklickt</span>
+</p>
+<ul id="sink"></ul>
+
+<h2>Zeitgeber</h2>
+<p id="timer">setTimeout ist nicht gelaufen.</p>
+
+<script>
+var langRows = [], domRows = [];
+
+function row(list, name, fn) {
+  var ok = false, why = "";
+  try { ok = (fn() === true); if (!ok) why = "lieferte nicht true"; }
+  catch (e) { why = String(e && e.message ? e.message : e); }
+  list.push([name, ok, why]);
+  return ok;
+}
+
+// Syntaxprobe: der Rahmen selbst bleibt lesbar, auch wenn das Mittel fehlt.
+function syn(list, name, src, want) {
+  row(list, name, function () { return Function(src)() === want; });
+}
+
+function paint(id, list) {
+  var tb = document.getElementById(id).getElementsByTagName("tbody")[0];
+  for (var i = 0; i < list.length; i++) {
+    var r = list[i], tr = document.createElement("tr");
+    tr.className = r[1] ? "pass" : "fail";
+    var a = document.createElement("td"); a.className = "n"; a.textContent = r[1] ? "JA" : "NEIN";
+    var b = document.createElement("td"); b.textContent = r[0];
+    var c = document.createElement("td"); c.className = "d"; c.textContent = r[2];
+    tr.appendChild(a); tr.appendChild(b); tr.appendChild(c);
+    tb.appendChild(tr);
+  }
+}
+
+function tally(list) { var n = 0; for (var i = 0; i < list.length; i++) if (list[i][1]) n++; return n; }
+
+/* ---------- Sprache ---------- */
+syn(langRows, "Pfeilfunktion", "return (x => x * 2)(21)", 42);
+syn(langRows, "let / const", "let a = 1; const b = 2; return a + b", 3);
+syn(langRows, "Vorlagentext", "var n = 7; return `n=${n}`", "n=7");
+syn(langRows, "Zerlegung", "var {a, b} = {a: 1, b: 2}; var [c] = [3]; return a + b + c", 6);
+syn(langRows, "Streuung", "function f(...r) { return r.length } return f(1,2,3) + Math.max(...[1,9])", 12);
+syn(langRows, "Vorgabewerte", "function f(a, b = 5) { return a + b } return f(1)", 6);
+syn(langRows, "Klasse + Getter", "class A { constructor() { this.x = 5 } get y() { return this.x * 2 } } return new A().y", 10);
+syn(langRows, "Vererbung", "class A { f() { return 1 } } class B extends A { f() { return super.f() + 1 } } return new B().f()", 2);
+syn(langRows, "for-of", "var s = 0; for (var v of [1,2,3]) s += v; return s", 6);
+syn(langRows, "Kettenzugriff ?.", "var o = {}; return (o?.a?.b ?? 'ok')", "ok");
+syn(langRows, "Generator", "function* g() { yield 1; yield 2 } var s = 0; for (var v of g()) s += v; return s", 3);
+syn(langRows, "Symbol.iterator", "var o = {}; o[Symbol.iterator] = function*() { yield 4 }; return [...o][0]", 4);
+syn(langRows, "Promise", "return typeof Promise", "function");
+syn(langRows, "async / await", "return (async function () { return 1 })().constructor.name", "Promise");
+
+row(langRows, "Schliessung + Rekursion", function () {
+  function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2) }
+  return fib(15) === 610;
+});
+row(langRows, "JSON hin und zurueck", function () {
+  var o = { a: [1, 2, { b: "x\"y" }], c: null, d: true };
+  return JSON.stringify(JSON.parse(JSON.stringify(o))) === JSON.stringify(o);
+});
+row(langRows, "RegExp exec + Gruppe", function () {
+  var m = /(\d+)-(?<w>\w+)/.exec("nr 42-abc");
+  return m[1] === "42" && m.groups.w === "abc";
+});
+row(langRows, "RegExp replace global", function () {
+  return "a1b2c3".replace(/\d/g, function (d) { return "[" + d + "]" }) === "a[1]b[2]c[3]";
+});
+row(langRows, "Array-Werkzeug", function () {
+  var a = [5, 1, 4, 2, 3];
+  return a.filter(function (x) { return x > 1 })
+          .map(function (x) { return x * 2 })
+          .sort(function (p, q) { return p - q })
+          .reduce(function (s, x) { return s + x }, 0) === 28
+      && a.includes(4) && a.find(function (x) { return x === 3 }) === 3;
+});
+row(langRows, "String-Werkzeug", function () {
+  return "  ab  ".trim().padStart(4, ".") === "..ab"
+      && "a,b,,c".split(",").length === 4
+      && "Hallo".startsWith("Ha") && "Hallo".slice(-2) === "lo";
+});
+row(langRows, "Object-Werkzeug", function () {
+  var o = Object.assign({}, { a: 1 }, { b: 2 });
+  return Object.keys(o).length === 2 && Object.entries(o)[1][1] === 2
+      && Object.values(o).join() === "1,2";
+});
+row(langRows, "defineProperty", function () {
+  var o = {}; Object.defineProperty(o, "x", { get: function () { return 9 } });
+  return o.x === 9;
+});
+row(langRows, "Map und Set", function () {
+  var m = new Map(); m.set("a", 1);
+  var s = new Set(); s.add("a"); s.add("a");
+  return m.get("a") === 1 && m.size === 1 && s.size === 1 && s.has("a");
+});
+row(langRows, "Fehler faengt", function () {
+  var seen = "";
+  try { null.x } catch (e) { seen = "gefangen" } finally { seen += "+finally" }
+  return seen === "gefangen+finally";
+});
+row(langRows, "Date und performance", function () {
+  return typeof Date.now() === "number" && performance.now() >= 0;
+});
+
+/* ---------- Dokument ---------- */
+row(domRows, "getElementById", function () { return document.getElementById("verdict") !== null });
+row(domRows, "querySelector", function () { return document.querySelector("#lang") !== null });
+row(domRows, "querySelectorAll", function () { return document.querySelectorAll("h2").length === 4 });
+row(domRows, "Klassenselektor", function () { return document.querySelectorAll("p.lead").length === 1 });
+row(domRows, "textContent lesen", function () { return document.querySelector(".lead").textContent.indexOf("beak selbst") > 0 });
+row(domRows, "getAttribute", function () { return document.getElementById("b2").getAttribute("id") === "b2" });
+row(domRows, "setAttribute", function () {
+  var e = document.getElementById("b3"); e.setAttribute("title", "gesetzt");
+  return e.getAttribute("title") === "gesetzt";
+});
+row(domRows, "createElement + appendChild", function () {
+  var li = document.createElement("li"); li.textContent = "vom Skript angehaengt";
+  document.getElementById("sink").appendChild(li);
+  return document.querySelectorAll("#sink li").length === 1;
+});
+row(domRows, "removeChild", function () {
+  var s = document.getElementById("sink");
+  var t = document.createElement("li"); s.appendChild(t); s.removeChild(t);
+  return document.querySelectorAll("#sink li").length === 1;
+});
+row(domRows, "innerHTML schreiben", function () {
+  var li = document.createElement("li"); li.innerHTML = "mit <b>Auszeichnung</b>";
+  document.getElementById("sink").appendChild(li);
+  return document.querySelectorAll("#sink b").length === 1;
+});
+row(domRows, "classList", function () {
+  var e = document.getElementById("count"); e.classList.add("hit");
+  return e.className.indexOf("hit") >= 0;
+});
+row(domRows, "style setzen", function () {
+  var e = document.querySelector("h1"); e.style.color = "#1d5c1d";
+  return true;
+});
+row(domRows, "parentNode / children", function () {
+  var e = document.getElementById("b1");
+  return e.parentNode !== null && e.parentNode.children.length >= 2;
+});
+row(domRows, "document.title", function () { return document.title === "beak Selbsttest" });
+row(domRows, "window.innerWidth", function () { return window.innerWidth > 0 });
+row(domRows, "getBoundingClientRect", function () {
+  return document.querySelector("h1").getBoundingClientRect().width > 0;
+});
+row(domRows, "addEventListener", function () {
+  return typeof document.getElementById("b1").addEventListener === "function";
+});
+
+/* ---------- Behandler ---------- */
+var clicks = 0;
+document.getElementById("b1").addEventListener("click", function () {
+  clicks++;
+  document.getElementById("count").textContent = clicks + " Klick" + (clicks === 1 ? "" : "s");
+});
+document.getElementById("b3").addEventListener("click", function () {
+  var li = document.createElement("li");
+  li.textContent = "durch Klick angehaengt (" + (document.querySelectorAll("#sink li").length + 1) + ")";
+  document.getElementById("sink").appendChild(li);
+});
+document.body.addEventListener("click", function (e) {
+  if (e.target && e.target.id === "b4") {
+    document.getElementById("bubble").textContent = "Blase kam bis body an, Ziel = " + e.target.id;
+  }
+});
+setTimeout(function () {
+  document.getElementById("timer").textContent = "setTimeout ist gelaufen.";
+}, 0);
+
+/* ---------- Ergebnis ---------- */
+paint("lang", langRows);
+paint("dom", domRows);
+var ls = tally(langRows), ds = tally(domRows);
+var v = document.getElementById("verdict");
+v.textContent = "Sprache " + ls + "/" + langRows.length + " · Dokument " + ds + "/" + domRows.length
+              + " · Ereignisse: bitte klicken.";
+if (ls === langRows.length && ds === domRows.length) v.className = "ok";
+
+console.log("[selftest] Sprache " + ls + "/" + langRows.length + ", Dokument " + ds + "/" + domRows.length);
+var all = langRows.concat(domRows);
+for (var i = 0; i < all.length; i++) {
+  if (!all[i][1]) console.log("[selftest] NEIN " + all[i][0] + " -- " + all[i][2]);
+}
+</script>
+</body></html>

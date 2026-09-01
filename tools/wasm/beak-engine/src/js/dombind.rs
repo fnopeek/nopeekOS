@@ -19,7 +19,6 @@
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use alloc::vec;
 
 use super::interp::*;
 use super::value::*;
@@ -131,7 +130,13 @@ impl Doc {
                 }
                 crate::dom::Node::Element(el) => {
                     let mut n = DomNode::new(ELEMENT_NODE, &el.tag);
-                    for (k, v) in &el.attrs { n.attrs.push((Rc::from(k.as_str()), Rc::from(v.as_str()))); }
+                    for (k, v) in &el.attrs {
+                        // Ein Attribut-Behandler ist genauso ein Behandler wie
+                        // ein angemeldeter: ohne diese Zeile bekaeme die Seite
+                        // keine Treffer-Kaesten, und der Klick fiele ins Leere.
+                        if is_handler_attr(k) { self.has_listeners = true; }
+                        n.attrs.push((Rc::from(k.as_str()), Rc::from(v.as_str())));
+                    }
                     let id = self.push(n, parent);
                     self.add_children(el, id);
                 }
@@ -250,6 +255,7 @@ impl Doc {
             crate::dom::Node::Element(el) => {
                 let id = self.create(ELEMENT_NODE, &el.tag);
                 for (k, v) in &el.attrs {
+                    if is_handler_attr(k) { self.has_listeners = true; }
                     self.nodes[id as usize].attrs.push((Rc::from(k.as_str()), Rc::from(v.as_str())));
                 }
                 for c in &el.children {
@@ -943,6 +949,39 @@ pub fn install(realm: &mut Realm) {
         match i.doc.as_ref().and_then(|d| d.head) { Some(x) => Ok(wrap(i, x)), None => Ok(Value::Null) }
     }, &fp);
     getter(&document_proto, "readyState", |_, _, _| Ok(Value::str("complete")), &fp);
+    // Der Titel steht im Baum, nicht daneben: ein Skript, das ihn setzt,
+    // aendert das `<title>`-Element, und wer ihn liest, liest denselben
+    // Knoten. Zwei Kopien waeren zwei Wahrheiten.
+    accessor(&document_proto, "title",
+        |i, _, _| {
+            let Some(d) = i.doc.as_ref() else { return Ok(Value::str("")) };
+            Ok(match d.find_tag(d.doc, "title") {
+                Some(x) => Value::str(&d.text_of(x)),
+                None => Value::str(""),
+            })
+        },
+        |i, _, a| {
+            let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+            let found = i.doc.as_ref().and_then(|d| d.find_tag(d.doc, "title"));
+            let Some(d) = &mut i.doc else { return Ok(Value::Undefined) };
+            let t = match found {
+                Some(x) => x,
+                // Kein `<title>`: eins anlegen und in den Kopf haengen. Ein
+                // stiller Fehlschlag saehe aus wie ein kaputter Setzer.
+                None => {
+                    let e = d.create(ELEMENT_NODE, "title");
+                    let head = d.head.unwrap_or(d.doc);
+                    d.append(head, e);
+                    e
+                }
+            };
+            d.clear_children(t);
+            let tn = d.create(TEXT_NODE, "");
+            d.nodes[tn as usize].text = s;
+            d.append(t, tn);
+            d.dirty = true;
+            Ok(Value::Undefined)
+        }, &fp);
     meth(&document_proto, "getElementById", |i, _, a| {
         let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         let found = match &i.doc {
@@ -1002,6 +1041,49 @@ fn sibling(i: &mut Interp, this: &Value, dir: i32) -> C<Value> {
 ///
 /// Liefert true, wenn ein Behandler `preventDefault` gerufen hat — dann
 /// unterbleibt, was beak sonst getan haette (einem Link folgen).
+/// Welche Ereignisse beak ueberhaupt zustellt.
+///
+/// Die Liste ist absichtlich kurz und deckungsgleich mit dem, was der Wirt
+/// wirklich ausloest. Ein `onload` hier aufzunehmen wuerde jeder Seite
+/// Treffer-Kaesten aufzwingen, die nie jemand befragt — Aufwand fuer ein
+/// Ereignis, das nie kommt.
+pub const DISPATCHED: &[&str] = &["click"];
+
+/// Ist `k` ein Attribut-Behandler fuer eins davon?
+fn is_handler_attr(k: &str) -> bool {
+    k.len() > 2 && k.starts_with("on") && DISPATCHED.contains(&&k[2..])
+}
+
+/// Den Behandler aus `on<art>` uebersetzen, falls es einen gibt.
+///
+/// Ein Attribut ist Quelltext, keine Funktion — es wird erst beim Ausloesen
+/// uebersetzt. Das kostet je Klick eine Uebersetzung von ein paar Dutzend
+/// Zeichen und spart, die halbe Seite beim Laden zu uebersetzen: die meisten
+/// dieser Behandler werden nie ausgeloest.
+///
+/// Ein Attribut, das sich nicht uebersetzen laesst, ist KEIN Fehler der
+/// Seite: der Browser laesst es still fallen, sonst haette ein Tippfehler in
+/// einem Attribut die ganze Zustellung angehalten.
+fn inline_handler(i: &mut Interp, node: u32, kind: &str) -> C<Option<Value>> {
+    let mut name = String::from("on");
+    name.push_str(kind);
+    let src = match &i.doc {
+        Some(d) => match d.nodes[node as usize].attr(&name) { Some(v) => v.to_string(), None => return Ok(None) },
+        None => return Ok(None),
+    };
+    if src.trim().is_empty() { return Ok(None); }
+    // Der Koerper laeuft mit `event` als Namen und `this` am Element — genau
+    // so ist der Attribut-Behandler definiert.
+    let mut wrapped = String::from("(function(event){");
+    wrapped.push_str(&src);
+    wrapped.push_str("\n})");
+    let prog = match super::parse(&wrapped, false) { Ok(p) => p, Err(_) => return Ok(None) };
+    match i.run_program(&prog) {
+        Ok(v) if i.is_callable(&v) => Ok(Some(v)),
+        _ => Ok(None),
+    }
+}
+
 pub fn dispatch(i: &mut Interp, kind: &str, chain: &[u32]) -> C<bool> {
     if chain.is_empty() { return Ok(false); }
     let target = wrap(i, chain[chain.len() - 1]);
@@ -1033,18 +1115,29 @@ pub fn dispatch(i: &mut Interp, kind: &str, chain: &[u32]) -> C<bool> {
     let evv = Value::Obj(ev.clone());
 
     for &node in chain.iter().rev() {
-        let listeners: Vec<Value> = match &i.doc {
-            Some(d) => d.nodes[node as usize].listeners.iter()
-                .filter(|(k, _)| &**k == kind).map(|(_, f)| f.clone()).collect(),
-            None => Vec::new(),
-        };
+        let mut listeners: Vec<Value> = Vec::new();
+        // Der Inline-Behandler zuerst: im Quelltext steht er vor jedem
+        // `addEventListener`, das ein Skript spaeter anmeldet, und die
+        // Reihenfolge der Anmeldung ist die Reihenfolge des Aufrufs.
+        if let Some(f) = inline_handler(i, node, kind)? { listeners.push(f); }
+        if let Some(d) = &i.doc {
+            listeners.extend(d.nodes[node as usize].listeners.iter()
+                .filter(|(k, _)| &**k == kind).map(|(_, f)| f.clone()));
+        }
         if listeners.is_empty() { continue; }
         let this_node = wrap(i, node);
         ev.borrow_mut().define("currentTarget", Prop::data(this_node.clone()));
         for f in listeners {
             // Ein Behandler, der wirft, darf die naechsten nicht mitnehmen —
             // so macht es ein Browser auch.
-            let _ = i.call(&f, this_node.clone(), &[evv.clone()]);
+            let r = i.call(&f, this_node.clone(), &[evv.clone()]);
+            // `onclick="return false"` ist die alte Schreibweise fuer
+            // `preventDefault` und steht auf mehr Seiten als die neue. Sie
+            // gilt nur fuer den Attribut-Behandler; ein `addEventListener`
+            // wertet den Rueckgabewert nicht aus.
+            if matches!(r, Ok(Value::Bool(false))) {
+                ev.borrow_mut().define("defaultPrevented", Prop::data(Value::Bool(true)));
+            }
         }
         let stop = matches!(ev.borrow().get_own("__stop").and_then(|p| p.value.clone()),
                             Some(Value::Bool(true)));

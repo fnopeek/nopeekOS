@@ -17,6 +17,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 mod neterror;
+mod selftest;
 use beak_engine::cookies;
 
 use beak_engine::charset;
@@ -910,6 +911,14 @@ fn nav_begin(engine: &Engine, method: &str, url: &str, body: &[u8], extra: &str,
     // Behandler zeigen auf Knoten, die es gleich nicht mehr gibt.
     unsafe { core::ptr::addr_of_mut!(JS).write(None) };
 
+    // Die eingebaute Pruefseite kommt aus dem Binaerbild, nicht aus dem Netz.
+    // Sie durchlaeuft ab hier denselben Weg wie ein geholtes Dokument — nur
+    // ohne die erste Rundreise.
+    if selftest::matches(url) {
+        deliver_builtin(engine, selftest::URL, selftest::HTML, push_hist);
+        return;
+    }
+
     let now = unsafe { npk_unix_time() };
     let mut hdrs = String::new();
     let jar = cookies::header_for(url, now);
@@ -994,6 +1003,34 @@ fn file_cookies(asked: &str) {
 /// Collect whichever half of the navigation has finished. Returns true if the
 /// chrome needs redrawing — the address changed, or the stop button goes back
 /// to being a reload button.
+/// Ein Dokument aus dem eigenen Binaerbild an die Stelle setzen, an der sonst
+/// die Antwort des Servers steht — und ab da nichts anders machen.
+///
+/// Der Rest der Kette (Skripte, Zeichnen, Verlauf) darf nicht wissen, woher
+/// die Bytes kamen; sonst haette die Pruefseite einen eigenen Pfad und
+/// pruefte am Ende diesen statt den echten.
+fn deliver_builtin(engine: &Engine, url: &str, html: &str, push_hist: bool) {
+    let len = html.len().min(HTML_CAP);
+    unsafe {
+        let dst = core::ptr::addr_of_mut!(HTML_BUF) as *mut u8;
+        core::ptr::copy_nonoverlapping(html.as_ptr(), dst, len);
+        core::ptr::addr_of_mut!(HTML_LEN).write(len);
+        // Die Seite bringt ihr eigenes `<style>` mit und verlinkt nichts —
+        // das CSS der vorigen Seite muss weg, sonst stylt es diese hier.
+        core::ptr::addr_of_mut!(CSS_LEN).write(0);
+        core::ptr::addr_of_mut!(NAV_START_MS).write(now_ms());
+        core::ptr::addr_of_mut!(NAV_REPORTED).write(false);
+    }
+    set_scroll(0);
+    bump_content_gen("navigation");
+    bump_nav_gen();
+    set_url(url);
+    if push_hist {
+        hist_push(url);
+    }
+    nav_finish(engine);
+}
+
 fn nav_pump(engine: &Engine) -> bool {
     let h = nav_job();
     if h < 0 {
@@ -1261,12 +1298,32 @@ fn nav_scripts_arrived(engine: &Engine) {
 /// Was ein Skript anstellt, bleibt im Sandkasten: die Maschine hat einen
 /// Schrittdeckel, eine Aufruftiefe und keinen Zugang zu Host-Funktionen. Sie
 /// kann diese Seite verunstalten und sonst nichts.
+/// Was die Seite auf `console` geschrieben hat, auf die Serienleitung geben.
+///
+/// Eine Seite, deren eigene Diagnose ins Leere laeuft, kann man aus der Ferne
+/// nicht befragen — und ein Geraetelauf ist immer eine Ferndiagnose. Mit
+/// Praefix, damit im Log sichtbar bleibt, wer geredet hat: das sind fremde
+/// Bytes, nicht beaks Stimme.
+fn drain_console(sess: &mut beak_engine::js::Session) {
+    for line in sess.interp.take_console() {
+        let mut m = String::from("[seite] ");
+        m.push_str(&line);
+        log(&m);
+    }
+}
+
 fn run_scripts(engine: &Engine, list: Vec<PendingScript>) {
     let t0 = now_ms();
     let dom = beak_engine::parse(html_str());
     let doc = beak_engine::js::dombind::Doc::from_dom(&dom);
     let mut sess = beak_engine::js::Session::new(SCRIPT_STEPS);
     sess.interp.set_document(doc);
+    // Die Fenstergroesse gehoert dem Wirt. Ohne sie gibt es `innerWidth`
+    // nicht, und eine Seite, die ihre schmale Fassung danach waehlt, faellt
+    // mit ReferenceError aus, statt sie zu nehmen.
+    if let Some((_, _, w, h)) = canvas_rect() {
+        sess.interp.set_viewport(w as f64, h as f64);
+    }
     let (mut ran, mut failed, mut bytes) = (0usize, 0usize, 0usize);
     for p in &list {
         let PendingScript::Ready(src) = p else { failed += 1; continue };
@@ -1289,6 +1346,7 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) {
     // laufen lassen — viele Seiten stellen ihre Oberflaeche in einem
     // `setTimeout(…, 0)` fertig.
     let timers = sess.interp.run_timers();
+    drain_console(&mut sess);
     let mut listeners = false;
     if let Some(d) = sess.interp.doc.as_mut() {
         listeners = d.has_listeners;
@@ -1341,6 +1399,7 @@ fn dispatch_click(engine: &Engine, lay: &Layout, cx: i32, cy: i32) -> bool {
         bump_content_gen("script");
         mark_dirty();
     }
+    drain_console(sess);
     if changed || prevented || timers > 0 {
         let mut m = String::from("[beak] click -> js: ");
         push_i64(&mut m, nodes.len() as i64);
@@ -1697,7 +1756,9 @@ fn go(engine: &Engine, typed: &str) {
     if t.is_empty() {
         return;
     }
-    let abs = if t.starts_with("http://") || t.starts_with("https://") {
+    let abs = if selftest::matches(t) {
+        selftest::URL.to_string()
+    } else if t.starts_with("http://") || t.starts_with("https://") {
         t.to_string()
     } else if looks_like_url(t) {
         let mut s = String::from("https://");

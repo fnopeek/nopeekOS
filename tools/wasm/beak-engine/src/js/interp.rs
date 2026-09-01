@@ -13,7 +13,7 @@
 //! gezaehlt statt vergessen.
 
 use alloc::rc::Rc;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use hashbrown::HashMap;
@@ -47,12 +47,18 @@ pub struct Env {
     pub this_val: Option<Value>,
     /// Ist das die Umgebung einer Funktion (Ziel fuer `var`-Hochziehen)?
     pub is_func_scope: bool,
+    /// Das „Heimatobjekt" der Methode, in der wir stehen — bei einer Klasse
+    /// ihr `prototype`. `super.f` sucht auf DESSEN Prototyp, nicht auf dem
+    /// von `this`: sonst faende eine Methode, die `super.f()` ruft, sich
+    /// selbst wieder und liefe endlos. Ein Pfeil setzt es nicht und erbt es
+    /// dadurch ueber die Kette, genau wie `this`.
+    pub home: Option<Gc>,
 }
 
 impl Env {
     pub fn new(parent: Option<Rc<RefCell<Env>>>, func_scope: bool) -> Rc<RefCell<Env>> {
         Rc::new(RefCell::new(Env {
-            vars: HashMap::new(), parent, this_val: None, is_func_scope: func_scope,
+            vars: HashMap::new(), parent, this_val: None, is_func_scope: func_scope, home: None,
         }))
     }
 }
@@ -61,6 +67,16 @@ pub fn env_lookup(env: &Rc<RefCell<Env>>, name: &str) -> Option<Rc<RefCell<Env>>
     let mut cur = env.clone();
     loop {
         if cur.borrow().vars.contains_key(name) { return Some(cur); }
+        let next = cur.borrow().parent.clone();
+        match next { Some(p) => cur = p, None => return None }
+    }
+}
+
+/// Das Heimatobjekt der naechsten umschliessenden Methode.
+pub fn env_home(env: &Rc<RefCell<Env>>) -> Option<Gc> {
+    let mut cur = env.clone();
+    loop {
+        if let Some(h) = cur.borrow().home.clone() { return Some(h); }
         let next = cur.borrow().parent.clone();
         match next { Some(p) => cur = p, None => return None }
     }
@@ -118,7 +134,20 @@ pub struct Interp {
     /// Angemeldete Zeitgeber-Rueckrufe. Noch laeuft niemand sie; sie zu HALTEN
     /// kostet nichts und ist die Stelle, an der beaks Schleife ansetzt.
     pub timers: Vec<Value>,
+    /// Was die Seite auf `console` geschrieben hat.
+    ///
+    /// Gesammelt statt weggeworfen: `beak-engine` hat keine Serienleitung,
+    /// aber der Wirt hat eine, und eine Seite, die ihren eigenen Zustand
+    /// meldet, ist bei einer Ferndiagnose oft das einzige Fenster hinein.
+    /// Gedeckelt, weil eine fremde Seite sonst den Speicher damit fuellt —
+    /// und der Verlust wird gemeldet, nicht verschwiegen.
+    pub console: Vec<String>,
+    console_dropped: usize,
 }
+
+/// Wie viele Zeilen `console` haelt, und wie lang eine werden darf.
+pub const MAX_CONSOLE_LINES: usize = 200;
+pub const MAX_CONSOLE_LEN: usize = 512;
 
 pub const MAX_DEPTH: usize = 400;
 
@@ -150,7 +179,8 @@ impl Interp {
         let mut realm = super::builtins::make_realm();
         super::dombind::install(&mut realm);
         super::regexp::install(&mut realm);
-        Interp { realm, depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX, fake_now: 0.0, doc: None, timers: Vec::new() }
+        super::json::install(&mut realm);
+        Interp { realm, depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX, fake_now: 0.0, doc: None, timers: Vec::new(), console: Vec::new(), console_dropped: 0 }
     }
 
     /// Die angemeldeten Zeitgeber EINMAL durchlaufen.
@@ -177,6 +207,59 @@ impl Interp {
         self.doc = Some(doc);
         let v = super::dombind::wrap(self, root);
         self.realm.global.borrow_mut().define("document", Prop::builtin(v));
+    }
+
+    /// Eine Zeile von der Seite entgegennehmen.
+    pub fn console_push(&mut self, line: String) {
+        if self.console.len() >= MAX_CONSOLE_LINES {
+            self.console_dropped += 1;
+            return;
+        }
+        let mut l = line;
+        if l.len() > MAX_CONSOLE_LEN {
+            l.truncate(MAX_CONSOLE_LEN);
+            l.push_str(" …");
+        }
+        self.console.push(l);
+    }
+
+    /// Die gesammelten Zeilen herausnehmen. Wurde etwas verworfen, sagt die
+    /// letzte Zeile es — sonst laese sich eine gedeckelte Ausgabe wie eine
+    /// vollstaendige.
+    pub fn take_console(&mut self) -> Vec<String> {
+        let mut out = core::mem::take(&mut self.console);
+        if self.console_dropped > 0 {
+            out.push(alloc::format!("… {} weitere Zeilen verworfen", self.console_dropped));
+            self.console_dropped = 0;
+        }
+        out
+    }
+
+    /// Die Fenstergroesse einreichen.
+    ///
+    /// `beak-engine` hat keine — sie gehoert dem Wirt. Vorher gab es
+    /// `innerWidth` deshalb GAR NICHT, und eine Seite, die ihr Layout danach
+    /// waehlt, fiel mit `ReferenceError` aus, statt die schmale Fassung zu
+    /// nehmen. Eine erfundene Zahl waere schlimmer gewesen: sie haette
+    /// ausgesehen wie eine Messung ([[feedback_invented_fallback_hides_the_fault]]).
+    pub fn set_viewport(&mut self, w: f64, h: f64) {
+        let g = self.realm.global.clone();
+        let mut o = g.borrow_mut();
+        for (k, v) in [("innerWidth", w), ("innerHeight", h),
+                       ("outerWidth", w), ("outerHeight", h),
+                       ("scrollX", 0.0), ("scrollY", 0.0), ("devicePixelRatio", 1.0)] {
+            o.define(k, Prop::builtin(Value::Num(v)));
+        }
+        let screen = new_obj(Some(self.realm.object_proto.clone()));
+        {
+            let mut sc = screen.borrow_mut();
+            for (k, v) in [("width", w), ("height", h), ("availWidth", w), ("availHeight", h)] {
+                sc.define(k, Prop::builtin(Value::Num(v)));
+            }
+            sc.define("colorDepth", Prop::builtin(Value::Num(24.0)));
+            sc.define("pixelDepth", Prop::builtin(Value::Num(24.0)));
+        }
+        o.define("screen", Prop::builtin(Value::Obj(screen)));
     }
 
     /// Ein Arbeitsschritt in einer EINGEBAUTEN Schleife.
@@ -418,6 +501,7 @@ impl Interp {
                 let env = Env::new(Some(d.env.clone()), true);
                 // Ein Pfeil bekommt KEIN eigenes `this` — dadurch findet
                 // `this_of` das der umgebenden Funktion.
+                env.borrow_mut().home = d.home_object.clone();
                 if !d.node.is_arrow {
                     env.borrow_mut().this_val = Some(d.this_val.clone().unwrap_or(this_val));
                     let ao = self.make_arguments(args);
@@ -594,9 +678,16 @@ impl Interp {
     }
 
     pub fn make_closure(&mut self, f: Rc<Func>, env: &Rc<RefCell<Env>>, this_val: Option<Value>) -> Value {
+        self.make_method(f, env, this_val, None)
+    }
+
+    /// Dasselbe, aber mit Heimatobjekt — das ist der einzige Unterschied
+    /// zwischen einer Funktion und einer Methode, und `super` haengt daran.
+    pub fn make_method(&mut self, f: Rc<Func>, env: &Rc<RefCell<Env>>, this_val: Option<Value>,
+                       home: Option<Gc>) -> Value {
         let g = new_kind(Some(self.realm.function_proto.clone()),
             ObjKind::Function(Rc::new(FuncData {
-                node: f.clone(), env: env.clone(), this_val, home_object: None,
+                node: f.clone(), env: env.clone(), this_val, home_object: home,
             })));
         {
             let mut o = g.borrow_mut();
