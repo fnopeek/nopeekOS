@@ -1,9 +1,8 @@
 //! Anweisungen und Ausdruecke auswerten.
 
 use alloc::rc::Rc;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::vec;
 use core::cell::RefCell;
 
 use super::ast::*;

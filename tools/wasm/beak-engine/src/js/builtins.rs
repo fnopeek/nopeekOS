@@ -11,36 +11,14 @@ use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::vec;
-use core::cell::RefCell;
 use hashbrown::HashMap;
 
 use super::interp::*;
 use super::value::*;
 
 fn def(o: &Gc, name: &str, f: NativeFn, len: usize, proto: &Gc) {
-    let g = native(Some(proto.clone()), f, leak(name), len, false);
+    let g = native(Some(proto.clone()), f, name, len, false);
     o.borrow_mut().define(name, Prop::builtin(Value::Obj(g)));
-}
-
-/// Namen der eingebauten Funktionen sind `&'static str`. Statt jeden einzeln
-/// als Konstante zu fuehren, wird hier eine kleine Tabelle benutzt — sie ist
-/// vollstaendig, weil sie neben den Definitionen steht.
-fn leak(s: &str) -> &'static str {
-    const NAMES: &[&str] = &[
-        "toString", "valueOf", "hasOwnProperty", "isPrototypeOf", "propertyIsEnumerable",
-        "call", "apply", "bind", "defineProperty", "getOwnPropertyDescriptor",
-        "getOwnPropertyNames", "keys", "values", "entries", "create", "getPrototypeOf",
-        "setPrototypeOf", "freeze", "isFrozen", "assign", "is", "preventExtensions",
-        "isExtensible", "push", "pop", "slice", "indexOf", "join", "map", "filter",
-        "forEach", "concat", "isArray", "charAt", "charCodeAt", "substring", "toUpperCase",
-        "toLowerCase", "trim", "split", "replace", "String", "Number", "Boolean", "Object",
-        "Array", "Error", "TypeError", "RangeError", "SyntaxError", "ReferenceError",
-        "EvalError", "URIError", "Function", "print", "abs", "floor", "ceil", "round",
-        "max", "min", "pow", "sqrt", "isNaN", "isFinite", "parseInt", "parseFloat",
-        "fromCharCode", "toFixed", "includes", "startsWith", "endsWith", "reverse",
-        "lastIndexOf", "defineProperties", "seal", "isSealed", "sign", "trunc",
-    ];
-    NAMES.iter().find(|n| **n == s).copied().unwrap_or("anonymous")
 }
 
 pub fn make_realm() -> Realm {
@@ -150,7 +128,7 @@ pub fn make_realm() -> Realm {
                 proto.borrow_mut().define("name", Prop::builtin(Value::str($name)));
                 proto.borrow_mut().define("message", Prop::builtin(Value::str("")));
             }
-            let c = native(Some(function_proto.clone()), $f, leak($name), 1, true);
+            let c = native(Some(function_proto.clone()), $f, $name, 1, true);
             c.borrow_mut().define("prototype", Prop::frozen(Value::Obj(proto.clone())));
             proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(c.clone())));
             global.borrow_mut().define($name, Prop::builtin(Value::Obj(c)));
@@ -273,6 +251,162 @@ pub fn make_realm() -> Realm {
         }
         Ok(i.new_array(out))
     }, 1, fp);
+    // Der Rest der Array-Werkzeugkiste. Gemessen als naechste Wand: `some`
+    // allein hat 19 Skripte des Zielkorpus gestoppt.
+    def(&array_proto, "some", |i, this, a| {
+        let f = a.first().cloned().unwrap_or(Value::Undefined);
+        if !i.is_callable(&f) { return i.type_err("callback is not a function"); }
+        let n = array_len(i, &this)? as usize;
+        let t = a.get(1).cloned().unwrap_or(Value::Undefined);
+        for k in 0..n {
+            i.tick()?;
+            let v = i.get(&this, &num_to_string(k as f64))?;
+            if i.call(&f, t.clone(), &[v, Value::Num(k as f64), this.clone()])?.truthy() {
+                return Ok(Value::Bool(true));
+            }
+        }
+        Ok(Value::Bool(false))
+    }, 1, fp);
+    def(&array_proto, "every", |i, this, a| {
+        let f = a.first().cloned().unwrap_or(Value::Undefined);
+        if !i.is_callable(&f) { return i.type_err("callback is not a function"); }
+        let n = array_len(i, &this)? as usize;
+        let t = a.get(1).cloned().unwrap_or(Value::Undefined);
+        for k in 0..n {
+            i.tick()?;
+            let v = i.get(&this, &num_to_string(k as f64))?;
+            if !i.call(&f, t.clone(), &[v, Value::Num(k as f64), this.clone()])?.truthy() {
+                return Ok(Value::Bool(false));
+            }
+        }
+        Ok(Value::Bool(true))
+    }, 1, fp);
+    def(&array_proto, "find", |i, this, a| {
+        let f = a.first().cloned().unwrap_or(Value::Undefined);
+        if !i.is_callable(&f) { return i.type_err("callback is not a function"); }
+        let n = array_len(i, &this)? as usize;
+        for k in 0..n {
+            i.tick()?;
+            let v = i.get(&this, &num_to_string(k as f64))?;
+            if i.call(&f, Value::Undefined, &[v.clone(), Value::Num(k as f64), this.clone()])?.truthy() {
+                return Ok(v);
+            }
+        }
+        Ok(Value::Undefined)
+    }, 1, fp);
+    def(&array_proto, "findIndex", |i, this, a| {
+        let f = a.first().cloned().unwrap_or(Value::Undefined);
+        if !i.is_callable(&f) { return i.type_err("callback is not a function"); }
+        let n = array_len(i, &this)? as usize;
+        for k in 0..n {
+            i.tick()?;
+            let v = i.get(&this, &num_to_string(k as f64))?;
+            if i.call(&f, Value::Undefined, &[v, Value::Num(k as f64), this.clone()])?.truthy() {
+                return Ok(Value::Num(k as f64));
+            }
+        }
+        Ok(Value::Num(-1.0))
+    }, 1, fp);
+    def(&array_proto, "reduce", |i, this, a| {
+        let f = a.first().cloned().unwrap_or(Value::Undefined);
+        if !i.is_callable(&f) { return i.type_err("callback is not a function"); }
+        let n = array_len(i, &this)? as usize;
+        let (mut acc, mut k) = match a.get(1) {
+            Some(v) => (v.clone(), 0usize),
+            None => {
+                if n == 0 { return i.type_err("reduce of empty array with no initial value"); }
+                (i.get(&this, "0")?, 1usize)
+            }
+        };
+        while k < n {
+            i.tick()?;
+            let v = i.get(&this, &num_to_string(k as f64))?;
+            acc = i.call(&f, Value::Undefined, &[acc, v, Value::Num(k as f64), this.clone()])?;
+            k += 1;
+        }
+        Ok(acc)
+    }, 1, fp);
+    def(&array_proto, "includes", |i, this, a| {
+        let target = a.first().cloned().unwrap_or(Value::Undefined);
+        let n = array_len(i, &this)? as usize;
+        for k in 0..n {
+            i.tick()?;
+            let v = i.get(&this, &num_to_string(k as f64))?;
+            if v.same_value(&target) || v.strict_eq(&target) { return Ok(Value::Bool(true)); }
+        }
+        Ok(Value::Bool(false))
+    }, 1, fp);
+    def(&array_proto, "lastIndexOf", |i, this, a| {
+        let target = a.first().cloned().unwrap_or(Value::Undefined);
+        let n = array_len(i, &this)? as usize;
+        for k in (0..n).rev() {
+            i.tick()?;
+            let v = i.get(&this, &num_to_string(k as f64))?;
+            if v.strict_eq(&target) { return Ok(Value::Num(k as f64)); }
+        }
+        Ok(Value::Num(-1.0))
+    }, 1, fp);
+    def(&array_proto, "shift", |i, this, _| {
+        let items = i.iterate(&this)?;
+        if items.is_empty() { return Ok(Value::Undefined); }
+        let first = items[0].clone();
+        rebuild(i, &this, items[1..].to_vec())?;
+        Ok(first)
+    }, 0, fp);
+    def(&array_proto, "unshift", |i, this, a| {
+        let mut items = a.to_vec();
+        items.extend(i.iterate(&this)?);
+        let n = items.len();
+        rebuild(i, &this, items)?;
+        Ok(Value::Num(n as f64))
+    }, 1, fp);
+    def(&array_proto, "reverse", |i, this, _| {
+        let mut items = i.iterate(&this)?;
+        items.reverse();
+        rebuild(i, &this, items)?;
+        Ok(this)
+    }, 0, fp);
+    def(&array_proto, "splice", |i, this, a| {
+        let items = i.iterate(&this)?;
+        let n = items.len() as i64;
+        let start = match a.first() { None => 0,
+            Some(v) => { let r = to_integer(i.to_number(v)?) as i64;
+                         if r < 0 { (n + r).max(0) } else { r.min(n) } } };
+        let del = match a.get(1) { None => n - start,
+            Some(v) => (to_integer(i.to_number(v)?) as i64).clamp(0, n - start) };
+        let removed: Vec<Value> = items[start as usize..(start + del) as usize].to_vec();
+        let mut out: Vec<Value> = items[..start as usize].to_vec();
+        out.extend(a.get(2..).unwrap_or(&[]).iter().cloned());
+        out.extend(items[(start + del) as usize..].iter().cloned());
+        rebuild(i, &this, out)?;
+        Ok(i.new_array(removed))
+    }, 2, fp);
+    def(&array_proto, "sort", |i, this, a| {
+        let mut items = i.iterate(&this)?;
+        let f = a.first().cloned().unwrap_or(Value::Undefined);
+        // Einfuegesortierung: sie ruft den Vergleicher genauso oft wie noetig
+        // und braucht keinen Ausleih-Trick, um waehrend des Sortierens in die
+        // Maschine zurueckzurufen — ein `sort_by` mit `?` im Vergleicher geht
+        // in Rust nicht ohne Verrenkung.
+        for k in 1..items.len() {
+            let mut j = k;
+            while j > 0 {
+                i.tick()?;
+                let (x, y) = (items[j - 1].clone(), items[j].clone());
+                let swap = if i.is_callable(&f) {
+                    let r = i.call(&f, Value::Undefined, &[x.clone(), y.clone()])?;
+                    i.to_number(&r)? > 0.0
+                } else {
+                    i.to_string(&x)? > i.to_string(&y)?
+                };
+                if !swap { break; }
+                items.swap(j - 1, j);
+                j -= 1;
+            }
+        }
+        rebuild(i, &this, items)?;
+        Ok(this)
+    }, 1, fp);
     def(&array_proto, "concat", |i, this, a| {
         let mut out = i.iterate(&this)?;
         for v in a {
@@ -354,6 +488,56 @@ pub fn make_realm() -> Realm {
         let (mut a0, mut b0) = (g(a.first(), 0, i)?, g(a.get(1), n, i)?);
         if a0 > b0 { core::mem::swap(&mut a0, &mut b0); }
         Ok(Value::string(s.chars().skip(a0 as usize).take((b0 - a0) as usize).collect()))
+    }, 2, fp);
+    def(&string_proto, "startsWith", |i, this, a| {
+        let s = i.to_string(&this)?;
+        let t = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        Ok(Value::Bool(s.starts_with(&*t)))
+    }, 1, fp);
+    def(&string_proto, "endsWith", |i, this, a| {
+        let s = i.to_string(&this)?;
+        let t = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        Ok(Value::Bool(s.ends_with(&*t)))
+    }, 1, fp);
+    def(&string_proto, "slice", |i, this, a| {
+        let s = i.to_string(&this)?;
+        let n = s.chars().count() as i64;
+        let g = |v: Option<&Value>, d: i64, i: &mut Interp| -> C<i64> {
+            Ok(match v { None | Some(Value::Undefined) => d,
+                Some(x) => { let r = to_integer(i.to_number(x)?) as i64;
+                             if r < 0 { (n + r).max(0) } else { r.min(n) } } })
+        };
+        let (a0, b0) = (g(a.first(), 0, i)?, g(a.get(1), n, i)?);
+        if a0 >= b0 { return Ok(Value::str("")); }
+        Ok(Value::string(s.chars().skip(a0 as usize).take((b0 - a0) as usize).collect()))
+    }, 2, fp);
+    def(&string_proto, "repeat", |i, this, a| {
+        let s = i.to_string(&this)?;
+        let n = to_integer(i.to_number(a.first().unwrap_or(&Value::Num(0.0)))?);
+        if n < 0.0 || !n.is_finite() { return i.range_err("invalid count value"); }
+        // Ein Deckel, weil `"x".repeat(2**31)` sonst den Speicher frisst und
+        // eine gescheiterte Allokation ein ABBRUCH ist, kein Fehler.
+        if (n as usize).saturating_mul(s.len()) > (1 << 24) {
+            return i.range_err("resulting string too large");
+        }
+        let mut out = String::new();
+        for _ in 0..(n as usize) { i.tick()?; out.push_str(&s); }
+        Ok(Value::string(out))
+    }, 1, fp);
+    def(&string_proto, "replace", |i, this, a| {
+        // Ohne RegExp: nur der Fall "Zeichenkette durch Zeichenkette, einmal".
+        // Ein Muster als erstes Argument wirft, statt still nichts zu tun.
+        let s = i.to_string(&this)?;
+        let pat = match a.first() {
+            Some(Value::Str(p)) => p.clone(),
+            _ => return i.type_err("String.prototype.replace needs a string pattern"),
+        };
+        let rep = i.to_string(a.get(1).unwrap_or(&Value::Undefined))?;
+        Ok(Value::string(match s.find(&*pat) {
+            Some(k) => { let mut o = String::from(&s[..k]); o.push_str(&rep);
+                         o.push_str(&s[k + pat.len()..]); o }
+            None => s.to_string(),
+        }))
     }, 2, fp);
     def(&string_proto, "toUpperCase", |i, this, _| {
         let s = i.to_string(&this)?; Ok(Value::string(s.to_uppercase()))
@@ -465,6 +649,67 @@ pub fn make_realm() -> Realm {
             b.define("configurable", Prop::data(Value::Bool(p.configurable)));
         }
         Ok(Value::Obj(d))
+    }, 2, fp);
+    def(&object_ctor, "assign", |i, _, a| {
+        let target = a.first().cloned().unwrap_or(Value::Undefined);
+        for src in a.get(1..).unwrap_or(&[]) {
+            let Value::Obj(o) = src else { continue };
+            for k in o.borrow().own_keys() {
+                let enumerable = o.borrow().get_own(&k).map(|p| p.enumerable).unwrap_or(false);
+                if !enumerable { continue; }
+                let v = i.get(src, &k)?;
+                i.set(&target, &k, v)?;
+            }
+        }
+        Ok(target)
+    }, 2, fp);
+    def(&object_ctor, "values", |i, _, a| {
+        let src = a.first().cloned().unwrap_or(Value::Undefined);
+        let o = i.to_object(&src)?;
+        let keys = o.borrow().own_keys();
+        let mut out = Vec::new();
+        for k in keys {
+            if !o.borrow().get_own(&k).map(|p| p.enumerable).unwrap_or(false) { continue; }
+            out.push(i.get(&src, &k)?);
+        }
+        Ok(i.new_array(out))
+    }, 1, fp);
+    def(&object_ctor, "entries", |i, _, a| {
+        let src = a.first().cloned().unwrap_or(Value::Undefined);
+        let o = i.to_object(&src)?;
+        let keys = o.borrow().own_keys();
+        let mut out = Vec::new();
+        for k in keys {
+            if !o.borrow().get_own(&k).map(|p| p.enumerable).unwrap_or(false) { continue; }
+            let v = i.get(&src, &k)?;
+            out.push(i.new_array(alloc::vec![Value::Str(k), v]));
+        }
+        Ok(i.new_array(out))
+    }, 1, fp);
+    def(&object_ctor, "setPrototypeOf", |i, _, a| {
+        let Some(Value::Obj(o)) = a.first() else {
+            return Ok(a.first().cloned().unwrap_or(Value::Undefined));
+        };
+        let new_proto = match a.get(1) { Some(Value::Obj(p)) => Some(p.clone()), _ => None };
+        // Ein ZYKLUS ist zu verweigern, nicht zu bauen (ES 10.4.7.1). Ohne
+        // diese Pruefung legt `Object.setPrototypeOf(Object.prototype, {})`
+        // die Maschine still lahm: jeder Eigenschaftszugriff laeuft danach im
+        // Kreis, in nativem Code, an der Schrittgrenze vorbei.
+        let mut cur = new_proto.clone();
+        let mut hops = 0;
+        while let Some(c) = cur {
+            hops += 1;
+            if hops > crate::js::interp::MAX_PROTO_CHAIN || Rc::ptr_eq(&c, o) {
+                return i.type_err("cyclic prototype chain");
+            }
+            let n = c.borrow().proto.clone();
+            cur = n;
+        }
+        if !o.borrow().extensible {
+            return i.type_err("cannot set prototype of a non-extensible object");
+        }
+        o.borrow_mut().proto = new_proto;
+        Ok(a[0].clone())
     }, 2, fp);
     def(&object_ctor, "is", |_, _, a| {
         let x = a.first().cloned().unwrap_or(Value::Undefined);
@@ -643,6 +888,77 @@ pub fn make_realm() -> Realm {
     function_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(function_ctor.clone())));
     global.borrow_mut().define("Function", Prop::builtin(Value::Obj(function_ctor)));
 
+    // ── Die Wirtsumgebung ────────────────────────────────────────────────
+    //
+    // Gemessen, nicht geraten (`examples/wallcheck.rs`): auf Wikipedia stirbt
+    // das ERSTE Skript an `performance`, und weil es `mw` haette setzen sollen,
+    // sterben die 107 danach an `mw`. EIN fehlender Global kostet eine ganze
+    // Seite. Deshalb kommen diese hier zuerst und nicht `Symbol` (2 Skripte).
+    //
+    // Was sie liefern, ist die FORM, nicht der Inhalt: beak muss Uhr, Adresse
+    // und Kennung noch einreichen. Ein Stumpf, der die richtige Form hat, ist
+    // trotzdem das, worauf ein Skript prueft.
+    global.borrow_mut().define("window", Prop::builtin(Value::Obj(global.clone())));
+    global.borrow_mut().define("self", Prop::builtin(Value::Obj(global.clone())));
+    global.borrow_mut().define("top", Prop::builtin(Value::Obj(global.clone())));
+    global.borrow_mut().define("parent", Prop::builtin(Value::Obj(global.clone())));
+
+    let perf = new_obj(Some(object_proto.clone()));
+    // Eine Uhr, die nur steigt. beak reicht die echte nach; bis dahin ist
+    // Monotonie das Einzige, worauf sich ein Skript wirklich verlaesst.
+    def(&perf, "now", |i, _, _| { i.fake_now += 1.0; Ok(Value::Num(i.fake_now)) }, 0, fp);
+    for m in ["mark", "measure", "clearMarks", "clearMeasures"] {
+        let g = native(Some(function_proto.clone()), |_, _, _| Ok(Value::Undefined), m, 1, false);
+        perf.borrow_mut().define(m, Prop::builtin(Value::Obj(g)));
+    }
+    for m in ["getEntriesByName", "getEntriesByType", "getEntries"] {
+        let g = native(Some(function_proto.clone()), |i, _, _| Ok(i.new_array(Vec::new())), m, 1, false);
+        perf.borrow_mut().define(m, Prop::builtin(Value::Obj(g)));
+    }
+    perf.borrow_mut().define("timeOrigin", Prop::builtin(Value::Num(0.0)));
+    global.borrow_mut().define("performance", Prop::builtin(Value::Obj(perf)));
+
+    let console = new_obj(Some(object_proto.clone()));
+    for m in ["log", "warn", "error", "info", "debug", "trace", "dir", "group", "groupEnd"] {
+        // Still. Die Ausgabe eines Skripts gehoert auf beaks Serienleitung,
+        // und die haengt hier nicht dran — `beak-engine` ist hostfrei.
+        let g = native(Some(function_proto.clone()), |_, _, _| Ok(Value::Undefined), m, 0, false);
+        console.borrow_mut().define(m, Prop::builtin(Value::Obj(g)));
+    }
+    global.borrow_mut().define("console", Prop::builtin(Value::Obj(console)));
+
+    let nav = new_obj(Some(object_proto.clone()));
+    nav.borrow_mut().define("userAgent", Prop::builtin(Value::str("Mozilla/5.0 (nopeekOS) beak")));
+    nav.borrow_mut().define("language", Prop::builtin(Value::str("de")));
+    nav.borrow_mut().define("onLine", Prop::builtin(Value::Bool(true)));
+    global.borrow_mut().define("navigator", Prop::builtin(Value::Obj(nav)));
+
+    let loc = new_obj(Some(object_proto.clone()));
+    for (k, v) in [("href", "about:blank"), ("protocol", "about:"), ("host", ""),
+                   ("hostname", ""), ("pathname", "blank"), ("search", ""), ("hash", "")] {
+        loc.borrow_mut().define(k, Prop::builtin(Value::str(v)));
+    }
+    global.borrow_mut().define("location", Prop::builtin(Value::Obj(loc)));
+
+    // ── Date, klein aber vorhanden ───────────────────────────────────────
+    let date_proto = new_obj(Some(object_proto.clone()));
+    def(&date_proto, "getTime", |i, this, _| i.get(&this, "__t"), 0, fp);
+    def(&date_proto, "valueOf", |i, this, _| i.get(&this, "__t"), 0, fp);
+    def(&date_proto, "toString", |_, _, _| Ok(Value::str("Thu Jan 01 1970 00:00:00 GMT+0000")), 0, fp);
+    let date_ctor = native(Some(function_proto.clone()), |i, _, a| {
+        let t = match a.first() { Some(v) => i.to_number(v)?, None => 0.0 };
+        let proto = i.get(&Value::Obj(i.realm.global.clone()), "Date")?;
+        let p = match i.get(&proto, "prototype")? { Value::Obj(o) => Some(o), _ => None };
+        let d = new_obj(p);
+        d.borrow_mut().define("__t", Prop { value: Some(Value::Num(t)), get: None, set: None,
+            writable: true, enumerable: false, configurable: false });
+        Ok(Value::Obj(d))
+    }, "Date", 7, true);
+    date_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(date_proto.clone())));
+    date_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(date_ctor.clone())));
+    def(&date_ctor, "now", |i, _, _| { i.fake_now += 1.0; Ok(Value::Num(i.fake_now)) }, 0, fp);
+    global.borrow_mut().define("Date", Prop::builtin(Value::Obj(date_ctor)));
+
     Realm { global, global_env, object_proto, function_proto, array_proto,
             string_proto, number_proto, boolean_proto, error_proto, error_ctors }
 }
@@ -650,6 +966,18 @@ pub fn make_realm() -> Realm {
 /// `this.length` als Zahl. Eigene Funktion, weil `i.to_number(&i.get(...))`
 /// zwei gleichzeitige Ausleihen waeren — und das Aufteilen an jeder Stelle
 /// haette den Code nur laenger gemacht.
+/// Ein Array in-place durch eine neue Elementfolge ersetzen. Die Grundlage
+/// fuer alles, was die Laenge aendert (`shift`, `splice`, `sort`, `reverse`).
+fn rebuild(i: &mut Interp, this: &Value, items: Vec<Value>) -> C<()> {
+    let Value::Obj(o) = this else { return Ok(()) };
+    o.borrow_mut().clear_indices();
+    let n = items.len();
+    for (k, v) in items.into_iter().enumerate() {
+        o.borrow_mut().set_prop(Rc::from(num_to_string(k as f64).as_str()), Prop::data(v));
+    }
+    i.set(this, "length", Value::Num(n as f64))
+}
+
 fn array_len(i: &mut Interp, this: &Value) -> C<f64> {
     let l = i.get(this, "length")?;
     i.to_number(&l)
