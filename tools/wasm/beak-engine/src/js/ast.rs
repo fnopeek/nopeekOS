@@ -10,6 +10,7 @@
 //! Lesbarkeit an jeder Stelle.
 
 use alloc::boxed::Box;
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -42,8 +43,8 @@ pub enum Stmt {
     Try { block: Vec<Stmt>, handler: Option<CatchClause>, finalizer: Option<Vec<Stmt>> },
     With { obj: Expr, body: Box<Stmt> },
     VarDecl(VarDecl),
-    Func(Box<Func>),
-    Class(Box<Class>),
+    Func(Rc<Func>),
+    Class(Rc<Class>),
     Import(Import),
     ExportNamed { decl: Option<Box<Stmt>>, specifiers: Vec<ExportSpec>, source: Option<String> },
     ExportDefault(Box<ExportDefault>),
@@ -51,7 +52,7 @@ pub enum Stmt {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum ExportDefault { Expr(Expr), Func(Box<Func>), Class(Box<Class>) }
+pub enum ExportDefault { Expr(Expr), Func(Rc<Func>), Class(Rc<Class>) }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ForInit { VarDecl(VarDecl), Expr(Expr) }
@@ -118,7 +119,7 @@ pub struct Class {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClassMember {
-    Method { key: PropKey, func: Box<Func>, kind: MethodKind, is_static: bool, computed: bool },
+    Method { key: PropKey, func: Rc<Func>, kind: MethodKind, is_static: bool, computed: bool },
     Field { key: PropKey, value: Option<Expr>, is_static: bool, computed: bool },
     StaticBlock(Vec<Stmt>),
 }
@@ -154,8 +155,8 @@ pub enum Expr {
     TaggedTemplate { tag: Box<Expr>, quasis: Vec<TemplateElement>, exprs: Vec<Expr> },
     Array(Vec<Option<Expr>>),
     Object(Vec<ObjProp>),
-    Func(Box<Func>),
-    Class(Box<Class>),
+    Func(Rc<Func>),
+    Class(Rc<Class>),
     Unary { op: UnaryOp, arg: Box<Expr> },
     Update { op: UpdateOp, arg: Box<Expr>, prefix: bool },
     Binary { op: BinOp, left: Box<Expr>, right: Box<Expr> },
@@ -195,7 +196,7 @@ pub struct ObjProp {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum ObjPropValue { Init(Expr), Get(Box<Func>), Set(Box<Func>), Method(Box<Func>), Spread(Expr) }
+pub enum ObjPropValue { Init(Expr), Get(Rc<Func>), Set(Rc<Func>), Method(Rc<Func>), Spread(Expr) }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp { Minus, Plus, Bang, Tilde, Typeof, Void, Delete }
