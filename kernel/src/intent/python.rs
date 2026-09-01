@@ -31,6 +31,16 @@ const BUNDLE: &str = "sys/python";
 const PYTHON_FUEL: u64 = 600_000_000_000;
 
 pub fn intent_python(args: &str, vault: &'static spin::Mutex<capability::Vault>, session: capability::CapId) {
+    intent_python_on(args, vault, session, false)
+}
+
+/// Dasselbe unter forge. Eigener Eingang statt einer Fahne im python-Aufruf:
+/// so laeuft genau EIN Lauf auf dem Compiler und alles andere wie bisher.
+pub fn intent_python_forge(args: &str, vault: &'static spin::Mutex<capability::Vault>, session: capability::CapId) {
+    intent_python_on(args, vault, session, true)
+}
+
+fn intent_python_on(args: &str, vault: &'static spin::Mutex<capability::Vault>, session: capability::CapId, use_forge: bool) {
     let args = args.trim();
 
     let wasm = match crate::npkfs::fetch(MODULE) {
@@ -118,7 +128,17 @@ pub fn intent_python(args: &str, vault: &'static spin::Mutex<capability::Vault>,
     }
 
     let term = crate::shade::terminal::active_idx() as u8;
-    match crate::wasm::execute_wasi(&wasm, cap, PYTHON_FUEL, ctx, term) {
+    let t0 = crate::interrupts::ticks();
+    let r = if use_forge {
+        crate::wasm::execute_wasi_forge(&wasm, cap, PYTHON_FUEL, ctx, term)
+    } else {
+        crate::wasm::execute_wasi(&wasm, cap, PYTHON_FUEL, ctx, term)
+    };
+    // Die Zeit gehoert zum Vergleich, nicht zum Lauf — deshalb steht sie hier
+    // und nicht im Motor, und beide Motoren werden gleich gemessen.
+    kprintln!("[python] {} ms ({})", crate::interrupts::ticks().saturating_sub(t0) * 10,
+        if use_forge { "forge" } else { "wasmi" });
+    match r {
         Ok(0) => {}
         Ok(code) => kprintln!("[python] exit {}", code),
         Err(e) => kprintln!("[python] {}", e),

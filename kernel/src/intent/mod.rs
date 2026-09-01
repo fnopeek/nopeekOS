@@ -2055,7 +2055,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         }
         "forge" => {
             if require_cap(vault, &session, Rights::EXECUTE, "forge") {
-                forge::intent_forge(args);
+                forge::intent_forge(args, vault, session);
             }
         }
 
