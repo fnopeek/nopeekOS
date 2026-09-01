@@ -31,12 +31,32 @@ struct FreeNode {
     next: *mut FreeNode,
 }
 
+/// Zaehler, um die Karte zu haben, bevor umgebaut wird. Reine Felder, kein
+/// Format, keine Ausgabe: hier drin darf nichts allozieren.
+///
+/// Gemessen werden soll, WOHIN die Zeit geht — `steps` sind die besuchten
+/// Knoten. Eine Gesamtzeit haette nicht gesagt, ob die Suche beim Belegen
+/// oder die adresssortierte Einfuegestelle beim Freigeben teuer ist.
+#[derive(Clone, Copy)]
+pub struct HeapCounters {
+    pub allocs: u64,
+    pub frees: u64,
+    pub alloc_steps: u64,
+    pub free_steps: u64,
+    pub free_nodes: u64,
+    pub max_free_nodes: u64,
+    pub grows: u64,
+    /// Anforderungen je Zweierpotenz: [0] < 32 B, [1] < 64 B, ... [15] >= 512 KB
+    pub size_hist: [u64; 16],
+}
+
 struct Heap {
     free_list: *mut FreeNode,
     regions: [(usize, usize); MAX_REGIONS], // (start, end) of each chunk
     region_count: usize,
     total_size: usize,
     allocated_bytes: usize,
+    c: HeapCounters,
 }
 
 unsafe impl Send for Heap {}
@@ -49,6 +69,10 @@ impl Heap {
             region_count: 0,
             total_size: 0,
             allocated_bytes: 0,
+            c: HeapCounters {
+                allocs: 0, frees: 0, alloc_steps: 0, free_steps: 0,
+                free_nodes: 0, max_free_nodes: 0, grows: 0, size_hist: [0; 16],
+            },
         }
     }
 
@@ -64,6 +88,8 @@ impl Heap {
             (*node).next = ptr::null_mut();
         }
         self.free_list = node;
+        self.c.free_nodes = 1;
+        self.c.max_free_nodes = 1;
     }
 
     /// Check if an address falls within any known heap region.
@@ -92,10 +118,16 @@ impl Heap {
         let size = layout.size();
         let align = layout.align().max(BLOCK_ALIGN);
 
+        self.c.allocs += 1;
+        let mut b = 0usize;
+        while b < 15 && size >= (32usize << b) { b += 1; }
+        self.c.size_hist[b] += 1;
+
         let mut prev: *mut FreeNode = ptr::null_mut();
         let mut current = self.free_list;
 
         while !current.is_null() {
+            self.c.alloc_steps += 1;
             let block_start = current as usize;
             let block_size = unsafe { (*current).size };
             let next = unsafe { (*current).next };
@@ -119,6 +151,7 @@ impl Heap {
                 } else {
                     if prev.is_null() { self.free_list = next; }
                     else { unsafe { (*prev).next = next; } }
+                    self.c.free_nodes = self.c.free_nodes.saturating_sub(1);
                     block_size
                 };
 
@@ -157,6 +190,7 @@ impl Heap {
             self.regions[self.region_count] = (start, start + size);
             self.region_count += 1;
             self.total_size += size;
+            self.c.grows += 1;
 
             // Add new chunk as free block (coalesces locally with neighbors)
             self.insert_free_block(start, size);
@@ -175,12 +209,19 @@ impl Heap {
         let mut prev: *mut FreeNode = ptr::null_mut();
         let mut current = self.free_list;
         while !current.is_null() && (current as usize) < block_start {
+            self.c.free_steps += 1;
             prev = current;
             current = unsafe { (*current).next };
+        }
+        // Ein neuer Knoten; die Verschmelzungen unten nehmen ihn ggf. wieder weg.
+        self.c.free_nodes += 1;
+        if self.c.free_nodes > self.c.max_free_nodes {
+            self.c.max_free_nodes = self.c.free_nodes;
         }
 
         // Merge with next block?
         if !current.is_null() && block_start + block_size == current as usize {
+            self.c.free_nodes = self.c.free_nodes.saturating_sub(1);
             block_size += unsafe { (*current).size };
             unsafe { (*new_node).next = (*current).next; }
         } else {
@@ -190,6 +231,7 @@ impl Heap {
 
         // Merge with prev block?
         if !prev.is_null() && (prev as usize) + unsafe { (*prev).size } == block_start {
+            self.c.free_nodes = self.c.free_nodes.saturating_sub(1);
             unsafe {
                 (*prev).size += block_size;
                 (*prev).next = (*new_node).next;
@@ -212,6 +254,7 @@ impl Heap {
 
         if !self.contains(block_start) { return; }
 
+        self.c.frees += 1;
         self.allocated_bytes -= block_size;
         self.insert_free_block(block_start, block_size);
     }
@@ -250,6 +293,20 @@ pub fn init() {
     HEAP.inner.lock().init(heap_start, INITIAL_HEAP);
     kprintln!("[npk] Heap: {} MB (grows on demand, max {} MB)",
         INITIAL_HEAP / (1024 * 1024), MAX_HEAP / (1024 * 1024));
+}
+
+/// Die Zaehler herausholen. Kopie, damit der Aufrufer drucken kann, ohne den
+/// Heap-Lock zu halten — kprintln alloziert.
+pub fn counters() -> HeapCounters {
+    HEAP.inner.lock().c
+}
+
+pub fn reset_counters() {
+    let mut h = HEAP.inner.lock();
+    h.c.allocs = 0; h.c.frees = 0; h.c.alloc_steps = 0; h.c.free_steps = 0;
+    h.c.grows = 0; h.c.size_hist = [0; 16];
+    // free_nodes NICHT zuruecksetzen: das ist ein Zustand, keine Zaehlung.
+    h.c.max_free_nodes = h.c.free_nodes;
 }
 
 pub fn stats() -> (usize, usize) {

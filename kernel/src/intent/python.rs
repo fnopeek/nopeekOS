@@ -128,6 +128,7 @@ fn intent_python_on(args: &str, vault: &'static spin::Mutex<capability::Vault>, 
     }
 
     let term = crate::shade::terminal::active_idx() as u8;
+    crate::heap::reset_counters();
     let t0 = crate::interrupts::ticks();
     let r = if use_forge {
         crate::wasm::execute_wasi_forge(&wasm, cap, PYTHON_FUEL, ctx, term)
@@ -136,8 +137,24 @@ fn intent_python_on(args: &str, vault: &'static spin::Mutex<capability::Vault>, 
     };
     // Die Zeit gehoert zum Vergleich, nicht zum Lauf — deshalb steht sie hier
     // und nicht im Motor, und beide Motoren werden gleich gemessen.
-    kprintln!("[python] {} ms ({})", crate::interrupts::ticks().saturating_sub(t0) * 10,
-        if use_forge { "forge" } else { "wasmi" });
+    let ms = crate::interrupts::ticks().saturating_sub(t0) * 10;
+    let c = crate::heap::counters();
+    kprintln!("[python] {} ms ({})", ms, if use_forge { "forge" } else { "wasmi" });
+    // Die Karte des Allokators fuer genau diesen Lauf. `steps` sind besuchte
+    // Knoten der Freiliste — die Zahl, die sagt, ob die lineare Suche das
+    // Problem ist oder nicht.
+    kprintln!("[heap] {} allocs / {} frees, Schritte: {} beim Belegen + {} beim Freigeben",
+        c.allocs, c.frees, c.alloc_steps, c.free_steps);
+    kprintln!("[heap] Freiliste jetzt {} Knoten, Spitze {}, {} mal gewachsen",
+        c.free_nodes, c.max_free_nodes, c.grows);
+    let mut line = alloc::string::String::new();
+    for (i, n) in c.size_hist.iter().enumerate() {
+        if *n > 0 {
+            use core::fmt::Write;
+            let _ = write!(line, " <{}B:{}", 32usize << i, n);
+        }
+    }
+    kprintln!("[heap] Groessen:{}", line);
     match r {
         Ok(0) => {}
         Ok(code) => kprintln!("[python] exit {}", code),
