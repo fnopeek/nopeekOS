@@ -31,12 +31,19 @@ pub(crate) mod forge_glue;
 static FORGE_DEFAULT: AtomicBool = AtomicBool::new(false);
 
 /// Aus der Konfiguration lesen. Nach `config::load()` aufrufen.
+///
+/// **Ohne Eintrag gilt forge.** Am 2026-09-01 lief das ganze System einmal
+/// damit durch — alle 21 Module auf ihren echten Startwegen, Autostart und
+/// Treiber eingeschlossen. Ein frisch installiertes System soll den Compiler
+/// bekommen, ohne dass jemand einen Schalter kennt.
+///
+/// `wasm.engine=wasmi` in der Konfiguration schaltet zurueck; der Weg dahin
+/// ist `forge default off`, und er funktioniert auch dann noch, wenn kein
+/// einziges Modul startet — die Intent-Shell ist nativ.
 pub fn load_engine_default() {
-    let on = crate::config::get("wasm.engine").as_deref() == Some("forge");
+    let on = crate::config::get("wasm.engine").as_deref() != Some("wasmi");
     FORGE_DEFAULT.store(on, AtOrd::Release);
-    if on {
-        kprintln!("[npk] WASM: forge ist der Vorgabemotor");
-    }
+    kprintln!("[npk] WASM: {}", if on { "forge" } else { "wasmi (per Konfiguration)" });
 }
 
 /// Welcher Motor faehrt, wenn der Aufrufer nichts anderes sagt.
