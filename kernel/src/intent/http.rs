@@ -961,7 +961,23 @@ static CONN_POOL: spin::Mutex<[Option<PooledConn>; CONN_POOL_SIZE]> =
 /// Take a *live* pooled session for `host`, if any. A session the server
 /// has since closed (idle-timeout FIN → state left `Established`) is
 /// closed and skipped here, so the caller never sends on a dead socket.
+/// Vor jedem Griff in einen Pool: den NIC-Ring leeren.
+///
+/// `conn_healthy` liest den VERBINDUNGSZUSTAND, und der aendert sich nur,
+/// wenn ein Paket verarbeitet wurde. Zwischen Einlegen und Herausnehmen
+/// pollt niemand — das FIN des Servers liegt also unbearbeitet im Ring, der
+/// Zustand sagt weiter `Established`, und die Pruefung nickt eine tote
+/// Verbindung durch. Gemessen: `0/4 over one connection` auf
+/// thumb.wikimedia.org, reproduzierbar, weil der Server nach jeder bedienten
+/// Runde zumacht.
+///
+/// Ein Aufruf, und die Pruefung sieht, was schon angekommen ist.
+fn drain_before_reuse() {
+    crate::net::poll_rx_only();
+}
+
 fn pool_take(host: &str) -> Option<crate::tls::TlsSession> {
+    drain_before_reuse();
     let mut pool = CONN_POOL.lock();
     let now = crate::interrupts::ticks();
     for slot in pool.iter_mut() {
@@ -972,6 +988,10 @@ fn pool_take(host: &str) -> Option<crate::tls::TlsSession> {
             if fresh && tls.is_healthy() {
                 return Some(tls);
             }
+            // Sagen, dass es gegriffen hat — sonst ist "kein Haenger mehr"
+            // nicht von "der Fall trat nicht ein" zu unterscheiden.
+            kprintln!("[npk]   pool {}: Verbindung verworfen ({})", host,
+                if fresh { "Gegenstelle hat zugemacht" } else { "zu lange ungenutzt" });
             let _ = crate::tls::tls_close(&mut tls);
             return None;
         }
@@ -1138,6 +1158,7 @@ fn mark_h2_refused(host: &str) {
 }
 
 fn h2_take(host: &str) -> Option<Http2> {
+    drain_before_reuse();
     let mut pool = H2_POOL.lock();
     let now = crate::interrupts::ticks();
     for slot in pool.iter_mut() {
@@ -1145,9 +1166,12 @@ fn h2_take(host: &str) -> Option<Http2> {
             let (_, mut conn, idle_since) = slot.take().unwrap();
             // Same rule as the HTTP/1.1 pool: a GOAWAY we have not read yet
             // is indistinguishable from a quiet connection.
-            if now.wrapping_sub(idle_since) < POOL_MAX_IDLE_TICKS && conn.is_healthy() {
+            let fresh = now.wrapping_sub(idle_since) < POOL_MAX_IDLE_TICKS;
+            if fresh && conn.is_healthy() {
                 return Some(conn);
             }
+            kprintln!("[npk]   h2 pool {}: Verbindung verworfen ({})", host,
+                if fresh { "Gegenstelle hat zugemacht" } else { "zu lange ungenutzt" });
             conn.close();
             return None;
         }
