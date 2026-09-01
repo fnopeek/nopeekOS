@@ -15,6 +15,7 @@
 
 pub mod ast;
 pub mod builtins;
+pub mod dombind;
 pub mod eval;
 pub mod expr;
 pub mod interp;
