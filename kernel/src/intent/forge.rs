@@ -146,4 +146,25 @@ pub fn intent_forge(args: &str) {
     if let Some(why) = first_refusal {
         kprintln!("[npk] forge: {} Funktionen abgelehnt, erste: {}", total - done, why);
     }
+
+    // Uebersetzen ist das eine, hinauskommen das andere. Ein Import, den die
+    // Bruecke nicht kennt, behaelt den Trap-Stumpf — das Modul wuerde beim
+    // ersten Aufruf stehenbleiben, nicht falsch rechnen. Also hier zaehlen,
+    // wo es noch niemandem weh tut.
+    let imports = m.plan.imported_funcs.len();
+    let mut resolved = 0usize;
+    let mut first_missing: Option<(&str, &str)> = None;
+    for (module, name) in &m.plan.imported_funcs {
+        if crate::wasm::forge_glue::resolve(module, name).is_some() {
+            resolved += 1;
+        } else if first_missing.is_none() {
+            first_missing = Some((module, name));
+        }
+    }
+    if imports > 0 {
+        kprintln!("[npk] forge: {}/{} Importe aufgeloest", resolved, imports);
+        if let Some((mo, na)) = first_missing {
+            kprintln!("[npk] forge: erster offener Import: {}::{}", mo, na);
+        }
+    }
 }

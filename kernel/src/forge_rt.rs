@@ -269,9 +269,26 @@ extern "C" fn grow(ctx: *mut u64, delta: u32) -> u32 {
     }
 }
 
+
+/// What an embedder has to answer so a compiled module can call out.
+///
+/// Deliberately two questions and no types: `forge_rt` stays free of anything
+/// npk-specific, and the table it fills is plain addresses. The npk side of
+/// this lives in `wasm::forge_glue`.
+pub trait HostImports {
+    /// The embedder state a host function will be handed, as a raw address.
+    /// Parked in the vmctx, so two modules on two cores never share one.
+    fn ctx_ptr(&self) -> u64;
+    /// Address of the routine for one import, or `None` to leave it trapping.
+    fn resolve(&self, module: &str, name: &str) -> Option<u64>;
+}
+
 /// A module made ready to run: its code mapped, its memory reserved, and the
 /// context generated code reaches everything else through.
 pub struct Instance {
+    /// Imports still pointing at the trap stub. Zero means the module can
+    /// actually run; anything else means it will stop at the first call out.
+    unresolved: u32,
     ctx: Vec<u64>,
     _globals: Vec<u64>,
     _table: Vec<u64>,
@@ -285,7 +302,23 @@ pub struct Instance {
 }
 
 impl Instance {
+    /// Without a host: every import lands on the trap stub. That is what the
+    /// selftest cases want — they import nothing.
     pub fn new(m: &CompiledModule) -> Option<Instance> {
+        Self::build(m, None)
+    }
+
+    /// With a host: imports the embedder knows get its addresses, the rest
+    /// keep trapping. A module is never half-wired without saying so —
+    /// `unresolved_imports` counts what stayed on the stub.
+    ///
+    /// Noch von niemandem gerufen: der Ausfuehrungspfad kommt als naechstes.
+    #[allow(dead_code)]
+    pub fn new_with_host(m: &CompiledModule, host: &dyn HostImports) -> Option<Instance> {
+        Self::build(m, Some(host))
+    }
+
+    fn build(m: &CompiledModule, host: Option<&dyn HostImports>) -> Option<Instance> {
         let code = Code::map(&m.code)?;
         let trap_stub = code.base + m.trap_offset as u64;
 
@@ -344,10 +377,17 @@ impl Instance {
             }
         }
 
-        // No host functions yet: an import lands on the trap stub, so a module
+        // An import the embedder does not know keeps the trap stub, so a module
         // that needs one says so instead of jumping somewhere arbitrary.
         let mut host_fns: Vec<u64> = Vec::new();
         host_fns.resize(m.plan.imported_funcs.len().max(1), trap_stub);
+        let mut unresolved = 0u32;
+        for (i, (module, name)) in m.plan.imported_funcs.iter().enumerate() {
+            match host.and_then(|h| h.resolve(module, name)) {
+                Some(addr) => host_fns[i] = addr,
+                None => unresolved += 1,
+            }
+        }
 
         let mut ctx: Vec<u64> = Vec::new();
         ctx.resize(vmctx::SIZE / 8, 0);
@@ -363,8 +403,10 @@ impl Instance {
         ctx[vmctx::TABLE_SIGS as usize / 8] = table_sigs.as_ptr() as u64;
         ctx[vmctx::HOST_FNS as usize / 8] = host_fns.as_ptr() as u64;
         ctx[vmctx::BUILTIN_GROW as usize / 8] = grow as usize as u64;
+        ctx[vmctx::HOST_CTX as usize / 8] = host.map(|h| h.ctx_ptr()).unwrap_or(0);
 
         Some(Instance {
+            unresolved,
             ctx,
             _globals: globals,
             _table: table,
@@ -376,6 +418,11 @@ impl Instance {
             pf_entry: m.pf_entry,
             de_entry: m.de_entry,
         })
+    }
+
+    #[allow(dead_code)]
+    pub fn unresolved_imports(&self) -> u32 {
+        self.unresolved
     }
 
     pub fn set_fuel(&mut self, v: i64) {

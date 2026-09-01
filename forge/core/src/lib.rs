@@ -66,7 +66,13 @@ pub mod vmctx {
     /// What went wrong; `trap::NONE` after a clean return.
     pub const TRAP_CODE: i32 = 104;
 
-    pub const SIZE: usize = 112;
+    /// The embedder's own state, opaque here. Generated code never reads it;
+    /// a host function does, to find the caller it belongs to. Without it a
+    /// host function would need a static, and a static cannot serve two
+    /// modules on two cores.
+    pub const HOST_CTX: i32 = 112;
+
+    pub const SIZE: usize = 120;
     /// Every global occupies eight bytes regardless of type, so the index is
     /// a plain shift.
     pub const GLOBAL_STRIDE: i32 = 8;
