@@ -48,23 +48,31 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-08-23 · beak 0.35.0** (Kernel-/WLAN-Versionen: `git log`)
+**Stand 2026-09-01 · beak 0.52.0 · Kernel 0.318.1** (Rest: `git log`)
 
 Zwei Fäden laufen parallel.
 
-**`beak`**, der eigene Browser: Stage 0 (HTML, CSS, Layout, Paint — noch kein
-JavaScript) läuft auf Hardware. **Die CSS-Runde ist zu Ende gebracht**: das
-Eigenschafts-Gap ist geschlossen, die Vor-JS-Liste aus
-`docs/plan/CSS_GAP_2026_08.md` abgearbeitet, und 93,7 % der Deklarationen auf
-Bootstrap + Wikipedia sind abgedeckt. Die gemessene WPT-Zahl steht in
-`docs/spec/CONFORMANCE.md` und nirgends sonst — **zwei Nenner**, roh und ohne
-Testvehikel, und der zweite wird mit `tools/wasm/beak-engine/tests/vehicles.py`
-aus der gesegneten Baseline HERGELEITET, nie weitergetragen. Nächster grosser
-Schritt ist JavaScript: was ein wachsender Teil des Webs ausliefert, ist ohne
-Skript gar kein Inhalt. Seit 0.26.0 gibt es ausserdem einen Pfad **unterhalb**
-von „volles Layout": ein Zeigerwechsel, der nur malt, wird in der Anzeigeliste
-geflickt statt neu gerechnet — **am Gerät noch nicht nachgemessen**, Rezept in
-`memory/`.
+**`beak`**, der eigene Browser: **Stage 1 läuft — die Seite reagiert.** Eigene
+JS-Maschine (Lexer, Parser, Baumläufer, RegExp, DOM-Bindung), externe Skripte
+werden geholt, ein Klick erreicht seinen Behandler und das Layout wird nur bei
+`Doc::dirty` neu gerechnet. Bewusst kein Bytecode; Begründung im Memory.
+Gemessen wird an vier stehenden Zahlen, nicht am Gefühl: test262 parse
+96,84 %, test262 exec 48,68 % (V8 auf demselben Korpus: 99,41 %), Zielkorpus
+437/437 geparst und 296/437 durchgelaufen. Offen und der Reihe nach: Symbol,
+Promise/async, Generator.
+
+Das eigene Testziel ist **`beak:selftest`** — eine Prüfseite aus dem
+Binärbild, die nichts holt und ihr Ergebnis auf dem Schirm UND im Log sagt.
+Sie läuft auch host-seitig über dieselbe Datei
+(`beak-engine/examples/selftest.rs`). Ein Lauf fand neun Lücken, die fremde
+Seiten in Wochen nicht gezeigt hatten.
+
+Die CSS-Runde davor ist zu Ende gebracht: das Eigenschafts-Gap ist
+geschlossen, 93,7 % der Deklarationen auf Bootstrap + Wikipedia abgedeckt. Die
+gemessene WPT-Zahl steht in `docs/spec/CONFORMANCE.md` und nirgends sonst —
+**zwei Nenner**, roh und ohne Testvehikel, und der zweite wird mit
+`tools/wasm/beak-engine/tests/vehicles.py` aus der gesegneten Baseline
+HERGELEITET, nie weitergetragen.
 
 **WLAN (AX200)**: ⏸ pausiert, die Verbindung läuft (Download 116 Mbit auf HT40,
 Upload erstmals möglich). Das Intent **`wlan`** ist das Werkzeug dafür —
