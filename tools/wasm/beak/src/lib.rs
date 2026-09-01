@@ -892,12 +892,15 @@ fn nav_asked() -> String {
 
 /// Start a navigation and return at once. `push_hist` records the address we
 /// land on once the document is here.
-fn nav_begin(method: &str, url: &str, body: &[u8], extra: &str, push_hist: bool) {
+fn nav_begin(engine: &Engine, method: &str, url: &str, body: &[u8], extra: &str, push_hist: bool) {
     // A new navigation replaces the old one, and takes the page it was
     // loading for with it — a browser that keeps fetching the pictures of the
     // page you just left is spending the network on nothing.
     nav_cancel();
     subresources_cancel();
+    // Und den vom Skript veraenderten Baum, sonst zeigt die naechste Seite den
+    // der vorigen — der Zwischenspeicher haengt am HTML, nicht am Baum.
+    engine.set_scripted_dom(None);
 
     let now = unsafe { npk_unix_time() };
     let mut hdrs = String::new();
@@ -983,7 +986,7 @@ fn file_cookies(asked: &str) {
 /// Collect whichever half of the navigation has finished. Returns true if the
 /// chrome needs redrawing — the address changed, or the stop button goes back
 /// to being a reload button.
-fn nav_pump() -> bool {
+fn nav_pump(engine: &Engine) -> bool {
     let h = nav_job();
     if h < 0 {
         return false;
@@ -994,13 +997,13 @@ fn nav_pump() -> bool {
         return false;
     }
     match unsafe { core::ptr::addr_of!(NAV_STAGE).read() } {
-        NavStage::Doc => nav_document_arrived(),
-        NavStage::Css => nav_stylesheets_arrived(),
+        NavStage::Doc => nav_document_arrived(engine),
+        NavStage::Css => nav_stylesheets_arrived(engine),
     }
     true
 }
 
-fn nav_document_arrived() {
+fn nav_document_arrived(engine: &Engine) {
     let h = nav_job();
     let asked = nav_asked();
     let dst = core::ptr::addr_of_mut!(HTML_BUF) as *mut u8;
@@ -1035,14 +1038,14 @@ fn nav_document_arrived() {
     if unsafe { core::ptr::addr_of!(NAV_PUSH_HIST).read() } {
         hist_push(url_str());
     }
-    nav_begin_stylesheets(&base);
+    nav_begin_stylesheets(engine, &base);
 }
 
 /// Start the second round trip: every `<link rel=stylesheet>` of the document
 /// that just landed, in ONE batch. They are render-blocking, so this is where
 /// overlapping the round trips is worth the most. Bounded by CSS_CAP +
 /// MAX_CSS_LINKS.
-fn nav_begin_stylesheets(base: &str) {
+fn nav_begin_stylesheets(engine: &Engine, base: &str) {
     let links = beak_engine::stylesheet_links(html_str());
     let mut urls: Vec<String> = Vec::new();
     for href in links.iter() {
@@ -1062,7 +1065,7 @@ fn nav_begin_stylesheets(base: &str) {
     }
     if urls.is_empty() {
         unsafe { core::ptr::addr_of_mut!(CSS_LEN).write(0) };
-        nav_finish();
+        nav_finish(engine);
         return;
     }
     let h = begin_batch(&urls, CSS_CAP);
@@ -1071,7 +1074,7 @@ fn nav_begin_stylesheets(base: &str) {
         // sheet — so this ends the navigation rather than diagnosing it.
         log("[beak] stylesheet fetch could not start — rendering unstyled");
         unsafe { core::ptr::addr_of_mut!(CSS_LEN).write(0) };
-        nav_finish();
+        nav_finish(engine);
         return;
     }
     unsafe {
@@ -1085,7 +1088,7 @@ fn nav_begin_stylesheets(base: &str) {
 /// How many sheets the batch in flight asked for.
 static mut NAV_CSS_COUNT: usize = 0;
 
-fn nav_stylesheets_arrived() {
+fn nav_stylesheets_arrived(engine: &Engine) {
     let h = nav_job();
     let want = unsafe { core::ptr::addr_of!(NAV_CSS_COUNT).read() };
     // Fetched into a scratch buffer first because the bodies come back
@@ -1114,17 +1117,71 @@ fn nav_stylesheets_arrived() {
     }
     unsafe { core::ptr::addr_of_mut!(CSS_LEN).write(len) };
     log_ms("fetch stylesheets", now_ms() - unsafe { core::ptr::addr_of!(NAV_STAGE_MS).read() });
-    nav_finish();
+    nav_finish(engine);
 }
 
 /// Document and stylesheets are both in: the page may be drawn, and its
 /// images may start arriving.
-fn nav_finish() {
+fn nav_finish(engine: &Engine) {
     decode_css();
+    run_page_scripts(engine);
     unsafe { core::ptr::addr_of_mut!(IMAGES_DIRTY).write(true) };
     mark_dirty();
     nav_clear();
 }
+
+/// Die eingebetteten Skripte der Seite ausfuehren und den veraenderten Baum
+/// ans Layout weiterreichen.
+///
+/// Erst HIER, nach den Stilblaettern: ein Skript liest Klassen und Groessen,
+/// und ein halb aufgebautes Dokument haette beides falsch. Es laeuft EINMAL je
+/// Navigation — nicht bei jedem Bild, das nachkommt.
+///
+/// Was ein Skript anstellt, bleibt im Sandkasten: die Maschine hat einen
+/// Schrittdeckel, eine Aufruftiefe und keinen Zugang zu Host-Funktionen. Sie
+/// kann diese Seite verunstalten und sonst nichts.
+fn run_page_scripts(engine: &Engine) {
+    let t0 = now_ms();
+    let dom = beak_engine::parse(html_str());
+    let doc = beak_engine::js::dombind::Doc::from_dom(&dom);
+    let scripts = beak_engine::js::dombind::inline_scripts(&doc);
+    if scripts.is_empty() { return; }
+    // DIESELBE Arena weitergeben, nicht eine zweite bauen — sonst wuerde der
+    // Baum zweimal geflacht, und das ist auf einer echten Seite ein paar
+    // tausend Knoten fuer nichts.
+    let mut sess = beak_engine::js::Session::new(SCRIPT_STEPS);
+    sess.interp.set_document(doc);
+    let mut ran = 0usize;
+    let mut failed = 0usize;
+    for src in &scripts {
+        let prog = match beak_engine::js::parse(src, false) {
+            Ok(p) => p,
+            Err(_) => { failed += 1; continue }
+        };
+        // Ein Skript, das scheitert, darf die naechsten nicht mitnehmen — so
+        // macht es ein Browser auch.
+        match sess.run(&prog) { Ok(()) => ran += 1, Err(_) => failed += 1 }
+    }
+    if let Some(d) = sess.interp.doc.as_ref() {
+        engine.set_scripted_dom(Some(d.to_dom()));
+    }
+    let mut m = String::from("[beak] scripts: ");
+    push_i64(&mut m, ran as i64);
+    m.push_str(" gelaufen, ");
+    push_i64(&mut m, failed as i64);
+    m.push_str(" gescheitert, ");
+    push_i64(&mut m, (now_ms() - t0) as i64);
+    m.push_str(" ms");
+    log(&m);
+}
+
+/// Was ein Seitenskript an Schritten bekommt.
+///
+/// Es laeuft im Fenster des Anwenders, nicht in einem Testlaeufer: reisst der
+/// Deckel, steht die Seite so da, wie das Skript sie bis dahin gebaut hat —
+/// und beak antwortet weiter. Grosszuegiger als im Test (200 000), weil eine
+/// echte Startroutine mehr tut als ein Einzeltest.
+const SCRIPT_STEPS: u64 = 5_000_000;
 
 /// Start a page's image load: drop the old pixels and return the list of
 /// sources still to fetch. Touches the network NOT AT ALL, so the first paint
@@ -1430,31 +1487,31 @@ fn subresources_cancel() {
 ///
 /// A failure is not silent: `nav_fail` puts a diagnostic page in the document
 /// and logs the reason, so there is nothing to add here.
-fn fetch_url(url: &str) {
+fn fetch_url(engine: &Engine, url: &str) {
     set_url(url);
-    nav_begin("GET", url, &[], "", false);
+    nav_begin(engine, "GET", url, &[], "", false);
 }
 
 /// The same, but the address we LAND on joins the history — a click, a typed
 /// address, a form. Recorded when the document arrives, not now: recording
 /// where we aimed would make every trip back replay the redirect.
-fn nav_goto(url: &str) {
+fn nav_goto(engine: &Engine, url: &str) {
     set_url(url);
-    nav_begin("GET", url, &[], "", true);
+    nav_begin(engine, "GET", url, &[], "", true);
 }
 
 /// Navigate by POSTing `body` to `url` (a form with `method=post`).
-fn post_url(url: &str, body: &[u8]) {
+fn post_url(engine: &Engine, url: &str, body: &[u8]) {
     set_url(url);
     nav_begin(
-        "POST", url, body,
+        engine, "POST", url, body,
         "Content-Type: application/x-www-form-urlencoded",
         true,
     );
 }
 
 /// Navigate the address bar's typed text (normalise scheme) — new entry.
-fn go(typed: &str) {
+fn go(engine: &Engine, typed: &str) {
     let t = typed.trim();
     if t.is_empty() {
         return;
@@ -1473,7 +1530,7 @@ fn go(typed: &str) {
         s.push_str(&q);
         s
     };
-    nav_goto(&abs);
+    nav_goto(engine, &abs);
 }
 
 /// A typed address that is not a URL becomes a web search. Marginalia is the
@@ -1496,7 +1553,7 @@ fn looks_like_url(t: &str) -> bool {
 
 /// Submit a form. GET puts the data in the query string, POST in the request
 /// body — the same encoding either way (HTML §4.10.21.3).
-fn submit_form(page: &Page, activated: Option<u32>) -> bool {
+fn submit_form(engine: &Engine, page: &Page, activated: Option<u32>) -> bool {
     let sub = match forms::submit(&page.forms, &page.state, activated) {
         Some(s) => s,
         // Silence here reads as "the button is dead". It is not the same
@@ -1519,20 +1576,20 @@ fn submit_form(page: &Page, activated: Option<u32>) -> bool {
             url.push('?');
             url.push_str(&sub.query);
         }
-        nav_goto(&url);
+        nav_goto(engine, &url);
     } else {
         // A POST keeps the action's own query string — only a GET replaces it.
         let target = if action.contains('?') { action.clone() } else { url.clone() };
-        post_url(&target, sub.query.as_bytes());
+        post_url(engine, &target, sub.query.as_bytes());
     }
     true
 }
 
 /// Follow a link href relative to the current page — new history entry.
-fn follow(href: &str) {
+fn follow(engine: &Engine, href: &str) {
     let base = url_str().to_string();
     let abs = resolve(&base, href);
-    nav_goto(&abs);
+    nav_goto(engine, &abs);
 }
 
 // ── Back/forward history (fixed-size static ring of URLs) ──────────────────
@@ -2023,7 +2080,7 @@ fn next_boundary(s: &str, i: usize) -> usize {
 
 /// Apply one key to the focused control. Returns true if the page must be
 /// re-laid-out (the control's painted text or caret changed).
-fn edit_key(page: &mut Page, key: KeyCode) -> bool {
+fn edit_key(engine: &Engine, page: &mut Page, key: KeyCode) -> bool {
     let (seq, kind, mut value) = match page.focused() {
         Some((c, v)) => (c.seq, c.kind, v.to_string()),
         None => return false,
@@ -2032,7 +2089,7 @@ fn edit_key(page: &mut Page, key: KeyCode) -> bool {
         // Space / Enter activate a button or toggle a box, like a browser.
         return match key {
             KeyCode::Enter | KeyCode::Char(b' ') => {
-                activate(page, seq);
+                activate(engine, page, seq);
                 true
             }
             KeyCode::Escape => {
@@ -2082,7 +2139,7 @@ fn edit_key(page: &mut Page, key: KeyCode) -> bool {
                 .map(|b| b.seq);
             page.state.set_value(seq, value);
             page.state.caret = caret;
-            submit_form(page, activated);
+            submit_form(engine, page, activated);
             return true;
         }
         _ => return false,
@@ -2093,7 +2150,7 @@ fn edit_key(page: &mut Page, key: KeyCode) -> bool {
 }
 
 /// Click / keyboard activation of a control: submit, toggle, or take focus.
-fn activate(page: &mut Page, seq: u32) {
+fn activate(engine: &Engine, page: &mut Page, seq: u32) {
     let kind = match page.forms.get(seq) {
         Some(c) => c.kind,
         None => return,
@@ -2101,7 +2158,7 @@ fn activate(page: &mut Page, seq: u32) {
     match kind {
         ControlKind::Submit => {
             page.state.focus = Some(seq);
-            submit_form(page, Some(seq));
+            submit_form(engine, page, Some(seq));
         }
         ControlKind::Reset => {
             page.state.reset();
@@ -2160,7 +2217,7 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
         // A page control has focus → the key is ours (the compositor only
         // routes keys here when no chrome Input/TextArea consumed them).
         Event::Key(k) if page.state.focus.is_some() => {
-            if edit_key(page, k) {
+            if edit_key(engine, page, k) {
                 bump_content_gen("form-key");
                 mark_dirty();
             }
@@ -2184,14 +2241,14 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
         Event::Action(ActionId(id)) => match id {
             ACT_GO => {
                 let t = url_str().to_string();
-                go(&t);
+                go(engine, &t);
                 set_open_menu(0);
                 true
             }
             ACT_RELOAD | ACT_VIEW_RELOAD => {
                 let t = url_str().to_string();
                 if !t.is_empty() {
-                    fetch_url(&t);
+                    fetch_url(engine, &t);
                 }
                 set_open_menu(0);
                 true
@@ -2221,14 +2278,14 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
             }
             ACT_BACK => {
                 if let Some(u) = hist_back() {
-                    fetch_url(u);
+                    fetch_url(engine, u);
                 }
                 set_open_menu(0);
                 true
             }
             ACT_FORWARD => {
                 if let Some(u) = hist_forward() {
-                    fetch_url(u);
+                    fetch_url(engine, u);
                 }
                 set_open_menu(0);
                 true
@@ -2307,7 +2364,7 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
                     // <a>, or a field overlapping a link rect, is the target.
                     if let Some(ctl) = lay.hit_control(cx, cy) {
                         let seq = ctl.seq;
-                        activate(page, seq);
+                        activate(engine, page, seq);
                         bump_content_gen("control-activate"); // repaint the focus ring / new value
                         mark_dirty();
                         return true;
@@ -2319,7 +2376,7 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
                         mark_dirty();
                     }
                     if let Some(href) = href {
-                        follow(&href);
+                        follow(engine, &href);
                         return true;
                     }
                     // A `<summary>` opens/closes its section. It comes AFTER
@@ -2399,7 +2456,7 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
             false
         }
         Event::Open(s) => {
-            go(&s);
+            go(engine, &s);
             true
         }
         _ => false,
@@ -2589,7 +2646,7 @@ pub extern "C" fn _start() {
     // Engine is up — fetch the launch URL now (if we were opened with one).
     if arg_len > 0 {
         let u = url_str().to_string();
-        go(&u);
+        go(&engine, &u);
     }
 
     // Cached layout: (Layout, width it was laid out at, content generation).
@@ -2636,7 +2693,7 @@ pub extern "C" fn _start() {
         // Take delivery of whatever the kernel finished while we were
         // painting: the document, or its stylesheets. THIS is where a
         // navigation completes now — no path through `handle` waits for one.
-        if nav_pump() {
+        if nav_pump(&engine) {
             chrome = true;
         }
         // …and only then re-parse the document's forms, so the page that just

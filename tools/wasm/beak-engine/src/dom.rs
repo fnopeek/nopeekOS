@@ -49,6 +49,12 @@ pub struct Element {
 }
 
 impl Element {
+    /// Ein Element von aussen bauen — der Weg zurueck aus der JS-Arena
+    /// (`js::dombind::Doc::to_dom`). Die abgeleiteten Felder sind LEER; wer
+    /// das benutzt, muss `index_attrs` rufen, sonst sieht der Selektor-
+    /// Vergleich weder Klassen noch id.
+    pub fn bare(tag: String, seq: u32) -> Element { Element::new(tag, seq) }
+
     fn new(tag: String, seq: u32) -> Element {
         Element {
             tag,
