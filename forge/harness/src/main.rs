@@ -245,6 +245,20 @@ fn report_roadmap(f: &str) {
         wasm_code,
         if wasm_code > 0 { m.code.len() as f64 / wasm_code as f64 } else { 0.0 }
     );
+
+    // Auszaehlung: wohin gehen die Bytes? Die Frage ist, ob der Abstand zu
+    // Cranelift an der Registerhaltung ueber Blockgrenzen haengt.
+    {
+        let (sb, sn, rb, rn, lb, ln) = forge_core::codegen::census::read();
+        let total = m.code.len() as u64;
+        let pct = |x: u64| if total > 0 { x as f64 * 100.0 / total as f64 } else { 0.0 };
+        println!("  ---- wohin die Bytes gehen ----");
+        println!("    Spill   {:>9} B ({:>4.1} %) in {:>8} Befehlen", sb, pct(sb), sn);
+        println!("    Reload  {:>9} B ({:>4.1} %) in {:>8} Befehlen", rb, pct(rb), rn);
+        println!("    Lokale  {:>9} B ({:>4.1} %) in {:>8} Befehlen", lb, pct(lb), ln);
+        println!("    zusammen{:>9} B ({:>4.1} %) von {} B",
+            sb + rb + lb, pct(sb + rb + lb), total);
+    }
     if !blocked.is_empty() {
         let mut v: Vec<_> = blocked.iter().collect();
         v.sort_by(|a, b| b.1.cmp(a.1));

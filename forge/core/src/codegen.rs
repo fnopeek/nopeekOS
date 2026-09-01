@@ -366,6 +366,68 @@ struct Ctx<'a> {
     reachable: bool,
 }
 
+
+// ── Auszaehlung: wohin gehen die erzeugten Bytes? ─────────────────────
+//
+// Haengt am schon vorhandenen Merkmal `census` (Host-Werkzeug), damit im
+// Kernel weder Zaehler noch Atomics landen. Ohne das Merkmal sind die drei
+// Funktionen leer und verschwinden.
+//
+// Die Frage war, ob der Abstand zu Cranelift (1,43x auf python) an der
+// Registerhaltung ueber Blockgrenzen haengt: forge muss vor jedem
+// Loop/If/Else/End/Br/BrIf/BrTable/Return und jedem Aufruf den ganzen
+// Wertestapel in Schlitze schreiben.
+pub mod census {
+    #[cfg(feature = "census")]
+    use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    #[cfg(feature = "census")]
+    pub static SPILL_BYTES: AtomicU64 = AtomicU64::new(0);
+    #[cfg(feature = "census")]
+    pub static SPILL_COUNT: AtomicU64 = AtomicU64::new(0);
+    #[cfg(feature = "census")]
+    pub static RELOAD_BYTES: AtomicU64 = AtomicU64::new(0);
+    #[cfg(feature = "census")]
+    pub static RELOAD_COUNT: AtomicU64 = AtomicU64::new(0);
+    #[cfg(feature = "census")]
+    pub static LOCAL_BYTES: AtomicU64 = AtomicU64::new(0);
+    #[cfg(feature = "census")]
+    pub static LOCAL_COUNT: AtomicU64 = AtomicU64::new(0);
+
+    #[inline(always)]
+    pub fn spill(_bytes: usize) {
+        #[cfg(feature = "census")]
+        {
+            SPILL_BYTES.fetch_add(_bytes as u64, Relaxed);
+            SPILL_COUNT.fetch_add(1, Relaxed);
+        }
+    }
+    #[inline(always)]
+    pub fn reload(_bytes: usize) {
+        #[cfg(feature = "census")]
+        {
+            RELOAD_BYTES.fetch_add(_bytes as u64, Relaxed);
+            RELOAD_COUNT.fetch_add(1, Relaxed);
+        }
+    }
+    #[inline(always)]
+    pub fn local(_bytes: usize) {
+        #[cfg(feature = "census")]
+        {
+            LOCAL_BYTES.fetch_add(_bytes as u64, Relaxed);
+            LOCAL_COUNT.fetch_add(1, Relaxed);
+        }
+    }
+
+    /// (spill_bytes, spill_n, reload_bytes, reload_n, local_bytes, local_n)
+    #[cfg(feature = "census")]
+    pub fn read() -> (u64, u64, u64, u64, u64, u64) {
+        (SPILL_BYTES.load(Relaxed), SPILL_COUNT.load(Relaxed),
+         RELOAD_BYTES.load(Relaxed), RELOAD_COUNT.load(Relaxed),
+         LOCAL_BYTES.load(Relaxed), LOCAL_COUNT.load(Relaxed))
+    }
+}
+
 impl<'a> Ctx<'a> {
     /// Frame slot for local `i`, relative to `rbp`.
     fn local(&self, i: u32) -> i32 {
@@ -468,6 +530,8 @@ impl<'a> Ctx<'a> {
     /// `alloc_gpr` and from `spill_all`, and both run between operators.
     fn spill(&mut self, i: usize) {
         let v = self.stack[i];
+        if matches!(v.loc, Loc::Slot) { return; }
+        let _mark = self.asm.pos();
         let off = self.slot(i as u32);
         match v.loc {
             Loc::Imm(c) => {
@@ -502,6 +566,7 @@ impl<'a> Ctx<'a> {
             }
             Loc::Slot => return,
         }
+        census::spill(self.asm.pos() - _mark);
         self.stack[i].loc = Loc::Slot;
     }
 
@@ -664,12 +729,14 @@ impl<'a> Ctx<'a> {
                 self.free_xmm(x);
             }
             Loc::Slot => {
+                let _mark = self.asm.pos();
                 let off = self.slot(self.depth());
                 if wide(v.ty) {
                     self.asm.load64(r, Reg::Rbp, off);
                 } else {
                     self.asm.load32(r, Reg::Rbp, off);
                 }
+                census::reload(self.asm.pos() - _mark);
             }
             Loc::Imm(c) => {
                 if wide(v.ty) {
@@ -679,12 +746,14 @@ impl<'a> Ctx<'a> {
                 }
             }
             Loc::Local(idx) => {
+                let _mark = self.asm.pos();
                 let off = self.local(idx);
                 if wide(v.ty) {
                     self.asm.load64(r, Reg::Rbp, off);
                 } else {
                     self.asm.load32(r, Reg::Rbp, off);
                 }
+                census::local(self.asm.pos() - _mark);
             }
         }
         Some(v.ty)
