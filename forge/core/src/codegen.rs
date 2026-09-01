@@ -616,6 +616,59 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// Alles UNTER den obersten `keep` Werten in die Schlitze. Vor einem Aufruf
+    /// ist das die Pflicht — der Aufgerufene besitzt jedes Cache-Register.
+    ///
+    /// Die Argumente selbst gehoeren NICHT dazu: sie muessen in den
+    /// Argumentregistern stehen, und der Weg dorthin ueber einen Schlitz ist
+    /// ein Umweg. Gezaehlt an python: 172 514 Spills und 149 355 Argumentladen
+    /// waren zusammen 18,2 % der erzeugten Bytes, und der groesste Teil davon
+    /// war ein Wert, der nur von einem Register in ein anderes wollte.
+    fn spill_below(&mut self, keep: usize) {
+        let n = self.stack.len().saturating_sub(keep);
+        for i in 0..n {
+            self.spill(i);
+        }
+    }
+
+    /// Die Faelle, die ein direkter Zug NICHT kann — hier, wo `r11` noch frei
+    /// ist. Danach braucht `load_args` weder Spill noch Hilfsregister, und das
+    /// ist die Bedingung dafuer, dass `call_indirect` sein Sprungziel in `r11`
+    /// halten darf.
+    ///
+    /// Drei Sorten gehen in ihren Schlitz:
+    /// 1. Ein Argument, dessen Register das ZIEL eines ANDEREN Arguments ist —
+    ///    der Zug dorthin wuerde es ueberschreiben. (Ueberschneidung: `rsi`,
+    ///    `r8`, `r9` sind beides.)
+    /// 2. Fliesskomma-Argumente. Cache- und Argument-XMM ueberschneiden sich
+    ///    ebenfalls; die alte, sichere Form kostet hier wenig, weil die
+    ///    Ganzzahlen die Masse stellen.
+    /// 3. Argumente, die ueber den Stapel gehen — sie werden aus ihrem Schlitz
+    ///    geschrieben.
+    fn spill_arg_conflicts(&mut self, params: &[ValType], base: usize) {
+        let (places, _) = arg_places(params);
+        let mut is_dest = [false; 16];
+        for p in &places {
+            if let Place::Int(k) = p {
+                is_dest[ARG_REGS[*k] as usize] = true;
+            }
+        }
+        for i in 0..params.len() {
+            let own = match places[i] {
+                Place::Int(k) => Some(ARG_REGS[k]),
+                _ => None,
+            };
+            match self.stack[base + i].loc {
+                Loc::Gpr(r) if own.is_none() || is_dest[r as usize] && Some(r) != own => {
+                    self.spill(base + i)
+                }
+                Loc::Xmm(_) => self.spill(base + i),
+                _ if own.is_none() => self.spill(base + i),
+                _ => {}
+            }
+        }
+    }
+
     /// Make `r` available: whatever stack value holds it goes to its slot.
     fn evict_gpr(&mut self, r: Reg) {
         for i in 0..self.stack.len() {
@@ -1965,10 +2018,39 @@ fn load_args(f: &mut Ctx, params: &[ValType]) -> i32 {
         let mark = f.asm.pos();
         match places[i] {
             Place::Int(k) => {
-                if wide(*t) {
-                    f.asm.load64(ARG_REGS[k], Reg::Rbp, off);
-                } else {
-                    f.asm.load32(ARG_REGS[k], Reg::Rbp, off);
+                let dst = ARG_REGS[k];
+                // `spill_arg_conflicts` hat vorher alles weggeraeumt, was ein
+                // direkter Zug nicht kann. Was hier noch in einem Register
+                // steht, darf ohne Umweg dorthin, wo es hin soll.
+                match f.stack[base + i].loc {
+                    Loc::Gpr(r) if r == dst => {} // sitzt schon richtig
+                    Loc::Gpr(r) => {
+                        if wide(*t) { f.asm.mov_rr64(dst, r); } else { f.asm.mov_rr32(dst, r); }
+                    }
+                    Loc::Imm(c) => {
+                        if wide(*t) {
+                            f.asm.mov_r64_imm64(dst, c);
+                        } else {
+                            f.asm.mov_r32_imm32(dst, c as i32);
+                        }
+                    }
+                    Loc::Local(idx) => {
+                        // Direkt aus dem Variablenschlitz; der Umweg ueber den
+                        // Stapelschlitz waere eine Kopie ohne Zweck.
+                        let src = f.local(idx);
+                        if wide(*t) {
+                            f.asm.load64(dst, Reg::Rbp, src);
+                        } else {
+                            f.asm.load32(dst, Reg::Rbp, src);
+                        }
+                    }
+                    _ => {
+                        if wide(*t) {
+                            f.asm.load64(dst, Reg::Rbp, off);
+                        } else {
+                            f.asm.load32(dst, Reg::Rbp, off);
+                        }
+                    }
                 }
             }
             Place::Flt(k) => f.asm.fload_slot(fw_of(*t), FARG_REGS[k], Reg::Rbp, off),
@@ -2003,7 +2085,6 @@ fn call_direct(f: &mut Ctx, function_index: u32) -> Result<(), &'static str> {
     // Before anything else. Nothing in a register survives a call — and a
     // spill materialises through `r11`, which the indirect path below is about
     // to hold the call target in.
-    f.spill_all();
     let ti = *f
         .m
         .func_type_of
@@ -2011,6 +2092,14 @@ fn call_direct(f: &mut Ctx, function_index: u32) -> Result<(), &'static str> {
         .ok_or("callee-index")?;
     let (params, results) = callee_shape(f.m, ti)?;
     let n = params.len();
+
+    // Nothing in a register survives a call, also muss alles UNTER den
+    // Argumenten in die Schlitze. Die Argumente selbst nicht — `load_args`
+    // zieht sie direkt in die Argumentregister, statt sie erst wegzuschreiben
+    // und sofort wieder zu holen.
+    f.spill_below(n);
+    let base = f.stack.len() - n;
+    f.spill_arg_conflicts(params, base);
 
     let arg_bytes = load_args(f, params);
 
@@ -2042,14 +2131,19 @@ fn call_direct(f: &mut Ctx, function_index: u32) -> Result<(), &'static str> {
 /// type indices — wasm types are structural, and comparing indices would
 /// reject calls the spec allows.
 fn call_indirect(f: &mut Ctx, type_index: u32) -> Result<(), &'static str> {
-    // First, for the same reason as the direct path: the target lands in
-    // `r11` further down, and that is the register a spill borrows.
-    f.spill_all();
     let (params, results) = callee_shape(f.m, type_index)?;
     let n = params.len();
     let want = *f.m.sig_id.get(type_index as usize).ok_or("callee-type")?;
 
+    // Wie im direkten Pfad, und aus demselben Grund noch strenger: das
+    // Sprungziel landet weiter unten in `r11`, und genau dort materialisiert
+    // ein Spill. ALLES Wegschreiben muss deshalb VOR dieser Stelle passieren —
+    // der Tabellenindex liegt ueber den Argumenten, also erst er, dann die
+    // Konflikte, dann faellt bis zum Aufruf kein Spill mehr an.
+    f.spill_below(n + 1);
     f.pop_to(B); // table index, zero-extended by the 32-bit move
+    let base = f.stack.len() - n;
+    f.spill_arg_conflicts(params, base);
     f.asm.load64(C, VMCTX, vmctx::TABLE_LEN);
     f.asm.cmp_rr64(B, C);
     f.trap_if(Cond::Ae, trap::TABLE_OUT_OF_BOUNDS);
