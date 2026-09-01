@@ -1175,6 +1175,20 @@ sha384=${USQ_SHA}
             ok "Asset manifest written"
         fi
 
+        # Freigabe-Tor: kein Modul geht raus, das forge nicht GANZ uebersetzen
+        # kann. Wir shippen Software — ein Modul, bei dem eine Funktion oder
+        # ein Import auf dem Trap-Stumpf landet, wuerde am Geraet erst beim
+        # ERSTEN AUFRUF dieser Stelle stehenbleiben, nicht beim Laden. Das
+        # gehoert hierher und nicht in `stage-module.sh`: `aml` und `wifid`
+        # werden von Hand gestaged und kaemen dort vorbei.
+        if [ -d "$RELEASE_DIR/modules" ]; then
+            log "forge-Tor: Module pruefen..."
+            if ! python3 "$PROJECT_DIR/tools/forge-gate.py"; then
+                err "forge-Tor: nicht freigabefaehig — es wird NICHTS signiert"
+                exit 1
+            fi
+        fi
+
         # Sign WASM modules in release/modules/ (if any)
         if [ -d "$RELEASE_DIR/modules" ]; then
             log "Signing WASM modules..."
