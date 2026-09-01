@@ -1168,6 +1168,11 @@ fn h2_take(host: &str) -> Option<Http2> {
             // is indistinguishable from a quiet connection.
             let fresh = now.wrapping_sub(idle_since) < POOL_MAX_IDLE_TICKS;
             if fresh && conn.is_healthy() {
+                // Der Nehmer soll wissen, dass er wettet: eine Gegenstelle,
+                // die zwischen zwei Benutzungen still weggeht, sendet weder
+                // FIN noch RST — vorhersagen laesst sich das nicht, nur
+                // schneller merken.
+                conn.reused = true;
                 return Some(conn);
             }
             kprintln!("[npk]   h2 pool {}: Verbindung verworfen ({})", host,

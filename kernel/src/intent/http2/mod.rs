@@ -195,6 +195,10 @@ pub struct Http2 {
     /// Ob seit dem letzten Senden auf dieser Verbindung ueberhaupt ein Byte
     /// kam. Entscheidet, wie lange auf Daten gewartet wird — siehe `fill_to`.
     answered: bool,
+    /// Ob diese Verbindung aus dem Pool kam. Auf einer wiederverwendeten ist
+    /// das Schweigen der Gegenstelle wahrscheinlicher und der Neuaufbau
+    /// billig, also wird frueher aufgegeben.
+    pub reused: bool,
     next_id: u32,
     peer_max_frame: usize,
     conn_consumed: u32,
@@ -224,6 +228,7 @@ impl Http2 {
             dec: hpack::Decoder::new(),
             rx: Vec::new(),
             answered: false,
+            reused: false,
             next_id: 1, // client streams are odd (§5.1.1)
             peer_max_frame: MAX_FRAME,
             conn_consumed: 0,
@@ -790,12 +795,14 @@ impl Http2 {
             // lokal lebendig aus (siehe `PooledConn` in `intent/http.rs`) und
             // hat einen Bildabruf 60 s gekostet. Sobald das erste Byte da ist,
             // gilt wieder die volle Nachsicht fuer stockende Uebertragungen.
-            let patience = if self.answered {
-                crate::tls::QUIET_TRANSFER
+            let (patience, attempt) = if self.answered {
+                (crate::tls::QUIET_TRANSFER, crate::tls::ATTEMPT_TICKS)
+            } else if self.reused {
+                (crate::tls::QUIET_FIRST_BYTE, crate::tls::ATTEMPT_TICKS_REUSED)
             } else {
-                crate::tls::QUIET_FIRST_BYTE
+                (crate::tls::QUIET_FIRST_BYTE, crate::tls::ATTEMPT_TICKS)
             };
-            match crate::tls::tls_recv_patient(&mut self.tls, &mut buf, patience) {
+            match crate::tls::tls_recv_patient(&mut self.tls, &mut buf, patience, attempt) {
                 Ok(0) => {
                     // Either a record carrying no application data (session
                     // tickets arrive this way) or nothing ready yet.
