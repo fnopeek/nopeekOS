@@ -840,6 +840,9 @@ static mut HDR_BUF: [u8; HDR_CAP] = [0; HDR_CAP];
 enum NavStage {
     Doc,
     Css,
+    /// Die externen Skripte der Seite. Eine dritte Rundreise, und sie kommt
+    /// NACH den Stilblaettern: ein Skript liest Klassen und Groessen.
+    Js,
 }
 
 /// Handle of the navigation in flight, or -1.
@@ -868,6 +871,7 @@ fn nav_busy() -> bool {
 
 fn nav_clear() {
     unsafe {
+        core::ptr::addr_of_mut!(NAV_SCRIPTS).write(None);
         core::ptr::addr_of_mut!(NAV_JOB).write(-1);
         core::ptr::addr_of_mut!(NAV_URL).write(None);
         core::ptr::addr_of_mut!(NAV_PUSH_HIST).write(false);
@@ -999,6 +1003,7 @@ fn nav_pump(engine: &Engine) -> bool {
     match unsafe { core::ptr::addr_of!(NAV_STAGE).read() } {
         NavStage::Doc => nav_document_arrived(engine),
         NavStage::Css => nav_stylesheets_arrived(engine),
+        NavStage::Js => nav_scripts_arrived(engine),
     }
     true
 }
@@ -1087,6 +1092,27 @@ fn nav_begin_stylesheets(engine: &Engine, base: &str) {
 
 /// How many sheets the batch in flight asked for.
 static mut NAV_CSS_COUNT: usize = 0;
+/// Die Skripte der Seite in Dokumentreihenfolge, waehrend die externen noch
+/// unterwegs sind. `None` heisst: keine offene Skriptrunde.
+static mut NAV_SCRIPTS: Option<Vec<PendingScript>> = None;
+/// Wie viele externe Adressen das Buendel angefordert hat.
+static mut NAV_JS_COUNT: usize = 0;
+
+/// Ein Skript, das auf seinen Text wartet — oder ihn schon hat.
+enum PendingScript {
+    Ready(String),
+    /// Der Index in der Bestellung, in der Reihenfolge der Anforderung.
+    Fetching(usize),
+}
+
+/// Wie viele externe Skripte eine Seite holen darf.
+///
+/// Nach Anzahl gedeckelt UND nach Bytes (`SCRIPT_CAP`): eine Seite mit 200
+/// Bundles soll nicht 200 Rundreisen ausloesen, und eines mit 50 MB soll den
+/// Puffer nicht sprengen. Der Zensus sagt, echte Seiten laden 1 bis 11
+/// externe (github am meisten).
+const MAX_SCRIPT_URLS: usize = 32;
+const SCRIPT_CAP: usize = 8 * 1024 * 1024;
 
 fn nav_stylesheets_arrived(engine: &Engine) {
     let h = nav_job();
@@ -1124,10 +1150,91 @@ fn nav_stylesheets_arrived(engine: &Engine) {
 /// images may start arriving.
 fn nav_finish(engine: &Engine) {
     decode_css();
-    run_page_scripts(engine);
+    // Erst die Skripte einsammeln. Sind externe dabei, geht die Navigation in
+    // eine dritte Stufe und endet erst danach — sonst waere die Seite fertig,
+    // bevor ihre Skripte sie gebaut haben.
+    if nav_begin_scripts(engine) { return; }
+    nav_done();
+}
+
+/// Die Seite ist fertig: zeichnen und Bilder holen.
+fn nav_done() {
     unsafe { core::ptr::addr_of_mut!(IMAGES_DIRTY).write(true) };
     mark_dirty();
     nav_clear();
+}
+
+/// Die Skripte der Seite einsammeln und die externen anfordern.
+///
+/// Liefert true, wenn eine Rundreise laeuft — dann geht es in `nav_pump`
+/// weiter. Sonst sind die Skripte schon gelaufen.
+fn nav_begin_scripts(engine: &Engine) -> bool {
+    use beak_engine::js::dombind::ScriptRef;
+    let dom = beak_engine::parse(html_str());
+    let doc = beak_engine::js::dombind::Doc::from_dom(&dom);
+    let refs = beak_engine::js::dombind::page_scripts(&doc);
+    if refs.is_empty() {
+        engine.set_scripted_dom(None);
+        return false;
+    }
+    let base = url_str().to_string();
+    let mut list: Vec<PendingScript> = Vec::with_capacity(refs.len());
+    let mut urls: Vec<String> = Vec::new();
+    for r in refs {
+        match r {
+            ScriptRef::Inline(t) => list.push(PendingScript::Ready(t)),
+            ScriptRef::External(src) => {
+                if urls.len() >= MAX_SCRIPT_URLS {
+                    log(&alloc::format!("[beak] script cap hit: {} external scripts used", MAX_SCRIPT_URLS));
+                    continue;
+                }
+                list.push(PendingScript::Fetching(urls.len()));
+                urls.push(resolve(&base, &src));
+            }
+        }
+    }
+    if urls.is_empty() {
+        run_scripts(engine, list);
+        return false;
+    }
+    let h = begin_batch(&urls, SCRIPT_CAP);
+    if h < 0 {
+        // Nicht anforderbar: die eingebetteten laufen trotzdem. Eine Seite
+        // ohne ihre Bundles ist weniger als eine ganze, aber mehr als keine.
+        log("[beak] external scripts could not be fetched — running inline only");
+        run_scripts(engine, list);
+        return false;
+    }
+    unsafe {
+        core::ptr::addr_of_mut!(NAV_SCRIPTS).write(Some(list));
+        core::ptr::addr_of_mut!(NAV_JS_COUNT).write(urls.len());
+        core::ptr::addr_of_mut!(NAV_STAGE).write(NavStage::Js);
+        core::ptr::addr_of_mut!(NAV_JOB).write(h);
+        core::ptr::addr_of_mut!(NAV_STAGE_MS).write(now_ms());
+    }
+    true
+}
+
+fn nav_scripts_arrived(engine: &Engine) {
+    let h = nav_job();
+    let want = unsafe { core::ptr::addr_of!(NAV_JS_COUNT).read() };
+    let mut list = unsafe { (*core::ptr::addr_of_mut!(NAV_SCRIPTS)).take() }.unwrap_or_default();
+    let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
+    let spans = take_batch(h, dst, SCRIPT_CAP.min(IMG_FETCH_CAP), want);
+    for p in list.iter_mut() {
+        let PendingScript::Fetching(k) = p else { continue };
+        let (off, n) = spans.get(*k).copied().unwrap_or((0, 0));
+        let text = if n == 0 { String::new() } else {
+            let bytes = unsafe { core::slice::from_raw_parts(dst.add(off) as *const u8, n) };
+            // Nicht dekodierbar heisst hier: nicht ausfuehren. Ein Skript
+            // halb zu lesen ist schlimmer als es zu lassen.
+            core::str::from_utf8(bytes).map(String::from).unwrap_or_default()
+        };
+        *p = PendingScript::Ready(text);
+    }
+    log_ms("fetch scripts", now_ms() - unsafe { core::ptr::addr_of!(NAV_STAGE_MS).read() });
+    run_scripts(engine, list);
+    nav_done();
 }
 
 /// Die eingebetteten Skripte der Seite ausfuehren und den veraenderten Baum
@@ -1140,23 +1247,25 @@ fn nav_finish(engine: &Engine) {
 /// Was ein Skript anstellt, bleibt im Sandkasten: die Maschine hat einen
 /// Schrittdeckel, eine Aufruftiefe und keinen Zugang zu Host-Funktionen. Sie
 /// kann diese Seite verunstalten und sonst nichts.
-fn run_page_scripts(engine: &Engine) {
+fn run_scripts(engine: &Engine, list: Vec<PendingScript>) {
     let t0 = now_ms();
     let dom = beak_engine::parse(html_str());
     let doc = beak_engine::js::dombind::Doc::from_dom(&dom);
-    let scripts = beak_engine::js::dombind::inline_scripts(&doc);
-    if scripts.is_empty() { return; }
-    // DIESELBE Arena weitergeben, nicht eine zweite bauen — sonst wuerde der
-    // Baum zweimal geflacht, und das ist auf einer echten Seite ein paar
-    // tausend Knoten fuer nichts.
     let mut sess = beak_engine::js::Session::new(SCRIPT_STEPS);
     sess.interp.set_document(doc);
-    let mut ran = 0usize;
-    let mut failed = 0usize;
-    for src in &scripts {
+    let (mut ran, mut failed, mut bytes) = (0usize, 0usize, 0usize);
+    for p in &list {
+        let PendingScript::Ready(src) = p else { failed += 1; continue };
+        if src.is_empty() { failed += 1; continue; }
+        bytes += src.len();
         let prog = match beak_engine::js::parse(src, false) {
             Ok(p) => p,
-            Err(_) => { failed += 1; continue }
+            // Ein Modul ist auch ein Skript — die Datei sagt es nicht, also
+            // beides versuchen.
+            Err(_) => match beak_engine::js::parse(src, true) {
+                Ok(p) => p,
+                Err(_) => { failed += 1; continue }
+            },
         };
         // Ein Skript, das scheitert, darf die naechsten nicht mitnehmen — so
         // macht es ein Browser auch.
@@ -1170,6 +1279,8 @@ fn run_page_scripts(engine: &Engine) {
     m.push_str(" gelaufen, ");
     push_i64(&mut m, failed as i64);
     m.push_str(" gescheitert, ");
+    push_i64(&mut m, (bytes / 1024) as i64);
+    m.push_str(" KB, ");
     push_i64(&mut m, (now_ms() - t0) as i64);
     m.push_str(" ms");
     log(&m);

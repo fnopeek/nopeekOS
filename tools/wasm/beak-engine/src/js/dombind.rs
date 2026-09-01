@@ -24,6 +24,24 @@ use alloc::vec;
 use super::interp::*;
 use super::value::*;
 
+/// Elemente ohne Schlusstag.
+fn is_void(tag: &str) -> bool {
+    matches!(tag, "area" | "base" | "br" | "col" | "embed" | "hr" | "img" | "input"
+        | "link" | "meta" | "source" | "track" | "wbr")
+}
+
+fn push_escaped(out: &mut String, s: &str, in_attr: bool) {
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' if in_attr => out.push_str("&quot;"),
+            _ => out.push(c),
+        }
+    }
+}
+
 pub const ELEMENT_NODE: f64 = 1.0;
 pub const TEXT_NODE: f64 = 3.0;
 pub const DOCUMENT_NODE: f64 = 9.0;
@@ -180,6 +198,99 @@ impl Doc {
 }
 
 impl Doc {
+    /// Ein HTML-Bruchstueck parsen und unter `parent` einhaengen.
+    ///
+    /// Das ist der Weg von `innerHTML =` und `insertAdjacentHTML`. Es geht
+    /// ueber beaks eigenen Parser — ein zweiter, laxerer waere eine zweite
+    /// Wahrheit darueber, was das Web bedeutet.
+    pub fn parse_into(&mut self, parent: u32, html: &str, at: Option<usize>) -> Vec<u32> {
+        let frag = crate::dom::parse(html);
+        let mut made = Vec::new();
+        for c in &frag.root.children {
+            if let Some(id) = self.from_src_node(c) { made.push(id); }
+        }
+        let idx = at.unwrap_or(self.nodes[parent as usize].children.len());
+        for (k, id) in made.iter().enumerate() {
+            self.nodes[*id as usize].parent = Some(parent);
+            let pos = (idx + k).min(self.nodes[parent as usize].children.len());
+            self.nodes[parent as usize].children.insert(pos, *id);
+        }
+        made
+    }
+
+    /// Einen geparsten Teilbaum in die Arena legen, noch ohne Elternteil.
+    fn from_src_node(&mut self, n: &crate::dom::Node) -> Option<u32> {
+        match n {
+            crate::dom::Node::Text(t) => {
+                let id = self.create(TEXT_NODE, "#text");
+                self.nodes[id as usize].text = Rc::from(t.as_str());
+                Some(id)
+            }
+            crate::dom::Node::Element(el) => {
+                let id = self.create(ELEMENT_NODE, &el.tag);
+                for (k, v) in &el.attrs {
+                    self.nodes[id as usize].attrs.push((Rc::from(k.as_str()), Rc::from(v.as_str())));
+                }
+                for c in &el.children {
+                    if let Some(cid) = self.from_src_node(c) {
+                        self.nodes[cid as usize].parent = Some(id);
+                        self.nodes[id as usize].children.push(cid);
+                    }
+                }
+                Some(id)
+            }
+        }
+    }
+
+    /// Ein Knoten als HTML. Fuer `innerHTML`/`outerHTML` — und die
+    /// Maskierung ist Pflicht, nicht Kosmetik: ein `<` im Text, das
+    /// unmaskiert herauskommt, macht aus Inhalt Auszeichnung.
+    pub fn serialize(&self, id: u32, inner_only: bool) -> String {
+        let n = &self.nodes[id as usize];
+        let mut s = String::new();
+        if n.kind == TEXT_NODE { push_escaped(&mut s, &n.text, false); return s; }
+        if !inner_only && n.kind == ELEMENT_NODE {
+            s.push('<'); s.push_str(&n.tag);
+            for (k, v) in &n.attrs {
+                s.push(' '); s.push_str(k); s.push_str("=\"");
+                push_escaped(&mut s, v, true);
+                s.push('"');
+            }
+            s.push('>');
+        }
+        for &c in &n.children { s.push_str(&self.serialize(c, false)); }
+        if !inner_only && n.kind == ELEMENT_NODE && !is_void(&n.tag) {
+            s.push_str("</"); s.push_str(&n.tag); s.push('>');
+        }
+        s
+    }
+
+    /// Alle Kinder eines Knotens loesen (fuer `innerHTML =`).
+    pub fn clear_children(&mut self, id: u32) {
+        let old: Vec<u32> = self.nodes[id as usize].children.clone();
+        for c in old { self.nodes[c as usize].parent = None; }
+        self.nodes[id as usize].children.clear();
+    }
+
+    /// Einen Teilbaum kopieren (`cloneNode`).
+    pub fn clone_node(&mut self, id: u32, deep: bool) -> u32 {
+        let (kind, tag, attrs, text, kids) = {
+            let n = &self.nodes[id as usize];
+            (n.kind, n.tag.clone(), n.attrs.clone(), n.text.clone(), n.children.clone())
+        };
+        let new = self.create(kind, &tag);
+        self.nodes[new as usize].attrs = attrs;
+        self.nodes[new as usize].text = text;
+        if deep {
+            for c in kids {
+                let cc = self.clone_node(c, true);
+                self.nodes[cc as usize].parent = Some(new);
+                self.nodes[new as usize].children.push(cc);
+            }
+        }
+        new
+    }
+
     /// Zurueck in beaks Baum — der Schritt, der eine DOM-Aenderung UEBERHAUPT
     /// ERST sichtbar macht.
     ///
@@ -222,6 +333,52 @@ impl Doc {
     }
 }
 
+/// Ein Skript der Seite: entweder sein Text oder die Adresse, unter der er
+/// steht.
+pub enum ScriptRef {
+    Inline(String),
+    External(String),
+}
+
+/// ALLE Skripte der Seite, in Dokumentreihenfolge — eingebettete wie externe.
+///
+/// Die Reihenfolge ist die des Quelltextes, und beak fuehrt sie auch so aus.
+/// Das ist die Bedeutung von `defer` und NICHT die eines blockierenden
+/// `<script>` mitten im Koerper: ein Browser wuerde ein klassisches Skript
+/// ausfuehren, BEVOR er weiterparst, und `document.write` haengt davon ab.
+/// beak hat das Dokument schon fertig, wenn es hier ankommt — also verhaelt
+/// sich alles wie `defer`. Bewusst, und es deckt alles ausser `document.write`.
+pub fn page_scripts(d: &Doc) -> Vec<ScriptRef> {
+    let mut all = Vec::new();
+    d.descendants(d.doc, &mut all);
+    let mut out = Vec::new();
+    for id in all {
+        let n = &d.nodes[id as usize];
+        if &*n.tag != "script" { continue; }
+        if !script_type_is_js(n) { continue; }
+        match n.attr("src") {
+            Some(src) if !src.trim().is_empty() => out.push(ScriptRef::External(src.to_string())),
+            _ => {
+                let text = d.text_of(id);
+                if !text.trim().is_empty() { out.push(ScriptRef::Inline(text)); }
+            }
+        }
+    }
+    out
+}
+
+/// Ein `type`, das nicht JavaScript meint (`application/json`,
+/// `text/template`), ist Nutzlast und kein Programm.
+fn script_type_is_js(n: &DomNode) -> bool {
+    match n.attr("type") {
+        None => true,
+        Some(t) => {
+            let t = t.to_ascii_lowercase();
+            t.is_empty() || t.contains("javascript") || t == "module" || t == "text/ecmascript"
+        }
+    }
+}
+
 /// Die Inhalte aller `<script>`-Elemente OHNE `src`, in Dokumentreihenfolge.
 ///
 /// Nur die eingebetteten: ein `src` muesste geholt werden, und die Reihenfolge
@@ -235,14 +392,7 @@ pub fn inline_scripts(d: &Doc) -> Vec<String> {
     for id in all {
         let n = &d.nodes[id as usize];
         if &*n.tag != "script" || n.attr("src").is_some() { continue; }
-        // Ein `type`, das nicht JavaScript meint (`application/json`,
-        // `text/template`), ist Nutzlast und kein Programm.
-        if let Some(t) = n.attr("type") {
-            let t = t.to_ascii_lowercase();
-            let ok = t.is_empty() || t.contains("javascript") || t == "module"
-                || t == "text/ecmascript";
-            if !ok { continue; }
-        }
+        if !script_type_is_js(n) { continue; }
         let text = d.text_of(id);
         if !text.trim().is_empty() { out.push(text); }
     }
@@ -584,6 +734,71 @@ pub fn install(realm: &mut Realm) {
         if let Some(d) = &mut i.doc { d.detach(id); }
         Ok(Value::Undefined)
     }, 0, &fp);
+    accessor(&element_proto, "innerHTML",
+        |i, t, _| { let id = node_of(i, &t)?;
+                    let s = i.doc.as_ref().map(|d| d.serialize(id, true)).unwrap_or_default();
+                    Ok(Value::string(s)) },
+        |i, t, a| {
+            let id = node_of(i, &t)?;
+            let html = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+            let Some(d) = &mut i.doc else { return Ok(Value::Undefined) };
+            d.clear_children(id);
+            d.parse_into(id, &html, None);
+            Ok(Value::Undefined)
+        }, &fp);
+    getter(&element_proto, "outerHTML", |i, t, _| {
+        let id = node_of(i, &t)?;
+        let s = i.doc.as_ref().map(|d| d.serialize(id, false)).unwrap_or_default();
+        Ok(Value::string(s))
+    }, &fp);
+    meth(&element_proto, "insertAdjacentHTML", |i, t, a| {
+        let id = node_of(i, &t)?;
+        let pos = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_lowercase();
+        let html = i.to_string(a.get(1).unwrap_or(&Value::Undefined))?;
+        let Some(d) = &mut i.doc else { return Ok(Value::Undefined) };
+        // Die vier Stellen der Spezifikation: vor/nach dem Element selbst,
+        // und ganz vorn/hinten in ihm.
+        let (parent, at) = match pos.as_str() {
+            "afterbegin" => (id, Some(0)),
+            "beforeend" => (id, None),
+            "beforebegin" | "afterend" => {
+                let Some(p) = d.nodes[id as usize].parent else { return Ok(Value::Undefined) };
+                let k = d.nodes[p as usize].children.iter().position(|&c| c == id).unwrap_or(0);
+                (p, Some(if pos == "beforebegin" { k } else { k + 1 }))
+            }
+            _ => return i.type_err("invalid insertAdjacentHTML position"),
+        };
+        d.parse_into(parent, &html, at);
+        Ok(Value::Undefined)
+    }, 2, &fp);
+    meth(&node_proto, "cloneNode", |i, t, a| {
+        let id = node_of(i, &t)?;
+        let deep = a.first().map(|v| v.truthy()).unwrap_or(false);
+        let Some(d) = &mut i.doc else { return i.type_err("no document") };
+        let new = d.clone_node(id, deep);
+        Ok(wrap(i, new))
+    }, 1, &fp);
+    meth(&node_proto, "hasChildNodes", |i, t, _| {
+        let id = node_of(i, &t)?;
+        Ok(Value::Bool(i.doc.as_ref().is_some_and(|d| !d.nodes[id as usize].children.is_empty())))
+    }, 0, &fp);
+    // Geometrie gibt es zum Skriptzeitpunkt NICHT: beak legt erst NACH den
+    // Skripten aus. Ein Nullrechteck ist damit keine Luege ueber die Groesse,
+    // sondern die Wahrheit ueber den Zeitpunkt — und ein fehlendes
+    // `getBoundingClientRect` beendet das Skript, was schlimmer ist.
+    // Sobald Ereignisse zugestellt werden, laeuft ein Skript NACH dem Layout
+    // und dann gehoert hier die echte Zahl her.
+    meth(&element_proto, "getBoundingClientRect", |i, _, _| {
+        let g = new_obj(Some(i.realm.object_proto.clone()));
+        for k in ["x", "y", "top", "left", "right", "bottom", "width", "height"] {
+            g.borrow_mut().define(k, Prop::data(Value::Num(0.0)));
+        }
+        Ok(Value::Obj(g))
+    }, 0, &fp);
+    for k in ["offsetWidth", "offsetHeight", "clientWidth", "clientHeight",
+              "scrollWidth", "scrollHeight", "scrollTop", "scrollLeft", "offsetTop", "offsetLeft"] {
+        getter(&element_proto, k, |_, _, _| Ok(Value::Num(0.0)), &fp);
+    }
     getter(&element_proto, "classList", |i, t, _| {
         // Frisch je Zugriff — `el.classList === el.classList` ist damit
         // falsch, waehrend ein Browser dasselbe Objekt liefert. Gemerkt, weil
