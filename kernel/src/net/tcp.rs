@@ -655,6 +655,23 @@ pub fn send_blocking(handle: usize, data: &[u8], timeout_ticks: u64) -> Result<(
             Err(TcpError::WouldBlock) => {}
             other => return other,
         }
+        // Bis hierher wurde gedreht, nicht gewartet: ~1 M Umlaeufe/s, die den
+        // Worker-Kern brennen und die Nachbar-Fibers einfrieren
+        // (feedback_wasm_host_call_freezes_peer_fibers, feedback_zero_cpu_wakes).
+        //
+        // Die Schwelle ist EIN Tick, nicht geraten: schneller als die
+        // Zeitgeberauflösung kann der Scheduler ohnehin nicht denken. Eine
+        // Antwort, die innerhalb des ersten Ticks kommt — der ganze heisse
+        // Download-Pfad, der diese Schleife einmal auf Durchsatz getrimmt hat —
+        // sieht damit keinen einzigen Kontextwechsel. Alles darueber ist
+        // Warten, und Warten gehoert dem Nachbarn.
+        //
+        // `yield_ready` meldet `false`, wenn wir gar nicht in einem Fiber
+        // laufen (Core 0, OTA); dort bleibt es beim Drehen wie bisher.
+        if crate::interrupts::ticks() != t0 {
+            crate::smp::fiber::yield_ready();
+        }
+
         if crate::interrupts::ticks() - t0 > timeout_ticks { return Err(TcpError::Timeout); }
         super::poll();
         tick_connections();
