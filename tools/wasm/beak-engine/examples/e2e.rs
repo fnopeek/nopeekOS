@@ -42,7 +42,7 @@ fn main() {
     "##;
     let prog = beak_engine::js::parse(script, false).unwrap();
     sess.run(&prog).unwrap();
-    engine.set_scripted_dom(Some(sess.interp.doc.as_ref().unwrap().to_dom()));
+    engine.set_scripted_dom(Some(sess.interp.doc.as_mut().unwrap().to_dom()));
 
     let after = count(&engine);
     println!("nachher: {} Rechtecke, Text: {:?}", after.0, after.1);

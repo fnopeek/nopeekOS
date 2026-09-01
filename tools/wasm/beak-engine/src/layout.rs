@@ -1461,6 +1461,10 @@ struct Ctx<'a> {
     theme: &'a Theme,
     sheet: &'a Stylesheet,
     images: &'a ImageMap,
+    /// Fuer JEDES Element einen Treffer-Kasten aufzeichnen. Ohne das gibt es
+    /// keinen Weg vom Klickpunkt zum Knoten — und nur Elemente mit einer
+    /// `:hover`-Regel haetten einen.
+    hit_all: bool,
     /// `src`s whose `<img>` box had to be GUESSED — no decoded pixels and no
     /// `width`/`height` pair. Only for these does a later decode move the
     /// page, so only their arrival justifies a re-layout.
@@ -1817,7 +1821,7 @@ impl<'a> Ctx<'a> {
         // Same call site, own switch: the pointer needs these boxes on any page
         // with a `:hover` rule, whether or not anyone is inspecting — and a
         // `<summary>` needs one whether or not the page hovers anything.
-        let hoverable = self.sheet.hover_set.may_match(el);
+        let hoverable = self.hit_all || self.sheet.hover_set.may_match(el);
         if w > 0 && h > 0 && (hoverable || st.is_summary) {
             let anchor = self.ops.get(op0).map(op_key);
             self.hover_boxes.push(HoverBox {
@@ -2008,6 +2012,7 @@ pub fn layout(
     forms: &FormState,
     inspect: bool,
     hover: &[u32],
+    hit_all: bool,
 ) -> Layout {
     // The root element is never painted, but `html { … }` still cascades into
     // the document — and its `font-size` is the basis for every `rem`.
@@ -2062,6 +2067,7 @@ pub fn layout(
         marker_ord: 0,
         counters: Counters::default(),
         inspect,
+        hit_all,
         inspects: Vec::new(),
         hover,
         hover_boxes: Vec::new(),
@@ -9492,19 +9498,19 @@ mod tests {
     fn lay(html: &str, w: u32) -> Layout {
         let dom = dom::parse(html);
         let sheet = crate::css::collect(&dom, crate::css::Media::new(800.0, false));
-        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, &FormState::default(), false, &[])
+        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, &FormState::default(), false, &[], false)
     }
 
     fn lay_inspect(html: &str, w: u32) -> Layout {
         let dom = dom::parse(html);
         let sheet = crate::css::collect(&dom, crate::css::Media::new(800.0, false));
-        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, &FormState::default(), true, &[])
+        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, &FormState::default(), true, &[], false)
     }
 
     fn lay_hover(html: &str, w: u32, hover: &[u32]) -> Layout {
         let dom = dom::parse(html);
         let sheet = crate::css::collect(&dom, crate::css::Media::new(800.0, false));
-        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, &FormState::default(), false, hover)
+        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, &FormState::default(), false, hover, false)
     }
 
     /// Only the elements a `:hover` rule can actually react to get a box —
@@ -11162,7 +11168,7 @@ fn dbg_wiki_shape() {
     fn lay_forms(html: &str, w: u32, st: &FormState) -> Layout {
         let dom = dom::parse(html);
         let sheet = crate::css::collect(&dom, crate::css::Media::new(800.0, false));
-        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, st, false, &[])
+        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, st, false, &[], false)
     }
 
     #[test]

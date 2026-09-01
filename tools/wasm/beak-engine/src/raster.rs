@@ -136,6 +136,14 @@ pub struct Engine {
     /// SCHLUESSEL des Stilblatts ein — ein Skript kann ein `<style>`
     /// hinzufuegen, und dann waere das zwischengespeicherte Blatt falsch.
     scripted_gen: core::cell::Cell<u64>,
+    /// Fuer JEDES Element einen Treffer-Kasten aufzeichnen, nicht nur fuer die
+    /// mit `:hover`-Regeln.
+    ///
+    /// beak schaltet das ein, sobald eine Seite Ereignisbehandler angemeldet
+    /// hat: ohne einen Kasten je Element gibt es keinen Weg vom Klickpunkt zum
+    /// Knoten. Aus, solange keiner da ist — die Liste ist ein `push` je
+    /// Element, und dieser Pfad wurde einmal gemessen und gekuerzt.
+    hit_all: core::cell::Cell<bool>,
     /// The last parsed stylesheet with the fingerprint of the inputs that built
     /// it. Parsing a real page's CSS is a third of a layout, and a page is laid
     /// out several times over its life (images landing, a form key, a resize)
@@ -260,6 +268,7 @@ impl Engine {
             dom: RefCell::new(Vec::new()),
             scripted: RefCell::new(None),
             scripted_gen: core::cell::Cell::new(0),
+            hit_all: core::cell::Cell::new(false),
             sheet: RefCell::new(Vec::new()),
             docs_parsed: core::cell::Cell::new(0),
             sheets_collected: core::cell::Cell::new(0),
@@ -584,6 +593,9 @@ impl Engine {
 
     pub fn has_scripted_dom(&self) -> bool { self.scripted.borrow().is_some() }
 
+    /// Treffer-Kaesten fuer alle Elemente aufzeichnen (siehe `hit_all`).
+    pub fn set_hit_all(&self, on: bool) { self.hit_all.set(on); }
+
     pub fn parse_counts(&self) -> (u64, u64) {
         (self.docs_parsed.get(), self.sheets_collected.get())
     }
@@ -727,7 +739,7 @@ impl Engine {
         let held = self.sheet.borrow();
         let sheet = &held[0].1;
         self.resolve_data_uri_images(&dom);
-        let mut lay = crate::layout::layout(&self.fonts, &dom, sheet, &self.images.borrow(), width, self.viewport_h.get(), &self.theme, forms, self.inspect.get(), &self.hover.borrow());
+        let mut lay = crate::layout::layout(&self.fonts, &dom, sheet, &self.images.borrow(), width, self.viewport_h.get(), &self.theme, forms, self.inspect.get(), &self.hover.borrow(), self.hit_all.get());
         self.resolve_inline_svgs(&dom, &lay);
         self.resolve_css_images(sheet, &mut lay);
         lay.phase = [t_parse.wrapping_sub(t0), t_css.wrapping_sub(t_parse), now().wrapping_sub(t_css)];
@@ -876,6 +888,7 @@ impl Engine {
             self.inspect.get(),
             // Reader mode drops the page's sheet, so nothing can style `:hover`.
             &[],
+            self.hit_all.get(),
         )
     }
 
