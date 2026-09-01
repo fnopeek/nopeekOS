@@ -2457,9 +2457,12 @@ pub(crate) fn npk_http_take_many(
     for n in &reply.lens {
         lens.extend_from_slice(&n.to_le_bytes());
     }
+    // Refused, not truncated. The length table describes the WHOLE blob, so a
+    // short write would leave the caller slicing bodies out of bytes that were
+    // never written. (`npk_http_take` may truncate — there is no table there.)
+    if reply.body.len() > out_max as usize { return -1; }
     if write_bytes(mem, lens_ptr, &lens) < 0 { return -1; }
-    let write_len = reply.body.len().min(out_max as usize);
-    if write_len > 0 && write_bytes(mem, out_ptr, &reply.body[..write_len]) < 0 { return -1; }
+    if !reply.body.is_empty() && write_bytes(mem, out_ptr, &reply.body) < 0 { return -1; }
     reply.lens.len() as i32
 }
 
