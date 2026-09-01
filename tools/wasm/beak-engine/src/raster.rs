@@ -125,6 +125,17 @@ pub struct Engine {
     /// that answers differently every request — a live front page — misses by
     /// construction, and that is correct rather than unfortunate.
     dom: RefCell<Vec<(u64, crate::dom::Dom)>>,
+    /// Ein vom SKRIPT veraenderter Baum. Ist er gesetzt, wird nicht geparst
+    /// und nicht zwischengespeichert — er IST das Dokument.
+    ///
+    /// So herum, weil der Zwischenspeicher auf dem HTML-Fingerabdruck sitzt:
+    /// derselbe Quelltext, aber ein anderer Baum, und der Abdruck wuesste
+    /// nichts davon.
+    scripted: RefCell<Option<crate::dom::Dom>>,
+    /// Zaehlt hoch, sobald ein Skript den Baum veraendert hat. Geht in den
+    /// SCHLUESSEL des Stilblatts ein — ein Skript kann ein `<style>`
+    /// hinzufuegen, und dann waere das zwischengespeicherte Blatt falsch.
+    scripted_gen: core::cell::Cell<u64>,
     /// The last parsed stylesheet with the fingerprint of the inputs that built
     /// it. Parsing a real page's CSS is a third of a layout, and a page is laid
     /// out several times over its life (images landing, a form key, a resize)
@@ -247,6 +258,8 @@ impl Engine {
             clock: core::cell::Cell::new(None),
             repaint_bail: core::cell::Cell::new(""),
             dom: RefCell::new(Vec::new()),
+            scripted: RefCell::new(None),
+            scripted_gen: core::cell::Cell::new(0),
             sheet: RefCell::new(Vec::new()),
             docs_parsed: core::cell::Cell::new(0),
             sheets_collected: core::cell::Cell::new(0),
@@ -559,6 +572,18 @@ impl Engine {
 
     /// How many documents this engine has actually parsed, and how many
     /// stylesheets it has actually collected, since it was created.
+    /// Den vom Skript veraenderten Baum einreichen. Ab jetzt legt das Layout
+    /// IHN aus, nicht mehr das geparste HTML.
+    ///
+    /// `None` nimmt das zurueck — bei einer Navigation muss das passieren,
+    /// sonst zeigt die naechste Seite den Baum der vorigen.
+    pub fn set_scripted_dom(&self, dom: Option<crate::dom::Dom>) {
+        *self.scripted.borrow_mut() = dom;
+        self.scripted_gen.set(self.scripted_gen.get().wrapping_add(1));
+    }
+
+    pub fn has_scripted_dom(&self) -> bool { self.scripted.borrow().is_some() }
+
     pub fn parse_counts(&self) -> (u64, u64) {
         (self.docs_parsed.get(), self.sheets_collected.get())
     }
@@ -657,7 +682,8 @@ impl Engine {
         let dom_key = fingerprint(html.as_bytes())
             ^ (width as u64) << 40
             ^ (self.theme.is_dark() as u64) << 63;
-        let dom_hit = promote(&mut self.dom.borrow_mut(), dom_key);
+        let scripted = self.scripted.borrow().is_some();
+        let dom_hit = scripted || promote(&mut self.dom.borrow_mut(), dom_key);
         if !dom_hit {
             let mut dom = crate::dom::parse(html);
             // `<picture>`/`srcset` is folded into the `<img>` before anything
@@ -670,7 +696,8 @@ impl Engine {
             held.truncate(DOC_SLOTS);
         }
         let held_dom = self.dom.borrow();
-        let dom = &held_dom[0].1;
+        let held_scripted = self.scripted.borrow();
+        let dom = match held_scripted.as_ref() { Some(d) => d, None => &held_dom[0].1 };
         // The cascade also reads the document's own `<style>` blocks and the
         // viewport width (media queries), so both are part of the identity.
         // The theme is part of the identity too: `prefers-color-scheme` decides
@@ -686,10 +713,11 @@ impl Engine {
             ^ fingerprint(external_css.as_bytes()).rotate_left(17)
             ^ (width as u64) << 40
             ^ (self.viewport_h.get() as u64).rotate_left(23)
-            ^ (media.dark as u64) << 63;
+            ^ (media.dark as u64) << 63
+            ^ self.scripted_gen.get().rotate_left(41);
         let sheet_hit = promote(&mut self.sheet.borrow_mut(), key);
         if !sheet_hit {
-            let collected = crate::css::collect_all(&dom, external_css, media);
+            let collected = crate::css::collect_all(dom, external_css, media);
             self.sheets_collected.set(self.sheets_collected.get() + 1);
             let mut held = self.sheet.borrow_mut();
             held.insert(0, (key, collected));

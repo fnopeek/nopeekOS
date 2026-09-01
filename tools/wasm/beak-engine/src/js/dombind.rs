@@ -179,6 +179,76 @@ impl Doc {
     }
 }
 
+impl Doc {
+    /// Zurueck in beaks Baum — der Schritt, der eine DOM-Aenderung UEBERHAUPT
+    /// ERST sichtbar macht.
+    ///
+    /// Solange nur die Arena veraendert wird, bleibt das Bild stehen: Layout,
+    /// Kaskade und Formulare lesen `dom::Dom`. Statt das Layout auf die Arena
+    /// umzubauen — was jede gemessene Zahl dieser Engine aufs Spiel setzen
+    /// wuerde — wird hier zurueckgeschrieben. Der Preis ist ein voller
+    /// Neuaufbau des Baums je Skriptlauf, nicht je Aenderung; gegen ein
+    /// Layout von 150 ms faellt das nicht auf.
+    ///
+    /// `seq` wird NEU vergeben, in Dokumentreihenfolge — genau wie der Parser
+    /// es tut. Damit stimmt die Identitaet, an der die Formularzustaende
+    /// haengen, fuer alles, was der Skriptlauf nicht angefasst hat.
+    pub fn to_dom(&self) -> crate::dom::Dom {
+        let mut seq = 0u32;
+        let mut root = crate::dom::Element::bare("#root".into(), seq);
+        for &c in &self.nodes[self.doc as usize].children.clone() {
+            if let Some(n) = self.to_node(c, &mut seq) { root.children.push(n); }
+        }
+        root.index_attrs();
+        crate::dom::Dom { root }
+    }
+
+    fn to_node(&self, id: u32, seq: &mut u32) -> Option<crate::dom::Node> {
+        let n = &self.nodes[id as usize];
+        if n.kind == TEXT_NODE {
+            return Some(crate::dom::Node::Text(n.text.to_string()));
+        }
+        if n.kind != ELEMENT_NODE { return None; }
+        *seq += 1;
+        let mut e = crate::dom::Element::bare(n.tag.to_string(), *seq);
+        for (k, v) in &n.attrs { e.attrs.push((k.to_string(), v.to_string())); }
+        // MUSS nach den Attributen laufen — sonst sind Klassen, id und der
+        // Bloom-Filter leer und kein Selektor trifft mehr.
+        e.index_attrs();
+        for &c in &n.children {
+            if let Some(x) = self.to_node(c, seq) { e.children.push(x); }
+        }
+        Some(crate::dom::Node::Element(e))
+    }
+}
+
+/// Die Inhalte aller `<script>`-Elemente OHNE `src`, in Dokumentreihenfolge.
+///
+/// Nur die eingebetteten: ein `src` muesste geholt werden, und die Reihenfolge
+/// zwischen geholten und eingebetteten Skripten ist eine eigene Frage
+/// (`defer`, `async`, und was ein `document.write` dazwischen anrichtet).
+/// Bewusst der kleinere, ehrliche Anfang.
+pub fn inline_scripts(d: &Doc) -> Vec<String> {
+    let mut all = Vec::new();
+    d.descendants(d.doc, &mut all);
+    let mut out = Vec::new();
+    for id in all {
+        let n = &d.nodes[id as usize];
+        if &*n.tag != "script" || n.attr("src").is_some() { continue; }
+        // Ein `type`, das nicht JavaScript meint (`application/json`,
+        // `text/template`), ist Nutzlast und kein Programm.
+        if let Some(t) = n.attr("type") {
+            let t = t.to_ascii_lowercase();
+            let ok = t.is_empty() || t.contains("javascript") || t == "module"
+                || t == "text/ecmascript";
+            if !ok { continue; }
+        }
+        let text = d.text_of(id);
+        if !text.trim().is_empty() { out.push(text); }
+    }
+    out
+}
+
 // ── Selektoren ──────────────────────────────────────────────────────────────
 //
 // Eine EIGENE, kleine Auswertung — nicht die aus `css.rs`. Die passt auf
