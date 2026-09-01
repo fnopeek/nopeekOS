@@ -235,6 +235,57 @@ unsafe extern "C" {
     pub fn forge_de_stub();
 }
 
+// ── ein Trap aus einer Host-Funktion heraus ───────────────────────────
+//
+// Eine wasi-Funktion wie `proc_exit` DARF nicht zurueckkehren — auch bei
+// sauberem Ende nicht. Der Interpreter macht daraus ein `Err` und rollt ab;
+// erzeugter Code braucht denselben Weg, und den gibt es: die Trap-Routine des
+// Moduls stellt `rsp`/`rbp` wieder her und springt zum Eintritt zurueck,
+// wodurch jede Tiefe von wasm-Rahmen in vier Befehlen verschwindet.
+//
+// Sie braucht dafuer nur den vmctx-Zeiger — und den hat jede Host-Funktion in
+// `rdi`. Deshalb genuegt hier dieselbe Sequenz, statt r14 anzufassen.
+//
+// Der Host-Zwilling in `forge/harness` kann das NICHT: dort ist jeder Lauf ein
+// eigener Prozess, und `proc_exit` beendet ihn einfach. Im Kernel gibt es
+// nichts zu beenden, also muss abgerollt werden.
+core::arch::global_asm!(
+    r#"
+.globl forge_host_trap
+forge_host_trap:
+    mov  [rdi + {tc}], rsi
+    mov  rbp, [rdi + {rbp}]
+    mov  rsp, [rdi + {rsp}]
+    jmp  [rdi + {res}]
+"#,
+    tc = const vmctx::TRAP_CODE,
+    rbp = const vmctx::TRAP_RBP,
+    rsp = const vmctx::TRAP_RSP,
+    res = const vmctx::TRAP_RESUME,
+);
+
+unsafe extern "C" {
+    /// Verlaesst das Modul mit `code` als Trap-Grund. Kehrt nie zurueck.
+    fn forge_host_trap(vm: *const u64, code: u64) -> !;
+}
+
+/// Aus einer Host-Funktion heraus den Lauf beenden.
+///
+/// # Safety
+/// `vm` muss der vmctx der GERADE laufenden Instanz sein — der Zeiger, den der
+/// Adapter als erstes Argument bekommen hat. Mit einem fremden vmctx springt
+/// das in einen Rahmen, den es nicht mehr gibt.
+///
+/// Der Aufrufer darf nichts halten, was aufgeraeumt werden muss: hier wird
+/// kein Rust-Rahmen abgewickelt, kein `Drop` laeuft. Das ist dieselbe
+/// Zusicherung, unter der auch der `#PF`-Vorschalter arbeitet.
+pub unsafe fn host_trap(vm: *const u64, code: u32) -> ! {
+    // SAFETY: an den Aufrufer weitergereicht, siehe oben.
+    unsafe { forge_host_trap(vm, code as u64) }
+}
+
+
+
 // ── instances ─────────────────────────────────────────────────────────
 
 use alloc::vec::Vec;

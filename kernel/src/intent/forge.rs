@@ -22,6 +22,80 @@ fn ms() -> u64 {
 /// interpreter case by case. So this asks a sharper question than "did it
 /// work" — it asks whether the device agrees with the host, down to the trap
 /// codes.
+/// Ein Modul von 70 Bytes, das genau eine Sache tut: einen Import rufen und
+/// danach 99 zurueckgeben. Die 99 darf NIE herauskommen — der Import verlaesst
+/// den Lauf ueber `forge_rt::host_trap`, und wenn das Abrollen nicht stimmt,
+/// sagt es genau hier Bescheid statt spaeter in python.
+///
+/// Von Hand erzeugt (Typen, ein Import, ein Export "f", drei Instruktionen).
+const TRAP_PROBE: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x02, 0x60,
+    0x00, 0x00, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x02, 0x1c, 0x01, 0x03, 0x65,
+    0x6e, 0x76, 0x14, 0x6e, 0x70, 0x6b, 0x5f, 0x66, 0x6f, 0x72, 0x67, 0x65,
+    0x5f, 0x74, 0x72, 0x61, 0x70, 0x5f, 0x70, 0x72, 0x6f, 0x62, 0x65, 0x00,
+    0x00, 0x03, 0x02, 0x01, 0x01, 0x07, 0x05, 0x01, 0x01, 0x66, 0x00, 0x01,
+    0x0a, 0x08, 0x01, 0x06, 0x00, 0x10, 0x00, 0x41, 0x63, 0x0b,
+];
+
+extern "C" fn probe_exit(vm: *const u64) -> i32 {
+    // SAFETY: `vm` ist der vmctx der laufenden Instanz, den der Generator als
+    // erstes Argument uebergibt. Kehrt nicht zurueck.
+    unsafe { crate::forge_rt::host_trap(vm, forge_core::trap::EXIT) }
+}
+
+struct ProbeHost;
+impl crate::forge_rt::HostImports for ProbeHost {
+    fn ctx_ptr(&self) -> u64 {
+        // Der Stumpf fasst den Zustand nicht an; ein Zeiger waere gelogen.
+        0
+    }
+    fn resolve(&self, module: &str, name: &str) -> Option<u64> {
+        (module == "env" && name == "npk_forge_trap_probe")
+            .then(|| probe_exit as *const () as u64)
+    }
+}
+
+/// Kann eine Host-Funktion den Lauf beenden, statt zurueckzukehren?
+///
+/// Das ist der eine Mechanismus, fuer den der Host-Zwilling keine Antwort hat:
+/// dort ist jeder Lauf ein eigener Prozess und `proc_exit` beendet ihn einfach.
+/// Im Kernel muss abgerollt werden, und ein Assembler-Stub, der `rsp` und `rbp`
+/// wiederherstellt, gehoert geprueft, bevor python davon abhaengt.
+fn trap_probe() -> bool {
+    use crate::forge_rt::Instance;
+    let Ok(m) = forge_core::compile(TRAP_PROBE) else {
+        kprintln!("[npk] forge: Trap-Probe liess sich nicht uebersetzen");
+        return false;
+    };
+    let entry = m.plan.exports.iter().find(|(n, _)| n == "f").map(|(_, i)| *i)
+        .and_then(|i| m.offset_of(i));
+    let Some(off) = entry else {
+        kprintln!("[npk] forge: Trap-Probe hat kein f");
+        return false;
+    };
+    let Some(mut inst) = Instance::new_with_host(&m, &ProbeHost) else {
+        kprintln!("[npk] forge: Trap-Probe — Instanz liess sich nicht bauen");
+        return false;
+    };
+    if inst.unresolved_imports() != 0 {
+        kprintln!("[npk] forge: Trap-Probe — Import nicht aufgeloest");
+        return false;
+    }
+    inst.set_fuel(i64::MAX / 4);
+    let (got, trap) = inst.call(off, 0, 0, 0);
+    if trap != forge_core::trap::EXIT {
+        kprintln!("[npk] forge: Trap-Probe -> {} statt EXIT (Ergebnis {})",
+            forge_core::trap::name(trap), got);
+        return false;
+    }
+    // Kaeme 99 heraus, waere die Host-Funktion zurueckgekehrt statt zu traps.
+    if got == 99 {
+        kprintln!("[npk] forge: Trap-Probe ist ZURUECKGEKEHRT — das Abrollen hat nicht gegriffen");
+        return false;
+    }
+    true
+}
+
 fn selftest() {
     use crate::forge_rt::Instance;
     use crate::forge_tests::CASES;
@@ -67,6 +141,8 @@ fn selftest() {
     }
 
     kprintln!("[npk] forge selftest: {}/{} wie auf dem Host", ok, ok + bad);
+    kprintln!("[npk] forge: Host-Trap (Abrollen aus einer Host-Funktion): {}",
+        if trap_probe() { "geht" } else { "GESCHEITERT" });
     if bad == 0 {
         kprintln!("[npk] forge: Wachseite, Tabelle, Division, unreachable und Fuel");
         kprintln!("[npk] forge: melden sich am Geraet mit demselben Grund.");
