@@ -41,10 +41,29 @@ const SKIP_FEATURES: &[&str] = &[
     "import-defer",
 ];
 
+/// Der ZWEITE Nenner fuer den Ausfuehrungslauf — dieselbe Politik wie
+/// `tools/test262/subset.json`.
+///
+/// Er ist LAENGER als der fuers Parsen, und das ist kein Widerspruch:
+/// `Temporal` parst tadellos und faellt dort zurecht nicht weg, aber
+/// AUSFUEHREN kann es nur, wer es gebaut hat — und wir bauen es erklaertermassen
+/// nicht. Die erste Fassung dieses Laufs zaehlte 4436 Temporal-Tests als
+/// Misserfolg mit; das ist kein ehrlicher Nenner, das ist eine
+/// selbstgemachte Niederlage.
+const SKIP_FEATURES_EXEC: &[&str] = &[
+    "Temporal", "Intl.Era-monthcode", "explicit-resource-management", "decorators",
+    "Atomics", "Atomics.pause", "SharedArrayBuffer", "import-assertions",
+    "import-attributes", "source-phase-imports", "iterator-sequencing",
+    "Math.sumPrecise", "uint8array-base64", "ShadowRealm", "await-dictionary",
+    "joint-iteration", "iterator-chunking", "iterator-includes", "import-defer",
+    "immutable-arraybuffer", "error-stack-accessor",
+];
+
 #[derive(Default)]
 struct Meta {
     description: String,
     flags: Vec<String>,
+    includes: Vec<String>,
     features: Vec<String>,
     negative_parse: bool,
     negative_other: bool,
@@ -70,6 +89,7 @@ fn frontmatter(src: &str) -> Meta {
     };
     m.flags = list("flags:");
     m.features = list("features:");
+    m.includes = list("includes:");
     for line in y.lines() {
         let t = line.trim();
         if let Some(rest) = t.strip_prefix("description:") {
@@ -276,5 +296,134 @@ fn corpus_parse() {
     if !fails.is_empty() {
         eprintln!("\n   Was nicht parst:");
         for (f, m, at) in fails.iter().take(20) { eprintln!("      {f} @{at}\n         {m}"); }
+    }
+}
+
+
+/// Der AUSFUEHRUNGSLAUF. test262 sagt hier nicht mehr nur „ist das gueltige
+/// Syntax", sondern „tut es das Richtige" — und das ist die Zahl, gegen die
+/// jede weitere Arbeit an der Maschine gemessen wird.
+///
+/// Verglichen wird gegen `tools/test262/out/baseline-v8.json` (V8: 99,41 %).
+/// Die eigene Zahl allein sagt wenig; die DIFFERENZ sagt alles.
+///
+///   TEST262=<…> cargo test --release --test test262 exec -- --nocapture
+///
+/// `T262_FILTER` grenzt ein · `T262_SHOW` zeigt n Fehler.
+#[test]
+fn test262_exec() {
+    let Ok(root) = std::env::var("TEST262") else {
+        eprintln!("[test262] uebersprungen — setze TEST262=<pfad zum test262-checkout>.");
+        return;
+    };
+    let tests = Path::new(&root).join("test");
+    let harness = Path::new(&root).join("harness");
+    if !tests.is_dir() { eprintln!("[test262] kein Checkout unter {}", tests.display()); return; }
+    let filter = std::env::var("T262_FILTER").unwrap_or_default();
+    let show: usize = std::env::var("T262_SHOW").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
+
+    let hread = |f: &str| fs::read_to_string(harness.join(f)).unwrap_or_default();
+    // EINMAL geparst, dann nur noch ausgefuehrt. Der Vorspann je Variante neu
+    // zu parsen war der erste Entwurf und hat den Lauf allein damit verbracht.
+    let prologue_src = format!("{}\n{}\n", hread("assert.js"), hread("sta.js"));
+    let strict_src = format!("\"use strict\";\n{prologue_src}");
+    let Ok(prologue) = beak_engine::js::parse(&prologue_src, false) else {
+        panic!("der test262-Vorspann parst nicht — ohne ihn misst dieser Lauf nichts");
+    };
+    let Ok(prologue_strict) = beak_engine::js::parse(&strict_src, false) else {
+        panic!("der strenge Vorspann parst nicht");
+    };
+
+    let mut files = Vec::new();
+    walk(&tests, &mut files);
+    files.sort();
+
+    let (mut run, mut pass) = (0usize, 0usize);
+    let (mut skip_dir, mut skip_kind, mut skip_feat) = (0usize, 0usize, 0usize);
+    let mut panics = 0usize;
+    let mut fails: Vec<(String, String)> = Vec::new();
+    let mut by_msg: std::collections::BTreeMap<String, (usize, String)> = Default::default();
+
+    for p in &files {
+        let rel = p.strip_prefix(&tests).unwrap().to_string_lossy().replace('\\', "/");
+        if !filter.is_empty() && !rel.contains(&filter) { continue; }
+        if SKIP_DIRS.iter().any(|d| rel.starts_with(d)) { skip_dir += 1; continue; }
+        let Ok(src) = fs::read_to_string(p) else { continue };
+        let m = frontmatter(&src);
+
+        // Module und async brauchen Auflöser bzw. Promises — beides gibt es
+        // noch nicht. Eigene Zeile im Bericht, NICHT unter "bestanden".
+        if m.flags.iter().any(|f| f == "module" || f == "async") { skip_kind += 1; continue; }
+        if m.features.iter().any(|f| SKIP_FEATURES_EXEC.contains(&f.as_str())) {
+            skip_feat += 1; continue;
+        }
+        let raw = m.flags.iter().any(|f| f == "raw");
+        let modes: &[bool] = if raw { &[false] }
+            else if m.flags.iter().any(|f| f == "onlyStrict") { &[true] }
+            else if m.flags.iter().any(|f| f == "noStrict") { &[false] }
+            else { &[true, false] };
+
+        for &strict in modes {
+            run += 1;
+            let mut text = String::new();
+            if strict && !raw { text.push_str("\"use strict\";\n"); }
+            if !raw { for inc in &m.includes { text.push_str(&hread(inc)); text.push('\n'); } }
+            text.push_str(&src);
+
+            let neg = m.negative_parse || m.negative_other;
+            // Ein Absturz im Interpreter darf den LAUF nicht beenden — sonst
+            // misst ein einziger `unwrap` gar nichts mehr. Getrennt gezaehlt.
+            let out = std::panic::catch_unwind(|| {
+                let prog = match beak_engine::js::parse(&text, false) {
+                    Ok(p) => p,
+                    Err(e) => return Err(format!("SyntaxError: {} @{}", e.msg, e.at)),
+                };
+                let mut s = beak_engine::js::Session::new(beak_engine::js::TEST_STEPS);
+                if raw { return s.run(&prog); }
+                s.run(if strict { &prologue_strict } else { &prologue })?;
+                s.run(&prog)
+            });
+            let ok = match &out {
+                Err(_) => false,
+                Ok(Ok(())) => !neg,
+                Ok(Err(_)) => neg,
+            };
+            if matches!(out, Err(_)) { panics += 1; }
+            if ok { pass += 1; continue; }
+            let why = match out {
+                Err(_) => "LAEUFER: Absturz".to_string(),
+                Ok(Err(e)) => e,
+                Ok(Ok(())) => "erwartete einen Fehler, es lief durch".to_string(),
+            };
+            // Nach der GANZEN Meldung gebuendelt, nicht nur nach ihrer Art.
+            // "30221 ReferenceError" ist keine Diagnose; "Symbol is not
+            // defined" ist eine. Zahlen und Anfuehrungszeichen fallen weg,
+            // damit dieselbe Ursache nicht in tausend Varianten zerfaellt.
+            let norm: String = why.chars()
+                .map(|c| if c.is_ascii_digit() { '#' } else { c })
+                .collect::<String>()
+                .replace('"', "'");
+            let key: String = norm.chars().take(64).collect();
+            let e = by_msg.entry(key).or_insert((0, rel.clone()));
+            e.0 += 1;
+            if fails.len() < 5000 { fails.push((rel.clone(), why)); }
+        }
+    }
+
+    let pct = |n: usize, d: usize| if d == 0 { 0.0 } else { 100.0 * n as f64 / d as f64 };
+    eprintln!("\n── test262, AUSFUEHRUNG ──");
+    eprintln!("   {} Dateien; uebergangen: {skip_dir} Verzeichnis, {skip_feat} Feature, {skip_kind} Modul+async",
+        files.len());
+    eprintln!("   bestanden {pass} von {run} gefahren = {:.2} %", pct(pass, run));
+    eprintln!("   (V8 auf demselben Korpus: 99,41 % — die DIFFERENZ ist die Arbeit)");
+    if panics > 0 { eprintln!("   ⚠ {panics} Abstuerze im Laeufer"); }
+
+    let mut v: Vec<_> = by_msg.into_iter().collect();
+    v.sort_by_key(|(_, (n, _))| std::cmp::Reverse(*n));
+    eprintln!("\n   Woran es scheitert, nach Meldung:");
+    for (msg, (n, ex)) in v.iter().take(24) { eprintln!("      {n:6}  {msg}\n              z.B. {ex}"); }
+    if show > 0 {
+        eprintln!("\n   Erste {} Fehler:", show.min(fails.len()));
+        for (p, w) in fails.iter().take(show) { eprintln!("      {p}\n         {w}"); }
     }
 }

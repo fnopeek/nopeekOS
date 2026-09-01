@@ -569,7 +569,7 @@ sind gemessen, nicht gehofft:
   (99,41 %). WPTs `dom/`/`html/` sind selbst JavaScript und kommen erst NACH
   der Bindung; test262 braucht kein DOM und geht sofort.
 
-### Stand: Lexer + Parser (beak 0.42.0)
+### Stand: Lexer, Parser, Auswertung (beak 0.44.0)
 
 `beak-engine/src/js/` — `lexer.rs`, `ast.rs` (ESTree-Form), `parser.rs`.
 Rekursiver Abstieg, Vorrangkletterung, Deckgrammatik statt Vorausschau.
@@ -584,6 +584,26 @@ Zwei Zahlen, beide aus `cargo test --test test262`:
 | — faelschlich abgelehnt | 36 | **36** (kostet die Seite) |
 | — faelschlich angenommen | 5 102 | **2 859** (fehlender Fruehfehler; die Seite laeuft) |
 | **Zielkorpus, echter Code** | 437/437 | **437 von 437 = 100 %** |
+
+**0.44.0 wertet aus.** Ein Baumlaeufer (`js/value.rs`, `interp.rs`, `eval.rs`,
+`expr.rs`, `builtins.rs`), gemessen an test262:
+
+| | |
+|---|---|
+| **test262, Ausfuehrung** | **41,52 %** von 69 194 Varianten |
+| V8 auf demselben Korpus | 99,41 % — die DIFFERENZ ist die Arbeit |
+
+Das Mindestziel war nicht geraten: test262s eigener Vorspann (`assert.js` +
+`sta.js`) muss laufen, sonst besteht kein einziger Test. Er laeuft.
+
+**Warum ein Baumlaeufer und kein Bytecode.** Die Form der Verteilerschleife ist
+eine Entwurfsentscheidung, und wasms `return_call` waere dort der Hebel — nur
+gibt es heute keine Zahl, gegen die er sich messen liesse. Der test262-Lauf ist
+das Netz, das eine spaetere Umstellung ueberhaupt erst verantwortbar macht.
+
+Bewusst offen und im Lauf gezaehlt: RegExp, Symbole, Generatoren, async,
+Proxy, BigInt, TypedArrays, Date, `eval`. Zaehlende Freigabe ohne Sammler —
+Zyklen bleiben liegen, tragbar fuer einen Browser, der je Seite aufraeumt.
 
 0.43.0 baut die Fruehfehler: `delete a.#x`, Rest-Element-Regeln, `import()`
 ohne Spread, `await`/`yield` als Bindungsname in async/Generator (auch

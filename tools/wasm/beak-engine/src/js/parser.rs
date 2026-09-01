@@ -17,6 +17,7 @@
 //!    Parse-Fehler" auf und ist damit gezaehlt statt vergessen.
 
 use alloc::boxed::Box;
+use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::vec;
@@ -241,13 +242,13 @@ impl<'a> Parser<'a> {
                     // `[` oder `{` folgt — sonst ist es ein Bezeichner
                     // (`let = 1`, `let.a`, `let(x)`).
                     Kw::Let if self.let_is_decl()? => self.var_statement(),
-                    Kw::Function => { let f = self.function(false, true)?; Ok(Stmt::Func(Box::new(f))) }
+                    Kw::Function => { let f = self.function(false, true)?; Ok(Stmt::Func(Rc::new(f))) }
                     Kw::Async if self.async_function_ahead()? => {
                         self.bump()?;
                         let f = self.function(true, true)?;
-                        Ok(Stmt::Func(Box::new(f)))
+                        Ok(Stmt::Func(Rc::new(f)))
                     }
-                    Kw::Class => { let c = self.class(true)?; Ok(Stmt::Class(Box::new(c))) }
+                    Kw::Class => { let c = self.class(true)?; Ok(Stmt::Class(Rc::new(c))) }
                     Kw::If => self.if_statement(),
                     Kw::For => self.for_statement(),
                     Kw::While => {
@@ -616,12 +617,12 @@ impl<'a> Parser<'a> {
         self.bump()?;
         if self.eat_kw(Kw::Default)? {
             let d = if self.is_kw(Kw::Function) {
-                ExportDefault::Func(Box::new(self.function(false, false)?))
+                ExportDefault::Func(Rc::new(self.function(false, false)?))
             } else if self.is_kw(Kw::Async) && self.async_function_ahead()? {
                 self.bump()?;
-                ExportDefault::Func(Box::new(self.function(true, false)?))
+                ExportDefault::Func(Rc::new(self.function(true, false)?))
             } else if self.is_kw(Kw::Class) {
-                ExportDefault::Class(Box::new(self.class(false)?))
+                ExportDefault::Class(Rc::new(self.class(false)?))
             } else {
                 let e = self.assign_expr()?; self.semicolon()?;
                 ExportDefault::Expr(e)
@@ -895,7 +896,7 @@ impl<'a> Parser<'a> {
             self.in_class_field = ocf;
             self.in_gen = og; self.in_async = oa; self.in_func = of;
             let func = Func { name: None, params, body, is_async, is_generator, is_arrow: false, expr_body: false };
-            return Ok(ClassMember::Method { key, func: Box::new(func), kind, is_static, computed });
+            return Ok(ClassMember::Method { key, func: Rc::new(func), kind, is_static, computed });
         }
         // Feld.
         let value = if self.eat_p(P::Eq)? {
@@ -1059,7 +1060,7 @@ impl<'a> Parser<'a> {
             (vec![Stmt::Return(Some(e))], true)
         };
         self.in_gen = og; self.in_async = oa; self.in_func = of;
-        Ok(Expr::Func(Box::new(Func {
+        Ok(Expr::Func(Rc::new(Func {
             name: None, params, body, is_async, is_generator: false, is_arrow: true, expr_body,
         })))
     }
@@ -1395,11 +1396,11 @@ impl<'a> Parser<'a> {
                 Kw::True => { self.bump()?; Ok(Expr::Bool(true)) }
                 Kw::False => { self.bump()?; Ok(Expr::Bool(false)) }
                 Kw::Null => { self.bump()?; Ok(Expr::Null) }
-                Kw::Function => Ok(Expr::Func(Box::new(self.function(false, false)?))),
-                Kw::Class => Ok(Expr::Class(Box::new(self.class(false)?))),
+                Kw::Function => Ok(Expr::Func(Rc::new(self.function(false, false)?))),
+                Kw::Class => Ok(Expr::Class(Rc::new(self.class(false)?))),
                 Kw::Async if self.async_function_ahead()? => {
                     self.bump()?;
-                    Ok(Expr::Func(Box::new(self.function(true, false)?)))
+                    Ok(Expr::Func(Rc::new(self.function(true, false)?)))
                 }
                 Kw::New => self.new_expr(),
                 Kw::Import => {
@@ -1515,7 +1516,7 @@ impl<'a> Parser<'a> {
                 let body = self.block_body_with_prologue()?;
                 self.in_class_field = ocf;
                 self.in_gen = og; self.in_async = oa; self.in_func = of;
-                let f = Box::new(Func { name: None, params, body, is_async: false,
+                let f = Rc::new(Func { name: None, params, body, is_async: false,
                     is_generator: false, is_arrow: false, expr_body: false });
                 props.push(ObjProp {
                     key, computed, shorthand: false,
@@ -1531,7 +1532,7 @@ impl<'a> Parser<'a> {
                 self.in_gen = og; self.in_async = oa; self.in_func = of;
                 props.push(ObjProp {
                     key, computed, shorthand: false,
-                    value: ObjPropValue::Method(Box::new(Func { name: None, params, body,
+                    value: ObjPropValue::Method(Rc::new(Func { name: None, params, body,
                         is_async, is_generator, is_arrow: false, expr_body: false })),
                 });
             } else if self.eat_p(P::Colon)? {
