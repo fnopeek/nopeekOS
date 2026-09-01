@@ -541,6 +541,59 @@ never grew a host call to hide behind an abstraction. A desktop port would
 introduce the trait at that point, over a small surface (fetch, present,
 input, clock).
 
+## 11. JavaScript — die Leiter steht vor der Maschine (2026-09-01)
+
+Drei Dinge haben JS von „zu langsam" auf „machbar" geschoben, und alle drei
+sind gemessen, nicht gehofft:
+
+1. **forge.** Ein Bytecode-Interpreter im wasm-Sandkasten ist die Form, die
+   eine JS-Maschine hat. Unter wasmi kostete CPython 45x nativ, unter forge
+   3,26x. Wikipedias Startskript rechnet sich damit von 9-22 s auf 0,7-1,6 s
+   am Geraet.
+2. **Async fetch (§ oben).** `begin`/`poll`/`take` ist das Primitiv, auf dem
+   ein Promise-basiertes `fetch()` sitzt. Ein `fetch`, das blockiert, ist in
+   JS sinnlos — Promises, Timer und die Task-Queue setzen voraus, dass die App
+   ihre Schleife behaelt.
+3. **Das Relayout kostet 150 ms statt 1280.** Jede DOM-Mutation zieht ein box
+   layout nach sich; bei 1280 ms war ein `classList.toggle` das Ende der Seite.
+
+### Was gemessen wurde, bevor eine Zeile Engine entstand
+
+- **Aufruf-Zensus** (`tools/jsscope/apicensus.mjs`): welche Web-APIs der
+  Zielkorpus zur LAUFZEIT ruft, getrennt nach Laden und Bedienen. 60 APIs
+  decken 89,4 % der Ladeaufrufe. Beim Laden ist es fast nur Baum-Lesen (30,9 %)
+  und `addEventListener` (12,0 %); `fetch` steht auf Platz 74, `customElements`
+  kommt nie vor. Layout-Lesen (`getBoundingClientRect` & Co.) taucht erst beim
+  BEDIENEN auf — dort auf Platz 2.
+- **test262** (`tools/test262/`): die Sprachzahl, mit V8 als Grundlinie
+  (99,41 %). WPTs `dom/`/`html/` sind selbst JavaScript und kommen erst NACH
+  der Bindung; test262 braucht kein DOM und geht sofort.
+
+### Stand: Lexer + Parser (beak 0.42.0)
+
+`beak-engine/src/js/` — `lexer.rs`, `ast.rs` (ESTree-Form), `parser.rs`.
+Rekursiver Abstieg, Vorrangkletterung, Deckgrammatik statt Vorausschau.
+Selbst geschrieben und nicht portiert, aus dem umgekehrten Grund wie bei WebP:
+die guten JS-Parser sind gross, `std`-gebunden und arenenbasiert.
+
+Zwei Zahlen, beide aus `cargo test --test test262`:
+
+| | |
+|---|---|
+| **test262, Parse-Orakel** | **94,39 %** von 91 523 Varianten |
+| — faelschlich abgelehnt | **36** (kostet die Seite) |
+| — faelschlich angenommen | 5 102 (fehlender Fruehfehler; die Seite laeuft) |
+| **Zielkorpus, echter Code** | **437 von 437 Skripten = 100 %** |
+
+Die zweite Zahl ist fuer beak die wichtigere: das sind die Skripte, die
+Chromium beim Laden der zwoelf Seiten wirklich geparst hat — minifiziert,
+ausgeliefert, kein Testfall.
+
+Die fehlenden Fruehfehler sind nach Familie kartiert (Klassen 1 810, RegExp-
+Literale 738, Blockbereich 191, Objektliterale 181). RegExp-Literale werden
+BEWUSST nicht geprueft: das ist Sache der RegExp-Maschine, und ein Parser, der
+es doch tut, lehnt Muster ab, die er nur nicht kennt.
+
 ## Appendix — host fns as built
 
 ```
