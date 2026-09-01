@@ -92,6 +92,7 @@ pub struct Realm {
     pub element_proto: Gc,
     pub text_proto: Gc,
     pub document_proto: Gc,
+    pub regexp_proto: Gc,
 }
 
 pub struct Interp {
@@ -114,6 +115,9 @@ pub struct Interp {
     /// eingereicht wurde — dann gibt es `document` gar nicht erst, statt eins
     /// vorzutaeuschen, das nichts enthaelt.
     pub doc: Option<super::dombind::Doc>,
+    /// Angemeldete Zeitgeber-Rueckrufe. Noch laeuft niemand sie; sie zu HALTEN
+    /// kostet nichts und ist die Stelle, an der beaks Schleife ansetzt.
+    pub timers: Vec<Value>,
 }
 
 pub const MAX_DEPTH: usize = 400;
@@ -145,7 +149,8 @@ impl Interp {
     pub fn new() -> Interp {
         let mut realm = super::builtins::make_realm();
         super::dombind::install(&mut realm);
-        Interp { realm, depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX, fake_now: 0.0, doc: None }
+        super::regexp::install(&mut realm);
+        Interp { realm, depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX, fake_now: 0.0, doc: None, timers: Vec::new() }
     }
 
     /// Ein Dokument einreichen und `document` global sichtbar machen.
