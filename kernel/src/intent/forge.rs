@@ -149,12 +149,17 @@ fn selftest() {
     }
 }
 
-pub fn intent_forge(args: &str) {
+pub fn intent_forge(args: &str, vault: &'static spin::Mutex<crate::security::capability::Vault>, session: crate::security::capability::CapId) {
     use crate::npkfs;
 
     let name = args.trim();
     if name == "selftest" || name == "test" {
         selftest();
+        return;
+    }
+    if let Some(rest) = args.trim_start().strip_prefix("python") {
+        // `forge python -c "..."` — derselbe Lauf, anderer Motor.
+        super::python::intent_python_forge(rest.trim_start(), vault, session);
         return;
     }
     if let Some(rest) = name.strip_prefix("run ") {
@@ -167,7 +172,7 @@ pub fn intent_forge(args: &str) {
         return;
     }
     if name.is_empty() {
-        kprintln!("[npk] Usage: forge <module> | forge run <module> | forge selftest");
+        kprintln!("[npk] Usage: forge <module> | forge run <module> | forge python <args> | forge selftest");
         return;
     }
 

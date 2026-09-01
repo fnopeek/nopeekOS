@@ -34,7 +34,7 @@ unsafe fn ctx_of<'a>(vm: *const u64) -> &'a mut HostState {
 /// # Safety
 /// Wie `ctx_of`, und `MEM_BASE`/`MEM_SIZE` muessen die Reservierung dieser
 /// Instanz beschreiben.
-unsafe fn parts<'a>(vm: *const u64) -> (&'a mut [u8], &'a mut HostState) {
+pub(crate) unsafe fn parts<'a>(vm: *const u64) -> (&'a mut [u8], &'a mut HostState) {
     unsafe {
         let base = *vm.add(vmctx::MEM_BASE as usize / 8);
         let size = *vm.add(vmctx::MEM_SIZE as usize / 8) as usize;
@@ -62,7 +62,10 @@ impl crate::forge_rt::HostImports for NpkHost {
         self.0 as u64
     }
     fn resolve(&self, module: &str, name: &str) -> Option<u64> {
-        resolve(module, name)
+        // Ein Modul kann beide ABIs importieren — beak nur `env`, python nur
+        // wasi. Der Host beantwortet deshalb beide, statt dass der Aufrufer
+        // sich einen aussuchen muesste.
+        resolve(module, name).or_else(|| crate::wasi::forge_glue::resolve(module, name))
     }
 }
 

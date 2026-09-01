@@ -784,6 +784,71 @@ pub fn execute_wasi(
     }
 }
 
+/// Wie `execute_wasi`, aber unter forge. Bewusst daneben und nicht darin: der
+/// Interpreterpfad bleibt, wie er ist, solange dieser hier nicht gemessen ist.
+///
+/// Der Unterschied ist genau einer — wie das Programm sich verabschiedet.
+/// Unter wasmi kommt `proc_exit` als `Err` mit Status zurueck; unter forge
+/// rollt es ueber `host_trap` ab und hinterlegt den Status vorher im
+/// wasi-Zustand. Beide enden im selben Zustand, also liest der Rueckweg hier
+/// dasselbe.
+pub fn execute_wasi_forge(
+    wasm_bytes: &[u8],
+    cap_id: CapId,
+    fuel: u64,
+    ctx: alloc::boxed::Box<crate::wasi::WasiCtx>,
+    terminal_idx: u8,
+) -> Result<i32, WasmError> {
+    let m = forge_core::compile(wasm_bytes).map_err(|_| WasmError::InvalidModule)?;
+    let entry = m.plan.exports.iter().find(|(n, _)| n == "_start").map(|(_, i)| *i)
+        .and_then(|i| m.offset_of(i))
+        .ok_or(WasmError::FunctionNotFound)?;
+
+    // Der Zustand gehoert hier UNS — unter wasmi haelt ihn der Store. Er darf
+    // sich nicht bewegen, solange die Instanz seinen Zeiger im vmctx hat.
+    let mut hs = HostState {
+        output: String::new(),
+        cap_id,
+        direct_output: true,
+        terminal_idx,
+        core_id: 0,
+        pid: 0,
+        hw: None,
+        widget_window_id: 0,
+        module_name: String::new(),
+        launch_arg: None,
+        http_final_url: None,
+        http_content_type: None,
+        http_last_error: None,
+        http_reply_headers: None,
+        http_status: 0,
+        wasi: Some(ctx),
+    };
+    let host = forge_glue::NpkHost(&raw mut hs);
+    let mut inst = crate::forge_rt::Instance::new_with_host(&m, &host)
+        .ok_or(WasmError::InstantiationFailed)?;
+    let open = inst.unresolved_imports();
+    if open > 0 {
+        kprintln!("[npk] forge: {} Importe unaufgeloest — das Modul wird stehenbleiben", open);
+        return Err(WasmError::InstantiationFailed);
+    }
+    inst.set_fuel(fuel.min(i64::MAX as u64) as i64);
+
+    let (_ret, trap) = inst.call(entry, 0, 0, 0);
+    match trap {
+        // Sauber aus `_start` zurueck: ein wasi-Programm tut das selten, aber
+        // es ist erlaubt und bedeutet Status 0.
+        forge_core::trap::NONE => Ok(crate::wasi::exit_status(&hs).unwrap_or(0)),
+        // Der normale Abgang: `proc_exit` hat den Status vorher hinterlegt.
+        forge_core::trap::EXIT => Ok(crate::wasi::exit_status(&hs).unwrap_or(0)),
+        forge_core::trap::OUT_OF_FUEL => Err(WasmError::FuelExhausted),
+        other => {
+            kprintln!("[npk] forge: python endete mit {}", forge_core::trap::name(other));
+            Err(WasmError::ExecutionFailed)
+        }
+    }
+}
+
 /// Route a string to wherever this run's output belongs: straight to a
 /// specific terminal on a worker core, to the active terminal via
 /// `kprint`, or into the buffer a one-shot `run` prints at the end.
