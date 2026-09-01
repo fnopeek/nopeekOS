@@ -120,7 +120,7 @@ pub type NativeFn = fn(&mut crate::js::interp::Interp, Value, &[Value]) -> Resul
 
 pub struct NativeData {
     pub func: NativeFn,
-    pub name: &'static str,
+    pub name: Rc<str>,
     pub length: usize,
     /// Darf mit `new` gerufen werden (Konstruktor)?
     pub ctor: bool,
@@ -177,6 +177,17 @@ impl Object {
         self.props.insert(k, p);
     }
     pub fn define(&mut self, k: &str, p: Prop) { self.set_prop(Rc::from(k), p); }
+
+    /// Alle Index-Eigenschaften in EINEM Durchgang entfernen.
+    ///
+    /// `remove` je Schluessel laeuft die Reihenfolgeliste jedes Mal ab — bei
+    /// n Schluesseln also O(n²), und das an der Schrittgrenze vorbei. Genau
+    /// daran ist der Lauf von 20 auf ueber 60 Sekunden gestiegen, nachdem
+    /// `shift`/`splice`/`sort` dazukamen.
+    pub fn clear_indices(&mut self) {
+        self.props.retain(|k, _| array_index(k).is_none());
+        self.order.retain(|k| array_index(k).is_none());
+    }
 
     pub fn remove(&mut self, k: &str) -> bool {
         if self.props.remove(k).is_some() {
@@ -291,8 +302,9 @@ pub fn new_kind(proto: Option<Gc>, kind: ObjKind) -> Gc {
 }
 
 /// Damit `Box<dyn …>` nicht noetig ist, wenn ein natives Objekt gebaut wird.
-pub fn native(proto: Option<Gc>, f: NativeFn, name: &'static str, length: usize, ctor: bool) -> Gc {
-    let g = new_kind(proto, ObjKind::Native(Rc::new(NativeData { func: f, name, length, ctor })));
+pub fn native(proto: Option<Gc>, f: NativeFn, name: &str, length: usize, ctor: bool) -> Gc {
+    let g = new_kind(proto, ObjKind::Native(Rc::new(
+        NativeData { func: f, name: Rc::from(name), length, ctor })));
     {
         let mut o = g.borrow_mut();
         o.define("length", Prop { value: Some(Value::Num(length as f64)), get: None, set: None,

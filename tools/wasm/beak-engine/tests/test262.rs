@@ -323,6 +323,10 @@ fn test262_exec() {
     let show: usize = std::env::var("T262_SHOW").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
 
     let hread = |f: &str| fs::read_to_string(harness.join(f)).unwrap_or_default();
+    let mut hmap: std::collections::BTreeMap<String, String> = Default::default();
+    let mut hcache = |f: &str| -> String {
+        hmap.entry(f.to_string()).or_insert_with(|| fs::read_to_string(harness.join(f)).unwrap_or_default()).clone()
+    };
     // EINMAL geparst, dann nur noch ausgefuehrt. Der Vorspann je Variante neu
     // zu parsen war der erste Entwurf und hat den Lauf allein damit verbracht.
     let prologue_src = format!("{}\n{}\n", hread("assert.js"), hread("sta.js"));
@@ -342,6 +346,12 @@ fn test262_exec() {
     let (mut skip_dir, mut skip_kind, mut skip_feat) = (0usize, 0usize, 0usize);
     let mut panics = 0usize;
     let mut fails: Vec<(String, String)> = Vec::new();
+    let mut slow: Vec<(u128, String)> = Vec::new();
+    let trace = std::env::var("T262_TRACE").ok();
+    // Die Phasen IM echten Lauf, nicht in einer Nebenmessung. Die
+    // Nebenmessung sagte 46 µs je Variante und lag um den Faktor 100 daneben,
+    // weil sie den teuren Fall nicht enthielt: sie parste nichts.
+    let (mut t_read, mut t_parse, mut t_exec) = (0u128, 0u128, 0u128);
     let mut by_msg: std::collections::BTreeMap<String, (usize, String)> = Default::default();
 
     for p in &files {
@@ -367,22 +377,53 @@ fn test262_exec() {
             run += 1;
             let mut text = String::new();
             if strict && !raw { text.push_str("\"use strict\";\n"); }
-            if !raw { for inc in &m.includes { text.push_str(&hread(inc)); text.push('\n'); } }
+            // Die Hilfsdateien aus dem Zwischenspeicher: `propertyHelper.js`
+            // allein sind 510 Zeilen, und sie je Variante von der Platte zu
+            // holen ist Arbeit fuer nichts.
+            if !raw { for inc in &m.includes { text.push_str(&hcache(inc)); text.push('\n'); } }
             text.push_str(&src);
 
             let neg = m.negative_parse || m.negative_other;
+            // Wer laenger braucht als das, wird SOFORT genannt — mit
+            // `flush`, damit die Zeile auch dann steht, wenn der Lauf danach
+            // haengt. Ein Testlaeufer, der ohne Angabe stehenbleiben kann,
+            // ist nicht fertig: dreimal in dieser Sitzung habe ich stattdessen
+            // geraten, wo die Zeit bleibt.
+            // Der Name VOR dem Lauf, nicht danach. Ein Test, der nie
+            // zurueckkehrt, taucht in einer Meldung danach nie auf — genau
+            // daran ist die Suche nach dem Haenger in `built-ins/Object`
+            // zweimal vorbeigelaufen. Nur mit `T262_TRACE`, weil eine Datei je
+            // Variante sonst selbst Zeit kostet.
+            if let Some(mark) = &trace {
+                let _ = fs::write(mark, format!("{rel}{}", if strict { " [strict]" } else { "" }));
+            }
+            let t_r = std::time::Instant::now();
             // Ein Absturz im Interpreter darf den LAUF nicht beenden — sonst
             // misst ein einziger `unwrap` gar nichts mehr. Getrennt gezaehlt.
-            let out = std::panic::catch_unwind(|| {
+            t_read += t_r.elapsed().as_nanos();
+            let t0 = std::time::Instant::now();
+            let mut np = 0u128;
+            let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let tp = std::time::Instant::now();
                 let prog = match beak_engine::js::parse(&text, false) {
                     Ok(p) => p,
                     Err(e) => return Err(format!("SyntaxError: {} @{}", e.msg, e.at)),
                 };
+                np = tp.elapsed().as_nanos();
                 let mut s = beak_engine::js::Session::new(beak_engine::js::TEST_STEPS);
                 if raw { return s.run(&prog); }
                 s.run(if strict { &prologue_strict } else { &prologue })?;
                 s.run(&prog)
-            });
+            }));
+            t_parse += np;
+            t_exec += t0.elapsed().as_nanos().saturating_sub(np);
+            let ms = t0.elapsed().as_millis();
+            if ms >= 25 {
+                use std::io::Write;
+                eprintln!("   [langsam] {ms:5} ms  {rel}{}", if strict { " [strict]" } else { "" });
+                let _ = std::io::stderr().flush();
+                slow.push((ms, rel.clone()));
+            }
             let ok = match &out {
                 Err(_) => false,
                 Ok(Ok(())) => !neg,
@@ -417,6 +458,15 @@ fn test262_exec() {
     eprintln!("   bestanden {pass} von {run} gefahren = {:.2} %", pct(pass, run));
     eprintln!("   (V8 auf demselben Korpus: 99,41 % — die DIFFERENZ ist die Arbeit)");
     if panics > 0 { eprintln!("   ⚠ {panics} Abstuerze im Laeufer"); }
+    eprintln!("   Phasen: {:.1} s lesen+zusammenbauen · {:.1} s parsen · {:.1} s ausfuehren",
+        t_read as f64 / 1e9, t_parse as f64 / 1e9, t_exec as f64 / 1e9);
+    if !slow.is_empty() {
+        slow.sort_by_key(|(ms, _)| std::cmp::Reverse(*ms));
+        let total: u128 = slow.iter().map(|(ms, _)| ms).sum();
+        eprintln!("   ⏱ {} Tests ueber 25 ms, zusammen {:.1} s — die teuersten:",
+            slow.len(), total as f64 / 1000.0);
+        for (ms, p) in slow.iter().take(12) { eprintln!("      {ms:6} ms  {p}"); }
+    }
 
     let mut v: Vec<_> = by_msg.into_iter().collect();
     v.sort_by_key(|(_, (n, _))| std::cmp::Reverse(*n));

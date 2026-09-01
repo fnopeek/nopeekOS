@@ -15,7 +15,6 @@
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use alloc::vec;
 use core::cell::RefCell;
 use hashbrown::HashMap;
 
@@ -104,23 +103,40 @@ pub struct Interp {
     /// bleibt, misst gar nichts mehr.
     pub steps: u64,
     pub max_steps: u64,
+    /// Eine Uhr, die nur steigt. Ersatz, bis beak die echte einreicht —
+    /// `beak-engine` ist hostfrei und hat keine.
+    pub fake_now: f64,
 }
 
 pub const MAX_DEPTH: usize = 400;
 
+/// Wie weit eine Prototypkette laufen darf.
+///
+/// **Ein Sicherungsnetz, keine Regel der Sprache.** Eine Kette kann einen
+/// Zyklus enthalten (`Object.setPrototypeOf` muss ihn zwar ablehnen, aber
+/// darauf allein soll sich hier nichts verlassen), und dann laeuft jeder
+/// Eigenschaftszugriff fuer immer — in NATIVEM Code, an der Schrittgrenze
+/// vorbei. Eine fremde Seite haette damit drei Zeilen gebraucht, um beak
+/// aufzuhaengen. Echte Ketten sind ein Dutzend Glieder tief.
+pub const MAX_PROTO_CHAIN: usize = 1000;
+
 /// Was ein Testlaeufer setzt.
 ///
-/// 20 Mio. war der erste Wert und er war zu hoch: ein Baumlaeufer braucht
-/// dafuer Sekunden, und bei ein paar hundert Endlosschleifen im Korpus steht
-/// der ganze Lauf. Ein echter test262-Test kommt mit einigen Zehntausend
-/// Schritten aus; 2 Mio. ist reichlich und macht aus einer Endlosschleife
-/// Millisekunden.
-pub const TEST_STEPS: u64 = 2_000_000;
+/// Gegen eine Messung gesetzt, nicht gegen ein Gefuehl: ein gewoehnlicher
+/// test262-Test kostet **1,9 µs**, also grob hundert Schritte. 2 Mio. waren
+/// das Zwanzigtausendfache — und weil diese Maschine rund 11 Mio. Schritte je
+/// Sekunde schafft, kostete JEDER Test, der absichtlich mit einer absurden
+/// Array-Laenge arbeitet, 180 ms. Davon gibt es in `built-ins/Array` Tausende.
+///
+/// 200 000 sind immer noch hundertfache Reserve und decken hoechstens 18 ms.
+/// Was darueber faellt, verschwindet nicht still: „step budget exhausted"
+/// steht als eigene Zeile in der Fehlerkarte.
+pub const TEST_STEPS: u64 = 200_000;
 
 impl Interp {
     pub fn new() -> Interp {
         let realm = super::builtins::make_realm();
-        Interp { realm, depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX }
+        Interp { realm, depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX, fake_now: 0.0 }
     }
 
     /// Ein Arbeitsschritt in einer EINGEBAUTEN Schleife.
@@ -245,7 +261,10 @@ impl Interp {
         // Array-`length` lebt in der Eigenschaftstabelle wie alles andere;
         // nur die Kette darunter wird hier gelaufen.
         let mut cur = Some(start);
+        let mut hops = 0;
         while let Some(o) = cur {
+            hops += 1;
+            if hops > MAX_PROTO_CHAIN { return self.type_err("prototype chain too long (cycle?)"); }
             let found = o.borrow().get_own(key).cloned();
             if let Some(p) = found {
                 if let Some(g) = &p.get {
@@ -269,7 +288,10 @@ impl Interp {
         };
         // Ein Setzer irgendwo in der Kette gewinnt vor dem eigenen Feld.
         let mut cur = Some(o.clone());
+        let mut hops = 0;
         while let Some(c) = cur {
+            hops += 1;
+            if hops > MAX_PROTO_CHAIN { return self.type_err("prototype chain too long (cycle?)"); }
             let found = c.borrow().get_own(key).cloned();
             if let Some(p) = found {
                 if let Some(s) = &p.set { self.call(&s.clone(), base.clone(), &[val])?; return Ok(()); }
@@ -311,7 +333,10 @@ impl Interp {
 
     pub fn has_property(&mut self, o: &Gc, key: &str) -> bool {
         let mut cur = Some(o.clone());
+        let mut hops = 0;
         while let Some(c) = cur {
+            hops += 1;
+            if hops > MAX_PROTO_CHAIN { return false; }
             if c.borrow().has_own(key) { return true; }
             let next = c.borrow().proto.clone();
             cur = next;

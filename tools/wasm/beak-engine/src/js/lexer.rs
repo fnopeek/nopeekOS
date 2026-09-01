@@ -17,7 +17,6 @@
 //!   der Parser es anfordert (`next_template_part`).
 
 use alloc::string::String;
-use alloc::vec::Vec;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Tok {

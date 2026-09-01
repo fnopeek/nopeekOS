@@ -1,51 +1,69 @@
 // Woran stirbt echter, ausgelieferter Code ZUERST?
 //
 // Nicht test262, sondern die Skripte, die Chromium beim Laden der zwoelf
-// Zielseiten geparst hat. Ohne DOM — `document` fehlt, das ist erwartet und
-// genau der Punkt: die Frage ist, ob die SPRACHE die Wand ist oder das DOM.
+// Zielseiten geparst hat. Ohne DOM — das ist erwartet und genau der Punkt:
+// die Frage ist, ob die SPRACHE die Wand ist oder die Wirtsumgebung.
+//
+// **Je SEITE eine Umgebung, nicht je Datei.** Die erste Fassung fuhr jedes
+// Skript einzeln und meldete 98 mal `mw is not defined` — aber `mw` wird von
+// einem SCHWESTERSKRIPT derselben Seite gesetzt. Ein Browser teilt die
+// Umgebung, also muss diese Messung es auch tun, sonst misst sie die
+// Isolation und nicht die Engine.
 fn main() {
     let root = std::env::var("JSCORPUS").unwrap();
-    let mut files: Vec<std::path::PathBuf> = Vec::new();
-    fn walk(d: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-        if let Ok(rd) = std::fs::read_dir(d) {
-            for e in rd.flatten() {
-                let p = e.path();
-                if p.is_dir() { walk(&p, out) } else if p.extension().is_some_and(|x| x == "js") { out.push(p) }
-            }
+    let mut pages: std::collections::BTreeMap<String, Vec<std::path::PathBuf>> = Default::default();
+    if let Ok(rd) = std::fs::read_dir(&root) {
+        for e in rd.flatten() {
+            if !e.path().is_dir() { continue }
+            let name = e.file_name().to_string_lossy().to_string();
+            let mut fs_: Vec<_> = std::fs::read_dir(e.path()).unwrap().flatten()
+                .map(|x| x.path()).filter(|p| p.extension().is_some_and(|x| x == "js")).collect();
+            // In der Reihenfolge, in der `measure.mjs` sie abgelegt hat — das
+            // ist die Reihenfolge, in der der Browser sie geparst hat.
+            fs_.sort_by_key(|p| {
+                p.file_stem().and_then(|s| s.to_str())
+                 .and_then(|s| s.rsplit("__").next().map(|n| n.parse::<u32>().unwrap_or(0)))
+                 .unwrap_or(0)
+            });
+            pages.insert(name, fs_);
         }
     }
-    walk(std::path::Path::new(&root), &mut files);
-    files.sort();
 
     let mut hist: std::collections::BTreeMap<String, usize> = Default::default();
     let (mut ok, mut n) = (0usize, 0usize);
-    for f in &files {
-        let Ok(src) = std::fs::read_to_string(f) else { continue };
-        n += 1;
-        // Ein ausgeliefertes Skript kann Script ODER Modul sein, und die
-        // Datei sagt es nicht. Beides versuchen — sonst misst man 250 mal
-        // "unexpected keyword" beim `export` und haelt es fuer eine Luecke.
-        let r = std::panic::catch_unwind(|| {
-            match beak_engine::js::run_capped(&src, false, 500_000) {
-                Ok(()) => Ok(()),
-                Err(e1) => {
-                    if e1.starts_with("SyntaxError") {
-                        beak_engine::js::run_capped(&src, true, 500_000)
-                    } else { Err(e1) }
-                }
-            }
-        });
-        let why = match r {
-            Err(_) => "LAEUFER: Absturz".to_string(),
-            Ok(Ok(())) => { ok += 1; continue }
-            Ok(Err(e)) => e,
-        };
-        let key: String = why.chars().map(|c| if c.is_ascii_digit() { '#' } else { c })
-            .collect::<String>().chars().take(62).collect();
-        *hist.entry(key).or_default() += 1;
+    println!("\n── Echter Korpus, je Seite EINE Umgebung, ohne DOM ──\n");
+    for (page, files) in &pages {
+        let (mut pok, mut pn) = (0usize, 0usize);
+        // Eine Umgebung fuer die ganze Seite. Ein Absturz in Skript 3 darf die
+        // Umgebung nicht mitnehmen, also faengt jeder Lauf fuer sich.
+        let mut sess = beak_engine::js::Session::new(2_000_000);
+        for f in files {
+            let Ok(src) = std::fs::read_to_string(f) else { continue };
+            n += 1; pn += 1;
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let prog = match beak_engine::js::parse(&src, false) {
+                    Ok(p) => p,
+                    Err(_) => match beak_engine::js::parse(&src, true) {
+                        Ok(p) => p,
+                        Err(e) => return Err(format!("SyntaxError: {}", e.msg)),
+                    },
+                };
+                sess.run(&prog)
+            }));
+            let why = match r {
+                Err(_) => "LAEUFER: Absturz".to_string(),
+                Ok(Ok(())) => { ok += 1; pok += 1; continue }
+                Ok(Err(e)) => e,
+            };
+            let key: String = why.chars().map(|c| if c.is_ascii_digit() { '#' } else { c })
+                .collect::<String>().chars().take(62).collect();
+            *hist.entry(key).or_default() += 1;
+        }
+        let mark = if pok == pn { "   " } else { " ! " };
+        println!("  {mark}{pok:3}/{pn:3}  {page}");
     }
-    println!("\n── Echter Korpus, OHNE DOM: {ok} von {n} laufen durch\n");
+    println!("\n  {ok} von {n} Skripten laufen durch\n");
     let mut v: Vec<_> = hist.into_iter().collect();
     v.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
-    for (k, c) in v.iter().take(18) { println!("  {c:4}  {k}"); }
+    for (k, c) in v.iter().take(20) { println!("  {c:4}  {k}"); }
 }
