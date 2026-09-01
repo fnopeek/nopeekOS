@@ -120,6 +120,16 @@ pub fn intent_run_background(module_name: &str) {
 /// Run a WASM module on a worker core in the current window.
 /// Returns immediately — intent loop routes keys when this window is focused.
 pub fn intent_run_interactive(module_name: &str) {
+    run_interactive_on(module_name, false)
+}
+
+/// Dasselbe, aber unter forge. Eigener Eingang statt einer globalen Fahne:
+/// so laeuft genau EIN Modul auf dem neuen Motor und alles andere wie bisher.
+pub fn intent_run_interactive_forge(module_name: &str) {
+    run_interactive_on(module_name, true)
+}
+
+fn run_interactive_on(module_name: &str, use_forge: bool) {
     use crate::{wasm, npkfs, capability};
 
     let sys_path = alloc::format!("sys/wasm/{}", module_name);
@@ -152,7 +162,12 @@ pub fn intent_run_interactive(module_name: &str) {
 
     // Spawn on worker core — returns immediately
     // Intent loop will route keys when this window is focused
-    if !wasm::spawn_on_worker(wasm_bytes.to_vec(), module_cap, term_idx, module_name) {
+    let ok = if use_forge {
+        wasm::spawn_on_worker_forge(wasm_bytes.to_vec(), module_cap, term_idx, module_name)
+    } else {
+        wasm::spawn_on_worker(wasm_bytes.to_vec(), module_cap, term_idx, module_name)
+    };
+    if !ok {
         kprintln!("[npk] Failed to spawn '{}'", module_name);
     }
 }

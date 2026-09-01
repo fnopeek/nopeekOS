@@ -146,6 +146,9 @@ struct WasmJob {
     /// Optional launch argument (e.g. a file path to open), readable by
     /// the app via `npk_launch_arg`. Set by `npk_open`.
     launch_arg: Option<String>,
+    /// Run this one under forge instead of the interpreter. Per job, not
+    /// global: ein Fehler in der Bruecke legt so nicht jede App um.
+    use_forge: bool,
 }
 
 static WASM_JOBS: Mutex<[Option<WasmJob>; MAX_WASM_JOBS]> =
@@ -328,9 +331,24 @@ pub fn spawn_widget_app(wasm_bytes: Vec<u8>, cap_id: CapId, module_name: &str, w
     spawn_on_worker_inner(wasm_bytes, cap_id, 255, module_name, false, widget_wid, None)
 }
 
+/// Wie `spawn_on_worker`, aber unter forge. Derselbe Weg, dieselbe Jobqueue,
+/// dasselbe Fenster — nur der Motor ist ein anderer.
+pub fn spawn_on_worker_forge(wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8, module_name: &str) -> bool {
+    spawn_on_worker_inner_engine(wasm_bytes, cap_id, terminal_idx, module_name, true, 0, None, true)
+}
+
 fn spawn_on_worker_inner(
     wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8, module_name: &str,
     foreground: bool, widget_wid: u32, launch_arg: Option<String>,
+) -> bool {
+    spawn_on_worker_inner_engine(
+        wasm_bytes, cap_id, terminal_idx, module_name, foreground, widget_wid, launch_arg, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_on_worker_inner_engine(
+    wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8, module_name: &str,
+    foreground: bool, widget_wid: u32, launch_arg: Option<String>, use_forge: bool,
 ) -> bool {
     let mut jobs = WASM_JOBS.lock();
     let slot = match jobs.iter().position(|j| j.is_none()) {
@@ -345,7 +363,7 @@ fn spawn_on_worker_inner(
     JOB_DONE[slot].store(false, core::sync::atomic::Ordering::Relaxed);
     jobs[slot] = Some(WasmJob {
         bytes: wasm_bytes, cap_id, terminal_idx, name, name_len: nlen as u8,
-        widget_window_id: widget_wid, launch_arg,
+        widget_window_id: widget_wid, launch_arg, use_forge,
     });
     drop(jobs);
 
@@ -381,6 +399,10 @@ fn wasm_worker_task(arg: u64) {
         Some(j) => j,
         None => return,
     };
+    if job.use_forge {
+        forge_worker_task(slot, job);
+        return;
+    }
     let terminal_idx = job.terminal_idx;
 
     // Clone engine (Arc internally, cheap)
@@ -472,6 +494,97 @@ fn wasm_worker_task(arg: u64) {
         APP_RUNNING[terminal_idx as usize].store(false, AtOrd::Release);
     }
     JOB_DONE[slot].store(true, core::sync::atomic::Ordering::Release);
+}
+
+/// Derselbe Job, unter forge. Bewusst NEBEN `wasm_worker_task` und nicht
+/// hinein: der Interpreterpfad bleibt Zeile fuer Zeile, wie er war, solange
+/// dieser hier nicht gemessen ist. Der Preis ist ein doppelter Nachlauf von
+/// zehn Zeilen — billiger als ein Umbau an dem Weg, an dem jede App haengt.
+fn forge_worker_task(slot: usize, job: WasmJob) {
+    let terminal_idx = job.terminal_idx;
+    let core_id = crate::smp::per_core::current_core_id();
+    let name_str = core::str::from_utf8(&job.name[..job.name_len as usize]).unwrap_or("?");
+    let pid = crate::process::spawn(name_str, crate::process::KIND_WASM, terminal_idx, core_id as u8);
+
+    // Ab hier muss jeder Ausgang aufraeumen, sonst bleibt ein Prozess stehen
+    // und das Terminal nimmt keine Tasten mehr an.
+    let done = |pid: u32, terminal_idx: u8, slot: usize| {
+        crate::process::exit(pid);
+        if (terminal_idx as usize) < MAX_APP_BUFS {
+            APP_RUNNING[terminal_idx as usize].store(false, AtOrd::Release);
+        }
+        JOB_DONE[slot].store(true, core::sync::atomic::Ordering::Release);
+    };
+
+    let t0 = crate::interrupts::ticks();
+    let m = match forge_core::compile(&job.bytes) {
+        Ok(m) => m,
+        Err(e) => {
+            kprintln!("[npk] forge: {} liess sich nicht uebersetzen — {}", name_str, e);
+            done(pid, terminal_idx, slot);
+            return;
+        }
+    };
+    let compile_ms = crate::interrupts::ticks().saturating_sub(t0) * 10;
+
+    let entry = m.plan.exports.iter().find(|(n, _)| n == "_start").map(|(_, i)| *i)
+        .and_then(|fidx| m.offset_of(fidx));
+    let Some(off) = entry else {
+        kprintln!("[npk] forge: {} hat kein _start", name_str);
+        done(pid, terminal_idx, slot);
+        return;
+    };
+
+    // Der Zustand gehoert hier UNS — unter wasmi haelt ihn der Store. Er darf
+    // sich nicht bewegen, solange die Instanz seinen Zeiger im vmctx hat.
+    let mut hs = HostState {
+        output: String::new(),
+        cap_id: job.cap_id,
+        direct_output: true,
+        terminal_idx: job.terminal_idx,
+        core_id,
+        pid,
+        hw: None,
+        widget_window_id: job.widget_window_id,
+        module_name: String::from(name_str),
+        launch_arg: job.launch_arg.clone(),
+        http_final_url: None,
+        http_content_type: None,
+        http_last_error: None,
+        http_reply_headers: None,
+        http_status: 0,
+        wasi: None,
+    };
+
+    let host = forge_glue::NpkHost(&raw mut hs);
+    let Some(mut inst) = crate::forge_rt::Instance::new_with_host(&m, &host) else {
+        kprintln!("[npk] forge: {} — Instanz liess sich nicht bauen", name_str);
+        done(pid, terminal_idx, slot);
+        return;
+    };
+    // Ein Import auf dem Trap-Stumpf wuerde beim ersten Aufruf stehenbleiben.
+    // Das jetzt sagen ist besser als es spaeter als Absturz zu lesen.
+    let open = inst.unresolved_imports();
+    if open > 0 {
+        kprintln!("[npk] forge: {} — {} Importe unaufgeloest, das Modul wird stehenbleiben",
+            name_str, open);
+    }
+    kprintln!("[npk] forge: {} uebersetzt in {} ms ({} B x86)", name_str, compile_ms, m.code.len());
+
+    inst.set_fuel(INTERACTIVE_FUEL as i64);
+    crate::process::set_memory(pid, inst.memory_size() as u32);
+
+    let (_ret, trap) = inst.call(off, 0, 0, 0);
+    if trap != forge_core::trap::NONE {
+        kprintln!("[npk] forge: {} endete mit {}", name_str, forge_core::trap::name(trap));
+    }
+
+    // Wie im Interpreterpfad: Hardware zurueck, Pfadrechte weg. Beide
+    // arbeiten schon auf `&mut HostState`, also gilt hier dasselbe.
+    cleanup_hw_state(&mut hs);
+    capability::revoke_path_grants(&hs.cap_id);
+    crate::process::set_memory(pid, inst.memory_size() as u32);
+    done(pid, terminal_idx, slot);
 }
 
 pub fn init() {

@@ -312,8 +312,6 @@ impl Instance {
     /// keep trapping. A module is never half-wired without saying so —
     /// `unresolved_imports` counts what stayed on the stub.
     ///
-    /// Noch von niemandem gerufen: der Ausfuehrungspfad kommt als naechstes.
-    #[allow(dead_code)]
     pub fn new_with_host(m: &CompiledModule, host: &dyn HostImports) -> Option<Instance> {
         Self::build(m, Some(host))
     }
@@ -420,9 +418,14 @@ impl Instance {
         })
     }
 
-    #[allow(dead_code)]
     pub fn unresolved_imports(&self) -> u32 {
         self.unresolved
+    }
+
+    /// Groesse der linearen Speichers in Bytes, wie sie gerade im vmctx steht.
+    /// Waechst mit `memory.grow`, also nach dem Lauf ein anderer Wert als davor.
+    pub fn memory_size(&self) -> u64 {
+        self.ctx[vmctx::MEM_SIZE as usize / 8]
     }
 
     pub fn set_fuel(&mut self, v: i64) {

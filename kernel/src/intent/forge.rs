@@ -81,8 +81,17 @@ pub fn intent_forge(args: &str) {
         selftest();
         return;
     }
+    if let Some(rest) = name.strip_prefix("run ") {
+        let m = rest.trim();
+        if m.is_empty() {
+            kprintln!("[npk] Usage: forge run <module>");
+            return;
+        }
+        super::wasm::intent_run_interactive_forge(m);
+        return;
+    }
     if name.is_empty() {
-        kprintln!("[npk] Usage: forge <module> | forge selftest");
+        kprintln!("[npk] Usage: forge <module> | forge run <module> | forge selftest");
         return;
     }
 
