@@ -31,7 +31,7 @@ const BUNDLE: &str = "sys/python";
 const PYTHON_FUEL: u64 = 600_000_000_000;
 
 pub fn intent_python(args: &str, vault: &'static spin::Mutex<capability::Vault>, session: capability::CapId) {
-    intent_python_on(args, vault, session, false)
+    intent_python_on(args, vault, session, crate::wasm::forge_is_default())
 }
 
 /// Dasselbe unter forge. Eigener Eingang statt einer Fahne im python-Aufruf:

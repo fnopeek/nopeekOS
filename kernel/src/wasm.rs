@@ -16,6 +16,40 @@ use crate::drivers::pci;
 pub(crate) mod host_core;
 pub(crate) mod forge_glue;
 
+// ── Welcher Motor faehrt ein Modul ────────────────────────────────────
+//
+// Die Wahl gehoert NICHT an jeden Startweg. Autostart, Treiber, Dienste und
+// Einmallaeufe kommen alle irgendwo anders herein — und `dock`, `bar`,
+// `audio_hda`, `wifid` startet ueberhaupt niemand von Hand. Ein Modul von
+// Hand zu starten pruefte ausserdem einen ANDEREN Pfad als den, auf dem es im
+// Betrieb hochkommt: andere Capabilities, andere Fensterbehandlung.
+//
+// Deshalb eine Fahne, die einen Neustart uebersteht. Umlegen, neu starten,
+// und der ganze Desktop laeuft unter forge — oder eben nicht, und man sieht
+// es sofort. Die Intent-Shell selbst ist nativ, also bleibt ein Prompt
+// erreichbar, auch wenn ein Modul kippt.
+static FORGE_DEFAULT: AtomicBool = AtomicBool::new(false);
+
+/// Aus der Konfiguration lesen. Nach `config::load()` aufrufen.
+pub fn load_engine_default() {
+    let on = crate::config::get("wasm.engine").as_deref() == Some("forge");
+    FORGE_DEFAULT.store(on, AtOrd::Release);
+    if on {
+        kprintln!("[npk] WASM: forge ist der Vorgabemotor");
+    }
+}
+
+/// Welcher Motor faehrt, wenn der Aufrufer nichts anderes sagt.
+pub fn forge_is_default() -> bool {
+    FORGE_DEFAULT.load(AtOrd::Acquire)
+}
+
+/// Umlegen und merken.
+pub fn set_engine_default(forge: bool) {
+    FORGE_DEFAULT.store(forge, AtOrd::Release);
+    crate::config::set("wasm.engine", if forge { "forge" } else { "wasmi" });
+}
+
 pub struct WasmResult {
     pub output: String,
 }
@@ -341,8 +375,12 @@ fn spawn_on_worker_inner(
     wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8, module_name: &str,
     foreground: bool, widget_wid: u32, launch_arg: Option<String>,
 ) -> bool {
+    // Kein verdrahtetes `false` mehr: hier kommen Autostart, Treiber, Dienste
+    // und Widget-Apps alle durch, und sie sollen denselben Motor fahren wie
+    // alles andere.
+    let e = forge_is_default();
     spawn_on_worker_inner_engine(
-        wasm_bytes, cap_id, terminal_idx, module_name, foreground, widget_wid, launch_arg, false)
+        wasm_bytes, cap_id, terminal_idx, module_name, foreground, widget_wid, launch_arg, e)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -607,56 +645,14 @@ pub fn execute_sandboxed_with_fuel(
 /// Execute a WASM module in interactive mode (live display).
 /// npk_print writes directly to terminal. Used for long-running apps (top).
 #[allow(dead_code)]
-pub fn execute_interactive(
-    wasm_bytes: &[u8], func_name: &str, args: &[Val], cap_id: CapId,
-) -> Result<WasmResult, WasmError> {
-    // Clone engine to release ENGINE lock — interactive apps run for a long time
-    let engine = {
-        let guard = ENGINE.lock();
-        guard.as_ref().ok_or(WasmError::NotInitialized)?.clone()
-    };
-
-    let module = Module::new(&engine, wasm_bytes)
-        .map_err(|_| WasmError::InvalidModule)?;
-
-    let mut store = Store::new(&engine, HostState {
-        output: String::new(),
-        cap_id,
-        direct_output: true,
-        terminal_idx: 255, // active terminal
-        core_id: 0, // runs on Core 0 (non-worker path)
-        pid: 0,
-        hw: None,
-        widget_window_id: 0,
-        module_name: String::new(),
-        launch_arg: None,
-        http_final_url: None,
-        http_content_type: None,
-        http_last_error: None,
-        http_reply_headers: None,
-        http_status: 0,
-        wasi: None,
-    });
-    store.set_fuel(INTERACTIVE_FUEL).map_err(|_| WasmError::ExecutionFailed)?;
-
-    let mut linker = <Linker<HostState>>::new(&engine);
-    register_host_functions(&mut linker)?;
-
-    let instance = linker.instantiate_and_start(&mut store, &module)
-        .map_err(|_| WasmError::InstantiationFailed)?;
-
-    let func = instance.get_func(&store, func_name)
-        .ok_or(WasmError::FunctionNotFound)?;
-
-    func.call(&mut store, args, &mut [])
-        .map_err(|e| map_exec_error(e))?;
-
-    Ok(WasmResult { output: String::new() })
-}
-
 fn execute_inner(
     wasm_bytes: &[u8], func_name: &str, args: &[Val], cap_id: CapId, fuel: u64,
 ) -> Result<WasmResult, WasmError> {
+    if forge_is_default() {
+        if let Some(r) = execute_inner_forge(wasm_bytes, func_name, args, cap_id, fuel) {
+            return r;
+        }
+    }
     // Clone the engine (cheap Arc bump) and drop the ENGINE lock so two
     // one-shot decodes (run/wallpaper) can run concurrently. The resident
     // + `execute` paths already do this; only this one held the lock over
@@ -791,6 +787,70 @@ pub fn execute_wasi(
             None => Err(map_exec_error(e)),
         },
     }
+}
+
+/// Der Einmallauf unter forge — wallpaper und `run <mod> <func> <args>`.
+///
+/// forges Eintritt nimmt drei `u32`; alles darueber oder mit anderen Typen
+/// bleibt beim Interpreter, und zwar SICHTBAR statt still. Der haeufige Fall
+/// (`"_start"` ohne Argumente, wie wallpaper ihn ruft) geht durch.
+fn execute_inner_forge(
+    wasm_bytes: &[u8], func_name: &str, args: &[Val], cap_id: CapId, fuel: u64,
+) -> Option<Result<WasmResult, WasmError>> {
+    if args.len() > 3 || args.iter().any(|v| v.i32().is_none()) {
+        kprintln!("[npk] forge: {} nimmt Argumente, die der Eintritt nicht kann — wasmi", func_name);
+        return None;
+    }
+    let m = match forge_core::compile(wasm_bytes) {
+        Ok(m) => m,
+        Err(_) => return Some(Err(WasmError::InvalidModule)),
+    };
+    let entry = m.plan.exports.iter().find(|(n, _)| n == func_name).map(|(_, i)| *i)
+        .and_then(|i| m.offset_of(i));
+    let Some(off) = entry else {
+        return Some(Err(WasmError::FunctionNotFound));
+    };
+
+    let mut hs = HostState {
+        output: String::new(),
+        cap_id,
+        direct_output: false,
+        terminal_idx: TERM_IDX_ACTIVE,
+        core_id: 0,
+        pid: 0,
+        hw: None,
+        widget_window_id: 0,
+        module_name: String::new(),
+        launch_arg: None,
+        http_final_url: None,
+        http_content_type: None,
+        http_last_error: None,
+        http_reply_headers: None,
+        http_status: 0,
+        wasi: None,
+    };
+    let host = forge_glue::NpkHost(&raw mut hs);
+    let Some(mut inst) = crate::forge_rt::Instance::new_with_host(&m, &host) else {
+        return Some(Err(WasmError::InstantiationFailed));
+    };
+    if inst.unresolved_imports() > 0 {
+        return Some(Err(WasmError::InstantiationFailed));
+    }
+    inst.set_fuel(fuel.min(i64::MAX as u64) as i64);
+
+    let a = |i: usize| args.get(i).and_then(|v| v.i32()).unwrap_or(0) as u32;
+    let (_ret, trap) = inst.call(off, a(0), a(1), a(2));
+
+    cleanup_hw_state(&mut hs);
+    capability::revoke_path_grants(&hs.cap_id);
+    Some(match trap {
+        forge_core::trap::NONE => Ok(WasmResult { output: hs.output }),
+        forge_core::trap::OUT_OF_FUEL => Err(WasmError::FuelExhausted),
+        other => {
+            kprintln!("[npk] forge: {} endete mit {}", func_name, forge_core::trap::name(other));
+            Err(WasmError::ExecutionFailed)
+        }
+    })
 }
 
 /// Wie `execute_wasi`, aber unter forge. Bewusst daneben und nicht darin: der
