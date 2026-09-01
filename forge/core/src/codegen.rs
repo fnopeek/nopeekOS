@@ -410,6 +410,23 @@ pub mod census {
             RELOAD_COUNT.fetch_add(1, Relaxed);
         }
     }
+    #[cfg(feature = "census")]
+    pub static ARG_BYTES: AtomicU64 = AtomicU64::new(0);
+    #[cfg(feature = "census")]
+    pub static ARG_COUNT: AtomicU64 = AtomicU64::new(0);
+
+    /// Argumente eines Aufrufs, aus ihren Schlitzen geladen. Der zweite Leser
+    /// neben `pop_to` — ohne ihn sieht die Spill-Bilanz aus, als wuerde
+    /// niemand zurueckholen, was `spill_all` wegschreibt.
+    #[inline(always)]
+    pub fn arg(_bytes: usize) {
+        #[cfg(feature = "census")]
+        {
+            ARG_BYTES.fetch_add(_bytes as u64, Relaxed);
+            ARG_COUNT.fetch_add(1, Relaxed);
+        }
+    }
+
     #[inline(always)]
     pub fn local(_bytes: usize) {
         #[cfg(feature = "census")]
@@ -419,12 +436,13 @@ pub mod census {
         }
     }
 
-    /// (spill_bytes, spill_n, reload_bytes, reload_n, local_bytes, local_n)
+    /// (spill_b, spill_n, reload_b, reload_n, local_b, local_n, arg_b, arg_n)
     #[cfg(feature = "census")]
-    pub fn read() -> (u64, u64, u64, u64, u64, u64) {
+    pub fn read() -> (u64, u64, u64, u64, u64, u64, u64, u64) {
         (SPILL_BYTES.load(Relaxed), SPILL_COUNT.load(Relaxed),
          RELOAD_BYTES.load(Relaxed), RELOAD_COUNT.load(Relaxed),
-         LOCAL_BYTES.load(Relaxed), LOCAL_COUNT.load(Relaxed))
+         LOCAL_BYTES.load(Relaxed), LOCAL_COUNT.load(Relaxed),
+         ARG_BYTES.load(Relaxed), ARG_COUNT.load(Relaxed))
     }
 }
 
@@ -1929,6 +1947,7 @@ fn load_args(f: &mut Ctx, params: &[ValType]) -> i32 {
         for (i, t) in params.iter().enumerate() {
             let Place::Stack(j) = places[i] else { continue };
             let off = f.slot((base + i) as u32);
+            let mark = f.asm.pos();
             if wide(*t) {
                 f.asm.load64(A, Reg::Rbp, off);
             } else {
@@ -1937,11 +1956,13 @@ fn load_args(f: &mut Ctx, params: &[ValType]) -> i32 {
                 // value.
                 f.asm.load32(A, Reg::Rbp, off);
             }
+            census::arg(f.asm.pos() - mark);
             f.asm.store64(Reg::Rsp, 8 * j as i32, A);
         }
     }
     for (i, t) in params.iter().enumerate() {
         let off = f.slot((base + i) as u32);
+        let mark = f.asm.pos();
         match places[i] {
             Place::Int(k) => {
                 if wide(*t) {
@@ -1953,6 +1974,7 @@ fn load_args(f: &mut Ctx, params: &[ValType]) -> i32 {
             Place::Flt(k) => f.asm.fload_slot(fw_of(*t), FARG_REGS[k], Reg::Rbp, off),
             Place::Stack(_) => {}
         }
+        census::arg(f.asm.pos() - mark);
     }
     bytes
 }
