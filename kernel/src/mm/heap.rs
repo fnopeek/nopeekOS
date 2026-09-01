@@ -276,10 +276,14 @@ impl Heap {
         while h < 15 && size >= (32usize << h) { h += 1; }
         self.c.size_hist[h] += 1;
 
-        // Der Bedarf haengt an der Ausrichtung des konkreten Blocks, also wird
-        // er unten je Kandidat nachgerechnet. Fuer die Kastenwahl genuegt die
-        // Schranke ohne Ausrichtungsverlust.
-        let lower = align_up(TAG + HEADER_SIZE + size + TAG, BLOCK_ALIGN)
+        // Die untere Schranke MUSS die Ausrichtung schon enthalten, sonst
+        // faellt die Kastenwahl eine Klasse zu tief und die Suche laeuft an
+        // allen zu kleinen Bloecken dieses Kastens vorbei. Genau das kostete
+        // in 0.314.0 noch 70,4 Schritte je Belegung statt einem:
+        // `TAG + HEADER_SIZE` sind 24, ein 16-ausgerichteter Blockanfang
+        // schiebt die Nutzdaten aber auf 32.
+        let data_off = align_up(TAG + HEADER_SIZE, align);
+        let lower = align_up(data_off + size + TAG, BLOCK_ALIGN)
             .max(MIN_BLOCK_SIZE);
         let first = bin_of(lower);
 
