@@ -50,10 +50,12 @@ fn main() {
             }
         }
     }
-    sess.interp.run_timers();
+    // Mehrere Runden: die Promise-Kette endet in einem `setTimeout`, das
+    // erst faellig wird, nachdem die Kette durch ist.
+    for _ in 0..8 { if sess.interp.run_timers() == 0 { break } }
     for line in sess.interp.take_console() { println!("{line}"); }
     let d = sess.interp.doc.as_ref().unwrap();
-    for id in ["count", "inline", "bubble", "timer"] {
+    for id in ["count", "inline", "bubble", "timer", "micro"] {
         match find_id(d, id) {
             Some(n) => println!("#{id}: {:?}", d.text_of(n)),
             None => println!("#{id}: nicht gefunden"),

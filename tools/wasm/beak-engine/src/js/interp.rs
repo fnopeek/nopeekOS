@@ -116,6 +116,7 @@ pub struct Realm {
     pub iterator_proto: Gc,
     pub array_iter_proto: Gc,
     pub string_iter_proto: Gc,
+    pub promise_proto: Gc,
 }
 
 pub struct Interp {
@@ -142,6 +143,11 @@ pub struct Interp {
     pub next_sym: u32,
     /// Die globale Symbolregistrierung hinter `Symbol.for`/`Symbol.keyFor`.
     pub sym_registry: HashMap<Rc<str>, Value>,
+    /// Die Microtask-Schlange. Sie steht NEBEN `timers`, nicht darin: eine
+    /// Microtask laeuft vor dem naechsten Zeitgeber, nicht danach — das ist
+    /// der ganze Unterschied zwischen `Promise.resolve().then(f)` und
+    /// `setTimeout(f, 0)`.
+    pub jobs: alloc::collections::VecDeque<super::promise::Job>,
     /// Angemeldete Zeitgeber-Rueckrufe. Noch laeuft niemand sie; sie zu HALTEN
     /// kostet nichts und ist die Stelle, an der beaks Schleife ansetzt.
     pub timers: Vec<Value>,
@@ -191,8 +197,10 @@ impl Interp {
         super::dombind::install(&mut realm);
         super::regexp::install(&mut realm);
         super::json::install(&mut realm);
+        super::promise::install(&mut realm);
         Interp { realm, depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX,
                  fake_now: 0.0, doc: None, next_sym: 0, sym_registry: HashMap::new(),
+                 jobs: alloc::collections::VecDeque::new(),
                  timers: Vec::new(), console: Vec::new(), console_dropped: 0 }
     }
 
@@ -203,10 +211,19 @@ impl Interp {
     /// Animationen) und wuerde die Schleife sonst nie verlassen. Was waehrend
     /// des Laufs dazukommt, ist beim naechsten Mal dran.
     pub fn run_timers(&mut self) -> usize {
+        // Erst die Microtasks, dann die Zeitgeber — das IST die Rangfolge.
+        // Und ohne diese Zeile bliebe ein `Promise.resolve().then(f)` aus
+        // einem Ereignisbehandler liegen, bis zufaellig ein Zeitgeber faellig
+        // wird: `run_timers` kaeme bei leerer Zeitgeberliste gar nicht dazu.
+        super::promise::run_jobs(self);
         let due = core::mem::take(&mut self.timers);
         let n = due.len();
         for f in due {
             let _ = self.call(&f, Value::Undefined, &[]);
+            // Nach JEDEM Zeitgeber, nicht erst nach allen: Microtasks laufen
+            // zwischen den Aufgaben, und ein `then`, das der erste Zeitgeber
+            // anlegt, gehoert vor den zweiten.
+            super::promise::run_jobs(self);
         }
         n
     }
@@ -622,11 +639,17 @@ impl Interp {
     pub fn run_program(&mut self, prog: &Program) -> C<Value> {
         let env = self.realm.global_env.clone();
         self.hoist(&prog.body, &env, &env)?;
-        let mut last = Value::Undefined;
-        for st in &prog.body {
-            if let Some(v) = self.exec(st, &env)? { last = v; }
-        }
-        Ok(last)
+        let r = (|| -> C<Value> {
+            let mut last = Value::Undefined;
+            for st in &prog.body {
+                if let Some(v) = self.exec(st, &env)? { last = v; }
+            }
+            Ok(last)
+        })();
+        // Auch wenn das Programm geworfen hat: die Schlange gehoert geleert.
+        // Ein `.then`, das vor dem Fehler angelegt wurde, ist angemeldet.
+        super::promise::run_jobs(self);
+        r
     }
 
     fn run_body(&mut self, body: &[Stmt], env: &Rc<RefCell<Env>>) -> C<()> {

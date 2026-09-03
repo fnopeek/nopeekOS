@@ -16,6 +16,9 @@ fn main() {
     let mut i = beak_engine::js::interp::Interp::new();
     if std::env::var("CAP").is_ok() { i.max_steps = 2_000_000; }
     let r = i.run_program(&prog);
+    // Zeitgeber UND Microtasks nachlaufen lassen — eine Probe, die auf
+    // `setTimeout` endet, haette sonst kein Ergebnis.
+    for _ in 0..64 { if i.run_timers() == 0 { break } }
     for l in &i.console { println!("{l}"); }
     if let Err(beak_engine::js::interp::Abrupt::Throw(v)) = r {
         let m = i.get(&v, "message").ok().and_then(|m| i.to_string(&m).ok());

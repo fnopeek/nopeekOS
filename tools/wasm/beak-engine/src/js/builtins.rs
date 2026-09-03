@@ -67,6 +67,7 @@ pub fn make_realm() -> Realm {
                     ObjKind::BoolWrap(_) => "Boolean",
                     ObjKind::Arguments => "Arguments",
                     ObjKind::Regex(_) => "RegExp",
+                    ObjKind::Promise(_) => "Promise",
                     ObjKind::Plain => "Object",
                 };
                 alloc::format!("[object {tag}]")
@@ -162,6 +163,17 @@ pub fn make_realm() -> Realm {
     err_ctor!("SyntaxError", |i, _, a| make_error(i, "SyntaxError", a));
     err_ctor!("ReferenceError", |i, _, a| make_error(i, "ReferenceError", a));
     err_ctor!("EvalError", |i, _, a| make_error(i, "EvalError", a));
+    // `AggregateError` nimmt die Fehlerliste ZUERST, die Meldung danach —
+    // als einziger Fehlerkonstruktor. `Promise.any` braucht ihn.
+    err_ctor!("AggregateError", |i, _, a| {
+        let e = make_error(i, "AggregateError", a.get(1..).unwrap_or(&[]))?;
+        let errs = match a.first() {
+            None | Some(Value::Undefined) => i.new_array(alloc::vec::Vec::new()),
+            Some(v) => { let items = i.iterate(v)?; i.new_array(items) }
+        };
+        i.set(&e, "errors", errs)?;
+        Ok(e)
+    });
     err_ctor!("URIError", |i, _, a| make_error(i, "URIError", a));
 
     // ── Array.prototype ──────────────────────────────────────────────────
@@ -1235,8 +1247,7 @@ pub fn make_realm() -> Realm {
     // ein Fehler, der das Skript beendet. Die Warteschlange ist die Stelle,
     // an der beaks Ereignisschleife spaeter ansetzt — dieselbe Form wie bei
     // `addEventListener`.
-    for n in ["setTimeout", "setInterval", "requestAnimationFrame", "requestIdleCallback",
-              "queueMicrotask"] {
+    for n in ["setTimeout", "setInterval", "requestAnimationFrame", "requestIdleCallback"] {
         let g = native(Some(function_proto.clone()), |i, _, a| {
             let f = a.first().cloned().unwrap_or(Value::Undefined);
             if i.is_callable(&f) { i.timers.push(f); }
@@ -1248,6 +1259,19 @@ pub fn make_realm() -> Realm {
         let g = native(Some(function_proto.clone()), |_, _, _| Ok(Value::Undefined), n, 1, false);
         global.borrow_mut().define(n, Prop::builtin(Value::Obj(g)));
     }
+
+    // `queueMicrotask` steht bewusst NICHT in der Liste darueber: es ist kein
+    // Zeitgeber, sondern haengt an DERSELBEN Schlange wie `.then`. Genau
+    // dafuer benutzen Seiten es — „nach dem laufenden Skript, aber vor dem
+    // naechsten Zeitgeber".
+    def(&global, "queueMicrotask", |i, _, a| {
+        let f = a.first().cloned().unwrap_or(Value::Undefined);
+        if !i.is_callable(&f) { return i.type_err("queueMicrotask needs a function"); }
+        let p = super::promise::new_promise(i);
+        super::promise::settle(i, &p, Value::Undefined, false);
+        super::promise::perform_then(i, &p, f, Value::Undefined);
+        Ok(Value::Undefined)
+    }, 1, fp);
 
     // ── Storage ──────────────────────────────────────────────────────────
     //
@@ -1424,7 +1448,7 @@ pub fn make_realm() -> Realm {
             string_proto, number_proto, boolean_proto, error_proto, error_ctors,
             node_proto: ph(), element_proto: ph(), text_proto: ph(), document_proto: ph(),
             regexp_proto: ph(), symbol_proto, iterator_proto, array_iter_proto,
-            string_iter_proto }
+            string_iter_proto, promise_proto: ph() }
 }
 
 /// `this.length` als Zahl. Eigene Funktion, weil `i.to_number(&i.get(...))`

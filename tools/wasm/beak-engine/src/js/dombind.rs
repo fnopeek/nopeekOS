@@ -1143,6 +1143,11 @@ pub fn dispatch(i: &mut Interp, kind: &str, chain: &[u32]) -> C<bool> {
                             Some(Value::Bool(true)));
         if stop { break; }
     }
+    // Ein Klick ist eine AUFGABE — danach laeuft die Microtask-Schlange, wie
+    // nach jeder anderen auch. Sonst bliebe ein `.then` aus dem Behandler bis
+    // zum naechsten Zeitgeber liegen, und auf einer Seite ohne Zeitgeber
+    // fuer immer.
+    super::promise::run_jobs(i);
     Ok(matches!(ev.borrow().get_own("defaultPrevented").and_then(|p| p.value.clone()),
                 Some(Value::Bool(true))))
 }

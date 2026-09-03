@@ -246,6 +246,7 @@ pub enum ObjKind {
     SymWrap(Rc<SymData>),
     Arguments,
     Regex(Rc<crate::js::regexp::Regex>),
+    Promise(Rc<RefCell<crate::js::promise::PData>>),
 }
 
 pub struct Object {
