@@ -17,7 +17,7 @@ fn main() {
 
     let mut sess = beak_engine::js::Session::new(50_000_000);
     sess.interp.set_document(doc);
-    sess.interp.set_viewport(1024.0, 768.0);
+    sess.interp.set_media(1024.0, 768.0, false);
     for (n, src) in scripts.iter().enumerate() {
         let prog = match beak_engine::js::parse(src, false) {
             Ok(p) => p,

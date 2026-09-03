@@ -635,6 +635,46 @@ pub fn make_realm() -> Realm {
         let b = i.to_string(&this)?; Ok(Value::Str(b))
     }, 0, fp);
 
+    // `toFixed` ist die einzige Zahlenformatierung, die echter Code wirklich
+    // ruft — und sie rundet KAUFMAENNISCH auf die Stelle, nicht ueber
+    // `format!("{:.n}")`, das zur geraden Ziffer rundet. `(1.005).toFixed(2)`
+    // ist in JS "1.00" (weil 1.005 als f64 knapp darunter liegt), und wer
+    // hier eine eigene Rundung erfindet, weicht genau dort ab.
+    def(&number_proto, "toFixed", |i, t, a| {
+        let n = i.to_number(&t)?;
+        let d = to_integer(i.to_number(a.first().unwrap_or(&Value::Num(0.0)))?);
+        if !(0.0..=100.0).contains(&d) { return i.range_err("toFixed: digits out of range"); }
+        if !n.is_finite() || libm::fabs(n) >= 1e21 { return Ok(Value::string(num_to_string(n))); }
+        Ok(Value::string(fixed(n, d as u32)))
+    }, 1, fp);
+    def(&number_proto, "toPrecision", |i, t, a| {
+        let n = i.to_number(&t)?;
+        let Some(v) = a.first().filter(|v| !matches!(v, Value::Undefined)) else {
+            return Ok(Value::string(num_to_string(n)));
+        };
+        let p = to_integer(i.to_number(v)?);
+        if !(1.0..=100.0).contains(&p) { return i.range_err("toPrecision: out of range"); }
+        if !n.is_finite() { return Ok(Value::string(num_to_string(n))); }
+        if n == 0.0 { return Ok(Value::string(fixed(0.0, p as u32 - 1))); }
+        // Die Spezifikation waehlt zwischen fester und Exponentialform nach
+        // DEM Exponenten, nicht nach Geschmack: unter -6 oder ab p Stellen
+        // wird exponentiell geschrieben, sonst fest.
+        let e = libm::floor(libm::log10(libm::fabs(n))) as i32;
+        if e < -6 || e >= p as i32 {
+            let mant = n / libm::pow(10.0, e as f64);
+            let sign = if e < 0 { '-' } else { '+' };
+            return Ok(Value::string(alloc::format!("{}e{}{}",
+                fixed(mant, p as u32 - 1), sign, e.abs())));
+        }
+        Ok(Value::string(fixed(n, (p as i32 - 1 - e).max(0) as u32)))
+    }, 1, fp);
+    // Ohne Landeseinstellungen: dieselbe Ausgabe wie `toString`. Eine
+    // erfundene Tausendertrennung waere schlimmer — sie saehe aus wie eine
+    // Lokalisierung und waere die falsche.
+    def(&number_proto, "toLocaleString", |i, t, _| {
+        let n = i.to_number(&t)?; Ok(Value::string(num_to_string(n)))
+    }, 0, fp);
+
     // ── Konstruktoren + globale Funktionen ───────────────────────────────
     let object_ctor = native(Some(function_proto.clone()), |i, _, a| {
         match a.first() {
@@ -933,6 +973,51 @@ pub fn make_realm() -> Realm {
         for v in a { let n = i.to_number(v)?; if n.is_nan() { return Ok(Value::Num(f64::NAN)); } if n < m { m = n; } }
         Ok(Value::Num(m))
     }, 2, fp);
+    // Eine Stelle je Funktion mit EINEM Argument — die Liste ist die
+    // Spezifikation, nicht die Umsetzung.
+    macro_rules! m1 {
+        ($($n:literal => $f:expr),* $(,)?) => { $(
+            def(&math, $n, |i, _, a| {
+                let x = i.to_number(a.first().unwrap_or(&Value::Undefined))?;
+                let f: fn(f64) -> f64 = $f;
+                Ok(Value::Num(f(x)))
+            }, 1, fp);
+        )* };
+    }
+    m1! {
+        "round" => |x| if x.is_nan() || x.is_infinite() { x } else { libm::floor(x + 0.5) },
+        "sign" => |x| if x.is_nan() { f64::NAN } else if x > 0.0 { 1.0 }
+                      else if x < 0.0 { -1.0 } else { x },
+        "log" => libm::log, "log2" => libm::log2, "log10" => libm::log10,
+        "log1p" => libm::log1p, "exp" => libm::exp, "expm1" => libm::expm1,
+        "sin" => libm::sin, "cos" => libm::cos, "tan" => libm::tan,
+        "asin" => libm::asin, "acos" => libm::acos, "atan" => libm::atan,
+        "sinh" => libm::sinh, "cosh" => libm::cosh, "tanh" => libm::tanh,
+        "asinh" => libm::asinh, "acosh" => libm::acosh, "atanh" => libm::atanh,
+        "cbrt" => libm::cbrt,
+        "fround" => |x| x as f32 as f64,
+        "clz32" => |x| to_uint32(x).leading_zeros() as f64,
+    }
+    def(&math, "atan2", |i, _, a| {
+        let y = i.to_number(a.first().unwrap_or(&Value::Undefined))?;
+        let x = i.to_number(a.get(1).unwrap_or(&Value::Undefined))?;
+        Ok(Value::Num(libm::atan2(y, x)))
+    }, 2, fp);
+    def(&math, "hypot", |i, _, a| {
+        let mut sum = 0.0;
+        for v in a { let n = i.to_number(v)?; sum += n * n; }
+        Ok(Value::Num(libm::sqrt(sum)))
+    }, 2, fp);
+    def(&math, "imul", |i, _, a| {
+        let x = to_int32(i.to_number(a.first().unwrap_or(&Value::Undefined))?);
+        let y = to_int32(i.to_number(a.get(1).unwrap_or(&Value::Undefined))?);
+        Ok(Value::Num(x.wrapping_mul(y) as f64))
+    }, 2, fp);
+    def(&math, "random", |i, _, _| Ok(Value::Num(i.next_random())), 0, fp);
+    for (n, v) in [("LOG2E", core::f64::consts::LOG2_E), ("LOG10E", core::f64::consts::LOG10_E),
+                   ("SQRT1_2", core::f64::consts::FRAC_1_SQRT_2)] {
+        math.borrow_mut().define(n, Prop::frozen(Value::Num(v)));
+    }
     math.borrow_mut().define(SYM_TO_STRING_TAG, Prop::frozen(Value::str("Math")));
     global.borrow_mut().define("Math", Prop::builtin(Value::Obj(math)));
 
@@ -1273,6 +1358,40 @@ pub fn make_realm() -> Realm {
         Ok(Value::Undefined)
     }, 1, fp);
 
+    // `matchMedia` beantwortet die Frage mit DEM Medienzustand, den die
+    // Engine wirklich fuer die Darstellung benutzt (`css::media_matches`) —
+    // nicht mit einem festen `false`. Eine Seite, die ihr Layout danach
+    // waehlt, bekommt so dieselbe Antwort wie der Kaskadenlauf, und Layout
+    // und Skript koennen nicht auseinanderlaufen.
+    //
+    // Ohne `set_viewport`/`set_media` gibt es die Funktion GAR NICHT: die
+    // Medienlage gehoert dem Wirt, und geraten waere sie eine Messung, die
+    // keine ist.
+    def(&global, "matchMedia", |i, _, a| {
+        let q = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let Some((w, dark)) = i.media else {
+            return i.type_err("matchMedia needs a viewport (host did not submit one)");
+        };
+        let m = crate::css::Media::new(w as f32, dark);
+        let hit = crate::css::media_matches(&q, m);
+        let g = new_obj(Some(i.realm.object_proto.clone()));
+        {
+            let mut o = g.borrow_mut();
+            o.define("matches", Prop::data(Value::Bool(hit)));
+            o.define("media", Prop::data(Value::Str(q)));
+        }
+        // Die Lage aendert sich in beak waehrend eines Laufs nicht — ein
+        // angemeldeter Behandler wuerde also nie gerufen. Ihn anzunehmen und
+        // zu verwerfen ist trotzdem richtig: die Seite verlaesst sich darauf,
+        // dass die Anmeldung nicht wirft.
+        for n in ["addListener", "removeListener", "addEventListener", "removeEventListener"] {
+            let f = native(Some(i.realm.function_proto.clone()),
+                           |_, _, _| Ok(Value::Undefined), n, 2, false);
+            g.borrow_mut().define(n, Prop::builtin(Value::Obj(f)));
+        }
+        Ok(Value::Obj(g))
+    }, 1, fp);
+
     // ── Storage ──────────────────────────────────────────────────────────
     //
     // Im Speicher, nicht auf der Platte. Ein Skript, das `localStorage`
@@ -1369,6 +1488,55 @@ pub fn make_realm() -> Realm {
     // Was sie liefern, ist die FORM, nicht der Inhalt: beak muss Uhr, Adresse
     // und Kennung noch einreichen. Ein Stumpf, der die richtige Form hat, ist
     // trotzdem das, worauf ein Skript prueft.
+    // `atob`/`btoa` — 10 426 Aufrufe im Zensus, die zweitgroesste Einzelluecke
+    // nach `addEventListener`. Beide arbeiten auf LATIN-1, nicht auf UTF-8:
+    // `btoa("ä")` wirft im Browser, weil `ä` ausserhalb von 0..255 liegt.
+    // Das ist kein Detail — wer hier UTF-8 kodiert, gibt fuer jedes Umlaut
+    // eine andere Zeichenkette zurueck als jeder Browser.
+    const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    def(&global, "btoa", |i, _, a| {
+        let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let mut bytes = Vec::with_capacity(s.len());
+        for c in s.chars() {
+            if (c as u32) > 255 { return i.type_err("btoa: character out of Latin-1 range"); }
+            bytes.push(c as u8);
+        }
+        let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+        for ch in bytes.chunks(3) {
+            let b = [ch[0], *ch.get(1).unwrap_or(&0), *ch.get(2).unwrap_or(&0)];
+            let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+            out.push(B64[(n >> 18) as usize & 63] as char);
+            out.push(B64[(n >> 12) as usize & 63] as char);
+            out.push(if ch.len() > 1 { B64[(n >> 6) as usize & 63] as char } else { '=' });
+            out.push(if ch.len() > 2 { B64[n as usize & 63] as char } else { '=' });
+        }
+        Ok(Value::string(out))
+    }, 1, fp);
+    def(&global, "atob", |i, _, a| {
+        let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let mut acc: u32 = 0;
+        let mut bits = 0u32;
+        let mut out = String::new();
+        for c in s.chars() {
+            if c.is_ascii_whitespace() || c == '=' { continue }
+            let v = match c {
+                'A'..='Z' => c as u32 - 'A' as u32,
+                'a'..='z' => c as u32 - 'a' as u32 + 26,
+                '0'..='9' => c as u32 - '0' as u32 + 52,
+                '+' => 62, '/' => 63,
+                _ => return i.type_err("atob: not base64"),
+            };
+            acc = (acc << 6) | v;
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                // Ein Byte wird ein ZEICHEN, nicht ein UTF-8-Byte: `atob`
+                // gibt eine Latin-1-Zeichenkette zurueck.
+                out.push(((acc >> bits) & 0xff) as u8 as char);
+            }
+        }
+        Ok(Value::string(out))
+    }, 1, fp);
     global.borrow_mut().define("window", Prop::builtin(Value::Obj(global.clone())));
     global.borrow_mut().define("self", Prop::builtin(Value::Obj(global.clone())));
     global.borrow_mut().define("top", Prop::builtin(Value::Obj(global.clone())));
@@ -1448,7 +1616,9 @@ pub fn make_realm() -> Realm {
             string_proto, number_proto, boolean_proto, error_proto, error_ctors,
             node_proto: ph(), element_proto: ph(), text_proto: ph(), document_proto: ph(),
             regexp_proto: ph(), symbol_proto, iterator_proto, array_iter_proto,
-            string_iter_proto, promise_proto: ph() }
+            string_iter_proto, promise_proto: ph(),
+            html_element_proto: ph(), svg_element_proto: ph(), fragment_proto: ph(),
+            tag_protos: HashMap::new(), url_proto: ph(), url_params_proto: ph() }
 }
 
 /// `this.length` als Zahl. Eigene Funktion, weil `i.to_number(&i.get(...))`
@@ -1551,6 +1721,37 @@ fn console_join(i: &mut Interp, args: &[Value], prefix: &str) -> String {
             Ok(s) => out.push_str(&s),
             Err(_) => out.push_str("<nicht darstellbar>"),
         }
+    }
+    out
+}
+
+/// `toFixed`, mit der Rundung, die JS vorschreibt: auf den BETRAG, und bei
+/// genau der Haelfte zur groesseren Zahl — also von der Null WEG.
+///
+/// Rusts `{:.n}` rundet zur geraden Ziffer, und `(-2.5).toFixed(0)` ist
+/// damit `-2` statt `-3`. Der Unterschied faellt nur im Vergleich mit einem
+/// echten Motor auf; gefunden hat ihn genau der.
+fn fixed(n: f64, d: u32) -> String {
+    let neg = n < 0.0 || (n == 0.0 && n.is_sign_negative() && d == 0 && n != 0.0);
+    let x = libm::fabs(n);
+    let p = libm::pow(10.0, d as f64);
+    // `x * p + 0.5` und dann abrunden: der Gleitkommafehler von `x * p`
+    // gehoert dazu. `(1.005).toFixed(2)` ist "1.00", WEIL 1.005 als f64
+    // knapp darunter liegt — wer das wegrechnet, weicht von jedem Browser ab.
+    let scaled = libm::floor(x * p + 0.5);
+    let digits = num_to_string(scaled);
+    let mut out = String::new();
+    if neg && scaled != 0.0 { out.push('-'); }
+    if d == 0 { out.push_str(&digits); return out }
+    let d = d as usize;
+    if digits.len() <= d {
+        out.push_str("0.");
+        for _ in 0..(d - digits.len()) { out.push('0'); }
+        out.push_str(&digits);
+    } else {
+        out.push_str(&digits[..digits.len() - d]);
+        out.push('.');
+        out.push_str(&digits[digits.len() - d..]);
     }
     out
 }

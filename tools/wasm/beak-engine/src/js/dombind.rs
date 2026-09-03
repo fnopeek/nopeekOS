@@ -17,6 +17,7 @@
 //! behalten.
 
 use alloc::rc::Rc;
+use hashbrown::HashMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -43,6 +44,7 @@ fn push_escaped(out: &mut String, s: &str, in_attr: bool) {
 
 pub const ELEMENT_NODE: f64 = 1.0;
 pub const TEXT_NODE: f64 = 3.0;
+pub const COMMENT_NODE: f64 = 8.0;
 pub const DOCUMENT_NODE: f64 = 9.0;
 
 pub struct DomNode {
@@ -546,6 +548,21 @@ pub fn node_of(i: &mut Interp, v: &Value) -> C<u32> {
     }
 }
 
+/// Wie `node_of`, aber `window` zaehlt als das DOKUMENT.
+///
+/// `window.addEventListener("click", …)` ist die haeufigste Anmeldung
+/// ueberhaupt, und im Browser bekommt das Fenster blasende Ereignisse als
+/// LETZTES. Der Wurzelknoten steht in jeder Zustellkette genau dort — also
+/// ist er die richtige Adresse, nicht eine Naeherung.
+fn target_node(i: &mut Interp, v: &Value) -> C<u32> {
+    if let Value::Obj(o) = v {
+        if Rc::ptr_eq(o, &i.realm.global) {
+            return match &i.doc { Some(d) => Ok(d.doc), None => i.type_err("no document") };
+        }
+    }
+    node_of(i, v)
+}
+
 /// Das Huellobjekt eines Knotens — einmal gebaut, dann behalten.
 pub fn wrap(i: &mut Interp, id: u32) -> Value {
     if let Some(doc) = &i.doc {
@@ -557,7 +574,18 @@ pub fn wrap(i: &mut Interp, id: u32) -> Value {
     let proto = match kind {
         DOCUMENT_NODE => i.realm.document_proto.clone(),
         TEXT_NODE => i.realm.text_proto.clone(),
-        _ => i.realm.element_proto.clone(),
+        _ => {
+            let tag = i.doc.as_ref().map(|d| d.nodes[id as usize].tag.clone())
+                       .unwrap_or_else(|| Rc::from(""));
+            if &*tag == "#fragment" { i.realm.fragment_proto.clone() }
+            else if &*tag == "svg" || tag.starts_with("svg:") {
+                i.realm.tag_protos.get("svg").cloned()
+                    .unwrap_or_else(|| i.realm.svg_element_proto.clone())
+            } else {
+                i.realm.tag_protos.get(&*tag).cloned()
+                    .unwrap_or_else(|| i.realm.html_element_proto.clone())
+            }
+        }
     };
     let g = new_obj(Some(proto));
     g.borrow_mut().define(SLOT, Prop {
@@ -606,7 +634,12 @@ fn meth(o: &Gc, name: &str, f: NativeFn, len: usize, fp: &Gc) {
 /// Baut `Node`/`Element`/`Document`-Prototypen und das globale `document`.
 pub fn install(realm: &mut Realm) {
     let fp = realm.function_proto.clone();
-    let node_proto = new_obj(Some(realm.object_proto.clone()));
+    // `EventTarget` steht UNTER `Node`: `addEventListener` gehoert dorthin,
+    // nicht auf den Knoten. Sonst hat `window` es nicht — und `window
+    // .addEventListener` ist mit 33 360 Aufrufen der haeufigste DOM-Aufruf
+    // des ganzen Zielkorpus (`tools/jsscope/out/apicensus.json`).
+    let event_target_proto = new_obj(Some(realm.object_proto.clone()));
+    let node_proto = new_obj(Some(event_target_proto.clone()));
     let element_proto = new_obj(Some(node_proto.clone()));
     let text_proto = new_obj(Some(node_proto.clone()));
     let document_proto = new_obj(Some(node_proto.clone()));
@@ -699,8 +732,8 @@ pub fn install(realm: &mut Realm) {
     // Anmelden, aber noch nicht zustellen. Ein `addEventListener`, das WIRFT,
     // beendet das Skript — eins, das die Anmeldung nur aufbewahrt, laesst es
     // weiterlaufen. Die Zustellung setzt genau hier an.
-    meth(&node_proto, "addEventListener", |i, t, a| {
-        let id = node_of(i, &t)?;
+    meth(&event_target_proto, "addEventListener", |i, t, a| {
+        let id = target_node(i, &t)?;
         let ev = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         let f = a.get(1).cloned().unwrap_or(Value::Undefined);
         if let Some(d) = &mut i.doc {
@@ -710,15 +743,15 @@ pub fn install(realm: &mut Realm) {
         }
         Ok(Value::Undefined)
     }, 2, &fp);
-    meth(&node_proto, "removeEventListener", |i, t, a| {
-        let id = node_of(i, &t)?;
+    meth(&event_target_proto, "removeEventListener", |i, t, a| {
+        let id = target_node(i, &t)?;
         let ev = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         if let Some(d) = &mut i.doc {
             d.nodes[id as usize].listeners.retain(|(e, _)| *e != ev);
         }
         Ok(Value::Undefined)
     }, 2, &fp);
-    meth(&node_proto, "dispatchEvent", |_, _, _| Ok(Value::Bool(true)), 1, &fp);
+    meth(&event_target_proto, "dispatchEvent", |_, _, _| Ok(Value::Bool(true)), 1, &fp);
 
     // ── Element ──────────────────────────────────────────────────────────
     getter(&element_proto, "tagName", |i, t, _| with_node!(i, t, |n| Ok(Value::string(n.tag.to_uppercase()))), &fp);
@@ -982,6 +1015,87 @@ pub fn install(realm: &mut Realm) {
             d.dirty = true;
             Ok(Value::Undefined)
         }, &fp);
+    // Was der Aufrufzensus (`tools/jsscope/out/apicensus.json`, eine echte
+    // Chromium-Messung auf denselben zwoelf Seiten) als naechstes verlangt.
+    // Die Reihenfolge hier IST die Rangfolge dort — nicht die Reihenfolge,
+    // in der mir etwas eingefallen ist.
+    getter(&node_proto, "ownerDocument", |i, t, _| {          // 6081
+        let id = node_of(i, &t)?;
+        let Some(d) = &i.doc else { return Ok(Value::Null) };
+        let root = d.doc;
+        if id == root { return Ok(Value::Null) }              // das Dokument selbst: null
+        Ok(wrap(i, root))
+    }, &fp);
+    meth(&node_proto, "getRootNode", |i, t, _| {              // 421
+        let mut id = node_of(i, &t)?;
+        loop {
+            let Some(d) = &i.doc else { return Ok(Value::Null) };
+            match d.nodes[id as usize].parent { Some(p) => id = p, None => break }
+        }
+        Ok(wrap(i, id))
+    }, 0, &fp);
+    getter(&element_proto, "namespaceURI", |i, t, _| {        // 3777
+        // Nur die zwei, die vorkommen. Ein `foreignObject` in SVG bekaeme
+        // hier die falsche Antwort — es kommt im Zielkorpus nicht vor, und
+        // eine erfundene dritte waere schlimmer als eine ehrliche zweite.
+        with_node!(i, t, |n| Ok(Value::str(
+            if &*n.tag == "svg" || n.tag.starts_with("svg:") { "http://www.w3.org/2000/svg" }
+            else { "http://www.w3.org/1999/xhtml" })))
+    }, &fp);
+    meth(&element_proto, "closest", |i, t, a| {               // 6115
+        let sel = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let mut id = Some(node_of(i, &t)?);
+        while let Some(x) = id {
+            let hit = i.doc.as_ref().is_some_and(|d| selector_match(d, x, &sel));
+            if hit { return Ok(wrap(i, x)) }
+            let Some(d) = &i.doc else { break };
+            id = d.nodes[x as usize].parent;
+        }
+        Ok(Value::Null)
+    }, 1, &fp);
+    meth(&element_proto, "getAttributeNames", |i, t, _| {     // 165
+        let names: Vec<Value> = with_node!(i, t, |n|
+            n.attrs.iter().map(|(k, _)| Value::str(k)).collect::<Vec<_>>());
+        Ok(i.new_array(names))
+    }, 0, &fp);
+    meth(&element_proto, "hasAttributes", |i, t, _| {         // 159
+        with_node!(i, t, |n| Ok(Value::Bool(!n.attrs.is_empty())))
+    }, 0, &fp);
+    getter(&element_proto, "dataset", |i, t, _| {             // 3966
+        // Eine MOMENTAUFNAHME, kein lebendes Objekt: `el.dataset.x = 1`
+        // schreibt damit KEIN Attribut. Das ist eine echte Luecke und hier
+        // benannt statt versteckt — der Zensus zaehlt fast nur Lesezugriffe.
+        let pairs: Vec<(String, String)> = with_node!(i, t, |n|
+            n.attrs.iter().filter_map(|(k, v)| k.strip_prefix("data-")
+                .map(|r| (dash_to_camel(r), v.to_string()))).collect::<Vec<_>>());
+        let g = new_obj(Some(i.realm.object_proto.clone()));
+        for (k, v) in pairs { g.borrow_mut().define(&k, Prop::data(Value::string(v))); }
+        Ok(Value::Obj(g))
+    }, &fp);
+    getter(&document_proto, "defaultView", |i, _, _| {        // 1580
+        Ok(Value::Obj(i.realm.global.clone()))
+    }, &fp);
+    getter(&document_proto, "activeElement", |i, _, _| {      // 1606
+        // beak hat keinen Tastaturfokus im Dokument — `body` ist die
+        // Antwort, die ein Browser ohne Fokus auch gibt.
+        let b = i.doc.as_ref().and_then(|d| find_tag(d, "body"));
+        Ok(match b { Some(x) => wrap(i, x), None => Value::Null })
+    }, &fp);
+    meth(&document_proto, "createComment", |i, _, a| {        // 2398
+        let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let Some(d) = &mut i.doc else { return i.type_err("no document") };
+        let id = d.create(COMMENT_NODE, "#comment");
+        d.nodes[id as usize].text = s;
+        Ok(wrap(i, id))
+    }, 1, &fp);
+    meth(&document_proto, "createElementNS", |i, _, a| {      // 180
+        let s = i.to_string(a.get(1).unwrap_or(&Value::Undefined))?;
+        let lower = s.to_lowercase();
+        let Some(d) = &mut i.doc else { return i.type_err("no document") };
+        let id = d.create(ELEMENT_NODE, &lower);
+        Ok(wrap(i, id))
+    }, 2, &fp);
+
     meth(&document_proto, "getElementById", |i, _, a| {
         let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         let found = match &i.doc {
@@ -1011,11 +1125,117 @@ pub fn install(realm: &mut Realm) {
         Ok(wrap(i, id))
     }, 0, &fp);
 
+    // ── Die Schnittstellen als globale Konstruktoren ─────────────────────
+    //
+    // Nicht Zierde: `el instanceof HTMLLinkElement` und
+    // `class X extends HTMLElement` sind auf DREI der elf Zielseiten die
+    // ERSTE Wand — vor jeder Sprachluecke. Gezaehlt, nicht vermutet
+    // (`wallcheck WCPAGE=*`).
+    //
+    // Die Kette ist die echte: EventTarget -> Node -> Element -> HTMLElement
+    // -> HTMLxyzElement. Eine flache Liste taete es fuer `instanceof
+    // HTMLElement` auch, aber dann waere `link instanceof Element` falsch —
+    // und genau solche Ketten fragt Bibliothekscode ab.
+    let html_element_proto = new_obj(Some(element_proto.clone()));
+    let svg_element_proto = new_obj(Some(element_proto.clone()));
+
+    // `new HTMLElement()` wirft — so wie im Browser. Die KLASSENDEFINITION
+    // `class X extends HTMLElement {}` laeuft trotzdem durch: sie liest nur
+    // `HTMLElement.prototype`, gerufen wird der Konstruktor erst bei `new`.
+    fn iface(realm: &Realm, name: &str, proto: &Gc) -> Gc {
+        let c = native(Some(realm.function_proto.clone()),
+                       |i, _, _| i.type_err("Illegal constructor"), name, 0, true);
+        c.borrow_mut().define("prototype", Prop::frozen(Value::Obj(proto.clone())));
+        proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(c.clone())));
+        realm.global.borrow_mut().define(name, Prop::builtin(Value::Obj(c.clone())));
+        c
+    }
+    iface(realm, "EventTarget", &event_target_proto);
+    // Das Fenster IST ein EventTarget — dadurch hat `window` dieselben drei
+    // Methoden wie jeder Knoten, ohne sie ein zweites Mal zu definieren.
+    realm.global.borrow_mut().proto = Some(event_target_proto.clone());
+    iface(realm, "Node", &node_proto);
+    iface(realm, "Element", &element_proto);
+    iface(realm, "HTMLElement", &html_element_proto);
+    iface(realm, "SVGElement", &svg_element_proto);
+    iface(realm, "Text", &text_proto);
+    iface(realm, "Document", &document_proto);
+    iface(realm, "HTMLDocument", &document_proto);
+    // `DocumentFragment` haengt an Node, nicht an Element.
+    let fragment_proto = new_obj(Some(node_proto.clone()));
+    iface(realm, "DocumentFragment", &fragment_proto);
+
+    let mut tag_protos: HashMap<&'static str, Gc> = HashMap::new();
+    for (iname, tags) in HTML_IFACES {
+        let proto = new_obj(Some(html_element_proto.clone()));
+        iface(realm, iname, &proto);
+        for t in *tags { tag_protos.insert(t, proto.clone()); }
+    }
+    // SVG kennt genau eine Unterscheidung, die Seiten wirklich abfragen.
+    {
+        let p = new_obj(Some(svg_element_proto.clone()));
+        iface(realm, "SVGSVGElement", &p);
+        tag_protos.insert("svg", p);
+    }
+
     realm.node_proto = node_proto;
     realm.element_proto = element_proto;
     realm.text_proto = text_proto;
     realm.document_proto = document_proto;
+    realm.html_element_proto = html_element_proto;
+    realm.svg_element_proto = svg_element_proto;
+    realm.fragment_proto = fragment_proto;
+    realm.tag_protos = tag_protos;
 }
+
+/// Welches Element welche Schnittstelle traegt.
+///
+/// Die Liste ist nicht vollstaendig und soll es nicht sein — sie deckt, was
+/// Seiten abfragen. Was nicht daraufsteht, ist `HTMLElement`, und das ist
+/// die richtige Antwort: ein unbekanntes Element IST eins, und `instanceof
+/// HTMLElement` ist die Abfrage, die wirklich vorkommt. `HTMLUnknownElement`
+/// waere formal genauer und praktisch nutzlos.
+const HTML_IFACES: &[(&str, &[&str])] = &[
+    ("HTMLAnchorElement",    &["a"]),
+    ("HTMLLinkElement",      &["link"]),
+    ("HTMLScriptElement",    &["script"]),
+    ("HTMLStyleElement",     &["style"]),
+    ("HTMLImageElement",     &["img"]),
+    ("HTMLInputElement",     &["input"]),
+    ("HTMLButtonElement",    &["button"]),
+    ("HTMLFormElement",      &["form"]),
+    ("HTMLSelectElement",    &["select"]),
+    ("HTMLOptionElement",    &["option"]),
+    ("HTMLTextAreaElement",  &["textarea"]),
+    ("HTMLLabelElement",     &["label"]),
+    ("HTMLDivElement",       &["div"]),
+    ("HTMLSpanElement",      &["span"]),
+    ("HTMLParagraphElement", &["p"]),
+    ("HTMLUListElement",     &["ul"]),
+    ("HTMLOListElement",     &["ol"]),
+    ("HTMLLIElement",        &["li"]),
+    ("HTMLTableElement",     &["table"]),
+    ("HTMLTableRowElement",  &["tr"]),
+    ("HTMLTableCellElement", &["td", "th"]),
+    ("HTMLHeadingElement",   &["h1", "h2", "h3", "h4", "h5", "h6"]),
+    ("HTMLHtmlElement",      &["html"]),
+    ("HTMLHeadElement",      &["head"]),
+    ("HTMLBodyElement",      &["body"]),
+    ("HTMLMetaElement",      &["meta"]),
+    ("HTMLTitleElement",     &["title"]),
+    ("HTMLCanvasElement",    &["canvas"]),
+    ("HTMLVideoElement",     &["video"]),
+    ("HTMLAudioElement",     &["audio"]),
+    ("HTMLIFrameElement",    &["iframe"]),
+    ("HTMLTemplateElement",  &["template"]),
+    ("HTMLPictureElement",   &["picture"]),
+    ("HTMLSourceElement",    &["source"]),
+    ("HTMLBRElement",        &["br"]),
+    ("HTMLHRElement",        &["hr"]),
+    ("HTMLPreElement",       &["pre"]),
+    ("HTMLDetailsElement",   &["details"]),
+    ("HTMLDialogElement",    &["dialog"]),
+];
 
 fn sibling(i: &mut Interp, this: &Value, dir: i32) -> C<Value> {
     let id = node_of(i, this)?;
@@ -1150,4 +1370,21 @@ pub fn dispatch(i: &mut Interp, kind: &str, chain: &[u32]) -> C<bool> {
     super::promise::run_jobs(i);
     Ok(matches!(ev.borrow().get_own("defaultPrevented").and_then(|p| p.value.clone()),
                 Some(Value::Bool(true))))
+}
+
+/// `data-foo-bar` -> `fooBar`.
+fn dash_to_camel(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut up = false;
+    for c in s.chars() {
+        if c == '-' { up = true; continue }
+        if up { out.extend(c.to_uppercase()); up = false } else { out.push(c) }
+    }
+    out
+}
+
+fn find_tag(d: &Doc, tag: &str) -> Option<u32> {
+    let mut all = Vec::new();
+    d.descendants(d.doc, &mut all);
+    all.into_iter().find(|&x| &*d.nodes[x as usize].tag == tag)
 }
