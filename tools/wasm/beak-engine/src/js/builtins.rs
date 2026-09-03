@@ -21,6 +21,13 @@ fn def(o: &Gc, name: &str, f: NativeFn, len: usize, proto: &Gc) {
     o.borrow_mut().define(name, Prop::builtin(Value::Obj(g)));
 }
 
+/// Wie `def`, aber unter einem SYMBOL. Der Anzeigename ist ein anderer als der
+/// Schluessel — `f.name` ist `"[Symbol.iterator]"`, nicht das NUL-Byte.
+fn def_sym(o: &Gc, key: &str, show: &str, f: NativeFn, len: usize, proto: &Gc) {
+    let g = native(Some(proto.clone()), f, show, len, false);
+    o.borrow_mut().define(key, Prop::builtin(Value::Obj(g)));
+}
+
 pub fn make_realm() -> Realm {
     let object_proto = new_obj(None);
     let function_proto = new_kind(Some(object_proto.clone()), ObjKind::Plain);
@@ -29,6 +36,10 @@ pub fn make_realm() -> Realm {
     let number_proto = new_obj(Some(object_proto.clone()));
     let boolean_proto = new_obj(Some(object_proto.clone()));
     let error_proto = new_obj(Some(object_proto.clone()));
+    let symbol_proto = new_obj(Some(object_proto.clone()));
+    let iterator_proto = new_obj(Some(object_proto.clone()));
+    let array_iter_proto = new_obj(Some(iterator_proto.clone()));
+    let string_iter_proto = new_obj(Some(iterator_proto.clone()));
     let global = new_obj(Some(object_proto.clone()));
     let global_env = Env::new(None, true);
     global_env.borrow_mut().this_val = Some(Value::Obj(global.clone()));
@@ -41,11 +52,17 @@ pub fn make_realm() -> Realm {
             Value::Undefined => "[object Undefined]".to_string(),
             Value::Null => "[object Null]".to_string(),
             Value::Obj(o) => {
+                // `Symbol.toStringTag` gewinnt vor der eingebauten Art —
+                // aber nur, wenn es eine Zeichenkette ist.
+                if let Ok(Value::Str(t)) = i.get(&this, SYM_TO_STRING_TAG) {
+                    return Ok(Value::string(alloc::format!("[object {t}]")));
+                }
                 let tag = match &o.borrow().kind {
                     ObjKind::Array => "Array",
                     ObjKind::Function(_) | ObjKind::Native(_) | ObjKind::Bound { .. } => "Function",
                     ObjKind::Error => "Error",
                     ObjKind::StrWrap(_) => "String",
+                    ObjKind::SymWrap(_) => "Symbol",
                     ObjKind::NumWrap(_) => "Number",
                     ObjKind::BoolWrap(_) => "Boolean",
                     ObjKind::Arguments => "Arguments",
@@ -54,14 +71,15 @@ pub fn make_realm() -> Realm {
                 };
                 alloc::format!("[object {tag}]")
             }
-            _ => { let _ = i; "[object Object]".to_string() }
+            Value::Sym(_) => "[object Symbol]".to_string(),
+            _ => "[object Object]".to_string()
         }))
     }, 0, fp);
     def(&object_proto, "valueOf", |i, this, _| {
         let o = i.to_object(&this)?; Ok(Value::Obj(o))
     }, 0, fp);
     def(&object_proto, "hasOwnProperty", |i, this, a| {
-        let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let k = i.to_prop_key(a.first().unwrap_or(&Value::Undefined))?;
         let o = i.to_object(&this)?;
         let has = o.borrow().has_own(&k);
         Ok(Value::Bool(has))
@@ -76,7 +94,7 @@ pub fn make_realm() -> Realm {
         Ok(Value::Bool(false))
     }, 1, fp);
     def(&object_proto, "propertyIsEnumerable", |i, this, a| {
-        let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let k = i.to_prop_key(a.first().unwrap_or(&Value::Undefined))?;
         let o = i.to_object(&this)?;
         let e = o.borrow().get_own(&k).map(|p| p.enumerable).unwrap_or(false);
         Ok(Value::Bool(e))
@@ -91,7 +109,9 @@ pub fn make_realm() -> Realm {
         let t = a.first().cloned().unwrap_or(Value::Undefined);
         let args = match a.get(1) {
             None | Some(Value::Undefined) | Some(Value::Null) => Vec::new(),
-            Some(v) => i.iterate(v)?,
+            // `apply` liest ARRAY-AEHNLICH, nicht ueber den Iterator —
+            // `f.apply(null, {length:2, 0:'a', 1:'b'})` muss gehen.
+            Some(v) => i.elems(v)?,
         };
         i.call(&this, t, &args)
     }, 2, fp);
@@ -348,7 +368,7 @@ pub fn make_realm() -> Realm {
         Ok(Value::Num(-1.0))
     }, 1, fp);
     def(&array_proto, "shift", |i, this, _| {
-        let items = i.iterate(&this)?;
+        let items = i.elems(&this)?;
         if items.is_empty() { return Ok(Value::Undefined); }
         let first = items[0].clone();
         rebuild(i, &this, items[1..].to_vec())?;
@@ -356,19 +376,19 @@ pub fn make_realm() -> Realm {
     }, 0, fp);
     def(&array_proto, "unshift", |i, this, a| {
         let mut items = a.to_vec();
-        items.extend(i.iterate(&this)?);
+        items.extend(i.elems(&this)?);
         let n = items.len();
         rebuild(i, &this, items)?;
         Ok(Value::Num(n as f64))
     }, 1, fp);
     def(&array_proto, "reverse", |i, this, _| {
-        let mut items = i.iterate(&this)?;
+        let mut items = i.elems(&this)?;
         items.reverse();
         rebuild(i, &this, items)?;
         Ok(this)
     }, 0, fp);
     def(&array_proto, "splice", |i, this, a| {
-        let items = i.iterate(&this)?;
+        let items = i.elems(&this)?;
         let n = items.len() as i64;
         let start = match a.first() { None => 0,
             Some(v) => { let r = to_integer(i.to_number(v)?) as i64;
@@ -383,7 +403,7 @@ pub fn make_realm() -> Realm {
         Ok(i.new_array(removed))
     }, 2, fp);
     def(&array_proto, "sort", |i, this, a| {
-        let mut items = i.iterate(&this)?;
+        let mut items = i.elems(&this)?;
         let f = a.first().cloned().unwrap_or(Value::Undefined);
         // Einfuegesortierung: sie ruft den Vergleicher genauso oft wie noetig
         // und braucht keinen Ausleih-Trick, um waehrend des Sortierens in die
@@ -409,10 +429,10 @@ pub fn make_realm() -> Realm {
         Ok(this)
     }, 1, fp);
     def(&array_proto, "concat", |i, this, a| {
-        let mut out = i.iterate(&this)?;
+        let mut out = i.elems(&this)?;
         for v in a {
             if matches!(v, Value::Obj(o) if matches!(o.borrow().kind, ObjKind::Array)) {
-                out.extend(i.iterate(v)?);
+                out.extend(i.elems(v)?);
             } else { out.push(v.clone()); }
         }
         Ok(i.new_array(out))
@@ -625,6 +645,16 @@ pub fn make_realm() -> Realm {
         let keys: Vec<Value> = o.borrow().own_keys().into_iter().map(Value::Str).collect();
         Ok(i.new_array(keys))
     }, 1, fp);
+    def(&object_ctor, "getOwnPropertySymbols", |i, _, a| {
+        let o = i.to_object(a.first().unwrap_or(&Value::Undefined))?;
+        let keys = o.borrow().own_sym_keys();
+        // Aus dem Schluessel zurueck auf das Symbol: er traegt Beschreibung
+        // und Registrierung, und er IST die Identitaet — ein hier gebautes
+        // `SymData` ist damit `===` zum urspruenglichen.
+        let out: Vec<Value> = keys.into_iter()
+            .map(|k| Value::Sym(Rc::new(sym_from_key(&k)))).collect();
+        Ok(i.new_array(out))
+    }, 1, fp);
     def(&object_ctor, "getPrototypeOf", |i, _, a| {
         let o = i.to_object(a.first().unwrap_or(&Value::Undefined))?;
         let p = o.borrow().proto.clone();
@@ -640,7 +670,7 @@ pub fn make_realm() -> Realm {
     }, 2, fp);
     def(&object_ctor, "defineProperty", |i, _, a| {
         let Some(Value::Obj(o)) = a.first() else { return i.type_err("Object.defineProperty on a non-object") };
-        let k = i.to_string(a.get(1).unwrap_or(&Value::Undefined))?;
+        let k = i.to_prop_key(a.get(1).unwrap_or(&Value::Undefined))?;
         let d = a.get(2).cloned().unwrap_or(Value::Undefined);
         let Value::Obj(_) = &d else { return i.type_err("property descriptor must be an object") };
         let get = i.get(&d, "get")?;
@@ -661,7 +691,7 @@ pub fn make_realm() -> Realm {
     }, 3, fp);
     def(&object_ctor, "getOwnPropertyDescriptor", |i, _, a| {
         let o = i.to_object(a.first().unwrap_or(&Value::Undefined))?;
-        let k = i.to_string(a.get(1).unwrap_or(&Value::Undefined))?;
+        let k = i.to_prop_key(a.get(1).unwrap_or(&Value::Undefined))?;
         let Some(p) = o.borrow().get_own(&k).cloned() else { return Ok(Value::Undefined) };
         let d = new_obj(Some(i.realm.object_proto.clone()));
         {
@@ -682,7 +712,11 @@ pub fn make_realm() -> Realm {
         let target = a.first().cloned().unwrap_or(Value::Undefined);
         for src in a.get(1..).unwrap_or(&[]) {
             let Value::Obj(o) = src else { continue };
-            for k in o.borrow().own_keys() {
+            // Zeichenketten UND Symbole: `assign` kopiert jede eigene
+            // aufzaehlbare Eigenschaft, und ein Symbol ist eine.
+            let mut keys = o.borrow().own_keys();
+            keys.extend(o.borrow().own_sym_keys());
+            for k in keys {
                 let enumerable = o.borrow().get_own(&k).map(|p| p.enumerable).unwrap_or(false);
                 if !enumerable { continue; }
                 let v = i.get(src, &k)?;
@@ -797,10 +831,39 @@ pub fn make_realm() -> Realm {
     def(&array_ctor, "isArray", |_, _, a| {
         Ok(Value::Bool(matches!(a.first(), Some(Value::Obj(o)) if matches!(o.borrow().kind, ObjKind::Array))))
     }, 1, fp);
+    def(&array_ctor, "of", |i, _, a| Ok(i.new_array(a.to_vec())), 0, fp);
+    // `from` nimmt BEIDES: den Iterator, wenn es einen gibt, sonst
+    // `length`+Indizes. Das ist keine Nachsicht, das steht so in der
+    // Spezifikation — und ein `NodeList` ohne `Symbol.iterator` haengt genau
+    // daran.
+    def(&array_ctor, "from", |i, _, a| {
+        let src = a.first().cloned().unwrap_or(Value::Undefined);
+        let f = a.get(1).cloned().unwrap_or(Value::Undefined);
+        if !matches!(f, Value::Undefined) && !i.is_callable(&f) {
+            return i.type_err("Array.from: mapper is not a function");
+        }
+        let m = if matches!(src, Value::Undefined | Value::Null) { Value::Undefined }
+                else { i.get(&src, SYM_ITERATOR)? };
+        let items = if i.is_callable(&m) { i.iterate(&src)? } else { i.elems(&src)? };
+        let mut out = Vec::with_capacity(items.len());
+        for (n, v) in items.into_iter().enumerate() {
+            out.push(if i.is_callable(&f) {
+                i.call(&f, Value::Undefined, &[v, Value::Num(n as f64)])?
+            } else { v });
+        }
+        Ok(i.new_array(out))
+    }, 1, fp);
     global.borrow_mut().define("Array", Prop::builtin(Value::Obj(array_ctor)));
 
     let string_ctor = native(Some(function_proto.clone()), |i, _, a| {
-        Ok(match a.first() { None => Value::str(""), Some(v) => Value::Str(i.to_string(v)?) })
+        Ok(match a.first() {
+            None => Value::str(""),
+            // `String(sym)` ist die AUSNAHME: sie darf, wo `"" + sym` wirft.
+            // Genau so steht es in der Spezifikation, und es ist der einzige
+            // Weg, ein Symbol absichtlich zu Text zu machen.
+            Some(Value::Sym(sd)) => Value::Str(Interp::sym_to_display(sd)),
+            Some(v) => Value::Str(i.to_string(v)?),
+        })
     }, "String", 1, true);
     string_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(string_proto.clone())));
     string_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(string_ctor.clone())));
@@ -858,6 +921,7 @@ pub fn make_realm() -> Realm {
         for v in a { let n = i.to_number(v)?; if n.is_nan() { return Ok(Value::Num(f64::NAN)); } if n < m { m = n; } }
         Ok(Value::Num(m))
     }, 2, fp);
+    math.borrow_mut().define(SYM_TO_STRING_TAG, Prop::frozen(Value::str("Math")));
     global.borrow_mut().define("Math", Prop::builtin(Value::Obj(math)));
 
     // ── Globale Werte + Funktionen ───────────────────────────────────────
@@ -908,7 +972,7 @@ pub fn make_realm() -> Realm {
     // benutzen die Zielseiten es) stimmt es; fuer Objektschluessel nicht.
     // `native` nimmt einen Funktionszeiger, keinen Abschluss — deshalb kommt
     // der Konstruktor von aussen herein statt hier eingefangen zu werden.
-    let collection = |name: &'static str, ctor_fn: NativeFn, object_proto: &Gc,
+    let collection = |name: &'static str, is_map: bool, ctor_fn: NativeFn, object_proto: &Gc,
                       function_proto: &Gc, global: &Gc| {
         let proto = new_obj(Some(object_proto.clone()));
         let d = |o: &Gc, n: &str, f: NativeFn, l: usize| {
@@ -969,6 +1033,25 @@ pub fn make_realm() -> Realm {
             }
             Ok(Value::Undefined)
         }, 1);
+        // Die drei Sichten. Eine Umsetzung fuer Map UND Set: bei einem Set
+        // IST der Wert der Schluessel, `entries` liefert dort also `[v, v]` —
+        // und genau das schreibt die Spezifikation vor.
+        //
+        // Der Iterator laeuft ueber eine MOMENTAUFNAHME. Ein echter
+        // Map-Iterator sieht spaetere Eintraege noch; unsere Karte ist
+        // ohnehin die zeichenkettenbasierte Naeherung von oben, und eine
+        // Aufnahme ist die ehrlichere Naeherung als ein Index, der bei jedem
+        // `next` neu ueber die Schluesselliste laeuft.
+        d(&proto, "keys", |i, t, _| { let v = coll_view(i, &t, 0)?; i.array_iter(v, 0) }, 0);
+        d(&proto, "values", |i, t, _| { let v = coll_view(i, &t, 1)?; i.array_iter(v, 0) }, 0);
+        d(&proto, "entries", |i, t, _| { let v = coll_view(i, &t, 2)?; i.array_iter(v, 0) }, 0);
+        {
+            let key = if is_map { "entries" } else { "values" };
+            let f = proto.borrow().get_own(key).and_then(|p| p.value.clone());
+            if let Some(f) = f { proto.borrow_mut().define(SYM_ITERATOR, Prop::builtin(f)); }
+        }
+        proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::frozen(Value::str(name)));
+
         let size = native(Some(function_proto.clone()), |_, t, _| {
             let Value::Obj(o) = &t else { return Ok(Value::Num(0.0)) };
             let n = o.borrow().own_keys().iter().filter(|k| k.starts_with('@')).count();
@@ -983,10 +1066,167 @@ pub fn make_realm() -> Realm {
         proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(ctor.clone())));
         global.borrow_mut().define(name, Prop::builtin(Value::Obj(ctor)));
     };
-    collection("Map", |i, _, a| coll_new(i, "Map", true, a), &object_proto, &function_proto, &global);
-    collection("Set", |i, _, a| coll_new(i, "Set", false, a), &object_proto, &function_proto, &global);
-    collection("WeakMap", |i, _, a| coll_new(i, "WeakMap", true, a), &object_proto, &function_proto, &global);
-    collection("WeakSet", |i, _, a| coll_new(i, "WeakSet", false, a), &object_proto, &function_proto, &global);
+    collection("Map", true, |i, _, a| coll_new(i, "Map", true, a), &object_proto, &function_proto, &global);
+    collection("Set", false, |i, _, a| coll_new(i, "Set", false, a), &object_proto, &function_proto, &global);
+    collection("WeakMap", true, |i, _, a| coll_new(i, "WeakMap", true, a), &object_proto, &function_proto, &global);
+    collection("WeakSet", false, |i, _, a| coll_new(i, "WeakSet", false, a), &object_proto, &function_proto, &global);
+
+    // ── Symbol ───────────────────────────────────────────────────────────
+    //
+    // Ein Symbol ist ein PRIMITIV (`Value::Sym`), kein Objekt. Sein
+    // Eigenschaftsname liegt als NUL-praefigierte Zeichenkette in derselben
+    // Tabelle wie jeder andere — die Begruendung steht bei `PropName`.
+    let symbol_ctor = native(Some(function_proto.clone()), |i, _, a| {
+        let desc = match a.first() {
+            None | Some(Value::Undefined) => None,
+            Some(v) => Some(i.to_string(v)?),
+        };
+        Ok(i.new_symbol(desc))
+    }, "Symbol", 0, false);          // `new Symbol()` wirft — kein Konstruktor
+    symbol_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(symbol_proto.clone())));
+    symbol_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(symbol_ctor.clone())));
+    for (name, key) in WELL_KNOWN {
+        let v = Value::Sym(Rc::new(SymData {
+            desc: Some(Rc::from(alloc::format!("Symbol.{name}").as_str())),
+            key: Rc::from(*key), registered: None }));
+        symbol_ctor.borrow_mut().define(name, Prop::frozen(v));
+    }
+    // `Symbol.for` teilt sich EINE Registrierung ueber alle Aufrufe. Der
+    // Schluessel wird aus dem Text abgeleitet und nicht durchgezaehlt —
+    // damit ist `Symbol.for("x") === Symbol.for("x")` schon durch die
+    // Gleichheit auf `key` wahr, ohne dass die Tabelle befragt werden muss.
+    def(&symbol_ctor, "for", |i, _, a| {
+        let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        if let Some(v) = i.sym_registry.get(&k) { return Ok(v.clone()); }
+        let v = Value::Sym(Rc::new(SymData {
+            desc: Some(k.clone()),
+            key: Rc::from(alloc::format!("\0*{k}").as_str()),
+            registered: Some(k.clone()) }));
+        i.sym_registry.insert(k, v.clone());
+        Ok(v)
+    }, 1, fp);
+    def(&symbol_ctor, "keyFor", |i, _, a| {
+        match a.first() {
+            Some(Value::Sym(sd)) => Ok(match &sd.registered {
+                Some(k) => Value::Str(k.clone()), None => Value::Undefined }),
+            _ => i.type_err("Symbol.keyFor requires a symbol"),
+        }
+    }, 1, fp);
+    global.borrow_mut().define("Symbol", Prop::builtin(Value::Obj(symbol_ctor)));
+
+    // `this` ist entweder das Primitiv oder seine Huelle — beides muss gehen,
+    // weil `sym.toString()` das Primitiv durchreicht, `Object(sym).toString()`
+    // aber die Huelle.
+    fn this_sym(i: &mut Interp, t: &Value) -> C<Rc<SymData>> {
+        match t {
+            Value::Sym(sd) => Ok(sd.clone()),
+            Value::Obj(o) => match &o.borrow().kind {
+                ObjKind::SymWrap(sd) => Ok(sd.clone()),
+                _ => i.type_err("not a Symbol"),
+            },
+            _ => i.type_err("not a Symbol"),
+        }
+    }
+    def(&symbol_proto, "toString", |i, t, _| {
+        let sd = this_sym(i, &t)?;
+        Ok(Value::Str(Interp::sym_to_display(&sd)))
+    }, 0, fp);
+    def(&symbol_proto, "valueOf", |i, t, _| {
+        let sd = this_sym(i, &t)?;
+        Ok(Value::Sym(sd))
+    }, 0, fp);
+    let desc_get = native(Some(function_proto.clone()), |i, t, _| {
+        let sd = this_sym(i, &t)?;
+        Ok(match &sd.desc { Some(d) => Value::Str(d.clone()), None => Value::Undefined })
+    }, "get description", 0, false);
+    symbol_proto.borrow_mut().define("description", Prop {
+        value: None, get: Some(Value::Obj(desc_get)), set: None,
+        writable: false, enumerable: false, configurable: true });
+    symbol_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::frozen(Value::str("Symbol")));
+    // `"" + sym` wirft (siehe `to_string`); ohne diese Sperre wuerde
+    // `ToPrimitive` erst `valueOf` finden und das Symbol still weiterreichen,
+    // statt an der Umwandlung zu scheitern, wo der Fehler hingehoert.
+    let sym_prim = native(Some(function_proto.clone()), |i, t, _| {
+        let sd = this_sym(i, &t)?;
+        Ok(Value::Sym(sd))
+    }, "[Symbol.toPrimitive]", 1, false);
+    symbol_proto.borrow_mut().define(SYM_TO_PRIMITIVE, Prop::frozen(Value::Obj(sym_prim)));
+
+    // ── Der Iteratorvertrag ──────────────────────────────────────────────
+    //
+    // `%IteratorPrototype%` traegt nur EINES: sich selbst zurueckzugeben.
+    // Genau daran haengt, dass `for (x of arr.entries())` geht — der
+    // Iterator muss selbst iterierbar sein.
+    let self_iter = native(Some(function_proto.clone()), |_, t, _| Ok(t),
+                           "[Symbol.iterator]", 0, false);
+    iterator_proto.borrow_mut().define(SYM_ITERATOR, Prop::builtin(Value::Obj(self_iter)));
+
+    // Der Zustand eines eingebauten Iterators liegt als NUL-praefigierte
+    // Eigenschaft auf ihm selbst. Kein Skript sieht sie (sie faellt aus
+    // `own_keys`), und `native` nimmt ohnehin keinen Abschluss.
+    def(&array_iter_proto, "next", |i, t, _| {
+        let target = i.get(&t, IT_TARGET)?;
+        if matches!(target, Value::Undefined) { return Ok(i.iter_result(Value::Undefined, true)); }
+        let idx = i.get(&t, IT_INDEX)?;
+        let idx = i.to_number(&idx)? as usize;
+        let len = i.get(&target, "length")?;
+        let len = i.to_number(&len)? as usize;
+        if idx >= len {
+            i.set(&t, IT_TARGET, Value::Undefined)?;
+            return Ok(i.iter_result(Value::Undefined, true));
+        }
+        i.set(&t, IT_INDEX, Value::Num(idx as f64 + 1.0))?;
+        let kind = i.get(&t, IT_KIND)?;
+        let kind = i.to_number(&kind)?;
+        let out = if kind == 1.0 {
+            Value::Num(idx as f64)
+        } else {
+            let v = i.get(&target, &num_to_string(idx as f64))?;
+            if kind == 2.0 { i.new_array(vec![Value::Num(idx as f64), v]) } else { v }
+        };
+        Ok(i.iter_result(out, false))
+    }, 0, fp);
+    array_iter_proto.borrow_mut().define(SYM_TO_STRING_TAG,
+        Prop::frozen(Value::str("Array Iterator")));
+
+    // Zeichen fuer Zeichen — nach CODEPOINT, nicht nach Byte. Unsere Texte
+    // sind Rust-`str`, ein `char` ist also genau ein Codepunkt; das trifft
+    // die Spezifikation auch fuer alles ausserhalb der BMP.
+    def(&string_iter_proto, "next", |i, t, _| {
+        let s = i.get(&t, IT_TARGET)?;
+        let Value::Str(s) = s else { return Ok(i.iter_result(Value::Undefined, true)) };
+        let off = i.get(&t, IT_INDEX)?;
+        let off = i.to_number(&off)? as usize;
+        match s[off..].chars().next() {
+            None => {
+                i.set(&t, IT_TARGET, Value::Undefined)?;
+                Ok(i.iter_result(Value::Undefined, true))
+            }
+            Some(c) => {
+                i.set(&t, IT_INDEX, Value::Num((off + c.len_utf8()) as f64))?;
+                let mut b = String::new(); b.push(c);
+                Ok(i.iter_result(Value::string(b), false))
+            }
+        }
+    }, 0, fp);
+    string_iter_proto.borrow_mut().define(SYM_TO_STRING_TAG,
+        Prop::frozen(Value::str("String Iterator")));
+
+    def_sym(&string_proto, SYM_ITERATOR, "[Symbol.iterator]", |i, t, _| {
+        let s = i.to_string(&t)?;
+        let g = new_obj(Some(i.realm.string_iter_proto.clone()));
+        g.borrow_mut().define(IT_TARGET, Prop::frozen(Value::Str(s)));
+        g.borrow_mut().define(IT_INDEX, Prop::data(Value::Num(0.0)));
+        Ok(Value::Obj(g))
+    }, 0, fp);
+
+    def(&array_proto, "values", |i, t, _| i.array_iter(t, 0), 0, fp);
+    def(&array_proto, "keys",   |i, t, _| i.array_iter(t, 1), 0, fp);
+    def(&array_proto, "entries",|i, t, _| i.array_iter(t, 2), 0, fp);
+    // `[Symbol.iterator]` IST `values` — dieselbe Funktion, nicht eine zweite
+    // mit gleichem Inhalt: `arr[Symbol.iterator] === arr.values` ist wahr.
+    let av = array_proto.borrow().get_own("values").and_then(|p| p.value.clone());
+    if let Some(v) = av { array_proto.borrow_mut().define(SYM_ITERATOR, Prop::builtin(v)); }
 
     // ── Zeitgeber ────────────────────────────────────────────────────────
     //
@@ -1183,7 +1423,8 @@ pub fn make_realm() -> Realm {
     Realm { global, global_env, object_proto: object_proto.clone(), function_proto, array_proto,
             string_proto, number_proto, boolean_proto, error_proto, error_ctors,
             node_proto: ph(), element_proto: ph(), text_proto: ph(), document_proto: ph(),
-            regexp_proto: ph() }
+            regexp_proto: ph(), symbol_proto, iterator_proto, array_iter_proto,
+            string_iter_proto }
 }
 
 /// `this.length` als Zahl. Eigene Funktion, weil `i.to_number(&i.get(...))`
@@ -1202,6 +1443,23 @@ fn rebuild(i: &mut Interp, this: &Value, items: Vec<Value>) -> C<()> {
 }
 
 /// Der gemeinsame Rumpf der vier Sammlungs-Konstruktoren.
+/// Die Eintraege einer Map/eines Sets als Array. `kind`: 0 Schluessel,
+/// 1 Werte, 2 Paare.
+fn coll_view(i: &mut Interp, t: &Value, kind: u8) -> C<Value> {
+    let Value::Obj(o) = t else { return i.type_err("not a collection") };
+    let ks: Vec<Rc<str>> = o.borrow().own_keys().into_iter()
+        .filter(|k| k.starts_with('@')).collect();
+    let mut out = Vec::with_capacity(ks.len());
+    for k in ks {
+        i.tick()?;
+        let key = Value::str(&k[1..]);
+        if kind == 0 { out.push(key); continue; }
+        let v = i.get(t, &k)?;
+        out.push(if kind == 1 { v } else { i.new_array(vec![key, v]) });
+    }
+    Ok(i.new_array(out))
+}
+
 fn coll_new(i: &mut Interp, name: &str, is_map: bool, a: &[Value]) -> C<Value> {
     let pv = i.get(&Value::Obj(i.realm.global.clone()), name)?;
     let proto = match i.get(&pv, "prototype")? { Value::Obj(p) => Some(p), _ => None };
@@ -1262,6 +1520,9 @@ fn console_join(i: &mut Interp, args: &[Value], prefix: &str) -> String {
     let mut out = String::from(prefix);
     for (n, a) in args.iter().enumerate() {
         if n > 0 { out.push(' '); }
+        // Ein Symbol wirft bei `ToString` — auf der Konsole waere das der
+        // falsche Ort dafuer: die Zeile soll berichten, nicht abbrechen.
+        if let Value::Sym(sd) = a { out.push_str(&Interp::sym_to_display(sd)); continue; }
         match i.to_string(a) {
             Ok(s) => out.push_str(&s),
             Err(_) => out.push_str("<nicht darstellbar>"),

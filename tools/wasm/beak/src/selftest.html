@@ -92,7 +92,11 @@ syn(langRows, "Vererbung", "class A { f() { return 1 } } class B extends A { f()
 syn(langRows, "for-of", "var s = 0; for (var v of [1,2,3]) s += v; return s", 6);
 syn(langRows, "Kettenzugriff ?.", "var o = {}; return (o?.a?.b ?? 'ok')", "ok");
 syn(langRows, "Generator", "function* g() { yield 1; yield 2 } var s = 0; for (var v of g()) s += v; return s", 3);
-syn(langRows, "Symbol.iterator", "var o = {}; o[Symbol.iterator] = function*() { yield 4 }; return [...o][0]", 4);
+syn(langRows, "Symbol", "var s = Symbol('k'); var o = {}; o[s] = 4; return o[s] + Object.keys(o).length", 4);
+/* Ohne Generator: eine Zeile darf nur EINE Sache pruefen, sonst meldet ein
+   fehlendes `function*` faelschlich, dass Symbole fehlen. */
+syn(langRows, "Symbol.iterator", "var o = {}; o[Symbol.iterator] = function () { var i = 0; return { next: function () { return i++ < 1 ? { value: 4, done: false } : { done: true } } } }; return [...o][0]", 4);
+syn(langRows, "Iterator schliesst", "var c = false; var o = {}; o[Symbol.iterator] = function () { return { next: function () { return { value: 1, done: false } }, 'return': function () { c = true; return { done: true } } } }; for (var x of o) break; return c", true);
 syn(langRows, "Promise", "return typeof Promise", "function");
 syn(langRows, "async / await", "return (async function () { return 1 })().constructor.name", "Promise");
 

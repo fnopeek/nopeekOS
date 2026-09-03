@@ -1,0 +1,24 @@
+//! Eine JS-Datei laufen lassen und sagen, was sie auf die Konsole geschrieben
+//! hat.
+//!
+//! `js::run` sammelt die Konsole ein und wirft sie weg — fuer eine Probe ist
+//! genau die Konsole aber das Ergebnis. `CAP=1` setzt die Schrittgrenze, damit
+//! eine Endlosschleife als `RangeError` endet statt als haengender Lauf.
+//!
+//!   cargo run --release --example jsrun -- probe.js
+fn main() {
+    let arg = std::env::args().nth(1).unwrap_or_default();
+    let script = std::fs::read_to_string(&arg).unwrap_or(arg);
+    let prog = match beak_engine::js::parse(&script, false) {
+        Ok(p) => p,
+        Err(e) => { println!("SyntaxError: {} @{}", e.msg, e.at); return; }
+    };
+    let mut i = beak_engine::js::interp::Interp::new();
+    if std::env::var("CAP").is_ok() { i.max_steps = 2_000_000; }
+    let r = i.run_program(&prog);
+    for l in &i.console { println!("{l}"); }
+    if let Err(beak_engine::js::interp::Abrupt::Throw(v)) = r {
+        let m = i.get(&v, "message").ok().and_then(|m| i.to_string(&m).ok());
+        println!("UNCAUGHT: {}", m.as_deref().unwrap_or("?"));
+    }
+}

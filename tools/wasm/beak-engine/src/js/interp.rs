@@ -109,6 +109,13 @@ pub struct Realm {
     pub text_proto: Gc,
     pub document_proto: Gc,
     pub regexp_proto: Gc,
+    pub symbol_proto: Gc,
+    /// `%IteratorPrototype%` — der gemeinsame Vorfahr aller eingebauten
+    /// Iteratoren. Er traegt `[Symbol.iterator]() { return this }`, und genau
+    /// daran haengt, dass ein Iterator selbst wieder iterierbar ist.
+    pub iterator_proto: Gc,
+    pub array_iter_proto: Gc,
+    pub string_iter_proto: Gc,
 }
 
 pub struct Interp {
@@ -131,6 +138,10 @@ pub struct Interp {
     /// eingereicht wurde — dann gibt es `document` gar nicht erst, statt eins
     /// vorzutaeuschen, das nichts enthaelt.
     pub doc: Option<super::dombind::Doc>,
+    /// Laufende Nummer fuer `Symbol()`.
+    pub next_sym: u32,
+    /// Die globale Symbolregistrierung hinter `Symbol.for`/`Symbol.keyFor`.
+    pub sym_registry: HashMap<Rc<str>, Value>,
     /// Angemeldete Zeitgeber-Rueckrufe. Noch laeuft niemand sie; sie zu HALTEN
     /// kostet nichts und ist die Stelle, an der beaks Schleife ansetzt.
     pub timers: Vec<Value>,
@@ -180,7 +191,9 @@ impl Interp {
         super::dombind::install(&mut realm);
         super::regexp::install(&mut realm);
         super::json::install(&mut realm);
-        Interp { realm, depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX, fake_now: 0.0, doc: None, timers: Vec::new(), console: Vec::new(), console_dropped: 0 }
+        Interp { realm, depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX,
+                 fake_now: 0.0, doc: None, next_sym: 0, sym_registry: HashMap::new(),
+                 timers: Vec::new(), console: Vec::new(), console_dropped: 0 }
     }
 
     /// Die angemeldeten Zeitgeber EINMAL durchlaufen.
@@ -295,6 +308,15 @@ impl Interp {
     /// `1 * obj`.
     pub fn to_primitive(&mut self, v: &Value, hint_string: bool) -> C<Value> {
         let Value::Obj(o) = v else { return Ok(v.clone()) };
+        // `Symbol.toPrimitive` geht VOR `valueOf`/`toString` — es ist der
+        // einzige Weg, auf dem ein Objekt beide ueberstimmen kann.
+        let exotic = self.get(v, SYM_TO_PRIMITIVE)?;
+        if self.is_callable(&exotic) {
+            let hint = Value::str(if hint_string { "string" } else { "number" });
+            let r = self.call(&exotic, v.clone(), &[hint])?;
+            if !matches!(r, Value::Obj(_)) { return Ok(r); }
+            return self.type_err("Symbol.toPrimitive returned an object");
+        }
         let order: [&str; 2] = if hint_string { ["toString", "valueOf"] } else { ["valueOf", "toString"] };
         for m in order {
             let f = self.get(&Value::Obj(o.clone()), m)?;
@@ -313,6 +335,7 @@ impl Interp {
             Value::Bool(b) => if *b { 1.0 } else { 0.0 },
             Value::Num(n) => *n,
             Value::Str(s) => string_to_num(s),
+            Value::Sym(_) => return self.type_err("cannot convert a Symbol value to a number"),
             Value::Obj(_) => { let p = self.to_primitive(v, false)?; self.to_number(&p)? }
         })
     }
@@ -324,8 +347,49 @@ impl Interp {
             Value::Bool(b) => Rc::from(if *b { "true" } else { "false" }),
             Value::Num(n) => Rc::from(num_to_string(*n).as_str()),
             Value::Str(s) => s.clone(),
+            // Absichtlich ein Fehler, kein Text. `"" + sym` ist fast immer ein
+            // Versehen; `String(sym)` und `sym.toString()` gehen weiterhin,
+            // die rufen `sym_to_display` statt hier durch.
+            Value::Sym(_) => return self.type_err("cannot convert a Symbol value to a string"),
             Value::Obj(_) => { let p = self.to_primitive(v, true)?; self.to_string(&p)? }
         })
+    }
+
+    /// `ToPropertyKey`. Der EINE Punkt, an dem ein Symbol zum
+    /// Eigenschaftsnamen wird — jeder berechnete Zugriff (`o[k]`,
+    /// Objektliteral, Klassenglied, `in`, `defineProperty`) laeuft hier
+    /// durch, und nur hier.
+    pub fn to_prop_key(&mut self, v: &Value) -> C<Rc<str>> {
+        match v {
+            Value::Sym(sd) => Ok(sd.key.clone()),
+            _ => self.to_string(v),
+        }
+    }
+
+    /// Wie ein Symbol GESCHRIEBEN aussieht: `Symbol(desc)`. Nicht `to_string`
+    /// — das wirft mit Absicht.
+    pub fn sym_to_display(sd: &SymData) -> Rc<str> {
+        match &sd.desc {
+            Some(d) => Rc::from(alloc::format!("Symbol({d})").as_str()),
+            None => Rc::from("Symbol()"),
+        }
+    }
+
+    /// Ein frisches Symbol. Die laufende Nummer macht den Schluessel einmalig
+    /// — zwei `Symbol("x")` sind damit verschieden, wie die Spezifikation es
+    /// verlangt.
+    /// Die Beschreibung steht MIT im Schluessel — `Object.getOwnPropertySymbols`
+    /// bekommt nur ihn zu sehen und muss das Symbol daraus wieder aufbauen
+    /// koennen ([[sym_from_key]]). Die laufende Nummer davor haelt ihn
+    /// einmalig, damit zwei `Symbol("x")` verschieden bleiben.
+    pub fn new_symbol(&mut self, desc: Option<Rc<str>>) -> Value {
+        self.next_sym += 1;
+        let n = self.next_sym;
+        let key: Rc<str> = Rc::from(match &desc {
+            Some(d) => alloc::format!("\0#{n}:{d}"),
+            None => alloc::format!("\0#{n}"),
+        }.as_str());
+        Value::Sym(Rc::new(SymData { desc, key, registered: None }))
     }
 
     /// `ToObject`: Primitive bekommen ihre Huelle. Das ist der Weg, ueber den
@@ -347,6 +411,7 @@ impl Interp {
                 }
                 Ok(g)
             }
+            Value::Sym(sd) => Ok(new_kind(Some(self.realm.symbol_proto.clone()), ObjKind::SymWrap(sd.clone()))),
             Value::Num(n) => Ok(new_kind(Some(self.realm.number_proto.clone()), ObjKind::NumWrap(*n))),
             Value::Bool(b) => Ok(new_kind(Some(self.realm.boolean_proto.clone()), ObjKind::BoolWrap(*b))),
             Value::Undefined | Value::Null =>
@@ -520,6 +585,13 @@ impl Interp {
 
     fn make_arguments(&mut self, args: &[Value]) -> Value {
         let g = new_kind(Some(self.realm.object_proto.clone()), ObjKind::Arguments);
+        // `arguments` ist iterierbar — `[...arguments]` und `for (a of
+        // arguments)` sind gewoehnliche Schreibweisen, und beide gehen ueber
+        // dieselbe Funktion wie `Array.prototype.values`.
+        {
+            let vals = self.get(&Value::Obj(self.realm.array_proto.clone()), "values");
+            if let Ok(v) = vals { g.borrow_mut().define(SYM_ITERATOR, Prop::builtin(v)); }
+        }
         {
             let mut o = g.borrow_mut();
             for (i, a) in args.iter().enumerate() {
@@ -659,6 +731,123 @@ impl Interp {
                 for c in cases { for s in &c.body { self.hoist_vars(s, func); } }
             }
             _ => {}
+        }
+    }
+
+    // ── Der Iteratorvertrag ──────────────────────────────────────────────
+
+    /// `{ value, done }` — das Ergebnis eines `next()`.
+    pub fn iter_result(&mut self, value: Value, done: bool) -> Value {
+        let g = new_obj(Some(self.realm.object_proto.clone()));
+        {
+            let mut o = g.borrow_mut();
+            o.define("value", Prop::data(value));
+            o.define("done", Prop::data(Value::Bool(done)));
+        }
+        Value::Obj(g)
+    }
+
+    /// Ein Array-Iterator ueber `target`. `kind`: 0 Werte, 1 Schluessel,
+    /// 2 Paare.
+    pub fn array_iter(&mut self, target: Value, kind: u8) -> C<Value> {
+        // `ToObject` zuerst: `Array.prototype.values.call("ab")` muss gehen.
+        let t = self.to_object(&target)?;
+        let g = new_obj(Some(self.realm.array_iter_proto.clone()));
+        {
+            let mut o = g.borrow_mut();
+            o.define(IT_TARGET, Prop::data(Value::Obj(t)));
+            o.define(IT_INDEX, Prop::data(Value::Num(0.0)));
+            o.define(IT_KIND, Prop::frozen(Value::Num(kind as f64)));
+        }
+        Ok(Value::Obj(g))
+    }
+
+    /// `GetIterator`. Wirft, wenn der Wert keinen `Symbol.iterator` hat —
+    /// genau das verlangt `for..of`, und der Fehlertext nennt den Grund.
+    pub fn get_iterator(&mut self, v: &Value) -> C<Value> {
+        if matches!(v, Value::Undefined | Value::Null) {
+            return self.type_err("value is not iterable");
+        }
+        let m = self.get(v, SYM_ITERATOR)?;
+        if !self.is_callable(&m) { return self.type_err("value is not iterable"); }
+        let it = self.call(&m, v.clone(), &[])?;
+        if !matches!(it, Value::Obj(_)) {
+            return self.type_err("Symbol.iterator did not return an object");
+        }
+        Ok(it)
+    }
+
+    /// Ein Schritt. `None` heisst fertig.
+    pub fn iter_next(&mut self, it: &Value) -> C<Option<Value>> {
+        self.tick()?;
+        let f = self.get(it, "next")?;
+        if !self.is_callable(&f) { return self.type_err("iterator has no next method"); }
+        let r = self.call(&f, it.clone(), &[])?;
+        if !matches!(r, Value::Obj(_)) {
+            return self.type_err("iterator result is not an object");
+        }
+        let done = self.get(&r, "done")?;
+        if done.truthy() { return Ok(None); }
+        Ok(Some(self.get(&r, "value")?))
+    }
+
+    /// `IteratorClose` — beim vorzeitigen Verlassen (`break`, `return`, ein
+    /// Fehler im Rumpf). Ein Generator raeumt hier auf; wer das auslaesst,
+    /// laesst `finally`-Bloecke in fremdem Code liegen.
+    ///
+    /// Ein Fehler AUS `return()` wird geschluckt: der Grund fuers Verlassen
+    /// steht schon fest, und ihn zu ueberschreiben verbirgt ihn.
+    pub fn iter_close(&mut self, it: &Value) {
+        let Ok(f) = self.get(it, "return") else { return };
+        if !self.is_callable(&f) { return; }
+        let _ = self.call(&f, it.clone(), &[]);
+    }
+
+    /// Alles auf einmal — fuer Streuung, `Array.from`, `new Map(…)`.
+    ///
+    /// Eifrig, und das ist hier richtig: alle drei Aufrufer BRAUCHEN die
+    /// vollstaendige Liste. `for..of` laeuft nicht hier durch, sondern
+    /// schrittweise ([[exec_for_of]]) — sonst haenge ein unendlicher
+    /// Iterator die Seite auf, obwohl der Rumpf im ersten Durchlauf
+    /// abbricht.
+    pub fn iterate(&mut self, v: &Value) -> C<Vec<Value>> {
+        let it = self.get_iterator(v)?;
+        let mut out = Vec::new();
+        loop {
+            match self.iter_next(&it) {
+                Ok(Some(x)) => out.push(x),
+                Ok(None) => break,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(out)
+    }
+
+    /// `CreateListFromArrayLike`: `length` und Indizes, OHNE den
+    /// Iteratorvertrag.
+    ///
+    /// Das ist kein Rueckfall, sondern eine eigene Spezifikationsoperation.
+    /// `Function.prototype.apply` und die Array-Methoden benutzen sie —
+    /// `apply` mit einem Objekt ohne `Symbol.iterator` muss gehen, `for..of`
+    /// damit muss werfen. Wer beides in eine Funktion legt, verliert genau
+    /// diesen Unterschied.
+    pub fn elems(&mut self, v: &Value) -> C<Vec<Value>> {
+        match v {
+            Value::Str(s) => Ok(s.chars().map(|c| {
+                let mut t = String::new(); t.push(c); Value::string(t)
+            }).collect()),
+            Value::Obj(_) => {
+                let len = self.get(v, "length")?;
+                let n = self.to_number(&len)?;
+                let n = if n.is_finite() && n > 0.0 { n as usize } else { 0 };
+                let mut out = Vec::with_capacity(n.min(1 << 16));
+                for i in 0..n {
+                    self.tick()?;
+                    out.push(self.get(v, &num_to_string(i as f64))?);
+                }
+                Ok(out)
+            }
+            _ => self.type_err("value is not array-like"),
         }
     }
 
