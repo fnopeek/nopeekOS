@@ -48,24 +48,35 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-01 · beak 0.52.0 · Kernel 0.318.1** (Rest: `git log`)
+**Stand 2026-09-03 · beak 0.55.0 · Kernel 0.318.1** (Rest: `git log`)
 
 Zwei Fäden laufen parallel.
 
 **`beak`**, der eigene Browser: **Stage 1 läuft — die Seite reagiert.** Eigene
-JS-Maschine (Lexer, Parser, Baumläufer, RegExp, DOM-Bindung), externe Skripte
-werden geholt, ein Klick erreicht seinen Behandler und das Layout wird nur bei
-`Doc::dirty` neu gerechnet. Bewusst kein Bytecode; Begründung im Memory.
-Gemessen wird an vier stehenden Zahlen, nicht am Gefühl: test262 parse
-96,84 %, test262 exec 48,68 % (V8 auf demselben Korpus: 99,41 %), Zielkorpus
-437/437 geparst und 296/437 durchgelaufen. Offen und der Reihe nach: Symbol,
-Promise/async, Generator.
+JS-Maschine (Lexer, Parser, Baumläufer, RegExp, DOM-Bindung), Symbol samt
+Iteratorvertrag, Promise mit einer Microtask-Schlange, und die Wirtsumgebung.
+Bewusst kein Bytecode; Begründung im Memory.
+
+**Gemessen wird an stehenden Zahlen, und die wichtigste ist NICHT test262.**
+Auf allen elf Zielseiten ist die erste Wand ein fehlendes DOM-/Wirts-Glied,
+keine Sprachlücke — im ganzen Korpus stirbt kein einziges Skript an
+Generatoren, während test262 dafür 4000 Fehlschläge zählt.
+
+    test262 parse   96,84 %   ·  exec 52,40 %  (V8 auf demselben Korpus: 99,41 %)
+    Zielkorpus      437/437 geparst, 299/437 durchgelaufen
+    DOM-Aufrufe     93,5 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
+
+Die Rangfolge gibt `tests/apigap.rs`, nicht die test262-Fehlerkarte. Offen und
+der Reihenfolge nach: `template.content`, `importNode`, `cookie`, dann
+Event/Storage/DOMTokenList als benannte Schnittstellen. Generator und
+async/await brauchen einen anhaltbaren Auswerter — eine Entwurfsfrage, und auf
+dem Korpus zahlen sie null.
 
 Das eigene Testziel ist **`beak:selftest`** — eine Prüfseite aus dem
 Binärbild, die nichts holt und ihr Ergebnis auf dem Schirm UND im Log sagt.
 Sie läuft auch host-seitig über dieselbe Datei
 (`beak-engine/examples/selftest.rs`). Ein Lauf fand neun Lücken, die fremde
-Seiten in Wochen nicht gezeigt hatten.
+Seiten in Wochen nicht gezeigt hatten. Stand: Sprache 25/27, Dokument 16/17.
 
 Die CSS-Runde davor ist zu Ende gebracht: das Eigenschafts-Gap ist
 geschlossen, 93,7 % der Deklarationen auf Bootstrap + Wikipedia abgedeckt. Die
