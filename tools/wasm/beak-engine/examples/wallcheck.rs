@@ -45,6 +45,10 @@ fn main() {
         if let Ok(html) = std::fs::read_to_string(&html_path) {
             let dom = beak_engine::dom::parse(&html);
             sess.interp.set_document(beak_engine::js::dombind::Doc::from_dom(&dom));
+            // Fenster + Farbschema wie im Browser, sonst faellt jede Seite
+            // schon an `innerWidth`/`matchMedia` aus und der Lauf misst das
+            // Werkzeug statt die Engine.
+            sess.interp.set_media(1280.0, 800.0, false);
         }
         for f in files {
             let Ok(src) = std::fs::read_to_string(f) else { continue };

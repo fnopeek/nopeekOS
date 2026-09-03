@@ -117,6 +117,15 @@ pub struct Realm {
     pub array_iter_proto: Gc,
     pub string_iter_proto: Gc,
     pub promise_proto: Gc,
+    /// Die Schnittstellen-Prototypen der DOM-Bindung. `tag_protos` bildet den
+    /// Elementnamen auf seine Schnittstelle ab; was nicht darinsteht, ist
+    /// `HTMLElement`.
+    pub html_element_proto: Gc,
+    pub svg_element_proto: Gc,
+    pub fragment_proto: Gc,
+    pub tag_protos: HashMap<&'static str, Gc>,
+    pub url_proto: Gc,
+    pub url_params_proto: Gc,
 }
 
 pub struct Interp {
@@ -139,6 +148,18 @@ pub struct Interp {
     /// eingereicht wurde — dann gibt es `document` gar nicht erst, statt eins
     /// vorzutaeuschen, das nichts enthaelt.
     pub doc: Option<super::dombind::Doc>,
+    /// Der Zustand von `Math.random`.
+    ///
+    /// **Der Wirt saet, nicht die Engine.** `beak-engine` ist hostfrei und hat
+    /// keine Entropiequelle; sich eine auszudenken waere schlimmer als keine
+    /// zu haben. Also steht hier eine feste Saat, und wer eine echte hat,
+    /// reicht sie mit `seed_random` ein. Der Testlaeufer bekommt dadurch
+    /// nebenbei, was er ohnehin braucht: reproduzierbare Laeufe.
+    rng: u64,
+    /// Die Medienlage fuer `matchMedia` — Breite und Farbschema-Wunsch. Wie
+    /// `innerWidth` gehoert sie dem Wirt; ohne `set_viewport` gibt es
+    /// `matchMedia` gar nicht erst.
+    pub media: Option<(f64, bool)>,
     /// Laufende Nummer fuer `Symbol()`.
     pub next_sym: u32,
     /// Die globale Symbolregistrierung hinter `Symbol.for`/`Symbol.keyFor`.
@@ -198,9 +219,11 @@ impl Interp {
         super::regexp::install(&mut realm);
         super::json::install(&mut realm);
         super::promise::install(&mut realm);
+        super::url::install(&mut realm);
         Interp { realm, depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX,
                  fake_now: 0.0, doc: None, next_sym: 0, sym_registry: HashMap::new(),
                  jobs: alloc::collections::VecDeque::new(),
+                 rng: 0x2545_F491_4F6C_DD1D, media: None,
                  timers: Vec::new(), console: Vec::new(), console_dropped: 0 }
     }
 
@@ -272,7 +295,33 @@ impl Interp {
     /// waehlt, fiel mit `ReferenceError` aus, statt die schmale Fassung zu
     /// nehmen. Eine erfundene Zahl waere schlimmer gewesen: sie haette
     /// ausgesehen wie eine Messung ([[feedback_invented_fallback_hides_the_fault]]).
+    /// Eine echte Saat vom Wirt. Ohne sie liefert `Math.random` jedes Mal
+    /// dieselbe Folge — sichtbar deterministisch statt unsichtbar schlecht.
+    pub fn seed_random(&mut self, seed: u64) {
+        self.rng = seed | 1;
+    }
+
+    /// xorshift64*. Eine Zahl in [0,1), wie die Spezifikation sie verlangt.
+    /// Kein Kryptozufall und nicht als solcher gedacht — `crypto.getRandomValues`
+    /// waere eine eigene Frage und haengt am Wirt.
+    pub fn next_random(&mut self) -> f64 {
+        let mut x = self.rng;
+        x ^= x >> 12; x ^= x << 25; x ^= x >> 27;
+        self.rng = x;
+        // Die oberen 53 Bits: genau die Genauigkeit eines f64-Bruchs.
+        ((x.wrapping_mul(0x2545_F491_4F6C_DD1D)) >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// Wie `set_viewport`, aber mit dem Farbschema dazu. `matchMedia` braucht
+    /// beides, und ein `prefers-color-scheme`, das immer hell sagt, waere eine
+    /// erfundene Antwort.
+    pub fn set_media(&mut self, w: f64, h: f64, dark: bool) {
+        self.set_viewport(w, h);
+        self.media = Some((w, dark));
+    }
+
     pub fn set_viewport(&mut self, w: f64, h: f64) {
+        if self.media.is_none() { self.media = Some((w, false)); }
         let g = self.realm.global.clone();
         let mut o = g.borrow_mut();
         for (k, v) in [("innerWidth", w), ("innerHeight", h),

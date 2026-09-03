@@ -1322,8 +1322,14 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) {
     // nicht, und eine Seite, die ihre schmale Fassung danach waehlt, faellt
     // mit ReferenceError aus, statt sie zu nehmen.
     if let Some((_, _, w, h)) = canvas_rect() {
-        sess.interp.set_viewport(w as f64, h as f64);
+        // Farbschema MIT einreichen, nicht nur die Groesse: `matchMedia`
+        // muss dieselbe Antwort geben wie der Kaskadenlauf, sonst waehlt das
+        // Skript eine Fassung, die das Layout nicht malt.
+        sess.interp.set_media(w as f64, h as f64, query_theme().is_dark());
     }
+    // `Math.random` bekommt eine echte Saat. Ohne sie liefert jede Seite
+    // dieselbe Folge — und die Engine erfindet sich absichtlich keine.
+    sess.interp.seed_random(now_ms() as u64 ^ 0x9E37_79B9_7F4A_7C15);
     let (mut ran, mut failed, mut bytes) = (0usize, 0usize, 0usize);
     for p in &list {
         let PendingScript::Ready(src) = p else { failed += 1; continue };

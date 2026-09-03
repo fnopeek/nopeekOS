@@ -14,6 +14,16 @@ fn main() {
         Err(e) => { println!("SyntaxError: {} @{}", e.msg, e.at); return; }
     };
     let mut i = beak_engine::js::interp::Interp::new();
+    // `HTML=<datei|text>` haengt ein Dokument an. Ohne das gibt es `document`
+    // GAR NICHT — das ist Absicht der Engine und keine Luecke des Werkzeugs.
+    if let Ok(h) = std::env::var("HTML") {
+        let html = std::fs::read_to_string(&h).unwrap_or(h);
+        let dom = beak_engine::dom::parse(&html);
+        i.set_document(beak_engine::js::dombind::Doc::from_dom(&dom));
+        // Ein Fenster dazu, sonst gibt es `matchMedia` nicht. `DARK=1` dreht
+        // das Farbschema.
+        i.set_media(1024.0, 768.0, std::env::var("DARK").is_ok());
+    }
     if std::env::var("CAP").is_ok() { i.max_steps = 2_000_000; }
     let r = i.run_program(&prog);
     // Zeitgeber UND Microtasks nachlaufen lassen — eine Probe, die auf
