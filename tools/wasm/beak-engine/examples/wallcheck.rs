@@ -64,6 +64,12 @@ fn main() {
                 Ok(Ok(())) => { ok += 1; pok += 1; continue }
                 Ok(Err(e)) => e,
             };
+            // `WCPAGE=<seite>` nennt Datei UND Grund. Der Histogramm-Balken
+            // sagt WAS die Wand ist, nicht WO — und beim Vergleich zweier
+            // Staende ist genau das die Frage.
+            if std::env::var("WCPAGE").ok().as_deref() == Some(page.as_str()) {
+                println!("    {} — {why}", f.file_name().unwrap().to_string_lossy());
+            }
             let key: String = why.chars().map(|c| if c.is_ascii_digit() { '#' } else { c })
                 .collect::<String>().chars().take(62).collect();
             *hist.entry(key).or_default() += 1;

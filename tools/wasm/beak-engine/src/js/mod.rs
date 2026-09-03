@@ -22,6 +22,7 @@ pub mod expr;
 pub mod interp;
 pub mod lexer;
 pub mod parser;
+pub mod promise;
 pub mod regexp;
 pub mod value;
 

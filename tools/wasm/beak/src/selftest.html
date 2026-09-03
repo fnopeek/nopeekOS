@@ -48,6 +48,7 @@
 
 <h2>Zeitgeber</h2>
 <p id="timer">setTimeout ist nicht gelaufen.</p>
+<p id="micro">Microtask ist nicht gelaufen.</p>
 
 <script>
 var langRows = [], domRows = [];
@@ -217,6 +218,26 @@ document.body.addEventListener("click", function (e) {
 setTimeout(function () {
   document.getElementById("timer").textContent = "setTimeout ist gelaufen.";
 }, 0);
+
+/* Der Name allein sagt nichts — die Frage ist, ob die Schlange LAEUFT und in
+   welcher Reihenfolge. Also schreibt jede Sprosse ihr Zeichen an, und am Ende
+   steht die Reihenfolge da statt eines JA. */
+if (typeof Promise === "function") {
+  var ord = "";
+  setTimeout(function () { ord += "t"; }, 0);
+  Promise.resolve("A").then(function (v) { ord += v; return Promise.resolve("B"); })
+    .then(function (v) { ord += v; })
+    .then(function () { return Promise.all([1, Promise.resolve(2)]); })
+    .then(function (a) { ord += a.join(""); })
+    .catch(function () { ord += "!"; })
+    .finally(function () {
+      setTimeout(function () {
+        document.getElementById("micro").textContent =
+          ord === "AB12t" ? "Microtask ist gelaufen, Reihenfolge stimmt: " + ord
+                          : "Microtask-Reihenfolge FALSCH: " + ord + " (erwartet AB12t)";
+      }, 0);
+    });
+}
 
 /* ---------- Ergebnis ---------- */
 paint("lang", langRows);
