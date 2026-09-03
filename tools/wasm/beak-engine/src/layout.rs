@@ -1216,6 +1216,26 @@ impl Layout {
             .filter(|b| x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h)
             .map(|b| b.seq)
             .collect();
+        // Ein Steuerelement hat KEINEN `hover_box`: es ist ein atomarer
+        // Inline-Kasten, seine Kinder laufen nie durchs Layout, und damit
+        // kommt es nie an `record_inspect` vorbei. Ohne diese Zeile endet die
+        // Kette beim ELTERNTEIL — der Behandler eines `<button>` feuert nie,
+        // sein `onclick`-Attribut auch nicht, und `e.target` ist der falsche
+        // Knoten.
+        //
+        // Am Geraet sah das aus wie „der Klick kommt gar nicht an": vier
+        // `control-activate` und keine einzige Zeile von der Seite. Der
+        // host-seitige Selftest hatte es nicht gefunden, weil er die Kette
+        // aus dem BAUM baute statt aus dem Layout — `examples/hitchk.rs`
+        // schliesst genau diese Luecke.
+        //
+        // Bewusst hier und nicht in `record_inspect`: „darf der Zeiger diesen
+        // Kasten treffen" ist nicht „reagiert dieses Element auf `:hover`".
+        // Die zwei Fragen zusammenzulegen hat schon einmal sechs volle
+        // Layouts je Mausbewegung gekostet ([[feedback_hitting_is_not_hovering]]).
+        v.extend(self.controls.iter()
+            .filter(|c| x >= c.x && x < c.x + c.w && y >= c.y && y < c.y + c.h)
+            .map(|c| c.seq));
         v.sort_unstable();
         v.dedup();
         v

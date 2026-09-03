@@ -35,16 +35,42 @@ fn main() {
     let d = sess.interp.doc.as_ref().unwrap();
     println!("Behandler angemeldet: {}", d.has_listeners);
 
-    // Die Klicks, die auf dem Geraet der Finger macht. Ohne sie ist die
-    // halbe Pruefseite nur host-seitig behauptet.
-    println!("\n── Klicks ──");
+    // Die Klicks, die auf dem Geraet der Finger macht — und ZWAR UEBER DAS
+    // LAYOUT, nicht ueber den Baum.
+    //
+    // Die erste Fassung baute die Kette mit `ancestors()` aus dem Baum. Damit
+    // pruefte sie alles ausser dem einen Schritt, an dem es am Geraet
+    // scheiterte: beak nimmt die Kette aus `lay.element_chain(x, y)`, und ein
+    // `<button>` stand dort nicht drin. Host gruen, Geraet stumm — ein
+    // Testpfad, der nicht der echte ist, ist kein Test
+    // ([[feedback_verify_the_call_path]]).
+    println!("\n── Klicks (Kette aus dem LAYOUT, wie in beak) ──");
+    let mut engine = beak_engine::Engine::new();
+    engine.set_theme(beak_engine::Theme {
+        bg: beak_engine::Rgb(255, 255, 255), text: beak_engine::Rgb(0, 0, 0),
+        heading: beak_engine::Rgb(0, 0, 0), link: beak_engine::Rgb(0, 0, 238),
+        muted: beak_engine::Rgb(96, 96, 96), rule: beak_engine::Rgb(128, 128, 128) });
+    engine.set_hit_all(sess.interp.doc.as_ref().unwrap().has_listeners);
+    engine.set_scripted_dom(Some(sess.interp.doc.as_mut().unwrap().to_dom()));
+    let lay = engine.layout_forms(html, "", 1024, &Default::default());
     for (id, times) in [("b1", 2usize), ("b2", 1), ("b3", 1), ("b4", 1)] {
         let Some(n) = find_id(sess.interp.doc.as_ref().unwrap(), id) else {
             println!("{id}: nicht gefunden"); continue;
         };
-        let chain = ancestors(sess.interp.doc.as_ref().unwrap(), n);
+        let seq = sess.interp.doc.as_ref().unwrap().nodes[n as usize].seq;
+        let Some(c) = lay.controls.iter().find(|c| c.seq == seq) else {
+            println!("{id}: KEIN Kasten im Layout — der Klick koennte ihn nie treffen");
+            continue;
+        };
+        let (cx, cy) = (c.x + c.w / 2, c.y + c.h / 2);
+        let chain = lay.element_chain(cx, cy);
+        let doc = sess.interp.doc.as_ref().unwrap();
+        let nodes: Vec<u32> = chain.iter().filter_map(|s| doc.by_seq(*s)).collect();
+        if !chain.contains(&seq) {
+            println!("{id}: der Klickpunkt ({cx},{cy}) findet das Element NICHT — Kette {chain:?}");
+        }
         for _ in 0..times {
-            match beak_engine::js::dombind::dispatch(&mut sess.interp, "click", &chain) {
+            match beak_engine::js::dombind::dispatch(&mut sess.interp, "click", &nodes) {
                 Ok(p) => { let _ = p; }
                 Err(_) => println!("{id}: LAUFFEHLER"),
             }
@@ -69,17 +95,4 @@ fn find_id(d: &Doc, id: &str) -> Option<u32> {
     let mut all = Vec::new();
     d.descendants(d.doc, &mut all);
     all.into_iter().find(|&x| d.nodes[x as usize].attr("id").map(|v| v.to_string()).as_deref() == Some(id))
-}
-
-/// Die Kette vom Wurzelknoten bis zum Ziel — dieselbe Form, die das Layout
-/// unter dem Zeiger ausgibt.
-fn ancestors(d: &Doc, n: u32) -> Vec<u32> {
-    let mut out = Vec::new();
-    let mut cur = Some(n);
-    while let Some(x) = cur {
-        out.push(x);
-        cur = d.nodes[x as usize].parent;
-    }
-    out.reverse();
-    out
 }
