@@ -165,7 +165,7 @@ impl Interp {
         Ok(match p {
             MemberProp::Ident(n) => Rc::from(n.as_str()),
             MemberProp::Private(n) => Rc::from(alloc::format!("#{n}").as_str()),
-            MemberProp::Computed(e) => { let v = self.eval(e, env)?; self.to_string(&v)? }
+            MemberProp::Computed(e) => { let v = self.eval(e, env)?; self.to_prop_key(&v)? }
         })
     }
 
@@ -551,11 +551,19 @@ impl Interp {
             BitXor => Value::Num((to_int32(self.to_number(&l)?) ^ to_int32(self.to_number(&r)?)) as f64),
             In => {
                 let Value::Obj(o) = &r else { return self.type_err("'in' needs an object on the right") };
-                let k = self.to_string(&l)?;
+                let k = self.to_prop_key(&l)?;
                 Value::Bool(self.has_property(o, &k))
             }
             Instanceof => {
                 let Value::Obj(_) = &r else { return self.type_err("right side of 'instanceof' is not callable") };
+                // `Symbol.hasInstance` ueberstimmt die Prototypkette — das ist
+                // der Weg, auf dem eine Klasse selbst entscheidet, was sie als
+                // ihre Instanz gelten laesst.
+                let hi = self.get(&r, SYM_HAS_INSTANCE)?;
+                if self.is_callable(&hi) {
+                    let res = self.call(&hi, r.clone(), &[l.clone()])?;
+                    return Ok(Value::Bool(res.truthy()));
+                }
                 if !self.is_callable(&r) { return self.type_err("right side of 'instanceof' is not callable"); }
                 let proto = self.get(&r, "prototype")?;
                 let Value::Obj(p) = proto else { return self.type_err("prototype is not an object") };
@@ -577,8 +585,11 @@ impl Interp {
         Ok(match (l, r) {
             (Undefined | Null, Undefined | Null) => true,
             (Undefined | Null, _) | (_, Undefined | Null) => false,
-            (Num(_), Num(_)) | (Str(_), Str(_)) | (Bool(_), Bool(_)) | (Obj(_), Obj(_)) =>
-                l.strict_eq(r),
+            (Num(_), Num(_)) | (Str(_), Str(_)) | (Bool(_), Bool(_)) | (Obj(_), Obj(_))
+            | (Sym(_), Sym(_)) => l.strict_eq(r),
+            // Ein Symbol ist nur sich selbst gleich — `==` wandelt es NICHT
+            // um. Gegen ein Objekt entscheidet erst dessen `ToPrimitive`.
+            (Sym(_), Num(_) | Str(_) | Bool(_)) | (Num(_) | Str(_) | Bool(_), Sym(_)) => false,
             (Bool(b), _) => { let n = Num(if *b { 1.0 } else { 0.0 }); self.loose_eq(&n, r)? }
             (_, Bool(b)) => { let n = Num(if *b { 1.0 } else { 0.0 }); self.loose_eq(l, &n)? }
             (Num(a), Str(_)) => *a == self.to_number(r)?,

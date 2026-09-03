@@ -11,7 +11,6 @@
 //! nicht. Das ist eine bewusste Schuld, keine Nachlaessigkeit — und die Stelle,
 //! an der ein Sammler ansetzen wuerde, ist genau `Gc`.
 
-use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -27,6 +26,7 @@ pub enum Value {
     Bool(bool),
     Num(f64),
     Str(Rc<str>),
+    Sym(Rc<SymData>),
     Obj(Gc),
 }
 
@@ -41,6 +41,7 @@ impl Value {
             Value::Bool(_) => "boolean",
             Value::Num(_) => "number",
             Value::Str(_) => "string",
+            Value::Sym(_) => "symbol",
             Value::Obj(o) => {
                 if matches!(o.borrow().kind, ObjKind::Function(_) | ObjKind::Native(_)) {
                     "function"
@@ -55,6 +56,7 @@ impl Value {
             Value::Bool(b) => *b,
             Value::Num(n) => *n != 0.0 && !n.is_nan(),
             Value::Str(s) => !s.is_empty(),
+            Value::Sym(_) => true,
             Value::Obj(_) => true,
         }
     }
@@ -70,6 +72,10 @@ impl Value {
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Num(a), Value::Num(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
+            // Zwei Symbole sind dasselbe, wenn ihr SCHLUESSEL derselbe ist —
+            // und der ist je Symbol einmalig. Damit ist die Identitaet nicht
+            // an den `Rc` gebunden, und `Symbol.for` darf ihn frisch bauen.
+            (Value::Sym(a), Value::Sym(b)) => a.key == b.key,
             (Value::Obj(a), Value::Obj(b)) => Rc::ptr_eq(a, b),
             _ => false,
         }
@@ -86,9 +92,100 @@ impl Value {
     }
 }
 
-/// Ein Eigenschaftsname. Symbole fehlen noch; wenn sie kommen, kommen sie
-/// HIER herein und nicht als zweite Tabelle daneben.
+/// Ein Eigenschaftsname — Zeichenkette ODER Symbol, in EINER Tabelle.
+///
+/// Ein Symbol traegt seinen Schluessel als Zeichenkette mit fuehrendem
+/// NUL-Byte. Das ist kein Trick, um Arbeit zu sparen, sondern die Entscheidung
+/// gegen eine zweite Eigenschaftstabelle: mit einem eigenen Schluesseltyp
+/// waere jede Suche `HashMap<PropName, _>` und muesste fuer jedes `o.foo`
+/// erst einen `PropName` bauen — eine Allokation auf dem heissesten Pfad der
+/// Maschine. So bleibt `get_own(&str)` unveraendert und kostenlos.
+///
+/// Der Preis, ehrlich benannt: eine Seite, die `obj["\0#7"]` schreibt, trifft
+/// den Namensraum der Symbole. Kein Zeichen ist von aussen unerreichbar —
+/// `String.fromCharCode(0)` gibt es. Ein fuehrendes NUL ist aber die Form,
+/// die in echtem Code nicht vorkommt, und die Pruefung kostet EIN Byte
+/// (`is_sym_key`), nicht einen Praefixvergleich.
 pub type PropName = Rc<str>;
+
+/// Ein Symbol. `key` ist der Eigenschaftsname, unter dem es in Objekten liegt,
+/// und zugleich seine Identitaet ([[Value::strict_eq]]).
+pub struct SymData {
+    pub desc: Option<Rc<str>>,
+    pub key: Rc<str>,
+    /// Gesetzt bei `Symbol.for` — `Symbol.keyFor` gibt genau das zurueck.
+    pub registered: Option<Rc<str>>,
+}
+
+/// Gehoert dieser Eigenschaftsname einem Symbol?
+#[inline]
+pub fn is_sym_key(k: &str) -> bool { k.as_bytes().first() == Some(&0) }
+
+/// Aus einem Symbolschluessel das Symbol zurueckgewinnen.
+///
+/// Nicht Bequemlichkeit, sondern Notwendigkeit:
+/// `Object.getOwnPropertySymbols` gibt SYMBOLE zurueck, und in der Tabelle
+/// steht nur der Schluessel. Also traegt der Schluessel alles, was ein Symbol
+/// ausmacht — Beschreibung und Registrierung — und ist trotzdem einmalig.
+///
+///   `\0@iterator`  wohlbekannt  → `Symbol.iterator`
+///   `\0*name`      registriert  → `Symbol.for("name")`
+///   `\0#7`         anonym       → `Symbol()`
+///   `\0#7:text`    beschrieben  → `Symbol("text")`
+pub fn sym_from_key(k: &PropName) -> SymData {
+    let body = &k[1..];
+    let (desc, registered) = match body.as_bytes().first() {
+        Some(b'@') => (Some(Rc::from(alloc::format!("Symbol.{}", &body[1..]).as_str())), None),
+        Some(b'*') => { let n: Rc<str> = Rc::from(&body[1..]); (Some(n.clone()), Some(n)) }
+        _ => match body.find(':') {
+            Some(i) => (Some(Rc::from(&body[i + 1..])), None),
+            None => (None, None),
+        },
+    };
+    SymData { desc, key: k.clone(), registered }
+}
+
+/// Die wohlbekannten Symbole. Ihr Schluessel ist eine Konstante, damit
+/// eingebauter Code `self.get(v, SYM_ITERATOR)` schreiben kann, ohne das
+/// Symbolobjekt erst zu suchen.
+pub const SYM_ITERATOR: &str = "\0@iterator";
+pub const SYM_ASYNC_ITERATOR: &str = "\0@asyncIterator";
+pub const SYM_HAS_INSTANCE: &str = "\0@hasInstance";
+pub const SYM_IS_CONCAT_SPREADABLE: &str = "\0@isConcatSpreadable";
+pub const SYM_MATCH: &str = "\0@match";
+pub const SYM_MATCH_ALL: &str = "\0@matchAll";
+pub const SYM_REPLACE: &str = "\0@replace";
+pub const SYM_SEARCH: &str = "\0@search";
+pub const SYM_SPECIES: &str = "\0@species";
+pub const SYM_SPLIT: &str = "\0@split";
+pub const SYM_TO_PRIMITIVE: &str = "\0@toPrimitive";
+pub const SYM_TO_STRING_TAG: &str = "\0@toStringTag";
+pub const SYM_UNSCOPABLES: &str = "\0@unscopables";
+
+/// Der Zustand eines eingebauten Iterators. Auch NUL-praefigiert, also aus
+/// `own_keys` heraus und fuer jedes Skript unsichtbar — `native` nimmt keinen
+/// Abschluss, der Zustand muss also irgendwo am Objekt liegen.
+pub const IT_TARGET: &str = "\0!target";
+pub const IT_INDEX: &str = "\0!index";
+/// 0 = Werte, 1 = Schluessel, 2 = Paare.
+pub const IT_KIND: &str = "\0!kind";
+
+/// Die Liste, aus der `Symbol.iterator` & Co. am globalen Objekt entstehen.
+pub const WELL_KNOWN: &[(&str, &str)] = &[
+    ("iterator", SYM_ITERATOR),
+    ("asyncIterator", SYM_ASYNC_ITERATOR),
+    ("hasInstance", SYM_HAS_INSTANCE),
+    ("isConcatSpreadable", SYM_IS_CONCAT_SPREADABLE),
+    ("match", SYM_MATCH),
+    ("matchAll", SYM_MATCH_ALL),
+    ("replace", SYM_REPLACE),
+    ("search", SYM_SEARCH),
+    ("species", SYM_SPECIES),
+    ("split", SYM_SPLIT),
+    ("toPrimitive", SYM_TO_PRIMITIVE),
+    ("toStringTag", SYM_TO_STRING_TAG),
+    ("unscopables", SYM_UNSCOPABLES),
+];
 
 #[derive(Clone)]
 pub struct Prop {
@@ -146,6 +243,7 @@ pub enum ObjKind {
     BoolWrap(bool),
     NumWrap(f64),
     StrWrap(Rc<str>),
+    SymWrap(Rc<SymData>),
     Arguments,
     Regex(Rc<crate::js::regexp::Regex>),
 }
@@ -197,13 +295,18 @@ impl Object {
         } else { false }
     }
 
-    /// Eigene Schluessel in der Reihenfolge, die die Spezifikation vorschreibt:
-    /// ganzzahlige Indizes aufsteigend, danach alles andere in
-    /// Einfuegereihenfolge.
+    /// Eigene ZEICHENKETTEN-Schluessel in der Reihenfolge, die die
+    /// Spezifikation vorschreibt: ganzzahlige Indizes aufsteigend, danach
+    /// alles andere in Einfuegereihenfolge.
+    ///
+    /// Symbole sind hier NICHT dabei — jeder Aufrufer (`Object.keys`,
+    /// `for..in`, `JSON.stringify`, `getOwnPropertyNames`) will genau das.
+    /// Wer Symbole braucht, nimmt `own_sym_keys`.
     pub fn own_keys(&self) -> Vec<PropName> {
         let mut idx: Vec<(u32, PropName)> = Vec::new();
         let mut rest: Vec<PropName> = Vec::new();
         for k in &self.order {
+            if is_sym_key(k) { continue; }
             match array_index(k) {
                 Some(i) => idx.push((i, k.clone())),
                 None => rest.push(k.clone()),
@@ -213,6 +316,11 @@ impl Object {
         let mut out: Vec<PropName> = idx.into_iter().map(|(_, k)| k).collect();
         out.append(&mut rest);
         out
+    }
+
+    /// Eigene SYMBOL-Schluessel, in Einfuegereihenfolge.
+    pub fn own_sym_keys(&self) -> Vec<PropName> {
+        self.order.iter().filter(|k| is_sym_key(k)).cloned().collect()
     }
 
     pub fn prop_count(&self) -> usize { self.props.len() }
@@ -316,6 +424,3 @@ pub fn native(proto: Option<Gc>, f: NativeFn, name: &str, length: usize, ctor: b
     g
 }
 
-/// Nur damit `Box` importiert bleibt, wenn spaeter Symbole dazukommen.
-#[allow(dead_code)]
-type _KeepBox = Box<()>;

@@ -221,49 +221,34 @@ impl Interp {
         Ok(None)
     }
 
+    /// `for..of` — SCHRITTWEISE, nicht erst einsammeln.
+    ///
+    /// Der Unterschied ist nicht Tempo, sondern Machbarkeit: ein Iterator
+    /// ohne Ende (ein Generator, ein Strom) ist voellig gewoehnlich, und ein
+    /// Rumpf, der im ersten Durchlauf `break` sagt, muss damit umgehen. Wer
+    /// vorher einsammelt, haengt an genau dieser Stelle.
+    ///
+    /// Und jedes vorzeitige Verlassen ruft `return()` auf dem Iterator —
+    /// sonst bleiben fremde `finally`-Bloecke liegen.
     fn exec_for_of(&mut self, left: &ForHead, right: &Expr, body: &Stmt,
                    env: &Rc<RefCell<Env>>) -> C<Option<Value>> {
         let src = self.eval(right, env)?;
-        let items = self.iterate(&src)?;
-        for v in items {
+        let it = self.get_iterator(&src)?;
+        loop {
+            let Some(v) = self.iter_next(&it)? else { break };
             let inner = Env::new(Some(env.clone()), false);
-            self.for_head_bind(left, v, &inner)?;
+            if let Err(e) = self.for_head_bind(left, v, &inner) {
+                self.iter_close(&it);
+                return Err(e);
+            }
             match self.exec(body, &inner) {
-                Err(Abrupt::Break(None)) => break,
+                Err(Abrupt::Break(None)) => { self.iter_close(&it); break }
                 Err(Abrupt::Continue(None)) => continue,
-                Err(e) => return Err(e),
+                Err(e) => { self.iter_close(&it); return Err(e) }
                 Ok(_) => {}
             }
         }
         Ok(None)
-    }
-
-    /// Ein Wert zu einer Werteliste.
-    ///
-    /// Der volle Iteratorvertrag (`Symbol.iterator`) fehlt, weil Symbole
-    /// fehlen. Bis dahin: Zeichenketten je Zeichen, Arrays und alles mit
-    /// `length` je Index — das deckt, was der Vorspann und der grosse Teil
-    /// echter Programme tut, und der Rest faellt im Lauf auf.
-    pub fn iterate(&mut self, v: &Value) -> C<Vec<Value>> {
-        match v {
-            Value::Str(s) => Ok(s.chars().map(|c| {
-                let mut t = String::new(); t.push(c); Value::string(t)
-            }).collect()),
-            Value::Obj(o) => {
-                let is_arrayish = matches!(o.borrow().kind, ObjKind::Array | ObjKind::Arguments)
-                    || self.has_property(o, "length");
-                if !is_arrayish { return self.type_err("value is not iterable"); }
-                let len = self.get(v, "length")?;
-                let n = self.to_number(&len)? as usize;
-                let mut out = Vec::with_capacity(n.min(1 << 16));
-                for i in 0..n {
-                    self.tick()?;
-                    out.push(self.get(v, &num_to_string(i as f64))?);
-                }
-                Ok(out)
-            }
-            _ => self.type_err("value is not iterable"),
-        }
     }
 
     fn exec_switch(&mut self, disc: &Expr, cases: &[SwitchCase],
@@ -462,7 +447,7 @@ impl Interp {
         Ok(match p {
             MemberProp::Ident(n) => Rc::from(n.as_str()),
             MemberProp::Private(n) => Rc::from(alloc::format!("#{n}").as_str()),
-            MemberProp::Computed(e) => { let v = self.eval(e, env)?; self.to_string(&v)? }
+            MemberProp::Computed(e) => { let v = self.eval(e, env)?; self.to_prop_key(&v)? }
         })
     }
 
@@ -471,7 +456,7 @@ impl Interp {
             PropKey::Ident(n) | PropKey::Str(n) => Rc::from(n.as_str()),
             PropKey::Private(n) => Rc::from(alloc::format!("#{n}").as_str()),
             PropKey::Num(n) => Rc::from(num_to_string(*n).as_str()),
-            PropKey::Computed(e) => { let v = self.eval(e, env)?; self.to_string(&v)? }
+            PropKey::Computed(e) => { let v = self.eval(e, env)?; self.to_prop_key(&v)? }
         })
     }
 }

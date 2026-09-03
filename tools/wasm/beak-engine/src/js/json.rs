@@ -31,6 +31,7 @@ pub fn install(realm: &mut Realm) {
     let pa = native(Some(fp.clone()), parse, "parse", 2, false);
     json.borrow_mut().define("stringify", Prop::builtin(Value::Obj(st)));
     json.borrow_mut().define("parse", Prop::builtin(Value::Obj(pa)));
+    json.borrow_mut().define(SYM_TO_STRING_TAG, Prop::frozen(Value::str("JSON")));
     realm.global.borrow_mut().define("JSON", Prop::builtin(Value::Obj(json)));
 }
 
@@ -84,7 +85,9 @@ fn write_value(i: &mut Interp, v: &Value, indent: &str, cur: &str, seen: &mut Ve
             Ok(true)
         }
         Value::Str(s) => { write_string(s, out); Ok(true) }
-        Value::Undefined => Ok(false),
+        // Wie `undefined`: faellt aus dem Objekt heraus, ist im Array `null`.
+        // Ein Fehler waere falsch — JSON kennt Symbole schlicht nicht.
+        Value::Undefined | Value::Sym(_) => Ok(false),
         Value::Obj(o) => {
             if i.is_callable(&v) { return Ok(false); }
             // Ein Zyklus ist der eine Fall, in dem `stringify` werfen MUSS.
