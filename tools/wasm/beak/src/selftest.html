@@ -36,7 +36,7 @@
  <span id="count">noch nie geklickt</span>
 </p>
 <p>
- <button id="b2" onclick="document.getElementById('inline').textContent='inline-onclick lief'">onclick-Attribut</button>
+ <button id="b2" onclick="say('inline', 'inline-onclick lief')">onclick-Attribut</button>
  <span id="inline">nicht geklickt</span>
 </p>
 <p>
@@ -200,23 +200,35 @@ row(domRows, "addEventListener", function () {
 });
 
 /* ---------- Behandler ---------- */
+
+/* Jedes Ergebnis geht auf den Schirm UND ins Log — dieselbe Zeichenkette.
+   Ein Geraetelauf ist eine Ferndiagnose: was nur auf dem Schirm steht, muss
+   jemand abtippen, und was nur im Log steht, sieht der Benutzer nicht. Die
+   erste Fassung dieser Seite schrieb Klicks und Microtask-Reihenfolge NUR auf
+   den Schirm, und genau die fehlten im ersten Geraetelauf. */
+function say(id, text) {
+  document.getElementById(id).textContent = text;
+  console.log("[selftest] " + id + ": " + text);
+}
+
 var clicks = 0;
 document.getElementById("b1").addEventListener("click", function () {
   clicks++;
-  document.getElementById("count").textContent = clicks + " Klick" + (clicks === 1 ? "" : "s");
+  say("count", clicks + " Klick" + (clicks === 1 ? "" : "s"));
 });
 document.getElementById("b3").addEventListener("click", function () {
   var li = document.createElement("li");
   li.textContent = "durch Klick angehaengt (" + (document.querySelectorAll("#sink li").length + 1) + ")";
   document.getElementById("sink").appendChild(li);
+  console.log("[selftest] sink: " + document.querySelectorAll("#sink li").length + " <li>");
 });
 document.body.addEventListener("click", function (e) {
   if (e.target && e.target.id === "b4") {
-    document.getElementById("bubble").textContent = "Blase kam bis body an, Ziel = " + e.target.id;
+    say("bubble", "Blase kam bis body an, Ziel = " + e.target.id);
   }
 });
 setTimeout(function () {
-  document.getElementById("timer").textContent = "setTimeout ist gelaufen.";
+  say("timer", "setTimeout ist gelaufen.");
 }, 0);
 
 /* Der Name allein sagt nichts — die Frage ist, ob die Schlange LAEUFT und in
@@ -232,9 +244,9 @@ if (typeof Promise === "function") {
     .catch(function () { ord += "!"; })
     .finally(function () {
       setTimeout(function () {
-        document.getElementById("micro").textContent =
-          ord === "AB12t" ? "Microtask ist gelaufen, Reihenfolge stimmt: " + ord
-                          : "Microtask-Reihenfolge FALSCH: " + ord + " (erwartet AB12t)";
+        say("micro", ord === "AB12t"
+          ? "Microtask ist gelaufen, Reihenfolge stimmt: " + ord
+          : "Microtask-Reihenfolge FALSCH: " + ord + " (erwartet AB12t)");
       }, 0);
     });
 }
