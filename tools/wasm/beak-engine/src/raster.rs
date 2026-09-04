@@ -1204,6 +1204,17 @@ fn fill_round(out: &mut [u8], w: i32, h: i32, x: i32, y: i32, rw: i32, rh: i32, 
         return;
     }
     let (fx, fy, fw, fh) = (x as f32, y as f32, rw as f32, rh as f32);
+    // Erst jeden Radius auf die Kastenseite deckeln, DANN die Paare summieren.
+    //
+    // Sonst laeuft die Summe ueber: Tailwind schreibt seine Pille als
+    // `border-radius: 3.40282e38px` — und das ist f32::MAX, also ist
+    // `r[0] + r[1]` unendlich, `extent / sum` wird 0, und der Faktor unten
+    // setzt ALLE Radien auf null. Die Pille kam als Rechteck heraus.
+    // Deckeln aendert die Form nicht: ein Radius groesser als die Seite ist
+    // ohnehin nicht darstellbar, und die Verhaeltnisse zwischen den Ecken
+    // bleiben, weil danach immer noch EIN gemeinsamer Faktor wirkt.
+    let cap = fw.max(fh);
+    let r = [r[0].min(cap), r[1].min(cap), r[2].min(cap), r[3].min(cap)];
     // A radius may not exceed half the box, and CSS scales ALL of them by one
     // factor when any pair overflows its side (css-backgrounds-3 §5.5) —
     // clamping each corner on its own would change the shape.

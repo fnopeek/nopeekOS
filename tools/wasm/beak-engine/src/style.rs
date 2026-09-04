@@ -2996,7 +2996,8 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         Prop::BorderTopLeftRadius | Prop::BorderTopRightRadius | Prop::BorderBottomRightRadius
         | Prop::BorderBottomLeftRadius => {
             // One corner takes `h v`; we keep the horizontal radius.
-            if let Some(n) = parse_len_opt(v.split_whitespace().next().unwrap_or(""), u) {
+            // Klammernbewusst: eine Ecke kann `calc(…) calc(…)` tragen.
+            if let Some(n) = parse_len_opt(css_tokens(&v).first().copied().unwrap_or(""), u) {
                 let i = match prop {
                     Prop::BorderTopLeftRadius => 0,
                     Prop::BorderTopRightRadius => 1,
@@ -3013,7 +3014,7 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         },
         // One length applies to both axes; two give horizontal then vertical.
         Prop::BorderSpacing => {
-            let mut it = v.split_whitespace().filter_map(|p| parse_length(p, u));
+            let mut it = css_tokens(&v).into_iter().filter_map(|p| parse_length(p, u));
             if let Some(h) = it.next() {
                 let vert = it.next().unwrap_or(h);
                 s.border_spacing = (h.max(0.0), vert.max(0.0));
@@ -3273,7 +3274,7 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         Prop::Contain => s.contain_size = v.split_whitespace().any(|k| k == "size" || k == "strict"),
         Prop::ContainIntrinsicSize => {
             // definite length(s): one → both axes, two → (width, height).
-            let mut it = v.split_whitespace().filter_map(|t| parse_length(t, u));
+            let mut it = css_tokens(&v).into_iter().filter_map(|t| parse_length(t, u));
             if let Some(a) = it.next() {
                 s.contain_intrinsic = Some((a, it.next().unwrap_or(a)));
             }
@@ -3636,7 +3637,11 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         Prop::AlignSelf => s.align_self = parse_cross(&v),
         // `gap` shorthand is `<row-gap> <column-gap>`; the longhands set one axis.
         Prop::Gap | Prop::GridGap => {
-            let mut it = v.split_whitespace();
+            // Klammernbewusst, wie `padding` und `margin` — sonst zerfaellt
+            // `gap: calc(.25rem * 3)` in drei Wortstuecke und der Abstand ist
+            // null. Tailwind schreibt jedes `gap-*` so.
+            let t = css_tokens(&v);
+            let mut it = t.into_iter();
             let row = it.next().map(|t| parse_len(t, u)).filter(|l| *l != Len::Auto);
             let col = it.next().map(|t| parse_len(t, u)).filter(|l| *l != Len::Auto).or(row);
             if let Some(r) = row {
