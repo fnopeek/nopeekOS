@@ -600,8 +600,11 @@ fn capture_headers(hdr_str: &str) -> String {
 ///
 /// `:hop` cannot be forged by a server: a field name may not start with a
 /// colon, and `capture_headers` drops any line that does.
-fn push_hop(out: &mut String, host: &str, path: &str, headers: &str) {
-    out.push_str(":hop https://");
+fn push_hop(out: &mut String, host: &str, path: &str, headers: &str, tls: bool) {
+    // Auch hier das ECHTE Schema. Der Behaelter liest aus dieser Marke, ob
+    // die Antwort ueber einen sicheren Kanal kam — ein `Secure`-Keks, der im
+    // Klartext ankam, darf nicht abgelegt werden, als waere er es nicht.
+    out.push_str(if tls { ":hop https://" } else { ":hop http://" });
     out.push_str(host);
     out.push_str(path);
     out.push_str("\r\n");
@@ -891,7 +894,14 @@ pub fn https_request_streaming(
         if done {
             if let Some(out) = info.as_deref_mut() {
                 out.final_url.clear();
-                out.final_url.push_str("https://");
+                // Das Schema, das WIRKLICH gefahren wurde — nicht immer
+                // `https`. beak macht aus dieser Zeichenkette seine
+                // Basisadresse, und `origin_of` einer Adresse ohne Schema
+                // setzt `https://` davor: die Seite kam im Klartext an, und
+                // jedes Stilblatt danach lief in einen TLS-Handschlag gegen
+                // einen Klartext-Server. Im Serverlog steht dann ein
+                // ClientHello als „Bad request version".
+                out.final_url.push_str(if cur_tls { "https://" } else { "http://" });
                 out.final_url.push_str(&cur_host);
                 out.final_url.push_str(&cur_path);
                 out.content_type.clear();
@@ -906,7 +916,7 @@ pub fn https_request_streaming(
                 out.headers.clear();
                 if keep_status {
                     out.headers.push_str(&hops);
-                    push_hop(&mut out.headers, &cur_host, &cur_path, &resp.headers);
+                    push_hop(&mut out.headers, &cur_host, &cur_path, &resp.headers, cur_tls);
                 }
             }
             return Ok(total);
@@ -920,7 +930,7 @@ pub fn https_request_streaming(
         // is only reachable because of it. Keeping just the last response's
         // headers threw the session away and the login quietly did not take.
         if keep_status {
-            push_hop(&mut hops, &cur_host, &cur_path, &resp.headers);
+            push_hop(&mut hops, &cur_host, &cur_path, &resp.headers, cur_tls);
         }
         // Auf TLS gilt weiter die strenge Fassung: sie verweigert jedes
         // `http://` im `Location`. Faehrt der Lauf schon im Klartext, darf das
