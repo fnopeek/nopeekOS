@@ -152,7 +152,28 @@ fn collect(css: &str, map: &mut BTreeMap<String, String>, uncond: &mut BTreeSet<
     while i < n {
         // Skip comments.
         if b[i] == b'/' && i + 1 < n && b[i + 1] == b'*' {
+            // Steht der Kommentar VOR einer Regel, gehoert er nicht in ihren
+            // Selektor. Ohne diese Zeile schleppte jede Regel, der ein
+            // Kommentar vorausgeht, dessen Text mit — und bei Bootstrap ist
+            // das die Kopfzeile:
+            //
+            //   /*! Bootstrap v5.3.3 (https://getbootstrap.com/) … */
+            //   :root,[data-bs-theme=light]{ … --bs-body-bg:#fff … }
+            //
+            // `is_unconditional_root` sah darin Punkte (`v5.3.3`, die URLs),
+            // hielt den Block fuer BEDINGT, und damit verlor `:root` seinen
+            // Schutz — worauf `[data-bs-theme=dark]` die ganze helle Palette
+            // ueberschrieb. Die Seite wurde dunkel, ohne dass irgendwo ein
+            // `data-bs-theme` stand.
+            //
+            // Nur wenn davor NUR Leerraum steht: ein Kommentar MITTEN in
+            // einem Selektor (`a /* x */ b`) darf dessen Anfang nicht
+            // abschneiden, sonst waere die Beurteilung nachher zu grosszuegig.
+            let lead_ws = css[sel_start..i].trim().is_empty();
             i = skip_comment(b, i);
+            if depth == 0 && lead_ws {
+                sel_start = i;
+            }
             continue;
         }
         // `@media` gates its body on the viewport — a variable declared inside
@@ -578,6 +599,23 @@ mod tests {
         // eine Behauptung ueber die heutige Ausgabe.
         assert!(out.contains("background-color:#ff0000"),
                 "eine nicht passende Regel hat den Wert entschieden: {out}");
+    }
+
+    /// Ein Kommentar vor einer Regel gehoert nicht in ihren Selektor.
+    ///
+    /// Gemessen 2026-09-04 an Bootstrap 5.3.3: die Kopfzeile enthaelt
+    /// Versionsnummer und URLs, also Punkte — und ein Punkt macht einen
+    /// Selektor „bedingt". Damit verlor `:root` seinen Schutz und der
+    /// Dunkelblock, der im Dokument NICHTS trifft, gewann die ganze Palette.
+    #[test]
+    fn a_comment_before_a_rule_is_not_part_of_its_selector() {
+        let css = "/*! Thing v5.3.3 (https://example.com/) */\
+                   :root,[data-t=light]{--bg:#fff}\
+                   [data-t=dark]{--bg:#000}\
+                   body{background-color:var(--bg)}";
+        let out = resolve_vars(css, crate::css::Media::new(1000.0, false), &[]);
+        assert!(out.contains("background-color:#fff"),
+                "der Dunkelblock hat die helle Palette ueberschrieben: {out}");
     }
 
     #[test]
