@@ -946,8 +946,12 @@ impl Engine {
                 DrawOp::RoundRect { x, y, w: rw, h: rh, r, color, ring } => {
                     fill_round(out, wi, hi, *x, *y - scroll_y, *rw, *rh, *r, *color, *ring);
                 }
-                DrawOp::Shadow { x, y, w: rw, h: rh, blur, color } => {
-                    fill_shadow(out, wi, hi, *x, *y - scroll_y, *rw, *rh, *blur, *color);
+                DrawOp::Shadow { x, y, w: rw, h: rh, blur, color, dx, dy, spread } => {
+                    // Der Kasten, der ausgespart bleibt: das Schattenrechteck
+                    // zurueckgerechnet auf den Rahmenkasten.
+                    let keep = (*x - *dx + *spread, *y - *dy + *spread - scroll_y,
+                                *rw - 2 * *spread, *rh - 2 * *spread);
+                    fill_shadow(out, wi, hi, *x, *y - scroll_y, *rw, *rh, *blur, *color, keep);
                 }
                 DrawOp::Text { x, y, size, color, bold, italic, mono, sp, text } => {
                     let vy = *y - scroll_y;
@@ -1304,7 +1308,7 @@ fn mul255(x: u8, y: u8) -> u8 {
 /// Kreis waere er sichtbar. Benannt statt still.
 #[allow(clippy::too_many_arguments)]
 fn fill_shadow(out: &mut [u8], cw: i32, ch: i32, x: i32, y: i32, w: i32, h: i32,
-               blur: f32, color: Rgba) {
+               blur: f32, color: Rgba, keep: (i32, i32, i32, i32)) {
     if w <= 0 || h <= 0 || color.a == 0 {
         return;
     }
@@ -1326,14 +1330,20 @@ fn fill_shadow(out: &mut [u8], cw: i32, ch: i32, x: i32, y: i32, w: i32, h: i32,
         if fy <= 0.002 {
             continue;
         }
-        let inside_y = py >= y && py < y + h;
+        let inside_y = py >= keep.1 && py < keep.1 + keep.3;
         let row = (py * cw) as usize * 4;
         for (k, px) in (x0..x1).enumerate() {
-            // Ein AEUSSERER Schatten wird nicht in den Rahmenkasten gemalt
+            // Ein AEUSSERER Schatten wird nicht in den RAHMENkasten gemalt
             // (CSS Backgrounds 3 §7.1.1). Unter einem deckenden Kasten faellt
             // das nicht auf; unter einem durchsichtigen ist es der Ring, den
             // ein Browser dort auch zeigt.
-            if inside_y && px >= x && px < x + w {
+            //
+            // Ausgespart wird der RAHMENkasten, nicht das Schattenrechteck.
+            // Dieselben sind die beiden nur ohne Versatz und ohne Spread —
+            // Tailwinds `shadow-lg` hat beides (`0 10px 15px -3px`), und die
+            // falsche Aussparung schnitt einen weissen Zapfen genau in den
+            // Streifen unter dem Kasten, wo der Schatten am dunkelsten ist.
+            if inside_y && px >= keep.0 && px < keep.0 + keep.2 {
                 continue;
             }
             let a = fx[k] * fy * (color.a as f32);
@@ -2040,6 +2050,25 @@ mod tests {
         ));
     }
 
+    /// Ein aeusserer Schatten wird aus dem RAHMENkasten ausgespart, nicht aus
+    /// seinem eigenen Rechteck. Bei `0 10px 15px -3px` sind das zwei
+    /// verschiedene Rechtecke, und die falsche Aussparung liess genau den
+    /// Streifen unter dem Kasten weiss — dort, wo der Schatten am
+    /// dunkelsten ist.
+    #[test]
+    fn an_offset_shadow_is_cut_out_of_the_border_box_not_of_itself() {
+        let html = "<div style='margin:20px;width:60px;height:40px;background:#fff;\
+                    box-shadow:0 10px 15px -3px rgba(0,0,0,.4)'></div>";
+        let p = page(html, 140, 90);
+        // Der Kasten selbst bleibt weiss.
+        assert_eq!(p(50, 40), (255, 255, 255), "im Kasten kein Schatten");
+        // Direkt darunter steht der dunkelste Teil.
+        let under = p(50, 62).0;
+        assert!(under < 235, "unter dem Kasten muss es dunkel sein, ist {under}");
+        // Und er wird nach unten hin heller.
+        assert!(p(50, 75).0 > under, "der Schatten laeuft aus");
+    }
+
     /// `filter` recolours the element AND its whole subtree — the box's own
     /// background, the text inside it, and an image's pixels, which are only
     /// looked up at paint time and so travel as an index instead of a colour.
@@ -2185,7 +2214,7 @@ mod tests {
                 DrawOp::RoundRect { x, y, w, h, r, color, ring } => {
                     let _ = write!(s, "Q {x},{y} {w}x{h} {r:?} c={color:?} {ring:.2}\n");
                 }
-                DrawOp::Shadow { x, y, w, h, blur, color } => {
+                DrawOp::Shadow { x, y, w, h, blur, color, .. } => {
                     let _ = write!(s, "S {x},{y} {w}x{h} b={blur:.1} c={color:?}\n");
                 }
                 DrawOp::Image { x, y, w, h, src, alt, .. } => {

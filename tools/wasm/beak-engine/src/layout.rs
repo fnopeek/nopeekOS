@@ -442,7 +442,8 @@ fn shadow_ops(st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, out: &mut Vec<
         let shh = h + 2 * sh.spread as i32;
         if sw > 0 && shh > 0 {
             out.push(DrawOp::Shadow { x: sx, y: sy, w: sw, h: shh, blur: sh.blur,
-                                      color: sh.color.unwrap_or(st.color) });
+                                      color: sh.color.unwrap_or(st.color),
+                                      dx: sh.dx as i32, dy: sh.dy as i32, spread: sh.spread as i32 });
         }
     }
     let Some(sh) = st.shadow else { return };
@@ -541,9 +542,9 @@ fn clip_ops(ops: &mut Vec<DrawOp>, start: usize, cl: i32, ct: i32, cr: i32, cb: 
             // Ein weicher Schatten wird nur ganz oder gar nicht behalten:
             // ihn zuzuschneiden hiesse, seine Deckung neu zu rechnen, und die
             // entsteht erst beim Malen.
-            DrawOp::Shadow { x, y, w, h, blur, color } => {
+            DrawOp::Shadow { x, y, w, h, blur, color, dx, dy, spread } => {
                 if x >= cl && y >= ct && x + w <= cr && y + h <= cb {
-                    ops.push(DrawOp::Shadow { x, y, w, h, blur, color });
+                    ops.push(DrawOp::Shadow { x, y, w, h, blur, color, dx, dy, spread });
                 }
             }
             // A rounded box that the clip fully contains keeps its corners;
@@ -575,6 +576,27 @@ fn clip_ops(ops: &mut Vec<DrawOp>, start: usize, cl: i32, ct: i32, cr: i32, cb: 
                     ops.push(op);
                 }
             }
+        }
+    }
+}
+
+/// The colour transform an element actually paints with: its `filter`, then
+/// its `opacity`. Both end up in the same matrix — `ColorFilter` already has
+/// an alpha factor, because `filter: opacity()` needs one — so opacity costs
+/// no second pass over the ops.
+///
+/// It is an APPROXIMATION of what the spec asks for. Real `opacity` composites
+/// the element and its subtree as one group: two overlapping descendants are
+/// flattened first, then faded together. Scaling each op's alpha instead lets
+/// them show through each other. Getting that exactly right needs an offscreen
+/// buffer per stacking context; this is the version that costs nothing.
+fn effective_filter(st: &ComputedStyle) -> Option<crate::color::ColorFilter> {
+    let fade = st.opacity < 0.999;
+    match (st.filter, fade) {
+        (f, false) => f,
+        (None, true) => Some(crate::color::ColorFilter { a: st.opacity, ..crate::color::ColorFilter::IDENTITY }),
+        (Some(f), true) => {
+            Some(f.then(crate::color::ColorFilter { a: st.opacity, ..crate::color::ColorFilter::IDENTITY }))
         }
     }
 }
@@ -758,7 +780,14 @@ pub enum DrawOp {
     /// jedem Pixel eine andere Deckung, und die entsteht erst beim Malen.
     /// Ein scharfer (`blur == 0`) bleibt, was er war — vier Rechtecke, weil
     /// er auf echten Seiten meist ein Haarstrich statt eines Schattens ist.
-    Shadow { x: i32, y: i32, w: i32, h: i32, blur: f32, color: Rgba },
+    /// `x,y,w,h` is the shadow's own rect — the border box moved by
+    /// `dx,dy` and grown by `spread`. The three CSS numbers ride along
+    /// because the painter needs the BORDER BOX back: an outer shadow is not
+    /// painted inside it (css-backgrounds-3 §7.1.1), and that cut-out is a
+    /// different rectangle as soon as there is an offset or a spread. Keeping
+    /// them (rather than the border box itself) is what makes the op survive
+    /// a translation untouched.
+    Shadow { x: i32, y: i32, w: i32, h: i32, blur: f32, color: Rgba, dx: i32, dy: i32, spread: i32 },
     /// A `border-radius` box. `r` is `[tl, tr, br, bl]` in px; `ring` is 0 for
     /// a solid fill, or the border thickness to stroke along the inside edge.
     /// Kept apart from `Rect` so the plain case stays one `memory.copy` per
@@ -4191,7 +4220,7 @@ impl<'a> Ctx<'a> {
     /// what a filtered box inside a filtered box means — the image index is
     /// composed by hand for the same reason.
     fn apply_filter(&mut self, st: &ComputedStyle, start: usize) {
-        let Some(f) = st.filter else { return };
+        let Some(f) = effective_filter(st) else { return };
         if start >= self.ops.len() {
             return;
         }
@@ -4222,7 +4251,7 @@ impl<'a> Ctx<'a> {
     /// An `<img>` with a filter of its OWN needs this before its op exists:
     /// the op is emitted from the line box, which has no `Ctx` to ask.
     fn filter_index(&mut self, st: &ComputedStyle) -> u16 {
-        match st.filter {
+        match effective_filter(st) {
             None => 0,
             Some(f) => {
                 let mut table = core::mem::take(&mut self.filters);
@@ -11362,6 +11391,55 @@ fn dbg_wiki_shape() {
             _ => None,
         }).expect("Text");
         assert!(x > 100 && x < 200, "zentriert in 300px, nicht bei 0: x={x}");
+    }
+
+    /// `opacity` unter 1 verblasst den Kasten UND seinen Teilbaum. Gemessen
+    /// wird die Alpha der Befehle, nicht die Farbe — die bleibt.
+    #[test]
+    fn opacity_fades_the_box_and_its_subtree() {
+        let l = lay(
+            "<body style=\"margin:0\"><div style=\"opacity:.5;background:#ff0000;width:40px;height:20px\">             <span>t</span></div></body>",
+            200,
+        );
+        let (mut fill, mut text) = (None, None);
+        for o in l.ops.iter() {
+            match o {
+                DrawOp::Rect { color, w, .. } if *w == 40 => fill = Some(*color),
+                DrawOp::Text { color, .. } => text = Some(*color),
+                _ => {}
+            }
+        }
+        let f = fill.expect("Fuellung");
+        assert_eq!((f.c.0, f.c.1, f.c.2), (255, 0, 0), "die Farbe bleibt");
+        assert!((f.a as i32 - 128).abs() <= 2, "halb durchsichtig, a={}", f.a);
+        assert!((text.expect("Text").a as i32 - 128).abs() <= 2, "der Teilbaum auch");
+    }
+
+    /// Eine Schatten-Schicht mit Alpha 0 malt nichts — und darf deshalb den
+    /// einen scharfen Platz nicht belegen. Tailwind stellt genau so eine als
+    /// Platzhalter VOR den echten Ring.
+    #[test]
+    fn a_transparent_shadow_layer_does_not_take_the_slot() {
+        let l = lay(
+            "<body style=\"margin:0\"><div style=\"box-shadow:0 0 #0000, 0 0 0 4px #0000ff;             background:#fff;width:40px;height:14px\">x</div></body>",
+            200,
+        );
+        let blue = l.ops.iter().filter(|o| matches!(o,
+            DrawOp::Rect { color, .. } if (color.c.0, color.c.1, color.c.2) == (0, 0, 255))).count();
+        assert_eq!(blue, 4, "vier Balken um den Kasten, got {blue}");
+    }
+
+    /// `currentcolor` ist die Vorgabe von `box-shadow` — ausgeschrieben muss
+    /// sie dasselbe heissen wie weggelassen, sonst ist die Schicht ungueltig.
+    #[test]
+    fn box_shadow_accepts_a_written_out_currentcolor() {
+        let l = lay(
+            "<body style=\"margin:0\"><div style=\"color:#00aa00;box-shadow:0 0 0 4px currentcolor;             background:#fff;width:40px;height:14px\">x</div></body>",
+            200,
+        );
+        let green = l.ops.iter().filter(|o| matches!(o,
+            DrawOp::Rect { color, .. } if (color.c.0, color.c.1, color.c.2) == (0, 170, 0))).count();
+        assert_eq!(green, 4, "der Ring traegt die Textfarbe, got {green}");
     }
 
     /// Ein WEICHER Schatten wird gemalt — und zwar weich.

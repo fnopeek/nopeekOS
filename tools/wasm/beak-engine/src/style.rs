@@ -764,6 +764,12 @@ pub struct ComputedStyle {
     /// stays HIT-TESTABLE, which is exactly what a checkbox-hack click overlay
     /// (`position:absolute; width:100%; height:100%; opacity:0`) needs.
     pub transparent: bool,
+    /// `opacity`, 0..1. Below 1 it scales the alpha of every op the element
+    /// and its subtree emit (see `Ctx::apply_filter`) — an approximation of
+    /// the group compositing the spec asks for: two OVERLAPPING descendants
+    /// show through each other instead of being flattened first. Exact group
+    /// opacity needs an offscreen buffer per stacking context.
+    pub opacity: f32,
     /// This element's OWN `opacity: 0`, before it is folded into `transparent`.
     /// Kept apart so a later declaration in the same cascade can undo an
     /// earlier one, while an ANCESTOR's transparency still can't be undone.
@@ -1109,6 +1115,7 @@ impl ComputedStyle {
             color: Rgba::opaque(theme.text),
             hidden: false,
             transparent: false,
+            opacity: 1.0,
             opacity_zero: false,
             text_align: TextAlign::Start,
             center_blocks: false,
@@ -1329,6 +1336,7 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         nowrap: parent.nowrap,
         hidden: parent.hidden,
         transparent: parent.transparent,
+        opacity: 1.0,
         opacity_zero: false,
         color: parent.color,
         text_align: parent.text_align,
@@ -2460,12 +2468,19 @@ fn set_var(own: &mut Option<crate::vars::VarMap>, inherited: &crate::vars::VarMa
     // Erst hier kopieren: wer nichts setzt, teilt die Karte des Elternteils.
     if own.is_none() { *own = Some(inherited.clone()); }
     let map = own.as_mut().unwrap();
-    let v = if crate::vars::has_var(val) {
-        crate::vars::expand(val, map, Some(name))
-    } else {
-        val.into()
-    };
-    crate::vars::var_set(map, name, &v);
+    // ROH ablegen, nicht ersetzen. Der Wert einer Custom Property wird erst
+    // eingesetzt, wenn ihn jemand BENUTZT (css-variables-1 §3) — und dann gegen
+    // die fertige Karte. Wer hier schon ersetzt, friert den Stand der Kaskade
+    // von diesem Augenblick ein: Tailwind schreibt
+    //
+    //     .ring-4        { --tw-ring-shadow: … var(--tw-ring-color,currentcolor) }
+    //     .ring-blue-500 { --tw-ring-color:  var(--color-blue-500) }
+    //
+    // und die Farbregel steht HINTER der Breitenregel. Eingesetzt wurde
+    // deshalb der Ausweichwert `currentcolor`, und `ring-4 ring-blue-500`
+    // malte einen Ring in der Textfarbe. Ringe im Schleifchen fangen die
+    // Paesse in `expand` ab, nicht mehr diese Stelle.
+    crate::vars::var_set(map, name, val);
 }
 
 /// Die Custom Properties eines `style`-Attributs.
@@ -2863,6 +2878,7 @@ pub fn apply_wide(prop: Prop, kw: Wide, parent: &ComputedStyle, theme: &Theme, s
         Prop::BoxSizing => s.box_border = src.box_border,
         Prop::Opacity => {
             s.transparent = src.transparent;
+            s.opacity = src.opacity;
             s.opacity_zero = src.opacity_zero;
         }
         Prop::TextIndent => s.text_indent = src.text_indent,
@@ -3245,10 +3261,17 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         // `collapse` differs from `hidden` only on table rows/columns (where it
         // removes the track); everywhere else the spec says treat it as
         // `hidden`, and we have no row-removal to do.
-        // Only fully-transparent is modelled: anything in between needs real
-        // alpha compositing in the rasteriser. Never cleared — see the field.
         Prop::Opacity => {
-            if let Ok(o) = v.trim().parse::<f32>() {
+            // Also `50%` — css-color-4 allows a percentage everywhere a
+            // <alpha-value> is taken, and Tailwind's `opacity-*` emits plain
+            // numbers while hand-written CSS often does not.
+            let t = v.trim();
+            let parsed = match t.strip_suffix('%') {
+                Some(n) => n.trim().parse::<f32>().map(|p| p / 100.0),
+                None => t.parse::<f32>(),
+            };
+            if let Ok(o) = parsed {
+                s.opacity = o.clamp(0.0, 1.0);
                 s.opacity_zero = o <= 0.001;
             }
         }
@@ -4299,7 +4322,7 @@ pub fn serialize_computed(s: &ComputedStyle) -> String {
                    ("border-bottom-width", &s.border_bottom), ("border-left-width", &s.border_left)] {
         put(k, &px(b.width));
     }
-    put("opacity", if s.transparent || s.opacity_zero { "0" } else { "1" });
+    put("opacity", &if s.transparent || s.opacity_zero { "0".into() } else { trim_f32(s.opacity) });
     put("visibility", if s.transparent { "hidden" } else { "visible" });
     o
 }
@@ -4422,7 +4445,15 @@ fn paintable_shadow(v: &str, u: Units) -> Option<ShadowSet> {
     loop {
         let (layer, tail) = next_layer(rest);
         let (inset, sh) = parse_box_shadow(layer, u)?;
-        if inset {
+        // Alpha 0 malt nichts — so eine Schicht darf ihren Platz nicht
+        // belegen. Tailwind v4 fuellt jede unbenutzte Schicht seiner Liste mit
+        // `0 0 #0000`, und die steht VOR der echten: sie ist unscharf-frei,
+        // also galt sie als der scharfe Anteil, und der Ring dahinter fiel
+        // heraus. Ein `ring-4` malte damit nichts.
+        let invisible = sh.color.is_some_and(|c| c.a == 0);
+        if invisible {
+            // Gueltig geparst, nur ohne Wirkung — die Deklaration bleibt.
+        } else if inset {
             if sh.paints() && inset_hit.is_none() {
                 inset_hit = Some(sh);
             }
@@ -4457,7 +4488,18 @@ fn parse_box_shadow(v: &str, u: Units) -> Option<(bool, BoxShadow)> {
             inset = true;
             continue;
         }
-        if let Some(px) = parse_length(tok, u) {
+        // `calc(4px + var(--x))` ist nach der Var-Ersetzung eine Rechnung, und
+        // `parse_length` kennt nur Einheiten. Ohne das ist die ganze Schicht
+        // ungueltig — Tailwinds Ringbreite ist IMMER eine Rechnung.
+        let len = if is_math_fn(tok) {
+            crate::values::resolve_length(
+                tok,
+                &crate::values::LenCtx { em: u.em, rem: u.rem, pct_basis: 0.0, vw: u.vw, vh: u.vh },
+            )
+        } else {
+            parse_length(tok, u)
+        };
+        if let Some(px) = len {
             if n < 4 {
                 lens[n] = px;
                 n += 1;
@@ -4479,6 +4521,14 @@ fn parse_box_shadow(v: &str, u: Units) -> Option<(bool, BoxShadow)> {
         // hatte damit NICHTS einen Schatten.
         if matches!(parse_color_val(tok, &Theme::DARK), Some(ColorVal::Transparent)) {
             color = Some(Rgba { c: Rgb(0, 0, 0), a: 0 });
+            continue;
+        }
+        // `currentcolor` ist die Vorgabe dieser Eigenschaft (css-backgrounds-3
+        // §7.1) und steht hier als `None` — genau wie eine weggelassene Farbe.
+        // Ausgeschrieben wurde sie trotzdem abgelehnt, und das ist der Fall,
+        // den Tailwind schreibt: `var(--tw-ring-color, currentcolor)`. Ohne
+        // eine gesetzte Ringfarbe malte `ring-4` deshalb nichts.
+        if matches!(parse_color_val(tok, &Theme::DARK), Some(ColorVal::CurrentColor)) {
             continue;
         }
         // An unknown token invalidates the layer rather than being ignored —
