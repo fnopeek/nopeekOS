@@ -343,29 +343,12 @@ dieselbe Rechnerei läuft auf dem Desktop.</p>\
     // (assets/) so we can measure "does it look as the author intended".
     // Run: `cargo test --release render_bootstrap_to_bmp -- --nocapture`
     // → writes `tools/wasm/beak-engine/bootstrap.bmp`.
-    const BOOTSTRAP_SAMPLE: &str = "<!DOCTYPE html><html><head><title>Bootstrap</title></head><body>\
-<nav class=\"navbar navbar-expand-lg navbar-dark bg-primary\"><div class=\"container\">\
-<a class=\"navbar-brand\" href=\"#\">beak</a>\
-<div class=\"navbar-nav\"><a class=\"nav-link active\" href=\"#\">Home</a>\
-<a class=\"nav-link\" href=\"#\">Features</a><a class=\"nav-link\" href=\"#\">About</a></div>\
-</div></nav>\
-<div class=\"container mt-4\"><div class=\"row\">\
-<div class=\"col-md-8\"><div class=\"card\"><div class=\"card-body\">\
-<h5 class=\"card-title\">Card Title</h5>\
-<p class=\"card-text\">Some quick example text to build on the card title and make up \
-the bulk of the card's content.</p>\
-<a href=\"#\" class=\"btn btn-primary\">Primary</a> \
-<a href=\"#\" class=\"btn btn-secondary\">Secondary</a></div></div></div>\
-<div class=\"col-md-4\">\
-<div class=\"alert alert-warning\" role=\"alert\">A warning alert with \
-<a href=\"#\" class=\"alert-link\">a link</a>.</div>\
-<span class=\"badge bg-success\">Success</span> <span class=\"badge bg-danger\">Danger</span>\
-</div></div>\
-<div class=\"row mt-4\">\
-<div class=\"col\"><div class=\"p-3 bg-light border\">Column one</div></div>\
-<div class=\"col\"><div class=\"p-3 bg-light border\">Column two</div></div>\
-<div class=\"col\"><div class=\"p-3 bg-light border\">Column three</div></div>\
-</div></div></body></html>";
+    // Die Vorlage liegt als DATEI da, nicht als Zeichenkette hier: derselbe
+    // Byte-fuer-Byte gleiche Text geht host-seitig durch diesen Test und
+    // ueber `tools/pageserver.py` ans Geraet. Eine Pruefseite, die in zwei
+    // Fassungen existiert, vergleicht zwei Dinge und nicht eins
+    // ([[project_beak_selftest_page]] macht es genauso).
+    const BOOTSTRAP_SAMPLE: &str = include_str!("../../../fixtures/components.html");
 
     #[test]
     fn render_bootstrap_to_bmp() {
@@ -382,15 +365,21 @@ the bulk of the card's content.</p>\
             rule: Rgb(222, 226, 230),
         });
         let css = include_str!("../assets/bootstrap.min.css");
-        let width = 1000u32;
+        // Die Breite, die das Geraet fährt (`layout @1902px` im Log). Eine
+        // andere Breite waehlt andere Bootstrap-Haltepunkte, und dann
+        // vergleicht man zwei Layouts statt zweier Maschinen
+        // ([[feedback_host_profile_is_not_the_device]]).
+        let width: u32 = std::env::var("W").ok().and_then(|w| w.parse().ok()).unwrap_or(1902);
         let lay = eng.layout_ext(BOOTSTRAP_SAMPLE, css, width);
-        let height = lay.height.clamp(1, 4000);
+        // Der Deckel stand auf 4000 — die Komponentenseite ist hoeher, und ein
+        // abgeschnittenes Bild sagt ueber die letzten Bloecke nichts.
+        let height = lay.height.clamp(1, 20000);
         let mut buf = alloc::vec![0u8; (width * height * 4) as usize];
         eng.paint(&lay, width, height, 0, &mut buf);
         std::fs::write("bootstrap.bmp", to_bmp(&buf, width, height)).expect("write bootstrap.bmp");
         std::eprintln!(
-            "bootstrap render: {}x{} px, {} ops, {} links → bootstrap.bmp",
-            width, height, lay.ops.len(), lay.links.len()
+            "bootstrap render: {}x{} px (Layout sagt {}), {} ops, {} links → bootstrap.bmp",
+            width, height, lay.height, lay.ops.len(), lay.links.len()
         );
     }
 }
