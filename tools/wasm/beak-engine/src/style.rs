@@ -40,6 +40,11 @@ pub enum Display {
     /// outside: it takes part in a line box like an image, but lays its own
     /// content out with the full block box model.
     InlineBlock,
+    /// `display: inline-flex` — innen ein Flex-Container, aussen ein atomarer
+    /// Inline-Kasten. Bis 0.62.0 wurde es wie `flex` behandelt, also
+    /// block-artig: eine `.btn-group` legte sich damit ueber die ganze Breite
+    /// statt sich auf ihre Knoepfe zu schrumpfen.
+    InlineFlex,
     ListItem,
     /// `<table>` — establishes the (simplified) table formatting context in
     /// `layout.rs`; its `tr`/`td`/`th` descendants are laid by that walker.
@@ -835,6 +840,14 @@ pub struct ComputedStyle {
     pub contain_size: bool, // `contain: size`/`strict` — content contributes no size
     pub contain_intrinsic: Option<(f32, f32)>, // `contain-intrinsic-size` (w, h) px
     pub bg: Option<Rgba>, // background-color (None = transparent)
+    /// Hat die SEITE einen Hintergrund gesetzt — auch `transparent`?
+    ///
+    /// `bg: None` heisst „durchsichtig" und sagt nicht, wer das entschieden
+    /// hat. Fuer ein Steuerelement ist das der Unterschied zwischen „male
+    /// deine UA-Flaeche" und „die Seite malt selbst": Bootstrap gibt
+    /// `.btn-outline-*` ein `--bs-btn-bg: transparent`, und ohne diese Fahne
+    /// bekam ein Umriss-Knopf trotzdem die graue Flaeche des Themas.
+    pub bg_set: bool,
     /// `background-image` + its placement properties.
     pub bg_layer: BgLayer,
     /// `background-clip` — which box the background (colour AND image) is
@@ -994,6 +1007,18 @@ pub struct ComputedStyle {
     /// beide gleichzeitig sichtbar sein koennen — und der weiche liegt
     /// hinter dem scharfen.
     pub shadow_soft: Option<BoxShadow>,
+    /// Die erste INNERE Schicht ohne Weichzeichnung.
+    ///
+    /// Sieht nach einer Randerscheinung aus und ist die Art, wie Bootstrap
+    /// 5.3 seine Tabellen streift:
+    ///
+    ///     box-shadow: inset 0 0 0 9999px var(--bs-table-bg-type)
+    ///
+    /// Ein innerer Schatten mit 9999 px Ausdehnung IST eine Fuellung ueber
+    /// dem Hintergrund — und weil er ueber dem Hintergrund liegt, faerbt er
+    /// die Zelle, ohne deren eigenes `background-color` zu ersetzen. Genau
+    /// dafuer haben sie ihn gewaehlt.
+    pub shadow_inset: Option<BoxShadow>,
     /// `transform: translate(...)` as a paint-time offset, in px and in
     /// PERCENT of the box's own size (`Len::Pct`) — the `translate(-50%,-50%)`
     /// centring idiom needs the latter. Only translation: rotation and scale
@@ -1068,6 +1093,7 @@ impl ComputedStyle {
             radius: [Len::Px(0.0); 4],
             shadow: None,
             shadow_soft: None,
+            shadow_inset: None,
             translate: None,
             bold: false,
             italic: false,
@@ -1111,6 +1137,7 @@ impl ComputedStyle {
             contain_size: false,
             contain_intrinsic: None,
             bg: None,
+            bg_set: false,
             bg_clip: BoxEdge::Border,
             bg_origin: BoxEdge::Padding,
             bg_layer: BgLayer::NONE,
@@ -1319,6 +1346,7 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         radius: [Len::Px(0.0); 4],
         shadow: None,
         shadow_soft: None,
+        shadow_inset: None,
         translate: None,
         display: Display::Inline, // CSS initial `display` is inline
         width: Len::Auto,
@@ -1343,6 +1371,7 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         contain_size: false,
         contain_intrinsic: None,
         bg: None,
+        bg_set: false,
         bg_clip: BoxEdge::Border,
         bg_origin: BoxEdge::Padding,
         bg_layer: BgLayer::NONE,
@@ -2671,11 +2700,13 @@ pub fn apply_wide(prop: Prop, kw: Wide, parent: &ComputedStyle, theme: &Theme, s
         Prop::BackgroundColor => {
             s.bg = src.bg;
             s.bg_cc = src.bg_cc;
+            s.bg_set = src.bg_set;
         }
         Prop::BackgroundImage => s.bg_layer = src.bg_layer,
         Prop::Background => {
             s.bg = src.bg;
             s.bg_cc = src.bg_cc;
+            s.bg_set = src.bg_set;
             s.bg_layer = src.bg_layer;
             s.bg_clip = src.bg_clip;
             s.bg_origin = src.bg_origin;
@@ -2872,7 +2903,8 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 "table-cell" => Display::TableCell,
                 "table-column" => Display::TableColumn,
                 "table-column-group" => Display::TableColumnGroup,
-                "flex" | "inline-flex" => Display::Flex,
+                "flex" => Display::Flex,
+                "inline-flex" => Display::InlineFlex,
                 "grid" | "inline-grid" | "grid-lanes" | "inline-grid-lanes" => Display::Grid,
                 _ => Display::Block,
             };
@@ -2944,9 +2976,11 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             if t.eq_ignore_ascii_case("none") {
                 s.shadow = None;
                 s.shadow_soft = None;
-            } else if let Some((sharp, soft)) = paintable_shadow(t, u) {
+                s.shadow_inset = None;
+            } else if let Some((sharp, soft, inset)) = paintable_shadow(t, u) {
                 s.shadow = sharp;
                 s.shadow_soft = soft;
+                s.shadow_inset = inset;
             }
         }
         Prop::BorderTopLeftRadius | Prop::BorderTopRightRadius | Prop::BorderBottomRightRadius
@@ -3287,6 +3321,7 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                     ColorVal::CurrentColor => Some(s.color),
                 };
                 s.bg_cc = cv == ColorVal::CurrentColor;
+                s.bg_set = true;
             }
         }
         Prop::Background => {
@@ -3301,6 +3336,7 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                     ColorVal::CurrentColor => Some(s.color),
                 };
                 s.bg_cc = cv == ColorVal::CurrentColor;
+                s.bg_set = true;
                 s.bg_layer = BgLayer::NONE;
                 s.bg_origin = BoxEdge::Padding;
                 s.bg_clip = BoxEdge::Border;
@@ -4224,13 +4260,20 @@ fn parse_translate(v: &str, u: Units) -> Option<(Len, Len)> {
 /// hide their ring behind a blurred layer this way, and **no** declaration has
 /// more than one paintable layer — so a list of layers would cost every
 /// `ComputedStyle` copy several more words for a case real pages do not write.
-fn paintable_shadow(v: &str, u: Units) -> Option<(Option<BoxShadow>, Option<BoxShadow>)> {
+type ShadowSet = (Option<BoxShadow>, Option<BoxShadow>, Option<BoxShadow>);
+
+fn paintable_shadow(v: &str, u: Units) -> Option<ShadowSet> {
     let mut rest = v;
     let (mut sharp, mut soft): (Option<BoxShadow>, Option<BoxShadow>) = (None, None);
+    let mut inset_hit: Option<BoxShadow> = None;
     loop {
         let (layer, tail) = next_layer(rest);
         let (inset, sh) = parse_box_shadow(layer, u)?;
-        if !inset {
+        if inset {
+            if sh.paints() && inset_hit.is_none() {
+                inset_hit = Some(sh);
+            }
+        } else {
             // Zwei Plaetze, weil echte Seiten zwei verschiedene Dinge unter
             // demselben Namen schreiben und BEIDE sichtbar sind: DDG legt
             // einen 1-px-Ring hinter zwei weiche Schichten, Bootstrap malt
@@ -4245,7 +4288,7 @@ fn paintable_shadow(v: &str, u: Units) -> Option<(Option<BoxShadow>, Option<BoxS
             }
         }
         if tail.is_empty() {
-            return Some((sharp, soft));
+            return Some((sharp, soft, inset_hit));
         }
         rest = tail;
     }

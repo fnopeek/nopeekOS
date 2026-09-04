@@ -170,7 +170,16 @@ pub type VarMap = alloc::vec::Vec<(alloc::rc::Rc<str>, alloc::rc::Rc<str>)>;
 pub fn has_var(v: &str) -> bool { contains_var(v.as_bytes()) }
 
 pub fn var_get<'a>(map: &'a VarMap, name: &str) -> Option<&'a str> {
-    map.iter().find(|(k, _)| &**k == name).map(|(_, v)| &**v)
+    let v = map.iter().find(|(k, _)| &**k == name).map(|(_, v)| &**v)?;
+    // `--x: initial` macht die Eigenschaft GARANTIERT UNGUELTIG (CSS Variables
+    // 1 §3.1) — sie gilt als nicht gesetzt, und ein `var(--x, rueckfall)`
+    // nimmt den Rueckfall. Das ist kein Randfall: Bootstrap schaltet damit
+    // seine Tabellenfarben um
+    // (`--bs-table-color-type: initial`, dann `var(--bs-table-color-type,
+    // var(--bs-table-color))`), und als Zeichenkette gelesen faerbte es jede
+    // Zelle mit dem Wort „initial".
+    if v.trim() == "initial" { return None }
+    Some(v)
 }
 
 /// Setzen oder ersetzen. Ersetzen statt Anhaengen, damit die Liste nicht mit
