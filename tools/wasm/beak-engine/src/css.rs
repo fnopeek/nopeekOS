@@ -372,6 +372,56 @@ impl Structural {
     }
 }
 
+/// Die vorangehenden Element-Geschwister eines VORFAHREN und ihre Gesamtzahl.
+///
+/// Bis 0.62.0 bekam ein Vorfahre gar keinen Geschwisterkontext — und damit
+/// scheiterte jedes `:nth-*` auf ihm. `tr:nth-of-type(odd)` allein traf,
+/// `tr:nth-of-type(odd) > td` nicht, und das ist die Form, in der JEDE
+/// gestreifte Tabelle im Web geschrieben ist.
+///
+/// Kostet einen Durchlauf durch die Kinder des Grosselternteils, wird deshalb
+/// nur geholt, wenn der Verbund ueberhaupt ein strukturelles Pseudo traegt.
+/// Einen Verbund gegen einen VORFAHREN pruefen — mit Geschwisterkontext,
+/// falls er einen braucht. Die Zwischenwerte leben hier, nicht beim Aufrufer.
+fn matches_anc(comp: &Compound, ancestors: &[ElemInfo], i: usize) -> bool {
+    if comp.structural.is_empty() {
+        return comp.matches(&ancestors[i], None);
+    }
+    let Some((prev, count)) = anc_siblings(ancestors, i) else {
+        return false;
+    };
+    let parent = ancestors.get(i.wrapping_sub(1)).map(|p| p.el);
+    let of_type = OfType::new(ancestors[i].tag(), &prev, parent);
+    comp.matches(&ancestors[i], Some(SibCtx {
+        idx: prev.len() as u32 + 1,
+        count,
+        of_type: &of_type,
+        parent,
+    }))
+}
+
+fn anc_siblings<'a>(
+    ancestors: &[ElemInfo<'a>],
+    i: usize,
+) -> Option<(alloc::vec::Vec<ElemInfo<'a>>, u32)> {
+    if i == 0 {
+        return None;
+    }
+    let el = ancestors[i].el;
+    let parent = ancestors[i - 1].el;
+    let kids: alloc::vec::Vec<&'a Element> = parent
+        .children
+        .iter()
+        .filter_map(|n| match n { Node::Element(e) => Some(e), _ => None })
+        .collect();
+    let pos = kids.iter().position(|k| core::ptr::eq(*k, el))?;
+    let prev = kids[..pos]
+        .iter()
+        .map(|e| ElemInfo { el: e, state: ElemState::default() })
+        .collect();
+    Some((prev, kids.len() as u32))
+}
+
 /// One alternative inside `:has(…)`: a combinator and the compound it applies
 /// to, relative to the subject. Measured against the CSS four real pages load,
 /// **223 of 243** `:has()` arguments are exactly this shape (178 descendant,
@@ -721,7 +771,7 @@ impl Selector {
             let comp = &self.compounds[ci as usize];
             match comb {
                 Comb::Child => {
-                    if anc < 0 || !comp.matches(&ancestors[anc as usize], None) {
+                    if anc < 0 || !matches_anc(comp, ancestors, anc as usize) {
                         return false;
                     }
                     anc -= 1;
@@ -731,7 +781,7 @@ impl Selector {
                     let mut a = anc;
                     let mut found = false;
                     while a >= 0 {
-                        if comp.matches(&ancestors[a as usize], None) {
+                        if matches_anc(comp, ancestors, a as usize) {
                             found = true;
                             break;
                         }

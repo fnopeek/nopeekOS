@@ -1,11 +1,18 @@
 // Was malt beak für ein Schnipsel — Befehl für Befehl?
 fn main() {
-    let css = include_str!("../assets/bootstrap.min.css");
+    // `CSS=` uebersteuert das Blatt — fuer eine Probe, die eine einzelne
+    // Regel prueft und nicht Bootstrap.
+    let mut css = match std::env::var("CSS") {
+        Ok(c) => c,
+        Err(_) => include_str!("../assets/bootstrap.min.css").to_string(),
+    };
+    // `CSSADD=` haengt an — um EINE Regel gegen das echte Blatt zu halten.
+    if let Ok(extra) = std::env::var("CSSADD") { css.push_str(&extra); }
     let body = std::env::var("BODY").unwrap_or_else(|_|
         "<button class=\"btn btn-primary\">Primary</button>".into());
     let doc = format!("<!DOCTYPE html><html><body>{body}</body></html>");
     let mut eng = beak_engine::Engine::new();
-    let lay = eng.layout_ext(&doc, css, 800);
+    let lay = eng.layout_ext(&doc, &css, 800);
     use beak_engine::layout::DrawOp;
     println!("\n   {body}\n");
     for o in lay.ops.iter() {

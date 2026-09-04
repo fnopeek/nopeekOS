@@ -147,7 +147,8 @@ struct FloatRect {
 /// displays (flex/grid/table) and a box that clips its overflow.
 fn establishes_bfc(st: &ComputedStyle) -> bool {
     st.bfc_root
-        || matches!(st.display, Display::Flex | Display::Grid | Display::Table)
+        || matches!(st.display,
+                    Display::Flex | Display::InlineFlex | Display::Grid | Display::Table)
         || st.overflow_x != Overflow::Visible
         || st.overflow_y != Overflow::Visible
 }
@@ -478,6 +479,39 @@ fn shadow_ops(st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, out: &mut Vec<
         push(x1.max(sx), my0, sx1 - x1.max(sx), my1 - my0);
     }
 }
+
+/// Der INNERE Schatten, gemalt ueber den Hintergrund und unter den Rahmen.
+///
+/// Ohne Weichzeichnung ist er ein Rechteck mit einem Loch: der Kasten minus
+/// dem, was der Schatten freilaesst. Bootstrap streift damit seine Tabellen
+/// (`inset 0 0 0 9999px`) — bei so einer Ausdehnung ist das Loch leer und der
+/// Schatten fuellt die ganze Zelle.
+fn inset_shadow_ops(st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, out: &mut Vec<DrawOp>) {
+    let Some(sh) = st.shadow_inset else { return };
+    let color = sh.color.unwrap_or(st.color);
+    // Das Loch: der Kasten, verschoben und nach innen geschrumpft.
+    let (hx, hy) = (x + sh.dx as i32 + sh.spread as i32, y + sh.dy as i32 + sh.spread as i32);
+    let (hw, hh) = (w - 2 * sh.spread as i32, h - 2 * sh.spread as i32);
+    let (hx1, hy1) = (hx + hw, hy + hh);
+    let (x1, y1) = (x + w, y + h);
+    let mut push = |px: i32, py: i32, pw: i32, ph: i32| {
+        if pw > 0 && ph > 0 {
+            out.push(DrawOp::Rect { x: px, y: py, w: pw, h: ph, color });
+        }
+    };
+    if hw <= 0 || hh <= 0 {
+        push(x, y, w, h);
+        return;
+    }
+    push(x, y, w, hy.clamp(y, y1) - y);
+    push(x, hy1.clamp(y, y1), w, y1 - hy1.clamp(y, y1));
+    let (my0, my1) = (hy.clamp(y, y1), hy1.clamp(y, y1));
+    if my1 > my0 {
+        push(x, my0, hx.clamp(x, x1) - x, my1 - my0);
+        push(hx1.clamp(x, x1), my0, x1 - hx1.clamp(x, x1), my1 - my0);
+    }
+}
+
 
 /// Clip the display-list ops in `ops[start..]` to the document-space rectangle
 /// `[cl, ct) .. [cr, cb)`. Filled rects are intersected (pixel-exact); text and
@@ -1776,7 +1810,8 @@ impl<'a> Ctx<'a> {
             let cs = self.styled(ce, st, &sibs, n);
             sibs.push(self.info(ce));
             inline_only = match cs.display {
-                Display::None | Display::Inline | Display::InlineBlock => true,
+                Display::None | Display::Inline | Display::InlineBlock
+                | Display::InlineFlex => true,
                 // Nested unboxing — `details, summary { display: contents }`
                 // is one element's contents inside another's.
                 Display::Contents => self.contents_is_inline(ce, &cs),
@@ -1986,6 +2021,7 @@ fn display_name(d: Display) -> &'static str {
         Display::Block => "block",
         Display::Inline => "inline",
         Display::InlineBlock => "inline-block",
+        Display::InlineFlex => "inline-flex",
         Display::ListItem => "list-item",
         Display::Table => "table",
         Display::Flex => "flex",
@@ -2735,7 +2771,7 @@ impl<'a> Ctx<'a> {
                 }
                 continue;
             }
-            if matches!(st.display, Display::Inline | Display::InlineBlock) {
+            if matches!(st.display, Display::Inline | Display::InlineBlock | Display::InlineFlex) {
                 let ib = self.inline_box_of(el, &st, w).map(|b| inline.open_box(b));
                 self.path.push(self.info(el));
                 self.collect_inline(el, &st, None, &mut inline, x, w, anchor);
@@ -3614,7 +3650,12 @@ impl<'a> Ctx<'a> {
         let font = self.fonts.pick(st.bold, st.italic, st.mono);
         let size = st.font_px;
         let ch_w = measure(font, "0", size).max(1.0);
-        let line = line_gap(font, size);
+        // Die Zeilenhoehe, die die SEITE gesetzt hat, sonst die der Schrift.
+        // Ohne das war jedes Feld so hoch wie sein Schriftbild: Bootstrap gibt
+        // `.form-control` `line-height: 1.5`, und ein Feld, das 24 statt 14 px
+        // Zeile bekommt, ist am Ende 38 statt 28 px hoch — der Unterschied
+        // zwischen „sieht komisch aus" und „sieht aus wie im Browser".
+        let line = st.line_height.px(size).filter(|v| *v > 0.0).unwrap_or_else(|| line_gap(font, size));
         let default = default_value(el, kind);
         let raw = self.forms.value_or(el.seq, &default).to_string();
         let focused = self.forms.focus == Some(el.seq);
@@ -3642,7 +3683,27 @@ impl<'a> Ctx<'a> {
 
         // Intrinsic size, then let a definite CSS width/height win (real pages
         // size their search fields in CSS, not with `size=`).
-        let pad_x = CTL_PAD_X;
+        // **Eine Polsterung, zwei Benutzer.** Die Breite wurde mit
+        // `CTL_PAD_X + 4` gerechnet, gemalt wurde mit `max(CSS, CTL_PAD_X)` —
+        // und sobald eine Seite ihre Knoepfe selbst polstert (Bootstrap gibt
+        // `.btn` 16 px), war der Kasten zu schmal fuer seine eigene
+        // Beschriftung. `Gross` wurde als `ross` gemalt, weil der Maler die zu
+        // lange Zeichenkette vorne abschnitt. Beide Seiten lesen jetzt
+        // dieselben zwei Zahlen ([[feedback_intrinsic_shared_path]]).
+        //
+        // Die UA-Untergrenze bleibt: ein Knopf ohne eigene Polsterung soll
+        // nicht am Text kleben, und `+ 4` ist, was er dafuer immer hatte.
+        let ua_min = if kind.is_submit() || kind == ControlKind::File {
+            CTL_PAD_X + 4
+        } else {
+            CTL_PAD_X
+        };
+        let pad_l = (st.pad_left as i32).max(ua_min);
+        let pad_r = (st.pad_right as i32).max(ua_min);
+        // Senkrecht dasselbe: `.form-control` bringt `padding: .375rem .75rem`
+        // mit, und ohne sie steht ein Feld 6 px zu flach in seiner Zeile.
+        let pad_t = (st.pad_top as i32).max(CTL_PAD_Y);
+        let pad_b = (st.pad_bottom as i32).max(CTL_PAD_Y);
         // The frame is part of the box, and it is the page's when the page
         // styled it — a control with `border: none` is exactly as tall as its
         // content, and a `border: 2px` one two pixels taller per side.
@@ -3657,29 +3718,29 @@ impl<'a> Ctx<'a> {
                 let cols = el.attr("cols").and_then(|c| c.trim().parse::<f32>().ok()).unwrap_or(30.0);
                 let rows = el.attr("rows").and_then(|r| r.trim().parse::<f32>().ok()).unwrap_or(3.0);
                 (
-                    (cols * ch_w) as i32 + 2 * pad_x + bx,
-                    (rows * line) as i32 + 2 * CTL_PAD_Y + by,
+                    (cols * ch_w) as i32 + pad_l + pad_r + bx,
+                    (rows * line) as i32 + pad_t + pad_b + by,
                 )
             }
             ControlKind::Text | ControlKind::Password => {
                 let cols = el.attr("size").and_then(|c| c.trim().parse::<f32>().ok()).unwrap_or(20.0);
                 (
-                    (cols * ch_w) as i32 + 2 * pad_x + bx,
-                    ceil_i32(line) + 2 * CTL_PAD_Y + by,
+                    (cols * ch_w) as i32 + pad_l + pad_r + bx,
+                    ceil_i32(line) + pad_t + pad_b + by,
                 )
             }
             ControlKind::Select => (
-                ceil_i32(measure(font, &text, size)) + 2 * pad_x + CTL_ARROW + bx,
-                ceil_i32(line) + 2 * CTL_PAD_Y + by,
+                ceil_i32(measure(font, &text, size)) + pad_l + pad_r + CTL_ARROW + bx,
+                ceil_i32(line) + pad_t + pad_b + by,
             ),
             _ => (
-                ceil_i32(measure(font, &text, size)) + 2 * (pad_x + 4) + bx,
-                ceil_i32(line) + 2 * CTL_PAD_Y + by,
+                ceil_i32(measure(font, &text, size)) + pad_l + pad_r + bx,
+                ceil_i32(line) + pad_t + pad_b + by,
             ),
         };
         if let Some(cw) = st.width.px(avail) {
             // A CSS width is a content width unless `box-sizing: border-box`.
-            w = if st.box_border { cw as i32 } else { cw as i32 + 2 * pad_x + bx };
+            w = if st.box_border { cw as i32 } else { cw as i32 + pad_l + pad_r + bx };
         }
         // A percentage height resolves against the containing block's HEIGHT
         // (§10.5), never `avail` (its width) — the checkbox-hack overlay is
@@ -3687,7 +3748,7 @@ impl<'a> Ctx<'a> {
         // made it as tall as its container is wide. An indefinite CB height
         // leaves the percentage unresolvable, so the intrinsic height stands.
         if let Some(chh) = vert_len(st.height, cbh) {
-            h = if st.box_border { chh as i32 } else { chh as i32 + 2 * CTL_PAD_Y + by };
+            h = if st.box_border { chh as i32 } else { chh as i32 + pad_t + pad_b + by };
         }
         if let Some(mx) = st.max_width.px(avail) {
             w = w.min(mx as i32);
@@ -3722,9 +3783,13 @@ impl<'a> Ctx<'a> {
             focused,
             caret,
             bg: st.bg,
-            appearance_none: st.appearance_none,
+            // Eine Seite, die dem Steuerelement einen Hintergrund gibt — auch
+            // `transparent` —, malt seine Flaeche selbst. So macht es jeder
+            // Browser, und Bootstraps `.btn-outline-*` verlaesst sich darauf.
+            appearance_none: st.appearance_none || (st.bg_set && st.bg.is_none()),
             bg_img: self.bg_key(st.bg_layer.image).map(|k| (k, st.bg_layer)),
-            pad_l: (st.pad_left as i32).max(CTL_PAD_X),
+            pad_l,
+            pad_r,
             border,
             style: RunStyle { hidden: st.hidden, transparent: st.transparent, size, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: crate::style::VAlign::Baseline, deco: st.deco, deco_color: st.deco_color, break_word: st.break_word, nowrap: st.nowrap, lh: st.line_height.px(size).unwrap_or(0.0), sp: (st.letter_spacing, st.word_spacing) },
         }
@@ -4182,6 +4247,12 @@ impl<'a> Ctx<'a> {
         let mut border: Vec<DrawOp> = Vec::new();
         border_ops(st, x, y, w, h, (true, true), &mut border);
         self.insert_ops_at(bg_idx, border);
+        // Der INNERE Schatten liegt ueber dem Hintergrund; er wird also vor
+        // ihm eingefuegt, damit er nach der Verschiebung durch `insert_bg`
+        // darueber steht.
+        let mut inset = Vec::new();
+        inset_shadow_ops(st, x, y, w, h, &mut inset);
+        self.insert_ops_at(bg_idx, inset);
         self.insert_bg(st, x, y, w, h, bg_idx);
         self.insert_shadow(st, x, y, w, h, bg_idx);
     }
@@ -5281,7 +5352,8 @@ impl<'a> Ctx<'a> {
         // (Reaching here with `display:inline` means an image, a form control
         // or another replaced box — the plain-inline branch above already
         // returned. A FLOATED box leaves the line, so it is not one of these.)
-        let atomic_inline = matches!(cs.display, Display::InlineBlock | Display::Inline);
+        let atomic_inline = matches!(cs.display,
+            Display::InlineBlock | Display::InlineFlex | Display::Inline);
         if atomic_inline && cs.float == FloatKind::None {
             run.atomic += p;
             run.atomic_min = run.atomic_min.max(m);
@@ -5470,7 +5542,7 @@ impl<'a> Ctx<'a> {
         let f0 = self.ops.len();
         let bottom = match st.display {
             Display::Table => self.layout_table(el, st, x, w, y),
-            Display::Flex => self.layout_flex(el, st, x, w, y),
+            Display::Flex | Display::InlineFlex => self.layout_flex(el, st, x, w, y),
             Display::Grid => self.layout_grid(el, st, x, w, y),
             _ => return self.layout_block(el, st, x, w, y),
         };
@@ -5601,7 +5673,7 @@ impl<'a> Ctx<'a> {
             if let Node::Element(ce) = c {
                 let mut cs = self.styled(ce, st, &siblings, sib_count);
                 siblings.push(self.info(ce));
-                if matches!(cs.display, Display::Inline | Display::InlineBlock) {
+                if matches!(cs.display, Display::Inline | Display::InlineBlock | Display::InlineFlex) {
                     cs.display = Display::Block;
                 }
                 if cs.display == Display::None {
@@ -6133,7 +6205,7 @@ impl<'a> Ctx<'a> {
                 let mut cs = self.styled(ce, st, &siblings, sib_count);
                 siblings.push(self.info(ce));
                 // A flex item is blockified (css-display-3 §2.7).
-                if matches!(cs.display, Display::Inline | Display::InlineBlock) {
+                if matches!(cs.display, Display::Inline | Display::InlineBlock | Display::InlineFlex) {
                     cs.display = Display::Block;
                 }
                 if cs.display == Display::None {
@@ -7305,7 +7377,7 @@ impl<'a> Ctx<'a> {
         // `display: inline-block` — lay the whole box out now (block model,
         // shrink-to-fit width) into its own display list, and hand the line
         // box a finished rectangle. Position comes later, in `emit_line`.
-        if st.display == Display::InlineBlock {
+        if matches!(st.display, Display::InlineBlock | Display::InlineFlex) {
             if let Some(b) = self.inline_block_box(el, st, bw) {
                 inline.atomic(b);
             }
@@ -7552,6 +7624,10 @@ struct CtlBox {
     /// (Wikipedia's search field asks for 36px to clear its magnifier). CSS
     /// only ever WIDENS the inset; it cannot squeeze the text below `CTL_PAD_X`.
     pad_l: i32,
+    /// Die rechte Polsterung — dieselbe Zahl, mit der die Breite gerechnet
+    /// wurde. Der Maler nahm frueher `CTL_PAD_X`, und die Differenz zur
+    /// gemessenen Breite schnitt die Beschriftung ab.
+    pad_r: i32,
     /// The frame, in paint order top/right/bottom/left.
     border: [CtlSide; 4],
     style: RunStyle,
@@ -7801,7 +7877,7 @@ fn paint_control(
                 // where the caret is — but a LABEL must keep its head, because
                 // it is a name, and a name clipped at the front is a different
                 // word. Google's consent buttons read "lle ablehnen".
-                let inner = (w - ctl.pad_l - CTL_PAD_X - 2).max(0) as f32;
+                let inner = (w - ctl.pad_l - ctl.pad_r).max(0) as f32;
                 let text = if ctl.kind.is_submit() || ctl.kind == ControlKind::File {
                     clip_text_head(font, &ctl.text, ctl.style.size, inner)
                 } else {
@@ -8998,6 +9074,7 @@ fn deco_ops(st: &ComputedStyle, b: &HoverBox) -> Option<Vec<DrawOp>> {
         shadow_ops(st, x, y, w, h, &mut v);
     }
     bg_ops(st, None, None, x, y, w, h, &mut v);
+    inset_shadow_ops(st, x, y, w, h, &mut v);
     border_ops(st, x, y, w, h, b.sides, &mut v);
     Some(v)
 }
@@ -10959,7 +11036,13 @@ fn dbg_wiki_shape() {
         // A BLURRED shadow is skipped rather than drawn as a hard slab, and an
         // inner one is a different paint entirely.
         assert!(shadow_rects("height:20px;box-shadow:0 2px 8px rgb(1,2,3)").is_empty());
-        assert!(shadow_rects("height:20px;box-shadow:inset 0 1px rgb(1,2,3)").is_empty());
+        // Ein INNERER Schatten malt seit 0.62.0 — und zwar INNEN: die Fuellung
+        // minus dem Loch, das er freilaesst. `inset 0 1px` verschiebt das Loch
+        // um eins nach unten, uebrig bleibt ein Streifen oben IM Kasten.
+        // Bootstrap streift damit seine Tabellen.
+        let ins = shadow_rects("height:20px;box-shadow:inset 0 1px rgb(1,2,3)");
+        assert_eq!(ins.len(), 1, "ein Streifen, got {ins:?}");
+        assert_eq!(ins[0].3, 1, "einen Pixel hoch");
         // `currentColor` is the LAST colour, not whatever was cascaded when the
         // shadow was parsed — same rule the border sides follow.
         let l = lay("<body><div style=\"height:20px;box-shadow:0 1px;color:rgb(1,2,3)\">x</div></body>", 400);
@@ -11955,7 +12038,7 @@ fn clamp_len(outer: f32, min_w: Len, max_w: Len, box_border: bool, frame: f32) -
 fn side_by_side(st: &ComputedStyle) -> bool {
     match st.display {
         Display::TableRow => true,
-        Display::Flex => st.flex_row,
+        Display::Flex | Display::InlineFlex => st.flex_row,
         Display::Grid => true,
         _ => false,
     }
