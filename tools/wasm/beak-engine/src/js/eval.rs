@@ -98,16 +98,9 @@ impl Interp {
             let v = match &dec.init {
                 Some(e) => {
                     let val = self.eval(e, env)?;
-                    // `var f = function(){}` bekommt den Namen der Variablen —
-                    // sichtbar in Stapelspuren und in `f.name`.
-                    if let (Pat::Ident(n), Value::Obj(o)) = (&dec.id, &val) {
-                        let empty = matches!(o.borrow().get_own("name").and_then(|p| p.value.clone()),
-                            Some(Value::Str(s)) if s.is_empty());
-                        if empty {
-                            o.borrow_mut().define("name", Prop {
-                                value: Some(Value::str(n)), get: None, set: None,
-                                writable: false, enumerable: false, configurable: true });
-                        }
+                    if let Pat::Ident(n) = &dec.id {
+                        let n = n.clone();
+                        self.name_function(&val, &n);
                     }
                     val
                 }
@@ -357,6 +350,18 @@ impl Interp {
     /// beobachtbar: `let f = 1; { function f(){} }` darf das aeussere `f`
     /// nicht anfassen (annexB B.3.3 nimmt die var-Bindung genau dann zurueck,
     /// wenn sie einen frueheren Fehler ausloeste). Sieben Tests.
+    /// Einer eben gebauten anonymen Funktion den Namen geben, unter dem sie
+    /// gerade gebunden wird. Sichtbar in Stapelspuren und in `f.name`.
+    pub fn name_function(&mut self, v: &Value, name: &str) {
+        let Value::Obj(o) = v else { return };
+        let empty = matches!(o.borrow().get_own("name").and_then(|p| p.value.clone()),
+            Some(Value::Str(s)) if s.is_empty());
+        if !empty { return }
+        o.borrow_mut().define("name", Prop {
+            value: Some(Value::str(name)), get: None, set: None,
+            writable: false, enumerable: false, configurable: true });
+    }
+
     pub fn bind_here(&mut self, name: &str, v: Value, env: &Rc<RefCell<Env>>) {
         env.borrow_mut().vars.insert(Rc::from(name),
             Binding { value: v, mutable: true, initialized: true });
