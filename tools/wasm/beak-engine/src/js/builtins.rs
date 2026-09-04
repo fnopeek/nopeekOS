@@ -1059,6 +1059,33 @@ pub fn make_realm() -> Realm {
         Ok(Value::Num(t[..end].parse::<f64>().unwrap_or(f64::NAN)))
     }, 1, fp);
 
+    // ── Die URI-Funktionen ───────────────────────────────────────────────
+    //
+    // Nicht Zierde: `encodeURIComponent is not defined` ist auf beiden
+    // Wikipedias die ZWEITE Wand, gleich hinter `document.cookie`
+    // (`wallcheck WCPAGE=*`). Vier Funktionen mit einer gemeinsamen Tabelle;
+    // der Unterschied zwischen ihnen ist genau, welche Zeichen roh
+    // durchgehen (ES 19.2.6).
+    def(&global, "encodeURIComponent", |i, _, a| {
+        let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        uri_encode(i, &s, "-_.!~*'()")
+    }, 1, fp);
+    def(&global, "encodeURI", |i, _, a| {
+        let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        uri_encode(i, &s, "-_.!~*'();/?:@&=+$,#")
+    }, 1, fp);
+    def(&global, "decodeURIComponent", |i, _, a| {
+        let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        uri_decode(i, &s, "")
+    }, 1, fp);
+    // `decodeURI` laesst die reservierten Zeichen KODIERT stehen — sonst
+    // aenderte das Dekodieren die Struktur der Adresse, und ein `%2F` wuerde
+    // zu einem Pfadtrenner, der vorher keiner war.
+    def(&global, "decodeURI", |i, _, a| {
+        let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        uri_decode(i, &s, ";/?:@&=+$,#")
+    }, 1, fp);
+
     // ── Map und Set ──────────────────────────────────────────────────────
     //
     // Auf einem gewoehnlichen Objekt aufgesetzt: die Eintraege liegen unter
@@ -1399,7 +1426,13 @@ pub fn make_realm() -> Realm {
     // Antwort; was es hineinlegt, ueberlebt die Seite nicht. Das ist eine
     // benannte Luecke — beak muesste es an npkFS haengen, und dann waere die
     // Frage, wem der Speicher gehoert.
-    let make_storage = |object_proto: &Gc, function_proto: &Gc| -> Gc {
+    //
+    // **Ein Prototyp, zwei Behaelter.** `Storage` ist im Zensus 1179 Aufrufe
+    // wert, und die Zeile, die fehlte, war nicht `getItem` — die gab es —
+    // sondern der NAME: `x instanceof Storage` und
+    // `Storage.prototype.getItem.call(…)` scheitern an einer flachen Huelle,
+    // deren Methoden auf ihr selbst sitzen.
+    let make_storage_proto = |object_proto: &Gc, function_proto: &Gc| -> Gc {
         let st = new_obj(Some(object_proto.clone()));
         let d = |o: &Gc, n: &str, f: NativeFn, l: usize| {
             let g = native(Some(function_proto.clone()), f, n, l, false);
@@ -1441,10 +1474,23 @@ pub fn make_realm() -> Realm {
                 .filter(|k| k.starts_with("__s_")).collect();
             Ok(match keys.get(n) { Some(k) => Value::str(&k[4..]), None => Value::Null })
         }, 1);
+        let len = native(Some(function_proto.clone()), |_, t, _| {
+            let Value::Obj(o) = &t else { return Ok(Value::Num(0.0)) };
+            let n = o.borrow().own_keys().into_iter().filter(|k| k.starts_with("__s_")).count();
+            Ok(Value::Num(n as f64))
+        }, "length", 0, false);
+        st.borrow_mut().define("length", Prop { value: None, get: Some(Value::Obj(len)), set: None,
+            writable: false, enumerable: false, configurable: true });
         st
     };
-    let ls = make_storage(&object_proto, &function_proto);
-    let ss = make_storage(&object_proto, &function_proto);
+    let storage_proto = make_storage_proto(&object_proto, &function_proto);
+    let storage_ctor = native(Some(function_proto.clone()),
+        |i, _, _| i.type_err("Illegal constructor"), "Storage", 0, true);
+    storage_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(storage_proto.clone())));
+    storage_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(storage_ctor.clone())));
+    global.borrow_mut().define("Storage", Prop::builtin(Value::Obj(storage_ctor)));
+    let ls = new_obj(Some(storage_proto.clone()));
+    let ss = new_obj(Some(storage_proto));
     global.borrow_mut().define("localStorage", Prop::builtin(Value::Obj(ls)));
     global.borrow_mut().define("sessionStorage", Prop::builtin(Value::Obj(ss)));
 
@@ -1615,6 +1661,7 @@ pub fn make_realm() -> Realm {
     Realm { global, global_env, object_proto: object_proto.clone(), function_proto, array_proto,
             string_proto, number_proto, boolean_proto, error_proto, error_ctors,
             node_proto: ph(), element_proto: ph(), text_proto: ph(), document_proto: ph(),
+            event_proto: ph(), token_list_proto: ph(), style_proto: ph(), comment_proto: ph(),
             regexp_proto: ph(), symbol_proto, iterator_proto, array_iter_proto,
             string_iter_proto, promise_proto: ph(),
             html_element_proto: ph(), svg_element_proto: ph(), fragment_proto: ph(),
@@ -1754,4 +1801,58 @@ fn fixed(n: f64, d: u32) -> String {
         out.push_str(&digits[digits.len() - d..]);
     }
     out
+}
+
+/// Der gemeinsame Rumpf von `encodeURI` und `encodeURIComponent`.
+///
+/// `keep` sind die Sonderzeichen, die roh durchgehen; Buchstaben und Ziffern
+/// gehen immer durch. Kodiert wird UTF-8, Byte fuer Byte — genau so steht es
+/// in der Spezifikation, und genau so erwartet es jeder Server.
+fn uri_encode(i: &mut Interp, s: &str, keep: &str) -> C<Value> {
+    let mut out = String::with_capacity(s.len());
+    let mut buf = [0u8; 4];
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() || keep.contains(c) { out.push(c); continue }
+        // Eine einzelne Haelfte eines Ersatzpaares ist kein Zeichen und laesst
+        // sich nicht als UTF-8 schreiben. Der Lexer laesst sie nicht entstehen,
+        // aber `String.fromCharCode` schon.
+        if (0xD800..0xE000).contains(&(c as u32)) { return Err(i.throw_kind("URIError", "URI malformed")) }
+        for b in c.encode_utf8(&mut buf).as_bytes() {
+            out.push('%');
+            out.push(char::from_digit((b >> 4) as u32, 16).unwrap().to_ascii_uppercase());
+            out.push(char::from_digit((b & 15) as u32, 16).unwrap().to_ascii_uppercase());
+        }
+    }
+    Ok(Value::str(&out))
+}
+
+/// Der gemeinsame Rumpf von `decodeURI` und `decodeURIComponent`.
+///
+/// `reserved` sind die Zeichen, deren Kodierung STEHEN bleibt. Ein `%` ohne
+/// zwei Hexziffern dahinter ist ein URIError — nicht ein stilles `%`: eine
+/// halb dekodierte Adresse sieht aus wie eine ganze.
+fn uri_decode(i: &mut Interp, s: &str, reserved: &str) -> C<Value> {
+    let b = s.as_bytes();
+    let mut bytes: Vec<u8> = Vec::with_capacity(b.len());
+    let mut k = 0;
+    while k < b.len() {
+        if b[k] != b'%' { bytes.push(b[k]); k += 1; continue }
+        if k + 2 >= b.len() { return Err(i.throw_kind("URIError", "URI malformed")) }
+        let hi = (b[k + 1] as char).to_digit(16);
+        let lo = (b[k + 2] as char).to_digit(16);
+        let (Some(hi), Some(lo)) = (hi, lo) else {
+            return Err(i.throw_kind("URIError", "URI malformed"))
+        };
+        let v = (hi * 16 + lo) as u8;
+        if v < 0x80 && reserved.contains(v as char) {
+            bytes.extend_from_slice(&b[k..k + 3]);
+        } else {
+            bytes.push(v);
+        }
+        k += 3;
+    }
+    match String::from_utf8(bytes) {
+        Ok(t) => Ok(Value::str(&t)),
+        Err(_) => Err(i.throw_kind("URIError", "URI malformed")),
+    }
 }

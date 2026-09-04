@@ -284,6 +284,13 @@ impl Object {
     /// n Schluesseln also O(n²), und das an der Schrittgrenze vorbei. Genau
     /// daran ist der Lauf von 20 auf ueber 60 Sekunden gestiegen, nachdem
     /// `shift`/`splice`/`sort` dazukamen.
+    /// Alles wegnehmen. Nur fuer den Abbau eines Realms — siehe
+    /// `Interp::teardown`, dort steht, warum es das braucht.
+    pub fn clear_props(&mut self) {
+        self.props.clear();
+        self.order.clear();
+    }
+
     pub fn clear_indices(&mut self) {
         self.props.retain(|k, _| array_index(k).is_none());
         self.order.retain(|k| array_index(k).is_none());

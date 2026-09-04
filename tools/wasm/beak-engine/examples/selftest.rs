@@ -18,6 +18,10 @@ fn main() {
     let mut sess = beak_engine::js::Session::new(50_000_000);
     sess.interp.set_document(doc);
     sess.interp.set_media(1024.0, 768.0, false);
+    // Dieselbe Adresse wie am Geraet (`selftest::URL`). Ohne sie stuende hier
+    // `about:blank` und dort `beak:selftest` — und die eine Sache, die diese
+    // Seite kann, ist Wirt und Geraet VERGLEICHBAR zu machen.
+    sess.interp.set_location("beak:selftest");
     for (n, src) in scripts.iter().enumerate() {
         let prog = match beak_engine::js::parse(src, false) {
             Ok(p) => p,

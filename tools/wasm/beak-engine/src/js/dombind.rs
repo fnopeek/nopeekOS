@@ -58,6 +58,16 @@ pub struct DomNode {
     pub js: Option<Gc>,
     /// Angemeldete Behandler, je Ereignisart.
     pub listeners: Vec<(Rc<str>, Value)>,
+    /// Behandler, die als EIGENSCHAFT gesetzt wurden (`el.onclick = f`).
+    ///
+    /// Getrennt von `listeners`, weil sie sich anders verhalten: eine zweite
+    /// Zuweisung ERSETZT die erste, waehrend `addEventListener` anhaengt. Und
+    /// sie verdraengt das gleichnamige Attribut — im Browser ist es derselbe
+    /// Platz, nicht zwei.
+    pub handlers: Vec<(Rc<str>, Value)>,
+    /// Nur `<template>`: der Bruchstueck-Knoten, in dem sein Inhalt haengt.
+    /// Entsteht beim ersten `.content` — siehe dort, warum nicht frueher.
+    pub content: Option<u32>,
     /// Die `seq` desselben Elements in beaks Baum — die Bruecke zwischen
     /// Klickpunkt und Knoten. `to_dom` vergibt sie und schreibt sie HIER
     /// zurueck; das Layout gibt sie beim Treffer aus. Ohne diese Brueckenzahl
@@ -68,7 +78,8 @@ pub struct DomNode {
 impl DomNode {
     fn new(kind: f64, tag: &str) -> DomNode {
         DomNode { kind, tag: Rc::from(tag), attrs: Vec::new(), text: Rc::from(""),
-                  parent: None, children: Vec::new(), js: None, listeners: Vec::new(), seq: 0 }
+                  parent: None, children: Vec::new(), js: None, listeners: Vec::new(),
+                  handlers: Vec::new(), content: None, seq: 0 }
     }
     pub fn attr(&self, k: &str) -> Option<&Rc<str>> {
         self.attrs.iter().find(|(n, _)| &**n == k).map(|(_, v)| v)
@@ -188,6 +199,23 @@ impl Doc {
         self.nodes[parent as usize].children.push(child);
     }
 
+    /// Einhaengen — und ein BRUCHSTUECK gibt dabei seine Kinder ab.
+    ///
+    /// Das ist keine Feinheit, sondern der Sinn der Sache: `ul.appendChild(
+    /// tpl.content.cloneNode(true))` ist die uebliche Schreibweise, und wer
+    /// das Bruchstueck selbst einhaengt, bekommt ein `<#fragment>`-Element in
+    /// den Baum — ein Element, das es im HTML nicht gibt und das jede
+    /// Formatierung darunter verschiebt.
+    pub fn insert_maybe_fragment(&mut self, parent: u32, child: u32, before: Option<u32>) {
+        if &*self.nodes[child as usize].tag == "#fragment" {
+            for k in self.nodes[child as usize].children.clone() {
+                self.insert_before(parent, k, before);
+            }
+            return;
+        }
+        self.insert_before(parent, child, before);
+    }
+
     pub fn insert_before(&mut self, parent: u32, child: u32, before: Option<u32>) {
         self.dirty = true;
         self.detach(child);
@@ -231,10 +259,19 @@ impl Doc {
     /// Das ist der Weg von `innerHTML =` und `insertAdjacentHTML`. Es geht
     /// ueber beaks eigenen Parser — ein zweiter, laxerer waere eine zweite
     /// Wahrheit darueber, was das Web bedeutet.
+    /// HTML in einen Knoten parsen — als BRUCHSTUECK, nicht als Dokument.
+    ///
+    /// `dom::parse` baut immer ein ganzes Dokument: `<li>x</li>` wird zu
+    /// `<html><body><li>x`. Wer das ungefiltert einhaengt, schiebt bei JEDEM
+    /// `innerHTML` ein `<html><body>` unter das Element — gefunden beim
+    /// Bauen von `append`, und es betraf jede Seite, die `innerHTML` setzt.
+    /// Sichtbar war es nicht, weil `<html>` und `<body>` keinen eigenen
+    /// Kasten malen; kaputt war es trotzdem: `el.children[0]` war nicht das
+    /// erste Element des Textes, sondern der Rahmen darum.
     pub fn parse_into(&mut self, parent: u32, html: &str, at: Option<usize>) -> Vec<u32> {
         let frag = crate::dom::parse(html);
         let mut made = Vec::new();
-        for c in &frag.root.children {
+        for c in fragment_nodes(&frag.root) {
             if let Some(id) = self.from_src_node(c) { made.push(id); }
         }
         let idx = at.unwrap_or(self.nodes[parent as usize].children.len());
@@ -574,6 +611,7 @@ pub fn wrap(i: &mut Interp, id: u32) -> Value {
     let proto = match kind {
         DOCUMENT_NODE => i.realm.document_proto.clone(),
         TEXT_NODE => i.realm.text_proto.clone(),
+        COMMENT_NODE => i.realm.comment_proto.clone(),
         _ => {
             let tag = i.doc.as_ref().map(|d| d.nodes[id as usize].tag.clone())
                        .unwrap_or_else(|| Rc::from(""));
@@ -611,6 +649,336 @@ macro_rules! with_node {
     }};
 }
 
+/// Die Schlitze eines Ereignisses. Nicht aufzaehlbar und mit `__` davor:
+/// ein `for (k in e)` einer Seite darf sie nicht sehen, und `e.type` kommt
+/// vom Prototyp, nicht von der Instanz.
+const EV_TYPE: &str = "__evtype";
+const EV_TARGET: &str = "__evtarget";
+const EV_CUR: &str = "__evcur";
+const EV_BUBBLES: &str = "__evbubbles";
+const EV_CANCELABLE: &str = "__evcancel";
+const EV_PREVENTED: &str = "__evprevented";
+const EV_TRUSTED: &str = "__evtrusted";
+const EV_PHASE: &str = "__evphase";
+const EV_STAMP: &str = "__evstamp";
+const EV_STOP: &str = "__evstop";
+const EV_STOPIMM: &str = "__evstopimm";
+const EV_DETAIL: &str = "__evdetail";
+
+/// Ein Getter, das einen festen Schlitz liest. Als Makro, weil ein
+/// eingebautes Getter ein FUNKTIONSZEIGER ist: er faengt nichts ein, also
+/// muss der Schlitzname im Rumpf stehen und nicht in einer Variablen.
+macro_rules! ev_getter {
+    ($proto:expr, $fp:expr, $name:literal, $slot:expr) => {{
+        let g = native(Some($fp.clone()), |i, t, _| i.get(&t, $slot),
+                       concat!("get ", $name), 0, false);
+        $proto.borrow_mut().define($name, Prop { value: None, get: Some(Value::Obj(g)),
+            set: None, writable: false, enumerable: false, configurable: true });
+    }};
+}
+
+/// Ein Ereignisobjekt mit gesetzten Schlitzen. `trusted` unterscheidet, was
+/// beak selbst zustellt, von dem, was die Seite mit `dispatchEvent` schickt —
+/// Seiten fragen es ab, und ein festes `true` waere gelogen.
+fn build_event(i: &mut Interp, proto: Gc, kind: &str, trusted: bool) -> Gc {
+    let ev = new_obj(Some(proto));
+    let stamp = { i.fake_now += 1.0; i.fake_now };
+    let mut o = ev.borrow_mut();
+    let hidden = |v: Value| Prop { value: Some(v), get: None, set: None,
+        writable: true, enumerable: false, configurable: true };
+    o.define(EV_TYPE, hidden(Value::str(kind)));
+    o.define(EV_TARGET, hidden(Value::Null));
+    o.define(EV_CUR, hidden(Value::Null));
+    o.define(EV_BUBBLES, hidden(Value::Bool(false)));
+    o.define(EV_CANCELABLE, hidden(Value::Bool(trusted)));
+    o.define(EV_PREVENTED, hidden(Value::Bool(false)));
+    o.define(EV_TRUSTED, hidden(Value::Bool(trusted)));
+    o.define(EV_PHASE, hidden(Value::Num(0.0)));
+    o.define(EV_STAMP, hidden(Value::Num(stamp)));
+    o.define(EV_STOP, hidden(Value::Bool(false)));
+    o.define(EV_STOPIMM, hidden(Value::Bool(false)));
+    drop(o);
+    ev
+}
+
+/// `new Event(art, {bubbles, cancelable})` — das zweite Argument.
+fn apply_event_init(i: &mut Interp, ev: &Gc, init: &Value) -> C<()> {
+    if !matches!(init, Value::Obj(_)) { return Ok(()) }
+    for (key, slot) in [("bubbles", EV_BUBBLES), ("cancelable", EV_CANCELABLE),
+                        ("composed", "__evcomposed")] {
+        let v = i.get(init, key)?;
+        let b = v.truthy();
+        ev.borrow_mut().define(slot, Prop { value: Some(Value::Bool(b)), get: None, set: None,
+            writable: true, enumerable: false, configurable: true });
+    }
+    Ok(())
+}
+
+/// Sind das dieselbe Funktion? Identitaet, nicht Gleichheit — genau das
+/// fragt `removeEventListener`.
+fn same_fn(a: &Value, b: &Value) -> bool {
+    match (a, b) { (Value::Obj(x), Value::Obj(y)) => Rc::ptr_eq(x, y), _ => false }
+}
+
+/// Die Zustellkette fuer einen Knoten: von der Wurzel bis zu ihm.
+///
+/// Dieselbe Reihenfolge, in der beak sie aus dem LAYOUT baut — aussen zuerst,
+/// Ziel zuletzt. Wer das dreht, dreht die Blasenrichtung.
+fn ancestors(i: &Interp, id: u32) -> Vec<u32> {
+    let Some(d) = &i.doc else { return alloc::vec![id] };
+    let mut out = alloc::vec![id];
+    let mut cur = d.nodes[id as usize].parent;
+    while let Some(x) = cur {
+        out.push(x);
+        cur = d.nodes[x as usize].parent;
+    }
+    out.reverse();
+    out
+}
+
+/// Die Erklaerungen eines `style`-Attributs, in der Reihenfolge des Textes.
+///
+/// Ein eigener kleiner Leser und nicht der aus `css`: der hier bekommt genau
+/// das zurueckzugeben, was ein Skript hineingeschrieben hat — der Kaskadenleser
+/// wirft ungueltige Erklaerungen weg, und dann laese `el.style.foo` etwas
+/// anderes als das eben Geschriebene.
+fn style_decls(text: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for decl in text.split(';') {
+        let Some((k, v)) = decl.split_once(':') else { continue };
+        let (k, v) = (k.trim(), v.trim());
+        if k.is_empty() || v.is_empty() { continue }
+        out.push((k.to_ascii_lowercase(), v.to_string()));
+    }
+    out
+}
+
+fn style_join(decls: &[(String, String)]) -> String {
+    let mut out = String::new();
+    for (k, v) in decls {
+        if !out.is_empty() { out.push(' '); }
+        out.push_str(k); out.push_str(": "); out.push_str(v); out.push(';');
+    }
+    out
+}
+
+fn style_get(i: &Interp, id: u32, css: &str) -> Value {
+    let Some(d) = &i.doc else { return Value::str("") };
+    let text = d.nodes[id as usize].attr("style").map(|s| s.to_string()).unwrap_or_default();
+    match style_decls(&text).into_iter().rev().find(|(k, _)| k == css) {
+        Some((_, v)) => Value::string(v),
+        // Nicht gesetzt ist die LEERE Zeichenkette, nicht `undefined` — so
+        // steht es in der Spezifikation, und Seiten pruefen darauf.
+        None => Value::str(""),
+    }
+}
+
+/// Eine Erklaerung setzen oder (bei leerem Wert) entfernen.
+///
+/// Das Ergebnis landet im `style`-ATTRIBUT, nicht in einer Nebenablage: die
+/// Kaskade liest das Attribut, also wirkt `el.style.display = "none"` damit
+/// wirklich — vorher lief die Zuweisung ins Leere und die Seite blieb stehen,
+/// wie sie war.
+fn style_set(i: &mut Interp, id: u32, css: &str, val: &str) {
+    let Some(d) = &mut i.doc else { return };
+    let text = d.nodes[id as usize].attr("style").map(|s| s.to_string()).unwrap_or_default();
+    let mut decls = style_decls(&text);
+    decls.retain(|(k, _)| k != css);
+    let v = val.trim();
+    if !v.is_empty() { decls.push((css.to_string(), v.to_string())); }
+    let joined = style_join(&decls);
+    d.nodes[id as usize].set_attr("style", &joined);
+    d.dirty = true;
+}
+
+/// Ein Eigenschaftspaar auf `CSSStyleDeclaration.prototype`. Als Makro aus
+/// demselben Grund wie `ev_getter`: ein eingebautes Getter ist ein
+/// Funktionszeiger und faengt nichts ein.
+macro_rules! style_prop {
+    ($proto:expr, $fp:expr, $js:literal, $css:literal) => {{
+        let g = native(Some($fp.clone()), |i, t, _| {
+            let id = node_of(i, &t)?; Ok(style_get(i, id, $css))
+        }, concat!("get ", $js), 0, false);
+        let st = native(Some($fp.clone()), |i, t, a| {
+            let id = node_of(i, &t)?;
+            let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+            style_set(i, id, $css, &v);
+            Ok(Value::Undefined)
+        }, concat!("set ", $js), 1, false);
+        $proto.borrow_mut().define($js, Prop { value: None, get: Some(Value::Obj(g)),
+            set: Some(Value::Obj(st)), writable: false, enumerable: false, configurable: true });
+    }};
+}
+
+/// Ein Behandler als Eigenschaft: `el.onclick`. Als Makro, weil das Getter
+/// ein Funktionszeiger ist und die Ereignisart im Rumpf stehen muss.
+macro_rules! handler_prop {
+    ($proto:expr, $fp:expr, $js:literal, $kind:literal) => {{
+        let g = native(Some($fp.clone()), |i, t, _| {
+            let id = target_node(i, &t)?;
+            if let Some(f) = i.doc.as_ref().and_then(|d| d.nodes[id as usize].handlers.iter()
+                .find(|(k, _)| &**k == $kind).map(|(_, f)| f.clone())) { return Ok(f) }
+            // Steht nur das Attribut da, gibt der Browser trotzdem eine
+            // FUNKTION zurueck — also uebersetzen wir es hier, wie beim
+            // Ausloesen auch.
+            Ok(inline_handler(i, id, $kind)?.unwrap_or(Value::Null))
+        }, concat!("get ", $js), 0, false);
+        let s = native(Some($fp.clone()), |i, t, a| {
+            let id = target_node(i, &t)?;
+            let f = a.first().cloned().unwrap_or(Value::Null);
+            let callable = i.is_callable(&f);
+            if let Some(d) = &mut i.doc {
+                d.nodes[id as usize].handlers.retain(|(k, _)| &**k != $kind);
+                if callable {
+                    d.nodes[id as usize].handlers.push((Rc::from($kind), f));
+                    // Ohne diese Zeile zeichnet das Layout keine
+                    // Treffer-Kaesten auf, und der Klick findet nichts —
+                    // dieselbe Falle wie bei `addEventListener`.
+                    d.has_listeners = true;
+                }
+            }
+            Ok(Value::Undefined)
+        }, concat!("set ", $js), 1, false);
+        $proto.borrow_mut().define($js, Prop { value: None, get: Some(Value::Obj(g)),
+            set: Some(Value::Obj(s)), writable: false, enumerable: false, configurable: true });
+    }};
+}
+
+/// Ein Feld, das auf einem ATTRIBUT sitzt: `a.href`, `img.src`, `el.title`.
+/// Lesen gibt die leere Zeichenkette, wenn es das Attribut nicht gibt —
+/// nicht `undefined`, denn darauf ruft Seitencode `.indexOf`.
+macro_rules! attr_prop {
+    ($proto:expr, $fp:expr, $js:literal, $attr:literal) => {{
+        let g = native(Some($fp.clone()), |i, t, _| {
+            with_node!(i, t, |n| Ok(match n.attr($attr) {
+                Some(v) => Value::Str(v.clone()), None => Value::str("") }))
+        }, concat!("get ", $js), 0, false);
+        let s = native(Some($fp.clone()), |i, t, a| {
+            let id = node_of(i, &t)?;
+            let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+            if let Some(d) = &mut i.doc { d.dirty = true; d.nodes[id as usize].set_attr($attr, &v); }
+            Ok(Value::Undefined)
+        }, concat!("set ", $js), 1, false);
+        $proto.borrow_mut().define($js, Prop { value: None, get: Some(Value::Obj(g)),
+            set: Some(Value::Obj(s)), writable: false, enumerable: false, configurable: true });
+    }};
+}
+
+/// Ein Feld, das eine ZAHL auf einem Attribut ist: `el.tabIndex`. Fehlt das
+/// Attribut oder ist es keine Zahl, gilt `default` — bei `tabIndex` ist das
+/// nicht 0, sondern -1 fuer alles, was nicht von sich aus anspringbar ist.
+macro_rules! num_attr_prop {
+    ($proto:expr, $fp:expr, $js:literal, $attr:literal, $default:expr) => {{
+        let g = native(Some($fp.clone()), |i, t, _| {
+            with_node!(i, t, |n| Ok(Value::Num(match n.attr($attr) {
+                Some(v) => v.trim().parse::<f64>().unwrap_or($default),
+                None => $default })))
+        }, concat!("get ", $js), 0, false);
+        let s = native(Some($fp.clone()), |i, t, a| {
+            let id = node_of(i, &t)?;
+            let n = i.to_number(a.first().unwrap_or(&Value::Undefined))?;
+            let v = i.to_string(&Value::Num(n))?;
+            if let Some(d) = &mut i.doc { d.dirty = true; d.nodes[id as usize].set_attr($attr, &v); }
+            Ok(Value::Undefined)
+        }, concat!("set ", $js), 1, false);
+        $proto.borrow_mut().define($js, Prop { value: None, get: Some(Value::Obj(g)),
+            set: Some(Value::Obj(s)), writable: false, enumerable: false, configurable: true });
+    }};
+}
+
+/// Ein Feld, das die ANWESENHEIT eines Attributs ist: `el.hidden`,
+/// `script.async`. Der Wert des Attributs zaehlt nicht — `hidden="false"`
+/// versteckt trotzdem, so steht es im HTML.
+macro_rules! bool_attr_prop {
+    ($proto:expr, $fp:expr, $js:literal, $attr:literal) => {{
+        let g = native(Some($fp.clone()), |i, t, _| {
+            with_node!(i, t, |n| Ok(Value::Bool(n.attr($attr).is_some())))
+        }, concat!("get ", $js), 0, false);
+        let s = native(Some($fp.clone()), |i, t, a| {
+            let id = node_of(i, &t)?;
+            let on = a.first().map(|v| v.truthy()).unwrap_or(false);
+            if let Some(d) = &mut i.doc {
+                d.dirty = true;
+                if on { d.nodes[id as usize].set_attr($attr, "") }
+                else { d.nodes[id as usize].attrs.retain(|(k, _)| &**k != $attr) }
+            }
+            Ok(Value::Undefined)
+        }, concat!("set ", $js), 1, false);
+        $proto.borrow_mut().define($js, Prop { value: None, get: Some(Value::Obj(g)),
+            set: Some(Value::Obj(s)), writable: false, enumerable: false, configurable: true });
+    }};
+}
+
+/// Die Knoten eines geparsten BRUCHSTUECKS: der `<html>`/`<head>`/`<body>`-
+/// Rahmen, den der Dokumentparser immer baut, faellt weg.
+fn fragment_nodes(root: &crate::dom::Element) -> Vec<&crate::dom::Node> {
+    let mut out = Vec::new();
+    for c in &root.children {
+        match c {
+            crate::dom::Node::Element(e) if &*e.tag == "html" => {
+                for c2 in &e.children {
+                    match c2 {
+                        crate::dom::Node::Element(e2) if &*e2.tag == "head" || &*e2.tag == "body" =>
+                            out.extend(e2.children.iter()),
+                        other => out.push(other),
+                    }
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Wohin `append` & Co. einhaengen.
+enum Where { First, Last, Before, After }
+
+/// Der gemeinsame Rumpf von `append`/`prepend`/`before`/`after`. Ein
+/// Argument, das kein Knoten ist, wird zum Textknoten — genau das
+/// unterscheidet diese Familie von `appendChild`.
+fn insert_all(i: &mut Interp, this: &Value, args: &[Value], w: Where) -> C<Value> {
+    let me = node_of(i, this)?;
+    let (parent, anchor) = match w {
+        Where::First => (me, i.doc.as_ref().and_then(|d| d.nodes[me as usize].children.first().copied())),
+        Where::Last => (me, None),
+        Where::Before | Where::After => {
+            let Some(p) = i.doc.as_ref().and_then(|d| d.nodes[me as usize].parent) else {
+                return Ok(Value::Undefined)
+            };
+            let after = matches!(w, Where::After);
+            let sib = i.doc.as_ref().and_then(|d| {
+                let ks = &d.nodes[p as usize].children;
+                let k = ks.iter().position(|&c| c == me)?;
+                if after { ks.get(k + 1).copied() } else { Some(me) }
+            });
+            (p, sib)
+        }
+    };
+    for v in args {
+        let id = match node_of(i, v) {
+            Ok(x) => x,
+            Err(_) => {
+                let s = i.to_string(v)?;
+                let Some(d) = &mut i.doc else { return Ok(Value::Undefined) };
+                let t = d.create(TEXT_NODE, "");
+                d.nodes[t as usize].text = s;
+                t
+            }
+        };
+        // Der Anker bleibt derselbe: alles landet DAVOR, also stehen mehrere
+        // Argumente am Ende in der Reihenfolge, in der sie uebergeben wurden.
+        if let Some(d) = &mut i.doc { d.insert_maybe_fragment(parent, id, anchor); d.dirty = true; }
+    }
+    Ok(Value::Undefined)
+}
+
+/// Eine Funktion auf dem Fenster. `meth` legt sie auf einen Prototyp, hier
+/// gehoert sie an den globalen Gegenstand selbst.
+fn def_global(realm: &Realm, name: &str, f: NativeFn, len: usize, fp: &Gc) {
+    let g = native(Some(fp.clone()), f, name, len, false);
+    realm.global.borrow_mut().define(name, Prop::builtin(Value::Obj(g)));
+}
+
 fn getter(o: &Gc, name: &str, f: NativeFn, fp: &Gc) {
     let g = native(Some(fp.clone()), f, name, 0, false);
     o.borrow_mut().define(name, Prop {
@@ -643,6 +1011,9 @@ pub fn install(realm: &mut Realm) {
     let element_proto = new_obj(Some(node_proto.clone()));
     let text_proto = new_obj(Some(node_proto.clone()));
     let document_proto = new_obj(Some(node_proto.clone()));
+    // `DocumentFragment` haengt an Node, nicht an Element — hier oben, weil
+    // die Suchfunktionen weiter unten auch auf ihm sitzen.
+    let fragment_proto = new_obj(Some(node_proto.clone()));
 
     // ── Node ─────────────────────────────────────────────────────────────
     getter(&node_proto, "nodeType", |i, t, _| with_node!(i, t, |n| Ok(Value::Num(n.kind))), &fp);
@@ -702,14 +1073,14 @@ pub fn install(realm: &mut Realm) {
     meth(&node_proto, "appendChild", |i, t, a| {
         let p = node_of(i, &t)?;
         let c = node_of(i, a.first().unwrap_or(&Value::Undefined))?;
-        if let Some(d) = &mut i.doc { d.append(p, c); }
+        if let Some(d) = &mut i.doc { d.insert_maybe_fragment(p, c, None); }
         Ok(a[0].clone())
     }, 1, &fp);
     meth(&node_proto, "insertBefore", |i, t, a| {
         let p = node_of(i, &t)?;
         let c = node_of(i, a.first().unwrap_or(&Value::Undefined))?;
         let b = match a.get(1) { Some(Value::Obj(_)) => Some(node_of(i, &a[1])?), _ => None };
-        if let Some(d) = &mut i.doc { d.insert_before(p, c, b); }
+        if let Some(d) = &mut i.doc { d.insert_maybe_fragment(p, c, b); }
         Ok(a[0].clone())
     }, 2, &fp);
     meth(&node_proto, "removeChild", |i, t, a| {
@@ -717,6 +1088,42 @@ pub fn install(realm: &mut Realm) {
         let c = node_of(i, a.first().unwrap_or(&Value::Undefined))?;
         if let Some(d) = &mut i.doc { d.detach(c); }
         Ok(a[0].clone())
+    }, 1, &fp);
+    accessor(&node_proto, "nodeValue",
+        // Ein Element HAT keinen Wert — `null` ist die Antwort, nicht "".
+        |i, t, _| with_node!(i, t, |n| Ok(if n.kind == ELEMENT_NODE || n.kind == DOCUMENT_NODE {
+            Value::Null } else { Value::Str(n.text.clone()) })),
+        |i, t, a| {
+            let id = node_of(i, &t)?;
+            let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+            if let Some(d) = &mut i.doc {
+                if d.nodes[id as usize].kind != ELEMENT_NODE {
+                    d.dirty = true;
+                    d.nodes[id as usize].text = v;
+                }
+            }
+            Ok(Value::Undefined)
+        }, &fp);
+    // Die Bitmaske aus der Spezifikation. Seiten benutzen sie fuer genau eine
+    // Frage — „liegt A vor B?" — und `& 4` ist die Art, sie zu stellen.
+    meth(&node_proto, "compareDocumentPosition", |i, t, a| {
+        let x = node_of(i, &t)?;
+        let y = node_of(i, a.first().unwrap_or(&Value::Undefined))?;
+        if x == y { return Ok(Value::Num(0.0)) }
+        let Some(d) = &i.doc else { return Ok(Value::Num(1.0)) };
+        let up = |mut n: u32| { let mut v = alloc::vec![n];
+            while let Some(p) = d.nodes[n as usize].parent { v.push(p); n = p; } v.reverse(); v };
+        let (ax, ay) = (up(x), up(y));
+        if ax[0] != ay[0] { return Ok(Value::Num(1.0 + 2.0 + 32.0)) }   // DISCONNECTED
+        // Der erste Punkt, an dem die Wege sich trennen, entscheidet.
+        let mut k = 0;
+        while k < ax.len() && k < ay.len() && ax[k] == ay[k] { k += 1; }
+        if k == ax.len() { return Ok(Value::Num(16.0 + 4.0)) }          // CONTAINED_BY
+        if k == ay.len() { return Ok(Value::Num(8.0 + 2.0)) }           // CONTAINS
+        let parent = ax[k - 1];
+        let kids = &d.nodes[parent as usize].children;
+        let (px, py) = (kids.iter().position(|&c| c == ax[k]), kids.iter().position(|&c| c == ay[k]));
+        Ok(Value::Num(if px < py { 4.0 } else { 2.0 }))
     }, 1, &fp);
     meth(&node_proto, "contains", |i, t, a| {
         let p = node_of(i, &t)?;
@@ -743,15 +1150,37 @@ pub fn install(realm: &mut Realm) {
         }
         Ok(Value::Undefined)
     }, 2, &fp);
+    // `removeEventListener(art, f)` nimmt GENAU f weg, nicht alles dieser
+    // Art. Vorher fiel mit einem `resize`-Behandler jeder zweite mit ab —
+    // und eine Seite, die einen von dreien abmeldet, verlor alle drei.
     meth(&event_target_proto, "removeEventListener", |i, t, a| {
         let id = target_node(i, &t)?;
         let ev = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let f = a.get(1).cloned().unwrap_or(Value::Undefined);
         if let Some(d) = &mut i.doc {
-            d.nodes[id as usize].listeners.retain(|(e, _)| *e != ev);
+            d.nodes[id as usize].listeners.retain(|(e, g)| *e != ev || !same_fn(g, &f));
         }
         Ok(Value::Undefined)
     }, 2, &fp);
-    meth(&event_target_proto, "dispatchEvent", |_, _, _| Ok(Value::Bool(true)), 1, &fp);
+    // Die Seite loest selbst aus: `el.dispatchEvent(new Event("change"))`.
+    // Vorher gab das ein festes `true` zurueck, ohne einen Behandler zu
+    // rufen — eine Antwort, die aussieht wie eine Zustellung.
+    meth(&event_target_proto, "dispatchEvent", |i, t, a| {
+        let id = target_node(i, &t)?;
+        let Some(Value::Obj(ev)) = a.first().cloned() else {
+            return i.type_err("dispatchEvent needs an Event");
+        };
+        let kind = match i.get(&Value::Obj(ev.clone()), "type")? {
+            Value::Undefined => return i.type_err("dispatchEvent needs an Event"),
+            v => i.to_string(&v)?,
+        };
+        let bubbles = matches!(i.get(&Value::Obj(ev.clone()), "bubbles")?, Value::Bool(true));
+        // Blast es nicht, ist die Kette genau ein Knoten lang — dann laeuft
+        // nur der Behandler am Ziel, und das ist der ganze Unterschied.
+        let chain = if bubbles { ancestors(i, id) } else { alloc::vec![id] };
+        let prevented = deliver(i, &ev, &kind, &chain)?;
+        Ok(Value::Bool(!prevented))
+    }, 1, &fp);
 
     // ── Element ──────────────────────────────────────────────────────────
     getter(&element_proto, "tagName", |i, t, _| with_node!(i, t, |n| Ok(Value::string(n.tag.to_uppercase()))), &fp);
@@ -873,68 +1302,48 @@ pub fn install(realm: &mut Realm) {
               "scrollWidth", "scrollHeight", "scrollTop", "scrollLeft", "offsetTop", "offsetLeft"] {
         getter(&element_proto, k, |_, _, _| Ok(Value::Num(0.0)), &fp);
     }
+    // Die Liste selbst arbeitet auf dem Element: sie haelt keine Kopie der
+    // Klassen, sondern liest und schreibt das Attribut. Frisch je Zugriff —
+    // `el.classList === el.classList` ist damit falsch, waehrend ein Browser
+    // dasselbe Objekt liefert. Gemerkt, weil es eines Tages auffaellt.
     getter(&element_proto, "classList", |i, t, _| {
-        // Frisch je Zugriff — `el.classList === el.classList` ist damit
-        // falsch, waehrend ein Browser dasselbe Objekt liefert. Gemerkt, weil
-        // es eines Tages auffaellt; die Liste selbst arbeitet auf dem Element.
         let id = node_of(i, &t)?;
-        let g = new_obj(Some(i.realm.object_proto.clone()));
+        let g = new_obj(Some(i.realm.token_list_proto.clone()));
         g.borrow_mut().define(SLOT, Prop { value: Some(Value::Num(id as f64)), get: None,
             set: None, writable: false, enumerable: false, configurable: false });
-        let fp2 = i.realm.function_proto.clone();
-        meth(&g, "contains", |i, t, a| {
-            let id = node_of(i, &t)?;
-            let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-            Ok(Value::Bool(i.doc.as_ref().is_some_and(|d| d.classes(id).iter().any(|c| *c == k))))
-        }, 1, &fp2);
-        meth(&g, "add", |i, t, a| {
-            let id = node_of(i, &t)?;
-            for v in a {
-                let k = i.to_string(v)?;
-                let Some(d) = &mut i.doc else { break };
-                d.dirty = true;
-                let mut cs = d.classes(id);
-                if !cs.iter().any(|c| *c == k) { cs.push(k); }
-                let joined = cs.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
-                d.nodes[id as usize].set_attr("class", &joined);
-            }
-            Ok(Value::Undefined)
-        }, 1, &fp2);
-        meth(&g, "remove", |i, t, a| {
-            let id = node_of(i, &t)?;
-            for v in a {
-                let k = i.to_string(v)?;
-                let Some(d) = &mut i.doc else { break };
-                d.dirty = true;
-                let cs: Vec<Rc<str>> = d.classes(id).into_iter().filter(|c| *c != k).collect();
-                let joined = cs.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
-                d.nodes[id as usize].set_attr("class", &joined);
-            }
-            Ok(Value::Undefined)
-        }, 1, &fp2);
-        meth(&g, "toggle", |i, t, a| {
-            let id = node_of(i, &t)?;
-            let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-            let has = i.doc.as_ref().is_some_and(|d| d.classes(id).iter().any(|c| *c == k));
-            let Some(d) = &mut i.doc else { return Ok(Value::Bool(false)) };
-            d.dirty = true;
-            let mut cs: Vec<Rc<str>> = d.classes(id).into_iter().filter(|c| *c != k).collect();
-            if !has { cs.push(k); }
-            let joined = cs.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
-            d.nodes[id as usize].set_attr("class", &joined);
-            Ok(Value::Bool(!has))
-        }, 1, &fp2);
         Ok(Value::Obj(g))
     }, &fp);
-    // `style` ist ein leeres Objekt: Schreibzugriffe laufen ins Leere, statt
-    // zu werfen. Ein Stumpf, der die Seite weiterlaufen laesst — und der
-    // NICHTS vortaeuscht, weil er auch nichts zurueckliest.
-    getter(&element_proto, "style", |i, _, _| {
-        Ok(Value::Obj(new_obj(Some(i.realm.object_proto.clone()))))
+    // `el.style` ist eine SICHT auf das `style`-Attribut dieses Elements —
+    // sie haelt keinen eigenen Zustand, also koennen Attribut und Sicht nicht
+    // auseinanderlaufen.
+    getter(&element_proto, "style", |i, t, _| {
+        let id = node_of(i, &t)?;
+        let g = new_obj(Some(i.realm.style_proto.clone()));
+        g.borrow_mut().define(SLOT, Prop { value: Some(Value::Num(id as f64)), get: None,
+            set: None, writable: false, enumerable: false, configurable: false });
+        Ok(Value::Obj(g))
     }, &fp);
 
     // querySelector & Co. auf Element wie auf Document.
-    for target in [&element_proto, &document_proto] {
+    // `append`, `prepend`, `before`, `after`, `replaceWith` — die moderne
+    // Einhaengfamilie. Sie nimmt beliebig viele Argumente, und ein Text wird
+    // dabei zum TEXTKNOTEN: `el.append("hallo")` haengt keinen String an.
+    for target in [&element_proto, &fragment_proto] {
+        meth(target, "append", |i, t, a| insert_all(i, &t, a, Where::Last), 1, &fp);
+        meth(target, "prepend", |i, t, a| insert_all(i, &t, a, Where::First), 1, &fp);
+    }
+    meth(&element_proto, "before", |i, t, a| insert_all(i, &t, a, Where::Before), 1, &fp);
+    meth(&element_proto, "after", |i, t, a| insert_all(i, &t, a, Where::After), 1, &fp);
+    meth(&element_proto, "replaceWith", |i, t, a| {
+        let id = node_of(i, &t)?;
+        insert_all(i, &t, a, Where::Before)?;
+        if let Some(d) = &mut i.doc { d.detach(id); d.dirty = true; }
+        Ok(Value::Undefined)
+    }, 1, &fp);
+
+    // Auch auf dem Bruchstueck: eine Schablone wird gefuellt, indem man in
+    // ihrem Inhalt sucht — ohne das ist `.content` nur halb gebaut.
+    for target in [&element_proto, &document_proto, &fragment_proto] {
         meth(target, "querySelector", |i, t, a| {
             let id = node_of(i, &t)?;
             let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
@@ -982,6 +1391,41 @@ pub fn install(realm: &mut Realm) {
         match i.doc.as_ref().and_then(|d| d.head) { Some(x) => Ok(wrap(i, x)), None => Ok(Value::Null) }
     }, &fp);
     getter(&document_proto, "readyState", |_, _, _| Ok(Value::str("complete")), &fp);
+    // `document.cookie` — 1852 Aufrufe im Zensus, und auf BEIDEN Wikipedias
+    // die erste Wand ueberhaupt: das allererste Inline-Skript jeder Seite
+    // ruft `document.cookie.match(…)`, und auf `undefined` ist das das Ende
+    // des Skripts.
+    //
+    // Die Engine haelt keinen Behaelter. Was dieses Dokument sehen darf,
+    // haengt an Domain, Pfad, `Secure` und `HttpOnly` — das weiss der Wirt,
+    // und `Interp::set_cookies` reicht ihm genau die Skript-Sicht ein.
+    // Gesetztes geht denselben Weg zurueck (`take_cookie_sets`).
+    accessor(&document_proto, "cookie",
+        |i, _, _| { let c = i.cookies.clone(); Ok(Value::str(&c)) },
+        |i, _, a| {
+            let decl = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+            let Some((name, rest)) = decl.split_once('=') else { return Ok(Value::Undefined) };
+            let name = name.trim().to_string();
+            if name.is_empty() { return Ok(Value::Undefined) }
+            let value = rest.split(';').next().unwrap_or("").trim().to_string();
+            // Loeschen erkennt die Engine nur an `Max-Age<=0` — das ist
+            // taktfrei. Ein `Expires` in der Vergangenheit braucht eine Uhr,
+            // die sie nicht hat; DER Fall wird erst sichtbar, wenn der Wirt
+            // die Sicht neu einreicht. Der Behaelter selbst hat beides.
+            let deleting = decl.split(';').skip(1).any(|a| {
+                let (k, v) = a.split_once('=').unwrap_or((a, ""));
+                k.trim().eq_ignore_ascii_case("max-age")
+                    && v.trim().parse::<i64>().is_ok_and(|n| n <= 0)
+            });
+            let mut kept: Vec<String> = i.cookies.split(';')
+                .map(|p| p.trim()).filter(|p| !p.is_empty())
+                .filter(|p| p.split_once('=').map(|(k, _)| k.trim()) != Some(&name[..]))
+                .map(|p| p.to_string()).collect();
+            if !deleting { kept.push(alloc::format!("{name}={value}")); }
+            i.cookies = kept.join("; ");
+            i.cookie_sets.push(decl.to_string());
+            Ok(Value::Undefined)
+        }, &fp);
     // Der Titel steht im Baum, nicht daneben: ein Skript, das ihn setzt,
     // aendert das `<title>`-Element, und wer ihn liest, liest denselben
     // Knoten. Zwei Kopien waeren zwei Wahrheiten.
@@ -1119,6 +1563,22 @@ pub fn install(realm: &mut Realm) {
         d.nodes[id as usize].text = s;
         Ok(wrap(i, id))
     }, 1, &fp);
+    // `importNode` (2134 Aufrufe) und `adoptNode`: beide holen einen Knoten
+    // in DIESES Dokument. beak hat genau eins — es gibt keinen zweiten Baum,
+    // aus dem etwas kaeme —, also ist `importNode` eine Kopie und `adoptNode`
+    // der Knoten selbst. Das ist keine Abkuerzung, sondern was die
+    // Spezifikation fuer den Ein-Dokument-Fall sagt.
+    meth(&document_proto, "importNode", |i, _, a| {
+        let id = node_of(i, a.first().unwrap_or(&Value::Undefined))?;
+        let deep = a.get(1).map(|v| v.truthy()).unwrap_or(false);
+        let Some(d) = &mut i.doc else { return i.type_err("no document") };
+        let c = d.clone_node(id, deep);
+        Ok(wrap(i, c))
+    }, 1, &fp);
+    meth(&document_proto, "adoptNode", |i, _, a| {
+        let id = node_of(i, a.first().unwrap_or(&Value::Undefined))?;
+        Ok(wrap(i, id))
+    }, 1, &fp);
     meth(&document_proto, "createDocumentFragment", |i, _, _| {
         let Some(d) = &mut i.doc else { return i.type_err("no document") };
         let id = d.create(ELEMENT_NODE, "#fragment");
@@ -1158,18 +1618,596 @@ pub fn install(realm: &mut Realm) {
     iface(realm, "Element", &element_proto);
     iface(realm, "HTMLElement", &html_element_proto);
     iface(realm, "SVGElement", &svg_element_proto);
+    // `CharacterData` sitzt zwischen Node und Text — 453 Aufrufe im Zensus
+    // fragen `.data`, und die Kette ist die, die Bibliothekscode abfragt.
+    let char_data_proto = new_obj(Some(node_proto.clone()));
+    iface(realm, "CharacterData", &char_data_proto);
+    text_proto.borrow_mut().proto = Some(char_data_proto.clone());
     iface(realm, "Text", &text_proto);
+    // Ein Kommentar ist KEIN HTMLElement — vorher landete er dort, weil
+    // `wrap` ihn wie ein unbekanntes Tag behandelte.
+    let comment_proto = new_obj(Some(char_data_proto.clone()));
+    iface(realm, "Comment", &comment_proto);
+    accessor(&char_data_proto, "data",
+        |i, t, _| with_node!(i, t, |n| Ok(Value::Str(n.text.clone()))),
+        |i, t, a| {
+            let id = node_of(i, &t)?;
+            let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+            if let Some(d) = &mut i.doc { d.dirty = true; d.nodes[id as usize].text = v; }
+            Ok(Value::Undefined)
+        }, &fp);
+    getter(&char_data_proto, "length",
+        |i, t, _| with_node!(i, t, |n| Ok(Value::Num(n.text.chars().count() as f64))), &fp);
+    meth(&char_data_proto, "appendData", |i, t, a| {
+        let id = node_of(i, &t)?;
+        let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        if let Some(d) = &mut i.doc {
+            d.dirty = true;
+            let mut s = d.nodes[id as usize].text.to_string();
+            s.push_str(&v);
+            d.nodes[id as usize].text = Rc::from(s.as_str());
+        }
+        Ok(Value::Undefined)
+    }, 1, &fp);
+
+    // ── DOMTokenList ─────────────────────────────────────────────────────
+    //
+    // `classList` gab es; was fehlte, war der Name — 1381 Aufrufe, und die
+    // Methoden sassen auf JEDER Liste einzeln statt auf einem Prototyp.
+    let token_list_proto = new_obj(Some(realm.object_proto.clone()));
+    iface(realm, "DOMTokenList", &token_list_proto);
+    /// Die Klassen eines Knotens schreiben — eine Stelle, ein Format.
+    fn set_classes(i: &mut Interp, id: u32, cs: &[Rc<str>]) {
+        let joined = cs.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
+        if let Some(d) = &mut i.doc { d.dirty = true; d.nodes[id as usize].set_attr("class", &joined); }
+    }
+    meth(&token_list_proto, "contains", |i, t, a| {
+        let id = node_of(i, &t)?;
+        let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        Ok(Value::Bool(i.doc.as_ref().is_some_and(|d| d.classes(id).iter().any(|c| *c == k))))
+    }, 1, &fp);
+    meth(&token_list_proto, "add", |i, t, a| {
+        let id = node_of(i, &t)?;
+        for v in a {
+            let k = i.to_string(v)?;
+            let Some(d) = &i.doc else { break };
+            let mut cs = d.classes(id);
+            if cs.iter().any(|c| *c == k) { continue }
+            cs.push(k);
+            set_classes(i, id, &cs);
+        }
+        Ok(Value::Undefined)
+    }, 1, &fp);
+    meth(&token_list_proto, "remove", |i, t, a| {
+        let id = node_of(i, &t)?;
+        for v in a {
+            let k = i.to_string(v)?;
+            let Some(d) = &i.doc else { break };
+            let cs: Vec<Rc<str>> = d.classes(id).into_iter().filter(|c| *c != k).collect();
+            set_classes(i, id, &cs);
+        }
+        Ok(Value::Undefined)
+    }, 1, &fp);
+    meth(&token_list_proto, "toggle", |i, t, a| {
+        let id = node_of(i, &t)?;
+        let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        // `toggle(name, kraft)` — das zweite Argument entscheidet statt des
+        // Zustands, und Seiten benutzen es fuer „setze genau so".
+        let forced = match a.get(1) { None | Some(Value::Undefined) => None, Some(v) => Some(v.truthy()) };
+        let has = i.doc.as_ref().is_some_and(|d| d.classes(id).iter().any(|c| *c == k));
+        let want = forced.unwrap_or(!has);
+        if want != has {
+            let Some(d) = &i.doc else { return Ok(Value::Bool(has)) };
+            let mut cs: Vec<Rc<str>> = d.classes(id).into_iter().filter(|c| *c != k).collect();
+            if want { cs.push(k); }
+            set_classes(i, id, &cs);
+        }
+        Ok(Value::Bool(want))
+    }, 1, &fp);
+    meth(&token_list_proto, "replace", |i, t, a| {
+        let id = node_of(i, &t)?;
+        let from = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let to = i.to_string(a.get(1).unwrap_or(&Value::Undefined))?;
+        let Some(d) = &i.doc else { return Ok(Value::Bool(false)) };
+        let cs = d.classes(id);
+        if !cs.iter().any(|c| *c == from) { return Ok(Value::Bool(false)) }
+        let cs: Vec<Rc<str>> = cs.into_iter().map(|c| if c == from { to.clone() } else { c }).collect();
+        set_classes(i, id, &cs);
+        Ok(Value::Bool(true))
+    }, 2, &fp);
+    meth(&token_list_proto, "item", |i, t, a| {
+        let id = node_of(i, &t)?;
+        let n = i.to_number(a.first().unwrap_or(&Value::Undefined))?;
+        let Some(d) = &i.doc else { return Ok(Value::Null) };
+        Ok(match d.classes(id).get(n as usize) { Some(c) => Value::Str(c.clone()), None => Value::Null })
+    }, 1, &fp);
+    getter(&token_list_proto, "length", |i, t, _| {
+        let id = node_of(i, &t)?;
+        Ok(Value::Num(i.doc.as_ref().map(|d| d.classes(id).len()).unwrap_or(0) as f64))
+    }, &fp);
+    accessor(&token_list_proto, "value",
+        |i, t, _| with_node!(i, t, |n| Ok(match n.attr("class") {
+            Some(v) => Value::Str(v.clone()), None => Value::str("") })),
+        |i, t, a| {
+            let id = node_of(i, &t)?;
+            let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+            if let Some(d) = &mut i.doc { d.dirty = true; d.nodes[id as usize].set_attr("class", &v); }
+            Ok(Value::Undefined)
+        }, &fp);
+    meth(&token_list_proto, "toString", |i, t, _| {
+        with_node!(i, t, |n| Ok(match n.attr("class") { Some(v) => Value::Str(v.clone()), None => Value::str("") }))
+    }, 0, &fp);
+    meth(&token_list_proto, "forEach", |i, t, a| {
+        let id = node_of(i, &t)?;
+        let f = a.first().cloned().unwrap_or(Value::Undefined);
+        let cs = i.doc.as_ref().map(|d| d.classes(id)).unwrap_or_default();
+        for (k, c) in cs.into_iter().enumerate() {
+            i.call(&f, Value::Undefined, &[Value::Str(c), Value::Num(k as f64), t.clone()])?;
+        }
+        Ok(Value::Undefined)
+    }, 1, &fp);
+    // ── CSSStyleDeclaration ──────────────────────────────────────────────
+    //
+    // Vorher gab `el.style` bei JEDEM Zugriff ein frisches leeres Objekt:
+    // ein Schreibzugriff verschwand, und ein Lesen danach fand nichts. Das
+    // war als ehrlicher Stumpf gemeint, ist aber der haeufigste Eingriff
+    // ueberhaupt — `el.style.display = "none"` ist Zeigen und Verstecken.
+    //
+    // Jetzt ist es eine SICHT auf das `style`-Attribut. Damit wirkt die
+    // Zuweisung wirklich: die Kaskade liest dasselbe Attribut, und `dirty`
+    // sagt beak, dass neu ausgelegt werden muss.
+    let style_proto = new_obj(Some(realm.object_proto.clone()));
+    iface(realm, "CSSStyleDeclaration", &style_proto);
+    meth(&style_proto, "getPropertyValue", |i, t, a| {
+        let id = node_of(i, &t)?;
+        let n = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        Ok(style_get(i, id, &n.to_ascii_lowercase()))
+    }, 1, &fp);
+    meth(&style_proto, "setProperty", |i, t, a| {
+        let id = node_of(i, &t)?;
+        let n = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let v = i.to_string(a.get(1).unwrap_or(&Value::Undefined))?;
+        style_set(i, id, &n.to_ascii_lowercase(), &v);
+        Ok(Value::Undefined)
+    }, 2, &fp);
+    meth(&style_proto, "removeProperty", |i, t, a| {
+        let id = node_of(i, &t)?;
+        let n = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_ascii_lowercase();
+        let old = style_get(i, id, &n);
+        style_set(i, id, &n, "");
+        Ok(old)
+    }, 1, &fp);
+    meth(&style_proto, "item", |i, t, a| {
+        let id = node_of(i, &t)?;
+        let n = i.to_number(a.first().unwrap_or(&Value::Undefined))? as usize;
+        let Some(d) = &i.doc else { return Ok(Value::str("")) };
+        let text = d.nodes[id as usize].attr("style").map(|s| s.to_string()).unwrap_or_default();
+        Ok(match style_decls(&text).get(n) { Some((k, _)) => Value::string(k.clone()), None => Value::str("") })
+    }, 1, &fp);
+    getter(&style_proto, "length", |i, t, _| {
+        let id = node_of(i, &t)?;
+        let Some(d) = &i.doc else { return Ok(Value::Num(0.0)) };
+        let text = d.nodes[id as usize].attr("style").map(|s| s.to_string()).unwrap_or_default();
+        Ok(Value::Num(style_decls(&text).len() as f64))
+    }, &fp);
+    accessor(&style_proto, "cssText",
+        |i, t, _| with_node!(i, t, |n| Ok(match n.attr("style") {
+            Some(v) => Value::Str(v.clone()), None => Value::str("") })),
+        |i, t, a| {
+            let id = node_of(i, &t)?;
+            let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+            if let Some(d) = &mut i.doc { d.dirty = true; d.nodes[id as usize].set_attr("style", &v); }
+            Ok(Value::Undefined)
+        }, &fp);
+    // Die benannten Eigenschaften. Die Liste ist bewusst endlich: ohne Proxy
+    // gibt es keinen Weg, JEDEN Namen abzufangen, und eine Liste, die die
+    // gebraeuchlichen deckt, ist besser als ein Stumpf, der keinen deckt.
+    // Was nicht daraufsteht, geht ueber `setProperty`/`getPropertyValue`.
+    style_prop!(style_proto, fp, "display", "display");
+    style_prop!(style_proto, fp, "visibility", "visibility");
+    style_prop!(style_proto, fp, "opacity", "opacity");
+    style_prop!(style_proto, fp, "position", "position");
+    style_prop!(style_proto, fp, "top", "top");
+    style_prop!(style_proto, fp, "right", "right");
+    style_prop!(style_proto, fp, "bottom", "bottom");
+    style_prop!(style_proto, fp, "left", "left");
+    style_prop!(style_proto, fp, "zIndex", "z-index");
+    style_prop!(style_proto, fp, "width", "width");
+    style_prop!(style_proto, fp, "height", "height");
+    style_prop!(style_proto, fp, "minWidth", "min-width");
+    style_prop!(style_proto, fp, "minHeight", "min-height");
+    style_prop!(style_proto, fp, "maxWidth", "max-width");
+    style_prop!(style_proto, fp, "maxHeight", "max-height");
+    style_prop!(style_proto, fp, "margin", "margin");
+    style_prop!(style_proto, fp, "marginTop", "margin-top");
+    style_prop!(style_proto, fp, "marginRight", "margin-right");
+    style_prop!(style_proto, fp, "marginBottom", "margin-bottom");
+    style_prop!(style_proto, fp, "marginLeft", "margin-left");
+    style_prop!(style_proto, fp, "padding", "padding");
+    style_prop!(style_proto, fp, "paddingTop", "padding-top");
+    style_prop!(style_proto, fp, "paddingRight", "padding-right");
+    style_prop!(style_proto, fp, "paddingBottom", "padding-bottom");
+    style_prop!(style_proto, fp, "paddingLeft", "padding-left");
+    style_prop!(style_proto, fp, "color", "color");
+    style_prop!(style_proto, fp, "background", "background");
+    style_prop!(style_proto, fp, "backgroundColor", "background-color");
+    style_prop!(style_proto, fp, "backgroundImage", "background-image");
+    style_prop!(style_proto, fp, "backgroundPosition", "background-position");
+    style_prop!(style_proto, fp, "backgroundSize", "background-size");
+    style_prop!(style_proto, fp, "backgroundRepeat", "background-repeat");
+    style_prop!(style_proto, fp, "border", "border");
+    style_prop!(style_proto, fp, "borderTop", "border-top");
+    style_prop!(style_proto, fp, "borderRight", "border-right");
+    style_prop!(style_proto, fp, "borderBottom", "border-bottom");
+    style_prop!(style_proto, fp, "borderLeft", "border-left");
+    style_prop!(style_proto, fp, "borderColor", "border-color");
+    style_prop!(style_proto, fp, "borderWidth", "border-width");
+    style_prop!(style_proto, fp, "borderStyle", "border-style");
+    style_prop!(style_proto, fp, "borderRadius", "border-radius");
+    style_prop!(style_proto, fp, "font", "font");
+    style_prop!(style_proto, fp, "fontSize", "font-size");
+    style_prop!(style_proto, fp, "fontFamily", "font-family");
+    style_prop!(style_proto, fp, "fontWeight", "font-weight");
+    style_prop!(style_proto, fp, "fontStyle", "font-style");
+    style_prop!(style_proto, fp, "lineHeight", "line-height");
+    style_prop!(style_proto, fp, "textAlign", "text-align");
+    style_prop!(style_proto, fp, "textDecoration", "text-decoration");
+    style_prop!(style_proto, fp, "textTransform", "text-transform");
+    style_prop!(style_proto, fp, "letterSpacing", "letter-spacing");
+    style_prop!(style_proto, fp, "whiteSpace", "white-space");
+    style_prop!(style_proto, fp, "wordBreak", "word-break");
+    style_prop!(style_proto, fp, "overflow", "overflow");
+    style_prop!(style_proto, fp, "overflowX", "overflow-x");
+    style_prop!(style_proto, fp, "overflowY", "overflow-y");
+    style_prop!(style_proto, fp, "cursor", "cursor");
+    style_prop!(style_proto, fp, "pointerEvents", "pointer-events");
+    style_prop!(style_proto, fp, "userSelect", "user-select");
+    style_prop!(style_proto, fp, "transform", "transform");
+    style_prop!(style_proto, fp, "transformOrigin", "transform-origin");
+    style_prop!(style_proto, fp, "transition", "transition");
+    style_prop!(style_proto, fp, "animation", "animation");
+    style_prop!(style_proto, fp, "filter", "filter");
+    style_prop!(style_proto, fp, "boxShadow", "box-shadow");
+    style_prop!(style_proto, fp, "textShadow", "text-shadow");
+    style_prop!(style_proto, fp, "flex", "flex");
+    style_prop!(style_proto, fp, "flexDirection", "flex-direction");
+    style_prop!(style_proto, fp, "flexWrap", "flex-wrap");
+    style_prop!(style_proto, fp, "flexGrow", "flex-grow");
+    style_prop!(style_proto, fp, "flexShrink", "flex-shrink");
+    style_prop!(style_proto, fp, "flexBasis", "flex-basis");
+    style_prop!(style_proto, fp, "justifyContent", "justify-content");
+    style_prop!(style_proto, fp, "alignItems", "align-items");
+    style_prop!(style_proto, fp, "alignSelf", "align-self");
+    style_prop!(style_proto, fp, "alignContent", "align-content");
+    style_prop!(style_proto, fp, "gap", "gap");
+    style_prop!(style_proto, fp, "rowGap", "row-gap");
+    style_prop!(style_proto, fp, "columnGap", "column-gap");
+    style_prop!(style_proto, fp, "order", "order");
+    style_prop!(style_proto, fp, "gridTemplateColumns", "grid-template-columns");
+    style_prop!(style_proto, fp, "gridTemplateRows", "grid-template-rows");
+    style_prop!(style_proto, fp, "gridColumn", "grid-column");
+    style_prop!(style_proto, fp, "gridRow", "grid-row");
+    style_prop!(style_proto, fp, "clear", "clear");
+    style_prop!(style_proto, fp, "content", "content");
+    style_prop!(style_proto, fp, "verticalAlign", "vertical-align");
+    style_prop!(style_proto, fp, "boxSizing", "box-sizing");
+    style_prop!(style_proto, fp, "outline", "outline");
+    style_prop!(style_proto, fp, "resize", "resize");
+    style_prop!(style_proto, fp, "tableLayout", "table-layout");
+    style_prop!(style_proto, fp, "listStyle", "list-style");
+    style_prop!(style_proto, fp, "objectFit", "object-fit");
+    style_prop!(style_proto, fp, "willChange", "will-change");
+    style_prop!(style_proto, fp, "inset", "inset");
+    style_prop!(style_proto, fp, "aspectRatio", "aspect-ratio");
+    style_prop!(style_proto, fp, "cssFloat", "float");
+    style_prop!(style_proto, fp, "float", "float");
+    realm.style_proto = style_proto;
+    realm.token_list_proto = token_list_proto;
+    realm.comment_proto = comment_proto.clone();
     iface(realm, "Document", &document_proto);
     iface(realm, "HTMLDocument", &document_proto);
-    // `DocumentFragment` haengt an Node, nicht an Element.
-    let fragment_proto = new_obj(Some(node_proto.clone()));
     iface(realm, "DocumentFragment", &fragment_proto);
+
+    // ── Event ────────────────────────────────────────────────────────────
+    //
+    // Das Ereignisobjekt gab es schon — als flache Huelle mit Datenfeldern.
+    // Was fehlte, war der NAME: `e instanceof Event` scheitert daran, nicht
+    // an `e.target`, und im Zensus haengen 1320 Aufrufe daran.
+    //
+    // Die Felder liegen jetzt in Schlitzen und die Prototypen lesen sie —
+    // sonst stuende `target` auf der INSTANZ und `Event.prototype.target`
+    // waere trotzdem leer, also genau die Abfrage, die scheitert.
+    let event_proto = new_obj(Some(realm.object_proto.clone()));
+    let fp2 = realm.function_proto.clone();
+    // Ein eingebautes Getter je Feld. Ein Funktionszeiger faengt nichts ein,
+    // also traegt jedes seinen Schlitznamen im Rumpf — das Makro schreibt sie.
+    ev_getter!(event_proto, fp2, "type", EV_TYPE);
+    ev_getter!(event_proto, fp2, "target", EV_TARGET);
+    ev_getter!(event_proto, fp2, "srcElement", EV_TARGET);
+    ev_getter!(event_proto, fp2, "currentTarget", EV_CUR);
+    ev_getter!(event_proto, fp2, "bubbles", EV_BUBBLES);
+    ev_getter!(event_proto, fp2, "cancelable", EV_CANCELABLE);
+    ev_getter!(event_proto, fp2, "defaultPrevented", EV_PREVENTED);
+    ev_getter!(event_proto, fp2, "isTrusted", EV_TRUSTED);
+    ev_getter!(event_proto, fp2, "eventPhase", EV_PHASE);
+    ev_getter!(event_proto, fp2, "timeStamp", EV_STAMP);
+    meth(&event_proto, "preventDefault", |i, t, _| {
+        // Nur ein abbrechbares Ereignis laesst sich abbrechen — sonst meldet
+        // `defaultPrevented` einen Halt, den niemand beachtet.
+        if matches!(i.get(&t, EV_CANCELABLE)?, Value::Bool(true)) {
+            if let Value::Obj(o) = &t { o.borrow_mut().define(EV_PREVENTED, Prop::data(Value::Bool(true))); }
+        }
+        Ok(Value::Undefined)
+    }, 0, &fp2);
+    meth(&event_proto, "stopPropagation", |_, t, _| {
+        if let Value::Obj(o) = &t { o.borrow_mut().define(EV_STOP, Prop::data(Value::Bool(true))); }
+        Ok(Value::Undefined)
+    }, 0, &fp2);
+    meth(&event_proto, "stopImmediatePropagation", |_, t, _| {
+        if let Value::Obj(o) = &t {
+            o.borrow_mut().define(EV_STOP, Prop::data(Value::Bool(true)));
+            o.borrow_mut().define(EV_STOPIMM, Prop::data(Value::Bool(true)));
+        }
+        Ok(Value::Undefined)
+    }, 0, &fp2);
+    meth(&event_proto, "composedPath", |i, t, _| {
+        let tgt = i.get(&t, EV_TARGET)?;
+        let Ok(id) = node_of(i, &tgt) else { return Ok(i.new_array(Vec::new())) };
+        let chain = ancestors(i, id);
+        // Vom Ziel nach aussen — `ancestors` liefert die Zustellreihenfolge,
+        // also aussen zuerst.
+        Ok(nodes_array(i, chain.into_iter().rev().collect()))
+    }, 0, &fp2);
+    let event_ctor = native(Some(realm.function_proto.clone()), |i, _, a| {
+        let kind = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let init = a.get(1).cloned().unwrap_or(Value::Undefined);
+        let proto = i.realm.event_proto.clone();
+        let ev = build_event(i, proto, &kind, false);
+        apply_event_init(i, &ev, &init)?;
+        Ok(Value::Obj(ev))
+    }, "Event", 1, true);
+    event_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(event_proto.clone())));
+    event_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(event_ctor.clone())));
+    realm.global.borrow_mut().define("Event", Prop::builtin(Value::Obj(event_ctor)));
+    for (k, v) in [("NONE", 0.0), ("CAPTURING_PHASE", 1.0), ("AT_TARGET", 2.0), ("BUBBLING_PHASE", 3.0)] {
+        event_proto.borrow_mut().define(k, Prop::frozen(Value::Num(v)));
+    }
+
+    // `CustomEvent` ist ein `Event` mit einem Feld — und mit 412 Aufrufen die
+    // Art, in der Seiten untereinander reden.
+    let custom_proto = new_obj(Some(event_proto.clone()));
+    ev_getter!(custom_proto, fp2, "detail", EV_DETAIL);
+    let custom_ctor = native(Some(realm.function_proto.clone()), |i, _, a| {
+        let kind = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let init = a.get(1).cloned().unwrap_or(Value::Undefined);
+        let proto = match i.get(&Value::Obj(i.realm.global.clone()), "CustomEvent")
+                          .and_then(|c| i.get(&c, "prototype")) {
+            Ok(Value::Obj(o)) => o, _ => i.realm.event_proto.clone(),
+        };
+        let ev = build_event(i, proto, &kind, false);
+        apply_event_init(i, &ev, &init)?;
+        let detail = match &init { Value::Obj(_) => i.get(&init, "detail")?, _ => Value::Null };
+        ev.borrow_mut().define(EV_DETAIL, Prop::data(detail));
+        Ok(Value::Obj(ev))
+    }, "CustomEvent", 1, true);
+    custom_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(custom_proto.clone())));
+    custom_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(custom_ctor.clone())));
+    realm.global.borrow_mut().define("CustomEvent", Prop::builtin(Value::Obj(custom_ctor)));
+    realm.event_proto = event_proto;
+
+    // `getComputedStyle` — 443 Aufrufe, und die Antwort ist NUR der
+    // Inline-Stil dieses Elements.
+    //
+    // ⚠ **Die Kaskade steckt nicht darin.** Was ein Stilblatt setzt, weiss
+    // dieses Objekt nicht: die Kaskade laeuft in `style.rs` auf beaks eigenem
+    // Baum, mit den geholten Blaettern — beides hat die Maschine nicht. Was
+    // hier steht, ist damit eine TEILANTWORT, und wo nichts gesetzt ist,
+    // steht die leere Zeichenkette wie bei jeder nicht gesetzten
+    // Eigenschaft.
+    //
+    // Warum trotzdem: die Funktion ganz wegzulassen heisst TypeError, und
+    // ein TypeError beendet das Skript. Eine Teilantwort laesst die Seite
+    // laufen. Der Weg zur ganzen ist, dass der Wirt die gerechneten Werte
+    // einreicht — dieselbe Bauart wie `set_media` — und das ist eine eigene
+    // Runde, keine Zeile.
+    def_global(realm, "getComputedStyle", |i, _, a| {
+        let id = node_of(i, a.first().unwrap_or(&Value::Undefined))?;
+        let g = new_obj(Some(i.realm.style_proto.clone()));
+        g.borrow_mut().define(SLOT, Prop { value: Some(Value::Num(id as f64)), get: None,
+            set: None, writable: false, enumerable: false, configurable: false });
+        Ok(Value::Obj(g))
+    }, 1, &fp);
+
+    // ── Behandler als Eigenschaft ────────────────────────────────────────
+    //
+    // `el.onclick = f` — 645 Aufrufe im Zensus, und bis hierher gab es davon
+    // NUR die Attributform. Eine Seite, die den Behandler zuweist statt ihn
+    // ins HTML zu schreiben, hatte gar keinen.
+    //
+    // Zugestellt wird trotzdem nur, was in `DISPATCHED` steht (heute:
+    // `click`). Die uebrigen Namen anzunehmen ist kein Vortaeuschen — die
+    // Anmeldung DARF nicht werfen, sonst stirbt die Seite an einer Zeile,
+    // die im Browser auch nichts tut, solange nichts passiert.
+    handler_prop!(html_element_proto, fp, "onclick", "click");
+    handler_prop!(html_element_proto, fp, "onload", "load");
+    handler_prop!(html_element_proto, fp, "onerror", "error");
+    handler_prop!(html_element_proto, fp, "onchange", "change");
+    handler_prop!(html_element_proto, fp, "oninput", "input");
+    handler_prop!(html_element_proto, fp, "onsubmit", "submit");
+    handler_prop!(html_element_proto, fp, "onfocus", "focus");
+    handler_prop!(html_element_proto, fp, "onblur", "blur");
+    handler_prop!(html_element_proto, fp, "onkeydown", "keydown");
+    handler_prop!(html_element_proto, fp, "onkeyup", "keyup");
+    handler_prop!(html_element_proto, fp, "onkeypress", "keypress");
+    handler_prop!(html_element_proto, fp, "onmousedown", "mousedown");
+    handler_prop!(html_element_proto, fp, "onmouseup", "mouseup");
+    handler_prop!(html_element_proto, fp, "onmouseover", "mouseover");
+    handler_prop!(html_element_proto, fp, "onmouseout", "mouseout");
+    handler_prop!(html_element_proto, fp, "onmousemove", "mousemove");
+    handler_prop!(html_element_proto, fp, "onscroll", "scroll");
+    handler_prop!(html_element_proto, fp, "onresize", "resize");
+    handler_prop!(html_element_proto, fp, "oncontextmenu", "contextmenu");
+    handler_prop!(html_element_proto, fp, "ondblclick", "dblclick");
+    handler_prop!(html_element_proto, fp, "ontouchstart", "touchstart");
+    handler_prop!(html_element_proto, fp, "ontouchend", "touchend");
+    handler_prop!(html_element_proto, fp, "onmessage", "message");
+    handler_prop!(html_element_proto, fp, "onbeforeunload", "beforeunload");
+    handler_prop!(html_element_proto, fp, "onunload", "unload");
+    handler_prop!(html_element_proto, fp, "ondomcontentloaded", "DOMContentLoaded");
+
+    // Dieselben auf dem Fenster: `window.onload = …` ist die aelteste
+    // Schreibweise ueberhaupt und steht auf fast jeder alten Seite.
+    handler_prop!(realm.global, fp, "onclick", "click");
+    handler_prop!(realm.global, fp, "onload", "load");
+    handler_prop!(realm.global, fp, "onerror", "error");
+    handler_prop!(realm.global, fp, "onchange", "change");
+    handler_prop!(realm.global, fp, "oninput", "input");
+    handler_prop!(realm.global, fp, "onsubmit", "submit");
+    handler_prop!(realm.global, fp, "onfocus", "focus");
+    handler_prop!(realm.global, fp, "onblur", "blur");
+    handler_prop!(realm.global, fp, "onkeydown", "keydown");
+    handler_prop!(realm.global, fp, "onkeyup", "keyup");
+    handler_prop!(realm.global, fp, "onkeypress", "keypress");
+    handler_prop!(realm.global, fp, "onmousedown", "mousedown");
+    handler_prop!(realm.global, fp, "onmouseup", "mouseup");
+    handler_prop!(realm.global, fp, "onmouseover", "mouseover");
+    handler_prop!(realm.global, fp, "onmouseout", "mouseout");
+    handler_prop!(realm.global, fp, "onmousemove", "mousemove");
+    handler_prop!(realm.global, fp, "onscroll", "scroll");
+    handler_prop!(realm.global, fp, "onresize", "resize");
+    handler_prop!(realm.global, fp, "oncontextmenu", "contextmenu");
+    handler_prop!(realm.global, fp, "ondblclick", "dblclick");
+    handler_prop!(realm.global, fp, "ontouchstart", "touchstart");
+    handler_prop!(realm.global, fp, "ontouchend", "touchend");
+    handler_prop!(realm.global, fp, "onmessage", "message");
+    handler_prop!(realm.global, fp, "onbeforeunload", "beforeunload");
+    handler_prop!(realm.global, fp, "onunload", "unload");
+    handler_prop!(realm.global, fp, "ondomcontentloaded", "DOMContentLoaded");
+
+    // ── Felder, die auf einem Attribut sitzen ────────────────────────────
+    //
+    // Alle aus dem Zensus, keins geraten. Sie sind billig, weil das Attribut
+    // schon da ist — was fehlte, war der NAME, unter dem Seiten es abfragen.
+    attr_prop!(html_element_proto, fp, "title", "title");
+    attr_prop!(html_element_proto, fp, "lang", "lang");
+    attr_prop!(html_element_proto, fp, "dir", "dir");
+    attr_prop!(html_element_proto, fp, "accessKey", "accesskey");
+    attr_prop!(html_element_proto, fp, "contentEditable", "contenteditable");
+    bool_attr_prop!(html_element_proto, fp, "hidden", "hidden");
+    // `tabIndex` ist -1, wenn nichts dasteht: „nicht mit der Tabtaste
+    // erreichbar". Eine 0 hiesse das Gegenteil.
+    num_attr_prop!(html_element_proto, fp, "tabIndex", "tabindex", -1.0);
+    attr_prop!(element_proto, fp, "slot", "slot");
 
     let mut tag_protos: HashMap<&'static str, Gc> = HashMap::new();
     for (iname, tags) in HTML_IFACES {
         let proto = new_obj(Some(html_element_proto.clone()));
         iface(realm, iname, &proto);
         for t in *tags { tag_protos.insert(t, proto.clone()); }
+    }
+    // Je Schnittstelle das, was auf ihr wirklich abgefragt wird — aus dem
+    // Aufrufzensus, nicht aus der Spezifikation: `HTMLAnchorElement.href`
+    // steht dort mit 285 Aufrufen, `HTMLScriptElement.src` mit 144. Was
+    // niemand ruft, steht hier nicht.
+    //
+    // **`href` und `src` sind ROH**, so wie sie im Attribut stehen. Im
+    // Browser sind sie AUFGELOEST — `a.href` einer relativen Adresse ist die
+    // absolute. Das braucht die Adresse der Seite und ist eine eigene Zeile;
+    // bis dahin ist `.href` dasselbe wie `getAttribute("href")`, und das ist
+    // nachpruefbar falsch statt still falsch.
+    // HTMLAnchorElement
+    if let Some(p) = tag_protos.get("a") {
+        attr_prop!(p, fp, "href", "href");
+        attr_prop!(p, fp, "type", "type");
+        attr_prop!(p, fp, "target", "target");
+        attr_prop!(p, fp, "rel", "rel");
+        attr_prop!(p, fp, "download", "download");
+        attr_prop!(p, fp, "hreflang", "hreflang");
+    }
+    // HTMLLinkElement
+    if let Some(p) = tag_protos.get("link") {
+        attr_prop!(p, fp, "href", "href");
+        attr_prop!(p, fp, "rel", "rel");
+        attr_prop!(p, fp, "type", "type");
+        attr_prop!(p, fp, "as", "as");
+        attr_prop!(p, fp, "media", "media");
+    }
+    // HTMLScriptElement
+    if let Some(p) = tag_protos.get("script") {
+        attr_prop!(p, fp, "src", "src");
+        attr_prop!(p, fp, "type", "type");
+        attr_prop!(p, fp, "charset", "charset");
+    }
+    // HTMLImageElement
+    if let Some(p) = tag_protos.get("img") {
+        attr_prop!(p, fp, "src", "src");
+        attr_prop!(p, fp, "alt", "alt");
+        attr_prop!(p, fp, "srcset", "srcset");
+        attr_prop!(p, fp, "sizes", "sizes");
+        attr_prop!(p, fp, "loading", "loading");
+    }
+    // HTMLInputElement
+    if let Some(p) = tag_protos.get("input") {
+        attr_prop!(p, fp, "type", "type");
+        attr_prop!(p, fp, "name", "name");
+        attr_prop!(p, fp, "placeholder", "placeholder");
+    }
+    // HTMLButtonElement
+    if let Some(p) = tag_protos.get("button") {
+        attr_prop!(p, fp, "type", "type");
+        attr_prop!(p, fp, "name", "name");
+    }
+    // HTMLFormElement
+    if let Some(p) = tag_protos.get("form") {
+        attr_prop!(p, fp, "action", "action");
+        attr_prop!(p, fp, "method", "method");
+        attr_prop!(p, fp, "target", "target");
+    }
+    // HTMLTextAreaElement
+    if let Some(p) = tag_protos.get("textarea") {
+        attr_prop!(p, fp, "name", "name");
+        attr_prop!(p, fp, "placeholder", "placeholder");
+    }
+    // HTMLIFrameElement
+    if let Some(p) = tag_protos.get("iframe") {
+        attr_prop!(p, fp, "src", "src");
+        attr_prop!(p, fp, "srcdoc", "srcdoc");
+    }
+    // HTMLSourceElement
+    if let Some(p) = tag_protos.get("source") {
+        attr_prop!(p, fp, "src", "src");
+        attr_prop!(p, fp, "srcset", "srcset");
+        attr_prop!(p, fp, "type", "type");
+        attr_prop!(p, fp, "media", "media");
+    }
+    // HTMLMetaElement
+    if let Some(p) = tag_protos.get("meta") {
+        attr_prop!(p, fp, "name", "name");
+        attr_prop!(p, fp, "content", "content");
+        attr_prop!(p, fp, "charset", "charset");
+    }
+
+    // `<template>.content` — 2245 Aufrufe, die groesste einzelne Luecke im
+    // Zensus. Der Inhalt einer Schablone gehoert laut Spezifikation NICHT in
+    // den Baum, sondern in ein eigenes Bruchstueck.
+    //
+    // Umgehaengt wird erst beim ersten Zugriff. Wer nie `.content` liest,
+    // behaelt die Kinder im Baum, und `to_dom` schreibt sie zurueck wie
+    // bisher — gemalt werden sie ohnehin nicht (`style.rs` gibt `<template>`
+    // kein Kaestchen). Das ist der billige Weg zu spec-treuem Verhalten,
+    // ohne den Weg zurueck ins Layout anzufassen.
+    if let Some(tpl) = tag_protos.get("template") {
+        getter(tpl, "content", |i, t, _| {
+            let id = node_of(i, &t)?;
+            if let Some(f) = i.doc.as_ref().and_then(|d| d.nodes[id as usize].content) {
+                return Ok(wrap(i, f));
+            }
+            let Some(d) = &mut i.doc else { return i.type_err("no document") };
+            let f = d.create(ELEMENT_NODE, "#fragment");
+            for k in d.nodes[id as usize].children.clone() { d.append(f, k); }
+            d.nodes[id as usize].content = Some(f);
+            Ok(wrap(i, f))
+        }, &fp);
     }
     // SVG kennt genau eine Unterscheidung, die Seiten wirklich abfragen.
     {
@@ -1304,49 +2342,68 @@ fn inline_handler(i: &mut Interp, node: u32, kind: &str) -> C<Option<Value>> {
     }
 }
 
+/// Ein Ereignis, das beak selbst ausloest, ueber die Kette zustellen.
+///
+/// `chain` ist die Kette aus dem LAYOUT, aussen zuerst — nicht aus dem Baum.
+/// Das ist keine Feinheit: der Klickpunkt kennt nur Kaesten, und wer die
+/// Kette stattdessen aus dem Baum baut, prueft einen Weg, den beak nie geht
+/// ([[feedback_the_test_path_must_be_the_real_path]]).
 pub fn dispatch(i: &mut Interp, kind: &str, chain: &[u32]) -> C<bool> {
     if chain.is_empty() { return Ok(false); }
+    let proto = i.realm.event_proto.clone();
+    let ev = build_event(i, proto, kind, true);
+    ev.borrow_mut().define(EV_BUBBLES, Prop { value: Some(Value::Bool(true)), get: None,
+        set: None, writable: true, enumerable: false, configurable: true });
+    let prevented = deliver(i, &ev, kind, chain)?;
+    // Ein Klick ist eine AUFGABE — danach laeuft die Microtask-Schlange, wie
+    // nach jeder anderen auch. Sonst bliebe ein `.then` aus dem Behandler bis
+    // zum naechsten Zeitgeber liegen, und auf einer Seite ohne Zeitgeber
+    // fuer immer.
+    super::promise::run_jobs(i);
+    Ok(prevented)
+}
+
+/// Der gemeinsame Kern: ein fertiges Ereignis ueber eine fertige Kette.
+///
+/// Zwei Wege enden hier — beaks eigener Klick und `el.dispatchEvent(…)` der
+/// Seite. Ein zweiter Rumpf waere ein zweiter Satz Regeln, und der eine wuerde
+/// gepflegt und der andere nicht.
+fn deliver(i: &mut Interp, ev: &Gc, kind: &str, chain: &[u32]) -> C<bool> {
+    if chain.is_empty() { return Ok(false); }
     let target = wrap(i, chain[chain.len() - 1]);
-    let ev = new_obj(Some(i.realm.object_proto.clone()));
-    {
-        let mut o = ev.borrow_mut();
-        o.define("type", Prop::data(Value::str(kind)));
-        o.define("target", Prop::data(target.clone()));
-        o.define("bubbles", Prop::data(Value::Bool(true)));
-        o.define("defaultPrevented", Prop::data(Value::Bool(false)));
-        o.define("__stop", Prop { value: Some(Value::Bool(false)), get: None, set: None,
-            writable: true, enumerable: false, configurable: false });
-    }
-    let fp = i.realm.function_proto.clone();
-    let pd = native(Some(fp.clone()), |_, t, _| {
-        if let Value::Obj(o) = &t { o.borrow_mut().define("defaultPrevented", Prop::data(Value::Bool(true))); }
-        Ok(Value::Undefined)
-    }, "preventDefault", 0, false);
-    let sp = native(Some(fp.clone()), |_, t, _| {
-        if let Value::Obj(o) = &t {
-            o.borrow_mut().define("__stop", Prop { value: Some(Value::Bool(true)), get: None,
-                set: None, writable: true, enumerable: false, configurable: false });
-        }
-        Ok(Value::Undefined)
-    }, "stopPropagation", 0, false);
-    ev.borrow_mut().define("preventDefault", Prop::builtin(Value::Obj(pd)));
-    ev.borrow_mut().define("stopPropagation", Prop::builtin(Value::Obj(sp.clone())));
-    ev.borrow_mut().define("stopImmediatePropagation", Prop::builtin(Value::Obj(sp)));
+    let set = |o: &Gc, k: &str, v: Value| {
+        o.borrow_mut().define(k, Prop { value: Some(v), get: None, set: None,
+            writable: true, enumerable: false, configurable: true });
+    };
+    set(ev, EV_TARGET, target);
     let evv = Value::Obj(ev.clone());
 
-    for &node in chain.iter().rev() {
+    for (k, &node) in chain.iter().enumerate().rev() {
         let mut listeners: Vec<Value> = Vec::new();
-        // Der Inline-Behandler zuerst: im Quelltext steht er vor jedem
-        // `addEventListener`, das ein Skript spaeter anmeldet, und die
-        // Reihenfolge der Anmeldung ist die Reihenfolge des Aufrufs.
-        if let Some(f) = inline_handler(i, node, kind)? { listeners.push(f); }
+        // Der Behandler aus dem Attribut oder aus der Eigenschaft zuerst: im
+        // Quelltext steht er vor jedem `addEventListener`, das ein Skript
+        // spaeter anmeldet, und die Reihenfolge der Anmeldung ist die
+        // Reihenfolge des Aufrufs.
+        //
+        // ENTWEDER-ODER: `el.onclick = f` ersetzt im Browser den Behandler
+        // aus dem Attribut, es ist derselbe Platz. Beide laufen zu lassen
+        // hiesse, dass eine Zuweisung den alten nicht loswird.
+        let prop = i.doc.as_ref().and_then(|d| d.nodes[node as usize].handlers.iter()
+            .find(|(k, _)| &**k == kind).map(|(_, f)| f.clone()));
+        match prop {
+            Some(f) => listeners.push(f),
+            None => if let Some(f) = inline_handler(i, node, kind)? { listeners.push(f); },
+        }
         if let Some(d) = &i.doc {
             listeners.extend(d.nodes[node as usize].listeners.iter()
                 .filter(|(k, _)| &**k == kind).map(|(_, f)| f.clone()));
         }
         if listeners.is_empty() { continue; }
         let this_node = wrap(i, node);
-        ev.borrow_mut().define("currentTarget", Prop::data(this_node.clone()));
+        set(ev, EV_CUR, this_node.clone());
+        // 2 = AT_TARGET, 3 = BUBBLING_PHASE. Eine Fangphase gibt es nicht:
+        // `addEventListener` nimmt das dritte Argument an und verwirft es.
+        set(ev, EV_PHASE, Value::Num(if k + 1 == chain.len() { 2.0 } else { 3.0 }));
         for f in listeners {
             // Ein Behandler, der wirft, darf die naechsten nicht mitnehmen —
             // so macht es ein Browser auch.
@@ -1355,20 +2412,18 @@ pub fn dispatch(i: &mut Interp, kind: &str, chain: &[u32]) -> C<bool> {
             // `preventDefault` und steht auf mehr Seiten als die neue. Sie
             // gilt nur fuer den Attribut-Behandler; ein `addEventListener`
             // wertet den Rueckgabewert nicht aus.
-            if matches!(r, Ok(Value::Bool(false))) {
-                ev.borrow_mut().define("defaultPrevented", Prop::data(Value::Bool(true)));
-            }
+            if matches!(r, Ok(Value::Bool(false))) { set(ev, EV_PREVENTED, Value::Bool(true)); }
+            let imm = matches!(ev.borrow().get_own(EV_STOPIMM).and_then(|p| p.value.clone()),
+                               Some(Value::Bool(true)));
+            if imm { break; }
         }
-        let stop = matches!(ev.borrow().get_own("__stop").and_then(|p| p.value.clone()),
+        let stop = matches!(ev.borrow().get_own(EV_STOP).and_then(|p| p.value.clone()),
                             Some(Value::Bool(true)));
         if stop { break; }
     }
-    // Ein Klick ist eine AUFGABE — danach laeuft die Microtask-Schlange, wie
-    // nach jeder anderen auch. Sonst bliebe ein `.then` aus dem Behandler bis
-    // zum naechsten Zeitgeber liegen, und auf einer Seite ohne Zeitgeber
-    // fuer immer.
-    super::promise::run_jobs(i);
-    Ok(matches!(ev.borrow().get_own("defaultPrevented").and_then(|p| p.value.clone()),
+    set(ev, EV_CUR, Value::Null);
+    set(ev, EV_PHASE, Value::Num(0.0));
+    Ok(matches!(ev.borrow().get_own(EV_PREVENTED).and_then(|p| p.value.clone()),
                 Some(Value::Bool(true))))
 }
 

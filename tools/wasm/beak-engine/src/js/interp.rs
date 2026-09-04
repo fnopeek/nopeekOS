@@ -16,7 +16,7 @@ use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 
 use super::ast::*;
 use super::value::*;
@@ -108,6 +108,13 @@ pub struct Realm {
     pub element_proto: Gc,
     pub text_proto: Gc,
     pub document_proto: Gc,
+    /// `Event.prototype`. Liegt im Realm, weil die Zustellung Ereignisse
+    /// BAUT und die eingebauten Funktionen Zeiger sind, keine Abschluesse —
+    /// sie koennen den Prototyp nicht einfangen.
+    pub event_proto: Gc,
+    pub token_list_proto: Gc,
+    pub comment_proto: Gc,
+    pub style_proto: Gc,
     pub regexp_proto: Gc,
     pub symbol_proto: Gc,
     /// `%IteratorPrototype%` — der gemeinsame Vorfahr aller eingebauten
@@ -126,6 +133,30 @@ pub struct Realm {
     pub tag_protos: HashMap<&'static str, Gc>,
     pub url_proto: Gc,
     pub url_params_proto: Gc,
+}
+
+impl Realm {
+    /// Alles, was der Realm selbst festhaelt. Eine Liste und keine
+    /// Aufzaehlung von Hand an jeder Stelle: wer ein Feld hinzufuegt, sieht
+    /// hier, dass es auch abgebaut werden muss.
+    fn roots(&self) -> Vec<Gc> {
+        alloc::vec![
+            self.global.clone(), self.object_proto.clone(), self.function_proto.clone(),
+            self.array_proto.clone(), self.string_proto.clone(), self.number_proto.clone(),
+            self.boolean_proto.clone(), self.error_proto.clone(), self.node_proto.clone(),
+            self.element_proto.clone(), self.text_proto.clone(), self.document_proto.clone(),
+            self.event_proto.clone(), self.token_list_proto.clone(), self.style_proto.clone(),
+            self.comment_proto.clone(), self.regexp_proto.clone(), self.symbol_proto.clone(),
+            self.iterator_proto.clone(), self.array_iter_proto.clone(),
+            self.string_iter_proto.clone(), self.promise_proto.clone(),
+            self.html_element_proto.clone(), self.svg_element_proto.clone(),
+            self.fragment_proto.clone(), self.url_proto.clone(), self.url_params_proto.clone(),
+        ]
+    }
+}
+
+impl Drop for Interp {
+    fn drop(&mut self) { self.teardown(); }
 }
 
 pub struct Interp {
@@ -160,6 +191,20 @@ pub struct Interp {
     /// `innerWidth` gehoert sie dem Wirt; ohne `set_viewport` gibt es
     /// `matchMedia` gar nicht erst.
     pub media: Option<(f64, bool)>,
+    /// Die Kekse dieser Seite, so wie `document.cookie` sie zeigt.
+    ///
+    /// **Der Wirt reicht sie ein, die Engine hat keinen Behaelter.** Der
+    /// Behaelter kennt Domain, Pfad, `Secure` und `HttpOnly`; welche davon
+    /// dieses Dokument sehen darf, ist eine Frage an ihn und nicht an die
+    /// Maschine. `None` heisst „niemand hat gefragt" — dann gibt es
+    /// `document.cookie` trotzdem, als leere Zeichenkette, weil ein Skript
+    /// darauf `.match` ruft und ein `undefined` es toetet. Das ist keine
+    /// erfundene Antwort: keine Kekse IST eine Antwort.
+    pub cookies: String,
+    /// Was die Seite mit `document.cookie = "…"` gesetzt hat, roh und in der
+    /// Reihenfolge. Der Wirt holt es sich mit `take_cookie_sets` und legt es
+    /// in seinen Behaelter — die Engine entscheidet nicht, was gilt.
+    pub cookie_sets: Vec<String>,
     /// Laufende Nummer fuer `Symbol()`.
     pub next_sym: u32,
     /// Die globale Symbolregistrierung hinter `Symbol.for`/`Symbol.keyFor`.
@@ -222,6 +267,7 @@ impl Interp {
         super::url::install(&mut realm);
         Interp { realm, depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX,
                  fake_now: 0.0, doc: None, next_sym: 0, sym_registry: HashMap::new(),
+                 cookies: String::new(), cookie_sets: Vec::new(),
                  jobs: alloc::collections::VecDeque::new(),
                  rng: 0x2545_F491_4F6C_DD1D, media: None,
                  timers: Vec::new(), console: Vec::new(), console_dropped: 0 }
@@ -253,6 +299,100 @@ impl Interp {
 
     /// Ein Dokument einreichen und `document` global sichtbar machen.
     ///
+    /// Den Realm abbauen und dabei die Ringe brechen.
+    ///
+    /// **Gemessen 2026-09-04: ein Realm kostet 973 KB und wurde NIE frei.**
+    /// Zweihundert erzeugte und wieder fallengelassene Maschinen liessen
+    /// 191 MB liegen. Der Grund ist kein Fehler in einer Zeile, sondern die
+    /// Bauart: `Rc` zaehlt, und die Form eines JS-Realms ist ringfoermig —
+    /// `proto.constructor` zeigt auf den Konstruktor, `ctor.prototype`
+    /// zurueck auf den Prototyp; `globalThis` zeigt auf sich selbst; jede
+    /// Schliessung haelt ihre Umgebung, und die globale Umgebung haelt die
+    /// Schliessung. Ein Zaehler kommt aus einem Ring nie auf null.
+    ///
+    /// Der test262-Lauf hat es aufgedeckt: 69 194 Tests x 973 KB = 67 GB, und
+    /// der OOM-Killer hat den Lauf erschossen. Bei 519 KB (0.56.0) passte es
+    /// gerade noch — die Luecke war also schon lange da, nur nicht sichtbar.
+    ///
+    /// Kein Sammler, sondern ein ABBAU an den Wurzeln: alles, was vom
+    /// globalen Gegenstand und den Prototypen aus erreichbar ist, wird
+    /// einmal besucht und geleert. Danach zeigt kein Ring mehr auf sich
+    /// selbst, und `Rc` raeumt den Rest.
+    ///
+    /// ⚠ Wer nach dem Fallenlassen noch einen `Value` aus dieser Maschine
+    /// haelt, haelt danach ein LEERES Objekt. Das ist sicher (der Speicher
+    /// lebt, solange der `Rc` lebt), aber es ist nicht mehr dasselbe Objekt.
+    fn teardown(&mut self) {
+        let mut seen: HashSet<usize> = HashSet::new();
+        let mut envs: HashSet<usize> = HashSet::new();
+        let mut objs: Vec<Gc> = alloc::vec![self.realm.global.clone()];
+        let mut env_stack: Vec<Rc<RefCell<Env>>> = alloc::vec![self.realm.global_env.clone()];
+        // Die Prototypen stehen im Realm und sind nicht immer vom globalen
+        // Gegenstand aus erreichbar (`event_proto` etwa haengt am
+        // Konstruktor, aber der Umweg ist nicht garantiert).
+        objs.extend(self.realm.roots());
+        let mut all: Vec<Gc> = Vec::new();
+        while let Some(o) = objs.pop() {
+            if !seen.insert(Rc::as_ptr(&o) as usize) { continue }
+            {
+                let b = o.borrow();
+                if let Some(p) = &b.proto { objs.push(p.clone()); }
+                for k in b.own_keys() {
+                    let Some(pr) = b.get_own(&k) else { continue };
+                    for v in [&pr.value, &pr.get, &pr.set].into_iter().flatten() {
+                        if let Value::Obj(x) = v { objs.push(x.clone()); }
+                    }
+                }
+                match &b.kind {
+                    ObjKind::Function(d) => {
+                        env_stack.push(d.env.clone());
+                        if let Some(Value::Obj(x)) = &d.this_val { objs.push(x.clone()); }
+                        if let Some(h) = &d.home_object { objs.push(h.clone()); }
+                    }
+                    ObjKind::Bound { target, this_val, args } => {
+                        objs.push(target.clone());
+                        if let Value::Obj(x) = this_val { objs.push(x.clone()); }
+                        for a in args { if let Value::Obj(x) = a { objs.push(x.clone()); } }
+                    }
+                    _ => {}
+                }
+            }
+            all.push(o);
+        }
+        // Die Umgebungen dazu: eine Schliessung haelt ihre, und die haelt
+        // ueber ihre Bindungen wieder Schliessungen.
+        let mut all_envs: Vec<Rc<RefCell<Env>>> = Vec::new();
+        while let Some(e) = env_stack.pop() {
+            if !envs.insert(Rc::as_ptr(&e) as usize) { continue }
+            {
+                let b = e.borrow();
+                if let Some(p) = &b.parent { env_stack.push(p.clone()); }
+                for v in b.vars.values() {
+                    if let Value::Obj(x) = &v.value {
+                        if seen.insert(Rc::as_ptr(x) as usize) { all.push(x.clone()); }
+                        // Objekte aus Umgebungen koennen selbst Umgebungen
+                        // halten — deshalb dieselbe Behandlung.
+                        if let ObjKind::Function(d) = &x.borrow().kind { env_stack.push(d.env.clone()); }
+                    }
+                }
+            }
+            all_envs.push(e);
+        }
+        for o in &all {
+            let mut b = o.borrow_mut();
+            b.clear_props();
+            b.proto = None;
+            b.kind = ObjKind::Plain;
+        }
+        for e in &all_envs {
+            let mut b = e.borrow_mut();
+            b.vars.clear();
+            b.parent = None;
+            b.this_val = None;
+            b.home = None;
+        }
+    }
+
     /// Erst hier entsteht `document` — vorher gibt es den Namen nicht, und ein
     /// Skript, das ihn prueft, bekommt die Wahrheit statt eine leere Huelle.
     pub fn set_document(&mut self, doc: super::dombind::Doc) {
@@ -310,6 +450,56 @@ impl Interp {
         self.rng = x;
         // Die oberen 53 Bits: genau die Genauigkeit eines f64-Bruchs.
         ((x.wrapping_mul(0x2545_F491_4F6C_DD1D)) >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// Die Kekse dieser Seite einreichen — was `document.cookie` LIEST.
+    ///
+    /// Der Wirt gibt die Skript-Sicht (`cookies::script_header_for`), nicht
+    /// den `Cookie:`-Kopf: ein `HttpOnly`-Keks reist auf der Anfrage mit und
+    /// darf trotzdem nie in einem Skript stehen.
+    pub fn set_cookies(&mut self, jar: String) {
+        self.cookies = jar;
+    }
+
+    /// Was die Seite gesetzt hat, herausnehmen. Rohe Erklaerungen
+    /// (`name=wert; Path=/; Max-Age=…`) — die Regeln kennt der Behaelter.
+    pub fn take_cookie_sets(&mut self) -> Vec<String> {
+        core::mem::take(&mut self.cookie_sets)
+    }
+
+    /// Die Adresse der Seite einreichen. Fuellt `location` und `document.URL`.
+    ///
+    /// Vorher stand dort `about:blank` — eine Zahl, die aussieht wie eine
+    /// Messung: ein Skript, das seinen Pfad prueft, nahm den falschen Zweig
+    /// und meldete keinen Fehler dabei.
+    pub fn set_location(&mut self, url: &str) {
+        let p = super::url::parse_abs(url).unwrap_or_else(|| super::url::Parts {
+            scheme: alloc::string::String::from("about"),
+            path: alloc::string::String::from("blank"),
+            ..Default::default()
+        });
+        let loc = match self.realm.global.borrow().get_own("location").and_then(|p| p.value.clone()) {
+            Some(Value::Obj(o)) => o,
+            _ => return,
+        };
+        let mut o = loc.borrow_mut();
+        for (k, v) in [("href", p.href()), ("protocol", alloc::format!("{}:", p.scheme)),
+                       ("host", p.host_with_port()), ("hostname", p.host.clone()),
+                       ("port", p.port.clone()), ("origin", p.origin()),
+                       ("pathname", p.path.clone()),
+                       ("search", if p.query.is_empty() { String::new() } else { alloc::format!("?{}", p.query) }),
+                       ("hash", if p.hash.is_empty() { String::new() } else { alloc::format!("#{}", p.hash) })] {
+            o.define(k, Prop::builtin(Value::str(&v)));
+        }
+        drop(o);
+        let href = p.href();
+        self.realm.global.borrow_mut().define("origin", Prop::builtin(Value::str(&p.origin())));
+        if let Some(Value::Obj(d)) = self.realm.global.borrow().get_own("document").and_then(|p| p.value.clone()) {
+            let mut d = d.borrow_mut();
+            d.define("URL", Prop::builtin(Value::str(&href)));
+            d.define("documentURI", Prop::builtin(Value::str(&href)));
+            d.define("location", Prop::builtin(Value::Obj(loc.clone())));
+        }
     }
 
     /// Wie `set_viewport`, aber mit dem Farbschema dazu. `matchMedia` braucht

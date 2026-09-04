@@ -45,6 +45,7 @@
  <span id="bubble">nicht geklickt</span>
 </p>
 <ul id="sink"></ul>
+<template id="tpl"><li class="ausschablone">aus der Schablone</li></template>
 
 <h2>Zeitgeber</h2>
 <p id="timer">setTimeout ist nicht gelaufen.</p>
@@ -148,6 +149,13 @@ row(langRows, "Fehler faengt", function () {
   try { null.x } catch (e) { seen = "gefangen" } finally { seen += "+finally" }
   return seen === "gefangen+finally";
 });
+row(langRows, "URI-Funktionen", function () {
+  /* Zweite Wand auf beiden Wikipedias, bis 0.57.0. */
+  return encodeURIComponent("a b/c") === "a%20b%2Fc"
+      && encodeURI("a b/c") === "a%20b/c"
+      && decodeURIComponent("%C3%A4") === "\u00e4"
+      && decodeURI("a%2Fb") === "a%2Fb";
+});
 row(langRows, "Date und performance", function () {
   return typeof Date.now() === "number" && performance.now() >= 0;
 });
@@ -182,9 +190,13 @@ row(domRows, "classList", function () {
   var e = document.getElementById("count"); e.classList.add("hit");
   return e.className.indexOf("hit") >= 0;
 });
-row(domRows, "style setzen", function () {
+row(domRows, "style setzen und zurueck lesen", function () {
   var e = document.querySelector("h1"); e.style.color = "#1d5c1d";
-  return true;
+  /* Bis 0.56.0 stand hier ein festes `true`: `el.style` gab bei jedem
+     Zugriff ein frisches leeres Objekt, es war also gar nichts zu pruefen.
+     Seit die Sicht auf dem Attribut sitzt, ist es pruefbar — und genau das
+     ist der Unterschied zwischen einer Zeile und einer Probe. */
+  return e.style.color === "#1d5c1d" && e.getAttribute("style").indexOf("color") >= 0;
 });
 row(domRows, "parentNode / children", function () {
   var e = document.getElementById("b1");
@@ -197,6 +209,99 @@ row(domRows, "getBoundingClientRect", function () {
 });
 row(domRows, "addEventListener", function () {
   return typeof document.getElementById("b1").addEventListener === "function";
+});
+row(domRows, "document.cookie", function () {
+  /* Auf dieser Seite ist der Behaelter leer — sie holt nichts und hat keinen
+     Wirt, der ihr Kekse gaebe. Geprueft wird deshalb die SICHT: gesetzt,
+     zurueckgelesen, geloescht. Auf einer echten Seite reicht beak den
+     Behaelter ein, `HttpOnly` bleibt draussen. */
+  document.cookie = "probe=1";
+  var da = document.cookie.indexOf("probe=1") >= 0;
+  document.cookie = "probe=; Max-Age=0";
+  return da && document.cookie.indexOf("probe=") < 0;
+});
+row(domRows, "location", function () {
+  return location.protocol === "beak:" && location.pathname === "selftest"
+      && document.URL === location.href;
+});
+row(domRows, "Event + dispatchEvent", function () {
+  var e = document.getElementById("b3"), traf = 0, ziel = null;
+  e.addEventListener("probe", function (ev) { traf++; ziel = ev.target; });
+  var ev = new Event("probe", { bubbles: true });
+  var ok = e.dispatchEvent(ev);
+  return traf === 1 && ziel === e && ok === true && ev instanceof Event
+      && ev.isTrusted === false;
+});
+row(domRows, "CustomEvent mit detail", function () {
+  var e = document.getElementById("b3"), n = 0;
+  e.addEventListener("mitdaten", function (ev) { n = ev.detail.n; });
+  e.dispatchEvent(new CustomEvent("mitdaten", { detail: { n: 42 } }));
+  return n === 42;
+});
+row(domRows, "onclick als Eigenschaft", function () {
+  var e = document.createElement("button"), n = 0;
+  e.onclick = function () { n++; };
+  e.dispatchEvent(new Event("click"));
+  e.onclick = null;
+  e.dispatchEvent(new Event("click"));
+  return n === 1 && typeof e.onclick !== "function";
+});
+row(domRows, "DOMTokenList benannt", function () {
+  var e = document.getElementById("count");
+  return e.classList instanceof DOMTokenList && e.classList.length >= 1
+      && e.classList.contains("hit") && e.classList.item(0) !== null;
+});
+row(domRows, "CSSStyleDeclaration benannt", function () {
+  var e = document.querySelector("h1");
+  return e.style instanceof CSSStyleDeclaration
+      && e.style.getPropertyValue("color") === "#1d5c1d"
+      && getComputedStyle(e).getPropertyValue("color") === "#1d5c1d";
+});
+row(domRows, "template.content", function () {
+  var t = document.getElementById("tpl"), c = t.content;
+  return c instanceof DocumentFragment && c.childNodes.length === 1
+      && t.childNodes.length === 0 && c.querySelector(".ausschablone") !== null;
+});
+row(domRows, "importNode + Bruchstueck haengt Kinder ein", function () {
+  var c = document.getElementById("tpl").content;
+  var kopie = document.importNode(c, true), s = document.getElementById("sink");
+  var vorher = s.children.length;
+  s.appendChild(kopie);
+  /* Ein Bruchstueck gibt seine KINDER ab — wer es selbst einhaengt,
+     bekommt ein `<#fragment>` in den Baum. */
+  return s.children.length === vorher + 1
+      && s.querySelector(".ausschablone") !== null
+      && c.childNodes.length === 1;
+});
+row(domRows, "Storage benannt", function () {
+  localStorage.setItem("k", "v");
+  return localStorage instanceof Storage && localStorage.getItem("k") === "v"
+      && localStorage.length >= 1;
+});
+row(domRows, "Text und Kommentar", function () {
+  var t = document.createTextNode("ab"), k = document.createComment("hm");
+  t.data = "abc";
+  return t instanceof CharacterData && t instanceof Text && t.data === "abc"
+      && t.length === 3 && k instanceof Comment && !(k instanceof HTMLElement);
+});
+row(domRows, "append / prepend / before", function () {
+  var u = document.createElement("ul");
+  u.innerHTML = "<li>m</li>";
+  u.prepend("A"); u.append("Z");
+  /* Text wird dabei zum TEXTKNOTEN, nicht zu einer Zeichenkette im Baum. */
+  return u.textContent === "AmZ" && u.firstChild.nodeValue === "A";
+});
+row(domRows, "compareDocumentPosition", function () {
+  var a = document.getElementById("b1"), b = document.getElementById("b3");
+  return (a.compareDocumentPosition(b) & 4) === 4
+      && (b.compareDocumentPosition(a) & 2) === 2;
+});
+row(domRows, "Felder auf Attributen", function () {
+  var a = document.createElement("a");
+  a.href = "/x"; a.title = "t"; a.tabIndex = 2; a.hidden = true;
+  return a.getAttribute("href") === "/x" && a.title === "t"
+      && a.tabIndex === 2 && a.hidden === true
+      && document.createElement("div").tabIndex === -1;
 });
 
 /* ---------- Behandler ---------- */

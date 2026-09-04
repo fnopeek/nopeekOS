@@ -28,6 +28,10 @@ struct Cookie {
     path: String,
     host_only: bool,
     secure: bool,
+    /// `HttpOnly`: der Keks geht auf die Anfrage, aber NICHT an ein Skript.
+    /// Der ganze Sinn der Fahne — sie ist die Gegenmassnahme gegen XSS, und
+    /// sie zaehlt erst, seit beak Seitenskripte laufen laesst.
+    http_only: bool,
     /// Absolute expiry, seconds since the epoch. `None` = session cookie,
     /// which for this jar means "until beak quits".
     expires: Option<i64>,
@@ -66,6 +70,17 @@ pub fn store(url: &str, headers: &str, now: i64) {
 /// The `Cookie:` header value for `url` from the browser's jar.
 pub fn header_for(url: &str, now: i64) -> String {
     global().header_for(url, now)
+}
+
+/// The `document.cookie` value for `url` from the browser's jar — without
+/// the `HttpOnly` ones.
+pub fn script_header_for(url: &str, now: i64) -> String {
+    global().script_header_for(url, now)
+}
+
+/// File one `document.cookie = "..."` against the browser's jar.
+pub fn store_from_script(url: &str, decl: &str, now: i64) {
+    global().store_from_script(url, decl, now)
 }
 
 /// How many cookies are held, for the diagnostic line.
@@ -237,11 +252,11 @@ pub fn store(&mut self, url: &str, headers: &str, now: i64) {
         if !name.trim().eq_ignore_ascii_case("set-cookie") {
             continue;
         }
-        self.store_one(&host, &path, value.trim(), now);
+        self.store_one(&host, &path, value.trim(), now, false);
     }
 }
 
-fn store_one(&mut self, host: &str, req_path: &str, decl: &str, now: i64) {
+fn store_one(&mut self, host: &str, req_path: &str, decl: &str, now: i64, from_script: bool) {
     let mut parts = decl.split(';');
     let Some(pair) = parts.next() else { return };
     let Some((name, value)) = pair.split_once('=') else { return };
@@ -253,6 +268,7 @@ fn store_one(&mut self, host: &str, req_path: &str, decl: &str, now: i64) {
     let mut domain = String::new();
     let mut path = String::new();
     let mut secure = false;
+    let mut http_only = false;
     let mut expires: Option<i64> = None;
     let mut max_age: Option<i64> = None;
     for attr in parts {
@@ -266,6 +282,8 @@ fn store_one(&mut self, host: &str, req_path: &str, decl: &str, now: i64) {
             path = v.to_string();
         } else if k.eq_ignore_ascii_case("secure") {
             secure = true;
+        } else if k.eq_ignore_ascii_case("httponly") {
+            http_only = true;
         } else if k.eq_ignore_ascii_case("expires") {
             expires = parse_http_date(v);
         } else if k.eq_ignore_ascii_case("max-age") {
@@ -294,6 +312,12 @@ fn store_one(&mut self, host: &str, req_path: &str, decl: &str, now: i64) {
         return;
     }
 
+    // Ein Skript kann `HttpOnly` nicht vergeben — sonst waere die Fahne ein
+    // Selbstbedienungsladen und schuetzte nichts (RFC 6265bis 5.7).
+    if from_script {
+        http_only = false;
+    }
+
     let host_only = domain.is_empty();
     let domain = if host_only {
         host.to_string()
@@ -308,6 +332,14 @@ fn store_one(&mut self, host: &str, req_path: &str, decl: &str, now: i64) {
     // Replacing on (name, domain, path) is what makes deletion work: a server
     // logs you out by re-sending the same cookie with an expiry in the past.
     let jar = &mut self.cookies;
+    // Und es kann einen HttpOnly-Keks auch nicht UEBERSCHREIBEN. Ohne diese
+    // Zeile waere die Fahne zu umgehen: erst den Keks mit eigenem Wert neu
+    // setzen, dann zurueckzulesen, was man selbst geschrieben hat — das ist
+    // kein Leck mehr, aber es ist eine Uebernahme der Sitzung.
+    if from_script && jar.iter().any(|c| c.name == name && c.domain == domain
+                                        && c.path == path && c.http_only) {
+        return;
+    }
     jar.retain(|c| !(c.name == name && c.domain == domain && c.path == path));
     if expiry.is_some_and(|e| e <= now) {
         return; // an already-expired cookie IS the delete
@@ -322,6 +354,7 @@ fn store_one(&mut self, host: &str, req_path: &str, decl: &str, now: i64) {
         path,
         host_only,
         secure,
+        http_only,
         expires: expiry,
     });
 }
@@ -329,6 +362,29 @@ fn store_one(&mut self, host: &str, req_path: &str, decl: &str, now: i64) {
 /// The `Cookie:` header value for `url`, or an empty string if the jar has
 /// nothing for it. Longer paths first (RFC 6265 §5.4).
 pub fn header_for(&mut self, url: &str, now: i64) -> String {
+    self.collect(url, now, false)
+}
+
+/// Was `document.cookie` einem Skript zeigt: dasselbe, ohne die
+/// `HttpOnly`-Kekse. Getrennte Funktion und nicht ein Argument an
+/// `header_for`, damit an jeder Aufrufstelle STEHT, wer fragt.
+pub fn script_header_for(&mut self, url: &str, now: i64) -> String {
+    self.collect(url, now, true)
+}
+
+/// Was ein Skript mit `document.cookie = "..."` gesetzt hat. Eine einzelne
+/// Erklaerung, ohne `Set-Cookie:` davor — genau das, was die Zuweisung
+/// uebergibt. Die Regeln sind dieselben wie fuer den Server, mit zwei
+/// Ausnahmen, die in `store_one` stehen.
+pub fn store_from_script(&mut self, url: &str, decl: &str, now: i64) {
+    let (host, path, _) = split_url(url);
+    if host.is_empty() {
+        return;
+    }
+    self.store_one(&host, &path, decl, now, true);
+}
+
+fn collect(&mut self, url: &str, now: i64, for_script: bool) -> String {
     let (host, path, secure_req) = split_url(url);
     if host.is_empty() {
         return String::new();
@@ -342,6 +398,7 @@ pub fn header_for(&mut self, url: &str, now: i64) -> String {
             (if c.host_only { host == c.domain } else { domain_match(&host, &c.domain) })
                 && path_match(&path, &c.path)
                 && (!c.secure || secure_req)
+                && !(for_script && c.http_only)
         })
         .collect();
     hits.sort_by(|a, b| b.path.len().cmp(&a.path.len()));
@@ -383,6 +440,34 @@ mod tests {
         j.store("https://example.com/", "set-cookie: sid=abc\r\n", 1000);
         j.store("https://example.com/", "set-cookie: sid=; Max-Age=0\r\n", 1000);
         assert_eq!(j.header_for("https://example.com/", 1000), "");
+    }
+
+    /// Die Fahne, wegen der es `script_header_for` ueberhaupt gibt.
+    #[test]
+    fn an_httponly_cookie_goes_on_the_request_but_never_to_a_script() {
+        let mut j = jar();
+        j.store("https://example.com/", "set-cookie: sid=secret; HttpOnly\r\n                                         set-cookie: theme=dark\r\n", 1000);
+        assert_eq!(j.header_for("https://example.com/", 1000), "sid=secret; theme=dark");
+        assert_eq!(j.script_header_for("https://example.com/", 1000), "theme=dark");
+    }
+
+    #[test]
+    fn a_script_cannot_hand_itself_the_httponly_flag() {
+        let mut j = jar();
+        j.store_from_script("https://example.com/", "sid=abc; HttpOnly", 1000);
+        // Gesetzt ist er — aber ohne die Fahne, also sieht das Skript ihn.
+        assert_eq!(j.script_header_for("https://example.com/", 1000), "sid=abc");
+    }
+
+    /// Der Angriff, den die vorige Regel allein offen liesse: den Keks nicht
+    /// lesen, sondern ueberschreiben und dann das Eigene zurueckholen.
+    #[test]
+    fn a_script_cannot_overwrite_an_httponly_cookie() {
+        let mut j = jar();
+        j.store("https://example.com/", "set-cookie: sid=secret; HttpOnly\r\n", 1000);
+        j.store_from_script("https://example.com/", "sid=stolen", 1000);
+        assert_eq!(j.header_for("https://example.com/", 1000), "sid=secret");
+        assert_eq!(j.script_header_for("https://example.com/", 1000), "");
     }
 
     #[test]
