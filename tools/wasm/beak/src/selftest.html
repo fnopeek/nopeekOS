@@ -253,9 +253,14 @@ row(domRows, "DOMTokenList benannt", function () {
 });
 row(domRows, "CSSStyleDeclaration benannt", function () {
   var e = document.querySelector("h1");
+  /* Zwei Sichten, ZWEI Schreibweisen — und das ist der Punkt. Der Inline-Stil
+     gibt zurueck, was dasteht; der gerechnete gibt den GERECHNETEN Wert, und
+     der ist in CSSOM immer `rgb(...)`. Solange hier zweimal `#1d5c1d` stand,
+     hat die Zeile nur bestaetigt, dass getComputedStyle den Inline-Stil
+     durchreicht — genau die Teilantwort, die seit 0.64.0 weg ist. */
   return e.style instanceof CSSStyleDeclaration
       && e.style.getPropertyValue("color") === "#1d5c1d"
-      && getComputedStyle(e).getPropertyValue("color") === "#1d5c1d";
+      && getComputedStyle(e).getPropertyValue("color") === "rgb(29, 92, 29)";
 });
 row(domRows, "template.content", function () {
   var t = document.getElementById("tpl"), c = t.content;

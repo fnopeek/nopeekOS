@@ -2510,6 +2510,23 @@ fn apply_var_decl(prop: Prop, v: &str, theme: &Theme, parent: &ComputedStyle,
     }
 }
 
+/// Einen LEBENDEN Inline-Stil ueber einen schon gerechneten Stil legen.
+///
+/// Fuer `getComputedStyle`: dessen Kaskadenkontext ist ein SCHNAPPSCHUSS des
+/// Baums vom Skriptstart, das Skript aber hat inzwischen vielleicht
+/// `el.style.color = …` geschrieben. Der Schnappschuss kennt das nicht, und
+/// eine Antwort aus ihm waere von vorgestern.
+///
+/// Nur aufrufen, wenn der lebende Text sich vom Attribut im Schnappschuss
+/// UNTERSCHEIDET: sonst liefe die Inline-Ebene ein zweites Mal und schlueg
+/// ein `!important` aus dem Autorenblatt, das ueber ihr steht.
+pub fn apply_inline_over(s: &mut ComputedStyle, decls: &str, theme: &Theme,
+                         parent: &ComputedStyle, vars: &crate::vars::VarMap) {
+    let none = None;
+    apply_declarations_pass_vars(decls, theme, Some(parent), s, false, &none, vars);
+    apply_declarations_pass_vars(decls, theme, Some(parent), s, true, &none, vars);
+}
+
 fn apply_declarations_pass_vars(decls: &str, theme: &Theme, parent: Option<&ComputedStyle>,
                                 s: &mut ComputedStyle, important: bool,
                                 own: &Option<crate::vars::VarMap>,
