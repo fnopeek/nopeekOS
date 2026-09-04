@@ -20,6 +20,26 @@ fn main() {
         let html = std::fs::read_to_string(&h).unwrap_or(h);
         let dom = beak_engine::dom::parse(&html);
         i.set_document(beak_engine::js::dombind::Doc::from_dom(&dom));
+        // Denselben Kaskadenkontext einreichen, den beak einreicht — sonst
+        // antwortet `getComputedStyle` hier anders als am Geraet, und die
+        // Probe prueft eine Maschine, die es so nicht gibt.
+        let media = beak_engine::css::Media::new(1024.0, std::env::var("DARK").is_ok());
+        let ext = std::env::var("CSS").ok().and_then(|p| std::fs::read_to_string(p).ok())
+            .unwrap_or_default();
+        let sheet = beak_engine::css::collect_all(&dom, &ext, media);
+        i.set_style_context(beak_engine::js::interp::StyleCtx {
+            sheet: std::rc::Rc::new(sheet),
+            dom: std::rc::Rc::new(dom),
+            theme: beak_engine::layout::Theme {
+                bg: beak_engine::layout::Rgb(255, 255, 255),
+                text: beak_engine::layout::Rgb(33, 37, 41),
+                heading: beak_engine::layout::Rgb(33, 37, 41),
+                link: beak_engine::layout::Rgb(13, 110, 253),
+                muted: beak_engine::layout::Rgb(108, 117, 125),
+                rule: beak_engine::layout::Rgb(222, 226, 230),
+            },
+            viewport_w: 1024.0,
+        });
         // Ein Fenster dazu, sonst gibt es `matchMedia` nicht. `DARK=1` dreht
         // das Farbschema.
         i.set_media(1024.0, 768.0, std::env::var("DARK").is_ok());

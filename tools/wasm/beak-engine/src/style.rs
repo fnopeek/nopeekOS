@@ -4162,6 +4162,80 @@ fn apply_font_shorthand(v: &str, theme: &Theme, s: &mut ComputedStyle) {
     }
 }
 
+/// Einen gerechneten Stil als Deklarationstext ausgeben — die Antwort von
+/// `getComputedStyle`.
+///
+/// **Was hier NICHT drin ist, und warum.** Ein Browser gibt fuer `width` den
+/// BENUTZTEN Wert in px zurueck, und der entsteht erst im Layout. Diese
+/// Funktion laeuft VOR dem Layout, also steht hier der angegebene Wert
+/// (`auto`, `50%`). Das ist eine Teilantwort und als solche benannt — eine
+/// erfundene Pixelzahl waere schlimmer, weil sie aussaehe wie eine Messung
+/// ([[feedback_invented_fallback_hides_the_fault]]).
+///
+/// Die Liste deckt, was Seiten wirklich lesen. Was nicht daraufsteht,
+/// beantwortet die leere Zeichenkette — wie jede nicht gesetzte Eigenschaft.
+pub fn serialize_computed(s: &ComputedStyle) -> String {
+    let mut o = String::with_capacity(512);
+    let mut put = |k: &str, v: &str| {
+        if v.is_empty() { return }
+        if !o.is_empty() { o.push(' ') }
+        o.push_str(k); o.push_str(": "); o.push_str(v); o.push(';');
+    };
+    let px = |v: f32| alloc::format!("{}px", trim_f32(v));
+    let len = |l: Len| match l {
+        Len::Auto => String::from("auto"),
+        Len::Px(v) => px(v),
+        Len::Pct(v) => alloc::format!("{}%", trim_f32(v)),
+        Len::Calc { pct, px: p } => alloc::format!("calc({}% + {}px)", trim_f32(pct), trim_f32(p)),
+        Len::Intrinsic(_) => String::from("auto"),
+    };
+    let rgba = |c: Rgba| if c.a == 255 {
+        alloc::format!("rgb({}, {}, {})", c.c.0, c.c.1, c.c.2)
+    } else {
+        alloc::format!("rgba({}, {}, {}, {})", c.c.0, c.c.1, c.c.2, trim_f32(c.a as f32 / 255.0))
+    };
+
+    put("display", if s.hidden { "none" } else { crate::layout::display_name(s.display) });
+    put("color", &rgba(s.color));
+    put("background-color", &match s.bg { Some(c) => rgba(c), None => String::from("rgba(0, 0, 0, 0)") });
+    put("font-size", &px(s.font_px));
+    put("font-weight", if s.bold { "700" } else { "400" });
+    put("font-style", if s.italic { "italic" } else { "normal" });
+    put("font-family", if s.mono { "monospace" } else { "sans-serif" });
+    put("line-height", &match s.line_height.px(s.font_px) {
+        Some(v) if v > 0.0 => px(v),
+        _ => String::from("normal"),
+    });
+    put("width", &len(s.width));
+    put("height", &len(s.height));
+    put("min-width", &len(s.min_width));
+    put("max-width", &len(s.max_width));
+    // Oben/unten sind bereits aufgeloest, links/rechts koennen `auto` sein
+    // (das ist die Zentrierung) — deshalb zwei verschiedene Formen.
+    put("margin-top", &px(s.margin_top));
+    put("margin-bottom", &px(s.margin_bottom));
+    put("margin-left", &len(s.margin_left));
+    put("margin-right", &len(s.margin_right));
+    for (k, v) in [("padding-top", s.pad_top), ("padding-right", s.pad_right),
+                   ("padding-bottom", s.pad_bottom), ("padding-left", s.pad_left)] {
+        put(k, &px(v));
+    }
+    for (k, b) in [("border-top-width", &s.border_top), ("border-right-width", &s.border_right),
+                   ("border-bottom-width", &s.border_bottom), ("border-left-width", &s.border_left)] {
+        put(k, &px(b.width));
+    }
+    put("opacity", if s.transparent || s.opacity_zero { "0" } else { "1" });
+    put("visibility", if s.transparent { "hidden" } else { "visible" });
+    o
+}
+
+/// `1.5` statt `1.5000`, `2` statt `2.0` — so schreibt ein Browser es auch.
+fn trim_f32(v: f32) -> String {
+    let r = alloc::format!("{v:.4}");
+    let r = r.trim_end_matches('0').trim_end_matches('.');
+    if r.is_empty() { String::from("0") } else { String::from(r) }
+}
+
 /// `<a> [<b>]` — a two-sided logical shorthand. One value applies to both.
 fn split_sides(v: &str) -> [&str; 2] {
     let mut it = v.split_whitespace();

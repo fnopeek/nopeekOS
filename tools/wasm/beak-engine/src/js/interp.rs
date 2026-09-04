@@ -159,6 +159,14 @@ impl Drop for Interp {
     fn drop(&mut self) { self.teardown(); }
 }
 
+/// Der Kaskadenkontext, den der Wirt einreicht.
+pub struct StyleCtx {
+    pub sheet: alloc::rc::Rc<crate::css::Stylesheet>,
+    pub dom: alloc::rc::Rc<crate::dom::Dom>,
+    pub theme: crate::layout::Theme,
+    pub viewport_w: f32,
+}
+
 pub struct Interp {
     pub realm: Realm,
     /// Aufruftiefe. Ein Baumlaeufer benutzt den RUST-Stapel, also wird ein
@@ -191,6 +199,15 @@ pub struct Interp {
     /// `innerWidth` gehoert sie dem Wirt; ohne `set_viewport` gibt es
     /// `matchMedia` gar nicht erst.
     pub media: Option<(f64, bool)>,
+    /// Was `getComputedStyle` braucht: das Blatt, der Baum, aus dem das
+    /// Dokument gebaut wurde, das Farbschema und die Fensterbreite.
+    ///
+    /// **Der Wirt reicht es ein**, wie die Fenstergroesse und die Kekse. Die
+    /// Maschine hat kein Stilblatt und soll keins holen; sie bekommt eins,
+    /// wenn jemand eins hat. Ohne diesen Kontext antwortet
+    /// `getComputedStyle` weiter aus dem Inline-Stil — eine Teilantwort, die
+    /// die Seite laufen laesst, statt sie mit einem TypeError zu beenden.
+    pub style_ctx: Option<StyleCtx>,
     /// Die Kekse dieser Seite, so wie `document.cookie` sie zeigt.
     ///
     /// **Der Wirt reicht sie ein, die Engine hat keinen Behaelter.** Der
@@ -267,7 +284,7 @@ impl Interp {
         super::url::install(&mut realm);
         Interp { realm, depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX,
                  fake_now: 0.0, doc: None, next_sym: 0, sym_registry: HashMap::new(),
-                 cookies: String::new(), cookie_sets: Vec::new(),
+                 cookies: String::new(), cookie_sets: Vec::new(), style_ctx: None,
                  jobs: alloc::collections::VecDeque::new(),
                  rng: 0x2545_F491_4F6C_DD1D, media: None,
                  timers: Vec::new(), console: Vec::new(), console_dropped: 0 }
@@ -465,6 +482,12 @@ impl Interp {
     /// (`name=wert; Path=/; Max-Age=…`) — die Regeln kennt der Behaelter.
     pub fn take_cookie_sets(&mut self) -> Vec<String> {
         core::mem::take(&mut self.cookie_sets)
+    }
+
+    /// Den Kaskadenkontext einreichen — damit `getComputedStyle` echte Werte
+    /// liefern kann statt nur des Inline-Stils.
+    pub fn set_style_context(&mut self, ctx: StyleCtx) {
+        self.style_ctx = Some(ctx);
     }
 
     /// Die Adresse der Seite einreichen. Fuellt `location` und `document.URL`.
