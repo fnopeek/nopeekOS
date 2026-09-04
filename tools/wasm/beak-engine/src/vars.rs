@@ -297,6 +297,20 @@ mod tests {
         }).collect()
     }
 
+    /// Eine Custom Property wird erst beim GEBRAUCH eingesetzt, nicht beim
+    /// Setzen (css-variables-1 §3). Sonst friert die Regel, die zuerst kommt,
+    /// den Stand der Kaskade ein — und eine Regel dahinter, die eine benutzte
+    /// Variable erst setzt, kommt zu spaet. Genau so schreibt Tailwind seine
+    /// Ringe: die Breite steht vor der Farbe.
+    #[test]
+    fn a_variable_may_be_set_after_the_one_that_uses_it() {
+        let c = painted_text(
+            "<p class=\"a b\">x</p>",
+            ".a { --outer: var(--inner, #00ff00); color: var(--outer) } .b { --inner: #ff0000 }",
+        );
+        assert_eq!(c, Some((255, 0, 0)), "die spaetere Regel entscheidet, nicht der Ausweichwert");
+    }
+
     // ── Die Kaskade: WER entscheidet den Wert ───────────────────────────────
 
     /// **Der Fehler, wegen dem die Aufloesung in die Kaskade gezogen wurde.**
