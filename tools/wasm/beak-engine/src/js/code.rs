@@ -116,6 +116,9 @@ pub enum Op {
     /// `[a, b, c]` → `[c, a, b]`. Fuer `o.p++`, wo der ALTE Wert das Ergebnis
     /// ist und trotzdem unter dem Objekt hindurch nach unten muss.
     Rot3,
+    /// `[a, b, c, d]` → `[d, a, b, c]`. Dasselbe fuer `o[k]++`: dort liegen
+    /// Objekt UND Schluessel darueber.
+    Rot4,
     /// Ein regulaerer Ausdruck aus `names[body]` und `names[flags]`.
     Regex { body: u32, flags: u32 },
     /// Die obersten `n` Werte zu einer Zeichenkette verketten (Vorlage).
@@ -130,6 +133,19 @@ pub enum Op {
     /// so kann `f(...xs)` dieselbe Aufrufhilfe benutzen.
     CallSpread(u32),
     NewSpread,
+    /// `super.k` lesen — Stapel: → wert. `Interp::super_get`.
+    SuperGet(u32),
+    /// `super.k` als Gerufenes — Stapel: → wert, this. Der Empfaenger ist das
+    /// EIGENE `this`, der Wert kommt von oben; genau diese Trennung ist der
+    /// Sinn von `super`.
+    SuperCallee(u32),
+    /// `super(...)` — Stapel: arg0..argN → undefined. `Interp::super_call`
+    /// macht alles: Elternkonstruktor suchen, auf DIESEM `this` fahren, und
+    /// danach die eigenen Instanzfelder anlegen.
+    SuperCall(u16),
+    /// Springt, wenn oben `null`/`undefined` ist, und laesst den Wert liegen.
+    /// Das Gegenstueck zu `JumpNullishKeep`, fuer die Optional-Kette.
+    JumpNullishTo(u32),
     /// Aus `names[i]` eine Funktion bauen — der Index zeigt in `funcs`.
     Closure(u32),
     /// Ein MUSTER binden — Stapel: wert → (nichts). Der Index zeigt in `pats`.
@@ -296,7 +312,7 @@ impl Chunk {
         let here = self.ops.len() as u32;
         match &mut self.ops[at] {
             Op::Jump(t) | Op::JumpFalse(t) | Op::JumpTrue(t) | Op::JumpFalseKeep(t)
-            | Op::JumpTrueKeep(t) | Op::JumpNullishKeep(t)
+            | Op::JumpTrueKeep(t) | Op::JumpNullishKeep(t) | Op::JumpNullishTo(t)
             | Op::IterNext(t) | Op::ForInNext(t) => *t = here,
             other => panic!("patch auf {other:?}"),
         }

@@ -240,7 +240,7 @@ impl Vm {
                 Op::Jump(t) => (*t as usize) <= ip,
                 Op::Call { .. } | Op::New(_) | Op::CallSpread(_) | Op::NewSpread
                 | Op::SetCompletion | Op::DeclVar { .. } | Op::Ret
-                | Op::Yield | Op::Await | Op::ForInNext(_) => true,
+                | Op::Yield | Op::Await | Op::ForInNext(_) | Op::SuperCall(_) => true,
                 _ => false,
             };
             if counts {
@@ -410,6 +410,25 @@ impl Vm {
                 let v = i.new_array(items);
                 self.push(v);
             }
+            Op::SuperGet(n) => {
+                let (v, _) = i.super_get(&chunk.names[*n as usize], &env)?;
+                self.push(v);
+            }
+            Op::SuperCallee(n) => {
+                let (v, t) = i.super_get(&chunk.names[*n as usize], &env)?;
+                self.push(v);
+                self.push(t);
+            }
+            Op::SuperCall(argc) => {
+                let args = self.take(*argc as usize);
+                let v = i.super_call(&args, &env)?;
+                self.push(v);
+            }
+            Op::JumpNullishTo(t) => {
+                if matches!(self.top(), Value::Undefined | Value::Null) {
+                    self.jump(*t);
+                }
+            }
             Op::Closure(f) => {
                 let v = i.func_value(chunk.funcs[*f as usize].clone(), &env);
                 self.push(v);
@@ -477,6 +496,11 @@ impl Vm {
                 let n = self.stack.len();
                 let c = self.stack.remove(n - 1);
                 self.stack.insert(n - 3, c);
+            }
+            Op::Rot4 => {
+                let n = self.stack.len();
+                let c = self.stack.remove(n - 1);
+                self.stack.insert(n - 4, c);
             }
             Op::Dup2 => {
                 let n = self.stack.len();
