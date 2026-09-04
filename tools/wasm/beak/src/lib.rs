@@ -1312,12 +1312,52 @@ fn drain_console(sess: &mut beak_engine::js::Session) {
     }
 }
 
+/// Was die Seite mit `document.cookie = …` gesetzt hat, in den Behaelter —
+/// und die Sicht danach neu einreichen.
+///
+/// Nach JEDEM Einstiegspunkt der Maschine, nicht nur nach dem Laden: ein
+/// Klick setzt Kekse genauso wie ein Startskript, und wer nur einmal
+/// abholt, verliert alles danach. Die Engine haelt keinen Behaelter — was
+/// gilt, entscheidet `cookies`, samt Domain, Pfad und `HttpOnly`.
+fn sync_cookies(sess: &mut beak_engine::js::Session) {
+    let url = url_str();
+    if url.is_empty() {
+        return;
+    }
+    let now = unsafe { npk_unix_time() };
+    let sets = sess.interp.take_cookie_sets();
+    for decl in &sets {
+        cookies::store_from_script(url, decl, now);
+    }
+    if !sets.is_empty() {
+        let mut m = String::from("[beak] cookies: Seite setzte ");
+        push_i64(&mut m, sets.len() as i64);
+        m.push_str(", ");
+        push_i64(&mut m, cookies::count() as i64);
+        m.push_str(" held");
+        log(&m);
+    }
+    sess.interp.set_cookies(cookies::script_header_for(url, now));
+}
+
 fn run_scripts(engine: &Engine, list: Vec<PendingScript>) {
     let t0 = now_ms();
     let dom = beak_engine::parse(html_str());
     let doc = beak_engine::js::dombind::Doc::from_dom(&dom);
     let mut sess = beak_engine::js::Session::new(SCRIPT_STEPS);
     sess.interp.set_document(doc);
+    // Die Adresse gehoert dem Wirt — und zwar die, aus der das Dokument KAM,
+    // nicht die erfragte: eine Weiterleitung aendert Herkunft und damit die
+    // Kekse. Ohne diese Zeile stand in `location` `about:blank`, und ein
+    // Skript, das seinen Pfad prueft, nahm still den falschen Zweig.
+    sess.interp.set_location(url_str());
+    // Die Kekse, die dieses Dokument sehen DARF. `HttpOnly` bleibt draussen:
+    // die Fahne ist die Gegenmassnahme gegen fremden Code auf der Seite, und
+    // seit die Maschine Seitenskripte faehrt, gibt es fremden Code.
+    if !url_str().is_empty() {
+        let now = unsafe { npk_unix_time() };
+        sess.interp.set_cookies(cookies::script_header_for(url_str(), now));
+    }
     // Die Fenstergroesse gehoert dem Wirt. Ohne sie gibt es `innerWidth`
     // nicht, und eine Seite, die ihre schmale Fassung danach waehlt, faellt
     // mit ReferenceError aus, statt sie zu nehmen.
@@ -1352,6 +1392,7 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) {
     // laufen lassen — viele Seiten stellen ihre Oberflaeche in einem
     // `setTimeout(…, 0)` fertig.
     let timers = sess.interp.run_timers();
+    sync_cookies(&mut sess);
     drain_console(&mut sess);
     let mut listeners = false;
     if let Some(d) = sess.interp.doc.as_mut() {
@@ -1395,6 +1436,7 @@ fn dispatch_click(engine: &Engine, lay: &Layout, cx: i32, cy: i32) -> bool {
     let prevented = matches!(
         beak_engine::js::dombind::dispatch(&mut sess.interp, "click", &nodes), Ok(true));
     let timers = sess.interp.run_timers();
+    sync_cookies(sess);
     // NUR wenn sich etwas geaendert hat. Ein Behandler, der bloss zaehlt,
     // darf keine 130 ms Layout kosten.
     let changed = sess.interp.doc.as_ref().is_some_and(|d| d.dirty);
