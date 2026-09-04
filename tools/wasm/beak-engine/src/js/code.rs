@@ -127,6 +127,36 @@ pub enum Op {
     /// Aus `names[i]` eine Funktion bauen — der Index zeigt in `funcs`.
     Closure(u32),
     Throw,
+    /// Den Wert oben werfen — der Rueckweg aus einem `finally`, das nicht
+    /// gefangen hat.
+    Rethrow,
+    /// Einen Behandler aufmachen. `catch`/`finally` sind Sprungziele,
+    /// `u32::MAX` heisst „gibt es nicht".
+    ///
+    /// Der Behandler merkt sich AUCH die Stapel- und Umgebungstiefe: ein Wurf
+    /// mitten in einem Ausdruck laesst halbe Werte liegen, und ohne das
+    /// Zurueckschneiden faende der `catch`-Block einen Stapel vor, den niemand
+    /// gebaut hat.
+    TryStart { catch: u32, finally: u32 },
+    /// Den obersten Behandler wieder zumachen.
+    TryEnd,
+    /// Die geworfene Sache in `names[i]` binden — der Kopf eines `catch`.
+    BindCatch(u32),
+    /// Den Iterator des Wertes oben holen und im Rahmen ablegen.
+    ///
+    /// FAUL, ueber `get_iterator`/`iter_next`/`iter_close` — dieselben Hilfen
+    /// wie im Baumlaeufer. Die Werte vorher einzusammeln waere kuerzer und
+    /// falsch: ein Rumpf, der die Quelle veraendert, muss das sehen, und ein
+    /// vorzeitiger Ausstieg muss `return()` rufen. Fuenf Tests haben genau
+    /// das gesagt.
+    IterAll,
+    /// Den naechsten Wert auf den Stapel; ist der Iterator zu Ende, springen.
+    IterNext(u32),
+    /// Den Iterator vergessen — er ist zu Ende, `return()` waere falsch.
+    IterDrop,
+    /// Den Iterator SCHLIESSEN (`return()`) und vergessen — der Weg fuer
+    /// `break` und fuer jeden Abbruch.
+    IterClose,
     /// Aus dem Rahmen zurueck; oben liegt der Wert.
     Ret,
     /// Eine Umgebung fuer einen Block oeffnen — mit den Bindungen, die dort
@@ -189,7 +219,7 @@ impl Chunk {
         let here = self.ops.len() as u32;
         match &mut self.ops[at] {
             Op::Jump(t) | Op::JumpFalse(t) | Op::JumpFalseKeep(t)
-            | Op::JumpTrueKeep(t) | Op::JumpNullishKeep(t) => *t = here,
+            | Op::JumpTrueKeep(t) | Op::JumpNullishKeep(t) | Op::IterNext(t) => *t = here,
             other => panic!("patch auf {other:?}"),
         }
     }

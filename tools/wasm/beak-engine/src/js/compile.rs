@@ -217,9 +217,12 @@ impl Compiler {
             Stmt::Labeled { .. } => Err(Unsupported("label")),
             Stmt::Break(Some(_)) | Stmt::Continue(Some(_)) => Err(Unsupported("labeled-jump")),
             Stmt::Switch { .. } => Err(Unsupported("switch")),
-            Stmt::Try { .. } => Err(Unsupported("try")),
+            Stmt::Try { block, handler, finalizer } => self.try_stmt(block, handler, finalizer),
             Stmt::ForIn { .. } => Err(Unsupported("for-in")),
-            Stmt::ForOf { .. } => Err(Unsupported("for-of")),
+            Stmt::ForOf { left, right, body, is_await } => {
+                if *is_await { return Err(Unsupported("for-await")) }
+                self.for_of(left, right, body)
+            }
             Stmt::With { .. } => Err(Unsupported("with")),
             Stmt::Class(_) => Err(Unsupported("class")),
             Stmt::Import(_) | Stmt::ExportNamed { .. } | Stmt::ExportDefault(_)
@@ -258,6 +261,197 @@ impl Compiler {
             }
         }
         Ok(self.chunk.block(out))
+    }
+
+    /// `try` / `catch` / `finally`.
+    ///
+    /// **Der Finalisierer wird KOPIERT, nicht angesprungen** — einmal fuer den
+    /// normalen Weg, einmal fuer den Wurf. Ein Unterprogramm waere kuerzer und
+    /// braeuchte eine Ruecksprungadresse auf dem Stapel; das ist die Stelle,
+    /// an der solche Maschinen historisch falsch werden (das alte `jsr`/`ret`
+    /// der JVM ist genau daran gestorben). Zwei Kopien eines meist kurzen
+    /// Blocks sind der ehrlichere Handel.
+    ///
+    /// **Nicht gebaut und deshalb abgelehnt:** ein `return`/`break`/`continue`
+    /// AUS einem `try` mit `finally` heraus. Das muss den Abschluss
+    /// zwischenspeichern, den Finalisierer fahren und ihn danach fortsetzen —
+    /// und wenn der Finalisierer selbst abbricht, gewinnt ER. Halb gebaut
+    /// waere das schlimmer als gar nicht.
+    fn try_stmt(&mut self, block: &[Stmt], handler: &Option<CatchClause>,
+                finalizer: &Option<Vec<Stmt>>) -> CompileResult<()> {
+        if finalizer.is_some() && (Self::jumps_out(block)
+            || handler.as_ref().is_some_and(|h| Self::jumps_out(&h.body))) {
+            return Err(Unsupported("finally-with-jump"));
+        }
+        let start = self.chunk.emit(Op::TryStart { catch: u32::MAX, finally: u32::MAX });
+        let depth0 = self.depth;
+        let b = self.block_decls(block)?;
+        self.chunk.emit(Op::PushEnv(b));
+        self.depth += 1;
+        for st in block { self.stmt(st)?; }
+        self.chunk.emit(Op::PopEnv);
+        self.depth -= 1;
+        self.chunk.emit(Op::TryEnd);
+        let to_end = self.chunk.emit_jump(Op::Jump);
+
+        // Der Fangpfad. Der geworfene Wert liegt oben, wenn wir hier ankommen.
+        let catch_at = self.chunk.here();
+        let mut catch_guard = None;
+        if let Some(h) = handler {
+            self.depth = depth0;
+            // **Der `catch`-Block braucht seinen EIGENEN Behandler**, wenn es
+            // einen Finalisierer gibt: wirft er selbst, muss der Finalisierer
+            // trotzdem laufen. Ohne diese Zeile verschwand `finally` still,
+            // sobald `catch` warf — zwei test262-Faelle, und im Alltag genau
+            // das Muster „aufraeumen und weiterwerfen".
+            if finalizer.is_some() {
+                catch_guard = Some(self.chunk.emit(
+                    Op::TryStart { catch: u32::MAX, finally: u32::MAX }));
+            }
+            let hb = self.block_decls(&h.body)?;
+            self.chunk.emit(Op::PushEnv(hb));
+            self.depth += 1;
+            match &h.param {
+                None => { self.chunk.emit(Op::Pop); }
+                Some(Pat::Ident(n)) => {
+                    let i = self.chunk.name(n);
+                    self.chunk.emit(Op::BindCatch(i));
+                }
+                Some(_) => return Err(Unsupported("catch-destructuring")),
+            }
+            for st in &h.body { self.stmt(st)?; }
+            self.chunk.emit(Op::PopEnv);
+            self.depth -= 1;
+            if catch_guard.is_some() { self.chunk.emit(Op::TryEnd); }
+        }
+        let after_catch = self.chunk.emit_jump(Op::Jump);
+
+        // Der Wurfpfad OHNE `catch`: Finalisierer, dann weiterwerfen.
+        let rethrow_at = self.chunk.here();
+        self.depth = depth0;
+        if let Some(f) = finalizer {
+            self.finalizer(f)?;
+        }
+        self.chunk.emit(Op::Rethrow);
+
+        // Der normale Weg (und der Weg nach einem gefangenen Wurf).
+        self.chunk.patch(to_end);
+        self.chunk.patch(after_catch);
+        self.depth = depth0;
+        if let Some(f) = finalizer {
+            self.finalizer(f)?;
+        }
+        // Erst jetzt steht fest, wohin der Behandler zeigt.
+        match &mut self.chunk.ops[start] {
+            Op::TryStart { catch, finally } => {
+                if handler.is_some() {
+                    *catch = catch_at;
+                    // Ein gefangener Wurf laeuft ueber den Fangpfad, und der
+                    // endet im normalen Finalisierer.
+                    *finally = u32::MAX;
+                } else {
+                    *catch = u32::MAX;
+                    *finally = rethrow_at;
+                }
+            }
+            _ => unreachable!(),
+        }
+        if let Some(at) = catch_guard {
+            match &mut self.chunk.ops[at] {
+                Op::TryStart { finally, .. } => *finally = rethrow_at,
+                _ => unreachable!(),
+            }
+        }
+        Ok(())
+    }
+
+    fn finalizer(&mut self, body: &[Stmt]) -> CompileResult<()> {
+        let b = self.block_decls(body)?;
+        self.chunk.emit(Op::PushEnv(b));
+        self.depth += 1;
+        for st in body { self.stmt(st)?; }
+        self.chunk.emit(Op::PopEnv);
+        self.depth -= 1;
+        Ok(())
+    }
+
+    /// Springt aus diesem Rumpf etwas HERAUS? `return`, `break`, `continue`.
+    /// Ein `break` innerhalb einer eigenen Schleife zaehlt nicht — es
+    /// verlaesst den `try` nicht.
+    fn jumps_out(body: &[Stmt]) -> bool {
+        fn walk(st: &Stmt, in_loop: bool, hit: &mut bool) {
+            match st {
+                Stmt::Return(_) => *hit = true,
+                Stmt::Break(_) | Stmt::Continue(_) if !in_loop => *hit = true,
+                Stmt::Block(b) => b.iter().for_each(|s| walk(s, in_loop, hit)),
+                Stmt::If { cons, alt, .. } => {
+                    walk(cons, in_loop, hit);
+                    if let Some(a) = alt { walk(a, in_loop, hit) }
+                }
+                Stmt::While { body, .. } | Stmt::DoWhile { body, .. }
+                | Stmt::For { body, .. } | Stmt::ForIn { body, .. }
+                | Stmt::ForOf { body, .. } => walk(body, true, hit),
+                Stmt::Labeled { body, .. } => walk(body, in_loop, hit),
+                Stmt::Try { block, handler, finalizer } => {
+                    block.iter().for_each(|s| walk(s, in_loop, hit));
+                    if let Some(h) = handler { h.body.iter().for_each(|s| walk(s, in_loop, hit)) }
+                    if let Some(f) = finalizer { f.iter().for_each(|s| walk(s, in_loop, hit)) }
+                }
+                Stmt::Switch { cases, .. } =>
+                    cases.iter().flat_map(|c| c.body.iter()).for_each(|s| walk(s, true, hit)),
+                _ => {}
+            }
+        }
+        let mut hit = false;
+        body.iter().for_each(|s| walk(s, false, &mut hit));
+        hit
+    }
+
+    /// `for (x of e) body`.
+    ///
+    /// Die Werte werden EAGER geholt (`Interp::iterate`), genau wie im
+    /// Baumlaeufer. Ein Iterator, der erst beim Ziehen rechnet, braucht eine
+    /// Maschine, die anhalten kann — das ist Stufe 4, und bis dahin waeren
+    /// zwei verschiedene Iterationssemantiken das schlechtere Geschaeft.
+    fn for_of(&mut self, left: &ForHead, right: &Expr, body: &Stmt) -> CompileResult<()> {
+        let name = match left {
+            ForHead::VarDecl(d) => match d.decls.first().map(|x| &x.id) {
+                Some(Pat::Ident(n)) => n.clone(),
+                _ => return Err(Unsupported("for-of-pattern")),
+            },
+            ForHead::Pattern(Pat::Ident(n)) => n.clone(),
+            _ => return Err(Unsupported("for-of-target")),
+        };
+        let lexical = matches!(left, ForHead::VarDecl(d) if d.kind != VarKind::Var);
+        self.expr(right)?;
+        self.chunk.emit(Op::IterAll);
+        let depth0 = self.depth;
+        let top = self.chunk.here();
+        let done = self.chunk.emit_jump(Op::IterNext);
+        self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(), depth: depth0 });
+        // Je Umlauf eine eigene Umgebung: eine Schliessung im Rumpf soll den
+        // Wert DIESES Umlaufs festhalten, nicht den letzten.
+        let empty = self.chunk.block(Vec::new());
+        self.chunk.emit(Op::PushEnv(empty));
+        self.depth += 1;
+        let n = self.chunk.name(&name);
+        self.chunk.emit(Op::DeclVar { name: n, mutable: true, lexical });
+        self.stmt(body)?;
+        self.chunk.emit(Op::PopEnv);
+        self.depth -= 1;
+        let l = self.loops.pop().unwrap();
+        for at in l.continues { self.patch_to(at, top); }
+        self.chunk.emit(Op::Jump(top));
+        // Zwei Ausgaenge, und sie sind NICHT dasselbe: wer vorzeitig geht,
+        // schliesst den Iterator (`return()`); wer ihn leergelesen hat, darf
+        // das nicht mehr.
+        for at in l.breaks { self.chunk.patch(at); }
+        self.chunk.emit(Op::IterClose);
+        let to_end = self.chunk.emit_jump(Op::Jump);
+        self.chunk.patch(done);
+        self.chunk.emit(Op::IterDrop);
+        self.chunk.patch(to_end);
+        Ok(())
     }
 
     fn var_decl(&mut self, d: &VarDecl) -> CompileResult<()> {

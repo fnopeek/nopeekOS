@@ -36,6 +36,24 @@ struct Frame {
     /// Der Stapelstand beim Betreten — beim Verlassen wird darauf zurueck-
     /// geschnitten, damit ein `Ret` mitten im Ausdruck nichts liegenlaesst.
     base: usize,
+    /// Offene `try`-Behandler, innerster zuletzt.
+    handlers: Vec<Handler>,
+    /// Offene `for…of`-Iteratoren. Sie stehen HIER und nicht auf dem
+    /// Wertestapel: ein `break` oder ein Wurf mitten in der Schleife muesste
+    /// sie sonst einzeln wegraeumen, und das ist genau die Buchhaltung, an
+    /// der solche Maschinen scheitern.
+    iters: Vec<Value>,
+}
+
+/// Ein offener `try`. Die drei Tiefen sind der Punkt: ein Wurf kann mitten in
+/// einem Ausdruck passieren, und dann liegen halbe Werte auf dem Stapel,
+/// offene Blockumgebungen im Rahmen und angefangene Iterationen daneben.
+struct Handler {
+    catch_ip: Option<u32>,
+    finally_ip: Option<u32>,
+    stack: usize,
+    envs: usize,
+    iters: usize,
 }
 
 pub struct Vm {
@@ -54,7 +72,8 @@ impl Vm {
     /// Rufer schon hochgezogen hat — das Hochziehen bleibt beim Baumlaeufer,
     /// weil es auf der UMGEBUNG arbeitet und fuer beide Maschinen dasselbe ist.
     pub fn run(&mut self, i: &mut Interp, chunk: Rc<Chunk>, env: &Rc<RefCell<Env>>) -> C<Value> {
-        self.frames.push(Frame { chunk, ip: 0, envs: alloc::vec![env.clone()], base: 0 });
+        self.frames.push(Frame { chunk, ip: 0, envs: alloc::vec![env.clone()], base: 0,
+                                 handlers: Vec::new(), iters: Vec::new() });
         loop {
             let (chunk, ip) = {
                 let f = self.frames.last().unwrap();
@@ -89,6 +108,14 @@ impl Vm {
             match self.step(i, &chunk, ip) {
                 Ok(Some(v)) => return Ok(v),
                 Ok(None) => {}
+                // Ein Wurf sucht sich seinen Behandler. Findet er keinen, geht
+                // er an den Rufer — dann faehrt ihn der Rust-Stapel hoch, und
+                // das ist richtig, solange Aufrufe noch so laufen.
+                Err(Abrupt::Throw(v)) => {
+                    if !self.unwind(i, v.clone()) {
+                        return Err(Abrupt::Throw(v));
+                    }
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -341,9 +368,49 @@ impl Vm {
                 let v = i.construct(&callee, &a)?;
                 self.push(v);
             }
-            Op::Throw => {
+            Op::Throw | Op::Rethrow => {
                 let v = self.pop();
                 return Err(Abrupt::Throw(v));
+            }
+            Op::TryStart { catch, finally } => {
+                let (s, e, it) = {
+                    let f = self.frames.last().unwrap();
+                    (self.stack.len(), f.envs.len(), f.iters.len())
+                };
+                self.frames.last_mut().unwrap().handlers.push(Handler {
+                    catch_ip: (*catch != u32::MAX).then_some(*catch),
+                    finally_ip: (*finally != u32::MAX).then_some(*finally),
+                    stack: s, envs: e, iters: it,
+                });
+            }
+            Op::TryEnd => {
+                self.frames.last_mut().unwrap().handlers.pop();
+            }
+            Op::BindCatch(n) => {
+                let v = self.pop();
+                i.bind_here(&chunk.names[*n as usize], v, &env);
+            }
+            Op::IterAll => {
+                let v = self.pop();
+                let it = i.get_iterator(&v)?;
+                self.frames.last_mut().unwrap().iters.push(it);
+            }
+            Op::IterNext(done) => {
+                let it = self.frames.last().unwrap().iters.last().unwrap().clone();
+                match i.iter_next(&it)? {
+                    Some(v) => self.push(v),
+                    None => {
+                        self.jump(*done);
+                    }
+                }
+            }
+            Op::IterDrop => {
+                self.frames.last_mut().unwrap().iters.pop();
+            }
+            Op::IterClose => {
+                if let Some(it) = self.frames.last_mut().unwrap().iters.pop() {
+                    i.iter_close(&it);
+                }
             }
             Op::PushEnv(b) => {
                 let child = Env::new(Some(env.clone()), false);
@@ -386,6 +453,37 @@ impl Vm {
             }
         }
         Ok(None)
+    }
+
+    /// Den innersten Behandler suchen, der den Wurf nimmt. `false` heisst:
+    /// keiner da, der Wurf verlaesst diese Maschine.
+    ///
+    /// Zurueckgeschnitten wird auf die Tiefen, die der Behandler sich gemerkt
+    /// hat — Wertestapel, Umgebungen UND offene Iterationen. Wer eins davon
+    /// vergisst, bekommt einen `catch`-Block, der auf fremdem Zustand steht.
+    fn unwind(&mut self, i: &mut Interp, v: Value) -> bool {
+        let h = {
+            let Some(f) = self.frames.last_mut() else { return false };
+            let Some(h) = f.handlers.pop() else { return false };
+            f.envs.truncate(h.envs);
+            h
+        };
+        // Ein Wurf aus einer `for…of`-Schleife heraus muss ihren Iterator
+        // SCHLIESSEN, nicht nur vergessen — `return()` ist der Weg, auf dem
+        // ein Generator seinen `finally`-Block noch faehrt.
+        loop {
+            let it = {
+                let f = self.frames.last_mut().unwrap();
+                if f.iters.len() <= h.iters { break }
+                f.iters.pop().unwrap()
+            };
+            i.iter_close(&it);
+        }
+        let Some(t) = h.catch_ip.or(h.finally_ip) else { return false };
+        self.frames.last_mut().unwrap().ip = t as usize;
+        self.stack.truncate(h.stack);
+        self.stack.push(v);
+        true
     }
 
     fn jump(&mut self, t: u32) {
