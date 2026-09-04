@@ -733,6 +733,7 @@ impl Theme {
 }
 
 /// One paint instruction, positioned in document space (pre-scroll).
+#[derive(Clone)]
 pub enum DrawOp {
     /// A run of already-wrapped, same-style text; `y` is the run's top.
     /// `sp` is `(letter-spacing, word-spacing)` in px — the run measures and
@@ -803,6 +804,23 @@ pub enum DrawOp {
         /// that colour at layout time instead.
         filter: u16,
     },
+}
+
+/// Ein Flex-Kind: ein Element, oder ein ANONYMER Kasten um einen nackten
+/// Textlauf (css-flexbox-1 §4).
+///
+/// Der anonyme traegt seinen fertigen Kasten mit sich — er hat kein Element,
+/// also auch keinen Weg durch `layout_box`, und `AtomicBox` ist genau die
+/// Form, die das Layout dafuer schon hat (ein `::before` ist derselbe Fall).
+enum Kid<'a> {
+    El(&'a Element),
+    Anon(AtomicBox),
+}
+
+impl<'a> Kid<'a> {
+    fn el(&self) -> Option<&'a Element> {
+        match self { Kid::El(e) => Some(e), Kid::Anon(_) => None }
+    }
 }
 
 /// The bottom edge a draw op reaches, for sizing the scrollable page.
@@ -3114,6 +3132,73 @@ impl<'a> Ctx<'a> {
     /// `width`/`height` come from the style when definite; otherwise the text
     /// decides, as for any shrink-to-fit box. Percentages resolve against
     /// `avail_w`.
+    /// Die eigenen Breiten eines Flex-Kindes. Ein anonymer Kasten hat sie
+    /// schon — er wurde beim Sammeln gemessen.
+    fn kid_intrinsic(&mut self, kid: &Kid<'a>, s: &ComputedStyle) -> (f32, f32) {
+        match kid {
+            Kid::El(e) => self.intrinsic_width(e, s),
+            Kid::Anon(b) => (b.w as f32, b.w as f32),
+        }
+    }
+
+    /// Einen fertigen Kasten an seinen Platz legen.
+    fn place_atomic(&mut self, b: &AtomicBox, x: i32, y: i32) {
+        let mut ops = b.ops.clone();
+        translate_op_list(&mut ops, x, y);
+        self.ops.extend(ops);
+    }
+
+    /// Der anonyme Kasten um einen nackten Textlauf in einem Flex-Container.
+    ///
+    /// Einzeilig, wie der Kasten eines `::before` auch: die Breite ist die
+    /// gemessene Textbreite, die Hoehe eine Zeile. Ein anonymer Kasten, der
+    /// UMBRICHT, braeuchte die volle Inline-Maschinerie und damit ein
+    /// Element, das es hier nicht gibt — benannt statt still.
+    fn anon_text_box(&mut self, text: &str, st: &ComputedStyle, avail_w: i32) -> Option<AtomicBox> {
+        let t = text.trim();
+        if t.is_empty() {
+            return None;
+        }
+        let font = self.fonts.pick(st.bold, st.italic, st.mono);
+        let sp = (st.letter_spacing, st.word_spacing);
+        let w = measure_sp(font, t, st.font_px, sp).min(avail_w as f32).max(1.0);
+        let h = line_gap(font, st.font_px).max(1.0);
+        // Der Text sitzt an der Oberkante des Kastens, ohne eigenen
+        // Durchschuss.
+        //
+        // Benannt, weil es nicht ganz stimmt: ein Nachbar-Element setzt seine
+        // erste Zeile mit halbem Durchschuss, und in einer Schrift, deren
+        // Zeilenabstand groesser ist als ihre Groesse, steht der anonyme Lauf
+        // dadurch bis zu zwei Pixel hoeher. Ein fester Ausgleich waere
+        // geraten: er stimmte in einer Schrift und waere in der naechsten
+        // wieder daneben. Richtig ist, die erste Zeile durch dieselbe
+        // Inline-Maschinerie zu legen wie ein Element — und die braucht ein
+        // Element, das es hier nicht gibt.
+        let lead = 0.0f32;
+        let ops = alloc::vec![DrawOp::Text {
+            x: 0,
+            y: ceil_i32(lead),
+            size: st.font_px,
+            color: st.color,
+            bold: st.bold,
+            italic: st.italic,
+            mono: st.mono,
+            sp,
+            text: alloc::string::String::from(t),
+        }];
+        Some(AtomicBox {
+            ops,
+            links: Vec::new(),
+            controls: Vec::new(),
+            inspects: Vec::new(),
+            hover_boxes: Vec::new(),
+            w: ceil_i32(w),
+            h: ceil_i32(h),
+            baseline: ceil_i32(h),
+            valign: st.valign,
+        })
+    }
+
     fn pseudo_box(&mut self, owner: &Element, own: &ComputedStyle, kind: PseudoElem, avail_w: i32) -> Option<AtomicBox> {
         let (text, ps) = self.pseudo_content(owner, own, kind)?;
         if !ps.is_generated_box() || ps.hidden || ps.transparent {
@@ -6206,13 +6291,30 @@ impl<'a> Ctx<'a> {
     /// (start/center/end/stretch), and `flex-wrap` (multi-line). Not yet:
     /// reverse directions, `align-content`, baseline alignment.
     fn layout_flex(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
+        // Ein nackter Textlauf zwischen den Kindern ist laut css-flexbox-1 §4
+        // ein ANONYMER Flex-Kasten — er verschwand hier bisher spurlos, weil
+        // die Schleife unten nur Elemente aufsammelte. `<div class="flex">Label
+        // <span>x</span></div>` verlor sein „Label".
+
         // Flex items = in-flow child elements; abspos children are out of flow.
         // Structural selectors count EVERY element sibling, so the position is
         // tracked independently of which children become items.
-        let mut items: Vec<(&Element, ComputedStyle)> = Vec::new();
+        let mut items: Vec<(Kid<'a>, ComputedStyle)> = Vec::new();
         let sib_count = el.children.iter().filter(|n| matches!(n, Node::Element(_))).count() as u32;
         let mut siblings: Vec<ElemInfo> = Vec::new();
         for c in &el.children {
+            if let Node::Text(t) = c {
+                // Nur Laeufe mit sichtbarem Inhalt: reiner Leerraum zwischen
+                // zwei Kaesten erzeugt keinen Kasten (§4).
+                if t.trim().is_empty() {
+                    continue;
+                }
+                let cs = crate::style::anon_inherit(st, Display::Block);
+                if let Some(b) = self.anon_text_box(t, &cs, w) {
+                    items.push((Kid::Anon(b), cs));
+                }
+                continue;
+            }
             if let Node::Element(ce) = c {
                 let mut cs = self.styled(ce, st, &siblings, sib_count);
                 siblings.push(self.info(ce));
@@ -6229,7 +6331,7 @@ impl<'a> Ctx<'a> {
                     self.path.pop();
                     continue;
                 }
-                items.push((ce, cs));
+                items.push((Kid::El(ce), cs));
             }
         }
         // A `::before`/`::after` with a box of its own is a flex item like any
@@ -6341,7 +6443,7 @@ impl<'a> Ctx<'a> {
     /// content-box height consumed by all lines.
     fn flex_row(
         &mut self,
-        items: &[(&'a Element, ComputedStyle)],
+        items: &[(Kid<'a>, ComputedStyle)],
         st: &ComputedStyle,
         x: i32,
         w: i32,
@@ -6447,7 +6549,7 @@ impl<'a> Ctx<'a> {
     #[allow(clippy::too_many_arguments)]
     fn flex_row_line(
         &mut self,
-        items: &[(&'a Element, ComputedStyle)],
+        items: &[(Kid<'a>, ComputedStyle)],
         st: &ComputedStyle,
         m: &[FlexItem],
         x: i32,
@@ -6514,13 +6616,23 @@ impl<'a> Ctx<'a> {
         let mut h_nat = alloc::vec![0i32; ln];
         let mut marks: Vec<FlexMark> = Vec::with_capacity(ln);
         for k in 0..ln {
-            let (el, s) = items[idx0 + k];
+            let (kid, s) = (&items[idx0 + k].0, items[idx0 + k].1);
             let s_meas = flex_item_style(&s, size[k], None, true);
             let box_main = (size[k] + li[k].main_pad).max(1.0) as i32;
             let mark = self.flex_mark();
-            self.path.push(self.info(el));
-            let bottom = self.layout_box(el, &s_meas, item_x[k] as i32, box_main, cross_y);
-            self.path.pop();
+            let bottom = match kid {
+                Kid::El(el) => {
+                    self.path.push(self.info(el));
+                    let b = self.layout_box(el, &s_meas, item_x[k] as i32, box_main, cross_y);
+                    self.path.pop();
+                    b
+                }
+                // Ein anonymer Kasten ist schon fertig — er wird nur gelegt.
+                Kid::Anon(b) => {
+                    self.place_atomic(b, item_x[k] as i32, cross_y);
+                    cross_y + b.h
+                }
+            };
             h_nat[k] = bottom - cross_y;
             // Keep the ops, but NOT the ambient state a discarded
             // measurement used to drop: a flex item is its own block
@@ -6587,9 +6699,15 @@ impl<'a> Ctx<'a> {
         if first_redo < ln {
             self.flex_rollback(&marks[first_redo]);
             for k in first_redo..ln {
-                let (el, s) = items[idx0 + k];
+                let (kid, s) = (&items[idx0 + k].0, items[idx0 + k].1);
                 let (forced_h, y) = plan[k];
                 let s2 = flex_item_style(&s, size[k], forced_h, true);
+                let Kid::El(el) = kid else {
+                    // Der anonyme Kasten aendert sich durch die zweite Runde
+                    // nicht — er hat keine Kinder, die anders fielen.
+                    if let Kid::Anon(b) = kid { self.place_atomic(b, item_x[k] as i32, y); }
+                    continue;
+                };
                 self.path.push(self.info(el));
                 // `layout_box` takes the box the caller resolved — the
                 // item's BORDER box. `size[k]` is its content size, so the
@@ -6609,7 +6727,7 @@ impl<'a> Ctx<'a> {
     /// is the container's definite content height (main size) if any.
     fn flex_column(
         &mut self,
-        items: &[(&'a Element, ComputedStyle)],
+        items: &[(Kid<'a>, ComputedStyle)],
         st: &ComputedStyle,
         x: i32,
         w: i32,
@@ -6640,10 +6758,10 @@ impl<'a> Ctx<'a> {
             let mut wd = if stretch {
                 (avail - ml - mr).max(1.0)
             } else if let Len::Intrinsic(k) = s.width {
-                let (pref, min) = self.intrinsic_width(el, s);
+                let (pref, min) = self.kid_intrinsic(el, s);
                 intrinsic_size(k, pref, min, (avail - ml - mr).max(0.0))
             } else {
-                s.width.px(avail).map(to_content).unwrap_or_else(|| self.intrinsic_width(el, s).0)
+                s.width.px(avail).map(to_content).unwrap_or_else(|| self.kid_intrinsic(el, s).0)
             };
             if let Some(mx) = s.max_width.px(avail) {
                 wd = wd.min(to_content(mx));
@@ -6661,7 +6779,10 @@ impl<'a> Ctx<'a> {
             mm_lead[i] = s.margin_top;
             mm_trail[i] = s.margin_bottom;
             let s_meas = flex_item_style(s, wd, None, false);
-            h_nat[i] = self.measured_h(MEAS_FLEX_COL, wd, el, &s_meas, ix[i], wd.max(1.0) as i32, y0);
+            h_nat[i] = match el {
+                Kid::El(e) => self.measured_h(MEAS_FLEX_COL, wd, e, &s_meas, ix[i], wd.max(1.0) as i32, y0),
+                Kid::Anon(b) => b.h,
+            };
         }
 
         // Total intrinsic main size (heights + vertical margins + gaps).
@@ -6686,9 +6807,18 @@ impl<'a> Ctx<'a> {
             } else {
             }
             let s2 = flex_item_style(s, cross_w[i], None, false);
-            self.path.push(self.info(el));
-            let bottom = self.layout_box(el, &s2, ix[i], cross_w[i].max(1.0) as i32, y as i32);
-            self.path.pop();
+            let bottom = match el {
+                Kid::El(e) => {
+                    self.path.push(self.info(e));
+                    let b = self.layout_box(e, &s2, ix[i], cross_w[i].max(1.0) as i32, y as i32);
+                    self.path.pop();
+                    b
+                }
+                Kid::Anon(b) => {
+                    self.place_atomic(b, ix[i], y as i32);
+                    y as i32 + b.h
+                }
+            };
             y = bottom as f32 + mm_trail[i];
             if i + 1 < n {
                 y += gap + extra_gap;
@@ -6703,7 +6833,7 @@ impl<'a> Ctx<'a> {
 
     /// Per-item flex metrics on the main axis (row: width; column: width used as
     /// cross). `row` selects which margins/paddings are the main vs cross axis.
-    fn flex_metrics(&mut self, items: &[(&'a Element, ComputedStyle)], avail: f32, row: bool) -> Vec<FlexItem> {
+    fn flex_metrics(&mut self, items: &[(Kid<'a>, ComputedStyle)], avail: f32, row: bool) -> Vec<FlexItem> {
         let mut out = Vec::with_capacity(items.len());
         for (el, s) in items {
             // Padding AND border on each axis: every consumer below adds
@@ -6750,8 +6880,11 @@ impl<'a> Ctx<'a> {
             // it never uses and a growing sibling is short by exactly that much
             // — Wikipedia's search field stopped 22px (its button's padding)
             // before the group's right edge.
-            let control_chrome = if crate::forms::kind_of(el).is_some() { main_pad } else { 0.0 };
-            let (pref_bb, minc_bb) = self.intrinsic_width(el, s);
+            let control_chrome = match el.el() {
+                Some(e) if crate::forms::kind_of(e).is_some() => main_pad,
+                _ => 0.0,
+            };
+            let (pref_bb, minc_bb) = self.kid_intrinsic(el, s);
             let (pref, minc) = ((pref_bb - control_chrome).max(0.0), (minc_bb - control_chrome).max(0.0));
             let base = match s.flex_basis {
                 FlexBasis::Px(p) => to_content(p),
@@ -11092,6 +11225,36 @@ fn dbg_wiki_shape() {
     /// articles: 7 declarations hide their only sharp layer behind a blurred
     /// one, and none has two paintable layers.
     #[test]
+    /// Ein nackter Textlauf in einem Flex-Container ist ein ANONYMER Kasten
+    /// (css-flexbox-1 §4) — und verschwand bis 0.66.0 spurlos.
+    ///
+    /// `<div class="flex">Label<span>x</span></div>` verlor sein „Label".
+    /// Das ist die schlimmste Sorte Layoutfehler: er LOESCHT Text, statt ihn
+    /// falsch zu setzen, und auf dem Schirm fehlt nur etwas, von dem niemand
+    /// weiss, dass es da sein sollte.
+    #[test]
+    fn a_bare_text_run_in_a_flex_container_is_an_anonymous_item() {
+        let l = lay("<body><div style=\"display:flex\">Label<span>zweites</span></div></body>", 400);
+        let texts: alloc::vec::Vec<(i32, i32, &str)> = l.ops.iter().filter_map(|o| match o {
+            DrawOp::Text { x, y, text, .. } => Some((*x, *y, text.as_str())),
+            _ => None,
+        }).collect();
+        assert_eq!(texts.len(), 2, "beide Laeufe, got {texts:?}");
+        assert_eq!(texts[0].2, "Label");
+        // Nebeneinander, nicht untereinander — und auf derselben Zeile.
+        assert!(texts[1].0 > texts[0].0, "das zweite Kind steht rechts: {texts:?}");
+        assert_eq!(texts[0].1, texts[1].1, "gleiche Grundlinie: {texts:?}");
+    }
+
+    /// Reiner Leerraum zwischen zwei Kaesten erzeugt KEINEN Kasten (§4) —
+    /// sonst bekaeme jede eingerueckte Quelle unsichtbare Flex-Kinder.
+    #[test]
+    fn whitespace_between_flex_items_makes_no_box() {
+        let l = lay("<body><div style=\"display:flex\">\n  <span>a</span>\n  <span>b</span>\n</div></body>", 400);
+        let n = l.ops.iter().filter(|o| matches!(o, DrawOp::Text { .. })).count();
+        assert_eq!(n, 2, "nur die beiden Kinder");
+    }
+
     /// Ein WEICHER Schatten wird gemalt — und zwar weich.
     ///
     /// Bis 0.61.0 fiel er ganz weg (nur `blur == 0` wurde gemalt), und das
