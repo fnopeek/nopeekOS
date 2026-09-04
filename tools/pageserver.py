@@ -31,6 +31,7 @@ Routes:
   /                     index of everything on offer
   /<name>               a fixture from tools/fixtures/ (ours, versioned)
   /bootstrap.min.css    the ONE vendored copy, from beak-engine/assets/
+  /tailwind.css         same, for the Tailwind fixture
   /frozen/<name>        a snapshot from --frozen <dir>, its stylesheet links
                         rewritten to /frozen/<name>.css so nothing reaches
                         the real site
@@ -47,7 +48,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.dirname(os.path.abspath(os.path.dirname(__file__)))
 FIXTURES = os.path.join(ROOT, "tools", "fixtures")
-BOOTSTRAP = os.path.join(ROOT, "tools", "wasm", "beak-engine", "assets", "bootstrap.min.css")
+# Die eingefrorenen Blaetter, die eine Vorlage per `<link>` holt. EINE Kopie,
+# die im Repo liegt — der Server verweist darauf, statt sie zu duplizieren.
+ASSETS = os.path.join(ROOT, "tools", "wasm", "beak-engine", "assets")
+SHEETS = {"/bootstrap.min.css": "bootstrap.min.css", "/tailwind.css": "tailwind.css"}
 FROZEN = None
 
 TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
@@ -104,8 +108,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if p == "/":
                 return self.index()
-            if p == "/bootstrap.min.css":
-                return self.file(BOOTSTRAP)
+            if p in SHEETS:
+                return self.file(os.path.join(ASSETS, SHEETS[p]))
             if p.startswith("/frozen/"):
                 return self.frozen(p[len("/frozen/"):])
             name = p.lstrip("/")
