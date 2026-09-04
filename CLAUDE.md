@@ -48,39 +48,40 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-04 · beak 0.57.0 · Kernel 0.318.1** (Rest: `git log`)
+**Stand 2026-09-04 · beak 0.81.0 · Kernel 0.324.0** (Rest: `git log`)
 
 Zwei Fäden laufen parallel.
 
 **`beak`**, der eigene Browser: **Stage 1 läuft — die Seite reagiert.** Eigene
-JS-Maschine (Lexer, Parser, Baumläufer, RegExp, DOM-Bindung), Symbol samt
-Iteratorvertrag, Promise mit einer Microtask-Schlange, und die Wirtsumgebung.
-Bewusst kein Bytecode; Begründung im Memory.
+JS-Maschine (Lexer, Parser, RegExp, DOM-Bindung, Symbol samt Iteratorvertrag,
+Promise mit Microtask-Schlange) und die Wirtsumgebung. Seit 0.77.0 läuft sie
+auf einer **Befehlsmaschine** statt eines Baumläufers — der Zustand ist ein
+Feld, nicht der Rust-Stapel. **0.81.0 hat damit Generator und `async`/`await`
+gebaut** (Stufe 4: anhalten). Ein Generator ist eine EIGENE Maschine, kein
+Rahmen in fremder; Begründung in `vm.rs` und im Memory.
 
 **Gemessen wird an stehenden Zahlen, und die wichtigste ist NICHT test262.**
 Auf allen elf Zielseiten ist die erste Wand ein fehlendes DOM-/Wirts-Glied,
-keine Sprachlücke — im ganzen Korpus stirbt kein einziges Skript an
-Generatoren, während test262 dafür 4000 Fehlschläge zählt.
+keine Sprachlücke — auf keiner der 134 Wandstellen steht `await`, `yield` oder
+ein Generator, während test262 dafür Tausende Fehlschläge zählte.
 
-    test262 parse   96,84 %   ·  exec 52,77 %  (V8 auf demselben Korpus: 99,41 %)
-    Zielkorpus      437/437 geparst, 304/437 durchgelaufen
-    DOM-Aufrufe     98,5 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
+    test262 parse   96,84 %   ·  exec 58,09 %  (V8 auf demselben Korpus: 99,41 %)
+    Zielkorpus      437/437 geparst, 303/437 durchgelaufen
+    DOM-Aufrufe     98,3 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
 
-Die Rangfolge gibt `tests/apigap.rs`, nicht die test262-Fehlerkarte. 0.57.0 hat
-`document.cookie` (die erste Wand auf BEIDEN Wikipedias), `location`, die
-URI-Funktionen, Event/CustomEvent samt echter `dispatchEvent`,
-`template.content`/`importNode`, die benannten Schnittstellen und `el.style`
-als Sicht aufs Attribut gebaut. Was übrig ist — Shadow DOM, Beobachter,
-`postMessage` — ist teuer; die billigen Zeilen sind weg. Generator und
-async/await brauchen einen anhaltbaren Auswerter — eine Entwurfsfrage, und auf
-dem Korpus zahlen sie null.
+Die Rangfolge gibt `tests/apigap.rs` und der Zielkorpus, nicht die
+test262-Fehlerkarte. Auf der DOM-Seite ist übrig, was teuer ist — Shadow DOM,
+Beobachter, `postMessage`; die billigen Zeilen sind weg. Auf der Sprachseite
+sind die nächsten billigen Posten `switch` und `for-in` im FUNKTIONSRUMPF
+(3636 und 2200 Absagen) — nicht `class`, und sichtbar erst, seit
+`Interp::func_declines` die Ebene unter dem Programm mitzählt.
 
 Das eigene Testziel ist **`beak:selftest`** — eine Prüfseite aus dem
 Binärbild, die nichts holt und ihr Ergebnis auf dem Schirm UND im Log sagt.
 Sie läuft auch host-seitig über dieselbe Datei
 (`beak-engine/examples/selftest.rs`). Ein Lauf fand neun Lücken, die fremde
-Seiten in Wochen nicht gezeigt hatten. Stand host-seitig: Sprache 26/28,
-Dokument 30/31; der Gerätelauf für 0.57.0 steht aus.
+Seiten in Wochen nicht gezeigt hatten. Stand host-seitig: Sprache 28/28,
+Dokument 31/31; der Gerätelauf für 0.81.0 steht aus.
 
 Die CSS-Runde davor ist zu Ende gebracht: das Eigenschafts-Gap ist
 geschlossen, 93,7 % der Deklarationen auf Bootstrap + Wikipedia abgedeckt. Die
