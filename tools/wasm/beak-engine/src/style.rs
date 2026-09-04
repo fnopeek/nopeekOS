@@ -2871,6 +2871,11 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 "xx-large" => Some(BASE_FONT_PX * 2.0),
                 "larger" => Some(base * 1.2),
                 "smaller" => Some(base / 1.2),
+                // Ohne Einheit ist es keine Laenge und damit eine ungueltige
+                // Deklaration — die faellt WEG und laesst den geerbten Wert
+                // stehen, statt als 700-px-Schrift durchzukommen
+                // ([[feedback_unknown_unit_invalidates_the_declaration]]).
+                _ if unitless_nonzero(&v) => None,
                 _ => parse_length(&v, Units { em: base, ..s.units() }),
             };
             if let Some(px) = px {
@@ -3919,11 +3924,24 @@ fn parse_calc_affine(v: &str, u: Units) -> Option<Len> {
 /// before it is style/variant/weight, everything after it is the family.
 fn is_font_size_token(t: &str) -> bool {
     let head = t.split('/').next().unwrap_or("");
-    matches!(
+    if matches!(
         head,
         "xx-small" | "x-small" | "small" | "medium" | "large" | "x-large" | "xx-large"
             | "larger" | "smaller"
-    ) || head.starts_with(|c: char| c.is_ascii_digit() || c == '.')
+    ) {
+        return true;
+    }
+    if !head.starts_with(|c: char| c.is_ascii_digit() || c == '.') {
+        return false;
+    }
+    // **Eine blosse Zahl ist KEINE Schriftgroesse.** `font: 700 13px/1.6 x`
+    // fing sonst bei der `700` an: das Gewicht wurde zur Groesse, `13px/1.6`
+    // zur Familie. Gemessen an der eigenen Komponentenvorlage — eine Zeile
+    // Text wurde 285 statt 21 px hoch, und die Schreibweise steht auf halben
+    // Web. Eine Laenge braucht eine Einheit; einzige Ausnahme ist die 0.
+    let num_end = head.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(head.len());
+    let (num, unit) = head.split_at(num_end);
+    !unit.is_empty() || num.parse::<f32>() == Ok(0.0)
 }
 
 /// `font: [<style> || <variant> || <weight>] <size>[/<line-height>] <family>`
@@ -4575,6 +4593,20 @@ fn apply_flex_shorthand(v: &str, s: &mut ComputedStyle) {
 
 /// Parse a CSS `<length>` to px. Supports `px`, `em`/`rem` (relative to
 /// `em_base`), and bare numbers (treated as px).
+/// Eine Zahl ohne Einheit und ungleich null — in CSS keine Laenge.
+///
+/// Nur `font-size` fragt das heute. `parse_length` selbst laesst so etwas
+/// weiterhin durch, und das ist eine benannte Luecke, keine Absicht: sie zu
+/// schliessen beruehrt jede Laengeneigenschaft auf einmal und gehoert
+/// gemessen, nicht nebenbei erledigt.
+fn unitless_nonzero(v: &str) -> bool {
+    let t = v.trim();
+    match t.parse::<f32>() {
+        Ok(n) => n != 0.0,
+        Err(_) => false,
+    }
+}
+
 fn parse_length(v: &str, u: Units) -> Option<f32> {
     let v = v.trim();
     // Font-relative first so "rem" is matched before the "em" suffix eats it.
