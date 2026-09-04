@@ -73,13 +73,24 @@ pub struct DomNode {
     /// zurueck; das Layout gibt sie beim Treffer aus. Ohne diese Brueckenzahl
     /// gibt es keinen Weg von „hier wurde geklickt" zu „dieser Knoten".
     pub seq: u32,
+    /// Die `seq` des Elements im BAUM, aus dem dieses Dokument gebaut wurde.
+    ///
+    /// Die Bruecke fuer `getComputedStyle`: die Kaskade laeuft auf beaks Baum
+    /// (`crate::dom`), die Maschine arbeitet auf ihrer eigenen Arena. Ohne
+    /// diesen Verweis gibt es keinen Weg von „dieses JS-Objekt" zu „dieses
+    /// Element, fuer das die Kaskade gerechnet hat".
+    ///
+    /// `0` heisst „kein Quellknoten" — ein Element, das ein Skript erst
+    /// erzeugt hat. Fuer das kann `getComputedStyle` nur den Inline-Stil
+    /// beantworten, und das ist ehrlicher als eine Zahl aus dem Nichts.
+    pub src_seq: u32,
 }
 
 impl DomNode {
     fn new(kind: f64, tag: &str) -> DomNode {
         DomNode { kind, tag: Rc::from(tag), attrs: Vec::new(), text: Rc::from(""),
                   parent: None, children: Vec::new(), js: None, listeners: Vec::new(),
-                  handlers: Vec::new(), content: None, seq: 0 }
+                  handlers: Vec::new(), content: None, seq: 0, src_seq: 0 }
     }
     pub fn attr(&self, k: &str) -> Option<&Rc<str>> {
         self.attrs.iter().find(|(n, _)| &**n == k).map(|(_, v)| v)
@@ -143,6 +154,7 @@ impl Doc {
                 }
                 crate::dom::Node::Element(el) => {
                     let mut n = DomNode::new(ELEMENT_NODE, &el.tag);
+                    n.src_seq = el.seq;
                     for (k, v) in &el.attrs {
                         // Ein Attribut-Behandler ist genauso ein Behandler wie
                         // ein angemeldeter: ohne diese Zeile bekaeme die Seite
@@ -762,6 +774,33 @@ fn style_join(decls: &[(String, String)]) -> String {
     out
 }
 
+/// Der Schnappschuss, den `getComputedStyle` hinterlegt. Ist er da, liest die
+/// Sicht IHN statt des `style`-Attributs — dieselben Zugriffsfunktionen, zwei
+/// Quellen, und keine zweite Maschinerie.
+const COMPUTED: &str = "__computed";
+
+/// Der Deklarationstext hinter einer `CSSStyleDeclaration`.
+fn style_text(i: &Interp, this: &Value) -> String {
+    if let Value::Obj(o) = this {
+        if let Some(Value::Str(t)) = o.borrow().get_own(COMPUTED).and_then(|p| p.value.clone()) {
+            return t.to_string();
+        }
+    }
+    let Ok(id) = node_of_ref(i, this) else { return String::new() };
+    i.doc.as_ref()
+        .and_then(|d| d.nodes[id as usize].attr("style").map(|s| s.to_string()))
+        .unwrap_or_default()
+}
+
+/// Wie `node_of`, aber ohne zu werfen — ein Schnappschuss hat keinen Knoten.
+fn node_of_ref(i: &Interp, v: &Value) -> Result<u32, ()> {
+    let Value::Obj(o) = v else { return Err(()) };
+    match o.borrow().get_own(SLOT).and_then(|p| p.value.clone()) {
+        Some(Value::Num(n)) if n >= 0.0 => Ok(n as u32),
+        _ => Err(()),
+    }
+}
+
 fn style_get(i: &Interp, id: u32, css: &str) -> Value {
     let Some(d) = &i.doc else { return Value::str("") };
     let text = d.nodes[id as usize].attr("style").map(|s| s.to_string()).unwrap_or_default();
@@ -797,7 +836,11 @@ fn style_set(i: &mut Interp, id: u32, css: &str, val: &str) {
 macro_rules! style_prop {
     ($proto:expr, $fp:expr, $js:literal, $css:literal) => {{
         let g = native(Some($fp.clone()), |i, t, _| {
-            let id = node_of(i, &t)?; Ok(style_get(i, id, $css))
+            let text = style_text(i, &t);
+            Ok(match style_decls(&text).into_iter().rev().find(|(k, _)| k == $css) {
+                Some((_, v)) => Value::string(v),
+                None => Value::str(""),
+            })
         }, concat!("get ", $js), 0, false);
         let st = native(Some($fp.clone()), |i, t, a| {
             let id = node_of(i, &t)?;
@@ -970,6 +1013,74 @@ fn insert_all(i: &mut Interp, this: &Value, args: &[Value], w: Where) -> C<Value
         if let Some(d) = &mut i.doc { d.insert_maybe_fragment(parent, id, anchor); d.dirty = true; }
     }
     Ok(Value::Undefined)
+}
+
+/// Den KASKADIERTEN Stil eines Elements als Deklarationstext.
+///
+/// Die Kaskade laeuft auf beaks Baum, nicht auf der Arena der Maschine — also
+/// wird das Element ueber `src_seq` dort gesucht und die Kette von der Wurzel
+/// herunter aufgeloest. Das kostet einen Lauf je Ebene (auf einer echten
+/// Seite ein Dutzend), und zwar je Aufruf: `getComputedStyle` ist eine Frage
+/// an den JETZIGEN Zustand, und ein Zwischenspeicher muesste wissen, wann er
+/// falsch wird.
+///
+/// `None`, wenn kein Kontext eingereicht wurde oder das Element im Baum nicht
+/// vorkommt (ein Skript hat es erst erzeugt) — dann bleibt es beim
+/// Inline-Stil.
+fn computed_decls(i: &Interp, src_seq: u32) -> Option<String> {
+    let ctx = i.style_ctx.as_ref()?;
+    if src_seq == 0 {
+        return None;
+    }
+    let mut path: Vec<&crate::dom::Element> = Vec::new();
+    if !find_path(&ctx.dom.root, src_seq, &mut path) {
+        return None;
+    }
+    let mut parent = crate::style::ComputedStyle::root(&ctx.theme);
+    parent.vw = ctx.viewport_w;
+    let mut anc: Vec<crate::css::ElemInfo> = Vec::new();
+    let mut out = parent;
+    for (k, el) in path.iter().enumerate() {
+        // Geschwister zaehlen, damit `:nth-*` und `:first-child` stimmen —
+        // sonst haette der gerechnete Stil eine andere Kaskade gesehen als
+        // das Layout.
+        let (prev, count) = match k {
+            0 => (Vec::new(), 1),
+            _ => {
+                let kids: Vec<&crate::dom::Element> = path[k - 1]
+                    .children.iter()
+                    .filter_map(|n| match n { crate::dom::Node::Element(e) => Some(e), _ => None })
+                    .collect();
+                let pos = kids.iter().position(|c| c.seq == el.seq).unwrap_or(0);
+                (kids[..pos].iter().map(|e| crate::css::ElemInfo {
+                    el: e, state: Default::default() }).collect(), kids.len() as u32)
+            }
+        };
+        let info = crate::css::ElemInfo { el, state: Default::default() };
+        out = crate::style::resolve(&info, &parent, &ctx.theme, &ctx.sheet,
+                                    &anc, &prev, count, ctx.viewport_w);
+        parent = out;
+        anc.push(info);
+    }
+    Some(crate::style::serialize_computed(&out))
+}
+
+/// Den Weg von der Wurzel zu `seq` sammeln.
+fn find_path<'a>(el: &'a crate::dom::Element, seq: u32,
+                 out: &mut Vec<&'a crate::dom::Element>) -> bool {
+    if el.seq == seq {
+        out.push(el);
+        return true;
+    }
+    for c in &el.children {
+        if let crate::dom::Node::Element(e) = c {
+            if find_path(e, seq, out) {
+                out.insert(0, el);
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Eine Funktion auf dem Fenster. `meth` legt sie auf einen Prototyp, hier
@@ -1759,9 +1870,12 @@ pub fn install(realm: &mut Realm) {
     let style_proto = new_obj(Some(realm.object_proto.clone()));
     iface(realm, "CSSStyleDeclaration", &style_proto);
     meth(&style_proto, "getPropertyValue", |i, t, a| {
-        let id = node_of(i, &t)?;
-        let n = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-        Ok(style_get(i, id, &n.to_ascii_lowercase()))
+        let n = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_ascii_lowercase();
+        let text = style_text(i, &t);
+        Ok(match style_decls(&text).into_iter().rev().find(|(k, _)| *k == n) {
+            Some((_, v)) => Value::string(v),
+            None => Value::str(""),
+        })
     }, 1, &fp);
     meth(&style_proto, "setProperty", |i, t, a| {
         let id = node_of(i, &t)?;
@@ -1778,16 +1892,12 @@ pub fn install(realm: &mut Realm) {
         Ok(old)
     }, 1, &fp);
     meth(&style_proto, "item", |i, t, a| {
-        let id = node_of(i, &t)?;
         let n = i.to_number(a.first().unwrap_or(&Value::Undefined))? as usize;
-        let Some(d) = &i.doc else { return Ok(Value::str("")) };
-        let text = d.nodes[id as usize].attr("style").map(|s| s.to_string()).unwrap_or_default();
+        let text = style_text(i, &t);
         Ok(match style_decls(&text).get(n) { Some((k, _)) => Value::string(k.clone()), None => Value::str("") })
     }, 1, &fp);
     getter(&style_proto, "length", |i, t, _| {
-        let id = node_of(i, &t)?;
-        let Some(d) = &i.doc else { return Ok(Value::Num(0.0)) };
-        let text = d.nodes[id as usize].attr("style").map(|s| s.to_string()).unwrap_or_default();
+        let text = style_text(i, &t);
         Ok(Value::Num(style_decls(&text).len() as f64))
     }, &fp);
     accessor(&style_proto, "cssText",
@@ -2015,6 +2125,16 @@ pub fn install(realm: &mut Realm) {
         let g = new_obj(Some(i.realm.style_proto.clone()));
         g.borrow_mut().define(SLOT, Prop { value: Some(Value::Num(id as f64)), get: None,
             set: None, writable: false, enumerable: false, configurable: false });
+        // Der gerechnete Stil, wenn der Wirt einen Kaskadenkontext eingereicht
+        // hat. Ein SCHNAPPSCHUSS, kein lebender Verweis — genau das ist
+        // `getComputedStyle` auch im Browser: die Antwort auf die Frage von
+        // jetzt. Ohne Kontext bleibt es beim Inline-Stil, und das ist eine
+        // Teilantwort, die die Seite laufen laesst.
+        let src = i.doc.as_ref().map(|d| d.nodes[id as usize].src_seq).unwrap_or(0);
+        if let Some(text) = computed_decls(i, src) {
+            g.borrow_mut().define(COMPUTED, Prop { value: Some(Value::str(&text)), get: None,
+                set: None, writable: false, enumerable: false, configurable: false });
+        }
         Ok(Value::Obj(g))
     }, 1, &fp);
 
@@ -2442,4 +2562,77 @@ fn find_tag(d: &Doc, tag: &str) -> Option<u32> {
     let mut all = Vec::new();
     d.descendants(d.doc, &mut all);
     all.into_iter().find(|&x| &*d.nodes[x as usize].tag == tag)
+}
+
+#[cfg(test)]
+mod tests {
+    /// `getComputedStyle` antwortet aus der KASKADE, nicht aus dem
+    /// Inline-Stil.
+    ///
+    /// Der Unterschied ist der ganze Sinn: `.hide{display:none}` steht in
+    /// einem Blatt, nicht am Element. Bis 0.64.0 gab die Funktion darauf
+    /// „block" zurueck — eine Auskunft, auf die eine Seite ihren naechsten
+    /// Schritt baut.
+    fn run(html: &str, js: &str) -> alloc::vec::Vec<alloc::string::String> {
+        let dom = crate::dom::parse(html);
+        let media = crate::css::Media::new(1024.0, false);
+        let sheet = crate::css::collect_all(&dom, "", media);
+        let mut i = super::super::interp::Interp::new();
+        i.set_document(super::Doc::from_dom(&dom));
+        i.set_style_context(super::super::interp::StyleCtx {
+            sheet: alloc::rc::Rc::new(sheet),
+            dom: alloc::rc::Rc::new(dom),
+            theme: crate::layout::Theme {
+                bg: crate::layout::Rgb(255, 255, 255),
+                text: crate::layout::Rgb(33, 37, 41),
+                heading: crate::layout::Rgb(33, 37, 41),
+                link: crate::layout::Rgb(13, 110, 253),
+                muted: crate::layout::Rgb(108, 117, 125),
+                rule: crate::layout::Rgb(222, 226, 230),
+            },
+            viewport_w: 1024.0,
+        });
+        let prog = super::super::parse(js, false).expect("parst");
+        let _ = i.run_program(&prog);
+        i.take_console()
+    }
+
+    #[test]
+    fn computed_style_answers_from_the_cascade() {
+        let out = run(
+            "<html><head><style>.h{display:none} .c{color:#0d6efd;font-size:20px}</style></head>\
+             <body><p class='h' id='a'>x</p><p class='c' id='b'>y</p></body></html>",
+            "console.log(getComputedStyle(document.getElementById('a')).display);\
+             console.log(getComputedStyle(document.getElementById('b')).color);\
+             console.log(getComputedStyle(document.getElementById('b')).fontSize);",
+        );
+        assert_eq!(out, ["none", "rgb(13, 110, 253)", "20px"]);
+    }
+
+    /// Ein Element, das ein Skript erst erzeugt hat, kommt im Baum nicht vor.
+    /// Dafuer gibt es keinen gerechneten Stil — und die leere Zeichenkette ist
+    /// die ehrliche Antwort, keine erfundene Zahl.
+    #[test]
+    fn an_element_the_script_made_has_no_cascade_yet() {
+        let out = run(
+            "<html><body><p>x</p></body></html>",
+            "var e = document.createElement('div');\
+             console.log(JSON.stringify(getComputedStyle(e).display));",
+        );
+        assert_eq!(out, ["\"\""]);
+    }
+
+    /// Der Inline-Stil bleibt eine LEBENDE Sicht — `el.style` ist etwas
+    /// anderes als `getComputedStyle(el)`, und beide gehen durch dieselben
+    /// Zugriffsfunktionen.
+    #[test]
+    fn the_inline_view_still_writes_through() {
+        let out = run(
+            "<html><body><p id='a'>x</p></body></html>",
+            "var e = document.getElementById('a');\
+             e.style.color = 'red';\
+             console.log(e.style.color + '|' + e.getAttribute('style'));",
+        );
+        assert_eq!(out, ["red|color: red;"]);
+    }
 }

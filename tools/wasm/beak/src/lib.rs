@@ -1358,6 +1358,21 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) {
         let now = unsafe { npk_unix_time() };
         sess.interp.set_cookies(cookies::script_header_for(url_str(), now));
     }
+    // Der Kaskadenkontext fuer `getComputedStyle`. Ohne ihn antwortet es aus
+    // dem Inline-Stil — eine Teilantwort, die eine Seite laufen laesst, aber
+    // die falsche Auskunft gibt. Mit ihm rechnet die Maschine dieselbe
+    // Kaskade, die das Layout rechnet, auf demselben Baum und demselben
+    // Blatt.
+    if let Some((_, _, w, _)) = canvas_rect() {
+        let media = beak_engine::css::Media::new(w as f32, query_theme().is_dark());
+        let sheet = beak_engine::css::collect_all(&dom, css_str(), media);
+        sess.interp.set_style_context(beak_engine::js::interp::StyleCtx {
+            sheet: alloc::rc::Rc::new(sheet),
+            dom: alloc::rc::Rc::new(dom),
+            theme: engine.theme(),
+            viewport_w: w as f32,
+        });
+    }
     // Die Fenstergroesse gehoert dem Wirt. Ohne sie gibt es `innerWidth`
     // nicht, und eine Seite, die ihre schmale Fassung danach waehlt, faellt
     // mit ReferenceError aus, statt sie zu nehmen.

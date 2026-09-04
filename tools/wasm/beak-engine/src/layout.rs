@@ -2016,7 +2016,7 @@ impl<'a> Ctx<'a> {
 }
 
 /// A short name for a `Display` value, for the inspect label.
-fn display_name(d: Display) -> &'static str {
+pub(crate) fn display_name(d: Display) -> &'static str {
     match d {
         Display::Block => "block",
         Display::Inline => "inline",

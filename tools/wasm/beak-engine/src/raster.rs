@@ -504,6 +504,13 @@ impl Engine {
         self.theme = theme;
     }
 
+    /// Die Farben, mit denen die Engine kaskadiert. `getComputedStyle` muss
+    /// dieselben nehmen, sonst antwortet es ueber eine andere Seite als die
+    /// gemalte.
+    pub fn theme(&self) -> Theme {
+        self.theme
+    }
+
     /// Start a fresh page's image set: clear the previous decode + reset the
     /// per-page budget. The shell then fetches + `add_image`s each `<img>` ONE
     /// AT A TIME (streaming) so the compressed bytes never pile up — decode the
