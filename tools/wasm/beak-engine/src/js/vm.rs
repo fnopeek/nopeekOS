@@ -414,6 +414,11 @@ impl Vm {
                 let v = i.func_value(chunk.funcs[*f as usize].clone(), &env);
                 self.push(v);
             }
+            // Dieselbe Funktion, die der Baumlaeufer ruft — siehe `Op::Class`.
+            Op::Class(c) => {
+                let v = i.eval_class(&chunk.classes[*c as usize], &env)?;
+                self.push(v);
+            }
             Op::NewObject => {
                 let g = super::value::new_obj(Some(i.realm.object_proto.clone()));
                 self.push(Value::Obj(g));

@@ -291,7 +291,21 @@ impl Compiler {
                 self.for_of(left, right, body)
             }
             Stmt::With { .. } => Err(Unsupported("with")),
-            Stmt::Class(_) => Err(Unsupported("class")),
+            // Eine Klassen-DEKLARATION: bauen und an ihren Namen binden. Die
+            // Bindung selbst hat das Hochziehen schon angelegt (auf „nicht
+            // bereit", die zeitliche Totzone) — hier wird sie fertig.
+            Stmt::Class(c) => {
+                let k = self.chunk.class(c.clone());
+                self.chunk.emit(Op::Class(k));
+                match &c.name {
+                    Some(n) => {
+                        let name = self.chunk.name(n);
+                        self.chunk.emit(Op::DeclVar { name, mutable: true, lexical: true });
+                    }
+                    None => { self.chunk.emit(Op::Pop); }
+                }
+                Ok(())
+            }
             Stmt::Import(_) | Stmt::ExportNamed { .. } | Stmt::ExportDefault(_)
             | Stmt::ExportAll { .. } => Err(Unsupported("module")),
         }
@@ -330,6 +344,14 @@ impl Compiler {
                         };
                         let name = self.chunk.name(n);
                         out.push(BlockDecl::Tdz { name, mutable: d.kind != VarKind::Const });
+                    }
+                }
+                // Eine Klasse steht wie ein `let` in der Totzone — dieselben
+                // zwei Schleifen wie `Interp::hoist`.
+                Stmt::Class(c) => {
+                    if let Some(n) = &c.name {
+                        let name = self.chunk.name(n);
+                        out.push(BlockDecl::Tdz { name, mutable: true });
                     }
                 }
                 _ => {}
@@ -870,6 +892,20 @@ impl Compiler {
                             self.chunk.emit(Op::Swap);
                         }
                         MemberProp::Computed(k) => {
+                            // Ein LITERALER Schluessel ist zur Uebersetzungszeit
+                            // bekannt — `o[8362]()` kann seine 8362 nennen, und
+                            // genau so sieht ein minifiziertes Modulregister
+                            // aus. Ein wirklich berechneter Schluessel bleibt
+                            // namenlos; ihn mitzufuehren kostete zwei Befehle
+                            // an jedem Aufruf, und das ist der falsche Handel.
+                            match k {
+                                Expr::Num(n) => {
+                                    let t = super::value::num_to_string(*n);
+                                    named = self.chunk.name(&t);
+                                }
+                                Expr::Str(t) => { named = self.chunk.name(t.as_str()); }
+                                _ => {}
+                            }
                             self.expr(obj)?;
                             self.chunk.emit(Op::Dup);
                             self.expr(k)?;
@@ -1016,7 +1052,11 @@ impl Compiler {
                 Ok(())
             }
             Expr::TaggedTemplate { .. } => Err(Unsupported("tagged-template")),
-            Expr::Class(_) => Err(Unsupported("class-expr")),
+            Expr::Class(c) => {
+                let k = self.chunk.class(c.clone());
+                self.chunk.emit(Op::Class(k));
+                Ok(())
+            }
             Expr::BigInt(_) => Err(Unsupported("bigint")),
             Expr::Super => Err(Unsupported("super")),
 
