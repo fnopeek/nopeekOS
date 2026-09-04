@@ -14,6 +14,11 @@
 //! Was hier NICHT ist: eine Auswertung. Der Parser baut den Baum, mehr nicht.
 
 pub mod ast;
+/// Der Befehlssatz und der Uebersetzer dorthin — siehe `code.rs` fuer die
+/// Begruendung des Umbaus.
+pub mod code;
+pub mod compile;
+pub mod vm;
 pub mod builtins;
 pub mod dombind;
 pub mod eval;
@@ -73,6 +78,14 @@ impl Session {
         let mut interp = interp::Interp::new();
         interp.max_steps = max_steps;
         Session { interp }
+    }
+
+    /// Dieselbe Sitzung, aber ohne die Befehlsmaschine — fuer die Gegenprobe,
+    /// die sagt, WELCHE Tests die Umstellung kostet.
+    pub fn new_without_vm(max_steps: u64) -> Session {
+        let mut s = Session::new(max_steps);
+        s.interp.vm_off = true;
+        s
     }
 
     /// Ein bereits geparstes Programm laufen lassen.
