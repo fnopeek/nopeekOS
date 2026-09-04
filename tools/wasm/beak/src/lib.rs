@@ -391,6 +391,13 @@ static mut RECT_BUF: [u8; 16] = [0; 16];
 
 static mut SCROLL_Y: i32 = 0;
 static mut DIRTY: bool = true; // page content needs a repaint
+/// Die Kaesten des letzten Layouts, fuer `getBoundingClientRect` & Co.
+///
+/// Als `Rc` gehalten, damit das Weiterreichen an die JS-Maschine nichts
+/// kostet: der Rollstand aendert sich bei JEDEM Bild, die Kaesten nur bei
+/// einem neuen Layout — ohne das waere jede Rollbewegung eine Kopie von
+/// ~180 KB.
+static mut GEOM: Option<alloc::rc::Rc<alloc::vec::Vec<beak_engine::layout::ElemRect>>> = None;
 static mut LAST_W: i32 = -1;
 static mut LAST_H: i32 = -1;
 /// The scroll offset the buffer currently HOLDS, so the next frame knows how
@@ -1411,7 +1418,10 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) {
     let mut listeners = false;
     if let Some(d) = sess.interp.doc.as_mut() {
         listeners = d.has_listeners;
-        engine.set_hit_all(listeners);
+        // Die Kaesten werden nicht nur fuer Klicks gebraucht, sondern auch
+        // fuer `getBoundingClientRect`. Eine Seite, die Skripte FAEHRT, kann
+        // danach fragen, auch wenn sie keinen Behandler angemeldet hat.
+        engine.set_hit_all(listeners || ran > 0);
         engine.set_scripted_dom(Some(d.to_dom()));
     }
     unsafe { core::ptr::addr_of_mut!(JS).write(Some(sess)) };
@@ -2074,12 +2084,27 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
     };
     if need_layout {
         *cache = Some((do_layout(engine, w as u32, state), w, h, cur_gen));
+        // Die Kaesten neu einsammeln — nur hier, nicht je Bild.
+        let boxes = cache.as_ref().unwrap().0.element_rects();
+        unsafe { core::ptr::addr_of_mut!(GEOM).write(Some(alloc::rc::Rc::new(boxes))) };
     }
     let layout = &cache.as_ref().unwrap().0;
 
     let max_scroll = (layout.height as i32 - h).max(0);
     let sy = scroll_y().clamp(0, max_scroll);
     set_scroll(sy);
+    // Geometrie und Rollstand an die Maschine reichen. Der Rollstand geht bei
+    // jedem Bild mit, weil er sich ohne Layout aendert; die Kaesten sind ein
+    // `Rc` und kosten dabei nichts.
+    // `ptr::read` waere hier ein Fehler: es kopiert das `Rc` BITWEISE, ohne
+    // den Zaehler hochzusetzen — beim naechsten Fallenlassen ein Double-Free.
+    // `clone()` ist das, was gemeint ist.
+    let geom = unsafe { (*core::ptr::addr_of!(GEOM)).clone() };
+    if let (Some(sess), Some(g)) = (js_session(), geom) {
+        sess.interp.set_geometry(beak_engine::js::interp::Geometry {
+            boxes: g, scroll: (0, sy),
+        });
+    }
 
     // Reuse a persistent paint buffer across frames — `engine.paint` fills every
     // pixel (background first), so no re-zeroing is needed. A fresh

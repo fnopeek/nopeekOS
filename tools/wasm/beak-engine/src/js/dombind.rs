@@ -1023,6 +1023,63 @@ fn fragment_nodes(root: &crate::dom::Element) -> Vec<&crate::dom::Node> {
     out
 }
 
+/// Die Nummer, unter der das LAYOUT dieses Element kennt.
+///
+/// Zwei Zahlen kommen in Frage, und welche gilt, haengt am Zeitpunkt:
+/// `to_dom` vergibt beim Zurueckschreiben frische `seq`, davor sind sie 0 und
+/// das Layout stammt noch aus dem geparsten Baum — dessen Nummern stehen in
+/// `src_seq`. „Nicht-null gewinnt" ist damit keine Heuristik, sondern die
+/// Frage „hat schon einmal jemand zurueckgeschrieben?".
+fn layout_seq(i: &Interp, this: &Value) -> Option<u32> {
+    let id = node_of_ref(i, this).ok()?;
+    let n = &i.doc.as_ref()?.nodes[id as usize];
+    Some(if n.seq != 0 { n.seq } else { n.src_seq }).filter(|s| *s != 0)
+}
+
+/// Der Rahmenkasten in FENSTERkoordinaten: `(x, y, w, h)`.
+///
+/// Ein Kasten kann in mehrere Fragmente zerfallen (ein Inline-Kasten je
+/// Zeile) — `getBoundingClientRect` nennt deren Vereinigung, und das ist
+/// genau das, was ein Browser dort auch liefert.
+fn elem_rect(i: &Interp, this: &Value) -> Option<(f64, f64, f64, f64)> {
+    let g = i.geometry.as_ref()?;
+    let seq = layout_seq(i, this)?;
+    let mut acc: Option<(i32, i32, i32, i32)> = None;
+    for b in g.boxes.iter().filter(|b| b.seq == seq) {
+        acc = Some(match acc {
+            None => (b.x, b.y, b.x + b.w, b.y + b.h),
+            Some((x0, y0, x1, y1)) =>
+                (x0.min(b.x), y0.min(b.y), x1.max(b.x + b.w), y1.max(b.y + b.h)),
+        });
+    }
+    let (x0, y0, x1, y1) = acc?;
+    Some(((x0 - g.scroll.0) as f64, (y0 - g.scroll.1) as f64, (x1 - x0) as f64, (y1 - y0) as f64))
+}
+
+/// Der POLSTERkasten: Breite und Hoehe ohne die Rahmen.
+fn elem_inner(i: &Interp, this: &Value) -> Option<(f64, f64)> {
+    let g = i.geometry.as_ref()?;
+    let seq = layout_seq(i, this)?;
+    let (_, _, w, h) = elem_rect(i, this)?;
+    // Die Rahmen des ERSTEN Fragments: ein ueber Zeilen gebrochener Kasten
+    // zeichnet sie nur an seinen aeusseren Enden, und dort steht ohnehin 0.
+    let b = g.boxes.iter().find(|b| b.seq == seq)?;
+    Some(((w - b.bx as f64).max(0.0), (h - b.by as f64).max(0.0)))
+}
+
+/// Ein `DOMRect`-artiger Gegenstand. `None` heisst „kein Kasten" und wird zu
+/// lauter Nullen — dieselbe Antwort, die ein Browser fuer ein Element ohne
+/// Kasten (`display:none`) gibt.
+fn rect_obj(i: &Interp, r: Option<(f64, f64, f64, f64)>) -> Gc {
+    let (x, y, w, h) = r.unwrap_or((0.0, 0.0, 0.0, 0.0));
+    let o = new_obj(Some(i.realm.object_proto.clone()));
+    for (k, v) in [("x", x), ("y", y), ("left", x), ("top", y),
+                   ("right", x + w), ("bottom", y + h), ("width", w), ("height", h)] {
+        o.borrow_mut().define(k, Prop::data(Value::Num(v)));
+    }
+    o
+}
+
 /// Wohin `append` & Co. einhaengen.
 enum Where { First, Last, Before, After }
 
@@ -1479,21 +1536,70 @@ pub fn install(realm: &mut Realm) {
         let id = node_of(i, &t)?;
         Ok(Value::Bool(i.doc.as_ref().is_some_and(|d| !d.nodes[id as usize].children.is_empty())))
     }, 0, &fp);
-    // Geometrie gibt es zum Skriptzeitpunkt NICHT: beak legt erst NACH den
-    // Skripten aus. Ein Nullrechteck ist damit keine Luege ueber die Groesse,
-    // sondern die Wahrheit ueber den Zeitpunkt — und ein fehlendes
-    // `getBoundingClientRect` beendet das Skript, was schlimmer ist.
-    // Sobald Ereignisse zugestellt werden, laeuft ein Skript NACH dem Layout
-    // und dann gehoert hier die echte Zahl her.
-    meth(&element_proto, "getBoundingClientRect", |i, _, _| {
-        let g = new_obj(Some(i.realm.object_proto.clone()));
-        for k in ["x", "y", "top", "left", "right", "bottom", "width", "height"] {
-            g.borrow_mut().define(k, Prop::data(Value::Num(0.0)));
-        }
-        Ok(Value::Obj(g))
+    // ── Geometrie ────────────────────────────────────────────────────────
+    //
+    // Bis 0.75.0 stand hier ueberall eine 0, und der Kommentar begruendete das
+    // damit, dass beak erst NACH den Skripten auslegt. Der Grund war einmal
+    // richtig und ist es seit der Ereigniszustellung nicht mehr: ein
+    // Klickbehandler laeuft auf einer fertig ausgelegten Seite.
+    //
+    // **Eine 0 war dabei das teuerste, was hier stehen konnte.** Sie wirft
+    // nicht, sie steht in keinem Log, sie sieht aus wie eine Antwort — der
+    // Tooltip landet in der Ecke, die Sichtbarkeitspruefung haelt alles fuer
+    // sichtbar. Im Aufrufzensus ist `getBoundingClientRect` mit 1125 Aufrufen
+    // der GROESSTE einzelne Posten, und er stand als „gedeckt" in der Bilanz.
+    meth(&element_proto, "getBoundingClientRect", |i, t, _| {
+        let r = elem_rect(i, &t);
+        Ok(Value::Obj(rect_obj(i, r)))
     }, 0, &fp);
-    for k in ["offsetWidth", "offsetHeight", "clientWidth", "clientHeight",
-              "scrollWidth", "scrollHeight", "scrollTop", "scrollLeft", "offsetTop", "offsetLeft"] {
+    // Die Fragmente einzeln — ein Inline-Kasten ueber drei Zeilen hat drei
+    // Rechtecke, und genau deshalb gibt es diese Funktion neben der oberen.
+    meth(&element_proto, "getClientRects", |i, t, _| {
+        let (sx, sy) = i.geometry.as_ref().map_or((0, 0), |g| g.scroll);
+        let seq = layout_seq(i, &t);
+        let rects: Vec<(f64, f64, f64, f64)> = match (&i.geometry, seq) {
+            (Some(g), Some(seq)) => g.boxes.iter().filter(|b| b.seq == seq)
+                .map(|b| ((b.x - sx) as f64, (b.y - sy) as f64, b.w as f64, b.h as f64)).collect(),
+            _ => Vec::new(),
+        };
+        let out = new_obj(Some(i.realm.object_proto.clone()));
+        for (n, r) in rects.iter().enumerate() {
+            let o = rect_obj(i, Some(*r));
+            out.borrow_mut().define(&alloc::format!("{n}"), Prop::data(Value::Obj(o)));
+        }
+        out.borrow_mut().define("length", Prop::data(Value::Num(rects.len() as f64)));
+        Ok(Value::Obj(out))
+    }, 0, &fp);
+    getter(&element_proto, "offsetWidth",
+        |i, t, _| Ok(Value::Num(elem_rect(i, &t).map_or(0.0, |r| r.2))), &fp);
+    getter(&element_proto, "offsetHeight",
+        |i, t, _| Ok(Value::Num(elem_rect(i, &t).map_or(0.0, |r| r.3))), &fp);
+    // `offsetTop`/`offsetLeft` gehen gegen den `offsetParent`, und den gibt es
+    // hier nicht. Gegen das DOKUMENT ist die naechstbeste Wahrheit und fuer
+    // die ueblichen Faelle (ein Element in einem nicht positionierten Rumpf)
+    // dieselbe Zahl. Benannt, damit niemand sie fuer exakt haelt.
+    getter(&element_proto, "offsetTop", |i, t, _| {
+        let sy = i.geometry.as_ref().map_or(0, |g| g.scroll.1);
+        Ok(Value::Num(elem_rect(i, &t).map_or(0.0, |r| r.1 + sy as f64)))
+    }, &fp);
+    getter(&element_proto, "offsetLeft", |i, t, _| {
+        let sx = i.geometry.as_ref().map_or(0, |g| g.scroll.0);
+        Ok(Value::Num(elem_rect(i, &t).map_or(0.0, |r| r.0 + sx as f64)))
+    }, &fp);
+    // `clientWidth`/`clientHeight` sind der POLSTERkasten: der Rahmenkasten
+    // ohne die Rahmen. Die Summen faehrt `HoverBox` mit.
+    getter(&element_proto, "clientWidth", |i, t, _| {
+        Ok(Value::Num(elem_inner(i, &t).map_or(0.0, |(w, _)| w)))
+    }, &fp);
+    getter(&element_proto, "clientHeight", |i, t, _| {
+        Ok(Value::Num(elem_inner(i, &t).map_or(0.0, |(_, h)| h)))
+    }, &fp);
+    // NOCH Platzhalter, und sie stehen als solche in `tests/apigap.rs`:
+    // `scrollWidth`/`scrollHeight` brauchen die INHALTSgroesse (mit Ueberlauf),
+    // `scrollTop`/`scrollLeft` einen Rollstand je Element. Beides gibt es im
+    // Layout heute nicht; eine Zahl daraus zu erfinden waere genau der Fehler,
+    // den diese Runde behebt.
+    for k in ["scrollWidth", "scrollHeight", "scrollTop", "scrollLeft"] {
         getter(&element_proto, k, |_, _, _| Ok(Value::Num(0.0)), &fp);
     }
     // Die Liste selbst arbeitet auf dem Element: sie haelt keine Kopie der
@@ -2648,6 +2754,25 @@ fn find_tag(d: &Doc, tag: &str) -> Option<u32> {
 }
 
 #[cfg(test)]
+mod beak_engine_layout_boxes {
+    use crate::layout::ElemRect;
+
+    /// Ein Kasten, wie das Layout ihn aufzeichnet — kurz, weil eine Probe die
+    /// zwoelf Felder sonst dreimal ausschreibt und nur fuenf davon meint.
+    pub fn boxed(seq: u32, x: i32, y: i32, w: i32, h: i32, bx: i16, by: i16) -> ElemRect {
+        ElemRect { seq, x, y, w, h, bx, by }
+    }
+
+    pub fn find_seq(el: &crate::dom::Element, id: &str) -> Option<u32> {
+        if el.attr("id") == Some(id) { return Some(el.seq) }
+        el.children.iter().find_map(|c| match c {
+            crate::dom::Node::Element(e) => find_seq(e, id),
+            _ => None,
+        })
+    }
+}
+
+#[cfg(test)]
 mod tests {
     /// `getComputedStyle` antwortet aus der KASKADE, nicht aus dem
     /// Inline-Stil.
@@ -2753,6 +2878,68 @@ mod tests {
              console.log(getComputedStyle(s).color);",
         );
         assert_eq!(out, ["\"\"", "rgb(0, 128, 0)"]);
+    }
+
+    /// Geometrie kommt aus dem LAYOUT, und der Wirt reicht sie ein. Ohne
+    /// eingereichte Kaesten bleibt es bei Nullen — das ist die Antwort eines
+    /// Browsers fuer ein Element ohne Kasten und die einzige ehrliche, solange
+    /// es kein Layout gibt.
+    #[test]
+    fn geometry_answers_from_the_boxes_the_host_handed_in() {
+        use super::beak_engine_layout_boxes::*;
+        let html = "<html><body><div id=a>x</div></body></html>";
+        let dom = crate::dom::parse(html);
+        let mut i = super::super::interp::Interp::new();
+        i.set_document(super::Doc::from_dom(&dom));
+        let seq = find_seq(&dom.root, "a").expect("das div");
+        i.set_geometry(super::super::interp::Geometry {
+            boxes: alloc::rc::Rc::new(alloc::vec![
+                boxed(seq, 10, 100, 200, 50, 4, 6),
+            ]),
+            scroll: (0, 40),
+        });
+        let prog = super::super::parse(
+            "var e = document.getElementById('a'), r = e.getBoundingClientRect();\
+             console.log([r.x, r.y, r.width, r.height, r.right, r.bottom].join(','));\
+             console.log([e.offsetWidth, e.offsetHeight, e.offsetTop].join(','));\
+             console.log([e.clientWidth, e.clientHeight].join(','));\
+             console.log(e.getClientRects().length);", false).expect("parst");
+        let _ = i.run_program(&prog);
+        assert_eq!(i.take_console(), [
+            // y ist um den Rollstand verschoben: 100 - 40.
+            "10,60,200,50,210,110",
+            // offsetTop geht gegen das DOKUMENT, also OHNE den Rollstand.
+            "200,50,100",
+            // Polsterkasten = Rahmenkasten ohne die Rahmensummen.
+            "196,44",
+            "1",
+        ]);
+    }
+
+    /// Ein Kasten ueber mehrere Zeilen hat mehrere Fragmente. `getClientRects`
+    /// nennt sie einzeln, `getBoundingClientRect` ihre VEREINIGUNG — nicht das
+    /// erste, was man findet.
+    #[test]
+    fn a_box_broken_over_lines_reports_the_union() {
+        use super::beak_engine_layout_boxes::*;
+        let html = "<html><body><span id=a>x</span></body></html>";
+        let dom = crate::dom::parse(html);
+        let mut i = super::super::interp::Interp::new();
+        i.set_document(super::Doc::from_dom(&dom));
+        let seq = find_seq(&dom.root, "a").expect("der span");
+        i.set_geometry(super::super::interp::Geometry {
+            boxes: alloc::rc::Rc::new(alloc::vec![
+                boxed(seq, 100, 10, 50, 20, 0, 0),
+                boxed(seq, 10, 30, 90, 20, 0, 0),
+            ]),
+            scroll: (0, 0),
+        });
+        let prog = super::super::parse(
+            "var r = document.getElementById('a').getBoundingClientRect();\
+             console.log([r.left, r.top, r.right, r.bottom].join(','));\
+             console.log(document.getElementById('a').getClientRects().length);", false).expect("parst");
+        let _ = i.run_program(&prog);
+        assert_eq!(i.take_console(), ["10,10,150,50", "2"]);
     }
 
     /// Der Inline-Stil bleibt eine LEBENDE Sicht — `el.style` ist etwas

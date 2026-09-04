@@ -34,6 +34,7 @@
 <p>
  <button id="b1">Z&auml;hler</button>
  <span id="count">noch nie geklickt</span>
+ <span id="geom">Geometrie ungeprueft</span>
 </p>
 <p>
  <button id="b2" onclick="say('inline', 'inline-onclick lief')">onclick-Attribut</button>
@@ -204,8 +205,16 @@ row(domRows, "parentNode / children", function () {
 });
 row(domRows, "document.title", function () { return document.title === "beak Selbsttest" });
 row(domRows, "window.innerWidth", function () { return window.innerWidth > 0 });
-row(domRows, "getBoundingClientRect", function () {
-  return document.querySelector("h1").getBoundingClientRect().width > 0;
+row(domRows, "getBoundingClientRect (Form)", function () {
+  /* ZUM SKRIPTZEITPUNKT gibt es noch kein Layout — beak legt danach aus, und
+     kein Wirt kann eine Groesse einreichen, die es noch nicht gibt. Hier ist
+     deshalb die FORM die Frage: acht Zahlen, konsistent. Ob echte Zahlen
+     drinstehen, prueft die Zeile `geom` beim Klick auf „Zaehler" — also dann,
+     wenn die Seite ausgelegt IST. Zwei Zeiten, zwei Zeilen. */
+  var r = document.querySelector("h1").getBoundingClientRect();
+  var ks = ["x", "y", "top", "left", "right", "bottom", "width", "height"];
+  for (var i = 0; i < ks.length; i++) if (typeof r[ks[i]] !== "number") return false;
+  return r.right - r.left === r.width && r.bottom - r.top === r.height;
 });
 row(domRows, "addEventListener", function () {
   return typeof document.getElementById("b1").addEventListener === "function";
@@ -325,6 +334,13 @@ var clicks = 0;
 document.getElementById("b1").addEventListener("click", function () {
   clicks++;
   say("count", clicks + " Klick" + (clicks === 1 ? "" : "s"));
+  /* Und JETZT ist die Seite ausgelegt: hier gehoert eine echte Zahl her.
+     Der Knopf, auf den gerade geklickt wurde, hat eine Breite und eine
+     Hoehe — steht hier 0, reicht der Wirt seine Kaesten nicht ein. */
+  var g = document.getElementById("b1").getBoundingClientRect();
+  say("geom", g.width > 0 && g.height > 0
+        ? "Knopf ist " + Math.round(g.width) + "x" + Math.round(g.height)
+        : "NEIN: Geometrie ist 0");
 });
 document.getElementById("b3").addEventListener("click", function () {
   var li = document.createElement("li");

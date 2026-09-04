@@ -77,9 +77,12 @@ const PROBE: &str = r#"
 // neuen Platzhalter einbaut, traegt ihn EIN. Sonst misst diese Probe wieder
 // sich selbst.
 var STUB = {
-  "getBoundingClientRect": 1, "getClientRects": 1, "offsetParent": 1,
-  "offsetWidth": 1, "offsetHeight": 1, "offsetTop": 1, "offsetLeft": 1,
-  "clientWidth": 1, "clientHeight": 1,
+  // 0.75.0 hat die Geometrie gebaut: `getBoundingClientRect`,
+  // `getClientRects`, `offset*` und `client*` antworten aus den Kaesten des
+  // letzten Layouts. Was hier bleibt, braucht Zahlen, die das Layout heute
+  // nicht fuehrt: die INHALTSgroesse mit Ueberlauf (`scroll*`) und einen
+  // Rollstand je Element.
+  "offsetParent": 1,
   "scrollWidth": 1, "scrollHeight": 1, "scrollTop": 1, "scrollLeft": 1
 };
 var missing = [], have = 0, total = 0;
