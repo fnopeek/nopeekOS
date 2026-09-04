@@ -38,6 +38,26 @@ pub struct Compiler {
     depth: usize,
 }
 
+/// Einen FUNKTIONSRUMPF uebersetzen.
+///
+/// Unterschied zum Programm: kein Abschlusswert (eine Funktion ohne `return`
+/// gibt `undefined`), und am Ende steht ein `Ret`, das genau das tut.
+/// Parameter und `this` liegen schon in der Umgebung, die `Interp::call_env`
+/// gebaut hat — der Rumpf faengt beim ersten Statement an.
+pub fn function(f: &Func) -> CompileResult<Chunk> {
+    if f.is_generator || f.is_async {
+        return Err(Unsupported("generator-or-async"));
+    }
+    let mut c = Compiler { chunk: Chunk::new(), loops: Vec::new(), depth: 0 };
+    for st in &f.body {
+        c.stmt_no_completion(st)?;
+    }
+    let k = c.chunk.konst(Value::Undefined);
+    c.chunk.emit(Op::Const(k));
+    c.chunk.emit(Op::Ret);
+    Ok(c.chunk)
+}
+
 /// Ein ganzes Programm uebersetzen. `Err` heisst: der Baumlaeufer macht es.
 pub fn program(prog: &Program) -> CompileResult<Chunk> {
     let mut c = Compiler { chunk: Chunk::new(), loops: Vec::new(), depth: 0 };
@@ -53,6 +73,20 @@ pub fn program(prog: &Program) -> CompileResult<Chunk> {
 
 impl Compiler {
     // ── Anweisungen ──────────────────────────────────────────────────────
+    /// Wie `stmt`, aber ohne Abschlusswert. In einer FUNKTION gibt es keinen —
+    /// ihr Wert ist ihr `return`, und ein `SetCompletion` je Anweisung waere
+    /// Arbeit fuer nichts.
+    fn stmt_no_completion(&mut self, st: &Stmt) -> CompileResult<()> {
+        match st {
+            Stmt::Expr(e) => {
+                self.expr(e)?;
+                self.chunk.emit(Op::Pop);
+                Ok(())
+            }
+            other => self.stmt(other),
+        }
+    }
+
     fn stmt(&mut self, st: &Stmt) -> CompileResult<()> {
         match st {
             Stmt::Empty | Stmt::Debugger => Ok(()),

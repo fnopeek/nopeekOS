@@ -195,8 +195,8 @@ pub struct Interp {
     /// zu tiefes JS-Programm zum Stapelueberlauf des Wirts — und das ist im
     /// Kernel ein Absturz, kein Fehler. Die Grenze ist deshalb Pflicht, nicht
     /// Komfort.
-    depth: usize,
-    max_depth: usize,
+    pub depth: usize,
+    pub max_depth: usize,
     /// Ausgefuehrte Anweisungen. Ohne Deckel haengt ein `while(true)` den
     /// ganzen Lauf auf — und ein Testlaeufer, der an EINEM Programm stehen
     /// bleibt, misst gar nichts mehr.
@@ -244,6 +244,22 @@ pub struct Interp {
     /// diesen Schalter muesste man den Unterschied erraten, und beim ersten
     /// Lauf waren es 62 Tests von 69 194 — die findet man nicht durch Lesen.
     pub vm_off: bool,
+    /// Uebersetzte Funktionsrumpfe, nach der Adresse ihres AST-Knotens.
+    ///
+    /// Ein `Rc<Func>` ist die Identitaet einer Funktion im Quelltext; derselbe
+    /// Rumpf wird bei jedem Aufruf gebraucht und darf nur EINMAL uebersetzt
+    /// werden. `None` heisst „schon versucht, geht nicht" — auch das gehoert
+    /// gemerkt, sonst uebersetzt eine Schleife bei jedem Umlauf vergeblich.
+    pub func_chunks: HashMap<usize, Option<Rc<super::code::Chunk>>>,
+    /// Aufrufe, die als RAHMEN liefen, und solche, die ueber den Rust-Stapel
+    /// mussten. Die zweite Zahl ist das, was Stufe 4 (Anhalten) noch im Weg
+    /// steht: was ueber Rust laeuft, kann nicht stehenbleiben.
+    pub vm_calls: u64,
+    /// Eingebaute, gebundene, Getter — die haben keinen Rumpf aus Befehlen
+    /// und werden nie einen haben. Sie gehoeren NICHT in denselben Nenner wie
+    /// eine JS-Funktion, die der Uebersetzer bloss noch nicht kann.
+    pub vm_calls_native: u64,
+    pub vm_calls_slow: u64,
     /// Siehe `Geometry`. `None` heisst: der Wirt hat keine eingereicht, und
     /// dann antwortet die Geometrie mit Nullen wie eh und je.
     pub geometry: Option<Geometry>,
@@ -333,6 +349,7 @@ impl Interp {
                  fake_now: 0.0, doc: None, next_sym: 0, sym_registry: HashMap::new(),
                  cookies: String::new(), cookie_sets: Vec::new(), style_ctx: None,
                  vm_ran: 0, vm_declined: 0, vm_decline: None, vm_off: false,
+                 func_chunks: HashMap::new(), vm_calls: 0, vm_calls_native: 0, vm_calls_slow: 0,
                  geometry: None,
                  live_dom: core::cell::RefCell::new(None),
                  jobs: alloc::collections::VecDeque::new(),
@@ -899,17 +916,7 @@ impl Interp {
                 self.call(&Value::Obj(t), bt, &ba)
             }
             Which::Js(d) => {
-                let env = Env::new(Some(d.env.clone()), true);
-                // Ein Pfeil bekommt KEIN eigenes `this` — dadurch findet
-                // `this_of` das der umgebenden Funktion.
-                env.borrow_mut().home = d.home_object.clone();
-                if !d.node.is_arrow {
-                    env.borrow_mut().this_val = Some(d.this_val.clone().unwrap_or(this_val));
-                    let ao = self.make_arguments(args);
-                    env.borrow_mut().vars.insert(Rc::from("arguments"),
-                        Binding { value: ao, mutable: true, initialized: true });
-                }
-                self.bind_params(&d.node.params, args, &env)?;
+                let env = self.call_env(&d, this_val, args)?;
                 match self.run_body(&d.node.body, &env) {
                     Ok(()) => Ok(Value::Undefined),
                     Err(Abrupt::Return(v)) => Ok(v),
@@ -917,6 +924,51 @@ impl Interp {
                 }
             }
         }
+    }
+
+    /// Die Umgebung, in der ein Aufruf laeuft — alles, was VOR dem ersten
+    /// Schritt des Rumpfes passiert: `this`, `arguments`, das Heimatobjekt,
+    /// die Parameter.
+    ///
+    /// Eigene Funktion, weil die Befehlsmaschine sie braucht: sie legt danach
+    /// einen RAHMEN an, statt den Rumpf ueber den Rust-Stapel zu fahren. Zwei
+    /// Umsetzungen dieses Vorspanns waeren zwei verschiedene Aufrufsemantiken,
+    /// und das ist die teuerste Sorte Unterschied.
+    pub fn call_env(&mut self, d: &Rc<FuncData>, this_val: Value, args: &[Value])
+        -> C<Rc<RefCell<Env>>> {
+        let env = Env::new(Some(d.env.clone()), true);
+        // Ein Pfeil bekommt KEIN eigenes `this` — dadurch findet `this_of`
+        // das der umgebenden Funktion.
+        env.borrow_mut().home = d.home_object.clone();
+        if !d.node.is_arrow {
+            env.borrow_mut().this_val = Some(d.this_val.clone().unwrap_or(this_val));
+            let ao = self.make_arguments(args);
+            env.borrow_mut().vars.insert(Rc::from("arguments"),
+                Binding { value: ao, mutable: true, initialized: true });
+        }
+        self.bind_params(&d.node.params, args, &env)?;
+        Ok(env)
+    }
+
+    /// Das Hochziehen eines Funktionsrumpfes — `var` und Funktionen nach vorn.
+    /// Fuer die Maschine, die den Rumpf danach als Befehle faehrt.
+    pub fn hoist_body(&mut self, body: &[Stmt], env: &Rc<RefCell<Env>>) -> C<()> {
+        self.hoist(body, env, env)
+    }
+
+    /// Der uebersetzte Rumpf dieser Funktion, oder `None`, wenn der
+    /// Uebersetzer absagt. Einmal je Funktion, dann gemerkt.
+    pub fn func_chunk(&mut self, f: &Rc<Func>) -> Option<Rc<super::code::Chunk>> {
+        if self.vm_off {
+            return None;
+        }
+        let key = Rc::as_ptr(f) as usize;
+        if let Some(c) = self.func_chunks.get(&key) {
+            return c.clone();
+        }
+        let c = super::compile::function(f).ok().map(Rc::new);
+        self.func_chunks.insert(key, c.clone());
+        c
     }
 
     fn make_arguments(&mut self, args: &[Value]) -> Value {
