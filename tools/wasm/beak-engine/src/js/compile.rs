@@ -9,6 +9,7 @@
 //! Die Absage-Namen sind Schluessel, keine Saetze: `test262` zaehlt sie, und
 //! die Rangliste sagt, was als naechstes uebersetzbar werden muss.
 
+use alloc::string::String;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 
@@ -29,6 +30,17 @@ struct Loop {
     /// die falsche, und eine Bindung aus dem Block ist danach draussen noch
     /// zu sehen — sechs annexB-Tests, die genau das pruefen.
     depth: usize,
+    /// Der Name, unter dem `break lbl` / `continue lbl` diesen Ausgang
+    /// findet. `None` heisst: nur ueber das unbenannte `break` erreichbar.
+    labels: Vec<String>,
+    /// Wieviele `for…of`/`for…in` beim Betreten offen waren.
+    ///
+    /// Dieselbe Buchhaltung wie `depth` fuer die Umgebungen, und aus demselben
+    /// Grund: ein `break lbl`/`continue lbl` springt an den `IterClose` der
+    /// INNEREN Schleife vorbei. Dann bleibt deren Iterator im Rahmen liegen —
+    /// ungeschlossen, und der naechste `IterNext` der aeusseren Schleife
+    /// findet den falschen. Ein test262-Fall hat genau das gesagt.
+    iters: usize,
     /// Ein `switch` ist BRECHBAR, aber nicht fortsetzbar: `break` gehoert ihm,
     /// `continue` der Schleife darunter. Ohne diese Unterscheidung liefe ein
     /// `continue` in einem `switch` innerhalb einer Schleife an den Anfang des
@@ -41,6 +53,8 @@ pub struct Compiler {
     loops: Vec<Loop>,
     /// Wieviele `PushEnv` gerade offen sind.
     depth: usize,
+    /// Wieviele Schleifeniteratoren gerade offen sind.
+    iters: usize,
     /// Uebersetzen wir gerade den Rumpf eines GENERATORS? Nur dort ist ein
     /// `yield` ein `Op::Yield`; in einem Pfeil INNERHALB eines Generators
     /// liest unser Parser `yield` ebenfalls als Yield-Ausdruck, und dessen
@@ -52,6 +66,22 @@ pub struct Compiler {
     /// Ueberlegung wie bei `in_gen`: ein `await` im Rumpf eines gewoehnlichen
     /// Pfeils darin ist ein eigener Chunk, der hier nein sagt.
     in_async: bool,
+    /// Offene Ausgaenge einer Optional-Kette (`a?.b.c`).
+    ///
+    /// Der Kurzschluss gehoert der GANZEN Kette, nicht dem einen Glied:
+    /// `a?.b.c` gibt `undefined`, wenn `a` fehlt — es fasst `.c` gar nicht
+    /// erst an. `Expr::Chain` macht die Klammer auf, jedes `?.` darin traegt
+    /// hier seinen Sprung ein, und beim Zumachen zeigen alle auf dasselbe
+    /// Ende. Jeder Sprung raeumt VORHER seinen eigenen Stapel ab, damit das
+    /// Ende nicht wissen muss, wieviel darunter lag.
+    chains: Vec<Vec<usize>>,
+    /// Der Name, den die naechste Schleife bekommt.
+    ///
+    /// `outer: for (…)` ist im Baum eine Marke UM eine Schleife, in der
+    /// Maschine aber gehoert der Name der SCHLEIFE — nur sie weiss, wohin ein
+    /// `continue outer` springt. Also legt die Marke ihn hier ab und die
+    /// Schleife nimmt ihn beim Anlegen mit.
+    pending_labels: Vec<String>,
     /// Wieviele `finally` gerade anhaengig sind.
     ///
     /// Ein `yield` darunter ist ABGELEHNT, und zwar aus demselben Grund wie
@@ -76,8 +106,8 @@ pub fn function(f: &Func) -> CompileResult<Chunk> {
     if f.is_async && f.is_generator {
         return Err(Unsupported("async-generator"));
     }
-    let mut c = Compiler { chunk: Chunk::new(), loops: Vec::new(), depth: 0,
-                           in_gen: f.is_generator, in_async: f.is_async, fin: 0 };
+    let mut c = Compiler { chunk: Chunk::new(), loops: Vec::new(), depth: 0, iters: 0,
+                           in_gen: f.is_generator, in_async: f.is_async, fin: 0, chains: Vec::new(), pending_labels: Vec::new() };
     for st in &f.body {
         c.stmt_no_completion(st)?;
     }
@@ -89,8 +119,8 @@ pub fn function(f: &Func) -> CompileResult<Chunk> {
 
 /// Ein ganzes Programm uebersetzen. `Err` heisst: der Baumlaeufer macht es.
 pub fn program(prog: &Program) -> CompileResult<Chunk> {
-    let mut c = Compiler { chunk: Chunk::new(), loops: Vec::new(), depth: 0,
-                           in_gen: false, in_async: false, fin: 0 };
+    let mut c = Compiler { chunk: Chunk::new(), loops: Vec::new(), depth: 0, iters: 0,
+                           in_gen: false, in_async: false, fin: 0, chains: Vec::new(), pending_labels: Vec::new() };
     // Hochziehen bleibt beim Baumlaeufer (`Interp::hoist`) — es arbeitet auf
     // der Umgebung, nicht auf dem Code, und ist damit fuer beide Maschinen
     // dasselbe. Hier nur der Rumpf.
@@ -157,7 +187,9 @@ impl Compiler {
                 let top = self.chunk.here();
                 self.expr(test)?;
                 let out = self.chunk.emit_jump(Op::JumpFalse);
-                self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(), depth: self.depth, brk_only: false });
+                let lbl = self.take_label();
+                self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(),
+                                       depth: self.depth, brk_only: false, labels: lbl, iters: self.iters });
                 self.stmt(body)?;
                 let l = self.loops.pop().unwrap();
                 for at in l.continues {
@@ -172,7 +204,9 @@ impl Compiler {
             }
             Stmt::DoWhile { body, test } => {
                 let top = self.chunk.here();
-                self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(), depth: self.depth, brk_only: false });
+                let lbl = self.take_label();
+                self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(),
+                                       depth: self.depth, brk_only: false, labels: lbl, iters: self.iters });
                 self.stmt(body)?;
                 let l = self.loops.pop().unwrap();
                 let cond = self.chunk.here();
@@ -219,7 +253,9 @@ impl Compiler {
                         Some(self.chunk.emit_jump(Op::JumpFalse))
                     }
                 };
-                self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(), depth: self.depth, brk_only: false });
+                let lbl = self.take_label();
+                self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(),
+                                       depth: self.depth, brk_only: false, labels: lbl, iters: self.iters });
                 self.stmt(body)?;
                 let l = self.loops.pop().unwrap();
                 let cont = self.chunk.here();
@@ -245,6 +281,8 @@ impl Compiler {
                 let Some(d) = self.loops.last().map(|l| l.depth) else {
                     return Err(Unsupported("break-outside-loop"));
                 };
+                let it = self.loops.last().unwrap().iters;
+                self.unwind_iters(it);
                 self.unwind_to(d);
                 let at = self.chunk.emit_jump(Op::Jump);
                 self.loops.last_mut().unwrap().breaks.push(at);
@@ -257,6 +295,7 @@ impl Compiler {
                 let Some(k) = self.loops.iter().rposition(|l| !l.brk_only) else {
                     return Err(Unsupported("continue-outside-loop"));
                 };
+                self.unwind_iters(self.loops[k].iters);
                 self.unwind_to(self.loops[k].depth);
                 let at = self.chunk.emit_jump(Op::Jump);
                 self.loops[k].continues.push(at);
@@ -281,8 +320,58 @@ impl Compiler {
             // Funktionsdeklarationen erledigt das Hochziehen, genau wie beim
             // Baumlaeufer — hier ist nichts zu tun.
             Stmt::Func(_) => Ok(()),
-            Stmt::Labeled { .. } => Err(Unsupported("label")),
-            Stmt::Break(Some(_)) | Stmt::Continue(Some(_)) => Err(Unsupported("labeled-jump")),
+            // Eine Marke vor einer SCHLEIFE gehoert der Schleife (nur sie hat
+            // einen Fortsetzungspunkt); vor allem anderen ist sie selbst ein
+            // Ausgang, den nur ein `break lbl` trifft.
+            Stmt::Labeled { label, body } => {
+                // **Eine KETTE von Marken gehoert ganz der Schleife darunter.**
+                // `a: b: for (…)` traegt beide, und `continue a` ist gueltig.
+                // Der erste Entwurf gab nur die innerste weiter und lehnte
+                // `continue a` ab — node sagte prompt etwas anderes.
+                let mut labels = alloc::vec![label.clone()];
+                let mut inner: &Stmt = body;
+                while let Stmt::Labeled { label: l2, body: b2 } = inner {
+                    labels.push(l2.clone());
+                    inner = b2;
+                }
+                if matches!(inner, Stmt::While { .. } | Stmt::DoWhile { .. }
+                            | Stmt::For { .. } | Stmt::ForIn { .. } | Stmt::ForOf { .. }) {
+                    self.pending_labels = labels;
+                    let r = self.stmt(inner);
+                    self.pending_labels.clear();
+                    return r;
+                }
+                // Sonst ist die Marke selbst der Ausgang — nur ein `break lbl`
+                // trifft sie, ein `continue` braucht einen Fortsetzungspunkt.
+                self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(),
+                                       depth: self.depth, brk_only: true, labels, iters: self.iters });
+                let r = self.stmt(inner);
+                let l = self.loops.pop().unwrap();
+                r?;
+                for at in l.breaks { self.chunk.patch(at); }
+                Ok(())
+            }
+            Stmt::Break(Some(l)) => {
+                let Some(k) = self.loops.iter().rposition(|x| x.labels.iter().any(|n| n == l))
+                else { return Err(Unsupported("break-unknown-label")) };
+                self.unwind_iters(self.loops[k].iters);
+                self.unwind_to(self.loops[k].depth);
+                let at = self.chunk.emit_jump(Op::Jump);
+                self.loops[k].breaks.push(at);
+                Ok(())
+            }
+            Stmt::Continue(Some(l)) => {
+                // Ein `continue` braucht einen Fortsetzungspunkt, den hat nur
+                // eine Schleife — eine Marke vor einem Block ist keiner.
+                let Some(k) = self.loops.iter().rposition(
+                    |x| !x.brk_only && x.labels.iter().any(|n| n == l))
+                else { return Err(Unsupported("continue-unknown-label")) };
+                self.unwind_iters(self.loops[k].iters);
+                self.unwind_to(self.loops[k].depth);
+                let at = self.chunk.emit_jump(Op::Jump);
+                self.loops[k].continues.push(at);
+                Ok(())
+            }
             Stmt::Switch { disc, cases } => self.switch(disc, cases),
             Stmt::Try { block, handler, finalizer } => self.try_stmt(block, handler, finalizer),
             Stmt::ForIn { left, right, body } => self.for_in(left, right, body),
@@ -528,10 +617,13 @@ impl Compiler {
     fn for_of(&mut self, left: &ForHead, right: &Expr, body: &Stmt) -> CompileResult<()> {
         self.expr(right)?;
         self.chunk.emit(Op::IterAll);
+        self.iters += 1;
         let depth0 = self.depth;
         let top = self.chunk.here();
         let done = self.chunk.emit_jump(Op::IterNext);
-        self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(), depth: depth0, brk_only: false });
+        let lbl = self.take_label();
+        self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(),
+                               depth: depth0, brk_only: false, labels: lbl, iters: self.iters });
         // Je Umlauf eine eigene Umgebung: eine Schliessung im Rumpf soll den
         // Wert DIESES Umlaufs festhalten, nicht den letzten.
         let empty = self.chunk.block(Vec::new());
@@ -554,6 +646,7 @@ impl Compiler {
         self.chunk.patch(done);
         self.chunk.emit(Op::IterDrop);
         self.chunk.patch(to_end);
+        self.iters -= 1;
         Ok(())
     }
 
@@ -566,11 +659,13 @@ impl Compiler {
     fn for_in(&mut self, left: &ForHead, right: &Expr, body: &Stmt) -> CompileResult<()> {
         self.expr(right)?;
         self.chunk.emit(Op::ForInAll);
+        self.iters += 1;
         let depth0 = self.depth;
         let top = self.chunk.here();
         let done = self.chunk.emit_jump(Op::ForInNext);
+        let lbl = self.take_label();
         self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(),
-                               depth: depth0, brk_only: false });
+                               depth: depth0, brk_only: false, labels: lbl, iters: self.iters });
         // Je Umlauf eine eigene Umgebung — wie bei `for…of`, und aus
         // demselben Grund: eine Schliessung im Rumpf haelt den Schluessel
         // DIESES Umlaufs fest.
@@ -588,6 +683,7 @@ impl Compiler {
         for at in l.breaks { self.chunk.patch(at); }
         self.chunk.patch(done);
         self.chunk.emit(Op::IterDrop);
+        self.iters -= 1;
         Ok(())
     }
 
@@ -615,8 +711,9 @@ impl Compiler {
         let b = self.block_decls_of(cases.iter().flat_map(|c| c.body.iter()))?;
         self.chunk.emit(Op::PushEnv(b));
         self.depth += 1;
+        let lbl = self.take_label();
         self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(),
-                               depth: self.depth, brk_only: true });
+                               depth: self.depth, brk_only: true, labels: lbl, iters: self.iters });
 
         // Die Bedingungskette. Jeder Treffer springt in seine Weiche.
         let mut hits = Vec::new();
@@ -859,6 +956,16 @@ impl Compiler {
                 };
                 self.compound(*op, target, right)
             }
+            Expr::Member { obj, prop, optional: false } if matches!(**obj, Expr::Super) => {
+                match &**prop {
+                    MemberProp::Ident(n) => {
+                        let i = self.chunk.name(n);
+                        self.chunk.emit(Op::SuperGet(i));
+                        Ok(())
+                    }
+                    _ => Err(Unsupported("super-computed")),
+                }
+            }
             Expr::Member { obj, prop, optional: false } => {
                 self.expr(obj)?;
                 match &**prop {
@@ -874,7 +981,56 @@ impl Compiler {
                     }
                 }
             }
-            Expr::Member { optional: true, .. } | Expr::Chain(_) => Err(Unsupported("optional-chain")),
+            // Die Klammer um eine Optional-Kette: alle Kurzschluesse darin
+            // enden HIER, nicht am einzelnen Glied.
+            Expr::Chain(inner) => {
+                self.chains.push(Vec::new());
+                let r = self.expr(inner);
+                let exits = self.chains.pop().unwrap();
+                r?;
+                for at in exits { self.chunk.patch(at); }
+                Ok(())
+            }
+            Expr::Member { obj, prop, optional: true } => {
+                if self.chains.is_empty() { return Err(Unsupported("optional-outside-chain")) }
+                self.expr(obj)?;
+                self.short_circuit(1)?;
+                match &**prop {
+                    MemberProp::Ident(_) | MemberProp::Private(_) => {
+                        let i = self.member_name(prop);
+                        self.chunk.emit(Op::GetProp(i));
+                    }
+                    MemberProp::Computed(k) => {
+                        self.expr(k)?;
+                        self.chunk.emit(Op::GetIndex);
+                    }
+                }
+                Ok(())
+            }
+            Expr::Call { callee, args, optional: false } if matches!(**callee, Expr::Super) => {
+                if Self::args_have_spread(args) { return Err(Unsupported("super-spread")) }
+                let n = self.plain_args(args)?;
+                self.chunk.emit(Op::SuperCall(n));
+                Ok(())
+            }
+            Expr::Call { callee, args, optional: false }
+                if matches!(&**callee, Expr::Member { obj, optional: false, .. }
+                            if matches!(**obj, Expr::Super)) => {
+                let Expr::Member { prop, .. } = &**callee else { unreachable!() };
+                let MemberProp::Ident(n) = &**prop else {
+                    return Err(Unsupported("super-computed"));
+                };
+                let i = self.chunk.name(n);
+                self.chunk.emit(Op::SuperCallee(i));
+                if Self::args_have_spread(args) {
+                    self.args_as_array(args)?;
+                    self.chunk.emit(Op::CallSpread(i));
+                } else {
+                    let a = self.plain_args(args)?;
+                    self.chunk.emit(Op::Call { argc: a, name: i });
+                }
+                Ok(())
+            }
             Expr::Call { callee, args, optional: false } => {
                 // Der Empfaenger gehoert zum Aufruf: `o.f()` ruft mit `o` als
                 // `this`, `f()` mit undefined. Beides wird HIER entschieden,
@@ -931,7 +1087,41 @@ impl Compiler {
                 }
                 Ok(())
             }
-            Expr::Call { optional: true, .. } => Err(Unsupported("optional-call")),
+            // `f?.()` — hier liegen callee UND Empfaenger, also raeumt der
+            // Kurzschluss zwei Werte ab.
+            Expr::Call { callee, args, optional: true } => {
+                if self.chains.is_empty() { return Err(Unsupported("optional-outside-chain")) }
+                match &**callee {
+                    Expr::Member { obj, prop, optional: false } => {
+                        let i = self.member_name(prop);
+                        self.expr(obj)?;
+                        self.chunk.emit(Op::Dup);
+                        match &**prop {
+                            MemberProp::Computed(k) => {
+                                self.expr(k)?;
+                                self.chunk.emit(Op::GetIndex);
+                            }
+                            _ => { self.chunk.emit(Op::GetProp(i)); }
+                        }
+                        self.short_circuit(2)?;
+                        self.chunk.emit(Op::Swap);
+                    }
+                    _ => {
+                        self.expr(callee)?;
+                        self.short_circuit(1)?;
+                        let k = self.chunk.konst(Value::Undefined);
+                        self.chunk.emit(Op::Const(k));
+                    }
+                }
+                if Self::args_have_spread(args) {
+                    self.args_as_array(args)?;
+                    self.chunk.emit(Op::CallSpread(u32::MAX));
+                } else {
+                    let a = self.plain_args(args)?;
+                    self.chunk.emit(Op::Call { argc: a, name: u32::MAX });
+                }
+                Ok(())
+            }
             Expr::New { callee, args } => {
                 self.expr(callee)?;
                 if Self::args_have_spread(args) {
@@ -1196,7 +1386,26 @@ impl Compiler {
                         if !prefix { self.chunk.emit(Op::Pop); }
                         Ok(())
                     }
-                    MemberProp::Computed(_) => Err(Unsupported("update-computed")),
+                    // `o[k]++` — dieselbe Regel: Objekt und Schluessel nur
+                    // EINMAL. Der alte Wert ist das Ergebnis und muss unter
+                    // beiden hindurch nach unten.
+                    MemberProp::Computed(k) => {
+                        self.expr(k)?;
+                        self.chunk.emit(Op::ToKey);
+                        self.chunk.emit(Op::Dup2);
+                        self.chunk.emit(Op::GetIndex);
+                        self.chunk.emit(Op::Un(UnaryOp::Plus));
+                        if !prefix {
+                            self.chunk.emit(Op::Dup);
+                            self.chunk.emit(Op::Rot4);
+                        }
+                        let c = self.chunk.konst(Value::Num(d));
+                        self.chunk.emit(Op::Const(c));
+                        self.chunk.emit(Op::Bin(BinOp::Add));
+                        self.chunk.emit(Op::SetIndex);
+                        if !prefix { self.chunk.emit(Op::Pop); }
+                        Ok(())
+                    }
                 }
             }
             _ => Err(Unsupported("update-target")),
@@ -1209,19 +1418,59 @@ impl Compiler {
         // Die kurzschliessenden Formen werten die Rechte NUR aus, wenn sie
         // gebraucht wird: `a ||= b` darf `b` nicht anfassen, wenn `a` wahr ist.
         if matches!(op, AssignOp::And | AssignOp::Or | AssignOp::Nullish) {
-            let Expr::Ident(n) = target else { return Err(Unsupported("logical-assign-member")) };
-            let i = self.chunk.name(n);
-            self.chunk.emit(Op::LoadVar(i));
-            let at = match op {
-                AssignOp::And => self.chunk.emit_jump(Op::JumpFalseKeep),
-                AssignOp::Or => self.chunk.emit_jump(Op::JumpTrueKeep),
-                _ => self.chunk.emit_jump(Op::JumpNullishKeep),
+            let jump = |c: &mut Compiler| match op {
+                AssignOp::And => c.chunk.emit_jump(Op::JumpFalseKeep),
+                AssignOp::Or => c.chunk.emit_jump(Op::JumpTrueKeep),
+                _ => c.chunk.emit_jump(Op::JumpNullishKeep),
             };
-            self.chunk.emit(Op::Pop);
-            self.expr(right)?;
-            self.chunk.emit(Op::StoreVar(i));
-            self.chunk.patch(at);
-            return Ok(());
+            match target {
+                Expr::Ident(n) => {
+                    let i = self.chunk.name(n);
+                    self.chunk.emit(Op::LoadVar(i));
+                    let at = jump(self);
+                    self.chunk.emit(Op::Pop);
+                    self.expr(right)?;
+                    self.chunk.emit(Op::StoreVar(i));
+                    self.chunk.patch(at);
+                    return Ok(());
+                }
+                // `o.x ||= v` und `o[k] ||= v`. Objekt und Schluessel werden
+                // EINMAL ausgewertet und liegen unter dem gelesenen Wert; wird
+                // nicht geschrieben, muessen sie wieder weg — deshalb der
+                // Umweg ueber zwei Ausgaenge statt eines Sprungs.
+                Expr::Member { obj, prop, optional: false } => {
+                    let computed = matches!(&**prop, MemberProp::Computed(_));
+                    let i = self.member_name(prop);
+                    self.expr(obj)?;
+                    if let MemberProp::Computed(k) = &**prop {
+                        self.expr(k)?;
+                        self.chunk.emit(Op::ToKey);
+                        self.chunk.emit(Op::Dup2);
+                        self.chunk.emit(Op::GetIndex);
+                    } else {
+                        self.chunk.emit(Op::Dup);
+                        self.chunk.emit(Op::GetProp(i));
+                    }
+                    let keep = jump(self);
+                    self.chunk.emit(Op::Pop);
+                    self.expr(right)?;
+                    if computed { self.chunk.emit(Op::SetIndex); }
+                    else { self.chunk.emit(Op::SetProp(i)); }
+                    let done = self.chunk.emit_jump(Op::Jump);
+                    // Der Kurzschluss: der gelesene Wert ist das Ergebnis,
+                    // Objekt (und Schluessel) darunter gehoeren weggeraeumt.
+                    self.chunk.patch(keep);
+                    self.chunk.emit(Op::Swap);
+                    self.chunk.emit(Op::Pop);
+                    if computed {
+                        self.chunk.emit(Op::Swap);
+                        self.chunk.emit(Op::Pop);
+                    }
+                    self.chunk.patch(done);
+                    return Ok(());
+                }
+                _ => return Err(Unsupported("logical-assign-target")),
+            }
         }
         let bop = match op {
             AssignOp::Add => BinOp::Add, AssignOp::Sub => BinOp::Sub,
@@ -1253,7 +1502,19 @@ impl Compiler {
                     self.chunk.emit(Op::SetProp(i));
                     Ok(())
                 }
-                _ => Err(Unsupported("compound-computed")),
+                // `o[k] += v`: Objekt und Schluessel EINMAL auswerten, dann
+                // verdoppeln — `o[i++] += 1` darf `i` nicht zweimal zaehlen.
+                MemberProp::Computed(k) => {
+                    self.expr(obj)?;
+                    self.expr(k)?;
+                    self.chunk.emit(Op::ToKey);
+                    self.chunk.emit(Op::Dup2);
+                    self.chunk.emit(Op::GetIndex);
+                    self.expr(right)?;
+                    self.chunk.emit(Op::Bin(bop));
+                    self.chunk.emit(Op::SetIndex);
+                    Ok(())
+                }
             },
             _ => Err(Unsupported("compound-target")),
         }
@@ -1261,6 +1522,15 @@ impl Compiler {
 
     /// Alle Umgebungen schliessen, die zwischen HIER und `depth` offen sind.
     /// Ein Sprung aus einem Block heraus laesst sie sonst stehen.
+    /// Alle Schleifeniteratoren schliessen, die zwischen HIER und `n` offen
+    /// sind. Der Iterator der ZIELschleife bleibt: bei `continue` laeuft sie
+    /// weiter, bei `break` schliesst ihn ihr eigener Nachspann.
+    fn unwind_iters(&mut self, n: usize) {
+        for _ in n..self.iters {
+            self.chunk.emit(Op::IterClose);
+        }
+    }
+
     fn unwind_to(&mut self, depth: usize) {
         for _ in depth..self.depth {
             self.chunk.emit(Op::PopEnv);
@@ -1285,6 +1555,28 @@ impl Compiler {
             }
             MemberProp::Computed(_) => u32::MAX,
         }
+    }
+
+    /// Der Kurzschluss eines `?.`: ist der Wert oben nullish, raeumt er
+    /// `depth` Werte ab, legt `undefined` hin und springt ans Ende der Kette.
+    ///
+    /// Aufgeraeumt wird HIER und nicht am Ende, weil nur hier feststeht,
+    /// wieviel unter dem geprueften Wert liegt — bei `a?.b` ist es nichts,
+    /// bei `o.f?.()` liegt der Empfaenger darunter.
+    /// Den vorgemerkten Namen abholen — jede Schleife genau einmal.
+    fn take_label(&mut self) -> Vec<String> {
+        core::mem::take(&mut self.pending_labels)
+    }
+
+    fn short_circuit(&mut self, depth: usize) -> CompileResult<()> {
+        let go_on = self.chunk.emit_jump(Op::JumpNullishKeep);
+        for _ in 0..depth { self.chunk.emit(Op::Pop); }
+        let k = self.chunk.konst(Value::Undefined);
+        self.chunk.emit(Op::Const(k));
+        let out = self.chunk.emit_jump(Op::Jump);
+        self.chains.last_mut().unwrap().push(out);
+        self.chunk.patch(go_on);
+        Ok(())
     }
 
     fn patch_to(&mut self, at: usize, target: u32) {

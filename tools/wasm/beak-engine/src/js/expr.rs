@@ -122,6 +122,44 @@ impl Interp {
     }
 
     /// Der Prototyp, auf dem `super` sucht: der des Heimatobjekts.
+    /// `super(...)` — den Elternkonstruktor auf DIESEM `this` fahren.
+    ///
+    /// Kein eigener Empfaenger, kein eigenes Objekt: das gibt es schon,
+    /// `construct` hat es angelegt, bevor der Koerper lief. Eigene Funktion,
+    /// weil die Befehlsmaschine sie ruft — und weil die Instanzfelder daran
+    /// haengen.
+    pub fn super_call(&mut self, args: &[Value], env: &Rc<RefCell<Env>>) -> C<Value> {
+        let this_val = env_this(env);
+        let parent = self.super_parent(env)?;
+        let ctor = self.get(&Value::Obj(parent), "constructor")?;
+        if !self.is_callable(&ctor) {
+            return self.type_err("super: the parent class has no constructor");
+        }
+        self.call(&ctor, this_val.clone(), args)?;
+        // **Jetzt erst die eigenen Instanzfelder.** Die Spec legt sie nach dem
+        // Elternkonstruktor an, und der Unterschied ist sichtbar: ein
+        // Initialisierer darf ein Feld der Elternklasse lesen. Welche Klasse
+        // „eigene" ist, sagt das Heimatobjekt — sein `constructor` ist der
+        // Konstruktor, in dem wir stehen.
+        if let Some(home) = env_home(env) {
+            let own = self.get(&Value::Obj(home), "constructor")?;
+            if let Value::Obj(co) = &own {
+                let d = match &co.borrow().kind {
+                    ObjKind::Function(d) => Some(d.clone()),
+                    _ => None,
+                };
+                if let Some(d) = d { self.init_fields(&d, &this_val)?; }
+            }
+        }
+        Ok(Value::Undefined)
+    }
+
+    /// `super.k` — der Wert kommt von OBEN, `this` bleibt unten. Eigene
+    /// Funktion, weil beide Maschinen sie rufen.
+    pub fn super_get(&mut self, key: &str, env: &Rc<RefCell<Env>>) -> C<(Value, Value)> {
+        self.super_lookup(key, env)
+    }
+
     fn super_parent(&mut self, env: &Rc<RefCell<Env>>) -> C<Gc> {
         let Some(home) = env_home(env) else {
             return self.type_err("'super' outside of a method");
@@ -179,30 +217,8 @@ impl Interp {
         // Kein eigener Empfaenger, kein eigenes Objekt: das Objekt gibt es
         // schon, `construct` hat es angelegt, bevor der Koerper lief.
         if matches!(callee, Expr::Super) {
-            let this_val = env_this(env);
-            let parent = self.super_parent(env)?;
-            let ctor = self.get(&Value::Obj(parent), "constructor")?;
-            if !self.is_callable(&ctor) {
-                return self.type_err("super: the parent class has no constructor");
-            }
             let a = self.eval_args(args, env)?;
-            self.call(&ctor, this_val.clone(), &a)?;
-            // **Jetzt erst die eigenen Instanzfelder.** Die Spec legt sie
-            // nach dem Elternkonstruktor an, und der Unterschied ist
-            // sichtbar: ein Initialisierer darf ein Feld der Elternklasse
-            // lesen. Welche Klasse „eigene" ist, sagt das Heimatobjekt —
-            // sein `constructor` ist der Konstruktor, in dem wir stehen.
-            if let Some(home) = env_home(env) {
-                let own = self.get(&Value::Obj(home), "constructor")?;
-                if let Value::Obj(co) = &own {
-                    let d = match &co.borrow().kind {
-                        ObjKind::Function(d) => Some(d.clone()),
-                        _ => None,
-                    };
-                    if let Some(d) = d { self.init_fields(&d, &this_val)?; }
-                }
-            }
-            return Ok(Value::Undefined);
+            return self.super_call(&a, env);
         }
         let (this_val, f) = match callee {
             Expr::Member { obj, prop, optional: mopt } if matches!(**obj, Expr::Super) => {

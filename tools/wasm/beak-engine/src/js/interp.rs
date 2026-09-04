@@ -266,6 +266,14 @@ pub struct Interp {
     /// Absage war damit UNSICHTBAR. Eine Rangfolge, die den halben Korpus
     /// nicht sieht, ist keine.
     pub func_declines: HashMap<&'static str, u64>,
+    /// Die Marken, die zur naechsten Schleife gehoeren.
+    ///
+    /// `outer: for (…)` ist im Baum eine Marke UM eine Schleife; ein
+    /// `continue outer` gehoert aber der SCHLEIFE — nur sie hat einen
+    /// Fortsetzungspunkt. Also legt die Marke den Namen hier ab und die
+    /// Schleife holt ihn beim Betreten. Ohne das lief ein `continue lbl` dem
+    /// Baumlaeufer durch bis nach oben und beendete das Programm STILL.
+    pub pending_labels: Vec<String>,
     /// Aufrufe, die als RAHMEN liefen, und solche, die ueber den Rust-Stapel
     /// mussten. Die zweite Zahl ist das, was Stufe 4 (Anhalten) noch im Weg
     /// steht: was ueber Rust laeuft, kann nicht stehenbleiben.
@@ -364,7 +372,7 @@ impl Interp {
                  fake_now: 0.0, doc: None, next_sym: 0, sym_registry: HashMap::new(),
                  cookies: String::new(), cookie_sets: Vec::new(), style_ctx: None,
                  vm_ran: 0, vm_declined: 0, vm_decline: None, vm_off: false,
-                 func_chunks: HashMap::new(), func_declines: HashMap::new(), vm_calls: 0, vm_calls_native: 0, vm_calls_slow: 0,
+                 func_chunks: HashMap::new(), func_declines: HashMap::new(), pending_labels: Vec::new(), vm_calls: 0, vm_calls_native: 0, vm_calls_slow: 0,
                  geometry: None,
                  live_dom: core::cell::RefCell::new(None),
                  jobs: alloc::collections::VecDeque::new(),

@@ -45,7 +45,13 @@ impl Interp {
             Stmt::Break(l) => Err(Abrupt::Break(l.clone())),
             Stmt::Continue(l) => Err(Abrupt::Continue(l.clone())),
             Stmt::Labeled { label, body } => {
-                match self.exec(body, env) {
+                // Den Namen fuer die Schleife darunter ablegen — sie holt ihn
+                // beim Betreten ab (`Interp::pending_labels`). War der Rumpf
+                // keine Schleife, holt ihn niemand, und er gehoert wieder weg.
+                self.pending_labels.push(label.clone());
+                let r = self.exec(body, env);
+                self.pending_labels.retain(|x| x != label);
+                match r {
                     // Ein `break lbl` endet GENAU hier; ein `continue lbl`
                     // gehoert der Schleife darunter und wird dort gefangen.
                     Err(Abrupt::Break(Some(l))) if l == *label => Ok(None),
@@ -53,10 +59,13 @@ impl Interp {
                 }
             }
             Stmt::While { test, body } => {
+                let mine = core::mem::take(&mut self.pending_labels);
                 while self.eval(test, env)?.truthy() {
                     match self.exec(body, env) {
                         Err(Abrupt::Break(None)) => break,
+                        Err(Abrupt::Break(Some(l))) if mine.iter().any(|x| *x == l) => break,
                         Err(Abrupt::Continue(None)) => continue,
+                        Err(Abrupt::Continue(Some(l))) if mine.iter().any(|x| *x == l) => continue,
                         Err(e) => return Err(e),
                         Ok(_) => {}
                     }
@@ -64,10 +73,13 @@ impl Interp {
                 Ok(None)
             }
             Stmt::DoWhile { body, test } => {
+                let mine = core::mem::take(&mut self.pending_labels);
                 loop {
                     match self.exec(body, env) {
                         Err(Abrupt::Break(None)) => break,
+                        Err(Abrupt::Break(Some(l))) if mine.iter().any(|x| *x == l) => break,
                         Err(Abrupt::Continue(None)) => {}
+                        Err(Abrupt::Continue(Some(l))) if mine.iter().any(|x| *x == l) => {}
                         Err(e) => return Err(e),
                         Ok(_) => {}
                     }
@@ -118,6 +130,7 @@ impl Interp {
         // Durchlauf neu, damit eine Closure im Rumpf den Wert DIESES Durchlaufs
         // festhaelt. Ohne das teilen sich alle Closures dieselbe Zelle — der
         // Klassiker, an dem `for (var i…)` scheitert.
+        let mine = core::mem::take(&mut self.pending_labels);
         let head = Env::new(Some(env.clone()), false);
         let mut per_iter: Vec<Rc<str>> = Vec::new();
         if let Some(i) = init {
@@ -156,7 +169,9 @@ impl Interp {
             }
             match r {
                 Err(Abrupt::Break(None)) => break,
+                Err(Abrupt::Break(Some(l))) if mine.iter().any(|x| *x == l) => break,
                 Err(Abrupt::Continue(None)) => {}
+                Err(Abrupt::Continue(Some(l))) if mine.iter().any(|x| *x == l) => {}
                 Err(e) => return Err(e),
                 Ok(_) => {}
             }
@@ -187,6 +202,7 @@ impl Interp {
 
     fn exec_for_in(&mut self, left: &ForHead, right: &Expr, body: &Stmt,
                    env: &Rc<RefCell<Env>>) -> C<Option<Value>> {
+        let mine = core::mem::take(&mut self.pending_labels);
         let obj = self.eval(right, env)?;
         // Dieselbe Hilfe wie die Befehlsmaschine — siehe `Interp::for_in_keys`.
         let keys = self.for_in_keys(&obj)?;
@@ -195,7 +211,9 @@ impl Interp {
             self.for_head_bind(left, Value::Str(k), &inner)?;
             match self.exec(body, &inner) {
                 Err(Abrupt::Break(None)) => break,
+                Err(Abrupt::Break(Some(l))) if mine.iter().any(|x| *x == l) => break,
                 Err(Abrupt::Continue(None)) => continue,
+                Err(Abrupt::Continue(Some(l))) if mine.iter().any(|x| *x == l) => continue,
                 Err(e) => return Err(e),
                 Ok(_) => {}
             }
@@ -214,6 +232,7 @@ impl Interp {
     /// sonst bleiben fremde `finally`-Bloecke liegen.
     fn exec_for_of(&mut self, left: &ForHead, right: &Expr, body: &Stmt,
                    env: &Rc<RefCell<Env>>) -> C<Option<Value>> {
+        let mine = core::mem::take(&mut self.pending_labels);
         let src = self.eval(right, env)?;
         let it = self.get_iterator(&src)?;
         loop {
@@ -225,7 +244,11 @@ impl Interp {
             }
             match self.exec(body, &inner) {
                 Err(Abrupt::Break(None)) => { self.iter_close(&it); break }
+                Err(Abrupt::Break(Some(l))) if mine.iter().any(|x| *x == l) => {
+                    self.iter_close(&it); break
+                }
                 Err(Abrupt::Continue(None)) => continue,
+                Err(Abrupt::Continue(Some(l))) if mine.iter().any(|x| *x == l) => continue,
                 Err(e) => { self.iter_close(&it); return Err(e) }
                 Ok(_) => {}
             }
