@@ -342,7 +342,7 @@ impl ElemKind {
                             let d = v - f;
                             let r = if d < 0.5 { f } else if d > 0.5 { f + 1.0 }
                                     else if (f as i64) % 2 == 0 { f } else { f + 1.0 };
-                            r as u8
+                            to_uint32(r) as u8
                         };
             }
             ElemKind::F32 => put(b, 4, (v as f32).to_bits() as u64),
@@ -361,13 +361,17 @@ impl ElemKind {
 /// (NaN und Unendlich zu 0, dann abschneiden, dann modulo) an neun Stellen
 /// dieselbe ist.
 pub fn to_uint_wrap(v: f64, bits: usize) -> u64 {
-    if !v.is_finite() || v == 0.0 { return 0 }
-    let t = libm::trunc(v);
-    let m = libm::pow(2.0, bits as f64);
-    // `rem_euclid` gibt es in `no_std` nicht — dieselbe Rechnung von Hand.
-    let mut r = libm::fmod(t, m);
-    if r < 0.0 { r += m; }
-    r as u64
+    // **Ueber `to_uint32`, nicht ueber einen eigenen f64→u64-Cast.** Der
+    // uebersetzt zu `i64.trunc_sat_f64_u`, und forge kann diesen Befehl
+    // nicht — ein Modul mit ihm bliebe AM GERAET beim ersten Aufruf der
+    // Stelle stehen, nicht beim Laden. Das forge-Tor hat ihn gemeldet, bevor
+    // irgendetwas signiert war; ohne das Tor waere er in einer Freigabe
+    // gelandet und erst beim Benutzen aufgefallen.
+    //
+    // Die Rechnung ist dieselbe: `ToUint32` schneidet ab und rechnet modulo
+    // 2^32, und alles darunter ist ein Ausschnitt davon.
+    let full = to_uint32(v) as u64;
+    if bits >= 32 { full } else { full & ((1u64 << bits) - 1) }
 }
 
 /// Eine SICHT auf einen Puffer.
