@@ -423,6 +423,7 @@ fn set_url(s: &str) {
         core::ptr::addr_of_mut!(HOVER_REFUSED).write(false);
         core::ptr::addr_of_mut!(HOVER_SAID_FAST).write(false);
         core::ptr::addr_of_mut!(HOVER_SAID_SLOW).write(false);
+        core::ptr::addr_of_mut!(CTL_BAIL_SAID).write(false);
         core::ptr::addr_of_mut!(LAST_LAYOUT_MS).write(0);
     }
 }
@@ -2535,9 +2536,23 @@ fn restate_control(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>,
                    state: &FormState, why: &str) {
     let done = cache.as_mut().is_some_and(|(lay, ..)| engine.repaint_controls(lay, state));
     if !done {
+        // EINMAL je Seite sagen, WARUM ausgelegt wird. Ohne diese Zeile sieht
+        // ein Schnellweg, der nie laeuft, genauso aus wie einer, der nie
+        // gebraucht wurde — und genau so ist er drei Versionen lang tot
+        // gewesen ([[feedback_the_fast_path_must_say_it_ran]]).
+        say_ctl_bail_once(engine.repaint_bail());
         bump_content_gen(why);
     }
     mark_dirty();
+}
+
+static mut CTL_BAIL_SAID: bool = false;
+fn say_ctl_bail_once(why: &str) {
+    if unsafe { core::ptr::addr_of!(CTL_BAIL_SAID).read() } || why.is_empty() {
+        return;
+    }
+    unsafe { core::ptr::addr_of_mut!(CTL_BAIL_SAID).write(true) };
+    log(&alloc::format!("[beak] Steuerelement neu malen geht nicht: {why}"));
 }
 
 fn handle(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32, u32)>, page: &mut Page) -> bool {

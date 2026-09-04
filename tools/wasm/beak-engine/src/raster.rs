@@ -229,6 +229,28 @@ const DOC_SLOTS: usize = 3;
 ///
 /// Front means current: every reader takes index 0, so a hit has to be
 /// promoted and not merely found.
+/// Der Baum, aus dem das LETZTE Layout gebaut wurde.
+///
+/// **Der Grund, warum das eine eigene Funktion ist:** `layout_forms` umgeht den
+/// Parse-Zwischenspeicher, sobald ein Skript einen Baum zurueckgeschrieben hat
+/// (`let dom_hit = scripted || promote(…)`). Damit bleibt `self.dom` auf jeder
+/// Seite mit Skripten LEER — und beide Schnellwege, die ihn lasen, gaben
+/// stillschweigend auf. Der Hover-Weg (gemessen 0,16 ms gegen 24 ms Layout)
+/// und der Steuerelement-Weg liefen auf keiner echten Seite.
+///
+/// Gemerkt hat es niemand, weil der eine Weg nichts sagte und der andere
+/// seinen Grund nur im Fehlerfall meldete
+/// ([[feedback-the-fast-path-must-say-it-ran]]).
+fn current_dom<'a>(
+    scripted: &'a Option<crate::dom::Dom>,
+    cached: &'a alloc::vec::Vec<(u64, crate::dom::Dom)>,
+) -> Option<&'a crate::dom::Dom> {
+    match scripted {
+        Some(d) => Some(d),
+        None => cached.first().map(|(_, d)| d),
+    }
+}
+
 fn promote<T>(slots: &mut alloc::vec::Vec<(u64, T)>, key: u64) -> bool {
     match slots.iter().position(|(k, _)| *k == key) {
         Some(0) => true,
@@ -356,10 +378,15 @@ impl Engine {
     /// Wikipedia kostete jedes davon 280 ms.
     pub fn repaint_controls(&self, lay: &mut Layout, state: &crate::forms::FormState) -> bool {
         let held = self.sheet.borrow();
+        let scripted = self.scripted.borrow();
         let held_dom = self.dom.borrow();
-        let (sheet, dom) = match (held.first(), held_dom.first()) {
-            (Some((_, s)), Some((_, d))) => (s, d),
-            _ => return false,
+        let Some((_, sheet)) = held.first() else {
+            self.repaint_bail.set("kein Blatt im Zwischenspeicher");
+            return false;
+        };
+        let Some(dom) = current_dom(&scripted, &held_dom) else {
+            self.repaint_bail.set("kein Baum im Zwischenspeicher");
+            return false;
         };
         // Nur eine `:checked`-Regel kann durch die Kaskade etwas anderes
         // umstylen; `:focus` und Verwandte matchen bei uns nie.
@@ -419,8 +446,11 @@ impl Engine {
         }
         let held = self.sheet.borrow();
         let Some((_, sheet)) = held.first() else { return Err("no sheet") };
+        let scripted = self.scripted.borrow();
         let held_dom = self.dom.borrow();
-        let Some((_, dom)) = held_dom.first() else { return Err("no cached document") };
+        let Some(dom) = current_dom(&scripted, &held_dom) else {
+            return Err("no cached document");
+        };
         let w = lay.width;
         let vh = self.viewport_h.get();
         // A rule that restyles a sibling of the element the pointer is in is
