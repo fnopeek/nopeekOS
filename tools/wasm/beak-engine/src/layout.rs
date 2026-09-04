@@ -6674,10 +6674,20 @@ impl<'a> Ctx<'a> {
             let s = &items[idx0 + k].1;
             let align = s.align_self.unwrap_or(st.align_items);
             let inner = (line_cross - li[k].cm_lead as i32 - li[k].cm_trail as i32).max(0);
-            let stretch = align == CrossAlign::Stretch && li[k].cross_auto;
+            // An `auto` cross margin eats the line's free cross space, and
+            // that overrides both `align-self` and the stretch (css-flexbox-1
+            // §8.1 / §9.4 step 11) — `mt-auto` on a row item means bottom, no
+            // matter what the container aligns to.
+            let cross_m_auto = li[k].cm_lead_auto || li[k].cm_trail_auto;
+            let stretch = align == CrossAlign::Stretch && li[k].cross_auto && !cross_m_auto;
             let (forced_h, y) = if stretch {
                 let target = clamp_cross(inner as f32, li[k].min_cross, li[k].max_cross);
                 (Some(target), cross_y + li[k].cm_lead as i32)
+            } else if cross_m_auto {
+                let free = (inner - h_nat[k]).max(0) as f32;
+                let share = free / (li[k].cm_lead_auto as u32 + li[k].cm_trail_auto as u32) as f32;
+                let lead = if li[k].cm_lead_auto { share } else { li[k].cm_lead };
+                (None, cross_y + lead as i32)
             } else {
                 let h = h_nat[k];
                 let y = match align {
@@ -6746,6 +6756,8 @@ impl<'a> Ctx<'a> {
         let mut ix = alloc::vec![0i32; n];
         let mut mm_lead = alloc::vec![0.0f32; n];
         let mut mm_trail = alloc::vec![0.0f32; n];
+        let mut ma_lead = alloc::vec![false; n];
+        let mut ma_trail = alloc::vec![false; n];
         let mut h_nat = alloc::vec![0i32; n];
         for (i, (el, s)) in items.iter().enumerate() {
             let pad_h = s.pad_left + s.pad_right;
@@ -6754,7 +6766,13 @@ impl<'a> Ctx<'a> {
             let mr = s.margin_right.px(avail).unwrap_or(0.0);
             let align = s.align_self.unwrap_or(st.align_items);
             let width_auto = matches!(s.width, Len::Auto);
-            let stretch = align == CrossAlign::Stretch && width_auto;
+            // Cross axis of a column = horizontal. An `auto` margin there takes
+            // the free width and cancels the stretch (css-flexbox-1 §9.4 step
+            // 11) — without that, `mx-auto` on a stretched item has nothing
+            // left to centre and reads as ignored.
+            let ml_auto = matches!(s.margin_left, Len::Auto);
+            let mr_auto = matches!(s.margin_right, Len::Auto);
+            let stretch = align == CrossAlign::Stretch && width_auto && !(ml_auto || mr_auto);
             let mut wd = if stretch {
                 (avail - ml - mr).max(1.0)
             } else if let Len::Intrinsic(k) = s.width {
@@ -6771,13 +6789,27 @@ impl<'a> Ctx<'a> {
             }
             wd = wd.clamp(1.0, avail.max(1.0));
             cross_w[i] = wd;
-            ix[i] = match align {
-                CrossAlign::End => x + (avail - mr - wd) as i32,
-                CrossAlign::Center => x + (ml + (avail - ml - mr - wd) / 2.0) as i32,
-                _ => x + ml as i32, // start / stretch
+            ix[i] = if ml_auto || mr_auto {
+                let free = (avail - ml - mr - wd).max(0.0);
+                let lead = if ml_auto && mr_auto {
+                    free / 2.0
+                } else if ml_auto {
+                    free
+                } else {
+                    0.0
+                };
+                x + (ml + lead) as i32
+            } else {
+                match align {
+                    CrossAlign::End => x + (avail - mr - wd) as i32,
+                    CrossAlign::Center => x + (ml + (avail - ml - mr - wd) / 2.0) as i32,
+                    _ => x + ml as i32, // start / stretch
+                }
             };
             mm_lead[i] = s.margin_top;
             mm_trail[i] = s.margin_bottom;
+            ma_lead[i] = s.margin_top_auto;
+            ma_trail[i] = s.margin_bottom_auto;
             let s_meas = flex_item_style(s, wd, None, false);
             h_nat[i] = match el {
                 Kid::El(e) => self.measured_h(MEAS_FLEX_COL, wd, e, &s_meas, ix[i], wd.max(1.0) as i32, y0),
@@ -6791,21 +6823,28 @@ impl<'a> Ctx<'a> {
         let intrinsic = sum_h + gaps_total;
         // A definite container height gives free main space → justify-content.
         let free = def_cross.map(|c| c - intrinsic).unwrap_or(0.0).max(0.0);
-        let (offset, extra_gap) = match st.justify {
-            Justify::End => (free, 0.0),
-            Justify::Center => (free / 2.0, 0.0),
-            Justify::Between => (0.0, if n > 1 { free / (n as f32 - 1.0) } else { 0.0 }),
-            Justify::Around => (free / (2.0 * n as f32), free / n as f32),
-            Justify::Evenly => (free / (n as f32 + 1.0), free / (n as f32 + 1.0)),
-            Justify::Start => (0.0, 0.0),
+        // Main-axis auto margins take the free space FIRST; `justify-content`
+        // only ever sees what they leave (css-flexbox-1 §8.1). This is what
+        // makes `mt-auto` on the last child of a fixed-height column pin it to
+        // the bottom — the card-footer pattern.
+        let n_auto: usize = (0..n).map(|i| ma_lead[i] as usize + ma_trail[i] as usize).sum();
+        let (offset, extra_gap, auto_each) = if free > 0.5 && n_auto > 0 {
+            (0.0, 0.0, free / n_auto as f32)
+        } else {
+            let (o, g) = match st.justify {
+                Justify::End => (free, 0.0),
+                Justify::Center => (free / 2.0, 0.0),
+                Justify::Between => (0.0, if n > 1 { free / (n as f32 - 1.0) } else { 0.0 }),
+                Justify::Around => (free / (2.0 * n as f32), free / n as f32),
+                Justify::Evenly => (free / (n as f32 + 1.0), free / (n as f32 + 1.0)),
+                Justify::Start => (0.0, 0.0),
+            };
+            (o, g, 0.0)
         };
 
         let mut y = y0 as f32 + offset;
         for (i, (el, s)) in items.iter().enumerate() {
-            y += mm_lead[i];
-            if y as i32 == y0 {
-            } else {
-            }
+            y += mm_lead[i] + if ma_lead[i] { auto_each } else { 0.0 };
             let s2 = flex_item_style(s, cross_w[i], None, false);
             let bottom = match el {
                 Kid::El(e) => {
@@ -6819,7 +6858,7 @@ impl<'a> Ctx<'a> {
                     y as i32 + b.h
                 }
             };
-            y = bottom as f32 + mm_trail[i];
+            y = bottom as f32 + mm_trail[i] + if ma_trail[i] { auto_each } else { 0.0 };
             if i + 1 < n {
                 y += gap + extra_gap;
             }
@@ -6850,8 +6889,22 @@ impl<'a> Ctx<'a> {
             } else {
                 (Len::Px(s.margin_top), Len::Px(s.margin_bottom))
             };
-            let m_lead_auto = matches!(m_lead_len, Len::Auto);
-            let m_trail_auto = matches!(m_trail_len, Len::Auto);
+            // An `auto` margin is free space on ITS axis, so which of the four
+            // counts as main and which as cross flips with the direction. The
+            // vertical pair carries its keyword beside the number, because in
+            // normal flow it is used as zero.
+            let h_lead_auto = matches!(s.margin_left, Len::Auto);
+            let h_trail_auto = matches!(s.margin_right, Len::Auto);
+            let (m_lead_auto, m_trail_auto) = if row {
+                (h_lead_auto, h_trail_auto)
+            } else {
+                (s.margin_top_auto, s.margin_bottom_auto)
+            };
+            let (cm_lead_auto, cm_trail_auto) = if row {
+                (s.margin_top_auto, s.margin_bottom_auto)
+            } else {
+                (h_lead_auto, h_trail_auto)
+            };
             let m_lead = m_lead_len.px(avail).unwrap_or(0.0);
             let m_trail = m_trail_len.px(avail).unwrap_or(0.0);
             // Cross-axis margins.
@@ -6925,6 +6978,8 @@ impl<'a> Ctx<'a> {
                 cross_pad,
                 cm_lead,
                 cm_trail,
+                cm_lead_auto,
+                cm_trail_auto,
                 base,
                 hypo,
                 floor,
@@ -7011,6 +7066,8 @@ struct FlexItem {
     ceil: f32,
     grow: f32,
     shrink: f32,
+    cm_lead_auto: bool,
+    cm_trail_auto: bool,
     cross_auto: bool, // cross size is `auto` → eligible for stretch
     min_cross: f32,
     max_cross: f32,
@@ -11253,6 +11310,58 @@ fn dbg_wiki_shape() {
         let l = lay("<body><div style=\"display:flex\">\n  <span>a</span>\n  <span>b</span>\n</div></body>", 400);
         let n = l.ops.iter().filter(|o| matches!(o, DrawOp::Text { .. })).count();
         assert_eq!(n, 2, "nur die beiden Kinder");
+    }
+
+    /// css-flexbox-1 §8.1: eine `auto`-Marge frisst den freien Platz auf IHRER
+    /// Achse. In der Spalte ist das die Hauptachse — `margin-top:auto` auf dem
+    /// letzten Kind heftet es an den Boden (das Karten-Fussmuster).
+    #[test]
+    fn an_auto_top_margin_pins_the_last_column_item_to_the_bottom() {
+        let l = lay(
+            "<body style=\"margin:0\"><div style=\"display:flex;flex-direction:column;height:200px\">             <div>oben</div><div style=\"margin-top:auto\">unten</div></div></body>",
+            400,
+        );
+        let ys: alloc::vec::Vec<i32> = l.ops.iter().filter_map(|o| match o {
+            DrawOp::Text { y, .. } => Some(*y),
+            _ => None,
+        }).collect();
+        assert_eq!(ys.len(), 2, "{ys:?}");
+        assert_eq!(ys[0], 0, "das erste Kind bleibt oben: {ys:?}");
+        assert!(ys[1] >= 175, "das zweite steht unten, nicht direkt darunter: {ys:?}");
+    }
+
+    /// Auf der Querachse ueberstimmt sie `align-items` — und den Stretch.
+    /// `mt-auto` in einer ZEILE heisst unten, `my-auto` heisst Mitte.
+    #[test]
+    fn auto_cross_margins_beat_align_items_in_a_row() {
+        let l = lay(
+            "<body style=\"margin:0\"><div style=\"display:flex;height:200px;align-items:flex-start\">             <div>a</div><div style=\"margin-top:auto\">b</div>             <div style=\"margin-top:auto;margin-bottom:auto\">c</div></div></body>",
+            400,
+        );
+        let ys: alloc::vec::Vec<i32> = l.ops.iter().filter_map(|o| match o {
+            DrawOp::Text { y, .. } => Some(*y),
+            _ => None,
+        }).collect();
+        assert_eq!(ys.len(), 3, "{ys:?}");
+        assert_eq!(ys[0], 0, "align-items gilt weiter, wo keine auto-Marge steht: {ys:?}");
+        assert!(ys[1] >= 175, "mt-auto = unten: {ys:?}");
+        assert!((ys[2] - 90).abs() <= 3, "my-auto = Mitte: {ys:?}");
+    }
+
+    /// In der Spalte ist links/rechts die QUERachse: `mx-auto` zentriert, und
+    /// dazu muss der Stretch weichen — sonst ist der Kasten schon so breit wie
+    /// die Zeile und es bleibt nichts zu verteilen.
+    #[test]
+    fn mx_auto_centres_a_column_item_instead_of_stretching_it() {
+        let l = lay(
+            "<body style=\"margin:0\"><div style=\"display:flex;flex-direction:column;width:300px\">             <div style=\"margin-left:auto;margin-right:auto\">m</div></div></body>",
+            400,
+        );
+        let x = l.ops.iter().find_map(|o| match o {
+            DrawOp::Text { x, .. } => Some(*x),
+            _ => None,
+        }).expect("Text");
+        assert!(x > 100 && x < 200, "zentriert in 300px, nicht bei 0: x={x}");
     }
 
     /// Ein WEICHER Schatten wird gemalt — und zwar weich.

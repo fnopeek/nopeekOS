@@ -808,6 +808,12 @@ pub struct ComputedStyle {
     pub max_height: Len, // Auto = no maximum
     pub margin_top: f32,
     pub margin_bottom: f32,
+    /// `margin-top: auto` / `margin-bottom: auto`. In normal flow a vertical
+    /// `auto` is zero (CSS2.1 §10.6.3), so the number above is enough there —
+    /// but a flex item's auto margin EATS the free space on its axis
+    /// (css-flexbox-1 §8.1), which a zero cannot express.
+    pub margin_top_auto: bool,
+    pub margin_bottom_auto: bool,
     pub margin_left: Len,
     pub margin_right: Len,
     pub pad_top: f32,
@@ -1123,6 +1129,8 @@ impl ComputedStyle {
             max_height: Len::Auto,
             margin_top: 0.0,
             margin_bottom: 0.0,
+            margin_top_auto: false,
+            margin_bottom_auto: false,
             margin_left: Len::Px(0.0),
             margin_right: Len::Px(0.0),
             pad_top: 0.0,
@@ -1357,6 +1365,8 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         max_height: Len::Auto,
         margin_top: 0.0,
         margin_bottom: 0.0,
+        margin_top_auto: false,
+        margin_bottom_auto: false,
         margin_left: Len::Px(0.0),
         margin_right: Len::Px(0.0),
         pad_top: 0.0,
@@ -1808,6 +1818,8 @@ pub fn resolve_in(
     ) {
         s.margin_top = 0.0;
         s.margin_bottom = 0.0;
+        s.margin_top_auto = false;
+        s.margin_bottom_auto = false;
         s.margin_left = Len::Px(0.0);
         s.margin_right = Len::Px(0.0);
     }
@@ -2779,13 +2791,21 @@ pub fn apply_wide(prop: Prop, kw: Wide, parent: &ComputedStyle, theme: &Theme, s
         Prop::MaxHeight => s.max_height = src.max_height,
         Prop::Margin => {
             s.margin_top = src.margin_top;
+            s.margin_top_auto = src.margin_top_auto;
             s.margin_right = src.margin_right;
             s.margin_bottom = src.margin_bottom;
+            s.margin_bottom_auto = src.margin_bottom_auto;
             s.margin_left = src.margin_left;
         }
-        Prop::MarginTop => s.margin_top = src.margin_top,
+        Prop::MarginTop => {
+            s.margin_top = src.margin_top;
+            s.margin_top_auto = src.margin_top_auto;
+        }
         Prop::MarginRight => s.margin_right = src.margin_right,
-        Prop::MarginBottom => s.margin_bottom = src.margin_bottom,
+        Prop::MarginBottom => {
+            s.margin_bottom = src.margin_bottom;
+            s.margin_bottom_auto = src.margin_bottom_auto;
+        }
         Prop::MarginLeft => s.margin_left = src.margin_left,
         Prop::Padding => {
             s.pad_top = src.pad_top;
@@ -3282,13 +3302,17 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         Prop::Margin => {
             let u = s.units();
             let (t, r, b, l) = four_values(&v);
-            s.margin_top = margin_tb(t, u);
+            set_margin_tb(t, u, &mut s.margin_top, &mut s.margin_top_auto);
             s.margin_right = margin_lr(r, u);
-            s.margin_bottom = margin_tb(b, u);
+            set_margin_tb(b, u, &mut s.margin_bottom, &mut s.margin_bottom_auto);
             s.margin_left = margin_lr(l, u);
         }
-        Prop::MarginTop | Prop::MarginBlockStart => s.margin_top = margin_tb(&v, u),
-        Prop::MarginBottom | Prop::MarginBlockEnd => s.margin_bottom = margin_tb(&v, u),
+        Prop::MarginTop | Prop::MarginBlockStart => {
+            set_margin_tb(&v, u, &mut s.margin_top, &mut s.margin_top_auto)
+        }
+        Prop::MarginBottom | Prop::MarginBlockEnd => {
+            set_margin_tb(&v, u, &mut s.margin_bottom, &mut s.margin_bottom_auto)
+        }
         Prop::MarginLeft | Prop::MarginInlineStart => s.margin_left = margin_lr(&v, u),
         Prop::MarginRight | Prop::MarginInlineEnd => s.margin_right = margin_lr(&v, u),
         // Logical two-value shorthands, LTR/horizontal-tb: `margin-inline` is
@@ -3300,8 +3324,8 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         }
         Prop::MarginBlock => {
             let p = split_sides(&v);
-            s.margin_top = margin_tb(p[0], u);
-            s.margin_bottom = margin_tb(p[1], u);
+            set_margin_tb(p[0], u, &mut s.margin_top, &mut s.margin_top_auto);
+            set_margin_tb(p[1], u, &mut s.margin_bottom, &mut s.margin_bottom_auto);
         }
         Prop::Padding => {
             let u = s.units();
@@ -4263,8 +4287,8 @@ pub fn serialize_computed(s: &ComputedStyle) -> String {
     put("max-width", &len(s.max_width));
     // Oben/unten sind bereits aufgeloest, links/rechts koennen `auto` sein
     // (das ist die Zentrierung) — deshalb zwei verschiedene Formen.
-    put("margin-top", &px(s.margin_top));
-    put("margin-bottom", &px(s.margin_bottom));
+    put("margin-top", &if s.margin_top_auto { "auto".into() } else { px(s.margin_top) });
+    put("margin-bottom", &if s.margin_bottom_auto { "auto".into() } else { px(s.margin_bottom) });
     put("margin-left", &len(s.margin_left));
     put("margin-right", &len(s.margin_right));
     for (k, v) in [("padding-top", s.pad_top), ("padding-right", s.pad_right),
@@ -4319,8 +4343,11 @@ fn parse_list_style(v: &str) -> Option<ListStyle> {
 }
 
 /// Top/bottom margin: `auto` computes to 0 for block boxes.
-fn margin_tb(v: &str, u: Units) -> f32 {
-    if v.trim() == "auto" { 0.0 } else { parse_length(v, u).unwrap_or(0.0) }
+/// A top/bottom margin: the used length in normal flow, plus whether the
+/// author wrote `auto`. Both are needed — see `ComputedStyle::margin_top_auto`.
+fn set_margin_tb(v: &str, u: Units, px: &mut f32, auto: &mut bool) {
+    *auto = v.trim() == "auto";
+    *px = if *auto { 0.0 } else { parse_length(v, u).unwrap_or(0.0) };
 }
 
 /// Left/right margin keeps `auto` (drives centering / slack).
