@@ -143,10 +143,18 @@ impl Interp {
         Ok((f, this_val))
     }
 
-    fn member_key2(&mut self, p: &MemberProp, env: &Rc<RefCell<Env>>) -> C<Rc<str>> {
+    /// Der Schluessel eines Elementzugriffs.
+    ///
+    /// **Es gab davon zwei**, eine hier und eine in `eval.rs` — Wort fuer Wort
+    /// dieselbe, bis ich das private Feld auf einen NUL-Schluessel umstellte
+    /// und nur eine davon anfasste. Danach schrieb `this.#p = v` unter `#p`
+    /// und `this.#p` las unter `\0#p`: das Feld war zugleich sichtbar und
+    /// leer. Eine Kopie ist kein Duplikat, sie ist eine zweite Semantik, die
+    /// auf ihren Tag wartet.
+    pub fn member_key2(&mut self, p: &MemberProp, env: &Rc<RefCell<Env>>) -> C<Rc<str>> {
         Ok(match p {
             MemberProp::Ident(n) => Rc::from(n.as_str()),
-            MemberProp::Private(n) => Rc::from(alloc::format!("#{n}").as_str()),
+            MemberProp::Private(n) => private_key(n),
             MemberProp::Computed(e) => { let v = self.eval(e, env)?; self.to_prop_key(&v)? }
         })
     }
@@ -178,7 +186,22 @@ impl Interp {
                 return self.type_err("super: the parent class has no constructor");
             }
             let a = self.eval_args(args, env)?;
-            self.call(&ctor, this_val, &a)?;
+            self.call(&ctor, this_val.clone(), &a)?;
+            // **Jetzt erst die eigenen Instanzfelder.** Die Spec legt sie
+            // nach dem Elternkonstruktor an, und der Unterschied ist
+            // sichtbar: ein Initialisierer darf ein Feld der Elternklasse
+            // lesen. Welche Klasse „eigene" ist, sagt das Heimatobjekt —
+            // sein `constructor` ist der Konstruktor, in dem wir stehen.
+            if let Some(home) = env_home(env) {
+                let own = self.get(&Value::Obj(home), "constructor")?;
+                if let Value::Obj(co) = &own {
+                    let d = match &co.borrow().kind {
+                        ObjKind::Function(d) => Some(d.clone()),
+                        _ => None,
+                    };
+                    if let Some(d) = d { self.init_fields(&d, &this_val)?; }
+                }
+            }
             return Ok(Value::Undefined);
         }
         let (this_val, f) = match callee {
@@ -295,7 +318,7 @@ impl Interp {
         Ok(Value::Obj(g))
     }
 
-    pub fn eval_class(&mut self, c: &Class, env: &Rc<RefCell<Env>>) -> C<Value> {
+    pub fn eval_class(&mut self, c: &Rc<Class>, env: &Rc<RefCell<Env>>) -> C<Value> {
         // Zwei Ketten, nicht eine: die Instanzen haengen unter
         // `Eltern.prototype`, der KONSTRUKTOR unter der Elternklasse selbst.
         let (parent_proto, parent_ctor) = match &c.super_class {
@@ -340,6 +363,27 @@ impl Interp {
             }),
         };
         let ctor = self.make_method(ctor_fn, env, None, Some(proto.clone()));
+        // Hat die Klasse Instanzfelder, traegt ihr Konstruktor sie mit —
+        // `call_env` bzw. der `super()`-Weg legen sie dann an. Ohne Felder
+        // bleibt der Zeiger leer, damit ein gewoehnlicher Aufruf nichts
+        // nachzuschlagen hat.
+        let has_fields = c.body.iter()
+            .any(|m| matches!(m, ClassMember::Field { is_static: false, .. }));
+        if has_fields {
+            if let Value::Obj(co) = &ctor {
+                let d = match &co.borrow().kind {
+                    ObjKind::Function(d) => Some(d.clone()),
+                    _ => None,
+                };
+                if let Some(d) = d {
+                    co.borrow_mut().kind = ObjKind::Function(Rc::new(FuncData {
+                        node: d.node.clone(), env: d.env.clone(),
+                        this_val: d.this_val.clone(), home_object: d.home_object.clone(),
+                        class: Some(c.clone()),
+                    }));
+                }
+            }
+        }
         if let Value::Obj(co) = &ctor {
             co.borrow_mut().define("prototype", Prop {
                 value: Some(Value::Obj(proto.clone())), get: None, set: None,
@@ -385,8 +429,8 @@ impl Interp {
                     let v = match value { Some(e) => self.eval(e, env)?, None => Value::Undefined };
                     ctor.as_obj().unwrap().borrow_mut().set_prop(k, Prop::data(v));
                 }
-                // Felder je Instanz brauchen einen Haken im Konstruktor; der
-                // fehlt noch und faellt im Lauf auf.
+                // Felder je Instanz stehen im Konstruktor, nicht hier —
+                // siehe `Interp::init_fields`.
                 _ => {}
             }
         }

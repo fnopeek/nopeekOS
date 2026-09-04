@@ -460,25 +460,17 @@ impl Interp {
             Expr::Ident(n) => self.assign_ident(n, v, env),
             Expr::Member { obj, prop, .. } => {
                 let base = self.eval(obj, env)?;
-                let key = self.member_key(prop, env)?;
+                let key = self.member_key2(prop, env)?;
                 self.set(&base, &key, v)
             }
             _ => self.ref_err("invalid assignment target"),
         }
     }
 
-    fn member_key(&mut self, p: &MemberProp, env: &Rc<RefCell<Env>>) -> C<Rc<str>> {
-        Ok(match p {
-            MemberProp::Ident(n) => Rc::from(n.as_str()),
-            MemberProp::Private(n) => Rc::from(alloc::format!("#{n}").as_str()),
-            MemberProp::Computed(e) => { let v = self.eval(e, env)?; self.to_prop_key(&v)? }
-        })
-    }
-
     pub fn prop_key(&mut self, k: &PropKey, env: &Rc<RefCell<Env>>) -> C<Rc<str>> {
         Ok(match k {
             PropKey::Ident(n) | PropKey::Str(n) => Rc::from(n.as_str()),
-            PropKey::Private(n) => Rc::from(alloc::format!("#{n}").as_str()),
+            PropKey::Private(n) => private_key(n),
             PropKey::Num(n) => Rc::from(num_to_string(*n).as_str()),
             PropKey::Computed(e) => { let v = self.eval(e, env)?; self.to_prop_key(&v)? }
         })
