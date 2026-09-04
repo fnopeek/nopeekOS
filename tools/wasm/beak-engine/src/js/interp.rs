@@ -999,7 +999,50 @@ impl Interp {
                 Binding { value: ao, mutable: true, initialized: true });
         }
         self.bind_params(&d.node.params, args, &env)?;
+        // **Instanzfelder einer BASISklasse stehen, bevor der Rumpf laeuft.**
+        // Eine abgeleitete legt sie erst nach `super()` an: vorher hat sie
+        // zwar schon ein Objekt, aber ein Initialisierer darf ein Feld der
+        // Elternklasse sehen, und das gibt es erst danach.
+        if let Some(c) = &d.class {
+            if c.super_class.is_none() {
+                let t = super::interp::env_this(&env);
+                self.init_fields(d, &t)?;
+            }
+        }
         Ok(env)
+    }
+
+    /// Die Instanzfelder einer Klasse auf ein frisches `this` legen.
+    ///
+    /// Jeder Initialisierer ist ein eigener kleiner Funktionsbereich mit
+    /// `this` auf der Instanz und `home` der Klasse — ein Pfeil darin faengt
+    /// die INSTANZ ein, und `super.x` darin trifft die Elternklasse. Der
+    /// Bereich darum ist der der KLASSE (`d.env`), nicht der des Aufrufers.
+    pub fn init_fields(&mut self, d: &Rc<FuncData>, this_val: &Value) -> C<()> {
+        let Some(c) = d.class.clone() else { return Ok(()) };
+        let Value::Obj(o) = this_val else { return Ok(()) };
+        for m in &c.body {
+            let ClassMember::Field { key, value, is_static: false, .. } = m else { continue };
+            let fenv = Env::new(Some(d.env.clone()), true);
+            {
+                let mut b = fenv.borrow_mut();
+                b.this_val = Some(this_val.clone());
+                b.home = d.home_object.clone();
+            }
+            let k = self.prop_key(key, &fenv)?;
+            let v = match value {
+                Some(e) => {
+                    let val = self.eval(e, &fenv)?;
+                    // `x = function(){}` gibt der Funktion den Feldnamen —
+                    // dieselbe Regel wie bei `var f = function(){}`.
+                    self.name_function(&val, &k);
+                    val
+                }
+                None => Value::Undefined,
+            };
+            o.borrow_mut().set_prop(k, Prop::data(v));
+        }
+        Ok(())
     }
 
     /// Einen Funktionsrumpf mit dem BAUMLAEUFER fahren — der Weg, den ein
@@ -1405,6 +1448,7 @@ impl Interp {
         let g = new_kind(Some(fproto),
             ObjKind::Function(Rc::new(FuncData {
                 node: f.clone(), env: env.clone(), this_val, home_object: home,
+                class: None,
             })));
         {
             let mut o = g.borrow_mut();

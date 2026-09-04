@@ -756,15 +756,14 @@ impl Compiler {
                 Expr::Member { obj, prop, optional: false } => {
                     self.expr(obj)?;
                     match &**prop {
-                        MemberProp::Ident(n) => {
-                            let i = self.chunk.name(n);
+                        MemberProp::Ident(_) | MemberProp::Private(_) => {
+                            let i = self.member_name(prop);
                             self.chunk.emit(Op::DeleteProp(i));
                         }
                         MemberProp::Computed(k) => {
                             self.expr(k)?;
                             self.chunk.emit(Op::DeleteIndex);
                         }
-                        MemberProp::Private(_) => return Err(Unsupported("private-field")),
                     }
                     Ok(())
                 }
@@ -830,10 +829,10 @@ impl Compiler {
                 }
                 Pat::Expr(inner) => match &**inner {
                     Expr::Member { obj, prop, optional: false } => match &**prop {
-                        MemberProp::Ident(name) => {
+                        MemberProp::Ident(_) | MemberProp::Private(_) => {
+                            let i = self.member_name(prop);
                             self.expr(obj)?;
                             self.expr(right)?;
-                            let i = self.chunk.name(name);
                             self.chunk.emit(Op::SetProp(i));
                             Ok(())
                         }
@@ -844,7 +843,6 @@ impl Compiler {
                             self.chunk.emit(Op::SetIndex);
                             Ok(())
                         }
-                        MemberProp::Private(_) => Err(Unsupported("private-field")),
                     },
                     _ => Err(Unsupported("assign-target")),
                 },
@@ -859,8 +857,8 @@ impl Compiler {
             Expr::Member { obj, prop, optional: false } => {
                 self.expr(obj)?;
                 match &**prop {
-                    MemberProp::Ident(name) => {
-                        let i = self.chunk.name(name);
+                    MemberProp::Ident(_) | MemberProp::Private(_) => {
+                        let i = self.member_name(prop);
                         self.chunk.emit(Op::GetProp(i));
                         Ok(())
                     }
@@ -869,7 +867,6 @@ impl Compiler {
                         self.chunk.emit(Op::GetIndex);
                         Ok(())
                     }
-                    MemberProp::Private(_) => Err(Unsupported("private-field")),
                 }
             }
             Expr::Member { optional: true, .. } | Expr::Chain(_) => Err(Unsupported("optional-chain")),
@@ -883,11 +880,11 @@ impl Compiler {
                 let mut named = u32::MAX;
                 match &**callee {
                     Expr::Member { obj, prop, optional: false } => match &**prop {
-                        MemberProp::Ident(name) => {
+                        MemberProp::Ident(_) | MemberProp::Private(_) => {
+                            let i = self.member_name(prop);
+                            named = i;
                             self.expr(obj)?;
                             self.chunk.emit(Op::Dup);
-                            let i = self.chunk.name(name);
-                            named = i;
                             self.chunk.emit(Op::GetProp(i));
                             self.chunk.emit(Op::Swap);
                         }
@@ -912,7 +909,6 @@ impl Compiler {
                             self.chunk.emit(Op::GetIndex);
                             self.chunk.emit(Op::Swap);
                         }
-                        MemberProp::Private(_) => return Err(Unsupported("private-field")),
                     },
                     _ => {
                         if let Expr::Ident(n) = &**callee { named = self.chunk.name(n); }
@@ -1177,8 +1173,8 @@ impl Compiler {
             Expr::Member { obj, prop, optional: false } => {
                 self.expr(obj)?;
                 match &**prop {
-                    MemberProp::Ident(name) => {
-                        let i = self.chunk.name(name);
+                    MemberProp::Ident(_) | MemberProp::Private(_) => {
+                        let i = self.member_name(prop);
                         self.chunk.emit(Op::Dup);
                         self.chunk.emit(Op::GetProp(i));
                         self.chunk.emit(Op::Un(UnaryOp::Plus));
@@ -1196,7 +1192,6 @@ impl Compiler {
                         Ok(())
                     }
                     MemberProp::Computed(_) => Err(Unsupported("update-computed")),
-                    MemberProp::Private(_) => Err(Unsupported("private-field")),
                 }
             }
             _ => Err(Unsupported("update-target")),
@@ -1243,8 +1238,8 @@ impl Compiler {
                 Ok(())
             }
             Expr::Member { obj, prop, optional: false } => match &**prop {
-                MemberProp::Ident(name) => {
-                    let i = self.chunk.name(name);
+                MemberProp::Ident(_) | MemberProp::Private(_) => {
+                    let i = self.member_name(prop);
                     self.expr(obj)?;
                     self.chunk.emit(Op::Dup);
                     self.chunk.emit(Op::GetProp(i));
@@ -1264,6 +1259,26 @@ impl Compiler {
     fn unwind_to(&mut self, depth: usize) {
         for _ in depth..self.depth {
             self.chunk.emit(Op::PopEnv);
+        }
+    }
+
+    /// Der Schluessel eines Elementzugriffs, wo er zur Uebersetzungszeit
+    /// feststeht.
+    ///
+    /// **Ein privates Feld ist dabei nichts Besonderes** — nur ein anderer
+    /// Schluesseltext (`value::private_key`, NUL davor). Es faellt damit aus
+    /// `own_keys` heraus und ist fuer `Object.keys` und `JSON.stringify`
+    /// unsichtbar, verhaelt sich sonst aber wie jede Eigenschaft. Deshalb
+    /// steht `Private` ueberall in DEMSELBEN Zweig wie `Ident`: ein eigener
+    /// Weg waere eine zweite Semantik fuer denselben Zugriff.
+    fn member_name(&mut self, p: &MemberProp) -> u32 {
+        match p {
+            MemberProp::Ident(n) => self.chunk.name(n),
+            MemberProp::Private(n) => {
+                let k = super::value::private_key(n);
+                self.chunk.name(&k)
+            }
+            MemberProp::Computed(_) => u32::MAX,
         }
     }
 

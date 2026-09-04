@@ -121,6 +121,36 @@ pub struct SymData {
 #[inline]
 pub fn is_sym_key(k: &str) -> bool { k.as_bytes().first() == Some(&0) }
 
+/// Der Schluessel, unter dem ein privates Feld `#name` liegt.
+///
+/// Das NUL davor ist der ganze Trick: solche Schluessel fallen aus
+/// `own_keys` heraus, und damit ist ein privates Feld fuer `Object.keys`,
+/// `for..in`, `JSON.stringify` und die Streuung unsichtbar — ohne einen
+/// zweiten Speicher neben der Eigenschaftstabelle.
+///
+/// **Was das NICHT leistet:** zwei Klassen, die beide ein `#p` auf DEMSELBEN
+/// Objekt anlegen, teilen es sich. Echte Motoren schluesseln nach Klasse.
+/// Der Fall verlangt, dass eine Klasse ein fremdes Objekt als `this`
+/// bekommt; die Vereinfachung ist benannt und nicht still.
+/// Liegt hier ein privates Feld?
+///
+/// Der Schluessel eines Symbols faengt ebenfalls mit NUL an — die beiden zu
+/// trennen ist Pflicht, sonst gibt `Object.getOwnPropertySymbols` das private
+/// Feld als Symbol heraus, und damit ist es nicht mehr privat. Genau das ist
+/// beim ersten Lauf passiert.
+///
+/// **Und das zweite Zeichen ist deshalb `~` und nicht `#`:** ein
+/// gewoehnliches Symbol liegt schon unter `\0#<n>:<beschreibung>`
+/// (`Interp::new_symbol`). Der erste Entwurf nahm `#`, und damit verschwanden
+/// die echten Symbole aus `getOwnPropertySymbols` — ein Feld fuer Neues, das
+/// das Alte umbringt. Die Marker sind: `@` wohlbekannt, `*` registriert,
+/// `#` gewoehnlich, `~` privat.
+pub fn is_private_key(k: &str) -> bool { k.as_bytes().starts_with(b"\0~") }
+
+pub fn private_key(name: &str) -> Rc<str> {
+    Rc::from(alloc::format!("\0~{name}").as_str())
+}
+
 /// Aus einem Symbolschluessel das Symbol zurueckgewinnen.
 ///
 /// Nicht Bequemlichkeit, sondern Notwendigkeit:
@@ -230,6 +260,14 @@ pub struct FuncData {
     /// es beim Aufruf.
     pub this_val: Option<Value>,
     pub home_object: Option<Gc>,
+    /// Die Klasse, deren KONSTRUKTOR das hier ist — und nur dann gesetzt,
+    /// wenn sie Instanzfelder hat.
+    ///
+    /// Ein Instanzfeld gehoert weder auf den Prototyp (es ist je Instanz)
+    /// noch in den Rumpf (es steht dort nicht). Es gehoert an den Aufruf, und
+    /// der Aufruf braucht dafuer die Liste — hier liegt sie. `env` daneben ist
+    /// schon der richtige Bereich fuer die Initialisierer.
+    pub class: Option<Rc<crate::js::ast::Class>>,
 }
 
 pub enum ObjKind {
@@ -332,7 +370,7 @@ impl Object {
 
     /// Eigene SYMBOL-Schluessel, in Einfuegereihenfolge.
     pub fn own_sym_keys(&self) -> Vec<PropName> {
-        self.order.iter().filter(|k| is_sym_key(k)).cloned().collect()
+        self.order.iter().filter(|k| is_sym_key(k) && !is_private_key(k)).cloned().collect()
     }
 
     pub fn prop_count(&self) -> usize { self.props.len() }
