@@ -601,6 +601,38 @@ fn effective_filter(st: &ComputedStyle) -> Option<crate::color::ColorFilter> {
     }
 }
 
+/// Eine Farbe mit der aufgesammelten Inline-Deckung vormultiplizieren.
+/// `k == 1.0` (der Normalfall) laesst sie unangetastet — auch in den Bits.
+fn faded(c: Rgba, k: f32) -> Rgba {
+    if k >= 0.999 {
+        return c;
+    }
+    Rgba { c: c.c, a: (c.a as f32 * k.clamp(0.0, 1.0)) as u8 }
+}
+
+/// Derselbe Stil, mit der Inline-Deckung schon in den Farben. Fuer den
+/// SCHMUCK eines Inline-Kastens — Hintergrund, Rahmen, Umriss —, der wie sein
+/// Text keinen eigenen Befehlsbereich hat.
+///
+/// Bewusst nur die Farben, nicht die Bilder: ein Hintergrundbild wird ueber
+/// seinen Schluessel erst beim Malen aufgeloest, und ein halbdurchsichtiges
+/// Bild braucht einen Filterindex am Befehl. Das ist eine eigene Runde; hier
+/// stuende sonst eine Halbheit.
+fn fade_style(st: &ComputedStyle) -> ComputedStyle {
+    let k = st.inline_fade;
+    if k >= 0.999 {
+        return *st;
+    }
+    let mut s = *st;
+    s.color = faded(s.color, k);
+    s.bg = s.bg.map(|c| faded(c, k));
+    for b in [&mut s.border_top, &mut s.border_right, &mut s.border_bottom, &mut s.border_left,
+              &mut s.outline] {
+        b.color = b.color.map(|c| faded(c, k));
+    }
+    s
+}
+
 /// Intern one `filter` transform, deduped, and return its 1-based index.
 fn filter_key(table: &mut Vec<crate::color::ColorFilter>, f: crate::color::ColorFilter) -> u16 {
     let i = table.iter().position(|e| *e == f).unwrap_or_else(|| {
@@ -3451,14 +3483,34 @@ impl<'a> Ctx<'a> {
                     self.ops.push(DrawOp::Rect { x, y, w, h, color: c });
                 }
             } else if st.list_style.is_bullet() {
-                let s = 4;
-                self.ops.push(DrawOp::Rect {
-                    x: content_x - 12,
-                    y: top + (st.font_px * 0.55) as i32,
-                    w: s,
-                    h: s,
-                    color: self.theme.muted.into(),
-                });
+                // Die FORM ist der Wert dieser Eigenschaft: `disc` ist eine
+                // gefuellte Scheibe, `circle` ein Ring, `square` ein Quadrat.
+                // Alle drei als Quadrat zu malen macht sie ununterscheidbar —
+                // und eine verschachtelte Liste, die ihre Ebenen genau darueber
+                // auseinanderhaelt, sieht dann auf jeder Ebene gleich aus.
+                //
+                // Die Groesse folgt der Schrift (Browser nehmen rund ein
+                // Drittel der Schriftgroesse), damit der Punkt in einer kleinen
+                // Liste nicht klobig und in einer grossen nicht verloren wirkt.
+                let s = ((st.font_px * 0.33) as i32).clamp(4, 9);
+                let (x, y) = (content_x - 12, top + (st.font_px * 0.5) as i32);
+                let color = self.theme.muted.into();
+                match st.list_style {
+                    ListStyle::Square => {
+                        self.ops.push(DrawOp::Rect { x, y, w: s, h: s, color });
+                    }
+                    // `circle` ist hohl — ein Ring von einem Pixel.
+                    ListStyle::Circle => {
+                        self.ops.push(DrawOp::RoundRect {
+                            x, y, w: s, h: s, r: [s as f32 / 2.0; 4], color, ring: 1.0,
+                        });
+                    }
+                    _ => {
+                        self.ops.push(DrawOp::RoundRect {
+                            x, y, w: s, h: s, r: [s as f32 / 2.0; 4], color, ring: 0.0,
+                        });
+                    }
+                }
             } else {
                 // A counter marker is right-aligned against the content edge,
                 // like every browser's `::marker` box.
@@ -7569,7 +7621,7 @@ impl<'a> Ctx<'a> {
             return None;
         }
         Some(InlineBox {
-            st: *st,
+            st: fade_style(st),
             hover_seq,
             bg: self.bg_key(st.bg_layer.image),
             mask: self.bg_key(st.mask_layer.image),
@@ -8373,7 +8425,15 @@ impl Inline {
 
     /// Add collapsed text from one text node under style `st`.
     fn text(&mut self, raw: &str, st: &ComputedStyle, href: Option<&str>) {
-        let rs = RunStyle { hidden: st.hidden, transparent: st.transparent, size: st.font_px, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: st.valign, deco: st.deco, deco_color: st.deco_color, break_word: st.break_word, nowrap: st.nowrap, lh: st.line_height.px(st.font_px).unwrap_or(0.0), sp: (st.letter_spacing, st.word_spacing) };
+        // Die Deckung der Inline-Vorfahren steckt HIER in der Farbe: ein
+        // Inline-Kasten hat keinen Befehlsbereich, ueber den sie spaeter
+        // gelegt werden koennte (siehe `ComputedStyle::inline_fade`). Zwei
+        // Laeufe verschmelzen nur bei gleicher `RunStyle` — die verschiedene
+        // Alpha trennt sie also von selbst, ohne dass der Verschmelzer davon
+        // wissen muss.
+        let rs = RunStyle { hidden: st.hidden, transparent: st.transparent, size: st.font_px,
+            color: faded(st.color, st.inline_fade),
+            deco_color: st.deco_color.map(|c| faded(c, st.inline_fade)), bold: st.bold, italic: st.italic, mono: st.mono, valign: st.valign, deco: st.deco, break_word: st.break_word, nowrap: st.nowrap, lh: st.line_height.px(st.font_px).unwrap_or(0.0), sp: (st.letter_spacing, st.word_spacing) };
         let mut word = String::new();
         for ch in raw.chars() {
             if is_css_space(ch) {
@@ -12475,10 +12535,61 @@ fn dbg_wiki_shape() {
     #[test]
     fn list_items_get_bullets_and_indent() {
         let l = lay("<body><ul><li>one</li><li>two</li></ul></body>", 800);
-        let bullets = l.ops.iter().filter(|o| matches!(o, DrawOp::Rect { .. })).count();
-        assert_eq!(bullets, 2, "one bullet per li");
+        // `disc` ist eine SCHEIBE, kein Quadrat — die Form IST der Wert der
+        // Eigenschaft, sonst sind `disc`, `circle` und `square` auf dem Schirm
+        // dasselbe Zeichen und eine verschachtelte Liste verliert ihre Ebenen.
+        let discs: alloc::vec::Vec<f32> = l.ops.iter().filter_map(|o| match o {
+            DrawOp::RoundRect { r, w, h, ring, .. } if w == h && *ring == 0.0 => Some(r[0] / *w as f32),
+            _ => None,
+        }).collect();
+        assert_eq!(discs.len(), 2, "ein Punkt je <li>, got {discs:?}");
+        assert!(discs.iter().all(|f| (*f - 0.5).abs() < 0.01), "voll gerundet: {discs:?}");
         // list text is indented past the plain content edge (the body margin)
         assert!(texts(&l).iter().all(|(x, _, _)| *x > 8));
+    }
+
+    /// Ein `opacity` auf einem INLINE-Element verblasst seinen Text und seinen
+    /// Schmuck. Ein Inline-Kasten bekommt keinen eigenen Befehlsbereich, ueber
+    /// den es nachtraeglich gelegt werden koennte — die Deckung faehrt deshalb
+    /// im Stil mit, und Vorfahren multiplizieren sich auf.
+    #[test]
+    fn opacity_on_an_inline_element_fades_its_run() {
+        let l = lay(
+            "<body style=\"margin:0\"><p>a <span style=\"opacity:.5;background:#ff0000\">halb</span> b</p></body>",
+            400,
+        );
+        let alphas: alloc::vec::Vec<(u8, &str)> = l.ops.iter().filter_map(|o| match o {
+            DrawOp::Text { color, text, .. } => Some((color.a, text.as_str())),
+            _ => None,
+        }).collect();
+        let half = alphas.iter().find(|(_, t)| *t == "halb").expect("der Lauf ist getrennt");
+        assert!((half.0 as i32 - 127).abs() <= 2, "halb durchsichtig: {alphas:?}");
+        assert!(alphas.iter().filter(|(_, t)| *t != "halb").all(|(a, _)| *a == 255),
+                "die Nachbarn nicht: {alphas:?}");
+        // Und der Hintergrund des Inline-Kastens genauso.
+        let bg = l.ops.iter().find_map(|o| match o {
+            DrawOp::Rect { color, .. } if (color.c.0, color.c.1, color.c.2) == (255, 0, 0) => Some(color.a),
+            _ => None,
+        }).expect("Hintergrund");
+        assert!((bg as i32 - 127).abs() <= 2, "auch der Schmuck, a={bg}");
+    }
+
+    /// Und sie multipliziert sich mit der des BLOCKS darueber, statt sie zu
+    /// ersetzen: der Block legt seine ueber den ganzen Befehlsbereich.
+    #[test]
+    fn inline_and_block_opacity_multiply() {
+        let l = lay(
+            "<body style=\"margin:0\"><p style=\"opacity:.5\">a <span style=\"opacity:.5\">viertel</span></p></body>",
+            400,
+        );
+        let a: alloc::vec::Vec<(u8, &str)> = l.ops.iter().filter_map(|o| match o {
+            DrawOp::Text { color, text, .. } => Some((color.a, text.as_str())),
+            _ => None,
+        }).collect();
+        let outer = a.iter().find(|(_, t)| t.trim() == "a").expect("aussen").0;
+        let inner = a.iter().find(|(_, t)| *t == "viertel").expect("innen").0;
+        assert!((outer as i32 - 128).abs() <= 2, "aussen halb: {a:?}");
+        assert!((inner as i32 - 64).abs() <= 2, "innen viertel: {a:?}");
     }
 }
 

@@ -770,6 +770,20 @@ pub struct ComputedStyle {
     /// show through each other instead of being flattened first. Exact group
     /// opacity needs an offscreen buffer per stacking context.
     pub opacity: f32,
+    /// Alpha, mit der der TEXT und der Kastenschmuck dieses Elements
+    /// vormultipliziert werden — aufgesammelt ueber die INLINE-Vorfahren.
+    ///
+    /// Ein Block bekommt seinen `opacity`/`filter` nachtraeglich ueber seinen
+    /// Befehlsbereich gelegt (`Ctx::apply_filter`). Ein Inline-Kasten hat
+    /// keinen solchen Bereich: seine Laeufe werden erst beim Schliessen der
+    /// Zeile ausgegeben, lange nachdem das Element vorbei ist. Also traegt er
+    /// seine Deckung hier mit, und seine Nachfahren multiplizieren ihre dazu.
+    ///
+    /// Auf allem, was einen eigenen Bereich HAT (Block, Inline-Block, Float,
+    /// ausser Fluss), steht sie wieder auf 1 — sonst wuerde dieselbe Deckung
+    /// zweimal angewandt. Der Preis dafuer ist benannt: ein BLOCK innerhalb
+    /// eines halbdurchsichtigen Inline-Kastens verliert dessen Deckung.
+    pub inline_fade: f32,
     /// This element's OWN `opacity: 0`, before it is folded into `transparent`.
     /// Kept apart so a later declaration in the same cascade can undo an
     /// earlier one, while an ANCESTOR's transparency still can't be undone.
@@ -1116,6 +1130,7 @@ impl ComputedStyle {
             hidden: false,
             transparent: false,
             opacity: 1.0,
+            inline_fade: 1.0,
             opacity_zero: false,
             text_align: TextAlign::Start,
             center_blocks: false,
@@ -1337,6 +1352,7 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         hidden: parent.hidden,
         transparent: parent.transparent,
         opacity: 1.0,
+        inline_fade: parent.inline_fade,
         opacity_zero: false,
         color: parent.color,
         text_align: parent.text_align,
@@ -1851,6 +1867,18 @@ pub fn resolve_in(
     // Opacity groups the subtree: a transparent ancestor wins over anything
     // this element declares, but within this element the cascade decides.
     s.transparent |= s.opacity_zero;
+    // Die Deckung, die dieses Element seinen Laeufen mitgibt — siehe
+    // `inline_fade`. Nur ein reiner Inline-Kasten sammelt; alles mit einem
+    // eigenen Befehlsbereich faengt wieder bei 1 an.
+    let own_alpha = s.opacity * s.filter.map_or(1.0, |f| f.a);
+    s.inline_fade = if s.display == Display::Inline
+        && s.float == FloatKind::None
+        && !matches!(s.position, Position::Absolute | Position::Fixed)
+    {
+        s.inline_fade * own_alpha
+    } else {
+        1.0
+    };
     // `currentcolor` is a used-value keyword: it reads the `color` this element
     // ended up with, whatever order the declarations came in and whether the
     // value arrived through `inherit`.
@@ -1979,6 +2007,18 @@ pub fn resolve_pseudo(
         s.display = Display::Block;
     }
     s.transparent |= s.opacity_zero;
+    // Die Deckung, die dieses Element seinen Laeufen mitgibt — siehe
+    // `inline_fade`. Nur ein reiner Inline-Kasten sammelt; alles mit einem
+    // eigenen Befehlsbereich faengt wieder bei 1 an.
+    let own_alpha = s.opacity * s.filter.map_or(1.0, |f| f.a);
+    s.inline_fade = if s.display == Display::Inline
+        && s.float == FloatKind::None
+        && !matches!(s.position, Position::Absolute | Position::Fixed)
+    {
+        s.inline_fade * own_alpha
+    } else {
+        1.0
+    };
     // `currentcolor` is a used-value keyword: it reads the `color` this element
     // ended up with, whatever order the declarations came in and whether the
     // value arrived through `inherit`.
