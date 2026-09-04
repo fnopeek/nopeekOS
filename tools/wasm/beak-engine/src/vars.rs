@@ -541,6 +541,45 @@ fn is_ws(c: u8) -> bool {
 mod tests {
     use super::*;
 
+    /// **Bekannte Luecke, gemessen 2026-09-04 an Bootstrap 5.3.3.**
+    ///
+    /// Die Aufloesung laeuft EINMAL ueber den Blatt-TEXT, mit einer globalen
+    /// Karte: ein Wert je Name. Das traegt das Muster, fuer das sie gebaut
+    /// wurde (`:root` setzt eine Palette), und bricht bei dem, das moderne
+    /// Rahmenwerke benutzen: die Basisklasse liest die Variable, jede
+    /// Variante setzt sie neu.
+    ///
+    ///     .btn        { --bs-btn-bg: transparent; background: var(--bs-btn-bg) }
+    ///     .btn-primary{ --bs-btn-bg: #0d6efd }
+    ///     …
+    ///     .btn-link   { --bs-btn-bg: transparent }   <- steht ZULETZT im Blatt
+    ///
+    /// `.btn-link` trifft einen `<button class="btn btn-primary">` nie, gewinnt
+    /// aber die globale Karte — und damit ist JEDER Bootstrap-Knopf
+    /// durchsichtig. Dasselbe trifft `.alert-*`, `.table-striped`,
+    /// `.list-group-item.active`: das meiste, was auf der Komponentenvorlage
+    /// falsch aussieht, ist DIESE eine Ursache.
+    ///
+    /// Der Fix ist keine Zeile: die Aufloesung muss in die KASKADE, je
+    /// Element und vererbt, statt in einen Textlauf davor. Solange sie das
+    /// nicht ist, steht dieser Test hier und ist `ignore`d — er beschreibt,
+    /// was gelten soll.
+    ///
+    ///     cargo test --release -- --ignored
+    #[test]
+    #[ignore = "bekannte Luecke: Variablen werden global aufgeloest, nicht je Element"]
+    fn a_rule_that_does_not_match_must_not_decide_the_value() {
+        let css = ".a{--x:transparent;background-color:var(--x)}\
+                   .b{--x:#ff0000}\
+                   .c{--x:#00ff00}";
+        let out = resolve_vars(css, crate::css::Media::new(1000.0, false), &[]);
+        // Auf einem Element mit `class="a b"` muss `.b` gewinnen. Ein Textlauf
+        // kann das nicht wissen — deshalb steht hier die Anforderung und nicht
+        // eine Behauptung ueber die heutige Ausgabe.
+        assert!(out.contains("background-color:#ff0000"),
+                "eine nicht passende Regel hat den Wert entschieden: {out}");
+    }
+
     #[test]
     fn simple_root_var() {
         let out = resolve_vars(":root{--c:#f00} a{color:var(--c)}", crate::css::Media::new(800.0, false), &[]);
