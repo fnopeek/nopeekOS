@@ -165,17 +165,19 @@ impl Interp {
         Ok(None)
     }
 
-    fn for_head_bind(&mut self, left: &ForHead, v: Value, env: &Rc<RefCell<Env>>) -> C<()> {
+    /// Den Kopf einer `for..of`/`for..in`-Schleife an einen Wert binden.
+    ///
+    /// Drei Faelle in einer Funktion, und beide Maschinen rufen sie: ein
+    /// `let`/`const` legt seinen Namen je Durchlauf NEU an (deshalb
+    /// `declare_pattern`), ein `var` findet den hochgezogenen weiter aussen,
+    /// und ein blosses Ziel (`for (x of …)`, `for ([a,b] of …)`) ist eine
+    /// ZUWEISUNG und legt gar nichts an.
+    pub fn for_head_bind(&mut self, left: &ForHead, v: Value, env: &Rc<RefCell<Env>>) -> C<()> {
         match left {
             ForHead::VarDecl(d) => {
                 let id = &d.decls[0].id;
                 if d.kind != VarKind::Var {
-                    let mut n = Vec::new();
-                    names_of(id, &mut n);
-                    for x in n {
-                        env.borrow_mut().vars.insert(Rc::from(x.as_str()),
-                            Binding { value: Value::Undefined, mutable: true, initialized: false });
-                    }
+                    return self.declare_pattern(id, v, env);
                 }
                 self.bind_pattern(id, v, env, true)
             }
@@ -268,13 +270,7 @@ impl Interp {
             let exc = exc.clone();
             let cenv = Env::new(Some(env.clone()), false);
             if let Some(p) = &h.param {
-                let mut names = Vec::new();
-                names_of(p, &mut names);
-                for n in names {
-                    cenv.borrow_mut().vars.insert(Rc::from(n.as_str()),
-                        Binding { value: Value::Undefined, mutable: true, initialized: false });
-                }
-                self.bind_pattern(p, exc, &cenv, true)?;
+                self.declare_pattern(p, exc, &cenv)?;
             }
             result = self.exec_block(&h.body, &cenv);
         }
@@ -377,6 +373,23 @@ impl Interp {
     }
 
     // ── Muster binden ────────────────────────────────────────────────────
+    /// Die Namen eines Musters HIER anlegen und dann binden.
+    ///
+    /// Der Unterschied zu `bind_pattern(…, true)` ist der Ort: `init_binding`
+    /// laeuft die Umgebungskette HOCH und faende eine gleichnamige Bindung
+    /// weiter aussen. Der Kopf eines `catch` und der einer `for`-Schleife
+    /// legen ihre Namen aber GENAU HIER an, je Durchlauf neu. Eigene
+    /// Funktion, weil beide Maschinen sie brauchen.
+    pub fn declare_pattern(&mut self, p: &Pat, v: Value, env: &Rc<RefCell<Env>>) -> C<()> {
+        let mut names = Vec::new();
+        names_of(p, &mut names);
+        for n in names {
+            env.borrow_mut().vars.insert(Rc::from(n.as_str()),
+                Binding { value: Value::Undefined, mutable: true, initialized: false });
+        }
+        self.bind_pattern(p, v, env, true)
+    }
+
     pub fn bind_pattern(&mut self, p: &Pat, v: Value, env: &Rc<RefCell<Env>>, declare: bool) -> C<()> {
         match p {
             Pat::Ident(n) => {

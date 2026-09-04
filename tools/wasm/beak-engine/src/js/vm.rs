@@ -414,6 +414,20 @@ impl Vm {
                 let v = i.func_value(chunk.funcs[*f as usize].clone(), &env);
                 self.push(v);
             }
+            // Dieselben Hilfen wie der Baumlaeufer — siehe `Op::BindPat`.
+            Op::BindPat { pat, mode } => {
+                let v = self.pop();
+                let p = &chunk.pats[*pat as usize];
+                match mode {
+                    super::code::BindMode::Init => i.bind_pattern(p, v, &env, true)?,
+                    super::code::BindMode::Assign => i.bind_pattern(p, v, &env, false)?,
+                    super::code::BindMode::Declare => i.declare_pattern(p, v, &env)?,
+                }
+            }
+            Op::BindHead(h) => {
+                let v = self.pop();
+                i.for_head_bind(&chunk.heads[*h as usize], v, &env)?;
+            }
             // Dieselbe Funktion, die der Baumlaeufer ruft — siehe `Op::Class`.
             Op::Class(c) => {
                 let v = i.eval_class(&chunk.classes[*c as usize], &env)?;
@@ -556,10 +570,21 @@ impl Vm {
                     Some(Iter::Obj(v)) => v.clone(),
                     _ => return Err(i.throw_kind("TypeError", "no iterator here")),
                 };
-                match i.iter_next(&it)? {
-                    Some(v) => self.push(v),
-                    None => {
+                match i.iter_next(&it) {
+                    Ok(Some(v)) => self.push(v),
+                    Ok(None) => {
                         self.jump(*done);
+                    }
+                    // **Wirft `next()` SELBST, wird nicht geschlossen.** Der
+                    // Iterator ist dann in unbekanntem Zustand, und `return()`
+                    // darauf waere spec-widrig — anders als bei einem Wurf aus
+                    // dem RUMPF, der ihn sehr wohl schliessen muss. Deshalb
+                    // faellt er hier aus der Liste, bevor der Wurf geht: sonst
+                    // holt ihn der naechste Behandler oder das Verlassen des
+                    // Rahmens nach.
+                    Err(e) => {
+                        self.frames.last_mut().unwrap().iters.pop();
+                        return Err(e);
                     }
                 }
             }
@@ -682,6 +707,16 @@ impl Vm {
                 return false;
             }
             let f = self.frames.pop().unwrap();
+            // **Auch beim Verlassen eines Rahmens gehoeren offene `for…of`
+            // geschlossen** — von innen nach aussen, genau wie im `Ret`. Ohne
+            // diese Schleife faehrt ein fremder Generator seinen
+            // `finally`-Block nie, wenn der Wurf aus dem Schleifenrumpf durch
+            // die Funktion nach draussen geht. Gefunden vom Diff, als
+            // `for ([x.attr] of it)` uebersetzbar wurde und ein werfender
+            // Schreiber im KOPF dasselbe ausloeste.
+            for it in f.iters.iter().rev() {
+                if let Iter::Obj(v) = it { i.iter_close(v); }
+            }
             self.stack.truncate(f.base);
             i.depth -= 1;
         };

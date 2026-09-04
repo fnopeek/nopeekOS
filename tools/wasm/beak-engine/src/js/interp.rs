@@ -1184,7 +1184,7 @@ impl Interp {
                 }
                 Stmt::VarDecl(d) if d.kind != VarKind::Var => {
                     let mut names = Vec::new();
-                    for dec in &d.decls { collect_names(&dec.id, &mut names); }
+                    for dec in &d.decls { super::eval::names_of(&dec.id, &mut names); }
                     for n in names {
                         block.borrow_mut().vars.insert(Rc::from(n.as_str()), Binding {
                             value: Value::Undefined,
@@ -1220,7 +1220,7 @@ impl Interp {
         match st {
             Stmt::VarDecl(d) if d.kind == VarKind::Var => {
                 let mut names = Vec::new();
-                for dec in &d.decls { collect_names(&dec.id, &mut names); }
+                for dec in &d.decls { super::eval::names_of(&dec.id, &mut names); }
                 put(names);
             }
             Stmt::Block(b) => for s in b { self.hoist_vars(s, func) },
@@ -1233,7 +1233,7 @@ impl Interp {
                     if let ForInit::VarDecl(d) = &**i {
                         if d.kind == VarKind::Var {
                             let mut names = Vec::new();
-                            for dec in &d.decls { collect_names(&dec.id, &mut names); }
+                            for dec in &d.decls { super::eval::names_of(&dec.id, &mut names); }
                             put(names);
                         }
                     }
@@ -1244,7 +1244,7 @@ impl Interp {
                 if let ForHead::VarDecl(d) = &**left {
                     if d.kind == VarKind::Var {
                         let mut names = Vec::new();
-                        for dec in &d.decls { collect_names(&dec.id, &mut names); }
+                        for dec in &d.decls { super::eval::names_of(&dec.id, &mut names); }
                         put(names);
                     }
                 }
@@ -1486,18 +1486,4 @@ impl Interp {
     }
 }
 
-/// Namen, die ein Muster bindet (fuer das Hochziehen).
-fn collect_names(p: &Pat, out: &mut Vec<String>) {
-    match p {
-        Pat::Ident(n) => out.push(n.clone()),
-        Pat::Array(items) => for it in items.iter().flatten() { collect_names(it, out) },
-        Pat::Object { props, rest } => {
-            for pr in props { collect_names(&pr.value, out); }
-            if let Some(r) = rest { collect_names(r, out); }
-        }
-        Pat::Assign { left, .. } => collect_names(left, out),
-        Pat::Rest(inner) => collect_names(inner, out),
-        Pat::Expr(_) => {}
-    }
-}
 

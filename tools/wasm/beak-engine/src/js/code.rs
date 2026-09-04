@@ -132,6 +132,17 @@ pub enum Op {
     NewSpread,
     /// Aus `names[i]` eine Funktion bauen — der Index zeigt in `funcs`.
     Closure(u32),
+    /// Ein MUSTER binden — Stapel: wert → (nichts). Der Index zeigt in `pats`.
+    ///
+    /// Wie `Op::Class` rechnet der Befehl nichts, er ruft `bind_pattern` bzw.
+    /// `declare_pattern` — dieselben Hilfen wie der Baumlaeufer. Ein Muster
+    /// ist eine Bauvorschrift mit Voreinstellungen, Restsammlern, geschachtelten
+    /// Mustern und Zielen, die gar keine Bindungen sind (`[a.b] = x`); ein
+    /// Nachbau davon waere eine zweite Zuweisungssemantik.
+    BindPat { pat: u32, mode: BindMode },
+    /// Den Kopf einer `for..of`/`for..in`-Schleife binden — Stapel: wert →
+    /// (nichts). `Interp::for_head_bind` kennt die drei Faelle.
+    BindHead(u32),
     /// Eine Klasse bauen — der Index zeigt in `classes`.
     ///
     /// **Der Befehl rechnet nichts, er RUFT `Interp::eval_class`** — dieselbe
@@ -220,6 +231,18 @@ pub enum Op {
     SetCompletion,
 }
 
+/// Wie ein Muster gebunden wird.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindMode {
+    /// Eine Deklaration: die Bindung gibt es schon (das Hochziehen hat sie
+    /// angelegt), hier wird sie fertig.
+    Init,
+    /// Eine Zuweisung an bestehende Ziele — auch an Eigenschaften.
+    Assign,
+    /// Der Kopf eines `catch`: die Namen entstehen GENAU HIER.
+    Declare,
+}
+
 /// Was beim Betreten eines Blocks gebunden wird, bevor die erste Zeile laeuft.
 ///
 /// Die Liste entsteht beim Uebersetzen aus denselben zwei Schleifen wie
@@ -244,6 +267,8 @@ pub struct Chunk {
     pub names: Vec<Rc<str>>,
     pub funcs: Vec<Rc<super::ast::Func>>,
     pub classes: Vec<Rc<super::ast::Class>>,
+    pub pats: Vec<super::ast::Pat>,
+    pub heads: Vec<super::ast::ForHead>,
     pub blocks: Vec<Vec<BlockDecl>>,
     /// Je `MakeArraySpread` eine Maske: welcher Eintrag war ein `...x`?
     pub blocks_spread: Vec<Vec<bool>>,
@@ -252,8 +277,8 @@ pub struct Chunk {
 impl Chunk {
     pub fn new() -> Chunk {
         Chunk { ops: Vec::new(), constants: Vec::new(), names: Vec::new(),
-                funcs: Vec::new(), classes: Vec::new(), blocks: Vec::new(),
-                blocks_spread: Vec::new() }
+                funcs: Vec::new(), classes: Vec::new(), pats: Vec::new(),
+                heads: Vec::new(), blocks: Vec::new(), blocks_spread: Vec::new() }
     }
 
     pub fn emit(&mut self, op: Op) -> usize {
@@ -310,6 +335,16 @@ impl Chunk {
     pub fn class(&mut self, c: Rc<super::ast::Class>) -> u32 {
         self.classes.push(c);
         (self.classes.len() - 1) as u32
+    }
+
+    pub fn pat(&mut self, p: super::ast::Pat) -> u32 {
+        self.pats.push(p);
+        (self.pats.len() - 1) as u32
+    }
+
+    pub fn head(&mut self, h: super::ast::ForHead) -> u32 {
+        self.heads.push(h);
+        (self.heads.len() - 1) as u32
     }
 
     pub fn here(&self) -> u32 {

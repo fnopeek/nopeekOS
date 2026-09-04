@@ -338,11 +338,13 @@ impl Compiler {
                     }
                 }
                 Stmt::VarDecl(d) if d.kind != VarKind::Var => {
-                    for dec in &d.decls {
-                        let Pat::Ident(n) = &dec.id else {
-                            return Err(Unsupported("destructuring-decl"));
-                        };
-                        let name = self.chunk.name(n);
+                    // Auch ein Muster steht mit ALLEN seinen Namen in der
+                    // Totzone — dieselbe Liste wie `Interp::hoist`, dieselbe
+                    // Funktion (`names_of`).
+                    let mut names = Vec::new();
+                    for dec in &d.decls { super::eval::names_of(&dec.id, &mut names); }
+                    for n in names {
+                        let name = self.chunk.name(&n);
                         out.push(BlockDecl::Tdz { name, mutable: d.kind != VarKind::Const });
                     }
                 }
@@ -424,7 +426,10 @@ impl Compiler {
                     let i = self.chunk.name(n);
                     self.chunk.emit(Op::BindCatch(i));
                 }
-                Some(_) => return Err(Unsupported("catch-destructuring")),
+                Some(p) => {
+                    let k = self.chunk.pat(p.clone());
+                    self.chunk.emit(Op::BindPat { pat: k, mode: BindMode::Declare });
+                }
             }
             for st in &h.body { self.stmt(st)?; }
             self.chunk.emit(Op::PopEnv);
@@ -521,15 +526,6 @@ impl Compiler {
     /// Maschine, die anhalten kann — das ist Stufe 4, und bis dahin waeren
     /// zwei verschiedene Iterationssemantiken das schlechtere Geschaeft.
     fn for_of(&mut self, left: &ForHead, right: &Expr, body: &Stmt) -> CompileResult<()> {
-        let name = match left {
-            ForHead::VarDecl(d) => match d.decls.first().map(|x| &x.id) {
-                Some(Pat::Ident(n)) => n.clone(),
-                _ => return Err(Unsupported("for-of-pattern")),
-            },
-            ForHead::Pattern(Pat::Ident(n)) => n.clone(),
-            _ => return Err(Unsupported("for-of-target")),
-        };
-        let lexical = matches!(left, ForHead::VarDecl(d) if d.kind != VarKind::Var);
         self.expr(right)?;
         self.chunk.emit(Op::IterAll);
         let depth0 = self.depth;
@@ -541,8 +537,8 @@ impl Compiler {
         let empty = self.chunk.block(Vec::new());
         self.chunk.emit(Op::PushEnv(empty));
         self.depth += 1;
-        let n = self.chunk.name(&name);
-        self.chunk.emit(Op::DeclVar { name: n, mutable: true, lexical });
+        let h = self.chunk.head(left.clone());
+        self.chunk.emit(Op::BindHead(h));
         self.stmt(body)?;
         self.chunk.emit(Op::PopEnv);
         self.depth -= 1;
@@ -568,15 +564,6 @@ impl Compiler {
     /// nichts zu schliessen: eine fertige Liste hat kein `return()`. Deshalb
     /// nehmen beide Ausgaenge denselben `IterDrop`.
     fn for_in(&mut self, left: &ForHead, right: &Expr, body: &Stmt) -> CompileResult<()> {
-        let name = match left {
-            ForHead::VarDecl(d) => match d.decls.first().map(|x| &x.id) {
-                Some(Pat::Ident(n)) => n.clone(),
-                _ => return Err(Unsupported("for-in-pattern")),
-            },
-            ForHead::Pattern(Pat::Ident(n)) => n.clone(),
-            _ => return Err(Unsupported("for-in-target")),
-        };
-        let lexical = matches!(left, ForHead::VarDecl(d) if d.kind != VarKind::Var);
         self.expr(right)?;
         self.chunk.emit(Op::ForInAll);
         let depth0 = self.depth;
@@ -590,8 +577,8 @@ impl Compiler {
         let empty = self.chunk.block(Vec::new());
         self.chunk.emit(Op::PushEnv(empty));
         self.depth += 1;
-        let n = self.chunk.name(&name);
-        self.chunk.emit(Op::DeclVar { name: n, mutable: true, lexical });
+        let h = self.chunk.head(left.clone());
+        self.chunk.emit(Op::BindHead(h));
         self.stmt(body)?;
         self.chunk.emit(Op::PopEnv);
         self.depth -= 1;
@@ -678,7 +665,16 @@ impl Compiler {
     fn var_decl(&mut self, d: &VarDecl) -> CompileResult<()> {
         for dec in &d.decls {
             let Pat::Ident(name) = &dec.id else {
-                return Err(Unsupported("destructuring-decl"));
+                // Ein MUSTER. Ohne Initialisierer gibt es das nicht (der
+                // Parser laesst `var {a};` nicht durch), also steht der Wert
+                // hier immer. Die Bindungen hat das Hochziehen schon angelegt.
+                let Some(e) = &dec.init else {
+                    return Err(Unsupported("destructuring-no-init"));
+                };
+                self.expr(e)?;
+                let p = self.chunk.pat(dec.id.clone());
+                self.chunk.emit(Op::BindPat { pat: p, mode: BindMode::Init });
+                continue;
             };
             // `var x;` OHNE Initialisierer laesst eine vorhandene Bindung in
             // Ruhe — sonst loescht `var f; function f(){}` die Funktion, die
@@ -846,7 +842,16 @@ impl Compiler {
                     },
                     _ => Err(Unsupported("assign-target")),
                 },
-                _ => Err(Unsupported("destructuring-assign")),
+                // Ein Muster als Ziel: `[a,b] = x`, `({a} = x)`. Der WERT der
+                // Zuweisung ist die rechte Seite, nicht das Gebundene —
+                // deshalb bleibt eine Kopie liegen.
+                p => {
+                    self.expr(right)?;
+                    self.chunk.emit(Op::Dup);
+                    let k = self.chunk.pat(p.clone());
+                    self.chunk.emit(Op::BindPat { pat: k, mode: BindMode::Assign });
+                    Ok(())
+                }
             },
             Expr::Assign { op, left, right } => {
                 let Pat::Expr(target) = &**left else {
