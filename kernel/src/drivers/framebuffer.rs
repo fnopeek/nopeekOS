@@ -224,8 +224,9 @@ pub fn init_from_gpu() {
     }
 
     let info = FbInfo { addr, pitch, width, height, bpp };
-    // 2x pixel scaling for 4K (each glyph pixel → 2×2 block)
-    let scale = if width > 1920 { 2u32 } else { 1 };
+    // 2x pixel scaling for 4K (each glyph pixel → 2×2 block).
+    // Threshold matches gui::font::scale_for — keep both in step.
+    let scale = if width > 2560 { 2u32 } else { 1 };
     let eff_w = FONT_WIDTH * scale;
     let eff_h = FONT_HEIGHT * scale;
     let cols = width / eff_w;

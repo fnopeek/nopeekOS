@@ -32,9 +32,11 @@ const FONT_32X64: FontDesc = FontDesc {
     glyph_w: 32, glyph_h: 64, bytes_per_row: 4,
 };
 
-/// Auto-detect scale: 2x for >1920px width, else 1x.
+/// Auto-detect scale: 2x above 2560px width, else 1x.
+/// 2560x1440 is a normal-DPI desktop mode, not HiDPI — scaling it would
+/// leave 1280x720 of usable area. Only 4K-class panels get 2x.
 pub fn scale_for(screen_width: u32) -> u32 {
-    if screen_width > 1920 { 2 } else { 1 }
+    if screen_width > 2560 { 2 } else { 1 }
 }
 
 /// Get the appropriate font for a given scale.

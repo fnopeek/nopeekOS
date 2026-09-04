@@ -500,9 +500,9 @@ run_qemu_generic() {
             ;;
     esac
 
-    # The framebuffer is a fixed 1920x1080, but GTK defaults to zoom-to-fit:
+    # The framebuffer size is fixed at boot, but GTK defaults to zoom-to-fit:
     # it rescales that buffer to whatever size the window ends up with. Under
-    # a tiling WM the window is never exactly 1920x1080, so every frame goes
+    # a tiling WM the window is never exactly that size, so every frame goes
     # through a resample and small text turns mushy — very visible in screen
     # recordings and screenshots. zoom-to-fit=off keeps one guest pixel on one
     # host pixel; show-menubar=off drops the GTK menu strip so the window IS
@@ -510,13 +510,33 @@ run_qemu_generic() {
     # window to float, otherwise the tiler shrinks it and QEMU crops instead
     # of scaling. Override with e.g. QEMU_GTK=zoom-to-fit=on for the old
     # behaviour, or QEMU_GTK=full-screen=on for a fullscreen demo.
+    #
+    # Resolution: xres/yres land in the stdvga EDID, OVMF picks the matching
+    # mode, and the kernel simply takes whatever GOP mode it is handed
+    # (boot_uefi.rs). Only sizes from OVMF's QemuVideoBochsModes table work —
+    # 1920x1080, 1920x1200, 2560x1440, 2560x1600, 3840x2160 — anything else
+    # silently falls back to 1024x768. vgamem must cover w*h*4 and be a power
+    # of two, so it is derived, not guessed. Override with QEMU_RES=WxH.
+    # NOTE the guest flips to 2x UI scaling above 2560 wide (gui/font.rs
+    # scale_for), so 3840x2160 gives 1080p worth of usable area, not 4K.
     local -a display_args
     if [ "$display" = "gui" ]; then
+        local res="${QEMU_RES:-2560x1440}"
+        local xres="${res%x*}" yres="${res#*x}"
+        if ! [[ "$xres" =~ ^[0-9]+$ && "$yres" =~ ^[0-9]+$ ]]; then
+            err "QEMU_RES must be WIDTHxHEIGHT (e.g. 2560x1440), got: $res"
+            exit 1
+        fi
+        local vgamem=16
+        while [ $(( vgamem * 1024 * 1024 )) -lt $(( xres * yres * 4 )) ]; do
+            vgamem=$(( vgamem * 2 ))
+        done
         display_args=(-vga std \
-            -global driver=VGA,property=xres,value=1920 \
-            -global driver=VGA,property=yres,value=1080 \
+            -global driver=VGA,property=xres,value="$xres" \
+            -global driver=VGA,property=yres,value="$yres" \
+            -global driver=VGA,property=vgamem_mb,value="$vgamem" \
             -display "gtk,${QEMU_GTK:-show-menubar=off,zoom-to-fit=off}")
-        log "Launching QEMU GUI @ 1920x1080 (1:1, unscaled). Serial in this terminal. Ctrl-A X to quit."
+        log "Launching QEMU GUI @ ${xres}x${yres} (1:1, unscaled, ${vgamem}M VRAM). Serial in this terminal. Ctrl-A X to quit."
     else
         display_args=(-display none)
         log "Launching QEMU. Serial on stdio. Ctrl-A X to quit."
@@ -756,7 +776,7 @@ Cross-vendor testing (TCG, slow but vendor-correct):
 Installer / release:
   installer            Two-pass installer build (kernel.efi + bundled assets)
   qemu-installer       Installer + run (wipes NVMe, attaches installer USB)
-  qemu-installer-gui   Same with framebuffer (1920x1080)
+  qemu-installer-gui   Same with framebuffer (QEMU_RES, default 2560x1440)
   qemu-installer-full  Same as qemu-installer-gui but bundles the
                        LibreWolf userspace sqfs (~261 MB) so the
                        fresh install has the browser ready on first
@@ -776,6 +796,14 @@ Installer / release:
                        (Alpine+Mesa userspace bundles, >30 MB).
 
 Without argument: build + qemu
+
+Environment:
+  QEMU_RES=WxH         GUI framebuffer size (default 2560x1440). Must be a
+                       mode OVMF knows: 1920x1080, 1920x1200, 2560x1440,
+                       2560x1600, 3840x2160. VRAM is derived. Above 2560
+                       wide the guest UI switches to 2x scaling.
+  QEMU_GTK=...         GTK display options (default
+                       show-menubar=off,zoom-to-fit=off)
 EOF
 }
 
