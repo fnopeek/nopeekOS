@@ -296,15 +296,18 @@ impl Interp {
     }
 
     pub fn eval_class(&mut self, c: &Class, env: &Rc<RefCell<Env>>) -> C<Value> {
-        let parent_proto = match &c.super_class {
+        // Zwei Ketten, nicht eine: die Instanzen haengen unter
+        // `Eltern.prototype`, der KONSTRUKTOR unter der Elternklasse selbst.
+        let (parent_proto, parent_ctor) = match &c.super_class {
             Some(e) => {
                 let sv = self.eval(e, env)?;
-                match self.get(&sv, "prototype")? {
+                let pp = match self.get(&sv, "prototype")? {
                     Value::Obj(p) => Some(p),
                     _ => Some(self.realm.object_proto.clone()),
-                }
+                };
+                (pp, sv.as_obj().cloned())
             }
-            None => Some(self.realm.object_proto.clone()),
+            None => (Some(self.realm.object_proto.clone()), None),
         };
         let proto = new_obj(parent_proto);
 
@@ -344,6 +347,14 @@ impl Interp {
             co.borrow_mut().define("name", Prop {
                 value: Some(Value::str(c.name.as_deref().unwrap_or(""))), get: None, set: None,
                 writable: false, enumerable: false, configurable: true });
+        }
+        // **Statische Vererbung.** Ohne sie findet `B.create()` das
+        // `static create` der Elternklasse nicht — und `Object.getPrototypeOf(B)`
+        // ist `Function.prototype` statt `A`. Fiel auf, als `class` auf die
+        // Befehlsmaschine kam und die Probe gegen node lief; die Luecke war
+        // vorher in BEIDEN Maschinen, weil beide dieselbe Funktion rufen.
+        if let (Some(p), Value::Obj(co)) = (&parent_ctor, &ctor) {
+            co.borrow_mut().proto = Some(p.clone());
         }
         proto.borrow_mut().define("constructor", Prop::builtin(ctor.clone()));
 

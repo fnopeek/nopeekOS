@@ -132,6 +132,21 @@ pub enum Op {
     NewSpread,
     /// Aus `names[i]` eine Funktion bauen — der Index zeigt in `funcs`.
     Closure(u32),
+    /// Eine Klasse bauen — der Index zeigt in `classes`.
+    ///
+    /// **Der Befehl rechnet nichts, er RUFT `Interp::eval_class`** — dieselbe
+    /// Funktion, die der Baumlaeufer ruft. Eine Klasse ist kein Ausdruck mit
+    /// Unterausdruecken, den man in Befehle zerlegen wollte: sie ist eine
+    /// Bauvorschrift mit einem Dutzend Sonderregeln (fehlender Konstruktor,
+    /// abgeleiteter Durchreicher, Methoden NICHT aufzaehlbar, Leser und
+    /// Schreiber auf DERSELBEN Eigenschaft). Sie ein zweites Mal zu schreiben
+    /// waere die teuerste Sorte zweiter Semantik.
+    ///
+    /// Ihre Unterausdruecke — `extends`, berechnete Schluessel, statische
+    /// Felder — laufen dadurch im Baumlaeufer, und zwar in BEIDEN Faellen.
+    /// Das ist kein Bruch der Regel „ganz oder gar nicht", sondern ihre
+    /// strengste Lesart: fuer einen Klassenrumpf gibt es genau EINEN Weg.
+    Class(u32),
     Throw,
     /// Den Wert oben werfen — der Rueckweg aus einem `finally`, das nicht
     /// gefangen hat.
@@ -228,6 +243,7 @@ pub struct Chunk {
     /// Namen (Bezeichner und Eigenschaften), einmal abgelegt statt je Befehl.
     pub names: Vec<Rc<str>>,
     pub funcs: Vec<Rc<super::ast::Func>>,
+    pub classes: Vec<Rc<super::ast::Class>>,
     pub blocks: Vec<Vec<BlockDecl>>,
     /// Je `MakeArraySpread` eine Maske: welcher Eintrag war ein `...x`?
     pub blocks_spread: Vec<Vec<bool>>,
@@ -236,7 +252,8 @@ pub struct Chunk {
 impl Chunk {
     pub fn new() -> Chunk {
         Chunk { ops: Vec::new(), constants: Vec::new(), names: Vec::new(),
-                funcs: Vec::new(), blocks: Vec::new(), blocks_spread: Vec::new() }
+                funcs: Vec::new(), classes: Vec::new(), blocks: Vec::new(),
+                blocks_spread: Vec::new() }
     }
 
     pub fn emit(&mut self, op: Op) -> usize {
@@ -288,6 +305,11 @@ impl Chunk {
     pub fn func(&mut self, f: Rc<super::ast::Func>) -> u32 {
         self.funcs.push(f);
         (self.funcs.len() - 1) as u32
+    }
+
+    pub fn class(&mut self, c: Rc<super::ast::Class>) -> u32 {
+        self.classes.push(c);
+        (self.classes.len() - 1) as u32
     }
 
     pub fn here(&self) -> u32 {
