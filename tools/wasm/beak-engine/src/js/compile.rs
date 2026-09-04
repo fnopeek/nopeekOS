@@ -29,6 +29,11 @@ struct Loop {
     /// die falsche, und eine Bindung aus dem Block ist danach draussen noch
     /// zu sehen — sechs annexB-Tests, die genau das pruefen.
     depth: usize,
+    /// Ein `switch` ist BRECHBAR, aber nicht fortsetzbar: `break` gehoert ihm,
+    /// `continue` der Schleife darunter. Ohne diese Unterscheidung liefe ein
+    /// `continue` in einem `switch` innerhalb einer Schleife an den Anfang des
+    /// `switch` — und das ist eine Endlosschleife, kein Fehler, den man sieht.
+    brk_only: bool,
 }
 
 pub struct Compiler {
@@ -152,7 +157,7 @@ impl Compiler {
                 let top = self.chunk.here();
                 self.expr(test)?;
                 let out = self.chunk.emit_jump(Op::JumpFalse);
-                self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(), depth: self.depth });
+                self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(), depth: self.depth, brk_only: false });
                 self.stmt(body)?;
                 let l = self.loops.pop().unwrap();
                 for at in l.continues {
@@ -167,7 +172,7 @@ impl Compiler {
             }
             Stmt::DoWhile { body, test } => {
                 let top = self.chunk.here();
-                self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(), depth: self.depth });
+                self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(), depth: self.depth, brk_only: false });
                 self.stmt(body)?;
                 let l = self.loops.pop().unwrap();
                 let cond = self.chunk.here();
@@ -214,7 +219,7 @@ impl Compiler {
                         Some(self.chunk.emit_jump(Op::JumpFalse))
                     }
                 };
-                self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(), depth: self.depth });
+                self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(), depth: self.depth, brk_only: false });
                 self.stmt(body)?;
                 let l = self.loops.pop().unwrap();
                 let cont = self.chunk.here();
@@ -246,12 +251,15 @@ impl Compiler {
                 Ok(())
             }
             Stmt::Continue(None) => {
-                let Some(d) = self.loops.last().map(|l| l.depth) else {
+                // Ein `switch` faengt kein `continue` — das gehoert der
+                // Schleife darunter, und der Weg dorthin fuehrt durch die
+                // Umgebung des `switch` hindurch.
+                let Some(k) = self.loops.iter().rposition(|l| !l.brk_only) else {
                     return Err(Unsupported("continue-outside-loop"));
                 };
-                self.unwind_to(d);
+                self.unwind_to(self.loops[k].depth);
                 let at = self.chunk.emit_jump(Op::Jump);
-                self.loops.last_mut().unwrap().continues.push(at);
+                self.loops[k].continues.push(at);
                 Ok(())
             }
             Stmt::Return(e) => {
@@ -275,9 +283,9 @@ impl Compiler {
             Stmt::Func(_) => Ok(()),
             Stmt::Labeled { .. } => Err(Unsupported("label")),
             Stmt::Break(Some(_)) | Stmt::Continue(Some(_)) => Err(Unsupported("labeled-jump")),
-            Stmt::Switch { .. } => Err(Unsupported("switch")),
+            Stmt::Switch { disc, cases } => self.switch(disc, cases),
             Stmt::Try { block, handler, finalizer } => self.try_stmt(block, handler, finalizer),
-            Stmt::ForIn { .. } => Err(Unsupported("for-in")),
+            Stmt::ForIn { left, right, body } => self.for_in(left, right, body),
             Stmt::ForOf { left, right, body, is_await } => {
                 if *is_await { return Err(Unsupported("for-await")) }
                 self.for_of(left, right, body)
@@ -294,6 +302,14 @@ impl Compiler {
     /// dabei: das steigt bis zur Funktionsgrenze und ist beim Programmstart
     /// schon erledigt.
     fn block_decls(&mut self, body: &[Stmt]) -> CompileResult<u32> {
+        self.block_decls_of(body.iter())
+    }
+
+    /// Dasselbe ueber eine beliebige Folge — ein `switch` zieht ueber ALLE
+    /// Faelle zusammen hoch, so wie es der Baumlaeufer tut: sie teilen sich
+    /// EINE Umgebung, und eine Funktionsdeklaration im dritten Fall ist im
+    /// ersten schon sichtbar.
+    fn block_decls_of<'a>(&mut self, body: impl Iterator<Item = &'a Stmt>) -> CompileResult<u32> {
         let mut out = Vec::new();
         for st in body {
             match st {
@@ -497,7 +513,7 @@ impl Compiler {
         let depth0 = self.depth;
         let top = self.chunk.here();
         let done = self.chunk.emit_jump(Op::IterNext);
-        self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(), depth: depth0 });
+        self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(), depth: depth0, brk_only: false });
         // Je Umlauf eine eigene Umgebung: eine Schliessung im Rumpf soll den
         // Wert DIESES Umlaufs festhalten, nicht den letzten.
         let empty = self.chunk.block(Vec::new());
@@ -520,6 +536,120 @@ impl Compiler {
         self.chunk.patch(done);
         self.chunk.emit(Op::IterDrop);
         self.chunk.patch(to_end);
+        Ok(())
+    }
+
+    /// `for (k in obj)`.
+    ///
+    /// Dieselbe Form wie `for_of` — nur ist die Schluesselliste EIFRIG
+    /// (`Interp::for_in_keys`, dieselbe Hilfe wie im Baumlaeufer), und es gibt
+    /// nichts zu schliessen: eine fertige Liste hat kein `return()`. Deshalb
+    /// nehmen beide Ausgaenge denselben `IterDrop`.
+    fn for_in(&mut self, left: &ForHead, right: &Expr, body: &Stmt) -> CompileResult<()> {
+        let name = match left {
+            ForHead::VarDecl(d) => match d.decls.first().map(|x| &x.id) {
+                Some(Pat::Ident(n)) => n.clone(),
+                _ => return Err(Unsupported("for-in-pattern")),
+            },
+            ForHead::Pattern(Pat::Ident(n)) => n.clone(),
+            _ => return Err(Unsupported("for-in-target")),
+        };
+        let lexical = matches!(left, ForHead::VarDecl(d) if d.kind != VarKind::Var);
+        self.expr(right)?;
+        self.chunk.emit(Op::ForInAll);
+        let depth0 = self.depth;
+        let top = self.chunk.here();
+        let done = self.chunk.emit_jump(Op::ForInNext);
+        self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(),
+                               depth: depth0, brk_only: false });
+        // Je Umlauf eine eigene Umgebung — wie bei `for…of`, und aus
+        // demselben Grund: eine Schliessung im Rumpf haelt den Schluessel
+        // DIESES Umlaufs fest.
+        let empty = self.chunk.block(Vec::new());
+        self.chunk.emit(Op::PushEnv(empty));
+        self.depth += 1;
+        let n = self.chunk.name(&name);
+        self.chunk.emit(Op::DeclVar { name: n, mutable: true, lexical });
+        self.stmt(body)?;
+        self.chunk.emit(Op::PopEnv);
+        self.depth -= 1;
+        let l = self.loops.pop().unwrap();
+        for at in l.continues { self.patch_to(at, top); }
+        self.chunk.emit(Op::Jump(top));
+        for at in l.breaks { self.chunk.patch(at); }
+        self.chunk.patch(done);
+        self.chunk.emit(Op::IterDrop);
+        Ok(())
+    }
+
+    /// `switch`.
+    ///
+    /// Drei Dinge machen ihn aus, und alle drei stehen im Code:
+    ///
+    /// * **EINE Umgebung fuer alle Faelle**, mit den Bindungen aller
+    ///   Fallrumpfe zusammen hochgezogen — eine Funktionsdeklaration im
+    ///   dritten Fall ist im ersten schon da.
+    /// * **Durchfallen ist die Regel.** Gesucht wird nur der EINSTIEG; ab dort
+    ///   laufen alle Faelle hintereinander weg, bis ein `break` kommt.
+    /// * **Die Bedingungen werden der Reihe nach ausgewertet, bis eine
+    ///   passt** — und nicht weiter. `default` kommt erst dran, wenn keine
+    ///   passte, egal wo er steht. Genau das tut der Baumlaeufer auch; eine
+    ///   zweite Auswertungsreihenfolge waere hier der teuerste Unterschied.
+    ///
+    /// Der Wert des `switch` liegt waehrend der Bedingungskette auf dem
+    /// Stapel und wird in einer kleinen Weiche wieder heruntergenommen, BEVOR
+    /// ein Fallrumpf laeuft. Ihn dort liegen zu lassen waere kuerzer und
+    /// falsch: jeder `break`, jedes `continue` und jeder Sprung nach draussen
+    /// muesste ihn einzeln wegraeumen.
+    fn switch(&mut self, disc: &Expr, cases: &[SwitchCase]) -> CompileResult<()> {
+        self.expr(disc)?;
+        let b = self.block_decls_of(cases.iter().flat_map(|c| c.body.iter()))?;
+        self.chunk.emit(Op::PushEnv(b));
+        self.depth += 1;
+        self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(),
+                               depth: self.depth, brk_only: true });
+
+        // Die Bedingungskette. Jeder Treffer springt in seine Weiche.
+        let mut hits = Vec::new();
+        for (k, c) in cases.iter().enumerate() {
+            let Some(t) = &c.test else { continue };
+            self.chunk.emit(Op::Dup);
+            self.expr(t)?;
+            self.chunk.emit(Op::Bin(BinOp::EqEqEq));
+            hits.push((self.chunk.emit_jump(Op::JumpTrue), k));
+        }
+        // Keine passte: den Wert weg und zu `default` (oder ans Ende).
+        self.chunk.emit(Op::Pop);
+        let to_default = self.chunk.emit_jump(Op::Jump);
+
+        // Die Weichen: Wert herunternehmen, dann in den Rumpf.
+        let mut gates = Vec::new();
+        for (at, k) in hits {
+            self.chunk.patch(at);
+            self.chunk.emit(Op::Pop);
+            gates.push((self.chunk.emit_jump(Op::Jump), k));
+        }
+
+        // Die Rumpfe, hintereinander — das Durchfallen ergibt sich von selbst.
+        let mut starts: Vec<u32> = Vec::new();
+        for c in cases {
+            starts.push(self.chunk.here());
+            for st in &c.body { self.stmt(st)?; }
+        }
+        let end = self.chunk.here();
+        for (at, k) in gates {
+            self.patch_to(at, starts[k]);
+        }
+        let dflt = cases.iter().position(|c| c.test.is_none());
+        self.patch_to(to_default, match dflt {
+            Some(k) => starts[k],
+            None => end,
+        });
+
+        let l = self.loops.pop().unwrap();
+        for at in l.breaks { self.chunk.patch(at); }
+        self.chunk.emit(Op::PopEnv);
+        self.depth -= 1;
         Ok(())
     }
 
@@ -725,12 +855,17 @@ impl Compiler {
                 // Der Empfaenger gehoert zum Aufruf: `o.f()` ruft mit `o` als
                 // `this`, `f()` mit undefined. Beides wird HIER entschieden,
                 // damit die Maschine unten nur noch abarbeitet.
+                // Der Name des Gerufenen wird MITGEGEBEN — nicht fuer den
+                // Aufruf, sondern fuer den Fehlschlag: „o is not a function"
+                // sagt, was fehlt, „value is not a function" nicht.
+                let mut named = u32::MAX;
                 match &**callee {
                     Expr::Member { obj, prop, optional: false } => match &**prop {
                         MemberProp::Ident(name) => {
                             self.expr(obj)?;
                             self.chunk.emit(Op::Dup);
                             let i = self.chunk.name(name);
+                            named = i;
                             self.chunk.emit(Op::GetProp(i));
                             self.chunk.emit(Op::Swap);
                         }
@@ -744,6 +879,7 @@ impl Compiler {
                         MemberProp::Private(_) => return Err(Unsupported("private-field")),
                     },
                     _ => {
+                        if let Expr::Ident(n) = &**callee { named = self.chunk.name(n); }
                         self.expr(callee)?;
                         let k = self.chunk.konst(Value::Undefined);
                         self.chunk.emit(Op::Const(k));
@@ -751,10 +887,10 @@ impl Compiler {
                 }
                 if Self::args_have_spread(args) {
                     self.args_as_array(args)?;
-                    self.chunk.emit(Op::CallSpread);
+                    self.chunk.emit(Op::CallSpread(named));
                 } else {
                     let n = self.plain_args(args)?;
-                    self.chunk.emit(Op::Call(n));
+                    self.chunk.emit(Op::Call { argc: n, name: named });
                 }
                 Ok(())
             }

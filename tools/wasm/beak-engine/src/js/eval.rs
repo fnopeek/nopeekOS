@@ -186,21 +186,8 @@ impl Interp {
     fn exec_for_in(&mut self, left: &ForHead, right: &Expr, body: &Stmt,
                    env: &Rc<RefCell<Env>>) -> C<Option<Value>> {
         let obj = self.eval(right, env)?;
-        if matches!(obj, Value::Undefined | Value::Null) { return Ok(None); }
-        let o = self.to_object(&obj)?;
-        // Aufzaehlbare Schluessel der ganzen Kette, ohne Doppelte. Die Liste
-        // wird VORHER gebaut: eine Aenderung waehrend der Schleife darf sie
-        // nicht ins Rutschen bringen.
-        let mut keys: Vec<Rc<str>> = Vec::new();
-        let mut cur = Some(o);
-        while let Some(c) = cur {
-            for k in c.borrow().own_keys() {
-                let enumerable = c.borrow().get_own(&k).map(|p| p.enumerable).unwrap_or(false);
-                if enumerable && !keys.iter().any(|x| *x == k) { keys.push(k); }
-            }
-            let next = c.borrow().proto.clone();
-            cur = next;
-        }
+        // Dieselbe Hilfe wie die Befehlsmaschine — siehe `Interp::for_in_keys`.
+        let keys = self.for_in_keys(&obj)?;
         for k in keys {
             let inner = Env::new(Some(env.clone()), false);
             self.for_head_bind(left, Value::Str(k), &inner)?;

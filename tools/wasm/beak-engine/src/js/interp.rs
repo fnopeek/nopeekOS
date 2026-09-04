@@ -674,6 +674,22 @@ impl Interp {
         Abrupt::Throw(Value::Obj(e))
     }
     pub fn type_err<T>(&mut self, msg: &str) -> C<T> { Err(self.throw_kind("TypeError", msg)) }
+
+    /// „x is not a function" — mit dem NAMEN, wo es einen gibt.
+    ///
+    /// „value is not a function" war im Zielkorpus mit 46 Fehlschlaegen der
+    /// haeufigste Grund ueberhaupt und sagte ueber keinen einzigen, WAS fehlt
+    /// ([[feedback_print_the_identifier_not_just_the_event]]). Eigene
+    /// Funktion, weil beide Maschinen sie brauchen: als `switch` und `for..in`
+    /// uebersetzbar wurden, wanderten zwei Korpusskripte auf die Maschine —
+    /// und verloren dabei still ihren Namen in der Meldung. Die Prozentzahl
+    /// hat das nicht gesehen, der Wandvergleich schon.
+    pub fn not_a_function(&mut self, name: Option<&str>) -> Abrupt {
+        match name {
+            Some(n) => self.throw_kind("TypeError", &alloc::format!("{n} is not a function")),
+            None => self.throw_kind("TypeError", "value is not a function"),
+        }
+    }
     pub fn range_err<T>(&mut self, msg: &str) -> C<T> { Err(self.throw_kind("RangeError", msg)) }
     pub fn ref_err<T>(&mut self, msg: &str) -> C<T> { Err(self.throw_kind("ReferenceError", msg)) }
 
@@ -1292,6 +1308,39 @@ impl Interp {
             }
         }
         Ok(out)
+    }
+
+    /// Die Schluessel, ueber die ein `for..in` laeuft: aufzaehlbar, die ganze
+    /// Prototypenkette hoch, ohne Doppelte.
+    ///
+    /// **Die Liste wird VORHER gebaut.** Eine Aenderung am Objekt waehrend der
+    /// Schleife darf sie nicht ins Rutschen bringen — das ist der Unterschied
+    /// zu `for..of`, das faul sein MUSS. Ein Schluessel, der zwischendurch
+    /// verschwindet, wird trotzdem uebersprungen: das macht `get` von selbst.
+    ///
+    /// `undefined`/`null` geben eine LEERE Liste, keinen Fehler: `for (k in
+    /// null)` laeuft null Mal, statt zu werfen.
+    ///
+    /// Eigene Funktion, weil die Befehlsmaschine sie braucht. Sie dort
+    /// nachzubauen waere eine zweite Aufzaehlungsreihenfolge, und die faellt
+    /// erst auf, wenn ein Skript sich darauf verlaesst.
+    pub fn for_in_keys(&mut self, v: &Value) -> C<Vec<Rc<str>>> {
+        if matches!(v, Value::Undefined | Value::Null) { return Ok(Vec::new()) }
+        let o = self.to_object(v)?;
+        let mut keys: Vec<Rc<str>> = Vec::new();
+        let mut cur = Some(o);
+        let mut hops = 0;
+        while let Some(c) = cur {
+            if hops > MAX_PROTO_CHAIN { break }
+            hops += 1;
+            for k in c.borrow().own_keys() {
+                let enumerable = c.borrow().get_own(&k).map(|p| p.enumerable).unwrap_or(false);
+                if enumerable && !keys.iter().any(|x| *x == k) { keys.push(k); }
+            }
+            let next = c.borrow().proto.clone();
+            cur = next;
+        }
+        Ok(keys)
     }
 
     /// `CreateListFromArrayLike`: `length` und Indizes, OHNE den

@@ -71,11 +71,25 @@ struct Frame {
     /// aber KEINEN Abschlusswert hat: ein `{ x = 1; }` in ihm setzt
     /// `SetCompletion`, und das duerfte sein `return` nicht ueberschreiben.
     root: bool,
-    /// Offene `for…of`-Iteratoren. Sie stehen HIER und nicht auf dem
-    /// Wertestapel: ein `break` oder ein Wurf mitten in der Schleife muesste
-    /// sie sonst einzeln wegraeumen, und das ist genau die Buchhaltung, an
-    /// der solche Maschinen scheitern.
-    iters: Vec<Value>,
+    /// Offene Laufzustaende von `for…of` und `for…in`. Sie stehen HIER und
+    /// nicht auf dem Wertestapel: ein `break` oder ein Wurf mitten in der
+    /// Schleife muesste sie sonst einzeln wegraeumen, und das ist genau die
+    /// Buchhaltung, an der solche Maschinen scheitern.
+    ///
+    /// Beide in EINER Liste, weil die ganze Aufraeumerei — Behandlertiefe,
+    /// `Ret`, `unwind` — sie dann nur einmal kennen muss.
+    iters: Vec<Iter>,
+}
+
+/// Was eine laufende Schleife festhaelt.
+enum Iter {
+    /// Ein echter Iterator (`for…of`). Sein `return()` gehoert bei jedem
+    /// vorzeitigen Verlassen gerufen.
+    Obj(Value),
+    /// Die Schluesselliste eines `for…in`, RUECKWAERTS — dann ist `pop` der
+    /// naechste Schritt und es braucht keinen Index daneben. Es gibt hier
+    /// nichts zu schliessen: die Liste steht schon fest.
+    Keys(Vec<Value>),
 }
 
 /// Ein offener `try`. Die drei Tiefen sind der Punkt: ein Wurf kann mitten in
@@ -173,7 +187,7 @@ impl Vm {
     pub fn close(&mut self, i: &mut Interp) {
         while let Some(f) = self.frames.pop() {
             for it in f.iters.iter().rev() {
-                i.iter_close(it);
+                if let Iter::Obj(v) = it { i.iter_close(v); }
             }
             if !f.root { i.depth -= 1; }
         }
@@ -195,7 +209,7 @@ impl Vm {
         for f in &self.frames {
             envs.extend(f.envs.iter().cloned());
             for it in &f.iters {
-                if let Value::Obj(o) = it { objs.push(o.clone()); }
+                if let Iter::Obj(Value::Obj(o)) = it { objs.push(o.clone()); }
             }
         }
     }
@@ -224,9 +238,9 @@ impl Vm {
             // eine echte Abbruchgarantie.
             let counts = match &chunk.ops[ip] {
                 Op::Jump(t) => (*t as usize) <= ip,
-                Op::Call(_) | Op::New(_) | Op::CallSpread | Op::NewSpread
+                Op::Call { .. } | Op::New(_) | Op::CallSpread(_) | Op::NewSpread
                 | Op::SetCompletion | Op::DeclVar { .. } | Op::Ret
-                | Op::Yield | Op::Await => true,
+                | Op::Yield | Op::Await | Op::ForInNext(_) => true,
                 _ => false,
             };
             if counts {
@@ -327,6 +341,12 @@ impl Vm {
                     self.jump(*t);
                 }
             }
+            Op::JumpTrue(t) => {
+                let v = self.pop();
+                if v.truthy() {
+                    self.jump(*t);
+                }
+            }
             Op::JumpFalseKeep(t) => {
                 if !self.top().truthy() {
                     self.jump(*t);
@@ -372,11 +392,12 @@ impl Vm {
                 i.set(&obj, &k, val.clone())?;
                 self.push(val);
             }
-            Op::Call(argc) => {
+            Op::Call { argc, name } => {
                 let args = self.take(*argc as usize);
                 let this = self.pop();
                 let callee = self.pop();
-                self.invoke(i, callee, this, args)?;
+                let n = chunk.names.get(*name as usize).map(|s| &**s);
+                self.invoke(i, callee, this, args, n)?;
             }
             Op::New(argc) => {
                 let args = self.take(*argc as usize);
@@ -483,12 +504,13 @@ impl Vm {
                 let a = i.new_array(out);
                 self.push(a);
             }
-            Op::CallSpread => {
+            Op::CallSpread(name) => {
                 let args = self.pop();
                 let this = self.pop();
                 let callee = self.pop();
                 let a = i.iterate(&args)?;
-                self.invoke(i, callee, this, a)?;
+                let n = chunk.names.get(*name as usize).map(|s| &**s);
+                self.invoke(i, callee, this, a, n)?;
             }
             Op::NewSpread => {
                 let args = self.pop();
@@ -522,10 +544,13 @@ impl Vm {
             Op::IterAll => {
                 let v = self.pop();
                 let it = i.get_iterator(&v)?;
-                self.frames.last_mut().unwrap().iters.push(it);
+                self.frames.last_mut().unwrap().iters.push(Iter::Obj(it));
             }
             Op::IterNext(done) => {
-                let it = self.frames.last().unwrap().iters.last().unwrap().clone();
+                let it = match self.frames.last().unwrap().iters.last() {
+                    Some(Iter::Obj(v)) => v.clone(),
+                    _ => return Err(i.throw_kind("TypeError", "no iterator here")),
+                };
                 match i.iter_next(&it)? {
                     Some(v) => self.push(v),
                     None => {
@@ -533,11 +558,29 @@ impl Vm {
                     }
                 }
             }
+            Op::ForInAll => {
+                let v = self.pop();
+                let mut keys = i.for_in_keys(&v)?;
+                // Rueckwaerts, damit `pop` der naechste Schritt ist.
+                keys.reverse();
+                let vals = keys.into_iter().map(Value::Str).collect();
+                self.frames.last_mut().unwrap().iters.push(Iter::Keys(vals));
+            }
+            Op::ForInNext(done) => {
+                let next = match self.frames.last_mut().unwrap().iters.last_mut() {
+                    Some(Iter::Keys(ks)) => ks.pop(),
+                    _ => return Err(i.throw_kind("TypeError", "no key list here")),
+                };
+                match next {
+                    Some(k) => self.push(k),
+                    None => self.jump(*done),
+                }
+            }
             Op::IterDrop => {
                 self.frames.last_mut().unwrap().iters.pop();
             }
             Op::IterClose => {
-                if let Some(it) = self.frames.last_mut().unwrap().iters.pop() {
+                if let Some(Iter::Obj(it)) = self.frames.last_mut().unwrap().iters.pop() {
                     i.iter_close(&it);
                 }
             }
@@ -575,7 +618,7 @@ impl Vm {
                 // Iterator SCHLIESSEN — sonst faehrt ein Generator seinen
                 // eigenen `finally`-Block nie. Von innen nach aussen.
                 for it in f.iters.iter().rev() {
-                    i.iter_close(it);
+                    if let Iter::Obj(v) = it { i.iter_close(v); }
                 }
                 self.stack.truncate(f.base);
                 if f.root {
@@ -646,7 +689,7 @@ impl Vm {
                 if f.iters.len() <= h.iters { break }
                 f.iters.pop().unwrap()
             };
-            i.iter_close(&it);
+            if let Iter::Obj(v) = it { i.iter_close(&v); }
         }
         let Some(t) = h.catch_ip.or(h.finally_ip) else { return false };
         self.frames.last_mut().unwrap().ip = t as usize;
@@ -667,7 +710,8 @@ impl Vm {
     /// ueberlaufen, aber eine endlose JS-Rekursion soll denselben
     /// `RangeError` geben wie vorher — sonst haengt sie, bis der Speicher
     /// ausgeht.
-    fn invoke(&mut self, i: &mut Interp, callee: Value, this: Value, args: Vec<Value>) -> C<()> {
+    fn invoke(&mut self, i: &mut Interp, callee: Value, this: Value, args: Vec<Value>,
+              name: Option<&str>) -> C<()> {
         let d = match &callee {
             Value::Obj(o) => match &o.borrow().kind {
                 super::value::ObjKind::Function(d) => Some(d.clone()),
@@ -676,6 +720,12 @@ impl Vm {
             _ => None,
         };
         let Some(d) = d else {
+            // Den NAMEN nennen, nicht nur das Ereignis — dieselbe Hilfe wie im
+            // Baumlaeufer. Ohne diese Zeile verlor jedes Skript, das auf die
+            // Maschine wanderte, still seine Fehlerdiagnose.
+            if !i.is_callable(&callee) {
+                return Err(i.not_a_function(name));
+            }
             i.vm_calls_native += 1;
             let v = i.call(&callee, this, &args)?;
             self.push(v);

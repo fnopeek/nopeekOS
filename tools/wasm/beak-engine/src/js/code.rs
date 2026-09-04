@@ -68,6 +68,8 @@ pub enum Op {
     /// es den Namen nicht gibt, und ist deshalb kein `LoadVar` + `Un`.
     TypeofVar(u32),
     Jump(u32),
+    /// Springt, wenn oben TRUTHY ist; nimmt den Wert immer vom Stapel.
+    JumpTrue(u32),
     /// Springt, wenn oben falsy ist; nimmt den Wert IMMER vom Stapel.
     JumpFalse(u32),
     /// Fuer `&&`/`||`/`??`: springt bei falsy/truthy/nullish und LAESST den
@@ -84,7 +86,11 @@ pub enum Op {
     /// Stapel: obj, key, wert → wert.
     SetIndex,
     /// Stapel: callee, this, arg0..argN → ergebnis.
-    Call(u16),
+    ///
+    /// `name` ist der NAME des Gerufenen, nur fuer die Fehlermeldung —
+    /// `u32::MAX` heisst „keiner". „value is not a function" sagt nicht, WAS
+    /// fehlt, und genau das ist im Zielkorpus der haeufigste Fehlschlag.
+    Call { argc: u16, name: u32 },
     /// Stapel: callee, arg0..argN → ergebnis.
     New(u16),
     /// Feld aus den obersten `n` Werten. `true` an Stelle `k` heisst: dort
@@ -122,7 +128,7 @@ pub enum Op {
     MakeArraySpread { n: u16, spread: u32 },
     /// Wie `Call`/`New`, aber die Argumente stehen als FELD auf dem Stapel —
     /// so kann `f(...xs)` dieselbe Aufrufhilfe benutzen.
-    CallSpread,
+    CallSpread(u32),
     NewSpread,
     /// Aus `names[i]` eine Funktion bauen — der Index zeigt in `funcs`.
     Closure(u32),
@@ -152,6 +158,17 @@ pub enum Op {
     IterAll,
     /// Den naechsten Wert auf den Stapel; ist der Iterator zu Ende, springen.
     IterNext(u32),
+    /// Die Schluessel eines `for…in` holen und im Rahmen ablegen — Stapel:
+    /// obj → (nichts).
+    ///
+    /// EIFRIG, ueber `Interp::for_in_keys`, dieselbe Hilfe wie im
+    /// Baumlaeufer. Anders als bei `for…of` ist das richtig: die Liste wird
+    /// vorher gebaut, damit eine Aenderung am Objekt die Schleife nicht ins
+    /// Rutschen bringt. `null`/`undefined` geben eine leere Liste, also
+    /// null Umlaeufe statt eines Fehlers.
+    ForInAll,
+    /// Den naechsten Schluessel auf den Stapel; ist die Liste leer, springen.
+    ForInNext(u32),
     /// Den Iterator vergessen — er ist zu Ende, `return()` waere falsch.
     IterDrop,
     /// Den Iterator SCHLIESSEN (`return()`) und vergessen — der Weg fuer
@@ -236,8 +253,9 @@ impl Chunk {
     pub fn patch(&mut self, at: usize) {
         let here = self.ops.len() as u32;
         match &mut self.ops[at] {
-            Op::Jump(t) | Op::JumpFalse(t) | Op::JumpFalseKeep(t)
-            | Op::JumpTrueKeep(t) | Op::JumpNullishKeep(t) | Op::IterNext(t) => *t = here,
+            Op::Jump(t) | Op::JumpFalse(t) | Op::JumpTrue(t) | Op::JumpFalseKeep(t)
+            | Op::JumpTrueKeep(t) | Op::JumpNullishKeep(t)
+            | Op::IterNext(t) | Op::ForInNext(t) => *t = here,
             other => panic!("patch auf {other:?}"),
         }
     }
