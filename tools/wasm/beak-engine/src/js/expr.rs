@@ -225,7 +225,19 @@ impl Interp {
         };
         if optional && matches!(f, Value::Undefined | Value::Null) { return Ok(Value::Undefined); }
         let a = self.eval_args(args, env)?;
-        if !self.is_callable(&f) { return self.type_err("value is not a function"); }
+        if !self.is_callable(&f) {
+            // **Den Namen nennen, nicht nur das Ereignis.** „value is not a
+            // function" war im Zielkorpus mit 46 Fehlschlaegen der haeufigste
+            // Grund ueberhaupt — und sagte ueber keinen einzigen davon, WAS
+            // fehlt. Ein Aufruf auf einem Bezeichner kann seinen Namen
+            // nennen; alles andere bleibt, was es war
+            // ([[feedback_print_the_identifier_not_just_the_event]]).
+            let what = match callee {
+                Expr::Ident(n) => alloc::format!("{n} is not a function"),
+                _ => alloc::string::String::from("value is not a function"),
+            };
+            return self.type_err(&what);
+        }
         self.call(&f, this_val, &a)
     }
 
