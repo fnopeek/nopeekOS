@@ -853,6 +853,19 @@ impl Http2 {
     pub fn is_healthy(&self) -> bool {
         !self.goaway && self.tls.is_healthy()
     }
+
+    /// Adresse und Port der Gegenstelle — die erste Haelfte der
+    /// Coalescing-Bedingung (RFC 7540 §9.1.1).
+    pub fn peer(&self) -> ([u8; 4], u16) {
+        self.tls.peer()
+    }
+
+    /// Deckt das Zertifikat dieser Verbindung auch `host`? Die zweite Haelfte.
+    /// Ein GOAWAY schliesst sie aus: eine Verbindung, die keine neuen Streams
+    /// mehr annimmt, ist fuer einen zweiten Namen erst recht nichts.
+    pub fn covers(&self, host: &str) -> bool {
+        !self.goaway && self.tls.covers(host)
+    }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

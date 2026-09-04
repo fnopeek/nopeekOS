@@ -785,6 +785,16 @@ pub fn conn_healthy(handle: usize) -> bool {
         if c.state == State::Established && !c.closed && !c.error)
 }
 
+/// Wohin diese Verbindung geht. Fuers Coalescing: zwei Namen duerfen sich
+/// eine Verbindung nur teilen, wenn sie zur selben Adresse fuehren.
+pub fn peer(handle: usize) -> Option<([u8; 4], u16)> {
+    let conns = CONNECTIONS.lock();
+    match conns.get(handle) {
+        Some(Some(c)) => Some((c.remote_ip, c.remote_port)),
+        _ => None,
+    }
+}
+
 /// Close a connection gracefully (sends FIN) and return at once.
 ///
 /// Linux's `close()` does not wait either: the socket lingers in the

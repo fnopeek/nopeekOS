@@ -542,6 +542,22 @@ pub fn verify_p384_prehash_384(pubkey: &[u8], prehash: &[u8; 48], signature: &[u
     vk.verify_prehash(prehash, &sig).is_ok()
 }
 
+/// Deckt dieses Blattzertifikat auch DIESEN Namen?
+///
+/// Fuer Connection Coalescing (RFC 7540 §9.1.1): eine schon aufgebaute
+/// Verbindung darf einen zweiten Namen bedienen, wenn sie zur selben Adresse
+/// geht UND das Zertifikat den Namen deckt. Der Rest der Kette wurde beim
+/// Handshake geprueft und aendert sich nicht — nur der Name ist neu, also ist
+/// der Name die einzige Frage. Bewusst DIESELBE Funktion wie im Handshake:
+/// zwei Namenspruefungen nebeneinander laufen auseinander, und die schwaechere
+/// gewinnt dann immer.
+pub fn covers(leaf_der: &[u8], hostname: &str) -> bool {
+    match x509::parse_x509(leaf_der) {
+        Some(leaf) => cn_matches(&leaf, hostname),
+        None => false,
+    }
+}
+
 fn cn_matches(cert: &X509Cert<'_>, hostname: &str) -> bool {
     // Check CN first
     let cn = core::str::from_utf8(cert.subject_cn).unwrap_or("");

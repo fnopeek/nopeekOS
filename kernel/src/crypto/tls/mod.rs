@@ -337,6 +337,18 @@ pub struct TlsSession {
     /// we offered nothing or the server stayed silent — then HTTP/1.1 is
     /// implied, since that is what an ALPN-less connection has always meant.
     alpn: Option<String>,
+    /// Das Blattzertifikat der Gegenstelle, roh. Aufgehoben fuer genau eine
+    /// Frage: deckt es auch einen ZWEITEN Namen? Das ist die Bedingung fuers
+    /// Coalescing (RFC 7540 §9.1.1) — `de.wikipedia.org`,
+    /// `thumb.wikimedia.org` und `auth.wikimedia.org` liegen auf derselben
+    /// Adresse und auf demselben Zertifikat, und wir bauen zu jedem einzeln
+    /// auf: gemessen 3 x 90 ms je Seitenaufbau.
+    ///
+    /// Roh und nicht als Namensliste, damit die Frage von derselben Funktion
+    /// beantwortet wird wie beim Handshake.
+    leaf_der: Vec<u8>,
+    /// Wohin diese Verbindung geht. Der erste Teil derselben Bedingung.
+    peer: ([u8; 4], u16),
 }
 
 impl TlsSession {
@@ -347,6 +359,16 @@ impl TlsSession {
     /// The negotiated ALPN protocol, e.g. `"h2"` or `"http/1.1"`.
     pub fn alpn(&self) -> Option<&str> {
         self.alpn.as_deref()
+    }
+
+    /// Adresse und Port der Gegenstelle.
+    pub fn peer(&self) -> ([u8; 4], u16) {
+        self.peer
+    }
+
+    /// Darf diese Verbindung `hostname` bedienen? Siehe `leaf_der`.
+    pub fn covers(&self, hostname: &str) -> bool {
+        certstore::covers(&self.leaf_der, hostname)
     }
 
     /// True while the underlying TCP connection is still usable for
@@ -570,6 +592,8 @@ pub fn tls_connect_alpn(
     let cert_refs: Vec<&[u8]> = cert_chain.iter().map(|c| c.as_slice()).collect();
     certstore::verify_chain(&cert_refs, hostname)
         .map_err(TlsError::CertificateError)?;
+    // Das GEPRUEFTE Blatt aufheben — nicht das, was spaeter irgendwo liegt.
+    let leaf_der = cert_chain[0].clone();
 
     // === Verify Finished ===
     let transcript_before_sf = transcript.clone();
@@ -646,6 +670,8 @@ pub fn tls_connect_alpn(
         client_seq: 0,
         server_seq: 0,
         alpn: negotiated_alpn,
+        leaf_der,
+        peer: tcp::peer(tcp_handle).unwrap_or(([0, 0, 0, 0], 0)),
     })
 }
 

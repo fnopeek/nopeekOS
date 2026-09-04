@@ -1194,6 +1194,12 @@ fn mark_h2_refused(host: &str) {
 }
 
 fn h2_take(host: &str) -> Option<Http2> {
+    h2_take_exact(host).or_else(|| h2_take_coalesced(host))
+}
+
+/// Eine Verbindung, die schon fuer GENAU diesen Namen offen ist. Kostet kein
+/// DNS — deshalb zuerst.
+fn h2_take_exact(host: &str) -> Option<Http2> {
     drain_before_reuse();
     let mut pool = H2_POOL.lock();
     let now = crate::interrupts::ticks();
@@ -1216,6 +1222,56 @@ fn h2_take(host: &str) -> Option<Http2> {
             conn.close();
             return None;
         }
+    }
+    None
+}
+
+/// **Connection Coalescing, RFC 7540 §9.1.1.** Eine offene Verbindung darf
+/// einen ZWEITEN Namen bedienen, wenn beides gilt: sie geht zur selben Adresse
+/// UND ihr Zertifikat deckt den Namen.
+///
+/// Gemessen auf de.wikipedia.org/wiki/Stansstad: `de.wikipedia.org`,
+/// `thumb.wikimedia.org` und `auth.wikimedia.org` loesen alle auf
+/// 185.15.58.224 auf und bekamen je einen eigenen Handshake — 3 x 90 ms je
+/// Seitenaufbau, zweimal in Folge so gemessen. `upload.wikimedia.org` liegt
+/// auf .240 und bleibt zurecht getrennt; genau dafuer steht die Adresse in
+/// der Bedingung und nicht nur das Zertifikat.
+///
+/// Die Namenspruefung ist DIESELBE Funktion wie im Handshake
+/// (`certstore::covers`). Zwei Pruefungen nebeneinander laufen auseinander,
+/// und die schwaechere gewinnt dann immer — hier waere das ein fremder Name
+/// auf einer fremden Verbindung.
+fn h2_take_coalesced(host: &str) -> Option<Http2> {
+    let (bare, port) = split_host_port(host);
+    let port = port.unwrap_or(443);
+    // Aufloesen, nicht nur den Zwischenspeicher fragen: die Runde faellt
+    // ohnehin an, `h2_connect` macht sie gleich danach. Sie hier zu machen
+    // kostet nichts und ist der Unterschied zwischen „beim ERSTEN Bild
+    // gespart" und „erst beim zweiten". VOR dem Lock — ein blockierendes DNS
+    // unter einem Spinlock haelt jeden anderen Nehmer an.
+    let ip = parse_ip(bare).or_else(|| crate::net::dns::resolve(bare))?;
+    drain_before_reuse();
+    let mut pool = H2_POOL.lock();
+    let now = crate::interrupts::ticks();
+    for slot in pool.iter_mut() {
+        // `ip` ist nie 0.0.0.0 (ein Name loest nicht dorthin auf), aber eine
+        // Verbindung, deren TCP-Slot schon weg ist, MELDET 0.0.0.0:0. Die
+        // Gleichheit allein wuerde beide verwechseln — also erst gar keine
+        // unbekannte Gegenstelle zulassen.
+        let hit = matches!(slot, Some((_, c, _))
+            if c.peer() != ([0, 0, 0, 0], 0) && c.peer() == (ip, port) && c.covers(host));
+        if !hit {
+            continue;
+        }
+        let (other, mut conn, idle_since) = slot.take().unwrap();
+        if now.wrapping_sub(idle_since) < POOL_MAX_IDLE_TICKS && conn.is_healthy() {
+            conn.reused = true;
+            kprintln!("[npk]   h2 {} teilt sich die Verbindung von {} ({}.{}.{}.{})",
+                host, other, ip[0], ip[1], ip[2], ip[3]);
+            return Some(conn);
+        }
+        conn.close();
+        return None;
     }
     None
 }
@@ -1608,8 +1664,15 @@ fn h2_exchange(
                 let now = crate::interrupts::ticks();
                 let hdr_ms = t_head.wrapping_sub(t_send) * 10;
                 match (&location, redirect) {
+                    // WOHER die Umleitung kam, gehoert dazu. Ein Ziel allein
+                    // laesst sich nicht beurteilen: die 301 auf dieser Seite
+                    // zeigte auf eine Adresse, die genauso aussah wie die
+                    // angefragte, und ohne die Quelle war nicht zu sehen,
+                    // worin sie sich unterschieden
+                    // ([[feedback-print-the-identifier-not-just-the-event]]).
                     (Some(l), true) =>
-                        kprintln!("[npk]   h2 HTTP {} (headers {} ms) -> {}", status, hdr_ms, l),
+                        kprintln!("[npk]   h2 HTTP {} (headers {} ms) {} -> {}",
+                            status, hdr_ms, path, l),
                     _ => kprintln!("[npk]   h2 HTTP {} {} — headers {} ms + body {} ms",
                         status, req.method, hdr_ms, now.wrapping_sub(t_head) * 10),
                 }
