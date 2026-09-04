@@ -1200,6 +1200,26 @@ pub struct Layout {
 /// Deliberately not `InspectBox`: that one carries a formatted label, and this
 /// list exists on every page with a hover rule, not only while a developer is
 /// inspecting.
+/// Der Kasten EINES Elements, so wie ein Skript ihn erfragt.
+///
+/// Eigene Form statt `HoverBox` durchzureichen: die traegt Anker, Pseudo-Art
+/// und Nachmal-Fahnen mit, von denen hier nichts gebraucht wird — und sie
+/// deckt Steuerelemente nicht ab. Ein `<button>` wird von `paint_control`
+/// gemalt und steht in `controls`; genau auf solche Kaesten fragen Seiten
+/// aber am haeufigsten.
+#[derive(Clone, Copy)]
+pub struct ElemRect {
+    pub seq: u32,
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    /// Rahmenbreiten, waagerecht und senkrecht summiert — `clientWidth` ist
+    /// der Rahmenkasten OHNE sie.
+    pub bx: i16,
+    pub by: i16,
+}
+
 #[derive(Clone, Copy)]
 pub struct HoverBox {
     pub x: i32,
@@ -1247,6 +1267,14 @@ pub struct HoverBox {
     /// cascade event, and reporting it would repaint on every page that has a
     /// `<details>` and no hover rule at all.
     pub hoverable: bool,
+    /// Rahmenbreiten, waagerecht und senkrecht SUMMIERT.
+    ///
+    /// Nur dafuer da, dass `clientWidth`/`clientHeight` den Polsterkasten
+    /// nennen koennen statt des Rahmenkastens. Zwei Zahlen statt vier, weil
+    /// `clientLeft`/`clientTop` im Aufrufzensus gar nicht vorkommen — und eine
+    /// Zahl, die niemand liest, ist Ballast auf einem heissen Pfad.
+    pub bx: i16,
+    pub by: i16,
     /// Clicking this box opens/closes its `<details>`.
     ///
     /// It rides in `hover_boxes` rather than in a list of its own because this
@@ -1325,6 +1353,23 @@ impl Layout {
     /// The deepest (most specific) inspect box containing a document-space
     /// point, for the inspect dev tool. Ties break toward the one recorded
     /// later (painted on top).
+    /// Die Kaesten aller Elemente, die einer gemalt hat — Elementkaesten UND
+    /// Steuerelemente, in einer Liste.
+    ///
+    /// Ein Kasten kann mehrfach vorkommen: ein Inline-Kasten hat ein Fragment
+    /// je Zeile. Das ist gewollt — `getClientRects` nennt sie einzeln,
+    /// `getBoundingClientRect` ihre Vereinigung.
+    pub fn element_rects(&self) -> Vec<ElemRect> {
+        let mut out = Vec::with_capacity(self.hover_boxes.len() + self.controls.len());
+        for b in &self.hover_boxes {
+            out.push(ElemRect { seq: b.seq, x: b.x, y: b.y, w: b.w, h: b.h, bx: b.bx, by: b.by });
+        }
+        for c in &self.controls {
+            out.push(ElemRect { seq: c.seq, x: c.x, y: c.y, w: c.w, h: c.h, bx: 0, by: 0 });
+        }
+        out
+    }
+
     pub fn hit_inspect(&self, x: i32, y: i32) -> Option<&InspectBox> {
         self.inspect
             .iter()
@@ -2058,6 +2103,8 @@ impl<'a> Ctx<'a> {
                 paint: (x, y, w, h),
                 sides: (true, true),
                 shadow: true,
+                bx: st.border_x() as i16,
+                by: st.border_y() as i16,
                 pseudo: PseudoElem::None,
                 anchor_after: false,
                 has_text: false,
@@ -3165,6 +3212,8 @@ impl<'a> Ctx<'a> {
                     paint: (x, y, w, h),
                     sides: (true, true),
                     shadow: false,
+                    bx: 0,
+                    by: 0,
                     pseudo: kind,
                     anchor_after: true,
                     has_text: !text.trim().is_empty(),
@@ -9981,6 +10030,8 @@ fn emit_line(
                         paint: frag_rect(fonts, b, x0, x1, baseline),
                         sides: (f.left, f.right),
                         shadow: false,
+                        bx: 0,
+                        by: 0,
                         pseudo: crate::css::PseudoElem::None,
                         anchor_after: false,
                         has_text: false,

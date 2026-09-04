@@ -160,6 +160,29 @@ impl Drop for Interp {
 }
 
 /// Der Kaskadenkontext, den der Wirt einreicht.
+/// Die Kaesten des LETZTEN Layouts — was `getBoundingClientRect` und die
+/// `offset*`/`client*`-Felder beantworten.
+///
+/// **Warum das der Wirt einreicht und die Maschine es nicht selbst rechnet:**
+/// Geometrie entsteht im Layout, und das Layout ist beaks Sache. Dieselbe
+/// Bauart wie `StyleCtx` und `set_media`.
+///
+/// **Und warum es die Kaesten von VORHIN sind:** ein Skript, das den Baum
+/// aendert und sofort misst, bekommt hier den Stand vor seiner Aenderung. Ein
+/// Browser legt an dieser Stelle synchron neu aus — auf Wikipedia gemessene
+/// 70 ms je Abfrage. Das waere hier machbar und ist bewusst nicht gebaut:
+/// erst soll jemand eine Seite zeigen, der es weh tut. Bis dahin ist die
+/// letzte echte Geometrie ungleich besser als die Null, die vorher dastand.
+pub struct Geometry {
+    /// Ein Eintrag je FRAGMENT — ein Inline-Kasten ueber drei Zeilen hat drei,
+    /// und das ist richtig: `getClientRects` nennt sie einzeln,
+    /// `getBoundingClientRect` ihre Vereinigung.
+    pub boxes: alloc::rc::Rc<alloc::vec::Vec<crate::layout::ElemRect>>,
+    /// Der Rollstand des Fensters. Die Kaesten stehen in Dokumentkoordinaten,
+    /// `getBoundingClientRect` antwortet in Fensterkoordinaten.
+    pub scroll: (i32, i32),
+}
+
 pub struct StyleCtx {
     pub sheet: alloc::rc::Rc<crate::css::Stylesheet>,
     pub theme: crate::layout::Theme,
@@ -207,6 +230,9 @@ pub struct Interp {
     /// `getComputedStyle` weiter aus dem Inline-Stil — eine Teilantwort, die
     /// die Seite laufen laesst, statt sie mit einem TypeError zu beenden.
     pub style_ctx: Option<StyleCtx>,
+    /// Siehe `Geometry`. `None` heisst: der Wirt hat keine eingereicht, und
+    /// dann antwortet die Geometrie mit Nullen wie eh und je.
+    pub geometry: Option<Geometry>,
     /// Der lebende Baum in der Form, die die Kaskade lesen kann — gebaut aus
     /// `doc`, und nur neu gebaut, wenn `doc.version` sich bewegt hat.
     ///
@@ -292,6 +318,7 @@ impl Interp {
         Interp { realm, depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX,
                  fake_now: 0.0, doc: None, next_sym: 0, sym_registry: HashMap::new(),
                  cookies: String::new(), cookie_sets: Vec::new(), style_ctx: None,
+                 geometry: None,
                  live_dom: core::cell::RefCell::new(None),
                  jobs: alloc::collections::VecDeque::new(),
                  rng: 0x2545_F491_4F6C_DD1D, media: None,
@@ -496,6 +523,13 @@ impl Interp {
     /// liefern kann statt nur des Inline-Stils.
     pub fn set_style_context(&mut self, ctx: StyleCtx) {
         self.style_ctx = Some(ctx);
+    }
+
+    /// Die Kaesten des letzten Layouts einreichen — siehe `Geometry`.
+    /// Der Rollstand aendert sich ohne Layout, also gehoert er MIT hinein und
+    /// wird bei jedem Einreichen nachgezogen.
+    pub fn set_geometry(&mut self, g: Geometry) {
+        self.geometry = Some(g);
     }
 
     /// Die Adresse der Seite einreichen. Fuellt `location` und `document.URL`.

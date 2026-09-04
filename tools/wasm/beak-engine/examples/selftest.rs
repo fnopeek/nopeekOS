@@ -76,6 +76,15 @@ fn main() {
     engine.set_hit_all(sess.interp.doc.as_ref().unwrap().has_listeners);
     engine.set_scripted_dom(Some(sess.interp.doc.as_mut().unwrap().to_dom()));
     let lay = engine.layout_forms(html, "", 1024, &Default::default());
+    // Die Kaesten einreichen — GENAU wie beak es je Bild tut. Ohne das
+    // antwortet `getBoundingClientRect` hier mit Nullen, und die Zeile `geom`
+    // waere host-seitig rot und am Geraet gruen: derselbe Fehler wie bei der
+    // Klickkette und beim Kaskadenkontext, dritte Auspraegung
+    // ([[feedback_the_test_path_must_be_the_real_path]]).
+    sess.interp.set_geometry(beak_engine::js::interp::Geometry {
+        boxes: std::rc::Rc::new(lay.element_rects()),
+        scroll: (0, 0),
+    });
     for (id, times) in [("b1", 2usize), ("b2", 1), ("b3", 1), ("b4", 1)] {
         let Some(n) = find_id(sess.interp.doc.as_ref().unwrap(), id) else {
             println!("{id}: nicht gefunden"); continue;
