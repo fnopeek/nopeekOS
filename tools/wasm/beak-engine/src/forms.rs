@@ -259,6 +259,13 @@ impl FormState {
     pub fn value_or<'a>(&'a self, seq: u32, default: &'a str) -> &'a str {
         self.values.get(&seq).map(|s| s.as_str()).unwrap_or(default)
     }
+    /// Der Wert, den der Benutzer gesetzt hat — oder `None`, wenn er das Feld
+    /// nie angefasst hat. `value_or` kann das nicht sagen: dort ist „nie
+    /// getippt" von „leer getippt" nicht zu unterscheiden, und ein Neumalen
+    /// muss den Unterschied kennen (leer heisst Platzhalter).
+    pub fn value_set(&self, seq: u32) -> Option<&str> {
+        self.values.get(&seq).map(|s| s.as_str())
+    }
     pub fn checked_or(&self, seq: u32, default: bool) -> bool {
         self.checked.get(&seq).copied().unwrap_or(default)
     }
@@ -270,6 +277,11 @@ impl FormState {
     }
     pub fn set_value(&mut self, seq: u32, v: String) {
         self.values.insert(seq, v);
+    }
+    /// Ein Haekchen direkt setzen. Der Weg fuer ein Skript und fuer eine
+    /// Probe; der Benutzerweg ist `toggle`, der die Radiogruppe mitfuehrt.
+    pub fn set_checked(&mut self, seq: u32, on: bool) {
+        self.checked.insert(seq, on);
     }
     /// Toggle a checkbox, or select one radio out of its name-group.
     pub fn toggle(&mut self, forms: &Forms, seq: u32) {

@@ -1082,6 +1082,14 @@ pub struct ControlRect {
     pub h: i32,
     pub seq: u32,
     pub kind: ControlKind,
+    /// Where this control's ops sit in `Layout::ops`, and the box they were
+    /// painted from. A control's own state — focus, checked, the typed value,
+    /// the caret — changes far more often than the page does, and repainting
+    /// that range beats laying the document out again by three orders of
+    /// magnitude ([[project-beak-pointer-and-repaint]]).
+    at: usize,
+    len: usize,
+    paint: CtlBox,
 }
 
 pub struct Layout {
@@ -3893,6 +3901,7 @@ impl<'a> Ctx<'a> {
             h: h.max(8),
             text,
             ghost,
+            placeholder: el.attr("placeholder").unwrap_or("").to_string(),
             checked: self.forms.checked_or(el.seq, el.attr("checked").is_some()),
             focused,
             caret,
@@ -7828,6 +7837,7 @@ const CTL_PAD_Y: i32 = 3;
 const CTL_ARROW: i32 = 14;
 
 /// A measured form control, ready to place on a line and paint.
+#[derive(Clone)]
 struct CtlBox {
     seq: u32,
     kind: ControlKind,
@@ -7837,6 +7847,9 @@ struct CtlBox {
     text: String,
     /// `text` is a placeholder → paint it muted.
     ghost: bool,
+    /// The element's `placeholder`, kept for a repaint: emptying a field has to
+    /// bring it back, and the repaint has no element to ask.
+    placeholder: String,
     checked: bool,
     focused: bool,
     /// Caret position in characters, when this control has keyboard focus.
@@ -8002,6 +8015,13 @@ fn paint_control(
     ops: &mut Vec<DrawOp>,
     controls: &mut Vec<ControlRect>,
 ) {
+    let at = ops.len();
+    // Jede Rueckkehr aus dieser Funktion meldet ihren Bereich — sonst zeigt
+    // ein Eintrag auf Befehle, die ein anderes Element gemalt hat.
+    let rect = |ops: &Vec<DrawOp>, ctl: &CtlBox| ControlRect {
+        x, y: top, w: ctl.w, h: ctl.h, seq: ctl.seq, kind: ctl.kind,
+        at, len: ops.len() - at, paint: ctl.clone(),
+    };
     // A `visibility:hidden` control paints nothing and takes no clicks — it is
     // not registered, so it can't sit as an invisible target over the page.
     if ctl.style.hidden {
@@ -8011,7 +8031,7 @@ fn paint_control(
     // `opacity:0`: paint nothing, but keep the hit rect — this is the
     // checkbox-hack overlay that a CSS-only dropdown is toggled with.
     if ctl.style.transparent {
-        controls.push(ControlRect { x, y: top, w, h, seq: ctl.seq, kind: ctl.kind });
+        controls.push(rect(ops, ctl));
         return;
     }
     let font = fonts.pick(ctl.style.bold, ctl.style.italic, ctl.style.mono);
@@ -8154,7 +8174,7 @@ fn paint_control(
                     });
                     ly += lh;
                 }
-                controls.push(ControlRect { x, y: top, w, h, seq: ctl.seq, kind: ctl.kind });
+                controls.push(rect(ops, ctl));
                 return;
             }
             if !ctl.text.is_empty() {
@@ -8220,7 +8240,7 @@ fn paint_control(
             }
         }
     }
-    controls.push(ControlRect { x, y: top, w, h, seq: ctl.seq, kind: ctl.kind });
+    controls.push(rect(ops, ctl));
 }
 
 /// Paint a control's frame: each side its own width and colour, `ua` standing
@@ -9270,6 +9290,98 @@ fn descend<'a>(
 /// `push_decorations`), and the old state is regenerated too and has to be
 /// found in the list exactly where it is replaced. Anything ambiguous returns
 /// `false` and the caller lays out, which is what it did before.
+/// Ein Steuerelement neu malen, ohne die Seite neu auszulegen.
+///
+/// **Warum das die groesste einzelne Zahl in beak ist:** jeder Tastendruck in
+/// einem Feld war bisher ein `bump_content_gen("form-key")`, also ein volles
+/// Auslegen des Dokuments. Auf Wikipedia sind das 280 ms — je Zeichen. Was
+/// sich dabei wirklich aendert, ist der Malbereich EINES Kastens.
+///
+/// Erlaubt ist das, weil `:focus`, `:focus-within` und `:active` bei uns in
+/// `never_matches` stehen: Tastaturbesitz kann durch die Kaskade gar nichts
+/// umstylen. `:checked` kann es sehr wohl — der Kaestchen-Trick ist
+/// `input:checked ~ .menu{display:block}` —, also entscheidet dort
+/// `may_restyle`, und im Zweifel wird ausgelegt.
+///
+/// Die Geometrie wird NICHT neu gerechnet: der Kasten behaelt seine Masse. Ein
+/// Wert, der breiter ist als sein Feld, wird beschnitten (wie vorher) statt
+/// mitzuwandern — das ist die benannte Grenze dieses Weges.
+pub fn repaint_controls(
+    lay: &mut Layout,
+    fonts: &crate::fonts::Fonts,
+    theme: &Theme,
+    state: &crate::forms::FormState,
+    may_restyle: &dyn Fn(u32) -> bool,
+) -> Result<(), &'static str> {
+    // Erst planen, dann anwenden — ein Lauf, der auf halbem Weg aufgibt, liesse
+    // eine halb neu gemalte Seite stehen ([[repaint_hover]] macht es genauso).
+    let mut plan: Vec<(usize, Vec<DrawOp>, CtlBox)> = Vec::new();
+    for (i, c) in lay.controls.iter().enumerate() {
+        let old = &c.paint;
+        let focused = state.focus == Some(old.seq);
+        let checked = state.checked_or(old.seq, old.checked);
+        // Der angezeigte Text: nur wer getippt hat, aendert ihn.
+        let (text, ghost, raw) = match state.value_set(old.seq) {
+            None => (old.text.clone(), old.ghost, None),
+            Some(v) => match old.kind {
+                ControlKind::Password => (repeat_char('•', v.chars().count()), false, Some(v)),
+                ControlKind::Text | ControlKind::TextArea if v.is_empty() => {
+                    (old.placeholder.clone(), true, Some(v))
+                }
+                // Ein `<select>` zeigt die Beschriftung seiner gewaehlten
+                // Option, und die steht im Baum, nicht im Zustand. Auslegen.
+                ControlKind::Select => return Err("select label comes from the tree"),
+                _ => (v.to_string(), false, Some(v)),
+            },
+        };
+        let caret = if focused && old.kind.is_text() {
+            let r = raw.unwrap_or(&old.text);
+            Some(r[..state.caret.min(r.len())].chars().count())
+        } else {
+            None
+        };
+        if focused == old.focused && checked == old.checked && text == old.text
+            && ghost == old.ghost && caret == old.caret
+        {
+            continue;
+        }
+        if checked != old.checked && may_restyle(old.seq) {
+            return Err("a :checked rule reaches this control");
+        }
+        let mut next = old.clone();
+        next.focused = focused;
+        next.checked = checked;
+        next.text = text;
+        next.ghost = ghost;
+        next.caret = caret;
+        let mut ops = Vec::new();
+        let mut throwaway = Vec::new();
+        paint_control(fonts, theme, &next, c.x, c.y, &mut ops, &mut throwaway);
+        plan.push((i, ops, next));
+    }
+    if plan.is_empty() {
+        return Ok(());
+    }
+    // Von hinten nach vorn: eine Ersetzung verschiebt nur, was DAHINTER liegt,
+    // und die Eintraege davor bleiben gueltig.
+    plan.sort_by_key(|(i, ..)| core::cmp::Reverse(lay.controls[*i].at));
+    for (i, ops, next) in plan {
+        let (at, len) = (lay.controls[i].at, lay.controls[i].len);
+        let delta = ops.len() as isize - len as isize;
+        lay.ops.splice(at..at + len, ops);
+        lay.controls[i].len = (len as isize + delta) as usize;
+        lay.controls[i].paint = next;
+        if delta != 0 {
+            for other in lay.controls.iter_mut() {
+                if other.at > at {
+                    other.at = (other.at as isize + delta) as usize;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn repaint_hover(
     lay: &mut Layout,
     fonts: &crate::fonts::Fonts,

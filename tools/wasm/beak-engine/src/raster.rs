@@ -348,6 +348,46 @@ impl Engine {
     /// patch could not be made with certainty and the caller must lay out —
     /// the layout it was given is then untouched, because every change is
     /// applied only once all of them are known to be possible.
+    /// Ein Steuerelement neu malen statt die Seite auszulegen. `false` heisst:
+    /// es geht nicht, legt aus.
+    ///
+    /// Der Anrufer ist jedes Ereignis, das nur den Zustand eines Kastens
+    /// aendert — Tastendruck im Feld, Fokus, Fokusverlust, Haekchen. Auf
+    /// Wikipedia kostete jedes davon 280 ms.
+    pub fn repaint_controls(&self, lay: &mut Layout, state: &crate::forms::FormState) -> bool {
+        let held = self.sheet.borrow();
+        let held_dom = self.dom.borrow();
+        let (sheet, dom) = match (held.first(), held_dom.first()) {
+            (Some((_, s)), Some((_, d))) => (s, d),
+            _ => return false,
+        };
+        // Nur eine `:checked`-Regel kann durch die Kaskade etwas anderes
+        // umstylen; `:focus` und Verwandte matchen bei uns nie.
+        let may_restyle = |seq: u32| {
+            if sheet.checked_set.is_empty() {
+                return false;
+            }
+            fn find(el: &crate::dom::Element, seq: u32) -> Option<&crate::dom::Element> {
+                if el.seq == seq {
+                    return Some(el);
+                }
+                el.children.iter().find_map(|c| match c {
+                    crate::dom::Node::Element(e) => find(e, seq),
+                    _ => None,
+                })
+            }
+            // Kein Element gefunden heisst: nicht entscheidbar, also auslegen.
+            find(&dom.root, seq).map_or(true, |el| sheet.checked_set.may_match(el))
+        };
+        match crate::layout::repaint_controls(lay, &self.fonts, &self.theme, state, &may_restyle) {
+            Ok(()) => true,
+            Err(why) => {
+                self.repaint_bail.set(why);
+                false
+            }
+        }
+    }
+
     pub fn repaint_hover(&self, lay: &mut Layout) -> bool {
         match self.try_repaint_hover(lay) {
             Ok(()) => true,
@@ -2200,6 +2240,46 @@ mod tests {
 
     /// Everything a layout draws must survive being written down and read back
     /// — the comparison the repaint tests lean on.
+    /// **Das Gate fuer den Schnellweg: neu gemalt muss BYTEGLEICH sein zu neu
+    /// ausgelegt.** Alles andere waere ein zweiter Renderpfad, der langsam
+    /// auseinanderlaeuft ([[feedback-byte-identical-render-gate]]).
+    #[test]
+    fn repainting_a_control_equals_laying_the_page_out_again() {
+        let html = "<style>body{margin:0}input{width:200px}</style>\
+                    <p>Text davor</p><input id=q placeholder=Suche><p>und danach</p>\
+                    <input type=checkbox id=c><label for=c>Haken</label>";
+        let eng = Engine::new();
+        let mut state = crate::forms::FormState::default();
+        let mut lay = eng.layout_forms(html, "", 400, &state);
+        let seq = lay.controls.first().map(|c| c.seq).expect("ein Feld");
+        let cb = lay.controls.get(1).map(|c| c.seq).expect("ein Kaestchen");
+
+        // Fokus + getippter Wert + Haken — alles, was ein Klick und eine Taste
+        // auslesen.
+        state.focus = Some(seq);
+        state.set_value(seq, alloc::string::String::from("Hallo"));
+        state.caret = 5;
+        state.set_checked(cb, true);
+
+        assert!(eng.repaint_controls(&mut lay, &state), "Schnellweg: {}", eng.repaint_bail());
+        let fresh = eng.layout_forms(html, "", 400, &state);
+        assert_eq!(dump_ops(&lay), dump_ops(&fresh), "neu gemalt != neu ausgelegt");
+    }
+
+    /// Und wenn eine `:checked`-Regel Kaesten bewegen kann, gibt der Schnellweg
+    /// auf, statt ein Menue zu, das sich haette oeffnen muessen.
+    #[test]
+    fn a_checked_rule_sends_the_page_to_a_layout() {
+        let html = "<style>input:checked ~ .menu{display:block}.menu{display:none}</style>\
+                    <input type=checkbox id=c><div class=menu>Menue</div>";
+        let eng = Engine::new();
+        let mut state = crate::forms::FormState::default();
+        let mut lay = eng.layout_forms(html, "", 400, &state);
+        let cb = lay.controls.first().map(|c| c.seq).expect("ein Kaestchen");
+        state.set_checked(cb, true);
+        assert!(!eng.repaint_controls(&mut lay, &state), "muss auslegen");
+    }
+
     fn dump_ops(l: &Layout) -> alloc::string::String {
         use core::fmt::Write;
         let mut s = alloc::string::String::new();
