@@ -2438,8 +2438,71 @@ fn parse_any_url(loc: &str, current_host: &str, current_tls: bool) -> Result<(St
     }
 }
 
+/// Eine offene Klartext-Verbindung, die auf ihre naechste Anfrage wartet.
+///
+/// Der TLS-Pool daneben haelt `TlsSession`s; hier ist es der nackte
+/// TCP-Griff. Getrennt zu halten ist kein Duplikat, sondern der Unterschied
+/// zwischen den beiden Protokollen: eine TLS-Sitzung hat einen Zustand, der
+/// mitgeschleppt werden muss, ein TCP-Griff ist eine Zahl.
+struct PlainConn {
+    /// `host:port` — der Port GEHOERT dazu. Zwei Dienste auf derselben
+    /// Maschine sind zwei Gegenstellen, und ein Griff, der beim falschen
+    /// landet, schickt die Anfrage an den falschen Server.
+    key: String,
+    handle: usize,
+    idle_since: u64,
+}
+
+static PLAIN_POOL: spin::Mutex<[Option<PlainConn>; CONN_POOL_SIZE]> =
+    spin::Mutex::new([const { None }; CONN_POOL_SIZE]);
+
+/// Einen lebenden Klartext-Griff fuer `key` holen. Dieselbe Vorsicht wie im
+/// TLS-Pool: erst den NIC-Ring leeren, dann den Zustand lesen — sonst liegt
+/// das FIN der Gegenstelle unverarbeitet im Ring und `conn_healthy` nickt
+/// eine tote Verbindung durch.
+fn plain_take(key: &str) -> Option<usize> {
+    drain_before_reuse();
+    let mut pool = PLAIN_POOL.lock();
+    let now = crate::interrupts::ticks();
+    for slot in pool.iter_mut() {
+        if matches!(slot, Some(c) if c.key == key) {
+            let c = slot.take().unwrap();
+            let fresh = now.wrapping_sub(c.idle_since) < POOL_MAX_IDLE_TICKS;
+            if fresh && crate::net::tcp::conn_healthy(c.handle) {
+                return Some(c.handle);
+            }
+            kprintln!("[npk]   pool {}: Verbindung verworfen ({})", key,
+                if fresh { "Gegenstelle hat zugemacht" } else { "zu lange ungenutzt" });
+            let _ = crate::net::tcp::close(c.handle);
+            return None;
+        }
+    }
+    None
+}
+
+fn plain_put(key: &str, handle: usize) {
+    let mut pool = PLAIN_POOL.lock();
+    let conn = PlainConn { key: String::from(key), handle, idle_since: crate::interrupts::ticks() };
+    for slot in pool.iter_mut() {
+        if slot.is_none() {
+            *slot = Some(conn);
+            return;
+        }
+    }
+    if let Some(old) = pool[0].replace(conn) {
+        let _ = crate::net::tcp::close(old.handle);
+    }
+}
+
 /// One plain-HTTP round-trip (no TLS, no redirect follow). Mirrors
 /// `https_get_once` but over raw TCP. Content-Length bodies only.
+///
+/// **Die Verbindung wird wiederverwendet.** Bis 0.322.0 stand hier
+/// `Connection: close`, und JEDE Anfrage baute neu auf — am Geraet gegen den
+/// eigenen Vorlagenserver waren das zwei volle Handshakes je Seitenaufbau,
+/// einer fuers Dokument und einer fuers Stilblatt, fuer nichts. Der Weg ist
+/// derselbe wie im TLS-Pool: erst einen gepoolten Griff versuchen, und was
+/// dort schiefgeht, BEVOR ein Byte ausgeliefert wurde, wird frisch wiederholt.
 fn http_get_once(
     host: &str,
     path: &str,
@@ -2448,6 +2511,18 @@ fn http_get_once(
 ) -> Result<HttpResponse, &'static str> {
     let (bare, port) = split_host_port(host);
     let port = port.unwrap_or(80);
+    let key = alloc::format!("{}:{}", bare, port);
+
+    // Versuch 1: eine offene Verbindung. Kein DNS, kein ARP, kein Handshake.
+    if let Some(handle) = plain_take(&key) {
+        match http_exchange(handle, host, path, &key, max_size, on_chunk) {
+            Ok(r) => return Ok(r),
+            Err(ExchangeErr::Retry) => {} // abgestanden — unten frisch
+            Err(ExchangeErr::Fatal(e)) => return Err(e),
+        }
+    }
+
+    // Versuch 2: frisch aufbauen.
     let ip = match parse_ip(bare) {
         Some(ip) => ip,
         None => crate::net::dns::resolve(bare).ok_or("DNS resolution failed")?,
@@ -2458,7 +2533,25 @@ fn http_get_once(
 
     if chatty() { kprintln!("[npk]   TCP connect {}:{} ...", bare, port); }
     let handle = crate::net::tcp::connect(ip, port).map_err(|_| "TCP connect failed")?;
+    match http_exchange(handle, host, path, &key, max_size, on_chunk) {
+        Ok(r) => Ok(r),
+        Err(ExchangeErr::Retry) => Err("connection reset after connect"),
+        Err(ExchangeErr::Fatal(e)) => Err(e),
+    }
+}
 
+/// Eine Anfrage ueber einen schon offenen Griff. `Retry` heisst: es ist nichts
+/// ausgeliefert worden, der Rufer darf frisch aufbauen und es nochmal
+/// versuchen. Alles, was nach dem ersten `on_chunk` schiefgeht, ist `Fatal` —
+/// ein zweiter Versuch wuerde dieselben Bytes ein zweites Mal liefern.
+fn http_exchange(
+    handle: usize,
+    host: &str,
+    path: &str,
+    key: &str,
+    max_size: usize,
+    on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
+) -> Result<HttpResponse, ExchangeErr> {
     // Timer-NAPI: speed this worker core's idle timer to ~10 kHz for the whole
     // transfer so the recv loop's HLT wakes every ~100 µs (vs 10 ms at 100 Hz) —
     // low-latency polling without burning the core. The guard restores 100 Hz on
@@ -2471,12 +2564,12 @@ fn http_get_once(
     let _poll_hz_guard = PollHzGuard;
 
     let request = alloc::format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: */*\r\nConnection: keep-alive\r\n\r\n",
         path, host, USER_AGENT
     );
     if crate::net::tcp::send_blocking(handle, request.as_bytes(), 1000).is_err() {
         let _ = crate::net::tcp::close(handle);
-        return Err("HTTP send failed");
+        return Err(ExchangeErr::Retry);
     }
 
     let mut raw = alloc::vec::Vec::new();
@@ -2502,21 +2595,26 @@ fn http_get_once(
         }
         if raw.len() > 32_768 {
             let _ = crate::net::tcp::close(handle);
-            return Err("headers too large");
+            return Err(ExchangeErr::Fatal("headers too large"));
         }
     }
     let hdr_end = match header_end {
         Some(p) => p,
-        None => { let _ = crate::net::tcp::close(handle); return Err("no HTTP headers received"); }
+        // Nichts oder nur Bruchstuecke: auf einer wiederverwendeten Verbindung
+        // ist das der Normalfall einer still geschlossenen Gegenstelle.
+        None => { let _ = crate::net::tcp::close(handle); return Err(ExchangeErr::Retry); }
     };
     let body_start = hdr_end + 4;
-    let hdr_str = core::str::from_utf8(&raw[..hdr_end]).map_err(|_| "invalid header encoding")?;
+    let hdr_str = core::str::from_utf8(&raw[..hdr_end])
+        .map_err(|_| ExchangeErr::Fatal("invalid header encoding"))?;
     let status = parse_status_code(hdr_str).unwrap_or(0);
     // Everything after the status line, capped. `Set-Cookie` repeats, so
     // handing back parsed single values could never carry it.
     let reply_headers = capture_headers(hdr_str);
     let location = parse_header_value(hdr_str, "location").map(String::from);
     let content_type = parse_header_value(hdr_str, "content-type").map(String::from);
+    let peer_closes = parse_header_value(hdr_str, "connection")
+        .is_some_and(|v| header_has_token(v, "close"));
 
     if (300..400).contains(&status) {
         match &location {
@@ -2524,6 +2622,9 @@ fn http_get_once(
             None if chatty() => kprintln!("[npk]   HTTP {} (redirect, no Location)", status),
             _ => {}
         }
+        // Der Koerper einer Weiterleitung wird nicht gelesen, also steht die
+        // Verbindung nicht mehr auf einer Nachrichtengrenze. Sie zurueckzulegen
+        // hiesse, die naechste Anfrage mit fremden Bytes zu beantworten.
         let _ = crate::net::tcp::close(handle);
         return Ok(HttpResponse { status, location, content_type, headers: reply_headers });
     }
@@ -2531,14 +2632,17 @@ fn http_get_once(
 
     let cl = match parse_header_value(hdr_str, "content-length").and_then(|v| v.trim().parse::<usize>().ok()) {
         Some(c) => c,
-        None => { let _ = crate::net::tcp::close(handle); return Err("plain http needs Content-Length (chunked unsupported)"); }
+        None => {
+            let _ = crate::net::tcp::close(handle);
+            return Err(ExchangeErr::Fatal("plain http needs Content-Length (chunked unsupported)"));
+        }
     };
     let cap = core::cmp::min(cl, max_size);
     let leading = &raw[body_start..];
     let mut delivered: usize = 0;
     let n_leading = core::cmp::min(leading.len(), cap);
     if n_leading > 0 {
-        on_chunk(&leading[..n_leading])?;
+        on_chunk(&leading[..n_leading]).map_err(ExchangeErr::Fatal)?;
         delivered += n_leading;
     }
     while delivered < cap {
@@ -2546,13 +2650,23 @@ fn http_get_once(
             Ok(0) => continue,
             Ok(n) => {
                 let take = core::cmp::min(n, cap - delivered);
-                on_chunk(&buf[..take])?;
+                on_chunk(&buf[..take]).map_err(ExchangeErr::Fatal)?;
                 delivered += take;
             }
             Err(_) => break,
         }
     }
-    let _ = crate::net::tcp::close(handle);
+    // Zurueckgelegt wird NUR, was nachweislich auf einer Nachrichtengrenze
+    // steht: der ganze Koerper geliefert, nichts abgeschnitten, nichts
+    // uebriggelassen — und die Gegenstelle hat nicht `close` gesagt. Jede
+    // andere Verbindung traegt Reste, und die naechste Anfrage bekaeme sie als
+    // Antwort.
+    let clean = delivered == cl && cl <= max_size && leading.len() <= cl;
+    if clean && !peer_closes {
+        plain_put(key, handle);
+    } else {
+        let _ = crate::net::tcp::close(handle);
+    }
     Ok(HttpResponse { status, location, content_type, headers: reply_headers })
 }
 
