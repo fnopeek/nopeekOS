@@ -7,12 +7,14 @@ fn main() {
         Err(_) => include_str!("../assets/bootstrap.min.css").to_string(),
     };
     // `CSSADD=` haengt an — um EINE Regel gegen das echte Blatt zu halten.
+    if let Ok(f) = std::env::var("CSSFILE") { css = std::fs::read_to_string(f).expect("css"); }
     if let Ok(extra) = std::env::var("CSSADD") { css.push_str(&extra); }
     let body = std::env::var("BODY").unwrap_or_else(|_|
         "<button class=\"btn btn-primary\">Primary</button>".into());
     let doc = format!("<!DOCTYPE html><html><body>{body}</body></html>");
     let mut eng = beak_engine::Engine::new();
-    let lay = eng.layout_ext(&doc, &css, 800);
+    let w: u32 = std::env::var("W").ok().and_then(|v| v.parse().ok()).unwrap_or(800);
+    let lay = eng.layout_ext(&doc, &css, w);
     use beak_engine::layout::DrawOp;
     println!("\n   {body}\n");
     for o in lay.ops.iter() {

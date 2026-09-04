@@ -1039,6 +1039,13 @@ fn computed_decls(i: &Interp, src_seq: u32) -> Option<String> {
     let mut parent = crate::style::ComputedStyle::root(&ctx.theme);
     parent.vw = ctx.viewport_w;
     let mut anc: Vec<crate::css::ElemInfo> = Vec::new();
+    // Die Variablenkarte faehrt MIT. Ohne sie erreicht `:root`s Palette das
+    // Element nie — und ein Rahmenwerk, das seine ganze Skala ueber
+    // Variablen fuehrt (Tailwind: `font-size: var(--text-xs)`), bekaeme
+    // ueberall die Vorgabewerte zurueck. `getComputedStyle` haette dann eine
+    // andere Antwort gegeben als das Layout gemalt hat, und das ist die
+    // schlimmste Sorte Fehler: zwei Wahrheiten.
+    let mut vars = crate::vars::VarMap::new();
     let mut out = parent;
     for (k, el) in path.iter().enumerate() {
         // Geschwister zaehlen, damit `:nth-*` und `:first-child` stimmen —
@@ -1057,8 +1064,18 @@ fn computed_decls(i: &Interp, src_seq: u32) -> Option<String> {
             }
         };
         let info = crate::css::ElemInfo { el, state: Default::default() };
-        out = crate::style::resolve(&info, &parent, &ctx.theme, &ctx.sheet,
-                                    &anc, &prev, count, ctx.viewport_w);
+        let mut own = None;
+        out = crate::style::resolve_in(&info, &parent, &ctx.theme, &ctx.sheet,
+                                       &anc, &prev, count, ctx.viewport_w, &vars, &mut own);
+        if let Some(m) = own { vars = m; }
+        // `rem` rechnet gegen die WURZEL, und die steht erst fest, wenn sie
+        // aufgeloest ist. Das Layout setzt das direkt nach dem Wurzellauf;
+        // ohne die Zeile las `getComputedStyle` jedes `rem` gegen die
+        // Vorgabegroesse — `font-size: .75rem` kam als 16 px zurueck, waehrend
+        // das Layout 12 malte. Zwei Antworten auf dieselbe Frage.
+        if k == 0 {
+            out.rem_base = out.font_px;
+        }
         parent = out;
         anc.push(info);
     }

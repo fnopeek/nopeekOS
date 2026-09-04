@@ -1649,6 +1649,16 @@ pub fn resolve_in(
         // `revert-layer` needs to know which layer a declaration came from, so
         // it is resolved before anything is applied — and only when the sheet
         // actually contains one, which no page but a cascade reftest does.
+        // Die mit `@property` angemeldeten Anfangswerte, EINMAL an der
+        // Wurzel: sie stehen unter allem, was eine Regel setzt, und vererben
+        // sich von dort nach unten. Ohne sie bleibt bei Tailwind jedes
+        // `var(--tw-…)` unaufgeloest und die Deklaration faellt weg.
+        if ancestors.is_empty() {
+            for (name, val) in &sheet.registered {
+                set_var(own, inherited, name, val);
+            }
+        }
+
         // ── Custom Properties zuerst ──────────────────────────────────
         //
         // Vor jeder anderen Deklaration, denn jede andere darf sie lesen. Und
@@ -3061,6 +3071,17 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 }
             } else if let Ok(n) = t.parse::<f32>() {
                 LineHeight::Num(n)
+            } else if is_unitless_calc(t) {
+                // **`calc()` ohne Einheit ist eine ZAHL, keine Laenge.**
+                // Tailwind v4 schreibt JEDE Zeilenhoehe so — `.text-xs` bringt
+                // `line-height: calc(1 / .75)` mit. Als Laenge gelesen sind
+                // das 1,3 PIXEL: die Zeilenkaesten fallen auf null zusammen,
+                // aufeinanderfolgende Absaetze werden uebereinandergedruckt,
+                // und der Text landet mit negativem y ueber dem Seitenrand.
+                match parse_len_opt(t, u) {
+                    Some(Len::Px(v)) => LineHeight::Num(v),
+                    _ => s.line_height,
+                }
             } else {
                 match parse_len_opt(t, u) {
                     Some(Len::Px(px)) => LineHeight::Px(px),
@@ -4162,6 +4183,31 @@ fn apply_font_shorthand(v: &str, theme: &Theme, s: &mut ComputedStyle) {
     }
 }
 
+/// Ist das ein `calc()`, in dem keine Einheit und kein Prozent vorkommt?
+///
+/// Dann ist sein Ergebnis eine ZAHL. Der Unterschied entscheidet bei
+/// `line-height` zwischen einem Verhaeltnis und einer Laenge — und zwischen
+/// einer lesbaren Seite und uebereinandergedrucktem Text.
+fn is_unitless_calc(v: &str) -> bool {
+    let t = v.trim();
+    if t.len() < 6 || !t[..5].eq_ignore_ascii_case("calc(") {
+        return false;
+    }
+    if t.contains('%') {
+        return false;
+    }
+    // Ein Einheitenzeichen steht IMMER direkt hinter einer Ziffer oder einem
+    // Punkt. Ein blosser Buchstabe ist dagegen ein Funktionsname (`min`,
+    // `max`, `var` sind vorher schon ersetzt).
+    let b = t.as_bytes();
+    for i in 1..b.len() {
+        if b[i].is_ascii_alphabetic() && (b[i - 1].is_ascii_digit() || b[i - 1] == b'.') {
+            return false;
+        }
+    }
+    true
+}
+
 /// Einen gerechneten Stil als Deklarationstext ausgeben — die Antwort von
 /// `getComputedStyle`.
 ///
@@ -4238,9 +4284,10 @@ fn trim_f32(v: f32) -> String {
 
 /// `<a> [<b>]` — a two-sided logical shorthand. One value applies to both.
 fn split_sides(v: &str) -> [&str; 2] {
-    let mut it = v.split_whitespace();
-    let a = it.next().unwrap_or("0");
-    [a, it.next().unwrap_or(a)]
+    // Klammernbewusst, aus demselben Grund wie `four_values`.
+    let t = css_tokens(v);
+    let a = t.first().copied().unwrap_or("0");
+    [a, t.get(1).copied().unwrap_or(a)]
 }
 
 /// A `list-style-type` keyword, or `None` for anything we don't render as a
@@ -4389,6 +4436,19 @@ fn parse_box_shadow(v: &str, u: Units) -> Option<(bool, BoxShadow)> {
             color = Some(c);
             continue;
         }
+        // Eine DURCHSICHTIGE Farbe ist eine gueltige Schicht, keine kaputte.
+        //
+        // `parse_color` gibt fuer `#0000` nichts zurueck, und der Zweig
+        // darunter erklaerte damit die ganze Deklaration fuer ungueltig.
+        // Tailwind v4 baut seine Schatten aus einer Liste von Platzhaltern
+        // (`box-shadow: var(--tw-inset-shadow), … , var(--tw-shadow)`), und
+        // die unbenutzten sind genau `0 0 #0000` — ein einziger davon
+        // loeschte den echten Schatten gleich mit. Auf einer Tailwind-Seite
+        // hatte damit NICHTS einen Schatten.
+        if matches!(parse_color_val(tok, &Theme::DARK), Some(ColorVal::Transparent)) {
+            color = Some(Rgba { c: Rgb(0, 0, 0), a: 0 });
+            continue;
+        }
         // An unknown token invalidates the layer rather than being ignored —
         // otherwise a value we cannot read paints something the author never
         // asked for.
@@ -4495,7 +4555,13 @@ fn four_sides<'a>(toks: &[&'a str]) -> Option<[&'a str; 4]> {
 
 /// Expand a 1–4 token box shorthand into (top, right, bottom, left).
 fn four_values(v: &str) -> (&str, &str, &str, &str) {
-    let p: alloc::vec::Vec<&str> = v.split_whitespace().collect();
+    // **Klammernbewusst zerlegen.** `split_whitespace` machte aus
+    // `padding: calc(2 * 10px)` drei Seiten (`calc(2`, `*`, `10px)`), und
+    // uebrig blieb Unsinn — die Deklaration fiel weg, und der Kasten hatte
+    // GAR KEINE Polsterung. Tailwind schreibt jede Abstandsklasse so
+    // (`.p-4{padding:calc(var(--spacing) * 4)}`), also war auf einer
+    // Tailwind-Seite jedes `p-*`, `m-*`, `gap-*` wirkungslos.
+    let p: alloc::vec::Vec<&str> = css_tokens(v);
     match p.len() {
         0 => ("0", "0", "0", "0"),
         1 => (p[0], p[0], p[0], p[0]),
