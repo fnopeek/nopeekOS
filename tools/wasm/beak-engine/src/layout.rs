@@ -410,6 +410,7 @@ fn translate_op_list(ops: &mut [DrawOp], dx: i32, dy: i32) {
         match op {
             DrawOp::Rect { x, y, .. }
             | DrawOp::RoundRect { x, y, .. }
+            | DrawOp::Shadow { x, y, .. }
             | DrawOp::Text { x, y, .. }
             | DrawOp::Image { x, y, .. }
             | DrawOp::BgImage { x, y, .. } => {
@@ -430,6 +431,19 @@ fn translate_op_list(ops: &mut [DrawOp], dx: i32, dy: i32) {
 /// would drift, and one that merely FORGOT the shadow silently left the tab
 /// underline behind while recolouring the text above it.
 fn shadow_ops(st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, out: &mut Vec<DrawOp>) {
+    // Der WEICHE zuerst: er liegt hinter dem scharfen. Das ist die Form, in
+    // der Bootstrap seine Schatten schreibt (`0 .5rem 1rem rgba(0,0,0,.15)`),
+    // und bis 0.61.0 fiel sie ganz weg — nur `blur == 0` wurde gemalt.
+    if let Some(sh) = st.shadow_soft {
+        let sx = x + sh.dx as i32 - sh.spread as i32;
+        let sy = y + sh.dy as i32 - sh.spread as i32;
+        let sw = w + 2 * sh.spread as i32;
+        let shh = h + 2 * sh.spread as i32;
+        if sw > 0 && shh > 0 {
+            out.push(DrawOp::Shadow { x: sx, y: sy, w: sw, h: shh, blur: sh.blur,
+                                      color: sh.color.unwrap_or(st.color) });
+        }
+    }
     let Some(sh) = st.shadow else { return };
     if !sh.paints() {
         return;
@@ -488,6 +502,14 @@ fn clip_ops(ops: &mut Vec<DrawOp>, start: usize, cl: i32, ct: i32, cr: i32, cb: 
                 let ny1 = (y + h).min(cb);
                 if nx1 > nx && ny1 > ny {
                     ops.push(DrawOp::Rect { x: nx, y: ny, w: nx1 - nx, h: ny1 - ny, color });
+                }
+            }
+            // Ein weicher Schatten wird nur ganz oder gar nicht behalten:
+            // ihn zuzuschneiden hiesse, seine Deckung neu zu rechnen, und die
+            // entsteht erst beim Malen.
+            DrawOp::Shadow { x, y, w, h, blur, color } => {
+                if x >= cl && y >= ct && x + w <= cr && y + h <= cb {
+                    ops.push(DrawOp::Shadow { x, y, w, h, blur, color });
                 }
             }
             // A rounded box that the clip fully contains keeps its corners;
@@ -694,6 +716,14 @@ pub enum DrawOp {
     },
     /// A filled rectangle (divider, list bullet).
     Rect { x: i32, y: i32, w: i32, h: i32, color: Rgba },
+    /// Ein WEICHER Schlagschatten: der Kasten, unter dem er liegt, plus der
+    /// Weichzeichnungsradius. Der Maler rechnet die Deckung selbst aus.
+    ///
+    /// Eigener Befehl und kein Haufen `Rect`: ein weicher Schatten hat an
+    /// jedem Pixel eine andere Deckung, und die entsteht erst beim Malen.
+    /// Ein scharfer (`blur == 0`) bleibt, was er war — vier Rechtecke, weil
+    /// er auf echten Seiten meist ein Haarstrich statt eines Schattens ist.
+    Shadow { x: i32, y: i32, w: i32, h: i32, blur: f32, color: Rgba },
     /// A `border-radius` box. `r` is `[tl, tr, br, bl]` in px; `ring` is 0 for
     /// a solid fill, or the border thickness to stroke along the inside edge.
     /// Kept apart from `Rect` so the plain case stays one `memory.copy` per
@@ -751,6 +781,9 @@ fn op_bottom(op: &DrawOp) -> i32 {
         | DrawOp::RoundRect { y, h, .. }
         | DrawOp::Image { y, h, .. }
         | DrawOp::BgImage { y, h, .. } => y + h,
+        // Der weiche Rand reicht ueber den Kasten hinaus, aber er ist
+        // durchsichtig und soll die Seite nicht laenger machen.
+        DrawOp::Shadow { y, h, .. } => y + h,
     }
 }
 
@@ -1126,6 +1159,7 @@ fn op_key(op: &DrawOp) -> OpKey {
         DrawOp::RoundRect { x, y, w, h, .. } => OpKey { kind: 2, x: *x, y: *y, a: *w, b: *h },
         DrawOp::Image { x, y, w, h, .. } => OpKey { kind: 3, x: *x, y: *y, a: *w, b: *h },
         DrawOp::BgImage { x, y, w, h, .. } => OpKey { kind: 4, x: *x, y: *y, a: *w, b: *h },
+        DrawOp::Shadow { x, y, w, h, .. } => OpKey { kind: 5, x: *x, y: *y, a: *w, b: *h },
     }
 }
 
@@ -4016,6 +4050,7 @@ impl<'a> Ctx<'a> {
             match op {
                 DrawOp::Text { color, .. }
                 | DrawOp::Rect { color, .. }
+                | DrawOp::Shadow { color, .. }
                 | DrawOp::RoundRect { color, .. } => *color = f.apply(*color),
                 DrawOp::Image { filter, .. } => {
                     let inner = (*filter as usize).checked_sub(1).map(|i| table[i]);
@@ -6701,6 +6736,7 @@ impl<'a> Ctx<'a> {
                 DrawOp::Text { x, y, .. }
                 | DrawOp::Rect { x, y, .. }
                 | DrawOp::RoundRect { x, y, .. }
+                | DrawOp::Shadow { x, y, .. }
                 | DrawOp::Image { x, y, .. }
                 | DrawOp::BgImage { x, y, .. } => {
                     *x += dx;
@@ -10938,6 +10974,26 @@ fn dbg_wiki_shape() {
     /// articles: 7 declarations hide their only sharp layer behind a blurred
     /// one, and none has two paintable layers.
     #[test]
+    /// Ein WEICHER Schatten wird gemalt — und zwar weich.
+    ///
+    /// Bis 0.61.0 fiel er ganz weg (nur `blur == 0` wurde gemalt), und das
+    /// betraf jede Bootstrap-Karte, jeden Dialog und jedes Menue: sie lagen
+    /// flach auf der Seite statt darueber.
+    #[test]
+    fn a_blurred_shadow_is_painted_and_fades() {
+        let l = lay("<body><div style=\"height:20px;box-shadow:0 4px 12px rgb(0,0,0)\">x</div></body>", 400);
+        let n = l.ops.iter().filter(|o| matches!(o, DrawOp::Shadow { .. })).count();
+        assert_eq!(n, 1, "genau ein weicher Schatten");
+        // Und er ist wirklich weich: die Deckung faellt nach aussen ab. Ohne
+        // die Pruefung koennte er ein harter Klotz sein und der Test gruen.
+        let mut buf = alloc::vec![0u8; 400 * 120 * 4];
+        let eng = crate::Engine::new();
+        eng.paint(&l, 400, 120, 0, &mut buf);
+        let at = |x: usize, y: usize| buf[(y * 400 + x) * 4] as i32;
+        let (nah, fern) = (at(200, 40), at(200, 52));
+        assert!(nah < fern, "unter dem Kasten muss es nach aussen heller werden: {nah} vs {fern}");
+    }
+
     fn a_shadow_list_paints_its_first_paintable_layer_not_its_first() {
         let shadow_rects = |css: &str| -> Vec<(i32, i32, i32, i32, Rgb)> {
             let l = lay(&alloc::format!("<body><div style=\"{css}\">x</div></body>"), 400);

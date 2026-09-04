@@ -939,6 +939,9 @@ impl Engine {
                 DrawOp::RoundRect { x, y, w: rw, h: rh, r, color, ring } => {
                     fill_round(out, wi, hi, *x, *y - scroll_y, *rw, *rh, *r, *color, *ring);
                 }
+                DrawOp::Shadow { x, y, w: rw, h: rh, blur, color } => {
+                    fill_shadow(out, wi, hi, *x, *y - scroll_y, *rw, *rh, *blur, *color);
+                }
                 DrawOp::Text { x, y, size, color, bold, italic, mono, sp, text } => {
                     let vy = *y - scroll_y;
                     if vy > hi || vy + (*size as i32) + 6 < 0 {
@@ -1262,6 +1265,77 @@ fn mul255(x: u8, y: u8) -> u8 {
 /// offset rather than (x, y) so the caller can walk a row by adding 4 instead of
 /// recomputing `y * w + x` for every pixel it touches.
 #[inline]
+/// Ein weichgezeichneter Schlagschatten.
+///
+/// **Die Deckung eines gaussisch weichgezeichneten Rechtecks ist trennbar:**
+///
+///     a(x,y) = A * S(x; links, rechts) * S(y; oben, unten)
+///     S(t; a, b) = Phi((t-a)/sigma) - Phi((t-b)/sigma)
+///
+/// Das ist keine Naeherung, sondern exakt — die Faltung eines Rechtecks mit
+/// einem trennbaren Kern zerfaellt in zwei eindimensionale. Damit kostet ein
+/// Pixel EINE Multiplikation statt einer Faltung, und das Waagrechte wird
+/// einmal je Schatten gerechnet statt einmal je Zeile.
+///
+/// `sigma = blur / 2`, wie CSS Backgrounds 3 §7.1.1 es vorschreibt: der
+/// Radius spannt zwei Standardabweichungen.
+///
+/// **Was hier NICHT drin ist:** die Ecken folgen keinem `border-radius`. Bei
+/// den Radien, mit denen echte Seiten arbeiten (6 px) und den Weichzeichnungen
+/// (16 px) liegt der Unterschied unter der Sichtbarkeitsschwelle; bei einem
+/// Kreis waere er sichtbar. Benannt statt still.
+#[allow(clippy::too_many_arguments)]
+fn fill_shadow(out: &mut [u8], cw: i32, ch: i32, x: i32, y: i32, w: i32, h: i32,
+               blur: f32, color: Rgba) {
+    if w <= 0 || h <= 0 || color.a == 0 {
+        return;
+    }
+    let sigma = (blur * 0.5).max(0.01);
+    // Jenseits von drei Sigma ist die Deckung unter einem halben Prozent.
+    let pad = libm::ceilf(sigma * 3.0) as i32;
+    let (x0, y0) = ((x - pad).max(0), (y - pad).max(0));
+    let (x1, y1) = ((x + w + pad).min(cw), (y + h + pad).min(ch));
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    // Das waagrechte Profil einmal, nicht je Zeile.
+    let mut fx: alloc::vec::Vec<f32> = alloc::vec::Vec::with_capacity((x1 - x0) as usize);
+    for px in x0..x1 {
+        fx.push(span(px as f32 + 0.5, x as f32, (x + w) as f32, sigma));
+    }
+    for py in y0..y1 {
+        let fy = span(py as f32 + 0.5, y as f32, (y + h) as f32, sigma);
+        if fy <= 0.002 {
+            continue;
+        }
+        let inside_y = py >= y && py < y + h;
+        let row = (py * cw) as usize * 4;
+        for (k, px) in (x0..x1).enumerate() {
+            // Ein AEUSSERER Schatten wird nicht in den Rahmenkasten gemalt
+            // (CSS Backgrounds 3 §7.1.1). Unter einem deckenden Kasten faellt
+            // das nicht auf; unter einem durchsichtigen ist es der Ring, den
+            // ein Browser dort auch zeigt.
+            if inside_y && px >= x && px < x + w {
+                continue;
+            }
+            let a = fx[k] * fy * (color.a as f32);
+            if a < 0.5 {
+                continue;
+            }
+            blend_at(out, row + px as usize * 4, color.c, a as u8);
+        }
+    }
+}
+
+/// Wieviel einer gaussisch verschmierten Kante liegt bei `t` noch im Band
+/// `[a, b]`? `Phi` ueber die Fehlerfunktion — `libm` hat sie, also braucht es
+/// hier keine Naeherung, die man spaeter erklaeren muss.
+fn span(t: f32, a: f32, b: f32, sigma: f32) -> f32 {
+    let k = 1.0 / (sigma * core::f32::consts::SQRT_2);
+    let phi = |z: f32| 0.5 * (1.0 + libm::erff(z));
+    (phi((t - a) * k) - phi((t - b) * k)).clamp(0.0, 1.0)
+}
+
 fn blend_at(out: &mut [u8], i: usize, c: Rgb, a: u8) {
     if a == 255 {
         out[i] = c.2;
@@ -2092,6 +2166,9 @@ mod tests {
                 }
                 DrawOp::RoundRect { x, y, w, h, r, color, ring } => {
                     let _ = write!(s, "Q {x},{y} {w}x{h} {r:?} c={color:?} {ring:.2}\n");
+                }
+                DrawOp::Shadow { x, y, w, h, blur, color } => {
+                    let _ = write!(s, "S {x},{y} {w}x{h} b={blur:.1} c={color:?}\n");
                 }
                 DrawOp::Image { x, y, w, h, src, alt, .. } => {
                     let _ = write!(s, "I {x},{y} {w}x{h} {src} {alt}\n");
