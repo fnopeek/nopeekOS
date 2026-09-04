@@ -917,6 +917,9 @@ impl Compiler {
                 Pat::Ident(n) => {
                     self.expr(right)?;
                     let i = self.chunk.name(n);
+                    // `q = function(){}` gibt der Funktion den Namen der
+                    // Variablen — dieselbe Regel wie bei `var q = …`.
+                    self.chunk.emit(Op::NameFunc(i));
                     self.chunk.emit(Op::StoreVar(i));
                     Ok(())
                 }
