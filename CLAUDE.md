@@ -48,7 +48,7 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-03 · beak 0.55.0 · Kernel 0.318.1** (Rest: `git log`)
+**Stand 2026-09-04 · beak 0.57.0 · Kernel 0.318.1** (Rest: `git log`)
 
 Zwei Fäden laufen parallel.
 
@@ -62,13 +62,16 @@ Auf allen elf Zielseiten ist die erste Wand ein fehlendes DOM-/Wirts-Glied,
 keine Sprachlücke — im ganzen Korpus stirbt kein einziges Skript an
 Generatoren, während test262 dafür 4000 Fehlschläge zählt.
 
-    test262 parse   96,84 %   ·  exec 52,40 %  (V8 auf demselben Korpus: 99,41 %)
-    Zielkorpus      437/437 geparst, 299/437 durchgelaufen
-    DOM-Aufrufe     93,5 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
+    test262 parse   96,84 %   ·  exec 52,77 %  (V8 auf demselben Korpus: 99,41 %)
+    Zielkorpus      437/437 geparst, 304/437 durchgelaufen
+    DOM-Aufrufe     98,5 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
 
-Die Rangfolge gibt `tests/apigap.rs`, nicht die test262-Fehlerkarte. Offen und
-der Reihenfolge nach: `template.content`, `importNode`, `cookie`, dann
-Event/Storage/DOMTokenList als benannte Schnittstellen. Generator und
+Die Rangfolge gibt `tests/apigap.rs`, nicht die test262-Fehlerkarte. 0.57.0 hat
+`document.cookie` (die erste Wand auf BEIDEN Wikipedias), `location`, die
+URI-Funktionen, Event/CustomEvent samt echter `dispatchEvent`,
+`template.content`/`importNode`, die benannten Schnittstellen und `el.style`
+als Sicht aufs Attribut gebaut. Was übrig ist — Shadow DOM, Beobachter,
+`postMessage` — ist teuer; die billigen Zeilen sind weg. Generator und
 async/await brauchen einen anhaltbaren Auswerter — eine Entwurfsfrage, und auf
 dem Korpus zahlen sie null.
 
@@ -76,7 +79,8 @@ Das eigene Testziel ist **`beak:selftest`** — eine Prüfseite aus dem
 Binärbild, die nichts holt und ihr Ergebnis auf dem Schirm UND im Log sagt.
 Sie läuft auch host-seitig über dieselbe Datei
 (`beak-engine/examples/selftest.rs`). Ein Lauf fand neun Lücken, die fremde
-Seiten in Wochen nicht gezeigt hatten. Stand: Sprache 25/27, Dokument 16/17.
+Seiten in Wochen nicht gezeigt hatten. Stand host-seitig: Sprache 26/28,
+Dokument 30/31; der Gerätelauf für 0.57.0 steht aus.
 
 Die CSS-Runde davor ist zu Ende gebracht: das Eigenschafts-Gap ist
 geschlossen, 93,7 % der Deklarationen auf Bootstrap + Wikipedia abgedeckt. Die
