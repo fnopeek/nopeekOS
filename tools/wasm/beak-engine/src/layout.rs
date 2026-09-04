@@ -3905,6 +3905,7 @@ impl<'a> Ctx<'a> {
             pad_l,
             pad_r,
             border,
+            radius: radii_px(st, w.max(8)),
             style: RunStyle { hidden: st.hidden, transparent: st.transparent, size, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: crate::style::VAlign::Baseline, deco: st.deco, deco_color: st.deco_color, break_word: st.break_word, nowrap: st.nowrap, lh: st.line_height.px(size).unwrap_or(0.0), sp: (st.letter_spacing, st.word_spacing) },
         }
     }
@@ -7861,6 +7862,11 @@ struct CtlBox {
     pad_r: i32,
     /// The frame, in paint order top/right/bottom/left.
     border: [CtlSide; 4],
+    /// `border-radius` in px, top-left clockwise. A control is painted with our
+    /// own metrics, so the page's radius has to be CARRIED here — it is not a
+    /// detail: every button on a Bootstrap or Tailwind page is rounded, and
+    /// square corners are the first thing that reads as „not a browser".
+    radius: [f32; 4],
     style: RunStyle,
 }
 
@@ -8017,7 +8023,33 @@ fn paint_control(
     // behind it, and dark text a light one.
     let theme = &surface_palette(theme, ctl.style.color.c);
     let border = Rgba::opaque(if ctl.focused { theme.link } else { mix(theme.rule, theme.text, 40) });
-    let frame = |ops: &mut Vec<DrawOp>| stroke_frame(ops, x, top, w, h, &ctl.border, border, ctl.focused);
+    let round = ctl.radius.iter().any(|r| *r > 0.5);
+    // Eine gerundete Ecke kann nicht aus vier Rechtecken bestehen. Solange alle
+    // vier Seiten dieselbe Breite und Farbe haben — bei Knoepfen und Feldern
+    // immer —, ist der Rahmen EIN Ring; sonst bleibt es beim eckigen Rahmen,
+    // und das ist die ehrlichere Naeherung als eine Ecke, die nur auf einer
+    // Seite rund waere.
+    let ring: Option<(f32, Rgba)> = {
+        let [t, r, b, l] = ctl.border;
+        let same = [r, b, l].iter().all(|s| s.w == t.w && s.transparent == t.transparent
+                                            && s.color.map(|c| c.c) == t.color.map(|c| c.c));
+        (round && same && t.w > 0 && !t.transparent)
+            .then(|| (t.w as f32, if ctl.focused { border } else { t.color.unwrap_or(border) }))
+    };
+    let frame = |ops: &mut Vec<DrawOp>| match ring {
+        Some((bw, color)) => ops.push(DrawOp::RoundRect {
+            x, y: top, w, h, r: ctl.radius, color, ring: bw,
+        }),
+        None => stroke_frame(ops, x, top, w, h, &ctl.border, border, ctl.focused),
+    };
+    // Die Flaeche — gerundet, wenn die Seite es sagt.
+    let face_op = |ops: &mut Vec<DrawOp>, color: Rgba| {
+        if round {
+            ops.push(DrawOp::RoundRect { x, y: top, w, h, r: ctl.radius, color, ring: 0.0 });
+        } else {
+            ops.push(DrawOp::Rect { x, y: top, w, h, color });
+        }
+    };
     // A page that styles its own button (`background-color`) wins; otherwise
     // the UA face is derived from the theme so it reads on light and dark.
     // `appearance: none` (css-ui-4 §4) removes the question: the page opted
@@ -8077,7 +8109,7 @@ fn paint_control(
         }
         ControlKind::Checkbox => {
             if let Some(face) = face {
-                ops.push(DrawOp::Rect { x, y: top, w, h, color: face });
+                face_op(ops, face);
             }
             bg_img(ops);
             frame(ops);
@@ -8094,7 +8126,7 @@ fn paint_control(
         }
         _ => {
             if let Some(face) = face {
-                ops.push(DrawOp::Rect { x, y: top, w, h, color: face });
+                face_op(ops, face);
             }
             bg_img(ops);
             frame(ops);
@@ -11440,6 +11472,31 @@ fn dbg_wiki_shape() {
         let green = l.ops.iter().filter(|o| matches!(o,
             DrawOp::Rect { color, .. } if (color.c.0, color.c.1, color.c.2) == (0, 170, 0))).count();
         assert_eq!(green, 4, "der Ring traegt die Textfarbe, got {green}");
+    }
+
+    /// Ein Steuerelement wird mit UNSEREN Massen gemalt, also muss die Seite
+    /// ihren `border-radius` mitgeben koennen. Ohne ihn hatte JEDER Knopf auf
+    /// einer Bootstrap- oder Tailwind-Seite scharfe Ecken — das erste, was
+    /// nach „kein Browser" aussieht.
+    #[test]
+    fn a_control_keeps_the_page_border_radius() {
+        let l = lay(
+            "<body style=\"margin:0\"><button style=\"border-radius:6px;background:#0d6efd;\
+             border:1px solid #0d6efd\">Knopf</button></body>",
+            400,
+        );
+        let rounded: alloc::vec::Vec<f32> = l.ops.iter().filter_map(|o| match o {
+            DrawOp::RoundRect { r, .. } => Some(r[0]),
+            _ => None,
+        }).collect();
+        assert!(rounded.len() >= 2, "Flaeche UND Rahmen gerundet, got {rounded:?}");
+        assert!(rounded.iter().all(|r| (*r - 6.0).abs() < 0.01), "{rounded:?}");
+        // Und ohne Radius bleibt es beim Rechteck — kein Ring, wo keiner hin soll.
+        let sq = lay(
+            "<body style=\"margin:0\"><button style=\"background:#0d6efd\">Knopf</button></body>",
+            400,
+        );
+        assert!(!sq.ops.iter().any(|o| matches!(o, DrawOp::RoundRect { .. })), "eckig bleibt eckig");
     }
 
     /// Ein WEICHER Schatten wird gemalt — und zwar weich.
