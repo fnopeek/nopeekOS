@@ -24,6 +24,7 @@ pub mod dombind;
 pub mod eval;
 pub mod json;
 pub mod expr;
+pub mod generator;
 pub mod interp;
 pub mod lexer;
 pub mod parser;

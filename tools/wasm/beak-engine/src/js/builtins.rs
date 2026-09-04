@@ -68,6 +68,11 @@ pub fn make_realm() -> Realm {
                     ObjKind::Arguments => "Arguments",
                     ObjKind::Regex(_) => "RegExp",
                     ObjKind::Promise(_) => "Promise",
+                    // Ein Generator traegt seinen Namen ueber
+                    // `Symbol.toStringTag` und kommt hier nur an, wenn den
+                    // jemand geloescht hat — dann ist er ein gewoehnliches
+                    // Objekt, genau wie in jedem echten Motor.
+                    ObjKind::Generator(_) => "Object",
                     ObjKind::Plain => "Object",
                 };
                 alloc::format!("[object {tag}]")
@@ -1285,6 +1290,11 @@ pub fn make_realm() -> Realm {
                            "[Symbol.iterator]", 0, false);
     iterator_proto.borrow_mut().define(SYM_ITERATOR, Prop::builtin(Value::Obj(self_iter)));
 
+    // Der Generatorvertrag haengt darunter — deshalb ist ein Generator selbst
+    // iterierbar, ohne dass `generator.rs` ein `Symbol.iterator` setzt.
+    let (generator_proto, generator_func_proto) =
+        super::generator::install(&iterator_proto, &function_proto);
+
     // Der Zustand eines eingebauten Iterators liegt als NUL-praefigierte
     // Eigenschaft auf ihm selbst. Kein Skript sieht sie (sie faellt aus
     // `own_keys`), und `native` nimmt ohnehin keinen Abschluss.
@@ -1662,7 +1672,8 @@ pub fn make_realm() -> Realm {
             string_proto, number_proto, boolean_proto, error_proto, error_ctors,
             node_proto: ph(), element_proto: ph(), text_proto: ph(), document_proto: ph(),
             event_proto: ph(), token_list_proto: ph(), style_proto: ph(), comment_proto: ph(),
-            regexp_proto: ph(), symbol_proto, iterator_proto, array_iter_proto,
+            regexp_proto: ph(), symbol_proto, iterator_proto,
+            generator_proto, generator_func_proto, array_iter_proto,
             string_iter_proto, promise_proto: ph(),
             html_element_proto: ph(), svg_element_proto: ph(), fragment_proto: ph(),
             tag_protos: HashMap::new(), url_proto: ph(), url_params_proto: ph() }

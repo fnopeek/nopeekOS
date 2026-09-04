@@ -191,7 +191,10 @@ pub fn run_jobs(i: &mut Interp) -> usize {
 /// Der Ersatz fuer einen Abschluss: `NativeFn` ist ein Funktionszeiger und
 /// sieht sein eigenes Funktionsobjekt nicht, `ObjKind::Bound` stellt die
 /// gebundenen Argumente aber vorn an.
-fn bind1(i: &mut Interp, f: NativeFn, arg: Value) -> Value {
+/// Ein natives mit einem GEBUNDENEN ersten Argument — der einzige Weg, einem
+/// Funktionszeiger Zustand mitzugeben. `generator.rs` braucht ihn fuer die
+/// zwei Behandler, mit denen ein `await` wieder anlaeuft.
+pub fn bind1(i: &mut Interp, f: NativeFn, arg: Value) -> Value {
     let target = native(Some(i.realm.function_proto.clone()), f, "", 1, false);
     Value::Obj(new_kind(Some(i.realm.function_proto.clone()), ObjKind::Bound {
         target, this_val: Value::Undefined, args: vec![arg] }))
@@ -214,7 +217,8 @@ fn finally_step(i: &mut Interp, a: &[Value], rejected: bool) -> C<Value> {
 }
 
 /// Ein Wert als Versprechen: ist er schon eines, bleibt er es.
-fn to_promise(i: &mut Interp, v: &Value) -> Gc {
+/// `PromiseResolve`: ein Versprechen bleibt es, alles andere wird eins.
+pub fn to_promise(i: &mut Interp, v: &Value) -> Gc {
     if let Value::Obj(o) = v {
         if pdata(o).is_some() { return o.clone(); }
     }

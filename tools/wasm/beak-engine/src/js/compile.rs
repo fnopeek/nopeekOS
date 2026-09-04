@@ -36,6 +36,26 @@ pub struct Compiler {
     loops: Vec<Loop>,
     /// Wieviele `PushEnv` gerade offen sind.
     depth: usize,
+    /// Uebersetzen wir gerade den Rumpf eines GENERATORS? Nur dort ist ein
+    /// `yield` ein `Op::Yield`; in einem Pfeil INNERHALB eines Generators
+    /// liest unser Parser `yield` ebenfalls als Yield-Ausdruck, und dessen
+    /// Rumpf ist ein eigener Chunk mit `in_gen == false` — der sagt hier nein
+    /// und faellt auf den Baumlaeufer zurueck, statt einen `Op::Yield` in
+    /// einen Rahmen zu legen, der ihn nicht anhalten kann.
+    in_gen: bool,
+    /// Uebersetzen wir gerade den Rumpf einer ASYNC-Funktion? Dieselbe
+    /// Ueberlegung wie bei `in_gen`: ein `await` im Rumpf eines gewoehnlichen
+    /// Pfeils darin ist ein eigener Chunk, der hier nein sagt.
+    in_async: bool,
+    /// Wieviele `finally` gerade anhaengig sind.
+    ///
+    /// Ein `yield` darunter ist ABGELEHNT, und zwar aus demselben Grund wie
+    /// `return` darunter: `gen.return()` an so einer Stelle muss den
+    /// Finalisierer noch fahren, und der Finalisierer wird hier KOPIERT statt
+    /// angesprungen — es gibt keine Stelle, an die ein zwischengespeicherter
+    /// Abschluss zurueckkaeme. Halb gebaut waere schlimmer als abgelehnt; im
+    /// Korpus kostet es 60 Dateien.
+    fin: usize,
 }
 
 /// Einen FUNKTIONSRUMPF uebersetzen.
@@ -45,10 +65,14 @@ pub struct Compiler {
 /// Parameter und `this` liegen schon in der Umgebung, die `Interp::call_env`
 /// gebaut hat — der Rumpf faengt beim ersten Statement an.
 pub fn function(f: &Func) -> CompileResult<Chunk> {
-    if f.is_generator || f.is_async {
-        return Err(Unsupported("generator-or-async"));
+    // Ein async-Generator ist BEIDES auf einmal: er haelt an `yield` UND an
+    // `await` an, und `next()` gibt ein Versprechen zurueck. Das ist eine
+    // eigene Runde, nicht die Summe der beiden — deshalb hier nein.
+    if f.is_async && f.is_generator {
+        return Err(Unsupported("async-generator"));
     }
-    let mut c = Compiler { chunk: Chunk::new(), loops: Vec::new(), depth: 0 };
+    let mut c = Compiler { chunk: Chunk::new(), loops: Vec::new(), depth: 0,
+                           in_gen: f.is_generator, in_async: f.is_async, fin: 0 };
     for st in &f.body {
         c.stmt_no_completion(st)?;
     }
@@ -60,7 +84,8 @@ pub fn function(f: &Func) -> CompileResult<Chunk> {
 
 /// Ein ganzes Programm uebersetzen. `Err` heisst: der Baumlaeufer macht es.
 pub fn program(prog: &Program) -> CompileResult<Chunk> {
-    let mut c = Compiler { chunk: Chunk::new(), loops: Vec::new(), depth: 0 };
+    let mut c = Compiler { chunk: Chunk::new(), loops: Vec::new(), depth: 0,
+                           in_gen: false, in_async: false, fin: 0 };
     // Hochziehen bleibt beim Baumlaeufer (`Interp::hoist`) — es arbeitet auf
     // der Umgebung, nicht auf dem Code, und ist damit fuer beide Maschinen
     // dasselbe. Hier nur der Rumpf.
@@ -273,8 +298,8 @@ impl Compiler {
         for st in body {
             match st {
                 Stmt::Func(f) => {
-                    if f.is_generator || f.is_async {
-                        return Err(Unsupported("generator-or-async"));
+                    if f.is_async && f.is_generator {
+                        return Err(Unsupported("async-generator"));
                     }
                     if let Some(n) = &f.name {
                         let name = self.chunk.name(n);
@@ -317,6 +342,16 @@ impl Compiler {
             || handler.as_ref().is_some_and(|h| Self::jumps_out(&h.body))) {
             return Err(Unsupported("finally-with-jump"));
         }
+        // Ein `yield` unter einem anhaengigen Finalisierer ist derselbe Fall
+        // wie ein `return` darunter — siehe `Compiler::fin`.
+        if finalizer.is_some() { self.fin += 1; }
+        let r = self.try_inner(block, handler, finalizer);
+        if finalizer.is_some() { self.fin -= 1; }
+        r
+    }
+
+    fn try_inner(&mut self, block: &[Stmt], handler: &Option<CatchClause>,
+                 finalizer: &Option<Vec<Stmt>>) -> CompileResult<()> {
         let start = self.chunk.emit(Op::TryStart { catch: u32::MAX, finally: u32::MAX });
         let depth0 = self.depth;
         let b = self.block_decls(block)?;
@@ -787,8 +822,8 @@ impl Compiler {
                             }
                         }
                         ObjPropValue::Method(f) => {
-                            if f.is_generator || f.is_async {
-                                return Err(Unsupported("generator-or-async"));
+                            if f.is_async && f.is_generator {
+                                return Err(Unsupported("async-generator"));
                             }
                             let k = self.prop_key(&p.key, p.computed)?;
                             let fi = self.chunk.func(f.clone());
@@ -799,8 +834,8 @@ impl Compiler {
                             }
                         }
                         ObjPropValue::Get(f) | ObjPropValue::Set(f) => {
-                            if f.is_generator || f.is_async {
-                                return Err(Unsupported("generator-or-async"));
+                            if f.is_async && f.is_generator {
+                                return Err(Unsupported("async-generator"));
                             }
                             let get = matches!(p.value, ObjPropValue::Get(_));
                             let k = self.prop_key(&p.key, p.computed)?;
@@ -837,8 +872,8 @@ impl Compiler {
             }
             Expr::Update { op, arg, prefix } => self.update(*op, arg, *prefix),
             Expr::Func(f) => {
-                if f.is_generator || f.is_async {
-                    return Err(Unsupported("generator-or-async"));
+                if f.is_async && f.is_generator {
+                    return Err(Unsupported("async-generator"));
                 }
                 let i = self.chunk.func(f.clone());
                 self.chunk.emit(Op::Closure(i));
@@ -853,8 +888,34 @@ impl Compiler {
             // schon abgelehnt; hier ist es der nackte Innenausdruck, genau wie
             // im Baumlaeufer.
             Expr::Spread(inner) => self.expr(inner),
-            Expr::Yield { .. } => Err(Unsupported("yield")),
-            Expr::Await(_) => Err(Unsupported("await")),
+            // **Anhalten.** Der Wert geht an `next()` heraus; was `next(v)`
+            // hereingibt, legt `Vm::send` an dieselbe Stelle des Stapels und
+            // ist damit der Wert dieses Ausdrucks.
+            Expr::Yield { arg, delegate } => {
+                if !self.in_gen { return Err(Unsupported("yield-outside-generator")) }
+                if *delegate { return Err(Unsupported("yield-delegate")) }
+                if self.fin > 0 { return Err(Unsupported("yield-in-finally")) }
+                match arg {
+                    Some(e) => self.expr(e)?,
+                    None => {
+                        let k = self.chunk.konst(Value::Undefined);
+                        self.chunk.emit(Op::Const(k));
+                    }
+                }
+                self.chunk.emit(Op::Yield);
+                Ok(())
+            }
+            // **Warten.** Kein `fin`-Verbot wie beim `yield`: eine wartende
+            // Funktion wird nur mit einem WERT oder einem WURF wieder
+            // angeworfen, und fuer beides gibt es den Weg schon (`send` und
+            // `unwind`). Ein `gen.return()`, das einen Finalisierer noch
+            // fahren muesste, gibt es hier nicht.
+            Expr::Await(inner) => {
+                if !self.in_async { return Err(Unsupported("await-outside-async")) }
+                self.expr(inner)?;
+                self.chunk.emit(Op::Await);
+                Ok(())
+            }
             Expr::MetaProp { .. } => Err(Unsupported("meta-prop")),
             Expr::ImportCall(_) => Err(Unsupported("import-call")),
         }

@@ -331,6 +331,10 @@ fn test262_exec() {
     let (mut vm_calls, mut vm_calls_slow) = (0u64, 0u64);
     let mut vm_calls_native = 0u64;
     let mut by_decline: BTreeMap<&'static str, u64> = BTreeMap::new();
+    // Und dieselbe Zaehlung fuer FUNKTIONSRUMPFE. Seit Generatoren und
+    // async/await eigene Maschinen bekommen, sagt ein Rumpf ab, ohne dass das
+    // Programm absagt — ohne diese Zeile waere die Absage unsichtbar.
+    let mut by_fdecline: BTreeMap<&'static str, u64> = BTreeMap::new();
 
     let hread = |f: &str| fs::read_to_string(harness.join(f)).unwrap_or_default();
     let mut hmap: std::collections::BTreeMap<String, String> = Default::default();
@@ -415,6 +419,7 @@ fn test262_exec() {
             let mut np = 0u128;
             let mut vm_seen = (0u64, 0u64, None);
             let mut calls_seen = (0u64, 0u64, 0u64);
+            let mut fdecl: Vec<(&'static str, u64)> = Vec::new();
             let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let tp = std::time::Instant::now();
                 let prog = match beak_engine::js::parse(&text, false) {
@@ -442,6 +447,8 @@ fn test262_exec() {
                             let (ca, cb) = (s.interp.vm_calls, s.interp.vm_calls_slow);
                             let cn = s.interp.vm_calls_native;
                             let r = s.run(&prog);
+                            fdecl = s.interp.func_declines.iter()
+                                .map(|(k, v)| (*k, *v)).collect();
                             vm_seen = (s.interp.vm_ran - a, s.interp.vm_declined - b,
                                        s.interp.vm_decline);
                             calls_seen = (s.interp.vm_calls - ca, s.interp.vm_calls_slow - cb,
@@ -452,6 +459,9 @@ fn test262_exec() {
                 };
                 r
             }));
+            for (k, n) in fdecl.drain(..) {
+                *by_fdecline.entry(k).or_insert(0) += n;
+            }
             vm_calls += calls_seen.0;
             vm_calls_slow += calls_seen.1;
             vm_calls_native += calls_seen.2;
@@ -519,8 +529,14 @@ fn test262_exec() {
             eprintln!("   JS-Aufrufe als RAHMEN: {vm_calls} von {ct} = {:.1} %  ({vm_calls_native} eingebaute daneben)",
                       100.0 * vm_calls as f64 / ct as f64);
         }
-        eprintln!("   Woran der Uebersetzer absagt:");
-        for (k, n) in d.iter().take(14) {
+        eprintln!("   Woran der Uebersetzer bei einem PROGRAMM absagt:");
+        for (k, n) in d.iter().take(12) {
+            eprintln!("      {n:6}  {k}");
+        }
+        let mut fd: Vec<(&&str, &u64)> = by_fdecline.iter().collect();
+        fd.sort_by(|a, b| b.1.cmp(a.1));
+        eprintln!("   … und bei einem FUNKTIONSRUMPF:");
+        for (k, n) in fd.iter().take(12) {
             eprintln!("      {n:6}  {k}");
         }
     }
