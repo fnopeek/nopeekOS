@@ -4813,7 +4813,19 @@ impl<'a> Ctx<'a> {
                     if let Some((_, prst)) = prev_row_el {
                         top = collapsed_edge(&top, &prst.border_bottom);
                     }
+                    // Auch im zusammengefassten Modell malt eine Zelle ihre
+                    // Schatten. Hier stand nur `insert_bg`, und damit fielen
+                    // sie weg — was genau die gestreifte Tabelle traf:
+                    // Bootstrap streift mit `box-shadow: inset`, und sein
+                    // Reboot setzt `border-collapse: collapse` auf JEDE
+                    // Tabelle. Beide Wege muessen dasselbe malen, sonst
+                    // haengt das Aussehen einer Zelle daran, welches
+                    // Randmodell die Seite gewaehlt hat.
+                    let mut inset = Vec::new();
+                    inset_shadow_ops(cs, *cell_x, y, *cell_w, row_h, &mut inset);
+                    self.insert_ops_at(bg_idx, inset);
                     self.insert_bg(cs, *cell_x, y, *cell_w, row_h, bg_idx);
+                    self.insert_shadow(cs, *cell_x, y, *cell_w, row_h, bg_idx);
                     // A collapsed border straddles the grid line: half of it
                     // falls in each of the two cells that meet there.
                     let half = |w: f32| (w / 2.0) as i32;
@@ -7821,7 +7833,30 @@ fn paint_control(
         }
     };
     match ctl.kind {
-        ControlKind::Checkbox | ControlKind::Radio => {
+        // Ein Radioknopf ist RUND, ein Kaestchen eckig. Das ist keine
+        // Geschmacksfrage: die Form IST die Bedeutung — rund heisst „eine aus
+        // dieser Gruppe", eckig heisst „unabhaengig an oder aus". Beide als
+        // Quadrat zu malen nimmt dem Benutzer die Auskunft, ob seine Wahl die
+        // anderen ausschliesst.
+        ControlKind::Radio => {
+            let r = [(w.min(h) as f32) / 2.0; 4];
+            if let Some(face) = face {
+                ops.push(DrawOp::RoundRect { x, y: top, w, h, r, color: face, ring: 0.0 });
+            }
+            bg_img(ops);
+            let bw = ctl.border[0].w.max(1) as f32;
+            ops.push(DrawOp::RoundRect { x, y: top, w, h, r, color: border, ring: bw });
+            if ctl.checked {
+                let i = (w / 4).max(2);
+                let (iw, ih) = (w - 2 * i, h - 2 * i);
+                ops.push(DrawOp::RoundRect {
+                    x: x + i, y: top + i, w: iw, h: ih,
+                    r: [(iw.min(ih) as f32) / 2.0; 4],
+                    color: theme.link.into(), ring: 0.0,
+                });
+            }
+        }
+        ControlKind::Checkbox => {
             if let Some(face) = face {
                 ops.push(DrawOp::Rect { x, y: top, w, h, color: face });
             }
