@@ -13,8 +13,15 @@
 // Das isoliert: was in einem Block schiefgeht, kann den naechsten nicht mehr
 // verschieben, und die Hoehe ist die des Blocks und nicht die seiner Nachbarn.
 fn main() {
-    let page = include_str!("../../../fixtures/components.html");
-    let css = include_str!("../assets/bootstrap.min.css");
+    // Zwei Vorlagen, dasselbe Werkzeug: `FIX=tailwind` prueft die
+    // Utility-Familien, ohne `FIX` die Bootstrap-Komponenten. Ein zweites
+    // Rahmenwerk belastet andere Ecken — und was BEIDE richtig malen, ist
+    // wahrscheinlich wirklich richtig.
+    let tw = std::env::var("FIX").is_ok_and(|f| f == "tailwind");
+    let page = if tw { include_str!("../../../fixtures/tailwind.html") }
+               else { include_str!("../../../fixtures/components.html") };
+    let css = if tw { include_str!("../assets/tailwind.css") }
+              else { include_str!("../assets/bootstrap.min.css") };
     let width: u32 = std::env::var("W").ok().and_then(|w| w.parse().ok()).unwrap_or(1902);
     let only = std::env::var("CMP").ok();
 
@@ -22,7 +29,7 @@ fn main() {
     // Rahmen um jeden Block, und ohne ihn misst man eine andere Seite.
     let own = between(page, "<style>", "</style>").unwrap_or_default();
 
-    println!("\n── Bootstrap-Komponenten einzeln, @{width}px ──\n");
+    println!("\n── {} einzeln, @{width}px ──\n", if tw { "Tailwind-Utilities" } else { "Bootstrap-Komponenten" });
     println!("   {:<16} {:>7}  {:>6}  {:>6}", "block", "hoehe", "ops", "links");
     let mut total = 0f32;
     for (id, body) in sections(page) {

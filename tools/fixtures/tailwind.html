@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tailwind-Utilities — nopeekOS Vorlage</title>
+<link rel="stylesheet" href="/tailwind.css">
+<!-- Same frame as the Bootstrap fixture, and for the same reason: every rule
+     here is one beak has had for months, so a block that looks wrong is
+     Tailwind's CSS meeting ours, never this. Nothing below touches a block's
+     inside. -->
+<style>
+  body { margin: 0; background: #fff; color: #111; }
+  .cmp { border-top: 4px solid #d0d0d0; margin: 0 0 32px 0; padding: 8px 12px 20px 12px; }
+  .cmp-h { font-family: monospace; font-size: 13px; font-weight: 700; color: #666;
+           margin: 0 0 12px 0; text-transform: uppercase; letter-spacing: 1px; }
+  .cmp-note { font-family: monospace; font-size: 12px; color: #999; margin: 6px 0 0 0; }
+</style>
+</head>
+<body>
+
+<!-- Tailwind is utility-first: there ARE no components to check, so the blocks
+     are utility FAMILIES. That is the axis on which a bug shows up — a broken
+     `gap-*` is broken everywhere, a broken `.card` only on cards.
+     Every class below was checked against the frozen sheet; a class the build
+     does not contain would test nothing at all. -->
+
+<section id="t-display" class="cmp">
+  <h2 class="cmp-h">display</h2>
+  <div class="block bg-gray-100 p-2">block</div>
+  <div><span class="inline bg-blue-200 p-1">inline</span><span class="inline-block bg-blue-300 p-1">inline-block</span></div>
+  <div class="flex bg-gray-100 p-2">flex<span class="ml-4">zweites Kind</span></div>
+  <div class="grid grid-cols-3 bg-gray-100 p-2"><span>grid</span><span>drei</span><span>Spalten</span></div>
+  <div class="hidden">DIESER TEXT DARF NICHT ZU SEHEN SEIN</div>
+</section>
+
+<section id="t-typography" class="cmp">
+  <h2 class="cmp-h">typography</h2>
+  <p class="text-xs">text-xs</p><p class="text-sm">text-sm</p><p class="text-base">text-base</p>
+  <p class="text-lg">text-lg</p><p class="text-xl">text-xl</p><p class="text-2xl">text-2xl</p>
+  <p class="text-3xl">text-3xl</p><p class="text-4xl">text-4xl</p><p class="text-5xl">text-5xl</p>
+  <p class="font-light">font-light</p><p class="font-normal">font-normal</p>
+  <p class="font-medium">font-medium</p><p class="font-bold">font-bold</p><p class="font-black">font-black</p>
+  <p class="font-mono">font-mono 0123</p>
+  <p class="italic">italic</p><p class="underline">underline</p><p class="uppercase">uppercase klein</p>
+  <p class="leading-tight">leading-tight — eine Zeile, und noch eine, damit der Abstand sichtbar wird.</p>
+  <p class="leading-loose">leading-loose — eine Zeile, und noch eine, damit der Abstand sichtbar wird.</p>
+  <p class="tracking-wide">tracking-wide</p>
+  <p class="text-center bg-gray-100">text-center</p>
+  <p class="text-right bg-gray-100">text-right</p>
+</section>
+
+<section id="t-colors" class="cmp">
+  <h2 class="cmp-h">colors</h2>
+  <div class="bg-black text-white p-2">bg-black / text-white</div>
+  <div class="bg-gray-50 p-2">bg-gray-50</div>
+  <div class="bg-gray-200 p-2">bg-gray-200</div>
+  <div class="bg-gray-600 text-white p-2">bg-gray-600</div>
+  <div class="bg-blue-200 p-2">bg-blue-200</div>
+  <div class="bg-blue-500 text-white p-2">bg-blue-500</div>
+  <div class="bg-blue-600 text-white p-2">bg-blue-600</div>
+  <p class="text-blue-600">text-blue-600</p>
+  <p class="text-gray-600">text-gray-600</p>
+</section>
+
+<section id="t-spacing" class="cmp">
+  <h2 class="cmp-h">spacing</h2>
+  <div class="flex gap-2 items-start">
+    <div class="bg-gray-200"><div class="bg-blue-300 p-0">p-0</div></div>
+    <div class="bg-gray-200"><div class="bg-blue-300 p-1">p-1</div></div>
+    <div class="bg-gray-200"><div class="bg-blue-300 p-2">p-2</div></div>
+    <div class="bg-gray-200"><div class="bg-blue-300 p-4">p-4</div></div>
+    <div class="bg-gray-200"><div class="bg-blue-300 p-8">p-8</div></div>
+  </div>
+  <div class="bg-gray-100 mt-4"><div class="bg-blue-300 m-4">m-4 im grauen Kasten</div></div>
+  <div class="bg-gray-100 mt-4"><div class="bg-blue-300 px-8 py-1">px-8 py-1</div></div>
+</section>
+
+<section id="t-sizing" class="cmp">
+  <h2 class="cmp-h">sizing</h2>
+  <div class="bg-blue-300 w-32 mb-1">w-32</div>
+  <div class="bg-blue-400 w-64 mb-1">w-64</div>
+  <div class="bg-blue-500 w-full text-white mb-1">w-full</div>
+  <div class="bg-gray-200 max-w-md mb-1">max-w-md</div>
+  <div class="flex gap-2 items-start">
+    <div class="bg-blue-300 h-16 w-16">h-16</div>
+    <div class="bg-blue-400 h-32 w-16">h-32</div>
+  </div>
+</section>
+
+<section id="t-flex" class="cmp">
+  <h2 class="cmp-h">flexbox</h2>
+  <div class="flex justify-between bg-gray-100 p-2 mb-2">
+    <div class="bg-blue-300 p-1">links</div><div class="bg-blue-300 p-1">rechts</div></div>
+  <div class="flex justify-center gap-4 bg-gray-100 p-2 mb-2">
+    <div class="bg-blue-300 p-1">A</div><div class="bg-blue-300 p-1">B</div>
+    <div class="bg-blue-300 p-1">C</div></div>
+  <div class="flex items-center bg-gray-100 p-2 mb-2 h-24">
+    <div class="bg-blue-300 p-1">mittig senkrecht</div></div>
+  <div class="flex flex-col bg-gray-100 p-2 mb-2 h-32">
+    <div class="bg-blue-300 p-1">oben</div><div class="bg-blue-400 p-1 mt-auto">mt-auto</div></div>
+  <div class="flex gap-2 bg-gray-100 p-2">
+    <div class="bg-blue-300 p-1 grow">grow</div><div class="bg-blue-400 p-1">fest</div></div>
+</section>
+
+<section id="t-grid" class="cmp">
+  <h2 class="cmp-h">grid</h2>
+  <div class="grid grid-cols-3 gap-2 mb-2">
+    <div class="bg-blue-300 p-2">1</div><div class="bg-blue-300 p-2">2</div><div class="bg-blue-300 p-2">3</div>
+    <div class="bg-blue-400 p-2">4</div><div class="bg-blue-400 p-2">5</div><div class="bg-blue-400 p-2">6</div>
+  </div>
+  <div class="grid grid-cols-4 gap-2 mb-2">
+    <div class="bg-gray-200 p-2 col-span-2">col-span-2</div>
+    <div class="bg-gray-200 p-2">1</div><div class="bg-gray-200 p-2">1</div>
+  </div>
+  <div class="grid grid-cols-6 gap-1">
+    <div class="bg-blue-200 p-1 col-span-6">col-span-6</div>
+    <div class="bg-blue-300 p-1 col-span-3">3</div><div class="bg-blue-300 p-1 col-span-3">3</div>
+  </div>
+</section>
+
+<section id="t-borders" class="cmp">
+  <h2 class="cmp-h">borders + radius</h2>
+  <div class="flex gap-3 flex-wrap items-start">
+    <div class="border p-2">border</div>
+    <div class="border-2 border-blue-500 p-2">border-2 blue</div>
+    <div class="border-4 p-2">border-4</div>
+    <div class="border rounded p-2">rounded</div>
+    <div class="border rounded-lg p-2">rounded-lg</div>
+    <div class="border rounded-xl p-2">rounded-xl</div>
+    <div class="border rounded-full p-2 px-4">rounded-full</div>
+    <div class="border rounded-t p-2">rounded-t</div>
+    <div class="ring-2 ring-blue-500 p-2">ring-2</div>
+  </div>
+</section>
+
+<section id="t-shadow" class="cmp">
+  <h2 class="cmp-h">shadow</h2>
+  <div class="flex gap-6 flex-wrap p-4">
+    <div class="shadow-xs p-3 bg-white">xs</div>
+    <div class="shadow-sm p-3 bg-white">sm</div>
+    <div class="shadow p-3 bg-white">shadow</div>
+    <div class="shadow-md p-3 bg-white">md</div>
+    <div class="shadow-lg p-3 bg-white">lg</div>
+    <div class="shadow-xl p-3 bg-white">xl</div>
+    <div class="shadow-2xl p-3 bg-white">2xl</div>
+    <div class="shadow-inner p-3 bg-white">inner</div>
+  </div>
+</section>
+
+<section id="t-position" class="cmp">
+  <h2 class="cmp-h">position</h2>
+  <div class="relative bg-gray-100 h-32">
+    <div class="absolute inset-0 bg-blue-200 opacity-50">inset-0</div>
+    <div class="absolute top-2 left-2 bg-blue-500 text-white p-1 z-10">top-2 left-2 z-10</div>
+  </div>
+</section>
+
+<section id="t-opacity" class="cmp">
+  <h2 class="cmp-h">opacity + filter</h2>
+  <div class="flex gap-3">
+    <div class="bg-blue-500 text-white p-3 opacity-100">100</div>
+    <div class="bg-blue-500 text-white p-3 opacity-75">75</div>
+    <div class="bg-blue-500 text-white p-3 opacity-50">50</div>
+    <div class="bg-blue-500 text-white p-3 opacity-25">25</div>
+    <div class="bg-blue-500 text-white p-3 blur-sm">blur-sm</div>
+    <div class="bg-blue-500 text-white p-3 grayscale">grayscale</div>
+  </div>
+</section>
+
+<section id="t-transform" class="cmp">
+  <h2 class="cmp-h">transform</h2>
+  <div class="flex gap-8 items-center h-24">
+    <div class="bg-blue-300 p-2 rotate-45">rotate-45</div>
+    <div class="bg-blue-300 p-2 scale-75">scale-75</div>
+    <div class="bg-blue-300 p-2 scale-125">scale-125</div>
+    <div class="bg-blue-300 p-2 translate-x-4">translate-x-4</div>
+  </div>
+  <p class="cmp-note">Drehung und Skalierung sind gemessen NICHT gebaut — hier steht,
+     ob sie wenigstens nichts kaputtmachen.</p>
+</section>
+
+<section id="t-overflow" class="cmp">
+  <h2 class="cmp-h">overflow + truncate</h2>
+  <div class="overflow-hidden h-16 w-64 bg-gray-100">
+    Ein Text, der laenger ist als der Kasten hoch, damit der Rest abgeschnitten
+    wird. Zeile zwei. Zeile drei. Zeile vier. Zeile fuenf.</div>
+  <div class="truncate w-64 bg-gray-100 mt-2">truncate: eine sehr lange Zeile, die nicht passt</div>
+</section>
+
+<section id="t-responsive" class="cmp">
+  <h2 class="cmp-h">responsive</h2>
+  <div class="bg-gray-200 lg:bg-white lg:border-l lg:border-t p-2">
+    lg:bg-white — bei 1902 px muss dieser Kasten WEISS sein und links/oben einen Rahmen haben</div>
+  <p class="cmp-note">Der Haltepunkt ist der Punkt: eine Medienabfrage, die nicht
+     ausgewertet wird, faellt hier sofort auf.</p>
+</section>
+
+<section id="t-end" class="cmp">
+  <h2 class="cmp-h">ende</h2>
+  <p class="cmp-note">Wenn dieser Block da ist, ist die Seite ganz durchgelaufen.</p>
+</section>
+
+</body>
+</html>

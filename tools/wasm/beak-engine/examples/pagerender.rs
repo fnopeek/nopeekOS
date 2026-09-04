@@ -7,7 +7,11 @@
 fn main() {
     let base = std::env::var("PAGE").expect("PAGE=<pfad ohne .html>");
     let html = std::fs::read_to_string(format!("{base}.html")).expect("html");
-    let css = std::fs::read_to_string(format!("{base}.css")).unwrap_or_default();
+    // `CSSFILE=` fuer eine Vorlage, deren Blatt nicht neben ihr liegt.
+    let css = match std::env::var("CSSFILE") {
+        Ok(f) => std::fs::read_to_string(f).expect("css"),
+        Err(_) => std::fs::read_to_string(format!("{base}.css")).unwrap_or_default(),
+    };
     let width: u32 = std::env::var("W").ok().and_then(|w| w.parse().ok()).unwrap_or(1902);
     let out = std::env::var("OUT").unwrap_or_else(|_| "page.bmp".into());
     use beak_engine::layout::{Rgb, Theme};

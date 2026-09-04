@@ -1270,6 +1270,27 @@ impl Layers {
 pub type Matched<'a> = (u16, u32, u32, &'a [(Prop, String)], &'a [(Prop, String)],
                         &'a [(String, String)], &'a [(String, String)]);
 
+/// Der Anfangswert einer mit `@property` angemeldeten Custom Property.
+///
+/// **Warum das kein Randfall ist.** Tailwind v4 legt seine Schatten als
+/// Liste von Platzhaltern an:
+///
+///     box-shadow: var(--tw-inset-shadow), … , var(--tw-shadow)
+///
+/// und meldet jeden Platzhalter mit `@property --tw-shadow{initial-value:
+/// 0 0 #0000}` an. Die Ersatzdeklarationen daneben stehen in einem
+/// `@supports`, das nur in aelteren Browsern gilt. Ohne `@property` hat also
+/// KEINE dieser Variablen einen Wert, das `var()` bleibt stehen, die
+/// Deklaration ist ungueltig — und auf einer Tailwind-Seite hat nichts einen
+/// Schatten.
+///
+/// **Vereinfachung, benannt:** `inherits: false` wird nicht beachtet. Die
+/// Anfangswerte werden auf der Wurzel gesetzt und vererben sich damit nach
+/// unten. Fuer die Platzhalter, um die es geht, ist das dasselbe; fuer eine
+/// Eigenschaft, die ein Vorfahre setzt und ein Nachfahre NICHT erben soll,
+/// waere es zu grosszuegig.
+pub type Registered = alloc::vec::Vec<(String, String)>;
+
 /// A parsed author stylesheet.
 ///
 /// Rules are also indexed by the most selective simple selector in each
@@ -1282,6 +1303,8 @@ pub type Matched<'a> = (u16, u32, u32, &'a [(Prop, String)], &'a [(Prop, String)
 /// interpreter on the device that was 13 of the 14.6 seconds to first paint.
 pub struct Stylesheet {
     rules: Vec<Rule>,
+    /// Anfangswerte aus `@property` — siehe [`Registered`].
+    pub registered: Registered,
     /// Selectors targeting real elements.
     normal: Index,
     /// Selectors ending in `::before`/`::after`, kept apart because the
@@ -1454,6 +1477,7 @@ impl Stylesheet {
     pub fn empty() -> Stylesheet {
         Stylesheet {
             rules: Vec::new(),
+            registered: Registered::new(),
             normal: Index::default(),
             pseudo: Index::default(),
             hover_set: HoverSet::default(),
@@ -1702,7 +1726,8 @@ pub fn parse(css: &str) -> Stylesheet {
     let mut rules = Vec::new();
     let mut order = 0u32;
     let mut layers = Layers::default();
-    parse_into(&css, 0, css.len(), None, &mut rules, &mut order, "", &mut layers);
+    let mut registered: Registered = Registered::new();
+    parse_into(&css, 0, css.len(), None, &mut rules, &mut order, "", &mut layers, &mut registered);
     // Ids became positions only now that every layer is known.
     if !layers.names.is_empty() {
         let rank = layers.ranks();
@@ -1737,6 +1762,7 @@ pub fn parse(css: &str) -> Stylesheet {
     }
     let mut sheet = Stylesheet {
         rules,
+        registered,
         normal: Index::default(),
         pseudo: Index::default(),
         hover_set,
@@ -1760,6 +1786,7 @@ fn parse_into(
     order: &mut u32,
     layer: &str,
     layers: &mut Layers,
+    registered: &mut Registered,
 ) {
     let bytes = css.as_bytes();
     let mut i = start;
@@ -1787,7 +1814,7 @@ fn parse_into(
                 }
                 let conds = parse_media_query(&css[j..k]);
                 let close = matching_brace(bytes, k, end);
-                parse_into(css, k + 1, close, Some(&conds), rules, order, layer, layers);
+                parse_into(css, k + 1, close, Some(&conds), rules, order, layer, layers, registered);
                 i = (close + 1).min(end);
             } else if css[i + 1..j].eq_ignore_ascii_case("supports") {
                 // Descend into `@supports` when the condition holds; else skip
@@ -1802,7 +1829,28 @@ fn parse_into(
                 }
                 let close = matching_brace(bytes, k, end);
                 if supports_cond(&css[j..k]) {
-                    parse_into(css, k + 1, close, media, rules, order, layer, layers);
+                    parse_into(css, k + 1, close, media, rules, order, layer, layers, registered);
+                }
+                i = (close + 1).min(end);
+            } else if css[i + 1..j].eq_ignore_ascii_case("property") {
+                // `@property --name { … initial-value: V … }` — der Wert, den
+                // die Eigenschaft hat, bevor irgendetwas sie setzt.
+                let mut k = j;
+                while k < end && bytes[k] != b'{' && bytes[k] != b';' {
+                    k += 1;
+                }
+                if k >= end || bytes[k] == b';' {
+                    i = (k + 1).min(end);
+                    continue;
+                }
+                let close = matching_brace(bytes, k, end);
+                let name = css[j..k].trim();
+                if name.starts_with("--") {
+                    for (p, v) in parse_decls(&css[k + 1..close]) {
+                        if p.eq_ignore_ascii_case("initial-value") {
+                            registered.push((String::from(name), v));
+                        }
+                    }
                 }
                 i = (close + 1).min(end);
             } else if css[i + 1..j].eq_ignore_ascii_case("layer") {
@@ -1833,7 +1881,7 @@ fn parse_into(
                     (layers.id(&full), full)
                 };
                 let close = matching_brace(bytes, k, end);
-                parse_into(css, k + 1, close, media, rules, order, &full, layers);
+                parse_into(css, k + 1, close, media, rules, order, &full, layers, registered);
                 let _ = id;
                 i = (close + 1).min(end);
             } else {
@@ -2112,6 +2160,18 @@ pub fn media_matches(prelude: &str, m: Media) -> bool {
 /// A media-feature `<length>` — px only (Bootstrap/WP breakpoints are all px).
 fn parse_px(v: &str) -> Option<f32> {
     let v = v.trim();
+    // **`em` und `rem` in einer Medienabfrage sind 16 px** — beide beziehen
+    // sich auf den ANFANGSWERT von `font-size`, nicht auf das Wurzelelement
+    // (media-queries-4 §1.3). Das ist keine Feinheit: Tailwind v4 schreibt
+    // JEDEN Haltepunkt so (`@media (min-width:64rem)`), und ohne diese vier
+    // Zeilen ist auf einer Tailwind-Seite jede responsive Klasse tot — sie
+    // fiel einfach nie an.
+    const INITIAL_FONT_PX: f32 = 16.0;
+    for u in ["rem", "em"] {
+        if let Some(n) = v.strip_suffix(u) {
+            return n.trim().parse::<f32>().ok().map(|f| f * INITIAL_FONT_PX);
+        }
+    }
     v.strip_suffix("px").unwrap_or(v).trim().parse::<f32>().ok()
 }
 
