@@ -121,6 +121,12 @@ pub struct Realm {
     /// Iteratoren. Er traegt `[Symbol.iterator]() { return this }`, und genau
     /// daran haengt, dass ein Iterator selbst wieder iterierbar ist.
     pub iterator_proto: Gc,
+    /// `%GeneratorPrototype%` (`next`/`return`/`throw`) und
+    /// `%GeneratorFunction.prototype%`. Sie liegen im Realm, weil eingebaute
+    /// Funktionen Zeiger sind und keine Abschluesse — sie koennen den
+    /// Prototyp nicht einfangen.
+    pub generator_proto: Gc,
+    pub generator_func_proto: Gc,
     pub array_iter_proto: Gc,
     pub string_iter_proto: Gc,
     pub promise_proto: Gc,
@@ -147,7 +153,8 @@ impl Realm {
             self.element_proto.clone(), self.text_proto.clone(), self.document_proto.clone(),
             self.event_proto.clone(), self.token_list_proto.clone(), self.style_proto.clone(),
             self.comment_proto.clone(), self.regexp_proto.clone(), self.symbol_proto.clone(),
-            self.iterator_proto.clone(), self.array_iter_proto.clone(),
+            self.iterator_proto.clone(), self.generator_proto.clone(),
+            self.generator_func_proto.clone(), self.array_iter_proto.clone(),
             self.string_iter_proto.clone(), self.promise_proto.clone(),
             self.html_element_proto.clone(), self.svg_element_proto.clone(),
             self.fragment_proto.clone(), self.url_proto.clone(), self.url_params_proto.clone(),
@@ -251,6 +258,14 @@ pub struct Interp {
     /// werden. `None` heisst „schon versucht, geht nicht" — auch das gehoert
     /// gemerkt, sonst uebersetzt eine Schleife bei jedem Umlauf vergeblich.
     pub func_chunks: HashMap<usize, Option<Rc<super::code::Chunk>>>,
+    /// Woran der Uebersetzer bei einem FUNKTIONSRUMPF absagt, je Grund.
+    ///
+    /// Die Programm-Absagen (`vm_decline`) waren bis Stufe 4 die ganze
+    /// Rangliste — und sind es seitdem nicht mehr: ein Generator- oder
+    /// async-Rumpf sagt ab, ohne dass das Programm darum absagt, und die
+    /// Absage war damit UNSICHTBAR. Eine Rangfolge, die den halben Korpus
+    /// nicht sieht, ist keine.
+    pub func_declines: HashMap<&'static str, u64>,
     /// Aufrufe, die als RAHMEN liefen, und solche, die ueber den Rust-Stapel
     /// mussten. Die zweite Zahl ist das, was Stufe 4 (Anhalten) noch im Weg
     /// steht: was ueber Rust laeuft, kann nicht stehenbleiben.
@@ -349,7 +364,7 @@ impl Interp {
                  fake_now: 0.0, doc: None, next_sym: 0, sym_registry: HashMap::new(),
                  cookies: String::new(), cookie_sets: Vec::new(), style_ctx: None,
                  vm_ran: 0, vm_declined: 0, vm_decline: None, vm_off: false,
-                 func_chunks: HashMap::new(), vm_calls: 0, vm_calls_native: 0, vm_calls_slow: 0,
+                 func_chunks: HashMap::new(), func_declines: HashMap::new(), vm_calls: 0, vm_calls_native: 0, vm_calls_slow: 0,
                  geometry: None,
                  live_dom: core::cell::RefCell::new(None),
                  jobs: alloc::collections::VecDeque::new(),
@@ -432,6 +447,13 @@ impl Interp {
                         env_stack.push(d.env.clone());
                         if let Some(Value::Obj(x)) = &d.this_val { objs.push(x.clone()); }
                         if let Some(h) = &d.home_object { objs.push(h.clone()); }
+                    }
+                    // Ein angehaltener Generator haelt seine Umgebungen und
+                    // halbfertige Werte in seiner Maschine fest. Sie stehen
+                    // sonst in keiner Eigenschaft und in keiner Bindung — wer
+                    // sie hier auslaesst, laesst einen Rc-Ring stehen.
+                    ObjKind::Generator(g) => {
+                        g.roots(&mut objs, &mut env_stack);
                     }
                     ObjKind::Bound { target, this_val, args } => {
                         objs.push(target.clone());
@@ -916,12 +938,26 @@ impl Interp {
                 self.call(&Value::Obj(t), bt, &ba)
             }
             Which::Js(d) => {
-                let env = self.call_env(&d, this_val, args)?;
-                match self.run_body(&d.node.body, &env) {
-                    Ok(()) => Ok(Value::Undefined),
-                    Err(Abrupt::Return(v)) => Ok(v),
-                    Err(e) => Err(e),
+                // **Ein Generator laeuft seinen Rumpf hier NICHT.** Der Aufruf
+                // baut ein Objekt, und der Rumpf faengt erst beim ersten
+                // `next()` an — auf einer eigenen Maschine. Das ist die
+                // einzige Stelle, an der ein Generatorobjekt entsteht; die
+                // Befehlsmaschine schickt ihre Aufrufe absichtlich hierher.
+                if d.node.is_generator && !d.node.is_async {
+                    if let Some(v) = super::generator::make(self, f, &d, this_val.clone(), args)? {
+                        return Ok(v);
+                    }
                 }
+                // Und eine async-Funktion gibt ein VERSPRECHEN zurueck. Ihr
+                // Rumpf laeuft bis zum ersten `await` sofort weiter, dann
+                // haelt er an — dieselbe Maschine, nur wirft ihn die
+                // Microtask-Schlange wieder an.
+                if d.node.is_async && !d.node.is_generator {
+                    if let Some(v) = super::generator::make_async(self, &d, this_val.clone(), args)? {
+                        return Ok(v);
+                    }
+                }
+                self.run_js_body(&d, this_val, args)
             }
         }
     }
@@ -950,6 +986,22 @@ impl Interp {
         Ok(env)
     }
 
+    /// Einen Funktionsrumpf mit dem BAUMLAEUFER fahren — der Weg, den ein
+    /// Aufruf nimmt, wenn der Uebersetzer den Rumpf nicht kann.
+    ///
+    /// Eigene Funktion, weil `generator.rs` sie fuer denselben Fall braucht:
+    /// eine async-Funktion mit unuebersetzbarem Rumpf muss trotzdem ein
+    /// VERSPRECHEN zurueckgeben, und dafuer muss jemand den Rumpf fahren und
+    /// den Ausgang einsammeln.
+    pub fn run_js_body(&mut self, d: &Rc<FuncData>, this_val: Value, args: &[Value]) -> C<Value> {
+        let env = self.call_env(d, this_val, args)?;
+        match self.run_body(&d.node.body, &env) {
+            Ok(()) => Ok(Value::Undefined),
+            Err(Abrupt::Return(v)) => Ok(v),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Das Hochziehen eines Funktionsrumpfes — `var` und Funktionen nach vorn.
     /// Fuer die Maschine, die den Rumpf danach als Befehle faehrt.
     pub fn hoist_body(&mut self, body: &[Stmt], env: &Rc<RefCell<Env>>) -> C<()> {
@@ -966,7 +1018,13 @@ impl Interp {
         if let Some(c) = self.func_chunks.get(&key) {
             return c.clone();
         }
-        let c = super::compile::function(f).ok().map(Rc::new);
+        let c = match super::compile::function(f) {
+            Ok(ch) => Some(Rc::new(ch)),
+            Err(u) => {
+                *self.func_declines.entry(u.0).or_insert(0) += 1;
+                None
+            }
+        };
         self.func_chunks.insert(key, c.clone());
         c
     }
@@ -1287,7 +1345,15 @@ impl Interp {
     /// zwischen einer Funktion und einer Methode, und `super` haengt daran.
     pub fn make_method(&mut self, f: Rc<Func>, env: &Rc<RefCell<Env>>, this_val: Option<Value>,
                        home: Option<Gc>) -> Value {
-        let g = new_kind(Some(self.realm.function_proto.clone()),
+        // Eine Generatorfunktion haengt unter `%GeneratorFunction.prototype%`,
+        // nicht unter `Function.prototype` — daran haengen `f.constructor` und
+        // der `toStringTag`, und beides wird gemessen.
+        let fproto = if f.is_generator && !f.is_async {
+            self.realm.generator_func_proto.clone()
+        } else {
+            self.realm.function_proto.clone()
+        };
+        let g = new_kind(Some(fproto),
             ObjKind::Function(Rc::new(FuncData {
                 node: f.clone(), env: env.clone(), this_val, home_object: home,
             })));
@@ -1302,9 +1368,23 @@ impl Interp {
         // Ein Pfeil hat kein `prototype` — er kann nicht als Konstruktor
         // dienen, und ein vorhandenes `prototype` waere ein sichtbarer
         // Unterschied zu jedem echten Motor.
-        if !f.is_arrow {
-            let proto = new_obj(Some(self.realm.object_proto.clone()));
-            proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(g.clone())));
+        // Eine async-Funktion hat KEIN `prototype` — sie ist kein Konstruktor,
+        // und ein vorhandenes waere ein sichtbarer Unterschied zu jedem echten
+        // Motor. (Ein async-Generator hat eins; den bauen wir nicht.)
+        if !f.is_arrow && !(f.is_async && !f.is_generator) {
+            // Das `prototype` einer Generatorfunktion haengt unter
+            // `%GeneratorPrototype%` und traegt KEIN `constructor` — von dort
+            // erbt das Generatorobjekt `next`/`return`/`throw`. Eine
+            // gewoehnliche Funktion bekommt das gewohnte Paar.
+            let is_gen = f.is_generator && !f.is_async;
+            let proto = new_obj(Some(if is_gen {
+                self.realm.generator_proto.clone()
+            } else {
+                self.realm.object_proto.clone()
+            }));
+            if !is_gen {
+                proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(g.clone())));
+            }
             g.borrow_mut().define("prototype", Prop {
                 value: Some(Value::Obj(proto)), get: None, set: None,
                 writable: true, enumerable: false, configurable: false });

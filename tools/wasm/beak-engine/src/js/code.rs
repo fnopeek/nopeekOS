@@ -159,6 +159,24 @@ pub enum Op {
     IterClose,
     /// Aus dem Rahmen zurueck; oben liegt der Wert.
     Ret,
+    /// **Anhalten.** Oben liegt der Wert, den `next()` zurueckgibt; der Rahmen
+    /// bleibt stehen, wo er steht.
+    ///
+    /// Beim Wiederaufnehmen legt `Vm::send` den Wert von `next(v)` an genau
+    /// dieselbe Stelle des Stapels — und der ist der Wert des
+    /// `yield`-Ausdrucks. Mehr ist ein `yield` nicht: der halbe Ausdruck
+    /// darunter (`a + (yield 1)` hat `a` liegen) steht im Wertestapel des
+    /// Rahmens und ueberlebt das Anhalten, weil er ein FELD ist und kein
+    /// Rust-Stapel. Das ist die ganze Begruendung des Umbaus, eingeloest.
+    Yield,
+    /// **Warten.** Oben liegt das Erwartete; die Maschine haelt an, und was
+    /// sie wieder anwirft, ist die Aufloesung des Versprechens.
+    ///
+    /// Derselbe Mechanismus wie `Yield` — nur legt sich hier ein Versprechen
+    /// davor, und das Wiederaufnehmen kommt aus der Microtask-Schlange statt
+    /// von einem `next()`. Genau das meinte der Bauplan mit „`async`/`await`
+    /// ist derselbe Mechanismus mit einem Promise davor".
+    Await,
     /// Eine Umgebung fuer einen Block oeffnen — mit den Bindungen, die dort
     /// HOCHGEZOGEN gehoeren (`blocks[i]`). Ohne sie steht `let` erst ab seiner
     /// Zeile, statt von Blockanfang an in der zeitlichen Totzone, und eine

@@ -12,10 +12,32 @@
 //! statt zu rufen, waere eine zweite Semantik, und die laeuft still
 //! auseinander.
 //!
-//! **Stand dieser Stufe.** Aufrufe gehen weiter durch `Interp::call`, also
-//! ueber den Rust-Stapel; ein Rahmen je JS-Funktion kommt in der naechsten
-//! Stufe. Diese hier baut den Rahmenstapel und beweist mit test262, dass die
-//! Bedeutung sich nicht bewegt hat — die Zahl darf sich NICHT aendern.
+//! **Stufe 4 und ihre Entwurfsfrage.** Sie lautete: ein Generator, der von
+//! einem EINGEBAUTEN gerufen wird (`[...gen]`, `Array.from(gen)`), sitzt unter
+//! einem Rust-Rahmen — dort kann er nicht anhalten. Die Antwort ist, die
+//! Voraussetzung der Frage zu streichen:
+//!
+//! **Ein Generator ist keine Rahmen in fremder Maschine, er ist eine EIGENE.**
+//! Jedes Generatorobjekt haelt seine `Vm` mit genau einem Wurzelrahmen. Ein
+//! `yield` muss deshalb nie ueber einen Rust-Rahmen zurueck — zwischen dem
+//! `yield` und dem `Vm::resume`, das darauf wartet, liegt keiner:
+//!
+//!     Array.from                (Rust)
+//!       Interp::call(gen.next)  (Rust)
+//!         next                  (Rust)
+//!           Vm::resume          ← die EIGENE Maschine des Generators
+//!             Frame(rumpf) ip=17 … Op::Yield → zurueck mit „angehalten"
+//!
+//! Ein `next()` kostet damit EINEN Rust-Rahmen, nicht einen je `yield`. Und
+//! weil das so ist, ist es voellig gleichgueltig, wer ruft: der Baumlaeufer,
+//! ein Eingebautes, `Op::Call` einer anderen Maschine oder ein zweiter
+//! Generator. Niemand muss etwas dazulernen, es gibt keinen eifrigen
+//! Rueckfall und keine Falle mit unendlichen Generatoren.
+//!
+//! Ein `yield` steht immer im Rumpf des Generators SELBST (in einer inneren
+//! Funktion waere es deren eigenes), und ein Aufruf von dort muss
+//! zurueckkehren, bevor es weitergeht — beim `Op::Yield` ist der Wurzelrahmen
+//! also der einzige. Deshalb reicht ein Wurzelrahmen je Maschine.
 
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -41,6 +63,14 @@ struct Frame {
     /// Ist das der Rahmen eines PROGRAMMS? Dessen Wert ist sein letzter
     /// Ausdruckswert, der einer Funktion ihr `return`.
     is_program: bool,
+    /// Der UNTERSTE Rahmen dieser Maschine. Ein Wurf sucht darueber hinaus
+    /// keinen Behandler mehr, ein `Ret` beendet den Lauf, und die Aufruftiefe
+    /// wird nicht mitgezaehlt — dieser Rahmen gehoert nicht dem Rufer.
+    ///
+    /// Getrennt von `is_program`, weil ein Generatorrumpf zwar Wurzel ist,
+    /// aber KEINEN Abschlusswert hat: ein `{ x = 1; }` in ihm setzt
+    /// `SetCompletion`, und das duerfte sein `return` nicht ueberschreiben.
+    root: bool,
     /// Offene `for…of`-Iteratoren. Sie stehen HIER und nicht auf dem
     /// Wertestapel: ein `break` oder ein Wurf mitten in der Schleife muesste
     /// sie sonst einzeln wegraeumen, und das ist genau die Buchhaltung, an
@@ -57,6 +87,26 @@ struct Handler {
     stack: usize,
     envs: usize,
     iters: usize,
+}
+
+/// Wie ein Lauf geendet hat.
+pub enum Step {
+    /// Der Wurzelrahmen ist zurueck.
+    Done(Value),
+    /// `yield` — die Maschine steht und laesst sich wieder aufnehmen.
+    Yield(Value),
+    /// `await` — dasselbe Anhalten, nur wartet hier ein Versprechen darauf,
+    /// sie wieder anzuwerfen, statt eines `next()`.
+    Await(Value),
+}
+
+/// Wie ein einzelner Befehl ausgegangen ist.
+enum Flow {
+    /// Weiter zum naechsten.
+    Go,
+    Done(Value),
+    Yield(Value),
+    Await(Value),
 }
 
 pub struct Vm {
@@ -76,14 +126,90 @@ impl Vm {
     /// weil es auf der UMGEBUNG arbeitet und fuer beide Maschinen dasselbe ist.
     pub fn run(&mut self, i: &mut Interp, chunk: Rc<Chunk>, env: &Rc<RefCell<Env>>) -> C<Value> {
         self.frames.push(Frame { chunk, ip: 0, envs: alloc::vec![env.clone()], base: 0,
-                                 is_program: true, handlers: Vec::new(), iters: Vec::new() });
+                                 is_program: true, root: true,
+                                 handlers: Vec::new(), iters: Vec::new() });
+        match self.drive(i)? {
+            Step::Done(v) => Ok(v),
+            // Ein Programmrumpf wird mit `in_gen == false` uebersetzt; ein
+            // `Op::Yield` kann darin nicht stehen. Kein `panic!`: ein Absturz
+            // der Maschine ist in einem Kernel keine Fehlermeldung.
+            Step::Yield(_) => Err(i.throw_kind("TypeError", "yield outside a generator")),
+            Step::Await(_) => Err(i.throw_kind("TypeError", "await outside an async function")),
+        }
+    }
+
+    /// Eine Maschine fuer einen GENERATOR- oder ASYNC-RUMPF: ein einziger
+    /// Wurzelrahmen,
+    /// noch nichts gelaufen. Die Umgebung hat `Interp::call_env` gebaut —
+    /// Parameter und `this` stehen beim AUFRUF fest, der Rumpf laeuft erst
+    /// beim ersten `next()`. Genau diese Reihenfolge verlangt die Spec.
+    pub fn for_generator(chunk: Rc<Chunk>, env: &Rc<RefCell<Env>>) -> Vm {
+        let mut vm = Vm::new();
+        vm.frames.push(Frame { chunk, ip: 0, envs: alloc::vec![env.clone()], base: 0,
+                               is_program: false, root: true,
+                               handlers: Vec::new(), iters: Vec::new() });
+        vm
+    }
+
+    /// Den Wert von `next(v)` an die Stelle legen, an der `Op::Yield` seinen
+    /// abgegeben hat — er ist der Wert des `yield`-Ausdrucks.
+    pub fn send(&mut self, v: Value) {
+        self.stack.push(v);
+    }
+
+    /// `gen.throw(v)`: den Wurf an der Anhaltestelle einwerfen. `false`
+    /// heisst, dass ihn hier keiner faengt — dann ist der Generator fertig
+    /// und der Wurf geht an den Rufer.
+    pub fn inject_throw(&mut self, i: &mut Interp, v: Value) -> bool {
+        self.unwind(i, v)
+    }
+
+    /// `gen.return(v)`: die Maschine aufgeben. Offene `for…of`-Iterationen
+    /// werden GESCHLOSSEN (von innen nach aussen), nicht bloss vergessen —
+    /// sonst faehrt ein fremder Generator seinen `finally`-Block nie.
+    ///
+    /// Ein anhaengiger `finally` KANN es hier nicht geben: ein `yield` unter
+    /// einem solchen ist schon beim Uebersetzen abgelehnt (`Compiler::fin`).
+    pub fn close(&mut self, i: &mut Interp) {
+        while let Some(f) = self.frames.pop() {
+            for it in f.iters.iter().rev() {
+                i.iter_close(it);
+            }
+            if !f.root { i.depth -= 1; }
+        }
+        self.stack.clear();
+    }
+
+    /// Alles, was diese Maschine festhaelt — fuer den Abbau eines Realms.
+    ///
+    /// Ein angehaltener Generator ist der einzige Ort, an dem Umgebungen und
+    /// halbfertige Werte leben, ohne in einer Eigenschaft oder Bindung zu
+    /// stehen. `Interp::teardown` faende sie sonst nicht, und ein Rc-Ring
+    /// darin kaeme nie auf null.
+    pub fn roots(&self, objs: &mut Vec<super::value::Gc>,
+                 envs: &mut Vec<Rc<RefCell<Env>>>) {
+        for v in &self.stack {
+            if let Value::Obj(o) = v { objs.push(o.clone()); }
+        }
+        if let Value::Obj(o) = &self.completion { objs.push(o.clone()); }
+        for f in &self.frames {
+            envs.extend(f.envs.iter().cloned());
+            for it in &f.iters {
+                if let Value::Obj(o) = it { objs.push(o.clone()); }
+            }
+        }
+    }
+
+    /// Die Schleife. Sie laeuft, bis der Wurzelrahmen zurueck ist oder ein
+    /// `yield` sie anhaelt — und beim naechsten Aufruf genau dort weiter.
+    pub fn drive(&mut self, i: &mut Interp) -> C<Step> {
         loop {
             let (chunk, ip) = {
                 let f = self.frames.last().unwrap();
                 (f.chunk.clone(), f.ip)
             };
             if ip >= chunk.ops.len() {
-                return Ok(core::mem::replace(&mut self.completion, Value::Undefined));
+                return Ok(Step::Done(core::mem::replace(&mut self.completion, Value::Undefined)));
             }
             self.frames.last_mut().unwrap().ip += 1;
             // Der Deckel gegen `while(true)` — aber mit derselben KOERNUNG wie
@@ -99,7 +225,8 @@ impl Vm {
             let counts = match &chunk.ops[ip] {
                 Op::Jump(t) => (*t as usize) <= ip,
                 Op::Call(_) | Op::New(_) | Op::CallSpread | Op::NewSpread
-                | Op::SetCompletion | Op::DeclVar { .. } | Op::Ret => true,
+                | Op::SetCompletion | Op::DeclVar { .. } | Op::Ret
+                | Op::Yield | Op::Await => true,
                 _ => false,
             };
             if counts {
@@ -109,8 +236,10 @@ impl Vm {
                 }
             }
             match self.step(i, &chunk, ip) {
-                Ok(Some(v)) => return Ok(v),
-                Ok(None) => {}
+                Ok(Flow::Done(v)) => return Ok(Step::Done(v)),
+                Ok(Flow::Yield(v)) => return Ok(Step::Yield(v)),
+                Ok(Flow::Await(v)) => return Ok(Step::Await(v)),
+                Ok(Flow::Go) => {}
                 // Ein Wurf sucht sich seinen Behandler. Findet er keinen, geht
                 // er an den Rufer — dann faehrt ihn der Rust-Stapel hoch, und
                 // das ist richtig, solange Aufrufe noch so laufen.
@@ -124,8 +253,7 @@ impl Vm {
         }
     }
 
-    /// `Ok(Some(v))` heisst: der aeusserste Rahmen ist zurueck.
-    fn step(&mut self, i: &mut Interp, chunk: &Chunk, ip: usize) -> C<Option<Value>> {
+    fn step(&mut self, i: &mut Interp, chunk: &Chunk, ip: usize) -> C<Flow> {
         let env = self.frames.last().unwrap().envs.last().unwrap().clone();
         match &chunk.ops[ip] {
             Op::Const(k) => self.push(chunk.constants[*k as usize].clone()),
@@ -450,20 +578,35 @@ impl Vm {
                     i.iter_close(it);
                 }
                 self.stack.truncate(f.base);
-                if f.is_program {
-                    // Der Wert eines PROGRAMMS ist sein letzter Ausdruckswert,
-                    // nicht das, was am Ende auf dem Stapel liegt.
-                    let c = core::mem::replace(&mut self.completion, Value::Undefined);
-                    return Ok(Some(if matches!(c, Value::Undefined) { v } else { c }));
+                if f.root {
+                    if f.is_program {
+                        // Der Wert eines PROGRAMMS ist sein letzter
+                        // Ausdruckswert, nicht das, was am Ende auf dem Stapel
+                        // liegt. Ein Funktions- oder Generatorrumpf hat keinen.
+                        let c = core::mem::replace(&mut self.completion, Value::Undefined);
+                        return Ok(Flow::Done(if matches!(c, Value::Undefined) { v } else { c }));
+                    }
+                    return Ok(Flow::Done(v));
                 }
                 i.depth -= 1;
                 if self.frames.is_empty() {
-                    return Ok(Some(v));
+                    return Ok(Flow::Done(v));
                 }
                 self.push(v);
             }
+            // Der Rahmen bleibt stehen, wo er steht — `ip` zeigt schon auf den
+            // naechsten Befehl, und `Vm::send` legt den Wert von `next(v)` an
+            // die Stelle, an der dieser hier seinen abgegeben hat.
+            Op::Yield => {
+                let v = self.pop();
+                return Ok(Flow::Yield(v));
+            }
+            Op::Await => {
+                let v = self.pop();
+                return Ok(Flow::Await(v));
+            }
         }
-        Ok(None)
+        Ok(Flow::Go)
     }
 
     /// Den innersten Behandler suchen, der den Wurf nimmt. `false` heisst:
@@ -487,7 +630,7 @@ impl Vm {
             // Kein Behandler in diesem Rahmen: ihn verlassen und weitersuchen.
             // Das PROGRAMM ist die Grenze — darueber gibt es nur den Rufer in
             // Rust, und dorthin geht der Wurf als `Err`.
-            if f.is_program {
+            if f.root {
                 return false;
             }
             let f = self.frames.pop().unwrap();
@@ -538,6 +681,18 @@ impl Vm {
             self.push(v);
             return Ok(());
         };
+        // **Ein Generator und eine async-Funktion bekommen hier keinen
+        // Rahmen.** Ihr Aufruf baut ein Objekt bzw. ein Versprechen, und der
+        // Rumpf laeuft auf einer EIGENEN Maschine — beides tut `Interp::call`
+        // an einer Stelle, fuer beide Maschinen dieselbe. Die Pruefung steht
+        // vor `func_chunk`, weil dessen Chunk hier sonst als gewoehnlicher
+        // Funktionsrumpf losliefe.
+        if d.node.is_generator || d.node.is_async {
+            i.vm_calls_slow += 1;
+            let v = i.call(&callee, this, &args)?;
+            self.push(v);
+            return Ok(());
+        }
         let Some(chunk) = i.func_chunk(&d.node) else {
             i.vm_calls_slow += 1;
             let v = i.call(&callee, this, &args)?;
@@ -561,7 +716,7 @@ impl Vm {
         let base = self.stack.len();
         self.frames.push(Frame {
             chunk, ip: 0, envs: alloc::vec![env], base,
-            is_program: false, handlers: Vec::new(), iters: Vec::new(),
+            is_program: false, root: false, handlers: Vec::new(), iters: Vec::new(),
         });
         Ok(())
     }

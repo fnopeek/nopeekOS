@@ -247,6 +247,10 @@ pub enum ObjKind {
     Arguments,
     Regex(Rc<crate::js::regexp::Regex>),
     Promise(Rc<RefCell<crate::js::promise::PData>>),
+    /// Ein angehaltener Generator: seine EIGENE Maschine, samt Zustand.
+    /// Siehe `generator.rs` — und den Kopf von `vm.rs` fuer den Grund, warum
+    /// es eine eigene ist und kein Rahmen in einer fremden.
+    Generator(Rc<crate::js::generator::GenState>),
 }
 
 pub struct Object {
