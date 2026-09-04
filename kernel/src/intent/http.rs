@@ -543,6 +543,13 @@ pub struct HttpRequest<'a> {
     /// document arrives 4,1x to 9,9x larger without it, measured across the
     /// target corpus (`docs/plan/JS_SCOPE_CONTENT_WEB.md` §8).
     pub accept_gzip: bool,
+    /// Diese Anfrage geht im KLARTEXT, ohne TLS.
+    ///
+    /// Aus by default, und das ist keine Vorsichtsmassnahme, sondern die
+    /// Politik: `parse_url` setzt sie nur, wenn `net.allow_plain_http` an ist
+    /// UND der Host eine literale private Adresse ist. Wer sie von Hand setzt,
+    /// umgeht diese Pruefung — also nicht tun.
+    pub plain: bool,
     /// Offer HTTP/2 for this request, falling back to HTTP/1.1 when the host
     /// does not speak it.
     ///
@@ -557,7 +564,8 @@ pub struct HttpRequest<'a> {
 
 impl Default for HttpRequest<'_> {
     fn default() -> Self {
-        HttpRequest { method: "GET", headers: &[], body: &[], accept_gzip: false, try_h2: false }
+        HttpRequest { method: "GET", headers: &[], body: &[], accept_gzip: false, try_h2: false,
+                      plain: false }
     }
 }
 
@@ -829,6 +837,10 @@ pub fn https_request_streaming(
 ) -> Result<usize, &'static str> {
     let mut cur_host = String::from(host);
     let mut cur_path = String::from(path);
+    // Welches Schema der AKTUELLE Sprung faehrt. Eine Umleitung darf
+    // hinaufgehen (Klartext -> TLS), aber niemals hinunter — das ist die
+    // Regel, die `parse_https_url` seit jeher durchsetzt, und sie bleibt.
+    let mut cur_tls = !req.plain;
     // A redirect can change the method, so the request travels by value from
     // here on (RFC 9110 §15.4).
     let mut method = String::from(req.method);
@@ -853,8 +865,9 @@ pub fn https_request_streaming(
             method: &method,
             headers: if carry_headers { req.headers } else { &no_headers },
             body,
-            accept_gzip: req.accept_gzip,
-            try_h2: req.try_h2,
+            accept_gzip: req.accept_gzip && cur_tls,
+            try_h2: req.try_h2 && cur_tls,
+            plain: !cur_tls,
         };
         let resp = https_get_once(
             &cur_host,
@@ -909,12 +922,21 @@ pub fn https_request_streaming(
         if keep_status {
             push_hop(&mut hops, &cur_host, &cur_path, &resp.headers);
         }
-        let (next_host, next_path) = parse_https_url(&loc, &cur_host)?;
+        // Auf TLS gilt weiter die strenge Fassung: sie verweigert jedes
+        // `http://` im `Location`. Faehrt der Lauf schon im Klartext, darf das
+        // Ziel auch `https://` sein — hinauf ist erlaubt.
+        let (next_host, next_path, next_tls) = if cur_tls {
+            let (h, p) = parse_https_url(&loc, &cur_host)?;
+            (h, p, true)
+        } else {
+            parse_any_url(&loc, &cur_host, false)?
+        };
         if next_host != cur_host {
             carry_headers = false;
         }
         cur_host = next_host;
         cur_path = next_path;
+        cur_tls = next_tls;
         // 303 says so outright, and 301/302 after a POST is the behaviour
         // every browser settled on (RFC 9110 §15.4.3 note): the redirect
         // points at a RESULT page, and re-POSTing the form to it would
@@ -1073,11 +1095,15 @@ pub fn error_kind(msg: &str) -> &'static str {
 
 /// Fresh DNS + ARP + TCP + TLS to `host:443`. Only paid on a pool miss.
 fn open_tls(host: &str) -> Result<crate::tls::TlsSession, &'static str> {
+    // Der nackte Name fuer DNS und fuer die TLS-Kennung (SNI); der Port, wenn
+    // einer dasteht, sonst 443.
+    let (bare, port) = split_host_port(host);
+    let port = port.unwrap_or(443);
     let t_dns = crate::interrupts::ticks();
-    let ip = if let Some(ip) = parse_ip(host) {
+    let ip = if let Some(ip) = parse_ip(bare) {
         ip
     } else {
-        crate::net::dns::resolve(host).ok_or("DNS resolution failed")?
+        crate::net::dns::resolve(bare).ok_or("DNS resolution failed")?
     };
     let t_arp = crate::interrupts::ticks();
     // Make sure the gateway's MAC is known before we SYN.
@@ -1094,9 +1120,9 @@ fn open_tls(host: &str) -> Result<crate::tls::TlsSession, &'static str> {
     let _ = crate::net::arp::resolve(gw, 100); // 1 s at 100 Hz
     let t_tcp = crate::interrupts::ticks();
 
-    let handle = crate::net::tcp::connect(ip, 443).map_err(|_| "TCP connect failed")?;
+    let handle = crate::net::tcp::connect(ip, port).map_err(|_| "TCP connect failed")?;
     let t_tls = crate::interrupts::ticks();
-    let out = match crate::tls::tls_connect(handle, host) {
+    let out = match crate::tls::tls_connect(handle, bare) {
         Ok(s) => Ok(s),
         Err(e) => {
             // Keep the reason. Collapsing every handshake failure into one
@@ -1218,7 +1244,9 @@ fn h2_connect(host: &str) -> Option<Http2> {
         return None;
     }
     let t_dns = crate::interrupts::ticks();
-    let ip = parse_ip(host).or_else(|| crate::net::dns::resolve(host))?;
+    let (bare, port) = split_host_port(host);
+    let port = port.unwrap_or(443);
+    let ip = parse_ip(bare).or_else(|| crate::net::dns::resolve(bare))?;
     let t_arp = crate::interrupts::ticks();
     // Gateway MAC, same as the h1 path (see `open_tls` for why this is a
     // resolve and not a spin).
@@ -1233,7 +1261,7 @@ fn h2_connect(host: &str) -> Option<Http2> {
     // The serial write above is itself unmeasured otherwise, and it sits
     // INSIDE the span the caller reports as "connect".
     let t_pre = crate::interrupts::ticks();
-    let r = http2::connect(host, ip, 443);
+    let r = http2::connect(bare, ip, port);
     if chatty() {
         let after = crate::interrupts::ticks();
         kprintln!("[npk]   h2 connect() span {} ms (log {} ms before it)",
@@ -1270,7 +1298,10 @@ pub fn https_get_many(urls: &[String], max_size: usize) -> alloc::vec::Vec<Optio
     let mut out: alloc::vec::Vec<Option<alloc::vec::Vec<u8>>> = urls.iter().map(|_| None).collect();
 
     // Split into per-host groups, keeping the original positions.
-    let mut parsed: alloc::vec::Vec<Option<(String, String)>> = alloc::vec::Vec::new();
+    // Das Schema bleibt DABEI: ein Klartext-Host kann kein h2 (h2c sprechen
+    // wir nicht) und muss den einfachen Weg nehmen. Es wegzuwerfen hiesse,
+    // jede Unterressource einer lokalen Vorlage gegen :443 zu versuchen.
+    let mut parsed: alloc::vec::Vec<Option<(String, String, bool)>> = alloc::vec::Vec::new();
     for u in urls {
         parsed.push(parse_url(u).ok());
     }
@@ -1285,13 +1316,14 @@ pub fn https_get_many(urls: &[String], max_size: usize) -> alloc::vec::Vec<Optio
         let idxs: alloc::vec::Vec<usize> = parsed
             .iter()
             .enumerate()
-            .filter(|(_, p)| matches!(p, Some((h, _)) if h == host))
+            .filter(|(_, p)| matches!(p, Some((h, _, _)) if h == host))
             .map(|(i, _)| i)
             .collect();
+        let plain = matches!(parsed.iter().flatten().find(|p| &p.0 == host), Some((_, _, false)));
 
         let mut served = false;
         let t0 = crate::interrupts::ticks();
-        if let Some(mut conn) = h2_open(host) {
+        if let Some(mut conn) = (if plain { None } else { h2_open(host) }) {
             let t_conn = crate::interrupts::ticks();
             let paths: alloc::vec::Vec<&str> =
                 idxs.iter().map(|&i| parsed[i].as_ref().unwrap().1.as_str()).collect();
@@ -1373,11 +1405,12 @@ pub fn https_get_many(urls: &[String], max_size: usize) -> alloc::vec::Vec<Optio
             if out[i].is_some() {
                 continue;
             }
-            let (h, p) = parsed[i].as_ref().unwrap();
+            let (h, p, tls) = parsed[i].as_ref().unwrap();
             // Still h2 where the host offers it — this door is the one a
             // redirect goes through, and a redirected sub-resource is no
             // less throttled than a direct one.
-            let req = HttpRequest { accept_gzip: true, try_h2: true, ..HttpRequest::default() };
+            let req = HttpRequest { accept_gzip: *tls, try_h2: *tls, plain: !*tls,
+                                    ..HttpRequest::default() };
             if let Ok(body) = https_get_req(h, p, max_size, &req) {
                 out[i] = Some(body);
             }
@@ -1896,6 +1929,21 @@ fn https_get_once(
     }
     let _hz = PollHzGuard;
 
+    // Klartext geht seinen eigenen Weg: kein h2 (h2c sprechen wir nicht),
+    // kein Sitzungsspeicher, kein TLS. `http_get_once` gibt es seit langem,
+    // es fehlte nur der Weg dorthin.
+    //
+    // Nur GET. Ein POST oder eigene Koepfe muessten durch `https_exchange`,
+    // und das setzt eine TLS-Sitzung voraus — den zweiten Rumpf dafuer zu
+    // bauen, bevor ihn jemand braucht, waere Arbeit auf Verdacht. Wer es
+    // versucht, bekommt eine Absage und keinen stillen Fehlschlag.
+    if req.plain {
+        if req.method != "GET" && !req.method.is_empty() {
+            return Err("plain http: only GET");
+        }
+        return http_get_once(host, path, max_size, on_chunk);
+    }
+
     // Attempt 0: HTTP/2. Wikimedia throttles HTTP/1.1 to ~0.5 requests/s and
     // exempts h2 (§8.1, measured) — and one page load is FOUR document
     // requests inside two seconds, so this path was the only one still
@@ -1955,19 +2003,90 @@ fn parse_https_url(loc: &str, current_host: &str) -> Result<(String, String), &'
 /// Accepts `https://host/path`, `host/path`, or a bare `host` (path
 /// defaults to `/`). Scheme-less input is treated as https; plain `http://`
 /// is refused (no downgrade). Reuses `parse_https_url`'s rules.
-pub(crate) fn parse_url(url: &str) -> Result<(String, String), &'static str> {
+pub(crate) fn parse_url(url: &str) -> Result<(String, String, bool), &'static str> {
     let url = url.trim();
     if url.is_empty() {
         return Err("empty url");
     }
     if url.starts_with("https://") {
-        parse_https_url(url, "")
-    } else if url.starts_with("http://") {
-        Err("refusing http downgrade")
+        parse_https_url(url, "").map(|(h, p)| (h, p, true))
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        let (host, path) = match rest.find('/') {
+            Some(i) => (&rest[..i], &rest[i..]),
+            None => (rest, "/"),
+        };
+        if host.is_empty() {
+            return Err("empty host");
+        }
+        if !plain_http_allowed(host) {
+            return Err("refusing http downgrade");
+        }
+        // JEDER Klartext-Abruf sagt es. Ein stiller Downgrade ist genau das,
+        // was die Regel verhindern soll — und wer den Schalter vergessen hat
+        // umzulegen, sieht es hier statt in einem Paketmitschnitt.
+        kprintln!("[npk]   http (KLARTEXT, kein TLS) -> {}", host);
+        Ok((String::from(host), String::from(path), false))
     } else {
         let mut full = String::from("https://");
         full.push_str(url);
-        parse_https_url(&full, "")
+        parse_https_url(&full, "").map(|(h, p)| (h, p, true))
+    }
+}
+
+/// Darf `http://<host>` ohne TLS geholt werden?
+///
+/// **Zwei Bedingungen, und beide muessen halten.**
+///
+/// 1. `net.allow_plain_http` steht auf `1`. Vorgabe ist AUS: ein Geraet, das
+///    den Schluessel nie setzt, verhaelt sich wie vorher, und die Angriffs-
+///    flaeche entsteht erst, wenn jemand sie einschaltet.
+/// 2. Der Host ist eine LITERALE private Adresse — 10/8, 172.16/12,
+///    192.168/16, 127/8, 169.254/16.
+///
+/// Der zweite Punkt ist nicht Bequemlichkeit, sondern der Kern: ein NAME
+/// waere hier eine Luecke, weil sein DNS-Eintrag jederzeit auf eine oeffent-
+/// liche Adresse zeigen kann (und beim zweiten Auflosen auf eine andere als
+/// beim ersten). Eine Adresse, die im URL selbst steht, kann sich nicht
+/// verwandeln.
+///
+/// ⚠ Was auch mit dem Schalter AN bestehen bleibt: eine fremde Seite kann
+/// beak dazu bringen, Unterressourcen von `http://192.168.x.y` zu holen und
+/// so das eigene Netz abzuklopfen. Deshalb ist der Schalter fuer die Dauer
+/// einer Messung gedacht und nicht fuer den Dauerbetrieb.
+fn plain_http_allowed(host: &str) -> bool {
+    if crate::config::get("net.allow_plain_http").as_deref() != Some("1") {
+        return false;
+    }
+    let bare = split_host_port(host).0;
+    match parse_ip(bare) {
+        Some([10, ..]) => true,
+        Some([172, b, ..]) if (16..=31).contains(&b) => true,
+        Some([192, 168, ..]) => true,
+        Some([127, ..]) => true,
+        Some([169, 254, ..]) => true,
+        _ => false,
+    }
+}
+
+/// `host` oder `host:port` in beides zerlegen. Der Port ist `None`, wenn
+/// keiner dasteht — dann entscheidet das Schema.
+///
+/// Bis hierher hat NICHTS im Kernel einen Port aus einer Adresse gelesen:
+/// `connect(ip, 443)` stand fest, und `http://10.0.2.2:8080/x` waere auf :443
+/// gelandet. Der Aufruf mit dem vollen `host:port` bleibt fuer den
+/// `Host:`-Kopf richtig (RFC 9110 nennt den Port, wenn er nicht der
+/// Vorgabeport ist); DNS, `parse_ip` und die TLS-Kennung brauchen den nackten
+/// Namen.
+pub(crate) fn split_host_port(host: &str) -> (&str, Option<u16>) {
+    match host.rsplit_once(':') {
+        // Ein Doppelpunkt im Namen ist auch eine IPv6-Adresse — die kann
+        // dieser Stapel nicht, aber sie darf hier nicht als Port gelesen
+        // werden.
+        Some((h, p)) if !h.contains(':') => match p.parse::<u16>() {
+            Ok(n) => (h, Some(n)),
+            Err(_) => (host, None),
+        },
+        _ => (host, None),
     }
 }
 
@@ -2317,16 +2436,18 @@ fn http_get_once(
     max_size: usize,
     on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
 ) -> Result<HttpResponse, &'static str> {
-    let ip = match parse_ip(host) {
+    let (bare, port) = split_host_port(host);
+    let port = port.unwrap_or(80);
+    let ip = match parse_ip(bare) {
         Some(ip) => ip,
-        None => crate::net::dns::resolve(host).ok_or("DNS resolution failed")?,
+        None => crate::net::dns::resolve(bare).ok_or("DNS resolution failed")?,
     };
-    if chatty() { kprintln!("[npk]   {} -> {}.{}.{}.{}", host, ip[0], ip[1], ip[2], ip[3]); }
+    if chatty() { kprintln!("[npk]   {} -> {}.{}.{}.{}", bare, ip[0], ip[1], ip[2], ip[3]); }
     let gw = crate::net::ipv4::gateway();
     let _ = crate::net::arp::resolve(gw, 100); // see open_tls: not a blind spin
 
-    if chatty() { kprintln!("[npk]   TCP connect {}:80 ...", host); }
-    let handle = crate::net::tcp::connect(ip, 80).map_err(|_| "TCP connect failed")?;
+    if chatty() { kprintln!("[npk]   TCP connect {}:{} ...", bare, port); }
+    let handle = crate::net::tcp::connect(ip, port).map_err(|_| "TCP connect failed")?;
 
     // Timer-NAPI: speed this worker core's idle timer to ~10 kHz for the whole
     // transfer so the recv loop's HLT wakes every ~100 µs (vs 10 ms at 100 Hz) —

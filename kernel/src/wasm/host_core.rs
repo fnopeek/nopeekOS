@@ -2118,7 +2118,7 @@ pub(crate) fn npk_http_request(mem: &mut [u8], ctx: &mut HostState, url_ptr: i32
         Some(s) => s,
         None => return -1,
     };
-    let (host, path) = match crate::intent::http::parse_url(&url) {
+    let (host, path, tls) = match crate::intent::http::parse_url(&url) {
         Ok(hp) => hp,
         Err(e) => {
             kprintln!("[npk] WASM: npk_http_request bad url: {}", e);
@@ -2141,10 +2141,11 @@ pub(crate) fn npk_http_request(mem: &mut [u8], ctx: &mut HostState, url_ptr: i32
         &crate::intent::http::HttpRequest {
             // The document itself: 4,1x-9,9x fewer bytes on the wire,
             // measured (docs/plan/JS_SCOPE_CONTENT_WEB.md §8).
-            accept_gzip: true,
+            accept_gzip: tls,
             // And over HTTP/2: this is the request Wikimedia
             // throttles, four of them per page load (BROWSER.md §8.1).
-            try_h2: true,
+            try_h2: tls,
+            plain: !tls,
             ..Default::default()
         },
     );
@@ -2222,7 +2223,7 @@ pub(crate) fn npk_http_send(mem: &mut [u8], ctx: &mut HostState, method_ptr: i32
         alloc::vec::Vec::new()
     };
 
-    let (host, path) = match crate::intent::http::parse_url(&url) {
+    let (host, path, tls) = match crate::intent::http::parse_url(&url) {
         Ok(hp) => hp,
         Err(e) => {
             kprintln!("[npk] WASM: npk_http_send bad url: {}", e);
@@ -2236,8 +2237,9 @@ pub(crate) fn npk_http_send(mem: &mut [u8], ctx: &mut HostState, method_ptr: i32
         method: &method, headers: &headers, body: &body,
         // The browser asks for gzip and the kernel unpacks it; an app
         // cannot set `Accept-Encoding` itself (RESERVED_HEADERS).
-        accept_gzip: true,
-        try_h2: true,
+        accept_gzip: tls,
+        try_h2: tls,
+        plain: !tls,
     };
     let res = crate::intent::http::https_request_streaming(
         &host, &path, &req, cap,
@@ -2337,7 +2339,7 @@ pub(crate) fn npk_http_begin(
     } else {
         alloc::vec::Vec::new()
     };
-    let (host, path) = match crate::intent::http::parse_url(&url) {
+    let (host, path, tls) = match crate::intent::http::parse_url(&url) {
         Ok(hp) => hp,
         Err(e) => {
             // A refusal at the door has to name itself the same way a failed
@@ -2348,7 +2350,7 @@ pub(crate) fn npk_http_begin(
     };
 
     match crate::intent::fetch::begin_one(
-        ctx.pid, ctx.core_id, method, host, path, headers, body, cap,
+        ctx.pid, ctx.core_id, method, host, path, headers, body, cap, tls,
     ) {
         Ok(h) => h,
         Err(e) => {
