@@ -1,453 +1,37 @@
-//! vars.rs — CSS custom properties (`--name`) + `var()` resolution.
+//! vars.rs — CSS Custom Properties (`--name`) und `var()`.
 //!
-//! Modern sites (esp. Bootstrap 5's `--bs-*`) define custom properties and
-//! consume them via `var(--name, fallback)`. This module resolves them as a
-//! pre-pass over the raw stylesheet text (before `css::parse`), so the rest of
-//! the engine never has to know about variables. Host-testable, no OS.
+//! **Sie werden in der KASKADE aufgeloest, je Element** — `style::resolve_in`
+//! sammelt sie aus den Regeln, die dieses Element wirklich treffen, erbt sie
+//! vom Elternteil und setzt sie beim Anwenden eines Wertes ein. Hier steht
+//! nur noch, was eine Karte IST und wie aus einem Wert ein fertiger wird.
 //!
-//! Pipeline: [collect] all `--name: value` declarations document-wide into a
-//! map (last wins) → [expand] every `var(...)` to a fixpoint. The rewritten
-//! CSS is plain and feeds the existing `css::parse` unchanged. The `--name:
-//! value;` declarations are left in place — the downstream parser ignores
-//! unknown `--` properties, so they are harmless.
+//! Bis 0.59.0 lief davor ein Textlauf ueber das ganze Blatt, mit einer
+//! globalen Karte: ein Wert je Name fuer das ganze Dokument. Das traegt genau
+//! ein Muster — `:root` setzt eine Palette, alles liest daraus — und bricht
+//! bei dem, das jedes moderne Rahmenwerk benutzt: die Basisklasse liest die
+//! Variable, jede Variante setzt sie neu.
 //!
-//! `@media` IS honoured: a block that doesn't hold at the current viewport is
-//! skipped wholesale, so its declarations never enter the map. The cascade
-//! already skipped such *rules*; collecting their *values* anyway let a
-//! `prefers-color-scheme:dark` palette win over `:root`.
+//!     .btn         { --bs-btn-bg: transparent; background: var(--bs-btn-bg) }
+//!     .btn-primary { --bs-btn-bg: #0d6efd }
+//!     .btn-link    { --bs-btn-bg: transparent }   <- steht ZULETZT im Blatt
 //!
-//! SCOPING LIMITATION (v1): declarations are collected document-wide, not
-//! per-selector. A `--x` set inside `.foo{}` is treated as visible everywhere,
-//! and if the same name is declared twice the *later* declaration wins for the
-//! whole document. This is intentionally coarse; it covers the overwhelmingly
-//! common case (all of Bootstrap defines its palette on `:root{…}`). True
-//! cascade-scoped custom properties are out of scope.
+//! `.btn-link` trifft einen `<button class="btn btn-primary">` nie und gewann
+//! trotzdem die globale Karte: **jeder Bootstrap-Knopf war durchsichtig.**
+//! Dasselbe traf Hinweise, Tabellenstreifen und `list-group .active`.
+//!
+//! Mit dem Textlauf sind auch seine Heuristiken weg — er musste RATEN, welcher
+//! Block „unbedingt" gilt, und tat das an der Selektor-Zeichenkette. Ein
+//! Kommentar davor (Bootstraps Kopfzeile, mit Versionsnummer und URLs) reichte,
+//! um `:root` fuer bedingt zu halten; dann gewann `[data-bs-theme=dark]`, und
+//! die Seite war dunkel, ohne dass irgendwo ein `data-bs-theme` stand. Die
+//! Kaskade muss nichts raten: sie TRIFFT.
+//!
+//! Gemessen hat der Umbau nichts gekostet — auf drei eingefrorenen Seiten
+//! 56,6/45,5/56,2 ms vorher gegen 57,5/44,5/47,2 ms nachher. Der Textlauf ueber
+//! ein 368-KB-Blatt war eben auch nicht gratis.
 
-use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
-use alloc::vec::Vec;
 
-/// Expand every `var(--name, fallback)` in a stylesheet using its `--name:
-/// value;` custom-property declarations, and return the rewritten CSS (which
-/// then feeds the existing `css::parse`). Handles nested `var()`, fallbacks,
-/// missing variables, and whitespace variations. Document-scoped (see module
-/// note). Cheap fast-path: returns the input unchanged when it has no `var(`.
-pub fn resolve_vars(css: &str, media: crate::css::Media, root_classes: &[&str]) -> String {
-    // Fast path: nothing to do. Also covers the common case of a sheet with no
-    // custom properties at all.
-    if !contains_var(css.as_bytes()) {
-        return css.to_string();
-    }
-
-    let mut map: BTreeMap<String, String> = BTreeMap::new();
-    // Names whose winning value came from an *unconditional* (`:root`/`html`/
-    // `body`/`*`) block — a later *conditional* block (a theme/state class such
-    // as `html.skin-theme-clientpref-night`) must not overwrite these.
-    let mut uncond: BTreeSet<String> = BTreeSet::new();
-    collect(css, &mut map, &mut uncond, media, root_classes);
-    drop_cyclic(&mut map);
-
-    // Expand to a fixpoint. A variable's value (or a fallback) may itself hold
-    // more `var()`; each pass resolves one layer, so we loop until stable.
-    // Capped at MAX_PASSES to bound cyclic references (e.g. --a: var(--b);
-    // --b: var(--a)) — they simply stop mutating and any residual var() is
-    // left in place rather than looping forever.
-    const MAX_PASSES: usize = 16;
-    let (mut cur, _) = expand_once(css, &map);
-    for _ in 1..MAX_PASSES {
-        if !contains_var(cur.as_bytes()) {
-            break;
-        }
-        let (next, changed) = expand_once(&cur, &map);
-        if !changed {
-            break;
-        }
-        cur = next;
-    }
-    cur
-}
-
-/// Remove custom properties that reference themselves, directly or through a
-/// chain. CSS Variables 1 §3: such a property is **invalid at computed-value
-/// time**, so a `var(--x, fallback)` that consumes it must fall back — which is
-/// the whole point of the idiom.
-///
-/// Wikipedia writes `--font-size-medium: var(--font-size-medium, 1rem)`. Left
-/// in the map, the expansion below substitutes the name with itself, stops
-/// changing, and leaves a literal `var(…)` in the text — so the consuming
-/// `calc(var(--font-size-medium,1rem) + 4px)` never parses and the box falls
-/// back to `auto`. That is the search field's missing magnifier: 0-wide, then
-/// clamped up to its 10px `min-width`.
-fn drop_cyclic(map: &mut BTreeMap<String, String>) {
-    let names: Vec<String> = map.keys().cloned().collect();
-    let mut bad: Vec<String> = Vec::new();
-    for start in &names {
-        // Walk the reference graph from `start`; if we arrive back at it, the
-        // property is in a cycle. `seen` bounds the walk on shared sub-chains.
-        let mut seen: BTreeSet<String> = BTreeSet::new();
-        let mut stack: Vec<String> = var_refs(map.get(start).map(|s| s.as_str()).unwrap_or(""));
-        let mut cyclic = false;
-        while let Some(name) = stack.pop() {
-            if name == *start {
-                cyclic = true;
-                break;
-            }
-            if !seen.insert(name.clone()) {
-                continue;
-            }
-            if let Some(v) = map.get(&name) {
-                stack.extend(var_refs(v));
-            }
-        }
-        if cyclic {
-            bad.push(start.clone());
-        }
-    }
-    for name in bad {
-        map.remove(&name);
-    }
-}
-
-/// Every `--name` a value references through `var()`, fallbacks included.
-fn var_refs(value: &str) -> Vec<String> {
-    let b = value.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < b.len() {
-        if is_var_at(b, i) && !(i > 0 && is_name(b[i - 1])) {
-            if let Some((end, name, fallback)) = parse_var_args(value, i + 3) {
-                out.push(name);
-                if let Some(f) = fallback {
-                    out.extend(var_refs(&f));
-                }
-                i = end;
-                continue;
-            }
-        }
-        i += 1;
-    }
-    out
-}
-
-// ── collection ──────────────────────────────────────────────────────────────
-
-/// Scan the whole stylesheet for `--name: value` declarations and record them
-/// (later declaration overwrites earlier). Strings and `/* comments */` are
-/// skipped so a `--x:` inside them is never mistaken for a declaration. A
-/// `--name` that is *used* (`var(--name)`) is not a declaration because it is
-/// not followed by `:`, so it is ignored here.
-fn collect(css: &str, map: &mut BTreeMap<String, String>, uncond: &mut BTreeSet<String>, media: crate::css::Media, root_classes: &[&str]) {
-    let b = css.as_bytes();
-    let n = b.len();
-    let mut i = 0;
-    // Track the block a declaration sits in: `depth` (0 = between rules), and
-    // whether the current top-level rule's selector is unconditional-root.
-    // `sel_start` marks where the pending selector prelude began.
-    let mut depth: i32 = 0;
-    let mut sel_start = 0usize;
-    let mut block_uncond = false;
-    // A block whose ONLY selectors qualify the root by a class the document
-    // does not carry can never apply — its values must be ignored outright.
-    let mut block_dead = false;
-    while i < n {
-        // Skip comments.
-        if b[i] == b'/' && i + 1 < n && b[i + 1] == b'*' {
-            // Steht der Kommentar VOR einer Regel, gehoert er nicht in ihren
-            // Selektor. Ohne diese Zeile schleppte jede Regel, der ein
-            // Kommentar vorausgeht, dessen Text mit — und bei Bootstrap ist
-            // das die Kopfzeile:
-            //
-            //   /*! Bootstrap v5.3.3 (https://getbootstrap.com/) … */
-            //   :root,[data-bs-theme=light]{ … --bs-body-bg:#fff … }
-            //
-            // `is_unconditional_root` sah darin Punkte (`v5.3.3`, die URLs),
-            // hielt den Block fuer BEDINGT, und damit verlor `:root` seinen
-            // Schutz — worauf `[data-bs-theme=dark]` die ganze helle Palette
-            // ueberschrieb. Die Seite wurde dunkel, ohne dass irgendwo ein
-            // `data-bs-theme` stand.
-            //
-            // Nur wenn davor NUR Leerraum steht: ein Kommentar MITTEN in
-            // einem Selektor (`a /* x */ b`) darf dessen Anfang nicht
-            // abschneiden, sonst waere die Beurteilung nachher zu grosszuegig.
-            let lead_ws = css[sel_start..i].trim().is_empty();
-            i = skip_comment(b, i);
-            if depth == 0 && lead_ws {
-                sel_start = i;
-            }
-            continue;
-        }
-        // `@media` gates its body on the viewport — a variable declared inside
-        // a block that doesn't apply must not be collected. The cascade already
-        // skips such rules; without this the *values* leaked anyway, so a
-        // `prefers-color-scheme:dark` palette (or any mobile-breakpoint
-        // override) silently won document-wide. Other at-rules are walked
-        // through as before.
-        if b[i] == b'@' {
-            let mut j = i + 1;
-            while j < n && (b[j].is_ascii_alphabetic() || b[j] == b'-') {
-                j += 1;
-            }
-            if css[i + 1..j].eq_ignore_ascii_case("media") {
-                let mut k = j;
-                while k < n && b[k] != b'{' && b[k] != b';' {
-                    k += 1;
-                }
-                if k >= n || b[k] == b';' {
-                    i = (k + 1).min(n);
-                    continue;
-                }
-                let close = crate::css::matching_brace(b, k, n);
-                if crate::css::media_matches(&css[j..k], media) {
-                    // The media body is a fresh rule list — its own selectors
-                    // decide unconditional-ness, so recurse (depth resets).
-                    collect(&css[k + 1..close], map, uncond, media, root_classes);
-                }
-                i = (close + 1).min(n);
-                sel_start = i;
-                continue;
-            }
-            i = j;
-            continue;
-        }
-        // Skip strings.
-        if b[i] == b'"' || b[i] == b'\'' {
-            i = skip_string(b, i);
-            continue;
-        }
-        // Block boundaries — track which rule (and whether its selector is
-        // unconditional-root) each declaration sits in.
-        if b[i] == b'{' {
-            if depth == 0 {
-                let sel = css[sel_start..i].trim();
-                block_uncond = is_unconditional_root(sel);
-                block_dead = !block_uncond && root_selector_excluded(sel, root_classes);
-            }
-            depth += 1;
-            i += 1;
-            continue;
-        }
-        if b[i] == b'}' {
-            if depth > 0 {
-                depth -= 1;
-            }
-            if depth == 0 {
-                sel_start = i + 1;
-            }
-            i += 1;
-            continue;
-        }
-        if b[i] == b';' && depth == 0 {
-            sel_start = i + 1;
-            i += 1;
-            continue;
-        }
-        // Candidate custom-property declaration: `--` ident … `:`.
-        if b[i] == b'-' && i + 1 < n && b[i + 1] == b'-' {
-            let name_start = i;
-            let mut j = i + 2;
-            while j < n && is_name(b[j]) {
-                j += 1;
-            }
-            // Must have at least one name char after the leading `--`.
-            if j > name_start + 2 {
-                let mut k = j;
-                while k < n && is_ws(b[k]) {
-                    k += 1;
-                }
-                if k < n && b[k] == b':' {
-                    // It's a declaration. Read the value up to the terminating
-                    // `;` or `}` at paren-depth 0 (skipping strings/comments so
-                    // a `;` inside them does not end the value early).
-                    let val_start = k + 1;
-                    let v = read_value_end(b, val_start);
-                    let name = css[name_start..j].to_string();
-                    let value = css[val_start..v].trim().to_string();
-                    // A declaration at rule level (depth 1) is "unconditional"
-                    // only if its selector is a bare root; deeper nesting
-                    // (@supports/@keyframes) is collected as before. An
-                    // unconditional value overwrites freely and is protected;
-                    // a conditional one may not clobber a protected value.
-                    if depth == 1 && block_dead {
-                        i = v;
-                        continue;
-                    }
-                    let is_uncond = depth != 1 || block_uncond;
-                    if is_uncond {
-                        map.insert(name.clone(), value);
-                        uncond.insert(name);
-                    } else if !uncond.contains(&name) {
-                        map.insert(name, value);
-                    }
-                    i = v;
-                    continue;
-                }
-            }
-            i = j;
-            continue;
-        }
-        i += 1;
-    }
-}
-
-/// Does a selector list apply unconditionally — i.e. does any alternative
-/// target the document root with no class/id/attribute/state qualifier
-/// (`:root`, `html`, `body`, `*`, `html body`, …)? A theme or state override
-/// like `html.skin-theme-clientpref-night` or `:root[data-theme=dark]` adds a
-/// qualifier we cannot confirm at collection time, so its custom-property
-/// values must not overwrite the unconditional default (dark palettes were
-/// otherwise winning document-wide on any site that ships one).
-fn is_unconditional_root(sel: &str) -> bool {
-    sel.split(',').any(|alt| {
-        let a = alt.trim();
-        if a.is_empty() {
-            return false;
-        }
-        // Any class, id, or attribute qualifier makes it conditional.
-        if a.contains('.') || a.contains('#') || a.contains('[') {
-            return false;
-        }
-        // The only pseudo allowed is `:root`; anything else (`:where`, `:not`,
-        // `:hover`, a pseudo-element, …) is conditional.
-        !a.replace(":root", "").contains(':')
-    })
-}
-
-/// Does this selector list target the root ONLY through classes the document's
-/// root element does not have? MediaWiki ships one definition per user
-/// preference — `html.vector-feature-custom-font-size-clientpref-1{--font-size-
-/// medium:1rem}` next to `…-clientpref-2{…:1.25rem}` — and the page carries
-/// exactly one of those classes. Taking the last one seen made every page
-/// render at the largest preference (20px instead of 16px), which inflated
-/// every measurement on the page.
-///
-/// Only root-targeting alternatives (`html`/`:root` plus classes) can be
-/// judged. Anything else — a plain `.foo`, a descendant selector, an id or
-/// attribute — might match somewhere, so it keeps the old permissive
-/// behaviour and the block stays alive.
-fn root_selector_excluded(sel: &str, root_classes: &[&str]) -> bool {
-    let mut saw_root_qualified = false;
-    for alt in sel.split(',') {
-        let a = alt.trim();
-        if a.is_empty() {
-            continue;
-        }
-        let Some(classes) = root_compound_classes(a) else {
-            return false; // not judgeable → keep the block
-        };
-        if classes.iter().all(|c| root_classes.contains(c)) {
-            return false; // this alternative does match the root
-        }
-        saw_root_qualified = true;
-    }
-    saw_root_qualified
-}
-
-/// Split a single `html.a.b` / `:root.a` compound into its classes, or `None`
-/// if it is not a plain class-qualified root selector.
-fn root_compound_classes(a: &str) -> Option<Vec<&str>> {
-    let rest = a.strip_prefix("html").or_else(|| a.strip_prefix(":root"))?;
-    if rest.is_empty() || !rest.starts_with('.') {
-        return None;
-    }
-    // Classes only — an id, attribute, pseudo or combinator is out of scope.
-    if rest.contains(['#', '[', ':', ' ', '>', '+', '~']) {
-        return None;
-    }
-    Some(rest.split('.').filter(|c| !c.is_empty()).collect())
-}
-
-/// Return the index one past the end of a declaration value that starts at
-/// `start`, i.e. the position of the terminating `;`/`}` (or end of input).
-fn read_value_end(b: &[u8], start: usize) -> usize {
-    let n = b.len();
-    let mut v = start;
-    let mut depth: i32 = 0;
-    while v < n {
-        let c = b[v];
-        if c == b'/' && v + 1 < n && b[v + 1] == b'*' {
-            v = skip_comment(b, v);
-            continue;
-        }
-        if c == b'"' || c == b'\'' {
-            v = skip_string(b, v);
-            continue;
-        }
-        match c {
-            b'(' => depth += 1,
-            b')' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
-            }
-            b';' if depth == 0 => break,
-            b'}' if depth == 0 => break,
-            _ => {}
-        }
-        v += 1;
-    }
-    v
-}
-
-// ── expansion ───────────────────────────────────────────────────────────────
-
-/// One left-to-right pass replacing each top-level `var(...)` with its resolved
-/// value. Returns the rewritten string and whether any replacement happened.
-/// `var(` inside strings/comments is left untouched. Replacements are inserted
-/// verbatim (they may still contain `var()`, resolved on the next pass).
-fn expand_once(input: &str, map: &BTreeMap<String, String>) -> (String, bool) {
-    let b = input.as_bytes();
-    let n = b.len();
-    let mut out: Vec<u8> = Vec::with_capacity(n + 16);
-    let mut i = 0;
-    let mut changed = false;
-    while i < n {
-        // Copy comments verbatim.
-        if b[i] == b'/' && i + 1 < n && b[i + 1] == b'*' {
-            let end = skip_comment(b, i);
-            out.extend_from_slice(&b[i..end]);
-            i = end;
-            continue;
-        }
-        // Copy strings verbatim (a `var(` inside a string is literal text).
-        if b[i] == b'"' || b[i] == b'\'' {
-            let end = skip_string(b, i);
-            out.extend_from_slice(&b[i..end]);
-            i = end;
-            continue;
-        }
-        // `var(` not glued to a preceding ident char (so `xvar(` / `--my-var(`
-        // are not matched).
-        if is_var_at(b, i) && !(i > 0 && is_name(b[i - 1])) {
-            if let Some((end, name, fallback)) = parse_var_args(input, i + 3) {
-                let repl = match map.get(&name) {
-                    Some(v) => v.as_str(),
-                    None => fallback.as_deref().unwrap_or(""),
-                };
-                out.extend_from_slice(repl.as_bytes());
-                changed = true;
-                i = end;
-                continue;
-            }
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    let s = match String::from_utf8(out) {
-        Ok(s) => s,
-        // Cannot happen (we only copy exact byte ranges of a valid &str and
-        // insert valid UTF-8), but never panic on stylesheet input.
-        Err(e) => String::from_utf8_lossy(&e.into_bytes()).into_owned(),
-    };
-    (s, changed)
-}
-
-/// Parse the argument list of a `var(` whose `(` is at byte index `open`.
-/// Returns `(index-after-close-paren, name, fallback)`. The name is the first
-/// argument (must start with `--`); the fallback, if a top-level comma is
-/// present, is the raw remaining text (may itself contain commas, parens, and
-/// nested `var()`). Whitespace around name/fallback is trimmed. `None` if the
-/// parens are unbalanced or the first argument isn't a custom-property name —
-/// then the caller leaves the text as-is.
 fn parse_var_args(input: &str, open: usize) -> Option<(usize, String, Option<String>)> {
     let b = input.as_bytes();
     let n = b.len();
@@ -556,261 +140,344 @@ fn is_ws(c: u8) -> bool {
     matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0c)
 }
 
+// ── Je Element, nicht je Dokument ───────────────────────────────────────────
+//
+// Frueher lief hier ein Textlauf ueber das ganze Blatt: EINE Karte, ein Wert
+// je Name fuer das ganze Dokument. Das traegt das Muster, fuer das es gebaut
+// war (`:root` setzt eine Palette), und bricht bei dem, das jedes moderne
+// Rahmenwerk benutzt — die Basisklasse liest die Variable, jede Variante
+// setzt sie neu:
+//
+//     .btn         { --bs-btn-bg: transparent; background: var(--bs-btn-bg) }
+//     .btn-primary { --bs-btn-bg: #0d6efd }
+//     .btn-link    { --bs-btn-bg: transparent }   <- steht ZULETZT im Blatt
+//
+// `.btn-link` trifft einen `<button class="btn btn-primary">` nie und gewann
+// trotzdem: jeder Bootstrap-Knopf war durchsichtig. Eine Custom Property ist
+// eine GEERBTE Eigenschaft — sie gehoert in die Kaskade, je Element. Dort
+// steht sie jetzt (`style::resolve_in`); hier bleibt nur, was eine Karte ist
+// und wie ein Wert daraus entsteht.
+
+/// Die Custom Properties, die auf einem Element gelten.
+///
+/// Eine flache Liste und keine Karte: ein Element traegt selten mehr als ein
+/// paar Dutzend, und ein linearer Vergleich ueber kurze Namen ist billiger
+/// als das Hashen, das eine Karte je Zugriff kostet.
+pub type VarMap = alloc::vec::Vec<(alloc::rc::Rc<str>, alloc::rc::Rc<str>)>;
+
+/// Steht ein `var()` in diesem Wert? Ein Bytescan, damit der Normalfall —
+/// die allermeisten Deklarationen haben keins — nichts kostet.
+pub fn has_var(v: &str) -> bool { contains_var(v.as_bytes()) }
+
+pub fn var_get<'a>(map: &'a VarMap, name: &str) -> Option<&'a str> {
+    map.iter().find(|(k, _)| &**k == name).map(|(_, v)| &**v)
+}
+
+/// Setzen oder ersetzen. Ersetzen statt Anhaengen, damit die Liste nicht mit
+/// jeder ueberschriebenen Deklaration waechst.
+pub fn var_set(map: &mut VarMap, name: &str, value: &str) {
+    match map.iter_mut().find(|(k, _)| &**k == name) {
+        Some(slot) => slot.1 = alloc::rc::Rc::from(value),
+        None => map.push((alloc::rc::Rc::from(name), alloc::rc::Rc::from(value))),
+    }
+}
+
+/// `var()` in einem Wert ersetzen, gegen die Karte DIESES Elements.
+///
+/// `skip` ist der Name, dessen eigener Wert gerade ausgerechnet wird: er darf
+/// sich nicht selbst einsetzen. `--x: var(--x, 1rem)` ist die Schreibweise,
+/// mit der eine Seite „nimm den geerbten Wert, sonst 1rem" sagt (Wikipedia
+/// tut das); wuerde er sich selbst finden, bliebe ein `var()` stehen und die
+/// Deklaration waere ungueltig.
+pub fn expand(value: &str, map: &VarMap, skip: Option<&str>) -> String {
+    if !contains_var(value.as_bytes()) {
+        return value.into();
+    }
+    let mut cur = expand_pass(value, map, skip);
+    for _ in 1..MAX_PASSES {
+        if !contains_var(cur.0.as_bytes()) || !cur.1 {
+            break;
+        }
+        cur = expand_pass(&cur.0, map, skip);
+    }
+    cur.0
+}
+
+/// Deckel gegen Ringe: `--a: var(--b); --b: var(--a)` hoert von selbst nicht
+/// auf. Was danach noch ein `var()` traegt, ist ungueltig — und das ist die
+/// richtige Antwort, nicht ein erfundener Wert.
+const MAX_PASSES: usize = 16;
+
+fn expand_pass(input: &str, map: &VarMap, skip: Option<&str>) -> (String, bool) {
+    let b = input.as_bytes();
+    let mut out = String::with_capacity(input.len() + 16);
+    let mut i = 0;
+    let mut changed = false;
+    while i < b.len() {
+        if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
+            let j = skip_comment(b, i);
+            out.push_str(&input[i..j]);
+            i = j;
+            continue;
+        }
+        if b[i] == b'"' || b[i] == b'\'' {
+            let j = skip_string(b, i);
+            out.push_str(&input[i..j]);
+            i = j;
+            continue;
+        }
+        if is_var_at(b, i) {
+            if let Some((end, name, fallback)) = parse_var_args(input, i + 3) {
+                let hit = if skip == Some(name.as_str()) { None } else { var_get(map, &name) };
+                match (hit, fallback) {
+                    (Some(v), _) => out.push_str(v),
+                    (None, Some(f)) => out.push_str(&f),
+                    // Kein Wert und kein Rueckfall: das `var()` bleibt stehen,
+                    // der Wertparser scheitert daran, und die Deklaration
+                    // faellt weg — CSS Variables 1 §3.
+                    (None, None) => { out.push_str(&input[i..end]); i = end; continue }
+                }
+                changed = true;
+                i = end;
+                continue;
+            }
+        }
+        let ch_len = input[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+        out.push_str(&input[i..i + ch_len]);
+        i += ch_len;
+    }
+    (out, changed)
+}
+
 // ── tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::DrawOp;
 
-    /// **Bekannte Luecke, gemessen 2026-09-04 an Bootstrap 5.3.3.**
-    ///
-    /// Die Aufloesung laeuft EINMAL ueber den Blatt-TEXT, mit einer globalen
-    /// Karte: ein Wert je Name. Das traegt das Muster, fuer das sie gebaut
-    /// wurde (`:root` setzt eine Palette), und bricht bei dem, das moderne
-    /// Rahmenwerke benutzen: die Basisklasse liest die Variable, jede
-    /// Variante setzt sie neu.
-    ///
-    ///     .btn        { --bs-btn-bg: transparent; background: var(--bs-btn-bg) }
-    ///     .btn-primary{ --bs-btn-bg: #0d6efd }
-    ///     …
-    ///     .btn-link   { --bs-btn-bg: transparent }   <- steht ZULETZT im Blatt
-    ///
-    /// `.btn-link` trifft einen `<button class="btn btn-primary">` nie, gewinnt
-    /// aber die globale Karte — und damit ist JEDER Bootstrap-Knopf
-    /// durchsichtig. Dasselbe trifft `.alert-*`, `.table-striped`,
-    /// `.list-group-item.active`: das meiste, was auf der Komponentenvorlage
-    /// falsch aussieht, ist DIESE eine Ursache.
-    ///
-    /// Der Fix ist keine Zeile: die Aufloesung muss in die KASKADE, je
-    /// Element und vererbt, statt in einen Textlauf davor. Solange sie das
-    /// nicht ist, steht dieser Test hier und ist `ignore`d — er beschreibt,
-    /// was gelten soll.
-    ///
-    ///     cargo test --release -- --ignored
-    #[test]
-    #[ignore = "bekannte Luecke: Variablen werden global aufgeloest, nicht je Element"]
-    fn a_rule_that_does_not_match_must_not_decide_the_value() {
-        let css = ".a{--x:transparent;background-color:var(--x)}\
-                   .b{--x:#ff0000}\
-                   .c{--x:#00ff00}";
-        let out = resolve_vars(css, crate::css::Media::new(1000.0, false), &[]);
-        // Auf einem Element mit `class="a b"` muss `.b` gewinnen. Ein Textlauf
-        // kann das nicht wissen — deshalb steht hier die Anforderung und nicht
-        // eine Behauptung ueber die heutige Ausgabe.
-        assert!(out.contains("background-color:#ff0000"),
-                "eine nicht passende Regel hat den Wert entschieden: {out}");
+    fn map(pairs: &[(&str, &str)]) -> VarMap {
+        pairs.iter().map(|(k, v)| (alloc::rc::Rc::from(*k), alloc::rc::Rc::from(*v))).collect()
     }
 
-    /// Ein Kommentar vor einer Regel gehoert nicht in ihren Selektor.
+    /// Die Farbe, die eine Seite auf ihr erstes Textstueck malt.
     ///
-    /// Gemessen 2026-09-04 an Bootstrap 5.3.3: die Kopfzeile enthaelt
-    /// Versionsnummer und URLs, also Punkte — und ein Punkt macht einen
-    /// Selektor „bedingt". Damit verlor `:root` seinen Schutz und der
-    /// Dunkelblock, der im Dokument NICHTS trifft, gewann die ganze Palette.
+    /// Der kuerzeste ehrliche Weg, einen KASKADIERTEN Wert zu pruefen: er geht
+    /// durch Parser, Treffer, Kaskade, Vererbung und Einsetzung — also durch
+    /// alles, was hier zu pruefen ist. Eine Probe direkt auf `expand` sagt
+    /// ueber die Kaskade nichts.
+    fn painted_text(html: &str, css: &str) -> Option<(u8, u8, u8)> {
+        let mut eng = crate::Engine::new();
+        let lay = eng.layout_ext(html, css, 800);
+        lay.ops.iter().find_map(|o| match o {
+            DrawOp::Text { color, .. } => Some((color.c.0, color.c.1, color.c.2)),
+            _ => None,
+        })
+    }
+
+    /// Alle Fuellfarben einer Seite. Eine Liste und kein „die erste": welche
+    /// Fuellung die Leinwand ist und welche das Element, haengt am Aufbau der
+    /// Seite — und die Probe soll den WERT pruefen, nicht die Malreihenfolge.
+    fn fills(html: &str, css: &str) -> alloc::vec::Vec<(u8, u8, u8)> {
+        let mut eng = crate::Engine::new();
+        let lay = eng.layout_ext(html, css, 800);
+        lay.ops.iter().filter_map(|o| match o {
+            DrawOp::Rect { color, .. } | DrawOp::RoundRect { color, .. } =>
+                Some((color.c.0, color.c.1, color.c.2)),
+            _ => None,
+        }).collect()
+    }
+
+    // ── Die Kaskade: WER entscheidet den Wert ───────────────────────────────
+
+    /// **Der Fehler, wegen dem die Aufloesung in die Kaskade gezogen wurde.**
+    ///
+    /// Bis 0.59.0 lief ein Textlauf ueber das ganze Blatt mit einer globalen
+    /// Karte. `.c` trifft das Element nicht und gewann trotzdem — auf einer
+    /// echten Seite hiess das: `.btn-link{--bs-btn-bg:transparent}` steht
+    /// zuletzt im Blatt, und JEDER Bootstrap-Knopf war durchsichtig.
     #[test]
-    fn a_comment_before_a_rule_is_not_part_of_its_selector() {
+    fn a_rule_that_does_not_match_must_not_decide_the_value() {
+        let css = ".a{--x:#00f;color:var(--x)} .b{--x:#f00} .c{--x:#0f0}";
+        assert_eq!(painted_text("<p class='a b'>x</p>", css), Some((255, 0, 0)));
+    }
+
+    /// Und die Umkehrung: die eigene Regel des Elements gewinnt gegen eine
+    /// gleichnamige, die woanders steht.
+    #[test]
+    fn the_element_own_declaration_wins_over_a_later_foreign_one() {
+        let css = ".btn{--bg:transparent;background-color:var(--bg)}\
+                   .btn-primary{--bg:#0d6efd}\
+                   .btn-link{--bg:transparent}";
+        let f = fills("<p class='btn btn-primary'>x</p>", css);
+        assert!(f.contains(&(13, 110, 253)), "die Fuellung des Elements fehlt: {f:?}");
+    }
+
+    /// Eine Custom Property wird VERERBT — der Kern der Sache, und der Grund,
+    /// warum sie nicht bloss je Element gilt.
+    #[test]
+    fn a_custom_property_inherits_to_descendants() {
+        let css = ".wrap{--c:#0f0} .deep{color:var(--c)}";
+        assert_eq!(painted_text("<div class='wrap'><div><p class='deep'>x</p></div></div>", css),
+                   Some((0, 255, 0)));
+    }
+
+    /// Und ein Nachfahre darf sie ueberschreiben, ohne den Vorfahren zu
+    /// beruehren.
+    #[test]
+    fn a_descendant_may_shadow_an_inherited_value() {
+        let css = ".wrap{--c:#f00} .inner{--c:#00f} .t{color:var(--c)}";
+        assert_eq!(painted_text("<div class='wrap'><div class='inner'><p class='t'>x</p></div></div>", css),
+                   Some((0, 0, 255)));
+    }
+
+    #[test]
+    fn root_palette_reaches_everything() {
+        assert_eq!(painted_text("<p>x</p>", ":root{--c:#f00} p{color:var(--c)}"), Some((255, 0, 0)));
+    }
+
+    /// Ein Kommentar vor einer Regel gehoert nicht in ihren Selektor —
+    /// und seit die Kaskade wirklich TRIFFT, kann er es auch nicht mehr.
+    /// Gemessen an Bootstrap 5.3.3: die Kopfzeile trug Versionsnummer und
+    /// URLs, und der Dunkelblock gewann die ganze helle Palette.
+    #[test]
+    fn a_theme_block_that_matches_nothing_stays_out() {
         let css = "/*! Thing v5.3.3 (https://example.com/) */\
                    :root,[data-t=light]{--bg:#fff}\
                    [data-t=dark]{--bg:#000}\
-                   body{background-color:var(--bg)}";
-        let out = resolve_vars(css, crate::css::Media::new(1000.0, false), &[]);
-        assert!(out.contains("background-color:#fff"),
-                "der Dunkelblock hat die helle Palette ueberschrieben: {out}");
+                   p{color:var(--bg)}";
+        assert_eq!(painted_text("<p>x</p>", css), Some((255, 255, 255)));
     }
 
+    /// Und wenn das Attribut DA ist, gewinnt der Dunkelblock — sonst waere
+    /// die Regel darueber bloss ein „nie".
     #[test]
-    fn simple_root_var() {
-        let out = resolve_vars(":root{--c:#f00} a{color:var(--c)}", crate::css::Media::new(800.0, false), &[]);
-        assert!(out.contains("color:#f00"), "{out}");
+    fn the_same_theme_block_wins_when_it_does_match() {
+        let css = ":root,[data-t=light]{--bg:#fff} [data-t=dark]{--bg:#000} p{color:var(--bg)}";
+        assert_eq!(painted_text("<html data-t='dark'><body><p>x</p></body></html>", css),
+                   Some((0, 0, 0)));
     }
 
-    /// A custom property that references itself is invalid at computed-value
-    /// time (CSS Variables 1 §3), so a consumer with a fallback must use it.
-    /// Wikipedia ships `--font-size-medium: var(--font-size-medium, 1rem)`;
-    /// leaving it in the map made the expansion substitute the name with
-    /// itself, stop changing, and leave a literal `var(…)` in the text — which
-    /// then failed every `calc()` that consumed it.
+    /// MediaWiki liefert eine Definition je Benutzereinstellung und die Seite
+    /// traegt genau eine davon. Die andere darf nicht gewinnen — frueher
+    /// brauchte es dafuer eine Heuristik, heute reicht das Treffen.
     #[test]
-    fn a_self_referential_variable_falls_back() {
-        let out = resolve_vars(
-            ":root{--fs:var(--fs,1rem)} a{width:calc(var(--fs,1rem) + 4px)}",
-            crate::css::Media::new(800.0, false),
-            &[],
-        );
-        assert!(out.contains("calc(1rem + 4px)"), "{out}");
-        assert!(!out.contains("var("), "no var() may survive: {out}");
+    fn only_the_class_the_root_carries_counts() {
+        let css = "html.pref-1{--s:#f00} html.pref-2{--s:#0f0} p{color:var(--s)}";
+        assert_eq!(painted_text("<html class='pref-1'><body><p>x</p></body></html>", css),
+                   Some((255, 0, 0)));
     }
 
-    /// The same for a cycle that goes through another name.
+    /// Spezifitaet schlaegt Reihenfolge, wie bei jeder anderen Eigenschaft.
     #[test]
-    fn an_indirect_variable_cycle_falls_back() {
-        let out = resolve_vars(
-            ":root{--a:var(--b);--b:var(--a)} p{color:var(--a,red)}",
-            crate::css::Media::new(800.0, false),
-            &[],
-        );
-        assert!(out.contains("color:red"), "{out}");
+    fn specificity_decides_before_order() {
+        let css = "#id{--c:#f00} .cls{--c:#0f0} p{color:var(--c)}";
+        assert_eq!(painted_text("<p id='id' class='cls'>x</p>", css), Some((255, 0, 0)));
     }
 
-    /// A long chain is not a cycle and must still resolve.
+    /// Ein `@media`, das nicht gilt, liefert auch keine Variablen.
     #[test]
-    fn a_deep_chain_is_not_a_cycle() {
-        let out = resolve_vars(
-            ":root{--a:var(--b);--b:var(--c);--c:#0f0} p{color:var(--a)}",
-            crate::css::Media::new(800.0, false),
-            &[],
-        );
-        assert!(out.contains("color:#0f0"), "{out}");
+    fn a_media_block_that_does_not_apply_contributes_nothing() {
+        let css = ":root{--c:#f00} @media (max-width:480px){:root{--c:#0f0}} p{color:var(--c)}";
+        assert_eq!(painted_text("<p>x</p>", css), Some((255, 0, 0)));
+    }
+
+    // ── Die Einsetzung: WAS aus einem Wert wird ─────────────────────────────
+
+    #[test]
+    fn simple_substitution() {
+        assert_eq!(expand("var(--c)", &map(&[("--c", "#f00")]), None), "#f00");
     }
 
     #[test]
     fn fallback_used_when_undefined() {
-        let out = resolve_vars("a{color:var(--missing, blue)}", crate::css::Media::new(800.0, false), &[]);
-        assert!(out.contains("color:blue"), "{out}");
+        assert_eq!(expand("var(--missing, blue)", &map(&[]), None), "blue");
     }
 
     #[test]
     fn fallback_ignored_when_defined() {
-        let out = resolve_vars(":root{--c:green} a{color:var(--c, blue)}", crate::css::Media::new(800.0, false), &[]);
-        assert!(out.contains("color:green"), "{out}");
-        assert!(!out.contains("color:blue"), "{out}");
+        assert_eq!(expand("var(--c, blue)", &map(&[("--c", "green")]), None), "green");
     }
 
+    /// Kein Wert und kein Rueckfall: das `var()` bleibt stehen, der
+    /// Wertparser scheitert daran, und die Deklaration faellt weg. Genau das
+    /// verlangt CSS Variables 1 §3 — ein leerer Wert waere etwas anderes.
     #[test]
-    fn undefined_no_fallback_is_empty() {
-        // `color:var(--nope)` → `color:` (invalid at computed-value time ~ "").
-        let out = resolve_vars("a{color:var(--nope)}", crate::css::Media::new(800.0, false), &[]);
-        assert!(out.contains("a{color:}"), "{out}");
+    fn undefined_without_fallback_stays_and_invalidates() {
+        assert_eq!(expand("var(--nope)", &map(&[]), None), "var(--nope)");
     }
 
     #[test]
     fn nested_var_in_value() {
-        let out = resolve_vars(":root{--a:var(--b);--b:#0d6efd} a{color:var(--a)}", crate::css::Media::new(800.0, false), &[]);
-        assert!(out.contains("color:#0d6efd"), "{out}");
+        assert_eq!(expand("var(--a)", &map(&[("--a", "var(--b)"), ("--b", "#0f0")]), None), "#0f0");
     }
 
     #[test]
     fn nested_var_in_fallback() {
-        let out = resolve_vars(":root{--b:orange} a{color:var(--missing, var(--b))}", crate::css::Media::new(800.0, false), &[]);
-        assert!(out.contains("color:orange"), "{out}");
-    }
-
-    #[test]
-    fn deeply_nested_fallback_with_calc() {
-        // Fallback holds calc() with its own nested var() + fallback.
-        let out = resolve_vars("a{width:var(--x, calc(1px + var(--y, 2px)))}", crate::css::Media::new(800.0, false), &[]);
-        assert!(out.contains("width:calc(1px + 2px)"), "{out}");
+        assert_eq!(expand("var(--x, calc(1px + var(--y, 2px)))", &map(&[]), None),
+                   "calc(1px + 2px)");
     }
 
     #[test]
     fn fallback_with_commas_and_parens() {
-        // rgba() inside the fallback must survive intact (paren-depth parse).
-        let out = resolve_vars("a{box-shadow:0 0 0 var(--x, rgba(0,0,0,.1))}", crate::css::Media::new(800.0, false), &[]);
-        assert!(out.contains("box-shadow:0 0 0 rgba(0,0,0,.1)"), "{out}");
-    }
-
-    #[test]
-    fn defined_var_wins_over_rgba_fallback() {
-        let out = resolve_vars(":root{--x:#111} a{color:var(--x, rgba(0,0,0,.1))}", crate::css::Media::new(800.0, false), &[]);
-        assert!(out.contains("color:#111"), "{out}");
-        assert!(!out.contains("rgba"), "{out}");
-    }
-
-    #[test]
-    fn multiple_uses() {
-        let out = resolve_vars(":root{--c:#123456} a{color:var(--c)} b{border-color:var(--c)}", crate::css::Media::new(800.0, false), &[]);
-        assert!(out.contains("color:#123456"), "{out}");
-        assert!(out.contains("border-color:#123456"), "{out}");
-    }
-
-    #[test]
-    fn last_unconditional_declaration_wins() {
-        // Among equally unconditional root declarations, the later one wins.
-        let out = resolve_vars(":root{--c:red} html{--c:green} a{color:var(--c)}", crate::css::Media::new(800.0, false), &[]);
-        assert!(out.contains("color:green"), "{out}");
-    }
-
-    #[test]
-    fn qualified_declaration_does_not_override_the_unconditional_one() {
-        // A class-qualified definition is conditional on that class being
-        // present; it must not win document-wide (the 0.1.51 dark-mode leak,
-        // which turned every page dark because one theme class defined the
-        // whole palette).
-        let out = resolve_vars(":root{--c:red} .x{--c:green} a{color:var(--c)}", crate::css::Media::new(800.0, false), &[]);
-        assert!(out.contains("color:red"), "{out}");
+        assert_eq!(expand("0 0 0 var(--x, rgba(0,0,0,.1))", &map(&[]), None),
+                   "0 0 0 rgba(0,0,0,.1)");
     }
 
     #[test]
     fn whitespace_variations() {
-        let out = resolve_vars(":root{--c:#abc} a{color:var( --c )}", crate::css::Media::new(800.0, false), &[]);
-        assert!(out.contains("color:#abc"), "{out}");
-        let out2 = resolve_vars("a{color:var(  --missing ,  blue  )}", crate::css::Media::new(800.0, false), &[]);
-        assert!(out2.contains("color:blue"), "{out2}");
+        assert_eq!(expand("var( --c )", &map(&[("--c", "#abc")]), None), "#abc");
+        assert_eq!(expand("var(  --missing ,  blue  )", &map(&[]), None), "blue");
     }
 
     #[test]
     fn uppercase_var_function() {
-        // CSS function names are case-insensitive.
-        let out = resolve_vars(":root{--c:#0f0} a{color:VAR(--c)}", crate::css::Media::new(800.0, false), &[]);
-        assert!(out.contains("color:#0f0"), "{out}");
+        assert_eq!(expand("VAR(--c)", &map(&[("--c", "#0f0")]), None), "#0f0");
     }
 
     #[test]
-    #[test]
-    fn media_block_that_does_not_apply_is_not_collected() {
-        // The dark-mode palette must not beat `:root` at a viewport where the
-        // query doesn't hold — www.wikipedia.org paints its whole page from
-        // `--background-color-base`, and the leak turned every site dark.
-        let css = ":root{--bg:#fff} @media (prefers-color-scheme:dark){:root{--bg:#101418}} a{background:var(--bg)}";
-        assert!(resolve_vars(css, crate::css::Media::new(1880.0, false), &[]).contains("background:#fff"));
-
-        // Width queries gate on the actual viewport, both ways.
-        let css = ":root{--pad:32px} @media (max-width:480px){:root{--pad:8px}} a{padding:var(--pad)}";
-        assert!(resolve_vars(css, crate::css::Media::new(1880.0, false), &[]).contains("padding:32px"));
-        assert!(resolve_vars(css, crate::css::Media::new(400.0, false), &[]).contains("padding:8px"));
-
-        // A block that DOES hold still contributes, nested ones included.
-        let css = ":root{--c:red} @media screen{@media (min-width:600px){:root{--c:green}}} a{color:var(--c)}";
-        assert!(resolve_vars(css, crate::css::Media::new(1880.0, false), &[]).contains("color:green"));
-    }
-
-    fn no_vars_passthrough() {
-        let css = "a{color:red;font-weight:bold}";
-        assert_eq!(resolve_vars(css, crate::css::Media::new(800.0, false), &[]), css);
+    fn var_inside_string_is_not_expanded() {
+        assert_eq!(expand(r#""var(--c)""#, &map(&[("--c", "red")]), None), r#""var(--c)""#);
     }
 
     #[test]
-    fn var_inside_string_not_expanded() {
-        let out = resolve_vars(r#":root{--c:red} a{content:"var(--c)"}"#, crate::css::Media::new(800.0, false), &[]);
-        assert!(out.contains(r#"content:"var(--c)""#), "{out}");
+    fn multiple_uses_in_one_value() {
+        assert_eq!(expand("var(--c) var(--c)", &map(&[("--c", "1px")]), None), "1px 1px");
+    }
+
+    /// **Wikipedias Schreibweise.** `--fs: var(--fs, 1rem)` heisst „nimm den
+    /// geerbten Wert, sonst 1rem". Duerfte sie sich selbst finden, bliebe ein
+    /// `var()` stehen und die Deklaration waere ungueltig — die Suchleiste
+    /// verlor daran einmal ihre Lupe.
+    #[test]
+    fn a_self_referential_declaration_takes_the_fallback() {
+        assert_eq!(expand("var(--fs,1rem)", &map(&[]), Some("--fs")), "1rem");
+    }
+
+    /// Ein Ring aus zwei Namen dreht sich nicht ewig.
+    #[test]
+    fn a_cycle_terminates() {
+        let m = map(&[("--a", "var(--b)"), ("--b", "var(--a)")]);
+        let out = expand("var(--a)", &m, None);
+        assert!(out.contains("var("), "der Ring haette einen Wert liefern muessen? {out}");
     }
 
     #[test]
-    fn declaration_in_comment_ignored() {
-        // A `--x:` inside a comment must not be collected as a real value.
-        let out = resolve_vars("/* --c: red */ :root{--c:blue} a{color:var(--c)}", crate::css::Media::new(800.0, false), &[]);
-        assert!(out.contains("color:blue"), "{out}");
+    fn a_deep_chain_is_not_a_cycle() {
+        let m = map(&[("--a", "var(--b)"), ("--b", "var(--c)"), ("--c", "#0f0")]);
+        assert_eq!(expand("var(--a)", &m, None), "#0f0");
     }
 
-    #[test]
-    fn cyclic_reference_terminates() {
-        // Must not hang; residual var() is acceptable, just no infinite loop.
-        let out = resolve_vars(":root{--a:var(--b);--b:var(--a)} x{color:var(--a)}", crate::css::Media::new(800.0, false), &[]);
-        let _ = out; // reaching here means it terminated
-    }
-
+    /// Die Form, in der Bootstrap seine Palette weiterreicht.
     #[test]
     fn bootstrap_like_chain() {
-        let css = ":root{--bs-blue:#0d6efd;--bs-primary:var(--bs-blue)}\
-                   .btn{background-color:var(--bs-primary);border-color:var(--bs-primary, #ccc)}";
-        let out = resolve_vars(css, crate::css::Media::new(800.0, false), &[]);
-        assert!(out.contains("background-color:#0d6efd"), "{out}");
-        assert!(out.contains("border-color:#0d6efd"), "{out}");
+        let m = map(&[("--bs-blue", "#0d6efd"), ("--bs-primary", "var(--bs-blue)")]);
+        assert_eq!(expand("var(--bs-primary)", &m, None), "#0d6efd");
+        assert_eq!(expand("var(--bs-primary, #ccc)", &m, None), "#0d6efd");
     }
 
     #[test]
-    fn empty_fallback() {
-        let out = resolve_vars("a{margin:var(--m,)}", crate::css::Media::new(800.0, false), &[]);
-        assert!(out.contains("a{margin:}"), "{out}");
+    fn a_value_without_var_is_returned_unchanged() {
+        assert_eq!(expand("1px solid red", &map(&[("--c", "x")]), None), "1px solid red");
     }
 }

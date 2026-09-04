@@ -1431,6 +1431,31 @@ pub fn resolve(
     sib_count: u32,
     viewport_w: f32,
 ) -> ComputedStyle {
+    let (mut own, empty) = (None, crate::vars::VarMap::new());
+    resolve_in(subject, parent, theme, sheet, ancestors, prev_siblings, sib_count,
+               viewport_w, &empty, &mut own)
+}
+
+/// Wie [`resolve`], aber mit den Custom Properties des ELTERNTEILS — und es
+/// gibt die eigenen zurueck.
+///
+/// `own` bleibt `None`, wenn das Element keine einzige Custom Property setzt.
+/// Das ist der Normalfall und der Grund fuer die Form: Bootstraps `:root`
+/// traegt ueber 200 Namen, und die je Element zu KOPIEREN waere teurer als
+/// die ganze Kaskade. Wer nichts setzt, teilt die Karte des Elternteils.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_in(
+    subject: &ElemInfo,
+    parent: &ComputedStyle,
+    theme: &Theme,
+    sheet: &Stylesheet,
+    ancestors: &[ElemInfo],
+    prev_siblings: &[ElemInfo],
+    sib_count: u32,
+    viewport_w: f32,
+    inherited: &crate::vars::VarMap,
+    own: &mut Option<crate::vars::VarMap>,
+) -> ComputedStyle {
     // The SUBJECT arrives as an `ElemInfo`, not a bare `Element`: it carries the
     // pointer state, and a caller that built it by hand would silently cascade
     // `:hover` as false. The compiler now asks every call site for it.
@@ -1582,16 +1607,43 @@ pub fn resolve(
     let inline = el.attr("style");
     if !sheet.is_empty() {
         let mut matched = sheet.matched(subject, ancestors, prev_siblings, sib_count, crate::css::Media::new(viewport_w, theme.is_dark()));
-        matched.sort_by_key(|(layer, spec, order, _, _)| (*layer, *spec, *order));
+        matched.sort_by_key(|(layer, spec, order, _, _, _, _)| (*layer, *spec, *order));
         // Pass 1 — normal <style> declarations, low→high layer/specificity.
         // `revert-layer` needs to know which layer a declaration came from, so
         // it is resolved before anything is applied — and only when the sheet
         // actually contains one, which no page but a cascade reftest does.
+        // ── Custom Properties zuerst ──────────────────────────────────
+        //
+        // Vor jeder anderen Deklaration, denn jede andere darf sie lesen. Und
+        // in derselben Kaskadenordnung: Ebene, Spezifitaet, Reihenfolge —
+        // eine Regel, die dieses Element nicht trifft, steht hier gar nicht
+        // erst in der Liste. Genau das war der Fehler des Textlaufs.
+        for (_, _, _, _, _, customs, _) in &matched {
+            for (name, val) in *customs {
+                set_var(own, inherited, name, val);
+            }
+        }
+        if let Some(decls) = inline {
+            for (name, val) in inline_customs(decls, false) {
+                set_var(own, inherited, &name, &val);
+            }
+        }
+        for (_, _, _, _, _, _, imp) in &matched {
+            for (name, val) in *imp {
+                set_var(own, inherited, name, val);
+            }
+        }
+        if let Some(decls) = inline {
+            for (name, val) in inline_customs(decls, true) {
+                set_var(own, inherited, &name, &val);
+            }
+        }
+
         let has_revert = matched
             .iter()
-            .any(|(_, _, _, d, i)| d.iter().chain(i.iter()).any(|(_, v)| is_revert_layer(v)));
+            .any(|(_, _, _, d, i, _, _)| d.iter().chain(i.iter()).any(|(_, v)| is_revert_layer(v)));
         let dead = if has_revert { resolve_revert_layers(&matched, false) } else { Vec::new() };
-        for (layer, _, _, decls, _) in &matched {
+        for (layer, _, _, decls, _, _, _) in &matched {
             for (p, v) in *decls {
                 if !dead.is_empty()
                     && (dead.contains(&(*p, *layer)) || dead.contains(&(Prop::All, *layer)))
@@ -1601,18 +1653,18 @@ pub fn resolve(
                 if is_revert_layer(v) {
                     continue;
                 }
-                apply_decl(*p, v, theme, Some(parent), &mut s);
+                apply_var_decl(*p, v, theme, parent, &mut s, own, inherited);
             }
         }
         if let Some(decls) = inline {
-            apply_declarations_pass(decls, theme, Some(parent), &mut s, false);
+            apply_declarations_pass_vars(decls, theme, Some(parent), &mut s, false, own, inherited);
         }
         // Pass 2 — `!important`, where the layer axis reverses (css-cascade-5
         // §6.4.4): the FIRST layer wins, and an unlayered important loses to
         // every layered one. Specificity and order keep their direction.
-        matched.sort_by_key(|(layer, spec, order, _, _)| (crate::css::imp_rank(*layer), *spec, *order));
+        matched.sort_by_key(|(layer, spec, order, _, _, _, _)| (crate::css::imp_rank(*layer), *spec, *order));
         let dead_imp = if has_revert { resolve_revert_layers(&matched, true) } else { Vec::new() };
-        for (layer, _, _, _, imp) in &matched {
+        for (layer, _, _, _, imp, _, _) in &matched {
             for (p, v) in *imp {
                 if !dead_imp.is_empty()
                     && (dead_imp.contains(&(*p, *layer)) || dead_imp.contains(&(Prop::All, *layer)))
@@ -1622,11 +1674,11 @@ pub fn resolve(
                 if is_revert_layer(v) {
                     continue;
                 }
-                apply_decl(*p, v, theme, Some(parent), &mut s);
+                apply_var_decl(*p, v, theme, parent, &mut s, own, inherited);
             }
         }
         if let Some(decls) = inline {
-            apply_declarations_pass(decls, theme, Some(parent), &mut s, true);
+            apply_declarations_pass_vars(decls, theme, Some(parent), &mut s, true, own, inherited);
         }
     } else if let Some(decls) = inline {
         apply_declarations_pass(decls, theme, Some(parent), &mut s, false);
@@ -1814,14 +1866,14 @@ pub fn resolve_pseudo(
     if matched.is_empty() {
         return None;
     }
-    matched.sort_by_key(|(layer, spec, order, _, _)| (*layer, *spec, *order));
+    matched.sort_by_key(|(layer, spec, order, _, _, _, _)| (*layer, *spec, *order));
     // The `content` declarations in cascade order (later overrides earlier). An
     // INVALID one is dropped at parse time (CSS Syntax 3 §4), so the winner is
     // the LAST one that parses — not simply the last one. The template may
     // reference counters (`counter()`/`counters()`), resolved later against the
     // layout-time counter stack; a plain string is a single `Text` piece.
     let mut content_vals: Vec<&str> = Vec::new();
-    for (_, _, _, decls, imp) in &matched {
+    for (_, _, _, decls, imp, _, _) in &matched {
         for (p, v) in decls.iter().chain(imp.iter()) {
             if *p == Prop::Content {
                 content_vals.push(v);
@@ -1831,7 +1883,7 @@ pub fn resolve_pseudo(
     let template = content_vals.iter().rev().find_map(|v| parse_content_template(v))?;
     let mut s = inherit_reset(own);
     for pass_imp in [false, true] {
-        for (_, _, _, decls, imp) in &matched {
+        for (_, _, _, decls, imp, _, _) in &matched {
             for (p, v) in if pass_imp { *imp } else { *decls } {
                 if *p == Prop::Content {
                     continue;
@@ -2338,6 +2390,75 @@ fn split_important(v: &str) -> (&str, bool) {
 
 /// Apply the `style="…"` declarations whose importance matches `important`, so
 /// callers run the two cascade passes. css-syntax-3 syntax, unknown props skipped.
+/// Eine Custom Property setzen — und dabei ihren eigenen Wert einsetzen.
+///
+/// `skip` ist ihr eigener Name: `--x: var(--x, 1rem)` heisst „nimm den
+/// geerbten Wert, sonst 1rem" (so schreibt es Wikipedia). Wuerde sie sich
+/// selbst finden, bliebe ein `var()` stehen und die Deklaration waere
+/// ungueltig.
+fn set_var(own: &mut Option<crate::vars::VarMap>, inherited: &crate::vars::VarMap,
+           name: &str, val: &str) {
+    // Erst hier kopieren: wer nichts setzt, teilt die Karte des Elternteils.
+    if own.is_none() { *own = Some(inherited.clone()); }
+    let map = own.as_mut().unwrap();
+    let v = if crate::vars::has_var(val) {
+        crate::vars::expand(val, map, Some(name))
+    } else {
+        val.into()
+    };
+    crate::vars::var_set(map, name, &v);
+}
+
+/// Die Custom Properties eines `style`-Attributs.
+fn inline_customs(decls: &str, important: bool) -> alloc::vec::Vec<(String, String)> {
+    let mut out = alloc::vec::Vec::new();
+    for decl in crate::css::split_decls(decls) {
+        let Some((name, raw)) = decl.split_once(':') else { continue };
+        let name = name.trim();
+        if !name.starts_with("--") || name.len() <= 2 { continue }
+        let (val, imp) = split_important(raw.trim());
+        if imp != important || val.is_empty() { continue }
+        out.push((name.into(), val.into()));
+    }
+    out
+}
+
+/// Eine gewoehnliche Deklaration anwenden, `var()` vorher ersetzt.
+fn apply_var_decl(prop: Prop, v: &str, theme: &Theme, parent: &ComputedStyle,
+                  s: &mut ComputedStyle, own: &Option<crate::vars::VarMap>,
+                  inherited: &crate::vars::VarMap) {
+    if crate::vars::has_var(v) {
+        let map = own.as_ref().unwrap_or(inherited);
+        let e = crate::vars::expand(v, map, None);
+        apply_decl(prop, &e, theme, Some(parent), s);
+    } else {
+        apply_decl(prop, v, theme, Some(parent), s);
+    }
+}
+
+fn apply_declarations_pass_vars(decls: &str, theme: &Theme, parent: Option<&ComputedStyle>,
+                                s: &mut ComputedStyle, important: bool,
+                                own: &Option<crate::vars::VarMap>,
+                                inherited: &crate::vars::VarMap) {
+    for decl in crate::css::split_decls(decls) {
+        let mut it = decl.splitn(2, ':');
+        let Some(prop) = it.next().map(|p| p.trim().to_ascii_lowercase()) else { continue };
+        let Some(raw) = it.next().map(|v| v.trim()) else { continue };
+        let (val, imp) = split_important(raw);
+        if prop.is_empty() || val.is_empty() || imp != important || prop.starts_with("--") {
+            continue;
+        }
+        let key = crate::css::prop_key(&prop);
+        if crate::vars::has_var(val) {
+            let map = own.as_ref().unwrap_or(inherited);
+            let e = crate::vars::expand(val, map, None);
+            apply_decl(key, &e, theme, parent, s);
+        } else {
+            apply_decl(key, val, theme, parent, s);
+        }
+    }
+}
+
 fn apply_declarations_pass(decls: &str, theme: &Theme, parent: Option<&ComputedStyle>, s: &mut ComputedStyle, important: bool) {
     for decl in crate::css::split_decls(decls) {
         let mut it = decl.splitn(2, ':');
@@ -2412,7 +2533,7 @@ fn resolve_revert_layers(matched: &[crate::css::Matched], important: bool) -> Ve
     let mut dead: Vec<(Prop, u16)> = Vec::new();
     loop {
         let mut winner: Vec<(Prop, u16, bool)> = Vec::new();
-        for (layer, _, _, decls, imp) in matched {
+        for (layer, _, _, decls, imp, _, _) in matched {
             for (p, v) in if important { *imp } else { *decls } {
                 // `all: revert-layer` reverts the layer for EVERY property, so
                 // a dead `All` takes the whole layer with it.

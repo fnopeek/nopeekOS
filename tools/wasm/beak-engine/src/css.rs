@@ -1107,6 +1107,14 @@ pub struct Rule {
     /// The cascade runs two passes over every matched rule, so leaving the
     /// suffix on meant re-scanning every value's tail twice per element.
     decls: Vec<(Prop, String)>,
+    /// Custom Properties (`--name: wert`) mit ihrem NAMEN.
+    ///
+    /// Sie koennen nicht in `decls` stehen: dort ist der Name schon zu einem
+    /// `Prop` geworden, und fuer `--irgendwas` ist das `Prop::Unknown` — der
+    /// Name waere weg. Sie brauchen ihn aber, denn sie werden je Element
+    /// kaskadiert und vererbt, wie jede andere geerbte Eigenschaft auch.
+    customs: Vec<(String, String)>,
+    customs_imp: Vec<(String, String)>,
     /// The `!important` ones, same shape. Usually empty, which is the point:
     /// pass 2 then has nothing to walk.
     decls_imp: Vec<(Prop, String)>,
@@ -1203,7 +1211,14 @@ impl Layers {
 /// applies the normal pass first, then the important one — and because the
 /// layer axis reverses between the two passes, the important pass re-sorts on
 /// `imp_rank` rather than reusing pass 1's order.
-pub type Matched<'a> = (u16, u32, u32, &'a [(Prop, String)], &'a [(Prop, String)]);
+/// Eine getroffene Regel: (Ebene, Spezifitaet, Reihenfolge, normal,
+/// `!important`, Custom Properties normal, Custom Properties `!important`).
+///
+/// Die Custom Properties fahren MIT und nicht in einem zweiten Lauf: das
+/// Treffen selbst ist der teuerste Teil der Kaskade (~95 % der Layoutzeit auf
+/// einer echten Seite), und zweimal zu treffen waere zweimal zu bezahlen.
+pub type Matched<'a> = (u16, u32, u32, &'a [(Prop, String)], &'a [(Prop, String)],
+                        &'a [(String, String)], &'a [(String, String)]);
 
 /// A parsed author stylesheet.
 ///
@@ -1512,6 +1527,8 @@ impl Stylesheet {
                     rule.order,
                     rule.decls.as_slice(),
                     rule.decls_imp.as_slice(),
+                    rule.customs.as_slice(),
+                    rule.customs_imp.as_slice(),
                 )),
             }
         }
@@ -1527,7 +1544,7 @@ pub fn collect(dom: &Dom, media: Media) -> Stylesheet {
 /// Author stylesheet = already-fetched external `<link>` CSS (document order:
 /// `<head>` first) followed by inline `<style>` blocks. The shell fetches the
 /// linked files (the engine is host-free) and hands their bytes in as `external`.
-pub fn collect_all(dom: &Dom, external: &str, media: Media) -> Stylesheet {
+pub fn collect_all(dom: &Dom, external: &str, _media: Media) -> Stylesheet {
     let mut css = String::from(external);
     css.push('\n');
     gather_style_text(&dom.root, &mut css);
@@ -1536,16 +1553,21 @@ pub fn collect_all(dom: &Dom, external: &str, media: Media) -> Stylesheet {
         gather_inline_urls(&dom.root, &mut sheet);
         return sheet;
     }
-    // Expand CSS custom properties (`var(--x)`) as a pre-pass so the parser +
-    // cascade never see variables — modern sites (Bootstrap's `--bs-*`) lean
-    // on them heavily.
-    // The document root's classes decide which of a site's per-preference
-    // custom-property blocks actually applies (MediaWiki ships one per user
-    // setting on `html.…-clientpref-N`).
-    let root = dom.root_element();
-    let root_class_attr = root.attr("class").unwrap_or("");
-    let root_classes: Vec<&str> = root_class_attr.split_whitespace().collect();
-    let css = crate::vars::resolve_vars(&css, media, &root_classes);
+    // Custom Properties werden NICHT mehr hier ersetzt.
+    //
+    // Bis 0.59.0 lief davor ein Textlauf ueber das ganze Blatt, mit einer
+    // globalen Karte: ein Wert je Name fuer das ganze Dokument. Das traegt
+    // das Muster, fuer das es gebaut war (`:root` setzt eine Palette), und
+    // bricht bei dem, das jedes Rahmenwerk benutzt — die Basisklasse liest
+    // die Variable, jede Variante setzt sie neu. Eine Regel, die ein Element
+    // NICHT trifft, entschied dessen Wert.
+    //
+    // Eine Custom Property ist eine GEERBTE Eigenschaft. Sie gehoert in die
+    // Kaskade, je Element, und dort steht sie jetzt: `Rule` haelt sie mit
+    // Namen, `Matched` traegt sie mit, `style::resolve_in` kaskadiert und
+    // vererbt sie, und `vars::expand` setzt sie beim Anwenden eines Wertes
+    // ein. Damit fallen auch die Heuristiken weg, mit denen der Textlauf
+    // raten musste, welcher Block „unbedingt" ist.
     let mut sheet = parse(&css);
     // An inline `style="background-image:url(…)"` never passes through the
     // sheet text, so its URL would have no entry to resolve against.
@@ -1832,22 +1854,30 @@ fn parse_into(
         let parsed = parse_decls(body);
         let mut decls = Vec::with_capacity(parsed.len());
         let mut decls_imp = Vec::new();
+        let mut customs = Vec::new();
+        let mut customs_imp = Vec::new();
         for (name, val) in parsed {
-            let key = prop_key(&name);
             let t = val.trim_end();
             let n = t.len();
-            if n >= 10 && t.is_char_boundary(n - 10) && t[n - 10..].eq_ignore_ascii_case("!important") {
-                decls_imp.push((key, t[..n - 10].trim_end().into()));
-            } else {
-                decls.push((key, val));
+            let imp = n >= 10 && t.is_char_boundary(n - 10)
+                && t[n - 10..].eq_ignore_ascii_case("!important");
+            let val = if imp { t[..n - 10].trim_end().into() } else { val };
+            if name.starts_with("--") && name.len() > 2 {
+                if imp { customs_imp.push((name, val)) } else { customs.push((name, val)) }
+                continue;
             }
+            let key = prop_key(&name);
+            if imp { decls_imp.push((key, val)) } else { decls.push((key, val)) }
         }
-        if !selectors.is_empty() && !(decls.is_empty() && decls_imp.is_empty()) {
+        if !selectors.is_empty()
+            && !(decls.is_empty() && decls_imp.is_empty()
+                 && customs.is_empty() && customs_imp.is_empty()) {
             // The layer id is stable; `parse` turns it into a rank once the
             // whole sheet is read (a nested layer declared late moves its
             // siblings, so a rank handed out here would go stale).
             let lid = if layer.is_empty() { UNLAYERED } else { layers.id(layer) };
-            rules.push(Rule { selectors, decls, decls_imp, order: *order, media: media.cloned(), layer: lid });
+            rules.push(Rule { selectors, decls, decls_imp, customs, customs_imp,
+                              order: *order, media: media.cloned(), layer: lid });
             *order += 1;
         }
     }
@@ -2994,7 +3024,7 @@ mod tests {
         let ss = parse("p { color: a } p.x { color: b } #p { color: c }");
         let e = info("p", Some("p"), &["x"]);
         let mut m = ss.matched(&e, &[], &[], 0, Media::new(1000.0, false));
-        m.sort_by_key(|(layer, spec, order, _, _)| (*layer, *spec, *order));
+        m.sort_by_key(|(layer, spec, order, _, _, _, _)| (*layer, *spec, *order));
         // ascending: type(p) < class(p.x) < id(#p)
         assert_eq!(m.len(), 3);
         assert!(m[0].1 < m[1].1 && m[1].1 < m[2].1);
@@ -3009,7 +3039,7 @@ mod tests {
         let ss = parse("@layer a, b; @layer b { p { color: b } } @layer a { p { color: a } }");
         let mut m = ss.matched(&info("p", None, &[]), &[], &[], 0, Media::new(800.0, false));
         assert_eq!(m.len(), 2, "both layered rules kept");
-        m.sort_by_key(|(layer, spec, order, _, _)| (*layer, *spec, *order));
+        m.sort_by_key(|(layer, spec, order, _, _, _, _)| (*layer, *spec, *order));
         // `@layer a, b` fixed the order, so `b` wins even though `a`'s rule is
         // written last — layer beats document order.
         assert_eq!(m.last().unwrap().3[0].1, "b");
@@ -3019,11 +3049,11 @@ mod tests {
     fn unlayered_beats_every_layer_and_important_reverses_it() {
         let ss = parse("@layer a { p { color: a } } p { color: plain }");
         let mut m = ss.matched(&info("p", None, &[]), &[], &[], 0, Media::new(800.0, false));
-        m.sort_by_key(|(layer, spec, order, _, _)| (*layer, *spec, *order));
+        m.sort_by_key(|(layer, spec, order, _, _, _, _)| (*layer, *spec, *order));
         assert_eq!(m.last().unwrap().3[0].1, "plain", "unlayered wins a normal decl");
         // The `!important` pass runs the layer axis the other way round, so the
         // same unlayered rule is the WEAKEST there (css-cascade-5 §6.4.4).
-        m.sort_by_key(|(layer, spec, order, _, _)| (imp_rank(*layer), *spec, *order));
+        m.sort_by_key(|(layer, spec, order, _, _, _, _)| (imp_rank(*layer), *spec, *order));
         assert_eq!(m.first().unwrap().3[0].1, "plain");
     }
 
@@ -3033,7 +3063,7 @@ mod tests {
     fn a_nested_layer_sorts_inside_its_parent_not_at_the_end() {
         let ss = parse("@layer a; @layer b; @layer a.c { p { color: ac } } @layer b { p { color: b } }");
         let mut m = ss.matched(&info("p", None, &[]), &[], &[], 0, Media::new(800.0, false));
-        m.sort_by_key(|(layer, spec, order, _, _)| (*layer, *spec, *order));
+        m.sort_by_key(|(layer, spec, order, _, _, _, _)| (*layer, *spec, *order));
         assert_eq!(m.first().unwrap().3[0].1, "ac", "a.c sits inside a, before b");
         assert_eq!(m.last().unwrap().3[0].1, "b");
     }
@@ -3062,8 +3092,8 @@ mod tests {
         // `:root` and `html` both match; `:root.night` does not (no class).
         assert_eq!(m.len(), 2);
         // `:root` has class-level specificity, `html` only type-level.
-        let root_spec = m.iter().find(|(_, _, _, d, _)| d[0].1 == "a").unwrap().1;
-        let tag_spec = m.iter().find(|(_, _, _, d, _)| d[0].1 == "c").unwrap().1;
+        let root_spec = m.iter().find(|(_, _, _, d, _, _, _)| d[0].1 == "a").unwrap().1;
+        let tag_spec = m.iter().find(|(_, _, _, d, _, _, _)| d[0].1 == "c").unwrap().1;
         assert!(root_spec > tag_spec);
         // Not the root element → no match.
         assert!(ss.matched(&info("body", None, &[]), &[], &[], 0, Media::new(1000.0, false)).len() == 0);
@@ -3088,7 +3118,7 @@ mod tests {
         let dom = dom::parse("<html><head><style>p{color:blue}</style></head><body><p>x</p></body></html>");
         let ss = collect_all(&dom, "p { color: red }", Media::new(800.0, false));
         let mut m = ss.matched(&info("p", None, &[]), &[], &[], 0, Media::new(1000.0, false));
-        m.sort_by_key(|(layer, spec, order, _, _)| (*layer, *spec, *order));
+        m.sort_by_key(|(layer, spec, order, _, _, _, _)| (*layer, *spec, *order));
         assert_eq!(m.len(), 2, "both external + inline rules match");
         assert!(m[0].2 < m[1].2, "external rule has earlier document order");
     }
