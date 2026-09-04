@@ -36,25 +36,7 @@ impl Interp {
                 Ok(self.new_array(out))
             }
             Expr::Object(props) => self.eval_object(props, env),
-            Expr::Func(f) => {
-                // Eine benannte Funktions-EXPRESSION sieht ihren eigenen Namen
-                // in ihrem Rumpf — `(function e(){ … e … })`. Das ist der Weg,
-                // auf dem minifizierter Code rekursiert, und ohne ihn stirbt er
-                // an einem einbuchstabigen `ReferenceError`. Eine DEKLARATION
-                // bekommt diese Bindung NICHT: dort steht der Name schon
-                // aussen, und eine innere wuerde eine Neuzuweisung verdecken.
-                if !f.is_arrow {
-                    if let Some(n) = &f.name {
-                        let inner = Env::new(Some(env.clone()), false);
-                        let cl = self.make_closure(f.clone(), &inner, None);
-                        inner.borrow_mut().vars.insert(Rc::from(n.as_str()),
-                            Binding { value: cl.clone(), mutable: false, initialized: true });
-                        return Ok(cl);
-                    }
-                }
-                Ok(self.make_closure(f.clone(), env,
-                    if f.is_arrow { Some(env_this(env)) } else { None }))
-            }
+            Expr::Func(f) => Ok(self.func_value(f.clone(), env)),
             Expr::Class(c) => self.eval_class(c, env),
             Expr::Template { quasis, exprs } => {
                 let mut s = String::new();
@@ -425,6 +407,43 @@ impl Interp {
             });
         }
         let v = self.eval(arg, env)?;
+        self.unary_val(op, v)
+    }
+
+    /// Der WERTteil eines Praefixoperators — alles ausser `delete` und dem
+    /// `typeof` auf einem unbekannten Namen, die beide den Ausdruck selbst
+    /// brauchen und nicht nur sein Ergebnis.
+    ///
+    /// Eigene Funktion, weil die Befehlsmaschine (`js::vm`) sie ruft. Zwei
+    /// Umsetzungen desselben Operators nebeneinander laufen auseinander, und
+    /// die schwaechere gewinnt dann immer.
+    /// Der Wert eines Funktions-AUSDRUCKS.
+    ///
+    /// Eine benannte Funktions-EXPRESSION sieht ihren eigenen Namen in ihrem
+    /// Rumpf — `(function e(){ … e … })`. Das ist der Weg, auf dem
+    /// minifizierter Code rekursiert, und ohne ihn stirbt er an einem
+    /// einbuchstabigen `ReferenceError`. Eine DEKLARATION bekommt diese
+    /// Bindung NICHT: dort steht der Name schon aussen, und eine innere wuerde
+    /// eine Neuzuweisung verdecken.
+    ///
+    /// Eigene Funktion, weil die Befehlsmaschine sie ruft. Sie dort
+    /// nachzubauen kostete beim ersten Versuch sechs Tests — genau die
+    /// Rekursion ueber den eigenen Namen.
+    pub fn func_value(&mut self, f: Rc<Func>, env: &Rc<RefCell<Env>>) -> Value {
+        if !f.is_arrow {
+            if let Some(n) = f.name.clone() {
+                let inner = Env::new(Some(env.clone()), false);
+                let cl = self.make_closure(f, &inner, None);
+                inner.borrow_mut().vars.insert(Rc::from(n.as_str()),
+                    Binding { value: cl.clone(), mutable: false, initialized: true });
+                return cl;
+            }
+        }
+        let this_val = if f.is_arrow { Some(env_this(env)) } else { None };
+        self.make_closure(f, env, this_val)
+    }
+
+    pub fn unary_val(&mut self, op: UnaryOp, v: Value) -> C<Value> {
         Ok(match op {
             UnaryOp::Minus => Value::Num(-self.to_number(&v)?),
             UnaryOp::Plus => Value::Num(self.to_number(&v)?),
@@ -434,6 +453,29 @@ impl Interp {
             UnaryOp::Void => Value::Undefined,
             UnaryOp::Delete => unreachable!(),
         })
+    }
+
+    /// `typeof <name>` — wirft NICHT, wenn es den Namen nicht gibt. Der
+    /// klassische Weg, ein globales Objekt zu pruefen.
+    pub fn typeof_ident(&mut self, n: &str, env: &Rc<RefCell<Env>>) -> C<Value> {
+        if env_lookup(env, n).is_none() {
+            let g = self.realm.global.clone();
+            if !self.has_property(&g, n) {
+                return Ok(Value::str("undefined"));
+            }
+        }
+        let v = self.load_ident(n, env)?;
+        self.unary_val(UnaryOp::Typeof, v)
+    }
+
+    /// Einen Namen lesen (`x`) bzw. zuweisen (`x = v`) — dieselben Funktionen,
+    /// die der Baumlaeufer benutzt, nur oeffentlich fuer die Maschine.
+    pub fn vm_load(&mut self, n: &str, env: &Rc<RefCell<Env>>) -> C<Value> {
+        self.load_ident(n, env)
+    }
+
+    pub fn vm_store(&mut self, n: &str, v: Value, env: &Rc<RefCell<Env>>) -> C<()> {
+        self.store(&Expr::Ident(alloc::string::String::from(n)), v, env)
     }
 
     fn eval_update(&mut self, op: UpdateOp, arg: &Expr, prefix: bool,

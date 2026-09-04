@@ -1,0 +1,280 @@
+//! Die Befehlsmaschine — eine Schleife statt eines Rust-Stapels.
+//!
+//! **Was hier anders ist als im Baumlaeufer, und nur DAS:** der Zustand einer
+//! laufenden Auswertung liegt in Feldern (`stack`, `frames`), nicht in
+//! Rust-Aufrufrahmen. Wegspeichern und weiterlaufen lassen ist damit
+//! moeglich — das ist die ganze Begruendung des Umbaus, und alles, was
+//! Generatoren und `async`/`await` brauchen.
+//!
+//! **Was hier NICHT anders ist: die Bedeutung.** Jeder Befehl ruft dieselbe
+//! Hilfe wie der Baumlaeufer — `binary`, `unary_val`, `vm_load`, `vm_store`,
+//! `get`, `set`, `call`, `construct`, `make_closure`. Wo diese Datei rechnet,
+//! statt zu rufen, waere eine zweite Semantik, und die laeuft still
+//! auseinander.
+//!
+//! **Stand dieser Stufe.** Aufrufe gehen weiter durch `Interp::call`, also
+//! ueber den Rust-Stapel; ein Rahmen je JS-Funktion kommt in der naechsten
+//! Stufe. Diese hier baut den Rahmenstapel und beweist mit test262, dass die
+//! Bedeutung sich nicht bewegt hat — die Zahl darf sich NICHT aendern.
+
+use alloc::rc::Rc;
+use alloc::vec::Vec;
+use core::cell::RefCell;
+
+use super::code::{Chunk, Op};
+use super::interp::{Abrupt, Env, Interp, C};
+use super::value::Value;
+
+/// Ein Aufrufrahmen. Heute gibt es genau einen (das Programm); die Form steht
+/// schon, weil sie der Punkt der Uebung ist.
+struct Frame {
+    chunk: Rc<Chunk>,
+    ip: usize,
+    /// Die Umgebung, in der dieser Rahmen laeuft. `PushEnv`/`PopEnv` schieben
+    /// hier, nicht auf dem Rust-Stapel.
+    envs: Vec<Rc<RefCell<Env>>>,
+    /// Der Stapelstand beim Betreten — beim Verlassen wird darauf zurueck-
+    /// geschnitten, damit ein `Ret` mitten im Ausdruck nichts liegenlaesst.
+    base: usize,
+}
+
+pub struct Vm {
+    stack: Vec<Value>,
+    frames: Vec<Frame>,
+    /// Der Abschlusswert des Programms (sein letzter Ausdruckswert).
+    completion: Value,
+}
+
+impl Vm {
+    pub fn new() -> Vm {
+        Vm { stack: Vec::new(), frames: Vec::new(), completion: Value::Undefined }
+    }
+
+    /// Ein uebersetztes Programm fahren. `env` ist die Umgebung, in die der
+    /// Rufer schon hochgezogen hat — das Hochziehen bleibt beim Baumlaeufer,
+    /// weil es auf der UMGEBUNG arbeitet und fuer beide Maschinen dasselbe ist.
+    pub fn run(&mut self, i: &mut Interp, chunk: Rc<Chunk>, env: &Rc<RefCell<Env>>) -> C<Value> {
+        self.frames.push(Frame { chunk, ip: 0, envs: alloc::vec![env.clone()], base: 0 });
+        loop {
+            let (chunk, ip) = {
+                let f = self.frames.last().unwrap();
+                (f.chunk.clone(), f.ip)
+            };
+            if ip >= chunk.ops.len() {
+                return Ok(core::mem::replace(&mut self.completion, Value::Undefined));
+            }
+            self.frames.last_mut().unwrap().ip += 1;
+            // Derselbe Deckel wie im Baumlaeufer, an derselben Stelle gezaehlt:
+            // ein Befehl ist ein Schritt. Ohne ihn haengt ein `while(true)`
+            // den ganzen Lauf auf.
+            i.steps += 1;
+            if i.steps > i.max_steps {
+                return Err(i.throw_kind("RangeError", "step budget exhausted"));
+            }
+            match self.step(i, &chunk, ip) {
+                Ok(Some(v)) => return Ok(v),
+                Ok(None) => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// `Ok(Some(v))` heisst: der aeusserste Rahmen ist zurueck.
+    fn step(&mut self, i: &mut Interp, chunk: &Chunk, ip: usize) -> C<Option<Value>> {
+        let env = self.frames.last().unwrap().envs.last().unwrap().clone();
+        match &chunk.ops[ip] {
+            Op::Const(k) => self.push(chunk.constants[*k as usize].clone()),
+            Op::LoadVar(n) => {
+                let v = i.vm_load(&chunk.names[*n as usize], &env)?;
+                self.push(v);
+            }
+            Op::StoreVar(n) => {
+                let v = self.top();
+                i.vm_store(&chunk.names[*n as usize], v, &env)?;
+            }
+            Op::DeclVar { name, mutable } => {
+                let v = self.pop();
+                let n = &chunk.names[*name as usize];
+                i.init_binding(n, v, &env);
+                if !*mutable {
+                    i.make_const(n, &env);
+                }
+            }
+            Op::This => {
+                let v = super::interp::env_this(&env);
+                self.push(v);
+            }
+            Op::Pop => {
+                self.pop();
+            }
+            Op::Dup => {
+                let v = self.top();
+                self.push(v);
+            }
+            // `a b` → `b a`: der Aufruf braucht `callee` unter `this`, und der
+            // Uebersetzer legt sie in der anderen Reihenfolge ab.
+            Op::Swap => {
+                let n = self.stack.len();
+                self.stack.swap(n - 1, n - 2);
+            }
+            Op::Un(op) => {
+                let v = self.pop();
+                let r = i.unary_val(*op, v)?;
+                self.push(r);
+            }
+            Op::TypeofVar(n) => {
+                let v = i.typeof_ident(&chunk.names[*n as usize], &env)?;
+                self.push(v);
+            }
+            Op::Bin(op) => {
+                let r = self.pop();
+                let l = self.pop();
+                let v = i.binary(*op, l, r)?;
+                self.push(v);
+            }
+            Op::Jump(t) => self.jump(*t),
+            Op::JumpFalse(t) => {
+                let v = self.pop();
+                if !v.truthy() {
+                    self.jump(*t);
+                }
+            }
+            Op::JumpFalseKeep(t) => {
+                if !self.top().truthy() {
+                    self.jump(*t);
+                }
+            }
+            Op::JumpTrueKeep(t) => {
+                if self.top().truthy() {
+                    self.jump(*t);
+                }
+            }
+            Op::JumpNullishKeep(t) => {
+                if !matches!(self.top(), Value::Undefined | Value::Null) {
+                    self.jump(*t);
+                }
+            }
+            Op::GetProp(n) => {
+                let obj = self.pop();
+                let v = i.get(&obj, &chunk.names[*n as usize])?;
+                self.push(v);
+            }
+            Op::GetIndex => {
+                let key = self.pop();
+                let obj = self.pop();
+                // `to_prop_key`, NICHT `to_string`: ein Symbol ist ein
+                // Schluessel und keine Zeichenkette, und es zu einer zu machen
+                // hat `Symbol.iterator` & Co. ins Leere zeigen lassen — 35
+                // Tests, gefunden vom Diff gegen den Baumlaeufer.
+                let k = i.to_prop_key(&key)?;
+                let v = i.get(&obj, &k)?;
+                self.push(v);
+            }
+            Op::SetProp(n) => {
+                let val = self.pop();
+                let obj = self.pop();
+                i.set(&obj, &chunk.names[*n as usize], val.clone())?;
+                self.push(val);
+            }
+            Op::SetIndex => {
+                let val = self.pop();
+                let key = self.pop();
+                let obj = self.pop();
+                let k = i.to_prop_key(&key)?;
+                i.set(&obj, &k, val.clone())?;
+                self.push(val);
+            }
+            Op::Call(argc) => {
+                let args = self.take(*argc as usize);
+                let this = self.pop();
+                let callee = self.pop();
+                let v = i.call(&callee, this, &args)?;
+                self.push(v);
+            }
+            Op::New(argc) => {
+                let args = self.take(*argc as usize);
+                let callee = self.pop();
+                let v = i.construct(&callee, &args)?;
+                self.push(v);
+            }
+            Op::MakeArray(n) => {
+                let items = self.take(*n as usize);
+                let v = i.new_array(items);
+                self.push(v);
+            }
+            Op::Closure(f) => {
+                let v = i.func_value(chunk.funcs[*f as usize].clone(), &env);
+                self.push(v);
+            }
+            Op::Throw => {
+                let v = self.pop();
+                return Err(Abrupt::Throw(v));
+            }
+            Op::PushEnv(b) => {
+                let child = Env::new(Some(env.clone()), false);
+                // Erst binden, dann laufen: `let` steht von Blockanfang an in
+                // der Totzone, eine Funktionsdeklaration ist von Blockanfang
+                // an fertig. Genau die zwei Schleifen aus `Interp::hoist`.
+                for d in &chunk.blocks[*b as usize] {
+                    match d {
+                        super::code::BlockDecl::Tdz { name, mutable } =>
+                            i.declare_tdz(&chunk.names[*name as usize], *mutable, &child),
+                        super::code::BlockDecl::Func { name, func } => {
+                            let v = i.make_closure(chunk.funcs[*func as usize].clone(), &child, None);
+                            i.bind_here(&chunk.names[*name as usize], v, &child);
+                        }
+                    }
+                }
+                self.frames.last_mut().unwrap().envs.push(child);
+            }
+            Op::PopEnv => {
+                self.frames.last_mut().unwrap().envs.pop();
+            }
+            Op::SetCompletion => {
+                self.completion = self.pop();
+            }
+            Op::Ret => {
+                let v = if self.stack.len() > self.frames.last().unwrap().base {
+                    self.pop()
+                } else {
+                    Value::Undefined
+                };
+                let f = self.frames.pop().unwrap();
+                self.stack.truncate(f.base);
+                if self.frames.is_empty() {
+                    // Der Wert eines PROGRAMMS ist sein letzter Ausdruckswert,
+                    // nicht das, was am Ende auf dem Stapel liegt.
+                    let c = core::mem::replace(&mut self.completion, Value::Undefined);
+                    return Ok(Some(if matches!(c, Value::Undefined) { v } else { c }));
+                }
+                self.push(v);
+            }
+        }
+        Ok(None)
+    }
+
+    fn jump(&mut self, t: u32) {
+        self.frames.last_mut().unwrap().ip = t as usize;
+    }
+
+    fn push(&mut self, v: Value) {
+        self.stack.push(v);
+    }
+
+    /// Der Uebersetzer erzeugt nur ausgeglichenen Code; ein leerer Stapel hier
+    /// waere ein Fehler IM UEBERSETZER, kein Programmfehler. `Undefined` statt
+    /// `panic!`, weil ein Absturz der Maschine in einem Kernel keine
+    /// Fehlermeldung ist, sondern ein Halt.
+    fn pop(&mut self) -> Value {
+        self.stack.pop().unwrap_or(Value::Undefined)
+    }
+
+    fn top(&mut self) -> Value {
+        self.stack.last().cloned().unwrap_or(Value::Undefined)
+    }
+
+    fn take(&mut self, n: usize) -> Vec<Value> {
+        let at = self.stack.len().saturating_sub(n);
+        self.stack.split_off(at)
+    }
+}

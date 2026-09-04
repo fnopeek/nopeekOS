@@ -342,6 +342,38 @@ impl Interp {
         Ok(())
     }
 
+    /// Eine eben angelegte Bindung auf `const` stellen. Getrennt von
+    /// `init_binding`, weil der Baumlaeufer die Veraenderlichkeit schon beim
+    /// Hochziehen setzt und die Maschine erst beim Ausfuehren dort ankommt.
+    /// Eine Bindung anlegen, die es GIBT, aber noch nicht bereit ist — die
+    /// zeitliche Totzone von `let`/`const`/`class`. Dieselbe Zeile, die
+    /// `hoist` schreibt; hier oeffentlich, weil die Befehlsmaschine sie beim
+    /// Betreten eines Blocks braucht.
+    /// Eine fertige Bindung GENAU HIER anlegen — ohne die Kette hochzugehen.
+    ///
+    /// Der Unterschied zu `init_binding` ist der ganze Punkt: das sucht erst
+    /// nach einer vorhandenen Bindung und schreibt DIE. Fuer eine
+    /// Funktionsdeklaration in einem Block ist das falsch, und zwar
+    /// beobachtbar: `let f = 1; { function f(){} }` darf das aeussere `f`
+    /// nicht anfassen (annexB B.3.3 nimmt die var-Bindung genau dann zurueck,
+    /// wenn sie einen frueheren Fehler ausloeste). Sieben Tests.
+    pub fn bind_here(&mut self, name: &str, v: Value, env: &Rc<RefCell<Env>>) {
+        env.borrow_mut().vars.insert(Rc::from(name),
+            Binding { value: v, mutable: true, initialized: true });
+    }
+
+    pub fn declare_tdz(&mut self, name: &str, mutable: bool, env: &Rc<RefCell<Env>>) {
+        env.borrow_mut().vars.insert(Rc::from(name), Binding {
+            value: Value::Undefined, mutable, initialized: false,
+        });
+    }
+
+    pub fn make_const(&mut self, name: &str, env: &Rc<RefCell<Env>>) {
+        if let Some(b) = env.borrow_mut().vars.get_mut(name) {
+            b.mutable = false;
+        }
+    }
+
     pub fn init_binding(&mut self, name: &str, v: Value, env: &Rc<RefCell<Env>>) {
         if let Some(e) = env_lookup(env, name) {
             if let Some(b) = e.borrow_mut().vars.get_mut(name) {

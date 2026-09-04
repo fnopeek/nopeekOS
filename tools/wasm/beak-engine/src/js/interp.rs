@@ -230,6 +230,20 @@ pub struct Interp {
     /// `getComputedStyle` weiter aus dem Inline-Stil — eine Teilantwort, die
     /// die Seite laufen laesst, statt sie mit einem TypeError zu beenden.
     pub style_ctx: Option<StyleCtx>,
+    /// Wieviele Programme die BEFEHLSMASCHINE gefahren hat und wieviele der
+    /// Baumlaeufer — die Zahl, an der die Umstellung gemessen wird. Sie soll
+    /// steigen, waehrend die test262-Zahl STEHEN BLEIBT: das eine ist der
+    /// Fortschritt, das andere das Netz.
+    pub vm_ran: u64,
+    pub vm_declined: u64,
+    /// Warum der Uebersetzer beim letzten Mal abgesagt hat. Ein Name, kein
+    /// Satz — er wird gezaehlt, und eine Zaehlung braucht einen Schluessel.
+    pub vm_decline: Option<&'static str>,
+    /// Aus. Nur fuer die Gegenprobe: derselbe Lauf einmal MIT und einmal OHNE
+    /// die Befehlsmaschine sagt in einem Diff, welche Tests sie verliert. Ohne
+    /// diesen Schalter muesste man den Unterschied erraten, und beim ersten
+    /// Lauf waren es 62 Tests von 69 194 — die findet man nicht durch Lesen.
+    pub vm_off: bool,
     /// Siehe `Geometry`. `None` heisst: der Wirt hat keine eingereicht, und
     /// dann antwortet die Geometrie mit Nullen wie eh und je.
     pub geometry: Option<Geometry>,
@@ -318,6 +332,7 @@ impl Interp {
         Interp { realm, depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX,
                  fake_now: 0.0, doc: None, next_sym: 0, sym_registry: HashMap::new(),
                  cookies: String::new(), cookie_sets: Vec::new(), style_ctx: None,
+                 vm_ran: 0, vm_declined: 0, vm_decline: None, vm_off: false,
                  geometry: None,
                  live_dom: core::cell::RefCell::new(None),
                  jobs: alloc::collections::VecDeque::new(),
@@ -942,14 +957,33 @@ impl Interp {
     // ── Programm ─────────────────────────────────────────────────────────
     pub fn run_program(&mut self, prog: &Program) -> C<Value> {
         let env = self.realm.global_env.clone();
+        // Hochziehen ist fuer BEIDE Maschinen dasselbe: es arbeitet auf der
+        // Umgebung, nicht auf dem Code.
         self.hoist(&prog.body, &env, &env)?;
-        let r = (|| -> C<Value> {
-            let mut last = Value::Undefined;
-            for st in &prog.body {
-                if let Some(v) = self.exec(st, &env)? { last = v; }
+        // **Ganz oder gar nicht.** Was der Uebersetzer kann, faehrt die
+        // Befehlsmaschine; sagt er irgendwo nein, faehrt der Baumlaeufer das
+        // GANZE Programm. Eine Mischung waere ein zweiter Semantikpfad im
+        // selben Lauf, und solche laufen still auseinander.
+        let r = match if self.vm_off { Err(super::code::Unsupported("off")) }
+                      else { super::compile::program(prog) } {
+            Ok(chunk) => {
+                self.vm_ran += 1;
+                self.vm_decline = None;
+                let mut vm = super::vm::Vm::new();
+                vm.run(self, Rc::new(chunk), &env)
             }
-            Ok(last)
-        })();
+            Err(u) => {
+                self.vm_declined += 1;
+                self.vm_decline = Some(u.0);
+                (|| -> C<Value> {
+                    let mut last = Value::Undefined;
+                    for st in &prog.body {
+                        if let Some(v) = self.exec(st, &env)? { last = v; }
+                    }
+                    Ok(last)
+                })()
+            }
+        };
         // Auch wenn das Programm geworfen hat: die Schlange gehoert geleert.
         // Ein `.then`, das vor dem Fehler angelegt wurde, ist angemeldet.
         super::promise::run_jobs(self);

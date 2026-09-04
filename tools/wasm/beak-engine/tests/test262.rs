@@ -21,6 +21,7 @@
 //! wir reissen und V8 besteht, ist UNSERE Luecke. Die eigene Prozentzahl allein
 //! sagt wenig — test262 laeuft den Motoren voraus.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -321,6 +322,13 @@ fn test262_exec() {
     if !tests.is_dir() { eprintln!("[test262] kein Checkout unter {}", tests.display()); return; }
     let filter = std::env::var("T262_FILTER").unwrap_or_default();
     let show: usize = std::env::var("T262_SHOW").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
+    // `T262_FAILLIST=<datei>` schreibt JEDEN gescheiterten Namen dorthin.
+    let faillist = std::env::var("T262_FAILLIST").ok();
+    let mut all_fails: Vec<String> = Vec::new();
+    // Wieviel schon auf der BEFEHLSMASCHINE laeuft — die Zahl, die steigen
+    // soll, waehrend die Bestehensquote steht.
+    let (mut vm_ran, mut vm_declined) = (0u64, 0u64);
+    let mut by_decline: BTreeMap<&'static str, u64> = BTreeMap::new();
 
     let hread = |f: &str| fs::read_to_string(harness.join(f)).unwrap_or_default();
     let mut hmap: std::collections::BTreeMap<String, String> = Default::default();
@@ -403,6 +411,7 @@ fn test262_exec() {
             t_read += t_r.elapsed().as_nanos();
             let t0 = std::time::Instant::now();
             let mut np = 0u128;
+            let mut vm_seen = (0u64, 0u64, None);
             let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let tp = std::time::Instant::now();
                 let prog = match beak_engine::js::parse(&text, false) {
@@ -410,11 +419,37 @@ fn test262_exec() {
                     Err(e) => return Err(format!("SyntaxError: {} @{}", e.msg, e.at)),
                 };
                 np = tp.elapsed().as_nanos();
-                let mut s = beak_engine::js::Session::new(beak_engine::js::TEST_STEPS);
-                if raw { return s.run(&prog); }
-                s.run(if strict { &prologue_strict } else { &prologue })?;
-                s.run(&prog)
+                // `T262_NOVM=1` faehrt denselben Lauf ohne die Befehlsmaschine.
+                // Der Diff der beiden Fehlerlisten ist die einzige Art, die
+                // Umstellung ehrlich zu pruefen.
+                let mut s = if std::env::var("T262_NOVM").is_ok() {
+                    beak_engine::js::Session::new_without_vm(beak_engine::js::TEST_STEPS)
+                } else {
+                    beak_engine::js::Session::new(beak_engine::js::TEST_STEPS)
+                };
+                // Nur der TEST zaehlt fuer die Deckung, nicht der Vorspann:
+                // der ist immer derselbe und wuerde die Zahl verwaessern.
+                let r = if raw {
+                    s.run(&prog)
+                } else {
+                    match s.run(if strict { &prologue_strict } else { &prologue }) {
+                        Err(e) => Err(e),
+                        Ok(()) => {
+                            let (a, b) = (s.interp.vm_ran, s.interp.vm_declined);
+                            let r = s.run(&prog);
+                            vm_seen = (s.interp.vm_ran - a, s.interp.vm_declined - b,
+                                       s.interp.vm_decline);
+                            r
+                        }
+                    }
+                };
+                r
             }));
+            vm_ran += vm_seen.0;
+            vm_declined += vm_seen.1;
+            if let Some(w) = vm_seen.2 {
+                *by_decline.entry(w).or_insert(0u64) += 1;
+            }
             t_parse += np;
             t_exec += t0.elapsed().as_nanos().saturating_sub(np);
             let ms = t0.elapsed().as_millis();
@@ -448,10 +483,32 @@ fn test262_exec() {
             let e = by_msg.entry(key).or_insert((0, rel.clone()));
             e.0 += 1;
             if fails.len() < 5000 { fails.push((rel.clone(), why)); }
+            // ALLE Namen, nicht nur die ersten 5000: nur eine vollstaendige
+            // Liste laesst sich gegen einen zweiten Lauf diffen, und der Diff
+            // ist die einzige ehrliche Pruefung einer Umstellung.
+            all_fails.push(rel.clone());
         }
     }
 
+    if let Some(path) = &faillist {
+        all_fails.sort();
+        all_fails.dedup();
+        let _ = fs::write(path, all_fails.join("\n"));
+        eprintln!("   {} Namen -> {path}", all_fails.len());
+    }
+
     let pct = |n: usize, d: usize| if d == 0 { 0.0 } else { 100.0 * n as f64 / d as f64 };
+    let tot = vm_ran + vm_declined;
+    if tot > 0 {
+        eprintln!("\n   Befehlsmaschine: {vm_ran} von {tot} Programmen = {:.1} %",
+                  100.0 * vm_ran as f64 / tot as f64);
+        let mut d: Vec<(&&str, &u64)> = by_decline.iter().collect();
+        d.sort_by(|a, b| b.1.cmp(a.1));
+        eprintln!("   Woran der Uebersetzer absagt:");
+        for (k, n) in d.iter().take(14) {
+            eprintln!("      {n:6}  {k}");
+        }
+    }
     eprintln!("\n── test262, AUSFUEHRUNG ──");
     eprintln!("   {} Dateien; uebergangen: {skip_dir} Verzeichnis, {skip_feat} Feature, {skip_kind} Modul+async",
         files.len());
