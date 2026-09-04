@@ -91,6 +91,26 @@ pub fn intent_run(args: &str) {
     // burn through hundreds of millions of fuel units in a single
     // call. 10 B keeps the bulk-bench paths comfortable without
     // making infinite loops free.
+    // Eine Fensteranwendung gehoert auf einen Arbeitskern, nicht in die
+    // Shell-Schleife. Woran man sie erkennt: sie hat RENDER SELBST deklariert
+    // (die feste Liste oben vergibt es an jeden, taugt also nicht als
+    // Unterscheidung).
+    //
+    // Das war bisher der Unterschied zwischen „beak vom Dock" und „beak vom
+    // Prompt": der Klickweg spawnt, der Terminalweg fuehrte blockierend aus —
+    // mit `pid: 0`, und ohne Prozessnummer lehnt `fetch::begin_one` jeden
+    // asynchronen Abruf ab. beak ging auf und blieb leer, mit
+    // „async fetch needs a process" im Log.
+    if declared.contains(capability::Rights::RENDER) {
+        let term_idx = crate::shade::terminal::active_idx();
+        if !wasm::spawn_on_worker_with_arg(
+            wasm_bytes.to_vec(), module_cap, term_idx, module_name, launch_arg)
+        {
+            kprintln!("[npk] Failed to spawn '{}'", module_name);
+        }
+        return;
+    }
+
     match wasm::execute_sandboxed_with_arg(
         &wasm_bytes, func_name, &args_vec, module_cap, 10_000_000_000, launch_arg,
     ) {
