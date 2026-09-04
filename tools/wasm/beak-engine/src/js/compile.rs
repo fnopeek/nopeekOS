@@ -279,7 +279,15 @@ impl Compiler {
                 }
             }
             let n = self.chunk.name(name);
-            self.chunk.emit(Op::DeclVar { name: n, mutable: d.kind != VarKind::Const });
+            // `var f = function(){}` gibt der Funktion den Namen der Variablen.
+            if dec.init.is_some() {
+                self.chunk.emit(Op::NameFunc(n));
+            }
+            self.chunk.emit(Op::DeclVar {
+                name: n,
+                mutable: d.kind != VarKind::Const,
+                lexical: d.kind != VarKind::Var,
+            });
         }
         Ok(())
     }
@@ -329,7 +337,31 @@ impl Compiler {
                 }
                 Ok(())
             }
-            Expr::Unary { op: UnaryOp::Delete, .. } => Err(Unsupported("delete")),
+            Expr::Unary { op: UnaryOp::Delete, arg } => match &**arg {
+                Expr::Member { obj, prop, optional: false } => {
+                    self.expr(obj)?;
+                    match &**prop {
+                        MemberProp::Ident(n) => {
+                            let i = self.chunk.name(n);
+                            self.chunk.emit(Op::DeleteProp(i));
+                        }
+                        MemberProp::Computed(k) => {
+                            self.expr(k)?;
+                            self.chunk.emit(Op::DeleteIndex);
+                        }
+                        MemberProp::Private(_) => return Err(Unsupported("private-field")),
+                    }
+                    Ok(())
+                }
+                // `delete x` auf allem anderen ist `true` — genau wie im
+                // Baumlaeufer. Der Ausdruck wird trotzdem NICHT ausgewertet,
+                // auch dort nicht.
+                _ => {
+                    let k = self.chunk.konst(Value::Bool(true));
+                    self.chunk.emit(Op::Const(k));
+                    Ok(())
+                }
+            },
             Expr::Unary { op, arg } => {
                 self.expr(arg)?;
                 self.chunk.emit(Op::Un(*op));
@@ -403,8 +435,12 @@ impl Compiler {
                 },
                 _ => Err(Unsupported("destructuring-assign")),
             },
-            Expr::Assign { .. } => Err(Unsupported("compound-assign")),
-            Expr::Update { .. } => Err(Unsupported("update")),
+            Expr::Assign { op, left, right } => {
+                let Pat::Expr(target) = &**left else {
+                    return Err(Unsupported("destructuring-assign"));
+                };
+                self.compound(*op, target, right)
+            }
             Expr::Member { obj, prop, optional: false } => {
                 self.expr(obj)?;
                 match &**prop {
@@ -450,32 +486,128 @@ impl Compiler {
                         self.chunk.emit(Op::Const(k));
                     }
                 }
-                let n = self.plain_args(args)?;
-                self.chunk.emit(Op::Call(n));
+                if Self::args_have_spread(args) {
+                    self.args_as_array(args)?;
+                    self.chunk.emit(Op::CallSpread);
+                } else {
+                    let n = self.plain_args(args)?;
+                    self.chunk.emit(Op::Call(n));
+                }
                 Ok(())
             }
             Expr::Call { optional: true, .. } => Err(Unsupported("optional-call")),
             Expr::New { callee, args } => {
                 self.expr(callee)?;
-                let n = self.plain_args(args)?;
-                self.chunk.emit(Op::New(n));
+                if Self::args_have_spread(args) {
+                    self.args_as_array(args)?;
+                    self.chunk.emit(Op::NewSpread);
+                } else {
+                    let n = self.plain_args(args)?;
+                    self.chunk.emit(Op::New(n));
+                }
                 Ok(())
             }
             Expr::Array(items) => {
+                let mut mask = Vec::with_capacity(items.len());
                 let mut n = 0u16;
+                let mut any_spread = false;
                 for it in items {
                     match it {
-                        None => return Err(Unsupported("array-hole")),
-                        Some(Expr::Spread(_)) => return Err(Unsupported("spread")),
+                        // Eine LUECKE ist nicht `undefined` — aber der
+                        // Baumlaeufer macht daraus ebenfalls `undefined`
+                        // (`Expr::Array`, `None => Value::Undefined`), und
+                        // dieselbe Naeherung ist besser als eine zweite.
+                        None => {
+                            let k = self.chunk.konst(Value::Undefined);
+                            self.chunk.emit(Op::Const(k));
+                            mask.push(false);
+                        }
+                        Some(Expr::Spread(inner)) => {
+                            self.expr(inner)?;
+                            mask.push(true);
+                            any_spread = true;
+                        }
                         Some(x) => {
                             self.expr(x)?;
-                            n += 1;
+                            mask.push(false);
+                        }
+                    }
+                    n += 1;
+                }
+                if any_spread {
+                    let m = self.chunk.spread_mask(mask);
+                    self.chunk.emit(Op::MakeArraySpread { n, spread: m });
+                } else {
+                    self.chunk.emit(Op::MakeArray(n));
+                }
+                Ok(())
+            }
+            Expr::Object(props) => {
+                self.chunk.emit(Op::NewObject);
+                for p in props {
+                    match &p.value {
+                        ObjPropValue::Spread(e) => {
+                            self.expr(e)?;
+                            self.chunk.emit(Op::SpreadInto);
+                        }
+                        ObjPropValue::Init(e) => {
+                            let k = self.prop_key(&p.key, p.computed)?;
+                            self.expr(e)?;
+                            match k {
+                                Some(n) => { self.chunk.emit(Op::DefineProp(n)); }
+                                None => { self.chunk.emit(Op::DefinePropComputed); }
+                            }
+                        }
+                        ObjPropValue::Method(f) => {
+                            if f.is_generator || f.is_async {
+                                return Err(Unsupported("generator-or-async"));
+                            }
+                            let k = self.prop_key(&p.key, p.computed)?;
+                            let fi = self.chunk.func(f.clone());
+                            self.chunk.emit(Op::Closure(fi));
+                            match k {
+                                Some(n) => { self.chunk.emit(Op::DefineProp(n)); }
+                                None => { self.chunk.emit(Op::DefinePropComputed); }
+                            }
+                        }
+                        ObjPropValue::Get(f) | ObjPropValue::Set(f) => {
+                            if f.is_generator || f.is_async {
+                                return Err(Unsupported("generator-or-async"));
+                            }
+                            let get = matches!(p.value, ObjPropValue::Get(_));
+                            let k = self.prop_key(&p.key, p.computed)?;
+                            let fi = self.chunk.func(f.clone());
+                            self.chunk.emit(Op::Closure(fi));
+                            match k {
+                                Some(name) => { self.chunk.emit(Op::DefineAccessor { name, get }); }
+                                None => { self.chunk.emit(Op::DefineAccessorComputed { get }); }
+                            }
                         }
                     }
                 }
-                self.chunk.emit(Op::MakeArray(n));
                 Ok(())
             }
+            Expr::Template { quasis, exprs } => {
+                let mut n = 0u16;
+                for (idx, q) in quasis.iter().enumerate() {
+                    let k = self.chunk.konst(Value::str(q.cooked.as_deref().unwrap_or("")));
+                    self.chunk.emit(Op::Const(k));
+                    n += 1;
+                    if let Some(x) = exprs.get(idx) {
+                        self.expr(x)?;
+                        n += 1;
+                    }
+                }
+                self.chunk.emit(Op::Concat(n));
+                Ok(())
+            }
+            Expr::Regex { body, flags } => {
+                let b = self.chunk.name(body);
+                let f = self.chunk.name(flags);
+                self.chunk.emit(Op::Regex { body: b, flags: f });
+                Ok(())
+            }
+            Expr::Update { op, arg, prefix } => self.update(*op, arg, *prefix),
             Expr::Func(f) => {
                 if f.is_generator || f.is_async {
                     return Err(Unsupported("generator-or-async"));
@@ -484,13 +616,15 @@ impl Compiler {
                 self.chunk.emit(Op::Closure(i));
                 Ok(())
             }
-            Expr::Object(_) => Err(Unsupported("object-literal")),
-            Expr::Template { .. } | Expr::TaggedTemplate { .. } => Err(Unsupported("template")),
-            Expr::Regex { .. } => Err(Unsupported("regex-literal")),
+            Expr::TaggedTemplate { .. } => Err(Unsupported("tagged-template")),
             Expr::Class(_) => Err(Unsupported("class-expr")),
             Expr::BigInt(_) => Err(Unsupported("bigint")),
             Expr::Super => Err(Unsupported("super")),
-            Expr::Spread(_) => Err(Unsupported("spread")),
+
+            // Ein `...x` ausserhalb von Feld und Argumentliste hat der Parser
+            // schon abgelehnt; hier ist es der nackte Innenausdruck, genau wie
+            // im Baumlaeufer.
+            Expr::Spread(inner) => self.expr(inner),
             Expr::Yield { .. } => Err(Unsupported("yield")),
             Expr::Await(_) => Err(Unsupported("await")),
             Expr::MetaProp { .. } => Err(Unsupported("meta-prop")),
@@ -510,6 +644,154 @@ impl Compiler {
             }
         }
         Ok(n)
+    }
+
+    /// Hat diese Argumentliste ein `...x`? Dann werden ALLE Argumente in ein
+    /// Feld gebaut und der Aufruf nimmt dieses — sonst muesste der Befehl eine
+    /// Zahl tragen, die erst zur Laufzeit feststeht.
+    fn args_have_spread(args: &[Arg]) -> bool {
+        args.iter().any(|a| matches!(a, Arg::Spread(_)))
+    }
+
+    fn args_as_array(&mut self, args: &[Arg]) -> CompileResult<()> {
+        let mut mask = Vec::with_capacity(args.len());
+        for a in args {
+            match a {
+                Arg::Expr(e) => { self.expr(e)?; mask.push(false); }
+                Arg::Spread(e) => { self.expr(e)?; mask.push(true); }
+            }
+        }
+        let n = args.len() as u16;
+        let m = self.chunk.spread_mask(mask);
+        self.chunk.emit(Op::MakeArraySpread { n, spread: m });
+        Ok(())
+    }
+
+    /// Ein statischer Eigenschaftsname wird zum Namensindex; ein berechneter
+    /// laesst seinen Schluessel auf dem Stapel und gibt `None`.
+    fn prop_key(&mut self, k: &PropKey, computed: bool) -> CompileResult<Option<u32>> {
+        if computed {
+            let PropKey::Computed(e) = k else { return Err(Unsupported("prop-key")) };
+            self.expr(e)?;
+            // SOFORT umwandeln: `ToPropertyKey` darf Nebenwirkungen haben, und
+            // die Spec legt fest, dass sie VOR der Auswertung des Wertes
+            // passieren.
+            self.chunk.emit(Op::ToKey);
+            return Ok(None);
+        }
+        Ok(Some(match k {
+            PropKey::Ident(n) => self.chunk.name(n),
+            PropKey::Str(s) => self.chunk.name(s),
+            PropKey::Num(n) => {
+                let s = crate::js::value::num_to_string(*n);
+                self.chunk.name(&s)
+            }
+            PropKey::Computed(e) => { self.expr(e)?; self.chunk.emit(Op::ToKey); return Ok(None) }
+            PropKey::Private(_) => return Err(Unsupported("private-field")),
+        }))
+    }
+
+    /// `x++` / `--o.p` — der Zielausdruck darf nur EINMAL ausgewertet werden.
+    fn update(&mut self, op: UpdateOp, arg: &Expr, prefix: bool) -> CompileResult<()> {
+        let d = if op == UpdateOp::Inc { 1.0 } else { -1.0 };
+        match arg {
+            Expr::Ident(n) => {
+                let i = self.chunk.name(n);
+                self.chunk.emit(Op::LoadVar(i));
+                // `to_number` VOR dem Rechnen: `x = "3"; x++` gibt 4, nicht
+                // "31". `Op::Un(Plus)` ist genau diese Umwandlung.
+                self.chunk.emit(Op::Un(UnaryOp::Plus));
+                if !prefix { self.chunk.emit(Op::Dup); }
+                let k = self.chunk.konst(Value::Num(d));
+                self.chunk.emit(Op::Const(k));
+                self.chunk.emit(Op::Bin(BinOp::Add));
+                self.chunk.emit(Op::StoreVar(i));
+                if !prefix { self.chunk.emit(Op::Pop); }
+                Ok(())
+            }
+            Expr::Member { obj, prop, optional: false } => {
+                self.expr(obj)?;
+                match &**prop {
+                    MemberProp::Ident(name) => {
+                        let i = self.chunk.name(name);
+                        self.chunk.emit(Op::Dup);
+                        self.chunk.emit(Op::GetProp(i));
+                        self.chunk.emit(Op::Un(UnaryOp::Plus));
+                        if !prefix {
+                            // Den alten Wert unter das Objekt schieben: er ist
+                            // das Ergebnis, das Objekt braucht der Schreiber.
+                            self.chunk.emit(Op::Dup);
+                            self.chunk.emit(Op::Rot3);
+                        }
+                        let k = self.chunk.konst(Value::Num(d));
+                        self.chunk.emit(Op::Const(k));
+                        self.chunk.emit(Op::Bin(BinOp::Add));
+                        self.chunk.emit(Op::SetProp(i));
+                        if !prefix { self.chunk.emit(Op::Pop); }
+                        Ok(())
+                    }
+                    MemberProp::Computed(_) => Err(Unsupported("update-computed")),
+                    MemberProp::Private(_) => Err(Unsupported("private-field")),
+                }
+            }
+            _ => Err(Unsupported("update-target")),
+        }
+    }
+
+    /// `a += b`, `a ||= b`, und `a = b` als Sonderfall — der linke Ausdruck
+    /// wird EINMAL ausgewertet.
+    fn compound(&mut self, op: AssignOp, target: &Expr, right: &Expr) -> CompileResult<()> {
+        // Die kurzschliessenden Formen werten die Rechte NUR aus, wenn sie
+        // gebraucht wird: `a ||= b` darf `b` nicht anfassen, wenn `a` wahr ist.
+        if matches!(op, AssignOp::And | AssignOp::Or | AssignOp::Nullish) {
+            let Expr::Ident(n) = target else { return Err(Unsupported("logical-assign-member")) };
+            let i = self.chunk.name(n);
+            self.chunk.emit(Op::LoadVar(i));
+            let at = match op {
+                AssignOp::And => self.chunk.emit_jump(Op::JumpFalseKeep),
+                AssignOp::Or => self.chunk.emit_jump(Op::JumpTrueKeep),
+                _ => self.chunk.emit_jump(Op::JumpNullishKeep),
+            };
+            self.chunk.emit(Op::Pop);
+            self.expr(right)?;
+            self.chunk.emit(Op::StoreVar(i));
+            self.chunk.patch(at);
+            return Ok(());
+        }
+        let bop = match op {
+            AssignOp::Add => BinOp::Add, AssignOp::Sub => BinOp::Sub,
+            AssignOp::Mul => BinOp::Mul, AssignOp::Div => BinOp::Div,
+            AssignOp::Mod => BinOp::Mod, AssignOp::Exp => BinOp::Exp,
+            AssignOp::Shl => BinOp::Shl, AssignOp::Shr => BinOp::Shr,
+            AssignOp::UShr => BinOp::UShr, AssignOp::BitAnd => BinOp::BitAnd,
+            AssignOp::BitOr => BinOp::BitOr, AssignOp::BitXor => BinOp::BitXor,
+            AssignOp::Assign => return Err(Unsupported("plain-assign-here")),
+            _ => return Err(Unsupported("assign-op")),
+        };
+        match target {
+            Expr::Ident(n) => {
+                let i = self.chunk.name(n);
+                self.chunk.emit(Op::LoadVar(i));
+                self.expr(right)?;
+                self.chunk.emit(Op::Bin(bop));
+                self.chunk.emit(Op::StoreVar(i));
+                Ok(())
+            }
+            Expr::Member { obj, prop, optional: false } => match &**prop {
+                MemberProp::Ident(name) => {
+                    let i = self.chunk.name(name);
+                    self.expr(obj)?;
+                    self.chunk.emit(Op::Dup);
+                    self.chunk.emit(Op::GetProp(i));
+                    self.expr(right)?;
+                    self.chunk.emit(Op::Bin(bop));
+                    self.chunk.emit(Op::SetProp(i));
+                    Ok(())
+                }
+                _ => Err(Unsupported("compound-computed")),
+            },
+            _ => Err(Unsupported("compound-target")),
+        }
     }
 
     /// Alle Umgebungen schliessen, die zwischen HIER und `depth` offen sind.

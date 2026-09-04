@@ -40,9 +40,22 @@ pub enum Op {
     /// Oben zuweisen an `names[i]`; der Wert BLEIBT auf dem Stapel (eine
     /// Zuweisung ist ein Ausdruck).
     StoreVar(u32),
-    /// `names[i]` neu binden — `var`/`let`/`const` in der aktuellen Umgebung.
-    /// Nimmt den Wert vom Stapel.
-    DeclVar { name: u32, mutable: bool },
+    /// `names[i]` binden. Nimmt den Wert vom Stapel.
+    ///
+    /// `lexical` unterscheidet die beiden Faelle, und der Unterschied ist
+    /// beobachtbar: ein `let`/`const` gehoert GENAU HIER hin, ein `var` in die
+    /// naechste Funktionsumgebung — die das Hochziehen schon angelegt hat, und
+    /// die kann weiter oben liegen. `for (const x = 1; …)` hat den Fehler
+    /// gezeigt: die Zuweisung fand das aeussere `x`.
+    DeclVar { name: u32, mutable: bool, lexical: bool },
+    /// Einer eben gebauten Funktion den Namen der Variablen geben, an die sie
+    /// gerade gebunden wird (`var f = function(){}` -> `f.name === "f"`).
+    /// Sichtbar in Stapelspuren und in `f.name`; sechs Tests.
+    NameFunc(u32),
+    /// Oben in einen Eigenschaftsschluessel wandeln — VOR der Auswertung des
+    /// Wertes, weil `ToPropertyKey` Nebenwirkungen haben kann und die Spec
+    /// ihre Reihenfolge festlegt.
+    ToKey,
     /// `this`.
     This,
     Pop,
@@ -74,8 +87,43 @@ pub enum Op {
     Call(u16),
     /// Stapel: callee, arg0..argN → ergebnis.
     New(u16),
-    /// Feld aus den obersten `n` Werten.
+    /// Feld aus den obersten `n` Werten. `true` an Stelle `k` heisst: dort
+    /// stand eine LUECKE (`[1, , 3]`), und die ist nicht dasselbe wie
+    /// `undefined` — `in` findet sie nicht.
     MakeArray(u16),
+    /// Ein leerer Gegenstand mit `Object.prototype`.
+    NewObject,
+    /// Stapel: obj, wert → obj. Eine Dateneigenschaft unter `names[i]`.
+    DefineProp(u32),
+    /// Stapel: obj, schluessel, wert → obj.
+    DefinePropComputed,
+    /// Stapel: obj, funktion → obj. `get` unterscheidet Leser von Schreiber;
+    /// beide muessen sich auf DERSELBEN Eigenschaft treffen koennen.
+    DefineAccessor { name: u32, get: bool },
+    DefineAccessorComputed { get: bool },
+    /// Stapel: obj, quelle → obj. `{...src}` kopiert die aufzaehlbaren
+    /// EIGENEN Eigenschaften.
+    SpreadInto,
+    /// Die obersten ZWEI verdoppeln — fuer `o[k]++`, wo Objekt und Schluessel
+    /// nur EINMAL ausgewertet werden duerfen.
+    Dup2,
+    /// `[a, b, c]` → `[c, a, b]`. Fuer `o.p++`, wo der ALTE Wert das Ergebnis
+    /// ist und trotzdem unter dem Objekt hindurch nach unten muss.
+    Rot3,
+    /// Ein regulaerer Ausdruck aus `names[body]` und `names[flags]`.
+    Regex { body: u32, flags: u32 },
+    /// Die obersten `n` Werte zu einer Zeichenkette verketten (Vorlage).
+    Concat(u16),
+    /// `delete obj[names[i]]` bzw. `delete obj[key]`.
+    DeleteProp(u32),
+    DeleteIndex,
+    /// Ein Feld aus den obersten `n` EINTRAEGEN bauen, von denen jeder
+    /// entweder ein Wert oder ein zu spreizender ist (`spread[k]`).
+    MakeArraySpread { n: u16, spread: u32 },
+    /// Wie `Call`/`New`, aber die Argumente stehen als FELD auf dem Stapel —
+    /// so kann `f(...xs)` dieselbe Aufrufhilfe benutzen.
+    CallSpread,
+    NewSpread,
     /// Aus `names[i]` eine Funktion bauen — der Index zeigt in `funcs`.
     Closure(u32),
     Throw,
@@ -116,12 +164,14 @@ pub struct Chunk {
     pub names: Vec<Rc<str>>,
     pub funcs: Vec<Rc<super::ast::Func>>,
     pub blocks: Vec<Vec<BlockDecl>>,
+    /// Je `MakeArraySpread` eine Maske: welcher Eintrag war ein `...x`?
+    pub blocks_spread: Vec<Vec<bool>>,
 }
 
 impl Chunk {
     pub fn new() -> Chunk {
         Chunk { ops: Vec::new(), constants: Vec::new(), names: Vec::new(),
-                funcs: Vec::new(), blocks: Vec::new() }
+                funcs: Vec::new(), blocks: Vec::new(), blocks_spread: Vec::new() }
     }
 
     pub fn emit(&mut self, op: Op) -> usize {
@@ -162,6 +212,11 @@ impl Chunk {
     pub fn block(&mut self, d: Vec<BlockDecl>) -> u32 {
         self.blocks.push(d);
         (self.blocks.len() - 1) as u32
+    }
+
+    pub fn spread_mask(&mut self, m: Vec<bool>) -> u32 {
+        self.blocks_spread.push(m);
+        (self.blocks_spread.len() - 1) as u32
     }
 
     pub fn func(&mut self, f: Rc<super::ast::Func>) -> u32 {

@@ -246,20 +246,38 @@ impl Interp {
         Ok(match r { Value::Obj(_) => r, _ => Value::Obj(obj) })
     }
 
+    /// Einen Leser oder Schreiber auf eine Eigenschaft legen — die beiden
+    /// muessen sich auf DERSELBEN treffen, sonst verdeckt der zweite den
+    /// ersten. Eigene Funktion, weil die Befehlsmaschine sie ruft.
+    pub fn define_accessor(&mut self, g: &Gc, key: Rc<str>, f: Value, is_get: bool) {
+        let mut existing = g.borrow().get_own(&key).cloned().unwrap_or(Prop {
+            value: None, get: None, set: None,
+            writable: false, enumerable: true, configurable: true });
+        existing.value = None;
+        if is_get { existing.get = Some(f); } else { existing.set = Some(f); }
+        g.borrow_mut().set_prop(key, existing);
+    }
+
+    /// `{...src}` — die aufzaehlbaren EIGENEN Eigenschaften kopieren.
+    pub fn spread_into(&mut self, g: &Gc, src: &Value) -> C<()> {
+        if let Value::Obj(o) = src {
+            for k in o.borrow().own_keys() {
+                let enumerable = o.borrow().get_own(&k).map(|x| x.enumerable).unwrap_or(false);
+                if !enumerable { continue; }
+                let val = self.get(src, &k)?;
+                g.borrow_mut().set_prop(k, Prop::data(val));
+            }
+        }
+        Ok(())
+    }
+
     fn eval_object(&mut self, props: &[ObjProp], env: &Rc<RefCell<Env>>) -> C<Value> {
         let g = new_obj(Some(self.realm.object_proto.clone()));
         for p in props {
             match &p.value {
                 ObjPropValue::Spread(e) => {
                     let v = self.eval(e, env)?;
-                    if let Value::Obj(src) = &v {
-                        for k in src.borrow().own_keys() {
-                            let enumerable = src.borrow().get_own(&k).map(|x| x.enumerable).unwrap_or(false);
-                            if !enumerable { continue; }
-                            let val = self.get(&v, &k)?;
-                            g.borrow_mut().set_prop(k, Prop::data(val));
-                        }
-                    }
+                    self.spread_into(&g, &v)?;
                 }
                 ObjPropValue::Init(e) => {
                     let key = self.prop_key(&p.key, env)?;
@@ -275,12 +293,7 @@ impl Interp {
                     let key = self.prop_key(&p.key, env)?;
                     let v = self.make_closure(f.clone(), env, None);
                     let is_get = matches!(p.value, ObjPropValue::Get(_));
-                    let mut existing = g.borrow().get_own(&key).cloned().unwrap_or(Prop {
-                        value: None, get: None, set: None,
-                        writable: false, enumerable: true, configurable: true });
-                    existing.value = None;
-                    if is_get { existing.get = Some(v); } else { existing.set = Some(v); }
-                    g.borrow_mut().set_prop(key, existing);
+                    self.define_accessor(&g, key, v, is_get);
                 }
             }
         }
@@ -391,17 +404,7 @@ impl Interp {
                 Expr::Member { obj, prop, .. } => {
                     let base = self.eval(obj, env)?;
                     let key = self.member_key2(prop, env)?;
-                    match base {
-                        Value::Obj(o) => {
-                            let cfg = o.borrow().get_own(&key).map(|p| p.configurable);
-                            match cfg {
-                                Some(false) => Value::Bool(false),
-                                Some(true) => { o.borrow_mut().remove(&key); Value::Bool(true) }
-                                None => Value::Bool(true),
-                            }
-                        }
-                        _ => Value::Bool(true),
-                    }
+                    Value::Bool(self.delete_key(&base, &key)?)
                 }
                 _ => Value::Bool(true),
             });
@@ -441,6 +444,22 @@ impl Interp {
         }
         let this_val = if f.is_arrow { Some(env_this(env)) } else { None };
         self.make_closure(f, env, this_val)
+    }
+
+    /// `delete obj[key]` — `false` nur, wenn die Eigenschaft da ist und sich
+    /// nicht entfernen laesst. Fehlt sie ganz, ist die Antwort `true`.
+    pub fn delete_key(&mut self, base: &Value, key: &str) -> C<bool> {
+        Ok(match base {
+            Value::Obj(o) => {
+                let cfg = o.borrow().get_own(key).map(|p| p.configurable);
+                match cfg {
+                    Some(false) => false,
+                    Some(true) => { o.borrow_mut().remove(key); true }
+                    None => true,
+                }
+            }
+            _ => true,
+        })
     }
 
     pub fn unary_val(&mut self, op: UnaryOp, v: Value) -> C<Value> {

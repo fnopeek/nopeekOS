@@ -64,12 +64,27 @@ impl Vm {
                 return Ok(core::mem::replace(&mut self.completion, Value::Undefined));
             }
             self.frames.last_mut().unwrap().ip += 1;
-            // Derselbe Deckel wie im Baumlaeufer, an derselben Stelle gezaehlt:
-            // ein Befehl ist ein Schritt. Ohne ihn haengt ein `while(true)`
-            // den ganzen Lauf auf.
-            i.steps += 1;
-            if i.steps > i.max_steps {
-                return Err(i.throw_kind("RangeError", "step budget exhausted"));
+            // Der Deckel gegen `while(true)` — aber mit derselben KOERNUNG wie
+            // im Baumlaeufer, sonst ist er ein anderer Deckel.
+            //
+            // Der zaehlt einen Schritt je ANWEISUNG. Je Befehl zu zaehlen
+            // waere feiner und damit strenger: derselbe Test, der dort
+            // durchlief, brach hier ab (`encodeURI` mit seiner langen
+            // Zeichentabelle). Gezaehlt wird deshalb, was eine Schleife
+            // wirklich vorantreibt — ein Rueckwaertssprung, ein Aufruf, eine
+            // Anweisungsgrenze. Das ist dieselbe Groessenordnung und bleibt
+            // eine echte Abbruchgarantie.
+            let counts = match &chunk.ops[ip] {
+                Op::Jump(t) => (*t as usize) <= ip,
+                Op::Call(_) | Op::New(_) | Op::CallSpread | Op::NewSpread
+                | Op::SetCompletion | Op::DeclVar { .. } | Op::Ret => true,
+                _ => false,
+            };
+            if counts {
+                i.steps += 1;
+                if i.steps > i.max_steps {
+                    return Err(i.throw_kind("RangeError", "step budget exhausted"));
+                }
             }
             match self.step(i, &chunk, ip) {
                 Ok(Some(v)) => return Ok(v),
@@ -92,13 +107,28 @@ impl Vm {
                 let v = self.top();
                 i.vm_store(&chunk.names[*n as usize], v, &env)?;
             }
-            Op::DeclVar { name, mutable } => {
+            Op::DeclVar { name, mutable, lexical } => {
                 let v = self.pop();
                 let n = &chunk.names[*name as usize];
-                i.init_binding(n, v, &env);
+                if *lexical {
+                    // GENAU HIER — `init_binding` liefe die Kette hoch und
+                    // schriebe eine gleichnamige Bindung weiter aussen.
+                    i.bind_here(n, v, &env);
+                } else {
+                    i.init_binding(n, v, &env);
+                }
                 if !*mutable {
                     i.make_const(n, &env);
                 }
+            }
+            Op::NameFunc(n) => {
+                let v = self.top();
+                i.name_function(&v, &chunk.names[*n as usize]);
+            }
+            Op::ToKey => {
+                let v = self.pop();
+                let k = i.to_prop_key(&v)?;
+                self.push(Value::Str(k));
             }
             Op::This => {
                 let v = super::interp::env_this(&env);
@@ -204,6 +234,111 @@ impl Vm {
             }
             Op::Closure(f) => {
                 let v = i.func_value(chunk.funcs[*f as usize].clone(), &env);
+                self.push(v);
+            }
+            Op::NewObject => {
+                let g = super::value::new_obj(Some(i.realm.object_proto.clone()));
+                self.push(Value::Obj(g));
+            }
+            Op::DefineProp(n) => {
+                let val = self.pop();
+                let key: Rc<str> = chunk.names[*n as usize].clone();
+                if let Value::Obj(g) = self.top() {
+                    g.borrow_mut().set_prop(key, super::value::Prop::data(val));
+                }
+            }
+            Op::DefinePropComputed => {
+                let val = self.pop();
+                let key = self.pop();
+                let k = i.to_prop_key(&key)?;
+                if let Value::Obj(g) = self.top() {
+                    g.borrow_mut().set_prop(k, super::value::Prop::data(val));
+                }
+            }
+            Op::DefineAccessor { name, get } => {
+                let f = self.pop();
+                let key: Rc<str> = chunk.names[*name as usize].clone();
+                if let Value::Obj(g) = self.top() {
+                    i.define_accessor(&g, key, f, *get);
+                }
+            }
+            Op::DefineAccessorComputed { get } => {
+                let f = self.pop();
+                let key = self.pop();
+                let k = i.to_prop_key(&key)?;
+                if let Value::Obj(g) = self.top() {
+                    i.define_accessor(&g, k, f, *get);
+                }
+            }
+            Op::SpreadInto => {
+                let src = self.pop();
+                if let Value::Obj(g) = self.top() {
+                    i.spread_into(&g, &src)?;
+                }
+            }
+            Op::Rot3 => {
+                let n = self.stack.len();
+                let c = self.stack.remove(n - 1);
+                self.stack.insert(n - 3, c);
+            }
+            Op::Dup2 => {
+                let n = self.stack.len();
+                let (a, b) = (self.stack[n - 2].clone(), self.stack[n - 1].clone());
+                self.push(a);
+                self.push(b);
+            }
+            Op::Regex { body, flags } => {
+                let v = super::regexp::make(i, &chunk.names[*body as usize],
+                                            &chunk.names[*flags as usize])?;
+                self.push(v);
+            }
+            Op::Concat(n) => {
+                let parts = self.take(*n as usize);
+                let mut out = alloc::string::String::new();
+                for p in &parts {
+                    out.push_str(&i.to_string(p)?);
+                }
+                self.push(Value::string(out));
+            }
+            Op::DeleteProp(n) => {
+                let obj = self.pop();
+                let v = i.delete_key(&obj, &chunk.names[*n as usize])?;
+                self.push(Value::Bool(v));
+            }
+            Op::DeleteIndex => {
+                let key = self.pop();
+                let obj = self.pop();
+                let k = i.to_prop_key(&key)?;
+                let v = i.delete_key(&obj, &k)?;
+                self.push(Value::Bool(v));
+            }
+            Op::MakeArraySpread { n, spread } => {
+                let items = self.take(*n as usize);
+                let mask = &chunk.blocks_spread[*spread as usize];
+                let mut out = Vec::new();
+                for (k, v) in items.into_iter().enumerate() {
+                    if mask.get(k).copied().unwrap_or(false) {
+                        out.extend(i.iterate(&v)?);
+                    } else {
+                        out.push(v);
+                    }
+                }
+                let a = i.new_array(out);
+                self.push(a);
+            }
+            Op::CallSpread => {
+                let args = self.pop();
+                let this = self.pop();
+                let callee = self.pop();
+                let a = i.iterate(&args)?;
+                let v = i.call(&callee, this, &a)?;
+                self.push(v);
+            }
+            Op::NewSpread => {
+                let args = self.pop();
+                let callee = self.pop();
+                let a = i.iterate(&args)?;
+                let v = i.construct(&callee, &a)?;
                 self.push(v);
             }
             Op::Throw => {
