@@ -67,12 +67,32 @@ fn api_gap() {
 }
 
 const PROBE: &str = r#"
+// **Vorhanden ist nicht dasselbe wie beantwortet.** Diese Namen GIBT es auf
+// dem Prototyp, aber sie liefern eine feste Zahl statt einer gemessenen — und
+// eine 0 sieht aus wie eine Antwort, also faellt niemandem etwas auf: die
+// Seite malt nur falsch. Als „gedeckt" gezaehlt haben sie die Zahl oben um
+// 2524 Aufrufe geschoent, den GROESSTEN Posten der ganzen Luecke.
+//
+// Wer hier etwas einbaut, streicht den Namen aus dieser Liste — und wer einen
+// neuen Platzhalter einbaut, traegt ihn EIN. Sonst misst diese Probe wieder
+// sich selbst.
+var STUB = {
+  "getBoundingClientRect": 1, "getClientRects": 1, "offsetParent": 1,
+  "offsetWidth": 1, "offsetHeight": 1, "offsetTop": 1, "offsetLeft": 1,
+  "clientWidth": 1, "clientHeight": 1,
+  "scrollWidth": 1, "scrollHeight": 1, "scrollTop": 1, "scrollLeft": 1
+};
 var missing = [], have = 0, total = 0;
 function chk(iface, member, count) {
   total += count;
   var host = iface === "window" ? globalThis
            : (typeof globalThis[iface] === "function" ? globalThis[iface].prototype : null);
   if (!host) { missing.push([count, iface + "." + member + "   (Schnittstelle fehlt ganz)"]); return; }
+  // `STUB[member]` waere falsch: fuer `toString` faende es das ERBSTUECK von
+  // `Object.prototype` und erklaerte einen intakten Namen zum Platzhalter.
+  if (Object.prototype.hasOwnProperty.call(STUB, member)) {
+    missing.push([count, iface + "." + member + "   (da, aber antwortet 0)"]); return;
+  }
   var o = host, found = false;
   while (o) { if (Object.getOwnPropertyDescriptor(o, member)) { found = true; break; }
               o = Object.getPrototypeOf(o); }
