@@ -793,7 +793,7 @@ fn style_text(i: &Interp, this: &Value) -> String {
 }
 
 /// Wie `node_of`, aber ohne zu werfen — ein Schnappschuss hat keinen Knoten.
-fn node_of_ref(i: &Interp, v: &Value) -> Result<u32, ()> {
+fn node_of_ref(_i: &Interp, v: &Value) -> Result<u32, ()> {
     let Value::Obj(o) = v else { return Err(()) };
     match o.borrow().get_own(SLOT).and_then(|p| p.value.clone()) {
         Some(Value::Num(n)) if n >= 0.0 => Ok(n as u32),
