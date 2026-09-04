@@ -29,7 +29,6 @@ fn main() {
         let sheet = beak_engine::css::collect_all(&dom, &ext, media);
         i.set_style_context(beak_engine::js::interp::StyleCtx {
             sheet: std::rc::Rc::new(sheet),
-            dom: std::rc::Rc::new(dom),
             theme: beak_engine::layout::Theme {
                 bg: beak_engine::layout::Rgb(255, 255, 255),
                 text: beak_engine::layout::Rgb(33, 37, 41),
