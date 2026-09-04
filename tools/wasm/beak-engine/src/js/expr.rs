@@ -199,7 +199,7 @@ impl Interp {
                 let key = self.member_key2(prop, env)?;
                 let f = self.get(&base, &key)?;
                 if !self.is_callable(&f) && !optional {
-                    return self.type_err(&alloc::format!("{key} is not a function"));
+                    return Err(self.not_a_function(Some(&key)));
                 }
                 (base, f)
             }
@@ -208,17 +208,12 @@ impl Interp {
         if optional && matches!(f, Value::Undefined | Value::Null) { return Ok(Value::Undefined); }
         let a = self.eval_args(args, env)?;
         if !self.is_callable(&f) {
-            // **Den Namen nennen, nicht nur das Ereignis.** „value is not a
-            // function" war im Zielkorpus mit 46 Fehlschlaegen der haeufigste
-            // Grund ueberhaupt — und sagte ueber keinen einzigen davon, WAS
-            // fehlt. Ein Aufruf auf einem Bezeichner kann seinen Namen
-            // nennen; alles andere bleibt, was es war
-            // ([[feedback_print_the_identifier_not_just_the_event]]).
-            let what = match callee {
-                Expr::Ident(n) => alloc::format!("{n} is not a function"),
-                _ => alloc::string::String::from("value is not a function"),
-            };
-            return self.type_err(&what);
+            // Den Namen nennen, nicht nur das Ereignis — dieselbe Hilfe wie
+            // die Befehlsmaschine, siehe `Interp::not_a_function`.
+            return Err(self.not_a_function(match callee {
+                Expr::Ident(n) => Some(n.as_str()),
+                _ => None,
+            }));
         }
         self.call(&f, this_val, &a)
     }
