@@ -182,4 +182,8 @@ pub const KNOWN_KEYS: &[(&str, &str)] = &[
     ("static_dns", "Static DNS server (with static_ip)"),
     ("net_prefer", "Preferred NIC: 'wifi' or 'lan' (default lan); falls back if no link"),
     ("code.scheme", "Syntax colours: auto, dark-plus, light-plus, monokai, abyss, ..."),
+    // Deliberately last, and deliberately spelled out: this one lowers a
+    // security guarantee. Everything else here is taste or topology.
+    ("net.allow_plain_http",
+     "1 = allow http:// (NO TLS) to private addresses only. Off by default; for local test servers."),
 ];

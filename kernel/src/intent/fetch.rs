@@ -91,6 +91,9 @@ enum Work {
         headers: Vec<String>,
         body: Vec<u8>,
         cap: usize,
+        /// Ueber TLS? `false` heisst Klartext — `parse_url` laesst das nur
+        /// unter der Politik in `plain_http_allowed` zu.
+        tls: bool,
     },
     /// A batch, multiplexed per host exactly as `npk_http_request_many` does.
     Many { urls: Vec<String>, cap: usize },
@@ -156,8 +159,9 @@ pub(crate) fn begin_one(
     headers: Vec<String>,
     body: Vec<u8>,
     cap: usize,
+    tls: bool,
 ) -> Result<i32, &'static str> {
-    submit(owner, caller_core, cap, Work::One { method, host, path, headers, body, cap })
+    submit(owner, caller_core, cap, Work::One { method, host, path, headers, body, cap, tls })
 }
 
 pub(crate) fn begin_many(
@@ -427,7 +431,7 @@ fn worker_entry(_k: u64) {
 
 fn run(slot: usize, work: Work) -> Reply {
     match work {
-        Work::One { method, host, path, headers, body, cap } => {
+        Work::One { method, host, path, headers, body, cap, tls } => {
             let mut out: Vec<u8> = Vec::new();
             let mut info = http::FetchInfo::default();
             let req = http::HttpRequest {
@@ -436,8 +440,9 @@ fn run(slot: usize, work: Work) -> Reply {
                 body: &body,
                 // Both as `npk_http_send` sets them: the kernel unpacks gzip,
                 // and the browser is the caller h2 was turned on for.
-                accept_gzip: true,
-                try_h2: true,
+                accept_gzip: tls,
+                try_h2: tls,
+                plain: !tls,
             };
             let res = http::https_request_streaming(
                 &host, &path, &req, cap,
