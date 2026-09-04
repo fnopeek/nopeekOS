@@ -359,6 +359,21 @@ pub fn spawn_on_worker(wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8, mod
 /// Spawn a WASM module as a background task. Unlike spawn_on_worker, this does
 /// NOT set APP_RUNNING for the terminal — the intent shell keeps receiving keys
 /// and the window continues to function normally. Used by debug.wasm.
+/// Wie [`spawn_on_worker`], aber mit einem STARTARGUMENT — der Weg, den der
+/// Terminal-Start einer Fensteranwendung nimmt.
+///
+/// Warum ueberhaupt: der blockierende Ausfuehrungsweg (`execute_inner`) setzt
+/// `pid: 0`, und ohne Prozessnummer lehnt `fetch::begin_one` jeden
+/// asynchronen Abruf ab ("async fetch needs a process"). Vom Prompt aus
+/// konnte beak damit zwar aufgehen, aber nie eine Seite laden — vom Dock
+/// aus ging es, weil der Klickweg schon immer hier vorbeikam.
+pub fn spawn_on_worker_with_arg(
+    wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8, module_name: &str,
+    launch_arg: Option<String>,
+) -> bool {
+    spawn_on_worker_inner(wasm_bytes, cap_id, terminal_idx, module_name, true, 0, launch_arg)
+}
+
 pub fn spawn_on_worker_background(wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8, module_name: &str) -> bool {
     spawn_on_worker_inner(wasm_bytes, cap_id, terminal_idx, module_name, false, 0, None)
 }
