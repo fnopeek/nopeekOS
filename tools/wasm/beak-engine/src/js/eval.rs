@@ -417,11 +417,23 @@ impl Interp {
         match p {
             Pat::Ident(n) => {
                 if declare { self.init_binding(n, v, env); }
-                else { self.assign_ident(n, v, env)?; }
+                else {
+                    self.name_function(&v, n);
+                    self.assign_ident(n, v, env)?;
+                }
                 Ok(())
             }
             Pat::Assign { left, right } => {
-                let v = if matches!(v, Value::Undefined) { self.eval(right, env)? } else { v };
+                let v = if matches!(v, Value::Undefined) {
+                    let d = self.eval(right, env)?;
+                    // `var [a = () => {}] = []` nennt den Pfeil `a` — dieselbe
+                    // Regel wie `var f = function(){}`, nur eine Ebene tiefer.
+                    if let Pat::Ident(n) = &**left {
+                        let n = n.clone();
+                        self.name_function(&d, &n);
+                    }
+                    d
+                } else { v };
                 self.bind_pattern(left, v, env, declare)
             }
             Pat::Rest(inner) => self.bind_pattern(inner, v, env, declare),

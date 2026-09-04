@@ -459,6 +459,9 @@ impl Vm {
             Op::DefineProp(n) => {
                 let val = self.pop();
                 let key: Rc<str> = chunk.names[*n as usize].clone();
+                // `{ m(){} }` und `{ a: function(){} }` bekommen den
+                // Schluessel als Namen — dieselbe Regel wie `var f = …`.
+                i.name_function(&val, &key);
                 if let Value::Obj(g) = self.top() {
                     g.borrow_mut().set_prop(key, super::value::Prop::data(val));
                 }
@@ -467,6 +470,7 @@ impl Vm {
                 let val = self.pop();
                 let key = self.pop();
                 let k = i.to_prop_key(&key)?;
+                i.name_function(&val, &k);
                 if let Value::Obj(g) = self.top() {
                     g.borrow_mut().set_prop(k, super::value::Prop::data(val));
                 }
@@ -474,6 +478,8 @@ impl Vm {
             Op::DefineAccessor { name, get } => {
                 let f = self.pop();
                 let key: Rc<str> = chunk.names[*name as usize].clone();
+                let show = alloc::format!("{} {key}", if *get { "get" } else { "set" });
+                i.name_function(&f, &show);
                 if let Value::Obj(g) = self.top() {
                     i.define_accessor(&g, key, f, *get);
                 }
@@ -482,6 +488,8 @@ impl Vm {
                 let f = self.pop();
                 let key = self.pop();
                 let k = i.to_prop_key(&key)?;
+                let show = alloc::format!("{} {k}", if *get { "get" } else { "set" });
+                i.name_function(&f, &show);
                 if let Value::Obj(g) = self.top() {
                     i.define_accessor(&g, k, f, *get);
                 }

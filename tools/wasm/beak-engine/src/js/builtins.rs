@@ -723,47 +723,47 @@ pub fn make_realm() -> Realm {
             Some(Value::Null) => None,
             _ => return i.type_err("Object.create needs an object or null"),
         };
-        Ok(Value::Obj(new_obj(proto)))
+        let g = new_obj(proto);
+        // Das ZWEITE Argument ist dieselbe Tabelle wie bei
+        // `defineProperties` — dieselbe Funktion, nicht dieselbe Idee.
+        if let Some(p) = a.get(1) {
+            if !matches!(p, Value::Undefined) { i.define_props_from(&g, p)?; }
+        }
+        Ok(Value::Obj(g))
     }, 2, fp);
     def(&object_ctor, "defineProperty", |i, _, a| {
         let Some(Value::Obj(o)) = a.first() else { return i.type_err("Object.defineProperty on a non-object") };
         let k = i.to_prop_key(a.get(1).unwrap_or(&Value::Undefined))?;
         let d = a.get(2).cloned().unwrap_or(Value::Undefined);
         let Value::Obj(_) = &d else { return i.type_err("property descriptor must be an object") };
-        let get = i.get(&d, "get")?;
-        let set = i.get(&d, "set")?;
-        let has = |i: &mut Interp, n: &str| -> bool {
-            matches!(&d, Value::Obj(dd) if dd.borrow().has_own(n)) && { let _ = i; true }
-        };
-        let p = Prop {
-            value: if has(i, "value") { Some(i.get(&d, "value")?) } else { None },
-            get: if matches!(get, Value::Undefined) { None } else { Some(get) },
-            set: if matches!(set, Value::Undefined) { None } else { Some(set) },
-            writable: i.get(&d, "writable")?.truthy(),
-            enumerable: i.get(&d, "enumerable")?.truthy(),
-            configurable: i.get(&d, "configurable")?.truthy(),
-        };
+        let p = i.to_prop_desc(&d)?;
         o.borrow_mut().set_prop(k, p);
         Ok(a[0].clone())
     }, 3, fp);
+    def(&object_ctor, "defineProperties", |i, _, a| {
+        let Some(Value::Obj(o)) = a.first() else {
+            return i.type_err("Object.defineProperties on a non-object");
+        };
+        let o = o.clone();
+        let props = a.get(1).cloned().unwrap_or(Value::Undefined);
+        i.define_props_from(&o, &props)?;
+        Ok(Value::Obj(o))
+    }, 2, fp);
+    def(&object_ctor, "getOwnPropertyDescriptors", |i, _, a| {
+        let o = i.to_object(a.first().unwrap_or(&Value::Undefined))?;
+        let out = new_obj(Some(i.realm.object_proto.clone()));
+        for k in o.borrow().own_keys() {
+            let Some(p) = o.borrow().get_own(&k).cloned() else { continue };
+            let d = i.from_prop_desc(&p);
+            out.borrow_mut().set_prop(k, Prop::data(d));
+        }
+        Ok(Value::Obj(out))
+    }, 1, fp);
     def(&object_ctor, "getOwnPropertyDescriptor", |i, _, a| {
         let o = i.to_object(a.first().unwrap_or(&Value::Undefined))?;
         let k = i.to_prop_key(a.get(1).unwrap_or(&Value::Undefined))?;
         let Some(p) = o.borrow().get_own(&k).cloned() else { return Ok(Value::Undefined) };
-        let d = new_obj(Some(i.realm.object_proto.clone()));
-        {
-            let mut b = d.borrow_mut();
-            if p.is_accessor() {
-                b.define("get", Prop::data(p.get.clone().unwrap_or(Value::Undefined)));
-                b.define("set", Prop::data(p.set.clone().unwrap_or(Value::Undefined)));
-            } else {
-                b.define("value", Prop::data(p.value.clone().unwrap_or(Value::Undefined)));
-                b.define("writable", Prop::data(Value::Bool(p.writable)));
-            }
-            b.define("enumerable", Prop::data(Value::Bool(p.enumerable)));
-            b.define("configurable", Prop::data(Value::Bool(p.configurable)));
-        }
-        Ok(Value::Obj(d))
+        Ok(i.from_prop_desc(&p))
     }, 2, fp);
     def(&object_ctor, "assign", |i, _, a| {
         let target = a.first().cloned().unwrap_or(Value::Undefined);
@@ -847,6 +847,46 @@ pub fn make_realm() -> Realm {
         let y = a.get(1).cloned().unwrap_or(Value::Undefined);
         Ok(Value::Bool(x.same_value(&y)))
     }, 2, fp);
+    def(&object_ctor, "seal", |_, _, a| {
+        if let Some(Value::Obj(o)) = a.first() {
+            o.borrow_mut().extensible = false;
+            let keys = o.borrow().own_keys();
+            for k in keys {
+                let existing = o.borrow().get_own(&k).cloned();
+                if let Some(mut p) = existing {
+                    // Versiegeln nimmt nur die KONFIGURIERBARKEIT — der Wert
+                    // bleibt schreibbar. Das ist der ganze Unterschied zu
+                    // `freeze`, und er wird geprueft.
+                    p.configurable = false;
+                    o.borrow_mut().set_prop(k, p);
+                }
+            }
+        }
+        Ok(a.first().cloned().unwrap_or(Value::Undefined))
+    }, 1, fp);
+    def(&object_ctor, "isSealed", |_, _, a| {
+        let Some(Value::Obj(o)) = a.first() else { return Ok(Value::Bool(true)) };
+        if o.borrow().extensible { return Ok(Value::Bool(false)) }
+        let keys = o.borrow().own_keys();
+        for k in keys {
+            if o.borrow().get_own(&k).map(|p| p.configurable).unwrap_or(false) {
+                return Ok(Value::Bool(false));
+            }
+        }
+        Ok(Value::Bool(true))
+    }, 1, fp);
+    def(&object_ctor, "isFrozen", |_, _, a| {
+        let Some(Value::Obj(o)) = a.first() else { return Ok(Value::Bool(true)) };
+        if o.borrow().extensible { return Ok(Value::Bool(false)) }
+        let keys = o.borrow().own_keys();
+        for k in keys {
+            let Some(p) = o.borrow().get_own(&k).cloned() else { continue };
+            if p.configurable || (!p.is_accessor() && p.writable) {
+                return Ok(Value::Bool(false));
+            }
+        }
+        Ok(Value::Bool(true))
+    }, 1, fp);
     def(&object_ctor, "freeze", |_, _, a| {
         if let Some(Value::Obj(o)) = a.first() {
             o.borrow_mut().extensible = false;
@@ -871,6 +911,13 @@ pub fn make_realm() -> Realm {
     def(&object_ctor, "isExtensible", |_, _, a| {
         Ok(Value::Bool(matches!(a.first(), Some(Value::Obj(o)) if o.borrow().extensible)))
     }, 1, fp);
+    def(&object_ctor, "hasOwn", |i, _, a| {
+        let o = i.to_object(a.first().unwrap_or(&Value::Undefined))?;
+        let k = i.to_prop_key(a.get(1).unwrap_or(&Value::Undefined))?;
+        let has = o.borrow().has_own(&k);
+        Ok(Value::Bool(has))
+    }, 2, fp);
+
     global.borrow_mut().define("Object", Prop::builtin(Value::Obj(object_ctor)));
 
     let array_ctor = native(Some(function_proto.clone()), |i, _, a| {
@@ -1242,6 +1289,122 @@ pub fn make_realm() -> Realm {
         }
     }, 1, fp);
     global.borrow_mut().define("Symbol", Prop::builtin(Value::Obj(symbol_ctor)));
+
+    // ── `Reflect` ────────────────────────────────────────────────────────
+    //
+    // Kein Konstruktor und keine Funktion, sondern ein Namensraum: jede
+    // Methode ist die nackte Spec-Operation, die die entsprechende Syntax
+    // sonst versteckt. Deshalb steht hier fast nichts eigenes — jede Zeile
+    // ruft dieselbe Hilfe, die auch `o.k`, `o.k = v`, `k in o`, `delete o.k`
+    // und `new f(…)` benutzen. Der Unterschied ist allein die Antwort: wo die
+    // Syntax wirft oder schweigt, gibt `Reflect` ein `true`/`false` zurueck.
+    let reflect = new_obj(Some(object_proto.clone()));
+    def(&reflect, "get", |i, _, a| {
+        let t = a.first().cloned().unwrap_or(Value::Undefined);
+        let k = i.to_prop_key(a.get(1).unwrap_or(&Value::Undefined))?;
+        i.get(&t, &k)
+    }, 2, fp);
+    def(&reflect, "set", |i, _, a| {
+        let t = a.first().cloned().unwrap_or(Value::Undefined);
+        let k = i.to_prop_key(a.get(1).unwrap_or(&Value::Undefined))?;
+        let v = a.get(2).cloned().unwrap_or(Value::Undefined);
+        i.set(&t, &k, v)?;
+        Ok(Value::Bool(true))
+    }, 3, fp);
+    def(&reflect, "has", |i, _, a| {
+        let Some(Value::Obj(o)) = a.first() else { return i.type_err("Reflect.has on a non-object") };
+        let o = o.clone();
+        let k = i.to_prop_key(a.get(1).unwrap_or(&Value::Undefined))?;
+        Ok(Value::Bool(i.has_property(&o, &k)))
+    }, 2, fp);
+    def(&reflect, "deleteProperty", |i, _, a| {
+        let t = a.first().cloned().unwrap_or(Value::Undefined);
+        if !matches!(t, Value::Obj(_)) { return i.type_err("Reflect.deleteProperty on a non-object") }
+        let k = i.to_prop_key(a.get(1).unwrap_or(&Value::Undefined))?;
+        Ok(Value::Bool(i.delete_key(&t, &k)?))
+    }, 2, fp);
+    def(&reflect, "ownKeys", |i, _, a| {
+        let Some(Value::Obj(o)) = a.first() else { return i.type_err("Reflect.ownKeys on a non-object") };
+        let mut out: Vec<Value> = o.borrow().own_keys().into_iter()
+            .map(|k| Value::Str(k)).collect();
+        // Erst die Zeichenketten, dann die Symbole — die Reihenfolge steht in
+        // der Spec und wird geprueft.
+        out.extend(o.borrow().own_sym_keys().into_iter()
+            .map(|k| Value::Sym(Rc::new(sym_from_key(&k)))));
+        Ok(i.new_array(out))
+    }, 1, fp);
+    def(&reflect, "getPrototypeOf", |i, _, a| {
+        let Some(Value::Obj(o)) = a.first() else {
+            return i.type_err("Reflect.getPrototypeOf on a non-object");
+        };
+        let p = o.borrow().proto.clone();
+        Ok(match p { Some(x) => Value::Obj(x), None => Value::Null })
+    }, 1, fp);
+    def(&reflect, "setPrototypeOf", |i, _, a| {
+        let Some(Value::Obj(o)) = a.first() else {
+            return i.type_err("Reflect.setPrototypeOf on a non-object");
+        };
+        o.borrow_mut().proto = match a.get(1) {
+            Some(Value::Obj(p)) => Some(p.clone()),
+            _ => None,
+        };
+        Ok(Value::Bool(true))
+    }, 2, fp);
+    def(&reflect, "defineProperty", |i, _, a| {
+        let Some(Value::Obj(o)) = a.first() else {
+            return i.type_err("Reflect.defineProperty on a non-object");
+        };
+        let o = o.clone();
+        let k = i.to_prop_key(a.get(1).unwrap_or(&Value::Undefined))?;
+        let d = a.get(2).cloned().unwrap_or(Value::Undefined);
+        let p = i.to_prop_desc(&d)?;
+        // Der Unterschied zu `Object.defineProperty`: hier ist ein
+        // Fehlschlag ein `false`, kein Wurf.
+        if !o.borrow().extensible && !o.borrow().has_own(&k) {
+            return Ok(Value::Bool(false));
+        }
+        o.borrow_mut().set_prop(k, p);
+        Ok(Value::Bool(true))
+    }, 3, fp);
+    def(&reflect, "getOwnPropertyDescriptor", |i, _, a| {
+        let Some(Value::Obj(o)) = a.first() else {
+            return i.type_err("Reflect.getOwnPropertyDescriptor on a non-object");
+        };
+        let o = o.clone();
+        let k = i.to_prop_key(a.get(1).unwrap_or(&Value::Undefined))?;
+        let Some(p) = o.borrow().get_own(&k).cloned() else { return Ok(Value::Undefined) };
+        Ok(i.from_prop_desc(&p))
+    }, 2, fp);
+    def(&reflect, "isExtensible", |i, _, a| {
+        let Some(Value::Obj(o)) = a.first() else {
+            return i.type_err("Reflect.isExtensible on a non-object");
+        };
+        let e = o.borrow().extensible;
+        Ok(Value::Bool(e))
+    }, 1, fp);
+    def(&reflect, "preventExtensions", |i, _, a| {
+        let Some(Value::Obj(o)) = a.first() else {
+            return i.type_err("Reflect.preventExtensions on a non-object");
+        };
+        o.borrow_mut().extensible = false;
+        Ok(Value::Bool(true))
+    }, 1, fp);
+    def(&reflect, "apply", |i, _, a| {
+        let f = a.first().cloned().unwrap_or(Value::Undefined);
+        if !i.is_callable(&f) { return i.type_err("Reflect.apply target is not a function") }
+        let this = a.get(1).cloned().unwrap_or(Value::Undefined);
+        let list = a.get(2).cloned().unwrap_or(Value::Undefined);
+        let args = i.elems(&list)?;
+        i.call(&f, this, &args)
+    }, 3, fp);
+    def(&reflect, "construct", |i, _, a| {
+        let f = a.first().cloned().unwrap_or(Value::Undefined);
+        let list = a.get(1).cloned().unwrap_or(Value::Undefined);
+        let args = if matches!(list, Value::Undefined) { Vec::new() } else { i.elems(&list)? };
+        i.construct(&f, &args)
+    }, 2, fp);
+    reflect.borrow_mut().define(SYM_TO_STRING_TAG, Prop::frozen(Value::str("Reflect")));
+    global.borrow_mut().define("Reflect", Prop::builtin(Value::Obj(reflect)));
 
     // `this` ist entweder das Primitiv oder seine Huelle — beides muss gehen,
     // weil `sym.toString()` das Primitiv durchreicht, `Object(sym).toString()`
@@ -1646,6 +1809,214 @@ pub fn make_realm() -> Realm {
     global.borrow_mut().define("location", Prop::builtin(Value::Obj(loc)));
 
     // ── Date, klein aber vorhanden ───────────────────────────────────────
+    // ── Nachzuegler ──────────────────────────────────────────────────────
+    //
+    // Kein Thema, sondern eine LISTE: Eingebaute, die schlicht fehlten.
+    // Gefunden mit einer Probe, die `typeof` ueber alles laufen laesst, was
+    // die Spec nennt — nicht geraten, ausgezaehlt.
+    def(&array_proto, "at", |i, this, a| {
+        let n = array_len(i, &this)? as i64;
+        let mut k = to_integer(i.to_number(a.first().unwrap_or(&Value::Undefined))?) as i64;
+        if k < 0 { k += n; }
+        if k < 0 || k >= n { return Ok(Value::Undefined) }
+        i.get(&this, &num_to_string(k as f64))
+    }, 1, fp);
+    def(&array_proto, "fill", |i, this, a| {
+        let n = array_len(i, &this)? as i64;
+        let v = a.first().cloned().unwrap_or(Value::Undefined);
+        let (s, e) = range_args(i, a.get(1), a.get(2), n)?;
+        for k in s..e {
+            i.tick()?;
+            i.set(&this, &num_to_string(k as f64), v.clone())?;
+        }
+        Ok(this)
+    }, 1, fp);
+    def(&array_proto, "copyWithin", |i, this, a| {
+        let n = array_len(i, &this)? as i64;
+        let mut t = to_integer(i.to_number(a.first().unwrap_or(&Value::Undefined))?) as i64;
+        if t < 0 { t += n; }
+        let t = t.clamp(0, n);
+        let (s, e) = range_args(i, a.get(1), a.get(2), n)?;
+        // Ueber eine KOPIE, sonst ueberschreibt der Lauf seine eigene Quelle,
+        // wenn sich Ziel und Bereich ueberlappen.
+        let mut buf = Vec::new();
+        for k in s..e {
+            i.tick()?;
+            buf.push(i.get(&this, &num_to_string(k as f64))?);
+        }
+        for (j, v) in buf.into_iter().enumerate() {
+            let at = t + j as i64;
+            if at >= n { break }
+            i.set(&this, &num_to_string(at as f64), v)?;
+        }
+        Ok(this)
+    }, 2, fp);
+    def(&array_proto, "flat", |i, this, a| {
+        let d = match a.first() {
+            None | Some(Value::Undefined) => 1.0,
+            Some(v) => to_integer(i.to_number(v)?),
+        };
+        let mut out = Vec::new();
+        flatten(i, &this, d, &mut out)?;
+        Ok(i.new_array(out))
+    }, 0, fp);
+    def(&array_proto, "flatMap", |i, this, a| {
+        let f = a.first().cloned().unwrap_or(Value::Undefined);
+        if !i.is_callable(&f) { return i.type_err("callback is not a function") }
+        let t = a.get(1).cloned().unwrap_or(Value::Undefined);
+        let n = array_len(i, &this)? as usize;
+        let mut out = Vec::new();
+        for k in 0..n {
+            i.tick()?;
+            let key = num_to_string(k as f64);
+            let v = i.get(&this, &key)?;
+            let r = i.call(&f, t.clone(), &[v, Value::Num(k as f64), this.clone()])?;
+            // Nur EINE Ebene, und nur echte Felder: was kein Feld ist, wird
+            // als WERT genommen. `[1,2].flatMap(x => x)` gab sonst `[]` —
+            // `flatten` las die `length` einer Zahl.
+            let is_arr = matches!(&r, Value::Obj(o) if matches!(o.borrow().kind, ObjKind::Array));
+            if is_arr { flatten(i, &r, 0.0, &mut out)?; } else { out.push(r); }
+        }
+        Ok(i.new_array(out))
+    }, 1, fp);
+    def(&array_proto, "findLast", |i, this, a| { find_last(i, this, a, false) }, 1, fp);
+    def(&array_proto, "findLastIndex", |i, this, a| { find_last(i, this, a, true) }, 1, fp);
+    def(&array_proto, "toReversed", |i, this, _| {
+        let mut items = i.elems(&this)?;
+        items.reverse();
+        Ok(i.new_array(items))
+    }, 0, fp);
+    def(&array_proto, "toSorted", |i, this, a| {
+        // Ueber dieselbe `sort` wie in-place — eine zweite Sortierordnung
+        // waere genau die Sorte Unterschied, die niemand bemerkt, bis sie
+        // zaehlt.
+        let items = i.elems(&this)?;
+        let arr = i.new_array(items);
+        let ap = i.realm.array_proto.clone();
+        let sort = i.get(&Value::Obj(ap), "sort")?;
+        i.call(&sort, arr.clone(), a)?;
+        Ok(arr)
+    }, 1, fp);
+    def(&array_proto, "with", |i, this, a| {
+        let mut items = i.elems(&this)?;
+        let n = items.len() as i64;
+        let mut k = to_integer(i.to_number(a.first().unwrap_or(&Value::Undefined))?) as i64;
+        if k < 0 { k += n; }
+        if k < 0 || k >= n { return i.range_err("index out of range") }
+        items[k as usize] = a.get(1).cloned().unwrap_or(Value::Undefined);
+        Ok(i.new_array(items))
+    }, 2, fp);
+    def(&array_proto, "toSpliced", |i, this, a| {
+        let items = i.elems(&this)?;
+        let n = items.len() as i64;
+        let mut s = to_integer(i.to_number(a.first().unwrap_or(&Value::Undefined))?) as i64;
+        if s < 0 { s += n; }
+        let s = s.clamp(0, n);
+        let del = match a.get(1) {
+            None => n - s,
+            Some(v) => (to_integer(i.to_number(v)?) as i64).clamp(0, n - s),
+        };
+        let mut out: Vec<Value> = items[..s as usize].to_vec();
+        out.extend(a.iter().skip(2).cloned());
+        out.extend(items[(s + del) as usize..].iter().cloned());
+        Ok(i.new_array(out))
+    }, 2, fp);
+    array_proto.borrow_mut().define(SYM_UNSCOPABLES, Prop {
+        value: Some({
+            let u = new_obj(None);
+            for n in ["at", "copyWithin", "entries", "fill", "find", "findIndex", "findLast",
+                      "findLastIndex", "flat", "flatMap", "includes", "keys", "toReversed",
+                      "toSorted", "toSpliced", "values"] {
+                u.borrow_mut().define(n, Prop::data(Value::Bool(true)));
+            }
+            Value::Obj(u)
+        }),
+        get: None, set: None, writable: false, enumerable: false, configurable: true });
+
+    def(&string_proto, "at", |i, this, a| {
+        let s = i.to_string(&this)?;
+        let ch: Vec<char> = s.chars().collect();
+        let n = ch.len() as i64;
+        let mut k = to_integer(i.to_number(a.first().unwrap_or(&Value::Undefined))?) as i64;
+        if k < 0 { k += n; }
+        if k < 0 || k >= n { return Ok(Value::Undefined) }
+        let mut t = String::new();
+        t.push(ch[k as usize]);
+        Ok(Value::string(t))
+    }, 1, fp);
+    def(&string_proto, "codePointAt", |i, this, a| {
+        let s = i.to_string(&this)?;
+        let k = to_integer(i.to_number(a.first().unwrap_or(&Value::Undefined))?);
+        if k < 0.0 { return Ok(Value::Undefined) }
+        // Nach UTF-16-Einheiten gezaehlt, wie die Spec — unsere Texte sind
+        // aber `str`. Die Umrechnung ist dieselbe wie in `charCodeAt`.
+        let units: Vec<u16> = s.encode_utf16().collect();
+        let k = k as usize;
+        if k >= units.len() { return Ok(Value::Undefined) }
+        let c = units[k];
+        if (0xD800..0xDC00).contains(&c) && k + 1 < units.len() {
+            let lo = units[k + 1];
+            if (0xDC00..0xE000).contains(&lo) {
+                let cp = 0x10000 + ((c as u32 - 0xD800) << 10) + (lo as u32 - 0xDC00);
+                return Ok(Value::Num(cp as f64));
+            }
+        }
+        Ok(Value::Num(c as f64))
+    }, 1, fp);
+    def(&string_proto, "substr", |i, this, a| {
+        let s = i.to_string(&this)?;
+        let ch: Vec<char> = s.chars().collect();
+        let n = ch.len() as i64;
+        let mut st = to_integer(i.to_number(a.first().unwrap_or(&Value::Undefined))?) as i64;
+        if st < 0 { st = (n + st).max(0); }
+        let st = st.min(n);
+        let len = match a.get(1) {
+            None | Some(Value::Undefined) => n - st,
+            Some(v) => (to_integer(i.to_number(v)?) as i64).clamp(0, n - st),
+        };
+        Ok(Value::string(ch[st as usize..(st + len) as usize].iter().collect()))
+    }, 2, fp);
+    def(&string_proto, "localeCompare", |i, this, a| {
+        let s = i.to_string(&this)?;
+        let t = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        // Ohne Gebietsschema: der Vergleich ist der gewoehnliche. Das ist
+        // erlaubt und ehrlicher als eine erfundene Sortierordnung.
+        Ok(Value::Num(if *s < *t { -1.0 } else if *s > *t { 1.0 } else { 0.0 }))
+    }, 1, fp);
+
+    def(&global, "escape", |i, _, a| {
+        let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let mut out = String::new();
+        for c in s.encode_utf16() {
+            match char::from_u32(c as u32) {
+                Some(ch) if ch.is_ascii_alphanumeric() || "@*_+-./".contains(ch) => out.push(ch),
+                _ if c < 256 => out.push_str(&alloc::format!("%{c:02X}")),
+                _ => out.push_str(&alloc::format!("%u{c:04X}")),
+            }
+        }
+        Ok(Value::string(out))
+    }, 1, fp);
+    def(&global, "unescape", |i, _, a| {
+        let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let b: Vec<char> = s.chars().collect();
+        let mut units: Vec<u16> = Vec::new();
+        let mut k = 0;
+        while k < b.len() {
+            if b[k] == '%' && k + 5 < b.len() && b[k + 1] == 'u' {
+                let h: String = b[k + 2..k + 6].iter().collect();
+                if let Ok(v) = u16::from_str_radix(&h, 16) { units.push(v); k += 6; continue }
+            }
+            if b[k] == '%' && k + 2 < b.len() {
+                let h: String = b[k + 1..k + 3].iter().collect();
+                if let Ok(v) = u8::from_str_radix(&h, 16) { units.push(v as u16); k += 3; continue }
+            }
+            let mut buf = [0u16; 2];
+            units.extend_from_slice(b[k].encode_utf16(&mut buf));
+            k += 1;
+        }
+        Ok(Value::string(String::from_utf16_lossy(&units)))
+    }, 1, fp);
+
     let date_proto = new_obj(Some(object_proto.clone()));
     def(&date_proto, "getTime", |i, this, _| i.get(&this, "__t"), 0, fp);
     def(&date_proto, "valueOf", |i, this, _| i.get(&this, "__t"), 0, fp);
@@ -1743,6 +2114,61 @@ fn pad(i: &mut Interp, t: Value, a: &[Value], start: bool) -> C<Value> {
     while p.chars().count() < want - have { p.push_str(&fill); }
     let p: String = p.chars().take(want - have).collect();
     Ok(Value::string(if start { p + &s } else { s.to_string() + &p }))
+}
+
+/// `start`/`end` einer Bereichsangabe, negativ vom Ende gezaehlt.
+fn range_args(i: &mut Interp, s: Option<&Value>, e: Option<&Value>, n: i64) -> C<(i64, i64)> {
+    let conv = |i: &mut Interp, v: Option<&Value>, d: i64| -> C<i64> {
+        Ok(match v {
+            None | Some(Value::Undefined) => d,
+            Some(x) => {
+                let r = to_integer(i.to_number(x)?) as i64;
+                if r < 0 { (n + r).max(0) } else { r.min(n) }
+            }
+        })
+    };
+    let a = conv(i, s, 0)?;
+    let b = conv(i, e, n)?;
+    Ok((a, b.max(a)))
+}
+
+/// `flat`: Felder bis zur Tiefe `d` ausschuetten. Nur ECHTE Felder werden
+/// aufgeloest — ein feldaehnliches Objekt bleibt ein Wert.
+fn flatten(i: &mut Interp, v: &Value, d: f64, out: &mut Vec<Value>) -> C<()> {
+    let n = array_len(i, v)? as usize;
+    for k in 0..n {
+        i.tick()?;
+        let key = num_to_string(k as f64);
+        let has = matches!(v, Value::Obj(o) if o.borrow().has_own(&key));
+        if !has { continue }
+        let x = i.get(v, &key)?;
+        let is_arr = matches!(&x, Value::Obj(o) if matches!(o.borrow().kind, ObjKind::Array));
+        if d > 0.0 && is_arr {
+            flatten(i, &x, d - 1.0, out)?;
+        } else {
+            out.push(x);
+        }
+    }
+    Ok(())
+}
+
+fn find_last(i: &mut Interp, this: Value, a: &[Value], want_index: bool) -> C<Value> {
+    let f = a.first().cloned().unwrap_or(Value::Undefined);
+    if !i.is_callable(&f) { return i.type_err("callback is not a function") }
+    let t = a.get(1).cloned().unwrap_or(Value::Undefined);
+    let n = array_len(i, &this)? as i64;
+    let mut k = n - 1;
+    while k >= 0 {
+        i.tick()?;
+        let key = num_to_string(k as f64);
+        let v = i.get(&this, &key)?;
+        let r = i.call(&f, t.clone(), &[v.clone(), Value::Num(k as f64), this.clone()])?;
+        if r.truthy() {
+            return Ok(if want_index { Value::Num(k as f64) } else { v });
+        }
+        k -= 1;
+    }
+    Ok(if want_index { Value::Num(-1.0) } else { Value::Undefined })
 }
 
 fn array_len(i: &mut Interp, this: &Value) -> C<f64> {

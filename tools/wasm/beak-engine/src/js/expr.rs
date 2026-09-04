@@ -316,17 +316,23 @@ impl Interp {
                 ObjPropValue::Init(e) => {
                     let key = self.prop_key(&p.key, env)?;
                     let v = self.eval(e, env)?;
+                    self.name_function(&v, &key);
                     g.borrow_mut().set_prop(key, Prop::data(v));
                 }
                 ObjPropValue::Method(f) => {
                     let key = self.prop_key(&p.key, env)?;
                     let v = self.make_closure(f.clone(), env, None);
+                    self.name_function(&v, &key);
                     g.borrow_mut().set_prop(key, Prop::data(v));
                 }
                 ObjPropValue::Get(f) | ObjPropValue::Set(f) => {
                     let key = self.prop_key(&p.key, env)?;
                     let v = self.make_closure(f.clone(), env, None);
                     let is_get = matches!(p.value, ObjPropValue::Get(_));
+                    // Ein Leser heisst `"get x"`, kein blosses `"x"` — sonst
+                    // waeren Leser und Schreiber ununterscheidbar.
+                    let show = alloc::format!("{} {key}", if is_get { "get" } else { "set" });
+                    self.name_function(&v, &show);
                     self.define_accessor(&g, key, v, is_get);
                 }
             }
@@ -425,6 +431,12 @@ impl Interp {
                     let target = if *is_static { ctor.as_obj().unwrap().clone() } else { proto.clone() };
                     let k = self.prop_key(key, env)?;
                     let v = self.make_method(func.clone(), env, None, Some(target.clone()));
+                    let show = match kind {
+                        MethodKind::Get => alloc::format!("get {k}"),
+                        MethodKind::Set => alloc::format!("set {k}"),
+                        _ => alloc::string::String::from(&*k),
+                    };
+                    self.name_function(&v, &show);
                     match kind {
                         MethodKind::Get | MethodKind::Set => {
                             let mut p = target.borrow().get_own(&k).cloned().unwrap_or(Prop {

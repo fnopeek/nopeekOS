@@ -1275,6 +1275,64 @@ impl Interp {
     // ── Der Iteratorvertrag ──────────────────────────────────────────────
 
     /// `{ value, done }` — das Ergebnis eines `next()`.
+    /// Ein Eigenschaftsbeschreiber (`{value, writable, …}`) → `Prop`.
+    ///
+    /// Eigene Funktion, weil sie fuenf Rufer hat: `Object.defineProperty`,
+    /// `Object.defineProperties`, `Object.create` mit zweitem Argument und
+    /// `Reflect.defineProperty`. Fuenf Kopien dieser Regeln waeren fuenf
+    /// Gelegenheiten, sie auseinanderlaufen zu lassen.
+    pub fn to_prop_desc(&mut self, d: &Value) -> C<Prop> {
+        let Value::Obj(dd) = d else {
+            return self.type_err("property descriptor must be an object");
+        };
+        let has = |n: &str| dd.borrow().has_own(n);
+        let get = self.get(d, "get")?;
+        let set = self.get(d, "set")?;
+        Ok(Prop {
+            value: if has("value") { Some(self.get(d, "value")?) } else { None },
+            get: if matches!(get, Value::Undefined) { None } else { Some(get) },
+            set: if matches!(set, Value::Undefined) { None } else { Some(set) },
+            writable: self.get(d, "writable")?.truthy(),
+            enumerable: self.get(d, "enumerable")?.truthy(),
+            configurable: self.get(d, "configurable")?.truthy(),
+        })
+    }
+
+    /// Und zurueck: `Prop` → Beschreiberobjekt.
+    pub fn from_prop_desc(&mut self, p: &Prop) -> Value {
+        let d = new_obj(Some(self.realm.object_proto.clone()));
+        {
+            let mut b = d.borrow_mut();
+            if p.is_accessor() {
+                b.define("get", Prop::data(p.get.clone().unwrap_or(Value::Undefined)));
+                b.define("set", Prop::data(p.set.clone().unwrap_or(Value::Undefined)));
+            } else {
+                b.define("value", Prop::data(p.value.clone().unwrap_or(Value::Undefined)));
+                b.define("writable", Prop::data(Value::Bool(p.writable)));
+            }
+            b.define("enumerable", Prop::data(Value::Bool(p.enumerable)));
+            b.define("configurable", Prop::data(Value::Bool(p.configurable)));
+        }
+        Value::Obj(d)
+    }
+
+    /// Die Eigenschaften aus einem `{k: beschreiber, …}` auf ein Objekt
+    /// legen — `Object.defineProperties` und `Object.create(p, props)`.
+    pub fn define_props_from(&mut self, target: &Gc, props: &Value) -> C<()> {
+        let Value::Obj(src) = props else {
+            return self.type_err("properties must be an object");
+        };
+        let keys: Vec<Rc<str>> = src.borrow().own_keys().into_iter()
+            .filter(|k| src.borrow().get_own(k).map(|p| p.enumerable).unwrap_or(false))
+            .collect();
+        for k in keys {
+            let d = self.get(props, &k)?;
+            let p = self.to_prop_desc(&d)?;
+            target.borrow_mut().set_prop(k, p);
+        }
+        Ok(())
+    }
+
     pub fn iter_result(&mut self, value: Value, done: bool) -> Value {
         let g = new_obj(Some(self.realm.object_proto.clone()));
         {
