@@ -1027,7 +1027,9 @@ fn insert_all(i: &mut Interp, this: &Value, args: &[Value], w: Where) -> C<Value
 /// `None`, wenn kein Kontext eingereicht wurde oder das Element im Baum nicht
 /// vorkommt (ein Skript hat es erst erzeugt) — dann bleibt es beim
 /// Inline-Stil.
-fn computed_decls(i: &Interp, src_seq: u32) -> Option<String> {
+/// `live` sind die Inline-Stile, die das SKRIPT gerade haelt, je `src_seq` —
+/// siehe `getComputedStyle`, warum der Schnappschuss allein nicht reicht.
+fn computed_decls(i: &Interp, src_seq: u32, live: &[(u32, &str)]) -> Option<String> {
     let ctx = i.style_ctx.as_ref()?;
     if src_seq == 0 {
         return None;
@@ -1068,6 +1070,14 @@ fn computed_decls(i: &Interp, src_seq: u32) -> Option<String> {
         out = crate::style::resolve_in(&info, &parent, &ctx.theme, &ctx.sheet,
                                        &anc, &prev, count, ctx.viewport_w, &vars, &mut own);
         if let Some(m) = own { vars = m; }
+        // Was das Skript seither an den Inline-Stil geschrieben hat. Nur wenn
+        // er sich vom Schnappschuss unterscheidet — sonst liefe die
+        // Inline-Ebene ein zweites Mal.
+        if let Some((_, text)) = live.iter().find(|(seq, _)| *seq == el.seq) {
+            if el.attr("style").unwrap_or("") != *text {
+                crate::style::apply_inline_over(&mut out, text, &ctx.theme, &parent, &vars);
+            }
+        }
         // `rem` rechnet gegen die WURZEL, und die steht erst fest, wenn sie
         // aufgeloest ist. Das Layout setzt das direkt nach dem Wurzellauf;
         // ohne die Zeile las `getComputedStyle` jedes `rem` gegen die
@@ -2122,21 +2132,18 @@ pub fn install(realm: &mut Realm) {
     realm.global.borrow_mut().define("CustomEvent", Prop::builtin(Value::Obj(custom_ctor)));
     realm.event_proto = event_proto;
 
-    // `getComputedStyle` — 443 Aufrufe, und die Antwort ist NUR der
-    // Inline-Stil dieses Elements.
+    // `getComputedStyle` — 443 Aufrufe im Zensus.
     //
-    // ⚠ **Die Kaskade steckt nicht darin.** Was ein Stilblatt setzt, weiss
-    // dieses Objekt nicht: die Kaskade laeuft in `style.rs` auf beaks eigenem
-    // Baum, mit den geholten Blaettern — beides hat die Maschine nicht. Was
-    // hier steht, ist damit eine TEILANTWORT, und wo nichts gesetzt ist,
-    // steht die leere Zeichenkette wie bei jeder nicht gesetzten
-    // Eigenschaft.
+    // Seit 0.64.0 antwortet es aus der KASKADE: der Wirt reicht mit
+    // `set_style_context` Blatt, Baum, Thema und Fensterbreite ein, und
+    // `computed_decls` rechnet damit dieselbe Kaskade wie das Layout — auf
+    // demselben Baum, mit demselben Blatt. Die Werte kommen in
+    // CSSOM-Schreibweise heraus (`rgb(0, 0, 0)`, nicht `#000`), also NICHT
+    // in der des Autors.
     //
-    // Warum trotzdem: die Funktion ganz wegzulassen heisst TypeError, und
-    // ein TypeError beendet das Skript. Eine Teilantwort laesst die Seite
-    // laufen. Der Weg zur ganzen ist, dass der Wirt die gerechneten Werte
-    // einreicht — dieselbe Bauart wie `set_media` — und das ist eine eigene
-    // Runde, keine Zeile.
+    // Ohne Kontext bleibt es beim Inline-Stil. Das ist eine Teilantwort, aber
+    // die Funktion ganz wegzulassen hiesse TypeError, und ein TypeError
+    // beendet das Skript.
     def_global(realm, "getComputedStyle", |i, _, a| {
         let id = node_of(i, a.first().unwrap_or(&Value::Undefined))?;
         let g = new_obj(Some(i.realm.style_proto.clone()));
@@ -2148,7 +2155,30 @@ pub fn install(realm: &mut Realm) {
         // jetzt. Ohne Kontext bleibt es beim Inline-Stil, und das ist eine
         // Teilantwort, die die Seite laufen laesst.
         let src = i.doc.as_ref().map(|d| d.nodes[id as usize].src_seq).unwrap_or(0);
-        if let Some(text) = computed_decls(i, src) {
+        // Der Kaskadenkontext ist ein Schnappschuss vom SKRIPTSTART. Was das
+        // Skript seither geschrieben hat, steht nur im lebenden Baum — also
+        // die Inline-Stile der Vorfahrenkette dort abholen und ueber die
+        // gerechneten legen.
+        //
+        // Genannt, weil es die Luecke nur zum TEIL schliesst: eine geaenderte
+        // KLASSE (oder ein neu eingehaengter Knoten) veraendert, welche Regeln
+        // ueberhaupt treffen, und das sieht der Schnappschuss weiter nicht.
+        // Dafuer muesste der Kontext auf dem lebenden Baum rechnen — eine
+        // eigene Runde, und keine billige.
+        let mut live: alloc::vec::Vec<(u32, &str)> = alloc::vec::Vec::new();
+        if let Some(d) = i.doc.as_ref() {
+            let mut n = Some(id);
+            while let Some(k) = n {
+                let node = &d.nodes[k as usize];
+                if node.src_seq != 0 {
+                    if let Some(t) = node.attr("style") {
+                        live.push((node.src_seq, t));
+                    }
+                }
+                n = node.parent;
+            }
+        }
+        if let Some(text) = computed_decls(i, src, &live) {
             g.borrow_mut().define(COMPUTED, Prop { value: Some(Value::str(&text)), get: None,
                 set: None, writable: false, enumerable: false, configurable: false });
         }
@@ -2637,6 +2667,23 @@ mod tests {
              console.log(JSON.stringify(getComputedStyle(e).display));",
         );
         assert_eq!(out, ["\"\""]);
+    }
+
+    /// Was das SKRIPT an den Inline-Stil schreibt, sieht der gerechnete Stil
+    /// auch — obwohl der Kaskadenkontext ein Schnappschuss vom Skriptstart
+    /// ist. Ohne diese Ueberlagerung antwortete `getComputedStyle` mit dem
+    /// Stand von vorgestern, und ein Skript, das setzt und dann misst, bekam
+    /// seinen eigenen Wert nicht zurueck.
+    #[test]
+    fn a_style_the_script_just_set_is_in_the_computed_answer() {
+        let out = run(
+            "<html><head><style>p{color:#000}</style></head><body><p id='a'>x</p></body></html>",
+            "var e = document.getElementById('a');\
+             console.log(getComputedStyle(e).color);\
+             e.style.color = '#1d5c1d';\
+             console.log(getComputedStyle(e).color);",
+        );
+        assert_eq!(out, ["rgb(0, 0, 0)", "rgb(29, 92, 29)"]);
     }
 
     /// Der Inline-Stil bleibt eine LEBENDE Sicht — `el.style` ist etwas

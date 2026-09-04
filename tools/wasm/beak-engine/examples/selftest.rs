@@ -22,6 +22,26 @@ fn main() {
     // `about:blank` und dort `beak:selftest` — und die eine Sache, die diese
     // Seite kann, ist Wirt und Geraet VERGLEICHBAR zu machen.
     sess.interp.set_location("beak:selftest");
+    // Der Kaskadenkontext — GENAU wie beak ihn einreicht (`beak/src/lib.rs`).
+    //
+    // Er fehlte hier, und dadurch lief `getComputedStyle` host-seitig auf dem
+    // Ausweichpfad (nur Inline-Stil) statt auf dem echten. Die Zeile
+    // `CSSStyleDeclaration benannt` war deshalb host GRUEN und am Geraet ROT:
+    // ein Testpfad, der nicht der echte ist, ist kein Test
+    // ([[feedback_the_test_path_must_be_the_real_path]]) — und diesmal hat er
+    // die Luecke nicht nur verpasst, er hat sie ZUGEDECKT.
+    let theme = beak_engine::Theme {
+        bg: beak_engine::Rgb(255, 255, 255), text: beak_engine::Rgb(0, 0, 0),
+        heading: beak_engine::Rgb(0, 0, 0), link: beak_engine::Rgb(0, 0, 238),
+        muted: beak_engine::Rgb(96, 96, 96), rule: beak_engine::Rgb(128, 128, 128) };
+    let media = beak_engine::css::Media::new(1024.0, false);
+    let sheet = beak_engine::css::collect_all(&dom, "", media);
+    sess.interp.set_style_context(beak_engine::js::interp::StyleCtx {
+        sheet: std::rc::Rc::new(sheet),
+        dom: std::rc::Rc::new(dom),
+        theme,
+        viewport_w: 1024.0,
+    });
     for (n, src) in scripts.iter().enumerate() {
         let prog = match beak_engine::js::parse(src, false) {
             Ok(p) => p,
