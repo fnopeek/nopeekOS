@@ -688,7 +688,7 @@ pub enum ZIndex {
     Inherit,
 }
 
-/// One `box-shadow` layer, outer only and WITHOUT blur.
+/// One `box-shadow` layer, outer only.
 ///
 /// Real pages use two very different things under one name: a soft drop shadow
 /// (`0 2px 8px rgba(...)`) and a **hairline rule** (`0 1px #c8ccd1`), which is a
@@ -713,6 +713,8 @@ impl BoxShadow {
     /// Whether we have a paint for this layer at all. The single source for it:
     /// `paintable_shadow` picks the layer with it and `shadow_ops` draws the
     /// layer with it, so neither can drift into painting what the other skipped.
+    /// Eine SCHARFE Schicht — auf echten Seiten meist ein Haarstrich, den der
+    /// Autor nicht im Kastenmodell haben wollte.
     pub fn paints(&self) -> bool {
         self.blur == 0.0
     }
@@ -988,6 +990,10 @@ pub struct ComputedStyle {
     /// `box-shadow`: the first OUTER, zero-blur layer of the list — see
     /// `paintable_shadow` for why the first *paintable* one and not the first.
     pub shadow: Option<BoxShadow>,
+    /// Die erste WEICHE aeussere Schicht. Getrennt vom scharfen Platz, weil
+    /// beide gleichzeitig sichtbar sein koennen — und der weiche liegt
+    /// hinter dem scharfen.
+    pub shadow_soft: Option<BoxShadow>,
     /// `transform: translate(...)` as a paint-time offset, in px and in
     /// PERCENT of the box's own size (`Len::Pct`) — the `translate(-50%,-50%)`
     /// centring idiom needs the latter. Only translation: rotation and scale
@@ -1061,6 +1067,7 @@ impl ComputedStyle {
             filter: None,
             radius: [Len::Px(0.0); 4],
             shadow: None,
+            shadow_soft: None,
             translate: None,
             bold: false,
             italic: false,
@@ -1311,6 +1318,7 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         filter: None,
         radius: [Len::Px(0.0); 4],
         shadow: None,
+        shadow_soft: None,
         translate: None,
         display: Display::Inline, // CSS initial `display` is inline
         width: Len::Auto,
@@ -2935,8 +2943,10 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             let t = v.trim();
             if t.eq_ignore_ascii_case("none") {
                 s.shadow = None;
-            } else if let Some(sh) = paintable_shadow(t, u) {
-                s.shadow = sh;
+                s.shadow_soft = None;
+            } else if let Some((sharp, soft)) = paintable_shadow(t, u) {
+                s.shadow = sharp;
+                s.shadow_soft = soft;
             }
         }
         Prop::BorderTopLeftRadius | Prop::BorderTopRightRadius | Prop::BorderBottomRightRadius
@@ -4214,17 +4224,28 @@ fn parse_translate(v: &str, u: Units) -> Option<(Len, Len)> {
 /// hide their ring behind a blurred layer this way, and **no** declaration has
 /// more than one paintable layer — so a list of layers would cost every
 /// `ComputedStyle` copy several more words for a case real pages do not write.
-fn paintable_shadow(v: &str, u: Units) -> Option<Option<BoxShadow>> {
+fn paintable_shadow(v: &str, u: Units) -> Option<(Option<BoxShadow>, Option<BoxShadow>)> {
     let mut rest = v;
-    let mut hit: Option<BoxShadow> = None;
+    let (mut sharp, mut soft): (Option<BoxShadow>, Option<BoxShadow>) = (None, None);
     loop {
         let (layer, tail) = next_layer(rest);
         let (inset, sh) = parse_box_shadow(layer, u)?;
-        if hit.is_none() && !inset && sh.paints() {
-            hit = Some(sh);
+        if !inset {
+            // Zwei Plaetze, weil echte Seiten zwei verschiedene Dinge unter
+            // demselben Namen schreiben und BEIDE sichtbar sind: DDG legt
+            // einen 1-px-Ring hinter zwei weiche Schichten, Bootstrap malt
+            // Karten mit einer einzigen weichen. Eine volle Liste waere
+            // gemessen unnoetig — keine der geprueften Deklarationen hat mehr
+            // als einen scharfen UND einen weichen Anteil —, und sie kostete
+            // jede `ComputedStyle`-Kopie mehrere Woerter.
+            if sh.paints() {
+                if sharp.is_none() { sharp = Some(sh) }
+            } else if soft.is_none() {
+                soft = Some(sh)
+            }
         }
         if tail.is_empty() {
-            return Some(hit);
+            return Some((sharp, soft));
         }
         rest = tail;
     }

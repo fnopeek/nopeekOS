@@ -19,6 +19,9 @@ fn main() {
             DrawOp::Text { x, y, text, color, size, .. } =>
                 println!("   Text      {x:>5},{y:<5} {size:>4.0}px rgba({},{},{},{}) {:?}",
                          color.c.0, color.c.1, color.c.2, color.a, text),
+            DrawOp::Shadow { x, y, w, h, blur, color } =>
+                println!("   Shadow    {x:>5},{y:<5} {w:>4}x{h:<4} rgba({},{},{},{}) blur={blur}",
+                         color.c.0, color.c.1, color.c.2, color.a),
             other => println!("   {:?}", core::mem::discriminant(other)),
         }
     }
