@@ -73,6 +73,15 @@ const WINDOW_REFILL_AT: u32 = WINDOW / 2;
 /// largest record or we silently lose bytes.
 const READ_BUF: usize = 17 * 1024;
 
+/// Wie lange EIN `fill_to` insgesamt auf seine Bytes wartet, in Ticks (100 Hz).
+///
+/// Die aeusserste Schranke des h2-Lesewegs — und damit die einzige Zahl in
+/// dieser Kette, die wirklich bindet. Darunter liegen `QUIET_TRANSFER` x
+/// `ATTEMPT_TICKS` (bis 60 s) und `ATTEMPT_TICKS_REUSED` (1 s); `fill_to`
+/// stutzt beide auf das, was hiervon uebrig ist. Wer eine der inneren Zahlen
+/// anhebt, hebt damit NICHT diese hier an — das ist der Sinn der Rangfolge.
+const FILL_BUDGET: u64 = 1500; // 15 s
+
 /// Cap on one response body. Larger than any page asset we fetch; a peer
 /// cannot make us buffer beyond it.
 const MAX_BODY: usize = 24 * 1024 * 1024;
@@ -789,6 +798,20 @@ impl Http2 {
         let start = crate::interrupts::ticks();
         while self.rx.len() < n {
             crate::net::poll_rx_only();
+            // **Die aeussere Schranke ist die Autoritaet, und sie wird HIER
+            // geprueft, nicht nur im `Ok(0)`-Zweig.**
+            //
+            // Vorher stand sie dort unten und war Dekoration: ein einziger
+            // `tls_recv_patient(QUIET_TRANSFER=6, ATTEMPT_TICKS=1000)` wartet
+            // bis zu 60 s IN SICH, und die 15 s daueber konnten erst danach
+            // zuschlagen. Eine Schranke, die groesser ist als die Geduld, die
+            // sie begrenzen soll, begrenzt nichts
+            // ([[feedback-threshold-without-a-comparison]]).
+            let spent = crate::interrupts::ticks().wrapping_sub(start);
+            let left = FILL_BUDGET.saturating_sub(spent);
+            if left == 0 {
+                return Err(Http2Error::Tls("timed out waiting for data"));
+            }
             // Solange auf DIESER Verbindung seit dem Senden noch nichts kam,
             // ist die kurze Geduld richtig: eine aus dem Pool genommene
             // Verbindung, die der Server inzwischen geschlossen hat, sieht
@@ -802,13 +825,15 @@ impl Http2 {
             } else {
                 (crate::tls::QUIET_FIRST_BYTE, crate::tls::ATTEMPT_TICKS)
             };
+            // `tls_recv_patient` wartet bis zu `patience * attempt` Ticks. Beides
+            // wird auf das gestutzt, was vom Budget uebrig ist — sonst kaeme der
+            // Rueckweg erst, wenn die INNERE Geduld erschoepft ist.
+            let attempt = attempt.min(left);
+            let patience = patience.min((left / attempt.max(1)).max(1) as u32);
             match crate::tls::tls_recv_patient(&mut self.tls, &mut buf, patience, attempt) {
                 Ok(0) => {
                     // Either a record carrying no application data (session
                     // tickets arrive this way) or nothing ready yet.
-                    if crate::interrupts::ticks().wrapping_sub(start) > 1500 {
-                        return Err(Http2Error::Tls("timed out waiting for data"));
-                    }
                     core::hint::spin_loop();
                 }
                 Ok(got) => {
