@@ -296,7 +296,7 @@ impl Interp {
     pub fn spread_into(&mut self, g: &Gc, src: &Value) -> C<()> {
         if let Value::Obj(o) = src {
             for k in o.borrow().own_keys() {
-                let enumerable = o.borrow().get_own(&k).map(|x| x.enumerable).unwrap_or(false);
+                let enumerable = o.borrow().is_enumerable(&k);
                 if !enumerable { continue; }
                 let val = self.get(src, &k)?;
                 g.borrow_mut().set_prop(k, Prop::data(val));

@@ -134,7 +134,7 @@ fn write_obj(i: &mut Interp, o: &Gc, indent: &str, cur: &str, seen: &mut Vec<Gc>
         let keys = o.borrow().own_keys();
         for k in keys {
             i.tick()?;
-            let enumerable = matches!(o.borrow().get_own(&k), Some(p) if p.enumerable);
+            let enumerable = o.borrow().is_enumerable(&k);
             if !enumerable { continue; }
             let e = i.get(&Value::Obj(o.clone()), &k)?;
             let mut piece = String::new();

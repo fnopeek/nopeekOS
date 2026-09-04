@@ -139,6 +139,13 @@ pub struct Realm {
     pub tag_protos: HashMap<&'static str, Gc>,
     pub url_proto: Gc,
     pub url_params_proto: Gc,
+    /// Die Prototypen der neun Sichten, nach ihrem Namen — `new_typed` haengt
+    /// eine frische Sicht daran, und eingebaute Funktionen sind Zeiger, die
+    /// nichts einfangen koennen.
+    pub ta_protos: HashMap<&'static str, Gc>,
+    pub typed_proto: Gc,
+    pub buffer_proto: Gc,
+    pub dataview_proto: Gc,
 }
 
 impl Realm {
@@ -156,6 +163,8 @@ impl Realm {
             self.iterator_proto.clone(), self.generator_proto.clone(),
             self.generator_func_proto.clone(), self.array_iter_proto.clone(),
             self.string_iter_proto.clone(), self.promise_proto.clone(),
+            self.typed_proto.clone(), self.buffer_proto.clone(),
+            self.dataview_proto.clone(),
             self.html_element_proto.clone(), self.svg_element_proto.clone(),
             self.fragment_proto.clone(), self.url_proto.clone(), self.url_params_proto.clone(),
         ]
@@ -346,6 +355,16 @@ pub const MAX_DEPTH: usize = 400;
 /// vorbei. Eine fremde Seite haette damit drei Zeilen gebraucht, um beak
 /// aufzuhaengen. Echte Ketten sind ein Dutzend Glieder tief.
 pub const MAX_PROTO_CHAIN: usize = 1000;
+
+/// Wieviele Bytes ein einzelner `ArrayBuffer` haben darf.
+///
+/// Keine erfundene Grenze, sondern die Antwort auf eine echte: der Lauf ist
+/// an `new ArrayBuffer(2**53)` gestorben, und in einem Kernel gibt es keinen
+/// Prozess, der dabei alleine stirbt. 64 MB sind mehr, als jede Seite im
+/// Zielkorpus je in einem Stueck belegt, und der Fehlschlag ist ein
+/// `RangeError` — genau der, den ein echter Motor bei gescheiterter Zuteilung
+/// gibt.
+pub const MAX_BUFFER_BYTES: usize = 64 << 20;
 
 /// Was ein Testlaeufer setzt.
 ///
@@ -845,6 +864,12 @@ impl Interp {
                     if matches!(base, Value::Null) { "null" } else { "undefined" })),
             _ => self.to_object(base)?,
         };
+        // **Eine SICHT beantwortet ihre Indizes selbst, und zwar ENDGUELTIG.**
+        // Die Prototypenkette wird dabei NICHT gelaufen: `ta[99]` gibt
+        // `undefined`, auch wenn `Object.prototype[99]` existiert. Das ist
+        // kein Detail — es ist der Unterschied zwischen einer Sicht und einem
+        // gewoehnlichen Objekt mit Zahlen als Schluesseln.
+        if let Some(v) = ta_read(&start, key) { return Ok(v) }
         // Array-`length` lebt in der Eigenschaftstabelle wie alles andere;
         // nur die Kette darunter wird hier gelaufen.
         let mut cur = Some(start);
@@ -873,6 +898,20 @@ impl Interp {
             // gehoert zu den Dingen, die der Lauf als offen ausweist.
             return Ok(());
         };
+        // Dieselbe Endgueltigkeit beim Schreiben: ausserhalb der Sicht
+        // verpufft es, und ein Setzer in der Kette bekommt es nie zu sehen.
+        if let Some(t) = ta_of(o) {
+            if let Some(k) = array_index(key) {
+                let n = self.to_number(&val)?;
+                let live = t.live_len();
+                if (k as usize) < live {
+                    let ObjKind::Buffer(b) = &t.buf.borrow().kind else { return Ok(()) };
+                    let at = t.offset + (k as usize) * t.kind.size();
+                    t.kind.write(&mut b.bytes.borrow_mut(), at, n);
+                }
+                return Ok(());
+            }
+        }
         // Ein Setzer irgendwo in der Kette gewinnt vor dem eigenen Feld.
         let mut cur = Some(o.clone());
         let mut hops = 0;
@@ -919,6 +958,11 @@ impl Interp {
     }
 
     pub fn has_property(&mut self, o: &Gc, key: &str) -> bool {
+        if let Some(t) = ta_of(o) {
+            if let Some(k) = array_index(key) {
+                return (k as usize) < t.live_len();
+            }
+        }
         let mut cur = Some(o.clone());
         let mut hops = 0;
         while let Some(c) = cur {
@@ -1323,7 +1367,7 @@ impl Interp {
             return self.type_err("properties must be an object");
         };
         let keys: Vec<Rc<str>> = src.borrow().own_keys().into_iter()
-            .filter(|k| src.borrow().get_own(k).map(|p| p.enumerable).unwrap_or(false))
+            .filter(|k| src.borrow().is_enumerable(k))
             .collect();
         for k in keys {
             let d = self.get(props, &k)?;
@@ -1331,6 +1375,39 @@ impl Interp {
             target.borrow_mut().set_prop(k, p);
         }
         Ok(())
+    }
+
+    /// Ein frischer `ArrayBuffer` mit `n` Nullbytes.
+    ///
+    /// **Ueber `MAX_BUFFER_BYTES` gibt es einen leeren Puffer** — die Rufer
+    /// pruefen vorher und werfen einen `RangeError`, so wie ein echter Motor
+    /// es tut, wenn die Zuteilung scheitert. Ohne die Schranke hat ein
+    /// test262-Fall 7 Petabyte angefordert und den Lauf mit SIGABRT beendet;
+    /// in einem Kernel waere das kein Absturz des Testlaeufers, sondern der
+    /// des Systems.
+    pub fn new_buffer(&mut self, n: usize) -> Value {
+        if n > MAX_BUFFER_BYTES { return self.new_buffer(0) }
+        Value::Obj(new_kind(Some(self.realm.buffer_proto.clone()),
+            ObjKind::Buffer(Rc::new(BufData {
+                bytes: RefCell::new(alloc::vec![0u8; n]),
+                detached: core::cell::Cell::new(false),
+            }))))
+    }
+
+    /// Eine SICHT auf einen bestehenden Puffer — kein neuer Speicher.
+    pub fn new_view(&mut self, kind: ElemKind, buf: Gc, offset: usize, len: usize) -> Value {
+        let proto = self.realm.ta_protos.get(kind.name()).cloned()
+            .unwrap_or_else(|| self.realm.typed_proto.clone());
+        Value::Obj(new_kind(Some(proto),
+            ObjKind::TypedArray(Rc::new(TaData { buf, kind, offset, len }))))
+    }
+
+    /// Eine Sicht MIT eigenem Puffer — der gewoehnliche `new Uint8Array(n)`.
+    pub fn new_typed(&mut self, kind: ElemKind, len: usize) -> Value {
+        let Some(bytes) = len.checked_mul(kind.size()) else { return Value::Undefined };
+        let b = self.new_buffer(bytes);
+        let Value::Obj(bo) = b else { return Value::Undefined };
+        self.new_view(kind, bo, 0, len)
     }
 
     pub fn iter_result(&mut self, value: Value, done: bool) -> Value {
@@ -1443,7 +1520,7 @@ impl Interp {
             if hops > MAX_PROTO_CHAIN { break }
             hops += 1;
             for k in c.borrow().own_keys() {
-                let enumerable = c.borrow().get_own(&k).map(|p| p.enumerable).unwrap_or(false);
+                let enumerable = c.borrow().is_enumerable(&k);
                 if enumerable && !keys.iter().any(|x| *x == k) { keys.push(k); }
             }
             let next = c.borrow().proto.clone();
@@ -1553,3 +1630,23 @@ impl Interp {
 }
 
 
+
+/// Die Sicht hinter einem Objekt, wenn es eine ist.
+pub fn ta_of(o: &Gc) -> Option<Rc<TaData>> {
+    match &o.borrow().kind {
+        ObjKind::TypedArray(t) => Some(t.clone()),
+        _ => None,
+    }
+}
+
+/// Ein Element einer Sicht lesen. `None` heisst „das ist keine Sicht oder
+/// kein Index" — dann laeuft der gewoehnliche Weg weiter. `Some(Undefined)`
+/// heisst „Sicht, aber ausserhalb", und das ist eine ANTWORT, kein Durchfall.
+pub fn ta_read(o: &Gc, key: &str) -> Option<Value> {
+    let t = ta_of(o)?;
+    let k = array_index(key)? as usize;
+    if k >= t.live_len() { return Some(Value::Undefined) }
+    let ObjKind::Buffer(b) = &t.buf.borrow().kind else { return Some(Value::Undefined) };
+    let at = t.offset + k * t.kind.size();
+    Some(Value::Num(t.kind.read(&b.bytes.borrow(), at)))
+}
