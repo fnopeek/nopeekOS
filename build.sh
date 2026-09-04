@@ -513,20 +513,31 @@ run_qemu_generic() {
     #
     # Resolution: xres/yres land in the stdvga EDID, OVMF picks the matching
     # mode, and the kernel simply takes whatever GOP mode it is handed
-    # (boot_uefi.rs). Only sizes from OVMF's QemuVideoBochsModes table work —
-    # 1920x1080, 1920x1200, 2560x1440, 2560x1600, 3840x2160 — anything else
-    # silently falls back to 1024x768. vgamem must cover w*h*4 and be a power
-    # of two, so it is derived, not guessed. Override with QEMU_RES=WxH.
+    # (boot_uefi.rs). An unsupported size does NOT fail — OVMF silently falls
+    # back to 1280x800, i.e. you get LESS than 1080p and no error anywhere.
+    # That is what QEMU_RES_OK guards: measured on this box (edk2 OVMF 4m,
+    # QEMU 11.1.1) by booting each mode and reading the size back off a
+    # monitor `screendump`, not copied from the OVMF mode table.
+    #
+    # 3840x2160 and 3200x2400 both fall back — and it is NOT a VRAM shortage:
+    # 4K stays at 1280x800 with 64 and 128 MB too, while 2800x2100 comes up
+    # fine on 32. The ceiling sits in the EDID/mode negotiation, so raising
+    # vgamem is not the fix. vgamem is still derived from w*h*4 (power of
+    # two) because the working modes do need it.
+    #
     # NOTE the guest flips to 2x UI scaling above 2560 wide (gui/font.rs
-    # scale_for), so 3840x2160 gives 1080p worth of usable area, not 4K.
+    # scale_for), so 2800x2100 renders at 1400x1050 worth of usable area.
     local -a display_args
     if [ "$display" = "gui" ]; then
+        local QEMU_RES_OK="1920x1080 1920x1200 2560x1440 2560x1600 2560x2048 2800x2100"
         local res="${QEMU_RES:-2560x1440}"
-        local xres="${res%x*}" yres="${res#*x}"
-        if ! [[ "$xres" =~ ^[0-9]+$ && "$yres" =~ ^[0-9]+$ ]]; then
-            err "QEMU_RES must be WIDTHxHEIGHT (e.g. 2560x1440), got: $res"
+        if [[ " $QEMU_RES_OK " != *" $res "* ]]; then
+            err "QEMU_RES=$res is not a mode OVMF brings up here — it would"
+            err "silently boot at 1280x800. Measured working: $QEMU_RES_OK"
+            err "(3200x2400 and 3840x2160 do not come up, more VRAM does not help)"
             exit 1
         fi
+        local xres="${res%x*}" yres="${res#*x}"
         local vgamem=16
         while [ $(( vgamem * 1024 * 1024 )) -lt $(( xres * yres * 4 )) ]; do
             vgamem=$(( vgamem * 2 ))
@@ -798,10 +809,12 @@ Installer / release:
 Without argument: build + qemu
 
 Environment:
-  QEMU_RES=WxH         GUI framebuffer size (default 2560x1440). Must be a
-                       mode OVMF knows: 1920x1080, 1920x1200, 2560x1440,
-                       2560x1600, 3840x2160. VRAM is derived. Above 2560
-                       wide the guest UI switches to 2x scaling.
+  QEMU_RES=WxH         GUI framebuffer size (default 2560x1440). Measured
+                       working: 1920x1080, 1920x1200, 2560x1440, 2560x1600,
+                       2560x2048, 2800x2100. Anything else is refused —
+                       OVMF would boot it at 1280x800 without a word.
+                       No 4K: 3840x2160 falls back regardless of VRAM.
+                       Above 2560 wide the guest UI switches to 2x scaling.
   QEMU_GTK=...         GTK display options (default
                        show-menubar=off,zoom-to-fit=off)
 EOF
