@@ -684,6 +684,18 @@ impl Compound {
             || self.where_groups.iter().flatten().any(Compound::wants_hover)
             || self.has.iter().flatten().any(|h| h.compound.wants_hover())
     }
+
+    /// Tests `:checked` — the one control state a selector can actually read.
+    /// `:focus`/`:focus-within`/`:active` are in `never_matches`, so a control
+    /// gaining or losing the keyboard cannot restyle anything through the
+    /// cascade; only a checkbox or radio can.
+    fn wants_checked(&self) -> bool {
+        self.checked.is_some()
+            || self.not.iter().any(Compound::wants_checked)
+            || self.is_groups.iter().flatten().any(Compound::wants_checked)
+            || self.where_groups.iter().flatten().any(Compound::wants_checked)
+            || self.has.iter().flatten().any(|h| h.compound.wants_checked())
+    }
 }
 
 /// A complex selector: compounds left→right, with the combinator that precedes
@@ -717,6 +729,15 @@ impl Selector {
     /// `li:hover + li` is a real idiom, and what it restyles is not inside the
     /// element the pointer is in. A repaint that walks the carrier's subtree
     /// cannot see it, so those carriers take the slow path.
+    /// Record every compound that tests `:checked`, wherever it sits in the
+    /// selector — an ancestor carrier (`:checked ~ .menu`) restyles something
+    /// the control does not contain, so the ONE set has to cover both.
+    fn collect_checked(&self, out: &mut HoverSet) {
+        for c in self.compounds.iter().filter(|c| c.wants_checked()) {
+            out.add(c);
+        }
+    }
+
     fn collect_hover_sideways(&self, out: &mut HoverSet) {
         for (i, c) in self.compounds.iter().enumerate() {
             if c.wants_hover()
@@ -1329,6 +1350,11 @@ pub struct Stylesheet {
     /// what a repaint can FIND: it walks the carrier's own subtree, and a
     /// sibling is not in it.
     pub hover_sideways_set: HoverSet,
+    /// Every `:checked` carrier, by name. A control whose CHECKED state changes
+    /// and that may match one of these has to be laid out: `:checked` can move
+    /// boxes (the checkbox hack is `input:checked ~ .menu{display:block}`), and
+    /// repainting the control alone would leave that menu shut.
+    pub checked_set: HoverSet,
     /// Every `url(…)` appearing anywhere in the sheet, keyed by `url_key`.
     ///
     /// `ComputedStyle` is `Copy`, so it cannot carry the URL itself — it
@@ -1483,6 +1509,7 @@ impl Stylesheet {
             hover_set: HoverSet::default(),
             hover_layout_set: HoverSet::default(),
             hover_sideways_set: HoverSet::default(),
+            checked_set: HoverSet::default(),
             urls: BTreeMap::new(),
         }
     }
@@ -1742,6 +1769,7 @@ pub fn parse(css: &str) -> Stylesheet {
     let mut hover_set = HoverSet::default();
     let mut hover_layout_set = HoverSet::default();
     let mut hover_sideways_set = HoverSet::default();
+    let mut checked_set = HoverSet::default();
     for r in &rules {
         // A rule made only of properties we do not implement declares nothing
         // at all — `apply_one` has no arm for them — so it can gain or lose
@@ -1758,6 +1786,7 @@ pub fn parse(css: &str) -> Stylesheet {
                 sel.collect_hover(&mut hover_layout_set);
             }
             sel.collect_hover_sideways(&mut hover_sideways_set);
+            sel.collect_checked(&mut checked_set);
         }
     }
     let mut sheet = Stylesheet {
@@ -1768,6 +1797,7 @@ pub fn parse(css: &str) -> Stylesheet {
         hover_set,
         hover_layout_set,
         hover_sideways_set,
+        checked_set,
         urls,
     };
     sheet.build_index();

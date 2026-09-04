@@ -2499,6 +2499,23 @@ fn activate(engine: &Engine, page: &mut Page, seq: u32) {
 /// A navigation no longer COMPLETES in here — it is started and picked up by
 /// `nav_pump`, which reports its own redraw — so this guard now only catches
 /// a path that bumps the counter without waiting for a network.
+/// Ein Ereignis, das nur den Zustand EINES Steuerelements aendert: erst neu
+/// malen versuchen, und nur wenn das nicht geht, die Seite auslegen.
+///
+/// Der Unterschied ist nicht klein. Ein volles Auslegen kostet auf Wikipedia
+/// 280 ms, ein Neumalen einen Bruchteil einer Millisekunde — und bis 0.71.0
+/// ging JEDER Tastendruck in einem Feld den teuren Weg. Wer hier eine neue
+/// Ursache einhaengt, prueft zuerst, ob sie wirklich nur einen Kasten
+/// betrifft; `repaint_controls` sagt selbst nein, wenn nicht.
+fn restate_control(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>,
+                   state: &FormState, why: &str) {
+    let done = cache.as_mut().is_some_and(|(lay, ..)| engine.repaint_controls(lay, state));
+    if !done {
+        bump_content_gen(why);
+    }
+    mark_dirty();
+}
+
 fn handle(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32, u32)>, page: &mut Page) -> bool {
     let nav = nav_gen();
     let chrome = handle_event(engine, ev, cache, page);
@@ -2514,8 +2531,7 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
             // focus there — drop the page control's focus so only one caret
             // blinks and Enter goes to the right place.
             if page.state.focus.take().is_some() {
-                bump_content_gen("addressbar-focus");
-                mark_dirty();
+                restate_control(engine, cache, &page.state, "addressbar-focus");
             }
             false
         }
@@ -2523,8 +2539,7 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
         // routes keys here when no chrome Input/TextArea consumed them).
         Event::Key(k) if page.state.focus.is_some() => {
             if edit_key(engine, page, k) {
-                bump_content_gen("form-key");
-                mark_dirty();
+                restate_control(engine, cache, &page.state, "form-key");
             }
             false
         }
@@ -2675,15 +2690,16 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
                     if let Some(ctl) = lay.hit_control(cx, cy) {
                         let seq = ctl.seq;
                         activate(engine, page, seq);
-                        bump_content_gen("control-activate"); // repaint the focus ring / new value
-                        mark_dirty();
+                        restate_control(engine, cache, &page.state, "control-activate");
                         return true;
                     }
                     let href = lay.hit_test(cx, cy).map(|s| s.to_string());
+                    let toggle = lay.hit_toggle(cx, cy);
                     // Clicking the page elsewhere blurs a focused control.
+                    // Beide Treffer werden VORHER geholt: das Neumalen braucht
+                    // den Zwischenspeicher veraenderlich, und `lay` haelt ihn.
                     if page.state.focus.take().is_some() {
-                        bump_content_gen("control-blur");
-                        mark_dirty();
+                        restate_control(engine, cache, &page.state, "control-blur");
                     }
                     if let Some(href) = href {
                         follow(engine, &href);
@@ -2692,7 +2708,7 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
                     // A `<summary>` opens/closes its section. It comes AFTER
                     // the control and the link: a link inside a summary
                     // navigates, which is what a browser does too.
-                    if let Some(seq) = lay.hit_toggle(cx, cy) {
+                    if let Some(seq) = toggle {
                         if engine.toggle_details(seq) {
                             bump_content_gen("details-toggle");
                             mark_dirty();
