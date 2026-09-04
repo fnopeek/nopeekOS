@@ -162,7 +162,6 @@ impl Drop for Interp {
 /// Der Kaskadenkontext, den der Wirt einreicht.
 pub struct StyleCtx {
     pub sheet: alloc::rc::Rc<crate::css::Stylesheet>,
-    pub dom: alloc::rc::Rc<crate::dom::Dom>,
     pub theme: crate::layout::Theme,
     pub viewport_w: f32,
 }
@@ -208,6 +207,14 @@ pub struct Interp {
     /// `getComputedStyle` weiter aus dem Inline-Stil — eine Teilantwort, die
     /// die Seite laufen laesst, statt sie mit einem TypeError zu beenden.
     pub style_ctx: Option<StyleCtx>,
+    /// Der lebende Baum in der Form, die die Kaskade lesen kann — gebaut aus
+    /// `doc`, und nur neu gebaut, wenn `doc.version` sich bewegt hat.
+    ///
+    /// Frueher hielt `StyleCtx` einen SCHNAPPSCHUSS vom Skriptstart, und
+    /// `getComputedStyle` antwortete daraus. Ein Skript, das eine Klasse setzt
+    /// und dann misst, bekam den Stand von vorher — zwei Antworten auf
+    /// dieselbe Frage. Jetzt gibt es nur noch einen Baum.
+    pub live_dom: core::cell::RefCell<Option<(u32, alloc::rc::Rc<crate::dom::Dom>)>>,
     /// Die Kekse dieser Seite, so wie `document.cookie` sie zeigt.
     ///
     /// **Der Wirt reicht sie ein, die Engine hat keinen Behaelter.** Der
@@ -285,6 +292,7 @@ impl Interp {
         Interp { realm, depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX,
                  fake_now: 0.0, doc: None, next_sym: 0, sym_registry: HashMap::new(),
                  cookies: String::new(), cookie_sets: Vec::new(), style_ctx: None,
+                 live_dom: core::cell::RefCell::new(None),
                  jobs: alloc::collections::VecDeque::new(),
                  rng: 0x2545_F491_4F6C_DD1D, media: None,
                  timers: Vec::new(), console: Vec::new(), console_dropped: 0 }

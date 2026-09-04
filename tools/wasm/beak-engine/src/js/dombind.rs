@@ -118,6 +118,14 @@ pub struct Doc {
     /// Hat die Seite ueberhaupt Behandler? Solange nicht, braucht das Layout
     /// keine Treffer-Kaesten aufzuzeichnen.
     pub has_listeners: bool,
+    /// Zaehlt jede Aenderung am Baum — und wird NIE zurueckgesetzt.
+    ///
+    /// `dirty` beantwortet „muss ich zurueckschreiben?" und wird beim
+    /// Zurueckschreiben geloescht. Fuer einen Zwischenspeicher taugt es
+    /// deshalb nicht: nach dem Loeschen ist „unveraendert seit meinem Stand"
+    /// von „seither zweimal geaendert" nicht mehr zu unterscheiden. Ein
+    /// Zaehler, der nur steigt, kann beides.
+    pub version: u32,
 }
 
 impl Doc {
@@ -125,7 +133,7 @@ impl Doc {
         let mut nodes = Vec::new();
         nodes.push(DomNode::new(DOCUMENT_NODE, "#document"));
         Doc { nodes, doc: 0, html: None, body: None, head: None,
-              dirty: false, has_listeners: false }
+              dirty: false, has_listeners: false, version: 0 }
     }
 
     /// Aus beaks geparstem Baum. Der `seq` des Originals wird NICHT
@@ -170,7 +178,7 @@ impl Doc {
     }
 
     pub fn push(&mut self, n: DomNode, parent: u32) -> u32 {
-        self.dirty = true;
+        self.touch();
         let id = self.nodes.len() as u32;
         self.nodes.push(n);
         self.nodes[id as usize].parent = Some(parent);
@@ -180,7 +188,7 @@ impl Doc {
 
     /// Frei stehender Knoten, noch ohne Elternteil (`createElement`).
     pub fn create(&mut self, kind: f64, tag: &str) -> u32 {
-        self.dirty = true;
+        self.touch();
         let id = self.nodes.len() as u32;
         self.nodes.push(DomNode::new(kind, tag));
         id
@@ -197,7 +205,7 @@ impl Doc {
     /// Aus dem alten Elternteil aushaengen. Muss VOR jedem Einhaengen laufen,
     /// sonst steht ein Knoten in zwei Kinderlisten und der Baum ist keiner mehr.
     pub fn detach(&mut self, id: u32) {
-        self.dirty = true;
+        self.touch();
         if let Some(p) = self.nodes[id as usize].parent {
             self.nodes[p as usize].children.retain(|&c| c != id);
         }
@@ -205,7 +213,7 @@ impl Doc {
     }
 
     pub fn append(&mut self, parent: u32, child: u32) {
-        self.dirty = true;
+        self.touch();
         self.detach(child);
         self.nodes[child as usize].parent = Some(parent);
         self.nodes[parent as usize].children.push(child);
@@ -229,7 +237,7 @@ impl Doc {
     }
 
     pub fn insert_before(&mut self, parent: u32, child: u32, before: Option<u32>) {
-        self.dirty = true;
+        self.touch();
         self.detach(child);
         self.nodes[child as usize].parent = Some(parent);
         let at = match before {
@@ -345,7 +353,7 @@ impl Doc {
 
     /// Alle Kinder eines Knotens loesen (fuer `innerHTML =`).
     pub fn clear_children(&mut self, id: u32) {
-        self.dirty = true;
+        self.touch();
         let old: Vec<u32> = self.nodes[id as usize].children.clone();
         for c in old { self.nodes[c as usize].parent = None; }
         self.nodes[id as usize].children.clear();
@@ -383,6 +391,48 @@ impl Doc {
     /// `seq` wird NEU vergeben, in Dokumentreihenfolge — genau wie der Parser
     /// es tut. Damit stimmt die Identitaet, an der die Formularzustaende
     /// haengen, fuer alles, was der Skriptlauf nicht angefasst hat.
+    /// Eine Aenderung am Baum vermerken. `dirty` fuer „zurueckschreiben",
+    /// `version` fuer jeden, der einen Zwischenspeicher darauf haelt.
+    pub fn touch(&mut self) {
+        self.dirty = true;
+        self.version = self.version.wrapping_add(1);
+    }
+
+    /// Der LEBENDE Baum, so wie die Kaskade ihn braucht — ohne etwas zu
+    /// aendern.
+    ///
+    /// Unterschied zu `to_dom`: das hier vergibt keine neuen `seq`. `to_dom`
+    /// tut das, weil es die Bruecke zum Layout neu spannt; wer es zwischendurch
+    /// riefe, um nur EINE Frage zu beantworten, wuerde jedem Kasten im
+    /// fertigen Layout die Nummer unter dem Stuhl wegziehen.
+    ///
+    /// Die Kennung ist stattdessen der ARENA-INDEX, der sich nie aendert. Sie
+    /// steht als `seq` im gebauten Element, also findet `find_path` das
+    /// Element mit derselben Zahl wieder, mit der der Rufer sein JS-Objekt
+    /// haelt.
+    pub fn live_dom(&self) -> crate::dom::Dom {
+        let mut root = crate::dom::Element::bare("#root".into(), 0);
+        for c in &self.nodes[self.doc as usize].children {
+            if let Some(n) = self.live_node(*c) { root.children.push(n); }
+        }
+        root.index_attrs();
+        crate::dom::Dom { root }
+    }
+
+    fn live_node(&self, id: u32) -> Option<crate::dom::Node> {
+        let n = &self.nodes[id as usize];
+        if n.kind == TEXT_NODE { return Some(crate::dom::Node::Text(n.text.to_string())); }
+        if n.kind != ELEMENT_NODE { return None; }
+        let mut e = crate::dom::Element::bare(n.tag.to_string(), id);
+        for (k, v) in &n.attrs { e.attrs.push((k.to_string(), v.to_string())); }
+        // MUSS nach den Attributen laufen — siehe `to_node`.
+        e.index_attrs();
+        for c in &n.children {
+            if let Some(x) = self.live_node(*c) { e.children.push(x); }
+        }
+        Some(crate::dom::Node::Element(e))
+    }
+
     pub fn to_dom(&mut self) -> crate::dom::Dom {
         let mut seq = 0u32;
         let mut root = crate::dom::Element::bare("#root".into(), seq);
@@ -827,7 +877,7 @@ fn style_set(i: &mut Interp, id: u32, css: &str, val: &str) {
     if !v.is_empty() { decls.push((css.to_string(), v.to_string())); }
     let joined = style_join(&decls);
     d.nodes[id as usize].set_attr("style", &joined);
-    d.dirty = true;
+    d.touch();
 }
 
 /// Ein Eigenschaftspaar auf `CSSStyleDeclaration.prototype`. Als Makro aus
@@ -899,7 +949,7 @@ macro_rules! attr_prop {
         let s = native(Some($fp.clone()), |i, t, a| {
             let id = node_of(i, &t)?;
             let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-            if let Some(d) = &mut i.doc { d.dirty = true; d.nodes[id as usize].set_attr($attr, &v); }
+            if let Some(d) = &mut i.doc { d.touch(); d.nodes[id as usize].set_attr($attr, &v); }
             Ok(Value::Undefined)
         }, concat!("set ", $js), 1, false);
         $proto.borrow_mut().define($js, Prop { value: None, get: Some(Value::Obj(g)),
@@ -921,7 +971,7 @@ macro_rules! num_attr_prop {
             let id = node_of(i, &t)?;
             let n = i.to_number(a.first().unwrap_or(&Value::Undefined))?;
             let v = i.to_string(&Value::Num(n))?;
-            if let Some(d) = &mut i.doc { d.dirty = true; d.nodes[id as usize].set_attr($attr, &v); }
+            if let Some(d) = &mut i.doc { d.touch(); d.nodes[id as usize].set_attr($attr, &v); }
             Ok(Value::Undefined)
         }, concat!("set ", $js), 1, false);
         $proto.borrow_mut().define($js, Prop { value: None, get: Some(Value::Obj(g)),
@@ -941,7 +991,7 @@ macro_rules! bool_attr_prop {
             let id = node_of(i, &t)?;
             let on = a.first().map(|v| v.truthy()).unwrap_or(false);
             if let Some(d) = &mut i.doc {
-                d.dirty = true;
+                d.touch();
                 if on { d.nodes[id as usize].set_attr($attr, "") }
                 else { d.nodes[id as usize].attrs.retain(|(k, _)| &**k != $attr) }
             }
@@ -1010,7 +1060,7 @@ fn insert_all(i: &mut Interp, this: &Value, args: &[Value], w: Where) -> C<Value
         };
         // Der Anker bleibt derselbe: alles landet DAVOR, also stehen mehrere
         // Argumente am Ende in der Reihenfolge, in der sie uebergeben wurden.
-        if let Some(d) = &mut i.doc { d.insert_maybe_fragment(parent, id, anchor); d.dirty = true; }
+        if let Some(d) = &mut i.doc { d.insert_maybe_fragment(parent, id, anchor); d.touch(); }
     }
     Ok(Value::Undefined)
 }
@@ -1027,15 +1077,29 @@ fn insert_all(i: &mut Interp, this: &Value, args: &[Value], w: Where) -> C<Value
 /// `None`, wenn kein Kontext eingereicht wurde oder das Element im Baum nicht
 /// vorkommt (ein Skript hat es erst erzeugt) — dann bleibt es beim
 /// Inline-Stil.
-/// `live` sind die Inline-Stile, die das SKRIPT gerade haelt, je `src_seq` —
-/// siehe `getComputedStyle`, warum der Schnappschuss allein nicht reicht.
-fn computed_decls(i: &Interp, src_seq: u32, live: &[(u32, &str)]) -> Option<String> {
-    let ctx = i.style_ctx.as_ref()?;
-    if src_seq == 0 {
-        return None;
+/// Der Baum, auf dem die Kaskade rechnet: der LEBENDE, aus `doc` gebaut und
+/// nur dann neu gebaut, wenn `doc.version` sich bewegt hat.
+///
+/// Ein Skript, das eine Klasse setzt und dann misst, ist kein Randfall — und
+/// aus einem Schnappschuss beantwortet, waeren es zwei Antworten auf dieselbe
+/// Frage. Der Zwischenspeicher ist der Preis dafuer: EIN Aufbau je
+/// Aenderungsschub, nicht je Abfrage.
+fn style_tree(i: &Interp) -> Option<alloc::rc::Rc<crate::dom::Dom>> {
+    let doc = i.doc.as_ref()?;
+    let mut slot = i.live_dom.borrow_mut();
+    if !matches!(&*slot, Some((v, _)) if *v == doc.version) {
+        *slot = Some((doc.version, alloc::rc::Rc::new(doc.live_dom())));
     }
+    slot.as_ref().map(|(_, d)| d.clone())
+}
+
+/// `node` ist der ARENA-INDEX des Elements — dieselbe Zahl, die `live_dom`
+/// als `seq` in den Baum schreibt.
+fn computed_decls(i: &Interp, node: u32) -> Option<String> {
+    let ctx = i.style_ctx.as_ref()?;
+    let tree = style_tree(i)?;
     let mut path: Vec<&crate::dom::Element> = Vec::new();
-    if !find_path(&ctx.dom.root, src_seq, &mut path) {
+    if !find_path(&tree.root, node, &mut path) {
         return None;
     }
     let mut parent = crate::style::ComputedStyle::root(&ctx.theme);
@@ -1070,14 +1134,6 @@ fn computed_decls(i: &Interp, src_seq: u32, live: &[(u32, &str)]) -> Option<Stri
         out = crate::style::resolve_in(&info, &parent, &ctx.theme, &ctx.sheet,
                                        &anc, &prev, count, ctx.viewport_w, &vars, &mut own);
         if let Some(m) = own { vars = m; }
-        // Was das Skript seither an den Inline-Stil geschrieben hat. Nur wenn
-        // er sich vom Schnappschuss unterscheidet — sonst liefe die
-        // Inline-Ebene ein zweites Mal.
-        if let Some((_, text)) = live.iter().find(|(seq, _)| *seq == el.seq) {
-            if el.attr("style").unwrap_or("") != *text {
-                crate::style::apply_inline_over(&mut out, text, &ctx.theme, &parent, &vars);
-            }
-        }
         // `rem` rechnet gegen die WURZEL, und die steht erst fest, wenn sie
         // aufgeloest ist. Das Layout setzt das direkt nach dem Wurzellauf;
         // ohne die Zeile las `getComputedStyle` jedes `rem` gegen die
@@ -1236,7 +1292,7 @@ pub fn install(realm: &mut Realm) {
             let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
             if let Some(d) = &mut i.doc {
                 if d.nodes[id as usize].kind != ELEMENT_NODE {
-                    d.dirty = true;
+                    d.touch();
                     d.nodes[id as usize].text = v;
                 }
             }
@@ -1337,12 +1393,12 @@ pub fn install(realm: &mut Realm) {
     accessor(&element_proto, "id",
         |i, t, _| with_node!(i, t, |n| Ok(match n.attr("id") { Some(v) => Value::Str(v.clone()), None => Value::str("") })),
         |i, t, a| { let id = node_of(i, &t)?; let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-                    if let Some(d) = &mut i.doc { d.dirty = true; d.nodes[id as usize].set_attr("id", &v); }
+                    if let Some(d) = &mut i.doc { d.touch(); d.nodes[id as usize].set_attr("id", &v); }
                     Ok(Value::Undefined) }, &fp);
     accessor(&element_proto, "className",
         |i, t, _| with_node!(i, t, |n| Ok(match n.attr("class") { Some(v) => Value::Str(v.clone()), None => Value::str("") })),
         |i, t, a| { let id = node_of(i, &t)?; let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-                    if let Some(d) = &mut i.doc { d.dirty = true; d.nodes[id as usize].set_attr("class", &v); }
+                    if let Some(d) = &mut i.doc { d.touch(); d.nodes[id as usize].set_attr("class", &v); }
                     Ok(Value::Undefined) }, &fp);
     meth(&element_proto, "getAttribute", |i, t, a| {
         let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
@@ -1356,13 +1412,13 @@ pub fn install(realm: &mut Realm) {
         let id = node_of(i, &t)?;
         let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         let v = i.to_string(a.get(1).unwrap_or(&Value::Undefined))?;
-        if let Some(d) = &mut i.doc { d.dirty = true; d.nodes[id as usize].set_attr(&k, &v); }
+        if let Some(d) = &mut i.doc { d.touch(); d.nodes[id as usize].set_attr(&k, &v); }
         Ok(Value::Undefined)
     }, 2, &fp);
     meth(&element_proto, "removeAttribute", |i, t, a| {
         let id = node_of(i, &t)?;
         let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-        if let Some(d) = &mut i.doc { d.dirty = true; d.nodes[id as usize].attrs.retain(|(n, _)| *n != k); }
+        if let Some(d) = &mut i.doc { d.touch(); d.nodes[id as usize].attrs.retain(|(n, _)| *n != k); }
         Ok(Value::Undefined)
     }, 1, &fp);
     meth(&element_proto, "matches", |i, t, a| {
@@ -1475,7 +1531,7 @@ pub fn install(realm: &mut Realm) {
     meth(&element_proto, "replaceWith", |i, t, a| {
         let id = node_of(i, &t)?;
         insert_all(i, &t, a, Where::Before)?;
-        if let Some(d) = &mut i.doc { d.detach(id); d.dirty = true; }
+        if let Some(d) = &mut i.doc { d.detach(id); d.touch(); }
         Ok(Value::Undefined)
     }, 1, &fp);
 
@@ -1594,7 +1650,7 @@ pub fn install(realm: &mut Realm) {
             let tn = d.create(TEXT_NODE, "");
             d.nodes[tn as usize].text = s;
             d.append(t, tn);
-            d.dirty = true;
+            d.touch();
             Ok(Value::Undefined)
         }, &fp);
     // Was der Aufrufzensus (`tools/jsscope/out/apicensus.json`, eine echte
@@ -1771,7 +1827,7 @@ pub fn install(realm: &mut Realm) {
         |i, t, a| {
             let id = node_of(i, &t)?;
             let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-            if let Some(d) = &mut i.doc { d.dirty = true; d.nodes[id as usize].text = v; }
+            if let Some(d) = &mut i.doc { d.touch(); d.nodes[id as usize].text = v; }
             Ok(Value::Undefined)
         }, &fp);
     getter(&char_data_proto, "length",
@@ -1780,7 +1836,7 @@ pub fn install(realm: &mut Realm) {
         let id = node_of(i, &t)?;
         let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         if let Some(d) = &mut i.doc {
-            d.dirty = true;
+            d.touch();
             let mut s = d.nodes[id as usize].text.to_string();
             s.push_str(&v);
             d.nodes[id as usize].text = Rc::from(s.as_str());
@@ -1797,7 +1853,7 @@ pub fn install(realm: &mut Realm) {
     /// Die Klassen eines Knotens schreiben — eine Stelle, ein Format.
     fn set_classes(i: &mut Interp, id: u32, cs: &[Rc<str>]) {
         let joined = cs.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
-        if let Some(d) = &mut i.doc { d.dirty = true; d.nodes[id as usize].set_attr("class", &joined); }
+        if let Some(d) = &mut i.doc { d.touch(); d.nodes[id as usize].set_attr("class", &joined); }
     }
     meth(&token_list_proto, "contains", |i, t, a| {
         let id = node_of(i, &t)?;
@@ -1869,7 +1925,7 @@ pub fn install(realm: &mut Realm) {
         |i, t, a| {
             let id = node_of(i, &t)?;
             let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-            if let Some(d) = &mut i.doc { d.dirty = true; d.nodes[id as usize].set_attr("class", &v); }
+            if let Some(d) = &mut i.doc { d.touch(); d.nodes[id as usize].set_attr("class", &v); }
             Ok(Value::Undefined)
         }, &fp);
     meth(&token_list_proto, "toString", |i, t, _| {
@@ -1933,7 +1989,7 @@ pub fn install(realm: &mut Realm) {
         |i, t, a| {
             let id = node_of(i, &t)?;
             let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-            if let Some(d) = &mut i.doc { d.dirty = true; d.nodes[id as usize].set_attr("style", &v); }
+            if let Some(d) = &mut i.doc { d.touch(); d.nodes[id as usize].set_attr("style", &v); }
             Ok(Value::Undefined)
         }, &fp);
     // Die benannten Eigenschaften. Die Liste ist bewusst endlich: ohne Proxy
@@ -2154,31 +2210,11 @@ pub fn install(realm: &mut Realm) {
         // `getComputedStyle` auch im Browser: die Antwort auf die Frage von
         // jetzt. Ohne Kontext bleibt es beim Inline-Stil, und das ist eine
         // Teilantwort, die die Seite laufen laesst.
-        let src = i.doc.as_ref().map(|d| d.nodes[id as usize].src_seq).unwrap_or(0);
-        // Der Kaskadenkontext ist ein Schnappschuss vom SKRIPTSTART. Was das
-        // Skript seither geschrieben hat, steht nur im lebenden Baum — also
-        // die Inline-Stile der Vorfahrenkette dort abholen und ueber die
-        // gerechneten legen.
-        //
-        // Genannt, weil es die Luecke nur zum TEIL schliesst: eine geaenderte
-        // KLASSE (oder ein neu eingehaengter Knoten) veraendert, welche Regeln
-        // ueberhaupt treffen, und das sieht der Schnappschuss weiter nicht.
-        // Dafuer muesste der Kontext auf dem lebenden Baum rechnen — eine
-        // eigene Runde, und keine billige.
-        let mut live: alloc::vec::Vec<(u32, &str)> = alloc::vec::Vec::new();
-        if let Some(d) = i.doc.as_ref() {
-            let mut n = Some(id);
-            while let Some(k) = n {
-                let node = &d.nodes[k as usize];
-                if node.src_seq != 0 {
-                    if let Some(t) = node.attr("style") {
-                        live.push((node.src_seq, t));
-                    }
-                }
-                n = node.parent;
-            }
-        }
-        if let Some(text) = computed_decls(i, src, &live) {
+        // Gerechnet wird auf dem LEBENDEN Baum, und die Kennung ist der
+        // Arena-Index — dieselbe Zahl, die das JS-Objekt haelt. Ein Element,
+        // das noch nirgends haengt, findet `find_path` nicht: dafuer gibt es
+        // keinen gerechneten Stil, und die leere Antwort ist die ehrliche.
+        if let Some(text) = computed_decls(i, id) {
             g.borrow_mut().define(COMPUTED, Prop { value: Some(Value::str(&text)), get: None,
                 set: None, writable: false, enumerable: false, configurable: false });
         }
@@ -2628,7 +2664,6 @@ mod tests {
         i.set_document(super::Doc::from_dom(&dom));
         i.set_style_context(super::super::interp::StyleCtx {
             sheet: alloc::rc::Rc::new(sheet),
-            dom: alloc::rc::Rc::new(dom),
             theme: crate::layout::Theme {
                 bg: crate::layout::Rgb(255, 255, 255),
                 text: crate::layout::Rgb(33, 37, 41),
@@ -2684,6 +2719,40 @@ mod tests {
              console.log(getComputedStyle(e).color);",
         );
         assert_eq!(out, ["rgb(0, 0, 0)", "rgb(29, 92, 29)"]);
+    }
+
+    /// **Der Fall, wegen dem der Schnappschuss weg ist.** Ein Skript setzt
+    /// eine KLASSE und misst dann — die Klasse entscheidet, welche Regeln
+    /// ueberhaupt treffen, und aus einem Baum vom Skriptstart ist das nicht zu
+    /// beantworten. Bis 0.74.0 kam die Antwort von vorher.
+    #[test]
+    fn a_class_the_script_just_added_decides_the_computed_style() {
+        let out = run(
+            "<html><head><style>p{color:#000} .an{color:#ff0000;display:none}</style></head>\
+             <body><p id=a>x</p></body></html>",
+            "var e = document.getElementById('a');\
+             console.log(getComputedStyle(e).color + ' ' + getComputedStyle(e).display);\
+             e.className = 'an';\
+             console.log(getComputedStyle(e).color + ' ' + getComputedStyle(e).display);\
+             e.className = '';\
+             console.log(getComputedStyle(e).color + ' ' + getComputedStyle(e).display);",
+        );
+        assert_eq!(out, ["rgb(0, 0, 0) block", "rgb(255, 0, 0) none", "rgb(0, 0, 0) block"]);
+    }
+
+    /// Und ein Knoten, den das Skript erst EINHAENGT, bekommt seine Kaskade —
+    /// samt allem, was ihm der Nachbar oder der Elternteil vererbt.
+    #[test]
+    fn a_node_the_script_appends_gets_the_cascade_of_where_it_landed() {
+        let out = run(
+            "<html><head><style>.box{color:#0000ff} .box span{color:#008000}</style></head>\
+             <body><div class=box id=b></div></body></html>",
+            "var s = document.createElement('span');\
+             console.log(JSON.stringify(getComputedStyle(s).color));\
+             document.getElementById('b').appendChild(s);\
+             console.log(getComputedStyle(s).color);",
+        );
+        assert_eq!(out, ["\"\"", "rgb(0, 128, 0)"]);
     }
 
     /// Der Inline-Stil bleibt eine LEBENDE Sicht — `el.style` ist etwas

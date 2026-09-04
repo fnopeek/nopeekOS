@@ -1368,7 +1368,6 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) {
         let sheet = beak_engine::css::collect_all(&dom, css_str(), media);
         sess.interp.set_style_context(beak_engine::js::interp::StyleCtx {
             sheet: alloc::rc::Rc::new(sheet),
-            dom: alloc::rc::Rc::new(dom),
             theme: engine.theme(),
             viewport_w: w as f32,
         });

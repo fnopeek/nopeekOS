@@ -38,7 +38,6 @@ fn main() {
     let sheet = beak_engine::css::collect_all(&dom, "", media);
     sess.interp.set_style_context(beak_engine::js::interp::StyleCtx {
         sheet: std::rc::Rc::new(sheet),
-        dom: std::rc::Rc::new(dom),
         theme,
         viewport_w: 1024.0,
     });
