@@ -469,7 +469,7 @@ impl Interp {
                     let out = new_obj(Some(self.realm.object_proto.clone()));
                     for k in keys {
                         if taken.contains(&k) { continue; }
-                        let enumerable = o.borrow().get_own(&k).map(|p| p.enumerable).unwrap_or(false);
+                        let enumerable = o.borrow().is_enumerable(&k);
                         if !enumerable { continue; }
                         let val = self.get(&v, &k)?;
                         out.borrow_mut().set_prop(k, Prop::data(val));

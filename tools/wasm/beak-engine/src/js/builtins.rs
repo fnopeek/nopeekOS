@@ -68,6 +68,11 @@ pub fn make_realm() -> Realm {
                     ObjKind::Arguments => "Arguments",
                     ObjKind::Regex(_) => "RegExp",
                     ObjKind::Promise(_) => "Promise",
+                    ObjKind::Buffer(_) => "ArrayBuffer",
+                    // Eine Sicht traegt ihren Namen ueber `Symbol.toStringTag`
+                    // auf `%TypedArray%.prototype`; hier kommt sie nur an,
+                    // wenn den jemand geloescht hat.
+                    ObjKind::TypedArray(_) | ObjKind::DataView(_) => "Object",
                     // Ein Generator traegt seinen Namen ueber
                     // `Symbol.toStringTag` und kommt hier nur an, wenn den
                     // jemand geloescht hat — dann ist er ein gewoehnliches
@@ -102,7 +107,7 @@ pub fn make_realm() -> Realm {
     def(&object_proto, "propertyIsEnumerable", |i, this, a| {
         let k = i.to_prop_key(a.first().unwrap_or(&Value::Undefined))?;
         let o = i.to_object(&this)?;
-        let e = o.borrow().get_own(&k).map(|p| p.enumerable).unwrap_or(false);
+        let e = o.borrow().is_enumerable(&k);
         Ok(Value::Bool(e))
     }, 1, fp);
 
@@ -693,7 +698,7 @@ pub fn make_realm() -> Realm {
     def(&object_ctor, "keys", |i, _, a| {
         let o = i.to_object(a.first().unwrap_or(&Value::Undefined))?;
         let keys: Vec<Value> = o.borrow().own_keys().into_iter()
-            .filter(|k| o.borrow().get_own(k).map(|p| p.enumerable).unwrap_or(false))
+            .filter(|k| o.borrow().is_enumerable(k))
             .map(Value::Str).collect();
         Ok(i.new_array(keys))
     }, 1, fp);
@@ -774,7 +779,7 @@ pub fn make_realm() -> Realm {
             let mut keys = o.borrow().own_keys();
             keys.extend(o.borrow().own_sym_keys());
             for k in keys {
-                let enumerable = o.borrow().get_own(&k).map(|p| p.enumerable).unwrap_or(false);
+                let enumerable = o.borrow().is_enumerable(&k);
                 if !enumerable { continue; }
                 let v = i.get(src, &k)?;
                 i.set(&target, &k, v)?;
@@ -788,7 +793,7 @@ pub fn make_realm() -> Realm {
         let keys = o.borrow().own_keys();
         let mut out = Vec::new();
         for k in keys {
-            if !o.borrow().get_own(&k).map(|p| p.enumerable).unwrap_or(false) { continue; }
+            if !o.borrow().is_enumerable(&k) { continue; }
             out.push(i.get(&src, &k)?);
         }
         Ok(i.new_array(out))
@@ -799,7 +804,7 @@ pub fn make_realm() -> Realm {
         let keys = o.borrow().own_keys();
         let mut out = Vec::new();
         for k in keys {
-            if !o.borrow().get_own(&k).map(|p| p.enumerable).unwrap_or(false) { continue; }
+            if !o.borrow().is_enumerable(&k) { continue; }
             let v = i.get(&src, &k)?;
             out.push(i.new_array(alloc::vec![Value::Str(k), v]));
         }
@@ -2017,6 +2022,259 @@ pub fn make_realm() -> Realm {
         Ok(Value::string(String::from_utf16_lossy(&units)))
     }, 1, fp);
 
+    // ── ArrayBuffer, %TypedArray% und DataView ───────────────────────────
+    //
+    // **Der Puffer ist der Speicher, die Sicht nur eine Sicht darauf.** Zwei
+    // Sichten auf denselben Puffer sehen einander; das ist der Sinn der
+    // Familie und der Grund, warum die Bytes im `ArrayBuffer` liegen und
+    // nicht in der Sicht.
+    //
+    // `%TypedArray%` selbst ist nicht rufbar und hat keinen Namen im globalen
+    // Objekt — es ist der gemeinsame Vorfahr, an dem alle Methoden haengen.
+    // Die neun Konstruktoren erben von ihm, ihre Prototypen von seinem.
+    let mut ta_protos: HashMap<&'static str, Gc> = HashMap::new();
+    let ab_proto = new_obj(Some(object_proto.clone()));
+    let ab_ctor = native(Some(function_proto.clone()), |i, _, a| {
+        let n = match a.first() {
+            None | Some(Value::Undefined) => 0.0,
+            Some(v) => i.to_number(v)?,
+        };
+        if n < 0.0 || n != to_integer(n) || n > MAX_BUFFER_BYTES as f64 {
+            return i.range_err("invalid ArrayBuffer length");
+        }
+        Ok(i.new_buffer(n as usize))
+    }, "ArrayBuffer", 1, true);
+    ab_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(ab_proto.clone())));
+    ab_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(ab_ctor.clone())));
+    def(&ab_ctor, "isView", |_, _, a| {
+        Ok(Value::Bool(matches!(a.first(), Some(Value::Obj(o))
+            if matches!(o.borrow().kind, ObjKind::TypedArray(_) | ObjKind::DataView(_)))))
+    }, 1, fp);
+    let ab_len = native(Some(function_proto.clone()), |i, t, _| {
+        let Some(b) = buf_of(&t) else { return i.type_err("not an ArrayBuffer") };
+        Ok(Value::Num(if b.detached.get() { 0.0 } else { b.bytes.borrow().len() as f64 }))
+    }, "get byteLength", 0, false);
+    ab_proto.borrow_mut().define("byteLength", Prop {
+        value: None, get: Some(Value::Obj(ab_len)), set: None,
+        writable: false, enumerable: false, configurable: true });
+    def(&ab_proto, "slice", |i, t, a| {
+        let Some(b) = buf_of(&t) else { return i.type_err("not an ArrayBuffer") };
+        let n = b.bytes.borrow().len() as i64;
+        let (s, e) = range_args(i, a.first(), a.get(1), n)?;
+        let part: Vec<u8> = b.bytes.borrow()[s as usize..e as usize].to_vec();
+        let out = i.new_buffer(part.len());
+        if let Value::Obj(o) = &out {
+            if let ObjKind::Buffer(nb) = &o.borrow().kind { *nb.bytes.borrow_mut() = part; }
+        }
+        Ok(out)
+    }, 2, fp);
+    ab_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::frozen(Value::str("ArrayBuffer")));
+    global.borrow_mut().define("ArrayBuffer", Prop::builtin(Value::Obj(ab_ctor.clone())));
+
+    let ta_proto = new_obj(Some(object_proto.clone()));
+    let ta_ctor = native(Some(function_proto.clone()), |i, _, _| {
+        i.type_err("Abstract class TypedArray not directly constructable")
+    }, "TypedArray", 0, true);
+    ta_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(ta_proto.clone())));
+    ta_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(ta_ctor.clone())));
+    // Die vier Auskuenfte sind LESER auf dem gemeinsamen Prototyp, keine
+    // Eigenschaften der Sicht — sonst muesste jede Sicht sie mitschleppen und
+    // ein abgetrennter Puffer koennte sie nicht mehr aendern.
+    for (name, which) in [("length", 0u8), ("byteLength", 1), ("byteOffset", 2)] {
+        let g = native(Some(function_proto.clone()), match which {
+            0 => |i: &mut Interp, t: Value, _: &[Value]| {
+                let Some(x) = this_ta(i, &t) else { return i.type_err("not a TypedArray") };
+                Ok(Value::Num(x.live_len() as f64))
+            },
+            1 => |i: &mut Interp, t: Value, _: &[Value]| {
+                let Some(x) = this_ta(i, &t) else { return i.type_err("not a TypedArray") };
+                Ok(Value::Num((x.live_len() * x.kind.size()) as f64))
+            },
+            _ => |i: &mut Interp, t: Value, _: &[Value]| {
+                let Some(x) = this_ta(i, &t) else { return i.type_err("not a TypedArray") };
+                Ok(Value::Num(if x.live_len() == 0 && x.len > 0 { 0.0 } else { x.offset as f64 }))
+            },
+        }, "get", 0, false);
+        ta_proto.borrow_mut().define(name, Prop {
+            value: None, get: Some(Value::Obj(g)), set: None,
+            writable: false, enumerable: false, configurable: true });
+    }
+    let ta_buf = native(Some(function_proto.clone()), |i, t, _| {
+        let Some(x) = this_ta(i, &t) else { return i.type_err("not a TypedArray") };
+        Ok(Value::Obj(x.buf.clone()))
+    }, "get buffer", 0, false);
+    ta_proto.borrow_mut().define("buffer", Prop {
+        value: None, get: Some(Value::Obj(ta_buf)), set: None,
+        writable: false, enumerable: false, configurable: true });
+    let ta_tag = native(Some(function_proto.clone()), |i, t, _| {
+        Ok(match this_ta(i, &t) { Some(x) => Value::str(x.kind.name()), None => Value::Undefined })
+    }, "get [Symbol.toStringTag]", 0, false);
+    ta_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop {
+        value: None, get: Some(Value::Obj(ta_tag)), set: None,
+        writable: false, enumerable: false, configurable: true });
+    def(&ta_proto, "set", |i, t, a| {
+        let Some(x) = this_ta(i, &t) else { return i.type_err("not a TypedArray") };
+        let src = a.first().cloned().unwrap_or(Value::Undefined);
+        let off = match a.get(1) { None => 0.0, Some(v) => i.to_number(v)? };
+        if off < 0.0 { return i.range_err("offset is negative") }
+        let items = i.elems(&src)?;
+        if off as usize + items.len() > x.live_len() {
+            return i.range_err("source is too large");
+        }
+        for (k, v) in items.into_iter().enumerate() {
+            let n = i.to_number(&v)?;
+            ta_write(&x, off as usize + k, n);
+        }
+        Ok(Value::Undefined)
+    }, 1, fp);
+    def(&ta_proto, "subarray", |i, t, a| {
+        let Some(x) = this_ta(i, &t) else { return i.type_err("not a TypedArray") };
+        let n = x.live_len() as i64;
+        let (s, e) = range_args(i, a.first(), a.get(1), n)?;
+        // Eine Untersicht teilt den PUFFER — sie kopiert nicht.
+        Ok(i.new_view(x.kind, x.buf.clone(), x.offset + s as usize * x.kind.size(),
+                      (e - s) as usize))
+    }, 2, fp);
+    def(&ta_proto, "slice", |i, t, a| {
+        let Some(x) = this_ta(i, &t) else { return i.type_err("not a TypedArray") };
+        let n = x.live_len() as i64;
+        let (s, e) = range_args(i, a.first(), a.get(1), n)?;
+        // `slice` KOPIERT, `subarray` nicht — der einzige Unterschied, und er
+        // ist der ganze Grund, dass es beide gibt.
+        let out = i.new_typed(x.kind, (e - s) as usize);
+        if let Value::Obj(o) = out.clone() {
+            if let Some(y) = ta_of(&o) {
+                for k in 0..(e - s) as usize {
+                    ta_write(&y, k, ta_get(&x, s as usize + k));
+                }
+            }
+        }
+        Ok(out)
+    }, 2, fp);
+    // Eine Sicht ist iterierbar ueber DIESELBE Funktion wie ein Feld — sie
+    // laeuft ueber `length` und Indizes, und beides beantwortet die Sicht.
+    if let Some(v) = array_proto.borrow().get_own("values").and_then(|p| p.value.clone()) {
+        ta_proto.borrow_mut().define(SYM_ITERATOR, Prop::builtin(v));
+    }
+    // Und die gewoehnlichen Feldmethoden gelten auch hier, solange sie nur
+    // lesen und rechnen. Was ein FELD zurueckgibt statt einer Sicht (`map`,
+    // `filter`), bleibt vorerst weg — lieber gar nicht als mit falschem Typ.
+    for m in ["forEach", "indexOf", "lastIndexOf", "includes", "join", "reduce",
+              "reduceRight", "some", "every", "find", "findIndex", "findLast",
+              "findLastIndex", "at", "fill", "reverse", "sort", "entries",
+              "keys", "values", "copyWithin"] {
+        let v = array_proto.borrow().get_own(m).and_then(|p| p.value.clone());
+        if let Some(v) = v { ta_proto.borrow_mut().define(m, Prop::builtin(v)); }
+    }
+
+    // Die neun Konstruktoren. Ihr Rumpf ist derselbe; nur die Elementart
+    // unterscheidet sie, und die steht im Zeiger.
+    for (kind, f) in [
+        (ElemKind::I8,  (|i: &mut Interp, _: Value, a: &[Value]| ta_new(i, ElemKind::I8, a)) as NativeFn),
+        (ElemKind::U8,  |i, _, a| ta_new(i, ElemKind::U8, a)),
+        (ElemKind::U8C, |i, _, a| ta_new(i, ElemKind::U8C, a)),
+        (ElemKind::I16, |i, _, a| ta_new(i, ElemKind::I16, a)),
+        (ElemKind::U16, |i, _, a| ta_new(i, ElemKind::U16, a)),
+        (ElemKind::I32, |i, _, a| ta_new(i, ElemKind::I32, a)),
+        (ElemKind::U32, |i, _, a| ta_new(i, ElemKind::U32, a)),
+        (ElemKind::F32, |i, _, a| ta_new(i, ElemKind::F32, a)),
+        (ElemKind::F64, |i, _, a| ta_new(i, ElemKind::F64, a)),
+    ] {
+        let proto = new_obj(Some(ta_proto.clone()));
+        let ctor = native(Some(ta_ctor.clone()), f, kind.name(), 3, true);
+        ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(proto.clone())));
+        ctor.borrow_mut().define("BYTES_PER_ELEMENT",
+            Prop::frozen(Value::Num(kind.size() as f64)));
+        proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(ctor.clone())));
+        proto.borrow_mut().define("BYTES_PER_ELEMENT",
+            Prop::frozen(Value::Num(kind.size() as f64)));
+        global.borrow_mut().define(kind.name(), Prop::builtin(Value::Obj(ctor)));
+        ta_protos.insert(kind.name(), proto);
+    }
+
+    let dv_proto = new_obj(Some(object_proto.clone()));
+    let dv_ctor = native(Some(function_proto.clone()), |i, _, a| {
+        let Some(Value::Obj(b)) = a.first() else { return i.type_err("DataView needs a buffer") };
+        let Some(bd) = buf_of(&Value::Obj(b.clone())) else {
+            return i.type_err("DataView needs a buffer");
+        };
+        let have = bd.bytes.borrow().len();
+        let off = match a.get(1) { None => 0.0, Some(v) => i.to_number(v)? };
+        if off < 0.0 || off as usize > have { return i.range_err("offset out of range") }
+        let len = match a.get(2) {
+            None | Some(Value::Undefined) => have - off as usize,
+            Some(v) => {
+                let n = i.to_number(v)?;
+                if n < 0.0 || n > MAX_BUFFER_BYTES as f64 {
+                    return i.range_err("invalid DataView length");
+                }
+                n as usize
+            }
+        };
+        if off as usize + len > have { return i.range_err("length out of range") }
+        Ok(Value::Obj(new_kind(Some(i.realm.dataview_proto.clone()),
+            ObjKind::DataView(Rc::new(DvData { buf: b.clone(), offset: off as usize, len })))))
+    }, "DataView", 1, true);
+    dv_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(dv_proto.clone())));
+    dv_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(dv_ctor.clone())));
+    dv_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::frozen(Value::str("DataView")));
+    for (name, which) in [("byteLength", 0u8), ("byteOffset", 1)] {
+        let g = native(Some(function_proto.clone()), match which {
+            0 => |i: &mut Interp, t: Value, _: &[Value]| {
+                let Some(d) = dv_of(&t) else { return i.type_err("not a DataView") };
+                Ok(Value::Num(d.len as f64))
+            },
+            _ => |i: &mut Interp, t: Value, _: &[Value]| {
+                let Some(d) = dv_of(&t) else { return i.type_err("not a DataView") };
+                Ok(Value::Num(d.offset as f64))
+            },
+        }, "get", 0, false);
+        dv_proto.borrow_mut().define(name, Prop {
+            value: None, get: Some(Value::Obj(g)), set: None,
+            writable: false, enumerable: false, configurable: true });
+    }
+    let dv_buf = native(Some(function_proto.clone()), |i, t, _| {
+        let Some(d) = dv_of(&t) else { return i.type_err("not a DataView") };
+        Ok(Value::Obj(d.buf.clone()))
+    }, "get buffer", 0, false);
+    dv_proto.borrow_mut().define("buffer", Prop {
+        value: None, get: Some(Value::Obj(dv_buf)), set: None,
+        writable: false, enumerable: false, configurable: true });
+    // Je Art ein Leser und ein Schreiber. **Die Bytefolge ist hier eine
+    // ANGABE, nicht die der Maschine** — das ist der ganze Unterschied zur
+    // getypten Sicht, und deshalb steht `little` in jedem Aufruf.
+    for (name, kind) in [("Int8", ElemKind::I8), ("Uint8", ElemKind::U8),
+                         ("Int16", ElemKind::I16), ("Uint16", ElemKind::U16),
+                         ("Int32", ElemKind::I32), ("Uint32", ElemKind::U32),
+                         ("Float32", ElemKind::F32), ("Float64", ElemKind::F64)] {
+        let gname = alloc::format!("get{name}");
+        let sname = alloc::format!("set{name}");
+        let k = kind;
+        let g = native(Some(function_proto.clone()), match k {
+            ElemKind::I8 => |i: &mut Interp, t: Value, a: &[Value]| dv_get(i, t, a, ElemKind::I8),
+            ElemKind::U8 => |i, t, a| dv_get(i, t, a, ElemKind::U8),
+            ElemKind::I16 => |i, t, a| dv_get(i, t, a, ElemKind::I16),
+            ElemKind::U16 => |i, t, a| dv_get(i, t, a, ElemKind::U16),
+            ElemKind::I32 => |i, t, a| dv_get(i, t, a, ElemKind::I32),
+            ElemKind::U32 => |i, t, a| dv_get(i, t, a, ElemKind::U32),
+            ElemKind::F32 => |i, t, a| dv_get(i, t, a, ElemKind::F32),
+            _ => |i, t, a| dv_get(i, t, a, ElemKind::F64),
+        }, &gname, 1, false);
+        dv_proto.borrow_mut().define(&gname, Prop::builtin(Value::Obj(g)));
+        let sf = native(Some(function_proto.clone()), match k {
+            ElemKind::I8 => |i: &mut Interp, t: Value, a: &[Value]| dv_set(i, t, a, ElemKind::I8),
+            ElemKind::U8 => |i, t, a| dv_set(i, t, a, ElemKind::U8),
+            ElemKind::I16 => |i, t, a| dv_set(i, t, a, ElemKind::I16),
+            ElemKind::U16 => |i, t, a| dv_set(i, t, a, ElemKind::U16),
+            ElemKind::I32 => |i, t, a| dv_set(i, t, a, ElemKind::I32),
+            ElemKind::U32 => |i, t, a| dv_set(i, t, a, ElemKind::U32),
+            ElemKind::F32 => |i, t, a| dv_set(i, t, a, ElemKind::F32),
+            _ => |i, t, a| dv_set(i, t, a, ElemKind::F64),
+        }, &sname, 2, false);
+        dv_proto.borrow_mut().define(&sname, Prop::builtin(Value::Obj(sf)));
+    }
+    global.borrow_mut().define("DataView", Prop::builtin(Value::Obj(dv_ctor)));
+
     let date_proto = new_obj(Some(object_proto.clone()));
     def(&date_proto, "getTime", |i, this, _| i.get(&this, "__t"), 0, fp);
     def(&date_proto, "valueOf", |i, this, _| i.get(&this, "__t"), 0, fp);
@@ -2039,6 +2297,7 @@ pub fn make_realm() -> Realm {
     // weil ein Realm ohne sie nicht baubar waere und `install` den fertigen
     // Realm braucht, um die Prototypen daranzuhaengen.
     let ph = || new_obj(Some(object_proto.clone()));
+    let _ = &ta_protos;
     Realm { global, global_env, object_proto: object_proto.clone(), function_proto, array_proto,
             string_proto, number_proto, boolean_proto, error_proto, error_ctors,
             node_proto: ph(), element_proto: ph(), text_proto: ph(), document_proto: ph(),
@@ -2047,7 +2306,9 @@ pub fn make_realm() -> Realm {
             generator_proto, generator_func_proto, array_iter_proto,
             string_iter_proto, promise_proto: ph(),
             html_element_proto: ph(), svg_element_proto: ph(), fragment_proto: ph(),
-            tag_protos: HashMap::new(), url_proto: ph(), url_params_proto: ph() }
+            tag_protos: HashMap::new(), url_proto: ph(), url_params_proto: ph(),
+            ta_protos, typed_proto: ta_proto, buffer_proto: ab_proto,
+            dataview_proto: dv_proto }
 }
 
 /// `this.length` als Zahl. Eigene Funktion, weil `i.to_number(&i.get(...))`
@@ -2169,6 +2430,153 @@ fn find_last(i: &mut Interp, this: Value, a: &[Value], want_index: bool) -> C<Va
         k -= 1;
     }
     Ok(if want_index { Value::Num(-1.0) } else { Value::Undefined })
+}
+
+// ── Hilfen fuer Puffer und Sichten ───────────────────────────────────────
+
+fn buf_of(v: &Value) -> Option<Rc<BufData>> {
+    let Value::Obj(o) = v else { return None };
+    match &o.borrow().kind { ObjKind::Buffer(b) => Some(b.clone()), _ => None }
+}
+
+fn dv_of(v: &Value) -> Option<Rc<DvData>> {
+    let Value::Obj(o) = v else { return None };
+    match &o.borrow().kind { ObjKind::DataView(d) => Some(d.clone()), _ => None }
+}
+
+fn this_ta(_i: &mut Interp, v: &Value) -> Option<Rc<TaData>> {
+    let Value::Obj(o) = v else { return None };
+    ta_of(o)
+}
+
+/// Ein Element aus einer Sicht — ausserhalb ist es `NaN`, nicht ein Fehler.
+fn ta_get(t: &Rc<TaData>, k: usize) -> f64 {
+    if k >= t.live_len() { return f64::NAN }
+    let ObjKind::Buffer(b) = &t.buf.borrow().kind else { return f64::NAN };
+    t.kind.read(&b.bytes.borrow(), t.offset + k * t.kind.size())
+}
+
+fn ta_write(t: &Rc<TaData>, k: usize, v: f64) {
+    if k >= t.live_len() { return }
+    let ObjKind::Buffer(b) = &t.buf.borrow().kind else { return };
+    let at = t.offset + k * t.kind.size();
+    t.kind.write(&mut b.bytes.borrow_mut(), at, v);
+}
+
+/// Der gemeinsame Rumpf aller neun Konstruktoren. Vier Formen, und sie sind
+/// nicht dasselbe:
+///
+/// * `new TA(n)` — ein frischer Puffer fuer n Elemente
+/// * `new TA(sicht)` — KOPIE, Element fuer Element umgerechnet
+/// * `new TA(puffer, versatz, laenge)` — eine SICHT, kein neuer Speicher
+/// * `new TA(iterierbares|feldaehnliches)` — Kopie der Werte
+fn ta_new(i: &mut Interp, kind: ElemKind, a: &[Value]) -> C<Value> {
+    match a.first() {
+        None | Some(Value::Undefined) => Ok(i.new_typed(kind, 0)),
+        Some(Value::Obj(o)) if matches!(o.borrow().kind, ObjKind::Buffer(_)) => {
+            let b = o.clone();
+            let have = match &b.borrow().kind {
+                ObjKind::Buffer(bd) => bd.bytes.borrow().len(),
+                _ => 0,
+            };
+            let off = match a.get(1) { None | Some(Value::Undefined) => 0.0,
+                                       Some(v) => i.to_number(v)? };
+            if off < 0.0 || off as usize > have || (off as usize) % kind.size() != 0 {
+                return i.range_err("start offset is outside the buffer");
+            }
+            let off = off as usize;
+            let len = match a.get(2) {
+                None | Some(Value::Undefined) => {
+                    if (have - off) % kind.size() != 0 {
+                        return i.range_err("buffer length is not a multiple of the element size");
+                    }
+                    (have - off) / kind.size()
+                }
+                Some(v) => {
+                    let n = i.to_number(v)?;
+                    if n < 0.0 || n > MAX_BUFFER_BYTES as f64 {
+                        return i.range_err("invalid typed array length");
+                    }
+                    n as usize
+                }
+            };
+            if off + len * kind.size() > have {
+                return i.range_err("length is outside the buffer");
+            }
+            Ok(i.new_view(kind, b, off, len))
+        }
+        Some(Value::Obj(o)) if ta_of(o).is_some() => {
+            let src = ta_of(o).unwrap();
+            let n = src.live_len();
+            let out = i.new_typed(kind, n);
+            if let Value::Obj(g) = &out {
+                if let Some(d) = ta_of(g) {
+                    for k in 0..n { ta_write(&d, k, ta_get(&src, k)); }
+                }
+            }
+            Ok(out)
+        }
+        Some(Value::Obj(_)) => {
+            let src = a[0].clone();
+            // Iterierbar geht vor feldaehnlich — genau wie in der Spec.
+            let items = match i.get_iterator(&src) {
+                Ok(_) => i.iterate(&src)?,
+                Err(_) => i.elems(&src)?,
+            };
+            let out = i.new_typed(kind, items.len());
+            if let Value::Obj(g) = &out {
+                if let Some(d) = ta_of(g) {
+                    for (k, v) in items.into_iter().enumerate() {
+                        let n = i.to_number(&v)?;
+                        ta_write(&d, k, n);
+                    }
+                }
+            }
+            Ok(out)
+        }
+        Some(v) => {
+            let n = i.to_number(v)?;
+            if n < 0.0 || n != to_integer(n) || n * kind.size() as f64 > MAX_BUFFER_BYTES as f64 {
+                return i.range_err("invalid typed array length");
+            }
+            Ok(i.new_typed(kind, n as usize))
+        }
+    }
+}
+
+fn dv_get(i: &mut Interp, t: Value, a: &[Value], kind: ElemKind) -> C<Value> {
+    // Bei `getFloat*` steht die Bytefolge an Stelle 1, bei den Ganzzahlen
+    // ebenso — nur `set*` schiebt sie um eins nach hinten.
+    let Some(d) = dv_of(&t) else { return i.type_err("not a DataView") };
+    let off = i.to_number(a.first().unwrap_or(&Value::Undefined))?;
+    if off < 0.0 || !off.is_finite() { return i.range_err("offset is out of bounds") }
+    let off = off as usize;
+    if off + kind.size() > d.len { return i.range_err("offset is out of bounds") }
+    let little = matches!(kind, ElemKind::I8 | ElemKind::U8)
+        || a.get(1).map(|v| v.truthy()).unwrap_or(false);
+    let ObjKind::Buffer(b) = &d.buf.borrow().kind else { return i.type_err("detached") };
+    let n = kind.size();
+    let mut bytes: Vec<u8> = b.bytes.borrow()[d.offset + off..d.offset + off + n].to_vec();
+    if !little { bytes.reverse(); }
+    Ok(Value::Num(kind.read(&bytes, 0)))
+}
+
+fn dv_set(i: &mut Interp, t: Value, a: &[Value], kind: ElemKind) -> C<Value> {
+    let Some(d) = dv_of(&t) else { return i.type_err("not a DataView") };
+    let off = i.to_number(a.first().unwrap_or(&Value::Undefined))?;
+    if off < 0.0 || !off.is_finite() { return i.range_err("offset is out of bounds") }
+    let off = off as usize;
+    let v = i.to_number(a.get(1).unwrap_or(&Value::Undefined))?;
+    if off + kind.size() > d.len { return i.range_err("offset is out of bounds") }
+    let little = matches!(kind, ElemKind::I8 | ElemKind::U8)
+        || a.get(2).map(|x| x.truthy()).unwrap_or(false);
+    let n = kind.size();
+    let mut bytes = alloc::vec![0u8; n];
+    kind.write(&mut bytes, 0, v);
+    if !little { bytes.reverse(); }
+    let ObjKind::Buffer(b) = &d.buf.borrow().kind else { return i.type_err("detached") };
+    b.bytes.borrow_mut()[d.offset + off..d.offset + off + n].copy_from_slice(&bytes);
+    Ok(Value::Undefined)
 }
 
 fn array_len(i: &mut Interp, this: &Value) -> C<f64> {

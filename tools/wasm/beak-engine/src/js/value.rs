@@ -270,6 +270,136 @@ pub struct FuncData {
     pub class: Option<Rc<crate::js::ast::Class>>,
 }
 
+/// Der Bytespeicher hinter jedem TypedArray und jeder DataView.
+///
+/// **Ein `ArrayBuffer` ist der Speicher, ein TypedArray nur eine SICHT
+/// darauf.** Zwei Sichten auf denselben Puffer sehen einander — das ist der
+/// Punkt der ganzen Familie, und deshalb liegt der Speicher hier und nicht
+/// in der Sicht.
+pub struct BufData {
+    pub bytes: RefCell<alloc::vec::Vec<u8>>,
+    /// Abgetrennt. Danach hat der Puffer die Laenge 0 und jede Sicht darauf
+    /// ist leer; test262 loest das ueber `$262.detachArrayBuffer` aus.
+    pub detached: core::cell::Cell<bool>,
+}
+
+/// Die Elementart einer Sicht.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ElemKind { I8, U8, U8C, I16, U16, I32, U32, F32, F64 }
+
+impl ElemKind {
+    pub fn size(self) -> usize {
+        match self {
+            ElemKind::I8 | ElemKind::U8 | ElemKind::U8C => 1,
+            ElemKind::I16 | ElemKind::U16 => 2,
+            ElemKind::I32 | ElemKind::U32 | ElemKind::F32 => 4,
+            ElemKind::F64 => 8,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            ElemKind::I8 => "Int8Array", ElemKind::U8 => "Uint8Array",
+            ElemKind::U8C => "Uint8ClampedArray", ElemKind::I16 => "Int16Array",
+            ElemKind::U16 => "Uint16Array", ElemKind::I32 => "Int32Array",
+            ElemKind::U32 => "Uint32Array", ElemKind::F32 => "Float32Array",
+            ElemKind::F64 => "Float64Array",
+        }
+    }
+    /// Ein Element lesen. Immer LITTLE ENDIAN — das ist, was jede Plattform
+    /// tut, auf der dieser Code laeuft, und die Spec laesst der Sicht (anders
+    /// als der `DataView`) keine Wahl.
+    pub fn read(self, b: &[u8], at: usize) -> f64 {
+        let g = |n: usize| -> u64 {
+            let mut v = 0u64;
+            for k in 0..n { v |= (b[at + k] as u64) << (8 * k); }
+            v
+        };
+        match self {
+            ElemKind::I8 => b[at] as i8 as f64,
+            ElemKind::U8 | ElemKind::U8C => b[at] as f64,
+            ElemKind::I16 => g(2) as u16 as i16 as f64,
+            ElemKind::U16 => g(2) as u16 as f64,
+            ElemKind::I32 => g(4) as u32 as i32 as f64,
+            ElemKind::U32 => g(4) as u32 as f64,
+            ElemKind::F32 => f32::from_bits(g(4) as u32) as f64,
+            ElemKind::F64 => f64::from_bits(g(8)),
+        }
+    }
+    /// Ein Element schreiben. Die Umwandlung ist die der Spec: NaN und
+    /// Unendlich werden bei den Ganzzahlen zu 0, der Rest wird modulo
+    /// abgeschnitten — ausser bei `Uint8Clamped`, das KLEMMT und rundet.
+    pub fn write(self, b: &mut [u8], at: usize, v: f64) {
+        let put = |b: &mut [u8], n: usize, raw: u64| {
+            for k in 0..n { b[at + k] = ((raw >> (8 * k)) & 0xff) as u8; }
+        };
+        match self {
+            ElemKind::U8C => {
+                b[at] = if v.is_nan() { 0 } else if v <= 0.0 { 0 } else if v >= 255.0 { 255 }
+                        else {
+                            // Zur naechsten GERADEN bei .5 — die Spec sagt das
+                            // ausdruecklich, und `round` taete es nicht.
+                            let f = libm::floor(v);
+                            let d = v - f;
+                            let r = if d < 0.5 { f } else if d > 0.5 { f + 1.0 }
+                                    else if (f as i64) % 2 == 0 { f } else { f + 1.0 };
+                            r as u8
+                        };
+            }
+            ElemKind::F32 => put(b, 4, (v as f32).to_bits() as u64),
+            ElemKind::F64 => put(b, 8, v.to_bits()),
+            _ => {
+                let n = self.size();
+                let m = to_uint_wrap(v, n * 8);
+                put(b, n, m);
+            }
+        }
+    }
+}
+
+/// `ToIntegerOrInfinity` + modulo 2^bits — der gemeinsame Rumpf von
+/// `ToInt8`/`ToUint8`/`ToInt16`/… Ein eigener Name, weil die Regel
+/// (NaN und Unendlich zu 0, dann abschneiden, dann modulo) an neun Stellen
+/// dieselbe ist.
+pub fn to_uint_wrap(v: f64, bits: usize) -> u64 {
+    if !v.is_finite() || v == 0.0 { return 0 }
+    let t = libm::trunc(v);
+    let m = libm::pow(2.0, bits as f64);
+    // `rem_euclid` gibt es in `no_std` nicht — dieselbe Rechnung von Hand.
+    let mut r = libm::fmod(t, m);
+    if r < 0.0 { r += m; }
+    r as u64
+}
+
+/// Eine SICHT auf einen Puffer.
+pub struct TaData {
+    pub buf: Gc,
+    pub kind: ElemKind,
+    /// Byteversatz im Puffer.
+    pub offset: usize,
+    /// Anzahl ELEMENTE, nicht Bytes.
+    pub len: usize,
+}
+
+/// Die ungetypte Sicht: jeder Zugriff nennt seine Art und seine Bytefolge
+/// selbst. Deshalb steht hier keine `ElemKind`.
+pub struct DvData {
+    pub buf: Gc,
+    pub offset: usize,
+    pub len: usize,
+}
+
+impl TaData {
+    /// Wieviele Elemente die Sicht WIRKLICH hat — ein abgetrennter Puffer
+    /// macht sie leer, ohne dass jemand die Sicht anfasst.
+    pub fn live_len(&self) -> usize {
+        let ObjKind::Buffer(b) = &self.buf.borrow().kind else { return 0 };
+        if b.detached.get() { return 0 }
+        let have = b.bytes.borrow().len();
+        if self.offset + self.len * self.kind.size() > have { return 0 }
+        self.len
+    }
+}
+
 pub enum ObjKind {
     Plain,
     Array,
@@ -285,6 +415,10 @@ pub enum ObjKind {
     Arguments,
     Regex(Rc<crate::js::regexp::Regex>),
     Promise(Rc<RefCell<crate::js::promise::PData>>),
+    /// Der Speicher (`ArrayBuffer`) und die zwei Sichten darauf.
+    Buffer(Rc<BufData>),
+    TypedArray(Rc<TaData>),
+    DataView(Rc<DvData>),
     /// Ein angehaltener Generator: seine EIGENE Maschine, samt Zustand.
     /// Siehe `generator.rs` — und den Kopf von `vm.rs` fuer den Grund, warum
     /// es eine eigene ist und kein Rahmen in einer fremden.
@@ -312,6 +446,20 @@ impl Object {
     }
 
     pub fn get_own(&self, k: &str) -> Option<&Prop> { self.props.get(k) }
+
+    /// Ist dieser eigene Schluessel aufzaehlbar?
+    ///
+    /// **Eigene Funktion, weil die Antwort nicht immer in der Tabelle steht.**
+    /// Die Indizes einer Sicht (`TypedArray`) sind aufzaehlbar, obwohl es zu
+    /// ihnen keinen Eintrag gibt — sie entstehen aus der Laenge. Acht Stellen
+    /// haben das frueher mit `get_own(k).map(|p| p.enumerable)` gefragt und
+    /// bekamen fuer eine Sicht achtmal `false`: `Object.keys`, `for..in`,
+    /// `JSON.stringify` und die Streuung sahen ein leeres Objekt.
+    pub fn is_enumerable(&self, k: &str) -> bool {
+        if let Some(p) = self.props.get(k) { return p.enumerable }
+        matches!(&self.kind, ObjKind::TypedArray(t)
+                 if array_index(k).is_some_and(|x| (x as usize) < t.live_len()))
+    }
     pub fn has_own(&self, k: &str) -> bool { self.props.contains_key(k) }
 
     pub fn set_prop(&mut self, k: PropName, p: Prop) {
@@ -353,6 +501,20 @@ impl Object {
     /// `for..in`, `JSON.stringify`, `getOwnPropertyNames`) will genau das.
     /// Wer Symbole braucht, nimmt `own_sym_keys`.
     pub fn own_keys(&self) -> Vec<PropName> {
+        // **Eine Sicht traegt ihre Indizes nicht in der Tabelle.** Sie
+        // entstehen aus der Laenge, und ohne diesen Zweig faende
+        // `Object.keys(ta)` nichts — auch `for..in` und `JSON.stringify`
+        // nicht.
+        if let ObjKind::TypedArray(t) = &self.kind {
+            let n = t.live_len();
+            let mut out: Vec<PropName> = (0..n)
+                .map(|k| PropName::from(num_to_string(k as f64).as_str())).collect();
+            for k in &self.order {
+                if is_sym_key(k) || array_index(k).is_some() { continue }
+                out.push(k.clone());
+            }
+            return out;
+        }
         let mut idx: Vec<(u32, PropName)> = Vec::new();
         let mut rest: Vec<PropName> = Vec::new();
         for k in &self.order {
