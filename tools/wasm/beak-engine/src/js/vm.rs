@@ -38,6 +38,9 @@ struct Frame {
     base: usize,
     /// Offene `try`-Behandler, innerster zuletzt.
     handlers: Vec<Handler>,
+    /// Ist das der Rahmen eines PROGRAMMS? Dessen Wert ist sein letzter
+    /// Ausdruckswert, der einer Funktion ihr `return`.
+    is_program: bool,
     /// Offene `for…of`-Iteratoren. Sie stehen HIER und nicht auf dem
     /// Wertestapel: ein `break` oder ein Wurf mitten in der Schleife muesste
     /// sie sonst einzeln wegraeumen, und das ist genau die Buchhaltung, an
@@ -73,7 +76,7 @@ impl Vm {
     /// weil es auf der UMGEBUNG arbeitet und fuer beide Maschinen dasselbe ist.
     pub fn run(&mut self, i: &mut Interp, chunk: Rc<Chunk>, env: &Rc<RefCell<Env>>) -> C<Value> {
         self.frames.push(Frame { chunk, ip: 0, envs: alloc::vec![env.clone()], base: 0,
-                                 handlers: Vec::new(), iters: Vec::new() });
+                                 is_program: true, handlers: Vec::new(), iters: Vec::new() });
         loop {
             let (chunk, ip) = {
                 let f = self.frames.last().unwrap();
@@ -245,8 +248,7 @@ impl Vm {
                 let args = self.take(*argc as usize);
                 let this = self.pop();
                 let callee = self.pop();
-                let v = i.call(&callee, this, &args)?;
-                self.push(v);
+                self.invoke(i, callee, this, args)?;
             }
             Op::New(argc) => {
                 let args = self.take(*argc as usize);
@@ -358,8 +360,7 @@ impl Vm {
                 let this = self.pop();
                 let callee = self.pop();
                 let a = i.iterate(&args)?;
-                let v = i.call(&callee, this, &a)?;
-                self.push(v);
+                self.invoke(i, callee, this, a)?;
             }
             Op::NewSpread => {
                 let args = self.pop();
@@ -442,12 +443,22 @@ impl Vm {
                     Value::Undefined
                 };
                 let f = self.frames.pop().unwrap();
+                // Ein `return` aus einer `for…of`-Schleife heraus muss ihren
+                // Iterator SCHLIESSEN — sonst faehrt ein Generator seinen
+                // eigenen `finally`-Block nie. Von innen nach aussen.
+                for it in f.iters.iter().rev() {
+                    i.iter_close(it);
+                }
                 self.stack.truncate(f.base);
-                if self.frames.is_empty() {
+                if f.is_program {
                     // Der Wert eines PROGRAMMS ist sein letzter Ausdruckswert,
                     // nicht das, was am Ende auf dem Stapel liegt.
                     let c = core::mem::replace(&mut self.completion, Value::Undefined);
                     return Ok(Some(if matches!(c, Value::Undefined) { v } else { c }));
+                }
+                i.depth -= 1;
+                if self.frames.is_empty() {
+                    return Ok(Some(v));
                 }
                 self.push(v);
             }
@@ -462,11 +473,26 @@ impl Vm {
     /// hat — Wertestapel, Umgebungen UND offene Iterationen. Wer eins davon
     /// vergisst, bekommt einen `catch`-Block, der auf fremdem Zustand steht.
     fn unwind(&mut self, i: &mut Interp, v: Value) -> bool {
-        let h = {
+        // **Ueber Rahmengrenzen hinweg.** Ein `throw` tief in einer Funktion
+        // sucht sein `try` beim RUFER, wenn es dort keins gibt — genau das
+        // macht ein Aufrufstapel aus. Ohne diese Schleife blieb ein Wurf im
+        // eigenen Rahmen haengen und kam als „UNCAUGHT" heraus, obwohl zwei
+        // Ebenen darueber ein `catch` stand.
+        let h = loop {
             let Some(f) = self.frames.last_mut() else { return false };
-            let Some(h) = f.handlers.pop() else { return false };
-            f.envs.truncate(h.envs);
-            h
+            if let Some(h) = f.handlers.pop() {
+                f.envs.truncate(h.envs);
+                break h;
+            }
+            // Kein Behandler in diesem Rahmen: ihn verlassen und weitersuchen.
+            // Das PROGRAMM ist die Grenze — darueber gibt es nur den Rufer in
+            // Rust, und dorthin geht der Wurf als `Err`.
+            if f.is_program {
+                return false;
+            }
+            let f = self.frames.pop().unwrap();
+            self.stack.truncate(f.base);
+            i.depth -= 1;
         };
         // Ein Wurf aus einer `for…of`-Schleife heraus muss ihren Iterator
         // SCHLIESSEN, nicht nur vergessen — `return()` ist der Weg, auf dem
@@ -484,6 +510,60 @@ impl Vm {
         self.stack.truncate(h.stack);
         self.stack.push(v);
         true
+    }
+
+    /// Einen Aufruf ausfuehren.
+    ///
+    /// **Der Punkt der ganzen Stufe:** ist der Gerufene eine JS-Funktion,
+    /// deren Rumpf sich uebersetzen laesst, bekommt er einen RAHMEN — der
+    /// Rust-Stapel waechst nicht mit. Alles andere (eingebaute Funktionen,
+    /// gebundene, Generatoren) geht weiter durch `Interp::call`, und das ist
+    /// richtig so: die haben keinen Rumpf aus Befehlen.
+    ///
+    /// Die Tiefe wird trotzdem gezaehlt. Ein Rahmenstapel kann nicht
+    /// ueberlaufen, aber eine endlose JS-Rekursion soll denselben
+    /// `RangeError` geben wie vorher — sonst haengt sie, bis der Speicher
+    /// ausgeht.
+    fn invoke(&mut self, i: &mut Interp, callee: Value, this: Value, args: Vec<Value>) -> C<()> {
+        let d = match &callee {
+            Value::Obj(o) => match &o.borrow().kind {
+                super::value::ObjKind::Function(d) => Some(d.clone()),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(d) = d else {
+            i.vm_calls_native += 1;
+            let v = i.call(&callee, this, &args)?;
+            self.push(v);
+            return Ok(());
+        };
+        let Some(chunk) = i.func_chunk(&d.node) else {
+            i.vm_calls_slow += 1;
+            let v = i.call(&callee, this, &args)?;
+            self.push(v);
+            return Ok(());
+        };
+        i.vm_calls += 1;
+        i.depth += 1;
+        if i.depth > i.max_depth {
+            i.depth -= 1;
+            return Err(i.throw_kind("RangeError", "Maximum call stack size exceeded"));
+        }
+        let env = match i.call_env(&d, this, &args) {
+            Ok(e) => e,
+            Err(e) => { i.depth -= 1; return Err(e) }
+        };
+        if let Err(e) = i.hoist_body(&d.node.body, &env) {
+            i.depth -= 1;
+            return Err(e);
+        }
+        let base = self.stack.len();
+        self.frames.push(Frame {
+            chunk, ip: 0, envs: alloc::vec![env], base,
+            is_program: false, handlers: Vec::new(), iters: Vec::new(),
+        });
+        Ok(())
     }
 
     fn jump(&mut self, t: u32) {

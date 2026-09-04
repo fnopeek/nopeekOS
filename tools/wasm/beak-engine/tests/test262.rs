@@ -328,6 +328,8 @@ fn test262_exec() {
     // Wieviel schon auf der BEFEHLSMASCHINE laeuft — die Zahl, die steigen
     // soll, waehrend die Bestehensquote steht.
     let (mut vm_ran, mut vm_declined) = (0u64, 0u64);
+    let (mut vm_calls, mut vm_calls_slow) = (0u64, 0u64);
+    let mut vm_calls_native = 0u64;
     let mut by_decline: BTreeMap<&'static str, u64> = BTreeMap::new();
 
     let hread = |f: &str| fs::read_to_string(harness.join(f)).unwrap_or_default();
@@ -412,6 +414,7 @@ fn test262_exec() {
             let t0 = std::time::Instant::now();
             let mut np = 0u128;
             let mut vm_seen = (0u64, 0u64, None);
+            let mut calls_seen = (0u64, 0u64, 0u64);
             let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let tp = std::time::Instant::now();
                 let prog = match beak_engine::js::parse(&text, false) {
@@ -436,15 +439,22 @@ fn test262_exec() {
                         Err(e) => Err(e),
                         Ok(()) => {
                             let (a, b) = (s.interp.vm_ran, s.interp.vm_declined);
+                            let (ca, cb) = (s.interp.vm_calls, s.interp.vm_calls_slow);
+                            let cn = s.interp.vm_calls_native;
                             let r = s.run(&prog);
                             vm_seen = (s.interp.vm_ran - a, s.interp.vm_declined - b,
                                        s.interp.vm_decline);
+                            calls_seen = (s.interp.vm_calls - ca, s.interp.vm_calls_slow - cb,
+                                          s.interp.vm_calls_native - cn);
                             r
                         }
                     }
                 };
                 r
             }));
+            vm_calls += calls_seen.0;
+            vm_calls_slow += calls_seen.1;
+            vm_calls_native += calls_seen.2;
             vm_ran += vm_seen.0;
             vm_declined += vm_seen.1;
             if let Some(w) = vm_seen.2 {
@@ -504,6 +514,11 @@ fn test262_exec() {
                   100.0 * vm_ran as f64 / tot as f64);
         let mut d: Vec<(&&str, &u64)> = by_decline.iter().collect();
         d.sort_by(|a, b| b.1.cmp(a.1));
+        let ct = vm_calls + vm_calls_slow;
+        if ct > 0 {
+            eprintln!("   JS-Aufrufe als RAHMEN: {vm_calls} von {ct} = {:.1} %  ({vm_calls_native} eingebaute daneben)",
+                      100.0 * vm_calls as f64 / ct as f64);
+        }
         eprintln!("   Woran der Uebersetzer absagt:");
         for (k, n) in d.iter().take(14) {
             eprintln!("      {n:6}  {k}");
