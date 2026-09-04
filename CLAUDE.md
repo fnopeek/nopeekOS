@@ -48,40 +48,40 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-04 · beak 0.81.0 · Kernel 0.324.0** (Rest: `git log`)
+**Stand 2026-09-04 · beak 0.88.1 · Kernel 0.324.0** (Rest: `git log`)
 
 Zwei Fäden laufen parallel.
 
 **`beak`**, der eigene Browser: **Stage 1 läuft — die Seite reagiert.** Eigene
-JS-Maschine (Lexer, Parser, RegExp, DOM-Bindung, Symbol samt Iteratorvertrag,
-Promise mit Microtask-Schlange) und die Wirtsumgebung. Seit 0.77.0 läuft sie
-auf einer **Befehlsmaschine** statt eines Baumläufers — der Zustand ist ein
-Feld, nicht der Rust-Stapel. **0.81.0 hat damit Generator und `async`/`await`
-gebaut** (Stufe 4: anhalten). Ein Generator ist eine EIGENE Maschine, kein
-Rahmen in fremder; Begründung in `vm.rs` und im Memory.
+JS-Maschine (Lexer, Parser, RegExp, DOM-Bindung) und die Wirtsumgebung. Seit
+0.77.0 läuft sie auf einer **Befehlsmaschine** statt eines Baumläufers — der
+Zustand ist ein Feld, nicht der Rust-Stapel. **Der Umbau ist mit 0.86.0
+abgeschlossen**: 97,7 % der Programme laufen auf der Maschine, in zehn
+Releases nie ein Test verloren. Generator, `async`/`await`, `class`, Felder,
+Destrukturierung, `super`, `?.` und Marken sind darin gebaut.
 
-**Gemessen wird an stehenden Zahlen, und die wichtigste ist NICHT test262.**
-Auf allen elf Zielseiten ist die erste Wand ein fehlendes DOM-/Wirts-Glied,
-keine Sprachlücke — auf keiner der 134 Wandstellen steht `await`, `yield` oder
-ein Generator, während test262 dafür Tausende Fehlschläge zählte.
+**Zwei Zahlen, und sie messen NICHT dasselbe.** Die 97,7 % sagen, WO Code
+läuft — ein abgelehntes Programm fährt der Baumläufer mit identischer
+Bedeutung. Was GEHT, sagt test262:
 
-    test262 parse   96,84 %   ·  exec 58,09 %  (V8 auf demselben Korpus: 99,41 %)
+    test262 exec    66,93 %   (V8 auf demselben Korpus: 99,41 %)
     Zielkorpus      437/437 geparst, 303/437 durchgelaufen
     DOM-Aufrufe     98,3 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
 
-Die Rangfolge gibt `tests/apigap.rs` und der Zielkorpus, nicht die
-test262-Fehlerkarte. Auf der DOM-Seite ist übrig, was teuer ist — Shadow DOM,
-Beobachter, `postMessage`; die billigen Zeilen sind weg. Auf der Sprachseite
-sind die nächsten billigen Posten `switch` und `for-in` im FUNKTIONSRUMPF
-(3636 und 2200 Absagen) — nicht `class`, und sichtbar erst, seit
-`Interp::func_declines` die Ebene unter dem Programm mitzählt.
+Der Rest ist deshalb keine Übersetzerarbeit mehr, sondern Sprache:
+TypedArrays sind mit 0.88.0 gebaut, offen bleiben `eval`, Proxy, BigInt und
+der Wurf bei fehlgeschlagenem Schreiben. Die Rangfolge steht in
+`memory/project_beak_js_language_gap.md`, gemessen statt geraten — und die
+Wand des Zielkorpus ist wieder etwas anderes: dort war weder `await` noch ein
+Generator je die erste Wand, wohl aber `substr` und `Uint8Array`.
 
 Das eigene Testziel ist **`beak:selftest`** — eine Prüfseite aus dem
 Binärbild, die nichts holt und ihr Ergebnis auf dem Schirm UND im Log sagt.
 Sie läuft auch host-seitig über dieselbe Datei
 (`beak-engine/examples/selftest.rs`). Ein Lauf fand neun Lücken, die fremde
-Seiten in Wochen nicht gezeigt hatten. Stand host-seitig: Sprache 28/28,
-Dokument 31/31; der Gerätelauf für 0.81.0 steht aus.
+Seiten in Wochen nicht gezeigt hatten. **0.81.0 lief am Gerät voll grün
+(Sprache 28/28, Dokument 31/31, Klicks 4/4); für 0.82.0–0.88.1 steht der
+Gerätelauf aus.**
 
 Die CSS-Runde davor ist zu Ende gebracht: das Eigenschafts-Gap ist
 geschlossen, 93,7 % der Deklarationen auf Bootstrap + Wikipedia abgedeckt. Die
