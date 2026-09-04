@@ -2654,50 +2654,71 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
                     }
                     let cx = x - rx;
                     let cy = y - ry + scroll_y();
-                    // Hit-test the cached layout if it still matches; else lay
-                    // out on the fly (rare — only if a click races a resize).
-                    let fresh;
-                    let lay = match cache.as_ref() {
-                        Some((lay, cw, ch, cg)) if *cw == w && *ch == h && *cg == content_gen() => lay,
-                        _ => {
-                            fresh = do_layout(engine, w as u32, &page.state);
-                            &fresh
-                        }
+                    // Der Zwischenspeicher muss zum aktuellen Stand passen —
+                    // und wenn nicht, wird das Layout EINGELEGT statt
+                    // weggeworfen.
+                    //
+                    // Vorher stand hier eine Rechnung fuer genau einen
+                    // Treffertest, die der naechste Anstrich sofort noch einmal
+                    // machte. Der Kommentar nannte das „rare — only if a click
+                    // races a resize", aber die Bedingung ist `content_gen`,
+                    // und das steigt bei JEDEM Hover. Wer den Zeiger auf etwas
+                    // bewegt, um es anzuklicken, loest also erst ein
+                    // Neuauslegen aus und klickt dann in den veralteten Stand:
+                    // im Geraetelog zwei volle Layouts hintereinander, ohne
+                    // eine Zeile dazwischen.
+                    let stale = !matches!(cache.as_ref(),
+                        Some((_, cw, ch, cg)) if *cw == w && *ch == h && *cg == content_gen());
+                    if stale {
+                        *cache = Some((do_layout(engine, w as u32, &page.state), w, h, content_gen()));
+                    }
+                    // Alles, was das Layout beantworten kann, VOR der ersten
+                    // Aenderung am Zwischenspeicher holen — danach ist er
+                    // veraenderlich geliehen und `lay` gaebe es nicht mehr.
+                    let (dispatched, inspect_sel, ctl_seq, href, toggle) = {
+                        let lay = &cache.as_ref().unwrap().0;
+                        // Die Seite bekommt den Klick ZUERST. Ruft ein Behandler
+                        // `preventDefault`, ist der Klick verbraucht — sonst
+                        // wuerde beak zusaetzlich dem Link folgen, den die Seite
+                        // gerade abgefangen hat.
+                        let dispatched = dispatch_click(engine, lay, cx, cy);
+                        (
+                            dispatched,
+                            // Nur im Inspect-Modus: der Test laeuft ueber ALLE
+                            // Kaesten, und ein Klick auf einer grossen Seite
+                            // soll dafuer nicht zahlen, wenn niemand hinschaut.
+                            inspect_mode()
+                                .then(|| lay.hit_inspect(cx, cy).map(|b| (b.x, b.y, b.w, b.h, b.label.clone())))
+                                .flatten(),
+                            lay.hit_control(cx, cy).map(|c| c.seq),
+                            lay.hit_test(cx, cy).map(|s| s.to_string()),
+                            lay.hit_toggle(cx, cy),
+                        )
                     };
-                    // Die Seite bekommt den Klick ZUERST. Ruft ein Behandler
-                    // `preventDefault`, ist der Klick verbraucht — sonst
-                    // wuerde beak zusaetzlich dem Link folgen, den die Seite
-                    // gerade abgefangen hat.
-                    if dispatch_click(engine, lay, cx, cy) { return true; }
+                    if dispatched { return true; }
                     // Inspect mode intercepts the click: select the deepest
                     // element box under the cursor (shown as an outline + a
                     // status-bar label) instead of following a link.
                     if inspect_mode() {
-                        let sel = lay.hit_inspect(cx, cy).map(|b| (b.x, b.y, b.w, b.h, b.label.clone()));
                         // Also echo to the serial console so it can be copied
                         // without transcribing from the screen.
-                        if let Some((bx, by, _, _, ref label)) = sel {
+                        if let Some((bx, by, _, _, ref label)) = inspect_sel {
                             log(&alloc::format!("[inspect] @({bx},{by}) {label}"));
                         } else {
                             log("[inspect] (no element here)");
                         }
-                        set_selected(sel);
+                        set_selected(inspect_sel);
                         mark_dirty();
                         return true;
                     }
                     // A control wins over a link: a submit button inside an
                     // <a>, or a field overlapping a link rect, is the target.
-                    if let Some(ctl) = lay.hit_control(cx, cy) {
-                        let seq = ctl.seq;
+                    if let Some(seq) = ctl_seq {
                         activate(engine, page, seq);
                         restate_control(engine, cache, &page.state, "control-activate");
                         return true;
                     }
-                    let href = lay.hit_test(cx, cy).map(|s| s.to_string());
-                    let toggle = lay.hit_toggle(cx, cy);
                     // Clicking the page elsewhere blurs a focused control.
-                    // Beide Treffer werden VORHER geholt: das Neumalen braucht
-                    // den Zwischenspeicher veraenderlich, und `lay` haelt ihn.
                     if page.state.focus.take().is_some() {
                         restate_control(engine, cache, &page.state, "control-blur");
                     }
