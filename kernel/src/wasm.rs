@@ -646,7 +646,21 @@ pub fn init() {
 pub fn execute_sandboxed_with_fuel(
     wasm_bytes: &[u8], func_name: &str, args: &[Val], cap_id: CapId, fuel: u64,
 ) -> Result<WasmResult, WasmError> {
-    execute_inner(wasm_bytes, func_name, args, cap_id, fuel)
+    execute_inner(wasm_bytes, func_name, args, cap_id, fuel, None)
+}
+
+/// Wie [`execute_sandboxed_with_fuel`], aber mit einem STARTARGUMENT.
+///
+/// Das ist dieselbe Zeichenkette, die `npk_open`/`npk_launch` einem Modul
+/// mitgeben und die es mit `npk_launch_arg` abholt — nur kam sie bisher
+/// ausschliesslich von einer anderen App. Von der Shell aus gab es keinen
+/// Weg: `beak https://…` startete beak ohne die Adresse, obwohl beak sie
+/// beim Start liest und ansteuert.
+pub fn execute_sandboxed_with_arg(
+    wasm_bytes: &[u8], func_name: &str, args: &[Val], cap_id: CapId, fuel: u64,
+    launch_arg: Option<String>,
+) -> Result<WasmResult, WasmError> {
+    execute_inner(wasm_bytes, func_name, args, cap_id, fuel, launch_arg)
 }
 
 /// Execute a WASM module in interactive mode (live display).
@@ -654,9 +668,11 @@ pub fn execute_sandboxed_with_fuel(
 #[allow(dead_code)]
 fn execute_inner(
     wasm_bytes: &[u8], func_name: &str, args: &[Val], cap_id: CapId, fuel: u64,
+    launch_arg: Option<String>,
 ) -> Result<WasmResult, WasmError> {
     if forge_is_default() {
-        if let Some(r) = execute_inner_forge(wasm_bytes, func_name, args, cap_id, fuel) {
+        if let Some(r) = execute_inner_forge(wasm_bytes, func_name, args, cap_id, fuel,
+                                             launch_arg.clone()) {
             return r;
         }
     }
@@ -682,7 +698,7 @@ fn execute_inner(
         hw: None,
         widget_window_id: 0,
         module_name: String::new(),
-        launch_arg: None,
+        launch_arg,
         http_final_url: None,
         http_content_type: None,
         http_last_error: None,
@@ -803,6 +819,7 @@ pub fn execute_wasi(
 /// (`"_start"` ohne Argumente, wie wallpaper ihn ruft) geht durch.
 fn execute_inner_forge(
     wasm_bytes: &[u8], func_name: &str, args: &[Val], cap_id: CapId, fuel: u64,
+    launch_arg: Option<String>,
 ) -> Option<Result<WasmResult, WasmError>> {
     if args.len() > 3 || args.iter().any(|v| v.i32().is_none()) {
         kprintln!("[npk] forge: {} nimmt Argumente, die der Eintritt nicht kann — wasmi", func_name);
@@ -828,7 +845,7 @@ fn execute_inner_forge(
         hw: None,
         widget_window_id: 0,
         module_name: String::new(),
-        launch_arg: None,
+        launch_arg,
         http_final_url: None,
         http_content_type: None,
         http_last_error: None,

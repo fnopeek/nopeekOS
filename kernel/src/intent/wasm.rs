@@ -71,14 +71,28 @@ pub fn intent_run(args: &str) {
     // Determine function name: if no args, try _start; otherwise use module name
     let func_name = if args_vec.is_empty() { "_start" } else { module_name };
 
+    // Alles, was KEINE Zahl ist, geht als STARTARGUMENT mit — dieselbe
+    // Zeichenkette, die `npk_open` einer App gibt und die sie mit
+    // `npk_launch_arg` abholt. Bisher kam sie nur von einer anderen App;
+    // von der Shell aus fiel sie auf den Boden, und `beak https://…`
+    // startete beak ohne die Adresse, obwohl beak sie beim Start liest.
+    //
+    // Die Zahlenform bleibt, wie sie war: wer `<modul> 3 4` tippt, ruft
+    // weiterhin den gleichnamigen Export mit zwei i32.
+    let launch_arg = if args_vec.is_empty() && !arg_str.trim().is_empty() {
+        Some(alloc::string::String::from(arg_str.trim()))
+    } else {
+        None
+    };
+
     // 10 B fuel — bumped from 1 B after testdisk's 100 MB phase
     // exhausted it. wasmi charges ~1 fuel per WASM instruction; bulk
     // memory ops (memory.fill / memory.copy) for 100+ MB buffers
     // burn through hundreds of millions of fuel units in a single
     // call. 10 B keeps the bulk-bench paths comfortable without
     // making infinite loops free.
-    match wasm::execute_sandboxed_with_fuel(
-        &wasm_bytes, func_name, &args_vec, module_cap, 10_000_000_000,
+    match wasm::execute_sandboxed_with_arg(
+        &wasm_bytes, func_name, &args_vec, module_cap, 10_000_000_000, launch_arg,
     ) {
         Ok(result) => {
             if !result.output.is_empty() {
