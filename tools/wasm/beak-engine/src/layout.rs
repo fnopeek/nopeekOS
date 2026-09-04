@@ -1666,6 +1666,15 @@ struct Ctx<'a> {
     /// throwaway measurement re-walks its subtree, and selector matching is
     /// ~90 % of layout, so that multiplier is most of the cost of a page.
     styles: core::cell::RefCell<BTreeMap<u64, ComputedStyle>>,
+    /// Die Custom Properties je Element, nach `seq`.
+    ///
+    /// Sie stehen NICHT in `ComputedStyle`: der ist `Copy` und wird je
+    /// Element kopiert; eine `Rc` darin haette die ganze Layoutschicht
+    /// umgeworfen. Also laufen sie daneben — und weil eine Custom Property
+    /// eine geerbte Eigenschaft ist, braucht jedes Element den Eintrag seines
+    /// Elternteils. Wer selbst keine setzt, TEILT dessen Karte (`Rc`), sonst
+    /// koestete Bootstraps 200-Namen-Palette je Element eine Kopie.
+    varmaps: core::cell::RefCell<BTreeMap<u32, alloc::rc::Rc<crate::vars::VarMap>>>,
 }
 
 /// Hash the inputs `style::resolve` actually depends on. Elements are
@@ -1772,13 +1781,31 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// Die Custom Properties, die ein Kind von `seq` erbt.
+    fn vars_of(&self, seq: u32) -> alloc::rc::Rc<crate::vars::VarMap> {
+        self.varmaps.borrow().get(&seq).cloned().unwrap_or_default()
+    }
+
     fn styled(&self, el: &Element, parent: &ComputedStyle, prev: &[ElemInfo], sib_count: u32) -> ComputedStyle {
         let key = style_key(el, parent, &self.path, prev, sib_count);
         if let Some(s) = self.styles.borrow().get(&key) {
             self.note_vh(s);
             return *s;
         }
-        let s = style::resolve(&self.info(el), parent, self.theme, self.sheet, &self.path, prev, sib_count, self.viewport_w);
+        let inherited = match self.path.last() {
+            Some(p) => self.vars_of(p.el.seq),
+            None => alloc::rc::Rc::new(crate::vars::VarMap::new()),
+        };
+        let mut own = None;
+        let s = style::resolve_in(&self.info(el), parent, self.theme, self.sheet, &self.path,
+            prev, sib_count, self.viewport_w, &inherited, &mut own);
+        // Wer selbst nichts setzt, teilt die Karte des Elternteils — dieselbe
+        // `Rc`, kein Kopieren. Der Eintrag muss trotzdem da sein, sonst faende
+        // ein Kind nichts und die Vererbung risse an dieser Stelle ab.
+        self.varmaps.borrow_mut().insert(el.seq, match own {
+            Some(m) => alloc::rc::Rc::new(m),
+            None => inherited,
+        });
         self.note_vh(&s);
         self.styles.borrow_mut().insert(key, s);
         s
@@ -2063,7 +2090,10 @@ pub fn layout(
     initial.vw = width as f32;
     initial.vh = viewport_h as f32;
     let html_el = dom.root_element();
-    let mut root = style::resolve(&ElemInfo::of_hovered(html_el, hover), &initial, theme, sheet, &[], &[], 0, width as f32);
+    let (mut root_own, no_vars) = (None, crate::vars::VarMap::new());
+    let mut root = style::resolve_in(&ElemInfo::of_hovered(html_el, hover), &initial, theme,
+        sheet, &[], &[], 0, width as f32, &no_vars, &mut root_own);
+    let root_vars = root_own.unwrap_or_default();
     root.rem_base = root.font_px;
     let cx = 0;
     let cw = (width as i32).max(60);
@@ -2118,14 +2148,27 @@ pub fn layout(
         pseudos: core::cell::RefCell::new(BTreeMap::new()),
         segs: core::cell::RefCell::new(BTreeMap::new()),
         styles: core::cell::RefCell::new(BTreeMap::new()),
+        varmaps: core::cell::RefCell::new(BTreeMap::new()),
     };
+    // Die Wurzelpalette. `:root{--bs-…}` ist die Karte, aus der alles andere
+    // liest — ohne diesen Eintrag erbt niemand etwas.
+    ctx.varmaps.borrow_mut().insert(html_el.seq, alloc::rc::Rc::new(root_vars));
 
     // Resolve <body> for the canvas-background rule below; layout reaches it
     // as an ordinary child of the root.
     let body = dom.body();
     let html_info = [ctx.info(html_el)];
     let anc: &[ElemInfo] = if core::ptr::eq(html_el, body) { &[] } else { &html_info };
-    let body_style = style::resolve(&ctx.info(body), &root, theme, sheet, anc, &[], 0, width as f32);
+    // Auch der Rumpf erbt die Wurzelpalette — er wird hier fuer die
+    // Leinwandfarbe aufgeloest, also ausserhalb des Baumlaufs.
+    let body_inherited = ctx.vars_of(html_el.seq);
+    let mut body_own = None;
+    let body_style = style::resolve_in(&ctx.info(body), &root, theme, sheet, anc, &[], 0,
+        width as f32, &body_inherited, &mut body_own);
+    ctx.varmaps.borrow_mut().insert(body.seq, match body_own {
+        Some(m) => alloc::rc::Rc::new(m),
+        None => body_inherited,
+    });
 
     // The ROOT ELEMENT IS A BOX. It used to be skipped — layout started at
     // `<body>`'s children, inside a hardcoded 20px page inset — so `html
