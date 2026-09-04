@@ -6,21 +6,25 @@ wrong one for "does this look right". It changes between the run we compare
 against and the run beak fetches: another article of the day, another image
 count, another WAN. This server delivers the SAME BYTES every time.
 
+  python3 tools/pageserver.py 8080            # any port, no root needed
   python3 tools/pageserver.py                 # port 80 (needs root or
                                               # CAP_NET_BIND_SERVICE)
-  sudo python3 tools/pageserver.py
-  python3 tools/pageserver.py 8080 --no-warn  # host browsers only, see below
 
-⚠ **Port 80, and only port 80, for nopeekOS.** Nothing in the kernel parses a
-`:port` out of a URL — `parse_ip(host).or_else(dns::resolve)` takes the host
-verbatim and `connect(ip, 80)` hardcodes the port. `http://10.0.2.2:8080/x`
-would connect to :80 anyway. A different port is useful only for looking at
-the same bytes in a desktop browser.
+Binds 0.0.0.0, so the NUC or notebook on the same network reaches it too, not
+just QEMU.
 
-From nopeekOS:
+From nopeekOS — **the switch is off by default and has to be set once**:
 
-  beak http://10.0.2.2/components          # QEMU (slirp host alias)
-  beak http://<host-LAN-IP>/components     # NUC / notebook on the same net
+  set net.allow_plain_http 1
+  beak http://10.0.2.2:8080/components        # QEMU (slirp host alias)
+  beak http://192.168.1.50:8080/components    # NUC / notebook, same network
+
+The kernel refuses `http://` outright unless that key is `1` AND the host is
+a literal private address (10/8, 172.16/12, 192.168/16, 127/8, 169.254/16) —
+a NAME is not accepted, because its DNS record can point somewhere else. Both
+the switch and `host:port` parsing arrived in kernel 0.319.0; before that
+neither existed. Turn the switch off again when the measurement is done: a
+hostile page can use it to probe the local network over plain HTTP.
 
 Routes:
 
@@ -151,17 +155,13 @@ def main():
         k = args.index("--frozen")
         FROZEN = os.path.abspath(args[k + 1])
         del args[k:k + 2]
-    warn = "--no-warn" not in args
     args = [a for a in args if not a.startswith("--")]
     port = int(args[0]) if args else 80
-    if port != 80 and warn:
-        sys.stderr.write(
-            "note: nopeekOS cannot reach port %d — it parses no :port out of a URL\n"
-            "      and connects to :80 regardless. Fine for a desktop browser.\n" % port)
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print("pageserver on :%d — fixtures %s%s"
           % (port, FIXTURES, (", frozen " + FROZEN) if FROZEN else ""))
-    print("  beak http://10.0.2.2/components      (QEMU)")
+    print("  set net.allow_plain_http 1        (einmal, im Gerät)")
+    print("  beak http://10.0.2.2:%d/components" % port)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
