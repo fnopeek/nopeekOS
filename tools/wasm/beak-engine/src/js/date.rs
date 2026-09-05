@@ -66,7 +66,7 @@ fn month_from_time(t: f64) -> f64 {
     0.0
 }
 fn date_from_time(t: f64) -> f64 {
-    let m = month_from_time(t) as usize;
+    let m = f64_to_usize(month_from_time(t));
     let l = if leap(year_from_time(t)) { 1.0 } else { 0.0 };
     day_in_year(t) - CUM[m] - if m >= 2 { l } else { 0.0 } + 1.0
 }
@@ -86,7 +86,7 @@ fn make_day(y: f64, m: f64, d: f64) -> f64 {
     let (y, m, d) = (libm::trunc(y), libm::trunc(m), libm::trunc(d));
     let ym = y + fdiv(m, 12.0);
     if !ym.is_finite() { return f64::NAN; }
-    let mn = fmod_pos(m, 12.0) as usize;
+    let mn = f64_to_usize(fmod_pos(m, 12.0));
     let l = if leap(ym) { 1.0 } else { 0.0 };
     let first = day_from_year(ym) + CUM[mn] + if mn >= 2 { l } else { 0.0 };
     first + d - 1.0
@@ -141,8 +141,8 @@ fn year_str(y: f64) -> String {
 }
 
 fn date_string(t: f64) -> String {
-    alloc::format!("{} {} {} {}", DAYS[week_day(t) as usize],
-        MONTHS[month_from_time(t) as usize], pad(date_from_time(t), 2),
+    alloc::format!("{} {} {} {}", DAYS[f64_to_usize(week_day(t))],
+        MONTHS[f64_to_usize(month_from_time(t))], pad(date_from_time(t), 2),
         year_str(year_from_time(t)))
 }
 
@@ -158,8 +158,8 @@ fn full_string(t: f64) -> String {
 
 fn utc_string(t: f64) -> String {
     if t.is_nan() { return "Invalid Date".to_string(); }
-    alloc::format!("{}, {} {} {} {}:{}:{} GMT", DAYS[week_day(t) as usize],
-        pad(date_from_time(t), 2), MONTHS[month_from_time(t) as usize],
+    alloc::format!("{}, {} {} {} {}:{}:{} GMT", DAYS[f64_to_usize(week_day(t))],
+        pad(date_from_time(t), 2), MONTHS[f64_to_usize(month_from_time(t))],
         year_str(year_from_time(t)), pad(hour(t), 2), pad(minute(t), 2), pad(second(t), 2))
 }
 
