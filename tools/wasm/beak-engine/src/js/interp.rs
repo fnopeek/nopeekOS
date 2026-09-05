@@ -130,6 +130,7 @@ pub struct Realm {
     pub array_iter_proto: Gc,
     pub string_iter_proto: Gc,
     pub promise_proto: Gc,
+    pub date_proto: Gc,
     /// Die Schnittstellen-Prototypen der DOM-Bindung. `tag_protos` bildet den
     /// Elementnamen auf seine Schnittstelle ab; was nicht darinsteht, ist
     /// `HTMLElement`.
@@ -221,6 +222,10 @@ pub struct Interp {
     /// Eine Uhr, die nur steigt. Ersatz, bis beak die echte einreicht —
     /// `beak-engine` ist hostfrei und hat keine.
     pub fake_now: f64,
+    /// Millisekunden seit der Epoche, wie sie der Wirt beim Sitzungsbeginn
+    /// gesetzt hat. Die Engine selbst hat keine Uhr; ohne diesen Wert steht
+    /// `Date.now()` bei 1970 — richtig, aber nutzlos.
+    pub epoch_ms: f64,
     /// Das Dokument, auf dem `document` arbeitet. `None`, solange keins
     /// eingereicht wurde — dann gibt es `document` gar nicht erst, statt eins
     /// vorzutaeuschen, das nichts enthaelt.
@@ -408,9 +413,10 @@ impl Interp {
         super::regexp::install(&mut realm);
         super::json::install(&mut realm);
         super::promise::install(&mut realm);
+        super::date::install(&mut realm);
         super::url::install(&mut realm);
         Interp { realm, depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX,
-                 fake_now: 0.0, doc: None, next_sym: 0, sym_registry: HashMap::new(),
+                 fake_now: 0.0, epoch_ms: 0.0, doc: None, next_sym: 0, sym_registry: HashMap::new(),
                  cookies: String::new(), cookie_sets: Vec::new(), style_ctx: None,
                  vm_ran: 0, vm_declined: 0, vm_decline: None, vm_off: false,
                  func_chunks: HashMap::new(), func_declines: HashMap::new(), pending_labels: Vec::new(), vm_calls: 0, vm_calls_native: 0, vm_calls_slow: 0,
@@ -747,16 +753,33 @@ impl Interp {
     /// `valueOf` — das ist der ganze Unterschied zwischen `"" + obj` und
     /// `1 * obj`.
     pub fn to_primitive(&mut self, v: &Value, hint_string: bool) -> C<Value> {
+        self.to_primitive_hint(v, if hint_string { "string" } else { "number" })
+    }
+
+    /// Mit dem DRITTEN Wunsch: `"default"`. Er unterscheidet sich fuer
+    /// gewoehnliche Objekte in nichts von `"number"` — aber `Symbol.
+    /// toPrimitive` bekommt ihn zu sehen, und ein `Date` macht daraus Text.
+    /// Ohne ihn waere `date + ""` eine Zahl.
+    pub fn to_primitive_hint(&mut self, v: &Value, hint: &str) -> C<Value> {
         let Value::Obj(o) = v else { return Ok(v.clone()) };
         // `Symbol.toPrimitive` geht VOR `valueOf`/`toString` — es ist der
         // einzige Weg, auf dem ein Objekt beide ueberstimmen kann.
         let exotic = self.get(v, SYM_TO_PRIMITIVE)?;
         if self.is_callable(&exotic) {
-            let hint = Value::str(if hint_string { "string" } else { "number" });
-            let r = self.call(&exotic, v.clone(), &[hint])?;
+            let r = self.call(&exotic, v.clone(), &[Value::str(hint)])?;
             if !matches!(r, Value::Obj(_)) { return Ok(r); }
             return self.type_err("Symbol.toPrimitive returned an object");
         }
+        let _ = o;
+        self.ordinary_to_primitive(v, hint == "string")
+    }
+
+    /// `OrdinaryToPrimitive` — `valueOf` und `toString` in der Reihenfolge,
+    /// die der Wunsch vorgibt. Herausgezogen, weil `Date.prototype[Symbol.
+    /// toPrimitive]` sie ruft: sonst waere sie dort ein zweites Mal
+    /// geschrieben.
+    pub fn ordinary_to_primitive(&mut self, v: &Value, hint_string: bool) -> C<Value> {
+        let Value::Obj(o) = v else { return Ok(v.clone()) };
         let order: [&str; 2] = if hint_string { ["toString", "valueOf"] } else { ["valueOf", "toString"] };
         for m in order {
             let f = self.get(&Value::Obj(o.clone()), m)?;

@@ -1392,6 +1392,10 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) {
     // `Math.random` bekommt eine echte Saat. Ohne sie liefert jede Seite
     // dieselbe Folge — und die Engine erfindet sich absichtlich keine.
     sess.interp.seed_random(now_ms() as u64 ^ 0x9E37_79B9_7F4A_7C15);
+    // Und eine echte Uhr. Die Engine hat keine — ohne diese Zeile steht
+    // `Date.now()` bei 1970, und jede Seite, die ein Datum ausrechnet,
+    // rechnet falsch.
+    sess.interp.epoch_ms = unsafe { npk_unix_time() } as f64 * 1000.0;
     let (mut ran, mut failed, mut bytes) = (0usize, 0usize, 0usize);
     for p in &list {
         let PendingScript::Ready(src) = p else { failed += 1; continue };
