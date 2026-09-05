@@ -485,7 +485,12 @@ impl Interp {
         }
     }
 
-    fn assign_ident(&mut self, n: &str, v: Value, env: &Rc<RefCell<Env>>) -> C<()> {
+    /// `PutValue` auf einen Bezeichner (ES §6.2.5.6).
+    ///
+    /// **Die einzige Fassung.** Bis 0.98.0 stand dieselbe Regel ein zweites
+    /// Mal in `expr.rs::store`, und die zweite hat beim strengen Modus sofort
+    /// anders entschieden — [[feedback-a-copy-is-a-second-semantics-waiting]].
+    pub fn assign_ident(&mut self, n: &str, v: Value, env: &Rc<RefCell<Env>>) -> C<()> {
         if let Some(e) = env_lookup(env, n) {
             let (mutable, init) = {
                 let b = e.borrow();
@@ -497,10 +502,22 @@ impl Interp {
             e.borrow_mut().vars.get_mut(n).unwrap().value = v;
             return Ok(());
         }
-        // Unbekannter Name: im lockeren Modus wird eine globale Eigenschaft
-        // daraus. Der strenge Modus wuerde werfen — noch offen.
-        let g = Value::Obj(self.realm.global.clone());
-        self.set(&g, n, v)
+        // Nicht in der Bindungskette — aber das GLOBALE OBJEKT ist auch ein
+        // Bindungsort: `Object = 12` schreibt dort und ist auch im strengen
+        // Modus erlaubt. Unaufloesbar ist ein Name erst, wenn ihn auch das
+        // globale Objekt nicht kennt.
+        let g = self.realm.global.clone();
+        if self.has_property(&g, n) {
+            let strict = super::interp::env_strict(env);
+            return self.set(&Value::Obj(g), n, v, strict);
+        }
+        // Jetzt ist er wirklich unbekannt: im lockeren Modus wird eine globale
+        // Eigenschaft daraus, im strengen wirft es.
+        super::interp::strict_site!(self, 6);
+        if super::interp::env_strict(env) {
+            return self.ref_err(&alloc::format!("{n} is not defined"));
+        }
+        self.set(&Value::Obj(g), n, v, false)
     }
 
     fn assign_to_expr(&mut self, e: &Expr, v: Value, env: &Rc<RefCell<Env>>) -> C<()> {
@@ -509,7 +526,8 @@ impl Interp {
             Expr::Member { obj, prop, .. } => {
                 let base = self.eval(obj, env)?;
                 let key = self.member_key2(prop, env)?;
-                self.set(&base, &key, v)
+                let throw = super::interp::env_strict(env);
+                self.set(&base, &key, v, throw)
             }
             _ => self.ref_err("invalid assignment target"),
         }

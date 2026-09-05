@@ -21,7 +21,7 @@ impl Interp {
             Expr::Str(s) => Ok(Value::str(s)),
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             Expr::Null => Ok(Value::Null),
-            Expr::This => Ok(env_this(env)),
+            Expr::This => Ok(super::interp::this_observed(self, env)),
             Expr::Ident(n) => self.load_ident(n, env),
             Expr::Regex { body, flags } => super::regexp::make(self, body, flags),
             Expr::Array(items) => {
@@ -424,10 +424,12 @@ impl Interp {
                     optional: false,
                 })],
                 is_async: false, is_generator: false, is_arrow: false, expr_body: false,
+                strict: true,
             }),
             None => Rc::new(Func {
                 name: c.name.clone(), params: Vec::new(), body: Vec::new(),
                 is_async: false, is_generator: false, is_arrow: false, expr_body: false,
+                strict: true,
             }),
         };
         let ctor = self.make_method(ctor_fn, env, None, Some(proto.clone()));
@@ -528,7 +530,17 @@ impl Interp {
                 Expr::Member { obj, prop, .. } => {
                     let base = self.eval(obj, env)?;
                     let key = self.member_key2(prop, env)?;
-                    Value::Bool(self.delete_key(&base, &key)?)
+                    let ok = self.delete_key(&base, &key)?;
+                    if !ok {
+                        super::interp::strict_site!(self, 7);
+                        // Strenger Code laesst ein gescheitertes `delete`
+                        // nicht als `false` durchgehen (ES §13.5.1.2).
+                        if super::interp::env_strict(env) {
+                            return self.type_err(&alloc::format!(
+                                "cannot delete property '{key}'"));
+                        }
+                    }
+                    Value::Bool(ok)
                 }
                 _ => Value::Bool(true),
             });
@@ -599,6 +611,14 @@ impl Interp {
         })
     }
 
+    /// `DeletePropertyOrThrow` (ES §7.3.9) — was die Eingebauten benutzen.
+    /// Der `delete`-OPERATOR gibt `false` zurueck (ausser im strengen Modus);
+    /// eine eingebaute Funktion darf das nie ignorieren.
+    pub fn delete_or_throw(&mut self, base: &Value, key: &str) -> C<()> {
+        if self.delete_key(base, key)? { return Ok(()); }
+        self.type_err(&alloc::format!("cannot delete property '{key}'"))
+    }
+
     pub fn unary_val(&mut self, op: UnaryOp, v: Value) -> C<Value> {
         Ok(match op {
             UnaryOp::Minus => {
@@ -655,25 +675,14 @@ impl Interp {
 
     fn store(&mut self, target: &Expr, v: Value, env: &Rc<RefCell<Env>>) -> C<()> {
         match target {
-            Expr::Ident(n) => {
-                if let Some(e) = env_lookup(env, n.as_str()) {
-                    let (mutable, init) = {
-                        let b = e.borrow();
-                        let bd = b.vars.get(n.as_str()).unwrap();
-                        (bd.mutable, bd.initialized)
-                    };
-                    if !init { return self.ref_err(&alloc::format!("cannot access '{n}' before initialization")); }
-                    if !mutable { return self.type_err("assignment to constant variable"); }
-                    e.borrow_mut().vars.get_mut(n.as_str()).unwrap().value = v;
-                    return Ok(());
-                }
-                let g = Value::Obj(self.realm.global.clone());
-                self.set(&g, n, v)
-            }
+            // EINE Fassung, in `eval.rs`. Zwei nebeneinander sind zwei
+            // Semantiken, die auf ihren ersten Unterschied warten.
+            Expr::Ident(n) => self.assign_ident(n, v, env),
             Expr::Member { obj, prop, .. } => {
                 let base = self.eval(obj, env)?;
                 let key = self.member_key2(prop, env)?;
-                self.set(&base, &key, v)
+                let throw = super::interp::env_strict(env);
+                self.set(&base, &key, v, throw)
             }
             _ => self.ref_err("invalid assignment target"),
         }

@@ -14,6 +14,10 @@ fn main() {
         Err(e) => { println!("SyntaxError: {} @{}", e.msg, e.at); return; }
     };
     let mut i = beak_engine::js::interp::Interp::new();
+    // `NOVM=1` faehrt dieselbe Datei ohne die Befehlsmaschine. Der Diff der
+    // beiden Ausgaben ist die einzige Art, zu pruefen, dass die zwei
+    // Maschinen dieselbe Bedeutung haben — und nicht nur dieselbe Zahl.
+    if std::env::var("NOVM").is_ok() { i.vm_off = true; }
     // `HTML=<datei|text>` haengt ein Dokument an. Ohne das gibt es `document`
     // GAR NICHT — das ist Absicht der Engine und keine Luecke des Werkzeugs.
     if let Ok(h) = std::env::var("HTML") {

@@ -620,7 +620,7 @@ fn do_exec(i: &mut Interp, this: &Value, s: &str) -> C<Value> {
         let li = i.get(this, "lastIndex")?;
         let n = i.to_number(&li)?;
         if n < 0.0 || n as usize > chars.len() {
-            i.set(this, "lastIndex", Value::Num(0.0))?;
+            i.set(this, "lastIndex", Value::Num(0.0), true)?;
             return Ok(Value::Null);
         }
         n as usize
@@ -629,13 +629,13 @@ fn do_exec(i: &mut Interp, this: &Value, s: &str) -> C<Value> {
         Some(m) => {
             if use_last {
                 let end = m.caps[0].map(|(_, b)| b).unwrap_or(start);
-                i.set(this, "lastIndex", Value::Num(end as f64))?;
+                i.set(this, "lastIndex", Value::Num(end as f64), true)?;
             }
             record(i, &chars, &m);
             Ok(match_result(i, &re, &chars, &m, s))
         }
         None => {
-            if use_last { i.set(this, "lastIndex", Value::Num(0.0))?; }
+            if use_last { i.set(this, "lastIndex", Value::Num(0.0), true)?; }
             Ok(Value::Null)
         }
     }

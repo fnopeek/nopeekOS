@@ -20,6 +20,11 @@ pub struct Program {
     /// `module` heisst: `import`/`export` erlaubt, immer streng, `await` oben
     /// erlaubt. Das ist kein Schalter am Parser, es ist eine andere Grammatik.
     pub module: bool,
+    /// Ob dieses Programm STRENG ist. Der Parser wusste das immer und hat es
+    /// weggeworfen; die Laufzeit war dadurch blind, und der Modus entschied
+    /// nur noch ueber Fruehfehler. Die Strenge steht am CODE, nicht am
+    /// Zustand des Laufs — deshalb hier und nicht im Interpreter.
+    pub strict: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -108,6 +113,10 @@ pub struct Func {
     /// einzelnes `Stmt::Return` in `body`, damit alles darunter EINEN Fall hat.
     pub is_arrow: bool,
     pub expr_body: bool,
+    /// Streng? Entweder weil der Rumpf mit `"use strict"` beginnt, oder weil
+    /// die Funktion in strengem Code steht (auch: in einem Klassenkoerper,
+    /// der immer streng ist). Der Parser rechnet es ohnehin aus.
+    pub strict: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

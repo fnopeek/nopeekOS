@@ -53,15 +53,30 @@ pub struct Env {
     /// selbst wieder und liefe endlos. Ein Pfeil setzt es nicht und erbt es
     /// dadurch ueber die Kette, genau wie `this`.
     pub home: Option<Gc>,
+    /// Streng? Die Strenge steht am CODE (siehe [[ast::Func::strict]]), aber
+    /// gelesen wird sie zur Laufzeit — an jeder Zuweisung, jedem `delete`,
+    /// jedem `this`. Deshalb faellt sie beim Anlegen der Umgebung hier
+    /// hinein und wird VERERBT: ein Block in einer strengen Funktion ist
+    /// streng, ohne dass jemand die Kette hochlaufen muss.
+    pub strict: bool,
 }
 
 impl Env {
+    /// Erbt die Strenge vom Elter. Ein Funktionsaufruf ueberschreibt sie
+    /// gleich danach mit der seines eigenen Rumpfes — nur DORT darf sie sich
+    /// aendern, und nur nach oben.
     pub fn new(parent: Option<Rc<RefCell<Env>>>, func_scope: bool) -> Rc<RefCell<Env>> {
+        let strict = parent.as_ref().is_some_and(|p| p.borrow().strict);
         Rc::new(RefCell::new(Env {
             vars: HashMap::new(), parent, this_val: None, is_func_scope: func_scope, home: None,
+            strict,
         }))
     }
 }
+
+/// Ist der Code, der gerade laeuft, streng? Ein Feld, kein Kettenlauf — die
+/// Vererbung ist beim Anlegen passiert.
+pub fn env_strict(env: &Rc<RefCell<Env>>) -> bool { env.borrow().strict }
 
 pub fn env_lookup(env: &Rc<RefCell<Env>>, name: &str) -> Option<Rc<RefCell<Env>>> {
     let mut cur = env.clone();
@@ -80,6 +95,21 @@ pub fn env_home(env: &Rc<RefCell<Env>>) -> Option<Gc> {
         let next = cur.borrow().parent.clone();
         match next { Some(p) => cur = p, None => return None }
     }
+}
+
+/// `this`, PLUS die Frage, ob der Modus daran etwas aendern wuerde.
+///
+/// Beide Maschinen rufen sie, damit die Sonde nicht in zwei Fassungen
+/// auseinanderlaeuft. `undefined`/`null` waere im lockeren Modus `globalThis`,
+/// ein Primitiv waere dort eingepackt — beides sieht das Programm.
+pub fn this_observed(i: &mut Interp, env: &Rc<RefCell<Env>>) -> Value {
+    let v = env_this(env);
+    match &v {
+        Value::Undefined | Value::Null => strict_site!(i, 8),
+        Value::Obj(_) => {}
+        _ => strict_site!(i, 9),
+    }
+    v
 }
 
 pub fn env_this(env: &Rc<RefCell<Env>>) -> Value {
@@ -212,6 +242,40 @@ pub struct StyleCtx {
     pub viewport_w: f32,
 }
 
+/// Die Stellen, an denen der strenge Modus abweicht — in der Reihenfolge des
+/// Zaehlfeldes. Nur Diagnose (`--features strict-probe`).
+pub const STRICT_SITE_NAMES: [&str; STRICT_SITES] = [
+    "set: Empfaenger ist ein echtes Primitiv (Text/Zahl/Bool/Symbol)",
+    "set: eigene Eigenschaft nicht schreibbar",
+    "set: geerbte Eigenschaft nicht schreibbar",
+    "set: nur Getter, kein Setzer",
+    "set: Objekt nicht erweiterbar",
+    "set: die Stellvertreter-Falle sagte nein",
+    "Zuweisung an einen unbekannten Namen legt eine globale an",
+    "delete gab false zurueck",
+    "this ist undefined in einem einfachen Aufruf (locker: globalThis)",
+    "this bleibt ein Primitiv (locker: eingepackt)",
+    "eval legt sein var im Bereich des Aufrufers ab",
+    // Getrennt vom echten Primitiv, und das ist keine Feinheit: fast jeder
+    // Treffer hier heisst „das Objekt gibt es in beak gar nicht", also
+    // `undefined.foo = 1` aus `propertyHelper.js`. Zusammengezaehlt haetten
+    // die beiden Faelle die Rangliste angefuehrt und dabei eine ganz andere
+    // Luecke gemessen als die, die sie zu messen vorgeben.
+    "set: Empfaenger ist undefined/null (meist: das Objekt fehlt ganz)",
+];
+pub const STRICT_SITES: usize = 12;
+
+/// Eine Stelle melden. Ohne die Fahne ist es nichts — kein Feld, kein Befehl.
+#[cfg(feature = "strict-probe")]
+macro_rules! strict_site {
+    ($me:expr, $i:expr) => {{ $me.strict_probe[$i] += 1; }};
+}
+#[cfg(not(feature = "strict-probe"))]
+macro_rules! strict_site {
+    ($me:expr, $i:expr) => {{ let _ = &$me; }};
+}
+pub(crate) use strict_site;
+
 pub struct Interp {
     pub realm: Realm,
     /// Aufruftiefe. Ein Baumlaeufer benutzt den RUST-Stapel, also wird ein
@@ -323,6 +387,15 @@ pub struct Interp {
     /// `document.cookie` trotzdem, als leere Zeichenkette, weil ein Skript
     /// darauf `.match` ruft und ein `undefined` es toetet. Das ist keine
     /// erfundene Antwort: keine Kekse IST eine Antwort.
+    /// **Nur mit `--features strict-probe`.** Zaehlt die Stellen, an denen der
+    /// strenge Modus etwas anderes taete als der lockere — jede fuer sich.
+    ///
+    /// Die Fahnen der Tests (`onlyStrict`) beantworten die Frage NICHT: sie
+    /// sagen, wie ein Test GESTARTET wird, nicht, ob er an einer dieser
+    /// Stellen vorbeikommt. Ein Test ohne Fahne, der in seinem Rumpf
+    /// `"use strict"` schreibt, haengt genauso daran.
+    #[cfg(feature = "strict-probe")]
+    pub strict_probe: [u32; STRICT_SITES],
     pub cookies: String,
     /// Was die Seite mit `document.cookie = "…"` gesetzt hat, roh und in der
     /// Reihenfolge. Der Wirt holt es sich mit `take_cookie_sets` und legt es
@@ -428,6 +501,8 @@ impl Interp {
         super::url::install(&mut realm);
         Interp { realm, depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX,
                  fake_now: 0.0, epoch_ms: 0.0, doc: None, next_sym: 0, sym_registry: HashMap::new(),
+                 #[cfg(feature = "strict-probe")]
+                 strict_probe: [0; STRICT_SITES],
                  cookies: String::new(), cookie_sets: Vec::new(), style_ctx: None,
                  vm_ran: 0, vm_declined: 0, vm_decline: None, vm_off: false,
                  func_chunks: HashMap::new(), func_declines: HashMap::new(), pending_labels: Vec::new(), vm_calls: 0, vm_calls_native: 0, vm_calls_slow: 0,
@@ -1033,11 +1108,28 @@ impl Interp {
         Ok(Value::Undefined)
     }
 
-    pub fn set(&mut self, base: &Value, key: &str, val: Value) -> C<()> {
+    /// `Set(O, P, V, Throw)` (ES §7.3.4).
+    ///
+    /// **Die Wurf-Fahne ist ein ARGUMENT, kein Modus.** Das ist der Punkt, den
+    /// beak bis 0.98.0 nicht hatte: nicht nur strenger Code will einen Fehler,
+    /// wenn ein Schreiben scheitert, sondern auch fast jede eingebaute
+    /// Funktion — `[].push` auf einem eingefrorenen Feld muss in BEIDEN Modi
+    /// werfen. Deshalb steht die Fahne hier und wird an jeder Rufstelle
+    /// entschieden; ein Vorgabewert haette genau die Haelfte still falsch
+    /// gelassen.
+    pub fn set(&mut self, base: &Value, key: &str, val: Value, throw: bool) -> C<()> {
         let Value::Obj(o) = base else {
             // Zuweisung an eine Eigenschaft eines Primitivs verpufft still
             // (im lockeren Modus). Der strenge Modus wuerde werfen — das
             // gehoert zu den Dingen, die der Lauf als offen ausweist.
+            if matches!(base, Value::Undefined | Value::Null) { strict_site!(self, 11); }
+            else { strict_site!(self, 0); }
+            if throw {
+                // `undefined.x = 1` wirft ohnehin schon beim Lesen der Basis;
+                // hier geht es um `"abc".x = 1` im strengen Modus.
+                return self.type_err(&alloc::format!(
+                    "cannot create property '{key}' on a primitive value"));
+            }
             return Ok(());
         };
         // Dieselbe Endgueltigkeit beim Schreiben: ausserhalb der Sicht
@@ -1070,10 +1162,17 @@ impl Interp {
             return match super::proxy::trap(self, o, "set")? {
                 Some((f, t)) => {
                     let kv = super::proxy::key_value(key);
-                    self.call(&f, Value::Undefined, &[t, kv, val, base.clone()])?;
+                    let r = self.call(&f, Value::Undefined, &[t, kv, val, base.clone()])?;
+                    if !r.truthy() {
+                        strict_site!(self, 5);
+                        if throw {
+                            return self.type_err(&alloc::format!(
+                                "'set' on proxy: trap returned falsish for property '{key}'"));
+                        }
+                    }
                     Ok(())
                 }
-                None => { let t = super::proxy::target(self, o)?; self.set(&Value::Obj(t), key, val) }
+                None => { let t = super::proxy::target(self, o)?; self.set(&Value::Obj(t), key, val, throw) }
             };
         }
         // Ein Setzer irgendwo in der Kette gewinnt vor dem eigenen Feld.
@@ -1085,21 +1184,42 @@ impl Interp {
             let found = c.borrow().get_own(key).cloned();
             if let Some(p) = found {
                 if let Some(s) = &p.set { self.call(&s.clone(), base.clone(), &[val])?; return Ok(()); }
-                if p.is_accessor() { return Ok(()); }        // nur Getter: still
+                // Nur ein Getter, kein Setzer: das Schreiben scheitert.
+                if p.is_accessor() {
+                    strict_site!(self, 3);
+                    if throw { return self.type_err(&alloc::format!(
+                        "cannot set property '{key}' of #<Object> which has only a getter")); }
+                    return Ok(());
+                }
                 if Rc::ptr_eq(&c, o) {
-                    if !p.writable { return Ok(()); }
+                    if !p.writable {
+                        strict_site!(self, 1);
+                        if throw { return self.type_err(&alloc::format!(
+                            "cannot assign to read only property '{key}'")); }
+                        return Ok(());
+                    }
                     let mut np = p.clone();
                     np.value = Some(val);
                     o.borrow_mut().set_prop(Rc::from(key), np);
                     return Ok(());
                 }
-                if !p.writable { return Ok(()); }
+                if !p.writable {
+                    strict_site!(self, 2);
+                    if throw { return self.type_err(&alloc::format!(
+                        "cannot assign to read only property '{key}'")); }
+                    return Ok(());
+                }
                 break;
             }
             let next = c.borrow().proto.clone();
             cur = next;
         }
-        if !o.borrow().extensible { return Ok(()); }
+        if !o.borrow().extensible {
+            strict_site!(self, 4);
+            if throw { return self.type_err(&alloc::format!(
+                "cannot add property {key}, object is not extensible")); }
+            return Ok(());
+        }
         o.borrow_mut().set_prop(Rc::from(key), Prop::data(val));
         self.fix_array_length(o, key);
         Ok(())
@@ -1226,8 +1346,16 @@ impl Interp {
         // Ein Pfeil bekommt KEIN eigenes `this` — dadurch findet `this_of`
         // das der umgebenden Funktion.
         env.borrow_mut().home = d.home_object.clone();
+        // Die Strenge des RUMPFES, nicht die des Rufers: eine strenge
+        // Funktion bleibt streng, egal wer sie ruft, und eine lockere bleibt
+        // locker, auch wenn strenger Code sie aufruft. `Env::new` hat gerade
+        // die des Definitionsortes geerbt; ein `"use strict"` im Rumpf legt
+        // hier drauf.
+        if d.node.strict { env.borrow_mut().strict = true; }
         if !d.node.is_arrow {
-            env.borrow_mut().this_val = Some(d.this_val.clone().unwrap_or(this_val));
+            let t = d.this_val.clone().unwrap_or(this_val);
+            let t = self.bind_this(t, d.node.strict)?;
+            env.borrow_mut().this_val = Some(t);
             let ao = self.make_arguments(args);
             env.borrow_mut().vars.insert(Rc::from("arguments"),
                 Binding { value: ao, mutable: true, initialized: true });
@@ -1244,6 +1372,23 @@ impl Interp {
             }
         }
         Ok(env)
+    }
+
+    /// `OrdinaryCallBindThis` (ES §10.2.1.2) — was `this` im Rumpf WIRKLICH ist.
+    ///
+    /// **Der Unterschied ist der Modus, und beide Seiten waren falsch.** Eine
+    /// strenge Funktion bekommt den Wert unveraendert: `f()` sieht `undefined`.
+    /// Eine lockere sieht dort `globalThis`, und ein Primitiv wird ihr
+    /// EINGEPACKT — `(7).f()` sieht ein `Number`-Objekt, kein `7`. beak gab
+    /// bis 0.98.0 immer den strengen Wert, in beiden Modi; das war der
+    /// groesste einzelne Posten der Messung (257 Varianten, 191 davon locker).
+    fn bind_this(&mut self, t: Value, strict: bool) -> C<Value> {
+        if strict { return Ok(t); }
+        match t {
+            Value::Undefined | Value::Null => Ok(Value::Obj(self.realm.global.clone())),
+            Value::Obj(_) => Ok(t),
+            other => Ok(Value::Obj(self.to_object(&other)?)),
+        }
     }
 
     /// Die Instanzfelder einer Klasse auf ein frisches `this` legen.
@@ -1360,6 +1505,11 @@ impl Interp {
     // ── Programm ─────────────────────────────────────────────────────────
     pub fn run_program(&mut self, prog: &Program) -> C<Value> {
         let env = self.realm.global_env.clone();
+        // Die globale Umgebung gehoert der EINHEIT, die gerade laeuft: ein
+        // Skript mit `"use strict"` faerbt sie streng, das naechste ohne
+        // wieder locker. Beide Faelle kommen im test262-Lauf vor — Vorspann
+        // locker, Testkoerper streng.
+        env.borrow_mut().strict = prog.strict;
         // Hochziehen ist fuer BEIDE Maschinen dasselbe: es arbeitet auf der
         // Umgebung, nicht auf dem Code.
         self.hoist(&prog.body, &env, &env)?;
@@ -1422,18 +1572,33 @@ impl Interp {
             Ok(p) => p,
             Err(e) => return Err(self.throw_kind("SyntaxError", &e.msg)),
         };
+        // Ein DIREKTES eval erbt die Strenge seines Rufers; die eigene
+        // Direktive legt drauf. Ein indirektes faengt locker an.
+        let inherited = caller.as_ref().is_some_and(|e| e.borrow().strict);
+        let strict = prog.strict || inherited;
         let base = caller.unwrap_or_else(|| self.realm.global_env.clone());
         // `let`/`const` bekommen einen EIGENEN Bereich, `var` und
         // Funktionsdeklarationen steigen bis zur naechsten Funktionsgrenze
         // des RUFERS — genau deshalb ist der Bereich hier kein Funktionsbereich.
         let scope = Env::new(Some(base.clone()), false);
-        let mut var_env = base;
-        loop {
-            let is_fn = var_env.borrow().is_func_scope;
-            if is_fn { break }
-            let up = var_env.borrow().parent.clone();
-            match up { Some(p) => var_env = p, None => break }
-        }
+        scope.borrow_mut().strict = strict;
+        // **Strenger eval behaelt sein `var` bei sich.** Sonst steigt es bis
+        // zur Funktionsgrenze des Rufers und legt dort einen Namen an, den
+        // der Rufer nie geschrieben hat — genau der Unterschied, an dem
+        // `eval` in 0.92.0 fuenf Tests gekostet hat.
+        let var_env = if strict {
+            scope.borrow_mut().is_func_scope = true;
+            scope.clone()
+        } else {
+            let mut ve = base;
+            loop {
+                let is_fn = ve.borrow().is_func_scope;
+                if is_fn { break }
+                let up = ve.borrow().parent.clone();
+                match up { Some(p) => ve = p, None => break }
+            }
+            ve
+        };
         self.hoist(&prog.body, &scope, &var_env)?;
         // Dieselbe Wahl wie beim Programm: kann der Uebersetzer alles, faehrt
         // die Maschine; sonst der Baumlaeufer. Nie eine Mischung.

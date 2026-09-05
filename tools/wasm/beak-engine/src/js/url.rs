@@ -232,7 +232,7 @@ fn parts_of(i: &mut Interp, t: &Value) -> C<Parts> {
 }
 
 fn store(i: &mut Interp, t: &Value, p: &Parts) -> C<()> {
-    i.set(t, U_HREF, Value::string(p.href()))
+    i.set(t, U_HREF, Value::string(p.href()), true)
 }
 
 fn part_accessor(o: &Gc, name: &str, get: NativeFn, set: NativeFn, fp: &Gc) {
@@ -460,5 +460,5 @@ fn sp_write(i: &mut Interp, t: &Value, pairs: &[(String, String)]) -> C<()> {
         p.query = q;
         return store(i, &owner, &p);
     }
-    i.set(t, U_QUERY, Value::string(q))
+    i.set(t, U_QUERY, Value::string(q), true)
 }

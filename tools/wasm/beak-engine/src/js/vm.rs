@@ -303,7 +303,7 @@ impl Vm {
                 self.push(Value::Str(k));
             }
             Op::This => {
-                let v = super::interp::env_this(&env);
+                let v = super::interp::this_observed(i, &env);
                 self.push(v);
             }
             Op::Pop => {
@@ -383,7 +383,8 @@ impl Vm {
             Op::SetProp(n) => {
                 let val = self.pop();
                 let obj = self.pop();
-                i.set(&obj, &chunk.names[*n as usize], val.clone())?;
+                let throw = super::interp::env_strict(&env);
+                i.set(&obj, &chunk.names[*n as usize], val.clone(), throw)?;
                 self.push(val);
             }
             Op::SetIndex => {
@@ -391,7 +392,8 @@ impl Vm {
                 let key = self.pop();
                 let obj = self.pop();
                 let k = i.to_prop_key(&key)?;
-                i.set(&obj, &k, val.clone())?;
+                let throw = super::interp::env_strict(&env);
+                i.set(&obj, &k, val.clone(), throw)?;
                 self.push(val);
             }
             Op::Call { argc, name } => {
@@ -543,7 +545,14 @@ impl Vm {
             }
             Op::DeleteProp(n) => {
                 let obj = self.pop();
-                let v = i.delete_key(&obj, &chunk.names[*n as usize])?;
+                let key = &chunk.names[*n as usize];
+                let v = i.delete_key(&obj, key)?;
+                if !v {
+                    super::interp::strict_site!(i, 7);
+                    if super::interp::env_strict(&env) {
+                        return i.type_err(&alloc::format!("cannot delete property '{key}'"));
+                    }
+                }
                 self.push(Value::Bool(v));
             }
             Op::DeleteIndex => {
@@ -551,6 +560,12 @@ impl Vm {
                 let obj = self.pop();
                 let k = i.to_prop_key(&key)?;
                 let v = i.delete_key(&obj, &k)?;
+                if !v {
+                    super::interp::strict_site!(i, 7);
+                    if super::interp::env_strict(&env) {
+                        return i.type_err(&alloc::format!("cannot delete property '{k}'"));
+                    }
+                }
                 self.push(Value::Bool(v));
             }
             Op::MakeArraySpread { n, spread } => {

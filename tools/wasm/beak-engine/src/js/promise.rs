@@ -419,7 +419,7 @@ fn agg_step(i: &mut Interp, a: &[Value], rejected: bool) {
         }
         Value::Obj(o)
     } else { v };
-    let _ = i.set(&vals, &num_to_string(idx), entry);
+    let _ = i.set(&vals, &num_to_string(idx), entry, false);
 
     // Der Zaehler liegt auf dem GEMEINSAMEN Vorfahren der Schlitze, nicht auf
     // dem Schlitz — sonst zaehlte jeder fuer sich.
@@ -431,7 +431,7 @@ fn agg_step(i: &mut Interp, a: &[Value], rejected: bool) {
     if mode == 2 {
         let e = i.throw_kind("AggregateError", "all promises were rejected");
         if let Abrupt::Throw(ev) = e {
-            let _ = i.set(&ev, "errors", vals);
+            let _ = i.set(&ev, "errors", vals, false);
             settle(i, &cap, ev, true);
         }
     } else {
