@@ -103,6 +103,32 @@ syn(langRows, "Iterator schliesst", "var c = false; var o = {}; o[Symbol.iterato
 syn(langRows, "Promise", "return typeof Promise", "function");
 syn(langRows, "async / await", "return (async function () { return 1 })().constructor.name", "Promise");
 
+/* Was 0.89.0-0.96.1 dazugebracht hat. Ohne diese Zeilen sagt ein gruener
+   Lauf nur, dass nichts KAPUTT ist — nicht, dass das Neue am Geraet geht. */
+syn(langRows, "Zahl -> Text", "return String(1e21) + '|' + (255).toString(16)", "1e+21|ff");
+syn(langRows, "eval (direkt)", "var x = 5; return eval('x * 2')", 10);
+syn(langRows, "eval (indirekt)", "var g = eval; return typeof g('1 + 1')", "number");
+syn(langRows, "BigInt", "return (2n ** 64n) + 1n === 18446744073709551617n", true);
+syn(langRows, "BigInt64Array", "var a = new BigInt64Array(1); a[0] = -1n; return a[0] === -1n", true);
+syn(langRows, "Proxy", "var p = new Proxy({}, { get: function (t, k) { return k === 'a' ? 7 : 0 } }); return p.a", 7);
+syn(langRows, "Iterator-Hilfen", "return [1,2,3,4].values().map(function (x) { return x * 2 }).take(2).toArray().join(',')", "2,4");
+syn(langRows, "Mengenoperationen", "return [...new Set([1,2]).union(new Set([3]))].join(',')", "1,2,3");
+syn(langRows, "Empfaengerpruefung", "try { String.prototype.trim.call(null); return 'kein Wurf' } catch (e) { return e.constructor.name }", "TypeError");
+syn(langRows, "Erben von Error", "class E extends Error {} return new E('boom').message", "boom");
+syn(langRows, "Date rechnet", "return new Date(Date.UTC(2026, 8, 5)).toISOString()", "2026-09-05T00:00:00.000Z");
+syn(langRows, "Date liest den Text", "return Date.parse('2026-09-05T14:30:45.123Z')", 1788618645123);
+
+/* **Diese eine geht NUR am Geraet.** Host-seitig ist die Uhr des Wirts 0,
+   also steht `Date.now()` dort bei 1970 — der Weg ueber `npk_unix_time()`
+   ist der einzige Pfad, den kein Test auf dem Rechner beruehrt. */
+row(langRows, "Date hat die echte Uhr (nur am Geraet)", function () {
+  var y = new Date(Date.now()).getUTCFullYear();
+  // Den gelesenen Wert in die Meldung heben: „lieferte nicht true" saegt
+  // sonst genau die Zahl ab, wegen der die Zeile hier steht.
+  if (y < 2025 || y >= 2100) { throw new Error("Jahr " + y + " — die Uhr des Wirts kommt nicht an"); }
+  return true;
+});
+
 row(langRows, "Schliessung + Rekursion", function () {
   function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2) }
   return fib(15) === 610;
