@@ -135,7 +135,27 @@ impl Interp {
         if !self.is_callable(&ctor) {
             return self.type_err("super: the parent class has no constructor");
         }
-        self.call(&ctor, this_val.clone(), args)?;
+        // Ein EINGEBAUTER Elternkonstruktor baut sein eigenes Objekt und kann
+        // `this` gar nicht fuellen — `super()` in `class E extends Error {}`
+        // hat die Meldung bisher weggeworfen. Also wird das Gebaute
+        // UEBERNOMMEN: Art und eigene Eigenschaften wandern hinueber, der
+        // Prototyp der abgeleiteten Klasse bleibt.
+        let native_parent = matches!(&ctor, Value::Obj(o)
+            if matches!(o.borrow().kind, ObjKind::Native(_)));
+        if native_parent {
+            let built = self.construct(&ctor, args)?;
+            if let (Value::Obj(src), Value::Obj(dst)) = (&built, &this_val) {
+                let keys = src.borrow().raw_keys();
+                for k in keys {
+                    let p = src.borrow().get_own(&k).cloned();
+                    if let Some(p) = p { dst.borrow_mut().set_prop(k, p); }
+                }
+                let kind = core::mem::replace(&mut src.borrow_mut().kind, ObjKind::Plain);
+                dst.borrow_mut().kind = kind;
+            }
+        } else {
+            self.call(&ctor, this_val.clone(), args)?;
+        }
         // **Jetzt erst die eigenen Instanzfelder.** Die Spec legt sie nach dem
         // Elternkonstruktor an, und der Unterschied ist sichtbar: ein
         // Initialisierer darf ein Feld der Elternklasse lesen. Welche Klasse

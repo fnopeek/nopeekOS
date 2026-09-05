@@ -282,11 +282,13 @@ pub fn install(realm: &mut Realm) {
         i.call(&f, t.clone(), &[pass, fail])
     }, 1, &fp);
 
-    d(&ctor, "resolve", |i, _, a| {
+    d(&ctor, "resolve", |i, t, a| {
+        if !matches!(t, Value::Obj(_)) { return i.type_err("Promise.resolve on a non-object"); }
         let v = a.first().cloned().unwrap_or(Value::Undefined);
         Ok(Value::Obj(to_promise(i, &v)))
     }, 1, &fp);
-    d(&ctor, "reject", |i, _, a| {
+    d(&ctor, "reject", |i, t, a| {
+        if !i.is_constructor(&t) { return i.type_err("Promise.reject on a non-constructor"); }
         let p = new_promise(i);
         settle(i, &p, a.first().cloned().unwrap_or(Value::Undefined), true);
         Ok(Value::Obj(p))
@@ -295,10 +297,11 @@ pub fn install(realm: &mut Realm) {
     // `all` = 0, `allSettled` = 1, `any` = 2. Eine Umsetzung fuer drei: sie
     // unterscheiden sich nur darin, was ein einzelnes Ergebnis mit dem
     // Zaehler macht.
-    d(&ctor, "all", |i, _, a| aggregate(i, a, 0), 1, &fp);
-    d(&ctor, "allSettled", |i, _, a| aggregate(i, a, 1), 1, &fp);
-    d(&ctor, "any", |i, _, a| aggregate(i, a, 2), 1, &fp);
-    d(&ctor, "race", |i, _, a| {
+    d(&ctor, "all", |i, t, a| { agg_this(i, &t)?; aggregate(i, a, 0) }, 1, &fp);
+    d(&ctor, "allSettled", |i, t, a| { agg_this(i, &t)?; aggregate(i, a, 1) }, 1, &fp);
+    d(&ctor, "any", |i, t, a| { agg_this(i, &t)?; aggregate(i, a, 2) }, 1, &fp);
+    d(&ctor, "race", |i, t, a| {
+        agg_this(i, &t)?;
         let p = new_promise(i);
         let (res, rej) = resolving_functions(i, &p);
         let items = match i.iterate(a.first().unwrap_or(&Value::Undefined)) {
@@ -439,3 +442,10 @@ fn agg_step(i: &mut Interp, a: &[Value], rejected: bool) {
 /// Deckel fuer `run_jobs` — dieselbe Begruendung wie die Schrittgrenze.
 pub const MAX_JOBS: usize = 100_000;
 
+
+/// Die Sammelstatiken bauen ihr Ergebnis ueber `NewPromiseCapability(this)`
+/// — auf einem Nicht-Konstruktor werfen sie, bevor sie den Iterator
+/// anfassen.
+fn agg_this(i: &mut Interp, t: &Value) -> C<()> {
+    if i.is_constructor(t) { Ok(()) } else { i.type_err("Promise static on a non-constructor") }
+}
