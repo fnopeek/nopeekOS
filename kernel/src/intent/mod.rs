@@ -493,6 +493,11 @@ pub(crate) fn resolve_path(name: &str) -> String {
     parts.join("/")
 }
 
+/// Dieselbe Funktion, fuer die TLS-Schicht sichtbar: `lanpin` muss
+/// unterscheiden koennen, ob ein Host eine LITERALE Adresse ist oder ein
+/// Name — bei einem Namen gilt die Freigabe nicht.
+pub(crate) fn parse_ip_pub(s: &str) -> Option<[u8; 4]> { parse_ip(s) }
+
 fn parse_ip(s: &str) -> Option<[u8; 4]> {
     let parts: alloc::vec::Vec<&str> = s.split('.').collect();
     if parts.len() != 4 { return None; }

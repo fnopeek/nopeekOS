@@ -11,6 +11,8 @@ pub mod rsa;
 pub mod asn1;
 pub mod x509;
 pub mod certstore;
+/// Geraete im eigenen Netz — angeheftetes Vertrauen statt „ignorieren".
+pub mod lanpin;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -590,8 +592,14 @@ pub fn tls_connect_alpn(
     }
 
     let cert_refs: Vec<&[u8]> = cert_chain.iter().map(|c| c.as_slice()).collect();
-    certstore::verify_chain(&cert_refs, hostname)
-        .map_err(TlsError::CertificateError)?;
+    // Die richtige Pruefung zuerst und unveraendert. `second_chance` kann
+    // nichts erlauben, was hier durchgefallen waere — sie sieht den Fehler
+    // erst, nachdem er feststeht, und laesst genau zwei davon nach, und auch
+    // die nur fuer eine vom Nutzer benannte private Adresse.
+    if let Err(e) = certstore::verify_chain(&cert_refs, hostname) {
+        lanpin::second_chance(hostname, cert_refs[0], e)
+            .map_err(TlsError::CertificateError)?;
+    }
     // Das GEPRUEFTE Blatt aufheben — nicht das, was spaeter irgendwo liegt.
     let leaf_der = cert_chain[0].clone();
 

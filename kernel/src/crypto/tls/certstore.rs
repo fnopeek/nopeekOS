@@ -683,7 +683,9 @@ impl<'a> Iterator for SanIter<'a> {
     }
 }
 
-#[derive(Debug)]
+// `Copy`, damit ein Fehler weitergereicht werden kann, ohne ihn zu
+// verbrauchen: `lanpin::second_chance` muss ihn pruefen UND zurueckgeben.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CertError {
     EmptyChain,
     ParseError,
