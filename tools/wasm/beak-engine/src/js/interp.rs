@@ -420,6 +420,7 @@ impl Interp {
         super::promise::install(&mut realm);
         super::date::install(&mut realm);
         super::iterhelp::install(&mut realm);
+        super::proxy::install(&mut realm);
         realm.eval_fn = match realm.global.borrow().get_own("eval").and_then(|p| p.value.clone()) {
             Some(Value::Obj(o)) => Some(o), _ => None,
         };
@@ -892,8 +893,18 @@ impl Interp {
     }
 
     pub fn is_callable(&self, v: &Value) -> bool {
-        matches!(v, Value::Obj(o) if matches!(o.borrow().kind,
-            ObjKind::Function(_) | ObjKind::Native(_) | ObjKind::Bound { .. }))
+        let Value::Obj(o) = v else { return false };
+        let kind = &o.borrow().kind;
+        match kind {
+            ObjKind::Function(_) | ObjKind::Native(_) | ObjKind::Bound { .. } => true,
+            // Ein Stellvertreter ist aufrufbar, wenn sein ZIEL es ist —
+            // `typeof new Proxy(f, {})` ist "function".
+            ObjKind::Proxy(c) => match c.borrow().clone() {
+                Some((t, _)) => self.is_callable(&Value::Obj(t)),
+                None => false,
+            },
+            _ => false,
+        }
     }
 
     /// Darf `new` darauf? Ein Pfeil, eine Methode, eine async-Funktion und
@@ -912,6 +923,10 @@ impl Interp {
             ObjKind::Function(d) =>
                 !d.node.is_arrow && !d.node.is_async && !d.node.is_generator,
             ObjKind::Bound { target, .. } => self.is_constructor(&Value::Obj(target.clone())),
+            ObjKind::Proxy(c) => match c.borrow().clone() {
+                Some((t, _)) => self.is_constructor(&Value::Obj(t)),
+                None => false,
+            },
             _ => false,
         }
     }
@@ -944,6 +959,17 @@ impl Interp {
         // kein Detail — es ist der Unterschied zwischen einer Sicht und einem
         // gewoehnlichen Objekt mit Zahlen als Schluesseln.
         if let Some(v) = ta_read(&start, key) { return Ok(v) }
+        // Ein Stellvertreter beantwortet JEDEN Zugriff selbst — die
+        // Prototypenkette darunter wird nicht gelaufen.
+        if super::proxy::parts(&start).is_some() {
+            return match super::proxy::trap(self, &start, "get")? {
+                Some((f, t)) => {
+                    let kv = super::proxy::key_value(key);
+                    self.call(&f, Value::Undefined, &[t, kv, base.clone()])
+                }
+                None => { let t = super::proxy::target(self, &start)?; self.get(&Value::Obj(t), key) }
+            };
+        }
         // Array-`length` lebt in der Eigenschaftstabelle wie alles andere;
         // nur die Kette darunter wird hier gelaufen.
         let mut cur = Some(start);
@@ -985,6 +1011,16 @@ impl Interp {
                 }
                 return Ok(());
             }
+        }
+        if super::proxy::parts(o).is_some() {
+            return match super::proxy::trap(self, o, "set")? {
+                Some((f, t)) => {
+                    let kv = super::proxy::key_value(key);
+                    self.call(&f, Value::Undefined, &[t, kv, val, base.clone()])?;
+                    Ok(())
+                }
+                None => { let t = super::proxy::target(self, o)?; self.set(&Value::Obj(t), key, val) }
+            };
         }
         // Ein Setzer irgendwo in der Kette gewinnt vor dem eigenen Feld.
         let mut cur = Some(o.clone());
@@ -1032,6 +1068,12 @@ impl Interp {
     }
 
     pub fn has_property(&mut self, o: &Gc, key: &str) -> bool {
+        // Ein Stellvertreter kann hier WERFEN; `has_property` gibt aber nur
+        // ein Ja/Nein. Der geworfene Wert geht dabei verloren — benannt statt
+        // verschwiegen, `has_prop` daneben reicht ihn durch, und `in` ruft die.
+        if super::proxy::parts(o).is_some() {
+            return self.has_prop(o, key).unwrap_or(false);
+        }
         if let Some(t) = ta_of(o) {
             if let Some(k) = array_index(key) {
                 return (k as usize) < t.live_len();
@@ -1065,6 +1107,18 @@ impl Interp {
     }
 
     fn call_inner(&mut self, f: &Gc, this_val: Value, args: &[Value]) -> C<Value> {
+        // Die `apply`-Falle. Ohne sie liefe ein Aufruf auf einen
+        // Stellvertreter am Behandler vorbei ans Ziel.
+        if super::proxy::parts(f).is_some() {
+            return match super::proxy::trap(self, f, "apply")? {
+                Some((h, t)) => {
+                    let arr = self.new_array(args.to_vec());
+                    self.call(&h, Value::Undefined, &[t, this_val, arr])
+                }
+                None => { let t = super::proxy::target(self, f)?;
+                          self.call(&Value::Obj(t), this_val, args) }
+            };
+        }
         enum Which { Native(Rc<NativeData>), Js(Rc<FuncData>), Bound(Gc, Value, Vec<Value>) }
         let which = match &f.borrow().kind {
             ObjKind::Native(n) => Which::Native(n.clone()),
@@ -1595,6 +1649,89 @@ impl Interp {
         Ok(it)
     }
 
+    /// Wie `has_property`, aber ein Wurf aus einer Stellvertreterfalle kommt
+    /// durch. `in` und `Reflect.has` rufen diese.
+    pub fn has_prop(&mut self, o: &Gc, key: &str) -> C<bool> {
+        if super::proxy::parts(o).is_some() {
+            return match super::proxy::trap(self, o, "has")? {
+                Some((f, t)) => {
+                    let kv = super::proxy::key_value(key);
+                    let r = self.call(&f, Value::Undefined, &[t, kv])?;
+                    Ok(r.truthy())
+                }
+                None => { let t = super::proxy::target(self, o)?; self.has_prop(&t, key) }
+            };
+        }
+        Ok(self.has_property(o, key))
+    }
+
+    /// Die EIGENEN Schluessel — durch einen Stellvertreter hindurch.
+    pub fn own_keys_of(&mut self, o: &Gc) -> C<Vec<PropName>> {
+        if super::proxy::parts(o).is_some() {
+            return match super::proxy::trap(self, o, "ownKeys")? {
+                Some((f, t)) => {
+                    let r = self.call(&f, Value::Undefined, &[t])?;
+                    let items = self.elems(&r)?;
+                    let mut out = Vec::with_capacity(items.len());
+                    for v in items { out.push(PropName::from(&*self.to_prop_key(&v)?)); }
+                    Ok(out)
+                }
+                None => { let t = super::proxy::target(self, o)?; self.own_keys_of(&t) }
+            };
+        }
+        Ok(o.borrow().own_keys())
+    }
+
+    /// Der EIGENE Beschreiber — durch einen Stellvertreter hindurch.
+    pub fn get_own_desc(&mut self, o: &Gc, key: &str) -> C<Option<Prop>> {
+        if super::proxy::parts(o).is_some() {
+            return match super::proxy::trap(self, o, "getOwnPropertyDescriptor")? {
+                Some((f, t)) => {
+                    let kv = super::proxy::key_value(key);
+                    let r = self.call(&f, Value::Undefined, &[t, kv])?;
+                    if matches!(r, Value::Undefined) { return Ok(None); }
+                    if !matches!(r, Value::Obj(_)) {
+                        return self.type_err("getOwnPropertyDescriptor trap did not return an object");
+                    }
+                    Ok(Some(self.to_prop_desc(&r)?))
+                }
+                None => { let t = super::proxy::target(self, o)?; self.get_own_desc(&t, key) }
+            };
+        }
+        Ok(o.borrow().get_own(key).cloned())
+    }
+
+    /// Eine Eigenschaft festlegen — durch einen Stellvertreter hindurch.
+    pub fn define_own(&mut self, o: &Gc, key: &str, p: Prop) -> C<bool> {
+        if super::proxy::parts(o).is_some() {
+            return match super::proxy::trap(self, o, "defineProperty")? {
+                Some((f, t)) => {
+                    let kv = super::proxy::key_value(key);
+                    let d = self.from_prop_desc(&p);
+                    let r = self.call(&f, Value::Undefined, &[t, kv, d])?;
+                    Ok(r.truthy())
+                }
+                None => { let t = super::proxy::target(self, o)?; self.define_own(&t, key, p) }
+            };
+        }
+        o.borrow_mut().define(key, p);
+        Ok(true)
+    }
+
+    /// Der Prototyp — durch einen Stellvertreter hindurch.
+    pub fn proto_of(&mut self, o: &Gc) -> C<Option<Gc>> {
+        if super::proxy::parts(o).is_some() {
+            return match super::proxy::trap(self, o, "getPrototypeOf")? {
+                Some((f, t)) => {
+                    let r = self.call(&f, Value::Undefined, &[t])?;
+                    Ok(match r { Value::Obj(x) => Some(x), _ => None })
+                }
+                None => { let t = super::proxy::target(self, o)?; self.proto_of(&t) }
+            };
+        }
+        Ok(o.borrow().proto.clone())
+    }
+
     /// Ein Schritt. `None` heisst fertig.
     pub fn iter_next(&mut self, it: &Value) -> C<Option<Value>> {
         self.tick()?;
@@ -1664,11 +1801,15 @@ impl Interp {
         while let Some(c) = cur {
             if hops > MAX_PROTO_CHAIN { break }
             hops += 1;
-            for k in c.borrow().own_keys() {
-                let enumerable = c.borrow().is_enumerable(&k);
+            let own = self.own_keys_of(&c)?;
+            for k in own {
+                if is_sym_key(&k) { continue }
+                let enumerable = if super::proxy::parts(&c).is_some() {
+                    matches!(self.get_own_desc(&c, &k)?, Some(p) if p.enumerable)
+                } else { c.borrow().is_enumerable(&k) };
                 if enumerable && !keys.iter().any(|x| *x == k) { keys.push(k); }
             }
-            let next = c.borrow().proto.clone();
+            let next = self.proto_of(&c)?;
             cur = next;
         }
         Ok(keys)

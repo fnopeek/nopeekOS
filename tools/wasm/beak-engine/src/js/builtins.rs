@@ -48,6 +48,15 @@ pub fn make_realm() -> Realm {
 
     // ── Object.prototype ─────────────────────────────────────────────────
     def(&object_proto, "toString", |i, this, _| {
+        // Ein Stellvertreter traegt die Marke seines ZIELS: `[object Array]`
+        // fuer einen Stellvertreter auf ein Feld.
+        if let Value::Obj(o) = &this {
+            if super::proxy::parts(o).is_some() {
+                let t = super::proxy::target(i, o)?;
+                let f = i.get(&Value::Obj(i.realm.object_proto.clone()), "toString")?;
+                return i.call(&f, Value::Obj(t), &[]);
+            }
+        }
         Ok(Value::string(match &this {
             Value::Undefined => "[object Undefined]".to_string(),
             Value::Null => "[object Null]".to_string(),
@@ -69,6 +78,9 @@ pub fn make_realm() -> Realm {
                     ObjKind::Regex(_) => "RegExp",
                     ObjKind::Promise(_) => "Promise",
                     ObjKind::Date(_) => "Date",
+                    // Oben abgefangen; hier nur, damit der Uebersetzer die
+                    // Vollstaendigkeit prueft statt sie zu erlauben.
+                    ObjKind::Proxy(_) => "Object",
                     ObjKind::Buffer(_) => "ArrayBuffer",
                     // Eine Sicht traegt ihren Namen ueber `Symbol.toStringTag`
                     // auf `%TypedArray%.prototype`; hier kommt sie nur an,
@@ -957,14 +969,17 @@ pub fn make_realm() -> Realm {
     object_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(object_ctor.clone())));
     def(&object_ctor, "keys", |i, _, a| {
         let o = i.to_object(a.first().unwrap_or(&Value::Undefined))?;
-        let keys: Vec<Value> = o.borrow().own_keys().into_iter()
-            .filter(|k| o.borrow().is_enumerable(k))
-            .map(Value::Str).collect();
+        let all = i.own_keys_of(&o)?;
+        let mut keys = Vec::new();
+        for k in all {
+            if is_sym_key(&k) { continue; }
+            if enum_own(i, &o, &k)? { keys.push(Value::Str(k)); }
+        }
         Ok(i.new_array(keys))
     }, 1, fp);
     def(&object_ctor, "getOwnPropertyNames", |i, _, a| {
         let o = i.to_object(a.first().unwrap_or(&Value::Undefined))?;
-        let keys: Vec<Value> = o.borrow().own_keys().into_iter().map(Value::Str).collect();
+        let keys: Vec<Value> = i.own_keys_of(&o)?.into_iter().map(Value::Str).collect();
         Ok(i.new_array(keys))
     }, 1, fp);
     def(&object_ctor, "getOwnPropertySymbols", |i, _, a| {
@@ -979,7 +994,7 @@ pub fn make_realm() -> Realm {
     }, 1, fp);
     def(&object_ctor, "getPrototypeOf", |i, _, a| {
         let o = i.to_object(a.first().unwrap_or(&Value::Undefined))?;
-        let p = o.borrow().proto.clone();
+        let p = i.proto_of(&o)?;
         Ok(match p { Some(x) => Value::Obj(x), None => Value::Null })
     }, 1, fp);
     def(&object_ctor, "create", |i, _, a| {
@@ -1002,7 +1017,8 @@ pub fn make_realm() -> Realm {
         let d = a.get(2).cloned().unwrap_or(Value::Undefined);
         let Value::Obj(_) = &d else { return i.type_err("property descriptor must be an object") };
         let p = i.to_prop_desc(&d)?;
-        o.borrow_mut().set_prop(k, p);
+        let o = o.clone();
+        i.define_own(&o, &k, p)?;
         Ok(a[0].clone())
     }, 3, fp);
     def(&object_ctor, "defineProperties", |i, _, a| {
@@ -1017,8 +1033,8 @@ pub fn make_realm() -> Realm {
     def(&object_ctor, "getOwnPropertyDescriptors", |i, _, a| {
         let o = i.to_object(a.first().unwrap_or(&Value::Undefined))?;
         let out = new_obj(Some(i.realm.object_proto.clone()));
-        for k in o.borrow().own_keys() {
-            let Some(p) = o.borrow().get_own(&k).cloned() else { continue };
+        for k in i.own_keys_of(&o)? {
+            let Some(p) = i.get_own_desc(&o, &k)? else { continue };
             let d = i.from_prop_desc(&p);
             out.borrow_mut().set_prop(k, Prop::data(d));
         }
@@ -1027,7 +1043,7 @@ pub fn make_realm() -> Realm {
     def(&object_ctor, "getOwnPropertyDescriptor", |i, _, a| {
         let o = i.to_object(a.first().unwrap_or(&Value::Undefined))?;
         let k = i.to_prop_key(a.get(1).unwrap_or(&Value::Undefined))?;
-        let Some(p) = o.borrow().get_own(&k).cloned() else { return Ok(Value::Undefined) };
+        let Some(p) = i.get_own_desc(&o, &k)? else { return Ok(Value::Undefined) };
         Ok(i.from_prop_desc(&p))
     }, 2, fp);
     def(&object_ctor, "assign", |i, _, a| {
@@ -1039,11 +1055,11 @@ pub fn make_realm() -> Realm {
             let Value::Obj(o) = src else { continue };
             // Zeichenketten UND Symbole: `assign` kopiert jede eigene
             // aufzaehlbare Eigenschaft, und ein Symbol ist eine.
-            let mut keys = o.borrow().own_keys();
-            keys.extend(o.borrow().own_sym_keys());
+            let o = o.clone();
+            let mut keys = i.own_keys_of(&o)?;
+            if super::proxy::parts(&o).is_none() { keys.extend(o.borrow().own_sym_keys()); }
             for k in keys {
-                let enumerable = o.borrow().is_enumerable(&k);
-                if !enumerable { continue; }
+                if !enum_own(i, &o, &k)? { continue; }
                 let v = i.get(src, &k)?;
                 i.set(&target, &k, v)?;
             }
@@ -1053,10 +1069,10 @@ pub fn make_realm() -> Realm {
     def(&object_ctor, "values", |i, _, a| {
         let src = a.first().cloned().unwrap_or(Value::Undefined);
         let o = i.to_object(&src)?;
-        let keys = o.borrow().own_keys();
+        let keys = i.own_keys_of(&o)?;
         let mut out = Vec::new();
         for k in keys {
-            if !o.borrow().is_enumerable(&k) { continue; }
+            if is_sym_key(&k) || !enum_own(i, &o, &k)? { continue; }
             out.push(i.get(&src, &k)?);
         }
         Ok(i.new_array(out))
@@ -1064,10 +1080,10 @@ pub fn make_realm() -> Realm {
     def(&object_ctor, "entries", |i, _, a| {
         let src = a.first().cloned().unwrap_or(Value::Undefined);
         let o = i.to_object(&src)?;
-        let keys = o.borrow().own_keys();
+        let keys = i.own_keys_of(&o)?;
         let mut out = Vec::new();
         for k in keys {
-            if !o.borrow().is_enumerable(&k) { continue; }
+            if is_sym_key(&k) || !enum_own(i, &o, &k)? { continue; }
             let v = i.get(&src, &k)?;
             out.push(i.new_array(alloc::vec![Value::Str(k), v]));
         }
@@ -1728,7 +1744,8 @@ pub fn make_realm() -> Realm {
         let Some(Value::Obj(o)) = a.first() else { return i.type_err("Reflect.has on a non-object") };
         let o = o.clone();
         let k = i.to_prop_key(a.get(1).unwrap_or(&Value::Undefined))?;
-        Ok(Value::Bool(i.has_property(&o, &k)))
+        let r = i.has_prop(&o, &k)?;
+        Ok(Value::Bool(r))
     }, 2, fp);
     def(&reflect, "deleteProperty", |i, _, a| {
         let t = a.first().cloned().unwrap_or(Value::Undefined);
@@ -1738,12 +1755,20 @@ pub fn make_realm() -> Realm {
     }, 2, fp);
     def(&reflect, "ownKeys", |i, _, a| {
         let Some(Value::Obj(o)) = a.first() else { return i.type_err("Reflect.ownKeys on a non-object") };
-        let mut out: Vec<Value> = o.borrow().own_keys().into_iter()
-            .map(|k| Value::Str(k)).collect();
+        let o = o.clone();
+        let all = i.own_keys_of(&o)?;
+        let is_px = super::proxy::parts(&o).is_some();
+        let mut out: Vec<Value> = all.iter().filter(|k| !is_sym_key(k))
+            .map(|k| Value::Str(k.clone())).collect();
         // Erst die Zeichenketten, dann die Symbole — die Reihenfolge steht in
         // der Spec und wird geprueft.
-        out.extend(o.borrow().own_sym_keys().into_iter()
-            .map(|k| Value::Sym(Rc::new(sym_from_key(&k)))));
+        if is_px {
+            out.extend(all.iter().filter(|k| is_sym_key(k))
+                .map(|k| Value::Sym(Rc::new(sym_from_key(k)))));
+        } else {
+            out.extend(o.borrow().own_sym_keys().into_iter()
+                .map(|k| Value::Sym(Rc::new(sym_from_key(&k)))));
+        }
         Ok(i.new_array(out))
     }, 1, fp);
     def(&reflect, "getPrototypeOf", |i, _, a| {
@@ -3381,4 +3406,13 @@ fn this_coll(i: &mut Interp, t: &Value, name: &str) -> C<()> {
         if matches!(o.borrow().get_own(COLL_KIND).and_then(|p| p.value.clone()),
                     Some(Value::Str(k)) if &*k == name));
     if ok { Ok(()) } else { i.type_err(&alloc::format!("{name} method on the wrong receiver")) }
+}
+
+/// Ist die eigene Eigenschaft aufzaehlbar? Fuer einen Stellvertreter fragt
+/// das seine `getOwnPropertyDescriptor`-Falle, nicht die Tabelle darunter.
+fn enum_own(i: &mut Interp, o: &Gc, k: &str) -> C<bool> {
+    if super::proxy::parts(o).is_some() {
+        return Ok(matches!(i.get_own_desc(o, k)?, Some(p) if p.enumerable));
+    }
+    Ok(o.borrow().is_enumerable(k))
 }

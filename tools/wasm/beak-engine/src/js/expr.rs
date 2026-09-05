@@ -285,6 +285,22 @@ impl Interp {
 
     pub fn construct(&mut self, f: &Value, args: &[Value]) -> C<Value> {
         let Value::Obj(fo) = f else { return self.type_err("value is not a constructor") };
+        // Die `construct`-Falle.
+        if super::proxy::parts(fo).is_some() {
+            return match super::proxy::trap(self, fo, "construct")? {
+                Some((h, t)) => {
+                    let arr = self.new_array(args.to_vec());
+                    let nt = f.clone();
+                    let r = self.call(&h, Value::Undefined, &[t, arr, nt])?;
+                    if !matches!(r, Value::Obj(_)) {
+                        return self.type_err("construct trap did not return an object");
+                    }
+                    Ok(r)
+                }
+                None => { let t = super::proxy::target(self, fo)?;
+                          self.construct(&Value::Obj(t), args) }
+            };
+        }
         // Ein nativer Konstruktor baut sein Objekt selbst; ein Pfeil ist keiner.
         if let ObjKind::Native(n) = &fo.borrow().kind {
             if !n.ctor { return self.type_err("value is not a constructor"); }
@@ -554,6 +570,19 @@ impl Interp {
     /// `delete obj[key]` — `false` nur, wenn die Eigenschaft da ist und sich
     /// nicht entfernen laesst. Fehlt sie ganz, ist die Antwort `true`.
     pub fn delete_key(&mut self, base: &Value, key: &str) -> C<bool> {
+        if let Value::Obj(o) = base {
+            if super::proxy::parts(o).is_some() {
+                return match super::proxy::trap(self, o, "deleteProperty")? {
+                    Some((f, t)) => {
+                        let kv = super::proxy::key_value(key);
+                        let r = self.call(&f, Value::Undefined, &[t, kv])?;
+                        Ok(r.truthy())
+                    }
+                    None => { let t = super::proxy::target(self, o)?;
+                              self.delete_key(&Value::Obj(t), key) }
+                };
+            }
+        }
         Ok(match base {
             Value::Obj(o) => {
                 let cfg = o.borrow().get_own(key).map(|p| p.configurable);
@@ -730,7 +759,8 @@ impl Interp {
             In => {
                 let Value::Obj(o) = &r else { return self.type_err("'in' needs an object on the right") };
                 let k = self.to_prop_key(&l)?;
-                Value::Bool(self.has_property(o, &k))
+                let o = o.clone();
+                Value::Bool(self.has_prop(&o, &k)?)
             }
             Instanceof => {
                 let Value::Obj(_) = &r else { return self.type_err("right side of 'instanceof' is not callable") };
