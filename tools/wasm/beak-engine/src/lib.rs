@@ -31,6 +31,16 @@ pub mod layout;
 pub mod picture;
 pub mod raster;
 pub mod site;
+/// **Die Reichweitenregel des KERNELS, hier nur zum Fahren.**
+///
+/// Der Kernel hat keine Testinfrastruktur, und eine Sicherheitsregel, die
+/// niemand fahren kann, ist eine Behauptung. Die Datei wird deshalb von dort
+/// EINGEHAENGT statt kopiert: es gibt genau eine Fassung, und ihre Tabelle
+/// laeuft bei jedem `cargo test` dieses Crates mit.
+/// Siehe `docs/plan/BROWSER_FETCH_ORIGIN.md` §3.1 V2.
+#[cfg(test)]
+#[path = "../../../../kernel/src/intent/reach.rs"]
+pub mod kernel_reach;
 pub mod style;
 pub mod svg;
 pub mod values;

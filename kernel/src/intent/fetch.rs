@@ -94,9 +94,12 @@ enum Work {
         /// Ueber TLS? `false` heisst Klartext — `parse_url` laesst das nur
         /// unter der Politik in `plain_http_allowed` zu.
         tls: bool,
+        /// Die Reichweite des Dokuments, das die Anfrage ausloest.
+        /// Siehe `http::Reach` und `docs/plan/BROWSER_FETCH_ORIGIN.md` §3.1.
+        from_reach: Option<http::Reach>,
     },
     /// A batch, multiplexed per host exactly as `npk_http_request_many` does.
-    Many { urls: Vec<String>, cap: usize },
+    Many { urls: Vec<String>, cap: usize, from_reach: Option<http::Reach> },
 }
 
 /// What came back. `error` empty means it worked.
@@ -160,8 +163,10 @@ pub(crate) fn begin_one(
     body: Vec<u8>,
     cap: usize,
     tls: bool,
+    from_reach: Option<http::Reach>,
 ) -> Result<i32, &'static str> {
-    submit(owner, caller_core, cap, Work::One { method, host, path, headers, body, cap, tls })
+    submit(owner, caller_core, cap,
+           Work::One { method, host, path, headers, body, cap, tls, from_reach })
 }
 
 pub(crate) fn begin_many(
@@ -169,11 +174,12 @@ pub(crate) fn begin_many(
     caller_core: usize,
     urls: Vec<String>,
     cap: usize,
+    from_reach: Option<http::Reach>,
 ) -> Result<i32, &'static str> {
     if urls.is_empty() || urls.len() > MAX_URLS {
         return Err("bad url list");
     }
-    submit(owner, caller_core, cap, Work::Many { urls, cap })
+    submit(owner, caller_core, cap, Work::Many { urls, cap, from_reach })
 }
 
 fn submit(
@@ -431,7 +437,7 @@ fn worker_entry(_k: u64) {
 
 fn run(slot: usize, work: Work) -> Reply {
     match work {
-        Work::One { method, host, path, headers, body, cap, tls } => {
+        Work::One { method, host, path, headers, body, cap, tls, from_reach } => {
             let mut out: Vec<u8> = Vec::new();
             let mut info = http::FetchInfo::default();
             let req = http::HttpRequest {
@@ -443,6 +449,7 @@ fn run(slot: usize, work: Work) -> Reply {
                 accept_gzip: tls,
                 try_h2: tls,
                 plain: !tls,
+                from_reach,
             };
             let res = http::https_request_streaming(
                 &host, &path, &req, cap,
@@ -485,8 +492,8 @@ fn run(slot: usize, work: Work) -> Reply {
                 },
             }
         }
-        Work::Many { urls, cap } => {
-            let bodies = http::https_get_many(&urls, cap);
+        Work::Many { urls, cap, from_reach } => {
+            let bodies = http::https_get_many(&urls, cap, from_reach);
             // Packed here rather than at `take`, so the guest side is a plain
             // copy: bodies back to back, one length each, and one that would
             // overrun the budget is DROPPED rather than truncated — half an

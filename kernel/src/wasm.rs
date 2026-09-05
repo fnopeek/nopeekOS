@@ -97,6 +97,14 @@ pub(crate) struct HostState {
     pid: u32,
     /// Hardware driver state (only set for driver modules)
     hw: Option<HwDriverState>,
+    /// Die Reichweite des Dokuments, das dieses Modul gerade anzeigt.
+    ///
+    /// **Vorgabe `Public`, und das ist die strenge Wahl.** Ein Modul, das
+    /// nie etwas sagt, gilt als oeffentliche Seite und kommt damit nicht ins
+    /// private Netz. Nur wer `npk_net_context` ruft und dabei eine private
+    /// Adresse nennt, bekommt mehr — und auch das erst, nachdem der Kernel
+    /// die Adresse selbst AUFGELOEST hat.
+    pub(crate) net_reach: crate::intent::http::Reach,
     /// Shade window id owned by this WASM app for widget rendering.
     /// 0 = no widget window yet (first scene_commit allocates one).
     /// Phase 10: set when the app calls npk_scene_commit, reused on
@@ -485,6 +493,7 @@ fn wasm_worker_task(arg: u64) {
     let mut store = Store::new(&engine, HostState {
         output: String::new(),
         cap_id: job.cap_id,
+        net_reach: crate::intent::http::Reach::Public,
         direct_output: true,
         terminal_idx: job.terminal_idx,
         core_id,
@@ -600,6 +609,7 @@ fn forge_worker_task(slot: usize, job: WasmJob) {
     let mut hs = HostState {
         output: String::new(),
         cap_id: job.cap_id,
+        net_reach: crate::intent::http::Reach::Public,
         direct_output: true,
         terminal_idx: job.terminal_idx,
         core_id,
@@ -711,6 +721,7 @@ fn execute_inner(
         core_id: 0,
         pid: 0,
         hw: None,
+        net_reach: crate::intent::http::Reach::Public,
         widget_window_id: 0,
         module_name: String::new(),
         launch_arg,
@@ -791,6 +802,7 @@ pub fn execute_wasi(
         core_id: 0,
         pid: 0,
         hw: None,
+        net_reach: crate::intent::http::Reach::Public,
         widget_window_id: 0,
         module_name: String::new(),
         launch_arg: None,
@@ -858,6 +870,7 @@ fn execute_inner_forge(
         core_id: 0,
         pid: 0,
         hw: None,
+        net_reach: crate::intent::http::Reach::Public,
         widget_window_id: 0,
         module_name: String::new(),
         launch_arg,
@@ -927,6 +940,7 @@ pub fn execute_wasi_forge(
         core_id: 0,
         pid: 0,
         hw: None,
+        net_reach: crate::intent::http::Reach::Public,
         widget_window_id: 0,
         module_name: String::new(),
         launch_arg: None,
@@ -1130,6 +1144,24 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     // happens on a worker fiber on another core (intent::fetch).
     //
     // NET-gated, same capability as the synchronous pair.
+
+    // npk_net_context(url_ptr, url_len) -> 0, or -1
+    //
+    // Der Browser sagt, WELCHES Dokument er gerade anzeigt. Der Kernel loest
+    // die Adresse SELBST auf und merkt sich nur die Klasse (oeffentlich /
+    // privat / lokal) — nie den Namen, denn ein Name kann beim zweiten
+    // Aufloesen woandershin zeigen.
+    //
+    // Ohne diesen Aufruf gilt das Modul als oeffentliche Seite. Das ist die
+    // strenge Vorgabe und deshalb sicher zu vergessen.
+    linker.func_wrap("env", "npk_net_context",
+        |mut caller: Caller<'_, HostState>, url_ptr: i32, url_len: i32| -> i32 {
+            let Some(m) = caller.get_export("memory").and_then(|e| e.into_memory())
+                else { return -1 };
+            let (mem, ctx) = m.data_and_store_mut(&mut caller);
+            host_core::npk_net_context(mem, ctx, url_ptr, url_len)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
 
     // npk_http_begin(method_ptr, method_len, url_ptr, url_len,
     //                hdrs_ptr, hdrs_len, body_ptr, body_len, buf_max)

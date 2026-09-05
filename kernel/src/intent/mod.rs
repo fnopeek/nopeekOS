@@ -10,6 +10,9 @@ mod forge;
 mod fs;
 pub(crate) mod gzip;
 pub mod history;
+/// Die Reichweitenregel — haengt an nichts und wird deshalb host-seitig
+/// gefahren (siehe die Datei selbst).
+pub(crate) mod reach;
 pub(crate) mod http;
 pub(crate) mod http2;
 mod net;

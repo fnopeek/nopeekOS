@@ -560,12 +560,24 @@ pub struct HttpRequest<'a> {
     /// — asks for it. Flip the default once a release has h2 documents on
     /// hardware behind it.
     pub try_h2: bool,
+    /// Die Reichweite des DOKUMENTS, das diese Anfrage ausloest.
+    ///
+    /// `None` heisst „nicht von einer Seite": OTA, Modulinstallation,
+    /// netbench. Die sind das Betriebssystem selbst und duerfen ueberallhin.
+    /// `Some(Reach::Public)` heisst „eine oeffentliche Seite fragt" — und
+    /// dann ist das private Netz des Nutzers zu.
+    ///
+    /// Vorgabe ist `None`, und das ist hier ausnahmsweise die LOCKERE Wahl.
+    /// Sie ist trotzdem richtig: der Vorgabewert bedient die Aufrufer im
+    /// Kernel, und der einzige Weg, auf dem Seitencode je hierher kommt,
+    /// ist `npk_http_begin` — der setzt das Feld ausdruecklich.
+    pub from_reach: Option<Reach>,
 }
 
 impl Default for HttpRequest<'_> {
     fn default() -> Self {
         HttpRequest { method: "GET", headers: &[], body: &[], accept_gzip: false, try_h2: false,
-                      plain: false }
+                      plain: false, from_reach: None }
     }
 }
 
@@ -664,6 +676,67 @@ pub fn header_line_is_safe(line: &str) -> bool {
 }
 
 /// Is this a method a guest is allowed to send? A token of ASCII letters,
+// ── Reichweite ───────────────────────────────────────────────────────────
+//
+// Siehe `docs/plan/BROWSER_FETCH_ORIGIN.md` §3.1 V2. Kurz: eine oeffentliche
+// Seite darf das private Netz des Nutzers nicht erreichen. CORS deckt das
+// NICHT ab — es schuetzt den Zielserver, nicht das Netz, in dem der Browser
+// steht. Browser haben die Regel als *Private Network Access* nachgerueckt
+// und bis heute nicht vollstaendig; wir bauen sie von Anfang an.
+//
+// Warum im Kernel und nicht in beak: eine Grenze, die das Modul im
+// Sandkasten selbst zieht, ist keine. beak sagt nur, WOHER eine Anfrage
+// kommt; ob sie darf, entscheidet diese Datei.
+
+pub use super::reach::{classify_ip, Reach};
+
+/// Einen Host aufloesen UND die Reichweite pruefen — in EINEM Schritt.
+///
+/// Getrennt waeren es zwei, und die zweite wuerde irgendwo vergessen: im
+/// Baum standen fuenf Stellen mit demselben
+/// `parse_ip(h).or_else(|| dns::resolve(h))`. Wer hier durchgeht, ist
+/// geprueft; wer die Pruefung umgehen will, muss es sichtbar tun.
+///
+/// `from` ist die Reichweite des Dokuments, das die Anfrage ausloest.
+/// `None` heisst „nicht von einer Seite" — OTA, Modulinstallation, netbench.
+/// Die duerfen ueberallhin, sie sind das Betriebssystem selbst.
+pub fn resolve_checked(host: &str, from: Option<Reach>) -> Result<[u8; 4], &'static str> {
+    let bare = split_host_port(host).0;
+    let ip = parse_ip(bare)
+        .or_else(|| crate::net::dns::resolve(bare))
+        .ok_or("DNS resolution failed")?;
+    if let Some(from) = from {
+        let to = classify_ip(ip);
+        if !super::reach::allows(from, to) {
+            kprintln!("[npk] REICHWEITE verweigert: {} ({}.{}.{}.{}) ist {:?}, die Seite ist {:?}",
+                bare, ip[0], ip[1], ip[2], ip[3], to, from);
+            return Err("reach: a public page may not reach the private network");
+        }
+    }
+    Ok(ip)
+}
+
+/// Die Reichweite eines DOKUMENTS, aus seiner Adresse.
+///
+/// Aufgeloest wird hier, im Kernel. Alles, was keine brauchbare Adresse hat
+/// oder sich nicht aufloesen laesst, ist `Public` — die strengste Klasse.
+/// Ein Fehlschlag darf nie mehr erlauben als ein Erfolg.
+pub fn reach_of_url(url: &str) -> Reach {
+    let rest = match url.split_once("://") {
+        Some((_, r)) => r,
+        None => return Reach::Public,
+    };
+    let hostport = match rest.find(['/', '?', '#']) {
+        Some(i) => &rest[..i],
+        None => rest,
+    };
+    let bare = split_host_port(hostport).0;
+    match parse_ip(bare).or_else(|| crate::net::dns::resolve(bare)) {
+        Some(ip) => classify_ip(ip),
+        None => Reach::Public,
+    }
+}
+
 /// nothing else — the method sits at the very front of the request line, so
 /// a space or a newline there rewrites the whole request.
 pub fn method_is_safe(m: &str) -> bool {
@@ -722,6 +795,12 @@ fn https_get_req(host: &str, path: &str, max_size: usize, req: &HttpRequest)
     let mut cur_host = String::from(host);
     let mut cur_path = String::from(path);
     for _ in 0..4 {
+        // **Jeder Sprung neu.** Eine Weiterleitung auf `192.168.1.1` ist
+        // genau der Weg, den man sonst nimmt, wenn nur der erste Aufruf
+        // geprueft wird — und sie kostet den Angreifer nichts.
+        if let Err(e) = resolve_checked(&cur_host, req.from_reach) {
+            return Err(e);
+        }
         // Vec-mode: accumulate into out, sink just extends it.
         let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
         // Progress heartbeat. The streaming asset path reports every 8 MiB —
@@ -864,6 +943,12 @@ pub fn https_request_streaming(
     for _ in 0..4 {
         let mut total: usize = 0;
         let no_headers: [String; 0] = [];
+        // Auch hier JEDER Sprung. Das ist die Schleife, die der Browser
+        // faehrt — die andere (`https_get_req`) gehoert OTA. Sie zu
+        // uebersehen waere die ganze Regel gewesen.
+        if let Err(e) = resolve_checked(&cur_host, req.from_reach) {
+            return Err(e);
+        }
         let hop = HttpRequest {
             method: &method,
             headers: if carry_headers { req.headers } else { &no_headers },
@@ -871,6 +956,7 @@ pub fn https_request_streaming(
             accept_gzip: req.accept_gzip && cur_tls,
             try_h2: req.try_h2 && cur_tls,
             plain: !cur_tls,
+            from_reach: req.from_reach,
         };
         let resp = https_get_once(
             &cur_host,
@@ -1360,7 +1446,8 @@ fn h2_connect(host: &str) -> Option<Http2> {
 /// counts as a failure rather than returning the error page's body — the
 /// caller is loading images and stylesheets, and decoding an HTML error page
 /// as a PNG helps nobody.
-pub fn https_get_many(urls: &[String], max_size: usize) -> alloc::vec::Vec<Option<alloc::vec::Vec<u8>>> {
+pub fn https_get_many(urls: &[String], max_size: usize, from_reach: Option<Reach>)
+    -> alloc::vec::Vec<Option<alloc::vec::Vec<u8>>> {
     let mut out: alloc::vec::Vec<Option<alloc::vec::Vec<u8>>> = urls.iter().map(|_| None).collect();
 
     // Split into per-host groups, keeping the original positions.
@@ -1377,6 +1464,13 @@ pub fn https_get_many(urls: &[String], max_size: usize) -> alloc::vec::Vec<Optio
             hosts.push(p.0.clone());
         }
     }
+
+    // **Die Reichweite EINMAL je Host, vor allem anderen.** Ein verwehrter
+    // Host laesst seine Plaetze leer, genau wie ein kaputter Strom weiter
+    // unten — der Aufrufer sieht ein fehlendes Bild, keinen halben.
+    let hosts: alloc::vec::Vec<String> = hosts.into_iter()
+        .filter(|h| resolve_checked(h, from_reach).is_ok())
+        .collect();
 
     for host in &hosts {
         let idxs: alloc::vec::Vec<usize> = parsed
@@ -1475,8 +1569,10 @@ pub fn https_get_many(urls: &[String], max_size: usize) -> alloc::vec::Vec<Optio
             // Still h2 where the host offers it — this door is the one a
             // redirect goes through, and a redirected sub-resource is no
             // less throttled than a direct one.
+            // Der h1-Rueckfall folgt Weiterleitungen, also traegt er die
+            // Reichweite mit — sonst waere er das Loch neben der Tuer.
             let req = HttpRequest { accept_gzip: *tls, try_h2: *tls, plain: !*tls,
-                                    ..HttpRequest::default() };
+                                    from_reach, ..HttpRequest::default() };
             if let Ok(body) = https_get_req(h, p, max_size, &req) {
                 out[i] = Some(body);
             }
