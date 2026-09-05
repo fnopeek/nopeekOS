@@ -139,6 +139,11 @@ unsafe extern "C" {
     fn npk_http_last_error(buf_ptr: i32, buf_max: i32) -> i32;
     /// The last response's Content-Type, verbatim. -1 if the server sent none.
     fn npk_http_content_type(buf_ptr: i32, buf_max: i32) -> i32;
+    /// Sagt dem Kernel, WELCHES Dokument gerade angezeigt wird. Er loest die
+    /// Adresse selbst auf und merkt sich nur die Netzklasse; daran haengt,
+    /// ob eine Unterressource ins private Netz darf.
+    /// Siehe `docs/plan/BROWSER_FETCH_ORIGIN.md` §3.1 V2.
+    fn npk_net_context(url_ptr: i32, url_len: i32) -> i32;
     /// Start a newline-separated list of URLs in one call, multiplexed over
     /// HTTP/2 where the host offers it. Same handle discipline as
     /// `npk_http_begin`.
@@ -412,7 +417,22 @@ static mut LAST_SY: i32 = 0;
 /// followed by a scroll must still repaint everything.
 static mut NEED_FULL: bool = true;
 
+/// Dem Kernel sagen, aus welchem Dokument die naechsten Anfragen kommen.
+///
+/// **Der Kernel glaubt uns die Adresse, aber nicht die Klasse** — er loest
+/// selbst auf. Was das garantiert: Seitencode kann den Kontext nie
+/// erweitern, weil Seitencode keinen Weg zu einer Host-Funktion hat. Was es
+/// NICHT garantiert: dass beak selbst sich nicht vertut. Dafuer gibt es nur
+/// diese eine Stelle und `set_url` — beide unten.
+fn tell_net_context(url: &str) {
+    unsafe { npk_net_context(url.as_ptr() as i32, url.len() as i32) };
+}
+
 fn set_url(s: &str) {
+    // Nach dem Laden noch einmal, mit der Adresse, aus der das Dokument
+    // WIRKLICH kam (nach Weiterleitungen). `nav_begin` hat vorher schon die
+    // des Ziels gemeldet; hier wird sie richtiggestellt.
+    tell_net_context(s);
     let n = s.len().min(URL_CAP);
     unsafe {
         core::ptr::copy_nonoverlapping(s.as_ptr(), core::ptr::addr_of_mut!(URL_BUF) as *mut u8, n);
@@ -906,6 +926,12 @@ fn nav_asked() -> String {
 /// Start a navigation and return at once. `push_hist` records the address we
 /// land on once the document is here.
 fn nav_begin(engine: &Engine, method: &str, url: &str, body: &[u8], extra: &str, push_hist: bool) {
+    // **Vor dem ersten Byte.** Eine Navigation darf ueberallhin — auch auf
+    // den eigenen Router —, denn das neue Dokument ist eine andere Herkunft
+    // und die alte Seite kann es nicht lesen. Gemeldet wird deshalb die
+    // Klasse des ZIELS, nicht die der Seite, die wir verlassen; sonst waere
+    // `https://192.168.1.1` von einer oeffentlichen Seite aus gesperrt.
+    tell_net_context(url);
     // A new navigation replaces the old one, and takes the page it was
     // loading for with it — a browser that keeps fetching the pictures of the
     // page you just left is spending the network on nothing.

@@ -2240,6 +2240,10 @@ pub(crate) fn npk_http_send(mem: &mut [u8], ctx: &mut HostState, method_ptr: i32
         accept_gzip: tls,
         try_h2: tls,
         plain: !tls,
+        // Alles, was ueber die WASM-Grenze kommt, ist Seitencode — auch
+        // wenn beak es weiterreicht. Die Reichweite steht am Kontext, nicht
+        // an der Anfrage, und der Kernel hat sie selbst ausgerechnet.
+        from_reach: Some(ctx.net_reach),
     };
     let res = crate::intent::http::https_request_streaming(
         &host, &path, &req, cap,
@@ -2288,6 +2292,35 @@ pub(crate) fn npk_http_send(mem: &mut [u8], ctx: &mut HostState, method_ptr: i32
 /// Start one request. Returns a handle (>= 1), or -1 with the reason in
 /// `npk_http_last_error`. Same validation as `npk_http_send`: it is the same
 /// request, only nobody waits for it here.
+/// Den Reichweiten-Kontext dieses Moduls setzen.
+///
+/// **Der Kernel glaubt dem Modul den Namen, aber nicht die Klasse.** beak
+/// reicht die Adresse des Dokuments ein; welcher Netzbereich das ist,
+/// rechnet diese Funktion selbst aus — sonst waere die Grenze eine, die das
+/// Modul im Sandkasten selbst zieht, und das ist keine.
+///
+/// Eine Adresse ohne Herkunft (`beak:selftest`, `about:blank`) und alles,
+/// was sich nicht aufloesen laesst, faellt auf `Public` zurueck: die
+/// strengste Klasse, nicht die bequemste.
+pub(crate) fn npk_net_context(
+    mem: &mut [u8], ctx: &mut HostState, url_ptr: i32, url_len: i32,
+) -> i32 {
+    let cap_id = ctx.cap_id;
+    if capability::check_global(&cap_id, capability::Rights::NET).is_err() {
+        return -1;
+    }
+    let url = match read_str(mem, url_ptr, url_len) {
+        Some(s) => s,
+        None => return -1,
+    };
+    let reach = crate::intent::http::reach_of_url(&url);
+    if reach != ctx.net_reach {
+        kprintln!("[npk] Netzkontext: {:?} ({})", reach, url);
+    }
+    ctx.net_reach = reach;
+    0
+}
+
 pub(crate) fn npk_http_begin(
     mem: &mut [u8], ctx: &mut HostState,
     method_ptr: i32, method_len: i32, url_ptr: i32, url_len: i32,
@@ -2351,6 +2384,7 @@ pub(crate) fn npk_http_begin(
 
     match crate::intent::fetch::begin_one(
         ctx.pid, ctx.core_id, method, host, path, headers, body, cap, tls,
+        Some(ctx.net_reach),
     ) {
         Ok(h) => h,
         Err(e) => {
@@ -2383,7 +2417,8 @@ pub(crate) fn npk_http_begin_many(
         .filter(|s| !s.is_empty())
         .map(String::from)
         .collect();
-    match crate::intent::fetch::begin_many(ctx.pid, ctx.core_id, urls, out_max as usize) {
+    match crate::intent::fetch::begin_many(ctx.pid, ctx.core_id, urls, out_max as usize,
+                                          Some(ctx.net_reach)) {
         Ok(h) => h,
         Err(e) => {
             ctx.http_last_error = Some(alloc::format!("queue\t{}", e));
@@ -2501,7 +2536,7 @@ pub(crate) fn npk_http_request_many(mem: &mut [u8], ctx: &mut HostState, urls_pt
     if (lens_max as usize) < urls.len() * 4 { return -1; }
 
     let total_cap = out_max as usize;
-    let bodies = crate::intent::http::https_get_many(&urls, total_cap);
+    let bodies = crate::intent::http::https_get_many(&urls, total_cap, Some(ctx.net_reach));
 
     let mut blobs: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     let mut lens: alloc::vec::Vec<u8> = alloc::vec::Vec::new();

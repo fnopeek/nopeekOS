@@ -711,6 +711,12 @@ extern "C" fn f_npk_http_begin(vm: *const u64, method_ptr: i32, method_len: i32,
     host_core::npk_http_begin(mem, ctx, method_ptr, method_len, url_ptr, url_len, hdrs_ptr, hdrs_len, body_ptr, body_len, buf_max)
 }
 
+extern "C" fn f_npk_net_context(vm: *const u64, url_ptr: i32, url_len: i32) -> i32 {
+    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    let (mem, ctx) = unsafe { parts(vm) };
+    host_core::npk_net_context(mem, ctx, url_ptr, url_len)
+}
+
 extern "C" fn f_npk_http_begin_many(vm: *const u64, urls_ptr: i32, urls_len: i32, out_max: i32) -> i32 {
     // SAFETY: `vm` ist der vmctx des rufenden Moduls.
     let (mem, ctx) = unsafe { parts(vm) };
@@ -958,6 +964,7 @@ pub(crate) fn resolve(module: &str, name: &str) -> Option<u64> {
         "npk_http_send" => f_npk_http_send as *const () as u64,
         "npk_http_request_many" => f_npk_http_request_many as *const () as u64,
         "npk_http_begin" => f_npk_http_begin as *const () as u64,
+        "npk_net_context" => f_npk_net_context as *const () as u64,
         "npk_http_begin_many" => f_npk_http_begin_many as *const () as u64,
         "npk_http_poll" => f_npk_http_poll as *const () as u64,
         "npk_http_take" => f_npk_http_take as *const () as u64,
