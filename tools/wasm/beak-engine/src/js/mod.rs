@@ -21,6 +21,7 @@ pub mod compile;
 pub mod vm;
 pub mod builtins;
 pub mod date;
+pub mod iterhelp;
 pub mod dombind;
 pub mod eval;
 pub mod json;

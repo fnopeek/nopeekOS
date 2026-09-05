@@ -266,6 +266,12 @@ impl Interp {
         };
         if optional && matches!(f, Value::Undefined | Value::Null) { return Ok(Value::Undefined); }
         let a = self.eval_args(args, env)?;
+        // Der DIREKTE `eval`-Aufruf: am Namen UND an der Sache erkannt. Beide
+        // Maschinen tun hier dasselbe, siehe `Op::Call`.
+        if matches!(callee, Expr::Ident(n) if n == "eval") && self.is_eval_fn(&f) {
+            let c = a.first().cloned().unwrap_or(Value::Undefined);
+            return self.perform_eval(&c, Some(env.clone()));
+        }
         if !self.is_callable(&f) {
             // Den Namen nennen, nicht nur das Ereignis — dieselbe Hilfe wie
             // die Befehlsmaschine, siehe `Interp::not_a_function`.
