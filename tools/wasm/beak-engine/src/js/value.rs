@@ -307,7 +307,7 @@ pub struct BufData {
 
 /// Die Elementart einer Sicht.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ElemKind { I8, U8, U8C, I16, U16, I32, U32, F32, F64 }
+pub enum ElemKind { I8, U8, U8C, I16, U16, I32, U32, F32, F64, I64, U64 }
 
 impl ElemKind {
     pub fn size(self) -> usize {
@@ -315,9 +315,12 @@ impl ElemKind {
             ElemKind::I8 | ElemKind::U8 | ElemKind::U8C => 1,
             ElemKind::I16 | ElemKind::U16 => 2,
             ElemKind::I32 | ElemKind::U32 | ElemKind::F32 => 4,
-            ElemKind::F64 => 8,
+            ElemKind::F64 | ElemKind::I64 | ElemKind::U64 => 8,
         }
     }
+    /// Traegt diese Art GROSSE Zahlen? Dann ist ein Element ein `BigInt`, und
+    /// jeder Schreiber muss `ToBigInt` statt `ToNumber` rufen.
+    pub fn is_big(self) -> bool { matches!(self, ElemKind::I64 | ElemKind::U64) }
     pub fn name(self) -> &'static str {
         match self {
             ElemKind::I8 => "Int8Array", ElemKind::U8 => "Uint8Array",
@@ -325,7 +328,27 @@ impl ElemKind {
             ElemKind::U16 => "Uint16Array", ElemKind::I32 => "Int32Array",
             ElemKind::U32 => "Uint32Array", ElemKind::F32 => "Float32Array",
             ElemKind::F64 => "Float64Array",
+            ElemKind::I64 => "BigInt64Array", ElemKind::U64 => "BigUint64Array",
         }
+    }
+
+    /// Ein Element als JS-Wert — bei den 64-Bit-Arten eine grosse Zahl.
+    pub fn read_v(self, b: &[u8], at: usize) -> Value {
+        if !self.is_big() { return Value::Num(self.read(b, at)); }
+        let mut raw = 0u64;
+        for k in 0..8 { raw |= (b[at + k] as u64) << (8 * k); }
+        let big = if matches!(self, ElemKind::I64) {
+            crate::js::bigint::Big::from_i64(raw as i64)
+        } else {
+            crate::js::bigint::Big::from_u64(raw)
+        };
+        Value::BigInt(alloc::rc::Rc::new(big))
+    }
+
+    /// Eine grosse Zahl schreiben — abgeschnitten auf 64 Bit.
+    pub fn write_big(self, b: &mut [u8], at: usize, v: &crate::js::bigint::Big) {
+        let raw = v.to_u64_wrap();
+        for k in 0..8 { b[at + k] = ((raw >> (8 * k)) & 0xff) as u8; }
     }
     /// Ein Element lesen. Immer LITTLE ENDIAN — das ist, was jede Plattform
     /// tut, auf der dieser Code laeuft, und die Spec laesst der Sicht (anders
@@ -345,6 +368,10 @@ impl ElemKind {
             ElemKind::U32 => g(4) as u32 as f64,
             ElemKind::F32 => f32::from_bits(g(4) as u32) as f64,
             ElemKind::F64 => f64::from_bits(g(8)),
+            // Ueber `read_v` zu holen; hier nur, damit der Uebersetzer die
+            // Vollstaendigkeit prueft.
+            ElemKind::I64 => g(8) as i64 as f64,
+            ElemKind::U64 => g(8) as f64,
         }
     }
     /// Ein Element schreiben. Die Umwandlung ist die der Spec: NaN und

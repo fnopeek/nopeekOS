@@ -817,6 +817,22 @@ impl Interp {
         })
     }
 
+    /// `ToBigInt` — die Umwandlung, die eine 64-Bit-Sicht beim Schreiben
+    /// verlangt. Eine gewoehnliche Zahl wirft: der Uebergang muss im
+    /// Quelltext stehen.
+    pub fn to_bigint(&mut self, v: &Value) -> C<super::bigint::Big> {
+        let p = self.to_primitive(v, false)?;
+        Ok(match &p {
+            Value::BigInt(b) => (**b).clone(),
+            Value::Bool(b) => super::bigint::Big::from_u64(if *b { 1 } else { 0 }),
+            Value::Str(t) => match super::bigint::Big::parse(t) {
+                Some(b) => b,
+                None => return Err(self.throw_kind("SyntaxError", "cannot convert string to a BigInt")),
+            },
+            _ => return self.type_err("cannot convert value to a BigInt"),
+        })
+    }
+
     /// `ToNumeric` — eine grosse Zahl bleibt gross, alles andere wird eine
     /// gewoehnliche. Der Unterschied zu `to_number` ist genau der Grund,
     /// warum `x++` auf einem BigInt nicht `+x` sein darf.
@@ -1028,6 +1044,18 @@ impl Interp {
         // verpufft es, und ein Setzer in der Kette bekommt es nie zu sehen.
         if let Some(t) = ta_of(o) {
             if let Some(k) = array_index(key) {
+                // Die Umwandlung laeuft AUCH, wenn der Index draussen liegt —
+                // sie ist beobachtbar.
+                if t.kind.is_big() {
+                    let big = self.to_bigint(&val)?;
+                    let live = t.live_len();
+                    if (k as usize) < live {
+                        let ObjKind::Buffer(b) = &t.buf.borrow().kind else { return Ok(()) };
+                        let at = t.offset + (k as usize) * t.kind.size();
+                        t.kind.write_big(&mut b.bytes.borrow_mut(), at, &big);
+                    }
+                    return Ok(());
+                }
                 let n = self.to_number(&val)?;
                 let live = t.live_len();
                 if (k as usize) < live {
@@ -1960,5 +1988,5 @@ pub fn ta_read(o: &Gc, key: &str) -> Option<Value> {
     if k >= t.live_len() { return Some(Value::Undefined) }
     let ObjKind::Buffer(b) = &t.buf.borrow().kind else { return Some(Value::Undefined) };
     let at = t.offset + k * t.kind.size();
-    Some(Value::Num(t.kind.read(&b.bytes.borrow(), at)))
+    Some(t.kind.read_v(&b.bytes.borrow(), at))
 }
