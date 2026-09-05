@@ -516,6 +516,11 @@ impl Object {
     /// Symbole sind hier NICHT dabei — jeder Aufrufer (`Object.keys`,
     /// `for..in`, `JSON.stringify`, `getOwnPropertyNames`) will genau das.
     /// Wer Symbole braucht, nimmt `own_sym_keys`.
+    /// JEDER Schluessel, auch die NUL-praefigierten. `own_keys` laesst die
+    /// absichtlich weg — wer aber ein Objekt UEBERNIMMT (`super()` auf einen
+    /// eingebauten Konstruktor), braucht auch die inneren Vermerke.
+    pub fn raw_keys(&self) -> Vec<PropName> { self.order.clone() }
+
     pub fn own_keys(&self) -> Vec<PropName> {
         // **Eine Sicht traegt ihre Indizes nicht in der Tabelle.** Sie
         // entstehen aus der Laenge, und ohne diesen Zweig faende

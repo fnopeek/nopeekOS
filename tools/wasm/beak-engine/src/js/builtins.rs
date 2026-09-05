@@ -135,7 +135,10 @@ pub fn make_realm() -> Realm {
             ObjKind::Bound { target: t.clone(), this_val: bt, args: rest });
         Ok(Value::Obj(g))
     }, 1, fp);
-    def(fp, "toString", |_, _, _| Ok(Value::str("function () { [native code] }")), 0, fp);
+    def(fp, "toString", |i, t, _| {
+        if !i.is_callable(&t) { return i.type_err("Function.prototype.toString on a non-function"); }
+        Ok(Value::str("function () { [native code] }"))
+    }, 0, fp);
 
     // ── Error ────────────────────────────────────────────────────────────
     error_proto.borrow_mut().define("name", Prop::builtin(Value::str("Error")));
@@ -551,29 +554,29 @@ pub fn make_realm() -> Realm {
         i.type_err("String.prototype.valueOf on a non-string")
     }, 0, fp);
     def(&string_proto, "charAt", |i, this, a| {
-        let s = i.to_string(&this)?;
+        let s = this_string(i, &this)?;
         let n = to_integer(i.to_number(a.first().unwrap_or(&Value::Num(0.0)))?) as usize;
         Ok(match s.chars().nth(n) { Some(c) => { let mut t = String::new(); t.push(c); Value::string(t) }
                                     None => Value::str("") })
     }, 1, fp);
     def(&string_proto, "charCodeAt", |i, this, a| {
-        let s = i.to_string(&this)?;
+        let s = this_string(i, &this)?;
         let n = to_integer(i.to_number(a.first().unwrap_or(&Value::Num(0.0)))?) as usize;
         Ok(match s.chars().nth(n) { Some(c) => Value::Num(c as u32 as f64), None => Value::Num(f64::NAN) })
     }, 1, fp);
     def(&string_proto, "indexOf", |i, this, a| {
-        let s = i.to_string(&this)?;
+        let s = this_string(i, &this)?;
         let t = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         Ok(Value::Num(match s.find(&*t) {
             Some(b) => s[..b].chars().count() as f64, None => -1.0 }))
     }, 1, fp);
     def(&string_proto, "includes", |i, this, a| {
-        let s = i.to_string(&this)?;
+        let s = this_string(i, &this)?;
         let t = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         Ok(Value::Bool(s.contains(&*t)))
     }, 1, fp);
     def(&string_proto, "split", |i, this, a| {
-        let s = i.to_string(&this)?;
+        let s = this_string(i, &this)?;
         let parts: Vec<Value> = match a.first() {
             None | Some(Value::Undefined) => vec![Value::Str(s)],
             Some(v) => {
@@ -586,7 +589,7 @@ pub fn make_realm() -> Realm {
         Ok(i.new_array(parts))
     }, 2, fp);
     def(&string_proto, "substring", |i, this, a| {
-        let s = i.to_string(&this)?;
+        let s = this_string(i, &this)?;
         let n = s.chars().count() as i64;
         let g = |v: Option<&Value>, d: i64, i: &mut Interp| -> C<i64> {
             Ok(match v { None | Some(Value::Undefined) => d,
@@ -597,17 +600,17 @@ pub fn make_realm() -> Realm {
         Ok(Value::string(s.chars().skip(a0 as usize).take((b0 - a0) as usize).collect()))
     }, 2, fp);
     def(&string_proto, "startsWith", |i, this, a| {
-        let s = i.to_string(&this)?;
+        let s = this_string(i, &this)?;
         let t = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         Ok(Value::Bool(s.starts_with(&*t)))
     }, 1, fp);
     def(&string_proto, "endsWith", |i, this, a| {
-        let s = i.to_string(&this)?;
+        let s = this_string(i, &this)?;
         let t = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         Ok(Value::Bool(s.ends_with(&*t)))
     }, 1, fp);
     def(&string_proto, "slice", |i, this, a| {
-        let s = i.to_string(&this)?;
+        let s = this_string(i, &this)?;
         let n = s.chars().count() as i64;
         let g = |v: Option<&Value>, d: i64, i: &mut Interp| -> C<i64> {
             Ok(match v { None | Some(Value::Undefined) => d,
@@ -619,7 +622,7 @@ pub fn make_realm() -> Realm {
         Ok(Value::string(s.chars().skip(a0 as usize).take((b0 - a0) as usize).collect()))
     }, 2, fp);
     def(&string_proto, "repeat", |i, this, a| {
-        let s = i.to_string(&this)?;
+        let s = this_string(i, &this)?;
         let n = to_integer(i.to_number(a.first().unwrap_or(&Value::Num(0.0)))?);
         if n < 0.0 || !n.is_finite() { return i.range_err("invalid count value"); }
         // Ein Deckel, weil `"x".repeat(2**31)` sonst den Speicher frisst und
@@ -634,7 +637,7 @@ pub fn make_realm() -> Realm {
     def(&string_proto, "replace", |i, this, a| {
         // Ohne RegExp: nur der Fall "Zeichenkette durch Zeichenkette, einmal".
         // Ein Muster als erstes Argument wirft, statt still nichts zu tun.
-        let s = i.to_string(&this)?;
+        let s = this_string(i, &this)?;
         let pat = match a.first() {
             Some(Value::Str(p)) => p.clone(),
             _ => return i.type_err("String.prototype.replace needs a string pattern"),
@@ -647,12 +650,12 @@ pub fn make_realm() -> Realm {
         }))
     }, 2, fp);
     def(&string_proto, "lastIndexOf", |i, t, a| {
-        let s = i.to_string(&t)?;
+        let s = this_string(i, &t)?;
         let n = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         Ok(Value::Num(match s.rfind(&*n) { Some(b) => s[..b].chars().count() as f64, None => -1.0 }))
     }, 1, fp);
     def(&string_proto, "at", |i, t, a| {
-        let s = i.to_string(&t)?;
+        let s = this_string(i, &t)?;
         let len = s.chars().count() as i64;
         let mut k = to_integer(i.to_number(a.first().unwrap_or(&Value::Num(0.0)))?) as i64;
         if k < 0 { k += len; }
@@ -661,10 +664,10 @@ pub fn make_realm() -> Realm {
             _ => Value::Undefined })
     }, 1, fp);
     def(&string_proto, "trimStart", |i, t, _| {
-        let s = i.to_string(&t)?; Ok(Value::str(s.trim_start()))
+        let s = this_string(i, &t)?; Ok(Value::str(s.trim_start()))
     }, 0, fp);
     def(&string_proto, "trimEnd", |i, t, _| {
-        let s = i.to_string(&t)?; Ok(Value::str(s.trim_end()))
+        let s = this_string(i, &t)?; Ok(Value::str(s.trim_end()))
     }, 0, fp);
     for (alias, orig) in [("trimLeft", "trimStart"), ("trimRight", "trimEnd")] {
         let v = string_proto.borrow().get_own(orig).and_then(|p| p.value.clone());
@@ -673,44 +676,63 @@ pub fn make_realm() -> Realm {
     def(&string_proto, "padStart", |i, t, a| pad(i, t, a, true), 2, fp);
     def(&string_proto, "padEnd", |i, t, a| pad(i, t, a, false), 2, fp);
     def(&string_proto, "concat", |i, t, a| {
-        let mut s = i.to_string(&t)?.to_string();
+        let mut s = this_string(i, &t)?.to_string();
         for v in a { s.push_str(&i.to_string(v)?); }
         Ok(Value::string(s))
     }, 1, fp);
     def(&string_proto, "toUpperCase", |i, this, _| {
-        let s = i.to_string(&this)?; Ok(Value::string(s.to_uppercase()))
+        let s = this_string(i, &this)?; Ok(Value::string(s.to_uppercase()))
     }, 0, fp);
     def(&string_proto, "toLowerCase", |i, this, _| {
-        let s = i.to_string(&this)?; Ok(Value::string(s.to_lowercase()))
+        let s = this_string(i, &this)?; Ok(Value::string(s.to_lowercase()))
     }, 0, fp);
     def(&string_proto, "trim", |i, this, _| {
-        let s = i.to_string(&this)?; Ok(Value::str(s.trim()))
+        let s = this_string(i, &this)?; Ok(Value::str(s.trim()))
     }, 0, fp);
     // Ohne Sprachumgebung IST die landessprachliche Umwandlung die
     // gewoehnliche. Eine erfundene tuerkische Sonderregel waere schlechter
     // als keine.
     def(&string_proto, "toLocaleUpperCase", |i, this, _| {
-        let s = i.to_string(&this)?; Ok(Value::string(s.to_uppercase()))
+        let s = this_string(i, &this)?; Ok(Value::string(s.to_uppercase()))
     }, 0, fp);
     def(&string_proto, "toLocaleLowerCase", |i, this, _| {
-        let s = i.to_string(&this)?; Ok(Value::string(s.to_lowercase()))
+        let s = this_string(i, &this)?; Ok(Value::string(s.to_lowercase()))
     }, 0, fp);
     // Unsere Zeichenketten sind UTF-8 — eine einzelne Ersatzhaelfte kann
     // darin gar nicht stehen. Also ist jede wohlgeformt, und `toWellFormed`
     // gibt sie unveraendert zurueck. Benannt statt verschwiegen: eine Seite,
     // die eine kaputte UTF-16-Folge baut, bekommt hier `true` statt `false`.
+    // `normalize` OHNE die Unicode-Zerlegungstabellen: sie prueft die Form
+    // und gibt die Zeichenkette unveraendert zurueck. Fuer bereits
+    // normalisierten Text — praktisch jeden Text im Netz — ist das die
+    // richtige Antwort; fuer zerlegten ist es die falsche. Benannt statt
+    // verschwiegen, und trotzdem besser als "normalize is not a function",
+    // woran eine Seite ganz stirbt.
+    def(&string_proto, "normalize", |i, this, a| {
+        let s = this_string(i, &this)?;
+        match a.first() {
+            None | Some(Value::Undefined) => {}
+            Some(v) => {
+                let f = i.to_string(v)?;
+                if !matches!(&*f, "NFC" | "NFD" | "NFKC" | "NFKD") {
+                    return i.range_err("normalize: form must be one of NFC, NFD, NFKC, NFKD");
+                }
+            }
+        }
+        Ok(Value::Str(s))
+    }, 0, fp);
     def(&string_proto, "isWellFormed", |i, this, _| {
-        let _ = i.to_string(&this)?; Ok(Value::Bool(true))
+        let _ = this_string(i, &this)?; Ok(Value::Bool(true))
     }, 0, fp);
     def(&string_proto, "toWellFormed", |i, this, _| {
-        let s = i.to_string(&this)?; Ok(Value::Str(s))
+        let s = this_string(i, &this)?; Ok(Value::Str(s))
     }, 0, fp);
     // Die dreizehn annexB-Auszeichner. Sie stehen in der Spezifikation, weil
     // alter Code sie ruft — und der Anfuehrungszeichen-Ersatz gehoert dazu.
     macro_rules! html_wrap {
         ($($m:literal => $tag:literal, $attr:literal, $len:literal),* $(,)?) => { $(
             def(&string_proto, $m, |i, t, a| {
-                let s = i.to_string(&t)?;
+                let s = this_string(i, &t)?;
                 let (tag, attr) = ($tag, $attr);
                 let mut open = String::from("<");
                 open.push_str(tag);
@@ -769,7 +791,15 @@ pub fn make_realm() -> Realm {
         i.type_err("Boolean.prototype.valueOf on a non-boolean")
     }, 0, fp);
     def(&boolean_proto, "toString", |i, this, _| {
-        let b = i.to_string(&this)?; Ok(Value::Str(b))
+        let b = match &this {
+            Value::Bool(b) => *b,
+            Value::Obj(o) => match &o.borrow().kind {
+                ObjKind::BoolWrap(b) => *b,
+                _ => return i.type_err("Boolean.prototype.toString on a non-boolean"),
+            },
+            _ => return i.type_err("Boolean.prototype.toString on a non-boolean"),
+        };
+        Ok(Value::str(if b { "true" } else { "false" }))
     }, 0, fp);
 
     // `toFixed` ist die einzige Zahlenformatierung, die echter Code wirklich
@@ -1002,6 +1032,9 @@ pub fn make_realm() -> Realm {
     }, 2, fp);
     def(&object_ctor, "assign", |i, _, a| {
         let target = a.first().cloned().unwrap_or(Value::Undefined);
+        // `ToObject(target)` steht VOR allem anderen — auf `undefined` wirft
+        // es, statt still nichts zu tun.
+        let target = Value::Obj(i.to_object(&target)?);
         for src in a.get(1..).unwrap_or(&[]) {
             let Value::Obj(o) = src else { continue };
             // Zeichenketten UND Symbole: `assign` kopiert jede eigene
@@ -1053,9 +1086,16 @@ pub fn make_realm() -> Realm {
         Ok(Value::Obj(g))
     }, 1, fp);
     def(&object_ctor, "setPrototypeOf", |i, _, a| {
-        let Some(Value::Obj(o)) = a.first() else {
-            return Ok(a.first().cloned().unwrap_or(Value::Undefined));
-        };
+        let first = a.first().cloned().unwrap_or(Value::Undefined);
+        if matches!(first, Value::Undefined | Value::Null) {
+            return i.type_err("Object.setPrototypeOf on undefined or null");
+        }
+        // Das zweite Argument wird auch dann geprueft, wenn das erste ein
+        // Primitiv ist — die Reihenfolge steht in der Spezifikation.
+        if !matches!(a.get(1), Some(Value::Obj(_)) | Some(Value::Null)) {
+            return i.type_err("Object.setPrototypeOf: prototype must be an object or null");
+        }
+        let Some(Value::Obj(o)) = a.first() else { return Ok(first) };
         let new_proto = match a.get(1) { Some(Value::Obj(p)) => Some(p.clone()), _ => None };
         // Ein ZYKLUS ist zu verweigern, nicht zu bauen (ES 10.4.7.1). Ohne
         // diese Pruefung legt `Object.setPrototypeOf(Object.prototype, {})`
@@ -1447,24 +1487,31 @@ pub fn make_realm() -> Realm {
     // benutzen die Zielseiten es) stimmt es; fuer Objektschluessel nicht.
     // `native` nimmt einen Funktionszeiger, keinen Abschluss — deshalb kommt
     // der Konstruktor von aussen herein statt hier eingefangen zu werden.
-    let collection = |name: &'static str, is_map: bool, ctor_fn: NativeFn, object_proto: &Gc,
-                      function_proto: &Gc, global: &Gc| {
+    // Vier Sammlungen, EIN Rumpf — als Makro und nicht als Abschluss, weil
+    // die Methoden ihren eigenen Namen brauchen: `Map.prototype.has.call(
+    // new Set())` muss werfen, und ein Funktionszeiger sieht keine
+    // eingefangene Variable.
+    macro_rules! collection {
+        ($name:literal, $is_map:literal, $ctor:expr) => {{
         let proto = new_obj(Some(object_proto.clone()));
         let d = |o: &Gc, n: &str, f: NativeFn, l: usize| {
             let g = native(Some(function_proto.clone()), f, n, l, false);
             o.borrow_mut().define(n, Prop::builtin(Value::Obj(g)));
         };
         d(&proto, "has", |i, t, a| {
+            this_coll(i, &t, $name)?;
             let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
             let key = alloc::format!("@{k}");
             Ok(Value::Bool(matches!(&t, Value::Obj(o) if o.borrow().has_own(&key))))
         }, 1);
         d(&proto, "get", |i, t, a| {
+            this_coll(i, &t, $name)?;
             let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
             let key = alloc::format!("@{k}");
             Ok(match i.get(&t, &key)? { Value::Undefined => Value::Undefined, v => v })
         }, 1);
         d(&proto, "set", |i, t, a| {
+            this_coll(i, &t, $name)?;
             let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
             let v = a.get(1).cloned().unwrap_or(Value::Undefined);
             if let Value::Obj(o) = &t {
@@ -1475,6 +1522,7 @@ pub fn make_realm() -> Realm {
             Ok(t)
         }, 2);
         d(&proto, "add", |i, t, a| {
+            this_coll(i, &t, $name)?;
             let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
             if let Value::Obj(o) = &t {
                 o.borrow_mut().define(&alloc::format!("@{k}"), Prop {
@@ -1484,11 +1532,13 @@ pub fn make_realm() -> Realm {
             Ok(t)
         }, 1);
         d(&proto, "delete", |i, t, a| {
+            this_coll(i, &t, $name)?;
             let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
             let key = alloc::format!("@{k}");
             Ok(Value::Bool(matches!(&t, Value::Obj(o) if o.borrow_mut().remove(&key))))
         }, 1);
-        d(&proto, "clear", |_, t, _| {
+        d(&proto, "clear", |i, t, _| {
+            this_coll(i, &t, $name)?;
             if let Value::Obj(o) = &t {
                 let ks = o.borrow().own_keys();
                 for k in ks { if k.starts_with('@') { o.borrow_mut().remove(&k); } }
@@ -1496,6 +1546,7 @@ pub fn make_realm() -> Realm {
             Ok(Value::Undefined)
         }, 0);
         d(&proto, "forEach", |i, t, a| {
+            this_coll(i, &t, $name)?;
             let f = a.first().cloned().unwrap_or(Value::Undefined);
             if !i.is_callable(&f) { return i.type_err("callback is not a function"); }
             let Value::Obj(o) = &t else { return Ok(Value::Undefined) };
@@ -1517,17 +1568,21 @@ pub fn make_realm() -> Realm {
         // ohnehin die zeichenkettenbasierte Naeherung von oben, und eine
         // Aufnahme ist die ehrlichere Naeherung als ein Index, der bei jedem
         // `next` neu ueber die Schluesselliste laeuft.
-        d(&proto, "keys", |i, t, _| { let v = coll_view(i, &t, 0)?; i.array_iter(v, 0) }, 0);
-        d(&proto, "values", |i, t, _| { let v = coll_view(i, &t, 1)?; i.array_iter(v, 0) }, 0);
-        d(&proto, "entries", |i, t, _| { let v = coll_view(i, &t, 2)?; i.array_iter(v, 0) }, 0);
+        d(&proto, "keys", |i, t, _| {
+            this_coll(i, &t, $name)?; let v = coll_view(i, &t, 0)?; i.array_iter(v, 0) }, 0);
+        d(&proto, "values", |i, t, _| {
+            this_coll(i, &t, $name)?; let v = coll_view(i, &t, 1)?; i.array_iter(v, 0) }, 0);
+        d(&proto, "entries", |i, t, _| {
+            this_coll(i, &t, $name)?; let v = coll_view(i, &t, 2)?; i.array_iter(v, 0) }, 0);
         {
-            let key = if is_map { "entries" } else { "values" };
+            let key = if $is_map { "entries" } else { "values" };
             let f = proto.borrow().get_own(key).and_then(|p| p.value.clone());
             if let Some(f) = f { proto.borrow_mut().define(SYM_ITERATOR, Prop::builtin(f)); }
         }
-        proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::frozen(Value::str(name)));
+        proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::frozen(Value::str($name)));
 
-        let size = native(Some(function_proto.clone()), |_, t, _| {
+        let size = native(Some(function_proto.clone()), |i, t, _| {
+            this_coll(i, &t, $name)?;
             let Value::Obj(o) = &t else { return Ok(Value::Num(0.0)) };
             let n = o.borrow().own_keys().iter().filter(|k| k.starts_with('@')).count();
             Ok(Value::Num(n as f64))
@@ -1536,15 +1591,16 @@ pub fn make_realm() -> Realm {
             value: None, get: Some(Value::Obj(size)), set: None,
             writable: false, enumerable: false, configurable: true });
 
-        let ctor = native(Some(function_proto.clone()), ctor_fn, name, 0, true);
+        let ctor = native(Some(function_proto.clone()), $ctor, $name, 0, true);
         ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(proto.clone())));
         proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(ctor.clone())));
-        global.borrow_mut().define(name, Prop::builtin(Value::Obj(ctor)));
-    };
-    collection("Map", true, |i, _, a| coll_new(i, "Map", true, a), &object_proto, &function_proto, &global);
-    collection("Set", false, |i, _, a| coll_new(i, "Set", false, a), &object_proto, &function_proto, &global);
-    collection("WeakMap", true, |i, _, a| coll_new(i, "WeakMap", true, a), &object_proto, &function_proto, &global);
-    collection("WeakSet", false, |i, _, a| coll_new(i, "WeakSet", false, a), &object_proto, &function_proto, &global);
+        global.borrow_mut().define($name, Prop::builtin(Value::Obj(ctor)));
+        }};
+    }
+    collection!("Map", true, (|i: &mut Interp, _: Value, a: &[Value]| coll_new(i, "Map", true, a)) as NativeFn);
+    collection!("Set", false, (|i: &mut Interp, _: Value, a: &[Value]| coll_new(i, "Set", false, a)) as NativeFn);
+    collection!("WeakMap", true, (|i: &mut Interp, _: Value, a: &[Value]| coll_new(i, "WeakMap", true, a)) as NativeFn);
+    collection!("WeakSet", false, (|i: &mut Interp, _: Value, a: &[Value]| coll_new(i, "WeakSet", false, a)) as NativeFn);
 
     // ── Die sieben Mengenoperationen (ES 2025) ───────────────────────────
     //
@@ -1655,6 +1711,7 @@ pub fn make_realm() -> Realm {
     }, 2, fp);
     def(&reflect, "set", |i, _, a| {
         let t = a.first().cloned().unwrap_or(Value::Undefined);
+        if !matches!(t, Value::Obj(_)) { return i.type_err("Reflect.set on a non-object"); }
         let k = i.to_prop_key(a.get(1).unwrap_or(&Value::Undefined))?;
         let v = a.get(2).cloned().unwrap_or(Value::Undefined);
         i.set(&t, &k, v)?;
@@ -2291,7 +2348,7 @@ pub fn make_realm() -> Realm {
         get: None, set: None, writable: false, enumerable: false, configurable: true });
 
     def(&string_proto, "at", |i, this, a| {
-        let s = i.to_string(&this)?;
+        let s = this_string(i, &this)?;
         let ch: Vec<char> = s.chars().collect();
         let n = ch.len() as i64;
         let mut k = to_integer(i.to_number(a.first().unwrap_or(&Value::Undefined))?) as i64;
@@ -2302,7 +2359,7 @@ pub fn make_realm() -> Realm {
         Ok(Value::string(t))
     }, 1, fp);
     def(&string_proto, "codePointAt", |i, this, a| {
-        let s = i.to_string(&this)?;
+        let s = this_string(i, &this)?;
         let k = to_integer(i.to_number(a.first().unwrap_or(&Value::Undefined))?);
         if k < 0.0 { return Ok(Value::Undefined) }
         // Nach UTF-16-Einheiten gezaehlt, wie die Spec — unsere Texte sind
@@ -2321,7 +2378,7 @@ pub fn make_realm() -> Realm {
         Ok(Value::Num(c as f64))
     }, 1, fp);
     def(&string_proto, "substr", |i, this, a| {
-        let s = i.to_string(&this)?;
+        let s = this_string(i, &this)?;
         let ch: Vec<char> = s.chars().collect();
         let n = ch.len() as i64;
         let mut st = to_integer(i.to_number(a.first().unwrap_or(&Value::Undefined))?) as i64;
@@ -2334,7 +2391,7 @@ pub fn make_realm() -> Realm {
         Ok(Value::string(ch[st as usize..(st + len) as usize].iter().collect()))
     }, 2, fp);
     def(&string_proto, "localeCompare", |i, this, a| {
-        let s = i.to_string(&this)?;
+        let s = this_string(i, &this)?;
         let t = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         // Ohne Gebietsschema: der Vergleich ist der gewoehnliche. Das ist
         // erlaubt und ehrlicher als eine erfundene Sortierordnung.
@@ -2728,7 +2785,7 @@ fn coll_new(i: &mut Interp, name: &str, is_map: bool, a: &[Value]) -> C<Value> {
 }
 
 fn pad(i: &mut Interp, t: Value, a: &[Value], start: bool) -> C<Value> {
-    let s = i.to_string(&t)?;
+    let s = this_string(i, &t)?;
     let want = to_integer(i.to_number(a.first().unwrap_or(&Value::Num(0.0)))?) as usize;
     let fill = match a.get(1) { None | Some(Value::Undefined) => Rc::from(" "), Some(v) => i.to_string(v)? };
     let have = s.chars().count();
@@ -3295,4 +3352,25 @@ fn has_index(i: &mut Interp, this: &Value, k: usize) -> bool {
         Value::Str(s) => k < s.chars().count(),
         _ => false,
     }
+}
+
+/// `RequireObjectCoercible` + `ToString` — der Kopf jeder
+/// String.prototype-Methode. `String.prototype.trim.call(null)` ist ein
+/// TypeError, nicht `"null"`.
+pub fn this_string(i: &mut Interp, t: &Value) -> C<Rc<str>> {
+    if matches!(t, Value::Undefined | Value::Null) {
+        return i.type_err("String.prototype method called on null or undefined");
+    }
+    i.to_string(t)
+}
+
+/// Ist `this` GENAU diese Sammlung? Der Vermerk `COLL_KIND` steht fuer das
+/// interne Feld, das die Spezifikation verlangt — ohne ihn liefe
+/// `Map.prototype.has.call({})` still durch und `…call(null)` gaebe `false`
+/// statt zu werfen.
+fn this_coll(i: &mut Interp, t: &Value, name: &str) -> C<()> {
+    let ok = matches!(t, Value::Obj(o)
+        if matches!(o.borrow().get_own(COLL_KIND).and_then(|p| p.value.clone()),
+                    Some(Value::Str(k)) if &*k == name));
+    if ok { Ok(()) } else { i.type_err(&alloc::format!("{name} method on the wrong receiver")) }
 }

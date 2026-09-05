@@ -17,6 +17,7 @@
 //! Indizes ab. Bewusst und benannt, statt still falsch.
 
 use alloc::boxed::Box;
+use super::builtins::this_string;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::vec;
@@ -804,6 +805,46 @@ pub fn install(realm: &mut Realm) {
             set: None, writable: false, enumerable: false, configurable: true });
     }
 
+    // annexB: `compile` baut den Ausdruck IM SELBEN Objekt neu. Moeglich,
+    // weil die Art des Objekts veraenderlich ist — der Ausdruck liegt in
+    // `ObjKind::Regex`, nicht in einer eingefrorenen Eigenschaft.
+    def(&proto, "compile", |i, t, a| {
+        if compiled(&t).is_none() { return i.type_err("RegExp.prototype.compile on a non-RegExp"); }
+        // Nur ein Ausdruck, den `%RegExp%` SELBST gebaut hat, darf neu
+        // uebersetzt werden (`[[LegacyFeaturesEnabled]]`). Eine Unterklasse
+        // erkennt man am Prototyp.
+        let own_proto = matches!(&t, Value::Obj(o)
+            if matches!(&o.borrow().proto, Some(p) if Rc::ptr_eq(p, &i.realm.regexp_proto)));
+        if !own_proto { return i.type_err("compile: not a plain RegExp instance"); }
+        let arg = a.first().cloned().unwrap_or(Value::Undefined);
+        let (pat, fl) = match compiled(&arg) {
+            Some(r) => {
+                if !matches!(a.get(1), None | Some(Value::Undefined)) {
+                    return i.type_err("compile: flags must be undefined when the pattern is a RegExp");
+                }
+                (r.source.clone(), r.flags.as_string())
+            }
+            None => {
+                let p = match &arg { Value::Undefined => String::new(), v => i.to_string(v)?.to_string() };
+                let f = match a.get(1) {
+                    None | Some(Value::Undefined) => String::new(),
+                    Some(v) => i.to_string(v)?.to_string(),
+                };
+                (p, f)
+            }
+        };
+        let re = match Regex::new(&pat, &fl) {
+            Ok(r) => Rc::new(r),
+            Err(e) => return Err(i.throw_kind("SyntaxError",
+                &alloc::format!("invalid regular expression: {e}"))),
+        };
+        if let Value::Obj(o) = &t {
+            o.borrow_mut().kind = ObjKind::Regex(re);
+            o.borrow_mut().define("lastIndex", Prop { value: Some(Value::Num(0.0)), get: None,
+                set: None, writable: true, enumerable: false, configurable: false });
+        }
+        Ok(t)
+    }, 2);
     def(&proto, "toString", |i, t, _| {
         let src = i.get(&t, "source")?;
         let fl = i.get(&t, "flags")?;
@@ -920,7 +961,7 @@ pub fn install(realm: &mut Realm) {
     // ── Die String-Methoden, die ein Muster nehmen ───────────────────────
     let sp = realm.string_proto.clone();
     def(&sp, "match", |i, t, a| {
-        let s = i.to_string(&t)?;
+        let s = this_string(i, &t)?;
         let chars: Vec<char> = s.chars().collect();
         let rev = as_regex(i, a.first())?;
         let Some(re) = compiled(&rev) else { return Ok(Value::Null) };
@@ -963,7 +1004,7 @@ pub fn install(realm: &mut Realm) {
                 }
             }
         }
-        let s = i.to_string(&t)?;
+        let s = this_string(i, &t)?;
         let chars: Vec<char> = s.chars().collect();
         let rev = as_regex(i, a.first())?;
         let Some(re) = compiled(&rev) else { return i.type_err("matchAll: not a RegExp") };
@@ -975,7 +1016,7 @@ pub fn install(realm: &mut Realm) {
         i.array_iter(arr, 0)
     }, 1);
     def(&sp, "search", |i, t, a| {
-        let s = i.to_string(&t)?;
+        let s = this_string(i, &t)?;
         let chars: Vec<char> = s.chars().collect();
         let rev = as_regex(i, a.first())?;
         let Some(re) = compiled(&rev) else { return Ok(Value::Num(-1.0)) };
@@ -988,7 +1029,7 @@ pub fn install(realm: &mut Realm) {
     def(&sp, "replace", |i, t, a| do_replace(i, t, a, false), 2);
     def(&sp, "replaceAll", |i, t, a| do_replace(i, t, a, true), 2);
     def(&sp, "split", |i, t, a| {
-        let s = i.to_string(&t)?;
+        let s = this_string(i, &t)?;
         let chars: Vec<char> = s.chars().collect();
         let sep = a.first().cloned().unwrap_or(Value::Undefined);
         if compiled(&sep).is_none() {
@@ -1048,7 +1089,7 @@ fn escape_literal(s: &str) -> String {
 }
 
 fn do_replace(i: &mut Interp, t: Value, a: &[Value], all: bool) -> C<Value> {
-    let s = i.to_string(&t)?;
+    let s = this_string(i, &t)?;
     let chars: Vec<char> = s.chars().collect();
     let pat = a.first().cloned().unwrap_or(Value::Undefined);
     let rep = a.get(1).cloned().unwrap_or(Value::Undefined);
