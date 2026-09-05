@@ -336,11 +336,33 @@ pub struct Interp {
     /// meldet, ist bei einer Ferndiagnose oft das einzige Fenster hinein.
     /// Gedeckelt, weil eine fremde Seite sonst den Speicher damit fuellt —
     /// und der Verlust wird gemeldet, nicht verschwiegen.
+    /// Der letzte erfolgreiche Treffer — allein fuer die annexB-Statiken
+    /// `RegExp.$1`, `RegExp.lastMatch` & Co. Sie stehen NICHT am
+    /// Ausdrucksobjekt, sondern am Konstruktor, also muss der Zustand hier
+    /// liegen und nicht dort.
+    /// Laeuft gerade ein `new` auf einem eingebauten Konstruktor? Ein
+    /// natives `this` ist bei Aufruf und Bau dasselbe (`undefined`), also
+    /// braucht es diese Fahne — `Symbol` HAT ein `[[Construct]]`, es wirft
+    /// nur darin.
+    pub native_new: bool,
+    pub last_match: Option<LastMatch>,
     pub console: Vec<String>,
     console_dropped: usize,
 }
 
 /// Wie viele Zeilen `console` haelt, und wie lang eine werden darf.
+/// Was die neun `RegExp.$n` und ihre vier Nachbarn brauchen. Fertige
+/// Zeichenketten statt Bereiche: die Quelle darf danach verschwinden.
+pub struct LastMatch {
+    pub input: String,
+    pub matched: String,
+    pub left: String,
+    pub right: String,
+    /// `$1` bis `$9`; eine Gruppe ohne Treffer ist die leere Zeichenkette.
+    pub caps: Vec<String>,
+    pub last_paren: String,
+}
+
 pub const MAX_CONSOLE_LINES: usize = 200;
 pub const MAX_CONSOLE_LEN: usize = 512;
 
@@ -396,7 +418,7 @@ impl Interp {
                  live_dom: core::cell::RefCell::new(None),
                  jobs: alloc::collections::VecDeque::new(),
                  rng: 0x2545_F491_4F6C_DD1D, media: None,
-                 timers: Vec::new(), console: Vec::new(), console_dropped: 0 }
+                 timers: Vec::new(), native_new: false, last_match: None, console: Vec::new(), console_dropped: 0 }
     }
 
     /// Die angemeldeten Zeitgeber EINMAL durchlaufen.
@@ -840,6 +862,26 @@ impl Interp {
     pub fn is_callable(&self, v: &Value) -> bool {
         matches!(v, Value::Obj(o) if matches!(o.borrow().kind,
             ObjKind::Function(_) | ObjKind::Native(_) | ObjKind::Bound { .. }))
+    }
+
+    /// Darf `new` darauf? Ein Pfeil, eine Methode, eine async-Funktion und
+    /// ein Generator sind KEINE Konstruktoren — und `Reflect.construct` mit
+    /// einem solchen als `newTarget` muss werfen. Genau daran haengt der
+    /// `isConstructor`-Helfer von test262, den ein paar hundert Tests rufen.
+    ///
+    /// Benannt statt verschwiegen: eine Methodenkurzform (`{ m(){} }`) sieht
+    /// in unserem Baum aus wie eine gewoehnliche Funktion und gilt hier
+    /// deshalb faelschlich als Konstruktor.
+    pub fn is_constructor(&self, v: &Value) -> bool {
+        let Value::Obj(o) = v else { return false };
+        let kind = &o.borrow().kind;
+        match kind {
+            ObjKind::Native(n) => n.ctor,
+            ObjKind::Function(d) =>
+                !d.node.is_arrow && !d.node.is_async && !d.node.is_generator,
+            ObjKind::Bound { target, .. } => self.is_constructor(&Value::Obj(target.clone())),
+            _ => false,
+        }
     }
 
     // ── Eigenschaften ────────────────────────────────────────────────────

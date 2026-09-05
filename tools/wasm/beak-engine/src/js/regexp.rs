@@ -570,18 +570,11 @@ pub fn make(i: &mut Interp, pattern: &str, flags: &str) -> C<Value> {
         // Prototyp — daran haengt, dass `g`-Suchen weiterlaufen.
         o.define("lastIndex", Prop { value: Some(Value::Num(0.0)), get: None, set: None,
             writable: true, enumerable: false, configurable: false });
-        o.define("source", Prop::frozen(Value::str(&re.source)));
-        o.define("flags", Prop::frozen(Value::string(re.flags.as_string())));
-        o.define("global", Prop::frozen(Value::Bool(re.flags.global)));
-        o.define("ignoreCase", Prop::frozen(Value::Bool(re.flags.ignore_case)));
-        o.define("multiline", Prop::frozen(Value::Bool(re.flags.multiline)));
-        o.define("sticky", Prop::frozen(Value::Bool(re.flags.sticky)));
-        // `dotAll` fehlte, und genau daran ist Wikipedias
-        // Vertraeglichkeitspruefung gescheitert (`/./.dotAll === false`) —
-        // die Flagge gab es intern laengst, nur herausgereicht war sie nicht.
-        o.define("dotAll", Prop::frozen(Value::Bool(re.flags.dot_all)));
-        o.define("unicode", Prop::frozen(Value::Bool(re.flags.unicode)));
-        o.define("hasIndices", Prop::frozen(Value::Bool(false)));
+        // `source`, `flags` und die acht Flaggen stehen NICHT hier: sie sind
+        // Leser auf `RegExp.prototype` (ES 22.2.6). Am Ausdruck selbst waeren
+        // sie eigene Eigenschaften — `Object.defineProperty(re, "flags", …)`
+        // schluege dann fehl statt zu greifen, und `Object.keys(re)` faende
+        // neun Namen statt keinen.
     }
     Ok(Value::Obj(g))
 }
@@ -637,6 +630,7 @@ fn do_exec(i: &mut Interp, this: &Value, s: &str) -> C<Value> {
                 let end = m.caps[0].map(|(_, b)| b).unwrap_or(start);
                 i.set(this, "lastIndex", Value::Num(end as f64))?;
             }
+            record(i, &chars, &m);
             Ok(match_result(i, &re, &chars, &m, s))
         }
         None => {
@@ -679,6 +673,41 @@ fn expand(rep: &str, chars: &[char], m: &Match) -> String {
 /// Alle Treffer einer Suche — die Grundlage von `match`, `replace` und
 /// `split`. Ein LEERER Treffer muss die Stelle weiterschieben, sonst laeuft
 /// die Schleife ewig (`"abc".replace(/x*/g, "-")`).
+/// Den Treffer fuer die annexB-Statiken festhalten. Eine Stelle, damit
+/// `exec`, `match`, `replace` und `split` nicht drei verschiedene Wahrheiten
+/// hinterlassen.
+fn record(i: &mut Interp, chars: &[char], m: &Match) {
+    let (a, b) = match m.caps[0] { Some(x) => x, None => return };
+    let text = |r: core::ops::Range<usize>| -> String { chars[r].iter().collect() };
+    let mut caps = Vec::with_capacity(9);
+    let mut last_paren = String::new();
+    for k in 1..=9 {
+        let v = m.caps.get(k).copied().flatten().map(|(x, y)| text(x..y)).unwrap_or_default();
+        caps.push(v);
+    }
+    for k in (1..m.caps.len()).rev() {
+        if let Some((x, y)) = m.caps[k] { last_paren = text(x..y); break; }
+    }
+    i.last_match = Some(crate::js::interp::LastMatch {
+        input: text(0..chars.len()), matched: text(a..b),
+        left: text(0..a), right: text(b..chars.len()), caps, last_paren });
+}
+
+/// Wie `all_matches`, aber ohne Ruecksicht auf die `g`-Flagge — `matchAll`
+/// hat sie schon geprueft, und ein aus einer Zeichenkette gebautes Muster
+/// traegt sie nicht.
+fn all_matches_global(re: &Regex, chars: &[char]) -> Vec<Match> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at <= chars.len() {
+        let Some(m) = re.exec(chars, at) else { break };
+        let (a, b) = m.caps[0].unwrap_or((at, at));
+        out.push(m);
+        at = if b > a { b } else { b + 1 };
+    }
+    out
+}
+
 fn all_matches(re: &Regex, chars: &[char]) -> Vec<Match> {
     let mut out = Vec::new();
     let mut at = 0;
@@ -709,6 +738,72 @@ pub fn install(realm: &mut Realm) {
         let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         Ok(Value::Bool(!matches!(do_exec(i, &t, &s)?, Value::Null)))
     }, 1);
+    // ── Die Leser (ES 22.2.6) ────────────────────────────────────────────
+    //
+    // Auf `RegExp.prototype` selbst geben sie `undefined` (bzw. `"(?:)"`)
+    // statt zu werfen — die Ausnahme steht so in der Spezifikation, weil der
+    // Prototyp selbst kein Ausdruck ist.
+    macro_rules! flag_get {
+        ($($n:literal => $sel:expr),* $(,)?) => { $(
+            {
+                let g = native(Some(fp.clone()), |i, t, _| {
+                    let sel: fn(&Flags) -> bool = $sel;
+                    match compiled(&t) {
+                        Some(re) => Ok(Value::Bool(sel(&re.flags))),
+                        None => {
+                            if is_regexp_proto(i, &t) { return Ok(Value::Undefined); }
+                            i.type_err("RegExp flag accessor on a non-RegExp")
+                        }
+                    }
+                }, &alloc::format!("get {}", $n), 0, false);
+                proto.borrow_mut().define($n, Prop { value: None, get: Some(Value::Obj(g)),
+                    set: None, writable: false, enumerable: false, configurable: true });
+            }
+        )* };
+    }
+    flag_get! {
+        "global" => |f| f.global,
+        "ignoreCase" => |f| f.ignore_case,
+        "multiline" => |f| f.multiline,
+        "dotAll" => |f| f.dot_all,
+        "sticky" => |f| f.sticky,
+        "unicode" => |f| f.unicode,
+        // Weder `d` noch `v` sind gebaut; sie sind trotzdem da und sagen
+        // ehrlich `false`, statt zu fehlen.
+        "hasIndices" => |_| false,
+        "unicodeSets" => |_| false,
+    }
+    {
+        let g = native(Some(fp.clone()), |i, t, _| {
+            match compiled(&t) {
+                Some(re) => Ok(Value::str(&re.source)),
+                None => {
+                    if is_regexp_proto(i, &t) { return Ok(Value::str("(?:)")); }
+                    i.type_err("RegExp.prototype.source on a non-RegExp")
+                }
+            }
+        }, "get source", 0, false);
+        proto.borrow_mut().define("source", Prop { value: None, get: Some(Value::Obj(g)),
+            set: None, writable: false, enumerable: false, configurable: true });
+        // `flags` ist KEIN eigener Zustand, sondern die Zusammenfassung der
+        // acht Leser — und liest sie einzeln, damit ein ueberschriebener
+        // Leser durchschlaegt. Genau das prueft test262.
+        let g = native(Some(fp.clone()), |i, t, _| {
+            if matches!(t, Value::Undefined | Value::Null) {
+                return i.type_err("RegExp.prototype.flags on undefined or null");
+            }
+            let mut out = String::new();
+            for (name, c) in [("hasIndices", 'd'), ("global", 'g'), ("ignoreCase", 'i'),
+                              ("multiline", 'm'), ("dotAll", 's'), ("unicode", 'u'),
+                              ("unicodeSets", 'v'), ("sticky", 'y')] {
+                if i.get(&t, name)?.truthy() { out.push(c); }
+            }
+            Ok(Value::string(out))
+        }, "get flags", 0, false);
+        proto.borrow_mut().define("flags", Prop { value: None, get: Some(Value::Obj(g)),
+            set: None, writable: false, enumerable: false, configurable: true });
+    }
+
     def(&proto, "toString", |i, t, _| {
         let src = i.get(&t, "source")?;
         let fl = i.get(&t, "flags")?;
@@ -734,6 +829,91 @@ pub fn install(realm: &mut Realm) {
     }, "RegExp", 2, true);
     ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(proto.clone())));
     proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(ctor.clone())));
+    // ── `RegExp.escape` (ES 2025) ────────────────────────────────────────
+    def(&ctor, "escape", |i, _, a| {
+        let Some(Value::Str(s)) = a.first() else {
+            return i.type_err("RegExp.escape requires a string");
+        };
+        let mut out = String::new();
+        for (k, c) in s.chars().enumerate() {
+            // Die ERSTE Stelle wird auch dann geschuetzt, wenn sie harmlos
+            // aussieht: sonst waere `escape("ab")` in `\1ab` einlesbar als
+            // Rueckverweis.
+            if k == 0 && c.is_ascii_alphanumeric() {
+                out.push_str(&alloc::format!("\\x{:02x}", c as u32));
+                continue;
+            }
+            match c {
+                '^' | '$' | '\\' | '.' | '*' | '+' | '?' | '(' | ')' | '[' | ']'
+                | '{' | '}' | '|' | '/' => { out.push('\\'); out.push(c); }
+                '\t' => out.push_str("\\t"),
+                '\n' => out.push_str("\\n"),
+                '\u{b}' => out.push_str("\\v"),
+                '\u{c}' => out.push_str("\\f"),
+                '\r' => out.push_str("\\r"),
+                // Die Liste steht in der Spezifikation (`otherPunctuators`),
+                // dazu Leerraum und Zeilenenden. Bis 0xFF als `\xHH`, darueber
+                // als `\uXXXX` — nicht umgekehrt.
+                c if ",-=<>#&!%:;@~'`\"".contains(c) || c.is_whitespace()
+                     || (c as u32) < 0x20 || c as u32 == 0xfeff => {
+                    let n = c as u32;
+                    if n <= 0xff { out.push_str(&alloc::format!("\\x{n:02x}")); }
+                    else if n <= 0xffff { out.push_str(&alloc::format!("\\u{n:04x}")); }
+                    else { out.push_str(&alloc::format!("\\u{{{n:x}}}")); }
+                }
+                c => out.push(c),
+            }
+        }
+        Ok(Value::string(out))
+    }, 1);
+
+    // ── Die annexB-Statiken ──────────────────────────────────────────────
+    //
+    // Sie liegen am KONSTRUKTOR, nicht am Ausdruck, und lesen den letzten
+    // erfolgreichen Treffer aus `Interp::last_match`. Ein Leser auf einem
+    // anderen `this` wirft — genau das prueft test262.
+    {
+        let legacy = |name: &str, alias: &str, f: NativeFn| {
+            let g = native(Some(fp.clone()), f, &alloc::format!("get {name}"), 0, false);
+            let p = Prop { value: None, get: Some(Value::Obj(g)), set: None,
+                writable: false, enumerable: false, configurable: true };
+            ctor.borrow_mut().define(name, Prop { value: None, get: p.get.clone(), set: None,
+                writable: false, enumerable: false, configurable: true });
+            if !alias.is_empty() { ctor.borrow_mut().define(alias, p); }
+        };
+        legacy("input", "$_", |i, t, _| legacy_get(i, t, LegacyPart::Input));
+        legacy("lastMatch", "$&", |i, t, _| legacy_get(i, t, LegacyPart::Matched));
+        legacy("lastParen", "$+", |i, t, _| legacy_get(i, t, LegacyPart::LastParen));
+        legacy("leftContext", "$`", |i, t, _| legacy_get(i, t, LegacyPart::Left));
+        legacy("rightContext", "$'", |i, t, _| legacy_get(i, t, LegacyPart::Right));
+        macro_rules! dollar {
+            ($($n:literal => $k:literal),* $(,)?) => { $(
+                legacy($n, "", |i, t, _| legacy_get(i, t, LegacyPart::Cap($k)));
+            )* };
+        }
+        dollar! { "$1" => 0, "$2" => 1, "$3" => 2, "$4" => 3, "$5" => 4,
+                  "$6" => 5, "$7" => 6, "$8" => 7, "$9" => 8 }
+        // `input` ist als einziges auch SCHREIBBAR.
+        let set = native(Some(fp.clone()), |i, t, a| {
+            legacy_this(i, &t)?;
+            let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+            match &mut i.last_match {
+                Some(lm) => lm.input = v.to_string(),
+                None => i.last_match = Some(crate::js::interp::LastMatch {
+                    input: v.to_string(), matched: String::new(), left: String::new(),
+                    right: String::new(), caps: alloc::vec![String::new(); 9],
+                    last_paren: String::new() }),
+            }
+            Ok(Value::Undefined)
+        }, "set input", 1, false);
+        for n in ["input", "$_"] {
+            let get = ctor.borrow().get_own(n).and_then(|p| p.get.clone());
+            ctor.borrow_mut().define(n, Prop { value: None, get,
+                set: Some(Value::Obj(set.clone())),
+                writable: false, enumerable: false, configurable: true });
+        }
+    }
+
     realm.global.borrow_mut().define("RegExp", Prop::builtin(Value::Obj(ctor)));
     realm.regexp_proto = proto;
 
@@ -749,11 +929,50 @@ pub fn install(realm: &mut Realm) {
         }
         let ms = all_matches(&re, &chars);
         if ms.is_empty() { return Ok(Value::Null); }
+        if let Some(last) = ms.last() { record(i, &chars, last); }
         let items: Vec<Value> = ms.iter().map(|m| {
             let (a2, b) = m.caps[0].unwrap_or((0, 0));
             Value::string(chars[a2..b].iter().collect::<String>())
         }).collect();
         Ok(i.new_array(items))
+    }, 1);
+    // `matchAll` sammelt EIFRIG ein und gibt einen Feld-Iterator darueber.
+    // Ein echter Motor laeuft faul und sieht Aenderungen an `lastIndex`
+    // waehrenddessen; benannt statt verschwiegen — die Schleife
+    // `for (const m of s.matchAll(re))` sieht keinen Unterschied.
+    def(&sp, "matchAll", |i, t, a| {
+        if matches!(t, Value::Undefined | Value::Null) {
+            return i.type_err("matchAll on undefined or null");
+        }
+        let arg = a.first().cloned().unwrap_or(Value::Undefined);
+        // Ein musteraehnliches Objekt zaehlt auch: `IsRegExp` fragt
+        // `Symbol.match`, und dann MUSS `flags` da sein.
+        if !matches!(arg, Value::Undefined | Value::Null) {
+            let is_re = compiled(&arg).is_some() || {
+                let m = i.get(&arg, SYM_MATCH)?;
+                !matches!(m, Value::Undefined) && m.truthy()
+            };
+            if is_re {
+                let fl = i.get(&arg, "flags")?;
+                if matches!(fl, Value::Undefined | Value::Null) {
+                    return i.type_err("matchAll: flags is undefined");
+                }
+                let fs = i.to_string(&fl)?;
+                if !fs.contains('g') {
+                    return i.type_err("matchAll requires a global regular expression");
+                }
+            }
+        }
+        let s = i.to_string(&t)?;
+        let chars: Vec<char> = s.chars().collect();
+        let rev = as_regex(i, a.first())?;
+        let Some(re) = compiled(&rev) else { return i.type_err("matchAll: not a RegExp") };
+        let ms = all_matches_global(&re, &chars);
+        if let Some(last) = ms.last() { record(i, &chars, last); }
+        let mut items = Vec::with_capacity(ms.len());
+        for m in &ms { items.push(match_result(i, &re, &chars, m, &s)); }
+        let arr = i.new_array(items);
+        i.array_iter(arr, 0)
     }, 1);
     def(&sp, "search", |i, t, a| {
         let s = i.to_string(&t)?;
@@ -761,7 +980,8 @@ pub fn install(realm: &mut Realm) {
         let rev = as_regex(i, a.first())?;
         let Some(re) = compiled(&rev) else { return Ok(Value::Num(-1.0)) };
         Ok(match re.exec(&chars, 0) {
-            Some(m) => Value::Num(m.caps[0].map(|(x, _)| x).unwrap_or(0) as f64),
+            Some(m) => { record(i, &chars, &m);
+                         Value::Num(m.caps[0].map(|(x, _)| x).unwrap_or(0) as f64) }
             None => Value::Num(-1.0),
         })
     }, 1);
@@ -863,6 +1083,7 @@ fn do_replace(i: &mut Interp, t: Value, a: &[Value], all: bool) -> C<Value> {
     let mut at = 0usize;
     while at <= chars.len() {
         let Some(m) = re.exec(&chars, at) else { break };
+        record(i, &chars, &m);
         let (a2, b) = m.caps[0].unwrap_or((at, at));
         out.extend(&chars[last..a2]);
         if i.is_callable(&rep) {
@@ -886,4 +1107,38 @@ fn do_replace(i: &mut Interp, t: Value, a: &[Value], all: bool) -> C<Value> {
     }
     out.extend(&chars[last.min(chars.len())..]);
     Ok(Value::string(out))
+}
+
+/// Welches Stueck des letzten Treffers eine annexB-Statik liest.
+#[derive(Clone, Copy)]
+enum LegacyPart { Input, Matched, Left, Right, LastParen, Cap(usize) }
+
+/// Die Statiken gehoeren dem KONSTRUKTOR. Auf einem anderen `this` werfen sie
+/// — sonst waere `RegExp.__lookupGetter__("$1").call({})` ein stiller Leser
+/// auf fremdem Zustand.
+fn legacy_this(i: &mut Interp, t: &Value) -> C<()> {
+    let want = i.get(&Value::Obj(i.realm.global.clone()), "RegExp")?;
+    match (t, &want) {
+        (Value::Obj(a), Value::Obj(b)) if Rc::ptr_eq(a, b) => Ok(()),
+        _ => i.type_err("RegExp legacy accessor on the wrong receiver"),
+    }
+}
+
+fn legacy_get(i: &mut Interp, t: Value, part: LegacyPart) -> C<Value> {
+    legacy_this(i, &t)?;
+    let Some(lm) = &i.last_match else { return Ok(Value::str("")) };
+    Ok(Value::string(match part {
+        LegacyPart::Input => lm.input.clone(),
+        LegacyPart::Matched => lm.matched.clone(),
+        LegacyPart::Left => lm.left.clone(),
+        LegacyPart::Right => lm.right.clone(),
+        LegacyPart::LastParen => lm.last_paren.clone(),
+        LegacyPart::Cap(k) => lm.caps.get(k).cloned().unwrap_or_default(),
+    }))
+}
+
+/// Ist das GENAU `RegExp.prototype`? Die Leser geben dort `undefined` statt
+/// zu werfen.
+fn is_regexp_proto(i: &Interp, t: &Value) -> bool {
+    matches!(t, Value::Obj(o) if Rc::ptr_eq(o, &i.realm.regexp_proto))
 }

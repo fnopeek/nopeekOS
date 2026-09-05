@@ -263,12 +263,13 @@ impl Interp {
         if let ObjKind::Native(n) = &fo.borrow().kind {
             if !n.ctor { return self.type_err("value is not a constructor"); }
             let nf = n.clone();
-            return (nf.func)(self, Value::Undefined, args);
+            let was = self.native_new;
+            self.native_new = true;
+            let r = (nf.func)(self, Value::Undefined, args);
+            self.native_new = was;
+            return r;
         }
-        if let ObjKind::Function(d) = &fo.borrow().kind {
-            if d.node.is_arrow { return self.type_err("arrow functions are not constructors"); }
-        }
-        if !self.is_callable(f) { return self.type_err("value is not a constructor"); }
+        if !self.is_constructor(f) { return self.type_err("value is not a constructor"); }
         let proto = match self.get(f, "prototype")? {
             Value::Obj(p) => Some(p),
             _ => Some(self.realm.object_proto.clone()),
