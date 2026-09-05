@@ -552,7 +552,12 @@ fn test262_exec() {
             let key: String = norm.chars().take(64).collect();
             let e = by_msg.entry(key).or_insert((0, rel.clone()));
             e.0 += 1;
-            if fails.len() < 5000 { fails.push((rel.clone(), why)); }
+            // Der Deckel galt der Bildschirmausgabe; `T262_FAILDETAIL` will
+            // alle. Ein Deckel, der still die Haelfte der Karte abschneidet,
+            // ist schlimmer als eine lange Datei.
+            if fails.len() < 5000 || std::env::var("T262_FAILDETAIL").is_ok() {
+                fails.push((rel.clone(), why));
+            }
             // ALLE Namen, nicht nur die ersten 5000: nur eine vollstaendige
             // Liste laesst sich gegen einen zweiten Lauf diffen, und der Diff
             // ist die einzige ehrliche Pruefung einer Umstellung.
@@ -566,6 +571,18 @@ fn test262_exec() {
         }
     }
 
+    // `T262_FAILDETAIL=<datei>`: JEDER Fehler mit seiner Meldung. Die
+    // Buendelung im Bericht zeigt zwanzig Zeilen und eine Beispieldatei —
+    // fuer „welche Verzeichnisse stecken hinter DIESER Meldung" reicht das
+    // nicht, und genau das ist die Frage vor jeder Planung.
+    if let Ok(path) = std::env::var("T262_FAILDETAIL") {
+        let mut out = String::new();
+        for (rel, why) in &fails {
+            out.push_str(&format!("{}\t{}\n", rel, why.replace('\t', " ").replace('\n', " ")));
+        }
+        let _ = fs::write(&path, out);
+        eprintln!("   {} Zeilen mit Meldung -> {path}", fails.len());
+    }
     if let Some(path) = &faillist {
         all_fails.sort();
         all_fails.dedup();
