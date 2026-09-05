@@ -112,6 +112,20 @@ pub fn this_observed(i: &mut Interp, env: &Rc<RefCell<Env>>) -> Value {
     v
 }
 
+/// `this` NEU binden — in genau der Umgebung, die es traegt.
+///
+/// Nur `super()` braucht das: bis dahin ist `this` in einer abgeleiteten
+/// Klasse noch nicht endgueltig, und ein Elternkonstruktor, der ein Objekt
+/// zurueckgibt, entscheidet es.
+pub fn set_env_this(env: &Rc<RefCell<Env>>, v: Value) {
+    let mut cur = env.clone();
+    loop {
+        if cur.borrow().this_val.is_some() { cur.borrow_mut().this_val = Some(v); return; }
+        let next = cur.borrow().parent.clone();
+        match next { Some(p) => cur = p, None => return }
+    }
+}
+
 pub fn env_this(env: &Rc<RefCell<Env>>) -> Value {
     let mut cur = env.clone();
     loop {
@@ -1050,6 +1064,7 @@ impl Interp {
 
     // ── Eigenschaften ────────────────────────────────────────────────────
     pub fn get(&mut self, base: &Value, key: &str) -> C<Value> {
+        self.private_brand(base, key)?;
         // Primitive bekommen KEINE Huelle fuer einen blossen Lesezugriff —
         // ausser bei Zeichenketten, wo Laenge und Index direkt beantwortet
         // werden. Eine Huelle je Zugriff waere sonst der teuerste Weg zu
@@ -1119,7 +1134,39 @@ impl Interp {
     /// werfen. Deshalb steht die Fahne hier und wird an jeder Rufstelle
     /// entschieden; ein Vorgabewert haette genau die Haelfte still falsch
     /// gelassen.
+    /// **Die Markenpruefung** (ES §7.3.28 `PrivateGet`/`PrivateSet`).
+    ///
+    /// Ein privates Feld ist keine Eigenschaft, die man anlegen kann: es
+    /// entsteht im Konstruktor und nirgends sonst. Ein Zugriff auf ein
+    /// Objekt, das es nicht hat, ist ein TypeError — nicht `undefined`, und
+    /// erst recht kein stilles Anlegen. Ohne diese Pruefung war
+    /// `fremdesObjekt.#f` schlicht `undefined`, und Schreiben legte das Feld
+    /// an: die Kapselung war eine Verabredung, keine Grenze.
+    /// `#x in obj` — die Markenpruefung als AUSDRUCK (ES §13.10.1).
+    ///
+    /// Sie WIRFT nicht, sie antwortet mit ja/nein; das ist ihr ganzer Zweck.
+    /// Der Parser macht daraus einen Bezeichner `#x` — ein echter Name kann
+    /// nie mit `#` anfangen, also ist das eindeutig.
+    pub fn private_in(&mut self, name: &str, base: &Value) -> C<Value> {
+        let Value::Obj(o) = base else {
+            return self.type_err("the right side of 'in' must be an object");
+        };
+        let key = super::value::private_key(name);
+        let o = o.clone();
+        Ok(Value::Bool(self.has_property(&o, &key)))
+    }
+
+    fn private_brand(&mut self, base: &Value, key: &str) -> C<()> {
+        if !key.starts_with(super::value::PRIVATE_PREFIX) { return Ok(()); }
+        let ok = matches!(base, Value::Obj(o) if self.has_property(o, key));
+        if ok { return Ok(()); }
+        self.type_err(&alloc::format!(
+            "cannot read private member #{} from an object whose class did not declare it",
+            super::value::private_name(key)))
+    }
+
     pub fn set(&mut self, base: &Value, key: &str, val: Value, throw: bool) -> C<()> {
+        self.private_brand(base, key)?;
         let Value::Obj(o) = base else {
             // Zuweisung an eine Eigenschaft eines Primitivs verpufft still
             // (im lockeren Modus). Der strenge Modus wuerde werfen — das
@@ -1440,8 +1487,13 @@ impl Interp {
     /// den Ausgang einsammeln.
     pub fn run_js_body(&mut self, d: &Rc<FuncData>, this_val: Value, args: &[Value]) -> C<Value> {
         let env = self.call_env(d, this_val, args)?;
+        // Ein KONSTRUKTOR ohne `return` liefert sein `this` — und das kann
+        // `super()` inzwischen umgehaengt haben. Bei einer Basisklasse ist es
+        // dasselbe Objekt, das `construct` ohnehin nimmt; bei einer
+        // abgeleiteten ist es der Unterschied.
+        let implicit = || if d.class.is_some() { env_this(&env) } else { Value::Undefined };
         match self.run_body(&d.node.body, &env) {
-            Ok(()) => Ok(Value::Undefined),
+            Ok(()) | Err(Abrupt::Return(Value::Undefined)) => Ok(implicit()),
             Err(Abrupt::Return(v)) => Ok(v),
             Err(e) => Err(e),
         }

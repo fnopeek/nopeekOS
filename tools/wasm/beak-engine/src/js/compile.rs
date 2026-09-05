@@ -875,6 +875,17 @@ impl Compiler {
                 Ok(())
             }
             Expr::Binary { op, left, right } => {
+                // `#x in obj`: die linke Seite ist ein NAME, kein Wert.
+                if *op == BinOp::In {
+                    if let Expr::Ident(n) = &**left {
+                        if let Some(name) = n.strip_prefix('#') {
+                            self.expr(right)?;
+                            let k = self.chunk.name(name);
+                            self.chunk.emit(Op::PrivateIn(k));
+                            return Ok(());
+                        }
+                    }
+                }
                 self.expr(left)?;
                 self.expr(right)?;
                 self.chunk.emit(Op::Bin(*op));

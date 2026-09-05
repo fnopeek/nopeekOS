@@ -130,6 +130,9 @@ pub enum Op {
     Concat(u16),
     /// `delete obj[names[i]]` bzw. `delete obj[key]`.
     DeleteProp(u32),
+    /// `#x in obj` — die Markenpruefung. Der Name steht in der Namenstabelle,
+    /// das Objekt auf dem Stapel.
+    PrivateIn(u32),
     DeleteIndex,
     /// Ein Feld aus den obersten `n` EINTRAEGEN bauen, von denen jeder
     /// entweder ein Wert oder ein zu spreizender ist (`spread[k]`).
