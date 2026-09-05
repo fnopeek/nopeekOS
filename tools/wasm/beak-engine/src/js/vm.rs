@@ -397,6 +397,16 @@ impl Vm {
                 let this = self.pop();
                 let callee = self.pop();
                 let n = chunk.names.get(*name as usize).map(|s| &**s);
+                // Ein DIREKTER `eval`-Aufruf ist kein gewoehnlicher: er sieht
+                // den Bereich des Rufers. Erkannt wird er am Namen UND an der
+                // Sache — eine eigene Funktion namens `eval` ist keiner.
+                if n == Some("eval") && i.is_eval_fn(&callee) {
+                    let env = self.frames.last().unwrap().envs.last().unwrap().clone();
+                    let c = args.first().cloned().unwrap_or(Value::Undefined);
+                    let v = i.perform_eval(&c, Some(env))?;
+                    self.push(v);
+                    return Ok(Flow::Go);
+                }
                 self.invoke(i, callee, this, args, n)?;
             }
             Op::New(argc) => {

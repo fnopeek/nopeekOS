@@ -1413,6 +1413,13 @@ pub fn make_realm() -> Realm {
     global.borrow_mut().define("globalThis", Prop::builtin(Value::Obj(global.clone())));
     def(&global, "isNaN", |i, _, a| Ok(Value::Bool(i.to_number(a.first().unwrap_or(&Value::Undefined))?.is_nan())), 1, fp);
     def(&global, "isFinite", |i, _, a| Ok(Value::Bool(i.to_number(a.first().unwrap_or(&Value::Undefined))?.is_finite())), 1, fp);
+    // `eval` als globale Funktion ist die INDIREKTE Form: sie laeuft im
+    // globalen Bereich. Die direkte erkennt der Aufruf selbst (siehe
+    // `Interp::is_eval_fn`).
+    def(&global, "eval", |i, _, a| {
+        let c = a.first().cloned().unwrap_or(Value::Undefined);
+        i.perform_eval(&c, None)
+    }, 1, fp);
     def(&global, "parseInt", |i, _, a| {
         let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         let t = s.trim();
@@ -2722,6 +2729,7 @@ pub fn make_realm() -> Realm {
             regexp_proto: ph(), symbol_proto, iterator_proto,
             generator_proto, generator_func_proto, array_iter_proto,
             string_iter_proto, promise_proto: ph(), date_proto: ph(),
+            iter_helper_proto: ph(), iter_wrap_proto: ph(), eval_fn: None,
             html_element_proto: ph(), svg_element_proto: ph(), fragment_proto: ph(),
             tag_protos: HashMap::new(), url_proto: ph(), url_params_proto: ph(),
             ta_protos, typed_proto: ta_proto, buffer_proto: ab_proto,

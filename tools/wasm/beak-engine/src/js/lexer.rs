@@ -190,6 +190,9 @@ impl<'a> Lexer<'a> {
 
     /// Zeichen ab `pos`, mit seiner UTF-8-Laenge.
     fn char_at(&self, i: usize) -> (char, usize) {
+        // `self.text[i..]` PANIKT auf einer Nicht-Zeichengrenze. Ein Lexer
+        // darf an keiner Eingabe platzen — im Zweifel ein Byte weiter.
+        if i >= self.text.len() || !self.text.is_char_boundary(i) { return ('\0', 1); }
         match self.text[i..].chars().next() {
             Some(c) => (c, c.len_utf8()),
             None => ('\0', 1),
@@ -563,7 +566,17 @@ impl<'a> Lexer<'a> {
             }
             let b = self.src[self.pos];
             match b {
-                b'\\' => { self.pos += 2; continue; }
+                // Ein `\\` schuetzt EIN ZEICHEN, nicht ein Byte: `/\\ä/` hat
+                // hinter dem Schraegstrich zwei Bytes, und `+= 2` landete
+                // mitten darin.
+                b'\\' => {
+                    self.pos += 1;
+                    if self.pos < self.src.len() {
+                        let (_, n) = self.char_at(self.pos);
+                        self.pos += n;
+                    }
+                    continue;
+                }
                 b'[' => in_class = true,
                 b']' => in_class = false,
                 b'/' if !in_class => break,

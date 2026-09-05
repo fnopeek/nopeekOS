@@ -131,6 +131,11 @@ pub struct Realm {
     pub string_iter_proto: Gc,
     pub promise_proto: Gc,
     pub date_proto: Gc,
+    pub iter_helper_proto: Gc,
+    pub iter_wrap_proto: Gc,
+    /// Die eingebaute `eval`. Gemerkt, weil ein Aufruf nur dann ein DIREKTER
+    /// ist, wenn er GENAU sie trifft.
+    pub eval_fn: Option<Gc>,
     /// Die Schnittstellen-Prototypen der DOM-Bindung. `tag_protos` bildet den
     /// Elementnamen auf seine Schnittstelle ab; was nicht darinsteht, ist
     /// `HTMLElement`.
@@ -414,6 +419,10 @@ impl Interp {
         super::json::install(&mut realm);
         super::promise::install(&mut realm);
         super::date::install(&mut realm);
+        super::iterhelp::install(&mut realm);
+        realm.eval_fn = match realm.global.borrow().get_own("eval").and_then(|p| p.value.clone()) {
+            Some(Value::Obj(o)) => Some(o), _ => None,
+        };
         super::url::install(&mut realm);
         Interp { realm, depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX,
                  fake_now: 0.0, epoch_ms: 0.0, doc: None, next_sym: 0, sym_registry: HashMap::new(),
@@ -1274,6 +1283,77 @@ impl Interp {
         // Ein `.then`, das vor dem Fehler angelegt wurde, ist angemeldet.
         super::promise::run_jobs(self);
         r
+    }
+
+    /// `eval`. Der Unterschied zwischen DIREKT und indirekt ist der Bereich:
+    /// `eval(s)` als blosser Aufruf laeuft im Bereich des Rufers und sieht
+    /// dessen Namen, `(0,eval)(s)` laeuft global.
+    ///
+    /// **Kein strenger Modus.** Die Engine kennt ihn zur Laufzeit nicht
+    /// (siehe [[project-beak-js-language-gap]]), also legt auch ein
+    /// `"use strict"` im Quelltext keinen eigenen Bereich fuer `var` an.
+    pub fn perform_eval(&mut self, code: &Value, caller: Option<Rc<RefCell<Env>>>) -> C<Value> {
+        // Alles, was keine Zeichenkette ist, kommt unveraendert zurueck —
+        // `eval(42)` ist 42, kein Programm.
+        let Value::Str(src) = code else { return Ok(code.clone()) };
+        // Ein `eval` legt einen RUST-Rahmen an (Parser + eigene Maschine) und
+        // laeuft sonst ohne Grenze im Kreis: `eval("eval('…')")`. Also zaehlt
+        // er wie ein Aufruf mit.
+        self.depth += 1;
+        if self.depth > self.max_depth {
+            self.depth -= 1;
+            return Err(self.throw_kind("RangeError", "maximum call stack size exceeded"));
+        }
+        let r = self.eval_inner(src, caller);
+        self.depth -= 1;
+        r
+    }
+
+    fn eval_inner(&mut self, src: &Rc<str>, caller: Option<Rc<RefCell<Env>>>) -> C<Value> {
+        let prog = match super::parser::parse(src, false) {
+            Ok(p) => p,
+            Err(e) => return Err(self.throw_kind("SyntaxError", &e.msg)),
+        };
+        let base = caller.unwrap_or_else(|| self.realm.global_env.clone());
+        // `let`/`const` bekommen einen EIGENEN Bereich, `var` und
+        // Funktionsdeklarationen steigen bis zur naechsten Funktionsgrenze
+        // des RUFERS — genau deshalb ist der Bereich hier kein Funktionsbereich.
+        let scope = Env::new(Some(base.clone()), false);
+        let mut var_env = base;
+        loop {
+            let is_fn = var_env.borrow().is_func_scope;
+            if is_fn { break }
+            let up = var_env.borrow().parent.clone();
+            match up { Some(p) => var_env = p, None => break }
+        }
+        self.hoist(&prog.body, &scope, &var_env)?;
+        // Dieselbe Wahl wie beim Programm: kann der Uebersetzer alles, faehrt
+        // die Maschine; sonst der Baumlaeufer. Nie eine Mischung.
+        match if self.vm_off { Err(super::code::Unsupported("off")) }
+              else { super::compile::program(&prog) } {
+            Ok(chunk) => {
+                self.vm_ran += 1;
+                let mut vm = super::vm::Vm::new();
+                vm.run(self, Rc::new(chunk), &scope)
+            }
+            Err(u) => {
+                self.vm_declined += 1;
+                self.vm_decline = Some(u.0);
+                let mut last = Value::Undefined;
+                for st in &prog.body {
+                    if let Some(v) = self.exec(st, &scope)? { last = v; }
+                }
+                Ok(last)
+            }
+        }
+    }
+
+    /// Ist dieser Wert die eingebaute `eval`? Nur dann ist ein Aufruf
+    /// `eval(...)` ein DIREKTER — jede andere Funktion unter dem Namen ist
+    /// ein gewoehnlicher Aufruf.
+    pub fn is_eval_fn(&self, v: &Value) -> bool {
+        let Some(want) = self.realm.eval_fn.as_ref() else { return false };
+        matches!(v, Value::Obj(o) if Rc::ptr_eq(o, want))
     }
 
     fn run_body(&mut self, body: &[Stmt], env: &Rc<RefCell<Env>>) -> C<()> {
