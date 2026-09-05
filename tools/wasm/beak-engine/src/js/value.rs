@@ -432,6 +432,9 @@ pub enum ObjKind {
     Buffer(Rc<BufData>),
     TypedArray(Rc<TaData>),
     DataView(Rc<DvData>),
+    /// Der Zeitwert eines `Date`. Als eigene Art und nicht als Eigenschaft,
+    /// damit er nicht in `Object.getOwnPropertyNames` auftaucht.
+    Date(Rc<core::cell::Cell<f64>>),
     /// Ein angehaltener Generator: seine EIGENE Maschine, samt Zustand.
     /// Siehe `generator.rs` — und den Kopf von `vm.rs` fuer den Grund, warum
     /// es eine eigene ist und kein Rahmen in einer fremden.

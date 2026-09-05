@@ -659,8 +659,8 @@ impl Interp {
                 // Seiten werden ZUERST primitiv gemacht, DANN entschieden —
                 // die Reihenfolge ist sichtbar, wenn `valueOf` Nebenwirkungen
                 // hat.
-                let lp = self.to_primitive(&l, false)?;
-                let rp = self.to_primitive(&r, false)?;
+                let lp = self.to_primitive_hint(&l, "default")?;
+                let rp = self.to_primitive_hint(&r, "default")?;
                 if matches!(lp, Value::Str(_)) || matches!(rp, Value::Str(_)) {
                     let a = self.to_string(&lp)?;
                     let b = self.to_string(&rp)?;
@@ -746,8 +746,8 @@ impl Interp {
             (_, Bool(b)) => { let n = Num(if *b { 1.0 } else { 0.0 }); self.loose_eq(l, &n)? }
             (Num(a), Str(_)) => *a == self.to_number(r)?,
             (Str(_), Num(b)) => self.to_number(l)? == *b,
-            (Obj(_), _) => { let p = self.to_primitive(l, false)?; self.loose_eq(&p, r)? }
-            (_, Obj(_)) => { let p = self.to_primitive(r, false)?; self.loose_eq(l, &p)? }
+            (Obj(_), _) => { let p = self.to_primitive_hint(l, "default")?; self.loose_eq(&p, r)? }
+            (_, Obj(_)) => { let p = self.to_primitive_hint(r, "default")?; self.loose_eq(l, &p)? }
         })
     }
 }

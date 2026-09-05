@@ -68,6 +68,7 @@ pub fn make_realm() -> Realm {
                     ObjKind::Arguments => "Arguments",
                     ObjKind::Regex(_) => "RegExp",
                     ObjKind::Promise(_) => "Promise",
+                    ObjKind::Date(_) => "Date",
                     ObjKind::Buffer(_) => "ArrayBuffer",
                     // Eine Sicht traegt ihren Namen ueber `Symbol.toStringTag`
                     // auf `%TypedArray%.prototype`; hier kommt sie nur an,
@@ -2651,23 +2652,6 @@ pub fn make_realm() -> Realm {
     }
     global.borrow_mut().define("DataView", Prop::builtin(Value::Obj(dv_ctor)));
 
-    let date_proto = new_obj(Some(object_proto.clone()));
-    def(&date_proto, "getTime", |i, this, _| i.get(&this, "__t"), 0, fp);
-    def(&date_proto, "valueOf", |i, this, _| i.get(&this, "__t"), 0, fp);
-    def(&date_proto, "toString", |_, _, _| Ok(Value::str("Thu Jan 01 1970 00:00:00 GMT+0000")), 0, fp);
-    let date_ctor = native(Some(function_proto.clone()), |i, _, a| {
-        let t = match a.first() { Some(v) => i.to_number(v)?, None => 0.0 };
-        let proto = i.get(&Value::Obj(i.realm.global.clone()), "Date")?;
-        let p = match i.get(&proto, "prototype")? { Value::Obj(o) => Some(o), _ => None };
-        let d = new_obj(p);
-        d.borrow_mut().define("__t", Prop { value: Some(Value::Num(t)), get: None, set: None,
-            writable: true, enumerable: false, configurable: false });
-        Ok(Value::Obj(d))
-    }, "Date", 7, true);
-    date_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(date_proto.clone())));
-    date_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(date_ctor.clone())));
-    def(&date_ctor, "now", |i, _, _| { i.fake_now += 1.0; Ok(Value::Num(i.fake_now)) }, 0, fp);
-    global.borrow_mut().define("Date", Prop::builtin(Value::Obj(date_ctor)));
 
     // Platzhalter — `dombind::install` ersetzt sie sofort. Sie stehen hier,
     // weil ein Realm ohne sie nicht baubar waere und `install` den fertigen
@@ -2680,7 +2664,7 @@ pub fn make_realm() -> Realm {
             event_proto: ph(), token_list_proto: ph(), style_proto: ph(), comment_proto: ph(),
             regexp_proto: ph(), symbol_proto, iterator_proto,
             generator_proto, generator_func_proto, array_iter_proto,
-            string_iter_proto, promise_proto: ph(),
+            string_iter_proto, promise_proto: ph(), date_proto: ph(),
             html_element_proto: ph(), svg_element_proto: ph(), fragment_proto: ph(),
             tag_protos: HashMap::new(), url_proto: ph(), url_params_proto: ph(),
             ta_protos, typed_proto: ta_proto, buffer_proto: ab_proto,
