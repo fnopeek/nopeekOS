@@ -1374,6 +1374,68 @@ fn sync_cookies(sess: &mut beak_engine::js::Session) {
     sess.interp.set_cookies(cookies::script_header_for(url, now));
 }
 
+/// Was die Seite am Verlauf verlangt hat — abholen und tun.
+///
+/// **Die Engine sammelt nur Absichten**, weil sie keinen Verlauf hat und
+/// keinen erfinden soll. Hier ist der Ort, an dem daraus etwas wird; und
+/// hier wird ihr auch gesagt, wie lang der Verlauf inzwischen ist, damit
+/// `history.length` nicht ewig 1 behauptet.
+///
+/// Gerufen an denselben Stellen wie `sync_cookies` — nach JEDEM
+/// Einstiegspunkt, nicht nur nach dem Laden. Ein Klick schreibt Verlauf
+/// genauso wie ein Skript beim Start.
+fn sync_history(engine: &Engine, sess: &mut beak_engine::js::Session) {
+    use beak_engine::js::interp::HistoryOp;
+    for op in sess.interp.take_history_ops() {
+        match op {
+            // `pushState`/`replaceState` NAVIGIEREN NICHT — sie schreiben nur
+            // die Adresse um. Genau das ist ihr Sinn: eine Anwendung, die
+            // ihre Ansicht wechselt, ohne ein Dokument zu holen.
+            HistoryOp::Push { ref url } | HistoryOp::Replace { ref url } => {
+                let replace = matches!(op, HistoryOp::Replace { .. });
+                if url.is_empty() {
+                    continue;
+                }
+                let abs = resolve(url_str(), url);
+                // Nur die eigene Herkunft. Eine Seite darf ihre Adresszeile
+                // umschreiben, aber nicht auf eine fremde Herkunft — das
+                // waere eine Faelschung, die der Nutzer nicht sieht.
+                if origin_of(&abs) != origin_of(url_str()) {
+                    log("[beak] history: Adresse fremder Herkunft abgelehnt");
+                    continue;
+                }
+                set_url(&abs);
+                if !replace {
+                    hist_push(&abs);
+                }
+            }
+            // `go(n)` springt WIRKLICH. Ein Zaehler, der die Absicht
+            // notiert und nichts tut, waere schlimmer als kein `history`:
+            // die Seite glaubt dann, sie sei zurueckgegangen.
+            //
+            // Mehr als einen Schritt kann beaks Verlauf nicht am Stueck —
+            // also so oft, wie verlangt, und wer am Ende ist, hoert auf.
+            HistoryOp::Go(n) => {
+                let mut target: Option<String> = None;
+                for _ in 0..n.unsigned_abs().min(HIST_MAX as u32) {
+                    match if n < 0 { hist_back() } else { hist_forward() } {
+                        Some(u) => target = Some(String::from(u)),
+                        None => break,
+                    }
+                }
+                if let Some(u) = target {
+                    // `push_hist` ist hier FALSCH: sonst waechst der Verlauf
+                    // beim Zurueckgehen, und man kaeme nie heraus.
+                    nav_begin(engine, "GET", &u, &[], "", false);
+                    return;
+                }
+            }
+        }
+    }
+    let count = unsafe { core::ptr::addr_of!(HIST_COUNT).read() };
+    sess.interp.set_history(count.max(1) as f64, beak_engine::js::value::Value::Null);
+}
+
 fn run_scripts(engine: &Engine, list: Vec<PendingScript>) {
     let t0 = now_ms();
     let dom = beak_engine::parse(html_str());
@@ -1445,6 +1507,7 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) {
     // `setTimeout(…, 0)` fertig.
     let timers = sess.interp.run_timers();
     sync_cookies(&mut sess);
+    sync_history(engine, &mut sess);
     drain_console(&mut sess);
     let mut listeners = false;
     if let Some(d) = sess.interp.doc.as_mut() {
@@ -1492,6 +1555,7 @@ fn dispatch_click(engine: &Engine, lay: &Layout, cx: i32, cy: i32) -> bool {
         beak_engine::js::dombind::dispatch(&mut sess.interp, "click", &nodes), Ok(true));
     let timers = sess.interp.run_timers();
     sync_cookies(sess);
+    sync_history(engine, sess);
     // NUR wenn sich etwas geaendert hat. Ein Behandler, der bloss zaehlt,
     // darf keine 130 ms Layout kosten.
     let changed = sess.interp.doc.as_ref().is_some_and(|d| d.dirty);

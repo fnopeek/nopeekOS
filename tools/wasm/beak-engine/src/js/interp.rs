@@ -290,6 +290,19 @@ macro_rules! strict_site {
 }
 pub(crate) use strict_site;
 
+/// Was eine Seite am Verlauf verlangt hat. **Eine Absicht, keine Tat** —
+/// ausgefuehrt wird sie vom Wirt, der als einziger einen Verlauf hat.
+#[derive(Debug, Clone)]
+pub enum HistoryOp {
+    /// `pushState(state, title, url)` — `url` ist bereits aufgeloest oder
+    /// leer, wenn die Seite keine angab.
+    Push { url: String },
+    /// `replaceState(...)` — derselbe Eintrag, neue Adresse.
+    Replace { url: String },
+    /// `go(n)`, `back()` (= `go(-1)`), `forward()` (= `go(1)`).
+    Go(i32),
+}
+
 pub struct Interp {
     pub realm: Realm,
     /// Aufruftiefe. Ein Baumlaeufer benutzt den RUST-Stapel, also wird ein
@@ -415,6 +428,19 @@ pub struct Interp {
     /// Reihenfolge. Der Wirt holt es sich mit `take_cookie_sets` und legt es
     /// in seinen Behaelter — die Engine entscheidet nicht, was gilt.
     pub cookie_sets: Vec<String>,
+    /// Was die Seite mit `history.pushState`/`replaceState`/`go` verlangt hat
+    /// — roh und in der Reihenfolge. **Die Engine navigiert nicht**, sie hat
+    /// keinen Verlauf und soll keinen erfinden; sie sammelt, und der Wirt
+    /// holt es mit `take_history_ops` ab und entscheidet. Dasselbe Muster
+    /// wie bei den Keksen.
+    pub history_ops: Vec<HistoryOp>,
+    /// `history.state` — der Zustand, den die Seite zuletzt gesetzt hat.
+    /// Er gehoert dem DOKUMENT, nicht dem Verlauf des Wirts, und lebt
+    /// deshalb hier.
+    pub history_state: Value,
+    /// `history.length`, vom Wirt eingereicht. Ohne ihn steht 1 da — ein
+    /// frisch geladenes Dokument ist immer mindestens ein Eintrag.
+    pub history_len: f64,
     /// Laufende Nummer fuer `Symbol()`.
     pub next_sym: u32,
     /// Die globale Symbolregistrierung hinter `Symbol.for`/`Symbol.keyFor`.
@@ -518,6 +544,7 @@ impl Interp {
                  #[cfg(feature = "strict-probe")]
                  strict_probe: [0; STRICT_SITES],
                  cookies: String::new(), cookie_sets: Vec::new(), style_ctx: None,
+                 history_ops: Vec::new(), history_state: Value::Null, history_len: 1.0,
                  vm_ran: 0, vm_declined: 0, vm_decline: None, vm_off: false,
                  func_chunks: HashMap::new(), func_declines: HashMap::new(), pending_labels: Vec::new(), vm_calls: 0, vm_calls_native: 0, vm_calls_slow: 0,
                  geometry: None,
@@ -724,6 +751,19 @@ impl Interp {
 
     /// Was die Seite gesetzt hat, herausnehmen. Rohe Erklaerungen
     /// (`name=wert; Path=/; Max-Age=…`) — die Regeln kennt der Behaelter.
+    /// Was die Seite am Verlauf tun WOLLTE. Der Wirt holt es ab und
+    /// entscheidet; die Liste ist danach leer.
+    pub fn take_history_ops(&mut self) -> Vec<HistoryOp> {
+        core::mem::take(&mut self.history_ops)
+    }
+
+    /// Der Wirt reicht ein, wie lang sein Verlauf ist und welchen Zustand
+    /// der aktuelle Eintrag traegt — beim Laden und nach jedem Sprung.
+    pub fn set_history(&mut self, len: f64, state: Value) {
+        self.history_len = len;
+        self.history_state = state;
+    }
+
     pub fn take_cookie_sets(&mut self) -> Vec<String> {
         core::mem::take(&mut self.cookie_sets)
     }
