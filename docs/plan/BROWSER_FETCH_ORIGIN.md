@@ -257,12 +257,27 @@ Jede Stufe ist für sich prüfbar und lässt beak in einem stimmigen Zustand.
    at rest is a separate decision"). V3 hält das fest. Wenn ein Login je
    Sitzung zu lästig wird, ist das die Diskussion — mit Verschlüsselung und
    der Frage, wer sonst lesen darf.
-3. **Registrierbare Domain ohne Public-Suffix-Liste.** K1 braucht den
-   Site-Begriff; die echte Liste ist ~10 000 Einträge und wächst. Eine grobe
-   Heuristik („letzte zwei Bestandteile") ist bei `co.uk` falsch — und
-   zwar in die gefährliche Richtung. Vorschlag: eine eingebettete Kurzliste
-   der mehrteiligen Endungen, gemessen am Zielkorpus statt geraten. **Vor
-   Stufe A auszählen**, nicht schätzen.
+3. ~~Registrierbare Domain ohne Public-Suffix-Liste.~~ **Ausgezählt und
+   entschieden, 2026-09-05.** Im Zielkorpus stehen 691 verschiedene Hosts;
+   bei **7** wäre „die letzten zwei Bestandteile" falsch — und zwar in die
+   gefährliche Richtung: fünf `*.github.io`, `github-cloud.s3.amazonaws.com`
+   und `pajhome.org.uk` würden als *dieselbe* Site gelten wie jede andere
+   Seite unter derselben Endung. Kekse flössen zwischen fremden Nutzern.
+
+   Statt eine Kurzliste zu raten wurde die echte gemessen:
+
+       Public Suffix List   10 321 Regeln   144 KB roh   44 KB gzip
+       davon ICANN 6 949, privat 3 372
+
+   Der private Abschnitt ist genau der, der `github.io` und
+   `s3.amazonaws.com` enthält — also der, der unseren Fall rettet. Gegen
+   3,86 MB `beak.wasm`, 9 MB Python-Stdlib und 12 MB Kernelabbild sind
+   144 KB nichts.
+
+   **Entscheidung: die echte Liste wird eingebettet** (`include_str!`,
+   unkomprimiert — kein Startaufwand, kein neuer Vertrauenspfad). Sie
+   aktualisiert sich mit jedem beak-Release. Eine Sicherheitsgrenze
+   approximiert man nicht, wenn die genaue Antwort 144 KB kostet.
 
 ---
 
