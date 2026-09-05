@@ -186,6 +186,48 @@ row(langRows, "URI-Funktionen", function () {
 row(langRows, "Date und performance", function () {
   return typeof Date.now() === "number" && performance.now() >= 0;
 });
+/* Der strenge Modus (0.98.0). Er entscheidet sich zur LAUFZEIT, also kann
+   nur ein Geraetelauf ihn bestaetigen — der Wirt fuehrt denselben Code. */
+row(langRows, "strenger Modus wirft", function () {
+  return (function () {
+    "use strict";
+    var o = Object.freeze({ p: 1 });
+    try { o.p = 2; return false } catch (e) { return e instanceof TypeError }
+  })();
+});
+row(langRows, "strenger Modus: unbekannter Name", function () {
+  return (function () {
+    "use strict";
+    try { nichtDeklariert987 = 1; return false } catch (e) { return e instanceof ReferenceError }
+  })();
+});
+row(langRows, "lockeres this", function () {
+  /* Die andere Haelfte, und die groessere: ein einfacher Aufruf sieht
+     `globalThis`, ein primitives `this` wird eingepackt. */
+  var plain = (function () { return this })();
+  var boxed = (function () { return typeof this })  .call(7);
+  return plain === globalThis && boxed === "object";
+});
+row(langRows, "strenges this bleibt undefined", function () {
+  return (function () { "use strict"; return this })  .call(undefined) === undefined;
+});
+row(langRows, "Eingebaute werfen in beiden Modi", function () {
+  var a = Object.freeze([1, 2]);
+  try { a.push(3); return false } catch (e) { return e instanceof TypeError }
+});
+row(langRows, "Klassenkoerper ist streng", function () {
+  class S { m() { var o = Object.freeze({ p: 1 });
+                  try { o.p = 2; return false } catch (e) { return e instanceof TypeError } } }
+  return new S().m();
+});
+row(langRows, "strenges eval behaelt sein var", function () {
+  eval('"use strict"; var nurImEval654 = 1;');
+  return typeof nurImEval654 === "undefined";
+});
+row(langRows, "new String ist ein Objekt", function () {
+  return typeof new String("x") === "object" && new String("x") == "x"
+      && Object.prototype.toString.call(new Number(1)) === "[object Number]";
+});
 
 /* ---------- Dokument ---------- */
 row(domRows, "getElementById", function () { return document.getElementById("verdict") !== null });
