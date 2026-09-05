@@ -30,6 +30,7 @@ pub mod webp;
 pub mod layout;
 pub mod picture;
 pub mod raster;
+pub mod site;
 pub mod style;
 pub mod svg;
 pub mod values;
