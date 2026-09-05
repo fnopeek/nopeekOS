@@ -313,6 +313,37 @@ pub fn install(realm: &mut Realm) {
         Ok(Value::Obj(p))
     }, 1, &fp);
 
+    // `withResolvers` gibt genau die drei Stuecke heraus, die der
+    // Konstruktor sonst im Ausfuehrer versteckt.
+    d(&ctor, "withResolvers", |i, t, _| {
+        // Sie bauen ueber `NewPromiseCapability(this)` — also muss `this` ein
+        // Konstruktor sein, auch wenn wir immer unser eigenes Versprechen
+        // liefern.
+        if !i.is_constructor(&t) { return i.type_err("withResolvers on a non-constructor"); }
+        let p = new_promise(i);
+        let (res, rej) = resolving_functions(i, &p);
+        let o = new_obj(Some(i.realm.object_proto.clone()));
+        o.borrow_mut().define("promise", Prop::data(Value::Obj(p)));
+        o.borrow_mut().define("resolve", Prop::data(res));
+        o.borrow_mut().define("reject", Prop::data(rej));
+        Ok(Value::Obj(o))
+    }, 0, &fp);
+    // `Promise.try` faengt einen SYNCHRONEN Wurf ein und macht ihn zur
+    // Ablehnung — das ist ihr ganzer Zweck.
+    d(&ctor, "try", |i, t, a| {
+        if !i.is_constructor(&t) { return i.type_err("Promise.try on a non-constructor"); }
+        let f = a.first().cloned().unwrap_or(Value::Undefined);
+        if !i.is_callable(&f) { return i.type_err("Promise.try: argument is not a function"); }
+        let p = new_promise(i);
+        let rest: Vec<Value> = a.iter().skip(1).cloned().collect();
+        match i.call(&f, Value::Undefined, &rest) {
+            Ok(v) => resolve_promise(i, &p, v),
+            Err(Abrupt::Throw(e)) => settle(i, &p, e, true),
+            Err(e) => return Err(e),
+        }
+        Ok(Value::Obj(p))
+    }, 1, &fp);
+
     realm.global.borrow_mut().define("Promise", Prop::builtin(Value::Obj(ctor)));
 }
 

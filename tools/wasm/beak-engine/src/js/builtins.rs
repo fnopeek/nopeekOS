@@ -168,6 +168,14 @@ pub fn make_realm() -> Realm {
         }};
     }
     err_ctor!("Error", |i, _, a| make_error(i, "Error", a));
+    // `Error.isError` fragt die ART, nicht die Prototypenkette — ein
+    // `Object.create(Error.prototype)` ist KEIN Fehler.
+    if let Some(Value::Obj(ec)) = global.borrow().get_own("Error").and_then(|p| p.value.clone()) {
+        def(&ec, "isError", |_, _, a| {
+            Ok(Value::Bool(matches!(a.first(), Some(Value::Obj(o))
+                if matches!(o.borrow().kind, ObjKind::Error))))
+        }, 1, fp);
+    }
     err_ctor!("TypeError", |i, _, a| make_error(i, "TypeError", a));
     err_ctor!("RangeError", |i, _, a| make_error(i, "RangeError", a));
     err_ctor!("SyntaxError", |i, _, a| make_error(i, "SyntaxError", a));
@@ -354,21 +362,76 @@ pub fn make_realm() -> Realm {
         let f = a.first().cloned().unwrap_or(Value::Undefined);
         if !i.is_callable(&f) { return i.type_err("callback is not a function"); }
         let n = array_len(i, &this)? as usize;
+        // LOECHER zaehlen nicht mit. Unsere Felder haben zwar keine, aber
+        // `new Array(10)` legt auch keine Indizes an — und genau daran haengt,
+        // ob der Aufruf ohne Startwert wirft.
         let (mut acc, mut k) = match a.get(1) {
             Some(v) => (v.clone(), 0usize),
             None => {
-                if n == 0 { return i.type_err("reduce of empty array with no initial value"); }
-                (i.get(&this, "0")?, 1usize)
+                let mut at = None;
+                for j in 0..n {
+                    i.tick()?;
+                    if has_index(i, &this, j) { at = Some(j); break; }
+                }
+                let Some(j) = at else {
+                    return i.type_err("reduce of empty array with no initial value");
+                };
+                (i.get(&this, &num_to_string(j as f64))?, j + 1)
             }
         };
         while k < n {
             i.tick()?;
+            if !has_index(i, &this, k) { k += 1; continue; }
             let v = i.get(&this, &num_to_string(k as f64))?;
             acc = i.call(&f, Value::Undefined, &[acc, v, Value::Num(k as f64), this.clone()])?;
             k += 1;
         }
         Ok(acc)
     }, 1, fp);
+    def(&array_proto, "reduceRight", |i, this, a| {
+        let f = a.first().cloned().unwrap_or(Value::Undefined);
+        if !i.is_callable(&f) { return i.type_err("callback is not a function"); }
+        let n = array_len(i, &this)? as usize;
+        let (mut acc, mut k) = match a.get(1) {
+            Some(v) => (v.clone(), n),
+            None => {
+                let mut at = None;
+                for j in (0..n).rev() {
+                    i.tick()?;
+                    if has_index(i, &this, j) { at = Some(j); break; }
+                }
+                let Some(j) = at else {
+                    return i.type_err("reduceRight of empty array with no initial value");
+                };
+                (i.get(&this, &num_to_string(j as f64))?, j)
+            }
+        };
+        while k > 0 {
+            i.tick()?;
+            k -= 1;
+            if !has_index(i, &this, k) { continue; }
+            let v = i.get(&this, &num_to_string(k as f64))?;
+            acc = i.call(&f, Value::Undefined, &[acc, v, Value::Num(k as f64), this.clone()])?;
+        }
+        Ok(acc)
+    }, 1, fp);
+    // Ohne Sprachumgebung ist `toLocaleString` die Verkettung der einzelnen
+    // `toLocaleString` — das ist keine Vereinfachung, das ist der Algorithmus.
+    def(&array_proto, "toLocaleString", |i, this, _| {
+        let n = array_len(i, &this)? as usize;
+        let mut out = String::new();
+        for k in 0..n {
+            i.tick()?;
+            if k > 0 { out.push(','); }
+            let v = i.get(&this, &num_to_string(k as f64))?;
+            if matches!(v, Value::Undefined | Value::Null) { continue; }
+            let f = i.get(&v, "toLocaleString")?;
+            if !i.is_callable(&f) { return i.type_err("toLocaleString is not a function"); }
+            let r = i.call(&f, v, &[])?;
+            out.push_str(&i.to_string(&r)?);
+        }
+        Ok(Value::string(out))
+    }, 0, fp);
     def(&array_proto, "includes", |i, this, a| {
         let target = a.first().cloned().unwrap_or(Value::Undefined);
         let n = array_len(i, &this)? as usize;
@@ -602,6 +665,10 @@ pub fn make_realm() -> Realm {
     def(&string_proto, "trimEnd", |i, t, _| {
         let s = i.to_string(&t)?; Ok(Value::str(s.trim_end()))
     }, 0, fp);
+    for (alias, orig) in [("trimLeft", "trimStart"), ("trimRight", "trimEnd")] {
+        let v = string_proto.borrow().get_own(orig).and_then(|p| p.value.clone());
+        if let Some(v) = v { string_proto.borrow_mut().define(alias, Prop::builtin(v)); }
+    }
     def(&string_proto, "padStart", |i, t, a| pad(i, t, a, true), 2, fp);
     def(&string_proto, "padEnd", |i, t, a| pad(i, t, a, false), 2, fp);
     def(&string_proto, "concat", |i, t, a| {
@@ -618,6 +685,62 @@ pub fn make_realm() -> Realm {
     def(&string_proto, "trim", |i, this, _| {
         let s = i.to_string(&this)?; Ok(Value::str(s.trim()))
     }, 0, fp);
+    // Ohne Sprachumgebung IST die landessprachliche Umwandlung die
+    // gewoehnliche. Eine erfundene tuerkische Sonderregel waere schlechter
+    // als keine.
+    def(&string_proto, "toLocaleUpperCase", |i, this, _| {
+        let s = i.to_string(&this)?; Ok(Value::string(s.to_uppercase()))
+    }, 0, fp);
+    def(&string_proto, "toLocaleLowerCase", |i, this, _| {
+        let s = i.to_string(&this)?; Ok(Value::string(s.to_lowercase()))
+    }, 0, fp);
+    // Unsere Zeichenketten sind UTF-8 — eine einzelne Ersatzhaelfte kann
+    // darin gar nicht stehen. Also ist jede wohlgeformt, und `toWellFormed`
+    // gibt sie unveraendert zurueck. Benannt statt verschwiegen: eine Seite,
+    // die eine kaputte UTF-16-Folge baut, bekommt hier `true` statt `false`.
+    def(&string_proto, "isWellFormed", |i, this, _| {
+        let _ = i.to_string(&this)?; Ok(Value::Bool(true))
+    }, 0, fp);
+    def(&string_proto, "toWellFormed", |i, this, _| {
+        let s = i.to_string(&this)?; Ok(Value::Str(s))
+    }, 0, fp);
+    // Die dreizehn annexB-Auszeichner. Sie stehen in der Spezifikation, weil
+    // alter Code sie ruft — und der Anfuehrungszeichen-Ersatz gehoert dazu.
+    macro_rules! html_wrap {
+        ($($m:literal => $tag:literal, $attr:literal, $len:literal),* $(,)?) => { $(
+            def(&string_proto, $m, |i, t, a| {
+                let s = i.to_string(&t)?;
+                let (tag, attr) = ($tag, $attr);
+                let mut open = String::from("<");
+                open.push_str(tag);
+                if !attr.is_empty() {
+                    let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+                    open.push(' ');
+                    open.push_str(attr);
+                    open.push_str("=\"");
+                    open.push_str(&v.replace('"', "&quot;"));
+                    open.push('"');
+                }
+                open.push('>');
+                Ok(Value::string(alloc::format!("{open}{s}</{tag}>")))
+            }, $len, fp);
+        )* };
+    }
+    html_wrap! {
+        "anchor" => "a", "name", 1,
+        "link" => "a", "href", 1,
+        "fontcolor" => "font", "color", 1,
+        "fontsize" => "font", "size", 1,
+        "big" => "big", "", 0,
+        "blink" => "blink", "", 0,
+        "bold" => "b", "", 0,
+        "fixed" => "tt", "", 0,
+        "italics" => "i", "", 0,
+        "small" => "small", "", 0,
+        "strike" => "strike", "", 0,
+        "sub" => "sub", "", 0,
+        "sup" => "sup", "", 0,
+    }
 
     // ── Number / Boolean prototypes ──────────────────────────────────────
     def(&number_proto, "valueOf", |i, this, _| {
@@ -627,12 +750,15 @@ pub fn make_realm() -> Realm {
         if matches!(this, Value::Num(_)) { return Ok(this); }
         i.type_err("Number.prototype.valueOf on a non-number")
     }, 0, fp);
-    def(&number_proto, "toString", |i, this, _| {
-        let v = if let Value::Obj(o) = &this {
-            match &o.borrow().kind { ObjKind::NumWrap(n) => Value::Num(*n), _ => this.clone() }
-        } else { this.clone() };
-        let n = i.to_number(&v)?;
-        Ok(Value::string(num_to_string(n)))
+    def(&number_proto, "toString", |i, this, a| {
+        let n = this_number(i, &this)?;
+        let radix = match a.first() {
+            None | Some(Value::Undefined) => 10.0,
+            Some(v) => to_integer(i.to_number(v)?),
+        };
+        if !(2.0..=36.0).contains(&radix) { return i.range_err("toString: radix out of range"); }
+        Ok(Value::string(if radix == 10.0 { num_to_string(n) }
+                         else { num_to_radix(n, radix as u32) }))
     }, 1, fp);
     def(&boolean_proto, "valueOf", |i, this, _| {
         if let Value::Obj(o) = &this {
@@ -651,14 +777,14 @@ pub fn make_realm() -> Realm {
     // ist in JS "1.00" (weil 1.005 als f64 knapp darunter liegt), und wer
     // hier eine eigene Rundung erfindet, weicht genau dort ab.
     def(&number_proto, "toFixed", |i, t, a| {
-        let n = i.to_number(&t)?;
+        let n = this_number(i, &t)?;
         let d = to_integer(i.to_number(a.first().unwrap_or(&Value::Num(0.0)))?);
         if !(0.0..=100.0).contains(&d) { return i.range_err("toFixed: digits out of range"); }
         if !n.is_finite() || libm::fabs(n) >= 1e21 { return Ok(Value::string(num_to_string(n))); }
         Ok(Value::string(fixed(n, d as u32)))
     }, 1, fp);
     def(&number_proto, "toPrecision", |i, t, a| {
-        let n = i.to_number(&t)?;
+        let n = this_number(i, &t)?;
         let Some(v) = a.first().filter(|v| !matches!(v, Value::Undefined)) else {
             return Ok(Value::string(num_to_string(n)));
         };
@@ -678,14 +804,117 @@ pub fn make_realm() -> Realm {
         }
         Ok(Value::string(fixed(n, (p as i32 - 1 - e).max(0) as u32)))
     }, 1, fp);
+    def(&number_proto, "toExponential", |i, t, a| {
+        let n = this_number(i, &t)?;
+        let arg = a.first().cloned().unwrap_or(Value::Undefined);
+        // Die Umwandlung des Arguments laeuft VOR der Endlichkeitspruefung —
+        // sie ist beobachtbar (ES 21.1.3.2).
+        let dv = i.to_number(&arg)?;
+        if !n.is_finite() { return Ok(Value::string(num_to_string(n))); }
+        let auto = matches!(arg, Value::Undefined);
+        let d = to_integer(dv);
+        if !auto && !(0.0..=100.0).contains(&d) { return i.range_err("toExponential: out of range"); }
+        if n == 0.0 {
+            let f = if auto { 0 } else { d as u32 };
+            let sign = if n.is_sign_negative() { "-" } else { "" };
+            return Ok(Value::string(alloc::format!("{sign}{}e+0", fixed(0.0, f))));
+        }
+        let a2 = libm::fabs(n);
+        let mut e = libm::floor(libm::log10(a2)) as i32;
+        let f = if auto {
+            // Ohne Stellenangabe: so viele, wie die kuerzeste Darstellung
+            // braucht. `num_to_string` liefert genau die.
+            let s = num_to_string(a2);
+            let digits: usize = s.chars().filter(|c| c.is_ascii_digit()).count();
+            (digits.saturating_sub(1)).min(100) as u32
+        } else { d as u32 };
+        let mut mant = a2 / libm::pow(10.0, e as f64);
+        // Das Runden der Mantisse kann sie auf 10 heben — dann traegt der
+        // Exponent die Stelle.
+        let r = libm::pow(10.0, f as f64);
+        if libm::floor(mant * r + 0.5) >= 10.0 * r { mant /= 10.0; e += 1; }
+        let sign = if e < 0 { '-' } else { '+' };
+        let body = alloc::format!("{}e{}{}", fixed(mant, f), sign, e.abs());
+        Ok(Value::string(if n < 0.0 { alloc::format!("-{body}") } else { body }))
+    }, 1, fp);
     // Ohne Landeseinstellungen: dieselbe Ausgabe wie `toString`. Eine
     // erfundene Tausendertrennung waere schlimmer — sie saehe aus wie eine
     // Lokalisierung und waere die falsche.
     def(&number_proto, "toLocaleString", |i, t, _| {
-        let n = i.to_number(&t)?; Ok(Value::string(num_to_string(n)))
+        let n = this_number(i, &t)?; Ok(Value::string(num_to_string(n)))
     }, 0, fp);
 
     // ── Konstruktoren + globale Funktionen ───────────────────────────────
+    // ── `Object.prototype.__proto__` und die vier annexB-Helfer ─────────
+    //
+    // `__proto__` ist ein ZUGRIFF auf `Object.prototype`, keine Eigenschaft
+    // je Objekt — sonst waere `({}).__proto__` ein eigener Schluessel und
+    // taeuchte in `Object.keys` auf.
+    {
+        let get = native(Some(function_proto.clone()), |i, t, _| {
+            let o = i.to_object(&t)?;
+            let p = o.borrow().proto.clone();
+            Ok(match p { Some(x) => Value::Obj(x), None => Value::Null })
+        }, "get __proto__", 0, false);
+        let set = native(Some(function_proto.clone()), |i, t, a| {
+            if matches!(t, Value::Undefined | Value::Null) {
+                return i.type_err("cannot set __proto__ of undefined or null");
+            }
+            let Value::Obj(o) = &t else { return Ok(Value::Undefined) };
+            let np = match a.first() {
+                Some(Value::Obj(p)) => Some(p.clone()),
+                Some(Value::Null) => None,
+                // Ein Primitiv ist KEIN Fehler, es wird still uebergangen.
+                _ => return Ok(Value::Undefined),
+            };
+            let mut cur = np.clone();
+            let mut hops = 0;
+            while let Some(c) = cur {
+                hops += 1;
+                if hops > crate::js::interp::MAX_PROTO_CHAIN || Rc::ptr_eq(&c, o) {
+                    return i.type_err("cyclic prototype chain");
+                }
+                let n = c.borrow().proto.clone();
+                cur = n;
+            }
+            if !o.borrow().extensible {
+                return i.type_err("cannot set prototype of a non-extensible object");
+            }
+            o.borrow_mut().proto = np;
+            Ok(Value::Undefined)
+        }, "set __proto__", 1, false);
+        object_proto.borrow_mut().define("__proto__", Prop {
+            value: None, get: Some(Value::Obj(get)), set: Some(Value::Obj(set)),
+            writable: false, enumerable: false, configurable: true });
+    }
+    def(&object_proto, "__defineGetter__", |i, t, a| {
+        let o = i.to_object(&t)?;
+        let f = a.get(1).cloned().unwrap_or(Value::Undefined);
+        if !i.is_callable(&f) { return i.type_err("getter is not a function"); }
+        let k = i.to_prop_key(a.first().unwrap_or(&Value::Undefined))?;
+        let keep = o.borrow().get_own(&k).and_then(|p| p.set.clone());
+        o.borrow_mut().define(&k, Prop { value: None, get: Some(f), set: keep,
+            writable: false, enumerable: true, configurable: true });
+        Ok(Value::Undefined)
+    }, 2, fp);
+    def(&object_proto, "__defineSetter__", |i, t, a| {
+        let o = i.to_object(&t)?;
+        let f = a.get(1).cloned().unwrap_or(Value::Undefined);
+        if !i.is_callable(&f) { return i.type_err("setter is not a function"); }
+        let k = i.to_prop_key(a.first().unwrap_or(&Value::Undefined))?;
+        let keep = o.borrow().get_own(&k).and_then(|p| p.get.clone());
+        o.borrow_mut().define(&k, Prop { value: None, get: keep, set: Some(f),
+            writable: false, enumerable: true, configurable: true });
+        Ok(Value::Undefined)
+    }, 2, fp);
+    def(&object_proto, "__lookupGetter__", |i, t, a| lookup_accessor(i, t, a, false), 1, fp);
+    def(&object_proto, "__lookupSetter__", |i, t, a| lookup_accessor(i, t, a, true), 1, fp);
+    def(&object_proto, "toLocaleString", |i, t, _| {
+        let f = i.get(&t, "toString")?;
+        if !i.is_callable(&f) { return i.type_err("toString is not a function"); }
+        i.call(&f, t, &[])
+    }, 0, fp);
+
     let object_ctor = native(Some(function_proto.clone()), |i, _, a| {
         match a.first() {
             None | Some(Value::Undefined) | Some(Value::Null) =>
@@ -922,6 +1151,11 @@ pub fn make_realm() -> Realm {
         let has = o.borrow().has_own(&k);
         Ok(Value::Bool(has))
     }, 2, fp);
+    def(&object_ctor, "groupBy", |i, _, a| {
+        let out = new_obj(None);
+        group_into(i, a, &out, false)?;
+        Ok(Value::Obj(out))
+    }, 2, fp);
 
     global.borrow_mut().define("Object", Prop::builtin(Value::Obj(object_ctor)));
 
@@ -981,6 +1215,43 @@ pub fn make_realm() -> Realm {
         for v in a { let n = i.to_number(v)? as u32; if let Some(c) = char::from_u32(n) { s.push(c); } }
         Ok(Value::string(s))
     }, 1, fp);
+    def(&string_ctor, "fromCodePoint", |i, _, a| {
+        let mut s = String::new();
+        for v in a {
+            let n = i.to_number(v)?;
+            if libm::trunc(n) != n || !(0.0..=0x10FFFF as f64).contains(&n) {
+                return i.range_err("invalid code point");
+            }
+            match char::from_u32(n as u32) {
+                Some(c) => s.push(c),
+                // Eine einzelne Ersatzhaelfte ist ein gueltiger Codepunkt
+                // fuer diese Funktion, aber kein `char`. Sie geht als
+                // Ersatzzeichen durch — unsere Zeichenketten sind UTF-8.
+                None => s.push('\u{FFFD}'),
+            }
+        }
+        Ok(Value::string(s))
+    }, 1, fp);
+    // `String.raw` liest die ROHEN Teile eines Vorlagenobjekts. Sie ist auch
+    // ohne markierte Vorlagen erreichbar — mit einem selbstgebauten Objekt,
+    // und genau so prueft test262 sie.
+    def(&string_ctor, "raw", |i, _, a| {
+        let t = a.first().cloned().unwrap_or(Value::Undefined);
+        let raw = i.get(&t, "raw")?;
+        let len = i.get(&raw, "length")?;
+        let n = i.to_number(&len)?;
+        let n = if n.is_nan() || n <= 0.0 { 0 } else { n as usize };
+        let mut out = String::new();
+        for k in 0..n {
+            i.tick()?;
+            let seg = i.get(&raw, &num_to_string(k as f64))?;
+            out.push_str(&i.to_string(&seg)?);
+            if k + 1 < n {
+                if let Some(sub) = a.get(k + 1) { out.push_str(&i.to_string(sub)?); }
+            }
+        }
+        Ok(Value::string(out))
+    }, 1, fp);
     global.borrow_mut().define("String", Prop::builtin(Value::Obj(string_ctor)));
 
     let number_ctor = native(Some(function_proto.clone()), |i, _, a| {
@@ -994,7 +1265,22 @@ pub fn make_realm() -> Realm {
                    ("NaN", f64::NAN)] {
         number_ctor.borrow_mut().define(n, Prop::frozen(Value::Num(v)));
     }
-    global.borrow_mut().define("Number", Prop::builtin(Value::Obj(number_ctor)));
+    // Die vier Praedikate sind KEINE Umwandlung: `Number.isNaN("NaN")` ist
+    // falsch, `isNaN("NaN")` wahr. Genau darin liegt ihr Zweck.
+    def(&number_ctor, "isNaN", |_, _, a| {
+        Ok(Value::Bool(matches!(a.first(), Some(Value::Num(n)) if n.is_nan())))
+    }, 1, fp);
+    def(&number_ctor, "isFinite", |_, _, a| {
+        Ok(Value::Bool(matches!(a.first(), Some(Value::Num(n)) if n.is_finite())))
+    }, 1, fp);
+    def(&number_ctor, "isInteger", |_, _, a| {
+        Ok(Value::Bool(matches!(a.first(), Some(Value::Num(n)) if n.is_finite() && libm::trunc(*n) == *n)))
+    }, 1, fp);
+    def(&number_ctor, "isSafeInteger", |_, _, a| {
+        Ok(Value::Bool(matches!(a.first(), Some(Value::Num(n))
+            if n.is_finite() && libm::trunc(*n) == *n && libm::fabs(*n) <= 9007199254740991.0)))
+    }, 1, fp);
+    global.borrow_mut().define("Number", Prop::builtin(Value::Obj(number_ctor.clone())));
 
     let bool_ctor = native(Some(function_proto.clone()), |_, _, a| {
         Ok(Value::Bool(a.first().map(|v| v.truthy()).unwrap_or(false)))
@@ -1053,6 +1339,7 @@ pub fn make_realm() -> Realm {
         "asinh" => libm::asinh, "acosh" => libm::acosh, "atanh" => libm::atanh,
         "cbrt" => libm::cbrt,
         "fround" => |x| x as f32 as f64,
+        "f16round" => f16round,
         "clz32" => |x| to_uint32(x).leading_zeros() as f64,
     }
     def(&math, "atan2", |i, _, a| {
@@ -1115,6 +1402,12 @@ pub fn make_realm() -> Realm {
             .map(|(k, c)| k + c.len_utf8()).last().unwrap_or(0);
         Ok(Value::Num(t[..end].parse::<f64>().unwrap_or(f64::NAN)))
     }, 1, fp);
+    // `Number.parseInt === parseInt` steht so in der Spezifikation — also
+    // DASSELBE Objekt weiterreichen und nicht ein zweites bauen.
+    for n in ["parseInt", "parseFloat"] {
+        let v = global.borrow().get_own(n).and_then(|p| p.value.clone());
+        if let Some(v) = v { number_ctor.borrow_mut().define(n, Prop::builtin(v)); }
+    }
 
     // ── Die URI-Funktionen ───────────────────────────────────────────────
     //
@@ -1252,18 +1545,52 @@ pub fn make_realm() -> Realm {
     collection("WeakMap", true, |i, _, a| coll_new(i, "WeakMap", true, a), &object_proto, &function_proto, &global);
     collection("WeakSet", false, |i, _, a| coll_new(i, "WeakSet", false, a), &object_proto, &function_proto, &global);
 
+    // ── Die sieben Mengenoperationen (ES 2025) ───────────────────────────
+    //
+    // Sie lesen das Argument ueber `size`/`has`/`keys` — es muss KEIN Set
+    // sein, nur mengenaehnlich. Genau das prueft test262, und genau das
+    // brauchen Seiten, die eine eigene Menge herumreichen.
+    {
+        let set_proto = match global.borrow().get_own("Set").and_then(|p| p.value.clone()) {
+            Some(v) => match v { Value::Obj(c) => c.borrow().get_own("prototype")
+                .and_then(|p| p.value.clone()), _ => None },
+            None => None,
+        };
+        if let Some(Value::Obj(sp)) = set_proto {
+            def(&sp, "union", |i, t, a| set_op(i, t, a, SetOp::Union), 1, fp);
+            def(&sp, "intersection", |i, t, a| set_op(i, t, a, SetOp::Intersection), 1, fp);
+            def(&sp, "difference", |i, t, a| set_op(i, t, a, SetOp::Difference), 1, fp);
+            def(&sp, "symmetricDifference", |i, t, a| set_op(i, t, a, SetOp::Symmetric), 1, fp);
+            def(&sp, "isSubsetOf", |i, t, a| set_op(i, t, a, SetOp::Subset), 1, fp);
+            def(&sp, "isSupersetOf", |i, t, a| set_op(i, t, a, SetOp::Superset), 1, fp);
+            def(&sp, "isDisjointFrom", |i, t, a| set_op(i, t, a, SetOp::Disjoint), 1, fp);
+        }
+        let map_ctor = global.borrow().get_own("Map").and_then(|p| p.value.clone());
+        if let Some(Value::Obj(mc)) = map_ctor {
+            def(&mc, "groupBy", |i, _, a| {
+                let out = coll_new(i, "Map", true, &[])?;
+                let Value::Obj(o) = &out else { return Ok(out) };
+                group_into(i, a, &o.clone(), true)?;
+                Ok(out)
+            }, 2, fp);
+        }
+    }
+
     // ── Symbol ───────────────────────────────────────────────────────────
     //
     // Ein Symbol ist ein PRIMITIV (`Value::Sym`), kein Objekt. Sein
     // Eigenschaftsname liegt als NUL-praefigierte Zeichenkette in derselben
     // Tabelle wie jeder andere — die Begruendung steht bei `PropName`.
+    // `Symbol` IST ein Konstruktor — `new Symbol()` wirft im Rumpf, nicht
+    // davor. Der Unterschied ist ueber `isConstructor` beobachtbar.
     let symbol_ctor = native(Some(function_proto.clone()), |i, _, a| {
+        if i.native_new { return i.type_err("Symbol is not a constructor"); }
         let desc = match a.first() {
             None | Some(Value::Undefined) => None,
             Some(v) => Some(i.to_string(v)?),
         };
         Ok(i.new_symbol(desc))
-    }, "Symbol", 0, false);          // `new Symbol()` wirft — kein Konstruktor
+    }, "Symbol", 0, true);
     symbol_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(symbol_proto.clone())));
     symbol_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(symbol_ctor.clone())));
     for (name, key) in WELL_KNOWN {
@@ -1293,6 +1620,22 @@ pub fn make_realm() -> Realm {
             _ => i.type_err("Symbol.keyFor requires a symbol"),
         }
     }, 1, fp);
+    {
+        let g = native(Some(function_proto.clone()), |i, t, _| {
+            let sd = match &t {
+                Value::Sym(sd) => sd.clone(),
+                Value::Obj(o) => match &o.borrow().kind {
+                    ObjKind::SymWrap(sd) => sd.clone(),
+                    _ => return i.type_err("not a symbol"),
+                },
+                _ => return i.type_err("not a symbol"),
+            };
+            Ok(match &sd.desc { Some(d) => Value::Str(d.clone()), None => Value::Undefined })
+        }, "get description", 0, false);
+        symbol_proto.borrow_mut().define("description", Prop {
+            value: None, get: Some(Value::Obj(g)), set: None,
+            writable: false, enumerable: false, configurable: true });
+    }
     global.borrow_mut().define("Symbol", Prop::builtin(Value::Obj(symbol_ctor)));
 
     // ── `Reflect` ────────────────────────────────────────────────────────
@@ -1404,6 +1747,14 @@ pub fn make_realm() -> Realm {
     }, 3, fp);
     def(&reflect, "construct", |i, _, a| {
         let f = a.first().cloned().unwrap_or(Value::Undefined);
+        if !i.is_constructor(&f) { return i.type_err("Reflect.construct target is not a constructor"); }
+        // FEHLT das dritte Argument, ist das Ziel selbst das Neuziel; steht
+        // dort `undefined`, ist es eines und wirft. Der Unterschied ist
+        // beobachtbar, und `isConstructor` aus dem test262-Vorspann baut
+        // genau darauf.
+        if let Some(nt) = a.get(2) {
+            if !i.is_constructor(nt) { return i.type_err("Reflect.construct newTarget is not a constructor"); }
+        }
         let list = a.get(1).cloned().unwrap_or(Value::Undefined);
         let args = if matches!(list, Value::Undefined) { Vec::new() } else { i.elems(&list)? };
         i.construct(&f, &args)
@@ -2159,12 +2510,37 @@ pub fn make_realm() -> Realm {
     // Und die gewoehnlichen Feldmethoden gelten auch hier, solange sie nur
     // lesen und rechnen. Was ein FELD zurueckgibt statt einer Sicht (`map`,
     // `filter`), bleibt vorerst weg — lieber gar nicht als mit falschem Typ.
-    for m in ["forEach", "indexOf", "lastIndexOf", "includes", "join", "reduce",
-              "reduceRight", "some", "every", "find", "findIndex", "findLast",
-              "findLastIndex", "at", "fill", "reverse", "sort", "entries",
-              "keys", "values", "copyWithin"] {
-        let v = array_proto.borrow().get_own(m).and_then(|p| p.value.clone());
-        if let Some(v) = v { ta_proto.borrow_mut().define(m, Prop::builtin(v)); }
+    //
+    // Sie werden NICHT weitergereicht, sondern umhuellt: `%TypedArray%.
+    // prototype.reduceRight.call(undefined)` muss werfen, und das taete die
+    // Feldfassung nicht. Der Mantel prueft die Sicht und ruft dann dieselbe
+    // Funktion — keine zweite Semantik, nur die fehlende Vorpruefung.
+    macro_rules! ta_borrow {
+        ($($m:literal),* $(,)?) => { $(
+            {
+                let orig = array_proto.borrow().get_own($m).and_then(|p| p.value.clone());
+                if let Some(orig) = orig {
+                    let len = match &orig {
+                        Value::Obj(o) => o.borrow().get_own("length")
+                            .and_then(|p| p.value.clone())
+                            .map(|v| if let Value::Num(n) = v { n as usize } else { 0 })
+                            .unwrap_or(0),
+                        _ => 0,
+                    };
+                    let w = native(Some(function_proto.clone()),
+                        |i, t, a| ta_forward(i, t, a, $m), $m, len, false);
+                    ta_proto.borrow_mut().define($m, Prop::builtin(Value::Obj(w)));
+                }
+            }
+        )* };
+    }
+    ta_borrow!["forEach", "indexOf", "lastIndexOf", "includes", "join", "reduce",
+               "reduceRight", "some", "every", "find", "findIndex", "findLast",
+               "findLastIndex", "at", "fill", "reverse", "sort", "entries",
+               "keys", "values", "copyWithin", "toLocaleString"];
+    {
+        let v = ta_proto.borrow().get_own("values").and_then(|p| p.value.clone());
+        if let Some(v) = v { ta_proto.borrow_mut().define(SYM_ITERATOR, Prop::builtin(v)); }
     }
 
     // Die neun Konstruktoren. Ihr Rumpf ist derselbe; nur die Elementart
@@ -2348,6 +2724,9 @@ fn coll_new(i: &mut Interp, name: &str, is_map: bool, a: &[Value]) -> C<Value> {
     let pv = i.get(&Value::Obj(i.realm.global.clone()), name)?;
     let proto = match i.get(&pv, "prototype")? { Value::Obj(p) => Some(p), _ => None };
     let out = Value::Obj(new_obj(proto));
+    if let Value::Obj(o) = &out {
+        o.borrow_mut().define(COLL_KIND, Prop::frozen(Value::str(name)));
+    }
     if let Some(src) = a.first() {
         if !matches!(src, Value::Undefined | Value::Null) {
             for it in i.iterate(src)? {
@@ -2699,5 +3078,237 @@ fn uri_decode(i: &mut Interp, s: &str, reserved: &str) -> C<Value> {
     match String::from_utf8(bytes) {
         Ok(t) => Ok(Value::str(&t)),
         Err(_) => Err(i.throw_kind("URIError", "URI malformed")),
+    }
+}
+
+/// `__lookupGetter__` / `__lookupSetter__`: die KETTE hoch, bis eine eigene
+/// Eigenschaft dieses Namens da ist — und nur wenn die ein Zugriff ist, gibt
+/// es etwas zurueck.
+fn lookup_accessor(i: &mut Interp, t: Value, a: &[Value], want_set: bool) -> C<Value> {
+    let o = i.to_object(&t)?;
+    let k = i.to_prop_key(a.first().unwrap_or(&Value::Undefined))?;
+    let mut cur = Some(o);
+    let mut hops = 0;
+    while let Some(c) = cur {
+        hops += 1;
+        if hops > crate::js::interp::MAX_PROTO_CHAIN { break; }
+        let found = c.borrow().get_own(&k).cloned();
+        if let Some(p) = found {
+            let f = if want_set { p.set.clone() } else { p.get.clone() };
+            return Ok(f.unwrap_or(Value::Undefined));
+        }
+        let n = c.borrow().proto.clone();
+        cur = n;
+    }
+    Ok(Value::Undefined)
+}
+
+/// Der gemeinsame Rumpf von `Object.groupBy` und `Map.groupBy`. Der
+/// Unterschied ist allein der SCHLUESSEL: dort eine Eigenschaft, hier ein
+/// Karteneintrag — und unsere Karte ist ohnehin zeichenkettenbasiert.
+fn group_into(i: &mut Interp, a: &[Value], out: &Gc, as_map: bool) -> C<()> {
+    let f = a.get(1).cloned().unwrap_or(Value::Undefined);
+    if !i.is_callable(&f) { i.type_err::<()>("callback is not a function")?; }
+    let items = i.iterate(a.first().unwrap_or(&Value::Undefined))?;
+    for (n, v) in items.into_iter().enumerate() {
+        i.tick()?;
+        let kv = i.call(&f, Value::Undefined, &[v.clone(), Value::Num(n as f64)])?;
+        let k = if as_map { alloc::format!("@{}", i.to_string(&kv)?) }
+                else { i.to_prop_key(&kv)?.to_string() };
+        let have = out.borrow().get_own(&k).and_then(|p| p.value.clone());
+        match have {
+            Some(arr) => {
+                let lv = i.get(&arr, "length")?;
+                let len = i.to_number(&lv)?;
+                i.set(&arr, &num_to_string(len), v)?;
+            }
+            None => {
+                let arr = i.new_array(vec![v]);
+                out.borrow_mut().define(&k, Prop::data(arr));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Welche der sieben Mengenoperationen. Eine Umsetzung fuer alle, weil sie
+/// sich nur darin unterscheiden, was mit einem Schluessel passiert, der auf
+/// beiden Seiten (oder nur auf einer) steht.
+#[derive(Clone, Copy, PartialEq)]
+enum SetOp { Union, Intersection, Difference, Symmetric, Subset, Superset, Disjoint }
+
+/// Die eigenen Eintraege als Schluesselliste (ohne das `@`).
+fn set_keys(t: &Value) -> Vec<Rc<str>> {
+    let Value::Obj(o) = t else { return Vec::new() };
+    o.borrow().own_keys().into_iter().filter(|k| k.starts_with('@')).collect()
+}
+
+fn set_op(i: &mut Interp, t: Value, a: &[Value], op: SetOp) -> C<Value> {
+    let is_set = matches!(&t, Value::Obj(o)
+        if matches!(o.borrow().get_own(COLL_KIND).and_then(|p| p.value.clone()),
+                    Some(Value::Str(k)) if &*k == "Set"));
+    if !is_set { return i.type_err("Set method on a non-Set receiver"); }
+    let other = a.first().cloned().unwrap_or(Value::Undefined);
+    if matches!(other, Value::Undefined | Value::Null) {
+        return i.type_err("argument is not set-like");
+    }
+    // Das MENGENPROTOKOLL: `size` als Zahl, `has` und `keys` als Funktionen.
+    // Die Reihenfolge der Pruefungen steht in der Spezifikation und ist
+    // beobachtbar.
+    let sz = i.get(&other, "size")?;
+    let szn = i.to_number(&sz)?;
+    if szn.is_nan() { return i.type_err("set-like object has no numeric size"); }
+    let has = i.get(&other, "has")?;
+    if !i.is_callable(&has) { return i.type_err("set-like object has no callable has"); }
+    let keys_fn = i.get(&other, "keys")?;
+    if !i.is_callable(&keys_fn) { return i.type_err("set-like object has no callable keys"); }
+
+    let mine = set_keys(&t);
+    // Nur holen, wer sie braucht — `isSubsetOf` fragt sonst umsonst.
+    let theirs: Vec<Rc<str>> = if matches!(op, SetOp::Union | SetOp::Intersection
+        | SetOp::Symmetric | SetOp::Superset) {
+        let it = i.call(&keys_fn, other.clone(), &[])?;
+        let vs = i.iterate(&it)?;
+        let mut out = Vec::with_capacity(vs.len());
+        for v in vs { out.push(i.to_string(&v)?); }
+        out
+    } else { Vec::new() };
+
+    let contains = |i: &mut Interp, k: &str| -> C<bool> {
+        let r = i.call(&has, other.clone(), &[Value::str(k)])?;
+        Ok(r.truthy())
+    };
+
+    match op {
+        SetOp::Subset => {
+            if (mine.len() as f64) > szn { return Ok(Value::Bool(false)); }
+            for k in &mine {
+                i.tick()?;
+                if !contains(i, &k[1..])? { return Ok(Value::Bool(false)); }
+            }
+            Ok(Value::Bool(true))
+        }
+        SetOp::Superset => {
+            if (mine.len() as f64) < szn { return Ok(Value::Bool(false)); }
+            let Value::Obj(o) = &t else { return Ok(Value::Bool(false)) };
+            for k in &theirs {
+                i.tick()?;
+                if !o.borrow().has_own(&alloc::format!("@{k}")) { return Ok(Value::Bool(false)); }
+            }
+            Ok(Value::Bool(true))
+        }
+        SetOp::Disjoint => {
+            for k in &mine {
+                i.tick()?;
+                if contains(i, &k[1..])? { return Ok(Value::Bool(false)); }
+            }
+            Ok(Value::Bool(true))
+        }
+        _ => {
+            let out = coll_new(i, "Set", false, &[])?;
+            let put = |out: &Value, k: &str| {
+                if let Value::Obj(o) = out {
+                    o.borrow_mut().define(&alloc::format!("@{k}"), Prop {
+                        value: Some(Value::str(k)), get: None, set: None,
+                        writable: true, enumerable: false, configurable: true });
+                }
+            };
+            match op {
+                SetOp::Union => {
+                    for k in &mine { put(&out, &k[1..]); }
+                    for k in &theirs { put(&out, k); }
+                }
+                SetOp::Intersection => {
+                    for k in &mine {
+                        i.tick()?;
+                        if contains(i, &k[1..])? { put(&out, &k[1..]); }
+                    }
+                }
+                SetOp::Difference => {
+                    for k in &mine {
+                        i.tick()?;
+                        if !contains(i, &k[1..])? { put(&out, &k[1..]); }
+                    }
+                }
+                _ => {
+                    let Value::Obj(mo) = &t else { return Ok(out) };
+                    for k in &mine {
+                        i.tick()?;
+                        if !contains(i, &k[1..])? { put(&out, &k[1..]); }
+                    }
+                    for k in &theirs {
+                        i.tick()?;
+                        if !mo.borrow().has_own(&alloc::format!("@{k}")) { put(&out, k); }
+                    }
+                }
+            }
+            Ok(out)
+        }
+    }
+}
+
+/// Auf die naechste `binary16`-Zahl runden. Rust hat `f16` in `core` nicht
+/// stabil, also von Hand: Vorzeichen, 5 Bit Exponent, 10 Bit Mantisse — mit
+/// den beiden Randfaellen, an denen so eine Funktion sonst falsch wird
+/// (subnormal und Ueberlauf nach Unendlich).
+fn f16round(x: f64) -> f64 {
+    if x.is_nan() || x == 0.0 || x.is_infinite() { return x; }
+    let neg = x < 0.0;
+    let a = libm::fabs(x);
+    if a >= 65520.0 { return if neg { f64::NEG_INFINITY } else { f64::INFINITY }; }
+    // 2^-24 ist die kleinste subnormale binary16; darunter bleibt die Null.
+    if a < 1.0 / 33554432.0 { return if neg { -0.0 } else { 0.0 }; }
+    let e = libm::floor(libm::log2(a));
+    let e = if e < -14.0 { -14.0 } else { e };
+    let step = libm::pow(2.0, e - 10.0);
+    let mut r = libm::floor(a / step + 0.5) * step;
+    // Zur GERADEN runden, wo es genau in der Mitte liegt.
+    if libm::fabs(a / step - (libm::floor(a / step) + 0.5)) < 1e-9 {
+        let lo = libm::floor(a / step);
+        if (lo as i64) % 2 == 0 { r = lo * step; }
+    }
+    if r >= 65520.0 { return if neg { f64::NEG_INFINITY } else { f64::INFINITY }; }
+    if neg { -r } else { r }
+}
+
+/// Eine geborgte Feldmethode auf einer Sicht: erst pruefen, dass `this`
+/// wirklich eine ist, dann DIESELBE Funktion rufen.
+fn ta_forward(i: &mut Interp, t: Value, a: &[Value], name: &str) -> C<Value> {
+    if !matches!(&t, Value::Obj(o) if matches!(o.borrow().kind, ObjKind::TypedArray(_))) {
+        return i.type_err("TypedArray method on a non-TypedArray receiver");
+    }
+    let f = {
+        let ap = i.realm.array_proto.clone();
+        let v = ap.borrow().get_own(name).and_then(|p| p.value.clone());
+        match v { Some(v) => v, None => return i.type_err("missing Array method") }
+    };
+    i.call(&f, t, a)
+}
+
+/// `thisNumberValue` — eine Zahl oder ihre Huelle, alles andere wirft. Das
+/// ist KEINE Umwandlung: `Number.prototype.toFixed.call("1")` ist ein
+/// TypeError, kein "1.0".
+fn this_number(i: &mut Interp, t: &Value) -> C<f64> {
+    match t {
+        Value::Num(n) => Ok(*n),
+        Value::Obj(o) => match &o.borrow().kind {
+            ObjKind::NumWrap(n) => Ok(*n),
+            _ => i.type_err("not a number"),
+        },
+        _ => i.type_err("not a number"),
+    }
+}
+
+/// Gibt es den Index ueberhaupt? Fuer eine Sicht immer, fuer ein Feld nur,
+/// wenn die Eigenschaft (oder eine geerbte) da ist.
+fn has_index(i: &mut Interp, this: &Value, k: usize) -> bool {
+    match this {
+        Value::Obj(o) => {
+            if matches!(o.borrow().kind, ObjKind::TypedArray(_)) { return true; }
+            let key = num_to_string(k as f64);
+            i.has_property(&o.clone(), &key)
+        }
+        Value::Str(s) => k < s.chars().count(),
+        _ => false,
     }
 }

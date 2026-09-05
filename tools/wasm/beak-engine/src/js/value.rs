@@ -191,11 +191,18 @@ pub const SYM_SPLIT: &str = "\0@split";
 pub const SYM_TO_PRIMITIVE: &str = "\0@toPrimitive";
 pub const SYM_TO_STRING_TAG: &str = "\0@toStringTag";
 pub const SYM_UNSCOPABLES: &str = "\0@unscopables";
+pub const SYM_DISPOSE: &str = "\0@dispose";
+pub const SYM_ASYNC_DISPOSE: &str = "\0@asyncDispose";
 
 /// Der Zustand eines eingebauten Iterators. Auch NUL-praefigiert, also aus
 /// `own_keys` heraus und fuer jedes Skript unsichtbar — `native` nimmt keinen
 /// Abschluss, der Zustand muss also irgendwo am Objekt liegen.
 pub const IT_TARGET: &str = "\0!target";
+/// Der Ersatz fuer das interne Feld `[[SetData]]`/`[[MapData]]`: welche
+/// Sammlung das hier IST. NUL-praefigiert, also fuer jedes Skript unsichtbar
+/// — ohne den Vermerk waere eine selbstgebaute Menge von einer echten nicht
+/// zu unterscheiden, und `Set.prototype.union.call({…})` liefe still durch.
+pub const COLL_KIND: &str = "\0!coll";
 pub const IT_INDEX: &str = "\0!index";
 /// 0 = Werte, 1 = Schluessel, 2 = Paare.
 pub const IT_KIND: &str = "\0!kind";
@@ -215,6 +222,8 @@ pub const WELL_KNOWN: &[(&str, &str)] = &[
     ("toPrimitive", SYM_TO_PRIMITIVE),
     ("toStringTag", SYM_TO_STRING_TAG),
     ("unscopables", SYM_UNSCOPABLES),
+    ("dispose", SYM_DISPOSE),
+    ("asyncDispose", SYM_ASYNC_DISPOSE),
 ];
 
 #[derive(Clone)]
@@ -562,27 +571,113 @@ pub fn num_to_string(n: f64) -> String {
     if n == f64::INFINITY { return "Infinity".to_string(); }
     if n == f64::NEG_INFINITY { return "-Infinity".to_string(); }
     if n == 0.0 { return "0".to_string(); }
-    if n == libm::trunc(n) && libm::fabs(n) < 1e21 {
-        // Ganzzahlig und im Bereich, in dem JS keine Exponenten benutzt.
-        let mut s = String::new();
-        let neg = n < 0.0;
-        let mut v = libm::fabs(n);
-        let mut digits = Vec::new();
-        while v >= 1.0 {
-            let d = (v % 10.0) as u8;
-            digits.push(b'0' + d);
-            v = libm::trunc(v / 10.0);
+    // ES 6.1.6.1.20 waehlt die Form nach der KOMMASTELLE, nicht nach der
+    // Groesse: `s * 10^(n-k)` mit der kuerzesten Ziffernfolge `s` (k Ziffern).
+    // Rusts `{:e}` liefert genau diese kuerzeste Folge — sie selbst zu
+    // rechnen hiesse Grisu nachzubauen.
+    let neg = n < 0.0;
+    let sci = alloc::format!("{:e}", libm::fabs(n));
+    let (mant, ex) = match sci.split_once('e') { Some(x) => x, None => return sci };
+    let exp: i32 = ex.parse().unwrap_or(0);
+    let d: String = mant.chars().filter(|c| c.is_ascii_digit()).collect();
+    let d = d.trim_end_matches('0');
+    let d = if d.is_empty() { "0" } else { d };
+    let k = d.len() as i32;
+    let pt = exp + 1;                    // wo das Komma steht
+    let mut s = String::new();
+    if neg { s.push('-'); }
+    if (1..=21).contains(&pt) {
+        if k <= pt {
+            s.push_str(d);
+            for _ in 0..(pt - k) { s.push('0'); }
+        } else {
+            s.push_str(&d[..pt as usize]);
+            s.push('.');
+            s.push_str(&d[pt as usize..]);
         }
-        if neg { s.push('-'); }
-        for d in digits.iter().rev() { s.push(*d as char); }
-        return s;
+    } else if (-5..=0).contains(&pt) {
+        s.push_str("0.");
+        for _ in 0..(-pt) { s.push('0'); }
+        s.push_str(d);
+    } else {
+        s.push_str(&d[..1]);
+        if k > 1 { s.push('.'); s.push_str(&d[1..]); }
+        s.push('e');
+        s.push(if pt - 1 < 0 { '-' } else { '+' });
+        s.push_str(&alloc::format!("{}", (pt - 1).abs()));
     }
-    // Der allgemeine Fall. Rusts kuerzeste Darstellung stimmt mit der von JS
-    // fuer den Bereich ueberein, in dem beide keine Exponentialform waehlen;
-    // darueber schreibt JS `1e+21`, Rust `1000…`. Deshalb die Grenze oben.
-    let mut s = alloc::format!("{}", n);
-    if s.contains('e') && !s.contains("e-") { s = s.replace('e', "e+"); }
     s
+}
+
+/// `Number.prototype.toString(radix)` fuer eine Basis ausser 10.
+///
+/// Der Weg ist der von V8 (`DoubleToRadixCString`) und nicht ein eigener:
+/// die Spezifikation laesst die Nachkommastellen ausdruecklich offen
+/// („implementation-approximated"), und zwei Motoren, die hier verschieden
+/// runden, geben verschiedene Farbwerte aus. Byte-gleich zu node
+/// gegengeprueft.
+pub fn num_to_radix(v: f64, radix: u32) -> String {
+    const CHARS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    if v.is_nan() { return "NaN".to_string(); }
+    if v == f64::INFINITY { return "Infinity".to_string(); }
+    if v == f64::NEG_INFINITY { return "-Infinity".to_string(); }
+    if v == 0.0 { return "0".to_string(); }
+    let neg = v < 0.0;
+    let value = libm::fabs(v);
+    let r = radix as f64;
+    let mut integer = libm::floor(value);
+    let mut fraction = value - integer;
+    // Der Abstand zur naechsten darstellbaren Zahl ist die Abbruchgrenze:
+    // weiter zu rechnen hiesse Ziffern zu drucken, die im `f64` nicht stehen.
+    let mut delta = 0.5 * (libm::nextafter(value, f64::INFINITY) - value);
+    if delta < 5e-324 { delta = 5e-324; }
+    let mut frac: Vec<u8> = Vec::new();
+    if fraction >= delta {
+        loop {
+            fraction *= r;
+            delta *= r;
+            let digit = fraction as usize;
+            frac.push(CHARS[digit.min(35)]);
+            fraction -= digit as f64;
+            if (fraction > 0.5 || (fraction == 0.5 && digit & 1 == 1)) && fraction + delta > 1.0 {
+                // Aufrunden mit Uebertrag — und laeuft der bis vor die erste
+                // Stelle, waechst die Ganzzahl.
+                loop {
+                    match frac.pop() {
+                        None => { integer += 1.0; break }
+                        Some(c) => {
+                            let d = CHARS.iter().position(|x| *x == c).unwrap_or(0) as u32;
+                            if d + 1 < radix { frac.push(CHARS[(d + 1) as usize]); break }
+                        }
+                    }
+                }
+                break;
+            }
+            if fraction < delta { break }
+        }
+    }
+    // Ueber 2^53 traegt der `f64` die unteren Stellen nicht mehr — dort
+    // stehen Nullen, und das ist ehrlicher als erfundene Ziffern.
+    let mut int_digits: Vec<u8> = Vec::new();
+    while integer / r >= 9007199254740992.0 {
+        integer /= r;
+        int_digits.push(b'0');
+    }
+    loop {
+        let rem = libm::fmod(integer, r);
+        int_digits.push(CHARS[(rem as usize).min(35)]);
+        integer = (integer - rem) / r;
+        if integer <= 0.0 { break }
+    }
+    int_digits.reverse();
+    let mut out = String::new();
+    if neg { out.push('-'); }
+    for c in int_digits { out.push(c as char); }
+    if !frac.is_empty() {
+        out.push('.');
+        for c in frac { out.push(c as char); }
+    }
+    out
 }
 
 /// Zeichenkette zu Zahl (`Number("…")`). Leerraum ringsum, `0x`/`0o`/`0b`,
