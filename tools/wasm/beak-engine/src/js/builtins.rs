@@ -72,6 +72,7 @@ pub fn make_realm() -> Realm {
                     ObjKind::Error => "Error",
                     ObjKind::StrWrap(_) => "String",
                     ObjKind::SymWrap(_) => "Symbol",
+                    ObjKind::BigWrap(_) => "BigInt",
                     ObjKind::NumWrap(_) => "Number",
                     ObjKind::BoolWrap(_) => "Boolean",
                     ObjKind::Arguments => "Arguments",
@@ -1338,6 +1339,50 @@ pub fn make_realm() -> Realm {
             if n.is_finite() && libm::trunc(*n) == *n && libm::fabs(*n) <= 9007199254740991.0)))
     }, 1, fp);
     global.borrow_mut().define("Number", Prop::builtin(Value::Obj(number_ctor.clone())));
+
+    // ── BigInt ───────────────────────────────────────────────────────────
+    let bigint_proto = new_obj(Some(object_proto.clone()));
+    let bigint_ctor = native(Some(function_proto.clone()), |i, _, a| {
+        if i.native_new { return i.type_err("BigInt is not a constructor"); }
+        let v = a.first().cloned().unwrap_or(Value::Undefined);
+        let p = i.to_primitive(&v, false)?;
+        Ok(Value::BigInt(Rc::new(match &p {
+            Value::BigInt(b) => (**b).clone(),
+            Value::Bool(b) => super::bigint::Big::from_u64(if *b { 1 } else { 0 }),
+            Value::Str(t) => match super::bigint::Big::parse(t) {
+                Some(b) => b,
+                None => return Err(i.throw_kind("SyntaxError", "cannot convert string to a BigInt")),
+            },
+            Value::Num(n) => match super::bigint::Big::from_f64(*n) {
+                Some(b) => b,
+                None => return i.range_err("the number is not a safe integer"),
+            },
+            _ => return i.type_err("cannot convert value to a BigInt"),
+        })))
+    }, "BigInt", 1, false);
+    bigint_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(bigint_proto.clone())));
+    bigint_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(bigint_ctor.clone())));
+    bigint_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::frozen(Value::str("BigInt")));
+    def(&bigint_proto, "toString", |i, t, a| {
+        let b = this_bigint(i, &t)?;
+        let radix = match a.first() {
+            None | Some(Value::Undefined) => 10.0,
+            Some(v) => to_integer(i.to_number(v)?),
+        };
+        if !(2.0..=36.0).contains(&radix) { return i.range_err("toString: radix out of range"); }
+        Ok(Value::string(b.to_string_radix(radix as u32)))
+    }, 0, fp);
+    def(&bigint_proto, "toLocaleString", |i, t, _| {
+        let b = this_bigint(i, &t)?;
+        Ok(Value::string(b.to_string_radix(10)))
+    }, 0, fp);
+    def(&bigint_proto, "valueOf", |i, t, _| {
+        let b = this_bigint(i, &t)?;
+        Ok(Value::BigInt(Rc::new(b)))
+    }, 0, fp);
+    def(&bigint_ctor, "asIntN", |i, _, a| as_n(i, a, true), 2, fp);
+    def(&bigint_ctor, "asUintN", |i, _, a| as_n(i, a, false), 2, fp);
+    global.borrow_mut().define("BigInt", Prop::builtin(Value::Obj(bigint_ctor)));
 
     let bool_ctor = native(Some(function_proto.clone()), |_, _, a| {
         Ok(Value::Bool(a.first().map(|v| v.truthy()).unwrap_or(false)))
@@ -2753,7 +2798,7 @@ pub fn make_realm() -> Realm {
             event_proto: ph(), token_list_proto: ph(), style_proto: ph(), comment_proto: ph(),
             regexp_proto: ph(), symbol_proto, iterator_proto,
             generator_proto, generator_func_proto, array_iter_proto,
-            string_iter_proto, promise_proto: ph(), date_proto: ph(),
+            string_iter_proto, promise_proto: ph(), date_proto: ph(), bigint_proto,
             iter_helper_proto: ph(), iter_wrap_proto: ph(), eval_fn: None,
             html_element_proto: ph(), svg_element_proto: ph(), fragment_proto: ph(),
             tag_protos: HashMap::new(), url_proto: ph(), url_params_proto: ph(),
@@ -3415,4 +3460,28 @@ fn enum_own(i: &mut Interp, o: &Gc, k: &str) -> C<bool> {
         return Ok(matches!(i.get_own_desc(o, k)?, Some(p) if p.enumerable));
     }
     Ok(o.borrow().is_enumerable(k))
+}
+
+/// `thisBigIntValue` — eine grosse Zahl oder ihre Huelle.
+fn this_bigint(i: &mut Interp, t: &Value) -> C<super::bigint::Big> {
+    match t {
+        Value::BigInt(b) => Ok((**b).clone()),
+        Value::Obj(o) => match &o.borrow().kind {
+            ObjKind::BigWrap(b) => Ok((**b).clone()),
+            _ => i.type_err("not a BigInt"),
+        },
+        _ => i.type_err("not a BigInt"),
+    }
+}
+
+/// `BigInt.asIntN` / `asUintN`: auf `bits` Stellen zuschneiden, mit oder ohne
+/// Vorzeichen.
+fn as_n(i: &mut Interp, a: &[Value], signed: bool) -> C<Value> {
+    let bits = i.to_number(a.first().unwrap_or(&Value::Undefined))?;
+    let bits = to_integer(bits);
+    if bits < 0.0 || bits > 4294967295.0 { return i.range_err("asIntN: bits out of range"); }
+    let v = a.get(1).cloned().unwrap_or(Value::Undefined);
+    let p = i.to_primitive(&v, false)?;
+    let Value::BigInt(b) = &p else { return i.type_err("asIntN: value is not a BigInt") };
+    Ok(Value::BigInt(Rc::new(b.as_n(bits as u64, signed))))
 }

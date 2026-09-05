@@ -63,6 +63,11 @@ pub enum Op {
     /// Oben verwerfen und darunter liegenden Wert behalten (`a, b` → a weg).
     Swap,
     Un(UnaryOp),
+    /// `ToNumeric` — wie `Un(Plus)`, aber eine grosse Zahl bleibt gross.
+    /// `x++` auf einem BigInt darf nicht in `+x` laufen, das wirft.
+    ToNumeric,
+    /// Eins dazu oder eins weg, im TYP des Wertes (`true` = dazu).
+    Step(bool),
     Bin(BinOp),
     /// `typeof x` auf einem NAMEN — muss ohne ReferenceError auskommen, wenn
     /// es den Namen nicht gibt, und ist deshalb kein `LoadVar` + `Un`.
