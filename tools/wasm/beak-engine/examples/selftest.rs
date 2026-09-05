@@ -22,6 +22,16 @@ fn main() {
     // `about:blank` und dort `beak:selftest` — und die eine Sache, die diese
     // Seite kann, ist Wirt und Geraet VERGLEICHBAR zu machen.
     sess.interp.set_location("beak:selftest");
+    // Und die Uhr. Am Geraet setzt `beak/src/lib.rs` sie aus
+    // `npk_unix_time()`; ohne dieselbe Zeile hier stuende `Date.now()`
+    // host-seitig bei 1970, und die Pruefzeile waere auf dem Rechner
+    // DAUERHAFT rot — ein Warnlicht, das immer leuchtet, liest niemand mehr.
+    // Beidseitig gesetzt prueft sie, was sie soll: kommt die Uhr des Wirts
+    // in der Engine an?
+    sess.interp.epoch_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as f64)
+        .unwrap_or(0.0);
     // Der Kaskadenkontext — GENAU wie beak ihn einreicht (`beak/src/lib.rs`).
     //
     // Er fehlte hier, und dadurch lief `getComputedStyle` host-seitig auf dem
