@@ -3447,19 +3447,25 @@ impl<'a> Ctx<'a> {
             let frame = st.pad_left + st.pad_right + st.border_x();
             cw = clamp_len(iw + frame, st.min_width, st.max_width, st.box_border, frame) - frame;
         }
-        // NOTE: an intrinsic keyword on an IN-FLOW block's `width` is left on
-        // the `auto` path deliberately. Sizing it from `intrinsic_width` was
-        // built and MEASURED: +12/−12 and three references that stopped
-        // rendering. `intrinsic_width` walks children as block content, so on
-        // a grid, flex or table box it answers about the wrong formatting
-        // context — and `width: fit-content` on a `display:grid` wrapper is
-        // how several grid REFERENCES frame themselves, which turns the error
-        // into losses in families that have nothing to do with sizing.
-        // Restricting it by the box's own display did not help, because the
-        // keyword usually sits on a plain wrapper AROUND such a box. This
-        // wants a display-aware intrinsic measurement, not a special case.
-        // The out-of-flow, float, flex-item and grid-item paths DO honour it —
-        // those measure the box themselves.
+        // An intrinsic keyword on an IN-FLOW block's `width` (`min-content`,
+        // `max-content`, `fit-content`). The first attempt at this was
+        // MEASURED at +12/−12 and reverted: `intrinsic_width` walked every
+        // child as block content, so on a grid, flex or table box it answered
+        // about the wrong formatting context — and `width: fit-content` on a
+        // `display:grid` wrapper is how several grid REFERENCES frame
+        // themselves. Now that the measurement dispatches on `display`
+        // (`intrinsic_flex`/`intrinsic_grid`/`intrinsic_table`), the keyword
+        // is honoured here too.
+        if let Len::Intrinsic(k) = st.width {
+            let (pref, min) = self.intrinsic_width(el, st);
+            let frame = st.pad_left + st.pad_right + st.border_x();
+            let ml = st.margin_left.px(w as f32).unwrap_or(0.0);
+            let mr = st.margin_right.px(w as f32).unwrap_or(0.0);
+            let avail = (w as f32 - ml - mr - frame).max(0.0);
+            let want = intrinsic_size(k, pref, min, avail);
+            let outer = clamp_len(want + frame, st.min_width, st.max_width, st.box_border, frame);
+            cw = (outer - frame).max(1.0);
+        }
         let aspect = with_aspect_height(st, cw);
         let st = aspect.as_ref().unwrap_or(st);
         let content_x = x + off_left as i32;
@@ -5402,10 +5408,15 @@ impl<'a> Ctx<'a> {
             if push {
                 self.path.push(self.info(el));
             }
-            let got = if st.display == Display::Table {
-                self.intrinsic_table(&el.children, st)
-            } else {
-                self.intrinsic_width_nodes(&el.children, st)
+            let got = match st.display {
+                Display::Table => self.intrinsic_table(&el.children, st),
+                // Ein Flex- oder Rasterkasten ist KEIN Blockcontainer: seine
+                // Kinder liegen nach einer anderen Regel nebeneinander, und
+                // sie als Blockinhalt zu messen beantwortet den falschen
+                // Formatierungskontext.
+                Display::Flex | Display::InlineFlex => self.intrinsic_flex(el, st),
+                Display::Grid => self.intrinsic_grid(el, st),
+                _ => self.intrinsic_width_nodes(&el.children, st),
             };
             if push {
                 self.path.pop();
@@ -5559,25 +5570,7 @@ impl<'a> Ctx<'a> {
             self.path.pop();
             (iw as f32, iw as f32)
         } else {
-            let (p, m) = self.intrinsic_width(el, &cs);
-            // A child contributes its MARGIN box: its margins have to fit
-            // inside the parent's shrink-to-fit width too (css-sizing-3 §4).
-            // A percentage margin resolves against a width that does not exist
-            // yet, so it is indefinite here and contributes nothing.
-            let margins = cs.margin_left.px(0.0).unwrap_or(0.0) + cs.margin_right.px(0.0).unwrap_or(0.0);
-            let frame = cs.pad_left + cs.pad_right + cs.border_x() + margins;
-            // A definite `width` fixes the child's outer width, so that — not
-            // what its content would prefer — is what it contributes to its
-            // parent's shrink-to-fit (css-sizing-3 §4). A percentage stays
-            // indefinite while the parent's own width is still unknown.
-            match cs.width {
-                Len::Px(v) => {
-                    let outer = if cs.box_border { v } else { v + frame };
-                    let outer = clamp_len(outer, cs.min_width, cs.max_width, cs.box_border, frame);
-                    (outer, outer)
-                }
-                _ => (p + frame, m + frame),
-            }
+            self.child_outer(el, &cs)
         };
         // An atomic inline sits ON the current line — it does not end it.
         // `inline-block`, an image, a form control: all of them are
@@ -5616,6 +5609,124 @@ impl<'a> Ctx<'a> {
             *pref = pref.max(p);
         }
         *min = min.max(m);
+    }
+
+    /// Was ein KIND zur schrumpfenden Breite seines Elternteils beitraegt:
+    /// sein MARGIN-Kasten. Herausgezogen, weil Block-, Flex- und Rasterkinder
+    /// dieselbe Rechnung brauchen — und eine zweite Fassung waere eine zweite
+    /// Semantik.
+    fn child_outer(&mut self, el: &'a Element, cs: &ComputedStyle) -> (f32, f32) {
+        let (p, m) = self.intrinsic_width(el, cs);
+        // A percentage margin resolves against a width that does not exist
+        // yet, so it is indefinite here and contributes nothing.
+        let margins = cs.margin_left.px(0.0).unwrap_or(0.0) + cs.margin_right.px(0.0).unwrap_or(0.0);
+        let frame = cs.pad_left + cs.pad_right + cs.border_x() + margins;
+        // A definite `width` fixes the child's outer width, so that — not what
+        // its content would prefer — is what it contributes (css-sizing-3 §4).
+        match cs.width {
+            Len::Px(v) => {
+                let outer = if cs.box_border { v } else { v + frame };
+                let outer = clamp_len(outer, cs.min_width, cs.max_width, cs.box_border, frame);
+                (outer, outer)
+            }
+            _ => (p + frame, m + frame),
+        }
+    }
+
+    /// Die in-flow-KINDER eines Kastens mit ihren Stilen — so gesammelt, wie
+    /// `layout_flex` und `layout_grid` es tun (Reihenfolge, Geschwisterzahl,
+    /// `display:none` und ausser Fluss fallen weg).
+    fn flow_kids(&mut self, el: &'a Element, st: &ComputedStyle)
+        -> Vec<(&'a Element, ComputedStyle)> {
+        let mut out = Vec::new();
+        let mut siblings: Vec<ElemInfo> = Vec::new();
+        let sib_count = el.children.iter().filter(|n| matches!(n, Node::Element(_))).count() as u32;
+        for c in &el.children {
+            let Node::Element(ce) = c else { continue };
+            let cs = self.styled(ce, st, &siblings, sib_count);
+            siblings.push(self.info(ce));
+            if cs.display == Display::None { continue }
+            if matches!(cs.position, Position::Absolute | Position::Fixed) { continue }
+            out.push((ce, cs));
+        }
+        out
+    }
+
+    /// Die inneren Breiten eines FLEX-Kastens. Seine Kinder sind ITEMS, kein
+    /// Blockinhalt: in einer Zeile stehen sie nebeneinander, also ist die
+    /// max-content-Breite ihre SUMME; in einer Spalte stapeln sie, also die
+    /// breiteste. Ohne diese Unterscheidung antwortet die Messung ueber den
+    /// falschen Formatierungskontext — und genau daran ist der erste Versuch
+    /// gescheitert, `width: fit-content` an einem Block zu ehren.
+    fn intrinsic_flex(&mut self, el: &'a Element, st: &ComputedStyle) -> (f32, f32) {
+        let kids = self.flow_kids(el, st);
+        let (mut pref, mut min) = (0.0f32, 0.0f32);
+        for (ce, cs) in &kids {
+            let (p, m) = self.child_outer(ce, cs);
+            if st.flex_row {
+                pref += p;
+                // Umbrechend darf jede Zeile fuer sich schmal werden; ohne
+                // Umbruch muessen alle Items nebeneinander passen.
+                if st.flex_wrap { min = min.max(m) } else { min += m }
+            } else {
+                pref = pref.max(p);
+                min = min.max(m);
+            }
+        }
+        if st.flex_row && kids.len() > 1 {
+            let g = st.grid_col_gap.px(0.0).unwrap_or(0.0) * (kids.len() as f32 - 1.0);
+            pref += g;
+            if !st.flex_wrap { min += g }
+        }
+        (pref, min)
+    }
+
+    /// Die inneren Breiten eines RASTER-Kastens: die Summe seiner Spalten.
+    ///
+    /// Genau, solange jede Spur eine feste Groesse hat — und das ist die Form,
+    /// in der die WPT-Referenzen ein Raster rahmen. Fuer `auto`/`fr` steht
+    /// hier der groesste Beitrag EINES Kindes je Spur; die Zuordnung Kind →
+    /// Spalte braeuchte die ganze Platzierung, und die laeuft erst im Layout.
+    /// Benannt statt verschwiegen.
+    fn intrinsic_grid(&mut self, el: &'a Element, st: &ComputedStyle) -> (f32, f32) {
+        let ncols = st.grid_ncols as usize;
+        if ncols == 0 { return self.intrinsic_width_nodes(&el.children, st) }
+        let kids = self.flow_kids(el, st);
+        // Die Kinder den SPALTEN zuordnen — zeilenweise, wie die Platzierung
+        // im Layout, und mit `grid-column-start`, wo eines steht. Ohne diese
+        // Zuordnung waere die max-content-Breite „Spurenzahl mal breitestes
+        // Kind" und damit fuer jedes ungleiche Raster zu gross.
+        let (mut col_p, mut col_m) = (alloc::vec![0.0f32; ncols], alloc::vec![0.0f32; ncols]);
+        let mut next = 0usize;
+        for (ce, cs) in &kids {
+            let span = (cs.grid_col_span as usize).clamp(1, ncols);
+            let c = if cs.grid_col_start > 0 {
+                ((cs.grid_col_start as usize - 1).min(ncols - 1)).min(ncols - span)
+            } else {
+                if next + span > ncols { next = 0 }
+                let c = next;
+                next += span;
+                c
+            };
+            // Ein Kind ueber mehrere Spuren sagt ueber eine einzelne nichts —
+            // dieselbe Vereinfachung wie in der Spaltenrechnung des Layouts.
+            if span != 1 { continue }
+            let (p, m) = self.child_outer(ce, cs);
+            col_p[c] = col_p[c].max(p);
+            col_m[c] = col_m[c].max(m);
+        }
+        let (mut pref, mut min) = (0.0f32, 0.0f32);
+        for c in 0..ncols {
+            match st.grid_tracks[c] {
+                GridTrack::Fixed(px) => { pref += px; min += px; }
+                // Ein Prozentsatz hat hier keine Bezugsgroesse (css-sizing-3
+                // §4.1) und traegt darum nichts bei.
+                GridTrack::Pct(_) => {}
+                GridTrack::Auto | GridTrack::Fr(_) => { pref += col_p[c]; min += col_m[c]; }
+            }
+        }
+        let gaps = st.grid_col_gap.px(0.0).unwrap_or(0.0) * (ncols as f32 - 1.0).max(0.0);
+        (pref + gaps, min + gaps)
     }
 
     /// `intrinsic_width`, dispatching on whether the cell is real or anonymous.
