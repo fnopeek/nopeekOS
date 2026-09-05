@@ -1097,7 +1097,9 @@ impl Interp {
             let found = o.borrow().get_own(key).cloned();
             if let Some(p) = found {
                 if let Some(g) = &p.get {
-                    return self.call(&g.clone(), base.clone(), &[]);
+                    if !matches!(g, Value::Undefined) {
+                        return self.call(&g.clone(), base.clone(), &[]);
+                    }
                 }
                 if p.is_accessor() { return Ok(Value::Undefined); }
                 return Ok(p.value.clone().unwrap_or(Value::Undefined));
@@ -1183,7 +1185,12 @@ impl Interp {
             if hops > MAX_PROTO_CHAIN { return self.type_err("prototype chain too long (cycle?)"); }
             let found = c.borrow().get_own(key).cloned();
             if let Some(p) = found {
-                if let Some(s) = &p.set { self.call(&s.clone(), base.clone(), &[val])?; return Ok(()); }
+                if let Some(st) = &p.set {
+                    if !matches!(st, Value::Undefined) {
+                        self.call(&st.clone(), base.clone(), &[val])?;
+                        return Ok(());
+                    }
+                }
                 // Nur ein Getter, kein Setzer: das Schreiben scheitert.
                 if p.is_accessor() {
                     strict_site!(self, 3);
@@ -1743,21 +1750,50 @@ impl Interp {
     /// `Object.defineProperties`, `Object.create` mit zweitem Argument und
     /// `Reflect.defineProperty`. Fuenf Kopien dieser Regeln waeren fuenf
     /// Gelegenheiten, sie auseinanderlaufen zu lassen.
-    pub fn to_prop_desc(&mut self, d: &Value) -> C<Prop> {
+    /// `ToPropertyDescriptor` (ES §6.2.6.5).
+    ///
+    /// **Gefragt wird nach ANWESENHEIT, nicht nach Wahrheit.** Die alte
+    /// Fassung las `writable` mit `.truthy()`, und ein fehlendes Feld wurde
+    /// damit zu `false` — beim ANLEGEN richtig, beim AENDERN falsch. Der
+    /// Unterschied ist der ganze Sinn eines partiellen Beschreibers.
+    ///
+    /// Gefragt wird ueber die PROTOTYPKETTE (`HasProperty`, nicht `has_own`):
+    /// ein Beschreiber, der `writable` erbt, zaehlt.
+    pub fn to_prop_desc(&mut self, d: &Value) -> C<Desc> {
         let Value::Obj(dd) = d else {
             return self.type_err("property descriptor must be an object");
         };
-        let has = |n: &str| dd.borrow().has_own(n);
-        let get = self.get(d, "get")?;
-        let set = self.get(d, "set")?;
-        Ok(Prop {
-            value: if has("value") { Some(self.get(d, "value")?) } else { None },
-            get: if matches!(get, Value::Undefined) { None } else { Some(get) },
-            set: if matches!(set, Value::Undefined) { None } else { Some(set) },
-            writable: self.get(d, "writable")?.truthy(),
-            enumerable: self.get(d, "enumerable")?.truthy(),
-            configurable: self.get(d, "configurable")?.truthy(),
-        })
+        let dd = dd.clone();
+        let mut out = Desc::default();
+        if self.has_property(&dd, "enumerable") {
+            out.enumerable = Some(self.get(d, "enumerable")?.truthy());
+        }
+        if self.has_property(&dd, "configurable") {
+            out.configurable = Some(self.get(d, "configurable")?.truthy());
+        }
+        if self.has_property(&dd, "value") { out.value = Some(self.get(d, "value")?); }
+        if self.has_property(&dd, "writable") {
+            out.writable = Some(self.get(d, "writable")?.truthy());
+        }
+        if self.has_property(&dd, "get") {
+            let g = self.get(d, "get")?;
+            if !self.is_callable(&g) && !matches!(g, Value::Undefined) {
+                return self.type_err("getter must be a function");
+            }
+            out.get = Some(g);
+        }
+        if self.has_property(&dd, "set") {
+            let st = self.get(d, "set")?;
+            if !self.is_callable(&st) && !matches!(st, Value::Undefined) {
+                return self.type_err("setter must be a function");
+            }
+            out.set = Some(st);
+        }
+        if out.is_accessor() && out.is_data() {
+            return self.type_err(
+                "property descriptor cannot be both an accessor and a data descriptor");
+        }
+        Ok(out)
     }
 
     /// Und zurueck: `Prop` → Beschreiberobjekt.
@@ -1787,10 +1823,16 @@ impl Interp {
         let keys: Vec<Rc<str>> = src.borrow().own_keys().into_iter()
             .filter(|k| src.borrow().is_enumerable(k))
             .collect();
+        // ERST alle Beschreiber lesen, DANN alle anwenden (ES §20.1.2.3.1).
+        // Die Reihenfolge ist beobachtbar: wirft der dritte Beschreiber,
+        // duerfen die ersten beiden nicht schon gelegt sein.
+        let mut pending = Vec::new();
         for k in keys {
             let d = self.get(props, &k)?;
-            let p = self.to_prop_desc(&d)?;
-            target.borrow_mut().set_prop(k, p);
+            pending.push((k, self.to_prop_desc(&d)?));
+        }
+        for (k, d) in pending {
+            self.define_or_throw(target, &k, d)?;
         }
         Ok(())
     }
@@ -1912,7 +1954,10 @@ impl Interp {
                     if !matches!(r, Value::Obj(_)) {
                         return self.type_err("getOwnPropertyDescriptor trap did not return an object");
                     }
-                    Ok(Some(self.to_prop_desc(&r)?))
+                    // Die Falle liefert einen partiellen Beschreiber; eine
+                    // ABGELEGTE Eigenschaft ist immer vollstaendig, also
+                    // bekommen die fehlenden Felder hier ihre Vorgabewerte.
+                    Ok(Some(self.to_prop_desc(&r)?.into_new_prop()))
                 }
                 None => { let t = super::proxy::target(self, o)?; self.get_own_desc(&t, key) }
             };
@@ -1921,20 +1966,97 @@ impl Interp {
     }
 
     /// Eine Eigenschaft festlegen — durch einen Stellvertreter hindurch.
-    pub fn define_own(&mut self, o: &Gc, key: &str, p: Prop) -> C<bool> {
+    /// `[[DefineOwnProperty]]` — MIT der Pruefung (ES §10.1.6).
+    ///
+    /// Bis 0.99.0 legte diese Funktion einfach ab, was man ihr gab. Eine
+    /// nicht konfigurierbare Eigenschaft liess sich damit umdefinieren,
+    /// `Object.freeze` war eine Bitte, und `Object.defineProperty` gab immer
+    /// `true`. 368 test262-Varianten haengen daran.
+    pub fn define_own(&mut self, o: &Gc, key: &str, d: Desc) -> C<bool> {
         if super::proxy::parts(o).is_some() {
             return match super::proxy::trap(self, o, "defineProperty")? {
                 Some((f, t)) => {
                     let kv = super::proxy::key_value(key);
-                    let d = self.from_prop_desc(&p);
-                    let r = self.call(&f, Value::Undefined, &[t, kv, d])?;
+                    let dv = self.desc_to_object(&d);
+                    let r = self.call(&f, Value::Undefined, &[t, kv, dv])?;
                     Ok(r.truthy())
                 }
-                None => { let t = super::proxy::target(self, o)?; self.define_own(&t, key, p) }
+                None => { let t = super::proxy::target(self, o)?; self.define_own(&t, key, d) }
             };
         }
-        o.borrow_mut().define(key, p);
+        let cur = o.borrow().get_own(key).cloned();
+        let extensible = o.borrow().extensible;
+        let Some(cur) = cur else {
+            // Neu. Nur die Erweiterbarkeit steht dem im Weg; die fehlenden
+            // Felder bekommen HIER ihre Vorgabewerte.
+            if !extensible { return Ok(false); }
+            let np = d.into_new_prop();
+            o.borrow_mut().define(key, np);
+            self.fix_array_length(o, key);
+            return Ok(true);
+        };
+        if d.is_empty() { return Ok(true); }
+        // `ValidateAndApplyPropertyDescriptor`, Schritt 4: was eine nicht
+        // konfigurierbare Eigenschaft NICHT erlaubt.
+        if !cur.configurable {
+            if d.configurable == Some(true) { return Ok(false); }
+            if let Some(e) = d.enumerable { if e != cur.enumerable { return Ok(false); } }
+            if !d.is_generic() && d.is_accessor() != cur.is_accessor() { return Ok(false); }
+            if cur.is_accessor() {
+                let same = |a: &Option<Value>, b: &Option<Value>| {
+                    let av = a.clone().unwrap_or(Value::Undefined);
+                    let bv = b.clone().unwrap_or(Value::Undefined);
+                    av.same_value(&bv)
+                };
+                if d.get.is_some() && !same(&d.get, &cur.get) { return Ok(false); }
+                if d.set.is_some() && !same(&d.set, &cur.set) { return Ok(false); }
+            } else if !cur.writable {
+                if d.writable == Some(true) { return Ok(false); }
+                if let Some(v) = &d.value {
+                    let cv = cur.value.clone().unwrap_or(Value::Undefined);
+                    if !v.same_value(&cv) { return Ok(false); }
+                }
+            }
+        }
+        // Angewendet wird FELDWEISE: was der Beschreiber nicht nennt, bleibt.
+        let mut np = cur.clone();
+        if !d.is_generic() && d.is_accessor() != cur.is_accessor() {
+            // Art gewechselt — die Felder der alten Art fallen auf ihre
+            // Vorgabewerte zurueck, `enumerable`/`configurable` bleiben.
+            np = Prop { value: None, get: None, set: None, writable: false,
+                        enumerable: cur.enumerable, configurable: cur.configurable };
+        }
+        if let Some(v) = d.value { np.value = Some(v); np.get = None; np.set = None; }
+        if let Some(w) = d.writable { np.writable = w; }
+        if let Some(g) = d.get { np.get = Some(g); np.value = None; }
+        if let Some(st) = d.set { np.set = Some(st); np.value = None; }
+        if let Some(e) = d.enumerable { np.enumerable = e; }
+        if let Some(c) = d.configurable { np.configurable = c; }
+        o.borrow_mut().define(key, np);
+        self.fix_array_length(o, key);
         Ok(true)
+    }
+
+    /// `FromPropertyDescriptor` fuer einen PARTIELLEN Beschreiber — was die
+    /// Stellvertreter-Falle zu sehen bekommt. Nur die Felder, die dastehen.
+    pub fn desc_to_object(&mut self, d: &Desc) -> Value {
+        let o = new_obj(Some(self.realm.object_proto.clone()));
+        {
+            let mut b = o.borrow_mut();
+            if let Some(v) = &d.value { b.define("value", Prop::data(v.clone())); }
+            if let Some(w) = d.writable { b.define("writable", Prop::data(Value::Bool(w))); }
+            if let Some(g) = &d.get { b.define("get", Prop::data(g.clone())); }
+            if let Some(s) = &d.set { b.define("set", Prop::data(s.clone())); }
+            if let Some(e) = d.enumerable { b.define("enumerable", Prop::data(Value::Bool(e))); }
+            if let Some(c) = d.configurable { b.define("configurable", Prop::data(Value::Bool(c))); }
+        }
+        Value::Obj(o)
+    }
+
+    /// `DefinePropertyOrThrow` (ES §7.3.8) — was die Eingebauten benutzen.
+    pub fn define_or_throw(&mut self, o: &Gc, key: &str, d: Desc) -> C<()> {
+        if self.define_own(o, key, d)? { return Ok(()); }
+        self.type_err(&alloc::format!("cannot redefine property: {key}"))
     }
 
     /// Der Prototyp — durch einen Stellvertreter hindurch.
