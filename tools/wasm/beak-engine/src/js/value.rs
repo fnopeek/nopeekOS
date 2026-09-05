@@ -27,6 +27,8 @@ pub enum Value {
     Num(f64),
     Str(Rc<str>),
     Sym(Rc<SymData>),
+    /// Eine ganze Zahl ohne Groessengrenze. Ein PRIMITIV, kein Objekt.
+    BigInt(Rc<crate::js::bigint::Big>),
     Obj(Gc),
 }
 
@@ -42,6 +44,7 @@ impl Value {
             Value::Num(_) => "number",
             Value::Str(_) => "string",
             Value::Sym(_) => "symbol",
+            Value::BigInt(_) => "bigint",
             Value::Obj(o) => {
                 // Eine GEBUNDENE Funktion ist eine, und ein Stellvertreter ist
                 // eine, wenn sein Ziel eine ist. Beides fehlte hier.
@@ -64,6 +67,7 @@ impl Value {
             Value::Bool(b) => *b,
             Value::Num(n) => *n != 0.0 && !n.is_nan(),
             Value::Str(s) => !s.is_empty(),
+            Value::BigInt(b) => !b.is_zero(),
             Value::Sym(_) => true,
             Value::Obj(_) => true,
         }
@@ -84,6 +88,7 @@ impl Value {
             // und der ist je Symbol einmalig. Damit ist die Identitaet nicht
             // an den `Rc` gebunden, und `Symbol.for` darf ihn frisch bauen.
             (Value::Sym(a), Value::Sym(b)) => a.key == b.key,
+            (Value::BigInt(a), Value::BigInt(b)) => a == b,
             (Value::Obj(a), Value::Obj(b)) => Rc::ptr_eq(a, b),
             _ => false,
         }
@@ -433,6 +438,7 @@ pub enum ObjKind {
     NumWrap(f64),
     StrWrap(Rc<str>),
     SymWrap(Rc<SymData>),
+    BigWrap(Rc<crate::js::bigint::Big>),
     Arguments,
     Regex(Rc<crate::js::regexp::Regex>),
     Promise(Rc<RefCell<crate::js::promise::PData>>),

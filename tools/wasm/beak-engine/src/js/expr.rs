@@ -14,6 +14,10 @@ impl Interp {
     pub fn eval(&mut self, e: &Expr, env: &Rc<RefCell<Env>>) -> C<Value> {
         match e {
             Expr::Num(n) => Ok(Value::Num(*n)),
+            Expr::BigInt(t) => match crate::js::bigint::Big::parse(t) {
+                Some(b) => Ok(Value::BigInt(Rc::new(b))),
+                None => Err(self.throw_kind("SyntaxError", "invalid BigInt literal")),
+            },
             Expr::Str(s) => Ok(Value::str(s)),
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             Expr::Null => Ok(Value::Null),
@@ -598,10 +602,20 @@ impl Interp {
 
     pub fn unary_val(&mut self, op: UnaryOp, v: Value) -> C<Value> {
         Ok(match op {
-            UnaryOp::Minus => Value::Num(-self.to_number(&v)?),
+            UnaryOp::Minus => {
+                let p = self.to_primitive(&v, false)?;
+                if let Value::BigInt(b) = &p { return Ok(Value::BigInt(Rc::new(b.negate()))); }
+                Value::Num(-self.to_number(&p)?)
+            }
+            // `+x` ist die EINZIGE Stelle, an der eine grosse Zahl wirft statt
+            // sich umzuwandeln — es gaebe sonst einen stillen Weg nach `f64`.
             UnaryOp::Plus => Value::Num(self.to_number(&v)?),
             UnaryOp::Bang => Value::Bool(!v.truthy()),
-            UnaryOp::Tilde => Value::Num(!to_int32(self.to_number(&v)?) as f64),
+            UnaryOp::Tilde => {
+                let p = self.to_primitive(&v, false)?;
+                if let Value::BigInt(b) = &p { return Ok(Value::BigInt(Rc::new(b.not()))); }
+                Value::Num(!to_int32(self.to_number(&p)?) as f64)
+            }
             UnaryOp::Typeof => Value::str(v.type_of()),
             UnaryOp::Void => Value::Undefined,
             UnaryOp::Delete => unreachable!(),
@@ -634,10 +648,10 @@ impl Interp {
     fn eval_update(&mut self, op: UpdateOp, arg: &Expr, prefix: bool,
                    env: &Rc<RefCell<Env>>) -> C<Value> {
         let old = self.eval(arg, env)?;
-        let n = self.to_number(&old)?;
-        let new = if op == UpdateOp::Inc { n + 1.0 } else { n - 1.0 };
-        self.store(arg, Value::Num(new), env)?;
-        Ok(Value::Num(if prefix { new } else { n }))
+        let n = self.to_numeric(&old)?;
+        let new = self.step_numeric(&n, op == UpdateOp::Inc)?;
+        self.store(arg, new.clone(), env)?;
+        Ok(if prefix { new } else { n })
     }
 
     fn store(&mut self, target: &Expr, v: Value, env: &Rc<RefCell<Env>>) -> C<()> {
@@ -722,19 +736,40 @@ impl Interp {
                     let mut s = String::with_capacity(a.len() + b.len());
                     s.push_str(&a); s.push_str(&b);
                     Value::string(s)
+                } else if let (Value::BigInt(a), Value::BigInt(b)) = (&lp, &rp) {
+                    Value::BigInt(Rc::new(a.add(b)))
+                } else if matches!(lp, Value::BigInt(_)) || matches!(rp, Value::BigInt(_)) {
+                    return self.type_err("cannot mix BigInt and other types, use explicit conversions");
                 } else {
                     Value::Num(self.to_number(&lp)? + self.to_number(&rp)?)
                 }
             }
-            Sub => Value::Num(self.to_number(&l)? - self.to_number(&r)?),
-            Mul => Value::Num(self.to_number(&l)? * self.to_number(&r)?),
-            Div => Value::Num(self.to_number(&l)? / self.to_number(&r)?),
-            Mod => {
-                let a = self.to_number(&l)?; let b = self.to_number(&r)?;
-                Value::Num(if b == 0.0 || a.is_nan() || b.is_nan() || a.is_infinite() { f64::NAN }
-                           else if b.is_infinite() { a } else { a % b })
+            Sub | Mul | Div | Mod | Exp => {
+                // Beide Seiten ZUERST primitiv machen, dann entscheiden: zwei
+                // grosse Zahlen rechnen gross, zwei kleine klein, gemischt
+                // wirft. Die Reihenfolge ist sichtbar, wenn `valueOf`
+                // Nebenwirkungen hat.
+                // `ToNumeric(lhs)` GANZ, dann erst `ToNumeric(rhs)`. Die
+                // Reihenfolge ist beobachtbar: gibt `lhs.valueOf` ein Symbol
+                // zurueck, darf `rhs.valueOf` gar nicht mehr laufen.
+                let lp = self.to_numeric(&l)?;
+                let rp = self.to_numeric(&r)?;
+                if let (Value::BigInt(a), Value::BigInt(b)) = (&lp, &rp) {
+                    return self.big_arith(op, a, b);
+                }
+                if matches!(lp, Value::BigInt(_)) || matches!(rp, Value::BigInt(_)) {
+                    return self.type_err("cannot mix BigInt and other types, use explicit conversions");
+                }
+                let a = self.to_number(&lp)?; let b = self.to_number(&rp)?;
+                Value::Num(match op {
+                    Sub => a - b,
+                    Mul => a * b,
+                    Div => a / b,
+                    Mod => if b == 0.0 || a.is_nan() || b.is_nan() || a.is_infinite() { f64::NAN }
+                           else if b.is_infinite() { a } else { a % b },
+                    _ => powf(a, b),
+                })
             }
-            Exp => Value::Num(powf(self.to_number(&l)?, self.to_number(&r)?)),
             EqEqEq => Value::Bool(l.strict_eq(&r)),
             NotEqEq => Value::Bool(!l.strict_eq(&r)),
             EqEq => Value::Bool(self.loose_eq(&l, &r)?),
@@ -744,18 +779,61 @@ impl Interp {
                 let rp = self.to_primitive(&r, false)?;
                 if let (Value::Str(a), Value::Str(b)) = (&lp, &rp) {
                     Value::Bool(match op { Lt => a < b, Gt => a > b, LtEq => a <= b, _ => a >= b })
+                } else if matches!(lp, Value::BigInt(_)) || matches!(rp, Value::BigInt(_)) {
+                    // Gross gegen klein DARF verglichen werden — nur gerechnet
+                    // werden darf damit nicht.
+                    match self.big_cmp(&lp, &rp)? {
+                        None => Value::Bool(false),
+                        Some(o) => Value::Bool(match op {
+                            Lt => o.is_lt(), Gt => o.is_gt(), LtEq => o.is_le(), _ => o.is_ge() }),
+                    }
                 } else {
                     let a = self.to_number(&lp)?; let b = self.to_number(&rp)?;
                     if a.is_nan() || b.is_nan() { Value::Bool(false) }
                     else { Value::Bool(match op { Lt => a < b, Gt => a > b, LtEq => a <= b, _ => a >= b }) }
                 }
             }
-            Shl => Value::Num(((to_int32(self.to_number(&l)?)) << (to_uint32(self.to_number(&r)?) & 31)) as f64),
-            Shr => Value::Num(((to_int32(self.to_number(&l)?)) >> (to_uint32(self.to_number(&r)?) & 31)) as f64),
-            UShr => Value::Num(((to_uint32(self.to_number(&l)?)) >> (to_uint32(self.to_number(&r)?) & 31)) as f64),
-            BitAnd => Value::Num((to_int32(self.to_number(&l)?) & to_int32(self.to_number(&r)?)) as f64),
-            BitOr => Value::Num((to_int32(self.to_number(&l)?) | to_int32(self.to_number(&r)?)) as f64),
-            BitXor => Value::Num((to_int32(self.to_number(&l)?) ^ to_int32(self.to_number(&r)?)) as f64),
+            Shl | Shr | UShr => {
+                let lp = self.to_numeric(&l)?;
+                let rp = self.to_numeric(&r)?;
+                if let (Value::BigInt(a), Value::BigInt(b)) = (&lp, &rp) {
+                    // `>>>` gibt es fuer grosse Zahlen NICHT: es setzt eine
+                    // feste Breite voraus, und die hat der Typ nicht.
+                    if matches!(op, UShr) {
+                        return self.type_err("BigInts have no unsigned right shift");
+                    }
+                    let n = b.to_f64();
+                    if !n.is_finite() || libm::fabs(n) > 1e6 {
+                        return self.range_err("BigInt shift count is too large");
+                    }
+                    let left = matches!(op, Shl) == (n >= 0.0);
+                    let k = libm::fabs(n) as u64;
+                    return Ok(Value::BigInt(Rc::new(if left { a.shl(k) } else { a.shr(k) })));
+                }
+                if matches!(lp, Value::BigInt(_)) || matches!(rp, Value::BigInt(_)) {
+                    return self.type_err("cannot mix BigInt and other types, use explicit conversions");
+                }
+                let a = self.to_number(&lp)?; let b = self.to_number(&rp)?;
+                Value::Num(match op {
+                    Shl => ((to_int32(a)) << (to_uint32(b) & 31)) as f64,
+                    Shr => ((to_int32(a)) >> (to_uint32(b) & 31)) as f64,
+                    _ => ((to_uint32(a)) >> (to_uint32(b) & 31)) as f64,
+                })
+            }
+            BitAnd | BitOr | BitXor => {
+                let lp = self.to_numeric(&l)?;
+                let rp = self.to_numeric(&r)?;
+                if let (Value::BigInt(a), Value::BigInt(b)) = (&lp, &rp) {
+                    let k = match op { BitAnd => 0u8, BitOr => 1, _ => 2 };
+                    return Ok(Value::BigInt(Rc::new(a.bitop(b, k))));
+                }
+                if matches!(lp, Value::BigInt(_)) || matches!(rp, Value::BigInt(_)) {
+                    return self.type_err("cannot mix BigInt and other types, use explicit conversions");
+                }
+                let a = to_int32(self.to_number(&lp)?);
+                let b = to_int32(self.to_number(&rp)?);
+                Value::Num(match op { BitAnd => a & b, BitOr => a | b, _ => a ^ b } as f64)
+            }
             In => {
                 let Value::Obj(o) = &r else { return self.type_err("'in' needs an object on the right") };
                 let k = self.to_prop_key(&l)?;
@@ -794,7 +872,15 @@ impl Interp {
             (Undefined | Null, Undefined | Null) => true,
             (Undefined | Null, _) | (_, Undefined | Null) => false,
             (Num(_), Num(_)) | (Str(_), Str(_)) | (Bool(_), Bool(_)) | (Obj(_), Obj(_))
-            | (Sym(_), Sym(_)) => l.strict_eq(r),
+            | (Sym(_), Sym(_)) | (BigInt(_), BigInt(_)) => l.strict_eq(r),
+            // `1n == 1` ist WAHR, `1n === 1` falsch. Der Vergleich laeuft
+            // ueber den mathematischen Wert, nicht ueber eine Umwandlung.
+            (BigInt(a), Num(n)) | (Num(n), BigInt(a)) =>
+                n.is_finite() && libm::trunc(*n) == *n
+                    && crate::js::bigint::Big::from_f64(*n).map(|b| b == **a).unwrap_or(false),
+            (BigInt(a), Str(t)) | (Str(t), BigInt(a)) =>
+                crate::js::bigint::Big::parse(t).map(|b| b == **a).unwrap_or(false),
+            (BigInt(_), Sym(_)) | (Sym(_), BigInt(_)) => false,
             // Ein Symbol ist nur sich selbst gleich — `==` wandelt es NICHT
             // um. Gegen ein Objekt entscheidet erst dessen `ToPrimitive`.
             (Sym(_), Num(_) | Str(_) | Bool(_)) | (Num(_) | Str(_) | Bool(_), Sym(_)) => false,
@@ -805,6 +891,57 @@ impl Interp {
             (Obj(_), _) => { let p = self.to_primitive_hint(l, "default")?; self.loose_eq(&p, r)? }
             (_, Obj(_)) => { let p = self.to_primitive_hint(r, "default")?; self.loose_eq(l, &p)? }
         })
+    }
+}
+
+impl Interp {
+    /// Die vier Rechenoperatoren auf zwei grossen Zahlen.
+    fn big_arith(&mut self, op: BinOp, a: &Rc<crate::js::bigint::Big>,
+                 b: &Rc<crate::js::bigint::Big>) -> C<Value> {
+        use BinOp::*;
+        let r = match op {
+            Sub => a.sub(b),
+            Mul => a.mul(b),
+            Div | Mod => {
+                let Some((q, m)) = a.div_rem(b) else {
+                    return Err(self.throw_kind("RangeError", "division by zero"));
+                };
+                if matches!(op, Div) { q } else { m }
+            }
+            _ => match a.pow(b) {
+                Some(x) => x,
+                None => return Err(self.throw_kind("RangeError",
+                    "BigInt exponent is negative or the result is too large")),
+            },
+        };
+        Ok(Value::BigInt(Rc::new(r)))
+    }
+
+    /// Ein Vergleich, bei dem mindestens eine Seite gross ist. `None` heisst
+    /// „unvergleichbar" (NaN auf der anderen Seite).
+    fn big_cmp(&mut self, l: &Value, r: &Value) -> C<Option<core::cmp::Ordering>> {
+        use crate::js::bigint::Big;
+        let to_big = |v: &Value| -> Option<Big> {
+            match v {
+                Value::BigInt(b) => Some((**b).clone()),
+                Value::Str(s) => Big::parse(s),
+                _ => None,
+            }
+        };
+        // Zwei grosse, oder eine grosse gegen einen Text: exakt vergleichen.
+        if let (Some(a), Some(b)) = (to_big(l), to_big(r)) { return Ok(Some(a.cmp(&b))); }
+        // Gross gegen Zahl: ueber `f64`. Das ist auf sehr grossen Werten
+        // ungenau — benannt statt verschwiegen, und der Fall kommt in echtem
+        // Code nicht vor.
+        let (a, b) = match (l, r) {
+            (Value::BigInt(x), other) => (x.to_f64(), self.to_number(other)?),
+            (other, Value::BigInt(y)) => (self.to_number(other)?, y.to_f64()),
+            _ => return Ok(None),
+        };
+        if a.is_nan() || b.is_nan() { return Ok(None); }
+        Ok(Some(if a < b { core::cmp::Ordering::Less }
+                else if a > b { core::cmp::Ordering::Greater }
+                else { core::cmp::Ordering::Equal }))
     }
 }
 

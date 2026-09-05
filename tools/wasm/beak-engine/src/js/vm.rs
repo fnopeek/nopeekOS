@@ -324,6 +324,8 @@ impl Vm {
                 let r = i.unary_val(*op, v)?;
                 self.push(r);
             }
+            Op::ToNumeric => { let v = self.pop(); let r = i.to_numeric(&v)?; self.push(r); }
+            Op::Step(up) => { let v = self.pop(); let r = i.step_numeric(&v, *up)?; self.push(r); }
             Op::TypeofVar(n) => {
                 let v = i.typeof_ident(&chunk.names[*n as usize], &env)?;
                 self.push(v);

@@ -19,6 +19,7 @@ pub mod ast;
 pub mod code;
 pub mod compile;
 pub mod vm;
+pub mod bigint;
 pub mod builtins;
 pub mod date;
 pub mod iterhelp;

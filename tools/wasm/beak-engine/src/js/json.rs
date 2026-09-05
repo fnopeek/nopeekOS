@@ -75,6 +75,16 @@ fn write_value(i: &mut Interp, v: &Value, indent: &str, cur: &str, seen: &mut Ve
         }
         _ => v.clone(),
     };
+    // Die HUELLE eines Primitivs zaehlt wie das Primitiv: `JSON.stringify(
+    // Object(0n))` muss werfen, `Object(1)` wird zu `1`. Ohne diesen Schritt
+    // faellt eine Huelle in den Objektzweig und wird `{}`.
+    let v = match &v {
+        Value::Obj(o) => match &o.borrow().kind {
+            ObjKind::BigWrap(b) => Value::BigInt(b.clone()),
+            _ => v.clone(),
+        },
+        _ => v.clone(),
+    };
     match &v {
         Value::Null => { out.push_str("null"); Ok(true) }
         Value::Bool(b) => { out.push_str(if *b { "true" } else { "false" }); Ok(true) }
@@ -85,6 +95,9 @@ fn write_value(i: &mut Interp, v: &Value, indent: &str, cur: &str, seen: &mut Ve
             Ok(true)
         }
         Value::Str(s) => { write_string(s, out); Ok(true) }
+        // JSON kennt keine grossen Zahlen, und stillschweigend zu kuerzen
+        // waere Datenverlust — die Spezifikation schreibt hier einen Fehler vor.
+        Value::BigInt(_) => Err(i.throw_kind("TypeError", "Do not know how to serialize a BigInt")),
         // Wie `undefined`: faellt aus dem Objekt heraus, ist im Array `null`.
         // Ein Fehler waere falsch — JSON kennt Symbole schlicht nicht.
         Value::Undefined | Value::Sym(_) => Ok(false),

@@ -1251,7 +1251,14 @@ impl Compiler {
                 self.chunk.emit(Op::Class(k));
                 Ok(())
             }
-            Expr::BigInt(_) => Err(Unsupported("bigint")),
+            Expr::BigInt(t) => {
+                let Some(b) = super::bigint::Big::parse(t) else {
+                    return Err(Unsupported("bigint-literal"));
+                };
+                let k = self.chunk.konst(Value::BigInt(alloc::rc::Rc::new(b)));
+                self.chunk.emit(Op::Const(k));
+                Ok(())
+            }
             Expr::Super => Err(Unsupported("super")),
 
             // Ein `...x` ausserhalb von Feld und Argumentliste hat der Parser
@@ -1352,18 +1359,16 @@ impl Compiler {
 
     /// `x++` / `--o.p` — der Zielausdruck darf nur EINMAL ausgewertet werden.
     fn update(&mut self, op: UpdateOp, arg: &Expr, prefix: bool) -> CompileResult<()> {
-        let d = if op == UpdateOp::Inc { 1.0 } else { -1.0 };
+        let up = op == UpdateOp::Inc;
         match arg {
             Expr::Ident(n) => {
                 let i = self.chunk.name(n);
                 self.chunk.emit(Op::LoadVar(i));
                 // `to_number` VOR dem Rechnen: `x = "3"; x++` gibt 4, nicht
                 // "31". `Op::Un(Plus)` ist genau diese Umwandlung.
-                self.chunk.emit(Op::Un(UnaryOp::Plus));
+                self.chunk.emit(Op::ToNumeric);
                 if !prefix { self.chunk.emit(Op::Dup); }
-                let k = self.chunk.konst(Value::Num(d));
-                self.chunk.emit(Op::Const(k));
-                self.chunk.emit(Op::Bin(BinOp::Add));
+                self.chunk.emit(Op::Step(up));
                 self.chunk.emit(Op::StoreVar(i));
                 if !prefix { self.chunk.emit(Op::Pop); }
                 Ok(())
@@ -1375,16 +1380,14 @@ impl Compiler {
                         let i = self.member_name(prop);
                         self.chunk.emit(Op::Dup);
                         self.chunk.emit(Op::GetProp(i));
-                        self.chunk.emit(Op::Un(UnaryOp::Plus));
+                        self.chunk.emit(Op::ToNumeric);
                         if !prefix {
                             // Den alten Wert unter das Objekt schieben: er ist
                             // das Ergebnis, das Objekt braucht der Schreiber.
                             self.chunk.emit(Op::Dup);
                             self.chunk.emit(Op::Rot3);
                         }
-                        let k = self.chunk.konst(Value::Num(d));
-                        self.chunk.emit(Op::Const(k));
-                        self.chunk.emit(Op::Bin(BinOp::Add));
+                        self.chunk.emit(Op::Step(up));
                         self.chunk.emit(Op::SetProp(i));
                         if !prefix { self.chunk.emit(Op::Pop); }
                         Ok(())
@@ -1397,14 +1400,12 @@ impl Compiler {
                         self.chunk.emit(Op::ToKey);
                         self.chunk.emit(Op::Dup2);
                         self.chunk.emit(Op::GetIndex);
-                        self.chunk.emit(Op::Un(UnaryOp::Plus));
+                        self.chunk.emit(Op::ToNumeric);
                         if !prefix {
                             self.chunk.emit(Op::Dup);
                             self.chunk.emit(Op::Rot4);
                         }
-                        let c = self.chunk.konst(Value::Num(d));
-                        self.chunk.emit(Op::Const(c));
-                        self.chunk.emit(Op::Bin(BinOp::Add));
+                        self.chunk.emit(Op::Step(up));
                         self.chunk.emit(Op::SetIndex);
                         if !prefix { self.chunk.emit(Op::Pop); }
                         Ok(())

@@ -131,6 +131,7 @@ pub struct Realm {
     pub string_iter_proto: Gc,
     pub promise_proto: Gc,
     pub date_proto: Gc,
+    pub bigint_proto: Gc,
     pub iter_helper_proto: Gc,
     pub iter_wrap_proto: Gc,
     /// Die eingebaute `eval`. Gemerkt, weil ein Aufruf nur dann ein DIREKTER
@@ -809,7 +810,30 @@ impl Interp {
             Value::Num(n) => *n,
             Value::Str(s) => string_to_num(s),
             Value::Sym(_) => return self.type_err("cannot convert a Symbol value to a number"),
+            // Eine grosse Zahl wird NICHT still zu einer kleinen. Das ist der
+            // ganze Sinn des Typs: `1n + 1` ist ein Fehler, keine 2.
+            Value::BigInt(_) => return self.type_err("cannot convert a BigInt value to a number"),
             Value::Obj(_) => { let p = self.to_primitive(v, false)?; self.to_number(&p)? }
+        })
+    }
+
+    /// `ToNumeric` — eine grosse Zahl bleibt gross, alles andere wird eine
+    /// gewoehnliche. Der Unterschied zu `to_number` ist genau der Grund,
+    /// warum `x++` auf einem BigInt nicht `+x` sein darf.
+    pub fn to_numeric(&mut self, v: &Value) -> C<Value> {
+        let p = self.to_primitive(v, false)?;
+        if matches!(p, Value::BigInt(_)) { return Ok(p); }
+        Ok(Value::Num(self.to_number(&p)?))
+    }
+
+    /// Eins dazu oder eins weg, im TYP des Wertes.
+    pub fn step_numeric(&mut self, v: &Value, up: bool) -> C<Value> {
+        Ok(match v {
+            Value::BigInt(b) => {
+                let one = super::bigint::Big::from_u64(1);
+                Value::BigInt(Rc::new(if up { b.add(&one) } else { b.sub(&one) }))
+            }
+            _ => { let n = self.to_number(v)?; Value::Num(if up { n + 1.0 } else { n - 1.0 }) }
         })
     }
 
@@ -824,6 +848,7 @@ impl Interp {
             // Versehen; `String(sym)` und `sym.toString()` gehen weiterhin,
             // die rufen `sym_to_display` statt hier durch.
             Value::Sym(_) => return self.type_err("cannot convert a Symbol value to a string"),
+            Value::BigInt(b) => Rc::from(b.to_string_radix(10).as_str()),
             Value::Obj(_) => { let p = self.to_primitive(v, true)?; self.to_string(&p)? }
         })
     }
@@ -887,6 +912,7 @@ impl Interp {
             Value::Sym(sd) => Ok(new_kind(Some(self.realm.symbol_proto.clone()), ObjKind::SymWrap(sd.clone()))),
             Value::Num(n) => Ok(new_kind(Some(self.realm.number_proto.clone()), ObjKind::NumWrap(*n))),
             Value::Bool(b) => Ok(new_kind(Some(self.realm.boolean_proto.clone()), ObjKind::BoolWrap(*b))),
+            Value::BigInt(b) => Ok(new_kind(Some(self.realm.bigint_proto.clone()), ObjKind::BigWrap(b.clone()))),
             Value::Undefined | Value::Null =>
                 self.type_err("cannot convert undefined or null to object"),
         }
