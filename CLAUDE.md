@@ -90,8 +90,11 @@ Binärbild, die nichts holt und ihr Ergebnis auf dem Schirm UND im Log sagt.
 Sie läuft auch host-seitig über dieselbe Datei
 (`beak-engine/examples/selftest.rs`). Ein Lauf fand neun Lücken, die fremde
 Seiten in Wochen nicht gezeigt hatten. **0.97.0 lief am Gerät voll grün
-(Sprache 41/41, Dokument 31/31, Klicks 4/4); für 0.98.0–0.100.0 steht der
-Gerätelauf aus** (host-seitig 49/49 grün).
+**0.100.0 lief am Gerät voll grün: Sprache 49/49,
+Dokument 31/31, Klicks 4/4, Timer + Microtask.** Die 49 schliessen die acht
+Zeilen ein, die nur am Gerät etwas beweisen — der Modus entscheidet sich
+zur Laufzeit, und `this` im einfachen Aufruf ist die, die am ehesten wieder
+kaputtgeht.
 
 Die CSS-Runde davor ist zu Ende gebracht: das Eigenschafts-Gap ist
 geschlossen, 93,7 % der Deklarationen auf Bootstrap + Wikipedia abgedeckt. Die
