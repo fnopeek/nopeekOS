@@ -99,7 +99,7 @@ fn helper_next(i: &mut Interp, t: Value, _a: &[Value]) -> C<Value> {
             let nv = slot(i, &t, H_N)?;
             let n = i.to_number(&nv)?;
             if n > 0.0 {
-                for _ in 0..(n as u64) {
+                for _ in 0..f64_to_usize(n) {
                     i.tick()?;
                     if i.iter_next(&src)?.is_none() {
                         put(&t, H_DONE, Value::Bool(true));

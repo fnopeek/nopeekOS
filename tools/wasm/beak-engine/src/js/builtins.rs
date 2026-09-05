@@ -3530,5 +3530,5 @@ fn as_n(i: &mut Interp, a: &[Value], signed: bool) -> C<Value> {
     let v = a.get(1).cloned().unwrap_or(Value::Undefined);
     let p = i.to_primitive(&v, false)?;
     let Value::BigInt(b) = &p else { return i.type_err("asIntN: value is not a BigInt") };
-    Ok(Value::BigInt(Rc::new(b.as_n(bits as u64, signed))))
+    Ok(Value::BigInt(Rc::new(b.as_n(f64_to_usize(bits) as u64, signed))))
 }

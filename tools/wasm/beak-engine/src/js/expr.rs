@@ -806,7 +806,7 @@ impl Interp {
                         return self.range_err("BigInt shift count is too large");
                     }
                     let left = matches!(op, Shl) == (n >= 0.0);
-                    let k = libm::fabs(n) as u64;
+                    let k = crate::js::value::f64_to_usize(libm::fabs(n)) as u64;
                     return Ok(Value::BigInt(Rc::new(if left { a.shl(k) } else { a.shr(k) })));
                 }
                 if matches!(lp, Value::BigInt(_)) || matches!(rp, Value::BigInt(_)) {

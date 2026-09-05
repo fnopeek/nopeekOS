@@ -689,7 +689,7 @@ pub fn num_to_radix(v: f64, radix: u32) -> String {
         loop {
             fraction *= r;
             delta *= r;
-            let digit = fraction as usize;
+            let digit = f64_to_usize(fraction);
             frac.push(CHARS[digit.min(35)]);
             fraction -= digit as f64;
             if (fraction > 0.5 || (fraction == 0.5 && digit & 1 == 1)) && fraction + delta > 1.0 {
@@ -718,7 +718,7 @@ pub fn num_to_radix(v: f64, radix: u32) -> String {
     }
     loop {
         let rem = libm::fmod(integer, r);
-        int_digits.push(CHARS[(rem as usize).min(35)]);
+        int_digits.push(CHARS[f64_to_usize(rem).min(35)]);
         integer = (integer - rem) / r;
         if integer <= 0.0 { break }
     }
@@ -763,6 +763,19 @@ pub fn to_int32(n: f64) -> i32 {
     if m >= 2147483648.0 { (m - 4294967296.0) as i32 } else { m as i32 }
 }
 pub fn to_uint32(n: f64) -> u32 { to_int32(n) as u32 }
+
+/// `f64` zu einer kleinen Ganzzahl, OHNE `i64.trunc_sat_f64_u`.
+///
+/// **forge kann diesen Befehl nicht**, und ein Modul mit ihm bleibt am Geraet
+/// beim ERSTEN Aufruf der Stelle stehen — nicht beim Laden, wo es auffiele.
+/// Der Umweg ueber `u32` ist fuer alles, was hier gezaehlt wird (Monate,
+/// Ziffern, Schiebeweiten, Indizes), derselbe Wert und uebersetzt.
+/// `python3 tools/forge-gate.py` ist der Vorablauf, der das prueft.
+pub fn f64_to_usize(v: f64) -> usize {
+    if !(v > 0.0) { return 0 }
+    if v >= 4294967295.0 { return u32::MAX as usize }
+    (v as u32) as usize
+}
 
 /// `ToInteger`: abschneiden, NaN zu 0.
 pub fn to_integer(n: f64) -> f64 {
