@@ -249,6 +249,69 @@ pub struct Prop {
     pub configurable: bool,
 }
 
+/// Ein PARTIELLER Beschreiber — was `Object.defineProperty` bekommt.
+///
+/// **Nicht dasselbe wie `Prop`, und das ist der ganze Punkt.** `Prop` ist
+/// eine fertig abgelegte Eigenschaft, dort ist `writable` ein `bool`. Ein
+/// Beschreiber dagegen hat FEHLENDE Felder, und „fehlt" heisst „lass, wie es
+/// ist" — nicht „false". Bis 0.99.0 fielen beide auf `Prop` zusammen, und
+/// damit war `defineProperty(o,'x',{value:1})` auf einer schreibbaren
+/// Eigenschaft ein stilles `writable = false`.
+///
+/// `Some(Value::Undefined)` heisst „steht da und ist `undefined`" und ist
+/// etwas anderes als `None` — `{get: undefined}` macht eine
+/// Zugriffseigenschaft ohne Leser.
+#[derive(Clone, Default)]
+pub struct Desc {
+    pub value: Option<Value>,
+    pub get: Option<Value>,
+    pub set: Option<Value>,
+    pub writable: Option<bool>,
+    pub enumerable: Option<bool>,
+    pub configurable: Option<bool>,
+}
+
+impl Desc {
+    pub fn is_accessor(&self) -> bool { self.get.is_some() || self.set.is_some() }
+    pub fn is_data(&self) -> bool { self.value.is_some() || self.writable.is_some() }
+    /// Weder das eine noch das andere — `{enumerable: true}` allein.
+    pub fn is_generic(&self) -> bool { !self.is_accessor() && !self.is_data() }
+    pub fn is_empty(&self) -> bool {
+        self.is_generic() && self.enumerable.is_none() && self.configurable.is_none()
+    }
+    /// Der Beschreiber einer BESTEHENDEN Eigenschaft: vollstaendig besetzt.
+    pub fn from_prop(p: &Prop) -> Desc {
+        if p.is_accessor() {
+            Desc { value: None, writable: None,
+                   get: Some(p.get.clone().unwrap_or(Value::Undefined)),
+                   set: Some(p.set.clone().unwrap_or(Value::Undefined)),
+                   enumerable: Some(p.enumerable), configurable: Some(p.configurable) }
+        } else {
+            Desc { value: Some(p.value.clone().unwrap_or(Value::Undefined)),
+                   writable: Some(p.writable), get: None, set: None,
+                   enumerable: Some(p.enumerable), configurable: Some(p.configurable) }
+        }
+    }
+    /// Was daraus wird, wenn die Eigenschaft NEU angelegt wird: jedes
+    /// fehlende Feld bekommt seinen Vorgabewert, und der ist `false`/
+    /// `undefined` — nur HIER, nicht beim Aendern.
+    pub fn into_new_prop(self) -> Prop {
+        Prop {
+            value: if self.is_accessor() { None }
+                   else { Some(self.value.unwrap_or(Value::Undefined)) },
+            // **`undefined` bleibt stehen.** `{set: undefined}` ist eine
+            // ZUGRIFFSeigenschaft ohne Schreiber — filtert man das auf `None`,
+            // sieht sie hinterher aus wie eine Datenbeschreibung, und ein
+            // erneutes Umdefinieren wird faelschlich abgelehnt.
+            get: self.get,
+            set: self.set,
+            writable: self.writable.unwrap_or(false),
+            enumerable: self.enumerable.unwrap_or(false),
+            configurable: self.configurable.unwrap_or(false),
+        }
+    }
+}
+
 impl Prop {
     pub fn data(v: Value) -> Prop {
         Prop { value: Some(v), get: None, set: None, writable: true, enumerable: true, configurable: true }
@@ -258,6 +321,14 @@ impl Prop {
     /// darf `toString` nicht sehen.
     pub fn builtin(v: Value) -> Prop {
         Prop { value: Some(v), get: None, set: None, writable: true, enumerable: false, configurable: true }
+    }
+    /// Was ein `@@toStringTag` (und `Symbol.prototype[@@toPrimitive]`) traegt:
+    /// nicht schreibbar, nicht aufzaehlbar, aber **konfigurierbar** (ES 17).
+    /// `Prop::frozen` war dafuer der falsche Konstruktor — er sperrt auch das
+    /// Umdefinieren, und das faellt erst auf, wenn `defineProperty` wirklich
+    /// prueft.
+    pub fn tag(v: Value) -> Prop {
+        Prop { value: Some(v), get: None, set: None, writable: false, enumerable: false, configurable: true }
     }
     pub fn frozen(v: Value) -> Prop {
         Prop { value: Some(v), get: None, set: None, writable: false, enumerable: false, configurable: false }

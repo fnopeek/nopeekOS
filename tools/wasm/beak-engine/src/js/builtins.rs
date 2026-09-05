@@ -1056,7 +1056,9 @@ pub fn make_realm() -> Realm {
         let Value::Obj(_) = &d else { return i.type_err("property descriptor must be an object") };
         let p = i.to_prop_desc(&d)?;
         let o = o.clone();
-        i.define_own(&o, &k, p)?;
+        // `Object.defineProperty` WIRFT, wo `Reflect.defineProperty` `false`
+        // gibt (ES §20.1.2.4 -> DefinePropertyOrThrow).
+        i.define_or_throw(&o, &k, p)?;
         Ok(a[0].clone())
     }, 3, fp);
     def(&object_ctor, "defineProperties", |i, _, a| {
@@ -1409,7 +1411,7 @@ pub fn make_realm() -> Realm {
     }, "BigInt", 1, false);
     bigint_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(bigint_proto.clone())));
     bigint_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(bigint_ctor.clone())));
-    bigint_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::frozen(Value::str("BigInt")));
+    bigint_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("BigInt")));
     def(&bigint_proto, "toString", |i, t, a| {
         let b = this_bigint(i, &t)?;
         let radix = match a.first() {
@@ -1513,7 +1515,7 @@ pub fn make_realm() -> Realm {
                    ("SQRT1_2", core::f64::consts::FRAC_1_SQRT_2)] {
         math.borrow_mut().define(n, Prop::frozen(Value::Num(v)));
     }
-    math.borrow_mut().define(SYM_TO_STRING_TAG, Prop::frozen(Value::str("Math")));
+    math.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("Math")));
     global.borrow_mut().define("Math", Prop::builtin(Value::Obj(math)));
 
     // ── Globale Werte + Funktionen ───────────────────────────────────────
@@ -1696,7 +1698,7 @@ pub fn make_realm() -> Realm {
             let f = proto.borrow().get_own(key).and_then(|p| p.value.clone());
             if let Some(f) = f { proto.borrow_mut().define(SYM_ITERATOR, Prop::builtin(f)); }
         }
-        proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::frozen(Value::str($name)));
+        proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str($name)));
 
         let size = native(Some(function_proto.clone()), |i, t, _| {
             this_coll(i, &t, $name)?;
@@ -1891,12 +1893,9 @@ pub fn make_realm() -> Realm {
         let d = a.get(2).cloned().unwrap_or(Value::Undefined);
         let p = i.to_prop_desc(&d)?;
         // Der Unterschied zu `Object.defineProperty`: hier ist ein
-        // Fehlschlag ein `false`, kein Wurf.
-        if !o.borrow().extensible && !o.borrow().has_own(&k) {
-            return Ok(Value::Bool(false));
-        }
-        o.borrow_mut().set_prop(k, p);
-        Ok(Value::Bool(true))
+        // Fehlschlag ein `false`, kein Wurf. Die PRUEFUNG ist dieselbe —
+        // sie steht in `define_own` und nicht zweimal daneben.
+        Ok(Value::Bool(i.define_own(&o, &k, p)?))
     }, 3, fp);
     def(&reflect, "getOwnPropertyDescriptor", |i, _, a| {
         let Some(Value::Obj(o)) = a.first() else {
@@ -1943,7 +1942,7 @@ pub fn make_realm() -> Realm {
         let args = if matches!(list, Value::Undefined) { Vec::new() } else { i.elems(&list)? };
         i.construct(&f, &args)
     }, 2, fp);
-    reflect.borrow_mut().define(SYM_TO_STRING_TAG, Prop::frozen(Value::str("Reflect")));
+    reflect.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("Reflect")));
     global.borrow_mut().define("Reflect", Prop::builtin(Value::Obj(reflect)));
 
     // `this` ist entweder das Primitiv oder seine Huelle — beides muss gehen,
@@ -1974,7 +1973,7 @@ pub fn make_realm() -> Realm {
     symbol_proto.borrow_mut().define("description", Prop {
         value: None, get: Some(Value::Obj(desc_get)), set: None,
         writable: false, enumerable: false, configurable: true });
-    symbol_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::frozen(Value::str("Symbol")));
+    symbol_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("Symbol")));
     // `"" + sym` wirft (siehe `to_string`); ohne diese Sperre wuerde
     // `ToPrimitive` erst `valueOf` finden und das Symbol still weiterreichen,
     // statt an der Umwandlung zu scheitern, wo der Fehler hingehoert.
@@ -1982,7 +1981,7 @@ pub fn make_realm() -> Realm {
         let sd = this_sym(i, &t)?;
         Ok(Value::Sym(sd))
     }, "[Symbol.toPrimitive]", 1, false);
-    symbol_proto.borrow_mut().define(SYM_TO_PRIMITIVE, Prop::frozen(Value::Obj(sym_prim)));
+    symbol_proto.borrow_mut().define(SYM_TO_PRIMITIVE, Prop::tag(Value::Obj(sym_prim)));
 
     // ── Der Iteratorvertrag ──────────────────────────────────────────────
     //
@@ -2024,7 +2023,7 @@ pub fn make_realm() -> Realm {
         Ok(i.iter_result(out, false))
     }, 0, fp);
     array_iter_proto.borrow_mut().define(SYM_TO_STRING_TAG,
-        Prop::frozen(Value::str("Array Iterator")));
+        Prop::tag(Value::str("Array Iterator")));
 
     // Zeichen fuer Zeichen — nach CODEPOINT, nicht nach Byte. Unsere Texte
     // sind Rust-`str`, ein `char` ist also genau ein Codepunkt; das trifft
@@ -2047,7 +2046,7 @@ pub fn make_realm() -> Realm {
         }
     }, 0, fp);
     string_iter_proto.borrow_mut().define(SYM_TO_STRING_TAG,
-        Prop::frozen(Value::str("String Iterator")));
+        Prop::tag(Value::str("String Iterator")));
 
     def_sym(&string_proto, SYM_ITERATOR, "[Symbol.iterator]", |i, t, _| {
         let s = i.to_string(&t)?;
@@ -2605,7 +2604,7 @@ pub fn make_realm() -> Realm {
         }
         Ok(out)
     }, 2, fp);
-    ab_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::frozen(Value::str("ArrayBuffer")));
+    ab_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("ArrayBuffer")));
     global.borrow_mut().define("ArrayBuffer", Prop::builtin(Value::Obj(ab_ctor.clone())));
 
     let ta_proto = new_obj(Some(object_proto.clone()));
@@ -2787,7 +2786,7 @@ pub fn make_realm() -> Realm {
     }, "DataView", 1, true);
     dv_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(dv_proto.clone())));
     dv_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(dv_ctor.clone())));
-    dv_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::frozen(Value::str("DataView")));
+    dv_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("DataView")));
     for (name, which) in [("byteLength", 0u8), ("byteOffset", 1)] {
         let g = native(Some(function_proto.clone()), match which {
             0 => |i: &mut Interp, t: Value, _: &[Value]| {
