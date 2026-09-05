@@ -43,9 +43,17 @@ impl Value {
             Value::Str(_) => "string",
             Value::Sym(_) => "symbol",
             Value::Obj(o) => {
-                if matches!(o.borrow().kind, ObjKind::Function(_) | ObjKind::Native(_)) {
-                    "function"
-                } else { "object" }
+                // Eine GEBUNDENE Funktion ist eine, und ein Stellvertreter ist
+                // eine, wenn sein Ziel eine ist. Beides fehlte hier.
+                let kind = &o.borrow().kind;
+                match kind {
+                    ObjKind::Function(_) | ObjKind::Native(_) | ObjKind::Bound { .. } => "function",
+                    ObjKind::Proxy(c) => match c.borrow().clone() {
+                        Some((t, _)) => Value::Obj(t).type_of(),
+                        None => "object",
+                    },
+                    _ => "object",
+                }
             }
         }
     }
@@ -432,6 +440,10 @@ pub enum ObjKind {
     Buffer(Rc<BufData>),
     TypedArray(Rc<TaData>),
     DataView(Rc<DvData>),
+    /// Ein Stellvertreter: Ziel und Behandler, oder `None` nach dem
+    /// Widerruf. Siehe `proxy.rs` — die Fallen sitzen in den
+    /// Grundoperationen, nicht hier.
+    Proxy(crate::js::proxy::ProxyCell),
     /// Der Zeitwert eines `Date`. Als eigene Art und nicht als Eigenschaft,
     /// damit er nicht in `Object.getOwnPropertyNames` auftaucht.
     Date(Rc<core::cell::Cell<f64>>),

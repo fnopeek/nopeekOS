@@ -31,6 +31,7 @@ pub mod interp;
 pub mod lexer;
 pub mod parser;
 pub mod promise;
+pub mod proxy;
 pub mod url;
 pub mod regexp;
 pub mod value;
