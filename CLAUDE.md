@@ -48,39 +48,39 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-04 · beak 0.88.1 · Kernel 0.324.0** (Rest: `git log`)
+**Stand 2026-09-05 · beak 0.96.0 · Kernel 0.324.0** (Rest: `git log`)
 
 Zwei Fäden laufen parallel.
 
 **`beak`**, der eigene Browser: **Stage 1 läuft — die Seite reagiert.** Eigene
-JS-Maschine (Lexer, Parser, RegExp, DOM-Bindung) und die Wirtsumgebung. Seit
-0.77.0 läuft sie auf einer **Befehlsmaschine** statt eines Baumläufers — der
-Zustand ist ein Feld, nicht der Rust-Stapel. **Der Umbau ist mit 0.86.0
-abgeschlossen**: 97,7 % der Programme laufen auf der Maschine, in zehn
-Releases nie ein Test verloren. Generator, `async`/`await`, `class`, Felder,
-Destrukturierung, `super`, `?.` und Marken sind darin gebaut.
+JS-Maschine (Lexer, Parser, RegExp, DOM-Bindung) und die Wirtsumgebung. Sie
+läuft auf einer **Befehlsmaschine** statt eines Baumläufers — der Zustand ist
+ein Feld, nicht der Rust-Stapel. **Der Umbau ist mit 0.86.0 abgeschlossen**;
+seit BigInt (0.94.0) laufen 99,6 % der Programme darauf.
 
-**Zwei Zahlen, und sie messen NICHT dasselbe.** Die 97,7 % sagen, WO Code
+**Zwei Zahlen, und sie messen NICHT dasselbe.** Die 99,6 % sagen, WO Code
 läuft — ein abgelehntes Programm fährt der Baumläufer mit identischer
 Bedeutung. Was GEHT, sagt test262:
 
-    test262 exec    66,93 %   (V8 auf demselben Korpus: 99,41 %)
-    Zielkorpus      437/437 geparst, 303/437 durchgelaufen
+    test262 exec    77,21 %   (V8 auf demselben Korpus: 99,41 %)
+    Zielkorpus      437/437 geparst, 305/437 durchgelaufen
     DOM-Aufrufe     98,3 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
+    WPT (CSS)       4476/5192 = 86,2 % ohne Testvehikel (roh 79,4 %)
 
-Der Rest ist deshalb keine Übersetzerarbeit mehr, sondern Sprache:
-TypedArrays sind mit 0.88.0 gebaut, offen bleiben `eval`, Proxy, BigInt und
-der Wurf bei fehlgeschlagenem Schreiben. Die Rangfolge steht in
-`memory/project_beak_js_language_gap.md`, gemessen statt geraten — und die
-Wand des Zielkorpus ist wieder etwas anderes: dort war weder `await` noch ein
-Generator je die erste Wand, wohl aber `substr` und `Uint8Array`.
+0.89.0–0.96.0 haben die Sprache in sieben Releases von 66,93 auf 77,21 %
+gebracht: **Date** (richtig gerechnet, nicht mehr gestumpft), **eval**
+(direkt und indirekt), **Proxy**, **BigInt** samt eigener Bignum und den
+64-Bit-Sichten, die **Iterator-Hilfen**, die Empfängerprüfung überall und
+zwei Dutzend ausgezählte Eingebaute. Die Rangfolge des Rests steht in
+`memory/project_beak_js_language_gap.md`, gemessen statt geraten — jetzt
+oben: **der strenge Modus**, den die Engine zur Laufzeit gar nicht kennt.
 
 Das eigene Testziel ist **`beak:selftest`** — eine Prüfseite aus dem
 Binärbild, die nichts holt und ihr Ergebnis auf dem Schirm UND im Log sagt.
 Sie läuft auch host-seitig über dieselbe Datei
 (`beak-engine/examples/selftest.rs`). Ein Lauf fand neun Lücken, die fremde
 Seiten in Wochen nicht gezeigt hatten. **0.81.0 lief am Gerät voll grün
-(Sprache 28/28, Dokument 31/31, Klicks 4/4); für 0.82.0–0.88.1 steht der
+(Sprache 28/28, Dokument 31/31, Klicks 4/4); für 0.82.0–0.96.0 steht der
 Gerätelauf aus.**
 
 Die CSS-Runde davor ist zu Ende gebracht: das Eigenschafts-Gap ist
@@ -88,7 +88,9 @@ geschlossen, 93,7 % der Deklarationen auf Bootstrap + Wikipedia abgedeckt. Die
 gemessene WPT-Zahl steht in `docs/spec/CONFORMANCE.md` und nirgends sonst —
 **zwei Nenner**, roh und ohne Testvehikel, und der zweite wird mit
 `tools/wasm/beak-engine/tests/vehicles.py` aus der gesegneten Baseline
-HERGELEITET, nie weitergetragen.
+HERGELEITET, nie weitergetragen. **Vor jeder WPT-Planung dieses Werkzeug
+laufen lassen:** 347 der 1163 Fehler sind `display: grid-lanes`, und kein
+Dateiname sagt es.
 
 **WLAN (AX200)**: ⏸ pausiert, die Verbindung läuft (Download 116 Mbit auf HT40,
 Upload erstmals möglich). Das Intent **`wlan`** ist das Werkzeug dafür —
