@@ -22,7 +22,6 @@ impl Interp {
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             Expr::Null => Ok(Value::Null),
             Expr::This => Ok(env_this(env)),
-            Expr::BigInt(_) => self.type_err("BigInt is not supported"),
             Expr::Ident(n) => self.load_ident(n, env),
             Expr::Regex { body, flags } => super::regexp::make(self, body, flags),
             Expr::Array(items) => {

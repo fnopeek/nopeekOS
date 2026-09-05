@@ -22,29 +22,30 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-08-23, beak 0.35.0)
+### Current number (measured 2026-09-05, beak 0.96.0)
 
 ```
-4456 pass / 1186 fail / 144 inconclusive   (of 5786 vendored reftests)
-= 79.0 % of the conclusive 5642
+4476 pass / 1163 fail / 147 inconclusive   (of 5786 vendored reftests)
+= 79.4 % of the conclusive 5639
 ```
 
-**Two denominators, and the second one is the honest one.** 448 of the 1186
+**Two denominators, and the second one is the honest one.** 447 of the 1163
 failures are tests for specs no page on the web runs — counted by CONTENT, not
 by filename, because the filename does not say so
 (`css-grid/column-align-items-001.html` is a `display: grid-lanes` test):
 
 | | failing | what it is |
 |---|---:|---|
-| `grid-lanes` | 346 | masonry, css-grid-3 — an unshipped proposal |
-| `writing-mode: vertical` | 49 | a project of its own |
+| `grid-lanes` | 347 | masonry, css-grid-3 — an unshipped proposal |
+| `writing-mode: vertical` | 47 | a project of its own |
 | `display: run-in` | 35 | dropped from CSS 2.1 by every engine |
 | `subgrid` | 18 | |
 
-Against the corpus that a real page can actually exercise — 5194 tests —
-the number is **4456 / 5194 = 85.8 %**. Both are worth tracking: the raw one
-never lies about the suite, and the second one is the one that predicts what a
-page looks like. Neither is allowed to move without a measured run.
+Against the corpus that a real page can actually exercise — 5192 tests —
+the number is **4476 / 5192 = 86.2 %**, with **716 real failures left**. Both
+are worth tracking: the raw one never lies about the suite, and the second one
+is the one that predicts what a page looks like. Neither is allowed to move
+without a measured run.
 
 **Re-derive the second one, do not carry it forward.** `tests/vehicles.py`
 reads the blessed baseline and prints both numbers, so the denominator is a
