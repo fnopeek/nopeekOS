@@ -48,7 +48,7 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-05 · beak 0.98.0 · Kernel 0.324.0** (Rest: `git log`)
+**Stand 2026-09-05 · beak 0.100.0 · Kernel 0.324.0** (Rest: `git log`)
 
 Zwei Fäden laufen parallel.
 
@@ -62,33 +62,36 @@ seit BigInt (0.94.0) laufen 99,6 % der Programme darauf.
 läuft — ein abgelehntes Programm fährt der Baumläufer mit identischer
 Bedeutung. Was GEHT, sagt test262:
 
-    test262 exec    78,62 %   (V8 auf demselben Korpus: 99,41 %)
+    test262 exec    80,65 %   (V8 auf demselben Korpus: 99,41 %)
     Zielkorpus      437/437 geparst, 305/437 durchgelaufen
     DOM-Aufrufe     98,3 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
     WPT (CSS)       4476/5192 = 86,2 % ohne Testvehikel (roh 79,4 %)
 
-0.89.0–0.98.0 haben die Sprache in acht Releases von 66,93 auf 78,62 %
+0.89.0–0.100.0 haben die Sprache in zehn Releases von 66,93 auf 80,65 %
 gebracht: **Date** (richtig gerechnet, nicht mehr gestumpft), **eval**
 (direkt und indirekt), **Proxy**, **BigInt** samt eigener Bignum und den
 64-Bit-Sichten, die **Iterator-Hilfen**, die Empfängerprüfung überall, zwei
-Dutzend ausgezählte Eingebaute — und mit **0.98.0 der strenge Modus**, den
-die Engine zur Laufzeit gar nicht kannte (978 Varianten, 0 verloren).
+Dutzend ausgezählte Eingebaute — und zuletzt drei Runden am OBJEKTMODELL:
+**0.98.0 der strenge Modus** (978 Varianten), **0.99.0 `defineProperty`
+prüft wirklich** (1299), **0.100.0 private Felder mit Marke** (104), je
+ohne eine einzige Regression.
 
-**Und die Lehre daraus:** es fehlte nicht der strenge Modus, es fehlte der
-UNTERSCHIED. 56 % der gemessenen Treffer lagen im LOCKEREN Modus — `this`
-war in einem einfachen Aufruf immer `undefined`. Die naive Zählung (Tests
-mit der Fahne `onlyStrict`) sagte 206 und lag um den Faktor sieben daneben.
-Die Rangfolge des Rests steht in
-`memory/project_beak_js_language_gap.md`, gemessen statt geraten — jetzt
-oben: `\p{…}` im Regex (886) und der Schrittdeckel im Regex-Leser (378).
+**Und die Lehre aus allen dreien:** die naheliegende Zählung lag jedes Mal
+daneben. Beim strengen Modus fehlte nicht die Strenge, sondern der
+UNTERSCHIED — 56 % der Treffer lagen im LOCKEREN Modus. Bei
+`defineProperty` war nicht die Prüfung das Problem, sondern das MODELL: in
+`Prop` war „Feld fehlt" dasselbe wie „false". Die Rangfolge des Rests steht
+in `memory/project_beak_js_language_gap.md`, gemessen statt geraten —
+`T262_FAILDETAIL=<datei>` gibt jeden Fehler mit seiner Meldung, und die
+grösste Meldung ist meist eine Sammelmeldung.
 
 Das eigene Testziel ist **`beak:selftest`** — eine Prüfseite aus dem
 Binärbild, die nichts holt und ihr Ergebnis auf dem Schirm UND im Log sagt.
 Sie läuft auch host-seitig über dieselbe Datei
 (`beak-engine/examples/selftest.rs`). Ein Lauf fand neun Lücken, die fremde
 Seiten in Wochen nicht gezeigt hatten. **0.97.0 lief am Gerät voll grün
-(Sprache 41/41, Dokument 31/31, Klicks 4/4); für 0.98.0 steht der
-Gerätelauf aus** (host-seitig grün).
+(Sprache 41/41, Dokument 31/31, Klicks 4/4); für 0.98.0–0.100.0 steht der
+Gerätelauf aus** (host-seitig 49/49 grün).
 
 Die CSS-Runde davor ist zu Ende gebracht: das Eigenschafts-Gap ist
 geschlossen, 93,7 % der Deklarationen auf Bootstrap + Wikipedia abgedeckt. Die
