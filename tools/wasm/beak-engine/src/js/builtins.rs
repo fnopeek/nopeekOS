@@ -2608,8 +2608,13 @@ pub fn make_realm() -> Realm {
             return i.range_err("source is too large");
         }
         for (k, v) in items.into_iter().enumerate() {
-            let n = i.to_number(&v)?;
-            ta_write(&x, off as usize + k, n);
+            if x.kind.is_big() {
+                let b = i.to_bigint(&v)?;
+                ta_write_big(&x, off as usize + k, &b);
+            } else {
+                let n = i.to_number(&v)?;
+                ta_write(&x, off as usize + k, n);
+            }
         }
         Ok(Value::Undefined)
     }, 1, fp);
@@ -2631,7 +2636,8 @@ pub fn make_realm() -> Realm {
         if let Value::Obj(o) = out.clone() {
             if let Some(y) = ta_of(&o) {
                 for k in 0..(e - s) as usize {
-                    ta_write(&y, k, ta_get(&x, s as usize + k));
+                    if x.kind.is_big() { ta_copy_big_at(&y, k, &x, s as usize + k); }
+                    else { ta_write(&y, k, ta_get(&x, s as usize + k)); }
                 }
             }
         }
@@ -2690,6 +2696,8 @@ pub fn make_realm() -> Realm {
         (ElemKind::U32, |i, _, a| ta_new(i, ElemKind::U32, a)),
         (ElemKind::F32, |i, _, a| ta_new(i, ElemKind::F32, a)),
         (ElemKind::F64, |i, _, a| ta_new(i, ElemKind::F64, a)),
+        (ElemKind::I64, |i, _, a| ta_new(i, ElemKind::I64, a)),
+        (ElemKind::U64, |i, _, a| ta_new(i, ElemKind::U64, a)),
     ] {
         let proto = new_obj(Some(ta_proto.clone()));
         let ctor = native(Some(ta_ctor.clone()), f, kind.name(), 3, true);
@@ -2757,7 +2765,8 @@ pub fn make_realm() -> Realm {
     for (name, kind) in [("Int8", ElemKind::I8), ("Uint8", ElemKind::U8),
                          ("Int16", ElemKind::I16), ("Uint16", ElemKind::U16),
                          ("Int32", ElemKind::I32), ("Uint32", ElemKind::U32),
-                         ("Float32", ElemKind::F32), ("Float64", ElemKind::F64)] {
+                         ("Float32", ElemKind::F32), ("Float64", ElemKind::F64),
+                         ("BigInt64", ElemKind::I64), ("BigUint64", ElemKind::U64)] {
         let gname = alloc::format!("get{name}");
         let sname = alloc::format!("set{name}");
         let k = kind;
@@ -2769,6 +2778,8 @@ pub fn make_realm() -> Realm {
             ElemKind::I32 => |i, t, a| dv_get(i, t, a, ElemKind::I32),
             ElemKind::U32 => |i, t, a| dv_get(i, t, a, ElemKind::U32),
             ElemKind::F32 => |i, t, a| dv_get(i, t, a, ElemKind::F32),
+            ElemKind::I64 => |i, t, a| dv_get(i, t, a, ElemKind::I64),
+            ElemKind::U64 => |i, t, a| dv_get(i, t, a, ElemKind::U64),
             _ => |i, t, a| dv_get(i, t, a, ElemKind::F64),
         }, &gname, 1, false);
         dv_proto.borrow_mut().define(&gname, Prop::builtin(Value::Obj(g)));
@@ -2780,6 +2791,8 @@ pub fn make_realm() -> Realm {
             ElemKind::I32 => |i, t, a| dv_set(i, t, a, ElemKind::I32),
             ElemKind::U32 => |i, t, a| dv_set(i, t, a, ElemKind::U32),
             ElemKind::F32 => |i, t, a| dv_set(i, t, a, ElemKind::F32),
+            ElemKind::I64 => |i, t, a| dv_set(i, t, a, ElemKind::I64),
+            ElemKind::U64 => |i, t, a| dv_set(i, t, a, ElemKind::U64),
             _ => |i, t, a| dv_set(i, t, a, ElemKind::F64),
         }, &sname, 2, false);
         dv_proto.borrow_mut().define(&sname, Prop::builtin(Value::Obj(sf)));
@@ -2954,6 +2967,27 @@ fn ta_get(t: &Rc<TaData>, k: usize) -> f64 {
     t.kind.read(&b.bytes.borrow(), t.offset + k * t.kind.size())
 }
 
+/// Ein Element einer 64-Bit-Sicht schreiben.
+fn ta_write_big(t: &Rc<TaData>, k: usize, v: &super::bigint::Big) {
+    if k >= t.live_len() { return }
+    let ObjKind::Buffer(b) = &t.buf.borrow().kind else { return };
+    let at = t.offset + k * t.kind.size();
+    t.kind.write_big(&mut b.bytes.borrow_mut(), at, v);
+}
+
+/// Ein Element von einer 64-Bit-Sicht in eine andere.
+fn ta_copy_big(dst: &Rc<TaData>, k: usize, src: &Rc<TaData>) { ta_copy_big_at(dst, k, src, k) }
+
+fn ta_copy_big_at(dst: &Rc<TaData>, dk: usize, src: &Rc<TaData>, sk: usize) {
+    if sk >= src.live_len() { return }
+    let v = {
+        let ObjKind::Buffer(sb) = &src.buf.borrow().kind else { return };
+        let at = src.offset + sk * src.kind.size();
+        src.kind.read_v(&sb.bytes.borrow(), at)
+    };
+    if let Value::BigInt(b) = v { ta_write_big(dst, dk, &b); }
+}
+
 fn ta_write(t: &Rc<TaData>, k: usize, v: f64) {
     if k >= t.live_len() { return }
     let ObjKind::Buffer(b) = &t.buf.borrow().kind else { return };
@@ -3005,11 +3039,17 @@ fn ta_new(i: &mut Interp, kind: ElemKind, a: &[Value]) -> C<Value> {
         }
         Some(Value::Obj(o)) if ta_of(o).is_some() => {
             let src = ta_of(o).unwrap();
+            if src.kind.is_big() != kind.is_big() {
+                return i.type_err("cannot mix BigInt and number typed arrays");
+            }
             let n = src.live_len();
             let out = i.new_typed(kind, n);
             if let Value::Obj(g) = &out {
                 if let Some(d) = ta_of(g) {
-                    for k in 0..n { ta_write(&d, k, ta_get(&src, k)); }
+                    for k in 0..n {
+                        if kind.is_big() { ta_copy_big(&d, k, &src); }
+                        else { ta_write(&d, k, ta_get(&src, k)); }
+                    }
                 }
             }
             Ok(out)
@@ -3025,8 +3065,13 @@ fn ta_new(i: &mut Interp, kind: ElemKind, a: &[Value]) -> C<Value> {
             if let Value::Obj(g) = &out {
                 if let Some(d) = ta_of(g) {
                     for (k, v) in items.into_iter().enumerate() {
-                        let n = i.to_number(&v)?;
-                        ta_write(&d, k, n);
+                        if kind.is_big() {
+                            let b = i.to_bigint(&v)?;
+                            ta_write_big(&d, k, &b);
+                        } else {
+                            let n = i.to_number(&v)?;
+                            ta_write(&d, k, n);
+                        }
                     }
                 }
             }
@@ -3056,7 +3101,7 @@ fn dv_get(i: &mut Interp, t: Value, a: &[Value], kind: ElemKind) -> C<Value> {
     let n = kind.size();
     let mut bytes: Vec<u8> = b.bytes.borrow()[d.offset + off..d.offset + off + n].to_vec();
     if !little { bytes.reverse(); }
-    Ok(Value::Num(kind.read(&bytes, 0)))
+    Ok(kind.read_v(&bytes, 0))
 }
 
 fn dv_set(i: &mut Interp, t: Value, a: &[Value], kind: ElemKind) -> C<Value> {
@@ -3064,13 +3109,15 @@ fn dv_set(i: &mut Interp, t: Value, a: &[Value], kind: ElemKind) -> C<Value> {
     let off = i.to_number(a.first().unwrap_or(&Value::Undefined))?;
     if off < 0.0 || !off.is_finite() { return i.range_err("offset is out of bounds") }
     let off = off as usize;
-    let v = i.to_number(a.get(1).unwrap_or(&Value::Undefined))?;
+    // Die Umwandlung laeuft VOR der Bereichspruefung — sie ist beobachtbar.
+    let big = if kind.is_big() { Some(i.to_bigint(a.get(1).unwrap_or(&Value::Undefined))?) } else { None };
+    let v = match &big { Some(_) => 0.0, None => i.to_number(a.get(1).unwrap_or(&Value::Undefined))? };
     if off + kind.size() > d.len { return i.range_err("offset is out of bounds") }
     let little = matches!(kind, ElemKind::I8 | ElemKind::U8)
         || a.get(2).map(|x| x.truthy()).unwrap_or(false);
     let n = kind.size();
     let mut bytes = alloc::vec![0u8; n];
-    kind.write(&mut bytes, 0, v);
+    match &big { Some(b) => kind.write_big(&mut bytes, 0, b), None => kind.write(&mut bytes, 0, v) }
     if !little { bytes.reverse(); }
     let ObjKind::Buffer(b) = &d.buf.borrow().kind else { return i.type_err("detached") };
     b.bytes.borrow_mut()[d.offset + off..d.offset + off + n].copy_from_slice(&bytes);
