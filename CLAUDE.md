@@ -48,9 +48,18 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-05 · beak 0.100.0 · Kernel 0.324.0** (Rest: `git log`)
+**Stand 2026-09-05 · beak 0.102.0 · Kernel 0.326.0** (Rest: `git log`)
 
 Zwei Fäden laufen parallel.
+
+**▶ Als nächstes: `fetch`, Stufe C.** Das Entscheidungspapier steht
+(`docs/plan/BROWSER_FETCH_ORIGIN.md`), Stufe A (Herkunft/Site + echte Public
+Suffix List) und B (Reichweiten-Riegel im Kernel) sind gebaut und
+ausgeliefert. Der Grund: **die Sprache ist nicht mehr die Wand** — 2381
+gewonnene test262-Varianten haben den Zielkorpus um NULL bewegt (305/437).
+Ein Skript in beak kann heute NICHTS aus dem Netz holen; `fetch`, `XHR`,
+`WebSocket` und `EventSource` fehlen alle vier. Stand und Reihenfolge:
+`memory/project_beak_fetch_origin.md`.
 
 **`beak`**, der eigene Browser: **Stage 1 läuft — die Seite reagiert.** Eigene
 JS-Maschine (Lexer, Parser, RegExp, DOM-Bindung) und die Wirtsumgebung. Sie
