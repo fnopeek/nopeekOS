@@ -206,7 +206,7 @@ pub fn make_realm() -> Realm {
             None | Some(Value::Undefined) => i.new_array(alloc::vec::Vec::new()),
             Some(v) => { let items = i.iterate(v)?; i.new_array(items) }
         };
-        i.set(&e, "errors", errs)?;
+        i.set(&e, "errors", errs, true)?;
         Ok(e)
     });
     err_ctor!("URIError", |i, _, a| make_error(i, "URIError", a));
@@ -215,19 +215,26 @@ pub fn make_realm() -> Realm {
     array_proto.borrow_mut().define("length", Prop {
         value: Some(Value::Num(0.0)), get: None, set: None,
         writable: true, enumerable: false, configurable: false });
+    // **`ToObject(this)` ZUERST** (ES §23.1.3.x, Schritt 1 in jeder dieser
+    // Funktionen). Solange ein Schreiben auf ein Primitiv still verpuffte,
+    // fiel das Fehlen nicht auf: `[].pop.call(true)` schrieb ins Leere und
+    // gab dasselbe zurueck. Mit der Wurf-Fahne wird daraus ein TypeError,
+    // und der Test sagt endlich, was schon immer falsch war.
     def(&array_proto, "push", |i, this, a| {
+        let this = Value::Obj(i.to_object(&this)?);
         let mut n = array_len(i, &this)?;
-        for v in a { i.tick()?; i.set(&this, &num_to_string(n), v.clone())?; n += 1.0; }
-        i.set(&this, "length", Value::Num(n))?;
+        for v in a { i.tick()?; i.set(&this, &num_to_string(n), v.clone(), true)?; n += 1.0; }
+        i.set(&this, "length", Value::Num(n), true)?;
         Ok(Value::Num(n))
     }, 1, fp);
     def(&array_proto, "pop", |i, this, _| {
+        let this = Value::Obj(i.to_object(&this)?);
         let n = array_len(i, &this)?;
-        if n <= 0.0 { i.set(&this, "length", Value::Num(0.0))?; return Ok(Value::Undefined); }
+        if n <= 0.0 { i.set(&this, "length", Value::Num(0.0), true)?; return Ok(Value::Undefined); }
         let k = num_to_string(n - 1.0);
         let v = i.get(&this, &k)?;
         if let Value::Obj(o) = &this { o.borrow_mut().remove(&k); }
-        i.set(&this, "length", Value::Num(n - 1.0))?;
+        i.set(&this, "length", Value::Num(n - 1.0), true)?;
         Ok(v)
     }, 0, fp);
     def(&array_proto, "join", |i, this, a| {
@@ -483,10 +490,32 @@ pub fn make_realm() -> Realm {
         rebuild(i, &this, items)?;
         Ok(Value::Num(n as f64))
     }, 1, fp);
+    // **`reverse` TAUSCHT, es baut nicht neu** (ES §23.1.3.26). Der
+    // Unterschied ist beobachtbar und hat drei Familien gekostet: `rebuild`
+    // schrieb `length` und alle Indizes, also warf ein eingefrorenes `[1]`
+    // (die Spezifikation tauscht dort NICHTS) und eine typisierte Sicht
+    // verlor ihre nicht-numerischen Eigenschaften. Getauscht wird ueber
+    // `Set(…, true)` — auf einem eingefrorenen Feld mit zwei Eintraegen
+    // wirft das, und genau so haelt es node.
     def(&array_proto, "reverse", |i, this, _| {
-        let mut items = i.elems(&this)?;
-        items.reverse();
-        rebuild(i, &this, items)?;
+        let this = Value::Obj(i.to_object(&this)?);
+        let len = array_len(i, &this)? as i64;
+        let middle = len / 2;
+        for lower in 0..middle {
+            i.tick()?;
+            let upper = len - lower - 1;
+            let (lo, up) = (num_to_string(lower as f64), num_to_string(upper as f64));
+            let lo_has = matches!(&this, Value::Obj(o) if i.has_property(o, &lo));
+            let up_has = matches!(&this, Value::Obj(o) if i.has_property(o, &up));
+            let lo_v = if lo_has { i.get(&this, &lo)? } else { Value::Undefined };
+            let up_v = if up_has { i.get(&this, &up)? } else { Value::Undefined };
+            match (lo_has, up_has) {
+                (true, true) => { i.set(&this, &lo, up_v, true)?; i.set(&this, &up, lo_v, true)?; }
+                (false, true) => { i.set(&this, &lo, up_v, true)?; i.delete_or_throw(&this, &up)?; }
+                (true, false) => { i.delete_or_throw(&this, &lo)?; i.set(&this, &up, lo_v, true)?; }
+                (false, false) => {}
+            }
+        }
         Ok(this)
     }, 0, fp);
     def(&array_proto, "splice", |i, this, a| {
@@ -505,7 +534,9 @@ pub fn make_realm() -> Realm {
         Ok(i.new_array(removed))
     }, 2, fp);
     def(&array_proto, "sort", |i, this, a| {
+        let this = Value::Obj(i.to_object(&this)?);
         let mut items = i.elems(&this)?;
+        if items.len() < 2 { return Ok(this); }
         let f = a.first().cloned().unwrap_or(Value::Undefined);
         // Einfuegesortierung: sie ruft den Vergleicher genauso oft wie noetig
         // und braucht keinen Ausleih-Trick, um waehrend des Sortierens in die
@@ -527,7 +558,13 @@ pub fn make_realm() -> Realm {
                 j -= 1;
             }
         }
-        rebuild(i, &this, items)?;
+        // Zurueckgeschrieben wird ELEMENTWEISE, ohne `length` anzufassen —
+        // sonst verliert eine typisierte Sicht ihre Laenge (die ist dort ein
+        // Getter) und ihre nicht-numerischen Eigenschaften.
+        for (k, v) in items.into_iter().enumerate() {
+            i.tick()?;
+            i.set(&this, &num_to_string(k as f64), v, true)?;
+        }
         Ok(this)
     }, 1, fp);
     def(&array_proto, "concat", |i, this, a| {
@@ -1062,7 +1099,7 @@ pub fn make_realm() -> Realm {
             for k in keys {
                 if !enum_own(i, &o, &k)? { continue; }
                 let v = i.get(src, &k)?;
-                i.set(&target, &k, v)?;
+                i.set(&target, &k, v, true)?;
             }
         }
         Ok(target)
@@ -1221,7 +1258,7 @@ pub fn make_realm() -> Realm {
         if a.len() == 1 {
             if let Value::Num(n) = &a[0] {
                 let arr = i.new_array(Vec::new());
-                i.set(&arr, "length", Value::Num(*n))?;
+                i.set(&arr, "length", Value::Num(*n), true)?;
                 return Ok(arr);
             }
         }
@@ -1257,14 +1294,22 @@ pub fn make_realm() -> Realm {
     global.borrow_mut().define("Array", Prop::builtin(Value::Obj(array_ctor)));
 
     let string_ctor = native(Some(function_proto.clone()), |i, _, a| {
-        Ok(match a.first() {
+        let prim = match a.first() {
             None => Value::str(""),
             // `String(sym)` ist die AUSNAHME: sie darf, wo `"" + sym` wirft.
             // Genau so steht es in der Spezifikation, und es ist der einzige
             // Weg, ein Symbol absichtlich zu Text zu machen.
             Some(Value::Sym(sd)) => Value::Str(Interp::sym_to_display(sd)),
             Some(v) => Value::Str(i.to_string(v)?),
-        })
+        };
+        // **`new String(x)` ist ein OBJEKT, `String(x)` ist Text.** Bis 0.98.0
+        // gab beak beide Male das Primitiv, und `typeof new String()` sagte
+        // "string". Aufgefallen ist es erst, als `this` im lockeren Modus
+        // richtig eingepackt wurde: der Test verglich das eingepackte `this`
+        // mit dem NICHT eingepackten `new String()` — vorher waren beide
+        // Primitive und die zwei Fehler hoben sich auf.
+        if i.native_new { return Ok(Value::Obj(i.to_object(&prim)?)); }
+        Ok(prim)
     }, "String", 1, true);
     string_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(string_proto.clone())));
     string_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(string_ctor.clone())));
@@ -1313,7 +1358,9 @@ pub fn make_realm() -> Realm {
     global.borrow_mut().define("String", Prop::builtin(Value::Obj(string_ctor)));
 
     let number_ctor = native(Some(function_proto.clone()), |i, _, a| {
-        Ok(Value::Num(match a.first() { None => 0.0, Some(v) => i.to_number(v)? }))
+        let prim = Value::Num(match a.first() { None => 0.0, Some(v) => i.to_number(v)? });
+        if i.native_new { return Ok(Value::Obj(i.to_object(&prim)?)); }
+        Ok(prim)
     }, "Number", 1, true);
     number_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(number_proto.clone())));
     number_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(number_ctor.clone())));
@@ -1384,8 +1431,10 @@ pub fn make_realm() -> Realm {
     def(&bigint_ctor, "asUintN", |i, _, a| as_n(i, a, false), 2, fp);
     global.borrow_mut().define("BigInt", Prop::builtin(Value::Obj(bigint_ctor)));
 
-    let bool_ctor = native(Some(function_proto.clone()), |_, _, a| {
-        Ok(Value::Bool(a.first().map(|v| v.truthy()).unwrap_or(false)))
+    let bool_ctor = native(Some(function_proto.clone()), |i, _, a| {
+        let prim = Value::Bool(a.first().map(|v| v.truthy()).unwrap_or(false));
+        if i.native_new { return Ok(Value::Obj(i.to_object(&prim)?)); }
+        Ok(prim)
     }, "Boolean", 1, true);
     bool_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(boolean_proto.clone())));
     boolean_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(bool_ctor.clone())));
@@ -1782,7 +1831,7 @@ pub fn make_realm() -> Realm {
         if !matches!(t, Value::Obj(_)) { return i.type_err("Reflect.set on a non-object"); }
         let k = i.to_prop_key(a.get(1).unwrap_or(&Value::Undefined))?;
         let v = a.get(2).cloned().unwrap_or(Value::Undefined);
-        i.set(&t, &k, v)?;
+        i.set(&t, &k, v, true)?;
         Ok(Value::Bool(true))
     }, 3, fp);
     def(&reflect, "has", |i, _, a| {
@@ -1960,10 +2009,10 @@ pub fn make_realm() -> Realm {
         let len = i.get(&target, "length")?;
         let len = i.to_number(&len)? as usize;
         if idx >= len {
-            i.set(&t, IT_TARGET, Value::Undefined)?;
+            slot_set(&t, IT_TARGET, Value::Undefined);
             return Ok(i.iter_result(Value::Undefined, true));
         }
-        i.set(&t, IT_INDEX, Value::Num(idx as f64 + 1.0))?;
+        slot_set(&t, IT_INDEX, Value::Num(idx as f64 + 1.0));
         let kind = i.get(&t, IT_KIND)?;
         let kind = i.to_number(&kind)?;
         let out = if kind == 1.0 {
@@ -1987,11 +2036,11 @@ pub fn make_realm() -> Realm {
         let off = i.to_number(&off)? as usize;
         match s[off..].chars().next() {
             None => {
-                i.set(&t, IT_TARGET, Value::Undefined)?;
+                slot_set(&t, IT_TARGET, Value::Undefined);
                 Ok(i.iter_result(Value::Undefined, true))
             }
             Some(c) => {
-                i.set(&t, IT_INDEX, Value::Num((off + c.len_utf8()) as f64))?;
+                slot_set(&t, IT_INDEX, Value::Num((off + c.len_utf8()) as f64));
                 let mut b = String::new(); b.push(c);
                 Ok(i.iter_result(Value::string(b), false))
             }
@@ -2313,16 +2362,18 @@ pub fn make_realm() -> Realm {
         i.get(&this, &num_to_string(k as f64))
     }, 1, fp);
     def(&array_proto, "fill", |i, this, a| {
+        let this = Value::Obj(i.to_object(&this)?);
         let n = array_len(i, &this)? as i64;
         let v = a.first().cloned().unwrap_or(Value::Undefined);
         let (s, e) = range_args(i, a.get(1), a.get(2), n)?;
         for k in s..e {
             i.tick()?;
-            i.set(&this, &num_to_string(k as f64), v.clone())?;
+            i.set(&this, &num_to_string(k as f64), v.clone(), true)?;
         }
         Ok(this)
     }, 1, fp);
     def(&array_proto, "copyWithin", |i, this, a| {
+        let this = Value::Obj(i.to_object(&this)?);
         let n = array_len(i, &this)? as i64;
         let mut t = to_integer(i.to_number(a.first().unwrap_or(&Value::Undefined))?) as i64;
         if t < 0 { t += n; }
@@ -2338,7 +2389,7 @@ pub fn make_realm() -> Realm {
         for (j, v) in buf.into_iter().enumerate() {
             let at = t + j as i64;
             if at >= n { break }
-            i.set(&this, &num_to_string(at as f64), v)?;
+            i.set(&this, &num_to_string(at as f64), v, true)?;
         }
         Ok(this)
     }, 2, fp);
@@ -2824,6 +2875,17 @@ pub fn make_realm() -> Realm {
 /// haette den Code nur laenger gemacht.
 /// Ein Array in-place durch eine neue Elementfolge ersetzen. Die Grundlage
 /// fuer alles, was die Laenge aendert (`shift`, `splice`, `sort`, `reverse`).
+/// Ein internes FACH schreiben.
+///
+/// Diese Namen (` !target`, ` !index`) sind keine Eigenschaften des Objekts —
+/// die Objektdarstellung hat nur keinen anderen Ort dafuer. Sie gehen deshalb
+/// an der Eigenschaftsmaschinerie vorbei: `Set` mit Wurf-Fahne wuerde am
+/// eingefrorenen ` !target` scheitern, und das waere ein Fehler ueber etwas,
+/// das ein Skript gar nicht sehen kann.
+fn slot_set(t: &Value, key: &str, v: Value) {
+    if let Value::Obj(o) = t { o.borrow_mut().define(key, Prop::data(v)); }
+}
+
 fn rebuild(i: &mut Interp, this: &Value, items: Vec<Value>) -> C<()> {
     let Value::Obj(o) = this else { return Ok(()) };
     o.borrow_mut().clear_indices();
@@ -2831,7 +2893,7 @@ fn rebuild(i: &mut Interp, this: &Value, items: Vec<Value>) -> C<()> {
     for (k, v) in items.into_iter().enumerate() {
         o.borrow_mut().set_prop(Rc::from(num_to_string(k as f64).as_str()), Prop::data(v));
     }
-    i.set(this, "length", Value::Num(n as f64))
+    i.set(this, "length", Value::Num(n as f64), true)
 }
 
 /// Der gemeinsame Rumpf der vier Sammlungs-Konstruktoren.
@@ -3286,7 +3348,7 @@ fn group_into(i: &mut Interp, a: &[Value], out: &Gc, as_map: bool) -> C<()> {
             Some(arr) => {
                 let lv = i.get(&arr, "length")?;
                 let len = i.to_number(&lv)?;
-                i.set(&arr, &num_to_string(len), v)?;
+                i.set(&arr, &num_to_string(len), v, true)?;
             }
             None => {
                 let arr = i.new_array(vec![v]);

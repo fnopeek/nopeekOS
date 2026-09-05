@@ -42,7 +42,17 @@ fn stringify(i: &mut Interp, _t: Value, args: &[Value]) -> C<Value> {
     // Der dritte Parameter ist der Einzug. Eine Zahl heisst „so viele
     // Leerzeichen", ein Text heisst „dieser Text" — beide gedeckelt auf 10,
     // wie die Spezifikation es vorschreibt.
-    let indent = match args.get(2) {
+    // Ein Number- oder String-OBJEKT zaehlt wie sein Wert (ES §25.5.2.1, 5).
+    // Seit `new Number(5)` wirklich ein Objekt ist, kommt der Fall auch vor.
+    let space = match args.get(2) {
+        Some(Value::Obj(o)) => match &o.borrow().kind {
+            ObjKind::NumWrap(n) => Some(Value::Num(*n)),
+            ObjKind::StrWrap(t) => Some(Value::Str(t.clone())),
+            _ => None,
+        },
+        other => other.cloned(),
+    };
+    let indent = match &space {
         Some(Value::Num(n)) => " ".repeat((*n as usize).min(10)),
         Some(Value::Str(s)) => s.chars().take(10).collect(),
         _ => String::new(),
@@ -225,7 +235,7 @@ fn revive(i: &mut Interp, holder: &Value, key: &str, f: &Value, depth: usize) ->
             if matches!(nv, Value::Undefined) {
                 o.borrow_mut().remove(&k);
             } else {
-                i.set(&val, &k, nv)?;
+                i.set(&val, &k, nv, true)?;
             }
         }
     }

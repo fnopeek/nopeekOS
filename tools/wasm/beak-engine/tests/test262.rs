@@ -335,6 +335,20 @@ fn test262_exec() {
     // async/await eigene Maschinen bekommen, sagt ein Rumpf ab, ohne dass das
     // Programm absagt — ohne diese Zeile waere die Absage unsichtbar.
     let mut by_fdecline: BTreeMap<&'static str, u64> = BTreeMap::new();
+    // Die Sonde fuer den strengen Modus (`--features strict-probe`). Gezaehlt
+    // wird JE VARIANTE und getrennt nach Ausgang: nur so sagt der Lauf, wie
+    // viele der FEHLER an einer dieser Stellen vorbeikamen — die Fahnen der
+    // Tests sagen es nicht.
+    #[cfg(feature = "strict-probe")]
+    let mut probe_fail = [0u64; beak_engine::js::STRICT_SITES];
+    #[cfg(feature = "strict-probe")]
+    let mut probe_pass = [0u64; beak_engine::js::STRICT_SITES];
+    #[cfg(feature = "strict-probe")]
+    let (mut probe_fail_any, mut probe_pass_any) = (0u64, 0u64);
+    // Und: welche Stelle traf welchen gescheiterten Test — fuer die Rangliste
+    // nach Verzeichnis.
+    #[cfg(feature = "strict-probe")]
+    let mut probe_names: Vec<(String, [u32; beak_engine::js::STRICT_SITES], String)> = Vec::new();
 
     let hread = |f: &str| fs::read_to_string(harness.join(f)).unwrap_or_default();
     let mut hmap: std::collections::BTreeMap<String, String> = Default::default();
@@ -420,6 +434,8 @@ fn test262_exec() {
             let mut vm_seen = (0u64, 0u64, None);
             let mut calls_seen = (0u64, 0u64, 0u64);
             let mut fdecl: Vec<(&'static str, u64)> = Vec::new();
+            #[cfg(feature = "strict-probe")]
+            let mut probe = [0u32; beak_engine::js::STRICT_SITES];
             let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let tp = std::time::Instant::now();
                 let prog = match beak_engine::js::parse(&text, false) {
@@ -443,12 +459,21 @@ fn test262_exec() {
                     match s.run(if strict { &prologue_strict } else { &prologue }) {
                         Err(e) => Err(e),
                         Ok(()) => {
+                            // VOR dem Testprogramm ablesen und danach abziehen:
+                            // der Vorspann laeuft locker und trifft die Stellen
+                            // selbst, er wuerde sonst jede Zeile gleich faerben.
+                            #[cfg(feature = "strict-probe")]
+                            let probe0 = s.interp.strict_probe;
                             let (a, b) = (s.interp.vm_ran, s.interp.vm_declined);
                             let (ca, cb) = (s.interp.vm_calls, s.interp.vm_calls_slow);
                             let cn = s.interp.vm_calls_native;
                             let r = s.run(&prog);
                             fdecl = s.interp.func_declines.iter()
                                 .map(|(k, v)| (*k, *v)).collect();
+                            #[cfg(feature = "strict-probe")]
+                            for k in 0..beak_engine::js::STRICT_SITES {
+                                probe[k] = s.interp.strict_probe[k] - probe0[k];
+                            }
                             vm_seen = (s.interp.vm_ran - a, s.interp.vm_declined - b,
                                        s.interp.vm_decline);
                             calls_seen = (s.interp.vm_calls - ca, s.interp.vm_calls_slow - cb,
@@ -485,6 +510,31 @@ fn test262_exec() {
                 Ok(Err(_)) => neg,
             };
             if matches!(out, Err(_)) { panics += 1; }
+            #[cfg(feature = "strict-probe")]
+            {
+                let hit = probe.iter().any(|&n| n > 0);
+                let t = if ok { &mut probe_pass } else { &mut probe_fail };
+                for k in 0..beak_engine::js::STRICT_SITES {
+                    if probe[k] > 0 { t[k] += 1; }
+                }
+                if hit {
+                    if ok { probe_pass_any += 1; } else { probe_fail_any += 1; }
+                }
+                if !ok && hit {
+                    // MIT der Meldung. Eine getroffene Stelle heisst nicht,
+                    // dass der Test daran stirbt — `propertyHelper.js` schreibt
+                    // selbst auf nicht schreibbare Eigenschaften und faengt den
+                    // Fehler ab. Erst die Meldung sagt, ob der fehlende Wurf
+                    // die URSACHE war.
+                    let why = match &out {
+                        Err(_) => "LAEUFER: Absturz".to_string(),
+                        Ok(Err(e)) => e.clone(),
+                        Ok(Ok(())) => "erwartete einen Fehler, es lief durch".to_string(),
+                    };
+                    probe_names.push((format!("{rel}{}",
+                        if strict { " [strict]" } else { "" }), probe, why));
+                }
+            }
             if ok { pass += 1; continue; }
             let why = match out {
                 Err(_) => "LAEUFER: Absturz".to_string(),
@@ -506,7 +556,13 @@ fn test262_exec() {
             // ALLE Namen, nicht nur die ersten 5000: nur eine vollstaendige
             // Liste laesst sich gegen einen zweiten Lauf diffen, und der Diff
             // ist die einzige ehrliche Pruefung einer Umstellung.
-            all_fails.push(rel.clone());
+            //
+            // MIT der Betriebsart. Gezaehlt wird die VARIANTE (eine Datei ohne
+            // Fahne laeuft zweimal), und ohne die Marke fallen beide auf einen
+            // Namen zusammen: ein Fix, der nur den strengen Modus bewegt,
+            // aendert die Liste dann NICHT. Genau die Blindstelle, die bei der
+            // Arbeit am strengen Modus jede Messung wertlos machen wuerde.
+            all_fails.push(format!("{rel}{}", if strict { " [strict]" } else { "" }));
         }
     }
 
@@ -538,6 +594,34 @@ fn test262_exec() {
         eprintln!("   … und bei einem FUNKTIONSRUMPF:");
         for (k, n) in fd.iter().take(12) {
             eprintln!("      {n:6}  {k}");
+        }
+    }
+    #[cfg(feature = "strict-probe")]
+    {
+        eprintln!("\n── Der STRENGE MODUS: was haengt wirklich daran ──");
+        eprintln!("   Gezaehlt wird die VARIANTE, die an der Stelle vorbeikam —");
+        eprintln!("   nicht, wie oft. Eine Variante kann mehrere Stellen treffen.");
+        eprintln!("   {:>7} {:>7}   {}", "gerissen", "bestanden", "Stelle");
+        let mut rows: Vec<usize> = (0..beak_engine::js::STRICT_SITES).collect();
+        rows.sort_by_key(|&k| std::cmp::Reverse(probe_fail[k]));
+        for k in rows {
+            eprintln!("   {:>7} {:>9}   {}", probe_fail[k], probe_pass[k],
+                      beak_engine::js::STRICT_SITE_NAMES[k]);
+        }
+        eprintln!("   ──");
+        eprintln!("   {probe_fail_any} GESCHEITERTE Varianten kamen an mindestens einer Stelle vorbei");
+        eprintln!("   {probe_pass_any} bestandene ebenfalls — die sind die Gegenprobe:");
+        eprintln!("   eine Stelle zu treffen heisst NICHT, dass der Test daran stirbt.");
+        if let Ok(path) = std::env::var("T262_PROBELIST") {
+            let mut out = String::new();
+            for (n, p, why) in &probe_names {
+                let sites: Vec<String> = (0..beak_engine::js::STRICT_SITES)
+                    .filter(|&k| p[k] > 0).map(|k| k.to_string()).collect();
+                let w = why.replace('\t', " ").replace('\n', " ");
+                out.push_str(&format!("{}\t{}\t{}\n", sites.join(","), n, w));
+            }
+            let _ = fs::write(&path, out);
+            eprintln!("   {} Zeilen -> {path}", probe_names.len());
         }
     }
     eprintln!("\n── test262, AUSFUEHRUNG ──");

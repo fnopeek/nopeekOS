@@ -40,6 +40,7 @@ pub mod value;
 pub use ast::Program;
 pub use parser::{parse, ParseError};
 pub use interp::TEST_STEPS;
+pub use interp::{STRICT_SITES, STRICT_SITE_NAMES};
 
 /// Ein Programm laufen lassen. Fehler kommen als geworfener JS-Wert zurueck,
 /// nicht als Rust-Fehler — ein `throw` ist ein normaler Ausgang.

@@ -180,7 +180,8 @@ impl<'a> Parser<'a> {
     pub fn parse_program(&mut self) -> R<Program> {
         let body = self.directive_prologue_and_body(true)?;
         if self.cur.tok != Tok::Eof { return self.err("unexpected token after program"); }
-        Ok(Program { body, module: self.module })
+        // Ein Modul ist immer streng, ein Skript nur mit Direktive.
+        Ok(Program { body, module: self.module, strict: self.strict || self.module })
     }
 
     /// Der Direktiven-Vorspann: fuehrende Zeichenkettenausdruecke, unter denen
@@ -675,15 +676,21 @@ impl<'a> Parser<'a> {
         let ocf = core::mem::replace(&mut self.in_class_field, false);
         let params = self.params()?;
         let outer_strict = self.strict;
-        let body = self.block_body_with_prologue()?;
+        let (body, strict) = self.block_body_with_prologue()?;
         self.strict = outer_strict;
         self.in_class_field = ocf;
         self.in_gen = og; self.in_async = oa; self.in_func = of;
 
-        Ok(Func { name, params, body, is_async, is_generator, is_arrow: false, expr_body: false })
+        Ok(Func { name, params, body, is_async, is_generator, is_arrow: false,
+                  expr_body: false, strict })
     }
 
-    fn block_body_with_prologue(&mut self) -> R<Vec<Stmt>> {
+    /// Der Rumpf UND seine Strenge. Bis 0.98.0 gab er nur den Rumpf, und die
+    /// Strenge blieb im Parser stehen — zwei Aufrufer haben sie danach nicht
+    /// einmal zurueckgesetzt (`({ m(){ "use strict"; } })` faerbte alles
+    /// dahinter mit). Wer sie zurueckgibt, zwingt jeden Aufrufer, sich zu
+    /// entscheiden.
+    fn block_body_with_prologue(&mut self) -> R<(Vec<Stmt>, bool)> {
         // Die Parameter, die gerade gelesen wurden — der Vorspann braucht sie:
         // `"use strict"` neben einer nicht-einfachen Parameterliste ist ein
         // Fruehfehler, und dieselbe Direktive macht doppelte Namen nachtraeglich
@@ -704,7 +711,8 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect_p(P::RBrace)?;
-        Ok(out)
+        let strict = self.strict;
+        Ok((out, strict))
     }
 
     /// Prueft EINE Anweisungsliste auf doppelte Deklarationen.
@@ -892,10 +900,13 @@ impl<'a> Parser<'a> {
             self.in_gen = is_generator; self.in_async = is_async; self.in_func = true;
             let ocf = core::mem::replace(&mut self.in_class_field, false);
             let params = self.params_ex(true)?;
-            let body = self.block_body_with_prologue()?;
+            let outer_strict = self.strict;
+            let (body, strict) = self.block_body_with_prologue()?;
+            self.strict = outer_strict;
             self.in_class_field = ocf;
             self.in_gen = og; self.in_async = oa; self.in_func = of;
-            let func = Func { name: None, params, body, is_async, is_generator, is_arrow: false, expr_body: false };
+            let func = Func { name: None, params, body, is_async, is_generator, is_arrow: false,
+                              expr_body: false, strict };
             return Ok(ClassMember::Method { key, func: Rc::new(func), kind, is_static, computed });
         }
         // Feld.
@@ -1050,18 +1061,20 @@ impl<'a> Parser<'a> {
         // Ein Pfeil hat kein eigenes `yield`-Verhalten; `in_gen` bleibt aussen
         // stehen, weil `yield` im Pfeilkoerper den umgebenden Generator meint.
         self.in_async = is_async; self.in_func = true;
-        let (body, expr_body) = if self.is_p(P::LBrace) {
+        let (body, expr_body, strict) = if self.is_p(P::LBrace) {
             let outer_strict = self.strict;
-            let b = self.block_body_with_prologue()?;
+            let (b, st) = self.block_body_with_prologue()?;
             self.strict = outer_strict;
-            (b, false)
+            (b, false, st)
         } else {
+            // Ein Ausdruckskoerper hat keinen Vorspann — er erbt schlicht.
             let e = self.assign_expr()?;
-            (vec![Stmt::Return(Some(e))], true)
+            (vec![Stmt::Return(Some(e))], true, self.strict)
         };
         self.in_gen = og; self.in_async = oa; self.in_func = of;
         Ok(Expr::Func(Rc::new(Func {
             name: None, params, body, is_async, is_generator: false, is_arrow: true, expr_body,
+            strict,
         })))
     }
 
@@ -1513,11 +1526,13 @@ impl<'a> Parser<'a> {
                 // gescheitert.
                 let ocf = core::mem::replace(&mut self.in_class_field, false);
                 let params = self.params_ex(true)?;
-                let body = self.block_body_with_prologue()?;
+                let outer_strict = self.strict;
+                let (body, strict) = self.block_body_with_prologue()?;
+                self.strict = outer_strict;
                 self.in_class_field = ocf;
                 self.in_gen = og; self.in_async = oa; self.in_func = of;
                 let f = Rc::new(Func { name: None, params, body, is_async: false,
-                    is_generator: false, is_arrow: false, expr_body: false });
+                    is_generator: false, is_arrow: false, expr_body: false, strict });
                 props.push(ObjProp {
                     key, computed, shorthand: false,
                     value: if kind == 1 { ObjPropValue::Get(f) } else { ObjPropValue::Set(f) },
@@ -1527,13 +1542,15 @@ impl<'a> Parser<'a> {
                 self.in_gen = is_generator; self.in_async = is_async; self.in_func = true;
                 let ocf = core::mem::replace(&mut self.in_class_field, false);
                 let params = self.params_ex(true)?;
-                let body = self.block_body_with_prologue()?;
+                let outer_strict = self.strict;
+                let (body, strict) = self.block_body_with_prologue()?;
+                self.strict = outer_strict;
                 self.in_class_field = ocf;
                 self.in_gen = og; self.in_async = oa; self.in_func = of;
                 props.push(ObjProp {
                     key, computed, shorthand: false,
                     value: ObjPropValue::Method(Rc::new(Func { name: None, params, body,
-                        is_async, is_generator, is_arrow: false, expr_body: false })),
+                        is_async, is_generator, is_arrow: false, expr_body: false, strict })),
                 });
             } else if self.eat_p(P::Colon)? {
                 let v = self.assign_expr()?;

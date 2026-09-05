@@ -50,3 +50,9 @@ default-features = false
 [features]
 # Dev-only: print oversized boxes with the element that made them.
 diag-boxes = []
+# Dev-only: zaehlt die Stellen, an denen der STRENGE MODUS etwas anderes
+# taete als der lockere. Nur so laesst sich aus einem test262-Lauf ablesen,
+# wieviele der Fehler wirklich daran haengen — die Fahnen der Tests
+# (`onlyStrict`) sagen es NICHT, sie zaehlen nur, wie ein Test gestartet wird.
+# Bleibt aus dem ausgelieferten Modul heraus: Diagnose darf nicht stoeren.
+strict-probe = []
