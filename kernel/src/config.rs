@@ -186,4 +186,6 @@ pub const KNOWN_KEYS: &[(&str, &str)] = &[
     // security guarantee. Everything else here is taste or topology.
     ("net.allow_plain_http",
      "1 = allow http:// (NO TLS) to private addresses only. Off by default; for local test servers."),
+    ("net.lan_devices",
+     "Private IPs whose self-signed cert is trusted ON FIRST USE and pinned after (e.g. 192.168.178.1). Literal addresses only."),
 ];

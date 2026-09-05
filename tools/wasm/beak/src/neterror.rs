@@ -148,8 +148,22 @@ pub fn document(url: &str, kind: &str, message: &str) -> String {
     s.push_str(body);
     s.push_str("</p>");
 
-    if !steps.is_empty() {
+    // **Der Geraetefall bekommt seinen eigenen Hinweis, mit der Adresse
+    // darin.** Ein Router im Heimnetz KANN kein oeffentlich vertrautes
+    // Zertifikat haben — keine CA stellt eines fuer eine private Adresse
+    // aus. Ohne diesen Absatz endet der Weg hier, und der Nutzer haelt es
+    // fuer einen Fehler in beak. Mit ihm steht der naechste Schritt da.
+    let device_hint = matches!(kind, "cert.hostname" | "cert.untrusted")
+        .then(|| private_host_of(url))
+        .flatten();
+
+    if !steps.is_empty() || device_hint.is_some() {
         s.push_str("<ul>");
+        if let Some(host) = &device_hint {
+            s.push_str("<li>This looks like a device on your own network.                         Such a device cannot hold a publicly trusted certificate                         for its address — no authority issues one for a private                         IP. To trust it on first sight and pin it afterwards, run                         <code>set net.lan_devices ");
+            escape_into(host, &mut s);
+            s.push_str("</code>, then reload. A LATER change of its certificate                         is refused again — that is the part that still protects                         you.</li>");
+        }
         for step in steps {
             s.push_str("<li>");
             s.push_str(step);
@@ -167,6 +181,29 @@ pub fn document(url: &str, kind: &str, message: &str) -> String {
     escape_into(message, &mut s);
     s.push_str("</p></div>");
     s
+}
+
+/// Die Adresse aus einer URL, WENN sie eine literale private ist.
+///
+/// Nur dann ist der Geraetehinweis wahr — und nur dann nimmt der Kernel den
+/// Schalter ueberhaupt an (`net.lan_devices` gilt ausschliesslich fuer
+/// literale private Adressen). Ein Hinweis, der auf einen Weg zeigt, den
+/// der Kernel gleich wieder verwirft, waere schlimmer als keiner.
+fn private_host_of(url: &str) -> Option<String> {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let hostport = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let host = hostport.split(':').next().unwrap_or(hostport);
+    let mut it = host.split('.');
+    let q: [u8; 4] = [
+        it.next()?.parse().ok()?, it.next()?.parse().ok()?,
+        it.next()?.parse().ok()?, it.next()?.parse().ok()?,
+    ];
+    if it.next().is_some() { return None; }
+    let private = matches!(q,
+        [10, ..] | [192, 168, ..] | [127, ..] | [169, 254, ..])
+        || matches!(q, [172, b, ..] if (16..=31).contains(&b))
+        || matches!(q, [100, b, ..] if (64..=127).contains(&b));
+    private.then(|| String::from(host))
 }
 
 /// Escape text for HTML. The URL is attacker-influenced — it can come from a
