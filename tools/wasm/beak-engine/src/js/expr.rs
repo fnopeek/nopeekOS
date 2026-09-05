@@ -61,6 +61,18 @@ impl Interp {
             Expr::Unary { op, arg } => self.eval_unary(*op, arg, env),
             Expr::Update { op, arg, prefix } => self.eval_update(*op, arg, *prefix, env),
             Expr::Binary { op, left, right } => {
+                // `#x in obj` fragt nach der MARKE, nicht nach einer
+                // Eigenschaft — und die linke Seite ist kein Wert, den man
+                // auswerten koennte.
+                if *op == BinOp::In {
+                    if let Expr::Ident(n) = &**left {
+                        if let Some(name) = n.strip_prefix('#') {
+                            let name = alloc::string::String::from(name);
+                            let r = self.eval(right, env)?;
+                            return self.private_in(&name, &r);
+                        }
+                    }
+                }
                 let l = self.eval(left, env)?;
                 let r = self.eval(right, env)?;
                 self.binary(*op, l, r)
@@ -157,13 +169,29 @@ impl Interp {
                 dst.borrow_mut().kind = kind;
             }
         } else {
-            self.call(&ctor, this_val.clone(), args)?;
+            let r = self.call(&ctor, this_val.clone(), args)?;
+            // **Gibt der Elternkonstruktor ein OBJEKT zurueck, ist DAS `this`.**
+            // `class Base { constructor(o) { return o } }` ist das Muster
+            // hinter jeder Klasse, die eine bestehende Instanz zurueckreicht.
+            // Bis 0.99.0 warf `super()` die Antwort weg und arbeitete auf dem
+            // frisch gebauten Objekt weiter — sichtbar wurde es erst, als die
+            // Markenpruefung ein privates Feld auf dem falschen Objekt suchte.
+            if let Value::Obj(o) = &r {
+                if !matches!(&this_val, Value::Obj(t) if Rc::ptr_eq(t, o)) {
+                    set_env_this(env, r.clone());
+                    return self.finish_super(env, r);
+                }
+            }
         }
-        // **Jetzt erst die eigenen Instanzfelder.** Die Spec legt sie nach dem
-        // Elternkonstruktor an, und der Unterschied ist sichtbar: ein
-        // Initialisierer darf ein Feld der Elternklasse lesen. Welche Klasse
-        // „eigene" ist, sagt das Heimatobjekt — sein `constructor` ist der
-        // Konstruktor, in dem wir stehen.
+        self.finish_super(env, this_val)
+    }
+
+    /// **Jetzt erst die eigenen Instanzfelder.** Die Spec legt sie nach dem
+    /// Elternkonstruktor an, und der Unterschied ist sichtbar: ein
+    /// Initialisierer darf ein Feld der Elternklasse lesen. Welche Klasse
+    /// „eigene" ist, sagt das Heimatobjekt — sein `constructor` ist der
+    /// Konstruktor, in dem wir stehen.
+    fn finish_super(&mut self, env: &Rc<RefCell<Env>>, this_val: Value) -> C<Value> {
         if let Some(home) = env_home(env) {
             let own = self.get(&Value::Obj(home), "constructor")?;
             if let Value::Obj(co) = &own {
@@ -437,9 +465,11 @@ impl Interp {
         // `call_env` bzw. der `super()`-Weg legen sie dann an. Ohne Felder
         // bleibt der Zeiger leer, damit ein gewoehnlicher Aufruf nichts
         // nachzuschlagen hat.
-        let has_fields = c.body.iter()
-            .any(|m| matches!(m, ClassMember::Field { is_static: false, .. }));
-        if has_fields {
+        // **Jeder** Klassenkonstruktor traegt seine Klasse, nicht nur die mit
+        // Feldern: der Zeiger sagt jetzt auch „das hier ist ein Konstruktor",
+        // und daran haengt, dass ein Rumpf ohne `return` sein `this` liefert.
+        // Ohne Felder ist `init_fields` ohnehin ein Leerlauf.
+        {
             if let Value::Obj(co) = &ctor {
                 let d = match &co.borrow().kind {
                     ObjKind::Function(d) => Some(d.clone()),

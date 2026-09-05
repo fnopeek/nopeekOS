@@ -161,7 +161,17 @@ pub fn is_sym_key(k: &str) -> bool { k.as_bytes().first() == Some(&0) }
 pub fn is_private_key(k: &str) -> bool { k.as_bytes().starts_with(b"\0~") }
 
 pub fn private_key(name: &str) -> Rc<str> {
-    Rc::from(alloc::format!("\0~{name}").as_str())
+    Rc::from(alloc::format!("{PRIVATE_PREFIX}{name}").as_str())
+}
+
+/// Das Vorzeichen eines privaten Feldes im Schluesseltext. Ein Skript kann
+/// es nicht erzeugen — NUL steht in keinem Bezeichner —, also ist „faengt
+/// damit an" ein sicheres Erkennungsmerkmal fuer die Markenpruefung.
+pub const PRIVATE_PREFIX: &str = "\0~";
+
+/// Der Name ohne Vorzeichen, fuer die Fehlermeldung.
+pub fn private_name(key: &str) -> &str {
+    key.strip_prefix(PRIVATE_PREFIX).unwrap_or(key)
 }
 
 /// Aus einem Symbolschluessel das Symbol zurueckgewinnen.

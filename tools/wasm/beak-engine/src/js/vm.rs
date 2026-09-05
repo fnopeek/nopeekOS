@@ -543,6 +543,11 @@ impl Vm {
                 }
                 self.push(Value::string(out));
             }
+            Op::PrivateIn(n) => {
+                let obj = self.pop();
+                let v = i.private_in(&chunk.names[*n as usize], &obj)?;
+                self.push(v);
+            }
             Op::DeleteProp(n) => {
                 let obj = self.pop();
                 let key = &chunk.names[*n as usize];
