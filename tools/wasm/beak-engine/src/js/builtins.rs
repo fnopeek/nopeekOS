@@ -2347,6 +2347,69 @@ pub fn make_realm() -> Realm {
     }
     global.borrow_mut().define("location", Prop::builtin(Value::Obj(loc)));
 
+    // ── history ──────────────────────────────────────────────────────────
+    //
+    // **Die Engine navigiert nicht.** Sie hat keinen Verlauf und soll keinen
+    // erfinden; `state` gehoert dem Dokument, `length` und das Springen
+    // gehoeren dem Wirt. Also: lesen aus dem, was der Wirt eingereicht hat,
+    // schreiben in eine Liste, die er abholt — dasselbe Muster wie bei den
+    // Keksen (`take_cookie_sets`).
+    //
+    // Rangfolge am Zielkorpus gemessen, nicht geraten: `replaceState` 42,
+    // `pushState` 29, `state` 21, `scrollRestoration` 12, `back` 11, `go` 5.
+    // Auf der Fritz!Box ist es `history.state?.sid` — verschleiert, aber es
+    // ist `state`, und ohne `history` stirbt ihr erstes Skript sofort.
+    let hist = new_obj(Some(object_proto.clone()));
+    {
+        let mut h = hist.borrow_mut();
+        // `state` und `length` sind Leser: sie muessen den Wert von JETZT
+        // liefern, nicht den vom Aufbau der Umgebung.
+        let g_state = native(Some(function_proto.clone()),
+            |i, _, _| Ok(i.history_state.clone()), "state", 0, false);
+        h.define("state", Prop { value: None, get: Some(Value::Obj(g_state)), set: None,
+                                 writable: false, enumerable: true, configurable: true });
+        let g_len = native(Some(function_proto.clone()),
+            |i, _, _| Ok(Value::Num(i.history_len)), "length", 0, false);
+        h.define("length", Prop { value: None, get: Some(Value::Obj(g_len)), set: None,
+                                  writable: false, enumerable: true, configurable: true });
+        // `scrollRestoration` ist ein reiner Merkposten: wir stellen keine
+        // Bildlaufstellung wieder her, also ist "manual" die ehrliche
+        // Antwort. Schreibbar, damit eine Seite es setzen kann, ohne zu
+        // sterben — der Wert wird gelesen, nicht befolgt.
+        h.define("scrollRestoration", Prop::builtin(Value::str("manual")));
+    }
+    def(&hist, "pushState", |i, _, a| {
+        i.history_state = a.first().cloned().unwrap_or(Value::Null);
+        let url = hist_url(i, a.get(2))?;
+        i.history_ops.push(super::interp::HistoryOp::Push { url });
+        Ok(Value::Undefined)
+    }, 3, fp);
+    def(&hist, "replaceState", |i, _, a| {
+        i.history_state = a.first().cloned().unwrap_or(Value::Null);
+        let url = hist_url(i, a.get(2))?;
+        i.history_ops.push(super::interp::HistoryOp::Replace { url });
+        Ok(Value::Undefined)
+    }, 3, fp);
+    def(&hist, "go", |i, _, a| {
+        let n = match a.first() {
+            None | Some(Value::Undefined) => 0,
+            Some(v) => to_integer(i.to_number(v)?) as i32,
+        };
+        // `go(0)` laedt neu. Das ist etwas anderes als „nichts tun", und der
+        // Wirt darf es unterscheiden — also geht es genauso raus.
+        i.history_ops.push(super::interp::HistoryOp::Go(n));
+        Ok(Value::Undefined)
+    }, 1, fp);
+    def(&hist, "back", |i, _, _| {
+        i.history_ops.push(super::interp::HistoryOp::Go(-1));
+        Ok(Value::Undefined)
+    }, 0, fp);
+    def(&hist, "forward", |i, _, _| {
+        i.history_ops.push(super::interp::HistoryOp::Go(1));
+        Ok(Value::Undefined)
+    }, 0, fp);
+    global.borrow_mut().define("history", Prop::builtin(Value::Obj(hist)));
+
     // ── Date, klein aber vorhanden ───────────────────────────────────────
     // ── Nachzuegler ──────────────────────────────────────────────────────
     //
@@ -2893,6 +2956,20 @@ fn rebuild(i: &mut Interp, this: &Value, items: Vec<Value>) -> C<()> {
         o.borrow_mut().set_prop(Rc::from(num_to_string(k as f64).as_str()), Prop::data(v));
     }
     i.set(this, "length", Value::Num(n as f64), true)
+}
+
+/// Das dritte Argument von `pushState`/`replaceState`: eine Adresse, oder
+/// nichts. `null`/`undefined` heisst „dieselbe Adresse behalten" und kommt
+/// als leerer Text heraus — der Wirt unterscheidet das.
+///
+/// **Aufgeloest wird hier NICHT.** Die Engine kennt die Adresse des
+/// Dokuments nicht besser als der Wirt, und eine halb aufgeloeste Adresse
+/// waere schlimmer als die rohe: sie saehe richtig aus.
+fn hist_url(i: &mut Interp, v: Option<&Value>) -> C<String> {
+    Ok(match v {
+        None | Some(Value::Null) | Some(Value::Undefined) => String::new(),
+        Some(v) => i.to_string(v)?.to_string(),
+    })
 }
 
 /// Der gemeinsame Rumpf der vier Sammlungs-Konstruktoren.
