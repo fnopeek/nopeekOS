@@ -653,7 +653,14 @@ impl Interp {
         let due = core::mem::take(&mut self.timers);
         let n = due.len();
         for f in due {
-            let _ = self.call(&f, Value::Undefined, &[]);
+            // Ein Zeitgeber, der wirft, muss es SAGEN. Der Ausgang wurde hier
+            // weggeworfen: ein Fehler in einem `setTimeout`-Rueckruf war
+            // unsichtbar, und was danach nicht passierte, sah aus wie ein
+            // fehlendes Merkmal — dieselbe Falle wie beim Ereignisbehandler.
+            if let Err(e) = self.call(&f, Value::Undefined, &[]) {
+                let msg = super::modules::describe(self, e);
+                self.console_push(alloc::format!("Fehler im Zeitgeber: {msg}"));
+            }
             // Nach JEDEM Zeitgeber, nicht erst nach allen: Microtasks laufen
             // zwischen den Aufgaben, und ein `then`, das der erste Zeitgeber
             // anlegt, gehoert vor den zweiten.

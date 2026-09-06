@@ -1656,6 +1656,36 @@ static mut SCRIPT_TALLY: (usize, usize, usize) = (0, 0, 0);
 /// Wann die Skriptrunde begann. NICHT `NAV_STAGE_MS`: das steht nach einer
 /// Modulrunde auf deren Beginn, und die gemeldete Zeit waere zu klein.
 static mut SCRIPT_T0: i64 = 0;
+/// Steht `load` noch aus? Es faellt erst, wenn die Geometrie steht.
+static mut LOAD_PENDING: bool = false;
+
+/// `load` zustellen — nach dem ersten Malen, wenn die Kaesten stehen.
+///
+/// Liefert true, wenn dabei etwas am Baum passiert ist.
+fn fire_load(engine: &Engine) -> bool {
+    if !unsafe { core::ptr::addr_of!(LOAD_PENDING).read() } { return false }
+    unsafe { core::ptr::addr_of_mut!(LOAD_PENDING).write(false) };
+    let Some(sess) = js_session() else { return false };
+    let Some(dn) = sess.interp.doc.as_ref().map(|d| d.doc) else { return false };
+    arm_script_budget();
+    let t0 = now_ms();
+    let _ = beak_engine::js::dombind::dispatch(&mut sess.interp, "load", &[dn]);
+    let timers = sess.interp.run_timers();
+    sync_cookies(sess);
+    drain_console(sess);
+    let changed = sess.interp.doc.as_ref().is_some_and(|d| d.dirty);
+    if changed {
+        if let Some(d) = sess.interp.doc.as_mut() {
+            engine.set_scripted_dom(Some(d.to_dom()));
+        }
+        bump_content_gen("load");
+        mark_dirty();
+    }
+    log(&alloc::format!("[beak] load: {}, {timers} Zeitgeber, {} ms",
+                        if changed { "Baum geaendert" } else { "unveraendert" },
+                        now_ms() - t0));
+    changed
+}
 
 /// Eine Runde am Modulgraphen: was fehlt noch?
 ///
@@ -1905,6 +1935,31 @@ fn finish_scripts(engine: &Engine) {
     let (ran, failed, bytes) = unsafe { core::ptr::addr_of!(SCRIPT_TALLY).read() };
     let t0 = unsafe { core::ptr::addr_of!(SCRIPT_T0).read() };
     let Some(sess) = js_session() else { return };
+    // **`DOMContentLoaded` und `load`.**
+    //
+    // Beide wurden NIE zugestellt. Die Eigenschaften gab es seit langem
+    // (`window.onload`, `document.ondomcontentloaded`), das Ereignis nicht —
+    // und `document.readyState` sagte trotzdem „complete". Eine Seite, die
+    // ihre Oberflaeche in `window.addEventListener("load", …)` baut, wartete
+    // damit fuer immer, ohne Fehler und ohne Meldung. Das ist kein
+    // Randmerkmal: es ist eine der beiden ueblichen Arten, ueberhaupt
+    // anzufangen.
+    //
+    // Die Reihenfolge ist die der Spezifikation: erst `DOMContentLoaded`
+    // (Dokument steht, aufgeschobene Skripte und Module sind gelaufen), dann
+    // `load` (auch die nachgeladenen Blaetter sind da). Beide gehen an den
+    // DOKUMENTknoten — `window.addEventListener` landet dort
+    // (`target_node`), und ein Behandler am `document` bekommt sie durch das
+    // Blubbern ebenfalls.
+    // `load` selbst faellt aber NICHT hier, sondern nach dem ersten Malen:
+    // die Kaestchengeometrie reicht der Wirt erst dort ein
+    // (`Interp::set_geometry`), und ein Behandler, der misst, bekaeme sonst
+    // ueberall Nullen — eine Zahl, die aussieht wie eine Messung.
+    let doc_node = sess.interp.doc.as_ref().map(|d| d.doc);
+    if let Some(dn) = doc_node {
+        let _ = beak_engine::js::dombind::dispatch(&mut sess.interp, "DOMContentLoaded", &[dn]);
+    }
+    unsafe { core::ptr::addr_of_mut!(LOAD_PENDING).write(true) };
     // Die Zeitgeber, die waehrend des Ladens angemeldet wurden, einmal
     // laufen lassen — viele Seiten stellen ihre Oberflaeche in einem
     // `setTimeout(…, 0)` fertig.
@@ -3754,6 +3809,11 @@ pub extern "C" fn _start() {
             css_asked.clear();
         }
         maybe_repaint(&engine, &mut cache, &mut paint_buf, &page.state);
+        // JETZT steht die Geometrie — `load` darf fallen.
+        if fire_load(&engine) {
+            page.sync(&engine);
+            if let Some(s) = js_session() { pull_control_values(&mut page, s); }
+        }
         // The visible document band, read AFTER the repaint clamped the scroll
         // offset. Without a canvas the band is everything, so an arriving
         // image always repaints — the conservative direction.
