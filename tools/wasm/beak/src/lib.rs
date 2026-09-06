@@ -1291,6 +1291,7 @@ fn nav_stylesheets_arrived(engine: &Engine) {
 /// images may start arriving.
 fn nav_finish(engine: &Engine) {
     decode_css();
+    log_font_faces(css_str());
     // Erst die Skripte einsammeln. Sind externe dabei, geht die Navigation in
     // eine dritte Stufe und endet erst danach — sonst waere die Seite fertig,
     // bevor ihre Skripte sie gebaut haben.
@@ -1790,6 +1791,37 @@ fn nav_sheets_arrived(engine: &Engine) {
         mark_dirty();
     }
     if !sheet_pump(engine) { nav_done(); }
+}
+
+/// Welche Schriften die Seite ueber `@font-face` mitbringt — und dass beak
+/// sie NICHT laedt.
+///
+/// **Eine Zeile gegen eine ganze Klasse von Raetseln.** Ohne sie zeigt eine
+/// Seite mit Symbolschrift Text, wo ein Symbol stehen soll — die
+/// Fritzbox-Oberflaeche malt „eye" neben das Kennwortfeld, weil ihr
+/// Auge-Symbol eine Ligatur in `FDS-Iconfont` ist. Das sieht nach einem
+/// Layoutfehler aus und ist keiner; es ist eine fehlende Schrift, und das
+/// gehoert gesagt statt gesucht.
+fn log_font_faces(css: &str) {
+    let mut names: Vec<&str> = Vec::new();
+    let mut rest = css;
+    while let Some(i) = rest.find("@font-face") {
+        rest = &rest[i + 10..];
+        let Some(open) = rest.find('{') else { break };
+        let Some(close) = rest[open..].find('}') else { break };
+        let block = &rest[open..open + close];
+        rest = &rest[open + close..];
+        let Some(f) = block.find("font-family") else { continue };
+        let after = &block[f + 11..];
+        let Some(c) = after.find(':') else { continue };
+        let val = after[c + 1..].split(';').next().unwrap_or("").trim()
+            .trim_matches(['"', '\'']).trim();
+        if !val.is_empty() && !names.contains(&val) && names.len() < 12 { names.push(val); }
+    }
+    if names.is_empty() { return }
+    log(&alloc::format!(
+        "[beak] @font-face nicht geladen ({}): {} — Text faellt auf die eingebaute Schrift zurueck",
+        names.len(), names.join(", ")));
 }
 
 /// Ein Stilblatt ANHAENGEN. Spaeter geholt heisst spaeter in der Kaskade, und
