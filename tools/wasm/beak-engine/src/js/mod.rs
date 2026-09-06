@@ -28,6 +28,7 @@ pub mod eval;
 pub mod json;
 pub mod modules;
 pub mod expr;
+pub mod fetch;
 pub mod generator;
 pub mod interp;
 pub mod lexer;

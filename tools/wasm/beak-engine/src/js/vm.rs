@@ -289,6 +289,12 @@ impl Vm {
                 if i.steps > i.max_steps {
                     return Err(i.throw_kind("RangeError", "step budget exhausted"));
                 }
+                // Und die Uhr — dieselbe Koernung wie im Baumlaeufer, sonst
+                // ist es eine andere Uhr. Siehe `Interp::check_deadline`:
+                // sie stand nur in `tick`, und der zaehlt nur eingebaute
+                // Schleifen. Genau die Rechnung, die Minuten dauert, kam
+                // deshalb nie an ihr vorbei.
+                if i.steps & 0xFFFF == 0 { i.check_deadline()?; }
             }
             match self.step(i, chunk, ip) {
                 Ok(Flow::Done(v)) => return Ok(Step::Done(v)),
@@ -1007,5 +1013,53 @@ impl IdxBuf {
     fn as_str(&self) -> &str {
         // SAFETY: nur ASCII-Ziffern geschrieben, also gueltiges UTF-8.
         unsafe { core::str::from_utf8_unchecked(&self.b[self.at..]) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    /// **Die Uhr des Wirts muss BEIDE Maschinen erreichen.**
+    ///
+    /// Bis 0.117.0 stand sie nur in `Interp::tick`, und `tick` ruft nur, wer
+    /// in einem EINGEBAUTEN schleift (`Array.prototype.*`, `JSON`, die
+    /// Iterator-Hilfen). Eine reine JS-Schleife lief an ihr vorbei: kein
+    /// Herzschlag, und das Zeitbudget war fuer genau den Fall unwirksam, fuer
+    /// den es gedacht ist. Am Geraet waren das vier Minuten Stillstand ohne
+    /// eine Zeile im Log.
+    ///
+    /// Der Test schleift deshalb OHNE eingebauten Aufruf. Mit einem darin
+    /// haette er auch vorher bestanden — und genau das ist die Falle, die die
+    /// Luecke so lange offen gehalten hat.
+    static CALLS: AtomicU32 = AtomicU32::new(0);
+    fn clock() -> bool {
+        CALLS.fetch_add(1, Ordering::Relaxed);
+        false // sofort abgelaufen: der Lauf muss hier enden
+    }
+
+    fn run(novm: bool) -> (bool, u32) {
+        CALLS.store(0, Ordering::Relaxed);
+        let mut i = super::Interp::new();
+        i.vm_off = novm;
+        i.deadline = Some(clock);
+        let src = "var x = 0; for (var k = 0; k < 400000; k++) { x = x + 1; }";
+        let prog = crate::js::parse(src, false).expect("parst");
+        let err = i.run_program(&prog).is_err();
+        (err, CALLS.load(Ordering::Relaxed))
+    }
+
+    #[test]
+    fn die_uhr_erreicht_die_befehlsmaschine() {
+        let (abgebrochen, gefragt) = run(false);
+        assert!(gefragt > 0, "die Uhr wurde nie gefragt");
+        assert!(abgebrochen, "der Lauf lief ueber die abgelaufene Uhr hinaus");
+    }
+
+    #[test]
+    fn die_uhr_erreicht_den_baumlaeufer() {
+        let (abgebrochen, gefragt) = run(true);
+        assert!(gefragt > 0, "die Uhr wurde nie gefragt");
+        assert!(abgebrochen, "der Lauf lief ueber die abgelaufene Uhr hinaus");
     }
 }

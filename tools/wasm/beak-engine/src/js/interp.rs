@@ -109,8 +109,17 @@ pub fn env_lookup(env: &Rc<RefCell<Env>>, name: &str) -> Option<Rc<RefCell<Env>>
 /// auch — ein Modul, das seinen eigenen Namen wieder einfuehrt. Der Deckel
 /// ist deshalb kein Vorsichtsmass, sondern die Abbruchbedingung.
 pub fn env_deref(env: &Rc<RefCell<Env>>, name: &str) -> Option<(Rc<RefCell<Env>>, Rc<str>)> {
-    let mut e = env.clone();
-    let mut n: Rc<str> = Rc::from(name);
+    env_deref_from(env.clone(), Rc::from(name))
+}
+
+/// Wie `env_deref`, nur mit einem Namen, den der Rufer schon BESITZT.
+///
+/// Der gewoehnliche Lesepfad geht hierueber und alloziert damit nichts:
+/// `Rc::from(name)` kopiert die Zeichenkette auf den Haufen, und das je
+/// Variablenzugriff — fuer eine Kette, die in aller Regel gar nicht
+/// betreten wird.
+pub fn env_deref_from(mut e: Rc<RefCell<Env>>, mut n: Rc<str>)
+    -> Option<(Rc<RefCell<Env>>, Rc<str>)> {
     for _ in 0..64 {
         let next = {
             let b = e.borrow();
@@ -123,6 +132,38 @@ pub fn env_deref(env: &Rc<RefCell<Env>>, name: &str) -> Option<(Rc<RefCell<Env>>
         }
     }
     None
+}
+
+/// Was EIN Blick in EINE Umgebung ergeben hat.
+pub enum Hit {
+    /// Der Name steht hier, mit diesem Wert.
+    Val(Value),
+    /// Er steht hier, ist aber noch nicht initialisiert (zeitliche Totzone).
+    Dead,
+    /// Er kommt aus einem anderen Modul.
+    Import(Rc<RefCell<Env>>, Rc<str>),
+    /// Nicht hier — weiter beim Elter (`None` = die Kette ist zu Ende).
+    Up(Option<Rc<RefCell<Env>>>),
+}
+
+/// Eine Umgebung EINMAL fragen.
+///
+/// **Der Punkt ist, dass es einmal ist.** Der Lesepfad lief bis 0.117.0 als
+/// `env_lookup` + `env_deref` + zwei `vars.get` — derselbe Name bis zu
+/// viermal gehasht und mit `memcmp` verglichen, dazu ein `Rc<str>` auf dem
+/// Haufen. Im Profil der Fritzbox-Anmeldung waren das 6,1 % memcmp und
+/// 6,3 % hashbrown.
+pub fn env_peek(env: &Rc<RefCell<Env>>, n: &str) -> Hit {
+    let b = env.borrow();
+    if let Some(bd) = b.vars.get(n) {
+        return if bd.initialized { Hit::Val(bd.value.clone()) } else { Hit::Dead };
+    }
+    // Die Tabelle gibt es nur in Modulumgebungen; sonst ist das hier eine
+    // Nullpruefung.
+    if let Some(t) = b.imports.as_ref().and_then(|m| m.get(n)) {
+        return Hit::Import(t.0.clone(), t.1.clone());
+    }
+    Hit::Up(b.parent.clone())
 }
 
 /// Das Heimatobjekt der naechsten umschliessenden Methode.
@@ -228,6 +269,11 @@ pub struct Realm {
     pub tag_protos: HashMap<&'static str, Gc>,
     pub url_proto: Gc,
     pub url_params_proto: Gc,
+    /// `fetch` und was daran haengt — siehe `fetch.rs`.
+    pub response_proto: Gc,
+    pub headers_proto: Gc,
+    pub abort_signal_proto: Gc,
+    pub abort_ctrl_proto: Gc,
     pub prej_proto: Gc,
     pub text_encoder_proto: Gc,
     pub text_decoder_proto: Gc,
@@ -256,7 +302,9 @@ impl Realm {
             self.generator_func_proto.clone(), self.array_iter_proto.clone(),
             self.string_iter_proto.clone(), self.promise_proto.clone(),
             self.typed_proto.clone(), self.buffer_proto.clone(),
-            self.dataview_proto.clone(),
+            self.dataview_proto.clone(), self.response_proto.clone(),
+            self.headers_proto.clone(), self.abort_signal_proto.clone(),
+            self.abort_ctrl_proto.clone(),
             self.html_element_proto.clone(), self.svg_element_proto.clone(),
             self.fragment_proto.clone(), self.url_proto.clone(), self.url_params_proto.clone(),
         ]
@@ -361,6 +409,18 @@ pub struct Interp {
     /// oder `error` am `<link>`. Ohne diesen Weg wartet jede Seite, die ihr
     /// Blatt per Skript nachlaedt, fuer immer auf ein Ereignis, das nie kommt.
     pub pending_sheets: Vec<(u32, String)>,
+    /// Anfragen aus `fetch()`, deren Antwort noch aussteht. **Dasselbe Muster
+    /// wie `pending_sheets`:** die Engine holt nichts, sie legt die Anfrage
+    /// hin; der Wirt nimmt sie mit `take_pending_fetches`, laedt, und meldet
+    /// mit `fetch_done`/`fetch_failed` zurueck.
+    pub pending_fetches: Vec<super::fetch::PendingFetch>,
+    /// Wer auf welche Antwort wartet: `(id, Versprechen)`.
+    pub(crate) fetch_waiting: Vec<(u32, Gc)>,
+    /// Anfragen, die der Wirt ABBRECHEN soll. `controller.abort()` legt die
+    /// id hier ab — sonst waere der Abbruch nur eine Fahne im Baum und die
+    /// Verbindung liefe weiter.
+    pub aborted_fetches: Vec<u32>,
+    pub(crate) next_fetch_id: u32,
     /// Formulare, die die SEITE abschicken will (`form.submit()`), als
     /// `seq` des `<form>`. Der Wirt holt sie mit `take_submits` ab und
     /// navigiert — die Engine kann das nicht, sie kennt weder Adresse noch
@@ -624,9 +684,12 @@ impl Interp {
             Some(Value::Obj(o)) => Some(o), _ => None,
         };
         super::url::install(&mut realm);
+        super::fetch::install(&mut realm);
         Interp { realm, modules: HashMap::new(), module_fail: None, submits: Vec::new(),
                  deadline: None,
                  pending_sheets: Vec::new(),
+                 pending_fetches: Vec::new(), fetch_waiting: Vec::new(),
+                 aborted_fetches: Vec::new(), next_fetch_id: 1,
                  pending_rejections: Vec::new(), custom: Vec::new(), depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX,
                  fake_now: 0.0, epoch_ms: 0.0, doc: None, next_sym: 0, sym_registry: HashMap::new(),
                  #[cfg(feature = "strict-probe")]
@@ -852,6 +915,17 @@ impl Interp {
         core::mem::take(&mut self.pending_sheets)
     }
 
+    /// Was `fetch()` losschicken will. Der Wirt holt es ab; die Liste ist
+    /// danach leer.
+    pub fn take_pending_fetches(&mut self) -> Vec<super::fetch::PendingFetch> {
+        core::mem::take(&mut self.pending_fetches)
+    }
+
+    /// Welche Anfragen abgebrochen gehoeren.
+    pub fn take_aborted_fetches(&mut self) -> Vec<u32> {
+        core::mem::take(&mut self.aborted_fetches)
+    }
+
     pub fn take_submits(&mut self) -> Vec<u32> {
         core::mem::take(&mut self.submits)
     }
@@ -960,11 +1034,27 @@ impl Interp {
         if self.steps > self.max_steps {
             return Err(self.throw_kind("RangeError", "step budget exhausted"));
         }
-        if self.steps & 0xFFFF == 0 {
-            if let Some(f) = self.deadline {
-                if !f() {
-                    return Err(self.throw_kind("RangeError", "script ran too long"));
-                }
+        if self.steps & 0xFFFF == 0 { self.check_deadline()?; }
+        Ok(())
+    }
+
+    /// Die UHR des Wirts — alle 65 536 Schritte.
+    ///
+    /// **Sie stand bis 0.117.0 nur in `tick`, und `tick` ruft nur, wer in
+    /// einem EINGEBAUTEN schleift.** Reines JS kam nie vorbei: eine
+    /// Anmeldung, die ihren HMAC selbst rechnet, lief vier Minuten ohne
+    /// einen Herzschlag, und das Zeitbudget war fuer genau den Fall
+    /// unwirksam, fuer den es gedacht ist. Eine echte Endlosschleife hing
+    /// bis zum Schrittdeckel — bei 20 Mrd. Schritten anderthalb Stunden.
+    ///
+    /// Sie gehoert deshalb dorthin, wo BEIDE Maschinen ihre Schritte
+    /// zaehlen. Der heisse Pfad zahlt eine Maske und einen Sprung; der
+    /// Aufruf selbst kommt alle 65 536 Schritte, das sind rund 60 ms.
+    #[inline]
+    pub fn check_deadline(&mut self) -> C<()> {
+        if let Some(f) = self.deadline {
+            if !f() {
+                return Err(self.throw_kind("RangeError", "script ran too long"));
             }
         }
         Ok(())

@@ -131,6 +131,10 @@ unsafe extern "C" {
     /// The last collected response's header block, minus the status
     /// line. `Set-Cookie` repeats, so it can only be handed over raw.
     fn npk_http_response_headers(buf_ptr: i32, buf_max: i32) -> i32;
+    /// Der Statuscode der zuletzt eingesammelten Antwort. Fuer eine
+    /// Navigation ist er gleichgueltig — eine 404-Seite ist ein Dokument —,
+    /// fuer `fetch` ist er die halbe Auskunft: `response.ok` haengt daran.
+    fn npk_http_status() -> i32;
     /// Seconds since the epoch, UTC. `npk_ticks` cannot stand in: it restarts
     /// at every boot and a cookie's `Expires` is an absolute date.
     fn npk_unix_time() -> i64;
@@ -1673,6 +1677,124 @@ static mut FONT_WANT: Option<Vec<(String, u32, u16, bool)>> = None;
 const MAX_FONT_URLS: usize = 12;
 const FONT_CAP: usize = 4 * 1024 * 1024;
 
+/// Wieviele `fetch`-Anfragen gleichzeitig unterwegs sein duerfen.
+///
+/// Nicht erfunden, sondern die Grenze des Wirts: er haelt je Anfrage einen
+/// Antwortpuffer, und eine Seite, die zwanzig auf einmal stellt, band damit
+/// vierzig Megabyte. Was nicht drankommt, wartet auf die naechste Runde.
+const MAX_FETCH_INFLIGHT: usize = 6;
+const FETCH_CAP: usize = 2 * 1024 * 1024;
+
+/// Welche Anfrage der Engine auf welchem Griff des Wirts liegt.
+static mut FETCH_JOBS: Option<Vec<(u32, i32)>> = None;
+
+fn fetch_jobs() -> &'static mut Vec<(u32, i32)> {
+    unsafe {
+        let p = core::ptr::addr_of_mut!(FETCH_JOBS);
+        if (*p).is_none() { *p = Some(Vec::new()); }
+        (*p).as_mut().unwrap()
+    }
+}
+
+/// Der Kopfblock der zuletzt eingesammelten Antwort.
+fn response_headers() -> String {
+    let hp = core::ptr::addr_of_mut!(HDR_BUF) as *mut u8;
+    let hn = unsafe { npk_http_response_headers(hp as i32, HDR_CAP as i32) };
+    if hn <= 0 { return String::new() }
+    let bytes = unsafe { core::slice::from_raw_parts(hp as *const u8, hn as usize) };
+    core::str::from_utf8(bytes).unwrap_or("").to_string()
+}
+
+/// Eine Runde an den `fetch`-Anfragen der Seite.
+///
+/// **Die Engine holt nichts** — sie legt die Anfrage hin, das hier holt sie.
+/// Derselbe Weg wie `pending_sheets`/`sheet_done`, nur mit einem Griff JE
+/// ANFRAGE statt einem je Runde: `fetch` ist nebenlaeufig, eine Seite stellt
+/// mehrere und wartet auf alle.
+///
+/// Ein Abbruch ist hier ECHT: `controller.abort()` legt die id ab, und die
+/// Verbindung wird beendet. Nur die Fahne zu setzen hiesse, dass die Seite
+/// weiterlaedt, was niemand mehr liest.
+///
+/// Liefert true, wenn etwas ankam — dann lief Seitencode, und der Baum kann
+/// sich geaendert haben.
+fn pump_fetches() -> bool {
+    let Some(sess) = js_session() else { return false };
+    let mut landed = false;
+
+    for id in sess.interp.take_aborted_fetches() {
+        let jobs = fetch_jobs();
+        if let Some(k) = jobs.iter().position(|(n, _)| *n == id) {
+            unsafe { npk_http_cancel(jobs[k].1) };
+            jobs.remove(k);
+        }
+    }
+
+    let mut k = 0;
+    while k < fetch_jobs().len() {
+        let (id, h) = fetch_jobs()[k];
+        if unsafe { npk_http_poll(h) } == 0 { k += 1; continue }
+        fetch_jobs().remove(k);
+        let mut buf: Vec<u8> = Vec::with_capacity(FETCH_CAP);
+        let n = unsafe { npk_http_take(h, buf.as_mut_ptr() as i32, FETCH_CAP as i32) };
+        landed = true;
+        if n < 0 {
+            let why = last_error().map(|(a, _)| a).unwrap_or_else(|| String::from("request failed"));
+            beak_engine::js::fetch::fetch_failed(&mut sess.interp, id, &why);
+            continue;
+        }
+        unsafe { buf.set_len((n as usize).min(FETCH_CAP)) };
+        // Die Kekse gehoeren zu DIESER Antwort, und die Getter, die sie
+        // tragen, ueberschreibt das naechste `take`.
+        let from = fetched_from().unwrap_or_default();
+        file_cookies(&from);
+        let status = unsafe { npk_http_status() }.max(0) as u16;
+        let hdrs = response_headers();
+        let body = alloc::string::String::from_utf8_lossy(&buf).into_owned();
+        beak_engine::js::fetch::fetch_done(&mut sess.interp, id, status, &from, &hdrs, body);
+    }
+
+    let mut queued = sess.interp.take_pending_fetches();
+    let base = url_str().to_string();
+    let mut rest: Vec<beak_engine::js::fetch::PendingFetch> = Vec::new();
+    for f in queued.drain(..) {
+        if fetch_jobs().len() >= MAX_FETCH_INFLIGHT { rest.push(f); continue }
+        let url = resolve(&base, &f.url);
+        // Der Wirt trennt Kopfzeilen mit `\n`; die Engine haelt den rohen
+        // Block, wie er ueber die Leitung geht, also mit `\r\n`.
+        let mut hdrs = f.headers.replace("\r\n", "\n").trim_end_matches('\n').to_string();
+        // **Kekse fahren mit — bei GLEICHER Herkunft.** Regel K3 des Papiers,
+        // und die Engine laesst nur gleiche Herkunft ueberhaupt durch. Ohne
+        // sie kann keine angemeldete API-Schicht antworten; mit ihnen ueber
+        // eine Herkunftsgrenze waere es die mitreisende Vollmacht, vor der
+        // `BROWSER_FETCH_ORIGIN.md` §3.1 warnt.
+        let jar = cookies::header_for(&url, unsafe { npk_unix_time() });
+        if !jar.is_empty() {
+            if !hdrs.is_empty() { hdrs.push('\n'); }
+            hdrs.push_str("Cookie: ");
+            hdrs.push_str(&jar);
+        }
+        let body = f.body.clone().unwrap_or_default();
+        let h = unsafe {
+            npk_http_begin(
+                f.method.as_ptr() as i32, f.method.len() as i32,
+                url.as_ptr() as i32, url.len() as i32,
+                hdrs.as_ptr() as i32, hdrs.len() as i32,
+                body.as_ptr() as i32, body.len() as i32,
+                FETCH_CAP as i32)
+        };
+        if h < 0 {
+            beak_engine::js::fetch::fetch_failed(&mut sess.interp, f.id, "no handle");
+            landed = true;
+        } else {
+            fetch_jobs().push((f.id, h));
+        }
+    }
+    for f in rest { sess.interp.pending_fetches.push(f); }
+
+    landed
+}
+
 /// Eine Runde an den Schriften der Seite. Liefert true, wenn etwas ankam —
 /// dann muss neu ausgelegt werden, denn jede Breite aendert sich.
 fn pump_fonts(engine: &Engine) -> bool {
@@ -1893,15 +2015,19 @@ fn nav_sheets_arrived(engine: &Engine) {
     if !sheet_pump(engine) { nav_done(); }
 }
 
-/// Welche Schriften die Seite ueber `@font-face` mitbringt — und dass beak
-/// sie NICHT laedt.
+/// Welche Schriften die Seite ueber `@font-face` mitbringt.
 ///
-/// **Eine Zeile gegen eine ganze Klasse von Raetseln.** Ohne sie zeigt eine
-/// Seite mit Symbolschrift Text, wo ein Symbol stehen soll — die
-/// Fritzbox-Oberflaeche malt „eye" neben das Kennwortfeld, weil ihr
-/// Auge-Symbol eine Ligatur in `FDS-Iconfont` ist. Das sieht nach einem
-/// Layoutfehler aus und ist keiner; es ist eine fehlende Schrift, und das
-/// gehoert gesagt statt gesucht.
+/// **Die Zeile stand hier aus der Zeit VOR `@font-face`** und sagte
+/// unbedingt „nicht geladen" — auch nachdem 0.104.0 WOFF2 samt Brotli
+/// gebaut hatte. Am Geraet las sich das als Fehler, waehrend zehn Zeilen
+/// spaeter `Schriften: 5 geladen, 0 gescheitert` stand: dieselben drei
+/// Familien, alle da. Eine Diagnose von damals ist keine Messung von heute
+/// ([[feedback_the_named_gap_may_not_be_the_gap]]).
+///
+/// Sie laeuft VOR dem Holen, also kann sie ueber Erfolg gar nichts wissen.
+/// Was sie sagen darf, ist was die Seite VERLANGT; das Urteil kommt aus
+/// `pump_fonts` — dort steht je Datei `FEHLT` oder `NICHT LESBAR`, und
+/// darunter die Summe.
 fn log_font_faces(css: &str) {
     let mut names: Vec<&str> = Vec::new();
     let mut rest = css;
@@ -1919,9 +2045,8 @@ fn log_font_faces(css: &str) {
         if !val.is_empty() && !names.contains(&val) && names.len() < 12 { names.push(val); }
     }
     if names.is_empty() { return }
-    log(&alloc::format!(
-        "[beak] @font-face nicht geladen ({}): {} — Text faellt auf die eingebaute Schrift zurueck",
-        names.len(), names.join(", ")));
+    log(&alloc::format!("[beak] @font-face: {} Familien verlangt ({}) — werden geholt",
+                        names.len(), names.join(", ")));
 }
 
 /// Ein Stilblatt ANHAENGEN. Spaeter geholt heisst spaeter in der Kaskade, und
@@ -3969,6 +4094,22 @@ pub extern "C" fn _start() {
         if pump_fonts(&engine) {
             bump_content_gen("font");
             mark_dirty();
+        }
+        // Was `fetch()` bestellt hat. Kommt eine Antwort an, lief danach
+        // Seitencode — und der darf den Baum umgebaut haben.
+        if pump_fetches() {
+            if let Some(s) = js_session() {
+                let n = s.interp.run_timers();
+                let _ = n;
+                drain_console(s);
+                if s.interp.doc.as_ref().is_some_and(|d| d.dirty) {
+                    if let Some(d) = s.interp.doc.as_mut() {
+                        engine.set_scripted_dom(Some(d.to_dom()));
+                    }
+                    bump_content_gen("fetch");
+                    mark_dirty();
+                }
+            }
         }
         // JETZT steht die Geometrie — `load` darf fallen.
         if fire_load(&engine, &page) {
