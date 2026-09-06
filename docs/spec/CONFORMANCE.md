@@ -22,22 +22,20 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-09-05, beak 0.96.0 — the BLESSED baseline)
+### Current number (measured 2026-09-06, beak 0.115.0)
 
 ```
-4476 pass / 1163 fail / 147 inconclusive   (of 5786 vendored reftests)
-= 79.4 % of the conclusive 5639
+4481 pass / 1166 fail / 139 inconclusive   (of 5786 vendored reftests)
+= 79.4 % of the conclusive 5647
 ```
 
-**A live run at 0.114.0 says 4477 / 1170 / 139 — and the baseline is NOT
-re-blessed.** Two of the differences are LOSSES that shipped in 0.109.0
-(`css-flexbox/flexbox-definite-sizes-001` and `-003`: a flex item with
-`min-height: 100%` paints nothing at all now). Blessing would cement them into
-the denominator `tests/vehicles.py` derives, so the numbers below stay on the
-0.96.0 baseline until that is fixed — see
-`memory/project_beak_flex_min_height_regression.md`. The eight tests that left
-INCONCLUSIVE in 0.114.0 are gradients: a reference that painted nothing now
-paints, which makes the test decidable rather than better.
+Moved +5 / −0 against the 0.96.0 baseline, which is now re-blessed: three
+gradient/background tests, and the two `css-flexbox/flexbox-definite-sizes`
+losses that had shipped in 0.109.0 are back — a flex container's cross size is
+established by `min-height`/`max-height` too, not only by `height`. Eight
+tests also left INCONCLUSIVE when gradients started painting: a reference that
+painted nothing now paints, which makes the test decidable rather than
+better.
 
 **Two denominators, and the second one is the honest one.** 447 of the 1163
 failures are tests for specs no page on the web runs — counted by CONTENT, not
@@ -51,8 +49,8 @@ by filename, because the filename does not say so
 | `display: run-in` | 35 | dropped from CSS 2.1 by every engine |
 | `subgrid` | 18 | |
 
-Against the corpus that a real page can actually exercise — 5192 tests —
-the number is **4476 / 5192 = 86.2 %**, with **716 real failures left**. Both
+Against the corpus that a real page can actually exercise — 5200 tests —
+the number is **4481 / 5200 = 86.2 %**, with **719 real failures left**. Both
 are worth tracking: the raw one never lies about the suite, and the second one
 is the one that predicts what a page looks like. Neither is allowed to move
 without a measured run.

@@ -2576,6 +2576,32 @@ mod tests {
         assert_eq!(dump_ops(&lay), dump_ops(&fresh), "neu gemalt != neu ausgelegt");
     }
 
+    /// **Derselbe Vergleich, aber mit einem Kasten, der einen HINTERGRUND
+    /// hat.** Der wird UNTER den schon gemalten Inhalt geschoben, also vor
+    /// jedes Feld darin — und die notierte Befehlsspanne des Feldes blieb
+    /// dabei stehen. Der Schnellweg ersetzte danach fremde Befehle: getippter
+    /// Text lag unter dem alten Kasten (unsichtbar), und der Text daneben
+    /// rutschte in der Malreihenfolge nach hinten. Am Geraet sah das aus wie
+    /// „das Feld zeigt erst beim Verlassen etwas an und blendet dabei den
+    /// Text daneben weg".
+    ///
+    /// Ein Verlauf am Vorfahren macht es schlimmer (ein Befehl mehr je
+    /// Kasten), deshalb steht er hier mit drin.
+    #[test]
+    fn a_background_above_the_control_does_not_move_its_op_range() {
+        let html = "<style>body{margin:0}                    .card{background:#eee;background-image:linear-gradient(90deg,#fff,#eee);padding:8px}                    .row{background:#ddd;padding:4px}input{width:200px}</style>                    <div class=card><span>Beschriftung</span>                    <div class=row><input id=q><button id=b>Los</button></div>                    <p>und danach</p></div>";
+        let eng = Engine::new();
+        let mut state = crate::forms::FormState::default();
+        let mut lay = eng.layout_forms(html, "", 400, &state);
+        let seq = lay.controls.first().map(|c| c.seq).expect("ein Feld");
+        state.focus = Some(seq);
+        state.set_value(seq, alloc::string::String::from("Hallo"));
+        state.caret = 5;
+        assert!(eng.repaint_controls(&mut lay, &state), "Schnellweg: {}", eng.repaint_bail());
+        let fresh = eng.layout_forms(html, "", 400, &state);
+        assert_eq!(dump_ops(&lay), dump_ops(&fresh), "neu gemalt != neu ausgelegt");
+    }
+
     /// Und wenn eine `:checked`-Regel Kaesten bewegen kann, gibt der Schnellweg
     /// auf, statt ein Menue zu, das sich haette oeffnen muessen.
     #[test]

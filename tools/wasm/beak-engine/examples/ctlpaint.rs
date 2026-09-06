@@ -1,16 +1,18 @@
-//! Die GANZE Skriptrunde einer Seite host-seitig fahren — in EINER Sitzung,
-//! in Dokumentreihenfolge, mit demselben Modul-Rueckfall wie beak.
+//! Der SCHNELLWEG beim Tippen, gegen ein volles Auslegen gehalten.
 //!
-//! `jsrun` faehrt eine Datei allein, und das beantwortet die falsche Frage:
-//! am Geraet teilen sich alle Skripte einen globalen Bereich, und ein Skript,
-//! das allein `x is not defined` wirft, laeuft in der Kette sauber. Genau so
-//! ist die Fritzbox-Anmeldeseite zuerst falsch gelesen worden.
+//! `repaint_controls` ersetzt die Befehle EINES Steuerelements an Ort und
+//! Stelle. Stimmt seine Spanne nicht, frisst die Ersetzung den Nachbarn — und
+//! am Geraet sieht das aus wie „der Text daneben wird ausgeblendet".
 //!
-//!   cargo run --release --example pagerun -- seite.html verzeichnis/
+//! Gefahren wird die Reihenfolge des WIRTS, nicht eine zweite:
+//!   1. auslegen, wie die Seite ankommt (leerer Zustand)
+//!   2. in ein Feld tippen und den Fokus setzen
+//!   3. `repaint_controls` — der Weg jedes Tastendrucks
+//!   4. dasselbe noch einmal GANZ auslegen
+//!   5. beide Befehlslisten Zeile fuer Zeile vergleichen
 //!
-//! Die externen Skripte werden NICHT geholt — sie werden im Verzeichnis unter
-//! dem letzten Pfadbestandteil ihrer `src` erwartet (`curl` legt sie so ab).
-//! Fehlt eine Datei, sagt der Lauf das, statt sie still zu ueberspringen.
+//!   URL=… W=1605 CTL=<id> TEXT=abc cargo run --release --example ctlpaint -- seite.html dir/
+
 use beak_engine::js::dombind::ScriptRef;
 
 fn main() {
@@ -206,50 +208,131 @@ fn main() {
             }
         }
     }
-    // `RENDER=<datei.bmp>` malt die Seite so, wie beak sie malt: der
-    // GESKRIPTETE Baum plus ALLE Stilblaetter, die im Baum stehen — die aus
-    // dem Quelltext und die, die Skripte nachgelegt haben, in Baumreihenfolge.
-    // Das ist der einzige Weg, „schaut falsch aus" in etwas Nachpruefbares zu
-    // verwandeln ([[feedback_trust_the_pixels_not_the_tool]]).
-    if let Ok(out) = std::env::var("RENDER") {
-        let Some(dom) = sess.interp.doc.as_mut().map(|d| d.to_dom()) else { return };
-        let mut css = String::new();
-        let mut sheets = 0;
-        collect_links(dom.body(), &dir, &mut css, &mut sheets);
-        // `<head>` steht nicht unter `body()` — beide Seiten des Baums.
-        collect_links(&dom.root, &dir, &mut css, &mut sheets);
-        let width: u32 = std::env::var("W").ok().and_then(|w| w.parse().ok()).unwrap_or(1902);
-        use beak_engine::layout::{Rgb, Theme};
-        let mut eng = beak_engine::Engine::new();
-        eng.set_theme(Theme { bg: Rgb(255,255,255), text: Rgb(33,37,41), heading: Rgb(33,37,41),
-                              link: Rgb(13,110,253), muted: Rgb(108,117,125), rule: Rgb(222,226,230) });
-        // `H=` ist keine Kosmetik: `vh` und `min-height:100vh` haengen daran,
-        // und eine Seite, die ihr Fenster fuellt, liegt sonst 225 px zu hoch.
-        eng.set_viewport_h(std::env::var("H").ok().and_then(|v| v.parse().ok()).unwrap_or(993));
-        eng.set_scripted_dom(Some(dom));
-        let mut lay = eng.layout_ext(&html, &css, width);
-        for _ in 0..4 {
-            let want = eng.take_pending_fonts();
-            if want.is_empty() { break }
-            for (url, family, weight, italic) in want {
-                let u = resolve_path(&format!("{}/", origin()), &url);
-                if let Ok(b) = std::fs::read(local(&dir, &u)) {
-                    let _ = eng.add_font(family, weight, italic, &b);
-                }
-            }
-            lay = eng.layout_ext(&html, &css, width);
+
+    // ── Der Vergleich ──────────────────────────────────────────────────────
+    let Some(dom) = sess.interp.doc.as_mut().map(|d| d.to_dom()) else { return };
+    let dom2 = sess.interp.doc.as_mut().map(|d| d.to_dom()).unwrap();
+    let mut css = String::new();
+    let mut sheets = 0;
+    collect_links(dom.body(), &dir, &mut css, &mut sheets);
+    collect_links(&dom.root, &dir, &mut css, &mut sheets);
+    let width: u32 = std::env::var("W").ok().and_then(|w| w.parse().ok()).unwrap_or(1902);
+    use beak_engine::layout::{Rgb, Theme};
+    let mut eng = beak_engine::Engine::new();
+    eng.set_theme(Theme { bg: Rgb(255,255,255), text: Rgb(33,37,41), heading: Rgb(33,37,41),
+                  link: Rgb(13,110,253), muted: Rgb(108,117,125), rule: Rgb(222,226,230) });
+    // `H=` ist keine Kosmetik: `vh` und `min-height:100vh` haengen daran,
+    // und eine Seite, die ihr Fenster fuellt, liegt sonst 225 px zu hoch.
+    eng.set_viewport_h(std::env::var("H").ok().and_then(|v| v.parse().ok()).unwrap_or(993));
+    eng.set_scripted_dom(Some(dom2));
+    let empty = beak_engine::forms::FormState::default();
+    let mut lay = eng.layout_forms(&html, &css, width, &empty);
+    for _ in 0..4 {
+        let want = eng.take_pending_fonts();
+        if want.is_empty() { break }
+        for (url, family, weight, italic) in want {
+            let u = resolve_path(&format!("{}/", origin()), &url);
+            if let Ok(b) = std::fs::read(local(&dir, &u)) { let _ = eng.add_font(family, weight, italic, &b); }
         }
-        println!("  Schriften der Seite: {}", eng.web_font_count());
-        let h = lay.height.clamp(1, 20000);
-        let mut buf = vec![0u8; (width * h * 4) as usize];
-        eng.paint(&lay, width, h, 0, &mut buf);
-        std::fs::write(&out, to_bmp(&buf, width, h)).expect("schreiben");
-        println!("RENDER {out}: {width}x{h}, {sheets} Blaetter ({} B CSS), {} Ops",
-                 css.len(), lay.ops.len());
+        lay = eng.layout_forms(&html, &css, width, &empty);
     }
-    let listeners = sess.interp.doc.as_ref().is_some_and(|d| d.has_listeners);
-    println!("\n{ran} gelaufen, {failed} gescheitert, {timers} Zeitgeber, {}",
-             if listeners { "Ereignisse SCHARF" } else { "keine Behandler" });
+    let forms = beak_engine::forms::collect(&dom);
+    let want_id = std::env::var("CTL").unwrap_or_default();
+    let text = std::env::var("TEXT").unwrap_or_else(|_| "abc".into());
+    let seq = match want_id.strip_prefix("seq:").and_then(|v| v.parse::<u32>().ok())
+        .or_else(|| find_seq(dom.body(), &want_id)) {
+        Some(s) => s,
+        None => { println!("CTL: kein Element mit id={want_id}; Steuerelemente:"); 
+                  for c in &forms.controls { println!("   seq={} {:?}", c.seq, c.kind); } return }
+    };
+    let mut state = beak_engine::forms::FormState::default();
+    state.focus = Some(seq);
+    state.set_value(seq, text.clone());
+    state.caret = text.len();
+
+    for (c, (seq, at, len)) in lay.controls.iter().zip(lay.control_spans()) {
+        println!("  seq={seq} {:?} {},{} {}x{} — Befehle {at}..{} ({len} Stueck)",
+                 c.kind, c.x, c.y, c.w, c.h, at + len);
+    }
+    // `STATE0=<wert>`: so, wie das Feld schon AUSGELEGT ist, bevor getippt
+    // wird. Damit laesst sich der zweite Tastendruck pruefen — der erste
+    // faellt bei einem Feld, das nichts malt, ohnehin auf ein Auslegen
+    // zurueck, und danach ist die Spanne nicht mehr leer.
+    if let Ok(v) = std::env::var("STATE0") {
+        let mut s0 = beak_engine::forms::FormState::default();
+        s0.focus = Some(seq);
+        s0.set_value(seq, v.clone());
+        s0.caret = v.len();
+        lay = eng.layout_forms(&html, &css, width, &s0);
+        println!("  (Ausgangslage: #{seq} = {v:?})");
+        for (c, (sq, at, len)) in lay.controls.iter().zip(lay.control_spans()) {
+            println!("  seq={sq} {:?} {},{} {}x{} — Befehle {at}..{} ({len} Stueck)",
+                     c.kind, c.x, c.y, c.w, c.h, at + len);
+        }
+    }
+    let before = dump_ops(&lay);
+    if std::env::var("FULL").is_ok() {
+        println!("\n── vorher ──");
+        for (i, o) in before.iter().enumerate() { println!("  [{i:2}] {o}"); }
+    }
+    let ok = eng.repaint_controls(&mut lay, &state);
+    let fast = dump_ops(&lay);
+    let fresh = dump_ops(&eng.layout_forms(&html, &css, width, &state));
+
+    if ok { println!("\nSchnellweg: gelaufen"); } else { println!("\nSchnellweg: ABGELEHNT ({})", eng.repaint_bail()); }
+    println!("Befehle: {} vorher, {} nach dem Neumalen, {} beim vollen Auslegen",
+             before.len(), fast.len(), fresh.len());
+    if std::env::var("FULL").is_ok() {
+        println!("\n── schnell ──");
+        for (i, o) in fast.iter().enumerate() { println!("  [{i:2}] {o}"); }
+        println!("\n── ausgelegt ──");
+        for (i, o) in fresh.iter().enumerate() { println!("  [{i:2}] {o}"); }
+    }
+    if fast == fresh { println!("\n✓ Schnellweg == volles Auslegen"); return }
+    println!("\n✗ Sie gehen auseinander:\n");
+    let n = fast.len().max(fresh.len());
+    let mut shown = 0;
+    for i in 0..n {
+        let a = fast.get(i).map(|s| s.as_str()).unwrap_or("—");
+        let b = fresh.get(i).map(|s| s.as_str()).unwrap_or("—");
+        if a == b { continue }
+        println!("  [{i}]\n     schnell: {a}\n     ausgelegt: {b}");
+        shown += 1;
+        if shown >= 25 { println!("  … abgeschnitten"); break }
+    }
+    // Was der Schnellweg VERLOREN hat, egal an welcher Stelle.
+    let missing: Vec<&String> = fresh.iter().filter(|o| !fast.contains(o)).collect();
+    let extra: Vec<&String> = fast.iter().filter(|o| !fresh.contains(o)).collect();
+    if !missing.is_empty() {
+        println!("\n  NUR im ausgelegten Bild ({}):", missing.len());
+        for m in missing.iter().take(12) { println!("     {m}"); }
+    }
+    if !extra.is_empty() {
+        println!("\n  NUR im schnell gemalten ({}):", extra.len());
+        for m in extra.iter().take(12) { println!("     {m}"); }
+    }
+}
+
+fn dump_ops(l: &beak_engine::layout::Layout) -> Vec<String> {
+    use beak_engine::layout::DrawOp;
+    use std::fmt::Write as _;
+    let mut v = Vec::new();
+    for o in &l.ops {
+        let mut s = String::new();
+        match o {
+            DrawOp::Text { x, y, size, color, text, .. } =>
+                { let _ = write!(s, "T {x},{y} {size:.1} {color:?} {text:?}"); }
+            DrawOp::Rect { x, y, w, h, color } => { let _ = write!(s, "R {x},{y} {w}x{h} {color:?}"); }
+            DrawOp::RoundRect { x, y, w, h, color, ring, .. } =>
+                { let _ = write!(s, "Q {x},{y} {w}x{h} {color:?} ring={ring:.1}"); }
+            DrawOp::Shadow { x, y, w, h, .. } => { let _ = write!(s, "S {x},{y} {w}x{h}"); }
+            DrawOp::Image { x, y, w, h, src, .. } => { let _ = write!(s, "I {x},{y} {w}x{h} {src}"); }
+            DrawOp::BgImage { x, y, w, h, key, .. } => { let _ = write!(s, "B {x},{y} {w}x{h} {key}"); }
+            DrawOp::Gradient { x, y, w, h, .. } => { let _ = write!(s, "G {x},{y} {w}x{h}"); }
+        }
+        v.push(s);
+    }
+    v
 }
 
 fn pos(src: &str, at: usize) -> String {
@@ -430,11 +513,6 @@ fn feed_geometry(sess: &mut beak_engine::js::Session, html: &str, dir: &str) {
     let mut eng = beak_engine::Engine::new();
     eng.set_theme(Theme { bg: Rgb(255,255,255), text: Rgb(33,37,41), heading: Rgb(33,37,41),
                           link: Rgb(13,110,253), muted: Rgb(108,117,125), rule: Rgb(222,226,230) });
-    // `H=` gehoert zur MESSUNG, nicht zur Kosmetik: `vh` und
-    // `min-height:100vh` haengen daran. Mit der Vorgabe 600 statt der echten
-    // Fensterhoehe lag die ganze Fritzbox-Seite 225 px zu hoch, und der
-    // Vergleich mit Chromium meldete 26 Abweichungen, die es nicht gibt.
-    eng.set_viewport_h(std::env::var("H").ok().and_then(|v| v.parse().ok()).unwrap_or(993));
     // Ohne diese Zeile zeichnet das Layout gar keine Element-Kaesten auf, und
     // `element_rects()` ist leer — derselbe Schalter, den der Wirt setzt,
     // sobald eine Seite Skripte faehrt.

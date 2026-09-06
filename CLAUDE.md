@@ -48,7 +48,7 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-06 · beak 0.114.0 · Kernel 0.326.0** (Rest: `git log`)
+**Stand 2026-09-06 · beak 0.115.0 · Kernel 0.326.0** (Rest: `git log`)
 
 Zwei Fäden laufen parallel.
 
@@ -57,6 +57,19 @@ Ligatur; fontdue läuft mit `load_substitutions: false`, also ist `fos-icon`
 1 px statt 24 — kein Schriftfehler, ein GSUB-Fehler. Danach: `body` 600 statt
 937 (die Seite hält das Fenster auf). Stand:
 `memory/project_beak_web_app_stack.md`.
+
+**0.115.0 hat drei Fehler geschlossen, die alle am Gerät sichtbar waren.**
+Ein Feld zeigte Getipptes erst beim Verlassen an und blendete dabei den Text
+daneben weg — der Schnellweg beim Tippen ersetzte die falschen Zeichenbefehle,
+weil die notierte Spanne eines Steuerelements an DREI Stellen verschoben
+wurde, ohne mitgezogen zu werden. Ein Riegel rechnet die Spanne jetzt nach und
+legt lieber aus, als fremde Befehle zu überschreiben. Zweitens: die Quer-Größe
+eines Flex-Kastens steht auch fest, wenn sie aus `min-height`/`max-height`
+kommt — damit sitzt die Fritzbox-Anmeldung mittig statt oben zu kleben, und
+die zwei WPT-Verluste aus 0.109.0 sind zurück. Drittens zentriert
+`margin: auto` jetzt auch ein blockweites Steuerelement. **WPT 4477 -> 4481,
++5/−0, Baseline neu gesegnet.** Kastengeometrie gegen Chromium:
+`memory/project_beak_render_oracle.md`.
 
 **Farbverläufe sind seit 0.114.0 gebaut** — linear/radial, je auch
 `repeating-`, mit dem Winkel, den der KASTEN einer Ecke vorgibt, Kachelung
