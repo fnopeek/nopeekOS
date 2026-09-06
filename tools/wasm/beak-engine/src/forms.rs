@@ -61,6 +61,15 @@ pub struct Control {
     pub form: Option<usize>,
     /// `<select>` choices as (value, label).
     pub options: Vec<(String, String)>,
+    /// Was auf dem Bedienelement STEHT — der Text eines `<button>`, das
+    /// `value` eines `<input type=submit>`.
+    ///
+    /// Getrennt von `default_value`, weil es etwas anderes ist: der Text
+    /// eines `<button>` ist NICHT sein Wert (HTML §4.10.6). Gebraucht wird er
+    /// zum Hinsehen — Googles Einwilligungsseite hat vier Formulare auf
+    /// dieselbe Adresse, und ohne die Beschriftung sind „Alle ablehnen" und
+    /// „Alle akzeptieren" im Log nicht zu unterscheiden.
+    pub label: String,
 }
 
 pub struct FormDef {
@@ -205,10 +214,15 @@ fn control_of(e: &Element, kind: ControlKind, form: Option<usize>) -> Control {
         // both hid the icon and submitted a value the page never asked for.
         default_value = "Absenden".to_string();
     }
+    // Die Beschriftung: bei `<button>` der Text, bei `<input>` sein `value`.
+    let mut label = if e.tag == "button" { text_of(e) } else { default_value.clone() };
+    if label.len() > 60 { label.truncate(60); }
+    let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
     Control {
         seq: e.seq,
         kind,
         name: e.attr("name").unwrap_or("").trim().to_string(),
+        label,
         default_value,
         default_checked: e.attr("checked").is_some(),
         placeholder: e.attr("placeholder").unwrap_or("").to_string(),
@@ -542,5 +556,36 @@ mod tests {
         let mut st = FormState::default();
         st.focus = Some(f.controls[0].seq);
         assert!(submit(&f, &st, None).is_none());
+    }
+
+    /// **Die Beschriftung ist nicht der Wert.** Der Text eines `<button>`
+    /// ist laut HTML §4.10.6 nicht sein `value`, und `collect` speichert ihn
+    /// deshalb getrennt.
+    ///
+    /// Gebraucht wird er zum Hinsehen: Googles Einwilligungsseite traegt vier
+    /// Formulare auf dieselbe Adresse, und im Log sahen sie alle gleich aus —
+    /// „Alle ablehnen" und „Alle akzeptieren" waren nicht zu unterscheiden.
+    /// Wer da blind das erste nimmt, wirft eine Muenze ueber eine
+    /// Entscheidung des Benutzers.
+    #[test]
+    fn ein_knopf_traegt_seine_beschriftung_getrennt_vom_wert() {
+        let f = collect(&crate::dom::parse(
+            "<form action='/save' method='post'><button value='0'>Alle ablehnen</button></form>\
+             <form action='/save' method='post'><button>Alle  akzeptieren</button></form>\
+             <form action='/q'><input type='submit' value='Los'></form>\
+             <form action='/r'><input type='submit'></form>",
+        ));
+        let b: Vec<(&str, &str)> = f.controls.iter().filter(|c| c.kind.is_submit())
+            .map(|c| (c.label.as_str(), c.default_value.as_str())).collect();
+        assert_eq!(b, [
+            // Text steht in `label`, das `value` bleibt das `value`.
+            ("Alle ablehnen", "0"),
+            // Mehrfache Leerzeichen werden zusammengezogen.
+            ("Alle akzeptieren", ""),
+            // Bei `<input>` ist die Beschriftung sein `value` …
+            ("Los", "Los"),
+            // … und ohne `value` die Vorgabe des Wirts.
+            ("Absenden", "Absenden"),
+        ]);
     }
 }
