@@ -152,6 +152,31 @@ impl Vm {
         }
     }
 
+    /// Einen FUNKTIONSRUMPF auf der Maschine fahren, wenn der Ruf NICHT von
+    /// ihr kommt.
+    ///
+    /// `Op::Call` in der Maschine legt einen Rahmen an und laeuft weiter —
+    /// aber jeder Aufruf, der von aussen kommt (aus einem eingebauten
+    /// Rueckruf, aus der Microtask-Schlange, aus einem Ereignisbehandler, aus
+    /// einem Generator), ging ueber `Interp::run_js_body` und damit auf den
+    /// BAUMLAEUFER. Und weil dessen Aufrufe wieder dort landen, blieb alles
+    /// darunter beim Baumlaeufer: die Fritzbox-Anmeldung fuhr 320 721
+    /// Schritte, davon 4 286 auf der Maschine.
+    ///
+    /// Es ist derselbe Chunk, den `Op::Call` benutzt haette — kein zweiter
+    /// Semantikpfad, nur derselbe von einem anderen Rufer aus erreicht.
+    pub fn run_function(i: &mut Interp, chunk: Rc<Chunk>, env: &Rc<RefCell<Env>>) -> C<Value> {
+        let mut vm = Vm::new();
+        vm.frames.push(Frame { chunk, ip: 0, envs: alloc::vec![env.clone()], base: 0,
+                               is_program: false, root: true,
+                               handlers: Vec::new(), iters: Vec::new() });
+        match vm.drive(i)? {
+            Step::Done(v) => Ok(v),
+            Step::Yield(_) => Err(i.throw_kind("TypeError", "yield outside a generator")),
+            Step::Await(_) => Err(i.throw_kind("TypeError", "await outside an async function")),
+        }
+    }
+
     /// Eine Maschine fuer einen GENERATOR- oder ASYNC-RUMPF: ein einziger
     /// Wurzelrahmen,
     /// noch nichts gelaufen. Die Umgebung hat `Interp::call_env` gebaut —
@@ -217,11 +242,26 @@ impl Vm {
     /// Die Schleife. Sie laeuft, bis der Wurzelrahmen zurueck ist oder ein
     /// `yield` sie anhaelt — und beim naechsten Aufruf genau dort weiter.
     pub fn drive(&mut self, i: &mut Interp) -> C<Step> {
+        // **Der Chunk wird GEHALTEN, nicht je Befehl neu geliehen.** Ein
+        // `Rc::clone` mit dem Freigeben danach sind zwei Zaehleroperationen —
+        // je BEFEHL, auf dem heissesten Pfad des Motors. Gewechselt wird er
+        // nur, wenn sich der Rahmen aendert, und das prueft ein
+        // Zeigervergleich.
+        let mut held: Option<(usize, Rc<Chunk>)> = None;
         loop {
-            let (chunk, ip) = {
+            let flen = self.frames.len();
+            let (ip, need) = {
                 let f = self.frames.last().unwrap();
-                (f.chunk.clone(), f.ip)
+                let need = match &held {
+                    Some((n, c)) => *n != flen || !Rc::ptr_eq(c, &f.chunk),
+                    None => true,
+                };
+                (f.ip, need)
             };
+            if need {
+                held = Some((flen, self.frames.last().unwrap().chunk.clone()));
+            }
+            let chunk: &Chunk = &held.as_ref().unwrap().1;
             if ip >= chunk.ops.len() {
                 return Ok(Step::Done(core::mem::replace(&mut self.completion, Value::Undefined)));
             }
@@ -243,13 +283,14 @@ impl Vm {
                 | Op::Yield | Op::Await | Op::ForInNext(_) | Op::SuperCall(_) => true,
                 _ => false,
             };
+            i.vm_ops += 1;
             if counts {
                 i.steps += 1;
                 if i.steps > i.max_steps {
                     return Err(i.throw_kind("RangeError", "step budget exhausted"));
                 }
             }
-            match self.step(i, &chunk, ip) {
+            match self.step(i, chunk, ip) {
                 Ok(Flow::Done(v)) => return Ok(Step::Done(v)),
                 Ok(Flow::Yield(v)) => return Ok(Step::Yield(v)),
                 Ok(Flow::Await(v)) => return Ok(Step::Await(v)),
@@ -372,13 +413,28 @@ impl Vm {
             Op::GetIndex => {
                 let key = self.pop();
                 let obj = self.pop();
-                // `to_prop_key`, NICHT `to_string`: ein Symbol ist ein
-                // Schluessel und keine Zeichenkette, und es zu einer zu machen
-                // hat `Symbol.iterator` & Co. ins Leere zeigen lassen — 35
-                // Tests, gefunden vom Diff gegen den Baumlaeufer.
-                let k = i.to_prop_key(&key)?;
-                let v = i.get(&obj, &k)?;
-                self.push(v);
+                // **Ein ganzzahliger Index geht ohne Haufen.** `a[i]` baute
+                // bisher aus `i` eine Zeichenkette AUF DEM HAUFEN (`Rc<str>`),
+                // gab sie an `get`, und `ta_read`/`array_index` lasen die Zahl
+                // sofort wieder heraus. Der Schluessel ist derselbe — er wird
+                // nur in einen Puffer auf dem Stapel geschrieben statt
+                // alloziert und wieder freigegeben. Auf einer Seite, die
+                // rechnet (SHA-256, Bildbearbeitung, ein Parser), ist das der
+                // haeufigste Befehl ueberhaupt.
+                if let Some(ix) = int_index(&key) {
+                    let b = IdxBuf::new(ix);
+                    let v = i.get(&obj, b.as_str())?;
+                    self.push(v);
+                } else {
+                    // `to_prop_key`, NICHT `to_string`: ein Symbol ist ein
+                    // Schluessel und keine Zeichenkette, und es zu einer zu
+                    // machen hat `Symbol.iterator` & Co. ins Leere zeigen
+                    // lassen — 35 Tests, gefunden vom Diff gegen den
+                    // Baumlaeufer.
+                    let k = i.to_prop_key(&key)?;
+                    let v = i.get(&obj, &k)?;
+                    self.push(v);
+                }
             }
             Op::SetProp(n) => {
                 let val = self.pop();
@@ -391,9 +447,14 @@ impl Vm {
                 let val = self.pop();
                 let key = self.pop();
                 let obj = self.pop();
-                let k = i.to_prop_key(&key)?;
                 let throw = super::interp::env_strict(&env);
-                i.set(&obj, &k, val.clone(), throw)?;
+                if let Some(ix) = int_index(&key) {
+                    let b = IdxBuf::new(ix);
+                    i.set(&obj, b.as_str(), val.clone(), throw)?;
+                } else {
+                    let k = i.to_prop_key(&key)?;
+                    i.set(&obj, &k, val.clone(), throw)?;
+                }
                 self.push(val);
             }
             Op::Call { argc, name } => {
@@ -898,5 +959,46 @@ impl Vm {
     fn take(&mut self, n: usize) -> Vec<Value> {
         let at = self.stack.len().saturating_sub(n);
         self.stack.split_off(at)
+    }
+}
+
+/// Ein Feldindex als Zahl, wenn der Schluessel einer ist.
+///
+/// Die Grenze ist die von `array_index`: `0 <= n < 2^32-1` und ganzzahlig.
+/// Genau in diesem Bereich ist die Zeichenkette einer Zahl in JS die schlichte
+/// Dezimaldarstellung, also derselbe Schluessel, den `to_string` gebaut haette.
+/// `-0` faellt mit hinein und wird zu `"0"` — was JS auch tut.
+#[inline]
+fn int_index(v: &Value) -> Option<u32> {
+    match v {
+        Value::Num(n) if *n >= 0.0 && *n < 4294967295.0 && libm::floor(*n) == *n => Some(*n as u32),
+        _ => None,
+    }
+}
+
+/// Zehn Ziffern auf dem STAPEL — die groesste Zahl in diesem Bereich hat
+/// zehn (`4294967294`).
+struct IdxBuf {
+    b: [u8; 10],
+    at: usize,
+}
+
+impl IdxBuf {
+    #[inline]
+    fn new(mut v: u32) -> IdxBuf {
+        let mut b = [0u8; 10];
+        let mut at = 10;
+        loop {
+            at -= 1;
+            b[at] = b'0' + (v % 10) as u8;
+            v /= 10;
+            if v == 0 { break }
+        }
+        IdxBuf { b, at }
+    }
+    #[inline]
+    fn as_str(&self) -> &str {
+        // SAFETY: nur ASCII-Ziffern geschrieben, also gueltiges UTF-8.
+        unsafe { core::str::from_utf8_unchecked(&self.b[self.at..]) }
     }
 }

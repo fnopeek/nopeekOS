@@ -25,6 +25,10 @@ fn main() {
     // Derselbe Deckel wie im Wirt — die Probe soll nicht an einer Grenze
     // scheitern, die es am Geraet nicht gibt.
     let mut sess = beak_engine::js::Session::new(20_000_000_000);
+    // `NOVM=1`: den Baumlaeufer erzwingen. Der Vergleich beantwortet die
+    // Frage, die kein Zaehler beantwortet — laeuft der heisse Code der Seite
+    // ueberhaupt auf der Befehlsmaschine?
+    if std::env::var("NOVM").is_ok() { sess.interp.vm_off = true; }
     sess.interp.set_document(beak_engine::js::dombind::Doc::from_dom(&dom));
     let media = beak_engine::css::Media::new(1902.0, false);
     let sheet = beak_engine::css::collect_all(&dom, "", media);
@@ -178,12 +182,16 @@ fn main() {
                 let mut n = 0;
                 for _ in 0..64 { let t = sess.interp.run_timers(); n += t; if t == 0 { break } }
                 println!("  Kosten: {} Schritte, {:?}", sess.interp.steps - s0, t0.elapsed());
+                println!("  Befehle: {} ({:.2} ns je Befehl)", sess.interp.vm_ops,
+                         t0.elapsed().as_nanos() as f64 / sess.interp.vm_ops.max(1) as f64);
                 println!("  Maschine: {} Programme gefahren, {} abgelehnt; Aufrufe {} (davon {} langsam, {} nativ)",
                          sess.interp.vm_ran, sess.interp.vm_declined,
                          sess.interp.vm_calls, sess.interp.vm_calls_slow, sess.interp.vm_calls_native);
                 let mut d: Vec<(&&'static str, &u64)> = sess.interp.func_declines.iter().collect();
                 d.sort_by_key(|(_, n)| core::cmp::Reverse(**n));
-                for (why, n) in d.iter().take(6) { println!("    Rumpf abgelehnt: {why} x{n}"); }
+                let tot: u64 = d.iter().map(|(_, n)| **n).sum();
+                println!("    Rumpfe abgelehnt: {tot} in {} Sorten", d.len());
+                for (why, n) in d.iter().take(8) { println!("      {why} x{n}"); }
                 println!("\nSUBMIT auf #{want} (seq {seq}): {}, {n} Zeitgeber",
                          if prevented { "abgefangen" } else { "durchgelassen" });
                 for l in &sess.interp.console[n0..] { println!("       | {l}"); }

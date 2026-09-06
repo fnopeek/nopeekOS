@@ -469,6 +469,10 @@ pub struct Interp {
     /// Aufrufe, die als RAHMEN liefen, und solche, die ueber den Rust-Stapel
     /// mussten. Die zweite Zahl ist das, was Stufe 4 (Anhalten) noch im Weg
     /// steht: was ueber Rust laeuft, kann nicht stehenbleiben.
+    /// Nur zum MESSEN: wie viele Befehle die Maschine wirklich gefahren hat.
+    /// Der Schrittzaehler zaehlt Anweisungen, nicht Befehle, und aus ihm laesst
+    /// sich keine ns-je-Befehl-Zahl bilden.
+    pub vm_ops: u64,
     pub vm_calls: u64,
     /// Eingebaute, gebundene, Getter — die haben keinen Rumpf aus Befehlen
     /// und werden nie einen haben. Sie gehoeren NICHT in denselben Nenner wie
@@ -630,7 +634,7 @@ impl Interp {
                  cookies: String::new(), cookie_sets: Vec::new(), style_ctx: None,
                  history_ops: Vec::new(), history_state: Value::Null, history_len: 1.0,
                  vm_ran: 0, vm_declined: 0, vm_decline: None, vm_off: false,
-                 func_chunks: HashMap::new(), func_declines: HashMap::new(), pending_labels: Vec::new(), vm_calls: 0, vm_calls_native: 0, vm_calls_slow: 0,
+                 func_chunks: HashMap::new(), func_declines: HashMap::new(), pending_labels: Vec::new(), vm_ops: 0, vm_calls: 0, vm_calls_native: 0, vm_calls_slow: 0,
                  geometry: None,
                  live_dom: core::cell::RefCell::new(None),
                  jobs: alloc::collections::VecDeque::new(),
@@ -1633,6 +1637,27 @@ impl Interp {
     /// den Ausgang einsammeln.
     pub fn run_js_body(&mut self, d: &Rc<FuncData>, this_val: Value, args: &[Value]) -> C<Value> {
         let env = self.call_env(d, this_val, args)?;
+        // **Der Rumpf gehoert auf die Maschine, auch wenn der Ruf nicht von
+        // ihr kommt.** Ein Aufruf aus einem eingebauten Rueckruf, aus der
+        // Microtask-Schlange oder aus einem Generator landete hier — und weil
+        // der Baumlaeufer seine eigenen Aufrufe wieder hierher schickt, blieb
+        // ALLES darunter bei ihm. Gemessen an der Fritzbox-Anmeldung: 320 721
+        // Schritte, davon 4 286 auf der Maschine.
+        //
+        // Generator und async bleiben aussen vor: ihre Rumpfe halten an, und
+        // dafuer gibt es `generator.rs` mit einer eigenen Maschine je Aufruf.
+        if !d.node.is_generator && !d.node.is_async {
+            if let Some(chunk) = self.func_chunk(&d.node) {
+                self.hoist_body(&d.node.body, &env)?;
+                let implicit = if d.class.is_some() { env_this(&env) } else { Value::Undefined };
+                return match super::vm::Vm::run_function(self, chunk, &env) {
+                    // Ein Konstruktor ohne `return` liefert sein `this`.
+                    Ok(Value::Undefined) => Ok(implicit),
+                    Ok(v) => Ok(v),
+                    Err(e) => Err(e),
+                };
+            }
+        }
         // Ein KONSTRUKTOR ohne `return` liefert sein `this` — und das kann
         // `super()` inzwischen umgehaengt haben. Bei einer Basisklasse ist es
         // dasselbe Objekt, das `construct` ohnehin nimmt; bei einer
