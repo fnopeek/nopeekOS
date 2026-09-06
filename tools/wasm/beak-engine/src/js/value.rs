@@ -565,6 +565,104 @@ pub enum ObjKind {
     /// Siehe `generator.rs` — und den Kopf von `vm.rs` fuer den Grund, warum
     /// es eine eigene ist und kein Rahmen in einer fremden.
     Generator(Rc<crate::js::generator::GenState>),
+    /// Der Inhalt einer `Map`/`Set`/`WeakMap`/`WeakSet`.
+    Collection(Rc<RefCell<CollData>>),
+}
+
+/// Ein Sammlungsschluessel, so wie SameValueZero ihn vergleicht.
+///
+/// **Warum eine eigene Darstellung.** Bis 0.103.0 lag ein Eintrag als
+/// Eigenschaft `@<Zeichenkette des Schluessels>` im Objekt. Das hat drei
+/// Dinge falsch gemacht, und alle drei sind an echtem Code aufgefallen: zwei
+/// verschiedene Objekte mit gleichem `toString` waren EIN Eintrag, `1` und
+/// `"1"` waren derselbe Schluessel, und schon das Nachschlagen RIEF das
+/// `toString` des Schluessels. core-js legt seinen internen Zustand in einer
+/// `WeakMap` ab, deren Schluessel Funktionen sind — der Aufruf ging in deren
+/// `Function.prototype.toString`, das core-js im selben Modul gerade ersetzt
+/// hatte, und von dort im Kreis, bis der Aufrufdeckel griff.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub enum CollKey {
+    Undefined,
+    Null,
+    Bool(bool),
+    /// Die Bits der Zahl — mit `-0` auf `+0` gelegt und JEDEM NaN auf
+    /// dasselbe Muster. Das ist der einzige Unterschied zwischen
+    /// SameValueZero und `Object.is`.
+    Num(u64),
+    Str(Rc<str>),
+    Sym(Rc<str>),
+    Big(String),
+    /// Die ADRESSE, nicht der Inhalt: zwei gleich aussehende Objekte sind
+    /// zwei Schluessel. Sie bleibt gueltig, weil `entries` den Schluessel
+    /// selbst festhaelt — die Sammlung haelt ihn also am Leben.
+    Obj(usize),
+}
+
+impl CollKey {
+    pub fn of(v: &Value) -> CollKey {
+        match v {
+            Value::Undefined => CollKey::Undefined,
+            Value::Null => CollKey::Null,
+            Value::Bool(b) => CollKey::Bool(*b),
+            Value::Num(n) => CollKey::Num(
+                if n.is_nan() { 0x7ff8_0000_0000_0000 }
+                else if *n == 0.0 { 0 }
+                else { n.to_bits() }),
+            Value::Str(s) => CollKey::Str(s.clone()),
+            Value::Sym(s) => CollKey::Sym(s.key.clone()),
+            Value::BigInt(b) => CollKey::Big(b.to_string_radix(10)),
+            Value::Obj(o) => CollKey::Obj(Rc::as_ptr(o) as *const () as usize),
+        }
+    }
+}
+
+/// Die Eintraege einer Sammlung.
+///
+/// **Weich, nicht schwach.** `WeakMap` haelt hier genauso fest wie `Map`. Ein
+/// echtes schwaches Halten braucht einen Sammler, und den gibt es nicht
+/// (siehe Modulkopf) — die Alternative waere ein Schluessel, der still
+/// verschwindet, und das waere schlimmer als einer, der zu lange lebt.
+#[derive(Default)]
+pub struct CollData {
+    /// Die Eintraege in EINFUEGEREIHENFOLGE. Geloescht heisst `None` statt
+    /// entfernt: `forEach` und die Iteratoren laufen ueber Indizes, und ein
+    /// Zusammenschieben wuerde sie mitten im Lauf verschieben — genau der
+    /// Fall, den die Spezifikation ausdruecklich regelt.
+    pub entries: Vec<Option<(Value, Value)>>,
+    /// Schluessel -> Index. Ohne ihn waere jedes `get` ein Durchlauf, und
+    /// core-js fragt seinen Zustand bei JEDEM Zugriff.
+    pub index: HashMap<CollKey, usize>,
+}
+
+impl CollData {
+    pub fn get(&self, k: &Value) -> Option<Value> {
+        let i = *self.index.get(&CollKey::of(k))?;
+        self.entries.get(i).and_then(|e| e.as_ref()).map(|(_, v)| v.clone())
+    }
+    pub fn has(&self, k: &Value) -> bool { self.index.contains_key(&CollKey::of(k)) }
+    /// Setzen. Ein vorhandener Schluessel behaelt seinen PLATZ — die
+    /// Reihenfolge richtet sich nach dem ersten Einfuegen.
+    pub fn set(&mut self, k: Value, v: Value) {
+        let ck = CollKey::of(&k);
+        if let Some(&i) = self.index.get(&ck) {
+            if let Some(slot) = self.entries.get_mut(i) { *slot = Some((k, v)); return; }
+        }
+        self.index.insert(ck, self.entries.len());
+        self.entries.push(Some((k, v)));
+    }
+    pub fn remove(&mut self, k: &Value) -> bool {
+        let Some(i) = self.index.remove(&CollKey::of(k)) else { return false };
+        if let Some(slot) = self.entries.get_mut(i) { *slot = None; }
+        true
+    }
+    pub fn clear(&mut self) { self.entries.clear(); self.index.clear(); }
+    pub fn len(&self) -> usize { self.index.len() }
+    pub fn is_empty(&self) -> bool { self.index.is_empty() }
+    /// Die lebenden Paare als Liste — die Momentaufnahme, aus der `keys`,
+    /// `values` und `entries` ihren Iterator bauen.
+    pub fn pairs(&self) -> Vec<(Value, Value)> {
+        self.entries.iter().flatten().cloned().collect()
+    }
 }
 
 pub struct Object {

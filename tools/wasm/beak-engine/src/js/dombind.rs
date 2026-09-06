@@ -474,8 +474,12 @@ impl Doc {
 /// Ein Skript der Seite: entweder sein Text oder die Adresse, unter der er
 /// steht.
 pub enum ScriptRef {
-    Inline(String),
-    External(String),
+    /// Quelltext und ob `type="module"` daransteht. Die Fahne gehoert
+    /// HIERHER und wird nicht spaeter geraten: ein Modul ohne `import` parst
+    /// auch als Skript, haette dann aber den falschen Bereich und das falsche
+    /// `this` — und zwar still.
+    Inline(String, bool),
+    External(String, bool),
 }
 
 /// ALLE Skripte der Seite, in Dokumentreihenfolge — eingebettete wie externe.
@@ -494,11 +498,13 @@ pub fn page_scripts(d: &Doc) -> Vec<ScriptRef> {
         let n = &d.nodes[id as usize];
         if &*n.tag != "script" { continue; }
         if !script_type_is_js(n) { continue; }
+        let module = n.attr("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("module"));
         match n.attr("src") {
-            Some(src) if !src.trim().is_empty() => out.push(ScriptRef::External(src.to_string())),
+            Some(src) if !src.trim().is_empty() =>
+                out.push(ScriptRef::External(src.to_string(), module)),
             _ => {
                 let text = d.text_of(id);
-                if !text.trim().is_empty() { out.push(ScriptRef::Inline(text)); }
+                if !text.trim().is_empty() { out.push(ScriptRef::Inline(text, module)); }
             }
         }
     }
@@ -2525,6 +2531,8 @@ pub fn install(realm: &mut Realm) {
         tag_protos.insert("svg", p);
     }
 
+    install_text_codec(realm);
+
     realm.node_proto = node_proto;
     realm.element_proto = element_proto;
     realm.text_proto = text_proto;
@@ -2954,5 +2962,182 @@ mod tests {
              console.log(e.style.color + '|' + e.getAttribute('style'));",
         );
         assert_eq!(out, ["red|color: red;"]);
+    }
+}
+
+/// Das interne Feld eines `TextDecoder`: verwirft eine ungueltige Folge
+/// still, oder wirft? NUL-praefigiert, also fuer jedes Skript unsichtbar.
+const TD_FATAL: &str = "\0!tdfatal";
+
+/// `TextEncoder` und `TextDecoder`.
+///
+/// **Nur UTF-8, und das ist keine Luecke.** Die Spezifikation laesst dem
+/// Encoder gar keine andere Wahl (`new TextEncoder("latin1")` ist trotzdem
+/// UTF-8), und der Decoder nimmt zwar Beschriftungen entgegen, aber jede
+/// Seite, die eine andere als UTF-8 braucht, braucht auch eine Tabelle, die
+/// hier nicht liegt. Eine fremde Beschriftung wird also angenommen und wie
+/// UTF-8 behandelt, statt zu werfen — der Fritzbox-Anmeldecode ruft
+/// `new TextEncoder("utf-8")`, und ein Wurf dort waere ein Fehler ueber
+/// nichts.
+fn install_text_codec(realm: &mut Realm) {
+    let fp = realm.function_proto.clone();
+    let op = realm.object_proto.clone();
+
+    // ── TextEncoder ──────────────────────────────────────────────────────
+    let enc_proto = new_obj(Some(op.clone()));
+    getter(&enc_proto, "encoding", |_, _, _| Ok(Value::str("utf-8")), &fp);
+    meth(&enc_proto, "encode", |i, _, a| {
+        let s = match a.first() {
+            None | Some(Value::Undefined) => Rc::from(""),
+            Some(v) => i.to_string(v)?,
+        };
+        Ok(bytes_to_u8(i, s.as_bytes()))
+    }, 1, &fp);
+    // `encodeInto` schreibt in eine bestehende Sicht und meldet, wie weit es
+    // gekommen ist. Abgeschnitten wird an einer ZEICHENgrenze — eine halbe
+    // Folge in den Puffer zu legen waere kaputtes UTF-8.
+    meth(&enc_proto, "encodeInto", |i, _, a| {
+        let s = match a.first() {
+            None | Some(Value::Undefined) => Rc::from(""),
+            Some(v) => i.to_string(v)?,
+        };
+        let Some(dst) = a.get(1).cloned() else { return i.type_err("encodeInto needs a target") };
+        let cap = view_len(&dst);
+        let mut written = 0usize;
+        let mut read = 0usize;
+        for c in s.chars() {
+            let n = c.len_utf8();
+            if written + n > cap { break }
+            written += n;
+            read += c.len_utf16();
+        }
+        let bytes = &s.as_bytes()[..written];
+        write_view(&dst, bytes);
+        let out = new_obj(Some(i.realm.object_proto.clone()));
+        out.borrow_mut().define("read", Prop::data(Value::Num(read as f64)));
+        out.borrow_mut().define("written", Prop::data(Value::Num(written as f64)));
+        Ok(Value::Obj(out))
+    }, 2, &fp);
+    let enc_ctor = native(Some(fp.clone()), |i, _, _| {
+        Ok(Value::Obj(new_obj(Some(i.realm.text_encoder_proto.clone()))))
+    }, "TextEncoder", 0, true);
+    enc_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(enc_proto.clone())));
+    enc_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(enc_ctor.clone())));
+    enc_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::frozen(Value::str("TextEncoder")));
+    realm.global.borrow_mut().define("TextEncoder", Prop::builtin(Value::Obj(enc_ctor)));
+    realm.text_encoder_proto = enc_proto;
+
+    // ── TextDecoder ──────────────────────────────────────────────────────
+    let dec_proto = new_obj(Some(op));
+    getter(&dec_proto, "encoding", |_, _, _| Ok(Value::str("utf-8")), &fp);
+    getter(&dec_proto, "fatal", |i, t, _| {
+        Ok(Value::Bool(matches!(i.get(&t, TD_FATAL)?, Value::Bool(true))))
+    }, &fp);
+    meth(&dec_proto, "decode", |i, t, a| {
+        let src = a.first().cloned().unwrap_or(Value::Undefined);
+        if matches!(src, Value::Undefined) { return Ok(Value::str("")); }
+        let bytes = read_view(&src);
+        match core::str::from_utf8(&bytes) {
+            Ok(s) => Ok(Value::str(s)),
+            Err(_) => {
+                if matches!(i.get(&t, TD_FATAL)?, Value::Bool(true)) {
+                    return i.type_err("The encoded data was not valid utf-8");
+                }
+                // Ohne `fatal` ersetzt die Spezifikation jede ungueltige
+                // Folge durch U+FFFD, statt zu werfen.
+                Ok(Value::string(lossy_utf8(&bytes)))
+            }
+        }
+    }, 1, &fp);
+    let dec_ctor = native(Some(fp.clone()), |i, _, a| {
+        let fatal = match a.get(1) {
+            Some(o @ Value::Obj(_)) => i.get(o, "fatal")?.truthy(),
+            _ => false,
+        };
+        let g = new_obj(Some(i.realm.text_decoder_proto.clone()));
+        g.borrow_mut().define(TD_FATAL, Prop::frozen(Value::Bool(fatal)));
+        Ok(Value::Obj(g))
+    }, "TextDecoder", 0, true);
+    dec_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(dec_proto.clone())));
+    dec_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(dec_ctor.clone())));
+    dec_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::frozen(Value::str("TextDecoder")));
+    realm.global.borrow_mut().define("TextDecoder", Prop::builtin(Value::Obj(dec_ctor)));
+    realm.text_decoder_proto = dec_proto;
+}
+
+/// Eine frische `Uint8Array` mit diesen Bytes.
+fn bytes_to_u8(i: &mut Interp, b: &[u8]) -> Value {
+    let v = i.new_typed(ElemKind::U8, b.len());
+    write_view(&v, b);
+    v
+}
+
+/// Die Bytes hinter einer Sicht ODER einem Puffer. Alles andere ist leer —
+/// `decode` bekommt in echtem Code nie etwas anderes.
+fn read_view(v: &Value) -> Vec<u8> {
+    let Value::Obj(o) = v else { return Vec::new() };
+    // Erst die Angaben herausholen, dann die Ausleihe fallen lassen: eine
+    // Sicht auf SICH SELBST gibt es nicht, aber `slice_of` leiht den Puffer
+    // erneut, und bei `ObjKind::Buffer` waere das dasselbe Objekt.
+    let what = match &o.borrow().kind {
+        ObjKind::Buffer(b) => return b.bytes.borrow().clone(),
+        ObjKind::TypedArray(td) => (td.buf.clone(), td.offset, td.len * td.kind.size()),
+        ObjKind::DataView(dv) => (dv.buf.clone(), dv.offset, dv.len),
+        _ => return Vec::new(),
+    };
+    slice_of(&what.0, what.1, what.2)
+}
+
+fn slice_of(buf: &Gc, off: usize, len: usize) -> Vec<u8> {
+    let ObjKind::Buffer(b) = &buf.borrow().kind else { return Vec::new() };
+    let all = b.bytes.borrow();
+    if off > all.len() { return Vec::new() }
+    all[off..(off + len).min(all.len())].to_vec()
+}
+
+/// Wieviele BYTES in die Sicht passen.
+fn view_len(v: &Value) -> usize {
+    let Value::Obj(o) = v else { return 0 };
+    match &o.borrow().kind {
+        ObjKind::TypedArray(td) => td.len * td.kind.size(),
+        ObjKind::DataView(dv) => dv.len,
+        ObjKind::Buffer(b) => b.bytes.borrow().len(),
+        _ => 0,
+    }
+}
+
+fn write_view(v: &Value, src: &[u8]) {
+    let Value::Obj(o) = v else { return };
+    let (buf, off, cap) = match &o.borrow().kind {
+        ObjKind::TypedArray(td) => (td.buf.clone(), td.offset, td.len * td.kind.size()),
+        ObjKind::DataView(dv) => (dv.buf.clone(), dv.offset, dv.len),
+        ObjKind::Buffer(_) => (o.clone(), 0, usize::MAX),
+        _ => return,
+    };
+    let ObjKind::Buffer(b) = &buf.borrow().kind else { return };
+    let mut all = b.bytes.borrow_mut();
+    let n = src.len().min(cap).min(all.len().saturating_sub(off));
+    all[off..off + n].copy_from_slice(&src[..n]);
+}
+
+/// UTF-8 mit U+FFFD fuer jede ungueltige Folge. `String::from_utf8_lossy`
+/// gibt es in `alloc` — aber nur mit `Cow`, und die Grenze ist hier
+/// uninteressant.
+fn lossy_utf8(b: &[u8]) -> String {
+    let mut out = String::with_capacity(b.len());
+    let mut rest = b;
+    loop {
+        match core::str::from_utf8(rest) {
+            Ok(s) => { out.push_str(s); return out }
+            Err(e) => {
+                let good = e.valid_up_to();
+                out.push_str(unsafe { core::str::from_utf8_unchecked(&rest[..good]) });
+                out.push('\u{FFFD}');
+                match e.error_len() {
+                    Some(n) => rest = &rest[good + n..],
+                    None => return out,
+                }
+            }
+        }
     }
 }

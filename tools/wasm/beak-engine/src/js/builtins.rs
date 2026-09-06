@@ -11,6 +11,7 @@ use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::vec;
+use core::cell::RefCell;
 use hashbrown::HashMap;
 
 use super::interp::*;
@@ -92,6 +93,9 @@ pub fn make_realm() -> Realm {
                     // jemand geloescht hat — dann ist er ein gewoehnliches
                     // Objekt, genau wie in jedem echten Motor.
                     ObjKind::Generator(_) => "Object",
+                    // Wie der Generator: `Map` und `Set` tragen ihren Namen
+                    // ueber `Symbol.toStringTag` auf ihrem Prototyp.
+                    ObjKind::Collection(_) => "Object",
                     ObjKind::Plain => "Object",
                 };
                 alloc::format!("[object {tag}]")
@@ -1618,63 +1622,56 @@ pub fn make_realm() -> Realm {
             o.borrow_mut().define(n, Prop::builtin(Value::Obj(g)));
         };
         d(&proto, "has", |i, t, a| {
-            this_coll(i, &t, $name)?;
-            let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-            let key = alloc::format!("@{k}");
-            Ok(Value::Bool(matches!(&t, Value::Obj(o) if o.borrow().has_own(&key))))
+            let c = this_coll(i, &t, $name)?;
+            let k = a.first().cloned().unwrap_or(Value::Undefined);
+            Ok(Value::Bool(c.borrow().has(&k)))
         }, 1);
         d(&proto, "get", |i, t, a| {
-            this_coll(i, &t, $name)?;
-            let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-            let key = alloc::format!("@{k}");
-            Ok(match i.get(&t, &key)? { Value::Undefined => Value::Undefined, v => v })
+            let c = this_coll(i, &t, $name)?;
+            let k = a.first().cloned().unwrap_or(Value::Undefined);
+            let v = c.borrow().get(&k);
+            Ok(v.unwrap_or(Value::Undefined))
         }, 1);
         d(&proto, "set", |i, t, a| {
-            this_coll(i, &t, $name)?;
-            let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+            let c = this_coll(i, &t, $name)?;
+            let k = norm_key(a.first().cloned().unwrap_or(Value::Undefined));
             let v = a.get(1).cloned().unwrap_or(Value::Undefined);
-            if let Value::Obj(o) = &t {
-                o.borrow_mut().define(&alloc::format!("@{k}"), Prop {
-                    value: Some(v), get: None, set: None,
-                    writable: true, enumerable: false, configurable: true });
-            }
+            c.borrow_mut().set(k, v);
             Ok(t)
         }, 2);
         d(&proto, "add", |i, t, a| {
-            this_coll(i, &t, $name)?;
-            let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-            if let Value::Obj(o) = &t {
-                o.borrow_mut().define(&alloc::format!("@{k}"), Prop {
-                    value: Some(Value::Str(k)), get: None, set: None,
-                    writable: true, enumerable: false, configurable: true });
-            }
+            let c = this_coll(i, &t, $name)?;
+            let k = norm_key(a.first().cloned().unwrap_or(Value::Undefined));
+            c.borrow_mut().set(k.clone(), k);
             Ok(t)
         }, 1);
         d(&proto, "delete", |i, t, a| {
-            this_coll(i, &t, $name)?;
-            let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-            let key = alloc::format!("@{k}");
-            Ok(Value::Bool(matches!(&t, Value::Obj(o) if o.borrow_mut().remove(&key))))
+            let c = this_coll(i, &t, $name)?;
+            let k = a.first().cloned().unwrap_or(Value::Undefined);
+            let r = c.borrow_mut().remove(&k);
+            Ok(Value::Bool(r))
         }, 1);
         d(&proto, "clear", |i, t, _| {
-            this_coll(i, &t, $name)?;
-            if let Value::Obj(o) = &t {
-                let ks = o.borrow().own_keys();
-                for k in ks { if k.starts_with('@') { o.borrow_mut().remove(&k); } }
-            }
+            let c = this_coll(i, &t, $name)?;
+            c.borrow_mut().clear();
             Ok(Value::Undefined)
         }, 0);
         d(&proto, "forEach", |i, t, a| {
-            this_coll(i, &t, $name)?;
+            let c = this_coll(i, &t, $name)?;
             let f = a.first().cloned().unwrap_or(Value::Undefined);
             if !i.is_callable(&f) { return i.type_err("callback is not a function"); }
-            let Value::Obj(o) = &t else { return Ok(Value::Undefined) };
-            let ks: Vec<Rc<str>> = o.borrow().own_keys().into_iter()
-                .filter(|k| k.starts_with('@')).collect();
-            for k in ks {
+            let this_arg = a.get(1).cloned().unwrap_or(Value::Undefined);
+            // Ueber den INDEX, nicht ueber eine Kopie: ein Behandler darf
+            // waehrend des Laufs einfuegen, und die Spezifikation sagt, dass
+            // das Neue noch besucht wird. Deshalb bleibt ein geloeschter
+            // Platz auch als Luecke stehen, statt die Liste zu verschieben.
+            let mut n = 0usize;
+            loop {
                 i.tick()?;
-                let v = i.get(&t, &k)?;
-                i.call(&f, Value::Undefined, &[v, Value::str(&k[1..]), t.clone()])?;
+                let Some(e) = c.borrow().entries.get(n).cloned() else { break };
+                n += 1;
+                let Some((k, v)) = e else { continue };
+                i.call(&f, this_arg.clone(), &[v, k, t.clone()])?;
             }
             Ok(Value::Undefined)
         }, 1);
@@ -1683,10 +1680,9 @@ pub fn make_realm() -> Realm {
         // und genau das schreibt die Spezifikation vor.
         //
         // Der Iterator laeuft ueber eine MOMENTAUFNAHME. Ein echter
-        // Map-Iterator sieht spaetere Eintraege noch; unsere Karte ist
-        // ohnehin die zeichenkettenbasierte Naeherung von oben, und eine
-        // Aufnahme ist die ehrlichere Naeherung als ein Index, der bei jedem
-        // `next` neu ueber die Schluesselliste laeuft.
+        // Map-Iterator sieht spaeter Eingefuegtes noch; das ist der eine
+        // Punkt, an dem diese Umsetzung noch von der Spezifikation abweicht,
+        // und er ist bewusst getrennt von der Frage der Schluesselidentitaet.
         d(&proto, "keys", |i, t, _| {
             this_coll(i, &t, $name)?; let v = coll_view(i, &t, 0)?; i.array_iter(v, 0) }, 0);
         d(&proto, "values", |i, t, _| {
@@ -1701,9 +1697,8 @@ pub fn make_realm() -> Realm {
         proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str($name)));
 
         let size = native(Some(function_proto.clone()), |i, t, _| {
-            this_coll(i, &t, $name)?;
-            let Value::Obj(o) = &t else { return Ok(Value::Num(0.0)) };
-            let n = o.borrow().own_keys().iter().filter(|k| k.starts_with('@')).count();
+            let c = this_coll(i, &t, $name)?;
+            let n = c.borrow().len();
             Ok(Value::Num(n as f64))
         }, "size", 0, false);
         proto.borrow_mut().define("size", Prop {
@@ -2927,6 +2922,7 @@ pub fn make_realm() -> Realm {
             string_iter_proto, promise_proto: ph(), date_proto: ph(), bigint_proto,
             iter_helper_proto: ph(), iter_wrap_proto: ph(), eval_fn: None,
             html_element_proto: ph(), svg_element_proto: ph(), fragment_proto: ph(),
+            text_encoder_proto: ph(), text_decoder_proto: ph(),
             tag_protos: HashMap::new(), url_proto: ph(), url_params_proto: ph(),
             ta_protos, typed_proto: ta_proto, buffer_proto: ab_proto,
             dataview_proto: dv_proto }
@@ -2976,16 +2972,12 @@ fn hist_url(i: &mut Interp, v: Option<&Value>) -> C<String> {
 /// Die Eintraege einer Map/eines Sets als Array. `kind`: 0 Schluessel,
 /// 1 Werte, 2 Paare.
 fn coll_view(i: &mut Interp, t: &Value, kind: u8) -> C<Value> {
-    let Value::Obj(o) = t else { return i.type_err("not a collection") };
-    let ks: Vec<Rc<str>> = o.borrow().own_keys().into_iter()
-        .filter(|k| k.starts_with('@')).collect();
-    let mut out = Vec::with_capacity(ks.len());
-    for k in ks {
+    let Some(c) = coll_of(t) else { return i.type_err("not a collection") };
+    let pairs = c.borrow().pairs();
+    let mut out = Vec::with_capacity(pairs.len());
+    for (k, v) in pairs {
         i.tick()?;
-        let key = Value::str(&k[1..]);
-        if kind == 0 { out.push(key); continue; }
-        let v = i.get(t, &k)?;
-        out.push(if kind == 1 { v } else { i.new_array(vec![key, v]) });
+        out.push(match kind { 0 => k, 1 => v, _ => i.new_array(vec![k, v]) });
     }
     Ok(i.new_array(out))
 }
@@ -2993,20 +2985,16 @@ fn coll_view(i: &mut Interp, t: &Value, kind: u8) -> C<Value> {
 fn coll_new(i: &mut Interp, name: &str, is_map: bool, a: &[Value]) -> C<Value> {
     let pv = i.get(&Value::Obj(i.realm.global.clone()), name)?;
     let proto = match i.get(&pv, "prototype")? { Value::Obj(p) => Some(p), _ => None };
-    let out = Value::Obj(new_obj(proto));
-    if let Value::Obj(o) = &out {
-        o.borrow_mut().define(COLL_KIND, Prop::frozen(Value::str(name)));
-    }
+    let data = Rc::new(RefCell::new(CollData::default()));
+    let g = new_kind(proto, ObjKind::Collection(data.clone()));
+    g.borrow_mut().define(COLL_KIND, Prop::frozen(Value::str(name)));
+    let out = Value::Obj(g);
     if let Some(src) = a.first() {
         if !matches!(src, Value::Undefined | Value::Null) {
             for it in i.iterate(src)? {
+                i.tick()?;
                 let (k, v) = if is_map { (i.get(&it, "0")?, i.get(&it, "1")?) } else { (it.clone(), it) };
-                let ks = i.to_string(&k)?;
-                if let Value::Obj(o) = &out {
-                    o.borrow_mut().define(&alloc::format!("@{ks}"), Prop {
-                        value: Some(v), get: None, set: None,
-                        writable: true, enumerable: false, configurable: true });
-                }
+                data.borrow_mut().set(norm_key(k), v);
             }
         }
     }
@@ -3407,19 +3395,24 @@ fn lookup_accessor(i: &mut Interp, t: Value, a: &[Value], want_set: bool) -> C<V
     Ok(Value::Undefined)
 }
 
-/// Der gemeinsame Rumpf von `Object.groupBy` und `Map.groupBy`. Der
-/// Unterschied ist allein der SCHLUESSEL: dort eine Eigenschaft, hier ein
-/// Karteneintrag — und unsere Karte ist ohnehin zeichenkettenbasiert.
+/// Der gemeinsame Rumpf von `Object.groupBy` und `Map.groupBy`.
+///
+/// Der Unterschied ist allein der SCHLUESSEL: dort ein Eigenschaftsname (also
+/// immer eine Zeichenkette oder ein Symbol), hier ein Karteneintrag mit
+/// eigener Identitaet — `Map.groupBy` darf nach einem OBJEKT gruppieren, und
+/// genau das ist der Grund, warum es die Variante ueberhaupt gibt.
 fn group_into(i: &mut Interp, a: &[Value], out: &Gc, as_map: bool) -> C<()> {
     let f = a.get(1).cloned().unwrap_or(Value::Undefined);
     if !i.is_callable(&f) { i.type_err::<()>("callback is not a function")?; }
+    let coll = if as_map { coll_of(&Value::Obj(out.clone())) } else { None };
     let items = i.iterate(a.first().unwrap_or(&Value::Undefined))?;
     for (n, v) in items.into_iter().enumerate() {
         i.tick()?;
         let kv = i.call(&f, Value::Undefined, &[v.clone(), Value::Num(n as f64)])?;
-        let k = if as_map { alloc::format!("@{}", i.to_string(&kv)?) }
-                else { i.to_prop_key(&kv)?.to_string() };
-        let have = out.borrow().get_own(&k).and_then(|p| p.value.clone());
+        let have = match &coll {
+            Some(c) => c.borrow().get(&kv),
+            None => out.borrow().get_own(&i.to_prop_key(&kv)?).and_then(|p| p.value.clone()),
+        };
         match have {
             Some(arr) => {
                 let lv = i.get(&arr, "length")?;
@@ -3428,7 +3421,10 @@ fn group_into(i: &mut Interp, a: &[Value], out: &Gc, as_map: bool) -> C<()> {
             }
             None => {
                 let arr = i.new_array(vec![v]);
-                out.borrow_mut().define(&k, Prop::data(arr));
+                match &coll {
+                    Some(c) => c.borrow_mut().set(norm_key(kv), arr),
+                    None => out.borrow_mut().define(&i.to_prop_key(&kv)?, Prop::data(arr)),
+                }
             }
         }
     }
@@ -3441,10 +3437,10 @@ fn group_into(i: &mut Interp, a: &[Value], out: &Gc, as_map: bool) -> C<()> {
 #[derive(Clone, Copy, PartialEq)]
 enum SetOp { Union, Intersection, Difference, Symmetric, Subset, Superset, Disjoint }
 
-/// Die eigenen Eintraege als Schluesselliste (ohne das `@`).
-fn set_keys(t: &Value) -> Vec<Rc<str>> {
-    let Value::Obj(o) = t else { return Vec::new() };
-    o.borrow().own_keys().into_iter().filter(|k| k.starts_with('@')).collect()
+/// Die eigenen Schluessel der Menge, als WERTE.
+fn set_keys(t: &Value) -> Vec<Value> {
+    match coll_of(t) { Some(c) => c.borrow().pairs().into_iter().map(|(k, _)| k).collect(),
+                       None => Vec::new() }
 }
 
 fn set_op(i: &mut Interp, t: Value, a: &[Value], op: SetOp) -> C<Value> {
@@ -3469,18 +3465,18 @@ fn set_op(i: &mut Interp, t: Value, a: &[Value], op: SetOp) -> C<Value> {
 
     let mine = set_keys(&t);
     // Nur holen, wer sie braucht — `isSubsetOf` fragt sonst umsonst.
-    let theirs: Vec<Rc<str>> = if matches!(op, SetOp::Union | SetOp::Intersection
+    let theirs: Vec<Value> = if matches!(op, SetOp::Union | SetOp::Intersection
         | SetOp::Symmetric | SetOp::Superset) {
         let it = i.call(&keys_fn, other.clone(), &[])?;
-        let vs = i.iterate(&it)?;
-        let mut out = Vec::with_capacity(vs.len());
-        for v in vs { out.push(i.to_string(&v)?); }
-        out
+        i.iterate(&it)?
     } else { Vec::new() };
 
-    let contains = |i: &mut Interp, k: &str| -> C<bool> {
-        let r = i.call(&has, other.clone(), &[Value::str(k)])?;
+    let contains = |i: &mut Interp, k: &Value| -> C<bool> {
+        let r = i.call(&has, other.clone(), &[k.clone()])?;
         Ok(r.truthy())
+    };
+    let mine_has = |k: &Value| -> bool {
+        matches!(coll_of(&t), Some(c) if c.borrow().has(k))
     };
 
     match op {
@@ -3488,61 +3484,58 @@ fn set_op(i: &mut Interp, t: Value, a: &[Value], op: SetOp) -> C<Value> {
             if (mine.len() as f64) > szn { return Ok(Value::Bool(false)); }
             for k in &mine {
                 i.tick()?;
-                if !contains(i, &k[1..])? { return Ok(Value::Bool(false)); }
+                if !contains(i, k)? { return Ok(Value::Bool(false)); }
             }
             Ok(Value::Bool(true))
         }
         SetOp::Superset => {
             if (mine.len() as f64) < szn { return Ok(Value::Bool(false)); }
-            let Value::Obj(o) = &t else { return Ok(Value::Bool(false)) };
             for k in &theirs {
                 i.tick()?;
-                if !o.borrow().has_own(&alloc::format!("@{k}")) { return Ok(Value::Bool(false)); }
+                if !mine_has(k) { return Ok(Value::Bool(false)); }
             }
             Ok(Value::Bool(true))
         }
         SetOp::Disjoint => {
             for k in &mine {
                 i.tick()?;
-                if contains(i, &k[1..])? { return Ok(Value::Bool(false)); }
+                if contains(i, k)? { return Ok(Value::Bool(false)); }
             }
             Ok(Value::Bool(true))
         }
         _ => {
             let out = coll_new(i, "Set", false, &[])?;
-            let put = |out: &Value, k: &str| {
-                if let Value::Obj(o) = out {
-                    o.borrow_mut().define(&alloc::format!("@{k}"), Prop {
-                        value: Some(Value::str(k)), get: None, set: None,
-                        writable: true, enumerable: false, configurable: true });
+            let put = |out: &Value, k: &Value| {
+                if let Some(c) = coll_of(out) {
+                    let k = norm_key(k.clone());
+                    c.borrow_mut().set(k.clone(), k);
                 }
             };
             match op {
                 SetOp::Union => {
-                    for k in &mine { put(&out, &k[1..]); }
+                    for k in &mine { put(&out, k); }
                     for k in &theirs { put(&out, k); }
                 }
                 SetOp::Intersection => {
                     for k in &mine {
                         i.tick()?;
-                        if contains(i, &k[1..])? { put(&out, &k[1..]); }
+                        if contains(i, k)? { put(&out, k); }
                     }
                 }
                 SetOp::Difference => {
                     for k in &mine {
                         i.tick()?;
-                        if !contains(i, &k[1..])? { put(&out, &k[1..]); }
+                        if !contains(i, k)? { put(&out, k); }
                     }
                 }
                 _ => {
-                    let Value::Obj(mo) = &t else { return Ok(out) };
                     for k in &mine {
                         i.tick()?;
-                        if !contains(i, &k[1..])? { put(&out, &k[1..]); }
+                        if !contains(i, k)? { put(&out, k); }
                     }
                     for k in &theirs {
                         i.tick()?;
-                        if !mo.borrow().has_own(&alloc::format!("@{k}")) { put(&out, k); }
+                        if !mine_has(k) { put(&out, k); }
                     }
                 }
             }
@@ -3631,11 +3624,30 @@ pub fn this_string(i: &mut Interp, t: &Value) -> C<Rc<str>> {
 /// interne Feld, das die Spezifikation verlangt — ohne ihn liefe
 /// `Map.prototype.has.call({})` still durch und `…call(null)` gaebe `false`
 /// statt zu werfen.
-fn this_coll(i: &mut Interp, t: &Value, name: &str) -> C<()> {
+fn this_coll(i: &mut Interp, t: &Value, name: &str) -> C<Rc<RefCell<CollData>>> {
     let ok = matches!(t, Value::Obj(o)
         if matches!(o.borrow().get_own(COLL_KIND).and_then(|p| p.value.clone()),
                     Some(Value::Str(k)) if &*k == name));
-    if ok { Ok(()) } else { i.type_err(&alloc::format!("{name} method on the wrong receiver")) }
+    if !ok { return i.type_err(&alloc::format!("{name} method on the wrong receiver")); }
+    match t { Value::Obj(o) => match &o.borrow().kind {
+                  ObjKind::Collection(c) => Ok(c.clone()),
+                  _ => i.type_err(&alloc::format!("{name} without its data")) },
+              _ => i.type_err(&alloc::format!("{name} without its data")) }
+}
+
+/// `-0` als Schluessel wird zu `+0` — das verlangt die Spezifikation
+/// ausdruecklich (`Map.prototype.set`, Schritt 6), und zwar fuer den
+/// GESPEICHERTEN Wert, nicht nur fuer den Vergleich.
+fn norm_key(v: Value) -> Value {
+    match v { Value::Num(n) if n == 0.0 => Value::Num(0.0), other => other }
+}
+
+/// Der Speicher einer Sammlung, ohne Pruefung auf die Art — fuer die
+/// Mengenoperationen, die schon wissen, dass sie ein `Set` in der Hand haben.
+fn coll_of(t: &Value) -> Option<Rc<RefCell<CollData>>> {
+    match t { Value::Obj(o) => match &o.borrow().kind {
+                  ObjKind::Collection(c) => Some(c.clone()), _ => None },
+              _ => None }
 }
 
 /// Ist die eigene Eigenschaft aufzaehlbar? Fuer einen Stellvertreter fragt

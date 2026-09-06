@@ -11,7 +11,7 @@ fn main() {
     let doc = Doc::from_dom(&dom);
     let scripts: Vec<String> = page_scripts(&doc)
         .into_iter()
-        .filter_map(|r| match r { ScriptRef::Inline(t) => Some(t), _ => None })
+        .filter_map(|r| match r { ScriptRef::Inline(t, _) => Some(t), _ => None })
         .collect();
     println!("{} eingebettete Skripte, {} B HTML", scripts.len(), html.len());
 

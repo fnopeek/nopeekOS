@@ -112,7 +112,19 @@ impl Interp {
             }
             Expr::Spread(inner) => self.eval(inner, env),
             Expr::Super => Ok(Value::Undefined),
-            Expr::MetaProp { .. } => Ok(Value::Undefined),
+            // `import.meta` liegt als Bindung in der Modulumgebung; die Kette
+            // gibt die richtige, auch aus einem Rueckruf heraus. Ausserhalb
+            // eines Moduls gibt es sie nicht — dann `undefined`, wie
+            // `new.target`.
+            Expr::MetaProp { meta, prop } => {
+                if meta == "import" && prop == "meta" {
+                    let n = super::modules::META_LOCAL;
+                    if let Some(e) = env_lookup(env, n) {
+                        if let Some(b) = e.borrow().vars.get(n) { return Ok(b.value.clone()); }
+                    }
+                }
+                Ok(Value::Undefined)
+            }
             Expr::ImportCall(_) => self.type_err("dynamic import is not supported"),
             Expr::Yield { .. } => self.type_err("generators are not supported"),
             Expr::Await(_) => self.type_err("await is not supported"),
@@ -121,8 +133,16 @@ impl Interp {
 
     fn load_ident(&mut self, n: &str, env: &Rc<RefCell<Env>>) -> C<Value> {
         if let Some(e) = env_lookup(env, n) {
+            // Ein importierter Name steht nicht HIER, sondern im Modul, aus
+            // dem er kommt — und er wird bei JEDEM Lesen dort geholt.
+            let Some((e, n2)) = super::interp::env_deref(&e, n) else {
+                return self.ref_err(&alloc::format!("circular import binding for '{n}'"));
+            };
             let b = e.borrow();
-            let bd = b.vars.get(n).unwrap();
+            let Some(bd) = b.vars.get(&*n2) else {
+                drop(b);
+                return self.ref_err(&alloc::format!("{n} is not exported"));
+            };
             if !bd.initialized {
                 drop(b);
                 return self.ref_err(&alloc::format!("cannot access '{n}' before initialization"));

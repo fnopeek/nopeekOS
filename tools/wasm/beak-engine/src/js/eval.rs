@@ -93,8 +93,34 @@ impl Interp {
             Stmt::Switch { disc, cases } => self.exec_switch(disc, cases, env),
             Stmt::Try { block, handler, finalizer } => self.exec_try(block, handler, finalizer, env),
             Stmt::With { .. } => self.type_err("with is not supported"),
-            Stmt::Import(_) | Stmt::ExportNamed { .. } | Stmt::ExportDefault(_)
-            | Stmt::ExportAll { .. } => Ok(None),
+            // `import` und die reinen Weiterreichungen tun zur LAUFZEIT
+            // nichts — sie sind beim Verknuepfen erledigt (`modules.rs`).
+            Stmt::Import(_) | Stmt::ExportAll { .. } => Ok(None),
+            // Aber `export function f(){}` ist eine DEKLARATION mit einem
+            // `export` davor. Sie zu ueberspringen hiess: `f` gibt es im
+            // eigenen Modul nicht — und das fiel niemandem auf, weil auch
+            // der Import still war.
+            Stmt::ExportNamed { decl, .. } => match decl {
+                Some(d) => self.exec(d, env),
+                None => Ok(None),
+            },
+            Stmt::ExportDefault(d) => {
+                let v = match &**d {
+                    ExportDefault::Expr(e) => self.eval(e, env)?,
+                    ExportDefault::Func(f) => self.make_closure(f.clone(), env, None),
+                    ExportDefault::Class(c) => self.eval_class(c, env)?,
+                };
+                // Eine benannte Deklaration hinter `export default` fuehrt
+                // AUCH ihren eigenen Namen ein.
+                let own = match &**d {
+                    ExportDefault::Func(f) => f.name.clone(),
+                    ExportDefault::Class(c) => c.name.clone(),
+                    _ => None,
+                };
+                if let Some(n) = own { self.init_binding(&n, v.clone(), env); }
+                self.init_binding(super::modules::DEFAULT_LOCAL, v, env);
+                Ok(None)
+            }
         }
     }
 
@@ -492,6 +518,12 @@ impl Interp {
     /// anders entschieden — [[feedback-a-copy-is-a-second-semantics-waiting]].
     pub fn assign_ident(&mut self, n: &str, v: Value, env: &Rc<RefCell<Env>>) -> C<()> {
         if let Some(e) = env_lookup(env, n) {
+            // Auf einen importierten Namen zu schreiben ist ein Fehler, kein
+            // Schreiben ins Herkunftsmodul: die Bindung dort gehoert dem
+            // Modul, das sie ausfuehrt.
+            if e.borrow().imports.as_ref().is_some_and(|m| m.contains_key(n)) {
+                return self.type_err(&alloc::format!("assignment to import '{n}'"));
+            }
             let (mutable, init) = {
                 let b = e.borrow();
                 let bd = b.vars.get(n).unwrap();
