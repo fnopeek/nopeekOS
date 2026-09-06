@@ -149,18 +149,18 @@ fn origin() -> String {
 }
 
 /// Eine Adresse gegen die des Importeurs aufloesen.
+///
+/// **Dieselbe Funktion, die beak am Geraet faehrt.** Die Probe hatte hier
+/// erst ihre eigene — und die normalisierte `.`/`..`, waehrend beaks Wirt es
+/// nicht tat. Ergebnis: host-seitig lief der Modulgraph, am Geraet explodierte
+/// er (106 geladen, 179 offen). Eine Probe, die einen ANDEREN Pfad misst als
+/// das Ziel, ist keine ([[feedback_the_test_path_must_be_the_real_path]]).
 fn resolve_path(base: &str, spec: &str) -> String {
-    let org = origin();
-    let path = |u: &str| u.strip_prefix(&org).unwrap_or(u).to_string();
-    if spec.contains("://") { return spec.to_string(); }
-    if spec.starts_with('/') { return format!("{org}{spec}"); }
-    let b = path(base);
-    let dir = b.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-    let mut parts: Vec<&str> = dir.split('/').filter(|p| !p.is_empty()).collect();
-    for p in spec.split('/') {
-        match p { "." | "" => {}, ".." => { parts.pop(); }, x => parts.push(x) }
+    use beak_engine::js::url;
+    match url::parse_abs(base) {
+        Some(b) => url::resolve(spec, &b).href(),
+        None => spec.to_string(),
     }
-    format!("{org}/{}", parts.join("/"))
 }
 
 /// Wo die Datei zu einer Adresse liegt: `curl` hat sie unter dem Pfad mit
