@@ -22,12 +22,22 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-09-05, beak 0.96.0)
+### Current number (measured 2026-09-05, beak 0.96.0 — the BLESSED baseline)
 
 ```
 4476 pass / 1163 fail / 147 inconclusive   (of 5786 vendored reftests)
 = 79.4 % of the conclusive 5639
 ```
+
+**A live run at 0.114.0 says 4477 / 1170 / 139 — and the baseline is NOT
+re-blessed.** Two of the differences are LOSSES that shipped in 0.109.0
+(`css-flexbox/flexbox-definite-sizes-001` and `-003`: a flex item with
+`min-height: 100%` paints nothing at all now). Blessing would cement them into
+the denominator `tests/vehicles.py` derives, so the numbers below stay on the
+0.96.0 baseline until that is fixed — see
+`memory/project_beak_flex_min_height_regression.md`. The eight tests that left
+INCONCLUSIVE in 0.114.0 are gradients: a reference that painted nothing now
+paints, which makes the test decidable rather than better.
 
 **Two denominators, and the second one is the honest one.** 447 of the 1163
 failures are tests for specs no page on the web runs — counted by CONTENT, not
