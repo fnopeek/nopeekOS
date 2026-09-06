@@ -1948,6 +1948,34 @@ pub fn install(realm: &mut Realm) {
         let id = d.create(ELEMENT_NODE, &lower);
         Ok(wrap(i, id))
     }, 1, &fp);
+    // **`new Image()` ist `document.createElement("img")`** — dieselbe
+    // Sache, ein anderer Name. Ohne den Konstruktor bricht der Zeitgeber der
+    // Google-Ergebnisseite mit `Image is not defined` ab; ein Zaehlpixel ist
+    // der haeufigste Gebrauch, und der besteht genau aus `new Image().src =
+    // …`. Gebaut wird deshalb ein ECHTES `img`-Element und kein Attrappe:
+    // was die Seite danach daran tut, tut sie an einem Knoten im Baum.
+    let img_ctor = native(Some(fp.clone()), |i, _, a| {
+        let node = {
+            let Some(d) = &mut i.doc else { return i.type_err("no document") };
+            d.create(ELEMENT_NODE, "img")
+        };
+        let el = wrap(i, node);
+        // `new Image(w, h)` setzt Breite und Hoehe als ATTRIBUTE, so wie im
+        // Browser — nicht als Stil.
+        for (k, n) in [("width", 0usize), ("height", 1usize)] {
+            if let Some(v) = a.get(n) {
+                if !matches!(v, Value::Undefined) {
+                    let t = i.to_string(v)?;
+                    if let Some(d) = &mut i.doc {
+                        d.nodes[node as usize].attrs.push((Rc::from(k), t));
+                    }
+                }
+            }
+        }
+        Ok(el)
+    }, "Image", 0, true);
+    realm.global.borrow_mut().define("Image", Prop::builtin(Value::Obj(img_ctor)));
+
     meth(&document_proto, "createTextNode", |i, _, a| {
         let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         let Some(d) = &mut i.doc else { return i.type_err("no document") };
@@ -3171,6 +3199,29 @@ mod tests {
              console.log(getComputedStyle(document.getElementById('b')).fontSize);",
         );
         assert_eq!(out, ["none", "rgb(13, 110, 253)", "20px"]);
+    }
+
+    /// **`new Image()` ist ein echtes `img`-Element, keine Attrappe.**
+    ///
+    /// Die Google-Ergebnisseite bricht ihren Zeitgeber sonst mit
+    /// `Image is not defined` ab — ein Zaehlpixel besteht genau aus
+    /// `new Image().src = …`. Ein Stummel haette den Fehler weggenommen und
+    /// den Knoten schuldig geblieben; der Test prueft deshalb, dass das Ding
+    /// im Baum ankommt und sich wie ein Element verhaelt.
+    #[test]
+    fn new_image_ist_ein_img_element_im_baum() {
+        let out = run(
+            "<html><body></body></html>",
+            "var i = new Image();\
+             console.log(i.tagName + ' ' + i.nodeType + ' ' + (i instanceof HTMLImageElement));\
+             i.src = '/pixel.gif';\
+             console.log(i.getAttribute('src'));\
+             var j = new Image(16, 9);\
+             console.log(j.getAttribute('width') + 'x' + j.getAttribute('height'));\
+             document.body.appendChild(i);\
+             console.log(String(document.getElementsByTagName('img').length));",
+        );
+        assert_eq!(out, ["IMG 1 true", "/pixel.gif", "16x9", "1"]);
     }
 
     /// Ein Element, das ein Skript erst erzeugt hat, kommt im Baum nicht vor.
