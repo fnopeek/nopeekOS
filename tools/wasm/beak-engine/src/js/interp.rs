@@ -1335,12 +1335,32 @@ impl Interp {
                 });
             }
         }
+        // **Ein Primitiv bekommt KEINE Huelle fuers Lesen** — der Kommentar
+        // oben sagte das schon, der Code tat es nicht: er rief `to_object`.
+        //
+        // Und das ist bei einer Zeichenkette kein kleiner Umweg.
+        // `to_object` legt dort JEDES ZEICHEN als eigene Eigenschaft an —
+        // ein `String` je Zeichen, ein `num_to_string` je Index, ein
+        // Hashtabellen-Eintrag je Zeichen. Bei 89 KB sind das 89 000
+        // Eintraege, gebaut fuer EINEN Aufruf von `s.indexOf(...)`, dessen
+        // Antwort auf dem PROTOTYP liegt. In einer Schleife ueber eine lange
+        // Zeichenkette ist das quadratisch.
+        //
+        // Gemessen auf einer Google-Suchseite: `to_object` war **22 % der
+        // Laufzeit**, und die wachsende Hashtabelle darunter noch einmal
+        // 6,6 %. Eigene Eigenschaften hat ein Primitiv hier keine — `length`
+        // und die Indizes beantwortet der Schnellweg darueber —, also faengt
+        // die Kette gleich beim Prototyp an.
         let start = match base {
             Value::Obj(o) => o.clone(),
             Value::Undefined | Value::Null =>
                 return self.type_err(&alloc::format!("cannot read '{key}' of {}",
                     if matches!(base, Value::Null) { "null" } else { "undefined" })),
-            _ => self.to_object(base)?,
+            Value::Str(_) => self.realm.string_proto.clone(),
+            Value::Num(_) => self.realm.number_proto.clone(),
+            Value::Bool(_) => self.realm.boolean_proto.clone(),
+            Value::BigInt(_) => self.realm.bigint_proto.clone(),
+            Value::Sym(_) => self.realm.symbol_proto.clone(),
         };
         // **Eine SICHT beantwortet ihre Indizes selbst, und zwar ENDGUELTIG.**
         // Die Prototypenkette wird dabei NICHT gelaufen: `ta[99]` gibt
