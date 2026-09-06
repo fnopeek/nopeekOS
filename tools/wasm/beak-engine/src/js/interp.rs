@@ -91,15 +91,24 @@ impl Env {
 pub fn env_strict(env: &Rc<RefCell<Env>>) -> bool { env.borrow().strict }
 
 pub fn env_lookup(env: &Rc<RefCell<Env>>, name: &str) -> Option<Rc<RefCell<Env>>> {
+    env_lookup_depth(env, name).map(|(e, _)| e)
+}
+
+/// Wie `env_lookup`, sagt aber MIT, wieviele Spruenge es gekostet hat.
+pub fn env_lookup_depth(env: &Rc<RefCell<Env>>, name: &str)
+    -> Option<(Rc<RefCell<Env>>, usize)> {
+    let mut depth = 0usize;
     let mut cur = env.clone();
     loop {
         {
             let b = cur.borrow();
-            if b.vars.contains_key(name) { drop(b); return Some(cur); }
-            if b.imports.as_ref().is_some_and(|m| m.contains_key(name)) { drop(b); return Some(cur); }
+            if b.vars.contains_key(name) { drop(b); return Some((cur, depth)); }
+            if b.imports.as_ref().is_some_and(|m| m.contains_key(name)) {
+                drop(b); return Some((cur, depth));
+            }
         }
         let next = cur.borrow().parent.clone();
-        match next { Some(p) => cur = p, None => return None }
+        match next { Some(p) => { cur = p; depth += 1; } None => return None }
     }
 }
 
@@ -533,6 +542,14 @@ pub struct Interp {
     /// Der Schrittzaehler zaehlt Anweisungen, nicht Befehle, und aus ihm laesst
     /// sich keine ns-je-Befehl-Zahl bilden.
     pub vm_ops: u64,
+    /// Duerfen die Wegweiser in `Chunk::hints` benutzt werden?
+    ///
+    /// **Ein direktes `eval` schaltet sie ab, fuer die ganze Sitzung.** Es
+    /// ist das Einzige, was eine Bindung in eine INNERE Umgebung legen kann,
+    /// nachdem eine Befehlsstelle schon gelaufen ist — und dann zeigt der
+    /// Hinweis an der Verschattung vorbei. Eine Pruefung dagegen waere der
+    /// volle Kettenlauf, also genau das, was der Hinweis spart.
+    pub hints_ok: bool,
     pub vm_calls: u64,
     /// Eingebaute, gebundene, Getter — die haben keinen Rumpf aus Befehlen
     /// und werden nie einen haben. Sie gehoeren NICHT in denselben Nenner wie
@@ -697,7 +714,7 @@ impl Interp {
                  cookies: String::new(), cookie_sets: Vec::new(), style_ctx: None,
                  history_ops: Vec::new(), history_state: Value::Null, history_len: 1.0,
                  vm_ran: 0, vm_declined: 0, vm_decline: None, vm_off: false,
-                 func_chunks: HashMap::new(), func_declines: HashMap::new(), pending_labels: Vec::new(), vm_ops: 0, vm_calls: 0, vm_calls_native: 0, vm_calls_slow: 0,
+                 func_chunks: HashMap::new(), func_declines: HashMap::new(), pending_labels: Vec::new(), vm_ops: 0, hints_ok: true, vm_calls: 0, vm_calls_native: 0, vm_calls_slow: 0,
                  geometry: None,
                  live_dom: core::cell::RefCell::new(None),
                  jobs: alloc::collections::VecDeque::new(),

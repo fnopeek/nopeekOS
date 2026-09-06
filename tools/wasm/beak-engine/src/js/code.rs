@@ -283,9 +283,24 @@ pub enum BlockDecl {
     Func { name: u32, func: u32 },
 }
 
+/// „Noch kein Hinweis." Kein `Option`, weil das je Befehlsstelle ein Byte
+/// mehr waere und die Stelle heiss ist.
+pub const HINT_NONE: u16 = u16::MAX;
+
 /// Uebersetzter Code samt allem, worauf seine Befehle zeigen.
 pub struct Chunk {
     pub ops: Vec<Op>,
+    /// **Der Weg von letztem Mal, je Befehlsstelle.** Gemessen an der
+    /// Fritzbox-Anmeldung: 24,4 % aller Befehle sind `LoadVar`, und 85,4 %
+    /// davon finden ihren Namen DREI Umgebungen weiter oben. Der volle Weg
+    /// fragt dafuer vier Tabellen — drei davon nur, um „nicht hier" zu
+    /// hoeren.
+    ///
+    /// Der Hinweis ist die Tiefe, in der der Name beim letzten Mal stand.
+    /// Sie ist LEXIKALISCH festgelegt: dieselbe Befehlsstelle sieht dieselbe
+    /// Kettenform. Trifft er trotzdem nicht, laeuft der volle Weg — er ist
+    /// ein Hinweis, keine Auskunft.
+    pub hints: Vec<core::cell::Cell<u16>>,
     pub constants: Vec<Value>,
     /// Namen (Bezeichner und Eigenschaften), einmal abgelegt statt je Befehl.
     pub names: Vec<Rc<str>>,
@@ -300,13 +315,16 @@ pub struct Chunk {
 
 impl Chunk {
     pub fn new() -> Chunk {
-        Chunk { ops: Vec::new(), constants: Vec::new(), names: Vec::new(),
+        Chunk { ops: Vec::new(), hints: Vec::new(), constants: Vec::new(), names: Vec::new(),
                 funcs: Vec::new(), classes: Vec::new(), pats: Vec::new(),
                 heads: Vec::new(), blocks: Vec::new(), blocks_spread: Vec::new() }
     }
 
     pub fn emit(&mut self, op: Op) -> usize {
         self.ops.push(op);
+        // Genau hier, damit die beiden Listen nicht auseinanderlaufen
+        // koennen — `ops` waechst nirgends sonst.
+        self.hints.push(core::cell::Cell::new(HINT_NONE));
         self.ops.len() - 1
     }
 

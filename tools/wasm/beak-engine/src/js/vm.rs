@@ -326,12 +326,18 @@ impl Vm {
         match &chunk.ops[ip] {
             Op::Const(k) => self.push(chunk.constants[*k as usize].clone()),
             Op::LoadVar(n) => {
-                let v = i.vm_load(&chunk.names[*n as usize], &env)?;
+                let v = match chunk.hints.get(ip) {
+                    Some(h) => i.vm_load_at(&chunk.names[*n as usize], &env, h)?,
+                    None => i.vm_load(&chunk.names[*n as usize], &env)?,
+                };
                 self.push(v);
             }
             Op::StoreVar(n) => {
                 let v = self.top();
-                i.vm_store(&chunk.names[*n as usize], v, &env)?;
+                match chunk.hints.get(ip) {
+                    Some(h) => i.vm_store_at(&chunk.names[*n as usize], v, &env, h)?,
+                    None => i.vm_store(&chunk.names[*n as usize], v, &env)?,
+                }
             }
             Op::DeclVar { name, mutable, lexical } => {
                 let v = self.pop();
@@ -479,6 +485,9 @@ impl Vm {
                 // den Bereich des Rufers. Erkannt wird er am Namen UND an der
                 // Sache — eine eigene Funktion namens `eval` ist keiner.
                 if n == Some("eval") && i.is_eval_fn(&callee) {
+                    // Ab jetzt kann eine Bindung weiter INNEN entstehen, als
+                    // ein Wegweiser zeigt. Siehe `Interp::hints_ok`.
+                    i.hints_ok = false;
                     let env = self.frames.last().unwrap().envs.last().unwrap().clone();
                     let c = args.first().cloned().unwrap_or(Value::Undefined);
                     let v = i.perform_eval(&c, Some(env))?;
@@ -1061,5 +1070,73 @@ mod tests {
         let (abgebrochen, gefragt) = run(true);
         assert!(gefragt > 0, "die Uhr wurde nie gefragt");
         assert!(abgebrochen, "der Lauf lief ueber die abgelaufene Uhr hinaus");
+    }
+
+    /// **Ein Wegweiser darf die BEDEUTUNG nicht aendern.**
+    ///
+    /// `Chunk::hints` merkt sich, in welcher Tiefe ein Name beim letzten Mal
+    /// stand. Entstuende danach eine Bindung WEITER INNEN, zeigte er daran
+    /// vorbei — und das waere kein Absturz, sondern ein falscher Wert.
+    ///
+    /// Der Test faehrt dieselben Programme ZWEIMAL, einmal mit Wegweisern und
+    /// einmal ohne, und vergleicht. Ein Test, der nur „laeuft durch" prueft,
+    /// saehe genau den Fehler nicht, um den es geht.
+    fn zweimal(src: &str) -> (alloc::string::String, alloc::string::String) {
+        let lauf = |hints: bool| {
+            let mut i = super::Interp::new();
+            i.hints_ok = hints;
+            let prog = match crate::js::parse(src, false) {
+                Ok(p) => p,
+                Err(e) => return alloc::format!("SyntaxError @{}", e.at),
+            };
+            match i.run_program(&prog) {
+                Ok(v) => i.to_string(&v).map(|s| s.to_string())
+                          .unwrap_or_else(|_| alloc::string::String::from("?")),
+                Err(super::Abrupt::Throw(v)) => {
+                    let m = i.get(&v, "message").ok()
+                        .and_then(|m| i.to_string(&m).ok())
+                        .unwrap_or_else(|| alloc::rc::Rc::from("?"));
+                    alloc::format!("THROW {m}")
+                }
+                Err(_) => alloc::string::String::from("ABRUPT"),
+            }
+        };
+        (lauf(true), lauf(false))
+    }
+
+    #[test]
+    fn wegweiser_aendert_die_bedeutung_nicht() {
+        let faelle: &[&str] = &[
+            // Verschattung in einem Block, in einer Schleife: dieselbe
+            // Befehlsstelle, viele Durchlaeufe.
+            "var o=[];var x='a';for(var k=0;k<3;k++){let x='b'+k;o.push(x);}o.push(x);o.join(',')",
+            // Ein Abschluss liest nach aussen, waehrend innen gleich heisst.
+            "var x='aussen';function f(){return x}function g(){var x='innen';return f()+'|'+x}g()",
+            // Zeitliche Totzone: der Name STEHT hier, ist aber noch nichts.
+            "function f(){ try { return y } catch(e) { return 'TDZ:'+e.name } finally { } } var r=f(); let y=1; r",
+            // `const` beschreiben — der Fehler muss derselbe bleiben.
+            "const c=1; try { c=2; return } catch(e) { e.name }",
+            // Ein direktes `eval`, das eine Bindung WEITER INNEN anlegt.
+            "var x='aussen';function f(){function inner(){return x}var a=inner();eval(\"var x='innen'\");return a+'|'+inner()}f()",
+            // Tief geschachtelt, damit der Weg wirklich mehrere Spruenge hat.
+            "var a=1;function f(){var b=2;return function(){var c=3;return function(){return a+b+c}}}f()()()",
+            // Derselbe Name auf mehreren Ebenen, gelesen von innen nach aussen.
+            "var n='g';function f(){var n='f';{let n='b';return n+f2()}}function f2(){return n}f()",
+        ];
+        for (k, src) in faelle.iter().enumerate() {
+            let (mit, ohne) = zweimal(src);
+            assert_eq!(mit, ohne, "Fall {k} laeuft mit und ohne Wegweiser auseinander: {src}");
+        }
+    }
+
+    /// Ein direktes `eval` MUSS die Wegweiser abschalten — das ist der
+    /// einzige Weg, auf dem eine Bindung nachtraeglich weiter innen entsteht.
+    #[test]
+    fn direktes_eval_schaltet_die_wegweiser_ab() {
+        let mut i = super::Interp::new();
+        assert!(i.hints_ok, "am Anfang sind sie an");
+        let prog = crate::js::parse("var q = 1; eval(\"q = 2\"); q", false).expect("parst");
+        let _ = i.run_program(&prog);
+        assert!(!i.hints_ok, "nach einem direkten eval muessen sie aus sein");
     }
 }
