@@ -11,7 +11,10 @@ fn main() {
         heading: beak_engine::Rgb(0, 0, 0), link: beak_engine::Rgb(0, 0, 238),
         muted: beak_engine::Rgb(96, 96, 96), rule: beak_engine::Rgb(128, 128, 128),
     });
-    let lay = eng.layout_ext(&html, "", w);
+    // `CSSFILE=` fuer eine Seite, deren Blatt nicht im `<style>` steht.
+    let css = std::env::var("CSSFILE").ok()
+        .map(|f| std::fs::read_to_string(f).expect("css")).unwrap_or_default();
+    let lay = eng.layout_ext(&html, &css, w);
     use beak_engine::layout::DrawOp;
     for o in lay.ops.iter() {
         match o {
@@ -21,6 +24,9 @@ fn main() {
                 println!("RoundRect {x:5},{y:<5} {w:4}x{h:<4} {color:?}"),
             DrawOp::Text { x, y, size, text, .. } =>
                 println!("Text      {x:5},{y:<5} {size}px {text:?}"),
+            DrawOp::Gradient { x, y, w, h, g, .. } =>
+                println!("Gradient  {x:5},{y:<5} {w:4}x{h:<4} {:?} {}deg rep={} {:?}",
+                         g.kind, g.angle, g.repeating, g.stops()),
             _ => {}
         }
     }
