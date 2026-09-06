@@ -800,6 +800,9 @@ pub enum DrawOp {
         bold: bool,
         italic: bool,
         mono: bool,
+        /// Streuwert der `font-family` — ohne ihn malte der Rasterer eine
+        /// andere Schrift als das Layout gemessen hat.
+        family: u32,
         sp: (f32, f32),
         text: String,
     },
@@ -3168,7 +3171,7 @@ impl<'a> Ctx<'a> {
             let aw = pw as f32;
             let frame_x = ps.pad_left + ps.pad_right + ps.border_x();
             let frame_y = ps.pad_top + ps.pad_bottom + ps.border_y();
-            let font = self.fonts.pick(ps.bold, ps.italic, ps.mono);
+            let font = self.fonts.pick(ps.bold, ps.italic, ps.mono, ps.family);
             let cw = match ps.width.px(aw) {
                 Some(v) if v >= 0.0 => v,
                 _ => measure_sp(font, text.trim(), ps.font_px, (ps.letter_spacing, ps.word_spacing)),
@@ -3233,6 +3236,7 @@ impl<'a> Ctx<'a> {
                     bold: ps.bold,
                     italic: ps.italic,
                     mono: ps.mono,
+family: ps.family,
                     sp: (ps.letter_spacing, ps.word_spacing),
                     text: text.trim().into(),
                 });
@@ -3277,7 +3281,7 @@ impl<'a> Ctx<'a> {
         if t.is_empty() {
             return None;
         }
-        let font = self.fonts.pick(st.bold, st.italic, st.mono);
+        let font = self.fonts.pick(st.bold, st.italic, st.mono, st.family);
         let sp = (st.letter_spacing, st.word_spacing);
         let w = measure_sp(font, t, st.font_px, sp).min(avail_w as f32).max(1.0);
         let h = line_gap(font, st.font_px).max(1.0);
@@ -3301,6 +3305,7 @@ impl<'a> Ctx<'a> {
             bold: st.bold,
             italic: st.italic,
             mono: st.mono,
+family: st.family,
             sp,
             text: alloc::string::String::from(t),
         }];
@@ -3334,7 +3339,7 @@ impl<'a> Ctx<'a> {
         let cbw = avail_w as f32;
         let frame_x = ps.pad_left + ps.pad_right + ps.border_x();
         let frame_y = ps.pad_top + ps.pad_bottom + ps.border_y();
-        let font = self.fonts.pick(ps.bold, ps.italic, ps.mono);
+        let font = self.fonts.pick(ps.bold, ps.italic, ps.mono, ps.family);
         let cw = match ps.width.px(cbw) {
             Some(v) if v >= 0.0 => v,
             _ => measure_sp(font, text.trim(), ps.font_px, (ps.letter_spacing, ps.word_spacing)),
@@ -3366,6 +3371,7 @@ impl<'a> Ctx<'a> {
                 bold: ps.bold,
                 italic: ps.italic,
                 mono: ps.mono,
+family: ps.family,
                 sp: (ps.letter_spacing, ps.word_spacing),
                 text: text.trim().into(),
             });
@@ -3570,7 +3576,7 @@ impl<'a> Ctx<'a> {
                 // A counter marker is right-aligned against the content edge,
                 // like every browser's `::marker` box.
                 let label = marker_label(st.list_style, self.marker_ord);
-                let mw = measure(self.fonts.pick(st.bold, st.italic, st.mono), &label, st.font_px);
+                let mw = measure(self.fonts.pick(st.bold, st.italic, st.mono, st.family), &label, st.font_px);
                 self.ops.push(DrawOp::Text {
                     x: content_x - 8 - ceil_i32(mw),
                     y: top,
@@ -3579,6 +3585,7 @@ impl<'a> Ctx<'a> {
                     bold: st.bold,
                     italic: st.italic,
                     mono: st.mono,
+family: st.family,
                     sp: (0.0, 0.0),
                     text: label,
                 });
@@ -3640,7 +3647,7 @@ impl<'a> Ctx<'a> {
             Flow { bottom: child_anchor, open: Collapse::default(), first_top: child_anchor, committed: false }
         } else if st.pre {
             let ly = child_anchor + child_incoming.value() as i32;
-            let nb = layout_pre(self.fonts.pick(st.bold, st.italic, st.mono), el, st, content_x, content_w, ly, &mut self.ops);
+            let nb = layout_pre(self.fonts.pick(st.bold, st.italic, st.mono, st.family), el, st, content_x, content_w, ly, &mut self.ops);
             Flow { bottom: nb, open: Collapse::default(), first_top: ly, committed: true }
         } else {
             self.flow_children(&el.children, st, Some(el), content_x, content_w, child_anchor, child_incoming)
@@ -3876,7 +3883,7 @@ impl<'a> Ctx<'a> {
         } else {
             self.cb.3
         };
-        let font = self.fonts.pick(st.bold, st.italic, st.mono);
+        let font = self.fonts.pick(st.bold, st.italic, st.mono, st.family);
         let size = st.font_px;
         let ch_w = measure(font, "0", size).max(1.0);
         // Die Zeilenhoehe, die die SEITE gesetzt hat, sonst die der Schrift.
@@ -4022,7 +4029,7 @@ impl<'a> Ctx<'a> {
             pad_r,
             border,
             radius: radii_px(st, w.max(8)),
-            style: RunStyle { hidden: st.hidden, transparent: st.transparent, size, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: crate::style::VAlign::Baseline, deco: st.deco, deco_color: st.deco_color, break_word: st.break_word, nowrap: st.nowrap, lh: st.line_height.px(size).unwrap_or(0.0), sp: (st.letter_spacing, st.word_spacing) },
+            style: RunStyle { hidden: st.hidden, transparent: st.transparent, size, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, family: st.family, valign: crate::style::VAlign::Baseline, deco: st.deco, deco_color: st.deco_color, break_word: st.break_word, nowrap: st.nowrap, lh: st.line_height.px(size).unwrap_or(0.0), sp: (st.letter_spacing, st.word_spacing) },
         }
     }
 
@@ -4304,8 +4311,8 @@ impl<'a> Ctx<'a> {
     /// box does not just lack the `…` — its text runs on out of the box.
     fn ellipsize(&mut self, start: usize, cr: i32) {
         for op in &mut self.ops[start..] {
-            let DrawOp::Text { x, size, bold, italic, mono, sp, text, .. } = op else { continue };
-            let font = self.fonts.pick(*bold, *italic, *mono);
+            let DrawOp::Text { x, size, bold, italic, mono, family, sp, text, .. } = op else { continue };
+            let font = self.fonts.pick(*bold, *italic, *mono, *family);
             if *x + ceil_i32(measure_sp(font, text, *size, *sp)) <= cr {
                 continue;
             }
@@ -7547,6 +7554,7 @@ fn layout_pre(
                 bold: st.bold,
                 italic: st.italic,
                 mono: st.mono,
+family: st.family,
                 sp: (st.letter_spacing, st.word_spacing),
                 text,
             });
@@ -7609,7 +7617,7 @@ fn flush_run(fonts: &crate::fonts::Fonts, st: &ComputedStyle, run: &mut Run, pre
     // its own line box and the widest one wins — collapsing them into one
     // would measure a whole code block as a single enormous line.
     if st.pre {
-        let font = fonts.pick(st.bold, st.italic, st.mono);
+        let font = fonts.pick(st.bold, st.italic, st.mono, st.family);
         let mut widest = 0.0f32;
         for line in run.text.lines() {
             // Trailing spaces hang past the line box, so they never widen it
@@ -7633,7 +7641,7 @@ fn flush_run(fonts: &crate::fonts::Fonts, st: &ComputedStyle, run: &mut Run, pre
     // The run's OWN font, not `regular()`: monospace advances wider than the
     // proportional face, so measuring mono content with it under-sizes every
     // auto table column that holds code.
-    let font = fonts.pick(st.bold, st.italic, st.mono);
+    let font = fonts.pick(st.bold, st.italic, st.mono, st.family);
     let size = st.font_px;
     let p = measure_sp(
         font,
@@ -7967,6 +7975,8 @@ struct RunStyle {
     bold: bool,
     italic: bool,
     mono: bool,
+    /// Streuwert der `font-family` — siehe `ComputedStyle::family`.
+    family: u32,
     valign: crate::style::VAlign,
     /// `text-decoration-line` bits (`style::DECO_*`).
     deco: u8,
@@ -8263,7 +8273,7 @@ fn paint_control(
         controls.push(rect(ops, ctl));
         return;
     }
-    let font = fonts.pick(ctl.style.bold, ctl.style.italic, ctl.style.mono);
+    let font = fonts.pick(ctl.style.bold, ctl.style.italic, ctl.style.mono, ctl.style.family);
     // A control's chrome follows the SURFACE IT SITS ON, not the device theme.
     // Wikipedia paints itself light whatever the desktop is set to (its dark
     // mode is opt-in, gated on a class), so a face mixed from a dark theme is a
@@ -8398,6 +8408,7 @@ fn paint_control(
                         bold: ctl.style.bold,
                         italic: ctl.style.italic,
                         mono: ctl.style.mono,
+family: ctl.style.family,
                         sp: ctl.style.sp,
                         text: line,
                     });
@@ -8436,6 +8447,7 @@ fn paint_control(
                     bold: ctl.style.bold,
                     italic: ctl.style.italic,
                     mono: ctl.style.mono,
+family: ctl.style.family,
                     sp: ctl.style.sp,
                     text,
                 });
@@ -8608,7 +8620,7 @@ impl Inline {
         // Laeufe verschmelzen nur bei gleicher `RunStyle` — die verschiedene
         // Alpha trennt sie also von selbst, ohne dass der Verschmelzer davon
         // wissen muss.
-        let rs = RunStyle { hidden: st.hidden, transparent: st.transparent, size: st.font_px,
+        let rs = RunStyle { hidden: st.hidden, transparent: st.transparent, size: st.font_px, family: st.family,
             color: faded(st.color, st.inline_fade),
             deco_color: st.deco_color.map(|c| faded(c, st.inline_fade)), bold: st.bold, italic: st.italic, mono: st.mono, valign: st.valign, deco: st.deco, break_word: st.break_word, nowrap: st.nowrap, lh: st.line_height.px(st.font_px).unwrap_or(0.0), sp: (st.letter_spacing, st.word_spacing) };
         let mut word = String::new();
@@ -8690,6 +8702,7 @@ impl Inline {
             bold: st.bold,
             italic: st.italic,
             mono: st.mono,
+            family: st.family,
             valign: st.valign,
             deco: st.deco,
             deco_color: st.deco_color,
@@ -8733,7 +8746,7 @@ impl Inline {
         // Each word/segment measures with its own face (a monospace run advances
         // differently from proportional Inter), so glyph positions match what
         // the raster later paints via the same `Fonts::pick`.
-        let face = |s: &RunStyle| fonts.pick(s.bold, s.italic, s.mono);
+        let face = |s: &RunStyle| fonts.pick(s.bold, s.italic, s.mono, s.family);
         let mut y = y0;
         let mut line: Vec<Placed> = Vec::new();
         // Each line's usable [left, right] narrows around floats at its y-band.
@@ -8771,7 +8784,7 @@ impl Inline {
                         // closest thing to hand — and a monospace space is much
                         // wider than a proportional one.
                         pen += space_width(
-                            fonts.pick(b.st.bold, b.st.italic, b.st.mono),
+                            fonts.pick(b.st.bold, b.st.italic, b.st.mono, b.st.family),
                             b.st.font_px,
                             (b.st.letter_spacing, b.st.word_spacing),
                         );
@@ -9744,8 +9757,10 @@ fn op_eq(a: &DrawOp, b: &DrawOp) -> bool {
             DrawOp::RoundRect { x: bx, y: by, w: bw, h: bh, r: br, color: bc, ring: bg },
         ) => (ax, ay, aw, ah, ac) == (bx, by, bw, bh, bc) && ar == br && ag == bg,
         (
-            DrawOp::Text { x: ax, y: ay, size: asz, color: ac, bold: ab, italic: ai, mono: am, sp: asp, text: at },
-            DrawOp::Text { x: bx, y: by, size: bsz, color: bc, bold: bb, italic: bi, mono: bm, sp: bsp, text: bt },
+            DrawOp::Text { x: ax, y: ay, size: asz, color: ac, bold: ab, italic: ai, mono: am,
+family: 0, sp: asp, text: at },
+            DrawOp::Text { x: bx, y: by, size: bsz, color: bc, bold: bb, italic: bi, mono: bm,
+family: 0, sp: bsp, text: bt },
         ) => (ax, ay, ac, ab, ai, am, at) == (bx, by, bc, bb, bi, bm, bt) && asz == bsz && asp == bsp,
         _ => false,
     }
@@ -9956,8 +9971,8 @@ fn plan_one(
         Some((*y, c, size.to_bits(), *bold, *italic, *mono))
     };
     let right_edge = |op: &DrawOp| -> i32 {
-        let DrawOp::Text { x, size, bold, italic, mono, sp, text, .. } = op else { return i32::MIN };
-        x + ceil_i32(measure_sp(fonts.pick(*bold, *italic, *mono), text, *size, *sp))
+        let DrawOp::Text { x, size, bold, italic, mono, family, sp, text, .. } = op else { return i32::MIN };
+        x + ceil_i32(measure_sp(fonts.pick(*bold, *italic, *mono, *family), text, *size, *sp))
     };
     let texts: Vec<usize> =
         (0..lay.ops.len()).filter(|i| matches!(lay.ops[*i], DrawOp::Text { .. })).collect();
@@ -9975,13 +9990,13 @@ fn plan_one(
     let mut touched = 0usize;
     for (i, op) in lay.ops.iter().enumerate() {
         let Some(sub) = sub_for(op) else { continue };
-        let DrawOp::Text { x, y, size, bold, italic, mono, sp, text, .. } = op else { continue };
+        let DrawOp::Text { x, y, size, bold, italic, mono, family, sp, text, .. } = op else { continue };
         // Everything `push_decorations` was given, recovered from the op it was
         // emitted next to — the run's own width and baseline, measured with the
         // same face at the same size AND the same spacing. No second copy of
         // the rule.
         let (x, y, size) = (*x, *y, *size);
-        let font = fonts.pick(*bold, *italic, *mono);
+        let font = fonts.pick(*bold, *italic, *mono, *family);
         let run_w = ceil_i32(measure_sp(font, text, size, *sp));
         let baseline = y + ascent_i(font, size);
         let mut run = RunStyle {
@@ -9992,6 +10007,7 @@ fn plan_one(
             bold: *bold,
             italic: *italic,
             mono: *mono,
+            family: *family,
             valign: sub.off.valign,
             deco: sub.off.deco,
             deco_color: sub.off.deco_color,
@@ -10015,6 +10031,7 @@ fn plan_one(
             bold: *bold,
             italic: *italic,
             mono: *mono,
+            family: *family,
             sp: *sp,
             text: text.clone(),
         });
@@ -10099,7 +10116,7 @@ fn frag_rect(
     baseline: i32,
 ) -> (i32, i32, i32, i32) {
     let st = &b.st;
-    let font = fonts.pick(st.bold, st.italic, st.mono);
+    let font = fonts.pick(st.bold, st.italic, st.mono, st.family);
     let m = font.horizontal_line_metrics(st.font_px);
     let asc = m.map(|m| m.ascent).unwrap_or(st.font_px);
     let desc = m.map(|m| m.descent.abs()).unwrap_or(0.0);
@@ -10174,7 +10191,7 @@ fn emit_line(
     for placed in line.drain(..) {
         match placed {
             Placed::Text(seg) => {
-                let font = fonts.pick(seg.style.bold, seg.style.italic, seg.style.mono);
+                let font = fonts.pick(seg.style.bold, seg.style.italic, seg.style.mono, seg.style.family);
                 let mut top = baseline - ascent_i(font, seg.style.size);
                 // vertical-align: raise a superscript, drop a subscript off the
                 // shared baseline (the run is already at its reduced sup/sub size).
@@ -10203,6 +10220,7 @@ fn emit_line(
                         bold: seg.style.bold,
                         italic: seg.style.italic,
                         mono: seg.style.mono,
+family: seg.style.family,
                         sp: seg.style.sp,
                         text: seg.text,
                     });

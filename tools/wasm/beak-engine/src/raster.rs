@@ -35,7 +35,16 @@ impl HoverChange {
 }
 
 pub struct Engine {
-    fonts: Fonts,
+    /// Die Schriften. `RefCell`, weil eine Seite ihre eigenen erst NACH dem
+    /// ersten Auslegen mitbringt und `layout` nur `&self` hat.
+    fonts: core::cell::RefCell<Fonts>,
+    /// Schriften, die die Seite verlangt und die noch fehlen: `(Adresse,
+    /// Familie, Gewicht, kursiv)`. Der Wirt holt sie und meldet sich mit
+    /// `add_font` zurueck — dieselbe Runde wie beim Modulgraphen und den
+    /// nachgeladenen Stilblaettern.
+    pending_fonts: core::cell::RefCell<alloc::vec::Vec<(alloc::string::String, u32, u16, bool)>>,
+    /// Adressen, die schon angefragt wurden — sonst fragt jedes Auslegen neu.
+    asked_fonts: core::cell::RefCell<alloc::vec::Vec<alloc::string::String>>,
     /// Rasterised-glyph cache keyed by (char, size-bits, face-id). fontdue's
     /// rasterise is not free; without this every glyph is re-rasterised every
     /// frame, which makes scrolling lag. Bounded by the glyph set the page uses.
@@ -268,7 +277,9 @@ impl Engine {
     /// across page loads (the shell keeps one `Engine`).
     pub fn new() -> Engine {
         Engine {
-            fonts: Fonts::new(),
+            fonts: core::cell::RefCell::new(Fonts::new()),
+            pending_fonts: core::cell::RefCell::new(alloc::vec::Vec::new()),
+            asked_fonts: core::cell::RefCell::new(alloc::vec::Vec::new()),
             glyphs: RefCell::new(HashMap::new()),
             theme: Theme::DARK,
             images: RefCell::new(crate::image::ImageMap::new()),
@@ -406,7 +417,7 @@ impl Engine {
             // Kein Element gefunden heisst: nicht entscheidbar, also auslegen.
             find(&dom.root, seq).map_or(true, |el| sheet.checked_set.may_match(el))
         };
-        match crate::layout::repaint_controls(lay, &self.fonts, &self.theme, state, &may_restyle) {
+        match crate::layout::repaint_controls(lay, &self.fonts.borrow(), &self.theme, state, &may_restyle) {
             Ok(()) => true,
             Err(why) => {
                 self.repaint_bail.set(why);
@@ -504,7 +515,7 @@ impl Engine {
                 pairs,
             });
         }
-        crate::layout::repaint_hover(lay, &self.fonts, &groups)
+        crate::layout::repaint_hover(lay, &self.fonts.borrow(), &groups)
     }
 
     /// Put the pointer state back to what the last layout was made with —
@@ -670,6 +681,54 @@ impl Engine {
 
     pub fn has_scripted_dom(&self) -> bool { self.scripted.borrow().is_some() }
 
+    /// Welche `@font-face`-Schriften die Seite verlangt und noch nicht hat.
+    ///
+    /// Nur die ERSTE Quelle je Gesicht: die Liste ist die Rangfolge der Seite,
+    /// und beak liest WOFF2 und rohes sfnt — die erste Angabe ist praktisch
+    /// immer WOFF2.
+    fn note_font_faces(&self, sheet: &crate::css::Stylesheet) {
+        for f in &sheet.faces {
+            let Some(url) = f.src.first() else { continue };
+            if self.asked_fonts.borrow().iter().any(|u| u == url) { continue }
+            self.asked_fonts.borrow_mut().push(url.clone());
+            self.pending_fonts.borrow_mut().push((url.clone(), f.family, f.weight, f.italic));
+        }
+    }
+
+    /// Was der Wirt holen soll. Leert die Liste — jede Adresse wird einmal
+    /// angefragt.
+    pub fn take_pending_fonts(&self) -> alloc::vec::Vec<(alloc::string::String, u32, u16, bool)> {
+        core::mem::take(&mut self.pending_fonts.borrow_mut())
+    }
+
+    /// Eine geholte Schrift aufnehmen. `bytes` darf WOFF2 oder rohes sfnt
+    /// sein; alles andere wird abgelehnt, statt als kaputte Schrift zu enden.
+    ///
+    /// Liefert false, wenn die Bytes nicht lesbar waren — der Wirt meldet das.
+    pub fn add_font(&self, family: u32, weight: u16, italic: bool, bytes: &[u8]) -> bool {
+        let owned;
+        let sfnt: &[u8] = if bytes.starts_with(b"wOF2") {
+            match crate::woff2::to_sfnt(bytes) { Some(v) => { owned = v; &owned } None => return false }
+        } else if bytes.starts_with(b"wOFF") {
+            // WOFF1 packt mit zlib. Nicht gebaut — die Fassung ist praktisch
+            // ausgestorben, und eine halbe Umsetzung waere schlechter als ein
+            // ehrliches Nein.
+            return false;
+        } else {
+            bytes
+        };
+        let ok = self.fonts.borrow_mut().add_web(family, weight, italic, sfnt);
+        if ok {
+            // Alles, was mit der alten Schrift gemessen wurde, ist ueberholt.
+            self.sheet.borrow_mut().clear();
+            self.dom.borrow_mut().clear();
+            self.glyphs.borrow_mut().clear();
+        }
+        ok
+    }
+
+    pub fn web_font_count(&self) -> usize { self.fonts.borrow().web_count() }
+
     /// Wie oft der Baum seit dem Start durch Skripte ersetzt wurde.
     ///
     /// Der Wirt braucht die Zahl, um sein FORMULARMODELL nachzuziehen: eine
@@ -828,8 +887,9 @@ impl Engine {
         let t_css = now();
         let held = self.sheet.borrow();
         let sheet = &held[0].1;
+        self.note_font_faces(sheet);
         self.resolve_data_uri_images(&dom);
-        let mut lay = crate::layout::layout(&self.fonts, &dom, sheet, &self.images.borrow(), width, self.viewport_h.get(), &self.theme, forms, self.inspect.get(), &self.hover.borrow(), self.hit_all.get());
+        let mut lay = crate::layout::layout(&self.fonts.borrow(), &dom, sheet, &self.images.borrow(), width, self.viewport_h.get(), &self.theme, forms, self.inspect.get(), &self.hover.borrow(), self.hit_all.get());
         self.resolve_inline_svgs(&dom, &lay);
         self.resolve_css_images(sheet, &mut lay);
         lay.phase = [t_parse.wrapping_sub(t0), t_css.wrapping_sub(t_parse), now().wrapping_sub(t_css)];
@@ -967,7 +1027,7 @@ impl Engine {
         crate::picture::resolve(&mut dom, crate::css::Media::new(width as f32, self.theme.is_dark()));
         self.resolve_data_uri_images(&dom);
         crate::layout::layout(
-            &self.fonts,
+            &self.fonts.borrow(),
             &dom,
             &crate::css::Stylesheet::empty(),
             &self.images.borrow(),
@@ -1036,12 +1096,12 @@ impl Engine {
                                 *rw - 2 * *spread, *rh - 2 * *spread);
                     fill_shadow(out, wi, hi, *x, *y - scroll_y, *rw, *rh, *blur, *color, keep);
                 }
-                DrawOp::Text { x, y, size, color, bold, italic, mono, sp, text } => {
+                DrawOp::Text { x, y, size, color, bold, italic, mono, family, sp, text } => {
                     let vy = *y - scroll_y;
                     if vy > hi || vy + (*size as i32) + 6 < 0 {
                         continue; // fully off-screen line → skip
                     }
-                    self.draw_run(out, wi, hi, *x, vy, *size, *color, *bold, *italic, *mono, *sp, text);
+                    self.draw_run(out, wi, hi, *x, vy, *size, *color, *bold, *italic, *mono, *family, *sp, text);
                 }
                 DrawOp::Image { x, y, w: iw, h: ih, src, alt, fit, filter } => {
                     let vy = *y - scroll_y;
@@ -1097,7 +1157,7 @@ impl Engine {
         fill(out, wi, hi, x, y, 1, h, c);
         fill(out, wi, hi, x + w - 1, y, 1, h, c);
         if !alt.is_empty() && w > 24 {
-            self.draw_run(out, wi, hi, x + 4, y + 4, 13.0, self.theme.muted.into(), false, false, false, (0.0, 0.0), alt);
+            self.draw_run(out, wi, hi, x + 4, y + 4, 13.0, self.theme.muted.into(), false, false, false, 0, (0.0, 0.0), alt);
         }
     }
 
@@ -1116,14 +1176,19 @@ impl Engine {
         bold: bool,
         italic: bool,
         mono: bool,
+        // Streuwert der `font-family` — dieselbe Zahl, mit der das Layout
+        // gemessen hat. Ohne sie malte der Rasterer die eingebaute Schrift
+        // unter die Breiten einer Seitenschrift.
+        family: u32,
         // `(letter-spacing, word-spacing)` — the SAME pair layout measured the
         // run with. Advancing the pen by anything else puts the glyphs somewhere
         // the line box did not reserve.
         sp: (f32, f32),
         text: &str,
     ) {
-        let font = self.fonts.pick(bold, italic, mono);
-        let face = Fonts::face_id(bold, italic, mono);
+        let fonts = self.fonts.borrow();
+        let font = fonts.pick(bold, italic, mono, family);
+        let face = Fonts::face_key(bold, italic, mono, family);
         let ascent = font.horizontal_line_metrics(size).map(|m| m.ascent).unwrap_or(size);
         let baseline = y + ascent as i32;
         let mut pen = x as f32;
@@ -2328,7 +2393,7 @@ mod tests {
         let mut s = alloc::string::String::new();
         for op in &l.ops {
             match op {
-                DrawOp::Text { x, y, size, color, bold, italic, mono, sp, text } => {
+                DrawOp::Text { x, y, size, color, bold, italic, mono, family, sp, text } => {
                     let _ = write!(s, "T {x},{y} {size:.2} c={color:?} {bold}{italic}{mono} {sp:?} {text:?}\n");
                 }
                 DrawOp::Rect { x, y, w, h, color } => {
