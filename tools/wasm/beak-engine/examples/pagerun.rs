@@ -100,6 +100,15 @@ fn main() {
         for l in &sess.interp.console[n0..] { println!("       | {l}"); }
     }
     let n0 = sess.interp.console.len();
+    // Dieselbe Reihenfolge wie im Wirt: `DOMContentLoaded`, dann EIN LAYOUT
+    // (damit `getBoundingClientRect` etwas zu sagen hat), dann `load`.
+    if let Some(dn) = sess.interp.doc.as_ref().map(|d| d.doc) {
+        let _ = beak_engine::js::dombind::dispatch(&mut sess.interp, "DOMContentLoaded", &[dn]);
+    }
+    feed_geometry(&mut sess, &html, &dir);
+    if let Some(dn) = sess.interp.doc.as_ref().map(|d| d.doc) {
+        let _ = beak_engine::js::dombind::dispatch(&mut sess.interp, "load", &[dn]);
+    }
     let mut timers = 0;
     // Zeitgeber UND die Stilblattrunden — dieselbe Reihenfolge wie im Wirt:
     // ein geholtes Blatt laesst eine Komponente fertig bauen, und die meldet
@@ -390,4 +399,34 @@ fn to_bmp(px: &[u8], w: u32, h: u32) -> Vec<u8> {
         for _ in 0..(row - w * 3) { o.push(0); }
     }
     o
+}
+
+/// Einmal auslegen und der Maschine die Kaesten reichen — sonst antwortet
+/// `getBoundingClientRect` mit Nullen, und eine Probe, die misst, misst nichts.
+fn feed_geometry(sess: &mut beak_engine::js::Session, html: &str, dir: &str) {
+    let Some(dom) = sess.interp.doc.as_mut().map(|d| d.to_dom()) else { return };
+    let mut css = String::new();
+    let mut n = 0;
+    collect_links(dom.body(), dir, &mut css, &mut n);
+    collect_links(&dom.root, dir, &mut css, &mut n);
+    let width: u32 = std::env::var("W").ok().and_then(|w| w.parse().ok()).unwrap_or(1902);
+    use beak_engine::layout::{Rgb, Theme};
+    let mut eng = beak_engine::Engine::new();
+    eng.set_theme(Theme { bg: Rgb(255,255,255), text: Rgb(33,37,41), heading: Rgb(33,37,41),
+                          link: Rgb(13,110,253), muted: Rgb(108,117,125), rule: Rgb(222,226,230) });
+    // Ohne diese Zeile zeichnet das Layout gar keine Element-Kaesten auf, und
+    // `element_rects()` ist leer — derselbe Schalter, den der Wirt setzt,
+    // sobald eine Seite Skripte faehrt.
+    eng.set_hit_all(true);
+    eng.set_scripted_dom(Some(dom));
+    let lay = eng.layout_ext(html, &css, width);
+    let rects = lay.element_rects();
+    if std::env::var("GEOMDBG").is_ok() {
+        eprintln!("  Geometrie: {} Kaesten, Layouthoehe {}", rects.len(), lay.height);
+        for r in rects.iter().take(8) { eprintln!("    seq={} {},{} {}x{}", r.seq, r.x, r.y, r.w, r.h); }
+    }
+    sess.interp.set_geometry(beak_engine::js::interp::Geometry {
+        boxes: std::rc::Rc::new(rects), scroll: (0, 0),
+    });
+    sess.interp.set_media(width as f64, 1080.0, false);
 }
