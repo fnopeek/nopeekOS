@@ -628,7 +628,11 @@ fn forge_worker_task(slot: usize, job: WasmJob) {
 
     let host = forge_glue::NpkHost(&raw mut hs);
     let Some(mut inst) = crate::forge_rt::Instance::new_with_host(&m, &host) else {
-        kprintln!("[npk] forge: {} — Instanz liess sich nicht bauen", name_str);
+        // Vier Dinge koennen hier scheitern, und die Meldung sagte keins davon.
+        // Der haeufigste Grund sind fehlende Rahmen — also stehen sie da.
+        let (frames, mb) = crate::mm::memory::stats();
+        kprintln!("[npk] forge: {} — Instanz liess sich nicht bauen (frei: {} Rahmen = {} MB)",
+            name_str, frames, mb);
         done(pid, terminal_idx, slot);
         return;
     };
