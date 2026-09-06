@@ -48,18 +48,24 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-06 · beak 0.111.0 · Kernel 0.326.0** (Rest: `git log`)
+**Stand 2026-09-06 · beak 0.114.0 · Kernel 0.326.0** (Rest: `git log`)
 
 Zwei Fäden laufen parallel.
 
-**▶ Als nächstes: `getBoundingClientRect` antwortet für die Hälfte der
-Elemente nicht.** Gemessen im Browser-Vergleich (Chromium 29 Kästen, beak 13):
-es fehlen `body`, `label`, `strong`, `a`, `input` und eigene Elemente.
-`element_rects()` speist sich aus `hover_boxes` + `controls`, und
-`record_inspect` wird nicht überall gerufen — Inline-Kästen und
-Steuerelemente fallen durch. Eine Seite, die misst, bekommt dort **null**,
-und das sieht aus wie eine Messung. Stand:
+**▶ Als nächstes: Ligaturen (GSUB).** Symbolschriften bilden ihr Zeichen als
+Ligatur; fontdue läuft mit `load_substitutions: false`, also ist `fos-icon`
+1 px statt 24 — kein Schriftfehler, ein GSUB-Fehler. Danach: `body` 600 statt
+937 (die Seite hält das Fenster auf). Stand:
 `memory/project_beak_web_app_stack.md`.
+
+**Farbverläufe sind seit 0.114.0 gebaut** — linear/radial, je auch
+`repeating-`, mit dem Winkel, den der KASTEN einer Ecke vorgibt, Kachelung
+über `background-size` und `in oklab` gelesen-und-fallengelassen. Vorher war
+ein Verlauf ein flacher Kasten, und die Fritzbox-Anmeldung hatte deshalb
+einen weissen Kopf mit weisser Schrift darauf. WPT 4474 -> 4477, kein Test
+verloren. Offen nach Häufigkeit im Korpus: `conic` (11 von 255), ein Verlauf
+am `html`-Kasten, `calc()` in einer Stopp-Lage (2 von 255).
+Stand: `memory/project_beak_gradients.md`.
 
 Gebaut seit 0.104: ES-Module, Custom Elements, Formular-Brücke samt
 `submit`-Ereignis, nachgeladene Stilblätter, `load`/`DOMContentLoaded`, und
