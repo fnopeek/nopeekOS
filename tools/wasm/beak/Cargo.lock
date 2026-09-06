@@ -28,7 +28,7 @@ checksum = "c880a97d28a3681c0267bd29cff89621202715b065127cd445fa0f0fe0aa2880"
 
 [[package]]
 name = "beak"
-version = "0.121.0"
+version = "0.122.0"
 dependencies = [
  "beak-engine",
  "nopeek_widgets",
