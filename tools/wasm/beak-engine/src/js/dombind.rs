@@ -509,6 +509,18 @@ pub enum ScriptRef {
 /// ausfuehren, BEVOR er weiterparst, und `document.write` haengt davon ab.
 /// beak hat das Dokument schon fertig, wenn es hier ankommt — also verhaelt
 /// sich alles wie `defer`. Bewusst, und es deckt alles ausser `document.write`.
+/// Ist `t` das Wurzelelement (`<html>`)?
+fn is_root_element(i: &mut Interp, t: &Value) -> bool {
+    let Ok(id) = node_of(i, t) else { return false };
+    i.doc.as_ref().and_then(|d| d.html) == Some(id)
+}
+
+/// Ein Fenstermass, so wie `set_viewport` es abgelegt hat.
+fn viewport_num(i: &mut Interp, key: &str) -> Value {
+    let g = Value::Obj(i.realm.global.clone());
+    match i.get(&g, key) { Ok(v @ Value::Num(_)) => v, _ => Value::Num(0.0) }
+}
+
 pub fn page_scripts(d: &Doc) -> Vec<ScriptRef> {
     let mut all = Vec::new();
     d.descendants(d.doc, &mut all);
@@ -1652,10 +1664,23 @@ pub fn install(realm: &mut Realm) {
     }, &fp);
     // `clientWidth`/`clientHeight` sind der POLSTERkasten: der Rahmenkasten
     // ohne die Rahmen. Die Summen faehrt `HoverBox` mit.
+    //
+    // **Ausser am WURZELELEMENT — dort sind sie die Sichtflaeche** (CSSOM
+    // View §4: „If the element is the root element … return the viewport
+    // width/height"). Das ist keine Feinheit: Googles Startseite misst damit
+    // das Fenster und laeuft nur weiter, wenn beide Werte wahr sind —
+    //
+    //     h = p.clientWidth; m = p.clientHeight;
+    //     if (h && m && …) { … "/client_204?…&biw=" + h + "&bih=" + m … }
+    //
+    // Mit 0 blieb der Block stehen, das Formular schickte `biw=&bih=`, und
+    // Google hielt uns fuer einen Browser ohne JavaScript.
     getter(&element_proto, "clientWidth", |i, t, _| {
+        if is_root_element(i, &t) { return Ok(viewport_num(i, "innerWidth")) }
         Ok(Value::Num(elem_inner(i, &t).map_or(0.0, |(w, _)| w)))
     }, &fp);
     getter(&element_proto, "clientHeight", |i, t, _| {
+        if is_root_element(i, &t) { return Ok(viewport_num(i, "innerHeight")) }
         Ok(Value::Num(elem_inner(i, &t).map_or(0.0, |(_, h)| h)))
     }, &fp);
     // NOCH Platzhalter, und sie stehen als solche in `tests/apigap.rs`:
@@ -3222,6 +3247,30 @@ mod tests {
              console.log(String(document.getElementsByTagName('img').length));",
         );
         assert_eq!(out, ["IMG 1 true", "/pixel.gif", "16x9", "1"]);
+    }
+
+    /// **Am Wurzelelement ist `clientWidth` die SICHTFLAECHE** (CSSOM View
+    /// §4), nicht der Polsterkasten. Googles Startseite misst damit das
+    /// Fenster und laeuft nur weiter, wenn beide Werte wahr sind — mit 0
+    /// blieb ihr ganzer Messblock stehen und das Formular schickte
+    /// `biw=&bih=`.
+    ///
+    /// Eigener Aufbau statt `run`: der Helfer setzt keine Sichtflaeche, und
+    /// genau die ist hier der Gegenstand.
+    #[test]
+    fn clientwidth_am_wurzelelement_ist_die_sichtflaeche() {
+        let dom = crate::dom::parse("<html><body><p id='p'>x</p></body></html>");
+        let mut i = super::super::interp::Interp::new();
+        i.set_document(super::Doc::from_dom(&dom));
+        i.set_media(1902.0, 1000.0, false);
+        let src = "[document.documentElement.clientWidth, \
+                    document.documentElement.clientHeight, \
+                    document.documentElement.clientWidth === window.innerWidth, \
+                    document.getElementById('p').clientWidth === window.innerWidth].join(',')";
+        let prog = crate::js::parse(src, false).expect("parst");
+        let Ok(v) = i.run_program(&prog) else { panic!("der Lauf hat geworfen") };
+        let Ok(got) = i.to_string(&v) else { panic!("kein Text") };
+        assert_eq!(&*got, "1902,1000,true,false");
     }
 
     /// Ein Element, das ein Skript erst erzeugt hat, kommt im Baum nicht vor.

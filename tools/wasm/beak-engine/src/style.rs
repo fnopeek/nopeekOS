@@ -2519,21 +2519,16 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
     let em = parent.font_px;
     match tag {
         // Non-rendered subtrees.
-        "head" | "title" | "meta" | "link" | "script" | "style" | "template" => {
+        "head" | "title" | "meta" | "link" | "script" | "style" | "template"
+        | "noscript" => {
             s.display = Display::None;
         }
-        // `<noscript>` is deliberately NOT in that list. A browser hides it only
-        // while scripting is ENABLED (HTML §15.3.1) — with scripting off its
-        // children are ordinary markup and render, which is literally beak's
-        // case. `dom.rs` already parses the contents as markup rather than raw
-        // text, so the element only had to stop being hidden. It stays inline,
-        // as the initial value says; the lazy-loading `<img>` fallbacks pages
-        // put there are what this brings back.
-
-        // `<body>` is the block container that insets the page, and the inset
-        // is its UA MARGIN (HTML's rendering section says 8px) — not a fixed
-        // page padding. A reftest that writes `body { margin: 0 }` means it,
-        // and so does a page that lays itself edge to edge.
+        // `<noscript>` gehoert wieder dazu, und der alte Kommentar hier sagte
+        // selbst, unter welcher Bedingung: „a browser hides it only while
+        // scripting is ENABLED … which is literally beak's case." Beaks Fall
+        // ist es seit Stage 1 nicht mehr — beak faehrt Skripte. Der Parser
+        // liest den Inhalt jetzt als Rohtext (`dom.rs::RAWTEXT`), diese Zeile
+        // ist der zweite Riegel.
         "body" => {
             s.display = Display::Block;
             s.margin_top = 8.0;
