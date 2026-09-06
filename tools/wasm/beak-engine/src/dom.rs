@@ -135,7 +135,20 @@ const VOID: &[&str] = &[
     "source", "track", "wbr",
 ];
 // Raw-text elements: everything up to the matching close is literal text.
-const RAWTEXT: &[&str] = &["script", "style"];
+//
+// **`noscript` steht hier, seit beak Skripte fahren kann.** Bei
+// eingeschaltetem Skripting liest der Parser den Inhalt eines `<noscript>`
+// laut HTML §13.2.5 als ROHTEXT — er baut daraus gar keine Elemente. Solange
+// beak keine Skripte hatte, war das Gegenteil richtig, und der alte
+// Kommentar in `style.rs` sagte das auch so.
+//
+// Was daran haengt, ist keine Feinheit: Googles Ergebnisseite legt in ihr
+// `<noscript>` ein `<style>table,div,span,p{display:none}</style>` UND ein
+// `<meta http-equiv="refresh" url=/httpservice/retry/enablejs>`. Als Markup
+// gelesen versteckt das jede Tabelle, jeden Kasten und jeden Absatz der
+// Seite und navigiert dann weg — bei einem Browser, der sehr wohl Skripte
+// fährt. [[feedback_the_named_gap_may_not_be_the_gap]]
+const RAWTEXT: &[&str] = &["script", "style", "noscript"];
 // Block-level starters that imply a `</p>` when a `<p>` is still open.
 const BLOCK_STARTERS: &[&str] = &[
     "address", "article", "aside", "blockquote", "details", "div", "dl", "fieldset", "figcaption",

@@ -11649,32 +11649,47 @@ fn dbg_wiki_shape() {
         assert!(texts(&forced).iter().any(|(_, _, s)| *s == "modal"));
     }
 
-    /// `<noscript>` renders when scripting is off (HTML §15.3.1) — and beak has
-    /// no scripting at all. Pages put lazy-loading `<img>` fallbacks in there,
-    /// which is content we were throwing away.
+    /// **`<noscript>` ist inert, weil beak Skripte faehrt.**
+    ///
+    /// Dieser Test stand einmal umgekehrt da, und er hatte recht: solange
+    /// beak kein JavaScript hatte, war der Inhalt eines `<noscript>`
+    /// gewoehnliches Markup und gehoerte gerendert (HTML §15.3.1). Seit
+    /// Stage 1 stimmt die Voraussetzung nicht mehr.
+    ///
+    /// Was daran haengt, zeigt Googles Ergebnisseite: sie legt in ihr
+    /// `<noscript>` ein `<style>table,div,span,p{display:none}</style>` und
+    /// ein `<meta http-equiv="refresh">` auf ihre „bitte aktiviere
+    /// JavaScript"-Seite. Als Markup gelesen versteckt das jede Tabelle,
+    /// jeden Kasten und jeden Absatz — und navigiert dann weg.
     #[test]
-    fn noscript_content_renders_because_we_have_no_script() {
+    fn noscript_ist_inert_weil_beak_skripte_faehrt() {
         let l = lay("<body><p>a</p><noscript><p>fallback</p></noscript></body>", 800);
         let t: Vec<&str> = texts(&l).iter().map(|(_, _, s)| *s).collect();
-        assert!(t.contains(&"fallback"), "{t:?}");
+        assert!(t.contains(&"a"), "{t:?}");
+        assert!(!t.contains(&"fallback"), "der Inhalt darf nicht rendern: {t:?}");
 
-        // An `<img>` inside it has to reach the shell's fetch list, or the
-        // fallback renders as an empty box.
+        // Ein `<img>` darin darf NICHT geholt werden — sonst laedt die Seite
+        // Bilder, die nur fuer den skriptlosen Fall gedacht sind.
         let l2 = lay(
             "<body><noscript><img src=\'/late.png\' width=\'40\' height=\'20\'></noscript></body>",
             800,
         );
         assert!(
-            l2.ops.iter().any(|o| matches!(o, DrawOp::Image { src, .. } if src == "/late.png")),
-            "the fallback image must be laid out"
+            !l2.ops.iter().any(|o| matches!(o, DrawOp::Image { src, .. } if src == "/late.png")),
+            "das Rueckfallbild gehoert nicht ins Layout"
         );
 
-        // `<script>`/`<style>` stay hidden — only noscript moved.
-        let l3 = lay("<body><script>var x = 1</script><style>p{}</style>after</body>", 800);
+        // Der Rohtext darf auch nicht als TEXT auf der Seite landen.
+        let l3 = lay("<body><noscript><style>p{display:none}</style></noscript>danach</body>", 800);
         let t3: Vec<&str> = texts(&l3).iter().map(|(_, _, s)| *s).collect();
-        assert!(!t3.iter().any(|s| s.contains("var x")), "{t3:?}");
-        assert!(!t3.iter().any(|s| s.contains("p{}")), "{t3:?}");
-        assert!(t3.iter().any(|s| s.contains("after")), "{t3:?}");
+        assert!(!t3.iter().any(|s| s.contains("display:none")), "{t3:?}");
+        assert!(t3.iter().any(|s| s.contains("danach")), "{t3:?}");
+
+        // `<script>`/`<style>` bleiben wie bisher versteckt.
+        let l4 = lay("<body><script>var x = 1</script><style>p{}</style>after</body>", 800);
+        let t4: Vec<&str> = texts(&l4).iter().map(|(_, _, s)| *s).collect();
+        assert!(!t4.iter().any(|s| s.contains("var x")), "{t4:?}");
+        assert!(t4.iter().any(|s| s.contains("after")), "{t4:?}");
     }
 
     fn rects(l: &Layout) -> Vec<(i32, i32, i32, i32, Rgb)> {

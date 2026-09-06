@@ -619,6 +619,41 @@ pub fn install(realm: &mut Realm) {
     realm.global.borrow_mut().define("fetch", Prop::builtin(Value::Obj(f)));
 
     install_xhr(realm);
+
+    // ── navigator.sendBeacon ────────────────────────────────────────────
+    //
+    // **Fire and forget: die Antwort interessiert niemanden.** Deshalb steht
+    // kein Warter in `fetch_waiting` — `fetch_done` findet keinen und legt
+    // die Antwort weg. Genau das ist die Semantik.
+    //
+    // Gefunden an Googles Startseite: sie meldet die gemessene Fenstergroesse
+    // mit `navigator.sendBeacon("/client_204?…&biw=…&bih=…")`, und der Aufruf
+    // steht in einem `try{}catch{}`. Ohne die Funktion scheitert er STILL —
+    // im Log stand nichts, und die Seite verhielt sich, als haette sie nie
+    // gemessen.
+    //
+    // Gleiche Herkunft, wie bei `fetch` und `XMLHttpRequest`. Ein Beacon an
+    // eine fremde Herkunft ist der Ausleitungskanal in Reinform; `false`
+    // sagt dem Rufer, dass nichts abging.
+    if let Some(Value::Obj(nav)) = realm.global.borrow().get_own("navigator")
+        .and_then(|p| p.value.clone()) {
+        let f = native(Some(fp.clone()), |i, _, a| {
+            let raw = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_string();
+            let body = match a.get(1) {
+                None | Some(Value::Undefined) | Some(Value::Null) => None,
+                Some(v) => Some(i.to_string(v)?.to_string()),
+            };
+            let Some(url) = same_origin_url(i, &raw)? else { return Ok(Value::Bool(false)) };
+            let id = i.next_fetch_id;
+            i.next_fetch_id += 1;
+            // POST, wenn etwas mitfaehrt — sonst GET, so wie ein Zaehlpixel.
+            let method = if body.is_some() { "POST" } else { "GET" };
+            i.pending_fetches.push(PendingFetch {
+                id, url, method: String::from(method), headers: String::new(), body });
+            Ok(Value::Bool(true))
+        }, "sendBeacon", 1, false);
+        nav.borrow_mut().define("sendBeacon", Prop::builtin(Value::Obj(f)));
+    }
 }
 
 /// Den Rumpf EINMAL hergeben. `bodyUsed` ist kein Schmuck: eine Antwort
@@ -947,6 +982,32 @@ mod tests {
             y.open('GET','https://fremd.test/x'); y.send(); s");
         assert_eq!(r, "error:0:4");
         assert!(i.take_pending_fetches().is_empty(), "nichts darf beim Wirt liegen");
+    }
+
+    /// **`sendBeacon` ist fire-and-forget** — es meldet nur, ob etwas abging.
+    ///
+    /// Googles Startseite meldet damit die gemessene Fenstergroesse, und der
+    /// Aufruf steht in einem `try{}catch{}`: fehlt die Funktion, scheitert er
+    /// STILL. Fremde Herkunft gibt `false` statt eines Wurfs — ein Beacon
+    /// dorthin waere der Ausleitungskanal in Reinform.
+    #[test]
+    fn sendbeacon_schickt_und_meldet_nur_ob() {
+        let mut i = Interp::new();
+        i.set_location("http://beispiel.test/a/b.html");
+        assert_eq!(ausdruck(&mut i, "typeof navigator.sendBeacon"), "function");
+        assert_eq!(ausdruck(&mut i, "String(navigator.sendBeacon('/client_204?x=1'))"), "true");
+        let q = i.take_pending_fetches();
+        assert_eq!(q.len(), 1);
+        assert_eq!(&q[0].url, "http://beispiel.test/client_204?x=1");
+        assert_eq!(&q[0].method, "GET", "ohne Rumpf ein GET, wie ein Zaehlpixel");
+        // Mit Rumpf ein POST.
+        assert_eq!(ausdruck(&mut i, "String(navigator.sendBeacon('/p', 'daten'))"), "true");
+        let q = i.take_pending_fetches();
+        assert_eq!(&q[0].method, "POST");
+        assert_eq!(q[0].body.as_deref(), Some("daten"));
+        // Fremd: false, und nichts geht ab.
+        assert_eq!(ausdruck(&mut i, "String(navigator.sendBeacon('https://fremd.test/x'))"), "false");
+        assert!(i.take_pending_fetches().is_empty());
     }
 
     /// Synchron kann die Engine nicht — sie gibt die Kontrolle an den Wirt
