@@ -1900,6 +1900,7 @@ fn finish_scripts(engine: &Engine) {
     push_i64(&mut m, (now_ms() - t0) as i64);
     m.push_str(" ms");
     if timers > 0 { m.push_str(", "); push_i64(&mut m, timers as i64); m.push_str(" Zeitgeber"); }
+    if now_ms() - t0 > SCRIPT_SLOW_MS { m.push_str(", RECHNET LANGE"); }
     // Ob die Zustellung ueberhaupt scharf ist, gehoert EINMAL je Seite ins
     // Log. Ohne diese Zeile ist "kein Klick kam an" nicht von "die Seite hat
     // keine Behandler" zu unterscheiden — und das ist genau der Unterschied,
@@ -1996,12 +1997,25 @@ const SCRIPT_STEPS: u64 = 20_000_000_000;
 /// Wie lange ein Skriptlauf oder ein Behandler rechnen darf.
 ///
 /// **Grosszuegig, und mit Grund.** Eine Anmeldung, die ihren Kennwort-Hash
-/// selbst rechnet (PBKDF2, zehntausende Runden), braucht in beak Sekunden —
-/// gemessen 65 s fuer die 66 000 Runden einer Fritzbox. Das ist keine
-/// Endlosschleife, das ist der Preis eines Interpreters, und ihn abzuwuergen
-/// hiesse „die Seite ist kaputt" zu melden, wo sie es nicht ist. Der Deckel
-/// ist gegen das ANDERE da: `while(true)`.
-const SCRIPT_BUDGET_MS: i64 = 120_000;
+/// selbst rechnet (PBKDF2, zehntausende Runden), braucht in beak Minuten. Das
+/// ist keine Endlosschleife, das ist der Preis eines Interpreters, und ihn
+/// abzuwuergen hiesse „die Seite ist kaputt" zu melden, wo sie es nicht ist.
+/// Der Deckel ist gegen das ANDERE da: `while(true)`.
+///
+/// **Die Zahl kommt vom GERAET, nicht vom Host.** Host-seitig gemessen
+/// kostet die Fritzbox-Anmeldung 65 s — aber das ist NATIVER Code. Am Geraet
+/// laeuft beak durch forge, und `tools/beaknative` hat das Verhaeltnis
+/// ausgezaehlt: nativ 17,0 ms, forge 66,6 ms, wasmi 350,4 ms, also **3,9x**.
+/// Mit einem 120-s-Deckel haette dieselbe Anmeldung, die host-seitig
+/// durchlaeuft, am Geraet abgebrochen — und der Bericht haette „script ran
+/// too long" gesagt, wo in Wahrheit die Messung am falschen Ziel stand
+/// ([[feedback_host_profile_is_not_the_device]]).
+const SCRIPT_BUDGET_MS: i64 = 360_000;
+
+/// Ab wann ein Lauf im Log auffaellt. Ein Skript, das Minuten rechnet, ist
+/// kein Fehler — aber es ist der Grund, warum nichts passiert, und das
+/// gehoert gesagt, statt es aus einem Zeitstempel raten zu lassen.
+const SCRIPT_SLOW_MS: i64 = 3_000;
 
 static mut SCRIPT_DEADLINE: i64 = 0;
 
