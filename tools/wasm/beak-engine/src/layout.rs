@@ -1394,6 +1394,15 @@ fn op_key(op: &DrawOp) -> OpKey {
 }
 
 impl Layout {
+    /// Wo die Befehle eines Steuerelements liegen — `(seq, at, len)`.
+    ///
+    /// Nur fuer Proben: `repaint_controls` ersetzt genau diese Spanne, und
+    /// wenn sie nicht stimmt, frisst die Ersetzung den Nachbarn. Von aussen
+    /// war das bisher nicht nachzusehen.
+    pub fn control_spans(&self) -> Vec<(u32, usize, usize)> {
+        self.controls.iter().map(|c| (c.seq, c.at, c.len)).collect()
+    }
+
     /// Does any box this layout painted for one of `srcs` reach into the
     /// vertical band `[top, bottom)` of the document?
     ///
@@ -1442,11 +1451,19 @@ impl Layout {
     /// `getBoundingClientRect` ihre Vereinigung.
     pub fn element_rects(&self) -> Vec<ElemRect> {
         let mut out = Vec::with_capacity(self.hover_boxes.len() + self.controls.len());
-        for b in &self.hover_boxes {
-            out.push(ElemRect { seq: b.seq, x: b.x, y: b.y, w: b.w, h: b.h, bx: b.bx, by: b.by });
-        }
         for c in &self.controls {
             out.push(ElemRect { seq: c.seq, x: c.x, y: c.y, w: c.w, h: c.h, bx: 0, by: 0 });
+        }
+        // **Der Kasten eines Steuerelements ist das Steuerelement.** Ein
+        // blockweiter Knopf bekommt vom Blockpfad AUSSERDEM einen Kasten in
+        // voller Spaltenbreite aufgezeichnet — und der stand vorher zuerst in
+        // der Liste. `getBoundingClientRect` gab dann 620 px statt der 296,
+        // die gemalt werden, und `margin:auto` sah aus, als wirke es nicht.
+        for b in &self.hover_boxes {
+            if self.controls.iter().any(|c| c.seq == b.seq) {
+                continue;
+            }
+            out.push(ElemRect { seq: b.seq, x: b.x, y: b.y, w: b.w, h: b.h, bx: b.bx, by: b.by });
         }
         out
     }
@@ -2353,6 +2370,41 @@ fn reorder_by_z<T>(items: Vec<T>, ranges: &[(i32, i32, usize, usize)]) -> Vec<T>
     blocks.into_iter().flat_map(|(_, v)| v).collect()
 }
 
+/// Wohin `reorder_by_z` jeden Befehl legt: `perm[alt] == neu`.
+///
+/// Dieselbe Blockbildung wie dort, nur mit Indizes statt Werten — damit
+/// koennen Nebentabellen, die auf Befehle zeigen, mitgezogen werden.
+fn z_permutation(len: usize, ranges: &[(i32, i32, usize, usize)]) -> Vec<usize> {
+    let mut perm: Vec<usize> = (0..len).collect();
+    if ranges.is_empty() {
+        return perm;
+    }
+    let idx: Vec<usize> = (0..len).collect();
+    let out = reorder_by_z(idx, ranges);
+    for (new, &old) in out.iter().enumerate() {
+        perm[old] = new;
+    }
+    perm
+}
+
+/// Die neue Startstelle einer Spanne — oder `None`, wenn die Umsortierung sie
+/// ZERRISSEN hat.
+///
+/// Ein zerrissener Bereich ist nicht am Stueck ersetzbar; der Schnellweg muss
+/// ihn dann ablehnen, statt fremde Befehle zu ueberschreiben.
+fn remap_span(perm: &[usize], at: usize, len: usize) -> Option<usize> {
+    if len == 0 {
+        return perm.get(at).copied().or(Some(perm.len()));
+    }
+    let first = *perm.get(at)?;
+    for k in 1..len {
+        if *perm.get(at + k)? != first + k {
+            return None;
+        }
+    }
+    Some(first)
+}
+
 /// Lay a document out into a scroll-independent display list.
 pub fn layout(
     fonts: &crate::fonts::Fonts,
@@ -2520,12 +2572,20 @@ pub fn layout(
     }
     let op_ranges = split_float_ranges(&ctx.stack_ops, &ctx.float_ops);
     let link_ranges = split_float_ranges(&ctx.stack_links, &ctx.float_links);
+    // Die Umsortierung nach z verschiebt ganze Bloecke — und damit auch die
+    // Spanne, die ein Steuerelement fuer sich notiert hat. Erst die Abbildung
+    // alt -> neu, dann die Befehle UND die Spannen damit umschreiben.
+    let perm = z_permutation(ctx.ops.len(), &op_ranges);
+    let mut controls = ctx.controls;
+    for c in &mut controls {
+        c.at = remap_span(&perm, c.at, c.len).unwrap_or(usize::MAX);
+    }
     let ops = reorder_by_z(ctx.ops, &op_ranges);
     let links = reorder_by_z(ctx.links, &link_ranges);
     Layout {
         ops,
         links,
-        controls: ctx.controls,
+        controls,
         height: y.max(1) as u32,
         bg: canvas_bg,
         guessed_image_srcs: ctx.guessed.into_inner(),
@@ -2934,8 +2994,17 @@ impl<'a> Ctx<'a> {
                 // only when the page also asked for it, which the `display:block;
                 // width:100%` idiom (Codex, Bootstrap) always does. A bare
                 // block-level control keeps its intrinsic width as an inline.
+                //
+                // Die AUSNAHME ist `margin: auto`. Ein Kasten, der links und
+                // rechts `auto` sagt, will mittig stehen — und das kann nur
+                // ein Block, kein Inline (an einem Inline rechnet `auto` zu
+                // null). Die Fritzbox setzt ihren Anmeldeknopf genau so:
+                // `display:block; margin:auto; min-width:18.5rem`, und bei uns
+                // klebte er 162 px zu weit links.
+                let centred = matches!(st.margin_left, Len::Auto)
+                    && matches!(st.margin_right, Len::Auto);
                 let block_level = matches!(st.display, Display::Block | Display::Flex | Display::Grid)
-                    && !matches!(st.width, Len::Auto);
+                    && (!matches!(st.width, Len::Auto) || centred);
                 if !block_level {
                     self.path.push(self.info(el));
                     let ctl = self.control_box(el, &st, kind, w as f32);
@@ -4501,6 +4570,17 @@ family: st.family,
         for (i, op) in ops.into_iter().enumerate() {
             self.ops.insert(at + i, op);
         }
+        // Die Steuerelemente sind die DRITTE Tabelle mit Befehlsindizes, und
+        // sie wurde hier jahrelang vergessen. Der Hintergrund eines Kastens
+        // wird UNTER seinen schon gemalten Inhalt geschoben — also vor jedes
+        // Feld darin. Blieb `at` stehen, ersetzte der Schnellweg beim naechsten
+        // Tastendruck fremde Befehle, und das Feld malte sich unter den alten
+        // Kasten: getippter Text unsichtbar, der Text daneben verschoben.
+        for c in &mut self.controls {
+            if c.at >= at {
+                c.at += n;
+            }
+        }
         for (_, _, s, e) in &mut self.stack_ops {
             if *s >= at {
                 *s += n;
@@ -5962,14 +6042,25 @@ family: st.family,
             // height is the stretched cross size. Painting the control's own
             // intrinsic size instead would overlap the next item and ignore the
             // stretch every grid/flex item gets by default.
-            if !matches!(kind, ControlKind::Checkbox | ControlKind::Radio) {
+            // `width: auto` plus zwei `auto`-Raender: ein blockweiter Kasten
+            // mit EIGENER Breite, mittig gesetzt. CSS 2.1 §10.3.4 behandelt
+            // ein Steuerelement dabei wie einen ersetzten Kasten — die Breite
+            // kommt aus ihm selbst, der Rest wird gleichmaessig verteilt.
+            let mut dx = 0;
+            let centred = matches!(st.width, Len::Auto)
+                && matches!(st.margin_left, Len::Auto)
+                && matches!(st.margin_right, Len::Auto)
+                && ctl.w < w;
+            if centred {
+                dx = (w - ctl.w) / 2;
+            } else if !matches!(kind, ControlKind::Checkbox | ControlKind::Radio) {
                 ctl.w = w.max(8);
                 if let Some(hh) = st.height.px(w as f32) {
                     ctl.h = (hh as i32).max(8);
                 }
             }
             let h_i = ctl.h;
-            paint_control(self.fonts, self.theme, &ctl, x, y, &mut self.ops, &mut self.controls);
+            paint_control(self.fonts, self.theme, &ctl, x + dx, y, &mut self.ops, &mut self.controls);
             return y + h_i;
         }
         // The block path resolves percentage heights itself (it is entered
@@ -6736,13 +6827,29 @@ family: st.family,
 
         // Definite container content height (for cross-stretch / main-axis flex).
         let def_h: Option<f32> = content_height_of(st, st.height);
+        // **`min-height` bestimmt die Quer-Groesse genauso.** Ein Behaelter mit
+        // `min-height: 100vh` und `align-items: center` hat 993 px Platz, in
+        // denen er mittig setzen kann — bisher sah das Layout nur `height`,
+        // fand nichts, und der Kasten klebte oben. Dasselbe Loch liess
+        // `min-height: 100%` an einem Kind gegen NICHTS rechnen: zwei
+        // WPT-Tests und die Fritzbox-Anmeldung, ein Fehler.
+        //
+        // Es ist ein BODEN, kein Ersatz: ist der natuerliche Inhalt hoeher,
+        // gilt der. Deshalb reicht ein Durchgang — der Boden steht vorher
+        // fest, und die Zeile nimmt das Maximum.
+        let min_h: Option<f32> = content_height_of(st, st.min_height);
+        // Und `max-height` ist derselbe Satz von der anderen Seite: eine
+        // DECKE. Ohne sie lief ein Kind auf 9999 px, obwohl der Behaelter auf
+        // 100 gedeckelt war — der Deckel griff erst ganz am Ende an der
+        // Kastenhoehe, nicht an dem, was die Zeile ihren Kindern gibt.
+        let max_h: Option<f32> = content_height_of(st, st.max_height);
 
         let prev_cb_h = self.cb_h;
         self.cb_h = def_h;
         let mut content_h = if items.is_empty() {
             0
         } else if st.flex_row {
-            self.flex_row(&items, st, content_x, content_w, content_top, def_h)
+            self.flex_row(&items, st, content_x, content_w, content_top, def_h, min_h, max_h)
         } else {
             self.flex_column(&items, st, content_x, content_w, content_top, def_h)
         };
@@ -6802,6 +6909,11 @@ family: st.family,
         w: i32,
         y0: i32,
         def_cross: Option<f32>,
+        // Der Boden aus `min-height` — bestimmt wie `def_cross`, aber er
+        // ERSETZT die natuerliche Groesse nicht, er hebt sie nur an.
+        min_cross: Option<f32>,
+        // Und die Decke aus `max-height`.
+        max_cross: Option<f32>,
     ) -> i32 {
         let avail = w as f32;
         // Row flex: the MAIN axis is horizontal, so the gap between items is
@@ -6812,7 +6924,9 @@ family: st.family,
         let line_gap = st.grid_row_gap.px(def_cross.unwrap_or(0.0)).unwrap_or(0.0);
 
         // — per-item metrics (content-box main size = width) —
-        let m = self.flex_metrics(items, avail, true, def_cross);
+        // Die Prozentbasis der Kinder ist die BENUTZTE Quer-Groesse — und die
+        // steht auch fest, wenn sie aus `min-height` kommt.
+        let m = self.flex_metrics(items, avail, true, def_cross.or(min_cross));
 
         // — line breaking (flex-wrap) —
         let lines = flex_break_lines(&m, avail, main_gap, st.flex_wrap, st.flex_balance);
@@ -6833,7 +6947,7 @@ family: st.family,
             let mut nat: Vec<i32> = Vec::with_capacity(n_lines);
             let mut y = y0;
             for &line in &lines {
-                let h = self.flex_row_line(items, st, &m, x, avail, main_gap, line, y, None);
+                let h = self.flex_row_line(items, st, &m, x, avail, main_gap, line, y, None, None, None);
                 nat.push(h);
                 y += h + line_gap as i32;
             }
@@ -6885,7 +6999,9 @@ family: st.family,
         let mut cross_y = y0 + offset_cross;
         for (i, &line) in lines.iter().enumerate() {
             let line_cross =
-                self.flex_row_line(items, st, &m, x, avail, main_gap, line, cross_y, forced[i]);
+                self.flex_row_line(items, st, &m, x, avail, main_gap, line, cross_y, forced[i],
+                                   if n_lines == 1 { min_cross } else { None },
+                                   if n_lines == 1 { max_cross } else { None });
             cross_y += line_cross;
             if i + 1 < n_lines {
                 cross_y += line_gap as i32 + extra_line_gap;
@@ -6911,6 +7027,10 @@ family: st.family,
         line: (usize, usize),
         cross_y: i32,
         forced_cross: Option<i32>,
+        // `min-height` des Behaelters, wenn diese Zeile die einzige ist.
+        min_cross: Option<f32>,
+        // dito `max-height`.
+        max_cross: Option<f32>,
     ) -> i32 {
         let (idx0, idx1) = (line.0, line.1);
         let li = &m[idx0..idx1];
@@ -7014,7 +7134,14 @@ family: st.family,
             })
             .max()
             .unwrap_or(0);
-        let line_cross = forced_cross.unwrap_or(nat_line);
+        // `height` SETZT die Zeile (ein zu kleiner Wert laesst die Inhalte
+        // ueberlaufen), `min-height` HEBT sie nur an — die Reihenfolge, die
+        // css-sizing-3 §5 fuer die Klammerung vorschreibt.
+        let line_cross = clamp_cross(
+            forced_cross.unwrap_or(nat_line) as f32,
+            min_cross.unwrap_or(0.0),
+            max_cross.unwrap_or(f32::INFINITY),
+        ) as i32;
 
         // Now that the line's cross size is known, work out where each item
         // really goes, and find the FIRST one the speculative pass got
@@ -9720,8 +9847,39 @@ pub fn repaint_controls(
         next.text = text;
         next.ghost = ghost;
         next.caret = caret;
-        let mut ops = Vec::new();
+        // **Die Spanne beweisen, bevor sie ersetzt wird.**
+        //
+        // `at`/`len` zeigen auf Befehle, die WOANDERS entstanden sind, und
+        // zwischen dem Notieren und hier liegen drei Stellen, die die Liste
+        // umbauen: ein eingeschobener Hintergrund, ein angehaengter
+        // Inline-Kasten, die Umsortierung nach z. Jede hat die Spanne schon
+        // einmal verschoben, ohne es zu sagen — und eine falsche Spanne
+        // ersetzt fremde Befehle, was am Geraet aussieht wie „der Text daneben
+        // verschwindet". Also nachrechnen: was da steht, MUSS das sein, was
+        // der alte Zustand gemalt haette. Kostet `len` Vergleiche (~6) und
+        // macht aus einem stillen Schaden ein ehrliches Auslegen.
+        let mut was = Vec::new();
         let mut throwaway = Vec::new();
+        paint_control(fonts, theme, old, c.x, c.y, &mut was, &mut throwaway);
+        // Eine LEERE Spanne sagt nicht, wo neue Befehle hingehoeren. Ein Feld
+        // ohne Rahmen, ohne eigene Flaeche und ohne Text malt nichts — die
+        // Fritzbox baut ihres genau so —, und `at` liegt dann auf einer
+        // Stelle, an der zwei Kaesten aneinandergrenzen. Ob die neuen Befehle
+        // VOR oder HINTER den Hintergrund des naechsten gehoeren, steht im
+        // Baum und nicht im Index. Also einmal auslegen: danach hat das Feld
+        // einen Cursor, die Spanne ist nicht mehr leer, und jeder weitere
+        // Tastendruck geht wieder den Schnellweg.
+        if c.len == 0 {
+            return Err("das Steuerelement hat bisher nichts gemalt");
+        }
+        if c.at > lay.ops.len() || c.at + c.len > lay.ops.len() || was.len() != c.len {
+            return Err("die notierte Befehlsspanne passt nicht zum Steuerelement");
+        }
+        if lay.ops[c.at..c.at + c.len].iter().map(op_key).ne(was.iter().map(op_key)) {
+            return Err("an der notierten Stelle stehen fremde Befehle");
+        }
+        let mut ops = Vec::new();
+        throwaway.clear();
         paint_control(fonts, theme, &next, c.x, c.y, &mut ops, &mut throwaway);
         plan.push((i, ops, next));
     }
@@ -10388,6 +10546,12 @@ family: seg.style.family,
                         a.x += dx;
                         a.y += dy;
                     }
+                }
+                // Die Befehle des Kastens landen HINTER den bisherigen — die
+                // Indizes seiner Steuerelemente zaehlen aber ab null.
+                let base = ops.len();
+                for c in &mut box_.controls {
+                    c.at += base;
                 }
                 ops.append(&mut box_.ops);
                 links.append(&mut box_.links);
