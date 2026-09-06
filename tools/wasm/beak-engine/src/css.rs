@@ -1322,8 +1322,24 @@ pub type Registered = alloc::vec::Vec<(String, String)>;
 /// CSS) laying out took 159 ms with the site's stylesheet and 6.8 ms with an
 /// empty one — i.e. ~95 % of layout was selector matching. Under the WASM
 /// interpreter on the device that was 13 of the 14.6 seconds to first paint.
+/// Eine Schrift, die die SEITE mitbringt (`@font-face`).
+#[derive(Clone, Debug)]
+pub struct FontFace {
+    /// Streuwert des Familiennamens (`style::hash_name` auf klein).
+    pub family: u32,
+    /// Die Quellen in der Reihenfolge der Seite. Die erste, die beak lesen
+    /// kann, gewinnt — genau wie im Browser.
+    pub src: Vec<String>,
+    /// 100..900. Ein Bereich (`400 700`) wird auf seinen Anfang gelegt.
+    pub weight: u16,
+    pub italic: bool,
+}
+
 pub struct Stylesheet {
     rules: Vec<Rule>,
+    /// Was die Seite an Schriften mitbringt. NUR die Angaben — die Bytes holt
+    /// der Wirt (siehe `Engine::take_pending_fonts`).
+    pub faces: Vec<FontFace>,
     /// Anfangswerte aus `@property` — siehe [`Registered`].
     pub registered: Registered,
     /// Selectors targeting real elements.
@@ -1502,6 +1518,7 @@ impl Index {
 impl Stylesheet {
     pub fn empty() -> Stylesheet {
         Stylesheet {
+            faces: Vec::new(),
             rules: Vec::new(),
             registered: Registered::new(),
             normal: Index::default(),
@@ -1754,7 +1771,8 @@ pub fn parse(css: &str) -> Stylesheet {
     let mut order = 0u32;
     let mut layers = Layers::default();
     let mut registered: Registered = Registered::new();
-    parse_into(&css, 0, css.len(), None, &mut rules, &mut order, "", &mut layers, &mut registered);
+    let mut faces: Vec<FontFace> = Vec::new();
+    parse_into(&css, 0, css.len(), None, &mut rules, &mut order, "", &mut layers, &mut registered, &mut faces);
     // Ids became positions only now that every layer is known.
     if !layers.names.is_empty() {
         let rank = layers.ranks();
@@ -1790,6 +1808,7 @@ pub fn parse(css: &str) -> Stylesheet {
         }
     }
     let mut sheet = Stylesheet {
+        faces,
         rules,
         registered,
         normal: Index::default(),
@@ -1817,6 +1836,7 @@ fn parse_into(
     layer: &str,
     layers: &mut Layers,
     registered: &mut Registered,
+    faces: &mut Vec<FontFace>,
 ) {
     let bytes = css.as_bytes();
     let mut i = start;
@@ -1844,7 +1864,7 @@ fn parse_into(
                 }
                 let conds = parse_media_query(&css[j..k]);
                 let close = matching_brace(bytes, k, end);
-                parse_into(css, k + 1, close, Some(&conds), rules, order, layer, layers, registered);
+                parse_into(css, k + 1, close, Some(&conds), rules, order, layer, layers, registered, faces);
                 i = (close + 1).min(end);
             } else if css[i + 1..j].eq_ignore_ascii_case("supports") {
                 // Descend into `@supports` when the condition holds; else skip
@@ -1859,8 +1879,18 @@ fn parse_into(
                 }
                 let close = matching_brace(bytes, k, end);
                 if supports_cond(&css[j..k]) {
-                    parse_into(css, k + 1, close, media, rules, order, layer, layers, registered);
+                    parse_into(css, k + 1, close, media, rules, order, layer, layers, registered, faces);
                 }
+                i = (close + 1).min(end);
+            } else if css[i + 1..j].eq_ignore_ascii_case("font-face") {
+                // `@font-face { font-family: X; src: url(...) format(...) }`
+                // Nur EINGESAMMELT: die Datei holt der Wirt, die Engine hat
+                // kein Netz.
+                let mut k = j;
+                while k < end && bytes[k] != b'{' && bytes[k] != b';' { k += 1; }
+                if k >= end || bytes[k] == b';' { i = (k + 1).min(end); continue }
+                let close = matching_brace(bytes, k, end);
+                if let Some(f) = parse_font_face(&css[k + 1..close]) { faces.push(f); }
                 i = (close + 1).min(end);
             } else if css[i + 1..j].eq_ignore_ascii_case("property") {
                 // `@property --name { … initial-value: V … }` — der Wert, den
@@ -1911,7 +1941,7 @@ fn parse_into(
                     (layers.id(&full), full)
                 };
                 let close = matching_brace(bytes, k, end);
-                parse_into(css, k + 1, close, media, rules, order, &full, layers, registered);
+                parse_into(css, k + 1, close, media, rules, order, &full, layers, registered, faces);
                 let _ = id;
                 i = (close + 1).min(end);
             } else {
@@ -3298,4 +3328,41 @@ mod tests {
         let ss2 = parse("@media (prefers-color-scheme: dark) { .col { color: blue } }");
         assert!(ss2.matched(&e, &[], &[], 0, Media::new(1000.0, false)).is_empty(), "unknown feature never applies");
     }
+}
+
+/// Ein `@font-face`-Block. `None`, wenn Familie oder Quelle fehlen — ohne
+/// beides ist er keine Schrift, sondern ein Kommentar.
+fn parse_font_face(body: &str) -> Option<FontFace> {
+    let mut family = 0u32;
+    let mut src: Vec<String> = Vec::new();
+    let mut weight = 400u16;
+    let mut italic = false;
+    for (p, v) in parse_decls(body) {
+        if p.eq_ignore_ascii_case("font-family") {
+            let n = v.trim().trim_matches(['"', '\'']).trim().to_ascii_lowercase();
+            if !n.is_empty() { family = crate::style::hash_name(&n); }
+        } else if p.eq_ignore_ascii_case("src") {
+            // `url(a) format("woff2"), url(b)` — die Reihenfolge ist die
+            // Rangfolge der Seite, also bleibt sie erhalten.
+            let mut rest = v.as_str();
+            while let Some(i) = rest.find("url(") {
+                rest = &rest[i + 4..];
+                let Some(j) = rest.find(')') else { break };
+                let u = rest[..j].trim().trim_matches(['"', '\'']).trim();
+                if !u.is_empty() { src.push(String::from(u)); }
+                rest = &rest[j + 1..];
+            }
+        } else if p.eq_ignore_ascii_case("font-weight") {
+            let first = v.split_whitespace().next().unwrap_or("");
+            weight = match first.to_ascii_lowercase().as_str() {
+                "normal" => 400, "bold" => 700,
+                n => n.parse().unwrap_or(400),
+            };
+        } else if p.eq_ignore_ascii_case("font-style") {
+            italic = v.trim().to_ascii_lowercase().starts_with("italic")
+                  || v.trim().to_ascii_lowercase().starts_with("oblique");
+        }
+    }
+    if family == 0 || src.is_empty() { return None }
+    Some(FontFace { family, src, weight: weight.clamp(1, 1000), italic })
 }

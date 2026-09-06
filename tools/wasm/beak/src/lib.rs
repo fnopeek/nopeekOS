@@ -1659,6 +1659,69 @@ static mut SCRIPT_T0: i64 = 0;
 /// Steht `load` noch aus? Es faellt erst, wenn die Geometrie steht.
 static mut LOAD_PENDING: bool = false;
 
+/// Die Schriftrunde. Eigener Auftrag, nicht der der Navigation: welche
+/// Schriften eine Seite braucht, weiss die Engine erst nach dem ersten
+/// Auslegen — genau wie bei Bildern.
+static mut FONT_JOB: i32 = -1;
+static mut FONT_WANT: Option<Vec<(String, u32, u16, bool)>> = None;
+/// Wie viele Schriften eine Seite in einer Runde holen darf, und wie viele
+/// Bytes zusammen. Gemessen: eine Seite bringt 3 bis 6 mit, je 30-90 KB.
+const MAX_FONT_URLS: usize = 12;
+const FONT_CAP: usize = 4 * 1024 * 1024;
+
+/// Eine Runde an den Schriften der Seite. Liefert true, wenn etwas ankam —
+/// dann muss neu ausgelegt werden, denn jede Breite aendert sich.
+fn pump_fonts(engine: &Engine) -> bool {
+    let h = unsafe { core::ptr::addr_of!(FONT_JOB).read() };
+    let mut loaded = false;
+    if h >= 0 {
+        if unsafe { npk_http_poll(h) } == 0 { return false }
+        unsafe { core::ptr::addr_of_mut!(FONT_JOB).write(-1) };
+        let want = unsafe { (*core::ptr::addr_of_mut!(FONT_WANT)).take() }.unwrap_or_default();
+        let mut buf: Vec<u8> = Vec::with_capacity(FONT_CAP);
+        let spans = take_batch(h, buf.as_mut_ptr(), FONT_CAP, want.len());
+        let total = spans.iter().map(|(o, l)| o + l).max().unwrap_or(0);
+        unsafe { buf.set_len(total.min(FONT_CAP)) };
+        let (mut ok, mut bad) = (0usize, 0usize);
+        for (k, (url, family, weight, italic)) in want.iter().enumerate() {
+            let (off, n) = spans.get(k).copied().unwrap_or((0, 0));
+            if n == 0 || off + n > buf.len() {
+                log(&alloc::format!("[beak]   Schrift FEHLT {url}"));
+                bad += 1;
+                continue;
+            }
+            if engine.add_font(*family, *weight, *italic, &buf[off..off + n]) {
+                ok += 1;
+                loaded = true;
+            } else {
+                // Kein stilles Weiterlaufen: eine Schrift, die beak nicht
+                // lesen kann, ist der Grund, warum die Seite anders aussieht.
+                log(&alloc::format!("[beak]   Schrift NICHT LESBAR {url} ({n} B)"));
+                bad += 1;
+            }
+        }
+        log(&alloc::format!("[beak] Schriften: {ok} geladen, {bad} gescheitert, {} ms",
+                            now_ms() - unsafe { core::ptr::addr_of!(NAV_STAGE_MS).read() }));
+    }
+    if unsafe { core::ptr::addr_of!(FONT_JOB).read() } >= 0 { return loaded }
+    let mut want = engine.take_pending_fonts();
+    if want.is_empty() { return loaded }
+    want.truncate(MAX_FONT_URLS);
+    let base = url_str().to_string();
+    let urls: Vec<String> = want.iter().map(|(u, ..)| resolve(&base, u)).collect();
+    let h = begin_batch(&urls, FONT_CAP);
+    if h < 0 {
+        log("[beak] Schriften konnten nicht angefordert werden");
+        return loaded;
+    }
+    unsafe {
+        core::ptr::addr_of_mut!(FONT_JOB).write(h);
+        core::ptr::addr_of_mut!(FONT_WANT).write(Some(want));
+        core::ptr::addr_of_mut!(NAV_STAGE_MS).write(now_ms());
+    }
+    loaded
+}
+
 /// `load` zustellen — nach dem ersten Malen, wenn die Kaesten stehen.
 ///
 /// Liefert true, wenn dabei etwas am Baum passiert ist.
@@ -3809,6 +3872,12 @@ pub extern "C" fn _start() {
             css_asked.clear();
         }
         maybe_repaint(&engine, &mut cache, &mut paint_buf, &page.state);
+        // Die Schriften, die die Seite mitbringt. NACH dem ersten Auslegen:
+        // vorher weiss niemand, welche sie ueberhaupt verlangt.
+        if pump_fonts(&engine) {
+            bump_content_gen("font");
+            mark_dirty();
+        }
         // JETZT steht die Geometrie — `load` darf fallen.
         if fire_load(&engine) {
             page.sync(&engine);
@@ -3878,7 +3947,11 @@ pub extern "C" fn _start() {
             // Anything on the wire keeps the short nap: that is how often we
             // ask the kernel whether the answer is here, and it is the whole
             // latency the split costs. 4 ms against a round trip is nothing.
-            let waiting = nav_busy() || img_job() >= 0 || cssimg_job() >= 0;
+            // Eine laufende Schriftrunde gehoert dazu: sonst schlaeft die
+            // Schleife 16 ms je Frage, und eine Seite steht eine Sekunde
+            // laenger ungestylt da.
+            let waiting = nav_busy() || img_job() >= 0 || cssimg_job() >= 0
+                || unsafe { core::ptr::addr_of!(FONT_JOB).read() } >= 0;
             let busy = had_event
                 || waiting
                 || !pending_imgs.is_empty()

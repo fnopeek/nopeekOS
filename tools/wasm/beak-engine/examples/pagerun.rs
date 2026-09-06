@@ -223,7 +223,19 @@ fn main() {
         eng.set_theme(Theme { bg: Rgb(255,255,255), text: Rgb(33,37,41), heading: Rgb(33,37,41),
                               link: Rgb(13,110,253), muted: Rgb(108,117,125), rule: Rgb(222,226,230) });
         eng.set_scripted_dom(Some(dom));
-        let lay = eng.layout_ext(&html, &css, width);
+        let mut lay = eng.layout_ext(&html, &css, width);
+        for _ in 0..4 {
+            let want = eng.take_pending_fonts();
+            if want.is_empty() { break }
+            for (url, family, weight, italic) in want {
+                let u = resolve_path(&format!("{}/", origin()), &url);
+                if let Ok(b) = std::fs::read(local(&dir, &u)) {
+                    let _ = eng.add_font(family, weight, italic, &b);
+                }
+            }
+            lay = eng.layout_ext(&html, &css, width);
+        }
+        println!("  Schriften der Seite: {}", eng.web_font_count());
         let h = lay.height.clamp(1, 20000);
         let mut buf = vec![0u8; (width * h * 4) as usize];
         eng.paint(&lay, width, h, 0, &mut buf);
@@ -419,7 +431,24 @@ fn feed_geometry(sess: &mut beak_engine::js::Session, html: &str, dir: &str) {
     // sobald eine Seite Skripte faehrt.
     eng.set_hit_all(true);
     eng.set_scripted_dom(Some(dom));
-    let lay = eng.layout_ext(html, &css, width);
+    let mut lay = eng.layout_ext(html, &css, width);
+    // Die Schriften der Seite holen und NOCHMAL auslegen — dieselbe Runde,
+    // die der Wirt faehrt. Ohne den zweiten Lauf misst die Probe mit der
+    // eingebauten Schrift und vergleicht dann Breiten, die es nicht gibt.
+    let (mut ok, mut bad) = (0usize, 0usize);
+    for _ in 0..4 {
+        let want = eng.take_pending_fonts();
+        if want.is_empty() { break }
+        for (url, family, weight, italic) in want {
+            let u = resolve_path(&format!("{}/", origin()), &url);
+            match std::fs::read(local(dir, &u)) {
+                Ok(b) if eng.add_font(family, weight, italic, &b) => ok += 1,
+                _ => { bad += 1; eprintln!("  Schrift nicht ladbar: {u}"); }
+            }
+        }
+        lay = eng.layout_ext(html, &css, width);
+    }
+    if ok + bad > 0 { println!("Schriften: {ok} geladen, {bad} gescheitert"); }
     let rects = lay.element_rects();
     if std::env::var("GEOMDBG").is_ok() {
         eprintln!("  Geometrie: {} Kaesten, Layouthoehe {}", rects.len(), lay.height);

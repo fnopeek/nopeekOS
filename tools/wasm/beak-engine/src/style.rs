@@ -747,6 +747,14 @@ pub struct ComputedStyle {
     pub bold: bool,
     pub italic: bool,
     pub mono: bool,
+    /// Die ERSTE Familie aus `font-family`, als Streuwert.
+    ///
+    /// **Nicht der Name, nur seine Zahl.** Ein `ComputedStyle` wird millionenfach
+    /// kopiert; eine Zeichenkette darin waere eine Allokation je Element. Der
+    /// Streuwert reicht: `Fonts` haelt die geladenen `@font-face`-Gesichter unter
+    /// derselben Zahl. 0 heisst „keine benannte Familie" (die eingebauten
+    /// Gesichter entscheiden dann wie bisher ueber `bold`/`italic`/`mono`).
+    pub family: u32,
     pub pre: bool, // white-space: pre (no collapse, honor newlines)
     /// `white-space: nowrap` — whitespace still collapses, but the line never
     /// breaks at one. Inherited. Real pages use it to keep a label, a
@@ -1124,6 +1132,7 @@ impl ComputedStyle {
             bold: false,
             italic: false,
             mono: false,
+            family: 0,
             nowrap: false,
             pre: false,
             color: Rgba::opaque(theme.text),
@@ -1347,6 +1356,7 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         bold: parent.bold,
         italic: parent.italic,
         mono: parent.mono,
+        family: 0,
         pre: parent.pre,
         nowrap: parent.nowrap,
         hidden: parent.hidden,
@@ -2904,7 +2914,7 @@ pub fn apply_wide(prop: Prop, kw: Wide, parent: &ComputedStyle, theme: &Theme, s
         }
         Prop::FontWeight => s.bold = src.bold,
         Prop::FontStyle => s.italic = src.italic,
-        Prop::FontFamily => s.mono = src.mono,
+        Prop::FontFamily => { s.mono = src.mono; s.family = src.family; }
         Prop::WhiteSpace => {
             s.pre = src.pre;
             s.nowrap = src.nowrap;
@@ -3322,6 +3332,7 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         },
         Prop::FontFamily => {
             s.mono = v.contains("mono") || v.contains("courier") || v.contains("consol");
+            s.family = family_hash(v);
         }
         // — box model —
         Prop::Width | Prop::InlineSize => set_size(&mut s.width, &v, u),
@@ -5540,4 +5551,33 @@ mod tests {
         apply_one("background-image", "linear-gradient(red, blue)", &theme, &mut st);
         assert_eq!(st.bg_layer.image, None);
     }
+}
+
+/// Der Streuwert der ERSTEN Familie einer `font-family`-Liste.
+///
+/// Nur die erste: eine Ersatzkette wie `"Foo", Arial, sans-serif` sagt „nimm
+/// Foo, wenn du es hast". Hat beak `Foo` nicht, faellt es ohnehin auf seine
+/// eingebaute Schrift zurueck — und die IST der Rest der Kette.
+pub fn family_hash(list: &str) -> u32 {
+    let first = list.split(',').next().unwrap_or("").trim()
+        .trim_matches(['"', '\'']).trim();
+    if first.is_empty() { return 0 }
+    // Gattungsnamen sind keine Familien, sie sind die Ersatzkette selbst.
+    let low = first.to_ascii_lowercase();
+    if matches!(low.as_str(), "serif" | "sans-serif" | "monospace" | "cursive"
+                | "fantasy" | "system-ui" | "ui-serif" | "ui-sans-serif"
+                | "ui-monospace" | "ui-rounded" | "inherit" | "initial" | "unset") {
+        return 0;
+    }
+    hash_name(&low)
+}
+
+/// FNV-1a ueber den kleingeschriebenen Namen. 0 bleibt fuer „keine" frei.
+pub fn hash_name(low: &str) -> u32 {
+    let mut h: u32 = 0x811c9dc5;
+    for b in low.bytes() {
+        h ^= b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    if h == 0 { 1 } else { h }
 }
