@@ -386,6 +386,12 @@ impl Interp {
             Ok(())
         })();
         m.borrow_mut().state = if r.is_ok() { ModState::Done } else { ModState::Failed };
+        // Den ERSTEN Werfer festhalten, nicht den letzten: der aeussere
+        // Aufrufer reicht denselben Fehler nach oben durch, und dessen Name
+        // wuerde den echten ueberschreiben.
+        if r.is_err() && self.module_fail.is_none() {
+            self.module_fail = Some(m.borrow().url.clone());
+        }
         // Ein Namensraum, der VOR dem Rumpf gebaut wurde, hat die spaeter
         // zugewiesenen Werte nicht. Hier nachziehen — das ist der billige
         // Ersatz fuer die exotic getter der Spezifikation.

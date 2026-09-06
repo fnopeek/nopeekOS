@@ -118,6 +118,13 @@ pub struct Doc {
     /// Hat die Seite ueberhaupt Behandler? Solange nicht, braucht das Layout
     /// keine Treffer-Kaesten aufzuzeichnen.
     pub has_listeners: bool,
+    /// Welches Element den Tastaturfokus hat — gesetzt von `focus()`.
+    ///
+    /// Der Wirt liest es und stellt seinen eigenen Fokus danach
+    /// (`forms.rs::FormState::focus`); ohne diese Zeile war `el.focus()`
+    /// „focus is not a function", und die Fritzbox-Anmeldemaske ist genau
+    /// daran am Ende ihres Aufbaus gescheitert.
+    pub focused: Option<u32>,
     /// Zaehlt jede Aenderung am Baum — und wird NIE zurueckgesetzt.
     ///
     /// `dirty` beantwortet „muss ich zurueckschreiben?" und wird beim
@@ -133,7 +140,7 @@ impl Doc {
         let mut nodes = Vec::new();
         nodes.push(DomNode::new(DOCUMENT_NODE, "#document"));
         Doc { nodes, doc: 0, html: None, body: None, head: None,
-              dirty: false, has_listeners: false, version: 0 }
+              dirty: false, has_listeners: false, focused: None, version: 0 }
     }
 
     /// Aus beaks geparstem Baum. Der `seq` des Originals wird NICHT
@@ -1124,6 +1131,7 @@ fn insert_all(i: &mut Interp, this: &Value, args: &[Value], w: Where) -> C<Value
         // Der Anker bleibt derselbe: alles landet DAVOR, also stehen mehrere
         // Argumente am Ende in der Reihenfolge, in der sie uebergeben wurden.
         if let Some(d) = &mut i.doc { d.insert_maybe_fragment(parent, id, anchor); d.touch(); }
+        fire_connected(i, id)?;
     }
     Ok(Value::Undefined)
 }
@@ -1327,10 +1335,47 @@ pub fn install(realm: &mut Realm) {
             }
             Ok(Value::Undefined)
         }, &fp);
+    // `normalize` — benachbarte Textknoten verschmelzen, leere entfernen.
+    //
+    // Die Fritzbox ruft es am Ende JEDES Anhaengens. Ohne die Methode wirft
+    // dort „normalize is not a function", und zwar nachdem die Kinder schon
+    // dranhaengen: der Baum ist dann halb gebaut und die Meldung zeigt auf
+    // die falsche Stelle.
+    meth(&node_proto, "normalize", |i, t, _| {
+        let id = node_of(i, &t)?;
+        fn walk(d: &mut Doc, id: u32) {
+            let kids = d.nodes[id as usize].children.clone();
+            let mut keep: Vec<u32> = Vec::with_capacity(kids.len());
+            for c in kids {
+                if d.nodes[c as usize].kind == TEXT_NODE {
+                    if d.nodes[c as usize].text.is_empty() {
+                        d.nodes[c as usize].parent = None;
+                        continue;
+                    }
+                    if let Some(&last) = keep.last() {
+                        if d.nodes[last as usize].kind == TEXT_NODE {
+                            let joined = alloc::format!("{}{}",
+                                d.nodes[last as usize].text, d.nodes[c as usize].text);
+                            d.nodes[last as usize].text = Rc::from(joined.as_str());
+                            d.nodes[c as usize].parent = None;
+                            continue;
+                        }
+                    }
+                } else {
+                    walk(d, c);
+                }
+                keep.push(c);
+            }
+            d.nodes[id as usize].children = keep;
+        }
+        if let Some(d) = &mut i.doc { walk(d, id); d.touch(); }
+        Ok(Value::Undefined)
+    }, 0, &fp);
     meth(&node_proto, "appendChild", |i, t, a| {
         let p = node_of(i, &t)?;
         let c = node_of(i, a.first().unwrap_or(&Value::Undefined))?;
         if let Some(d) = &mut i.doc { d.insert_maybe_fragment(p, c, None); }
+        fire_connected(i, c)?;
         Ok(a[0].clone())
     }, 1, &fp);
     meth(&node_proto, "insertBefore", |i, t, a| {
@@ -1338,6 +1383,7 @@ pub fn install(realm: &mut Realm) {
         let c = node_of(i, a.first().unwrap_or(&Value::Undefined))?;
         let b = match a.get(1) { Some(Value::Obj(_)) => Some(node_of(i, &a[1])?), _ => None };
         if let Some(d) = &mut i.doc { d.insert_maybe_fragment(p, c, b); }
+        fire_connected(i, c)?;
         Ok(a[0].clone())
     }, 2, &fp);
     meth(&node_proto, "removeChild", |i, t, a| {
@@ -1826,8 +1872,9 @@ pub fn install(realm: &mut Realm) {
         Ok(Value::Obj(i.realm.global.clone()))
     }, &fp);
     getter(&document_proto, "activeElement", |i, _, _| {      // 1606
-        // beak hat keinen Tastaturfokus im Dokument — `body` ist die
-        // Antwort, die ein Browser ohne Fokus auch gibt.
+        // Was `focus()` gesetzt hat — sonst `body`, die Antwort, die ein
+        // Browser ohne Fokus auch gibt.
+        if let Some(f) = i.doc.as_ref().and_then(|d| d.focused) { return Ok(wrap(i, f)) }
         let b = i.doc.as_ref().and_then(|d| find_tag(d, "body"));
         Ok(match b { Some(x) => wrap(i, x), None => Value::Null })
     }, &fp);
@@ -1920,9 +1967,27 @@ pub fn install(realm: &mut Realm) {
     // Das Fenster IST ein EventTarget — dadurch hat `window` dieselben drei
     // Methoden wie jeder Knoten, ohne sie ein zweites Mal zu definieren.
     realm.global.borrow_mut().proto = Some(event_target_proto.clone());
-    iface(realm, "Node", &node_proto);
+    let node_ctor = iface(realm, "Node", &node_proto);
+    // **Die Knotentyp-Konstanten.** Sie stehen laut Spezifikation auf dem
+    // Konstruktor UND auf dem Prototyp. Ohne sie ist `Node.ELEMENT_NODE`
+    // `undefined`, und ein `switch(el.nodeType){case Node.ELEMENT_NODE: …}`
+    // faellt still in den `default`-Zweig: die Fritzbox-Oberflaeche hat
+    // damit ihre GANZE Anmeldemaske gebaut und dann nicht angehaengt — kein
+    // Fehler, keine Meldung, nur ein leeres `<body>`.
+    for (n, v) in [("ELEMENT_NODE", 1.0), ("ATTRIBUTE_NODE", 2.0), ("TEXT_NODE", 3.0),
+                   ("CDATA_SECTION_NODE", 4.0), ("ENTITY_REFERENCE_NODE", 5.0),
+                   ("ENTITY_NODE", 6.0), ("PROCESSING_INSTRUCTION_NODE", 7.0),
+                   ("COMMENT_NODE", 8.0), ("DOCUMENT_NODE", 9.0),
+                   ("DOCUMENT_TYPE_NODE", 10.0), ("DOCUMENT_FRAGMENT_NODE", 11.0),
+                   ("NOTATION_NODE", 12.0)] {
+        node_ctor.borrow_mut().define(n, Prop::frozen(Value::Num(v)));
+        node_proto.borrow_mut().define(n, Prop::frozen(Value::Num(v)));
+    }
     iface(realm, "Element", &element_proto);
+    // NACH `iface`: die legt einen „Illegal constructor" auf denselben
+    // Prototyp, und wer zuletzt schreibt, gewinnt.
     iface(realm, "HTMLElement", &html_element_proto);
+    install_custom_elements(realm, &html_element_proto);
     iface(realm, "SVGElement", &svg_element_proto);
     // `CharacterData` sitzt zwischen Node und Text — 453 Aufrufe im Zensus
     // fragen `.data`, und die Kette ist die, die Bibliothekscode abfragt.
@@ -2298,6 +2363,40 @@ pub fn install(realm: &mut Realm) {
     custom_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(custom_proto.clone())));
     custom_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(custom_ctor.clone())));
     realm.global.borrow_mut().define("CustomEvent", Prop::builtin(Value::Obj(custom_ctor)));
+    // `PromiseRejectionEvent` — die Art, unter der eine unbehandelte
+    // Ablehnung ans Fenster kommt.
+    //
+    // Die Marke ist keine leere Zusage: beak meldet unbehandelte Ablehnungen
+    // wirklich (`promise::report_rejections` schickt genau dieses Ereignis
+    // ans Fenster und schreibt danach auf die Konsole). Sie zu HABEN ist
+    // zugleich das, woran core-js erkennt, ob die Umgebung Versprechen
+    // browsermaessig behandelt — fiel die Pruefung durch, ersetzte es die
+    // eingebaute `Promise` durch seine eigene, und die kennt in der Fassung,
+    // die die Fritzbox ausliefert, kein `allSettled`.
+    let prej_proto = new_obj(Some(event_proto.clone()));
+    ev_getter!(prej_proto, fp2, "reason", EV_REASON);
+    ev_getter!(prej_proto, fp2, "promise", EV_PROMISE);
+    let prej_ctor = native(Some(realm.function_proto.clone()), |i, _, a| {
+        let kind = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let init = a.get(1).cloned().unwrap_or(Value::Undefined);
+        let proto = match i.get(&Value::Obj(i.realm.global.clone()), "PromiseRejectionEvent")
+                          .and_then(|c| i.get(&c, "prototype")) {
+            Ok(Value::Obj(o)) => o, _ => i.realm.event_proto.clone(),
+        };
+        let ev = build_event(i, proto, &kind, false);
+        apply_event_init(i, &ev, &init)?;
+        let (reason, promise) = match &init {
+            Value::Obj(_) => (i.get(&init, "reason")?, i.get(&init, "promise")?),
+            _ => (Value::Undefined, Value::Undefined),
+        };
+        ev.borrow_mut().define(EV_REASON, Prop::data(reason));
+        ev.borrow_mut().define(EV_PROMISE, Prop::data(promise));
+        Ok(Value::Obj(ev))
+    }, "PromiseRejectionEvent", 2, true);
+    prej_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(prej_proto.clone())));
+    prej_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(prej_ctor.clone())));
+    realm.global.borrow_mut().define("PromiseRejectionEvent", Prop::builtin(Value::Obj(prej_ctor)));
+    realm.prej_proto = prej_proto;
     realm.event_proto = event_proto;
 
     // `getComputedStyle` — 443 Aufrufe im Zensus.
@@ -2349,6 +2448,29 @@ pub fn install(realm: &mut Realm) {
     handler_prop!(html_element_proto, fp, "onchange", "change");
     handler_prop!(html_element_proto, fp, "oninput", "input");
     handler_prop!(html_element_proto, fp, "onsubmit", "submit");
+    // `focus()` / `blur()` — die Seite bestimmt, wo die Tastatur hinschreibt.
+    //
+    // Der Fokus steht im Dokument, nicht in einem Nebenzustand: `document
+    // .activeElement` liest dieselbe Stelle, und der Wirt uebernimmt sie in
+    // seinen eigenen (`forms.rs`). Die Ereignisse werden dabei WIRKLICH
+    // zugestellt — ein `focus()`, das nur einen Wert setzt, waere fuer eine
+    // Seite mit `onfocus` unsichtbar.
+    meth(&html_element_proto, "focus", |i, t, _| {
+        let id = node_of(i, &t)?;
+        let old = i.doc.as_ref().and_then(|d| d.focused);
+        if old == Some(id) { return Ok(Value::Undefined) }
+        if let Some(o) = old { deliver_focus(i, o, "blur")?; }
+        if let Some(d) = &mut i.doc { d.focused = Some(id); d.touch(); }
+        deliver_focus(i, id, "focus")?;
+        Ok(Value::Undefined)
+    }, 0, &fp);
+    meth(&html_element_proto, "blur", |i, t, _| {
+        let id = node_of(i, &t)?;
+        if i.doc.as_ref().and_then(|d| d.focused) != Some(id) { return Ok(Value::Undefined) }
+        if let Some(d) = &mut i.doc { d.focused = None; d.touch(); }
+        deliver_focus(i, id, "blur")?;
+        Ok(Value::Undefined)
+    }, 0, &fp);
     handler_prop!(html_element_proto, fp, "onfocus", "focus");
     handler_prop!(html_element_proto, fp, "onblur", "blur");
     handler_prop!(html_element_proto, fp, "onkeydown", "keydown");
@@ -2466,6 +2588,98 @@ pub fn install(realm: &mut Realm) {
         attr_prop!(p, fp, "type", "type");
         attr_prop!(p, fp, "name", "name");
         attr_prop!(p, fp, "placeholder", "placeholder");
+    }
+    // ── HTMLSelectElement / HTMLOptionElement ────────────────────────────
+    //
+    // Ein `<select>` hatte weder `value` noch `options` noch `selectedIndex`.
+    // Auf der Fritzbox-Anmeldeseite stirbt daran der Aufbau des
+    // Anmeldeformulars — `gUsernameElem.value.length` liest `.length` von
+    // `undefined`, und der Fehler nennt weder Element noch Zeile.
+    //
+    // Die Wahrheit ist der BAUM, nicht ein Nebenzustand: `selected` ist das
+    // Attribut, `value` faellt auf den Text zurueck. Genau so liest das
+    // Layout die Auswahl (`forms.rs::collect_options`), also koennen die
+    // beiden Seiten nicht auseinanderlaufen.
+    if let Some(p) = tag_protos.get("option") {
+        attr_prop!(p, fp, "label", "label");
+        bool_attr_prop!(p, fp, "selected", "selected");
+        bool_attr_prop!(p, fp, "defaultSelected", "selected");
+        bool_attr_prop!(p, fp, "disabled", "disabled");
+        accessor(p, "value", |i, t, _| {
+            let id = node_of(i, &t)?;
+            Ok(Value::string(option_value(i, id)))
+        }, |i, t, a| {
+            let id = node_of(i, &t)?;
+            let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+            if let Some(d) = &mut i.doc { d.touch(); d.nodes[id as usize].set_attr("value", &v); }
+            Ok(Value::Undefined)
+        }, &fp);
+        accessor(p, "text", |i, t, _| {
+            let id = node_of(i, &t)?;
+            let s = i.doc.as_ref().map(|d| d.text_of(id)).unwrap_or_default();
+            Ok(Value::string(s.trim().to_string()))
+        }, |i, t, a| {
+            let id = node_of(i, &t)?;
+            let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+            set_text_of(i, id, &v);
+            Ok(Value::Undefined)
+        }, &fp);
+        getter(p, "index", |i, t, _| {
+            let id = node_of(i, &t)?;
+            let Some(sel) = owning_select(i, id) else { return Ok(Value::Num(0.0)) };
+            let opts = select_options(i, sel);
+            Ok(Value::Num(opts.iter().position(|x| *x == id).map(|n| n as f64).unwrap_or(-1.0)))
+        }, &fp);
+    }
+    if let Some(p) = tag_protos.get("select") {
+        attr_prop!(p, fp, "name", "name");
+        bool_attr_prop!(p, fp, "multiple", "multiple");
+        bool_attr_prop!(p, fp, "disabled", "disabled");
+        getter(p, "options", |i, t, _| {
+            let id = node_of(i, &t)?;
+            let opts = select_options(i, id);
+            Ok(nodes_array(i, opts))
+        }, &fp);
+        getter(p, "length", |i, t, _| {
+            let id = node_of(i, &t)?;
+            Ok(Value::Num(select_options(i, id).len() as f64))
+        }, &fp);
+        getter(p, "selectedOptions", |i, t, _| {
+            let id = node_of(i, &t)?;
+            let opts: Vec<u32> = select_options(i, id).into_iter()
+                .filter(|o| i.doc.as_ref().is_some_and(|d| d.nodes[*o as usize].attr("selected").is_some()))
+                .collect();
+            Ok(nodes_array(i, opts))
+        }, &fp);
+        accessor(p, "selectedIndex", |i, t, _| {
+            let id = node_of(i, &t)?;
+            Ok(Value::Num(selected_index(i, id)))
+        }, |i, t, a| {
+            let id = node_of(i, &t)?;
+            let n = i.to_number(a.first().unwrap_or(&Value::Undefined))?;
+            select_index(i, id, n as i64);
+            Ok(Value::Undefined)
+        }, &fp);
+        accessor(p, "value", |i, t, _| {
+            let id = node_of(i, &t)?;
+            let idx = selected_index(i, id);
+            if idx < 0.0 { return Ok(Value::str("")); }
+            let opts = select_options(i, id);
+            match opts.get(idx as usize) {
+                Some(o) => { let o = *o; Ok(Value::string(option_value(i, o))) }
+                None => Ok(Value::str("")),
+            }
+        }, |i, t, a| {
+            let id = node_of(i, &t)?;
+            let want = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+            let opts = select_options(i, id);
+            let mut hit = -1i64;
+            for (n, o) in opts.iter().enumerate() {
+                if option_value(i, *o) == *want { hit = n as i64; break }
+            }
+            select_index(i, id, hit);
+            Ok(Value::Undefined)
+        }, &fp);
     }
     // HTMLButtonElement
     if let Some(p) = tag_protos.get("button") {
@@ -3140,4 +3354,315 @@ fn lossy_utf8(b: &[u8]) -> String {
             }
         }
     }
+}
+
+/// `customElements` — die Registratur der eigenen Elemente.
+///
+/// **Ohne Schattenbaum.** `attachShadow` fehlt weiter; gemessen an der
+/// Fritzbox-Oberflaeche benutzen vier von vierzehn Komponenten einen, und
+/// keine davon steht auf der Anmeldeseite. Die Trennung ist bewusst: ein
+/// halber Schattenbaum waere schlimmer als keiner, weil er das Layout
+/// betrifft und nicht nur die Bindung.
+///
+/// **Was es kann:** anmelden, nachschlagen, und — der eigentliche Punkt —
+/// `class X extends HTMLElement` KONSTRUIERBAR machen. `new X()` legt einen
+/// echten Knoten mit der angemeldeten Marke an; welche Marke, sagt der
+/// Prototyp des gerade gebauten Objekts.
+fn install_custom_elements(realm: &mut Realm, html_element_proto: &Gc) {
+    let fp = realm.function_proto.clone();
+
+    // `HTMLElement` ist ab hier ein echter Konstruktor. Ohne ihn wirft
+    // `super()` in jeder Komponente „Illegal constructor" — und das ist die
+    // erste Zeile, die eine Seite mit Web Components ausfuehrt.
+    let he = native(Some(fp.clone()), |i, this, _| {
+        if !i.native_new { return i.type_err("Illegal constructor"); }
+        let Some(tag) = custom_tag_of(i, &this) else {
+            return i.type_err("HTMLElement constructor: the class is not a registered custom element");
+        };
+        let Some(d) = &mut i.doc else { return i.type_err("no document") };
+        let id = d.create(ELEMENT_NODE, &tag);
+        Ok(wrap(i, id))
+    }, "HTMLElement", 0, true);
+    he.borrow_mut().define("prototype", Prop::frozen(Value::Obj(html_element_proto.clone())));
+    html_element_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(he.clone())));
+    realm.global.borrow_mut().define("HTMLElement", Prop::builtin(Value::Obj(he)));
+
+    let ce = new_obj(Some(realm.object_proto.clone()));
+    meth(&ce, "define", |i, _, a| {
+        let name = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let ctor = a.get(1).cloned().unwrap_or(Value::Undefined);
+        if !i.is_callable(&ctor) { return i.type_err("customElements.define: not a constructor"); }
+        // Eine Marke ohne Bindestrich ist keine eigene — die Spezifikation
+        // wirft dort, und eine Seite, die es doch versucht, will es wissen.
+        if !name.contains('-') {
+            return i.type_err(&alloc::format!("'{name}' is not a valid custom element name"));
+        }
+        if i.custom.iter().any(|(t, _)| **t == *name) {
+            return i.type_err(&alloc::format!("'{name}' has already been defined"));
+        }
+        // **`observedAttributes` wird HIER gelesen**, nicht erst beim ersten
+        // Attributwechsel. Die Spezifikation sagt es so, und Bibliotheken
+        // haengen ihre ganze Einrichtung an diesen Zugriff: der `static get`
+        // der Fritzbox-Komponenten ruft `finalize()`, und ohne den steht
+        // spaeter `_wcProperties` auf `undefined`.
+        let obs = i.get(&ctor, "observedAttributes")?;
+        if !matches!(obs, Value::Undefined | Value::Null) {
+            // Nur LESEN. Die Liste selbst braucht beak noch nicht — sie wird
+            // gebraucht, wenn `attributeChangedCallback` kommt.
+            let _ = i.iterate(&obs);
+        }
+        i.custom.push((name, ctor));
+        Ok(Value::Undefined)
+    }, 2, &fp);
+    meth(&ce, "get", |i, _, a| {
+        let name = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        Ok(i.custom.iter().find(|(t, _)| **t == *name).map(|(_, c)| c.clone())
+            .unwrap_or(Value::Undefined))
+    }, 1, &fp);
+    meth(&ce, "getName", |i, _, a| {
+        let c = a.first().cloned().unwrap_or(Value::Undefined);
+        Ok(i.custom.iter().find(|(_, x)| x.strict_eq(&c))
+            .map(|(t, _)| Value::Str(t.clone())).unwrap_or(Value::Null))
+    }, 1, &fp);
+    // `whenDefined` wird nur abgewartet. Da alle Anmeldungen beim Laden
+    // passieren, ist die Antwort immer schon da.
+    meth(&ce, "whenDefined", |i, _, a| {
+        let name = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let v = i.custom.iter().find(|(t, _)| **t == *name).map(|(_, c)| c.clone())
+            .unwrap_or(Value::Undefined);
+        let p = super::promise::new_promise(i);
+        super::promise::resolve_promise(i, &p, v);
+        Ok(Value::Obj(p))
+    }, 1, &fp);
+    // `upgrade` tut nichts: beak baut den Baum aus dem HTML, bevor ein
+    // Skript laeuft, und hebt vorhandene Knoten nicht nachtraeglich in eine
+    // Klasse. Es ist da, damit ein Aufruf nicht wirft.
+    meth(&ce, "upgrade", |_, _, _| Ok(Value::Undefined), 1, &fp);
+    ce.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("CustomElementRegistry")));
+    realm.global.borrow_mut().define("customElements", Prop::builtin(Value::Obj(ce)));
+}
+
+/// Welche angemeldete Marke gehoert zu diesem Objekt?
+///
+/// Ueber die PROTOTYPKETTE, von innen nach aussen — das gibt automatisch die
+/// abgeleitetste Klasse. `new.target` gaebe dieselbe Antwort, aber beak
+/// reicht es nicht durch, und die Kette weiss es ohnehin: `construct` hat den
+/// Prototyp der gebauten Klasse schon gesetzt, bevor `super()` lief.
+fn custom_tag_of(i: &Interp, this: &Value) -> Option<Rc<str>> {
+    let Value::Obj(o) = this else { return None };
+    let mut cur = o.borrow().proto.clone();
+    while let Some(p) = cur {
+        for (tag, ctor) in &i.custom {
+            let Value::Obj(c) = ctor else { continue };
+            let cp = c.borrow().get_own("prototype").and_then(|x| x.value.clone());
+            if matches!(cp, Some(Value::Obj(cp)) if Rc::ptr_eq(&cp, &p)) {
+                return Some(tag.clone());
+            }
+        }
+        let n = p.borrow().proto.clone();
+        cur = n;
+    }
+    None
+}
+
+/// Den DOM-Knoten von einem Huellenobjekt auf ein anderes umhaengen.
+///
+/// `super()` kopiert die Felder des eingebauten Ergebnisses in das `this` der
+/// abgeleiteten Klasse. Der Knoten zeigt danach aber noch auf die
+/// weggeworfene Huelle — und `wrap` gibt jedem, der ihn spaeter aus dem Baum
+/// holt, genau die. Diese Zeile ist der Unterschied zwischen „die Komponente
+/// IST das Element" und „es gibt sie zweimal".
+pub fn readopt(i: &mut Interp, from: &Gc, to: &Gc) {
+    let id = match from.borrow().get_own(SLOT).and_then(|p| p.value.clone()) {
+        Some(Value::Num(n)) => n as u32,
+        _ => return,
+    };
+    let Some(d) = &mut i.doc else { return };
+    let Some(node) = d.nodes.get_mut(id as usize) else { return };
+    if matches!(&node.js, Some(g) if Rc::ptr_eq(g, from)) {
+        node.js = Some(to.clone());
+    }
+}
+
+/// Die `<option>`-Knoten eines `<select>`, in Dokumentreihenfolge und durch
+/// `<optgroup>` hindurch — genau wie `forms.rs::collect_options`.
+fn select_options(i: &Interp, sel: u32) -> Vec<u32> {
+    fn walk(d: &Doc, id: u32, out: &mut Vec<u32>) {
+        for c in d.nodes[id as usize].children.clone() {
+            if d.nodes[c as usize].kind != ELEMENT_NODE { continue }
+            if &*d.nodes[c as usize].tag == "option" { out.push(c); } else { walk(d, c, out); }
+        }
+    }
+    let mut out = Vec::new();
+    if let Some(d) = &i.doc { walk(d, sel, &mut out); }
+    out
+}
+
+/// Der Wert einer Option: das Attribut, sonst ihr Text. Dieselbe Regel wie im
+/// Layout — sonst zeigt die Auswahl etwas anderes an, als das Skript liest.
+fn option_value(i: &Interp, id: u32) -> String {
+    let Some(d) = &i.doc else { return String::new() };
+    match d.nodes[id as usize].attr("value") {
+        Some(v) => v.to_string(),
+        None => d.text_of(id).trim().to_string(),
+    }
+}
+
+/// Zu welchem `<select>` gehoert diese Option?
+fn owning_select(i: &Interp, id: u32) -> Option<u32> {
+    let d = i.doc.as_ref()?;
+    let mut cur = d.nodes[id as usize].parent;
+    while let Some(p) = cur {
+        if &*d.nodes[p as usize].tag == "select" { return Some(p) }
+        cur = d.nodes[p as usize].parent;
+    }
+    None
+}
+
+/// Welche Option ist ausgewaehlt?
+///
+/// Steht nirgends `selected`, ist es bei einer einfachen Auswahl die ERSTE —
+/// so zeigt ein Browser sie an, und ein Skript, das gleich danach `value`
+/// liest, bekaeme sonst die leere Zeichenkette.
+fn selected_index(i: &Interp, sel: u32) -> f64 {
+    let opts = select_options(i, sel);
+    let Some(d) = &i.doc else { return -1.0 };
+    for (n, o) in opts.iter().enumerate() {
+        if d.nodes[*o as usize].attr("selected").is_some() { return n as f64 }
+    }
+    let multiple = d.nodes[sel as usize].attr("multiple").is_some();
+    if !multiple && !opts.is_empty() { 0.0 } else { -1.0 }
+}
+
+/// Die n-te Option auswaehlen und alle anderen abwaehlen. `-1` waehlt nichts.
+fn select_index(i: &mut Interp, sel: u32, n: i64) {
+    let opts = select_options(i, sel);
+    let Some(d) = &mut i.doc else { return };
+    d.touch();
+    for (k, o) in opts.iter().enumerate() {
+        if k as i64 == n { d.nodes[*o as usize].set_attr("selected", ""); }
+        else { d.nodes[*o as usize].attrs.retain(|(a, _)| &**a != "selected"); }
+    }
+}
+
+/// Den Inhalt eines Knotens durch EINEN Textknoten ersetzen — dieselbe
+/// Regel wie `textContent`, nur als Funktion, weil `option.text` sie auch
+/// braucht.
+fn set_text_of(i: &mut Interp, id: u32, s: &str) {
+    let Some(d) = &mut i.doc else { return };
+    d.touch();
+    let old: Vec<u32> = d.nodes[id as usize].children.clone();
+    for c in old { d.nodes[c as usize].parent = None; }
+    d.nodes[id as usize].children.clear();
+    if !s.is_empty() {
+        let tid = d.create(TEXT_NODE, "#text");
+        d.nodes[tid as usize].text = s.into();
+        d.append(id, tid);
+    }
+}
+
+/// Vermerk auf der Huelle: `connectedCallback` ist gelaufen. NUL-praefigiert,
+/// also fuer jedes Skript unsichtbar.
+const CE_CONNECTED: &str = "\0!ceconn";
+
+/// Haengt dieser Knoten wirklich am Dokument?
+fn is_connected(d: &Doc, mut id: u32) -> bool {
+    loop {
+        if id == d.doc { return true }
+        match d.nodes[id as usize].parent { Some(p) => id = p, None => return false }
+    }
+}
+
+/// Die eigenen Elemente eines Teilbaums, von aussen nach innen.
+fn collect_custom(d: &Doc, id: u32, out: &mut Vec<u32>) {
+    let n = &d.nodes[id as usize];
+    // Eine Marke OHNE Bindestrich kann kein eigenes Element sein — die
+    // Spezifikation verlangt ihn, und die Pruefung kostet ein Byte.
+    if n.kind == ELEMENT_NODE && n.tag.contains('-') { out.push(id); }
+    for c in n.children.clone() { collect_custom(d, c, out); }
+}
+
+/// `connectedCallback` fuer alles, was gerade ins Dokument gekommen ist.
+///
+/// **Einmal je Element**, gemerkt auf der Huelle: die Fritzbox-Komponenten
+/// bauen darin ihren Inhalt, und ein zweiter Lauf wuerde ihn verdoppeln.
+/// Ein Wurf im Rueckruf beendet NICHT das Einhaengen — so macht es ein
+/// Browser auch —, landet aber sichtbar auf der Konsole statt still zu
+/// verschwinden.
+fn fire_connected(i: &mut Interp, id: u32) -> C<Value> {
+    settle_stylesheet(i, id);
+    if i.custom.is_empty() { return Ok(Value::Undefined) }
+    if !i.doc.as_ref().is_some_and(|d| is_connected(d, id)) { return Ok(Value::Undefined) }
+    let mut list = Vec::new();
+    if let Some(d) = &i.doc { collect_custom(d, id, &mut list); }
+    for n in list {
+        let v = wrap(i, n);
+        let Value::Obj(o) = &v else { continue };
+        if o.borrow().get_own(CE_CONNECTED).is_some() { continue }
+        o.borrow_mut().define(CE_CONNECTED, Prop::frozen(Value::Bool(true)));
+        let f = i.get(&v, "connectedCallback")?;
+        if !i.is_callable(&f) { continue }
+        if let Err(e) = i.call(&f, v.clone(), &[]) {
+            let msg = super::modules::describe(i, e);
+            let tag = i.doc.as_ref().map(|d| d.nodes[n as usize].tag.to_string()).unwrap_or_default();
+            i.console_push(alloc::format!("connectedCallback <{tag}>: {msg}"));
+        }
+    }
+    Ok(Value::Undefined)
+}
+
+/// Ein `<link rel="stylesheet">`, das ein SKRIPT einhaengt, bekommt sein
+/// `error`-Ereignis — als Zeitgeber, also nach der laufenden Aufgabe.
+///
+/// **Warum `error` und nicht `load`.** beak holt nachgeladene Stilblaetter
+/// nicht; die Seite bleibt an dieser Stelle ungestylt. `load` zu melden waere
+/// eine erfundene Erfolgsmeldung
+/// ([[feedback_invented_fallback_hides_the_fault]]). Gar nichts zu melden ist
+/// aber SCHLIMMER als beides: die Fritzbox-Komponenten warten in
+/// `connectedCallback` auf dieses Versprechen, und ohne Antwort bleibt jede
+/// von ihnen fuer immer leer — ohne Fehler, ohne Meldung. Mit `error` laeuft
+/// `Promise.allSettled` weiter und die Komponente rendert, nur eben ohne ihr
+/// Blatt.
+///
+/// Der richtige Schritt danach ist, sie wirklich zu holen — dieselbe Runde
+/// wie beim Modulgraphen.
+fn settle_stylesheet(i: &mut Interp, id: u32) {
+    let is_sheet = i.doc.as_ref().is_some_and(|d| {
+        let n = &d.nodes[id as usize];
+        &*n.tag == "link"
+            && n.attr("rel").is_some_and(|r| r.to_ascii_lowercase().contains("stylesheet"))
+            && n.attr("href").is_some_and(|h| !h.trim().is_empty())
+            && is_connected(d, id)
+    });
+    if !is_sheet { return }
+    let href = i.doc.as_ref().and_then(|d| d.nodes[id as usize].attr("href").cloned())
+        .unwrap_or_else(|| Rc::from(""));
+    i.console_push(alloc::format!("stylesheet not fetched (added by script): {href}"));
+    let arg = Value::Num(id as f64);
+    let f = super::promise::bind1(i, |i, _, a| {
+        let Some(Value::Num(n)) = a.first() else { return Ok(Value::Undefined) };
+        let id = *n as u32;
+        // `error` blubbert NICHT — die Kette ist nur das Element selbst.
+        dispatch(i, "error", &[id])?;
+        Ok(Value::Undefined)
+    }, arg);
+    i.timers.push(f);
+}
+
+/// Eine unbehandelte Ablehnung ans Fenster melden. Liefert true, wenn ein
+/// Behandler `preventDefault` gerufen hat — dann unterbleibt die Konsolenzeile.
+pub fn dispatch_rejection(i: &mut Interp, reason: Value, promise: Value) -> C<bool> {
+    let Some(target) = i.doc.as_ref().map(|d| d.doc) else { return Ok(false) };
+    let proto = i.realm.prej_proto.clone();
+    let ev = build_event(i, proto, "unhandledrejection", true);
+    ev.borrow_mut().define(EV_REASON, Prop::data(reason));
+    ev.borrow_mut().define(EV_PROMISE, Prop::data(promise));
+    deliver(i, &ev, "unhandledrejection", &[target])
+}
+
+/// `focus`/`blur` zustellen. Sie BLUBBERN NICHT — die Kette ist das Element
+/// allein; `focusin`/`focusout` waeren die blubbernden Zwillinge.
+fn deliver_focus(i: &mut Interp, id: u32, kind: &str) -> C<()> {
+    dispatch(i, kind, &[id])?;
+    Ok(())
 }

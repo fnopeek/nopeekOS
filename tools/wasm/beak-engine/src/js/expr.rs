@@ -178,7 +178,12 @@ impl Interp {
         let native_parent = matches!(&ctor, Value::Obj(o)
             if matches!(o.borrow().kind, ObjKind::Native(_)));
         if native_parent {
-            let built = self.construct(&ctor, args)?;
+            // Der eingebaute Konstruktor bekommt das frisch angelegte `this`
+            // als EMPFAENGER. Er baut trotzdem sein eigenes Objekt, aber ohne
+            // diese Zeile wuesste er nicht, welche Klasse gerade gebaut wird
+            // — und `HTMLElement` braucht genau das, um die angemeldete
+            // Marke aus der Prototypkette zu lesen.
+            let built = self.construct_on(&ctor, this_val.clone(), args)?;
             if let (Value::Obj(src), Value::Obj(dst)) = (&built, &this_val) {
                 let keys = src.borrow().raw_keys();
                 for k in keys {
@@ -187,6 +192,13 @@ impl Interp {
                 }
                 let kind = core::mem::replace(&mut src.borrow_mut().kind, ObjKind::Plain);
                 dst.borrow_mut().kind = kind;
+                // **Und der Verweis zurueck.** Ein eingebauter Konstruktor
+                // kann sein Objekt anderswo eingetragen haben — `HTMLElement`
+                // haengt es an den DOM-Knoten. Wird die Kopie hier nicht
+                // nachgezogen, zeigen Baum und Instanz auf ZWEI Objekte: die
+                // Komponente traegt ihre Felder, der Knoten kennt sie nicht,
+                // und `document.querySelector` liefert die falsche Haelfte.
+                super::dombind::readopt(self, src, dst);
             }
         } else {
             let r = self.call(&ctor, this_val.clone(), args)?;
@@ -335,6 +347,16 @@ impl Interp {
     }
 
     pub fn construct(&mut self, f: &Value, args: &[Value]) -> C<Value> {
+        self.construct_on(f, Value::Undefined, args)
+    }
+
+    /// Wie `construct`, aber mit einem Empfaenger fuer den EINGEBAUTEN Fall.
+    ///
+    /// Nur `super()` reicht einen: das frisch angelegte `this` traegt schon
+    /// den Prototyp der abgeleiteten Klasse, und daran haengt die einzige
+    /// Auskunft darueber, WAS gerade gebaut wird. Ein gewoehnliches `new`
+    /// gibt `undefined` weiter, wie bisher.
+    pub fn construct_on(&mut self, f: &Value, recv: Value, args: &[Value]) -> C<Value> {
         let Value::Obj(fo) = f else { return self.type_err("value is not a constructor") };
         // Die `construct`-Falle.
         if super::proxy::parts(fo).is_some() {
@@ -358,7 +380,7 @@ impl Interp {
             let nf = n.clone();
             let was = self.native_new;
             self.native_new = true;
-            let r = (nf.func)(self, Value::Undefined, args);
+            let r = (nf.func)(self, recv, args);
             self.native_new = was;
             return r;
         }

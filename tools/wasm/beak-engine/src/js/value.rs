@@ -226,6 +226,8 @@ pub const IT_TARGET: &str = "\0!target";
 /// — ohne den Vermerk waere eine selbstgebaute Menge von einer echten nicht
 /// zu unterscheiden, und `Set.prototype.union.call({…})` liefe still durch.
 pub const COLL_KIND: &str = "\0!coll";
+pub const EV_REASON: &str = "\0!ev.reason";
+pub const EV_PROMISE: &str = "\0!ev.promise";
 pub const IT_INDEX: &str = "\0!index";
 /// 0 = Werte, 1 = Schluessel, 2 = Paare.
 pub const IT_KIND: &str = "\0!kind";
