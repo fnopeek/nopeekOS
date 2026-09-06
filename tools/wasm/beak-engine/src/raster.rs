@@ -14,7 +14,7 @@ use hashbrown::HashMap;
 use crate::fonts::Fonts;
 use crate::layout::{DrawOp, Layout, Rgb, Rgba, Theme};
 use crate::color::ColorFilter;
-use crate::style::{BgPos, BgSize, ObjectFit};
+use crate::style::{BgPos, BgSize, GradKind, Gradient, ObjectFit};
 
 /// What a pointer move costs — the answer `Engine::set_hover` gives.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1117,6 +1117,14 @@ impl Engine {
                         None => self.draw_img_placeholder(out, wi, hi, *x, vy, *iw, *ih, alt),
                     }
                 }
+                DrawOp::Gradient { x, y, w: gw, h: gh, clip, repeat, pos, size, r, g } => {
+                    let vy = *y - scroll_y;
+                    if vy > hi || vy + *gh < 0 {
+                        continue;
+                    }
+                    let cl = (clip.0, clip.1 - scroll_y, clip.2, clip.3);
+                    fill_gradient(out, wi, hi, *x, vy, *gw, *gh, cl, *repeat, *pos, *size, *r, g);
+                }
                 DrawOp::BgImage { x, y, w: bw, h: bh, clip, key, repeat, pos, size, tint, filter } => {
                     let vy = *y - scroll_y;
                     if vy > hi || vy + *bh < 0 {
@@ -1337,6 +1345,200 @@ fn fill_span(out: &mut [u8], w: i32, h: i32, y: i32, xl: f32, xr: f32, c: Rgba) 
     }
     edge(l, 1.0 - (xl - l));
     edge(rr - 1.0, 1.0 - (rr - xr));
+}
+
+/// Die Kachelgroesse eines Verlaufs.
+///
+/// Ein Verlauf hat KEINE eigene Groesse (css-images-3 §4.3): sein Vorgabemass
+/// ist die Positionierflaeche selbst. Damit fallen `auto`, `cover` und
+/// `contain` alle auf die Flaeche zurueck, und nur eine ausdrueckliche
+/// Groesse macht daraus eine Kachel.
+fn grad_tile_size(area: (i32, i32), size: BgSize) -> (i32, i32) {
+    let (aw, ah) = (area.0 as f32, area.1 as f32);
+    match size {
+        BgSize::Fixed(fw, fh) => {
+            let tw = fw.and_then(|l| l.px(aw)).unwrap_or(aw);
+            let th = fh.and_then(|l| l.px(ah)).unwrap_or(ah);
+            ((libm::roundf(tw) as i32).max(1), (libm::roundf(th) as i32).max(1))
+        }
+        _ => (area.0.max(1), area.1.max(1)),
+    }
+}
+
+/// Einen Farbverlauf ueber die Positionierflaeche `x,y,gw,gh` malen —
+/// gekachelt nach `size`/`pos`/`repeat`, beschnitten auf `cl` und auf die
+/// Eckenradien `r`.
+///
+/// Die Kachelung ist dieselbe wie bei einem Bild und aus demselben Grund:
+/// `background-image` ist EINE Eigenschaft, und ein Verlauf steht darin an
+/// derselben Stelle wie ein `url()`.
+#[allow(clippy::too_many_arguments)]
+fn fill_gradient(
+    out: &mut [u8],
+    w: i32,
+    h: i32,
+    x: i32,
+    y: i32,
+    gw: i32,
+    gh: i32,
+    cl: (i32, i32, i32, i32),
+    repeat: (bool, bool),
+    pos: (BgPos, BgPos),
+    size: BgSize,
+    r: [f32; 4],
+    g: &Gradient,
+) {
+    if gw <= 0 || gh <= 0 || g.n < 2 {
+        return;
+    }
+    let (tw, th) = grad_tile_size((gw, gh), size);
+    let ox = x + bg_offset(pos.0, gw, tw);
+    let oy = y + bg_offset(pos.1, gh, th);
+    // Wie in `blit_bg`: wie viele Kacheln zurueck und vor, bis der Malbereich
+    // verlassen ist. Eine nicht wiederholte Achse hat genau eine.
+    let span = |origin: i32, box_lo: i32, box_hi: i32, tile: i32, rep: bool| -> (i32, i32) {
+        if !rep {
+            return (0, 0);
+        }
+        let lo = (box_lo - origin).div_euclid(tile).min(0);
+        let hi = (box_hi - origin - 1).div_euclid(tile).max(0);
+        (lo, hi)
+    };
+    let (ix0, ix1) = span(ox, cl.0, cl.0 + cl.2, tw, repeat.0);
+    let (iy0, iy1) = span(oy, cl.1, cl.1 + cl.3, th, repeat.1);
+    for ty in iy0..=iy1 {
+        for tx in ix0..=ix1 {
+            fill_gradient_tile(out, w, h, ox + tx * tw, oy + ty * th, tw, th, cl, r, g);
+        }
+    }
+}
+
+/// EINE Kachel des Verlaufs.
+///
+/// Drei Wege, und der Grund ist die Groesse: ein Seitenhintergrund ist
+/// 1902x1000 = 1,9 Mio Pixel, und jedes einzeln zu rechnen kostet mehr als
+/// alles andere im Bild zusammen. Ein SENKRECHTER Verlauf hat je Zeile genau
+/// eine Farbe — eine Zeile ist ein `memory.copy`. Nur der schraege und der
+/// radiale laufen wirklich Pixel fuer Pixel.
+#[allow(clippy::too_many_arguments)]
+fn fill_gradient_tile(
+    out: &mut [u8],
+    w: i32,
+    h: i32,
+    x: i32,
+    y: i32,
+    gw: i32,
+    gh: i32,
+    cl: (i32, i32, i32, i32),
+    r: [f32; 4],
+    g: &Gradient,
+) {
+    // Sichtbarer Bereich: Kachel ∩ Malbereich ∩ Bild.
+    let x0 = x.max(cl.0).max(0);
+    let y0 = y.max(cl.1).max(0);
+    let x1 = (x + gw).min(cl.0 + cl.2).min(w);
+    let y1 = (y + gh).min(cl.1 + cl.3).min(h);
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let (fw, fh) = (gw as f32, gh as f32);
+    let (cx, cy) = (x as f32 + fw / 2.0, y as f32 + fh / 2.0);
+    let rounded = r.iter().any(|&v| v > 0.0);
+    // Die Rundung gehoert dem MALBEREICH, nicht der Kachel: mit einem Rahmen
+    // sind das zwei verschiedene Rechtecke, und die Ecke, die der Verlauf
+    // nicht ueberlaufen darf, ist die des Malbereichs.
+    let span = |py: i32| -> (i32, i32) {
+        if !rounded {
+            return (x0, x1);
+        }
+        let (li, ri) = round_insets((py - cl.1) as f32, cl.3 as f32, r);
+        let l = libm::ceilf(cl.0 as f32 + li) as i32;
+        let rgt = libm::floorf((cl.0 + cl.2) as f32 - ri) as i32;
+        (l.max(x0), rgt.min(x1))
+    };
+
+    if g.kind == GradKind::Radial {
+        // Mitte, `farthest-corner`. Eine Ellipse behaelt das Seitenverhaeltnis
+        // des Kastens und geht durch die Ecke — das Wurzel-Zwei-Fache der
+        // halben Seiten. Ein Kreis hat EINEN Radius: den Abstand zur Ecke.
+        let (rx, ry) = if g.circle {
+            let rad = libm::sqrtf(fw * fw + fh * fh) / 2.0;
+            (rad, rad)
+        } else {
+            (fw * 0.7071068, fh * 0.7071068)
+        };
+        let gr = g.resolved(rx);
+        for py in y0..y1 {
+            let (sx, ex) = span(py);
+            let dy = (py as f32 + 0.5 - cy) / ry.max(0.001);
+            for px in sx..ex {
+                let dx = (px as f32 + 0.5 - cx) / rx.max(0.001);
+                let c = gr.at(libm::sqrtf(dx * dx + dy * dy));
+                if c.a > 0 {
+                    blend_at(out, idx(w, px, py), c.c, c.a);
+                }
+            }
+        }
+        return;
+    }
+
+    // CSS zaehlt den Winkel im Uhrzeigersinn ab „nach oben"; die Achse zeigt
+    // damit nach `(sin, -cos)` in Bildkoordinaten (y waechst nach unten).
+    let rad = g.angle_for(fw, fh) * core::f32::consts::PI / 180.0;
+    let (sa, ca) = (libm::sinf(rad), libm::cosf(rad));
+    let line = libm::fabsf(fw * sa) + libm::fabsf(fh * ca);
+    let gr = g.resolved(line);
+    let inv = if line > 0.0 { 1.0 / line } else { 0.0 };
+    // `t` an einem Pixel: die Projektion auf die Achse, auf 0..1 normiert.
+    let t_at = |px: f32, py: f32| 0.5 + ((px - cx) * sa - (py - cy) * ca) * inv;
+
+    if libm::fabsf(sa) < 0.0005 {
+        // Senkrecht: eine Farbe je Zeile.
+        for py in y0..y1 {
+            let (sx, ex) = span(py);
+            if ex <= sx {
+                continue;
+            }
+            let c = gr.at(t_at(0.0, py as f32 + 0.5));
+            if c.a > 0 {
+                fill(out, w, h, sx, py, ex - sx, 1, c);
+            }
+        }
+        return;
+    }
+
+    if libm::fabsf(ca) < 0.0005 {
+        // Waagrecht: jede Zeile ist dieselbe Farbfolge. Einmal rechnen, dann
+        // nur noch schreiben — das nimmt der heissesten Schleife im Bild die
+        // Winkelrechnung und die Stoppsuche je Pixel.
+        let mut row: Vec<Rgba> = Vec::with_capacity((x1 - x0) as usize);
+        for px in x0..x1 {
+            row.push(gr.at(t_at(px as f32 + 0.5, 0.0)));
+        }
+        for py in y0..y1 {
+            let (sx, ex) = span(py);
+            let mut i = idx(w, sx, py);
+            for px in sx..ex {
+                let c = row[(px - x0) as usize];
+                if c.a > 0 {
+                    blend_at(out, i, c.c, c.a);
+                }
+                i += 4;
+            }
+        }
+        return;
+    }
+
+    for py in y0..y1 {
+        let (sx, ex) = span(py);
+        let fy = py as f32 + 0.5;
+        for px in sx..ex {
+            let c = gr.at(t_at(px as f32 + 0.5, fy));
+            if c.a > 0 {
+                blend_at(out, idx(w, px, py), c.c, c.a);
+            }
+        }
+    }
 }
 
 /// Fill a rounded rect, or — when `ring > 0` — only a border of that thickness
@@ -2410,6 +2612,12 @@ mod tests {
                 }
                 DrawOp::BgImage { x, y, w, h, key, .. } => {
                     let _ = write!(s, "B {x},{y} {w}x{h} {key}\n");
+                }
+                DrawOp::Gradient { x, y, w, h, clip, repeat, pos, size, r, g } => {
+                    let _ = write!(s, "G {x},{y} {w}x{h} {clip:?} {repeat:?} {pos:?} {size:?} {r:?} \
+                                       {:?} {} {} {:.1} {:?}\n",
+                                   g.kind, g.repeating, g.circle, g.angle_for(*w as f32, *h as f32),
+                                   g.stops());
                 }
             }
         }

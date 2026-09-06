@@ -615,6 +615,207 @@ pub enum BgSize {
     Fixed(Option<Len>, Option<Len>),
 }
 
+/// Ein Farbstopp eines Verlaufs.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct GradStop {
+    pub color: Rgba,
+    /// Lage auf der Achse. `px` sagt, in welcher Einheit: als Anteil 0..1,
+    /// oder absolut in px. `NaN` heisst „nicht angegeben" — die Luecken
+    /// werden gleichmaessig gefuellt, wie es die Spezifikation vorschreibt.
+    ///
+    /// Eine px-Lage KANN hier nicht in einen Anteil umgerechnet werden: sie
+    /// misst gegen die Verlaufsachse, und deren Laenge kennt erst der Kasten.
+    /// 14 von 86 gesetzten Stopps im Messkorpus sind px — sie als „nicht
+    /// angegeben" zu behandeln hiesse, sie still gleichmaessig zu verteilen.
+    pub pos: f32,
+    pub px: bool,
+    /// `currentcolor`. Sie steht beim Parsen noch nicht fest — die Farbe des
+    /// Elements wird erst aufgeloest, wenn der Kasten gemalt wird. Kostet
+    /// nichts: das Byte liegt in der Auffuellung neben `px`.
+    pub cur: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GradKind { Linear, Radial }
+
+/// Wie viele Farbstopps ein Verlauf tragen darf.
+///
+/// **Ausgezaehlt, nicht geraten**: ueber 23 echte Stilblaetter (Fritzbox +
+/// der Messkorpus) haben 109 Verlaeufe zwei Stopps, 31 drei, 7 vier, zwei
+/// sechs und zwei zehn — dazwischen liegt nichts. Sechs deckt also genau so
+/// viel wie acht, und die beiden Ausreisser sind Tailwind-MASKEN, die wir
+/// ohnehin nicht malen.
+///
+/// Der Platz ist der Grund fuer die Sparsamkeit: der Verlauf liegt in
+/// `BgLayer`, `BgLayer` zweimal in `ComputedStyle` (Hintergrund und Maske),
+/// und `ComputedStyle` ist die heisseste Struktur des Motors. Gemessen:
+/// 1312 B ohne Verlaeufe, 1472 B mit sechs Stopps, 1520 B mit acht.
+pub const MAX_STOPS: usize = 6;
+
+/// `Gradient::corner`: keine Ecke, oder eine der vier.
+pub const CORNER_NONE: u8 = 0;
+pub const CORNER_TR: u8 = 1;
+pub const CORNER_BR: u8 = 2;
+pub const CORNER_BL: u8 = 3;
+pub const CORNER_TL: u8 = 4;
+
+/// Ein Farbverlauf als Hintergrund.
+///
+/// **Warum er IM Stil liegt und nicht in einer Tabelle daneben.** Ein
+/// `url()`-Hintergrund traegt nur einen Schluessel, weil die Bytes anderswo
+/// liegen; ein Verlauf hat keine Bytes. Ein Index in eine Blatt-Tabelle ginge
+/// nicht: `var()` wird beim GEBRAUCH aufgeloest, der Text am Blatt ist also
+/// ein anderer als der, den die Kaskade sieht — und genau so schreibt die
+/// Fritzbox ihren Kopf (`linear-gradient(90deg, var(--blue-100), …)`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Gradient {
+    pub kind: GradKind,
+    /// Anzahl gueltiger Stopps. 0 heisst: kein Verlauf.
+    pub n: u8,
+    pub repeating: bool,
+    /// Nur radial: `circle` statt der Vorgabe `ellipse`. Ein Kreis hat EINEN
+    /// Radius, eine Ellipse zwei — auf einem breiten Kasten sind das zwei
+    /// deutlich verschiedene Bilder. Das Byte liegt in der Auffuellung.
+    pub circle: bool,
+    /// `to <ecke>`, wenn eine angegeben war — `CORNER_NONE` sonst. Der
+    /// Winkel dazu steht erst am Kasten fest; `angle` traegt bis dahin die
+    /// 45-Grad-Naeherung.
+    pub corner: u8,
+    /// Grad im Uhrzeigersinn von „nach oben" — die Zaehlweise von CSS.
+    /// `to bottom` ist 180, `to right` ist 90.
+    pub angle: f32,
+    pub stops: [GradStop; MAX_STOPS],
+}
+
+impl Gradient {
+    pub const NONE: Gradient = Gradient {
+        kind: GradKind::Linear,
+        n: 0,
+        repeating: false,
+        circle: false,
+        corner: CORNER_NONE,
+        angle: 180.0,
+        stops: [GradStop { color: Rgba { c: Rgb(0, 0, 0), a: 0 }, pos: 0.0, px: false, cur: false }; MAX_STOPS],
+    };
+    pub fn is_some(&self) -> bool { self.n >= 2 }
+    pub fn stops(&self) -> &[GradStop] { &self.stops[..self.n as usize] }
+
+    /// Der Winkel der Achse an einem `w` x `h` grossen Kasten.
+    ///
+    /// Fuer alles ausser einer Ecke ist das schlicht `angle`. Fuer eine Ecke
+    /// liegt die Achse so, dass ihre Senkrechte durch die Mitte die beiden
+    /// Nachbarecken trifft (css-images-3 §3.4.1) — das haengt am
+    /// Seitenverhaeltnis, nicht am Schluesselwort.
+    pub fn angle_for(&self, w: f32, h: f32) -> f32 {
+        if self.corner == CORNER_NONE || w <= 0.0 || h <= 0.0 {
+            return self.angle;
+        }
+        let a = libm::atan2f(w, h) * 180.0 / core::f32::consts::PI;
+        match self.corner {
+            CORNER_TR => a,
+            CORNER_BR => 180.0 - a,
+            CORNER_BL => 180.0 + a,
+            _ => 360.0 - a,
+        }
+    }
+
+    /// `currentcolor`-Stopps mit der Farbe des Elements fuellen.
+    ///
+    /// Erst hier, nicht beim Parsen: css-color-4 §6.2 loest `currentcolor`
+    /// zum Gebrauchswert auf, und beim Parsen der Deklaration kann `color`
+    /// noch gar nicht feststehen.
+    pub fn with_current(&self, color: Rgba) -> Gradient {
+        let mut g = *self;
+        for st in g.stops.iter_mut().take(g.n as usize) {
+            if st.cur {
+                st.color = color;
+                st.cur = false;
+            }
+        }
+        g
+    }
+
+    /// Derselbe Verlauf, aber mit Stopps als reine Anteile 0..1 — px gegen
+    /// die Achsenlaenge `line` gerechnet, offene Lagen gefuellt.
+    ///
+    /// Das geschieht beim MALEN, nicht beim Parsen: `line` haengt am Kasten,
+    /// und derselbe Stil malt zwei verschieden breite Kaesten.
+    pub fn resolved(&self, line: f32) -> Gradient {
+        let mut g = *self;
+        let line = if line > 0.0 { line } else { 1.0 };
+        for st in g.stops.iter_mut().take(g.n as usize) {
+            if st.px {
+                st.pos /= line;
+                st.px = false;
+            }
+        }
+        fill_positions(&mut g);
+        g
+    }
+
+    /// Die Farbe an der Stelle `t` der Achse (0..1 ausserhalb erlaubt).
+    ///
+    /// Zwischen zwei Stopps wird MIT VORMULTIPLIZIERTEM Alpha gemischt —
+    /// `transparent` ist `rgba(0,0,0,0)`, und ein naiver Mittelwert zoege
+    /// einen Verlauf nach Schwarz statt ihn ausblenden zu lassen.
+    pub fn at(&self, t: f32) -> Rgba {
+        let n = self.n as usize;
+        if n == 0 {
+            return Rgba { c: Rgb(0, 0, 0), a: 0 };
+        }
+        let (lo, hi) = (self.stops[0].pos, self.stops[n - 1].pos);
+        let t = if self.repeating && hi > lo {
+            let span = hi - lo;
+            let k = (t - lo) / span;
+            lo + (k - libm::floorf(k)) * span
+        } else {
+            t
+        };
+        if t <= lo {
+            return self.stops[0].color;
+        }
+        if t >= hi {
+            return self.stops[n - 1].color;
+        }
+        let mut i = 1;
+        while i < n && self.stops[i].pos < t {
+            i += 1;
+        }
+        let (a, b) = (self.stops[i - 1], self.stops[i]);
+        let span = b.pos - a.pos;
+        // Zwei Stopps auf derselben Lage sind eine harte Kante.
+        let f = if span > 1e-6 { (t - a.pos) / span } else { 1.0 };
+        // Sind beide Stopps deckend, ist das Vormultiplizieren ein Umweg mit
+        // drei Divisionen — und dieser Zweig laeuft je PIXEL.
+        if a.color.a == 255 && b.color.a == 255 {
+            let ch = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * f) as u8;
+            return Rgba {
+                c: Rgb(ch(a.color.c.0, b.color.c.0), ch(a.color.c.1, b.color.c.1),
+                       ch(a.color.c.2, b.color.c.2)),
+                a: 255,
+            };
+        }
+        mix_premul(a.color, b.color, f)
+    }
+}
+
+/// Zwei Farben mischen, vormultipliziert (css-images-3 §3.4.2).
+fn mix_premul(a: Rgba, b: Rgba, f: f32) -> Rgba {
+    let (aa, ba) = (a.a as f32 / 255.0, b.a as f32 / 255.0);
+    let oa = aa + (ba - aa) * f;
+    if oa <= 0.0001 {
+        return Rgba { c: Rgb(0, 0, 0), a: 0 };
+    }
+    let ch = |x: u8, y: u8| {
+        let v = (x as f32 * aa) + ((y as f32 * ba) - (x as f32 * aa)) * f;
+        (v / oa).clamp(0.0, 255.0) as u8
+    };
+    Rgba {
+        c: Rgb(ch(a.c.0, b.c.0), ch(a.c.1, b.c.1), ch(a.c.2, b.c.2)),
+        a: (oa * 255.0).clamp(0.0, 255.0) as u8,
+    }
+}
+
 /// A `background-image` or `mask-image` layer.
 ///
 /// `image` is a `url_key` into the stylesheet's URL table, not the string:
@@ -623,6 +824,9 @@ pub enum BgSize {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct BgLayer {
     pub image: Option<u64>,
+    /// Ein Farbverlauf statt eines Bildes. `n == 0` heisst „keiner" — ein
+    /// `Option` waere hier nur ein Byte Verpackung mehr.
+    pub gradient: Gradient,
     /// (repeat-x, repeat-y).
     pub repeat: (bool, bool),
     pub pos: (BgPos, BgPos),
@@ -632,6 +836,7 @@ pub struct BgLayer {
 impl BgLayer {
     pub const NONE: BgLayer = BgLayer {
         image: None,
+        gradient: Gradient::NONE,
         repeat: (true, true),
         pos: (BgPos::Pct(0.0), BgPos::Pct(0.0)),
         size: BgSize::Auto,
@@ -3471,7 +3676,19 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 }
             }
         }
-        Prop::BackgroundImage => s.bg_layer.image = parse_bg_image(val),
+        Prop::BackgroundImage => {
+            let image = parse_bg_image(val);
+            let gradient = parse_gradient(val, theme);
+            // Einen Wert, den wir gar nicht lesen koennen, VERWIRFT css-syntax-3
+            // — der vorige bleibt stehen. `-webkit-gradient(…)` ist so einer,
+            // und Blaetter schreiben ihn als Vorspann vor die
+            // Standardschreibweise. Ihn als „kein Bild" zu nehmen loeschte
+            // genau den Verlauf, der eine Zeile spaeter kommt.
+            if image.is_some() || gradient.is_some() || v == "none" {
+                s.bg_layer.image = image;
+                s.bg_layer.gradient = gradient;
+            }
+        }
         // `background-clip: text` stencils the background through the glyphs —
         // a different mechanism, not a smaller box — so it is left alone rather
         // than approximated by one of the three rectangles.
@@ -3966,6 +4183,283 @@ fn parse_bg_image(val: &str) -> Option<u64> {
     crate::css::url_value(first_layer(val)).map(|u| crate::css::url_key(&u))
 }
 
+/// Die Argumente einer Funktion auf OBERSTER Ebene trennen.
+///
+/// Ein Komma in `rgba(0,0,0,.5)` trennt keine Argumente — ohne diese
+/// Klammerzaehlung zerfaellt jeder Verlauf mit einer `rgba()`-Farbe in
+/// Bruchstuecke.
+fn split_top(s: &str) -> alloc::vec::Vec<&str> {
+    let mut out = alloc::vec::Vec::new();
+    let (mut depth, mut start) = (0i32, 0usize);
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => { out.push(s[start..i].trim()); start = i + c.len_utf8(); }
+            _ => {}
+        }
+    }
+    let last = s[start..].trim();
+    if !last.is_empty() { out.push(last); }
+    out
+}
+
+/// Der Rumpf einer Funktion, wenn der Text mit ihrem Namen beginnt.
+fn fn_body<'a>(v: &'a str, name: &str) -> Option<&'a str> {
+    let t = v.trim();
+    let rest = t.strip_prefix(name)?.trim_start();
+    let inner = rest.strip_prefix('(')?;
+    let mut depth = 1i32;
+    for (i, c) in inner.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => { depth -= 1; if depth == 0 { return Some(&inner[..i]) } }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Ein Winkel in Grad. `0deg` zeigt nach OBEN und dreht im Uhrzeigersinn —
+/// das ist die Zaehlweise von CSS und nicht die der Mathematik.
+fn parse_angle(v: &str) -> Option<f32> {
+    let t = v.trim();
+    let (num, unit) = t.split_at(t.find(|c: char| c.is_ascii_alphabetic() || c == '%')
+                                  .unwrap_or(t.len()));
+    let n: f32 = num.trim().parse().ok()?;
+    Some(match unit.trim().to_ascii_lowercase().as_str() {
+        "deg" | "" => n,
+        "rad" => n * 180.0 / core::f32::consts::PI,
+        "grad" => n * 0.9,
+        "turn" => n * 360.0,
+        _ => return None,
+    })
+}
+
+/// `to right`, `to bottom left`, … als Winkel — und, bei einer ECKE, als
+/// Eckenschluessel.
+///
+/// Eine Ecke ist keine feste Zahl: css-images-3 §3.4.1 verlangt, dass die
+/// Achse so liegt, dass die Senkrechte durch die Mitte die beiden
+/// NACHBARecken trifft. Auf einem 800x60-Kasten sind das 85,7 Grad und nicht
+/// 45 — der Unterschied zwischen „fast waagrecht" und „diagonal". Der Winkel
+/// haengt also am Kasten und wird erst beim Malen gerechnet; hier faellt nur
+/// der Schluessel an, plus die 45-Grad-Naeherung als Rueckfalltyp.
+fn side_angle(v: &str) -> Option<(f32, u8)> {
+    let rest = v.trim().strip_prefix("to ")?;
+    let mut up = false; let mut down = false; let mut left = false; let mut right = false;
+    for w in rest.split_whitespace() {
+        match w {
+            "top" => up = true, "bottom" => down = true,
+            "left" => left = true, "right" => right = true,
+            _ => return None,
+        }
+    }
+    Some(match (up, down, left, right) {
+        (true, _, false, false) => (0.0, CORNER_NONE),
+        (_, true, false, false) => (180.0, CORNER_NONE),
+        (false, false, false, true) => (90.0, CORNER_NONE),
+        (false, false, true, false) => (270.0, CORNER_NONE),
+        (true, _, _, true) => (45.0, CORNER_TR),
+        (_, true, _, true) => (135.0, CORNER_BR),
+        (_, true, true, _) => (225.0, CORNER_BL),
+        (true, _, true, _) => (315.0, CORNER_TL),
+        _ => return None,
+    })
+}
+
+/// Das ` in <farbraum> [<hue>]` vom ersten Parameter abtrennen.
+///
+/// Zurueck kommt der Rest (oft leer) und ob eine Angabe da war.
+fn split_interpolation(a0: &str) -> (&str, bool) {
+    let t = a0.trim();
+    if let Some(r) = t.strip_prefix("in ") {
+        // Nur die Angabe, keine Richtung: `linear-gradient(in oklab, …)`.
+        let _ = r;
+        return ("", true);
+    }
+    let b = t.as_bytes();
+    let mut depth = 0i32;
+    let mut i = 0;
+    while i + 4 <= b.len() {
+        match b[i] {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 && b[i] == b' ' && &t[i..].as_bytes()[..4] == b" in " {
+            return (t[..i].trim(), true);
+        }
+        i += 1;
+    }
+    (t, false)
+}
+
+/// Den Verlaufsaufruf aus einer Schicht herausschneiden — er kann hinter
+/// einer Farbe stehen. Zurueck kommt der Text ab dem Funktionsnamen.
+fn gradient_token(layer: &str) -> Option<&str> {
+    let at = layer.find("-gradient(")?;
+    // Zurueck bis zum Anfang des Bezeichners (`repeating-radial` …).
+    let b = layer.as_bytes();
+    let mut start = at;
+    while start > 0 && (b[start - 1].is_ascii_alphanumeric() || b[start - 1] == b'-') {
+        start -= 1;
+    }
+    Some(layer[start..].trim())
+}
+
+/// Einen Verlauf aus `background-image` lesen.
+///
+/// Gebaut wird, was echte Seiten schreiben — ausgezaehlt ueber 23 Blaetter:
+/// `linear-gradient` (172 Vorkommen), `radial-gradient` (36), je auch in der
+/// `repeating-`Form. `conic-gradient` (11) fehlt noch und wird ehrlich
+/// abgelehnt statt als linearer gemalt.
+pub fn parse_gradient(val: &str, theme: &Theme) -> Gradient {
+    // Der Verlauf steht nicht zwingend am Anfang: `background: #eee
+    // linear-gradient(…)` ist eine Kurzform, und die Farbe kommt zuerst.
+    // Ohne diese Suche verlor die Deklaration ihren Verlauf still.
+    let Some(v) = gradient_token(first_layer(val)) else { return Gradient::NONE };
+    let (repeating, rest) = match v.strip_prefix("repeating-") {
+        Some(r) => (true, r),
+        None => (false, v),
+    };
+    let (kind, body) = if let Some(b) = fn_body(rest, "linear-gradient") {
+        (GradKind::Linear, b)
+    } else if let Some(b) = fn_body(rest, "radial-gradient") {
+        (GradKind::Radial, b)
+    } else {
+        return Gradient::NONE;
+    };
+    let args = split_top(body);
+    if args.is_empty() { return Gradient::NONE }
+
+    // Erstes Argument: Richtung oder Form — oder schon der erste Farbstopp.
+    let mut angle = if kind == GradKind::Linear { 180.0 } else { 0.0 };
+    let mut circle = false;
+    let mut corner = CORNER_NONE;
+    let mut first = 0usize;
+    // `in oklab` / `in hsl longer hue` sagt, in WELCHEM Raum gemischt wird.
+    // Wir mischen in sRGB und lassen die Angabe fallen — ein etwas anderer
+    // Mittelweg zwischen denselben Farben. Sie mitzulesen ist trotzdem
+    // Pflicht: Tailwind v4 schreibt JEDEN Verlauf so, und ohne diesen
+    // Zweig faellt der erste Parameter durch und der Verlauf ganz weg.
+    let (a0, interp) = split_interpolation(args[0]);
+    if interp && a0.is_empty() { first = 1; }
+    if let Some((a, c)) = side_angle(a0) { angle = a; corner = c; first = 1; }
+    else if let Some(a) = parse_angle(a0) { angle = a; first = 1; }
+    else if kind == GradKind::Radial
+        && (a0.starts_with("circle") || a0.starts_with("ellipse") || a0.starts_with("at ")
+            || a0.starts_with("closest") || a0.starts_with("farthest")) {
+        // Von der Form wird nur `circle` gelesen — die Mitte und die
+        // Groessenwoerter (`closest-side` …) fallen auf die Vorgabe
+        // „Mitte, farthest-corner" zurueck, und das ist der haeufigste Fall.
+        circle = a0.starts_with("circle");
+        first = 1;
+    }
+
+    let mut g = Gradient { kind, n: 0, repeating, circle, corner, angle, stops: Gradient::NONE.stops };
+    // Ein Stopp kann ZWEI Positionen tragen (`red 0% 40%`) — das ist die
+    // Kurzform fuer zwei Stopps derselben Farbe.
+    for a in &args[first..] {
+        if g.n as usize >= MAX_STOPS { break }
+        let mut it = split_ws_top(a);
+        let Some(cs) = it.first().copied() else { continue };
+        // Ein Farbstopp, den wir nicht lesen koennen, laesst den GANZEN
+        // Verlauf fallen. Ihn zu ueberspringen waere schlimmer: die
+        // uebrigen Stopps ruecken auf und malen ein anderes Bild, das
+        // aussieht, als haetten wir es gekonnt.
+        let color = match parse_color_val(cs, theme) {
+            Some(ColorVal::Rgb(c)) => (c, false),
+            Some(ColorVal::Transparent) => (Rgba { c: Rgb(0, 0, 0), a: 0 }, false),
+            Some(ColorVal::CurrentColor) => (Rgba { c: Rgb(0, 0, 0), a: 255 }, true),
+            None => return Gradient::NONE,
+        };
+        let (color, cur) = color;
+        let mut pushed = false;
+        for p in it.drain(1..) {
+            if g.n as usize >= MAX_STOPS { break }
+            let (pos, px) = pct_or_len(p).map_or((f32::NAN, false), |(v, u)| (v, u));
+            g.stops[g.n as usize] = GradStop { color, pos, px, cur };
+            g.n += 1;
+            pushed = true;
+        }
+        if !pushed && (g.n as usize) < MAX_STOPS {
+            g.stops[g.n as usize] = GradStop { color, pos: f32::NAN, px: false, cur };
+            g.n += 1;
+        }
+    }
+    if g.n < 2 { return Gradient::NONE }
+    // Die Luecken bleiben offen: `fill_positions` laeuft in `resolved()`,
+    // wenn die Achsenlaenge feststeht und px-Lagen Anteile geworden sind.
+    g
+}
+
+/// Wie `split_top`, aber an Leerzeichen — fuer `red 0% 40%`.
+fn split_ws_top(s: &str) -> alloc::vec::Vec<&str> {
+    let mut out = alloc::vec::Vec::new();
+    let (mut depth, mut start) = (0i32, 0usize);
+    let mut in_tok = false;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            c if c.is_whitespace() && depth == 0 => {
+                if in_tok { out.push(s[start..i].trim()); in_tok = false; }
+                continue;
+            }
+            _ => {}
+        }
+        if !in_tok { start = i; in_tok = true; }
+    }
+    if in_tok { out.push(s[start..].trim()); }
+    out
+}
+
+/// Eine Stopp-Position als Anteil 0..1. Laengen ohne Bezug (px) koennen hier
+/// noch nicht aufgeloest werden — die Kastenbreite steht erst im Layout fest.
+/// Eine Stopp-Lage: Anteil (`50%`) oder absolut (`40px`). Der Rueckgabewert
+/// sagt mit, welches von beidem — umrechnen kann erst der Kasten.
+fn pct_or_len(v: &str) -> Option<(f32, bool)> {
+    let t = v.trim();
+    if let Some(p) = t.strip_suffix('%') {
+        return p.trim().parse::<f32>().ok().map(|x| (x / 100.0, false));
+    }
+    if let Some(p) = t.strip_suffix("px") {
+        return p.trim().parse::<f32>().ok().map(|x| (x, true));
+    }
+    // Eine nackte Null IST eine Laenge — `#000 0 10px` steht so in echten
+    // Blaettern. Ohne diesen Zweig faellt sie auf „nicht angegeben" zurueck
+    // und wird still verteilt.
+    if t == "0" {
+        return Some((0.0, true));
+    }
+    None
+}
+
+/// Die Luecken zwischen gesetzten Positionen gleichmaessig fuellen — so
+/// schreibt es die Spezifikation vor (css-images-3 §3.4.3).
+fn fill_positions(g: &mut Gradient) {
+    let n = g.n as usize;
+    if n < 2 { return }
+    if g.stops[0].pos.is_nan() { g.stops[0].pos = 0.0; }
+    if g.stops[n - 1].pos.is_nan() { g.stops[n - 1].pos = 1.0; }
+    let mut i = 0;
+    while i < n {
+        if !g.stops[i].pos.is_nan() { i += 1; continue }
+        let start = i - 1;
+        let mut j = i;
+        while j < n && g.stops[j].pos.is_nan() { j += 1; }
+        let (a, b) = (g.stops[start].pos, g.stops[j].pos);
+        let step = (b - a) / (j - start) as f32;
+        for k in i..j { g.stops[k].pos = a + step * (k - start) as f32; }
+        i = j;
+    }
+    // Eine Position darf nie kleiner sein als die davor.
+    for i in 1..n {
+        if g.stops[i].pos < g.stops[i - 1].pos { g.stops[i].pos = g.stops[i - 1].pos; }
+    }
+}
+
 fn parse_overflow(v: &str) -> Overflow {
     match v {
         "hidden" => Overflow::Hidden,
@@ -4099,6 +4593,7 @@ fn parse_bg_shorthand(
     // tracked as one `Option` that fills twice.
     let (mut origin, mut clip) = (None, None);
     layer.image = parse_bg_image(val);
+    layer.gradient = parse_gradient(val, theme);
     // Position and size are written `<position> / <size>`; everything else is
     // order-free. Collect the unclaimed tokens and split them on the slash.
     // The slash need not be spaced (`center/contain`), so give it room first.
@@ -4118,8 +4613,10 @@ fn parse_bg_shorthand(
         } else if let Some(e) = parse_box_edge(tok) {
             if origin.is_none() { origin = Some(e) } else { clip = Some(e) }
         } else if matches!(tok, "scroll" | "fixed" | "local" | "none") || tok.starts_with("url(")
-            // A gradient is valid CSS we cannot paint. Accepting it keeps the
-            // reset (`background: <gradient>` HAS no colour) instead of
+            // Ein Verlauf ist hier schon als `layer.gradient` gelesen; dieser
+            // Zweig ueberspringt nur sein TOKEN, damit es nicht als Farbe oder
+            // Platzangabe missverstanden wird. Er behaelt den Reset
+            // (`background: <gradient>` HAT keine Farbe) statt
             // dropping the declaration and leaving a stale one in place.
             || tok.contains("-gradient(")
         {
@@ -5542,14 +6039,149 @@ mod tests {
         assert_eq!(st.mask_layer.repeat, (false, false));
     }
 
-    /// We cannot paint a gradient, and pretending we can would be worse than
-    /// leaving the box flat.
+    /// Ein Verlauf ist kein `url()` — er darf keinen Bildschluessel setzen,
+    /// sonst suchte der Rasterer Bytes, die es nie geben wird.
     #[test]
-    fn gradient_leaves_the_layer_imageless() {
+    fn gradient_is_not_an_image_key() {
         let theme = Theme::DARK;
         let mut st = ComputedStyle::root(&theme);
         apply_one("background-image", "linear-gradient(red, blue)", &theme, &mut st);
         assert_eq!(st.bg_layer.image, None);
+        assert!(st.bg_layer.gradient.is_some());
+    }
+
+    #[test]
+    fn gradient_reads_direction_and_stops() {
+        let theme = Theme::DARK;
+        let g = parse_gradient("linear-gradient(to right, #fff 0%, #000 100%)", &theme);
+        assert_eq!(g.kind, GradKind::Linear);
+        assert_eq!(g.angle, 90.0);
+        assert_eq!(g.n, 2);
+        let g = g.resolved(100.0);
+        assert_eq!(g.stops()[0].pos, 0.0);
+        assert_eq!(g.stops()[1].pos, 1.0);
+        // Vorgaberichtung ist „nach unten", nicht „nach rechts".
+        assert_eq!(parse_gradient("linear-gradient(red, blue)", &theme).angle, 180.0);
+        assert_eq!(parse_gradient("linear-gradient(45deg, red, blue)", &theme).angle, 45.0);
+    }
+
+    /// Offene Lagen werden gleichmaessig verteilt — aber ERST beim Malen,
+    /// weil eine px-Lage bis dahin keine Zahl auf der Achse ist.
+    #[test]
+    fn gradient_fills_open_positions_against_the_line() {
+        let theme = Theme::DARK;
+        let g = parse_gradient("linear-gradient(red, lime, blue)", &theme);
+        assert!(g.stops()[1].pos.is_nan());
+        let g = g.resolved(200.0);
+        assert_eq!(g.stops()[1].pos, 0.5);
+
+        let g = parse_gradient("linear-gradient(red, lime 40px, blue)", &theme);
+        assert!(g.stops()[1].px);
+        assert_eq!(g.resolved(200.0).stops()[1].pos, 0.2);
+        // Derselbe Stil an einem anderen Kasten: eine andere Lage.
+        assert_eq!(g.resolved(80.0).stops()[1].pos, 0.5);
+    }
+
+    #[test]
+    fn gradient_samples_the_axis() {
+        let theme = Theme::DARK;
+        let g = parse_gradient("linear-gradient(#000, #fff)", &theme).resolved(10.0);
+        assert_eq!(g.at(0.0), Rgba::opaque(Rgb(0, 0, 0)));
+        assert_eq!(g.at(1.0), Rgba::opaque(Rgb(255, 255, 255)));
+        assert_eq!(g.at(0.5), Rgba::opaque(Rgb(127, 127, 127)));
+        // Ausserhalb der Achse wird der Randstopp gehalten.
+        assert_eq!(g.at(-3.0), Rgba::opaque(Rgb(0, 0, 0)));
+        assert_eq!(g.at(9.0), Rgba::opaque(Rgb(255, 255, 255)));
+    }
+
+    /// `transparent` ist `rgba(0,0,0,0)`. Ohne vormultipliziertes Mischen
+    /// liefe der Verlauf durch Schwarz statt einfach auszublenden.
+    #[test]
+    fn gradient_fades_out_without_going_grey() {
+        let theme = Theme::DARK;
+        let g = parse_gradient("linear-gradient(red, transparent)", &theme).resolved(10.0);
+        let mid = g.at(0.5);
+        assert_eq!(mid.c, Rgb(255, 0, 0));
+        assert!((mid.a as i32 - 127).abs() <= 1, "{mid:?}");
+    }
+
+    #[test]
+    fn repeating_gradient_wraps_the_axis() {
+        let theme = Theme::DARK;
+        let g = parse_gradient("repeating-linear-gradient(#000 0%, #fff 50%)", &theme)
+            .resolved(100.0);
+        assert!(g.repeating);
+        assert_eq!(g.at(0.0), g.at(0.5));
+        assert_eq!(g.at(0.25), g.at(0.75));
+    }
+
+    /// `conic-gradient` wird ehrlich abgelehnt statt als linearer gemalt.
+    /// Tailwind v4 schreibt jeden Verlauf mit Mischraum. Ohne den Zweig
+    /// dafuer fiel der erste Parameter durch und der Verlauf ganz weg.
+    #[test]
+    fn an_interpolation_space_does_not_kill_the_gradient() {
+        let theme = Theme::DARK;
+        let g = parse_gradient("linear-gradient(45deg in oklab, red, blue)", &theme);
+        assert!(g.is_some());
+        assert_eq!(g.angle, 45.0);
+        let g = parse_gradient("linear-gradient(in oklab, red, blue)", &theme);
+        assert!(g.is_some());
+        assert_eq!(g.n, 2);
+        assert_eq!(g.angle, 180.0);
+        let g = parse_gradient("linear-gradient(to right in oklch longer hue, red, blue)", &theme);
+        assert!(g.is_some());
+        assert_eq!(g.angle, 90.0);
+    }
+
+    /// Die Ecke ist kein fester Winkel: die Achse steht senkrecht auf der
+    /// Verbindung der beiden NACHBARecken, haengt also am Kasten.
+    #[test]
+    fn a_corner_keyword_takes_its_angle_from_the_box() {
+        let theme = Theme::DARK;
+        let g = parse_gradient("linear-gradient(to top right, red, blue)", &theme);
+        assert_eq!(g.corner, CORNER_TR);
+        // Ein breiter flacher Kasten: fast waagrecht.
+        assert!((g.angle_for(800.0, 60.0) - 85.7).abs() < 0.2, "{}", g.angle_for(800.0, 60.0));
+        // Ein hoher schmaler: fast senkrecht.
+        assert!((g.angle_for(60.0, 200.0) - 16.7).abs() < 0.2, "{}", g.angle_for(60.0, 200.0));
+        // Quadratisch: die 45 Grad, die die Naeherung immer nahm.
+        assert!((g.angle_for(100.0, 100.0) - 45.0).abs() < 0.01);
+        // Eine Seite bleibt eine Seite.
+        let g = parse_gradient("linear-gradient(to right, red, blue)", &theme);
+        assert_eq!(g.corner, CORNER_NONE);
+        assert_eq!(g.angle_for(800.0, 60.0), 90.0);
+    }
+
+    /// `background: <farbe> <verlauf>` — die Kurzform stellt die Farbe voran,
+    /// und der Verlauf ging dabei still verloren.
+    #[test]
+    fn the_shorthand_finds_a_gradient_behind_a_colour() {
+        let theme = Theme::DARK;
+        let mut st = ComputedStyle::root(&theme);
+        apply_one("background", "#eee linear-gradient(90deg, red, blue)", &theme, &mut st);
+        assert!(st.bg_layer.gradient.is_some());
+        assert_eq!(st.bg, Some(Rgba::opaque(Rgb(238, 238, 238))));
+    }
+
+    /// Ein Vorspann in fremder Schreibweise darf den Standardwert nicht
+    /// loeschen — und in der anderen Reihenfolge auch nicht.
+    #[test]
+    fn an_unreadable_background_image_keeps_the_previous_one() {
+        let theme = Theme::DARK;
+        let mut st = ComputedStyle::root(&theme);
+        apply_one("background-image", "linear-gradient(90deg, red, blue)", &theme, &mut st);
+        apply_one("background-image",
+                  "-webkit-gradient(linear,left top,right top,from(red),to(blue))",
+                  &theme, &mut st);
+        assert!(st.bg_layer.gradient.is_some(), "der lesbare Wert muss stehen bleiben");
+        apply_one("background-image", "none", &theme, &mut st);
+        assert!(!st.bg_layer.gradient.is_some(), "`none` loescht sehr wohl");
+    }
+
+    #[test]
+    fn conic_gradient_is_declined() {
+        let theme = Theme::DARK;
+        assert!(!parse_gradient("conic-gradient(red, blue)", &theme).is_some());
     }
 }
 
@@ -5580,4 +6212,20 @@ pub fn hash_name(low: &str) -> u32 {
         h = h.wrapping_mul(0x0100_0193);
     }
     if h == 0 { 1 } else { h }
+}
+
+#[cfg(test)]
+mod size_probe {
+    /// Der Preis der Verlaeufe, festgenagelt statt geschaetzt.
+    ///
+    /// `ComputedStyle` wird je Element kopiert und gemerkt; waechst sie
+    /// unbemerkt weiter, zahlt das jede Seite. Faellt dieser Test, ist das
+    /// keine Regression — es ist die Frage, ob das neue Feld seinen Platz
+    /// wert ist.
+    #[test]
+    fn the_style_stays_small() {
+        assert_eq!(core::mem::size_of::<super::GradStop>(), 12);
+        assert_eq!(core::mem::size_of::<super::Gradient>(), 84);
+        assert_eq!(core::mem::size_of::<super::ComputedStyle>(), 1472);
+    }
 }

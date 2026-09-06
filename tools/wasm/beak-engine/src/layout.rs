@@ -413,10 +413,18 @@ fn translate_op_list(ops: &mut [DrawOp], dx: i32, dy: i32) {
             | DrawOp::RoundRect { x, y, .. }
             | DrawOp::Shadow { x, y, .. }
             | DrawOp::Text { x, y, .. }
-            | DrawOp::Image { x, y, .. }
-            | DrawOp::BgImage { x, y, .. } => {
+            | DrawOp::Image { x, y, .. } => {
                 *x += dx;
                 *y += dy;
+            }
+            // Der Malbereich steht in Dokumentkoordinaten wie der Kasten
+            // selbst — bleibt er stehen, schneidet er den Hintergrund an der
+            // alten Stelle ab.
+            DrawOp::BgImage { x, y, clip, .. } | DrawOp::Gradient { x, y, clip, .. } => {
+                *x += dx;
+                *y += dy;
+                clip.0 += dx;
+                clip.1 += dy;
             }
         }
     }
@@ -568,6 +576,27 @@ fn clip_ops(ops: &mut Vec<DrawOp>, start: usize, cl: i32, ct: i32, cr: i32, cb: 
             DrawOp::Image { x, y, w, h, .. } | DrawOp::BgImage { x, y, w, h, .. } => {
                 if x < cr && x + w > cl && y < cb && y + h > ct {
                     ops.push(op);
+                }
+            }
+            // Ein Verlauf traegt seinen Malbereich selbst: der Schnitt geht
+            // in `clip`, waehrend `x,y,w,h` (die Verlaufsachse) stehen
+            // bleibt — sonst wanderten die Farbstopps mit dem Schnitt.
+            DrawOp::Gradient { x, y, w, h, clip, repeat, pos, size, r, g } => {
+                let (nx, ny) = (clip.0.max(cl), clip.1.max(ct));
+                let (nx1, ny1) = ((clip.0 + clip.2).min(cr), (clip.1 + clip.3).min(cb));
+                if nx1 > nx && ny1 > ny {
+                    ops.push(DrawOp::Gradient {
+                        x,
+                        y,
+                        w,
+                        h,
+                        clip: (nx, ny, nx1 - nx, ny1 - ny),
+                        repeat,
+                        pos,
+                        size,
+                        r,
+                        g,
+                    });
                 }
             }
             DrawOp::Text { x, y, size, .. } => {
@@ -868,6 +897,27 @@ pub enum DrawOp {
         /// that colour at layout time instead.
         filter: u16,
     },
+    /// Ein Farbverlauf als Hintergrund.
+    ///
+    /// Eigener Befehl und keine Kette aus Rechtecken: ein Verlauf hat an jedem
+    /// Pixel eine andere Farbe, und tausend 1-px-Streifen je Kasten waeren
+    /// eine Anzeigeliste, die niemand mehr lesen kann.
+    Gradient {
+        x: i32, y: i32, w: i32, h: i32,
+        clip: (i32, i32, i32, i32),
+        /// Eckenradien der Kastenform, damit ein Verlauf unter einer runden
+        /// Ecke nicht darueber hinauslaeuft.
+        r: [f32; 4],
+        /// Dieselben drei wie bei `BgImage`, und aus demselben Grund: ein
+        /// Verlauf IST ein Hintergrundbild. Tailwinds Punkt- und Gittermuster
+        /// sind ein 10x10 grosser Verlauf, der sich kachelt — ohne
+        /// `background-size` waere es eine einzige Kachel ueber die ganze
+        /// Seite, und das Muster verschwaende.
+        repeat: (bool, bool),
+        pos: (BgPos, BgPos),
+        size: BgSize,
+        g: crate::style::Gradient,
+    },
 }
 
 /// Ein Flex-Kind: ein Element, oder ein ANONYMER Kasten um einen nackten
@@ -896,6 +946,7 @@ fn op_bottom(op: &DrawOp) -> i32 {
         DrawOp::Rect { y, h, .. }
         | DrawOp::RoundRect { y, h, .. }
         | DrawOp::Image { y, h, .. }
+        | DrawOp::Gradient { y, h, .. }
         | DrawOp::BgImage { y, h, .. } => y + h,
         // Der weiche Rand reicht ueber den Kasten hinaus, aber er ist
         // durchsichtig und soll die Seite nicht laenger machen.
@@ -993,6 +1044,32 @@ fn bg_ops(st: &ComputedStyle, bg: Option<u64>, mask: Option<u64>, x: i32, y: i32
             size: st.bg_layer.size,
             tint: None,
             filter: 0,
+        });
+    }
+    // Ein Verlauf ist dieselbe Schicht wie ein `url()` — `background-image`
+    // ist eines von beidem, nie beides. Er wird ueber die Positionierflaeche
+    // gespannt und am Malbereich beschnitten, wie das Bild auch.
+    if st.bg_layer.gradient.is_some() && cw > 0 && ch > 0 {
+        // Wie bei der Farbe: der Radius wird am Rahmenkasten gemessen, und
+        // ein nach innen gezogener Malbereich zieht die Rundung mit.
+        let r = radii_px(st, w);
+        let inset = (cx - x).max(cy - y) as f32;
+        out.push(DrawOp::Gradient {
+            x: ox,
+            y: oy,
+            w: ow,
+            h: oh,
+            clip,
+            repeat: st.bg_layer.repeat,
+            pos: st.bg_layer.pos,
+            size: st.bg_layer.size,
+            r: [
+                (r[0] - inset).max(0.0),
+                (r[1] - inset).max(0.0),
+                (r[2] - inset).max(0.0),
+                (r[3] - inset).max(0.0),
+            ],
+            g: st.bg_layer.gradient.with_current(st.color),
         });
     }
 }
@@ -1312,6 +1389,7 @@ fn op_key(op: &DrawOp) -> OpKey {
         DrawOp::Image { x, y, w, h, .. } => OpKey { kind: 3, x: *x, y: *y, a: *w, b: *h },
         DrawOp::BgImage { x, y, w, h, .. } => OpKey { kind: 4, x: *x, y: *y, a: *w, b: *h },
         DrawOp::Shadow { x, y, w, h, .. } => OpKey { kind: 5, x: *x, y: *y, a: *w, b: *h },
+        DrawOp::Gradient { x, y, w, h, .. } => OpKey { kind: 6, x: *x, y: *y, a: *w, b: *h },
     }
 }
 
@@ -4359,6 +4437,13 @@ family: st.family,
                     let inner = (*filter as usize).checked_sub(1).map(|i| table[i]);
                     *filter = filter_key(&mut table, inner.map_or(f, |i| i.then(f)));
                 }
+                // Die Farben eines Verlaufs stehen schon hier fest, also
+                // wird jeder Stopp gefiltert — kein Eintrag in `filters`.
+                DrawOp::Gradient { g, .. } => {
+                    for st in g.stops.iter_mut().take(g.n as usize) {
+                        st.color = f.apply(st.color);
+                    }
+                }
                 // A mask paints `tint` THROUGH the image's alpha, so the
                 // filter belongs on that colour, not on the stencil's pixels.
                 DrawOp::BgImage { tint: Some(c), .. } => *c = f.apply(*c),
@@ -7294,10 +7379,17 @@ family: st.family,
                 | DrawOp::Rect { x, y, .. }
                 | DrawOp::RoundRect { x, y, .. }
                 | DrawOp::Shadow { x, y, .. }
-                | DrawOp::Image { x, y, .. }
-                | DrawOp::BgImage { x, y, .. } => {
+                | DrawOp::Image { x, y, .. } => {
                     *x += dx;
                     *y += dy;
+                }
+                // Wie in `translate_op_list`: `clip` ist absolut, nicht
+                // relativ zum Kasten.
+                DrawOp::BgImage { x, y, clip, .. } | DrawOp::Gradient { x, y, clip, .. } => {
+                    *x += dx;
+                    *y += dy;
+                    clip.0 += dx;
+                    clip.1 += dy;
                 }
             }
         }
