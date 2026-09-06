@@ -1045,6 +1045,48 @@ impl Compiler {
                 }
                 Ok(())
             }
+            // `a?.b(…)` und `a?.b?.(…)`: der Empfaenger ist `a`, und er darf
+            // NICHT verlorengehen.
+            //
+            // Ohne diesen Zweig fiel BEIDES in den Fall „irgendein Ausdruck
+            // als Gerufener" und rief mit `undefined` als `this`.
+            // `o?.m?.forEach(f)` warf dann „Map method on the wrong
+            // receiver" — und zwar nur auf der Befehlsmaschine, der
+            // Baumlaeufer war die ganze Zeit richtig. test262 hat es nicht
+            // gesehen; gefunden hat es die Fritzbox-Oberflaeche.
+            Expr::Call { callee, args, optional }
+                if matches!(&**callee, Expr::Member { optional: true, .. }) => {
+                if self.chains.is_empty() { return Err(Unsupported("optional-outside-chain")) }
+                let Expr::Member { obj, prop, .. } = &**callee else { unreachable!() };
+                self.expr(obj)?;
+                // Erst `a` pruefen — das ist das `?.` VOR dem Namen.
+                self.short_circuit(1)?;
+                self.chunk.emit(Op::Dup);
+                let mut named = u32::MAX;
+                match &**prop {
+                    MemberProp::Computed(k) => {
+                        self.expr(k)?;
+                        self.chunk.emit(Op::GetIndex);
+                    }
+                    _ => {
+                        named = self.member_name(prop);
+                        self.chunk.emit(Op::GetProp(named));
+                    }
+                }
+                // Und dann das `?.` VOR der Klammer, wenn eins dasteht: hier
+                // liegen Empfaenger UND Gerufener, der Kurzschluss raeumt
+                // beide ab.
+                if *optional { self.short_circuit(2)?; named = u32::MAX; }
+                self.chunk.emit(Op::Swap);
+                if Self::args_have_spread(args) {
+                    self.args_as_array(args)?;
+                    self.chunk.emit(Op::CallSpread(named));
+                } else {
+                    let n = self.plain_args(args)?;
+                    self.chunk.emit(Op::Call { argc: n, name: named });
+                }
+                Ok(())
+            }
             Expr::Call { callee, args, optional: false } => {
                 // Der Empfaenger gehoert zum Aufruf: `o.f()` ruft mit `o` als
                 // `this`, `f()` mit undefined. Beides wird HIER entschieden,

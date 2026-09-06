@@ -35,12 +35,26 @@ pub enum PState { Pending, Fulfilled(Value), Rejected(Value) }
 
 /// Ein angehaengter Behandler: die Funktion (oder keine — dann wird
 /// durchgereicht) und das abgeleitete Versprechen, das er erledigt.
-pub struct Reaction { pub handler: Option<Value>, pub derived: Gc }
+///
+/// `cap` ist der FREMDE Fall: `then` darf sein Ergebnis ueber
+/// `constructor[Symbol.species]` bauen lassen, und dann ist das Ergebnis kein
+/// `ObjKind::Promise`, sondern irgendein Objekt mit einem eigenen
+/// `resolve`/`reject`-Paar. `derived` bleibt trotzdem gesetzt (als
+/// Platzhalter), damit der Rest des Codes unveraendert bleibt.
+pub struct Reaction {
+    pub handler: Option<Value>,
+    pub derived: Gc,
+    pub cap: Option<(Value, Value)>,
+}
 
 pub struct PData {
     pub state: PState,
     pub on_ok: Vec<Reaction>,
     pub on_err: Vec<Reaction>,
+    /// Hat jemals jemand `then` daran gehaengt? `PerformPromiseThen` setzt es,
+    /// egal ob ein Ablehnungsbehandler dabei war — das abgeleitete
+    /// Versprechen uebernimmt die Verantwortung.
+    pub handled: bool,
 }
 
 /// Eine Microtask.
@@ -57,7 +71,7 @@ fn pdata(o: &Gc) -> Option<Rc<RefCell<PData>>> {
 
 pub fn new_promise(i: &Interp) -> Gc {
     new_kind(Some(i.realm.promise_proto.clone()), ObjKind::Promise(Rc::new(RefCell::new(
-        PData { state: PState::Pending, on_ok: Vec::new(), on_err: Vec::new() }))))
+        PData { state: PState::Pending, on_ok: Vec::new(), on_err: Vec::new(), handled: false }))))
 }
 
 /// Erledigen. Nur EINMAL — wer schon erledigt ist, aendert sich nicht mehr.
@@ -69,9 +83,15 @@ pub fn settle(i: &mut Interp, p: &Gc, v: Value, rejected: bool) {
         b.state = if rejected { PState::Rejected(v.clone()) } else { PState::Fulfilled(v.clone()) };
         (core::mem::take(&mut b.on_ok), core::mem::take(&mut b.on_err))
     };
+    let handled = d.borrow().handled;
     for r in if rejected { err } else { ok } {
         i.jobs.push_back(Job::React { r, arg: v.clone(), rejected });
     }
+    // Eine Ablehnung, an der nichts haengt, ist die stillste Art, eine Seite
+    // scheitern zu lassen: kein Fehler, keine Meldung, nur etwas, das nie
+    // passiert. Sie wird gemerkt und am Ende der Schlange gemeldet — bis
+    // dahin darf noch jemand ein `catch` anhaengen, und das ist der Normalfall.
+    if rejected && !handled { i.pending_rejections.push(p.clone()); }
 }
 
 /// `ResolvePromise`: ein Thenable wird UEBERNOMMEN, alles andere erfuellt.
@@ -125,6 +145,13 @@ fn cap_settle(i: &mut Interp, a: &[Value], rejected: bool) {
 
 /// `PerformPromiseThen` — haengt an und gibt das abgeleitete Versprechen.
 pub fn perform_then(i: &mut Interp, p: &Gc, on_ok: Value, on_err: Value) -> Gc {
+    perform_then_cap(i, p, on_ok, on_err, None)
+}
+
+/// Wie `perform_then`, aber mit einem FREMDEN Erledigungspaar.
+pub fn perform_then_cap(i: &mut Interp, p: &Gc, on_ok: Value, on_err: Value,
+                        cap: Option<(Value, Value)>) -> Gc {
+    if let Some(d) = pdata(p) { d.borrow_mut().handled = true; }
     let derived = new_promise(i);
     let ok = if i.is_callable(&on_ok) { Some(on_ok) } else { None };
     let err = if i.is_callable(&on_err) { Some(on_err) } else { None };
@@ -133,14 +160,16 @@ pub fn perform_then(i: &mut Interp, p: &Gc, on_ok: Value, on_err: Value) -> Gc {
         let mut b = d.borrow_mut();
         match &b.state {
             PState::Pending => {
-                b.on_ok.push(Reaction { handler: ok, derived: derived.clone() });
-                b.on_err.push(Reaction { handler: err, derived: derived.clone() });
+                b.on_ok.push(Reaction { handler: ok, derived: derived.clone(), cap: cap.clone() });
+                b.on_err.push(Reaction { handler: err, derived: derived.clone(), cap: cap.clone() });
                 None
             }
-            PState::Fulfilled(v) => Some((Reaction { handler: ok, derived: derived.clone() },
-                                          v.clone(), false)),
-            PState::Rejected(v) => Some((Reaction { handler: err, derived: derived.clone() },
-                                         v.clone(), true)),
+            PState::Fulfilled(v) => Some((
+                Reaction { handler: ok, derived: derived.clone(), cap: cap.clone() },
+                v.clone(), false)),
+            PState::Rejected(v) => Some((
+                Reaction { handler: err, derived: derived.clone(), cap: cap.clone() },
+                v.clone(), true)),
         }
     };
     if let Some((r, arg, rejected)) = queued {
@@ -156,6 +185,37 @@ pub fn perform_then(i: &mut Interp, p: &Gc, on_ok: Value, on_err: Value) -> Gc {
 /// dieselbe Entscheidung wie bei `run_timers` — EINMAL durchlaufen ist zu
 /// wenig (eine Kette braucht ihre Sprossen), unbegrenzt zu viel.
 pub fn run_jobs(i: &mut Interp) -> usize {
+    let n = run_queue(i);
+    report_rejections(i);
+    n
+}
+
+/// Was am Ende der Schlange noch unbehandelt abgelehnt ist, wird GEMELDET —
+/// als `unhandledrejection` am Fenster und auf der Konsole.
+fn report_rejections(i: &mut Interp) {
+    if i.pending_rejections.is_empty() { return }
+    let list = core::mem::take(&mut i.pending_rejections);
+    for p in list {
+        let Some(d) = pdata(&p) else { continue };
+        if d.borrow().handled { continue }
+        let PState::Rejected(v) = &d.borrow().state else { continue };
+        let reason = v.clone();
+        // Der Behandler darf noch antworten — `preventDefault` unterdrueckt
+        // die Meldung, genau wie im Browser.
+        let prevented = super::dombind::dispatch_rejection(i, reason.clone(), Value::Obj(p.clone()))
+            .unwrap_or(false);
+        if prevented { continue }
+        let text = i.get(&reason, "message").ok()
+            .and_then(|m| i.to_string(&m).ok())
+            .filter(|m| !m.is_empty())
+            .or_else(|| i.to_string(&reason).ok())
+            .map(|s| alloc::string::String::from(&*s))
+            .unwrap_or_else(|| "?".into());
+        i.console_push(alloc::format!("Unhandled promise rejection: {text}"));
+    }
+}
+
+fn run_queue(i: &mut Interp) -> usize {
     let mut n = 0;
     while let Some(j) = i.jobs.pop_front() {
         n += 1;
@@ -163,14 +223,25 @@ pub fn run_jobs(i: &mut Interp) -> usize {
         if i.tick().is_err() { break; }
         match j {
             Job::React { r, arg, rejected } => {
-                match r.handler {
-                    None => {
-                        if rejected { settle(i, &r.derived, arg, true) }
-                        else { resolve_promise(i, &r.derived, arg) }
+                // Ein FREMDES Erledigungspaar bekommt den Ausgang als Aufruf,
+                // nicht als Zustandswechsel — es gehoert nicht uns.
+                let finish = |i: &mut Interp, r: &Reaction, v: Value, rejected: bool| {
+                    match &r.cap {
+                        Some((res, rej)) => {
+                            let f = if rejected { rej.clone() } else { res.clone() };
+                            let _ = i.call(&f, Value::Undefined, &[v]);
+                        }
+                        None => {
+                            if rejected { settle(i, &r.derived, v, true) }
+                            else { resolve_promise(i, &r.derived, v) }
+                        }
                     }
+                };
+                match r.handler.clone() {
+                    None => finish(i, &r, arg, rejected),
                     Some(h) => match i.call(&h, Value::Undefined, &[arg]) {
-                        Ok(v) => resolve_promise(i, &r.derived, v),
-                        Err(Abrupt::Throw(e)) => settle(i, &r.derived, e, true),
+                        Ok(v) => finish(i, &r, v, false),
+                        Err(Abrupt::Throw(e)) => finish(i, &r, e, true),
                         Err(_) => {}
                     },
                 }
@@ -258,8 +329,24 @@ pub fn install(realm: &mut Realm) {
         if pdata(p).is_none() { return i.type_err("then on a non-promise"); }
         let ok = a.first().cloned().unwrap_or(Value::Undefined);
         let err = a.get(1).cloned().unwrap_or(Value::Undefined);
-        let der = perform_then(i, &p.clone(), ok, err);
-        Ok(Value::Obj(der))
+        let p = p.clone();
+        // **`SpeciesConstructor`** (ES §27.2.5.4 Schritt 3). Wer
+        // `p.constructor[Symbol.species]` setzt, bestimmt, WAS `then`
+        // zurueckgibt — auch wenn das gar kein Versprechen ist.
+        //
+        // Das ist nicht Feinschliff: core-js prueft mit genau diesem
+        // Ausdruck, ob die eingebaute `Promise` taugt. Fiel die Pruefung
+        // durch, ERSETZTE es sie durch seine eigene — und die kennt in der
+        // Fassung, die die Fritzbox ausliefert, kein `allSettled`. Die
+        // Komponenten warten in `connectedCallback` darauf und blieben fuer
+        // immer leer.
+        let c = match species_of(i, &t)? {
+            Some(c) => c,
+            None => { let der = perform_then(i, &p, ok, err); return Ok(Value::Obj(der)) }
+        };
+        let (obj, res, rej) = new_capability(i, &c)?;
+        perform_then_cap(i, &p, ok, err, Some((res, rej)));
+        Ok(obj)
     }, 2, &fp);
     d(&proto, "catch", |i, t, a| {
         let f = i.get(&t, "then")?;
@@ -449,3 +536,45 @@ pub const MAX_JOBS: usize = 100_000;
 fn agg_this(i: &mut Interp, t: &Value) -> C<()> {
     if i.is_constructor(t) { Ok(()) } else { i.type_err("Promise static on a non-constructor") }
 }
+
+/// `SpeciesConstructor(p, %Promise%)` — aber nur, wenn es NICHT die eigene
+/// ist. `None` heisst „der gewoehnliche Weg".
+fn species_of(i: &mut Interp, t: &Value) -> C<Option<Value>> {
+    let ctor = i.get(t, "constructor")?;
+    if matches!(ctor, Value::Undefined) { return Ok(None) }
+    if !matches!(ctor, Value::Obj(_)) { return i.type_err("constructor is not an object") }
+    let sp = i.get(&ctor, SYM_SPECIES)?;
+    if matches!(sp, Value::Undefined | Value::Null) { return Ok(None) }
+    // Die eigene `Promise` (oder ihr eigenes `species`, das auf sie zeigt)
+    // nimmt den kurzen Weg — sonst kostete JEDES `then` einen Konstruktoraufruf.
+    let own = i.realm.global.borrow().get_own("Promise").and_then(|p| p.value.clone());
+    if matches!((&sp, &own), (Value::Obj(a), Some(Value::Obj(b))) if Rc::ptr_eq(a, b)) {
+        return Ok(None);
+    }
+    if !i.is_callable(&sp) { return i.type_err("species is not a constructor") }
+    Ok(Some(sp))
+}
+
+/// `NewPromiseCapability(C)` — `new C(executor)` und die zwei Funktionen, die
+/// der Ausfuehrer bekommen hat.
+///
+/// Der Ausfuehrer ist ein NATIVER Sammler: er schreibt die beiden Argumente
+/// in einen Kasten, den wir danach auslesen. Ein fremder Konstruktor darf sie
+/// aufheben, sofort rufen oder wegwerfen — alle drei Faelle stehen so.
+fn new_capability(i: &mut Interp, c: &Value) -> C<(Value, Value, Value)> {
+    let box_ = new_obj(None);
+    let ex = bind1(i, |i, _, a| {
+        let Some(Value::Obj(b)) = a.first() else { return Ok(Value::Undefined) };
+        b.borrow_mut().define(CAP_RES, Prop::data(a.get(1).cloned().unwrap_or(Value::Undefined)));
+        b.borrow_mut().define(CAP_REJ, Prop::data(a.get(2).cloned().unwrap_or(Value::Undefined)));
+        let _ = i;
+        Ok(Value::Undefined)
+    }, Value::Obj(box_.clone()));
+    let obj = i.construct(c, &[ex])?;
+    let res = box_.borrow().get_own(CAP_RES).and_then(|p| p.value.clone()).unwrap_or(Value::Undefined);
+    let rej = box_.borrow().get_own(CAP_REJ).and_then(|p| p.value.clone()).unwrap_or(Value::Undefined);
+    Ok((obj, res, rej))
+}
+
+const CAP_RES: &str = "\0!cap.res";
+const CAP_REJ: &str = "\0!cap.rej";

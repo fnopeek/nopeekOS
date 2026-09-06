@@ -100,6 +100,16 @@ fn main() {
         if t == 0 { break }
     }
     for l in &sess.interp.console[n0..] { println!("  timer| {l}"); }
+    // `DUMP=1` zeigt, was am Ende im Baum steht — die Frage „laufen die
+    // Skripte" ist nicht dieselbe wie „haben sie etwas gebaut".
+    if std::env::var("DUMP").is_ok() {
+        if let Some(d) = sess.interp.doc.as_mut() {
+            let dom = d.to_dom();
+            let mut out = String::new();
+            dump(dom.body(), 0, &mut out);
+            println!("\n── Baum nach den Skripten ──\n{out}");
+        }
+    }
     let listeners = sess.interp.doc.as_ref().is_some_and(|d| d.has_listeners);
     println!("\n{ran} gelaufen, {failed} gescheitert, {timers} Zeitgeber, {}",
              if listeners { "Ereignisse SCHARF" } else { "keine Behandler" });
@@ -181,6 +191,34 @@ fn run_module_graph(sess: &mut beak_engine::js::Session, label: &str, src: &str,
             queue.push(r);
         }
     }
-    sess.interp.eval_module(&entry)
-        .map_err(|e| beak_engine::js::modules::describe(&mut sess.interp, e))
+    sess.interp.module_fail = None;
+    sess.interp.eval_module(&entry).map_err(|e| {
+        let msg = beak_engine::js::modules::describe(&mut sess.interp, e);
+        match sess.interp.module_fail.clone() {
+            Some(u) if &*u != entry.as_str() => format!("{msg}   [in {u}]"),
+            _ => msg,
+        }
+    })
+}
+
+/// Den Baum als Umriss: Marke, id/class, und Text gekuerzt.
+fn dump(e: &beak_engine::dom::Element, depth: usize, out: &mut String) {
+    if depth > 12 { return }
+    let pad = "  ".repeat(depth);
+    let id = e.attr("id").map(|v| format!("#{v}")).unwrap_or_default();
+    let cls = e.attr("class").map(|v| format!(".{}", v.replace(' ', "."))).unwrap_or_default();
+    out.push_str(&format!("{pad}<{}{id}{cls}>\n", e.tag));
+    for c in &e.children {
+        match c {
+            beak_engine::dom::Node::Element(x) => dump(x, depth + 1, out),
+            beak_engine::dom::Node::Text(t) => {
+                let t = t.trim();
+                if !t.is_empty() {
+                    let t: String = t.chars().take(60).collect();
+                    out.push_str(&format!("{pad}  \"{t}\"\n"));
+                }
+            }
+            _ => {}
+        }
+    }
 }

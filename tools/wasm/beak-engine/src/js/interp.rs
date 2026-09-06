@@ -228,6 +228,7 @@ pub struct Realm {
     pub tag_protos: HashMap<&'static str, Gc>,
     pub url_proto: Gc,
     pub url_params_proto: Gc,
+    pub prej_proto: Gc,
     pub text_encoder_proto: Gc,
     pub text_decoder_proto: Gc,
     /// Die Prototypen der neun Sichten, nach ihrem Namen — `new_typed` haengt
@@ -348,6 +349,18 @@ pub struct Interp {
     /// Die geholten ES-Module, nach AUFGELOESTER Adresse. Siehe `modules.rs`
     /// — die Engine holt nichts, sie verwaltet nur.
     pub modules: HashMap<Rc<str>, Rc<RefCell<super::modules::Module>>>,
+    /// Welches Modul zuerst geworfen hat. Ein Fehler aus einem Graphen von
+    /// sechsundfuenfzig Adressen nennt sonst nur den EINSTIEG, und das ist
+    /// die eine Auskunft, die man nicht braucht.
+    pub module_fail: Option<Rc<str>>,
+    /// Abgelehnte Versprechen, an denen (noch) nichts haengt.
+    pub pending_rejections: Vec<Gc>,
+    /// `customElements`: Marke -> Konstruktor, in Reihenfolge der Anmeldung.
+    ///
+    /// Eine LISTE und keine Tabelle: sie wird bei jedem `new` einmal
+    /// durchlaufen, um aus dem Prototyp die Marke zu finden, und vierzehn
+    /// Eintraege sind kein Fall fuer eine Hashtabelle.
+    pub custom: Vec<(Rc<str>, Value)>,
     /// Aufruftiefe. Ein Baumlaeufer benutzt den RUST-Stapel, also wird ein
     /// zu tiefes JS-Programm zum Stapelueberlauf des Wirts — und das ist im
     /// Kernel ein Absturz, kein Fehler. Die Grenze ist deshalb Pflicht, nicht
@@ -582,7 +595,8 @@ impl Interp {
             Some(Value::Obj(o)) => Some(o), _ => None,
         };
         super::url::install(&mut realm);
-        Interp { realm, modules: HashMap::new(), depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX,
+        Interp { realm, modules: HashMap::new(), module_fail: None,
+                 pending_rejections: Vec::new(), custom: Vec::new(), depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX,
                  fake_now: 0.0, epoch_ms: 0.0, doc: None, next_sym: 0, sym_registry: HashMap::new(),
                  #[cfg(feature = "strict-probe")]
                  strict_probe: [0; STRICT_SITES],
