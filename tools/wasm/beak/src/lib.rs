@@ -1651,7 +1651,13 @@ fn module_pump(engine: &Engine) -> bool {
         }
     }
     let rounds = unsafe { core::ptr::addr_of!(NAV_MOD_ROUNDS).read() };
-    if !missing.is_empty() && rounds < MAX_MODULE_ROUNDS && seen.len() <= MAX_MODULE_URLS {
+    // WELCHER Deckel gerissen ist, gehoert in die Meldung: „nach 5 Runden"
+    // klang nach der Rundengrenze, obwohl die bei 24 liegt — gerissen war die
+    // Adressgrenze, und das ist eine ganz andere Diagnose.
+    let cap = if rounds >= MAX_MODULE_ROUNDS { Some("Runden") }
+              else if seen.len() > MAX_MODULE_URLS { Some("Adressen") }
+              else { None };
+    if !missing.is_empty() && cap.is_none() {
         missing.truncate(MAX_SCRIPT_URLS);
         let h = begin_batch(&missing, SCRIPT_CAP);
         if h >= 0 {
@@ -1669,8 +1675,13 @@ fn module_pump(engine: &Engine) -> bool {
     // Zu gross, zu tief oder fertig: auswerten, was da ist. Ein Modul, das
     // fehlt, meldet sich beim Verknuepfen mit Namen.
     if !missing.is_empty() {
-        log(&alloc::format!("[beak] module graph unresolved: {} offen nach {rounds} Runden",
-                            missing.len()));
+        let why = cap.unwrap_or("nicht holbar");
+        log(&alloc::format!(
+            "[beak] module graph unresolved: {} offen, {} im Graphen, {rounds} Runden — Deckel: {why}",
+            missing.len(), seen.len()));
+        if let Some(u) = missing.first() {
+            log(&alloc::format!("[beak]   erste offene Adresse: {u}"));
+        }
     }
     eval_modules();
     finish_scripts(engine);
@@ -2314,26 +2325,28 @@ fn origin_of(url: &str) -> String {
         alloc::format!("https://{}", url.split('/').next().unwrap_or(""))
     }
 }
+/// Eine Adresse gegen die der Seite aufloesen.
+///
+/// **Die Aufloesung der ENGINE, nicht eine zweite.** Der Wirt hatte seine
+/// eigene, und sie hat `.` und `..` stehen lassen (RFC 3986 §5.2.4 fehlte
+/// ganz). Solange nur Bilder und Links daran hingen, fiel das nicht auf: die
+/// Server liefern `/js/../js/x.css` klaglos aus. Beim Modulgraphen ist eine
+/// Adresse aber ein SCHLUESSEL — `./jsl.js` aus `/js/./jsl.js` wurde
+/// `/js/././jsl.js`, jede Ebene hing ein weiteres Segment an, und derselbe
+/// Modul lag am Ende unter sechs Namen im Graphen. Am Geraet: 106 geladen,
+/// 179 offen, Deckel gerissen, nichts gelaufen.
+///
+/// `js::url::resolve` konnte das die ganze Zeit ([[url::norm]]). Zwei
+/// Umsetzungen derselben Regel sind eine wartende zweite Semantik, und diese
+/// hier ist die falsche gewesen — also gibt es sie nicht mehr.
 fn resolve(base: &str, href: &str) -> String {
+    use beak_engine::js::url;
     let href = href.trim();
-    if href.starts_with("https://") || href.starts_with("http://") {
+    let Some(b) = url::parse_abs(base) else {
+        // Ohne brauchbare Grundlage bleibt nur die Angabe selbst.
         return href.to_string();
-    }
-    if let Some(rest) = href.strip_prefix("//") {
-        return alloc::format!("https://{}", rest);
-    }
-    if href.is_empty() || href.starts_with('#') {
-        return base.to_string();
-    }
-    let origin = origin_of(base);
-    if href.starts_with('/') {
-        return alloc::format!("{}{}", origin, href);
-    }
-    let path = base.split(['?', '#']).next().unwrap_or(base);
-    match path.rfind('/').filter(|&i| i > origin.len().saturating_sub(1)) {
-        Some(i) => alloc::format!("{}{}", &path[..=i], href),
-        None => alloc::format!("{}/{}", origin, href),
-    }
+    };
+    url::resolve(href, &b).href()
 }
 
 /// Query the canvas widget's actual laid-out rect (x, y, w, h) in the app's
