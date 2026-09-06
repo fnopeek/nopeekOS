@@ -557,6 +557,16 @@ impl Page {
             }
             s.push_str(" name=");
             s.push_str(if c.name.is_empty() { "-" } else { &c.name });
+            // **Was auf dem Knopf STEHT.** Googles Einwilligungsseite hat vier
+            // Formulare auf dieselbe Adresse; ohne die Beschriftung sind
+            // „Alle ablehnen" und „Alle akzeptieren" im Log nicht zu
+            // unterscheiden, und wer hier blind das erste nimmt, wirft eine
+            // Muenze ueber eine Entscheidung des Benutzers.
+            if !c.label.is_empty() {
+                s.push_str("  \"");
+                s.push_str(&c.label);
+                s.push('"');
+            }
             log(&s);
         }
     }
