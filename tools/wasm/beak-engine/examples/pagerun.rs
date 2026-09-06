@@ -196,6 +196,32 @@ fn main() {
             }
         }
     }
+    // `RENDER=<datei.bmp>` malt die Seite so, wie beak sie malt: der
+    // GESKRIPTETE Baum plus ALLE Stilblaetter, die im Baum stehen — die aus
+    // dem Quelltext und die, die Skripte nachgelegt haben, in Baumreihenfolge.
+    // Das ist der einzige Weg, „schaut falsch aus" in etwas Nachpruefbares zu
+    // verwandeln ([[feedback_trust_the_pixels_not_the_tool]]).
+    if let Ok(out) = std::env::var("RENDER") {
+        let Some(dom) = sess.interp.doc.as_mut().map(|d| d.to_dom()) else { return };
+        let mut css = String::new();
+        let mut sheets = 0;
+        collect_links(dom.body(), &dir, &mut css, &mut sheets);
+        // `<head>` steht nicht unter `body()` — beide Seiten des Baums.
+        collect_links(&dom.root, &dir, &mut css, &mut sheets);
+        let width: u32 = std::env::var("W").ok().and_then(|w| w.parse().ok()).unwrap_or(1902);
+        use beak_engine::layout::{Rgb, Theme};
+        let mut eng = beak_engine::Engine::new();
+        eng.set_theme(Theme { bg: Rgb(255,255,255), text: Rgb(33,37,41), heading: Rgb(33,37,41),
+                              link: Rgb(13,110,253), muted: Rgb(108,117,125), rule: Rgb(222,226,230) });
+        eng.set_scripted_dom(Some(dom));
+        let lay = eng.layout_ext(&html, &css, width);
+        let h = lay.height.clamp(1, 20000);
+        let mut buf = vec![0u8; (width * h * 4) as usize];
+        eng.paint(&lay, width, h, 0, &mut buf);
+        std::fs::write(&out, to_bmp(&buf, width, h)).expect("schreiben");
+        println!("RENDER {out}: {width}x{h}, {sheets} Blaetter ({} B CSS), {} Ops",
+                 css.len(), lay.ops.len());
+    }
     let listeners = sess.interp.doc.as_ref().is_some_and(|d| d.has_listeners);
     println!("\n{ran} gelaufen, {failed} gescheitert, {timers} Zeitgeber, {}",
              if listeners { "Ereignisse SCHARF" } else { "keine Behandler" });
@@ -318,4 +344,50 @@ fn find_seq(el: &beak_engine::dom::Element, id: &str) -> Option<u32> {
         }
     }
     None
+}
+
+/// Jedes `<link rel=stylesheet>` im Baum, in Baumreihenfolge, aus dem
+/// Verzeichnis gelesen. Dieselbe Reihenfolge, in der der Wirt sie anhaengt.
+fn collect_links(el: &beak_engine::dom::Element, dir: &str, out: &mut String, n: &mut usize) {
+    if el.tag == "link"
+        && el.attr("rel").is_some_and(|r| r.to_ascii_lowercase().contains("stylesheet")) {
+        if let Some(h) = el.attr("href") {
+            let u = resolve_path(&format!("{}/", origin()), h);
+            if let Ok(t) = std::fs::read_to_string(local(dir, &u)) {
+                out.push_str(&t);
+                out.push('\n');
+                *n += 1;
+            } else {
+                eprintln!("  Blatt fehlt: {u}");
+            }
+        }
+    }
+    for c in &el.children {
+        if let beak_engine::dom::Node::Element(e) = c { collect_links(e, dir, out, n); }
+    }
+}
+
+/// BGRA nach BMP, von unten nach oben — wie das Format es will.
+fn to_bmp(px: &[u8], w: u32, h: u32) -> Vec<u8> {
+    let row = (w * 3 + 3) & !3;
+    let size = 54 + (row * h) as usize;
+    let mut o = Vec::with_capacity(size);
+    o.extend_from_slice(b"BM");
+    o.extend_from_slice(&(size as u32).to_le_bytes());
+    o.extend_from_slice(&[0; 4]);
+    o.extend_from_slice(&54u32.to_le_bytes());
+    o.extend_from_slice(&40u32.to_le_bytes());
+    o.extend_from_slice(&(w as i32).to_le_bytes());
+    o.extend_from_slice(&(h as i32).to_le_bytes());
+    o.extend_from_slice(&1u16.to_le_bytes());
+    o.extend_from_slice(&24u16.to_le_bytes());
+    o.extend_from_slice(&[0; 24]);
+    for y in (0..h).rev() {
+        for x in 0..w {
+            let i = ((y * w + x) * 4) as usize;
+            o.extend_from_slice(&[px[i], px[i + 1], px[i + 2]]);
+        }
+        for _ in 0..(row - w * 3) { o.push(0); }
+    }
+    o
 }

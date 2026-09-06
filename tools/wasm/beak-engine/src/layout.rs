@@ -6710,7 +6710,7 @@ impl<'a> Ctx<'a> {
         let line_gap = st.grid_row_gap.px(def_cross.unwrap_or(0.0)).unwrap_or(0.0);
 
         // — per-item metrics (content-box main size = width) —
-        let m = self.flex_metrics(items, avail, true);
+        let m = self.flex_metrics(items, avail, true, def_cross);
 
         // — line breaking (flex-wrap) —
         let lines = flex_break_lines(&m, avail, main_gap, st.flex_wrap, st.flex_balance);
@@ -7123,7 +7123,12 @@ impl<'a> Ctx<'a> {
 
     /// Per-item flex metrics on the main axis (row: width; column: width used as
     /// cross). `row` selects which margins/paddings are the main vs cross axis.
-    fn flex_metrics(&mut self, items: &[(Kid<'a>, ComputedStyle)], avail: f32, row: bool) -> Vec<FlexItem> {
+    ///
+    /// `def_cross` ist die DEFINITE Quer-Groesse des Behaelters, oder `None`,
+    /// wenn sie sich erst aus dem Inhalt ergibt. Sie ist die einzige zulaessige
+    /// Grundlage fuer ein Prozent auf der Quer-Achse — siehe unten.
+    fn flex_metrics(&mut self, items: &[(Kid<'a>, ComputedStyle)], avail: f32, row: bool,
+                    def_cross: Option<f32>) -> Vec<FlexItem> {
         let mut out = Vec::with_capacity(items.len());
         for (el, s) in items {
             // Padding AND border on each axis: every consumer below adds
@@ -7212,10 +7217,22 @@ impl<'a> Ctx<'a> {
             } else {
                 matches!(s.width, Len::Auto)
             };
+            // **Die Quer-Achse hat eine EIGENE Grundlage.** Hier stand `avail`
+            // — und das ist die HAUPT-Achse, bei einer Zeile also die Breite.
+            // `min-height: 100%` an einem Flex-Element wurde damit zu 100 %
+            // der BREITE des Behaelters: ein 328 px breites Eingabefeld war
+            // 330 px hoch statt 40.
+            //
+            // Richtig ist die definite Quer-Groesse des Behaelters, und wenn
+            // es keine gibt, gilt das Prozent als nicht aufloesbar: `min-`
+            // faellt auf 0, `max-` auf „keins" (CSS 2.1 §10.7 — genau die
+            // Regel, die `resolve_pct_heights` fuer den Flussfall schon
+            // anwendet).
             let (min_cross, max_cross) = if row {
+                let basis = def_cross.map(|h| h as i32);
                 (
-                    s.min_height.px(avail).unwrap_or(0.0),
-                    s.max_height.px(avail).unwrap_or(f32::INFINITY),
+                    vert_len(s.min_height, basis).unwrap_or(0.0),
+                    vert_len(s.max_height, basis).unwrap_or(f32::INFINITY),
                 )
             } else {
                 (0.0, f32::INFINITY)
