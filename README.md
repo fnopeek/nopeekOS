@@ -47,7 +47,7 @@ spell                    # Text editor: tabs, syntax highlight, save to npkFS
 iris                     # Image viewer (PNG)
 tune                     # Audio player (MP3, WAV) — folder as playlist
 snap                     # Screenshot → npkFS
-beak                     # Native web browser (from scratch, no Linux)
+beak [url]               # Native web browser (from scratch, no Linux, own JS)
 browser                  # LibreWolf in a Linux microVM (compatibility browser)
 
 # The intent loop (terminal)
@@ -60,6 +60,9 @@ npk> install <module>    # Fetch + verify (ECDSA P-384) a signed WASM module
 npk> update              # OTA kernel update (signed, SHA-384 verified)
 npk> cert list           # TLS root store — inspect, add, drop a CA
 npk> driver wifi         # Bring up the AX200 WiFi driver + scan
+npk> wlan                # Link report: rate, retries, airtime, handshake rung
+npk> python fib.py       # CPython 3.13 as a WASM module (own WASI layer)
+npk> forge run <mod>     # Run a module on the compiler — A/B against wasmi
 npk> cores               # Trustworthy per-core CPU instrumentation
 ```
 
@@ -84,8 +87,8 @@ at rest.
  │  VT-x / AMD-V hypervisor · custom Linux 6.18 · virtio      │
  │  bridges · 9p↔npkFS · runs LibreWolf as a tiled window     │
  ├──────────────────────────────────────────────────────────┤
- │  WASM runtime (wasmi, fuel-metered) + host ABI (npk_*)     │
- │  npk_scene_commit — declarative widget rendering           │
+ │  WASM engine: forge (WASM→x86-64, W^X) · wasmi fallback    │
+ │  host ABI (npk_*) · wasi · npk_scene_commit — widgets      │
  │  npk_fs_* · npk_http_request · npk_input · npk_battery     │
  │  npk_pci/mmio/dma — capability-gated driver ABI            │
  ├──────────────────────────────────────────────────────────┤
@@ -138,11 +141,12 @@ system owns DNS, TCP, TLS, HTTP — you express intent, not protocol.
 
 ## What's Built
 
-Grouped by subsystem. Kernel is at **v0.265.1**; the full change history
-lives in the git log.
+Grouped by subsystem. Kernel is at **v0.326.0**, beak at **v0.110.0**; the
+full change history lives in the git log.
 
 **Kernel & SMP** — UEFI PE32+ boot straight to long mode; 4-level paging
-with NX + write-combining; growable heap (64 MB → 2 GB). All cores boot
+with NX + write-combining; a growable size-class heap (64 MB → 2 GB) that
+costs ~1 step per allocation instead of walking a free list. All cores boot
 (no limit) via a Chase-Lev work-stealing scheduler with MONITOR/MWAIT
 sleep, plus a stackful-fiber layer so blocking host calls yield instead
 of pinning a core. Per-core idle quiesces to real HLT.
@@ -162,9 +166,11 @@ an N100 (encrypted, on top of NVMe).
 
 **Networking** — Ethernet / ARP / IPv4 / ICMP / UDP / TCP from scratch,
 plus DNS, DHCP, NTP, and an HTTP/HTTPS client with a keep-alive
-connection pool and TCP window scaling (RFC 7323, ~gigabit). HTTP/2
-(HPACK, multiplexed streams) is implemented but has not yet been
-exercised on hardware — OTA deliberately stays on HTTP/1.1.
+connection pool and TCP window scaling (RFC 7323, ~gigabit). **HTTP/2**
+(HPACK, multiplexed streams) carries the document fetch and beak's
+subresource batches, with a per-host memory of who does not speak it;
+gzip on the receive path. OTA deliberately stays on HTTP/1.1 — an update
+that cannot be decoded is worse than a slow one.
 
 **Drivers** — NVMe, xHCI USB (keyboard + mouse, HID boot protocol),
 Intel I226-V and RTL8153 USB Ethernet, Intel Xe GPU (native 4K@60Hz
@@ -172,6 +178,33 @@ HDMI 2.0 + a Gen-12 BCS blitter for compositing), Intel HDA audio, an
 AML interpreter driving firmware `_BST`/`_BIF` for a vendor-independent
 battery %, and an Intel AX200 WiFi driver. WiFi, AML, and audio run as
 **WASM modules**; hardware drivers are ported 1:1 from Linux.
+
+**WiFi (AX200)** — iwlwifi ported function by function: firmware load,
+scan, a WPA2 four-way handshake in a resident `wifid` supplicant, TX and
+RX A-MPDU aggregation (~17-19 MPDUs per aggregate), fq_codel with 10240
+slots and AQL, which budgets airtime rather than bytes. Measured on the
+device: **116 Mbit down** on HT40, 69 minutes of link with `deauth 0`,
+one dropped frame in 404k transmitted. The `wlan` intent prints the
+driver's own report — rate, retries, airtime, handshake rung, ring state
+— next to the kernel's view, so a bad link says *which* stage is bad.
+
+**forge — the engine** — since v0.317.0 the default way a WASM module
+runs is our own single-pass **WASM→x86-64 compiler inside the kernel**.
+Code pages are W^X (writable while emitted, executable after, never
+both); linear memory gets an 8 GiB reservation, so a wasm address — a
+`u32` — cannot reach past it and the generator emits **no bounds check at
+all**; a host function can trap out of any depth of wasm frames in four
+instructions, which is what lets a WASI program `proc_exit` cleanly.
+Measured on the device against wasmi on the same binary: **10.1x** on the
+run phase of a CPython workload. wasmi stays in the image (0.82 MB of
+4.69) — not as dead weight but so the A/B comparison stays possible on
+real hardware: `run` vs `forge run`, `python` vs `forge python`.
+
+**Python** — CPython 3.13 runs as an ordinary signed WASM module. The
+kernel implements `wasi_snapshot_preview1` against npkFS, so nothing
+about Python is special-cased: it gets the same grant any WASI binary
+would, plus two directories. `python fib.py`, stdlib from a bundle in
+`sys/python`.
 
 **Desktop (Shade)** — Hyprland-style dwindle tiling compositor: rounded
 corners via SDF, light/dark `theme=auto` following wallpaper luminance,
@@ -197,7 +230,9 @@ syntax highlight, markdown preview), `iris` (image viewer), `tune`
 VT-x + EPT and AMD-V + NPT, vendor-symmetric), running a custom
 9.5 MB **Linux 6.18-nopeek** build. virtio-blk / -net / -gpu / -input
 backends, a 9p bridge that mounts npkFS into the guest, profile-image
-persistence, and guest-SMP (one vCPU per host worker core). It runs
+persistence, and guest-SMP (one vCPU per host worker core). Guest
+networking reaches ~480/290 Mbit on hardware after the interrupt and
+wake paths were rebuilt around what Intel machines actually do. It runs
 **LibreWolf** as a tiled window — the compatibility browser for the
 legacy web.
 
@@ -214,28 +249,45 @@ It renders HTML → a real DOM → a full CSS cascade (UA sheet → author
 `<style>` and external `<link>` sheets with selectors/specificity →
 inline → `!important`) → layout → paint, all hand-rolled: block +
 inline flow, tables, flexbox, CSS Grid, the box model, positioning,
-custom properties, `calc()`, `@media`, CSS Color 4, PNG + JPEG images
-and an SVG subset. Plus **HTML forms** — GET *and* POST, so typing into
-a page's search box and pressing Enter submits it, no JavaScript
-involved — cookies, and the charset rules real pages depend on
-(header → `<meta>` → sniffing, cp1252). It fetches over the kernel's
-TLS stack, is theme-aware, and scrolls smoothly.
+custom properties resolved at *use* rather than at definition, `calc()`,
+`@media`, CSS Color 4, PNG / JPEG / WebP / ICO images and an SVG subset.
+Plus HTML forms — GET *and* POST, cookies, and the charset rules real
+pages depend on (header → `<meta>` → sniffing, cp1252). It fetches over
+the kernel's TLS stack (HTTP/1.1 and HTTP/2, gzip), is theme-aware, and
+scrolls smoothly.
 
-Fidelity is measured, not guessed: the engine is a portable core with
-no host dependencies, and the official **WPT reftests** (5,786 of them)
-are vendored as a render-and-compare oracle that runs on the dev box —
-currently **4,088 passing**, 1,520 failing, 178 inconclusive: **72.9 %**
-of the conclusive set. Nearly every rendering bug this engine has had
-was found by rendering the real page to a bitmap on Linux, without
-booting the OS.
+**JavaScript is in, and pages react.** A whole engine of our own: lexer,
+parser, RegExp, DOM bindings, an event loop with timers and microtasks —
+running on a **bytecode VM**, where the state is an array rather than the
+Rust stack, and 99.6 % of programs execute on it. The language side has
+`Proxy`, `BigInt` on our own bignum, `eval` (direct and indirect), the
+iterator helpers, strict mode as a *difference* rather than a flag,
+private fields with a brand, and a `defineProperty` that really checks.
+The web side has ES modules with cycles and live bindings, custom
+elements, `history`, and a form bridge — the Fritzbox login mask now
+builds itself in beak, web component and all. An interpreter, never a
+JIT: a JIT would need a hole in W^X.
 
-Honest gaps: no JavaScript yet (Stage 1 — an interpreter, never a JIT,
-since a JIT would need a hole in W^X; test262 is its oracle), and beak
-still fetches over HTTP/1.1, which parts of the web now rate-limit
-outright — the kernel's HTTP/2 path exists but is unproven on hardware.
-Spec and status live in `docs/spec/BROWSER.md`, the measured per-feature
-number in `docs/spec/CONFORMANCE.md` (which is where that number lives —
-this paragraph will drift, that file will not).
+Fidelity is measured, not guessed. The engine is a portable core with no
+host dependencies, so every oracle runs on the dev box without booting
+the OS — which is how nearly every bug it has had was found. **The
+numbers live in files, not in this paragraph:**
+
+| Oracle | Where it stands | Runner |
+|---|---|---|
+| WPT CSS reftests | **86.2 %** of the 5192 tests a real page can exercise (79.4 % of the raw 5786) | `docs/spec/CONFORMANCE.md` |
+| test262 | **81.3 %** passing — V8 on the same corpus: 99.4 % | `…/beak-engine/tests/test262.rs` |
+| DOM surface | **98.3 %** of a Chromium call census covered | `…/beak-engine/tests/apigap.rs` |
+
+The counterpart runs on the device: `beak:selftest`, a check page baked
+into the image that fetches nothing and reports on screen *and* in the
+log. One run found nine gaps that weeks of foreign pages had not.
+
+Honest gaps: `@font-face` is skipped, so an icon font paints its ligature
+text and every text width drifts; `getBoundingClientRect` answers for
+roughly half the boxes a real browser reports; `fetch`, Shadow DOM,
+`postMessage` and the observers are unbuilt. Spec and status live in
+`docs/spec/BROWSER.md` — that file will not drift, this paragraph will.
 
 ---
 
@@ -246,7 +298,8 @@ this paragraph will drift, that file will not).
 | Language | Rust (`no_std`, nightly, edition 2024) | Memory safety, no GC |
 | Target | `x86_64-nopeek` (own spec) | Bare metal *with* SSE/AVX2/AES-NI |
 | Boot | UEFI (PE32+ direct) | Modern firmware, no GRUB |
-| Sandbox | wasmi (interpreter, fuel-metered) | `no_std`, one trust boundary |
+| WASM engine | forge — own WASM→x86-64 compiler | 10x the interpreter, W^X, `no_std` |
+| Fallback engine | wasmi (interpreter) | Keeps an A/B measurement possible |
 | Filesystem | npkFS (content-addressed, CoW) | BLAKE3, SSD-native, encrypted |
 | At-rest AEAD | AES-256-GCM (AES-NI + PCLMULQDQ) | Hardware-accelerated |
 | Hashing | BLAKE3 (AVX2) | Fast, streaming, verify on read |
@@ -277,6 +330,21 @@ AES-256-GCM at rest + BLAKE3 on every operation):
 Crypto on the same N100: BLAKE3 ~1670 MB/s, AES-256-GCM ~715 MB/s dec /
 ~622 MB/s enc. Encrypted throughput lands near unencrypted ext4 on
 comparable hardware, at ~2 W over idle on a fanless 6 W TDP CPU.
+
+The two WASM engines, same binary on the same machine — the laptop, not
+the N100 (`python -c "print(sum(i*i for i in range(1000000)))"`):
+
+| Phase | wasmi | forge |
+|-------|------:|------:|
+| translate | 90 ms | 2410 ms |
+| **run** | 6550 ms | **650 ms** |
+| total | 6650 ms | 3070 ms |
+
+Compiling is paid up front, so on a *short* enough run the interpreter
+still wins the total — which is why both engines stay in the image and
+the comparison is a command, not a claim. QEMU flatters the compiler
+(21x there, 10.1x on metal): a factor measured under TCG is never
+carried forward.
 
 ---
 
@@ -327,6 +395,7 @@ nopeekOS/
 ├── docs/                     # spec/ = living contracts · plan/ = open
 │                             # notes/ = how-tos · archive/ = shipped
 ├── targets/                  # x86_64-nopeek.json — the kernel's own target
+├── forge/core/               # WASM→x86-64 compiler (no_std, host-testable)
 ├── kernel/src/
 │   ├── main.rs               # Entry, boot sequence
 │   ├── boot.s / boot_uefi.rs # UEFI _start, ExitBootServices, GDT
@@ -341,14 +410,18 @@ nopeekOS/
 │   ├── shade/                # Compositor: tiling, widgets, panels
 │   ├── intent/               # The intent loop (dispatch, fs, net, http, ...)
 │   ├── microvm/              # VT-x / AMD-V hypervisor + virtio + Linux loader
-│   └── wasm.rs               # WASM runtime + host functions (npk_*)
+│   ├── forge_rt.rs           # forge address space, W^X mapping, host trap
+│   ├── wasi.rs               # wasi_snapshot_preview1 against npkFS
+│   └── wasm.rs               # Engine glue + host functions (npk_*)
 └── tools/wasm/               # WASM apps & drivers
     ├── beak/ + beak-engine/  #   Native browser + portable render engine
     ├── loft/ spell/ iris/    #   File browser, editor, image viewer
     ├── tune/                 #   Audio player (MP3/WAV -> kernel mixer)
     ├── snap/ drun/ top/      #   Screenshot, launcher, monitor
     ├── bar/ dock/ volume/    #   Panels + volume overlay
-    ├── wifi/ aml/ audio_hda/ #   Hardware drivers as WASM
+    ├── pick/ wallpaper/      #   File-dialog portal, wallpaper decoder
+    ├── wifi/ wifid/ aml/     #   AX200 driver, WPA supplicant, ACPI AML
+    ├── audio_hda/            #   Intel HDA driver as WASM
     └── sdk/widgets/          #   nopeek_widgets — declarative UI SDK
 ```
 

@@ -23,7 +23,7 @@ fn main() {
 
     use beak_engine::js::dombind::{ScriptRef, page_scripts};
     for r in page_scripts(sess.interp.doc.as_ref().unwrap()) {
-        if let ScriptRef::Inline(t) = r {
+        if let ScriptRef::Inline(t, _) = r {
             if let Ok(p) = beak_engine::js::parse(&t, false) { let _ = sess.run(&p); }
         }
     }

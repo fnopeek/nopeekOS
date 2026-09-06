@@ -100,19 +100,12 @@ fn main() {
         for l in &sess.interp.console[n0..] { println!("       | {l}"); }
     }
     let n0 = sess.interp.console.len();
-    // Dieselbe Reihenfolge wie im Wirt: `DOMContentLoaded`, dann EIN LAYOUT
-    // (damit `getBoundingClientRect` etwas zu sagen hat), dann `load`.
-    if let Some(dn) = sess.interp.doc.as_ref().map(|d| d.doc) {
-        let _ = beak_engine::js::dombind::dispatch(&mut sess.interp, "DOMContentLoaded", &[dn]);
-    }
-    feed_geometry(&mut sess, &html, &dir);
-    if let Some(dn) = sess.interp.doc.as_ref().map(|d| d.doc) {
-        let _ = beak_engine::js::dombind::dispatch(&mut sess.interp, "load", &[dn]);
-    }
+    // **Die Reihenfolge des WIRTS, und sie ist der ganze Punkt.** Erst die
+    // Stilblattrunden (ein geholtes Blatt laesst eine Komponente fertig
+    // bauen), dann `DOMContentLoaded`, dann EIN LAYOUT — und erst danach
+    // `load`. Wer die Geometrie vor den Runden einreicht, misst einen Baum,
+    // den es so nie gab: die Komponenten sind dann noch leer.
     let mut timers = 0;
-    // Zeitgeber UND die Stilblattrunden — dieselbe Reihenfolge wie im Wirt:
-    // ein geholtes Blatt laesst eine Komponente fertig bauen, und die meldet
-    // ihrerseits eins an.
     let (mut sheets_ok, mut sheets_bad) = (0usize, 0usize);
     for _ in 0..64 {
         let t = sess.interp.run_timers();
@@ -129,6 +122,14 @@ fn main() {
     if sheets_ok + sheets_bad > 0 {
         println!("Stilblaetter per Skript: {sheets_ok} geholt, {sheets_bad} gescheitert");
     }
+    if let Some(dn) = sess.interp.doc.as_ref().map(|d| d.doc) {
+        let _ = beak_engine::js::dombind::dispatch(&mut sess.interp, "DOMContentLoaded", &[dn]);
+    }
+    feed_geometry(&mut sess, &html, &dir);
+    if let Some(dn) = sess.interp.doc.as_ref().map(|d| d.doc) {
+        let _ = beak_engine::js::dombind::dispatch(&mut sess.interp, "load", &[dn]);
+    }
+    for _ in 0..64 { let t = sess.interp.run_timers(); timers += t; if t == 0 { break } }
     for l in &sess.interp.console[n0..] { println!("  timer| {l}"); }
     // `DUMP=1` zeigt, was am Ende im Baum steht — die Frage „laufen die
     // Skripte" ist nicht dieselbe wie „haben sie etwas gebaut".
