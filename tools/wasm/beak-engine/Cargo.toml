@@ -56,3 +56,12 @@ diag-boxes = []
 # (`onlyStrict`) sagen es NICHT, sie zaehlen nur, wie ein Test gestartet wird.
 # Bleibt aus dem ausgelieferten Modul heraus: Diagnose darf nicht stoeren.
 strict-probe = []
+
+# brotli-decompressor: WOFF2 packt seine Tabellen mit Brotli (RFC 7932).
+# NUR der Dekompressor, `default-features = false` = ohne `std`.
+[dependencies.brotli-decompressor]
+version = "6"
+default-features = false
+
+[[example]]
+name = "woffcheck"
