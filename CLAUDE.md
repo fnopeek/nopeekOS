@@ -48,18 +48,27 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-05 · beak 0.102.0 · Kernel 0.326.0** (Rest: `git log`)
+**Stand 2026-09-06 · beak 0.105.0 · Kernel 0.326.0** (Rest: `git log`)
 
 Zwei Fäden laufen parallel.
 
-**▶ Als nächstes: `fetch`, Stufe C.** Das Entscheidungspapier steht
-(`docs/plan/BROWSER_FETCH_ORIGIN.md`), Stufe A (Herkunft/Site + echte Public
-Suffix List) und B (Reichweiten-Riegel im Kernel) sind gebaut und
-ausgeliefert. Der Grund: **die Sprache ist nicht mehr die Wand** — 2381
-gewonnene test262-Varianten haben den Zielkorpus um NULL bewegt (305/437).
-Ein Skript in beak kann heute NICHTS aus dem Netz holen; `fetch`, `XHR`,
-`WebSocket` und `EventSource` fehlen alle vier. Stand und Reihenfolge:
-`memory/project_beak_fetch_origin.md`.
+**▶ Als nächstes: die Formular-Brücke.** Die Fritzbox-Anmeldemaske **baut
+sich jetzt in beak** — Titel, Benutzerauswahl, Passwortfeld als Web Component
+samt Auge-Symbol, Fehlermeldungen, Anmeldeknopf. Zum ANMELDEN fehlen drei
+Glieder, alle gemessen: `input.value` ist eine Eigenschaft auf der Hülle und
+schreibt nicht in den Baum (ein Skript, das ein verstecktes Feld füllt, fällt
+aus dem POST heraus), `document.forms`/`form.submit()` gibt es nicht, und
+`FormState` — die getippten Werte — lebt im WIRT nach `seq` und kommt nie in
+den JS-Baum. Stand und Reihenfolge:
+`memory/project_beak_web_app_stack.md`. Danach `fetch` Stufe C
+(`memory/project_beak_fetch_origin.md`); auf der Anmeldeseite ist es NICHT
+der kritische Pfad.
+
+**Das Werkzeug dafür ist `beak-engine/examples/pagerun.rs`** — es fährt die
+ganze Skriptrunde einer Seite host-seitig, in EINER Sitzung, mit Modulgraph,
+und `DUMP=1` zeigt den Baum danach. „Laufen die Skripte" ist nicht dieselbe
+Frage wie „haben sie etwas gebaut", und `jsrun` (eine Datei allein)
+beantwortet die falsche.
 
 **`beak`**, der eigene Browser: **Stage 1 läuft — die Seite reagiert.** Eigene
 JS-Maschine (Lexer, Parser, RegExp, DOM-Bindung) und die Wirtsumgebung. Sie
@@ -71,7 +80,7 @@ seit BigInt (0.94.0) laufen 99,6 % der Programme darauf.
 läuft — ein abgelehntes Programm fährt der Baumläufer mit identischer
 Bedeutung. Was GEHT, sagt test262:
 
-    test262 exec    80,65 %   (V8 auf demselben Korpus: 99,41 %)
+    test262 exec    81,27 %   (V8 auf demselben Korpus: 99,41 %)
     Zielkorpus      437/437 geparst, 305/437 durchgelaufen
     DOM-Aufrufe     98,3 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
     WPT (CSS)       4476/5192 = 86,2 % ohne Testvehikel (roh 79,4 %)
