@@ -493,11 +493,14 @@ impl Page {
     /// Steuerelemente: das Bild zeigte ein Anmeldeformular, `submit` sagte
     /// „kein zugehoeriges Formular". Das ist kein Sonderfall einer Seite,
     /// sondern die Regel bei allem, was seine Oberflaeche zur Laufzeit baut.
-    fn sync(&mut self, engine: &Engine) {
+    ///
+    /// Liefert true, wenn wirklich neu eingesammelt wurde — nur dann darf der
+    /// Rufer die Werte aus dem Baum uebernehmen.
+    fn sync(&mut self, engine: &Engine) -> bool {
         let g = nav_gen();
         let sg = engine.scripted_gen();
         if self.nav == g && self.scripted == sg {
-            return;
+            return false;
         }
         let navigated = self.nav != g;
         self.nav = g;
@@ -511,6 +514,7 @@ impl Page {
         // etwas umbaut.
         if navigated { self.state.reset(); }
         self.log_forms();
+        true
     }
 
     /// Report the forms this page offers, once per navigation.
@@ -1725,9 +1729,12 @@ fn pump_fonts(engine: &Engine) -> bool {
 /// `load` zustellen — nach dem ersten Malen, wenn die Kaesten stehen.
 ///
 /// Liefert true, wenn dabei etwas am Baum passiert ist.
-fn fire_load(engine: &Engine) -> bool {
+fn fire_load(engine: &Engine, page: &Page) -> bool {
     if !unsafe { core::ptr::addr_of!(LOAD_PENDING).read() } { return false }
     unsafe { core::ptr::addr_of_mut!(LOAD_PENDING).write(false) };
+    // Was der Benutzer schon getippt hat, muss der Behandler sehen — sonst
+    // liest er den Vorgabewert und schreibt ihn womoeglich zurueck.
+    push_control_values(page);
     let Some(sess) = js_session() else { return false };
     let Some(dn) = sess.interp.doc.as_ref().map(|d| d.doc) else { return false };
     arm_script_budget();
@@ -2109,6 +2116,7 @@ fn dispatch_click(engine: &Engine, page: &mut Page, lay: &Layout, cx: i32, cy: i
     }
     // Das Formularmodell und die Werte nachziehen, BEVOR ein Absende-Auftrag
     // ausgefuehrt wird — sonst schickt er den Stand von vorher.
+    // Nach einem Behandler: der Baum weiss jetzt mehr als der Wirt.
     page.sync(engine);
     pull_control_values(page, sess);
     let submits = sess.interp.take_submits();
@@ -3833,12 +3841,19 @@ pub extern "C" fn _start() {
         // …and only then re-parse the document's forms, so the page that just
         // arrived is laid out against its OWN controls rather than the
         // previous page's. Cheap when nothing navigated.
-        page.sync(&engine);
-        // Und was die Seite selbst gesetzt hat, uebernehmen: nach einem Umbau
-        // traegt der Baum die Wahrheit, und die `seq` sind neu vergeben. Die
-        // Sitzung wird DURCHGEREICHT, nicht neu geholt — zweimal `js_session`
-        // waeren zwei veraenderliche Ausleihen auf dasselbe Feld.
-        if let Some(s) = js_session() { pull_control_values(&mut page, s); }
+        // **NUR wenn wirklich neu eingesammelt wurde.**
+        //
+        // Der Wert im Baum ist der, den SEITENCODE gesetzt hat. Ihn in jeder
+        // Runde zu uebernehmen hiess: was der Benutzer tippt, wird im
+        // naechsten Durchlauf wieder ueberschrieben — das Feld zeigte erst
+        // nach dem Abschicken, was darin steht. Ein Umbau des Baums ist das
+        // einzige Ereignis, nach dem der Baum mehr weiss als der Wirt.
+        //
+        // Die Sitzung wird DURCHGEREICHT, nicht neu geholt — zweimal
+        // `js_session` waeren zwei veraenderliche Ausleihen auf dasselbe Feld.
+        if page.sync(&engine) {
+            if let Some(s) = js_session() { pull_control_values(&mut page, s); }
+        }
         // Ein Formular, das die Seite schon beim Laden abschicken will, darf
         // nicht bis zum naechsten Klick liegenbleiben.
         let pending = js_session().map(|s| s.interp.take_submits()).unwrap_or_default();
@@ -3879,7 +3894,7 @@ pub extern "C" fn _start() {
             mark_dirty();
         }
         // JETZT steht die Geometrie — `load` darf fallen.
-        if fire_load(&engine) {
+        if fire_load(&engine, &page) {
             page.sync(&engine);
             if let Some(s) = js_session() { pull_control_values(&mut page, s); }
         }
