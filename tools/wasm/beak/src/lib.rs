@@ -3715,6 +3715,11 @@ impl GrowingHeap {
 
 const WASM_PAGE: usize = 64 * 1024;
 
+/// Groesster Wachstumsschritt der Halde: 64 MB. Siehe `acquire` — Verdoppeln
+/// ohne Deckel wird ab einigen hundert MB zu einer Forderung, die das Geraet
+/// nicht erfuellen kann.
+const GROW_CAP_PAGES: usize = 1024;
+
 // SAFETY: `acquire` hands talc only memory that `memory.grow` just returned —
 // freshly mapped pages past the previous end of linear memory, which nothing
 // else can reach. It allocates nothing itself. That is talc's own
@@ -3729,12 +3734,35 @@ unsafe impl talc::source::Source for GrowingHeap {
         let need = layout.size() + layout.align() + 4 * WASM_PAGE;
         let need_pages = need.div_ceil(WASM_PAGE);
         let have_pages = core::arch::wasm32::memory_size::<0>();
-        let delta = need_pages.max(have_pages.max(1));
+        // **Verdoppeln, aber nicht endlos.** Bis 64 MB ist Verdoppeln richtig:
+        // wenige Anfragen, wenig Verschnitt. Darueber wird daraus eine
+        // Forderung, die das Geraet nicht erfuellen KANN — bei 512 MB
+        // Halde fragte beak nach weiteren 512 MB, der Kernel konnte sie nicht
+        // abbilden, und der Absturz sah aus wie „Speicher voll", obwohl vier
+        // Seiten gereicht haetten.
+        let step = have_pages.max(1).min(GROW_CAP_PAGES);
+        let delta = need_pages.max(step);
 
-        let prev_end = core::arch::wasm32::memory_grow::<0>(delta);
-        if prev_end == usize::MAX {
-            return Err(()); // the host said no — the machine really is full
-        }
+        // Nacheinander kleiner fragen, statt beim ersten Nein aufzugeben. Das
+        // Geraet sagt zu einem halben Gigabyte nein und zu vier Seiten ja —
+        // und die vier Seiten sind das, was der Aufrufer wirklich braucht.
+        let mut delta = delta;
+        let prev_end = loop {
+            let got = core::arch::wasm32::memory_grow::<0>(delta);
+            if got != usize::MAX { break got }
+            if delta <= need_pages {
+                // Jetzt ist die Maschine wirklich voll — und das gehoert mit
+                // ZAHLEN ins Log, nicht als nackte Panikzeile. Ohne
+                // Allokation: wir stecken gerade IM Allokator.
+                log("[beak] Halde erschoepft — memory.grow hat nein gesagt");
+                log("[beak]   Seiten bisher:");
+                log(u32_str(have_pages as u32));
+                log("[beak]   noch gebraucht (Seiten):");
+                log(u32_str(need_pages as u32));
+                return Err(());
+            }
+            delta = (delta / 2).max(need_pages);
+        };
         let base = (prev_end * WASM_PAGE) as *mut u8;
         let size = delta * WASM_PAGE;
 

@@ -309,6 +309,13 @@ impl Vm {
     }
 
     fn step(&mut self, i: &mut Interp, chunk: &Chunk, ip: usize) -> C<Flow> {
+        // **Hier und nicht je Arm.** Ein Versuch, sie erst beim Gebrauch zu
+        // holen, sparte ein `Rc`-Zaehlerpaar je Befehl — und war falsch:
+        // einige Befehle AENDERN die Umgebungskette, bevor sie sie benutzen,
+        // und bekamen dann die neue statt der alten
+        // (`cannot access 'dialog' before initialization`). Wer das noch
+        // einmal angeht, muss je Arm nachweisen, dass er vor jeder Aenderung
+        // liest — nicht es annehmen.
         let env = self.frames.last().unwrap().envs.last().unwrap().clone();
         match &chunk.ops[ip] {
             Op::Const(k) => self.push(chunk.constants[*k as usize].clone()),

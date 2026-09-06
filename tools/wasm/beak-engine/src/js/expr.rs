@@ -732,8 +732,14 @@ impl Interp {
         self.load_ident(n, env)
     }
 
+    /// **Direkt, nicht ueber einen gebauten AST-Knoten.** Bis 0.117.0 stand
+    /// hier `self.store(&Expr::Ident(String::from(n)), v, env)` — das
+    /// allozierte je ZUWEISUNG eine Zeichenkette auf dem Haufen und baute
+    /// einen Ausdrucksknoten, den `store` in der naechsten Zeile wieder
+    /// auseinandernahm. `StoreVar` sind 6 % aller Befehle: in einem
+    /// Anmeldelauf der Fritzbox 140 Millionen Allokationen fuer nichts.
     pub fn vm_store(&mut self, n: &str, v: Value, env: &Rc<RefCell<Env>>) -> C<()> {
-        self.store(&Expr::Ident(alloc::string::String::from(n)), v, env)
+        self.assign_ident(n, v, env)
     }
 
     fn eval_update(&mut self, op: UpdateOp, arg: &Expr, prefix: bool,
