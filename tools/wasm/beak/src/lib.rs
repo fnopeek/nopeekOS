@@ -2168,23 +2168,63 @@ const SCRIPT_STEPS: u64 = 20_000_000_000;
 /// durchlaeuft, am Geraet abgebrochen — und der Bericht haette „script ran
 /// too long" gesagt, wo in Wahrheit die Messung am falschen Ziel stand
 /// ([[feedback_host_profile_is_not_the_device]]).
-const SCRIPT_BUDGET_MS: i64 = 360_000;
+/// **Erhoeht von 360 auf 900 s.** Die Fritzbox-Anmeldung misst am Geraet
+/// ~270 s — bei 360 s waren das 33 % Luft, und eine Maschine unter Last oder
+/// mit kaltem Zwischenspeicher fiel darueber. Ein Abbruch sieht dann aus wie
+/// „falsches Kennwort", obwohl nur die Uhr abgelaufen war. Gegen eine echte
+/// Endlosschleife hilft jetzt der HERZSCHLAG: er sagt jede Sekunde, dass noch
+/// gerechnet wird, statt den Benutzer raten zu lassen.
+const SCRIPT_BUDGET_MS: i64 = 900_000;
 
 /// Ab wann ein Lauf im Log auffaellt. Ein Skript, das Minuten rechnet, ist
 /// kein Fehler — aber es ist der Grund, warum nichts passiert, und das
 /// gehoert gesagt, statt es aus einem Zeitstempel raten zu lassen.
 const SCRIPT_SLOW_MS: i64 = 3_000;
 
-static mut SCRIPT_DEADLINE: i64 = 0;
+/// Wie oft ein langer Lauf von sich hoeren laesst.
+const SCRIPT_HEARTBEAT_MS: i64 = 5_000;
 
-/// Die Uhr, die die Engine alle 65 536 Schritte fragt.
+static mut SCRIPT_DEADLINE: i64 = 0;
+/// Wann der laufende Behandler begann — fuer den Herzschlag. Eigener Name
+/// neben `SCRIPT_T0`: das ist der Beginn der SEITENrunde, nicht des Laufs.
+static mut BUDGET_T0: i64 = 0;
+static mut BUDGET_SAID: i64 = 0;
+
+/// Die Uhr, die die Engine alle 65 536 Schritte fragt — und der HERZSCHLAG.
+///
+/// **Ein Bildschirm, der Minuten stillsteht, ohne dass irgendwo etwas steht,
+/// ist ein Fehler, auch wenn das Rechnen keiner ist.** Florians Befund:
+/// „beim Absenden wird nichts geloggt, es bleibt einfach stehen." Die
+/// Meldung kam erst NACH dem Behandler, also nach vier Minuten — blind fuer
+/// genau das, was lange dauert ([[feedback_report_before_not_after]]).
+///
+/// Die Stelle ist die richtige: die Engine fragt hier ohnehin schon, und
+/// oefter als jede Sekunde kommt sie nicht vorbei.
 fn script_time_left() -> bool {
-    now_ms() < unsafe { core::ptr::addr_of!(SCRIPT_DEADLINE).read() }
+    let now = now_ms();
+    let t0 = unsafe { core::ptr::addr_of!(BUDGET_T0).read() };
+    let said = unsafe { core::ptr::addr_of!(BUDGET_SAID).read() };
+    let el = now - t0;
+    if el >= SCRIPT_SLOW_MS && el - said >= SCRIPT_HEARTBEAT_MS {
+        unsafe { core::ptr::addr_of_mut!(BUDGET_SAID).write(el) };
+        let mut m = String::from("[beak] Skript rechnet noch: ");
+        push_i64(&mut m, el / 1000);
+        m.push_str(" s von hoechstens ");
+        push_i64(&mut m, SCRIPT_BUDGET_MS / 1000);
+        m.push_str(" s");
+        log(&m);
+    }
+    now < unsafe { core::ptr::addr_of!(SCRIPT_DEADLINE).read() }
 }
 
 /// Die Uhr neu stellen — vor jedem Lauf von Seitencode.
 fn arm_script_budget() {
-    unsafe { core::ptr::addr_of_mut!(SCRIPT_DEADLINE).write(now_ms() + SCRIPT_BUDGET_MS) };
+    let now = now_ms();
+    unsafe {
+        core::ptr::addr_of_mut!(SCRIPT_DEADLINE).write(now + SCRIPT_BUDGET_MS);
+        core::ptr::addr_of_mut!(BUDGET_T0).write(now);
+        core::ptr::addr_of_mut!(BUDGET_SAID).write(0);
+    }
 }
 
 /// Start a page's image load: drop the old pixels and return the list of
@@ -2585,6 +2625,11 @@ fn submit_form(engine: &Engine, page: &mut Page, activated: Option<u32>) -> bool
         .and_then(|f| page.forms.forms.get(f).map(|d| d.seq));
     if let Some(fs) = form_seq {
         arm_script_budget();
+        // VOR dem Behandler. Er kann Minuten rechnen (eine Anmeldung, die
+        // ihren Hash selbst macht), und bis dahin sah der Benutzer nichts —
+        // weder dass die Eingabe angekommen ist noch dass etwas laeuft.
+        let ts0 = now_ms();
+        log("[beak] submit: Behandler der Seite laeuft…");
         if let Some(sess) = js_session() {
             if beak_engine::js::dombind::dispatch_seq(&mut sess.interp, "submit", fs) {
                 // Abgebrochen. Der Behandler hat oft trotzdem etwas vor —
@@ -2616,6 +2661,10 @@ fn submit_form(engine: &Engine, page: &mut Page, activated: Option<u32>) -> bool
         }
         page.sync(engine);
         if let Some(s) = js_session() { pull_control_values(page, s); }
+        let mut m = String::from("[beak] submit: Behandler fertig nach ");
+        push_i64(&mut m, now_ms() - ts0);
+        m.push_str(" ms");
+        log(&m);
     }
     let sub = match forms::submit(&page.forms, &page.state, activated) {
         Some(s) => s,
