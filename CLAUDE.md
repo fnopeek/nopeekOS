@@ -48,21 +48,29 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-06 · beak 0.106.0 · Kernel 0.326.0** (Rest: `git log`)
+**Stand 2026-09-06 · beak 0.111.0 · Kernel 0.326.0** (Rest: `git log`)
 
 Zwei Fäden laufen parallel.
 
-**▶ Als nächstes: die Formular-Brücke.** Die Fritzbox-Anmeldemaske **baut
-sich jetzt in beak** — Titel, Benutzerauswahl, Passwortfeld als Web Component
-samt Auge-Symbol, Fehlermeldungen, Anmeldeknopf. Zum ANMELDEN fehlen drei
-Glieder, alle gemessen: `input.value` ist eine Eigenschaft auf der Hülle und
-schreibt nicht in den Baum (ein Skript, das ein verstecktes Feld füllt, fällt
-aus dem POST heraus), `document.forms`/`form.submit()` gibt es nicht, und
-`FormState` — die getippten Werte — lebt im WIRT nach `seq` und kommt nie in
-den JS-Baum. Stand und Reihenfolge:
-`memory/project_beak_web_app_stack.md`. Danach `fetch` Stufe C
-(`memory/project_beak_fetch_origin.md`); auf der Anmeldeseite ist es NICHT
-der kritische Pfad.
+**▶ Als nächstes: `getBoundingClientRect` antwortet für die Hälfte der
+Elemente nicht.** Gemessen im Browser-Vergleich (Chromium 29 Kästen, beak 13):
+es fehlen `body`, `label`, `strong`, `a`, `input` und eigene Elemente.
+`element_rects()` speist sich aus `hover_boxes` + `controls`, und
+`record_inspect` wird nicht überall gerufen — Inline-Kästen und
+Steuerelemente fallen durch. Eine Seite, die misst, bekommt dort **null**,
+und das sieht aus wie eine Messung. Stand:
+`memory/project_beak_web_app_stack.md`.
+
+Gebaut seit 0.104: ES-Module, Custom Elements, Formular-Brücke samt
+`submit`-Ereignis, nachgeladene Stilblätter, `load`/`DOMContentLoaded`, und
+**`@font-face`** (WOFF2 mit Brotli und `glyf`-Rückbau, gegen
+`woff2_decompress` an fünf Schriften geprüft: 4620 Zeichen rasterisiert, 0
+abweichend).
+
+**Der Browser-Vergleich liegt in `<memory-dir>/../tools/mirror/`** — ein
+eingefrorenes Spiegelbild der Seite lokal ausgeliefert, dieselbe Sonde in
+Chromium und in beak, Kastengeometrie statt Pixel. Das war das offene Stück
+im Renderorakel.
 
 **Das Werkzeug dafür ist `beak-engine/examples/pagerun.rs`** — es fährt die
 ganze Skriptrunde einer Seite host-seitig, in EINER Sitzung, mit Modulgraph,
