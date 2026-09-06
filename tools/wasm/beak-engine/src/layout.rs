@@ -5899,8 +5899,18 @@ family: st.family,
             Display::Table => self.layout_table(el, st, x, w, y),
             Display::Flex | Display::InlineFlex => self.layout_flex(el, st, x, w, y),
             Display::Grid => self.layout_grid(el, st, x, w, y),
-            _ => return self.layout_block(el, st, x, w, y),
+            _ => {
+                let b = self.layout_block(el, st, x, w, y);
+                self.record_inspect(el, st, x, y, w, b - y, f0);
+                return b;
+            }
         };
+        // **Auch hier den Kasten aufzeichnen.** Bisher taten das nur der
+        // Flusspfad, Floats und absolut gesetzte Kaesten — alles, was ueber
+        // `layout_box` kommt (Flex- und Rasterkinder, Tabellenzellen), hatte
+        // gar keinen. `getBoundingClientRect` gab dort NULL zurueck, und eine
+        // Null sieht aus wie eine Messung.
+        self.record_inspect(el, st, x, y, w, bottom - y, f0);
         self.apply_filter(st, f0);
         bottom
     }
@@ -7801,13 +7811,19 @@ impl<'a> Ctx<'a> {
         // reason to exist — but a hover rule needs its RECTANGLE even when it
         // is invisible at rest, and a bare `<a href>` is exactly that box. Miss
         // this and the pointer finds every element except the ones it aims at.
-        let hover_seq = self.sheet.hover_set.may_match(el).then_some(el.seq);
+        // Mit `hit_all` braucht JEDES Inline-Element seinen Kasten, nicht nur
+        // die hoverbaren: `getBoundingClientRect` fragt danach, und ein
+        // `<label>` oder `<strong>` ohne Kasten antwortet mit NULL — eine
+        // Zahl, die aussieht wie eine Messung.
+        let hoverable = self.sheet.hover_set.may_match(el);
+        let hover_seq = (self.hit_all || hoverable).then_some(el.seq);
         if !paints && lead == 0.0 && trail == 0.0 && hover_seq.is_none() {
             return None;
         }
         Some(InlineBox {
             st: fade_style(st),
             hover_seq,
+            hoverable,
             bg: self.bg_key(st.bg_layer.image),
             mask: self.bg_key(st.mask_layer.image),
             lead,
@@ -7838,6 +7854,7 @@ impl<'a> Ctx<'a> {
             // An image's own box; a hover rule on it is caught by the element's
             // block-level record, not here.
             hover_seq: None,
+            hoverable: false,
             bg: None,
             mask: None,
             lead: st.border_left.width + st.pad_left,
@@ -8028,11 +8045,18 @@ struct AtomicBox {
 /// line's height (CSS 2.1 §10.6.1); horizontal ones advance the flow.
 struct InlineBox {
     st: ComputedStyle,
-    /// `seq` of the element this box came from, but only if a `:hover` rule
-    /// could react to it. `None` for the overwhelming majority, which is what
-    /// keeps the hit-test list short — an inline box is where LINKS live, so
-    /// without this the pointer would miss exactly what it aims at.
+    /// `seq` of the element this box came from, when its rectangle is worth
+    /// keeping: a `:hover` rule could react to it, or die Seite faehrt
+    /// Skripte und fragt nach Geometrie (`hit_all`).
     hover_seq: Option<u32>,
+    /// Kann eine `:hover`-Regel dieses Element wirklich treffen?
+    ///
+    /// **Getrennt von `hover_seq`, und das ist keine Feinheit.** Mit `hit_all`
+    /// bekommt JEDES Inline-Element einen Kasten — waeren die alle „hoverbar",
+    /// gaelte jede Mausbewegung als Stilwechsel, und das kostete auf Wikipedia
+    /// sechs volle Layouts fuer nichts. Dieselbe Falle, die `record_inspect`
+    /// im Kommentar nennt.
+    hoverable: bool,
     /// Image keys, already registered with the layout that needs them — `flow`
     /// paints without a `Ctx` to ask.
     bg: Option<u64>,
@@ -10165,11 +10189,16 @@ fn emit_line(
             if let Some(seq) = b.hover_seq {
                 if x1 > x0 {
                     pending_anchor.push((hover_boxes.len(), ops.len()));
+                    // Die EIGENE Hoehe des Inline-Kastens, nicht die der
+                    // Zeile: eine Zeile mit einem hohen Steuerelement darin
+                    // machte sonst jedes `<label>` daneben genauso hoch, und
+                    // `getBoundingClientRect` meldete 68 statt 21.
+                    let (_, fy, _, fh) = frag_rect(fonts, b, x0, x1, baseline);
                     hover_boxes.push(HoverBox {
                         x: x0,
-                        y: line_top,
+                        y: fy.min(line_top + box_h - 1).max(line_top.min(fy)),
                         w: x1 - x0,
-                        h: box_h,
+                        h: fh.max(1),
                         seq,
                         anchor: None,
                         paint: frag_rect(fonts, b, x0, x1, baseline),
@@ -10180,7 +10209,7 @@ fn emit_line(
                         pseudo: crate::css::PseudoElem::None,
                         anchor_after: false,
                         has_text: false,
-                        hoverable: true,
+                        hoverable: b.hoverable,
                         toggle: false,
                     });
                 }
