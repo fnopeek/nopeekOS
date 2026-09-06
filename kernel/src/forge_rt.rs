@@ -33,15 +33,56 @@ pub const MAX_MEMORY_BYTES: u64 = 8 * 1024 * 1024 * 1024 + 0x1000;
 
 const PAGE: u64 = 4096;
 
-/// Instances handed out so far. They are never reused within a boot; the
-/// address space is 48 bits wide and this is a counter, not an allocator.
+/// Wieviele Plaetze es GIBT. Ein Platz ist `INSTANCE_STRIDE` breit, und
+/// darueber faengt der Code an — Platz 1024 laege GENAU auf `CODE_BASE`.
+/// Bis 0.117.0 stand hier kein Deckel: der 1025. Modullauf eines Bootes haette
+/// sein lineares Gedaechtnis ueber den Maschinencode gelegt.
+const MAX_SLOTS: u64 = 1024;
+
+/// Hoechster je vergebener Platz. Die Marke, unter der `SLOT_FREE` gilt.
 static NEXT_SLOT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Zurueckgegebene Plaetze, ein Bit je Platz (gesetzt = frei). Ein Feld statt
+/// einer Liste: die Rueckgabe passiert in `Drop`, und dort darf nichts
+/// allozieren.
+static SLOT_FREE: [core::sync::atomic::AtomicU64; (MAX_SLOTS / 64) as usize] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; (MAX_SLOTS / 64) as usize];
+
+/// Einen Platz nehmen — erst einen zurueckgegebenen, sonst den naechsten.
+fn take_slot() -> Option<u64> {
+    use core::sync::atomic::Ordering::{AcqRel, Relaxed};
+    for (w, cell) in SLOT_FREE.iter().enumerate() {
+        loop {
+            let bits = cell.load(Relaxed);
+            if bits == 0 { break; }
+            let b = bits.trailing_zeros() as u64;
+            if cell.compare_exchange(bits, bits & !(1 << b), AcqRel, Relaxed).is_ok() {
+                return Some(w as u64 * 64 + b);
+            }
+        }
+    }
+    let s = NEXT_SLOT.fetch_add(1, Relaxed);
+    if s >= MAX_SLOTS {
+        NEXT_SLOT.store(MAX_SLOTS, Relaxed);
+        return None;
+    }
+    Some(s)
+}
+
+/// Einen Platz zurueckgeben.
+fn give_slot(s: u64) {
+    if s >= MAX_SLOTS { return; }
+    SLOT_FREE[(s / 64) as usize]
+        .fetch_or(1 << (s % 64), core::sync::atomic::Ordering::Release);
+}
 
 /// Code goes at the top of the region, far from any instance's memory.
 const CODE_BASE: u64 = REGION_BASE + 1024 * INSTANCE_STRIDE;
 static NEXT_CODE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(CODE_BASE);
 
 pub struct Memory {
+    /// Der Platz in der Region — gehoert zurueckgegeben, wenn die Instanz geht.
+    slot: u64,
     pub base: u64,
     /// Bytes currently readable.
     pub size: u64,
@@ -52,17 +93,39 @@ fn map_range(at: u64, bytes: u64, flags: PageFlags) -> bool {
     let mut off = 0;
     while off < bytes {
         let Some(frame) = memory::allocate_frame() else {
+            // Die Haelfte, die schon steht, geht zurueck. Sonst kostet gerade
+            // der Fall „kein Speicher mehr" noch einmal Speicher.
+            unmap_range(at, off);
             return false;
         };
         // SAFETY: the frame allocator just handed this out and the first
         // 64 GB are identity-mapped, so the frame is addressable here.
         unsafe { core::ptr::write_bytes(frame as *mut u8, 0, PAGE as usize) };
         if paging::map_page(at + off, frame, flags).is_err() {
+            memory::deallocate_frame(frame);
+            unmap_range(at, off);
             return false;
         }
         off += PAGE;
     }
     true
+}
+
+/// Abbildung loesen und die Rahmen zurueckgeben.
+///
+/// **Das Gegenstueck zu `map_range`, und bis 0.117.0 gab es keins.** Jeder
+/// Modullauf behielt sein lineares Gedaechtnis und seinen Maschinencode bis
+/// zum Neustart — bei beak 20 MB beim Start plus alles, was seine Halde
+/// waehrend eines Laufes dazunahm. Ein zweiter Start fand danach keine Rahmen
+/// mehr, und das Log sagte nur „Instanz liess sich nicht bauen".
+fn unmap_range(at: u64, bytes: u64) {
+    let mut off = 0;
+    while off < bytes {
+        if let Ok(frame) = paging::unmap_page(at + off) {
+            memory::deallocate_frame(frame);
+        }
+        off += PAGE;
+    }
 }
 
 impl Memory {
@@ -71,17 +134,19 @@ impl Memory {
     /// Only the mapping is done here — the rest of the 8 GiB stays absent, and
     /// that absence IS the bounds check.
     pub fn new(initial_pages: u64) -> Option<Memory> {
-        let slot = NEXT_SLOT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let slot = take_slot()?;
         let base = REGION_BASE + slot * INSTANCE_STRIDE;
         let size = initial_pages * 65536;
         if size > MAX_MEMORY_BYTES {
+            give_slot(slot);
             return None;
         }
         let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE;
         if !map_range(base, size, flags) {
+            give_slot(slot);
             return None;
         }
-        Some(Memory { base, size })
+        Some(Memory { base, size, slot })
     }
 
     /// Make `pages` more wasm pages readable. The base does not move — that is
@@ -103,6 +168,15 @@ impl Memory {
     /// handler asks to tell a module's mistake from a kernel's.
     pub fn owns(&self, addr: u64) -> bool {
         addr >= self.base && addr < self.base + INSTANCE_STRIDE
+    }
+}
+
+impl Drop for Memory {
+    /// **Die Seiten gehen zurueck, samt allem, was `grow` dazugelegt hat.**
+    /// `self.size` ist deshalb der Stand von JETZT und nicht der vom Anfang.
+    fn drop(&mut self) {
+        unmap_range(self.base, self.size);
+        give_slot(self.slot);
     }
 }
 
@@ -134,9 +208,12 @@ impl Code {
         let mut off = 0;
         while off < span {
             let Ok(frame) = paging::unmap_page(base + off) else {
+                unmap_range(base, span);
                 return None;
             };
             if paging::map_page(base + off, frame, rx).is_err() {
+                memory::deallocate_frame(frame);
+                unmap_range(base, span);
                 return None;
             }
             off += PAGE;
@@ -146,6 +223,18 @@ impl Code {
 
     pub fn owns(&self, addr: u64) -> bool {
         addr >= self.base && addr < self.base + self.len as u64
+    }
+
+    /// So viele Bytes stehen wirklich — `map` rundet auf ganze Seiten auf.
+    fn span(&self) -> u64 { ((self.len as u64) + PAGE - 1) & !(PAGE - 1) }
+}
+
+impl Drop for Code {
+    /// Auch der Maschinencode ist geliehen. Der Adressraum darueber wird
+    /// NICHT zurueckgedreht (`NEXT_CODE` laeuft weiter) — er ist 48 Bit breit
+    /// und kostet nichts; die Rahmen kosten.
+    fn drop(&mut self) {
+        unmap_range(self.base, self.span());
     }
 }
 
