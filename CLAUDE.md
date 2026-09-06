@@ -48,7 +48,7 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-06 · beak 0.105.0 · Kernel 0.326.0** (Rest: `git log`)
+**Stand 2026-09-06 · beak 0.106.0 · Kernel 0.326.0** (Rest: `git log`)
 
 Zwei Fäden laufen parallel.
 
