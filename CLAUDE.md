@@ -48,7 +48,7 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-06 · beak 0.115.0 · Kernel 0.326.0** (Rest: `git log`)
+**Stand 2026-09-06 · beak 0.116.0 · Kernel 0.326.0** (Rest: `git log`)
 
 Zwei Fäden laufen parallel.
 
@@ -57,6 +57,19 @@ Ligatur; fontdue läuft mit `load_substitutions: false`, also ist `fos-icon`
 1 px statt 24 — kein Schriftfehler, ein GSUB-Fehler. Danach: `body` 600 statt
 937 (die Seite hält das Fenster auf). Stand:
 `memory/project_beak_web_app_stack.md`.
+
+**0.116.0: die Fritzbox-Anmeldung rechnete die FALSCHE Antwort aus.** Um ein
+Byte verschoben — sie wäre auch nach den vier Minuten abgelehnt worden.
+Ursache war nicht der Hex-Code, sondern welche Maschine ihn fuhr:
+`run_js_body` fragte `func_chunk` nie und fuhr jeden von AUSSEN gerufenen
+Rumpf mit dem Baumläufer (Ereignisbehandler, Microtask, Rückruf) — und weil
+dessen eigene Aufrufe wieder dort landen, alles darunter. 4 286 von 320 721
+Schritten liefen auf der Befehlsmaschine. Die beiden Maschinen sind an echtem
+Code auseinandergelaufen, und test262 sieht das nicht. **Motor gemessen:
+29,7 ns je Befehl, `LoadVar` 24 % — kein einzelner grosser Hebel.** Die
+Anmeldung sind 66 000 HMAC-SHA256-Runden von Hand in JS (kein
+`crypto.subtle`): 2,34 Mrd. Befehle, 69 s nativ, ~4,5 min auf forge. Stand
+und Messweg: `memory/project_beak_js_engine_speed.md`.
 
 **0.115.0 hat drei Fehler geschlossen, die alle am Gerät sichtbar waren.**
 Ein Feld zeigte Getipptes erst beim Verlassen an und blendete dabei den Text
