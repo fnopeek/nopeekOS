@@ -520,7 +520,14 @@ impl Interp {
     /// Mal in `expr.rs::store`, und die zweite hat beim strengen Modus sofort
     /// anders entschieden — [[feedback-a-copy-is-a-second-semantics-waiting]].
     pub fn assign_ident(&mut self, n: &str, v: Value, env: &Rc<RefCell<Env>>) -> C<()> {
-        if let Some(e) = env_lookup(env, n) {
+        self.assign_ident_depth(n, v, env).map(|_| ())
+    }
+
+    /// Wie `assign_ident`, sagt aber MIT, in welcher Tiefe der Name stand.
+    /// Nur der Wegweiser braucht das; siehe `Chunk::hints`.
+    pub fn assign_ident_depth(&mut self, n: &str, v: Value, env: &Rc<RefCell<Env>>)
+        -> C<Option<usize>> {
+        if let Some((e, depth)) = env_lookup_depth(env, n) {
             // Auf einen importierten Namen zu schreiben ist ein Fehler, kein
             // Schreiben ins Herkunftsmodul: die Bindung dort gehoert dem
             // Modul, das sie ausfuehrt.
@@ -535,7 +542,7 @@ impl Interp {
             if !init { return self.ref_err(&alloc::format!("cannot access '{n}' before initialization")); }
             if !mutable { return self.type_err("assignment to constant variable"); }
             e.borrow_mut().vars.get_mut(n).unwrap().value = v;
-            return Ok(());
+            return Ok(Some(depth));
         }
         // Nicht in der Bindungskette — aber das GLOBALE OBJEKT ist auch ein
         // Bindungsort: `Object = 12` schreibt dort und ist auch im strengen
@@ -544,7 +551,7 @@ impl Interp {
         let g = self.realm.global.clone();
         if self.has_property(&g, n) {
             let strict = super::interp::env_strict(env);
-            return self.set(&Value::Obj(g), n, v, strict);
+            return self.set(&Value::Obj(g), n, v, strict).map(|_| None);
         }
         // Jetzt ist er wirklich unbekannt: im lockeren Modus wird eine globale
         // Eigenschaft daraus, im strengen wirft es.
@@ -552,7 +559,7 @@ impl Interp {
         if super::interp::env_strict(env) {
             return self.ref_err(&alloc::format!("{n} is not defined"));
         }
-        self.set(&Value::Obj(g), n, v, false)
+        self.set(&Value::Obj(g), n, v, false).map(|_| None)
     }
 
     fn assign_to_expr(&mut self, e: &Expr, v: Value, env: &Rc<RefCell<Env>>) -> C<()> {

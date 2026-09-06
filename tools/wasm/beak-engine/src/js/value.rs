@@ -805,6 +805,31 @@ pub fn num_to_string(n: f64) -> String {
     if n == f64::INFINITY { return "Infinity".to_string(); }
     if n == f64::NEG_INFINITY { return "-Infinity".to_string(); }
     if n == 0.0 { return "0".to_string(); }
+    // **Schnellweg: eine ganze Zahl.** Ein Index, eine Laenge, ein Zaehler —
+    // das ist der ueberwiegende Fall, und die Antwort ist die Ziffernfolge.
+    //
+    // Der Weg darunter zahlt dafuer `format!("{:e}")`: einen Haldenpuffer,
+    // Grisu, ein Filtern ueber die Ziffern und einen zweiten Puffer. Auf
+    // einer Google-Suchseite waren das **48 % der Laufzeit** — nicht weil
+    // die Seite mehr rechnet als in einem Browser, sondern weil jede Zahl,
+    // die zu einem Eigenschaftsschluessel wird, diesen Weg nahm.
+    //
+    // Bis 2^53 ist eine ganze Zahl in `f64` exakt, und unter 1e21 schreibt
+    // JS sie schlicht aus (ES 6.1.6.1.20, Fall `1 <= pt <= 21`) — die beiden
+    // Bedingungen decken sich also, und der lange Weg bleibt fuer alles
+    // andere zustaendig.
+    if libm::fabs(n) < 9007199254740992.0 && libm::trunc(n) == n {
+        let mut v = n as i64;
+        let neg = v < 0;
+        if neg { v = -v; }
+        let mut d = [0u8; 20];
+        let mut k = d.len();
+        while v > 0 { k -= 1; d[k] = b'0' + (v % 10) as u8; v /= 10; }
+        let mut s = String::with_capacity(d.len() - k + neg as usize);
+        if neg { s.push('-'); }
+        for &b in &d[k..] { s.push(b as char); }
+        return s;
+    }
     // ES 6.1.6.1.20 waehlt die Form nach der KOMMASTELLE, nicht nach der
     // Groesse: `s * 10^(n-k)` mit der kuerzesten Ziffernfolge `s` (k Ziffern).
     // Rusts `{:e}` liefert genau diese kuerzeste Folge — sie selbst zu
@@ -982,3 +1007,34 @@ pub fn native(proto: Option<Gc>, f: NativeFn, name: &str, length: usize, ctor: b
     g
 }
 
+
+#[cfg(test)]
+mod zahltext {
+    /// **`Number::toString` hat eigene Regeln, und der Schnellweg muss sie
+    /// treffen.** Die Tabelle steht gegen echtes JS, nicht gegen die alte
+    /// Fassung: eine Probe, die nur „wie vorher" prueft, zementiert einen
+    /// Fehler, statt ihn zu finden.
+    #[test]
+    fn zahlen_werden_wie_in_js_geschrieben() {
+        let f: &[(f64, &str)] = &[
+            (0.0, "0"), (-0.0, "0"), (1.0, "1"), (-1.0, "-1"), (42.0, "42"),
+            (100.0, "100"), (-7.0, "-7"),
+            // Genau an der Grenze des Schnellwegs: 2^53-1 geht darueber,
+            // 2^53 faellt auf den langen Weg — beide muessen gleich lauten.
+            (9007199254740991.0, "9007199254740991"),
+            (9007199254740992.0, "9007199254740992"),
+            // Und darueber, wo JS immer noch ausschreibt (pt <= 21).
+            (1e20, "100000000000000000000"),
+            // Ab 1e21 exponentiell.
+            (1e21, "1e+21"),
+            (1e-7, "1e-7"),
+            (0.1, "0.1"), (-0.5, "-0.5"), (123.456, "123.456"),
+            (0.000001, "0.000001"),
+            (f64::INFINITY, "Infinity"), (f64::NEG_INFINITY, "-Infinity"),
+        ];
+        for (n, want) in f {
+            assert_eq!(&super::num_to_string(*n), want, "fuer {n}");
+        }
+        assert_eq!(&super::num_to_string(f64::NAN), "NaN");
+    }
+}

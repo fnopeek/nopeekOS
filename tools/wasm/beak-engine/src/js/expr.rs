@@ -132,6 +132,14 @@ impl Interp {
     }
 
     fn load_ident(&mut self, n: &str, env: &Rc<RefCell<Env>>) -> C<Value> {
+        Ok(self.load_ident_depth(n, env)?.0)
+    }
+
+    /// Wie `load_ident`, sagt aber MIT, in welcher Tiefe der Name stand —
+    /// `None` heisst „nicht in der Kette, das globale Objekt hat geantwortet".
+    /// Nur der Wegweiser braucht das; siehe `Chunk::hints`.
+    fn load_ident_depth(&mut self, n: &str, env: &Rc<RefCell<Env>>)
+        -> C<(Value, Option<usize>)> {
         // **EIN Durchgang durch die Kette.** Bis 0.117.0 liefen hier
         // nacheinander `env_lookup`, `env_deref` und zwei `vars.get`: derselbe
         // Name bis zu VIERMAL gehasht und verglichen, und `env_deref` baute
@@ -139,23 +147,24 @@ impl Interp {
         // Import-Kette, die fast nie betreten wird. `LoadVar` ist 24 % aller
         // Befehle.
         let mut cur = env.clone();
+        let mut depth = 0usize;
         loop {
             match super::interp::env_peek(&cur, n) {
-                Hit::Val(v) => return Ok(v),
+                Hit::Val(v) => return Ok((v, Some(depth))),
                 Hit::Dead =>
                     return self.ref_err(
                         &alloc::format!("cannot access '{n}' before initialization")),
                 // Ein importierter Name steht nicht HIER, sondern im Modul,
                 // aus dem er kommt — und er wird bei JEDEM Lesen dort geholt.
-                Hit::Import(e, n2) => return self.load_import(e, n2, n),
-                Hit::Up(Some(p)) => cur = p,
+                Hit::Import(e, n2) => return Ok((self.load_import(e, n2, n)?, None)),
+                Hit::Up(Some(p)) => { cur = p; depth += 1; }
                 Hit::Up(None) => break,
             }
         }
         // Nicht in der Kette: das globale Objekt fragen, sonst ReferenceError.
         // Der Unterschied zu `undefined` ist der ganze Sinn der Sache.
         let g = self.realm.global.clone();
-        if self.has_property(&g, n) { return self.get(&Value::Obj(g), n); }
+        if self.has_property(&g, n) { return Ok((self.get(&Value::Obj(g), n)?, None)); }
         self.ref_err(&alloc::format!("{n} is not defined"))
     }
 
@@ -354,6 +363,7 @@ impl Interp {
         // Der DIREKTE `eval`-Aufruf: am Namen UND an der Sache erkannt. Beide
         // Maschinen tun hier dasselbe, siehe `Op::Call`.
         if matches!(callee, Expr::Ident(n) if n == "eval") && self.is_eval_fn(&f) {
+            self.hints_ok = false;
             let c = a.first().cloned().unwrap_or(Value::Undefined);
             return self.perform_eval(&c, Some(env.clone()));
         }
@@ -754,6 +764,51 @@ impl Interp {
         self.load_ident(n, env)
     }
 
+    /// `LoadVar` mit dem Weg von letztem Mal — siehe `Chunk::hints`.
+    ///
+    /// Trifft der Hinweis, kostet ein Zugriff EINEN Tabellenblick statt vier.
+    /// Trifft er nicht (oder ist keiner da), laeuft der volle Weg und der
+    /// Hinweis lernt dabei. Falsch werden kann er nur, wenn nachtraeglich
+    /// eine Bindung WEITER INNEN entsteht — und das kann allein ein direktes
+    /// `eval`, das die Wegweiser deshalb abschaltet.
+    pub fn vm_load_at(&mut self, n: &str, env: &Rc<RefCell<Env>>,
+                      hint: &core::cell::Cell<u16>) -> C<Value> {
+        let h = hint.get();
+        if self.hints_ok && h != super::code::HINT_NONE {
+            // **Der Weg wird gelesen, nicht geliehen.** Ein `Rc::clone` je
+            // Sprung waeren drei Zaehlerpaare fuer einen Zeiger, den niemand
+            // behaelt — im Profil sind das die 2,3 % in `Cell<isize>::get`.
+            //
+            // SAFETY: Die Kette haengt an `env`, und `env` lebt fuer die
+            // Dauer dieses Aufrufs; jede Umgebung haelt ihren Elter als
+            // `Rc`, also lebt die ganze Kette mit. Gelesen wird nur, und
+            // nichts davon verlaesst diese Schleife: zwischen Betreten und
+            // Verlassen laeuft kein fremder Code, der sie umhaengen koennte.
+            let mut cur: *const RefCell<Env> = Rc::as_ptr(env);
+            let mut reached = true;
+            for _ in 0..h {
+                let next = unsafe { (*cur).borrow().parent.as_ref().map(Rc::as_ptr) };
+                match next { Some(p) => cur = p, None => { reached = false; break } }
+            }
+            // NUR ein Treffer zaehlt. „Steht hier, ist aber tot" und
+            // „kommt aus einem Modul" gehen den vollen Weg, damit die
+            // Fehlermeldung und die Import-Kette dieselben bleiben.
+            if reached {
+                // SAFETY: `cur` ist der Zeiger aus derselben Kette, siehe oben.
+                let b = unsafe { (*cur).borrow() };
+                if let Some(bd) = b.vars.get(n) {
+                    if bd.initialized { return Ok(bd.value.clone()) }
+                }
+            }
+        }
+        let (v, d) = self.load_ident_depth(n, env)?;
+        match d {
+            Some(d) if d < super::code::HINT_NONE as usize => hint.set(d as u16),
+            _ => hint.set(super::code::HINT_NONE),
+        }
+        Ok(v)
+    }
+
     /// **Direkt, nicht ueber einen gebauten AST-Knoten.** Bis 0.117.0 stand
     /// hier `self.store(&Expr::Ident(String::from(n)), v, env)` — das
     /// allozierte je ZUWEISUNG eine Zeichenkette auf dem Haufen und baute
@@ -762,6 +817,51 @@ impl Interp {
     /// Anmeldelauf der Fritzbox 140 Millionen Allokationen fuer nichts.
     pub fn vm_store(&mut self, n: &str, v: Value, env: &Rc<RefCell<Env>>) -> C<()> {
         self.assign_ident(n, v, env)
+    }
+
+    /// `StoreVar` mit dem Weg von letztem Mal — dieselbe Ueberlegung wie in
+    /// `vm_load_at`, und derselbe Vorbehalt: ein direktes `eval` schaltet ihn ab.
+    ///
+    /// `StoreVar` sind 6,2 % aller Befehle, und der volle Weg fragt bis zu
+    /// VIER Tabellen: `env_lookup` je Ebene, dann die Import-Tabelle, dann
+    /// `get`, dann `get_mut`.
+    pub fn vm_store_at(&mut self, n: &str, v: Value, env: &Rc<RefCell<Env>>,
+                       hint: &core::cell::Cell<u16>) -> C<()> {
+        let h = hint.get();
+        if self.hints_ok && h != super::code::HINT_NONE {
+            // SAFETY: wie in `vm_load_at` — die Kette haengt an `env`, sie
+            // wird nur gelesen, und zwischendrin laeuft kein fremder Code.
+            let mut cur: *const RefCell<Env> = Rc::as_ptr(env);
+            let mut reached = true;
+            for _ in 0..h {
+                let next = unsafe { (*cur).borrow().parent.as_ref().map(Rc::as_ptr) };
+                match next { Some(p) => cur = p, None => { reached = false; break } }
+            }
+            if reached {
+                // SAFETY: `cur` ist der Zeiger aus derselben Kette, siehe oben.
+                // `borrow_mut` ist hier zulaessig, weil auf diesem Weg keine
+                // andere Leihe offen ist: die Schleife hat ihre wieder
+                // fallengelassen, und der Rufer haelt nur den `Rc`.
+                let mut b = unsafe { (*cur).borrow_mut() };
+                // **Nur wo es GAR KEINE Import-Tabelle gibt.** Sonst muesste
+                // hier entschieden werden, ob der Name importiert ist — und
+                // auf einen Import zu schreiben ist ein Fehler, kein
+                // Schreiben. Das ist der volle Weg.
+                if b.imports.is_none() {
+                    if let Some(bd) = b.vars.get_mut(n) {
+                        if bd.initialized && bd.mutable {
+                            bd.value = v;
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+        match self.assign_ident_depth(n, v, env)? {
+            Some(d) if d < super::code::HINT_NONE as usize => hint.set(d as u16),
+            _ => hint.set(super::code::HINT_NONE),
+        }
+        Ok(())
     }
 
     fn eval_update(&mut self, op: UpdateOp, arg: &Expr, prefix: bool,
