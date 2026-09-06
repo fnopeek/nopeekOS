@@ -12,6 +12,7 @@
 //! BigInt. Jedes davon faellt im Lauf als eigene Zeile auf und ist damit
 //! gezaehlt statt vergessen.
 
+use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -59,6 +60,17 @@ pub struct Env {
     /// hinein und wird VERERBT: ein Block in einer strengen Funktion ist
     /// streng, ohne dass jemand die Kette hochlaufen muss.
     pub strict: bool,
+    /// Namen, die aus einem ANDEREN Modul kommen (`import`).
+    ///
+    /// **Ein Verweis, keine Kopie.** Ein Modulgraph mit Zyklen — und der der
+    /// Fritzbox-Oberflaeche hat welche (`main` <-> `oldpage` <-> `html2`) —
+    /// braucht LEBENDE Bindungen: wer im Kreis frueher laeuft, sieht den
+    /// Wert, den der andere spaeter hineinschreibt. Eine Kopie beim Verbinden
+    /// saehe dort `undefined`, und zwar still.
+    ///
+    /// Nur Modulumgebungen tragen die Tabelle; jede andere ein `None`, und
+    /// das ist eine Nullpruefung im Kettenlauf.
+    pub imports: Option<Box<HashMap<Rc<str>, (Rc<RefCell<Env>>, Rc<str>)>>>,
 }
 
 impl Env {
@@ -69,7 +81,7 @@ impl Env {
         let strict = parent.as_ref().is_some_and(|p| p.borrow().strict);
         Rc::new(RefCell::new(Env {
             vars: HashMap::new(), parent, this_val: None, is_func_scope: func_scope, home: None,
-            strict,
+            strict, imports: None,
         }))
     }
 }
@@ -81,10 +93,36 @@ pub fn env_strict(env: &Rc<RefCell<Env>>) -> bool { env.borrow().strict }
 pub fn env_lookup(env: &Rc<RefCell<Env>>, name: &str) -> Option<Rc<RefCell<Env>>> {
     let mut cur = env.clone();
     loop {
-        if cur.borrow().vars.contains_key(name) { return Some(cur); }
+        {
+            let b = cur.borrow();
+            if b.vars.contains_key(name) { drop(b); return Some(cur); }
+            if b.imports.as_ref().is_some_and(|m| m.contains_key(name)) { drop(b); return Some(cur); }
+        }
         let next = cur.borrow().parent.clone();
         match next { Some(p) => cur = p, None => return None }
     }
+}
+
+/// Einem `import` folgen, bis eine echte Bindung dasteht.
+///
+/// Eine Kette ist moeglich (`export { x } from …` reicht durch), ein KREIS
+/// auch — ein Modul, das seinen eigenen Namen wieder einfuehrt. Der Deckel
+/// ist deshalb kein Vorsichtsmass, sondern die Abbruchbedingung.
+pub fn env_deref(env: &Rc<RefCell<Env>>, name: &str) -> Option<(Rc<RefCell<Env>>, Rc<str>)> {
+    let mut e = env.clone();
+    let mut n: Rc<str> = Rc::from(name);
+    for _ in 0..64 {
+        let next = {
+            let b = e.borrow();
+            if b.vars.contains_key(&*n) { None }
+            else { b.imports.as_ref().and_then(|m| m.get(&n).cloned()) }
+        };
+        match next {
+            None => return Some((e, n)),
+            Some((e2, n2)) => { e = e2; n = n2; }
+        }
+    }
+    None
 }
 
 /// Das Heimatobjekt der naechsten umschliessenden Methode.
@@ -190,6 +228,8 @@ pub struct Realm {
     pub tag_protos: HashMap<&'static str, Gc>,
     pub url_proto: Gc,
     pub url_params_proto: Gc,
+    pub text_encoder_proto: Gc,
+    pub text_decoder_proto: Gc,
     /// Die Prototypen der neun Sichten, nach ihrem Namen — `new_typed` haengt
     /// eine frische Sicht daran, und eingebaute Funktionen sind Zeiger, die
     /// nichts einfangen koennen.
@@ -305,6 +345,9 @@ pub enum HistoryOp {
 
 pub struct Interp {
     pub realm: Realm,
+    /// Die geholten ES-Module, nach AUFGELOESTER Adresse. Siehe `modules.rs`
+    /// — die Engine holt nichts, sie verwaltet nur.
+    pub modules: HashMap<Rc<str>, Rc<RefCell<super::modules::Module>>>,
     /// Aufruftiefe. Ein Baumlaeufer benutzt den RUST-Stapel, also wird ein
     /// zu tiefes JS-Programm zum Stapelueberlauf des Wirts — und das ist im
     /// Kernel ein Absturz, kein Fehler. Die Grenze ist deshalb Pflicht, nicht
@@ -539,7 +582,7 @@ impl Interp {
             Some(Value::Obj(o)) => Some(o), _ => None,
         };
         super::url::install(&mut realm);
-        Interp { realm, depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX,
+        Interp { realm, modules: HashMap::new(), depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX,
                  fake_now: 0.0, epoch_ms: 0.0, doc: None, next_sym: 0, sym_registry: HashMap::new(),
                  #[cfg(feature = "strict-probe")]
                  strict_probe: [0; STRICT_SITES],
@@ -1586,6 +1629,27 @@ impl Interp {
     }
 
     fn bind_params(&mut self, params: &[Pat], args: &[Value], env: &Rc<RefCell<Env>>) -> C<()> {
+        // **Erst ALLE Parameternamen HIER anlegen, dann binden.**
+        //
+        // `bind_pattern(…, true)` bindet ueber `init_binding`, und das laeuft
+        // die Umgebungskette HOCH: ein Parameter, der so heisst wie eine
+        // Variable weiter aussen, schrieb in DIESE. Minifizierter Code
+        // benutzt ueberall dieselben kurzen Namen, also traf das jedes
+        // Bundle — auf der Fritzbox-Anmeldeseite hat `o=(o,a)=>{…}` beim
+        // ersten Aufruf das aeussere `o` mit einer 0 ueberschrieben, und der
+        // naechste Zugriff darauf war „bind is not a function".
+        //
+        // Vor dem Binden, nicht je Parameter: `function f(a = b, b)` ist ein
+        // ReferenceError und darf nicht das aeussere `b` finden
+        // (`FunctionDeclarationInstantiation`, ES §10.2.11 Schritt 21).
+        for p in params {
+            let mut names = Vec::new();
+            super::eval::names_of(p, &mut names);
+            for n in names {
+                env.borrow_mut().vars.insert(Rc::from(n.as_str()),
+                    Binding { value: Value::Undefined, mutable: true, initialized: false });
+            }
+        }
         let mut i = 0;
         for p in params {
             if let Pat::Rest(inner) = p {
@@ -1743,6 +1807,11 @@ impl Interp {
     fn hoist(&mut self, body: &[Stmt], block: &Rc<RefCell<Env>>, func: &Rc<RefCell<Env>>) -> C<()> {
         for st in body { self.hoist_vars(st, func); }
         for st in body {
+            // `export function f(){}` ist eine Deklaration mit einem Wort
+            // davor — sie wird genauso hochgezogen. Ohne diese Zeile stuende
+            // eine exportierte Funktion erst da, wenn ihre Zeile lief, und
+            // ein Zyklus im Modulgraphen saehe sie nie.
+            let st = super::modules::unexport(st).unwrap_or(st);
             match st {
                 Stmt::Func(f) => {
                     if let Some(n) = &f.name {
@@ -1762,6 +1831,25 @@ impl Interp {
                         });
                     }
                 }
+                // `export default` legt seinen Wert unter einem Namen ab,
+                // den kein Skript schreiben kann. Er wird HIER angelegt,
+                // damit ein Zyklus, der ihn zu frueh liest, „nicht bereit"
+                // sagt statt „gibt es nicht" — und damit eine
+                // Funktionsdeklaration auch dahinter hochgezogen wird.
+                Stmt::ExportDefault(d) => {
+                    let (v, init, own) = match &**d {
+                        ExportDefault::Func(f) =>
+                            (self.make_closure(f.clone(), block, None), true, f.name.clone()),
+                        ExportDefault::Class(c) => (Value::Undefined, false, c.name.clone()),
+                        ExportDefault::Expr(_) => (Value::Undefined, false, None),
+                    };
+                    if let Some(n) = own {
+                        block.borrow_mut().vars.insert(Rc::from(n.as_str()),
+                            Binding { value: v.clone(), mutable: true, initialized: init });
+                    }
+                    block.borrow_mut().vars.insert(Rc::from(super::modules::DEFAULT_LOCAL),
+                        Binding { value: v, mutable: true, initialized: init });
+                }
                 Stmt::Class(c) => {
                     if let Some(n) = &c.name {
                         block.borrow_mut().vars.insert(Rc::from(n.as_str()),
@@ -1777,6 +1865,7 @@ impl Interp {
     /// `var` durch Bloecke und Schleifen hindurch einsammeln — aber NICHT
     /// durch Funktionen: dort faengt ein neuer Bereich an.
     fn hoist_vars(&mut self, st: &Stmt, func: &Rc<RefCell<Env>>) {
+        let st = super::modules::unexport(st).unwrap_or(st);
         let mut put = |names: Vec<String>| {
             for n in names {
                 let key: Rc<str> = Rc::from(n.as_str());

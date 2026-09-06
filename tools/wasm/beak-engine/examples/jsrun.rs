@@ -9,9 +9,21 @@
 fn main() {
     let arg = std::env::args().nth(1).unwrap_or_default();
     let script = std::fs::read_to_string(&arg).unwrap_or(arg);
-    let prog = match beak_engine::js::parse(&script, false) {
+    // `MODULE=1` parst als Modul. beak versucht am Geraet BEIDES — die Datei
+    // sagt nicht, was sie ist —, also muss die Probe das auch koennen.
+    let module = std::env::var("MODULE").is_ok();
+    let prog = match beak_engine::js::parse(&script, module) {
         Ok(p) => p,
-        Err(e) => { println!("SyntaxError: {} @{}", e.msg, e.at); return; }
+        Err(e) => {
+            let at = e.at.min(script.len());
+            let head = script[..at].rsplit('\n').next().unwrap_or("");
+            let tail = &script[at..(at + 60).min(script.len())];
+            println!("SyntaxError: {} @{} ...{}<<HIER>>{}...",
+                     e.msg, e.at,
+                     &head[head.len().saturating_sub(60)..],
+                     tail.split('\n').next().unwrap_or(""));
+            return;
+        }
     };
     let mut i = beak_engine::js::interp::Interp::new();
     // `NOVM=1` faehrt dieselbe Datei ohne die Befehlsmaschine. Der Diff der

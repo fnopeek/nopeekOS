@@ -872,6 +872,10 @@ enum NavStage {
     /// Die externen Skripte der Seite. Eine dritte Rundreise, und sie kommt
     /// NACH den Stilblaettern: ein Skript liest Klassen und Groessen.
     Js,
+    /// Der Modulgraph. Anders als die drei davor ist das KEINE einzelne
+    /// Rundreise: ein Modul nennt seine Abhaengigkeiten erst, wenn es da ist,
+    /// also geht es rundenweise, bis der Graph geschlossen ist.
+    Mod,
 }
 
 /// Handle of the navigation in flight, or -1.
@@ -1079,6 +1083,7 @@ fn nav_pump(engine: &Engine) -> bool {
         NavStage::Doc => nav_document_arrived(engine),
         NavStage::Css => nav_stylesheets_arrived(engine),
         NavStage::Js => nav_scripts_arrived(engine),
+        NavStage::Mod => nav_modules_arrived(engine),
     }
     true
 }
@@ -1182,12 +1187,23 @@ fn js_session() -> Option<&'static mut beak_engine::js::Session> {
 }
 /// Wie viele externe Adressen das Buendel angefordert hat.
 static mut NAV_JS_COUNT: usize = 0;
+/// Die Modul-Einstiege der Seite, in Dokumentreihenfolge — das sind die
+/// Adressen, die am Ende ausgewertet werden.
+static mut NAV_MOD_ENTRIES: Option<Vec<String>> = None;
+/// Die Adressen, die in DIESER Runde unterwegs sind, in Bestellreihenfolge.
+static mut NAV_MOD_WANT: Option<Vec<String>> = None;
+/// Wie viele Runden schon liefen — der Deckel gegen einen Graphen, der sich
+/// selbst nachlaedt.
+static mut NAV_MOD_ROUNDS: usize = 0;
 
 /// Ein Skript, das auf seinen Text wartet — oder ihn schon hat.
 enum PendingScript {
-    Ready(String),
-    /// Der Index in der Bestellung, in der Reihenfolge der Anforderung.
-    Fetching(usize),
+    /// Quelltext, die Kennung (fuer ein Modul: seine Adresse) und ob es ein
+    /// Modul ist.
+    Ready(String, String, bool),
+    /// Der Index in der Bestellung, in der Reihenfolge der Anforderung,
+    /// plus die Adresse — ein Fehler ohne Kennung ist keine Auskunft.
+    Fetching(usize, String, bool),
 }
 
 /// Wie viele externe Skripte eine Seite holen darf.
@@ -1198,6 +1214,14 @@ enum PendingScript {
 /// externe (github am meisten).
 const MAX_SCRIPT_URLS: usize = 32;
 const SCRIPT_CAP: usize = 8 * 1024 * 1024;
+/// Wie gross ein Modulgraph werden darf, und in wie vielen Runden.
+///
+/// Nach Anzahl UND Runden, weil beide Enden ausufern koennen: eine Seite mit
+/// tausend kleinen Modulen und eine Kette, die sich in jeder Runde ein
+/// weiteres Glied holt. Gemessen: die Fritzbox-Anmeldeseite braucht 56
+/// Adressen in 6 Runden.
+const MAX_MODULE_URLS: usize = 256;
+const MAX_MODULE_ROUNDS: usize = 24;
 
 fn nav_stylesheets_arrived(engine: &Engine) {
     let h = nav_job();
@@ -1265,30 +1289,38 @@ fn nav_begin_scripts(engine: &Engine) -> bool {
     let base = url_str().to_string();
     let mut list: Vec<PendingScript> = Vec::with_capacity(refs.len());
     let mut urls: Vec<String> = Vec::new();
+    let mut inline_n = 0usize;
     for r in refs {
         match r {
-            ScriptRef::Inline(t) => list.push(PendingScript::Ready(t)),
-            ScriptRef::External(src) => {
+            ScriptRef::Inline(t, m) => {
+                inline_n += 1;
+                // Ein eingebettetes Modul bekommt eine eigene Adresse: sie
+                // ist der Schluessel im Lader UND was `import.meta.url`
+                // sagt, und relative Angaben loesen sich dagegen auf.
+                let label = if m { alloc::format!("{base}#inline{inline_n}") }
+                            else { alloc::format!("inline #{inline_n}") };
+                list.push(PendingScript::Ready(t, label, m));
+            }
+            ScriptRef::External(src, m) => {
                 if urls.len() >= MAX_SCRIPT_URLS {
                     log(&alloc::format!("[beak] script cap hit: {} external scripts used", MAX_SCRIPT_URLS));
                     continue;
                 }
-                list.push(PendingScript::Fetching(urls.len()));
-                urls.push(resolve(&base, &src));
+                let u = resolve(&base, &src);
+                list.push(PendingScript::Fetching(urls.len(), u.clone(), m));
+                urls.push(u);
             }
         }
     }
     if urls.is_empty() {
-        run_scripts(engine, list);
-        return false;
+        return run_scripts(engine, list);
     }
     let h = begin_batch(&urls, SCRIPT_CAP);
     if h < 0 {
         // Nicht anforderbar: die eingebetteten laufen trotzdem. Eine Seite
         // ohne ihre Bundles ist weniger als eine ganze, aber mehr als keine.
         log("[beak] external scripts could not be fetched — running inline only");
-        run_scripts(engine, list);
-        return false;
+        return run_scripts(engine, list);
     }
     unsafe {
         core::ptr::addr_of_mut!(NAV_SCRIPTS).write(Some(list));
@@ -1307,19 +1339,49 @@ fn nav_scripts_arrived(engine: &Engine) {
     let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
     let spans = take_batch(h, dst, SCRIPT_CAP.min(IMG_FETCH_CAP), want);
     for p in list.iter_mut() {
-        let PendingScript::Fetching(k) = p else { continue };
-        let (off, n) = spans.get(*k).copied().unwrap_or((0, 0));
+        let (k, label, is_mod) = match p {
+            PendingScript::Fetching(k, l, m) => (*k, core::mem::take(l), *m),
+            _ => continue,
+        };
+        let (off, n) = spans.get(k).copied().unwrap_or((0, 0));
         let text = if n == 0 { String::new() } else {
             let bytes = unsafe { core::slice::from_raw_parts(dst.add(off) as *const u8, n) };
             // Nicht dekodierbar heisst hier: nicht ausfuehren. Ein Skript
             // halb zu lesen ist schlimmer als es zu lassen.
-            core::str::from_utf8(bytes).map(String::from).unwrap_or_default()
+            match core::str::from_utf8(bytes) {
+                Ok(t) => String::from(t),
+                Err(e) => {
+                    log(&alloc::format!(
+                        "[beak]   script FAIL {label}: {n} B, aber kein UTF-8 (@{})",
+                        e.valid_up_to()));
+                    String::new()
+                }
+            }
         };
-        *p = PendingScript::Ready(text);
+        *p = PendingScript::Ready(text, label, is_mod);
     }
     log_ms("fetch scripts", now_ms() - unsafe { core::ptr::addr_of!(NAV_STAGE_MS).read() });
-    run_scripts(engine, list);
-    nav_done();
+    if !run_scripts(engine, list) { nav_done(); }
+}
+
+/// Ein Byte-Offset als `Zeile:Spalte` plus die Umgebung im Quelltext.
+///
+/// Ein Fehler, der nur `@41822` sagt, kostet auf minifiziertem Fremdcode eine
+/// Stunde. Die Zeile selbst wird NICHT ganz gezeigt — minifizierter Code hat
+/// Zeilen von 200 KB.
+fn src_pos(src: &str, at: usize) -> String {
+    let mut at = at.min(src.len());
+    while at > 0 && !src.is_char_boundary(at) { at -= 1; }
+    let before = &src[..at];
+    let line = before.bytes().filter(|b| *b == b'\n').count() + 1;
+    let ls = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let col = at - ls + 1;
+    let le = src[at..].find('\n').map(|i| at + i).unwrap_or(src.len());
+    let mut from = at.saturating_sub(48).max(ls);
+    while from < at && !src.is_char_boundary(from) { from += 1; }
+    let mut to = (at + 48).min(le);
+    while to > at && !src.is_char_boundary(to) { to -= 1; }
+    alloc::format!("{line}:{col} ...{}<<HIER>>{}...", &src[from..at], &src[at..to])
 }
 
 /// Die eingebetteten Skripte der Seite ausfuehren und den veraenderten Baum
@@ -1436,8 +1498,10 @@ fn sync_history(engine: &Engine, sess: &mut beak_engine::js::Session) {
     sess.interp.set_history(count.max(1) as f64, beak_engine::js::value::Value::Null);
 }
 
-fn run_scripts(engine: &Engine, list: Vec<PendingScript>) {
-    let t0 = now_ms();
+/// Liefert true, wenn eine Modulrunde laeuft — dann ist die Navigation
+/// NOCH nicht fertig.
+fn run_scripts(engine: &Engine, list: Vec<PendingScript>) -> bool {
+    unsafe { core::ptr::addr_of_mut!(SCRIPT_T0).write(now_ms()) };
     let dom = beak_engine::parse(html_str());
     let doc = beak_engine::js::dombind::Doc::from_dom(&dom);
     let mut sess = beak_engine::js::Session::new(SCRIPT_STEPS);
@@ -1485,30 +1549,205 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) {
     // rechnet falsch.
     sess.interp.epoch_ms = unsafe { npk_unix_time() } as f64 * 1000.0;
     let (mut ran, mut failed, mut bytes) = (0usize, 0usize, 0usize);
+    // Die Modul-Einstiege, in Dokumentreihenfolge. Sie laufen NACH allen
+    // gewoehnlichen Skripten — `type="module"` ist per Spezifikation
+    // aufgeschoben, und die Fritzbox verlaesst sich darauf: ihr Modulcode
+    // liest `gNbc`, das ein eingebettetes Skript davor setzt.
+    let mut entries: Vec<String> = Vec::new();
     for p in &list {
-        let PendingScript::Ready(src) = p else { failed += 1; continue };
+        let (src, label, is_mod) = match p {
+            PendingScript::Ready(s, l, m) => (s, l.as_str(), *m),
+            PendingScript::Fetching(_, l, _) => {
+                failed += 1;
+                log(&alloc::format!("[beak]   script FAIL {l}: nie angekommen"));
+                continue;
+            }
+        };
         if src.is_empty() { failed += 1; continue; }
         bytes += src.len();
+        if is_mod {
+            match beak_engine::js::parse(src, true) {
+                Ok(p) => {
+                    sess.interp.add_module(label, alloc::rc::Rc::new(p));
+                    entries.push(label.to_string());
+                }
+                Err(e) => {
+                    failed += 1;
+                    log(&alloc::format!("[beak]   script FAIL {label}: SyntaxError: {} @{}",
+                                        e.msg, src_pos(src, e.at)));
+                }
+            }
+            continue;
+        }
         let prog = match beak_engine::js::parse(src, false) {
             Ok(p) => p,
             // Ein Modul ist auch ein Skript — die Datei sagt es nicht, also
             // beides versuchen.
-            Err(_) => match beak_engine::js::parse(src, true) {
+            Err(e) => match beak_engine::js::parse(src, true) {
                 Ok(p) => p,
-                Err(_) => { failed += 1; continue }
+                Err(em) => {
+                    failed += 1;
+                    let mut w = alloc::format!("SyntaxError: {} @{}", e.msg, src_pos(src, e.at));
+                    if em.msg != e.msg {
+                        w.push_str(&alloc::format!(" | als Modul: {} @{}", em.msg, src_pos(src, em.at)));
+                    }
+                    log(&alloc::format!("[beak]   script FAIL {label}: {w}"));
+                    continue;
+                }
             },
         };
         // Ein Skript, das scheitert, darf die naechsten nicht mitnehmen — so
         // macht es ein Browser auch.
-        match sess.run(&prog) { Ok(()) => ran += 1, Err(_) => failed += 1 }
+        match sess.run(&prog) {
+            Ok(()) => ran += 1,
+            Err(e) => {
+                failed += 1;
+                log(&alloc::format!("[beak]   script FAIL {label}: {e}"));
+            }
+        }
     }
+    unsafe {
+        core::ptr::addr_of_mut!(JS).write(Some(sess));
+        core::ptr::addr_of_mut!(SCRIPT_TALLY).write((ran, failed, bytes));
+        core::ptr::addr_of_mut!(NAV_MOD_ENTRIES).write(if entries.is_empty() { None } else { Some(entries) });
+        core::ptr::addr_of_mut!(NAV_MOD_ROUNDS).write(0);
+    }
+    module_pump(engine)
+}
+
+/// Was die gewoehnlichen Skripte ergeben haben — muss die Modulrunden
+/// ueberleben, weil der Bericht erst danach geschrieben wird.
+static mut SCRIPT_TALLY: (usize, usize, usize) = (0, 0, 0);
+/// Wann die Skriptrunde begann. NICHT `NAV_STAGE_MS`: das steht nach einer
+/// Modulrunde auf deren Beginn, und die gemeldete Zeit waere zu klein.
+static mut SCRIPT_T0: i64 = 0;
+
+/// Eine Runde am Modulgraphen: was fehlt noch?
+///
+/// Liefert true, wenn eine Rundreise laeuft — dann geht es in `nav_pump`
+/// weiter. Sonst ist der Graph geschlossen und alles ist ausgewertet.
+fn module_pump(engine: &Engine) -> bool {
+    let entries = match unsafe { (*core::ptr::addr_of!(NAV_MOD_ENTRIES)).clone() } {
+        Some(e) => e,
+        None => { finish_scripts(engine); return false }
+    };
+    let Some(sess) = js_session() else { finish_scripts(engine); return false };
+    // Vom Einstieg aus laufen und dabei JEDE Angabe aufloesen — der Lader
+    // kennt nur absolute Adressen, das Aufloesen gehoert dem Wirt.
+    let mut seen: Vec<String> = Vec::new();
+    let mut queue = entries;
+    let mut missing: Vec<String> = Vec::new();
+    while let Some(u) = queue.pop() {
+        if seen.iter().any(|x| x == &u) { continue }
+        seen.push(u.clone());
+        if !sess.interp.has_module(&u) {
+            if !missing.iter().any(|x| x == &u) { missing.push(u); }
+            continue;
+        }
+        for spec in sess.interp.module_requests(&u) {
+            let r = resolve(&u, &spec);
+            sess.interp.map_module_dep(&u, &spec, &r);
+            queue.push(r);
+        }
+    }
+    let rounds = unsafe { core::ptr::addr_of!(NAV_MOD_ROUNDS).read() };
+    if !missing.is_empty() && rounds < MAX_MODULE_ROUNDS && seen.len() <= MAX_MODULE_URLS {
+        missing.truncate(MAX_SCRIPT_URLS);
+        let h = begin_batch(&missing, SCRIPT_CAP);
+        if h >= 0 {
+            unsafe {
+                core::ptr::addr_of_mut!(NAV_MOD_WANT).write(Some(missing));
+                core::ptr::addr_of_mut!(NAV_MOD_ROUNDS).write(rounds + 1);
+                core::ptr::addr_of_mut!(NAV_STAGE).write(NavStage::Mod);
+                core::ptr::addr_of_mut!(NAV_JOB).write(h);
+                core::ptr::addr_of_mut!(NAV_STAGE_MS).write(now_ms());
+            }
+            return true;
+        }
+        log("[beak] module graph could not be fetched");
+    }
+    // Zu gross, zu tief oder fertig: auswerten, was da ist. Ein Modul, das
+    // fehlt, meldet sich beim Verknuepfen mit Namen.
+    if !missing.is_empty() {
+        log(&alloc::format!("[beak] module graph unresolved: {} offen nach {rounds} Runden",
+                            missing.len()));
+    }
+    eval_modules();
+    finish_scripts(engine);
+    false
+}
+
+fn nav_modules_arrived(engine: &Engine) {
+    let h = nav_job();
+    let want = unsafe { (*core::ptr::addr_of_mut!(NAV_MOD_WANT)).take() }.unwrap_or_default();
+    let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
+    let spans = take_batch(h, dst, SCRIPT_CAP.min(IMG_FETCH_CAP), want.len());
+    if let Some(sess) = js_session() {
+        for (k, url) in want.iter().enumerate() {
+            let (off, n) = spans.get(k).copied().unwrap_or((0, 0));
+            if n == 0 { log(&alloc::format!("[beak]   module FAIL {url}: leer")); continue }
+            let bytes = unsafe { core::slice::from_raw_parts(dst.add(off) as *const u8, n) };
+            let Ok(text) = core::str::from_utf8(bytes) else {
+                log(&alloc::format!("[beak]   module FAIL {url}: kein UTF-8"));
+                continue;
+            };
+            match beak_engine::js::parse(text, true) {
+                Ok(p) => sess.interp.add_module(url, alloc::rc::Rc::new(p)),
+                Err(e) => log(&alloc::format!("[beak]   module FAIL {url}: SyntaxError: {} @{}",
+                                              e.msg, src_pos(text, e.at))),
+            }
+        }
+    }
+    if !module_pump(engine) { nav_done(); }
+}
+
+/// Die Einstiege auswerten — in Dokumentreihenfolge, jeder genau einmal.
+fn eval_modules() {
+    let entries = match unsafe { (*core::ptr::addr_of!(NAV_MOD_ENTRIES)).clone() } {
+        Some(e) => e, None => return,
+    };
+    let Some(sess) = js_session() else { return };
+    let t0 = now_ms();
+    let (mut ok, mut bad) = (0usize, 0usize);
+    for u in &entries {
+        match sess.interp.eval_module(u) {
+            Ok(()) => ok += 1,
+            Err(e) => {
+                bad += 1;
+                let msg = beak_engine::js::modules::describe(&mut sess.interp, e);
+                log(&alloc::format!("[beak]   module FAIL {u}: {msg}"));
+            }
+        }
+    }
+    let mut m = String::from("[beak] modules: ");
+    push_i64(&mut m, ok as i64);
+    m.push_str(" gelaufen, ");
+    push_i64(&mut m, bad as i64);
+    m.push_str(" gescheitert, ");
+    push_i64(&mut m, sess.interp.modules.len() as i64);
+    m.push_str(" im Graphen, ");
+    push_i64(&mut m, (now_ms() - t0) as i64);
+    m.push_str(" ms");
+    log(&m);
+    unsafe {
+        let (r, f, b) = core::ptr::addr_of!(SCRIPT_TALLY).read();
+        core::ptr::addr_of_mut!(SCRIPT_TALLY).write((r + ok, f + bad, b));
+    }
+}
+
+/// Zeitgeber, Kekse, Baum und der Bericht — nach ALLEM, was die Seite an
+/// Code hat: gewoehnliche Skripte wie Module.
+fn finish_scripts(engine: &Engine) {
+    let (ran, failed, bytes) = unsafe { core::ptr::addr_of!(SCRIPT_TALLY).read() };
+    let t0 = unsafe { core::ptr::addr_of!(SCRIPT_T0).read() };
+    let Some(sess) = js_session() else { return };
     // Die Zeitgeber, die waehrend des Ladens angemeldet wurden, einmal
     // laufen lassen — viele Seiten stellen ihre Oberflaeche in einem
     // `setTimeout(…, 0)` fertig.
     let timers = sess.interp.run_timers();
-    sync_cookies(&mut sess);
-    sync_history(engine, &mut sess);
-    drain_console(&mut sess);
+    sync_cookies(sess);
+    sync_history(engine, sess);
+    drain_console(sess);
     let mut listeners = false;
     if let Some(d) = sess.interp.doc.as_mut() {
         listeners = d.has_listeners;
@@ -1518,7 +1757,7 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) {
         engine.set_hit_all(listeners || ran > 0);
         engine.set_scripted_dom(Some(d.to_dom()));
     }
-    unsafe { core::ptr::addr_of_mut!(JS).write(Some(sess)) };
+    unsafe { core::ptr::addr_of_mut!(NAV_MOD_ENTRIES).write(None) };
     let mut m = String::from("[beak] scripts: ");
     push_i64(&mut m, ran as i64);
     m.push_str(" gelaufen, ");

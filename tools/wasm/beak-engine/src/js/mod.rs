@@ -26,6 +26,7 @@ pub mod iterhelp;
 pub mod dombind;
 pub mod eval;
 pub mod json;
+pub mod modules;
 pub mod expr;
 pub mod generator;
 pub mod interp;
