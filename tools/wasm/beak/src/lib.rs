@@ -476,21 +476,40 @@ struct Page {
     forms: Forms,
     state: FormState,
     nav: u32,
+    /// Stand des Baums, aus dem `forms` gebaut wurde.
+    scripted: u64,
 }
 
 impl Page {
     fn new() -> Page {
-        Page { forms: forms::Forms { forms: Vec::new(), controls: Vec::new() }, state: FormState::default(), nav: 0 }
+        Page { forms: forms::Forms { forms: Vec::new(), controls: Vec::new() },
+               state: FormState::default(), nav: 0, scripted: 0 }
     }
-    /// Re-parse the document's forms if we have navigated since the last call.
-    fn sync(&mut self) {
+    /// Das Formularmodell nachziehen — nach einer Navigation ODER nachdem
+    /// Skripte den Baum ersetzt haben.
+    ///
+    /// **Aus dem LEBENDEN Baum, nicht aus dem Quelltext.** Eine Seite, die
+    /// ihre Maske erst per Skript baut, hatte hier vorher gar keine
+    /// Steuerelemente: das Bild zeigte ein Anmeldeformular, `submit` sagte
+    /// „kein zugehoeriges Formular". Das ist kein Sonderfall einer Seite,
+    /// sondern die Regel bei allem, was seine Oberflaeche zur Laufzeit baut.
+    fn sync(&mut self, engine: &Engine) {
         let g = nav_gen();
-        if self.nav == g {
+        let sg = engine.scripted_gen();
+        if self.nav == g && self.scripted == sg {
             return;
         }
+        let navigated = self.nav != g;
         self.nav = g;
-        self.forms = forms::collect(&beak_engine::parse(html_str()));
-        self.state.reset();
+        self.scripted = sg;
+        self.forms = match engine.with_scripted(forms::collect) {
+            Some(f) => f,
+            None => forms::collect(&beak_engine::parse(html_str())),
+        };
+        // Eine NAVIGATION wirft die Eingaben weg, ein Skriptlauf nicht — was
+        // der Benutzer getippt hat, gehoert ihm, auch wenn die Seite daneben
+        // etwas umbaut.
+        if navigated { self.state.reset(); }
         self.log_forms();
     }
 
@@ -876,6 +895,10 @@ enum NavStage {
     /// Rundreise: ein Modul nennt seine Abhaengigkeiten erst, wenn es da ist,
     /// also geht es rundenweise, bis der Graph geschlossen ist.
     Mod,
+    /// Stilblaetter, die ein SKRIPT eingehaengt hat. Auch rundenweise: ein
+    /// Blatt, das ankommt, laesst eine Komponente fertig bauen, und die haengt
+    /// ihrerseits eins ein.
+    Sheet,
 }
 
 /// Handle of the navigation in flight, or -1.
@@ -1084,6 +1107,7 @@ fn nav_pump(engine: &Engine) -> bool {
         NavStage::Css => nav_stylesheets_arrived(engine),
         NavStage::Js => nav_scripts_arrived(engine),
         NavStage::Mod => nav_modules_arrived(engine),
+        NavStage::Sheet => nav_sheets_arrived(engine),
     }
     true
 }
@@ -1195,6 +1219,10 @@ static mut NAV_MOD_WANT: Option<Vec<String>> = None;
 /// Wie viele Runden schon liefen — der Deckel gegen einen Graphen, der sich
 /// selbst nachlaedt.
 static mut NAV_MOD_ROUNDS: usize = 0;
+/// Die Knoten der Stilblaetter, die in DIESER Runde unterwegs sind — in
+/// Bestellreihenfolge, damit die Antwort dem `<link>` zugeordnet werden kann.
+static mut NAV_SHEET_NODES: Option<Vec<u32>> = None;
+static mut NAV_SHEET_ROUNDS: usize = 0;
 
 /// Ein Skript, das auf seinen Text wartet — oder ihn schon hat.
 enum PendingScript {
@@ -1222,6 +1250,10 @@ const SCRIPT_CAP: usize = 8 * 1024 * 1024;
 /// Adressen in 6 Runden.
 const MAX_MODULE_URLS: usize = 256;
 const MAX_MODULE_ROUNDS: usize = 24;
+/// Wie oft eine Seite nachgeladene Stilblaetter nachlegen darf. Jede Runde
+/// ist eine Rundreise; eine Seite, die in jeder Runde ein weiteres anmeldet,
+/// haelt den Aufbau sonst offen.
+const MAX_SHEET_ROUNDS: usize = 8;
 
 fn nav_stylesheets_arrived(engine: &Engine) {
     let h = nav_job();
@@ -1505,6 +1537,8 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) -> bool {
     let dom = beak_engine::parse(html_str());
     let doc = beak_engine::js::dombind::Doc::from_dom(&dom);
     let mut sess = beak_engine::js::Session::new(SCRIPT_STEPS);
+    sess.interp.deadline = Some(script_time_left);
+    arm_script_budget();
     sess.interp.set_document(doc);
     // Die Adresse gehoert dem Wirt — und zwar die, aus der das Dokument KAM,
     // nicht die erfragte: eine Weiterleitung aendert Herkunft und damit die
@@ -1684,8 +1718,95 @@ fn module_pump(engine: &Engine) -> bool {
         }
     }
     eval_modules();
-    finish_scripts(engine);
-    false
+    sheet_pump(engine)
+}
+
+/// Eine Runde an den Stilblaettern, die ein Skript eingehaengt hat.
+///
+/// Liefert true, wenn eine Rundreise laeuft. Wie beim Modulgraphen
+/// rundenweise: ein Blatt, das ankommt, laesst eine Komponente fertig bauen,
+/// und die haengt ihrerseits eins ein.
+fn sheet_pump(engine: &Engine) -> bool {
+    let Some(sess) = js_session() else { finish_scripts(engine); return false };
+    // Erst die Microtasks und Zeitgeber laufen lassen: was gerade fertig
+    // geworden ist, meldet seine Blaetter JETZT an.
+    for _ in 0..8 { if sess.interp.run_timers() == 0 { break } }
+    let want = sess.interp.take_pending_sheets();
+    if want.is_empty() { finish_scripts(engine); return false }
+    let rounds = unsafe { core::ptr::addr_of!(NAV_SHEET_ROUNDS).read() };
+    if rounds >= MAX_SHEET_ROUNDS {
+        log(&alloc::format!("[beak] sheet rounds capped at {MAX_SHEET_ROUNDS}, {} offen", want.len()));
+        for (id, _) in want { beak_engine::js::dombind::sheet_done(&mut sess.interp, id, false); }
+        finish_scripts(engine);
+        return false;
+    }
+    let base = url_str().to_string();
+    let mut nodes: Vec<u32> = Vec::new();
+    let mut urls: Vec<String> = Vec::new();
+    for (id, href) in want.into_iter().take(MAX_SCRIPT_URLS) {
+        nodes.push(id);
+        urls.push(resolve(&base, &href));
+    }
+    let h = begin_batch(&urls, CSS_CAP);
+    if h < 0 {
+        log("[beak] script stylesheets could not be fetched");
+        for id in nodes { beak_engine::js::dombind::sheet_done(&mut sess.interp, id, false); }
+        finish_scripts(engine);
+        return false;
+    }
+    unsafe {
+        core::ptr::addr_of_mut!(NAV_SHEET_NODES).write(Some(nodes));
+        core::ptr::addr_of_mut!(NAV_SHEET_ROUNDS).write(rounds + 1);
+        core::ptr::addr_of_mut!(NAV_STAGE).write(NavStage::Sheet);
+        core::ptr::addr_of_mut!(NAV_JOB).write(h);
+        core::ptr::addr_of_mut!(NAV_STAGE_MS).write(now_ms());
+    }
+    true
+}
+
+fn nav_sheets_arrived(engine: &Engine) {
+    let h = nav_job();
+    let nodes = unsafe { (*core::ptr::addr_of_mut!(NAV_SHEET_NODES)).take() }.unwrap_or_default();
+    let mut scratch: Vec<u8> = Vec::with_capacity(CSS_CAP);
+    let spans = take_batch(h, scratch.as_mut_ptr(), CSS_CAP, nodes.len());
+    let total = spans.iter().map(|(o, l)| o + l).max().unwrap_or(0);
+    unsafe { scratch.set_len(total.min(CSS_CAP)) };
+    let (mut ok, mut bad) = (0usize, 0usize);
+    if let Some(sess) = js_session() {
+        for (k, id) in nodes.iter().enumerate() {
+            let (off, n) = spans.get(k).copied().unwrap_or((0, 0));
+            let got = n > 0 && off + n <= scratch.len() && css_append(&scratch[off..off + n]);
+            if got { ok += 1 } else { bad += 1 }
+            beak_engine::js::dombind::sheet_done(&mut sess.interp, *id, got);
+        }
+    }
+    log(&alloc::format!("[beak] script stylesheets: {ok} geholt, {bad} gescheitert, {} ms",
+                        now_ms() - unsafe { core::ptr::addr_of!(NAV_STAGE_MS).read() }));
+    if ok > 0 {
+        decode_css();
+        // Die Kaskade muss neu laufen — sonst haengt das Blatt im Puffer und
+        // wirkt nicht.
+        bump_content_gen("sheet");
+        mark_dirty();
+    }
+    if !sheet_pump(engine) { nav_done(); }
+}
+
+/// Ein Stilblatt ANHAENGEN. Spaeter geholt heisst spaeter in der Kaskade, und
+/// das ist genau die Reihenfolge, in der es der Browser auch anwendet.
+fn css_append(bytes: &[u8]) -> bool {
+    let len = unsafe { core::ptr::addr_of!(CSS_LEN).read() };
+    if len + bytes.len() + 1 >= CSS_CAP {
+        log(&alloc::format!("[beak] CSS buffer full at {len} B — dropped a {} B sheet", bytes.len()));
+        return false;
+    }
+    let dst = core::ptr::addr_of_mut!(CSS_BUF) as *mut u8;
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.add(len), bytes.len());
+        *dst.add(len + bytes.len()) = b'\n';
+        core::ptr::addr_of_mut!(CSS_LEN).write(len + bytes.len() + 1);
+    }
+    true
 }
 
 fn nav_modules_arrived(engine: &Engine) {
@@ -1787,10 +1908,29 @@ fn finish_scripts(engine: &Engine) {
     log(&m);
 }
 
+/// Die zwei Richtungen der Formular-Bruecke. Die REGEL steht in der Engine
+/// (`dombind::push_control_values` / `pull_control_values`) — hier stehen nur
+/// die Ausleihen, damit es die Regel nicht zweimal gibt.
+fn push_control_values(page: &Page) {
+    let Some(sess) = js_session() else { return };
+    let Some(doc) = sess.interp.doc.as_mut() else { return };
+    beak_engine::js::dombind::push_control_values(doc, &page.forms, &page.state);
+}
+
+fn pull_control_values(page: &mut Page, sess: &beak_engine::js::Session) {
+    let Some(doc) = sess.interp.doc.as_ref() else { return };
+    beak_engine::js::dombind::pull_control_values(doc, &page.forms, &mut page.state);
+}
+
 /// Einen Klick an die Seite zustellen. Liefert true, wenn ein Behandler
 /// `preventDefault` gerufen hat — dann unterbleibt, was beak sonst getan
 /// haette (einem Link folgen, ein Steuerelement bedienen).
-fn dispatch_click(engine: &Engine, lay: &Layout, cx: i32, cy: i32) -> bool {
+fn dispatch_click(engine: &Engine, page: &mut Page, lay: &Layout, cx: i32, cy: i32) -> bool {
+    // Jeder Behandler bekommt sein eigenes Zeitbudget — sonst zahlt der
+    // zwanzigste Klick fuer die neunzehn davor.
+    arm_script_budget();
+    // Was der Benutzer getippt hat, muss der Behandler sehen.
+    push_control_values(page);
     let Some(sess) = js_session() else { return false };
     // Die seq-Kette unter dem Zeiger, vom aeussersten zum innersten. Das
     // Layout gibt sie schon aus — dieselbe Liste, aus der `:hover` lebt.
@@ -1816,7 +1956,16 @@ fn dispatch_click(engine: &Engine, lay: &Layout, cx: i32, cy: i32) -> bool {
         bump_content_gen("script");
         mark_dirty();
     }
+    // Das Formularmodell und die Werte nachziehen, BEVOR ein Absende-Auftrag
+    // ausgefuehrt wird — sonst schickt er den Stand von vorher.
+    page.sync(engine);
+    pull_control_values(page, sess);
+    let submits = sess.interp.take_submits();
     drain_console(sess);
+    for seq in submits {
+        log(&alloc::format!("[beak] script submit: form seq={seq}"));
+        if submit_form_seq(engine, page, seq) { return true }
+    }
     if changed || prevented || timers > 0 {
         let mut m = String::from("[beak] click -> js: ");
         push_i64(&mut m, nodes.len() as i64);
@@ -1838,7 +1987,33 @@ fn dispatch_click(engine: &Engine, lay: &Layout, cx: i32, cy: i32) -> bool {
 /// Deckel, steht die Seite so da, wie das Skript sie bis dahin gebaut hat —
 /// und beak antwortet weiter. Grosszuegiger als im Test (200 000), weil eine
 /// echte Startroutine mehr tut als ein Einzeltest.
-const SCRIPT_STEPS: u64 = 5_000_000;
+/// Der Schrittdeckel ist nur noch das Sicherungsnetz gegen einen Lauf, der
+/// gar nichts mehr tut. Was eine Seite wirklich begrenzt, ist die ZEIT
+/// (`SCRIPT_BUDGET_MS`) — ein Schrittdeckel trifft sonst genauso eine Seite,
+/// die viel rechnet, und „viel rechnen" ist kein Fehler.
+const SCRIPT_STEPS: u64 = 20_000_000_000;
+
+/// Wie lange ein Skriptlauf oder ein Behandler rechnen darf.
+///
+/// **Grosszuegig, und mit Grund.** Eine Anmeldung, die ihren Kennwort-Hash
+/// selbst rechnet (PBKDF2, zehntausende Runden), braucht in beak Sekunden —
+/// gemessen 65 s fuer die 66 000 Runden einer Fritzbox. Das ist keine
+/// Endlosschleife, das ist der Preis eines Interpreters, und ihn abzuwuergen
+/// hiesse „die Seite ist kaputt" zu melden, wo sie es nicht ist. Der Deckel
+/// ist gegen das ANDERE da: `while(true)`.
+const SCRIPT_BUDGET_MS: i64 = 120_000;
+
+static mut SCRIPT_DEADLINE: i64 = 0;
+
+/// Die Uhr, die die Engine alle 65 536 Schritte fragt.
+fn script_time_left() -> bool {
+    now_ms() < unsafe { core::ptr::addr_of!(SCRIPT_DEADLINE).read() }
+}
+
+/// Die Uhr neu stellen — vor jedem Lauf von Seitencode.
+fn arm_script_budget() {
+    unsafe { core::ptr::addr_of_mut!(SCRIPT_DEADLINE).write(now_ms() + SCRIPT_BUDGET_MS) };
+}
 
 /// Start a page's image load: drop the old pixels and return the list of
 /// sources still to fetch. Touches the network NOT AT ALL, so the first paint
@@ -2212,7 +2387,64 @@ fn looks_like_url(t: &str) -> bool {
 
 /// Submit a form. GET puts the data in the query string, POST in the request
 /// body — the same encoding either way (HTML §4.10.21.3).
-fn submit_form(engine: &Engine, page: &Page, activated: Option<u32>) -> bool {
+/// Ein Formular, das die SEITE abschicken will (`form.submit()`).
+fn submit_form_seq(engine: &Engine, page: &Page, form_seq: u32) -> bool {
+    match forms::submit_form(&page.forms, &page.state, form_seq) {
+        Some(s) => { send_submission(engine, s); true }
+        None => {
+            log("[beak] script submit: dieses Formular kennt beak nicht");
+            false
+        }
+    }
+}
+
+fn submit_form(engine: &Engine, page: &mut Page, activated: Option<u32>) -> bool {
+    // **Erst das `submit`-Ereignis.** Eine Seite rechnet in ihrem Behandler
+    // aus, was sie mitschickt — ein Kennwort-Hash, ein Zeitstempel, ein
+    // Token — und darf abbrechen. Ohne diesen Schritt schickte beak das
+    // Formular so ab, wie es im Baum stand: die berechneten Felder leer, und
+    // die Gegenseite antwortet mit „falsches Kennwort".
+    //
+    // Nur auf dem BENUTZERweg. `form.submit()` aus einem Skript feuert laut
+    // Spezifikation kein `submit` — sonst liefe der Behandler der Seite ein
+    // zweites Mal.
+    let form_seq = activated.or(page.state.focus)
+        .and_then(|s| page.forms.get(s)?.form)
+        .and_then(|f| page.forms.forms.get(f).map(|d| d.seq));
+    if let Some(fs) = form_seq {
+        arm_script_budget();
+        if let Some(sess) = js_session() {
+            if beak_engine::js::dombind::dispatch_seq(&mut sess.interp, "submit", fs) {
+                // Abgebrochen. Der Behandler hat oft trotzdem etwas vor —
+                // ein `setTimeout`, ein Versprechen — also laufen lassen und
+                // den Baum nachziehen.
+                let n = sess.interp.run_timers();
+                drain_console(sess);
+                if sess.interp.doc.as_ref().is_some_and(|d| d.dirty) {
+                    if let Some(d) = sess.interp.doc.as_mut() {
+                        engine.set_scripted_dom(Some(d.to_dom()));
+                    }
+                    bump_content_gen("submit");
+                    mark_dirty();
+                }
+                log(&alloc::format!("[beak] submit: von der Seite abgefangen ({n} Zeitgeber)"));
+                return true;
+            }
+            // Nicht abgefangen — aber der Behandler kann Felder gefuellt
+            // haben, und die gehoeren in die Eingabe.
+            let n = sess.interp.run_timers();
+            let _ = n;
+            drain_console(sess);
+            if sess.interp.doc.as_ref().is_some_and(|d| d.dirty) {
+                if let Some(d) = sess.interp.doc.as_mut() {
+                    engine.set_scripted_dom(Some(d.to_dom()));
+                }
+                bump_content_gen("submit");
+            }
+        }
+        page.sync(engine);
+        if let Some(s) = js_session() { pull_control_values(page, s); }
+    }
     let sub = match forms::submit(&page.forms, &page.state, activated) {
         Some(s) => s,
         // Silence here reads as "the button is dead". It is not the same
@@ -2225,6 +2457,13 @@ fn submit_form(engine: &Engine, page: &Page, activated: Option<u32>) -> bool {
             return false;
         }
     };
+    send_submission(engine, sub);
+    true
+}
+
+/// Eine fertige Eingabe abschicken — GET haengt sie an die Adresse, POST in
+/// den Rumpf. Eine Fassung fuer beide Wege dorthin (Knopf und `submit()`).
+fn send_submission(engine: &Engine, sub: forms::Submission) {
     // An empty action targets the current document; either way the form data
     // REPLACES the action's query string (HTML §4.10.21.3 "mutate action URL").
     let base = url_str().to_string();
@@ -2241,7 +2480,6 @@ fn submit_form(engine: &Engine, page: &Page, activated: Option<u32>) -> bool {
         let target = if action.contains('?') { action.clone() } else { url.clone() };
         post_url(engine, &target, sub.query.as_bytes());
     }
-    true
 }
 
 /// Follow a link href relative to the current page — new history entry.
@@ -3066,7 +3304,7 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
                         // `preventDefault`, ist der Klick verbraucht — sonst
                         // wuerde beak zusaetzlich dem Link folgen, den die Seite
                         // gerade abgefangen hat.
-                        let dispatched = dispatch_click(engine, lay, cx, cy);
+                        let dispatched = dispatch_click(engine, page, lay, cx, cy);
                         (
                             dispatched,
                             // Nur im Inspect-Modus: der Test laeuft ueber ALLE
@@ -3431,7 +3669,19 @@ pub extern "C" fn _start() {
         // …and only then re-parse the document's forms, so the page that just
         // arrived is laid out against its OWN controls rather than the
         // previous page's. Cheap when nothing navigated.
-        page.sync();
+        page.sync(&engine);
+        // Und was die Seite selbst gesetzt hat, uebernehmen: nach einem Umbau
+        // traegt der Baum die Wahrheit, und die `seq` sind neu vergeben. Die
+        // Sitzung wird DURCHGEREICHT, nicht neu geholt — zweimal `js_session`
+        // waeren zwei veraenderliche Ausleihen auf dasselbe Feld.
+        if let Some(s) = js_session() { pull_control_values(&mut page, s); }
+        // Ein Formular, das die Seite schon beim Laden abschicken will, darf
+        // nicht bis zum naechsten Klick liegenbleiben.
+        let pending = js_session().map(|s| s.interp.take_submits()).unwrap_or_default();
+        for seq in pending {
+            log(&alloc::format!("[beak] script submit: form seq={seq}"));
+            if submit_form_seq(&engine, &page, seq) { break }
+        }
         if chrome {
             render_chrome();
         }

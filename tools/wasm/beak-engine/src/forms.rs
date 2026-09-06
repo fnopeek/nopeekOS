@@ -66,6 +66,10 @@ pub struct Control {
 pub struct FormDef {
     pub action: String,
     pub method_get: bool,
+    /// Die `seq` des `<form>` selbst. Ein Skript schickt ueber `form.submit()`
+    /// ein ELEMENT ab, nicht einen Knopf — ohne diese Zahl ist das Formular
+    /// aus dem Baum nicht wiederzufinden.
+    pub seq: u32,
 }
 
 pub struct Forms {
@@ -166,6 +170,7 @@ fn walk(el: &Element, form: Option<usize>, out: &mut Forms) {
                     .attr("method")
                     .map(|m| m.trim().eq_ignore_ascii_case("post"))
                     .unwrap_or(false),
+                seq: e.seq,
             });
             inner = Some(out.forms.len() - 1);
         }
@@ -266,6 +271,11 @@ impl FormState {
     pub fn value_set(&self, seq: u32) -> Option<&str> {
         self.values.get(&seq).map(|s| s.as_str())
     }
+    /// Wurde dieses Kaestchen ueberhaupt angefasst? `None` heisst: der
+    /// Vorgabewert aus dem Attribut gilt noch.
+    pub fn checked_set(&self, seq: u32) -> Option<bool> {
+        self.checked.get(&seq).copied()
+    }
     pub fn checked_or(&self, seq: u32, default: bool) -> bool {
         self.checked.get(&seq).copied().unwrap_or(default)
     }
@@ -336,6 +346,19 @@ pub struct Submission {
 pub fn submit(forms: &Forms, state: &FormState, activated: Option<u32>) -> Option<Submission> {
     let origin = activated.or(state.focus)?;
     let form = forms.get(origin)?.form?;
+    build(forms, state, form, activated)
+}
+
+/// Wie `submit`, aber fuer ein `<form>`-ELEMENT — das ist der Weg, den ein
+/// Skript nimmt (`form.submit()`). Kein Knopf ist dabei aktiviert, also
+/// traegt auch keiner seinen Namen bei; genau das schreibt die Spezifikation
+/// fuer den skriptgesteuerten Fall vor.
+pub fn submit_form(forms: &Forms, state: &FormState, form_seq: u32) -> Option<Submission> {
+    let form = forms.forms.iter().position(|f| f.seq == form_seq)?;
+    build(forms, state, form, None)
+}
+
+fn build(forms: &Forms, state: &FormState, form: usize, activated: Option<u32>) -> Option<Submission> {
     let def = forms.forms.get(form)?;
 
     let mut query = String::new();
