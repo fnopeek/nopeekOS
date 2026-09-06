@@ -1139,4 +1139,51 @@ mod tests {
         let _ = i.run_program(&prog);
         assert!(!i.hints_ok, "nach einem direkten eval muessen sie aus sein");
     }
+
+    /// **Ein Primitiv bekommt keine Huelle fuers Lesen — aber alles muss
+    /// weiterhin dasselbe antworten.**
+    ///
+    /// `Interp::get` fing bis 0.120.0 mit `to_object(base)` an, und das legt
+    /// bei einer Zeichenkette JEDES ZEICHEN als eigene Eigenschaft an. Fuer
+    /// `s.indexOf(...)` wurden so bei 89 KB erst 89 000 Eintraege gebaut,
+    /// deren Antwort auf dem PROTOTYP liegt. Jetzt faengt die Kette beim
+    /// Prototyp an — und genau das prueft diese Liste: dass dabei nichts
+    /// verlorengeht, was ein Primitiv trotzdem koennen muss.
+    #[test]
+    fn primitive_antworten_ohne_huelle_dasselbe() {
+        let faelle: &[(&str, &str)] = &[
+            ("\"abc\".length", "3"),
+            ("\"abc\"[1]", "b"),
+            ("String(\"abc\"[9])", "undefined"),
+            ("\"abcb\".indexOf(\"b\")", "1"),
+            ("\"abc\".toUpperCase()", "ABC"),
+            ("\"abc\".charAt(2)", "c"),
+            // Eigene Eigenschaften hat ein Primitiv trotzdem: der Weg dorthin
+            // geht ueber `to_object`, und der bleibt.
+            ("String(\"abc\".hasOwnProperty(\"0\"))", "true"),
+            ("String(\"abc\".hasOwnProperty(\"length\"))", "true"),
+            ("Object.keys(\"ab\").join(\",\")", "0,1"),
+            ("(function(){var o=[];for(var k in \"ab\")o.push(k);return o.join(\",\")})()", "0,1"),
+            // Ein echtes String-OBJEKT bleibt, wie es war.
+            ("Object.keys(new String(\"ab\")).join(\",\")", "0,1"),
+            ("new String(\"ab\")[1]", "b"),
+            // Die Kette muss weiterlaufen, nicht beim Prototyp enden.
+            ("(function(){Object.prototype.zz=\"Z\";var v=\"ab\".zz;delete Object.prototype.zz;return v})()", "Z"),
+            // Und die anderen Primitive.
+            ("(255).toString(16)", "ff"),
+            ("(1.5).toFixed(2)", "1.50"),
+            ("true.toString()", "true"),
+            ("typeof Symbol(\"x\").description", "string"),
+        ];
+        for (src, want) in faelle {
+            let mut i = super::Interp::new();
+            let prog = crate::js::parse(src, false).expect("parst");
+            let got = match i.run_program(&prog) {
+                Ok(v) => i.to_string(&v).map(|s| s.to_string())
+                          .unwrap_or_else(|_| alloc::string::String::from("?")),
+                Err(_) => alloc::string::String::from("WURF"),
+            };
+            assert_eq!(&got, want, "fuer {src}");
+        }
+    }
 }
