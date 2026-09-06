@@ -65,6 +65,17 @@ pub struct DomNode {
     /// sie verdraengt das gleichnamige Attribut — im Browser ist es derselbe
     /// Platz, nicht zwei.
     pub handlers: Vec<(Rc<str>, Value)>,
+    /// Der „schmutzige" Wert eines Steuerelements (HTML §4.10.5.5): was der
+    /// Benutzer getippt oder ein Skript gesetzt hat.
+    ///
+    /// **Getrennt vom Attribut, und das ist keine Feinheit.** `el.value = x`
+    /// aendert im Browser das `value`-ATTRIBUT NICHT — das bleibt der
+    /// Vorgabewert (`defaultValue`), auf den `form.reset()` zurueckstellt.
+    /// Wer beides zusammenlegt, hat eine Seite, die nach dem Zuruecksetzen
+    /// das Getippte wieder hinschreibt, und `getAttribute("value")` luegt.
+    pub value: Option<Rc<str>>,
+    /// Dasselbe fuer `checked`: `defaultChecked` ist das Attribut.
+    pub checked: Option<bool>,
     /// Nur `<template>`: der Bruchstueck-Knoten, in dem sein Inhalt haengt.
     /// Entsteht beim ersten `.content` — siehe dort, warum nicht frueher.
     pub content: Option<u32>,
@@ -90,7 +101,8 @@ impl DomNode {
     fn new(kind: f64, tag: &str) -> DomNode {
         DomNode { kind, tag: Rc::from(tag), attrs: Vec::new(), text: Rc::from(""),
                   parent: None, children: Vec::new(), js: None, listeners: Vec::new(),
-                  handlers: Vec::new(), content: None, seq: 0, src_seq: 0 }
+                  handlers: Vec::new(), content: None, value: None, checked: None,
+                  seq: 0, src_seq: 0 }
     }
     pub fn attr(&self, k: &str) -> Option<&Rc<str>> {
         self.attrs.iter().find(|(n, _)| &**n == k).map(|(_, v)| v)
@@ -1871,6 +1883,33 @@ pub fn install(realm: &mut Realm) {
     getter(&document_proto, "defaultView", |i, _, _| {        // 1580
         Ok(Value::Obj(i.realm.global.clone()))
     }, &fp);
+    // `document.forms` — die Sammlung, ueber die Seiten ihr Formular finden.
+    //
+    // Mit BENANNTEM Zugriff: `document.forms["loginForm"]` sucht ueber `id`
+    // UND `name`, und genau diese Form nehmen Seiten. Eine Liste ohne
+    // Namenszugriff waere die halbe Sache — sie gibt `undefined` und sagt
+    // nicht, warum.
+    getter(&document_proto, "forms", |i, _, _| {
+        let ids = match &i.doc { Some(d) => tags_of(d, d.doc, "form"), None => Vec::new() };
+        let arr = nodes_array(i, ids.clone());
+        if let Value::Obj(o) = &arr {
+            for id in ids {
+                let (name, ident) = match &i.doc {
+                    Some(d) => (d.nodes[id as usize].attr("name").cloned(),
+                                d.nodes[id as usize].attr("id").cloned()),
+                    None => (None, None),
+                };
+                let v = wrap(i, id);
+                for k in [name, ident].into_iter().flatten() {
+                    if k.is_empty() { continue }
+                    o.borrow_mut().define(&k, Prop {
+                        value: Some(v.clone()), get: None, set: None,
+                        writable: true, enumerable: false, configurable: true });
+                }
+            }
+        }
+        Ok(arr)
+    }, &fp);
     getter(&document_proto, "activeElement", |i, _, _| {      // 1606
         // Was `focus()` gesetzt hat — sonst `body`, die Antwort, die ein
         // Browser ohne Fokus auch gibt.
@@ -2589,6 +2628,93 @@ pub fn install(realm: &mut Realm) {
         attr_prop!(p, fp, "name", "name");
         attr_prop!(p, fp, "placeholder", "placeholder");
     }
+    // ── Der WERT eines Steuerelements ────────────────────────────────────
+    //
+    // `value` ist der schmutzige Wert, `defaultValue` das Attribut — die
+    // Spezifikation trennt beide, und ein Browser aendert beim Setzen von
+    // `.value` das Attribut nicht. Bis hierher war `input.value` eine
+    // gewoehnliche Eigenschaft auf der HUELLE: sie las sich zurueck und
+    // erreichte weder Baum noch Layout noch das abgeschickte Formular.
+    for (tag, from_text) in [("input", false), ("textarea", true)] {
+        let Some(p) = tag_protos.get(tag) else { continue };
+        if from_text {
+            accessor(p, "value",
+                |i, t, _| { let id = node_of(i, &t)?; Ok(Value::string(control_value(i, id, true))) },
+                |i, t, a| { let id = node_of(i, &t)?;
+                            let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+                            set_control_value(i, id, &v); Ok(Value::Undefined) }, &fp);
+            accessor(p, "defaultValue",
+                |i, t, _| { let id = node_of(i, &t)?;
+                            let s = i.doc.as_ref().map(|d| d.text_of(id)).unwrap_or_default();
+                            Ok(Value::string(s)) },
+                |i, t, a| { let id = node_of(i, &t)?;
+                            let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+                            set_text_of(i, id, &v); Ok(Value::Undefined) }, &fp);
+        } else {
+            accessor(p, "value",
+                |i, t, _| { let id = node_of(i, &t)?; Ok(Value::string(control_value(i, id, false))) },
+                |i, t, a| { let id = node_of(i, &t)?;
+                            let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+                            set_control_value(i, id, &v); Ok(Value::Undefined) }, &fp);
+            attr_prop!(p, fp, "defaultValue", "value");
+            accessor(p, "checked",
+                |i, t, _| { let id = node_of(i, &t)?;
+                            let d = i.doc.as_ref();
+                            Ok(Value::Bool(match d.and_then(|d| d.nodes[id as usize].checked) {
+                                Some(b) => b,
+                                None => d.is_some_and(|d| d.nodes[id as usize].attr("checked").is_some()),
+                            })) },
+                |i, t, a| { let id = node_of(i, &t)?;
+                            let on = a.first().map(|v| v.truthy()).unwrap_or(false);
+                            if let Some(d) = &mut i.doc { d.nodes[id as usize].checked = Some(on); d.touch(); }
+                            Ok(Value::Undefined) }, &fp);
+            bool_attr_prop!(p, fp, "defaultChecked", "checked");
+        }
+    }
+
+    // ── HTMLFormElement: elements, submit, reset ─────────────────────────
+    if let Some(p) = tag_protos.get("form") {
+        attr_prop!(p, fp, "name", "name");
+        attr_prop!(p, fp, "enctype", "enctype");
+        getter(p, "elements", |i, t, _| {
+            let id = node_of(i, &t)?;
+            let cs = form_controls(i, id);
+            Ok(nodes_array(i, cs))
+        }, &fp);
+        getter(p, "length", |i, t, _| {
+            let id = node_of(i, &t)?;
+            Ok(Value::Num(form_controls(i, id).len() as f64))
+        }, &fp);
+        // `submit()` schickt OHNE `submit`-Ereignis ab — das ist der
+        // Unterschied zu `requestSubmit()`, und Seiten verlassen sich darauf
+        // (ihr eigener `onsubmit` soll nicht ein zweites Mal laufen).
+        meth(p, "submit", |i, t, _| {
+            let id = node_of(i, &t)?;
+            let seq = i.doc.as_ref().map(|d| d.nodes[id as usize].seq).unwrap_or(0);
+            if seq != 0 { i.submits.push(seq); }
+            Ok(Value::Undefined)
+        }, 0, &fp);
+        meth(p, "requestSubmit", |i, t, _| {
+            let id = node_of(i, &t)?;
+            if dispatch(i, "submit", &[id])? { return Ok(Value::Undefined) }
+            let seq = i.doc.as_ref().map(|d| d.nodes[id as usize].seq).unwrap_or(0);
+            if seq != 0 { i.submits.push(seq); }
+            Ok(Value::Undefined)
+        }, 0, &fp);
+        meth(p, "reset", |i, t, _| {
+            let id = node_of(i, &t)?;
+            for c in form_controls(i, id) {
+                if let Some(d) = &mut i.doc {
+                    d.nodes[c as usize].value = None;
+                    d.nodes[c as usize].checked = None;
+                }
+            }
+            if let Some(d) = &mut i.doc { d.touch(); }
+            dispatch(i, "reset", &[id])?;
+            Ok(Value::Undefined)
+        }, 0, &fp);
+    }
+
     // ── HTMLSelectElement / HTMLOptionElement ────────────────────────────
     //
     // Ein `<select>` hatte weder `value` noch `options` noch `selectedIndex`.
@@ -2939,6 +3065,15 @@ fn deliver(i: &mut Interp, ev: &Gc, kind: &str, chain: &[u32]) -> C<bool> {
             // Ein Behandler, der wirft, darf die naechsten nicht mitnehmen —
             // so macht es ein Browser auch.
             let r = i.call(&f, this_node.clone(), &[evv.clone()]);
+            // **Ein Behandler, der wirft, muss es SAGEN.** Der Ausgang wurde
+            // hier nur auf `false` geprueft und sonst weggeworfen: ein Fehler
+            // im `onsubmit` einer Seite verschwand spurlos, und was danach
+            // nicht passierte, sah aus wie ein fehlendes Merkmal.
+            if let Err(e) = r {
+                let msg = super::modules::describe(i, e);
+                i.console_push(alloc::format!("Fehler im {kind}-Behandler: {msg}"));
+                continue;
+            }
             // `onclick="return false"` ist die alte Schreibweise fuer
             // `preventDefault` und steht auf mehr Seiten als die neue. Sie
             // gilt nur fuer den Attribut-Behandler; ein `addEventListener`
@@ -3611,21 +3746,19 @@ fn fire_connected(i: &mut Interp, id: u32) -> C<Value> {
     Ok(Value::Undefined)
 }
 
-/// Ein `<link rel="stylesheet">`, das ein SKRIPT einhaengt, bekommt sein
-/// `error`-Ereignis — als Zeitgeber, also nach der laufenden Aufgabe.
+/// Ein `<link rel="stylesheet">`, das ein SKRIPT einhaengt, wird zum HOLEN
+/// angemeldet.
 ///
-/// **Warum `error` und nicht `load`.** beak holt nachgeladene Stilblaetter
-/// nicht; die Seite bleibt an dieser Stelle ungestylt. `load` zu melden waere
-/// eine erfundene Erfolgsmeldung
-/// ([[feedback_invented_fallback_hides_the_fault]]). Gar nichts zu melden ist
-/// aber SCHLIMMER als beides: die Fritzbox-Komponenten warten in
-/// `connectedCallback` auf dieses Versprechen, und ohne Antwort bleibt jede
-/// von ihnen fuer immer leer — ohne Fehler, ohne Meldung. Mit `error` laeuft
-/// `Promise.allSettled` weiter und die Komponente rendert, nur eben ohne ihr
-/// Blatt.
+/// Die Engine holt nichts — sie legt die Adresse in `pending_sheets`, der
+/// Wirt laedt sie und meldet mit `sheet_done` zurueck. Erst dann faellt
+/// `load` oder `error` am `<link>`.
 ///
-/// Der richtige Schritt danach ist, sie wirklich zu holen — dieselbe Runde
-/// wie beim Modulgraphen.
+/// **Warum das eine eigene Runde wert ist.** Eine Seite, die ihre
+/// Stilblaetter per Skript nachlaedt, wartet in aller Regel auf deren `load`,
+/// bevor sie weiterbaut. Ohne Antwort steht sie fuer immer; mit einer
+/// erfundenen `load`-Meldung baut sie weiter und sieht falsch aus, ohne dass
+/// es jemand sagt. Beides ist schlechter als die Wahrheit, und die Wahrheit
+/// heisst: holen.
 fn settle_stylesheet(i: &mut Interp, id: u32) {
     let is_sheet = i.doc.as_ref().is_some_and(|d| {
         let n = &d.nodes[id as usize];
@@ -3635,18 +3768,16 @@ fn settle_stylesheet(i: &mut Interp, id: u32) {
             && is_connected(d, id)
     });
     if !is_sheet { return }
+    // Zweimal anmelden waere zweimal holen — und zweimal `load`.
+    if i.pending_sheets.iter().any(|(n, _)| *n == id) { return }
     let href = i.doc.as_ref().and_then(|d| d.nodes[id as usize].attr("href").cloned())
         .unwrap_or_else(|| Rc::from(""));
-    i.console_push(alloc::format!("stylesheet not fetched (added by script): {href}"));
-    let arg = Value::Num(id as f64);
-    let f = super::promise::bind1(i, |i, _, a| {
-        let Some(Value::Num(n)) = a.first() else { return Ok(Value::Undefined) };
-        let id = *n as u32;
-        // `error` blubbert NICHT — die Kette ist nur das Element selbst.
-        dispatch(i, "error", &[id])?;
-        Ok(Value::Undefined)
-    }, arg);
-    i.timers.push(f);
+    i.pending_sheets.push((id, href.to_string()));
+}
+
+/// Der Wirt meldet, wie es einem angeforderten Blatt ergangen ist.
+pub fn sheet_done(i: &mut Interp, id: u32, ok: bool) {
+    let _ = dispatch(i, if ok { "load" } else { "error" }, &[id]);
 }
 
 /// Eine unbehandelte Ablehnung ans Fenster melden. Liefert true, wenn ein
@@ -3665,4 +3796,127 @@ pub fn dispatch_rejection(i: &mut Interp, reason: Value, promise: Value) -> C<bo
 fn deliver_focus(i: &mut Interp, id: u32, kind: &str) -> C<()> {
     dispatch(i, kind, &[id])?;
     Ok(())
+}
+
+/// Der WERT eines Steuerelements: der schmutzige, sonst der Vorgabewert.
+///
+/// Bei `<textarea>` ist der Vorgabewert der TEXTinhalt, bei `<input>` das
+/// `value`-Attribut. Beides steht so in der Spezifikation, und beides ist der
+/// Grund, warum es hier eine Funktion gibt statt zweier Makroaufrufe.
+fn control_value(i: &Interp, id: u32, from_text: bool) -> String {
+    let Some(d) = &i.doc else { return String::new() };
+    if let Some(v) = &d.nodes[id as usize].value { return v.to_string() }
+    if from_text { return d.text_of(id) }
+    d.nodes[id as usize].attr("value").map(|v| v.to_string()).unwrap_or_default()
+}
+
+fn set_control_value(i: &mut Interp, id: u32, v: &str) {
+    if let Some(d) = &mut i.doc {
+        d.nodes[id as usize].value = Some(Rc::from(v));
+        d.touch();
+    }
+}
+
+/// Die Steuerelemente eines `<form>`, in Dokumentreihenfolge.
+///
+/// Ueber den BAUM, nicht ueber `form=`: das Attribut, mit dem ein Element
+/// ausserhalb seines Formulars stehen kann, liest beak nirgends, und eine
+/// halbe Zuordnung waere schlimmer als eine ehrliche.
+fn form_controls(i: &Interp, form: u32) -> Vec<u32> {
+    fn walk(d: &Doc, id: u32, out: &mut Vec<u32>) {
+        for c in d.nodes[id as usize].children.clone() {
+            if d.nodes[c as usize].kind != ELEMENT_NODE { continue }
+            let tag = &*d.nodes[c as usize].tag;
+            if matches!(tag, "input" | "select" | "textarea" | "button" | "fieldset" | "output") {
+                out.push(c);
+            }
+            // Ein verschachteltes `<form>` ist ungueltiges HTML; seine
+            // Elemente gehoeren ihm, nicht uns.
+            if tag != "form" { walk(d, c, out); }
+        }
+    }
+    let mut out = Vec::new();
+    if let Some(d) = &i.doc { walk(d, form, &mut out); }
+    out
+}
+
+/// Alle Elemente einer Marke im Teilbaum, in Dokumentreihenfolge.
+fn tags_of(d: &Doc, from: u32, tag: &str) -> Vec<u32> {
+    fn walk(d: &Doc, id: u32, tag: &str, out: &mut Vec<u32>) {
+        for c in d.nodes[id as usize].children.clone() {
+            if d.nodes[c as usize].kind != ELEMENT_NODE { continue }
+            if &*d.nodes[c as usize].tag == tag { out.push(c); }
+            walk(d, c, tag, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(d, from, tag, &mut out);
+    out
+}
+
+/// Ein Ereignis an das Element mit dieser `seq` zustellen — mit der Kette bis
+/// zur Wurzel, also BLUBBERND.
+///
+/// Der Weg, auf dem der Wirt der Seite etwas meldet, das er selbst ausloest:
+/// ein Formular, das abgeschickt wird, ein Element, das den Fokus bekommt.
+/// Liefert true, wenn ein Behandler `preventDefault` gerufen hat (oder
+/// `false` zurueckgab).
+pub fn dispatch_seq(i: &mut Interp, kind: &str, seq: u32) -> bool {
+    let Some(doc) = i.doc.as_ref() else { return false };
+    let Some(id) = doc.by_seq(seq) else { return false };
+    let mut chain = alloc::vec![id];
+    let mut cur = doc.nodes[id as usize].parent;
+    while let Some(p) = cur {
+        chain.push(p);
+        cur = doc.nodes[p as usize].parent;
+    }
+    chain.reverse();
+    matches!(dispatch(i, kind, &chain), Ok(true))
+}
+
+// ── Die Bruecke zwischen den Eingaben des Benutzers und dem Baum ─────────
+//
+// Zwei Speicher, EINE Regel. Die Eingaben leben im Wirt (`FormState`, nach
+// `seq`), weil eine Seite ohne Skripte gar keinen Baum der Maschine hat; der
+// schmutzige Wert lebt am Knoten, weil `el.value` ihn dort erwartet. Die
+// beiden muessen vor und nach jedem Lauf von Seitencode abgeglichen werden —
+// und dafuer gibt es genau diese zwei Funktionen, damit nicht jeder Rufer
+// seine eigene Regel bekommt.
+
+/// Die Eingaben des Benutzers in den Baum schreiben — VOR jedem Lauf von
+/// Seitencode. Uebertragen wird nur, was wirklich bearbeitet wurde: sonst
+/// traegt hinterher jedes Feld einen schmutzigen Wert und `form.reset()`
+/// haette nichts mehr zurueckzustellen.
+pub fn push_control_values(doc: &mut Doc, forms: &crate::forms::Forms,
+                           state: &crate::forms::FormState) {
+    use crate::forms::ControlKind;
+    for c in &forms.controls {
+        let Some(id) = doc.by_seq(c.seq) else { continue };
+        match c.kind {
+            ControlKind::Checkbox | ControlKind::Radio => {
+                if let Some(b) = state.checked_set(c.seq) { doc.nodes[id as usize].checked = Some(b); }
+            }
+            _ => {
+                if let Some(v) = state.value_set(c.seq) {
+                    doc.nodes[id as usize].value = Some(Rc::from(v));
+                }
+            }
+        }
+    }
+}
+
+/// Und zurueck: was Seitencode gesetzt hat, gilt fuer Anzeige und Absenden.
+pub fn pull_control_values(doc: &Doc, forms: &crate::forms::Forms,
+                           state: &mut crate::forms::FormState) {
+    let mut set: Vec<(u32, Option<Rc<str>>, Option<bool>)> = Vec::new();
+    for c in &forms.controls {
+        let Some(id) = doc.by_seq(c.seq) else { continue };
+        let n = &doc.nodes[id as usize];
+        if n.value.is_none() && n.checked.is_none() { continue }
+        set.push((c.seq, n.value.clone(), n.checked));
+    }
+    for (seq, v, ch) in set {
+        if let Some(v) = v { state.set_value(seq, v.to_string()); }
+        if let Some(b) = ch { state.set_checked(seq, b); }
+    }
 }

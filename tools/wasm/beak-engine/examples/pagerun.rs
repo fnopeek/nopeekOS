@@ -22,7 +22,9 @@ fn main() {
     let doc = beak_engine::js::dombind::Doc::from_dom(&dom);
     let refs = beak_engine::js::dombind::page_scripts(&doc);
 
-    let mut sess = beak_engine::js::Session::new(5_000_000);
+    // Derselbe Deckel wie im Wirt — die Probe soll nicht an einer Grenze
+    // scheitern, die es am Geraet nicht gibt.
+    let mut sess = beak_engine::js::Session::new(20_000_000_000);
     sess.interp.set_document(beak_engine::js::dombind::Doc::from_dom(&dom));
     let media = beak_engine::css::Media::new(1902.0, false);
     let sheet = beak_engine::css::collect_all(&dom, "", media);
@@ -43,6 +45,11 @@ fn main() {
     // nur tiefer als 400?" ist sonst nicht zu beantworten.
     if let Ok(d) = std::env::var("DEPTH") {
         if let Ok(n) = d.parse() { sess.interp.max_depth = n; }
+    }
+    // `STEPS=` hebt den Schrittdeckel — die Frage „wie teuer ist die Rechnung
+    // dieser Seite wirklich?" ist sonst nicht zu beantworten.
+    if let Ok(d) = std::env::var("STEPS") {
+        if let Ok(n) = d.parse() { sess.interp.max_steps = n; }
     }
     if let Ok(u) = std::env::var("URL") { sess.interp.set_location(&u); }
 
@@ -94,10 +101,24 @@ fn main() {
     }
     let n0 = sess.interp.console.len();
     let mut timers = 0;
+    // Zeitgeber UND die Stilblattrunden — dieselbe Reihenfolge wie im Wirt:
+    // ein geholtes Blatt laesst eine Komponente fertig bauen, und die meldet
+    // ihrerseits eins an.
+    let (mut sheets_ok, mut sheets_bad) = (0usize, 0usize);
     for _ in 0..64 {
         let t = sess.interp.run_timers();
         timers += t;
-        if t == 0 { break }
+        let want = sess.interp.take_pending_sheets();
+        if t == 0 && want.is_empty() { break }
+        for (id, href) in want {
+            let u = resolve_path(&format!("{}/", origin()), &href);
+            let ok = std::fs::read_to_string(local(&dir, &u)).is_ok();
+            if ok { sheets_ok += 1 } else { sheets_bad += 1 }
+            beak_engine::js::dombind::sheet_done(&mut sess.interp, id, ok);
+        }
+    }
+    if sheets_ok + sheets_bad > 0 {
+        println!("Stilblaetter per Skript: {sheets_ok} geholt, {sheets_bad} gescheitert");
     }
     for l in &sess.interp.console[n0..] { println!("  timer| {l}"); }
     // `DUMP=1` zeigt, was am Ende im Baum steht — die Frage „laufen die
@@ -108,6 +129,71 @@ fn main() {
             let mut out = String::new();
             dump(dom.body(), 0, &mut out);
             println!("\n── Baum nach den Skripten ──\n{out}");
+        }
+    }
+    // `SUBMIT=<id>` faehrt den GANZEN Absendeweg: `submit`-Ereignis, was der
+    // Behandler ausrechnet, die Auftraege aus `form.submit()`, und am Ende
+    // die fertige Eingabe. Genau die Reihenfolge, die der Wirt faehrt.
+    // `TYPE=id=wert[,id=wert]` tippt in Felder, bevor abgeschickt wird — der
+    // Weg, den der Benutzer nimmt. Geschrieben wird der SCHMUTZIGE Wert, also
+    // genau das, was ein Tastendruck im Wirt auch setzt.
+    if let Ok(spec) = std::env::var("TYPE") {
+        let dom = sess.interp.doc.as_mut().map(|d| d.to_dom());
+        if let Some(dom) = dom {
+            for pair in spec.split(',') {
+                let Some((id, v)) = pair.split_once('=') else { continue };
+                let Some(seq) = find_seq(dom.body(), id) else {
+                    println!("TYPE: kein Element mit id={id}"); continue };
+                if let Some(d) = sess.interp.doc.as_mut() {
+                    if let Some(n) = d.by_seq(seq) {
+                        d.nodes[n as usize].value = Some(std::rc::Rc::from(v));
+                        d.touch();
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(want) = std::env::var("SUBMIT") {
+        let dom = sess.interp.doc.as_mut().map(|d| d.to_dom());
+        let Some(dom) = dom else { return };
+        let forms = beak_engine::forms::collect(&dom);
+        let mut state = beak_engine::forms::FormState::default();
+        let seq = find_seq(dom.body(), &want);
+        match seq {
+            None => println!("\nSUBMIT: kein Element mit id={want}"),
+            Some(seq) => {
+                let t0 = std::time::Instant::now();
+                let s0 = sess.interp.steps;
+                let prevented = beak_engine::js::dombind::dispatch_seq(&mut sess.interp, "submit", seq);
+                let mut n = 0;
+                for _ in 0..64 { let t = sess.interp.run_timers(); n += t; if t == 0 { break } }
+                println!("  Kosten: {} Schritte, {:?}", sess.interp.steps - s0, t0.elapsed());
+                println!("  Maschine: {} Programme gefahren, {} abgelehnt; Aufrufe {} (davon {} langsam, {} nativ)",
+                         sess.interp.vm_ran, sess.interp.vm_declined,
+                         sess.interp.vm_calls, sess.interp.vm_calls_slow, sess.interp.vm_calls_native);
+                let mut d: Vec<(&&'static str, &u64)> = sess.interp.func_declines.iter().collect();
+                d.sort_by_key(|(_, n)| core::cmp::Reverse(**n));
+                for (why, n) in d.iter().take(6) { println!("    Rumpf abgelehnt: {why} x{n}"); }
+                println!("\nSUBMIT auf #{want} (seq {seq}): {}, {n} Zeitgeber",
+                         if prevented { "abgefangen" } else { "durchgelassen" });
+                for l in &sess.interp.console[n0..] { println!("       | {l}"); }
+                // Der Baum kann sich geaendert haben — neu einsammeln.
+                let dom = sess.interp.doc.as_mut().map(|d| d.to_dom()).unwrap();
+                let forms2 = beak_engine::forms::collect(&dom);
+                // Dieselbe Bruecke wie im Wirt — nicht eine zweite.
+                if let Some(d) = sess.interp.doc.as_ref() {
+                    beak_engine::js::dombind::pull_control_values(d, &forms2, &mut state);
+                }
+                let asked = sess.interp.take_submits();
+                let target = asked.first().copied().or(if prevented { None } else { Some(seq) });
+                match target.and_then(|s| beak_engine::forms::submit_form(&forms2, &state, s)) {
+                    Some(sub) => println!("  -> {} {}\n     {}",
+                                          if sub.method_get { "GET" } else { "POST" },
+                                          sub.action, sub.query),
+                    None => println!("  -> nichts abgeschickt (Auftraege: {asked:?})"),
+                }
+                let _ = forms;
+            }
         }
     }
     let listeners = sess.interp.doc.as_ref().is_some_and(|d| d.has_listeners);
@@ -221,4 +307,15 @@ fn dump(e: &beak_engine::dom::Element, depth: usize, out: &mut String) {
             _ => {}
         }
     }
+}
+
+/// Die `seq` des Elements mit dieser id.
+fn find_seq(el: &beak_engine::dom::Element, id: &str) -> Option<u32> {
+    if el.attr("id") == Some(id) { return Some(el.seq) }
+    for c in &el.children {
+        if let beak_engine::dom::Node::Element(e) = c {
+            if let Some(s) = find_seq(e, id) { return Some(s) }
+        }
+    }
+    None
 }

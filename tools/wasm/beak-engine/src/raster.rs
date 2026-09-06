@@ -670,6 +670,19 @@ impl Engine {
 
     pub fn has_scripted_dom(&self) -> bool { self.scripted.borrow().is_some() }
 
+    /// Wie oft der Baum seit dem Start durch Skripte ersetzt wurde.
+    ///
+    /// Der Wirt braucht die Zahl, um sein FORMULARMODELL nachzuziehen: eine
+    /// Seite, die ihre Maske erst per Skript baut, hat sonst Steuerelemente
+    /// im Bild, die es fuer `submit` gar nicht gibt.
+    pub fn scripted_gen(&self) -> u64 { self.scripted_gen.get() }
+
+    /// Etwas auf dem lebenden Baum ausrechnen — ohne ihn herauszugeben, denn
+    /// er gehoert dem Motor.
+    pub fn with_scripted<R>(&self, f: impl FnOnce(&crate::dom::Dom) -> R) -> Option<R> {
+        self.scripted.borrow().as_ref().map(f)
+    }
+
     /// Treffer-Kaesten fuer alle Elemente aufzeichnen (siehe `hit_all`).
     pub fn set_hit_all(&self, on: bool) { self.hit_all.set(on); }
 

@@ -353,6 +353,19 @@ pub struct Interp {
     /// sechsundfuenfzig Adressen nennt sonst nur den EINSTIEG, und das ist
     /// die eine Auskunft, die man nicht braucht.
     pub module_fail: Option<Rc<str>>,
+    /// Stilblaetter, die ein SKRIPT eingehaengt hat und die noch geholt
+    /// werden muessen: `(Knoten, Adresse wie im Attribut)`.
+    ///
+    /// Der Wirt holt sie mit `take_pending_sheets` ab, loest auf, laedt, und
+    /// meldet den Ausgang mit `sheet_done` zurueck — dann erst faellt `load`
+    /// oder `error` am `<link>`. Ohne diesen Weg wartet jede Seite, die ihr
+    /// Blatt per Skript nachlaedt, fuer immer auf ein Ereignis, das nie kommt.
+    pub pending_sheets: Vec<(u32, String)>,
+    /// Formulare, die die SEITE abschicken will (`form.submit()`), als
+    /// `seq` des `<form>`. Der Wirt holt sie mit `take_submits` ab und
+    /// navigiert — die Engine kann das nicht, sie kennt weder Adresse noch
+    /// Netz. Dasselbe Muster wie `history_ops`.
+    pub submits: Vec<u32>,
     /// Abgelehnte Versprechen, an denen (noch) nichts haengt.
     pub pending_rejections: Vec<Gc>,
     /// `customElements`: Marke -> Konstruktor, in Reihenfolge der Anmeldung.
@@ -372,6 +385,18 @@ pub struct Interp {
     /// bleibt, misst gar nichts mehr.
     pub steps: u64,
     pub max_steps: u64,
+    /// „Darf noch weitergerechnet werden?" — der Wirt setzt sie, die Engine
+    /// fragt sie alle 65 536 Schritte.
+    ///
+    /// **Ein Schrittdeckel misst das Falsche.** Er sollte eine Seite stoppen,
+    /// die sich aufhaengt, aber er trifft genauso eine, die viel RECHNET: die
+    /// Anmeldung einer Fritzbox rechnet 66 000 PBKDF2-Runden, und die sind
+    /// keine Endlosschleife. Ein Browser misst deshalb ZEIT, nicht Schritte.
+    /// Die Engine hat keine Uhr — also fragt sie den Wirt.
+    ///
+    /// Alle 65 536 Schritte, nicht bei jedem: der Aufruf selbst darf den
+    /// heissesten Pfad der Maschine nicht kosten.
+    pub deadline: Option<fn() -> bool>,
     /// Eine Uhr, die nur steigt. Ersatz, bis beak die echte einreicht —
     /// `beak-engine` ist hostfrei und hat keine.
     pub fake_now: f64,
@@ -595,7 +620,9 @@ impl Interp {
             Some(Value::Obj(o)) => Some(o), _ => None,
         };
         super::url::install(&mut realm);
-        Interp { realm, modules: HashMap::new(), module_fail: None,
+        Interp { realm, modules: HashMap::new(), module_fail: None, submits: Vec::new(),
+                 deadline: None,
+                 pending_sheets: Vec::new(),
                  pending_rejections: Vec::new(), custom: Vec::new(), depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX,
                  fake_now: 0.0, epoch_ms: 0.0, doc: None, next_sym: 0, sym_registry: HashMap::new(),
                  #[cfg(feature = "strict-probe")]
@@ -810,6 +837,14 @@ impl Interp {
     /// (`name=wert; Path=/; Max-Age=…`) — die Regeln kennt der Behaelter.
     /// Was die Seite am Verlauf tun WOLLTE. Der Wirt holt es ab und
     /// entscheidet; die Liste ist danach leer.
+    pub fn take_pending_sheets(&mut self) -> Vec<(u32, String)> {
+        core::mem::take(&mut self.pending_sheets)
+    }
+
+    pub fn take_submits(&mut self) -> Vec<u32> {
+        core::mem::take(&mut self.submits)
+    }
+
     pub fn take_history_ops(&mut self) -> Vec<HistoryOp> {
         core::mem::take(&mut self.history_ops)
     }
@@ -913,6 +948,13 @@ impl Interp {
         self.steps += 1;
         if self.steps > self.max_steps {
             return Err(self.throw_kind("RangeError", "step budget exhausted"));
+        }
+        if self.steps & 0xFFFF == 0 {
+            if let Some(f) = self.deadline {
+                if !f() {
+                    return Err(self.throw_kind("RangeError", "script ran too long"));
+                }
+            }
         }
         Ok(())
     }
