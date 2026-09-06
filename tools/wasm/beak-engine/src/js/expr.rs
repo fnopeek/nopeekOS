@@ -132,28 +132,50 @@ impl Interp {
     }
 
     fn load_ident(&mut self, n: &str, env: &Rc<RefCell<Env>>) -> C<Value> {
-        if let Some(e) = env_lookup(env, n) {
-            // Ein importierter Name steht nicht HIER, sondern im Modul, aus
-            // dem er kommt — und er wird bei JEDEM Lesen dort geholt.
-            let Some((e, n2)) = super::interp::env_deref(&e, n) else {
-                return self.ref_err(&alloc::format!("circular import binding for '{n}'"));
-            };
-            let b = e.borrow();
-            let Some(bd) = b.vars.get(&*n2) else {
-                drop(b);
-                return self.ref_err(&alloc::format!("{n} is not exported"));
-            };
-            if !bd.initialized {
-                drop(b);
-                return self.ref_err(&alloc::format!("cannot access '{n}' before initialization"));
+        // **EIN Durchgang durch die Kette.** Bis 0.117.0 liefen hier
+        // nacheinander `env_lookup`, `env_deref` und zwei `vars.get`: derselbe
+        // Name bis zu VIERMAL gehasht und verglichen, und `env_deref` baute
+        // dafuer jedes Mal ein `Rc<str>` auf dem Haufen — fuer eine
+        // Import-Kette, die fast nie betreten wird. `LoadVar` ist 24 % aller
+        // Befehle.
+        let mut cur = env.clone();
+        loop {
+            match super::interp::env_peek(&cur, n) {
+                Hit::Val(v) => return Ok(v),
+                Hit::Dead =>
+                    return self.ref_err(
+                        &alloc::format!("cannot access '{n}' before initialization")),
+                // Ein importierter Name steht nicht HIER, sondern im Modul,
+                // aus dem er kommt — und er wird bei JEDEM Lesen dort geholt.
+                Hit::Import(e, n2) => return self.load_import(e, n2, n),
+                Hit::Up(Some(p)) => cur = p,
+                Hit::Up(None) => break,
             }
-            return Ok(bd.value.clone());
         }
         // Nicht in der Kette: das globale Objekt fragen, sonst ReferenceError.
         // Der Unterschied zu `undefined` ist der ganze Sinn der Sache.
         let g = self.realm.global.clone();
         if self.has_property(&g, n) { return self.get(&Value::Obj(g), n); }
         self.ref_err(&alloc::format!("{n} is not defined"))
+    }
+
+    /// Einem `import` bis zur echten Bindung folgen — der SELTENE Weg.
+    /// Hier darf ein `Rc<str>` entstehen; auf dem gewoehnlichen entsteht
+    /// keins mehr.
+    fn load_import(&mut self, e: Rc<RefCell<Env>>, n2: Rc<str>, n: &str) -> C<Value> {
+        let Some((e, n2)) = super::interp::env_deref_from(e, n2) else {
+            return self.ref_err(&alloc::format!("circular import binding for '{n}'"));
+        };
+        let b = e.borrow();
+        let Some(bd) = b.vars.get(&*n2) else {
+            drop(b);
+            return self.ref_err(&alloc::format!("{n} is not exported"));
+        };
+        if !bd.initialized {
+            drop(b);
+            return self.ref_err(&alloc::format!("cannot access '{n}' before initialization"));
+        }
+        Ok(bd.value.clone())
     }
 
     /// Der Prototyp, auf dem `super` sucht: der des Heimatobjekts.
@@ -806,8 +828,32 @@ impl Interp {
         Ok(v)
     }
 
+    /// Das Ende jedes Zahlenarmes — hier steht der Operator fest und beide
+    /// Seiten sind umgewandelt.
+    fn num_done(&mut self, op: BinOp, a: f64, b: f64) -> C<Value> {
+        match num_bin(op, a, b) {
+            Some(v) => Ok(v),
+            // `in`/`instanceof` haben eigene Arme und kommen hier nicht an.
+            None => self.type_err("not a numeric operator"),
+        }
+    }
+
     pub fn binary(&mut self, op: BinOp, l: Value, r: Value) -> C<Value> {
         use BinOp::*;
+        // **Schnellweg: beide Seiten sind schon Zahlen.** Dann ist jede
+        // Umwandlung die Identitaet — `ToPrimitive` gibt die Zahl zurueck,
+        // `ToNumeric` auch, und keine davon kann etwas beobachten: kein
+        // `valueOf`, kein `Symbol.toPrimitive`, kein Wurf, keine Reihenfolge.
+        // Der lange Weg rechnet DASSELBE, nur durch vier Ergebnisrahmen
+        // hindurch — und `C<Value>` ist 40 Byte, die je Rahmen ueber den
+        // Stapel wandern.
+        //
+        // Gemessen an der Fritzbox-Anmeldung (SHA-256 von Hand in JS):
+        // `to_numeric` + `to_number` + `to_primitive_hint` sind 10,2 % der
+        // Laufzeit und die `?`-Weiterreichung noch einmal 12,1 %.
+        if let (Value::Num(a), Value::Num(b)) = (&l, &r) {
+            if let Some(v) = num_bin(op, *a, *b) { return Ok(v); }
+        }
         Ok(match op {
             Add => {
                 // `+` ist der einzige Operator, der auch Text meint. Beide
@@ -827,7 +873,8 @@ impl Interp {
                 } else if matches!(lp, Value::BigInt(_)) || matches!(rp, Value::BigInt(_)) {
                     return self.type_err("cannot mix BigInt and other types, use explicit conversions");
                 } else {
-                    Value::Num(self.to_number(&lp)? + self.to_number(&rp)?)
+                    let a = self.to_number(&lp)?; let b = self.to_number(&rp)?;
+                    return self.num_done(Add, a, b);
                 }
             }
             Sub | Mul | Div | Mod | Exp => {
@@ -847,14 +894,7 @@ impl Interp {
                     return self.type_err("cannot mix BigInt and other types, use explicit conversions");
                 }
                 let a = self.to_number(&lp)?; let b = self.to_number(&rp)?;
-                Value::Num(match op {
-                    Sub => a - b,
-                    Mul => a * b,
-                    Div => a / b,
-                    Mod => if b == 0.0 || a.is_nan() || b.is_nan() || a.is_infinite() { f64::NAN }
-                           else if b.is_infinite() { a } else { a % b },
-                    _ => powf(a, b),
-                })
+                return self.num_done(op, a, b);
             }
             EqEqEq => Value::Bool(l.strict_eq(&r)),
             NotEqEq => Value::Bool(!l.strict_eq(&r)),
@@ -875,8 +915,7 @@ impl Interp {
                     }
                 } else {
                     let a = self.to_number(&lp)?; let b = self.to_number(&rp)?;
-                    if a.is_nan() || b.is_nan() { Value::Bool(false) }
-                    else { Value::Bool(match op { Lt => a < b, Gt => a > b, LtEq => a <= b, _ => a >= b }) }
+                    return self.num_done(op, a, b);
                 }
             }
             Shl | Shr | UShr => {
@@ -900,11 +939,7 @@ impl Interp {
                     return self.type_err("cannot mix BigInt and other types, use explicit conversions");
                 }
                 let a = self.to_number(&lp)?; let b = self.to_number(&rp)?;
-                Value::Num(match op {
-                    Shl => ((to_int32(a)) << (to_uint32(b) & 31)) as f64,
-                    Shr => ((to_int32(a)) >> (to_uint32(b) & 31)) as f64,
-                    _ => ((to_uint32(a)) >> (to_uint32(b) & 31)) as f64,
-                })
+                return self.num_done(op, a, b);
             }
             BitAnd | BitOr | BitXor => {
                 let lp = self.to_numeric(&l)?;
@@ -916,9 +951,8 @@ impl Interp {
                 if matches!(lp, Value::BigInt(_)) || matches!(rp, Value::BigInt(_)) {
                     return self.type_err("cannot mix BigInt and other types, use explicit conversions");
                 }
-                let a = to_int32(self.to_number(&lp)?);
-                let b = to_int32(self.to_number(&rp)?);
-                Value::Num(match op { BitAnd => a & b, BitOr => a | b, _ => a ^ b } as f64)
+                let a = self.to_number(&lp)?; let b = self.to_number(&rp)?;
+                return self.num_done(op, a, b);
             }
             In => {
                 let Value::Obj(o) = &r else { return self.type_err("'in' needs an object on the right") };
@@ -1029,6 +1063,44 @@ impl Interp {
                 else if a > b { core::cmp::Ordering::Greater }
                 else { core::cmp::Ordering::Equal }))
     }
+}
+
+/// Der Zahlenkern der zweistelligen Operatoren: beide Seiten sind schon
+/// gewoehnliche Zahlen, es ist nichts mehr umzuwandeln.
+///
+/// **Er steht hier EINMAL und wird von beiden Seiten gerufen** — vom
+/// Schnellweg oben in `binary` und vom Ende jedes langsamen Armes, wenn der
+/// seine Umwandlungen hinter sich hat. Abgeschrieben liefe die Bedeutung
+/// zwischen den zwei Stellen still auseinander: `%` hat vier Sonderfaelle,
+/// `**` drei, und ein Vergleich mit NaN ist immer falsch, auch `>=`.
+///
+/// `None` gibt es nur fuer `in` und `instanceof` — die haben mit zwei Zahlen
+/// nichts zu tun und eigene Arme.
+fn num_bin(op: BinOp, a: f64, b: f64) -> Option<Value> {
+    use BinOp::*;
+    Some(match op {
+        Add => Value::Num(a + b),
+        Sub => Value::Num(a - b),
+        Mul => Value::Num(a * b),
+        Div => Value::Num(a / b),
+        Mod => Value::Num(if b == 0.0 || a.is_nan() || b.is_nan() || a.is_infinite() { f64::NAN }
+                          else if b.is_infinite() { a } else { a % b }),
+        Exp => Value::Num(powf(a, b)),
+        Shl => Value::Num(((to_int32(a)) << (to_uint32(b) & 31)) as f64),
+        Shr => Value::Num(((to_int32(a)) >> (to_uint32(b) & 31)) as f64),
+        UShr => Value::Num(((to_uint32(a)) >> (to_uint32(b) & 31)) as f64),
+        BitAnd => Value::Num((to_int32(a) & to_int32(b)) as f64),
+        BitOr => Value::Num((to_int32(a) | to_int32(b)) as f64),
+        BitXor => Value::Num((to_int32(a) ^ to_int32(b)) as f64),
+        Lt | Gt | LtEq | GtEq => {
+            if a.is_nan() || b.is_nan() { Value::Bool(false) }
+            else { Value::Bool(match op { Lt => a < b, Gt => a > b, LtEq => a <= b, _ => a >= b }) }
+        }
+        // Zwei Zahlen: `==` ist `===`, und beide sind der Vergleich selbst.
+        EqEq | EqEqEq => Value::Bool(a == b),
+        NotEq | NotEqEq => Value::Bool(a != b),
+        In | Instanceof => return None,
+    })
 }
 
 /// `**`. `libm` ist schon Abhaengigkeit der Engine (CSS Color 4), also wird

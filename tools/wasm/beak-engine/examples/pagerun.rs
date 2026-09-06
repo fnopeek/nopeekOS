@@ -13,6 +13,38 @@
 //! Fehlt eine Datei, sagt der Lauf das, statt sie still zu ueberspringen.
 use beak_engine::js::dombind::ScriptRef;
 
+/// Ein Wirt fuer `fetch`, aus dem Spiegelverzeichnis.
+///
+/// **Damit laesst sich die API-Schicht einer Seite host-seitig fahren.** Die
+/// Fritzbox-Oberflaeche baut ihr `rest-helper.js` schon im MODULKOPF auf
+/// einem `AbortController` — das Modul scheiterte daran, bevor irgendetwas
+/// von seinem Inhalt lief, und `fetch` gab es daneben auch nicht.
+///
+/// Was der Wirt hier NICHT tut: raten. Eine Datei, die es nicht gibt, wird
+/// zur Ablehnung mit `TypeError`, genau wie ein Netzfehler im Browser — nicht
+/// zu einer leeren 200er-Antwort.
+fn serve_fetches(sess: &mut beak_engine::js::Session, dir: &str) -> usize {
+    let dropped = sess.interp.take_aborted_fetches();
+    let want = sess.interp.take_pending_fetches();
+    let mut n = 0;
+    for f in want {
+        if dropped.contains(&f.id) { continue }
+        n += 1;
+        let u = resolve_path(&format!("{}/", origin()), &f.url);
+        match std::fs::read(local(dir, &u)) {
+            Ok(bytes) => {
+                let ct = if u.ends_with(".json") { "content-type: application/json\r\n" }
+                         else { "content-type: text/plain\r\n" };
+                beak_engine::js::fetch::fetch_done(
+                    &mut sess.interp, f.id, 200, &u, ct,
+                    String::from_utf8_lossy(&bytes).into_owned());
+            }
+            Err(e) => beak_engine::js::fetch::fetch_failed(&mut sess.interp, f.id, &e.to_string()),
+        }
+    }
+    n
+}
+
 fn main() {
     let html_path = std::env::args().nth(1).unwrap_or_default();
     let dir = std::env::args().nth(2).unwrap_or_else(|| ".".into());
@@ -111,11 +143,13 @@ fn main() {
     // den es so nie gab: die Komponenten sind dann noch leer.
     let mut timers = 0;
     let (mut sheets_ok, mut sheets_bad) = (0usize, 0usize);
+    let mut fetches = 0usize;
     for _ in 0..64 {
         let t = sess.interp.run_timers();
         timers += t;
+        fetches += serve_fetches(&mut sess, &dir);
         let want = sess.interp.take_pending_sheets();
-        if t == 0 && want.is_empty() { break }
+        if t == 0 && want.is_empty() && sess.interp.pending_fetches.is_empty() { break }
         for (id, href) in want {
             let u = resolve_path(&format!("{}/", origin()), &href);
             let ok = std::fs::read_to_string(local(&dir, &u)).is_ok();
@@ -133,7 +167,14 @@ fn main() {
     if let Some(dn) = sess.interp.doc.as_ref().map(|d| d.doc) {
         let _ = beak_engine::js::dombind::dispatch(&mut sess.interp, "load", &[dn]);
     }
-    for _ in 0..64 { let t = sess.interp.run_timers(); timers += t; if t == 0 { break } }
+    for _ in 0..64 {
+        let t = sess.interp.run_timers();
+        timers += t;
+        let f = serve_fetches(&mut sess, &dir);
+        fetches += f;
+        if t == 0 && f == 0 { break }
+    }
+    if fetches > 0 { println!("fetch: {fetches} Anfragen aus dem Spiegel bedient"); }
     for l in &sess.interp.console[n0..] { println!("  timer| {l}"); }
     // `DUMP=1` zeigt, was am Ende im Baum steht — die Frage „laufen die
     // Skripte" ist nicht dieselbe wie „haben sie etwas gebaut".

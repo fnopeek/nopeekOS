@@ -18,6 +18,9 @@ impl Interp {
         if self.steps > self.max_steps {
             return Err(self.throw_kind("RangeError", "step budget exhausted"));
         }
+        // Und die Uhr. Sie stand nur in `tick`, und dort kommt reines JS nie
+        // vorbei — siehe `Interp::check_deadline`.
+        if self.steps & 0xFFFF == 0 { self.check_deadline()?; }
         match st {
             Stmt::Expr(e) => Ok(Some(self.eval(e, env)?)),
             Stmt::Empty | Stmt::Debugger => Ok(None),

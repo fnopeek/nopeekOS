@@ -198,6 +198,15 @@ fn write_string(s: &str, out: &mut String) {
 
 struct P<'a> { b: &'a [u8], p: usize }
 
+/// `JSON.parse` fuer einen Wert, den der Rufer schon HAT.
+///
+/// `Response.json()` geht hierueber. Ein eigener Leser dort waere eine
+/// zweite Semantik — und die faellt zuerst bei etwas Kleinem auseinander,
+/// etwa was ein nacktes `NaN` im Text bedeutet.
+pub(crate) fn parse_value(i: &mut Interp, v: &Value) -> C<Value> {
+    parse(i, Value::Undefined, core::slice::from_ref(v))
+}
+
 fn parse(i: &mut Interp, _t: Value, args: &[Value]) -> C<Value> {
     let text = match args.first() {
         Some(v) => i.to_string(v)?,

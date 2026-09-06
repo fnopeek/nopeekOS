@@ -2924,6 +2924,8 @@ pub fn make_realm() -> Realm {
             html_element_proto: ph(), svg_element_proto: ph(), fragment_proto: ph(),
             prej_proto: ph(), text_encoder_proto: ph(), text_decoder_proto: ph(),
             tag_protos: HashMap::new(), url_proto: ph(), url_params_proto: ph(),
+            response_proto: ph(), headers_proto: ph(),
+            abort_signal_proto: ph(), abort_ctrl_proto: ph(),
             ta_protos, typed_proto: ta_proto, buffer_proto: ab_proto,
             dataview_proto: dv_proto }
 }
