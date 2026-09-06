@@ -51,6 +51,15 @@ use super::interp::*;
 use super::promise;
 use super::value::*;
 
+/// Wer auf eine Antwort wartet.
+pub enum Waiter {
+    /// `fetch()` — das Versprechen wird erfuellt oder abgelehnt.
+    Promise(Gc),
+    /// `XMLHttpRequest` — das Objekt selbst nimmt die Antwort auf und ruft
+    /// seine Behandler.
+    Xhr(Gc),
+}
+
 /// Eine Anfrage, solange der Wirt sie holt.
 pub struct PendingFetch {
     pub id: u32,
@@ -268,28 +277,12 @@ fn do_fetch_inner(i: &mut Interp, _t: Value, a: &[Value]) -> C<Value> {
     let raw = i.to_string(&input)?.to_string();
     let init = a.get(1).cloned().unwrap_or(Value::Undefined);
 
-    // **Hier wird aufgeloest, und nur hier.** Der Wirt bekommt die fertige
-    // absolute Adresse — zwei Aufloeser waeren zwei Meinungen darueber, was
-    // `../` bedeutet, und die eine davon entscheidet dann ueber die
-    // Herkunftspruefung ([[feedback_the_probe_must_use_the_targets_resolver]]).
-    let here = match i.get(&Value::Obj(i.realm.global.clone()), "location")
-        .and_then(|l| i.get(&l, "href")) {
-        Ok(Value::Str(h)) => super::url::parse_abs(&h),
-        _ => None,
-    };
-    let Some(base) = here else {
-        return i.type_err("fetch: the document has no origin to fetch from");
-    };
-    let target = super::url::resolve(&raw, &base);
-    if target.origin() != base.origin() {
-        // Siehe Kopf: ohne CORS-Antwortpruefung darf es keine fremde Antwort
-        // zu lesen geben.
+    let Some(url) = same_origin_url(i, &raw)? else {
+        let base = document_origin(i).unwrap_or_default();
         return i.type_err(&alloc::format!(
-            "fetch: {} is a different origin than {} — cross-origin fetch is not built yet \
-             (see docs/plan/BROWSER_FETCH_ORIGIN.md)",
-            target.origin(), base.origin()));
-    }
-    let url = target.href();
+            "fetch: {raw} is a different origin than {base} — cross-origin fetch is not \
+             built yet (see docs/plan/BROWSER_FETCH_ORIGIN.md)"));
+    };
 
     let (method, headers, body, signal) = if matches!(init, Value::Obj(_)) {
         let m = match i.get(&init, "method")? {
@@ -318,16 +311,47 @@ fn do_fetch_inner(i: &mut Interp, _t: Value, a: &[Value]) -> C<Value> {
     let id = i.next_fetch_id;
     i.next_fetch_id += 1;
     i.pending_fetches.push(PendingFetch { id, url, method, headers, body });
-    i.fetch_waiting.push((id, p.clone()));
+    i.fetch_waiting.push((id, Waiter::Promise(p.clone())));
     if matches!(signal, Value::Obj(_)) {
         i.set(&signal, S_FETCH, Value::Num(id as f64), false)?;
     }
     Ok(Value::Obj(p))
 }
 
+/// Die Herkunft des Dokuments, als Text.
+fn document_origin(i: &mut Interp) -> Option<String> {
+    let g = Value::Obj(i.realm.global.clone());
+    let loc = i.get(&g, "location").ok()?;
+    let href = i.get(&loc, "href").ok()?;
+    let Value::Str(h) = href else { return None };
+    super::url::parse_abs(&h).map(|p| p.origin())
+}
+
+/// Eine Adresse aufloesen und auf gleiche Herkunft pruefen. `None` heisst
+/// fremd — was der Rufer daraus macht, ist bei `fetch` eine Ablehnung und
+/// bei `XMLHttpRequest` ein Fehlerereignis.
+///
+/// **Hier wird aufgeloest, und nur hier.** Zwei Aufloeser waeren zwei
+/// Meinungen darueber, was `../` bedeutet, und die eine davon entschiede dann
+/// ueber die Herkunft ([[feedback_the_probe_must_use_the_targets_resolver]]).
+fn same_origin_url(i: &mut Interp, raw: &str) -> C<Option<String>> {
+    let g = Value::Obj(i.realm.global.clone());
+    let loc = i.get(&g, "location")?;
+    let href = i.get(&loc, "href")?;
+    let Value::Str(h) = href else {
+        return i.type_err("the document has no origin to fetch from");
+    };
+    let Some(base) = super::url::parse_abs(&h) else {
+        return i.type_err("the document has no origin to fetch from");
+    };
+    let target = super::url::resolve(raw, &base);
+    if target.origin() != base.origin() { return Ok(None) }
+    Ok(Some(target.href()))
+}
+
 // ── Was der Wirt zurueckmeldet ──────────────────────────────────────────
 
-fn take_waiting(i: &mut Interp, id: u32) -> Option<Gc> {
+fn take_waiting(i: &mut Interp, id: u32) -> Option<Waiter> {
     let k = i.fetch_waiting.iter().position(|(n, _)| *n == id)?;
     Some(i.fetch_waiting.remove(k).1)
 }
@@ -335,7 +359,11 @@ fn take_waiting(i: &mut Interp, id: u32) -> Option<Gc> {
 /// Eine Antwort ist da. `raw_headers` ist der Kopfblock ohne die Statuszeile.
 pub fn fetch_done(i: &mut Interp, id: u32, status: u16, final_url: &str,
                   raw_headers: &str, body: String) {
-    let Some(p) = take_waiting(i, id) else { return };
+    let Some(w) = take_waiting(i, id) else { return };
+    let p = match w {
+        Waiter::Promise(p) => p,
+        Waiter::Xhr(x) => { xhr_done(i, &x, status, final_url, raw_headers, body); return }
+    };
     let hdrs = new_headers(i, raw_headers.to_string());
     let r = new_obj(Some(i.realm.response_proto.clone()));
     {
@@ -360,8 +388,11 @@ pub fn fetch_failed(i: &mut Interp, id: u32, why: &str) {
 }
 
 fn fetch_failed_with(i: &mut Interp, id: u32, reason: Value) {
-    let Some(p) = take_waiting(i, id) else { return };
-    promise::settle(i, &p, reason, true);
+    let Some(w) = take_waiting(i, id) else { return };
+    match w {
+        Waiter::Promise(p) => promise::settle(i, &p, reason, true),
+        Waiter::Xhr(x) => xhr_failed(i, &x),
+    }
 }
 
 // ── Einbau ──────────────────────────────────────────────────────────────
@@ -586,6 +617,8 @@ pub fn install(realm: &mut Realm) {
     // ── fetch ───────────────────────────────────────────────────────────
     let f = native(Some(fp.clone()), do_fetch, "fetch", 1, false);
     realm.global.borrow_mut().define("fetch", Prop::builtin(Value::Obj(f)));
+
+    install_xhr(realm);
 }
 
 /// Den Rumpf EINMAL hergeben. `bodyUsed` ist kein Schmuck: eine Antwort
@@ -614,5 +647,315 @@ fn status_text(s: u16) -> &'static str {
         500 => "Internal Server Error", 501 => "Not Implemented",
         502 => "Bad Gateway", 503 => "Service Unavailable", 504 => "Gateway Timeout",
         _ => "",
+    }
+}
+
+// ── XMLHttpRequest ──────────────────────────────────────────────────────
+//
+// **Warum das gebaut ist, obwohl es `fetch` gibt.** Googles Startseite
+// entscheidet mit EINER Zeile, ob sie eine Seite mit oder ohne JavaScript
+// ausliefert:
+//
+//     if (typeof XMLHttpRequest != "undefined") b = "2";
+//     …
+//     if (a == "2" && …) g.value = a;      // <input id="gbv" value="1">
+//
+// Ohne `XMLHttpRequest` bleibt `gbv=1`, und Google schickt die Seite „bitte
+// aktiviere JavaScript". Host-seitig nachgestellt: `GBV=1 xhr=undefined`
+// gegen `GBV=2 xhr=function` — alles andere an beak tat schon, was es soll.
+//
+// **Und deshalb darf es kein Stummel sein.** Ein `function(){}` haette
+// gereicht, damit Google `gbv=2` setzt — und dann BENUTZT die Seite es. Ein
+// Merkmal vorzutaeuschen ist schlimmer, als es nicht zu haben
+// ([[feedback_a_workaround_is_the_wrong_answer_to_a_missing_capability]]).
+//
+// Dieselbe Leitung wie `fetch`, dieselbe Herkunftsregel: nur gleiche
+// Herkunft, siehe `docs/plan/BROWSER_FETCH_ORIGIN.md`.
+//
+// NICHT gebaut: der SYNCHRONE Modus (`open(…, false)`). Die Engine kann
+// nicht blockieren — sie gibt die Kontrolle an den Wirt zurueck, und der
+// holt. Ein synchrones `send` wirft deshalb und sagt warum, statt still
+// etwas Leeres zu liefern.
+
+const X_METHOD: &str = "\0!xhr.method";
+const X_URL: &str = "\0!xhr.url";
+const X_HDRS: &str = "\0!xhr.hdrs";
+const X_STATE: &str = "\0!xhr.state";
+const X_STATUS: &str = "\0!xhr.status";
+const X_TEXT: &str = "\0!xhr.text";
+const X_RESHDRS: &str = "\0!xhr.reshdrs";
+const X_FETCH: &str = "\0!xhr.fetch";
+const X_LISTEN: &str = "\0!xhr.listen";
+
+fn xhr_state(i: &mut Interp, x: &Value, n: f64) -> C<()> {
+    i.set(x, X_STATE, Value::Num(n), false)?;
+    xhr_fire(i, x, "readystatechange")
+}
+
+/// Einen Behandler rufen: `onX` und die ueber `addEventListener` angemeldeten.
+fn xhr_fire(i: &mut Interp, x: &Value, kind: &str) -> C<()> {
+    let ev = new_obj(Some(i.realm.object_proto.clone()));
+    ev.borrow_mut().define("type", Prop::builtin(Value::str(kind)));
+    ev.borrow_mut().define("target", Prop::builtin(x.clone()));
+    let ev = Value::Obj(ev);
+    let on = i.get(x, &alloc::format!("on{kind}"))?;
+    if i.is_callable(&on) { i.call(&on, x.clone(), &[ev.clone()])?; }
+    for f in list_of(i, x, X_LISTEN) {
+        if !matches!(f, Value::Obj(_)) { continue }
+        let k = i.get(&f, "0")?;
+        let g = i.get(&f, "1")?;
+        if i.to_string(&k)?.as_ref() == kind && i.is_callable(&g) {
+            i.call(&g, x.clone(), &[ev.clone()])?;
+        }
+    }
+    Ok(())
+}
+
+fn xhr_done(i: &mut Interp, x: &Gc, status: u16, url: &str, raw: &str, body: String) {
+    let xv = Value::Obj(x.clone());
+    let _ = i.set(&xv, X_STATUS, Value::Num(status as f64), false);
+    let _ = i.set(&xv, X_TEXT, Value::string(body), false);
+    let _ = i.set(&xv, X_RESHDRS, Value::str(raw), false);
+    let _ = i.set(&xv, X_URL, Value::str(url), false);
+    let _ = i.set(&xv, X_FETCH, Value::Undefined, false);
+    // 2, 3, 4 der Reihe nach — Seitencode prueft beides, `readyState` UND
+    // die Ereignisse, und manche warten auf die Zwischenstufen.
+    let _ = xhr_state(i, &xv, 2.0);
+    let _ = xhr_state(i, &xv, 3.0);
+    let _ = xhr_state(i, &xv, 4.0);
+    let _ = xhr_fire(i, &xv, "load");
+    let _ = xhr_fire(i, &xv, "loadend");
+}
+
+fn xhr_failed(i: &mut Interp, x: &Gc) {
+    let xv = Value::Obj(x.clone());
+    // **Status 0, nicht ein erfundener Fehlercode.** So unterscheidet
+    // Seitencode einen Netzfehler von einer Antwort mit 500.
+    let _ = i.set(&xv, X_STATUS, Value::Num(0.0), false);
+    let _ = i.set(&xv, X_TEXT, Value::str(""), false);
+    let _ = i.set(&xv, X_FETCH, Value::Undefined, false);
+    let _ = xhr_state(i, &xv, 4.0);
+    let _ = xhr_fire(i, &xv, "error");
+    let _ = xhr_fire(i, &xv, "loadend");
+}
+
+pub(crate) fn install_xhr(realm: &mut Realm) {
+    let fp = realm.function_proto.clone();
+    let op = realm.object_proto.clone();
+    let proto = new_obj(Some(op.clone()));
+    realm.xhr_proto = proto.clone();
+
+    let ctor = native(Some(fp.clone()), |i, _, _| {
+        let x = new_obj(Some(i.realm.xhr_proto.clone()));
+        {
+            let mut b = x.borrow_mut();
+            b.define(X_METHOD, hidden(Value::str("GET")));
+            b.define(X_URL, hidden(Value::str("")));
+            b.define(X_HDRS, hidden(Value::str("")));
+            b.define(X_STATE, hidden(Value::Num(0.0)));
+            b.define(X_STATUS, hidden(Value::Num(0.0)));
+            b.define(X_TEXT, hidden(Value::str("")));
+            b.define(X_RESHDRS, hidden(Value::str("")));
+            b.define(X_FETCH, hidden(Value::Undefined));
+            b.define(X_LISTEN, hidden(Value::Undefined));
+            b.define("onreadystatechange", hidden(Value::Undefined));
+            b.define("onload", hidden(Value::Undefined));
+            b.define("onerror", hidden(Value::Undefined));
+            b.define("onabort", hidden(Value::Undefined));
+            b.define("onloadend", hidden(Value::Undefined));
+            b.define("withCredentials", hidden(Value::Bool(false)));
+            b.define("responseType", hidden(Value::str("")));
+            b.define("timeout", hidden(Value::Num(0.0)));
+        }
+        Ok(Value::Obj(x))
+    }, "XMLHttpRequest", 0, true);
+    ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(proto.clone())));
+    proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(ctor.clone())));
+    for (n, v) in [("UNSENT", 0.0), ("OPENED", 1.0), ("HEADERS_RECEIVED", 2.0),
+                   ("LOADING", 3.0), ("DONE", 4.0)] {
+        ctor.borrow_mut().define(n, Prop::frozen(Value::Num(v)));
+        proto.borrow_mut().define(n, Prop::frozen(Value::Num(v)));
+    }
+    realm.global.borrow_mut().define("XMLHttpRequest", Prop::builtin(Value::Obj(ctor)));
+
+    meth(&proto, "open", |i, t, a| {
+        let m = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_uppercase();
+        let u = i.to_string(a.get(1).unwrap_or(&Value::Undefined))?.to_string();
+        if let Some(v) = a.get(2) {
+            if !v.truthy() {
+                return i.type_err("XMLHttpRequest: synchronous send is not supported \
+                                   (the engine cannot block; use the async form)");
+            }
+        }
+        i.set(&t, X_METHOD, Value::string(m), false)?;
+        i.set(&t, X_URL, Value::string(u), false)?;
+        i.set(&t, X_HDRS, Value::str(""), false)?;
+        xhr_state(i, &t, 1.0)?;
+        Ok(Value::Undefined)
+    }, 2, &fp);
+
+    meth(&proto, "setRequestHeader", |i, t, a| {
+        let n = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_string();
+        let v = i.to_string(a.get(1).unwrap_or(&Value::Undefined))?.to_string();
+        let mut raw = match slot(i, &t, X_HDRS) { Value::Str(s) => s.to_string(), _ => String::new() };
+        raw_append(&mut raw, &n, &v);
+        i.set(&t, X_HDRS, Value::string(raw), false)?;
+        Ok(Value::Undefined)
+    }, 2, &fp);
+
+    meth(&proto, "send", |i, t, a| {
+        let uv = slot(i, &t, X_URL);
+        let raw = i.to_string(&uv)?.to_string();
+        let mv = slot(i, &t, X_METHOD);
+        let method = i.to_string(&mv)?.to_string();
+        let hdrs = match slot(i, &t, X_HDRS) { Value::Str(s) => s.to_string(), _ => String::new() };
+        let body = match a.first() {
+            None | Some(Value::Undefined) | Some(Value::Null) => None,
+            Some(v) => Some(i.to_string(v)?.to_string()),
+        };
+        let Some(url) = same_origin_url(i, &raw)? else {
+            // Fremde Herkunft: kein Wurf, ein FEHLEREREIGNIS — so wie im
+            // Browser ohne CORS. Siehe Kopf dieser Datei.
+            if let Value::Obj(x) = &t { xhr_failed(i, x); }
+            return Ok(Value::Undefined);
+        };
+        let id = i.next_fetch_id;
+        i.next_fetch_id += 1;
+        i.pending_fetches.push(PendingFetch { id, url, method, headers: hdrs, body });
+        if let Value::Obj(x) = &t { i.fetch_waiting.push((id, Waiter::Xhr(x.clone()))); }
+        i.set(&t, X_FETCH, Value::Num(id as f64), false)?;
+        Ok(Value::Undefined)
+    }, 1, &fp);
+
+    meth(&proto, "abort", |i, t, _| {
+        if let Value::Num(id) = slot(i, &t, X_FETCH) {
+            i.aborted_fetches.push(id as u32);
+            let k = i.fetch_waiting.iter().position(|(n, _)| *n == id as u32);
+            if let Some(k) = k { i.fetch_waiting.remove(k); }
+            i.set(&t, X_FETCH, Value::Undefined, false)?;
+            xhr_state(i, &t, 4.0)?;
+            xhr_fire(i, &t, "abort")?;
+            xhr_fire(i, &t, "loadend")?;
+        }
+        Ok(Value::Undefined)
+    }, 0, &fp);
+
+    meth(&proto, "addEventListener", |i, t, a| {
+        let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_string();
+        let f = a.get(1).cloned().unwrap_or(Value::Undefined);
+        if !i.is_callable(&f) { return Ok(Value::Undefined) }
+        let pair = i.new_array(alloc::vec![Value::string(k), f]);
+        let mut items = list_of(i, &t, X_LISTEN);
+        items.push(pair);
+        let arr = i.new_array(items);
+        i.set(&t, X_LISTEN, arr, false)?;
+        Ok(Value::Undefined)
+    }, 2, &fp);
+
+    meth(&proto, "getAllResponseHeaders", |i, t, _| Ok(slot(i, &t, X_RESHDRS)), 0, &fp);
+    meth(&proto, "getResponseHeader", |i, t, a| {
+        let n = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_string();
+        let raw = match slot(i, &t, X_RESHDRS) { Value::Str(s) => s.to_string(), _ => String::new() };
+        Ok(raw_get(&raw, &n).map(Value::string).unwrap_or(Value::Null))
+    }, 1, &fp);
+    meth(&proto, "overrideMimeType", |_, _, _| Ok(Value::Undefined), 1, &fp);
+
+    getter(&proto, "readyState", |i, t, _| Ok(slot(i, &t, X_STATE)), &fp);
+    getter(&proto, "status", |i, t, _| Ok(slot(i, &t, X_STATUS)), &fp);
+    getter(&proto, "statusText", |i, t, _| {
+        let s = match slot(i, &t, X_STATUS) { Value::Num(n) => n as u16, _ => 0 };
+        Ok(Value::str(status_text(s)))
+    }, &fp);
+    getter(&proto, "responseText", |i, t, _| Ok(slot(i, &t, X_TEXT)), &fp);
+    getter(&proto, "responseURL", |i, t, _| Ok(slot(i, &t, X_URL)), &fp);
+    getter(&proto, "response", |i, t, _| {
+        let rtv = slot(i, &t, "responseType");
+        let rt = i.to_string(&rtv)?.to_string();
+        let text = slot(i, &t, X_TEXT);
+        if rt == "json" {
+            return Ok(super::json::parse_value(i, &text).unwrap_or(Value::Null));
+        }
+        Ok(text)
+    }, &fp);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::interp::{Interp, Value};
+
+    fn ausdruck(i: &mut Interp, src: &str) -> alloc::string::String {
+        let prog = crate::js::parse(src, false).expect("parst");
+        match i.run_program(&prog) {
+            Ok(v) => i.to_string(&v).map(|s| s.to_string())
+                      .unwrap_or_else(|_| alloc::string::String::from("?")),
+            Err(super::Abrupt::Throw(v)) => {
+                let m = i.get(&v, "message").ok()
+                    .and_then(|m| i.to_string(&m).ok())
+                    .unwrap_or_else(|| alloc::rc::Rc::from("?"));
+                alloc::format!("THROW {m}")
+            }
+            Err(_) => alloc::string::String::from("ABRUPT"),
+        }
+    }
+
+    /// **Der ganze Weg eines `XMLHttpRequest`, ohne Wirt.**
+    ///
+    /// Google entscheidet mit `typeof XMLHttpRequest != "undefined"`, ob es
+    /// eine Seite mit JavaScript ausliefert. Ein Stummel haette dafuer
+    /// gereicht — und die Seite haette ihn dann BENUTZT. Der Test faehrt
+    /// deshalb die Anfrage bis zur Antwort durch: anlegen, oeffnen,
+    /// abschicken, den Wirt antworten lassen, Zustaende und Text pruefen.
+    #[test]
+    fn xhr_faehrt_eine_anfrage_zu_ende() {
+        let mut i = Interp::new();
+        i.set_location("http://beispiel.test/a/seite.html");
+        assert_eq!(ausdruck(&mut i, "typeof XMLHttpRequest"), "function");
+        assert_eq!(ausdruck(&mut i, "XMLHttpRequest.DONE + ',' + XMLHttpRequest.OPENED"), "4,1");
+        assert_eq!(ausdruck(&mut i, "\
+            globalThis.x = new XMLHttpRequest(); \
+            globalThis.log = []; \
+            x.onreadystatechange = function(){ log.push(x.readyState) }; \
+            x.onload = function(){ log.push('load:' + x.status) }; \
+            String(x.readyState)"), "0");
+        // `open` relativ — die Adresse muss gegen das Dokument aufgeloest werden.
+        assert_eq!(ausdruck(&mut i, "x.open('GET','../b/d.json'); String(x.readyState)"), "1");
+        let _ = ausdruck(&mut i, "x.setRequestHeader('X-A','1'); x.send()");
+        let offen = i.take_pending_fetches();
+        assert_eq!(offen.len(), 1, "die Anfrage muss beim Wirt liegen");
+        assert_eq!(&offen[0].url, "http://beispiel.test/b/d.json", "gegen das Dokument aufgeloest");
+        assert!(offen[0].headers.contains("X-A"), "gesetzte Kopfzeile faehrt mit");
+        // Jetzt antwortet der Wirt.
+        super::fetch_done(&mut i, offen[0].id, 200, &offen[0].url,
+                          "content-type: application/json\r\n",
+                          alloc::string::String::from("{\"a\":1}"));
+        assert_eq!(ausdruck(&mut i, "log.join(',')"), "1,2,3,4,load:200");
+        assert_eq!(ausdruck(&mut i, "x.responseText"), "{\"a\":1}");
+        assert_eq!(ausdruck(&mut i, "x.getResponseHeader('CONTENT-TYPE')"), "application/json");
+        assert_eq!(ausdruck(&mut i, "x.responseType='json'; String(x.response.a)"), "1");
+    }
+
+    /// Fremde Herkunft ist ein FEHLEREREIGNIS, kein Wurf — so wie im Browser
+    /// ohne CORS. Und sie darf gar nicht erst beim Wirt landen.
+    #[test]
+    fn xhr_fremde_herkunft_meldet_fehler_und_faehrt_nicht() {
+        let mut i = Interp::new();
+        i.set_location("http://beispiel.test/");
+        let r = ausdruck(&mut i, "\
+            var y = new XMLHttpRequest(); var s = 'nichts'; \
+            y.onerror = function(){ s = 'error:' + y.status + ':' + y.readyState }; \
+            y.onload = function(){ s = 'FALSCH erfuellt' }; \
+            y.open('GET','https://fremd.test/x'); y.send(); s");
+        assert_eq!(r, "error:0:4");
+        assert!(i.take_pending_fetches().is_empty(), "nichts darf beim Wirt liegen");
+    }
+
+    /// Synchron kann die Engine nicht — sie gibt die Kontrolle an den Wirt
+    /// zurueck, und der holt. Das gehoert gesagt, nicht still umgangen.
+    #[test]
+    fn xhr_synchron_sagt_dass_es_nicht_geht() {
+        let mut i = Interp::new();
+        i.set_location("http://beispiel.test/");
+        let r = ausdruck(&mut i, "new XMLHttpRequest().open('GET','/a',false)");
+        assert!(r.starts_with("THROW XMLHttpRequest: synchronous"), "war: {r}");
     }
 }

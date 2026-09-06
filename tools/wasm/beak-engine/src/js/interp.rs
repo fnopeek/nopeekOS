@@ -283,6 +283,7 @@ pub struct Realm {
     pub headers_proto: Gc,
     pub abort_signal_proto: Gc,
     pub abort_ctrl_proto: Gc,
+    pub xhr_proto: Gc,
     pub prej_proto: Gc,
     pub text_encoder_proto: Gc,
     pub text_decoder_proto: Gc,
@@ -313,7 +314,7 @@ impl Realm {
             self.typed_proto.clone(), self.buffer_proto.clone(),
             self.dataview_proto.clone(), self.response_proto.clone(),
             self.headers_proto.clone(), self.abort_signal_proto.clone(),
-            self.abort_ctrl_proto.clone(),
+            self.abort_ctrl_proto.clone(), self.xhr_proto.clone(),
             self.html_element_proto.clone(), self.svg_element_proto.clone(),
             self.fragment_proto.clone(), self.url_proto.clone(), self.url_params_proto.clone(),
         ]
@@ -423,8 +424,11 @@ pub struct Interp {
     /// hin; der Wirt nimmt sie mit `take_pending_fetches`, laedt, und meldet
     /// mit `fetch_done`/`fetch_failed` zurueck.
     pub pending_fetches: Vec<super::fetch::PendingFetch>,
-    /// Wer auf welche Antwort wartet: `(id, Versprechen)`.
-    pub(crate) fetch_waiting: Vec<(u32, Gc)>,
+    /// Wer auf welche Antwort wartet. **Zwei Sorten Warter, eine Leitung:**
+    /// `fetch` haelt ein Versprechen, ein `XMLHttpRequest` sein eigenes
+    /// Objekt. Der Wirt kennt den Unterschied nicht — er meldet eine id
+    /// zurueck, und `fetch_done` entscheidet hier.
+    pub(crate) fetch_waiting: Vec<(u32, super::fetch::Waiter)>,
     /// Anfragen, die der Wirt ABBRECHEN soll. `controller.abort()` legt die
     /// id hier ab — sonst waere der Abbruch nur eine Fahne im Baum und die
     /// Verbindung liefe weiter.
