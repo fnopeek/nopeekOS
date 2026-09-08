@@ -1014,6 +1014,23 @@ fn nav_begin(engine: &Engine, method: &str, url: &str, body: &[u8], extra: &str,
         hdrs.push_str("Cookie: ");
         hdrs.push_str(&jar);
     }
+    // **Welche Kekse mitgehen, nach NAMEN.** Der Wert ist ein Geheimnis, der
+    // Name nicht — und ohne ihn ist „5 held" keine Auskunft. Googles
+    // Einwilligung schickte im Kreis, und aus dem Log war nicht zu sehen, ob
+    // `SOCS` ueberhaupt dabei war.
+    {
+        let mit = cookies::names_for(url, now);
+        let da = cookies::names_held(url);
+        if !da.is_empty() || !mit.is_empty() {
+            let mut m = String::from("[beak] cookies -> ");
+            m.push_str(if mit.is_empty() { "(keine)" } else { &mit });
+            if da != mit {
+                m.push_str("   | fuer diesen Host da: ");
+                m.push_str(if da.is_empty() { "(keine)" } else { &da });
+            }
+            log(&m);
+        }
+    }
     if !extra.is_empty() {
         if !hdrs.is_empty() {
             hdrs.push('\n');
@@ -1084,6 +1101,13 @@ fn file_cookies(asked: &str) {
         let mut m = String::from("[beak] cookies: ");
         push_i64(&mut m, after as i64);
         m.push_str(" held");
+        // Und WELCHE der Host jetzt hat. Eine Zahl sagt nicht, ob der eine
+        // Keks dabei ist, an dem die Sitzung haengt.
+        let da = cookies::names_held(&from);
+        if !da.is_empty() {
+            m.push_str(" — hier: ");
+            m.push_str(&da);
+        }
         log(&m);
     }
 }

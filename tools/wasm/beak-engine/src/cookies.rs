@@ -83,6 +83,39 @@ pub fn store_from_script(url: &str, decl: &str, now: i64) {
     global().store_from_script(url, decl, now)
 }
 
+/// Die NAMEN der Kekse, die fuer diese Adresse mitgehen — ohne Werte.
+///
+/// **Ein Keks ist ein Geheimnis, sein Name ist es nicht.** Und ohne die Namen
+/// ist „5 held" keine Auskunft: Googles Einwilligung schickte im Kreis, und
+/// aus dem Log war nicht zu sehen, ob `SOCS` ueberhaupt mitging. Genau die
+/// Frage, die eine Zeile beantwortet und ein Nachmittag nicht.
+pub fn names_for(url: &str, now: i64) -> String {
+    let mut out = String::new();
+    for part in header_for(url, now).split("; ") {
+        let Some((n, _)) = part.split_once('=') else { continue };
+        if !out.is_empty() { out.push(' '); }
+        out.push_str(n);
+    }
+    out
+}
+
+/// Was der Behaelter fuer diesen Host haelt, nach Namen — auch die, die
+/// gerade NICHT mitgehen (falscher Pfad, `Secure` auf http, abgelaufen).
+/// Der Unterschied zu `names_for` ist die halbe Diagnose.
+pub fn names_held(host_url: &str) -> String {
+    let (host, _, _) = split_url(host_url);
+    let jar = global();
+    let mut out = String::new();
+    for c in jar.cookies.iter() {
+        let passt = if c.host_only { host == c.domain } else { domain_match(&host, &c.domain) };
+        if !passt { continue }
+        if !out.is_empty() { out.push(' '); }
+        out.push_str(&c.name);
+        if c.host_only { out.push_str("(host)") }
+    }
+    out
+}
+
 /// How many cookies are held, for the diagnostic line.
 pub fn count() -> usize {
     global().cookies.len()
