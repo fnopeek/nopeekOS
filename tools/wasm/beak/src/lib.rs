@@ -971,6 +971,15 @@ fn nav_asked() -> String {
 /// Start a navigation and return at once. `push_hist` records the address we
 /// land on once the document is here.
 fn nav_begin(engine: &Engine, method: &str, url: &str, body: &[u8], extra: &str, push_hist: bool) {
+    // Eine Navigation, die nicht aus einem Skript kam — ein Klick, die
+    // Adresszeile, der Verlauf — bricht die Skriptkette. Sonst zaehlte der
+    // Deckel ueber Seiten hinweg weiter und wuerde irgendwann eine
+    // vollkommen harmlose Weiterleitung abwuergen.
+    if unsafe { core::ptr::addr_of!(NAV_FROM_SCRIPT).read() } {
+        unsafe { core::ptr::addr_of_mut!(NAV_FROM_SCRIPT).write(false) };
+    } else {
+        unsafe { core::ptr::addr_of_mut!(SCRIPT_NAV_CHAIN).write(0) };
+    }
     // **Vor dem ersten Byte.** Eine Navigation darf ueberallhin — auch auf
     // den eigenen Router —, denn das neue Dokument ist eine andere Herkunft
     // und die alte Seite kann es nicht lesen. Gemeldet wird deshalb die
@@ -1549,6 +1558,63 @@ fn sync_history(engine: &Engine, sess: &mut beak_engine::js::Session) {
     sess.interp.set_history(count.max(1) as f64, beak_engine::js::value::Value::Null);
 }
 
+/// Wie viele Navigationen eine Seite HINTEREINANDER selbst ausloesen darf.
+///
+/// Nicht gegen langsame Seiten, sondern gegen `location.href = "/a"` AUF
+/// `/a` — das ist eine Endlosschleife, die je Runde eine Rundreise kostet
+/// und von aussen wie ein haengender Browser aussieht. Eine Kette von
+/// wenigen ist dagegen normal: Googles Sperrseite braucht zwei.
+const SCRIPT_NAV_MAX: u32 = 8;
+static mut SCRIPT_NAV_CHAIN: u32 = 0;
+/// Setzt `sync_nav` unmittelbar vor `nav_begin` — daran erkennt `nav_begin`,
+/// dass die Kette WEITERgeht statt neu anzufangen. Alles andere (Klick auf
+/// einen Link, Adresszeile, Verlauf) bricht sie.
+static mut NAV_FROM_SCRIPT: bool = false;
+
+/// Was die Seite per `location` verlangt hat — abholen und wirklich fahren.
+///
+/// **Der Unterschied zu `sync_history` ist der ganze Punkt.**
+/// `pushState` schreibt die Adresse um und laesst das Dokument stehen;
+/// `location.replace` wirft es weg und holt ein neues. Bis hierher war der
+/// zweite Fall gar nicht da: `location` war ein Datenobjekt, `replace` ein
+/// `TypeError`, und `location.href = u` schrieb still eine Eigenschaft um.
+/// Eine Seite, die sich selbst weiterschickt, kam nie an.
+///
+/// Liefert true, wenn navigiert wurde — dann ist das Dokument von eben weg
+/// und der Rufer muss aufhoeren, daran zu arbeiten.
+fn sync_nav(engine: &Engine) -> bool {
+    let Some(sess) = js_session() else { return false };
+    let Some(n) = sess.interp.take_nav() else { return false };
+    // **Nur, was ein Dokument liefern kann.** Die Engine hat `javascript:`
+    // und `data:` schon abgelehnt; hier faellt der Rest (`mailto:`, `file:`,
+    // `blob:`) — nicht weil er gefaehrlich waere, sondern weil `nav_begin`
+    // ihn ins Netz reichen wuerde und die Antwort eine leere Seite ist, die
+    // aussieht wie ein Fehler der Gegenstelle.
+    let ok = n.url.starts_with("https://") || n.url.starts_with("http://")
+             || selftest::matches(&n.url);
+    if !ok {
+        log(&alloc::format!("[beak] Navigation abgelehnt (Schema): {}", n.url));
+        return false;
+    }
+    let chain = unsafe { core::ptr::addr_of!(SCRIPT_NAV_CHAIN).read() } + 1;
+    if chain > SCRIPT_NAV_MAX {
+        log(&alloc::format!("[beak] Navigation abgebrochen: {SCRIPT_NAV_MAX} Sprünge in Folge, zuletzt {}", n.url));
+        return false;
+    }
+    unsafe { core::ptr::addr_of_mut!(SCRIPT_NAV_CHAIN).write(chain) };
+    let mut m = String::from("[beak] location.");
+    m.push_str(if n.reload { "reload()" } else if n.replace { "replace()" } else { "assign()" });
+    m.push_str(" -> ");
+    m.push_str(&n.url);
+    if chain > 1 { m.push_str(" ("); push_i64(&mut m, chain as i64); m.push_str(". in Folge)"); }
+    log(&m);
+    unsafe { core::ptr::addr_of_mut!(NAV_FROM_SCRIPT).write(true) };
+    // `replace` und `reload` haengen KEINEN Eintrag an: sonst kaeme man mit
+    // „zurueck" nie aus einer Seite heraus, die sich selbst ersetzt.
+    nav_begin(engine, "GET", &n.url, &[], "", !n.replace && !n.reload);
+    true
+}
+
 /// Liefert true, wenn eine Modulrunde laeuft — dann ist die Navigation
 /// NOCH nicht fertig.
 fn run_scripts(engine: &Engine, list: Vec<PendingScript>) -> bool {
@@ -1874,6 +1940,7 @@ fn fire_load(engine: &Engine, page: &Page) -> bool {
     let _ = beak_engine::js::dombind::dispatch(&mut sess.interp, "load", &[dn]);
     let timers = sess.interp.run_timers();
     sync_cookies(sess);
+    sync_history(engine, sess);
     drain_console(sess);
     let changed = sess.interp.doc.as_ref().is_some_and(|d| d.dirty);
     if changed {
@@ -2260,6 +2327,11 @@ fn dispatch_click(engine: &Engine, page: &mut Page, lay: &Layout, cx: i32, cy: i
         log(&alloc::format!("[beak] script submit: form seq={seq}"));
         if submit_form_seq(engine, page, seq) { return true }
     }
+    // Ein Behandler, der `location.href` setzt, hat damit gesagt, wohin es
+    // geht. Danach auch noch dem angeklickten Link zu folgen hiesse, zwei
+    // Navigationen aus einem Klick zu machen — also gilt der Klick als
+    // behandelt.
+    if sync_nav(engine) { return true }
     if changed || prevented || timers > 0 {
         let mut m = String::from("[beak] click -> js: ");
         push_i64(&mut m, nodes.len() as i64);
@@ -4073,6 +4145,12 @@ pub extern "C" fn _start() {
             log(&alloc::format!("[beak] script submit: form seq={seq}"));
             if submit_form_seq(&engine, &page, seq) { break }
         }
+        // Und eine Navigation, die die Seite selbst verlangt hat. **Hier
+        // zentral und nicht an jedem Einstiegspunkt:** ein Skript beim
+        // Laden, ein Zeitgeber, ein `load`-Behandler und ein Klick landen
+        // alle in derselben Runde — sechs Aufrufstellen waeren sechs
+        // Gelegenheiten, eine zu vergessen.
+        sync_nav(&engine);
         if chrome {
             render_chrome();
         }
@@ -4111,6 +4189,14 @@ pub extern "C" fn _start() {
             if let Some(s) = js_session() {
                 let n = s.interp.run_timers();
                 let _ = n;
+                // Ein `fetch`-Rueckruf ist ein Einstiegspunkt wie jeder
+                // andere: er darf einen Keks setzen und die Adresse
+                // umschreiben. Ohne diese zwei Zeilen fiel beides still
+                // unter den Tisch — und „still" heisst hier: die naechste
+                // Anfrage geht ohne den Keks hinaus, den die Seite gerade
+                // gesetzt hat.
+                sync_cookies(s);
+                sync_history(&engine, s);
                 drain_console(s);
                 if s.interp.doc.as_ref().is_some_and(|d| d.dirty) {
                     if let Some(d) = s.interp.doc.as_mut() {

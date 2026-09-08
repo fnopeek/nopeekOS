@@ -175,6 +175,15 @@ fn main() {
         if t == 0 && f == 0 { break }
     }
     if fetches > 0 { println!("fetch: {fetches} Anfragen aus dem Spiegel bedient"); }
+    // Was die Seite per `location` verlangt hat. Ohne diese Zeile sieht eine
+    // Seite, die sich selbst weiterschickt, genauso aus wie eine, die nichts
+    // tut — und genau daran ist Googles Sperrseite eine Woche lang
+    // vorbeigelaufen.
+    if let Some(n) = sess.interp.take_nav() {
+        println!("NAVIGATION {}{} -> {}",
+                 if n.replace { "replace" } else { "assign" },
+                 if n.reload { "/reload" } else { "" }, n.url);
+    }
     for l in &sess.interp.console[n0..] { println!("  timer| {l}"); }
     // `DUMP=1` zeigt, was am Ende im Baum steht — die Frage „laufen die
     // Skripte" ist nicht dieselbe wie „haben sie etwas gebaut".

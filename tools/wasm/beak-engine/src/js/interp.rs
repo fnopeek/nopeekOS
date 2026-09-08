@@ -244,6 +244,12 @@ pub struct Realm {
     /// BAUT und die eingebauten Funktionen Zeiger sind, keine Abschluesse —
     /// sie koennen den Prototyp nicht einfangen.
     pub event_proto: Gc,
+    /// Das EINE `location`-Objekt. Es liegt aus demselben Grund im Realm wie
+    /// `event_proto`: `window.location = "…"` und `document.location = "…"`
+    /// sind Setzer, die auf `href` weiterreichen ([PutForwards=href]), und
+    /// ein eingebauter Setzer ist ein Zeiger — er kann das Objekt nicht
+    /// einfangen, er muss es nachschlagen koennen.
+    pub location: Gc,
     pub token_list_proto: Gc,
     pub comment_proto: Gc,
     pub style_proto: Gc,
@@ -400,6 +406,23 @@ pub enum HistoryOp {
     Replace { url: String },
     /// `go(n)`, `back()` (= `go(-1)`), `forward()` (= `go(1)`).
     Go(i32),
+}
+
+/// Was die Seite per `location` verlangt hat: eine ECHTE Navigation.
+///
+/// **Der Unterschied zu `HistoryOp` ist der ganze Punkt.** `pushState`
+/// schreibt nur die Adresse um und laesst das Dokument stehen;
+/// `location.replace` wirft es weg und holt ein neues. Beides in einem Enum
+/// zu fuehren hiesse, dass ein Leser sie verwechseln kann — und der
+/// teurere der beiden Fehler ist still.
+#[derive(Debug, Clone)]
+pub struct NavRequest {
+    /// Schon gegen die aktuelle Adresse aufgeloest, also absolut.
+    pub url: String,
+    /// `replace()` ersetzt den Verlaufseintrag, `assign()`/`href=` haengt an.
+    pub replace: bool,
+    /// `reload()` — dieselbe Adresse noch einmal.
+    pub reload: bool,
 }
 
 pub struct Interp {
@@ -600,6 +623,19 @@ pub struct Interp {
     /// holt es mit `take_history_ops` ab und entscheidet. Dasselbe Muster
     /// wie bei den Keksen.
     pub history_ops: Vec<HistoryOp>,
+    /// Die Navigation, die die Seite zuletzt verlangt hat (`location.assign`,
+    /// `.replace`, `.reload`, `href = …`). **Genau eine, und die LETZTE
+    /// gewinnt** — im Browser bricht eine zweite Navigation die erste ab,
+    /// also darf hier keine Warteschlange stehen, die beide faehrt.
+    ///
+    /// Die Engine navigiert nicht; der Wirt holt es mit `take_nav` ab.
+    pub nav: Option<NavRequest>,
+    /// Die Adresse des Dokuments — die EINE Quelle hinter `location`.
+    ///
+    /// `location` ist deshalb ganz aus Zugriffsfunktionen gebaut und nicht
+    /// aus Datenfeldern: eine Seite, die `location.pathname` setzt, aendert
+    /// damit `href` mit, und zwei Kopien liefen sofort auseinander.
+    pub loc_href: String,
     /// `history.state` — der Zustand, den die Seite zuletzt gesetzt hat.
     /// Er gehoert dem DOKUMENT, nicht dem Verlauf des Wirts, und lebt
     /// deshalb hier.
@@ -717,6 +753,7 @@ impl Interp {
                  strict_probe: [0; STRICT_SITES],
                  cookies: String::new(), cookie_sets: Vec::new(), style_ctx: None,
                  history_ops: Vec::new(), history_state: Value::Null, history_len: 1.0,
+                 nav: None, loc_href: String::from("about:blank"),
                  vm_ran: 0, vm_declined: 0, vm_decline: None, vm_off: false,
                  func_chunks: HashMap::new(), func_declines: HashMap::new(), pending_labels: Vec::new(), vm_ops: 0, hints_ok: true, vm_calls: 0, vm_calls_native: 0, vm_calls_slow: 0,
                  geometry: None,
@@ -955,6 +992,12 @@ impl Interp {
         core::mem::take(&mut self.history_ops)
     }
 
+    /// Die verlangte Navigation abholen. Der Wirt ist der einzige, der sie
+    /// ausfuehren kann — er hat Netz und Verlauf.
+    pub fn take_nav(&mut self) -> Option<NavRequest> {
+        self.nav.take()
+    }
+
     /// Der Wirt reicht ein, wie lang sein Verlauf ist und welchen Zustand
     /// der aktuelle Eintrag traegt — beim Laden und nach jedem Sprung.
     pub fn set_history(&mut self, len: f64, state: Value) {
@@ -990,28 +1033,28 @@ impl Interp {
             path: alloc::string::String::from("blank"),
             ..Default::default()
         });
-        let loc = match self.realm.global.borrow().get_own("location").and_then(|p| p.value.clone()) {
-            Some(Value::Obj(o)) => o,
-            _ => return,
-        };
-        let mut o = loc.borrow_mut();
-        for (k, v) in [("href", p.href()), ("protocol", alloc::format!("{}:", p.scheme)),
-                       ("host", p.host_with_port()), ("hostname", p.host.clone()),
-                       ("port", p.port.clone()), ("origin", p.origin()),
-                       ("pathname", p.path.clone()),
-                       ("search", if p.query.is_empty() { String::new() } else { alloc::format!("?{}", p.query) }),
-                       ("hash", if p.hash.is_empty() { String::new() } else { alloc::format!("#{}", p.hash) })] {
-            o.define(k, Prop::builtin(Value::str(&v)));
-        }
-        drop(o);
+        // **Nur eine Zeile schreibt die Adresse.** `location` ist ganz aus
+        // Zugriffsfunktionen gebaut, die alle aus `loc_href` lesen — wer die
+        // Teile hier als Datenfelder mitschreiben wuerde, haette eine zweite
+        // Wahrheit, die beim ersten `location.pathname = …` auseinanderlaeuft.
+        self.loc_href = p.href();
         let href = p.href();
         self.realm.global.borrow_mut().define("origin", Prop::builtin(Value::str(&p.origin())));
-        if let Some(Value::Obj(d)) = self.realm.global.borrow().get_own("document").and_then(|p| p.value.clone()) {
-            let mut d = d.borrow_mut();
-            d.define("URL", Prop::builtin(Value::str(&href)));
-            d.define("documentURI", Prop::builtin(Value::str(&href)));
-            d.define("location", Prop::builtin(Value::Obj(loc.clone())));
-        }
+        let Some(Value::Obj(d)) = self.realm.global.borrow().get_own("document").and_then(|p| p.value.clone())
+        else { return };
+        let fp = self.realm.function_proto.clone();
+        let mut d = d.borrow_mut();
+        d.define("URL", Prop::builtin(Value::str(&href)));
+        d.define("documentURI", Prop::builtin(Value::str(&href)));
+        // `document.location` ist DASSELBE Objekt wie `window.location`, und
+        // eine Zuweisung darauf navigiert, statt es zu ersetzen — dieselbe
+        // Regel wie am Fenster ([PutForwards=href]).
+        let g = super::value::native(Some(fp.clone()),
+            |i, _, _| Ok(Value::Obj(i.realm.location.clone())), "location", 0, false);
+        let st = super::value::native(Some(fp),
+            |i, _, a| super::builtins::loc_put_forwards(i, a.first()), "location", 1, false);
+        d.define("location", Prop { value: None, get: Some(Value::Obj(g)),
+            set: Some(Value::Obj(st)), writable: false, enumerable: true, configurable: false });
     }
 
     /// Wie `set_viewport`, aber mit dem Farbschema dazu. `matchMedia` braucht

@@ -29,6 +29,75 @@ fn def_sym(o: &Gc, key: &str, show: &str, f: NativeFn, len: usize, proto: &Gc) {
     o.borrow_mut().define(key, Prop::builtin(Value::Obj(g)));
 }
 
+/// Die Adresse des Dokuments, zerlegt. **Bei jedem Zugriff frisch** — das
+/// kostet eine Zerlegung und spart die zweite Wahrheit; `location` wird
+/// gelesen, nicht in einer Schleife gezaehlt.
+fn loc_parts(i: &Interp) -> super::url::Parts {
+    super::url::parse_abs(&i.loc_href).unwrap_or_else(|| super::url::Parts {
+        scheme: String::from("about"), path: String::from("blank"), ..Default::default()
+    })
+}
+
+/// Eine Navigation ANMELDEN. Die Engine faehrt sie nicht — sie hat kein Netz.
+///
+/// **Zwei Schemata kommen hier nicht durch, und beide mit Grund:**
+/// `javascript:` waere ein zweiter Weg, Code einzuspeisen, an der
+/// Skript-Zustellung vorbei; `data:` erbte die Herkunft der Seite, die es
+/// oeffnet, und waere damit eine fremde Seite unter unserem Namen. Beide
+/// sind in echten Browsern fuer die Navigation der obersten Ebene gesperrt.
+fn loc_go(i: &mut Interp, url: String, replace: bool) -> C<Value> {
+    let low = url.trim_start().to_ascii_lowercase();
+    if low.starts_with("javascript:") || low.starts_with("data:") {
+        // Kein Wurf: der Browser lehnt still ab. Eine Ausnahme hier wuerde
+        // das Skript beenden, das sie ausloest — und das ist mehr Schaden,
+        // als die Absage anrichtet ([[feedback_a_host_call_that_throws_ends_the_script]]).
+        i.console_push(alloc::format!("warn: Navigation auf {low:.32} abgelehnt"));
+        return Ok(Value::Undefined);
+    }
+    i.nav = Some(super::interp::NavRequest { url, replace, reload: false });
+    Ok(Value::Undefined)
+}
+
+/// `assign(u)` / `replace(u)`: aufloesen gegen die AKTUELLE Adresse, dann
+/// anmelden. Ohne Argument ist es `undefined` — und das ist eine Adresse,
+/// die es nicht gibt, also passiert nichts.
+fn loc_navigate(i: &mut Interp, arg: Option<&Value>, replace: bool, _reload: bool) -> C<Value> {
+    let Some(v) = arg else { return Ok(Value::Undefined) };
+    let raw = i.to_string(v)?;
+    let base = loc_parts(i);
+    let abs = super::url::resolve(&raw, &base).href();
+    loc_go(i, abs, replace)
+}
+
+/// `[PutForwards=href]`: `window.location = u` und `document.location = u`
+/// sind eine Navigation, keine Zuweisung. Oeffentlich, weil `set_location`
+/// den Setzer am Dokument baut.
+pub(crate) fn loc_put_forwards(i: &mut Interp, arg: Option<&Value>) -> C<Value> {
+    loc_navigate(i, arg, false, false)
+}
+
+/// Ein Teil von `location`: lesen aus `loc_href`, schreiben heisst navigieren.
+///
+/// Ein Makro und keine Funktion, weil `native` einen reinen Funktionszeiger
+/// nimmt: ein Getter, der ein uebergebenes Stueck Verhalten FAENGT, ginge
+/// nicht durch. So steht jedes Paar als eigener, fangfreier Rumpf da.
+macro_rules! loc_part {
+    ($loc:expr, $fp:expr, $name:literal, $get:expr, $set:expr) => {{
+        let g = native(Some($fp.clone()), |i, _, _| {
+            let f: fn(&super::url::Parts) -> String = $get;
+            Ok(Value::string(f(&loc_parts(i))))
+        }, $name, 0, false);
+        let st = native(Some($fp.clone()), |i, _, a| {
+            let v = match a.first() { Some(v) => i.to_string(v)?, _ => Rc::from("") };
+            let f: fn(&mut super::url::Parts, &str) -> bool = $set;
+            let mut p = loc_parts(i);
+            if f(&mut p, &v) { loc_go(i, p.href(), false) } else { Ok(Value::Undefined) }
+        }, $name, 1, false);
+        $loc.borrow_mut().define($name, Prop { value: None, get: Some(Value::Obj(g)),
+            set: Some(Value::Obj(st)), writable: false, enumerable: true, configurable: true });
+    }};
+}
+
 pub fn make_realm() -> Realm {
     let object_proto = new_obj(None);
     let function_proto = new_kind(Some(object_proto.clone()), ObjKind::Plain);
@@ -2335,12 +2404,88 @@ pub fn make_realm() -> Realm {
     nav.borrow_mut().define("onLine", Prop::builtin(Value::Bool(true)));
     global.borrow_mut().define("navigator", Prop::builtin(Value::Obj(nav)));
 
+    // ── location ─────────────────────────────────────────────────────────
+    //
+    // **Ein Objekt, das navigiert.** Vorher standen hier sieben Datenfelder;
+    // `location.replace(u)` war damit ein `TypeError` und `location.href = u`
+    // schrieb still eine Eigenschaft um und ging nirgendwohin. Eine Seite,
+    // die sich per Skript weiterschickt — jede Anmeldung, jede Weiterleitung
+    // nach einem POST, Googles Sperrseite — kam so nie an.
+    //
+    // Alle Teile sind Zugriffsfunktionen ueber `interp.loc_href`, damit es
+    // die Adresse nur EINMAL gibt: `location.pathname = "/x"` muss `href`
+    // mitziehen, und zwei Kopien laufen beim ersten Setzer auseinander.
+    //
+    // **Die Engine navigiert nicht.** Sie legt die Absicht in `interp.nav`;
+    // der Wirt holt sie ab. Dasselbe Muster wie `history_ops` und
+    // `pending_fetches`.
     let loc = new_obj(Some(object_proto.clone()));
-    for (k, v) in [("href", "about:blank"), ("protocol", "about:"), ("host", ""),
-                   ("hostname", ""), ("pathname", "blank"), ("search", ""), ("hash", "")] {
-        loc.borrow_mut().define(k, Prop::builtin(Value::str(v)));
+    loc_part!(loc, function_proto, "href",
+        |p| p.href(),
+        |p, v| { *p = super::url::resolve(v, p); true });
+    loc_part!(loc, function_proto, "protocol",
+        |p| alloc::format!("{}:", p.scheme),
+        |p, v| { let t = v.trim_end_matches(':');
+                 if t.is_empty() { return false }
+                 p.scheme = t.to_string(); true });
+    loc_part!(loc, function_proto, "host",
+        |p| p.host_with_port(),
+        |p, v| { match v.split_once(':') {
+                     Some((h, port)) => { p.host = h.to_string(); p.port = port.to_string(); }
+                     None => { p.host = v.to_string(); p.port.clear(); }
+                 } true });
+    loc_part!(loc, function_proto, "hostname",
+        |p| p.host.clone(),
+        |p, v| { p.host = v.to_string(); true });
+    loc_part!(loc, function_proto, "port",
+        |p| p.port.clone(),
+        |p, v| { p.port = v.to_string(); true });
+    loc_part!(loc, function_proto, "pathname",
+        |p| p.path.clone(),
+        |p, v| { p.path = if v.starts_with('/') { v.to_string() }
+                          else { alloc::format!("/{v}") }; true });
+    loc_part!(loc, function_proto, "search",
+        |p| if p.query.is_empty() { String::new() } else { alloc::format!("?{}", p.query) },
+        |p, v| { p.query = v.trim_start_matches('?').to_string(); true });
+    loc_part!(loc, function_proto, "hash",
+        |p| if p.hash.is_empty() { String::new() } else { alloc::format!("#{}", p.hash) },
+        |p, v| { p.hash = v.trim_start_matches('#').to_string(); true });
+    // `origin` ist NUR lesbar — das ist keine Bequemlichkeit, sondern die
+    // Spezifikation: eine Seite kann ihre Herkunft nicht umschreiben.
+    {
+        let g = native(Some(function_proto.clone()),
+            |i, _, _| Ok(Value::str(&loc_parts(i).origin())), "origin", 0, false);
+        loc.borrow_mut().define("origin", Prop { value: None, get: Some(Value::Obj(g)),
+            set: None, writable: false, enumerable: true, configurable: true });
     }
-    global.borrow_mut().define("location", Prop::builtin(Value::Obj(loc)));
+    def(&loc, "assign", |i, _, a| { loc_navigate(i, a.first(), false, false) }, 1, fp);
+    def(&loc, "replace", |i, _, a| { loc_navigate(i, a.first(), true, false) }, 1, fp);
+    // `reload()` nimmt kein Argument: dieselbe Adresse, neuer Abruf. Der
+    // Verlauf waechst dabei NICHT — sonst kaeme man mit „zurueck" nie
+    // heraus.
+    def(&loc, "reload", |i, _, _| {
+        let url = i.loc_href.clone();
+        i.nav = Some(super::interp::NavRequest { url, replace: true, reload: true });
+        Ok(Value::Undefined)
+    }, 0, fp);
+    // `String(location)` ist die ADRESSE, nicht `[object Object]`
+    // (HTML §7.2.4). `"" + location` und `location == "…"` sind
+    // verbreitete Idiome; ohne das vergleicht eine Seite gegen einen Text,
+    // den sie nie geschrieben hat.
+    def(&loc, "toString", |i, _, _| Ok(Value::str(&i.loc_href)), 0, fp);
+    // `window.location = "…"` navigiert, es ERSETZT das Objekt nicht
+    // (HTML §7.2.4, [PutForwards=href]). Als Datenfeld haette eine Seite
+    // hier still ihr `location` gegen eine Zeichenkette getauscht und waere
+    // danach an jedem `location.href` gestorben.
+    {
+        let g = native(Some(function_proto.clone()),
+            |i, _, _| Ok(Value::Obj(i.realm.location.clone())), "location", 0, false);
+        let st = native(Some(function_proto.clone()),
+            |i, _, a| loc_navigate(i, a.first(), false, false), "location", 1, false);
+        global.borrow_mut().define("location", Prop { value: None,
+            get: Some(Value::Obj(g)), set: Some(Value::Obj(st)),
+            writable: false, enumerable: true, configurable: false });
+    }
 
     // ── history ──────────────────────────────────────────────────────────
     //
@@ -2916,7 +3061,7 @@ pub fn make_realm() -> Realm {
     Realm { global, global_env, object_proto: object_proto.clone(), function_proto, array_proto,
             string_proto, number_proto, boolean_proto, error_proto, error_ctors,
             node_proto: ph(), element_proto: ph(), text_proto: ph(), document_proto: ph(),
-            event_proto: ph(), token_list_proto: ph(), style_proto: ph(), comment_proto: ph(),
+            event_proto: ph(), location: loc, token_list_proto: ph(), style_proto: ph(), comment_proto: ph(),
             regexp_proto: ph(), symbol_proto, iterator_proto,
             generator_proto, generator_func_proto, array_iter_proto,
             string_iter_proto, promise_proto: ph(), date_proto: ph(), bigint_proto,
