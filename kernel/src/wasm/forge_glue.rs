@@ -477,6 +477,12 @@ extern "C" fn f_npk_http_response_headers(vm: *const u64, buf_ptr: i32, buf_max:
     host_core::npk_http_response_headers(mem, ctx, buf_ptr, buf_max)
 }
 
+extern "C" fn f_npk_random_bytes(vm: *const u64, buf_ptr: i32, len: i32) -> i32 {
+    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    let (mem, ctx) = unsafe { parts(vm) };
+    host_core::npk_random_bytes(mem, ctx, buf_ptr, len)
+}
+
 extern "C" fn f_npk_http_final_url(vm: *const u64, buf_ptr: i32, buf_max: i32) -> i32 {
     // SAFETY: `vm` ist der vmctx des rufenden Moduls.
     let (mem, ctx) = unsafe { parts(vm) };
@@ -864,6 +870,7 @@ pub(crate) fn resolve(module: &str, name: &str) -> Option<u64> {
         "npk_ticks" => f_npk_ticks as *const () as u64,
         "npk_now_us" => f_npk_now_us as *const () as u64,
         "npk_unix_time" => f_npk_unix_time as *const () as u64,
+        "npk_random_bytes" => f_npk_random_bytes as *const () as u64,
         "npk_theme_token" => f_npk_theme_token as *const () as u64,
         "npk_cursor_pos" => f_npk_cursor_pos as *const () as u64,
         "npk_screen_flash" => f_npk_screen_flash as *const () as u64,

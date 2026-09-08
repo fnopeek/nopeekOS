@@ -2475,6 +2475,91 @@ pub fn make_realm() -> Realm {
     console.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("console")));
     global.borrow_mut().define("console", Prop::builtin(Value::Obj(console)));
 
+    // ── crypto ───────────────────────────────────────────────────────────
+    //
+    // **Es erscheint nur, wenn der Wirt wirklich eine Quelle eingereicht
+    // hat.** Eine Seite prueft `if (window.crypto)` und richtet sich danach;
+    // ein `crypto`, das schwachen Zufall liefert, beantwortet diese Frage
+    // falsch — und aus `getRandomValues` baut Seitencode Sitzungsmarken.
+    // Lieber die Luecke, die man sieht, als die Zusage, die nicht haelt
+    // (siehe `js::random`).
+    if super::random::available() {
+        let crypto = new_obj(Some(object_proto.clone()));
+        def(&crypto, "getRandomValues", |i, _, a| {
+            let arg = a.first().cloned().unwrap_or(Value::Undefined);
+            let Value::Obj(o) = &arg else {
+                return i.type_err("crypto.getRandomValues: argument is not an integer TypedArray");
+            };
+            let Some(t) = ta_of(o) else {
+                return i.type_err("crypto.getRandomValues: argument is not an integer TypedArray");
+            };
+            // Fliesskomma-Sichten sind ausgeschlossen (WebCrypto 10.1.1):
+            // zufaellige Bitmuster sind dort teilweise NaN, und eine Seite,
+            // die daraus einen Schluessel baut, verliert Entropie ohne es zu
+            // merken.
+            if matches!(t.kind, ElemKind::F32 | ElemKind::F64) {
+                let e = i.throw_kind("Error", "crypto.getRandomValues: float views are not allowed");
+                if let super::interp::Abrupt::Throw(Value::Obj(x)) = &e {
+                    x.borrow_mut().define("name", Prop::builtin(Value::str("TypeMismatchError")));
+                }
+                return Err(e);
+            }
+            let n = t.live_len() * t.kind.size();
+            // Derselbe Deckel wie in der Spezifikation und im Kernel.
+            if n > 65_536 {
+                let e = i.throw_kind("Error", "crypto.getRandomValues: more than 65536 bytes");
+                if let super::interp::Abrupt::Throw(Value::Obj(x)) = &e {
+                    x.borrow_mut().define("name", Prop::builtin(Value::str("QuotaExceededError")));
+                }
+                return Err(e);
+            }
+            if n > 0 {
+                let ok = {
+                    let b = t.buf.borrow();
+                    let ObjKind::Buffer(buf) = &b.kind else {
+                        return i.type_err("crypto.getRandomValues: view has no buffer");
+                    };
+                    let mut bytes = buf.bytes.borrow_mut();
+                    let start = t.offset;
+                    match start.checked_add(n) {
+                        Some(end) if end <= bytes.len() =>
+                            super::random::fill(&mut bytes[start..end]),
+                        // Der Puffer ist unter der Sicht geschrumpft. Kein
+                        // Schreiben, kein Halt.
+                        _ => false,
+                    }
+                };
+                if !ok {
+                    return i.type_err("crypto.getRandomValues: no entropy source");
+                }
+            }
+            // Die Sicht SELBST kommt zurueck, nicht eine Kopie — Seitencode
+            // schreibt `const a = crypto.getRandomValues(new Uint8Array(16))`.
+            Ok(arg)
+        }, 1, fp);
+        // `randomUUID` aus derselben Quelle. Version 4, Variante 1, so wie
+        // RFC 9562 es verlangt — die sechs festen Bits werden gesetzt, nicht
+        // gewuerfelt.
+        def(&crypto, "randomUUID", |i, _, _| {
+            let mut b = [0u8; 16];
+            if !super::random::fill(&mut b) {
+                return i.type_err("crypto.randomUUID: no entropy source");
+            }
+            b[6] = (b[6] & 0x0f) | 0x40;
+            b[8] = (b[8] & 0x3f) | 0x80;
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let mut s = String::with_capacity(36);
+            for (k, byte) in b.iter().enumerate() {
+                if matches!(k, 4 | 6 | 8 | 10) { s.push('-'); }
+                s.push(HEX[(byte >> 4) as usize] as char);
+                s.push(HEX[(byte & 0x0f) as usize] as char);
+            }
+            Ok(Value::string(s))
+        }, 0, fp);
+        crypto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("Crypto")));
+        global.borrow_mut().define("crypto", Prop::builtin(Value::Obj(crypto)));
+    }
+
     let nav = new_obj(Some(object_proto.clone()));
     nav.borrow_mut().define("userAgent", Prop::builtin(Value::str("Mozilla/5.0 (nopeekOS) beak")));
     nav.borrow_mut().define("language", Prop::builtin(Value::str("de")));

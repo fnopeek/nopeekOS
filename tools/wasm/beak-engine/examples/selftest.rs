@@ -3,7 +3,19 @@
 // Unterschied waere ein Befund fuer sich.
 use beak_engine::js::dombind::Doc;
 
+/// Zufall fuer die HOST-Werkzeuge — aus `/dev/urandom`, nicht aus einer
+/// Bequemlichkeit. Ohne sie gaebe es hier kein `crypto`, und dann misst das
+/// Werkzeug eine andere Plattform als das Geraet.
+fn host_random(out: &mut [u8]) -> bool {
+    use std::io::Read;
+    match std::fs::File::open("/dev/urandom") {
+        Ok(mut f) => f.read_exact(out).is_ok(),
+        Err(_) => false,
+    }
+}
+
 fn main() {
+    beak_engine::js::random::set_source(host_random);
     use beak_engine::js::dombind::{Doc, ScriptRef, page_scripts};
 
     let html = include_str!("../../beak/src/selftest.html");

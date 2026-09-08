@@ -33,8 +33,8 @@ fn main() {
         let (mut inl, mut ext, mut miss) = (0, 0, 0);
         for r in refs {
             match r {
-                ScriptRef::Inline(t) => { inl += 1; texts.push(t) }
-                ScriptRef::External(src) => {
+                ScriptRef::Inline(t, _) => { inl += 1; texts.push(t) }
+                ScriptRef::External(src, _) => {
                     let tail = src.rsplit('/').next().unwrap_or("").to_string();
                     match map.iter().find(|(u, _)| u.ends_with(&tail) && !tail.is_empty()) {
                         Some((_, f)) => {

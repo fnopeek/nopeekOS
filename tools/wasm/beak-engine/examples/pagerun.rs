@@ -45,7 +45,19 @@ fn serve_fetches(sess: &mut beak_engine::js::Session, dir: &str) -> usize {
     n
 }
 
+/// Zufall fuer die HOST-Werkzeuge — aus `/dev/urandom`, nicht aus einer
+/// Bequemlichkeit. Ohne sie gaebe es hier kein `crypto`, und dann misst das
+/// Werkzeug eine andere Plattform als das Geraet.
+fn host_random(out: &mut [u8]) -> bool {
+    use std::io::Read;
+    match std::fs::File::open("/dev/urandom") {
+        Ok(mut f) => f.read_exact(out).is_ok(),
+        Err(_) => false,
+    }
+}
+
 fn main() {
+    beak_engine::js::random::set_source(host_random);
     let html_path = std::env::args().nth(1).unwrap_or_default();
     let dir = std::env::args().nth(2).unwrap_or_else(|| ".".into());
     let html = std::fs::read_to_string(&html_path).expect("HTML-Datei");

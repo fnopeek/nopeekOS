@@ -372,6 +372,29 @@ row(langRows, "eigene Eigenschaft durch den Proxy", function () {
       && JSON.stringify(p) === '{"a":1}'
       && JSON.stringify({ ...p }) === '{"a":1}';
 });
+row(domRows, "crypto.getRandomValues", function () {
+  /* Die Quelle ist der CSPRNG des Kernels (ChaCha20, aus RDRAND geseedet),
+     ueber `npk_random_bytes` hereingereicht. `crypto` erscheint NUR, wenn
+     wirklich eine Quelle da ist — eine Seite prueft `if (window.crypto)`,
+     und ein schwacher Zufall beantwortet diese Frage falsch. */
+  if (typeof crypto !== "object") return false;
+  var a = new Uint8Array(32), b = new Uint8Array(32);
+  var r = crypto.getRandomValues(a);
+  crypto.getRandomValues(b);
+  var alleNull = true, gleich = true;
+  for (var i = 0; i < 32; i++) {
+    if (a[i] !== 0) alleNull = false;
+    if (a[i] !== b[i]) gleich = false;
+  }
+  /* Fliesskomma-Sichten sind ausgeschlossen, und 64 KiB ist der Deckel. */
+  var typfehler = false, deckel = false;
+  try { crypto.getRandomValues(new Float64Array(2)); } catch (e) { typfehler = e.name === "TypeMismatchError"; }
+  try { crypto.getRandomValues(new Uint8Array(65537)); } catch (e) { deckel = e.name === "QuotaExceededError"; }
+  var id = crypto.randomUUID();
+  return r === a && !alleNull && !gleich && typfehler && deckel
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)
+      && crypto.randomUUID() !== id;
+});
 row(domRows, "navigator + document: die Pflichtfelder", function () {
   /* `appName`/`appCodeName`/`product`/`productSub` sind KONSTANTEN der
      Spezifikation (HTML 8.9.1.1) und in jedem Browser dieselben — sie

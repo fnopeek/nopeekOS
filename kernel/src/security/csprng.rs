@@ -54,6 +54,23 @@ impl ChaChaRng {
         (hi << 64) | lo
     }
 
+    /// Beliebig viele Bytes am Stueck — der Strom, nicht acht Bytes davon.
+    ///
+    /// Blockweise aus demselben Puffer wie `next_u64`, ohne den Umweg ueber
+    /// 64-Bit-Worte: `crypto.getRandomValues` darf bis 65 536 Bytes auf
+    /// einmal verlangen, und die Wortschleife waere dafuer achtmal so viele
+    /// Grenzpruefungen.
+    fn fill(&mut self, out: &mut [u8]) {
+        let mut done = 0;
+        while done < out.len() {
+            if self.pos >= 64 { self.refill(); }
+            let take = (64 - self.pos).min(out.len() - done);
+            out[done..done + take].copy_from_slice(&self.buffer[self.pos..self.pos + take]);
+            self.pos += take;
+            done += take;
+        }
+    }
+
     fn next_256(&mut self) -> [u8; 32] {
         let mut out = [0u8; 32];
         for i in 0..4 {
@@ -215,6 +232,20 @@ pub fn random_256() -> [u8; 32] {
         let val = rng.next_256();
         if val != [0u8; 32] { return val; }
     }
+}
+
+/// Einen Puffer mit Zufall fuellen — die Quelle hinter
+/// `crypto.getRandomValues` einer Seite.
+///
+/// **Derselbe ChaCha20-Strom wie fuer Kapabilitaetsmarken**, aus RDRAND
+/// geseedet und alle 64 Bloecke neu verschluesselt. Eine zweite, schwaechere
+/// Quelle daneben waere genau die Falle: eine Seite baut daraus
+/// Sitzungsmarken, und „reicht schon" ist dort keine Aussage, die jemand
+/// nachpruefen kann.
+pub fn fill(out: &mut [u8]) {
+    let mut rng = RNG.lock();
+    let rng = rng.as_mut().expect("CSPRNG not initialized");
+    rng.fill(out);
 }
 
 #[allow(dead_code)]
