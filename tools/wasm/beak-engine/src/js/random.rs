@@ -1,7 +1,7 @@
 //! Woher `crypto.getRandomValues` seine Bytes nimmt.
 //!
 //! **Die Engine hat keine Hostfunktionen — der Wirt leiht ihr eine**, genau
-//! wie bei der Uhr (`Engine::set_clock`). Hier ist es der CSPRNG des Kernels
+//! wie bei der Uhr (`Interp::epoch_ms`). Hier ist es der CSPRNG des Kernels
 //! (ChaCha20, aus RDRAND geseedet, alle 64 Bloecke neu verschluesselt), den
 //! beak ueber `npk_random_bytes` hereinreicht.
 //!

@@ -1308,6 +1308,13 @@ pub struct ElemRect {
     /// der Rahmenkasten OHNE sie.
     pub bx: i16,
     pub by: i16,
+    /// Polsterung, ebenso summiert. `ResizeObserver` meldet den INHALTSkasten,
+    /// und der ist der Rahmenkasten ohne beides — ohne diese zwei Zahlen waere
+    /// die gemeldete Groesse um die Polsterung zu gross, und ein Diagramm, das
+    /// sein Zeichenfeld daraus baut, waere in einem gepolsterten Kasten jedes
+    /// Mal zu breit.
+    pub px: i16,
+    pub py: i16,
 }
 
 #[derive(Clone, Copy)]
@@ -1365,6 +1372,10 @@ pub struct HoverBox {
     /// Zahl, die niemand liest, ist Ballast auf einem heissen Pfad.
     pub bx: i16,
     pub by: i16,
+    /// Polsterung, waagerecht und senkrecht summiert — fuer den
+    /// INHALTSkasten, den ein `ResizeObserver` meldet.
+    pub px: i16,
+    pub py: i16,
     /// Clicking this box opens/closes its `<details>`.
     ///
     /// It rides in `hover_boxes` rather than in a list of its own because this
@@ -1462,7 +1473,8 @@ impl Layout {
     pub fn element_rects(&self) -> Vec<ElemRect> {
         let mut out = Vec::with_capacity(self.hover_boxes.len() + self.controls.len());
         for c in &self.controls {
-            out.push(ElemRect { seq: c.seq, x: c.x, y: c.y, w: c.w, h: c.h, bx: 0, by: 0 });
+            out.push(ElemRect { seq: c.seq, x: c.x, y: c.y, w: c.w, h: c.h,
+                                bx: 0, by: 0, px: 0, py: 0 });
         }
         // **Der Kasten eines Steuerelements ist das Steuerelement.** Ein
         // blockweiter Knopf bekommt vom Blockpfad AUSSERDEM einen Kasten in
@@ -1473,7 +1485,8 @@ impl Layout {
             if self.controls.iter().any(|c| c.seq == b.seq) {
                 continue;
             }
-            out.push(ElemRect { seq: b.seq, x: b.x, y: b.y, w: b.w, h: b.h, bx: b.bx, by: b.by });
+            out.push(ElemRect { seq: b.seq, x: b.x, y: b.y, w: b.w, h: b.h,
+                                bx: b.bx, by: b.by, px: b.px, py: b.py });
         }
         out
     }
@@ -2213,6 +2226,8 @@ impl<'a> Ctx<'a> {
                 shadow: true,
                 bx: st.border_x() as i16,
                 by: st.border_y() as i16,
+                px: (st.pad_left + st.pad_right) as i16,
+                py: (st.pad_top + st.pad_bottom) as i16,
                 pseudo: PseudoElem::None,
                 anchor_after: false,
                 has_text: false,
@@ -3399,6 +3414,8 @@ impl<'a> Ctx<'a> {
                     shadow: false,
                     bx: 0,
                     by: 0,
+                    px: 0,
+                    py: 0,
                     pseudo: kind,
                     anchor_after: true,
                     has_text: !text.trim().is_empty(),
@@ -10491,6 +10508,8 @@ fn emit_line(
                         shadow: false,
                         bx: 0,
                         by: 0,
+                        px: 0,
+                        py: 0,
                         pseudo: crate::css::PseudoElem::None,
                         anchor_after: false,
                         has_text: false,

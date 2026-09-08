@@ -3293,6 +3293,8 @@ pub fn make_realm() -> Realm {
             response_proto: ph(), headers_proto: ph(),
             abort_signal_proto: ph(), abort_ctrl_proto: ph(), xhr_proto: ph(),
             mo_proto: ph(),
+            ro_proto: ph(),
+            io_proto: ph(),
             ta_protos, typed_proto: ta_proto, buffer_proto: ab_proto,
             dataview_proto: dv_proto }
 }
