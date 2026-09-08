@@ -404,6 +404,7 @@ pub fn install(realm: &mut Realm) {
     // ── Headers ─────────────────────────────────────────────────────────
     let h_proto = new_obj(Some(op.clone()));
     realm.headers_proto = h_proto.clone();
+    h_proto.borrow_mut().define(super::value::SYM_TO_STRING_TAG, Prop::tag(Value::str("Headers")));
     let h_ctor = native(Some(fp.clone()), |i, _, a| {
         let mut raw = String::new();
         if let Some(v @ Value::Obj(_)) = a.first() {
@@ -469,6 +470,7 @@ pub fn install(realm: &mut Realm) {
     // ── Response ────────────────────────────────────────────────────────
     let r_proto = new_obj(Some(op.clone()));
     realm.response_proto = r_proto.clone();
+    r_proto.borrow_mut().define(super::value::SYM_TO_STRING_TAG, Prop::tag(Value::str("Response")));
     let r_ctor = native(Some(fp.clone()), |i, _, a| {
         let body = match a.first() {
             None | Some(Value::Undefined) | Some(Value::Null) => String::new(),
@@ -551,6 +553,7 @@ pub fn install(realm: &mut Realm) {
     // ── AbortSignal ─────────────────────────────────────────────────────
     let s_proto = new_obj(Some(op.clone()));
     realm.abort_signal_proto = s_proto.clone();
+    s_proto.borrow_mut().define(super::value::SYM_TO_STRING_TAG, Prop::tag(Value::str("AbortSignal")));
     let s_ctor = native(Some(fp.clone()), |i, _, _| {
         // Wie im Browser: ein Signal entsteht am Controller, nicht mit `new`.
         i.type_err("Illegal constructor")
@@ -597,6 +600,7 @@ pub fn install(realm: &mut Realm) {
     // ── AbortController ─────────────────────────────────────────────────
     let c_proto = new_obj(Some(op.clone()));
     realm.abort_ctrl_proto = c_proto.clone();
+    c_proto.borrow_mut().define(super::value::SYM_TO_STRING_TAG, Prop::tag(Value::str("AbortController")));
     let c_ctor = native(Some(fp.clone()), |i, _, _| {
         let c = new_obj(Some(i.realm.abort_ctrl_proto.clone()));
         let s = new_signal(i);
@@ -779,6 +783,7 @@ pub(crate) fn install_xhr(realm: &mut Realm) {
     let op = realm.object_proto.clone();
     let proto = new_obj(Some(op.clone()));
     realm.xhr_proto = proto.clone();
+    proto.borrow_mut().define(super::value::SYM_TO_STRING_TAG, Prop::tag(Value::str("XMLHttpRequest")));
 
     let ctor = native(Some(fp.clone()), |i, _, _| {
         let x = new_obj(Some(i.realm.xhr_proto.clone()));

@@ -185,7 +185,30 @@ pub fn perform_then_cap(i: &mut Interp, p: &Gc, on_ok: Value, on_err: Value,
 /// dieselbe Entscheidung wie bei `run_timers` — EINMAL durchlaufen ist zu
 /// wenig (eine Kette braucht ihre Sprossen), unbegrenzt zu viel.
 pub fn run_jobs(i: &mut Interp) -> usize {
-    let n = run_queue(i);
+    let mut n = 0;
+    // **Der Kontrollpunkt der Beobachter.** Er gehoert hierher und nicht in
+    // `run_timers`: `run_jobs` laeuft nach JEDEM Einstiegspunkt — nach einem
+    // Skript, nach einem Ereignis, nach jedem Zeitgeber. Ein Beobachter, der
+    // erst beim naechsten Zeitgeber benachrichtigt wuerde, bekaeme auf einer
+    // Seite ohne Zeitgeber nie etwas zu sehen.
+    //
+    // In einer Schleife, weil ein Rueckruf den Baum aendern darf: das ist
+    // das uebliche Muster (eine Bibliothek erweckt frisch eingehaengtes
+    // Markup und haengt dabei selbst etwas ein). Begrenzt wird sie nicht
+    // hier, sondern von Schritt- und Zeitdeckel — die gelten auch fuer eine
+    // Endlosschleife, die aus lauter gewoehnlichen Runden besteht.
+    loop {
+        // **Zuerst zustellen, dann die Schlange fahren.** Die Meldung wird
+        // angemeldet, wenn die Aenderung passiert — also waehrend das Skript
+        // lief und damit VOR jedem `.then`, das danach kam. Andersherum
+        // gerufen liefe der Beobachter als Letzter, und eine Seite, die im
+        // `.then` das Ergebnis erwartet, saehe nichts.
+        let zugestellt = super::dombind::deliver_mutations(i);
+        let gefahren = run_queue(i);
+        n += gefahren;
+        if !zugestellt && gefahren == 0 { break }
+        if i.tick().is_err() { break }
+    }
     report_rejections(i);
     n
 }

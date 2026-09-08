@@ -169,8 +169,31 @@ pub fn make_realm() -> Realm {
                 };
                 alloc::format!("[object {tag}]")
             }
-            Value::Sym(_) => "[object Symbol]".to_string(),
-            _ => "[object Object]".to_string()
+            // **Ein Primitiv wird EINGEPACKT, bevor die Marke gelesen wird**
+            // (§20.1.3.6 Schritt 3) — vorher fielen `true`, `1`, `"s"` und
+            // `10n` alle auf `[object Object]`. Das ist die Zeile, mit der
+            // jede Bibliothek ihre Typen unterscheidet: Bootstrap lehnte
+            // deshalb sein eigenes `backdrop: true` als „object" ab.
+            //
+            // Eingepackt wird trotzdem NICHT wirklich. Eine Huelle waere hier
+            // reine Verschwendung, und bei einer Zeichenkette eine teure:
+            // sie legt eine Eigenschaft je Zeichen an
+            // ([[feedback_the_wrapper_built_the_whole_string]]). Beobachtbar
+            // ist an ihr ohnehin nur der Weg zu `Symbol.toStringTag` — und
+            // den geht `get` auf dem Primitiv genauso.
+            v => {
+                if let Ok(Value::Str(t)) = i.get(&this, SYM_TO_STRING_TAG) {
+                    return Ok(Value::string(alloc::format!("[object {t}]")));
+                }
+                match v {
+                    Value::Bool(_) => "[object Boolean]",
+                    Value::Num(_) => "[object Number]",
+                    Value::Str(_) => "[object String]",
+                    Value::BigInt(_) => "[object BigInt]",
+                    Value::Sym(_) => "[object Symbol]",
+                    _ => "[object Object]",
+                }.to_string()
+            }
         }))
     }, 0, fp);
     def(&object_proto, "valueOf", |i, this, _| {
@@ -2377,6 +2400,7 @@ pub fn make_realm() -> Realm {
         perf.borrow_mut().define(m, Prop::builtin(Value::Obj(g)));
     }
     perf.borrow_mut().define("timeOrigin", Prop::builtin(Value::Num(0.0)));
+    perf.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("Performance")));
     global.borrow_mut().define("performance", Prop::builtin(Value::Obj(perf)));
 
     let console = new_obj(Some(object_proto.clone()));
@@ -2396,12 +2420,14 @@ pub fn make_realm() -> Realm {
         let g = native(Some(function_proto.clone()), f, m, 0, false);
         console.borrow_mut().define(m, Prop::builtin(Value::Obj(g)));
     }
+    console.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("console")));
     global.borrow_mut().define("console", Prop::builtin(Value::Obj(console)));
 
     let nav = new_obj(Some(object_proto.clone()));
     nav.borrow_mut().define("userAgent", Prop::builtin(Value::str("Mozilla/5.0 (nopeekOS) beak")));
     nav.borrow_mut().define("language", Prop::builtin(Value::str("de")));
     nav.borrow_mut().define("onLine", Prop::builtin(Value::Bool(true)));
+    nav.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("Navigator")));
     global.borrow_mut().define("navigator", Prop::builtin(Value::Obj(nav)));
 
     // ── location ─────────────────────────────────────────────────────────
@@ -2473,6 +2499,7 @@ pub fn make_realm() -> Realm {
     // verbreitete Idiome; ohne das vergleicht eine Seite gegen einen Text,
     // den sie nie geschrieben hat.
     def(&loc, "toString", |i, _, _| Ok(Value::str(&i.loc_href)), 0, fp);
+    loc.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("Location")));
     // `window.location = "…"` navigiert, es ERSETZT das Objekt nicht
     // (HTML §7.2.4, [PutForwards=href]). Als Datenfeld haette eine Seite
     // hier still ihr `location` gegen eine Zeichenkette getauscht und waere
@@ -2548,6 +2575,7 @@ pub fn make_realm() -> Realm {
         i.history_ops.push(super::interp::HistoryOp::Go(1));
         Ok(Value::Undefined)
     }, 0, fp);
+    hist.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("History")));
     global.borrow_mut().define("history", Prop::builtin(Value::Obj(hist)));
 
     // ── Date, klein aber vorhanden ───────────────────────────────────────
@@ -3071,6 +3099,7 @@ pub fn make_realm() -> Realm {
             tag_protos: HashMap::new(), url_proto: ph(), url_params_proto: ph(),
             response_proto: ph(), headers_proto: ph(),
             abort_signal_proto: ph(), abort_ctrl_proto: ph(), xhr_proto: ph(),
+            mo_proto: ph(),
             ta_protos, typed_proto: ta_proto, buffer_proto: ab_proto,
             dataview_proto: dv_proto }
 }
