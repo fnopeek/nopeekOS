@@ -48,11 +48,20 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-08 · beak 0.128.0 · Kernel 0.328.0** (Rest: `git log`)
+**Stand 2026-09-08 · beak 0.129.0 · Kernel 0.328.0** (Rest: `git log`)
 
-**▶ Als nächstes: Kernel 0.328.0 am Gerät prüfen**, dann htmx
-(`XPathEvaluator`) und die Ligaturen. Stand und Werkzeug:
-`memory/project_beak_library_probes.md`.
+**▶ Als nächstes: htmx (`XPathEvaluator`) und die Ligaturen.**
+Stand: `memory/project_beak_library_probes.md`.
+
+**0.129.0: sechs Schriften beim Start, zwei gebraucht.** `beakbench` sagt,
+dass das Schriftrastern die Halde von 11 auf 89 MiB treibt und das Layout
+nichts drauflegt; die neue Sonde `examples/heapcheck.rs` trennt GEHALTEN von
+SPITZE und zeigt, dass die 40 MB **Dauerbedarf** sind (6,7 MB je Gesicht,
+2,9 KB je Glyphe — fontdue umreisst jede Glyphe beim Parsen, siehe
+`assets/subset.sh`). Keine Seite fasst alle sechs an (ddg 0, selftest 2,
+tailwind 5), also werden sie **faul** geladen: Start 435 → 0 ms, srf
+89 → 44 MiB, alle zwölf `gate`-Hashes byte-identisch. Stand:
+`memory/project_beak_memory_footprint.md`.
 
 **0.328.0 (Kernel): was `memory.grow` dazulegte, kam nie zurück.** Der
 generierte Code wächst über `forge_rt::grow`, die den **vmctx** schreibt;
@@ -118,6 +127,7 @@ als Ligatur; fontdue läuft mit `load_substitutions: false`, also ist
     WPT (CSS)       4485/5200 = 86,2 % ohne Testvehikel (roh 79,4 %)
     Bibliotheken    12 von 13 (`<tools>/libprobe/`)
     beak:selftest   Sprache 55/55, Dokument 35/35
+    Halde           Schriften faul; srf 44 MiB (war 89)
 
 Das eigene Testziel ist **`beak:selftest`** — eine Prüfseite aus dem
 Binärbild, die nichts holt und ihr Ergebnis auf dem Schirm UND im Log sagt.
