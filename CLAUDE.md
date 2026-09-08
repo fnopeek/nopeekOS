@@ -48,10 +48,21 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-08 · beak 0.128.0 · Kernel 0.327.0** (Rest: `git log`)
+**Stand 2026-09-08 · beak 0.128.0 · Kernel 0.328.0** (Rest: `git log`)
 
-**▶ Als nächstes: htmx (`XPathEvaluator`) und die Ligaturen.**
-Stand und Werkzeug: `memory/project_beak_library_probes.md`.
+**▶ Als nächstes: Kernel 0.328.0 am Gerät prüfen**, dann htmx
+(`XPathEvaluator`) und die Ligaturen. Stand und Werkzeug:
+`memory/project_beak_library_probes.md`.
+
+**0.328.0 (Kernel): was `memory.grow` dazulegte, kam nie zurück.** Der
+generierte Code wächst über `forge_rt::grow`, die den **vmctx** schreibt;
+`Memory::size` blieb auf dem Startwert, und `Memory::drop` gab genau den
+frei. Alles, was eine Modulhalde während eines Laufs dazunahm, blieb bis zum
+Neustart abgebildet. beak starb danach an „Halde erschöpft, 318 Seiten" —
+und 318 ist die **Startgrösse** aus seinem Binärbild, der Lauf war also
+unschuldig. `Memory::grow` hielt die Grösse korrekt nach und wurde von
+niemandem gerufen; er ist weg. **Am Gerät noch nicht geprüft:** die Zeile
+`[npk] forge: Instanz gibt N MB zurueck` muss beim Beenden erscheinen.
 
 **0.128.0: der klassische Clearfix mass null.** Räumung ist Platz IM Kasten,
 kein Schub AUF ihn — die Oberkante des Elters wanderte mit hinunter. Die
