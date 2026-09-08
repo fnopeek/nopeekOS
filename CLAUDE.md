@@ -61,8 +61,11 @@ frei. Alles, was eine Modulhalde während eines Laufs dazunahm, blieb bis zum
 Neustart abgebildet. beak starb danach an „Halde erschöpft, 318 Seiten" —
 und 318 ist die **Startgrösse** aus seinem Binärbild, der Lauf war also
 unschuldig. `Memory::grow` hielt die Grösse korrekt nach und wurde von
-niemandem gerufen; er ist weg. **Am Gerät noch nicht geprüft:** die Zeile
-`[npk] forge: Instanz gibt N MB zurueck` muss beim Beenden erscheinen.
+niemandem gerufen; er ist weg. **Am Gerät bestätigt:**
+`[npk] forge: Instanz gibt 79 MB zurueck (59 MB davon gewachsen)` — so viel
+ging bisher bei jedem beak-Lauf verloren. Offen und davon getrennt: warum
+eine 26-KB-Seite die Halde überhaupt auf 79 MB treibt (talc gibt Seiten nie
+zurück, die SPITZE wird zum Dauerbedarf).
 
 **0.128.0: der klassische Clearfix mass null.** Räumung ist Platz IM Kasten,
 kein Schub AUF ihn — die Oberkante des Elters wanderte mit hinunter. Die
