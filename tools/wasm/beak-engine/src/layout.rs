@@ -1315,6 +1315,11 @@ pub struct ElemRect {
     /// Mal zu breit.
     pub px: i16,
     pub py: i16,
+    /// `position` ist nicht `static`. Das ist die ganze Frage, die
+    /// `offsetParent` stellt (CSSOM View §5): der naechste positionierte
+    /// Vorfahr. Ohne diese Ecke muesste die Bindung fuer JEDEN Vorfahren die
+    /// Kaskade neu aufloesen — dieselbe Antwort, hundertmal teurer.
+    pub positioned: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1376,6 +1381,8 @@ pub struct HoverBox {
     /// INHALTSkasten, den ein `ResizeObserver` meldet.
     pub px: i16,
     pub py: i16,
+    /// `position` ist nicht `static` — die Frage, die `offsetParent` stellt.
+    pub positioned: bool,
     /// Clicking this box opens/closes its `<details>`.
     ///
     /// It rides in `hover_boxes` rather than in a list of its own because this
@@ -1474,7 +1481,7 @@ impl Layout {
         let mut out = Vec::with_capacity(self.hover_boxes.len() + self.controls.len());
         for c in &self.controls {
             out.push(ElemRect { seq: c.seq, x: c.x, y: c.y, w: c.w, h: c.h,
-                                bx: 0, by: 0, px: 0, py: 0 });
+                                bx: 0, by: 0, px: 0, py: 0, positioned: false });
         }
         // **Der Kasten eines Steuerelements ist das Steuerelement.** Ein
         // blockweiter Knopf bekommt vom Blockpfad AUSSERDEM einen Kasten in
@@ -1486,7 +1493,8 @@ impl Layout {
                 continue;
             }
             out.push(ElemRect { seq: b.seq, x: b.x, y: b.y, w: b.w, h: b.h,
-                                bx: b.bx, by: b.by, px: b.px, py: b.py });
+                                bx: b.bx, by: b.by, px: b.px, py: b.py,
+                                positioned: b.positioned });
         }
         out
     }
@@ -2228,6 +2236,7 @@ impl<'a> Ctx<'a> {
                 by: st.border_y() as i16,
                 px: (st.pad_left + st.pad_right) as i16,
                 py: (st.pad_top + st.pad_bottom) as i16,
+                positioned: st.position != crate::style::Position::Static,
                 pseudo: PseudoElem::None,
                 anchor_after: false,
                 has_text: false,
@@ -3416,6 +3425,7 @@ impl<'a> Ctx<'a> {
                     by: 0,
                     px: 0,
                     py: 0,
+                    positioned: false,
                     pseudo: kind,
                     anchor_after: true,
                     has_text: !text.trim().is_empty(),
@@ -10510,6 +10520,7 @@ fn emit_line(
                         by: 0,
                         px: 0,
                         py: 0,
+                        positioned: false,
                         pseudo: crate::css::PseudoElem::None,
                         anchor_after: false,
                         has_text: false,

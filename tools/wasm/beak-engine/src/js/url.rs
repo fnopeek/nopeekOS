@@ -70,6 +70,13 @@ pub fn parse_abs(input: &str) -> Option<Parts> {
         rest = &r[end..];
         // Anmeldedaten in der Adresse werden verworfen, nicht als Host
         // gelesen — `http://user@host/` hat den Host HINTER dem `@`.
+        //
+        // **Und sie kommen auch nicht zurueck.** Ein `URL`-Gegenstand haelt
+        // nur seinen `href`, und was nicht in `href()` steht, ueberlebt keinen
+        // Zugriff. Das ist hier die richtige Richtung: `location.href =
+        // "http://google.com@boese.example/"` wuerde in der Adresszeile
+        // aussehen wie Google. Was `URL.username` dazu sagt, steht bei den
+        // Zugriffsfunktionen.
         let hostport = auth.rsplit('@').next().unwrap_or(auth);
         match hostport.rfind(':') {
             Some(i) if hostport[i + 1..].bytes().all(|b| b.is_ascii_digit())
@@ -308,6 +315,24 @@ pub fn install(realm: &mut Realm) {
           |p, v| p.query = v.trim_start_matches('?').to_string());
     part!("hash", |p| if p.hash.is_empty() { String::new() } else { alloc::format!("#{}", p.hash) },
           |p, v| p.hash = v.trim_start_matches('#').to_string());
+    // `username`/`password` — 94 Aufrufe im Zensus, und was sie fragen, ist
+    // „steht da etwas?".
+    //
+    // **Sie sind IMMER leer, und das ist keine Luecke, sondern die Wahrheit
+    // ueber beaks Adressen:** `parse_abs` verwirft Anmeldedaten, weil
+    // `http://google.com@boese.example/` in einer Adresszeile aussieht wie
+    // Google. Eine Adresse in beak hat keine, also melden sie keine.
+    //
+    // Das Zuweisen wird ANGENOMMEN und tut nichts. Die Spezifikation kennt
+    // genau das (URL §6.2: „cannot have a username/password/port" — dort fuer
+    // `file:`); hier gilt es fuer jedes Schema. Zu werfen waere schlechter:
+    // eine Seite, die einen Benutzernamen setzt und ihn nie wieder liest,
+    // stuerbe an einer Zeile, die nichts bedeutet.
+    for k in ["username", "password"] {
+        part_accessor(&proto, k,
+            |_, _, _| Ok(Value::str("")),
+            |_, _, _| Ok(Value::Undefined), &fp);
+    }
 
     let og = native(Some(fp.clone()), |i, t, _| {
         let p = parts_of(i, &t)?; Ok(Value::string(p.origin()))

@@ -106,6 +106,7 @@ fn main() {
     sess.interp.set_geometry(beak_engine::js::interp::Geometry {
         boxes: std::rc::Rc::new(lay.element_rects()),
         scroll: (0, 0),
+        content: (1024, lay.height as i32),
     });
     for (id, times) in [("b1", 2usize), ("b2", 1), ("b3", 1), ("b4", 1)] {
         let Some(n) = find_id(sess.interp.doc.as_ref().unwrap(), id) else {

@@ -55,6 +55,7 @@
 <h2>Kasten-Beobachter</h2>
 <p id="ro">ResizeObserver hat nicht gemeldet.</p>
 <p id="io">IntersectionObserver hat nicht gemeldet.</p>
+<p id="roll">Rollmasse ungeprueft.</p>
 <div id="weitunten" style="margin-top:2400px;height:80px;background:#eef">
  weit unten &mdash; kommt erst beim Rollen in den Blick</div>
 
@@ -493,6 +494,35 @@ row(domRows, "Kasten-Beobachter: die Form", function () {
       && typeof ro.observe === "function" && typeof io.disconnect === "function"
       && schwellenFalsch;
 });
+row(domRows, "Kleinkram, der vorher warf", function () {
+  /* Neun Namen in einer Zeile. Jeder war vorher GAR NICHT da, und ein
+     fehlendes Feld ist ein TypeError mitten in fremdem Code — kein falscher
+     Wert, den man sieht. */
+  var l = document.getElementById("b3");
+  var attrs = l.attributes;
+  var vorher = l.hasAttribute("data-probe");
+  var an = l.toggleAttribute("data-probe");
+  var aus = l.toggleAttribute("data-probe");
+  var d = document.createElement("div");
+  d.innerHTML = "<i>1</i><b>2</b>";
+  d.replaceChildren(document.createElement("u"));
+  var u = new URL("http://bob:x@example.com/p");
+  return attrs.length >= 1 && attrs[0].name === attrs.item(0).name
+      && Object.prototype.toString.call(attrs) === "[object NamedNodeMap]"
+      && Object.prototype.toString.call(attrs[0]) === "[object Attr]"
+      && attrs.getNamedItem("id").value === "b3"
+      && vorher === false && an === true && aus === false
+      && l.isConnected === true && document.createElement("i").isConnected === false
+      && l.nextElementSibling !== null && l.nextElementSibling.nodeType === 1
+      && document.body.childElementCount > 3
+      && d.childNodes.length === 1 && d.firstElementChild.tagName === "U"
+      /* Anmeldedaten faehrt beak NICHT — und sagt das, statt zu schweigen. */
+      && u.username === "" && u.href.indexOf("bob") < 0
+      && (function () { l.ariaHidden = "true";
+                        var a = l.ariaHidden === "true" && l.getAttribute("aria-hidden") === "true";
+                        l.ariaHidden = null;
+                        return a && l.ariaHidden === null && !l.hasAttribute("aria-hidden"); })();
+});
 row(domRows, "Event + dispatchEvent", function () {
   var e = document.getElementById("b3"), traf = 0, ziel = null;
   e.addEventListener("probe", function (ev) { traf++; ziel = ev.target; });
@@ -593,6 +623,15 @@ function say(id, text) {
 var clicks = 0;
 document.getElementById("b1").addEventListener("click", function () {
   clicks++;
+  /* JETZT steht das Layout — vorher sind die Rollmasse 0, und eine 0 sieht
+     aus wie eine Antwort. Die Seite ist laenger als das Fenster, also MUSS
+     `scrollHeight` groesser als `clientHeight` sein; ist er es nicht, kommt
+     die Rollflaeche nicht mehr aus dem Layout. */
+  var r = document.documentElement;
+  say("roll", r.scrollHeight > r.clientHeight && r.clientHeight > 0
+        ? "Rollmasse: Dokument " + r.scrollHeight + " hoch, Fenster "
+          + r.clientHeight + ", Stand " + window.scrollY
+        : "NEIN: scrollHeight=" + r.scrollHeight + ", clientHeight=" + r.clientHeight);
   say("count", clicks + " Klick" + (clicks === 1 ? "" : "s"));
   /* Und JETZT ist die Seite ausgelegt: hier gehoert eine echte Zahl her.
      Der Knopf, auf den gerade geklickt wurde, hat eine Breite und eine
