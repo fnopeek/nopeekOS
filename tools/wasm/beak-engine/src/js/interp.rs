@@ -71,6 +71,15 @@ pub struct Env {
     /// Nur Modulumgebungen tragen die Tabelle; jede andere ein `None`, und
     /// das ist eine Nullpruefung im Kettenlauf.
     pub imports: Option<Box<HashMap<Rc<str>, (Rc<RefCell<Env>>, Rc<str>)>>>,
+    /// Das Objekt eines `with (o) { … }`.
+    ///
+    /// **Eine Umgebung, deren Namen aus einem OBJEKT kommen** — die einzige
+    /// Sorte, deren Bindungen sich waehrend des Laufs aendern koennen. Sie
+    /// ist deshalb auch der Grund, warum die Wegweiser (`Chunk::hints`)
+    /// abgeschaltet werden, sobald eine entsteht: ein Hinweis auf eine Tiefe
+    /// zeigt an einer Eigenschaft vorbei, die es beim letzten Mal noch nicht
+    /// gab.
+    pub with_obj: Option<Gc>,
 }
 
 impl Env {
@@ -81,7 +90,7 @@ impl Env {
         let strict = parent.as_ref().is_some_and(|p| p.borrow().strict);
         Rc::new(RefCell::new(Env {
             vars: HashMap::new(), parent, this_val: None, is_func_scope: func_scope, home: None,
-            strict, imports: None,
+            strict, imports: None, with_obj: None,
         }))
     }
 }
@@ -689,7 +698,9 @@ pub struct Interp {
     pub native_new: bool,
     pub last_match: Option<LastMatch>,
     pub console: Vec<String>,
-    console_dropped: usize,
+    /// Wie viele Zeilen der Deckel verworfen hat. OEFFENTLICH, weil ein
+    /// stiller Deckel jede Fehlersuche zur Messung des Deckels macht.
+    pub console_dropped: usize,
 }
 
 /// Wie viele Zeilen `console` haelt, und wie lang eine werden darf.
@@ -1436,9 +1447,9 @@ impl Interp {
         // Prototypenkette darunter wird nicht gelaufen.
         if super::proxy::parts(&start).is_some() {
             return match super::proxy::trap(self, &start, "get")? {
-                Some((f, t)) => {
+                Some((f, h, t)) => {
                     let kv = super::proxy::key_value(key);
-                    self.call(&f, Value::Undefined, &[t, kv, base.clone()])
+                    self.call(&f, h, &[t, kv, base.clone()])
                 }
                 None => { let t = super::proxy::target(self, &start)?; self.get(&Value::Obj(t), key) }
             };
@@ -1550,9 +1561,9 @@ impl Interp {
         }
         if super::proxy::parts(o).is_some() {
             return match super::proxy::trap(self, o, "set")? {
-                Some((f, t)) => {
+                Some((f, h, t)) => {
                     let kv = super::proxy::key_value(key);
-                    let r = self.call(&f, Value::Undefined, &[t, kv, val, base.clone()])?;
+                    let r = self.call(&f, h, &[t, kv, val, base.clone()])?;
                     if !r.truthy() {
                         strict_site!(self, 5);
                         if throw {
@@ -1680,9 +1691,9 @@ impl Interp {
         // Stellvertreter am Behandler vorbei ans Ziel.
         if super::proxy::parts(f).is_some() {
             return match super::proxy::trap(self, f, "apply")? {
-                Some((h, t)) => {
+                Some((fn_, hv, t)) => {
                     let arr = self.new_array(args.to_vec());
-                    self.call(&h, Value::Undefined, &[t, this_val, arr])
+                    self.call(&fn_, hv, &[t, this_val, arr])
                 }
                 None => { let t = super::proxy::target(self, f)?;
                           self.call(&Value::Obj(t), this_val, args) }
@@ -2375,9 +2386,9 @@ impl Interp {
     pub fn has_prop(&mut self, o: &Gc, key: &str) -> C<bool> {
         if super::proxy::parts(o).is_some() {
             return match super::proxy::trap(self, o, "has")? {
-                Some((f, t)) => {
+                Some((f, h, t)) => {
                     let kv = super::proxy::key_value(key);
-                    let r = self.call(&f, Value::Undefined, &[t, kv])?;
+                    let r = self.call(&f, h, &[t, kv])?;
                     Ok(r.truthy())
                 }
                 None => { let t = super::proxy::target(self, o)?; self.has_prop(&t, key) }
@@ -2390,8 +2401,8 @@ impl Interp {
     pub fn own_keys_of(&mut self, o: &Gc) -> C<Vec<PropName>> {
         if super::proxy::parts(o).is_some() {
             return match super::proxy::trap(self, o, "ownKeys")? {
-                Some((f, t)) => {
-                    let r = self.call(&f, Value::Undefined, &[t])?;
+                Some((f, h, t)) => {
+                    let r = self.call(&f, h, &[t])?;
                     let items = self.elems(&r)?;
                     let mut out = Vec::with_capacity(items.len());
                     for v in items { out.push(PropName::from(&*self.to_prop_key(&v)?)); }
@@ -2407,9 +2418,9 @@ impl Interp {
     pub fn get_own_desc(&mut self, o: &Gc, key: &str) -> C<Option<Prop>> {
         if super::proxy::parts(o).is_some() {
             return match super::proxy::trap(self, o, "getOwnPropertyDescriptor")? {
-                Some((f, t)) => {
+                Some((f, h, t)) => {
                     let kv = super::proxy::key_value(key);
-                    let r = self.call(&f, Value::Undefined, &[t, kv])?;
+                    let r = self.call(&f, h, &[t, kv])?;
                     if matches!(r, Value::Undefined) { return Ok(None); }
                     if !matches!(r, Value::Obj(_)) {
                         return self.type_err("getOwnPropertyDescriptor trap did not return an object");
@@ -2435,10 +2446,10 @@ impl Interp {
     pub fn define_own(&mut self, o: &Gc, key: &str, d: Desc) -> C<bool> {
         if super::proxy::parts(o).is_some() {
             return match super::proxy::trap(self, o, "defineProperty")? {
-                Some((f, t)) => {
+                Some((f, h, t)) => {
                     let kv = super::proxy::key_value(key);
                     let dv = self.desc_to_object(&d);
-                    let r = self.call(&f, Value::Undefined, &[t, kv, dv])?;
+                    let r = self.call(&f, h, &[t, kv, dv])?;
                     Ok(r.truthy())
                 }
                 None => { let t = super::proxy::target(self, o)?; self.define_own(&t, key, d) }
@@ -2523,8 +2534,8 @@ impl Interp {
     pub fn proto_of(&mut self, o: &Gc) -> C<Option<Gc>> {
         if super::proxy::parts(o).is_some() {
             return match super::proxy::trap(self, o, "getPrototypeOf")? {
-                Some((f, t)) => {
-                    let r = self.call(&f, Value::Undefined, &[t])?;
+                Some((f, h, t)) => {
+                    let r = self.call(&f, h, &[t])?;
                     Ok(match r { Value::Obj(x) => Some(x), _ => None })
                 }
                 None => { let t = super::proxy::target(self, o)?; self.proto_of(&t) }
@@ -2642,6 +2653,45 @@ impl Interp {
             }
             _ => self.type_err("value is not array-like"),
         }
+    }
+
+    /// Ein Feld MIT LOECHERN: nur die genannten Plaetze werden belegt, die
+    /// Laenge steht trotzdem fest.
+    ///
+    /// Ein Loch ist nicht `undefined`. `new Array(3).concat("x").map(f)` ruft
+    /// `f` genau EINMAL — d3 baut damit seine Farbtabellen, und ein Loch, das
+    /// als Wert durchgereicht wird, kommt dort als `undefined.length` an.
+    /// `{ __proto__: v }` im Objektliteral SETZT den Prototyp (ES 13.2.5.5,
+    /// PropertyDefinitionEvaluation) — es legt KEINE Eigenschaft an.
+    ///
+    /// Der Unterschied ist nicht akademisch: chart.js beginnt mit
+    /// `Object.freeze({__proto__:null, get Colors(){…}, …})` und laeuft
+    /// danach ueber die eigenen Schluessel dieses Namensraums. Als
+    /// Eigenschaft gelesen steht `__proto__` mit dem Wert `null` mit in der
+    /// Liste — und der naechste Zugriff ist `null.prototype`.
+    ///
+    /// Nur ein Objekt oder `null` wirken; alles andere wird still verworfen,
+    /// so wie es die Spezifikation sagt.
+    pub fn set_literal_proto(&mut self, o: &Gc, v: &Value) {
+        match v {
+            Value::Obj(p) => o.borrow_mut().proto = Some(p.clone()),
+            Value::Null => o.borrow_mut().proto = None,
+            _ => {}
+        }
+    }
+
+    pub fn new_sparse_array(&mut self, len: usize, items: Vec<(usize, Value)>) -> Value {
+        let g = new_kind(Some(self.realm.array_proto.clone()), ObjKind::Array);
+        {
+            let mut o = g.borrow_mut();
+            for (k, v) in items {
+                o.define(&num_to_string(k as f64), Prop::data(v));
+            }
+            o.define("length", Prop {
+                value: Some(Value::Num(len as f64)), get: None, set: None,
+                writable: true, enumerable: false, configurable: false });
+        }
+        Value::Obj(g)
     }
 
     pub fn new_array(&mut self, items: Vec<Value>) -> Value {

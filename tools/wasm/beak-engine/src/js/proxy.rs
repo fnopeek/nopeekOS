@@ -36,7 +36,7 @@ pub fn is_proxy(v: &Value) -> bool {
 
 /// Ziel und Falle holen. `Ok(None)` heisst: keine Falle, die Operation geht
 /// unveraendert ans Ziel.
-pub fn trap(i: &mut Interp, o: &Gc, name: &str) -> C<Option<(Value, Value)>> {
+pub fn trap(i: &mut Interp, o: &Gc, name: &str) -> C<Option<(Value, Value, Value)>> {
     let Some(cell) = parts(o) else { return Ok(None) };
     let Some((t, h)) = cell.borrow().clone() else {
         return i.type_err("cannot perform this operation on a revoked proxy");
@@ -45,7 +45,13 @@ pub fn trap(i: &mut Interp, o: &Gc, name: &str) -> C<Option<(Value, Value)>> {
     let f = i.get(&hv, name)?;
     if matches!(f, Value::Undefined | Value::Null) { return Ok(None); }
     if !i.is_callable(&f) { return i.type_err("proxy trap is not a function"); }
-    Ok(Some((f, Value::Obj(t))))
+    // **Der BEHANDLER ist der Empfaenger der Falle** (`Call(trap, handler,
+    // args)`, ES 10.5.x — in jeder einzelnen). Vorher lief jede Falle mit
+    // `this === undefined`: ein Behandler, der als KLASSE geschrieben ist,
+    // fand seine eigenen Felder nicht. Vues Reaktivitaet ist genau so
+    // gebaut (`class { constructor(){ this._isReadonly = … } get(t,k){ …
+    // this._isReadonly … } }`) — jedes `reactive()` starb daran.
+    Ok(Some((f, hv, Value::Obj(t))))
 }
 
 /// Das Ziel eines Stellvertreters — fuer die Faelle ohne Falle.

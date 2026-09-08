@@ -40,6 +40,18 @@ fn regex_allowed_after(t: &Tok) -> bool {
         // Ausdruck, also darf dort ein Regex stehen: `${/^a/.test(x)}`.
         // Nach dem letzten Stueck ist `/` eine Division.
         Tok::Template { has_sub, .. } => *has_sub,
+        // **Ein kontextuelles Schluesselwort ist meistens ein Bezeichner** —
+        // `var target = 8; target / 2` ist eine Division, keine Regex. Hier
+        // stand vorher „jedes Schluesselwort ausser fuenf erlaubt einen
+        // Regex", und damit brach jedes Skript, das eine Variable `get`,
+        // `set`, `of`, `as`, `from`, `async`, `target`, `meta` oder `let`
+        // teilt. Gefunden an d3: `tickIntervals[target / …]` — ab da las der
+        // Lexer den Rest der Zeile als Regex und die ganze Bibliothek fiel aus.
+        //
+        // `of` steht mit hier, obwohl `for (x of …)` ein Ausdruck folgt: ein
+        // Regex ist nicht iterierbar, `for (x of /re/)` ist also kein Code,
+        // den jemand schreibt.
+        Tok::Keyword(k) if !k.is_reserved() => false,
         Tok::Keyword(k) => !matches!(k, Kw::This | Kw::Super | Kw::True | Kw::False | Kw::Null),
         Tok::Punct(p) => !matches!(p, P::RParen | P::RBracket | P::Inc | P::Dec),
         Tok::Eof => true,
@@ -95,7 +107,15 @@ impl<'a> Parser<'a> {
     }
 
     fn bump(&mut self) -> R<()> {
-        let ok = regex_allowed_after(&self.cur.tok);
+        // `yield` und `await` sind nur DORT Schluesselwoerter, wo sie
+        // reserviert sind; sonst sind sie Bezeichner, und dann ist `/` eine
+        // Division. Das weiss nur der Parser — `regex_allowed_after` sieht
+        // bloss das Token.
+        let ok = match &self.cur.tok {
+            Tok::Keyword(Kw::Yield) => self.in_gen || self.strict,
+            Tok::Keyword(Kw::Await) => self.in_async || self.module,
+            t => regex_allowed_after(t),
+        };
         self.cur_start = self.lx.pos;
         self.lx.legacy_octal = false;
         self.cur = self.lx.next(ok).map_err(|e| ParseError { msg: e.msg.to_string(), at: e.at })?;

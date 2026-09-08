@@ -202,8 +202,12 @@ pub fn make_realm() -> Realm {
     def(&object_proto, "hasOwnProperty", |i, this, a| {
         let k = i.to_prop_key(a.first().unwrap_or(&Value::Undefined))?;
         let o = i.to_object(&this)?;
-        let has = o.borrow().has_own(&k);
-        Ok(Value::Bool(has))
+        // **Durch den Stellvertreter, nicht an ihm vorbei.** `has_own` liest
+        // die eigene Tabelle — die eines Proxys ist LEER, und damit war
+        // `hasOwnProperty.call(proxy, k)` immer `false`. Vue fragt seinen
+        // reaktiven Zustand genau so ab: `hasOwn(data, key)`, und die Antwort
+        // entschied, ob `this.n` in einer Komponente den Wert findet.
+        Ok(Value::Bool(i.get_own_desc(&o, &k)?.is_some()))
     }, 1, fp);
     def(&object_proto, "isPrototypeOf", |_, this, a| {
         let (Value::Obj(p), Some(Value::Obj(v))) = (&this, a.first()) else { return Ok(Value::Bool(false)) };
@@ -217,8 +221,7 @@ pub fn make_realm() -> Realm {
     def(&object_proto, "propertyIsEnumerable", |i, this, a| {
         let k = i.to_prop_key(a.first().unwrap_or(&Value::Undefined))?;
         let o = i.to_object(&this)?;
-        let e = o.borrow().is_enumerable(&k);
-        Ok(Value::Bool(e))
+        Ok(Value::Bool(i.get_own_desc(&o, &k)?.is_some_and(|p| p.enumerable)))
     }, 1, fp);
 
     // ── Function.prototype ───────────────────────────────────────────────
@@ -357,7 +360,11 @@ pub fn make_realm() -> Realm {
         let n = array_len(i, &this)? as usize;
         for k in 0..n {
             i.tick()?;
-            let v = i.get(&this, &num_to_string(k as f64))?;
+            let key = num_to_string(k as f64);
+            // Ein LOCH ist kein `undefined`: `new Array(3).indexOf(undefined)`
+            // ist -1, nicht 0 (ES 23.1.3.17 Schritt 9a).
+            if let Value::Obj(o) = &this { if !i.has_property(o, &key) { continue } }
+            let v = i.get(&this, &key)?;
             if v.strict_eq(&target) { return Ok(Value::Num(k as f64)); }
         }
         Ok(Value::Num(-1.0))
@@ -371,9 +378,19 @@ pub fn make_realm() -> Realm {
         };
         let s = idx(a.first(), 0, i)?;
         let e = idx(a.get(1), n, i)?;
+        // **Loecher bleiben Loecher.** `slice` kopiert nur, was DA ist
+        // (ES 23.1.3.28 Schritt 9b); ein aufgefuelltes Loch waere ein Wert,
+        // den niemand geschrieben hat.
         let mut out = Vec::new();
-        for k in s..e { i.tick()?; out.push(i.get(&this, &num_to_string(k as f64))?); }
-        Ok(i.new_array(out))
+        let mut m = 0usize;
+        for k in s..e {
+            i.tick()?;
+            let key = num_to_string(k as f64);
+            let da = match &this { Value::Obj(o) => i.has_property(o, &key), _ => true };
+            if da { let v = i.get(&this, &key)?; out.push((m, v)); }
+            m += 1;
+        }
+        Ok(i.new_sparse_array(m, out))
     }, 2, fp);
     def(&array_proto, "forEach", |i, this, a| {
         let f = a.first().cloned().unwrap_or(Value::Undefined);
@@ -402,10 +419,17 @@ pub fn make_realm() -> Realm {
         let mut out = Vec::with_capacity(n.min(1 << 16));
         for k in 0..n {
             i.tick()?;
-            let v = i.get(&this, &num_to_string(k as f64))?;
-            out.push(i.call(&f, t.clone(), &[v, Value::Num(k as f64), this.clone()])?);
+            let key = num_to_string(k as f64);
+            // Ein Loch wird UEBERSPRUNGEN und bleibt im Ergebnis eines
+            // (ES 23.1.3.20 Schritt 6c). d3 baut seine Farbtabellen als
+            // `new Array(3).concat(…).map(colors)` — jedes durchgereichte
+            // Loch kommt dort als `undefined.length` an.
+            if let Value::Obj(o) = &this { if !i.has_property(o, &key) { continue } }
+            let v = i.get(&this, &key)?;
+            let r = i.call(&f, t.clone(), &[v, Value::Num(k as f64), this.clone()])?;
+            out.push((k, r));
         }
-        Ok(i.new_array(out))
+        Ok(i.new_sparse_array(n, out))
     }, 1, fp);
     def(&array_proto, "filter", |i, this, a| {
         let f = a.first().cloned().unwrap_or(Value::Undefined);
@@ -415,7 +439,9 @@ pub fn make_realm() -> Realm {
         let mut out = Vec::new();
         for k in 0..n {
             i.tick()?;
-            let v = i.get(&this, &num_to_string(k as f64))?;
+            let key = num_to_string(k as f64);
+            if let Value::Obj(o) = &this { if !i.has_property(o, &key) { continue } }
+            let v = i.get(&this, &key)?;
             if i.call(&f, t.clone(), &[v.clone(), Value::Num(k as f64), this.clone()])?.truthy() {
                 out.push(v);
             }
@@ -431,7 +457,9 @@ pub fn make_realm() -> Realm {
         let t = a.get(1).cloned().unwrap_or(Value::Undefined);
         for k in 0..n {
             i.tick()?;
-            let v = i.get(&this, &num_to_string(k as f64))?;
+            let key = num_to_string(k as f64);
+            if let Value::Obj(o) = &this { if !i.has_property(o, &key) { continue } }
+            let v = i.get(&this, &key)?;
             if i.call(&f, t.clone(), &[v, Value::Num(k as f64), this.clone()])?.truthy() {
                 return Ok(Value::Bool(true));
             }
@@ -445,7 +473,9 @@ pub fn make_realm() -> Realm {
         let t = a.get(1).cloned().unwrap_or(Value::Undefined);
         for k in 0..n {
             i.tick()?;
-            let v = i.get(&this, &num_to_string(k as f64))?;
+            let key = num_to_string(k as f64);
+            if let Value::Obj(o) = &this { if !i.has_property(o, &key) { continue } }
+            let v = i.get(&this, &key)?;
             if !i.call(&f, t.clone(), &[v, Value::Num(k as f64), this.clone()])?.truthy() {
                 return Ok(Value::Bool(false));
             }
@@ -664,13 +694,35 @@ pub fn make_realm() -> Realm {
         Ok(this)
     }, 1, fp);
     def(&array_proto, "concat", |i, this, a| {
-        let mut out = i.elems(&this)?;
+        // **Loecher bleiben Loecher** (ES 23.1.3.1, `CreateDataProperty` nur
+        // bei `HasProperty`). `new Array(3).concat("a","b")` hat die Laenge 5
+        // und drei LOECHER — genau so baut d3 seine Farbtabellen, und das
+        // folgende `.map(colors)` darf sie nicht sehen.
+        let mut out: Vec<(usize, Value)> = Vec::new();
+        let mut n = 0usize;
+        let mut nimm = |i: &mut Interp, v: &Value, spreizen: bool,
+                        out: &mut Vec<(usize, Value)>, n: &mut usize| -> C<()> {
+            if !spreizen { out.push((*n, v.clone())); *n += 1; return Ok(()) }
+            let len = i.get(v, "length")?;
+            let len = i.to_number(&len)?;
+            let len = if len.is_finite() && len > 0.0 { len as usize } else { 0 };
+            for k in 0..len {
+                i.tick()?;
+                let key = num_to_string(k as f64);
+                let da = match v { Value::Obj(o) => i.has_property(o, &key), _ => true };
+                if da { let x = i.get(v, &key)?; out.push((*n, x)); }
+                *n += 1;
+            }
+            Ok(())
+        };
+        let ist_feld = |v: &Value| matches!(v, Value::Obj(o) if matches!(o.borrow().kind, ObjKind::Array));
+        let this_feld = ist_feld(&this);
+        nimm(i, &this, this_feld, &mut out, &mut n)?;
         for v in a {
-            if matches!(v, Value::Obj(o) if matches!(o.borrow().kind, ObjKind::Array)) {
-                out.extend(i.elems(v)?);
-            } else { out.push(v.clone()); }
+            let f = ist_feld(v);
+            nimm(i, v, f, &mut out, &mut n)?;
         }
-        Ok(i.new_array(out))
+        Ok(i.new_sparse_array(n, out))
     }, 1, fp);
 
     // ── String.prototype ─────────────────────────────────────────────────

@@ -306,6 +306,12 @@ fn main() {
                  css.len(), lay.ops.len());
     }
     let listeners = sess.interp.doc.as_ref().is_some_and(|d| d.has_listeners);
+    // Ein Deckel, der still zuschlaegt, macht jede Bisektion zur Messung des
+    // Deckels: die letzte gedruckte Marke war die 200., nicht die letzte
+    // gelaufene ([[feedback_a_read_cap_decides_what_exists]]).
+    if sess.interp.console_dropped > 0 {
+        println!("Konsole: {} Zeilen verworfen (Deckel)", sess.interp.console_dropped);
+    }
     println!("\n{ran} gelaufen, {failed} gescheitert, {timers} Zeitgeber, {}",
              if listeners { "Ereignisse SCHARF" } else { "keine Behandler" });
 }
