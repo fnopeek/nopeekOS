@@ -141,6 +141,36 @@ pub(crate) fn npk_unix_time(_ctx: &mut HostState) -> i64 {
     crate::rtc::read_unix_time().unwrap_or(0) as i64
 }
 
+/// Zufall aus dem CSPRNG des Kernels in den Speicher des Moduls.
+///
+/// **Ohne Kapabilitaet, wie `npk_unix_time`.** Zufall ist keine Ressource des
+/// Benutzers und verraet nichts ueber ihn: er gibt Bytes HERAUS und liest
+/// nichts. Ihn zu gaten hiesse, jedem Modul eine Berechtigung zu geben, die
+/// niemand je verweigern wuerde.
+///
+/// Die Quelle ist derselbe ChaCha20-Strom wie fuer Kapabilitaetsmarken —
+/// aus RDRAND geseedet, alle 64 Bloecke neu verschluesselt. Eine zweite,
+/// schwaechere Quelle fuer „bloss eine Seite" waere genau die Falle: aus
+/// `crypto.getRandomValues` baut Seitencode Sitzungsmarken.
+///
+/// Liefert die Zahl der geschriebenen Bytes, oder -1.
+pub(crate) fn npk_random_bytes(mem: &mut [u8], _ctx: &mut HostState, buf_ptr: i32, len: i32) -> i32 {
+    if buf_ptr < 0 || len <= 0 { return -1; }
+    // Derselbe Deckel, den die Webplattform kennt (WebCrypto 10.1.1): mehr
+    // als 64 KiB auf einmal verlangt niemand, und ohne Deckel haelt ein
+    // Modul den RNG-Mutex beliebig lange.
+    if len > 65_536 { return -1; }
+    let start = buf_ptr as usize;
+    let n = len as usize;
+    // `checked_add`: ein umlaufendes `start + n` gaebe start > end und
+    // brauchte den Kernel beim Schneiden zum Absturz — ein Halt, den der
+    // Gast ausloest.
+    let Some(end) = start.checked_add(n) else { return -1 };
+    if end > mem.len() { return -1; }
+    crate::security::csprng::fill(&mut mem[start..end]);
+    n as i32
+}
+
 pub(crate) fn npk_theme_token(ctx: &mut HostState, token_id: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {

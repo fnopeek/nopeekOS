@@ -6,7 +6,19 @@
 //! eine Endlosschleife als `RangeError` endet statt als haengender Lauf.
 //!
 //!   cargo run --release --example jsrun -- probe.js
+/// Zufall fuer die HOST-Werkzeuge — aus `/dev/urandom`, nicht aus einer
+/// Bequemlichkeit. Ohne sie gaebe es hier kein `crypto`, und dann misst das
+/// Werkzeug eine andere Plattform als das Geraet.
+fn host_random(out: &mut [u8]) -> bool {
+    use std::io::Read;
+    match std::fs::File::open("/dev/urandom") {
+        Ok(mut f) => f.read_exact(out).is_ok(),
+        Err(_) => false,
+    }
+}
+
 fn main() {
+    beak_engine::js::random::set_source(host_random);
     let arg = std::env::args().nth(1).unwrap_or_default();
     let script = std::fs::read_to_string(&arg).unwrap_or(arg);
     // `MODULE=1` parst als Modul. beak versucht am Geraet BEIDES — die Datei

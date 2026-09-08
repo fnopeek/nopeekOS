@@ -138,6 +138,9 @@ unsafe extern "C" {
     /// Seconds since the epoch, UTC. `npk_ticks` cannot stand in: it restarts
     /// at every boot and a cookie's `Expires` is an absolute date.
     fn npk_unix_time() -> i64;
+    /// Zufall aus dem CSPRNG des Kernels (ChaCha20, aus RDRAND geseedet).
+    /// Liefert die geschriebenen Bytes, oder -1. Hoechstens 64 KiB je Aufruf.
+    fn npk_random_bytes(ptr: i32, len: i32) -> i32;
     fn npk_http_final_url(buf_ptr: i32, buf_max: i32) -> i32;
     /// Why the last request failed: `kind\tmessage`. Cleared on success.
     fn npk_http_last_error(buf_ptr: i32, buf_max: i32) -> i32;
@@ -2371,6 +2374,23 @@ fn dispatch_click(engine: &Engine, page: &mut Page, lay: &Layout, cx: i32, cy: i
     prevented
 }
 
+/// Zufall aus dem Kernel in einen Puffer. `false`, wenn der Kernel abgelehnt
+/// hat — der Rufer wirft dann, statt schwachen Zufall zu liefern.
+///
+/// In Stuecken, weil der Kernel 64 KiB je Aufruf deckelt (er haelt dabei den
+/// RNG-Mutex). Der Motor deckelt ohnehin bei derselben Zahl; die Schleife
+/// steht hier, damit dieselbe Funktion auch einen groesseren Puffer bedienen
+/// koennte, ohne still die Haelfte ungefuellt zu lassen.
+fn random_bytes(out: &mut [u8]) -> bool {
+    for teil in out.chunks_mut(64 * 1024) {
+        // SAFETY: der Kernel schreibt hoechstens `len` Bytes ab `ptr`, und
+        // beides beschreibt genau dieses Stueck.
+        let n = unsafe { npk_random_bytes(teil.as_mut_ptr() as i32, teil.len() as i32) };
+        if n < 0 || n as usize != teil.len() { return false }
+    }
+    true
+}
+
 /// Was ein Seitenskript an Schritten bekommt.
 ///
 /// Es laeuft im Fenster des Anwenders, nicht in einem Testlaeufer: reisst der
@@ -4093,6 +4113,13 @@ pub extern "C" fn _start() {
     // whether a measurement belongs to the version that was just installed —
     // and a perf number from the wrong build is worse than no number.
     log(concat!("[beak] version ", env!("CARGO_PKG_VERSION")));
+
+    // **Dem Motor den Zufall des Kernels leihen.** Die Engine hat keine
+    // Hostfunktionen; sie bekommt eine gereicht, genau wie die Uhr. Ohne
+    // diese Zeile gibt es in einer Seite kein `crypto` — und das ist die
+    // richtige Antwort, solange keine echte Quelle da ist, statt `Math.random`
+    // als sichere auszugeben.
+    beak_engine::js::random::set_source(random_bytes);
 
     // **Hier wurde frueher die Schrift geparst — alle sechs Gesichter, 435 ms
     // und 40 MB Halde, gemessen mit `beakbench`.** Jetzt wird ein Gesicht

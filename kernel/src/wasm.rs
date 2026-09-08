@@ -1227,6 +1227,26 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_random_bytes(buf_ptr, len) -> geschriebene Bytes, oder -1
+    //
+    // Zufall aus dem CSPRNG des Kernels (ChaCha20, aus RDRAND geseedet).
+    // OHNE Kapabilitaet, wie `npk_unix_time`: er gibt Bytes heraus und liest
+    // nichts, und eine Berechtigung, die niemand je verweigert, ist keine.
+    //
+    // **Der Grund, warum es das gibt:** beak braucht
+    // `crypto.getRandomValues` fuer Seiten, und `Math.random` dafuer
+    // auszugeben waere schlimmer als die Luecke — Seitencode baut daraus
+    // Sitzungsmarken. Gedeckelt auf 64 KiB je Aufruf (WebCrypto 10.1.1),
+    // damit ein Modul den RNG-Mutex nicht beliebig lange haelt.
+    linker.func_wrap("env", "npk_random_bytes",
+        |mut caller: Caller<'_, HostState>, buf_ptr: i32, len: i32| -> i32 {
+            let Some(m) = caller.get_export("memory").and_then(|e| e.into_memory())
+                else { return -1 };
+            let (mem, ctx) = m.data_and_store_mut(&mut caller);
+            host_core::npk_random_bytes(mem, ctx, buf_ptr, len)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_http_final_url(buf_ptr, buf_max) -> len, or -1
     // The URL the last npk_http_request's body actually came from, after
     // redirects. A browser resolves relative sub-resources against this
