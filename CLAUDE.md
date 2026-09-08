@@ -48,128 +48,74 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-06 · beak 0.116.0 · Kernel 0.326.0** (Rest: `git log`)
+**Stand 2026-09-08 · beak 0.126.0 · Kernel 0.327.0** (Rest: `git log`)
 
-Zwei Fäden laufen parallel.
+**▶ Als nächstes: die drei offenen Bibliotheken und die Ligaturen.**
+Stand und Werkzeug: `memory/project_beak_library_probes.md`.
 
-**▶ Als nächstes: Ligaturen (GSUB).** Symbolschriften bilden ihr Zeichen als
-Ligatur; fontdue läuft mit `load_substitutions: false`, also ist `fos-icon`
-1 px statt 24 — kein Schriftfehler, ein GSUB-Fehler. Danach: `body` 600 statt
-937 (die Seite hält das Fenster auf). Stand:
+**0.126.0: eine freigegebene Adresse gab ihren Rumpf an die nächste
+Funktion.** `func_chunks` schlüsselte den übersetzten Rumpf nach
+`Rc::as_ptr`. Gibt das erste `<script>` seinen Syntaxbaum frei, kann eine
+Funktion des zweiten genau dort liegen — und bekommt beim Aufruf **fremden
+Code**. Kein Absturz, keine Meldung. Sichtbar wurde es an Alpine.js; auf dem
+Baumläufer (`NOVM=1`) lief derselbe Code sauber. Ein `Weak` hält die Zelle
+jetzt belegt. **Und der erste Test dafür lief gegen den Fehler grün durch** —
+er hoffte auf eine Kollision statt die Invariante zu prüfen.
+
+**Der Fund kam aus einem neuen Prüfstand: dreizehn echte Bibliotheken**
+(`<memory-dir>/../tools/libprobe/`), jede mit einer echten Benutzung statt
+eines „geladen?"-Hakens. **10 von 13 grün** (war 6): jQuery, Bootstrap,
+Alpine, React, Preact, lodash, dayjs, axios, marked. Dafür gebaut:
+`Object.prototype.toString` packt Primitive ein (+12 test262),
+`Symbol.toStringTag` an allen DOM-Schnittstellen, `document.implementation`,
+**MutationObserver**. Offen: htmx (`XPathEvaluator`), d3, chart.js, Vue
+rendert nichts.
+
+**0.125.0: `location` war ein Datenobjekt — es gab in beak überhaupt keine
+Navigation per Skript.** `replace` ein TypeError, `href = u` schrieb still
+eine Eigenschaft um. Jede Anmeldung, die nach dem POST weiterleitet, lief
+ins Leere. Jetzt ganz gebaut, `javascript:`/`data:` gesperrt, acht Sprünge
+in Folge sind Schluss. Gefunden an Googles Sperrseite: die rechnet in beak
+ihren Botguard-Token korrekt aus und rief dann `location.replace` — der
+TypeError landete in ihrem EIGENEN `.catch`, und unser Lauf meldete
+„0 gescheitert". Google bleibt trotzdem eine Sperrseite (Policy, nicht
+Können — `memory/project_beak_search_engines.md`).
+
+**Ligaturen (GSUB) sind weiter offen.** Symbolschriften bilden ihr Zeichen
+als Ligatur; fontdue läuft mit `load_substitutions: false`, also ist
+`fos-icon` 1 px statt 24. Danach: `body` 600 statt 937. Stand:
 `memory/project_beak_web_app_stack.md`.
 
-**0.116.0: die Fritzbox-Anmeldung rechnete die FALSCHE Antwort aus.** Um ein
-Byte verschoben — sie wäre auch nach den vier Minuten abgelehnt worden.
-Ursache war nicht der Hex-Code, sondern welche Maschine ihn fuhr:
-`run_js_body` fragte `func_chunk` nie und fuhr jeden von AUSSEN gerufenen
-Rumpf mit dem Baumläufer (Ereignisbehandler, Microtask, Rückruf) — und weil
-dessen eigene Aufrufe wieder dort landen, alles darunter. 4 286 von 320 721
-Schritten liefen auf der Befehlsmaschine. Die beiden Maschinen sind an echtem
-Code auseinandergelaufen, und test262 sieht das nicht. **Motor gemessen:
-29,7 ns je Befehl, `LoadVar` 24 % — kein einzelner grosser Hebel.** Die
-Anmeldung sind 66 000 HMAC-SHA256-Runden von Hand in JS (kein
-`crypto.subtle`): 2,34 Mrd. Befehle, 69 s nativ, ~4,5 min auf forge. Stand
-und Messweg: `memory/project_beak_js_engine_speed.md`.
+**Die Zahlen, und sie messen NICHT dasselbe:**
 
-**0.115.0 hat drei Fehler geschlossen, die alle am Gerät sichtbar waren.**
-Ein Feld zeigte Getipptes erst beim Verlassen an und blendete dabei den Text
-daneben weg — der Schnellweg beim Tippen ersetzte die falschen Zeichenbefehle,
-weil die notierte Spanne eines Steuerelements an DREI Stellen verschoben
-wurde, ohne mitgezogen zu werden. Ein Riegel rechnet die Spanne jetzt nach und
-legt lieber aus, als fremde Befehle zu überschreiben. Zweitens: die Quer-Größe
-eines Flex-Kastens steht auch fest, wenn sie aus `min-height`/`max-height`
-kommt — damit sitzt die Fritzbox-Anmeldung mittig statt oben zu kleben, und
-die zwei WPT-Verluste aus 0.109.0 sind zurück. Drittens zentriert
-`margin: auto` jetzt auch ein blockweites Steuerelement. **WPT 4477 -> 4481,
-+5/−0, Baseline neu gesegnet.** Kastengeometrie gegen Chromium:
-`memory/project_beak_render_oracle.md`.
-
-**Farbverläufe sind seit 0.114.0 gebaut** — linear/radial, je auch
-`repeating-`, mit dem Winkel, den der KASTEN einer Ecke vorgibt, Kachelung
-über `background-size` und `in oklab` gelesen-und-fallengelassen. Vorher war
-ein Verlauf ein flacher Kasten, und die Fritzbox-Anmeldung hatte deshalb
-einen weissen Kopf mit weisser Schrift darauf. WPT 4474 -> 4477, kein Test
-verloren. Offen nach Häufigkeit im Korpus: `conic` (11 von 255), ein Verlauf
-am `html`-Kasten, `calc()` in einer Stopp-Lage (2 von 255).
-Stand: `memory/project_beak_gradients.md`.
-
-Gebaut seit 0.104: ES-Module, Custom Elements, Formular-Brücke samt
-`submit`-Ereignis, nachgeladene Stilblätter, `load`/`DOMContentLoaded`, und
-**`@font-face`** (WOFF2 mit Brotli und `glyf`-Rückbau, gegen
-`woff2_decompress` an fünf Schriften geprüft: 4620 Zeichen rasterisiert, 0
-abweichend).
-
-**Der Browser-Vergleich liegt in `<memory-dir>/../tools/mirror/`** — ein
-eingefrorenes Spiegelbild der Seite lokal ausgeliefert, dieselbe Sonde in
-Chromium und in beak, Kastengeometrie statt Pixel. Das war das offene Stück
-im Renderorakel.
-
-**Das Werkzeug dafür ist `beak-engine/examples/pagerun.rs`** — es fährt die
-ganze Skriptrunde einer Seite host-seitig, in EINER Sitzung, mit Modulgraph,
-und `DUMP=1` zeigt den Baum danach. „Laufen die Skripte" ist nicht dieselbe
-Frage wie „haben sie etwas gebaut", und `jsrun` (eine Datei allein)
-beantwortet die falsche.
-
-**`beak`**, der eigene Browser: **Stage 1 läuft — die Seite reagiert.** Eigene
-JS-Maschine (Lexer, Parser, RegExp, DOM-Bindung) und die Wirtsumgebung. Sie
-läuft auf einer **Befehlsmaschine** statt eines Baumläufers — der Zustand ist
-ein Feld, nicht der Rust-Stapel. **Der Umbau ist mit 0.86.0 abgeschlossen**;
-seit BigInt (0.94.0) laufen 99,6 % der Programme darauf.
-
-**Zwei Zahlen, und sie messen NICHT dasselbe.** Die 99,6 % sagen, WO Code
-läuft — ein abgelehntes Programm fährt der Baumläufer mit identischer
-Bedeutung. Was GEHT, sagt test262:
-
-    test262 exec    81,27 %   (V8 auf demselben Korpus: 99,41 %)
-    Zielkorpus      437/437 geparst, 305/437 durchgelaufen
-    DOM-Aufrufe     98,3 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
-    WPT (CSS)       4476/5192 = 86,2 % ohne Testvehikel (roh 79,4 %)
-
-0.89.0–0.100.0 haben die Sprache in zehn Releases von 66,93 auf 80,65 %
-gebracht: **Date** (richtig gerechnet, nicht mehr gestumpft), **eval**
-(direkt und indirekt), **Proxy**, **BigInt** samt eigener Bignum und den
-64-Bit-Sichten, die **Iterator-Hilfen**, die Empfängerprüfung überall, zwei
-Dutzend ausgezählte Eingebaute — und zuletzt drei Runden am OBJEKTMODELL:
-**0.98.0 der strenge Modus** (978 Varianten), **0.99.0 `defineProperty`
-prüft wirklich** (1299), **0.100.0 private Felder mit Marke** (104), je
-ohne eine einzige Regression.
-
-**Und die Lehre aus allen dreien:** die naheliegende Zählung lag jedes Mal
-daneben. Beim strengen Modus fehlte nicht die Strenge, sondern der
-UNTERSCHIED — 56 % der Treffer lagen im LOCKEREN Modus. Bei
-`defineProperty` war nicht die Prüfung das Problem, sondern das MODELL: in
-`Prop` war „Feld fehlt" dasselbe wie „false". Die Rangfolge des Rests steht
-in `memory/project_beak_js_language_gap.md`, gemessen statt geraten —
-`T262_FAILDETAIL=<datei>` gibt jeden Fehler mit seiner Meldung, und die
-grösste Meldung ist meist eine Sammelmeldung.
+    test262 exec    81,28 %   (V8 auf demselben Korpus: 99,41 %)
+    test262 parse   96,84 %
+    DOM-Aufrufe     98,5 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
+    WPT (CSS)       4481/5200 = 86,2 % ohne Testvehikel (roh 79,4 %)
+    Bibliotheken    10 von 13 (`<tools>/libprobe/`)
+    beak:selftest   Sprache 49/49, Dokument 35/35
 
 Das eigene Testziel ist **`beak:selftest`** — eine Prüfseite aus dem
 Binärbild, die nichts holt und ihr Ergebnis auf dem Schirm UND im Log sagt.
-Sie läuft auch host-seitig über dieselbe Datei
-(`beak-engine/examples/selftest.rs`). Ein Lauf fand neun Lücken, die fremde
-Seiten in Wochen nicht gezeigt hatten. **0.97.0 lief am Gerät voll grün
-**0.100.0 lief am Gerät voll grün: Sprache 49/49,
-Dokument 31/31, Klicks 4/4, Timer + Microtask.** Die 49 schliessen die acht
-Zeilen ein, die nur am Gerät etwas beweisen — der Modus entscheidet sich
-zur Laufzeit, und `this` im einfachen Aufruf ist die, die am ehesten wieder
-kaputtgeht.
+Sie läuft auch host-seitig (`beak-engine/examples/selftest.rs`).
 
-Die CSS-Runde davor ist zu Ende gebracht: das Eigenschafts-Gap ist
-geschlossen, 93,7 % der Deklarationen auf Bootstrap + Wikipedia abgedeckt. Die
-gemessene WPT-Zahl steht in `docs/spec/CONFORMANCE.md` und nirgends sonst —
-**zwei Nenner**, roh und ohne Testvehikel, und der zweite wird mit
+**Das Werkzeug für Seiten ist `beak-engine/examples/pagerun.rs`** — es fährt
+die ganze Skriptrunde host-seitig, in EINER Sitzung, mit Modulgraph. `DUMP=1`
+zeigt den Baum danach, `NAVIGATION` die verlangte Adresse, `NOVM=1` fährt den
+Baumläufer statt der Befehlsmaschine (die Gegenprobe, die den Chunk-Fehler
+gefunden hat).
+
+**Die gemessene WPT-Zahl steht in `docs/spec/CONFORMANCE.md` und nirgends
+sonst** — zwei Nenner, und der zweite wird mit
 `tools/wasm/beak-engine/tests/vehicles.py` aus der gesegneten Baseline
 HERGELEITET, nie weitergetragen. **Vor jeder WPT-Planung dieses Werkzeug
-laufen lassen:** 347 der 1163 Fehler sind `display: grid-lanes`, und kein
+laufen lassen:** 347 der 1166 Fehler sind `display: grid-lanes`, und kein
 Dateiname sagt es.
 
-**WLAN (AX200)**: ⏸ pausiert, die Verbindung läuft (Download 116 Mbit auf HT40,
-Upload erstmals möglich). Das Intent **`wlan`** ist das Werkzeug dafür —
-Kernel-Sicht plus ein Klartext-Report, den der Treiber selbst veröffentlicht
-(Rate, Retries, Airtime, 4-Way-Sprosse, Ring-Zustand) plus der wifid-Log.
-Beim Wiedereinstieg NUR den obersten Abschnitt von
-`memory/project_wifi_stability_handover.md` lesen — er hat Stand,
-Betriebspunkt und die nächsten Schritte.
+**WLAN (AX200)**: ⏸ pausiert, die Verbindung läuft (Download 116 Mbit auf
+HT40, Upload möglich). Das Intent **`wlan`** ist das Werkzeug dafür. Beim
+Wiedereinstieg NUR den obersten Abschnitt von
+`memory/project_wifi_stability_handover.md` lesen.
 
 Alles darunter — Kernel, npkFS, Netz, Compositor, Panels, Apps, MicroVM —
 ist gebaut und in Betrieb. Überblick: `README.md`.
