@@ -24,6 +24,38 @@ steckt in vier Paketen.
 
 ---
 
+## 0a. Was seither geschlossen ist (Stand 0.132.0)
+
+**`MutationObserver`** (P6, 116 Aufrufe) — gebaut in 0.126.0, mit
+`childList`/`attributes`/`characterData`/`subtree`, beiden `oldValue` und
+`attributeFilter`. Die Zugehoerigkeit wird beim AENDERN gerechnet, nicht beim
+Einsammeln.
+
+**Aus P7:** `document.visibilityState`/`hidden` (50) und `document.referrer`
+(45) in 0.131.0 — `referrer` ist die leere Zeichenkette, weil beak keinen
+Verweis weiterreicht; das ist die richtige Antwort, keine erfundene. Dazu
+`document.hasFocus`, `window.isSecureContext` und die `navigator`-Felder, die
+jede Seite liest (`appName`/`appCodeName`/`product`/`productSub` sind
+KONSTANTEN der Spezifikation, HTML 8.9.1.1; `webdriver: false` ist die
+Wahrheit).
+
+**`crypto.getRandomValues` + `crypto.randomUUID`** — 0.132.0, gespeist aus
+dem CSPRNG des Kernels ueber die neue Hostfunktion `npk_random_bytes`
+(Kernel 0.329.0, ohne Kapabilitaet wie `npk_unix_time`). **`crypto` erscheint
+nur, wenn eine echte Quelle da ist:** eine Seite prueft `if (window.crypto)`,
+und schwacher Zufall beantwortet diese Frage falsch.
+
+**Nicht gebaut und mit Grund:** `window.chrome`,
+`navigator.plugins`/`mimeTypes`, `navigator.userAgentData` — reine
+Fingerabdruckflaechen, die nur dazu dienen, wie jemand anders auszusehen
+([[feedback_no_ua_impersonation]]).
+
+Bleibt aus der Rangliste: **P1** Shadow DOM (876), **P2** `MessagePort`
+(505), **P3** echte Scroll-Masse (660), **P4** `IntersectionObserver` (429),
+**P5** `ResizeObserver` (353). Dazu, ausserhalb dieser Zaehlung und je ein
+eigenes Thema: `Intl`, Zeichenflaeche (`canvas` 2D), `Worker`,
+`structuredClone`, `Error.stack`, `XPathEvaluator` (htmx).
+
 ## 0. Was 0.118.0 geschlossen hat
 
 `fetch`, `Response`, `Headers`, `AbortController`, `AbortSignal`
