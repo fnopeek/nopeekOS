@@ -48,10 +48,16 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-08 · beak 0.126.0 · Kernel 0.327.0** (Rest: `git log`)
+**Stand 2026-09-08 · beak 0.128.0 · Kernel 0.327.0** (Rest: `git log`)
 
-**▶ Als nächstes: die drei offenen Bibliotheken und die Ligaturen.**
+**▶ Als nächstes: htmx (`XPathEvaluator`) und die Ligaturen.**
 Stand und Werkzeug: `memory/project_beak_library_probes.md`.
+
+**0.128.0: der klassische Clearfix mass null.** Räumung ist Platz IM Kasten,
+kein Schub AUF ihn — die Oberkante des Elters wanderte mit hinunter. Die
+Regel stand wörtlich im Code, acht Zeilen unter der Stelle, an der sie
+fehlte, im Pfad für `::after` mit `clear`. **WPT 4481 → 4485, +4/−0**,
+Baseline neu gesegnet; alle zwölf `gate`-Hashes byte-identisch.
 
 **0.126.0: eine freigegebene Adresse gab ihren Rumpf an die nächste
 Funktion.** `func_chunks` schlüsselte den übersetzten Rumpf nach
@@ -68,8 +74,12 @@ eines „geladen?"-Hakens. **10 von 13 grün** (war 6): jQuery, Bootstrap,
 Alpine, React, Preact, lodash, dayjs, axios, marked. Dafür gebaut:
 `Object.prototype.toString` packt Primitive ein (+12 test262),
 `Symbol.toStringTag` an allen DOM-Schnittstellen, `document.implementation`,
-**MutationObserver**. Offen: htmx (`XPathEvaluator`), d3, chart.js, Vue
-rendert nichts.
+**MutationObserver** — und in einer zweiten Runde (0.127.0) sechs
+Sprachlücken, die d3, chart.js und Vue gezeigt haben: `target / 2` war ein
+Regex, **Löcher waren Werte** (sieben Feldmethoden), `{__proto__:null}`,
+`class X extends null`, **jede Proxy-Falle lief mit `this === undefined`**,
+`hasOwnProperty` ging am Proxy vorbei, und **`with (o) { … }`** gab es nicht.
+**test262 exec 81,27 → 81,76 %.** Offen: nur noch htmx (`XPathEvaluator`).
 
 **0.125.0: `location` war ein Datenobjekt — es gab in beak überhaupt keine
 Navigation per Skript.** `replace` ein TypeError, `href = u` schrieb still
@@ -88,12 +98,12 @@ als Ligatur; fontdue läuft mit `load_substitutions: false`, also ist
 
 **Die Zahlen, und sie messen NICHT dasselbe:**
 
-    test262 exec    81,28 %   (V8 auf demselben Korpus: 99,41 %)
+    test262 exec    81,76 %   (V8 auf demselben Korpus: 99,41 %)
     test262 parse   96,84 %
     DOM-Aufrufe     98,5 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
-    WPT (CSS)       4481/5200 = 86,2 % ohne Testvehikel (roh 79,4 %)
-    Bibliotheken    10 von 13 (`<tools>/libprobe/`)
-    beak:selftest   Sprache 49/49, Dokument 35/35
+    WPT (CSS)       4485/5200 = 86,2 % ohne Testvehikel (roh 79,4 %)
+    Bibliotheken    12 von 13 (`<tools>/libprobe/`)
+    beak:selftest   Sprache 55/55, Dokument 35/35
 
 Das eigene Testziel ist **`beak:selftest`** — eine Prüfseite aus dem
 Binärbild, die nichts holt und ihr Ergebnis auf dem Schirm UND im Log sagt.
