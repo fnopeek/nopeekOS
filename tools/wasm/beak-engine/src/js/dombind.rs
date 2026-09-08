@@ -2170,6 +2170,23 @@ pub fn install(realm: &mut Realm) {
         match doc_part(i, &this, DocPart::Head)? { Some(x) => Ok(wrap(i, x)), None => Ok(Value::Null) }
     }, &fp);
     getter(&document_proto, "readyState", |_, _, _| Ok(Value::str("complete")), &fp);
+    // **Vier Felder, die jede Seite liest — und die es bisher nicht gab.**
+    // Im Zensus stehen `visibilityState`/`hidden` mit 50 und `referrer` mit
+    // 45 Aufrufen (`docs/plan/WEB_PLATFORM_GAPS.md` P7). Ein FEHLENDES Feld
+    // ist schlechter als eine richtige Antwort: `document.referrer.indexOf(…)`
+    // stirbt auf `undefined`, und `if (document.hidden)` nimmt still den
+    // falschen Zweig.
+    //
+    // beak malt genau ein Dokument, und es ist sichtbar, solange es laeuft —
+    // das ist keine Hoeflichkeit, sondern der Zustand.
+    getter(&document_proto, "visibilityState", |_, _, _| Ok(Value::str("visible")), &fp);
+    getter(&document_proto, "hidden", |_, _, _| Ok(Value::Bool(false)), &fp);
+    meth(&document_proto, "hasFocus", |_, _, _| Ok(Value::Bool(true)), 0, &fp);
+    // `referrer` ist die LEERE Zeichenkette und keine erfundene Adresse: sie
+    // ist die richtige Antwort fuer eine Navigation ohne Verweis, und beak
+    // reicht bisher keinen weiter. Da statt fehlend — und wenn der Wirt ihn
+    // einmal einreicht, steht die Stelle schon.
+    getter(&document_proto, "referrer", |_, _, _| Ok(Value::str("")), &fp);
     // `document.cookie` — 1852 Aufrufe im Zensus, und auf BEIDEN Wikipedias
     // die erste Wand ueberhaupt: das allererste Inline-Skript jeder Seite
     // ruft `document.cookie.match(…)`, und auf `undefined` ist das das Ende

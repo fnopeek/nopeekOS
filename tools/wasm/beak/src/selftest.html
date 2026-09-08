@@ -372,6 +372,27 @@ row(langRows, "eigene Eigenschaft durch den Proxy", function () {
       && JSON.stringify(p) === '{"a":1}'
       && JSON.stringify({ ...p }) === '{"a":1}';
 });
+row(domRows, "navigator + document: die Pflichtfelder", function () {
+  /* `appName`/`appCodeName`/`product`/`productSub` sind KONSTANTEN der
+     Spezifikation (HTML 8.9.1.1) und in jedem Browser dieselben — sie
+     wegzulassen ist keine Ehrlichkeit, sondern eine Luecke: Seitencode liest
+     sie und faellt auf `undefined` in einen ungetesteten Zweig. Was uns
+     benennt, ist `userAgent`, und der sagt weiterhin, was wir sind.
+
+     `webdriver: false` ist die WAHRHEIT — beak wird nicht ferngesteuert. */
+  var n = navigator;
+  return n.appName === "Netscape" && n.appCodeName === "Mozilla"
+      && n.product === "Gecko" && n.productSub === "20030107"
+      && n.appVersion.indexOf("5.0 (") === 0
+      && n.platform === "nopeekOS"
+      && n.cookieEnabled === true && n.webdriver === false
+      && n.maxTouchPoints === 0
+      && Array.isArray(n.languages) && n.languages[0] === n.language
+      && n.userAgent.indexOf("nopeekOS") >= 0
+      && document.visibilityState === "visible" && document.hidden === false
+      && document.hasFocus() === true && document.referrer === ""
+      && isSecureContext === true;   /* beak:selftest gilt als sicher */
+});
 row(domRows, "Object.prototype.toString", function () {
   /* Ein PRIMITIV wird eingepackt, bevor die Marke gelesen wird (ES 20.1.3.6
      Schritt 3), und eine DOM-Schnittstelle traegt ihren Namen (WebIDL 3.7.3).

@@ -2479,6 +2479,49 @@ pub fn make_realm() -> Realm {
     nav.borrow_mut().define("userAgent", Prop::builtin(Value::str("Mozilla/5.0 (nopeekOS) beak")));
     nav.borrow_mut().define("language", Prop::builtin(Value::str("de")));
     nav.borrow_mut().define("onLine", Prop::builtin(Value::Bool(true)));
+    // ── Die Felder, die JEDE Seite liest ──────────────────────────────────
+    //
+    // **`appName`, `appCodeName`, `product` und `productSub` sind
+    // KONSTANTEN der Spezifikation** (HTML 8.9.1.1), keine Auskunft ueber
+    // uns: sie MUESSEN „Netscape", „Mozilla", „Gecko" und „20030107"
+    // lauten, in jedem Browser. Sie wegzulassen ist kein Stueck Ehrlichkeit,
+    // sondern eine Luecke — Seitencode liest sie und faellt auf `undefined`
+    // in einen Zweig, den niemand getestet hat. Was uns wirklich benennt,
+    // ist `userAgent`, und der sagt weiterhin, was wir sind
+    // ([[feedback_no_ua_impersonation]]).
+    for (k, v) in [("appName", "Netscape"), ("appCodeName", "Mozilla"),
+                   ("product", "Gecko"), ("productSub", "20030107"),
+                   // Die Spezifikation verlangt, dass `appVersion` mit
+                   // „5.0 (" beginnt; dahinter steht, wer wir sind.
+                   ("appVersion", "5.0 (nopeekOS)"),
+                   ("platform", "nopeekOS"),
+                   // Chrome sagt hier „Google Inc.", Firefox die leere
+                   // Zeichenkette. Wir sind keins von beiden.
+                   ("vendor", ""), ("vendorSub", "")] {
+        nav.borrow_mut().define(k, Prop::builtin(Value::str(v)));
+    }
+    // Kekse nimmt beak an (`cookies.rs`) — die Antwort ist wahr, nicht
+    // hoeflich.
+    nav.borrow_mut().define("cookieEnabled", Prop::builtin(Value::Bool(true)));
+    // **`webdriver` ist `false`, und das ist die WAHRHEIT**: beak wird nicht
+    // ferngesteuert. Ein fehlendes Feld liest sich fuer eine Seite wie
+    // „weiss nicht", und das ist schlechter als eine richtige Antwort.
+    nav.borrow_mut().define("webdriver", Prop::builtin(Value::Bool(false)));
+    nav.borrow_mut().define("maxTouchPoints", Prop::builtin(Value::Num(0.0)));
+    // `languages` folgt `language` — eine Liste mit einem Eintrag, kein
+    // erfundener Zweitwunsch. Ein Leser, damit sie beim Aendern von
+    // `language` mitgeht.
+    {
+        let g = native(Some(function_proto.clone()), |i, _, _| {
+            let g = Value::Obj(i.realm.global.clone());
+            let l = i.get(&g, "navigator")
+                .and_then(|n| i.get(&n, "language"))
+                .unwrap_or(Value::str("de"));
+            Ok(i.new_array(alloc::vec![l]))
+        }, "languages", 0, false);
+        nav.borrow_mut().define("languages", Prop { value: None, get: Some(Value::Obj(g)),
+            set: None, writable: false, enumerable: true, configurable: true });
+    }
     nav.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("Navigator")));
     global.borrow_mut().define("navigator", Prop::builtin(Value::Obj(nav)));
 
@@ -2561,7 +2604,20 @@ pub fn make_realm() -> Realm {
             |i, _, _| Ok(Value::Obj(i.realm.location.clone())), "location", 0, false);
         let st = native(Some(function_proto.clone()),
             |i, _, a| loc_navigate(i, a.first(), false, false), "location", 1, false);
-        global.borrow_mut().define("location", Prop { value: None,
+        // `isSecureContext` folgt dem Schema der Adresse — gelesen, nicht
+    // behauptet. Seiten schalten daran Merkmale frei, die ohne sicheren
+    // Kanal nicht laufen duerfen.
+    {
+        let g = native(Some(function_proto.clone()), |i, _, _| {
+            let h = &i.loc_href;
+            Ok(Value::Bool(h.starts_with("https:") || h.starts_with("beak:")
+                           || h.starts_with("about:")))
+        }, "isSecureContext", 0, false);
+        global.borrow_mut().define("isSecureContext", Prop { value: None,
+            get: Some(Value::Obj(g)), set: None,
+            writable: false, enumerable: true, configurable: true });
+    }
+    global.borrow_mut().define("location", Prop { value: None,
             get: Some(Value::Obj(g)), set: Some(Value::Obj(st)),
             writable: false, enumerable: true, configurable: false });
     }
