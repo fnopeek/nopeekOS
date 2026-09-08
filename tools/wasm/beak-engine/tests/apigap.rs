@@ -76,15 +76,16 @@ const PROBE: &str = r#"
 // Wer hier etwas einbaut, streicht den Namen aus dieser Liste — und wer einen
 // neuen Platzhalter einbaut, traegt ihn EIN. Sonst misst diese Probe wieder
 // sich selbst.
-var STUB = {
-  // 0.75.0 hat die Geometrie gebaut: `getBoundingClientRect`,
-  // `getClientRects`, `offset*` und `client*` antworten aus den Kaesten des
-  // letzten Layouts. Was hier bleibt, braucht Zahlen, die das Layout heute
-  // nicht fuehrt: die INHALTSgroesse mit Ueberlauf (`scroll*`) und einen
-  // Rollstand je Element.
-  "offsetParent": 1,
-  "scrollWidth": 1, "scrollHeight": 1, "scrollTop": 1, "scrollLeft": 1
-};
+//
+// **Leer, seit 0.134.0.** Was hier stand, waren die Rollmasse und
+// `offsetParent` — sie antworteten 0, weil das Layout die Zahlen nicht
+// fuehrte. Es fuehrt sie jetzt: die Polstersummen und die Ecke
+// „positioniert" fahren im Kasten mit, und die Rollflaeche des Dokuments
+// kommt mit der Geometrie herein.
+//
+// Die Liste bleibt stehen, weil sie wieder gebraucht wird. Wer einen
+// Platzhalter einbaut, traegt ihn EIN.
+var STUB = {};
 var missing = [], have = 0, total = 0;
 function chk(iface, member, count) {
   total += count;

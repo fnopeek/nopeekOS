@@ -543,6 +543,7 @@ fn feed_geometry(sess: &mut beak_engine::js::Session, html: &str, dir: &str) {
     }
     sess.interp.set_geometry(beak_engine::js::interp::Geometry {
         boxes: std::rc::Rc::new(rects), scroll: (0, 0),
+        content: (width as i32, lay.height as i32),
     });
     sess.interp.set_media(width as f64, 1080.0, false);
 }

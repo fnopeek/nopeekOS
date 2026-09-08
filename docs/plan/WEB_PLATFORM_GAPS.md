@@ -1,6 +1,6 @@
 # Was der Plattform noch fehlt — gemessen, nach Aufrufzahl
 
-**Stand 2026-09-08, beak 0.133.0.** Ausgelöst von Florian: *„bau es und für
+**Stand 2026-09-08, beak 0.134.0.** Ausgelöst von Florian: *„bau es und für
 alles andere sockets etc. was es sonst noch braucht auch gleich einplanen
 oder als todo notieren."*
 
@@ -18,13 +18,55 @@ APICENSUS=<tools>/jsscope/out/apicensus.json cargo test --release --test apigap 
 > hier ist die von heute; sie verschiebt sich, sobald etwas gebaut ist.
 > [[feedback_count_it_dont_sample_it]]
 
-**Deckung heute: 98,9 % von 301 127 Aufrufen** (297 680). Die fehlenden 1,1 %
-sind 3 447 Aufrufe, und sie verteilen sich nicht gleichmässig — über die
-Hälfte steckt in ZWEI Paketen (Shadow DOM 876, `MessagePort` 505).
+**Deckung heute: 99,4 % von 301 127 Aufrufen** (299 178). Die fehlenden
+0,6 % sind 1 949 Aufrufe, und **fast die Hälfte davon ist Shadow DOM** (876).
+Der Rest zerfällt in kleine Posten unter 100.
 
 ---
 
-## 0a. Was seither geschlossen ist (Stand 0.133.0)
+## 0a. Was seither geschlossen ist (Stand 0.134.0)
+
+**Die Rollmasse** (P3, 582 Aufrufe) und **`offsetParent`** (78) — gebaut in
+0.134.0. Sie waren da und antworteten 0, und der Kommentar an ihrer Stelle
+war ehrlich: die Zahlen gab es im Layout nicht. Jetzt schon.
+
+* `ElemRect`/`HoverBox` führen die Polstersummen (`px`/`py`) und die Ecke
+  `positioned` mit. Ohne die zweite müsste `offsetParent` für JEDEN
+  Vorfahren die Kaskade neu auflösen — dieselbe Antwort, hundertmal teurer.
+* Die Rollfläche des Dokuments kommt als `Geometry::content` mit herein,
+  aus `Layout::height`. Sie aus den Kästen zu raten wäre eine zweite
+  Wahrheit über dieselbe Zahl: ein Hintergrund oder ein überlaufender Text
+  hält eine Seite rollbar, ohne einen Kasten zu haben.
+* **`scrollTop`/`scrollLeft` sind an gewöhnlichen Elementen 0, und das ist
+  WAHR:** beak klemmt `overflow` nicht ab, es gibt keine Rollkästen je
+  Element. Am Wurzelelement und am `<body>` ist es der Rollstand der Seite.
+* Dabei aufgefallen: **`window.scrollX`/`scrollY` standen fest auf 0.**
+  `set_viewport` hat sie als Zahl abgelegt, und danach hat sie nie jemand
+  nachgezogen — eine Seite, die daran entscheidet, ob die Kopfzeile kleben
+  soll, bekam überall „ganz oben".
+* Neu dazu: `scrollTo`/`scroll`/`scrollBy`/`scrollIntoView` und
+  `document.scrollingElement`. Die Engine rollt nicht; sie merkt sich den
+  Wunsch, der Wirt holt ihn mit `take_scroll` ab.
+
+**Der Kleinkram aus P7** (~400 Aufrufe): `nextElementSibling` /
+`previousElementSibling` (auf Element UND `CharacterData`),
+`lastElementChild`, `childElementCount`, `replaceChildren`, `toggleAttribute`,
+`isConnected`, `attributes` + `NamedNodeMap` + `Attr`, `CharacterData.remove`,
+die ARIA-Spiegelung (`ariaHidden` & Co.), `currentSrc`, `a.hash`, die fünf
+Zeigerbehandler.
+
+**`URL.username`/`password` sind IMMER leer, mit Absicht.** `parse_abs`
+verwirft Anmeldedaten, weil `http://google.com@boese.example/` in einer
+Adresszeile aussieht wie Google — und ein `URL`-Gegenstand hält nur seinen
+`href`. Sie zu tragen hieße, sie in die Adresszeile zu schreiben. Das
+Zuweisen wird angenommen und tut nichts; die Spezifikation kennt genau das
+(URL §6.2, dort für `file:`).
+
+**Nicht gebaut, und benannt:** `Document.createTreeWalker` (26, davon 25 von
+einer Seite), `Selection`/`Range` (~90, ein eigenes Thema), `History` als
+benannte Schnittstelle (das Objekt gibt es, der Konstruktor fehlt).
+
+## 0b. Was davor geschlossen ist (Stand 0.133.0)
 
 **`IntersectionObserver` + `ResizeObserver`** (P4 + P5, 782 Aufrufe) — gebaut
 in 0.133.0. **Beide hängen an derselben Sache**, und deshalb sind sie EIN
@@ -48,7 +90,7 @@ Gegen die Rückkopplung (ein Rückruf ändert, was er misst — der häufigste
 Konsolenfehler des Webs) steht ein Riegel: nach acht Bildern in Folge wird
 der Baum weiter übernommen, aber nicht mehr sofort neu gemalt.
 
-## 0b. Was davor geschlossen ist (Stand 0.132.0)
+## 0c. Was davor geschlossen ist (Stand 0.132.0)
 
 **`MutationObserver`** (P6, 116 Aufrufe) — gebaut in 0.126.0, mit
 `childList`/`attributes`/`characterData`/`subtree`, beiden `oldValue` und
@@ -74,8 +116,14 @@ und schwacher Zufall beantwortet diese Frage falsch.
 Fingerabdruckflaechen, die nur dazu dienen, wie jemand anders auszusehen
 ([[feedback_no_ua_impersonation]]).
 
-Bleibt aus der Rangliste: **P1** Shadow DOM (876), **P3** echte Scroll-Masse
-(660), **P2** `MessagePort` (505). Dazu, ausserhalb dieser Zaehlung und je ein
+Bleibt aus der Rangliste: **P1** Shadow DOM (876) und **P2** `MessagePort`
+(505) — zusammen 71 % der ganzen verbleibenden Lücke.
+
+**Shadow DOM ist gemessen KEINE Web-Anforderung, sondern die Bauweise einer
+Seite:** 89 % der 906 Aufrufe kommen von MDN allein, 10 % von GitHub, der
+Rest ist einstellig. In allen sechzehn Korpusseiten — jede Google-Seite
+eingeschlossen — steht null Shadow DOM. Dieselbe Falle wie bei den
+WPT-Testvehikeln: die Zahl zählt Aufrufe, nicht Ziele. Dazu, ausserhalb dieser Zaehlung und je ein
 eigenes Thema: `Intl`, Zeichenflaeche (`canvas` 2D), `Worker`,
 `structuredClone`, `Error.stack`, `XPathEvaluator` (htmx).
 
@@ -104,15 +152,16 @@ Rümpfe ausser Text, `response.body` als Strom, `AbortSignal.timeout`.
 |---|---|---:|---|---|
 | **P1** | **Shadow DOM** — `attachShadow`, `shadowRoot`, `assignedSlot`, `ShadowRoot.host`, `adoptedStyleSheets` | **876** | Engine + Kaskade | gross |
 | **P2** | **`MessagePort.postMessage`** | **505** | Engine | mittel |
-| **P3** | **Echte Scroll-Masse** — `scrollHeight`, `scrollWidth`, `scrollTop`, `scrollLeft`, `offsetParent` | **660** | Layout → Bindung | mittel |
+| ~~P3~~ | ~~Echte Scroll-Masse~~ | ~~660~~ | **gebaut 0.134.0** | |
 | ~~P4~~ | ~~`IntersectionObserver`~~ | ~~429~~ | **gebaut 0.133.0** | |
 | ~~P5~~ | ~~`ResizeObserver`~~ | ~~353~~ | **gebaut 0.133.0** | |
 | ~~P6~~ | ~~`MutationObserver`~~ | ~~116~~ | **gebaut 0.126.0** | |
 | **P7** | Kleinkram, je < 70: `ariaHidden` 68, `nextElementSibling` 112, `toggleAttribute` 56, `URL.username/password` 94, `History.state` 46, `document.referrer` 45, `Node.isConnected` 42, `Element.attributes`/`NamedNodeMap` 75, `createTreeWalker` 26, `document.hidden`/`visibilityState` 50, `currentSrc` 28, `DocumentFragment.*` 54 | **~700** | Engine | je klein |
 
-**P3 ist der billigste Gewinn je Aufruf.** Die Eigenschaften sind schon da —
-sie antworten nur 0, weil die Bindung die Layoutkästen nicht fragt. Das ist
-keine neue Schnittstelle, das ist eine Leitung.
+~~**P3 ist der billigste Gewinn je Aufruf.**~~ Gebaut in 0.134.0 — und die
+Vorhersage stimmte nur halb: es war keine reine Leitung. Das Layout führte
+die Polsterung gar nicht mit, und die Rollfläche des Dokuments musste als
+eigenes Feld in die Geometrie.
 
 **P1 ist das grösste und das teuerste.** Shadow DOM ist nicht nur eine
 Baum-Erweiterung: die Kaskade muss Grenzen kennen (`:host`, `::slotted`,

@@ -684,10 +684,81 @@ fn is_root_element(i: &mut Interp, t: &Value) -> bool {
     i.doc.as_ref().and_then(|d| d.html) == Some(id)
 }
 
+/// Rollt DIESES Element die Seite? Das Wurzelelement und der `<body>` tun
+/// es; jedes andere hat in beak keinen eigenen Rollkasten.
+///
+/// `document.scrollingElement` nennt dasselbe Element, und beide Antworten
+/// muessen dieselbe sein: eine Seite liest `scrollingElement` und schreibt
+/// dann dessen `scrollTop`.
+fn is_scrolling_root(i: &mut Interp, t: &Value) -> bool {
+    let Ok(id) = node_of(i, t) else { return false };
+    let Some(d) = &i.doc else { return false };
+    d.html == Some(id) || d.body == Some(id)
+}
+
+/// Die ROLLFLAECHE eines gewoehnlichen Elements: sein Polsterkasten,
+/// vereinigt mit den Rahmenkaesten aller Nachfahren.
+///
+/// Genau das fragt eine Seite, wenn sie `scrollHeight` liest — „passt der
+/// Inhalt in den Kasten?". Ohne die Nachfahren waere die Antwort immer ja.
+fn scroll_area(i: &Interp, t: &Value) -> Option<(f64, f64)> {
+    let id = node_of_ref(i, t).ok()?;
+    let g = i.geometry.as_ref()?;
+    let d = i.doc.as_ref()?;
+    let (own, borders, _) = node_box(i, id)?;
+    // Der Polsterkasten ist der Boden: `scrollHeight` ist nie kleiner als
+    // `clientHeight`. Gemessen wird von der POLSTERkante aus, also nur den
+    // Rahmen hinein — und wir fuehren je Achse nur die SUMME, also ist die
+    // halbe die Schaetzung fuer die eine Seite. Bei gleichen Rahmen ist sie
+    // exakt; ein Rahmen, der links und rechts verschieden ist, verschiebt sie
+    // um wenige Pixel. Gegen die 0, die vorher dastand, ist das keine Frage.
+    let (bl, bt) = (borders.0 / 2.0, borders.1 / 2.0);
+    let mut w = (own.2 - borders.0).max(0.0);
+    let mut h = (own.3 - borders.1).max(0.0);
+    let (ox, oy) = (own.0 + bl, own.1 + bt);
+    let mut kids = Vec::new();
+    d.descendants(id, &mut kids);
+    for k in kids {
+        let Some(seq) = node_seq(i, k) else { continue };
+        for b in g.boxes.iter().filter(|b| b.seq == seq) {
+            let bx = (b.x - g.scroll.0) as f64;
+            let by = (b.y - g.scroll.1) as f64;
+            w = w.max(bx + b.w as f64 - ox);
+            h = h.max(by + b.h as f64 - oy);
+        }
+    }
+    Some((w, h))
+}
+
+/// Die Argumente von `scrollTo`/`scrollBy`: entweder zwei Zahlen oder ein
+/// Gegenstand mit `left`/`top`. Was fehlt, bleibt `None` und laesst die
+/// Achse in Ruhe — `scrollTo({ top: 0 })` darf nicht waagerecht springen.
+fn scroll_args(i: &mut Interp, a: &[Value]) -> C<(Option<f64>, Option<f64>)> {
+    match a.first() {
+        Some(o @ Value::Obj(_)) => {
+            let l = match i.get(o, "left")? { Value::Undefined => None, v => Some(i.to_number(&v)?) };
+            let t = match i.get(o, "top")? { Value::Undefined => None, v => Some(i.to_number(&v)?) };
+            Ok((l, t))
+        }
+        _ => {
+            let x = match a.first() { None | Some(Value::Undefined) => None,
+                                      Some(v) => Some(i.to_number(v)?) };
+            let y = match a.get(1) { None | Some(Value::Undefined) => None,
+                                     Some(v) => Some(i.to_number(v)?) };
+            Ok((x, y))
+        }
+    }
+}
+
 /// Ein Fenstermass, so wie `set_viewport` es abgelegt hat.
 fn viewport_num(i: &mut Interp, key: &str) -> Value {
     let g = Value::Obj(i.realm.global.clone());
     match i.get(&g, key) { Ok(v @ Value::Num(_)) => v, _ => Value::Num(0.0) }
+}
+
+/// Dasselbe als Zahl.
+fn viewport_f(i: &mut Interp, key: &str) -> f64 {
+    match viewport_num(i, key) { Value::Num(n) => n, _ => 0.0 }
 }
 
 pub fn page_scripts(d: &Doc) -> Vec<ScriptRef> {
@@ -995,19 +1066,27 @@ fn node_seq(i: &Interp, id: u32) -> Option<u32> {
 
 /// Der Rahmenkasten eines Knotens in FENSTERkoordinaten — die Vereinigung
 /// seiner Fragmente, genau wie `getBoundingClientRect`, dazu die Rahmen- und
-/// Polstersummen des ersten Fragments.
+/// Polstersummen des ersten Fragments, GETRENNT.
+///
+/// Getrennt, weil zwei Fragen daran haengen und sie verschiedene Kanten
+/// meinen: `contentRect` will beide abziehen, `scrollHeight` misst ab der
+/// POLSTERkante und zieht nur den Rahmen ab. Zusammengefasst waren sie
+/// einmal, und der Unterschied war 5 px, die kein Test bemerkt haette, wenn
+/// er nicht beides in demselben Kasten gehabt haette.
 ///
 /// Dieselbe Rechnung wie `elem_rect`, nur ohne den Umweg ueber einen
 /// JS-Wert. Zwei Rechenwege waeren zwei Wahrheiten ueber denselben Kasten
 /// ([[feedback_intrinsic_shared_path]]).
-fn node_box(i: &Interp, id: u32) -> Option<((f64, f64, f64, f64), (f64, f64))> {
+fn node_box(i: &Interp, id: u32) -> Option<((f64, f64, f64, f64), (f64, f64), (f64, f64))> {
     let g = i.geometry.as_ref()?;
     let seq = node_seq(i, id)?;
     let mut acc: Option<(i32, i32, i32, i32)> = None;
-    let mut edges = (0.0, 0.0);
+    let mut borders = (0.0, 0.0);
+    let mut pads = (0.0, 0.0);
     for b in g.boxes.iter().filter(|b| b.seq == seq) {
         if acc.is_none() {
-            edges = ((b.bx + b.px) as f64, (b.by + b.py) as f64);
+            borders = (b.bx as f64, b.by as f64);
+            pads = (b.px as f64, b.py as f64);
         }
         acc = Some(match acc {
             None => (b.x, b.y, b.x + b.w, b.y + b.h),
@@ -1017,7 +1096,7 @@ fn node_box(i: &Interp, id: u32) -> Option<((f64, f64, f64, f64), (f64, f64))> {
     }
     let (x0, y0, x1, y1) = acc?;
     Some((((x0 - g.scroll.0) as f64, (y0 - g.scroll.1) as f64,
-           (x1 - x0) as f64, (y1 - y0) as f64), edges))
+           (x1 - x0) as f64, (y1 - y0) as f64), borders, pads))
 }
 
 /// `rootMargin`: ein bis vier CSS-Laengen, oben/rechts/unten/links wie bei
@@ -1057,8 +1136,8 @@ pub fn eval_box_observers(i: &mut Interp) {
                 let reg = &i.resize_obs[n].regs[r];
                 (reg.target, reg.kind, reg.last)
             };
-            let Some(((_, _, w, h), (ex, ey))) = node_box(i, id) else { continue };
-            let content = ((w - ex).max(0.0), (h - ey).max(0.0));
+            let Some(((_, _, w, h), (bx, by), (px, py))) = node_box(i, id) else { continue };
+            let content = ((w - bx - px).max(0.0), (h - by - py).max(0.0));
             let border = (w, h);
             let seen = match kind { BoxKind::Border => border, BoxKind::Content => content };
             // Ein Beobachter meldet AENDERUNGEN — und beim ersten Mal die
@@ -1079,7 +1158,7 @@ pub fn eval_box_observers(i: &mut Interp) {
         // beiden Faellen um `rootMargin` gedehnt.
         let root = match i.inter_obs[n].root {
             None => (0.0, 0.0, vw, vh),
-            Some(id) => match node_box(i, id) { Some((r, _)) => r, None => continue },
+            Some(id) => match node_box(i, id) { Some((r, _, _)) => r, None => continue },
         };
         let (mt, mr, mb, ml) = i.inter_obs[n].margin;
         let rx0 = root.0 - ml;
@@ -1092,7 +1171,7 @@ pub fn eval_box_observers(i: &mut Interp) {
                 let reg = &i.inter_obs[n].regs[r];
                 (reg.target, reg.band)
             };
-            let Some(((tx, ty, tw, th), _)) = node_box(i, id) else { continue };
+            let Some(((tx, ty, tw, th), _, _)) = node_box(i, id) else { continue };
             let ix0 = tx.max(rx0);
             let iy0 = ty.max(ry0);
             let ix1 = (tx + tw).min(rx1);
@@ -1698,6 +1777,39 @@ macro_rules! attr_prop {
             let id = node_of(i, &t)?;
             let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
             if let Some(d) = &mut i.doc { d.set_attr_at(id, $attr, &v); }
+            Ok(Value::Undefined)
+        }, concat!("set ", $js), 1, false);
+        $proto.borrow_mut().define($js, Prop { value: None, get: Some(Value::Obj(g)),
+            set: Some(Value::Obj(s)), writable: false, enumerable: false, configurable: true });
+    }};
+}
+
+/// Wie `attr_prop!`, aber `null` statt der leeren Zeichenkette, wenn das
+/// Attribut fehlt. So spiegeln die ARIA-Felder (ARIA 1.2 §9): sie sind
+/// `DOMString?`, und `el.ariaHidden === null` ist die Frage „steht da
+/// ueberhaupt etwas".
+macro_rules! attr_prop_null {
+    ($proto:expr, $fp:expr, $js:literal, $attr:literal) => {{
+        let g = native(Some($fp.clone()), |i, t, _| {
+            with_node!(i, t, |n| Ok(match n.attr($attr) {
+                Some(v) => Value::Str(v.clone()), None => Value::Null }))
+        }, concat!("get ", $js), 0, false);
+        let s = native(Some($fp.clone()), |i, t, a| {
+            let id = node_of(i, &t)?;
+            match a.first() {
+                // `el.ariaHidden = null` NIMMT das Attribut weg. Es auf die
+                // Zeichenkette "null" zu setzen waere die naheliegende
+                // Bequemlichkeit und ein sichtbarer Fehler: `aria-hidden="null"`
+                // ist wahr, weil jeder Wert ausser "false" wahr ist.
+                None | Some(Value::Null) | Some(Value::Undefined) => {
+                    if let Some(d) = &mut i.doc { d.remove_attr_at(id, $attr); }
+                }
+                Some(v) => {
+                    let v = v.clone();
+                    let v = i.to_string(&v)?;
+                    if let Some(d) = &mut i.doc { d.set_attr_at(id, $attr, &v); }
+                }
+            }
             Ok(Value::Undefined)
         }, concat!("set ", $js), 1, false);
         $proto.borrow_mut().define($js, Prop { value: None, get: Some(Value::Obj(g)),
@@ -2393,14 +2505,130 @@ pub fn install(realm: &mut Realm) {
         if is_root_element(i, &t) { return Ok(viewport_num(i, "innerHeight")) }
         Ok(Value::Num(elem_inner(i, &t).map_or(0.0, |(_, h)| h)))
     }, &fp);
-    // NOCH Platzhalter, und sie stehen als solche in `tests/apigap.rs`:
-    // `scrollWidth`/`scrollHeight` brauchen die INHALTSgroesse (mit Ueberlauf),
-    // `scrollTop`/`scrollLeft` einen Rollstand je Element. Beides gibt es im
-    // Layout heute nicht; eine Zahl daraus zu erfinden waere genau der Fehler,
-    // den diese Runde behebt.
-    for k in ["scrollWidth", "scrollHeight", "scrollTop", "scrollLeft"] {
-        getter(&element_proto, k, |_, _, _| Ok(Value::Num(0.0)), &fp);
-    }
+    // ── Die Rollmasse ────────────────────────────────────────────────────
+    //
+    // **Sie waren da und antworteten 0** — 582 Aufrufe im Zensus, die
+    // groesste Position, die keine neue Schnittstelle braucht, sondern eine
+    // Leitung. Der Kommentar, der hier stand, war ehrlich: die Zahlen gab es
+    // im Layout nicht. Jetzt gibt es sie.
+    //
+    // **beak klemmt nichts ab.** `overflow: auto`/`scroll` schneidet hier
+    // nicht, es gibt keine Rollkaesten je Element (`layout.rs`: „we have no
+    // scroll containers"). Das ist keine Ausrede, sondern die Antwort:
+    //
+    // * `scrollTop`/`scrollLeft` sind an jedem gewoehnlichen Element **0**,
+    //   und das ist WAHR, nicht geraten — nichts an ihm ist weggerollt. Am
+    //   Wurzelelement und am `<body>` sind sie der Rollstand der SEITE, denn
+    //   die rollt.
+    // * `scrollHeight`/`scrollWidth` sind die Rollflaeche: der Polsterkasten,
+    //   vereinigt mit den Rahmenkaesten aller Nachfahren. Ein Element mit
+    //   `height: 100px` und hoeherem Inhalt meldet den Inhalt — genau
+    //   deswegen fragt eine Seite ueberhaupt.
+    // * Am Wurzelelement ist es die Rollflaeche des DOKUMENTS, und die sagt
+    //   das Layout (`Geometry::content`). Sie aus den Kaesten zu raten waere
+    //   eine zweite Wahrheit ueber dieselbe Zahl: ein Hintergrund oder ein
+    //   ueberlaufender Text haelt eine Seite rollbar, ohne einen Kasten zu
+    //   haben.
+    getter(&element_proto, "scrollHeight", |i, t, _| {
+        if is_scrolling_root(i, &t) {
+            let c = i.geometry.as_ref().map_or(0.0, |g| g.content.1 as f64);
+            return Ok(Value::Num(c.max(viewport_f(i, "innerHeight"))));
+        }
+        Ok(Value::Num(scroll_area(i, &t).map_or(0.0, |(_, h)| h)))
+    }, &fp);
+    getter(&element_proto, "scrollWidth", |i, t, _| {
+        if is_scrolling_root(i, &t) {
+            let c = i.geometry.as_ref().map_or(0.0, |g| g.content.0 as f64);
+            return Ok(Value::Num(c.max(viewport_f(i, "innerWidth"))));
+        }
+        Ok(Value::Num(scroll_area(i, &t).map_or(0.0, |(w, _)| w)))
+    }, &fp);
+    accessor(&element_proto, "scrollTop",
+        |i, t, _| {
+            if !is_scrolling_root(i, &t) { return Ok(Value::Num(0.0)) }
+            Ok(Value::Num(i.geometry.as_ref().map_or(0.0, |g| g.scroll.1 as f64)))
+        },
+        |i, t, a| {
+            if !is_scrolling_root(i, &t) { return Ok(Value::Undefined) }
+            let y = i.to_number(a.first().unwrap_or(&Value::Undefined))?;
+            i.want_scroll(None, Some(y));
+            Ok(Value::Undefined)
+        }, &fp);
+    accessor(&element_proto, "scrollLeft",
+        |i, t, _| {
+            if !is_scrolling_root(i, &t) { return Ok(Value::Num(0.0)) }
+            Ok(Value::Num(i.geometry.as_ref().map_or(0.0, |g| g.scroll.0 as f64)))
+        },
+        |i, t, a| {
+            if !is_scrolling_root(i, &t) { return Ok(Value::Undefined) }
+            let x = i.to_number(a.first().unwrap_or(&Value::Undefined))?;
+            i.want_scroll(Some(x), None);
+            Ok(Value::Undefined)
+        }, &fp);
+    // `offsetParent`: der naechste POSITIONIERTE Vorfahr, sonst der `<body>`
+    // (CSSOM View §5). Die Ecke „positioniert" faehrt seit dieser Runde im
+    // Layoutkasten mit — sie sonst zu beantworten hiesse, fuer jeden
+    // Vorfahren die Kaskade neu aufzuloesen.
+    //
+    // `null` an einem Element ohne Kasten, am Wurzelelement und am `<body>`
+    // selbst. Das ist die Antwort, auf die eine Seite prueft, wenn sie
+    // fragt, ob ein Element ueberhaupt sichtbar ist.
+    getter(&element_proto, "offsetParent", |i, t, _| {
+        let id = node_of(i, &t)?;
+        let (html, body) = match &i.doc {
+            Some(d) => (d.html, d.body),
+            None => return Ok(Value::Null),
+        };
+        if Some(id) == html || Some(id) == body { return Ok(Value::Null) }
+        // Ohne Kasten gibt es keinen Bezug — `display: none`, und genau das
+        // ist die uebliche Frage.
+        if node_box(i, id).is_none() { return Ok(Value::Null) }
+        let mut cur = i.doc.as_ref().and_then(|d| d.nodes[id as usize].parent);
+        while let Some(p) = cur {
+            if Some(p) == body || Some(p) == html { break }
+            if node_seq(i, p).is_some_and(|s| i.geometry.as_ref()
+                .is_some_and(|g| g.boxes.iter().any(|b| b.seq == s && b.positioned))) {
+                return Ok(wrap(i, p));
+            }
+            cur = i.doc.as_ref().and_then(|d| d.nodes[p as usize].parent);
+        }
+        Ok(match body { Some(b) => wrap(i, b), None => Value::Null })
+    }, &fp);
+    // Rollen auf Verlangen. **Die Engine rollt NICHT** — sie merkt sich, was
+    // die Seite wollte, und der Wirt holt es mit `take_scroll` ab. Dasselbe
+    // Muster wie bei den Keksen und der Navigation: die Engine hat kein
+    // Fenster und soll sich keines erfinden.
+    meth(&element_proto, "scrollTo", |i, t, a| {
+        if !is_scrolling_root(i, &t) { return Ok(Value::Undefined) }
+        let (x, y) = scroll_args(i, a)?;
+        i.want_scroll(x, y);
+        Ok(Value::Undefined)
+    }, 2, &fp);
+    meth(&element_proto, "scrollBy", |i, t, a| {
+        if !is_scrolling_root(i, &t) { return Ok(Value::Undefined) }
+        let (dx, dy) = scroll_args(i, a)?;
+        let (sx, sy) = i.geometry.as_ref().map_or((0.0, 0.0),
+            |g| (g.scroll.0 as f64, g.scroll.1 as f64));
+        i.want_scroll(dx.map(|v| sx + v), dy.map(|v| sy + v));
+        Ok(Value::Undefined)
+    }, 2, &fp);
+    // `scrollIntoView` rollt so weit, dass die OBERKANTE des Elements oben
+    // steht — die Vorgabe der Spezifikation (`block: "start"`). Ein Argument
+    // `false` oder `{ block: "end" }` stellt die Unterkante ans untere Ende.
+    meth(&element_proto, "scrollIntoView", |i, t, a| {
+        let Some((_, y, _, h)) = elem_rect(i, &t) else { return Ok(Value::Undefined) };
+        let sy = i.geometry.as_ref().map_or(0.0, |g| g.scroll.1 as f64);
+        let doc_y = y + sy;
+        let ende = match a.first() {
+            Some(Value::Bool(false)) => true,
+            Some(o @ Value::Obj(_)) => matches!(i.get(o, "block")?,
+                Value::Str(s) if &*s == "end" || &*s == "nearest"),
+            _ => false,
+        };
+        let ziel = if ende { doc_y + h - viewport_f(i, "innerHeight") } else { doc_y };
+        i.want_scroll(None, Some(ziel.max(0.0)));
+        Ok(Value::Undefined)
+    }, 1, &fp);
     // Die Liste selbst arbeitet auf dem Element: sie haelt keine Kopie der
     // Klassen, sondern liest und schreibt das Attribut. Frisch je Zugriff —
     // `el.classList === el.classList` ist damit falsch, waehrend ein Browser
@@ -2497,6 +2725,13 @@ pub fn install(realm: &mut Realm) {
         match doc_part(i, &this, DocPart::Head)? { Some(x) => Ok(wrap(i, x)), None => Ok(Value::Null) }
     }, &fp);
     getter(&document_proto, "readyState", |_, _, _| Ok(Value::str("complete")), &fp);
+    // `scrollingElement` — das Element, dessen `scrollTop` die SEITE rollt.
+    // Im Standardmodus ist das `documentElement`, und beak parst nichts
+    // anderes. Eine Seite liest es und schreibt dann darauf; beide Antworten
+    // muessen zueinander passen (`is_scrolling_root`).
+    getter(&document_proto, "scrollingElement", |i, this, _| {
+        match doc_part(i, &this, DocPart::Root)? { Some(x) => Ok(wrap(i, x)), None => Ok(Value::Null) }
+    }, &fp);
     // **Vier Felder, die jede Seite liest — und die es bisher nicht gab.**
     // Im Zensus stehen `visibilityState`/`hidden` mit 50 und `referrer` mit
     // 45 Aufrufen (`docs/plan/WEB_PLATFORM_GAPS.md` P7). Ein FEHLENDES Feld
@@ -3256,6 +3491,192 @@ pub fn install(realm: &mut Realm) {
         Ok(Value::Undefined)
     }, 1, &fp);
 
+
+    // ── Attr + NamedNodeMap ──────────────────────────────────────────────
+    //
+    // `el.attributes` (40 Aufrufe), `NamedNodeMap.length` (35) und die drei
+    // `Attr`-Felder (72). Zusammen 147, und sie haengen aneinander: ohne
+    // `Attr` ist die Karte leer, ohne die Karte ist `attributes` nutzlos.
+    //
+    // Die Karte ist eine MOMENTAUFNAHME, keine lebende Sicht. Ein Browser
+    // gibt eine lebende; wer die Karte haelt und dazwischen ein Attribut
+    // setzt, saehe hier den alten Stand. Gemerkt, weil es eines Tages
+    // auffaellt — die 147 Aufrufe lesen alle sofort.
+    //
+    // Die Felder sitzen auf dem PROTOTYP, nicht auf jedem Gegenstand — so
+    // wie im Browser. Sie auf die Instanz zu legen waere kuerzer und fuer
+    // `attributes[0].name` nicht zu unterscheiden; es faellt erst auf, wenn
+    // jemand `Attr.prototype` befragt, und genau das tut die Lueckenprobe.
+    let attr_proto = new_obj(Some(realm.object_proto.clone()));
+    iface(realm, "Attr", &attr_proto);
+    /// Ein verdecktes Feld lesen. Eingebaute Funktionen sind Zeiger und
+    /// fangen nichts ein — also steht der Feldname im Rumpf.
+    macro_rules! slot_getter {
+        ($proto:expr, $js:literal, $slot:literal, $fallback:expr) => {
+            getter($proto, $js, |i, t, _| {
+                let _ = i;
+                let Value::Obj(o) = &t else { return Ok($fallback) };
+                Ok(o.borrow().get_own($slot).and_then(|p| p.value.clone()).unwrap_or($fallback))
+            }, &fp);
+        };
+    }
+    slot_getter!(&attr_proto, "name", "__attrname", Value::str(""));
+    slot_getter!(&attr_proto, "localName", "__attrname", Value::str(""));
+    slot_getter!(&attr_proto, "value", "__attrval", Value::str(""));
+    // Wir fuehren keine Namensraeume. `null` ist die richtige Antwort fuer
+    // HTML-Attribute, nicht eine fehlende.
+    for k in ["namespaceURI", "prefix"] {
+        getter(&attr_proto, k, |_, _, _| Ok(Value::Null), &fp);
+    }
+    getter(&attr_proto, "specified", |_, _, _| Ok(Value::Bool(true)), &fp);
+    let nnm_proto = new_obj(Some(realm.object_proto.clone()));
+    iface(realm, "NamedNodeMap", &nnm_proto);
+    slot_getter!(&nnm_proto, "length", "__len", Value::Num(0.0));
+    meth(&nnm_proto, "item", |i, t, a| {
+        let n = i.to_number(a.first().unwrap_or(&Value::Undefined))?;
+        if !(n >= 0.0) { return Ok(Value::Null) }
+        Ok(match i.get(&t, &alloc::format!("{}", n as usize))? {
+            Value::Undefined => Value::Null, v => v })
+    }, 1, &fp);
+    meth(&nnm_proto, "getNamedItem", |i, t, a| {
+        let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let len = match i.get(&t, "length")? { Value::Num(n) => n as usize, _ => 0 };
+        for n in 0..len {
+            let e = i.get(&t, &alloc::format!("{n}"))?;
+            if matches!(i.get(&e, "name")?, Value::Str(s) if *s == *k) { return Ok(e) }
+        }
+        Ok(Value::Null)
+    }, 1, &fp);
+    realm.attr_proto = attr_proto.clone();
+    realm.nnm_proto = nnm_proto.clone();
+    getter(&element_proto, "attributes", |i, t, _| {
+        let id = node_of(i, &t)?;
+        let attrs: Vec<(Rc<str>, Rc<str>)> = i.doc.as_ref()
+            .map(|d| d.nodes[id as usize].attrs.clone()).unwrap_or_default();
+        let map = new_obj(Some(i.realm.nnm_proto.clone()));
+        for (n, (k, v)) in attrs.iter().enumerate() {
+            let a = new_obj(Some(i.realm.attr_proto.clone()));
+            {
+                let mut b = a.borrow_mut();
+                let hide = |v: Value| Prop { value: Some(v), get: None, set: None,
+                    writable: false, enumerable: false, configurable: false };
+                b.define("__attrname", hide(Value::Str(k.clone())));
+                b.define("__attrval", hide(Value::Str(v.clone())));
+            }
+            let mut m = map.borrow_mut();
+            m.define(&alloc::format!("{n}"), Prop::data(Value::Obj(a.clone())));
+            // Auch unter dem NAMEN: `el.attributes.href` ist die uebliche
+            // Schreibweise, und die Spezifikation kennt sie (WebIDL
+            // `[LegacyUnenumerableNamedProperties]`).
+            m.define(k, Prop::data(Value::Obj(a)));
+        }
+        map.borrow_mut().define("__len", Prop { value: Some(Value::Num(attrs.len() as f64)),
+            get: None, set: None, writable: false, enumerable: false, configurable: false });
+        Ok(Value::Obj(map))
+    }, &fp);
+    // `toggleAttribute(name, force?)` — 56 Aufrufe. Es liefert, ob das
+    // Attribut DANACH da ist, und darauf verlaesst sich der uebliche Einzeiler
+    // `el.setAttribute("aria-expanded", el.toggleAttribute("open"))`.
+    meth(&element_proto, "toggleAttribute", |i, t, a| {
+        let id = node_of(i, &t)?;
+        let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let da = i.doc.as_ref().is_some_and(|d| d.nodes[id as usize].attr(&k).is_some());
+        let soll = match a.get(1) {
+            None | Some(Value::Undefined) => !da,
+            Some(v) => v.truthy(),
+        };
+        if soll != da {
+            if let Some(d) = &mut i.doc {
+                if soll { d.set_attr_at(id, &k, ""); } else { d.remove_attr_at(id, &k); }
+            }
+        }
+        Ok(Value::Bool(soll))
+    }, 1, &fp);
+
+    // ── Der Kleinkram aus P7 ─────────────────────────────────────────────
+    //
+    // Je Zeile fuenf Zeilen Arbeit, zusammen rund 400 Aufrufe im Zensus. Sie
+    // stehen hier zusammen, weil sie EINE Sache gemeinsam haben: jede war
+    // nicht falsch, sondern GAR NICHT da — und ein fehlendes Feld ist ein
+    // `TypeError` mitten in fremdem Code, kein falscher Wert, den man sieht.
+
+    // `nextElementSibling`/`previousElementSibling` gehoeren zu
+    // `NonDocumentTypeChildNode` — also an Element UND an Text/Kommentar
+    // (112 + 54 Aufrufe). Der Zensus nennt beide getrennt, und beide gibt es.
+    for proto in [&element_proto, &char_data_proto] {
+        getter(proto, "nextElementSibling",
+               |i, t, _| element_sibling(i, &t, 1), &fp);
+        getter(proto, "previousElementSibling",
+               |i, t, _| element_sibling(i, &t, -1), &fp);
+        // `remove()` gehoert zu `ChildNode`, also an BEIDE — es sass nur auf
+        // Element, und `CharacterData.remove` steht mit 18 Aufrufen im
+        // Zensus. Ein Textknoten, den man nicht loswird, ist genau die Sorte
+        // Luecke, die man erst am fremden Code merkt.
+        meth(proto, "remove", |i, t, _| {
+            let id = node_of(i, &t)?;
+            if let Some(d) = &mut i.doc { d.detach(id); }
+            Ok(Value::Undefined)
+        }, 0, &fp);
+    }
+    // `lastElementChild`/`childElementCount` — die Geschwister von
+    // `firstElementChild`, das es schon gab. Sie einzeln nachzureichen, wenn
+    // sie das naechste Mal fehlen, waere dreimal derselbe Weg.
+    for proto in [&element_proto, &document_proto, &fragment_proto] {
+        getter(proto, "lastElementChild", |i, t, _| {
+            let id = node_of(i, &t)?;
+            let c = i.doc.as_ref().and_then(|d| d.nodes[id as usize].children.iter()
+                .rev().copied().find(|&c| d.nodes[c as usize].kind == ELEMENT_NODE));
+            Ok(match c { Some(x) => wrap(i, x), None => Value::Null })
+        }, &fp);
+        getter(proto, "childElementCount", |i, t, _| {
+            let id = node_of(i, &t)?;
+            let n = i.doc.as_ref().map_or(0, |d| d.nodes[id as usize].children.iter()
+                .filter(|&&c| d.nodes[c as usize].kind == ELEMENT_NODE).count());
+            Ok(Value::Num(n as f64))
+        }, &fp);
+        // `replaceChildren(...)` — alles raus, das Neue rein. 52 Aufrufe, und
+        // es ist die moderne Schreibweise fuer `innerHTML = ""` plus
+        // anhaengen; wer sie nicht hat, bekommt eine halb geleerte Liste.
+        meth(proto, "replaceChildren", |i, t, a| {
+            let id = node_of(i, &t)?;
+            let alt: Vec<u32> = i.doc.as_ref()
+                .map(|d| d.nodes[id as usize].children.clone()).unwrap_or_default();
+            for c in alt { if let Some(d) = &mut i.doc { d.detach(c); } }
+            insert_all(i, &t, a, Where::Last)
+        }, 0, &fp);
+    }
+    // Auf `document` und `<html>` fehlten `firstElementChild`/`children`
+    // ebenfalls — sie sitzen bisher nur auf Element.
+    for proto in [&document_proto, &fragment_proto] {
+        getter(proto, "firstElementChild", |i, t, _| {
+            let id = node_of(i, &t)?;
+            let c = i.doc.as_ref().and_then(|d| d.nodes[id as usize].children.iter()
+                .copied().find(|&c| d.nodes[c as usize].kind == ELEMENT_NODE));
+            Ok(match c { Some(x) => wrap(i, x), None => Value::Null })
+        }, &fp);
+        getter(proto, "children", |i, t, _| {
+            let id = node_of(i, &t)?;
+            let cs: Vec<u32> = i.doc.as_ref().map(|d| d.nodes[id as usize].children.iter()
+                .copied().filter(|&c| d.nodes[c as usize].kind == ELEMENT_NODE).collect())
+                .unwrap_or_default();
+            Ok(nodes_array(i, cs))
+        }, &fp);
+    }
+    // `isConnected` (42): haengt dieser Knoten am Dokument? Genau diese Frage
+    // stellt jede Bibliothek, bevor sie an einem Knoten misst — ein Knoten
+    // ausserhalb des Baumes hat keinen Kasten, und ihn zu messen liefert
+    // Nullen, die aussehen wie eine Messung.
+    getter(&node_proto, "isConnected", |i, t, _| {
+        let id = node_of(i, &t)?;
+        let Some(d) = &i.doc else { return Ok(Value::Bool(false)) };
+        let mut cur = Some(id);
+        while let Some(x) = cur {
+            if x == d.doc { return Ok(Value::Bool(true)) }
+            cur = d.nodes[x as usize].parent;
+        }
+        Ok(Value::Bool(false))
+    }, &fp);
+
     // ── DOMTokenList ─────────────────────────────────────────────────────
     //
     // `classList` gab es; was fehlte, war der Name — 1381 Aufrufe, und die
@@ -3649,6 +4070,40 @@ pub fn install(realm: &mut Realm) {
     // Ohne Kontext bleibt es beim Inline-Stil. Das ist eine Teilantwort, aber
     // die Funktion ganz wegzulassen hiesse TypeError, und ein TypeError
     // beendet das Skript.
+    // Der Rollstand am Fenster. **Er stand fest auf 0** — `set_viewport` hat
+    // ihn als Zahl abgelegt, und danach hat ihn nie jemand nachgezogen. Eine
+    // Seite, die `window.scrollY` liest, um zu entscheiden, ob die Kopfzeile
+    // kleben soll, bekam ueberall die Antwort „ganz oben".
+    //
+    // Jetzt Zugriffsfunktionen auf die Geometrie: dieselbe Quelle, aus der
+    // `getBoundingClientRect` rechnet, und damit dieselbe Wahrheit.
+    for k in ["scrollX", "pageXOffset"] {
+        getter(&realm.global, k, |i, _, _| {
+            Ok(Value::Num(i.geometry.as_ref().map_or(0.0, |g| g.scroll.0 as f64)))
+        }, &fp);
+    }
+    for k in ["scrollY", "pageYOffset"] {
+        getter(&realm.global, k, |i, _, _| {
+            Ok(Value::Num(i.geometry.as_ref().map_or(0.0, |g| g.scroll.1 as f64)))
+        }, &fp);
+    }
+    def_global(realm, "scrollTo", |i, _, a| {
+        let (x, y) = scroll_args(i, a)?;
+        i.want_scroll(x, y);
+        Ok(Value::Undefined)
+    }, 2, &fp);
+    def_global(realm, "scroll", |i, _, a| {
+        let (x, y) = scroll_args(i, a)?;
+        i.want_scroll(x, y);
+        Ok(Value::Undefined)
+    }, 2, &fp);
+    def_global(realm, "scrollBy", |i, _, a| {
+        let (dx, dy) = scroll_args(i, a)?;
+        let (sx, sy) = i.geometry.as_ref().map_or((0.0, 0.0),
+            |g| (g.scroll.0 as f64, g.scroll.1 as f64));
+        i.want_scroll(dx.map(|v| sx + v), dy.map(|v| sy + v));
+        Ok(Value::Undefined)
+    }, 2, &fp);
     def_global(realm, "getComputedStyle", |i, _, a| {
         let id = node_of(i, a.first().unwrap_or(&Value::Undefined))?;
         let g = new_obj(Some(i.realm.style_proto.clone()));
@@ -3723,6 +4178,16 @@ pub fn install(realm: &mut Realm) {
     handler_prop!(html_element_proto, fp, "onresize", "resize");
     handler_prop!(html_element_proto, fp, "oncontextmenu", "contextmenu");
     handler_prop!(html_element_proto, fp, "ondblclick", "dblclick");
+    // Die Zeigerereignisse — 150 Aufrufe im Zensus. Zugestellt wird davon
+    // heute nichts (beak kennt `click`), aber die ANMELDUNG darf nicht
+    // werfen: eine Seite, die `el.onpointermove = f` schreibt, stirbt sonst
+    // an einer Zeile, die im Browser auch nichts tut, solange der Zeiger
+    // stillsteht.
+    handler_prop!(html_element_proto, fp, "onpointerenter", "pointerenter");
+    handler_prop!(html_element_proto, fp, "onpointerleave", "pointerleave");
+    handler_prop!(html_element_proto, fp, "onpointermove", "pointermove");
+    handler_prop!(html_element_proto, fp, "onpointerdown", "pointerdown");
+    handler_prop!(html_element_proto, fp, "onpointerup", "pointerup");
     handler_prop!(html_element_proto, fp, "ontouchstart", "touchstart");
     handler_prop!(html_element_proto, fp, "ontouchend", "touchend");
     handler_prop!(html_element_proto, fp, "onmessage", "message");
@@ -3773,6 +4238,25 @@ pub fn install(realm: &mut Realm) {
     // erreichbar". Eine 0 hiesse das Gegenteil.
     num_attr_prop!(html_element_proto, fp, "tabIndex", "tabindex", -1.0);
     attr_prop!(element_proto, fp, "slot", "slot");
+    // ── ARIA-Spiegelung ──────────────────────────────────────────────────
+    //
+    // `ariaHidden` steht mit 68 Aufrufen im Zensus — tagesschau.de liest es
+    // bei jedem Umschalten. Die Nachbarn kommen mit, weil sie dasselbe Muster
+    // haben und weil die naechste Seite eines davon liest: sie einzeln
+    // nachzureichen waere achtmal derselbe Weg.
+    //
+    // `role` ist die Ausnahme in der Liste: es heisst auch im Attribut so.
+    attr_prop!(element_proto, fp, "role", "role");
+    attr_prop_null!(element_proto, fp, "ariaHidden", "aria-hidden");
+    attr_prop_null!(element_proto, fp, "ariaLabel", "aria-label");
+    attr_prop_null!(element_proto, fp, "ariaExpanded", "aria-expanded");
+    attr_prop_null!(element_proto, fp, "ariaChecked", "aria-checked");
+    attr_prop_null!(element_proto, fp, "ariaSelected", "aria-selected");
+    attr_prop_null!(element_proto, fp, "ariaDisabled", "aria-disabled");
+    attr_prop_null!(element_proto, fp, "ariaCurrent", "aria-current");
+    attr_prop_null!(element_proto, fp, "ariaPressed", "aria-pressed");
+    attr_prop_null!(element_proto, fp, "ariaLive", "aria-live");
+    attr_prop_null!(element_proto, fp, "ariaValueNow", "aria-valuenow");
 
     let mut tag_protos: HashMap<&'static str, Gc> = HashMap::new();
     for (iname, tags) in HTML_IFACES {
@@ -3798,6 +4282,15 @@ pub fn install(realm: &mut Realm) {
         attr_prop!(p, fp, "rel", "rel");
         attr_prop!(p, fp, "download", "download");
         attr_prop!(p, fp, "hreflang", "hreflang");
+        // `a.hash` — 20 Aufrufe, und es ist das Stueck, an dem eine Seite
+        // erkennt, ob ein Verweis auf denselben Abschnitt zeigt. Aus dem
+        // ROHEN `href`, wie die Nachbarn auch: `href` ist hier nicht
+        // aufgeloest, und `hash` daraus aufzuloesen waere die eine Zeile, die
+        // aus der Reihe tanzt.
+        getter(p, "hash", |i, t, _| {
+            with_node!(i, t, |n| Ok(match n.attr("href").and_then(|h| h.find('#').map(|k| h[k..].to_string())) {
+                Some(f) => Value::string(f), None => Value::str("") }))
+        }, &fp);
     }
     // HTMLLinkElement
     if let Some(p) = tag_protos.get("link") {
@@ -3820,6 +4313,16 @@ pub fn install(realm: &mut Realm) {
         attr_prop!(p, fp, "srcset", "srcset");
         attr_prop!(p, fp, "sizes", "sizes");
         attr_prop!(p, fp, "loading", "loading");
+        // `currentSrc` (28 Aufrufe): WELCHE Quelle wurde wirklich genommen.
+        // beak waehlt aus `srcset` im Layout (`picture.rs`), und die Engine
+        // kennt diese Wahl nicht — sie kennt nur das Dokument. Also `src`,
+        // und das ist die richtige Antwort fuer jedes Bild ohne `srcset`;
+        // fuer eines MIT ist es die Quelle, die im Markup steht, und nicht
+        // die leere Zeichenkette, an der Wikipedias Bildcode heute abbricht.
+        getter(p, "currentSrc", |i, t, _| {
+            with_node!(i, t, |n| Ok(match n.attr("src") {
+                Some(v) => Value::Str(v.clone()), None => Value::str("") }))
+        }, &fp);
     }
     // HTMLInputElement
     if let Some(p) = tag_protos.get("input") {
@@ -4131,6 +4634,24 @@ const HTML_IFACES: &[(&str, &[&str])] = &[
     ("HTMLDialogElement",    &["dialog"]),
 ];
 
+/// Der naechste/vorige ELEMENT-Geschwisterknoten. Wie `sibling`, nur laeuft
+/// er weiter, bis ein Element kommt — Textknoten zwischen zwei `<li>` sind
+/// der Normalfall, nicht die Ausnahme, und genau deshalb fragt Seitencode
+/// nach `nextElementSibling` und nicht nach `nextSibling`.
+fn element_sibling(i: &mut Interp, this: &Value, dir: i32) -> C<Value> {
+    let id = node_of(i, this)?;
+    let Some(d) = &i.doc else { return Ok(Value::Null) };
+    let Some(p) = d.nodes[id as usize].parent else { return Ok(Value::Null) };
+    let cs = &d.nodes[p as usize].children;
+    let Some(pos) = cs.iter().position(|&c| c == id) else { return Ok(Value::Null) };
+    let found = if dir > 0 {
+        cs[pos + 1..].iter().copied().find(|&c| d.nodes[c as usize].kind == ELEMENT_NODE)
+    } else {
+        cs[..pos].iter().rev().copied().find(|&c| d.nodes[c as usize].kind == ELEMENT_NODE)
+    };
+    Ok(match found { Some(x) => wrap(i, x), None => Value::Null })
+}
+
 fn sibling(i: &mut Interp, this: &Value, dir: i32) -> C<Value> {
     let id = node_of(i, this)?;
     let Some(d) = &i.doc else { return Ok(Value::Null) };
@@ -4316,14 +4837,19 @@ mod beak_engine_layout_boxes {
     /// Ein Kasten, wie das Layout ihn aufzeichnet — kurz, weil eine Probe die
     /// zwoelf Felder sonst dreimal ausschreibt und nur fuenf davon meint.
     pub fn boxed(seq: u32, x: i32, y: i32, w: i32, h: i32, bx: i16, by: i16) -> ElemRect {
-        ElemRect { seq, x, y, w, h, bx, by, px: 0, py: 0 }
+        ElemRect { seq, x, y, w, h, bx, by, px: 0, py: 0, positioned: false }
     }
 
     /// Derselbe Kasten mit Polsterung — nur die Proben der Beobachter
     /// brauchen sie.
+    /// Und mit `position` — nur `offsetParent` fragt danach.
+    pub fn placed(seq: u32, x: i32, y: i32, w: i32, h: i32) -> ElemRect {
+        ElemRect { seq, x, y, w, h, bx: 0, by: 0, px: 0, py: 0, positioned: true }
+    }
+
     pub fn padded(seq: u32, x: i32, y: i32, w: i32, h: i32,
                   bx: i16, by: i16, px: i16, py: i16) -> ElemRect {
-        ElemRect { seq, x, y, w, h, bx, by, px, py }
+        ElemRect { seq, x, y, w, h, bx, by, px, py, positioned: false }
     }
 
     pub fn find_seq(el: &crate::dom::Element, id: &str) -> Option<u32> {
@@ -4507,6 +5033,7 @@ mod tests {
                 boxed(seq, 10, 100, 200, 50, 4, 6),
             ]),
             scroll: (0, 40),
+            content: (1024, 768),
         });
         let prog = super::super::parse(
             "var e = document.getElementById('a'), r = e.getBoundingClientRect();\
@@ -4543,6 +5070,7 @@ mod tests {
                 boxed(seq, 10, 30, 90, 20, 0, 0),
             ]),
             scroll: (0, 0),
+            content: (1024, 4000),
         });
         let prog = super::super::parse(
             "var r = document.getElementById('a').getBoundingClientRect();\
@@ -4586,6 +5114,7 @@ mod tests {
                 padded(seq, 10, 100, 200, 50, 4, 6, 20, 10),
             ]),
             scroll: (0, 0),
+            content: (1024, 4000),
         });
         let _ = i.run_program(&prog);
         // Zugestellt wird am Kontrollpunkt, nicht im `observe`.
@@ -4609,6 +5138,7 @@ mod tests {
         let geom = |w: i32| super::super::interp::Geometry {
             boxes: alloc::rc::Rc::new(alloc::vec![boxed(seq, 0, 0, w, 50, 0, 0)]),
             scroll: (0, 0),
+            content: (1024, 4000),
         };
         i.set_geometry(geom(200));
         let prog = super::super::parse(
@@ -4644,6 +5174,7 @@ mod tests {
         let at = |y: i32| super::super::interp::Geometry {
             boxes: alloc::rc::Rc::new(alloc::vec![boxed(seq, 0, y, 100, 100, 0, 0)]),
             scroll: (0, 0),
+            content: (1024, 4000),
         };
         i.set_geometry(at(2000));
         let prog = super::super::parse(
@@ -4686,6 +5217,7 @@ mod tests {
         i.set_geometry(super::super::interp::Geometry {
             boxes: alloc::rc::Rc::new(alloc::vec![boxed(seq, 0, 1200, 100, 100, 0, 0)]),
             scroll: (0, 0),
+            content: (1024, 4000),
         });
         let prog = super::super::parse(
             "var ohne = null, mit = null;\
@@ -4700,6 +5232,183 @@ mod tests {
             "console.log(ohne + ',' + mit + ',' + io.rootMargin);", false).expect("parst");
         let _ = i.run_program(&prog);
         assert_eq!(i.take_console(), ["false,true,0px 0px 300px 0px"]);
+    }
+
+
+    /// Die Rollmasse kommen aus den KAESTEN, nicht aus einer 0.
+    ///
+    /// `scrollHeight` ist der Polsterkasten, vereinigt mit den Nachfahren —
+    /// ein Kind, das aus seinem Elter laeuft, macht genau den Unterschied,
+    /// wegen dem eine Seite ueberhaupt fragt.
+    #[test]
+    fn scroll_metrics_come_from_the_boxes_not_from_zero() {
+        use super::beak_engine_layout_boxes::*;
+        let html = "<html><body><div id=a><p id=b>x</p></div></body></html>";
+        let dom = crate::dom::parse(html);
+        let mut i = super::super::interp::Interp::new();
+        i.set_document(super::Doc::from_dom(&dom));
+        i.set_media(1000.0, 800.0, false);
+        let a = find_seq(&dom.root, "a").expect("a");
+        let b = find_seq(&dom.root, "b").expect("b");
+        i.set_geometry(super::super::interp::Geometry {
+            boxes: alloc::rc::Rc::new(alloc::vec![
+                // 200x60 Rahmenkasten, 4 px Rahmen und 10 px Polsterung.
+                padded(a, 0, 0, 200, 60, 4, 4, 10, 10),
+                // Das Kind ist 400 hoch und laeuft unten heraus.
+                boxed(b, 2, 2, 180, 400, 0, 0),
+            ]),
+            scroll: (0, 0),
+            content: (1000, 3000),
+        });
+        let prog = super::super::parse(
+            "var a = document.getElementById('a');\
+             console.log([a.clientWidth, a.clientHeight].join(','));\
+             console.log([a.scrollWidth, a.scrollHeight].join(','));\
+             console.log([a.scrollTop, a.scrollLeft].join(','));", false).expect("parst");
+        let _ = i.run_program(&prog);
+        assert_eq!(i.take_console(), [
+            // Polsterkasten: 200-4, 60-4.
+            "196,56",
+            // Rollflaeche: die Breite passt (das Kind endet bei 182, der
+            // Polsterkasten ist 196 breit), die Hoehe nicht — das Kind endet
+            // bei 402, die Polsterkante liegt bei 2.
+            "196,400",
+            // beak klemmt nichts ab: an einem gewoehnlichen Element ist
+            // NICHTS weggerollt, und 0 ist hier wahr statt geraten.
+            "0,0",
+        ]);
+    }
+
+    /// Am Wurzelelement ist es die Rollflaeche des DOKUMENTS, und die sagt
+    /// das Layout — nicht die Vereinigung der Kaesten.
+    #[test]
+    fn the_root_reports_the_documents_scrolling_area() {
+        use super::beak_engine_layout_boxes::*;
+        let html = "<html><body><p id=p>x</p></body></html>";
+        let dom = crate::dom::parse(html);
+        let mut i = super::super::interp::Interp::new();
+        i.set_document(super::Doc::from_dom(&dom));
+        i.set_media(1000.0, 800.0, false);
+        let p = find_seq(&dom.root, "p").expect("p");
+        i.set_geometry(super::super::interp::Geometry {
+            boxes: alloc::rc::Rc::new(alloc::vec![boxed(p, 0, 0, 100, 20, 0, 0)]),
+            scroll: (0, 250),
+            content: (1000, 3000),
+        });
+        let prog = super::super::parse(
+            "var r = document.documentElement;\
+             console.log([r.scrollHeight, r.scrollWidth].join(','));\
+             console.log([r.scrollTop, window.scrollY, window.pageYOffset].join(','));\
+             console.log(document.scrollingElement === r);", false).expect("parst");
+        let _ = i.run_program(&prog);
+        assert_eq!(i.take_console(), ["3000,1000", "250,250,250", "true"]);
+    }
+
+    /// Rollen ist ein WUNSCH. Die Engine hat kein Fenster; sie merkt sich,
+    /// was die Seite wollte, und der Wirt holt es ab.
+    #[test]
+    fn scrolling_is_a_request_the_host_picks_up() {
+        use super::beak_engine_layout_boxes::*;
+        let html = "<html><body><p id=p>x</p></body></html>";
+        let dom = crate::dom::parse(html);
+        let mut i = super::super::interp::Interp::new();
+        i.set_document(super::Doc::from_dom(&dom));
+        i.set_media(1000.0, 800.0, false);
+        let p = find_seq(&dom.root, "p").expect("p");
+        i.set_geometry(super::super::interp::Geometry {
+            boxes: alloc::rc::Rc::new(alloc::vec![boxed(p, 0, 1200, 100, 20, 0, 0)]),
+            scroll: (0, 0),
+            content: (1000, 3000),
+        });
+        let prog = super::super::parse("window.scrollTo({ top: 400 });", false).expect("parst");
+        let _ = i.run_program(&prog);
+        assert_eq!(i.take_scroll(), Some((None, Some(400.0))));
+        // Und `scrollIntoView` rechnet die Dokumentlage aus, nicht die
+        // Fensterlage: der Kasten steht bei 1200, gerollt ist nichts.
+        let prog = super::super::parse(
+            "document.getElementById('p').scrollIntoView();", false).expect("parst");
+        let _ = i.run_program(&prog);
+        assert_eq!(i.take_scroll(), Some((None, Some(1200.0))));
+        // Zweimal abholen gibt beim zweiten Mal nichts.
+        assert_eq!(i.take_scroll(), None);
+    }
+
+    /// `offsetParent` ist der naechste POSITIONIERTE Vorfahr — und die Ecke
+    /// dafuer faehrt im Layoutkasten mit, statt fuer jeden Vorfahren die
+    /// Kaskade neu aufzuloesen.
+    #[test]
+    fn offset_parent_finds_the_nearest_positioned_ancestor() {
+        use super::beak_engine_layout_boxes::*;
+        let html = "<html><body><div id=aussen><div id=mitte>\
+                    <span id=innen>x</span></div></div></body></html>";
+        let dom = crate::dom::parse(html);
+        let mut i = super::super::interp::Interp::new();
+        i.set_document(super::Doc::from_dom(&dom));
+        let (a, m, n) = (find_seq(&dom.root, "aussen").expect("a"),
+                         find_seq(&dom.root, "mitte").expect("m"),
+                         find_seq(&dom.root, "innen").expect("n"));
+        i.set_geometry(super::super::interp::Geometry {
+            boxes: alloc::rc::Rc::new(alloc::vec![
+                placed(a, 0, 0, 300, 300),          // positioniert
+                boxed(m, 0, 0, 300, 200, 0, 0),     // nicht
+                boxed(n, 0, 0, 50, 20, 0, 0),
+            ]),
+            scroll: (0, 0),
+            content: (1000, 3000),
+        });
+        let prog = super::super::parse(
+            "console.log(document.getElementById('innen').offsetParent.id);\
+             console.log(document.getElementById('aussen').offsetParent.tagName);\
+             console.log(document.body.offsetParent);\
+             console.log(document.createElement('div').offsetParent);", false).expect("parst");
+        let _ = i.run_program(&prog);
+        assert_eq!(i.take_console(), ["aussen", "BODY", "null", "null"]);
+    }
+
+    /// Der Kleinkram, in EINEM Lauf: jede dieser Zeilen war vorher ein
+    /// `TypeError` mitten in fremdem Code.
+    #[test]
+    fn the_small_gaps_answer_instead_of_throwing() {
+        let out = run("<html><body><a id=l href='/x#t' data-k=v>l</a><b id=b>b</b>\
+                       <img id=i src='/p.png'></body></html>",
+            "var l = document.getElementById('l');\
+             console.log(l.attributes.length + ',' + l.attributes[0].name + ','\
+                       + l.attributes.getNamedItem('data-k').value);\
+             console.log(l.toggleAttribute('open') + ',' + l.hasAttribute('open') + ','\
+                       + l.toggleAttribute('open') + ',' + l.hasAttribute('open'));\
+             console.log(l.nextElementSibling.id + ','\
+                       + document.getElementById('i').previousElementSibling.id);\
+             console.log(l.isConnected + ',' + document.createElement('i').isConnected);\
+             console.log(document.body.childElementCount + ','\
+                       + document.body.lastElementChild.tagName);\
+             console.log(l.hash + ',' + document.getElementById('i').currentSrc);\
+             l.ariaHidden = 'true';\
+             console.log(l.ariaHidden + ',' + l.getAttribute('aria-hidden'));\
+             l.ariaHidden = null;\
+             console.log(l.ariaHidden + ',' + l.hasAttribute('aria-hidden'));\
+             var d = document.createElement('div');\
+             d.innerHTML = '<i>1</i><b>2</b>';\
+             d.replaceChildren(document.createElement('u'));\
+             console.log(d.childNodes.length + ',' + d.firstElementChild.tagName);\
+             console.log(Object.prototype.toString.call(l.attributes) + ','\
+                       + Object.prototype.toString.call(l.attributes[0]));\
+             var u = new URL('http://bob:x@example.com/p');\
+             console.log('[' + u.username + '][' + u.password + ']' + u.href);");
+        assert_eq!(out, [
+            "3,id,v",
+            "true,true,false,false",
+            "b,b",
+            "true,false",
+            "3,IMG",
+            "#t,/p.png",
+            "true,true",
+            "null,false",
+            "1,U",
+            "[object NamedNodeMap],[object Attr]",
+            // Anmeldedaten faehrt beak nicht — und sagt das, statt zu
+            // schweigen oder sie in die Adresszeile zu schreiben.
+            "[][]http://example.com/p",
+        ]);
     }
 
     /// Der Inline-Stil bleibt eine LEBENDE Sicht — `el.style` ist etwas

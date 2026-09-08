@@ -138,7 +138,7 @@ als Ligatur; fontdue läuft mit `load_substitutions: false`, also ist
 
     test262 exec    81,76 %   (V8 auf demselben Korpus: 99,41 %)
     test262 parse   96,84 %
-    DOM-Aufrufe     98,9 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
+    DOM-Aufrufe     99,4 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
     WPT (CSS)       4485/5200 = 86,2 % ohne Testvehikel (roh 79,4 %)
     Bibliotheken    12 von 13 (`<tools>/libprobe/`)
     beak:selftest   Sprache 55/55, Dokument 35/35

@@ -1533,6 +1533,22 @@ fn sync_cookies(sess: &mut beak_engine::js::Session) {
 /// Gerufen an denselben Stellen wie `sync_cookies` — nach JEDEM
 /// Einstiegspunkt, nicht nur nach dem Laden. Ein Klick schreibt Verlauf
 /// genauso wie ein Skript beim Start.
+/// Was die Seite an Rollen verlangt hat, ausfuehren.
+///
+/// **Die Engine rollt nicht** — sie hat kein Fenster; sie merkt sich den
+/// Wunsch, und hier steht der Rollstand. Waagerecht rollt beak nicht, also
+/// wird der x-Wunsch bewusst verworfen statt so getan, als waere er
+/// angekommen.
+fn sync_scroll(sess: &mut beak_engine::js::Session) {
+    let Some((_x, y)) = sess.interp.take_scroll() else { return };
+    let Some(y) = y else { return };
+    if !y.is_finite() { return }
+    let want = y.max(0.0) as i32;
+    if want == scroll_y() { return }
+    set_scroll(want);
+    mark_dirty();
+}
+
 fn sync_history(engine: &Engine, sess: &mut beak_engine::js::Session) {
     use beak_engine::js::interp::HistoryOp;
     for op in sess.interp.take_history_ops() {
@@ -1968,6 +1984,7 @@ fn fire_load(engine: &Engine, page: &Page) -> bool {
     let timers = sess.interp.run_timers();
     sync_cookies(sess);
     sync_history(engine, sess);
+    sync_scroll(sess);
     drain_console(sess);
     let changed = sess.interp.doc.as_ref().is_some_and(|d| d.dirty);
     if changed {
@@ -1998,6 +2015,7 @@ fn pump_box_observers(engine: &Engine) {
     let _ = timers;
     sync_cookies(sess);
     sync_history(engine, sess);
+    sync_scroll(sess);
     drain_console(sess);
     if sess.interp.doc.as_ref().is_some_and(|d| d.dirty) {
         if let Some(d) = sess.interp.doc.as_mut() {
@@ -2317,6 +2335,7 @@ fn finish_scripts(engine: &Engine) {
     let timers = sess.interp.run_timers();
     sync_cookies(sess);
     sync_history(engine, sess);
+    sync_scroll(sess);
     drain_console(sess);
     let mut listeners = false;
     if let Some(d) = sess.interp.doc.as_mut() {
@@ -2385,6 +2404,7 @@ fn dispatch_click(engine: &Engine, page: &mut Page, lay: &Layout, cx: i32, cy: i
     let timers = sess.interp.run_timers();
     sync_cookies(sess);
     sync_history(engine, sess);
+    sync_scroll(sess);
     // NUR wenn sich etwas geaendert hat. Ein Behandler, der bloss zaehlt,
     // darf keine 130 ms Layout kosten.
     let changed = sess.interp.doc.as_ref().is_some_and(|d| d.dirty);
@@ -3223,6 +3243,12 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
         }
         sess.interp.set_geometry(beak_engine::js::interp::Geometry {
             boxes: g, scroll: (0, sy),
+            // Die Rollflaeche, wie das Layout sie ausgerechnet hat — dieselbe
+            // Zahl, gegen die der Wirt zwei Zeilen weiter oben `max_scroll`
+            // klemmt. `document.documentElement.scrollHeight` MUSS dieselbe
+            // sagen, sonst rechnet eine Seite mit einer Hoehe, an die sie nie
+            // rollen kann.
+            content: (w, layout.height as i32),
         });
     }
 
@@ -4323,6 +4349,7 @@ pub extern "C" fn _start() {
                 // gesetzt hat.
                 sync_cookies(s);
                 sync_history(&engine, s);
+                sync_scroll(s);
                 drain_console(s);
                 if s.interp.doc.as_ref().is_some_and(|d| d.dirty) {
                     if let Some(d) = s.interp.doc.as_mut() {

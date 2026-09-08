@@ -305,6 +305,9 @@ pub struct Realm {
     pub mo_proto: Gc,
     pub ro_proto: Gc,
     pub io_proto: Gc,
+    /// `Attr` und `NamedNodeMap` — `el.attributes` haengt beide aneinander.
+    pub attr_proto: Gc,
+    pub nnm_proto: Gc,
     pub prej_proto: Gc,
     pub text_encoder_proto: Gc,
     pub text_decoder_proto: Gc,
@@ -368,6 +371,14 @@ pub struct Geometry {
     /// Der Rollstand des Fensters. Die Kaesten stehen in Dokumentkoordinaten,
     /// `getBoundingClientRect` antwortet in Fensterkoordinaten.
     pub scroll: (i32, i32),
+    /// Die ROLLFLAECHE des Dokuments: so weit, wie der gemalte Inhalt reicht.
+    ///
+    /// Sie ist nicht die Vereinigung der Kaesten. Ein Hintergrundbild, ein
+    /// Schatten, ein Text, der aus seinem Kasten laeuft — all das haelt die
+    /// Seite rollbar, und das Layout rechnet es ohnehin aus
+    /// (`Layout::height`). Sie hier zu erraten waere eine zweite Wahrheit
+    /// ueber dieselbe Zahl.
+    pub content: (i32, i32),
 }
 
 pub struct StyleCtx {
@@ -659,6 +670,11 @@ pub struct Interp {
     /// Ausschnitt eines `IntersectionObserver` ohne eigene Wurzel.
     pub viewport: (f64, f64),
     pub history_ops: Vec<HistoryOp>,
+    /// Wohin die Seite rollen will (`scrollTo`, `scrollIntoView`,
+    /// `scrollTop =`). **Die Engine rollt nicht** — sie hat kein Fenster; der
+    /// Wirt holt es mit `take_scroll` ab. Je Achse getrennt, weil
+    /// `scrollTo({ top: 0 })` die andere in Ruhe lassen muss.
+    pub scroll_want: Option<(Option<f64>, Option<f64>)>,
     /// Die Navigation, die die Seite zuletzt verlangt hat (`location.assign`,
     /// `.replace`, `.reload`, `href = …`). **Genau eine, und die LETZTE
     /// gewinnt** — im Browser bricht eine zweite Navigation die erste ab,
@@ -793,7 +809,7 @@ impl Interp {
                  history_ops: Vec::new(), history_state: Value::Null, history_len: 1.0,
                  nav: None, loc_href: String::from("about:blank"),
                  observers: Vec::new(), resize_obs: Vec::new(), inter_obs: Vec::new(),
-                 viewport: (0.0, 0.0),
+                 viewport: (0.0, 0.0), scroll_want: None,
                  vm_ran: 0, vm_declined: 0, vm_decline: None, vm_off: false,
                  func_chunks: HashMap::new(), func_declines: HashMap::new(), pending_labels: Vec::new(), vm_ops: 0, hints_ok: true, vm_calls: 0, vm_calls_native: 0, vm_calls_slow: 0,
                  geometry: None,
@@ -1057,6 +1073,19 @@ impl Interp {
         self.history_state = state;
     }
 
+    /// Einen Rollwunsch merken. Der LETZTE gewinnt, so wie bei der
+    /// Navigation: im Browser bricht ein zweiter Sprung den ersten ab. Eine
+    /// Achse ohne Wunsch behaelt den Wunsch von vorhin.
+    pub fn want_scroll(&mut self, x: Option<f64>, y: Option<f64>) {
+        let (px, py) = self.scroll_want.unwrap_or((None, None));
+        self.scroll_want = Some((x.or(px), y.or(py)));
+    }
+
+    /// Was die Seite verlangt hat, und danach ist es weg.
+    pub fn take_scroll(&mut self) -> Option<(Option<f64>, Option<f64>)> {
+        self.scroll_want.take()
+    }
+
     pub fn take_cookie_sets(&mut self) -> Vec<String> {
         core::mem::take(&mut self.cookie_sets)
     }
@@ -1130,7 +1159,7 @@ impl Interp {
         let mut o = g.borrow_mut();
         for (k, v) in [("innerWidth", w), ("innerHeight", h),
                        ("outerWidth", w), ("outerHeight", h),
-                       ("scrollX", 0.0), ("scrollY", 0.0), ("devicePixelRatio", 1.0)] {
+                       ("devicePixelRatio", 1.0)] {
             o.define(k, Prop::builtin(Value::Num(v)));
         }
         let screen = new_obj(Some(self.realm.object_proto.clone()));
