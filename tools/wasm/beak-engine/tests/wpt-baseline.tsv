@@ -2249,9 +2249,9 @@ PASS	CSS2/margin-collapse-003.xht
 PASS	CSS2/margin-collapse-004.xht
 PASS	CSS2/margin-collapse-017.xht
 PASS	CSS2/margin-collapse-031.xht
-FAIL	CSS2/margin-collapse-033.xht
-FAIL	CSS2/margin-collapse-034.xht
-FAIL	CSS2/margin-collapse-035.xht
+PASS	CSS2/margin-collapse-033.xht
+PASS	CSS2/margin-collapse-034.xht
+PASS	CSS2/margin-collapse-035.xht
 FAIL	CSS2/margin-collapse-037.xht
 PASS	CSS2/margin-collapse-038.xht
 FAIL	CSS2/margin-collapse-039.xht
@@ -2276,7 +2276,7 @@ FAIL	CSS2/margin-collapse-134.xht
 PASS	CSS2/margin-collapse-135.xht
 FAIL	CSS2/margin-collapse-142.xht
 PASS	CSS2/margin-collapse-156.xht
-FAIL	CSS2/margin-collapse-157.xht
+PASS	CSS2/margin-collapse-157.xht
 FAIL	CSS2/margin-collapse-158.xht
 PASS	CSS2/margin-collapse-159.xht
 PASS	CSS2/margin-collapse-165.xht
