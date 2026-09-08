@@ -106,6 +106,9 @@ pub enum Op {
     NewObject,
     /// Stapel: obj, wert → obj. Eine Dateneigenschaft unter `names[i]`.
     DefineProp(u32),
+    /// `{ __proto__: v }` — setzt den PROTOTYP des Objekts auf dem Stapel,
+    /// statt eine Eigenschaft anzulegen.
+    SetLiteralProto,
     /// Stapel: obj, schluessel, wert → obj.
     DefinePropComputed,
     /// Stapel: obj, funktion → obj. `get` unterscheidet Leser von Schreiber;

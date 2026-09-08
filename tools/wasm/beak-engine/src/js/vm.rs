@@ -553,6 +553,10 @@ impl Vm {
                 let g = super::value::new_obj(Some(i.realm.object_proto.clone()));
                 self.push(Value::Obj(g));
             }
+            Op::SetLiteralProto => {
+                let val = self.pop();
+                if let Value::Obj(g) = self.top() { let g = g.clone(); i.set_literal_proto(&g, &val); }
+            }
             Op::DefineProp(n) => {
                 let val = self.pop();
                 let key: Rc<str> = chunk.names[*n as usize].clone();

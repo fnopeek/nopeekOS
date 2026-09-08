@@ -95,7 +95,26 @@ impl Interp {
             Stmt::ForOf { left, right, body, .. } => self.exec_for_of(left, right, body, env),
             Stmt::Switch { disc, cases } => self.exec_switch(disc, cases, env),
             Stmt::Try { block, handler, finalizer } => self.exec_try(block, handler, finalizer, env),
-            Stmt::With { .. } => self.type_err("with is not supported"),
+            // `with (o) { … }` — eine Umgebung, deren Namen aus einem OBJEKT
+            // kommen. Im strengen Modus verboten; das hat schon der Parser
+            // abgelehnt, hier steht nur der lockere Fall.
+            //
+            // Vue braucht es: sein Vorlagen-Uebersetzer erzeugt
+            // `with (_ctx) { … }`, und ohne das rendert eine Vue-Seite nichts
+            // — sie meldet den Fehler in ihrem eigenen Behandler und laesst
+            // den Kasten leer.
+            Stmt::With { obj, body } => {
+                let v = self.eval(obj, env)?;
+                let o = self.to_object(&v)?;
+                let inner = Env::new(Some(env.clone()), false);
+                inner.borrow_mut().with_obj = Some(o);
+                // **Die Wegweiser gehen aus, fuer die ganze Sitzung.** Eine
+                // Objektumgebung kann Bindungen bekommen und verlieren,
+                // waehrend eine Befehlsstelle schon gelaufen ist — dieselbe
+                // Ueberlegung wie beim direkten `eval` (`Interp::hints_ok`).
+                self.hints_ok = false;
+                self.exec(body, &inner)
+            }
             // `import` und die reinen Weiterreichungen tun zur LAUFZEIT
             // nichts — sie sind beim Verknuepfen erledigt (`modules.rs`).
             Stmt::Import(_) | Stmt::ExportAll { .. } => Ok(None),
@@ -523,10 +542,36 @@ impl Interp {
         self.assign_ident_depth(n, v, env).map(|_| ())
     }
 
+    /// Das `with`-Objekt, das diesen Namen traegt — oder `None`.
+    ///
+    /// Die Kette wird nur bis zur ersten gewoehnlichen Bindung desselben
+    /// Namens abgelaufen: eine INNERE `var` verschattet ein aeusseres `with`.
+    pub fn with_target(&mut self, n: &str, env: &Rc<RefCell<Env>>) -> C<Option<Gc>> {
+        let mut cur = env.clone();
+        loop {
+            let (wo, hat, up) = {
+                let b = cur.borrow();
+                (b.with_obj.clone(), b.vars.contains_key(n), b.parent.clone())
+            };
+            if let Some(o) = wo {
+                if self.with_has_pub(&o, n)? { return Ok(Some(o)) }
+            }
+            if hat { return Ok(None) }
+            match up { Some(p) => cur = p, None => return Ok(None) }
+        }
+    }
+
     /// Wie `assign_ident`, sagt aber MIT, in welcher Tiefe der Name stand.
     /// Nur der Wegweiser braucht das; siehe `Chunk::hints`.
     pub fn assign_ident_depth(&mut self, n: &str, v: Value, env: &Rc<RefCell<Env>>)
         -> C<Option<usize>> {
+        // Ein `with` kann den Namen tragen, und dann wird in das OBJEKT
+        // geschrieben. Die Kette wird dafuer einmal abgelaufen — nur, wenn
+        // ueberhaupt eine Objektumgebung darin steht.
+        if let Some(o) = self.with_target(n, env)? {
+            let strict = super::interp::env_strict(env);
+            return self.set(&Value::Obj(o), n, v, strict).map(|_| None);
+        }
         if let Some((e, depth)) = env_lookup_depth(env, n) {
             // Auf einen importierten Namen zu schreiben ist ein Fehler, kein
             // Schreiben ins Herkunftsmodul: die Bindung dort gehoert dem

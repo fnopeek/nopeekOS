@@ -154,11 +154,12 @@ fn write_obj(i: &mut Interp, o: &Gc, indent: &str, cur: &str, seen: &mut Vec<Gc>
             n += 1;
         }
     } else {
-        let keys = o.borrow().own_keys();
+        // Schluessel und Aufzaehlbarkeit durch einen Stellvertreter hindurch —
+        // `JSON.stringify(new Proxy({a:1},{}))` war sonst `{}`.
+        let keys = i.own_keys_of(o)?;
         for k in keys {
             i.tick()?;
-            let enumerable = o.borrow().is_enumerable(&k);
-            if !enumerable { continue; }
+            if !i.get_own_desc(o, &k)?.is_some_and(|p| p.enumerable) { continue }
             let e = i.get(&Value::Obj(o.clone()), &k)?;
             let mut piece = String::new();
             if !write_value(i, &e, indent, &inner, seen, &mut piece, depth + 1)? { continue; }

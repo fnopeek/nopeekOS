@@ -1235,6 +1235,16 @@ impl Compiler {
                         ObjPropValue::Init(e) => {
                             let k = self.prop_key(&p.key, p.computed)?;
                             self.expr(e)?;
+                            // Siehe `Interp::set_literal_proto` — dieselbe
+                            // Regel, damit die beiden Maschinen nicht
+                            // auseinanderlaufen.
+                            let ist_proto = !p.computed && !p.shorthand
+                                && matches!(&p.key, super::ast::PropKey::Ident(n)
+                                                  | super::ast::PropKey::Str(n) if n == "__proto__");
+                            if ist_proto {
+                                self.chunk.emit(Op::SetLiteralProto);
+                                continue;
+                            }
                             match k {
                                 Some(n) => { self.chunk.emit(Op::DefineProp(n)); }
                                 None => { self.chunk.emit(Op::DefinePropComputed); }

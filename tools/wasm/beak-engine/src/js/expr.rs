@@ -138,6 +138,23 @@ impl Interp {
     /// Wie `load_ident`, sagt aber MIT, in welcher Tiefe der Name stand —
     /// `None` heisst „nicht in der Kette, das globale Objekt hat geantwortet".
     /// Nur der Wegweiser braucht das; siehe `Chunk::hints`.
+    /// Hat die Objektumgebung eines `with` diesen Namen?
+    ///
+    /// Nicht bloss `HasProperty`: `Symbol.unscopables` kann einen Namen
+    /// AUSBLENDEN, obwohl er da ist. Genau dafuer gibt es die Tabelle —
+    /// `with([]) { keys }` darf nicht `Array.prototype.keys` finden, sonst
+    /// bricht Code, der aelter ist als die Methode.
+    pub(crate) fn with_has_pub(&mut self, o: &Gc, n: &str) -> C<bool> { self.with_has(o, n) }
+
+    fn with_has(&mut self, o: &Gc, n: &str) -> C<bool> {
+        if !self.has_property(o, n) { return Ok(false) }
+        let un = self.get(&Value::Obj(o.clone()), super::value::SYM_UNSCOPABLES)?;
+        if let Value::Obj(_) = un {
+            if self.get(&un, n)?.truthy() { return Ok(false) }
+        }
+        Ok(true)
+    }
+
     fn load_ident_depth(&mut self, n: &str, env: &Rc<RefCell<Env>>)
         -> C<(Value, Option<usize>)> {
         // **EIN Durchgang durch die Kette.** Bis 0.117.0 liefen hier
@@ -149,6 +166,16 @@ impl Interp {
         let mut cur = env.clone();
         let mut depth = 0usize;
         loop {
+            // **Die Objektumgebung eines `with` zuerst.** Ein `None` ist eine
+            // Nullpruefung; nur wo wirklich ein `with` steht, kostet es etwas.
+            let wo = cur.borrow().with_obj.clone();
+            if let Some(o) = wo {
+                if self.with_has(&o, n)? {
+                    // KEINE Tiefe zurueck: ein Wegweiser darf auf eine
+                    // Bindung, die aus einem Objekt kommt, nicht zeigen.
+                    return Ok((self.get(&Value::Obj(o), n)?, None));
+                }
+            }
             match super::interp::env_peek(&cur, n) {
                 Hit::Val(v) => return Ok((v, Some(depth))),
                 Hit::Dead =>
@@ -356,6 +383,14 @@ impl Interp {
                 }
                 (base, f)
             }
+            // **`with (o) { m() }` ruft `m` MIT `o` als Empfaenger**
+            // (ES 9.1.1.2.4, WithBaseObject). Ohne das sieht eine Methode,
+            // die aus dem `with`-Objekt kommt, `undefined` als `this` — und
+            // genau so ruft Vues uebersetzter Code seine Hilfen.
+            Expr::Ident(n) => match self.with_target(n, env)? {
+                Some(o) => (Value::Obj(o), self.eval(callee, env)?),
+                None => (Value::Undefined, self.eval(callee, env)?),
+            },
             _ => (Value::Undefined, self.eval(callee, env)?),
         };
         if optional && matches!(f, Value::Undefined | Value::Null) { return Ok(Value::Undefined); }
@@ -393,10 +428,10 @@ impl Interp {
         // Die `construct`-Falle.
         if super::proxy::parts(fo).is_some() {
             return match super::proxy::trap(self, fo, "construct")? {
-                Some((h, t)) => {
+                Some((fn_, hv, t)) => {
                     let arr = self.new_array(args.to_vec());
                     let nt = f.clone();
-                    let r = self.call(&h, Value::Undefined, &[t, arr, nt])?;
+                    let r = self.call(&fn_, hv, &[t, arr, nt])?;
                     if !matches!(r, Value::Obj(_)) {
                         return self.type_err("construct trap did not return an object");
                     }
@@ -443,9 +478,10 @@ impl Interp {
     /// `{...src}` — die aufzaehlbaren EIGENEN Eigenschaften kopieren.
     pub fn spread_into(&mut self, g: &Gc, src: &Value) -> C<()> {
         if let Value::Obj(o) = src {
-            for k in o.borrow().own_keys() {
-                let enumerable = o.borrow().is_enumerable(&k);
-                if !enumerable { continue; }
+            // Schluessel UND Aufzaehlbarkeit durch den Stellvertreter —
+            // `{...proxy}` war sonst `{}`.
+            for k in self.own_keys_of(o)? {
+                if !self.get_own_desc(o, &k)?.is_some_and(|p| p.enumerable) { continue }
                 let val = self.get(src, &k)?;
                 g.borrow_mut().set_prop(k, Prop::data(val));
             }
@@ -464,6 +500,14 @@ impl Interp {
                 ObjPropValue::Init(e) => {
                     let key = self.prop_key(&p.key, env)?;
                     let v = self.eval(e, env)?;
+                    // `__proto__: v` — nur ALS SCHLUESSEL geschrieben, nicht
+                    // berechnet und nicht abgekuerzt. `{[k]: v}` mit
+                    // `k = "__proto__"` und `{__proto__}` sind gewoehnliche
+                    // Eigenschaften, und die Spezifikation unterscheidet das.
+                    if !p.computed && !p.shorthand && &*key == "__proto__" {
+                        self.set_literal_proto(&g, &v);
+                        continue;
+                    }
                     self.name_function(&v, &key);
                     g.borrow_mut().set_prop(key, Prop::data(v));
                 }
@@ -494,11 +538,36 @@ impl Interp {
         let (parent_proto, parent_ctor) = match &c.super_class {
             Some(e) => {
                 let sv = self.eval(e, env)?;
-                let pp = match self.get(&sv, "prototype")? {
-                    Value::Obj(p) => Some(p),
-                    _ => Some(self.realm.object_proto.clone()),
-                };
-                (pp, sv.as_obj().cloned())
+                match sv {
+                    // **`class X extends null` ist erlaubt** (ES 15.7.14
+                    // Schritt 8.d.i): der Prototyp der Instanzen hat KEINEN
+                    // Elter, der Konstruktor haengt an `%Function.prototype%`.
+                    // Vorher lief das in `get(null, "prototype")` und meldete
+                    // `cannot read 'prototype' of null` — eine Meldung, die
+                    // nicht sagt, WO.
+                    Value::Null => (None, None),
+                    // Und was kein Konstruktor ist, sagt das mit dem NAMEN
+                    // der Klasse. Ein Laufzeitfehler ohne Stelle kostet eine
+                    // Stunde ([[feedback_a_runtime_error_without_a_position_costs_an_hour]]).
+                    _ if !self.is_constructor(&sv) => {
+                        let n = c.name.clone().unwrap_or_else(|| String::from("(anonym)"));
+                        let was = sv.type_of();
+                        return self.type_err(&alloc::format!(
+                            "class {n}: extends value is {was}, not a constructor or null"));
+                    }
+                    _ => {
+                        let pp = match self.get(&sv, "prototype")? {
+                            Value::Obj(p) => Some(p),
+                            Value::Null => None,
+                            _ => {
+                                let n = c.name.clone().unwrap_or_else(|| String::from("(anonym)"));
+                                return self.type_err(&alloc::format!(
+                                    "class {n}: superclass prototype is not an object or null"));
+                            }
+                        };
+                        (pp, sv.as_obj().cloned())
+                    }
+                }
             }
             None => (Some(self.realm.object_proto.clone()), None),
         };
@@ -623,7 +692,10 @@ impl Interp {
         // benutzt ihn (`typeof JSON !== "undefined"`).
         if op == UnaryOp::Typeof {
             if let Expr::Ident(n) = arg {
-                if env_lookup(env, n).is_none() {
+                // Ein `with`-Objekt traegt den Namen genauso wie eine
+                // Bindung — sonst meldet `typeof a` im `with` „undefined"
+                // fuer etwas, das direkt daneben gelesen werden kann.
+                if self.with_target(n, env)?.is_none() && env_lookup(env, n).is_none() {
                     let g = self.realm.global.clone();
                     if !self.has_property(&g, n) { return Ok(Value::str("undefined")); }
                 }
@@ -646,6 +718,16 @@ impl Interp {
                     }
                     Value::Bool(ok)
                 }
+                // `delete x` auf einen blossen Namen ist sonst `true` und
+                // tut nichts — INNERHALB eines `with` loescht es aber die
+                // Eigenschaft am Objekt (ES 13.5.1.2 Schritt 5).
+                Expr::Ident(n) => match self.with_target(n, env)? {
+                    Some(o) => {
+                        let k: Rc<str> = Rc::from(&**n);
+                        Value::Bool(self.delete_key(&Value::Obj(o), &k)?)
+                    }
+                    None => Value::Bool(true),
+                },
                 _ => Value::Bool(true),
             });
         }
@@ -692,9 +774,9 @@ impl Interp {
         if let Value::Obj(o) = base {
             if super::proxy::parts(o).is_some() {
                 return match super::proxy::trap(self, o, "deleteProperty")? {
-                    Some((f, t)) => {
+                    Some((f, h, t)) => {
                         let kv = super::proxy::key_value(key);
-                        let r = self.call(&f, Value::Undefined, &[t, kv])?;
+                        let r = self.call(&f, h, &[t, kv])?;
                         Ok(r.truthy())
                     }
                     None => { let t = super::proxy::target(self, o)?;
@@ -748,6 +830,11 @@ impl Interp {
     /// `typeof <name>` — wirft NICHT, wenn es den Namen nicht gibt. Der
     /// klassische Weg, ein globales Objekt zu pruefen.
     pub fn typeof_ident(&mut self, n: &str, env: &Rc<RefCell<Env>>) -> C<Value> {
+        // Ein `with`-Objekt kann den Namen tragen, und dann ist er DA.
+        if self.with_target(n, env)?.is_some() {
+            let v = self.load_ident(n, env)?;
+            return self.unary_val(UnaryOp::Typeof, v);
+        }
         if env_lookup(env, n).is_none() {
             let g = self.realm.global.clone();
             if !self.has_property(&g, n) {
