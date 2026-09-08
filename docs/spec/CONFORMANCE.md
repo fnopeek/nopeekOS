@@ -22,22 +22,40 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-09-06, beak 0.115.0)
+### Current number (measured 2026-09-08, beak 0.128.0)
 
 ```
-4481 pass / 1166 fail / 139 inconclusive   (of 5786 vendored reftests)
+4485 pass / 1162 fail / 139 inconclusive   (of 5786 vendored reftests)
 = 79.4 % of the conclusive 5647
 ```
 
-Moved +5 / −0 against the 0.96.0 baseline, which is now re-blessed: three
-gradient/background tests, and the two `css-flexbox/flexbox-definite-sizes`
-losses that had shipped in 0.109.0 are back — a flex container's cross size is
-established by `min-height`/`max-height` too, not only by `height`. Eight
-tests also left INCONCLUSIVE when gradients started painting: a reference that
-painted nothing now paints, which makes the test decidable rather than
-better.
+Moved **+4 / −0** against the 0.115.0 baseline, which is now re-blessed, and
+all four come from ONE rule: **clearance is space INSIDE the container, not a
+push on the container itself.**
 
-**Two denominators, and the second one is the honest one.** 447 of the 1163
+`<div><div style="float:left;height:50px"></div><div style="clear:both"></div></div>`
+— the classic clearfix — measured zero. The cleared child was placed
+correctly below the float, but the container's border-top followed it down
+instead of staying put, so the container came out the height of the cleared
+child rather than the height of the float. The `::after`-with-`clear` path
+had the right rule already; the path for a real `clear` element did not, and
+the comment stating it sat eight lines below the place it was missing.
+
+The second half of the same section (CSS 2.1 §8.3.1, last paragraph): when a
+cleared element's own margins are adjoining, the margin it forms with its
+following siblings does **not** collapse with the parent's bottom margin —
+`Flow::open_sealed` now carries that. That is `margin-collapse-033/034/035`.
+
+Render-neutral on real pages: all twelve `gate` hashes (4 pages × 3 widths)
+byte-identical before and after.
+
+Still open in this family, and deliberately: `margin-collapse-039/040/041/102/104`
+want the collapsed top margin **including descendants** before clearance is
+computed ("the margin collapsing should occur before calculating clearance").
+That needs the first-child margin chain resolved ahead of layout — a second
+pass for five tests of a rare pattern.
+
+**Two denominators, and the second one is the honest one.** 447 of the 1162
 failures are tests for specs no page on the web runs — counted by CONTENT, not
 by filename, because the filename does not say so
 (`css-grid/column-align-items-001.html` is a `display: grid-lanes` test):
@@ -50,7 +68,7 @@ by filename, because the filename does not say so
 | `subgrid` | 18 | |
 
 Against the corpus that a real page can actually exercise — 5200 tests —
-the number is **4481 / 5200 = 86.2 %**, with **719 real failures left**. Both
+the number is **4485 / 5200 = 86.2 %**, with **715 real failures left**. Both
 are worth tracking: the raw one never lies about the suite, and the second one
 is the one that predicts what a page looks like. Neither is allowed to move
 without a measured run.

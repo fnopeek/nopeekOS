@@ -204,6 +204,16 @@ struct Flow {
     first_top: i32,
     /// Whether any content was committed (vs. everything collapsing through).
     committed: bool,
+    /// Darf der offene Schlussrand noch mit dem Unterrand des Elters
+    /// verschmelzen?
+    ///
+    /// **Nein, wenn er von einem geraeumten Element kommt, dessen eigene
+    /// Raender aneinanderstossen** (CSS 2.1 §8.3.1, letzter Absatz): dessen
+    /// Rand verschmilzt zwar mit denen der FOLGEGESCHWISTER, aber das
+    /// Ergebnis nicht mehr mit dem Unterrand des Elters. Genau daran haengt,
+    /// dass ein Kasten aus `float` + leerem `clear` + `margin-top` seine
+    /// Hoehe bekommt statt null.
+    open_sealed: bool,
 }
 
 /// Result of laying one block-level box in normal flow.
@@ -2818,6 +2828,7 @@ impl<'a> Ctx<'a> {
         let mut open = incoming; // adjoining margin not yet committed
         let mut committed = false;
         let mut first_top = anchor_y;
+        let mut open_sealed = false;
         // Counter scope: any counter a child of this run resets lives until this
         // child list ends (its descendants + following siblings). Truncate the
         // stack back to here on the way out (css-lists-3 §4.4 scope boundary).
@@ -3085,13 +3096,30 @@ impl<'a> Ctx<'a> {
             // and then clearance SETS that edge: the margin is consumed, not
             // added on top of it. Clearing against the bare anchor instead put
             // every cleared box one whole top margin too low.
+            let mut had_clearance = false;
             if st.clear != ClearKind::None {
                 let mut hypo = open;
                 hypo.add(st.margin_top);
                 let own = Collapse::one(st.margin_top).value() as i32;
                 let base = anchor + hypo.value() as i32;
                 let cleared = self.clear_below(st.clear, base);
+                had_clearance = cleared > base;
                 if cleared > base {
+                    // Clearance stops the top margin collapsing through, so the
+                    // container's border box stays where the flow put it — the
+                    // cleared box adds HEIGHT below, it does not drag the whole
+                    // container down. **Dieselbe Regel, die acht Zeilen
+                    // weiter unten fuer ein `::after` mit `clear` schon
+                    // steht** — sie fehlte hier, und damit war der
+                    // gewoehnliche Clearfix
+                    // (`<div style="clear:both"></div>` als letztes Kind)
+                    // wirkungslos: der Kasten bekam die Hoehe des geraeumten
+                    // Kindes statt der des Floats, weil sein eigener Rand
+                    // mit heruntergezogen wurde.
+                    if !committed {
+                        first_top = anchor + open.value() as i32;
+                        committed = true;
+                    }
                     // `flow_block_impl` re-adds the top margin to the anchor it
                     // is handed, so hand it the one that lands the border edge
                     // exactly on `cleared`.
@@ -3179,6 +3207,9 @@ impl<'a> Ctx<'a> {
             if out.through {
                 // Nothing committed: the box's margins stay adjoining.
                 open = out.open;
+                // Aber wenn DIESER Kasten geraeumt wurde, endet die
+                // Verschmelzung am Elter (§8.3.1).
+                if had_clearance { open_sealed = true; }
             } else {
                 if !committed {
                     first_top = out.top_y;
@@ -3186,6 +3217,10 @@ impl<'a> Ctx<'a> {
                 }
                 anchor = out.bottom;
                 open = out.open;
+                // Ein festgeschriebener Kasten faengt einen neuen
+                // Schlussrand an — das Siegel gilt nur fuer den, der von
+                // dem geraeumten Element kam.
+                open_sealed = false;
             }
         }
         // A generated `::after` carrying `clear` is BLOCK-level: the open line
@@ -3243,7 +3278,7 @@ impl<'a> Ctx<'a> {
         }
         // Leave the counter scope this child list opened.
         self.counters.stack.truncate(counter_base);
-        Flow { bottom: anchor, open, first_top, committed }
+        Flow { bottom: anchor, open, first_top, committed, open_sealed }
     }
 
     /// `owner`'s `::before`/`::after` generated box, if `owner`'s own cascade
@@ -3791,11 +3826,11 @@ family: st.family,
             // `<iframe>`'s fallback text, a `<video>`'s `<source>` list, a
             // `<canvas>`'s alternative. Nothing commits; the box is the whole
             // of it, and its height comes from the intrinsic size below.
-            Flow { bottom: child_anchor, open: Collapse::default(), first_top: child_anchor, committed: false }
+            Flow { bottom: child_anchor, open: Collapse::default(), first_top: child_anchor, committed: false, open_sealed: false }
         } else if st.pre {
             let ly = child_anchor + child_incoming.value() as i32;
             let nb = layout_pre(self.fonts.pick(st.bold, st.italic, st.mono, st.family), el, st, content_x, content_w, ly, &mut self.ops);
-            Flow { bottom: nb, open: Collapse::default(), first_top: ly, committed: true }
+            Flow { bottom: nb, open: Collapse::default(), first_top: ly, committed: true, open_sealed: false }
         } else {
             self.flow_children(&el.children, st, Some(el), content_x, content_w, child_anchor, child_incoming)
         };
@@ -3884,7 +3919,7 @@ family: st.family,
         // Box with committed content. The last child's trailing margin
         // (`flow.open`) collapses with this box's bottom margin only when the
         // box has auto height and no bottom border/padding separating them.
-        let collapse_bottom = !isolated && bb == 0 && pb == 0 && auto_height;
+        let collapse_bottom = !isolated && bb == 0 && pb == 0 && auto_height && !flow.open_sealed;
         let mut ch = (flow.bottom - content_top).max(0);
         // A float reaching past the last line box extends the content edge.
         if let Some(fb) = float_bottom {
@@ -10648,6 +10683,40 @@ mod tests {
         let dom = dom::parse(html);
         let sheet = crate::css::collect(&dom, crate::css::Media::new(800.0, false));
         layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, &FormState::default(), false, hover, false)
+    }
+
+    /// **Der Clearfix.** Ein Kasten, dessen letztes Kind `clear` traegt, muss
+    /// so hoch werden wie sein Float — die Raeumung ist Platz IM Kasten, kein
+    /// Schub AUF ihn.
+    ///
+    /// Vorher kam der Kasten mit der Hoehe des geraeumten Kindes heraus (also
+    /// 0 bei einem leeren), weil sein eigener Rand mit heruntergezogen wurde.
+    /// Das ist das Muster, mit dem ein sehr grosser Teil des echten Webs seine
+    /// Floats einschliesst.
+    #[test]
+    fn ein_geraeumtes_kind_macht_den_kasten_so_hoch_wie_den_float() {
+        let hoehe = |inner: &str| {
+            let html = alloc::format!(
+                "<body style=\"margin:0\"><div id=\"c\">\
+                 <div style=\"float:left;height:50px;width:20px\"></div>{inner}</div></body>");
+            let lay = lay_inspect(&html, 400);
+            lay.inspect.iter().find(|b| b.label.starts_with("div#c"))
+                .map(|b| (b.y, b.h))
+                .unwrap_or((-1, -1))
+        };
+        // Der klassische Clearfix: leeres `clear`-Kind.
+        assert_eq!(hoehe("<div style=\"clear:both\"></div>"), (0, 50),
+            "Kasten muss oben stehenbleiben und so hoch werden wie der Float");
+        // Mit eigener Hoehe kommt sie unten dazu.
+        assert_eq!(hoehe("<div style=\"clear:both;height:10px\"></div>"), (0, 60));
+        // Ohne `clear` schliesst ein Kasten seinen Float NICHT ein (§10.6.3) —
+        // die Gegenprobe, damit der Riegel nicht zu weit greift.
+        assert_eq!(hoehe("<div style=\"height:5px\"></div>"), (0, 5));
+        // Und der Rand eines geraeumten, durchkollabierenden Kindes
+        // verschmilzt nicht mit dem Unterrand des Elters (§8.3.1):
+        // 50 px Raeumung + 99 px Rand des Folgegeschwisters.
+        assert_eq!(hoehe("<div style=\"clear:both\"></div><div style=\"margin-top:99px\"></div>"),
+                   (0, 149));
     }
 
     /// Only the elements a `:hover` rule can actually react to get a box —
