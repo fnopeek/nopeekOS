@@ -705,6 +705,15 @@ impl Engine {
     /// sein; alles andere wird abgelehnt, statt als kaputte Schrift zu enden.
     ///
     /// Liefert false, wenn die Bytes nicht lesbar waren — der Wirt meldet das.
+    /// Wieviele der sechs eingebauten Gesichter bisher geparst wurden.
+    ///
+    /// Sie werden FAUL geladen (siehe `fonts::LazyFace`), und „faul" ist ohne
+    /// diese Zahl eine Behauptung: eine Seite, die doch alle sechs anfasst,
+    /// spart nichts, und man saehe es nicht.
+    pub fn loaded_faces(&self) -> usize {
+        self.fonts.borrow().loaded_faces()
+    }
+
     pub fn add_font(&self, family: u32, weight: u16, italic: bool, bytes: &[u8]) -> bool {
         let owned;
         let sfnt: &[u8] = if bytes.starts_with(b"wOF2") {
