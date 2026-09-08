@@ -301,6 +301,26 @@ row(domRows, "location", function () {
   return location.protocol === "beak:" && location.pathname === "selftest"
       && document.URL === location.href;
 });
+row(domRows, "location navigiert", function () {
+  /* Geprueft wird die SCHNITTSTELLE, nicht der Sprung: eine Zeile, die
+     wirklich navigiert, nimmt die Pruefseite mit. Dass der Wirt der Absicht
+     folgt, sagt am Geraet die Logzeile `[beak] location.assign() -> …`;
+     host-seitig sagt es `pagerun` mit `NAVIGATION …`.
+
+     Und `origin` MUSS ohne Setzer sein — eine Seite, die ihre Herkunft
+     umschreiben kann, haette damit die Regel ausgehebelt, an der die
+     gleiche Herkunft von `fetch` haengt. */
+  var dh = Object.getOwnPropertyDescriptor(location, "href");
+  var dorg = Object.getOwnPropertyDescriptor(location, "origin");
+  return typeof location.assign === "function"
+      && typeof location.replace === "function"
+      && typeof location.reload === "function"
+      && String(location) === location.href
+      && ("" + location) === location.href
+      && document.location === window.location
+      && typeof dh.get === "function" && typeof dh.set === "function"
+      && typeof dorg.get === "function" && dorg.set === undefined;
+});
 row(domRows, "Event + dispatchEvent", function () {
   var e = document.getElementById("b3"), traf = 0, ziel = null;
   e.addEventListener("probe", function (ev) { traf++; ziel = ev.target; });
