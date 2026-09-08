@@ -290,6 +290,9 @@ pub struct Realm {
     pub abort_signal_proto: Gc,
     pub abort_ctrl_proto: Gc,
     pub xhr_proto: Gc,
+    /// `MutationObserver.prototype` — im Realm, weil der Konstruktor ein
+    /// Zeiger ist und den Prototyp nicht einfangen kann.
+    pub mo_proto: Gc,
     pub prej_proto: Gc,
     pub text_encoder_proto: Gc,
     pub text_decoder_proto: Gc,
@@ -545,7 +548,16 @@ pub struct Interp {
     /// Rumpf wird bei jedem Aufruf gebraucht und darf nur EINMAL uebersetzt
     /// werden. `None` heisst „schon versucht, geht nicht" — auch das gehoert
     /// gemerkt, sonst uebersetzt eine Schleife bei jedem Umlauf vergeblich.
-    pub func_chunks: HashMap<usize, Option<Rc<super::code::Chunk>>>,
+    ///
+    /// **Der `Weak` ist nicht Zierde, er ist der Schluessel.** Eine Adresse
+    /// ist nur solange eine Identitaet, wie sie belegt ist: gibt der letzte
+    /// `Rc` den Knoten frei, kann die naechste Funktion GENAU DORT liegen —
+    /// und bekam dann den Rumpf ihrer Vorgaengerin. Am Geraet heisst das:
+    /// die Seite ruft ihre Funktion, und es laeuft der Code einer fremden
+    /// Bibliothek. Ein `Weak` haelt die Zelle belegt, ohne den Baum
+    /// festzuhalten — die Adresse bleibt damit unverwechselbar, und der AST
+    /// darf trotzdem sterben.
+    pub func_chunks: HashMap<usize, (alloc::rc::Weak<Func>, Option<Rc<super::code::Chunk>>)>,
     /// Woran der Uebersetzer bei einem FUNKTIONSRUMPF absagt, je Grund.
     ///
     /// Die Programm-Absagen (`vm_decline`) waren bis Stufe 4 die ganze
@@ -622,6 +634,10 @@ pub struct Interp {
     /// keinen Verlauf und soll keinen erfinden; sie sammelt, und der Wirt
     /// holt es mit `take_history_ops` ab und entscheidet. Dasselbe Muster
     /// wie bei den Keksen.
+    /// Die angemeldeten `MutationObserver`. Sie liegen hier und nicht im
+    /// Dokument, weil sie einen JS-Rueckruf halten: das Dokument wird bei
+    /// jeder Navigation neu gebaut, der Realm nicht.
+    pub observers: Vec<super::dombind::MutObs>,
     pub history_ops: Vec<HistoryOp>,
     /// Die Navigation, die die Seite zuletzt verlangt hat (`location.assign`,
     /// `.replace`, `.reload`, `href = …`). **Genau eine, und die LETZTE
@@ -754,6 +770,7 @@ impl Interp {
                  cookies: String::new(), cookie_sets: Vec::new(), style_ctx: None,
                  history_ops: Vec::new(), history_state: Value::Null, history_len: 1.0,
                  nav: None, loc_href: String::from("about:blank"),
+                 observers: Vec::new(),
                  vm_ran: 0, vm_declined: 0, vm_decline: None, vm_off: false,
                  func_chunks: HashMap::new(), func_declines: HashMap::new(), pending_labels: Vec::new(), vm_ops: 0, hints_ok: true, vm_calls: 0, vm_calls_native: 0, vm_calls_slow: 0,
                  geometry: None,
@@ -1857,7 +1874,7 @@ impl Interp {
             return None;
         }
         let key = Rc::as_ptr(f) as usize;
-        if let Some(c) = self.func_chunks.get(&key) {
+        if let Some((_, c)) = self.func_chunks.get(&key) {
             return c.clone();
         }
         let c = match super::compile::function(f) {
@@ -1867,7 +1884,7 @@ impl Interp {
                 None
             }
         };
-        self.func_chunks.insert(key, c.clone());
+        self.func_chunks.insert(key, (Rc::downgrade(f), c.clone()));
         c
     }
 

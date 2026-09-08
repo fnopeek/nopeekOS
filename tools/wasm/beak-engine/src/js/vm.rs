@@ -1129,6 +1129,51 @@ mod tests {
         }
     }
 
+    /// **Ein freigegebener Funktionsknoten darf seinen Rumpf nicht vererben.**
+    ///
+    /// `func_chunks` merkt sich den uebersetzten Rumpf unter der ADRESSE des
+    /// AST-Knotens. Eine Adresse ist aber nur solange eine Identitaet, wie
+    /// sie belegt ist: gibt das erste `<script>` seinen Baum frei, kann eine
+    /// Funktion des zweiten genau dort liegen — und bekommt dann den Rumpf
+    /// der ersten. Am Geraet heisst das: die Seite ruft ihre eigene Funktion,
+    /// und es laeuft der Code einer fremden Bibliothek.
+    ///
+    /// Gefunden an Alpine.js: nach `alpine.js` scheiterte JEDER Aufruf einer
+    /// eigenen Funktion mit `mt is not defined` — einem Namen aus Alpines
+    /// Innerem. Auf dem Baumlaeufer lief derselbe Code sauber, weil der
+    /// diesen Zwischenspeicher nicht hat.
+    ///
+    /// **Geprueft wird die Invariante, nicht ein Lauf.** Zwei Programme
+    /// hintereinander zu fahren und auf eine Kollision zu HOFFEN ist ein
+    /// Test, der beruhigt: ob der Allokator dieselbe Zelle zurueckgibt, ist
+    /// Zufall. Hier steht die Bedingung selbst: eine Adresse, unter der ein
+    /// Rumpf gemerkt ist, darf nicht neu vergeben werden.
+    #[test]
+    fn eine_gemerkte_adresse_wird_nicht_neu_vergeben() {
+        use crate::js::ast::Func;
+        use alloc::rc::Rc;
+        fn leer(name: &str) -> Rc<Func> {
+            Rc::new(Func { name: Some(alloc::string::String::from(name)),
+                           params: alloc::vec::Vec::new(), body: alloc::vec::Vec::new(),
+                           is_async: false, is_generator: false, is_arrow: false,
+                           expr_body: false, strict: false })
+        }
+        let mut i = super::Interp::new();
+        let f = leer("erste");
+        let adresse = Rc::as_ptr(&f) as usize;
+        // Uebersetzen und merken — ab jetzt haengt an dieser Adresse ein Rumpf.
+        let _ = i.func_chunk(&f);
+        drop(f);
+        // Der Allokator gibt eine gerade freigegebene Zelle bevorzugt sofort
+        // wieder aus. Genau das ist die Falle.
+        for k in 0..64 {
+            let g = leer("zweite");
+            assert_ne!(Rc::as_ptr(&g) as usize, adresse,
+                "Versuch {k}: eine neue Funktion liegt auf der Adresse, unter der \
+                 noch ein fremder Rumpf gemerkt ist — sie bekaeme ihn beim Aufruf");
+        }
+    }
+
     /// Ein direktes `eval` MUSS die Wegweiser abschalten — das ist der
     /// einzige Weg, auf dem eine Bindung nachtraeglich weiter innen entsteht.
     #[test]

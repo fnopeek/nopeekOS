@@ -115,6 +115,47 @@ impl DomNode {
     }
 }
 
+/// Was sich am Baum geaendert hat — die Rohaufzeichnung fuer
+/// `MutationObserver`.
+///
+/// **Aufgezeichnet wird im BAUM, nicht in der Bindung.** Ein Beobachter, der
+/// sich seine Meldungen aus einem Vergleich zweier Momentaufnahmen rechnet,
+/// meldet „geaendert" und weiss nicht, was; und er kann nicht sehen, dass ein
+/// Knoten weg war und wieder da ist. Die Stellen, an denen sich ein Baum
+/// aendert, sind gezaehlt — also sagen sie es selbst.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum MutKind { ChildList, Attributes, CharacterData }
+
+#[derive(Clone)]
+pub struct Mutation {
+    pub kind: MutKind,
+    /// Bei `ChildList` der ELTER, bei den anderen beiden der Knoten selbst.
+    pub target: u32,
+    pub added: Vec<u32>,
+    pub removed: Vec<u32>,
+    pub prev: Option<u32>,
+    pub next: Option<u32>,
+    pub attr: Option<Rc<str>>,
+    pub old: Option<Rc<str>>,
+    /// **Welche beobachteten Knoten diese Aenderung ZUM ZEITPUNKT DER
+    /// AENDERUNG umschlossen haben**, als Bitmaske ueber `Doc::observed`.
+    ///
+    /// Das ist der ganze Grund, warum es diese Maske gibt: die Zugehoerigkeit
+    /// spaeter zu pruefen liest den Baum von SPAETER. Ein Knoten, der erst
+    /// gesetzt und dann eingehaengt wird, waere faelschlich dabei; einer, der
+    /// geaendert und dann entfernt wird, fiele heraus. Beides ist mir genau
+    /// so passiert, und beides sieht aus wie ein Fehler der Bibliothek.
+    pub hits: u64,
+}
+
+/// Deckel fuer die Rohaufzeichnung.
+///
+/// Ein Skript, das hunderttausend Knoten baut, waehrend ein Beobachter
+/// angemeldet ist, darf den Speicher nicht auffressen. Ueberlaeuft es, wird
+/// das GEMELDET und nicht still verschluckt — ein Beobachter, dem Meldungen
+/// fehlen, ohne dass es jemand sagt, ist schlimmer als gar keiner.
+pub const MAX_MUTATIONS: usize = 20_000;
+
 pub struct Doc {
     pub nodes: Vec<DomNode>,
     pub doc: u32,
@@ -145,6 +186,18 @@ pub struct Doc {
     /// von „seither zweimal geaendert" nicht mehr zu unterscheiden. Ein
     /// Zaehler, der nur steigt, kann beides.
     pub version: u32,
+    /// Die Rohaufzeichnung fuer `MutationObserver` — leer, solange niemand
+    /// zusieht.
+    pub mutations: Vec<Mutation>,
+    /// Sieht ueberhaupt jemand zu? Ohne diese Fahne zahlte JEDE Seite fuer
+    /// eine Aufzeichnung, die keiner abholt.
+    pub observing: bool,
+    /// Ist die Aufzeichnung uebergelaufen? Wird beim Zustellen gemeldet.
+    pub mut_overflow: bool,
+    /// Die beobachteten Knoten als `(Knoten, mit Nachkommen)`, in der
+    /// Reihenfolge der Bits in `Mutation::hits`. Der Baum muss NICHT wissen,
+    /// wer zusieht — nur, wo.
+    pub observed: Vec<(u32, bool)>,
 }
 
 impl Doc {
@@ -152,7 +205,9 @@ impl Doc {
         let mut nodes = Vec::new();
         nodes.push(DomNode::new(DOCUMENT_NODE, "#document"));
         Doc { nodes, doc: 0, html: None, body: None, head: None,
-              dirty: false, has_listeners: false, focused: None, version: 0 }
+              dirty: false, has_listeners: false, focused: None, version: 0,
+              mutations: Vec::new(), observing: false, mut_overflow: false,
+              observed: Vec::new() }
     }
 
     /// Aus beaks geparstem Baum. Der `seq` des Originals wird NICHT
@@ -221,11 +276,58 @@ impl Doc {
         None
     }
 
+    /// Welche beobachteten Knoten `node` JETZT umschliessen.
+    ///
+    /// Ein Gang die Elternkette hinauf, genau wie ihn ein echter Motor an
+    /// dieser Stelle macht — die Kosten sind die Tiefe, nicht die Zahl der
+    /// Knoten.
+    pub fn hits_for(&self, node: u32) -> u64 {
+        let mut bits = 0u64;
+        let mut cur = Some(node);
+        let mut erste = true;
+        while let Some(x) = cur {
+            for (k, (t, sub)) in self.observed.iter().enumerate() {
+                if k >= 64 { break }
+                if *t == x && (erste || *sub) { bits |= 1u64 << k; }
+            }
+            erste = false;
+            cur = self.nodes.get(x as usize).and_then(|n| n.parent);
+        }
+        bits
+    }
+
+    /// Eine Aenderung notieren — nur, wenn jemand zusieht, und nur, wenn sie
+    /// ueberhaupt jemanden betrifft.
+    pub fn record(&mut self, mut m: Mutation) {
+        if !self.observing { return }
+        m.hits = self.hits_for(m.target);
+        if m.hits == 0 { return }
+        if self.mutations.len() >= MAX_MUTATIONS { self.mut_overflow = true; return }
+        self.mutations.push(m);
+    }
+
+    /// Die Geschwister eines Knotens, wie sie JETZT stehen. Ein Datensatz
+    /// nennt sie so, wie sie zum Zeitpunkt der Aenderung waren — danach
+    /// stimmen sie nicht mehr.
+    fn siblings(&self, parent: u32, at: usize) -> (Option<u32>, Option<u32>) {
+        let k = &self.nodes[parent as usize].children;
+        (if at > 0 { k.get(at - 1).copied() } else { None }, k.get(at + 1).copied())
+    }
+
     /// Aus dem alten Elternteil aushaengen. Muss VOR jedem Einhaengen laufen,
     /// sonst steht ein Knoten in zwei Kinderlisten und der Baum ist keiner mehr.
     pub fn detach(&mut self, id: u32) {
         self.touch();
         if let Some(p) = self.nodes[id as usize].parent {
+            let at = self.nodes[p as usize].children.iter().position(|&c| c == id);
+            if self.observing {
+                if let Some(at) = at {
+                    let (prev, next) = self.siblings(p, at);
+                    self.record(Mutation { kind: MutKind::ChildList, target: p,
+                        added: Vec::new(), removed: alloc::vec![id],
+                        prev, next, attr: None, old: None, hits: 0 });
+                }
+            }
             self.nodes[p as usize].children.retain(|&c| c != id);
         }
         self.nodes[id as usize].parent = None;
@@ -233,9 +335,20 @@ impl Doc {
 
     pub fn append(&mut self, parent: u32, child: u32) {
         self.touch();
+        // **Ein Umhaengen ist ein Entfernen UND ein Einfuegen**, und beides
+        // gehoert gemeldet — die Spezifikation sagt es so, und ein
+        // Beobachter, der nur das Einfuegen saehe, haette den Knoten
+        // zweimal im Baum.
         self.detach(child);
         self.nodes[child as usize].parent = Some(parent);
         self.nodes[parent as usize].children.push(child);
+        if self.observing {
+            let n = self.nodes[parent as usize].children.len();
+            let prev = if n >= 2 { self.nodes[parent as usize].children.get(n - 2).copied() } else { None };
+            self.record(Mutation { kind: MutKind::ChildList, target: parent,
+                added: alloc::vec![child], removed: Vec::new(),
+                prev, next: None, attr: None, old: None, hits: 0 });
+        }
     }
 
     /// Einhaengen — und ein BRUCHSTUECK gibt dabei seine Kinder ab.
@@ -265,6 +378,53 @@ impl Doc {
             None => self.nodes[parent as usize].children.len(),
         };
         self.nodes[parent as usize].children.insert(at, child);
+        if self.observing {
+            let (prev, next) = self.siblings(parent, at);
+            self.record(Mutation { kind: MutKind::ChildList, target: parent,
+                added: alloc::vec![child], removed: Vec::new(),
+                prev, next, attr: None, old: None, hits: 0 });
+        }
+    }
+
+    /// Ein Attribut setzen — **der eine Weg**, damit die Aenderung EINMAL
+    /// notiert wird und nicht an zwoelf Stellen vergessen.
+    pub fn set_attr_at(&mut self, id: u32, k: &str, v: &str) {
+        self.touch();
+        if self.observing {
+            let old = self.nodes[id as usize].attr(k).cloned();
+            self.record(Mutation { kind: MutKind::Attributes, target: id,
+                added: Vec::new(), removed: Vec::new(), prev: None, next: None,
+                attr: Some(Rc::from(k)), old, hits: 0 });
+        }
+        self.nodes[id as usize].set_attr(k, v);
+    }
+
+    /// Ein Attribut entfernen. Ist es gar nicht da, ist es KEINE Aenderung —
+    /// ein Datensatz dafuer waere eine erfundene Meldung.
+    pub fn remove_attr_at(&mut self, id: u32, k: &str) {
+        self.touch();
+        let old = self.nodes[id as usize].attr(k).cloned();
+        if old.is_none() { return }
+        if self.observing {
+            self.record(Mutation { kind: MutKind::Attributes, target: id,
+                added: Vec::new(), removed: Vec::new(), prev: None, next: None,
+                attr: Some(Rc::from(k)), old, hits: 0 });
+        }
+        self.nodes[id as usize].attrs.retain(|(n, _)| &**n != k);
+    }
+
+    /// Den Text eines Text-/Kommentarknotens setzen (`data`, `nodeValue`).
+    /// NICHT fuer frisch gebaute Knoten: dort gibt es keinen alten Wert und
+    /// niemanden, der zusieht.
+    pub fn set_text(&mut self, id: u32, v: Rc<str>) {
+        self.touch();
+        if self.observing {
+            let old = Some(self.nodes[id as usize].text.clone());
+            self.record(Mutation { kind: MutKind::CharacterData, target: id,
+                added: Vec::new(), removed: Vec::new(), prev: None, next: None,
+                attr: None, old, hits: 0 });
+        }
+        self.nodes[id as usize].text = v;
     }
 
     /// Der Text eines Teilbaums, aneinandergehaengt.
@@ -374,8 +534,17 @@ impl Doc {
     pub fn clear_children(&mut self, id: u32) {
         self.touch();
         let old: Vec<u32> = self.nodes[id as usize].children.clone();
-        for c in old { self.nodes[c as usize].parent = None; }
+        for c in &old { self.nodes[*c as usize].parent = None; }
         self.nodes[id as usize].children.clear();
+        // `innerHTML = "…"` raeumt hier ab, bevor es neu baut. Ohne diese
+        // Meldung saehe ein Beobachter nur das Neue und nie, dass das Alte
+        // weg ist — und genau daran haengen die Aufraeumroutinen jeder
+        // Komponentenbibliothek.
+        if self.observing && !old.is_empty() {
+            self.record(Mutation { kind: MutKind::ChildList, target: id,
+                added: Vec::new(), removed: old, prev: None, next: None,
+                attr: None, old: None, hits: 0 });
+        }
     }
 
     /// Einen Teilbaum kopieren (`cloneNode`).
@@ -699,6 +868,221 @@ fn target_node(i: &mut Interp, v: &Value) -> C<u32> {
     node_of(i, v)
 }
 
+/// Welches Stueck eines Dokuments gesucht ist.
+#[derive(Clone, Copy, PartialEq)]
+enum DocPart { Root, Head, Body }
+
+/// `documentElement` / `head` / `body` — von DIESEM Dokumentknoten aus.
+///
+/// Fuer das Hauptdokument steht die Antwort gemerkt in `Doc`; fuer jedes
+/// andere (`implementation.createHTMLDocument`) wird gelaufen. Zwei Wege und
+/// nicht einer, weil der gemerkte auch dann noch stimmt, wenn eine Seite
+/// ihren Rumpf umbaut — und weil ein Umbau des Hauptwegs hier nichts
+/// gewinnen und alles riskieren wuerde.
+fn doc_part(i: &mut Interp, this: &Value, part: DocPart) -> C<Option<u32>> {
+    let id = node_of(i, this)?;
+    let Some(d) = &i.doc else { return Ok(None) };
+    if id == d.doc {
+        return Ok(match part { DocPart::Root => d.html, DocPart::Head => d.head, DocPart::Body => d.body });
+    }
+    // Die Wurzel ist das erste Element unter dem Dokumentknoten.
+    let root = d.nodes.get(id as usize)
+        .and_then(|n| n.children.iter().copied()
+            .find(|c| d.nodes[*c as usize].kind == ELEMENT_NODE));
+    let Some(root) = root else { return Ok(None) };
+    if part == DocPart::Root { return Ok(Some(root)) }
+    let want = if part == DocPart::Head { "head" } else { "body" };
+    Ok(d.nodes[root as usize].children.iter().copied()
+        .find(|c| &*d.nodes[*c as usize].tag == want))
+}
+
+/// Eine Anmeldung eines `MutationObserver`: WAS er an WELCHEM Knoten sehen
+/// will (DOM §4.3.1 „registered observer").
+pub struct MutReg {
+    pub target: u32,
+    /// Der Platz dieser Anmeldung in `Doc::observed` — das Bit, das eine
+    /// Aenderung gesetzt hat, wenn sie diesen Knoten betraf.
+    pub slot: usize,
+    pub subtree: bool,
+    pub child_list: bool,
+    pub attrs: bool,
+    pub attr_old: bool,
+    pub char_data: bool,
+    pub char_old: bool,
+    /// `attributeFilter` — nur diese Attribute. `None` heisst „alle".
+    pub filter: Option<Vec<Rc<str>>>,
+}
+
+/// Ein angemeldeter `MutationObserver`.
+///
+/// Er liegt im `Interp` und nicht im `Doc`, weil er einen JS-Rueckruf haelt:
+/// das Dokument wird bei jeder Navigation neu gebaut, der Realm nicht.
+pub struct MutObs {
+    /// Das JS-Objekt — die IDENTITAET. Ueber sie findet `observe` den
+    /// richtigen Eintrag wieder.
+    pub js: Gc,
+    pub cb: Value,
+    pub regs: Vec<MutReg>,
+    pub queue: Vec<Mutation>,
+}
+
+/// Sieht noch jemand zu? Wenn nicht, hoert der Baum auf aufzuzeichnen.
+fn sync_observing(i: &mut Interp) {
+    // Die Anmeldungen bekommen ihre Plaetze — und der Baum die Liste, die er
+    // beim Aufzeichnen braucht.
+    let mut obs: Vec<(u32, bool)> = Vec::new();
+    let mut voll = false;
+    for o in i.observers.iter_mut() {
+        for r in o.regs.iter_mut() {
+            match obs.iter().position(|(t, s)| *t == r.target && *s == r.subtree) {
+                Some(k) => r.slot = k,
+                None if obs.len() < 64 => { r.slot = obs.len(); obs.push((r.target, r.subtree)); }
+                // **Mehr als 64 verschiedene beobachtete Knoten.** Gesagt
+                // statt verschluckt: die Maske ist ein `u64`, und eine
+                // Anmeldung ohne Platz meldet nichts.
+                None => { r.slot = usize::MAX; voll = true; }
+            }
+        }
+    }
+    if voll {
+        i.console_push(alloc::string::String::from(
+            "warn: MutationObserver: mehr als 64 beobachtete Knoten, die weiteren melden nichts"));
+    }
+    let any = !obs.is_empty();
+    if let Some(d) = &mut i.doc {
+        d.observing = any;
+        d.observed = obs;
+        if !any { d.mutations.clear(); d.mut_overflow = false; }
+    }
+}
+
+/// Passt diese Aenderung zu dieser Anmeldung?
+///
+/// Die ZUGEHOERIGKEIT steht schon fest — sie wurde beim Aendern gerechnet
+/// (`Mutation::hits`). Hier faellt nur noch, was diese Anmeldung inhaltlich
+/// nicht sehen will.
+fn matches_reg(m: &Mutation, r: &MutReg) -> bool {
+    if r.slot >= 64 || m.hits & (1u64 << r.slot) == 0 { return false }
+    match m.kind {
+        MutKind::ChildList => r.child_list,
+        MutKind::CharacterData => r.char_data,
+        MutKind::Attributes => {
+            if !r.attrs { return false }
+            match (&r.filter, &m.attr) {
+                (Some(f), Some(a)) => f.iter().any(|x| x == a),
+                (Some(_), None) => false,
+                (None, _) => true,
+            }
+        }
+    }
+}
+
+/// Die Rohaufzeichnung des Baums auf die Beobachter verteilen.
+///
+/// **Erst hier wird gefiltert, nicht beim Aufzeichnen.** Der Baum weiss
+/// nicht, wer zusieht, und soll es nicht wissen muessen; und dieselbe
+/// Aenderung kann an mehrere Beobachter gehen.
+pub fn collect_mutations(i: &mut Interp) {
+    let raw = match &mut i.doc {
+        Some(d) if !d.mutations.is_empty() => core::mem::take(&mut d.mutations),
+        _ => return,
+    };
+    let overflow = i.doc.as_mut().map(|d| core::mem::replace(&mut d.mut_overflow, false)).unwrap_or(false);
+    if overflow {
+        i.console_push(alloc::string::String::from(
+            "warn: MutationObserver: Aufzeichnung uebergelaufen, Meldungen fehlen"));
+    }
+    let mut per: Vec<Vec<Mutation>> = alloc::vec![Vec::new(); i.observers.len()];
+    for m in &raw {
+        for (n, o) in i.observers.iter().enumerate() {
+            // Der Beobachter bekommt die Aenderung EINMAL, auch wenn zwei
+            // seiner Anmeldungen passen — sonst saehe eine Seite, die
+            // Elter und Kind beobachtet, alles doppelt.
+            if o.regs.iter().any(|r| matches_reg(m, r)) {
+                // `oldValue` gibt es nur, wenn die Anmeldung danach
+                // gefragt hat. Ihn immer mitzuliefern waere bequem und
+                // falsch: Seiten unterscheiden `null` von `""`.
+                let want_old = o.regs.iter().any(|r| matches_reg(m, r) && match m.kind {
+                    MutKind::Attributes => r.attr_old,
+                    MutKind::CharacterData => r.char_old,
+                    MutKind::ChildList => false,
+                });
+                let mut c = m.clone();
+                if !want_old { c.old = None; }
+                per[n].push(c);
+            }
+        }
+    }
+    for (n, mut list) in per.into_iter().enumerate() {
+        if list.is_empty() { continue }
+        i.observers[n].queue.append(&mut list);
+    }
+}
+
+/// Aus einer Aenderung ein `MutationRecord` bauen.
+fn build_record(i: &mut Interp, m: &Mutation) -> C<Value> {
+    let o = new_obj(Some(i.realm.object_proto.clone()));
+    let kind = match m.kind {
+        MutKind::ChildList => "childList",
+        MutKind::Attributes => "attributes",
+        MutKind::CharacterData => "characterData",
+    };
+    let target = wrap(i, m.target);
+    let added: Vec<Value> = m.added.clone().into_iter().map(|x| wrap(i, x)).collect();
+    let removed: Vec<Value> = m.removed.clone().into_iter().map(|x| wrap(i, x)).collect();
+    let added = i.new_array(added);
+    let removed = i.new_array(removed);
+    let prev = match m.prev { Some(x) => wrap(i, x), None => Value::Null };
+    let next = match m.next { Some(x) => wrap(i, x), None => Value::Null };
+    {
+        let mut b = o.borrow_mut();
+        b.define("type", Prop::data(Value::str(kind)));
+        b.define("target", Prop::data(target));
+        b.define("addedNodes", Prop::data(added));
+        b.define("removedNodes", Prop::data(removed));
+        b.define("previousSibling", Prop::data(prev));
+        b.define("nextSibling", Prop::data(next));
+        b.define("attributeName", Prop::data(match &m.attr {
+            Some(a) => Value::str(a), None => Value::Null }));
+        // Ein Namensraum, den wir nicht fuehren, ist `null` — und `null` ist
+        // hier die richtige Antwort, nicht eine fehlende.
+        b.define("attributeNamespace", Prop::data(Value::Null));
+        b.define("oldValue", Prop::data(match &m.old {
+            Some(v) => Value::str(v), None => Value::Null }));
+        b.define(SYM_TO_STRING_TAG, Prop::tag(Value::str("MutationRecord")));
+    }
+    Ok(Value::Obj(o))
+}
+
+/// Der Kontrollpunkt: einsammeln, und wer etwas hat, wird gerufen.
+///
+/// Liefert true, wenn ein Rueckruf gelaufen ist — der Rufer muss dann noch
+/// einmal vorbeikommen, weil ein Beobachter im Rueckruf den Baum aendern darf.
+pub fn deliver_mutations(i: &mut Interp) -> bool {
+    collect_mutations(i);
+    let mut ran = false;
+    for n in 0..i.observers.len() {
+        if i.observers[n].queue.is_empty() { continue }
+        let recs = core::mem::take(&mut i.observers[n].queue);
+        let cb = i.observers[n].cb.clone();
+        let this = Value::Obj(i.observers[n].js.clone());
+        let mut vals = Vec::with_capacity(recs.len());
+        for m in &recs {
+            match build_record(i, m) { Ok(v) => vals.push(v), Err(_) => return ran }
+        }
+        let arr = i.new_array(vals);
+        ran = true;
+        // Wirft der Rueckruf, ist das SEIN Fehler und nicht das Ende der
+        // Zustellung: die anderen Beobachter bekommen ihre Meldungen
+        // trotzdem, so wie im Browser.
+        if let Err(e) = i.call(&cb, this.clone(), &[arr, this]) {
+            let msg = super::modules::describe(i, e);
+            i.console_push(alloc::format!("error: MutationObserver-Rueckruf: {msg}"));
+        }
+    }
+    ran
+}
+
 /// Das Huellobjekt eines Knotens — einmal gebaut, dann behalten.
 pub fn wrap(i: &mut Interp, id: u32) -> Value {
     if let Some(doc) = &i.doc {
@@ -913,7 +1297,7 @@ fn style_set(i: &mut Interp, id: u32, css: &str, val: &str) {
     let v = val.trim();
     if !v.is_empty() { decls.push((css.to_string(), v.to_string())); }
     let joined = style_join(&decls);
-    d.nodes[id as usize].set_attr("style", &joined);
+    d.set_attr_at(id, "style", &joined);
     d.touch();
 }
 
@@ -986,7 +1370,7 @@ macro_rules! attr_prop {
         let s = native(Some($fp.clone()), |i, t, a| {
             let id = node_of(i, &t)?;
             let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-            if let Some(d) = &mut i.doc { d.touch(); d.nodes[id as usize].set_attr($attr, &v); }
+            if let Some(d) = &mut i.doc { d.set_attr_at(id, $attr, &v); }
             Ok(Value::Undefined)
         }, concat!("set ", $js), 1, false);
         $proto.borrow_mut().define($js, Prop { value: None, get: Some(Value::Obj(g)),
@@ -1008,7 +1392,7 @@ macro_rules! num_attr_prop {
             let id = node_of(i, &t)?;
             let n = i.to_number(a.first().unwrap_or(&Value::Undefined))?;
             let v = i.to_string(&Value::Num(n))?;
-            if let Some(d) = &mut i.doc { d.touch(); d.nodes[id as usize].set_attr($attr, &v); }
+            if let Some(d) = &mut i.doc { d.set_attr_at(id, $attr, &v); }
             Ok(Value::Undefined)
         }, concat!("set ", $js), 1, false);
         $proto.borrow_mut().define($js, Prop { value: None, get: Some(Value::Obj(g)),
@@ -1029,8 +1413,8 @@ macro_rules! bool_attr_prop {
             let on = a.first().map(|v| v.truthy()).unwrap_or(false);
             if let Some(d) = &mut i.doc {
                 d.touch();
-                if on { d.nodes[id as usize].set_attr($attr, "") }
-                else { d.nodes[id as usize].attrs.retain(|(k, _)| &**k != $attr) }
+                if on { d.set_attr_at(id, $attr, "") }
+                else { d.remove_attr_at(id, $attr) }
             }
             Ok(Value::Undefined)
         }, concat!("set ", $js), 1, false);
@@ -1425,8 +1809,7 @@ pub fn install(realm: &mut Realm) {
             let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
             if let Some(d) = &mut i.doc {
                 if d.nodes[id as usize].kind != ELEMENT_NODE {
-                    d.touch();
-                    d.nodes[id as usize].text = v;
+                    d.set_text(id, v);
                 }
             }
             Ok(Value::Undefined)
@@ -1526,12 +1909,12 @@ pub fn install(realm: &mut Realm) {
     accessor(&element_proto, "id",
         |i, t, _| with_node!(i, t, |n| Ok(match n.attr("id") { Some(v) => Value::Str(v.clone()), None => Value::str("") })),
         |i, t, a| { let id = node_of(i, &t)?; let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-                    if let Some(d) = &mut i.doc { d.touch(); d.nodes[id as usize].set_attr("id", &v); }
+                    if let Some(d) = &mut i.doc { d.set_attr_at(id, "id", &v); }
                     Ok(Value::Undefined) }, &fp);
     accessor(&element_proto, "className",
         |i, t, _| with_node!(i, t, |n| Ok(match n.attr("class") { Some(v) => Value::Str(v.clone()), None => Value::str("") })),
         |i, t, a| { let id = node_of(i, &t)?; let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-                    if let Some(d) = &mut i.doc { d.touch(); d.nodes[id as usize].set_attr("class", &v); }
+                    if let Some(d) = &mut i.doc { d.set_attr_at(id, "class", &v); }
                     Ok(Value::Undefined) }, &fp);
     meth(&element_proto, "getAttribute", |i, t, a| {
         let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
@@ -1545,13 +1928,13 @@ pub fn install(realm: &mut Realm) {
         let id = node_of(i, &t)?;
         let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         let v = i.to_string(a.get(1).unwrap_or(&Value::Undefined))?;
-        if let Some(d) = &mut i.doc { d.touch(); d.nodes[id as usize].set_attr(&k, &v); }
+        if let Some(d) = &mut i.doc { d.set_attr_at(id, &k, &v); }
         Ok(Value::Undefined)
     }, 2, &fp);
     meth(&element_proto, "removeAttribute", |i, t, a| {
         let id = node_of(i, &t)?;
         let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-        if let Some(d) = &mut i.doc { d.touch(); d.nodes[id as usize].attrs.retain(|(n, _)| *n != k); }
+        if let Some(d) = &mut i.doc { d.remove_attr_at(id, &k); }
         Ok(Value::Undefined)
     }, 1, &fp);
     meth(&element_proto, "matches", |i, t, a| {
@@ -1770,14 +2153,21 @@ pub fn install(realm: &mut Realm) {
     }
 
     // ── Document ─────────────────────────────────────────────────────────
-    getter(&document_proto, "documentElement", |i, _, _| {
-        match i.doc.as_ref().and_then(|d| d.html) { Some(x) => Ok(wrap(i, x)), None => Ok(Value::Null) }
+    //
+    // **Die drei lesen `this`, nicht nur das Hauptdokument.** Seit
+    // `implementation.createHTMLDocument` gibt es einen ZWEITEN
+    // Dokumentknoten im selben Feld, und ein Getter, der stur
+    // `i.doc.body` zurueckgibt, haette dessen Rumpf ausgeliefert — jQuery
+    // haette sein Probestueck in die ECHTE Seite geschrieben. Fuer das
+    // Hauptdokument bleibt der gemerkte Weg; nur daneben wird gelaufen.
+    getter(&document_proto, "documentElement", |i, this, _| {
+        match doc_part(i, &this, DocPart::Root)? { Some(x) => Ok(wrap(i, x)), None => Ok(Value::Null) }
     }, &fp);
-    getter(&document_proto, "body", |i, _, _| {
-        match i.doc.as_ref().and_then(|d| d.body) { Some(x) => Ok(wrap(i, x)), None => Ok(Value::Null) }
+    getter(&document_proto, "body", |i, this, _| {
+        match doc_part(i, &this, DocPart::Body)? { Some(x) => Ok(wrap(i, x)), None => Ok(Value::Null) }
     }, &fp);
-    getter(&document_proto, "head", |i, _, _| {
-        match i.doc.as_ref().and_then(|d| d.head) { Some(x) => Ok(wrap(i, x)), None => Ok(Value::Null) }
+    getter(&document_proto, "head", |i, this, _| {
+        match doc_part(i, &this, DocPart::Head)? { Some(x) => Ok(wrap(i, x)), None => Ok(Value::Null) }
     }, &fp);
     getter(&document_proto, "readyState", |_, _, _| Ok(Value::str("complete")), &fp);
     // `document.cookie` — 1852 Aufrufe im Zensus, und auf BEIDEN Wikipedias
@@ -1818,17 +2208,23 @@ pub fn install(realm: &mut Realm) {
     // Der Titel steht im Baum, nicht daneben: ein Skript, das ihn setzt,
     // aendert das `<title>`-Element, und wer ihn liest, liest denselben
     // Knoten. Zwei Kopien waeren zwei Wahrheiten.
+    // `title` liest und schreibt am EIGENEN Dokumentknoten — sonst gaebe ein
+    // frisch gebautes `createHTMLDocument("Titel")` den Titel der echten
+    // Seite zurueck, und ein Setzer daran wuerde ihn ueberschreiben.
     accessor(&document_proto, "title",
-        |i, _, _| {
+        |i, this, _| {
+            let root = node_of(i, &this)?;
             let Some(d) = i.doc.as_ref() else { return Ok(Value::str("")) };
-            Ok(match d.find_tag(d.doc, "title") {
+            Ok(match d.find_tag(root, "title") {
                 Some(x) => Value::str(&d.text_of(x)),
                 None => Value::str(""),
             })
         },
-        |i, _, a| {
+        |i, this, a| {
+            let root = node_of(i, &this)?;
             let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-            let found = i.doc.as_ref().and_then(|d| d.find_tag(d.doc, "title"));
+            let found = i.doc.as_ref().and_then(|d| d.find_tag(root, "title"));
+            let head = doc_part(i, &this, DocPart::Head)?;
             let Some(d) = &mut i.doc else { return Ok(Value::Undefined) };
             let t = match found {
                 Some(x) => x,
@@ -1836,8 +2232,7 @@ pub fn install(realm: &mut Realm) {
                 // stiller Fehlschlag saehe aus wie ein kaputter Setzer.
                 None => {
                     let e = d.create(ELEMENT_NODE, "title");
-                    let head = d.head.unwrap_or(d.doc);
-                    d.append(head, e);
+                    d.append(head.unwrap_or(root), e);
                     e
                 }
             };
@@ -2024,6 +2419,179 @@ pub fn install(realm: &mut Realm) {
         let id = node_of(i, a.first().unwrap_or(&Value::Undefined))?;
         Ok(wrap(i, id))
     }, 1, &fp);
+    // ── MutationObserver ─────────────────────────────────────────────────
+    //
+    // **Warum es das braucht.** Alpine, htmx und jede Bibliothek, die
+    // nachgeladenes HTML von selbst zum Leben erweckt, meldet sich beim BAUM
+    // an statt bei einem Ereignis. Ohne `MutationObserver` stirbt Alpine
+    // schon beim Laden — `ReferenceError`, ausserhalb jedes `try`.
+    //
+    // Aufgezeichnet wird im Baum (`Doc::record`), zugestellt am
+    // Microtask-Kontrollpunkt (`promise::run_jobs`). Die Meldungen werden
+    // erst beim Zustellen GEBAUT: ein fertiges Objekt je Aenderung, waehrend
+    // das Skript laeuft, waere Arbeit fuer einen Leser, den es vielleicht
+    // nie gibt.
+    let mo_proto = new_obj(Some(realm.object_proto.clone()));
+    let mo_ctor = native(Some(fp.clone()), |i, _, a| {
+        let cb = a.first().cloned().unwrap_or(Value::Undefined);
+        if !i.is_callable(&cb) {
+            return i.type_err("MutationObserver: argument 1 is not a function");
+        }
+        let o = new_obj(Some(i.realm.mo_proto.clone()));
+        i.observers.push(MutObs { js: o.clone(), cb, regs: Vec::new(), queue: Vec::new() });
+        Ok(Value::Obj(o))
+    }, "MutationObserver", 1, true);
+    mo_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(mo_proto.clone())));
+    mo_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(mo_ctor.clone())));
+    mo_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("MutationObserver")));
+    realm.global.borrow_mut().define("MutationObserver", Prop::builtin(Value::Obj(mo_ctor)));
+    realm.mo_proto = mo_proto.clone();
+
+    meth(&mo_proto, "observe", |i, t, a| {
+        let target = node_of(i, a.first().unwrap_or(&Value::Undefined))?;
+        let opts = a.get(1).cloned().unwrap_or(Value::Undefined);
+        let has_opts = matches!(opts, Value::Obj(_));
+        let mut flag = |i: &mut Interp, n: &str| -> C<bool> {
+            if !has_opts { return Ok(false) }
+            Ok(i.get(&opts, n)?.truthy())
+        };
+        let child_list = flag(i, "childList")?;
+        let subtree = flag(i, "subtree")?;
+        let char_data = flag(i, "characterData")?;
+        let attr_old = flag(i, "attributeOldValue")?;
+        let char_old = flag(i, "characterDataOldValue")?;
+        let explicit_attrs = flag(i, "attributes")?;
+        // `attributeFilter` schaltet `attributes` MIT ein, auch wenn niemand
+        // es hingeschrieben hat — so steht es in der Spezifikation, und
+        // Bibliothekscode verlaesst sich darauf.
+        let filter = if !has_opts { None } else {
+            match i.get(&opts, "attributeFilter")? {
+                Value::Obj(_) => {
+                    let fv = i.get(&opts, "attributeFilter")?;
+                    let n = match i.get(&fv, "length") { Ok(Value::Num(n)) => n as usize, _ => 0 };
+                    let mut v: Vec<Rc<str>> = Vec::with_capacity(n);
+                    for k in 0..n {
+                        let e = i.get(&fv, &alloc::format!("{k}"))?;
+                        let sv = i.to_string(&e)?;
+                        v.push(sv);
+                    }
+                    Some(v)
+                }
+                _ => None,
+            }
+        };
+        let attrs = explicit_attrs || attr_old || filter.is_some();
+        // Ohne eines der drei ist nichts zu beobachten — die Spezifikation
+        // wirft hier, statt still einen Beobachter anzulegen, der nie meldet.
+        if !child_list && !attrs && !char_data {
+            return i.type_err("MutationObserver.observe: childList, attributes or characterData required");
+        }
+        let Value::Obj(this) = &t else { return i.type_err("MutationObserver.observe: not an observer") };
+        let reg = MutReg { target, slot: usize::MAX, subtree, child_list, attrs,
+                           attr_old, char_data, char_old, filter };
+        let mut found = false;
+        for o in i.observers.iter_mut() {
+            if Rc::ptr_eq(&o.js, this) {
+                // Ein zweites `observe` auf DENSELBEN Knoten ersetzt die
+                // Anmeldung, es haengt keine zweite an (DOM §4.3.1).
+                o.regs.retain(|r| r.target != target);
+                o.regs.push(reg);
+                found = true;
+                break;
+            }
+        }
+        if !found { return i.type_err("MutationObserver.observe: not an observer") }
+        sync_observing(i);
+        Ok(Value::Undefined)
+    }, 2, &fp);
+
+    meth(&mo_proto, "disconnect", |i, t, _| {
+        let Value::Obj(this) = &t else { return Ok(Value::Undefined) };
+        for o in i.observers.iter_mut() {
+            if Rc::ptr_eq(&o.js, this) { o.regs.clear(); o.queue.clear(); }
+        }
+        sync_observing(i);
+        Ok(Value::Undefined)
+    }, 0, &fp);
+
+    meth(&mo_proto, "takeRecords", |i, t, _| {
+        let Value::Obj(this) = &t else { return Ok(i.new_array(Vec::new())) };
+        let this = this.clone();
+        // Erst einsammeln, was der Baum seit dem letzten Mal notiert hat —
+        // sonst gaebe `takeRecords()` unmittelbar nach einer Aenderung eine
+        // leere Liste, und genau dafuer ruft man es.
+        collect_mutations(i);
+        let mut recs = Vec::new();
+        for o in i.observers.iter_mut() {
+            if Rc::ptr_eq(&o.js, &this) { recs = core::mem::take(&mut o.queue); }
+        }
+        let mut vals = Vec::with_capacity(recs.len());
+        for m in &recs { vals.push(build_record(i, m)?); }
+        Ok(i.new_array(vals))
+    }, 0, &fp);
+
+    // ── document.implementation ──────────────────────────────────────────
+    //
+    // **`createHTMLDocument` ist der Grund, warum es das hier gibt.** jQuery
+    // baut damit ein WEGWERF-Dokument, um fremdes HTML zu zerlegen, ohne
+    // dass dabei Bilder geladen oder Skripte gefahren werden — und es tut
+    // das schon beim Laden, ausserhalb jedes `try`. Ohne diese Zeile stirbt
+    // jQuery an seiner eigenen Merkmalspruefung, und mit ihm die halbe
+    // Bibliothek der Seite.
+    //
+    // Ein zweiter Dokumentknoten IM SELBEN Knotenfeld, nicht ein zweites
+    // Feld: die Knoten-ids sind Plaetze in genau einem `Vec`, und ein
+    // zweiter Baum daneben waere ein zweites Adressraum-Modell. Losgeloest
+    // ist er trotzdem — er haengt an keinem Elter, also sieht ihn weder das
+    // Layout noch der Wirt.
+    let impl_obj = new_obj(Some(realm.object_proto.clone()));
+    meth(&impl_obj, "createHTMLDocument", |i, _, a| {
+        let title = match a.first() {
+            None | Some(Value::Undefined) => None,
+            Some(v) => Some(i.to_string(v)?),
+        };
+        let Some(d) = &mut i.doc else { return i.type_err("no document") };
+        let doc = d.create(DOCUMENT_NODE, "#document");
+        let html = d.create(ELEMENT_NODE, "html");
+        let head = d.create(ELEMENT_NODE, "head");
+        let body = d.create(ELEMENT_NODE, "body");
+        d.append(doc, html);
+        d.append(html, head);
+        d.append(html, body);
+        // `createHTMLDocument()` OHNE Argument bekommt keinen Titel — das
+        // ist etwas anderes als der leere Titel, den `("")` verlangt.
+        if let Some(t) = title {
+            let el = d.create(ELEMENT_NODE, "title");
+            let tx = d.create(TEXT_NODE, "#text");
+            d.nodes[tx as usize].text = t;
+            d.append(el, tx);
+            d.append(head, el);
+        }
+        Ok(wrap(i, doc))
+    }, 1, &fp);
+    // `hasFeature` sagt laut Spezifikation IMMER true — sie ist Altlast und
+    // ausdruecklich so festgeschrieben, damit niemand mehr danach fragt.
+    meth(&impl_obj, "hasFeature", |_, _, _| Ok(Value::Bool(true)), 0, &fp);
+    // `createDocument` ist der XML-Zwilling: ein Dokumentknoten mit genau
+    // einem Wurzelelement, kein `head`, kein `body`. Der Namensraum wird
+    // GELESEN und fallengelassen — beaks Baum kennt keine Namensraeume, und
+    // ein erfundener waere schlimmer als keiner.
+    meth(&impl_obj, "createDocument", |i, _, a| {
+        let qname = match a.get(1) {
+            None | Some(Value::Undefined) | Some(Value::Null) => None,
+            Some(v) => { let s = i.to_string(v)?; if s.is_empty() { None } else { Some(s) } }
+        };
+        let Some(d) = &mut i.doc else { return i.type_err("no document") };
+        let doc = d.create(DOCUMENT_NODE, "#document");
+        if let Some(q) = qname {
+            let root = d.create(ELEMENT_NODE, &q.to_lowercase());
+            d.append(doc, root);
+        }
+        Ok(wrap(i, doc))
+    }, 3, &fp);
+    impl_obj.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("DOMImplementation")));
+    document_proto.borrow_mut().define("implementation", Prop::builtin(Value::Obj(impl_obj)));
+
     meth(&document_proto, "createDocumentFragment", |i, _, _| {
         let Some(d) = &mut i.doc else { return i.type_err("no document") };
         let id = d.create(ELEMENT_NODE, "#fragment");
@@ -2052,6 +2620,16 @@ pub fn install(realm: &mut Realm) {
                        |i, _, _| i.type_err("Illegal constructor"), name, 0, true);
         c.borrow_mut().define("prototype", Prop::frozen(Value::Obj(proto.clone())));
         proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(c.clone())));
+        // **`Symbol.toStringTag` traegt den Schnittstellennamen** (WebIDL
+        // 3.7.3). Ohne ihn meldete `Object.prototype.toString.call(el)`
+        // `[object Object]` — und genau daran erkennt Bibliothekscode ein
+        // GEWOEHNLICHES Objekt: jQuerys `isPlainObject` hielt jeden Knoten
+        // fuer eine Datenstruktur und stieg beim tiefen Kopieren ueber
+        // `parentNode` in einen Ring, aus dem es keinen Ausgang gibt.
+        //
+        // Hier und nicht an 60 Stellen: `iface` ist der EINE Weg, auf dem
+        // eine DOM-Schnittstelle entsteht.
+        proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str(name)));
         realm.global.borrow_mut().define(name, Prop::builtin(Value::Obj(c.clone())));
         c
     }
@@ -2059,6 +2637,12 @@ pub fn install(realm: &mut Realm) {
     // Das Fenster IST ein EventTarget — dadurch hat `window` dieselben drei
     // Methoden wie jeder Knoten, ohne sie ein zweites Mal zu definieren.
     realm.global.borrow_mut().proto = Some(event_target_proto.clone());
+    // Und das Fenster heisst `Window`, nicht `EventTarget`. Ohne diese Zeile
+    // erbt es die Marke seines Prototyps, und `toString.call(window)` sagt
+    // etwas Falsches statt gar nichts. KEIN `iface`: das legte ein
+    // `constructor` auf das globale Objekt, und dort steht schon alles, was
+    // die Seite selbst definiert.
+    realm.global.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("Window")));
     let node_ctor = iface(realm, "Node", &node_proto);
     // **Die Knotentyp-Konstanten.** Sie stehen laut Spezifikation auf dem
     // Konstruktor UND auf dem Prototyp. Ohne sie ist `Node.ELEMENT_NODE`
@@ -2096,7 +2680,7 @@ pub fn install(realm: &mut Realm) {
         |i, t, a| {
             let id = node_of(i, &t)?;
             let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-            if let Some(d) = &mut i.doc { d.touch(); d.nodes[id as usize].text = v; }
+            if let Some(d) = &mut i.doc { d.set_text(id, v); }
             Ok(Value::Undefined)
         }, &fp);
     getter(&char_data_proto, "length",
@@ -2105,10 +2689,9 @@ pub fn install(realm: &mut Realm) {
         let id = node_of(i, &t)?;
         let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         if let Some(d) = &mut i.doc {
-            d.touch();
             let mut s = d.nodes[id as usize].text.to_string();
             s.push_str(&v);
-            d.nodes[id as usize].text = Rc::from(s.as_str());
+            d.set_text(id, Rc::from(s.as_str()));
         }
         Ok(Value::Undefined)
     }, 1, &fp);
@@ -2122,7 +2705,7 @@ pub fn install(realm: &mut Realm) {
     /// Die Klassen eines Knotens schreiben — eine Stelle, ein Format.
     fn set_classes(i: &mut Interp, id: u32, cs: &[Rc<str>]) {
         let joined = cs.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
-        if let Some(d) = &mut i.doc { d.touch(); d.nodes[id as usize].set_attr("class", &joined); }
+        if let Some(d) = &mut i.doc { d.set_attr_at(id, "class", &joined); }
     }
     meth(&token_list_proto, "contains", |i, t, a| {
         let id = node_of(i, &t)?;
@@ -2194,7 +2777,7 @@ pub fn install(realm: &mut Realm) {
         |i, t, a| {
             let id = node_of(i, &t)?;
             let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-            if let Some(d) = &mut i.doc { d.touch(); d.nodes[id as usize].set_attr("class", &v); }
+            if let Some(d) = &mut i.doc { d.set_attr_at(id, "class", &v); }
             Ok(Value::Undefined)
         }, &fp);
     meth(&token_list_proto, "toString", |i, t, _| {
@@ -2258,7 +2841,7 @@ pub fn install(realm: &mut Realm) {
         |i, t, a| {
             let id = node_of(i, &t)?;
             let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-            if let Some(d) = &mut i.doc { d.touch(); d.nodes[id as usize].set_attr("style", &v); }
+            if let Some(d) = &mut i.doc { d.set_attr_at(id, "style", &v); }
             Ok(Value::Undefined)
         }, &fp);
     // Die benannten Eigenschaften. Die Liste ist bewusst endlich: ohne Proxy
@@ -2430,6 +3013,7 @@ pub fn install(realm: &mut Realm) {
     }, "Event", 1, true);
     event_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(event_proto.clone())));
     event_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(event_ctor.clone())));
+    event_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("Event")));
     realm.global.borrow_mut().define("Event", Prop::builtin(Value::Obj(event_ctor)));
     for (k, v) in [("NONE", 0.0), ("CAPTURING_PHASE", 1.0), ("AT_TARGET", 2.0), ("BUBBLING_PHASE", 3.0)] {
         event_proto.borrow_mut().define(k, Prop::frozen(Value::Num(v)));
@@ -2454,6 +3038,7 @@ pub fn install(realm: &mut Realm) {
     }, "CustomEvent", 1, true);
     custom_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(custom_proto.clone())));
     custom_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(custom_ctor.clone())));
+    custom_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("CustomEvent")));
     realm.global.borrow_mut().define("CustomEvent", Prop::builtin(Value::Obj(custom_ctor)));
     // `PromiseRejectionEvent` — die Art, unter der eine unbehandelte
     // Ablehnung ans Fenster kommt.
@@ -2487,6 +3072,7 @@ pub fn install(realm: &mut Realm) {
     }, "PromiseRejectionEvent", 2, true);
     prej_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(prej_proto.clone())));
     prej_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(prej_ctor.clone())));
+    prej_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("PromiseRejectionEvent")));
     realm.global.borrow_mut().define("PromiseRejectionEvent", Prop::builtin(Value::Obj(prej_ctor)));
     realm.prej_proto = prej_proto;
     realm.event_proto = event_proto;
@@ -2790,7 +3376,7 @@ pub fn install(realm: &mut Realm) {
         }, |i, t, a| {
             let id = node_of(i, &t)?;
             let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-            if let Some(d) = &mut i.doc { d.touch(); d.nodes[id as usize].set_attr("value", &v); }
+            if let Some(d) = &mut i.doc { d.set_attr_at(id, "value", &v); }
             Ok(Value::Undefined)
         }, &fp);
         accessor(p, "text", |i, t, _| {
@@ -3472,6 +4058,7 @@ fn install_text_codec(realm: &mut Realm) {
     }, "TextEncoder", 0, true);
     enc_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(enc_proto.clone())));
     enc_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(enc_ctor.clone())));
+    enc_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("TextEncoder")));
     enc_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::frozen(Value::str("TextEncoder")));
     realm.global.borrow_mut().define("TextEncoder", Prop::builtin(Value::Obj(enc_ctor)));
     realm.text_encoder_proto = enc_proto;
@@ -3509,6 +4096,7 @@ fn install_text_codec(realm: &mut Realm) {
     }, "TextDecoder", 0, true);
     dec_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(dec_proto.clone())));
     dec_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(dec_ctor.clone())));
+    dec_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("TextDecoder")));
     dec_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::frozen(Value::str("TextDecoder")));
     realm.global.borrow_mut().define("TextDecoder", Prop::builtin(Value::Obj(dec_ctor)));
     realm.text_decoder_proto = dec_proto;
@@ -3775,8 +4363,8 @@ fn select_index(i: &mut Interp, sel: u32, n: i64) {
     let Some(d) = &mut i.doc else { return };
     d.touch();
     for (k, o) in opts.iter().enumerate() {
-        if k as i64 == n { d.nodes[*o as usize].set_attr("selected", ""); }
-        else { d.nodes[*o as usize].attrs.retain(|(a, _)| &**a != "selected"); }
+        if k as i64 == n { d.set_attr_at(*o, "selected", ""); }
+        else { d.remove_attr_at(*o, "selected"); }
     }
 }
 
