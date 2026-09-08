@@ -149,20 +149,11 @@ impl Memory {
         Some(Memory { base, size, slot })
     }
 
-    /// Make `pages` more wasm pages readable. The base does not move — that is
-    /// what the reservation buys, and the generated code depends on it.
-    pub fn grow(&mut self, pages: u64) -> bool {
-        let add = pages * 65536;
-        if self.size + add > MAX_MEMORY_BYTES {
-            return false;
-        }
-        let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE;
-        if !map_range(self.base + self.size, add, flags) {
-            return false;
-        }
-        self.size += add;
-        true
-    }
+    // **Hier stand ein zweites `grow`.** Es hielt `self.size` richtig und
+    // wurde von NIEMANDEM gerufen; gewachsen ist die Instanz ueber
+    // `forge_rt::grow`, das nur den vmctx schreibt. Zwei Wege fuer dieselbe
+    // Groesse, und gepflegt hat sie der tote — deshalb gibt es jetzt nur noch
+    // einen, und `Drop for Instance` holt die Groesse dort ab, wo sie steht.
 
     /// Does `addr` fall inside this instance's reservation? What a page-fault
     /// handler asks to tell a module's mistake from a kernel's.
@@ -172,8 +163,12 @@ impl Memory {
 }
 
 impl Drop for Memory {
-    /// **Die Seiten gehen zurueck, samt allem, was `grow` dazugelegt hat.**
-    /// `self.size` ist deshalb der Stand von JETZT und nicht der vom Anfang.
+    /// **Die Seiten gehen zurueck — so viele, wie `self.size` sagt.**
+    ///
+    /// Und `self.size` ist NICHT von selbst der Stand von jetzt: `memory.grow`
+    /// laeuft im generierten Code und schreibt die neue Groesse in den vmctx,
+    /// nicht hierher. Wer sie aktuell haelt, ist `Drop for Instance` — dort
+    /// steht auch, was es gekostet hat, dass es die Zeile nicht gab.
     fn drop(&mut self) {
         unmap_range(self.base, self.size);
         give_slot(self.slot);
@@ -396,11 +391,22 @@ extern "C" fn grow(ctx: *mut u64, delta: u32) -> u32 {
             return u32::MAX;
         };
         if new_pages > max_pages || new_pages * 65536 > MAX_MEMORY_BYTES {
+            crate::kprintln!(
+                "[npk] forge: memory.grow abgelehnt — Deckel erreicht ({} von hoechstens {} Seiten)",
+                new_pages, max_pages);
             return u32::MAX;
         }
         if delta > 0 {
             let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE;
             if !map_range(base + size, delta as u64 * 65536, flags) {
+                // **Ein „nein" ohne Grund kostet eine Stunde.** Das Modul
+                // meldet nur, dass `memory.grow` abgelehnt hat; ob die
+                // MASCHINE leer ist oder die Abbildung an dieser Adresse
+                // scheiterte, sieht man nur von hier aus.
+                let (frames, mb) = crate::memory::stats();
+                crate::kprintln!(
+                    "[npk] forge: memory.grow abgelehnt — {} Seiten gefragt, {} MB frei ({} Rahmen)",
+                    delta, mb, frames);
                 return u32::MAX;
             }
         }
@@ -434,7 +440,7 @@ pub struct Instance {
     _table: Vec<u64>,
     _table_sigs: Vec<u32>,
     _host_fns: Vec<u64>,
-    _memory: Option<Memory>,
+    memory: Option<Memory>,
     code: Code,
     entry: usize,
     pf_entry: usize,
@@ -550,7 +556,7 @@ impl Instance {
             _table: table,
             _table_sigs: table_sigs,
             _host_fns: host_fns,
-            _memory: memory,
+            memory,
             code,
             entry: m.entry_offset,
             pf_entry: m.pf_entry,
@@ -593,5 +599,45 @@ impl Instance {
         };
         disarm_faults();
         (r, self.trap_code())
+    }
+}
+
+impl Drop for Instance {
+    /// **Was `memory.grow` dazugelegt hat, gehoert mit zurueck.**
+    ///
+    /// Der Wachstumspfad ist der GENERIERTE Code: er ruft `forge_rt::grow`,
+    /// und die schreibt die neue Groesse in den vmctx — nicht in das
+    /// `Memory`, das die Seiten spaeter wieder freigibt. `Memory::drop`
+    /// loeste deshalb genau die Abbildung, die beim START stand, und alles,
+    /// was die Halde des Moduls waehrend des Laufs dazunahm, blieb bis zum
+    /// Neustart liegen.
+    ///
+    /// Bei beak sind das je Sitzung schnell hundert Megabyte. Nach ein paar
+    /// besuchten Seiten fand das naechste `memory.grow` keine Rahmen mehr —
+    /// und beak starb an seiner ERSTEN Erweiterung, mit einer Halde, die noch
+    /// auf ihrer Startgroesse von 318 Seiten stand. Genau diese Zahl im Log
+    /// war der Hinweis: sie ist die Startgroesse aus dem Binaerbild, also war
+    /// nicht diese Sitzung zu gross, sondern die vorigen waren nicht weg.
+    ///
+    /// **Zwei Wege fuer dieselbe Groesse, und gepflegt hat sie der TOTE.**
+    /// `Memory::grow` hielt `self.size` richtig und wurde von niemandem
+    /// gerufen; er ist deshalb weg. Jetzt gibt es einen Weg zu wachsen und
+    /// eine Stelle, die die Groesse zurueckholt.
+    fn drop(&mut self) {
+        if let Some(m) = &mut self.memory {
+            // Nie kleiner als beim Start und nie ueber die Reservierung
+            // hinaus: `unmap_range` laeuft Seite fuer Seite, und ein zu
+            // grosser Wert griffe in den Platz der naechsten Instanz.
+            let now = self.ctx[vmctx::MEM_SIZE as usize / 8];
+            let start = m.size;
+            m.size = now.clamp(start, MAX_MEMORY_BYTES);
+            // Gewachsen ist der seltene Fall — und der, der frueher liegen
+            // blieb. Er gehoert EINMAL ins Log, mit Zahlen: ohne das ist
+            // „die Rahmen kommen zurueck" eine Behauptung.
+            if m.size > start {
+                crate::kprintln!("[npk] forge: Instanz gibt {} MB zurueck ({} MB davon gewachsen)",
+                                 m.size / (1024 * 1024), (m.size - start) / (1024 * 1024));
+            }
+        }
     }
 }
