@@ -52,6 +52,12 @@
 <p id="timer">setTimeout ist nicht gelaufen.</p>
 <p id="micro">Microtask ist nicht gelaufen.</p>
 
+<h2>Kasten-Beobachter</h2>
+<p id="ro">ResizeObserver hat nicht gemeldet.</p>
+<p id="io">IntersectionObserver hat nicht gemeldet.</p>
+<div id="weitunten" style="margin-top:2400px;height:80px;background:#eef">
+ weit unten &mdash; kommt erst beim Rollen in den Blick</div>
+
 <script>
 var langRows = [], domRows = [];
 
@@ -232,7 +238,7 @@ row(langRows, "new String ist ein Objekt", function () {
 /* ---------- Dokument ---------- */
 row(domRows, "getElementById", function () { return document.getElementById("verdict") !== null });
 row(domRows, "querySelector", function () { return document.querySelector("#lang") !== null });
-row(domRows, "querySelectorAll", function () { return document.querySelectorAll("h2").length === 4 });
+row(domRows, "querySelectorAll", function () { return document.querySelectorAll("h2").length === 5 });
 row(domRows, "Klassenselektor", function () { return document.querySelectorAll("p.lead").length === 1 });
 row(domRows, "textContent lesen", function () { return document.querySelector(".lead").textContent.indexOf("beak selbst") > 0 });
 row(domRows, "getAttribute", function () { return document.getElementById("b2").getAttribute("id") === "b2" });
@@ -463,6 +469,30 @@ row(domRows, "MutationObserver", function () {
       && recs[0].type === "childList" && recs[0].addedNodes.length === 1
       && recs[1].type === "attributes" && recs[1].attributeName === "data-x";
 });
+row(domRows, "Kasten-Beobachter: die Form", function () {
+  /* SYNCHRON pruefbar ist nur die Form — gemessen wird erst, wenn der Wirt
+     die Kaesten eingereicht hat, und das ist beim ersten Skriptlauf noch
+     nicht passiert. Was gemessen ankommt, sagen die zwei Zeilen unter
+     „Kasten-Beobachter" auf dem Schirm. */
+  var ro = new ResizeObserver(function () {});
+  var io = new IntersectionObserver(function () {}, { threshold: [0.25, 0.75],
+                                                      rootMargin: "10px 20px" });
+  var e = document.getElementById("b3");
+  ro.observe(e); ro.unobserve(e); ro.disconnect();
+  io.observe(e); io.unobserve(e);
+  var schwellenFalsch = false;
+  try { new IntersectionObserver(function () {}, { threshold: 2 }); }
+  catch (x) { schwellenFalsch = true; }
+  return typeof ResizeObserver === "function"
+      && typeof IntersectionObserver === "function"
+      && Object.prototype.toString.call(ro) === "[object ResizeObserver]"
+      && Object.prototype.toString.call(io) === "[object IntersectionObserver]"
+      && io.thresholds.length === 2 && io.thresholds[0] === 0.25
+      && io.rootMargin === "10px 20px" && io.root === null
+      && io.takeRecords().length === 0
+      && typeof ro.observe === "function" && typeof io.disconnect === "function"
+      && schwellenFalsch;
+});
 row(domRows, "Event + dispatchEvent", function () {
   var e = document.getElementById("b3"), traf = 0, ziel = null;
   e.addEventListener("probe", function (ev) { traf++; ziel = ev.target; });
@@ -586,6 +616,50 @@ document.body.addEventListener("click", function (e) {
 setTimeout(function () {
   say("timer", "setTimeout ist gelaufen.");
 }, 0);
+
+/* Die zwei Zeilen, die nur am GERAET etwas beweisen. Beide haengen an der
+   Geometrie, und die reicht der Wirt erst nach dem ersten Malen ein — im
+   Skriptlauf steht hier noch nichts. Was hier stehenbleibt („hat nicht
+   gemeldet"), heisst: `set_geometry` erreicht die Beobachter nicht. */
+if (typeof ResizeObserver === "function") {
+  new ResizeObserver(function (es) {
+    var e = es[0];
+    say("ro", e.contentRect.width > 0 && e.contentRect.height > 0
+      ? "ResizeObserver: " + Math.round(e.contentRect.width) + "x"
+        + Math.round(e.contentRect.height)
+        + " (Rahmenkasten " + Math.round(e.borderBoxSize[0].inlineSize) + " breit)"
+      : "NEIN: ResizeObserver meldete 0x0");
+  }).observe(document.getElementById("b1"));
+}
+if (typeof IntersectionObserver === "function") {
+  /* Zwei Ziele mit EINEM Beobachter: die Urteilszeile steht ganz oben und
+     schneidet, der Kasten steht ueber 2400 px tiefer und schneidet nicht.
+     Meldet er fuer beide dasselbe, rechnet er nicht, sondern raet.
+
+     Und ZWEI Zeilen ins Log mit den Zahlen dazu. „Schneidet nicht" hat
+     mehrere Ursachen, die alle gleich aussehen: das Ziel liegt wirklich
+     draussen, der Ausschnitt ist 0 hoch, oder es gibt gar keinen Kasten.
+     Das erste Ziel dieser Zeile war der Knopf `#b1`, und der steht auf
+     dieser Seite bei y = 2802 — die Zeile war rot, und ohne die zwei Zahlen
+     haette ich das fuer einen Rechenfehler gehalten. */
+  var gesehen = {};
+  var io2 = new IntersectionObserver(function (es) {
+    for (var k = 0; k < es.length; k++) {
+      gesehen[es[k].target.id] = es[k].isIntersecting;
+      console.log("[selftest] io " + es[k].target.id + ": oben "
+        + Math.round(es[k].boundingClientRect.top) + ", Ausschnitt bis "
+        + Math.round(es[k].rootBounds.bottom) + ", Verhaeltnis "
+        + es[k].intersectionRatio);
+    }
+    if (gesehen.verdict !== undefined && gesehen.weitunten !== undefined) {
+      say("io", gesehen.verdict === true && gesehen.weitunten === false
+        ? "IntersectionObserver: die Urteilszeile ist im Blick, der Kasten weit unten nicht"
+        : "NEIN: oben=" + gesehen.verdict + ", weit unten=" + gesehen.weitunten);
+    }
+  });
+  io2.observe(document.getElementById("verdict"));
+  io2.observe(document.getElementById("weitunten"));
+}
 
 /* Der Name allein sagt nichts — die Frage ist, ob die Schlange LAEUFT und in
    welcher Reihenfolge. Also schreibt jede Sprosse ihr Zeichen an, und am Ende

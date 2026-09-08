@@ -896,6 +896,333 @@ fn doc_part(i: &mut Interp, this: &Value, part: DocPart) -> C<Option<u32>> {
         .find(|c| &*d.nodes[*c as usize].tag == want))
 }
 
+// ── ResizeObserver + IntersectionObserver ───────────────────────────────
+//
+// **Beide haengen an derselben Sache: der Geometrie nach dem Layout.** Der
+// Wirt reicht sie mit `Interp::set_geometry` ein, und genau dort werden die
+// Beobachter ausgewertet — nicht in einem Zeitgeber, der raet, wann sich
+// etwas bewegt haben koennte.
+//
+// Im Aufrufzensus stehen sie mit 429 (`IntersectionObserver`) und 353
+// (`ResizeObserver`) Aufrufen als P4 und P5. Was sie tragen, ist der halbe
+// moderne Web-Werkzeugkasten: verzoegert geladene Bilder, unendliche Listen,
+// klebende Kopfzeilen, Diagramme, die sich an ihren Kasten anpassen.
+//
+// **Gemessen wird beim Beobachten, gemeldet spaeter.** Ein Eintrag haelt die
+// Kaesten, wie sie ZUM ZEITPUNKT der Beobachtung standen; ihn beim Zustellen
+// neu zu rechnen hiesse, dem Rueckruf Zahlen aus einer anderen Runde zu
+// geben — und zwischen Beobachtung und Zustellung liegt ein Rueckruf eines
+// anderen Beobachters, der den Baum aendern darf.
+
+/// Welchen Kasten ein `ResizeObserver` meldet.
+#[derive(Clone, Copy, PartialEq)]
+pub enum BoxKind { Content, Border }
+
+/// Eine Anmeldung eines `ResizeObserver`.
+pub struct ResizeReg {
+    /// Der KNOTEN, nicht sein Layout-`seq`: das Layout vergibt `seq` bei
+    /// jedem Lauf neu, und eine Anmeldung ueberlebt jedes Layout.
+    pub target: u32,
+    pub kind: BoxKind,
+    /// Zuletzt GEMELDETE Groesse. `None` heisst „noch nie" — und der erste
+    /// Lauf meldet immer, so wie die Spezifikation es verlangt: wer
+    /// `observe` ruft, bekommt die aktuelle Groesse, nicht erst die naechste
+    /// Aenderung.
+    pub last: Option<(f64, f64)>,
+}
+
+/// Was ein `ResizeObserverEntry` sagt — beim Beobachten gerechnet.
+pub struct ResizeEntry {
+    pub target: u32,
+    /// Inhaltskasten: Breite, Hoehe.
+    pub content: (f64, f64),
+    /// Rahmenkasten: Breite, Hoehe.
+    pub border: (f64, f64),
+}
+
+pub struct ResizeObs {
+    pub js: Gc,
+    pub cb: Value,
+    pub regs: Vec<ResizeReg>,
+    pub queue: Vec<ResizeEntry>,
+}
+
+/// Eine Anmeldung eines `IntersectionObserver`.
+pub struct InterReg {
+    pub target: u32,
+    /// Der Schwellenindex von letztem Mal: wieviele Schwellen das Verhaeltnis
+    /// erreicht hat. Gemeldet wird, wenn sich DIESE Zahl aendert — nicht
+    /// jedes Pixel, sonst waere jeder Bildlauf ein Rueckrufgewitter.
+    /// `-1` heisst „noch nie gemeldet".
+    pub band: i32,
+}
+
+/// Was ein `IntersectionObserverEntry` sagt.
+pub struct InterEntry {
+    pub target: u32,
+    pub ratio: f64,
+    pub hit: bool,
+    pub root: Option<(f64, f64, f64, f64)>,
+    pub bounds: (f64, f64, f64, f64),
+    pub inter: (f64, f64, f64, f64),
+    pub time: f64,
+}
+
+pub struct InterObs {
+    pub js: Gc,
+    pub cb: Value,
+    /// `None` heisst: das Sichtfeld. Ein anderes Element als Wurzel ist
+    /// erlaubt und wird hier genauso behandelt — sein Kasten ist dann der
+    /// Ausschnitt.
+    pub root: Option<u32>,
+    /// Der ungelesene `rootMargin`-Text, damit der Getter ihn zurueckgeben
+    /// kann, ohne aus vier Zahlen wieder Text zu raten.
+    pub margin_src: Rc<str>,
+    /// `rootMargin` in Pixeln, oben/rechts/unten/links. Prozente werden beim
+    /// Anmelden aufgeloest; die Spezifikation erlaubt beides.
+    pub margin: (f64, f64, f64, f64),
+    pub thresholds: Vec<f64>,
+    pub regs: Vec<InterReg>,
+    pub queue: Vec<InterEntry>,
+}
+
+/// Der Layout-`seq` eines Knotens — dieselbe Auskunft wie `layout_seq`, nur
+/// von der id aus. Die Beobachter kennen ihre Ziele als Knoten.
+fn node_seq(i: &Interp, id: u32) -> Option<u32> {
+    let n = i.doc.as_ref()?.nodes.get(id as usize)?;
+    Some(if n.seq != 0 { n.seq } else { n.src_seq }).filter(|s| *s != 0)
+}
+
+/// Der Rahmenkasten eines Knotens in FENSTERkoordinaten — die Vereinigung
+/// seiner Fragmente, genau wie `getBoundingClientRect`, dazu die Rahmen- und
+/// Polstersummen des ersten Fragments.
+///
+/// Dieselbe Rechnung wie `elem_rect`, nur ohne den Umweg ueber einen
+/// JS-Wert. Zwei Rechenwege waeren zwei Wahrheiten ueber denselben Kasten
+/// ([[feedback_intrinsic_shared_path]]).
+fn node_box(i: &Interp, id: u32) -> Option<((f64, f64, f64, f64), (f64, f64))> {
+    let g = i.geometry.as_ref()?;
+    let seq = node_seq(i, id)?;
+    let mut acc: Option<(i32, i32, i32, i32)> = None;
+    let mut edges = (0.0, 0.0);
+    for b in g.boxes.iter().filter(|b| b.seq == seq) {
+        if acc.is_none() {
+            edges = ((b.bx + b.px) as f64, (b.by + b.py) as f64);
+        }
+        acc = Some(match acc {
+            None => (b.x, b.y, b.x + b.w, b.y + b.h),
+            Some((x0, y0, x1, y1)) =>
+                (x0.min(b.x), y0.min(b.y), x1.max(b.x + b.w), y1.max(b.y + b.h)),
+        });
+    }
+    let (x0, y0, x1, y1) = acc?;
+    Some((((x0 - g.scroll.0) as f64, (y0 - g.scroll.1) as f64,
+           (x1 - x0) as f64, (y1 - y0) as f64), edges))
+}
+
+/// `rootMargin`: ein bis vier CSS-Laengen, oben/rechts/unten/links wie bei
+/// `margin`. Prozente stehen zur AUSSCHNITTgroesse — waagerecht zur Breite,
+/// senkrecht zur Hoehe, so wie bei jedem anderen Rand auch.
+fn parse_root_margin(s: &str, vw: f64, vh: f64) -> (f64, f64, f64, f64) {
+    let one = |t: &str, basis: f64| -> f64 {
+        let t = t.trim();
+        if let Some(n) = t.strip_suffix('%') {
+            n.trim().parse::<f64>().map(|v| v / 100.0 * basis).unwrap_or(0.0)
+        } else if let Some(n) = t.strip_suffix("px") {
+            n.trim().parse::<f64>().unwrap_or(0.0)
+        } else {
+            // Eine blanke Zahl ist KEINE Laenge (nur `0` waere eine), und eine
+            // Einheit, die wir nicht kennen, auch nicht. Beides wird 0 statt
+            // geraten.
+            t.parse::<f64>().ok().filter(|v| *v == 0.0).unwrap_or(0.0)
+        }
+    };
+    let parts: Vec<&str> = s.split_whitespace().collect();
+    match parts.len() {
+        0 => (0.0, 0.0, 0.0, 0.0),
+        1 => { let t = one(parts[0], vh); let r = one(parts[0], vw); (t, r, t, r) }
+        2 => (one(parts[0], vh), one(parts[1], vw), one(parts[0], vh), one(parts[1], vw)),
+        3 => (one(parts[0], vh), one(parts[1], vw), one(parts[2], vh), one(parts[1], vw)),
+        _ => (one(parts[0], vh), one(parts[1], vw), one(parts[2], vh), one(parts[3], vw)),
+    }
+}
+
+/// Beide Beobachter auswerten. Gerufen aus `Interp::set_geometry` — dem
+/// einen Moment, in dem der Wirt sagt „so steht die Seite jetzt".
+pub fn eval_box_observers(i: &mut Interp) {
+    // ── ResizeObserver ───────────────────────────────────────────────────
+    for n in 0..i.resize_obs.len() {
+        for r in 0..i.resize_obs[n].regs.len() {
+            let (id, kind, last) = {
+                let reg = &i.resize_obs[n].regs[r];
+                (reg.target, reg.kind, reg.last)
+            };
+            let Some(((_, _, w, h), (ex, ey))) = node_box(i, id) else { continue };
+            let content = ((w - ex).max(0.0), (h - ey).max(0.0));
+            let border = (w, h);
+            let seen = match kind { BoxKind::Border => border, BoxKind::Content => content };
+            // Ein Beobachter meldet AENDERUNGEN — und beim ersten Mal die
+            // Lage, wie sie ist.
+            if last != Some(seen) {
+                i.resize_obs[n].regs[r].last = Some(seen);
+                i.resize_obs[n].queue.retain(|e| e.target != id);
+                i.resize_obs[n].queue.push(ResizeEntry { target: id, content, border });
+            }
+        }
+    }
+
+    // ── IntersectionObserver ─────────────────────────────────────────────
+    let (vw, vh) = i.viewport;
+    let now = { i.fake_now += 1.0; i.fake_now };
+    for n in 0..i.inter_obs.len() {
+        // Der Ausschnitt: das Sichtfeld oder der Kasten der Wurzel, in
+        // beiden Faellen um `rootMargin` gedehnt.
+        let root = match i.inter_obs[n].root {
+            None => (0.0, 0.0, vw, vh),
+            Some(id) => match node_box(i, id) { Some((r, _)) => r, None => continue },
+        };
+        let (mt, mr, mb, ml) = i.inter_obs[n].margin;
+        let rx0 = root.0 - ml;
+        let ry0 = root.1 - mt;
+        let rx1 = root.0 + root.2 + mr;
+        let ry1 = root.1 + root.3 + mb;
+        let rroot = (rx0, ry0, rx1 - rx0, ry1 - ry0);
+        for r in 0..i.inter_obs[n].regs.len() {
+            let (id, band) = {
+                let reg = &i.inter_obs[n].regs[r];
+                (reg.target, reg.band)
+            };
+            let Some(((tx, ty, tw, th), _)) = node_box(i, id) else { continue };
+            let ix0 = tx.max(rx0);
+            let iy0 = ty.max(ry0);
+            let ix1 = (tx + tw).min(rx1);
+            let iy1 = (ty + th).min(ry1);
+            let iw = (ix1 - ix0).max(0.0);
+            let ih = (iy1 - iy0).max(0.0);
+            let area = tw * th;
+            let overlap = iw > 0.0 && ih > 0.0;
+            // Ein Kasten ohne Flaeche (eine leere Zeile, ein umbrochener
+            // Inline-Kasten ohne Breite) hat kein Verhaeltnis — er schneidet,
+            // wenn er im Ausschnitt LIEGT. Sonst waere 0/0 die Antwort.
+            let inside = tx >= rx0 && tx <= rx1 && ty >= ry0 && ty <= ry1;
+            let (hit, ratio) = if area > 0.0 {
+                (overlap, if overlap { iw * ih / area } else { 0.0 })
+            } else {
+                (inside, if inside { 1.0 } else { 0.0 })
+            };
+            // Wieviele Schwellen erreicht sind. Die Schwelle 0 gilt erst als
+            // erreicht, wenn ueberhaupt geschnitten wird — sonst waere jedes
+            // Element von Anfang an „ueber 0".
+            let hits = i.inter_obs[n].thresholds.iter()
+                .filter(|t| if **t <= 0.0 { hit } else { ratio >= **t - 1e-9 })
+                .count() as i32;
+            if hits != band {
+                i.inter_obs[n].regs[r].band = hits;
+                i.inter_obs[n].queue.retain(|e| e.target != id);
+                i.inter_obs[n].queue.push(InterEntry {
+                    target: id, ratio, hit,
+                    root: Some(rroot),
+                    bounds: (tx, ty, tw, th),
+                    inter: if hit { (ix0, iy0, iw, ih) } else { (0.0, 0.0, 0.0, 0.0) },
+                    time: now,
+                });
+            }
+        }
+    }
+}
+
+/// Aus einem `ResizeEntry` das JS-Objekt bauen.
+fn build_resize_entry(i: &mut Interp, e: &ResizeEntry) -> Value {
+    let o = new_obj(Some(i.realm.object_proto.clone()));
+    let target = wrap(i, e.target);
+    // `contentRect` steht im Polsterkasten: x/y sind die Polsterung links
+    // und oben. Wir fuehren nur die SUMMEN, also die halbe — richtig fuer
+    // gleichmaessige Polsterung und nie schlechter als die 0, die vorher
+    // dagestanden haette.
+    let rect = rect_obj(i, Some((0.0, 0.0, e.content.0, e.content.1)));
+    let size = |i: &mut Interp, (w, h): (f64, f64)| -> Value {
+        let s = new_obj(Some(i.realm.object_proto.clone()));
+        s.borrow_mut().define("inlineSize", Prop::data(Value::Num(w)));
+        s.borrow_mut().define("blockSize", Prop::data(Value::Num(h)));
+        // Eine Liste, weil ein Element in einem fragmentierten Kasten
+        // mehrere Groessen haette. Wir haben immer genau eine — die Liste
+        // ist trotzdem die richtige Form, denn Seitencode schreibt
+        // `entry.contentBoxSize[0].inlineSize`.
+        i.new_array(alloc::vec![Value::Obj(s)])
+    };
+    let content_size = size(i, e.content);
+    let border_size = size(i, e.border);
+    {
+        let mut b = o.borrow_mut();
+        b.define("target", Prop::data(target));
+        b.define("contentRect", Prop::data(Value::Obj(rect)));
+        b.define("contentBoxSize", Prop::data(content_size));
+        b.define("borderBoxSize", Prop::data(border_size));
+        // Wir kennen kein Geraetepixel-Raster, also ist die Liste leer statt
+        // erfunden.
+        b.define(SYM_TO_STRING_TAG, Prop::tag(Value::str("ResizeObserverEntry")));
+    }
+    let empty = i.new_array(Vec::new());
+    o.borrow_mut().define("devicePixelContentBoxSize", Prop::data(empty));
+    Value::Obj(o)
+}
+
+/// Aus einem `InterEntry` das JS-Objekt bauen.
+fn build_inter_entry(i: &mut Interp, e: &InterEntry) -> Value {
+    let o = new_obj(Some(i.realm.object_proto.clone()));
+    let target = wrap(i, e.target);
+    let bounds = rect_obj(i, Some(e.bounds));
+    let inter = rect_obj(i, Some(e.inter));
+    let root = match e.root { Some(r) => Value::Obj(rect_obj(i, Some(r))), None => Value::Null };
+    let mut b = o.borrow_mut();
+    b.define("target", Prop::data(target));
+    b.define("time", Prop::data(Value::Num(e.time)));
+    b.define("boundingClientRect", Prop::data(Value::Obj(bounds)));
+    b.define("intersectionRect", Prop::data(Value::Obj(inter)));
+    b.define("rootBounds", Prop::data(root));
+    b.define("intersectionRatio", Prop::data(Value::Num(e.ratio)));
+    b.define("isIntersecting", Prop::data(Value::Bool(e.hit)));
+    b.define(SYM_TO_STRING_TAG, Prop::tag(Value::str("IntersectionObserverEntry")));
+    drop(b);
+    Value::Obj(o)
+}
+
+/// Der Kontrollpunkt: wer etwas in der Schlange hat, wird gerufen. Neben
+/// `deliver_mutations` und aus demselben Grund dort — nach jedem
+/// Einstiegspunkt, nicht in einem Zeitgeber.
+///
+/// Liefert true, wenn ein Rueckruf gelaufen ist.
+pub fn deliver_box_observers(i: &mut Interp) -> bool {
+    let mut ran = false;
+    for n in 0..i.resize_obs.len() {
+        if i.resize_obs[n].queue.is_empty() { continue }
+        let q = core::mem::take(&mut i.resize_obs[n].queue);
+        let cb = i.resize_obs[n].cb.clone();
+        let this = Value::Obj(i.resize_obs[n].js.clone());
+        let vals: Vec<Value> = q.iter().map(|e| build_resize_entry(i, e)).collect();
+        let arr = i.new_array(vals);
+        ran = true;
+        if let Err(e) = i.call(&cb, this.clone(), &[arr, this]) {
+            let msg = super::modules::describe(i, e);
+            i.console_push(alloc::format!("error: ResizeObserver-Rueckruf: {msg}"));
+        }
+    }
+    for n in 0..i.inter_obs.len() {
+        if i.inter_obs[n].queue.is_empty() { continue }
+        let q = core::mem::take(&mut i.inter_obs[n].queue);
+        let cb = i.inter_obs[n].cb.clone();
+        let this = Value::Obj(i.inter_obs[n].js.clone());
+        let vals: Vec<Value> = q.iter().map(|e| build_inter_entry(i, e)).collect();
+        let arr = i.new_array(vals);
+        ran = true;
+        if let Err(e) = i.call(&cb, this.clone(), &[arr, this]) {
+            let msg = super::modules::describe(i, e);
+            i.console_push(alloc::format!("error: IntersectionObserver-Rueckruf: {msg}"));
+        }
+    }
+    ran
+}
+
 /// Eine Anmeldung eines `MutationObserver`: WAS er an WELCHEM Knoten sehen
 /// will (DOM §4.3.1 „registered observer").
 pub struct MutReg {
@@ -2547,6 +2874,222 @@ pub fn install(realm: &mut Realm) {
         Ok(i.new_array(vals))
     }, 0, &fp);
 
+
+    // ── ResizeObserver ───────────────────────────────────────────────────
+    //
+    // **Warum es das braucht.** Jedes Diagramm, jede Karte und jede
+    // Bibliothek, die sich an ihren Kasten anpasst, meldet sich hier an statt
+    // am `resize` des Fensters — der sagt nichts darueber, dass sich EIN
+    // Kasten geaendert hat, weil daneben etwas eingeklappt wurde.
+    let ro_proto = new_obj(Some(realm.object_proto.clone()));
+    let ro_ctor = native(Some(fp.clone()), |i, _, a| {
+        let cb = a.first().cloned().unwrap_or(Value::Undefined);
+        if !i.is_callable(&cb) {
+            return i.type_err("ResizeObserver: argument 1 is not a function");
+        }
+        let o = new_obj(Some(i.realm.ro_proto.clone()));
+        i.resize_obs.push(ResizeObs { js: o.clone(), cb, regs: Vec::new(), queue: Vec::new() });
+        Ok(Value::Obj(o))
+    }, "ResizeObserver", 1, true);
+    ro_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(ro_proto.clone())));
+    ro_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(ro_ctor.clone())));
+    ro_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("ResizeObserver")));
+    realm.global.borrow_mut().define("ResizeObserver", Prop::builtin(Value::Obj(ro_ctor)));
+    realm.ro_proto = ro_proto.clone();
+
+    meth(&ro_proto, "observe", |i, t, a| {
+        let target = node_of(i, a.first().unwrap_or(&Value::Undefined))?;
+        // `{ box: "border-box" }` — die Vorgabe ist der Inhaltskasten.
+        let kind = match a.get(1) {
+            Some(o @ Value::Obj(_)) => match i.get(o, "box")? {
+                Value::Str(s) if &*s == "border-box" => BoxKind::Border,
+                _ => BoxKind::Content,
+            },
+            _ => BoxKind::Content,
+        };
+        let Value::Obj(this) = &t else {
+            return i.type_err("ResizeObserver.observe: not an observer")
+        };
+        let this = this.clone();
+        let mut found = false;
+        for o in i.resize_obs.iter_mut() {
+            if Rc::ptr_eq(&o.js, &this) {
+                // Ein zweites `observe` auf DENSELBEN Knoten ersetzt die
+                // Anmeldung (Resize Observer 3.1) — und `last: None` sorgt
+                // dafuer, dass es DANACH einmal meldet, so wie beim ersten
+                // Mal.
+                o.regs.retain(|r| r.target != target);
+                o.regs.push(ResizeReg { target, kind, last: None });
+                found = true;
+                break;
+            }
+        }
+        if !found { return i.type_err("ResizeObserver.observe: not an observer") }
+        // Sofort auswerten: `observe` liefert die aktuelle Groesse, nicht
+        // erst die naechste Aenderung. Wer bis zum naechsten Layout wartet,
+        // laesst eine Seite ohne Groesse dastehen, die sich nie mehr aendert.
+        eval_box_observers(i);
+        Ok(Value::Undefined)
+    }, 1, &fp);
+    meth(&ro_proto, "unobserve", |i, t, a| {
+        let target = node_of(i, a.first().unwrap_or(&Value::Undefined))?;
+        let Value::Obj(this) = &t else { return Ok(Value::Undefined) };
+        for o in i.resize_obs.iter_mut() {
+            if Rc::ptr_eq(&o.js, this) {
+                o.regs.retain(|r| r.target != target);
+                o.queue.retain(|e| e.target != target);
+            }
+        }
+        Ok(Value::Undefined)
+    }, 1, &fp);
+    meth(&ro_proto, "disconnect", |i, t, _| {
+        let Value::Obj(this) = &t else { return Ok(Value::Undefined) };
+        for o in i.resize_obs.iter_mut() {
+            if Rc::ptr_eq(&o.js, this) { o.regs.clear(); o.queue.clear(); }
+        }
+        Ok(Value::Undefined)
+    }, 0, &fp);
+
+    // ── IntersectionObserver ─────────────────────────────────────────────
+    //
+    // **Warum es das braucht.** Verzoegert geladene Bilder, unendliche
+    // Listen, „im Blick"-Animationen und jede Statistik, die zaehlt, was
+    // gesehen wurde. Ohne ihn laedt eine Bildergalerie genau ein Bild und
+    // haelt dann an — nicht mit einem Fehler, sondern mit Ruhe, und das ist
+    // schlimmer.
+    let io_proto = new_obj(Some(realm.object_proto.clone()));
+    let io_ctor = native(Some(fp.clone()), |i, _, a| {
+        let cb = a.first().cloned().unwrap_or(Value::Undefined);
+        if !i.is_callable(&cb) {
+            return i.type_err("IntersectionObserver: argument 1 is not a function");
+        }
+        let opts = a.get(1).cloned().unwrap_or(Value::Undefined);
+        let has = matches!(opts, Value::Obj(_));
+        // Die Wurzel: ein Element, oder das Sichtfeld.
+        let root = if !has { None } else {
+            match i.get(&opts, "root")? {
+                v @ Value::Obj(_) => node_of(i, &v).ok(),
+                _ => None,
+            }
+        };
+        // `rootMargin` — die CSS-Kurzform mit ein bis vier Laengen. Prozente
+        // stehen zur AUSSCHNITTgroesse; ohne eigene Wurzel ist das das
+        // Sichtfeld.
+        let (vw, vh) = i.viewport;
+        let margin_src: Rc<str> = if !has { Rc::from("0px") } else {
+            match i.get(&opts, "rootMargin")? {
+                Value::Str(s) => s.clone(),
+                Value::Undefined => Rc::from("0px"),
+                v => i.to_string(&v)?,
+            }
+        };
+        let margin = parse_root_margin(&margin_src, vw, vh);
+        // `threshold` — eine Zahl oder eine Liste. Ohne Angabe: 0, also
+        // „sobald ein Pixel sichtbar wird".
+        let mut thresholds: Vec<f64> = Vec::new();
+        if has {
+            match i.get(&opts, "threshold")? {
+                Value::Undefined | Value::Null => {}
+                v @ Value::Obj(_) => {
+                    let lv = i.get(&v, "length")?;
+                    let len = match lv { Value::Num(n) if n >= 0.0 => n as usize, _ => 0 };
+                    for k in 0..len {
+                        let e = i.get(&v, &alloc::format!("{k}"))?;
+                        thresholds.push(i.to_number(&e)?);
+                    }
+                }
+                v => thresholds.push(i.to_number(&v)?),
+            }
+        }
+        if thresholds.is_empty() { thresholds.push(0.0); }
+        for t in thresholds.iter() {
+            if !(*t >= 0.0 && *t <= 1.0) {
+                return i.range_err("IntersectionObserver: threshold outside [0, 1]");
+            }
+        }
+        thresholds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+        let o = new_obj(Some(i.realm.io_proto.clone()));
+        i.inter_obs.push(InterObs { js: o.clone(), cb, root, margin_src, margin,
+                                    thresholds, regs: Vec::new(), queue: Vec::new() });
+        Ok(Value::Obj(o))
+    }, "IntersectionObserver", 1, true);
+    io_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(io_proto.clone())));
+    io_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(io_ctor.clone())));
+    io_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("IntersectionObserver")));
+    realm.global.borrow_mut().define("IntersectionObserver", Prop::builtin(Value::Obj(io_ctor)));
+    realm.io_proto = io_proto.clone();
+
+    meth(&io_proto, "observe", |i, t, a| {
+        let target = node_of(i, a.first().unwrap_or(&Value::Undefined))?;
+        let Value::Obj(this) = &t else {
+            return i.type_err("IntersectionObserver.observe: not an observer")
+        };
+        let this = this.clone();
+        let mut found = false;
+        for o in i.inter_obs.iter_mut() {
+            if Rc::ptr_eq(&o.js, &this) {
+                o.regs.retain(|r| r.target != target);
+                o.regs.push(InterReg { target, band: -1 });
+                found = true;
+                break;
+            }
+        }
+        if !found { return i.type_err("IntersectionObserver.observe: not an observer") }
+        // Wie beim `ResizeObserver`: die erste Meldung kommt sofort, nicht
+        // erst beim naechsten Bildlauf. Genau darauf verlaesst sich jede
+        // Liste, die beim Laden schon halb sichtbar ist.
+        eval_box_observers(i);
+        Ok(Value::Undefined)
+    }, 1, &fp);
+    meth(&io_proto, "unobserve", |i, t, a| {
+        let target = node_of(i, a.first().unwrap_or(&Value::Undefined))?;
+        let Value::Obj(this) = &t else { return Ok(Value::Undefined) };
+        for o in i.inter_obs.iter_mut() {
+            if Rc::ptr_eq(&o.js, this) {
+                o.regs.retain(|r| r.target != target);
+                o.queue.retain(|e| e.target != target);
+            }
+        }
+        Ok(Value::Undefined)
+    }, 1, &fp);
+    meth(&io_proto, "disconnect", |i, t, _| {
+        let Value::Obj(this) = &t else { return Ok(Value::Undefined) };
+        for o in i.inter_obs.iter_mut() {
+            if Rc::ptr_eq(&o.js, this) { o.regs.clear(); o.queue.clear(); }
+        }
+        Ok(Value::Undefined)
+    }, 0, &fp);
+    meth(&io_proto, "takeRecords", |i, t, _| {
+        let Value::Obj(this) = &t else { return Ok(i.new_array(Vec::new())) };
+        let this = this.clone();
+        let mut q = Vec::new();
+        for o in i.inter_obs.iter_mut() {
+            if Rc::ptr_eq(&o.js, &this) { q = core::mem::take(&mut o.queue); }
+        }
+        let vals: Vec<Value> = q.iter().map(|e| build_inter_entry(i, e)).collect();
+        Ok(i.new_array(vals))
+    }, 0, &fp);
+    // `root`, `rootMargin` und `thresholds` sind lesbar — Bibliothekscode
+    // liest sie zurueck, um einen Beobachter wiederzuverwenden.
+    getter(&io_proto, "root", |i, t, _| {
+        let Value::Obj(this) = &t else { return Ok(Value::Null) };
+        let r = i.inter_obs.iter().find(|o| Rc::ptr_eq(&o.js, this)).and_then(|o| o.root);
+        Ok(match r { Some(id) => wrap(i, id), None => Value::Null })
+    }, &fp);
+    getter(&io_proto, "rootMargin", |i, t, _| {
+        let Value::Obj(this) = &t else { return Ok(Value::str("0px")) };
+        Ok(i.inter_obs.iter().find(|o| Rc::ptr_eq(&o.js, this))
+            .map(|o| Value::Str(o.margin_src.clone()))
+            .unwrap_or_else(|| Value::str("0px")))
+    }, &fp);
+    getter(&io_proto, "thresholds", |i, t, _| {
+        let Value::Obj(this) = &t else { return Ok(i.new_array(Vec::new())) };
+        let v: Vec<Value> = i.inter_obs.iter().find(|o| Rc::ptr_eq(&o.js, this))
+            .map(|o| o.thresholds.iter().map(|x| Value::Num(*x)).collect())
+            .unwrap_or_default();
+        Ok(i.new_array(v))
+    }, &fp);
+
     // ── document.implementation ──────────────────────────────────────────
     //
     // **`createHTMLDocument` ist der Grund, warum es das hier gibt.** jQuery
@@ -3773,7 +4316,14 @@ mod beak_engine_layout_boxes {
     /// Ein Kasten, wie das Layout ihn aufzeichnet — kurz, weil eine Probe die
     /// zwoelf Felder sonst dreimal ausschreibt und nur fuenf davon meint.
     pub fn boxed(seq: u32, x: i32, y: i32, w: i32, h: i32, bx: i16, by: i16) -> ElemRect {
-        ElemRect { seq, x, y, w, h, bx, by }
+        ElemRect { seq, x, y, w, h, bx, by, px: 0, py: 0 }
+    }
+
+    /// Derselbe Kasten mit Polsterung — nur die Proben der Beobachter
+    /// brauchen sie.
+    pub fn padded(seq: u32, x: i32, y: i32, w: i32, h: i32,
+                  bx: i16, by: i16, px: i16, py: i16) -> ElemRect {
+        ElemRect { seq, x, y, w, h, bx, by, px, py }
     }
 
     pub fn find_seq(el: &crate::dom::Element, id: &str) -> Option<u32> {
@@ -4000,6 +4550,156 @@ mod tests {
              console.log(document.getElementById('a').getClientRects().length);", false).expect("parst");
         let _ = i.run_program(&prog);
         assert_eq!(i.take_console(), ["10,10,150,50", "2"]);
+    }
+
+
+    /// `ResizeObserver` meldet den INHALTSkasten — Rahmen UND Polsterung ab.
+    ///
+    /// Das ist der Unterschied, der zaehlt: ein Diagramm baut sein Zeichenfeld
+    /// aus `entry.contentRect.width`, und in einem gepolsterten Kasten waere
+    /// jede andere Zahl zu gross. Vor dieser Runde fuehrte das Layout die
+    /// Polsterung gar nicht mit.
+    #[test]
+    fn resize_observer_reports_the_content_box_not_the_border_box() {
+        use super::beak_engine_layout_boxes::*;
+        let html = "<html><body><div id=a>x</div></body></html>";
+        let dom = crate::dom::parse(html);
+        let mut i = super::super::interp::Interp::new();
+        i.set_document(super::Doc::from_dom(&dom));
+        let seq = find_seq(&dom.root, "a").expect("das div");
+        let prog = super::super::parse(
+            "var log = [];\
+             var ro = new ResizeObserver(function (es) {\
+               for (var k = 0; k < es.length; k++) {\
+                 var e = es[k];\
+                 log.push(e.contentRect.width + 'x' + e.contentRect.height\
+                          + ' rand ' + e.borderBoxSize[0].inlineSize\
+                          + ' inhalt ' + e.contentBoxSize[0].blockSize);\
+               }\
+             });\
+             ro.observe(document.getElementById('a'));", false).expect("parst");
+        // Erst die Kaesten, dann das Skript: `observe` misst SOFORT.
+        i.set_geometry(super::super::interp::Geometry {
+            boxes: alloc::rc::Rc::new(alloc::vec![
+                // 200x50 Rahmenkasten, 4 px Rahmen und 20 px Polsterung
+                // waagerecht, 6 + 10 senkrecht.
+                padded(seq, 10, 100, 200, 50, 4, 6, 20, 10),
+            ]),
+            scroll: (0, 0),
+        });
+        let _ = i.run_program(&prog);
+        // Zugestellt wird am Kontrollpunkt, nicht im `observe`.
+        i.run_timers();
+        let prog = super::super::parse("console.log(log.join(' | '));", false).expect("parst");
+        let _ = i.run_program(&prog);
+        assert_eq!(i.take_console(), ["176x34 rand 200 inhalt 34"]);
+    }
+
+    /// Und er meldet nur, was sich GEAENDERT hat. Ein zweites Layout mit
+    /// derselben Groesse ist kein Ereignis — sonst waere jeder Bildlauf ein
+    /// Rueckrufgewitter.
+    #[test]
+    fn resize_observer_stays_quiet_when_the_size_did_not_move() {
+        use super::beak_engine_layout_boxes::*;
+        let html = "<html><body><div id=a>x</div></body></html>";
+        let dom = crate::dom::parse(html);
+        let mut i = super::super::interp::Interp::new();
+        i.set_document(super::Doc::from_dom(&dom));
+        let seq = find_seq(&dom.root, "a").expect("das div");
+        let geom = |w: i32| super::super::interp::Geometry {
+            boxes: alloc::rc::Rc::new(alloc::vec![boxed(seq, 0, 0, w, 50, 0, 0)]),
+            scroll: (0, 0),
+        };
+        i.set_geometry(geom(200));
+        let prog = super::super::parse(
+            "var n = 0;\
+             var ro = new ResizeObserver(function (es) { n += es.length; });\
+             ro.observe(document.getElementById('a'));", false).expect("parst");
+        let _ = i.run_program(&prog);
+        i.run_timers();
+        // Dasselbe noch dreimal — die Groesse steht.
+        for _ in 0..3 { i.set_geometry(geom(200)); i.run_timers(); }
+        // Jetzt bewegt sie sich.
+        i.set_geometry(geom(300));
+        i.run_timers();
+        let prog = super::super::parse("console.log(n);", false).expect("parst");
+        let _ = i.run_program(&prog);
+        assert_eq!(i.take_console(), ["2"]);
+    }
+
+    /// `IntersectionObserver`: das Verhaeltnis ist die geschnittene Flaeche
+    /// geteilt durch die des Ziels, und gemeldet wird beim WECHSEL ueber eine
+    /// Schwelle.
+    #[test]
+    fn intersection_observer_reports_when_a_threshold_is_crossed() {
+        use super::beak_engine_layout_boxes::*;
+        let html = "<html><body><div id=a>x</div></body></html>";
+        let dom = crate::dom::parse(html);
+        let mut i = super::super::interp::Interp::new();
+        i.set_document(super::Doc::from_dom(&dom));
+        i.set_viewport(1000.0, 1000.0);
+        let seq = find_seq(&dom.root, "a").expect("das div");
+        // Ein 100 hoher Kasten, dessen Oberkante bei y liegt. Bei y = 950
+        // ragen 50 von 100 ins Sichtfeld: Verhaeltnis 0,5.
+        let at = |y: i32| super::super::interp::Geometry {
+            boxes: alloc::rc::Rc::new(alloc::vec![boxed(seq, 0, y, 100, 100, 0, 0)]),
+            scroll: (0, 0),
+        };
+        i.set_geometry(at(2000));
+        let prog = super::super::parse(
+            "var log = [];\
+             var io = new IntersectionObserver(function (es) {\
+               for (var k = 0; k < es.length; k++) {\
+                 log.push(es[k].isIntersecting + '@' + es[k].intersectionRatio);\
+               }\
+             }, { threshold: [0, 0.5] });\
+             io.observe(document.getElementById('a'));", false).expect("parst");
+        let _ = i.run_program(&prog);
+        i.run_timers();
+        // Ein Viertel herein: ueber 0, unter 0,5.
+        i.set_geometry(at(975));
+        i.run_timers();
+        // Die Haelfte: die zweite Schwelle faellt.
+        i.set_geometry(at(950));
+        i.run_timers();
+        // Wieder hinaus.
+        i.set_geometry(at(2000));
+        i.run_timers();
+        let prog = super::super::parse("console.log(log.join(' | '));", false).expect("parst");
+        let _ = i.run_program(&prog);
+        assert_eq!(i.take_console(),
+                   ["false@0 | true@0.25 | true@0.5 | false@0"]);
+    }
+
+    /// `rootMargin` dehnt den Ausschnitt — genau das macht „lade das Bild,
+    /// BEVOR es sichtbar wird" moeglich.
+    #[test]
+    fn a_root_margin_stretches_the_clip() {
+        use super::beak_engine_layout_boxes::*;
+        let html = "<html><body><div id=a>x</div></body></html>";
+        let dom = crate::dom::parse(html);
+        let mut i = super::super::interp::Interp::new();
+        i.set_document(super::Doc::from_dom(&dom));
+        i.set_viewport(1000.0, 1000.0);
+        let seq = find_seq(&dom.root, "a").expect("das div");
+        // 200 px UNTER dem Sichtfeld.
+        i.set_geometry(super::super::interp::Geometry {
+            boxes: alloc::rc::Rc::new(alloc::vec![boxed(seq, 0, 1200, 100, 100, 0, 0)]),
+            scroll: (0, 0),
+        });
+        let prog = super::super::parse(
+            "var ohne = null, mit = null;\
+             new IntersectionObserver(function (es) { ohne = es[0].isIntersecting; })\
+               .observe(document.getElementById('a'));\
+             var io = new IntersectionObserver(function (es) { mit = es[0].isIntersecting; },\
+                                               { rootMargin: '0px 0px 300px 0px' });\
+             io.observe(document.getElementById('a'));", false).expect("parst");
+        let _ = i.run_program(&prog);
+        i.run_timers();
+        let prog = super::super::parse(
+            "console.log(ohne + ',' + mit + ',' + io.rootMargin);", false).expect("parst");
+        let _ = i.run_program(&prog);
+        assert_eq!(i.take_console(), ["false,true,0px 0px 300px 0px"]);
     }
 
     /// Der Inline-Stil bleibt eine LEBENDE Sicht — `el.style` ist etwas

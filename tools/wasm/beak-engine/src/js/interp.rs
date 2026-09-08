@@ -300,8 +300,11 @@ pub struct Realm {
     pub abort_ctrl_proto: Gc,
     pub xhr_proto: Gc,
     /// `MutationObserver.prototype` — im Realm, weil der Konstruktor ein
-    /// Zeiger ist und den Prototyp nicht einfangen kann.
+    /// Zeiger ist und den Prototyp nicht einfangen kann. Dasselbe gilt fuer
+    /// die beiden Kasten-Beobachter.
     pub mo_proto: Gc,
+    pub ro_proto: Gc,
+    pub io_proto: Gc,
     pub prej_proto: Gc,
     pub text_encoder_proto: Gc,
     pub text_decoder_proto: Gc,
@@ -647,6 +650,14 @@ pub struct Interp {
     /// Dokument, weil sie einen JS-Rueckruf halten: das Dokument wird bei
     /// jeder Navigation neu gebaut, der Realm nicht.
     pub observers: Vec<super::dombind::MutObs>,
+    /// Die angemeldeten `ResizeObserver` und `IntersectionObserver`.
+    /// Beide werden in `set_geometry` ausgewertet — dort, wo der Wirt sagt,
+    /// wie die Seite JETZT steht.
+    pub resize_obs: Vec<super::dombind::ResizeObs>,
+    pub inter_obs: Vec<super::dombind::InterObs>,
+    /// Breite und Hoehe des Sichtfelds, wie `set_viewport` sie kennt — der
+    /// Ausschnitt eines `IntersectionObserver` ohne eigene Wurzel.
+    pub viewport: (f64, f64),
     pub history_ops: Vec<HistoryOp>,
     /// Die Navigation, die die Seite zuletzt verlangt hat (`location.assign`,
     /// `.replace`, `.reload`, `href = …`). **Genau eine, und die LETZTE
@@ -781,7 +792,8 @@ impl Interp {
                  cookies: String::new(), cookie_sets: Vec::new(), style_ctx: None,
                  history_ops: Vec::new(), history_state: Value::Null, history_len: 1.0,
                  nav: None, loc_href: String::from("about:blank"),
-                 observers: Vec::new(),
+                 observers: Vec::new(), resize_obs: Vec::new(), inter_obs: Vec::new(),
+                 viewport: (0.0, 0.0),
                  vm_ran: 0, vm_declined: 0, vm_decline: None, vm_off: false,
                  func_chunks: HashMap::new(), func_declines: HashMap::new(), pending_labels: Vec::new(), vm_ops: 0, hints_ok: true, vm_calls: 0, vm_calls_native: 0, vm_calls_slow: 0,
                  geometry: None,
@@ -797,6 +809,18 @@ impl Interp {
     /// selbst neu anmeldet, ist ein voellig normales Muster (Abfrageschleifen,
     /// Animationen) und wuerde die Schleife sonst nie verlassen. Was waehrend
     /// des Laufs dazukommt, ist beim naechsten Mal dran.
+    /// Wartet eine Beobachtung auf ihren Rueckruf?
+    ///
+    /// **Der Wirt fragt das nach jedem Bild.** `set_geometry` MISST, aber
+    /// zustellen darf nur ein Einstiegspunkt — und ohne diese Frage haette
+    /// eine Seite, die weder Zeitgeber noch Ereignisse hat, ihre Beobachter
+    /// angemeldet und nie etwas gehoert. Billig, wenn niemand beobachtet:
+    /// zwei leere Listen.
+    pub fn box_observations_pending(&self) -> bool {
+        self.resize_obs.iter().any(|o| !o.queue.is_empty())
+            || self.inter_obs.iter().any(|o| !o.queue.is_empty())
+    }
+
     pub fn run_timers(&mut self) -> usize {
         // Erst die Microtasks, dann die Zeitgeber — das IST die Rangfolge.
         // Und ohne diese Zeile bliebe ein `Promise.resolve().then(f)` aus
@@ -1048,6 +1072,12 @@ impl Interp {
     /// wird bei jedem Einreichen nachgezogen.
     pub fn set_geometry(&mut self, g: Geometry) {
         self.geometry = Some(g);
+        // **Hier und nirgends sonst.** `ResizeObserver` und
+        // `IntersectionObserver` fragen nicht nach der Zeit, sondern nach
+        // dem Kasten — und der steht genau jetzt fest. Ein Zeitgeber, der
+        // raet, wann sich etwas bewegt haben koennte, waere die falsche
+        // Frage und die teurere dazu.
+        super::dombind::eval_box_observers(self);
     }
 
     /// Die Adresse der Seite einreichen. Fuellt `location` und `document.URL`.
@@ -1095,6 +1125,7 @@ impl Interp {
 
     pub fn set_viewport(&mut self, w: f64, h: f64) {
         if self.media.is_none() { self.media = Some((w, false)); }
+        self.viewport = (w, h);
         let g = self.realm.global.clone();
         let mut o = g.borrow_mut();
         for (k, v) in [("innerWidth", w), ("innerHeight", h),

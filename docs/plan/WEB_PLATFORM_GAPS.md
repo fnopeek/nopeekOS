@@ -1,6 +1,6 @@
 # Was der Plattform noch fehlt — gemessen, nach Aufrufzahl
 
-**Stand 2026-09-06, beak 0.118.0.** Ausgelöst von Florian: *„bau es und für
+**Stand 2026-09-08, beak 0.133.0.** Ausgelöst von Florian: *„bau es und für
 alles andere sockets etc. was es sonst noch braucht auch gleich einplanen
 oder als todo notieren."*
 
@@ -18,13 +18,37 @@ APICENSUS=<tools>/jsscope/out/apicensus.json cargo test --release --test apigap 
 > hier ist die von heute; sie verschiebt sich, sobald etwas gebaut ist.
 > [[feedback_count_it_dont_sample_it]]
 
-**Deckung heute: 98,5 % von 301 127 Aufrufen** (296 540). Die fehlenden 1,5 %
-sind 4 587 Aufrufe, und sie verteilen sich nicht gleichmässig — die Hälfte
-steckt in vier Paketen.
+**Deckung heute: 98,9 % von 301 127 Aufrufen** (297 680). Die fehlenden 1,1 %
+sind 3 447 Aufrufe, und sie verteilen sich nicht gleichmässig — über die
+Hälfte steckt in ZWEI Paketen (Shadow DOM 876, `MessagePort` 505).
 
 ---
 
-## 0a. Was seither geschlossen ist (Stand 0.132.0)
+## 0a. Was seither geschlossen ist (Stand 0.133.0)
+
+**`IntersectionObserver` + `ResizeObserver`** (P4 + P5, 782 Aufrufe) — gebaut
+in 0.133.0. **Beide hängen an derselben Sache**, und deshalb sind sie EIN
+Commit: nicht an einem Zeitgeber, sondern an der Geometrie nach dem Layout.
+`Interp::set_geometry` ist der Ort, an dem der Wirt sagt „so steht die Seite
+jetzt" — dort wird gemessen, zugestellt wird am Microtask-Kontrollpunkt.
+
+Dabei ist eine Lücke im Layout aufgefallen: die aufgezeichneten Kästen
+führten die **Polsterung** gar nicht mit (nur die Rahmensummen, für
+`clientWidth`). `ResizeObserver` meldet aber den INHALTSkasten, und ein
+Diagramm, das sein Zeichenfeld aus `entry.contentRect.width` baut, wäre in
+einem gepolsterten Kasten jedes Mal zu breit gewesen. `ElemRect`/`HoverBox`
+haben jetzt `px`/`py`.
+
+Und der Wirt fragt nach jedem Bild `box_observations_pending()`: ohne das
+hätte eine Seite ohne Zeitgeber und ohne Ereignisse ihre Beobachter
+angemeldet und **nie** einen Rückruf gesehen — die Meldung läge in der
+Schlange und wartete auf einen Einstiegspunkt, den es nicht gibt.
+
+Gegen die Rückkopplung (ein Rückruf ändert, was er misst — der häufigste
+Konsolenfehler des Webs) steht ein Riegel: nach acht Bildern in Folge wird
+der Baum weiter übernommen, aber nicht mehr sofort neu gemalt.
+
+## 0b. Was davor geschlossen ist (Stand 0.132.0)
 
 **`MutationObserver`** (P6, 116 Aufrufe) — gebaut in 0.126.0, mit
 `childList`/`attributes`/`characterData`/`subtree`, beiden `oldValue` und
@@ -50,9 +74,8 @@ und schwacher Zufall beantwortet diese Frage falsch.
 Fingerabdruckflaechen, die nur dazu dienen, wie jemand anders auszusehen
 ([[feedback_no_ua_impersonation]]).
 
-Bleibt aus der Rangliste: **P1** Shadow DOM (876), **P2** `MessagePort`
-(505), **P3** echte Scroll-Masse (660), **P4** `IntersectionObserver` (429),
-**P5** `ResizeObserver` (353). Dazu, ausserhalb dieser Zaehlung und je ein
+Bleibt aus der Rangliste: **P1** Shadow DOM (876), **P3** echte Scroll-Masse
+(660), **P2** `MessagePort` (505). Dazu, ausserhalb dieser Zaehlung und je ein
 eigenes Thema: `Intl`, Zeichenflaeche (`canvas` 2D), `Worker`,
 `structuredClone`, `Error.stack`, `XPathEvaluator` (htmx).
 
@@ -82,9 +105,9 @@ Rümpfe ausser Text, `response.body` als Strom, `AbortSignal.timeout`.
 | **P1** | **Shadow DOM** — `attachShadow`, `shadowRoot`, `assignedSlot`, `ShadowRoot.host`, `adoptedStyleSheets` | **876** | Engine + Kaskade | gross |
 | **P2** | **`MessagePort.postMessage`** | **505** | Engine | mittel |
 | **P3** | **Echte Scroll-Masse** — `scrollHeight`, `scrollWidth`, `scrollTop`, `scrollLeft`, `offsetParent` | **660** | Layout → Bindung | mittel |
-| **P4** | **`IntersectionObserver`** | **429** | Engine + Layout | mittel |
-| **P5** | **`ResizeObserver`** | **353** | Engine + Layout | mittel |
-| **P6** | **`MutationObserver`** | **116** | Engine | klein |
+| ~~P4~~ | ~~`IntersectionObserver`~~ | ~~429~~ | **gebaut 0.133.0** | |
+| ~~P5~~ | ~~`ResizeObserver`~~ | ~~353~~ | **gebaut 0.133.0** | |
+| ~~P6~~ | ~~`MutationObserver`~~ | ~~116~~ | **gebaut 0.126.0** | |
 | **P7** | Kleinkram, je < 70: `ariaHidden` 68, `nextElementSibling` 112, `toggleAttribute` 56, `URL.username/password` 94, `History.state` 46, `document.referrer` 45, `Node.isConnected` 42, `Element.attributes`/`NamedNodeMap` 75, `createTreeWalker` 26, `document.hidden`/`visibilityState` 50, `currentSrc` 28, `DocumentFragment.*` 54 | **~700** | Engine | je klein |
 
 **P3 ist der billigste Gewinn je Aufruf.** Die Eigenschaften sind schon da —

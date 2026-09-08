@@ -1983,6 +1983,58 @@ fn fire_load(engine: &Engine, page: &Page) -> bool {
     changed
 }
 
+/// Was `ResizeObserver`/`IntersectionObserver` gemessen haben, zustellen.
+///
+/// Nur wenn wirklich etwas in der Schlange liegt: auf einer Seite ohne
+/// Beobachter sind das zwei leere Listen und sonst nichts.
+fn pump_box_observers(engine: &Engine) {
+    let Some(sess) = js_session() else { return };
+    if !sess.interp.box_observations_pending() { return }
+    arm_script_budget();
+    // `run_timers` faengt mit den Microtasks an, und die Zustellung sitzt
+    // dort — ein Rueckruf darf also selbst ein `setTimeout` anlegen und wird
+    // in derselben Runde bedient.
+    let timers = sess.interp.run_timers();
+    let _ = timers;
+    sync_cookies(sess);
+    sync_history(engine, sess);
+    drain_console(sess);
+    if sess.interp.doc.as_ref().is_some_and(|d| d.dirty) {
+        if let Some(d) = sess.interp.doc.as_mut() {
+            engine.set_scripted_dom(Some(d.to_dom()));
+        }
+        bump_content_gen("observer");
+        // **Der Riegel gegen die Schleife.** Ein Rueckruf, der die Groesse
+        // seines eigenen Ziels aendert, misst beim naechsten Bild wieder
+        // etwas Neues — das ist der haeufigste Konsolenfehler des Webs
+        // ueberhaupt („ResizeObserver loop"). Ohne Riegel liefe hier ein
+        // Layout je Bild, und auf dem Geraet sind das fuenf Sekunden je
+        // Runde: eine Seite, die haengt.
+        //
+        // Der Baum wird trotzdem uebernommen — nur das sofortige Neumalen
+        // faellt weg. Damit kommt der Kreis zur Ruhe, und die naechste
+        // Eingabe zeigt den Stand.
+        let n = unsafe { core::ptr::addr_of!(OBS_ROUNDS).read() } + 1;
+        unsafe { core::ptr::addr_of_mut!(OBS_ROUNDS).write(n) };
+        if n <= OBS_ROUNDS_MAX {
+            mark_dirty();
+        } else if n == OBS_ROUNDS_MAX + 1 {
+            log("[beak] Beobachter: der Rueckruf aendert, was er misst —                  Neumalen ausgesetzt");
+        }
+    } else {
+        unsafe { core::ptr::addr_of_mut!(OBS_ROUNDS).write(0) };
+    }
+}
+
+/// Das zuletzt eingereichte Sichtfeld, damit `set_viewport` nur bei einer
+/// echten Aenderung laeuft.
+static mut LAST_VP: (i32, i32) = (0, 0);
+
+/// Wieviele Bilder hintereinander ein Beobachter-Rueckruf den Baum aendern
+/// darf, bevor das Neumalen aussetzt.
+const OBS_ROUNDS_MAX: u32 = 8;
+static mut OBS_ROUNDS: u32 = 0;
+
 /// Eine Runde am Modulgraphen: was fehlt noch?
 ///
 /// Liefert true, wenn eine Rundreise laeuft — dann geht es in `nav_pump`
@@ -3158,6 +3210,17 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
     // `clone()` ist das, was gemeint ist.
     let geom = unsafe { (*core::ptr::addr_of!(GEOM)).clone() };
     if let (Some(sess), Some(g)) = (js_session(), geom) {
+        // Das Sichtfeld nachziehen, wenn es sich bewegt hat. Der Ausschnitt
+        // eines `IntersectionObserver` ohne eigene Wurzel IST das Sichtfeld —
+        // und `set_media` laeuft nur einmal beim Skriptstart, also stand hier
+        // nach jeder Fensteraenderung die Zahl von damals. Nur bei
+        // Aenderung, weil `set_viewport` ein frisches `screen` baut und das
+        // je Bild Muell waere.
+        let vp = (w, h);
+        if unsafe { core::ptr::addr_of!(LAST_VP).read() } != vp {
+            unsafe { core::ptr::addr_of_mut!(LAST_VP).write(vp) };
+            sess.interp.set_viewport(w as f64, h as f64);
+        }
         sess.interp.set_geometry(beak_engine::js::interp::Geometry {
             boxes: g, scroll: (0, sy),
         });
@@ -4270,6 +4333,15 @@ pub extern "C" fn _start() {
                 }
             }
         }
+        // Die Kasten-Beobachter. `set_geometry` hat waehrend des Malens
+        // GEMESSEN; zugestellt wird hier, weil ein Rueckruf ein
+        // Einstiegspunkt ist und mitten im Malen nichts zu suchen hat.
+        //
+        // **Und es MUSS hier stehen.** Ohne diese Zeilen haette eine Seite
+        // ohne Zeitgeber und ohne Ereignisse ihre Beobachter angemeldet und
+        // nie einen Rueckruf gesehen — die Meldung laege in der Schlange und
+        // wartete auf einen Einstiegspunkt, den es nicht gibt.
+        pump_box_observers(&engine);
         // JETZT steht die Geometrie — `load` darf fallen.
         if fire_load(&engine, &page) {
             page.sync(&engine);

@@ -203,7 +203,8 @@ pub fn run_jobs(i: &mut Interp) -> usize {
         // lief und damit VOR jedem `.then`, das danach kam. Andersherum
         // gerufen liefe der Beobachter als Letzter, und eine Seite, die im
         // `.then` das Ergebnis erwartet, saehe nichts.
-        let zugestellt = super::dombind::deliver_mutations(i);
+        let zugestellt = super::dombind::deliver_mutations(i)
+            | super::dombind::deliver_box_observers(i);
         let gefahren = run_queue(i);
         n += gefahren;
         if !zugestellt && gefahren == 0 { break }
