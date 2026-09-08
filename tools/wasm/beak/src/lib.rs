@@ -3196,6 +3196,14 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
         if !core::ptr::addr_of!(NAV_REPORTED).read() && !nav_busy() {
             core::ptr::addr_of_mut!(NAV_REPORTED).write(true);
             log_ms("=== navigation -> first paint", now_ms() - core::ptr::addr_of!(NAV_START_MS).read());
+            // Wieviele der sechs eingebauten Gesichter diese Seite wirklich
+            // gebraucht hat. Sie werden faul geladen, und ohne diese Zahl ist
+            // „faul" eine Behauptung: eine Seite, die doch alle sechs
+            // anfasst, spart nichts, und man saehe es nicht.
+            let mut m = String::from("[beak] Schriften: ");
+            push_i64(&mut m, engine.loaded_faces() as i64);
+            m.push_str(" von 6 Gesichtern geparst");
+            log(&m);
         }
     }
 
@@ -4062,7 +4070,11 @@ pub extern "C" fn _start() {
     // and a perf number from the wrong build is worse than no number.
     log(concat!("[beak] version ", env!("CARGO_PKG_VERSION")));
 
-    log("[beak] parsing font…");
+    // **Hier wurde frueher die Schrift geparst — alle sechs Gesichter, 435 ms
+    // und 40 MB Halde, gemessen mit `beakbench`.** Jetzt wird ein Gesicht
+    // gebaut, wenn es zum ersten Mal gebraucht wird; eine gewoehnliche Seite
+    // fasst zwei bis vier an. Wieviele es wirklich waren, sagt die Zeile nach
+    // dem ersten Malen.
     let mut engine = Engine::new();
     // Lend the engine our tick source so it can report the per-phase split.
     engine.set_clock(|| unsafe { npk_ticks() } as u64);

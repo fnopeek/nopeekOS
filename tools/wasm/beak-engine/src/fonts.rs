@@ -24,16 +24,54 @@ pub struct WebFace {
     pub font: Font,
 }
 
+/// Ein eingebautes Gesicht, das erst beim ERSTEN Gebrauch geparst wird.
+///
+/// **fontdue hat keinen faulen Weg:** `Font::from_bytes` legt den Umriss
+/// JEDER cmap-erreichbaren Glyphe an — das sagt `assets/subset.sh` selbst,
+/// und deshalb wurde dort schon von 19 516 auf 14 524 Glyphen gekuerzt.
+/// Gemessen kostet das **6,6 bis 7,0 MB Halde je Gesicht** (host-seitig,
+/// `examples/heapcheck.rs`), bei sechs Gesichtern 40 MB — die beak beim START
+/// bezahlte, obwohl eine gewoehnliche Seite zwei davon anfasst.
+///
+/// Am Geraet war das der groesste Posten ueberhaupt: `beakbench` misst die
+/// Halde bei `instantiate` mit 11 MiB und nach dem Schriftrastern mit 89 MiB;
+/// das Layout selbst legt nichts mehr drauf. Und weil talc Seiten nie
+/// zurueckgibt, wurde diese Spitze zum Dauerbedarf.
+///
+/// `OnceCell` und kein `RefCell`: gelesen wird ueber `&self` (siehe `pick`),
+/// und ein Gesicht wird genau einmal gebaut. Einen Faden gibt es nicht —
+/// `Fonts` liegt einzeln in `Engine`.
+struct LazyFace {
+    bytes: &'static [u8],
+    font: core::cell::OnceCell<Font>,
+}
+
+impl LazyFace {
+    const fn new(bytes: &'static [u8]) -> LazyFace {
+        LazyFace { bytes, font: core::cell::OnceCell::new() }
+    }
+
+    fn get(&self) -> &Font {
+        self.font.get_or_init(|| {
+            // `load_substitutions` only feeds fontdue's glyph-INDEX API; we
+            // rasterise by char, and the subsetted faces carry no GSUB anyway
+            // (assets/subset.sh). Leaving it on just outlines dead glyphs.
+            let settings = FontSettings { load_substitutions: false, ..FontSettings::default() };
+            Font::from_bytes(self.bytes, settings).expect("embedded font is valid TrueType")
+        })
+    }
+}
+
 pub struct Fonts {
     /// Die Gesichter der Seite. Werden EINGEHAENGT, nicht ersetzt: die
     /// eingebauten bleiben die Ersatzkette.
     web: Vec<WebFace>,
-    regular: Font,
-    bold: Font,
-    italic: Font,
-    bold_italic: Font,
-    mono: Font,
-    mono_bold: Font,
+    regular: LazyFace,
+    bold: LazyFace,
+    italic: LazyFace,
+    bold_italic: LazyFace,
+    mono: LazyFace,
+    mono_bold: LazyFace,
 }
 
 impl Default for Fonts {
@@ -44,22 +82,23 @@ impl Default for Fonts {
 
 impl Fonts {
     pub fn new() -> Fonts {
-        fn load(bytes: &[u8]) -> Font {
-            // `load_substitutions` only feeds fontdue's glyph-INDEX API; we
-            // rasterise by char, and the subsetted faces carry no GSUB anyway
-            // (assets/subset.sh). Leaving it on just outlines dead glyphs.
-            let settings = FontSettings { load_substitutions: false, ..FontSettings::default() };
-            Font::from_bytes(bytes, settings).expect("embedded font is valid TrueType")
-        }
         Fonts {
             web: Vec::new(),
-            regular: load(include_bytes!("../assets/inter.ttf")),
-            bold: load(include_bytes!("../assets/inter-bold.ttf")),
-            italic: load(include_bytes!("../assets/inter-italic.ttf")),
-            bold_italic: load(include_bytes!("../assets/inter-bolditalic.ttf")),
-            mono: load(include_bytes!("../assets/mono.ttf")),
-            mono_bold: load(include_bytes!("../assets/mono-bold.ttf")),
+            regular: LazyFace::new(include_bytes!("../assets/inter.ttf")),
+            bold: LazyFace::new(include_bytes!("../assets/inter-bold.ttf")),
+            italic: LazyFace::new(include_bytes!("../assets/inter-italic.ttf")),
+            bold_italic: LazyFace::new(include_bytes!("../assets/inter-bolditalic.ttf")),
+            mono: LazyFace::new(include_bytes!("../assets/mono.ttf")),
+            mono_bold: LazyFace::new(include_bytes!("../assets/mono-bold.ttf")),
         }
+    }
+
+    /// Wieviele der sechs eingebauten Gesichter wirklich geparst wurden.
+    /// Gehoert ins Log: „faul" ist sonst eine Behauptung.
+    pub fn loaded_faces(&self) -> usize {
+        [&self.regular, &self.bold, &self.italic,
+         &self.bold_italic, &self.mono, &self.mono_bold]
+            .iter().filter(|f| f.font.get().is_some()).count()
     }
 
     /// The face for a run's style. Monospace ships no italic face (Noto Sans
@@ -105,12 +144,12 @@ impl Fonts {
     pub fn pick(&self, bold: bool, italic: bool, mono: bool, family: u32) -> &Font {
         if let Some(f) = self.web_pick(family, bold, italic) { return f }
         match (mono, bold, italic) {
-            (true, false, _) => &self.mono,
-            (true, true, _) => &self.mono_bold,
-            (false, false, false) => &self.regular,
-            (false, true, false) => &self.bold,
-            (false, false, true) => &self.italic,
-            (false, true, true) => &self.bold_italic,
+            (true, false, _) => self.mono.get(),
+            (true, true, _) => self.mono_bold.get(),
+            (false, false, false) => self.regular.get(),
+            (false, true, false) => self.bold.get(),
+            (false, false, true) => self.italic.get(),
+            (false, true, true) => self.bold_italic.get(),
         }
     }
 
@@ -118,7 +157,7 @@ impl Fonts {
     /// around floats, intrinsic auto-sizing) where a single reference face is
     /// fine and keeps behaviour identical to the old single-font path.
     pub fn regular(&self) -> &Font {
-        &self.regular
+        self.regular.get()
     }
 
     /// A stable id per face — mixed into the raster's glyph-cache key so two
