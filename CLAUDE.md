@@ -48,10 +48,25 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-08 · beak 0.129.0 · Kernel 0.328.0** (Rest: `git log`)
+**Stand 2026-09-08 · beak 0.132.0 · Kernel 0.329.0** (Rest: `git log`)
 
-**▶ Als nächstes: htmx (`XPathEvaluator`) und die Ligaturen.**
-Stand: `memory/project_beak_library_probes.md`.
+**▶ Als nächstes: `IntersectionObserver`/`ResizeObserver` (782 Aufrufe im
+Zensus), dann htmx (`XPathEvaluator`) und die Ligaturen.** Rangliste:
+`docs/plan/WEB_PLATFORM_GAPS.md` §0a.
+
+**0.132.0 + Kernel 0.329.0: `crypto.getRandomValues` mit echtem Zufall.**
+Neue Hostfunktion `npk_random_bytes` aus `security::csprng` (ChaCha20, aus
+RDRAND geseedet) — ohne Kapabilität wie `npk_unix_time`, registriert in
+BEIDEN Wegen (forge und wasmi). **`crypto` erscheint nur, wenn eine echte
+Quelle da ist:** eine Seite prüft `if (window.crypto)`, und `Math.random`
+als sichere Quelle auszugeben wäre schlimmer als die Lücke.
+
+**google.ch: der Weg ist fertig, die Tür ist zu.** beak fährt die ganze
+Kette — Startseite, Formular, Einwilligung, `/save`, Botguard, Token — und
+bekommt `/sorry` + 429. Nachgemessen: weder die IP (derselbe Anschluss
+bekommt mit Firefox-Kennung 200) noch die Kennung (drei Kennungen, dieselbe
+Seite). Google bewertet den Token. Das ist die Wand aus
+`memory/feedback_no_ua_impersonation.md`.
 
 **0.129.0: sechs Schriften beim Start, zwei gebraucht.** `beakbench` sagt,
 dass das Schriftrastern die Halde von 11 auf 89 MiB treibt und das Layout
