@@ -304,6 +304,9 @@ pub struct Realm {
     /// die beiden Kasten-Beobachter.
     pub mo_proto: Gc,
     pub ro_proto: Gc,
+    pub xpath_result_proto: Gc,
+    pub xpath_expr_proto: Gc,
+    pub xpath_eval_proto: Gc,
     pub io_proto: Gc,
     /// `Attr` und `NamedNodeMap` — `el.attributes` haengt beide aneinander.
     pub attr_proto: Gc,
@@ -664,6 +667,13 @@ pub struct Interp {
     /// Die angemeldeten `ResizeObserver` und `IntersectionObserver`.
     /// Beide werden in `set_geometry` ausgewertet — dort, wo der Wirt sagt,
     /// wie die Seite JETZT steht.
+    /// Der zuletzt geparste XPath-Ausdruck, gemerkt unter seinem Quelltext.
+    ///
+    /// `createExpression` gibt es genau deshalb: eine Seite parst EINEN
+    /// Ausdruck beim Laden und wertet ihn danach oft aus (htmx tut es bei
+    /// jedem `process`). Ein Eintrag reicht dafuer vollstaendig, und mehr
+    /// waere eine Tabelle, die niemand raeumt.
+    pub xpath_memo: Option<(alloc::string::String, alloc::rc::Rc<super::xpath::XPath>)>,
     pub resize_obs: Vec<super::dombind::ResizeObs>,
     pub inter_obs: Vec<super::dombind::InterObs>,
     /// Breite und Hoehe des Sichtfelds, wie `set_viewport` sie kennt — der
@@ -808,7 +818,8 @@ impl Interp {
                  cookies: String::new(), cookie_sets: Vec::new(), style_ctx: None,
                  history_ops: Vec::new(), history_state: Value::Null, history_len: 1.0,
                  nav: None, loc_href: String::from("about:blank"),
-                 observers: Vec::new(), resize_obs: Vec::new(), inter_obs: Vec::new(),
+                 observers: Vec::new(), xpath_memo: None,
+                 resize_obs: Vec::new(), inter_obs: Vec::new(),
                  viewport: (0.0, 0.0), scroll_want: None,
                  vm_ran: 0, vm_declined: 0, vm_decline: None, vm_off: false,
                  func_chunks: HashMap::new(), func_declines: HashMap::new(), pending_labels: Vec::new(), vm_ops: 0, hints_ok: true, vm_calls: 0, vm_calls_native: 0, vm_calls_slow: 0,
