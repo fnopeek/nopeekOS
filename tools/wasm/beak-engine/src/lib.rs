@@ -22,6 +22,7 @@ pub mod color;
 pub mod css;
 pub mod dom;
 pub mod fonts;
+pub mod gsub;
 pub mod forms;
 pub mod ico;
 pub mod image;

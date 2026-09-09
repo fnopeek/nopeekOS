@@ -9,6 +9,7 @@
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use fontdue::Metrics;
+use crate::fonts::Face;
 use hashbrown::HashMap;
 
 use crate::fonts::Fonts;
@@ -1211,12 +1212,34 @@ impl Engine {
         let mut pen = x as f32;
         // One borrow for the whole run instead of three per character.
         let mut cache = self.glyphs.borrow_mut();
-        for ch in text.chars() {
-            let key = (ch as u32, size.to_bits(), face);
-            let (m, cov) = cache.entry(key).or_insert_with(|| font.rasterize(ch, size));
+        // **Dieselbe Regel wie beim Messen, sonst landen die Glyphen neben
+        // dem Kasten, den die Zeile reserviert hat** — Ligaturen ausser bei
+        // `letter-spacing`, das sie laut css-text-3 §8.2 aufbricht.
+        // `shape` gibt je Glyphe die Byte-Spanne der Quelle, und daraus kommt
+        // die Laufweite, die das Layout gerechnet hat.
+        let ligated = sp.0 == 0.0 && font.ligatures().is_some();
+        let run: Vec<(u32, f32)> = if ligated {
+            font.shape(text)
+                .into_iter()
+                .map(|(g, at, n)| {
+                    let extra: f32 = text[at..at + n].chars().map(|c| crate::layout::char_spacing(c, sp)).sum();
+                    // Der Glyphenspeicher unterscheidet Zeichen von Index am
+                    // hohen Bit: sonst kollidierte Glyphe 65 mit `A`.
+                    (g as u32 | 0x8000_0000, extra)
+                })
+                .collect()
+        } else {
+            text.chars().map(|c| (c as u32, crate::layout::char_spacing(c, sp))).collect()
+        };
+        for (unit, extra) in run {
+            let key = (unit, size.to_bits(), face);
+            let (m, cov) = cache.entry(key).or_insert_with(|| match unit & 0x8000_0000 {
+                0 => font.rasterize(char::from_u32(unit).unwrap_or('\u{FFFD}'), size),
+                _ => font.rasterize_indexed((unit & 0x7FFF_FFFF) as u16, size),
+            });
             let gx0 = pen as i32 + m.xmin;
             let gy0 = baseline - m.ymin - m.height as i32;
-            pen += m.advance_width + crate::layout::char_spacing(ch, sp);
+            pen += m.advance_width + extra;
             // Clip the glyph box against the buffer once; the inner loop then
             // walks a row by offset and never re-tests a bound.
             let (cx0, cx1) = (gx0.max(0), (gx0 + m.width as i32).min(w));
