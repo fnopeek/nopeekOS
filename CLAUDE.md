@@ -48,9 +48,20 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-09 · beak 0.140.0 · Kernel 0.329.0** (Rest: `git log`)
+**Stand 2026-09-09 · beak 0.141.0 · Kernel 0.329.0** (Rest: `git log`)
 
-**▶ Als nächstes: die Ligaturen (GSUB).** Shadow DOM bleibt gemessen KEINE
+**0.141.0: GSUB-Ligaturen.** Eine Symbolschrift bildet ihr Zeichen als
+Ligatur — `<i class="fos-icon">home</i>` mass 1 px statt 24, weil die vier
+Buchstaben je eine leere Glyphe sind. fontdue *substituiert nicht* (kein
+Shaper, sagt es selbst); `src/gsub.rs` liest die Ligaturtabelle über
+`ttf-parser`, das ohnehin im Baum liegt. `Fonts::pick` gibt jetzt ein `Face`
+mit Schrift UND Ligaturen, und geformt wird an allen vier Textstellen — sonst
+misst man das eine und malt das andere. `letter-spacing` unterdrückt
+Ligaturen (css-text-3 §8.2). Der allokationsfreie Schnellpfad bleibt für jede
+Schrift ohne GSUB, und dass die sechs eingebauten keine haben, ist jetzt ein
+Test. Werkzeug: `examples/ligcheck.rs`.
+
+**▶ Als nächstes: offen — die benannte Liste ist abgearbeitet.** Shadow DOM bleibt gemessen KEINE
 Web-Anforderung, sondern die Bauweise EINER Seite: 89 % der 906 Aufrufe
 kommen von MDN allein, und in allen sechzehn Korpusseiten (jede Google-Seite
 eingeschlossen) steht null Shadow DOM. Rangliste:
