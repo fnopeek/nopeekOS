@@ -37,6 +37,7 @@ pub mod promise;
 pub mod random;
 pub mod proxy;
 pub mod url;
+pub mod xpath;
 pub mod regexp;
 pub mod value;
 

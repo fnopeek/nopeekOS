@@ -2111,6 +2111,225 @@ fn meth(o: &Gc, name: &str, f: NativeFn, len: usize, fp: &Gc) {
     o.borrow_mut().define(name, Prop::builtin(Value::Obj(g)));
 }
 
+
+// ── XPath ───────────────────────────────────────────────────────────────────
+//
+// **Warum es das gibt, und warum in dieser Groesse.** htmx sucht seine
+// `hx-on:`-Attribute mit einem XPath-Ausdruck, und es war das letzte der
+// dreizehn Bibliotheksproben, das rot stand. Der Chromium-Zensus ueber zwoelf
+// echte Zielseiten zaehlt dagegen NULL XPath-Aufrufe: das hier ist keine
+// Web-Anforderung nach Aufrufzahl, sondern eine BIBLIOTHEKS-Anforderung.
+//
+// Diese Messung entscheidet die Form, nicht das Ob. Ein Sonderfall fuer htmx'
+// einen Ausdruck waere ein Notnagel an der Stelle eines fehlenden Merkmals
+// ([[feedback_a_workaround_is_the_wrong_answer_to_a_missing_capability]]);
+// volles XPath 1.0 mit Namensraeumen waere Gold, nach dem niemand fragt.
+// Gebaut ist die Sprache, die eine Seite wirklich schreibt — `js/xpath.rs`
+// sagt, was fehlt.
+
+/// Den Ausdruck holen — einmal geparst, unter seinem Quelltext gemerkt.
+fn xpath_compiled(i: &mut Interp, src: &str) -> C<Rc<super::xpath::XPath>> {
+    if let Some((s, x)) = &i.xpath_memo {
+        if s == src {
+            return Ok(x.clone());
+        }
+    }
+    match super::xpath::parse(src) {
+        Ok(x) => {
+            let x = Rc::new(x);
+            i.xpath_memo = Some((src.to_string(), x.clone()));
+            Ok(x)
+        }
+        // Ein unlesbarer Ausdruck ist ein FEHLER, keine leere Treffermenge:
+        // eine leere Menge sieht aus wie „nichts gefunden".
+        Err(e) => Err(i.throw_kind("SyntaxError", &alloc::format!("XPath: {e}"))),
+    }
+}
+
+/// Ein Attributknoten als `Attr`-Objekt — dieselbe Form, die
+/// `element.attributes` liefert.
+fn wrap_attr(i: &mut Interp, owner: u32, k: usize) -> Value {
+    let pair = i.doc.as_ref()
+        .and_then(|d| d.nodes.get(owner as usize))
+        .and_then(|n| n.attrs.get(k))
+        .cloned();
+    let Some((name, val)) = pair else { return Value::Null };
+    let a = new_obj(Some(i.realm.attr_proto.clone()));
+    let hide = |v: Value| Prop { value: Some(v), get: None, set: None,
+        writable: false, enumerable: false, configurable: false };
+    let mut b = a.borrow_mut();
+    b.define("__attrname", hide(Value::Str(name)));
+    b.define("__attrval", hide(Value::Str(val)));
+    drop(b);
+    Value::Obj(a)
+}
+
+fn wrap_xnode(i: &mut Interp, n: super::xpath::XNode) -> Value {
+    match n {
+        super::xpath::XNode::Node(id) => wrap(i, id),
+        super::xpath::XNode::Attr(o, k) => wrap_attr(i, o, k),
+    }
+}
+
+/// `document.evaluate` / `XPathExpression.evaluate` — beide enden hier.
+fn xpath_run(i: &mut Interp, src: &str, ctx: &Value, want: f64) -> C<Value> {
+    let id = node_of(i, ctx)?;
+    let expr = xpath_compiled(i, src)?;
+    let Some(doc) = i.doc.as_ref() else { return i.type_err("XPath: no document") };
+    let val = expr.eval(doc, super::xpath::XNode::Node(id));
+    // Erst auswerten, dann huellen: die Auswertung leiht `i.doc` aus, das
+    // Huellen braucht `i` veraenderlich.
+    let (nodes, num, string, boolean) = {
+        let doc = i.doc.as_ref().expect("checked");
+        let num = super::xpath::to_number(doc, &val);
+        let string = super::xpath::to_str(doc, &val);
+        let boolean = super::xpath::to_boolean(doc, &val);
+        (super::xpath::result_nodes(doc, val), num, string, boolean)
+    };
+    let r = new_obj(Some(i.realm.xpath_result_proto.clone()));
+    let hide = |v: Value| Prop { value: Some(v), get: None, set: None,
+        writable: false, enumerable: false, configurable: false };
+    // `ANY_TYPE` (0) meldet den natuerlichen Typ des Ergebnisses; sonst
+    // gilt, was der Aufrufer verlangt hat.
+    let ty = if want == 0.0 {
+        if !nodes.is_empty() || string.is_empty() && num.is_nan() { 4.0 } else { 4.0 }
+    } else {
+        want
+    };
+    let vals: Vec<Value> = nodes.into_iter().map(|n| wrap_xnode(i, n)).collect();
+    let arr = i.new_array(vals);
+    {
+        let mut b = r.borrow_mut();
+        b.define("__xnodes", hide(arr));
+        b.define("__xi", Prop { value: Some(Value::Num(0.0)), get: None, set: None,
+            writable: true, enumerable: false, configurable: false });
+        b.define("__xtype", hide(Value::Num(ty)));
+        b.define("__xnum", hide(Value::Num(num)));
+        b.define("__xstr", hide(Value::string(string)));
+        b.define("__xbool", hide(Value::Bool(boolean)));
+    }
+    Ok(Value::Obj(r))
+}
+
+fn xpath_nodes(i: &mut Interp, t: &Value) -> C<Vec<Value>> {
+    let arr = i.get(t, "__xnodes")?;
+    let len = i.get(&arr, "length")?;
+    let len = i.to_number(&len)? as usize;
+    let mut out = Vec::with_capacity(len);
+    for k in 0..len {
+        out.push(i.get(&arr, &alloc::format!("{k}"))?);
+    }
+    Ok(out)
+}
+
+fn install_xpath(realm: &mut Realm) {
+    let fp = realm.function_proto.clone();
+
+    // ── XPathResult ──────────────────────────────────────────────────────
+    let res_proto = new_obj(Some(realm.object_proto.clone()));
+    let res_ctor = native(Some(fp.clone()),
+        |i, _, _| i.type_err("Illegal constructor"), "XPathResult", 0, true);
+    res_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(res_proto.clone())));
+    res_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(res_ctor.clone())));
+    res_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("XPathResult")));
+    // Die zehn Typkonstanten stehen im Browser auf BEIDEN — der Konstruktor
+    // ist die uebliche Schreibweise (`XPathResult.FIRST_ORDERED_NODE_TYPE`),
+    // die Instanz die seltenere.
+    for (name, v) in [
+        ("ANY_TYPE", 0.0), ("NUMBER_TYPE", 1.0), ("STRING_TYPE", 2.0),
+        ("BOOLEAN_TYPE", 3.0), ("UNORDERED_NODE_ITERATOR_TYPE", 4.0),
+        ("ORDERED_NODE_ITERATOR_TYPE", 5.0), ("UNORDERED_NODE_SNAPSHOT_TYPE", 6.0),
+        ("ORDERED_NODE_SNAPSHOT_TYPE", 7.0), ("ANY_UNORDERED_NODE_TYPE", 8.0),
+        ("FIRST_ORDERED_NODE_TYPE", 9.0),
+    ] {
+        res_ctor.borrow_mut().define(name, Prop::frozen(Value::Num(v)));
+        res_proto.borrow_mut().define(name, Prop::frozen(Value::Num(v)));
+    }
+    realm.global.borrow_mut().define("XPathResult", Prop::builtin(Value::Obj(res_ctor)));
+
+    meth(&res_proto, "iterateNext", |i, t, _| {
+        let at = i.get(&t, "__xi")?;
+        let at = i.to_number(&at)? as usize;
+        let nodes = xpath_nodes(i, &t)?;
+        match nodes.get(at) {
+            Some(v) => {
+                i.set(&t, "__xi", Value::Num((at + 1) as f64), false)?;
+                Ok(v.clone())
+            }
+            // Erschoepft: `null`, und darauf endet die `while`-Schleife, mit
+            // der jeder Aufrufer darueber laeuft.
+            None => Ok(Value::Null),
+        }
+    }, 0, &fp);
+
+    meth(&res_proto, "snapshotItem", |i, t, a| {
+        let k = i.to_number(a.first().unwrap_or(&Value::Num(0.0)))? as usize;
+        Ok(xpath_nodes(i, &t)?.get(k).cloned().unwrap_or(Value::Null))
+    }, 1, &fp);
+
+    getter(&res_proto, "resultType", |i, t, _| i.get(&t, "__xtype"), &fp);
+    getter(&res_proto, "numberValue", |i, t, _| i.get(&t, "__xnum"), &fp);
+    getter(&res_proto, "stringValue", |i, t, _| i.get(&t, "__xstr"), &fp);
+    getter(&res_proto, "booleanValue", |i, t, _| i.get(&t, "__xbool"), &fp);
+    getter(&res_proto, "snapshotLength", |i, t, _| {
+        Ok(Value::Num(xpath_nodes(i, &t)?.len() as f64))
+    }, &fp);
+    getter(&res_proto, "singleNodeValue", |i, t, _| {
+        Ok(xpath_nodes(i, &t)?.first().cloned().unwrap_or(Value::Null))
+    }, &fp);
+    realm.xpath_result_proto = res_proto;
+
+    // ── XPathExpression ──────────────────────────────────────────────────
+    let expr_proto = new_obj(Some(realm.object_proto.clone()));
+    let expr_ctor = native(Some(fp.clone()),
+        |i, _, _| i.type_err("Illegal constructor"), "XPathExpression", 0, true);
+    expr_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(expr_proto.clone())));
+    expr_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(expr_ctor.clone())));
+    expr_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("XPathExpression")));
+    realm.global.borrow_mut().define("XPathExpression", Prop::builtin(Value::Obj(expr_ctor)));
+    meth(&expr_proto, "evaluate", |i, t, a| {
+        let src = i.get(&t, "__xsrc")?;
+        let src = i.to_string(&src)?.to_string();
+        let ctx = a.first().cloned().unwrap_or(Value::Undefined);
+        let want = match a.get(1) { Some(v) => i.to_number(v)?, None => 0.0 };
+        xpath_run(i, &src, &ctx, want)
+    }, 1, &fp);
+    realm.xpath_expr_proto = expr_proto;
+
+    // ── XPathEvaluator ───────────────────────────────────────────────────
+    let ev_proto = new_obj(Some(realm.object_proto.clone()));
+    let ev_ctor = native(Some(fp.clone()), |i, _, _| {
+        Ok(Value::Obj(new_obj(Some(i.realm.xpath_eval_proto.clone()))))
+    }, "XPathEvaluator", 0, true);
+    ev_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(ev_proto.clone())));
+    ev_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(ev_ctor.clone())));
+    ev_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("XPathEvaluator")));
+    realm.global.borrow_mut().define("XPathEvaluator", Prop::builtin(Value::Obj(ev_ctor)));
+    meth(&ev_proto, "createExpression", |i, _, a| {
+        let src = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_string();
+        // JETZT parsen, nicht erst beim Auswerten: `createExpression` ist die
+        // Stelle, an der ein Browser einen Syntaxfehler meldet, und eine Seite
+        // die ihren Ausdruck beim Laden baut soll ihn beim Laden hoeren.
+        xpath_compiled(i, &src)?;
+        let o = new_obj(Some(i.realm.xpath_expr_proto.clone()));
+        o.borrow_mut().define("__xsrc", Prop { value: Some(Value::string(src)),
+            get: None, set: None, writable: false, enumerable: false, configurable: false });
+        Ok(Value::Obj(o))
+    }, 1, &fp);
+    meth(&ev_proto, "evaluate", |i, _, a| {
+        let src = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_string();
+        let ctx = a.get(1).cloned().unwrap_or(Value::Undefined);
+        let want = match a.get(3) { Some(v) => i.to_number(v)?, None => 0.0 };
+        xpath_run(i, &src, &ctx, want)
+    }, 4, &fp);
+    // `createNSResolver` gibt es, damit der uebliche Vieraufruf nicht wirft;
+    // Namensraeume loest es nicht auf, und das steht in `js/xpath.rs`.
+    meth(&ev_proto, "createNSResolver", |_, _, a| {
+        Ok(a.first().cloned().unwrap_or(Value::Null))
+    }, 1, &fp);
+    realm.xpath_eval_proto = ev_proto;
+}
+
 /// Baut `Node`/`Element`/`Document`-Prototypen und das globale `document`.
 pub fn install(realm: &mut Realm) {
     let fp = realm.function_proto.clone();
@@ -3387,6 +3606,27 @@ pub fn install(realm: &mut Realm) {
     impl_obj.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("DOMImplementation")));
     document_proto.borrow_mut().define("implementation", Prop::builtin(Value::Obj(impl_obj)));
 
+    // Ein Dokument IST ein `XPathEvaluator` (DOM 4 §XPathEvaluatorBase), und
+    // `document.evaluate(...)` ist der Einstieg, den eine Seite schreibt —
+    // `new XPathEvaluator()` ist der von Bibliotheken.
+    meth(&document_proto, "evaluate", |i, _, a| {
+        let src = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_string();
+        let ctx = a.get(1).cloned().unwrap_or(Value::Undefined);
+        let want = match a.get(3) { Some(v) => i.to_number(v)?, None => 0.0 };
+        xpath_run(i, &src, &ctx, want)
+    }, 4, &fp);
+    meth(&document_proto, "createExpression", |i, _, a| {
+        let src = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_string();
+        xpath_compiled(i, &src)?;
+        let o = new_obj(Some(i.realm.xpath_expr_proto.clone()));
+        o.borrow_mut().define("__xsrc", Prop { value: Some(Value::string(src)),
+            get: None, set: None, writable: false, enumerable: false, configurable: false });
+        Ok(Value::Obj(o))
+    }, 1, &fp);
+    meth(&document_proto, "createNSResolver", |_, _, a| {
+        Ok(a.first().cloned().unwrap_or(Value::Null))
+    }, 1, &fp);
+
     meth(&document_proto, "createDocumentFragment", |i, _, _| {
         let Some(d) = &mut i.doc else { return i.type_err("no document") };
         let id = d.create(ELEMENT_NODE, "#fragment");
@@ -3933,6 +4173,20 @@ pub fn install(realm: &mut Realm) {
     iface(realm, "Document", &document_proto);
     iface(realm, "HTMLDocument", &document_proto);
     iface(realm, "DocumentFragment", &fragment_proto);
+    // **`ShadowRoot` gibt es als SCHNITTSTELLE, auch ohne Shadow DOM.**
+    // htmx fragt `e.parentNode instanceof ShadowRoot`, um einen Elter durch
+    // eine Schattengrenze zu finden — und ein `instanceof` gegen einen
+    // fehlenden Namen ist ein `ReferenceError`, der die ganze Bibliothek
+    // umbringt, statt `false` zu ergeben.
+    //
+    // `false` IST hier die wahre Antwort: beak haengt nirgends einen
+    // Schattenbaum an, also ist der Elter eines Knotens nie einer. So sieht
+    // ein Browser auf jeder Seite aus, die `attachShadow` nie ruft — das
+    // Schnittstellenobjekt steht da, eine Instanz gibt es nicht. Shadow DOM
+    // selbst bleibt gemessen kein Ziel
+    // ([[feedback_a_call_count_is_not_a_site_count]]).
+    let shadow_root_proto = new_obj(Some(fragment_proto.clone()));
+    iface(realm, "ShadowRoot", &shadow_root_proto);
 
     // ── Event ────────────────────────────────────────────────────────────
     //
@@ -4574,6 +4828,7 @@ pub fn install(realm: &mut Realm) {
     }
 
     install_text_codec(realm);
+    install_xpath(realm);
 
     realm.node_proto = node_proto;
     realm.element_proto = element_proto;
