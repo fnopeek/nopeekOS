@@ -304,6 +304,7 @@ pub struct Realm {
     /// die beiden Kasten-Beobachter.
     pub mo_proto: Gc,
     pub ro_proto: Gc,
+    pub formdata_proto: Gc,
     pub intl_dtf_proto: Gc,
     pub intl_nf_proto: Gc,
     pub xpath_result_proto: Gc,
