@@ -4379,7 +4379,17 @@ family: st.family,
             Some(v) if st.box_border => (v as i32 - chrome_x).max(0),
             Some(v) => v as i32,
             None => {
-                let (mut pref, mut min) = self.intrinsic_width_nodes(&el.children, st);
+                // Measured in the SAME formatting context the contents will be
+                // laid out in — a flex row's items sit side by side, so its
+                // max-content width is their SUM, not the widest of them.
+                // Measured as block content, `<button class=flex><svg/><span>Mit
+                // Text</span></button>` came out one item wide and broke its
+                // own label onto two lines.
+                let (mut pref, mut min) = match st.display {
+                    Display::Flex | Display::InlineFlex => self.intrinsic_flex(el, st),
+                    Display::Grid => self.intrinsic_grid(el, st),
+                    _ => self.intrinsic_width_nodes(&el.children, st),
+                };
                 // A generated box starts its own line, so it is the WIDEST
                 // contribution, not one added to the others.
                 for p in [before, after].into_iter().flatten() {
@@ -6132,6 +6142,32 @@ family: st.family,
     fn intrinsic_flex(&mut self, el: &'a Element, st: &ComputedStyle) -> (f32, f32) {
         let kids = self.flow_kids(el, st);
         let (mut pref, mut min) = (0.0f32, 0.0f32);
+        // css-flexbox-1 §4: a bare text run between the children is an
+        // ANONYMOUS flex item. `flow_kids` reports elements only, so it counted
+        // for nothing here — the same gap `layout_flex` already closed on the
+        // LAYOUT side, and the two then disagreed about the same box:
+        // `<button class=flex><svg/>Speichern</button>` measured one icon wide
+        // and painted an `S`. `anon_text_box` lays such a run on ONE line, so
+        // its min-content is its max-content — keeping the two in step matters
+        // more than the wrap it does not do ([[feedback_intrinsic_shared_path]]).
+        let mut anon = 0usize;
+        for n in &el.children {
+            let Node::Text(t) = n else { continue };
+            let t = t.trim();
+            if t.is_empty() {
+                continue;
+            }
+            anon += 1;
+            let font = self.fonts.pick(st.bold, st.italic, st.mono, st.family);
+            let p = measure_sp(font, t, st.font_px, (st.letter_spacing, st.word_spacing));
+            if st.flex_row {
+                pref += p;
+                if st.flex_wrap { min = min.max(p) } else { min += p }
+            } else {
+                pref = pref.max(p);
+                min = min.max(p);
+            }
+        }
         for (ce, cs) in &kids {
             let (p, m) = self.child_outer(ce, cs);
             if st.flex_row {
@@ -6144,8 +6180,9 @@ family: st.family,
                 min = min.max(m);
             }
         }
-        if st.flex_row && kids.len() > 1 {
-            let g = st.grid_col_gap.px(0.0).unwrap_or(0.0) * (kids.len() as f32 - 1.0);
+        let items = kids.len() + anon;
+        if st.flex_row && items > 1 {
+            let g = st.grid_col_gap.px(0.0).unwrap_or(0.0) * (items as f32 - 1.0);
             pref += g;
             if !st.flex_wrap { min += g }
         }
