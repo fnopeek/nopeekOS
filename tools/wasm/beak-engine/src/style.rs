@@ -1797,6 +1797,11 @@ pub fn resolve_in(
             | ControlKind::File | ControlKind::Select)
     ) {
         s.box_border = true;
+        // …and `text-align: center` (HTML rendering §15.5.1). It is the button
+        // sheet's own rule, and with the children laid out it is what actually
+        // centres the label — the painter used to do it by hand, which no
+        // child box could inherit.
+        s.text_align = crate::style::TextAlign::Center;
     }
 
     // HTML's `dir` attribute is a presentational hint for `direction`: it sits
