@@ -48,7 +48,7 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-09 · beak 0.146.0 · Kernel 0.329.0** (Rest: `git log`)
+**Stand 2026-09-09 · beak 0.148.0 · Kernel 0.330.0** (Rest: `git log`)
 
 **0.141.0: GSUB-Ligaturen.** Eine Symbolschrift bildet ihr Zeichen als
 Ligatur — `<i class="fos-icon">home</i>` mass 1 px statt 24, weil die vier
@@ -60,6 +60,22 @@ misst man das eine und malt das andere. `letter-spacing` unterdrückt
 Ligaturen (css-text-3 §8.2). Der allokationsfreie Schnellpfad bleibt für jede
 Schrift ohne GSUB, und dass die sechs eingebauten keine haben, ist jetzt ein
 Test. Werkzeug: `examples/ligcheck.rs`.
+
+**0.147.0 / Kernel 0.330.0: jeder Tastendruck in der Adresszeile ging an
+den DNS.** Florians Log zeigte sechzehn Abfragen, jede einen Buchstaben
+kürzer als die davor — kein Netzfehler, sondern jemand, der die Adresse
+rückwärts löscht. `URL_BUF` war die Adresse des DOKUMENTS **und** der Inhalt
+des Textfelds; `Event::InputChange` rief `set_url`, und das meldet dem Kernel
+den Netzkontext, den der SELBST auflöst. Zuerst ein Datenschutzfehler: jedes
+Präfix einer Eingabe ging an den Auflöser. Und zweitens ein Loch in der
+Reichweiten-Grenze — `ctx.net_reach` ist die Klasse, gegen die JEDE Anfrage
+der laufenden Seite geprüft wird, und `192.168.1.1` in die Zeile zu tippen
+(ohne Enter) öffnete der offenen öffentlichen Seite das Heimnetz. Die Zeile
+hat jetzt ihren eigenen Puffer. Im Resolver dazu: die Fehlermeldung nannte
+„5,5 s (4 Versuche)" als KONSTANTE, während die Antwort auf Bein 1 in
+Millisekunden kam — und ein „den Namen gibt es nicht" wird jetzt gemerkt,
+eine Zeitüberschreitung ausdrücklich NICHT. **0.148.0** räumt die zwei
+Meldungen auf, die dabei als Fehler gelesen wurden und keine waren.
 
 **0.144–0.146: die Komponentengalerien, und was sie fand.** Florians
 Vorschlag: „tailwind css komplett holen und dann jedes element durchspielen..
