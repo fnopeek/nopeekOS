@@ -699,18 +699,23 @@ fn translate_offset(st: &ComputedStyle, box_w: i32, box_h: i32) -> (i32, i32) {
     (at(tx, box_w), at(ty, box_h))
 }
 
-fn rel_offset(st: &ComputedStyle, cb_w: f32) -> (i32, i32) {
+fn rel_offset(st: &ComputedStyle, cb_w: f32, cb_h: Option<f32>) -> (i32, i32) {
     let dx = st
         .left
         .px(cb_w)
         .map(|l| l as i32)
         .or_else(|| st.right.px(cb_w).map(|r| -(r as i32)))
         .unwrap_or(0);
-    let dy = st
-        .top
-        .px(cb_w)
+    // `top`/`bottom` are of the containing block's HEIGHT (CSS 2.1 §9.3.2), not
+    // its width. Both axes read `cb_w` here, so `top: 100%` on a 100px-tall box
+    // in an 800px-wide page moved it 800px down — off the bottom of everything.
+    // A containing block with no definite height leaves the percentage
+    // unresolvable and every engine takes it as zero.
+    // [[feedback_a_percentage_needs_its_own_axis]]
+    let vert = |l: Len| l.px(cb_h.unwrap_or(0.0));
+    let dy = vert(st.top)
         .map(|t| t as i32)
-        .or_else(|| st.bottom.px(cb_w).map(|b| -(b as i32)))
+        .or_else(|| vert(st.bottom).map(|b| -(b as i32)))
         .unwrap_or(0);
     (dx, dy)
 }
@@ -2153,6 +2158,42 @@ impl<'a> Ctx<'a> {
         st.position != Position::Static && matches!(st.z_index, ZIndex::Value(_)) && self.stack_depth == 0
     }
 
+    /// Resolve percentage `padding` and vertical `margin` against the containing
+    /// block's **width**, once, at the entry to laying the box out — the same
+    /// shape as `resolve_pct_heights`, so everything downstream keeps reading
+    /// plain pixels. Both axes take the width (CSS 2.1 §8.1, §8.3): a
+    /// percentage top padding is a fraction of the INLINE size, which is what
+    /// makes `padding-top: 56.25%` reserve a 16:9 box.
+    ///
+    /// Before this the vertical ones fell to zero and the horizontal ones too —
+    /// `pad_*` is a resolved `f32`, and the cascade that fills it cannot see a
+    /// containing block. Only the `margin`s on the inline axis were `Len` and
+    /// so survived to layout, which is why `margin-left: 50%` worked and
+    /// `padding-left: 50%` did not.
+    fn resolve_pct_box(st: &ComputedStyle, cb_w: f32) -> Option<ComputedStyle> {
+        if st.pct_pad == [0.0; 4] && st.pct_margin_tb == [0.0; 2] {
+            return None;
+        }
+        let mut out = *st;
+        // The stored px is the CONSTANT half of the value (`calc(10% + 5px)`
+        // keeps its 5px), so the percentage is added to it, not put in its
+        // place.
+        let at = |p: f32| p / 100.0 * cb_w;
+        let pads = [&mut out.pad_top, &mut out.pad_right, &mut out.pad_bottom, &mut out.pad_left];
+        for (i, dst) in pads.into_iter().enumerate() {
+            if st.pct_pad[i] != 0.0 {
+                *dst = (*dst + at(st.pct_pad[i])).max(0.0);
+            }
+        }
+        if st.pct_margin_tb[0] != 0.0 {
+            out.margin_top += at(st.pct_margin_tb[0]);
+        }
+        if st.pct_margin_tb[1] != 0.0 {
+            out.margin_bottom += at(st.pct_margin_tb[1]);
+        }
+        Some(out)
+    }
+
     /// Resolve percentage `height`/`min-`/`max-height` against the containing
     /// block ONCE, at the entry to laying the box out. Everything downstream
     /// then matches on `Len::Px` exactly as before — which is the point: the
@@ -3211,7 +3252,7 @@ impl<'a> Ctx<'a> {
             }
             // `position:relative` stays in flow but its paint shifts by top/left.
             if st.position == Position::Relative {
-                let (dx, dy) = rel_offset(&st, w as f32);
+                let (dx, dy) = rel_offset(&st, w as f32, content_height_of(parent, parent.height));
                 if dx != 0 || dy != 0 {
                     self.shift_ops(&m0, dx, dy);
                 }
@@ -3652,6 +3693,8 @@ family: ps.family,
     /// left open for the next sibling. When `isolated`, `base_y` is the
     /// border-box top and margins are committed, not propagated.
     fn flow_block_impl(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, base_y: i32, incoming: Collapse, isolated: bool) -> BoxOut {
+        let boxed = Self::resolve_pct_box(st, w as f32);
+        let st = boxed.as_ref().unwrap_or(st);
         let resolved = self.resolve_pct_heights(st);
         let st = resolved.as_ref().unwrap_or(st);
         let (mut cw, off_left) = resolve_block_h(st, w as f32);
@@ -4966,7 +5009,7 @@ family: st.family,
                 let part = self.part_start();
                 y = self.layout_box(e, &cs, x, w, y);
                 if cs.position == Position::Relative {
-                    let (dx, dy) = rel_offset(&cs, w as f32);
+                    let (dx, dy) = rel_offset(&cs, w as f32, content_height_of(st, st.height));
                     if dx != 0 || dy != 0 {
                         self.shift_ops(&part, dx, dy);
                     }
@@ -5108,10 +5151,10 @@ family: st.family,
     /// background but never a border — the separated model ignores border
     /// properties on them (CSS2.1 §17.6.1), and the collapsed model resolves
     /// every grid line at the cells.
-    fn finish_table_part(&mut self, cs: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, part: SpecMark, cb_w: f32) {
+    fn finish_table_part(&mut self, cs: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, part: SpecMark, cb_w: f32, cb_h: Option<f32>) {
         self.insert_bg(cs, x, y, w, h, part.ops);
         if cs.position == Position::Relative {
-            let (dx, dy) = rel_offset(cs, cb_w);
+            let (dx, dy) = rel_offset(cs, cb_w, cb_h);
             if dx != 0 || dy != 0 {
                 self.shift_ops(&part, dx, dy);
             }
@@ -5326,7 +5369,7 @@ family: st.family,
         for (ri, row) in rows.iter().enumerate() {
             if let Some((seq, gst, part, top)) = group {
                 if row.group.map(|(g, _)| g.seq) != Some(seq) {
-                    self.finish_table_part(&gst, x, top, grid_w, last_bottom - top, part, grid_w as f32);
+                    self.finish_table_part(&gst, x, top, grid_w, last_bottom - top, part, grid_w as f32, Some((last_bottom - top) as f32));
                     group = None;
                 }
             }
@@ -5404,6 +5447,16 @@ family: st.family,
                 if cs.position != Position::Static {
                     self.cb = (*content_x, y, *content_w, Some(row_h), None);
                 }
+                // A cell IS a definite containing block for its children by the
+                // time it is painted: the row height is resolved. Without this
+                // a `height: 100%` child of a `height: 100px` cell measured
+                // nothing at all and painted NOTHING — the commonest way a page
+                // fills a table cell with a coloured block.
+                let cell_cb_h = self.cb_h;
+                let (_, _, cbt, cbb) = cell_borders(cs, collapse);
+                self.cb_h = Some(
+                    (row_h as f32 - cbt - cbb - cs.pad_top - cs.pad_bottom).max(0.0),
+                );
                 match row.cells[c].cell {
                     Cell::Real(e) => {
                         self.path.push(self.info(e));
@@ -5414,6 +5467,7 @@ family: st.family,
                         let _ = self.layout_children(nodes, cs, None, *content_x, *content_w, content_y);
                     }
                 }
+                self.cb_h = cell_cb_h;
                 self.cb = cell_cb;
                 // `vertical-align` in the row (CSS2.1 §17.5.3). The content was
                 // laid out at the cell's top; middle/bottom just slide the ops
@@ -5493,7 +5547,7 @@ family: st.family,
                 // after the decoration was inserted — unlike the `vertical-align`
                 // slide above, which moves the content inside a cell that stays.
                 if cs.position == Position::Relative {
-                    let (dx, dy) = rel_offset(cs, grid_w as f32);
+                    let (dx, dy) = rel_offset(cs, grid_w as f32, Some(row_h as f32));
                     if dx != 0 || dy != 0 {
                         self.shift_ops(&m0, dx, dy);
                     }
@@ -5502,7 +5556,7 @@ family: st.family,
             self.cb = outer_cb;
             self.path.truncate(row_depth);
             if let Some((_, rst)) = row.el {
-                self.finish_table_part(&rst, x, y, grid_w, row_h, row_part, grid_w as f32);
+                self.finish_table_part(&rst, x, y, grid_w, row_h, row_part, grid_w as f32, Some(row_h as f32));
             }
             prev_row = cells.iter().map(|(cs, cx, cw, _, _)| (*cs, *cx, *cw)).collect();
             prev_row_el = row.el.map(|(e, s)| (e.seq, s));
@@ -5510,7 +5564,7 @@ family: st.family,
             y = last_bottom + sy;
         }
         if let Some((_, gst, part, top)) = group {
-            self.finish_table_part(&gst, x, top, grid_w, last_bottom - top, part, grid_w as f32);
+            self.finish_table_part(&gst, x, top, grid_w, last_bottom - top, part, grid_w as f32, Some((last_bottom - top) as f32));
         }
         // The trailing gap belongs BETWEEN rows, not after the last one — the
         // caller adds the outer one.
@@ -6337,6 +6391,8 @@ family: st.family,
         }
         // The block path resolves percentage heights itself (it is entered
         // directly from the flow loop too); the other three come through here.
+        let boxed = Self::resolve_pct_box(st, w as f32);
+        let st = boxed.as_ref().unwrap_or(st);
         let resolved = self.resolve_pct_heights(st);
         let st = resolved.as_ref().unwrap_or(st);
         // `flow_block_impl` applies its own `filter` over its own op range —
