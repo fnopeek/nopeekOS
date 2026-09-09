@@ -522,12 +522,20 @@ struct Page {
     nav: u32,
     /// Stand des Baums, aus dem `forms` gebaut wurde.
     scripted: u64,
+    /// Fingerabdruck des zuletzt GEMELDETEN Bestands.
+    ///
+    /// `sync` laeuft nach jedem Skriptlauf und nach jedem Beobachter-Rueckruf,
+    /// nicht nur nach einer Navigation — der Kommentar unten sagte „once per
+    /// navigation", und am Geraet standen dieselben acht Zeilen achtmal
+    /// untereinander. Ein Bestand, der sich nicht geaendert hat, ist keine
+    /// Nachricht.
+    logged: u64,
 }
 
 impl Page {
     fn new() -> Page {
         Page { forms: forms::Forms { forms: Vec::new(), controls: Vec::new() },
-               state: FormState::default(), nav: 0, scripted: 0 }
+               state: FormState::default(), nav: 0, scripted: 0, logged: 0 }
     }
     /// Das Formularmodell nachziehen — nach einer Navigation ODER nachdem
     /// Skripte den Baum ersetzt haben.
@@ -568,10 +576,18 @@ impl Page {
     /// we misread — and from the outside they look identical. Three lines on
     /// the serial tell them apart, which a screenshot cannot: a picture shows
     /// the pixels, not who owns which control.
-    fn log_forms(&self) {
+    fn log_forms(&mut self) {
         if self.forms.controls.is_empty() {
             return;
         }
+        let mut fp = ((self.forms.forms.len() as u64) << 32) | self.forms.controls.len() as u64;
+        for c in self.forms.controls.iter().filter(|c| c.kind.is_submit()) {
+            fp = fp.rotate_left(7) ^ (c.seq as u64) ^ ((c.form.map_or(0, |f| f as u64 + 1)) << 20);
+        }
+        if fp == self.logged {
+            return;
+        }
+        self.logged = fp;
         let mut s = String::from("[beak] forms: ");
         push_i64(&mut s, self.forms.forms.len() as i64);
         s.push_str(", controls: ");
@@ -3173,8 +3189,18 @@ fn submit_form(engine: &Engine, page: &mut Page, activated: Option<u32>) -> bool
         // diagnosis: a button whose form we never resolved (nested outside
         // it, or owned by a `form=` attribute we do not read) versus a form
         // that submitted and came back wrong.
+        //
+        // **Ein Absendeknopf OHNE Formular tut laut HTML §4.10.6 nichts** —
+        // das ist die Regel, kein Fehler. Auf einer Anwendungsseite ist jeder
+        // `<button>` ohne `type` ein solcher Knopf, und die Meldung stand dort
+        // bei JEDEM Klick, als waere etwas kaputt.
         None => {
-            log("[beak] submit: kein zugehoeriges Formular");
+            let owned = activated
+                .and_then(|s| page.forms.get(s))
+                .is_some_and(|c| c.form.is_some());
+            if owned {
+                log("[beak] submit: Formular gefunden, aber keine Eingabe daraus");
+            }
             return false;
         }
     };
