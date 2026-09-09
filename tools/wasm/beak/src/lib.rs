@@ -920,6 +920,9 @@ enum NavStage {
     /// Blatt, das ankommt, laesst eine Komponente fertig bauen, und die haengt
     /// ihrerseits eins ein.
     Sheet,
+    /// Die `@import`-Blaetter der verlinkten Blaetter. Rundenweise wie `Mod`:
+    /// ein Blatt nennt seine eigenen Importe erst, wenn es da ist.
+    CssImport,
 }
 
 /// Handle of the navigation in flight, or -1.
@@ -1162,6 +1165,7 @@ fn nav_pump(engine: &Engine) -> bool {
         NavStage::Js => nav_scripts_arrived(engine),
         NavStage::Mod => nav_modules_arrived(engine),
         NavStage::Sheet => nav_sheets_arrived(engine),
+        NavStage::CssImport => nav_css_imports_arrived(engine),
     }
     true
 }
@@ -1209,6 +1213,14 @@ fn nav_document_arrived(engine: &Engine) {
 /// overlapping the round trips is worth the most. Bounded by CSS_CAP +
 /// MAX_CSS_LINKS.
 fn nav_begin_stylesheets(engine: &Engine, base: &str) {
+    // Eine abgebrochene Navigation darf der naechsten keine Blaetter
+    // hinterlassen ([[feedback_a_copy_is_a_second_semantics_waiting]]).
+    unsafe {
+        core::ptr::addr_of_mut!(NAV_CSS_PARTS).write(None);
+        core::ptr::addr_of_mut!(NAV_CSS_WANT).write(None);
+        core::ptr::addr_of_mut!(NAV_CSS_URLS).write(None);
+        core::ptr::addr_of_mut!(NAV_CSS_ROUNDS).write(0);
+    }
     let links = beak_engine::stylesheet_links(html_str());
     let mut urls: Vec<String> = Vec::new();
     for href in links.iter() {
@@ -1245,6 +1257,10 @@ fn nav_begin_stylesheets(engine: &Engine, base: &str) {
         core::ptr::addr_of_mut!(NAV_JOB).write(h);
         core::ptr::addr_of_mut!(NAV_CSS_COUNT).write(urls.len());
         core::ptr::addr_of_mut!(NAV_STAGE_MS).write(now_ms());
+        // An `@import` resolves against ITS OWN sheet's address, not the
+        // document's, so the addresses have to survive the round trip.
+        core::ptr::addr_of_mut!(NAV_CSS_URLS).write(Some(urls));
+        core::ptr::addr_of_mut!(NAV_CSS_ROUNDS).write(0);
     }
 }
 
@@ -1275,6 +1291,21 @@ static mut NAV_MOD_WANT: Option<Vec<String>> = None;
 static mut NAV_MOD_ROUNDS: usize = 0;
 /// Die Knoten der Stilblaetter, die in DIESER Runde unterwegs sind — in
 /// Bestellreihenfolge, damit die Antwort dem `<link>` zugeordnet werden kann.
+/// Die Blaetter der Seite in KASKADENREIHENFOLGE, waehrend die `@import`-Runden
+/// laufen: `(Adresse, Rumpf, schon nach Importen durchsucht)`. Ein Import wird
+/// VOR seinem Blatt eingefuegt — dort steht er in der Kaskade, weil ein
+/// `@import` wirkt, als staende sein Inhalt an seiner Stelle, und das ist vor
+/// allem, was danach im Blatt folgt.
+static mut NAV_CSS_URLS: Option<Vec<String>> = None;
+static mut NAV_CSS_PARTS: Option<Vec<(String, Vec<u8>, bool)>> = None;
+/// Welches Blatt jede Adresse der Runde in Arbeit angefordert hat.
+static mut NAV_CSS_WANT: Option<Vec<(usize, String)>> = None;
+static mut NAV_CSS_ROUNDS: usize = 0;
+/// Ein Blatt darf importieren, was importiert, was importiert — aber nicht
+/// endlos, und ein Ring darf die Navigation nicht anhalten.
+const MAX_IMPORT_ROUNDS: usize = 4;
+const MAX_IMPORT_SHEETS: usize = 64;
+
 static mut NAV_SHEET_NODES: Option<Vec<u32>> = None;
 static mut NAV_SHEET_ROUNDS: usize = 0;
 
@@ -1320,25 +1351,126 @@ fn nav_stylesheets_arrived(engine: &Engine) {
     let total = spans.iter().map(|(o, l)| o + l).max().unwrap_or(0);
     unsafe { scratch.set_len(total.min(CSS_CAP)) };
 
-    let dst = core::ptr::addr_of_mut!(CSS_BUF) as *mut u8;
-    let mut len = 0usize;
-    for (off, n) in spans {
-        if n == 0 || off + n > scratch.len() || len + n + 1 >= CSS_CAP {
-            if n > 0 && len + n + 1 >= CSS_CAP {
-                log(&alloc::format!("[beak] CSS buffer full at {len} B — dropped a {n} B sheet"));
-            }
+    // The bodies are kept as PARTS rather than written straight into
+    // `CSS_BUF`: an `@import` cascades ahead of the sheet that imported it, so
+    // the buffer can only be assembled once every round of imports is in.
+    let urls = unsafe { (*core::ptr::addr_of_mut!(NAV_CSS_URLS)).take() }.unwrap_or_default();
+    let mut parts: Vec<(String, Vec<u8>, bool)> = Vec::with_capacity(spans.len());
+    for (k, (off, n)) in spans.iter().copied().enumerate() {
+        if n == 0 || off + n > scratch.len() {
             continue;
         }
-        unsafe {
-            core::ptr::copy_nonoverlapping(scratch.as_ptr().add(off), dst.add(len), n);
-            len += n;
-            *dst.add(len) = b'\n';
-        }
-        len += 1;
+        let url = urls.get(k).cloned().unwrap_or_default();
+        parts.push((url, scratch[off..off + n].to_vec(), false));
     }
-    unsafe { core::ptr::addr_of_mut!(CSS_LEN).write(len) };
     log_ms("fetch stylesheets", now_ms() - unsafe { core::ptr::addr_of!(NAV_STAGE_MS).read() });
-    nav_finish(engine);
+    unsafe { core::ptr::addr_of_mut!(NAV_CSS_PARTS).write(Some(parts)) };
+    if !css_import_pump() {
+        css_assemble();
+        nav_finish(engine);
+    }
+}
+
+/// Start one round of `@import` fetches, if any sheet still has unexamined
+/// bytes. `true` when a round is in flight.
+///
+/// Round-based like the module graph: a sheet only names its own imports once
+/// it has arrived. `sandbox.nopeek.ch` is the shape this exists for — one
+/// `<link>` to a `main.css` that holds nothing but fifteen `@import`s, and
+/// every one of them is the actual design.
+fn css_import_pump() -> bool {
+    let rounds = unsafe { core::ptr::addr_of!(NAV_CSS_ROUNDS).read() };
+    let parts = unsafe { (*core::ptr::addr_of_mut!(NAV_CSS_PARTS)).as_mut() };
+    let Some(parts) = parts else { return false };
+    if rounds >= MAX_IMPORT_ROUNDS {
+        log(&alloc::format!("[beak] @import: bei {MAX_IMPORT_ROUNDS} Runden gekappt"));
+        return false;
+    }
+    let mut want: Vec<(usize, String)> = Vec::new();
+    let mut urls: Vec<String> = Vec::new();
+    for i in 0..parts.len() {
+        if parts[i].2 {
+            continue;
+        }
+        parts[i].2 = true;
+        let (base, body) = (parts[i].0.clone(), parts[i].1.clone());
+        let Ok(text) = core::str::from_utf8(&body) else { continue };
+        for href in beak_engine::import_urls(text) {
+            if parts.len() + want.len() >= MAX_IMPORT_SHEETS {
+                log(&alloc::format!("[beak] @import: bei {MAX_IMPORT_SHEETS} Blaettern gekappt"));
+                break;
+            }
+            let abs = resolve(&base, &href);
+            // A sheet already in the list is a cycle or a repeat; either way
+            // its bytes are here once and that is enough.
+            if parts.iter().any(|(u, _, _)| *u == abs) || want.iter().any(|(_, u)| *u == abs) {
+                continue;
+            }
+            want.push((i, abs.clone()));
+            urls.push(abs);
+        }
+    }
+    if urls.is_empty() {
+        return false;
+    }
+    let h = begin_batch(&urls, CSS_CAP);
+    if h < 0 {
+        log("[beak] @import: Holen konnte nicht starten");
+        return false;
+    }
+    log(&alloc::format!("[beak] @import: {} Blaetter, Runde {}", urls.len(), rounds + 1));
+    unsafe {
+        core::ptr::addr_of_mut!(NAV_STAGE).write(NavStage::CssImport);
+        core::ptr::addr_of_mut!(NAV_JOB).write(h);
+        core::ptr::addr_of_mut!(NAV_CSS_WANT).write(Some(want));
+        core::ptr::addr_of_mut!(NAV_CSS_ROUNDS).write(rounds + 1);
+        core::ptr::addr_of_mut!(NAV_STAGE_MS).write(now_ms());
+    }
+    true
+}
+
+fn nav_css_imports_arrived(engine: &Engine) {
+    let h = nav_job();
+    let want = unsafe { (*core::ptr::addr_of_mut!(NAV_CSS_WANT)).take() }.unwrap_or_default();
+    let mut scratch: Vec<u8> = Vec::with_capacity(CSS_CAP);
+    let spans = take_batch(h, scratch.as_mut_ptr(), CSS_CAP, want.len());
+    let total = spans.iter().map(|(o, l)| o + l).max().unwrap_or(0);
+    unsafe { scratch.set_len(total.min(CSS_CAP)) };
+    let (mut ok, mut bad) = (0usize, 0usize);
+    if let Some(parts) = unsafe { (*core::ptr::addr_of_mut!(NAV_CSS_PARTS)).as_mut() } {
+        // **Von hinten einfuegen.** Jedes Einfuegen verschiebt alles dahinter;
+        // absteigend bleiben die noch offenen, kleineren Stellen gueltig.
+        for k in (0..want.len()).rev() {
+            let (owner, url) = &want[k];
+            let (off, n) = spans.get(k).copied().unwrap_or((0, 0));
+            if n == 0 || off + n > scratch.len() {
+                bad += 1;
+                log(&alloc::format!("[beak] @import gescheitert: {url}"));
+                continue;
+            }
+            ok += 1;
+            let at = (*owner).min(parts.len());
+            parts.insert(at, (url.clone(), scratch[off..off + n].to_vec(), false));
+        }
+    }
+    log(&alloc::format!("[beak] @import: {ok} geholt, {bad} gescheitert, {} ms",
+                        now_ms() - unsafe { core::ptr::addr_of!(NAV_STAGE_MS).read() }));
+    if !css_import_pump() {
+        css_assemble();
+        nav_finish(engine);
+    }
+}
+
+/// Write the assembled sheets into `CSS_BUF`, in the order the list holds —
+/// which is cascade order, imports ahead of their importer.
+fn css_assemble() {
+    let parts = unsafe { (*core::ptr::addr_of_mut!(NAV_CSS_PARTS)).take() }.unwrap_or_default();
+    unsafe { core::ptr::addr_of_mut!(CSS_LEN).write(0) };
+    for (_, body, _) in &parts {
+        if !css_append(body) {
+            break;
+        }
+    }
 }
 
 /// Document and stylesheets are both in: the page may be drawn, and its

@@ -1707,6 +1707,66 @@ fn gather_inline_urls(el: &Element, sheet: &mut Stylesheet) {
     }
 }
 
+/// The targets of a stylesheet's `@import` rules, in source order — the shell's
+/// fetch list for the round after the linked sheets.
+///
+/// `parse` SKIPS `@import` (it cannot fetch), so without this a sheet that is
+/// nothing but imports styles nothing at all. That is not a corner case: it is
+/// how a hand-written site splits its CSS into modules, and
+/// `sandbox.nopeek.ch` loads its entire design through fifteen of them behind
+/// one `<link>` — the page rendered completely unstyled.
+///
+/// Only at the top level: an `@import` inside a block is invalid, and stepping
+/// over blocks is also what keeps a `content: "@import x"` string out of the
+/// list. The prelude between the URL and the `;` (a `layer()`, a `supports()`,
+/// a media query) is stepped over rather than honoured — an import with a
+/// media query is applied unconditionally for now, which is named in
+/// CONFORMANCE rather than silently approximated.
+pub fn import_urls(css: &str) -> Vec<String> {
+    let css = strip_comments(css);
+    let b = css.as_bytes();
+    let mut out = Vec::new();
+    let (mut i, mut depth) = (0usize, 0i32);
+    while i < b.len() {
+        match b[i] {
+            b'{' => depth += 1,
+            b'}' => depth -= 1,
+            // A string can hold braces and semicolons; skip it whole.
+            q @ (b'"' | b'\'') => {
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'@' if depth == 0 && css[i..].len() >= 7 && css[i..i + 7].eq_ignore_ascii_case("@import") => {
+                let end = css[i..].find(';').map_or(css.len(), |e| i + e);
+                if let Some(u) = import_target(&css[i + 7..end]) {
+                    out.push(u);
+                }
+                i = end;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The URL out of one `@import` prelude: `"x"`, `'x'`, `url(x)`, `url("x")`.
+fn import_target(prelude: &str) -> Option<String> {
+    let t = prelude.trim_start();
+    let rest = if t.len() >= 4 && t[..4].eq_ignore_ascii_case("url(") { &t[4..] } else { t };
+    let rest = rest.trim_start();
+    let mut c = rest.chars();
+    let url = match c.next()? {
+        q @ ('"' | '\'') => rest[1..].split(q).next()?,
+        // Unquoted `url(x)` — ends at the closing paren.
+        _ => rest.split(')').next()?.trim(),
+    };
+    let url = url.trim();
+    (!url.is_empty()).then(|| url.to_string())
+}
+
 /// Hrefs of every `<link rel="stylesheet">` in the document, for the shell to
 /// fetch as sub-resources.
 pub fn stylesheet_links(dom: &Dom) -> Vec<String> {
@@ -2995,6 +3055,41 @@ fn ident_at(s: &str, mut i: usize) -> (String, usize) {
 
 #[cfg(test)]
 mod tests {
+
+
+    /// `@import` is how a hand-written site splits its CSS, and the whole of
+    /// `sandbox.nopeek.ch` hangs behind fifteen of them.
+    #[test]
+    fn import_urls_reads_every_spelling() {
+        let css = r#"
+            /* @import "commented-out.css"; */
+            @charset "utf-8";
+            @import 'base.css';
+            @import "layout.css";
+            @import url(components.css);
+            @import url("panels/network.css");
+            @import url('panels/threats.css') screen;
+            @import "print.css" print;
+            @layer a, b;
+            .x { content: "@import fake.css"; }
+            @media (min-width: 1px) { .y { color: red } }
+        "#;
+        assert_eq!(
+            super::import_urls(css),
+            alloc::vec![
+                "base.css", "layout.css", "components.css",
+                "panels/network.css", "panels/threats.css", "print.css",
+            ]
+        );
+    }
+
+    /// A brace or a semicolon inside a string must not end the scan, and an
+    /// `@import` inside a block is invalid and ignored.
+    #[test]
+    fn import_urls_steps_over_strings_and_blocks() {
+        let css = r#".a::before { content: "};@import 'no.css';" } @import "yes.css";"#;
+        assert_eq!(super::import_urls(css), alloc::vec!["yes.css"]);
+    }
     use super::*;
     use crate::dom;
 
