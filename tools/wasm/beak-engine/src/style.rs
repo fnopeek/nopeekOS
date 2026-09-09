@@ -1049,6 +1049,15 @@ pub struct ComputedStyle {
     pub margin_bottom_auto: bool,
     pub margin_left: Len,
     pub margin_right: Len,
+    /// A PERCENTAGE on `padding` (top, right, bottom, left) and on the vertical
+    /// `margin`s, kept unresolved until the containing block's width is known.
+    /// Both axes resolve against the WIDTH (CSS 2.1 §8.1, §8.3) — that is not a
+    /// typo in the spec: it is what makes `padding-top: 56.25%` an aspect ratio
+    /// rather than a height, which is how every responsive video embed on the
+    /// web reserves its box. `0.0` means "no percentage here"; a literal `0%`
+    /// resolves to the same zero either way, so it needs no separate marker.
+    pub pct_pad: [f32; 4],
+    pub pct_margin_tb: [f32; 2],
     pub pad_top: f32,
     pub pad_right: f32,
     pub pad_bottom: f32,
@@ -1369,6 +1378,8 @@ impl ComputedStyle {
             margin_bottom_auto: false,
             margin_left: Len::Px(0.0),
             margin_right: Len::Px(0.0),
+            pct_pad: [0.0; 4],
+            pct_margin_tb: [0.0; 2],
             pad_top: 0.0,
             pad_right: 0.0,
             pad_bottom: 0.0,
@@ -1608,6 +1619,8 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         margin_bottom_auto: false,
         margin_left: Len::Px(0.0),
         margin_right: Len::Px(0.0),
+        pct_pad: [0.0; 4],
+        pct_margin_tb: [0.0; 2],
         pad_top: 0.0,
         pad_right: 0.0,
         pad_bottom: 0.0,
@@ -2066,6 +2079,7 @@ pub fn resolve_in(
         s.margin_bottom_auto = false;
         s.margin_left = Len::Px(0.0);
         s.margin_right = Len::Px(0.0);
+        s.pct_margin_tb = [0.0; 2];
     }
     // `vertical-align` applies to inline-level boxes and table cells only
     // (CSS2.1 §10.8.1). An out-of-flow or block-level box is never aligned in
@@ -2577,6 +2591,7 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
             // `padding: 1px` from the UA sheet, overridden by `<table
             // cellpadding>` when that attribute is present.
             let p = s.attr_cell_padding.unwrap_or(1.0);
+            s.pct_pad = [0.0; 4];
             s.pad_top = p;
             s.pad_right = p;
             s.pad_bottom = p;
@@ -3066,15 +3081,18 @@ pub fn apply_wide(prop: Prop, kw: Wide, parent: &ComputedStyle, theme: &Theme, s
             s.margin_bottom = src.margin_bottom;
             s.margin_bottom_auto = src.margin_bottom_auto;
             s.margin_left = src.margin_left;
+            s.pct_margin_tb = src.pct_margin_tb;
         }
         Prop::MarginTop => {
             s.margin_top = src.margin_top;
             s.margin_top_auto = src.margin_top_auto;
+            s.pct_margin_tb[0] = src.pct_margin_tb[0];
         }
         Prop::MarginRight => s.margin_right = src.margin_right,
         Prop::MarginBottom => {
             s.margin_bottom = src.margin_bottom;
             s.margin_bottom_auto = src.margin_bottom_auto;
+            s.pct_margin_tb[1] = src.pct_margin_tb[1];
         }
         Prop::MarginLeft => s.margin_left = src.margin_left,
         Prop::Padding => {
@@ -3082,11 +3100,24 @@ pub fn apply_wide(prop: Prop, kw: Wide, parent: &ComputedStyle, theme: &Theme, s
             s.pad_right = src.pad_right;
             s.pad_bottom = src.pad_bottom;
             s.pad_left = src.pad_left;
+            s.pct_pad = src.pct_pad;
         }
-        Prop::PaddingTop => s.pad_top = src.pad_top,
-        Prop::PaddingRight => s.pad_right = src.pad_right,
-        Prop::PaddingBottom => s.pad_bottom = src.pad_bottom,
-        Prop::PaddingLeft => s.pad_left = src.pad_left,
+        Prop::PaddingTop => {
+            s.pad_top = src.pad_top;
+            s.pct_pad[0] = src.pct_pad[0];
+        }
+        Prop::PaddingRight => {
+            s.pad_right = src.pad_right;
+            s.pct_pad[1] = src.pct_pad[1];
+        }
+        Prop::PaddingBottom => {
+            s.pad_bottom = src.pad_bottom;
+            s.pct_pad[2] = src.pct_pad[2];
+        }
+        Prop::PaddingLeft => {
+            s.pad_left = src.pad_left;
+            s.pct_pad[3] = src.pct_pad[3];
+        }
         Prop::Top => s.top = src.top,
         Prop::Right => s.right = src.right,
         Prop::Bottom => s.bottom = src.bottom,
@@ -3581,16 +3612,16 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         Prop::Margin => {
             let u = s.units();
             let (t, r, b, l) = four_values(&v);
-            set_margin_tb(t, u, &mut s.margin_top, &mut s.margin_top_auto);
+            set_margin_tb(t, u, &mut s.margin_top, &mut s.margin_top_auto, &mut s.pct_margin_tb[0]);
             s.margin_right = margin_lr(r, u);
-            set_margin_tb(b, u, &mut s.margin_bottom, &mut s.margin_bottom_auto);
+            set_margin_tb(b, u, &mut s.margin_bottom, &mut s.margin_bottom_auto, &mut s.pct_margin_tb[1]);
             s.margin_left = margin_lr(l, u);
         }
         Prop::MarginTop | Prop::MarginBlockStart => {
-            set_margin_tb(&v, u, &mut s.margin_top, &mut s.margin_top_auto)
+            set_margin_tb(&v, u, &mut s.margin_top, &mut s.margin_top_auto, &mut s.pct_margin_tb[0])
         }
         Prop::MarginBottom | Prop::MarginBlockEnd => {
-            set_margin_tb(&v, u, &mut s.margin_bottom, &mut s.margin_bottom_auto)
+            set_margin_tb(&v, u, &mut s.margin_bottom, &mut s.margin_bottom_auto, &mut s.pct_margin_tb[1])
         }
         Prop::MarginLeft | Prop::MarginInlineStart => s.margin_left = margin_lr(&v, u),
         Prop::MarginRight | Prop::MarginInlineEnd => s.margin_right = margin_lr(&v, u),
@@ -3603,30 +3634,36 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         }
         Prop::MarginBlock => {
             let p = split_sides(&v);
-            set_margin_tb(p[0], u, &mut s.margin_top, &mut s.margin_top_auto);
-            set_margin_tb(p[1], u, &mut s.margin_bottom, &mut s.margin_bottom_auto);
+            set_margin_tb(p[0], u, &mut s.margin_top, &mut s.margin_top_auto, &mut s.pct_margin_tb[0]);
+            set_margin_tb(p[1], u, &mut s.margin_bottom, &mut s.margin_bottom_auto, &mut s.pct_margin_tb[1]);
         }
         Prop::Padding => {
             let u = s.units();
             let (t, r, b, l) = four_values(&v);
-            s.pad_top = parse_pad(t, u, 0.0);
-            s.pad_right = parse_pad(r, u, 0.0);
-            s.pad_bottom = parse_pad(b, u, 0.0);
-            s.pad_left = parse_pad(l, u, 0.0);
+            // The shorthand resets every side, so an invalid one lands on zero
+            // rather than keeping what the side happened to hold.
+            (s.pad_top, s.pct_pad[0]) = (0.0, 0.0);
+            (s.pad_right, s.pct_pad[1]) = (0.0, 0.0);
+            (s.pad_bottom, s.pct_pad[2]) = (0.0, 0.0);
+            (s.pad_left, s.pct_pad[3]) = (0.0, 0.0);
+            set_pad(t, u, &mut s.pad_top, &mut s.pct_pad[0]);
+            set_pad(r, u, &mut s.pad_right, &mut s.pct_pad[1]);
+            set_pad(b, u, &mut s.pad_bottom, &mut s.pct_pad[2]);
+            set_pad(l, u, &mut s.pad_left, &mut s.pct_pad[3]);
         }
-        Prop::PaddingTop | Prop::PaddingBlockStart => s.pad_top = parse_pad(&v, u, s.pad_top),
-        Prop::PaddingRight | Prop::PaddingInlineEnd => s.pad_right = parse_pad(&v, u, s.pad_right),
-        Prop::PaddingBottom | Prop::PaddingBlockEnd => s.pad_bottom = parse_pad(&v, u, s.pad_bottom),
-        Prop::PaddingLeft | Prop::PaddingInlineStart => s.pad_left = parse_pad(&v, u, s.pad_left),
+        Prop::PaddingTop | Prop::PaddingBlockStart => set_pad(&v, u, &mut s.pad_top, &mut s.pct_pad[0]),
+        Prop::PaddingRight | Prop::PaddingInlineEnd => set_pad(&v, u, &mut s.pad_right, &mut s.pct_pad[1]),
+        Prop::PaddingBottom | Prop::PaddingBlockEnd => set_pad(&v, u, &mut s.pad_bottom, &mut s.pct_pad[2]),
+        Prop::PaddingLeft | Prop::PaddingInlineStart => set_pad(&v, u, &mut s.pad_left, &mut s.pct_pad[3]),
         Prop::PaddingInline => {
             let p = split_sides(&v);
-            s.pad_left = parse_pad(p[0], u, s.pad_left);
-            s.pad_right = parse_pad(p[1], u, s.pad_right);
+            set_pad(p[0], u, &mut s.pad_left, &mut s.pct_pad[3]);
+            set_pad(p[1], u, &mut s.pad_right, &mut s.pct_pad[1]);
         }
         Prop::PaddingBlock => {
             let p = split_sides(&v);
-            s.pad_top = parse_pad(p[0], u, s.pad_top);
-            s.pad_bottom = parse_pad(p[1], u, s.pad_bottom);
+            set_pad(p[0], u, &mut s.pad_top, &mut s.pct_pad[0]);
+            set_pad(p[1], u, &mut s.pad_bottom, &mut s.pct_pad[2]);
         }
 
         // — background + border —
@@ -4916,9 +4953,12 @@ fn parse_list_style(v: &str) -> Option<ListStyle> {
 /// Top/bottom margin: `auto` computes to 0 for block boxes.
 /// A top/bottom margin: the used length in normal flow, plus whether the
 /// author wrote `auto`. Both are needed — see `ComputedStyle::margin_top_auto`.
-fn set_margin_tb(v: &str, u: Units, px: &mut f32, auto: &mut bool) {
+fn set_margin_tb(v: &str, u: Units, px: &mut f32, auto: &mut bool, pct: &mut f32) {
     *auto = v.trim() == "auto";
-    *px = if *auto { 0.0 } else { parse_length(v, u).unwrap_or(0.0) };
+    // A margin may be negative, so no sign filter here — unlike padding.
+    let (p, q) = if *auto { (0.0, 0.0) } else { length_parts(v, u).unwrap_or((0.0, 0.0)) };
+    *px = p;
+    *pct = q;
 }
 
 /// Left/right margin keeps `auto` (drives centering / slack).
@@ -5097,6 +5137,49 @@ fn parse_box_shadow(v: &str, u: Units) -> Option<(bool, BoxShadow)> {
             color,
         },
     ))
+}
+
+/// A length split into `(constant px, percent)`, so a value whose basis is not
+/// known yet can be carried whole: `50%` → `(0, 50)`, `calc(10% + 5px)` →
+/// `(5, 10)`, `5px` → `(5, 0)`. `None` means it is not a length at all and the
+/// declaration is dropped (the side keeps what it had).
+///
+/// The `calc` case is measured, not parsed: every CSS math function on lengths
+/// is LINEAR in its percentage, so evaluating it against a basis of 0 and of
+/// 100 gives the constant and the coefficient without a second expression
+/// walker. `calc(50% - 0px)` against a reference that writes plain `50%` is
+/// exactly the pair `grid-calc-margin` compares.
+fn length_parts(v: &str, u: Units) -> Option<(f32, f32)> {
+    let t = v.trim();
+    if let Some(n) = t.strip_suffix('%') {
+        return n.trim().parse::<f32>().ok().map(|p| (0.0, p));
+    }
+    if is_math_fn(t) {
+        let at = |basis: f32| {
+            crate::values::resolve_length(
+                t,
+                &crate::values::LenCtx { em: u.em, rem: u.rem, pct_basis: basis, vw: u.vw, vh: u.vh },
+            )
+        };
+        let (a, b) = (at(0.0)?, at(100.0)?);
+        return Some((a, b - a));
+    }
+    parse_length(t, u).map(|p| (p, 0.0))
+}
+
+/// One padding side. A plain negative length is INVALID and keeps what the side
+/// had; a value that carries a percentage is valid whatever its sign, because
+/// its used value is only known once the basis is — `calc(100% - 21.5rem)` is
+/// how Tailwind pads the end of a scrolling row, and it is negative only until
+/// the containing block is measured. That one is clamped to zero at USE time
+/// (css-values-4 §10), which is `resolve_pct_box`'s `.max(0.0)`.
+fn set_pad(v: &str, u: Units, px: &mut f32, pct: &mut f32) {
+    if let Some((p, q)) = length_parts(v, u) {
+        if q != 0.0 || p >= 0.0 {
+            *px = p;
+            *pct = q;
+        }
+    }
 }
 
 fn parse_pad(v: &str, u: Units, prior: f32) -> f32 {
@@ -6226,6 +6309,10 @@ mod size_probe {
     fn the_style_stays_small() {
         assert_eq!(core::mem::size_of::<super::GradStop>(), 12);
         assert_eq!(core::mem::size_of::<super::Gradient>(), 84);
-        assert_eq!(core::mem::size_of::<super::ComputedStyle>(), 1472);
+        // 1472 -> 1496: sechs `f32` fuer die Prozentanteile von `padding` und
+        // den senkrechten `margin`s. Der Platz ist es wert — ohne sie fielen
+        // ALLE VIER Polsterungen in Prozent auf null, und `padding-top: 56.25%`
+        // ist die Art, wie das Web ein 16:9-Kaestchen reserviert.
+        assert_eq!(core::mem::size_of::<super::ComputedStyle>(), 1496);
     }
 }
