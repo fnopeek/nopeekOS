@@ -48,7 +48,7 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-09 · beak 0.141.0 · Kernel 0.329.0** (Rest: `git log`)
+**Stand 2026-09-09 · beak 0.146.0 · Kernel 0.329.0** (Rest: `git log`)
 
 **0.141.0: GSUB-Ligaturen.** Eine Symbolschrift bildet ihr Zeichen als
 Ligatur — `<i class="fos-icon">home</i>` mass 1 px statt 24, weil die vier
@@ -61,7 +61,41 @@ Ligaturen (css-text-3 §8.2). Der allokationsfreie Schnellpfad bleibt für jede
 Schrift ohne GSUB, und dass die sechs eingebauten keine haben, ist jetzt ein
 Test. Werkzeug: `examples/ligcheck.rs`.
 
-**▶ Als nächstes: offen — die benannte Liste ist abgearbeitet.** Shadow DOM bleibt gemessen KEINE
+**0.144–0.146: die Komponentengalerien, und was sie fand.** Florians
+Vorschlag: „tailwind css komplett holen und dann jedes element durchspielen..
+gleiche für bootstrap etc." Gebaut als `<tools>/gallery/run.py` — dieselbe
+Vorlage durch Chromium UND durch beak, dieselbe Sonde, verglichen werden
+KÄSTEN. **Fünf Fehler im ersten Lauf, alle im Flex** und alle zuerst in
+`getBoundingClientRect` sichtbar: ein Flexkasten meldete die Breite seines
+STREIFENS (1902 statt 400) · eine Flex-Spalte streckte den INHALT statt des
+Außenkastens (jedes Kind eines gepolsterten Items 32 px zu breit) · die
+Innenbreite eines Steuerelements war doppelt gerahmt (Knopfgruppe 285 statt
+205) · Tabellenteile hatten **gar keinen** Kasten · und ein Kasten mit eigenem
+Formatierungskontext wurde ZWEIMAL aufgezeichnet — `getBoundingClientRect`
+gibt die Vereinigung, und die aus 256 und 1902 ist 1902. Dazu: der freie
+Platz einer Tabelle wird jetzt im VERHÄLTNIS der Inhaltsbreiten verteilt, wie
+Chromium es tut. Stand: Bootstrap 413 von 415 Kästen (161 identisch),
+Tailwind 165 von 165. **Vor dem Benutzen `<tools>/gallery/README.md` lesen** —
+ohne `--hide-scrollbars` und gepinnte Schrift misst der Vergleich sich selbst.
+
+**0.144.0: die Formular-Fläche.** Florian: „wir haben mühe mit form sachen..
+und was sicher auch noch nicht sauber ist. sind checkboxen." Ausgezählt statt
+gestochert: `el.click()` fehlte ganz (mit der Reihenfolge der Spezifikation —
+erst umschalten, dann zustellen, bei `preventDefault` zurück), **ein Klick auf
+ein `<label>` aktiviert sein Steuerelement** — auch OHNE Skript, denn der
+Schnellweg der Shell sprang ab, wenn die Seite keinen Behandler hat —, dazu
+`form`/`labels`/`disabled`/`readOnly`/`required`, `label.htmlFor`/`control`,
+`indeterminate` und volles `FormData`. Offen und benannt: die
+Validierungs-API und `select.add`.
+
+**▶ Als nächstes: das RASTER.** beak rechnet Wikipedias `main.mw-body` mit
+`grid-template: … / minmax(0,59.25rem) min-content` falsch aus und lässt die
+Spalten über ihren Behälter hinauslaufen (1299 + 248 > 1492); die
+Artikelspalte ist dadurch ~79 px zu breit. In WPT ist es dieselbe Familie:
+`css-grid/column-align-items`, `row-auto-repeat`, `grid-lanes-subgrid` — nach
+`CSS2/bidi` (bewusst zurückgestellt) der größte verbliebene Block.
+
+Shadow DOM bleibt gemessen KEINE
 Web-Anforderung, sondern die Bauweise EINER Seite: 89 % der 906 Aufrufe
 kommen von MDN allein, und in allen sechzehn Korpusseiten (jede Google-Seite
 eingeschlossen) steht null Shadow DOM. Rangliste:
@@ -158,19 +192,15 @@ nächste Funktion** (`Rc::as_ptr` als Schlüssel), gefunden am neuen Prüfstand
 `<tools>/libprobe/` (12 von 13 grün, offen nur htmx) · 0.125.0 `location`
 war ein Datenobjekt — es gab gar keine Navigation per Skript.
 
-**Ligaturen (GSUB) sind weiter offen.** Symbolschriften bilden ihr Zeichen
-als Ligatur; fontdue läuft mit `load_substitutions: false`, also ist
-`fos-icon` 1 px statt 24. Danach: `body` 600 statt 937. Stand:
-`memory/project_beak_web_app_stack.md`.
-
 **Die Zahlen, und sie messen NICHT dasselbe:**
 
     test262 exec    81,76 %   (V8 auf demselben Korpus: 99,41 %)
     test262 parse   96,84 %
     DOM-Aufrufe     99,4 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
-    WPT (CSS)       4537/5201 = 87,2 % ohne Testvehikel (roh 80,3 %)
+    WPT (CSS)       4542/5201 = 87,3 % ohne Testvehikel (roh 80,4 %)
     Bibliotheken    13 von 13 (`<tools>/libprobe/`)
     beak:selftest   Sprache 55/55, Dokument 39/39
+    Kastengeometrie Bootstrap 413/415 · Tailwind 165/165 (`<tools>/gallery/`)
     Halde           Schriften faul; srf 44 MiB (war 89)
 
 Das eigene Testziel ist **`beak:selftest`** — eine Prüfseite aus dem
