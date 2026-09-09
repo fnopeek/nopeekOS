@@ -2527,9 +2527,17 @@ fn dispatch_click(engine: &Engine, page: &mut Page, lay: &Layout, cx: i32, cy: i
     let chain = lay.element_chain(cx, cy);
     if chain.is_empty() { return false; }
     let Some(doc) = sess.interp.doc.as_ref() else { return false };
-    if !doc.has_listeners { return false; }
     let nodes: Vec<u32> = chain.iter().filter_map(|s| doc.by_seq(*s)).collect();
     if nodes.is_empty() { return false; }
+    // **Ein Schild aktiviert sein Kaestchen auch OHNE Skript.** Der Schnellweg
+    // hier springt ab, wenn die Seite keinen Behandler hat — richtig fuer
+    // Ereignisse, falsch fuer eingebautes Verhalten: die Klickflaeche eines
+    // Kaestchens ist der Text daneben, und eine Seite ganz ohne JS hat ihn
+    // genauso.
+    let on_label = nodes.last().is_some_and(|n| {
+        beak_engine::js::dombind::label_target(&sess.interp, *n).is_some()
+    });
+    if !doc.has_listeners && !on_label { return false; }
     let t0 = now_ms();
     let prevented = matches!(
         beak_engine::js::dombind::dispatch(&mut sess.interp, "click", &nodes), Ok(true));

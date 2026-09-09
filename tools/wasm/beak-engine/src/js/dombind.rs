@@ -2268,6 +2268,154 @@ fn xpath_nodes(i: &mut Interp, t: &Value) -> C<Vec<Value>> {
     Ok(out)
 }
 
+/// `FormData` — die Buendelung eines Formulars fuer `fetch`.
+///
+/// **Der Weg, auf dem eine moderne Seite ein Formular abschickt.** Sie faengt
+/// `submit` ab, baut `new FormData(form)` und schickt es selbst; ohne den
+/// Namen wirft schon die Zeile, und die Seite bleibt stumm stehen.
+///
+/// Die Paare liegen als Feld auf dem Objekt, in Dokumentreihenfolge — dieselbe
+/// Reihenfolge, die `forms::submit` fuer den eigenen Weg baut, und dieselben
+/// Regeln fuer den erfolgreichen Wert: benannt, nicht abgeschaltet, und ein
+/// Kaestchen nur, wenn es angehakt ist.
+///
+/// Dateien traegt es nicht: beak hat kein `multipart/form-data` (CONFORMANCE
+/// sagt es), und ein `File`, das nichts enthaelt, waere schlechter als keins.
+fn install_formdata(realm: &mut Realm) {
+    let fp = realm.function_proto.clone();
+    let proto = new_obj(Some(realm.object_proto.clone()));
+    proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("FormData")));
+
+    let ctor = native(Some(fp.clone()), |i, _, a| {
+        let o = new_obj(Some(i.realm.formdata_proto.clone()));
+        let mut pairs: Vec<Value> = Vec::new();
+        if let Some(v @ Value::Obj(_)) = a.first() {
+            if let Ok(form) = node_of(i, v) {
+                for c in form_controls(i, form) {
+                    let (name, ok, textarea) = {
+                        let d = i.doc.as_ref();
+                        let n = d.and_then(|d| d.nodes.get(c as usize));
+                        let name = n.and_then(|n| n.attr("name")).map(|s| s.to_string()).unwrap_or_default();
+                        let dis = n.is_some_and(|n| n.attr("disabled").is_some());
+                        let ty = n.and_then(|n| n.attr("type").map(|t| t.to_ascii_lowercase())).unwrap_or_default();
+                        let tag = n.map(|n| n.tag.to_string()).unwrap_or_default();
+                        let boxlike = tag == "input" && matches!(ty.as_str(), "checkbox" | "radio");
+                        let on = !boxlike || checked_now(i, c);
+                        // Ein Knopf ist nur erfolgreich, wenn er der ist, der
+                        // abgeschickt hat — hier war das keiner.
+                        let button = tag == "button" || matches!(ty.as_str(), "submit" | "reset" | "button" | "image");
+                        (name.clone(), !name.is_empty() && !dis && on && !button, tag == "textarea")
+                    };
+                    if !ok { continue }
+                    let val = control_value(i, c, textarea);
+                    let pair = i.new_array(alloc::vec![Value::string(name), Value::string(val)]);
+                    pairs.push(pair);
+                }
+            }
+        }
+        let arr = i.new_array(pairs);
+        o.borrow_mut().define("__pairs", Prop { value: Some(arr), get: None, set: None,
+            writable: true, enumerable: false, configurable: false });
+        Ok(Value::Obj(o))
+    }, "FormData", 0, true);
+    ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(proto.clone())));
+    proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(ctor.clone())));
+    realm.global.borrow_mut().define("FormData", Prop::builtin(Value::Obj(ctor)));
+    realm.formdata_proto = proto.clone();
+
+    meth(&proto, "append", |i, t, a| {
+        let (k, v) = (i.to_string(a.first().unwrap_or(&Value::Undefined))?,
+                      i.to_string(a.get(1).unwrap_or(&Value::Undefined))?);
+        let pair = i.new_array(alloc::vec![Value::Str(k), Value::Str(v)]);
+        let arr = i.get(&t, "__pairs")?;
+        let push = i.get(&arr, "push")?;
+        i.call(&push, arr, &[pair])?;
+        Ok(Value::Undefined)
+    }, 2, &fp);
+    meth(&proto, "get", |i, t, a| {
+        let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        Ok(fd_all(i, &t, &k)?.into_iter().next().unwrap_or(Value::Null))
+    }, 1, &fp);
+    meth(&proto, "getAll", |i, t, a| {
+        let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let v = fd_all(i, &t, &k)?;
+        Ok(i.new_array(v))
+    }, 1, &fp);
+    meth(&proto, "has", |i, t, a| {
+        let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        Ok(Value::Bool(!fd_all(i, &t, &k)?.is_empty()))
+    }, 1, &fp);
+    meth(&proto, "set", |i, t, a| {
+        let (k, v) = (i.to_string(a.first().unwrap_or(&Value::Undefined))?,
+                      i.to_string(a.get(1).unwrap_or(&Value::Undefined))?);
+        let kept = fd_pairs(i, &t)?.into_iter()
+            .filter(|(pk, _)| *pk != *k)
+            .map(|(pk, pv)| i.new_array(alloc::vec![Value::string(pk), Value::string(pv)]))
+            .collect::<Vec<_>>();
+        let mut kept = kept;
+        kept.push(i.new_array(alloc::vec![Value::Str(k), Value::Str(v)]));
+        let arr = i.new_array(kept);
+        i.set(&t, "__pairs", arr, false)?;
+        Ok(Value::Undefined)
+    }, 2, &fp);
+    meth(&proto, "delete", |i, t, a| {
+        let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let kept = fd_pairs(i, &t)?.into_iter()
+            .filter(|(pk, _)| *pk != *k)
+            .map(|(pk, pv)| i.new_array(alloc::vec![Value::string(pk), Value::string(pv)]))
+            .collect::<Vec<_>>();
+        let arr = i.new_array(kept);
+        i.set(&t, "__pairs", arr, false)?;
+        Ok(Value::Undefined)
+    }, 1, &fp);
+    meth(&proto, "forEach", |i, t, a| {
+        let f = a.first().cloned().unwrap_or(Value::Undefined);
+        if !i.is_callable(&f) { return i.type_err("FormData.forEach needs a function") }
+        for (k, v) in fd_pairs(i, &t)? {
+            i.call(&f, Value::Undefined, &[Value::string(v), Value::string(k), t.clone()])?;
+        }
+        Ok(Value::Undefined)
+    }, 1, &fp);
+    for name in ["entries", "keys", "values"] {
+        let which = name;
+        let f: NativeFn = match which {
+            "keys" => |i, t, _| {
+                let v: Vec<Value> = fd_pairs(i, &t)?.into_iter().map(|(k, _)| Value::string(k)).collect();
+                let a = i.new_array(v); let it = i.get(&a, SYM_ITERATOR)?; i.call(&it, a, &[])
+            },
+            "values" => |i, t, _| {
+                let v: Vec<Value> = fd_pairs(i, &t)?.into_iter().map(|(_, v)| Value::string(v)).collect();
+                let a = i.new_array(v); let it = i.get(&a, SYM_ITERATOR)?; i.call(&it, a, &[])
+            },
+            _ => |i, t, _| {
+                let v: Vec<Value> = fd_pairs(i, &t)?.into_iter()
+                    .map(|(k, val)| i.new_array(alloc::vec![Value::string(k), Value::string(val)])).collect();
+                let a = i.new_array(v); let it = i.get(&a, SYM_ITERATOR)?; i.call(&it, a, &[])
+            },
+        };
+        meth(&proto, name, f, 0, &fp);
+    }
+}
+
+/// Die Paare eines `FormData` als Rust-Werte.
+fn fd_pairs(i: &mut Interp, t: &Value) -> C<Vec<(alloc::string::String, alloc::string::String)>> {
+    let arr = i.get(t, "__pairs")?;
+    let len = i.get(&arr, "length")?;
+    let len = i.to_number(&len)? as usize;
+    let mut out = Vec::with_capacity(len);
+    for k in 0..len {
+        let pair = i.get(&arr, &alloc::format!("{k}"))?;
+        let a = i.get(&pair, "0")?;
+        let b = i.get(&pair, "1")?;
+        out.push((i.to_string(&a)?.to_string(), i.to_string(&b)?.to_string()));
+    }
+    Ok(out)
+}
+
+fn fd_all(i: &mut Interp, t: &Value, key: &str) -> C<Vec<Value>> {
+    Ok(fd_pairs(i, t)?.into_iter().filter(|(k, _)| k == key).map(|(_, v)| Value::string(v)).collect())
+}
+
 fn install_xpath(realm: &mut Realm) {
     let fp = realm.function_proto.clone();
 
@@ -4682,6 +4830,43 @@ pub fn install(realm: &mut Realm) {
                 Some(v) => Value::Str(v.clone()), None => Value::str("") }))
         }, &fp);
     }
+    // **`el.click()`** — die uebliche Art, ein Steuerelement aus JS
+    // auszuloesen, und sie fehlte ganz. Ohne sie wirft schon der AUFRUF, und
+    // der Wurf beendet das Skript; eine Seite, die ihren eigenen Knopf
+    // programmatisch drueckt, stirbt daran.
+    //
+    // Die Reihenfolge ist die der Spezifikation (HTML §4.10.5, „synthetic
+    // click activation"): bei einem Kaestchen oder Radioknopf wird ZUERST
+    // umgeschaltet, dann `click` zugestellt, und erst wenn niemand abgebrochen
+    // hat, folgen `input` und `change`. Bricht jemand ab, wird der Haken
+    // wieder zurueckgenommen — genau das ist der Unterschied zwischen
+    // `preventDefault()` an einem Kaestchen und an einem Knopf.
+    meth(&html_element_proto, "click", |i, t, _| {
+        let id = node_of(i, &t)?;
+        let (tag, kind) = {
+            let d = i.doc.as_ref();
+            let n = d.and_then(|d| d.nodes.get(id as usize));
+            (n.map(|n| n.tag.to_string()).unwrap_or_default(),
+             n.and_then(|n| n.attr("type").map(|t| t.to_ascii_lowercase())).unwrap_or_default())
+        };
+        let toggles = tag == "input" && matches!(kind.as_str(), "checkbox" | "radio");
+        let before = checked_now(i, id);
+        if toggles {
+            set_checked(i, id, if kind == "radio" { true } else { !before });
+        }
+        let chain = ancestors(i, id);
+        let prevented = dispatch(i, "click", &chain)?;
+        if toggles {
+            if prevented {
+                set_checked(i, id, before);
+            } else {
+                dispatch(i, "input", &chain)?;
+                dispatch(i, "change", &chain)?;
+            }
+        }
+        Ok(Value::Undefined)
+    }, 0, &fp);
+
     // HTMLCanvasElement
     if let Some(p) = tag_protos.get("canvas") {
         // `width`/`height` sind ZAHLEN und liegen als Attribut, mit den
@@ -4767,7 +4952,69 @@ pub fn install(realm: &mut Realm) {
                             if let Some(d) = &mut i.doc { d.nodes[id as usize].checked = Some(on); d.touch(); }
                             Ok(Value::Undefined) }, &fp);
             bool_attr_prop!(p, fp, "defaultChecked", "checked");
+            // `indeterminate` ist KEIN Attribut — es lebt nur im Objekt (HTML
+            // §4.10.5.3), und deshalb liegt es auch hier im Objekt. beak malt
+            // den dritten Zustand nicht; die Eigenschaft ist trotzdem da, weil
+            // ein Skript sie setzt und danach LIEST, und ein `undefined` an
+            // dieser Stelle ist eine falsche Antwort.
+            accessor(p, "indeterminate",
+                |i, t, _| Ok(Value::Bool(matches!(i.get(&t, "__indet")?, Value::Bool(true)))),
+                |i, t, a| {
+                    let on = a.first().map(|v| v.truthy()).unwrap_or(false);
+                    if let Value::Obj(o) = &t {
+                        o.borrow_mut().define("__indet", Prop { value: Some(Value::Bool(on)),
+                            get: None, set: None, writable: true, enumerable: false, configurable: true });
+                    }
+                    Ok(Value::Undefined)
+                }, &fp);
         }
+    }
+
+    // Die Eigenschaften, die JEDES Steuerelement traegt. Sie fehlten alle vier:
+    // `disabled`, `readOnly` und `required` liest und schreibt jedes
+    // Formularskript, und `form`/`labels` sind der Weg vom Feld zu seinem
+    // Umfeld.
+    for tag in ["input", "select", "textarea", "button"] {
+        let Some(p) = tag_protos.get(tag) else { continue };
+        bool_attr_prop!(p, fp, "disabled", "disabled");
+        bool_attr_prop!(p, fp, "required", "required");
+        bool_attr_prop!(p, fp, "readOnly", "readonly");
+        getter(p, "form", |i, t, _| {
+            let id = node_of(i, &t)?;
+            Ok(match owning_form(i, id) { Some(f) => wrap(i, f), None => Value::Null })
+        }, &fp);
+        getter(p, "labels", |i, t, _| {
+            let id = node_of(i, &t)?;
+            let ls = labels_of(i, id);
+            Ok(nodes_array(i, ls))
+        }, &fp);
+    }
+    // `<label>`: die zwei Eigenschaften, mit denen ein Skript vom Schild zum
+    // Feld kommt.
+    if let Some(p) = tag_protos.get("label") {
+        attr_prop!(p, fp, "htmlFor", "for");
+        getter(p, "control", |i, t, _| {
+            let id = node_of(i, &t)?;
+            Ok(match label_control(i, id) { Some(c) => wrap(i, c), None => Value::Null })
+        }, &fp);
+        getter(p, "form", |i, t, _| {
+            let id = node_of(i, &t)?;
+            let c = label_control(i, id).unwrap_or(id);
+            Ok(match owning_form(i, c) { Some(f) => wrap(i, f), None => Value::Null })
+        }, &fp);
+    }
+    // Textauswahl in einem Feld. beak fuehrt keine Auswahl (CONFORMANCE sagt
+    // das), also sind das die ehrlichen Antworten: `textLength` misst wirklich,
+    // `select`/`setSelectionRange` setzen den Fokus und melden keine Auswahl,
+    // die es nicht gibt.
+    for tag in ["input", "textarea"] {
+        let Some(p) = tag_protos.get(tag) else { continue };
+        getter(p, "textLength", |i, t, _| {
+            let id = node_of(i, &t)?;
+            Ok(Value::Num(control_value(i, id, t_is_textarea(i, id)).chars().count() as f64))
+        }, &fp);
+        meth(p, "select", |_, _, _| Ok(Value::Undefined), 0, &fp);
+        meth(p, "setSelectionRange", |_, _, _| Ok(Value::Undefined), 2, &fp);
     }
 
     // ── HTMLFormElement: elements, submit, reset ─────────────────────────
@@ -4971,6 +5218,7 @@ pub fn install(realm: &mut Realm) {
 
     install_text_codec(realm);
     install_xpath(realm);
+    install_formdata(realm);
 
     realm.node_proto = node_proto;
     realm.element_proto = element_proto;
@@ -5129,12 +5377,78 @@ pub fn dispatch(i: &mut Interp, kind: &str, chain: &[u32]) -> C<bool> {
     ev.borrow_mut().define(EV_BUBBLES, Prop { value: Some(Value::Bool(true)), get: None,
         set: None, writable: true, enumerable: false, configurable: true });
     let prevented = deliver(i, &ev, kind, chain)?;
+    // **Ein Klick auf ein `<label>` aktiviert sein Steuerelement** (HTML
+    // §4.10.4). Das ist keine Feinheit, sondern die Art, wie ein Kaestchen
+    // bedient wird: die Klickflaeche ist der TEXT daneben, und ohne diesen
+    // Schritt tut ein Klick darauf gar nichts — genau das Symptom „Checkboxen
+    // sind nicht sauber".
+    //
+    // Nicht, wenn jemand abgebrochen hat, und nicht, wenn das Steuerelement
+    // selbst schon in der Kette liegt (ein `<label><input></label>` bekaeme
+    // sonst zwei Klicks und schaltete zweimal um).
+    if kind == "click" && !prevented {
+        if let Some(target) = chain.last().copied() {
+            if let Some((lab, ctl)) = label_target(i, target) {
+                let _ = lab;
+                if !chain.contains(&ctl) {
+                    let c = ancestors(i, ctl);
+                    let toggles = is_box_control(i, ctl);
+                    let before = checked_now(i, ctl);
+                    if toggles { set_checked(i, ctl, !before); }
+                    let stopped = deliver_click(i, &c)?;
+                    if toggles {
+                        if stopped { set_checked(i, ctl, before); }
+                        else { dispatch_plain(i, "input", &c)?; dispatch_plain(i, "change", &c)?; }
+                    }
+                }
+            }
+        }
+    }
     // Ein Klick ist eine AUFGABE — danach laeuft die Microtask-Schlange, wie
     // nach jeder anderen auch. Sonst bliebe ein `.then` aus dem Behandler bis
     // zum naechsten Zeitgeber liegen, und auf einer Seite ohne Zeitgeber
     // fuer immer.
     super::promise::run_jobs(i);
     Ok(prevented)
+}
+
+/// Das `<label>` am oder ueber dem getroffenen Knoten und sein Steuerelement.
+pub fn label_target(i: &Interp, id: u32) -> Option<(u32, u32)> {
+    let d = i.doc.as_ref()?;
+    let mut cur = Some(id);
+    while let Some(n) = cur {
+        if &*d.nodes.get(n as usize)?.tag == "label" {
+            return label_control(i, n).map(|c| (n, c));
+        }
+        cur = d.nodes[n as usize].parent;
+    }
+    None
+}
+
+fn is_box_control(i: &Interp, id: u32) -> bool {
+    let Some(d) = i.doc.as_ref() else { return false };
+    let Some(n) = d.nodes.get(id as usize) else { return false };
+    &*n.tag == "input"
+        && n.attr("type").is_some_and(|t| {
+            let t = t.to_ascii_lowercase();
+            t == "checkbox" || t == "radio"
+        })
+}
+
+fn deliver_click(i: &mut Interp, chain: &[u32]) -> C<bool> {
+    let proto = i.realm.event_proto.clone();
+    let ev = build_event(i, proto, "click", true);
+    ev.borrow_mut().define(EV_BUBBLES, Prop { value: Some(Value::Bool(true)), get: None,
+        set: None, writable: true, enumerable: false, configurable: true });
+    deliver(i, &ev, "click", chain)
+}
+
+fn dispatch_plain(i: &mut Interp, kind: &str, chain: &[u32]) -> C<bool> {
+    let proto = i.realm.event_proto.clone();
+    let ev = build_event(i, proto, kind, true);
+    ev.borrow_mut().define(EV_BUBBLES, Prop { value: Some(Value::Bool(true)), get: None,
+        set: None, writable: true, enumerable: false, configurable: true });
+    deliver(i, &ev, kind, chain)
 }
 
 /// Der gemeinsame Kern: ein fertiges Ereignis ueber eine fertige Kette.
@@ -6333,6 +6647,92 @@ fn set_control_value(i: &mut Interp, id: u32, v: &str) {
 /// Ueber den BAUM, nicht ueber `form=`: das Attribut, mit dem ein Element
 /// ausserhalb seines Formulars stehen kann, liest beak nirgends, und eine
 /// halbe Zuordnung waere schlimmer als eine ehrliche.
+/// Der Haken, wie er JETZT steht: der „schmutzige" Wert, sonst das Attribut.
+fn checked_now(i: &Interp, id: u32) -> bool {
+    let Some(d) = i.doc.as_ref() else { return false };
+    match d.nodes.get(id as usize).and_then(|n| n.checked) {
+        Some(b) => b,
+        None => d.nodes.get(id as usize).is_some_and(|n| n.attr("checked").is_some()),
+    }
+}
+
+fn set_checked(i: &mut Interp, id: u32, on: bool) {
+    if let Some(d) = &mut i.doc {
+        if let Some(n) = d.nodes.get_mut(id as usize) {
+            n.checked = Some(on);
+        }
+        d.touch();
+    }
+}
+
+/// Das Formular, dem ein Steuerelement gehoert: der naechste `<form>`-Vorfahr.
+/// Das `form=`-Attribut (ein Control ausserhalb seines Formulars) wird hier
+/// NICHT gelesen — dieselbe Grenze, die `forms::collect` hat, und benannt
+/// statt still.
+fn owning_form(i: &Interp, id: u32) -> Option<u32> {
+    let d = i.doc.as_ref()?;
+    let mut cur = d.nodes.get(id as usize)?.parent;
+    while let Some(p) = cur {
+        if &*d.nodes.get(p as usize)?.tag == "form" {
+            return Some(p);
+        }
+        cur = d.nodes[p as usize].parent;
+    }
+    None
+}
+
+/// Die `<label>`, die zu einem Steuerelement gehoeren: die es einwickeln, und
+/// die per `for=` auf seine `id` zeigen.
+fn labels_of(i: &Interp, id: u32) -> Vec<u32> {
+    let Some(d) = i.doc.as_ref() else { return Vec::new() };
+    let mut out = Vec::new();
+    let mut cur = d.nodes.get(id as usize).and_then(|n| n.parent);
+    while let Some(p) = cur {
+        let Some(n) = d.nodes.get(p as usize) else { break };
+        if &*n.tag == "label" && !out.contains(&p) {
+            out.push(p);
+        }
+        cur = n.parent;
+    }
+    if let Some(want) = d.nodes.get(id as usize).and_then(|n| n.attr("id")).cloned() {
+        for (k, n) in d.nodes.iter().enumerate() {
+            if &*n.tag == "label" && n.attr("for").is_some_and(|f| **f == *want) && !out.contains(&(k as u32)) {
+                out.push(k as u32);
+            }
+        }
+    }
+    out
+}
+
+/// Das Steuerelement, das eine `<label>` benennt: `for=` zuerst, sonst das
+/// erste eingewickelte.
+fn label_control(i: &Interp, id: u32) -> Option<u32> {
+    let d = i.doc.as_ref()?;
+    if let Some(want) = d.nodes.get(id as usize)?.attr("for").cloned() {
+        return d.nodes.iter().position(|n| {
+            n.kind == ELEMENT_NODE && n.attr("id").is_some_and(|v| **v == *want)
+        }).map(|k| k as u32);
+    }
+    fn first(d: &Doc, id: u32, out: &mut Option<u32>) {
+        if out.is_some() { return }
+        for c in &d.nodes[id as usize].children {
+            let t = &*d.nodes[*c as usize].tag;
+            if matches!(t, "input" | "select" | "textarea" | "button") {
+                *out = Some(*c);
+                return;
+            }
+            first(d, *c, out);
+        }
+    }
+    let mut out = None;
+    first(d, id, &mut out);
+    out
+}
+
+fn t_is_textarea(i: &Interp, id: u32) -> bool {
+    i.doc.as_ref().is_some_and(|d| d.nodes.get(id as usize).is_some_and(|n| &*n.tag == "textarea"))
+}
+
 fn form_controls(i: &Interp, form: u32) -> Vec<u32> {
     fn walk(d: &Doc, id: u32, out: &mut Vec<u32>) {
         for c in d.nodes[id as usize].children.clone() {
