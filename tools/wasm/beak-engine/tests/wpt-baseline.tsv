@@ -4009,7 +4009,7 @@ PASS	css-flexbox/flex-order.html
 PASS	css-flexbox/flexbox-abspos-child-001a.html
 PASS	css-flexbox/flexbox-abspos-child-001b.html
 FAIL	css-flexbox/flexbox-abspos-child-002.html
-FAIL	css-flexbox/flexbox-align-items-center-nested-001.html
+PASS	css-flexbox/flexbox-align-items-center-nested-001.html
 PASS	css-flexbox/flexbox-align-self-stretch-vert-001.html
 PASS	css-flexbox/flexbox-align-self-stretch-vert-002.html
 INCONCLUSIVE	css-flexbox/flexbox-anonymous-items-001.html
@@ -4336,7 +4336,7 @@ FAIL	css-flexbox/overflow-area-002.html
 PASS	css-flexbox/overflow-area-003.html
 FAIL	css-flexbox/overflow-top-left.html
 FAIL	css-flexbox/percentage-heights-002.html
-FAIL	css-flexbox/percentage-heights-004.html
+PASS	css-flexbox/percentage-heights-004.html
 FAIL	css-flexbox/percentage-heights-015.html
 PASS	css-flexbox/percentage-padding-002.html
 PASS	css-flexbox/percentage-size-subitems-001.html
@@ -5150,9 +5150,9 @@ FAIL	css-position/position-absolute-in-inline-margin-top.html
 PASS	css-position/position-absolute-large-negative-inset.html
 PASS	css-position/position-absolute-root-element-flex.html
 PASS	css-position/position-absolute-root-element-grid.html
-FAIL	css-position/position-absolute-semi-replaced-stretch-button.html
-FAIL	css-position/position-absolute-semi-replaced-stretch-input.html
-FAIL	css-position/position-absolute-semi-replaced-stretch-other.html
+PASS	css-position/position-absolute-semi-replaced-stretch-button.html
+PASS	css-position/position-absolute-semi-replaced-stretch-input.html
+PASS	css-position/position-absolute-semi-replaced-stretch-other.html
 PASS	css-position/position-fixed-overflow-print.html
 PASS	css-position/position-fixed-root-element-flex.html
 PASS	css-position/position-fixed-root-element-grid.html

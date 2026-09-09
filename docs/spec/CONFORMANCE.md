@@ -22,15 +22,29 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-09-09, beak 0.138.0)
+### Current number (measured 2026-09-09, beak 0.146.0)
 
 ```
-4537 pass / 1110 fail / 139 inconclusive   (of 5786 vendored reftests)
-= 80.3 % of the conclusive 5647   ·   4537 / 5201 = 87.2 % without vehicles
+4542 pass / 1105 fail / 139 inconclusive   (of 5786 vendored reftests)
+= 80.4 % of the conclusive 5647   ·   4542 / 5201 = 87.3 % without vehicles
 ```
 
-Moved **+52 / −4** over 0.135.0–0.138.0 against the 0.128.0 baseline, which is
-now re-blessed. **664 real failures left.**
+Moved **+5 / −0** over 0.145.0–0.146.0 against the 0.138.0 baseline, which is
+now re-blessed. **659 real failures left.**
+
+#### 0.145.0/0.146.0: the box a flex container reports (+5 / −0)
+
+None of the five were found by WPT. They came out of the component galleries
+(`<tools>/gallery/`, Bootstrap and Tailwind against Chromium), and all five
+were visible in `getBoundingClientRect` before they were visible in a render:
+a flex/grid container reported the width of the STRIP it sits in rather than
+its own; a flex COLUMN stretched the content box instead of the outer box, so
+every child of a padded item was that padding too wide; a control's intrinsic
+width was framed twice; table parts had no box at all; and a box that
+establishes its own formatting context was recorded TWICE — `getBoundingClientRect`
+returns the union, and the union of 256 and 1902 is 1902. The five WPT tests
+that flipped are the flexbox and abspos-stretch ones that read the same
+geometry.
 
 #### 0.138.0: the stacking ranges nest (+25 / −3)
 
@@ -178,7 +192,7 @@ by filename, because the filename does not say so
 | `subgrid` | 18 | |
 
 Against the corpus that a real page can actually exercise — 5201 tests —
-the number is **4537 / 5201 = 87.2 %**, with **664 real failures left**. Both
+the number is **4542 / 5201 = 87.3 %**, with **659 real failures left**. Both
 are worth tracking: the raw one never lies about the suite, and the second one
 is the one that predicts what a page looks like. Neither is allowed to move
 without a measured run.
