@@ -48,7 +48,7 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-09 · beak 0.137.0 · Kernel 0.329.0** (Rest: `git log`)
+**Stand 2026-09-09 · beak 0.138.0 · Kernel 0.329.0** (Rest: `git log`)
 
 **▶ Als nächstes: htmx (`XPathEvaluator`), dann die Ligaturen.** Danach
 stünde Shadow DOM an — aber gemessen ist das KEINE Web-Anforderung, sondern
@@ -74,11 +74,21 @@ die Probe drei Dinge, die WPT nie zeigt: ein inline `<svg>` mass sich nicht,
 **`margin-top: calc(…)` wurde ganz verworfen** — Tailwind v4 schreibt jedes
 `my-*` genau so.
 
-**Gemessen und NICHT gemacht: die Malreihenfolge positionierter Kästen.** Ein
-Dutzend Fehlschläge hängt daran, dass ein absoluter Kasten vom Fluss überdeckt
-wird, der ihm folgt (Appendix E, Schritt 8). Zwei Anläufe gemessen, beide
-schlechter (+21/−30 und +21/−57) — es braucht einen echten Stapelkontext-BAUM,
-weil die Bereichsliste flach ist. Details: `docs/spec/CONFORMANCE.md`.
+**0.138.0: die Stapelbereiche verschachteln sich.** Das war der größte
+Strukturposten, und er war ein Datenstruktur-Problem, kein Regelproblem: ein
+Aufklappmenü verschwand UNTER dem Inhalt danach, sobald sein Panel nicht
+hinter einer offenen Textzeile stand — also bei fast jedem echten Menü. Fünf
+Messungen sagten „Heben hilft nicht", und alle fünf hatten recht: die
+Bereichsliste war FLACH, ein `position:relative`-Elter verschluckte die
+Bereiche seiner Kinder. `z_order` baut jetzt einen Baum. Damit bekommt jeder
+positionierte Kasten seinen Bereich — auch **Tabellenteile**, **positionierte
+Floats** und **Flex-/Rasterkinder**, die nie eine Meldestelle erreicht hatten.
+Preis: `clip_overflow` durfte nicht mehr aussteigen (467 Befehle entkamen
+ihren `overflow:hidden`-Kästen), also schreibt `clip_ops` jetzt zurück, wohin
+jeder Befehl gewandert ist. Nebenbei zwei Prozentbreiten, die sich zweimal
+auflösten: `float:left; width:50%` kam als VIERTEL heraus, und absolut
+gesetzt kam `width:18%` als 18 % von 18 %. Details:
+`docs/spec/CONFORMANCE.md`.
 
 **0.134.0: die Rollmasse antworteten 0, und das Layout hatte die Zahlen
 nicht.** 582 Aufrufe fragen `scrollHeight` & Co., 78 `offsetParent`. Das
@@ -132,7 +142,7 @@ als Ligatur; fontdue läuft mit `load_substitutions: false`, also ist
     test262 exec    81,76 %   (V8 auf demselben Korpus: 99,41 %)
     test262 parse   96,84 %
     DOM-Aufrufe     99,4 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
-    WPT (CSS)       4515/5201 = 86,8 % ohne Testvehikel (roh 80,0 %)
+    WPT (CSS)       4537/5201 = 87,2 % ohne Testvehikel (roh 80,3 %)
     Bibliotheken    12 von 13 (`<tools>/libprobe/`)
     beak:selftest   Sprache 55/55, Dokument 39/39
     Halde           Schriften faul; srf 44 MiB (war 89)
