@@ -59,6 +59,13 @@ pub fn stylesheet_links(html: &str) -> alloc::vec::Vec<alloc::string::String> {
     css::stylesheet_links(&dom::parse(html))
 }
 
+/// The `@import` targets of ONE stylesheet, in source order. They resolve
+/// against that sheet's own URL, not the document's, so the shell has to ask
+/// per sheet rather than over the concatenated buffer.
+pub fn import_urls(css: &str) -> alloc::vec::Vec<alloc::string::String> {
+    css::import_urls(css)
+}
+
 /// `src` of every `<img>` in an HTML document (as written), for the shell to
 /// fetch + hand back via `Engine::set_images`.
 /// Every `<img src>` in the document, in document order — the shell's fetch
