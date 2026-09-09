@@ -22,14 +22,70 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-09-09, beak 0.137.0)
+### Current number (measured 2026-09-09, beak 0.138.0)
 
 ```
-4515 pass / 1132 fail / 139 inconclusive   (of 5786 vendored reftests)
-= 80.0 % of the conclusive 5647   ·   4515 / 5201 = 86.8 % without vehicles
+4537 pass / 1110 fail / 139 inconclusive   (of 5786 vendored reftests)
+= 80.3 % of the conclusive 5647   ·   4537 / 5201 = 87.2 % without vehicles
 ```
 
-Moved **+30 / −1** against the 0.128.0 baseline, which is now re-blessed. The
+Moved **+52 / −4** over 0.135.0–0.138.0 against the 0.128.0 baseline, which is
+now re-blessed. **664 real failures left.**
+
+#### 0.138.0: the stacking ranges nest (+25 / −3)
+
+This is the item the previous section called "the single biggest structural
+one", and it was a data-structure problem, not a rule problem. Appendix E
+paints a positioned box in step 8, after everything in steps 3–7; our display
+list painted it in visit order, so a dropdown panel whose parent had no open
+line box vanished **under the content that follows it** — every dropdown,
+dialog and popover on the web is that shape. The old rule lifted exactly one
+special case: over the single line box the panel was reached from.
+
+Five measurements said lifting more does not work (+21/−30 for every
+out-of-flow box, +21/−57 for every positioned one, plus the three recorded at
+`LAYER_POSITIONED`). All five were right, and all five were about the flat
+range list: a `position: relative` parent SWALLOWED its children's ranges
+instead of containing them. `z_order` now builds a tree — ranges over one
+array are properly nested by construction, since each is a subtree's span —
+and sorts each level stably by `(z, layer)`, children first.
+
+With that, every positioned box can be tracked at every depth, and three
+families turned out never to have been tracked at all: **table parts** (cell,
+row, row group, caption — painted on their own path), **a float that is also
+positioned** (step 8, not step 4), and **flex and grid items** (`layout_box`
+records for itself now). Floats became ordinary nodes too: `split_float_ranges`
+used to CUT the enclosing range around each float, which the flat list needed
+and the tree breaks — the cut pieces become SIBLINGS, so a float sorted ahead
+of the very background it sits on.
+
+The price was `clip_overflow`, which used to bail whenever a descendant had
+recorded a range inside its span. Tolerable while only an explicit `z-index`
+opened one; with every positioned box opening one it meant an `overflow:
+hidden` box with any positioned child stopped clipping — 467 draw ops escaped
+their boxes on one vendored page. `clip_ops` now reports where every op went
+and `clip_overflow` rewrites the side tables through that map.
+
+Two pre-existing percentage bugs fell out of chasing the losses, both the same
+shape as each other and both real-page idioms: `float: left; width: 50%` came
+out a QUARTER, and an absolutely positioned `width: 18%` came out 18 % of
+18 %. In both, `layout_box` is handed the box's own used width as the
+containing block — the contract for a shrink-to-fit box, a trap for a
+percentage.
+
+Three losses, named rather than smoothed over:
+
+* `z-index-abspos-003/007` — a stacking context's OWN background belongs in
+  step 1, ahead of its negative-`z-index` children in step 2. Our node does not
+  separate it from the content that follows it in the range. The obvious fix
+  (pin the leading gap) was measured and REJECTED: −2 net, because it also
+  pushes ordinary leading content ahead of negative children
+  (`empty-inline-003`, `line-breaking-013/014`). Doing it right means carrying
+  the length of the box's own paint into `record_stack_entry`.
+* `position-sticky-rtl` — the reference writes `position: absolute` where the
+  test writes `sticky`. The reference is right now, which exposes that
+  `position: sticky` is parsed and never OFFSET. The green before was an
+  accidental pass. The
 one loss is not a loss: `css-flexbox/stretch-flex-item-checkbox-input` went
 PASS → INCONCLUSIVE at an unchanged 0.00 % diff, because a checkbox without
 the UA padding it never should have had is 50×50 instead of 62×62 and the
@@ -70,18 +126,10 @@ line. On the vendored Tailwind page that was the site logo. A third: a
 not functions), and Tailwind v4 writes every `my-*`/`mt-*` as
 `margin-block: calc(var(--spacing) * 10)`.
 
-**Not done, and measured twice more so it is not guessed at.** A dozen
-failures (`position-absolute-001`, `relpos-calcs-*`, `before-after-positioned-*`,
-much of `CSS2/abspos`) are one thing: a positioned box is painted in Appendix
-E step 8, after everything in steps 4 and 7, and our display list paints it in
-visit order — so the in-flow content that FOLLOWS it covers it. Lifting every
-out-of-flow box into the positioned layer measures +21/−30; lifting every
-positioned box measures +21/−57. That agrees with every earlier attempt
-recorded at `LAYER_POSITIONED` and in the 0.31.0 arc entry — five measurements
-now, all of them negative. The reason it cannot be fixed by lifting is
-that the range list is FLAT: a `position: relative` parent swallows its
-children's ranges. It needs a real stacking-context tree, and that is the
-single biggest structural item left in this file.
+**Done in 0.138.0** — see above. The dozen failures this paragraph used to
+name (`position-absolute-001`, `relpos-calcs-*`, `before-after-positioned-*`,
+much of `CSS2/abspos`) were all one thing, and the five negative measurements
+were all pointing at the same cause: the range list was FLAT.
 
 **A caveat on the denominator, found the same day.** Some vendored reftests
 name a reference that cannot match them by construction:
@@ -130,7 +178,7 @@ by filename, because the filename does not say so
 | `subgrid` | 18 | |
 
 Against the corpus that a real page can actually exercise — 5201 tests —
-the number is **4515 / 5201 = 86.8 %**, with **686 real failures left**. Both
+the number is **4537 / 5201 = 87.2 %**, with **664 real failures left**. Both
 are worth tracking: the raw one never lies about the suite, and the second one
 is the one that predicts what a page looks like. Neither is allowed to move
 without a measured run.
@@ -392,23 +440,23 @@ is the only way to move it, and it would measure font matching, not layout.
 Recorded here so the biggest near-miss in the census is not mistaken for the
 cheapest win a second time.
 
-Per suite, of the CONCLUSIVE tests in that suite (0.137.0):
+Per suite, of the CONCLUSIVE tests in that suite (0.138.0):
 
 | Suite | Pass | Conclusive | % |
 |---|---|---|---|
 | **html-forms** | 20 | 21 | **95.2** |
 | css-color | 267 | 282 | 94.7 |
-| **CSS2** (2.1 suite) | 3018 | 3297 | 91.5 |
+| **CSS2** (2.1 suite) | 3035 | 3297 | 92.1 |
 | css-position | 28 | 35 | 80.0 |
-| css-flexbox | 308 | 420 | 73.3 |
-| css-sizing | 74 | 102 | 72.5 |
+| css-sizing | 76 | 102 | 74.5 |
+| css-flexbox | 309 | 420 | 73.6 |
 | css-text | 253 | 354 | 71.5 |
 | css-values | 56 | 79 | 70.9 |
-| css-cascade | 20 | 31 | 64.5 |
+| css-cascade | 21 | 31 | 67.7 |
 | css-backgrounds | 82 | 137 | 59.9 |
 | css-display | 50 | 87 | 57.5 |
 | css-fonts | 23 | 42 | 54.8 |
-| css-grid | 305 | 731 | 41.7 |
+| css-grid | 306 | 731 | 41.9 |
 | css-align | 11 | 29 | 37.9 |
 
 `css-grid` and `css-display` read low for a reason the number cannot say:
