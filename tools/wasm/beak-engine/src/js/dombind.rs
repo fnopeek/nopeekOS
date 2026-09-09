@@ -1522,6 +1522,52 @@ pub fn wrap(i: &mut Interp, id: u32) -> Value {
     Value::Obj(g)
 }
 
+/// Die vier Stellen von `insertAdjacent*` als `(Elter, davor)`. `None`, wenn
+/// die Stellenangabe keine der vier ist — oder wenn `beforebegin`/`afterend`
+/// an einem Knoten ohne Elter verlangt wird, wo es nichts einzusetzen gibt.
+fn adjacent_spot(i: &Interp, id: u32, pos: &str) -> Option<(u32, Option<u32>)> {
+    let d = i.doc.as_ref()?;
+    match pos {
+        "afterbegin" => Some((id, d.nodes[id as usize].children.first().copied())),
+        "beforeend" => Some((id, None)),
+        "beforebegin" | "afterend" => {
+            let p = d.nodes[id as usize].parent?;
+            let kids = &d.nodes[p as usize].children;
+            let k = kids.iter().position(|&c| c == id)?;
+            let before = if pos == "beforebegin" { Some(id) } else { kids.get(k + 1).copied() };
+            Some((p, before))
+        }
+        _ => None,
+    }
+}
+
+/// `isEqualNode`, rekursiv. Attribute werden als MENGE verglichen: die
+/// Spezifikation sagt ausdruecklich, dass ihre Reihenfolge nichts bedeutet.
+fn nodes_equal(d: &Doc, x: u32, y: u32) -> bool {
+    if x == y {
+        return true;
+    }
+    let (Some(a), Some(b)) = (d.nodes.get(x as usize), d.nodes.get(y as usize)) else {
+        return false;
+    };
+    if a.kind != b.kind || a.tag != b.tag {
+        return false;
+    }
+    if a.kind != ELEMENT_NODE && a.text != b.text {
+        return false;
+    }
+    if a.attrs.len() != b.attrs.len() {
+        return false;
+    }
+    for (k, v) in &a.attrs {
+        if b.attr(k) != Some(v) {
+            return false;
+        }
+    }
+    a.children.len() == b.children.len()
+        && a.children.iter().zip(b.children.iter()).all(|(&p, &q)| nodes_equal(d, p, q))
+}
+
 fn nodes_array(i: &mut Interp, ids: Vec<u32>) -> Value {
     let vals: Vec<Value> = ids.into_iter().map(|id| wrap(i, id)).collect();
     i.new_array(vals)
@@ -2458,6 +2504,37 @@ pub fn install(realm: &mut Realm) {
         if let Some(d) = &mut i.doc { d.detach(c); }
         Ok(a[0].clone())
     }, 1, &fp);
+    // `replaceChild(neu, alt)` — im Zensus null Aufrufe, und trotzdem gebaut:
+    // die Ausfallart ist der Punkt. Eine FEHLENDE Methode wirft und beendet
+    // das ganze Skript, und **lucide ersetzt damit jedes `<i data-lucide>`
+    // durch sein `<svg>`**. Auf sandbox.nopeek.ch starb daran die komplette
+    // Symbolschicht — keine Reiter-Symbole, keine Lupe, kein Themenschalter.
+    meth(&node_proto, "replaceChild", |i, t, a| {
+        let p = node_of(i, &t)?;
+        let new = node_of(i, a.first().unwrap_or(&Value::Undefined))?;
+        let old = node_of(i, a.get(1).unwrap_or(&Value::Undefined))?;
+        if let Some(d) = &mut i.doc {
+            if d.nodes[old as usize].parent != Some(p) {
+                return i.type_err("replaceChild: the node is not a child of this node");
+            }
+            // Erst einsetzen, DANN entfernen: umgekehrt waere die Stelle weg,
+            // an der das Neue stehen soll, und es landete am Ende.
+            d.insert_maybe_fragment(p, new, Some(old));
+            d.detach(old);
+        }
+        fire_connected(i, new)?;
+        Ok(a[1].clone())
+    }, 2, &fp);
+    // Strukturvergleich (DOM §4.4): gleicher Knotentyp, gleicher Name, dieselben
+    // Attribute (Menge und Werte, Reihenfolge egal) und dieselben Kinder in
+    // derselben Reihenfolge. NICHT dieselbe Identitaet — dafuer gibt es `===`.
+    meth(&node_proto, "isEqualNode", |i, t, a| {
+        let x = node_of(i, &t)?;
+        let Ok(y) = node_of(i, a.first().unwrap_or(&Value::Undefined)) else {
+            return Ok(Value::Bool(false));
+        };
+        Ok(Value::Bool(i.doc.as_ref().is_some_and(|d| nodes_equal(d, x, y))))
+    }, 1, &fp);
     accessor(&node_proto, "nodeValue",
         // Ein Element HAT keinen Wert — `null` ist die Antwort, nicht "".
         |i, t, _| with_node!(i, t, |n| Ok(if n.kind == ELEMENT_NODE || n.kind == DOCUMENT_NODE {
@@ -2640,6 +2717,33 @@ pub fn install(realm: &mut Realm) {
             _ => return i.type_err("invalid insertAdjacentHTML position"),
         };
         d.parse_into(parent, &html, at);
+        Ok(Value::Undefined)
+    }, 2, &fp);
+    // Dieselben vier Stellen, aber mit einem KNOTEN statt einer Zeichenkette.
+    // Wer `insertAdjacentHTML` hat und diese beiden nicht, hat die Familie
+    // halb — und die halbe Familie wirft dort, wo die andere Haelfte traegt.
+    meth(&element_proto, "insertAdjacentElement", |i, t, a| {
+        let id = node_of(i, &t)?;
+        let pos = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_lowercase();
+        let node = node_of(i, a.get(1).unwrap_or(&Value::Undefined))?;
+        let Some((parent, before)) = adjacent_spot(i, id, &pos) else {
+            return i.type_err("invalid insertAdjacentElement position");
+        };
+        if let Some(d) = &mut i.doc { d.insert_maybe_fragment(parent, node, before); }
+        fire_connected(i, node)?;
+        Ok(a[1].clone())
+    }, 2, &fp);
+    meth(&element_proto, "insertAdjacentText", |i, t, a| {
+        let id = node_of(i, &t)?;
+        let pos = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_lowercase();
+        let text = i.to_string(a.get(1).unwrap_or(&Value::Undefined))?;
+        let Some((parent, before)) = adjacent_spot(i, id, &pos) else {
+            return i.type_err("invalid insertAdjacentText position");
+        };
+        let Some(d) = &mut i.doc else { return Ok(Value::Undefined) };
+        let n = d.create(TEXT_NODE, "#text");
+        d.set_text(n, text);
+        d.insert_maybe_fragment(parent, n, before);
         Ok(Value::Undefined)
     }, 2, &fp);
     meth(&node_proto, "cloneNode", |i, t, a| {
