@@ -328,6 +328,7 @@ impl Interp {
             return self.ref_err(&alloc::format!("module not loaded: {url}"));
         };
         let g = new_obj(None);
+        g.borrow_mut().kind = super::value::ObjKind::ModuleNs(Rc::from(url));
         g.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("Module")));
         let names: Vec<Rc<str>> = {
             let b = m.borrow();
@@ -348,6 +349,19 @@ impl Interp {
                 writable: false, enumerable: true, configurable: false });
         }
         Ok(ns)
+    }
+
+    /// Der AKTUELLE Wert eines Exports — die lebende Bindung hinter einer
+    /// Namensraum-Eigenschaft. `None`, wenn der Name kein Export ist (dann
+    /// antwortet die gewoehnliche Eigenschaftstabelle, etwa fuer
+    /// `Symbol.toStringTag`).
+    pub fn ns_live(&mut self, url: &str, name: &str) -> Option<Value> {
+        let known = self.modules.get(url)?.borrow().exports.contains_key(name);
+        if !known {
+            return None;
+        }
+        let (env, local) = self.resolve_export(url, name, &mut Vec::new())?;
+        Some(env.borrow().vars.get(&*local).map(|b| b.value.clone()).unwrap_or(Value::Undefined))
     }
 
     /// Den Graphen ab `url` auswerten — Tiefe zuerst, jedes Modul einmal.

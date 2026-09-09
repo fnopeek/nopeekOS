@@ -304,6 +304,8 @@ pub struct Realm {
     /// die beiden Kasten-Beobachter.
     pub mo_proto: Gc,
     pub ro_proto: Gc,
+    pub intl_dtf_proto: Gc,
+    pub intl_nf_proto: Gc,
     pub xpath_result_proto: Gc,
     pub xpath_expr_proto: Gc,
     pub xpath_eval_proto: Gc,
@@ -1514,6 +1516,19 @@ impl Interp {
         // kein Detail — es ist der Unterschied zwischen einer Sicht und einem
         // gewoehnlichen Objekt mit Zahlen als Schluesseln.
         if let Some(v) = ta_read(&start, key) { return Ok(v) }
+        // **Ein Modul-Namensraum liest die BINDUNG, nicht ihren Wert von
+        // damals.** `export let x` plus ein Setter heisst, dass `ns.x` sich
+        // aendert, ohne dass jemand `ns` anfasst; eine Momentaufnahme in der
+        // Eigenschaftstabelle zeigt fuer immer den Anfangswert. Genau daran
+        // starb sandbox.nopeek.chs `init()`: `state.canvas` blieb `null`,
+        // `getContext` warf, und die Zeile darunter — die alle Behandler
+        // anmeldet — lief nie.
+        if let super::value::ObjKind::ModuleNs(url) = &start.borrow().kind {
+            let url = url.clone();
+            if let Some(v) = self.ns_live(&url, key) {
+                return Ok(v);
+            }
+        }
         // Ein Stellvertreter beantwortet JEDEN Zugriff selbst — die
         // Prototypenkette darunter wird nicht gelaufen.
         if super::proxy::parts(&start).is_some() {

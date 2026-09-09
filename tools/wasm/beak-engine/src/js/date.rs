@@ -338,7 +338,110 @@ fn set_fields(i: &mut Interp, t: Value, a: &[Value], first: usize, count: usize)
     set_time(i, &t, v).map(Value::Num)
 }
 
+/// `Intl` — so viel davon, wie eine Seite braucht, um nicht zu STERBEN.
+///
+/// **Es gibt keine Gebietsdatenbank in beak**, und diese Funktion tut nicht so.
+/// Was sie liefert, ist wahr: `resolvedOptions()` nennt die Zeitzone, die die
+/// Maschine wirklich fuehrt (UTC — `npk_unix_time` gibt keine andere), den
+/// gregorianischen Kalender und lateinische Ziffern. `format` reicht an die
+/// `toLocale*`-Methoden von `Date` weiter, die es schon gibt.
+///
+/// Gebaut, weil die Ausfallart ohne es toedlich ist. Der Zensus zaehlt ueber
+/// zwoelf Zielseiten NULL `Intl`-Aufrufe; sandbox.nopeek.ch hat genau einen —
+/// `Intl.DateTimeFormat().resolvedOptions().timeZone`, in `init()`, eine
+/// Zeile ueber `initEventListeners()`. Ein `ReferenceError` dort kostete
+/// jeden Knopf der Seite.
+///
+/// Was FEHLT und hier nicht vorgetaeuscht wird: Zahlengruppierung nach
+/// Gebiet, Waehrungen, Pluralregeln, Kollation, relative Zeiten. Steht in
+/// CONFORMANCE.
+fn intl_def(o: &Gc, name: &str, f: NativeFn, len: usize, proto: &Gc) {
+    let g = native(Some(proto.clone()), f, name, len, false);
+    o.borrow_mut().define(name, Prop::builtin(Value::Obj(g)));
+}
+
+fn install_intl(realm: &mut Realm) {
+    let fp = realm.function_proto.clone();
+    let intl = new_obj(Some(realm.object_proto.clone()));
+    intl.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("Intl")));
+
+    // Ein gemeinsamer Prototyp fuer beide Formatierer: `resolvedOptions` sagt,
+    // was die Maschine wirklich kann, `format` reicht weiter.
+    let mk = |realm: &mut Realm, tag: &'static str, fmt: NativeFn| -> Gc {
+        let proto = new_obj(Some(realm.object_proto.clone()));
+        proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str(tag)));
+        intl_def(&proto, "format", fmt, 1, &realm.function_proto.clone());
+        intl_def(&proto, "resolvedOptions", |i, t, _| {
+            let o = new_obj(Some(i.realm.object_proto.clone()));
+            let loc = i.get(&t, "__locale")?;
+            let loc = match loc { Value::Str(s) => Value::Str(s), _ => Value::str("en-US") };
+            let mut b = o.borrow_mut();
+            b.define("locale", Prop::data(loc));
+            b.define("calendar", Prop::data(Value::str("gregory")));
+            b.define("numberingSystem", Prop::data(Value::str("latn")));
+            // Die Wahrheit ueber beak: die Uhr laeuft in UTC.
+            b.define("timeZone", Prop::data(Value::str("UTC")));
+            drop(b);
+            Ok(Value::Obj(o))
+        }, 0, &realm.function_proto.clone());
+        proto
+    };
+
+    let dtf_proto = mk(realm, "Intl.DateTimeFormat", |i, t, a| {
+        let d = a.first().cloned().unwrap_or(Value::Undefined);
+        let loc = i.get(&t, "__locale")?;
+        let f = i.get(&d, "toLocaleDateString")?;
+        if i.is_callable(&f) {
+            return i.call(&f, d, &[loc]);
+        }
+        Ok(Value::str(""))
+    });
+    let nf_proto = mk(realm, "Intl.NumberFormat", |i, _, a| {
+        let n = i.to_number(a.first().unwrap_or(&Value::Undefined))?;
+        Ok(Value::string(alloc::format!("{n}")))
+    });
+
+    // Beide sind mit UND ohne `new` aufrufbar (ES2024 §11.1.2) — eine Seite
+    // schreibt `Intl.DateTimeFormat()` genauso oft wie `new`.
+    let dtf_p = dtf_proto.clone();
+    let nf_p = nf_proto.clone();
+    realm.intl_dtf_proto = dtf_p;
+    realm.intl_nf_proto = nf_p;
+    let dtf = native(Some(fp.clone()), |i, _, a| {
+        let o = new_obj(Some(i.realm.intl_dtf_proto.clone()));
+        let loc = a.first().cloned().unwrap_or(Value::str("en-US"));
+        o.borrow_mut().define("__locale", Prop { value: Some(loc), get: None, set: None,
+            writable: false, enumerable: false, configurable: false });
+        Ok(Value::Obj(o))
+    }, "DateTimeFormat", 0, true);
+    dtf.borrow_mut().define("prototype", Prop::frozen(Value::Obj(dtf_proto.clone())));
+    dtf_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(dtf.clone())));
+    intl.borrow_mut().define("DateTimeFormat", Prop::builtin(Value::Obj(dtf)));
+
+    let nf = native(Some(fp.clone()), |i, _, a| {
+        let o = new_obj(Some(i.realm.intl_nf_proto.clone()));
+        let loc = a.first().cloned().unwrap_or(Value::str("en-US"));
+        o.borrow_mut().define("__locale", Prop { value: Some(loc), get: None, set: None,
+            writable: false, enumerable: false, configurable: false });
+        Ok(Value::Obj(o))
+    }, "NumberFormat", 0, true);
+    nf.borrow_mut().define("prototype", Prop::frozen(Value::Obj(nf_proto.clone())));
+    nf_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(nf.clone())));
+    intl.borrow_mut().define("NumberFormat", Prop::builtin(Value::Obj(nf)));
+
+    intl_def(&intl, "getCanonicalLocales", |i, _, a| {
+        let v = match a.first() {
+            Some(Value::Str(s)) => alloc::vec![Value::Str(s.clone())],
+            _ => Vec::new(),
+        };
+        Ok(i.new_array(v))
+    }, 1, &fp);
+
+    realm.global.borrow_mut().define("Intl", Prop::builtin(Value::Obj(intl)));
+}
+
 pub fn install(realm: &mut Realm) {
+    install_intl(realm);
     let fp = realm.function_proto.clone();
     let proto = new_obj(Some(realm.object_proto.clone()));
     realm.date_proto = proto.clone();
