@@ -75,7 +75,17 @@ fn main() {
     if std::env::var("NOVM").is_ok() { sess.interp.vm_off = true; }
     sess.interp.set_document(beak_engine::js::dombind::Doc::from_dom(&dom));
     let media = beak_engine::css::Media::new(1902.0, false);
-    let sheet = beak_engine::css::collect_all(&dom, "", media);
+    // **Die verlinkten Blaetter gehoeren in den Stilkontext.** Ohne sie
+    // antwortet `getComputedStyle` nur aus den `<style>`-Bloecken der Seite,
+    // und jede Bootstrap-Klasse sieht aus, als gaebe es sie nicht: `.row`
+    // meldete `block` statt `flex` — ein Fehler der PROBE, der wie ein
+    // Kaskadenfehler in beak aussah
+    // ([[feedback_the_test_path_must_be_the_real_path]]).
+    let mut linked = String::new();
+    let mut nlink = 0usize;
+    collect_links(dom.body(), &dir, &mut linked, &mut nlink);
+    collect_links(&dom.root, &dir, &mut linked, &mut nlink);
+    let sheet = beak_engine::css::collect_all(&dom, &linked, media);
     sess.interp.set_style_context(beak_engine::js::interp::StyleCtx {
         sheet: std::rc::Rc::new(sheet),
         theme: beak_engine::layout::Theme {
@@ -235,6 +245,16 @@ fn main() {
         }
     }
     if let Ok(spec) = std::env::var("CLICK") { click_ids(&mut sess, &html, &dir, &spec); }
+    // `TEXT=<id>` gibt den Inhalt EINES Elements ungekuerzt aus — der Weg,
+    // auf dem eine eingehaengte Sonde ihr Ergebnis herausreicht, und zwar
+    // derselbe, den Chromium mit `--dump-dom` nimmt.
+    if let Ok(id) = std::env::var("TEXT") {
+        let dom = sess.interp.doc.as_mut().map(|d| d.to_dom());
+        match dom.as_ref().and_then(|d| find_el(&d.root, &id)) {
+            Some(e) => { let mut t = String::new(); raw_text(e, &mut t); println!("{t}"); }
+            None => println!("TEXT: kein Element mit id={id}"),
+        }
+    }
     if let Ok(want) = std::env::var("SUBMIT") {
         let dom = sess.interp.doc.as_mut().map(|d| d.to_dom());
         let Some(dom) = dom else { return };
@@ -483,6 +503,34 @@ fn click_ids(sess: &mut beak_engine::js::Session, html: &str, dir: &str, spec: &
         if let Some(n) = sess.interp.take_nav() { println!("       NAVIGATION -> {}", n.url); }
         for seq in sess.interp.take_submits() { println!("       Absende-Auftrag: seq={seq}"); }
     }
+}
+
+/// Der ROHE Text eines Elements — ohne Kuerzung, ohne Umbau.
+///
+/// `DUMP=1` schneidet Text bei 60 Zeichen ab; fuer eine Sonde, die ihr
+/// Ergebnis in ein `<pre>` schreibt, ist das wertlos. **Und die Konsole ist
+/// der falsche Weg**: sie haelt 200 Zeilen, danach faellt still weg, was
+/// kommt — eine Messung, die auf halber Strecke aufhoert und wie eine Luecke
+/// im Layout aussieht ([[feedback_a_read_cap_decides_what_exists]]).
+fn raw_text(e: &beak_engine::dom::Element, out: &mut String) {
+    for c in &e.children {
+        match c {
+            beak_engine::dom::Node::Text(t) => out.push_str(t),
+            beak_engine::dom::Node::Element(x) => raw_text(x, out),
+            _ => {}
+        }
+    }
+}
+
+fn find_el<'a>(e: &'a beak_engine::dom::Element, id: &str)
+    -> Option<&'a beak_engine::dom::Element> {
+    if e.attr("id") == Some(id) { return Some(e) }
+    for c in &e.children {
+        if let beak_engine::dom::Node::Element(x) = c {
+            if let Some(f) = find_el(x, id) { return Some(f) }
+        }
+    }
+    None
 }
 
 /// Den Baum als Umriss: Marke, id/class, und Text gekuerzt.
