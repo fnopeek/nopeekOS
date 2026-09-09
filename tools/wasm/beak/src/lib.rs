@@ -290,6 +290,15 @@ fn toggle_menu(which: u8) {
 const URL_CAP: usize = 4096;
 static mut URL_BUF: [u8; URL_CAP] = [0; URL_CAP];
 static mut URL_LEN: usize = 0;
+/// Was in der Adresszeile STEHT — nicht, woher das Dokument kam.
+///
+/// **Zwei verschiedene Dinge, und sie waren ein Puffer.** Jeder Tastendruck
+/// in der Zeile schrieb `URL_BUF`, und damit (a) die Basis, gegen die die
+/// laufende Seite ihre relativen Adressen aufloest, und (b) den
+/// Netzkontext, den der Kernel fuer sie fuehrt. Beides gehoert dem geladenen
+/// Dokument, nicht dem Textfeld.
+static mut EDIT_BUF: [u8; URL_CAP] = [0; URL_CAP];
+static mut EDIT_LEN: usize = 0;
 
 const HTML_CAP: usize = 3 * 1024 * 1024;
 static mut HTML_BUF: [u8; HTML_CAP] = [0; HTML_CAP];
@@ -444,6 +453,10 @@ fn set_url(s: &str) {
     unsafe {
         core::ptr::copy_nonoverlapping(s.as_ptr(), core::ptr::addr_of_mut!(URL_BUF) as *mut u8, n);
         core::ptr::addr_of_mut!(URL_LEN).write(n);
+    }
+    // Die Zeile zeigt, wo man IST — bis jemand hineintippt.
+    set_edit(s);
+    unsafe {
         // A new page gets its own verdict on whether it can afford `:hover` —
         // and its own chance to say so once. Without this, one heavy page
         // silences the pointer for every page after it.
@@ -458,6 +471,30 @@ fn url_str() -> &'static str {
     unsafe {
         let len = core::ptr::addr_of!(URL_LEN).read();
         let ptr = core::ptr::addr_of!(URL_BUF) as *const u8;
+        core::str::from_utf8(core::slice::from_raw_parts(ptr, len)).unwrap_or("")
+    }
+}
+
+/// Nur das Textfeld — kein Netzkontext, keine neue Basis, kein DNS.
+///
+/// **Ein Tastendruck ist keine Navigation.** Bis 0.146.0 rief jeder
+/// Tastendruck `set_url`, und der meldet dem Kernel den Netzkontext; der
+/// loest dafuer AUF. Am Geraet stand das als sechzehn DNS-Abfragen im Log —
+/// `sandbox.nopeek.c`, `sandbox.nopeek.`, `sandbox.nopeek`, … bis zur leeren
+/// Zeichenkette —, weil der Benutzer die Adresse rueckwaerts geloescht hat.
+/// Jedes Praefix dessen, was jemand tippt, ging an den Aufloeser.
+fn set_edit(s: &str) {
+    let n = s.len().min(URL_CAP);
+    unsafe {
+        core::ptr::copy_nonoverlapping(s.as_ptr(), core::ptr::addr_of_mut!(EDIT_BUF) as *mut u8, n);
+        core::ptr::addr_of_mut!(EDIT_LEN).write(n);
+    }
+}
+
+fn edit_str() -> &'static str {
+    unsafe {
+        let len = core::ptr::addr_of!(EDIT_LEN).read();
+        let ptr = core::ptr::addr_of!(EDIT_BUF) as *const u8;
         core::str::from_utf8(core::slice::from_raw_parts(ptr, len)).unwrap_or("")
     }
 }
@@ -3510,7 +3547,11 @@ fn render_chrome() {
 
     // A lock in Success for https, the bird for anything else — the
     // scheme belongs in the field, not in the URL text (docs/spec/UI_REFRESH.md §5).
+    // Das Schloss gehoert dem GELADENEN Dokument, der Text dem Feld: waehrend
+    // jemand tippt, sagt das Schloss weiter die Wahrheit ueber die Seite, die
+    // dasteht.
     let url = url_str();
+    let field = edit_str();
     let (lead_icon, lead_tint) = if url.starts_with("https://") {
         (IconId::Lock, Token::Success)
     } else {
@@ -3525,7 +3566,7 @@ fn render_chrome() {
                 modifiers: vec![Modifier::Tint(lead_tint)],
             },
             Widget::Input {
-                value: url.to_string(),
+                value: field.to_string(),
                 placeholder: s().address_placeholder.to_string(),
                 on_submit: ActionId(ACT_GO),
                 modifiers: vec![Modifier::Flex(1)],
@@ -3856,9 +3897,11 @@ fn handle(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32, u32)
 
 fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32, u32)>, page: &mut Page) -> bool {
     match ev {
-        // Keep URL_BUF synced with the address-bar edit buffer.
+        // Nur das Textfeld. NICHT `set_url`: das meldet dem Kernel den
+        // Netzkontext, und der loest dafuer auf — ein Tastendruck ist keine
+        // Navigation ([[feedback_a_keystroke_is_not_a_navigation]]).
         Event::InputChange { value } => {
-            set_url(&value);
+            set_edit(&value);
             // Typing in the address bar means the compositor moved keyboard
             // focus there — drop the page control's focus so only one caret
             // blinks and Enter goes to the right place.
@@ -3892,7 +3935,8 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
         }
         Event::Action(ActionId(id)) => match id {
             ACT_GO => {
-                let t = url_str().to_string();
+                // Was in der Zeile STEHT, nicht wo wir sind.
+                let t = edit_str().to_string();
                 go(engine, &t);
                 set_open_menu(0);
                 true

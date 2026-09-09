@@ -28,6 +28,12 @@ struct DnsEntry {
     /// true = an address. false = the resolver tried and got nothing; the entry
     /// exists to keep the next asker from starting the same doomed lookup.
     valid: bool,
+    /// **Zwei Sorten Fehlschlag, und nur eine ist eine Auskunft.** `true`
+    /// heisst: der Aufloeser hat GEANTWORTET und den Namen nicht gekannt.
+    /// `false` heisst: nichts kam zurueck — das kann eine verlorene Frame
+    /// sein, und daraus eine halbe Minute Ausfall zu machen waere aus einer
+    /// Stoerung ein Defekt.
+    denied: bool,
     /// Tick this entry was written. Evicts the oldest instead of always slot 0,
     /// and expires a negative entry.
     stamp: u64,
@@ -102,16 +108,20 @@ pub fn pump_wanted() {
 
 /// Write an entry, replacing the oldest when the table is full.
 fn remember(name: &str, ip: [u8; 4], valid: bool) {
+    remember_kind(name, ip, valid, false)
+}
+
+fn remember_kind(name: &str, ip: [u8; 4], valid: bool, denied: bool) {
     let stamp = crate::interrupts::ticks();
     let mut cache = CACHE.lock();
     if let Some(slot) = cache.iter_mut().find(|s| {
         s.as_ref().is_some_and(|e| e.name == name)
     }) {
-        *slot = Some(DnsEntry { name: String::from(name), ip, valid, stamp });
+        *slot = Some(DnsEntry { name: String::from(name), ip, valid, denied, stamp });
         return;
     }
     if let Some(slot) = cache.iter_mut().find(|s| s.is_none()) {
-        *slot = Some(DnsEntry { name: String::from(name), ip, valid, stamp });
+        *slot = Some(DnsEntry { name: String::from(name), ip, valid, denied, stamp });
         return;
     }
     let oldest = cache
@@ -119,16 +129,34 @@ fn remember(name: &str, ip: [u8; 4], valid: bool) {
         .enumerate()
         .min_by_key(|(_, s)| s.as_ref().map_or(0, |e| e.stamp))
         .map_or(0, |(i, _)| i);
-    cache[oldest] = Some(DnsEntry { name: String::from(name), ip, valid, stamp });
+    cache[oldest] = Some(DnsEntry { name: String::from(name), ip, valid, denied, stamp });
 }
 
 /// Resolve a hostname to IPv4 address. Blocking (polls for reply).
 pub fn resolve(name: &str) -> Option<[u8; 4]> {
-    // Check cache first
+    // Ein leerer Name ist keine Frage. `want()` prueft das seit je, `resolve`
+    // nicht — und am Geraet stand deshalb `dns: reply for  carried no A
+    // record` im Log, eine Abfrage nach der Wurzelzone.
+    if name.is_empty() || name.len() > 255 {
+        return None;
+    }
+    // Check cache first — the POSITIVE one and the negative one.
+    //
+    // **Ein „den Namen gibt es nicht" ist eine Antwort und gehoert in den
+    // Cache.** `cached()` fuehrt das Negativfach seit je, aber `resolve`
+    // schrieb es nie und las es nie: jeder Aufruf mit demselben toten Namen
+    // zahlte die volle Runde noch einmal.
     {
         let cache = CACHE.lock();
-        if let Some(entry) = cache.iter().flatten().find(|e| e.valid && e.name == name) {
-            return Some(entry.ip);
+        if let Some(e) = cache.iter().flatten().find(|e| e.name == name) {
+            if e.valid {
+                return Some(e.ip);
+            }
+            // Nur ein AUSGESPROCHENES Nein spart die Runde. Eine
+            // Zeitueberschreitung wird wieder versucht.
+            if e.denied && crate::interrupts::ticks().wrapping_sub(e.stamp) < NEG_TTL_TICKS {
+                return None;
+            }
         }
     }
 
@@ -188,11 +216,17 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
     // end as one silent failure, and we have now guessed wrong about which one
     // it is twice.
     let mut seen = 0u32;
-    let mut foreign_id = 0u16;
+    let mut foreign_id: Option<u16> = None;
+    // Hat UNSERE Antwort den Weg zurueck gefunden? Das ist nicht dasselbe wie
+    // „steht eine Adresse darin": eine Antwort ohne A-Satz ist eine Antwort.
+    let mut answered = false;
+    let mut sent = 0usize;
+    let t_start = crate::interrupts::ticks();
     let udp_before = udp::rx_total();
     let (nl_before, _) = udp::no_listener_stats();
     'legs: for (n, leg) in LEGS.iter().enumerate() {
         udp::send(dns_server, LOCAL_PORT, DNS_PORT, &query);
+        sent += 1;
         let t0 = crate::interrupts::ticks();
         while crate::interrupts::ticks().wrapping_sub(t0) < *leg {
             super::poll();
@@ -203,14 +237,25 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
                 if is_reply_to(&data, id) {
                     result = parse_response(&data);
                     answered_on = n + 1;
+                    answered = true;
                     if result.is_none() {
-                        crate::kprintln!("[npk] dns: reply for {} carried no A record                                           ({} bytes, an={})", name, data.len(),
-                            if data.len() >= 8 { u16::from_be_bytes([data[6], data[7]]) } else { 0 });
+                        // **Das ist kein Fehlschlag, das ist ein Nein.** Frueher
+                        // folgten hier noch zwei Zeilen, die „nach 5,5 s (4
+                        // Versuche)" behaupteten — beide Zahlen fest im Code,
+                        // waehrend die Antwort auf Bein 1 in Millisekunden kam.
+                        crate::kprintln!(
+                            "[npk] dns: {} gibt es nicht — der Aufloeser hat nach {} ms \
+                             geantwortet ({} Bytes, an={}, rcode={})",
+                            name,
+                            crate::interrupts::ticks().wrapping_sub(t_start) * 10,
+                            data.len(),
+                            if data.len() >= 8 { u16::from_be_bytes([data[6], data[7]]) } else { 0 },
+                            if data.len() >= 4 { u16::from_be_bytes([data[2], data[3]]) & 0x0F } else { 0 });
                     }
                     break 'legs;
                 }
-                if foreign_id == 0 && data.len() >= 2 {
-                    foreign_id = u16::from_be_bytes([data[0], data[1]]);
+                if foreign_id.is_none() && data.len() >= 2 {
+                    foreign_id = Some(u16::from_be_bytes([data[0], data[1]]));
                 }
             }
             core::hint::spin_loop();
@@ -228,12 +273,27 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
     // A failed lookup names what it had to work with. Whether the next hop's MAC
     // was known decides where to look next, and reconstructing that afterwards
     // is impossible — by the time anyone asks, the cache is warm.
-    if result.is_none() {
-        crate::kprintln!("[npk] dns: no answer for {} after 5.5 s ({} attempts), next hop {}, \
-                          {} datagram(s) on our port (id 0x{:04x} wanted, 0x{:04x} seen)",
-            name, LEGS.len(),
+    // **Nur wenn wirklich nichts kam.** Eine Antwort ohne A-Satz hat oben
+    // schon ihre eine Zeile bekommen; sie hier noch einmal als „keine Antwort"
+    // zu melden war die Meldung, die am Geraet sechzehnmal untereinander stand
+    // und nach einem Netzfehler aussah.
+    if result.is_none() && !answered {
+        // Die GEMESSENE Zeit und die Zahl der wirklich abgeschickten Beine —
+        // „5,5 s (4 Versuche)" stand als Konstante da und log jedes Mal, wenn
+        // der Weg frueher endete ([[feedback_a_value_written_once_is_not_a_measurement]]).
+        let waited_ms = crate::interrupts::ticks().wrapping_sub(t_start) * 10;
+        crate::kprintln!("[npk] dns: no answer for {} after {} ms ({} attempts sent), \
+                          next hop {}, {} datagram(s) on our port, id 0x{:04x} wanted",
+            name, waited_ms, sent,
             if super::arp::lookup(hop).is_some() { "was resolved" } else { "still UNRESOLVED" },
-            seen, id, foreign_id);
+            seen, id);
+        // Eine fremde Kennung ist ein EIGENER Befund — sie nur dann nennen,
+        // wenn wirklich eine kam. „0x0000 seen" stand auch da, wenn gar
+        // nichts Fremdes eintraf, und las sich wie ein zweiter Fehler.
+        if let Some(f) = foreign_id {
+            crate::kprintln!("[npk] dns: ein Datagramm auf unserem Port trug die fremde \
+                              Kennung 0x{:04x} — nicht unsere Antwort", f);
+        }
         let (nl, nlp) = udp::no_listener_stats();
         crate::kprintln!("[npk] dns: during this lookup {} UDP datagram(s) reached the stack, \
                           {} of them with nobody listening (last such port {})",
@@ -248,9 +308,16 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
         }
     }
 
-    // Cache result
-    if let Some(ip) = result {
-        remember(name, ip, true);
+    // Cache result — und das NEIN genauso.
+    //
+    // Nur ein „geantwortet, keine Adresse" wird negativ gemerkt. Eine
+    // Zeitueberschreitung nicht: die kann eine verlorene Frame sein, und sie
+    // fuer die ganze TTL festzuschreiben macht aus einer Stoerung einen
+    // Ausfall.
+    match result {
+        Some(ip) => remember(name, ip, true),
+        None if answered => remember_kind(name, [0; 4], false, true),
+        None => {}
     }
 
     result
