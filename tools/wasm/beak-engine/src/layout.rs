@@ -3371,14 +3371,15 @@ impl<'a> Ctx<'a> {
                 let (bx, bw, byy) = self.avoid_floats_bfc(Some(el), &st, x, w, by);
                 let saved = core::mem::take(&mut self.floats);
                 let op0 = self.ops.len();
+                // **Hier NICHT aufzeichnen.** `layout_box` tut es selbst, und
+                // zwar mit dem eigenen Randkasten des Elements. Zwei Eintraege
+                // zu derselben `seq` sind kein Fehler (ein Inline-Kasten hat
+                // ein Fragment je Zeile), aber `getBoundingClientRect` gibt
+                // ihre VEREINIGUNG — und die aus 256 und 1902 ist 1902. Genau
+                // so las sich jedes `overflow:hidden` mit fester Breite: ein
+                // Tailwind-`w-64` meldete die Fensterbreite.
+                let _ = op0;
                 let bottom = self.layout_box(el, &st, bx, bw, byy);
-                // Der Kasten, den das Element MALT — nicht der Streifen, in dem
-                // es steht. Fuer eine Tabelle bleibt der Streifen die beste
-                // Naeherung: ihre Breite entsteht erst aus den Spalten.
-                let (rx, rw) = if matches!(st.display, Display::Flex | Display::InlineFlex | Display::Grid) {
-                    used_border_box(&st, bx, bw)
-                } else { (bx, bw) };
-                self.record_inspect(el, &st, rx, byy, rw, bottom - byy, op0);
                 self.floats = saved;
                 BoxOut { bottom, top_y: byy, open: Collapse::one(st.margin_bottom), through: false, box_x: bx, box_w: bw }
             } else {
@@ -5505,14 +5506,27 @@ family: st.family,
             // content — ended up the narrowest of the three. Only when every
             // column is pinned does the slack spread across all of them,
             // because then there is nowhere else for it to go.
+            //
+            // **Verteilt wird im VERHAELTNIS der Inhaltsbreiten**, nicht zu
+            // gleichen Teilen. Nachgemessen an Chromium: eine zweispaltige
+            // Tabelle mit `width:100%`, Koepfe „Eng" und „Mit Rahmen", kommt
+            // dort auf 518 | 1359 — genau `content_w * pref[c] / total`. Zu
+            // gleichen Teilen ergab 908 | 971, und damit steht die schmale
+            // Spalte fast so breit wie die, die den Text traegt. Das ist die
+            // Aufteilung, die jede `width:100%`-Tabelle des Webs betrifft.
             let slack = content_w - total;
-            let free = sized.iter().filter(|s| !**s).count();
-            if free > 0 {
-                let extra = slack / free as f32;
-                for c in 0..ncols {
-                    if !sized[c] {
-                        colw[c] += extra;
-                    }
+            let free: Vec<usize> = (0..ncols).filter(|c| !sized[*c]).collect();
+            let free_pref: f32 = free.iter().map(|c| pref[*c]).sum();
+            if !free.is_empty() && free_pref > 0.0 {
+                for c in &free {
+                    colw[*c] += slack * pref[*c] / free_pref;
+                }
+            } else if !free.is_empty() {
+                // Alle freien Spalten messen null: dann gibt es kein
+                // Verhaeltnis, und zu gleichen Teilen ist die einzige Antwort.
+                let extra = slack / free.len() as f32;
+                for c in &free {
+                    colw[*c] += extra;
                 }
             } else {
                 let extra = slack / ncols as f32;
