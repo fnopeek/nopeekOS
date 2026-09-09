@@ -234,6 +234,7 @@ fn main() {
             }
         }
     }
+    if let Ok(spec) = std::env::var("CLICK") { click_ids(&mut sess, &html, &dir, &spec); }
     if let Ok(want) = std::env::var("SUBMIT") {
         let dom = sess.interp.doc.as_mut().map(|d| d.to_dom());
         let Some(dom) = dom else { return };
@@ -433,6 +434,57 @@ fn run_module_graph(sess: &mut beak_engine::js::Session, label: &str, src: &str,
     })
 }
 
+/// `CLICK=<id>[,<id>…]` — einen Knopf druecken, auf dem Weg des WIRTS.
+///
+/// Nicht `dispatch` auf den Knoten aus dem Baum: beak nimmt die Zustellkette
+/// aus dem LAYOUT (`element_chain` auf der Mitte des gemalten Kastens), und
+/// genau dort ist schon einmal ein Klick gestorben, den der Baumweg als
+/// zugestellt meldete ([[feedback_the_test_path_must_be_the_real_path]]).
+/// Auch der Schnellweg-Wächter des Wirts steht hier — sonst behauptet die
+/// Probe eine Zustellung, die am Geraet gar nicht erst versucht wird.
+fn click_ids(sess: &mut beak_engine::js::Session, html: &str, dir: &str, spec: &str) {
+    for id in spec.split(',') {
+        let id = id.trim();
+        if id.is_empty() { continue }
+        // Je Klick neu auslegen — ein Behandler, der den Baum aendert,
+        // verschiebt die Kaesten fuer den naechsten.
+        let Some(lay) = page_layout(sess, html, dir) else { return };
+        let Some(dom) = sess.interp.doc.as_mut().map(|d| d.to_dom()) else { return };
+        let Some(seq) = find_seq(&dom.root, id) else {
+            println!("CLICK: kein Element mit id={id}"); continue };
+        let Some(r) = lay.element_rects().into_iter().find(|r| r.seq == seq) else {
+            println!("CLICK #{id}: kein Kasten im Layout — unsichtbar oder nicht gemalt");
+            continue };
+        let (cx, cy) = (r.x + r.w / 2, r.y + r.h / 2);
+        let chain = lay.element_chain(cx, cy);
+        let Some(doc) = sess.interp.doc.as_ref() else { return };
+        let nodes: Vec<u32> = chain.iter().filter_map(|s| doc.by_seq(*s)).collect();
+        let listeners = doc.has_listeners;
+        let hit = chain.contains(&seq);
+        let on_label = nodes.last().is_some_and(|n|
+            beak_engine::js::dombind::label_target(&sess.interp, *n).is_some());
+        if nodes.is_empty() || (!listeners && !on_label) {
+            println!("CLICK #{id} (seq {seq}) bei ({cx},{cy}): der Wirt stellt hier NICHT zu \
+                      (Kette {} Knoten, Behandler {listeners}, Schild {on_label})", nodes.len());
+            continue;
+        }
+        let n0 = sess.interp.console.len();
+        let prevented = matches!(
+            beak_engine::js::dombind::dispatch(&mut sess.interp, "click", &nodes), Ok(true));
+        let mut timers = 0;
+        for _ in 0..64 { let t = sess.interp.run_timers(); timers += t; if t == 0 { break } }
+        let changed = sess.interp.doc.as_ref().is_some_and(|d| d.dirty);
+        println!("CLICK #{id} (seq {seq}) bei ({cx},{cy}): Kette {} Knoten (eigenes seq {}), {}, \
+{timers} Zeitgeber, Baum {}",
+                 nodes.len(), if hit { "drin" } else { "FEHLT" },
+                 if prevented { "abgefangen" } else { "durchgelassen" },
+                 if changed { "GEAENDERT" } else { "unveraendert" });
+        for l in &sess.interp.console[n0..] { println!("       | {l}"); }
+        if let Some(n) = sess.interp.take_nav() { println!("       NAVIGATION -> {}", n.url); }
+        for seq in sess.interp.take_submits() { println!("       Absende-Auftrag: seq={seq}"); }
+    }
+}
+
 /// Den Baum als Umriss: Marke, id/class, und Text gekuerzt.
 fn dump(e: &beak_engine::dom::Element, depth: usize, out: &mut String) {
     if depth > 12 { return }
@@ -537,8 +589,13 @@ fn to_bmp(px: &[u8], w: u32, h: u32) -> Vec<u8> {
 
 /// Einmal auslegen und der Maschine die Kaesten reichen — sonst antwortet
 /// `getBoundingClientRect` mit Nullen, und eine Probe, die misst, misst nichts.
-fn feed_geometry(sess: &mut beak_engine::js::Session, html: &str, dir: &str) {
-    let Some(dom) = sess.interp.doc.as_mut().map(|d| d.to_dom()) else { return };
+/// Die Seite auslegen, wie der Wirt sie auslegt: der GESKRIPTETE Baum, alle
+/// Blaetter aus dem Baum, die Schriftrunde. Zwei Aufrufer — die Geometrie fuer
+/// `getBoundingClientRect`, und der Klickpunkt fuer `CLICK`. **Eine Quelle**,
+/// sonst misst die eine Seite etwas anderes als die andere.
+fn page_layout(sess: &mut beak_engine::js::Session, html: &str, dir: &str)
+    -> Option<beak_engine::layout::Layout> {
+    let dom = sess.interp.doc.as_mut().map(|d| d.to_dom())?;
     let mut css = String::new();
     let mut n = 0;
     collect_links(dom.body(), dir, &mut css, &mut n);
@@ -579,6 +636,12 @@ fn feed_geometry(sess: &mut beak_engine::js::Session, html: &str, dir: &str) {
         lay = eng.layout_ext(html, &css, width);
     }
     if ok + bad > 0 { println!("Schriften: {ok} geladen, {bad} gescheitert"); }
+    Some(lay)
+}
+
+fn feed_geometry(sess: &mut beak_engine::js::Session, html: &str, dir: &str) {
+    let width: u32 = std::env::var("W").ok().and_then(|w| w.parse().ok()).unwrap_or(1902);
+    let Some(lay) = page_layout(sess, html, dir) else { return };
     let rects = lay.element_rects();
     if std::env::var("GEOMDBG").is_ok() {
         eprintln!("  Geometrie: {} Kaesten, Layouthoehe {}", rects.len(), lay.height);
