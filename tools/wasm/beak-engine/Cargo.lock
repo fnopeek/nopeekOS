@@ -29,6 +29,7 @@ dependencies = [
  "hashbrown",
  "libm",
  "miniz_oxide",
+ "ttf-parser",
  "zune-core",
  "zune-jpeg",
 ]

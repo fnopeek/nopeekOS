@@ -20,6 +20,7 @@ use core::cell::RefCell;
 use alloc::vec;
 use alloc::vec::Vec;
 use fontdue::Font;
+use crate::fonts::Face;
 
 use crate::css::{ElemInfo, PseudoElem, Stylesheet};
 use crate::dom::{Dom, Element, Node};
@@ -1683,27 +1684,64 @@ pub(crate) fn char_spacing(c: char, sp: (f32, f32)) -> f32 {
     sp.0 + if ws { sp.1 } else { 0.0 }
 }
 
-fn measure(font: &Font, s: &str, size: f32) -> f32 {
-    s.chars().map(|c| font.metrics(c, size).advance_width).sum()
+fn measure(font: Face, s: &str, size: f32) -> f32 {
+    // The fast path is the one that runs: every embedded face is subsetted and
+    // carries no GSUB, so a page in the body font never allocates here.
+    if font.ligatures().is_none() {
+        return s.chars().map(|c| font.metrics(c, size).advance_width).sum();
+    }
+    font.shape(s).iter().map(|(g, _, _)| font.metrics_indexed(*g, size).advance_width).sum()
 }
 
 /// `measure` plus `(letter-spacing, word-spacing)`. Letter-spacing lands after
 /// EVERY character including the last — that is what an inline box measures as
 /// in every engine, and the reftests are written against it. Word-spacing lands
 /// on the word separator itself (css-text-3 §8.1: U+0020 and U+00A0).
-fn measure_sp(font: &Font, s: &str, size: f32, sp: (f32, f32)) -> f32 {
+fn measure_sp(font: Face, s: &str, size: f32, sp: (f32, f32)) -> f32 {
     if sp == (0.0, 0.0) {
         return measure(font, s, size);
     }
-    s.chars().map(|c| font.metrics(c, size).advance_width + char_spacing(c, sp)).sum()
+    // **Letter-spacing suppresses ligatures**, and that is the spec, not a
+    // shortcut: `letter-spacing` separates typographic character units, and a
+    // ligature spanning several of them must be broken to make room
+    // (css-text-3 §8.2). Word-spacing does not — it lands on a separator that
+    // no ligature crosses.
+    if sp.0 != 0.0 || font.ligatures().is_none() {
+        return s.chars().map(|c| font.metrics(c, size).advance_width + char_spacing(c, sp)).sum();
+    }
+    font.shape(s)
+        .iter()
+        .map(|(g, at, n)| {
+            let adv = font.metrics_indexed(*g, size).advance_width;
+            // A ligature is one unit; the spacing of the run it covers is the
+            // separator spacing of its characters, which for a ligature is
+            // always zero (no ligature spans a space).
+            adv + s[*at..*at + *n].chars().map(|c| char_spacing(c, sp)).sum::<f32>()
+        })
+        .sum()
 }
 /// Byte length of the longest prefix of `s` that fits in `avail` px, snapped
 /// back to a legal break. Returns 0 when not even the first cluster fits — the
 /// caller decides whether to try a fresh line or force one through (never
 /// returning 0 forever is the caller's job, not this function's).
-fn fit_prefix(font: &Font, s: &str, size: f32, avail: f32, sp: (f32, f32)) -> usize {
+fn fit_prefix(font: Face, s: &str, size: f32, avail: f32, sp: (f32, f32)) -> usize {
     let mut used = 0.0;
     let mut end = s.len();
+    if sp.0 == 0.0 && font.ligatures().is_some() {
+        // The byte ranges are why `shape` reports them: this walks OFFSETS
+        // into the original string, and a ligature is indivisible — a break
+        // inside one would ask for half a glyph.
+        for (g, at, _) in font.shape(s) {
+            let adv = font.metrics_indexed(g, size).advance_width
+                + s[at..].chars().next().map_or(0.0, |c| char_spacing(c, sp));
+            if used + adv > avail {
+                end = at;
+                break;
+            }
+            used += adv;
+        }
+        return cluster_boundary(s, end);
+    }
     for (i, c) in s.char_indices() {
         let adv = font.metrics(c, size).advance_width + char_spacing(c, sp);
         if used + adv > avail {
@@ -1762,13 +1800,13 @@ fn first_cluster(s: &str) -> usize {
 
 /// The advance of the space BETWEEN two words. `sp` is the run's
 /// `(letter-spacing, word-spacing)`: both apply to a word separator.
-fn space_width(font: &Font, size: f32, sp: (f32, f32)) -> f32 {
+fn space_width(font: Face, size: f32, sp: (f32, f32)) -> f32 {
     font.metrics(' ', size).advance_width + sp.0 + sp.1
 }
-fn ascent_i(font: &Font, size: f32) -> i32 {
+fn ascent_i(font: Face, size: f32) -> i32 {
     font.horizontal_line_metrics(size).map(|m| m.ascent).unwrap_or(size) as i32
 }
-fn line_gap(font: &Font, size: f32) -> f32 {
+fn line_gap(font: Face, size: f32) -> f32 {
     font.horizontal_line_metrics(size).map(|m| m.new_line_size).unwrap_or(size * 1.3)
 }
 
@@ -1779,7 +1817,7 @@ fn line_gap(font: &Font, size: f32) -> f32 {
 /// half-leading above and below the baseline (CSS 2.1 §10.8.1), so a value
 /// under the content height legitimately yields a negative half and lets
 /// consecutive lines overlap.
-fn run_metrics(font: &Font, size: f32, lh: f32) -> (f32, f32) {
+fn run_metrics(font: Face, size: f32, lh: f32) -> (f32, f32) {
     let m = font.horizontal_line_metrics(size);
     let asc = m.map(|m| m.ascent).unwrap_or(size);
     if lh <= 0.0 {
@@ -8313,7 +8351,7 @@ fn flex_item_style(s: &ComputedStyle, main: f32, forced_cross: Option<f32>, row:
 
 /// `white-space: pre` — honor newlines and runs of spaces; no word-wrap.
 fn layout_pre(
-    font: &Font,
+    font: Face,
     el: &Element,
     st: &ComputedStyle,
     x: i32,
@@ -9383,7 +9421,7 @@ fn stroke_rect(ops: &mut Vec<DrawOp>, x: i32, y: i32, w: i32, h: i32, color: Rgb
 
 /// Break `text` into at most `max_rows` lines that fit `max_w`, splitting on
 /// hard newlines first and then greedily on words (a `<textarea>`'s content).
-fn wrap_lines(font: &Font, text: &str, size: f32, max_w: f32, max_rows: usize) -> Vec<String> {
+fn wrap_lines(font: Face, text: &str, size: f32, max_w: f32, max_rows: usize) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for para in text.split('\n') {
         if out.len() >= max_rows {
@@ -9417,7 +9455,7 @@ fn wrap_lines(font: &Font, text: &str, size: f32, max_w: f32, max_rows: usize) -
 /// Trim from the END until it fits — for a label, which is read from the
 /// front. The counterpart of `clip_text_tail`, which trims from the front for
 /// a field whose caret is at the back.
-fn clip_text_head(font: &Font, text: &str, size: f32, max_w: f32) -> String {
+fn clip_text_head(font: Face, text: &str, size: f32, max_w: f32) -> String {
     if measure(font, text, size) <= max_w {
         return text.to_string();
     }
@@ -9433,7 +9471,7 @@ fn clip_text_head(font: &Font, text: &str, size: f32, max_w: f32) -> String {
     String::new()
 }
 
-fn clip_text_tail(font: &Font, text: &str, size: f32, max_w: f32) -> String {
+fn clip_text_tail(font: Face, text: &str, size: f32, max_w: f32) -> String {
     if measure(font, text, size) <= max_w {
         return text.to_string();
     }

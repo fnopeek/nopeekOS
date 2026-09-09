@@ -20,6 +20,18 @@ features = ["hashbrown"]
 # hashbrown 0.15 replaced the `ahash` feature with `default-hasher`
 # (foldhash underneath). fontdue 0.9.4 requires ^0.15, so pinning the same
 # line here keeps exactly one hashbrown in the tree instead of two.
+# ttf-parser: die OpenType-Tabellen, die fontdue nicht auswertet.
+#
+# Es liegt ohnehin im Baum — fontdue baut darauf — und mit DENSELBEN
+# Merkmalen, die fontdue anschaltet, also kostet die direkte Kante nichts
+# ausser der Zeile hier. Gebraucht fuer GSUB: fontdue laedt die
+# Ligaturglyphen, ersetzt aber nicht (es hat keinen Shaper und sagt das
+# selbst). Siehe `src/gsub.rs`.
+[dependencies.ttf-parser]
+version = "0.21"
+default-features = false
+features = ["opentype-layout"]
+
 [dependencies.hashbrown]
 version = "0.15"
 default-features = false
