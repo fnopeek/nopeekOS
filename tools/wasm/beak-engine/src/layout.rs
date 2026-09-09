@@ -4013,6 +4013,20 @@ family: st.family,
     /// default for a replaced element with no intrinsic size), so the box is
     /// definite on the FIRST layout and arriving pixels only need a repaint.
     fn svg_box(&self, el: &Element, st: &ComputedStyle) -> (i32, i32) {
+        let (w, h) = self.svg_size(el, st);
+        if w > 0 && h > 0 {
+            self.inline_svgs
+                .borrow_mut()
+                .push((el.seq, st.color.c, w as u32, h as u32));
+        }
+        (w, h)
+    }
+
+    /// The same box WITHOUT registering a raster — what a measurement needs.
+    /// `svg_box` enqueues the element for rasterising, and an intrinsic pass
+    /// that called it would queue an icon that is never painted (and queue the
+    /// painted one twice).
+    fn svg_size(&self, el: &Element, st: &ComputedStyle) -> (i32, i32) {
         let attr = |n: &str| el.attr(n).and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok());
         let vb = el.attr("viewBox").and_then(|v| {
             let n: Vec<f32> = v.split(|c: char| c == ',' || c.is_ascii_whitespace())
@@ -4034,13 +4048,7 @@ family: st.family,
             (None, Some(h)) => (h * iw / ih, h),
             (None, None) => (iw, ih),
         };
-        let (w, h) = (w.max(0.0) as i32, h.max(0.0) as i32);
-        if w > 0 && h > 0 {
-            self.inline_svgs
-                .borrow_mut()
-                .push((el.seq, st.color.c, w as u32, h as u32));
-        }
-        (w, h)
+        (w.max(0.0) as i32, h.max(0.0) as i32)
     }
 
     fn img_box(&self, el: &Element, st: &ComputedStyle) -> (i32, i32) {
@@ -4082,7 +4090,7 @@ family: st.family,
     /// Measure a form control and capture what it displays right now (the
     /// user's typed value, else the authored default). Controls are atomic
     /// inline boxes — they never wrap, and their children never lay out.
-    fn control_box(&mut self, el: &Element, st: &ComputedStyle, kind: ControlKind, avail: f32) -> CtlBox {
+    fn control_box(&mut self, el: &'a Element, st: &ComputedStyle, kind: ControlKind, avail: f32) -> CtlBox {
         // `&mut` only so a percentage height can ask for the containing
         // block's height, which may still be a deferred recipe. The common
         // case never asks — resolving would lay a whole box out.
@@ -4140,6 +4148,8 @@ family: st.family,
         // nicht am Text kleben, und `+ 4` ist, was er dafuer immer hatte.
         let ua_min = if kind.is_submit() || kind == ControlKind::File {
             CTL_PAD_X + 4
+        } else if matches!(kind, ControlKind::Checkbox | ControlKind::Radio) {
+            0
         } else {
             CTL_PAD_X
         };
@@ -4147,13 +4157,28 @@ family: st.family,
         let pad_r = (st.pad_right as i32).max(ua_min);
         // Senkrecht dasselbe: `.form-control` bringt `padding: .375rem .75rem`
         // mit, und ohne sie steht ein Feld 6 px zu flach in seiner Zeile.
-        let pad_t = (st.pad_top as i32).max(CTL_PAD_Y);
-        let pad_b = (st.pad_bottom as i32).max(CTL_PAD_Y);
+        // Ein Kaestchen und ein Radioknopf haben KEINE Polsterung — die
+        // UA-Untergrenze ist fuer Felder und Knoepfe da, damit der Text nicht
+        // am Rahmen klebt, und hier gibt es keinen Text. Mit ihr kam ein
+        // `height: 200px` grosses Kaestchen 206 px hoch heraus.
+        let box_like = matches!(kind, ControlKind::Checkbox | ControlKind::Radio);
+        let ua_pad_y = if box_like { 0 } else { CTL_PAD_Y };
+        let pad_t = (st.pad_top as i32).max(ua_pad_y);
+        let pad_b = (st.pad_bottom as i32).max(ua_pad_y);
         // The frame is part of the box, and it is the page's when the page
         // styled it — a control with `border: none` is exactly as tall as its
         // content, and a `border: 2px` one two pixels taller per side.
         let border = ctl_border(st);
         let (bx, by) = (border[1].w + border[3].w, border[0].w + border[2].w);
+        // HTML §button-layout: a `<button>` is not a label — its children are
+        // page content. Laid out here as their own block formatting context,
+        // then centred in the content box by `paint_control`.
+        // A definite CSS height gives the contents a definite content box to
+        // align in — `align-items: center` on a `display:flex` button needs it.
+        let def_ch = vert_len(st.height, cbh).map(|hh| {
+            (if st.box_border { hh as i32 - (pad_t + pad_b + by) } else { hh as i32 }).max(0)
+        });
+        let content = self.control_content(el, st, kind, avail, pad_l + pad_r + bx, def_ch);
         let (mut w, mut h) = match kind {
             ControlKind::Checkbox | ControlKind::Radio => {
                 let s = (size * 0.9).max(12.0) as i32;
@@ -4175,7 +4200,8 @@ family: st.family,
                 )
             }
             ControlKind::Select => (
-                ceil_i32(measure(font, &text, size)) + pad_l + pad_r + CTL_ARROW + bx,
+                ceil_i32(measure(font, &text, size)) + pad_l + pad_r
+                    + if st.appearance_none { 0 } else { CTL_ARROW } + bx,
                 ceil_i32(line) + pad_t + pad_b + by,
             ),
             _ => (
@@ -4183,6 +4209,13 @@ family: st.family,
                 ceil_i32(line) + pad_t + pad_b + by,
             ),
         };
+        if let Some(c) = &content {
+            // The contents ARE the label — painting `text` on top of them would
+            // write the button's own text twice.
+            text.clear();
+            w = c.w + pad_l + pad_r + bx;
+            h = c.h + pad_t + pad_b + by;
+        }
         if let Some(cw) = st.width.px(avail) {
             // A CSS width is a content width unless `box-sizing: border-box`.
             w = if st.box_border { cw as i32 } else { cw as i32 + pad_l + pad_r + bx };
@@ -4232,14 +4265,157 @@ family: st.family,
             // Eine Seite, die dem Steuerelement einen Hintergrund gibt — auch
             // `transparent` —, malt seine Flaeche selbst. So macht es jeder
             // Browser, und Bootstraps `.btn-outline-*` verlaesst sich darauf.
-            appearance_none: st.appearance_none || (st.bg_set && st.bg.is_none()),
+            no_face: st.appearance_none || (st.bg_set && st.bg.is_none()),
+            appearance_none: st.appearance_none,
             bg_img: self.bg_key(st.bg_layer.image).map(|k| (k, st.bg_layer)),
+            content,
             pad_l,
             pad_r,
+            pad_t,
+            pad_b,
             border,
             radius: radii_px(st, w.max(8)),
             style: RunStyle { hidden: st.hidden, transparent: st.transparent, size, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, family: st.family, valign: crate::style::VAlign::Baseline, deco: st.deco, deco_color: st.deco_color, break_word: st.break_word, nowrap: st.nowrap, lh: st.line_height.px(size).unwrap_or(0.0), sp: (st.letter_spacing, st.word_spacing) },
         }
+    }
+
+    /// A `<button>`'s children, laid out as their own block formatting context
+    /// at the origin (HTML §button-layout). `None` for everything else — an
+    /// `<input>` is void, and a text-only button is exactly its label, which
+    /// the one-op path already draws.
+    ///
+    /// This is what made the three `centering-00x` reftests fail, and NOT on
+    /// the side the name suggests: our render of the TEST was right all along,
+    /// and it was the REFERENCE — which frames its expectation as a
+    /// `display: table-cell` inside a `<button>` — that came out shrink-wrapped
+    /// to the word inside it. The same gap eats every icon button on the web:
+    /// `<button><svg …/> Speichern</button>` lost its icon and shrank to the
+    /// text.
+    fn control_content(
+        &mut self,
+        el: &'a Element,
+        st: &ComputedStyle,
+        kind: ControlKind,
+        avail: f32,
+        chrome_x: i32,
+        def_ch: Option<i32>,
+    ) -> Option<CtlContent> {
+        // A `<button>` takes its children; a checkbox or radio is void, but a
+        // page that took the widget away with `appearance: none` builds its own
+        // out of `::before`/`::after` — that is how every custom checkbox on
+        // the web is drawn, and it is what the two `no-centering` reftests ask
+        // for. A text field, a `<select>` and a `<textarea>` are left alone:
+        // their contents are a shadow tree in every engine, and a pseudo does
+        // not reach into it.
+        let takes_children = el.tag == "button"
+            && matches!(kind, ControlKind::Submit | ControlKind::Reset | ControlKind::Button);
+        if !takes_children && !matches!(kind, ControlKind::Checkbox | ControlKind::Radio) {
+            return None;
+        }
+        let has_kids = takes_children && el.children.iter().any(|n| matches!(n, Node::Element(_)));
+        // The element has to be on the path before anything under it is styled
+        // — `button > div` selects through it, and `pseudo_content` reads the
+        // path as the pseudo's ancestor chain. Two of the call sites push it
+        // already; pushing it twice would make `>` skip a level.
+        let pushed = self.path.last().map(|p| p.seq()) != Some(el.seq);
+        if pushed {
+            self.path.push(self.info(el));
+        }
+        let before = self.pseudo_intrinsic(el, st, PseudoElem::Before);
+        let after = self.pseudo_intrinsic(el, st, PseudoElem::After);
+        if !has_kids && before.is_none() && after.is_none() {
+            if pushed {
+                self.path.pop();
+            }
+            return None;
+        }
+        // The content width is the box's own, resolved the way an
+        // `inline-block` resolves it: a definite CSS width wins, else
+        // shrink-to-fit between the content's min and its preferred width.
+        let content_w = match st.width.px(avail) {
+            Some(v) if st.box_border => (v as i32 - chrome_x).max(0),
+            Some(v) => v as i32,
+            None => {
+                let (mut pref, mut min) = self.intrinsic_width_nodes(&el.children, st);
+                // A generated box starts its own line, so it is the WIDEST
+                // contribution, not one added to the others.
+                for p in [before, after].into_iter().flatten() {
+                    pref = pref.max(p);
+                    min = min.max(p);
+                }
+                let room = (avail - chrome_x as f32).max(0.0);
+                ceil_i32(pref.min(room).max(min).max(0.0))
+            }
+        };
+        let (o0, l0, c0) = (self.ops.len(), self.links.len(), self.controls.len());
+        let (i0, h0) = (self.inspects.len(), self.hover_boxes.len());
+        let saved_floats = core::mem::take(&mut self.floats);
+        let saved_baseline = self.last_baseline.take();
+        // The contents lay out in the formatting context the BUTTON declares.
+        // Tailwind writes `flex`/`inline-grid` on nearly every icon button, and
+        // laying those children out as blocks stacks an icon above its label
+        // instead of beside it. The style handed down has the chrome zeroed:
+        // `paint_control` owns the face, the frame and the padding, and a
+        // second copy here would paint the box twice and inset it twice.
+        let mut inner = *st;
+        inner.bg = None;
+        inner.bg_set = false;
+        inner.bg_layer.image = None;
+        inner.mask_layer.image = None;
+        inner.pad_left = 0.0;
+        inner.pad_right = 0.0;
+        inner.pad_top = 0.0;
+        inner.pad_bottom = 0.0;
+        for b in [&mut inner.border_top, &mut inner.border_right, &mut inner.border_bottom, &mut inner.border_left] {
+            b.width = 0.0;
+        }
+        inner.margin_left = Len::Px(0.0);
+        inner.margin_right = Len::Px(0.0);
+        inner.margin_top = 0.0;
+        inner.margin_bottom = 0.0;
+        inner.box_border = false;
+        inner.width = Len::Px(content_w as f32);
+        inner.min_width = Len::Auto;
+        inner.max_width = Len::Auto;
+        inner.height = def_ch.map_or(Len::Auto, |v| Len::Px(v as f32));
+        inner.min_height = Len::Auto;
+        inner.max_height = Len::Auto;
+        inner.position = Position::Static;
+        let bottom = match st.display {
+            Display::Flex | Display::InlineFlex => self.layout_flex(el, &inner, 0, content_w, 0),
+            Display::Grid => self.layout_grid(el, &inner, 0, content_w, 0),
+            _ => self.layout_children(&el.children, &inner, Some(el), 0, content_w, 0),
+        };
+        self.floats = saved_floats;
+        self.last_baseline = saved_baseline;
+        if pushed {
+            self.path.pop();
+        }
+        let ops: Vec<DrawOp> = self.ops.drain(o0..).collect();
+        // A button's content model is phrasing content: no control, no link,
+        // nothing that owns a hit rect of its own inside it.
+        self.links.truncate(l0);
+        self.controls.truncate(c0);
+        self.inspects.truncate(i0);
+        self.hover_boxes.truncate(h0);
+        Some(CtlContent { ops, w: content_w, h: bottom.max(0), centred: takes_children })
+    }
+
+    /// The preferred width of `el`'s `::before`/`::after` generated box, when
+    /// it makes one that takes part in the flow. `intrinsic_width_nodes` only
+    /// sees real nodes, and a control's contents may be nothing else.
+    fn pseudo_intrinsic(&self, el: &Element, st: &ComputedStyle, kind: PseudoElem) -> Option<f32> {
+        let (text, ps) = self.pseudo_content(el, st, kind)?;
+        if ps.display == Display::None || matches!(ps.position, Position::Absolute | Position::Fixed) {
+            return None;
+        }
+        let frame = ps.pad_left + ps.pad_right + ps.border_x();
+        if let Len::Px(w) = ps.width {
+            return Some(if ps.box_border { w.max(frame) } else { w + frame });
+        }
+        let font = self.fonts.pick(ps.bold, ps.italic, ps.mono, ps.family);
+        let sp = (ps.letter_spacing, ps.word_spacing);
+        Some(measure_sp(font, text.trim(), ps.font_px, sp) + frame)
     }
 
     /// Lay a `position:absolute`/`fixed` box, out of flow, at a position derived
@@ -5607,6 +5783,12 @@ family: st.family,
         let out = if st.contain_size {
             let w = st.contain_intrinsic.map_or(0.0, |(iw, _)| iw);
             (w, w)
+        } else if el.tag == "svg" {
+            // `replaced_intrinsic` reads the width ATTRIBUTE; an `<svg>` also
+            // has a `viewBox` and a CSS width, and `svg_size` is the one place
+            // that resolves all three the way the paint does.
+            let iw = self.svg_size(el, st).0 as f32;
+            (iw, iw)
         } else if let Some((iw, _)) = replaced_intrinsic(el) {
             (iw, iw)
         // A control has no text children to measure — without this it sizes to
@@ -5788,6 +5970,7 @@ family: st.family,
         if cs.display == Display::Inline
             && crate::forms::kind_of(el).is_none()
             && el.tag != "img"
+            && el.tag != "svg"
             && replaced_intrinsic(el).is_none()
         {
             run.frame += inline_frame(&cs, 0.0);
@@ -5798,9 +5981,9 @@ family: st.family,
         }
         // Everything else is a box of its own: an atomic inline (image, form
         // control) or a block-level child. Either way it ends the current line.
-        let (p, m) = if el.tag == "img" {
+        let (p, m) = if el.tag == "img" || el.tag == "svg" {
             self.path.push(self.info(el));
-            let (iw, _) = self.img_box(el, &cs);
+            let iw = if el.tag == "svg" { self.svg_size(el, &cs).0 } else { self.img_box(el, &cs).0 };
             self.path.pop();
             (iw as f32, iw as f32)
         } else {
@@ -6124,6 +6307,33 @@ family: st.family,
             let h_i = ctl.h;
             paint_control(self.fonts, self.theme, &ctl, x + dx, y, &mut self.ops, &mut self.controls);
             return y + h_i;
+        }
+        // A replaced element reached through a BOX-making path: a flex or grid
+        // item, a table cell's own box. `flow_children` puts an `<img>`/`<svg>`
+        // on the line it is building — there is no line here, so nothing put
+        // the picture anywhere and a flex row of icons painted NOTHING at all.
+        // The measurement was right the whole time (the neighbours sat the
+        // correct distance apart, around a hole), which is exactly why it read
+        // as an image-decoding problem and not as a missing branch.
+        if el.tag == "img" || el.tag == "svg" {
+            let svg = el.tag == "svg";
+            self.path.push(self.info(el));
+            let (iw, ih) = if svg { self.svg_box(el, st) } else { self.img_box(el, st) };
+            self.path.pop();
+            let (pl, pt) = (st.border_left.width + st.pad_left, st.border_top.width + st.pad_top);
+            let bw = iw + (st.pad_left + st.pad_right + st.border_x()) as i32;
+            let bh = ih + (st.pad_top + st.pad_bottom + st.border_y()) as i32;
+            let f0 = self.ops.len();
+            self.paint_box_decoration(st, x, y, bw, bh, f0);
+            if iw > 0 && ih > 0 {
+                let src = if svg { svg_key(el) } else { el.attr("src").unwrap_or("").to_string() };
+                let (alt, fit, filter) = (svg_alt(el, svg), st.object_fit, self.filter_index(st));
+                self.ops.push(DrawOp::Image {
+                    x: x + pl as i32, y: y + pt as i32, w: iw, h: ih, src, alt, fit, filter,
+                });
+            }
+            self.record_inspect(el, st, x, y, bw, bh, f0);
+            return y + bh;
         }
         // The block path resolves percentage heights itself (it is entered
         // directly from the flow loop too); the other three come through here.
@@ -8400,13 +8610,26 @@ struct CtlBox {
     caret: Option<usize>,
     /// The control's own `background-color`, if the page styled it.
     bg: Option<Rgba>,
-    /// `appearance: none` — the page draws this control itself, so we paint no
-    /// UA face at all (css-ui-4 §4).
+    /// The page paints this control's FACE itself — either it said
+    /// `appearance: none`, or it gave the control a background of its own
+    /// (`transparent` included). Only the face; the widget still shows.
+    no_face: bool,
+    /// `appearance: none` (css-ui-4 §4) — the page opted out of the WIDGET, not
+    /// just its face. No UA frame, no tick, no dot, no chevron: what remains is
+    /// an ordinary box the page styles itself, which is how every custom
+    /// checkbox on the web is built. The heuristic above must NOT reach this
+    /// far — a page that merely writes `background: transparent` on a checkbox
+    /// still wants the tick.
     appearance_none: bool,
     /// The page's own `background-image` (resolved key + placement). A control
     /// that opted out of the UA look carries its icon this way — DDG's search
     /// button is a bare box with a magnifier here and nothing else.
     bg_img: Option<(u64, BgLayer)>,
+    /// A `<button>`'s laid-out CONTENTS (HTML §button-layout). A button is not
+    /// a label: its children are page content, and an icon + markup inside one
+    /// is the commonest button on the web. Present only when the element has
+    /// element children — a text-only button stays the cheap one-op label.
+    content: Option<CtlContent>,
     /// Leading text inset. Controls are atomic — we paint them with our own
     /// metrics — but a page that reserves room for an icon does it with
     /// `padding-left`, and ignoring that puts the text on top of the icon
@@ -8417,6 +8640,10 @@ struct CtlBox {
     /// wurde. Der Maler nahm frueher `CTL_PAD_X`, und die Differenz zur
     /// gemessenen Breite schnitt die Beschriftung ab.
     pad_r: i32,
+    /// Senkrecht dasselbe Paar — nur der Inhaltskasten braucht sie, um mittig
+    /// zu stehen.
+    pad_t: i32,
+    pad_b: i32,
     /// The frame, in paint order top/right/bottom/left.
     border: [CtlSide; 4],
     /// `border-radius` in px, top-left clockwise. A control is painted with our
@@ -8425,6 +8652,22 @@ struct CtlBox {
     /// square corners are the first thing that reads as „not a browser".
     radius: [f32; 4],
     style: RunStyle,
+}
+
+/// A control's laid-out contents, at the origin, ready to be translated into
+/// the control's content box. Only the draw ops travel: a button's content
+/// model is phrasing content, so there is no nested control to carry, and a
+/// link inside one is not valid HTML either.
+#[derive(Clone)]
+struct CtlContent {
+    ops: Vec<DrawOp>,
+    w: i32,
+    h: i32,
+    /// Button layout centres its contents VERTICALLY in the content box. A
+    /// checkbox or radio that opted out of the widget does not — it is an
+    /// ordinary box, and its generated content starts at the top-left corner.
+    /// That distinction is the whole of `input-{checkbox,radio}-no-centering`.
+    centred: bool,
 }
 
 /// One edge of a control's frame. The UA gives every control a 1px one; a page
@@ -8446,10 +8689,14 @@ struct CtlSide {
 fn ctl_border(st: &ComputedStyle) -> [CtlSide; 4] {
     let sides = [&st.border_top, &st.border_right, &st.border_bottom, &st.border_left];
     let owned = sides.iter().any(|s| s.specified);
+    // The UA frame IS part of the widget: `appearance: none` takes it with the
+    // rest of it. Without this a custom checkbox came out inside a 1px box the
+    // page never asked for, on top of the border it drew itself.
+    let ua_w = if st.appearance_none { 0 } else { 1 };
     sides.map(|s| CtlSide {
         // An unstyled side still takes the author's `border-color` — the UA
         // frame is a real border, so colouring it is all a page needs to do.
-        w: if owned { s.width as i32 } else { 1 },
+        w: if owned { s.width as i32 } else { ua_w },
         color: s.color,
         transparent: s.see_through,
     })
@@ -8624,7 +8871,7 @@ fn paint_control(
     // white page.
     let face: Option<Rgba> = match ctl.bg {
         Some(c) => Some(c),
-        None if ctl.appearance_none => None,
+        None if ctl.no_face => None,
         None => Some(match ctl.kind {
             // Buttons get a raised face; text fields stay flat like the page.
             ControlKind::Submit | ControlKind::Reset | ControlKind::Button | ControlKind::File
@@ -8653,7 +8900,7 @@ fn paint_control(
         // dieser Gruppe", eckig heisst „unabhaengig an oder aus". Beide als
         // Quadrat zu malen nimmt dem Benutzer die Auskunft, ob seine Wahl die
         // anderen ausschliesst.
-        ControlKind::Radio => {
+        ControlKind::Radio if !ctl.appearance_none => {
             let r = [(w.min(h) as f32) / 2.0; 4];
             if let Some(face) = face {
                 ops.push(DrawOp::RoundRect { x, y: top, w, h, r, color: face, ring: 0.0 });
@@ -8671,7 +8918,7 @@ fn paint_control(
                 });
             }
         }
-        ControlKind::Checkbox => {
+        ControlKind::Checkbox if !ctl.appearance_none => {
             if let Some(face) = face {
                 face_op(ops, face);
             }
@@ -8694,6 +8941,20 @@ fn paint_control(
             }
             bg_img(ops);
             frame(ops);
+            // A button's laid-out contents sit in its content box, centred
+            // VERTICALLY (HTML §button-layout). Horizontally they are not
+            // centred as a box — `text-align: center` from the UA sheet is
+            // what centres the text inside them, which is why a 100px block
+            // child stays at the left edge with its own text in the middle.
+            if let Some(c) = &ctl.content {
+                let inner_h = (h - ctl.border[0].w - ctl.border[2].w - ctl.pad_t - ctl.pad_b).max(0);
+                let cx = x + ctl.border[3].w + ctl.pad_l;
+                let cy = top + ctl.border[0].w + ctl.pad_t
+                    + if c.centred { (inner_h - c.h).max(0) / 2 } else { 0 };
+                let mut inner = c.ops.clone();
+                translate_op_list(&mut inner, cx, cy);
+                ops.extend(inner);
+            }
             let tx = x + ctl.pad_l + 1;
             let lh = ceil_i32(line_gap(font, ctl.style.size));
             let ty = top + (h - lh) / 2;
@@ -8757,7 +9018,7 @@ family: ctl.style.family,
                     text,
                 });
             }
-            if ctl.kind == ControlKind::Select {
+            if ctl.kind == ControlKind::Select && !ctl.appearance_none {
                 // A downward chevron, drawn as a stack of narrowing bars.
                 let cx = x + w - CTL_PAD_X - CTL_ARROW / 2;
                 let cy = top + h / 2 - 2;
