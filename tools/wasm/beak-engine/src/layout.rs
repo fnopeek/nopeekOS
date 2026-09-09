@@ -537,16 +537,24 @@ fn inset_shadow_ops(st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, out: &mu
 /// images are kept whole if their box overlaps the rect, dropped otherwise (a
 /// flat display list can't clip glyph runs mid-way). An empty rect removes the
 /// whole range — the CSS 2.1 `clip` case where nothing of the box is painted.
-fn clip_ops(ops: &mut Vec<DrawOp>, start: usize, cl: i32, ct: i32, cr: i32, cb: i32) {
+/// Returns, for every op that was at `start + i`, where it ended up — `None`
+/// if the clip dropped it. Side tables that point into the display list (the
+/// z-index ranges, the float ranges, a control's own span) have to be
+/// rewritten with it: this function REBUILDS the tail, so every index past
+/// `start` moves.
+fn clip_ops(ops: &mut Vec<DrawOp>, start: usize, cl: i32, ct: i32, cr: i32, cb: i32) -> Vec<Option<usize>> {
     if start >= ops.len() {
-        return;
+        return Vec::new();
     }
     if cr <= cl || cb <= ct {
+        let n = ops.len() - start;
         ops.truncate(start);
-        return;
+        return alloc::vec![None; n];
     }
     let tail = ops.split_off(start);
+    let mut map: Vec<Option<usize>> = Vec::with_capacity(tail.len());
     for op in tail {
+        let before = ops.len();
         match op {
             DrawOp::Rect { x, y, w, h, color } => {
                 let nx = x.max(cl);
@@ -616,6 +624,28 @@ fn clip_ops(ops: &mut Vec<DrawOp>, start: usize, cl: i32, ct: i32, cr: i32, cb: 
                 }
             }
         }
+        map.push((ops.len() > before).then(|| ops.len() - 1));
+    }
+    map
+}
+
+/// Rewrite one `[s, e)` span of the display list through a `clip_ops` map.
+/// `None` when nothing of it survived — the span is gone and its entry with it.
+/// A span that the clip TORE (some ops kept, some dropped) still yields the
+/// range that encloses what is left: a stacking range only has to cover its
+/// subtree, and covering a dropped neighbour's slot is impossible here because
+/// the clip never reorders.
+fn remap_clip(map: &[Option<usize>], start: usize, s: usize, e: usize) -> Option<(usize, usize)> {
+    if e <= start {
+        return Some((s, e)); // entirely ahead of the clip — untouched
+    }
+    let lo = s.max(start);
+    let kept: Vec<usize> = (lo..e).filter_map(|i| map.get(i - start).copied().flatten()).collect();
+    match (kept.first(), kept.last()) {
+        (Some(&f), Some(&l)) => Some((if s < start { s } else { f }, l + 1)),
+        // Nothing left after the clip edge; keep only the part before it.
+        _ if s < start => Some((s, start)),
+        _ => None,
     }
 }
 
@@ -1891,10 +1921,9 @@ struct Ctx<'a> {
     stack_ops: Vec<(i32, i32, usize, usize)>,
     stack_links: Vec<(i32, i32, usize, usize)>,
     /// Op / link ranges emitted by non-positioned floats. Kept apart from
-    /// `stack_ops` because a float MAY sit inside a tracked z-index range —
-    /// MediaWiki wraps a whole article in one — and `reorder_by_z` needs
-    /// disjoint ranges. `split_float_ranges` merges the two at the end by
-    /// cutting the enclosing range around the float.
+    /// `stack_ops` only because they carry no `z`: both lists are concatenated
+    /// at the end and `z_order` nests them, so a float inside a positioned box
+    /// is simply that box's child.
     float_ops: Vec<(usize, usize)>,
     float_links: Vec<(usize, usize)>,
     /// How many out-of-flow boxes have been laid out so far, split by whether
@@ -2150,12 +2179,24 @@ impl<'a> Ctx<'a> {
     /// positioned, has an explicit `z-index`, and isn't already nested inside
     /// another tracked range.
     ///
-    /// **`z-index: auto` must stay untracked.** A tracked range is our stand-in
-    /// for a stacking context, and `auto` does not establish one: tracking a
-    /// `position: relative` wrapper made it swallow its children's ranges, so
-    /// their z-indexes stopped ordering against each other at all.
+    /// **Every positioned box, at every depth.** Appendix E paints them in step
+    /// 8, after all the in-flow content of steps 3–7, and their own `z-index`
+    /// orders them against their SIBLINGS — which is why the ranges have to
+    /// nest (`z_order`). The older rule tracked only an explicit `z-index` at
+    /// the top level, because a flat list made a `position: relative` wrapper
+    /// swallow its children; nesting removes that reason.
     fn should_track_stack(&self, st: &ComputedStyle) -> bool {
-        st.position != Position::Static && matches!(st.z_index, ZIndex::Value(_)) && self.stack_depth == 0
+        st.position != Position::Static
+    }
+
+    /// Where a positioned box sorts: its own `z-index` (`auto` counts as 0, and
+    /// both land in Appendix E step 8 together), in the positioned layer so it
+    /// paints over the in-flow content of the same stacking context.
+    fn stack_key(st: &ComputedStyle) -> (i32, i32) {
+        match st.z_index {
+            ZIndex::Value(z) => (z, LAYER_POSITIONED),
+            _ => (0, LAYER_POSITIONED),
+        }
     }
 
     /// Resolve percentage `padding` and vertical `margin` against the containing
@@ -2347,13 +2388,7 @@ pub(crate) fn display_name(d: Display) -> &'static str {
 /// Paint layers WITHIN one z-index (CSS2.1 Appendix E, steps 3 and 4): in-flow
 /// block boxes, then non-positioned floats. Untracked spans of the display list
 /// are in-flow content and take layer 0, which is what lifts a float above the
-/// block backgrounds and borders emitted after it. A `z-index: 0` box stays in
-/// layer 0 too: Appendix E would paint it above floats (step 6), but hoisting
-/// it above in-flow content it merely follows in the document breaks more than
-/// the overlap it fixes.
-/// In-flow content — every untracked span of the list, and an explicit
-/// `z-index` range, which orders by its `z` and keeps document order at 0.
-const LAYER_IN_FLOW: i32 = 0;
+/// block backgrounds and borders emitted after it.
 /// Non-positioned floats: above the in-flow block boxes around them.
 const LAYER_FLOAT: i32 = 1;
 /// An out-of-flow box that was emitted while a line box was still open.
@@ -2372,77 +2407,96 @@ const LAYER_FLOAT: i32 = 1;
 /// hands it to the loser), and every positioned box gives +16/-46.
 const LAYER_POSITIONED: i32 = 2;
 
-/// Merge the float ranges into the tracked z-index ranges so `reorder_by_z`
-/// still sees a disjoint, ascending list. A float inside a tracked range would
-/// otherwise overlap it — so that range is CUT around the float: the pieces
-/// keep the parent's `(z, layer)` and the float becomes `(parent z, float
-/// layer)`, which sorts it to the end of that parent's group and nowhere else.
-/// A float outside every range is simply `(0, float layer)`.
-fn split_float_ranges(
-    stacks: &[(i32, i32, usize, usize)],
-    floats: &[(usize, usize)],
-) -> Vec<(i32, i32, usize, usize)> {
-    if floats.is_empty() {
-        return stacks.to_vec();
-    }
-    let mut out: Vec<(i32, i32, usize, usize)> = Vec::with_capacity(stacks.len() + floats.len() * 2);
-    let mut taken = alloc::vec![false; floats.len()];
-    for &(z, layer, s, e) in stacks {
-        // Tracked ranges never nest (see `should_track_stack`), so each float
-        // lands in at most one of them.
-        let mut inner: Vec<(usize, usize)> = Vec::new();
-        for (i, &(fs, fe)) in floats.iter().enumerate() {
-            if !taken[i] && fs >= s && fe <= e {
-                taken[i] = true;
-                inner.push((fs, fe));
-            }
-        }
-        inner.sort_unstable();
-        let mut cursor = s;
-        for (fs, fe) in inner {
-            if fs > cursor {
-                out.push((z, layer, cursor, fs));
-            }
-            out.push((z, LAYER_FLOAT, fs, fe));
-            cursor = fe;
-        }
-        if cursor < e {
-            out.push((z, layer, cursor, e));
-        }
-    }
-    for (i, &(fs, fe)) in floats.iter().enumerate() {
-        if !taken[i] {
-            out.push((0, LAYER_FLOAT, fs, fe));
-        }
-    }
-    out.sort_unstable_by_key(|r| r.2);
-    out
-}
-
 fn reorder_by_z<T>(items: Vec<T>, ranges: &[(i32, i32, usize, usize)]) -> Vec<T> {
     if ranges.is_empty() {
         return items;
     }
-    let mut sorted_ranges = ranges.to_vec();
-    sorted_ranges.sort_by_key(|r| r.2); // by start — already ascending, but be safe
-    let mut it = items.into_iter();
-    let mut cursor = 0usize;
-    let mut blocks: Vec<((i32, i32), Vec<T>)> = Vec::new();
-    for (z, layer, start, end) in sorted_ranges {
-        if start > cursor {
-            blocks.push(((0, 0), (&mut it).take(start - cursor).collect()));
+    let order = z_order(items.len(), ranges);
+    let mut slots: Vec<Option<T>> = items.into_iter().map(Some).collect();
+    order.into_iter().filter_map(|i| slots.get_mut(i).and_then(Option::take)).collect()
+}
+
+/// The old display-list index of every op, in painting order — the whole of
+/// the z-ordering, expressed once so `reorder_by_z` and `z_permutation` cannot
+/// drift apart.
+///
+/// **The ranges NEST**, and that is the point of this shape. A stacking context
+/// is a tree: `z-index` orders a box against its SIBLINGS inside its parent's
+/// context, not against the whole page. A flat list cannot say that — the two
+/// earlier attempts at painting positioned boxes in Appendix E order both had
+/// a `position: relative` parent swallow its children's ranges, and both
+/// measured worse (+21/−30 and +21/−57) for exactly that reason.
+///
+/// Ranges over one array are properly nested by construction: each is a
+/// subtree's span, and two subtrees are either disjoint or contained. One that
+/// straddles a sibling is dropped rather than trusted — a scrambled display
+/// list is far worse than one box in the wrong layer.
+fn z_order(len: usize, ranges: &[(i32, i32, usize, usize)]) -> Vec<usize> {
+    // Parents first: by start ascending, then by end DESCENDING, so a range
+    // that contains another is seen before it.
+    let mut sorted: Vec<(i32, i32, usize, usize)> =
+        ranges.iter().copied().filter(|r| r.3 > r.2 && r.3 <= len).collect();
+    sorted.sort_by(|a, b| a.2.cmp(&b.2).then(b.3.cmp(&a.3)));
+
+    // `nodes[i] = (z, layer, start, end, kids)`; `roots` are the outermost.
+    let mut nodes: Vec<(i32, i32, usize, usize, Vec<usize>)> = Vec::with_capacity(sorted.len());
+    let mut roots: Vec<usize> = Vec::new();
+    let mut open: Vec<usize> = Vec::new(); // stack of enclosing node indices
+    for (z, layer, start, end) in sorted {
+        while let Some(&top) = open.last() {
+            if nodes[top].3 <= start {
+                open.pop();
+            } else {
+                break;
+            }
         }
-        blocks.push(((z, layer), (&mut it).take(end - start).collect()));
-        cursor = end;
+        if let Some(&top) = open.last() {
+            if nodes[top].3 < end {
+                continue; // straddles its parent's end — not a subtree, drop it
+            }
+        }
+        let me = nodes.len();
+        nodes.push((z, layer, start, end, Vec::new()));
+        match open.last() {
+            Some(&top) => nodes[top].4.push(me),
+            None => roots.push(me),
+        }
+        open.push(me);
     }
-    let rest: Vec<T> = it.collect();
-    if !rest.is_empty() {
-        blocks.push(((0, 0), rest));
+
+    // One level: the untracked gaps between the children (in-flow content, key
+    // `(0, 0)`) and the children themselves, stable-sorted by `(z, layer)`.
+    // Stable is what keeps document order among everything that ties — which
+    // is the rule for two positioned boxes that both land in step 8.
+    fn level(
+        start: usize,
+        end: usize,
+        kids: &[usize],
+        nodes: &[(i32, i32, usize, usize, Vec<usize>)],
+        out: &mut Vec<usize>,
+    ) {
+        let mut blocks: Vec<((i32, i32), Vec<usize>)> = Vec::new();
+        let mut cursor = start;
+        for &k in kids {
+            let (z, layer, ks, ke, ref grandkids) = nodes[k];
+            if ks > cursor {
+                blocks.push(((0, 0), (cursor..ks).collect()));
+            }
+            let mut inner = Vec::new();
+            level(ks, ke, grandkids, nodes, &mut inner);
+            blocks.push(((z, layer), inner));
+            cursor = ke;
+        }
+        if cursor < end {
+            blocks.push(((0, 0), (cursor..end).collect()));
+        }
+        blocks.sort_by_key(|(k, _)| *k);
+        out.extend(blocks.into_iter().flat_map(|(_, v)| v));
     }
-    // Stable: blocks with the same (z, layer) — all the untracked in-flow spans,
-    // and any explicit `z-index: 0` — keep the relative order built above.
-    blocks.sort_by_key(|(k, _)| *k);
-    blocks.into_iter().flat_map(|(_, v)| v).collect()
+
+    let mut out = Vec::with_capacity(len);
+    level(0, len, &roots, &nodes, &mut out);
+    out
 }
 
 /// Wohin `reorder_by_z` jeden Befehl legt: `perm[alt] == neu`.
@@ -2454,9 +2508,7 @@ fn z_permutation(len: usize, ranges: &[(i32, i32, usize, usize)]) -> Vec<usize> 
     if ranges.is_empty() {
         return perm;
     }
-    let idx: Vec<usize> = (0..len).collect();
-    let out = reorder_by_z(idx, ranges);
-    for (new, &old) in out.iter().enumerate() {
+    for (new, old) in z_order(len, ranges).into_iter().enumerate() {
         perm[old] = new;
     }
     perm
@@ -2645,8 +2697,20 @@ pub fn layout(
         extern crate std;
         std::eprintln!("[stack] ops={} ranges={:?} floats={:?}", ctx.ops.len(), ctx.stack_ops, ctx.float_ops);
     }
-    let op_ranges = split_float_ranges(&ctx.stack_ops, &ctx.float_ops);
-    let link_ranges = split_float_ranges(&ctx.stack_links, &ctx.float_links);
+    // Floats are ordinary nodes in the stacking tree now: a float inside a
+    // positioned box is simply its child, and `(0, LAYER_FLOAT)` sorts it after
+    // that box's own in-flow content (Appendix E step 4 after step 3).
+    // `split_float_ranges` used to CUT the enclosing range around each float,
+    // which the flat list needed and the tree actively breaks: the cut pieces
+    // become SIBLINGS, so the float sorted ahead of the very background it sits
+    // on and a red container painted over its own green children.
+    let float_range = |v: &Vec<(usize, usize)>| -> Vec<(i32, i32, usize, usize)> {
+        v.iter().map(|&(s, e)| (0, LAYER_FLOAT, s, e)).collect()
+    };
+    let mut op_ranges = ctx.stack_ops.clone();
+    op_ranges.extend(float_range(&ctx.float_ops));
+    let mut link_ranges = ctx.stack_links.clone();
+    link_ranges.extend(float_range(&ctx.float_links));
     // Die Umsortierung nach z verschiebt ganze Bloecke — und damit auch die
     // Spanne, die ein Steuerelement fuer sich notiert hat. Erst die Abbildung
     // alt -> neu, dann die Befehle UND die Spannen damit umschreiben.
@@ -2809,6 +2873,31 @@ impl<'a> Ctx<'a> {
         // Margin-box outer width (never below 1px, never the whole CB for a
         // shrink-to-fit float, but a definite width may exceed the CB).
         let fw = (ceil_i32(content_w + pad_border + ml + mr)).max(1);
+        // **A percentage width would resolve a SECOND time below.** `layout_box`
+        // is handed `fw` — the float's OWN margin-box width — as its containing
+        // block, which is the contract for a shrink-to-fit float and a trap for
+        // `width: 50%`: it came out half of half. A 300px container gave a 75px
+        // float where every browser gives 150, and the two-column `float:left;
+        // width:50%` idiom is as old as CSS. Same for the two bounds.
+        let pct = |l: Len| matches!(l, Len::Pct(_) | Len::Calc { .. });
+        let resolved;
+        let st = if pct(st.width) || pct(st.min_width) || pct(st.max_width) {
+            let mut s = *st;
+            let outer = |v: f32| Len::Px(if s.box_border { v + pad_border } else { v });
+            if pct(s.width) {
+                s.width = outer(content_w);
+            }
+            for l in [&mut s.min_width, &mut s.max_width] {
+                if pct(*l) {
+                    let v = l.px(w as f32).unwrap_or(0.0);
+                    *l = Len::Px(v);
+                }
+            }
+            resolved = s;
+            &resolved
+        } else {
+            st
+        };
         // Float margins never collapse: the margin box top is the static flow
         // position `y`. `clear` applies to floats as well (CSS2.1 §9.5.2), so
         // first drop below every earlier float on the cleared side — without
@@ -3114,19 +3203,30 @@ impl<'a> Ctx<'a> {
                 // NESTING (a float inside a float is covered by the outer one),
                 // not whether we record at all: the enclosing z-index range, if
                 // any, gets cut around this one at the end.
-                let track = self.float_depth == 0;
+                // A float that is ALSO positioned is a POSITIONED box — Appendix
+                // E step 8, not the float step 4. `float:left;
+                // position:relative` beside an absolutely positioned sibling
+                // must win on document order; recorded as a float it lost to
+                // one that precedes it (`anonymous-boxes-001`).
+                let positioned = st.position != Position::Static;
+                let track = positioned || self.float_depth == 0;
                 let (fop0, flink0) = (self.ops.len(), self.links.len());
-                if track {
+                if track && !positioned {
                     self.float_depth += 1;
                 }
                 self.place_float(el, &st, x, w, anchor + open.value() as i32);
                 if track {
-                    self.float_depth -= 1;
-                    if self.ops.len() > fop0 {
-                        self.float_ops.push((fop0, self.ops.len()));
-                    }
-                    if self.links.len() > flink0 {
-                        self.float_links.push((flink0, self.links.len()));
+                    if positioned {
+                        let (z, layer) = Self::stack_key(&st);
+                        self.record_stack_entry(z, layer, fop0, self.ops.len(), flink0, self.links.len());
+                    } else {
+                        self.float_depth -= 1;
+                        if self.ops.len() > fop0 {
+                            self.float_ops.push((fop0, self.ops.len()));
+                        }
+                        if self.links.len() > flink0 {
+                            self.float_links.push((flink0, self.links.len()));
+                        }
                     }
                 }
                 continue;
@@ -3264,9 +3364,8 @@ impl<'a> Ctx<'a> {
                 self.shift_ops(&m0, tdx, tdy);
             }
             if track {
-                if let ZIndex::Value(z) = st.z_index {
-                    self.record_stack_entry(z, LAYER_IN_FLOW, m0.ops, self.ops.len(), m0.links, self.links.len());
-                }
+                let (z, layer) = Self::stack_key(&st);
+                self.record_stack_entry(z, layer, m0.ops, self.ops.len(), m0.links, self.links.len());
             }
             self.path.pop();
             if out.through {
@@ -4592,10 +4691,37 @@ family: st.family,
         // stacking range for it (CSS2.1 §9.9) — unless it's already nested
         // inside another tracked range, which absorbs it instead. A box
         // reached mid-line opens one too, to climb over that line.
-        let track = (self.should_track_stack(st) || over_line) && self.stack_depth == 0;
+        // An out-of-flow box is positioned by definition, so `over_line` — the
+        // old stand-in for "this one at least must be lifted over its line" —
+        // has nothing left to add.
+        let _ = over_line;
+        let track = self.should_track_stack(st);
         if track {
             self.stack_depth += 1;
         }
+        // The same second resolution `place_float` guards against: `layout_box`
+        // reads `w_i` as the containing-block width, and `w_i` IS this box's
+        // own used width — so a `width: 18%` box came out 18 % of 18 %. The
+        // reference of `floats-wrap-bfc-outside-001` is exactly that box, which
+        // is why fixing only the float side made a correct test fail.
+        let pct = |l: Len| matches!(l, Len::Pct(_) | Len::Calc { .. });
+        let abs_resolved;
+        let st = if pct(st.width) || pct(st.min_width) || pct(st.max_width) {
+            let mut sx = *st;
+            let frame = sx.pad_left + sx.pad_right + sx.border_x();
+            if pct(sx.width) {
+                sx.width = Len::Px(if sx.box_border { width } else { (width - frame).max(0.0) });
+            }
+            for l in [&mut sx.min_width, &mut sx.max_width] {
+                if pct(*l) {
+                    *l = Len::Px(l.px(cbw as f32).unwrap_or(0.0));
+                }
+            }
+            abs_resolved = sx;
+            &abs_resolved
+        } else {
+            st
+        };
         let box_bottom = self.layout_box(el, st, px as i32, w_i, py as i32);
         // A replaced element out of flow still has to be PAINTED. `layout_box`
         // gives it a rectangle — borders, background, the space it occupies —
@@ -4672,10 +4798,7 @@ family: st.family,
             self.shift_ops(&m0, tdx, tdy);
         }
         if track {
-            let (z, layer) = match st.z_index {
-                ZIndex::Value(z) => (z, LAYER_IN_FLOW),
-                _ => (0, LAYER_POSITIONED),
-            };
+            let (z, layer) = Self::stack_key(st);
             self.record_stack_entry(z, layer, m0.ops, self.ops.len(), m0.links, self.links.len());
         }
         // The out-of-flow box, at its final (post-bottom-shift) position.
@@ -4706,9 +4829,6 @@ family: st.family,
         if (!st.overflow_x.clips() && !st.overflow_y.clips()) || start >= self.ops.len() {
             return;
         }
-        if self.stack_ops.iter().any(|(_, _, _, e)| *e > start) {
-            return;
-        }
         // An out-of-flow descendant is clipped only by an ancestor in its
         // CONTAINING-BLOCK chain (CSS2.1 §11.1.1). A `position: static` box is
         // not the containing block of an absolutely positioned descendant, and
@@ -4733,7 +4853,50 @@ family: st.family,
         if st.ellipsis && st.overflow_x.clips() {
             self.ellipsize(start, cr);
         }
-        clip_ops(&mut self.ops, start, cl, ct, cr, cb);
+        let map = clip_ops(&mut self.ops, start, cl, ct, cr, cb);
+        if map.is_empty() {
+            return;
+        }
+        // Every side table that points into the display list moves with it.
+        // This used to be a BAIL — "a descendant recorded a stacking range in
+        // here, so do not clip at all" — which was tolerable while only an
+        // explicit `z-index` opened one. Now every positioned box does, and the
+        // bail meant an `overflow: hidden` box with any positioned child
+        // stopped clipping: 467 draw ops escaped their boxes on one vendored
+        // page.
+        self.stack_ops.retain_mut(|(_, _, s, e)| match remap_clip(&map, start, *s, *e) {
+            Some((ns, ne)) if ne > ns => {
+                (*s, *e) = (ns, ne);
+                true
+            }
+            _ => false,
+        });
+        self.float_ops.retain_mut(|(s, e)| match remap_clip(&map, start, *s, *e) {
+            Some((ns, ne)) if ne > ns => {
+                (*s, *e) = (ns, ne);
+                true
+            }
+            _ => false,
+        });
+        // A control's span must stay EXACT — `repaint_controls` overwrites it
+        // in place — so a torn or dropped one is marked unusable instead.
+        for c in &mut self.controls {
+            if c.at + c.len <= start {
+                continue;
+            }
+            let ok = (c.at >= start && c.len > 0)
+                .then(|| {
+                    let first = map.get(c.at - start).copied().flatten()?;
+                    (1..c.len)
+                        .all(|k| map.get(c.at + k - start).copied().flatten() == Some(first + k))
+                        .then_some(first)
+                })
+                .flatten();
+            match ok {
+                Some(at) => c.at = at,
+                None => c.at = usize::MAX,
+            }
+        }
     }
 
     /// `text-overflow: ellipsis` — a text run that would cross the box's right
@@ -5018,11 +5181,13 @@ family: st.family,
                 self.path.push(self.info(e));
                 let part = self.part_start();
                 y = self.layout_box(e, &cs, x, w, y);
-                if cs.position == Position::Relative {
+                if cs.position != Position::Static {
                     let (dx, dy) = rel_offset(&cs, w as f32, content_height_of(st, st.height));
                     if dx != 0 || dy != 0 {
                         self.shift_ops(&part, dx, dy);
                     }
+                    let (z, layer) = Self::stack_key(&cs);
+                    self.record_stack_entry(z, layer, part.ops, self.ops.len(), part.links, self.links.len());
                 }
                 self.path.pop();
             }
@@ -5168,6 +5333,14 @@ family: st.family,
             if dx != 0 || dy != 0 {
                 self.shift_ops(&part, dx, dy);
             }
+            // A positioned table part is a positioned BOX (Appendix E step 8)
+            // like any other. Table parts are painted on their own path, so
+            // they were the one family of positioned boxes that never reached
+            // `record_stack_entry` — and an absolutely positioned sibling that
+            // PRECEDES one in the document then painted over it, where document
+            // order among two step-8 boxes says the later one wins.
+            let (z, layer) = Self::stack_key(cs);
+            self.record_stack_entry(z, layer, part.ops, self.ops.len(), part.links, self.links.len());
         }
     }
 
@@ -5479,6 +5652,7 @@ family: st.family,
                 }
                 self.cb_h = cell_cb_h;
                 self.cb = cell_cb;
+                let positioned_cell = cs.position != Position::Static;
                 // `vertical-align` in the row (CSS2.1 §17.5.3). The content was
                 // laid out at the cell's top; middle/bottom just slide the ops
                 // it produced down by the leftover of the row height. `baseline`
@@ -5561,6 +5735,10 @@ family: st.family,
                     if dx != 0 || dy != 0 {
                         self.shift_ops(&m0, dx, dy);
                     }
+                }
+                if positioned_cell {
+                    let (z, layer) = Self::stack_key(cs);
+                    self.record_stack_entry(z, layer, m0.ops, self.ops.len(), m0.links, self.links.len());
                 }
             }
             self.cb = outer_cb;
@@ -6362,7 +6540,26 @@ family: st.family,
     }
 
     /// Dispatch a block-level box to the right formatting context.
+    /// Every box-making path funnels through here — a flex item, a grid item, a
+    /// table cell's own box, an out-of-flow box, a float. A POSITIONED one gets
+    /// its stacking range recorded here rather than at each of those five call
+    /// sites; a caller that records one too (the flow loop, `layout_abs`,
+    /// `place_float`) produces a range that either equals this one or contains
+    /// it, and an identical nested pair orders exactly as the single range
+    /// does. A `position: sticky` flex item was the case that named this: it
+    /// reached no other recording site at all and painted under its sibling.
     fn layout_box(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
+        if !self.should_track_stack(st) {
+            return self.layout_box_inner(el, st, x, w, y);
+        }
+        let (o0, l0) = (self.ops.len(), self.links.len());
+        let out = self.layout_box_inner(el, st, x, w, y);
+        let (z, layer) = Self::stack_key(st);
+        self.record_stack_entry(z, layer, o0, self.ops.len(), l0, self.links.len());
+        out
+    }
+
+    fn layout_box_inner(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
         // A form control is atomic wherever it lands. `flow_children` and
         // `collect_inline` catch the in-flow cases (so a field flows with the
         // text beside it); this catches every other box-making path — flex and
