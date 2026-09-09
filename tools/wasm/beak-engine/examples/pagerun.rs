@@ -107,8 +107,13 @@ fn main() {
         let (src, label, is_mod) = match r {
             ScriptRef::Inline(t, m) => { inline_n += 1; (t, format!("inline #{inline_n}"), m) }
             ScriptRef::External(u, m) => {
-                let name = u.rsplit('/').next().unwrap_or(&u).to_string();
-                match std::fs::read_to_string(format!("{dir}/{name}")) {
+                // **Denselben Weg wie die Blaetter**: `local` schneidet die
+                // Abfrage ab und legt den Pfad flach, wie `mirror.py` es tut.
+                // Der alte Weg nahm nur den Dateinamen — `js/main.js?v=1`
+                // wurde `main.js?v=1`, und die Probe meldete „nicht im
+                // Verzeichnis" fuer eine Datei, die daliegt
+                // ([[feedback_the_probe_must_use_the_targets_resolver]]).
+                match std::fs::read_to_string(local(&dir, &u)) {
                     Ok(t) => (t, u, m),
                     Err(e) => {
                         failed += 1;
@@ -381,12 +386,26 @@ fn resolve_path(base: &str, spec: &str) -> String {
 fn local(dir: &str, url: &str) -> String {
     let org = origin();
     let p = url.strip_prefix(&org).unwrap_or(url);
+    // **Abfrage und Fragment gehoeren nicht in den Dateinamen.** `mirror.py`
+    // schneidet sie ab (`urlparse(...).path`), und eine Probe, die das nicht
+    // tut, sucht `css_main.css?v=1` und meldet „Blatt fehlt" fuer eine Datei,
+    // die daliegt — der Cache-Buster `?v=1` ist auf echten Seiten die Regel
+    // ([[feedback_the_probe_must_use_the_targets_resolver]]).
+    let p = p.split(['?', '#']).next().unwrap_or(p);
     format!("{dir}/{}", p.trim_start_matches('/').replace('/', "_"))
 }
 
 fn run_module_graph(sess: &mut beak_engine::js::Session, label: &str, src: &str, dir: &str)
     -> Result<(), String> {
-    let entry = format!("{}/__entry__{}", origin(), label.replace(' ', "_"));
+    // **Die Einstiegsadresse eines EXTERNEN Moduls ist seine eigene.** Der
+    // Kunstname `__entry__js/main.js` war eine Basis, gegen die `./state.js`
+    // zu `__entry__js/state.js` wurde — eine Datei, die es nirgends gibt.
+    // Nur ein INLINE-Modul hat keine Adresse und braucht eine erfundene.
+    let entry = if label.starts_with("inline ") {
+        format!("{}/__entry__{}", origin(), label.replace(' ', "_"))
+    } else {
+        resolve_path(&format!("{}/", origin()), label)
+    };
     let prog = beak_engine::js::parse(src, true).map_err(|e| format!("SyntaxError: {} @{}", e.msg, pos(src, e.at)))?;
     sess.interp.add_module(&entry, std::rc::Rc::new(prog));
     // Holen, bis der Graph geschlossen ist.
@@ -447,6 +466,24 @@ fn find_seq(el: &beak_engine::dom::Element, id: &str) -> Option<u32> {
     None
 }
 
+/// Ein Blatt anhaengen — seine `@import`e ZUERST, denn ein Import wirkt, als
+/// staende sein Inhalt an seiner Stelle, also vor allem, was im Blatt folgt.
+/// Dieselbe Reihenfolge, die der Wirt baut.
+fn push_sheet(text: &str, url: &str, dir: &str, out: &mut String, n: &mut usize, depth: usize) {
+    if depth < 4 {
+        for href in beak_engine::import_urls(text) {
+            let u = resolve_path(url, &href);
+            match std::fs::read_to_string(local(dir, &u)) {
+                Ok(t) => push_sheet(&t, &u, dir, out, n, depth + 1),
+                Err(_) => eprintln!("  Import fehlt: {u}"),
+            }
+        }
+    }
+    out.push_str(text);
+    out.push('\n');
+    *n += 1;
+}
+
 /// Jedes `<link rel=stylesheet>` im Baum, in Baumreihenfolge, aus dem
 /// Verzeichnis gelesen. Dieselbe Reihenfolge, in der der Wirt sie anhaengt.
 fn collect_links(el: &beak_engine::dom::Element, dir: &str, out: &mut String, n: &mut usize) {
@@ -454,12 +491,17 @@ fn collect_links(el: &beak_engine::dom::Element, dir: &str, out: &mut String, n:
         && el.attr("rel").is_some_and(|r| r.to_ascii_lowercase().contains("stylesheet")) {
         if let Some(h) = el.attr("href") {
             let u = resolve_path(&format!("{}/", origin()), h);
-            if let Ok(t) = std::fs::read_to_string(local(dir, &u)) {
-                out.push_str(&t);
-                out.push('\n');
-                *n += 1;
-            } else {
-                eprintln!("  Blatt fehlt: {u}");
+            match std::fs::read_to_string(local(dir, &u)) {
+                Ok(t) => {
+                    // **`@import` MUSS die Probe auch fahren.** Der Wirt tut es
+                    // seit 0.139.0; eine Probe, die es nicht tut, misst sich
+                    // selbst und nicht beak — bei sandbox.nopeek.ch haengt die
+                    // ganze Gestaltung an fuenfzehn `@import`-Zeilen, und ohne
+                    // sie sieht jeder Vergleich wie ein Layoutfehler aus
+                    // ([[feedback_the_test_path_must_be_the_real_path]]).
+                    push_sheet(&t, &u, dir, out, n, 0);
+                }
+                Err(_) => eprintln!("  Blatt fehlt: {u}"),
             }
         }
     }
@@ -501,6 +543,9 @@ fn feed_geometry(sess: &mut beak_engine::js::Session, html: &str, dir: &str) {
     let mut n = 0;
     collect_links(dom.body(), dir, &mut css, &mut n);
     collect_links(&dom.root, dir, &mut css, &mut n);
+    if std::env::var("CSSDBG").is_ok() {
+        eprintln!("[css] {n} Blaetter, {} B, .main-area: {}", css.len(), css.contains(".main-area"));
+    }
     let width: u32 = std::env::var("W").ok().and_then(|w| w.parse().ok()).unwrap_or(1902);
     use beak_engine::layout::{Rgb, Theme};
     let mut eng = beak_engine::Engine::new();
