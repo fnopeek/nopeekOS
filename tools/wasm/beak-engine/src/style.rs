@@ -5182,26 +5182,6 @@ fn set_pad(v: &str, u: Units, px: &mut f32, pct: &mut f32) {
     }
 }
 
-fn parse_pad(v: &str, u: Units, prior: f32) -> f32 {
-    let v = v.trim();
-    // `parse_length` knows units, not functions — so `padding: calc(…)` was
-    // dropped wholesale and the side kept its previous value. A percentage
-    // still resolves roughly here (it belongs to the containing block's WIDTH,
-    // which this parse cannot see); the math functions are exact.
-    let px = if is_math_fn(v) {
-        crate::values::resolve_length(
-            v,
-            &crate::values::LenCtx { em: u.em, rem: u.rem, pct_basis: 0.0, vw: u.vw, vh: u.vh },
-        )
-    } else {
-        parse_length(v, u)
-    };
-    match px {
-        Some(p) if p >= 0.0 => p,
-        _ => prior,
-    }
-}
-
 /// A border-width keyword/length → px. `thin`/`medium`/`thick` = 1/3/5px.
 /// A NEGATIVE length is invalid, not zero: the declaration is dropped and the
 /// side keeps the width it had (`border-top-width-012` and its siblings turn
@@ -5901,8 +5881,9 @@ mod tests {
     /// The CSS math functions have to reach the BOX MODEL, not just custom
     /// properties. `values.rs` evaluated all four from the start, but
     /// `parse_len_opt` only routed `calc(`, so `width: max(20px, 10px)` failed
-    /// its length parse and fell back to `auto`; and `parse_pad` called
+    /// its length parse and fell back to `auto`; and the padding parse called
     /// `parse_length` directly, so `padding: calc(…)` was dropped entirely.
+    /// `length_parts` owns both now, and carries the percentage with it.
     #[test]
     fn math_functions_reach_the_box_model() {
         let st = |css: &str| {
