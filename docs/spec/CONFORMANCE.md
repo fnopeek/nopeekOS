@@ -22,16 +22,78 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-09-08, beak 0.128.0)
+### Current number (measured 2026-09-09, beak 0.137.0)
 
 ```
-4485 pass / 1162 fail / 139 inconclusive   (of 5786 vendored reftests)
-= 79.4 % of the conclusive 5647
+4515 pass / 1132 fail / 139 inconclusive   (of 5786 vendored reftests)
+= 80.0 % of the conclusive 5647   ·   4515 / 5201 = 86.8 % without vehicles
 ```
 
-Moved **+4 / −0** against the 0.115.0 baseline, which is now re-blessed, and
-all four come from ONE rule: **clearance is space INSIDE the container, not a
-push on the container itself.**
+Moved **+30 / −1** against the 0.128.0 baseline, which is now re-blessed. The
+one loss is not a loss: `css-flexbox/stretch-flex-item-checkbox-input` went
+PASS → INCONCLUSIVE at an unchanged 0.00 % diff, because a checkbox without
+the UA padding it never should have had is 50×50 instead of 62×62 and the
+reference's ink then falls under the blank guard
+([[feedback_a_correct_render_can_trip_the_blank_guard]]).
+
+Four causes, and three of them are one lesson — **a percentage has to know
+which axis it belongs to** ([[feedback_a_percentage_needs_its_own_axis]]):
+
+* **`top`/`bottom` in percent read the WIDTH** (+8). `rel_offset` passed
+  `cb_w` for both axes, and the comment above it said so out loud. CSS 2.1
+  §9.3.2 gives them the containing block's HEIGHT; `top: 100%` on a 100px box
+  in an 800px page moved it 800px down, out of everything.
+* **All four percentage paddings, and both vertical percentage margins, fell
+  to zero** (+13). The reason was in the types: the inline-axis margins are
+  `Len` (they can be `auto`, so they survive to layout), while `padding` and
+  the block-axis margins are a resolved `f32` — and the cascade that fills it
+  cannot see a containing block. `ComputedStyle` now carries the percentage
+  beside the constant and resolves it at box entry, the same shape
+  `resolve_pct_heights` already had. **Both axes resolve against the WIDTH**
+  (§8.1/§8.3) — which is what makes `padding-top: 56.25%` a 16:9 box.
+* **A table cell was not a definite containing block** (+2). `height: 100%`
+  in a `height: 100px` cell measured and painted nothing. At paint time the
+  row height is long since resolved; the measuring pass deliberately still
+  leaves it indefinite, where it would be circular.
+* **A `<button>` did not lay its children out** (+5, with `appearance: none`).
+  See "Forms" below — and note that the three `centering-00x` failures were
+  on the REFERENCE side, not ours.
+
+Two real-page defects came out of the probe built for that last one, and
+neither is visible to a reftest ([[feedback_a_probe_for_the_new_finds_the_old]]):
+an inline `<svg>` was not in `replaced_intrinsic`'s tag list, so a
+shrink-to-fit box around one measured it as nothing; and an `<img>` or `<svg>`
+reached through `layout_box` — every flex item, grid item and table cell —
+painted NOTHING, because only `flow_children` knew how to put a picture on a
+line. On the vendored Tailwind page that was the site logo. A third: a
+`calc()` on a vertical margin was dropped whole (`parse_length` knows units,
+not functions), and Tailwind v4 writes every `my-*`/`mt-*` as
+`margin-block: calc(var(--spacing) * 10)`.
+
+**Not done, and measured twice more so it is not guessed at.** A dozen
+failures (`position-absolute-001`, `relpos-calcs-*`, `before-after-positioned-*`,
+much of `CSS2/abspos`) are one thing: a positioned box is painted in Appendix
+E step 8, after everything in steps 4 and 7, and our display list paints it in
+visit order — so the in-flow content that FOLLOWS it covers it. Lifting every
+out-of-flow box into the positioned layer measures +21/−30; lifting every
+positioned box measures +21/−57. That agrees with every earlier attempt
+recorded at `LAYER_POSITIONED` and in the 0.31.0 arc entry — five measurements
+now, all of them negative. The reason it cannot be fixed by lifting is
+that the range list is FLAT: a `position: relative` parent swallows its
+children's ranges. It needs a real stacking-context tree, and that is the
+single biggest structural item left in this file.
+
+**A caveat on the denominator, found the same day.** Some vendored reftests
+name a reference that cannot match them by construction:
+`margin-bottom-applies-to-012/013/014/015` all point at
+`margin-bottom-applies-to-009-ref.xht`, whose geometry is two 10px bars while
+the tests draw a 200px box. No engine passes those by pixel comparison. They
+are a third kind of unwinnable, beside the unshipped specs and the missing
+CSSTest fonts — not counted yet, because counting them needs more than a
+filename.
+
+The 0.128.0 gain, kept for the record: **clearance is space INSIDE the
+container, not a push on the container itself.**
 
 `<div><div style="float:left;height:50px"></div><div style="clear:both"></div></div>`
 — the classic clearfix — measured zero. The cleared child was placed
@@ -67,8 +129,8 @@ by filename, because the filename does not say so
 | `display: run-in` | 35 | dropped from CSS 2.1 by every engine |
 | `subgrid` | 18 | |
 
-Against the corpus that a real page can actually exercise — 5200 tests —
-the number is **4485 / 5200 = 86.2 %**, with **715 real failures left**. Both
+Against the corpus that a real page can actually exercise — 5201 tests —
+the number is **4515 / 5201 = 86.8 %**, with **686 real failures left**. Both
 are worth tracking: the raw one never lies about the suite, and the second one
 is the one that predicts what a page looks like. Neither is allowed to move
 without a measured run.
@@ -330,24 +392,30 @@ is the only way to move it, and it would measure font matching, not layout.
 Recorded here so the biggest near-miss in the census is not mistaken for the
 cheapest win a second time.
 
-Per suite (pass / total of that suite, inconclusive included in the total):
+Per suite, of the CONCLUSIVE tests in that suite (0.137.0):
 
-| Suite | Pass | Total | % | vs 0.1.69 |
-|---|---|---|---|---|
-| css-fonts | 40 | 43 | 93.0 | — |
-| css-color | 221 | 282 | 78.4 | — |
-| css-position | 28 | 36 | 77.8 | — |
-| **CSS2** (2.1 suite) | 2605 | 3351 | 77.7 | +4 |
-| html-forms | 15 | 21 | 71.4 | — |
-| css-text | 240 | 381 | 63.0 | — |
-| **css-flexbox** | 235 | 428 | 54.9 | **+86** |
-| css-display | 44 | 88 | 50.0 | — |
-| **css-align** | 13 | 29 | 44.8 | **+6** |
-| css-cascade | 14 | 32 | 43.8 | — |
-| css-backgrounds | 60 | 144 | 41.7 | — |
-| **css-grid** | 283 | 749 | 37.8 | **+27** |
-| css-values | 34 | 93 | 36.6 | — |
-| css-sizing | 37 | 109 | 33.9 | — |
+| Suite | Pass | Conclusive | % |
+|---|---|---|---|
+| **html-forms** | 20 | 21 | **95.2** |
+| css-color | 267 | 282 | 94.7 |
+| **CSS2** (2.1 suite) | 3018 | 3297 | 91.5 |
+| css-position | 28 | 35 | 80.0 |
+| css-flexbox | 308 | 420 | 73.3 |
+| css-sizing | 74 | 102 | 72.5 |
+| css-text | 253 | 354 | 71.5 |
+| css-values | 56 | 79 | 70.9 |
+| css-cascade | 20 | 31 | 64.5 |
+| css-backgrounds | 82 | 137 | 59.9 |
+| css-display | 50 | 87 | 57.5 |
+| css-fonts | 23 | 42 | 54.8 |
+| css-grid | 305 | 731 | 41.7 |
+| css-align | 11 | 29 | 37.9 |
+
+`css-grid` and `css-display` read low for a reason the number cannot say:
+347 of the grid failures are `display: grid-lanes` and 35 of the display ones
+are `display: run-in`, neither of which any engine ships. `css-fonts` carries
+the 18 unwinnable `font-family-name` tests. Run `tests/vehicles.py` before
+reading any of these three as a gap.
 
 **css-position 25.0 → 77.8 %** is bucket-B item 12 landing: rows, row groups
 and captions are boxes of their own now, so `position: relative` and a
@@ -1999,16 +2067,19 @@ rows are self-assessed and marked as such (see "How this file is maintained").
 
 ## Forms
 
-Measured: **16 / 21** vendored WPT reftests (`tests/wpt/html-forms`, from
-`html/rendering/widgets`). Only the *rendering* of controls is measurable this
+Measured: **20 / 21** vendored WPT reftests (`tests/wpt/html-forms`, from
+`html/rendering/widgets`). The one left is
+`field-sizing-placeholder-stretch`, which wants three things at once:
+`field-sizing: content`, a `::placeholder` colour, and real clipping of a
+control's text to a `height: 0` box. Only the *rendering* of controls is measurable this
 way — WPT tests submission behaviour through `testharness.js`, which needs JS,
 so `submit` is covered by unit tests against the real markup of live search
 boxes until Stage 1.
 
 | Feature | Spec | Status | Notes |
 |---------|------|--------|-------|
-| Control rendering (`input`/`button`/`select`/`textarea`) | HTML §4.10 + rendering §15.5 | 🟡 | atomic inline boxes wherever they land (in-flow, inline, flex/grid items, table cells); value/placeholder/label text, focus ring + caret, checkbox/radio mark, select chevron, multi-line textarea; author `background-color`/`width`/`height` honoured. No `appearance`, no native date/time/range widgets |
-| Button content layout | HTML §button-layout | 🟡 | label text centred in the box; the button's *children* are not laid out (an icon + markup inside a `<button>` collapses to its text) → the 3 `centering-00x` reftests fail on box size |
+| Control rendering (`input`/`button`/`select`/`textarea`) | HTML §4.10 + rendering §15.5 | 🟡 | atomic inline boxes wherever they land (in-flow, inline, flex/grid items, table cells); value/placeholder/label text, focus ring + caret, checkbox/radio mark, select chevron, multi-line textarea; author `background-color`/`width`/`height` honoured. **`appearance: none` takes the whole widget** — UA frame, tick, dot and chevron, and the width the chevron reserved — leaving an ordinary box the page styles itself, with its `::before`/`::after` laid out inside it (which is how every custom checkbox on the web is built, and it does NOT centre them). Kept apart from the older heuristic "the page gave it a background, so it paints its own face": that one must not take the tick away. No native date/time/range widgets |
+| Button content layout | HTML §button-layout | ✅ | a `<button>`'s children are laid out, in the formatting context the button itself declares (`flex`/`grid`/block — Tailwind writes `flex` on nearly every icon button), and the block they form is centred VERTICALLY in the content box. Horizontally they are not: `text-align: center` from the UA sheet centres the text inside them, which is why a 100px block child stays at the left with its own text in the middle. The 3 `centering-00x` reftests failed on the REFERENCE side — our render of the test was right all along |
 | Text editing in a field | HTML §4.10.5 | 🟡 | insert/Backspace/Delete/arrows/Home/End + caret, per-control state; no selection, no clipboard, no IME, ASCII only |
 | Form submission (GET) | HTML §4.10.21/22 | ✅ | successful-control rules (named + enabled, only the activated button, checked boxes/radios), `application/x-www-form-urlencoded`, implicit submission via the default button, action query replaced |
 | Form submission (POST) | HTML §4.10.21 | 🟡 | `npk_http_send` carries method + body; `application/x-www-form-urlencoded`. A POST keeps the action's own query string (only a GET replaces it), and a 301/302/303 answer turns into a GET so the form is not submitted twice (RFC 9110 §15.4.3). No `multipart/form-data` → no file upload |
