@@ -48,13 +48,28 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-09 · beak 0.138.0 · Kernel 0.329.0** (Rest: `git log`)
+**Stand 2026-09-09 · beak 0.140.0 · Kernel 0.329.0** (Rest: `git log`)
 
-**▶ Als nächstes: htmx (`XPathEvaluator`), dann die Ligaturen.** Danach
-stünde Shadow DOM an — aber gemessen ist das KEINE Web-Anforderung, sondern
-die Bauweise EINER Seite: 89 % der 906 Aufrufe kommen von MDN allein, und in
-allen sechzehn Korpusseiten (jede Google-Seite eingeschlossen) steht null
-Shadow DOM. Rangliste: `docs/plan/WEB_PLATFORM_GAPS.md` §0a.
+**▶ Als nächstes: die Ligaturen (GSUB).** Shadow DOM bleibt gemessen KEINE
+Web-Anforderung, sondern die Bauweise EINER Seite: 89 % der 906 Aufrufe
+kommen von MDN allein, und in allen sechzehn Korpusseiten (jede Google-Seite
+eingeschlossen) steht null Shadow DOM. Rangliste:
+`docs/plan/WEB_PLATFORM_GAPS.md` §0a. Als *Schnittstelle* gibt es
+`ShadowRoot` seit 0.140.0 trotzdem — ein `instanceof` gegen einen fehlenden
+Namen wirft, statt `false` zu ergeben, und daran starb htmx.
+
+**0.140.0: XPath, und damit 13 von 13 Bibliotheken grün.** htmx sucht seine
+`hx-on:`-Attribute per XPath. Der Zensus zählt über zwölf Zielseiten **null**
+XPath-Aufrufe — das entscheidet die GRÖSSE, nicht das Ob: kein Sonderfall für
+htmx' einen Ausdruck, aber auch kein volles XPath 1.0 mit Namensräumen.
+`js/xpath.rs` ist ein echter Lexer/Parser/Auswerter für die Sprache, die eine
+Seite schreibt; was fehlt, steht im Modulkopf.
+
+**0.139.0: `@import` wird geholt.** `sandbox.nopeek.ch` band ein Blatt ein,
+das nichts als fünfzehn `@import`-Zeilen enthielt — die ganze Gestaltung kam
+nie an (3592 statt 80094 Bytes CSS). Eine vierte Ladestufe, rundenweise; der
+Aufwand war die Kaskadenreihenfolge, denn ein Import gehört VOR sein Blatt.
+Offen und benannt: die Medienabfrage eines Imports wird übersprungen.
 
 **0.135–0.137: WPT 4485 → 4515 (+30/−1), Formularfamilie 20/21.** Florian
 fragte nach den Radioknöpfen — die Antwort lag dreimal woanders als der
@@ -143,7 +158,7 @@ als Ligatur; fontdue läuft mit `load_substitutions: false`, also ist
     test262 parse   96,84 %
     DOM-Aufrufe     99,4 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
     WPT (CSS)       4537/5201 = 87,2 % ohne Testvehikel (roh 80,3 %)
-    Bibliotheken    12 von 13 (`<tools>/libprobe/`)
+    Bibliotheken    13 von 13 (`<tools>/libprobe/`)
     beak:selftest   Sprache 55/55, Dokument 39/39
     Halde           Schriften faul; srf 44 MiB (war 89)
 
