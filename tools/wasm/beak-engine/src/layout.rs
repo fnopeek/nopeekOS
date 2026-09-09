@@ -4430,11 +4430,18 @@ family: st.family,
         } else {
             None
         };
+        // Die Untergrenze von 8 px ist dafuer da, dass ein Steuerelement OHNE
+        // eigene Groesse nicht verschwindet. Wo die Seite eine Groesse nennt —
+        // auch die Null — ist sie die Antwort: ein `height: 0` Feld in einer
+        // Flex-Spalte der Hoehe 0 soll null sein, nicht acht
+        // ([[feedback_invented_limits]]).
+        let said_w = st.width.px(avail).is_some();
+        let said_h = vert_len(st.height, cbh).is_some();
         CtlBox {
             seq: el.seq,
             kind,
-            w: w.max(8),
-            h: h.max(8),
+            w: if said_w { w.max(0) } else { w.max(8) },
+            h: if said_h { h.max(0) } else { h.max(8) },
             text,
             ghost,
             placeholder: el.attr("placeholder").unwrap_or("").to_string(),
@@ -6626,8 +6633,14 @@ family: st.family,
                 dx = (w - ctl.w) / 2;
             } else if !matches!(kind, ControlKind::Checkbox | ControlKind::Radio) {
                 ctl.w = w.max(8);
-                if let Some(hh) = st.height.px(w as f32) {
-                    ctl.h = (hh as i32).max(8);
+                // `control_box` hat die Hoehe schon aufgeloest — gegen die
+                // Hoehe des Umgebungskastens, wie es sich gehoert. Hier stand
+                // `st.height.px(w)`: dieselbe Achsenverwechslung noch einmal,
+                // und dazu eine Untergrenze von 8, die ein ausdrueckliches
+                // `height: 0` ueberstimmte. Nur eine feste Laenge zaehlt hier,
+                // und sie zaehlt, wie sie dasteht.
+                if let Len::Px(hh) = st.height {
+                    ctl.h = (hh as i32).max(0);
                 }
             }
             let h_i = ctl.h;
@@ -7690,7 +7703,7 @@ family: st.family,
         let mut marks: Vec<FlexMark> = Vec::with_capacity(ln);
         for k in 0..ln {
             let (kid, s) = (&items[idx0 + k].0, items[idx0 + k].1);
-            let s_meas = flex_item_style(&s, size[k], None, true);
+            let s_meas = flex_item_style(&s, Some(size[k]), None, true);
             let box_main = (size[k] + li[k].main_pad).max(1.0) as i32;
             let mark = self.flex_mark();
             let bottom = match kid {
@@ -7791,7 +7804,7 @@ family: st.family,
             for k in first_redo..ln {
                 let (kid, s) = (&items[idx0 + k].0, items[idx0 + k].1);
                 let (forced_h, y) = plan[k];
-                let s2 = flex_item_style(&s, size[k], forced_h, true);
+                let s2 = flex_item_style(&s, Some(size[k]), forced_h, true);
                 let Kid::El(el) = kid else {
                     // Der anonyme Kasten aendert sich durch die zweite Runde
                     // nicht — er hat keine Kinder, die anders fielen.
@@ -7890,7 +7903,7 @@ family: st.family,
             mm_trail[i] = s.margin_bottom;
             ma_lead[i] = s.margin_top_auto;
             ma_trail[i] = s.margin_bottom_auto;
-            let s_meas = flex_item_style(s, wd, None, false);
+            let s_meas = flex_item_style(s, None, Some(wd), false);
             h_nat[i] = match el {
                 Kid::El(e) => self.measured_h(MEAS_FLEX_COL, wd, e, &s_meas, ix[i], wd.max(1.0) as i32, y0),
                 Kid::Anon(b) => b.h,
@@ -7899,7 +7912,83 @@ family: st.family,
 
         // Total intrinsic main size (heights + vertical margins + gaps).
         let gaps_total = gap * (n as f32 - 1.0).max(0.0);
-        let sum_h: f32 = (0..n).map(|i| mm_lead[i] + h_nat[i] as f32 + mm_trail[i]).sum();
+
+        // **Die Hauptachse einer Spalte ist die HOEHE, und sie flext.**
+        //
+        // Bisher tat sie das nicht: diese Funktion mass die natuerlichen Hoehen
+        // und verteilte den Rest nur ueber `justify-content` und Auto-Raender.
+        // `flex-grow` hatte auf der Hauptachse einer Spalte KEINE Wirkung — und
+        // `display:flex; flex-direction:column` mit einem `flex:1`-Kind ist das
+        // haeufigste App-Layout des Webs. Auf sandbox.nopeek.ch bekam die
+        // Inhaltsflaeche dadurch ihre Inhaltshoehe statt der Fensterhoehe, und
+        // alles darunter sass 224 px zu hoch.
+        //
+        // Nur bei DEFINITER Hauptgroesse: ohne sie waechst der Behaelter selbst
+        // mit dem Inhalt, es gibt keinen freien Platz, und `grow` ist per
+        // Spezifikation wirkungslos.
+        let main_size: Option<Vec<f32>> = def_cross.map(|avail| {
+            let li: Vec<FlexItem> = items
+                .iter()
+                .enumerate()
+                .map(|(i, (_, s))| {
+                    let main_pad = s.pad_top + s.pad_bottom + s.border_y();
+                    let to_content = |px: f32| if s.box_border { (px - main_pad).max(0.0) } else { px };
+                    // Die Grundgroesse: `flex-basis`, sonst eine definite
+                    // `height`, sonst die gemessene Inhaltshoehe.
+                    let base = match s.flex_basis {
+                        FlexBasis::Px(p) => to_content(p),
+                        FlexBasis::Pct(p) => to_content(p / 100.0 * avail),
+                        FlexBasis::Auto => content_height_of(s, s.height)
+                            .unwrap_or_else(|| (h_nat[i] as f32 - main_pad).max(0.0)),
+                    };
+                    // **Die automatische Mindestgroesse** (css-flexbox-1 §4.5):
+                    // `min-height: auto` an einem Flex-Item ist seine
+                    // INHALTSgroesse, nicht null — deshalb schrumpft ein
+                    // `<select>` in einer 0 px hohen Spalte nicht weg. Nur
+                    // solange der Inhalt sichtbar ueberlaeuft: ein Rollkasten
+                    // ist dafuer gemacht, geklemmt zu werden, und hat keine.
+                    let floor = match vert_len(s.min_height, Some(avail as i32)) {
+                        Some(v) => to_content(v),
+                        // Das MINIMUM aus Inhalts- und angegebener Groesse,
+                        // wie `flex_metrics` es fuer die Zeile schon rechnet:
+                        // wer eine Hoehe nennt, die kleiner ist als sein
+                        // Inhalt, hat sie so gemeint.
+                        None if !s.overflow_y.scrolls() => {
+                            let content = (h_nat[i] as f32 - main_pad).max(0.0);
+                            match content_height_of(s, s.height) {
+                                Some(spec) => content.min(spec),
+                                None => content,
+                            }
+                        }
+                        None => 0.0,
+                    };
+                    let ceil = vert_len(s.max_height, Some(avail as i32))
+                        .map(|v| to_content(v))
+                        .unwrap_or(f32::INFINITY);
+                    FlexItem {
+                        m_lead: mm_lead[i], m_trail: mm_trail[i],
+                        m_lead_auto: ma_lead[i], m_trail_auto: ma_trail[i],
+                        main_pad, cross_pad: s.pad_left + s.pad_right + s.border_x(),
+                        cm_lead: 0.0, cm_trail: 0.0,
+                        base, hypo: base.clamp(floor.min(ceil), ceil), floor, ceil,
+                        grow: s.flex_grow, shrink: s.flex_shrink,
+                        cm_lead_auto: false, cm_trail_auto: false,
+                        cross_auto: false, min_cross: 0.0, max_cross: f32::INFINITY,
+                    }
+                })
+                .collect();
+            resolve_flex_line(&li, avail, gaps_total)
+        });
+
+        // Was die Zeilen unten wirklich belegen — geflext, wo es eine
+        // Hauptgroesse gibt, sonst wie gemessen.
+        let outer = |i: usize| -> f32 {
+            match &main_size {
+                Some(v) => v[i] + items[i].1.pad_top + items[i].1.pad_bottom + items[i].1.border_y(),
+                None => h_nat[i] as f32,
+            }
+        };
+        let sum_h: f32 = (0..n).map(|i| mm_lead[i] + outer(i) + mm_trail[i]).sum();
         let intrinsic = sum_h + gaps_total;
         // A definite container height gives free main space → justify-content.
         let free = def_cross.map(|c| c - intrinsic).unwrap_or(0.0).max(0.0);
@@ -7925,13 +8014,18 @@ family: st.family,
         let mut y = y0 as f32 + offset;
         for (i, (el, s)) in items.iter().enumerate() {
             y += mm_lead[i] + if ma_lead[i] { auto_each } else { 0.0 };
-            let s2 = flex_item_style(s, cross_w[i], None, false);
+            // Die Hauptgroesse wird ERZWUNGEN, wo der Behaelter eine hat;
+            // die Quergroesse ist die gestreckte Breite von oben.
+            let s2 = flex_item_style(s, main_size.as_ref().map(|v| v[i]), Some(cross_w[i]), false);
             let bottom = match el {
                 Kid::El(e) => {
                     self.path.push(self.info(e));
                     let b = self.layout_box(e, &s2, ix[i], cross_w[i].max(1.0) as i32, y as i32);
                     self.path.pop();
-                    b
+                    // Ein Kasten mit erzwungener Hauptgroesse belegt genau sie,
+                    // auch wenn sein Inhalt kuerzer ist — sonst wandert alles
+                    // darunter nach oben.
+                    b.max(y as i32 + outer(i) as i32)
                 }
                 Kid::Anon(b) => {
                     self.place_atomic(b, ix[i], y as i32);
@@ -8319,7 +8413,7 @@ fn clamp_cross(v: f32, min: f32, max: f32) -> f32 {
 /// content-box) and, when stretching, its cross-axis size (`forced_cross`,
 /// border-box). Item margins are zeroed — the flex code positions the item by
 /// hand — while keeping the item's own box-sizing for padding conversion.
-fn flex_item_style(s: &ComputedStyle, main: f32, forced_cross: Option<f32>, row: bool) -> ComputedStyle {
+fn flex_item_style(s: &ComputedStyle, main: Option<f32>, forced_cross: Option<f32>, row: bool) -> ComputedStyle {
     let mut s2 = *s;
     s2.margin_left = Len::Px(0.0);
     s2.margin_right = Len::Px(0.0);
@@ -8328,7 +8422,9 @@ fn flex_item_style(s: &ComputedStyle, main: f32, forced_cross: Option<f32>, row:
     let main_px = |content: f32, pad: f32| Len::Px(if s.box_border { content + pad } else { content });
     let main_chrome = s.pad_left + s.pad_right + s.border_x();
     if row {
-        s2.width = main_px(main, main_chrome);
+        if let Some(m) = main {
+            s2.width = main_px(m, main_chrome);
+        }
         if let Some(c) = forced_cross {
             // `c` is the stretched BORDER-box cross size. `Len::Px` means a
             // border-box value under `box-sizing:border-box` and a content-box
@@ -8342,9 +8438,30 @@ fn flex_item_style(s: &ComputedStyle, main: f32, forced_cross: Option<f32>, row:
             s2.height = Len::Px(if s.box_border { c } else { (c - inner_v).max(0.0) });
         }
     } else {
-        // Column: main axis is vertical (height), cross is horizontal (width).
-        s2.width = main_px(main, main_chrome);
-        let _ = forced_cross; // column forces cross via `width` above
+        // Column: main axis is vertical (HEIGHT), cross is horizontal (width).
+        //
+        // Es stand anders hier — der Zweig setzte `width` aus `main` und liess
+        // die Hoehe unberuehrt, und der Kommentar darueber sagte trotzdem
+        // „main axis is vertical". Der Aufrufer reichte folgerichtig die
+        // QUER-Groesse als `main` durch, und `flex-grow` hatte auf der
+        // Hauptachse einer Spalte nie eine Wirkung.
+        // `main: None` heisst „nicht erzwingen" — das braucht die MESSUNG, die
+        // ja gerade die natuerliche Hoehe sucht. Ohne diesen Fall reichte sie
+        // die Querbreite als Hauptgroesse durch und mass jedes Item so hoch,
+        // wie es breit ist.
+        if let Some(m) = main {
+            let main_v = s.pad_top + s.pad_bottom + s.border_y();
+            s2.height = Len::Px(if s.box_border { m + main_v } else { m });
+        }
+        // **Achtung, zwei Bedeutungen.** In der ZEILE ist `forced_cross` eine
+        // RANDkastenhoehe (die gestreckte Zeilenhoehe); in der SPALTE ist es
+        // die INHALTSbreite, die `flex_column` oben ausgerechnet hat. Sie
+        // gleich zu behandeln zog jedem gepolsterten Item seine Polsterung von
+        // der Breite ab — `flex-aspect-ratio-content-box-padding` misst genau
+        // das.
+        if let Some(c) = forced_cross {
+            s2.width = main_px(c, main_chrome);
+        }
     }
     s2
 }
