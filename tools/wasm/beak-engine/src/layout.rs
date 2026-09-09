@@ -415,6 +415,22 @@ fn resolve_block_h(st: &ComputedStyle, avail: f32) -> (f32, f32) {
     (cw.max(1.0), ml + st.pad_left + st.border_left.width)
 }
 
+/// Der EIGENE Randkasten eines Blocks in einem verfuegbaren Streifen.
+///
+/// `layout_flex` und `layout_grid` rechnen ihn intern genau so aus — hier steht
+/// er noch einmal fuer den AUFZEICHNENDEN Pfad. Ohne ihn meldete jeder Flex-
+/// und Rasterkasten die Breite seines Streifens statt seiner selbst: ein
+/// `display:flex; width:400px` stand mit 1902 px in `getBoundingClientRect`,
+/// obwohl es 400 malt. Genau derselbe Fehler war im Flusspfad schon einmal
+/// gefixt (MediaWikis `.mw-page-container`) — die BFC-Abzweigung daneben hat
+/// ihn behalten.
+fn used_border_box(st: &ComputedStyle, x: i32, avail: i32) -> (i32, i32) {
+    let (cw, off_left) = resolve_block_h(st, avail as f32);
+    let ml = off_left - st.pad_left - st.border_left.width;
+    let bw = cw.max(1.0) + st.pad_left + st.pad_right + st.border_x();
+    (x + ml as i32, bw as i32)
+}
+
 /// Move a detached op list (an `inline-block`'s, laid out at the origin) to
 /// where its line box put it.
 fn translate_op_list(ops: &mut [DrawOp], dx: i32, dy: i32) {
@@ -3356,7 +3372,13 @@ impl<'a> Ctx<'a> {
                 let saved = core::mem::take(&mut self.floats);
                 let op0 = self.ops.len();
                 let bottom = self.layout_box(el, &st, bx, bw, byy);
-                self.record_inspect(el, &st, bx, byy, bw, bottom - byy, op0);
+                // Der Kasten, den das Element MALT — nicht der Streifen, in dem
+                // es steht. Fuer eine Tabelle bleibt der Streifen die beste
+                // Naeherung: ihre Breite entsteht erst aus den Spalten.
+                let (rx, rw) = if matches!(st.display, Display::Flex | Display::InlineFlex | Display::Grid) {
+                    used_border_box(&st, bx, bw)
+                } else { (bx, bw) };
+                self.record_inspect(el, &st, rx, byy, rw, bottom - byy, op0);
                 self.floats = saved;
                 BoxOut { bottom, top_y: byy, open: Collapse::one(st.margin_bottom), through: false, box_x: bx, box_w: bw }
             } else {
@@ -5592,17 +5614,18 @@ family: st.family,
         // The open row group: its style, where its box and ops start, and the
         // bottom of its last row so far. Rows of one group are contiguous, so
         // the group closes when a row with a different one comes along.
-        let mut group: Option<(u32, ComputedStyle, SpecMark, i32)> = None;
+        let mut group: Option<(&'a Element, ComputedStyle, SpecMark, i32)> = None;
         let mut last_bottom = y0;
         for (ri, row) in rows.iter().enumerate() {
-            if let Some((seq, gst, part, top)) = group {
-                if row.group.map(|(g, _)| g.seq) != Some(seq) {
+            if let Some((gel, gst, part, top)) = group {
+                if row.group.map(|(g, _)| g.seq) != Some(gel.seq) {
                     self.finish_table_part(&gst, x, top, grid_w, last_bottom - top, part, grid_w as f32, Some((last_bottom - top) as f32));
+                    self.record_inspect(gel, &gst, x, top, grid_w, last_bottom - top, part.ops);
                     group = None;
                 }
             }
             if let (None, Some((g, gst))) = (group, row.group) {
-                group = Some((g.seq, gst, self.part_start(), y));
+                group = Some((g, gst, self.part_start(), y));
             }
             // Pass 1: place the cells + measure the tallest one. Their styles
             // were settled when the row was collected.
@@ -5775,29 +5798,41 @@ family: st.family,
                 // A relative cell takes its own box with it, so this has to run
                 // after the decoration was inserted — unlike the `vertical-align`
                 // slide above, which moves the content inside a cell that stays.
+                let (mut sdx, mut sdy) = (0, 0);
                 if cs.position == Position::Relative {
                     let (dx, dy) = rel_offset(cs, grid_w as f32, Some(row_h as f32));
                     if dx != 0 || dy != 0 {
                         self.shift_ops(&m0, dx, dy);
+                        (sdx, sdy) = (dx, dy);
                     }
                 }
                 if positioned_cell {
                     let (z, layer) = Self::stack_key(cs);
                     self.record_stack_entry(z, layer, m0.ops, self.ops.len(), m0.links, self.links.len());
                 }
+                // **Der Kasten der ZELLE.** Die Tabellenteile laufen auf einem
+                // eigenen Pfad, der nie an `record_inspect` vorbeikam:
+                // `getBoundingClientRect` gab an jedem `td`, `th`, `tr`,
+                // `thead`, `tbody` und `tfoot` GAR NICHTS zurueck — 37 der 38
+                // fehlenden Kaesten der Bootstrap-Galerie waren das.
+                if let Cell::Real(e) = row.cells[c].cell {
+                    self.record_inspect(e, cs, *cell_x + sdx, y + sdy, *cell_w, row_h, m0.ops);
+                }
             }
             self.cb = outer_cb;
             self.path.truncate(row_depth);
-            if let Some((_, rst)) = row.el {
+            if let Some((rel_el, rst)) = row.el {
                 self.finish_table_part(&rst, x, y, grid_w, row_h, row_part, grid_w as f32, Some(row_h as f32));
+                self.record_inspect(rel_el, &rst, x, y, grid_w, row_h, row_part.ops);
             }
             prev_row = cells.iter().map(|(cs, cx, cw, _, _)| (*cs, *cx, *cw)).collect();
             prev_row_el = row.el.map(|(e, s)| (e.seq, s));
             last_bottom = y + row_h;
             y = last_bottom + sy;
         }
-        if let Some((_, gst, part, top)) = group {
+        if let Some((gel, gst, part, top)) = group {
             self.finish_table_part(&gst, x, top, grid_w, last_bottom - top, part, grid_w as f32, Some((last_bottom - top) as f32));
+            self.record_inspect(gel, &gst, x, top, grid_w, last_bottom - top, part.ops);
         }
         // The trailing gap belongs BETWEEN rows, not after the last one — the
         // caller adds the outer one.
@@ -6098,7 +6133,32 @@ family: st.family,
                         *len = Len::Auto;
                     }
                 }
-                let w = self.control_box(el, &mst, kind, 0.0).w as f32;
+                // **Diese Funktion gibt eine INHALTSbreite** — jeder Aufrufer
+                // legt Polsterung und Rahmen selbst wieder drauf
+                // (`child_outer`, `flex_metrics`, `flex_column`). `control_box`
+                // liefert den fertigen RANDkasten, und ihn hier ungekuerzt
+                // zurueckzugeben zaehlte den Rahmen zweimal: eine
+                // `inline-flex`-Knopfgruppe mit drei Bootstrap-Knoepfen kam
+                // 285 statt 205 px breit heraus, je Knopf genau seine eigenen
+                // 26 px Polsterung und Rahmen zu viel.
+                // **Diese Funktion gibt eine INHALTSbreite** — jeder Aufrufer
+                // legt Polsterung und Rahmen selbst wieder drauf
+                // (`child_outer`, `flex_metrics`, `flex_column`). `control_box`
+                // liefert den fertigen RANDkasten; ihn ungekuerzt
+                // zurueckzugeben zaehlte den Rahmen zweimal, und eine
+                // `inline-flex`-Knopfgruppe mit drei Bootstrap-Knoepfen kam
+                // 285 statt 205 px breit heraus.
+                //
+                // Abgezogen wird GENAU der Rahmen, den der Aufrufer wieder
+                // addiert — der aus dem Stil, nicht der wirksame aus
+                // `control_box`. Die UA-Mindestpolsterung eines Knopfes ohne
+                // eigene Polsterung kennt der Aufrufer nicht; sie hier
+                // mitabzuziehen machte jedes Wikipedia-Steuerelement 12 px zu
+                // schmal (163 Kaesten schlechter, 54 besser — gemessen, bevor
+                // es stehen blieb).
+                let bw = self.control_box(el, &mst, kind, 0.0).w as f32;
+                let css_frame = mst.pad_left + mst.pad_right + mst.border_x();
+                let w = (bw - css_frame).max(0.0);
                 (w, w)
             }
         } else {
@@ -6690,7 +6750,11 @@ family: st.family,
             Display::Grid => self.layout_grid(el, st, x, w, y),
             _ => {
                 let b = self.layout_block(el, st, x, w, y);
-                self.record_inspect(el, st, x, y, w, b - y, f0);
+                // Auch hier der EIGENE Randkasten: ein Flex-Item bekommt seine
+                // Inhaltsbreite hereingereicht, und die aufzuzeichnen hiesse,
+                // `getBoundingClientRect` um die Polsterung zu belügen.
+                let (rx, rw) = used_border_box(st, x, w);
+                self.record_inspect(el, st, rx, y, rw, b - y, f0);
                 return b;
             }
         };
@@ -6699,7 +6763,9 @@ family: st.family,
         // `layout_box` kommt (Flex- und Rasterkinder, Tabellenzellen), hatte
         // gar keinen. `getBoundingClientRect` gab dort NULL zurueck, und eine
         // Null sieht aus wie eine Messung.
-        self.record_inspect(el, st, x, y, w, bottom - y, f0);
+        let (rx, rw) = if matches!(st.display, Display::Table) { (x, w) }
+                       else { used_border_box(st, x, w) };
+        self.record_inspect(el, st, rx, y, rw, bottom - y, f0);
         self.apply_filter(st, f0);
         bottom
     }
@@ -7853,7 +7919,12 @@ family: st.family,
         let mut ma_trail = alloc::vec![false; n];
         let mut h_nat = alloc::vec![0i32; n];
         for (i, (el, s)) in items.iter().enumerate() {
-            let pad_h = s.pad_left + s.pad_right;
+            // Polsterung UND Rahmen: `flex_item_style` legt beide wieder auf
+            // eine Inhaltsbreite drauf, also muss der Weg hierher beide
+            // abziehen. Nur die Polsterung abzuziehen machte jedes gerahmte
+            // Item um seinen Rahmen zu breit — dieselbe Zwillingsrechnung, die
+            // `flex_metrics` daneben schon richtig hat.
+            let pad_h = s.pad_left + s.pad_right + s.border_x();
             let to_content = |px: f32| if s.box_border { (px - pad_h).max(0.0) } else { px };
             let ml = s.margin_left.px(avail).unwrap_or(0.0);
             let mr = s.margin_right.px(avail).unwrap_or(0.0);
@@ -7867,7 +7938,14 @@ family: st.family,
             let mr_auto = matches!(s.margin_right, Len::Auto);
             let stretch = align == CrossAlign::Stretch && width_auto && !(ml_auto || mr_auto);
             let mut wd = if stretch {
-                (avail - ml - mr).max(1.0)
+                // **Gestreckt wird der AUSSENkasten** (css-flexbox-1 §9.4
+                // Schritt 11): der Randkasten des Items fuellt die Querachse,
+                // seine Inhaltsbreite ist um Polsterung und Rahmen kleiner.
+                // Ohne `to_content` bekam JEDES Kind eines gepolsterten
+                // Flex-Items die Breite des Elternrandkastens — auf der
+                // Bootstrap-Galerie 32 px zu viel an jedem Kartenrumpf, jedem
+                // Dialogrumpf und jedem Listeneintrag.
+                to_content((avail - ml - mr).max(1.0)).max(1.0)
             } else if let Len::Intrinsic(k) = s.width {
                 let (pref, min) = self.kid_intrinsic(el, s);
                 intrinsic_size(k, pref, min, (avail - ml - mr).max(0.0))
@@ -7882,8 +7960,12 @@ family: st.family,
             }
             wd = wd.clamp(1.0, avail.max(1.0));
             cross_w[i] = wd;
+            // Ausgerichtet wird der RANDkasten, nicht der Inhalt: `wd` ist
+            // eine Inhaltsbreite, also gehoert die Polsterung fuer jede
+            // Rechnung mit freiem Platz wieder drauf.
+            let bw = wd + pad_h;
             ix[i] = if ml_auto || mr_auto {
-                let free = (avail - ml - mr - wd).max(0.0);
+                let free = (avail - ml - mr - bw).max(0.0);
                 let lead = if ml_auto && mr_auto {
                     free / 2.0
                 } else if ml_auto {
@@ -7894,8 +7976,8 @@ family: st.family,
                 x + (ml + lead) as i32
             } else {
                 match align {
-                    CrossAlign::End => x + (avail - mr - wd) as i32,
-                    CrossAlign::Center => x + (ml + (avail - ml - mr - wd) / 2.0) as i32,
+                    CrossAlign::End => x + (avail - mr - bw) as i32,
+                    CrossAlign::Center => x + (ml + (avail - ml - mr - bw) / 2.0) as i32,
                     _ => x + ml as i32, // start / stretch
                 }
             };

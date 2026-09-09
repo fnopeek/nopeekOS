@@ -2059,6 +2059,22 @@ fn style_tree(i: &Interp) -> Option<alloc::rc::Rc<crate::dom::Dom>> {
 
 /// `node` ist der ARENA-INDEX des Elements — dieselbe Zahl, die `live_dom`
 /// als `seq` in den Baum schreibt.
+/// Die block-artige Entsprechung eines Anzeigewerts (css-display-3 §2.7).
+///
+/// `list-item` bleibt stehen — es ist schon block-artig, und Chromium meldet
+/// an einem `<li>` in einer Flex-Leiste auch `list-item`. Nachgemessen, nicht
+/// vermutet: die erste Fassung machte `block` daraus und lag an neunzehn
+/// Kaesten der Bootstrap-Galerie falsch.
+fn blockify(d: crate::style::Display) -> crate::style::Display {
+    use crate::style::Display as D;
+    match d {
+        D::Inline | D::InlineBlock | D::TableCell | D::TableCaption
+        | D::TableRow | D::TableRowGroup | D::TableHeaderGroup | D::TableFooterGroup => D::Block,
+        D::InlineFlex => D::Flex,
+        other => other,
+    }
+}
+
 fn computed_decls(i: &Interp, node: u32) -> Option<String> {
     let ctx = i.style_ctx.as_ref()?;
     let tree = style_tree(i)?;
@@ -2097,6 +2113,15 @@ fn computed_decls(i: &Interp, node: u32) -> Option<String> {
         let mut own = None;
         out = crate::style::resolve_in(&info, &parent, &ctx.theme, &ctx.sheet,
                                        &anc, &prev, count, ctx.viewport_w, &vars, &mut own);
+        // **Ein Flex- oder Rasterkind ist block-artig** (css-display-3 §2.7),
+        // und `layout_flex` rechnet auch genau damit. Ohne diese Zeile sagte
+        // `getComputedStyle` `inline` fuer einen Knopf, den das Layout als
+        // Block gemalt hat — auf der Bootstrap-Galerie 80 Kaesten, und jedes
+        // Mal zwei Wahrheiten zu derselben Frage.
+        if matches!(parent.display, crate::style::Display::Flex
+                    | crate::style::Display::InlineFlex | crate::style::Display::Grid) {
+            out.display = blockify(out.display);
+        }
         if let Some(m) = own { vars = m; }
         // `rem` rechnet gegen die WURZEL, und die steht erst fest, wenn sie
         // aufgeloest ist. Das Layout setzt das direkt nach dem Wurzellauf;
