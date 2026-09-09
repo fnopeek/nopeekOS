@@ -4682,6 +4682,44 @@ pub fn install(realm: &mut Realm) {
                 Some(v) => Value::Str(v.clone()), None => Value::str("") }))
         }, &fp);
     }
+    // HTMLCanvasElement
+    if let Some(p) = tag_protos.get("canvas") {
+        // `width`/`height` sind ZAHLEN und liegen als Attribut, mit den
+        // Vorgaben 300x150 aus der Spezifikation. Eine Seite liest sie, um
+        // ihre Zeichenflaeche zu bemessen.
+        accessor(p, "width",
+            |i, t, _| with_node!(i, t, |n| Ok(Value::Num(
+                n.attr("width").and_then(|v| v.trim().parse::<f64>().ok()).unwrap_or(300.0)))),
+            |i, t, a| {
+                let id = node_of(i, &t)?;
+                let v = i.to_number(a.first().unwrap_or(&Value::Undefined))?;
+                if let Some(d) = &mut i.doc { d.set_attr_at(id, "width", &alloc::format!("{}", v as i64)); }
+                Ok(Value::Undefined)
+            }, &fp);
+        accessor(p, "height",
+            |i, t, _| with_node!(i, t, |n| Ok(Value::Num(
+                n.attr("height").and_then(|v| v.trim().parse::<f64>().ok()).unwrap_or(150.0)))),
+            |i, t, a| {
+                let id = node_of(i, &t)?;
+                let v = i.to_number(a.first().unwrap_or(&Value::Undefined))?;
+                if let Some(d) = &mut i.doc { d.set_attr_at(id, "height", &alloc::format!("{}", v as i64)); }
+                Ok(Value::Undefined)
+            }, &fp);
+        // **`getContext` antwortet `null`, und das ist die Wahrheit.**
+        //
+        // Die Spezifikation sagt fuer einen Kontexttyp, den die Maschine nicht
+        // anbietet, ausdruecklich `null` — und beak hat keinen 2D-Kontext. Das
+        // ist etwas anderes als die Methode WEGZULASSEN: eine fehlende Methode
+        // wirft, und der Wurf beendet das ganze Skript. Auf sandbox.nopeek.ch
+        // stand `state.setCtx(state.canvas.getContext('2d'))` in `init()`,
+        // eine Zeile ueber `initEventListeners()` — der Wurf kostete jeden
+        // Knopf der Seite. Mit `null` laeuft `init()` durch, und der uebliche
+        // `if (ctx)` davor tut, was er soll.
+        //
+        // Ein echter 2D-Kontext ist ein eigenes Stueck Arbeit und steht in
+        // CONFORMANCE als benannte Luecke, nicht als Attrappe hier.
+        meth(p, "getContext", |_, _, _| Ok(Value::Null), 1, &fp);
+    }
     // HTMLInputElement
     if let Some(p) = tag_protos.get("input") {
         attr_prop!(p, fp, "type", "type");

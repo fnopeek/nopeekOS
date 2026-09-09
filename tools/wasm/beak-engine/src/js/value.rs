@@ -552,6 +552,15 @@ pub enum ObjKind {
     Arguments,
     Regex(Rc<crate::js::regexp::Regex>),
     Promise(Rc<RefCell<crate::js::promise::PData>>),
+    /// Der Namensraum eines Moduls, mit dessen Adresse.
+    ///
+    /// **Ein exotisches Objekt, kein gewoehnliches** (ES2024 §10.4.6): seine
+    /// Eigenschaften sind LEBENDE Bindungen, keine Werte. `export let canvas`
+    /// plus ein `setCanvas()` heisst, dass `ns.canvas` NACH dem Setzer den
+    /// neuen Wert zeigen muss — eine Momentaufnahme zeigt fuer immer `null`.
+    /// Die Eigenschaftstabelle bleibt trotzdem gefuellt: sie ist es, die
+    /// `Object.keys(ns)` und `for..in` beantwortet.
+    ModuleNs(Rc<str>),
     /// Der Speicher (`ArrayBuffer`) und die zwei Sichten darauf.
     Buffer(Rc<BufData>),
     TypedArray(Rc<TaData>),

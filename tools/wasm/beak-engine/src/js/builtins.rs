@@ -152,6 +152,9 @@ pub fn make_realm() -> Realm {
                     // Oben abgefangen; hier nur, damit der Uebersetzer die
                     // Vollstaendigkeit prueft statt sie zu erlauben.
                     ObjKind::Proxy(_) => "Object",
+                    // Ein Namensraum traegt sein Etikett als Eigenschaft und
+                    // ist oben schon beantwortet.
+                    ObjKind::ModuleNs(_) => "Module",
                     ObjKind::Buffer(_) => "ArrayBuffer",
                     // Eine Sicht traegt ihren Namen ueber `Symbol.toStringTag`
                     // auf `%TypedArray%.prototype`; hier kommt sie nur an,
@@ -3279,7 +3282,7 @@ pub fn make_realm() -> Realm {
     // Realm braucht, um die Prototypen daranzuhaengen.
     let ph = || new_obj(Some(object_proto.clone()));
     let _ = &ta_protos;
-    Realm { xpath_result_proto: object_proto.clone(), xpath_expr_proto: object_proto.clone(), xpath_eval_proto: object_proto.clone(),
+    Realm { intl_dtf_proto: object_proto.clone(), intl_nf_proto: object_proto.clone(), xpath_result_proto: object_proto.clone(), xpath_expr_proto: object_proto.clone(), xpath_eval_proto: object_proto.clone(),
         global, global_env, object_proto: object_proto.clone(), function_proto, array_proto,
             string_proto, number_proto, boolean_proto, error_proto, error_ctors,
             node_proto: ph(), element_proto: ph(), text_proto: ph(), document_proto: ph(),
