@@ -233,9 +233,16 @@ fn run_group(g: &Group, root: &Path, dump: Option<&str>, out: &mut Vec<Res>) {
         let ta = render(&html);
         let d = diff_fraction(&ta, &ra);
         if let Some(dir) = dump {
-            let stem = t.file_stem().unwrap().to_str().unwrap();
-            write_bmp(&Path::new(dir).join(format!("{stem}-test.bmp")), &ta, W, H);
-            write_bmp(&Path::new(dir).join(format!("{stem}-ref.bmp")), &ra, W, H);
+            // **Der ganze Dateiname, nicht der Stamm.** `…-001.html` und
+            // `…-001.xht` sind ZWEI Tests im selben Ordner, und mit dem Stamm
+            // schrieben sie dieselbe Datei: die zweite ueberschrieb die
+            // erste, und wer danach hinsah, verglich stillschweigend den
+            // falschen Test. Genau so ist mir eine Stunde an
+            // `margin-collapse-min-height-001` vergangen — die Bilder zeigten
+            // eine andere Seite, und nichts sagte es.
+            let name = t.file_name().unwrap().to_str().unwrap().replace('.', "_");
+            write_bmp(&Path::new(dir).join(format!("{name}-test.bmp")), &ta, W, H);
+            write_bmp(&Path::new(dir).join(format!("{name}-ref.bmp")), &ra, W, H);
         }
         let out_kind = if d <= PASS_MAX_DIFF { Outcome::Pass } else { Outcome::Fail };
         out.push(Res { rel: rel_of(t), out: out_kind, diff: d, note: String::new() });
