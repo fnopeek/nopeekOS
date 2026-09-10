@@ -55,8 +55,9 @@ See README.md for the full vision and phase planning.
 werden. Die letzten 24 `static mut`, die dem Dokument gehörten, sind in
 `struct Doc` gewandert (**47 → 23**, und die 23 sind vier Gruppen mit einem
 Grund, der eine zweite Seite überlebt: Abholpuffer · der BILDpuffer · der
-LAUF auf dem Stapel · Fenster und Werkzeug). Danach war `Vec<Box<Doc>>` +
-`ACTIVE` klein. **`Box`, weil `js_session()` ein `&'static mut` INS Dokument
+LAUF auf dem Stapel · Fenster und Werkzeug; die Tabs legen dann eine zurück,
+aus `DOC` wurden `TABS` + `ACTIVE`). Danach war `Vec<Box<Doc>>` + `ACTIVE`
+klein. **`Box`, weil `js_session()` ein `&'static mut` INS Dokument
 gibt** — ein umziehender Vec liesse es auf alten Speicher zeigen. Gefahren
 ist Entwurf (b): **ein lebendiger Motor, der Rest eingefroren** — ein
 Hintergrundtab ist Adresse, Verlauf, Rollstand und Titel, sonst nichts, und
