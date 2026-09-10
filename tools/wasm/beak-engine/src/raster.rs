@@ -68,6 +68,10 @@ pub struct Engine {
     css_img_budget: core::cell::Cell<usize>,
     /// Remaining decoded-BGRA budget for the current page (streaming decode).
     img_budget: core::cell::Cell<usize>,
+    /// Auswahl und Fundstellen — siehe `set_marks`.
+    #[allow(clippy::type_complexity)]
+    marks: RefCell<(Option<(crate::select::TextPos, crate::select::TextPos)>,
+                    Vec<(crate::select::TextPos, crate::select::TextPos)>)>,
     /// Decoded `<img>` pixels kept ACROSS navigations, keyed by the RESOLVED
     /// url and oldest-first.
     ///
@@ -287,6 +291,7 @@ impl Engine {
             css_images: RefCell::new(HashMap::new()),
             css_img_budget: core::cell::Cell::new(crate::image::CSS_BUDGET),
             img_budget: core::cell::Cell::new(crate::image::TOTAL_BUDGET),
+            marks: RefCell::new((None, Vec::new())),
             img_cache: RefCell::new(Vec::new()),
             img_cache_bytes: core::cell::Cell::new(0),
             css_cache: RefCell::new(Vec::new()),
@@ -735,6 +740,50 @@ impl Engine {
         ok
     }
 
+    // ── Text auf der Seite markieren ────────────────────────────────────
+    //
+    // Die Rechnung steht in `select.rs`; hier ist sie nur an die Schriften
+    // angeschlossen, denn ohne Gesicht gibt es keine Textbreite.
+
+    /// Der Ort im Text unter einem Punkt in Dokumentkoordinaten.
+    pub fn text_pos_at(&self, lay: &Layout, x: i32, y: i32) -> Option<crate::select::TextPos> {
+        crate::select::text_pos_at(&self.fonts.borrow(), lay, x, y)
+    }
+
+    /// Die Rechtecke, die einen Bereich hervorheben.
+    pub fn selection_rects(&self, lay: &Layout, a: crate::select::TextPos,
+                           b: crate::select::TextPos) -> Vec<(i32, i32, i32, i32)> {
+        crate::select::selection_rects(&self.fonts.borrow(), lay, a, b)
+    }
+
+    /// Was in diesem Bereich steht.
+    pub fn selected_text(&self, lay: &Layout, a: crate::select::TextPos,
+                         b: crate::select::TextPos) -> alloc::string::String {
+        crate::select::selected_text(lay, a, b)
+    }
+
+    /// Alle Fundstellen von `needle` auf der Seite.
+    pub fn find_all(&self, lay: &Layout, needle: &str)
+        -> Vec<(crate::select::TextPos, crate::select::TextPos)> {
+        crate::select::find_all(lay, needle)
+    }
+
+    /// Was hervorgehoben wird, wenn als naechstes gemalt wird.
+    ///
+    /// Der erste Bereich ist die AUSWAHL, die weiteren sind Fundstellen einer
+    /// Suche — beide werden gleich gemalt, nur in verschiedenen Farben, und
+    /// beide sind Zustand des Wirts, nicht des Layouts: ein Neuauslegen darf
+    /// eine Markierung nicht loeschen.
+    pub fn set_marks(&self, sel: Option<(crate::select::TextPos, crate::select::TextPos)>,
+                     found: Vec<(crate::select::TextPos, crate::select::TextPos)>) {
+        *self.marks.borrow_mut() = (sel, found);
+    }
+
+    /// Die Schriften, geliehen — nur fuer die Proben in `select.rs`, die
+    /// dieselbe Messung fahren muessen wie der Motor.
+    #[cfg(test)]
+    pub fn fonts_ref(&self) -> core::cell::Ref<'_, Fonts> { self.fonts.borrow() }
+
     pub fn web_font_count(&self) -> usize { self.fonts.borrow().web_count() }
 
     /// Wie oft der Baum seit dem Start durch Skripte ersetzt wurde.
@@ -1089,6 +1138,34 @@ impl Engine {
         self.paint(layout, w, y1 - y0, scroll_y + y0 as i32, band);
     }
 
+    /// Auswahl und Fundstellen, NACH allem anderen und halbdurchsichtig.
+    ///
+    /// Ein Browser malt die Auswahl deckend HINTER den Text und dreht dessen
+    /// Farbe um. Das ginge hier auch — aber es hiesse, den Anstrich in zwei
+    /// Durchgaenge zu teilen und jedem Textbefehl anzusehen, ob er markiert
+    /// ist. Ein durchscheinender Schleier darueber liest sich auf hellem wie
+    /// dunklem Grund und kostet einen Durchgang ueber ein paar Rechtecke.
+    /// Die ehrlichere Naeherung, und sie steht hier statt in einem Kommentar
+    /// weiter unten.
+    fn paint_marks(&self, layout: &Layout, wi: i32, hi: i32, scroll_y: i32, out: &mut [u8]) {
+        let marks = self.marks.borrow();
+        let (sel, found) = (&marks.0, &marks.1);
+        if sel.is_none() && found.is_empty() { return }
+        let fonts = self.fonts.borrow();
+        let mut wash = |a, b, color: Rgba| {
+            for (x, y, rw, rh) in crate::select::selection_rects(&fonts, layout, a, b) {
+                let vy = y - scroll_y;
+                if vy > hi || vy + rh < 0 { continue }
+                fill(out, wi, hi, x, vy, rw, rh, color);
+            }
+        };
+        // Fundstellen zuerst, damit die Auswahl darueber liegt: wer waehrend
+        // einer Suche etwas markiert, soll seine Markierung sehen.
+        let hit = Rgba { c: self.theme.link, a: 70 };
+        for (a, b) in found { wash(*a, *b, hit); }
+        if let Some((a, b)) = sel { wash(*a, *b, Rgba { c: self.theme.link, a: 110 }); }
+    }
+
     pub fn paint(&self, layout: &Layout, w: u32, h: u32, scroll_y: i32, out: &mut [u8]) {
         let (wi, hi) = (w as i32, h as i32);
         // Canvas = the propagated body background (falls back to theme bg).
@@ -1156,6 +1233,7 @@ impl Engine {
                 }
             }
         }
+        self.paint_marks(layout, wi, hi, scroll_y, out);
     }
 
     /// The box an `<img>` shows while its pixels are missing: a thin frame

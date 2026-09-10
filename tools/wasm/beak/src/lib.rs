@@ -155,6 +155,7 @@ unsafe extern "C" {
     /// HTTP/2 where the host offers it. Same handle discipline as
     /// `npk_http_begin`.
     fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_clipboard_set(ptr: i32, len: i32) -> i32;
     fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
     fn npk_http_begin_many(urls_ptr: i32, urls_len: i32, out_max: i32) -> i32;
     /// Wie oben, aber mit einer Keks-Zeile JE ADRESSE (durch `\n` getrennt,
@@ -356,6 +357,11 @@ struct Doc {
     content_gen: u32,
     /// Wie weit die Seite gerollt ist.
     scroll_y: i32,
+    /// Wo eine Textmarkierung begonnen hat, solange die Taste unten ist.
+    sel_anchor: Option<beak_engine::select::TextPos>,
+    /// Die Markierung auf der SEITE — nicht in der Adresszeile, die gehoert
+    /// dem Compositor.
+    sel: Option<(beak_engine::select::TextPos, beak_engine::select::TextPos)>,
 
     // ── Die Teilabrufe des Ladevorgangs ─────────────────────────────────
     // Blaetter, Skripte, Module: jede Stufe fuehrt Buch darueber, was sie
@@ -384,7 +390,7 @@ impl Doc {
             url: String::new(), edit: String::new(), hist: Vec::new(), hist_pos: 0,
             nav_job: -1, nav_stage: NavStage::Doc, nav_url: None, nav_push_hist: false,
             nav_stage_ms: 0, nav_gen: 0, nav_start_ms: 0, nav_reported: true,
-            content_gen: 0, scroll_y: 0,
+            content_gen: 0, scroll_y: 0, sel_anchor: None, sel: None,
             nav_css_count: 0, nav_scripts: None, js: None, nav_js_count: 0, nav_mod_entries: None, nav_mod_want: None, nav_mod_rounds: 0, nav_css_urls: None, nav_css_parts: None, nav_css_want: None, nav_css_rounds: 0, nav_sheet_nodes: None, nav_sheet_rounds: 0,
         }
     }
@@ -608,6 +614,11 @@ fn set_url(s: &str) {
     let d = doc_mut();
     d.url.clear();
     d.url.push_str(clip(s, URL_CAP));
+    // Eine Markierung gehoert dem Text, den sie markiert. Die neue Seite hat
+    // andere Textbefehle an denselben Stellen — die alten Orte zeigten dort
+    // auf irgendetwas.
+    d.sel = None;
+    d.sel_anchor = None;
     // Die Zeile zeigt, wo man IST — bis jemand hineintippt.
     set_edit(s);
     unsafe {
@@ -2923,6 +2934,9 @@ fn arm_script_budget() {
 /// server's rate limit, and wasted MAX_IMAGES slots that real images needed.
 fn begin_images(engine: &mut Engine) -> Vec<String> {
     unsafe { core::ptr::addr_of_mut!(IMAGES_DIRTY).write(false) };
+    // Der Motor haelt die Hervorhebungen; eine neue Seite hat keine.
+    // `set_url` raeumt sie im Dokument weg, hier faellt der Anstrich nach.
+    engine.set_marks(None, Vec::new());
     engine.images_begin();
     let mut pending: Vec<String> = Vec::new();
     // The SAME viewport width layout uses: `<picture>`/`srcset` picks its
@@ -4384,9 +4398,44 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
                         }
                         return true;
                     }
+                    // **Nichts anderes wollte diesen Klick — also faengt hier
+                    // eine Markierung an.** Sie kommt ZULETZT, damit sie
+                    // keinem Link, keinem Steuerelement und keinem
+                    // Seitenskript in die Quere kommt.
+                    //
+                    // Der Preis, und er ist benannt: eine Markierung, die AUF
+                    // einem Link beginnt, gibt es nicht — der Klick
+                    // navigiert vorher. Ein Browser folgt dem Link erst beim
+                    // LOSLASSEN und kann deshalb beides; das umzustellen ist
+                    // ein Eingriff in den Klickweg und gehoert nicht in
+                    // denselben Schritt wie das Markieren selbst.
+                    let lay = &cache.as_ref().unwrap().0;
+                    let d = doc_mut();
+                    let was = d.sel.take();
+                    d.sel_anchor = engine.text_pos_at(lay, cx, cy);
+                    engine.set_marks(None, Vec::new());
+                    if was.is_some() { mark_dirty(); }
+                    return was.is_some();
                 }
             }
             false
+        }
+        // Loslassen: die Markierung steht, das Ziehen ist vorbei.
+        Event::MouseButton { button: MouseButton::Left, down: false, .. } => {
+            doc_mut().sel_anchor = None;
+            false
+        }
+        // **Strg+C auf der Seite.** Der Compositor faengt die Tastenfolge nur
+        // ab, wenn eines SEINER Textfelder den Fokus hat (`handle_input_key`
+        // steigt sonst sofort aus) — auf der Leinwand kommt sie hier an.
+        Event::Clipboard(ClipKind::Copy) => {
+            let Some((a, b)) = doc().sel else { return false };
+            let Some((lay, _, _, _)) = cache.as_ref() else { return false };
+            let text = engine.selected_text(lay, a, b);
+            if text.is_empty() { return false }
+            let n = unsafe { npk_clipboard_set(text.as_ptr() as i32, text.len() as i32) };
+            log(&alloc::format!("[beak] kopiert: {} Zeichen", if n < 0 { 0 } else { n }));
+            true
         }
         // `:hover`. A series of ever-cheaper ways to answer "nothing to do":
         // no hover rules on the page at all, then no usable cached layout,
@@ -4395,6 +4444,32 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
         // — measured on Wikipedia at 0.16 ms against 24 ms for a layout — and
         // only otherwise by laying the page out again.
         Event::MouseMove { x, y } => {
+            // **Ziehen kommt VOR dem Hover.** Wer markiert, will keine
+            // `:hover`-Rechnung dazwischen — und die frueheste Absage dieses
+            // Zweigs („die Seite hat gar keine Hover-Regeln") wuerde die
+            // Markierung sonst auf jeder gewoehnlichen Seite verschlucken.
+            if doc().sel_anchor.is_some() {
+                if let Some((rx, ry, w, h)) = canvas_rect() {
+                    let (cx, cy) = (x - rx, y - ry + scroll_y());
+                    let fresh = matches!(cache.as_ref(),
+                        Some((_, cw, ch, cg)) if *cw == w && *ch == h && *cg == content_gen());
+                    if fresh {
+                        let lay = &cache.as_ref().unwrap().0;
+                        let a = doc().sel_anchor.unwrap();
+                        if let Some(b) = engine.text_pos_at(lay, cx, cy) {
+                            // Ein Punkt ist keine Markierung — sonst blinkt
+                            // bei jedem Klick ein Schleier von einem Pixel auf.
+                            let sel = (a != b).then_some((a, b));
+                            if doc().sel != sel {
+                                doc_mut().sel = sel;
+                                engine.set_marks(sel, Vec::new());
+                                mark_dirty();
+                            }
+                        }
+                    }
+                }
+                return true;
+            }
             if !engine.page_has_hover() {
                 return false;
             }

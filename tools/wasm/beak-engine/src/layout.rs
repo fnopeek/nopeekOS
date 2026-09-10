@@ -1722,6 +1722,19 @@ pub(crate) fn char_spacing(c: char, sp: (f32, f32)) -> f32 {
     sp.0 + if ws { sp.1 } else { 0.0 }
 }
 
+/// `measure_sp` fuer `select.rs` — dieselbe Rechnung, nicht eine zweite.
+///
+/// Die Textauswahl misst Praefixe, um vom Pixel aufs Byte zu kommen; ein
+/// eigener Messweg dort waere garantiert um Bruchteile daneben, und genau
+/// diese Bruchteile sind der Unterschied zwischen „das Zeichen unter dem
+/// Zeiger" und dem daneben ([[feedback_intrinsic_shared_path]]).
+pub fn measure_sp_pub(font: Face, s: &str, size: f32, sp: (f32, f32)) -> f32 {
+    measure_sp(font, s, size, sp)
+}
+
+/// `line_gap` fuer `select.rs` — aus demselben Grund.
+pub fn line_gap_pub(font: Face, size: f32) -> f32 { line_gap(font, size) }
+
 fn measure(font: Face, s: &str, size: f32) -> f32 {
     // The fast path is the one that runs: every embedded face is subsetted and
     // carries no GSUB, so a page in the body font never allocates here.

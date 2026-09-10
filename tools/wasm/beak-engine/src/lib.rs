@@ -33,6 +33,7 @@ pub mod woff2;
 pub mod layout;
 pub mod picture;
 pub mod raster;
+pub mod select;
 pub mod site;
 /// **Die Reichweitenregel des KERNELS, hier nur zum Fahren.**
 ///
