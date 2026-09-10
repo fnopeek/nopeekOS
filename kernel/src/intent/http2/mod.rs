@@ -287,10 +287,15 @@ impl Http2 {
     /// `accept_gzip` asks for the transfer compressed. The caller unpacks —
     /// see `intent::gzip`. Measured 4,1x-9,9x fewer bytes per page on the
     /// browser's target corpus (`docs/plan/JS_SCOPE_CONTENT_WEB.md` §8).
+    /// `cookies` ist POSITIONELL zu `paths`: Eintrag `i` ist die
+    /// `Cookie`-Kopfzeile fuer `paths[i]`, oder leer. Positionell und nicht
+    /// „einer je Host", weil ein Keks einen `Path` haben darf — zwei
+    /// Ressourcen desselben Hosts bekommen dann verschiedene.
     pub fn get_all(
         &mut self,
         authority: &str,
         paths: &[&str],
+        cookies: &[&str],
         user_agent: &str,
         accept_gzip: bool,
     ) -> Result<Vec<Result<Response, Http2Error>>, Http2Error> {
@@ -299,7 +304,7 @@ impl Http2 {
         }
         let mut streams: Vec<Stream> = Vec::with_capacity(paths.len());
         let mut out = Vec::new();
-        for path in paths {
+        for (pi, path) in paths.iter().enumerate() {
             let id = self.next_id;
             self.next_id += 2;
             let mut fields: Vec<(&str, &str)> = alloc::vec![
@@ -312,6 +317,13 @@ impl Http2 {
             ];
             if accept_gzip {
                 fields.push(("accept-encoding", "gzip"));
+            }
+            // **Der Keks gehoert auch an die Unterressource.** Ohne ihn kam
+            // das Dokument angemeldet und jedes Bild darin anonym zurueck —
+            // auf einer Seite hinter einer Anmeldung sah das aus wie ein
+            // Bildfehler und war keiner.
+            if let Some(c) = cookies.get(pi) {
+                if !c.is_empty() { fields.push(("cookie", c)); }
             }
             let block = hpack::encode(&fields);
             // A block longer than one frame would need CONTINUATION on send.

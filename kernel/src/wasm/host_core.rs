@@ -2426,9 +2426,36 @@ pub(crate) fn npk_http_begin(
 
 /// Start a batch. Returns a handle (>= 1) or -1; the answer comes back
 /// through `npk_http_take_many`.
+///
+/// Ohne Kopfzeilen — die Fassung, die vor 0.333.0 die einzige war. Sie
+/// bleibt, damit ein Modul, das gegen sie gebaut wurde, weiter LAEUFT: eine
+/// geaenderte Signatur waere ein Bindefehler, und ein Bindefehler heisst
+/// „die App startet gar nicht", nicht „ein Bild fehlt".
 pub(crate) fn npk_http_begin_many(
     mem: &mut [u8], ctx: &mut HostState,
     urls_ptr: i32, urls_len: i32, out_max: i32,
+) -> i32 {
+    npk_http_begin_many_hdr(mem, ctx, urls_ptr, urls_len, 0, 0, out_max)
+}
+
+/// Wie [`npk_http_begin_many`], aber mit einer KEKSZEILE JE ADRESSE.
+///
+/// **Warum es das geben muss.** Bis hierher trug nur der Weg fuer eine
+/// einzelne Anfrage (`Work::One`) Kopfzeilen; der Stapelweg trug keine. Das
+/// Dokument kam also angemeldet zurueck und JEDE Unterressource darin —
+/// Bilder, Blaetter, Skripte — anonym. Auf einer Seite hinter einer
+/// Anmeldung sieht das aus wie ein Bildfehler und ist keiner.
+///
+/// `hdrs` ist ein Block aus Zeilen, POSITIONELL zu `urls`: Zeile `i` ist der
+/// Wert der `Cookie`-Kopfzeile fuer `urls[i]`, oder leer. Leere Zeilen
+/// werden NICHT weggefiltert — sonst verrutschen die Positionen, und ein
+/// Keks landete an der falschen Adresse.
+///
+/// Das Keksglas gehoert dem Browser, nicht dem Kernel: hier wird nur
+/// weitergereicht und geprueft.
+pub(crate) fn npk_http_begin_many_hdr(
+    mem: &mut [u8], ctx: &mut HostState,
+    urls_ptr: i32, urls_len: i32, hdrs_ptr: i32, hdrs_len: i32, out_max: i32,
 ) -> i32 {
     let cap_id = ctx.cap_id;
     if let Err(e) = capability::check_global(&cap_id, capability::Rights::NET) {
@@ -2447,7 +2474,32 @@ pub(crate) fn npk_http_begin_many(
         .filter(|s| !s.is_empty())
         .map(String::from)
         .collect();
-    match crate::intent::fetch::begin_many(ctx.pid, ctx.core_id, urls, out_max as usize,
+    // Die Kekse: eine Zeile je Adresse, in derselben Reihenfolge. Geprueft
+    // wird jede mit demselben Massstab wie eine Kopfzeile am
+    // Einzelanfrage-Weg — eine, die nicht besteht, wird zu KEINEM Keks statt
+    // zu einer abgelehnten Anfrage: ein fehlender Keks ist ein Bild, das
+    // anonym kommt, eine Absage waere gar kein Bild.
+    let cookies: alloc::vec::Vec<String> = if hdrs_len > 0 {
+        match read_str(mem, hdrs_ptr, hdrs_len) {
+            Some(blob) => blob
+                .split('\n')
+                .map(|line| {
+                    let v = line.trim();
+                    if v.is_empty() { return String::new() }
+                    if crate::intent::http::header_line_is_safe(&alloc::format!("cookie: {v}")) {
+                        String::from(v)
+                    } else {
+                        kprintln!("[npk] WASM: npk_http_begin_many dropped an unsafe cookie line");
+                        String::new()
+                    }
+                })
+                .collect(),
+            None => return -1,
+        }
+    } else {
+        alloc::vec::Vec::new()
+    };
+    match crate::intent::fetch::begin_many(ctx.pid, ctx.core_id, urls, cookies, out_max as usize,
                                           Some(ctx.net_reach)) {
         Ok(h) => h,
         Err(e) => {
@@ -2566,7 +2618,7 @@ pub(crate) fn npk_http_request_many(mem: &mut [u8], ctx: &mut HostState, urls_pt
     if (lens_max as usize) < urls.len() * 4 { return -1; }
 
     let total_cap = out_max as usize;
-    let bodies = crate::intent::http::https_get_many(&urls, total_cap, Some(ctx.net_reach));
+    let bodies = crate::intent::http::https_get_many(&urls, &[], total_cap, Some(ctx.net_reach));
 
     let mut blobs: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     let mut lens: alloc::vec::Vec<u8> = alloc::vec::Vec::new();

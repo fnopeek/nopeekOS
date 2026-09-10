@@ -4,7 +4,7 @@
 //! Scancode Set 1 with US and DE_CH layouts.
 //! USB keyboards work via BIOS legacy PS/2 emulation.
 
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering, AtomicU32};
 use crate::serial::{inb, outb};
 
 const DATA_PORT: u16 = 0x60;
@@ -308,6 +308,9 @@ fn poll_ps2() -> Option<u8> {
                 }
                 continue;
             }
+            // Wartet noch die zweite Haelfte eines Zeichens? Die zuerst —
+            // vor dem naechsten Scancode, sonst geht sie verloren.
+            if let Some(b) = take_tail() { return Some(b) }
             let scancode = inb(DATA_PORT);
             if let Some(c) = decode_scancode(scancode) {
                 return Some(c);
@@ -351,6 +354,7 @@ pub fn poll_ps2_irq() {
             let scancode = inb(DATA_PORT);
             if let Some(c) = decode_scancode(scancode) {
                 push_key(c);
+                while let Some(b) = take_tail() { push_key(b) }
             }
         }
     }
@@ -446,7 +450,54 @@ fn wait_write() {
 }
 
 /// Decode a raw scancode into an ASCII character (handles modifiers + extended).
+/// Die Bytes einer UTF-8-Folge, die noch abgeholt werden wollen.
+///
+/// **Die Tastaturleitung traegt ein BYTE je Abruf, und `ü` sind zwei.** Statt
+/// die ganze Kette (`decode_scancode` → `push_key` → `KeyCode::Char(u8)` →
+/// jede App) auf Zeichen umzustellen, was jede ausgelieferte App zu einem
+/// Bindefehler machen wuerde, bleibt sie byteweise: das erste Byte kommt
+/// sofort, der Rest liegt hier und wird VOR dem naechsten Scancode abgeholt.
+/// Fuer ASCII ist der Puffer immer leer und der Weg genau der von vorher.
+///
+/// Gepackt: `len` in Bit 24..31, danach bis zu drei Bytes, das naechste ganz
+/// unten.
+static UTF8_TAIL: AtomicU32 = AtomicU32::new(0);
+
+fn stash_tail(bytes: &[u8]) {
+    let mut v = 0u32;
+    for (i, b) in bytes.iter().take(3).enumerate() {
+        v |= (*b as u32) << (8 * i);
+    }
+    v |= (bytes.len().min(3) as u32) << 24;
+    UTF8_TAIL.store(v, Ordering::Release);
+}
+
+/// Das naechste wartende Byte, oder `None`. **Muss vor dem Lesen eines neuen
+/// Scancodes gerufen werden** — sonst geht die zweite Haelfte eines Zeichens
+/// hinter dem naechsten Tastendruck verloren.
+fn take_tail() -> Option<u8> {
+    let v = UTF8_TAIL.load(Ordering::Acquire);
+    let len = (v >> 24) as usize;
+    if len == 0 { return None }
+    let b = (v & 0xFF) as u8;
+    let rest = (v >> 8) & 0xFF_FFFF;
+    UTF8_TAIL.store(rest | (((len - 1) as u32) << 24), Ordering::Release);
+    Some(b)
+}
+
+/// Scancode → erstes Byte des Zeichens; der Rest wandert in `UTF8_TAIL`.
 fn decode_scancode(scancode: u8) -> Option<u8> {
+    let c = decode_scancode_char(scancode)?;
+    if (c as u32) < 0x80 {
+        return Some(c as u8);   // ASCII: genau der Weg von frueher
+    }
+    let mut buf = [0u8; 4];
+    let enc = c.encode_utf8(&mut buf).as_bytes();
+    stash_tail(&enc[1..]);
+    Some(enc[0])
+}
+
+fn decode_scancode_char(scancode: u8) -> Option<char> {
     // Extended prefix: set flag, wait for next scancode
     if scancode == 0xE0 {
         EXTENDED.store(true, Ordering::Relaxed);
@@ -535,7 +586,7 @@ fn decode_scancode(scancode: u8) -> Option<u8> {
         // scancodes and reaches this point. (The 0x03 is also buffered for the
         // normal read path.)
         crate::intent::request_cancel();
-        return Some(0x03);
+        return Some('\u{3}');
     }
 
     let layout = crate::config::get("keyboard");
@@ -558,11 +609,15 @@ pub fn irq_handler() {
     let scancode = unsafe { inb(DATA_PORT) };
     if let Some(c) = decode_scancode(scancode) {
         push_key(c);
+        // Ein Zeichen ausserhalb von ASCII besteht aus mehreren Bytes; sie
+        // muessen DIREKT hintereinander in den Ring, sonst steht ein
+        // Tastendruck zwischen den Haelften eines Buchstabens.
+        while let Some(b) = take_tail() { push_key(b) }
     }
 }
 
 /// Scancode Set 1 → ASCII (US layout)
-fn scancode_to_char_us(code: u8, shift: bool, caps: bool) -> Option<u8> {
+fn scancode_to_char_us(code: u8, shift: bool, caps: bool) -> Option<char> {
     #[rustfmt::skip]
     const NORMAL: [u8; 58] = [
         0,   0x1B, b'1', b'2', b'3', b'4', b'5', b'6',  // 0x00-0x07
@@ -589,74 +644,93 @@ fn scancode_to_char_us(code: u8, shift: bool, caps: bool) -> Option<u8> {
 
     if code as usize >= NORMAL.len() { return None; }
 
+    // Die US-Tabelle bleibt Bytes — sie IST ASCII, jedes Zeichen darin passt
+    // in eins. Nur die Rueckgabe ist ein Zeichen, damit beide Layouts
+    // dieselbe Form haben.
     let ch = if shift { SHIFTED[code as usize] } else { NORMAL[code as usize] };
     if ch == 0 { return None; }
 
-    if caps && !shift && ch >= b'a' && ch <= b'z' { return Some(ch - 32); }
-    if caps && shift && ch >= b'A' && ch <= b'Z' { return Some(ch + 32); }
+    if caps && !shift && ch.is_ascii_lowercase() { return Some((ch - 32) as char); }
+    if caps && shift && ch.is_ascii_uppercase() { return Some((ch + 32) as char); }
 
-    Some(ch)
+    Some(ch as char)
 }
 
 /// AltGr characters for Swiss German (de_CH) keyboard layout.
 /// PS/2 Scancode Set 1 → ASCII.
-fn altgr_char_de(code: u8) -> Option<u8> {
+fn altgr_char_de(code: u8) -> Option<char> {
     match code {
-        0x03 => Some(b'@'),   // AltGr+2
-        0x04 => Some(b'#'),   // AltGr+3
-        0x08 => Some(b'|'),   // AltGr+7
-        0x0D => Some(b'~'),   // AltGr+^
-        0x1A => Some(b'['),   // AltGr+ü
-        0x1B => Some(b']'),   // AltGr+¨
-        0x28 => Some(b'{'),   // AltGr+ä
-        0x2B => Some(b'}'),   // AltGr+$
-        0x56 => Some(b'\\'),  // AltGr+<
+        0x03 => Some('@'),   // AltGr+2
+        0x04 => Some('#'),   // AltGr+3
+        0x08 => Some('|'),   // AltGr+7
+        0x0D => Some('~'),   // AltGr+^
+        0x12 => Some('€'),   // AltGr+e — xkb: AD03 dritte Ebene EuroSign
+        0x1A => Some('['),   // AltGr+ü
+        0x1B => Some(']'),   // AltGr+¨
+        0x28 => Some('{'),   // AltGr+ä
+        0x2B => Some('}'),   // AltGr+$
+        0x56 => Some('\\'),  // AltGr+<
         _ => None,
     }
 }
 
 /// Scancode Set 1 → ASCII (Swiss German / DE_CH layout)
-fn scancode_to_char_de(code: u8, shift: bool, caps: bool) -> Option<u8> {
+fn scancode_to_char_de(code: u8, shift: bool, caps: bool) -> Option<char> {
     // ISO-Extra key (102-key layout, left of Z): scancode 0x56.
     // Plain → `<`, Shift → `>`, AltGr → `\` (latter handled by
     // altgr_char_de above). The key is OUT OF RANGE of the layout
     // arrays below (which only cover 0x00–0x39), so it needs to
     // be special-cased before the array index.
     if code == 0x56 {
-        return Some(if shift { b'>' } else { b'<' });
+        return Some(if shift { '>' } else { '<' });
     }
 
+    // **Die Tabellen stammen aus `/usr/share/X11/xkb/symbols/ch`,
+    // `xkb_symbols "basic"` (German (Switzerland)) — nicht aus dem
+    // Gedaechtnis.** Der Unterschied ist keiner, den man raten kann: auf dem
+    // DEUTSCHschweizer Layout liegt `ü` UNGESCHIFTET und `è` auf Shift, beim
+    // franzoesischschweizerischen genau andersherum (dieselbe Datei, Block
+    // `fr`, ueberschreibt die drei Tasten).
+    //
+    // Bis hierher stand in beiden Tabellen die Zweitbelegung dieser Tasten:
+    // `[ ] ; '` — also genau die Zeichen, die AltGr ohnehin liefert. Ein
+    // Umlaut liess sich damit auf dieser Maschine ueberhaupt nicht tippen,
+    // und bei `ç` stand woertlich `non-ASCII→0`.
     #[rustfmt::skip]
-    const NORMAL: [u8; 58] = [
-        0,   0x1B, b'1', b'2', b'3', b'4', b'5', b'6',  // 0x00-0x07
-        b'7', b'8', b'9', b'0', b'\'',b'^', 0x08, b'\t', // 0x08-0x0F
-        b'q', b'w', b'e', b'r', b't', b'z', b'u', b'i',  // 0x10-0x17  (z/y swapped)
-        b'o', b'p', b'[', b']', b'\n', 0,   b'a', b's',  // 0x18-0x1F
-        b'd', b'f', b'g', b'h', b'j', b'k', b'l', b';',  // 0x20-0x27
-        b'\'',0,   0,   b'$', b'y', b'x', b'c', b'v',   // 0x28-0x2F  (z/y swapped; 0x29 = §/° → 0)
-        b'b', b'n', b'm', b',', b'.', b'-', 0,   b'*',   // 0x30-0x37
-        0,   b' ',                                         // 0x38-0x39
+    const NORMAL: [char; 58] = [
+        '\0','\u{1B}','1','2','3','4','5','6',        // 0x00-0x07
+        '7', '8', '9', '0', '\'','^','\u{8}','\t',      // 0x08-0x0F  0x0D = ^ (Totaste, hier direkt)
+        'q', 'w', 'e', 'r', 't', 'z', 'u', 'i',     // 0x10-0x17  (z/y getauscht)
+        'o', 'p', 'ü', '¨', '\n','\0','a', 's',      // 0x18-0x1F  AD11=ü, AD12=¨
+        'd', 'f', 'g', 'h', 'j', 'k', 'l', 'ö',     // 0x20-0x27  AC10=ö
+        'ä', '§', '\0','$', 'y', 'x', 'c', 'v',      // 0x28-0x2F  AC11=ä, TLDE=§
+        'b', 'n', 'm', ',', '.', '-', '\0','*',      // 0x30-0x37
+        '\0',' ',                                    // 0x38-0x39
     ];
 
     #[rustfmt::skip]
-    const SHIFTED: [u8; 58] = [
-        0,   0x1B, b'+', b'"', b'*', 0,    b'%', b'&',  // Shift+4=ç (non-ASCII→0)
-        b'/', b'(', b')', b'=', b'?', b'`', 0x08, b'\t', // Shift+7=/
-        b'Q', b'W', b'E', b'R', b'T', b'Z', b'U', b'I',
-        b'O', b'P', b'{', b'}', b'\n', 0,   b'A', b'S',
-        b'D', b'F', b'G', b'H', b'J', b'K', b'L', b':',
-        b'"', 0,   0,   b'!', b'Y', b'X', b'C', b'V',  // Shift+§/° → 0
-        b'B', b'N', b'M', b';', b':', b'_', 0,   b'*',
-        0,   b' ',
+    const SHIFTED: [char; 58] = [
+        '\0','\u{1B}','+','"', '*', 'ç','%', '&',     // 0x00-0x07  AE04 Shift = ç
+        '/', '(', ')', '=', '?', '`','\u{8}','\t',      // 0x08-0x0F
+        'Q', 'W', 'E', 'R', 'T', 'Z', 'U', 'I',
+        'O', 'P', 'è', '!', '\n','\0','A', 'S',       // AD11 Shift = è, AD12 Shift = !
+        'D', 'F', 'G', 'H', 'J', 'K', 'L', 'é',     // AC10 Shift = é
+        'à', '°', '\0','£', 'Y', 'X', 'C', 'V',      // AC11 Shift = à, TLDE Shift = °, BKSL Shift = £
+        'B', 'N', 'M', ';', ':', '_', '\0','*',
+        '\0',' ',
     ];
 
     if code as usize >= NORMAL.len() { return None; }
 
     let ch = if shift { SHIFTED[code as usize] } else { NORMAL[code as usize] };
-    if ch == 0 { return None; }
+    if ch == '\0' { return None; }
 
-    if caps && !shift && ch >= b'a' && ch <= b'z' { return Some(ch - 32); }
-    if caps && shift && ch >= b'A' && ch <= b'Z' { return Some(ch + 32); }
+    // Feststelltaste kehrt die Schreibung um — und zwar UNICODE-weise, sonst
+    // bliebe `ü` als einziges Zeichen der Tabelle davon unberuehrt.
+    if caps && ch.is_alphabetic() {
+        let flipped = if shift { ch.to_lowercase().next() } else { ch.to_uppercase().next() };
+        if let Some(f) = flipped { return Some(f) }
+    }
 
     Some(ch)
 }

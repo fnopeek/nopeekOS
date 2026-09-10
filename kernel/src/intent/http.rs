@@ -1446,7 +1446,11 @@ fn h2_connect(host: &str) -> Option<Http2> {
 /// counts as a failure rather than returning the error page's body — the
 /// caller is loading images and stylesheets, and decoding an HTML error page
 /// as a PNG helps nobody.
-pub fn https_get_many(urls: &[String], max_size: usize, from_reach: Option<Reach>)
+/// `cookies` ist POSITIONELL zu `urls`: Eintrag `i` ist die fertige
+/// `Cookie`-Zeile fuer `urls[i]` (ohne den Namen, nur der Wert), oder leer.
+/// Wer sie fuellt, ist der Browser — der Kernel hat kein Keksglas.
+pub fn https_get_many(urls: &[String], cookies: &[String], max_size: usize,
+                      from_reach: Option<Reach>)
     -> alloc::vec::Vec<Option<alloc::vec::Vec<u8>>> {
     let mut out: alloc::vec::Vec<Option<alloc::vec::Vec<u8>>> = urls.iter().map(|_| None).collect();
 
@@ -1487,7 +1491,10 @@ pub fn https_get_many(urls: &[String], max_size: usize, from_reach: Option<Reach
             let t_conn = crate::interrupts::ticks();
             let paths: alloc::vec::Vec<&str> =
                 idxs.iter().map(|&i| parsed[i].as_ref().unwrap().1.as_str()).collect();
-            match conn.get_all(host, &paths, USER_AGENT, true) {
+            // Dieselbe Reihenfolge wie `paths` — beide laufen ueber `idxs`.
+            let cks: alloc::vec::Vec<&str> = idxs.iter()
+                .map(|&i| cookies.get(i).map(|s| s.as_str()).unwrap_or("")).collect();
+            match conn.get_all(host, &paths, &cks, USER_AGENT, true) {
                 Ok(results) => {
                     let mut ok = 0usize;
                     let (mut gz_raw, mut gz_out) = (0usize, 0usize);
@@ -1571,8 +1578,17 @@ pub fn https_get_many(urls: &[String], max_size: usize, from_reach: Option<Reach
             // less throttled than a direct one.
             // Der h1-Rueckfall folgt Weiterleitungen, also traegt er die
             // Reichweite mit — sonst waere er das Loch neben der Tuer.
+            // Der h1-Rueckfall traegt denselben Keks. Er ist der Weg, den
+            // eine Weiterleitung nimmt, und eine weitergeleitete
+            // Unterressource ist nicht weniger angemeldet als eine direkte.
+            let ck = cookies.get(i).map(|s| s.as_str()).unwrap_or("");
+            let hdr: alloc::vec::Vec<String> = if ck.is_empty() {
+                alloc::vec::Vec::new()
+            } else {
+                alloc::vec![alloc::format!("cookie: {ck}")]
+            };
             let req = HttpRequest { accept_gzip: *tls, try_h2: *tls, plain: !*tls,
-                                    from_reach, ..HttpRequest::default() };
+                                    headers: &hdr, from_reach, ..HttpRequest::default() };
             if let Ok(body) = https_get_req(h, p, max_size, &req) {
                 out[i] = Some(body);
             }

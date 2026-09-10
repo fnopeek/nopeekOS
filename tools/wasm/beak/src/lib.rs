@@ -155,6 +155,10 @@ unsafe extern "C" {
     /// HTTP/2 where the host offers it. Same handle discipline as
     /// `npk_http_begin`.
     fn npk_http_begin_many(urls_ptr: i32, urls_len: i32, out_max: i32) -> i32;
+    /// Wie oben, aber mit einer Keks-Zeile JE ADRESSE (durch `\n` getrennt,
+    /// leere Zeilen zaehlen mit). Seit Kernel 0.333.0.
+    fn npk_http_begin_many_hdr(urls_ptr: i32, urls_len: i32,
+                               hdrs_ptr: i32, hdrs_len: i32, out_max: i32) -> i32;
     /// Collect a finished batch: the bodies back-to-back in `out`, one
     /// little-endian i32 per URL in `lens` (bytes written, or -1). Returns
     /// how many URLs the batch had, or -1 / -2 / -3 as above.
@@ -366,7 +370,31 @@ fn url_lines(urls: &[String]) -> String {
 /// may take together.
 fn begin_batch(urls: &[String], cap: usize) -> i32 {
     let blob = url_lines(urls);
-    unsafe { npk_http_begin_many(blob.as_ptr() as i32, blob.len() as i32, cap as i32) }
+    // **Jede Unterressource bekommt ihren Keks.** Vorher trug nur die
+    // Anfrage nach dem DOKUMENT eine `Cookie`-Zeile; Bilder, Blaetter und
+    // Skripte gingen anonym raus. Hinter einer Anmeldung kam so der Text an
+    // und die Bilder nicht, und es sah aus wie ein Bildfehler.
+    //
+    // Eine Zeile je Adresse, in derselben Reihenfolge, LEERE ZEILEN
+    // EINGESCHLOSSEN — die Zuordnung ist die Position, und wer leere Zeilen
+    // wegwirft, schickt den Keks der einen Adresse an eine andere.
+    let now = unsafe { npk_unix_time() };
+    let mut ck = String::new();
+    let mut any = false;
+    for (i, u) in urls.iter().enumerate() {
+        if i > 0 { ck.push('\n'); }
+        let v = cookies::header_for(u, now);
+        if !v.is_empty() { any = true; ck.push_str(&v); }
+    }
+    // Kein Keks im Spiel? Dann der alte Weg — eine Zeile weniger ueber die
+    // Grenze, und der Kernel muss nichts pruefen.
+    if !any {
+        return unsafe { npk_http_begin_many(blob.as_ptr() as i32, blob.len() as i32, cap as i32) };
+    }
+    unsafe {
+        npk_http_begin_many_hdr(blob.as_ptr() as i32, blob.len() as i32,
+                                ck.as_ptr() as i32, ck.len() as i32, cap as i32)
+    }
 }
 
 /// Collect a finished batch into `dst`, returning each body as a
@@ -3858,9 +3886,37 @@ fn edit_key(engine: &Engine, page: &mut Page, key: KeyCode) -> bool {
     }
     let mut caret = page.state.caret.min(value.len());
     match key {
-        KeyCode::Char(b) if (0x20..0x7F).contains(&b) => {
-            value.insert(caret, b as char);
-            caret += 1;
+        // **Nicht mehr nur ASCII.** `0x20..0x7F` hiess woertlich: auf einer
+        // Deutschschweizer Tastatur laesst sich kein `ä` in ein Formular
+        // tippen — nicht in ein Suchfeld, nicht in ein Anmeldefeld. Alles ab
+        // 0x80 ist ein Stueck einer UTF-8-Folge; `b as char` waere dort
+        // LATIN-1 und machte aus dem Fuehrungsbyte 0xC3 ein `Ã`.
+        KeyCode::Char(b) if b >= 0x20 && b != 0x7F => {
+            if b < 0x80 {
+                page.state.pending_len = 0;
+                value.insert(caret, b as char);
+                caret += 1;
+            } else {
+                if b >= 0xC0 { page.state.pending_len = 0; }   // neue Folge
+                let n = page.state.pending_len as usize;
+                if n < 4 {
+                    page.state.pending[n] = b;
+                    page.state.pending_len = n as u8 + 1;
+                } else {
+                    page.state.pending_len = 0;
+                }
+                let len = page.state.pending_len as usize;
+                match core::str::from_utf8(&page.state.pending[..len]).ok()
+                          .and_then(|t| t.chars().next()) {
+                    Some(ch) => {
+                        value.insert(caret, ch);
+                        caret += ch.len_utf8();
+                        page.state.pending_len = 0;
+                    }
+                    // Folge noch nicht vollstaendig: nichts tun, nichts malen.
+                    None => return false,
+                }
+            }
         }
         KeyCode::Backspace => {
             if caret == 0 {

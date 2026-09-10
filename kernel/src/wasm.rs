@@ -1189,6 +1189,21 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_http_begin_many_hdr(urls_ptr, urls_len, hdrs_ptr, hdrs_len, out_max)
+    // Wie oben, aber mit einer Keks-Zeile JE ADRESSE. Eigene Funktion und
+    // keine geaenderte Signatur: eine geaenderte waere fuer jedes bereits
+    // ausgelieferte Modul ein Bindefehler.
+    linker.func_wrap("env", "npk_http_begin_many_hdr",
+        |mut caller: Caller<'_, HostState>, urls_ptr: i32, urls_len: i32,
+         hdrs_ptr: i32, hdrs_len: i32, out_max: i32| -> i32 {
+            let Some(m) = caller.get_export("memory").and_then(|e| e.into_memory())
+                else { return -1 };
+            let (mem, ctx) = m.data_and_store_mut(&mut caller);
+            host_core::npk_http_begin_many_hdr(mem, ctx, urls_ptr, urls_len,
+                                               hdrs_ptr, hdrs_len, out_max)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_http_poll(handle) -> 1 answer waiting, 0 running, -1 failed,
     //                          -2 no such handle
     linker.func_wrap("env", "npk_http_poll",

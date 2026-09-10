@@ -57,6 +57,16 @@ pub struct InputEditState {
     /// Caret position as a byte index into `value`. Always at a UTF-8
     /// boundary; v1 only inserts ASCII so `byte_index == char_index`.
     pub cursor: usize,
+    /// Angefangene UTF-8-Folge. **Die Tastaturleitung traegt ein Byte je
+    /// Ereignis, und `ü` sind zwei** — das erste Byte allein ist noch kein
+    /// Zeichen und darf nicht in `value`, sonst stuende dort kein gueltiges
+    /// UTF-8. Hier liegt es, bis die Folge vollstaendig ist. Fuer ASCII
+    /// bleibt es immer leer.
+    ///
+    /// Kernel-seitig und NICHT auf dem Draht: die App sieht nur fertige
+    /// Zeichen, ueber `Event::InputChange`.
+    pub pending: [u8; 4],
+    pub pending_len: u8,
     /// Selection anchor (byte index) — the fixed end of a text selection;
     /// the caret is the moving end. `None` = no selection. Set by Shift+
     /// movement and mouse-drag, cleared by any plain (non-Shift) move or
@@ -66,7 +76,8 @@ pub struct InputEditState {
 
 impl InputEditState {
     fn from_value(v: &str) -> Self {
-        InputEditState { value: v.into(), cursor: v.len(), sel_anchor: None }
+        InputEditState { value: v.into(), cursor: v.len(),
+                         pending: [0; 4], pending_len: 0, sel_anchor: None }
     }
 
     /// Selected byte range `[start, end)` if a non-empty selection exists.
@@ -2050,7 +2061,12 @@ pub fn handle_input_key(
     }
 
     let op = match key {
-        K::Char(b) if (0x20..0x7F).contains(&b) => Op::Insert(b),
+        // **Nicht mehr nur ASCII.** 0x20..0x7F war woertlich „keine
+        // Umlaute" — auf einer Deutschschweizer Tastatur liess sich damit
+        // kein einziges `ä` in ein Feld tippen. Alles ab 0x80 ist ein Stueck
+        // einer UTF-8-Folge und wird unten zusammengesetzt; 0x7F (DEL) ist
+        // kein Text und bleibt draussen.
+        K::Char(b) if b >= 0x20 && b != 0x7F => Op::Insert(b),
         K::Backspace                             => Op::Backspace,
         K::Delete                                => Op::Delete,
         K::Left                                  => Op::Left,
@@ -2124,9 +2140,33 @@ pub fn handle_input_key(
 
         match op {
             Op::Insert(b) => {
-                edit.value.insert(edit.cursor, b as char);
-                edit.cursor += 1;
-                changed = true;
+                if b < 0x80 {
+                    edit.pending_len = 0;
+                    edit.value.insert(edit.cursor, b as char);
+                    edit.cursor += 1;
+                    changed = true;
+                } else {
+                    // **`b as char` waere hier LATIN-1, nicht UTF-8** — aus
+                    // dem Fuehrungsbyte 0xC3 wuerde `Ã`. Gesammelt wird, bis
+                    // die Folge steht, und dann als ZEICHEN eingefuegt.
+                    if b >= 0xC0 { edit.pending_len = 0; }   // neue Folge
+                    let n = edit.pending_len as usize;
+                    if n < 4 {
+                        edit.pending[n] = b;
+                        edit.pending_len = n as u8 + 1;
+                    } else {
+                        edit.pending_len = 0;   // laenger als jede Folge — verwerfen
+                    }
+                    let len = edit.pending_len as usize;
+                    if let Ok(txt) = core::str::from_utf8(&edit.pending[..len]) {
+                        if let Some(ch) = txt.chars().next() {
+                            edit.value.insert(edit.cursor, ch);
+                            edit.cursor += ch.len_utf8();
+                            edit.pending_len = 0;
+                            changed = true;
+                        }
+                    }
+                }
             }
             Op::Newline => {
                 edit.value.insert(edit.cursor, '\n');
