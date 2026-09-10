@@ -314,18 +314,26 @@ const URL_CAP: usize = 4096;
 /// Gewandert wird gruppenweise, und nach jeder Gruppe muessen
 /// `beak:selftest` und WPT unveraendert sein.
 ///
-/// **Der Zaehler, und er darf nur fallen:**
+/// **Der Zaehler:**
 ///
 ///     grep -c '^static mut ' tools/wasm/beak/src/lib.rs
 ///     0.151.0:  77          <- vorher
 ///     0.152.0:  46          <- Adresse, Verlauf, Navigation, Ladevorgang
+///     0.153.0:  47          <- +COOKIE_BUF, ein ABHOLpuffer
 ///
-/// Was noch draussen steht, gehoert grosszuegig gerechnet in drei Gruppen:
-/// die Ansicht (`GEOM`, `LAST_W/H`, `DIRTY`, `NEED_FULL`, `LAST_VP`), die
-/// Nebenabrufe (`IMG_JOB*`, `CSSIMG_JOB*`, `FONT_JOB`, `FETCH_JOBS`,
-/// `IMAGES_DIRTY`) und das, was WIRKLICH dem Programm gehoert und bleiben
-/// soll: die Abholpuffer (`HTML_BUF`, `CSS_BUF`, `IMG_FETCH_BUF` …, rund
-/// 47 MB `.bss`) und die einmaligen Log-Fahnen.
+/// **Die Regel ist nicht „die Zahl faellt", sondern „nichts, was dem
+/// DOKUMENT gehoert, kommt dazu".** 0.153.0 hat einen Puffer bekommen, in
+/// den die gespeicherten Kekse geholt werden — der gehoert dem Abruf, nicht
+/// der Seite, und vervielfacht sich mit Tabs nicht. Wer die Zahl allein
+/// bewacht, verbietet das Richtige und uebersieht das Falsche.
+///
+/// Was noch draussen steht und HINEIN gehoert: die Ansicht (`GEOM`,
+/// `LAST_W/H`, `DIRTY`, `NEED_FULL`, `LAST_VP`) und die Nebenabrufe
+/// (`IMG_JOB*`, `CSSIMG_JOB*`, `FONT_JOB`, `FETCH_JOBS`, `IMAGES_DIRTY`).
+///
+/// Was draussen bleibt und bleiben SOLL: die Abholpuffer (`HTML_BUF`,
+/// `CSS_BUF`, `IMG_FETCH_BUF`, `COOKIE_BUF` …, rund 47 MB `.bss`) und die
+/// einmaligen Log-Fahnen.
 struct Doc {
     /// Woher das Dokument KAM (nach Weiterleitungen). Basis fuer jede
     /// relative Adresse der Seite und der Netzkontext, den der Kernel fuehrt.
@@ -362,6 +370,18 @@ struct Doc {
     /// Die Markierung auf der SEITE — nicht in der Adresszeile, die gehoert
     /// dem Compositor.
     sel: Option<(beak_engine::select::TextPos, beak_engine::select::TextPos)>,
+    /// Die Suchleiste: `None` heisst zu. Der Text gehoert BEAK, nicht einem
+    /// `Widget::Input` — `Event::InputChange` traegt keine Knotenkennung,
+    /// zwei Eingabefelder im Fenster waeren also nicht auseinanderzuhalten.
+    /// Ein selbst gefuehrter Puffer ist die kleinere Antwort als eine
+    /// ABI-Erweiterung.
+    find: Option<String>,
+    /// Fundstellen der laufenden Suche und die, auf der man gerade steht.
+    found: Vec<(beak_engine::select::TextPos, beak_engine::select::TextPos)>,
+    find_at: usize,
+    /// Sammelpuffer fuer ein Zeichen in der Suchleiste.
+    find_pending: [u8; 4],
+    find_pending_len: u8,
 
     // ── Die Teilabrufe des Ladevorgangs ─────────────────────────────────
     // Blaetter, Skripte, Module: jede Stufe fuehrt Buch darueber, was sie
@@ -391,6 +411,8 @@ impl Doc {
             nav_job: -1, nav_stage: NavStage::Doc, nav_url: None, nav_push_hist: false,
             nav_stage_ms: 0, nav_gen: 0, nav_start_ms: 0, nav_reported: true,
             content_gen: 0, scroll_y: 0, sel_anchor: None, sel: None,
+            find: None, found: Vec::new(), find_at: 0,
+            find_pending: [0; 4], find_pending_len: 0,
             nav_css_count: 0, nav_scripts: None, js: None, nav_js_count: 0, nav_mod_entries: None, nav_mod_want: None, nav_mod_rounds: 0, nav_css_urls: None, nav_css_parts: None, nav_css_want: None, nav_css_rounds: 0, nav_sheet_nodes: None, nav_sheet_rounds: 0,
         }
     }
@@ -3595,6 +3617,25 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
         // Die Kaesten neu einsammeln — nur hier, nicht je Bild.
         let boxes = cache.as_ref().unwrap().0.element_rects();
         unsafe { core::ptr::addr_of_mut!(GEOM).write(Some(alloc::rc::Rc::new(boxes))) };
+
+        // **Eine Markierung zeigt auf BEFEHLSINDIZES, und die verschieben
+        // sich beim Neuauslegen.** Ein nachgeladenes Bild reicht: aus der
+        // markierten Zeile wird eine andere, und der Schleier liegt ueber
+        // fremdem Text. Also faellt die Auswahl weg — das ist ehrlicher, als
+        // etwas Falsches hervorzuheben.
+        //
+        // Die SUCHE dagegen wird neu gerechnet statt weggeworfen: sie hat
+        // eine Frage, die noch gilt (die Zeichenkette), waehrend eine
+        // Auswahl nur einen Ort hatte. Ohne Sprung — sonst reisst ein
+        // nachgeladenes Bild die Seite unter dem Leser weg.
+        if doc().sel.is_some() {
+            doc_mut().sel = None;
+            doc_mut().sel_anchor = None;
+            engine.set_marks(None, Vec::new());
+        }
+        if doc().find.is_some() {
+            find_run(engine, cache, false);
+        }
     }
     let layout = &cache.as_ref().unwrap().0;
 
@@ -3883,6 +3924,42 @@ fn render_chrome() {
         },
     ];
 
+    // Die Suchleiste. **Kein `Widget::Input`, sondern Text** — der Puffer
+    // gehoert beak, siehe `Doc::find`. Sie steht UNTER der Leinwand wie in
+    // jedem Browser: oben waere sie ein Werkzeug, unten ist sie eine
+    // Randnotiz, und genau das ist sie.
+    if let Some(q) = doc().find.clone() {
+        let (at, n) = (doc().find_at, doc().found.len());
+        let mut label = String::from("Suchen: ");
+        label.push_str(&q);
+        label.push('\u{2502}');           // ein stehender Strich als Schreibmarke
+        if !q.is_empty() {
+            label.push_str("    ");
+            if n == 0 {
+                label.push_str("nichts gefunden");
+            } else {
+                push_i64(&mut label, at as i64 + 1);
+                label.push_str(" von ");
+                push_i64(&mut label, n as i64);
+            }
+        }
+        label.push_str("      Enter = weiter · Esc = zu");
+        children.push(Widget::Divider);
+        children.push(Widget::Text {
+            content: label,
+            style: TextStyle::Body,
+            modifiers: vec![
+                Modifier::Padding(Padding::Sm.as_u16()),
+                Modifier::Background(Token::SurfaceElevated),
+                Modifier::Tint(if n == 0 && !q.is_empty() {
+                    Token::OnSurfaceMuted
+                } else {
+                    Token::OnSurface
+                }),
+            ],
+        });
+    }
+
     // Inspect status bar: the selected element's label, or a hint.
     if inspect_mode() {
         children.push(Widget::Divider);
@@ -4000,6 +4077,86 @@ fn next_boundary(s: &str, i: usize) -> usize {
     s[i..].chars().next().map(|c| i + c.len_utf8()).unwrap_or(i)
 }
 
+// ── Suchen in der Seite ───────────────────────────────────────────────────
+
+/// Die Suche neu rechnen und die Fundstellen hervorheben.
+///
+/// `jump` springt zur aktuellen Fundstelle. Beim Tippen ist das erwuenscht
+/// (man will sehen, ob es sie gibt), beim blossen Neuauslegen nicht — sonst
+/// reisst ein nachgeladenes Bild die Seite unter dem Leser weg.
+fn find_run(engine: &Engine, cache: &Option<(Layout, i32, i32, u32)>, jump: bool) {
+    let Some(q) = doc().find.clone() else { return };
+    let Some((lay, _, _, _)) = cache.as_ref() else { return };
+    let hits = if q.is_empty() { Vec::new() } else { engine.find_all(lay, &q) };
+    let d = doc_mut();
+    if d.find_at >= hits.len() { d.find_at = 0 }
+    d.found = hits;
+    let (at, n) = (d.find_at, d.found.len());
+    let cur = d.found.get(at).copied();
+    engine.set_marks(d.sel, d.found.clone());
+    // Hinscrollen, damit die Fundstelle im Blick ist — ein Drittel von oben,
+    // nicht am Rand: eine Fundstelle in der letzten Zeile liest sich nicht.
+    if jump && n > 0 {
+        if let Some((a, b)) = cur {
+            if let Some((_, _, _, ch)) = canvas_rect() {
+                let rects = engine.selection_rects(lay, a, b);
+                if let Some((_, ry, _, _)) = rects.first() {
+                    let want = (*ry - ch / 3).max(0);
+                    if (want - scroll_y()).abs() > ch / 8 { set_scroll(want); }
+                }
+            }
+        }
+    }
+    mark_dirty();
+}
+
+/// Eine Fundstelle weiter (oder zurueck), rundherum.
+fn find_step(engine: &Engine, cache: &Option<(Layout, i32, i32, u32)>, back: bool) {
+    let n = doc().found.len();
+    if n == 0 { return }
+    let d = doc_mut();
+    d.find_at = if back { (d.find_at + n - 1) % n } else { (d.find_at + 1) % n };
+    find_run(engine, cache, true);
+}
+
+/// Die Leiste schliessen und alles aufraeumen.
+fn find_close(engine: &Engine) {
+    let d = doc_mut();
+    d.find = None;
+    d.found.clear();
+    d.find_at = 0;
+    d.find_pending_len = 0;
+    engine.set_marks(d.sel, Vec::new());
+    mark_dirty();
+    render_chrome();
+}
+
+/// Ein Tastenbyte zu einem ZEICHEN sammeln.
+///
+/// **Ein Tastendruck traegt ein Byte, und `ä` sind zwei.** Alles ab 0x80 ist
+/// ein Stueck einer UTF-8-Folge; `b as char` waere dort LATIN-1 und machte
+/// aus dem Fuehrungsbyte 0xC3 ein `Ã`. `None` heisst „die Folge ist noch
+/// nicht vollstaendig" — dann passiert nichts, auch kein Neumalen.
+///
+/// Eine Stelle, nicht drei: die Adresszeile bedient der Compositor, aber
+/// beak hat zwei eigene Eingaben (Seitenformulare und die Suchleiste), und
+/// zwei Kopien derselben Rechnung sind eine wartende zweite Semantik
+/// ([[feedback_a_copy_is_a_second_semantics_waiting]]).
+fn utf8_feed(pending: &mut [u8; 4], len: &mut u8, b: u8) -> Option<char> {
+    if b < 0x80 {
+        *len = 0;
+        return Some(b as char);
+    }
+    if b >= 0xC0 { *len = 0; }              // neue Folge
+    let n = *len as usize;
+    if n < 4 { pending[n] = b; *len = n as u8 + 1; } else { *len = 0; }
+    let take = *len as usize;
+    match core::str::from_utf8(&pending[..take]).ok().and_then(|t| t.chars().next()) {
+        Some(ch) => { *len = 0; Some(ch) }
+        None => None,
+    }
+}
+
 /// Apply one key to the focused control. Returns true if the page must be
 /// re-laid-out (the control's painted text or caret changed).
 fn edit_key(engine: &Engine, page: &mut Page, key: KeyCode) -> bool {
@@ -4029,30 +4186,10 @@ fn edit_key(engine: &Engine, page: &mut Page, key: KeyCode) -> bool {
         // 0x80 ist ein Stueck einer UTF-8-Folge; `b as char` waere dort
         // LATIN-1 und machte aus dem Fuehrungsbyte 0xC3 ein `Ã`.
         KeyCode::Char(b) if b >= 0x20 && b != 0x7F => {
-            if b < 0x80 {
-                page.state.pending_len = 0;
-                value.insert(caret, b as char);
-                caret += 1;
-            } else {
-                if b >= 0xC0 { page.state.pending_len = 0; }   // neue Folge
-                let n = page.state.pending_len as usize;
-                if n < 4 {
-                    page.state.pending[n] = b;
-                    page.state.pending_len = n as u8 + 1;
-                } else {
-                    page.state.pending_len = 0;
-                }
-                let len = page.state.pending_len as usize;
-                match core::str::from_utf8(&page.state.pending[..len]).ok()
-                          .and_then(|t| t.chars().next()) {
-                    Some(ch) => {
-                        value.insert(caret, ch);
-                        caret += ch.len_utf8();
-                        page.state.pending_len = 0;
-                    }
-                    // Folge noch nicht vollstaendig: nichts tun, nichts malen.
-                    None => return false,
-                }
+            match utf8_feed(&mut page.state.pending, &mut page.state.pending_len, b) {
+                Some(ch) => { value.insert(caret, ch); caret += ch.len_utf8(); }
+                // Folge noch nicht vollstaendig: nichts tun, nichts malen.
+                None => return false,
             }
         }
         KeyCode::Backspace => {
@@ -4195,6 +4332,46 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
                 restate_control(engine, cache, &page.state, "addressbar-focus");
             }
             false
+        }
+        // **Strg+F.** Kommt als Chord, weil `Event::Key` keine Umschalter
+        // traegt — sonst waere Strg+F von einem getippten „f" nicht zu
+        // unterscheiden.
+        Event::Chord { letter: b'f', .. } => {
+            if doc().find.is_none() { doc_mut().find = Some(String::new()); }
+            doc_mut().find_pending_len = 0;
+            render_chrome();
+            mark_dirty();
+            true
+        }
+        // Die Suchleiste ist offen: die Tasten gehoeren IHR. Sie kommen nur
+        // hierher, wenn kein Textfeld des Compositors den Fokus hat — wer in
+        // die Adresszeile klickt, tippt dort weiter, und das ist richtig so.
+        Event::Key(k) if doc().find.is_some() => {
+            match k {
+                KeyCode::Escape => { find_close(engine); return true }
+                KeyCode::Enter => { find_step(engine, cache, false); render_chrome(); return true }
+                KeyCode::Backspace => {
+                    let d = doc_mut();
+                    d.find_pending_len = 0;
+                    if let Some(q) = d.find.as_mut() { q.pop(); }
+                    d.find_at = 0;
+                }
+                KeyCode::Char(b) if b >= 0x20 && b != 0x7F => {
+                    let mut pend = doc().find_pending;
+                    let mut len = doc().find_pending_len;
+                    let ch = utf8_feed(&mut pend, &mut len, b);
+                    let d = doc_mut();
+                    d.find_pending = pend;
+                    d.find_pending_len = len;
+                    let Some(ch) = ch else { return true };   // Folge unvollstaendig
+                    if let Some(q) = d.find.as_mut() { q.push(ch); }
+                    d.find_at = 0;
+                }
+                _ => return true,
+            }
+            find_run(engine, cache, true);
+            render_chrome();
+            true
         }
         // A page control has focus → the key is ours (the compositor only
         // routes keys here when no chrome Input/TextArea consumed them).
