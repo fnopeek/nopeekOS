@@ -1798,7 +1798,14 @@ fn update_widget_text_selection(mx: i32, my: i32, lmb: bool, was: bool) {
         return;
     }
     if lmb && !was {
-        widgets::text_select_begin(wid, mx, my);
+        // Der wievielte Klick dieser Reihe? Zwei waehlen das Wort, drei die
+        // ganze Zeile — und `click_run` zaehlt IMMER mit, auch wenn der
+        // Druck danach kein Textfeld trifft, sonst laeuft eine Reihe weiter,
+        // die woanders stattfindet.
+        match widgets::click_run_at(wid, mx, my) {
+            n if n >= 2 && widgets::text_select_run(wid, mx, my, n) => {}
+            _ => { widgets::text_select_begin(wid, mx, my); }
+        }
     }
 }
 

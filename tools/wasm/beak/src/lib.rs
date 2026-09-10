@@ -3564,6 +3564,57 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
 }
 
 /// Commit the loft-styled chrome: menu bar · toolbar (back/forward/reload +
+/// Die Farb-Laeufe der Adresszeile: die registrierbare Domain in voller
+/// Staerke, alles andere abgeblendet.
+///
+/// **Das ist keine Zierde, sondern die Anti-Phishing-Anzeige.** In
+/// `https://paypal.com.betrug.ru/login` heisst die Domain `betrug.ru`, und
+/// das Auge liest das erste, was wie ein Name aussieht. Jeder Browser hebt
+/// deshalb genau diesen Teil hervor.
+///
+/// Gerechnet wird mit `site::registrable_domain`, also mit der echten Public
+/// Suffix List — NICHT mit „die letzten zwei Bestandteile". Der Unterschied
+/// ist der ganze Punkt: bei `a.github.io` waeren das `github.io`, und dann
+/// haette die Anzeige zwei fremde Nutzerseiten als dieselbe ausgewiesen.
+///
+/// **Nur wenn das Feld die geladene Adresse ZEIGT.** Weicht es ab, tippt
+/// gerade jemand, und dann ist jede Hervorhebung eine Aussage ueber einen
+/// halben Satz: `arcade.c` waere `arcade.c`, eine Zehntelsekunde spaeter
+/// `arcade.ch`. Waehrend des Tippens bleibt der Text einfarbig.
+fn address_spans(field: &str, url: &str) -> Vec<Span> {
+    if field.is_empty() || field != url {
+        return Vec::new();
+    }
+    // Der Host: hinter `schema://`, bis zum ersten `/?#`, ohne `benutzer@`
+    // und ohne `:port`.
+    let after_scheme = match field.find("://") { Some(i) => i + 3, None => 0 };
+    let rest = &field[after_scheme..];
+    let host_len = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..host_len];
+    let host_at = after_scheme + authority.rfind('@').map(|i| i + 1).unwrap_or(0);
+    let host_raw = &field[host_at..after_scheme + host_len];
+    // Ein Doppelpunkt trennt den Port — aber in `[::1]` gehoert er zur
+    // Adresse, und eine IP hat ohnehin keine registrierbare Domain.
+    let host = match host_raw.rfind(':') {
+        Some(i) if !host_raw.contains(']') => &host_raw[..i],
+        _ => host_raw,
+    };
+    let Some(dom) = beak_engine::site::registrable_domain(host) else { return Vec::new() };
+    // `registrable_domain` gibt kleingeschrieben zurueck; gesucht wird im
+    // ORIGINAL, und sie ist immer ein Endstueck des Hosts.
+    if host.len() < dom.len() { return Vec::new() }
+    let start = host_at + (host.len() - dom.len());
+    let end = start + dom.len();
+    let muted = |a: usize, b: usize| Span {
+        start: a as u32, len: (b - a) as u32, token: Token::OnSurfaceMuted,
+    };
+    let mut out = Vec::new();
+    if start > 0 { out.push(muted(0, start)); }
+    out.push(Span { start: start as u32, len: dom.len() as u32, token: Token::OnSurface });
+    if end < field.len() { out.push(muted(end, field.len())); }
+    out
+}
+
 /// framed address bar) · canvas body · the open dropdown as a Popover.
 fn render_chrome() {
     let menu = prefab::menu_bar_with_icon(
@@ -3589,6 +3640,7 @@ fn render_chrome() {
     // dasteht.
     let url = url_str();
     let field = edit_str();
+    let spans = address_spans(field, url);
     let (lead_icon, lead_tint) = if url.starts_with("https://") {
         (IconId::Lock, Token::Success)
     } else {
@@ -3606,7 +3658,11 @@ fn render_chrome() {
                 value: field.to_string(),
                 placeholder: s().address_placeholder.to_string(),
                 on_submit: ActionId(ACT_GO),
-                modifiers: vec![Modifier::Flex(1)],
+                modifiers: {
+                    let mut m = vec![Modifier::Flex(1)];
+                    if !spans.is_empty() { m.push(Modifier::Spans(spans)); }
+                    m
+                },
             },
         ],
         spacing: Spacing::Sm.as_u16(),

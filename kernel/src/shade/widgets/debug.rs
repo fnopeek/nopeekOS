@@ -237,6 +237,7 @@ fn fmt_mods(mods: &[Modifier]) -> String {
             Modifier::Autofocus => { let _ = write!(s, "Autofocus"); }
             Modifier::FontSize(px) => { let _ = write!(s, "FontSize({})", px); }
             Modifier::CanvasOffset { x, y } => { let _ = write!(s, "CanvasOffset({},{})", x, y); }
+            Modifier::Spans(v)      => { let _ = write!(s, "Spans({})", v.len()); }
         }
     }
     s.push(']');
