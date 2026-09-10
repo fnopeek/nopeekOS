@@ -48,7 +48,28 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-10 · beak 0.162.0 · Kernel 0.335.0** (Rest: `git log`)
+**Stand 2026-09-10 · beak 0.163.0 · Kernel 0.336.0** (Rest: `git log`)
+
+**0.163.0: Tabs — und der Streifen war wirklich die letzten fünf Prozent.**
+`docs/plan/BROWSER_TABS.md` sagt es voraus: erst muss die Seite ein WERT
+werden. Die letzten 24 `static mut`, die dem Dokument gehörten, sind in
+`struct Doc` gewandert (**47 → 23**, und die 23 sind vier Gruppen mit einem
+Grund, der eine zweite Seite überlebt: Abholpuffer · der BILDpuffer · der
+LAUF auf dem Stapel · Fenster und Werkzeug). Danach war `Vec<Box<Doc>>` +
+`ACTIVE` klein. **`Box`, weil `js_session()` ein `&'static mut` INS Dokument
+gibt** — ein umziehender Vec liesse es auf alten Speicher zeigen. Gefahren
+ist Entwurf (b): **ein lebendiger Motor, der Rest eingefroren** — ein
+Hintergrundtab ist Adresse, Verlauf, Rollstand und Titel, sonst nichts, und
+beim Zurückwechseln wird neu geholt (`DOC_SLOTS = 3` und der Bildspeicher
+machen es billig). Der Preis ist benannt: Skriptzustand überlebt den Wechsel
+nicht. **Schritt 2 des Papiers ist übersprungen und das war richtig** — „alle
+Tabs lebendig" heisst N Motoren, also mehr Arbeit als (b). Dazu Strg+T/W/1-9
+(Strg+Tab gibt es nicht: `Event::Chord` trägt einen Buchstaben aus
+`KeyCode::Char`, und `Tab` ist keiner) und `npk_open` → Tab. **Der Kernel
+stellte die MITTLERE Maustaste nie zu**, obwohl beide Zeigerwege sie liefern
+— ohne sie gäbe es „Link in neuem Tab öffnen" gar nicht. Nebenbefund:
+**`ptr::write` lässt den alten Wert NICHT fallen**, und `GEOM` wurde so
+geschrieben — 66 KB Kästen je Neuauslegung, nie zurück.
 
 **0.161–0.162: und dann war die Umrechnung selbst dran.** beak legt in ganzen
 Zahlen aus, CSS rechnet in Brüchen — jedes `as i32` schnitt ab, und das

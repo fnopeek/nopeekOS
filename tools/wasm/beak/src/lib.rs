@@ -273,6 +273,12 @@ const ACT_VIEW_TOGGLE_CSS: u32 = 6_021;
 const ACT_VIEW_INSPECT: u32 = 6_022;
 const ACT_HELP_ABOUT: u32 = 6_100;
 
+// Der Tabstreifen. Zwei Baender statt zwei Zahlen je Tab: der Streifen wird
+// bei jeder Aenderung neu gebaut, und ein Index IST der Tab.
+const ACT_TAB_NEW: u32 = 7_000;
+const ACT_TAB_SEL: u32 = 7_100;     // + Index
+const ACT_TAB_CLOSE: u32 = 7_200;   // + Index
+
 // Menu-label anchor NodeIds (for the dropdown Popover)
 const NODE_MENU_FILE: u32 = 100;
 const NODE_MENU_EDIT: u32 = 101;
@@ -445,6 +451,17 @@ struct Doc {
     font_want: Option<Vec<(String, u32, u16, bool)>>,
     /// Welche `fetch`-Anfrage der Engine auf welchem Griff des Wirts liegt.
     fetch_jobs: Vec<(u32, i32)>,
+    /// Die Bilder DIESER Seite, die noch nicht gefragt wurden — der Rest der
+    /// Schlange hinter dem Stapel, der gerade laeuft.
+    ///
+    /// Standen bis 0.163.0 als Locals in der Schleife, und damit gehoerten
+    /// sie niemandem: bei einem Tabwechsel haette der neue Tab die Bilder des
+    /// alten weitergeholt, mit `resolve` gegen die NEUE Basis.
+    pending_imgs: Vec<String>,
+    pending_css_imgs: Vec<(u64, String)>,
+    /// Jeder Hintergrund, nach dem diese Seite schon gefragt hat — auch die
+    /// gescheiterten. Ein Fehlschlag darf nicht ewig wiederholt werden.
+    css_asked: Vec<u64>,
 
     // ── Die Skriptrunde DIESES Dokuments ────────────────────────────────
     /// Wie viele Navigationen die Seite HINTEREINANDER selbst ausgeloest hat.
@@ -479,6 +496,18 @@ struct Doc {
     /// Der im Inspektor gewaehlte Kasten: `(x, y, w, h)` im Dokumentraum, mit
     /// seiner Beschriftung. Die Koordinaten gelten in DIESEM Dokument.
     sel_box: Option<(i32, i32, i32, i32, String)>,
+
+    // ── Was einen eingefrorenen Tab wiederherstellt ─────────────────────
+    // Diese Felder und die vier ganz oben (`url`, `edit`, `hist`, `hist_pos`)
+    // sind ALLES, was ein Tab im Hintergrund behaelt — Kilobytes statt der
+    // 44 MiB, die eine lebende Seite haelt. Siehe `tab_freeze`.
+    /// Der `<title>` der Seite, fuer den Streifen. Wird beim Auslegen
+    /// nachgezogen (frueher weiss es niemand) und ueberlebt das Einfrieren.
+    title: String,
+    /// Wohin nach dem Laden gerollt werden soll. 0 fuer eine neue Seite, der
+    /// gemerkte Stand fuer einen Tab, der zurueckkommt — die Seite wird beim
+    /// Zurueckwechseln neu geholt, und ohne diese Zahl stuende sie oben.
+    scroll_want: i32,
 }
 
 impl Doc {
@@ -494,15 +523,75 @@ impl Doc {
             dirty: true, need_full: true, images_dirty: false, geom: None, last_vp: (0, 0),
             img_job: -1, img_job_srcs: None, cssimg_job: -1, cssimg_job_keys: None,
             font_job: -1, font_want: None, fetch_jobs: Vec::new(),
+            pending_imgs: Vec::new(), pending_css_imgs: Vec::new(), css_asked: Vec::new(),
             script_nav_chain: 0, nav_from_script: false, script_tally: (0, 0, 0),
             script_t0: 0, load_pending: false, obs_rounds: 0,
             last_layout_ms: 0, hover_refused: false, hover_said_fast: false,
             hover_said_slow: false, ctl_bail_said: false, sel_box: None,
+            title: String::new(), scroll_want: 0,
         }
     }
 }
 
-static mut DOC: Doc = Doc::new();
+/// **Die Tabs.** `docs/plan/BROWSER_TABS.md` §A3 (b): EIN lebendiger Motor,
+/// der Rest eingefroren.
+///
+/// Der Motor haelt einen Baum, ein Stilblatt und die Bilder EINER Seite;
+/// `HTML_BUF`/`CSS_BUF` sind je ein Puffer. Zwei lebende Seiten waeren also
+/// zwei Motoren — 44 MiB gehaltene Halde je Stueck, gemessen auf srf.ch. Ein
+/// Tab im Hintergrund ist deshalb nur das, was ihn wiederherstellt (Adresse,
+/// Verlauf, Rollstand, Titel), und beim Zurueckwechseln wird die Seite neu
+/// geholt. Was das billig macht, ist schon gebaut: `DOC_SLOTS = 3` im Motor
+/// haelt die letzten drei geparsten Baeume, und der Bildspeicher ueberlebt
+/// die Navigation.
+///
+/// Der Preis, und er gehoert benannt: **Skriptzustand geht verloren.** Ein
+/// halb ausgefuelltes Formular, ein offenes Menue, ein Warenkorb per Skript
+/// sind nach einem Tabwechsel weg. Das ist der Eintausch fuer „zwanzig Tabs
+/// kosten wie einer"; die Gegenrichtung (2-3 lebendige nach LRU) steht in
+/// §A3 und braucht mehrere Motoren.
+///
+/// **`Box`, und das ist keine Zierde.** `js_session()` und `fetch_jobs()`
+/// geben `&'static mut` INS Dokument heraus. Ein `Vec<Doc>`, der beim
+/// Oeffnen eines Tabs umzieht, liesse sie auf den alten Speicher zeigen —
+/// ein Fehler, den man erst Wochen spaeter als Datenmuell sieht. Ein `Box`
+/// steht fest, was der Vec auch tut.
+static mut TABS: Vec<alloc::boxed::Box<Doc>> = Vec::new();
+/// Welcher Tab gemalt wird und lebt. Immer gueltig — `active` klemmt.
+static mut ACTIVE: usize = 0;
+
+/// Wieviele Tabs.
+///
+/// **Der Speicher ist es nicht** — ein eingefrorener Tab ist Kilobytes. Es
+/// ist der Streifen: 160 px je Tab, zehn davon sind 1600 px, und darueber
+/// schoebe der elfte das `+` aus dem Fenster. Was diesen Deckel hebt, ist
+/// ein rollender Streifen (`Widget::Scroll`, `Axis::Horizontal`) — der
+/// einzige Kasten, der im Compositor wirklich abschneidet.
+const MAX_TABS: usize = 10;
+
+fn tabs() -> &'static mut Vec<alloc::boxed::Box<Doc>> {
+    // SAFETY: ein Faden; die Entleihung endet in der rufenden Anweisung.
+    // Der leere Fall trifft genau einmal, beim allerersten Zugriff.
+    unsafe {
+        let p = core::ptr::addr_of_mut!(TABS);
+        if (*p).is_empty() {
+            (*p).push(alloc::boxed::Box::new(Doc::new()));
+        }
+        &mut *p
+    }
+}
+
+/// Der laufende Tab. **Geklemmt, nicht geprueft:** ein `ACTIVE`, das auf
+/// einen geschlossenen Tab zeigt, waere sonst eine Panik an einer Stelle, an
+/// der niemand sie erwartet.
+fn active() -> usize {
+    let n = tabs().len();
+    let a = unsafe { core::ptr::addr_of!(ACTIVE).read() };
+    if a >= n { n - 1 } else { a }
+}
+fn set_active(i: usize) {
+    unsafe { core::ptr::addr_of_mut!(ACTIVE).write(i) };
+}
 
 /// **Die Regel fuer beide: eine Entleihung je Anweisung.**
 ///
@@ -517,13 +606,12 @@ static mut DOC: Doc = Doc::new();
 /// Anweisung sind immer richtig; ein festgehaltenes `let d = doc_mut()` nur
 /// dann, wenn darin kein weiterer Aufruf steckt.
 fn doc() -> &'static Doc {
-    // SAFETY: ein Faden, und die Entleihung endet in dieser Anweisung —
-    // siehe die Regel oben.
-    unsafe { &*core::ptr::addr_of!(DOC) }
+    let a = active();
+    &tabs()[a]
 }
 fn doc_mut() -> &'static mut Doc {
-    // SAFETY: wie `doc`.
-    unsafe { &mut *core::ptr::addr_of_mut!(DOC) }
+    let a = active();
+    &mut tabs()[a]
 }
 
 /// Auf `cap` Bytes kuerzen, aber an einer ZEICHENgrenze.
@@ -970,6 +1058,17 @@ fn payload_str(len: usize) -> &'static str {
 fn scroll_y() -> i32 {
     doc().scroll_y
 }
+/// Wohin die Seite nach dem Laden rollt.
+///
+/// **Null fuer eine neue Seite** — sie faengt oben an. Der gemerkte Stand
+/// fuer einen Tab, der zurueckkommt: er wird beim Wechsel neu GEHOLT
+/// (`docs/plan/BROWSER_TABS.md` §A3 b), und ohne diese Zahl staende der Leser
+/// nach jedem Wechsel wieder ganz oben.
+fn scroll_after_load() {
+    let y = doc().scroll_want;
+    doc_mut().scroll_want = 0;
+    set_scroll(y);
+}
 fn set_scroll(y: i32) {
     doc_mut().scroll_y = y;
 }
@@ -1348,6 +1447,9 @@ fn nav_begin(engine: &Engine, method: &str, url: &str, body: &[u8], extra: &str,
 /// address bar keeps the URL that was ASKED for rather than one derived from
 /// a response we never got.
 fn nav_fail(url: &str) {
+    // Ein gemerkter Rollstand gehoert der Seite, die nicht kam — nicht der
+    // Fehlermeldung, die an ihrer Stelle steht.
+    doc_mut().scroll_want = 0;
     set_scroll(0);
     bump_content_gen("navigation");
     bump_nav_gen();
@@ -1461,7 +1563,7 @@ fn deliver_builtin(engine: &Engine, url: &str, html: &str, push_hist: bool) {
         doc_mut().nav_start_ms = now_ms();
         doc_mut().nav_reported = false;
     }
-    set_scroll(0);
+    scroll_after_load();
     bump_content_gen("navigation");
     bump_nav_gen();
     set_url(url);
@@ -1516,7 +1618,7 @@ fn nav_document_arrived(engine: &Engine) {
         nav_fail(&asked);
         return;
     }
-    set_scroll(0);
+    scroll_after_load();
     bump_content_gen("navigation");
     bump_nav_gen();
     // Relative sub-resources resolve against the URL the document came FROM,
@@ -3268,6 +3370,14 @@ fn subresources_cancel() {
         doc_mut().cssimg_job = -1;
     }
     doc_mut().cssimg_job_keys = None;
+    // Und was noch gar nicht gefragt wurde. **Die Schlange gehoert der Seite,
+    // die ersetzt wird**: sie stehen zu lassen hiesse, dass der neue Abruf
+    // sich die eine Kernel-Schlange mit den Bildern der alten Seite teilt —
+    // und ihre relativen Adressen wuerden gegen die NEUE Basis aufgeloest.
+    let d = doc_mut();
+    d.pending_imgs.clear();
+    d.pending_css_imgs.clear();
+    d.css_asked.clear();
 }
 
 /// Set the address + start fetching, WITHOUT touching history (reload,
@@ -3300,9 +3410,17 @@ fn post_url(engine: &Engine, url: &str, body: &[u8]) {
 
 /// Navigate the address bar's typed text (normalise scheme) — new entry.
 fn go(engine: &Engine, typed: &str) {
+    if let Some(abs) = typed_to_url(typed) {
+        nav_goto(engine, &abs);
+    }
+}
+
+/// Was die Adresszeile MEINT: eine Adresse, oder eine Suche daraus.
+/// `None` heisst „nichts eingegeben".
+fn typed_to_url(typed: &str) -> Option<String> {
     let t = typed.trim();
     if t.is_empty() {
-        return;
+        return None;
     }
     let abs = if selftest::matches(t) {
         selftest::URL.to_string()
@@ -3320,7 +3438,184 @@ fn go(engine: &Engine, typed: &str) {
         s.push_str(&q);
         s
     };
-    nav_goto(engine, &abs);
+    Some(abs)
+}
+
+// ── Tabs ───────────────────────────────────────────────────────────────
+
+/// Womit ein Tab beschriftet wird: der Titel, sonst der WIRT der Adresse,
+/// sonst „Neuer Tab".
+///
+/// Der Wirt und nicht die ganze Adresse. Ein Etikett wird hinten
+/// abgeschnitten, und bei Adressen ist vorne alles gleich — fuenf Tabs auf
+/// Wikipedia waeren fuenfmal `https://de.wikipedia.org/wi…`.
+fn tab_label(d: &Doc) -> String {
+    let full: &str = if !d.title.is_empty() {
+        &d.title
+    } else if d.url.is_empty() {
+        "Neuer Tab"
+    } else {
+        let after = d.url.split_once("://").map(|(_, r)| r).unwrap_or(&d.url);
+        after.split('/').next().unwrap_or(after)
+    };
+    // **Selbst kuerzen, denn sonst tut es niemand.** Der Compositor malt
+    // Text vom linken Rand seines Kastens aus und klemmt ihn nicht:
+    // `MaxWidth` begrenzt die Kiste, nicht die Glyphen. Was nicht
+    // hineinpasst, steht im NACHBARtab.
+    if full.chars().count() <= TAB_CHARS {
+        return full.to_string();
+    }
+    let mut out: String = full.chars().take(TAB_CHARS - 1).collect();
+    out.push('\u{2026}');
+    out
+}
+
+/// Einen Tab einfrieren: die Griffe zurueckgeben, den Rest fallen lassen.
+///
+/// **Ein eingefrorener Tab IST seine Wiederherstellungsbeschreibung.** Statt
+/// aufzuzaehlen, was alles weg muss — und beim naechsten neuen Feld eines zu
+/// vergessen —, wird das Dokument auf ein frisches gesetzt und nur
+/// zurueckgeschrieben, was ihn wiederherstellt. Genau die Klasse Fehler, die
+/// `Doc` abgeschafft hat („navigate() muss an zwanzig Statics denken"), waere
+/// hier sonst zurueck.
+///
+/// Der grosse Posten dabei ist der JS-Realm: ~973 KB je Sitzung, plus ihr
+/// Baum. Was bleibt, sind Kilobytes.
+fn tab_freeze() {
+    // Zuerst die Griffe: sie gehoeren dem Wirt, nicht dem Speicher, den wir
+    // gleich fallen lassen. Ein Stapel, der weiterlaeuft, nimmt der Seite,
+    // auf die gewechselt wird, die eine Abrufschlange weg.
+    nav_cancel();
+    subresources_cancel();
+    {
+        let d = doc_mut();
+        if d.font_job >= 0 {
+            unsafe { npk_http_cancel(d.font_job) };
+        }
+        for (_, h) in core::mem::take(&mut d.fetch_jobs) {
+            unsafe { npk_http_cancel(h) };
+        }
+    }
+    let (url, hist, hist_pos, y, title) = {
+        let d = doc();
+        (d.url.clone(), d.hist.clone(), d.hist_pos, d.scroll_y, d.title.clone())
+    };
+    let d = doc_mut();
+    *d = Doc::new();
+    d.edit.push_str(&url);
+    d.url = url;
+    d.hist = hist;
+    d.hist_pos = hist_pos;
+    d.title = title;
+    // Wo der Leser stand. `scroll_y` waere die falsche Stelle: das Laden
+    // setzt sie auf 0, und zwar zu Recht — eine neue Seite faengt oben an.
+    d.scroll_want = y;
+}
+
+/// Ein leerer Tab.
+///
+/// **Die Puffer muessen wirklich leer werden.** `HTML_BUF`/`CSS_BUF` gehoeren
+/// dem Programm, nicht der Seite; ein neuer Tab, der den Text des alten
+/// zeigt, waere genau die Verwechslung, gegen die `Doc` gebaut wurde.
+fn blank_document(engine: &Engine) {
+    unsafe {
+        core::ptr::addr_of_mut!(HTML_LEN).write(0);
+        core::ptr::addr_of_mut!(CSS_LEN).write(0);
+    }
+    engine.set_scripted_dom(None);
+    engine.set_hit_all(false);
+    bump_content_gen("tab-blank");
+    mark_dirty();
+}
+
+/// Die Seite des laufenden Tabs holen — der Weg zurueck aus dem Einfrieren.
+///
+/// Ein Tab ohne Verlauf legt seinen ersten Eintrag an; ein zurueckkehrender
+/// nicht, denn er steht schon darin.
+fn tab_load(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, page: &mut Page) {
+    // Der Zwischenspeicher haelt das Layout der vorigen Seite, das
+    // Formularmodell ihre Steuerelemente. Beide haengen an Zaehlern, die JE
+    // DOKUMENT laufen — nach einem Wechsel sagt ein Vergleich nichts mehr.
+    *cache = None;
+    *page = Page::new();
+    let u = doc().url.to_string();
+    if u.is_empty() {
+        blank_document(engine);
+        return;
+    }
+    if doc().hist.is_empty() {
+        nav_goto(engine, &u);
+    } else {
+        fetch_url(engine, &u);
+    }
+}
+
+/// Auf einen anderen Tab umschalten.
+fn tab_activate(engine: &Engine, i: usize, cache: &mut Option<(Layout, i32, i32, u32)>,
+                page: &mut Page) {
+    if i >= tabs().len() || i == active() {
+        return;
+    }
+    tab_freeze();
+    set_active(i);
+    tab_load(engine, cache, page);
+    mark_dirty();
+}
+
+/// Einen Tab oeffnen. `background` legt ihn nur AN.
+///
+/// Ein Hintergrundtab holt nichts: geholt wird, wenn ihn jemand ansieht. Der
+/// Grund steht im Kernel — `WORKER_COUNT = 1`, es laeuft ein Abruf zur Zeit,
+/// und ein Tab, den niemand liest, nimmt der Seite vor den Augen des Lesers
+/// die Leitung weg.
+fn tab_open(engine: &Engine, url: &str, background: bool,
+            cache: &mut Option<(Layout, i32, i32, u32)>, page: &mut Page) {
+    if tabs().len() >= MAX_TABS {
+        log("[beak] der Streifen ist voll — mehr als 10 Tabs passen nicht nebeneinander");
+        return;
+    }
+    let mut d = Box::new(Doc::new());
+    d.url.push_str(url);
+    d.edit.push_str(url);
+    tabs().push(d);
+    if background {
+        return;
+    }
+    let i = tabs().len() - 1;
+    tab_freeze();
+    set_active(i);
+    tab_load(engine, cache, page);
+    mark_dirty();
+}
+
+/// Einen Tab schliessen.
+fn tab_close(engine: &Engine, i: usize, cache: &mut Option<(Layout, i32, i32, u32)>,
+             page: &mut Page) {
+    let n = tabs().len();
+    if i >= n {
+        return;
+    }
+    // **Der letzte Tab IST das Fenster.** So macht es jeder Browser, und die
+    // Gegenrichtung waere ein Strg+W, das nichts tut — also ein Fenster, das
+    // sich mit der Tastatur nicht schliessen laesst.
+    if n == 1 {
+        unsafe {
+            let _ = npk_close_widget();
+        }
+        return;
+    }
+    let a = active();
+    if i == a {
+        // Die Griffe zurueck, bevor das Dokument faellt.
+        tab_freeze();
+    }
+    tabs().remove(i);
+    let last = tabs().len() - 1;
+    set_active(if i < a { a - 1 } else if i > a { a } else { i.min(last) });
+    if i == a {
+        tab_load(engine, cache, page);
+        mark_dirty();
+    }
 }
 
 /// A typed address that is not a URL becomes a web search. Marginalia is the
@@ -3632,6 +3927,15 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
     };
     if need_layout {
         *cache = Some((do_layout(engine, w as u32, state), w, h, cur_gen));
+        // Der Titel fuer den Streifen. **Hier und nicht beim Ankommen des
+        // Dokuments:** der Motor parst beim AUSLEGEN, also haelt er bis
+        // hierher noch den Baum der vorigen Seite — ein Tab haette den Namen
+        // der Seite getragen, von der man kam.
+        let t = engine.title().unwrap_or_default();
+        if t != doc().title {
+            doc_mut().title = t;
+            render_chrome();
+        }
         // Die Kaesten neu einsammeln — nur hier, nicht je Bild.
         let boxes = cache.as_ref().unwrap().0.element_rects();
         // Zuweisung, nicht `ptr::write`: die ueberschreibt OHNE den alten Wert
@@ -3930,6 +4234,7 @@ fn render_chrome() {
     let mut children = vec![
         menu,
         Widget::Divider,
+        tab_strip(),
         toolbar,
         Widget::Divider,
         Widget::Canvas {
@@ -4022,6 +4327,102 @@ const TOOLBAR_H: u16 = 44;
 const FIELD_H: u16 = 30;
 const NAV_BTN: u16 = 28;
 const NAV_BTN_RADIUS: u8 = 7;
+
+/// Der Streifen: 36 px, `SurfaceElevated`, Tabs unten buendig
+/// (`docs/spec/UI_REFRESH.md` §5.2 und §3 `tab`).
+const TABSTRIP_H: u16 = 36;
+const TAB_H: u16 = 30;
+/// **Feste Breite, nicht mitwachsend** (§3 `tab`). Ein Tab, der sich der
+/// Anzahl anpasst, braucht ein Etikett, das mitgeht — und die Schrift gehoert
+/// dem Compositor, eine App kann sie nicht messen.
+const TAB_W: u16 = 160;
+const TAB_BTN: u16 = 20;
+/// Wieviel Text in einen Tab passt, in Zeichen.
+///
+/// Gerechnet mit 7 px je Zeichen gegen `TextStyle::Body` (13 px). Das ist
+/// eine SCHAETZUNG und absichtlich zu hoch: ein zu kurzes Etikett ist ein
+/// Etikett, ein zu langes ist ein Fehler — der Compositor schneidet Text
+/// nicht ab, er malt ihn ueber den Nachbarn.
+const TAB_CHARS: usize = ((TAB_W - 16 - TAB_BTN - 4) / 7) as usize;
+
+/// Ein kleiner Knopf im Streifen: das `\u{d7}` eines Tabs, das `+` dahinter.
+fn tab_btn(icon: IconId, action: ActionId) -> Widget {
+    prefab::center_box(
+        Widget::Icon { id: icon, size: 12, modifiers: vec![Modifier::Tint(Token::OnSurfaceMuted)] },
+        vec![
+            Modifier::MinWidth(TAB_BTN),
+            Modifier::MaxWidth(TAB_BTN),
+            Modifier::MinHeight(TAB_BTN),
+            Modifier::Rounded(Radius::Sm.as_u8()),
+            Modifier::OnClick(action),
+            Modifier::Hover(vec![
+                Modifier::Background(Token::SurfaceHover),
+                Modifier::Rounded(Radius::Sm.as_u8()),
+            ]),
+        ],
+    )
+}
+
+/// Der Tabstreifen.
+///
+/// **Er steht immer da, auch bei einem Tab** — das `+` ist der einzige Ort,
+/// an dem ein zweiter entsteht, wenn man die Tastenfolge nicht kennt. 36 px
+/// dafuer sind der Preis, den jeder Browser zahlt.
+fn tab_strip() -> Widget {
+    let a = active();
+    let n = tabs().len();
+    let mut kids: Vec<Widget> = Vec::with_capacity(n + 1);
+    for i in 0..n {
+        let sel = i == a;
+        let label = tab_label(&tabs()[i]);
+        let mut m = vec![
+            Modifier::OnClick(ActionId(ACT_TAB_SEL + i as u32)),
+            Modifier::MinWidth(TAB_W),
+            Modifier::MaxWidth(TAB_W),
+            Modifier::MinHeight(TAB_H),
+            Modifier::PaddingXY { x: 8, y: 0 },
+            Modifier::Rounded(Radius::Md.as_u8()),
+        ];
+        // **Der aktive Tab traegt die Farbe des Inhalts darunter** (§3
+        // `tab`): er IST die Seite, der Streifen ist der Rahmen.
+        if sel {
+            m.push(Modifier::Background(Token::Surface));
+        } else {
+            m.push(Modifier::Hover(vec![
+                Modifier::Background(Token::SurfaceMuted),
+                Modifier::Rounded(Radius::Md.as_u8()),
+            ]));
+        }
+        kids.push(Widget::Row {
+            children: vec![
+                Widget::Text {
+                    content: label,
+                    style: TextStyle::Body,
+                    modifiers: vec![
+                        Modifier::Flex(1),
+                        Modifier::Tint(if sel { Token::OnSurface } else { Token::OnSurfaceMuted }),
+                    ],
+                },
+                tab_btn(IconId::X, ActionId(ACT_TAB_CLOSE + i as u32)),
+            ],
+            spacing: Spacing::Xs.as_u16(),
+            align: Align::Center,
+            modifiers: m,
+        });
+    }
+    kids.push(tab_btn(IconId::Plus, ActionId(ACT_TAB_NEW)));
+    kids.push(Widget::Spacer { flex: 1 });
+    Widget::Row {
+        children: kids,
+        spacing: Spacing::Xxs.as_u16(),
+        align: Align::End,          // unten buendig
+        modifiers: vec![
+            Modifier::MinHeight(TABSTRIP_H),
+            Modifier::Background(Token::SurfaceElevated),
+            Modifier::PaddingXY { x: 6, y: 0 },
+        ],
+    }
+}
 
 /// Navigation button — the design's `toolbar_button`: bare at rest,
 /// `SurfaceHover` fill under the cursor, accent tint while pressed.
@@ -4358,6 +4759,30 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
             mark_dirty();
             true
         }
+        // **Strg+T / Strg+W / Strg+1..9.** Strg+Tab gibt es NICHT, und das ist
+        // keine Nachlaessigkeit: `Event::Chord` traegt einen Buchstaben, und
+        // der Kernel baut ihn aus `KeyCode::Char` — `KeyCode::Tab` ist kein
+        // `Char` und kommt gar nicht erst an. Ziffern schon (jede druckbare
+        // Taste), also sind die Zahlen der Weg zu einem bestimmten Tab.
+        Event::Chord { letter: b't', .. } => {
+            tab_open(engine, "", false, cache, page);
+            true
+        }
+        Event::Chord { letter: b'w', .. } => {
+            tab_close(engine, active(), cache, page);
+            true
+        }
+        // `9` ist der LETZTE, nicht der neunte — so macht es jeder Browser,
+        // und bei zwanzig Tabs ist „der letzte" die einzige Zahl, die man
+        // ohne Zaehlen trifft.
+        Event::Chord { letter: b'9', .. } => {
+            tab_activate(engine, tabs().len() - 1, cache, page);
+            true
+        }
+        Event::Chord { letter: d @ b'1'..=b'8', .. } => {
+            tab_activate(engine, (d - b'1') as usize, cache, page);
+            true
+        }
         // Die Suchleiste ist offen: die Tasten gehoeren IHR. Sie kommen nur
         // hierher, wenn kein Textfeld des Compositors den Fokus hat — wer in
         // die Adresszeile klickt, tippt dort weiter, und das ist richtig so.
@@ -4488,6 +4913,23 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
                 unsafe {
                     let _ = npk_close_widget();
                 }
+                true
+            }
+            ACT_TAB_NEW => {
+                tab_open(engine, "", false, cache, page);
+                set_open_menu(0);
+                true
+            }
+            // Zwei Baender, kein Feld je Tab: der Streifen wird bei jeder
+            // Aenderung neu gebaut, also IST der Index der Tab.
+            id if (ACT_TAB_SEL..ACT_TAB_SEL + MAX_TABS as u32).contains(&id) => {
+                tab_activate(engine, (id - ACT_TAB_SEL) as usize, cache, page);
+                set_open_menu(0);
+                true
+            }
+            id if (ACT_TAB_CLOSE..ACT_TAB_CLOSE + MAX_TABS as u32).contains(&id) => {
+                tab_close(engine, (id - ACT_TAB_CLOSE) as usize, cache, page);
+                set_open_menu(0);
                 true
             }
             _ => false,
@@ -4746,8 +5188,33 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
             mark_dirty_scrolled();
             false
         }
+        // **Mittelklick auf einen Link: neuer Tab im Hintergrund.**
+        //
+        // Die Seite bekommt ihn NICHT. Ein Mittelklick ist `auxclick`, nicht
+        // `click`; ihn als `click` zuzustellen waere falscher, als ihn
+        // wegzulassen, denn ein Behandler, der `preventDefault` ruft, meint
+        // damit die linke Taste.
+        Event::MouseButton { button: MouseButton::Middle, down: true, x, y } => {
+            let Some((rx, ry, w, h)) = canvas_rect() else { return false };
+            if x < rx || x >= rx + w || y < ry || y >= ry + h {
+                return false;
+            }
+            let (cx, cy) = (x - rx, y - ry + scroll_y());
+            let href = match cache.as_ref() {
+                Some((lay, ..)) => lay.hit_test(cx, cy).map(|s| s.to_string()),
+                None => None,
+            };
+            let Some(href) = href else { return false };
+            let abs = resolve(url_str(), &href);
+            tab_open(engine, &abs, true, cache, page);
+            true
+        }
+        // **`npk_open` auf eine laufende Instanz.** Der Kernel nennt es
+        // „Singleton + tabs" — und genau das ist es jetzt: ein zweites
+        // Oeffnen ist ein Tab, kein Ersetzen dessen, was gerade dasteht.
         Event::Open(s) => {
-            go(engine, &s);
+            let Some(abs) = typed_to_url(&s) else { return false };
+            tab_open(engine, &abs, false, cache, page);
             true
         }
         _ => false,
@@ -4990,13 +5457,13 @@ pub extern "C" fn _start() {
     // Persistent paint buffer, reused across frames (see maybe_repaint).
     let mut paint_buf: Vec<u8> = Vec::new();
     // Image sources of the current page still to fetch, one per loop turn.
-    let mut pending_imgs: Vec<String> = Vec::new();
+
     // CSS images still to fetch, as (url_key, url). Filled from the layout.
-    let mut pending_css_imgs: Vec<(u64, String)> = Vec::new();
+
     // Every CSS image this page has already been asked for — including the
     // ones that failed. A miss must not be retried forever; the box simply
     // stays undecorated until the next navigation.
-    let mut css_asked: Vec<u64> = Vec::new();
+
     loop {
         // Drain the ENTIRE event queue this tick, THEN repaint once. Wheel
         // events used to be handled one-per-loop with a full repaint (and a
@@ -5079,10 +5546,12 @@ pub extern "C" fn _start() {
         // that layout and laid it out again. Two full layouts per navigation,
         // and on the device a layout is over five seconds.
         if images_dirty() {
-            pending_imgs = begin_images(&mut engine);
+            let q = begin_images(&mut engine);
             engine.css_images_begin();
-            pending_css_imgs.clear();
-            css_asked.clear();
+            let d = doc_mut();
+            d.pending_imgs = q;
+            d.pending_css_imgs.clear();
+            d.css_asked.clear();
         }
         maybe_repaint(&engine, &mut cache, &mut paint_buf, &page.state);
         // Die Schriften, die die Seite mitbringt. NACH dem ersten Auslegen:
@@ -5147,7 +5616,13 @@ pub extern "C" fn _start() {
         // needs (did a guessed box land, and is the picture even on screen),
         // and the clone happened every turn of the loop.
         let layout = cache.as_ref().map(|(l, _, _, _): &(Layout, i32, i32, u32)| l);
-        pump_images(&mut engine, &mut pending_imgs, layout, band);
+        // Die Schlange wird HERAUSgenommen und zurueckgelegt, statt sie
+        // liegend zu leihen: `pump_images` ruft selbst `doc()`, und eine
+        // gehaltene Referenz daneben waere die zweite Entleihung, vor der der
+        // Kommentar an `doc`/`doc_mut` warnt.
+        let mut q = core::mem::take(&mut doc_mut().pending_imgs);
+        pump_images(&mut engine, &mut q, layout, band);
+        doc_mut().pending_imgs = q;
         // The layout reports which CSS images it needs, so this queue can only
         // be filled AFTER a layout — unlike `<img>`, whose srcs are in the HTML
         // and are queued once by `begin_images`.
@@ -5159,6 +5634,8 @@ pub extern "C" fn _start() {
         // checking it re-requested all of them once a turn, for as long as the
         // page stayed open. Cleared on navigation, with the engine's cache.
         let mut css_adopted: Vec<u64> = Vec::new();
+        let mut css_asked = core::mem::take(&mut doc_mut().css_asked);
+        let mut pending_css_imgs = core::mem::take(&mut doc_mut().pending_css_imgs);
         if let Some((l, _, _, _)) = cache.as_ref() {
             for (k, u) in &l.css_image_srcs {
                 if css_asked.contains(k) {
@@ -5187,6 +5664,8 @@ pub extern "C" fn _start() {
         }
         let layout = cache.as_ref().map(|(l, _, _, _): &(Layout, i32, i32, u32)| l);
         pump_css_images(&engine, &mut pending_css_imgs, layout, band);
+        doc_mut().css_asked = css_asked;
+        doc_mut().pending_css_imgs = pending_css_imgs;
         // ALWAYS yield so this worker core can halt — a cooperative fiber that
         // never sleeps pins its core at 100%. A short nap while interacting
         // stays responsive; a longer one when idle keeps the core asleep.
@@ -5201,8 +5680,8 @@ pub extern "C" fn _start() {
                 || font_job() >= 0;
             let busy = had_event
                 || waiting
-                || !pending_imgs.is_empty()
-                || !pending_css_imgs.is_empty();
+                || !doc().pending_imgs.is_empty()
+                || !doc().pending_css_imgs.is_empty();
             let nap = if busy { 4 } else { 16 };
             let _ = npk_sleep(nap);
         }

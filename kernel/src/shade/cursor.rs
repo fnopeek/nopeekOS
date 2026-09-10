@@ -339,6 +339,17 @@ impl MouseState {
     pub fn right_clicked(&self) -> bool {
         (self.buttons & 2) != 0 && (self.prev_buttons & 2) == 0
     }
+    /// Die mittlere Taste. Beide Zeigerwege liefern sie schon: die PS/2-Maske
+    /// ist `b0 & 0x07`, das HID-Boot-Protokoll hat sie auf demselben Bit —
+    /// niemand hat bisher nur danach gefragt. Der Browser tut es: ein
+    /// Mittelklick auf einen Link ist „in neuem Tab oeffnen", und ohne diese
+    /// Taste gibt es die Geste gar nicht.
+    pub fn middle_clicked(&self) -> bool {
+        (self.buttons & 4) != 0 && (self.prev_buttons & 4) == 0
+    }
+    pub fn middle_released(&self) -> bool {
+        (self.buttons & 4) == 0 && (self.prev_buttons & 4) != 0
+    }
     pub fn left_held(&self) -> bool { (self.buttons & 1) != 0 }
     pub fn right_held(&self) -> bool { (self.buttons & 2) != 0 }
     #[allow(dead_code)]

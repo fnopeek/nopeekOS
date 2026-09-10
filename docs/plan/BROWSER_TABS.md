@@ -1,5 +1,11 @@
 # BROWSER_TABS.md — Tabs, und was der Browser sonst noch braucht
 
+> **Stand 2026-09-10, beak 0.163.0 / Kernel 0.336.0: Schritt 1-3 und 5 sind
+> gebaut.** Ein `Vec<Box<Doc>>` mit `ACTIVE`, ein Streifen, Strg+T/W/1-9,
+> Mittelklick, `npk_open` → Tab. Gefahren ist Entwurf **(b)**: EIN lebendiger
+> Motor, der Rest eingefroren — Schritt 3 ist damit erledigt, nur mit LRU = 1
+> statt 2-3. Was offen bleibt, steht in **A9** ganz unten.
+
 > Offenes Papier, 2026-09-10, beak 0.150.0 / Kernel 0.332.0.
 > Florians Auftrag: „überleg dir, wie wir tabs implementieren. und welche
 > features unser browser sonst noch braucht."
@@ -290,6 +296,66 @@ Was er an ABI braucht: nichts. Was er an Verhalten braucht:
 
 **Schritt 1 ist mehr als die Hälfte der Arbeit und liefert für sich genommen
 noch keinen einzigen Tab.** Das muss man vorher wissen und aushalten.
+
+## A9. Was 0.163.0 wirklich gebaut hat — und was nicht
+
+Nachgetragen am Bau, nicht vorher geplant. Drei Dinge kamen anders.
+
+**Der Zaehler ist angekommen.** `static mut` in `tools/wasm/beak/src/lib.rs`:
+77 (0.151.0) → 46 → 23. Die 23 sind keine Reste, sondern vier Gruppen mit
+einem Grund, der eine zweite Seite ueberlebt: 13 Abholpuffer, 3 fuer den
+BILDPUFFER (`LAST_W/H/SY` — der Puffer ist einer), 3 fuer den Skriptdeckel
+(es laeuft ein Stueck Seitencode), 3 fuer Fenster und Werkzeug. Plus `TABS`.
+
+**Schritt 2 („alle Tabs lebendig") ist uebersprungen worden, und das war
+richtig.** Der Entwurf sah ihn als Zwischenstufe vor; am Baum ist er gar nicht
+baubar: der Motor haelt EINEN Baum, EIN Stilblatt und die Bilder EINER Seite,
+und `HTML_BUF`/`CSS_BUF` sind je ein Puffer. „Alle lebendig" heisst also N
+Motoren — mehr Arbeit als (b), nicht weniger. Gegangen wurde direkt (b).
+
+**Schritt 4 ist keiner mehr.** `visibilityState`/`hidden`/`hasFocus` sagen
+weiter „sichtbar", und das ist **wahr geblieben, nur aus einem anderen
+Grund**: ein Hintergrundtab ist eingefroren, hat also gar keine JS-Sitzung —
+wer fragt, ist der sichtbare Tab. Die Begruendung im Kommentar von
+`js/dombind.rs` ist entsprechend ausgetauscht, samt dem Tag, an dem sie
+ablaeuft. Damit entfaellt auch die Zeitgeber-Drosselung aus A5: ein
+eingefrorener Tab hat keine Zeitgeber.
+
+**Was der Kernel dazu brauchte** (`kernel+module beak:`): der Compositor hat
+Links und Rechts an Apps zugestellt, **die mittlere Taste nie** — obwohl
+beide Zeigerwege sie liefern (`b0 & 0x07` bei PS/2, dasselbe Bit im
+HID-Boot-Protokoll) und `MouseButton::Middle` seit je im ABI steht. Ohne sie
+gaebe es „Link in neuem Tab oeffnen" ueberhaupt nicht. Bewusst OHNE
+Treffertest: ein Mittelklick ist keine zweite Art, einen Knopf zu druecken,
+und ihn auf `hit_test` zu legen liesse jeden Knopf im System darauf
+reagieren.
+
+**Nebenbefund beim Umbau, und er kostete Speicher:** `ptr::write`
+ueberschreibt OHNE den alten Wert fallen zu lassen. `GEOM` wurde so
+geschrieben — also blieb bei JEDER Neuauslegung der vorige `Vec<ElemRect>`
+liegen (gemessen: 2123 Kaesten a 32 B = 66 KB auf der Wikipedia-Hauptseite),
+und `hit_all` steht genau auf den Seiten MIT Skripten an, also auf denen, die
+am oeftesten neu auslegen. Dasselbe in `subresources_cancel`. Als
+Feldzuweisung faellt der alte Wert, wie er soll.
+
+### Offen, in der Reihenfolge, in der es weh tut
+
+1. **Der Streifen rollt nicht.** Zehn Tabs a 160 px sind 1600 px; der elfte
+   schoebe das `+` aus dem Fenster, also ist bei zehn Schluss. Was das hebt,
+   ist ein `Widget::Scroll` mit `Axis::Horizontal` — der einzige Kasten, den
+   der Compositor wirklich abschneidet. Damit faellt zugleich die zweite
+   Kruecke: das Etikett wird heute auf 17 Zeichen gekuerzt, gerechnet mit
+   7 px je Zeichen, weil eine App die Schrift des Compositors nicht messen
+   kann und ueberstehender Text in den NACHBARN gemalt wuerde.
+2. **Skriptzustand ueberlebt den Wechsel nicht** — der benannte Preis von
+   (b). Formularwerte auch nicht: `forms.rs` kennt sie, aber `Page` ist eine
+   Schleifenvariable und wird beim Wechsel neu gebaut. Sie zu retten ist ein
+   Feld in `Doc` und die kleinste sichtbare Verbesserung, die hier steht.
+3. **Kein „Tab wiederherstellen"** (Strg+Shift+T) und keine Reihenfolge per
+   Ziehen.
+4. **LRU 2-3 lebendige Tabs** braucht mehrere Motoren — §A3, unveraendert.
+5. `WORKER_COUNT` 2 — §A6, unveraendert. Heute serialisiert sich das von
+   selbst: ein Hintergrundtab holt NICHTS, er wird nur angelegt.
 
 ---
 
