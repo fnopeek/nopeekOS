@@ -875,7 +875,7 @@ PASS	CSS2/clear-applies-to-008.xht
 PASS	CSS2/clear-clearance-calculation-004.xht
 PASS	CSS2/clear-default-inheritance-001.xht
 PASS	CSS2/clear-float-002.xht
-FAIL	CSS2/clear-float-003.xht
+PASS	CSS2/clear-float-003.xht
 PASS	CSS2/clear-initial-001.xht
 PASS	CSS2/clear-on-replaced-element.html
 PASS	CSS2/clip-004.xht
@@ -2286,9 +2286,9 @@ PASS	CSS2/margin-collapse-clear-008.xht
 PASS	CSS2/margin-collapse-clear-009.xht
 PASS	CSS2/margin-collapse-clear-016.xht
 PASS	CSS2/margin-collapse-min-height-001.html
-FAIL	CSS2/margin-collapse-min-height-001.xht
+PASS	CSS2/margin-collapse-min-height-001.xht
 PASS	CSS2/margin-collapse-min-height-002.html
-FAIL	CSS2/margin-collapse-min-height-002.xht
+PASS	CSS2/margin-collapse-min-height-002.xht
 PASS	CSS2/margin-collapse-min-height-003.html
 PASS	CSS2/margin-inline-002.xht
 PASS	CSS2/margin-left-004.xht
