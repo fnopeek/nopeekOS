@@ -271,6 +271,12 @@ pub struct FormState {
     pub focus: Option<u32>,
     /// Caret position in the focused control's value, as a byte offset.
     pub caret: usize,
+    /// Angefangene UTF-8-Folge. **Ein Tastendruck traegt ein BYTE, und `ä`
+    /// sind zwei** — das erste allein ist noch kein Zeichen und darf nicht in
+    /// den Wert, sonst stuende dort kein gueltiges UTF-8. Fuer ASCII bleibt
+    /// der Puffer immer leer.
+    pub pending: [u8; 4],
+    pub pending_len: u8,
 }
 
 impl FormState {

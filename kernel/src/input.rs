@@ -80,7 +80,9 @@ impl KeyEvent {
 
     /// True if this is a printable character (not a special key).
     pub fn is_printable(&self) -> bool {
-        matches!(self.key, KeyCode::Char(c) if c >= 0x20 && c < 0x7F)
+        // Ab 0x80 ist es ein Stueck einer UTF-8-Folge — also Text, auch
+        // wenn es allein kein Zeichen ist. 0x7F (DEL) ist keiner.
+        matches!(self.key, KeyCode::Char(c) if c >= 0x20 && c != 0x7F)
     }
 
     /// True if Mod (Super) key is held.

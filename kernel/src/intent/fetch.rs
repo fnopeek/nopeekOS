@@ -99,7 +99,7 @@ enum Work {
         from_reach: Option<http::Reach>,
     },
     /// A batch, multiplexed per host exactly as `npk_http_request_many` does.
-    Many { urls: Vec<String>, cap: usize, from_reach: Option<http::Reach> },
+    Many { urls: Vec<String>, cookies: Vec<String>, cap: usize, from_reach: Option<http::Reach> },
 }
 
 /// What came back. `error` empty means it worked.
@@ -173,13 +173,14 @@ pub(crate) fn begin_many(
     owner: u32,
     caller_core: usize,
     urls: Vec<String>,
+    cookies: Vec<String>,
     cap: usize,
     from_reach: Option<http::Reach>,
 ) -> Result<i32, &'static str> {
     if urls.is_empty() || urls.len() > MAX_URLS {
         return Err("bad url list");
     }
-    submit(owner, caller_core, cap, Work::Many { urls, cap, from_reach })
+    submit(owner, caller_core, cap, Work::Many { urls, cookies, cap, from_reach })
 }
 
 fn submit(
@@ -492,8 +493,8 @@ fn run(slot: usize, work: Work) -> Reply {
                 },
             }
         }
-        Work::Many { urls, cap, from_reach } => {
-            let bodies = http::https_get_many(&urls, cap, from_reach);
+        Work::Many { urls, cookies, cap, from_reach } => {
+            let bodies = http::https_get_many(&urls, &cookies, cap, from_reach);
             // Packed here rather than at `take`, so the guest side is a plain
             // copy: bodies back to back, one length each, and one that would
             // overrun the budget is DROPPED rather than truncated — half an
