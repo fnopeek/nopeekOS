@@ -198,6 +198,14 @@ fn span_token_at(spans: &[super::abi::Span], off: usize, default: Token) -> Toke
     default
 }
 
+/// Die Farb-Laeufe aus `Modifier::Spans`, oder leer.
+fn spans_of(mods: &[super::abi::Modifier]) -> &[super::abi::Span] {
+    for m in mods {
+        if let super::abi::Modifier::Spans(v) = m { return v }
+    }
+    &[]
+}
+
 /// Sum every `Modifier::Padding` in the effective list. Mirrors
 /// `layout::padding` so leaf glyph placement matches the layout-side
 /// outer-size growth — a single canonical source for "how much
@@ -621,9 +629,62 @@ fn paint_node_eff(
             let focused = edit_state.is_some();
             let text_x = inner_x + 4;   // built-in chrome + the node's padding
             let text_y = inner_y + 4;
+            // **Die Auswahl UNTER dem Text, vor den Glyphen.** Ziehen,
+            // Shift+Pfeil und Strg+C arbeiteten hier laengst — nur sah man
+            // nichts davon, weil die `Input` als einziges Textfeld ihre
+            // Auswahl nie gemalt hat. Eine Auswahl, die es gibt und die man
+            // nicht sieht, ist schlimmer als keine: man markiert, kopiert und
+            // weiss nicht, was in der Ablage liegt. Dieselbe Rechnung und
+            // dasselbe Token wie in `TextArea` weiter unten.
+            let sel = edit_state.and_then(|e| e.selection());
+            if let (Some((a, b)), false) = (sel, live_value.is_empty()) {
+                let (a, b) = (a.min(live_value.len()), b.min(live_value.len()));
+                if b > a {
+                    let ax = ceil_u32_local(
+                        crate::gui::text::measure(&live_value[..a], INPUT_STYLE));
+                    let w = ceil_u32_local(
+                        crate::gui::text::measure(&live_value[a..b], INPUT_STYLE));
+                    let line_h = ceil_u32_local(crate::gui::text::line_height(INPUT_STYLE));
+                    rast.rect(target, Rect { x: text_x + ax as i32, y: text_y,
+                                             w: w.max(2), h: line_h },
+                              Fill::Solid(Token::AccentMuted));
+                }
+            }
             if !live_value.is_empty() {
-                rast.text(target, live_value, INPUT_STYLE, Token::OnSurface,
-                          Point { x: text_x, y: text_y });
+                // `Modifier::Spans` faerbt LAEUFE des Textes — die
+                // Adresszeile hebt damit die registrierbare Domain hervor
+                // und blendet den Rest ab. Ohne Spannen bleibt es der eine
+                // billige Aufruf von vorher.
+                let spans = spans_of(eff);
+                if spans.is_empty() {
+                    rast.text(target, live_value, INPUT_STYLE, Token::OnSurface,
+                              Point { x: text_x, y: text_y });
+                } else {
+                    // In Laeufe gleicher Farbe zerlegen und einzeln setzen —
+                    // dieselbe Rechnung wie in `TextArea`. Gemessen wird je
+                    // Lauf, damit der naechste dort anfaengt, wo der vorige
+                    // wirklich endete.
+                    let mut x = text_x;
+                    let mut run_start = 0usize;
+                    let mut run_tok = span_token_at(spans, 0, Token::OnSurface);
+                    for (b, _) in live_value.char_indices() {
+                        let tok = span_token_at(spans, b, Token::OnSurface);
+                        if tok != run_tok && b > run_start {
+                            let seg = &live_value[run_start..b];
+                            rast.text(target, seg, INPUT_STYLE, run_tok,
+                                      Point { x, y: text_y });
+                            x += ceil_u32_local(
+                                crate::gui::text::measure(seg, INPUT_STYLE)) as i32;
+                            run_start = b;
+                        }
+                        run_tok = tok;
+                    }
+                    let tail = &live_value[run_start..];
+                    if !tail.is_empty() {
+                        rast.text(target, tail, INPUT_STYLE, run_tok,
+                                  Point { x, y: text_y });
+                    }
+                }
             } else if !focused {
                 // Placeholder is a hint, not content — faint, like the design.
                 rast.text(target, placeholder.as_str(), INPUT_STYLE,

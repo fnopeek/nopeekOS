@@ -210,6 +210,7 @@ fn _modifier_wire_position(m: &Modifier) -> usize {
         Modifier::Autofocus         => 29,
         Modifier::FontSize(_)       => 30,
         Modifier::CanvasOffset { .. } => 31,
+        Modifier::Spans(_)            => 32,
     }
 }
 

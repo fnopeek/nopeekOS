@@ -1649,6 +1649,66 @@ use core::sync::atomic::{AtomicU32, Ordering};
 /// Window id (+1) whose focused text widget is being drag-selected; 0 = none.
 static TEXT_DRAG: AtomicU32 = AtomicU32::new(0);
 
+/// Der letzte Klick in ein Textfeld: `(Tick, x, y, Fenster, Zaehler)`.
+///
+/// Daraus wird der Doppel- und Dreifachklick abgeleitet. Die Uhr ist
+/// `interrupts::ticks()` mit 100 Hz — 10 ms je Schritt, und ein Doppelklick
+/// wird in Zehntelsekunden gemessen, nicht in Millisekunden.
+static LAST_CLICK: Mutex<Option<(u64, i32, i32, u32, u8)>> = Mutex::new(None);
+
+/// Zeitfenster fuer den naechsten Klick derselben Reihe: 40 Ticks = 400 ms.
+/// Dasselbe, was jede Oberflaeche seit dreissig Jahren nimmt.
+const MULTI_CLICK_TICKS: u64 = 40;
+/// Wie weit der Zeiger dabei wandern darf. Ohne diese Grenze wird aus zwei
+/// Klicks an verschiedenen Stellen ein Doppelklick, und die Auswahl springt.
+const MULTI_CLICK_SLOP: i32 = 4;
+
+/// Der wievielte Klick dieser Reihe ist das? 1 = einzeln, 2 = doppelt,
+/// 3 = dreifach (danach faengt es wieder bei 1 an).
+///
+/// **Wird bei JEDEM Druck gerufen, auch ausserhalb eines Textfelds** — sonst
+/// zaehlt eine Reihe weiter, die laengst woanders stattfindet.
+pub fn click_run_at(window_id: u32, x: i32, y: i32) -> u8 { click_run(window_id, x, y) }
+
+fn click_run(window_id: u32, x: i32, y: i32) -> u8 {
+    let now = crate::interrupts::ticks();
+    let mut last = LAST_CLICK.lock();
+    let n = match *last {
+        Some((t, lx, ly, w, n))
+            if w == window_id
+                && now.saturating_sub(t) <= MULTI_CLICK_TICKS
+                && (x - lx).abs() <= MULTI_CLICK_SLOP
+                && (y - ly).abs() <= MULTI_CLICK_SLOP => (n % 3) + 1,
+        _ => 1,
+    };
+    *last = Some((now, x, y, window_id, n));
+    n
+}
+
+/// Die Wortgrenzen um `at` herum.
+///
+/// Ein „Wort" ist ein Lauf gleichartiger Zeichen: entweder alles
+/// Buchstaben/Ziffern/`_`, oder alles andere. Genau so trennt jeder Browser
+/// und jeder Editor, und fuer eine ADRESSE ist es die richtige Regel: ein
+/// Doppelklick auf `arcade` in `https://www.arcade.ch/media/x.jpg` gibt
+/// `arcade` und nicht die halbe Zeile, weil Punkt und Schraegstrich zur
+/// anderen Klasse gehoeren.
+fn word_bounds(s: &str, at: usize) -> (usize, usize) {
+    let b = s.as_bytes();
+    if b.is_empty() { return (0, 0) }
+    let wordish = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80;
+    // Steht der Zeiger hinter dem letzten Zeichen, gehoert er zum Zeichen
+    // DAVOR — sonst waehlt ein Doppelklick am Zeilenende nichts aus.
+    let at = at.min(b.len());
+    let probe = if at >= b.len() { b.len() - 1 } else { at };
+    let want = wordish(b[probe]);
+    let mut lo = probe;
+    while lo > 0 && wordish(b[lo - 1]) == want { lo -= 1; }
+    let mut hi = probe + 1;
+    while hi < b.len() && wordish(b[hi]) == want { hi += 1; }
+    (clamp_boundary(s, lo), clamp_boundary(s, hi))
+}
+
 #[inline]
 fn ceil_u32(v: f32) -> u32 { let i = v as u32; if v > i as f32 { i + 1 } else { i } }
 
@@ -1780,6 +1840,45 @@ pub fn text_select_begin(window_id: u32, x: i32, y: i32) -> bool {
         crate::shade::request_render();
     }
     began
+}
+
+/// Ein Doppel- oder Dreifachklick: das WORT unter dem Zeiger auswaehlen,
+/// beim dritten Klick die ganze Zeile.
+///
+/// Kein eigener Zieh-Zustand — die Auswahl steht danach fest, und das
+/// Loslassen laesst sie in Ruhe (`text_select_end` raeumt nur eine
+/// zusammengefallene Auswahl weg, und eine Wortauswahl ist keine).
+///
+/// `run` ist das Ergebnis von [`click_run`]: 2 = Wort, 3 = alles.
+pub fn text_select_run(window_id: u32, x: i32, y: i32, run: u8) -> bool {
+    let ok = {
+        let mut scenes = SCENES.lock();
+        let scene = match scenes.get_mut(&window_id) { Some(s) => s, None => return false };
+        let off = match offset_at(scene, x, y, true) { Some(o) => o, None => return false };
+        match scene.input_edit.as_mut() {
+            Some(edit) => {
+                let (a, b) = if run >= 3 {
+                    (0, edit.value.len())
+                } else {
+                    word_bounds(&edit.value, clamp_boundary(&edit.value, off))
+                };
+                if b <= a { return false }
+                edit.sel_anchor = Some(a);
+                edit.cursor = b;
+                true
+            }
+            None => false,
+        }
+    };
+    if ok {
+        // Der Zieh-Zustand bleibt AUS: ein Doppelklick waehlt, er zieht nicht.
+        TEXT_DRAG.store(0, Ordering::Release);
+        caret_follow_scroll(window_id);
+        rerender_state_only(window_id);
+        mark_dirty(window_id);
+        crate::shade::request_render();
+    }
+    ok
 }
 
 /// Move the caret (selection's moving end) to (x,y). Returns true if it

@@ -385,6 +385,21 @@ pub enum Modifier {
     /// the rect shows. The compositor clamps it to the overhang, so it can
     /// never push the content out of view. Ignored on every other widget.
     CanvasOffset { x: i32, y: i32 },
+    /// Farbige LAEUFE ueber den Text eines `Widget::Input`, in Byte-
+    /// Offsets — dasselbe, was `Widget::TextArea.spans` fuer den Editor tut.
+    ///
+    /// **Wofuer es gebaut wurde: die Adresszeile.** Ein Browser hebt die
+    /// registrierbare Domain hervor und blendet den Rest ab, und das ist
+    /// keine Zierde, sondern die Anti-Phishing-Anzeige: in
+    /// `https://paypal.com.betrug.ru/login` heisst die Domain `betrug.ru`,
+    /// und ohne die Hervorhebung liest das Auge das erste, was wie ein Name
+    /// aussieht. Die App rechnet die Spanne selbst aus (beak nimmt die echte
+    /// Public Suffix List) — der Baukasten faerbt nur, was ihm gesagt wird,
+    /// und weiss nichts von URLs.
+    ///
+    /// Nicht abgedeckte Bytes behalten die Vorgabefarbe. Ueberlappende oder
+    /// unsortierte Spannen sind erlaubt; die spaetere gewinnt.
+    Spans(alloc::vec::Vec<Span>),
     // Appended only.
 }
 
