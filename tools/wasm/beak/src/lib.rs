@@ -317,8 +317,15 @@ const MAX_CSS_LINKS: usize = 64;
 static mut CSS_BUF: [u8; CSS_CAP] = [0; CSS_CAP];
 static mut CSS_LEN: usize = 0;
 
-// Scratch buffer to fetch one <img>'s bytes into before decoding.
-const IMG_FETCH_CAP: usize = 6 * 1024 * 1024;
+// Scratch buffer a whole BATCH of <img> bytes arrives in before decoding.
+//
+// It is shared by `IMG_BATCH` images at once, so it was never "6 MB per
+// picture" — it was 1.5. A single press photograph is bigger than that, and it
+// would have failed with `n == 0`, which used to say nothing at all. The
+// kernel bounds what all pending answers may reserve together
+// (`MAX_RESERVED_BYTES`, 64 MB); 24 MB here leaves room for a document (3) +
+// stylesheets (8) + scripts (8) in flight beside it.
+const IMG_FETCH_CAP: usize = 24 * 1024 * 1024;
 /// A REQUEST backstop, not a memory bound. Memory is bounded one layer down,
 /// where it can be measured: the engine keeps a per-page budget of decoded
 /// BGRA and refuses anything over it, plus a per-image pixel cap. Counting
@@ -2873,17 +2880,21 @@ fn images_arrived(
     let mut moved = false;
     for ((src, url), (off, n)) in want.iter().zip(spans) {
         if n == 0 {
-            continue; // failed or did not fit → keeps its placeholder
+            // Nicht stillschweigend: eine Anfrage, die scheiterte, und eine,
+            // deren Antwort nicht in den Puffer passte, sehen hier gleich aus
+            // — und die zweite ist ein Deckel von UNS.
+            log(&alloc::format!("[beak] image not delivered (request failed or over {} KiB buffer) — {}",
+                IMG_FETCH_CAP / 1024, src));
+            continue;
         }
         let bytes = unsafe { core::slice::from_raw_parts(dst.add(off) as *const u8, n) };
         // Decode now, drop the compressed bytes — and keep the pixels under
         // their url so the next navigation to this page needs neither.
-        if !engine.add_image_cached(src, url, bytes) {
-            // Undecodable, or past the page's pixel budget. Either way the
-            // box keeps its placeholder, and a picture that silently does not
-            // appear is the kind of bug that gets blamed on layout for weeks.
-            log(&alloc::format!("[beak] image dropped ({} B): undecodable or over budget — {}",
-                n, src));
+        if let Err(why) = engine.add_image_cached(src, url, bytes) {
+            // Der Grund gehoert IN die Meldung. „nicht dekodierbar oder ueber
+            // dem Budget" schickte eine ganze Sitzung hinter einen
+            // JPEG-Dekoder her, der nie schuld war — es war das Budget.
+            log(&alloc::format!("[beak] image dropped ({n} B): {why} — {src}"));
             continue;
         }
         arrived.push(src.as_str());
@@ -2982,14 +2993,14 @@ fn css_images_arrived(
     let mut arrived: Vec<u64> = Vec::new();
     for ((key, url), (off, n)) in want.iter().zip(spans) {
         if n == 0 {
-            continue; // failed or did not fit → the box stays undecorated
+            log(&alloc::format!("[beak] background not delivered (request failed or over {} KiB buffer) — {}",
+                IMG_FETCH_CAP / 1024, url));
+            continue; // the box stays undecorated
         }
         let bytes = unsafe { core::slice::from_raw_parts(dst.add(off) as *const u8, n) };
-        if engine.add_css_image_cached(*key, url, bytes) {
-            arrived.push(*key);
-        } else {
-            log(&alloc::format!("[beak] background dropped ({} B): undecodable or over budget — {}",
-                n, url));
+        match engine.add_css_image_cached(*key, url, bytes) {
+            Ok(()) => arrived.push(*key),
+            Err(why) => log(&alloc::format!("[beak] background dropped ({n} B): {why} — {url}")),
         }
     }
     if arrived.is_empty() {

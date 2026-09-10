@@ -438,6 +438,7 @@ fn translate_op_list(ops: &mut [DrawOp], dx: i32, dy: i32) {
         match op {
             DrawOp::Rect { x, y, .. }
             | DrawOp::RoundRect { x, y, .. }
+            | DrawOp::Check { x, y, .. }
             | DrawOp::Shadow { x, y, .. }
             | DrawOp::Text { x, y, .. }
             | DrawOp::Image { x, y, .. } => {
@@ -602,6 +603,15 @@ fn clip_ops(ops: &mut Vec<DrawOp>, start: usize, cl: i32, ct: i32, cr: i32, cb: 
                     if nx1 > nx && ny1 > ny {
                         ops.push(DrawOp::Rect { x: nx, y: ny, w: nx1 - nx, h: ny1 - ny, color });
                     }
+                }
+            }
+            // Ganz oder gar nicht, wie der weiche Schatten: die Deckung des
+            // Hakens entsteht beim Malen, und ein halber Haken waere ein
+            // anderes Zeichen. Ein Kaestchen ist 13 px gross — ein Abschnitt,
+            // der es zerschneidet, verdeckt es ohnehin fast ganz.
+            DrawOp::Check { x, y, w, h, .. } => {
+                if x >= cl && y >= ct && x + w <= cr && y + h <= cb {
+                    ops.push(op);
                 }
             }
             // Kept whole when it overlaps, like `Image`: the layer's origin
@@ -919,6 +929,16 @@ pub enum DrawOp {
     /// Kept apart from `Rect` so the plain case stays one `memory.copy` per
     /// row — the rounded one has to walk its corner rows.
     RoundRect { x: i32, y: i32, w: i32, h: i32, r: [f32; 4], color: Rgba, ring: f32 },
+    /// Der Haken eines angekreuzten Kaestchens: zwei Striche im Kasten
+    /// `x,y,w,h`.
+    ///
+    /// Eigener Befehl aus demselben Grund wie `Shadow` — seine Deckung
+    /// entsteht erst beim Malen. Ein Haken aus Rechtecken ist eine Treppe,
+    /// und bei 13 px sieht man jede Stufe. Vorher stand hier ein gefuelltes
+    /// QUADRAT, und das ist nicht bloss haesslich: ein Haken und ein Punkt
+    /// sind die zwei Zeichen, an denen man ein Kaestchen von einem
+    /// Radioknopf unterscheidet.
+    Check { x: i32, y: i32, w: i32, h: i32, color: Rgba },
     /// A decoded image, scaled to `w`×`h` at blit time.
     /// An `<img>` box. Carries the `src` KEY, not the decoded pixels: the
     /// rasteriser looks the image up when it paints, and draws a placeholder
@@ -1007,6 +1027,7 @@ fn op_bottom(op: &DrawOp) -> i32 {
         DrawOp::Text { y, size, .. } => y + ceil_i32(*size),
         DrawOp::Rect { y, h, .. }
         | DrawOp::RoundRect { y, h, .. }
+        | DrawOp::Check { y, h, .. }
         | DrawOp::Image { y, h, .. }
         | DrawOp::Gradient { y, h, .. }
         | DrawOp::BgImage { y, h, .. } => y + h,
@@ -1470,6 +1491,7 @@ fn op_key(op: &DrawOp) -> OpKey {
         DrawOp::BgImage { x, y, w, h, .. } => OpKey { kind: 4, x: *x, y: *y, a: *w, b: *h },
         DrawOp::Shadow { x, y, w, h, .. } => OpKey { kind: 5, x: *x, y: *y, a: *w, b: *h },
         DrawOp::Gradient { x, y, w, h, .. } => OpKey { kind: 6, x: *x, y: *y, a: *w, b: *h },
+        DrawOp::Check { x, y, w, h, .. } => OpKey { kind: 7, x: *x, y: *y, a: *w, b: *h },
     }
 }
 
@@ -4469,6 +4491,7 @@ family: st.family,
             ghost,
             placeholder: el.attr("placeholder").unwrap_or("").to_string(),
             checked: self.forms.checked_or(el.seq, el.attr("checked").is_some()),
+            disabled: el.attr("disabled").is_some(),
             focused,
             caret,
             bg: st.bg,
@@ -5023,6 +5046,7 @@ family: st.family,
                 DrawOp::Text { color, .. }
                 | DrawOp::Rect { color, .. }
                 | DrawOp::Shadow { color, .. }
+                | DrawOp::Check { color, .. }
                 | DrawOp::RoundRect { color, .. } => *color = f.apply(*color),
                 DrawOp::Image { filter, .. } => {
                     let inner = (*filter as usize).checked_sub(1).map(|i| table[i]);
@@ -8295,6 +8319,7 @@ family: st.family,
                 DrawOp::Text { x, y, .. }
                 | DrawOp::Rect { x, y, .. }
                 | DrawOp::RoundRect { x, y, .. }
+                | DrawOp::Check { x, y, .. }
                 | DrawOp::Shadow { x, y, .. }
                 | DrawOp::Image { x, y, .. } => {
                     *x += dx;
@@ -9146,6 +9171,11 @@ struct CtlBox {
     /// bring it back, and the repaint has no element to ask.
     placeholder: String,
     checked: bool,
+    /// `disabled` — und das ist eine ANZEIGE, nicht bloss ein Zustand. Ein
+    /// gesperrter Knopf, der aussieht wie ein bedienbarer, ist eine falsche
+    /// Auskunft: der Benutzer klickt und nichts passiert. Jeder Browser
+    /// blasst ihn ab; beak malte ihn bis hierher unveraendert.
+    disabled: bool,
     focused: bool,
     /// Caret position in characters, when this control has keyboard focus.
     caret: Option<usize>,
@@ -9308,6 +9338,25 @@ fn mix(a: Rgb, b: Rgb, t: u32) -> Rgb {
     Rgb(f(a.0, b.0), f(a.1, b.1), f(a.2, b.2))
 }
 
+/// Ein abgeblendetes Thema: alles, was Farbe traegt, zur Flaeche hin gemischt.
+///
+/// **Ein Regler, nicht acht Sonderfaelle.** `disabled` blasst Rahmen,
+/// Beschriftung, Haken und Punkt gemeinsam ab; wer das an jeder Malstelle
+/// einzeln entscheidet, laesst eine davon kraeftig stehen und merkt es erst
+/// auf einer echten Seite. Chromium malt seine gesperrten Steuerelemente mit
+/// 30 % Deckung ueber der Flaeche — das ist dieser Wert.
+fn dimmed(t: &Theme) -> Theme {
+    const D: u32 = 165;
+    Theme {
+        bg: t.bg,
+        text: mix(t.text, t.bg, D),
+        heading: mix(t.heading, t.bg, D),
+        link: mix(t.link, t.bg, D),
+        muted: mix(t.muted, t.bg, D),
+        rule: mix(t.rule, t.bg, D),
+    }
+}
+
 /// Paint one control's chrome + text at (x, top) and record its hit rect.
 /// The UA palette to draw a form control's chrome from, given the colour its
 /// text inherited. `theme` is used as-is when the two agree, so a page that
@@ -9374,7 +9423,21 @@ fn paint_control(
     // control's own inherited text colour: light text means a dark surface
     // behind it, and dark text a light one.
     let theme = &surface_palette(theme, ctl.style.color.c);
-    let border = Rgba::opaque(if ctl.focused { theme.link } else { mix(theme.rule, theme.text, 40) });
+    let theme = &if ctl.disabled { dimmed(theme) } else { theme.clone() };
+    // Die Beschriftung traegt die Farbe des ELEMENTS, nicht die des Themas —
+    // sie geht am Regler oben vorbei und muss einzeln mit.
+    let ink: Rgba = if ctl.disabled {
+        Rgba { c: mix(ctl.style.color.c, theme.bg, 165), a: ctl.style.color.a }
+    } else { ctl.style.color };
+    // **Der Rahmen ist das, woran man ein Steuerelement erkennt.** Er kam aus
+    // `theme.rule` (der Linienfarbe einer Tabelle, #dee2e6) und war damit auf
+    // Weiss fast unsichtbar — jedes Feld und jeder Knopf sah aus wie ein
+    // hellgrauer Fleck. Ein Browser malt hier `ButtonBorder`, ein sattes
+    // #767676, und der Wert steht nicht als Konstante da, weil beak ein
+    // dunkles Thema hat: 150/255 zwischen Flaeche und Textfarbe ergibt auf
+    // Weiss #7c7c7c und auf Dunkel dasselbe Mittelgrau von der anderen Seite
+    // ([[feedback_dark_mode_is_two_things]]).
+    let border = Rgba::opaque(if ctl.focused { theme.link } else { mix(theme.bg, theme.text, 150) });
     let round = ctl.radius.iter().any(|r| *r > 0.5);
     // Eine gerundete Ecke kann nicht aus vier Rechtecken bestehen. Solange alle
     // vier Seiten dieselbe Breite und Farbe haben — bei Knoepfen und Feldern
@@ -9414,10 +9477,14 @@ fn paint_control(
         Some(c) => Some(c),
         None if ctl.no_face => None,
         None => Some(match ctl.kind {
-            // Buttons get a raised face; text fields stay flat like the page.
+            // Ein Knopf hat eine erhabene Flaeche (`ButtonFace`, #efefef);
+            // ein Feld und ein Kaestchen sind WEISS (`Field`), nicht
+            // hellgrau. Der alte Wert mischte auch in ein Textfeld einen
+            // Grauschleier, und eine Maske aus zwanzig Feldern sah dadurch
+            // aus wie eine gesperrte.
             ControlKind::Submit | ControlKind::Reset | ControlKind::Button | ControlKind::File
-            | ControlKind::Select => mix(theme.bg, theme.text, 28).into(),
-            _ => mix(theme.bg, theme.text, 8).into(),
+            | ControlKind::Select => mix(theme.bg, theme.text, 18).into(),
+            _ => theme.bg.into(),
         }),
     };
 
@@ -9443,14 +9510,25 @@ fn paint_control(
         // anderen ausschliesst.
         ControlKind::Radio if !ctl.appearance_none => {
             let r = [(w.min(h) as f32) / 2.0; 4];
-            if let Some(face) = face {
-                ops.push(DrawOp::RoundRect { x, y: top, w, h, r, color: face, ring: 0.0 });
+            // Angekreuzt bleibt die Flaeche HELL — der Ring und der Punkt
+            // darin nehmen die Farbe an. Nebeneinander gestellt malt
+            // Chromium genau das (Ring, weisser Zwischenraum, Punkt), und
+            // nicht die gefuellte Scheibe, die man dabei vor Augen hat.
+            if let Some(f) = face {
+                ops.push(DrawOp::RoundRect { x, y: top, w, h, r, color: f, ring: 0.0 });
             }
             bg_img(ops);
             let bw = ctl.border[0].w.max(1) as f32;
-            ops.push(DrawOp::RoundRect { x, y: top, w, h, r, color: border, ring: bw });
+            // **Der Ring war grau, auch wenn der Knopf gewaehlt war.** Das
+            // war der eigentliche Fehler: der Unterschied zwischen „gewaehlt"
+            // und „nicht gewaehlt" lag allein am Punkt in der Mitte.
+            let ring_color = if ctl.checked { Rgba::from(theme.link) } else { border };
+            ops.push(DrawOp::RoundRect { x, y: top, w, h, r, color: ring_color, ring: bw });
             if ctl.checked {
-                let i = (w / 4).max(2);
+                // Chromium malt in einen 13-px-Knopf einen Punkt von 6 px —
+                // etwas mehr als ein Viertel Einzug, mit sichtbarer heller
+                // Luft zum Ring.
+                let i = (w / 4).max(3);
                 let (iw, ih) = (w - 2 * i, h - 2 * i);
                 ops.push(DrawOp::RoundRect {
                     x: x + i, y: top + i, w: iw, h: ih,
@@ -9460,20 +9538,25 @@ fn paint_control(
             }
         }
         ControlKind::Checkbox if !ctl.appearance_none => {
-            if let Some(face) = face {
-                face_op(ops, face);
-            }
-            bg_img(ops);
-            frame(ops);
-            if ctl.checked {
-                let i = (w / 4).max(2);
-                ops.push(DrawOp::Rect {
-                    x: x + i,
-                    y: top + i,
-                    w: w - 2 * i,
-                    h: h - 2 * i,
-                    color: theme.link.into(),
-                });
+            // Angekreuzt: das Kaestchen wird die Farbe, und darauf steht ein
+            // HAKEN. Vorher stand hier ein gefuelltes Quadrat auf heller
+            // Flaeche — dasselbe Zeichen wie beim Radioknopf, nur eckig, und
+            // damit war die Form nicht mehr die Auskunft.
+            if ctl.checked && ctl.bg.is_none() && !ctl.no_face {
+                face_op(ops, theme.link.into());
+                bg_img(ops);
+                ops.push(DrawOp::Check { x, y: top, w, h, color: theme.bg.into() });
+            } else {
+                if let Some(face) = face {
+                    face_op(ops, face);
+                }
+                bg_img(ops);
+                frame(ops);
+                // Die Seite hat die Flaeche selbst gesetzt — dann bleibt der
+                // Haken die Vordergrundfarbe, nicht die des Themas.
+                if ctl.checked {
+                    ops.push(DrawOp::Check { x, y: top, w, h, color: ctl.style.color });
+                }
             }
         }
         _ => {
@@ -9505,7 +9588,7 @@ fn paint_control(
                 let inner_w = (w - ctl.pad_l - CTL_PAD_X - 2).max(1) as f32;
                 let rows = ((h - 2 * CTL_PAD_Y - 2) / lh.max(1)).max(1);
                 let mut ly = top + CTL_PAD_Y + 1;
-                let color = if ctl.ghost { theme.muted.into() } else { ctl.style.color };
+                let color = if ctl.ghost { theme.muted.into() } else { ink };
                 for line in wrap_lines(font, &ctl.text, ctl.style.size, inner_w, rows as usize) {
                     ops.push(DrawOp::Text {
                         x: tx,
@@ -9550,7 +9633,7 @@ family: ctl.style.family,
                     x: tx,
                     y: ty,
                     size: ctl.style.size,
-                    color: if ctl.ghost { theme.muted.into() } else { ctl.style.color },
+                    color: if ctl.ghost { theme.muted.into() } else { ink },
                     bold: ctl.style.bold,
                     italic: ctl.style.italic,
                     mono: ctl.style.mono,

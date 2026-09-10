@@ -28,6 +28,7 @@ pub mod ico;
 pub mod image;
 pub mod js;
 pub mod webp;
+pub mod woff;
 pub mod woff2;
 pub mod layout;
 pub mod picture;

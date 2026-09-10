@@ -23,9 +23,43 @@ pub struct Image {
 /// attribute exactly as written in the HTML (the shell stores them so).
 pub type ImageMap = HashMap<String, Rc<Image>>;
 
-/// Cap on decoded pixels per image — skip decoding anything larger so a single
-/// huge asset can't exhaust the shell heap (it degrades to a placeholder).
-pub(crate) const MAX_PIXELS: usize = 4_000_000; // ~16 MB BGRA
+/// Cap on decoded pixels per ONE image — a decompression bomb declares
+/// 40000×40000 in a header of 30 bytes, and this is where that is refused
+/// before anything is allocated for it.
+///
+/// It is NOT a memory policy: `zeroed` fails gracefully and the heap grows.
+/// So it belongs far above any picture a camera or a screen produces — a phone
+/// photograph is 12 MP and a 4K screenshot 8.3 MP, and the old 4 MP refused
+/// both. 32 MP is 8000×4000.
+pub(crate) const MAX_PIXELS: usize = 32_000_000;
+
+/// Why an image did not make it into the store.
+///
+/// The two cases look identical in code (`decode` gave `None`, or the budget
+/// said no) and are opposite at the device: one is a picture we cannot read,
+/// the other a limit WE set on a picture that is perfectly fine. Reporting
+/// them as one sentence — "undecodable or over budget" — sent a whole session
+/// after a JPEG decoder that was never at fault
+/// ([[feedback_a_denial_and_a_timeout_are_two_failures]]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reject {
+    /// No decoder took the bytes: unsupported format, or malformed data.
+    Undecodable,
+    /// Decoded fine; the page's remaining pixel budget could not hold it.
+    OverBudget { need: usize, left: usize },
+}
+
+impl core::fmt::Display for Reject {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Reject::Undecodable => f.write_str("nicht dekodierbar"),
+            Reject::OverBudget { need, left } => write!(
+                f, "ueber dem Seitenbudget ({} KiB gebraucht, {} KiB frei)",
+                need / 1024, left / 1024
+            ),
+        }
+    }
+}
 
 /// Allocate `n` zeroed bytes WITHOUT aborting on OOM — `try_reserve` returns
 /// `Err` instead of calling `handle_alloc_error`, so an oversize image degrades
@@ -419,8 +453,6 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
     }
 }
 
-/// Total decoded-pixel budget across a page — once exceeded, further images
-/// stay placeholders so an image-heavy page can't exhaust the shell heap.
 // ── Pixel budgets ───────────────────────────────────────────────────────────
 //
 // These used to be four slices of a `static mut HEAP: [u8; 128 MB]` — shares of
@@ -430,14 +462,28 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
 // believing a page is legitimate: a document may not make us decode an
 // unbounded number of pixels just by asking.
 //
-// So they are set far above any measured real page — a Wikipedia article's
-// images come to a few MB — and **every clip says so in the log**. The next
-// real page that hits one will tell us, instead of silently losing a picture.
+// **They were set from a guess, and the guess was under a normal page.**
+// arcade.ch — a Swiss IT company's front page, 5.3 MB of pictures on the wire —
+// decodes to 131 MB of BGRA across 50 images. The budget ran out after #49 and
+// dropped the last two logos. Nothing on that page is unreasonable: eleven
+// 1152×1152 PNGs and three 1920×1080 headers, each painted into a box a few
+// hundred pixels wide. That is what today's CMS ships.
+//
+// So the numbers are now what they claim to be — an anti-abuse ceiling, an
+// order of magnitude above the worst REAL page measured, not a memory policy.
+// The memory policy is one layer down and can be measured there: `zeroed`
+// uses `try_reserve` and degrades to a placeholder, and the heap grows.
+// **Every clip still says so in the log, and now it says WHICH clip** (see
+// `Reject`) — the next real page that hits one will tell us.
+//
 // They stay four rather than one because a page full of icons must not be able
 // to starve its `<img>`s, or the reverse.
 
 /// Decoded BGRA one page's `<img>`s may hold.
-pub(crate) const TOTAL_BUDGET: usize = 128 * 1024 * 1024;
+///
+/// 131 MB measured on arcade.ch, so 128 MB was BELOW the normal case. A page
+/// that wants more than a gigabyte of pixels is no longer a page.
+pub(crate) const TOTAL_BUDGET: usize = 1024 * 1024 * 1024;
 
 /// Decoded BGRA the cross-navigation cache may hold for
 /// `background-image`/`mask-image` layers.
@@ -445,20 +491,21 @@ pub(crate) const TOTAL_BUDGET: usize = 128 * 1024 * 1024;
 /// Half of what the `<img>` cache gets, because backgrounds are sprites and
 /// icons rather than photographs — and counted SEPARATELY from it, because two
 /// stores sharing one constant would hold twice the memory the number says.
-pub(crate) const CSS_CACHE_BUDGET: usize = 16 * 1024 * 1024;
+pub(crate) const CSS_CACHE_BUDGET: usize = 64 * 1024 * 1024;
 
 /// Decoded BGRA the cross-navigation `<img>` cache may hold.
 ///
 /// The pictures a live page is still using cost nothing here (`Rc`), so this
 /// bounds only what NO page holds any more — the price of going back being
 /// free. Measured on the device: four navigations across two Wikipedia pages
-/// filled 3 MB of it.
-pub(crate) const IMG_CACHE_BUDGET: usize = 32 * 1024 * 1024;
+/// filled 3 MB of it — but ONE arcade.ch is 131 MB, and a cache that cannot
+/// hold a single page it just left buys nothing on the way back.
+pub(crate) const IMG_CACHE_BUDGET: usize = 256 * 1024 * 1024;
 
 /// Decoded BGRA one page's `background-image`/`mask-image` layers may hold.
 /// Smaller than the `<img>` one on purpose: these are icons and tiles, and a
 /// page's whole icon set is a few hundred KB.
-pub(crate) const CSS_BUDGET: usize = 32 * 1024 * 1024;
+pub(crate) const CSS_BUDGET: usize = 256 * 1024 * 1024;
 
 /// Decode a batch of (src, bytes) into an `ImageMap` (failures / over-budget →
 /// skipped, they render as placeholders).

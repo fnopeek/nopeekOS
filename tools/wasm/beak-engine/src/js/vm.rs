@@ -347,7 +347,15 @@ impl Vm {
                     // schriebe eine gleichnamige Bindung weiter aussen.
                     i.bind_here(n, v, &env);
                 } else {
-                    i.init_binding(n, v, &env);
+                    // Ein `var` ist hier laengst hochgezogen; die Zeile
+                    // ZUWEIST nur noch (ES §VariableStatement: PutValue).
+                    // Dieselbe Regel wie im Baumlaeufer, und sie muss hier
+                    // ein zweites Mal stehen, weil die zweite Maschine ihren
+                    // eigenen Weg hat
+                    // ([[feedback_the_second_engine_only_runs_where_the_first_one_called]]):
+                    // `init_binding` legte eine zweite Bindung neben die auf
+                    // dem globalen Objekt, und `window.X` blieb undefined.
+                    i.vm_store(n, v, &env)?;
                 }
                 if !*mutable {
                     i.make_const(n, &env);

@@ -1636,6 +1636,26 @@ fn build_event(i: &mut Interp, proto: Gc, kind: &str, trusted: bool) -> Gc {
     ev
 }
 
+/// Die Felder, die `initEvent` setzt — als Rust-Funktion, damit
+/// `initCustomEvent` sie NICHT ein zweites Mal aufschreibt
+/// ([[feedback_a_copy_is_a_second_semantics_waiting]]).
+///
+/// DOM §initEvent setzt die Abbruch-Fahnen ausdruecklich ZURUECK: dasselbe
+/// Objekt darf ein zweites Mal zugestellt werden.
+fn init_event_fields(ev: &Gc, kind: &str, bubbles: bool, cancelable: bool) {
+    let hidden = |v: Value| Prop { value: Some(v), get: None, set: None,
+        writable: true, enumerable: false, configurable: true };
+    let mut b = ev.borrow_mut();
+    b.define(EV_TYPE, hidden(Value::str(kind)));
+    b.define(EV_BUBBLES, hidden(Value::Bool(bubbles)));
+    b.define(EV_CANCELABLE, hidden(Value::Bool(cancelable)));
+    b.define(EV_PREVENTED, hidden(Value::Bool(false)));
+    b.define(EV_STOP, hidden(Value::Bool(false)));
+    b.define(EV_STOPIMM, hidden(Value::Bool(false)));
+    b.define(EV_TARGET, hidden(Value::Null));
+    b.define(EV_TRUSTED, hidden(Value::Bool(false)));
+}
+
 /// `new Event(art, {bubbles, cancelable})` — das zweite Argument.
 fn apply_event_init(i: &mut Interp, ev: &Gc, init: &Value) -> C<()> {
     if !matches!(init, Value::Obj(_)) { return Ok(()) }
@@ -3419,6 +3439,40 @@ pub fn install(realm: &mut Realm) {
         d.nodes[id as usize].text = s;
         Ok(wrap(i, id))
     }, 1, &fp);
+    // `document.createEvent` — die Fassung von DOM Level 2, und sie steht
+    // immer noch in ausgeliefertem Code: die Einwilligungsschicht auf
+    // arcade.ch baut damit JEDES ihrer Ereignisse (`registerEvent`), und der
+    // ganze `DOMContentLoaded`-Behandler der Seite starb an diesem EINEN
+    // fehlenden Aufruf — die Navigation blieb ungestaltet zurueck.
+    //
+    // Der Chromium-Zensus zaehlt drei Aufrufe auf zwoelf Zielseiten. Das
+    // entscheidet die GROESSE, nicht das Ob
+    // ([[feedback_a_call_count_is_not_a_site_count]]): gebaut wird die
+    // Namenstabelle der Spezifikation fuer die Schnittstellen, die es hier
+    // WIRKLICH gibt — und fuer jede andere die Absage, die DOM §createEvent
+    // dafuer vorsieht, statt einer Huelle, die beim naechsten `init…`-Aufruf
+    // ohnehin stirbt.
+    meth(&document_proto, "createEvent", |i, _, a| {
+        let want = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_lowercase();
+        let custom = want == "customevent";
+        // Die Tabelle ist case-insensitiv, und die Namen im Plural sind die
+        // aelteren Schreibweisen desselben Eintrags.
+        if !custom && !matches!(&*want, "event" | "events" | "htmlevents" | "svgevents") {
+            return i.type_err(&alloc::format!(
+                "createEvent: die Schnittstelle '{want}' gibt es in dieser Engine nicht"));
+        }
+        let proto = if custom {
+            match i.get(&Value::Obj(i.realm.global.clone()), "CustomEvent")
+                   .and_then(|c| i.get(&c, "prototype")) {
+                Ok(Value::Obj(o)) => o, _ => i.realm.event_proto.clone(),
+            }
+        } else {
+            i.realm.event_proto.clone()
+        };
+        // So gebaut ist es NICHT initialisiert: die Art bleibt leer, bis
+        // `initEvent` sie setzt. Genau dafuer gibt es die zwei Aufrufe.
+        Ok(Value::Obj(build_event(i, proto, "", false)))
+    }, 1, &fp);
     meth(&document_proto, "createElementNS", |i, _, a| {      // 180
         let s = i.to_string(a.get(1).unwrap_or(&Value::Undefined))?;
         let lower = s.to_lowercase();
@@ -4507,6 +4561,26 @@ pub fn install(realm: &mut Realm) {
         }
         Ok(Value::Undefined)
     }, 0, &fp2);
+    // `initEvent(art, blasen, abbrechbar)` — der Partner von `createEvent`.
+    //
+    // Zwei Dinge stehen ausdruecklich in DOM §initEvent und sind beide der
+    // Grund, warum es nicht bloss drei Zuweisungen sind: ein Ereignis, das
+    // gerade ZUGESTELLT wird, laesst sich nicht mehr umbenennen (sonst
+    // wechselt es mitten in der Kette die Art), und der Aufruf setzt die
+    // Abbruch-Fahnen ZURUECK — dasselbe Objekt darf ein zweites Mal benutzt
+    // werden.
+    meth(&event_proto, "initEvent", |i, t, a| {
+        let Value::Obj(o) = &t else { return i.type_err("initEvent: kein Ereignis") };
+        // `eventPhase != NONE` ist die Zustellfahne der Spezifikation.
+        if !matches!(i.get(&t, EV_PHASE)?, Value::Num(0.0)) {
+            return Ok(Value::Undefined);
+        }
+        let kind = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let bubbles = a.get(1).map(|v| v.truthy()).unwrap_or(false);
+        let cancelable = a.get(2).map(|v| v.truthy()).unwrap_or(false);
+        init_event_fields(o, &kind, bubbles, cancelable);
+        Ok(Value::Undefined)
+    }, 3, &fp2);
     meth(&event_proto, "composedPath", |i, t, _| {
         let tgt = i.get(&t, EV_TARGET)?;
         let Ok(id) = node_of(i, &tgt) else { return Ok(i.new_array(Vec::new())) };
@@ -4548,6 +4622,22 @@ pub fn install(realm: &mut Realm) {
         ev.borrow_mut().define(EV_DETAIL, Prop::data(detail));
         Ok(Value::Obj(ev))
     }, "CustomEvent", 1, true);
+    // Der Partner von `createEvent("CustomEvent")` — ohne ihn haette der
+    // Zweig oben ein Objekt geliefert, das seine `detail` nie bekommt.
+    meth(&custom_proto, "initCustomEvent", |i, t, a| {
+        let Value::Obj(o) = &t else { return i.type_err("initCustomEvent: kein Ereignis") };
+        if !matches!(i.get(&t, EV_PHASE)?, Value::Num(0.0)) {
+            return Ok(Value::Undefined);
+        }
+        let kind = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let bubbles = a.get(1).map(|v| v.truthy()).unwrap_or(false);
+        let cancelable = a.get(2).map(|v| v.truthy()).unwrap_or(false);
+        init_event_fields(o, &kind, bubbles, cancelable);
+        let detail = a.get(3).cloned().unwrap_or(Value::Null);
+        o.borrow_mut().define(EV_DETAIL, Prop { value: Some(detail), get: None, set: None,
+            writable: true, enumerable: false, configurable: true });
+        Ok(Value::Undefined)
+    }, 4, &fp2);
     custom_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(custom_proto.clone())));
     custom_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(custom_ctor.clone())));
     custom_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("CustomEvent")));
