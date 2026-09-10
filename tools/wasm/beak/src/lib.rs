@@ -292,17 +292,137 @@ fn toggle_menu(which: u8) {
 // ── Persistent state (static buffers — no heap growth across page loads) ───
 
 const URL_CAP: usize = 4096;
-static mut URL_BUF: [u8; URL_CAP] = [0; URL_CAP];
-static mut URL_LEN: usize = 0;
-/// Was in der Adresszeile STEHT — nicht, woher das Dokument kam.
+
+/// **Was DIESEM Dokument gehoert — und nicht dem Programm.**
 ///
-/// **Zwei verschiedene Dinge, und sie waren ein Puffer.** Jeder Tastendruck
-/// in der Zeile schrieb `URL_BUF`, und damit (a) die Basis, gegen die die
-/// laufende Seite ihre relativen Adressen aufloest, und (b) den
-/// Netzkontext, den der Kernel fuer sie fuehrt. Beides gehoert dem geladenen
-/// Dokument, nicht dem Textfeld.
-static mut EDIT_BUF: [u8; URL_CAP] = [0; URL_CAP];
-static mut EDIT_LEN: usize = 0;
+/// Der erste Schritt zu Tabs, und er zahlt sich schon bei einem aus
+/// (`docs/plan/BROWSER_TABS.md` §A2). beak hielt seinen Zustand in
+/// siebenundsiebzig `static mut`, und die grosse Mehrheit davon beschreibt
+/// das eine geladene Dokument. Solange das so ist, gibt es keinen zweiten
+/// Ort, an dem eine zweite Seite stehen koennte — ein Tabstrip waere nur
+/// Fassade.
+///
+/// Der Gewinn ist aber nicht erst der zweite Tab: **0.147.0 war genau diese
+/// Klasse Fehler.** `URL_BUF` war die Adresse des DOKUMENTS *und* der Inhalt
+/// des Textfelds, und daraus wurde ein Datenschutzfehler (jedes Praefix
+/// einer Eingabe ging an den DNS) plus ein Loch in der Reichweiten-Grenze.
+/// Zwei Felder in einer Struktur koennen nicht derselbe Puffer sein.
+///
+/// Gewandert wird gruppenweise, und nach jeder Gruppe muessen
+/// `beak:selftest` und WPT unveraendert sein.
+///
+/// **Der Zaehler, und er darf nur fallen:**
+///
+///     grep -c '^static mut ' tools/wasm/beak/src/lib.rs
+///     0.151.0:  77          <- vorher
+///     0.152.0:  46          <- Adresse, Verlauf, Navigation, Ladevorgang
+///
+/// Was noch draussen steht, gehoert grosszuegig gerechnet in drei Gruppen:
+/// die Ansicht (`GEOM`, `LAST_W/H`, `DIRTY`, `NEED_FULL`, `LAST_VP`), die
+/// Nebenabrufe (`IMG_JOB*`, `CSSIMG_JOB*`, `FONT_JOB`, `FETCH_JOBS`,
+/// `IMAGES_DIRTY`) und das, was WIRKLICH dem Programm gehoert und bleiben
+/// soll: die Abholpuffer (`HTML_BUF`, `CSS_BUF`, `IMG_FETCH_BUF` …, rund
+/// 47 MB `.bss`) und die einmaligen Log-Fahnen.
+struct Doc {
+    /// Woher das Dokument KAM (nach Weiterleitungen). Basis fuer jede
+    /// relative Adresse der Seite und der Netzkontext, den der Kernel fuehrt.
+    url: String,
+    /// Was in der Adresszeile STEHT. Nur Text — kein Netzkontext, kein DNS.
+    edit: String,
+    /// Zurueck/Vorwaerts. War ein festes Feld aus 64 × 4 KB (256 KB `.bss`),
+    /// das je Tab noch einmal dagestanden haette.
+    hist: Vec<String>,
+    hist_pos: usize,
+
+    // ── Der Ladevorgang dieses Dokuments ────────────────────────────────
+    /// Der laufende Abruf, oder -1.
+    nav_job: i32,
+    /// Welche Stufe der Kette gerade laeuft.
+    nav_stage: NavStage,
+    /// Die Adresse, die der laufende Abruf VERLANGT hat — nicht die, aus der
+    /// er am Ende kam.
+    nav_url: Option<String>,
+    nav_push_hist: bool,
+    /// Beginn der laufenden Stufe, fuer die Zeitzeilen im Log.
+    nav_stage_ms: i64,
+    /// Zaehlt jede Navigation. Woran haengende Rueckrufe erkennen, dass sie
+    /// zu einer Seite gehoeren, die es nicht mehr gibt.
+    nav_gen: u32,
+    nav_start_ms: i64,
+    nav_reported: bool,
+    /// Zaehlt jede Aenderung am Inhalt — die Zahl, an der das Layout haengt.
+    content_gen: u32,
+    /// Wie weit die Seite gerollt ist.
+    scroll_y: i32,
+
+    // ── Die Teilabrufe des Ladevorgangs ─────────────────────────────────
+    // Blaetter, Skripte, Module: jede Stufe fuehrt Buch darueber, was sie
+    // verlangt hat und in welcher Runde sie steht. Das gehoert zum LADEN
+    // EINES Dokuments — zwei Tabs, die gleichzeitig laden, brauchen zwei
+    // davon, und mit einer Static waeren es zwei Seiten auf einem Zettel.
+    nav_css_count: usize,
+    nav_scripts: Option<Vec<PendingScript>>,
+    /// Die JS-Sitzung DIESER Seite.
+    js: Option<beak_engine::js::Session>,
+    nav_js_count: usize,
+    nav_mod_entries: Option<Vec<String>>,
+    nav_mod_want: Option<Vec<String>>,
+    nav_mod_rounds: usize,
+    nav_css_urls: Option<Vec<String>>,
+    nav_css_parts: Option<Vec<(String, Vec<u8>, bool)>>,
+    nav_css_want: Option<Vec<(usize, String)>>,
+    nav_css_rounds: usize,
+    nav_sheet_nodes: Option<Vec<u32>>,
+    nav_sheet_rounds: usize,
+}
+
+impl Doc {
+    const fn new() -> Doc {
+        Doc {
+            url: String::new(), edit: String::new(), hist: Vec::new(), hist_pos: 0,
+            nav_job: -1, nav_stage: NavStage::Doc, nav_url: None, nav_push_hist: false,
+            nav_stage_ms: 0, nav_gen: 0, nav_start_ms: 0, nav_reported: true,
+            content_gen: 0, scroll_y: 0,
+            nav_css_count: 0, nav_scripts: None, js: None, nav_js_count: 0, nav_mod_entries: None, nav_mod_want: None, nav_mod_rounds: 0, nav_css_urls: None, nav_css_parts: None, nav_css_want: None, nav_css_rounds: 0, nav_sheet_nodes: None, nav_sheet_rounds: 0,
+        }
+    }
+}
+
+static mut DOC: Doc = Doc::new();
+
+/// **Die Regel fuer beide: eine Entleihung je Anweisung.**
+///
+/// beak ist ein einziger Faden, es gibt also keinen zweiten Zugriff — aber
+/// „einfaedig" ist nicht dasselbe wie „aliasfrei". Diese Referenzen kommen
+/// aus einem `unsafe`-Deref und fallen damit aus der Buchhaltung des
+/// Rechners: er wuerde `let d = doc_mut(); … doc().x …` durchgehen lassen,
+/// und das sind zwei gleichzeitige Entleihungen auf dasselbe Objekt. Auf
+/// `&mut` ist das undefiniert, nicht bloss unschoen.
+///
+/// Praktisch heisst das: `doc().feld` und `doc_mut().feld = …` als GANZE
+/// Anweisung sind immer richtig; ein festgehaltenes `let d = doc_mut()` nur
+/// dann, wenn darin kein weiterer Aufruf steckt.
+fn doc() -> &'static Doc {
+    // SAFETY: ein Faden, und die Entleihung endet in dieser Anweisung —
+    // siehe die Regel oben.
+    unsafe { &*core::ptr::addr_of!(DOC) }
+}
+fn doc_mut() -> &'static mut Doc {
+    // SAFETY: wie `doc`.
+    unsafe { &mut *core::ptr::addr_of_mut!(DOC) }
+}
+
+/// Auf `cap` Bytes kuerzen, aber an einer ZEICHENgrenze.
+///
+/// Der Vorgaenger kopierte `min(len, cap)` rohe Bytes in einen festen Puffer;
+/// traf das mitten in ein Zeichen, war der Inhalt kein gueltiges UTF-8 mehr
+/// und `from_utf8(...).unwrap_or("")` machte daraus eine LEERE Adresse.
+fn clip(s: &str, cap: usize) -> &str {
+    if s.len() <= cap { return s }
+    let mut n = cap;
+    while n > 0 && !s.is_char_boundary(n) { n -= 1; }
+    &s[..n]
+}
 
 const HTML_CAP: usize = 3 * 1024 * 1024;
 static mut HTML_BUF: [u8; HTML_CAP] = [0; HTML_CAP];
@@ -445,7 +565,6 @@ static mut EVENT_BUF: [u8; EVENT_BUF_SIZE] = [0; EVENT_BUF_SIZE];
 
 static mut RECT_BUF: [u8; 16] = [0; 16];
 
-static mut SCROLL_Y: i32 = 0;
 static mut DIRTY: bool = true; // page content needs a repaint
 /// Die Kaesten des letzten Layouts, fuer `getBoundingClientRect` & Co.
 ///
@@ -484,11 +603,9 @@ fn set_url(s: &str) {
     // WIRKLICH kam (nach Weiterleitungen). `nav_begin` hat vorher schon die
     // des Ziels gemeldet; hier wird sie richtiggestellt.
     tell_net_context(s);
-    let n = s.len().min(URL_CAP);
-    unsafe {
-        core::ptr::copy_nonoverlapping(s.as_ptr(), core::ptr::addr_of_mut!(URL_BUF) as *mut u8, n);
-        core::ptr::addr_of_mut!(URL_LEN).write(n);
-    }
+    let d = doc_mut();
+    d.url.clear();
+    d.url.push_str(clip(s, URL_CAP));
     // Die Zeile zeigt, wo man IST — bis jemand hineintippt.
     set_edit(s);
     unsafe {
@@ -502,13 +619,7 @@ fn set_url(s: &str) {
         core::ptr::addr_of_mut!(LAST_LAYOUT_MS).write(0);
     }
 }
-fn url_str() -> &'static str {
-    unsafe {
-        let len = core::ptr::addr_of!(URL_LEN).read();
-        let ptr = core::ptr::addr_of!(URL_BUF) as *const u8;
-        core::str::from_utf8(core::slice::from_raw_parts(ptr, len)).unwrap_or("")
-    }
-}
+fn url_str() -> &'static str { &doc().url }
 
 /// Nur das Textfeld — kein Netzkontext, keine neue Basis, kein DNS.
 ///
@@ -519,20 +630,12 @@ fn url_str() -> &'static str {
 /// Zeichenkette —, weil der Benutzer die Adresse rueckwaerts geloescht hat.
 /// Jedes Praefix dessen, was jemand tippt, ging an den Aufloeser.
 fn set_edit(s: &str) {
-    let n = s.len().min(URL_CAP);
-    unsafe {
-        core::ptr::copy_nonoverlapping(s.as_ptr(), core::ptr::addr_of_mut!(EDIT_BUF) as *mut u8, n);
-        core::ptr::addr_of_mut!(EDIT_LEN).write(n);
-    }
+    let d = doc_mut();
+    d.edit.clear();
+    d.edit.push_str(clip(s, URL_CAP));
 }
 
-fn edit_str() -> &'static str {
-    unsafe {
-        let len = core::ptr::addr_of!(EDIT_LEN).read();
-        let ptr = core::ptr::addr_of!(EDIT_BUF) as *const u8;
-        core::str::from_utf8(core::slice::from_raw_parts(ptr, len)).unwrap_or("")
-    }
-}
+fn edit_str() -> &'static str { &doc().edit }
 fn html_str() -> &'static str {
     unsafe {
         let len = core::ptr::addr_of!(HTML_LEN).read();
@@ -549,7 +652,7 @@ fn css_str() -> &'static str {
 }
 
 /// The current page's forms + the user's live edits to them. Rebuilt on every
-/// navigation (keyed on NAV_GEN, NOT the layout's content generation — a theme
+/// navigation (keyed on `Doc::nav_gen`, NOT the layout's content generation — a theme
 /// switch or an image arriving must not wipe what the user has typed).
 struct Page {
     forms: Forms,
@@ -670,15 +773,12 @@ impl Page {
 }
 
 // Navigation generation — bumped ONLY by a real page load.
-static mut NAV_GEN: u32 = 0;
 fn nav_gen() -> u32 {
-    unsafe { core::ptr::addr_of!(NAV_GEN).read() }
+    doc().nav_gen
 }
 fn bump_nav_gen() {
-    unsafe {
-        let p = core::ptr::addr_of_mut!(NAV_GEN);
-        p.write(p.read().wrapping_add(1));
-    }
+    let d = doc_mut();
+    d.nav_gen = d.nav_gen.wrapping_add(1);
 }
 
 // Reader-mode toggle: apply the site's own (external + <style>) CSS, or render
@@ -760,10 +860,10 @@ fn payload_str(len: usize) -> &'static str {
     }
 }
 fn scroll_y() -> i32 {
-    unsafe { core::ptr::addr_of!(SCROLL_Y).read() }
+    doc().scroll_y
 }
 fn set_scroll(y: i32) {
-    unsafe { core::ptr::addr_of_mut!(SCROLL_Y).write(y) };
+    doc_mut().scroll_y = y;
 }
 fn mark_dirty() {
     unsafe {
@@ -781,26 +881,21 @@ fn mark_dirty_scrolled() {
 // re-lay-out (vs. reusing it for scroll, which keeps scrolling smooth).
 /// When the current navigation started, so the first paint after it can
 /// report the ONE number a user actually feels: click → something on screen.
-static mut NAV_START_MS: i64 = 0;
 /// Cleared once that number has been reported for this navigation.
-static mut NAV_REPORTED: bool = true;
 
-static mut CONTENT_GEN: u32 = 0;
 /// Invalidate the layout cache. `why` is logged because a full re-layout is
 /// the single most expensive thing this app does (~4.7 s on device), so an
 /// unexpected one has to be attributable at a glance.
 fn bump_content_gen(why: &str) {
-    unsafe {
-        let p = core::ptr::addr_of_mut!(CONTENT_GEN);
-        p.write(p.read().wrapping_add(1));
-    }
+    let d = doc_mut();
+    d.content_gen = d.content_gen.wrapping_add(1);
     let mut b = String::new();
     b.push_str("[beak] relayout: ");
     b.push_str(why);
     log(&b);
 }
 fn content_gen() -> u32 {
-    unsafe { core::ptr::addr_of!(CONTENT_GEN).read() }
+    doc().content_gen
 }
 
 /// What the last full layout cost, ms. `:hover` needs one per element the
@@ -1014,21 +1109,16 @@ enum NavStage {
 }
 
 /// Handle of the navigation in flight, or -1.
-static mut NAV_JOB: i32 = -1;
-static mut NAV_STAGE: NavStage = NavStage::Doc;
 /// The address that was ASKED for. The diagnostic page names it, and it
 /// stands in for the base URL if the response never said where it came from.
-static mut NAV_URL: Option<String> = None;
 /// Record the landing address in the history once the document is here.
 /// Where we LANDED, not where we aimed — otherwise every trip back through
 /// history replays the redirect.
-static mut NAV_PUSH_HIST: bool = false;
 /// When the stage in flight started, so each round trip reports its own span
 /// instead of the navigation's total.
-static mut NAV_STAGE_MS: i64 = 0;
 
 fn nav_job() -> i32 {
-    unsafe { core::ptr::addr_of!(NAV_JOB).read() }
+    doc().nav_job
 }
 
 /// Is a page load in the air? The toolbar asks (its reload button becomes a
@@ -1038,11 +1128,11 @@ fn nav_busy() -> bool {
 }
 
 fn nav_clear() {
-    unsafe {
-        core::ptr::addr_of_mut!(NAV_SCRIPTS).write(None);
-        core::ptr::addr_of_mut!(NAV_JOB).write(-1);
-        core::ptr::addr_of_mut!(NAV_URL).write(None);
-        core::ptr::addr_of_mut!(NAV_PUSH_HIST).write(false);
+    {
+        doc_mut().nav_scripts = None;
+        doc_mut().nav_job = -1;
+        doc_mut().nav_url = None;
+        doc_mut().nav_push_hist = false;
     }
 }
 
@@ -1059,7 +1149,7 @@ fn nav_cancel() {
 
 /// The address the navigation in flight asked for.
 fn nav_asked() -> String {
-    unsafe { (*core::ptr::addr_of!(NAV_URL)).clone() }.unwrap_or_default()
+    doc().nav_url.clone().unwrap_or_default()
 }
 
 /// Start a navigation and return at once. `push_hist` records the address we
@@ -1091,7 +1181,7 @@ fn nav_begin(engine: &Engine, method: &str, url: &str, body: &[u8], extra: &str,
     engine.set_hit_all(false);
     // Die Sitzung gehoert der Seite, die gerade verlassen wird: ihre
     // Behandler zeigen auf Knoten, die es gleich nicht mehr gibt.
-    unsafe { core::ptr::addr_of_mut!(JS).write(None) };
+    { doc_mut().js = None };
 
     // Die eingebaute Pruefseite kommt aus dem Binaerbild, nicht aus dem Netz.
     // Sie durchlaeuft ab hier denselben Weg wie ein geholtes Dokument — nur
@@ -1132,10 +1222,11 @@ fn nav_begin(engine: &Engine, method: &str, url: &str, body: &[u8], extra: &str,
         hdrs.push_str(extra);
     }
     let t_nav = now_ms();
-    unsafe {
-        core::ptr::addr_of_mut!(NAV_START_MS).write(t_nav);
-        core::ptr::addr_of_mut!(NAV_REPORTED).write(false);
-        core::ptr::addr_of_mut!(NAV_STAGE_MS).write(t_nav);
+    {
+        let d = doc_mut();
+        d.nav_start_ms = t_nav;
+        d.nav_reported = false;
+        d.nav_stage_ms = t_nav;
     }
     let h = unsafe {
         npk_http_begin(
@@ -1146,11 +1237,12 @@ fn nav_begin(engine: &Engine, method: &str, url: &str, body: &[u8], extra: &str,
             HTML_CAP as i32,
         )
     };
-    unsafe {
-        core::ptr::addr_of_mut!(NAV_URL).write(Some(url.to_string()));
-        core::ptr::addr_of_mut!(NAV_PUSH_HIST).write(push_hist);
-        core::ptr::addr_of_mut!(NAV_STAGE).write(NavStage::Doc);
-        core::ptr::addr_of_mut!(NAV_JOB).write(h);
+    {
+        let d = doc_mut();
+        d.nav_url = Some(url.to_string());
+        d.nav_push_hist = push_hist;
+        d.nav_stage = NavStage::Doc;
+        d.nav_job = h;
     }
     if h < 0 {
         // Refused at the door — a malformed address, or the kernel's fetch
@@ -1224,8 +1316,8 @@ fn deliver_builtin(engine: &Engine, url: &str, html: &str, push_hist: bool) {
         // Die Seite bringt ihr eigenes `<style>` mit und verlinkt nichts —
         // das CSS der vorigen Seite muss weg, sonst stylt es diese hier.
         core::ptr::addr_of_mut!(CSS_LEN).write(0);
-        core::ptr::addr_of_mut!(NAV_START_MS).write(now_ms());
-        core::ptr::addr_of_mut!(NAV_REPORTED).write(false);
+        doc_mut().nav_start_ms = now_ms();
+        doc_mut().nav_reported = false;
     }
     set_scroll(0);
     bump_content_gen("navigation");
@@ -1247,7 +1339,7 @@ fn nav_pump(engine: &Engine) -> bool {
     if unsafe { npk_http_poll(h) } == 0 {
         return false;
     }
-    match unsafe { core::ptr::addr_of!(NAV_STAGE).read() } {
+    match doc().nav_stage {
         NavStage::Doc => nav_document_arrived(engine),
         NavStage::Css => nav_stylesheets_arrived(engine),
         NavStage::Js => nav_scripts_arrived(engine),
@@ -1263,7 +1355,7 @@ fn nav_document_arrived(engine: &Engine) {
     let asked = nav_asked();
     let dst = core::ptr::addr_of_mut!(HTML_BUF) as *mut u8;
     let n = unsafe { npk_http_take(h, dst as i32, HTML_CAP as i32) };
-    log_ms("fetch document", now_ms() - unsafe { core::ptr::addr_of!(NAV_STAGE_MS).read() });
+    log_ms("fetch document", now_ms() - doc().nav_stage_ms);
     if n < 0 {
         nav_fail(&asked);
         return;
@@ -1290,7 +1382,7 @@ fn nav_document_arrived(engine: &Engine) {
     // every stylesheet and image repeat the document's own redirect.
     let base = fetched_from().unwrap_or(asked);
     set_url(&base);
-    if unsafe { core::ptr::addr_of!(NAV_PUSH_HIST).read() } {
+    if doc().nav_push_hist {
         hist_push(url_str());
     }
     nav_begin_stylesheets(engine, &base);
@@ -1303,11 +1395,11 @@ fn nav_document_arrived(engine: &Engine) {
 fn nav_begin_stylesheets(engine: &Engine, base: &str) {
     // Eine abgebrochene Navigation darf der naechsten keine Blaetter
     // hinterlassen ([[feedback_a_copy_is_a_second_semantics_waiting]]).
-    unsafe {
-        core::ptr::addr_of_mut!(NAV_CSS_PARTS).write(None);
-        core::ptr::addr_of_mut!(NAV_CSS_WANT).write(None);
-        core::ptr::addr_of_mut!(NAV_CSS_URLS).write(None);
-        core::ptr::addr_of_mut!(NAV_CSS_ROUNDS).write(0);
+    {
+        doc_mut().nav_css_parts = None;
+        doc_mut().nav_css_want = None;
+        doc_mut().nav_css_urls = None;
+        doc_mut().nav_css_rounds = 0;
     }
     let links = beak_engine::stylesheet_links(html_str());
     let mut urls: Vec<String> = Vec::new();
@@ -1340,43 +1432,36 @@ fn nav_begin_stylesheets(engine: &Engine, base: &str) {
         nav_finish(engine);
         return;
     }
-    unsafe {
-        core::ptr::addr_of_mut!(NAV_STAGE).write(NavStage::Css);
-        core::ptr::addr_of_mut!(NAV_JOB).write(h);
-        core::ptr::addr_of_mut!(NAV_CSS_COUNT).write(urls.len());
-        core::ptr::addr_of_mut!(NAV_STAGE_MS).write(now_ms());
+    {
+        doc_mut().nav_stage = NavStage::Css;
+        doc_mut().nav_job = h;
+        doc_mut().nav_css_count = urls.len();
+        doc_mut().nav_stage_ms = now_ms();
         // An `@import` resolves against ITS OWN sheet's address, not the
         // document's, so the addresses have to survive the round trip.
-        core::ptr::addr_of_mut!(NAV_CSS_URLS).write(Some(urls));
-        core::ptr::addr_of_mut!(NAV_CSS_ROUNDS).write(0);
+        doc_mut().nav_css_urls = Some(urls);
+        doc_mut().nav_css_rounds = 0;
     }
 }
 
 /// How many sheets the batch in flight asked for.
-static mut NAV_CSS_COUNT: usize = 0;
 /// Die Skripte der Seite in Dokumentreihenfolge, waehrend die externen noch
 /// unterwegs sind. `None` heisst: keine offene Skriptrunde.
-static mut NAV_SCRIPTS: Option<Vec<PendingScript>> = None;
 /// Die JS-Sitzung DIESER Seite.
 ///
 /// Sie muss die Skriptrunde ueberleben: die Behandler, die ein Skript
 /// anmeldet, leben in ihr, und ohne sie waere jeder `addEventListener` beim
 /// Verlassen der Funktion wieder weg. Eine Navigation wirft sie weg.
-static mut JS: Option<beak_engine::js::Session> = None;
 
 fn js_session() -> Option<&'static mut beak_engine::js::Session> {
-    unsafe { (*core::ptr::addr_of_mut!(JS)).as_mut() }
+    doc_mut().js.as_mut()
 }
 /// Wie viele externe Adressen das Buendel angefordert hat.
-static mut NAV_JS_COUNT: usize = 0;
 /// Die Modul-Einstiege der Seite, in Dokumentreihenfolge — das sind die
 /// Adressen, die am Ende ausgewertet werden.
-static mut NAV_MOD_ENTRIES: Option<Vec<String>> = None;
 /// Die Adressen, die in DIESER Runde unterwegs sind, in Bestellreihenfolge.
-static mut NAV_MOD_WANT: Option<Vec<String>> = None;
 /// Wie viele Runden schon liefen — der Deckel gegen einen Graphen, der sich
 /// selbst nachlaedt.
-static mut NAV_MOD_ROUNDS: usize = 0;
 /// Die Knoten der Stilblaetter, die in DIESER Runde unterwegs sind — in
 /// Bestellreihenfolge, damit die Antwort dem `<link>` zugeordnet werden kann.
 /// Die Blaetter der Seite in KASKADENREIHENFOLGE, waehrend die `@import`-Runden
@@ -1384,18 +1469,12 @@ static mut NAV_MOD_ROUNDS: usize = 0;
 /// VOR seinem Blatt eingefuegt — dort steht er in der Kaskade, weil ein
 /// `@import` wirkt, als staende sein Inhalt an seiner Stelle, und das ist vor
 /// allem, was danach im Blatt folgt.
-static mut NAV_CSS_URLS: Option<Vec<String>> = None;
-static mut NAV_CSS_PARTS: Option<Vec<(String, Vec<u8>, bool)>> = None;
 /// Welches Blatt jede Adresse der Runde in Arbeit angefordert hat.
-static mut NAV_CSS_WANT: Option<Vec<(usize, String)>> = None;
-static mut NAV_CSS_ROUNDS: usize = 0;
 /// Ein Blatt darf importieren, was importiert, was importiert — aber nicht
 /// endlos, und ein Ring darf die Navigation nicht anhalten.
 const MAX_IMPORT_ROUNDS: usize = 4;
 const MAX_IMPORT_SHEETS: usize = 64;
 
-static mut NAV_SHEET_NODES: Option<Vec<u32>> = None;
-static mut NAV_SHEET_ROUNDS: usize = 0;
 
 /// Ein Skript, das auf seinen Text wartet — oder ihn schon hat.
 enum PendingScript {
@@ -1430,7 +1509,7 @@ const MAX_SHEET_ROUNDS: usize = 8;
 
 fn nav_stylesheets_arrived(engine: &Engine) {
     let h = nav_job();
-    let want = unsafe { core::ptr::addr_of!(NAV_CSS_COUNT).read() };
+    let want = doc().nav_css_count;
     // Fetched into a scratch buffer first because the bodies come back
     // concatenated, and they need a separator between them: without one, a
     // sheet not ending in `}` would merge into the next sheet's first rule.
@@ -1442,7 +1521,7 @@ fn nav_stylesheets_arrived(engine: &Engine) {
     // The bodies are kept as PARTS rather than written straight into
     // `CSS_BUF`: an `@import` cascades ahead of the sheet that imported it, so
     // the buffer can only be assembled once every round of imports is in.
-    let urls = unsafe { (*core::ptr::addr_of_mut!(NAV_CSS_URLS)).take() }.unwrap_or_default();
+    let urls = doc_mut().nav_css_urls.take().unwrap_or_default();
     let mut parts: Vec<(String, Vec<u8>, bool)> = Vec::with_capacity(spans.len());
     for (k, (off, n)) in spans.iter().copied().enumerate() {
         if n == 0 || off + n > scratch.len() {
@@ -1451,8 +1530,8 @@ fn nav_stylesheets_arrived(engine: &Engine) {
         let url = urls.get(k).cloned().unwrap_or_default();
         parts.push((url, scratch[off..off + n].to_vec(), false));
     }
-    log_ms("fetch stylesheets", now_ms() - unsafe { core::ptr::addr_of!(NAV_STAGE_MS).read() });
-    unsafe { core::ptr::addr_of_mut!(NAV_CSS_PARTS).write(Some(parts)) };
+    log_ms("fetch stylesheets", now_ms() - doc().nav_stage_ms);
+    { doc_mut().nav_css_parts = Some(parts) };
     if !css_import_pump() {
         css_assemble();
         nav_finish(engine);
@@ -1467,8 +1546,8 @@ fn nav_stylesheets_arrived(engine: &Engine) {
 /// `<link>` to a `main.css` that holds nothing but fifteen `@import`s, and
 /// every one of them is the actual design.
 fn css_import_pump() -> bool {
-    let rounds = unsafe { core::ptr::addr_of!(NAV_CSS_ROUNDS).read() };
-    let parts = unsafe { (*core::ptr::addr_of_mut!(NAV_CSS_PARTS)).as_mut() };
+    let rounds = doc().nav_css_rounds;
+    let parts = doc_mut().nav_css_parts.as_mut();
     let Some(parts) = parts else { return false };
     if rounds >= MAX_IMPORT_ROUNDS {
         log(&alloc::format!("[beak] @import: bei {MAX_IMPORT_ROUNDS} Runden gekappt"));
@@ -1507,25 +1586,25 @@ fn css_import_pump() -> bool {
         return false;
     }
     log(&alloc::format!("[beak] @import: {} Blaetter, Runde {}", urls.len(), rounds + 1));
-    unsafe {
-        core::ptr::addr_of_mut!(NAV_STAGE).write(NavStage::CssImport);
-        core::ptr::addr_of_mut!(NAV_JOB).write(h);
-        core::ptr::addr_of_mut!(NAV_CSS_WANT).write(Some(want));
-        core::ptr::addr_of_mut!(NAV_CSS_ROUNDS).write(rounds + 1);
-        core::ptr::addr_of_mut!(NAV_STAGE_MS).write(now_ms());
+    {
+        doc_mut().nav_stage = NavStage::CssImport;
+        doc_mut().nav_job = h;
+        doc_mut().nav_css_want = Some(want);
+        doc_mut().nav_css_rounds = rounds + 1;
+        doc_mut().nav_stage_ms = now_ms();
     }
     true
 }
 
 fn nav_css_imports_arrived(engine: &Engine) {
     let h = nav_job();
-    let want = unsafe { (*core::ptr::addr_of_mut!(NAV_CSS_WANT)).take() }.unwrap_or_default();
+    let want = doc_mut().nav_css_want.take().unwrap_or_default();
     let mut scratch: Vec<u8> = Vec::with_capacity(CSS_CAP);
     let spans = take_batch(h, scratch.as_mut_ptr(), CSS_CAP, want.len());
     let total = spans.iter().map(|(o, l)| o + l).max().unwrap_or(0);
     unsafe { scratch.set_len(total.min(CSS_CAP)) };
     let (mut ok, mut bad) = (0usize, 0usize);
-    if let Some(parts) = unsafe { (*core::ptr::addr_of_mut!(NAV_CSS_PARTS)).as_mut() } {
+    if let Some(parts) = doc_mut().nav_css_parts.as_mut() {
         // **Von hinten einfuegen.** Jedes Einfuegen verschiebt alles dahinter;
         // absteigend bleiben die noch offenen, kleineren Stellen gueltig.
         for k in (0..want.len()).rev() {
@@ -1542,7 +1621,7 @@ fn nav_css_imports_arrived(engine: &Engine) {
         }
     }
     log(&alloc::format!("[beak] @import: {ok} geholt, {bad} gescheitert, {} ms",
-                        now_ms() - unsafe { core::ptr::addr_of!(NAV_STAGE_MS).read() }));
+                        now_ms() - doc().nav_stage_ms));
     if !css_import_pump() {
         css_assemble();
         nav_finish(engine);
@@ -1552,7 +1631,7 @@ fn nav_css_imports_arrived(engine: &Engine) {
 /// Write the assembled sheets into `CSS_BUF`, in the order the list holds —
 /// which is cascade order, imports ahead of their importer.
 fn css_assemble() {
-    let parts = unsafe { (*core::ptr::addr_of_mut!(NAV_CSS_PARTS)).take() }.unwrap_or_default();
+    let parts = doc_mut().nav_css_parts.take().unwrap_or_default();
     unsafe { core::ptr::addr_of_mut!(CSS_LEN).write(0) };
     for (_, body, _) in &parts {
         if !css_append(body) {
@@ -1629,20 +1708,20 @@ fn nav_begin_scripts(engine: &Engine) -> bool {
         log("[beak] external scripts could not be fetched — running inline only");
         return run_scripts(engine, list);
     }
-    unsafe {
-        core::ptr::addr_of_mut!(NAV_SCRIPTS).write(Some(list));
-        core::ptr::addr_of_mut!(NAV_JS_COUNT).write(urls.len());
-        core::ptr::addr_of_mut!(NAV_STAGE).write(NavStage::Js);
-        core::ptr::addr_of_mut!(NAV_JOB).write(h);
-        core::ptr::addr_of_mut!(NAV_STAGE_MS).write(now_ms());
+    {
+        doc_mut().nav_scripts = Some(list);
+        doc_mut().nav_js_count = urls.len();
+        doc_mut().nav_stage = NavStage::Js;
+        doc_mut().nav_job = h;
+        doc_mut().nav_stage_ms = now_ms();
     }
     true
 }
 
 fn nav_scripts_arrived(engine: &Engine) {
     let h = nav_job();
-    let want = unsafe { core::ptr::addr_of!(NAV_JS_COUNT).read() };
-    let mut list = unsafe { (*core::ptr::addr_of_mut!(NAV_SCRIPTS)).take() }.unwrap_or_default();
+    let want = doc().nav_js_count;
+    let mut list = doc_mut().nav_scripts.take().unwrap_or_default();
     let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
     let spans = take_batch(h, dst, SCRIPT_CAP.min(IMG_FETCH_CAP), want);
     for p in list.iter_mut() {
@@ -1667,7 +1746,7 @@ fn nav_scripts_arrived(engine: &Engine) {
         };
         *p = PendingScript::Ready(text, label, is_mod);
     }
-    log_ms("fetch scripts", now_ms() - unsafe { core::ptr::addr_of!(NAV_STAGE_MS).read() });
+    log_ms("fetch scripts", now_ms() - doc().nav_stage_ms);
     if !run_scripts(engine, list) { nav_done(); }
 }
 
@@ -1817,7 +1896,7 @@ fn sync_history(engine: &Engine, sess: &mut beak_engine::js::Session) {
             }
         }
     }
-    let count = unsafe { core::ptr::addr_of!(HIST_COUNT).read() };
+    let count = doc().hist.len();
     sess.interp.set_history(count.max(1) as f64, beak_engine::js::value::Value::Null);
 }
 
@@ -1989,10 +2068,10 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) -> bool {
         }
     }
     unsafe {
-        core::ptr::addr_of_mut!(JS).write(Some(sess));
+        doc_mut().js = Some(sess);
         core::ptr::addr_of_mut!(SCRIPT_TALLY).write((ran, failed, bytes));
-        core::ptr::addr_of_mut!(NAV_MOD_ENTRIES).write(if entries.is_empty() { None } else { Some(entries) });
-        core::ptr::addr_of_mut!(NAV_MOD_ROUNDS).write(0);
+        doc_mut().nav_mod_entries = if entries.is_empty() { None } else { Some(entries) };
+        doc_mut().nav_mod_rounds = 0;
     }
     module_pump(engine)
 }
@@ -2000,7 +2079,7 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) -> bool {
 /// Was die gewoehnlichen Skripte ergeben haben — muss die Modulrunden
 /// ueberleben, weil der Bericht erst danach geschrieben wird.
 static mut SCRIPT_TALLY: (usize, usize, usize) = (0, 0, 0);
-/// Wann die Skriptrunde begann. NICHT `NAV_STAGE_MS`: das steht nach einer
+/// Wann die Skriptrunde begann. NICHT `Doc::nav_stage_ms`: das steht nach einer
 /// Modulrunde auf deren Beginn, und die gemeldete Zeit waere zu klein.
 static mut SCRIPT_T0: i64 = 0;
 /// Steht `load` noch aus? Es faellt erst, wenn die Geometrie steht.
@@ -2166,7 +2245,7 @@ fn pump_fonts(engine: &Engine) -> bool {
             }
         }
         log(&alloc::format!("[beak] Schriften: {ok} geladen, {bad} gescheitert, {} ms",
-                            now_ms() - unsafe { core::ptr::addr_of!(NAV_STAGE_MS).read() }));
+                            now_ms() - doc().nav_stage_ms));
     }
     if unsafe { core::ptr::addr_of!(FONT_JOB).read() } >= 0 { return loaded }
     let mut want = engine.take_pending_fonts();
@@ -2182,7 +2261,7 @@ fn pump_fonts(engine: &Engine) -> bool {
     unsafe {
         core::ptr::addr_of_mut!(FONT_JOB).write(h);
         core::ptr::addr_of_mut!(FONT_WANT).write(Some(want));
-        core::ptr::addr_of_mut!(NAV_STAGE_MS).write(now_ms());
+        doc_mut().nav_stage_ms = now_ms();
     }
     loaded
 }
@@ -2278,7 +2357,7 @@ static mut OBS_ROUNDS: u32 = 0;
 /// Liefert true, wenn eine Rundreise laeuft — dann geht es in `nav_pump`
 /// weiter. Sonst ist der Graph geschlossen und alles ist ausgewertet.
 fn module_pump(engine: &Engine) -> bool {
-    let entries = match unsafe { (*core::ptr::addr_of!(NAV_MOD_ENTRIES)).clone() } {
+    let entries = match doc().nav_mod_entries.clone() {
         Some(e) => e,
         None => { finish_scripts(engine); return false }
     };
@@ -2301,7 +2380,7 @@ fn module_pump(engine: &Engine) -> bool {
             queue.push(r);
         }
     }
-    let rounds = unsafe { core::ptr::addr_of!(NAV_MOD_ROUNDS).read() };
+    let rounds = doc().nav_mod_rounds;
     // WELCHER Deckel gerissen ist, gehoert in die Meldung: „nach 5 Runden"
     // klang nach der Rundengrenze, obwohl die bei 24 liegt — gerissen war die
     // Adressgrenze, und das ist eine ganz andere Diagnose.
@@ -2312,12 +2391,12 @@ fn module_pump(engine: &Engine) -> bool {
         missing.truncate(MAX_SCRIPT_URLS);
         let h = begin_batch(&missing, SCRIPT_CAP);
         if h >= 0 {
-            unsafe {
-                core::ptr::addr_of_mut!(NAV_MOD_WANT).write(Some(missing));
-                core::ptr::addr_of_mut!(NAV_MOD_ROUNDS).write(rounds + 1);
-                core::ptr::addr_of_mut!(NAV_STAGE).write(NavStage::Mod);
-                core::ptr::addr_of_mut!(NAV_JOB).write(h);
-                core::ptr::addr_of_mut!(NAV_STAGE_MS).write(now_ms());
+            {
+                doc_mut().nav_mod_want = Some(missing);
+                doc_mut().nav_mod_rounds = rounds + 1;
+                doc_mut().nav_stage = NavStage::Mod;
+                doc_mut().nav_job = h;
+                doc_mut().nav_stage_ms = now_ms();
             }
             return true;
         }
@@ -2350,7 +2429,7 @@ fn sheet_pump(engine: &Engine) -> bool {
     for _ in 0..8 { if sess.interp.run_timers() == 0 { break } }
     let want = sess.interp.take_pending_sheets();
     if want.is_empty() { finish_scripts(engine); return false }
-    let rounds = unsafe { core::ptr::addr_of!(NAV_SHEET_ROUNDS).read() };
+    let rounds = doc().nav_sheet_rounds;
     if rounds >= MAX_SHEET_ROUNDS {
         log(&alloc::format!("[beak] sheet rounds capped at {MAX_SHEET_ROUNDS}, {} offen", want.len()));
         for (id, _) in want { beak_engine::js::dombind::sheet_done(&mut sess.interp, id, false); }
@@ -2371,19 +2450,19 @@ fn sheet_pump(engine: &Engine) -> bool {
         finish_scripts(engine);
         return false;
     }
-    unsafe {
-        core::ptr::addr_of_mut!(NAV_SHEET_NODES).write(Some(nodes));
-        core::ptr::addr_of_mut!(NAV_SHEET_ROUNDS).write(rounds + 1);
-        core::ptr::addr_of_mut!(NAV_STAGE).write(NavStage::Sheet);
-        core::ptr::addr_of_mut!(NAV_JOB).write(h);
-        core::ptr::addr_of_mut!(NAV_STAGE_MS).write(now_ms());
+    {
+        doc_mut().nav_sheet_nodes = Some(nodes);
+        doc_mut().nav_sheet_rounds = rounds + 1;
+        doc_mut().nav_stage = NavStage::Sheet;
+        doc_mut().nav_job = h;
+        doc_mut().nav_stage_ms = now_ms();
     }
     true
 }
 
 fn nav_sheets_arrived(engine: &Engine) {
     let h = nav_job();
-    let nodes = unsafe { (*core::ptr::addr_of_mut!(NAV_SHEET_NODES)).take() }.unwrap_or_default();
+    let nodes = doc_mut().nav_sheet_nodes.take().unwrap_or_default();
     let mut scratch: Vec<u8> = Vec::with_capacity(CSS_CAP);
     let spans = take_batch(h, scratch.as_mut_ptr(), CSS_CAP, nodes.len());
     let total = spans.iter().map(|(o, l)| o + l).max().unwrap_or(0);
@@ -2398,7 +2477,7 @@ fn nav_sheets_arrived(engine: &Engine) {
         }
     }
     log(&alloc::format!("[beak] script stylesheets: {ok} geholt, {bad} gescheitert, {} ms",
-                        now_ms() - unsafe { core::ptr::addr_of!(NAV_STAGE_MS).read() }));
+                        now_ms() - doc().nav_stage_ms));
     if ok > 0 {
         decode_css();
         // Die Kaskade muss neu laufen — sonst haengt das Blatt im Puffer und
@@ -2462,7 +2541,7 @@ fn css_append(bytes: &[u8]) -> bool {
 
 fn nav_modules_arrived(engine: &Engine) {
     let h = nav_job();
-    let want = unsafe { (*core::ptr::addr_of_mut!(NAV_MOD_WANT)).take() }.unwrap_or_default();
+    let want = doc_mut().nav_mod_want.take().unwrap_or_default();
     let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
     let spans = take_batch(h, dst, SCRIPT_CAP.min(IMG_FETCH_CAP), want.len());
     if let Some(sess) = js_session() {
@@ -2486,7 +2565,7 @@ fn nav_modules_arrived(engine: &Engine) {
 
 /// Die Einstiege auswerten — in Dokumentreihenfolge, jeder genau einmal.
 fn eval_modules() {
-    let entries = match unsafe { (*core::ptr::addr_of!(NAV_MOD_ENTRIES)).clone() } {
+    let entries = match doc().nav_mod_entries.clone() {
         Some(e) => e, None => return,
     };
     let Some(sess) = js_session() else { return };
@@ -2566,7 +2645,7 @@ fn finish_scripts(engine: &Engine) {
         engine.set_hit_all(listeners || ran > 0);
         engine.set_scripted_dom(Some(d.to_dom()));
     }
-    unsafe { core::ptr::addr_of_mut!(NAV_MOD_ENTRIES).write(None) };
+    { doc_mut().nav_mod_entries = None };
     let mut m = String::from("[beak] scripts: ");
     push_i64(&mut m, ran as i64);
     m.push_str(" gelaufen, ");
@@ -3278,66 +3357,54 @@ fn follow(engine: &Engine, href: &str) {
 // ── Back/forward history (fixed-size static ring of URLs) ──────────────────
 
 const HIST_MAX: usize = 64;
-static mut HIST: [[u8; URL_CAP]; HIST_MAX] = [[0; URL_CAP]; HIST_MAX];
-static mut HIST_LEN: [usize; HIST_MAX] = [0; HIST_MAX];
-static mut HIST_COUNT: usize = 0;
-static mut HIST_POS: usize = 0;
 
 fn hist_get(i: usize) -> &'static str {
-    unsafe {
-        let slot = (core::ptr::addr_of!(HIST) as *const [u8; URL_CAP]).add(i) as *const u8;
-        let len = (core::ptr::addr_of!(HIST_LEN) as *const usize).add(i).read();
-        core::str::from_utf8(core::slice::from_raw_parts(slot, len)).unwrap_or("")
-    }
-}
-fn hist_set(i: usize, url: &str) {
-    let n = url.len().min(URL_CAP);
-    unsafe {
-        let slot = (core::ptr::addr_of_mut!(HIST) as *mut [u8; URL_CAP]).add(i) as *mut u8;
-        core::ptr::copy_nonoverlapping(url.as_ptr(), slot, n);
-        (core::ptr::addr_of_mut!(HIST_LEN) as *mut usize).add(i).write(n);
-    }
+    doc().hist.get(i).map(|s| s.as_str()).unwrap_or("")
 }
 /// Record a new navigation: truncate forward entries, append (caps at HIST_MAX).
+///
+/// **Verhalten unveraendert uebernommen**, auch die Ecke am Deckel: ist die
+/// Liste voll, wird der LETZTE Eintrag ueberschrieben und die Stelle bleibt
+/// stehen. Ein Umbau ist der falsche Ort, um nebenbei eine Regel zu aendern
+/// — was hier steht, muss sich genauso verhalten wie vorher, sonst misst
+/// kein Test mehr den Umbau.
 fn hist_push(url: &str) {
-    unsafe {
-        let count = core::ptr::addr_of!(HIST_COUNT).read();
-        let pos = core::ptr::addr_of!(HIST_POS).read();
-        if count > 0 && hist_get(pos) == url {
-            return;
-        }
-        let new_pos = if count == 0 { 0 } else { pos + 1 };
-        if new_pos >= HIST_MAX {
-            hist_set(HIST_MAX - 1, url);
-            return;
-        }
-        hist_set(new_pos, url);
-        core::ptr::addr_of_mut!(HIST_POS).write(new_pos);
-        core::ptr::addr_of_mut!(HIST_COUNT).write(new_pos + 1);
+    let d = doc_mut();
+    if !d.hist.is_empty() && d.hist.get(d.hist_pos).map(|s| s.as_str()) == Some(url) {
+        return;
     }
+    let new_pos = if d.hist.is_empty() { 0 } else { d.hist_pos + 1 };
+    if new_pos >= HIST_MAX {
+        if let Some(last) = d.hist.get_mut(HIST_MAX - 1) {
+            last.clear();
+            last.push_str(clip(url, URL_CAP));
+        }
+        return;
+    }
+    // Vorwaerts-Eintraege fallen weg — dasselbe, was das feste Feld tat,
+    // indem es `HIST_COUNT` auf `new_pos + 1` zurueckschrieb.
+    d.hist.truncate(new_pos);
+    d.hist.push(String::from(clip(url, URL_CAP)));
+    d.hist_pos = new_pos;
 }
+// **Jede Entleihung endet in ihrer eigenen Anweisung.** `doc_mut` gibt ein
+// `&'static mut` heraus; zwei davon gleichzeitig — oder eines neben einem
+// `doc()` — sind Aliasing, und Aliasing auf `&mut` ist kein Stilfehler,
+// sondern undefiniert. Deshalb steht hier `doc().hist_pos` lesen, DANN
+// schreiben, DANN `hist_get` rufen, statt eine Referenz ueber alles drei zu
+// halten. Der Rechner merkt es nicht — die Referenz kommt aus einem
+// `unsafe`-Deref und faellt aus seiner Buchhaltung.
 fn hist_back() -> Option<&'static str> {
-    unsafe {
-        let pos = core::ptr::addr_of!(HIST_POS).read();
-        if pos > 0 {
-            core::ptr::addr_of_mut!(HIST_POS).write(pos - 1);
-            Some(hist_get(pos - 1))
-        } else {
-            None
-        }
-    }
+    let pos = doc().hist_pos;
+    if pos == 0 { return None }
+    doc_mut().hist_pos = pos - 1;
+    Some(hist_get(pos - 1))
 }
 fn hist_forward() -> Option<&'static str> {
-    unsafe {
-        let pos = core::ptr::addr_of!(HIST_POS).read();
-        let count = core::ptr::addr_of!(HIST_COUNT).read();
-        if pos + 1 < count {
-            core::ptr::addr_of_mut!(HIST_POS).write(pos + 1);
-            Some(hist_get(pos + 1))
-        } else {
-            None
-        }
-    }
+    let pos = doc().hist_pos;
+    if pos + 1 >= doc().hist.len() { return None }
+    doc_mut().hist_pos = pos + 1;
+    Some(hist_get(pos + 1))
 }
 
 fn origin_of(url: &str) -> String {
@@ -3567,10 +3634,10 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
     // Not while one is still in the air: the OLD page keeps repainting for
     // scrolls and hovers during a load now, and reporting one of those would
     // credit the new navigation with a picture of the previous page.
-    unsafe {
-        if !core::ptr::addr_of!(NAV_REPORTED).read() && !nav_busy() {
-            core::ptr::addr_of_mut!(NAV_REPORTED).write(true);
-            log_ms("=== navigation -> first paint", now_ms() - core::ptr::addr_of!(NAV_START_MS).read());
+    {
+        if !doc().nav_reported && !nav_busy() {
+            doc_mut().nav_reported = true;
+            log_ms("=== navigation -> first paint", now_ms() - doc().nav_start_ms);
             // Wieviele der sechs eingebauten Gesichter diese Seite wirklich
             // gebraucht hat. Sie werden faul geladen, und ohne diese Zahl ist
             // „faul" eine Behauptung: eine Seite, die doch alle sechs
