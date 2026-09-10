@@ -4739,6 +4739,18 @@ family: st.family,
         };
         let (o0, l0, c0) = (self.ops.len(), self.links.len(), self.controls.len());
         let (i0, h0) = (self.inspects.len(), self.hover_boxes.len());
+        // **Die Stapelbereiche gehoeren dazu, und ihr Fehlen war sichtbar.**
+        // Was hier gleich ausgelegt wird, wird danach wieder HERAUSGEZOGEN —
+        // ein Bereich, den ein Kind dabei notiert, zeigt hinterher auf
+        // Befehle, die es nie gemalt hat, naemlich auf die naechsten. Auf
+        // Wikipedia sortierte so ein Bereich aus dem SUCHknopf die Flaeche
+        // eines spaeteren Knopfes HINTER dessen eigene Beschriftung: der
+        // Knopf neben „Appearance" war eine graue Kiste ohne Text, und jeder
+        // Klick darauf kostete ein volles Auslegen, weil seine Spanne
+        // zerrissen war. `spec_rollback` nennt genau diese Regel — sie galt
+        // hier nur nicht.
+        let (s0, sl0, f0, fl0) = (self.stack_ops.len(), self.stack_links.len(),
+                                  self.float_ops.len(), self.float_links.len());
         let saved_floats = core::mem::take(&mut self.floats);
         let saved_baseline = self.last_baseline.take();
         // The contents lay out in the formatting context the BUTTON declares.
@@ -4788,6 +4800,13 @@ family: st.family,
         self.controls.truncate(c0);
         self.inspects.truncate(i0);
         self.hover_boxes.truncate(h0);
+        // Und die Bereiche, die in `ops` zeigen — siehe oben. Die innere
+        // Stapelordnung eines Knopfes geht damit verloren; sie war vorher
+        // nicht etwa da, sondern wurde auf FREMDE Befehle angewandt.
+        self.stack_ops.truncate(s0);
+        self.stack_links.truncate(sl0);
+        self.float_ops.truncate(f0);
+        self.float_links.truncate(fl0);
         Some(CtlContent { ops, w: content_w, h: bottom.max(0), centred: takes_children })
     }
 
@@ -6895,6 +6914,31 @@ family: st.family,
     /// it, and an identical nested pair orders exactly as the single range
     /// does. A `position: sticky` flex item was the case that named this: it
     /// reached no other recording site at all and painted under its sibling.
+    /// Ein Flex- oder Rasterkind auslegen.
+    ///
+    /// **Ein Item hat seinen EIGENEN Formatierungskontext** (css-flexbox-1 §4,
+    /// css-grid-2 §6), und das ist keine Feinheit: ein Float im einen Item
+    /// reicht nicht in das daneben, und ein `clear` im zweiten sieht den Float
+    /// des ersten nicht.
+    ///
+    /// Der Behaelter isoliert schon (`establishes_bfc` ist fuer `flex`/`grid`
+    /// wahr) — aber nur nach AUSSEN. Zwischen den Geschwistern lief die Liste
+    /// weiter, und auf Wikipedias Hauptseite raeumte deshalb der Float der
+    /// LINKEN Spalte den Clearfix der RECHTEN: „In the news" wurde 342 px zu
+    /// hoch (566x696 statt 531x351 in Chromium) und schob alles darunter weg.
+    fn layout_item(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
+        // Dieselbe Frage steht noch an zwei Stellen offen und ist dort NICHT
+        // gemessen: ein absolut gesetzter Kasten (`layout_abs`) und eine
+        // Tabellenzelle bekommen die Float-Liste ihres Rufers ebenfalls zu
+        // sehen. Beide legen laut Spezifikation auch einen eigenen Kontext an;
+        // wer das anfasst, misst es erst — hier steht die Zahl, die es
+        // rechtfertigt, nur fuer Flex und Raster.
+        let saved = core::mem::take(&mut self.floats);
+        let out = self.layout_box(el, st, x, w, y);
+        self.floats = saved;
+        out
+    }
+
     fn layout_box(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
         if !self.should_track_stack(st) {
             return self.layout_box_inner(el, st, x, w, y);
@@ -7462,7 +7506,7 @@ family: st.family,
             // (the `align-self: stretch` branch above already gives an
             // auto-height item the row's height) compensates for the coarser
             // answer. Parked with the number rather than taken on faith.
-            let bottom = self.layout_box(el_i, &s2, ix as i32, (iw as i32).max(1), cell_y);
+            let bottom = self.layout_item(el_i, &s2, ix as i32, (iw as i32).max(1), cell_y);
             self.path.pop();
             let laid_h = bottom - cell_y;
             let dy = match aself {
@@ -8029,7 +8073,7 @@ family: st.family,
             let bottom = match kid {
                 Kid::El(el) => {
                     self.path.push(self.info(el));
-                    let b = self.layout_box(el, &s_meas, item_x[k] as i32, box_main, cross_y);
+                    let b = self.layout_item(el, &s_meas, item_x[k] as i32, box_main, cross_y);
                     self.path.pop();
                     b
                 }
@@ -8138,7 +8182,7 @@ family: st.family,
                 // control (which paints exactly this width) loses them and
                 // clips its label.
                 let box_main = (size[k] + li[k].main_pad).max(1.0) as i32;
-                let _ = self.layout_box(el, &s2, item_x[k] as i32, box_main, y);
+                let _ = self.layout_item(el, &s2, item_x[k] as i32, box_main, y);
                 self.path.pop();
             }
         }
@@ -8356,7 +8400,7 @@ family: st.family,
             let bottom = match el {
                 Kid::El(e) => {
                     self.path.push(self.info(e));
-                    let b = self.layout_box(e, &s2, ix[i], cross_w[i].max(1.0) as i32, y as i32);
+                    let b = self.layout_item(e, &s2, ix[i], cross_w[i].max(1.0) as i32, y as i32);
                     self.path.pop();
                     // Ein Kasten mit erzwungener Hauptgroesse belegt genau sie,
                     // auch wenn sein Inhalt kuerzer ist — sonst wandert alles
@@ -9031,6 +9075,13 @@ impl<'a> Ctx<'a> {
 
         let (o0, l0, c0) = (self.ops.len(), self.links.len(), self.controls.len());
         let (i0, h0) = (self.inspects.len(), self.hover_boxes.len());
+        // Dieselbe Regel wie beim Knopfinhalt: die Befehle wandern gleich aus
+        // `self.ops` heraus, also duerfen keine Bereiche zurueckbleiben, die
+        // in sie zeigen. Ein `inline-block` mit einem positionierten Kind
+        // liess sonst einen Bereich stehen, der die naechsten Befehle der
+        // SEITE umsortierte.
+        let (s0, sl0, f0, fl0) = (self.stack_ops.len(), self.stack_links.len(),
+                                  self.float_ops.len(), self.float_links.len());
         let saved_floats = core::mem::take(&mut self.floats);
         let saved_baseline = self.last_baseline.take();
         self.path.push(self.info(el));
@@ -9047,6 +9098,10 @@ impl<'a> Ctx<'a> {
         let controls: Vec<ControlRect> = self.controls.drain(c0..).collect();
         let inspects: Vec<InspectBox> = self.inspects.drain(i0..).collect();
         let hover_boxes: Vec<HoverBox> = self.hover_boxes.drain(h0..).collect();
+        self.stack_ops.truncate(s0);
+        self.stack_links.truncate(sl0);
+        self.float_ops.truncate(f0);
+        self.float_links.truncate(fl0);
         let h = (border_bottom + st.margin_bottom as i32).max(0);
         // The box aligns on its LAST line box's baseline; with no in-flow line
         // box, or when it clips its overflow, it aligns on its bottom margin
@@ -13231,6 +13286,85 @@ fn dbg_wiki_shape() {
         // Nebeneinander, nicht untereinander — und auf derselben Zeile.
         assert!(texts[1].0 > texts[0].0, "das zweite Kind steht rechts: {texts:?}");
         assert_eq!(texts[0].1, texts[1].1, "gleiche Grundlinie: {texts:?}");
+    }
+
+    /// **Ein Flex-Item hat seinen eigenen Formatierungskontext** — ein Float
+    /// darin reicht nicht zum Nachbarn (css-flexbox-1 §4).
+    ///
+    /// Der Behaelter isolierte schon nach aussen; zwischen den GESCHWISTERN
+    /// lief die Float-Liste weiter. Auf Wikipedias Hauptseite raeumte deshalb
+    /// der Float der linken Spalte den Clearfix der rechten: „In the news"
+    /// mass 566x696 statt 531x351 und schob alles darunter weg.
+    ///
+    /// An Chromium gemessen (`<tools>/gallery/run.py`): der zweite Kasten ist
+    /// 20 px hoch, nicht 400.
+    #[test]
+    fn a_float_in_one_flex_item_does_not_reach_its_sibling() {
+        let v: Vec<(String, i32)> = lay_inspect(
+            "<body style='margin:0'><style>\
+             .row{display:flex} .col{width:300px}\
+             .f{float:left;width:80px;height:400px}\
+             .cf::after{content:'';display:block;clear:both}\
+             </style>\
+             <div class=row>\
+               <div class=col><div id=links class=cf><div class=f></div>links</div></div>\
+               <div class=col><div id=rechts class=cf>rechts</div></div>\
+             </div></body>", 800).inspect.iter()
+            .map(|b| (b.label.clone(), b.h)).collect();
+        let h = |id: &str| v.iter().find(|(l, _)| l.starts_with(id)).map(|&(_, h)| h)
+            .unwrap_or_else(|| panic!("kein Kasten {id}: {v:?}"));
+        assert_eq!(h("div#links"), 400, "die Spalte MIT dem Float raeumt ihn");
+        assert!(h("div#rechts") < 40, "die Spalte daneben sieht ihn nicht: {}", h("div#rechts"));
+    }
+
+    /// **Ein Kasten, dessen Befehle wieder herausgezogen werden, darf keinen
+    /// Stapelbereich zuruecklassen.**
+    ///
+    /// Der Inhalt eines `<button>` wird ausgelegt und dann aus `ops` gedraint;
+    /// notiert ein Kind dabei einen Bereich, zeigt der hinterher auf die
+    /// NAECHSTEN Befehle der Seite. Auf Wikipedia sortierte ein Bereich aus
+    /// dem Suchknopf die Flaeche eines spaeteren Knopfes hinter dessen eigene
+    /// Beschriftung — der Knopf neben „Appearance" war eine graue Kiste ohne
+    /// Text, und jeder Klick darauf kostete ein volles Auslegen, weil seine
+    /// Spanne zerrissen war.
+    ///
+    /// Geprueft wird die REIHENFOLGE, nicht die Lage: die Flaeche eines
+    /// Knopfes gehoert vor seine Beschriftung.
+    #[test]
+    fn a_drained_sub_layout_leaves_no_stacking_range_behind() {
+        let l = lay("<body>\
+            <div><button style=\"background:#eee\">\
+                <span style=\"display:block;position:relative\">ikone</span></button></div>\
+            <div><button style=\"background:#eee\">zwei</button></div>\
+            </body>", 400);
+        // Der erste Befehl der Seite ist die Flaeche des ERSTEN Knopfes —
+        // vorher stand sie ganz am Ende, hinter allem anderen.
+        let first_text = l.ops.iter().position(|o| matches!(o, DrawOp::Text { .. }));
+        let first_fill = l.ops.iter().position(|o| matches!(o,
+            DrawOp::Rect { color, .. } | DrawOp::RoundRect { color, .. }
+                if color.c == Rgb(238, 238, 238)));
+        assert!(first_fill < first_text,
+                "die Flaeche des Knopfes gehoert VOR seinen Text: {first_fill:?} / {first_text:?}");
+    }
+
+    /// Dasselbe fuer einen atomaren Inline-Kasten: auch seine Befehle wandern
+    /// aus `ops` heraus, und auch er liess Bereiche stehen.
+    #[test]
+    fn an_atomic_inline_leaves_no_stacking_range_behind() {
+        let l = lay("<body>\
+            <div><span style=\"display:inline-block\">\
+                <span style=\"display:block;position:relative\">ikone</span></span></div>\
+            <div><span style=\"display:inline-block\">zwei</span></div>\
+            <div>danach</div>\
+            </body>", 400);
+        let pos = |want: &str| l.ops.iter().position(|o| matches!(o,
+            DrawOp::Text { text, .. } if text == want));
+        // Ohne die Ruecknahme wanderte „ikone" ans ENDE der Seite: der
+        // Bereich, den das positionierte Kind im Inline-Block notiert hatte,
+        // zeigte hinterher auf dessen eigene, wieder eingesetzte Befehle.
+        assert!(pos("ikone") < pos("zwei") && pos("zwei") < pos("danach"),
+                "Dokumentreihenfolge: {:?} {:?} {:?}",
+                pos("ikone"), pos("zwei"), pos("danach"));
     }
 
     /// Reiner Leerraum zwischen zwei Kaesten erzeugt KEINEN Kasten (§4) —
