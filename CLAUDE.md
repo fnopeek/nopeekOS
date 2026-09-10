@@ -48,7 +48,27 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-09 · beak 0.148.0 · Kernel 0.330.0** (Rest: `git log`)
+**Stand 2026-09-10 · beak 0.160.0 · Kernel 0.335.0** (Rest: `git log`)
+
+**0.157–0.160: der Randzusammenfall, das UA-Blatt und der Tabellenkasten.**
+Drei Funde aus einer Kette. Erst `min-height`: es sperrt den Schlussrand
+richtig ein und rechnete ihn trotzdem zur Höhe dazu (650 px statt 100). Dann
+die allgemeine Regel darunter — **fällt der Rand durch JEDES Kind, gehört er
+an den OBERRAND des Elters** (§8.3.1); weil er erst nach dem Auslegen bekannt
+ist und zugleich bestimmt, wo die Kinder stehen (ein durchgefallenes Kind kann
+einen Float enthalten), fährt `flow_block_impl` diesen einen Fall ein zweites
+Mal, über `spec_rollback`. Dazu: **eine Räumung SETZT die Oberkante** (§9.5.2).
+Dann fiel am `<hr>` ein Pixel auf, und es war nicht das `<hr>`: **das halbe
+UA-Blatt war Geschmack statt Spezifikation** — alle sechs
+Überschriftengrössen und -ränder, `ul`/`ol`, `dd`, `blockquote`, `figure`,
+`pre`, `caption`, `address`, `fieldset`/`legend`. Gefunden mit einer neuen
+Vorlage, `tools/fixtures/ua.html`: **nackte Elemente, kein einziges Blatt**,
+durch `<tools>/gallery/run.py` gegen Chromium — Bootstrap und Tailwind setzen
+diese Vorgaben zurück und sagen deshalb NICHTS über sie. Dieselbe Vorlage fand
+zuletzt eine **Tabelle, die sich 1886 px breit meldet und 157 px breit malt**
+(`record_inspect` bekam den angebotenen Streifen), und eine `<caption>` über
+der ganzen Fensterbreite. Erster Lauf 60 von 62 Kästen anders, elf über 64 px;
+danach 17 identisch und **keine Abweichung über 16 px**.
 
 **0.141.0: GSUB-Ligaturen.** Eine Symbolschrift bildet ihr Zeichen als
 Ligatur — `<i class="fos-icon">home</i>` mass 1 px statt 24, weil die vier
@@ -113,8 +133,13 @@ Spalte 948 = 59,25 rem). Die genannten WPT-Familien (`column-align-items`,
 bleiben **13 echte** Tests. Ausgezählt ohne Vehikel:
 
     22  CSS2/bidi                     8  css-grid/positioned-grid-items
-    13  CSS2/margin-collapse          7  css-text/word-space-transform
+    14  CSS2/margin-collapse          7  css-text/word-space-transform
     12  CSS2/table-anonymous-objects  6  CSS2/abspos · flex-flow · contain-intrinsic-size
+
+**▶ Als nächstes: `CSS2/bidi`** (22 Tests, wir haben keinen Bidi-Algorithmus)
+und `table-anonymous-objects` (12, aufaddierte Aufrundung der Spalten). Vom
+Randzusammenfall bleiben nach 0.158.0 noch 14 — sie sind einzeln gemessen und
+nicht mehr eine Familie mit einer Ursache.
 
 **Immer erst `python3 tests/vehicles.py`** — die Rangliste der rohen Familien
 führt sonst zu einem Posten, den es nicht gibt.
@@ -221,10 +246,11 @@ war ein Datenobjekt — es gab gar keine Navigation per Skript.
     test262 exec    81,76 %   (V8 auf demselben Korpus: 99,41 %)
     test262 parse   96,84 %
     DOM-Aufrufe     99,4 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
-    WPT (CSS)       4542/5201 = 87,3 % ohne Testvehikel (roh 80,4 %)
+    WPT (CSS)       4545/5179 = 87,8 % ohne Testvehikel (roh 80,5 %)
     Bibliotheken    13 von 13 (`<tools>/libprobe/`)
     beak:selftest   Sprache 55/55, Dokument 39/39
-    Kastengeometrie Bootstrap 413/415 · Tailwind 165/165 (`<tools>/gallery/`)
+    Kastengeometrie Bootstrap 413/415 · Tailwind 165/165 · ua.html 62/62
+                    (`<tools>/gallery/`, die dritte Vorlage ist NACKT)
     Halde           Schriften faul; srf 44 MiB (war 89)
 
 Das eigene Testziel ist **`beak:selftest`** — eine Prüfseite aus dem
