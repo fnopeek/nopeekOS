@@ -5736,8 +5736,41 @@ family: st.family,
         let total: f32 = pref.iter().sum();
         let mut colw = pref.clone();
         if total > cap && total > 0.0 {
-            for c in 0..ncols {
-                colw[c] = (cap * pref[c] / total).max(minw[c]);
+            // **Erst jeder Spalte ihr Minimum, dann der Rest nach SPIELRAUM.**
+            //
+            // Vorher stand hier `(cap * pref[c] / total).max(minw[c])`, und
+            // das `.max` legte die Differenz OBEN DRAUF, statt sie der Spalte
+            // wegzunehmen, die noch schrumpfen kann. Eine Spalte, die nicht
+            // unter ihr Minimum kann — ein Bild —, machte den Tisch damit
+            // breiter als den Platz, den er hat.
+            //
+            // Gemessen auf Wikipedias „Today's featured picture": Bildspalte
+            // 404, Textspalte mit einer Vorzugsbreite von ~3040 in einem
+            // 1296er Kasten. Die anteilige Rechnung gab dem Bild 152, das
+            // `.max` hob es auf 404 — und der Tisch kam auf **1548 statt
+            // 1296**. Der Text lief 252 px aus seinem Kasten heraus, und weil
+            // die Vorlage der Seite taeglich wechselt (Bild oben ODER
+            // daneben), sah es aus, als passiere es „manchmal".
+            //
+            // Chromium verteilt in derselben Lage 404 | 892 — genau das, was
+            // unten herauskommt: Minimum sichern, den Rest im Verhaeltnis von
+            // `pref - minw`. Passen nicht einmal die Minima, laeuft der Tisch
+            // ueber; das ist dann unvermeidbar und tut jeder Browser.
+            let min_total: f32 = minw.iter().sum();
+            if min_total >= cap {
+                // Nicht einmal die Minima passen — dann laeuft der Tisch ueber.
+                colw = minw.clone();
+            } else {
+                let room = cap - min_total;
+                let slack: Vec<f32> = (0..ncols).map(|c| (pref[c] - minw[c]).max(0.0)).collect();
+                let slack_total: f32 = slack.iter().sum();
+                for c in 0..ncols {
+                    colw[c] = minw[c] + if slack_total > 0.0 {
+                        room * slack[c] / slack_total
+                    } else {
+                        room / ncols as f32
+                    };
+                }
             }
         } else if !table_auto && total < content_w {
             // No `total > 0` guard: a table whose columns all measure zero
@@ -13286,6 +13319,36 @@ fn dbg_wiki_shape() {
         // Nebeneinander, nicht untereinander — und auf derselben Zeile.
         assert!(texts[1].0 > texts[0].0, "das zweite Kind steht rechts: {texts:?}");
         assert_eq!(texts[0].1, texts[1].1, "gleiche Grundlinie: {texts:?}");
+    }
+
+    /// **Eine Spalte, die nicht schrumpfen kann, macht den Tisch nicht
+    /// breiter** (CSS2.1 §17.5.2.2).
+    ///
+    /// Beim Verteilen bekam jede Spalte ihren Anteil und danach `.max(minw)` —
+    /// und was das `.max` dazulegte, wurde niemandem weggenommen. Eine
+    /// Bildspalte (Minimum = ihre Breite) machte den Tisch damit breiter als
+    /// den Platz, den er hat: auf Wikipedias „Today's featured picture" 1548
+    /// statt 1296, und der Text lief 252 px aus seinem Kasten.
+    ///
+    /// An Chromium gemessen: 404 | 892 in einem 1296er Kasten — Minimum
+    /// sichern, den Rest im Verhaeltnis von `pref - minw`.
+    #[test]
+    fn a_column_that_cannot_shrink_does_not_widen_the_table() {
+        let l = lay_inspect(
+            "<body style='margin:0'><style>\
+             .box{width:600px} table{width:100%} td.t{text-align:left}\
+             </style><div class=box><table><tbody><tr>\
+             <td><img src=x.png width=200 height=100 alt=''></td>\
+             <td class=t><p>Ein ziemlich langer Text, der von sich aus viel \
+             breiter waere als die Spalte, die ihm zusteht, und der deshalb \
+             umbrechen muss statt den Tisch aufzublasen.</p></td>\
+             </tr></tbody></table></div></body>", 800);
+        let w = |tag: &str| l.inspect.iter().find(|b| b.label.starts_with(tag))
+            .map(|b| b.w).unwrap_or_else(|| panic!("kein {tag}"));
+        assert!(w("table") <= 600,
+                "der Tisch bleibt in seinem Kasten: {} von 600", w("table"));
+        // Und er faellt auch nicht in sich zusammen — `width:100%` gilt.
+        assert!(w("table") >= 590, "…und fuellt ihn: {}", w("table"));
     }
 
     /// **Ein Flex-Item hat seinen eigenen Formatierungskontext** — ein Float
