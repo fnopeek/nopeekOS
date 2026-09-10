@@ -2743,17 +2743,21 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
         "s" | "del" | "strike" => s.deco |= DECO_LINE_THROUGH,
         "i" | "em" | "cite" | "var" | "dfn" => s.italic = true,
         "code" | "kbd" | "samp" | "tt" => s.mono = true,
-        "small" => s.font_px = em * 0.85,
-        "big" => s.font_px = em * 1.15,
+        // `smaller` und `larger` sind EINE Stufe der Schriftskala, also
+        // /1,2 und ×1,2 (css-fonts-4 §3.3) — nicht 0,85 und 1,15 nach
+        // Augenmass. Chromium rechnet aus 16 px genau 13,3333 und 19,2.
+        "small" => s.font_px = em / 1.2,
+        "big" => s.font_px = em * 1.2,
         "mark" => s.color = theme.link.into(),
         "br" => s.is_break = true,
-        // Superscript / subscript: smaller, raised/lowered off the baseline.
+        // Superscript / subscript: `font-size: smaller`, von der Grundlinie
+        // gehoben bzw. gesenkt (HTML §15.3.4).
         "sup" => {
-            s.font_px = em * 0.75;
+            s.font_px = em / 1.2;
             s.valign = VAlign::Super;
         }
         "sub" => {
-            s.font_px = em * 0.75;
+            s.font_px = em / 1.2;
             s.valign = VAlign::Sub;
         }
         // span / label / abbr / time / u / s / … → plain inline.
@@ -5871,6 +5875,23 @@ mod tests {
         let s = ua("<address>x</address>");
         assert!(s.italic, "address ist kursiv");
         assert_eq!((s.margin_top, s.margin_bottom), (0.0, 0.0), "und hat keinen Rand");
+        // `smaller`/`larger` sind eine Stufe der Skala: /1,2 und ×1,2.
+        for (html, fs) in [("<p>x<small>y</small></p>", 16.0 / 1.2),
+                           ("<p>x<big>y</big></p>", 16.0 * 1.2),
+                           ("<p>x<sub>y</sub></p>", 16.0 / 1.2),
+                           ("<p>x<sup>y</sup></p>", 16.0 / 1.2)] {
+            let dom = dom::parse(html);
+            let sheet = css::parse("");
+            let mut root = ComputedStyle::root(&theme);
+            root.display = Display::Block;
+            let p = resolve(&subject(&dom), &root, &theme, &sheet, &[], &[], 0, 1000.0);
+            let inner = match &first_el(&dom).children[1] {
+                dom::Node::Element(e) => css::ElemInfo::of(e),
+                _ => panic!("kein Element"),
+            };
+            let s = resolve(&inner, &p, &theme, &sheet, &[], &[], 0, 1000.0);
+            assert!((s.font_px - fs).abs() < 0.01, "{html}: {} statt {fs}", s.font_px);
+        }
         let s = ua("<caption>x</caption>");
         assert!(!s.bold, "caption ist NICHT fett — das war unser Geschmack");
         assert_eq!(s.margin_bottom, 0.0);
