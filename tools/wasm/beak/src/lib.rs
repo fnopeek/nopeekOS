@@ -327,6 +327,8 @@ const URL_CAP: usize = 4096;
 ///     0.152.0:  46          <- Adresse, Verlauf, Navigation, Ladevorgang
 ///     0.153.0:  47          <- +COOKIE_BUF, ein ABHOLpuffer
 ///     0.163.0:  23          <- Ansicht, Nebenabrufe, Skriptrunde
+///     0.163.0:  24          <- und die Tabs legen EINE zurueck:
+///                              aus `DOC` wurden `TABS` + `ACTIVE`
 ///
 /// **Die Regel ist nicht „die Zahl faellt", sondern „nichts, was dem
 /// DOKUMENT gehoert, kommt dazu".** 0.153.0 hat einen Puffer bekommen, in
@@ -341,7 +343,7 @@ const URL_CAP: usize = 4096;
 /// | 3 | `LAST_W`/`LAST_H`/`LAST_SY` | beschreiben den BILDPUFFER, und der ist einer |
 /// | 3 | `SCRIPT_DEADLINE`, `BUDGET_T0`, `BUDGET_SAID` | beschreiben den LAUF auf dem Stapel, und der ist einer |
 /// | 3 | `OPEN_MENU`, `USE_SITE_CSS`, `INSPECT_MODE` | Fenster und Werkzeug, nicht Seite |
-/// | 1 | `DOC` | das Dokument selbst — daraus wird `Vec<Doc>` |
+/// | 2 | `TABS`, `ACTIVE` | die Dokumente selbst, und welches lebt |
 struct Doc {
     /// Woher das Dokument KAM (nach Weiterleitungen). Basis fuer jede
     /// relative Adresse der Seite und der Netzkontext, den der Kernel fuehrt.

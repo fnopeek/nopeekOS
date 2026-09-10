@@ -302,10 +302,12 @@ noch keinen einzigen Tab.** Das muss man vorher wissen und aushalten.
 Nachgetragen am Bau, nicht vorher geplant. Drei Dinge kamen anders.
 
 **Der Zaehler ist angekommen.** `static mut` in `tools/wasm/beak/src/lib.rs`:
-77 (0.151.0) → 46 → 23. Die 23 sind keine Reste, sondern vier Gruppen mit
-einem Grund, der eine zweite Seite ueberlebt: 13 Abholpuffer, 3 fuer den
-BILDPUFFER (`LAST_W/H/SY` — der Puffer ist einer), 3 fuer den Skriptdeckel
-(es laeuft ein Stueck Seitencode), 3 fuer Fenster und Werkzeug. Plus `TABS`.
+77 (0.151.0) → 46 → 23, und die Tabs legen eine zurueck (aus `DOC` wurden
+`TABS` + `ACTIVE`) — **24**. Die 22 ohne die beiden sind keine Reste, sondern
+vier Gruppen mit einem Grund, der eine zweite Seite ueberlebt: 13
+Abholpuffer, 3 fuer den BILDPUFFER (`LAST_W/H/SY` — der Puffer ist einer),
+3 fuer den Skriptdeckel (es laeuft ein Stueck Seitencode), 3 fuer Fenster
+und Werkzeug.
 
 **Schritt 2 („alle Tabs lebendig") ist uebersprungen worden, und das war
 richtig.** Der Entwurf sah ihn als Zwischenstufe vor; am Baum ist er gar nicht
