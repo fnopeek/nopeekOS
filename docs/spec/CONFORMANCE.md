@@ -22,12 +22,24 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-09-10, beak 0.160.0)
+### Current number (measured 2026-09-10, beak 0.161.0)
 
 ```
 4545 pass / 1099 fail / 142 inconclusive   (of 5786 vendored reftests)
 = 80.5 % of the conclusive 5644   ·   4545 / 5179 = 87.8 % without vehicles
 ```
+
+**0.161.0: eine CSS-Länge wird überall auf dieselbe Art ganzzahlig.** beak
+legt in ganzen Zahlen aus, CSS rechnet in Brüchen; jedes `as i32` schnitt ab.
+Das ADDIERT sich — jeder Kasten setzt auf der Unterkante des vorigen auf, und
+auf der nackten Vorlage waren es 8 px bis zum letzten `<div>`, mit sechzehn
+Kästen im 5–16-px-Eimer. Jetzt wird gerundet, und zwar an jeder Stelle:
+Ränder (`Collapse::px`), Polsterungen, Rahmen- und Umrissbreiten (`px_of`).
+Nur die Hälfte zu ändern ist schlimmer als gar nichts — `CSS2/floats-019`
+stellt `padding-top: 1.1in` gegen `margin: 1.1in`, und ein gerundeter Rand
+neben einer abgeschnittenen Polsterung ergibt 106 gegen 105. WPT ±0, die
+nackte Vorlage 19 identisch statt 17 und nur noch **drei** Kästen über 4 px,
+Bootstrap **168 identisch statt 162**.
 
 **0.160.0: der Kasten einer Tabelle ist die Tabelle.** Dieselbe Vorlage
 fand als nächstes eine Tabelle, die sich 1886 px breit MELDET und 157 px
