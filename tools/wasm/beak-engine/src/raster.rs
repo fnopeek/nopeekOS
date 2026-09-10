@@ -2232,7 +2232,7 @@ mod tests {
         // moves the page — which is the full re-layout that cost 1110-1710 ms
         // on the device.
         let mut eng = Engine::new();
-        eng.add_image_cached("/x.svg", "https://a.example/x.svg", RED_10);
+        eng.add_image_cached("/x.svg", "https://a.example/x.svg", RED_10).unwrap();
         eng.images_begin();
         eng.adopt_cached(&[(
             alloc::string::String::from("/x.svg"),

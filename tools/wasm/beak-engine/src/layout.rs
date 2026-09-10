@@ -4192,11 +4192,33 @@ family: st.family,
         }
         let out_open;
         if collapse_bottom {
-            // `min-height` taller than the content introduces space below it,
-            // trapping the trailing margin inside the box.
+            // **`min-height` ueber dem Inhalt VERSCHLUCKT den Schlussrand.**
+            // Er entkommt nicht (die Fusszeile darunter rueckt nicht weg) —
+            // und er wird auch nicht mitgerechnet.
+            //
+            // Das Zweite stand hier falsch: `ch` bekam `flow.open` dazu, also
+            // wuchs der Kasten um den Rand, den er gerade eingesperrt hatte.
+            // In `margin-collapse-min-height-001` sind das 550 px, und der
+            // gruene Kasten lief statt 100 px hoch aus dem Bild.
+            //
+            // Gemessen an Chromium ueber fuenf Faelle, und die Grenze ist
+            // genau diese Bedingung:
+            //
+            //     min-h  Kind  Rand    Elter  Fusszeile      der Rand
+            //      100    30   550      100   direkt danach  verschluckt
+            //      100   200   550      200   +550           entkommt
+            //      100    30    20      100   direkt danach  verschluckt
+            //        0    30   550       30   +550           entkommt
+            //      100   120   550      120   +550           entkommt
+            //
+            // Er verschwindet also GENAU dann, wenn `min-height` die Hoehe
+            // ueber den Inhalt hebt — dann liegt zwischen Inhaltsunterkante
+            // und Rahmenunterkante Platz, die beiden Raender stossen nicht
+            // mehr aneinander, und ein nicht aneinanderstossender Rand in
+            // diesem Zwischenraum wird aufgesogen.
             let mn = px_h(st.min_height).unwrap_or(0);
             if mn > ch {
-                ch = (flow.bottom + flow.open.value() as i32 - content_top).max(0).max(mn);
+                ch = mn;
                 if let Some(mx) = px_h(st.max_height) {
                     ch = ch.min(mx);
                 }
@@ -13185,45 +13207,65 @@ fn dbg_wiki_shape() {
         assert!(nah < fern, "unter dem Kasten muss es nach aussen heller werden: {nah} vs {fern}");
     }
 
-    fn a_shadow_list_paints_its_first_paintable_layer_not_its_first() {
-        let shadow_rects = |css: &str| -> Vec<(i32, i32, i32, i32, Rgb)> {
+    /// Eine Schattenliste hat DREI Plaetze — den ersten SCHARFEN, den ersten
+    /// WEICHEN und den ersten INNEREN Anteil —, und eine Schicht, die nichts
+    /// malt, belegt keinen davon.
+    ///
+    /// Der Test hiess bis hierher „malt die erste MALBARE Schicht, nicht die
+    /// erste" und beschrieb damit den Stand vor 0.61.0: weiche Schichten
+    /// fielen weg, `inset` gab es nicht. **Er stand seit 0.61.0 ohne `#[test]`
+    /// da** — die Zeile wurde beim Einfuegen des Nachbartests darueber
+    /// verbraucht —, und genau deshalb ist niemandem aufgefallen, dass seine
+    /// Behauptung im selben Commit falsch wurde.
+    #[test]
+    fn a_shadow_list_fills_three_slots_sharp_soft_and_inset() {
+        // Alle Rechtecke einer Farbe, dazu die Zahl der weichen Schatten.
+        let shadow = |css: &str| -> (Vec<(i32, i32, i32, i32, Rgb)>, usize) {
             let l = lay(&alloc::format!("<body><div style=\"{css}\">x</div></body>"), 400);
-            rects(&l).into_iter().filter(|(_, _, _, _, c)| *c == Rgb(1, 2, 3)).collect()
+            let soft = l.ops.iter().filter(|o| matches!(o, DrawOp::Shadow { .. })).count();
+            (rects(&l).into_iter().filter(|(_, _, _, _, c)| *c == Rgb(1, 2, 3)).collect(), soft)
         };
-        // The DDG shape: two blurred layers, then the 1px spread that is the
-        // visible ring. Four sides, because a pure spread rings the box.
-        assert_eq!(
-            shadow_rects(
-                "height:20px;box-shadow:0 10px 20px rgb(9,9,9),0 2px 6px rgb(9,9,9),\
-                 0 0 0 1px rgb(1,2,3)"
-            )
-            .len(),
-            4,
-            "the sharp third layer rings the box"
+        // Der Kasten: `body` hat 8 px Rand, das `div` ist 384x20 bei (8,8).
+        // Die DDG-Form: zwei weiche Schichten, dann der 1-px-Ring, der zu
+        // sehen ist. Vier Seiten, weil eine reine Ausdehnung den Kasten
+        // umrandet — und **ein** weicher Schatten, nicht zwei: die zweite
+        // weiche Schicht findet ihren Platz besetzt.
+        let (r, soft) = shadow(
+            "height:20px;box-shadow:0 10px 20px rgb(9,9,9),0 2px 6px rgb(9,9,9),\
+             0 0 0 1px rgb(1,2,3)",
         );
-        // An `inset` layer is skipped like a blurred one — we have no inner
-        // shadow — and the search continues past it.
-        let r = shadow_rects("height:20px;box-shadow:inset 0 0 0 2px rgb(9,9,9),0 1px rgb(1,2,3)");
-        assert_eq!(r.len(), 1, "one strip below, got {r:?}");
+        assert_eq!(r.len(), 4, "die scharfe dritte Schicht umrandet den Kasten");
+        assert_eq!(soft, 1, "nur die ERSTE weiche Schicht bekommt den Platz");
+        // Ein `inset` belegt den scharfen Platz NICHT — der Streifen darunter
+        // gehoert der zweiten Schicht —, und gemalt wird er trotzdem: vier
+        // Seiten nach innen, in seiner eigenen Farbe.
+        let (r, _) = shadow("height:20px;box-shadow:inset 0 0 0 2px rgb(9,9,9),0 1px rgb(1,2,3)");
+        assert_eq!(r.len(), 1, "ein Streifen darunter, war {r:?}");
         assert_eq!(r[0].1, 8 + 20);
-        // A list with nothing paintable in it paints nothing.
-        assert!(shadow_rects("height:20px;box-shadow:0 2px 8px rgb(1,2,3),inset 0 1px rgb(1,2,3)")
-            .is_empty());
-        // `inset` is VALID CSS, just unpaintable — so it REPLACES an earlier
-        // shadow rather than being dropped as a bad value and leaving it up.
-        assert!(
-            shadow_rects("height:20px;box-shadow:0 1px rgb(1,2,3);box-shadow:inset 0 1px rgb(1,2,3)")
-                .is_empty(),
-            "the inset declaration wins the cascade and paints nothing"
+        let l = lay(
+            "<body><div style=\"height:20px;box-shadow:inset 0 0 0 2px rgb(9,9,9),0 1px rgb(1,2,3)\">x</div></body>",
+            400,
         );
-        // A layer we cannot READ still invalidates the whole declaration, so
-        // the box keeps the shadow it already had.
-        assert_eq!(
-            shadow_rects("height:20px;box-shadow:0 1px rgb(1,2,3);box-shadow:0 1px wobble(3)")
-                .len(),
-            1,
-            "an unreadable value drops the declaration, not the previous shadow"
-        );
+        let inner = rects(&l).into_iter().filter(|(_, _, _, _, c)| *c == Rgb(9, 9, 9)).count();
+        assert_eq!(inner, 4, "der innere Schatten umrandet den Kasten von innen");
+        // Ohne scharfen Anteil bleibt der Kasten ohne Ring: was malt, ist der
+        // weiche Schatten und der innere Streifen IM Kasten (y = 8), nicht
+        // darunter.
+        let (r, soft) = shadow("height:20px;box-shadow:0 2px 8px rgb(1,2,3),inset 0 1px rgb(1,2,3)");
+        assert_eq!(soft, 1);
+        assert_eq!(r.len(), 1, "nur der innere Streifen, war {r:?}");
+        assert_eq!(r[0].1, 8, "er liegt IM Kasten, nicht darunter");
+        // `inset` ist gueltiges CSS — die zweite Deklaration ERSETZT die erste,
+        // statt als schlechter Wert zu verfallen. Der Streifen wandert damit
+        // von unter dem Kasten (y = 28) in ihn hinein (y = 8).
+        let (r, _) = shadow("height:20px;box-shadow:0 1px rgb(1,2,3);box-shadow:inset 0 1px rgb(1,2,3)");
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].1, 8, "die `inset`-Deklaration gewinnt die Kaskade");
+        // Eine Schicht, die wir nicht LESEN koennen, verwirft dagegen die ganze
+        // Deklaration — der Kasten behaelt den Schatten, den er schon hatte.
+        let (r, _) = shadow("height:20px;box-shadow:0 1px rgb(1,2,3);box-shadow:0 1px wobble(3)");
+        assert_eq!(r.len(), 1, "ein unlesbarer Wert verwirft die Deklaration, nicht den Vorgaenger");
+        assert_eq!(r[0].1, 8 + 20);
     }
 
     /// A control the page made block-level is a BLOCK box, not an atomic inline.
@@ -13709,6 +13751,37 @@ fn dbg_wiki_shape() {
     /// nur eckig. Chromium daneben gestellt zeigte den Unterschied. Der Test
     /// prueft jetzt, was die Form BEDEUTET, statt wie viele Rechtecke sie
     /// kostet: ohne Haken kein `Check`, mit Haken genau einer.
+    /// **`min-height` ueber dem Inhalt verschluckt den Schlussrand.**
+    ///
+    /// Die fuenf Faelle sind die, mit denen die Regel an Chromium
+    /// charakterisiert wurde (siehe den Kommentar an der Stelle): der Rand
+    /// verschwindet GENAU dann, wenn `min-height` die Hoehe ueber den Inhalt
+    /// hebt — sonst entkommt er wie immer und schiebt, was darunter steht.
+    #[test]
+    fn min_height_over_the_content_swallows_the_trailing_margin() {
+        let page = |mh: i32, chh: i32, mb: i32| alloc::format!(
+            "<body style='margin:0'><div style='width:100px'>             <div id=p style='min-height:{mh}px'>             <div style='height:{chh}px;margin-bottom:{mb}px'></div></div>             <div id=f style='height:50px'></div></div></body>");
+        // (min-height, Kindhoehe, Rand) -> (Elterhoehe, Fusszeilen-Oberkante)
+        for (mh, chh, mb, want_h, want_f) in [
+            (100, 30, 550, 100, 100),
+            (100, 200, 550, 200, 750),
+            (100, 30, 20, 100, 100),
+            (0, 30, 550, 30, 580),
+            (100, 120, 550, 120, 670),
+        ] {
+            let l = lay_inspect(&page(mh, chh, mb), 400);
+            let get = |id: &str| l.inspect.iter()
+                .find(|b| b.label.starts_with(id))
+                .unwrap_or_else(|| panic!("kein Kasten {id}"));
+            let p = get("div#p");
+            let f = get("div#f");
+            assert_eq!(p.h, want_h,
+                "min-height {mh}, Kind {chh}, Rand {mb}: Elterhoehe");
+            assert_eq!(f.y, want_f,
+                "min-height {mh}, Kind {chh}, Rand {mb}: Fusszeile");
+        }
+    }
+
     #[test]
     fn checkbox_paints_its_mark_only_when_checked() {
         let checks = |l: &Layout| {

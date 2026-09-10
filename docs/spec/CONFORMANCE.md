@@ -22,12 +22,20 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-09-10, beak 0.149.0)
+### Current number (measured 2026-09-10, beak 0.157.0)
 
 ```
-4539 pass / 1105 fail / 142 inconclusive   (of 5786 vendored reftests)
-= 80.4 % of the conclusive 5644   ·   4539 / 5179 = 87.6 % without vehicles
+4540 pass / 1104 fail / 142 inconclusive   (of 5786 vendored reftests)
+= 80.4 % of the conclusive 5644   ·   4540 / 5179 = 87.7 % without vehicles
 ```
+
+**+1 über 0.149.0: `margin-collapse-min-height-001`.** Ein `min-height`, das
+die Höhe über den Inhalt hebt, sperrt den Schlussrand ein — so weit stand es
+richtig im Code. Nur wurde derselbe Rand danach zur Höhe ADDIERT: der grüne
+Kasten kam 650 px statt 100 px hoch heraus. An Chromium über fünf Fälle
+charakterisiert (die Tabelle steht am Code), und die Grenze ist genau die
+Bedingung, die schon dastand: der Rand verschwindet, wenn `min-height` die
+Höhe hebt, und entkommt sonst wie immer.
 
 **Der zweite Nenner ist am 2026-09-10 um einen Eimer gewachsen: „Testschrift
 fehlt".** 19 Fehler — 18 davon die ganze Familie `css-fonts/font-family-name`
@@ -57,8 +65,8 @@ lost their oracle, not their correctness.
 input with a 1 px #7c7c7c border has almost no "ink" — although Chromium
 draws exactly that. Changing the oracle in the same commit that moves the
 rendering would make the number unreadable ([[feedback_which_side_moved]]),
-so the baseline is re-blessed at 4539 and the guard is written down here
-instead. **659 real failures left.**
+so the baseline is re-blessed at 4540 and the guard is written down here
+instead. **639 real failures left** (5179 − 4540, aus `tests/vehicles.py`).
 
 #### 0.145.0/0.146.0: the box a flex container reports (+5 / −0)
 
