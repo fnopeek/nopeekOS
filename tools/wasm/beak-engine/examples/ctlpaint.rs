@@ -249,6 +249,7 @@ fn main() {
     state.focus = Some(seq);
     state.set_value(seq, text.clone());
     state.caret = text.len();
+    println!("\nCTL {want_id:?} ist seq={seq}");
 
     for (c, (seq, at, len)) in lay.controls.iter().zip(lay.control_spans()) {
         println!("  seq={seq} {:?} {},{} {}x{} — Befehle {at}..{} ({len} Stueck)",
@@ -269,6 +270,20 @@ fn main() {
             println!("  seq={sq} {:?} {},{} {}x{} — Befehle {at}..{} ({len} Stueck)",
                      c.kind, c.x, c.y, c.w, c.h, at + len);
         }
+    }
+    // `DUPES=1`: welche Elemente MEHRFACH einen Kasten aufgezeichnet haben.
+    // `getBoundingClientRect` gibt die VEREINIGUNG (`node_box`), also macht ein
+    // zweiter Eintrag den Kasten stillschweigend groesser.
+    if std::env::var("DUPES").is_ok() {
+        let rects = lay.element_rects();
+        let mut by: std::collections::BTreeMap<u32, Vec<(i32, i32, i32, i32)>> = Default::default();
+        for r in &rects { by.entry(r.seq).or_default().push((r.x, r.y, r.w, r.h)); }
+        let mut n = 0;
+        for (seq, v) in by.iter().filter(|(_, v)| v.len() > 1) {
+            n += 1;
+            if n <= 20 { println!("  seq={seq} {}x aufgezeichnet: {v:?}", v.len()); }
+        }
+        println!("  {n} von {} Elementen mehrfach aufgezeichnet", by.len());
     }
     let before = dump_ops(&lay);
     if std::env::var("FULL").is_ok() {
@@ -329,6 +344,7 @@ fn dump_ops(l: &beak_engine::layout::Layout) -> Vec<String> {
             DrawOp::Image { x, y, w, h, src, .. } => { let _ = write!(s, "I {x},{y} {w}x{h} {src}"); }
             DrawOp::BgImage { x, y, w, h, key, .. } => { let _ = write!(s, "B {x},{y} {w}x{h} {key}"); }
             DrawOp::Gradient { x, y, w, h, .. } => { let _ = write!(s, "G {x},{y} {w}x{h}"); }
+            DrawOp::Check { x, y, w, h, color } => { let _ = write!(s, "C {x},{y} {w}x{h} {color:?}"); }
         }
         v.push(s);
     }
