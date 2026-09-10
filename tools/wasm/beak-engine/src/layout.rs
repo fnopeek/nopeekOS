@@ -3126,7 +3126,7 @@ impl<'a> Ctx<'a> {
                     let by = anchor + t.value() as i32;
                     let (bx, bw, byy) = self.avoid_floats_bfc(None, &anon_st, x, w, by);
                     let saved = core::mem::take(&mut self.floats);
-                    let bottom = self.layout_table_body(run, &anon_st, bx, bw, byy);
+                    let (bottom, ..) = self.layout_table_body(run, &anon_st, bx, bw, byy);
                     self.floats = saved;
                     if !committed {
                         first_top = byy;
@@ -5351,7 +5351,7 @@ family: st.family,
     /// cell's own box (background/border/padding). Rows/cells are recognised by
     /// HTML tag (`tr`/`td`/`th`/`thead`…) or `display: table-*`; anonymous
     /// boxes fill any missing row/row-group/cell wrapper (CSS2 §17.2.1).
-    fn layout_table(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
+    fn layout_table(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> (i32, i32, i32) {
         // <caption> renders as a block on the table's top or bottom edge
         // (CSS2.1 §17.4.1), per its own `caption-side` — aligned with the
         // TABLE box, so the table's horizontal margins have to come off first.
@@ -5363,9 +5363,44 @@ family: st.family,
         let ml = st.margin_left.px(cbw).unwrap_or(0.0) as i32;
         let mr = st.margin_right.px(cbw).unwrap_or(0.0) as i32;
         let (cx, cw) = (x + ml, (w - ml - mr).max(0));
-        let mut y = self.layout_captions(el, st, cx, cw, y0, false);
-        y = self.layout_table_body(&el.children, st, x, w, y);
-        self.layout_captions(el, st, cx, cw, y, true)
+        // Eine OBERE Ueberschrift steht vor dem Gitter und ist doch so breit
+        // wie es — also einmal die Spalten ausrechnen, bevor irgendetwas
+        // gemalt wird. Das kostet ein zusaetzliches Auszaehlen der Zeilen, und
+        // nur fuer Tabellen, die ueberhaupt eine obere Ueberschrift haben.
+        let (mut top_x, mut top_w) = (cx, cw);
+        if self.has_top_caption(el, st) {
+            let mut rows = self.collect_table_rows(&el.children, st);
+            rows.retain(|r| !r.cells.is_empty());
+            let ncols = rows.iter().map(|r| row_columns(&r.cells).1).max().unwrap_or(0).min(64);
+            if ncols > 0 {
+                let (_, tw, off) = self.table_columns(&rows, ncols, st, w);
+                (top_x, top_w) = (x + off, tw);
+            }
+        }
+        let mut y = self.layout_captions(el, st, top_x, top_w, y0, false);
+        let (bottom, bx, bw) = self.layout_table_body(&el.children, st, x, w, y);
+        y = self.layout_captions(el, st, bx, bw, bottom, true);
+        (y, bx, bw)
+    }
+
+    /// Hat die Tabelle eine Ueberschrift AN IHREM OBEREN Rand? Nur dann lohnt
+    /// der Vorablauf ueber die Spalten.
+    fn has_top_caption(&mut self, el: &'a Element, st: &ComputedStyle) -> bool {
+        let sib_count = el.children.iter().filter(|n| matches!(n, Node::Element(_))).count() as u32;
+        let mut siblings: Vec<ElemInfo> = Vec::new();
+        for c in &el.children {
+            if let Node::Element(e) = c {
+                let cs = self.styled(e, st, &siblings, sib_count);
+                siblings.push(self.info(e));
+                if (e.tag == "caption" || cs.display == Display::TableCaption)
+                    && cs.display != Display::None
+                    && !cs.caption_bottom
+                {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Lay out the caption children whose `caption-side` puts them on the
@@ -5417,7 +5452,13 @@ family: st.family,
     /// `table`/`inline-table` ancestor (CSS2 §17.2.1) — an anonymous table
     /// can't have a `<caption>` child (nothing selects an anonymous box), so
     /// only the row-collection step is shared.
-    fn layout_table_body(&mut self, nodes: &'a [Node], st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
+    ///
+    /// Gibt `(Unterkante, linke Kante, Breite)` des TABELLENKASTENS zurueck —
+    /// nicht des Streifens. Eine Tabelle mit `width: auto` schrumpft auf ihren
+    /// Inhalt (§17.5.2), und wer nur die Unterkante zurueckgibt, laesst jeden
+    /// Rufer raten: `getBoundingClientRect` meldete jahrelang die Streifen-
+    /// breite (1886 statt 157 px auf einer nackten Seite).
+    fn layout_table_body(&mut self, nodes: &'a [Node], st: &ComputedStyle, x: i32, w: i32, y0: i32) -> (i32, i32, i32) {
         let mut rows = self.collect_table_rows(nodes, st);
         rows.retain(|r| !r.cells.is_empty());
         let ncols = rows.iter().map(|r| row_columns(&r.cells).1).max().unwrap_or(0).min(64);
@@ -5440,7 +5481,7 @@ family: st.family,
             let (bw, bh) = ((cw + frame_x).max(0.0) as i32, (ch + frame_y).max(0.0) as i32);
             let ml = st.margin_left.px(cbw).unwrap_or(0.0) as i32;
             self.paint_box_decoration(st, x + ml, y0, bw, bh, bg_idx);
-            return y0 + bh;
+            return (y0 + bh, x + ml, bw);
         }
 
         // `fixed` tables paint each cell's own box (backgrounds/borders are the
@@ -5448,54 +5489,14 @@ family: st.family,
         // block boxes inside each cell — painting per-cell backgrounds/borders
         // there would (without collapsed-border resolution) draw borders that
         // should be hidden and swatches the reference omits.
-        // The columns share the table's CONTENT box, so the space they may use
-        // is what is left of `w` after the table's own border and padding —
-        // otherwise the grid overflows the border box by exactly that much.
-        // Horizontal margins apply to a table box like any other block-level
-        // box, but the enclosing BFC branch only carries the vertical ones —
-        // flex and grid pick these up inside `resolve_block_h`, which a table
-        // can't use (its `width:auto` shrink-wraps instead of filling).
-        let (ml_len, mr_len) = (st.margin_left, st.margin_right);
-        let (ml, mr) = (ml_len.px(w as f32).unwrap_or(0.0) as i32, mr_len.px(w as f32).unwrap_or(0.0) as i32);
-        let avail = (w - ml - mr).max(0);
-        // In the collapsed model the table has neither padding nor a border box
-        // of its own (CSS2.1 §17.6.2) — the outermost cell borders ARE the
-        // table's frame, so the grid starts flush at the table's edge and the
-        // cells draw every grid line, outer ones included.
-        let collapse = st.border_collapse;
-        let frame = if collapse { 0 } else { (st.pad_left + st.pad_right + st.border_x()) as i32 };
-        // Separated border model: `border-spacing` runs between every pair of
-        // columns AND once along each outer edge, so `ncols + 1` gaps come out
-        // of the content box before the columns share what is left.
+        let (colw, table_w, off) = self.table_columns(&rows, ncols, st, w);
         let (sx, sy) = spacing_of(st);
-        let gaps = sx * (ncols as i32 + 1);
-        let inner_w = (avail - frame - gaps).max(0);
-        let colw = if st.table_layout == TableLayout::Fixed {
-            self.fixed_columns(&rows, ncols, st, inner_w)
-        } else {
-            self.auto_columns(&rows, ncols, st, inner_w)
-        };
+        let collapse = st.border_collapse;
         // The table's own border box: border, then padding, then the row grid.
         // Getting the border edge in here is what lets the table paint its own
         // decoration at all — laying the grid at `x + pad_left` (no border
         // offset) put every stroke a border-width off.
         let (btl, btt) = (st.border_left.width as i32, st.border_top.width as i32);
-        // A table's used width is known only once its columns are, so `auto`
-        // margins can only be resolved here (CSS2.1 §10.3.3 over §17.5.2): both
-        // auto centres the table, one auto pushes it to the other edge.
-        let table_w = colw.iter().sum::<i32>() + gaps + frame;
-        let slack = (avail - table_w).max(0);
-        let off = match (ml_len, mr_len) {
-            (Len::Auto, Len::Auto) => ml + slack / 2,
-            (Len::Auto, _) => ml + slack,
-            // Inside `<center>` a table is centred even with zero margins —
-            // that is what `-moz-center` does, and it is the whole reason the
-            // `<center><table>` idiom worked. Google's home page centres its
-            // search box that way, so without it a correctly sized table still
-            // sits hard against the left edge.
-            _ if st.center_blocks => ml + slack / 2,
-            _ => ml,
-        };
         let x = x + off;
         let (inner_x, content_top) = if collapse {
             (x, y0)
@@ -5529,7 +5530,7 @@ family: st.family,
         } else {
             self.paint_box_decoration(st, x, y0, table_w, table_bottom - y0, bg_idx);
         }
-        table_bottom
+        (table_bottom, x, table_w)
     }
 
     fn part_start(&self) -> SpecMark {
@@ -5558,6 +5559,62 @@ family: st.family,
             let (z, layer) = Self::stack_key(cs);
             self.record_stack_entry(z, layer, part.ops, self.ops.len(), part.links, self.links.len());
         }
+    }
+
+    /// Die Spaltenbreiten, die gebrauchte Breite der Tabelle und ihr Versatz
+    /// im Streifen.
+    ///
+    /// Steht fuer sich, weil die Antwort ZWEIMAL gebraucht wird: einmal beim
+    /// Auslegen und einmal vorher, weil eine `<caption>` so breit ist wie die
+    /// TABELLE (§17.4.1) und nicht wie der Streifen, in dem sie steht — und
+    /// wie breit die Tabelle ist, weiss erst das Gitter. Sie haengt allein an
+    /// den Zeilen und am Stil, nicht an `y`.
+    fn table_columns(&mut self, rows: &[Row<'a>], ncols: usize, st: &ComputedStyle, w: i32)
+        -> (Vec<i32>, i32, i32)
+    {
+        // The columns share the table's CONTENT box, so the space they may use
+        // is what is left of `w` after the table's own border and padding —
+        // otherwise the grid overflows the border box by exactly that much.
+        // Horizontal margins apply to a table box like any other block-level
+        // box, but the enclosing BFC branch only carries the vertical ones —
+        // flex and grid pick these up inside `resolve_block_h`, which a table
+        // can't use (its `width:auto` shrink-wraps instead of filling).
+        let (ml_len, mr_len) = (st.margin_left, st.margin_right);
+        let (ml, mr) = (ml_len.px(w as f32).unwrap_or(0.0) as i32, mr_len.px(w as f32).unwrap_or(0.0) as i32);
+        let avail = (w - ml - mr).max(0);
+        // In the collapsed model the table has neither padding nor a border box
+        // of its own (CSS2.1 §17.6.2) — the outermost cell borders ARE the
+        // table's frame, so the grid starts flush at the table's edge and the
+        // cells draw every grid line, outer ones included.
+        let frame = if st.border_collapse { 0 } else { (st.pad_left + st.pad_right + st.border_x()) as i32 };
+        // Separated border model: `border-spacing` runs between every pair of
+        // columns AND once along each outer edge, so `ncols + 1` gaps come out
+        // of the content box before the columns share what is left.
+        let (sx, _) = spacing_of(st);
+        let gaps = sx * (ncols as i32 + 1);
+        let inner_w = (avail - frame - gaps).max(0);
+        let colw = if st.table_layout == TableLayout::Fixed {
+            self.fixed_columns(rows, ncols, st, inner_w)
+        } else {
+            self.auto_columns(rows, ncols, st, inner_w)
+        };
+        // A table's used width is known only once its columns are, so `auto`
+        // margins can only be resolved here (CSS2.1 §10.3.3 over §17.5.2): both
+        // auto centres the table, one auto pushes it to the other edge.
+        let table_w = colw.iter().sum::<i32>() + gaps + frame;
+        let slack = (avail - table_w).max(0);
+        let off = match (ml_len, mr_len) {
+            (Len::Auto, Len::Auto) => ml + slack / 2,
+            (Len::Auto, _) => ml + slack,
+            // Inside `<center>` a table is centred even with zero margins —
+            // that is what `-moz-center` does, and it is the whole reason the
+            // `<center><table>` idiom worked. Google's home page centres its
+            // search box that way, so without it a correctly sized table still
+            // sits hard against the left edge.
+            _ if st.center_blocks => ml + slack / 2,
+            _ => ml,
+        };
+        (colw, table_w, off)
     }
 
     /// Auto table sizing (CSS2 §17.5.2.2, approximated): each column takes the
@@ -6906,8 +6963,13 @@ family: st.family,
         // doing it again here would compose the transform with itself, and an
         // inversion applied twice is no inversion at all.
         let f0 = self.ops.len();
+        let mut table_box = None;
         let bottom = match st.display {
-            Display::Table => self.layout_table(el, st, x, w, y),
+            Display::Table => {
+                let (b, bx, bw) = self.layout_table(el, st, x, w, y);
+                table_box = Some((bx, bw));
+                b
+            }
             Display::Flex | Display::InlineFlex => self.layout_flex(el, st, x, w, y),
             Display::Grid => self.layout_grid(el, st, x, w, y),
             _ => {
@@ -6925,8 +6987,15 @@ family: st.family,
         // `layout_box` kommt (Flex- und Rasterkinder, Tabellenzellen), hatte
         // gar keinen. `getBoundingClientRect` gab dort NULL zurueck, und eine
         // Null sieht aus wie eine Messung.
-        let (rx, rw) = if matches!(st.display, Display::Table) { (x, w) }
-                       else { used_border_box(st, x, w) };
+        // **Der Kasten einer Tabelle ist die Tabelle, nicht ihr Streifen.**
+        // Hier stand `(x, w)` — die Breite, die ANGEBOTEN wurde. Eine Tabelle
+        // mit `width: auto` schrumpft auf ihren Inhalt, malt auch so, und
+        // meldete sich trotzdem 1886 px breit, wo sie 157 malt. Derselbe
+        // Fehler wie bei den Flexkaesten in 0.145.0, nur eine Zeile weiter.
+        let (rx, rw) = match table_box {
+            Some((bx, bw)) => (bx, bw),
+            None => used_border_box(st, x, w),
+        };
         self.record_inspect(el, st, rx, y, rw, bottom - y, f0);
         self.apply_filter(st, f0);
         bottom
@@ -13294,6 +13363,33 @@ fn dbg_wiki_shape() {
         let at = |x: usize, y: usize| buf[(y * 400 + x) * 4] as i32;
         let (nah, fern) = (at(200, 40), at(200, 52));
         assert!(nah < fern, "unter dem Kasten muss es nach aussen heller werden: {nah} vs {fern}");
+    }
+
+    /// **Der Kasten einer Tabelle ist die Tabelle, nicht ihr Streifen** — und
+    /// die `<caption>` ist so breit wie die Tabelle, nicht wie der Streifen.
+    ///
+    /// Eine Tabelle mit `width: auto` schrumpft auf ihren Inhalt (§17.5.2) und
+    /// MALT auch so; gemeldet wurde trotzdem die angebotene Breite. Auf einer
+    /// nackten Seite waren das 1886 statt 157 px, und eine Ueberschrift stand
+    /// ueber der ganzen Fensterbreite statt ueber ihrer Tabelle.
+    #[test]
+    fn a_tables_box_is_the_table_not_the_strip_it_was_offered() {
+        let l = lay_inspect(
+            "<body style='margin:0'><table><caption>Titel</caption>\
+             <tr><td>ab</td><td>cd</td></tr></table></body>", 800);
+        let get = |id: &str| l.inspect.iter().find(|b| b.label.starts_with(id))
+            .unwrap_or_else(|| panic!("kein Kasten {id}: {:?}",
+                l.inspect.iter().map(|b| &b.label).collect::<Vec<_>>()));
+        let (t, c) = (get("table"), get("caption"));
+        assert!(t.w < 300, "die Tabelle schrumpft auf ihren Inhalt, war {} px breit", t.w);
+        assert_eq!(c.w, t.w, "die Ueberschrift ist so breit wie die Tabelle");
+        assert_eq!(c.x, t.x, "und liegt an ihrer linken Kante");
+        assert_eq!(c.y, t.y, "und ueber ihr");
+        // Die Gegenprobe: eine Tabelle mit `width: 100%` FUELLT den Streifen.
+        let l = lay_inspect(
+            "<body style='margin:0'><table style='width:100%'><tr><td>ab</td></tr></table></body>", 800);
+        let t = l.inspect.iter().find(|b| b.label.starts_with("table")).expect("keine Tabelle");
+        assert_eq!(t.w, 800);
     }
 
     /// **Fallen die Raender aller Kinder durch, gehoeren sie an den OBERRAND

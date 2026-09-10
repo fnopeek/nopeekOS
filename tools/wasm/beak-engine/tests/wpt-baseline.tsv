@@ -2922,7 +2922,7 @@ PASS	CSS2/padding-top-applies-to-009.xht
 PASS	CSS2/padding-top-applies-to-012.xht
 PASS	CSS2/padding-top-applies-to-013.xht
 PASS	CSS2/padding-top-applies-to-014.xht
-FAIL	CSS2/padding-top-applies-to-015.xht
+PASS	CSS2/padding-top-applies-to-015.xht
 FAIL	CSS2/percent-height-1.html
 PASS	CSS2/position-006.xht
 PASS	CSS2/position-absolute-001.xht
