@@ -22,12 +22,27 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-09-10, beak 0.157.0)
+### Current number (measured 2026-09-10, beak 0.158.0)
 
 ```
-4540 pass / 1104 fail / 142 inconclusive   (of 5786 vendored reftests)
-= 80.4 % of the conclusive 5644   ·   4540 / 5179 = 87.7 % without vehicles
+4543 pass / 1101 fail / 142 inconclusive   (of 5786 vendored reftests)
+= 80.5 % of the conclusive 5644   ·   4543 / 5179 = 87.7 % without vehicles
 ```
+
+**+3 über 0.157.0: der Rand, der durch jedes Kind fällt, gehört an den
+OBERRAND des Elters** (CSS 2.1 §8.3.1). Legt sich kein Kind fest, stossen
+seine Ränder oben wie unten an die des Elters — hat der Elter aber eine Höhe,
+erreichen sie dessen Unterrand nicht mehr, und es bleibt der obere. Wir
+liessen sie ganz fallen. Weil der Rand erst BEKANNT ist, wenn die Kinder
+gelaufen sind, und zugleich bestimmt, wo sie stehen (ein durchgefallenes Kind
+kann einen Float enthalten, und der wird gemalt), fährt `flow_block_impl`
+diesen einen Fall ein zweites Mal — mit `spec_rollback`, wie die
+spekulativen Flex-Läufe. Dazu die Regel daneben, ohne die es ein Rücksprung
+gewesen wäre: **eine Räumung SETZT die Oberkante** (§9.5.2), der spät
+gefundene Rand geht in die hypothetische Lage ein und wird geschluckt, sobald
+der Float tiefer reicht. `margin-collapse-min-height-001.xht`/`-002.xht` und
+`clear-float-003.xht`; an Chromium über sieben Fälle gemessen, die Tabelle
+steht am Test.
 
 **+1 über 0.149.0: `margin-collapse-min-height-001`.** Ein `min-height`, das
 die Höhe über den Inhalt hebt, sperrt den Schlussrand ein — so weit stand es
@@ -65,8 +80,8 @@ lost their oracle, not their correctness.
 input with a 1 px #7c7c7c border has almost no "ink" — although Chromium
 draws exactly that. Changing the oracle in the same commit that moves the
 rendering would make the number unreadable ([[feedback_which_side_moved]]),
-so the baseline is re-blessed at 4540 and the guard is written down here
-instead. **639 real failures left** (5179 − 4540, aus `tests/vehicles.py`).
+so the baseline is re-blessed at 4543 and the guard is written down here
+instead. **636 real failures left** (5179 − 4543, aus `tests/vehicles.py`).
 
 #### 0.145.0/0.146.0: the box a flex container reports (+5 / −0)
 

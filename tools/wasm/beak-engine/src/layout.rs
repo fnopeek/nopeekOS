@@ -2021,6 +2021,13 @@ struct Ctx<'a> {
     /// jurisdiction (CSS2.1 §11.1.1) — see `clip_overflow`.
     abs_count: u32,
     fixed_count: u32,
+    /// Die Raeumung, die der Rufer gerade angewandt hat, fuer den EINEN
+    /// Kasten, der als naechstes ausgelegt wird: `(Anker davor, offener Rand
+    /// davor, geraeumte Oberkante)`. Nur der zweite Durchgang in
+    /// `flow_block_impl` braucht sie — eine Raeumung SETZT die Oberkante, also
+    /// muss ein spaeter gefundener Rand in die hypothetische Lage, nicht
+    /// obendrauf. Wird beim Eintritt genommen, damit kein Kind sie sieht.
+    clear_floor: Option<(i32, Collapse, i32)>,
     /// The containing block's CONTENT height, when it is definite — what a
     /// percentage `height`/`min-`/`max-height` resolves against (CSS2.1 §10.5).
     /// `None` means the containing block's height depends on its content, and
@@ -2678,6 +2685,7 @@ pub fn layout(
         vp_height_box: core::cell::Cell::new(false),
         abs_count: 0,
         fixed_count: 0,
+        clear_floor: None,
         cb_h: Some(viewport_h as f32),
         last_baseline: None,
         floats: Vec::new(),
@@ -3351,7 +3359,9 @@ impl<'a> Ctx<'a> {
             // added on top of it. Clearing against the bare anchor instead put
             // every cleared box one whole top margin too low.
             let mut had_clearance = false;
+            let mut clear_floor = None;
             if st.clear != ClearKind::None {
+                let (a0, o0) = (anchor, open);
                 let mut hypo = open;
                 hypo.add(st.margin_top);
                 let own = Collapse::one(st.margin_top).value() as i32;
@@ -3379,6 +3389,7 @@ impl<'a> Ctx<'a> {
                     // exactly on `cleared`.
                     anchor = cleared - own;
                     open = Collapse::default();
+                    clear_floor = Some((a0, o0, cleared));
                 }
             }
             self.path.push(self.info(el));
@@ -3419,7 +3430,9 @@ impl<'a> Ctx<'a> {
                 BoxOut { bottom, top_y: byy, open: Collapse::one(st.margin_bottom), through: false, box_x: bx, box_w: bw }
             } else {
                 let op0 = self.ops.len();
+                self.clear_floor = clear_floor;
                 let o = self.flow_block_impl(el, &st, x, w, anchor, open, false);
+                self.clear_floor = None;
                 if !o.through {
                     // The box's OWN border box. Reporting the containing
                     // block's `x`/`w` here made every device report about a
@@ -3888,6 +3901,11 @@ family: ps.family,
     /// left open for the next sibling. When `isolated`, `base_y` is the
     /// border-box top and margins are committed, not propagated.
     fn flow_block_impl(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, base_y: i32, incoming: Collapse, isolated: bool) -> BoxOut {
+        // Der Stil, wie er hereinkam — der Durchfall-Fall unten faehrt diesen
+        // Kasten ein zweites Mal, und zwar genau so, wie der Rufer ihn wollte.
+        let st_in = st;
+        // Gehoert diesem Kasten allein — genommen, bevor ein Kind sie sieht.
+        let clear_floor = self.clear_floor.take();
         let boxed = Self::resolve_pct_box(st, w as f32);
         let st = boxed.as_ref().unwrap_or(st);
         let resolved = self.resolve_pct_heights(st);
@@ -3928,6 +3946,10 @@ family: ps.family,
         let box_w = content_w + (st.pad_left + st.pad_right) as i32 + st.border_x() as i32;
         let bg_idx = self.ops.len();
         let clip_marks = (bg_idx, self.abs_count, self.fixed_count);
+        // Alles, was dieser Kasten aufzeichnet, faengt hier an. Zehn
+        // `len()`-Abfragen, keine Allokation — es kostet nichts, den Punkt
+        // immer zu kennen.
+        let spec0 = self.spec_mark();
 
         let bt = st.border_top.width as i32;
         let bb = st.border_bottom.width as i32;
@@ -3941,6 +3963,32 @@ family: ps.family,
             top.add(st.margin_top);
         }
         let collapse_top = !isolated && bt == 0 && pt == 0;
+        // Explicit `height`/`min`/`max-height` (definite lengths only; `%` needs
+        // a definite CB height we don't track). Border-box subtracts pad+border.
+        let pad_v = pt + pb + bt + bb;
+        let px_h = |len: Len| -> Option<i32> {
+            match len {
+                Len::Px(h) if st.box_border => Some((h as i32 - pad_v).max(0)),
+                Len::Px(h) => Some(h as i32),
+                _ => None,
+            }
+        };
+        // **Kann dieser Kasten einen zweiten Durchgang brauchen?** Nur, wenn
+        // sein Oberrand mit denen der Kinder zusammenfaellt UND etwas ihn
+        // daran hindert, selbst durchzufallen — dann bleiben durchgefallene
+        // Kinderraender an SEINEM Oberrand haengen (unten, nach dem Fluss).
+        // Die Frage haengt allein am Stil, also wird sie hier gestellt: bei
+        // fast jedem Kasten ist die Antwort nein und der Schnappschuss
+        // entfaellt. Zaehler und Listenzahl gehoeren dazu — ein zweiter
+        // Durchgang darf `counter-increment` nicht doppelt anwenden.
+        let retry_state = (collapse_top
+            && (bb != 0
+                || pb != 0
+                || st.contain_size
+                || px_h(st.height).is_some_and(|h| h > 0)
+                || px_h(st.min_height).is_some_and(|h| h > 0)
+                || replaced_intrinsic(el).is_some()))
+            .then(|| (self.counters.stack.clone(), self.marker_ord));
         // Provisional border-box top (exact unless the first child grows `top`).
         let prov_top_y = if isolated { base_y } else { base_y + top.value() as i32 };
 
@@ -4105,6 +4153,51 @@ family: st.family,
         // `cb` that referred to one has been restored past it.
         self.cb_pend.truncate(prev_pend);
 
+        // **Faellt der Rand ALLER Kinder durch, gehoert er an den OBERRAND
+        // dieses Kastens** (CSS 2.1 §8.3.1). Legt sich kein Kind fest, stossen
+        // seine Raender oben wie unten an die des Elters; hat der Elter aber
+        // eine Hoehe (hier: `min-height`), erreichen sie dessen UNTERrand nicht
+        // mehr — also bleibt nur der obere, und der Kasten rueckt nach unten.
+        //
+        // `margin-collapse-min-height-001.xht`: `min-height: 2em`, drei leere
+        // Kinder, das letzte mit `margin-bottom: 5em`. Chromium setzt den Elter
+        // auf y = 5em; wir setzten ihn auf 1em und liessen die 5em ganz fallen.
+        //
+        // Der Rand ist erst BEKANNT, wenn die Kinder gelaufen sind, und er
+        // bestimmt, wo sie stehen — ein Kind, das durchfaellt, kann einen Float
+        // enthalten, und der wird gemalt. Deshalb ein zweiter Durchgang mit dem
+        // gefundenen Rand als Eingang statt einer Verschiebung der Befehle
+        // hinterher: eine Nebentabelle aus Befehlsindizes mitzuziehen ist die
+        // Sorte Buchhaltung, die spaeter auseinanderlaeuft. Ein DRITTER
+        // Durchgang kann nicht kommen — `Collapse::merge` ist idempotent, also
+        // findet der zweite genau den Rand wieder, mit dem er gestartet ist.
+        if let Some((ctrs, ord)) = retry_state {
+            if !flow.committed {
+                let mut merged = top;
+                merged.merge(flow.open);
+                if merged.value() != top.value() {
+                    self.spec_rollback(&spec0);
+                    self.counters.stack = ctrs;
+                    self.marker_ord = ord;
+                    // §9.5.2: eine Raeumung SETZT die Oberkante, sie addiert
+                    // nicht. Der eben gefundene Rand gehoert deshalb in die
+                    // HYPOTHETISCHE Lage — wo der Kasten ohne `clear` staende
+                    // —, und die Raeumung nimmt davon das Maximum. Ohne das
+                    // rutschte ein geraeumter Kasten um genau diesen Rand unter
+                    // seinen Float (`CSS2/margin-collapse-157`).
+                    let base2 = match clear_floor {
+                        Some((a0, o0, cleared)) => {
+                            let mut hypo = o0;
+                            hypo.merge(merged);
+                            (a0 + hypo.value() as i32).max(cleared) - merged.value() as i32
+                        }
+                        None => base_y,
+                    };
+                    return self.flow_block_impl(el, st_in, x, w, base2, merged, isolated);
+                }
+            }
+        }
+
         // Resolve the border-box top: when the top margin collapsed through, the
         // box's border box sits at the first committed child's border-box top.
         let border_top_y = if collapse_top && flow.committed { flow.first_top } else { prov_top_y };
@@ -4122,16 +4215,6 @@ family: st.family,
             .then(|| self.floats[float0..].iter().map(|f| f.bottom).max())
             .flatten();
 
-        // Explicit `height`/`min`/`max-height` (definite lengths only; `%` needs
-        // a definite CB height we don't track). Border-box subtracts pad+border.
-        let pad_v = pt + pb + bt + bb;
-        let px_h = |len: Len| -> Option<i32> {
-            match len {
-                Len::Px(h) if st.box_border => Some((h as i32 - pad_v).max(0)),
-                Len::Px(h) => Some(h as i32),
-                _ => None,
-            }
-        };
         let out_bottom_margin = Collapse::one(if isolated { 0.0 } else { st.margin_bottom });
 
         // Size containment takes this branch even with content in it: under
@@ -13205,6 +13288,84 @@ fn dbg_wiki_shape() {
         let at = |x: usize, y: usize| buf[(y * 400 + x) * 4] as i32;
         let (nah, fern) = (at(200, 40), at(200, 52));
         assert!(nah < fern, "unter dem Kasten muss es nach aussen heller werden: {nah} vs {fern}");
+    }
+
+    /// **Fallen die Raender aller Kinder durch, gehoeren sie an den OBERRAND
+    /// des Elters** — und eine Raeumung SETZT die Oberkante, statt den Rand
+    /// obendrauf zu legen.
+    ///
+    /// An Chromium gemessen (`getBoundingClientRect`), sieben Faelle:
+    ///
+    ///     leeres Kind 50px Unterrand, Elter frei      Elter y=50 h=0
+    ///     dasselbe mit min-height:20px                Elter y=50 h=20
+    ///     dasselbe mit height:20px                    Elter y=50 h=20
+    ///     zwei leere Kinder, letztes 50px             Elter y=50 h=20
+    ///     Kind enthaelt nur einen Float               Elter y=50 h=20, Float y=50
+    ///     Kind mit Hoehe 30 (faellt NICHT durch)      Elter y=10 h=30
+    ///     Elter mit Rahmen oben (kein Zusammenfall)   Elter y=10 h=21
+    #[test]
+    fn margins_that_fall_through_every_child_belong_to_the_parents_top() {
+        let page = |css: &str, body: &str| alloc::format!(
+            "<body style='margin:0'><style>{css}</style>{body}</body>");
+        // Ein Etikett -> (Oberkante, Hoehe). Die Liste wird mitgegeben, weil
+        // ein Fehlschlag ohne sie nur „kein Kasten" sagt.
+        let boxes = |css: &str, body: &str| -> Vec<(String, i32, i32)> {
+            lay_inspect(&page(css, body), 800).inspect.iter()
+                .map(|b| (b.label.clone(), b.y, b.h)).collect()
+        };
+        fn at(v: &[(String, i32, i32)], id: &str) -> (i32, i32) {
+            v.iter().find(|(l, _, _)| l.starts_with(id)).map(|&(_, y, h)| (y, h))
+                .unwrap_or_else(|| panic!("kein Kasten {id}: {v:?}"))
+        }
+        let kind = "<div class=p><div class=c></div></div>";
+        let v = boxes(".p{margin-top:10px;min-height:20px}.c{margin-bottom:50px}", kind);
+        assert_eq!(at(&v, "div.p"), (50, 20), "min-height haelt den Kasten auf, der Rand hebt ihn");
+        let v = boxes(".p{margin-top:10px;height:20px}.c{margin-bottom:50px}", kind);
+        assert_eq!(at(&v, "div.p"), (50, 20), "eine feste Hoehe genauso");
+        let v = boxes(".p{margin-top:10px;min-height:20px}.c{margin-bottom:50px}",
+                      "<div class=p><div></div><div class=c></div></div>");
+        assert_eq!(at(&v, "div.p"), (50, 20), "der Rand faellt durch ZWEI leere Kinder");
+        // Ein Kind, das durchfaellt, kann trotzdem etwas malen: sein Float
+        // wandert mit. Genau daran haengt `margin-collapse-min-height-001.xht`.
+        let v = boxes(".p{margin-top:10px;min-height:20px}.c{margin-bottom:50px}.f{float:left}",
+                      "<div class=p><div class=c><div class=f>x</div></div></div>");
+        assert_eq!(at(&v, "div.p"), (50, 20));
+        assert_eq!(at(&v, "div.f").0, 50, "der Float im durchgefallenen Kind steht am Oberrand");
+        // Die Gegenprobe: ein Kind mit Hoehe faellt nicht durch, sein
+        // Unterrand entkommt nach unten und der Elter bleibt oben stehen.
+        let v = boxes(".p{margin-top:10px;min-height:20px}.c{margin-bottom:50px;height:30px}", kind);
+        assert_eq!(at(&v, "div.p"), (10, 30));
+        // Und ohne Zusammenfall am Oberrand (Rahmen dazwischen) bleibt alles,
+        // wie es war: der Rand des Kindes wird verschluckt.
+        let v = boxes(".p{margin-top:10px;min-height:20px;border-top:1px solid #000}.c{margin-bottom:50px}", kind);
+        assert_eq!(at(&v, "div.p"), (10, 21));
+    }
+
+    /// Eine Raeumung SETZT die Oberkante des Kastens; ein Rand, der erst beim
+    /// Auslegen der Kinder gefunden wird, geht in die HYPOTHETISCHE Lage ein
+    /// und wird von der Raeumung geschluckt, sobald der Float tiefer reicht.
+    ///
+    /// `CSS2/margin-collapse-157` prueft genau das mit sechs Quadraten, die
+    /// gleich aussehen muessen: der leere Kasten mit `margin: 1em` darin darf
+    /// den geraeumten Kasten NICHT unter den Float schieben. Chromium setzt
+    /// alle drei Formen auf dieselbe Oberkante.
+    #[test]
+    fn clearance_sets_the_top_edge_a_late_margin_does_not_push_past_it() {
+        let css = "<style>.float{float:left;height:64px;width:64px}\
+                   .clear{clear:left;border-bottom:64px solid #ff0}\
+                   .empty{margin:16px}.b .clear{margin-top:16px}</style>";
+        let case = |extra: &str, inner: &str| alloc::format!(
+            "<body style='margin:0'>{css}<div class='test {extra}'><div class=container>\
+             <div class=float></div><div class=clear id=k>{inner}</div></div></div></body>");
+        let top = |extra: &str, inner: &str| {
+            let l = lay_inspect(&case(extra, inner), 800);
+            l.inspect.iter().find(|b| b.label.starts_with("div#k")).expect("kein #k").y
+        };
+        assert_eq!(top("a", ""), 64, "der geraeumte Kasten sitzt auf dem Float");
+        assert_eq!(top("a", "<div class=empty></div>"), 64,
+                   "ein durchgefallener Rand darf ihn nicht tiefer schieben");
+        assert_eq!(top("b", "<div class=empty></div>"), 64,
+                   "und mit eigenem `margin-top` genauso");
     }
 
     /// Eine Schattenliste hat DREI Plaetze — den ersten SCHARFEN, den ersten
