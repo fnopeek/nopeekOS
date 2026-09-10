@@ -167,7 +167,15 @@ impl Interp {
                 None => Value::Undefined,
             };
             if d.kind == VarKind::Var && dec.init.is_none() { continue; }
-            self.bind_pattern(&dec.id, v, env, true)?;
+            // **`var` LEGT hier nichts mehr an — das Hochziehen hat das
+            // getan.** Die Zeile fuehrt nur noch eine Zuweisung aus (ES
+            // §VariableStatement: PutValue, nicht InitializeBinding), und der
+            // Unterschied ist sichtbar, sobald die Bindung nicht in der Kette
+            // steht, sondern auf dem globalen Objekt: `init_binding` legte
+            // daneben eine zweite an, und `window.X` blieb `undefined`.
+            // `let`/`const` initialisieren dagegen wirklich — ihre Bindung
+            // steht in der Kette und wartet in der TDZ.
+            self.bind_pattern(&dec.id, v, env, d.kind != VarKind::Var)?;
         }
         Ok(())
     }

@@ -22,15 +22,28 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-09-09, beak 0.146.0)
+### Current number (measured 2026-09-10, beak 0.149.0)
 
 ```
-4542 pass / 1105 fail / 139 inconclusive   (of 5786 vendored reftests)
-= 80.4 % of the conclusive 5647   ·   4542 / 5201 = 87.3 % without vehicles
+4539 pass / 1105 fail / 142 inconclusive   (of 5786 vendored reftests)
+= 80.4 % of the conclusive 5644   ·   4539 / 5198 = 87.3 % without vehicles
 ```
 
-Moved **+5 / −0** over 0.145.0–0.146.0 against the 0.138.0 baseline, which is
-now re-blessed. **659 real failures left.**
+Moved **+0 / −3** over 0.146.0–0.149.0, and **all three moved from PASS to
+INCONCLUSIVE at 0.00 % diff** — not one new failure (1105 either way). The
+form controls started being painted the way a browser paints them (white
+`Field` face, a real `ButtonBorder`, a checkmark instead of a filled square),
+and three references that consist of nothing but pale controls now fall under
+the blank guard's 0.1 % ink. They are *more* correct than before and have
+lost their oracle, not their correctness.
+
+**That is a defect in the guard, and it is a separate item on purpose.**
+`ink_fraction` measures distance from WHITE, so a reference showing a white
+input with a 1 px #7c7c7c border has almost no "ink" — although Chromium
+draws exactly that. Changing the oracle in the same commit that moves the
+rendering would make the number unreadable ([[feedback_which_side_moved]]),
+so the baseline is re-blessed at 4539 and the guard is written down here
+instead. **659 real failures left.**
 
 #### 0.145.0/0.146.0: the box a flex container reports (+5 / −0)
 

@@ -363,7 +363,7 @@ fn diag() {
             let fname = src.replace('/', "_").replace(':', "_");
             match fs::read(format!("{dir}/{fname}")) {
                 Ok(bytes) => {
-                    if eng.add_image(&src, &bytes) { ok += 1; }
+                    if eng.add_image(&src, &bytes).is_ok() { ok += 1; }
                     else { undecodable += 1; println!("  UNDECODABLE {} ({} B)", src, bytes.len()); }
                 }
                 Err(_) => { miss += 1; println!("  NO FILE      {}", src); }
@@ -404,7 +404,7 @@ fn diag() {
         for (key, u) in &lay.css_image_srcs {
             let fname = u.replace('/', "_").replace(':', "_");
             match fs::read(format!("{dir}/{fname}")) {
-                Ok(bytes) if eng.add_css_image(*key, &bytes) => css_ok += 1,
+                Ok(bytes) if eng.add_css_image(*key, &bytes).is_ok() => css_ok += 1,
                 _ => println!("   FETCH {}", if u.len() > 110 { &u[..110] } else { u }),
             }
         }

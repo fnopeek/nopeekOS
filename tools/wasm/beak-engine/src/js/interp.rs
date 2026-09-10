@@ -2193,8 +2193,18 @@ impl Interp {
                 Stmt::Func(f) => {
                     if let Some(n) = &f.name {
                         let v = self.make_closure(f.clone(), block, None);
-                        block.borrow_mut().vars.insert(Rc::from(n.as_str()),
-                            Binding { value: v, mutable: true, initialized: true });
+                        // Dieselbe Regel wie fuer `var`: eine
+                        // Funktionsdeklaration auf oberster Ebene eines
+                        // Skripts IST eine Eigenschaft des globalen Objekts.
+                        // In einem Block oder einer Funktion nicht.
+                        if Rc::ptr_eq(block, &self.realm.global_env) {
+                            self.realm.global.borrow_mut().define(n.as_str(), Prop {
+                                value: Some(v), get: None, set: None,
+                                writable: true, enumerable: true, configurable: false });
+                        } else {
+                            block.borrow_mut().vars.insert(Rc::from(n.as_str()),
+                                Binding { value: v, mutable: true, initialized: true });
+                        }
                     }
                 }
                 Stmt::VarDecl(d) if d.kind != VarKind::Var => {
@@ -2243,8 +2253,38 @@ impl Interp {
     /// durch Funktionen: dort faengt ein neuer Bereich an.
     fn hoist_vars(&mut self, st: &Stmt, func: &Rc<RefCell<Env>>) {
         let st = super::modules::unexport(st).unwrap_or(st);
+        // **Ein `var` auf oberster Ebene eines SKRIPTS ist eine Eigenschaft
+        // des globalen Objekts** (ES §CreateGlobalVarBinding) — und zwar die
+        // einzige Ablage dafuer, nicht eine zweite neben der Bindungskette
+        // ([[feedback_a_copy_is_a_second_semantics_waiting]]). Lesen und
+        // Schreiben finden sie: `assign_ident_depth` und die Namensaufloesung
+        // fallen beide auf das globale Objekt zurueck, wenn die Kette den
+        // Namen nicht hat.
+        //
+        // Ohne diese Zeile ist `window.X` fuer ein `var X` **undefined** — und
+        // genau so exponiert JEDES UMD-Buendel sich selbst. Auf arcade.ch
+        // starb daran der Einwilligungsbanner: `window.cookieconsent
+        // .openPreferencesCenter = …` auf einem Wert, den es nicht gab.
+        // `let`/`const` gehoeren NICHT dorthin (sie stehen im deklarativen
+        // Teil), und ein MODUL hat seine eigene Umgebung — beides faellt hier
+        // schon dadurch heraus, dass nur `var` und nur die globale Umgebung
+        // diesen Weg nehmen.
+        let gobj = Rc::ptr_eq(func, &self.realm.global_env)
+            .then(|| self.realm.global.clone());
         let mut put = |names: Vec<String>| {
             for n in names {
+                if let Some(g) = &gobj {
+                    // Schon da? Dann steht dort ein Wert, den ein frueheres
+                    // `var` oder das Wirtsobjekt gesetzt hat — nicht ueberschreiben.
+                    if g.borrow().get_own(n.as_str()).is_none() {
+                        // Nicht loeschbar (ES: D = false fuer ein Skript-`var`),
+                        // aber aufzaehlbar und schreibbar wie jede Seiteneigenschaft.
+                        g.borrow_mut().define(n.as_str(), Prop {
+                            value: Some(Value::Undefined), get: None, set: None,
+                            writable: true, enumerable: true, configurable: false });
+                    }
+                    continue;
+                }
                 let key: Rc<str> = Rc::from(n.as_str());
                 if !func.borrow().vars.contains_key(&key) {
                     func.borrow_mut().vars.insert(key,

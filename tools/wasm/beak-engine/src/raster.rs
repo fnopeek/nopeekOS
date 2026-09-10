@@ -612,22 +612,23 @@ impl Engine {
 
     /// Decode ONE image and store it under `src`. The compressed `bytes` are
     /// borrowed (dropped by the caller right after) — only the decoded pixels
-    /// are retained. Over-budget / undecodable → skipped (renders a
-    /// placeholder). Returns whether the image was stored.
-    pub fn add_image(&mut self, src: &str, bytes: &[u8]) -> bool {
+    /// are retained. A rejection names ITSELF (`Reject`) rather than being one
+    /// `false` for two opposite failures; the box keeps its placeholder either
+    /// way, but only the caller can say which one to put in the log.
+    pub fn add_image(&mut self, src: &str, bytes: &[u8]) -> Result<(), crate::image::Reject> {
         self.store_image(src, bytes)
     }
 
     /// As [`Self::add_image`], and also keep the pixels under `url` for the
     /// next navigation. The shell resolves the url; the engine never sees a
     /// base to resolve against.
-    pub fn add_image_cached(&mut self, src: &str, url: &str, bytes: &[u8]) -> bool {
-        if !self.store_image(src, bytes) {
-            return false;
-        }
-        let Some(img) = self.images.borrow().get(src).cloned() else { return true };
+    pub fn add_image_cached(&mut self, src: &str, url: &str, bytes: &[u8])
+        -> Result<(), crate::image::Reject>
+    {
+        self.store_image(src, bytes)?;
+        let Some(img) = self.images.borrow().get(src).cloned() else { return Ok(()) };
         self.cache_put(url, img);
-        true
+        Ok(())
     }
 
     /// Serve `pairs` of `(src, url)` from the cross-navigation cache.
@@ -719,11 +720,8 @@ impl Engine {
         let owned;
         let sfnt: &[u8] = if bytes.starts_with(b"wOF2") {
             match crate::woff2::to_sfnt(bytes) { Some(v) => { owned = v; &owned } None => return false }
-        } else if bytes.starts_with(b"wOFF") {
-            // WOFF1 packt mit zlib. Nicht gebaut — die Fassung ist praktisch
-            // ausgestorben, und eine halbe Umsetzung waere schlechter als ein
-            // ehrliches Nein.
-            return false;
+        } else if crate::woff::looks_like_woff(bytes) {
+            match crate::woff::to_sfnt(bytes) { Some(v) => { owned = v; &owned } None => return false }
         } else {
             bytes
         };
@@ -768,17 +766,17 @@ impl Engine {
     /// The one place `<img>` pixels enter the store, shared by the shell's
     /// fetched bytes and by a `data:` src decoded during layout, so the budget
     /// is honoured on both paths.
-    fn store_image(&self, src: &str, bytes: &[u8]) -> bool {
-        if let Some(img) = crate::image::decode(bytes) {
-            if img.bgra.len() <= self.img_budget.get() {
-                self.img_budget.set(self.img_budget.get() - img.bgra.len());
-                self.images
-                    .borrow_mut()
-                    .insert(src.into(), alloc::rc::Rc::new(img));
-                return true;
-            }
+    fn store_image(&self, src: &str, bytes: &[u8]) -> Result<(), crate::image::Reject> {
+        let Some(img) = crate::image::decode(bytes) else {
+            return Err(crate::image::Reject::Undecodable);
+        };
+        let (need, left) = (img.bgra.len(), self.img_budget.get());
+        if need > left {
+            return Err(crate::image::Reject::OverBudget { need, left });
         }
-        false
+        self.img_budget.set(left - need);
+        self.images.borrow_mut().insert(src.into(), alloc::rc::Rc::new(img));
+        Ok(())
     }
 
     /// Decode every `data:` `<img src>` in the document. Such a src carries its
@@ -795,7 +793,10 @@ impl Engine {
                                 && !eng.images.borrow().contains_key(src)
                             {
                                 if let Some(bytes) = crate::image::decode_data_uri(src) {
-                                    eng.store_image(src, &bytes);
+                                    // Eine Absage hier hat keinen Weg ins Log —
+                                    // die Bytes stehen im Dokument, es gibt keinen
+                                    // Wirt, der sie geholt haette und sie melden koennte.
+                                    let _ = eng.store_image(src, &bytes);
                                 }
                             }
                         }
@@ -813,7 +814,7 @@ impl Engine {
     pub fn set_images(&mut self, pairs: &[(alloc::string::String, Vec<u8>)]) {
         self.images_begin();
         for (src, bytes) in pairs {
-            self.add_image(src, bytes);
+            let _ = self.add_image(src, bytes);
         }
     }
 
@@ -959,7 +960,7 @@ impl Engine {
             let Some(url) = sheet.url(key) else { continue };
             if url.starts_with("data:") || url.starts_with("DATA:") {
                 if let Some(bytes) = crate::image::decode_data_uri(url) {
-                    self.store_css_image(key, &bytes);
+                    let _ = self.store_css_image(key, &bytes);
                 }
             } else {
                 lay.css_image_srcs.push((key, alloc::string::String::from(url)));
@@ -967,21 +968,22 @@ impl Engine {
         }
     }
 
-    fn store_css_image(&self, key: u64, bytes: &[u8]) -> bool {
-        if let Some(img) = crate::image::decode(bytes) {
-            let budget = self.css_img_budget.get();
-            if img.bgra.len() <= budget {
-                self.css_img_budget.set(budget - img.bgra.len());
-                self.css_images.borrow_mut().insert(key, alloc::rc::Rc::new(img));
-                return true;
-            }
+    fn store_css_image(&self, key: u64, bytes: &[u8]) -> Result<(), crate::image::Reject> {
+        let Some(img) = crate::image::decode(bytes) else {
+            return Err(crate::image::Reject::Undecodable);
+        };
+        let (need, left) = (img.bgra.len(), self.css_img_budget.get());
+        if need > left {
+            return Err(crate::image::Reject::OverBudget { need, left });
         }
-        false
+        self.css_img_budget.set(left - need);
+        self.css_images.borrow_mut().insert(key, alloc::rc::Rc::new(img));
+        Ok(())
     }
 
     /// Store a CSS image the shell fetched (see `Layout::css_image_srcs`).
     /// Costs a repaint, never a re-layout: a background cannot move a box.
-    pub fn add_css_image(&self, key: u64, bytes: &[u8]) -> bool {
+    pub fn add_css_image(&self, key: u64, bytes: &[u8]) -> Result<(), crate::image::Reject> {
         self.store_css_image(key, bytes)
     }
 
@@ -992,14 +994,14 @@ impl Engine {
     /// unique only WITHIN one document — two sites both saying `url(/bg.png)`
     /// share a key. Across navigations the RESOLVED url is the only honest
     /// identity, exactly as for `<img>`.
-    pub fn add_css_image_cached(&self, key: u64, url: &str, bytes: &[u8]) -> bool {
-        if !self.store_css_image(key, bytes) {
-            return false;
-        }
-        let Some(img) = self.css_images.borrow().get(&key).cloned() else { return true };
+    pub fn add_css_image_cached(&self, key: u64, url: &str, bytes: &[u8])
+        -> Result<(), crate::image::Reject>
+    {
+        self.store_css_image(key, bytes)?;
+        let Some(img) = self.css_images.borrow().get(&key).cloned() else { return Ok(()) };
         cache_put(&self.css_cache, &self.css_cache_bytes,
                   crate::image::CSS_CACHE_BUDGET, url, img);
-        true
+        Ok(())
     }
 
     /// Serve one background layer from the cross-navigation cache. True on a
@@ -1098,6 +1100,9 @@ impl Engine {
                 }
                 DrawOp::RoundRect { x, y, w: rw, h: rh, r, color, ring } => {
                     fill_round(out, wi, hi, *x, *y - scroll_y, *rw, *rh, *r, *color, *ring);
+                }
+                DrawOp::Check { x, y, w: cw, h: ch, color } => {
+                    stroke_check(out, wi, hi, *x, *y - scroll_y, *cw, *ch, *color);
                 }
                 DrawOp::Shadow { x, y, w: rw, h: rh, blur, color, dx, dy, spread } => {
                     // Der Kasten, der ausgespart bleibt: das Schattenrechteck
@@ -1744,6 +1749,47 @@ fn span(t: f32, a: f32, b: f32, sigma: f32) -> f32 {
     let k = 1.0 / (sigma * core::f32::consts::SQRT_2);
     let phi = |z: f32| 0.5 * (1.0 + libm::erff(z));
     (phi((t - a) * k) - phi((t - b) * k)).clamp(0.0, 1.0)
+}
+
+/// Der Haken eines Kaestchens: zwei Striche im Kasten `w`x`h`.
+///
+/// Die drei Punkte sind die Verhaeltnisse, die jeder Browser malt — kurzer
+/// Strich nach unten rechts, langer nach oben rechts. Die Kantenglaettung
+/// kommt aus dem ABSTAND zum Strich, nicht aus einer Ueberabtastung: bei
+/// 13 px ist der Haken zwei Striche breit, und jede Stufe waere sichtbar.
+fn stroke_check(out: &mut [u8], w: i32, h: i32, x: i32, y: i32, cw: i32, ch: i32, color: Rgba) {
+    if cw <= 0 || ch <= 0 || color.a == 0 { return }
+    let (fw, fh) = (cw as f32, ch as f32);
+    // Die Ecken des Hakens, in Anteilen des Kastens.
+    let pts = [(0.22 * fw, 0.52 * ch as f32), (0.42 * fw, 0.73 * fh), (0.78 * fw, 0.28 * fh)];
+    let hw = (fw.min(fh) * 0.085).max(0.9); // halbe Strichbreite
+    // Nur die Zeilen und Spalten anfassen, die der Haken ueberhaupt trifft.
+    let (x0, y0) = ((x.max(0)), (y.max(0)));
+    let (x1, y1) = ((x + cw).min(w), (y + ch).min(h));
+    for py in y0..y1 {
+        for px in x0..x1 {
+            let (fx, fy) = ((px - x) as f32 + 0.5, (py - y) as f32 + 0.5);
+            let mut d = f32::MAX;
+            for seg in 0..2 {
+                let (ax, ay) = pts[seg];
+                let (bx, by) = pts[seg + 1];
+                let (vx, vy) = (bx - ax, by - ay);
+                let len2 = vx * vx + vy * vy;
+                let t = if len2 <= 0.0 { 0.0 }
+                        else { (((fx - ax) * vx + (fy - ay) * vy) / len2).clamp(0.0, 1.0) };
+                let (dx, dy) = (fx - (ax + t * vx), fy - (ay + t * vy));
+                let dd = libm::sqrtf(dx * dx + dy * dy);
+                if dd < d { d = dd }
+            }
+            // Ein Pixel, dessen Mitte genau auf dem Rand liegt, ist halb
+            // gedeckt — daher das halbe Pixel Zugabe.
+            let cov = (hw + 0.5 - d).clamp(0.0, 1.0);
+            if cov <= 0.0 { continue }
+            let a = (cov * color.a as f32) as u8;
+            if a == 0 { continue }
+            blend_at(out, ((py * w + px) * 4) as usize, color.c, a);
+        }
+    }
 }
 
 fn blend_at(out: &mut [u8], i: usize, c: Rgb, a: u8) {
@@ -2661,6 +2707,9 @@ mod tests {
                 }
                 DrawOp::RoundRect { x, y, w, h, r, color, ring } => {
                     let _ = write!(s, "Q {x},{y} {w}x{h} {r:?} c={color:?} {ring:.2}\n");
+                }
+                DrawOp::Check { x, y, w, h, color } => {
+                    let _ = write!(s, "K {x},{y} {w}x{h} {color:?}\n");
                 }
                 DrawOp::Shadow { x, y, w, h, blur, color, .. } => {
                     let _ = write!(s, "S {x},{y} {w}x{h} b={blur:.1} c={color:?}\n");

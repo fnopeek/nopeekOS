@@ -3425,6 +3425,30 @@ mod tests {
     }
 }
 
+/// Kann beak diese `@font-face`-Quelle ueberhaupt lesen?
+///
+/// Zuerst zaehlt das ausdrueckliche `format(...)` — es ist die Zusage der
+/// Seite und genauer als jede Endung. Fehlt es, entscheidet die Endung; und
+/// sagt auch die nichts, wird die Quelle GENOMMEN: eine nackte Adresse ist
+/// die Einladung, es zu versuchen.
+///
+/// Gelesen werden WOFF2 (`woff2.rs`), WOFF1 (`woff.rs`) und rohes sfnt.
+/// `embedded-opentype` und `svg` sind Formate, die es nur fuer Browser gab,
+/// die es nicht mehr gibt.
+fn src_is_readable(url: &str, tail: &str) -> bool {
+    let low = tail.to_ascii_lowercase();
+    if let Some(i) = low.find("format(") {
+        let f = &low[i + 7..];
+        let f = &f[..f.find(')').unwrap_or(f.len())];
+        let f = f.trim().trim_matches(['"', '\'']).trim();
+        return matches!(f, "woff2" | "woff" | "truetype" | "opentype" | "");
+    }
+    // Endung — ohne Abfrage und Fragment (`x.woff?v=2`, `x.eot?#iefix`).
+    let path = &url[..url.find(['?', '#']).unwrap_or(url.len())];
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    !matches!(&*ext, "eot" | "svg" | "svgz")
+}
+
 /// Ein `@font-face`-Block. `None`, wenn Familie oder Quelle fehlen — ohne
 /// beides ist er keine Schrift, sondern ein Kommentar.
 fn parse_font_face(body: &str) -> Option<FontFace> {
@@ -3438,14 +3462,27 @@ fn parse_font_face(body: &str) -> Option<FontFace> {
             if !n.is_empty() { family = crate::style::hash_name(&n); }
         } else if p.eq_ignore_ascii_case("src") {
             // `url(a) format("woff2"), url(b)` — die Reihenfolge ist die
-            // Rangfolge der Seite, also bleibt sie erhalten.
+            // Rangfolge der Seite, also bleibt sie erhalten. Was NICHT
+            // bleibt: Quellen in einem Format, das wir nicht lesen koennen.
+            //
+            // css-fonts-4 §4.3 sagt „die erste UNTERSTUETZTE", nicht „die
+            // erste". Der Unterschied ist keine Feinheit: das kugelsichere
+            // `@font-face` jeder Icon-Schrift der 2010er beginnt mit
+            // `url(x.eot) format('embedded-opentype')` fuer den IE, und wer
+            // davon die erste nimmt, holt genau die eine Datei, die er nicht
+            // lesen kann — und faellt fuer die ganze Familie auf die
+            // eingebaute Schrift zurueck. Genau so verschwand das
+            // Symbolgesicht von flexslider auf arcade.ch.
             let mut rest = v.as_str();
             while let Some(i) = rest.find("url(") {
                 rest = &rest[i + 4..];
                 let Some(j) = rest.find(')') else { break };
                 let u = rest[..j].trim().trim_matches(['"', '\'']).trim();
-                if !u.is_empty() { src.push(String::from(u)); }
                 rest = &rest[j + 1..];
+                // Der Rest bis zum naechsten Komma gehoert zu DIESER Quelle:
+                // dort steht ihr `format(...)`, wenn sie eins hat.
+                let tail = &rest[..rest.find(',').unwrap_or(rest.len())];
+                if !u.is_empty() && src_is_readable(u, tail) { src.push(String::from(u)); }
             }
         } else if p.eq_ignore_ascii_case("font-weight") {
             let first = v.split_whitespace().next().unwrap_or("");

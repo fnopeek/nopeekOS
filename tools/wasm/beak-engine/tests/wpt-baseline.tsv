@@ -4344,11 +4344,11 @@ PASS	css-flexbox/percentage-widths-001.html
 FAIL	css-flexbox/position-absolute-containing-block-001.html
 FAIL	css-flexbox/position-absolute-containing-block-002.html
 PASS	css-flexbox/position-fixed-001.html
-PASS	css-flexbox/select-element-multiple.html
+INCONCLUSIVE	css-flexbox/select-element-multiple.html
 PASS	css-flexbox/select-element-zero-height-001.html
 PASS	css-flexbox/select-element-zero-height-002.html
 INCONCLUSIVE	css-flexbox/stretch-flex-item-checkbox-input.html
-PASS	css-flexbox/stretch-flex-item-radio-input.html
+INCONCLUSIVE	css-flexbox/stretch-flex-item-radio-input.html
 FAIL	css-flexbox/table-as-item-percent-width-cell-001.html
 PASS	css-flexbox/text-overflow-on-flexbox-001.html
 PASS	css-flexbox/webkit-box-vertical-writing-mode.html
@@ -5763,7 +5763,7 @@ PASS	css-values/viewport-units-scrollbars-scroll-vw-001.html
 PASS	css-values/viewport-units-scrollbars-scroll-vw-002.html
 PASS	css-values/viewport-units-scrollbars-scroll-vw-003.html
 PASS	css-values/viewport-units-writing-mode-font-size.html
-PASS	html-forms/block-in-inline.html
+INCONCLUSIVE	html-forms/block-in-inline.html
 PASS	html-forms/centering-001.html
 PASS	html-forms/centering-002.html
 PASS	html-forms/centering-003.html

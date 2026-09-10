@@ -1,19 +1,29 @@
-//! Eine WOFF2-Datei entpacken und gegen eine Referenz-TTF stellen.
+//! Eine WOFF-Datei entpacken und gegen eine Referenz-TTF stellen.
 //!
 //!   cargo run --release --example woffcheck -- x.woff2 [x.ttf]
+//!   cargo run --release --example woffcheck -- x.woff
 //!
-//! Verglichen werden die TABELLEN, nicht die Datei: Reihenfolge, Ausrichtung
-//! und Pruefsummen darf ein Entpacker anders schreiben, der INHALT nicht.
+//! BEIDE Container, weil beide im Netz stehen: `wOF2` geht durch `woff2`,
+//! `wOFF` durch `woff`. Verglichen werden die TABELLEN, nicht die Datei:
+//! Reihenfolge, Ausrichtung und Pruefsummen darf ein Entpacker anders
+//! schreiben, der INHALT nicht.
 fn main() {
     let a = std::env::args().nth(1).expect("woff2");
     let src = std::fs::read(&a).expect("lesen");
-    let mut tr = beak_engine::woff2::Trace::default();
-    let got = match beak_engine::woff2::to_sfnt_traced(&src, &mut tr) {
-        Some(v) => v,
-        None => {
-            println!("{a}: NICHT entpackbar — Stelle: {} (Glyphe {})",
-                     tr.step, if tr.glyph == usize::MAX { -1 } else { tr.glyph as i64 });
-            std::process::exit(1)
+    let got = if beak_engine::woff::looks_like_woff(&src) {
+        match beak_engine::woff::to_sfnt(&src) {
+            Some(v) => v,
+            None => { println!("{a}: WOFF1 NICHT entpackbar"); std::process::exit(1) }
+        }
+    } else {
+        let mut tr = beak_engine::woff2::Trace::default();
+        match beak_engine::woff2::to_sfnt_traced(&src, &mut tr) {
+            Some(v) => v,
+            None => {
+                println!("{a}: NICHT entpackbar — Stelle: {} (Glyphe {})",
+                         tr.step, if tr.glyph == usize::MAX { -1 } else { tr.glyph as i64 });
+                std::process::exit(1)
+            }
         }
     };
     println!("{}: {} B -> {} B", a.rsplit('/').next().unwrap(), src.len(), got.len());
