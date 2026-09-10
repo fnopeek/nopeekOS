@@ -320,6 +320,7 @@ const URL_CAP: usize = 4096;
 ///     0.151.0:  77          <- vorher
 ///     0.152.0:  46          <- Adresse, Verlauf, Navigation, Ladevorgang
 ///     0.153.0:  47          <- +COOKIE_BUF, ein ABHOLpuffer
+///     0.163.0:  23          <- Ansicht, Nebenabrufe, Skriptrunde
 ///
 /// **Die Regel ist nicht „die Zahl faellt", sondern „nichts, was dem
 /// DOKUMENT gehoert, kommt dazu".** 0.153.0 hat einen Puffer bekommen, in
@@ -327,13 +328,14 @@ const URL_CAP: usize = 4096;
 /// der Seite, und vervielfacht sich mit Tabs nicht. Wer die Zahl allein
 /// bewacht, verbietet das Richtige und uebersieht das Falsche.
 ///
-/// Was noch draussen steht und HINEIN gehoert: die Ansicht (`GEOM`,
-/// `LAST_W/H`, `DIRTY`, `NEED_FULL`, `LAST_VP`) und die Nebenabrufe
-/// (`IMG_JOB*`, `CSSIMG_JOB*`, `FONT_JOB`, `FETCH_JOBS`, `IMAGES_DIRTY`).
+/// **Die 23, die stehen bleiben, sind keine Reste — sie gehoeren woanders
+/// hin**, und jede Gruppe hat einen Grund, der eine zweite Seite ueberlebt:
 ///
-/// Was draussen bleibt und bleiben SOLL: die Abholpuffer (`HTML_BUF`,
-/// `CSS_BUF`, `IMG_FETCH_BUF`, `COOKIE_BUF` …, rund 47 MB `.bss`) und die
-/// einmaligen Log-Fahnen.
+/// | 13 | Abholpuffer (`HTML_BUF`, `CSS_BUF`, `IMG_FETCH_BUF` …, ~47 MB `.bss`) | gehoeren dem Abruf, der gerade laeuft — es laeuft einer |
+/// | 3 | `LAST_W`/`LAST_H`/`LAST_SY` | beschreiben den BILDPUFFER, und der ist einer |
+/// | 3 | `SCRIPT_DEADLINE`, `BUDGET_T0`, `BUDGET_SAID` | beschreiben den LAUF auf dem Stapel, und der ist einer |
+/// | 3 | `OPEN_MENU`, `USE_SITE_CSS`, `INSPECT_MODE` | Fenster und Werkzeug, nicht Seite |
+/// | 1 | `DOC` | das Dokument selbst — daraus wird `Vec<Doc>` |
 struct Doc {
     /// Woher das Dokument KAM (nach Weiterleitungen). Basis fuer jede
     /// relative Adresse der Seite und der Netzkontext, den der Kernel fuehrt.
@@ -405,6 +407,78 @@ struct Doc {
     nav_css_rounds: usize,
     nav_sheet_nodes: Option<Vec<u32>>,
     nav_sheet_rounds: usize,
+
+    // ── Die Ansicht DIESES Dokuments ────────────────────────────────────
+    // Nicht zu verwechseln mit dem, was der BILDPUFFER haelt (`LAST_W/H/SY`
+    // unten): der Puffer ist einer, die Seiten sind viele.
+    /// Das Bild ist nicht mehr das, was die Seite sagt.
+    dirty: bool,
+    /// Und zwar aus einem anderen Grund als Rollen — also ganz neu malen.
+    need_full: bool,
+    /// Ein Bild ist angekommen, die Bildliste muss neu durchgesehen werden.
+    images_dirty: bool,
+    /// Die Kaesten des letzten Layouts, fuer `getBoundingClientRect` & Co.
+    ///
+    /// Als `Rc` gehalten, damit das Weiterreichen an die JS-Maschine nichts
+    /// kostet: der Rollstand aendert sich bei JEDEM Bild, die Kaesten nur bei
+    /// einem neuen Layout — ohne das waere jede Rollbewegung eine Kopie von
+    /// ~180 KB.
+    geom: Option<alloc::rc::Rc<alloc::vec::Vec<beak_engine::layout::ElemRect>>>,
+    /// Das Sichtfeld, das die JS-Sitzung dieses Dokuments zuletzt gehoert hat.
+    last_vp: (i32, i32),
+
+    // ── Die Nebenabrufe DIESES Dokuments ────────────────────────────────
+    // Bilder, Hintergruende, Schriften, `fetch`: alles, was NEBEN dem
+    // Dokument laeuft und mit ihm endet. Eine zweite Seite hat ihre eigenen —
+    // und `subresources_cancel` bricht genau die einer Seite ab, nicht die
+    // aller.
+    /// Der laufende `<img>`-Stapel und wonach er gefragt hat, damit ein
+    /// ankommender Rumpf unter der Quelle abgelegt wird, unter der die Seite
+    /// ihn genannt hat. -1 / None, wenn nichts unterwegs ist.
+    img_job: i32,
+    img_job_srcs: Option<Vec<(String, String)>>,
+    /// Dasselbe fuer Hintergruende, benannt wie das Layout sie fuehrt.
+    cssimg_job: i32,
+    cssimg_job_keys: Option<Vec<(u64, String)>>,
+    /// Die laufende Schriftrunde.
+    font_job: i32,
+    font_want: Option<Vec<(String, u32, u16, bool)>>,
+    /// Welche `fetch`-Anfrage der Engine auf welchem Griff des Wirts liegt.
+    fetch_jobs: Vec<(u32, i32)>,
+
+    // ── Die Skriptrunde DIESES Dokuments ────────────────────────────────
+    /// Wie viele Navigationen die Seite HINTEREINANDER selbst ausgeloest hat.
+    script_nav_chain: u32,
+    /// Setzt `sync_nav` unmittelbar vor `nav_begin` — daran erkennt
+    /// `nav_begin`, dass die Kette WEITERgeht statt neu anzufangen.
+    nav_from_script: bool,
+    /// Was die gewoehnlichen Skripte ergeben haben (gelaufen, gescheitert,
+    /// Bytes) — muss die Modulrunden ueberleben, weil der Bericht erst danach
+    /// geschrieben wird.
+    script_tally: (usize, usize, usize),
+    /// Wann die Skriptrunde begann. NICHT `nav_stage_ms`: das steht nach einer
+    /// Modulrunde auf deren Beginn, und die gemeldete Zeit waere zu klein.
+    script_t0: i64,
+    /// Steht `load` noch aus? Es faellt erst, wenn die Geometrie steht.
+    load_pending: bool,
+    /// Wie viele Bilder hintereinander ein Beobachter-Rueckruf schon den Baum
+    /// geaendert hat — der Riegel gegen die „ResizeObserver loop".
+    obs_rounds: u32,
+
+    // ── Was diese Seite gekostet hat, und was darueber EINMAL gesagt wird ─
+    // Alle fuenf setzt `set_url` zurueck: eine neue Seite bekommt ihr eigenes
+    // Urteil und ihre eigene Gelegenheit, es zu sagen. Ohne das brachte eine
+    // schwere Seite den Zeiger fuer jede spaetere zum Schweigen.
+    /// Was das letzte volle Layout gekostet hat, ms — die Zahl, die
+    /// entscheidet, ob diese Seite sich `:hover` leisten kann.
+    last_layout_ms: i64,
+    hover_refused: bool,
+    hover_said_fast: bool,
+    hover_said_slow: bool,
+    ctl_bail_said: bool,
+    /// Der im Inspektor gewaehlte Kasten: `(x, y, w, h)` im Dokumentraum, mit
+    /// seiner Beschriftung. Die Koordinaten gelten in DIESEM Dokument.
+    sel_box: Option<(i32, i32, i32, i32, String)>,
 }
 
 impl Doc {
@@ -417,6 +491,13 @@ impl Doc {
             find: None, found: Vec::new(), find_at: 0,
             find_pending: [0; 4], find_pending_len: 0,
             nav_css_count: 0, nav_scripts: None, js: None, nav_js_count: 0, nav_mod_entries: None, nav_mod_want: None, nav_mod_rounds: 0, nav_css_urls: None, nav_css_parts: None, nav_css_want: None, nav_css_rounds: 0, nav_sheet_nodes: None, nav_sheet_rounds: 0,
+            dirty: true, need_full: true, images_dirty: false, geom: None, last_vp: (0, 0),
+            img_job: -1, img_job_srcs: None, cssimg_job: -1, cssimg_job_keys: None,
+            font_job: -1, font_want: None, fetch_jobs: Vec::new(),
+            script_nav_chain: 0, nav_from_script: false, script_tally: (0, 0, 0),
+            script_t0: 0, load_pending: false, obs_rounds: 0,
+            last_layout_ms: 0, hover_refused: false, hover_said_fast: false,
+            hover_said_slow: false, ctl_bail_said: false, sel_box: None,
         }
     }
 }
@@ -585,8 +666,6 @@ fn take_batch(handle: i32, dst: *mut u8, cap: usize, want: usize) -> Vec<(usize,
     }
     spans
 }
-static mut IMAGES_DIRTY: bool = false;
-
 // Scratch for the kernel to write back the post-redirect URL of a fetch.
 static mut FINAL_URL_BUF: [u8; URL_CAP] = [0; URL_CAP];
 
@@ -598,27 +677,18 @@ static mut EVENT_BUF: [u8; EVENT_BUF_SIZE] = [0; EVENT_BUF_SIZE];
 
 static mut RECT_BUF: [u8; 16] = [0; 16];
 
-static mut DIRTY: bool = true; // page content needs a repaint
-/// Die Kaesten des letzten Layouts, fuer `getBoundingClientRect` & Co.
+/// **Was der BILDPUFFER haelt — nicht, was die Seite sagt.**
 ///
-/// Als `Rc` gehalten, damit das Weiterreichen an die JS-Maschine nichts
-/// kostet: der Rollstand aendert sich bei JEDEM Bild, die Kaesten nur bei
-/// einem neuen Layout — ohne das waere jede Rollbewegung eine Kopie von
-/// ~180 KB.
-static mut GEOM: Option<alloc::rc::Rc<alloc::vec::Vec<beak_engine::layout::ElemRect>>> = None;
+/// Der Puffer ist einer, auch wenn es spaeter mehrere Dokumente gibt: diese
+/// drei Zahlen beschreiben das Bild, das gerade im Puffer steht, und gehoeren
+/// deshalb dem Fenster. Die Frage „muss neu gemalt werden?" gehoert dagegen
+/// dem Dokument (`Doc::dirty`, `Doc::need_full`) — ein Bild, das im
+/// Hintergrund ankommt, macht SEINE Seite alt, nicht das Bild auf dem Schirm.
 static mut LAST_W: i32 = -1;
 static mut LAST_H: i32 = -1;
 /// The scroll offset the buffer currently HOLDS, so the next frame knows how
 /// far the picture has to move.
 static mut LAST_SY: i32 = 0;
-/// Something other than scrolling wants a repaint.
-///
-/// Scrolling does not change the page, it moves it — so a frame that is dirty
-/// for scrolling ALONE can be blitted and have one band redrawn. Anything else
-/// (a hover, a form key, a new layout) sets this and gets the whole viewport.
-/// It is set, never cleared, until a frame is actually painted: a hover
-/// followed by a scroll must still repaint everything.
-static mut NEED_FULL: bool = true;
 
 /// Dem Kernel sagen, aus welchem Dokument die naechsten Anfragen kommen.
 ///
@@ -649,16 +719,15 @@ fn set_url(s: &str) {
     d.pending_link = None;
     // Die Zeile zeigt, wo man IST — bis jemand hineintippt.
     set_edit(s);
-    unsafe {
-        // A new page gets its own verdict on whether it can afford `:hover` —
-        // and its own chance to say so once. Without this, one heavy page
-        // silences the pointer for every page after it.
-        core::ptr::addr_of_mut!(HOVER_REFUSED).write(false);
-        core::ptr::addr_of_mut!(HOVER_SAID_FAST).write(false);
-        core::ptr::addr_of_mut!(HOVER_SAID_SLOW).write(false);
-        core::ptr::addr_of_mut!(CTL_BAIL_SAID).write(false);
-        core::ptr::addr_of_mut!(LAST_LAYOUT_MS).write(0);
-    }
+    // A new page gets its own verdict on whether it can afford `:hover` —
+    // and its own chance to say so once. Without this, one heavy page
+    // silences the pointer for every page after it.
+    let d = doc_mut();
+    d.hover_refused = false;
+    d.hover_said_fast = false;
+    d.hover_said_slow = false;
+    d.ctl_bail_said = false;
+    d.last_layout_ms = 0;
 }
 fn url_str() -> &'static str { &doc().url }
 
@@ -846,16 +915,14 @@ fn toggle_inspect() {
         p.write(!p.read());
     }
 }
-/// The selected element: document-space `(x, y, w, h)` + its label.
-static mut SEL_BOX: Option<(i32, i32, i32, i32, String)> = None;
 fn set_selected(b: Option<(i32, i32, i32, i32, String)>) {
-    unsafe { core::ptr::addr_of_mut!(SEL_BOX).write(b) };
+    doc_mut().sel_box = b;
 }
 fn selected_rect() -> Option<(i32, i32, i32, i32)> {
-    unsafe { (*core::ptr::addr_of!(SEL_BOX)).as_ref().map(|(x, y, w, h, _)| (*x, *y, *w, *h)) }
+    doc().sel_box.as_ref().map(|(x, y, w, h, _)| (*x, *y, *w, *h))
 }
 fn selected_label() -> Option<String> {
-    unsafe { (*core::ptr::addr_of!(SEL_BOX)).as_ref().map(|(_, _, _, _, l)| l.clone()) }
+    doc().sel_box.as_ref().map(|(_, _, _, _, l)| l.clone())
 }
 /// Lay out the current page honoring the reader-mode toggle: full site CSS
 /// (external `<link>` + inline `<style>`) when on, UA-only when off.
@@ -881,7 +948,7 @@ fn do_layout(engine: &Engine, w: u32, state: &FormState) -> Layout {
     push_i64(&mut label, w as i64);
     label.push_str("px (parse+cascade+layout)");
     log_ms(&label, ms);
-    unsafe { core::ptr::addr_of_mut!(LAST_LAYOUT_MS).write(ms) };
+    doc_mut().last_layout_ms = ms;
     // ...and WHICH of the three it was. The host profile says the box layout
     // dominates, but the host is not a WASM interpreter and the phases do not
     // scale alike under one: beak 0.18.0 halved the box layout on the host and
@@ -906,16 +973,22 @@ fn scroll_y() -> i32 {
 fn set_scroll(y: i32) {
     doc_mut().scroll_y = y;
 }
+/// Something other than scrolling wants a repaint.
+///
+/// Scrolling does not change the page, it moves it — so a frame that is dirty
+/// for scrolling ALONE can be blitted and have one band redrawn. Anything else
+/// (a hover, a form key, a new layout) sets `need_full` and gets the whole
+/// viewport. It is set, never cleared, until a frame is actually painted: a
+/// hover followed by a scroll must still repaint everything.
 fn mark_dirty() {
-    unsafe {
-        core::ptr::addr_of_mut!(DIRTY).write(true);
-        core::ptr::addr_of_mut!(NEED_FULL).write(true);
-    }
+    let d = doc_mut();
+    d.dirty = true;
+    d.need_full = true;
 }
 
 /// Dirty because the viewport MOVED — the display list is untouched.
 fn mark_dirty_scrolled() {
-    unsafe { core::ptr::addr_of_mut!(DIRTY).write(true) };
+    doc_mut().dirty = true;
 }
 
 // Content generation — bumped on every fetch so the layout cache knows to
@@ -939,48 +1012,28 @@ fn content_gen() -> u32 {
     doc().content_gen
 }
 
-/// What the last full layout cost, ms. `:hover` needs one per element the
-/// pointer enters, so this is what decides whether the page can afford to
-/// react to the pointer at all.
-static mut LAST_LAYOUT_MS: i64 = 0;
 /// A pointer that costs more than this to follow makes the page feel broken —
 /// the window stops answering while it re-lays-out. Below it, hover is free
 /// enough to be worth having. Only the FALLBACK is measured against it: a
 /// pointer change the engine can answer by repainting costs a fraction of a
 /// millisecond and is never refused.
 const HOVER_BUDGET_MS: i64 = 250;
-/// Did we already say that this page is too heavy to hover? Said once per
-/// page, not once per mouse move ([[feedback-log-the-exception-not-the-rule]]).
-static mut HOVER_REFUSED: bool = false;
-/// Has the first pointer answer on this page been reported yet — the repaint
-/// with what it cost, and separately the first fallback with its reason?
+/// Say ONCE per page how the pointer is being answered here.
 ///
-/// Once each per page, for the same reason. Without them a pointer answered by
+/// Once each, for the reason in `Doc`: without them a pointer answered by
 /// repainting is INVISIBLE in the log, so a device run cannot tell "it works"
 /// from "it never happened" — which is exactly what the first 0.28.0 log could
 /// not say ([[feedback-log-the-version-in-the-trace]]).
-static mut HOVER_SAID_FAST: bool = false;
-static mut HOVER_SAID_SLOW: bool = false;
-
-/// Say ONCE per page how the pointer is being answered here.
 fn say_hover_once(fast: bool, ms: i64, why: &str) {
-    unsafe {
-        let p = if fast {
-            core::ptr::addr_of_mut!(HOVER_SAID_FAST)
-        } else {
-            core::ptr::addr_of_mut!(HOVER_SAID_SLOW)
-        };
-        if p.read() {
-            return;
-        }
-        p.write(true);
+    let said = if fast { doc().hover_said_fast } else { doc().hover_said_slow };
+    if said {
+        return;
     }
+    if fast { doc_mut().hover_said_fast = true } else { doc_mut().hover_said_slow = true }
     let mut b = String::new();
     if fast {
         b.push_str("[beak] :hover repainted in ");
-        b.push_str(&alloc::format!("{ms} ms (a layout here costs {})", unsafe {
-            core::ptr::addr_of!(LAST_LAYOUT_MS).read()
-        }));
+        b.push_str(&alloc::format!("{ms} ms (a layout here costs {})", doc().last_layout_ms));
     } else {
         b.push_str("[beak] :hover needs a layout: ");
         b.push_str(why);
@@ -990,19 +1043,16 @@ fn say_hover_once(fast: bool, ms: i64, why: &str) {
 
 /// Can this page afford to restyle on pointer movement?
 fn hover_affordable() -> bool {
-    let ms = unsafe { core::ptr::addr_of!(LAST_LAYOUT_MS).read() };
+    let ms = doc().last_layout_ms;
     if ms <= HOVER_BUDGET_MS {
         return true;
     }
-    unsafe {
-        let p = core::ptr::addr_of_mut!(HOVER_REFUSED);
-        if !p.read() {
-            p.write(true);
-            let mut b = String::new();
-            b.push_str("[beak] :hover needs a layout here, and one costs ");
-            b.push_str(&alloc::format!("{ms} ms"));
-            log(&b);
-        }
+    if !doc().hover_refused {
+        doc_mut().hover_refused = true;
+        let mut b = String::new();
+        b.push_str("[beak] :hover needs a layout here, and one costs ");
+        b.push_str(&alloc::format!("{ms} ms"));
+        log(&b);
     }
     false
 }
@@ -1200,10 +1250,10 @@ fn nav_begin(engine: &Engine, method: &str, url: &str, body: &[u8], extra: &str,
     // Adresszeile, der Verlauf — bricht die Skriptkette. Sonst zaehlte der
     // Deckel ueber Seiten hinweg weiter und wuerde irgendwann eine
     // vollkommen harmlose Weiterleitung abwuergen.
-    if unsafe { core::ptr::addr_of!(NAV_FROM_SCRIPT).read() } {
-        unsafe { core::ptr::addr_of_mut!(NAV_FROM_SCRIPT).write(false) };
+    if doc().nav_from_script {
+        doc_mut().nav_from_script = false;
     } else {
-        unsafe { core::ptr::addr_of_mut!(SCRIPT_NAV_CHAIN).write(0) };
+        doc_mut().script_nav_chain = 0;
     }
     // **Vor dem ersten Byte.** Eine Navigation darf ueberallhin — auch auf
     // den eigenen Router —, denn das neue Dokument ist eine andere Herkunft
@@ -1746,7 +1796,7 @@ fn nav_finish(engine: &Engine) {
 
 /// Die Seite ist fertig: zeichnen und Bilder holen.
 fn nav_done() {
-    unsafe { core::ptr::addr_of_mut!(IMAGES_DIRTY).write(true) };
+    doc_mut().images_dirty = true;
     mark_dirty();
     nav_clear();
 }
@@ -2002,11 +2052,6 @@ fn sync_history(engine: &Engine, sess: &mut beak_engine::js::Session) {
 /// und von aussen wie ein haengender Browser aussieht. Eine Kette von
 /// wenigen ist dagegen normal: Googles Sperrseite braucht zwei.
 const SCRIPT_NAV_MAX: u32 = 8;
-static mut SCRIPT_NAV_CHAIN: u32 = 0;
-/// Setzt `sync_nav` unmittelbar vor `nav_begin` — daran erkennt `nav_begin`,
-/// dass die Kette WEITERgeht statt neu anzufangen. Alles andere (Klick auf
-/// einen Link, Adresszeile, Verlauf) bricht sie.
-static mut NAV_FROM_SCRIPT: bool = false;
 
 /// Was die Seite per `location` verlangt hat — abholen und wirklich fahren.
 ///
@@ -2033,19 +2078,19 @@ fn sync_nav(engine: &Engine) -> bool {
         log(&alloc::format!("[beak] Navigation abgelehnt (Schema): {}", n.url));
         return false;
     }
-    let chain = unsafe { core::ptr::addr_of!(SCRIPT_NAV_CHAIN).read() } + 1;
+    let chain = doc().script_nav_chain + 1;
     if chain > SCRIPT_NAV_MAX {
         log(&alloc::format!("[beak] Navigation abgebrochen: {SCRIPT_NAV_MAX} Sprünge in Folge, zuletzt {}", n.url));
         return false;
     }
-    unsafe { core::ptr::addr_of_mut!(SCRIPT_NAV_CHAIN).write(chain) };
+    doc_mut().script_nav_chain = chain;
     let mut m = String::from("[beak] location.");
     m.push_str(if n.reload { "reload()" } else if n.replace { "replace()" } else { "assign()" });
     m.push_str(" -> ");
     m.push_str(&n.url);
     if chain > 1 { m.push_str(" ("); push_i64(&mut m, chain as i64); m.push_str(". in Folge)"); }
     log(&m);
-    unsafe { core::ptr::addr_of_mut!(NAV_FROM_SCRIPT).write(true) };
+    doc_mut().nav_from_script = true;
     // `replace` und `reload` haengen KEINEN Eintrag an: sonst kaeme man mit
     // „zurueck" nie aus einer Seite heraus, die sich selbst ersetzt.
     nav_begin(engine, "GET", &n.url, &[], "", !n.replace && !n.reload);
@@ -2055,7 +2100,7 @@ fn sync_nav(engine: &Engine) -> bool {
 /// Liefert true, wenn eine Modulrunde laeuft — dann ist die Navigation
 /// NOCH nicht fertig.
 fn run_scripts(engine: &Engine, list: Vec<PendingScript>) -> bool {
-    unsafe { core::ptr::addr_of_mut!(SCRIPT_T0).write(now_ms()) };
+    doc_mut().script_t0 = now_ms();
     let dom = beak_engine::parse(html_str());
     let doc = beak_engine::js::dombind::Doc::from_dom(&dom);
     let mut sess = beak_engine::js::Session::new(SCRIPT_STEPS);
@@ -2162,29 +2207,17 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) -> bool {
             }
         }
     }
-    unsafe {
-        doc_mut().js = Some(sess);
-        core::ptr::addr_of_mut!(SCRIPT_TALLY).write((ran, failed, bytes));
-        doc_mut().nav_mod_entries = if entries.is_empty() { None } else { Some(entries) };
-        doc_mut().nav_mod_rounds = 0;
-    }
+    doc_mut().js = Some(sess);
+    doc_mut().script_tally = (ran, failed, bytes);
+    doc_mut().nav_mod_entries = if entries.is_empty() { None } else { Some(entries) };
+    doc_mut().nav_mod_rounds = 0;
     module_pump(engine)
 }
 
-/// Was die gewoehnlichen Skripte ergeben haben — muss die Modulrunden
-/// ueberleben, weil der Bericht erst danach geschrieben wird.
-static mut SCRIPT_TALLY: (usize, usize, usize) = (0, 0, 0);
-/// Wann die Skriptrunde begann. NICHT `Doc::nav_stage_ms`: das steht nach einer
-/// Modulrunde auf deren Beginn, und die gemeldete Zeit waere zu klein.
-static mut SCRIPT_T0: i64 = 0;
-/// Steht `load` noch aus? Es faellt erst, wenn die Geometrie steht.
-static mut LOAD_PENDING: bool = false;
 
 /// Die Schriftrunde. Eigener Auftrag, nicht der der Navigation: welche
 /// Schriften eine Seite braucht, weiss die Engine erst nach dem ersten
 /// Auslegen — genau wie bei Bildern.
-static mut FONT_JOB: i32 = -1;
-static mut FONT_WANT: Option<Vec<(String, u32, u16, bool)>> = None;
 /// Wie viele Schriften eine Seite in einer Runde holen darf, und wie viele
 /// Bytes zusammen. Gemessen: eine Seite bringt 3 bis 6 mit, je 30-90 KB.
 const MAX_FONT_URLS: usize = 12;
@@ -2198,15 +2231,8 @@ const FONT_CAP: usize = 4 * 1024 * 1024;
 const MAX_FETCH_INFLIGHT: usize = 6;
 const FETCH_CAP: usize = 2 * 1024 * 1024;
 
-/// Welche Anfrage der Engine auf welchem Griff des Wirts liegt.
-static mut FETCH_JOBS: Option<Vec<(u32, i32)>> = None;
-
 fn fetch_jobs() -> &'static mut Vec<(u32, i32)> {
-    unsafe {
-        let p = core::ptr::addr_of_mut!(FETCH_JOBS);
-        if (*p).is_none() { *p = Some(Vec::new()); }
-        (*p).as_mut().unwrap()
-    }
+    &mut doc_mut().fetch_jobs
 }
 
 /// Der Kopfblock der zuletzt eingesammelten Antwort.
@@ -2311,12 +2337,12 @@ fn pump_fetches() -> bool {
 /// Eine Runde an den Schriften der Seite. Liefert true, wenn etwas ankam —
 /// dann muss neu ausgelegt werden, denn jede Breite aendert sich.
 fn pump_fonts(engine: &Engine) -> bool {
-    let h = unsafe { core::ptr::addr_of!(FONT_JOB).read() };
+    let h = doc().font_job;
     let mut loaded = false;
     if h >= 0 {
         if unsafe { npk_http_poll(h) } == 0 { return false }
-        unsafe { core::ptr::addr_of_mut!(FONT_JOB).write(-1) };
-        let want = unsafe { (*core::ptr::addr_of_mut!(FONT_WANT)).take() }.unwrap_or_default();
+        doc_mut().font_job = -1;
+        let want = doc_mut().font_want.take().unwrap_or_default();
         let mut buf: Vec<u8> = Vec::with_capacity(FONT_CAP);
         let spans = take_batch(h, buf.as_mut_ptr(), FONT_CAP, want.len());
         let total = spans.iter().map(|(o, l)| o + l).max().unwrap_or(0);
@@ -2342,7 +2368,7 @@ fn pump_fonts(engine: &Engine) -> bool {
         log(&alloc::format!("[beak] Schriften: {ok} geladen, {bad} gescheitert, {} ms",
                             now_ms() - doc().nav_stage_ms));
     }
-    if unsafe { core::ptr::addr_of!(FONT_JOB).read() } >= 0 { return loaded }
+    if doc().font_job >= 0 { return loaded }
     let mut want = engine.take_pending_fonts();
     if want.is_empty() { return loaded }
     want.truncate(MAX_FONT_URLS);
@@ -2353,11 +2379,9 @@ fn pump_fonts(engine: &Engine) -> bool {
         log("[beak] Schriften konnten nicht angefordert werden");
         return loaded;
     }
-    unsafe {
-        core::ptr::addr_of_mut!(FONT_JOB).write(h);
-        core::ptr::addr_of_mut!(FONT_WANT).write(Some(want));
-        doc_mut().nav_stage_ms = now_ms();
-    }
+    doc_mut().font_job = h;
+    doc_mut().font_want = Some(want);
+    doc_mut().nav_stage_ms = now_ms();
     loaded
 }
 
@@ -2365,8 +2389,8 @@ fn pump_fonts(engine: &Engine) -> bool {
 ///
 /// Liefert true, wenn dabei etwas am Baum passiert ist.
 fn fire_load(engine: &Engine, page: &Page) -> bool {
-    if !unsafe { core::ptr::addr_of!(LOAD_PENDING).read() } { return false }
-    unsafe { core::ptr::addr_of_mut!(LOAD_PENDING).write(false) };
+    if !doc().load_pending { return false }
+    doc_mut().load_pending = false;
     // Was der Benutzer schon getippt hat, muss der Behandler sehen — sonst
     // liest er den Vorgabewert und schreibt ihn womoeglich zurueck.
     push_control_values(page);
@@ -2426,26 +2450,21 @@ fn pump_box_observers(engine: &Engine) {
         // Der Baum wird trotzdem uebernommen — nur das sofortige Neumalen
         // faellt weg. Damit kommt der Kreis zur Ruhe, und die naechste
         // Eingabe zeigt den Stand.
-        let n = unsafe { core::ptr::addr_of!(OBS_ROUNDS).read() } + 1;
-        unsafe { core::ptr::addr_of_mut!(OBS_ROUNDS).write(n) };
+        let n = doc().obs_rounds + 1;
+        doc_mut().obs_rounds = n;
         if n <= OBS_ROUNDS_MAX {
             mark_dirty();
         } else if n == OBS_ROUNDS_MAX + 1 {
             log("[beak] Beobachter: der Rueckruf aendert, was er misst —                  Neumalen ausgesetzt");
         }
     } else {
-        unsafe { core::ptr::addr_of_mut!(OBS_ROUNDS).write(0) };
+        doc_mut().obs_rounds = 0;
     }
 }
-
-/// Das zuletzt eingereichte Sichtfeld, damit `set_viewport` nur bei einer
-/// echten Aenderung laeuft.
-static mut LAST_VP: (i32, i32) = (0, 0);
 
 /// Wieviele Bilder hintereinander ein Beobachter-Rueckruf den Baum aendern
 /// darf, bevor das Neumalen aussetzt.
 const OBS_ROUNDS_MAX: u32 = 8;
-static mut OBS_ROUNDS: u32 = 0;
 
 /// Eine Runde am Modulgraphen: was fehlt noch?
 ///
@@ -2686,17 +2705,15 @@ fn eval_modules() {
     push_i64(&mut m, (now_ms() - t0) as i64);
     m.push_str(" ms");
     log(&m);
-    unsafe {
-        let (r, f, b) = core::ptr::addr_of!(SCRIPT_TALLY).read();
-        core::ptr::addr_of_mut!(SCRIPT_TALLY).write((r + ok, f + bad, b));
-    }
+    let (r, f, b) = doc().script_tally;
+    doc_mut().script_tally = (r + ok, f + bad, b);
 }
 
 /// Zeitgeber, Kekse, Baum und der Bericht — nach ALLEM, was die Seite an
 /// Code hat: gewoehnliche Skripte wie Module.
 fn finish_scripts(engine: &Engine) {
-    let (ran, failed, bytes) = unsafe { core::ptr::addr_of!(SCRIPT_TALLY).read() };
-    let t0 = unsafe { core::ptr::addr_of!(SCRIPT_T0).read() };
+    let (ran, failed, bytes) = doc().script_tally;
+    let t0 = doc().script_t0;
     let Some(sess) = js_session() else { return };
     // **`DOMContentLoaded` und `load`.**
     //
@@ -2722,7 +2739,7 @@ fn finish_scripts(engine: &Engine) {
     if let Some(dn) = doc_node {
         let _ = beak_engine::js::dombind::dispatch(&mut sess.interp, "DOMContentLoaded", &[dn]);
     }
-    unsafe { core::ptr::addr_of_mut!(LOAD_PENDING).write(true) };
+    doc_mut().load_pending = true;
     // Die Zeitgeber, die waehrend des Ladens angemeldet wurden, einmal
     // laufen lassen — viele Seiten stellen ihre Oberflaeche in einem
     // `setTimeout(…, 0)` fertig.
@@ -2909,9 +2926,20 @@ const SCRIPT_SLOW_MS: i64 = 3_000;
 /// Wie oft ein langer Lauf von sich hoeren laesst.
 const SCRIPT_HEARTBEAT_MS: i64 = 5_000;
 
+/// **Der Deckel gehoert dem LAUF, nicht dem Dokument.**
+///
+/// Es laeuft immer genau ein Stueck Seitencode — die Pumpe ist einfaedig, und
+/// daran aendern auch mehrere Tabs nichts. Diese drei beschreiben den Lauf,
+/// der gerade auf dem Stapel liegt, und `arm_script_budget` stellt sie vor
+/// jedem neu. In `Doc` waeren sie ein Feld, das je Seite dasselbe sagt.
+///
+/// Der zweite Grund ist handfester: `script_time_left` ruft die Engine aus
+/// dem laufenden Interpreter heraus, und der ist ueber `js_session()` bereits
+/// eine `&mut`-Entleihung aus dem Dokument. Ein `doc()` daneben waere genau
+/// das Aliasing, vor dem der Kommentar an `doc`/`doc_mut` warnt.
 static mut SCRIPT_DEADLINE: i64 = 0;
 /// Wann der laufende Behandler begann — fuer den Herzschlag. Eigener Name
-/// neben `SCRIPT_T0`: das ist der Beginn der SEITENrunde, nicht des Laufs.
+/// neben `Doc::script_t0`: das ist der Beginn der SEITENrunde, nicht des Laufs.
 static mut BUDGET_T0: i64 = 0;
 static mut BUDGET_SAID: i64 = 0;
 
@@ -2961,7 +2989,7 @@ fn arm_script_budget() {
 /// re-fetched and re-decoded identical bytes — wasted requests against the
 /// server's rate limit, and wasted MAX_IMAGES slots that real images needed.
 fn begin_images(engine: &mut Engine) -> Vec<String> {
-    unsafe { core::ptr::addr_of_mut!(IMAGES_DIRTY).write(false) };
+    doc_mut().images_dirty = false;
     // Der Motor haelt die Hervorhebungen; eine neue Seite hat keine.
     // `set_url` raeumt sie im Dokument weg, hier faellt der Anstrich nach.
     engine.set_marks(None, Vec::new());
@@ -3063,11 +3091,8 @@ fn images_start(pending: &mut Vec<String>, layout: Option<&Layout>) {
         log(&alloc::format!("[beak] image batch of {} could not start", urls.len()));
         return;
     }
-    unsafe {
-        core::ptr::addr_of_mut!(IMG_JOB_SRCS)
-            .write(Some(srcs.into_iter().zip(urls).collect()));
-        core::ptr::addr_of_mut!(IMG_JOB).write(h);
-    }
+    doc_mut().img_job_srcs = Some(srcs.into_iter().zip(urls).collect());
+    doc_mut().img_job = h;
 }
 
 fn images_arrived(
@@ -3076,9 +3101,8 @@ fn images_arrived(
     layout: Option<&Layout>,
     band: (i32, i32),
 ) {
-    let want: Vec<(String, String)> =
-        unsafe { (*core::ptr::addr_of_mut!(IMG_JOB_SRCS)).take() }.unwrap_or_default();
-    unsafe { core::ptr::addr_of_mut!(IMG_JOB).write(-1) };
+    let want: Vec<(String, String)> = doc_mut().img_job_srcs.take().unwrap_or_default();
+    doc_mut().img_job = -1;
     let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
     let spans = take_batch(handle, dst, IMG_FETCH_CAP, want.len());
     let mut arrived: Vec<&str> = Vec::new();
@@ -3131,7 +3155,7 @@ fn images_arrived(
 }
 
 fn images_dirty() -> bool {
-    unsafe { core::ptr::addr_of!(IMAGES_DIRTY).read() }
+    doc().images_dirty
 }
 
 /// Ask for the CSS images (`background-image`/`mask-image`) the last layout
@@ -3178,10 +3202,8 @@ fn css_images_start(pending: &mut Vec<(u64, String)>) {
     }
     let keys: Vec<(u64, String)> =
         want.into_iter().map(|(k, _)| k).zip(urls).collect();
-    unsafe {
-        core::ptr::addr_of_mut!(CSSIMG_JOB_KEYS).write(Some(keys));
-        core::ptr::addr_of_mut!(CSSIMG_JOB).write(h);
-    }
+    doc_mut().cssimg_job_keys = Some(keys);
+    doc_mut().cssimg_job = h;
 }
 
 fn css_images_arrived(
@@ -3190,9 +3212,8 @@ fn css_images_arrived(
     layout: Option<&Layout>,
     band: (i32, i32),
 ) {
-    let want: Vec<(u64, String)> =
-        unsafe { (*core::ptr::addr_of_mut!(CSSIMG_JOB_KEYS)).take() }.unwrap_or_default();
-    unsafe { core::ptr::addr_of_mut!(CSSIMG_JOB).write(-1) };
+    let want: Vec<(u64, String)> = doc_mut().cssimg_job_keys.take().unwrap_or_default();
+    doc_mut().cssimg_job = -1;
     let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
     let spans = take_batch(handle, dst, IMG_FETCH_CAP, want.len());
     let mut arrived: Vec<u64> = Vec::new();
@@ -3222,19 +3243,14 @@ fn css_images_arrived(
 // ── Sub-resource batches in flight ────────────────────────────────────────
 
 /// The `<img>` batch on the wire and the `(src, resolved url)` pairs it was
-/// asked for, so an arriving body can be filed under the src the page named
-/// it by. -1 / None when nothing is in flight.
-static mut IMG_JOB: i32 = -1;
-static mut IMG_JOB_SRCS: Option<Vec<(String, String)>> = None;
-/// The same for backgrounds, keyed the way the layout names them.
-static mut CSSIMG_JOB: i32 = -1;
-static mut CSSIMG_JOB_KEYS: Option<Vec<(u64, String)>> = None;
-
 fn img_job() -> i32 {
-    unsafe { core::ptr::addr_of!(IMG_JOB).read() }
+    doc().img_job
 }
 fn cssimg_job() -> i32 {
-    unsafe { core::ptr::addr_of!(CSSIMG_JOB).read() }
+    doc().cssimg_job
+}
+fn font_job() -> i32 {
+    doc().font_job
 }
 
 /// Drop the sub-resource batches of a page that is being replaced. A browser
@@ -3242,20 +3258,16 @@ fn cssimg_job() -> i32 {
 /// network on nothing — and with one kernel fetch queue behind them, it also
 /// makes the new document wait its turn.
 fn subresources_cancel() {
-    unsafe {
-        let p = core::ptr::addr_of_mut!(IMG_JOB);
-        if p.read() >= 0 {
-            npk_http_cancel(p.read());
-            p.write(-1);
-        }
-        core::ptr::addr_of_mut!(IMG_JOB_SRCS).write(None);
-        let p = core::ptr::addr_of_mut!(CSSIMG_JOB);
-        if p.read() >= 0 {
-            npk_http_cancel(p.read());
-            p.write(-1);
-        }
-        core::ptr::addr_of_mut!(CSSIMG_JOB_KEYS).write(None);
+    if doc().img_job >= 0 {
+        unsafe { npk_http_cancel(doc().img_job) };
+        doc_mut().img_job = -1;
     }
+    doc_mut().img_job_srcs = None;
+    if doc().cssimg_job >= 0 {
+        unsafe { npk_http_cancel(doc().cssimg_job) };
+        doc_mut().cssimg_job = -1;
+    }
+    doc_mut().cssimg_job_keys = None;
 }
 
 /// Set the address + start fetching, WITHOUT touching history (reload,
@@ -3595,7 +3607,7 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
     if w <= 0 || h <= 0 {
         return;
     }
-    let dirty = unsafe { core::ptr::addr_of!(DIRTY).read() };
+    let dirty = doc().dirty;
     let lw = unsafe { core::ptr::addr_of!(LAST_W).read() };
     let lh = unsafe { core::ptr::addr_of!(LAST_H).read() };
     if !dirty && w == lw && h == lh {
@@ -3622,7 +3634,10 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
         *cache = Some((do_layout(engine, w as u32, state), w, h, cur_gen));
         // Die Kaesten neu einsammeln — nur hier, nicht je Bild.
         let boxes = cache.as_ref().unwrap().0.element_rects();
-        unsafe { core::ptr::addr_of_mut!(GEOM).write(Some(alloc::rc::Rc::new(boxes))) };
+        // Zuweisung, nicht `ptr::write`: die ueberschreibt OHNE den alten Wert
+        // fallen zu lassen, und das waren ~180 KB Kaesten je Neuauslegung, die
+        // nie zurueckkamen.
+        doc_mut().geom = Some(alloc::rc::Rc::new(boxes));
 
         // **Eine Markierung zeigt auf BEFEHLSINDIZES, und die verschieben
         // sich beim Neuauslegen.** Ein nachgeladenes Bild reicht: aus der
@@ -3651,10 +3666,7 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
     // Geometrie und Rollstand an die Maschine reichen. Der Rollstand geht bei
     // jedem Bild mit, weil er sich ohne Layout aendert; die Kaesten sind ein
     // `Rc` und kosten dabei nichts.
-    // `ptr::read` waere hier ein Fehler: es kopiert das `Rc` BITWEISE, ohne
-    // den Zaehler hochzusetzen — beim naechsten Fallenlassen ein Double-Free.
-    // `clone()` ist das, was gemeint ist.
-    let geom = unsafe { (*core::ptr::addr_of!(GEOM)).clone() };
+    let geom = doc().geom.clone();
     if let (Some(sess), Some(g)) = (js_session(), geom) {
         // Das Sichtfeld nachziehen, wenn es sich bewegt hat. Der Ausschnitt
         // eines `IntersectionObserver` ohne eigene Wurzel IST das Sichtfeld —
@@ -3663,8 +3675,8 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
         // Aenderung, weil `set_viewport` ein frisches `screen` baut und das
         // je Bild Muell waere.
         let vp = (w, h);
-        if unsafe { core::ptr::addr_of!(LAST_VP).read() } != vp {
-            unsafe { core::ptr::addr_of_mut!(LAST_VP).write(vp) };
+        if doc().last_vp != vp {
+            doc_mut().last_vp = vp;
             sess.interp.set_viewport(w as f64, h as f64);
         }
         sess.interp.set_geometry(beak_engine::js::interp::Geometry {
@@ -3696,7 +3708,7 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
     // The inspect overlay is drawn OVER the frame rather than being part of the
     // display list, so a blit would smear it; that mode takes the full path.
     let dy = sy - unsafe { core::ptr::addr_of!(LAST_SY).read() };
-    let full = unsafe { core::ptr::addr_of!(NEED_FULL).read() }
+    let full = doc().need_full
         || need_layout
         || resized
         || inspect_mode()
@@ -3706,9 +3718,7 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
     // Repainting it was 60-80 ms for a picture that cannot differ, and holding
     // the wheel at the foot of an article does it every turn.
     if dy == 0 && !full {
-        unsafe {
-            core::ptr::addr_of_mut!(DIRTY).write(false);
-        }
+        doc_mut().dirty = false;
         return;
     }
     let t_paint = now_ms();
@@ -3770,9 +3780,9 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
         core::ptr::addr_of_mut!(LAST_W).write(w);
         core::ptr::addr_of_mut!(LAST_H).write(h);
         core::ptr::addr_of_mut!(LAST_SY).write(sy);
-        core::ptr::addr_of_mut!(NEED_FULL).write(false);
-        core::ptr::addr_of_mut!(DIRTY).write(false);
     }
+    doc_mut().need_full = false;
+    doc_mut().dirty = false;
 }
 
 /// Commit the loft-styled chrome: menu bar · toolbar (back/forward/reload +
@@ -4309,12 +4319,11 @@ fn restate_control(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>,
     mark_dirty();
 }
 
-static mut CTL_BAIL_SAID: bool = false;
 fn say_ctl_bail_once(why: &str) {
-    if unsafe { core::ptr::addr_of!(CTL_BAIL_SAID).read() } || why.is_empty() {
+    if doc().ctl_bail_said || why.is_empty() {
         return;
     }
-    unsafe { core::ptr::addr_of_mut!(CTL_BAIL_SAID).write(true) };
+    doc_mut().ctl_bail_said = true;
     log(&alloc::format!("[beak] Steuerelement neu malen geht nicht: {why}"));
 }
 
@@ -5189,7 +5198,7 @@ pub extern "C" fn _start() {
             // Schleife 16 ms je Frage, und eine Seite steht eine Sekunde
             // laenger ungestylt da.
             let waiting = nav_busy() || img_job() >= 0 || cssimg_job() >= 0
-                || unsafe { core::ptr::addr_of!(FONT_JOB).read() } >= 0;
+                || font_job() >= 0;
             let busy = had_event
                 || waiting
                 || !pending_imgs.is_empty()
