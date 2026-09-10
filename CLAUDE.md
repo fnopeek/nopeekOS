@@ -48,7 +48,21 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-10 · beak 0.164.0 · Kernel 0.336.0** (Rest: `git log`)
+**Stand 2026-09-10 · beak 0.165.0 · Kernel 0.336.0** (Rest: `git log`)
+
+**0.165.0: eine Spalte, die nicht schrumpfen kann, macht den Tisch nicht
+breiter.** Florian: „text bricht immer noch raus.. manchmal". Im Bild brechen
+ALLE sechs Zeilen auf derselben zu grossen Breite — also kein Umbruchfehler,
+sondern ein Kasten, der zu breit ist. `auto_columns` verteilte anteilig und
+klemmte danach mit `.max(minw[c])` — **und was das `.max` dazulegte, wurde
+niemandem weggenommen.** Eine Bildspalte (Minimum = ihre Breite) schnappt
+zurück, die Differenz addiert sich zur Tischbreite: „Today's featured
+picture" kam auf **1548 statt 1296**, der Text lief 252 px aus seinem Kasten.
+Jetzt erst jedes Minimum sichern, dann den Rest im Verhältnis von
+`pref - minw` (Chromium: 404 | 892). **„Manchmal" hat einen Grund:** die
+Vorlage der Hauptseite wechselt TÄGLICH zwischen Bild oben und Bild daneben,
+und nur die zweispaltige Fassung trifft es — der Korpusstand stapelt, deshalb
+sah es weder die Galerie noch der erste Lauf.
 
 **0.164.0: der Knopf neben „Appearance", und was er verdeckte.** Florian
 schickte einen Screenshot und die Zeile `Befehlsspanne passt nicht zum
