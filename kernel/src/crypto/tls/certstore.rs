@@ -49,6 +49,62 @@ const AMAZON_ROOT_CA1_DER: &[u8] = include_bytes!("../../../certs/amazon_root_ca
 /// variant were unreachable with X1 alone.
 const ISRG_ROOT_X2_DER: &[u8] = include_bytes!("../../../certs/isrg_root_x2.der");
 
+/// GTS Root R4 — Google Trust Services' ECDSA root, and the counterpart to
+/// R1 in exactly the way X2 is to X1: R1 anchors Google's RSA
+/// intermediates (WR1/WR2), R4 their ECDSA ones (WE1/WE2). Having only R1
+/// was not "most of Google", it was "none of the ECDSA half".
+///
+/// **Cloudflare's default certificates now come from GTS**, so this is not
+/// a Google-only anchor: measured over 38 real hosts, R4 is what
+/// `cdnjs.cloudflare.com`, `unpkg.com` and `cdn.fonts.net` chain to — two
+/// of the most-linked script CDNs on the web. arcade.ch stylesheet import
+/// died on exactly this: `TLS error: certificate: untrusted root CA`.
+const GTS_ROOT_R4_DER: &[u8] = include_bytes!("../../../certs/gts_root_r4.der");
+
+/// GlobalSign Root CA - R3 — anchors `crates.io` (GlobalSign Atlas) and
+/// orf.at. RSA 2048, and it EXPIRES 2029-03-18: the earliest expiry in this
+/// list by six years, so it is the first one to come back to.
+const GLOBALSIGN_ROOT_R3_DER: &[u8] = include_bytes!("../../../certs/globalsign_root_r3.der");
+
+/// SwissSign RSA TLS Root CA 2022 - 1 — the Swiss Post's anchor, and with
+/// it a good part of Swiss public-sector TLS. In the same measurement it
+/// was the only anchor no other host shared, which is precisely why it
+/// would never have been guessed.
+const SWISSSIGN_RSA_2022_DER: &[u8] = include_bytes!("../../../certs/swisssign_rsa_2022.der");
+
+/// DigiCert Global Root G3 — the ECDSA twin of G2, and the third time the
+/// same shape bit: akamai, blick.ch, credit-suisse.com, faz.net and
+/// DigiCert's own OCSP responder all chain here, none of them to G2.
+const DIGICERT_GLOBAL_G3_DER: &[u8] = include_bytes!("../../../certs/digicert_global_g3.der");
+
+/// GlobalSign Root R46 — GlobalSign's 2019 RSA root, a different anchor
+/// from the 2009 "Root CA - R3" above. bbc.co.uk, europa.eu, theguardian.com.
+const GLOBALSIGN_ROOT_R46_DER: &[u8] = include_bytes!("../../../certs/globalsign_root_r46.der");
+
+/// GlobalSign Root E46 — the ECDSA twin of R46. See the note on twins below:
+/// this one is INFERRED, not measured.
+const GLOBALSIGN_ROOT_E46_DER: &[u8] = include_bytes!("../../../certs/globalsign_root_e46.der");
+
+/// Starfield Root Certificate Authority - G2 — GoDaddy/Starfield, and with
+/// it Fastly's certificates.
+const STARFIELD_G2_DER: &[u8] = include_bytes!("../../../certs/starfield_g2.der");
+
+/// DigiCert TLS RSA4096 Root G5 — DigiCert's 2021 hierarchy, separate from
+/// the Global Root G2/G3 pair. raiffeisen.ch.
+const DIGICERT_TLS_RSA4096_G5_DER: &[u8] = include_bytes!("../../../certs/digicert_tls_rsa4096_g5.der");
+
+/// DigiCert TLS ECC P384 Root G5 — the ECDSA twin of RSA4096 G5. INFERRED.
+const DIGICERT_TLS_ECC_P384_G5_DER: &[u8] = include_bytes!("../../../certs/digicert_tls_ecc_p384_g5.der");
+
+/// T-TeleSec GlobalRoot Class 2 — Deutsche Telekom, and with it a good part
+/// of German public-sector TLS (bundesbank.de measured).
+const TTELESEC_GLOBALROOT_CLASS2_DER: &[u8] = include_bytes!("../../../certs/ttelesec_globalroot_class2.der");
+
+/// HARICA TLS RSA Root CA 2021 — the Greek academic CA, which is what
+/// bund.de chains to. Named here because nobody would have guessed it:
+/// a German federal portal on a Greek university's root.
+const HARICA_TLS_RSA_2021_DER: &[u8] = include_bytes!("../../../certs/harica_tls_rsa_2021.der");
+
 /// Built-in anchors. This set is the FLOOR: it ships inside the signed
 /// kernel, cannot be removed by an update or by the user, and is what
 /// guarantees the update host stays reachable even when the npkFS store
@@ -59,11 +115,53 @@ const ROOT_CERTS: &[&[u8]] = &[
     ISRG_ROOT_X2_DER,
     DIGICERT_GLOBAL_G2_DER,
     AAA_CERT_SERVICES_DER,
+    DIGICERT_GLOBAL_G3_DER,
+    DIGICERT_TLS_RSA4096_G5_DER,
+    DIGICERT_TLS_ECC_P384_G5_DER,
     GTS_ROOT_R1_DER,
+    GTS_ROOT_R4_DER,
+    GLOBALSIGN_ROOT_R3_DER,
+    GLOBALSIGN_ROOT_R46_DER,
+    GLOBALSIGN_ROOT_E46_DER,
+    SWISSSIGN_RSA_2022_DER,
+    STARFIELD_G2_DER,
+    TTELESEC_GLOBALROOT_CLASS2_DER,
+    HARICA_TLS_RSA_2021_DER,
     USERTRUST_ECC_DER,
     USERTRUST_RSA_DER,
     AMAZON_ROOT_CA1_DER,
 ];
+
+// **Wie diese Liste entstanden ist — nicht geraten, ausgezaehlt.** Fuer 88
+// echte Wirte (der Zielkorpus, die Skript- und Schriften-CDNs, die er
+// verlinkt, dazu Schweizer und deutsche Behoerden, Banken, Zeitungen und die
+// grossen Paketspeicher) wurde der ANKER bestimmt, den OpenSSL WIRKLICH
+// benutzt: die hoechste `depth=`-Zeile. **Nicht die letzte Karte der
+// gelieferten Kette** — die ist meistens ein Zwischenzertifikat, und wer sie
+// nimmt, traegt Namen wie „DigiCert Global G2 TLS RSA SHA256 2020 CA1" in
+// eine Wurzelliste ein. Danach jede neue Wurzel EINZELN als `-CAfile` gegen
+// ihre Wirte gehalten, mit `-no-CApath`: das beweist die Kette, statt sich
+// auf einen Fingerabdruck aus dem Gedaechtnis zu verlassen. 18 von 18 gruen.
+//
+// **Das Muster, das dabei dreimal dasselbe war: jede grosse CA fuehrt eine
+// RSA- und eine ECDSA-Wurzel, und hier stand immer nur eine von beiden.**
+// ISRG X1 ohne X2 (schon einmal nachgetragen), GTS R1 ohne R4, DigiCert G2
+// ohne G3. Es ist kein Zufall und keine Reihe von Einzelfaellen: die eine
+// Wurzel zu haben heisst nicht „die meisten Server dieser CA", sondern „die
+// Haelfte" — und WELCHE Haelfte entscheidet der Server, nicht wir. Deshalb
+// stehen zwei Anker hier, die NICHT gemessen wurden, sondern gefolgert:
+// `GLOBALSIGN_ROOT_E46` und `DIGICERT_TLS_ECC_P384_G5`, die ECDSA-Zwillinge
+// zweier Wurzeln, die gemessen gebraucht werden. Beide sind als gefolgert
+// markiert, damit die naechste Messung sie bestaetigen oder wegwerfen kann.
+//
+// `AAA_CERT_SERVICES` traf in beiden Laeufen KEINEN Wirt mehr — Cloudflares
+// alte Vorgabewurzel. Sie bleibt trotzdem: der Boden ist da, um erreichbar zu
+// sein, nicht um knapp zu sein, und eine Wurzel zu ENTFERNEN ist eine
+// Entscheidung fuer Geraete im Feld, nicht fuer diese Messung.
+//
+// **Was als naechstes ablaeuft:** `GLOBALSIGN_ROOT_R3` am 2029-03-18 — sechs
+// Jahre vor jedem anderen Anker hier. Wer nach 2029 liest: crates.io und
+// orf.at sind die zwei Wirte, die daran hingen.
 
 /// npkFS directory holding the data-delivered anchors. Off limits to WASM
 /// apps — write access here is the power to mint a MITM anchor for the
