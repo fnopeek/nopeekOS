@@ -2111,7 +2111,7 @@ mod tests {
     #[test]
     fn the_image_cache_is_keyed_by_url_not_by_src() {
         let mut eng = Engine::new();
-        assert!(eng.add_image_cached("logo.png", "https://a.example/logo.png", RED_10));
+        assert!(eng.add_image_cached("logo.png", "https://a.example/logo.png", RED_10).is_ok());
         eng.images_begin(); // a navigation: the page map goes, the cache stays
 
         // The SAME src string on ANOTHER host is another picture. Serving it
@@ -2135,7 +2135,7 @@ mod tests {
     fn the_css_image_cache_is_keyed_by_url_too() {
         let eng = Engine::new();
         // `url_key` 7 is whatever site A's sheet hashed `url(/bg.png)` to.
-        assert!(eng.add_css_image_cached(7, "https://a.example/bg.png", RED_10));
+        assert!(eng.add_css_image_cached(7, "https://a.example/bg.png", RED_10).is_ok());
         eng.css_images_begin(); // a navigation
 
         // Another site writing the SAME `url(/bg.png)` hashes to the same key

@@ -449,6 +449,73 @@ fn collect(&mut self, url: &str, now: i64, for_script: bool) -> String {
 }
 }
 
+// ── Ueber einen Neustart hinweg ───────────────────────────────────────────
+//
+// **Nur die DAUERHAFTEN.** Ein Keks ohne `Expires`/`Max-Age` ist ein
+// Sitzungskeks, und „Sitzung" heisst: bis der Browser endet. Ihn zu
+// speichern waere nicht bequemer, sondern falsch — die Seite hat
+// ausdruecklich gesagt, dass er nicht bleiben soll, und bei einem
+// Anmeldekeks ist das eine Sicherheitsaussage.
+//
+// Das Format ist eine Zeile je Keks, Felder durch Tabulator getrennt. Ein
+// Kekswert DARF laut RFC 6265 §4.1.1 weder Steuerzeichen noch Komma,
+// Semikolon, Anfuehrungszeichen oder Rueckstrich enthalten, ein Tabulator
+// ist also nie darin — und eine Zeile, in der doch einer steckt, wird
+// UEBERSPRUNGEN statt geschrieben. Eine kaputte Zeile darf die Datei nicht
+// unlesbar machen.
+const FILE_TAG: &str = "npkcookies 1";
+
+impl Jar {
+    /// Die dauerhaften Kekse als Text. Leer, wenn keiner bleiben soll.
+    pub fn serialize(&self, now: i64) -> String {
+        let mut out = String::new();
+        for c in &self.cookies {
+            let Some(exp) = c.expires else { continue };   // Sitzungskeks
+            if exp <= now { continue }                     // schon abgelaufen
+            let f = [&c.name, &c.value, &c.domain, &c.path];
+            if f.iter().any(|x| x.contains('\t') || x.contains('\n')) { continue }
+            if out.is_empty() { out.push_str(FILE_TAG); out.push('\n'); }
+            let flags = (c.host_only as u8) | ((c.secure as u8) << 1) | ((c.http_only as u8) << 2);
+            let _ = core::fmt::Write::write_fmt(&mut out, format_args!(
+                "{}\t{}\t{}\t{}\t{}\t{}\n", c.name, c.value, c.domain, c.path, flags, exp));
+        }
+        out
+    }
+
+    /// Zurueckgelesene Kekse einfuegen. Liefert, wie viele ankamen.
+    ///
+    /// Abgelaufene und unlesbare Zeilen werden still uebergangen: die Datei
+    /// ist Zustand, kein Vertrag, und eine halbe Zeile darf nicht den Rest
+    /// kosten.
+    pub fn load(&mut self, text: &str, now: i64) -> usize {
+        let mut n = 0;
+        for line in text.lines() {
+            if line.is_empty() || line == FILE_TAG { continue }
+            let mut f = line.split('\t');
+            let (Some(name), Some(value), Some(domain), Some(path), Some(flags), Some(exp)) =
+                (f.next(), f.next(), f.next(), f.next(), f.next(), f.next()) else { continue };
+            let (Ok(flags), Ok(exp)) = (flags.parse::<u8>(), exp.parse::<i64>()) else { continue };
+            if exp <= now || name.is_empty() { continue }
+            self.cookies.retain(|c| !(c.name == name && c.domain == domain && c.path == path));
+            if self.cookies.len() >= MAX_COOKIES { self.cookies.remove(0); }
+            self.cookies.push(Cookie {
+                name: name.into(), value: value.into(), domain: domain.into(),
+                path: path.into(),
+                host_only: flags & 1 != 0, secure: flags & 2 != 0, http_only: flags & 4 != 0,
+                expires: Some(exp),
+            });
+            n += 1;
+        }
+        n
+    }
+}
+
+/// Die dauerhaften Kekse des Browsers als Text.
+pub fn serialize(now: i64) -> String { global().serialize(now) }
+
+/// Gespeicherte Kekse ins Glas des Browsers.
+pub fn load(text: &str, now: i64) -> usize { global().load(text, now) }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -706,5 +773,70 @@ mod tests {
         let mut j = jar();
         j.store("https://example.com:8443/", "set-cookie: s=1\r\n", 1000);
         assert_eq!(j.header_for("https://example.com/", 1000), "s=1");
+    }
+
+    /// **Ein Sitzungskeks ueberlebt den Neustart NICHT.** Das ist keine
+    /// Sparsamkeit: die Seite hat gesagt, dass er nicht bleiben soll, und
+    /// bei einer Anmeldung ist das eine Sicherheitsaussage.
+    #[test]
+    fn only_cookies_with_an_expiry_survive_a_restart() {
+        let mut j = jar();
+        j.store("https://example.com/", "set-cookie: sess=abc\r\n", 1000);
+        j.store("https://example.com/",
+                "set-cookie: keep=xyz; Expires=Wed, 08-Sep-2027 19:03:37 GMT\r\n", 1000);
+        let text = j.serialize(1000);
+        assert!(text.contains("keep"), "der dauerhafte gehoert in die Datei");
+        assert!(!text.contains("sess"), "der Sitzungskeks NICHT");
+
+        let mut fresh = jar();
+        assert_eq!(fresh.load(&text, 1000), 1);
+        assert_eq!(fresh.header_for("https://example.com/", 1000), "keep=xyz");
+    }
+
+    /// Hin und zurueck muss jede Fahne mitnehmen — `Secure` und `HttpOnly`
+    /// sind Grenzen, und eine Grenze, die beim Speichern verloren geht, ist
+    /// schlimmer als keine.
+    #[test]
+    fn the_round_trip_keeps_every_flag() {
+        let mut j = jar();
+        j.store("https://example.com/app/",
+                "set-cookie: t=1; Path=/app; Secure; HttpOnly; \
+                 Expires=Wed, 08-Sep-2027 19:03:37 GMT\r\n", 1000);
+        let text = j.serialize(1000);
+        let mut fresh = jar();
+        fresh.load(&text, 1000);
+        // Secure: nicht ueber http.
+        assert_eq!(fresh.header_for("http://example.com/app/", 1000), "");
+        assert_eq!(fresh.header_for("https://example.com/app/", 1000), "t=1");
+        // Path: nicht ausserhalb.
+        assert_eq!(fresh.header_for("https://example.com/", 1000), "");
+        // HttpOnly: nicht ans Skript.
+        assert_eq!(fresh.script_header_for("https://example.com/app/", 1000), "");
+    }
+
+    /// Eine kaputte Zeile darf die Datei nicht kosten.
+    #[test]
+    fn a_broken_line_does_not_cost_the_file() {
+        let mut j = jar();
+        let text = concat!("npkcookies 1\n",
+                           "a\tb\texample.com\t/\t0\t99999999999\n",
+                           "das ist keine zeile\n",
+                           "\n",
+                           "c\td\texample.com\t/\tX\t99999999999\n",
+                           "e\tf\texample.com\t/\t0\t99999999999\n");
+        assert_eq!(j.load(text, 1000), 2, "die zwei heilen, nicht mehr und nicht weniger");
+        let h = j.header_for("http://example.com/", 1000);
+        assert!(h.contains("a=b") && h.contains("e=f"), "{h}");
+    }
+
+    /// Abgelaufenes kommt nicht zurueck — weder beim Schreiben noch beim Lesen.
+    #[test]
+    fn an_expired_cookie_comes_back_from_neither_side() {
+        let mut j = jar();
+        j.store("https://example.com/",
+                "set-cookie: old=1; Expires=Wed, 08-Sep-2021 19:03:37 GMT\r\n", 1000);
+        assert_eq!(j.serialize(1_700_000_000), "");
+        let mut fresh = jar();
+        assert_eq!(fresh.load("old\t1\texample.com\t/\t0\t1631127817\n", 1_700_000_000), 0);
     }
 }

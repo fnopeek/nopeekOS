@@ -1140,16 +1140,24 @@ pub(crate) fn npk_netdev_set_link_state(ctx: &mut HostState, carrier: i32, dorma
 
 pub(crate) fn npk_fetch(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if let Err(e) = capability::check_global(&cap_id, capability::Rights::READ) {
-        kprintln!("[npk] WASM: npk_fetch DENIED (cap_id={:08x}, {:?})",
-            capability::short_id(&cap_id), e);
-        return -1;
-    }
-
     let name = match read_str(mem, name_ptr, name_len) {
         Some(s) => s,
         None => return -1,
     };
+    // Der private Bereich eines anderen Moduls ist zu — auch mit READ auf
+    // alles. Der EIGENE ist dagegen offen, auch ohne READ: siehe
+    // `wasm::is_own_private`.
+    if !crate::wasm::private_area_allows(&name, &ctx.module_name) {
+        kprintln!("[npk] WASM: npk_fetch DENIED ({} gehoert einem anderen Modul)", name);
+        return -1;
+    }
+    if !crate::wasm::is_own_private(&name, &ctx.module_name) {
+        if let Err(e) = capability::check_global(&cap_id, capability::Rights::READ) {
+            kprintln!("[npk] WASM: npk_fetch DENIED (cap_id={:08x}, {:?})",
+                capability::short_id(&cap_id), e);
+            return -1;
+        }
+    }
 
     let (content, _) = match crate::npkfs::fetch(&name) {
         Ok(v) => v,
@@ -1280,6 +1288,12 @@ pub(crate) fn npk_store(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name
         kprintln!("[npk] WASM: npk_store DENIED ({} is read-only to apps)", name);
         return -1;
     }
+    // Der private Bereich eines anderen Moduls ist zu — auch mit READ und
+    // WRITE auf alles. Siehe `wasm::private_area_owner`.
+    if !crate::wasm::private_area_allows(&name, &ctx.module_name) {
+        kprintln!("[npk] WASM: npk_store DENIED ({} gehoert einem anderen Modul)", name);
+        return -1;
+    }
 
     // Three ways to be allowed to write, narrowest last:
     //   1. blanket WRITE from `.npk.caps`
@@ -1289,12 +1303,32 @@ pub(crate) fn npk_store(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name
     //      app that keeps preferences shouldn't need write access to
     //      the whole store for it, and the name is the kernel's to
     //      derive — a module can't claim someone else's.
+    //   4. der EIGENE private Bereich, `priv/<module>/…` — er braucht gar
+    //      keine Kapabilitaet, denn er ist keine Datei im Speicher der
+    //      Maschine, sondern der Zustand dieses Programms.
     let own_config = alloc::format!("sys/config/{}", ctx.module_name);
-    if capability::check_global(&cap_id, capability::Rights::WRITE).is_err()
-        && !capability::check_path_grant(&cap_id, &name, capability::Rights::WRITE)
-        && name != own_config
-    {
+    let has_write = capability::check_global(&cap_id, capability::Rights::WRITE).is_ok()
+        || capability::check_path_grant(&cap_id, &name, capability::Rights::WRITE)
+        || name == own_config;
+    let by_private = !has_write && crate::wasm::is_own_private(&name, &ctx.module_name);
+    if !has_write && !by_private {
         kprintln!("[npk] WASM: npk_store DENIED (no WRITE, no grant for {})", name);
+        return -1;
+    }
+    // **Was der private Bereich NICHT sein soll: ein Weg, ohne WRITE die
+    // Platte zu fuellen.** Ein Modul ohne Schreibrecht darf seinen eigenen
+    // Zustand behalten — das ist der Zweck —, aber „Zustand" hat eine
+    // Groessenordnung. Wer mehr braucht, braucht WRITE und damit die Frage
+    // an den Benutzer.
+    //
+    // Offen und benannt: das ist ein Deckel je SCHREIBVORGANG, kein
+    // Gesamtkontingent. Viele kleine Dateien laufen daran vorbei. Ein echtes
+    // Kontingent muesste den Bereich bei jedem Schreiben auszaehlen; das
+    // gehoert gemessen, bevor es gebaut wird.
+    const PRIVATE_WRITE_MAX: i32 = 1024 * 1024;
+    if by_private && data_len > PRIVATE_WRITE_MAX {
+        kprintln!("[npk] WASM: npk_store DENIED ({} B in den privaten Bereich, Deckel {} B)",
+            data_len, PRIVATE_WRITE_MAX);
         return -1;
     }
 
@@ -1836,6 +1870,21 @@ pub(crate) fn npk_fs_list(mem: &mut [u8], ctx: &mut HostState, prefix_ptr: i32, 
     let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     let prefix_for_list = prefix.trim_matches('/');
 
+    // **Auflisten ist auch Lesen.** Ein fremder privater Bereich darf nicht
+    // einmal als NAME erscheinen: dass `priv/tune` existiert, ist schon eine
+    // Auskunft. Deshalb zwei Schritte — der verlangte Pfad muss erlaubt
+    // sein, UND jeder Eintrag wird noch einmal an seinem vollen Pfad
+    // geprueft. Ohne den zweiten waere `list("")` das Loch neben der Tuer.
+    if !crate::wasm::private_area_allows(prefix_for_list, &ctx.module_name) {
+        return -1;
+    }
+    let module = ctx.module_name.clone();
+    let visible = |full: &str| crate::wasm::private_area_allows(full, &module);
+    let full_of = |base: &str, rel: &str| -> alloc::string::String {
+        if base.is_empty() { alloc::string::String::from(rel) }
+        else { alloc::format!("{}/{}", base, rel) }
+    };
+
     if recursive == 0 {
         // Non-recursive: one directory's immediate children.
         let entries = match crate::npkfs::fs::list(prefix_for_list) {
@@ -1844,6 +1893,7 @@ pub(crate) fn npk_fs_list(mem: &mut [u8], ctx: &mut HostState, prefix_ptr: i32, 
             Err(_) => return -1,
         };
         for e in &entries {
+            if !visible(&full_of(prefix_for_list, &e.name)) { continue }
             let is_dir = matches!(e.kind, crate::npkfs::object::EntryKind::Dir);
             append_entry(&mut out, &e.name, e.size, is_dir, e.mtime);
         }
@@ -1852,6 +1902,7 @@ pub(crate) fn npk_fs_list(mem: &mut [u8], ctx: &mut HostState, prefix_ptr: i32, 
         fn dfs(
             base: &str, rel: alloc::string::String,
             out: &mut alloc::vec::Vec<u8>,
+            visible: &dyn Fn(&str) -> bool,
         ) -> Result<(), ()> {
             let abs = if rel.is_empty() {
                 alloc::string::String::from(base)
@@ -1871,19 +1922,26 @@ pub(crate) fn npk_fs_list(mem: &mut [u8], ctx: &mut HostState, prefix_ptr: i32, 
                 } else {
                     alloc::format!("{}/{}", rel, e.name)
                 };
+                let child_abs = if abs.is_empty() {
+                    e.name.clone()
+                } else {
+                    alloc::format!("{}/{}", abs, e.name)
+                };
+                // Nicht bloss ueberspringen: gar nicht erst hineinsteigen.
+                if !visible(&child_abs) { continue }
                 match e.kind {
                     crate::npkfs::object::EntryKind::File => {
                         append_entry(out, &child_rel, e.size, false, e.mtime);
                     }
                     crate::npkfs::object::EntryKind::Dir => {
                         append_entry(out, &child_rel, 0, true, e.mtime);
-                        dfs(base, child_rel, out)?;
+                        dfs(base, child_rel, out, visible)?;
                     }
                 }
             }
             Ok(())
         }
-        if dfs(prefix_for_list, alloc::string::String::new(), &mut out).is_err() {
+        if dfs(prefix_for_list, alloc::string::String::new(), &mut out, &visible).is_err() {
             return -1;
         }
     }
@@ -1908,6 +1966,9 @@ pub(crate) fn npk_fs_stat(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, na
         None => return -1,
     };
 
+    if !crate::wasm::private_area_allows(&name, &ctx.module_name) {
+        return -1;   // still: ein fremder privater Bereich EXISTIERT nicht
+    }
     let (size, is_dir, mtime) = match crate::npkfs::fs::stat(&name) {
         Ok(Some(s)) => {
             let is_dir = matches!(s.kind, crate::npkfs::object::EntryKind::Dir);
@@ -2874,6 +2935,10 @@ pub(crate) fn npk_fs_delete(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, 
         kprintln!("[npk] WASM: npk_fs_delete DENIED ({} is read-only to apps)", name);
         return -1;
     }
+    if !crate::wasm::private_area_allows(&name, &ctx.module_name) {
+        kprintln!("[npk] WASM: npk_fs_delete DENIED ({} gehoert einem anderen Modul)", name);
+        return -1;
+    }
     match crate::npkfs::delete(&name) {
         Ok(_) => 0,
         Err(_) => -1,
@@ -2899,6 +2964,14 @@ pub(crate) fn npk_fs_rename(mem: &mut [u8], ctx: &mut HostState, old_ptr: i32, o
         kprintln!("[npk] WASM: npk_fs_rename DENIED (module/trust store is read-only to apps)");
         return -1;
     }
+    // BEIDE Seiten. Nur die Quelle zu pruefen liesse eine Datei in einen
+    // fremden privaten Bereich schieben, nur das Ziel liesse eine aus einem
+    // herausholen.
+    if !crate::wasm::private_area_allows(&old, &ctx.module_name)
+        || !crate::wasm::private_area_allows(&new, &ctx.module_name) {
+        kprintln!("[npk] WASM: npk_fs_rename DENIED (privater Bereich eines anderen Moduls)");
+        return -1;
+    }
     match crate::npkfs::rename(&old, &new) {
         Ok(_) => 0,
         Err(_) => -1,
@@ -2920,6 +2993,13 @@ pub(crate) fn npk_fs_copy(mem: &mut [u8], ctx: &mut HostState, old_ptr: i32, old
     };
     if is_trust_critical_path(&old) || is_trust_critical_path(&new) {
         kprintln!("[npk] WASM: npk_fs_copy DENIED (module/trust store is read-only to apps)");
+        return -1;
+    }
+    // Wie beim Umbenennen: beide Seiten. Eine Kopie AUS einem fremden
+    // privaten Bereich heraus waere derselbe Diebstahl wie ein Lesen.
+    if !crate::wasm::private_area_allows(&old, &ctx.module_name)
+        || !crate::wasm::private_area_allows(&new, &ctx.module_name) {
+        kprintln!("[npk] WASM: npk_fs_copy DENIED (privater Bereich eines anderen Moduls)");
         return -1;
     }
     match crate::npkfs::copy(&old, &new) {
