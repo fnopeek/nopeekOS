@@ -193,6 +193,18 @@ impl Collapse {
     fn value(self) -> f32 {
         self.pos + self.neg
     }
+    /// Derselbe Wert in ganzen Pixeln, GERUNDET.
+    ///
+    /// `as i32` schneidet ab, und ein Rand wird selten ganzzahlig: `h5` hat
+    /// nach der Spezifikation 22,1776 px. Abgeschnitten verliert jeder Kasten
+    /// bis zu einem Pixel, und weil der naechste auf der Unterkante des
+    /// vorigen aufsetzt, addiert sich das die Seite hinunter — auf einer
+    /// nackten Vorlage waren es 8 px bis zum letzten `<div>`. Chromium rechnet
+    /// in 1/64 px und rundet erst beim Malen; runden ist die naechste
+    /// Naeherung, die eine ganzzahlige Auslegung erlaubt.
+    fn px(self) -> i32 {
+        libm::roundf(self.value()) as i32
+    }
 }
 
 /// Result of flowing a run of block/inline children with margin collapsing.
@@ -429,6 +441,17 @@ fn used_border_box(st: &ComputedStyle, x: i32, avail: i32) -> (i32, i32) {
     let ml = off_left - st.pad_left - st.border_left.width;
     let bw = cw.max(1.0) + st.pad_left + st.pad_right + st.border_x();
     (x + ml as i32, bw as i32)
+}
+
+/// Eine CSS-Laenge in ganzen Pixeln, GERUNDET.
+///
+/// beak legt in ganzen Zahlen aus, CSS rechnet in Bruechen — jede Umrechnung
+/// ist eine Entscheidung, und sie muss ueberall dieselbe sein. `as i32`
+/// schneidet ab: `padding: 1.1in` wurde 105, `margin: 1.1in` (gerundet) 106,
+/// und ein Reftest, der beides gegeneinander stellt, scheitert an der
+/// Umrechnung statt an der Regel (`CSS2/floats-019`).
+fn px_of(v: f32) -> i32 {
+    libm::roundf(v) as i32
 }
 
 /// Move a detached op list (an `inline-block`'s, laid out at the origin) to
@@ -1183,10 +1206,10 @@ fn border_ops(st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, sides: (bool, 
         }
     };
     let (bt, br, bb, bl) = (
-        st.border_top.width as i32,
-        st.border_right.width as i32,
-        st.border_bottom.width as i32,
-        st.border_left.width as i32,
+        px_of(st.border_top.width),
+        px_of(st.border_right.width),
+        px_of(st.border_bottom.width),
+        px_of(st.border_left.width),
     );
     side(out, &st.border_top, (x, y, w, bt));
     side(out, &st.border_bottom, (x, y + h - bb, w, bb));
@@ -1208,7 +1231,7 @@ fn outline_ops(st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, sides: (bool,
     let (Some(color), true) = (o.color, o.width > 0.0) else {
         return;
     };
-    let (ow, off) = (o.width as i32, st.outline_offset as i32);
+    let (ow, off) = (px_of(o.width), px_of(st.outline_offset));
     // Grow the border box by the offset, then lay the ring OUTSIDE that.
     let (rx, ry) = (x - off - ow, y - off - ow);
     let (rw, rh) = (w + 2 * (off + ow), h + 2 * (off + ow));
@@ -3057,7 +3080,7 @@ impl<'a> Ctx<'a> {
     /// source element, so it cannot be selected and cannot generate one.
     fn layout_children(&mut self, nodes: &'a [Node], parent: &ComputedStyle, owner: Option<&Element>, x: i32, w: i32, y0: i32) -> i32 {
         let flow = self.flow_children(nodes, parent, owner, x, w, y0, Collapse::default());
-        flow.bottom + flow.open.value() as i32
+        flow.bottom + flow.open.px()
     }
 
     /// Block formatting: lay `nodes` as a vertical stack, grouping consecutive
@@ -3123,7 +3146,7 @@ impl<'a> Ctx<'a> {
                     let anon_st = style::anon_inherit(parent, Display::Table);
                     let mut t = open;
                     t.add(anon_st.margin_top);
-                    let by = anchor + t.value() as i32;
+                    let by = anchor + t.px();
                     let (bx, bw, byy) = self.avoid_floats_bfc(None, &anon_st, x, w, by);
                     let saved = core::mem::take(&mut self.floats);
                     let (bottom, ..) = self.layout_table_body(run, &anon_st, bx, bw, byy);
@@ -3197,7 +3220,7 @@ impl<'a> Ctx<'a> {
                 if matches!(st.position, Position::Absolute | Position::Fixed) {
                     self.path.push(self.info(el));
                     self.abs_over_open_line = !inline.is_empty();
-                    self.layout_abs(el, &st, x, anchor + open.value() as i32);
+                    self.layout_abs(el, &st, x, anchor + open.px());
                     self.abs_over_open_line = false;
                     self.path.pop();
                     continue;
@@ -3237,7 +3260,7 @@ impl<'a> Ctx<'a> {
                 // the container by the whole page height.
                 if matches!(st.position, Position::Absolute | Position::Fixed) {
                     self.path.push(self.info(el));
-                    self.layout_abs(el, &st, x, anchor + open.value() as i32);
+                    self.layout_abs(el, &st, x, anchor + open.px());
                     self.path.pop();
                     continue;
                 }
@@ -3280,7 +3303,7 @@ impl<'a> Ctx<'a> {
             if matches!(st.position, Position::Absolute | Position::Fixed) {
                 self.path.push(self.info(el));
                 self.abs_over_open_line = !inline.is_empty();
-                self.layout_abs(el, &st, x, anchor + open.value() as i32);
+                self.layout_abs(el, &st, x, anchor + open.px());
                 self.abs_over_open_line = false;
                 self.path.pop();
                 continue;
@@ -3311,7 +3334,7 @@ impl<'a> Ctx<'a> {
                 if track && !positioned {
                     self.float_depth += 1;
                 }
-                self.place_float(el, &st, x, w, anchor + open.value() as i32);
+                self.place_float(el, &st, x, w, anchor + open.px());
                 if track {
                     if positioned {
                         let (z, layer) = Self::stack_key(&st);
@@ -3341,7 +3364,7 @@ impl<'a> Ctx<'a> {
             // Block-level, in normal flow. Flush pending inline content first —
             // a line box separates margins, so the open margin commits here.
             if !inline.is_empty() {
-                let ly = anchor + open.value() as i32;
+                let ly = anchor + open.px();
                 let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, parent.text_align, parent.text_align_last, parent.rtl, parent.text_indent.px(w as f32).unwrap_or(0.0), parent.line_height.px(parent.font_px).unwrap_or(0.0), &mut self.ops, &mut self.links, &mut self.controls, &mut self.inspects, &mut self.hover_boxes, &mut self.last_baseline);
                 if !committed {
                     first_top = ly;
@@ -3364,8 +3387,8 @@ impl<'a> Ctx<'a> {
                 let (a0, o0) = (anchor, open);
                 let mut hypo = open;
                 hypo.add(st.margin_top);
-                let own = Collapse::one(st.margin_top).value() as i32;
-                let base = anchor + hypo.value() as i32;
+                let own = Collapse::one(st.margin_top).px();
+                let base = anchor + hypo.px();
                 let cleared = self.clear_below(st.clear, base);
                 had_clearance = cleared > base;
                 if cleared > base {
@@ -3381,7 +3404,7 @@ impl<'a> Ctx<'a> {
                     // Kindes statt der des Floats, weil sein eigener Rand
                     // mit heruntergezogen wurde.
                     if !committed {
-                        first_top = anchor + open.value() as i32;
+                        first_top = anchor + open.px();
                         committed = true;
                     }
                     // `flow_block_impl` re-adds the top margin to the anchor it
@@ -3413,7 +3436,7 @@ impl<'a> Ctx<'a> {
             let out = if establishes_bfc(&st) || crate::forms::kind_of(el).is_some() {
                 let mut t = open;
                 t.add(st.margin_top);
-                let by = anchor + t.value() as i32;
+                let by = anchor + t.px();
                 let (bx, bw, byy) = self.avoid_floats_bfc(Some(el), &st, x, w, by);
                 let saved = core::mem::take(&mut self.floats);
                 let op0 = self.ops.len();
@@ -3505,7 +3528,7 @@ impl<'a> Ctx<'a> {
         // follows it down past the floats. On a line box `clear` means nothing.
         if let Some(clear) = owner.and_then(|o| self.pseudo_clear(o, parent, PseudoElem::After)) {
             if !inline.is_empty() {
-                let ly = anchor + open.value() as i32;
+                let ly = anchor + open.px();
                 let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, parent.text_align, parent.text_align_last, parent.rtl, parent.text_indent.px(w as f32).unwrap_or(0.0), parent.line_height.px(parent.font_px).unwrap_or(0.0), &mut self.ops, &mut self.links, &mut self.controls, &mut self.inspects, &mut self.hover_boxes, &mut self.last_baseline);
                 if !committed {
                     first_top = ly;
@@ -3515,7 +3538,7 @@ impl<'a> Ctx<'a> {
                 open = Collapse::default();
                 inline = Inline::new();
             }
-            let base = anchor + open.value() as i32;
+            let base = anchor + open.px();
             // Clearance stops the top margin collapsing through, so the
             // container's border box stays where the flow put it — the cleared
             // box adds HEIGHT below, it does not drag the whole container down.
@@ -3540,7 +3563,7 @@ impl<'a> Ctx<'a> {
             }
         }
         if !inline.is_empty() {
-            let ly = anchor + open.value() as i32;
+            let ly = anchor + open.px();
             let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, parent.text_align, parent.text_align_last, parent.rtl, parent.text_indent.px(w as f32).unwrap_or(0.0), parent.line_height.px(parent.font_px).unwrap_or(0.0), &mut self.ops, &mut self.links, &mut self.controls, &mut self.inspects, &mut self.hover_boxes, &mut self.last_baseline);
             if !committed {
                 first_top = ly;
@@ -3609,8 +3632,8 @@ impl<'a> Ctx<'a> {
             return;
         }
         let (px, py, pw, ph) = (
-            bx + st.border_left.width as i32,
-            by + st.border_top.width as i32,
+            bx + px_of(st.border_left.width),
+            by + px_of(st.border_top.width),
             (bw - st.border_x() as i32).max(0),
             (bh - st.border_y() as i32).max(0),
         );
@@ -3942,7 +3965,7 @@ family: ps.family,
         let content_x = x + off_left as i32;
         let content_w = cw.max(1.0) as i32;
 
-        let box_left = content_x - st.pad_left as i32 - st.border_left.width as i32;
+        let box_left = content_x - px_of(st.pad_left) - px_of(st.border_left.width);
         let box_w = content_w + (st.pad_left + st.pad_right) as i32 + st.border_x() as i32;
         let bg_idx = self.ops.len();
         let clip_marks = (bg_idx, self.abs_count, self.fixed_count);
@@ -3951,10 +3974,10 @@ family: ps.family,
         // immer zu kennen.
         let spec0 = self.spec_mark();
 
-        let bt = st.border_top.width as i32;
-        let bb = st.border_bottom.width as i32;
-        let pt = st.pad_top as i32;
-        let pb = st.pad_bottom as i32;
+        let bt = px_of(st.border_top.width);
+        let bb = px_of(st.border_bottom.width);
+        let pt = px_of(st.pad_top);
+        let pb = px_of(st.pad_bottom);
 
         // Top margin. In flow it collapses with the incoming margin; a box with
         // no top border/padding also collapses it with its first child.
@@ -3990,7 +4013,7 @@ family: ps.family,
                 || replaced_intrinsic(el).is_some()))
             .then(|| (self.counters.stack.clone(), self.marker_ord));
         // Provisional border-box top (exact unless the first child grows `top`).
-        let prov_top_y = if isolated { base_y } else { base_y + top.value() as i32 };
+        let prov_top_y = if isolated { base_y } else { base_y + top.px() };
 
         // Where children start, and what open margin flows into them.
         let (child_anchor, child_incoming) = if collapse_top {
@@ -4099,7 +4122,7 @@ family: st.family,
         let prev_cb = self.cb;
         let prev_pend = self.cb_pend.len();
         if st.position != Position::Static {
-            let pad_top_y = prov_top_y + st.border_top.width as i32 + st.pad_top as i32;
+            let pad_top_y = prov_top_y + px_of(st.border_top.width) + px_of(st.pad_top);
             let mut cb = padding_cb(st, content_x, pad_top_y, content_w);
             // §10.1: the containing block for an absolutely positioned
             // descendant is this box's PADDING box — a USED height, definite
@@ -4147,7 +4170,7 @@ family: st.family,
             // of it, and its height comes from the intrinsic size below.
             Flow { bottom: child_anchor, open: Collapse::default(), first_top: child_anchor, committed: false, open_sealed: false }
         } else if st.pre {
-            let ly = child_anchor + child_incoming.value() as i32;
+            let ly = child_anchor + child_incoming.px();
             let nb = layout_pre(self.fonts.pick(st.bold, st.italic, st.mono, st.family), el, st, content_x, content_w, ly, &mut self.ops);
             Flow { bottom: nb, open: Collapse::default(), first_top: ly, committed: true, open_sealed: false }
         } else {
@@ -4195,7 +4218,7 @@ family: st.family,
                         Some((a0, o0, cleared)) => {
                             let mut hypo = o0;
                             hypo.merge(merged);
-                            (a0 + hypo.value() as i32).max(cleared) - merged.value() as i32
+                            (a0 + hypo.px()).max(cleared) - merged.px()
                         }
                         None => base_y,
                     };
@@ -4323,7 +4346,7 @@ family: st.family,
         } else {
             // Bottom border/padding or a definite height: commit the trailing
             // child margin into the content box.
-            ch = (flow.bottom + flow.open.value() as i32 - content_top).max(0);
+            ch = (flow.bottom + flow.open.px() - content_top).max(0);
             if let Some(fb) = float_bottom {
                 ch = ch.max(fb - content_top);
             }
@@ -4502,8 +4525,8 @@ family: st.family,
         } else {
             CTL_PAD_X
         };
-        let pad_l = (st.pad_left as i32).max(ua_min);
-        let pad_r = (st.pad_right as i32).max(ua_min);
+        let pad_l = (px_of(st.pad_left)).max(ua_min);
+        let pad_r = (px_of(st.pad_right)).max(ua_min);
         // Senkrecht dasselbe: `.form-control` bringt `padding: .375rem .75rem`
         // mit, und ohne sie steht ein Feld 6 px zu flach in seiner Zeile.
         // Ein Kaestchen und ein Radioknopf haben KEINE Polsterung — die
@@ -4512,8 +4535,8 @@ family: st.family,
         // `height: 200px` grosses Kaestchen 206 px hoch heraus.
         let box_like = matches!(kind, ControlKind::Checkbox | ControlKind::Radio);
         let ua_pad_y = if box_like { 0 } else { CTL_PAD_Y };
-        let pad_t = (st.pad_top as i32).max(ua_pad_y);
-        let pad_b = (st.pad_bottom as i32).max(ua_pad_y);
+        let pad_t = (px_of(st.pad_top)).max(ua_pad_y);
+        let pad_b = (px_of(st.pad_bottom)).max(ua_pad_y);
         // The frame is part of the box, and it is the page's when the page
         // styled it — a control with `border: none` is exactly as tall as its
         // content, and a `border: 2px` one two pixels taller per side.
@@ -5056,12 +5079,12 @@ family: st.family,
         // An axis that does not clip is given the whole plane, so one call
         // covers `overflow-x: hidden; overflow-y: auto` without a second path.
         let (cl, cr) = if st.overflow_x.clips() {
-            (box_left + st.border_left.width as i32, box_left + box_w - st.border_right.width as i32)
+            (box_left + px_of(st.border_left.width), box_left + box_w - px_of(st.border_right.width))
         } else {
             (i32::MIN / 4, i32::MAX / 4)
         };
         let (ct, cb) = if st.overflow_y.clips() {
-            (box_top + st.border_top.width as i32, box_top + box_h - st.border_bottom.width as i32)
+            (box_top + px_of(st.border_top.width), box_top + box_h - px_of(st.border_bottom.width))
         } else {
             (i32::MIN / 4, i32::MAX / 4)
         };
@@ -5496,16 +5519,16 @@ family: st.family,
         // Getting the border edge in here is what lets the table paint its own
         // decoration at all — laying the grid at `x + pad_left` (no border
         // offset) put every stroke a border-width off.
-        let (btl, btt) = (st.border_left.width as i32, st.border_top.width as i32);
+        let (btl, btt) = (px_of(st.border_left.width), px_of(st.border_top.width));
         let x = x + off;
         let (inner_x, content_top) = if collapse {
             (x, y0)
         } else {
-            (x + btl + st.pad_left as i32 + sx, y0 + btt + st.pad_top as i32 + sy)
+            (x + btl + px_of(st.pad_left) + sx, y0 + btt + px_of(st.pad_top) + sy)
         };
         let bg_idx = self.ops.len();
         let bottom = self.lay_table_rows(&rows, ncols, &colw, st, inner_x, content_top);
-        let mut table_bottom = if collapse { bottom } else { bottom + sy + st.pad_bottom as i32 + st.border_bottom.width as i32 };
+        let mut table_bottom = if collapse { bottom } else { bottom + sy + px_of(st.pad_bottom) + px_of(st.border_bottom.width) };
         // `height` on a table is a MINIMUM for its box, never a maximum
         // (CSS2.1 §17.5.3) — rows keep the height their content needs, and a
         // table shorter than its `height` grows to it. The rows themselves are
@@ -5864,7 +5887,7 @@ family: st.family,
                 let cx = x + col_x(c);
                 let cs = sc.st;
                 let (bl, br, _, _) = cell_borders(&cs, collapse);
-                let content_x = cx + bl as i32 + cs.pad_left as i32;
+                let content_x = cx + bl as i32 + px_of(cs.pad_left);
                 let content_w = (cw - (bl + br) as i32 - (cs.pad_left + cs.pad_right) as i32).max(0);
                 cells.push((cs, cx, cw, content_x, content_w));
             }
@@ -5873,7 +5896,7 @@ family: st.family,
             let mut box_hs: Vec<i32> = Vec::with_capacity(cells.len());
             for (c, (cs, _, _, content_x, content_w)) in cells.iter().enumerate() {
                 let (_, _, bt, bb) = cell_borders(cs, collapse);
-                let content_y = y + bt as i32 + cs.pad_top as i32;
+                let content_y = y + bt as i32 + px_of(cs.pad_top);
                 let mut ch = if cs.display == Display::None {
                     0
                 } else {
@@ -5910,7 +5933,7 @@ family: st.family,
                 if cs.display == Display::None {
                     continue;
                 }
-                let content_y = y + cell_borders(cs, collapse).2 as i32 + cs.pad_top as i32;
+                let content_y = y + cell_borders(cs, collapse).2 as i32 + px_of(cs.pad_top);
                 let m0 = self.spec_mark();
                 let bg_idx = m0.ops;
                 let cell_cb = self.cb;
@@ -5995,21 +6018,21 @@ family: st.family,
                     // A collapsed border straddles the grid line: half of it
                     // falls in each of the two cells that meet there.
                     let half = |w: f32| (w / 2.0) as i32;
-                    self.paint_edge(&top, *cell_x, y - half(top.width), *cell_w, top.width as i32);
-                    self.paint_edge(&lft, cell_x - half(lft.width), y, lft.width as i32, row_h);
+                    self.paint_edge(&top, *cell_x, y - half(top.width), *cell_w, px_of(top.width));
+                    self.paint_edge(&lft, cell_x - half(lft.width), y, px_of(lft.width), row_h);
                     if c + 1 == cells.len() {
                         let mut r = collapsed_edge(&cs.border_right, &st.border_right);
                         for outer in [row.el.map(|(_, s)| s), row.group.map(|(_, s)| s)].into_iter().flatten() {
                             r = collapsed_edge(&r, &outer.border_right);
                         }
-                        self.paint_edge(&r, cell_x + cell_w - half(r.width), y, r.width as i32, row_h);
+                        self.paint_edge(&r, cell_x + cell_w - half(r.width), y, px_of(r.width), row_h);
                     }
                     if ri + 1 == nrows {
                         let mut b = collapsed_edge(&cs.border_bottom, &st.border_bottom);
                         for outer in [row.el.map(|(_, s)| s), row.group.map(|(_, s)| s)].into_iter().flatten() {
                             b = collapsed_edge(&b, &outer.border_bottom);
                         }
-                        self.paint_edge(&b, *cell_x, y + row_h - half(b.width), *cell_w, b.width as i32);
+                        self.paint_edge(&b, *cell_x, y + row_h - half(b.width), *cell_w, px_of(b.width));
                     }
                 } else {
                     self.paint_box_decoration(cs, *cell_x, y, *cell_w, row_h, bg_idx);
@@ -7024,10 +7047,10 @@ family: st.family,
         let st = aspect.as_ref().unwrap_or(st);
         let content_x = x + off_left as i32;
         let content_w = cw.max(1.0) as i32;
-        let box_left = content_x - st.pad_left as i32 - st.border_left.width as i32;
+        let box_left = content_x - px_of(st.pad_left) - px_of(st.border_left.width);
         let box_w = content_w + (st.pad_left + st.pad_right) as i32 + st.border_x() as i32;
         let bg_idx = self.ops.len();
-        let content_top = y0 + st.pad_top as i32 + st.border_top.width as i32;
+        let content_top = y0 + px_of(st.pad_top) + px_of(st.border_top.width);
 
         let prev_cb = self.cb;
         if st.position != Position::Static {
@@ -7052,7 +7075,7 @@ family: st.family,
             ch = ch.min(mx);
         }
 
-        let y = content_top + ch + st.pad_bottom as i32 + st.border_bottom.width as i32;
+        let y = content_top + ch + px_of(st.pad_bottom) + px_of(st.border_bottom.width);
         self.paint_box_decoration(st, box_left, y0, box_w, y - y0, bg_idx);
         self.place_abs_pseudos(el, st, box_left, y0, box_w, y - y0);
         y
@@ -7716,10 +7739,10 @@ family: st.family,
         let st = aspect.as_ref().unwrap_or(st);
         let content_x = x + off_left as i32;
         let content_w = cw.max(1.0) as i32;
-        let box_left = content_x - st.pad_left as i32 - st.border_left.width as i32;
+        let box_left = content_x - px_of(st.pad_left) - px_of(st.border_left.width);
         let box_w = content_w + (st.pad_left + st.pad_right) as i32 + st.border_x() as i32;
         let bg_idx = self.ops.len();
-        let content_top = y0 + st.pad_top as i32 + st.border_top.width as i32;
+        let content_top = y0 + px_of(st.pad_top) + px_of(st.border_top.width);
         // Along the main axis in a row. `content_x`/`content_w` shrink around
         // the generated boxes so the real items never overlap them.
         let row = st.flex_row;
@@ -7802,7 +7825,7 @@ family: st.family,
             ch = ch.min(mx);
         }
 
-        let y = content_top + ch + st.pad_bottom as i32 + st.border_bottom.width as i32;
+        let y = content_top + ch + px_of(st.pad_bottom) + px_of(st.border_bottom.width);
         self.paint_box_decoration(st, box_left, y0, box_w, y - y0, bg_idx);
         self.place_abs_pseudos(el, st, box_left, y0, box_w, y - y0);
         y
@@ -9460,7 +9483,7 @@ fn ctl_border(st: &ComputedStyle) -> [CtlSide; 4] {
     sides.map(|s| CtlSide {
         // An unstyled side still takes the author's `border-color` — the UA
         // frame is a real border, so colouring it is all a page needs to do.
-        w: if owned { s.width as i32 } else { ua_w },
+        w: if owned { px_of(s.width) } else { ua_w },
         color: s.color,
         transparent: s.see_through,
     })
@@ -13365,6 +13388,31 @@ fn dbg_wiki_shape() {
         assert!(nah < fern, "unter dem Kasten muss es nach aussen heller werden: {nah} vs {fern}");
     }
 
+    /// **Eine CSS-Laenge wird ueberall auf dieselbe Art ganzzahlig: gerundet.**
+    ///
+    /// `CSS2/floats-019` stellt `padding-top: 1.1in` gegen `margin: 1.1in`
+    /// — 105,6 px, zweimal dieselbe Zahl. Wer den Rand rundet und die
+    /// Polsterung abschneidet, bekommt 106 gegen 105, und der Test scheitert
+    /// an der Umrechnung statt an der Regel.
+    ///
+    /// Gerundet statt abgeschnitten, weil sich Abschneiden ADDIERT: jeder
+    /// Kasten setzt auf der Unterkante des vorigen auf, und auf einer nackten
+    /// Seite mit sechs Ueberschriften waren das 8 px bis zum letzten `<div>`.
+    #[test]
+    fn a_length_becomes_an_integer_the_same_way_everywhere() {
+        let y_of = |css: &str| {
+            let l = lay_inspect(&alloc::format!(
+                "<body style='margin:0'>{css}<div id=t>x</div></body>"), 800);
+            l.inspect.iter().find(|b| b.label.starts_with("div#t")).expect("kein #t").y
+        };
+        // 1.1in = 105.6 px. Als Polsterung des Elters und als eigener Rand
+        // muss dieselbe Zahl herauskommen.
+        let a = y_of("<div style='padding-top:1.1in'></div>");
+        let b = y_of("<div style='margin-top:1.1in'></div>");
+        assert_eq!(a, b, "Polsterung {a} vs. Rand {b} — dieselbe Laenge");
+        assert_eq!(a, 106, "und beide GERUNDET, nicht abgeschnitten");
+    }
+
     /// **Der Kasten einer Tabelle ist die Tabelle, nicht ihr Streifen** — und
     /// die `<caption>` ist so breit wie die Tabelle, nicht wie der Streifen.
     ///
@@ -14610,7 +14658,7 @@ fn content_height_of(st: &ComputedStyle, len: Len) -> Option<f32> {
 }
 
 fn definite_cb_height(st: &ComputedStyle) -> Option<i32> {
-    let pad_v = st.pad_top as i32 + st.pad_bottom as i32;
+    let pad_v = px_of(st.pad_top) + px_of(st.pad_bottom);
     match st.height {
         // `box-sizing:border-box` → the used height already spans padding AND
         // border, so the padding box is that minus the border.
@@ -14627,8 +14675,8 @@ fn definite_cb_height(st: &ComputedStyle) -> Option<i32> {
 /// edge, so a padded container does not push its abspos children inwards.
 fn padding_cb(st: &ComputedStyle, content_x: i32, content_top: i32, content_w: i32) -> PosCb {
     (
-        content_x - st.pad_left as i32,
-        content_top - st.pad_top as i32,
+        content_x - px_of(st.pad_left),
+        content_top - px_of(st.pad_top),
         content_w + (st.pad_left + st.pad_right) as i32,
         definite_cb_height(st),
         None,
