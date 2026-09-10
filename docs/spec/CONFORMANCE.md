@@ -22,12 +22,34 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-09-10, beak 0.158.0)
+### Current number (measured 2026-09-10, beak 0.159.0)
 
 ```
-4543 pass / 1101 fail / 142 inconclusive   (of 5786 vendored reftests)
-= 80.5 % of the conclusive 5644   ·   4543 / 5179 = 87.7 % without vehicles
+4544 pass / 1100 fail / 142 inconclusive   (of 5786 vendored reftests)
+= 80.5 % of the conclusive 5644   ·   4544 / 5179 = 87.7 % without vehicles
 ```
+
+**0.159.0: das UA-Blatt gegen HTML §15.3 gehalten**, mit einer neuen Vorlage
+als Orakel — `tools/fixtures/ua.html`, nackte Elemente ohne ein einziges
+Blatt, durch `<tools>/gallery/run.py` gegen Chromium. Bootstrap und Tailwind
+setzen fast jede dieser Vorgaben zurück und sagen deshalb NICHTS über sie:
+60 von 62 Kästen wichen ab, 11 davon um mehr als 64 px. Falsch waren die
+Überschriftengrössen und -ränder (alle sechs, und unten ×0,7 statt gleich),
+`ul`/`ol` 26 statt 40 px Einzug, `dd` 26 px Polsterung statt 40 px RAND,
+`blockquote` 24 px Polsterung statt 40 px Rand (und eine graue Farbe, die
+die Spezifikation nicht kennt), `figure` ganz ohne Rand, `pre` 0,6 statt
+1 em, `hr` 0,6 statt 0,5 em **und ein 3-px-Kasten statt 2**, `caption` fett
+mit eigenem Abstand, `address` ohne Kursive, `fieldset`/`legend` ohne Rahmen
+und Polsterung. Danach: 17 identisch, 45 abweichend, und die drei grossen
+Reste sind zwei benannte Fehler — `<table>` schrumpft nicht auf seinen
+Inhalt, `<legend>` auch nicht.
+
+WPT +2 / −1. Der eine Rückgang ist keiner: `css-text/hyphens-i18n-auto-006`
+prüft Silbentrennung, die es bei uns nicht gibt, und die fehlende Trennung
+verschiebt das `<hr>` darunter um 59 px. Bei einer 1 px hohen Linie waren das
+0,33 % und damit unter der 0,5-%-Schwelle — ein Bestehen aus Versehen. Mit
+der richtigen 2-px-Linie sind es 0,65 %, und der Test sagt jetzt, was er die
+ganze Zeit gemeint hat.
 
 **+3 über 0.157.0: der Rand, der durch jedes Kind fällt, gehört an den
 OBERRAND des Elters** (CSS 2.1 §8.3.1). Legt sich kein Kind fest, stossen
@@ -80,8 +102,8 @@ lost their oracle, not their correctness.
 input with a 1 px #7c7c7c border has almost no "ink" — although Chromium
 draws exactly that. Changing the oracle in the same commit that moves the
 rendering would make the number unreadable ([[feedback_which_side_moved]]),
-so the baseline is re-blessed at 4543 and the guard is written down here
-instead. **636 real failures left** (5179 − 4543, aus `tests/vehicles.py`).
+so the baseline is re-blessed at 4544 and the guard is written down here
+instead. **635 real failures left** (5179 − 4544, aus `tests/vehicles.py`).
 
 #### 0.145.0/0.146.0: the box a flex container reports (+5 / −0)
 

@@ -2558,8 +2558,8 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
 
         // Block containers.
         "html" | "div" | "section" | "article" | "header" | "footer" | "main" | "nav"
-        | "aside" | "figure" | "figcaption" | "form" | "address" | "details" | "summary"
-        | "tbody" | "thead" | "tfoot" | "tr" | "fieldset" => {
+        | "aside" | "figcaption" | "form" | "details" | "summary"
+        | "tbody" | "thead" | "tfoot" | "tr" => {
             s.display = Display::Block;
         }
         // `<center>` is `display: block; text-align: center` (HTML rendering
@@ -2609,10 +2609,11 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
                 s.text_align = TextAlign::Center;
             }
         }
+        // §15.3.8 gibt `<caption>` nur `text-align: center`. Fett und ein
+        // Abstand darunter waren unsere Zutat — und eine Tabellenueberschrift,
+        // die fett ist, wo die Seite sie mager erwartet, faellt auf.
         "caption" => {
             s.display = Display::Block;
-            s.bold = true;
-            s.margin_bottom = em * 0.3;
             s.text_align = TextAlign::Center;
         }
         "p" => {
@@ -2621,54 +2622,108 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
             s.margin_bottom = em;
         }
 
-        // Headings: font-size in em of the parent, bold, heading colour.
-        "h1" => heading(s, theme, em, 1.9, 0.60),
-        "h2" => heading(s, theme, em, 1.5, 0.70),
-        "h3" => heading(s, theme, em, 1.25, 0.80),
-        "h4" => heading(s, theme, em, 1.05, 0.90),
-        "h5" => heading(s, theme, em, 0.95, 1.00),
-        "h6" => heading(s, theme, em, 0.85, 1.10),
+        // Headings — Groesse und Rand aus HTML §15.3.6, nicht nach Augenmass.
+        // Der Rand ist in em der UEBERSCHRIFT, oben wie unten gleich.
+        "h1" => heading(s, theme, em, 2.00, 0.67),
+        "h2" => heading(s, theme, em, 1.50, 0.83),
+        "h3" => heading(s, theme, em, 1.17, 1.00),
+        "h4" => heading(s, theme, em, 1.00, 1.33),
+        "h5" => heading(s, theme, em, 0.83, 1.67),
+        "h6" => heading(s, theme, em, 0.67, 2.33),
 
         // Lists.
-        "ul" | "ol" => {
+        "ul" | "ol" | "menu" => {
             s.display = Display::Block;
-            s.pad_left = 26.0;
-            s.margin_top = em * 0.5;
-            s.margin_bottom = em * 0.5;
+            // `padding-inline-start: 40px` (HTML §15.3.6), nicht 26 nach
+            // Augenmass: jede Liste einer ungestalteten Seite stand 14 px zu
+            // weit links, und ein Reftest backt die Zahl als Pixel ein.
+            s.pad_left = 40.0;
+            s.margin_top = em;
+            s.margin_bottom = em;
             s.list_style = if tag == "ol" { ListStyle::Decimal } else { ListStyle::Disc };
+            // Eine Liste IN einer Liste hat keinen Aussenrand. Die
+            // Spezifikation sagt „irgendein Listen-Vorfahr"; wir sehen den
+            // Elter, und der ist bei der Schachtelung, die vorkommt, das
+            // `<li>`. `li > div > ul` faellt durch — und faellt auf, sobald es
+            // jemand misst.
+            if parent.display == Display::ListItem {
+                s.margin_top = 0.0;
+                s.margin_bottom = 0.0;
+            }
         }
         "li" => s.display = Display::ListItem,
         "dl" => {
             s.display = Display::Block;
-            s.margin_top = em * 0.5;
-            s.margin_bottom = em * 0.5;
+            s.margin_top = em;
+            s.margin_bottom = em;
         }
         "dt" => s.display = Display::Block,
         "dd" => {
             s.display = Display::Block;
-            s.pad_left = 26.0;
+            // `margin-inline-start: 40px` — ein RAND, keine Polsterung: ein
+            // Hintergrund auf `<dd>` faengt links bei 40 px an, nicht bei 0.
+            s.margin_left = Len::Px(40.0);
         }
 
-        "blockquote" => {
+        // `margin-block: 1em; margin-inline: 40px` (HTML §15.3.3) — ein RAND
+        // aussen, keine Polsterung innen. Der Unterschied ist sichtbar,
+        // sobald das Zitat einen Hintergrund oder Rahmen traegt. Und keine
+        // eigene Farbe: die Spezifikation faerbt `<blockquote>` nicht, und ein
+        // grauer Kasten auf einer Seite, die ihn schwarz erwartet, ist unser
+        // Geschmack im Blatt eines fremden Autors.
+        "blockquote" | "figure" => {
             s.display = Display::Block;
-            s.pad_left = 24.0;
-            s.margin_top = em * 0.6;
-            s.margin_bottom = em * 0.6;
-            s.color = theme.muted.into();
+            s.margin_top = em;
+            s.margin_bottom = em;
+            s.margin_left = Len::Px(40.0);
+            s.margin_right = Len::Px(40.0);
         }
         "pre" => {
             s.display = Display::Block;
             s.mono = true;
             s.pre = true;
-            s.margin_top = em * 0.6;
-            s.margin_bottom = em * 0.6;
+            s.margin_top = em;
+            s.margin_bottom = em;
         }
 
         "hr" => {
             s.display = Display::Block;
             s.is_rule = true;
-            s.margin_top = em * 0.6;
-            s.margin_bottom = em * 0.6;
+            s.margin_top = em * 0.5;
+            s.margin_bottom = em * 0.5;
+        }
+
+        // `font-style: italic` (HTML §15.3.3). Die einzige Vorgabe, die
+        // `<address>` von einem `<div>` unterscheidet.
+        "address" => {
+            s.display = Display::Block;
+            s.italic = true;
+        }
+
+        // §15.3.11: 2 px Aussenrand, ein 2 px `groove`-Rahmen und eine
+        // Polsterung, die oben und unten verschieden ist. Ohne den Rahmen war
+        // ein `<fieldset>` von einem `<div>` nicht zu unterscheiden — und das
+        // Feld, das es umschliesst, ist genau der Zweck des Elements.
+        "fieldset" => {
+            s.display = Display::Block;
+            s.margin_left = Len::Px(2.0);
+            s.margin_right = Len::Px(2.0);
+            s.pct_pad = [0.0; 4];
+            s.pad_top = em * 0.35;
+            s.pad_right = em * 0.75;
+            s.pad_bottom = em * 0.625;
+            s.pad_left = em * 0.75;
+            for side in [&mut s.border_top, &mut s.border_right, &mut s.border_bottom, &mut s.border_left] {
+                side.set_style("groove");
+                side.set_spec_width(2.0);
+                side.color = Some(theme.rule.into());
+            }
+        }
+        "legend" => {
+            s.display = Display::Block;
+            s.pct_pad = [0.0; 4];
+            s.pad_right = 2.0;
+            s.pad_left = 2.0;
         }
 
         // Inline styling.
@@ -2705,7 +2760,7 @@ fn heading(s: &mut ComputedStyle, theme: &Theme, em: f32, scale: f32, margin_em:
     s.bold = true;
     s.color = theme.heading.into();
     s.margin_top = s.font_px * margin_em;
-    s.margin_bottom = s.font_px * margin_em * 0.7;
+    s.margin_bottom = s.font_px * margin_em;
 }
 
 /// Parse and apply a `style="a: b; c: d"` declaration list. This is real CSS
@@ -5757,6 +5812,67 @@ mod tests {
         let p = css::prop_key(name);
         assert_ne!(css::prop_name(p), "(unknown)", "no such property: {name}");
         super::apply_one(p, val, theme, s);
+    }
+
+    /// Das UA-Blatt gegen HTML §15.3 — die Zahlen, nicht das Aussehen.
+    ///
+    /// Gemessen an Chromium (`getComputedStyle`, 16 px Grundschrift), weil
+    /// eine Vorgabe, die „vernuenftig aussieht", trotzdem falsch ist: ein
+    /// Reftest backt sie als Literal-Pixel ein, und eine echte Seite ist
+    /// gegen sie gestaltet. `tools/fixtures/ua.html` faehrt dieselben
+    /// Elemente durch `<tools>/gallery/run.py`; dieser Test ist die billige
+    /// Fassung davon, die bei jedem `cargo test` mitlaeuft.
+    #[test]
+    fn the_ua_sheet_carries_the_specs_numbers_not_ours() {
+        let theme = Theme::DARK;
+        let ua = |html: &str| -> ComputedStyle {
+            let dom = dom::parse(html);
+            let sheet = css::parse("");
+            let mut root = ComputedStyle::root(&theme);
+            root.display = Display::Block;
+            resolve(&subject(&dom), &root, &theme, &sheet, &[], &[], 0, 1000.0)
+        };
+        let px = |l: Len| match l { Len::Px(v) => v, _ => f32::NAN };
+        // (Tag, Schriftgroesse, Rand oben = Rand unten) — §15.3.6.
+        for (tag, fs, m) in [("h1", 32.0, 21.44), ("h2", 24.0, 19.92), ("h3", 18.72, 18.72),
+                             ("h4", 16.0, 21.28), ("h5", 13.28, 22.1776), ("h6", 10.72, 24.9776)] {
+            let s = ua(&alloc::format!("<{tag}>x</{tag}>"));
+            assert!((s.font_px - fs).abs() < 0.01, "{tag} Schrift {} statt {fs}", s.font_px);
+            assert!((s.margin_top - m).abs() < 0.01, "{tag} Rand oben {} statt {m}", s.margin_top);
+            assert!((s.margin_bottom - m).abs() < 0.01,
+                    "{tag} Rand unten {} statt {m} — oben und unten sind GLEICH", s.margin_bottom);
+        }
+        let s = ua("<p>x</p>");
+        assert_eq!((s.margin_top, s.margin_bottom), (16.0, 16.0));
+        for tag in ["ul", "ol"] {
+            let s = ua(&alloc::format!("<{tag}><li>x</li></{tag}>"));
+            assert_eq!((s.margin_top, s.margin_bottom), (16.0, 16.0), "{tag}");
+            assert_eq!(s.pad_left, 40.0, "{tag}: `padding-inline-start: 40px`");
+        }
+        let s = ua("<dl><dt>x</dt></dl>");
+        assert_eq!((s.margin_top, s.margin_bottom), (16.0, 16.0));
+        for tag in ["blockquote", "figure"] {
+            let s = ua(&alloc::format!("<{tag}>x</{tag}>"));
+            assert_eq!((s.margin_top, s.margin_bottom), (16.0, 16.0), "{tag}");
+            // Ein RAND, keine Polsterung: ein Hintergrund faengt bei 40 px an.
+            assert_eq!((px(s.margin_left), px(s.margin_right), s.pad_left), (40.0, 40.0, 0.0), "{tag}");
+        }
+        let s = ua("<pre>x</pre>");
+        assert_eq!((s.margin_top, s.margin_bottom), (16.0, 16.0));
+        let s = ua("<hr>");
+        assert_eq!((s.margin_top, s.margin_bottom), (8.0, 8.0), "hr: 0.5em, nicht 0.6");
+        let s = ua("<address>x</address>");
+        assert!(s.italic, "address ist kursiv");
+        assert_eq!((s.margin_top, s.margin_bottom), (0.0, 0.0), "und hat keinen Rand");
+        let s = ua("<caption>x</caption>");
+        assert!(!s.bold, "caption ist NICHT fett — das war unser Geschmack");
+        assert_eq!(s.margin_bottom, 0.0);
+        let s = ua("<fieldset>x</fieldset>");
+        assert_eq!((px(s.margin_left), px(s.margin_right)), (2.0, 2.0));
+        assert_eq!(s.border_top.width, 2.0, "2px groove");
+        assert!((s.pad_top - 5.6).abs() < 0.01 && (s.pad_left - 12.0).abs() < 0.01
+                && (s.pad_bottom - 10.0).abs() < 0.01,
+                "0.35em / 0.75em / 0.625em, war {}/{}/{}", s.pad_top, s.pad_left, s.pad_bottom);
     }
 
     /// A CSS-wide keyword applies to EVERY property. Before this it was
