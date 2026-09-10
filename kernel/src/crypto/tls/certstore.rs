@@ -32,6 +32,10 @@ const GTS_ROOT_R1_DER: &[u8] = include_bytes!("../../../certs/gts_root_r1.der");
 /// Sectigo cross-signs newer roots (Public Server Authentication Root
 /// E46) under USERTrust ECC, so adding the cross-anchor here covers
 /// github.com + most Sectigo-issued ECDSA certs in 2025+.
+///
+/// **"Covers" only as far as the SERVER cooperates** — see the two Sectigo
+/// roots below. That sentence was written from the certificate's structure,
+/// and the structure is only half the question.
 const USERTRUST_ECC_DER: &[u8] = include_bytes!("../../../certs/usertrust_ecc.der");
 
 /// USERTrust RSA Certification Authority — Sectigo's modern RSA root.
@@ -105,6 +109,52 @@ const TTELESEC_GLOBALROOT_CLASS2_DER: &[u8] = include_bytes!("../../../certs/tte
 /// a German federal portal on a Greek university's root.
 const HARICA_TLS_RSA_2021_DER: &[u8] = include_bytes!("../../../certs/harica_tls_rsa_2021.der");
 
+/// Amazon Root CA 2/3/4 — the rest of the family around CA 1. CA 3 is
+/// measured (telekom.de); 2 and 4 complete the RSA-4096 / ECDSA-P384 pair
+/// the same way, see the note on twins below.
+const AMAZON_ROOT_CA2_DER: &[u8] = include_bytes!("../../../certs/amazon_root_ca2.der");
+const AMAZON_ROOT_CA3_DER: &[u8] = include_bytes!("../../../certs/amazon_root_ca3.der");
+const AMAZON_ROOT_CA4_DER: &[u8] = include_bytes!("../../../certs/amazon_root_ca4.der");
+
+/// IdenTrust Commercial Root CA 1 — its own hierarchy, not only the
+/// DST-Root cross-sign people remember it for. ing.de, identrust.com.
+const IDENTRUST_COMMERCIAL_CA1_DER: &[u8] = include_bytes!("../../../certs/identrust_commercial_root_ca1.der");
+
+/// D-TRUST (Bundesdruckerei) — German public-sector TLS, and it takes TWO
+/// anchors because the hierarchy was renewed: the 2009 EV root carries
+/// elster.de (the German tax portal), the 2023 BR root carries
+/// bsi.bund.de — the federal office for information security itself.
+/// The 2009 one expires 2029-11-05.
+const DTRUST_CLASS3_EV_2009_DER: &[u8] = include_bytes!("../../../certs/dtrust_root_class3_ca2_ev_2009.der");
+const DTRUST_BR_2023_DER: &[u8] = include_bytes!("../../../certs/dtrust_br_root_ca2_2023.der");
+
+/// Certum (Asseco, PL), Buypass (NO) and Actalis (IT) — three European CAs
+/// with a national customer base each. Each was found on its own site only,
+/// which is weak evidence on its own; they are here because a European
+/// desktop that cannot open a Polish, Norwegian or Italian government or
+/// bank page is not finished, and an anchor costs ~1.4 KB.
+const CERTUM_TRUSTED_ROOT_DER: &[u8] = include_bytes!("../../../certs/certum_trusted_root_ca.der");
+const BUYPASS_CLASS3_DER: &[u8] = include_bytes!("../../../certs/buypass_class3_root_ca.der");
+const ACTALIS_ROOT_DER: &[u8] = include_bytes!("../../../certs/actalis_authentication_root_ca.der");
+
+/// Sectigo Public Server Authentication Root E46 / R46 — DIRECTLY, although
+/// USERTrust ECC/RSA cross-sign them and the note above said that covers it.
+///
+/// **Eine Kreuzsignatur hilft nur, wenn der SERVER ihren Pfad mitliefert.**
+/// Der Anker ist da, aber die Kette dorthin baut nicht der Client, sondern
+/// der Server aus dem, was er schickt. github.com und code.jquery.com
+/// liefern den Weg ueber USERTrust und gingen deshalb durch;
+/// `www.dkb.de` schickt genau zwei Karten — sein Blatt und
+/// "Public Server Authentication CA EV E36" — und deren Aussteller ist Root
+/// E46 und sonst nichts. Ohne diesen Anker: "unable to get local issuer
+/// certificate", auf der Anmeldeseite einer Bank.
+///
+/// Gefunden hat es NICHT die Aufzaehlung der Aussteller (die nannte E46, und
+/// E46 galt als abgedeckt), sondern erst der Lauf, der den GANZEN Boden als
+/// einzigen Speicher gegen alle Wirte hielt.
+const SECTIGO_PSA_E46_DER: &[u8] = include_bytes!("../../../certs/sectigo_public_server_e46.der");
+const SECTIGO_PSA_R46_DER: &[u8] = include_bytes!("../../../certs/sectigo_public_server_r46.der");
+
 /// Built-in anchors. This set is the FLOOR: it ships inside the signed
 /// kernel, cannot be removed by an update or by the user, and is what
 /// guarantees the update host stays reachable even when the npkFS store
@@ -130,6 +180,17 @@ const ROOT_CERTS: &[&[u8]] = &[
     USERTRUST_ECC_DER,
     USERTRUST_RSA_DER,
     AMAZON_ROOT_CA1_DER,
+    AMAZON_ROOT_CA2_DER,
+    AMAZON_ROOT_CA3_DER,
+    AMAZON_ROOT_CA4_DER,
+    IDENTRUST_COMMERCIAL_CA1_DER,
+    DTRUST_CLASS3_EV_2009_DER,
+    DTRUST_BR_2023_DER,
+    CERTUM_TRUSTED_ROOT_DER,
+    BUYPASS_CLASS3_DER,
+    ACTALIS_ROOT_DER,
+    SECTIGO_PSA_E46_DER,
+    SECTIGO_PSA_R46_DER,
 ];
 
 // **Wie diese Liste entstanden ist — nicht geraten, ausgezaehlt.** Fuer 88
@@ -159,9 +220,19 @@ const ROOT_CERTS: &[&[u8]] = &[
 // sein, nicht um knapp zu sein, und eine Wurzel zu ENTFERNEN ist eine
 // Entscheidung fuer Geraete im Feld, nicht fuer diese Messung.
 //
-// **Was als naechstes ablaeuft:** `GLOBALSIGN_ROOT_R3` am 2029-03-18 — sechs
-// Jahre vor jedem anderen Anker hier. Wer nach 2029 liest: crates.io und
-// orf.at sind die zwei Wirte, die daran hingen.
+// **Der dritte Lauf ging absichtlich auf den SCHWANZ** — 30 Wirte, ausgesucht
+// nach Ausstellern, die in den ersten 88 gar nicht vorkamen: Behoerden,
+// Banken und Anbieter in DE/CH/PL/NO/IT/EE. Er fand neun weitere Anker, und
+// zwei davon sind der Grund, warum ein Zensus des Schwanzes sein muss:
+// `www.bsi.bund.de` — das Bundesamt fuer Sicherheit in der
+// Informationstechnik — und `www.elster.de` haengen an D-TRUST, das in
+// keiner CDN-Messung der Welt auftaucht. Das Muster oben schlug dabei ein
+// VIERTES Mal zu: Amazon Root CA 1 war da, CA 3 (ECDSA) nicht, und
+// telekom.de haengt an CA 3.
+//
+// **Was als naechstes ablaeuft:** `GLOBALSIGN_ROOT_R3` am 2029-03-18, dann
+// `DTRUST_CLASS3_EV_2009` am 2029-11-05. Wer nach 2029 liest: crates.io und
+// orf.at hingen am ersten, elster.de am zweiten.
 
 /// npkFS directory holding the data-delivered anchors. Off limits to WASM
 /// apps — write access here is the power to mint a MITM anchor for the
