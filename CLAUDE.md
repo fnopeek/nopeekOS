@@ -104,12 +104,20 @@ Schnellweg der Shell sprang ab, wenn die Seite keinen Behandler hat —, dazu
 `indeterminate` und volles `FormData`. Offen und benannt: die
 Validierungs-API und `select.add`.
 
-**▶ Als nächstes: das RASTER.** beak rechnet Wikipedias `main.mw-body` mit
-`grid-template: … / minmax(0,59.25rem) min-content` falsch aus und lässt die
-Spalten über ihren Behälter hinauslaufen (1299 + 248 > 1492); die
-Artikelspalte ist dadurch ~79 px zu breit. In WPT ist es dieselbe Familie:
-`css-grid/column-align-items`, `row-auto-repeat`, `grid-lanes-subgrid` — nach
-`CSS2/bidi` (bewusst zurückgestellt) der größte verbliebene Block.
+**Das RASTER war der nächste Posten — es ist erledigt, und die Rangliste
+darunter war falsch gelesen.** Nachgemessen 2026-09-10: Wikipedias
+`main.mw-body` kommt in beak und Chromium auf DIESELBEN Kästen (1220 breit,
+Spalte 948 = 59,25 rem). Die genannten WPT-Familien (`column-align-items`,
+`row-auto-repeat`, `grid-lanes-subgrid`) sind sämtlich `display: grid-lanes`
+— also Vehikel, die `vehicles.py` ausschliesst, und keine Arbeit. Vom Raster
+bleiben **13 echte** Tests. Ausgezählt ohne Vehikel:
+
+    22  CSS2/bidi                     8  css-grid/positioned-grid-items
+    13  CSS2/margin-collapse          7  css-text/word-space-transform
+    12  CSS2/table-anonymous-objects  6  CSS2/abspos · flex-flow · contain-intrinsic-size
+
+**Immer erst `python3 tests/vehicles.py`** — die Rangliste der rohen Familien
+führt sonst zu einem Posten, den es nicht gibt.
 
 Shadow DOM bleibt gemessen KEINE
 Web-Anforderung, sondern die Bauweise EINER Seite: 89 % der 906 Aufrufe

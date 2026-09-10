@@ -26,8 +26,23 @@ the dev box (§10). testharness.js-based tests need the JS engine first.
 
 ```
 4539 pass / 1105 fail / 142 inconclusive   (of 5786 vendored reftests)
-= 80.4 % of the conclusive 5644   ·   4539 / 5198 = 87.3 % without vehicles
+= 80.4 % of the conclusive 5644   ·   4539 / 5179 = 87.6 % without vehicles
 ```
+
+**Der zweite Nenner ist am 2026-09-10 um einen Eimer gewachsen: „Testschrift
+fehlt".** 19 Fehler — 18 davon die ganze Familie `css-fonts/font-family-name`
+— messen die Namensauflösung von `font-family` gegen eine Schriftfamilie, die
+installiert sein muss (`CSSTest …`, Mozillas Testpaket). `font-family-name-000`
+sagt es wörtlich: *„Test will fail if CSSTest fonts are not installed."* Sie
+sind nicht unGEWINNbar wie die vier anderen Eimer — wer die Schriften
+mitliefert, macht sie lauffähig — aber sie sagen nichts über unser Layout,
+und in einer Rangliste der grössten Familien standen sie auf **Platz zwei**
+und hätten die Arbeit auf einen Posten gezogen, den es nicht gibt.
+
+Dasselbe galt fürs Raster: `css-grid/column-align-items`,
+`row-auto-repeat`, `grid-lanes-subgrid` lesen sich wie Rasterarbeit und sind
+`display: grid-lanes`. Ohne Vehikel bleiben **13 echte** Raster-Tests, und
+Wikipedias `main.mw-body` rechnet inzwischen kastengleich mit Chromium.
 
 Moved **+0 / −3** over 0.146.0–0.149.0, and **all three moved from PASS to
 INCONCLUSIVE at 0.00 % diff** — not one new failure (1105 either way). The

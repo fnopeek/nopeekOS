@@ -32,6 +32,19 @@ VEHICLES = [
     ("display: run-in", re.compile(r"display\s*:\s*run-in")),
     # needs full grid track sizing underneath it first
     ("subgrid", re.compile(r"\bsubgrid\b")),
+    # **Kein Spec-Problem, ein FIXTURE-Problem** — und deshalb ein eigener
+    # Eimer statt stillschweigend dazugerechnet. Diese Tests messen die
+    # Namensaufloesung von `font-family` mit einer Schriftfamilie, die
+    # installiert sein muss (`CSSTest …`, Mozillas Testpaket; Ahem daneben).
+    # Ohne sie koennen sie nur scheitern, und `font-family-name-000` sagt das
+    # woertlich: „Test will fail if CSSTest fonts are not installed".
+    #
+    # Sie sind damit nicht UNGEWINNBAR wie die vier darueber — wer die
+    # Schriften mitliefert, macht sie lauffaehig. Sie stehen hier, damit die
+    # Zahl transparent bleibt: 18 Fehler, die nichts ueber unser Layout
+    # sagen, sind in einer Rangliste der groessten Familien sonst Platz zwei
+    # und ziehen die Arbeit auf einen Posten, den es nicht gibt.
+    ("Testschrift fehlt (CSSTest/Ahem)", re.compile(r"CSSTest|\bAhem\b")),
 ]
 
 
