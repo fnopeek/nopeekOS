@@ -51,6 +51,57 @@ pub struct Modifiers {
 
 /// Empty event for array initialization.
 #[allow(dead_code)]
+/// Der Rest einer UTF-8-Folge, die byteweise durch die Tastaturleitung muss.
+///
+/// **Ein Tastendruck traegt ein BYTE, und `ü` sind zwei.** Die ganze Kette
+/// (`push_key` → `KeyCode::Char(u8)` → jede App) auf Zeichen umzustellen
+/// hiesse, das ABI zu aendern und jede ausgelieferte App zu einem
+/// Bindefehler zu machen. Also bleibt sie byteweise: das erste Byte geht
+/// sofort, der Rest liegt hier und wird VOR dem naechsten Tastendruck
+/// abgeholt. Fuer ASCII ist der Puffer immer leer und der Weg genau der von
+/// vorher.
+///
+/// **Ein TYP mit zwei Instanzen, keine zwei Kopien.** Es gibt zwei
+/// Tastaturtreiber — PS/2 (`drivers::keyboard`) und USB-HID
+/// (`drivers::xhci`) —, und genau daran ist die Umlaut-Umstellung beim ersten
+/// Anlauf gescheitert: die PS/2-Tabelle war repariert, die Maschine hing an
+/// USB, und die Zeichen kamen weiter als `;` `[` `'`. Zwei Instanzen, weil
+/// die beiden unabhaengige Erzeuger sind; eine Rechnung, damit sie nicht
+/// auseinanderlaufen ([[feedback_a_copy_is_a_second_semantics_waiting]]).
+pub struct Utf8Tail {
+    buf: [u8; 3],
+    len: u8,
+}
+
+impl Utf8Tail {
+    pub const fn new() -> Utf8Tail { Utf8Tail { buf: [0; 3], len: 0 } }
+
+    /// Ein Zeichen einreichen und sein ERSTES Byte bekommen; der Rest wartet.
+    pub fn split(&mut self, c: char) -> u8 {
+        if (c as u32) < 0x80 {
+            self.len = 0;
+            return c as u8;      // ASCII: genau der Weg von frueher
+        }
+        let mut b = [0u8; 4];
+        let enc = c.encode_utf8(&mut b).as_bytes();
+        let rest = &enc[1..];
+        self.buf[..rest.len()].copy_from_slice(rest);
+        self.len = rest.len() as u8;
+        enc[0]
+    }
+
+    /// Das naechste wartende Byte. **Muss vor dem naechsten Tastendruck
+    /// gerufen werden** — sonst geht die zweite Haelfte eines Zeichens
+    /// dahinter verloren.
+    pub fn take(&mut self) -> Option<u8> {
+        if self.len == 0 { return None }
+        let b = self.buf[0];
+        self.buf.rotate_left(1);
+        self.len -= 1;
+        Some(b)
+    }
+}
+
 pub const EMPTY_EVENT: KeyEvent = KeyEvent { key: KeyCode::Char(0), modifiers: Modifiers::NONE };
 
 impl KeyEvent {
