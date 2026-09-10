@@ -48,7 +48,23 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-10 · beak 0.163.0 · Kernel 0.336.0** (Rest: `git log`)
+**Stand 2026-09-10 · beak 0.164.0 · Kernel 0.336.0** (Rest: `git log`)
+
+**0.164.0: der Knopf neben „Appearance", und was er verdeckte.** Florian
+schickte einen Screenshot und die Zeile `Befehlsspanne passt nicht zum
+Steuerelement`. Zwei Fehler, beide gemessen statt geraten. **(1) Ein `drain`
+ist auch eine Umbaustelle.** Der Inhalt eines `<button>` und ein atomarer
+Inline-Kasten legen aus und ziehen die Befehle wieder heraus — die
+Stapelbereiche nahmen sie nicht mit, also zeigten die auf die NÄCHSTEN Befehle
+der Seite. Die Fläche eines Knopfes landete hinter seiner eigenen Beschriftung
+(graue Kiste), seine Spanne zerriss, jeder Klick kostete ein Auslegen. Die
+Regel stand schon im File — `spec_rollback` sagt sie wörtlich. **(2) Ein
+Flex-Item hat seinen eigenen Formatierungskontext** (css-flexbox-1 §4);
+isoliert war nur der BEHÄLTER, zwischen den Geschwistern lief die Float-Liste
+weiter. Auf der Wikipedia-Hauptseite räumte der Float der linken Spalte den
+Clearfix der rechten: `#mp-itn` war **566×696 statt 531×351**. Dafür läuft das
+Kastenorakel jetzt auch auf einer echten Seite (`PIN_ALL=1` ist dort Pflicht).
+WPT 4545 unverändert.
 
 **0.163.0: Tabs — und der Streifen war wirklich die letzten fünf Prozent.**
 `docs/plan/BROWSER_TABS.md` sagt es voraus: erst muss die Seite ein WERT
