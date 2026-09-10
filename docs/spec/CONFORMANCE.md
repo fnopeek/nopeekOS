@@ -22,12 +22,28 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-09-10, beak 0.159.0)
+### Current number (measured 2026-09-10, beak 0.160.0)
 
 ```
-4544 pass / 1100 fail / 142 inconclusive   (of 5786 vendored reftests)
-= 80.5 % of the conclusive 5644   ·   4544 / 5179 = 87.7 % without vehicles
+4545 pass / 1099 fail / 142 inconclusive   (of 5786 vendored reftests)
+= 80.5 % of the conclusive 5644   ·   4545 / 5179 = 87.8 % without vehicles
 ```
+
+**0.160.0: der Kasten einer Tabelle ist die Tabelle.** Dieselbe Vorlage
+fand als nächstes eine Tabelle, die sich 1886 px breit MELDET und 157 px
+breit MALT — `record_inspect` bekam `(x, w)`, also den angebotenen Streifen,
+und damit gab `getBoundingClientRect` an jeder `width:auto`-Tabelle des Webs
+die Fensterbreite zurück. Genau der Fehler, den die Galerie 0.145.0 fünfmal
+im Flex gefunden hat, eine Zeile weiter. Dazu die `<caption>`: sie ist so
+breit wie die TABELLE (§17.4.1), nicht wie der Streifen — und weil das erst
+das Gitter weiß, rechnet `layout_table` die Spalten vorab aus, aber nur für
+Tabellen, die überhaupt eine obere Überschrift haben. Und `<legend>`
+schrumpft jetzt auf seinen Text (`fit-content`, 96 statt 1854 px); dass es
+auf dem Rahmen seines `<fieldset>` sitzt, fehlt noch und steht im Code.
+
+Danach ist auf der nackten Vorlage KEINE Abweichung mehr über 16 px, und die
+grössten sind zwei benannte Reste: der aufsummierte Abschneidefehler unserer
+ganzzahligen Ränder (8 px über eine ganze Seite) und die Höhe der `<legend>`.
 
 **0.159.0: das UA-Blatt gegen HTML §15.3 gehalten**, mit einer neuen Vorlage
 als Orakel — `tools/fixtures/ua.html`, nackte Elemente ohne ein einziges
@@ -102,8 +118,8 @@ lost their oracle, not their correctness.
 input with a 1 px #7c7c7c border has almost no "ink" — although Chromium
 draws exactly that. Changing the oracle in the same commit that moves the
 rendering would make the number unreadable ([[feedback_which_side_moved]]),
-so the baseline is re-blessed at 4544 and the guard is written down here
-instead. **635 real failures left** (5179 − 4544, aus `tests/vehicles.py`).
+so the baseline is re-blessed at 4545 and the guard is written down here
+instead. **634 real failures left** (5179 − 4545, aus `tests/vehicles.py`).
 
 #### 0.145.0/0.146.0: the box a flex container reports (+5 / −0)
 

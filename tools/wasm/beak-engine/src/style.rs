@@ -2719,8 +2719,15 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
                 side.color = Some(theme.rule.into());
             }
         }
+        // `<legend>` ist kein gewoehnlicher Block: es schrumpft auf seinen
+        // Text und sitzt auf dem oberen Rahmen seines `<fieldset>`. Die
+        // Spezifikation beschreibt das als eigenen Kasten; `fit-content` holt
+        // die BREITE davon ein (96 statt 1854 px), die Lage auf dem Rahmen
+        // noch nicht — die kostet ein Loch im Rahmen und einen Kasten, der aus
+        // dem Fluss faellt, und das ist eine eigene Arbeit.
         "legend" => {
             s.display = Display::Block;
+            s.width = Len::Intrinsic(Intrinsic::Fit);
             s.pct_pad = [0.0; 4];
             s.pad_right = 2.0;
             s.pad_left = 2.0;
