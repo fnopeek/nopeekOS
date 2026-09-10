@@ -160,31 +160,45 @@ static HID_TO_ASCII_SHIFT: [u8; 57] = [
 // Key differences: z↔y swap, number row shifted chars, special chars
 // (HID 0x64 = non-US `<`/`>` lives OUTSIDE this 57-entry range and is
 //  special-cased in `hid_to_char` so plain `<` and shift `>` work.)
-static HID_TO_ASCII_DE: [u8; 57] = [
-    0, 0, 0, 0,
-    b'a', b'b', b'c', b'd', b'e', b'f', b'g', b'h',
-    b'i', b'j', b'k', b'l', b'm', b'n', b'o', b'p',
-    b'q', b'r', b's', b't', b'u', b'v', b'w', b'x',
-    b'z', b'y',                                        // z/y swapped
-    b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', b'0',
-    b'\n', 0x1B, 0x08, b'\t', b' ',
-    b'\'', b'^', b'[', b']', b'$',
-    // 0x32-0x38: # ; ' §/° , . -    (§/° at 0x35 is a dead key on
-    // Swiss German → 0, NOT < > as it was previously mis-mapped)
-    0, b';', b'\'', 0, b',', b'.', b'-',
+// **Aus `/usr/share/X11/xkb/symbols/ch`, `xkb_symbols "basic"` (German
+// (Switzerland)) — nicht aus dem Gedaechtnis.** Hier standen bis 0.335.0 die
+// ZWEITbelegungen dieser Tasten (`[ ] ; '`), also genau die Zeichen, die
+// AltGr ohnehin liefert; ein Umlaut liess sich auf einer USB-Tastatur
+// ueberhaupt nicht tippen.
+//
+// **Und das war der zweite Anlauf.** 0.333.0 hatte dieselbe Tabelle im
+// PS/2-Treiber repariert und diese hier uebersehen — die NUC haengt an USB,
+// also aenderte sich am Geraet gar nichts. Es gibt ZWEI Tastaturtreiber, und
+// wer einen davon anfasst, hat die Haelfte angefasst
+// ([[feedback_verify_the_call_path]]).
+//
+// Gegengeprueft wird das jetzt maschinell: `tools/kbcheck.py` liest die
+// xkb-Referenz, kalibriert die Indexzuordnung an unseren EIGENEN
+// US-Tabellen und stellt beide Treiber daneben.
+static HID_TO_ASCII_DE: [char; 57] = [
+    '\0','\0','\0','\0',
+    'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h',
+    'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p',
+    'q', 'r', 's', 't', 'u', 'v', 'w', 'x',
+    'z', 'y',                                        // z/y getauscht
+    '1', '2', '3', '4', '5', '6', '7', '8', '9', '0',
+    '\n','\u{1B}','\u{8}','\t',' ',
+    // 0x2D..0x31: AE11 AE12 AD11 AD12 BKSL
+    '\'','^', 'ü', '¨', '$',
+    // 0x32..0x38: (nicht belegt) AC10 AC11 TLDE AB08 AB09 AB10
+    '\0','ö', 'ä', '§', ',', '.', '-',
 ];
 
-static HID_TO_ASCII_DE_SHIFT: [u8; 57] = [
-    0, 0, 0, 0,
-    b'A', b'B', b'C', b'D', b'E', b'F', b'G', b'H',
-    b'I', b'J', b'K', b'L', b'M', b'N', b'O', b'P',
-    b'Q', b'R', b'S', b'T', b'U', b'V', b'W', b'X',
-    b'Z', b'Y',
-    b'+', b'"', b'*', 0,    b'%', b'&', b'/', b'(', b')', b'=',  // Shift+4=ç→0, Shift+7=/
-    b'\n', 0x1B, 0x08, b'\t', b' ',
-    b'?', b'`', b'{', b'}', b'!',
-    // 0x32-0x38 shifted: same key positions as DE_NORMAL.
-    0, b':', b'"', 0, b';', b':', b'_',
+static HID_TO_ASCII_DE_SHIFT: [char; 57] = [
+    '\0','\0','\0','\0',
+    'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H',
+    'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P',
+    'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X',
+    'Z', 'Y',
+    '+', '"', '*', 'ç','%', '&', '/', '(', ')', '=',   // AE04 Shift = ç
+    '\n','\u{1B}','\u{8}','\t',' ',
+    '?', '`', 'è', '!', '£',                           // AD11 è · AD12 ! · BKSL £
+    '\0','é', 'à', '°', ';', ':', '_',                  // AC10 é · AC11 à · TLDE °
 ];
 
 // Key buffer — IRQ-safe SPSC ring (producer: IRQ/poll, consumer: main thread)
@@ -259,6 +273,9 @@ pub fn poll_keyboard() -> Option<u8> {
 
     // Timer-based key repeat (lock-free: read repeat state from atomics)
     let rk = REPEAT_KEY.load(Ordering::Relaxed);
+    // Wartet noch die zweite Haelfte eines Zeichens? Die zuerst — vor dem
+    // naechsten Tastendruck, sonst geht sie verloren.
+    if let Some(b) = take_tail() { return Some(b) }
     if rk != 0 {
         let now = crate::interrupts::ticks();
         let start = REPEAT_START.load(Ordering::Relaxed);
@@ -2807,12 +2824,31 @@ fn process_hid_report(modifiers: u8, keys: &[u8; 6], state: &mut XhciState) {
         let ch = hid_to_char(key, shift, alt_gr, is_de);
         if ch != 0 {
             push_key(ch);
+            // Ein Zeichen ausserhalb von ASCII besteht aus mehreren Bytes;
+            // sie muessen DIREKT hintereinander in den Ring.
+            while let Some(b) = take_tail() { push_key(b) }
         }
     }
 }
 
-/// Convert HID keycode to ASCII character. Returns 0 for unhandled keys.
+/// Der Rest einer UTF-8-Folge — siehe `input::Utf8Tail`. Eigene Instanz,
+/// weil dieser Treiber ein eigener Erzeuger ist; die Rechnung ist dieselbe
+/// wie im PS/2-Treiber.
+static UTF8_TAIL: spin::Mutex<crate::input::Utf8Tail> =
+    spin::Mutex::new(crate::input::Utf8Tail::new());
+
+fn take_tail() -> Option<u8> { UTF8_TAIL.lock().take() }
+
+/// HID-Code → erstes Byte des Zeichens; der Rest wandert in `UTF8_TAIL`.
+/// 0 heisst „diese Taste traegt kein Zeichen".
 fn hid_to_char(key: u8, shift: bool, alt_gr: bool, is_de: bool) -> u8 {
+    let c = hid_to_char_ch(key, shift, alt_gr, is_de);
+    if c == '\0' { return 0 }
+    UTF8_TAIL.lock().split(c)
+}
+
+/// Convert HID keycode to a character. `'\0'` for unhandled keys.
+fn hid_to_char_ch(key: u8, shift: bool, alt_gr: bool, is_de: bool) -> char {
     // AltGr: special characters (de_CH)
     if alt_gr && is_de {
         if let Some(ch) = altgr_char_de_hid(key) {
@@ -2825,14 +2861,14 @@ fn hid_to_char(key: u8, shift: bool, alt_gr: bool, is_de: bool) -> u8 {
     // above). The key is outside the 57-entry layout arrays so it
     // gets handled here before the index check.
     if is_de && key == 0x64 {
-        return if shift { b'>' } else { b'<' };
+        return if shift { '>' } else { '<' };
     }
     // US layout 102-key keyboards also have a non-US `\` key at
     // HID 0x64 — map plain to `\` (no shift). Most US users won't
     // hit this but it stops the key from being silent if they have
     // an EU-shape keyboard plugged in.
     if !is_de && key == 0x64 {
-        return if shift { b'|' } else { b'\\' };
+        return if shift { '|' } else { '\\' };
     }
 
     if (key as usize) < HID_TO_ASCII.len() {
@@ -2840,47 +2876,50 @@ fn hid_to_char(key: u8, shift: bool, alt_gr: bool, is_de: bool) -> u8 {
             if shift { HID_TO_ASCII_DE_SHIFT[key as usize] }
             else { HID_TO_ASCII_DE[key as usize] }
         } else {
-            if shift { HID_TO_ASCII_SHIFT[key as usize] }
-            else { HID_TO_ASCII[key as usize] }
+            // Die US-Tabellen bleiben Bytes — sie SIND ASCII, jedes Zeichen
+            // darin passt in eins.
+            (if shift { HID_TO_ASCII_SHIFT[key as usize] }
+             else { HID_TO_ASCII[key as usize] }) as char
         }
     } else {
         match key {
-            0x54 => b'/',
-            0x55 => b'*',
-            0x56 => b'-',
-            0x57 => b'+',
-            0x58 => b'\n', // Numpad Enter
-            0x59 => b'1',
-            0x5A => b'2',
-            0x5B => b'3',
-            0x5C => b'4',
-            0x5D => b'5',
-            0x5E => b'6',
-            0x5F => b'7',
-            0x60 => b'8',
-            0x61 => b'9',
-            0x62 => b'0',
-            0x63 => b'.',
-            0x4C => 0x7F, // Delete
+            0x54 => '/',
+            0x55 => '*',
+            0x56 => '-',
+            0x57 => '+',
+            0x58 => '\n', // Numpad Enter
+            0x59 => '1',
+            0x5A => '2',
+            0x5B => '3',
+            0x5C => '4',
+            0x5D => '5',
+            0x5E => '6',
+            0x5F => '7',
+            0x60 => '8',
+            0x61 => '9',
+            0x62 => '0',
+            0x63 => '.',
+            0x4C => '\u{7F}', // Delete
             // Arrow keys are multi-byte — handled separately, not via repeat
-            _ => 0,
+            _ => '\0',
         }
     }
 }
 
 /// AltGr characters for Swiss German (de_CH) keyboard layout.
 /// HID usage codes → ASCII.
-fn altgr_char_de_hid(key: u8) -> Option<u8> {
+fn altgr_char_de_hid(key: u8) -> Option<char> {
     match key {
-        0x1F => Some(b'@'),   // AltGr+2
-        0x20 => Some(b'#'),   // AltGr+3
-        0x24 => Some(b'|'),   // AltGr+7
-        0x2E => Some(b'~'),   // AltGr+^ (= key)
-        0x2F => Some(b'['),   // AltGr+ü ([ key)
-        0x30 => Some(b']'),   // AltGr+¨ (] key)
-        0x34 => Some(b'{'),   // AltGr+ä (' key)
-        0x31 => Some(b'}'),   // AltGr+$ (\ key)
-        0x64 => Some(b'\\'),  // AltGr+< (non-US \)
+        0x08 => Some('€'),   // AltGr+e — xkb: AD03 dritte Ebene EuroSign
+        0x1F => Some('@'),   // AltGr+2
+        0x20 => Some('#'),   // AltGr+3
+        0x24 => Some('|'),   // AltGr+7
+        0x2E => Some('~'),   // AltGr+^ (= key)
+        0x2F => Some('['),   // AltGr+ü ([ key)
+        0x30 => Some(']'),   // AltGr+¨ (] key)
+        0x34 => Some('{'),   // AltGr+ä (' key)
+        0x31 => Some('}'),   // AltGr+$ (\ key)
+        0x64 => Some('\\'),  // AltGr+< (non-US \)
         _ => None,
     }
 }

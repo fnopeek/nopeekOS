@@ -450,51 +450,20 @@ fn wait_write() {
 }
 
 /// Decode a raw scancode into an ASCII character (handles modifiers + extended).
-/// Die Bytes einer UTF-8-Folge, die noch abgeholt werden wollen.
-///
-/// **Die Tastaturleitung traegt ein BYTE je Abruf, und `ü` sind zwei.** Statt
-/// die ganze Kette (`decode_scancode` → `push_key` → `KeyCode::Char(u8)` →
-/// jede App) auf Zeichen umzustellen, was jede ausgelieferte App zu einem
-/// Bindefehler machen wuerde, bleibt sie byteweise: das erste Byte kommt
-/// sofort, der Rest liegt hier und wird VOR dem naechsten Scancode abgeholt.
-/// Fuer ASCII ist der Puffer immer leer und der Weg genau der von vorher.
-///
-/// Gepackt: `len` in Bit 24..31, danach bis zu drei Bytes, das naechste ganz
-/// unten.
-static UTF8_TAIL: AtomicU32 = AtomicU32::new(0);
-
-fn stash_tail(bytes: &[u8]) {
-    let mut v = 0u32;
-    for (i, b) in bytes.iter().take(3).enumerate() {
-        v |= (*b as u32) << (8 * i);
-    }
-    v |= (bytes.len().min(3) as u32) << 24;
-    UTF8_TAIL.store(v, Ordering::Release);
-}
+/// Der Rest einer UTF-8-Folge — siehe `input::Utf8Tail` fuer das Warum.
+/// Eigene Instanz, weil dieser Treiber ein eigener Erzeuger ist; die
+/// Rechnung ist die geteilte.
+static UTF8_TAIL: spin::Mutex<crate::input::Utf8Tail> =
+    spin::Mutex::new(crate::input::Utf8Tail::new());
 
 /// Das naechste wartende Byte, oder `None`. **Muss vor dem Lesen eines neuen
-/// Scancodes gerufen werden** — sonst geht die zweite Haelfte eines Zeichens
-/// hinter dem naechsten Tastendruck verloren.
-fn take_tail() -> Option<u8> {
-    let v = UTF8_TAIL.load(Ordering::Acquire);
-    let len = (v >> 24) as usize;
-    if len == 0 { return None }
-    let b = (v & 0xFF) as u8;
-    let rest = (v >> 8) & 0xFF_FFFF;
-    UTF8_TAIL.store(rest | (((len - 1) as u32) << 24), Ordering::Release);
-    Some(b)
-}
+/// Scancodes gerufen werden.**
+fn take_tail() -> Option<u8> { UTF8_TAIL.lock().take() }
 
 /// Scancode → erstes Byte des Zeichens; der Rest wandert in `UTF8_TAIL`.
 fn decode_scancode(scancode: u8) -> Option<u8> {
     let c = decode_scancode_char(scancode)?;
-    if (c as u32) < 0x80 {
-        return Some(c as u8);   // ASCII: genau der Weg von frueher
-    }
-    let mut buf = [0u8; 4];
-    let enc = c.encode_utf8(&mut buf).as_bytes();
-    stash_tail(&enc[1..]);
-    Some(enc[0])
+    Some(UTF8_TAIL.lock().split(c))
 }
 
 fn decode_scancode_char(scancode: u8) -> Option<char> {
