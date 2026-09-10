@@ -22,12 +22,21 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-09-10, beak 0.161.0)
+### Current number (measured 2026-09-10, beak 0.162.0)
 
 ```
 4545 pass / 1099 fail / 142 inconclusive   (of 5786 vendored reftests)
 = 80.5 % of the conclusive 5644   ·   4545 / 5179 = 87.8 % without vehicles
 ```
+
+**0.162.0: `smaller` und `larger` sind eine STUFE der Skala** — /1,2 und
+×1,2 (css-fonts-4 §3.3), nicht 0,85 und 1,15 nach Augenmass. Damit messen
+`<small>`, `<sub>` und `<sup>` auf der nackten Vorlage exakt wie Chromium
+(29×16, 20×16, 31×16). Was daneben stehen bleibt und benannt ist: der
+Kasten, den `getBoundingClientRect` für ein `<sub>`/`<sup>` meldet, trägt die
+Verschiebung von der Grundlinie NICHT mit — der Text wird richtig gehoben
+(`DrawOp::Text` bei y−2 bzw. y+5), nur der gemeldete Kasten bleibt auf der
+Zeile.
 
 **0.161.0: eine CSS-Länge wird überall auf dieselbe Art ganzzahlig.** beak
 legt in ganzen Zahlen aus, CSS rechnet in Brüchen; jedes `as i32` schnitt ab.
