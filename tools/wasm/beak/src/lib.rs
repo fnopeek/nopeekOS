@@ -367,6 +367,9 @@ struct Doc {
     scroll_y: i32,
     /// Wo eine Textmarkierung begonnen hat, solange die Taste unten ist.
     sel_anchor: Option<beak_engine::select::TextPos>,
+    /// Der Link unter dem Druck, bis das Loslassen entscheidet — mit dem
+    /// Punkt, an dem gedrueckt wurde.
+    pending_link: Option<(String, i32, i32)>,
     /// Die Markierung auf der SEITE — nicht in der Adresszeile, die gehoert
     /// dem Compositor.
     sel: Option<(beak_engine::select::TextPos, beak_engine::select::TextPos)>,
@@ -410,7 +413,7 @@ impl Doc {
             url: String::new(), edit: String::new(), hist: Vec::new(), hist_pos: 0,
             nav_job: -1, nav_stage: NavStage::Doc, nav_url: None, nav_push_hist: false,
             nav_stage_ms: 0, nav_gen: 0, nav_start_ms: 0, nav_reported: true,
-            content_gen: 0, scroll_y: 0, sel_anchor: None, sel: None,
+            content_gen: 0, scroll_y: 0, sel_anchor: None, sel: None, pending_link: None,
             find: None, found: Vec::new(), find_at: 0,
             find_pending: [0; 4], find_pending_len: 0,
             nav_css_count: 0, nav_scripts: None, js: None, nav_js_count: 0, nav_mod_entries: None, nav_mod_want: None, nav_mod_rounds: 0, nav_css_urls: None, nav_css_parts: None, nav_css_want: None, nav_css_rounds: 0, nav_sheet_nodes: None, nav_sheet_rounds: 0,
@@ -641,6 +644,9 @@ fn set_url(s: &str) {
     // auf irgendetwas.
     d.sel = None;
     d.sel_anchor = None;
+    // Ein Link, dessen Loslassen nie kam, darf die naechste Seite nicht
+    // umleiten.
+    d.pending_link = None;
     // Die Zeile zeigt, wo man IST — bis jemand hineintippt.
     set_edit(s);
     unsafe {
@@ -4561,8 +4567,28 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
                     if page.state.focus.take().is_some() {
                         restate_control(engine, cache, &page.state, "control-blur");
                     }
+                    // **Ein Link wird beim LOSLASSEN gefolgt, nicht beim
+                    // Druecken.** So macht es jeder Browser, und es ist die
+                    // Bedingung dafuer, dass sich Text markieren laesst, der
+                    // auf einem Link ANFAENGT — bis hierher navigierte der
+                    // Druck, bevor das Ziehen ueberhaupt begann.
+                    //
+                    // Nur der Link wandert; Skript, Steuerelemente und
+                    // `<summary>` bleiben beim Druecken. Den ganzen Klickweg
+                    // umzustellen ist ein eigener Schritt, und dieser hier
+                    // soll das Markieren fertig machen, nicht die
+                    // Ereignisreihenfolge neu erfinden.
                     if let Some(href) = href {
-                        follow(engine, &href);
+                        doc_mut().pending_link = Some((href, x, y));
+                        // Ein Anker fuer die Markierung wird trotzdem gesetzt
+                        // — genau darum geht es.
+                        let lay = &cache.as_ref().unwrap().0;
+                        let had = doc_mut().sel.take();
+                        doc_mut().sel_anchor = engine.text_pos_at(lay, cx, cy);
+                        if had.is_some() {
+                            engine.set_marks(None, Vec::new());
+                            mark_dirty();
+                        }
                         return true;
                     }
                     // A `<summary>` opens/closes its section. It comes AFTER
@@ -4597,10 +4623,19 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
             }
             false
         }
-        // Loslassen: die Markierung steht, das Ziehen ist vorbei.
-        Event::MouseButton { button: MouseButton::Left, down: false, .. } => {
+        // Loslassen: die Markierung steht, das Ziehen ist vorbei — und HIER
+        // entscheidet sich, ob der Druck ein Klick war oder der Anfang einer
+        // Markierung.
+        Event::MouseButton { button: MouseButton::Left, down: false, x, y } => {
             doc_mut().sel_anchor = None;
-            false
+            let Some((href, px, py)) = doc_mut().pending_link.take() else { return false };
+            // Gezogen? Dann war es keine Navigation. Vier Pixel Toleranz,
+            // damit eine zitternde Hand noch klickt.
+            if doc().sel.is_some() || (x - px).abs() > 4 || (y - py).abs() > 4 {
+                return false;
+            }
+            follow(engine, &href);
+            true
         }
         // **Strg+C auf der Seite.** Der Compositor faengt die Tastenfolge nur
         // ab, wenn eines SEINER Textfelder den Fokus hat (`handle_input_key`
