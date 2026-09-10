@@ -799,6 +799,21 @@ impl Engine {
         self.scripted.borrow().as_ref().map(f)
     }
 
+    /// Der `<title>` des Dokuments, aus dem zuletzt ausgelegt wurde.
+    ///
+    /// **Aus dem BAUM, den der Motor ohnehin haelt** — nicht aus einem
+    /// zweiten Parse: `current_dom` gibt den Baum des letzten Layouts, und
+    /// das ist der geskriptete, sobald es einen gibt. Damit sieht ein
+    /// Tabstreifen auch ein `document.title = …`.
+    ///
+    /// Der Baum steht erst NACH dem Auslegen. Wer beim Ankommen des Dokuments
+    /// fragt, bekommt den Titel der VORIGEN Seite.
+    pub fn title(&self) -> Option<alloc::string::String> {
+        let scripted = self.scripted.borrow();
+        let cached = self.dom.borrow();
+        current_dom(&scripted, &cached).and_then(crate::dom::title)
+    }
+
     /// Treffer-Kaesten fuer alle Elemente aufzeichnen (siehe `hit_all`).
     pub fn set_hit_all(&self, on: bool) { self.hit_all.set(on); }
 

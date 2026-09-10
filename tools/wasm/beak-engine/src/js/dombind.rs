@@ -3257,6 +3257,18 @@ pub fn install(realm: &mut Realm) {
     //
     // beak malt genau ein Dokument, und es ist sichtbar, solange es laeuft —
     // das ist keine Hoeflichkeit, sondern der Zustand.
+    //
+    // **Seit es Tabs gibt (beak 0.163.0) gilt der Satz weiter, aber aus einem
+    // anderen Grund**, und der gehoert dazu, weil er ablaufen kann: ein Tab im
+    // Hintergrund ist EINGEFROREN (`docs/plan/BROWSER_TABS.md` §A3 b) — er hat
+    // gar keine JS-Sitzung, also fragt dort auch niemand. Eine Sitzung, die
+    // diese drei Zeilen liest, ist die des sichtbaren Tabs.
+    //
+    // Zur Luege werden sie an dem Tag, an dem ein Hintergrundtab LEBENDIG
+    // bleibt (§A3, LRU 2-3). Dann ist „sichtbar" falsch, und zwar in der
+    // schlimmsten Richtung: eine Seite, der man sagt, sie sei sichtbar,
+    // pollt weiter. Wer das baut, baut diese drei Getter mit — und
+    // `visibilitychange`, das es noch gar nicht gibt.
     getter(&document_proto, "visibilityState", |_, _, _| Ok(Value::str("visible")), &fp);
     getter(&document_proto, "hidden", |_, _, _| Ok(Value::Bool(false)), &fp);
     meth(&document_proto, "hasFocus", |_, _, _| Ok(Value::Bool(true)), 0, &fp);

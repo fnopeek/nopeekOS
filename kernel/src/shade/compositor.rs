@@ -2588,6 +2588,32 @@ impl Compositor {
             }
         }
 
+        // Middle click: raw button only, no hit-test.
+        //
+        // **Es gibt keine `Action` dafuer, und das ist Absicht.** Ein
+        // Mittelklick ist keine zweite Art, einen Knopf zu druecken — er ist
+        // eine Geste auf dem INHALT (im Browser: den Link unter dem Zeiger in
+        // einem neuen Tab oeffnen). Wer ihn auf den Treffertest legte, liesse
+        // jeden Knopf im System auf die mittlere Taste reagieren, ohne dass
+        // eine einzige App darum gebeten haette.
+        if !mod_held && self.mouse.middle_clicked() {
+            if let Some(wid) = self.window_at(mx, my) {
+                let is_widget = self.windows.iter()
+                    .find(|w| w.id == wid)
+                    .map(|w| w.kind == crate::shade::window::WindowKind::Widget)
+                    .unwrap_or(false);
+                if is_widget {
+                    use crate::shade::widgets::abi::{Event, MouseButton};
+                    crate::shade::widgets::push_event(wid.0, Event::MouseButton {
+                        button: MouseButton::Middle,
+                        down:   true,
+                        x:      mx,
+                        y:      my,
+                    });
+                }
+            }
+        }
+
         // Mouse release: clear active state on every widget window
         // (we don't track which window held the press). Cheap — only
         // does work when the window's `active_path` was actually set.
@@ -2606,6 +2632,24 @@ impl Compositor {
                 }
                 crate::shade::widgets::push_event(wid.0, Event::MouseButton {
                     button: MouseButton::Left,
+                    down:   false,
+                    x:      mx,
+                    y:      my,
+                });
+            }
+        }
+
+        // Und die mittlere Taste ebenso — eine App, die Druck und Loslassen
+        // paart, darf nicht auf ein Loslassen warten, das nie kommt.
+        if !mod_held && self.mouse.middle_released() {
+            use crate::shade::widgets::abi::{Event, MouseButton};
+            let widget_ids: alloc::vec::Vec<crate::shade::WindowId> = self.windows.iter()
+                .filter(|w| w.kind == crate::shade::window::WindowKind::Widget)
+                .map(|w| w.id)
+                .collect();
+            for wid in widget_ids {
+                crate::shade::widgets::push_event(wid.0, Event::MouseButton {
+                    button: MouseButton::Middle,
                     down:   false,
                     x:      mx,
                     y:      my,
