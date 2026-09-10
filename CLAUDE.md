@@ -48,7 +48,17 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-10 · beak 0.160.0 · Kernel 0.335.0** (Rest: `git log`)
+**Stand 2026-09-10 · beak 0.162.0 · Kernel 0.335.0** (Rest: `git log`)
+
+**0.161–0.162: und dann war die Umrechnung selbst dran.** beak legt in ganzen
+Zahlen aus, CSS rechnet in Brüchen — jedes `as i32` schnitt ab, und das
+ADDIERT sich, weil jeder Kasten auf der Unterkante des vorigen aufsetzt (8 px
+bis zum Seitenende). Jetzt wird gerundet, an allen 53 Stellen: **nur die
+Hälfte zu ändern ist schlimmer als gar nichts** — `CSS2/floats-019` stellt
+`padding-top: 1.1in` gegen `margin: 1.1in`, und ein gerundeter Rand neben
+einer abgeschnittenen Polsterung ergibt 106 gegen 105. Dazu: `smaller` und
+`larger` sind eine STUFE der Skala (/1,2 und ×1,2), nicht 0,85 und 1,15.
+Seitenversatz danach: **1 px** statt 8.
 
 **0.157–0.160: der Randzusammenfall, das UA-Blatt und der Tabellenkasten.**
 Drei Funde aus einer Kette. Erst `min-height`: es sperrt den Schlussrand
