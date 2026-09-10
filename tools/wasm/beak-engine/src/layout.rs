@@ -4000,12 +4000,18 @@ family: ps.family,
         };
 
         // `<hr>` renders a rule at the content top.
+        //
+        // ZWEI Pixel hoch, nicht drei: §15.3.3 gibt der Linie `height: 0` und
+        // einen 1-px-`inset`-Rahmen, also liegen Ober- und Unterkante direkt
+        // aneinander. Wir hatten einen 3-px-Kasten mit der Linie in der Mitte
+        // — jede ungestaltete Seite war unter jedem `<hr>` um 1 px verschoben,
+        // und die Linie selbst stand einen Pixel zu tief.
         if st.is_rule {
             let y = prov_top_y + bt + pt;
             if !st.hidden && !st.transparent {
-                self.ops.push(DrawOp::Rect { x: content_x, y: y + 1, w: content_w.max(1), h: 1, color: self.theme.rule.into() });
+                self.ops.push(DrawOp::Rect { x: content_x, y, w: content_w.max(1), h: 2, color: self.theme.rule.into() });
             }
-            return BoxOut { bottom: y + 3 + pb, top_y: prov_top_y, open: Collapse::one(if isolated { 0.0 } else { st.margin_bottom }), through: false, box_x: box_left, box_w };
+            return BoxOut { bottom: y + 2 + pb, top_y: prov_top_y, open: Collapse::one(if isolated { 0.0 } else { st.margin_bottom }), through: false, box_x: box_left, box_w };
         }
         // The `display:list-item` marker box, outside the content edge.
         // `list-style-type:none` generates none at all — Wikipedia's nav/TOC
