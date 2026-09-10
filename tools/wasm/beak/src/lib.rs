@@ -154,6 +154,8 @@ unsafe extern "C" {
     /// Start a newline-separated list of URLs in one call, multiplexed over
     /// HTTP/2 where the host offers it. Same handle discipline as
     /// `npk_http_begin`.
+    fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
     fn npk_http_begin_many(urls_ptr: i32, urls_len: i32, out_max: i32) -> i32;
     /// Wie oben, aber mit einer Keks-Zeile JE ADRESSE (durch `\n` getrennt,
     /// leere Zeilen zaehlen mit). Seit Kernel 0.333.0.
@@ -1267,6 +1269,54 @@ fn nav_fail(url: &str) {
 
 /// File whatever `Set-Cookie` the response carried.
 ///
+/// Wo die dauerhaften Kekse liegen.
+///
+/// **Im PRIVATEN Bereich, nicht in `sys/config/beak`.** Ein Keks ist keine
+/// Einstellung, er IST die Anmeldung — und `npk_fetch` prueft die
+/// Kapabilitaet und danach jeden Pfad, also haette jede App mit READ alle
+/// Sitzungen der Maschine lesen koennen. `priv/<modul>/…` ist der einzige
+/// Ort, den eine Kapabilitaet nicht aufmacht: der Name entscheidet, und den
+/// vergibt der Kernel. beak behaelt dadurch `RENDER | CANVAS | NET` und
+/// braucht fuer den eigenen Zustand kein Recht am Speicher der Maschine.
+const COOKIE_FILE: &str = "priv/beak/cookies";
+const COOKIE_CAP: usize = 96 * 1024;   // 256 Kekse passen weit darunter
+static mut COOKIE_BUF: [u8; COOKIE_CAP] = [0; COOKIE_CAP];
+
+/// Die gespeicherten Kekse ins Glas — einmal beim Start.
+fn cookies_restore() {
+    let now = unsafe { npk_unix_time() };
+    let p = core::ptr::addr_of_mut!(COOKIE_BUF) as *mut u8;
+    let n = unsafe {
+        npk_fetch(COOKIE_FILE.as_ptr() as i32, COOKIE_FILE.len() as i32,
+                  p as i32, COOKIE_CAP as i32)
+    };
+    // Keine Datei ist der Normalfall beim ersten Start, kein Fehler.
+    if n <= 0 { return }
+    let bytes = unsafe { core::slice::from_raw_parts(p as *const u8, n as usize) };
+    let Ok(text) = core::str::from_utf8(bytes) else {
+        log("[beak] cookies: gespeicherte Datei ist kein UTF-8 — uebergangen");
+        return;
+    };
+    let got = cookies::load(text, now);
+    if got > 0 {
+        log(&alloc::format!("[beak] cookies: {got} aus dem Speicher zurueck"));
+    }
+}
+
+/// Die dauerhaften Kekse auf die Platte. Sitzungskekse bleiben draussen —
+/// `Jar::serialize` entscheidet das, nicht diese Stelle.
+fn cookies_persist() {
+    let now = unsafe { npk_unix_time() };
+    let text = cookies::serialize(now);
+    let r = unsafe {
+        npk_store(COOKIE_FILE.as_ptr() as i32, COOKIE_FILE.len() as i32,
+                  text.as_ptr() as i32, text.len() as i32)
+    };
+    if r < 0 {
+        log("[beak] cookies: konnten nicht gespeichert werden");
+    }
+}
+
 /// Cookies are scoped to where the response CAME from, after redirects —
 /// filing them against the URL we asked for would scope a login cookie to the
 /// wrong host.
@@ -1284,6 +1334,9 @@ fn file_cookies(asked: &str) {
     cookies::store(&from, h, now);
     let after = cookies::count();
     if after != before || h.to_ascii_lowercase().contains("set-cookie") {
+        // Nur wenn sich wirklich etwas geaendert hat — sonst schriebe jede
+        // Antwort dieselbe Datei neu.
+        cookies_persist();
         let mut m = String::from("[beak] cookies: ");
         push_i64(&mut m, after as i64);
         m.push_str(" held");
@@ -1812,6 +1865,9 @@ fn sync_cookies(sess: &mut beak_engine::js::Session) {
         cookies::store_from_script(url, decl, now);
     }
     if !sets.is_empty() {
+        // Ein Keks per Skript ist so dauerhaft wie einer per Kopfzeile —
+        // `document.cookie = "…; expires=…"` ist genau derselbe Vertrag.
+        cookies_persist();
         let mut m = String::from("[beak] cookies: Seite setzte ");
         push_i64(&mut m, sets.len() as i64);
         m.push_str(", ");
@@ -4619,6 +4675,10 @@ pub extern "C" fn _start() {
     // Lend the engine our tick source so it can report the per-phase split.
     engine.set_clock(|| unsafe { npk_ticks() } as u64);
     engine.set_theme(query_theme());
+    // Die Kekse der letzten Sitzungen zurueck ins Glas, BEVOR die erste
+    // Anfrage rausgeht — sonst laedt die Startseite abgemeldet und meldet
+    // sich erst beim zweiten Klick wieder an.
+    cookies_restore();
     log("[beak] engine ready");
 
     // Engine is up — fetch the launch URL now (if we were opened with one).

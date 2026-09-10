@@ -2665,6 +2665,81 @@ fn cleanup_instance_state(state: &mut HostState) {
 /// anchor and silently authenticate any server it likes. Both directories
 /// are read-only to apps for the same reason — writing them is a
 /// privilege escalation, not a file operation.
+/// Das Modul, dem dieser Pfad GEHOERT — oder `None`, wenn er niemandem
+/// gehoert (also allen).
+///
+/// **`priv/<modul>/…` ist der einzige Ort im Speicher, den eine
+/// Kapabilitaet nicht aufmacht.** Ueberall sonst gilt: wer READ hat, liest;
+/// wer WRITE hat, schreibt. Hier nicht — hier entscheidet der NAME, und den
+/// vergibt der Kernel, nicht das Modul. Auch ein Programm mit allen Rechten
+/// kommt in einen fremden privaten Bereich nicht hinein.
+///
+/// **Warum es das braucht.** beak muss seine Kekse ueber einen Neustart
+/// retten, sonst ist jede Anmeldung eine Sitzung lang. Ein Keks ist aber
+/// keine Datei wie andere: er IST die Anmeldung. In `sys/config/beak`
+/// abgelegt haette ihn jede App mit READ lesen koennen — `npk_fetch` prueft
+/// die Kapabilitaet und danach jeden Pfad —, und damit waere aus „Kekse
+/// bleiben erhalten" ein Weg geworden, alle Sitzungen der Maschine
+/// abzugreifen. Das ist keine Datei-Frage, das ist eine Rechte-Frage.
+///
+/// Die Regel ist bewusst symmetrisch (Lesen, Schreiben, Auflisten, Loeschen,
+/// Umbenennen, Kopieren): eine Grenze, die nur eine Richtung kennt, ist
+/// keine. Und sie gilt fuer JEDE App, nicht nur fuer beak — spell, tune und
+/// loft haben denselben Bedarf.
+///
+/// Preis, und er ist beabsichtigt: der Dateimanager sieht diese Ordner
+/// nicht. Ein privater Bereich, den ein anderes Programm anzeigen kann, ist
+/// keiner.
+pub(crate) const PRIVATE_ROOT: &str = "priv";
+
+pub(crate) fn private_area_owner(name: &str) -> Option<&str> {
+    // **Ueber SEGMENTE, nicht ueber Praefixe.** `privat/x` ist nicht
+    // `priv/x`, `priv//beak/x` ist es sehr wohl, und das Vergessen des
+    // Trenners ist die Art, wie diese Sorte Wache ueblicherweise leckt
+    // (siehe `is_trust_critical_path` daneben). npkFS normalisiert nicht —
+    // `clean_path` schneidet nur die Raender —, also normalisiert die Wache.
+    let mut segs = name.split('/').filter(|s| !s.is_empty() && *s != ".");
+    if segs.next() != Some(PRIVATE_ROOT) { return None }
+    // Ein `..` unter `priv/` ist kein Versehen. Der Besitzer wird dann zur
+    // leeren Zeichenkette, und die ist kein Modulname — es kommt also
+    // NIEMAND hinein, auch der rechtmaessige Besitzer nicht. Die Absage in
+    // die sichere Richtung.
+    if name.split('/').any(|s| s == "..") { return Some("") }
+    match segs.next() {
+        Some(owner) => Some(owner),
+        // `priv` allein ist der Ordner ueber allen privaten Bereichen: er
+        // gehoert niemandem, und Auflisten darf man ihn. Was DARIN steht,
+        // filtert `npk_fs_list` Eintrag fuer Eintrag.
+        None => None,
+    }
+}
+
+/// Darf `module` diesen Pfad anfassen? Fuer alles ausserhalb von `priv/`
+/// immer ja — dort entscheiden weiter die Kapabilitaeten.
+pub(crate) fn private_area_allows(name: &str, module: &str) -> bool {
+    match private_area_owner(name) {
+        Some(owner) => owner == module,
+        None => true,
+    }
+}
+
+/// Ist das der EIGENE private Bereich dieses Moduls?
+///
+/// **Dann braucht es keine Kapabilitaet.** Das ist der Punkt, an dem
+/// „Kapabilitaeten, keine Berechtigungen" etwas Konkretes heisst: die
+/// Faehigkeit, den eigenen Zustand ueber einen Neustart zu retten, ist NICHT
+/// dieselbe wie die Faehigkeit, den Speicher der Maschine zu lesen. beak
+/// traegt `RENDER | CANVAS | NET` und soll genau das behalten — ein Browser
+/// mit Lese- und Schreibrecht auf alles ist die Sorte Programm, gegen die
+/// dieses System gebaut ist. Trotzdem muss er seine Kekse behalten duerfen.
+///
+/// Der Name ist die Berechtigung, und den Namen vergibt der Kernel: ein
+/// Modul kann `priv/<sich selbst>` nicht verlassen und den eines anderen
+/// nicht betreten, ganz gleich, was in seinem `.npk.caps` steht.
+pub(crate) fn is_own_private(name: &str, module: &str) -> bool {
+    !module.is_empty() && private_area_owner(name) == Some(module)
+}
+
 fn is_trust_critical_path(name: &str) -> bool {
     let c = name.trim_matches('/');
     if c == "sys/wasm" || c.starts_with("sys/wasm/") {

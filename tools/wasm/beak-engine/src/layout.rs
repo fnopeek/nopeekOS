@@ -13690,18 +13690,27 @@ fn dbg_wiki_shape() {
         assert_eq!(rects(&focused).len(), rects(&l).len() + 4 + 1, "ring plus caret");
     }
 
+    /// **Das Zeichen ist ein HAKEN, kein Quadrat.** Bis 0.149.0 stand hier
+    /// „the tick is one filled rect" und der Test hatte recht — gemalt wurde
+    /// ein gefuelltes Quadrat, also dasselbe Zeichen wie beim Radioknopf,
+    /// nur eckig. Chromium daneben gestellt zeigte den Unterschied. Der Test
+    /// prueft jetzt, was die Form BEDEUTET, statt wie viele Rechtecke sie
+    /// kostet: ohne Haken kein `Check`, mit Haken genau einer.
     #[test]
     fn checkbox_paints_its_mark_only_when_checked() {
+        let checks = |l: &Layout| {
+            l.ops.iter().filter(|o| matches!(o, DrawOp::Check { .. })).count()
+        };
         let html = "<body><form action=/s><input type=checkbox name=a></form></body>";
         let l = lay(html, 800);
         let seq = l.controls[0].seq;
-        let unchecked = rects(&l).len();
+        assert_eq!(checks(&l), 0, "ein leeres Kaestchen traegt kein Zeichen");
         let mut st = FormState::default();
         st.set_value(seq, String::new());
         let f = crate::forms::collect(&dom::parse(html));
         st.toggle(&f, seq);
         let l2 = lay_forms(html, 800, &st);
-        assert_eq!(rects(&l2).len(), unchecked + 1, "the tick is one filled rect");
+        assert_eq!(checks(&l2), 1, "angekreuzt: genau ein Haken");
     }
 
     #[test]
