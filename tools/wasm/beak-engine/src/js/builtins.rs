@@ -2563,6 +2563,58 @@ pub fn make_realm() -> Realm {
         global.borrow_mut().define("crypto", Prop::builtin(Value::Obj(crypto)));
     }
 
+    // ── $262 ─────────────────────────────────────────────────────────────
+    //
+    // **Das Wirtsobjekt des Konformanzlaeufers, und es erscheint nur, wenn
+    // der Wirt es bestellt hat** (`js::test262::enable`) — genau wie `crypto`
+    // nur erscheint, wenn es eine echte Zufallsquelle gibt. Eine SEITE darf
+    // `$262` nie sehen: `evalScript` waere ein zweiter Weg, Code an der
+    // Skript-Zustellung vorbei laufen zu lassen, und `detachArrayBuffer` zieht
+    // fremden Sichten den Speicher weg. Was fehlt und warum, steht im Kopf von
+    // `js/test262.rs`.
+    if super::test262::enabled() {
+        let h = new_obj(Some(object_proto.clone()));
+        h.borrow_mut().define("global", Prop::builtin(Value::Obj(global.clone())));
+        // Den Puffer abtrennen. Der Motor kennt den Zustand laengst
+        // (`BufData::detached`, mit einem Kommentar, der genau diesen Haken
+        // nennt) — es fehlte nur, wer ihn setzt. Die Bytes fallen MIT weg:
+        // ein abgetrennter Puffer haelt keinen Speicher mehr fest.
+        def(&h, "detachArrayBuffer", |i, _, a| {
+            let Some(Value::Obj(o)) = a.first() else {
+                return i.type_err("$262.detachArrayBuffer: not an ArrayBuffer");
+            };
+            let ObjKind::Buffer(b) = &o.borrow().kind else {
+                return i.type_err("$262.detachArrayBuffer: not an ArrayBuffer");
+            };
+            b.detached.set(true);
+            b.bytes.borrow_mut().clear();
+            Ok(Value::Undefined)
+        }, 1, fp);
+        // `evalScript` ist SKRIPT-Code im globalen Bereich, nicht `eval`:
+        // `var` und Funktionsdeklarationen werden zu Eigenschaften des
+        // globalen Objekts, `let`/`const` landen im globalen lexikalischen
+        // Bereich und ueberleben das Skript. Genau das tut `run_program` —
+        // es ist derselbe Weg, den der Laeufer fuer den Test selbst faehrt.
+        def(&h, "evalScript", |i, _, a| {
+            let src = match a.first() {
+                Some(Value::Str(s)) => s.clone(),
+                Some(v) => i.to_string(v)?,
+                None => return Ok(Value::Undefined),
+            };
+            let prog = match super::parser::parse(&src, false) {
+                Ok(p) => p,
+                Err(e) => return Err(i.throw_kind("SyntaxError", &e.msg)),
+            };
+            i.run_program(&prog)
+        }, 1, fp);
+        // **Ein ehrliches Nichts.** Die Engine zaehlt Referenzen, sie sammelt
+        // nicht; `gc()` hat nichts zu tun. test262 verlangt allein, dass der
+        // Aufruf nicht wirft — ein Test, der danach eine Freigabe PRUEFT,
+        // prueft `FinalizationRegistry`, und das steht nicht an.
+        def(&h, "gc", |_, _, _| Ok(Value::Undefined), 0, fp);
+        global.borrow_mut().define("$262", Prop::builtin(Value::Obj(h)));
+    }
+
     let nav = new_obj(Some(object_proto.clone()));
     nav.borrow_mut().define("userAgent", Prop::builtin(Value::str("Mozilla/5.0 (nopeekOS) beak")));
     nav.borrow_mut().define("language", Prop::builtin(Value::str("de")));

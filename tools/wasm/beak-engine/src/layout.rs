@@ -2969,8 +2969,17 @@ impl<'a> Ctx<'a> {
     /// normal flow. `x`/`w` are the BFC content box; `y` the static flow top.
     fn place_float(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y: i32) {
         let is_left = st.float == FloatKind::Left;
-        let ml = st.margin_left.px(w as f32).unwrap_or(0.0).max(0.0);
-        let mr = st.margin_right.px(w as f32).unwrap_or(0.0).max(0.0);
+        // **Ein Rand darf negativ sein, auch an einem Float** (CSS 2.1 §9.5 —
+        // §8.3 nimmt Floats von nichts aus). Hier stand `.max(0.0)`, und weil
+        // `layout_box` unten denselben Rand UNGEKUERZT wieder abzieht, wuchs
+        // der Kasten um genau den Betrag: Bootstraps `.form-check-input`
+        // (`float:left; margin-left:-1.5em` in einem `padding-left:1.5em`) kam
+        // 60 statt 20 px breit heraus, und mit einem eigenen
+        // Formatierungskontext daneben rutschte der ELTER um dieselben 40 px.
+        // Das ist die Bauweise jeder Checkbox und jedes Radioknopfes in
+        // Bootstrap.
+        let ml = st.margin_left.px(w as f32).unwrap_or(0.0);
+        let mr = st.margin_right.px(w as f32).unwrap_or(0.0);
         let pad_border = st.pad_left + st.pad_right + st.border_x();
         // Content width: shrink-to-fit for `auto` (min(max(min-content, avail),
         // preferred)); a definite width is used directly (may overflow the CB).
@@ -2990,9 +2999,17 @@ impl<'a> Ctx<'a> {
                 if st.box_border { (v - pad_border).max(0.0) } else { v }
             }
         };
-        // Margin-box outer width (never below 1px, never the whole CB for a
-        // shrink-to-fit float, but a definite width may exceed the CB).
-        let fw = (ceil_i32(content_w + pad_border + ml + mr)).max(1);
+        // Margin-box outer width (never the whole CB for a shrink-to-fit float,
+        // but a definite width may exceed the CB). Negative margins can pull it
+        // below zero — `layout_box` and `record_inspect` need that true value,
+        // while the float BAND keeps the old floor of 1px so that a float never
+        // reserves nothing at all.
+        let fw = ceil_i32(content_w + pad_border + ml + mr);
+        // Ein Randkasten, den negative Raender auf null oder darunter ziehen,
+        // belegt NICHTS — Chromium laesst den naechsten eigenen
+        // Formatierungskontext daneben bei x = 0 stehen, nicht einen Pixel
+        // weiter rechts.
+        let band_w = fw.max(0);
         // **A percentage width would resolve a SECOND time below.** `layout_box`
         // is handed `fw` — the float's OWN margin-box width — as its containing
         // block, which is the contract for a shrink-to-fit float and a trap for
@@ -3027,7 +3044,7 @@ impl<'a> Ctx<'a> {
         let mut fy = self.clear_below(st.clear, y).max(y);
         loop {
             let (bl, br) = self.float_band(fy, fy + 1, x, x + w);
-            if fw <= br - bl || br - bl >= w {
+            if band_w <= br - bl || br - bl >= w {
                 break;
             }
             let next = self
@@ -3049,7 +3066,7 @@ impl<'a> Ctx<'a> {
         }
         let (bl, br) = self.float_band(fy, fy + 1, x, x + w);
         // Margin-box left edge: left floats pack left, right floats pack right.
-        let mbox_left = if is_left { bl } else { (br - fw).max(bl) };
+        let mbox_left = if is_left { bl } else { (br - band_w).max(bl) };
         // The border box sits below the margin box top by `margin-top`.
         let border_top = fy + st.margin_top as i32;
         self.path.push(self.info(el));
@@ -3058,13 +3075,30 @@ impl<'a> Ctx<'a> {
         // `layout_box` re-adds margin-left + padding from `mbox_left`; passing the
         // margin-box width lets an `auto`-width child fill the shrink-to-fit box.
         let op0 = self.ops.len();
-        let border_bottom = self.layout_box(el, st, mbox_left, fw, border_top);
+        // Dieselbe Vorabaufloesung wie im Blockweg: ein Steuerelement nimmt in
+        // `layout_box_inner` die uebergebene Breite als GEGEBEN und legt seine
+        // eigenen Raender NICHT wieder drauf. Der Float-Vertrag ist aber
+        // „Randkasten hier, Rand legt `layout_box` an" — also den Rand hier
+        // anlegen und den RANDkasten uebergeben. Ohne das sass Bootstraps
+        // `.form-check-input` (`float:left; margin-left:-1.5em`) auf der
+        // Polsterkante statt am linken Rand, und die Beschriftung daneben.
+        let ctl_st;
+        let (lx, lw, st) = if crate::forms::kind_of(el).is_some() {
+            let mut s = *st;
+            s.margin_left = Len::Px(0.0);
+            s.margin_right = Len::Px(0.0);
+            ctl_st = s;
+            (mbox_left + ml as i32, ceil_i32(content_w + pad_border).max(1), &ctl_st)
+        } else {
+            (mbox_left, fw, st)
+        };
+        let border_bottom = self.layout_box(el, st, lx, lw, border_top);
         self.record_inspect(el, st, mbox_left + ml as i32, border_top, (fw as f32 - ml - mr) as i32, border_bottom - border_top, op0);
         self.floats = saved;
         self.path.pop();
         self.floats.push(FloatRect {
             left: mbox_left,
-            right: mbox_left + fw,
+            right: mbox_left + band_w,
             top: fy,
             bottom: border_bottom + st.margin_bottom as i32,
             is_left,
@@ -3437,7 +3471,40 @@ impl<'a> Ctx<'a> {
                 let mut t = open;
                 t.add(st.margin_top);
                 let by = anchor + t.px();
-                let (bx, bw, byy) = self.avoid_floats_bfc(Some(el), &st, x, w, by);
+                let (mut bx, mut bw, byy) = self.avoid_floats_bfc(Some(el), &st, x, w, by);
+                // **Ein blockweites Steuerelement ist ein ersetzter Blockkasten**
+                // (CSS 2.1 §10.3.4): seine eigene Breite und seine eigenen
+                // Raender entscheiden. `layout_box_inner` nimmt die uebergebene
+                // Breite fuer ein Steuerelement als GEGEBEN — das ist der
+                // Vertrag der Flex-, Raster- und Zellenwege, wo der Rufer den
+                // Kasten schon aufgeloest hat. HIER ist `bw` die Breite des
+                // Umgebungskastens, und ohne diesen Schritt malte
+                // `display:block; width:100px; margin-left:50px` ueber die
+                // ganze Zeile und auf x = 0. Beide `auto`-Raender bleiben
+                // stehen: die mittige Lage loest `layout_box_inner` selbst auf.
+                let mut cst = st;
+                if crate::forms::kind_of(el).is_some() {
+                    let auto_l = matches!(st.margin_left, Len::Auto);
+                    let auto_r = matches!(st.margin_right, Len::Auto);
+                    if !(auto_l && auto_r) {
+                        let cbw = bw as f32;
+                        let ml = if auto_l { 0.0 } else { st.margin_left.px(cbw).unwrap_or(0.0) };
+                        let mr = if auto_r { 0.0 } else { st.margin_right.px(cbw).unwrap_or(0.0) };
+                        let frame = st.pad_left + st.pad_right + st.border_x();
+                        let used = match st.width {
+                            Len::Auto | Len::Intrinsic(_) => (cbw - ml - mr).max(0.0),
+                            other => {
+                                let v = other.px(cbw).unwrap_or(0.0);
+                                if st.box_border { v } else { v + frame }
+                            }
+                        };
+                        bx += ml as i32;
+                        bw = used.max(0.0) as i32;
+                        cst.margin_left = Len::Px(0.0);
+                        cst.margin_right = Len::Px(0.0);
+                    }
+                }
+                let st = cst;
                 let saved = core::mem::take(&mut self.floats);
                 let op0 = self.ops.len();
                 // **Hier NICHT aufzeichnen.** `layout_box` tut es selbst, und
@@ -8514,23 +8581,20 @@ family: st.family,
             let to_content = |px: f32| if s.box_border { (px - main_pad).max(0.0) } else { px };
             let spec = main_size.px(avail).map(to_content);
             // `intrinsic_width` reports the element's CONTENT width — its own
-            // padding and border are added by whoever lays it out. A CONTROL is
-            // the exception: it has no children to measure, so `control_box`
-            // hands back the finished box, painted with the control's own
-            // chrome and ignoring the CSS padding entirely.
+            // padding and border are added by whoever lays it out, and that
+            // holds for a CONTROL too: `control_box` hands back the finished
+            // border box, and `intrinsic_width` already takes the CSS frame
+            // back off (0.145.0, the `inline-flex` button group).
             //
-            // The flex algorithm takes bases as content sizes and removes every
-            // item's padding+border from the line once, in `resolve_flex_line`'s
-            // `fixed`. So a control has to give that back, or it reserves chrome
-            // it never uses and a growing sibling is short by exactly that much
-            // — Wikipedia's search field stopped 22px (its button's padding)
-            // before the group's right edge.
-            let control_chrome = match el.el() {
-                Some(e) if crate::forms::kind_of(e).is_some() => main_pad,
-                _ => 0.0,
-            };
-            let (pref_bb, minc_bb) = self.kid_intrinsic(el, s);
-            let (pref, minc) = ((pref_bb - control_chrome).max(0.0), (minc_bb - control_chrome).max(0.0));
+            // **Hier stand dieselbe Subtraktion ein zweites Mal.** Sie war
+            // richtig, solange `intrinsic_width` den Randkasten ungekuerzt
+            // durchreichte (0.66.0); seit 0.145.0 zieht sie denselben Betrag
+            // ein zweites Mal ab, und `resolve_flex_line` legt ihn nur EINmal
+            // wieder drauf. Jedes Steuerelement in einem Flex-Container kam so
+            // um genau seine Polsterung plus Rahmen zu schmal heraus — ein
+            // Bootstrap-Knopf 48 statt 74 px, jede `.input-group`, jede
+            // `.modal-footer`, jede `.navbar`-Suchzeile.
+            let (pref, minc) = self.kid_intrinsic(el, s);
             let base = match s.flex_basis {
                 FlexBasis::Px(p) => to_content(p),
                 FlexBasis::Pct(p) => to_content(p / 100.0 * avail),
@@ -9105,6 +9169,32 @@ impl<'a> Ctx<'a> {
             }
         };
         let outer_w = ceil_i32(content_w + pad_border + ml + mr).max(1);
+
+        // **Ein Prozent loeste sich ein ZWEITES Mal auf** — derselbe Fall, den
+        // `place_float` schon kennt und benennt: `layout_box` bekommt unten
+        // `outer_w`, den EIGENEN Randkasten dieses Elements, als
+        // Umgebungsbreite. Fuer `width: auto` ist das der Vertrag; fuer
+        // `width: 50%` ist es eine Falle — die Haelfte der Haelfte. Bootstraps
+        // `.placeholder.col-6` kam 469 statt 939 px heraus, und `col-*` auf
+        // einem `inline-block` ist ein Alltagsmuster. Gleiches fuer die beiden
+        // Grenzen.
+        let pct = |l: Len| matches!(l, Len::Pct(_) | Len::Calc { .. });
+        let resolved;
+        let st = if pct(st.width) || pct(st.min_width) || pct(st.max_width) {
+            let mut s = *st;
+            if pct(s.width) {
+                s.width = Len::Px(if s.box_border { content_w + pad_border } else { content_w });
+            }
+            for l in [&mut s.min_width, &mut s.max_width] {
+                if pct(*l) {
+                    *l = Len::Px(l.px(cbw).unwrap_or(0.0));
+                }
+            }
+            resolved = s;
+            &resolved
+        } else {
+            st
+        };
 
         let (o0, l0, c0) = (self.ops.len(), self.links.len(), self.controls.len());
         let (i0, h0) = (self.inspects.len(), self.hover_boxes.len());
@@ -13152,6 +13242,41 @@ fn dbg_wiki_shape() {
         assert_eq!(by(&rel), by(&base), "following block keeps its flow position");
     }
 
+    /// **Ein Prozent an einem `inline-block` loeste sich ZWEIMAL auf.**
+    /// `inline_block_box` reicht `layout_box` den EIGENEN Randkasten als
+    /// Umgebungsbreite — der Vertrag fuer `width: auto` und eine Falle fuer
+    /// `width: 50%`: die Haelfte der Haelfte. `place_float` kennt und benennt
+    /// denselben Fall seit 0.138.0; der Inline-Weg war der letzte, der ihn
+    /// noch hatte. Bootstraps `.placeholder.col-6` kam 469 statt 939 px.
+    #[test]
+    fn a_percentage_width_on_an_inline_block_resolves_once() {
+        let l = lay(
+            "<body><div style=\"width:800px\">\
+             <span style=\"display:inline-block; width:50%; height:10px; background:#00ff00\"></span></div></body>",
+            1000,
+        );
+        let green = rects(&l).into_iter().find(|r| r.4 == Rgb(0, 255, 0)).expect("no green box");
+        assert_eq!(green.2, 400, "50 % of 800 is 400, not 200");
+    }
+
+    /// **Ein negativer Rand verschiebt einen Float, er verbreitert ihn nicht.**
+    /// `place_float` klemmte `margin-left` mit `.max(0.0)` ab, `layout_box`
+    /// zog ihn unten ungekuerzt wieder ab — der Kasten wuchs um genau den
+    /// Betrag (60 statt 20 px). Floats sind von CSS 2.1 §8.3 nicht
+    /// ausgenommen, und `float:left; margin-left:-1.5em` ist die Bauweise
+    /// jeder Bootstrap-Checkbox.
+    #[test]
+    fn a_negative_margin_shifts_a_float_instead_of_widening_it() {
+        let l = lay(
+            "<body><div style=\"padding-left:40px\">\
+             <div style=\"float:left; margin-left:-40px; width:20px; height:20px; background:#ff0000\"></div>t</div></body>",
+            1000,
+        );
+        let red = rects(&l).into_iter().find(|r| r.4 == Rgb(255, 0, 0)).expect("no red float");
+        assert_eq!(red.2, 20, "the declared width, not width plus the margin");
+        assert_eq!(red.0, 8, "40px padding minus a 40px margin is the body's own edge");
+    }
+
     #[test]
     fn position_absolute_uses_containing_block_and_leaves_flow() {
         // The absolute badge is positioned at cb.left+left / cb.top+top; the
@@ -14105,6 +14230,57 @@ fn dbg_wiki_shape() {
         assert_eq!(l.controls[2].w, l.controls[3].w);
         assert!(l.controls[2].w > 300, "1fr column stretches the field");
         assert!(l.controls[4].y > l.controls[2].y);
+    }
+
+    /// **Ein Steuerelement im Flex behaelt seine Polsterung.** `flex_metrics`
+    /// zog Polsterung + Rahmen ein ZWEITES Mal ab (`intrinsic_width` tut es
+    /// seit 0.145.0 selbst), und `resolve_flex_line` legte sie nur einmal
+    /// wieder drauf. Gemessen wird gegen denselben Knopf AUSSERHALB eines
+    /// Flex-Containers: derselbe Text, dieselbe Polsterung, also dieselbe
+    /// Breite. Chromium sagt zu beiden 74 px; wir sagten 48 im Flex.
+    #[test]
+    fn a_control_in_a_flex_row_keeps_its_padding() {
+        let btn = "<button style=\"padding:6px 12px; border:1px solid #000\">Los</button>";
+        let plain = lay(&alloc::format!("<body><div>{btn}</div></body>"), 1000);
+        let flexed = lay(&alloc::format!("<body><div style=\"display:flex\">{btn}<span>x</span></div></body>"), 1000);
+        let (a, b) = (&plain.controls[0], &flexed.controls[0]);
+        assert!(a.w > 26, "the plain button is text plus its 26px frame, got {}", a.w);
+        assert_eq!(a.w, b.w, "a flex item is not narrower than the same control in flow");
+    }
+
+    /// **Ein blockweites Steuerelement ist ein ersetzter Blockkasten**
+    /// (CSS 2.1 §10.3.4): seine eigene Breite und sein eigener Rand
+    /// entscheiden. `layout_box_inner` nimmt die uebergebene Breite als
+    /// GEGEBEN — der Vertrag der Flex-/Raster-/Zellenwege — und `flow_children`
+    /// uebergab die Breite des UMGEBUNGSkastens: 1000 px breit auf x = 0
+    /// statt 100 px auf x = 58.
+    #[test]
+    fn a_block_level_control_uses_its_own_width_and_margin() {
+        let l = lay(
+            "<body><div><input style=\"display:block; width:100px; margin-left:50px; box-sizing:border-box\"></div></body>",
+            1000,
+        );
+        let c = &l.controls[0];
+        assert_eq!(c.w, 100, "the declared width wins over the containing block");
+        assert_eq!(c.x, 8 + 50, "margin-left moves it (8px is the body's UA margin)");
+    }
+
+    /// **Ein geflotetes Steuerelement legt seinen Rand an.** `place_float`
+    /// uebergibt den RANDkasten und verlaesst sich darauf, dass `layout_box`
+    /// den Rand anlegt — fuer ein Steuerelement tut es das nicht. Bootstraps
+    /// `.form-check-input` (`float:left; margin-left:-1.5em` in einem
+    /// `padding-left:1.5em`) sass deshalb auf der Polsterkante: jede Checkbox,
+    /// jeder Radioknopf, jeder Schalter.
+    #[test]
+    fn a_floated_control_gets_its_own_margin() {
+        let l = lay(
+            "<body><div style=\"padding-left:40px\">\
+             <input style=\"float:left; margin-left:-40px; width:20px; box-sizing:border-box\">Text</div></body>",
+            1000,
+        );
+        let c = &l.controls[0];
+        assert_eq!(c.x, 8, "the negative margin pulls it back onto the padding edge");
+        assert_eq!(c.w, 20, "and the box is the declared width, not width+margin");
     }
 
     /// A form control's chrome follows the surface it sits on. The engine runs

@@ -36,6 +36,7 @@ pub mod parser;
 pub mod promise;
 pub mod random;
 pub mod proxy;
+pub mod test262;
 pub mod url;
 pub mod xpath;
 pub mod regexp;

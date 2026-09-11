@@ -630,6 +630,10 @@ impl Vm {
                                             &chunk.names[*flags as usize])?;
                 self.push(v);
             }
+            Op::TemplateObject(t) => {
+                let v = i.template_object(&chunk.templates[*t as usize]);
+                self.push(v);
+            }
             Op::Concat(n) => {
                 let parts = self.take(*n as usize);
                 let mut out = alloc::string::String::new();
@@ -1138,6 +1142,72 @@ mod tests {
         for (k, src) in faelle.iter().enumerate() {
             let (mit, ohne) = zweimal(src);
             assert_eq!(mit, ohne, "Fall {k} laeuft mit und ohne Wegweiser auseinander: {src}");
+        }
+    }
+
+    /// Dasselbe Programm auf BEIDEN Maschinen — die Befehlsmaschine und der
+    /// Baumlaeufer muessen Zeichen fuer Zeichen dasselbe sagen.
+    fn beide(src: &str) -> (alloc::string::String, alloc::string::String) {
+        let lauf = |vm: bool| {
+            let mut i = super::Interp::new();
+            i.vm_off = !vm;
+            let prog = match crate::js::parse(src, false) {
+                Ok(p) => p,
+                Err(e) => return alloc::format!("SyntaxError: {}", e.msg),
+            };
+            match i.run_program(&prog) {
+                Ok(v) => i.to_string(&v).map(|s| s.to_string())
+                          .unwrap_or_else(|_| alloc::string::String::from("?")),
+                Err(super::Abrupt::Throw(v)) => {
+                    let m = i.get(&v, "message").ok()
+                        .and_then(|m| i.to_string(&m).ok())
+                        .unwrap_or_else(|| alloc::rc::Rc::from("?"));
+                    alloc::format!("THROW {m}")
+                }
+                Err(_) => alloc::string::String::from("ABRUPT"),
+            }
+        };
+        (lauf(true), lauf(false))
+    }
+
+    /// **Getaggte Templates, auf beiden Maschinen.**
+    ///
+    /// Sie waren bis 0.166 in KEINER von beiden gebaut — der Uebersetzer sagte
+    /// `tagged-template` ab, und der Baumlaeufer dahinter warf. Damit starb
+    /// jede Seite mit lit-html, styled-components oder graphql-tag an der
+    /// ersten Zeile ihrer Bibliothek.
+    #[test]
+    fn getaggte_templates_sagen_auf_beiden_maschinen_dasselbe() {
+        let faelle: &[(&str, &str)] = &[
+            // Gekochte und ROHE Stuecke, dazu die Einsetzungen.
+            (r"function t(s,...v){return s.raw.join('|')+'#'+s.join('|')+'#'+v.join(',')+'#'+s.length}t`a${1}b\t${2}c`",
+             "a|b\\t|c#a|b\t|c#1,2#3"),
+            // `String.raw` ist die eingebaute Marke und lebt genau davon.
+            (r"String.raw`x\ny${5}z`", r"x\ny5z"),
+            // **Dieselbe Stelle gibt bei jeder Auswertung DENSELBEN
+            // Gegenstand** (ES 13.2.8.4) — lit-html schluesselt seinen
+            // Zwischenspeicher damit.
+            ("var a=[];for(var k=0;k<3;k++){a.push((function(s){return s})`same`)} String(a[0]===a[1] && a[1]===a[2])", "true"),
+            // Zwei verschiedene Stellen mit demselben Text sind es NICHT.
+            ("var f=function(s){return s};String(f`same` !== f`same`)", "true"),
+            // Eingefroren, und `raw` ist nicht aufzaehlbar.
+            ("function t(s){return [Object.isFrozen(s),Object.isFrozen(s.raw),Object.keys(s).join(',')].join('|')}t`q${1}r`", "true|true|0,1"),
+            // Der Empfaenger gehoert zum Aufruf: `o.t`x`` ruft mit `o`.
+            ("var o={n:7,t(s){return this.n}};String(o.t`q`)", "7"),
+            // Eine ungueltige Flucht macht `cooked` undefined und laesst `raw`
+            // stehen — NUR mit Marke.
+            (r"function t(s){return String(s[0])+'/'+s.raw[0]}t`\xg`", r"undefined/\xg"),
+            (r"function t(s){return String(s[0])}t`\1`", "undefined"),
+            // OHNE Marke ist dieselbe Flucht ein Fruehfehler.
+            (r"`a\xgb`", "SyntaxError: invalid escape sequence in template"),
+            (r"`a\1b`", "SyntaxError: invalid escape sequence in template"),
+            // `\0` ohne Ziffer dahinter bleibt erlaubt.
+            (r"`a\0b`.length.toString()", "3"),
+        ];
+        for (k, (src, want)) in faelle.iter().enumerate() {
+            let (vm, walker) = beide(src);
+            assert_eq!(vm, walker, "Fall {k}: die zwei Maschinen sagen Verschiedenes: {src}");
+            assert_eq!(&vm, want, "Fall {k}: {src}");
         }
     }
 

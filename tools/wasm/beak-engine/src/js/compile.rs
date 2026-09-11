@@ -1308,7 +1308,48 @@ impl Compiler {
                 self.chunk.emit(Op::Closure(i));
                 Ok(())
             }
-            Expr::TaggedTemplate { .. } => Err(Unsupported("tagged-template")),
+            // `tag`a${x}b`` — dieselbe Stapelform wie ein gewoehnlicher
+            // Aufruf (erst der Gerufene, dann der Empfaenger, dann die
+            // Argumente), nur dass Argument 0 der Vorlagen-Gegenstand ist.
+            Expr::TaggedTemplate { tag, quasis, exprs } => {
+                let mut named = u32::MAX;
+                match &**tag {
+                    Expr::Member { obj, prop, optional: false } => match &**prop {
+                        MemberProp::Ident(_) | MemberProp::Private(_) => {
+                            named = self.member_name(prop);
+                            self.expr(obj)?;
+                            self.chunk.emit(Op::Dup);
+                            self.chunk.emit(Op::GetProp(named));
+                            self.chunk.emit(Op::Swap);
+                        }
+                        MemberProp::Computed(k) => {
+                            self.expr(obj)?;
+                            self.chunk.emit(Op::Dup);
+                            self.expr(k)?;
+                            self.chunk.emit(Op::GetIndex);
+                            self.chunk.emit(Op::Swap);
+                        }
+                    },
+                    // `super.tag`x`` und `a?.tag`x`` haben je eigene Regeln
+                    // fuer den Empfaenger; benannt absagen ist ehrlicher, als
+                    // sie mit `undefined` zu rufen. Der Baumlaeufer kann beide.
+                    Expr::Super | Expr::Member { optional: true, .. } => {
+                        return Err(Unsupported("tagged-template-callee"));
+                    }
+                    other => {
+                        if let Expr::Ident(n) = other { named = self.chunk.name(n); }
+                        self.expr(other)?;
+                        let k = self.chunk.konst(Value::Undefined);
+                        self.chunk.emit(Op::Const(k));
+                    }
+                }
+                let t = self.chunk.template(quasis.clone());
+                self.chunk.emit(Op::TemplateObject(t));
+                for x in exprs { self.expr(x)?; }
+                let argc = (exprs.len() + 1) as u16;
+                self.chunk.emit(Op::Call { argc, name: named });
+                Ok(())
+            }
             Expr::Class(c) => {
                 let k = self.chunk.class(c.clone());
                 self.chunk.emit(Op::Class(k));

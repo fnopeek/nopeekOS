@@ -445,10 +445,29 @@ impl<'a> Lexer<'a> {
                 // Ein getaggtes Template darf ungueltige Fluchten enthalten;
                 // dann ist `cooked` undefined und nur `raw` gilt (ES2018).
                 // Deshalb wird hier NICHT abgebrochen.
+                //
+                // **In einem Template sind die alten Zahlfluchten verboten**
+                // (ES 12.9.6, TemplateCharacter): `\1`–`\9` gar nicht, und
+                // `\0` nur, solange keine Ziffer folgt. `escape()` nimmt sie
+                // an, weil sie in einer gewoehnlichen Zeichenkette im lockeren
+                // Modus erlaubt sind — die Stelle, die den Unterschied kennt,
+                // ist diese hier.
+                let nx = self.at(self.pos);
+                if matches!(nx, b'1'..=b'9')
+                    || (nx == b'0' && (self.at(self.pos + 1) as char).is_ascii_digit()) {
+                    bad = true;
+                }
+                // Die Stelle der FLUCHTKENNUNG merken. Nach einem Fehler steht
+                // `self.pos` irgendwo mitten in der halbgelesenen Folge —
+                // `+= 1` von dort aus frass bei `` `\u0` `` das schliessende
+                // Akzentzeichen und machte aus einer ungueltigen Flucht ein
+                // „unterminated template". Aufgesetzt wird direkt hinter der
+                // Kennung; der Rest ist gewoehnlicher Text.
+                let after_slash = self.pos;
                 match self.escape() {
                     Ok(Some(c)) => cooked.push(c),
                     Ok(None) => {}
-                    Err(_) => { bad = true; self.pos += 1; }
+                    Err(_) => { bad = true; self.pos = after_slash + 1; }
                 }
                 continue;
             }

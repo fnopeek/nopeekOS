@@ -52,7 +52,6 @@ impl Interp {
                 }
                 Ok(Value::string(s))
             }
-            Expr::TaggedTemplate { .. } => self.type_err("tagged templates are not supported"),
             Expr::Seq(list) => {
                 let mut last = Value::Undefined;
                 for x in list { last = self.eval(x, env)?; }
@@ -126,6 +125,34 @@ impl Interp {
                 Ok(Value::Undefined)
             }
             Expr::ImportCall(_) => self.type_err("dynamic import is not supported"),
+            // `tag`a${x}b`` (ES 13.2.8.6): die Marke bekommt den
+            // Vorlagen-Gegenstand als erstes Argument und danach die
+            // Einsetzungen. **Der Empfaenger gehoert dazu** — `o.tag`x``
+            // ruft mit `o` als `this`, genau wie ein gewoehnlicher Aufruf;
+            // `String.raw` ist die eingebaute Marke, die das ausnutzt.
+            Expr::TaggedTemplate { tag, quasis, exprs } => {
+                let (this_val, f) = match &**tag {
+                    Expr::Member { obj, prop, optional } => {
+                        let base = self.eval(obj, env)?;
+                        if *optional && matches!(base, Value::Undefined | Value::Null) {
+                            return Ok(Value::Undefined);
+                        }
+                        let key = self.member_key2(prop, env)?;
+                        let f = self.get(&base, &key)?;
+                        if !self.is_callable(&f) {
+                            return Err(self.not_a_function(Some(&key)));
+                        }
+                        (base, f)
+                    }
+                    other => (Value::Undefined, self.eval(other, env)?),
+                };
+                if !self.is_callable(&f) {
+                    return self.type_err("tag is not a function");
+                }
+                let mut a = alloc::vec![self.template_object(quasis)];
+                for x in exprs { let v = self.eval(x, env)?; a.push(v); }
+                self.call(&f, this_val, &a)
+            }
             Expr::Yield { .. } => self.type_err("generators are not supported"),
             Expr::Await(_) => self.type_err("await is not supported"),
         }
