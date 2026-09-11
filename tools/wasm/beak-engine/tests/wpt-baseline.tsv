@@ -395,7 +395,7 @@ PASS	CSS2/blocks-016.xht
 PASS	CSS2/blocks-018.xht
 PASS	CSS2/blocks-019.xht
 FAIL	CSS2/blocks-025.xht
-FAIL	CSS2/blocks-026.xht
+PASS	CSS2/blocks-026.xht
 PASS	CSS2/blocks-and-strings-001.xht
 PASS	CSS2/border-005.xht
 PASS	CSS2/border-006.xht
@@ -5763,7 +5763,7 @@ PASS	css-values/viewport-units-scrollbars-scroll-vw-001.html
 PASS	css-values/viewport-units-scrollbars-scroll-vw-002.html
 PASS	css-values/viewport-units-scrollbars-scroll-vw-003.html
 PASS	css-values/viewport-units-writing-mode-font-size.html
-INCONCLUSIVE	html-forms/block-in-inline.html
+PASS	html-forms/block-in-inline.html
 PASS	html-forms/centering-001.html
 PASS	html-forms/centering-002.html
 PASS	html-forms/centering-003.html
@@ -5776,7 +5776,7 @@ PASS	html-forms/input-date-baseline.html
 PASS	html-forms/input-date-content-size.html
 PASS	html-forms/input-date-whitespace-pre-1.html
 PASS	html-forms/input-date-whitespace-pre-2.html
-PASS	html-forms/input-number-text-size.tentative.html
+FAIL	html-forms/input-number-text-size.tentative.html
 PASS	html-forms/input-password-background-suppresses-appearance.html
 PASS	html-forms/input-radio-no-centering.html
 PASS	html-forms/input-text-overflow-ellipsis-focused.html

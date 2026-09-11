@@ -4542,6 +4542,17 @@ family: st.family,
         let font = self.fonts.pick(st.bold, st.italic, st.mono, st.family);
         let size = st.font_px;
         let ch_w = measure(font, "0", size).max(1.0);
+        // **Die Eigenbreite rechnet mit der MITTLEREN Zeichenbreite**, nicht
+        // mit der Breite der Null, und ein `<input>` legt einmal den
+        // Unterschied zur BREITESTEN drauf — Platz, damit ein getipptes breites
+        // Zeichen das Feld nicht sofort rollen laesst. Chromium tut genau das;
+        // nachgemessen ueber fuenf Stuetzstellen (`size` 1, 5, 10, 20, 40), und
+        // erst die dritte sagt, ob die Gerade stimmt: zwei Punkte passen auf
+        // jede. Ohne das war ein nacktes Feld 217 statt 256 px breit.
+        let (avg_w, extra_w) = match font.char_widths(size) {
+            Some((a, m)) => (a.max(1.0), (m - a).max(0.0)),
+            None => (ch_w, 0.0),
+        };
         // Die Zeilenhoehe, die die SEITE gesetzt hat, sonst die der Schrift.
         // Ohne das war jedes Feld so hoch wie sein Schriftbild: Bootstrap gibt
         // `.form-control` `line-height: 1.5`, und ein Feld, das 24 statt 14 px
@@ -4585,12 +4596,19 @@ family: st.family,
         //
         // Die UA-Untergrenze bleibt: ein Knopf ohne eigene Polsterung soll
         // nicht am Text kleben, und `+ 4` ist, was er dafuer immer hatte.
-        let ua_min = if kind.is_submit() || kind == ControlKind::File {
-            CTL_PAD_X + 4
-        } else if matches!(kind, ControlKind::Checkbox | ControlKind::Radio) {
-            0
-        } else {
-            CTL_PAD_X
+        let ua_min = match kind {
+            ControlKind::Checkbox | ControlKind::Radio => 0,
+            // Der Pfeilstreifen traegt den Abstand nach rechts, und links
+            // sitzt die Beschriftung am Rahmen — gegen Chromium gemessen.
+            ControlKind::Select => 0,
+            ControlKind::File => CTL_PAD_X + 4,
+            // **Ein TEXTfeld polstert waagrecht zwei Pixel, ein Knopf sechs.**
+            // Beide ueber einen Kamm zu scheren machte jedes nackte Feld acht
+            // Pixel zu breit — und weil ein Rahmenwerk seinen Feldern immer
+            // eigene Polsterung gibt, sagte darueber weder Bootstrap noch
+            // Tailwind etwas.
+            ControlKind::Text | ControlKind::Password | ControlKind::TextArea => 2,
+            _ => CTL_PAD_X,
         };
         let pad_l = (px_of(st.pad_left)).max(ua_min);
         let pad_r = (px_of(st.pad_right)).max(ua_min);
@@ -4601,13 +4619,25 @@ family: st.family,
         // am Rahmen klebt, und hier gibt es keinen Text. Mit ihr kam ein
         // `height: 200px` grosses Kaestchen 206 px hoch heraus.
         let box_like = matches!(kind, ControlKind::Checkbox | ControlKind::Radio);
-        let ua_pad_y = if box_like { 0 } else { CTL_PAD_Y };
+        // Ein `<select>` hat KEINE senkrechte UA-Polsterung — seine zwei
+        // zusaetzlichen Pixel stecken im Widget selbst (unten in der
+        // Kastenrechnung). Mit einer Untergrenze hier waeren sie doppelt da,
+        // sobald die Seite selbst polstert: 34 statt 36.
+        let ua_pad_y = match kind {
+            ControlKind::Checkbox | ControlKind::Radio => 0,
+            // Sein Abstand steckt im Widget, nicht in der Polsterung.
+            ControlKind::Select => 0,
+            // Ein `<textarea>` polstert zwei Pixel, ein Feld einen.
+            ControlKind::TextArea => 2,
+            _ => CTL_PAD_Y,
+        };
+        let _ = box_like;
         let pad_t = (px_of(st.pad_top)).max(ua_pad_y);
         let pad_b = (px_of(st.pad_bottom)).max(ua_pad_y);
         // The frame is part of the box, and it is the page's when the page
         // styled it — a control with `border: none` is exactly as tall as its
         // content, and a `border: 2px` one two pixels taller per side.
-        let border = ctl_border(st);
+        let border = ctl_border(st, kind);
         let (bx, by) = (border[1].w + border[3].w, border[0].w + border[2].w);
         // HTML §button-layout: a `<button>` is not a label — its children are
         // page content. Laid out here as their own block formatting context,
@@ -4620,28 +4650,52 @@ family: st.family,
         let content = self.control_content(el, st, kind, avail, pad_l + pad_r + bx, def_ch);
         let (mut w, mut h) = match kind {
             ControlKind::Checkbox | ControlKind::Radio => {
-                let s = (size * 0.9).max(12.0) as i32;
-                (s, s)
+                // **13 px, fest.** Das Zeichen waechst NICHT mit der Schrift —
+                // Chromium skaliert es mit dem Zoom, nicht mit `font-size`,
+                // und eine Seite, die ihre Kaestchen gross will, schreibt eine
+                // Breite hin (`width: 24px`). Die alte Formel `font-size *
+                // 0.9` gab bei 16 px ein 14er Kaestchen.
+                let _ = size;
+                (13, 13)
             }
             ControlKind::TextArea => {
-                let cols = el.attr("cols").and_then(|c| c.trim().parse::<f32>().ok()).unwrap_or(30.0);
-                let rows = el.attr("rows").and_then(|r| r.trim().parse::<f32>().ok()).unwrap_or(3.0);
+                // **Die Vorgaben stehen in HTML §4.10.11 und lauten 20 und 2**,
+                // nicht 30 und 3 — ein nacktes `<textarea>` kam damit 90 px zu
+                // breit und 20 px zu hoch heraus. Dazu der Streifen fuer die
+                // Rollleiste: er ist da, auch wenn nichts zu rollen ist, und
+                // geht in die Eigenbreite ein (Chromium ebenso).
+                let cols = el.attr("cols").and_then(|c| c.trim().parse::<f32>().ok()).unwrap_or(20.0);
+                let rows = el.attr("rows").and_then(|r| r.trim().parse::<f32>().ok()).unwrap_or(2.0);
                 (
-                    (cols * ch_w) as i32 + pad_l + pad_r + bx,
-                    (rows * line) as i32 + pad_t + pad_b + by,
+                    (cols * avg_w) as i32 + pad_l + pad_r + bx + CTL_SCROLLBAR,
+                    // **Jede Zeile wird fuer sich ganzzahlig.** `rows * line`
+                    // erst am Ende abzuschneiden verlor bei vier Zeilen drei
+                    // Pixel: eine Zeilenhoehe von 19,36 ist im Kasten 20, und
+                    // zwar viermal.
+                    rows as i32 * ceil_i32(line) + pad_t + pad_b + by,
                 )
             }
             ControlKind::Text | ControlKind::Password => {
                 let cols = el.attr("size").and_then(|c| c.trim().parse::<f32>().ok()).unwrap_or(20.0);
                 (
-                    (cols * ch_w) as i32 + pad_l + pad_r + bx,
+                    // Aufgerundet, nicht abgeschnitten: die Vorgabe `size=20`
+                    // fiel sonst genau einen Pixel zu schmal aus. Was bleibt,
+                    // ist ein Pixel bei sehr kleinem `size` — Chromium rundet
+                    // dort in einer eigenen Gleitkommakette, und die
+                    // nachzubauen hiesse Rundung anzupassen statt ein Modell.
+                    ceil_i32(cols * avg_w + extra_w) + pad_l + pad_r + bx,
                     ceil_i32(line) + pad_t + pad_b + by,
                 )
             }
             ControlKind::Select => (
                 ceil_i32(measure(font, &text, size)) + pad_l + pad_r
                     + if st.appearance_none { 0 } else { CTL_ARROW } + bx,
-                ceil_i32(line) + pad_t + pad_b + by,
+                // Ein `<select>` haelt ueber und unter seiner Beschriftung je
+                // einen Pixel frei — Teil des Widgets, INNEN, also auch dann
+                // da, wenn die Seite selbst polstert. `appearance: none` nimmt
+                // ihn mit dem Rest des Widgets weg.
+                ceil_i32(line) + if st.appearance_none { 0 } else { 2 }
+                    + pad_t + pad_b + by,
             ),
             _ => (
                 ceil_i32(measure(font, &text, size)) + pad_l + pad_r + bx,
@@ -4677,7 +4731,11 @@ family: st.family,
         // height (Codex: `min-height: 32px`). Without it the control keeps its
         // intrinsic line height and sits short inside its own flex row.
         if let Some(mn) = vert_len(st.min_height, cbh) {
-            h = h.max(if st.box_border { mn as i32 } else { mn as i32 + 2 * CTL_PAD_Y + by });
+            // Ohne `border-box` ist `min-height` eine INHALTShoehe, und
+            // darauf kommt die WIRKLICHE Polsterung — nicht die
+            // UA-Untergrenze. Mit ihr kam ein `min-height: 44px` hohes Feld
+            // 48 statt 58 px heraus, sobald die Seite selbst polsterte.
+            h = h.max(if st.box_border { mn as i32 } else { mn as i32 + pad_t + pad_b + by });
         }
         if let Some(mx) = vert_len(st.max_height, cbh) {
             h = h.min(if st.box_border { mx as i32 } else { mx as i32 + 2 * CTL_PAD_Y + by });
@@ -7079,15 +7137,18 @@ family: st.family,
                 dx = (w - ctl.w) / 2;
             } else if !matches!(kind, ControlKind::Checkbox | ControlKind::Radio) {
                 ctl.w = w.max(8);
-                // `control_box` hat die Hoehe schon aufgeloest — gegen die
-                // Hoehe des Umgebungskastens, wie es sich gehoert. Hier stand
-                // `st.height.px(w)`: dieselbe Achsenverwechslung noch einmal,
-                // und dazu eine Untergrenze von 8, die ein ausdrueckliches
-                // `height: 0` ueberstimmte. Nur eine feste Laenge zaehlt hier,
-                // und sie zaehlt, wie sie dasteht.
-                if let Len::Px(hh) = st.height {
-                    ctl.h = (hh as i32).max(0);
-                }
+                // **Die Hoehe wird hier NICHT mehr angefasst.** Sie stand
+                // zuletzt als `ctl.h = st.height` da, „und sie zaehlt, wie sie
+                // dasteht" — nur zaehlt eine `Len::Px` an einem Steuerelement
+                // ohne `box-sizing: border-box` als INHALTShoehe, und
+                // `control_box` hat genau das schon aufgeloest. Der zweite
+                // Durchgang legte Polsterung und Rahmen also wieder ab: ein
+                // Flex-Item bekommt von `flex_item_style` die gestreckte Hoehe
+                // minus seinem Rahmenwerk eingetragen, und daraus wurde hier
+                // die ganze Hoehe. Ein `<input>` mit `padding: 6px 12px;
+                // border: 1px` kam in einer Flex-Zeile 20 statt 34 px hoch
+                // heraus — die Quer-Achse desselben Fehlers, den 0.166 auf der
+                // Hauptachse geschlossen hat.
             }
             let h_i = ctl.h;
             paint_control(self.fonts, self.theme, &ctl, x + dx, y, &mut self.ops, &mut self.controls);
@@ -9546,9 +9607,21 @@ enum Item {
 }
 
 // Form-control chrome metrics (px).
+//
+// **Ausgerechnet, nicht geschaetzt.** `tools/fixtures/controls.html` stellt
+// jedes Steuerelement viermal hin — nackt, nur gepolstert, nur gerahmt,
+// beides — und aus den vier Hoehen faellt jede dieser Zahlen einzeln heraus.
+// Vorher stand hier `PAD_Y = 3` und ein 1-px-Rahmen fuer alles; damit war ein
+// nacktes Feld 28 statt 26 px hoch, mit eigener Polsterung 34 statt 36, und
+// beide Fehler zeigten in verschiedene Richtungen — die Sorte, die sich in
+// einem Rahmenwerk gegenseitig zudeckt.
 const CTL_PAD_X: i32 = 6;
-const CTL_PAD_Y: i32 = 3;
-const CTL_ARROW: i32 = 14;
+const CTL_PAD_Y: i32 = 1;
+/// Der Streifen, den ein `<select>` fuer seinen Pfeil frei haelt.
+const CTL_ARROW: i32 = 20;
+/// Was ein `<textarea>` fuer seine Rollleiste reserviert — sie ist da, auch
+/// wenn nichts zu rollen ist, und geht in die Eigenbreite ein.
+const CTL_SCROLLBAR: i32 = 16;
 
 /// A measured form control, ready to place on a line and paint.
 #[derive(Clone)]
@@ -9651,13 +9724,31 @@ struct CtlSide {
 /// them, else the UA's 1px. Google wraps its search button in a bordered
 /// `<span>` and writes `border: none` on the `<input>`; painting our own frame
 /// anyway put a second rectangle 1px down and right of the first.
-fn ctl_border(st: &ComputedStyle) -> [CtlSide; 4] {
+fn ctl_border(st: &ComputedStyle, kind: ControlKind) -> [CtlSide; 4] {
     let sides = [&st.border_top, &st.border_right, &st.border_bottom, &st.border_left];
     let owned = sides.iter().any(|s| s.specified);
     // The UA frame IS part of the widget: `appearance: none` takes it with the
     // rest of it. Without this a custom checkbox came out inside a 1px box the
     // page never asked for, on top of the border it drew itself.
-    let ua_w = if st.appearance_none { 0 } else { 1 };
+    //
+    // **Und er ist nicht fuer jedes Steuerelement gleich breit** (HTML §15.5,
+    // „Form controls"): ein Feld, ein `<textarea>` und ein Knopf tragen 2 px
+    // je Seite, ein `<select>` eines. Ein Kaestchen und ein Radioknopf tragen
+    // GAR keinen — ihr Rahmen ist Teil des gemalten Zeichens und liegt INNEN;
+    // ihn zum Kasten zu addieren machte ein `width: 24px` grosses Kaestchen
+    // 26 px breit.
+    let ua_w = if st.appearance_none {
+        0
+    } else {
+        match kind {
+            ControlKind::Checkbox | ControlKind::Radio => 0,
+            // Ein `<select>` und ein `<textarea>` tragen EINEN Pixel je Seite,
+            // ein Feld und ein Knopf zwei — aus den vier Hoehen der Vorlage
+            // einzeln herausgerechnet, nicht ueber einen Kamm geschoren.
+            ControlKind::Select | ControlKind::TextArea => 1,
+            _ => 2,
+        }
+    };
     sides.map(|s| CtlSide {
         // An unstyled side still takes the author's `border-color` — the UA
         // frame is a real border, so colouring it is all a page needs to do.
@@ -14230,6 +14321,43 @@ fn dbg_wiki_shape() {
         assert_eq!(l.controls[2].w, l.controls[3].w);
         assert!(l.controls[2].w > 300, "1fr column stretches the field");
         assert!(l.controls[4].y > l.controls[2].y);
+    }
+
+    /// **Die UA-Masse eines Steuerelements, gegen Chromium ausgerechnet.**
+    ///
+    /// Sie standen bis 0.168 als eine Zahl fuer alle da (`PAD_Y = 3`, ein
+    /// 1-px-Rahmen), und `tools/fixtures/controls.html` hat jede einzeln
+    /// herausgerechnet: dieselben vier Faelle je Steuerelement — nackt, nur
+    /// gepolstert, nur gerahmt, beides — ergeben ein Gleichungssystem, das
+    /// genau eine Loesung hat. Was hier steht, ist diese Loesung.
+    #[test]
+    fn die_ua_masse_eines_steuerelements_stehen_fest() {
+        // Ein Kasten je Fall, in der Reihenfolge der Vorlage.
+        let h = |tag: &str, css: &str| -> i32 {
+            let l = lay(&alloc::format!("<body>{tag}</body>").replace("@", css), 1000);
+            l.controls.first().map(|c| c.h).unwrap_or(-1)
+        };
+        // Ein Feld: UA-Polsterung 1 px, UA-Rahmen 2 px je Seite. Die
+        // Zeilenhoehe ist dieselbe in allen vier Faellen, also ist die
+        // DIFFERENZ die Aussage — sie haengt nicht an der Schrift.
+        let f = |css: &str| h("<input style=\"@\">", css);
+        let (bare, pad, bord, both) = (f(""), f("padding:6px"), f("border:1px solid #000"),
+                                       f("padding:6px;border:1px solid #000"));
+        assert_eq!(pad - bare, 10, "12 px eigene Polsterung statt 2 px UA");
+        assert_eq!(bord - bare, -2, "2 px eigener Rahmen statt 4 px UA");
+        assert_eq!(both - bare, 8, "beides zusammen");
+        // Ein Kaestchen ist 13 px und waechst NICHT mit der Schrift.
+        let cb = |css: &str| h("<input type=checkbox style=\"@\">", css);
+        assert_eq!(cb(""), 13, "ein Kaestchen ist 13 px hoch");
+        assert_eq!(cb("font-size:32px"), 13, "und bleibt es bei jeder Schrift");
+        assert_eq!(cb("width:24px;height:24px"), 24, "eine eigene Groesse gilt GANZ");
+        // Ein `<textarea>` nimmt `rows` — Vorgabe 2, nicht 3 (HTML §4.10.11).
+        let ta = |a: &str| -> i32 {
+            let l = lay(&alloc::format!("<body><textarea {a}></textarea></body>"), 1000);
+            l.controls.first().map(|c| c.h).unwrap_or(-1)
+        };
+        assert_eq!(ta("rows=4") - ta(""), 2 * (ta("rows=3") - ta("rows=2")),
+            "vier Zeilen sind zwei mehr als die Vorgabe von zwei");
     }
 
     /// **Ein Steuerelement im Flex behaelt seine Polsterung.** `flex_metrics`
