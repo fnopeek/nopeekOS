@@ -274,6 +274,12 @@ pub struct Realm {
     /// Prototyp nicht einfangen.
     pub generator_proto: Gc,
     pub generator_func_proto: Gc,
+    /// `%AsyncIteratorPrototype%`, `%AsyncGeneratorPrototype%` und
+    /// `%AsyncGeneratorFunction.prototype%`. Der erste steht getrennt, weil
+    /// `for await` ihn auch an einem selbstgebauten async-Iterator findet.
+    pub async_iterator_proto: Gc,
+    pub async_gen_proto: Gc,
+    pub async_gen_func_proto: Gc,
     pub array_iter_proto: Gc,
     pub string_iter_proto: Gc,
     pub promise_proto: Gc,
@@ -339,7 +345,9 @@ impl Realm {
             self.event_proto.clone(), self.token_list_proto.clone(), self.style_proto.clone(),
             self.comment_proto.clone(), self.regexp_proto.clone(), self.symbol_proto.clone(),
             self.iterator_proto.clone(), self.generator_proto.clone(),
-            self.generator_func_proto.clone(), self.array_iter_proto.clone(),
+            self.generator_func_proto.clone(), self.async_iterator_proto.clone(),
+            self.async_gen_proto.clone(), self.async_gen_func_proto.clone(),
+            self.array_iter_proto.clone(),
             self.string_iter_proto.clone(), self.promise_proto.clone(),
             self.typed_proto.clone(), self.buffer_proto.clone(),
             self.dataview_proto.clone(), self.response_proto.clone(),
@@ -1840,6 +1848,14 @@ impl Interp {
                         return Ok(v);
                     }
                 }
+                // Und ein async-Generator ist beides: er gibt ein Objekt
+                // zurueck wie ein Generator, und jedes `next()` daran gibt ein
+                // Versprechen wie eine async-Funktion.
+                if d.node.is_async && d.node.is_generator {
+                    if let Some(v) = super::generator::make_async_gen(self, f, &d, this_val.clone(), args)? {
+                        return Ok(v);
+                    }
+                }
                 self.run_js_body(&d, this_val, args)
             }
         }
@@ -2743,6 +2759,34 @@ impl Interp {
     }
 
     /// Ein Schritt. `None` heisst fertig.
+    /// `GetIterator(obj, async)` (ES 7.4.2). Gibt den Iterator und die
+    /// Auskunft, ob er ein ECHTER async-Iterator ist.
+    ///
+    /// **Ohne `Symbol.asyncIterator` wird der synchrone genommen.** Die
+    /// Spezifikation huellt ihn dafuer in einen `%AsyncFromSyncIterator%`; wir
+    /// merken uns stattdessen `is_async = false` am Iterator und warten in
+    /// `Op::IterStepAsync` nur seinen `value` ab. Das ist dieselbe
+    /// beobachtbare Semantik ohne ein Objekt, das kein Skript je zu sehen
+    /// bekommt — was fehlt, ist allein `%AsyncFromSyncIteratorPrototype%` als
+    /// benannte Schnittstelle, und die zaehlt der Zensus nicht.
+    pub fn get_async_iterator(&mut self, v: &Value) -> C<(Value, bool)> {
+        if matches!(v, Value::Undefined | Value::Null) {
+            return self.type_err("value is not async iterable");
+        }
+        let m = self.get(v, super::value::SYM_ASYNC_ITERATOR)?;
+        if self.is_callable(&m) {
+            let it = self.call(&m, v.clone(), &[])?;
+            if !matches!(it, Value::Obj(_)) {
+                return self.type_err("Symbol.asyncIterator did not return an object");
+            }
+            return Ok((it, true));
+        }
+        if !matches!(m, Value::Undefined | Value::Null) {
+            return self.type_err("Symbol.asyncIterator is not a function");
+        }
+        Ok((self.get_iterator(v)?, false))
+    }
+
     pub fn iter_next(&mut self, it: &Value) -> C<Option<Value>> {
         self.tick()?;
         let f = self.get(it, "next")?;
@@ -2918,8 +2962,9 @@ impl Interp {
         // Eine Generatorfunktion haengt unter `%GeneratorFunction.prototype%`,
         // nicht unter `Function.prototype` — daran haengen `f.constructor` und
         // der `toStringTag`, und beides wird gemessen.
-        let fproto = if f.is_generator && !f.is_async {
-            self.realm.generator_func_proto.clone()
+        let fproto = if f.is_generator {
+            if f.is_async { self.realm.async_gen_func_proto.clone() }
+            else { self.realm.generator_func_proto.clone() }
         } else {
             self.realm.function_proto.clone()
         };
@@ -2941,17 +2986,20 @@ impl Interp {
         // Unterschied zu jedem echten Motor.
         // Eine async-Funktion hat KEIN `prototype` — sie ist kein Konstruktor,
         // und ein vorhandenes waere ein sichtbarer Unterschied zu jedem echten
-        // Motor. (Ein async-Generator hat eins; den bauen wir nicht.)
+        // Motor. Ein async-GENERATOR hat eins, obwohl auch er keiner ist: von
+        // dort erbt sein Objekt `next`/`return`/`throw`.
         if !f.is_arrow && !(f.is_async && !f.is_generator) {
             // Das `prototype` einer Generatorfunktion haengt unter
             // `%GeneratorPrototype%` und traegt KEIN `constructor` — von dort
             // erbt das Generatorobjekt `next`/`return`/`throw`. Eine
             // gewoehnliche Funktion bekommt das gewohnte Paar.
-            let is_gen = f.is_generator && !f.is_async;
-            let proto = new_obj(Some(if is_gen {
-                self.realm.generator_proto.clone()
-            } else {
+            let is_gen = f.is_generator;
+            let proto = new_obj(Some(if !is_gen {
                 self.realm.object_proto.clone()
+            } else if f.is_async {
+                self.realm.async_gen_proto.clone()
+            } else {
+                self.realm.generator_proto.clone()
             }));
             if !is_gen {
                 proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(g.clone())));

@@ -133,6 +133,18 @@ pub enum Op {
     /// Gebaut wird er EINMAL je Befehlsstelle — `Interp::template_object`
     /// haelt ihn unter der Adresse dieses Eintrags fest.
     TemplateObject(u32),
+    /// `for await (… of x)`: den ASYNCHRONEN Iterator holen (ES 7.4.2 mit
+    /// `hint: async`). Hat `x` kein `Symbol.asyncIterator`, wird sein
+    /// gewoehnlicher genommen und als synchron vermerkt.
+    IterAllAsync,
+    /// `next()` rufen und das legen, worauf gewartet werden muss: bei einem
+    /// echten async-Iterator das ganze Ergebnis, bei einem umgehuellten
+    /// synchronen nur dessen `value` (sein `done` steht schon fest und wird
+    /// am Iterator vermerkt).
+    IterNextAsyncCall,
+    /// Nach dem `Op::Await`: das abgewartete Ergebnis auswerten und
+    /// entweder den Wert legen oder ans Schleifenende springen.
+    IterStepAsync(u32),
     /// Die obersten `n` Werte zu einer Zeichenkette verketten (Vorlage).
     Concat(u16),
     /// `delete obj[names[i]]` bzw. `delete obj[key]`.
@@ -350,7 +362,7 @@ impl Chunk {
         match &mut self.ops[at] {
             Op::Jump(t) | Op::JumpFalse(t) | Op::JumpTrue(t) | Op::JumpFalseKeep(t)
             | Op::JumpTrueKeep(t) | Op::JumpNullishKeep(t) | Op::JumpNullishTo(t)
-            | Op::IterNext(t) | Op::ForInNext(t) => *t = here,
+            | Op::IterNext(t) | Op::ForInNext(t) | Op::IterStepAsync(t) => *t = here,
             other => panic!("patch auf {other:?}"),
         }
     }
