@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>controls — nackte Steuerelemente, ohne ein einziges Rahmenwerk</title>
+</head>
+<body>
+<!-- Die dritte Vorlage nach `ua.html`, und aus demselben Grund: Bootstrap und
+     Tailwind setzen jede UA-Vorgabe eines Steuerelements zurueck und sagen
+     deshalb NICHTS ueber sie. Hier steht kein Rahmenwerk — nur die vier
+     Faelle, die ein Steuerelement unterscheiden koennen (nackt, nur
+     Polsterung, nur Rahmen, beides), in Flussrichtung und im Flex.
+
+         python3 <tools>/gallery/run.py <repo>/tools/fixtures/controls.html
+
+     **Das `<style>` steht im BODY, und das ist kein Schlamperei.** `run.py`
+     haengt seinen Schrift-Pin unmittelbar vor `</head>` ein; alles, was im
+     Kopf steht, kommt also DAVOR und verliert bei gleicher Spezifitaet. Ein
+     Steuerelement erbt seine Schrift ausserdem nicht — Chromiums UA-Blatt gibt
+     ihm `13.333px Arial`. Ohne das `font: inherit` hier misst der Vergleich
+     wieder die Schriftwahl der Maschine statt unser Layout, und genau das ist
+     bei der ersten Fassung dieser Datei passiert (sie hatte gar kein
+     `</head>`, also nie einen Pin: jedes `<input>` „wich" um 37 px ab). -->
+<style>
+  input, button, select, textarea { font: inherit; margin: 0 }
+  .p  { padding: 6px 12px }
+  .b  { border: 1px solid #333 }
+  .pb { padding: 6px 12px; border: 1px solid #333 }
+  .row { display: flex }
+</style>
+
+<!-- 1. nackt: was das UA-Blatt allein hergibt -->
+<div><input id=n-text><input id=n-pw type=password><button id=n-btn>x</button>
+<select id=n-sel><option>x</option></select><textarea id=n-ta></textarea>
+<input id=n-cb type=checkbox><input id=n-rd type=radio></div>
+
+<!-- 2. nur Polsterung: die UA-Untergrenze muss weichen -->
+<div><input id=p-text class=p><button id=p-btn class=p>x</button>
+<select id=p-sel class=p><option>x</option></select><textarea id=p-ta class=p></textarea></div>
+
+<!-- 3. nur Rahmen: er gehoert zum Kasten -->
+<div><input id=b-text class=b><button id=b-btn class=b>x</button>
+<select id=b-sel class=b><option>x</option></select><textarea id=b-ta class=b></textarea></div>
+
+<!-- 4. beides — der Alltagsfall jedes Rahmenwerks -->
+<div><input id=x-text class=pb><button id=x-btn class=pb>x</button>
+<select id=x-sel class=pb><option>x</option></select><textarea id=x-ta class=pb></textarea></div>
+
+<!-- 5. dasselbe als Flex-Item, einmal wachsend -->
+<div class=row><input id=f-grow class=pb style="flex:1 1 auto;width:1%"><button id=f-btn class=pb>x</button></div>
+<div class=row><input id=f-text class=pb><select id=f-sel class=pb><option>x</option></select></div>
+
+<!-- 6. eigene Groessen: die Seite bestimmt, nicht das UA-Blatt -->
+<div><input id=s-w class=pb style="width:200px"><input id=s-wb class=pb style="width:200px;box-sizing:border-box">
+<input id=s-h class=pb style="height:50px"><input id=s-mh class=pb style="min-height:44px"></div>
+
+<!-- 7. blockweit, mit eigenem Rand -->
+<div><input id=blk class=pb style="display:block;width:150px;margin-left:40px"></div>
+
+<!-- 8. Kaestchen mit eigener Groesse -->
+<div><input id=cb-w type=checkbox style="width:24px;height:24px">
+<input id=cb-m type=checkbox style="margin:0 8px"></div>
+
+<!-- 9. `size` und `cols`/`rows` ausdruecklich — die Vorgaben stehen in HTML
+     §4.10 (input size=20, textarea cols=20 rows=2) und werden oben nackt
+     mitgemessen; hier steht, ob wir sie ueberhaupt LESEN. -->
+<div><input id=sz class=pb size=10><textarea id=ta-cr class=pb cols=10 rows=4></textarea></div>
+<!-- 10. Drei Stuetzstellen fuer die Eigenbreite. Chromiums Formel ist
+     `size * mittlere Zeichenbreite + (breitestes Zeichen - mittleres)` — mit
+     ZWEI Punkten laesst sich jede Gerade anpassen, erst der dritte sagt, ob
+     sie stimmt. -->
+<div><input id=sz1 class=pb size=1><input id=sz5 class=pb size=5><input id=sz40 class=pb size=40>
+<textarea id=tc1 class=pb cols=1 rows=1></textarea><textarea id=tc40 class=pb cols=40 rows=1></textarea></div>
+</body>
+</html>

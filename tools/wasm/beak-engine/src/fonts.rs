@@ -45,6 +45,18 @@ impl<'a> Face<'a> {
         (!self.lig.is_empty()).then_some(self.lig)
     }
 
+    /// Die mittlere und die groesste Zeichenbreite bei `size`, aus den echten
+    /// Tabellen der Schrift (`OS/2.xAvgCharWidth`, `hhea.advanceWidthMax`).
+    ///
+    /// **Gebraucht fuer die EIGENBREITE eines `<input size=n>` und eines
+    /// `<textarea cols=n>`** — jeder Browser rechnet sie aus der mittleren
+    /// Zeichenbreite, nicht aus der Breite der Null. Eine Schrift ohne die
+    /// Tabellen gibt `None`, und der Rufer nimmt weiter die Null.
+    pub fn char_widths(&self, size: f32) -> Option<(f32, f32)> {
+        let (a, m) = (self.lig.avg_char(), self.lig.max_char());
+        (a > 0.0 && m > 0.0).then(|| (a * size, m * size))
+    }
+
     /// The glyphs this text becomes, each with the BYTE RANGE of the source it
     /// covers. The byte ranges are what keeps line breaking working: it walks
     /// offsets into the original string, not glyph counts.

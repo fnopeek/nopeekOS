@@ -29,6 +29,17 @@ use alloc::vec::Vec;
 #[derive(Default)]
 pub struct Ligatures {
     by_first: Vec<(u16, Vec<Lig>)>,
+    /// Die mittlere und die groesste Zeichenbreite der Schrift, in Em.
+    ///
+    /// **Sie stehen hier, weil hier schon die echten Tabellen gelesen
+    /// werden** — `fontdue` wertet weder `OS/2` noch `hhea` aus, und ein
+    /// zweiter Leser fuer dieselben Bytes waere eine zweite Wahrheit ueber
+    /// dieselbe Schrift. Gebraucht werden sie fuer die EIGENBREITE eines
+    /// `<input size=n>` und eines `<textarea cols=n>`: die rechnet jeder
+    /// Browser aus der mittleren Zeichenbreite, nicht aus der Breite der
+    /// Null — gemessen ueber fuenf Stuetzstellen von `size=1` bis `size=40`.
+    avg_char: f32,
+    max_char: f32,
 }
 
 struct Lig {
@@ -69,9 +80,44 @@ impl Ligatures {
     /// Read the ligature substitutions out of a font's GSUB table. A font with
     /// none — every subsetted face we ship — yields an empty table, and an
     /// empty table is what makes the fast path in `measure` legal.
+    /// Die mittlere Zeichenbreite in Em (`OS/2.xAvgCharWidth`), oder 0.
+    pub fn avg_char(&self) -> f32 { self.avg_char }
+    /// Die groesste Zeichenbreite in Em (`hhea.advanceWidthMax`), oder 0.
+    pub fn max_char(&self) -> f32 { self.max_char }
+
     pub fn read(bytes: &[u8], index: u32) -> Ligatures {
         let mut out = Ligatures::default();
         let Ok(face) = ttf_parser::Face::parse(bytes, index) else { return out };
+        // **Zuerst die zwei Breiten** — sie haengen nicht am GSUB, und eine
+        // Schrift ohne Ligaturen (jede, die wir mitliefern) verlaesst die
+        // Funktion gleich darunter.
+        let upem = face.units_per_em() as f32;
+        if upem > 0.0 {
+            let raw = face.raw_face();
+            // `OS/2` Feld 2 (Offset 2, i16) und `hhea` Feld `advanceWidthMax`
+            // (Offset 34, u16). `ttf-parser` 0.21 gibt beide nicht als
+            // Methode heraus, die Tabellen selbst aber schon — gelesen wird
+            // mit Laengenpruefung, eine kurze Tabelle gibt 0 und der Rufer
+            // faellt auf die Breite der Null zurueck.
+            let be16 = |t: &[u8], at: usize| -> Option<u16> {
+                t.get(at..at + 2).map(|b| u16::from_be_bytes([b[0], b[1]]))
+            };
+            if let Some(t) = raw.table(ttf_parser::Tag::from_bytes(b"OS/2")) {
+                if let Some(v) = be16(t, 2) {
+                    let signed = v as i16;
+                    if signed > 0 { out.avg_char = signed as f32 / upem; }
+                }
+            }
+            // **Die groesste Zeichenbreite ist die des UMRISSKASTENS der
+            // ganzen Schrift**, nicht `hhea.advanceWidthMax`. Mit dem Vorschub
+            // blieb ein konstanter Versatz von 37 px ueber ALLE
+            // Stuetzstellen — und ein Fehler, der sich mit der Groesse nicht
+            // aendert, sitzt im konstanten Glied. Blink nimmt an dieser Stelle
+            // `xMax - xMin` aus `head`, und damit geht die Rechnung auf.
+            let bb = face.global_bounding_box();
+            let w = (bb.x_max as f32 - bb.x_min as f32).max(0.0);
+            if w > 0.0 { out.max_char = w / upem; }
+        }
         let Some(gsub) = face.tables().gsub else { return out };
 
         // Which lookups belong to a default-on ligature feature.

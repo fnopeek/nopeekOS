@@ -22,12 +22,21 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-09-11, beak 0.166.0)
+### Current number (measured 2026-09-11, beak 0.168.0)
 
 ```
-4546 pass / 1098 fail / 142 inconclusive   (of 5786 vendored reftests)
-= 80.5 % of the conclusive 5644   ·   4546 / 5179 = 87.8 % without vehicles
+4547 pass / 1098 fail / 141 inconclusive   (of 5786 vendored reftests)
+= 80.5 % of the conclusive 5645   ·   4547 / 5180 = 87.8 % without vehicles
 ```
+
+**0.168.0: +2 / −1, und der eine Rueckgang ist ein Bestehen aus Versehen
+weniger.** Gewonnen: `CSS2/blocks-026` und `html-forms/block-in-inline` (das
+stand als INCONCLUSIVE). Verloren: `html-forms/input-number-text-size.tentative`
+— es prueft eine VORSCHLAGS-Regel (whatwg/html#10390: `<input type=number>`
+leitet sein `size` aus `min`/`max`/`step` ab), die wir nicht bauen. Der Test
+lag mit 0,34 % unter der 0,5-%-Schwelle, WEIL unser Feld zu schmal war; seit
+die Eigenbreite stimmt, sind es 0,67 % und er sagt, was er die ganze Zeit
+gemeint hat — derselbe Fall wie `css-text/hyphens-i18n-auto-006` in 0.159.0.
 
 **0.166.0: +1, und die fuenf Fehler daneben sieht WPT gar nicht.** Der eine
 Gewinn ist `css-flexbox/flexbox_flex-natural`. Gefunden wurden in derselben

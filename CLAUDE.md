@@ -48,7 +48,46 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-11 · beak 0.167.0 · Kernel 0.336.0** (Rest: `git log`)
+**Stand 2026-09-11 · beak 0.168.0 · Kernel 0.336.0** (Rest: `git log`)
+
+**0.168.0: die UA-Masse eines Steuerelements standen als EINE Zahl fuer
+alle da.** `PAD_Y = 3`, ein 1-px-Rahmen, `CTL_PAD_X = 6` — geschaetzt, nicht
+gemessen. Die neue Vorlage `tools/fixtures/controls.html` stellt jedes
+Steuerelement VIERMAL hin (nackt · nur gepolstert · nur gerahmt · beides), und
+aus den vier Hoehen faellt jedes Mass einzeln heraus: **ein Feld und ein Knopf
+tragen 2 px Rahmen je Seite, ein `<select>` und ein `<textarea>` einen; die
+senkrechte Polsterung ist 1 px, beim `<textarea>` 2, beim `<select>` null (die
+zwei Pixel stecken in seinem Widget); waagrecht polstert ein TEXTfeld 2 px und
+ein Knopf 6.** Dazu drei echte Fehler: **`layout_box_inner` ueberschrieb die
+Hoehe, die `control_box` schon richtig aufgeloest hatte** — ohne `box-sizing`,
+also ohne Polsterung und Rahmen, und ein `<input>` in einer Flex-Zeile kam
+20 statt 34 px hoch heraus (die Quer-Achse desselben Fehlers, den 0.166
+geschlossen hat) · `<textarea>` nahm `cols=30 rows=3` statt der 20 und 2 aus
+HTML §4.10.11 und schnitt `rows * Zeilenhoehe` erst am Ende ab (drei Pixel bei
+vier Zeilen) · `min-height` rechnete mit der UA-Untergrenze statt mit der
+WIRKLICHEN Polsterung.
+
+**Und die Eigenbreite kommt aus der Schrift, nicht aus der Breite der Null.**
+`size=n` mal der Breite von „0" war bis zu 50 px zu schmal. Richtig ist
+`n × mittlere Zeichenbreite + (breitestes Zeichen − mittleres)` — beides echte
+Tabellen der Schrift (`OS/2.xAvgCharWidth`, Umrisskasten aus `head`), gelesen
+in `gsub.rs`, wo die Tabellen ohnehin schon offenstehen. **Gemessen ueber
+fuenf Stuetzstellen (`size` 1, 5, 10, 20, 40), und erst die dritte sagt, ob
+die Gerade stimmt** — zwei Punkte passen auf jede. Zwischenstand unterwegs:
+mit `hhea.advanceWidthMax` blieb ein KONSTANTER Versatz von 37 px ueber alle
+fuenf, und ein Fehler, der sich mit der Groesse nicht aendert, sitzt im
+konstanten Glied.
+
+Ergebnis auf der Vorlage: **47 von 49 Kaesten byte-gleich mit Chromium**, die
+zwei Reste sind ein Pixel bei `size=1` und `size=5`. Bootstrap 17-64-px-Eimer
+23 → 20; `ua.html` und Tailwind unveraendert. WPT **4546 → 4547**, und der
+eine Rueckgang ist keiner: `input-number-text-size.tentative` prueft eine
+VORSCHLAGS-Regel (implizites `size` aus `min`/`max`), die wir nicht bauen —
+sie lag mit 0,34 % unter der Schwelle, weil unser Feld zu schmal war, und
+sagt bei 0,67 % jetzt die Wahrheit. **Offen und benannt:** die Zeilenhoehe um
+ein Steuerelement herum (ein `<textarea>` auf einer Zeile laesst darunter
+11 px zu wenig Platz — die Grundlinie eines atomaren Inline, ein eigener
+Posten).
 
 **0.167.0: async-Generatoren — und der Uebersetzer sagte fuer den GANZEN
 Chunk ab.** `74,54 → 79,73 %` (+4110 Tests, gleicher Nenner), Befehlsmaschine
@@ -382,11 +421,11 @@ war ein Datenobjekt — es gab gar keine Navigation per Skript.
                               async-Tests endlich im Nenner stehen
     test262 parse   96,87 %
     DOM-Aufrufe     99,4 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
-    WPT (CSS)       4546/5179 = 87,8 % ohne Testvehikel (roh 80,5 %)
+    WPT (CSS)       4547/5180 = 87,8 % ohne Testvehikel (roh 80,5 %)
     Bibliotheken    13 von 13 (`<tools>/libprobe/`)
     beak:selftest   Sprache 55/55, Dokument 39/39
-    Kastengeometrie Bootstrap 413/415 (171 identisch) · Tailwind 165/165
-                    · ua.html 62/62
+    Kastengeometrie Bootstrap 413/415 (170 identisch) · Tailwind 165/165
+                    · ua.html 62/62 · controls.html 49/49 (47 byte-gleich)
                     (`<tools>/gallery/`, die dritte Vorlage ist NACKT)
     Halde           Schriften faul; srf 44 MiB (war 89)
 
