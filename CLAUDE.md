@@ -48,7 +48,33 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-11 · beak 0.166.0 · Kernel 0.336.0** (Rest: `git log`)
+**Stand 2026-09-11 · beak 0.167.0 · Kernel 0.336.0** (Rest: `git log`)
+
+**0.167.0: async-Generatoren — und der Uebersetzer sagte fuer den GANZEN
+Chunk ab.** `74,54 → 79,73 %` (+4110 Tests, gleicher Nenner), Befehlsmaschine
+`99,0 → 99,8 %` der Programme. **Sie sind nicht die Summe von Generator und
+async-Funktion, sondern ihre Verschraenkung** — und deshalb war es EIN Posten:
+`Step` kennt `Yield` und `Await` laengst, die `Vm` haelt an beidem an, es
+fehlte der Vertrag darum herum. Drei Stuecke: eine **Anfrage-Schlange**
+(`agen.next()` gibt sofort ein Versprechen zurueck, auch mitten im `await`;
+drei `next()` muessen sich anstellen statt die Maschine dreimal anzuwerfen),
+**`yield x` wartet seinen Wert ERST ab** (ES 15.5.5 — die Regel steht im
+UEBERSETZER, ein `Op::Await` vor jedem `Op::Yield`, damit `Op::Yield` eine
+Bedeutung behaelt), und **`for await` haelt MITTEN in der Schleife an**
+(`Op::IterNext` ruft und liest in einem Schritt — hier aufgeteilt in rufen ·
+warten · auswerten). Der grosse Nebengewinn steht in keiner Testzahl: **vier
+der fuenf Absagestellen waren „eine Funktion DANEBEN ist ein
+async-Generator"**, also fielen 2518 Programme komplett auf den Baumlaeufer.
+`%AsyncFromSyncIterator%` ist bewusst kein Objekt — wir merken `is_async` am
+Iteratoreintrag und warten nur den `value` ab.
+
+**▶ Als naechstes in JS: `yield*`.** 2560 Rumpfabsagen, 2629 Fehler — und
+**Delegation hat in beak noch NIE funktioniert**, auch im gewoehnlichen
+Generator nicht. Kein Nachmittag: `yield*` muss an der Anhaltestelle WISSEN,
+womit es wieder angeworfen wurde (Wert, Wurf oder `return`), um es an den
+inneren Iterator weiterzureichen — `Vm::send` liefert nur einen Wert,
+`inject_throw` wickelt gleich ab. Das braucht einen dritten Weg in die
+angehaltene Maschine.
 
 **0.166.0: fuenf Kastenfehler, die WPT nicht sehen kann — und eine
 Testquote, die FALLEN musste.** Zwei Haelften.
@@ -95,13 +121,6 @@ Lexer-Fehler, die nur ein getaggtes Template zeigt: die Fehlererholung frass
 das schliessende Akzentzeichen, `\1`–`\9` sind im Template verboten und
 wurden angenommen, und OHNE Marke ist jede ungueltige Flucht ein
 Fruehfehler — das wurde still geschluckt.
-
-**▶ Als naechstes in JS: async-Generatoren + `for await`.** 3460 + 338 + 206
-≈ 4000 Tests, und es ist EIN Mechanismus — `generator.rs` hat den
-angehaltenen Rumpf schon, ein AsyncGenerator ist derselbe Rumpf mit einer
-Warteschlange davor. Der Uebersetzer sagt bei 2518 Programmen mit
-`async-generator` ab und bei 776 Ruempfen mit `for-await`; was absagt, faellt
-auf den Baumlaeufer, und der kann kein `yield`.
 
 **0.165.0: eine Spalte, die nicht schrumpfen kann, macht den Tisch nicht
 breiter.** Florian: „text bricht immer noch raus.. manchmal". Im Bild brechen
@@ -358,9 +377,9 @@ war ein Datenobjekt — es gab gar keine Navigation per Skript.
 
 **Die Zahlen, und sie messen NICHT dasselbe:**
 
-    test262 exec    74,54 %   (V8 auf demselben Korpus: 99,41 %)
-                              die Zahl FIEL, weil 5485 async-Tests endlich
-                              im Nenner stehen — 2493 Tests MEHR bestanden
+    test262 exec    79,73 %   (V8 auf demselben Korpus: 99,41 %)
+                              0.166 fiel die Zahl auf 74,54 %, weil 5485
+                              async-Tests endlich im Nenner stehen
     test262 parse   96,87 %
     DOM-Aufrufe     99,4 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
     WPT (CSS)       4546/5179 = 87,8 % ohne Testvehikel (roh 80,5 %)

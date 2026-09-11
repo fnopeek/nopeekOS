@@ -101,11 +101,10 @@ pub struct Compiler {
 /// gebaut hat — der Rumpf faengt beim ersten Statement an.
 pub fn function(f: &Func) -> CompileResult<Chunk> {
     // Ein async-Generator ist BEIDES auf einmal: er haelt an `yield` UND an
-    // `await` an, und `next()` gibt ein Versprechen zurueck. Das ist eine
-    // eigene Runde, nicht die Summe der beiden — deshalb hier nein.
-    if f.is_async && f.is_generator {
-        return Err(Unsupported("async-generator"));
-    }
+    // `await` an, und `next()` gibt ein Versprechen zurueck. `in_gen` und
+    // `in_async` stehen deshalb beide — die Maschine kennt beide Anhaltegruende
+    // laengst (`Step::Yield`, `Step::Await`), der Vertrag darum herum steht in
+    // `generator.rs`.
     let mut c = Compiler { chunk: Chunk::new(), loops: Vec::new(), depth: 0, iters: 0,
                            in_gen: f.is_generator, in_async: f.is_async, fin: 0, chains: Vec::new(), pending_labels: Vec::new() };
     for st in &f.body {
@@ -376,7 +375,14 @@ impl Compiler {
             Stmt::Try { block, handler, finalizer } => self.try_stmt(block, handler, finalizer),
             Stmt::ForIn { left, right, body } => self.for_in(left, right, body),
             Stmt::ForOf { left, right, body, is_await } => {
-                if *is_await { return Err(Unsupported("for-await")) }
+                if *is_await {
+                    // `for await` haelt MITTEN in der Schleife an — der
+                    // Parser laesst es nur im async-Kontext zu, aber ein
+                    // Pfeil darin ist ein eigener Chunk und muss hier nein
+                    // sagen, genau wie bei `await` selbst.
+                    if !self.in_async { return Err(Unsupported("for-await-outside-async")) }
+                    return self.for_await(left, right, body);
+                }
                 self.for_of(left, right, body)
             }
             Stmt::With { .. } => Err(Unsupported("with")),
@@ -417,9 +423,6 @@ impl Compiler {
         for st in body {
             match st {
                 Stmt::Func(f) => {
-                    if f.is_async && f.is_generator {
-                        return Err(Unsupported("async-generator"));
-                    }
                     if let Some(n) = &f.name {
                         let name = self.chunk.name(n);
                         let func = self.chunk.func(f.clone());
@@ -640,6 +643,50 @@ impl Compiler {
         // Zwei Ausgaenge, und sie sind NICHT dasselbe: wer vorzeitig geht,
         // schliesst den Iterator (`return()`); wer ihn leergelesen hat, darf
         // das nicht mehr.
+        for at in l.breaks { self.chunk.patch(at); }
+        self.chunk.emit(Op::IterClose);
+        let to_end = self.chunk.emit_jump(Op::Jump);
+        self.chunk.patch(done);
+        self.chunk.emit(Op::IterDrop);
+        self.chunk.patch(to_end);
+        self.iters -= 1;
+        Ok(())
+    }
+
+    /// `for await (x of y)` (ES 14.7.5.7, `iteratorKind: async`).
+    ///
+    /// **Dieselbe Form wie `for_of`, mit einem Anhaltepunkt mittendrin.** Das
+    /// ist der ganze Unterschied und zugleich der Grund fuer die drei eigenen
+    /// Befehle: `Op::IterNext` ruft `next()` und liest sein Ergebnis in EINEM
+    /// Schritt, hier muss dazwischen gewartet werden. Also aufgeteilt —
+    /// rufen, `Op::Await`, auswerten. Das Warten laeuft ueber denselben
+    /// Anhaltemechanismus wie jedes andere `await`; die Maschine braucht
+    /// dafuer nichts Neues.
+    fn for_await(&mut self, left: &ForHead, right: &Expr, body: &Stmt) -> CompileResult<()> {
+        self.expr(right)?;
+        self.chunk.emit(Op::IterAllAsync);
+        self.iters += 1;
+        let depth0 = self.depth;
+        let top = self.chunk.here();
+        self.chunk.emit(Op::IterNextAsyncCall);
+        self.chunk.emit(Op::Await);
+        let done = self.chunk.emit_jump(Op::IterStepAsync);
+        let lbl = self.take_label();
+        self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(),
+                               depth: depth0, brk_only: false, labels: lbl, iters: self.iters });
+        let empty = self.chunk.block(Vec::new());
+        self.chunk.emit(Op::PushEnv(empty));
+        self.depth += 1;
+        let h = self.chunk.head(left.clone());
+        self.chunk.emit(Op::BindHead(h));
+        self.stmt(body)?;
+        self.chunk.emit(Op::PopEnv);
+        self.depth -= 1;
+        let l = self.loops.pop().unwrap();
+        for at in l.continues { self.patch_to(at, top); }
+        self.chunk.emit(Op::Jump(top));
+        // Zwei Ausgaenge, wie beim synchronen `for…of`: wer vorzeitig geht,
+        // schliesst den Iterator; wer ihn leergelesen hat, darf das nicht.
         for at in l.breaks { self.chunk.patch(at); }
         self.chunk.emit(Op::IterClose);
         let to_end = self.chunk.emit_jump(Op::Jump);
@@ -1251,9 +1298,6 @@ impl Compiler {
                             }
                         }
                         ObjPropValue::Method(f) => {
-                            if f.is_async && f.is_generator {
-                                return Err(Unsupported("async-generator"));
-                            }
                             let k = self.prop_key(&p.key, p.computed)?;
                             let fi = self.chunk.func(f.clone());
                             self.chunk.emit(Op::Closure(fi));
@@ -1263,9 +1307,6 @@ impl Compiler {
                             }
                         }
                         ObjPropValue::Get(f) | ObjPropValue::Set(f) => {
-                            if f.is_async && f.is_generator {
-                                return Err(Unsupported("async-generator"));
-                            }
                             let get = matches!(p.value, ObjPropValue::Get(_));
                             let k = self.prop_key(&p.key, p.computed)?;
                             let fi = self.chunk.func(f.clone());
@@ -1301,9 +1342,6 @@ impl Compiler {
             }
             Expr::Update { op, arg, prefix } => self.update(*op, arg, *prefix),
             Expr::Func(f) => {
-                if f.is_async && f.is_generator {
-                    return Err(Unsupported("async-generator"));
-                }
                 let i = self.chunk.func(f.clone());
                 self.chunk.emit(Op::Closure(i));
                 Ok(())
@@ -1383,6 +1421,13 @@ impl Compiler {
                         self.chunk.emit(Op::Const(k));
                     }
                 }
+                // **In einem async-Generator wird der Wert ERST abgewartet.**
+                // `yield x` ist dort `AsyncGeneratorYield(? Await(x))`
+                // (ES 15.5.5) — `yield Promise.resolve(1)` gibt also `1`
+                // heraus, nicht das Versprechen. Die Regel steht hier und
+                // nicht in `generator.rs`, damit `Op::Yield` EINE Bedeutung
+                // behaelt und die Maschine dumm bleibt.
+                if self.in_async { self.chunk.emit(Op::Await); }
                 self.chunk.emit(Op::Yield);
                 Ok(())
             }

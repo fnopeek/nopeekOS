@@ -86,6 +86,11 @@ enum Iter {
     /// Ein echter Iterator (`for…of`). Sein `return()` gehoert bei jedem
     /// vorzeitigen Verlassen gerufen.
     Obj(Value),
+    /// Ein Iterator eines `for await`. `async` sagt, ob er wirklich einer ist
+    /// (dann ist das abzuwartende Ding das ganze Ergebnisobjekt) oder ob wir
+    /// einen synchronen umhuellen (dann ist es nur sein `value`, und `done`
+    /// steht schon hier — ES 27.1.4.4, AsyncFromSyncIteratorContinuation).
+    Async { it: Value, is_async: bool, done: bool },
     /// Die Schluesselliste eines `for…in`, RUECKWAERTS — dann ist `pop` der
     /// naechste Schritt und es braucht keinen Index daneben. Es gibt hier
     /// nichts zu schliessen: die Liste steht schon fest.
@@ -212,7 +217,7 @@ impl Vm {
     pub fn close(&mut self, i: &mut Interp) {
         while let Some(f) = self.frames.pop() {
             for it in f.iters.iter().rev() {
-                if let Iter::Obj(v) = it { i.iter_close(v); }
+                match it { Iter::Obj(v) | Iter::Async { it: v, .. } => i.iter_close(v), _ => {} }
             }
             if !f.root { i.depth -= 1; }
         }
@@ -234,7 +239,7 @@ impl Vm {
         for f in &self.frames {
             envs.extend(f.envs.iter().cloned());
             for it in &f.iters {
-                if let Iter::Obj(Value::Obj(o)) = it { objs.push(o.clone()); }
+                if let Iter::Obj(Value::Obj(o)) | Iter::Async { it: Value::Obj(o), .. } = it { objs.push(o.clone()); }
             }
         }
     }
@@ -773,8 +778,71 @@ impl Vm {
                 self.frames.last_mut().unwrap().iters.pop();
             }
             Op::IterClose => {
-                if let Some(Iter::Obj(it)) = self.frames.last_mut().unwrap().iters.pop() {
-                    i.iter_close(&it);
+                match self.frames.last_mut().unwrap().iters.pop() {
+                    Some(Iter::Obj(it)) => i.iter_close(&it),
+                    // **Benannt halb:** die Spezifikation WARTET das Ergebnis
+                    // von `return()` an einem async-Iterator ab
+                    // (AsyncIteratorClose). Wir rufen es und gehen weiter —
+                    // der Unterschied ist sichtbar, wenn ein `break` einen
+                    // Aufraeumer startet, auf den danach jemand zaehlt.
+                    Some(Iter::Async { it, .. }) => i.iter_close(&it),
+                    _ => {}
+                }
+            }
+            Op::IterAllAsync => {
+                let v = self.pop();
+                let (it, is_async) = i.get_async_iterator(&v)?;
+                self.frames.last_mut().unwrap().iters.push(
+                    Iter::Async { it, is_async, done: false });
+            }
+            Op::IterNextAsyncCall => {
+                let (it, is_async) = match self.frames.last().unwrap().iters.last() {
+                    Some(Iter::Async { it, is_async, .. }) => (it.clone(), *is_async),
+                    _ => return Err(i.throw_kind("TypeError", "no async iterator here")),
+                };
+                i.tick()?;
+                let f = i.get(&it, "next")?;
+                if !i.is_callable(&f) {
+                    self.frames.last_mut().unwrap().iters.pop();
+                    return Err(i.throw_kind("TypeError", "iterator has no next method"));
+                }
+                // Wie beim synchronen `IterNext`: wirft `next()` SELBST, wird
+                // nicht geschlossen — der Iterator faellt vorher aus der Liste.
+                let r = match i.call(&f, it.clone(), &[]) {
+                    Ok(r) => r,
+                    Err(e) => { self.frames.last_mut().unwrap().iters.pop(); return Err(e) }
+                };
+                if is_async {
+                    self.push(r);
+                } else {
+                    if !matches!(r, Value::Obj(_)) {
+                        self.frames.last_mut().unwrap().iters.pop();
+                        return Err(i.throw_kind("TypeError", "iterator result is not an object"));
+                    }
+                    let d = i.get(&r, "done")?.truthy();
+                    let v = i.get(&r, "value")?;
+                    if let Some(Iter::Async { done, .. }) =
+                        self.frames.last_mut().unwrap().iters.last_mut() { *done = d; }
+                    self.push(v);
+                }
+            }
+            Op::IterStepAsync(end) => {
+                let awaited = self.pop();
+                let (is_async, stashed) = match self.frames.last().unwrap().iters.last() {
+                    Some(Iter::Async { is_async, done, .. }) => (*is_async, *done),
+                    _ => return Err(i.throw_kind("TypeError", "no async iterator here")),
+                };
+                if is_async {
+                    if !matches!(awaited, Value::Obj(_)) {
+                        self.frames.last_mut().unwrap().iters.pop();
+                        return Err(i.throw_kind("TypeError", "iterator result is not an object"));
+                    }
+                    if i.get(&awaited, "done")?.truthy() { self.jump(*end); }
+                    else { let v = i.get(&awaited, "value")?; self.push(v); }
+                } else if stashed {
+                    self.jump(*end);
+                } else {
+                    self.push(awaited);
                 }
             }
             Op::PushEnv(b) => {
@@ -811,7 +879,7 @@ impl Vm {
                 // Iterator SCHLIESSEN — sonst faehrt ein Generator seinen
                 // eigenen `finally`-Block nie. Von innen nach aussen.
                 for it in f.iters.iter().rev() {
-                    if let Iter::Obj(v) = it { i.iter_close(v); }
+                    match it { Iter::Obj(v) | Iter::Async { it: v, .. } => i.iter_close(v), _ => {} }
                 }
                 self.stack.truncate(f.base);
                 if f.root {
@@ -878,7 +946,7 @@ impl Vm {
             // `for ([x.attr] of it)` uebersetzbar wurde und ein werfender
             // Schreiber im KOPF dasselbe ausloeste.
             for it in f.iters.iter().rev() {
-                if let Iter::Obj(v) = it { i.iter_close(v); }
+                match it { Iter::Obj(v) | Iter::Async { it: v, .. } => i.iter_close(v), _ => {} }
             }
             self.stack.truncate(f.base);
             i.depth -= 1;
@@ -892,7 +960,7 @@ impl Vm {
                 if f.iters.len() <= h.iters { break }
                 f.iters.pop().unwrap()
             };
-            if let Iter::Obj(v) = it { i.iter_close(&v); }
+            match &it { Iter::Obj(v) | Iter::Async { it: v, .. } => i.iter_close(v), _ => {} }
         }
         let Some(t) = h.catch_ip.or(h.finally_ip) else { return false };
         self.frames.last_mut().unwrap().ip = t as usize;
@@ -1168,6 +1236,85 @@ mod tests {
             }
         };
         (lauf(true), lauf(false))
+    }
+
+    /// **Async-Generatoren und `for await`.**
+    ///
+    /// Beide Anhaltegruende aus DERSELBEN Maschine: `yield` haelt fuer ein
+    /// `next()` an, `await` fuer die Microtask-Schlange. Bis 0.167 sagte der
+    /// Uebersetzer bei jedem `async function*` ab — und zwar fuer den GANZEN
+    /// umgebenden Chunk, weshalb 2518 Programme komplett auf den Baumlaeufer
+    /// fielen, der kein `yield` kann.
+    ///
+    /// Gefahren wird ueber `jsrun`s Weg: Programm laufen lassen, dann die
+    /// Schlange leeren, dann das Ergebnis ablesen. Ohne das zweite steht in
+    /// `out` nichts — ein async-Generator liefert seinen ersten Wert
+    /// fruehestens im naechsten Microtask.
+    fn async_out(src: &str) -> alloc::string::String {
+        let mut i = super::Interp::new();
+        let full = alloc::format!("var out=[];{src};out.join('|')");
+        let prog = match crate::js::parse(&full, false) {
+            Ok(p) => p,
+            Err(e) => return alloc::format!("SyntaxError: {}", e.msg),
+        };
+        if let Err(super::Abrupt::Throw(v)) = i.run_program(&prog) {
+            let m = i.get(&v, "message").ok().and_then(|m| i.to_string(&m).ok())
+                     .unwrap_or_else(|| alloc::rc::Rc::from("?"));
+            return alloc::format!("THROW {m}");
+        }
+        crate::js::promise::run_jobs(&mut i);
+        let read = crate::js::parse("out.join('|')", false).expect("parst");
+        match i.run_program(&read) {
+            Ok(v) => i.to_string(&v).map(|s| s.to_string())
+                      .unwrap_or_else(|_| alloc::string::String::from("?")),
+            Err(_) => alloc::string::String::from("ABRUPT"),
+        }
+    }
+
+    #[test]
+    fn async_generatoren_halten_an_yield_und_an_await() {
+        let faelle: &[(&str, &str)] = &[
+            // `yield` im async-Generator WARTET seinen Wert ab (ES 15.5.5):
+            // `yield Promise.resolve(2)` gibt 2 heraus, nicht das Versprechen.
+            ("async function* g(){ yield 1; yield Promise.resolve(2); await null; yield 3 }              (async()=>{ for await (const x of g()) out.push(x) })()", "1|2|3"),
+            // Drei `next()` auf einmal stellen sich an, statt die Maschine
+            // dreimal anzuwerfen (ES 27.6.3.6).
+            ("async function* g(){ yield 'a'; yield 'b'; yield 'c' }              (async()=>{ const h=g(); const r=await Promise.all([h.next(),h.next(),h.next()]);              r.forEach(x=>out.push(x.value)) })()", "a|b|c"),
+            // Ein fertiger Generator beantwortet jede weitere Anfrage.
+            ("async function* g(){ yield 1 }              (async()=>{ const h=g(); await h.next(); const e=await h.next();              out.push(e.done); out.push(String(e.value)) })()", "true|undefined"),
+            // Ein Wurf im Rumpf LEHNT AB, er wirft nicht.
+            ("async function* g(){ yield 1; throw new Error('drin') }              (async()=>{ const h=g(); await h.next();              try { await h.next() } catch(e) { out.push('abgelehnt:'+e.message) } })()",
+             "abgelehnt:drin"),
+            // `for await` ueber ein gewoehnliches Feld huellt den synchronen
+            // Iterator ein — und wartet dabei jeden WERT ab.
+            ("(async()=>{ for await (const x of [Promise.resolve('p'),'q']) out.push(x) })()", "p|q"),
+            // `break` schliesst den async-Iterator.
+            ("const it={[Symbol.asyncIterator](){let n=0;return{                next:()=>Promise.resolve({value:n++,done:n>9}),                return:()=>{out.push('zu');return Promise.resolve({done:true})}}}};              (async()=>{ for await (const x of it){ out.push(x); if(x===1) break } })()",
+             "0|1|zu"),
+            // Der Tag und die Selbst-Iterierbarkeit stehen am Prototyp.
+            ("async function* g(){}              (async()=>{ const h=g();              out.push(Object.prototype.toString.call(h));              out.push(h[Symbol.asyncIterator]()===h) })()",
+             "[object AsyncGenerator]|true"),
+        ];
+        for (k, (src, want)) in faelle.iter().enumerate() {
+            assert_eq!(&async_out(src), want, "Fall {k}: {src}");
+        }
+    }
+
+    /// **Der Uebersetzer darf an einem async-Generator nicht mehr absagen** —
+    /// und zwar auch dann nicht, wenn er nur NEBEN dem Code steht. Vor 0.167
+    /// liess ein `async function*` irgendwo im Programm den ganzen Chunk
+    /// ablehnen, und damit fiel auch der Code daneben auf den Baumlaeufer.
+    #[test]
+    fn ein_async_generator_laesst_den_chunk_nicht_absagen() {
+        for src in ["async function* g(){ yield 1 } 1 + 1",
+                    "var o = { async *m(){ yield 1 } }; 1 + 1",
+                    "var f = async function*(){ yield 1 }; 1 + 1",
+                    "class C { async *m(){ yield 1 } } 1 + 1",
+                    "async function h(){ for await (const x of []) {} } 1 + 1"] {
+            let prog = crate::js::parse(src, false).expect("parst");
+            assert!(super::super::compile::program(&prog).is_ok(),
+                "der Uebersetzer sagt noch ab: {src}");
+        }
     }
 
     /// **Getaggte Templates, auf beiden Maschinen.**

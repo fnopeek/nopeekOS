@@ -2138,6 +2138,11 @@ pub fn make_realm() -> Realm {
     // iterierbar, ohne dass `generator.rs` ein `Symbol.iterator` setzt.
     let (generator_proto, generator_func_proto) =
         super::generator::install(&iterator_proto, &function_proto);
+    // Dasselbe fuer den ASYNC-Vertrag. `%AsyncIteratorPrototype%` haengt NICHT
+    // unter `%IteratorPrototype%` — es ist eine eigene Wurzel mit nur einem
+    // Eintrag, `[Symbol.asyncIterator]() { return this }`.
+    let (async_iterator_proto, async_gen_proto, async_gen_func_proto) =
+        super::generator::install_async(&function_proto);
 
     // Der Zustand eines eingebauten Iterators liegt als NUL-praefigierte
     // Eigenschaft auf ihm selbst. Kein Skript sieht sie (sie faellt aus
@@ -3340,7 +3345,8 @@ pub fn make_realm() -> Realm {
             node_proto: ph(), element_proto: ph(), text_proto: ph(), document_proto: ph(),
             event_proto: ph(), location: loc, token_list_proto: ph(), style_proto: ph(), comment_proto: ph(),
             regexp_proto: ph(), symbol_proto, iterator_proto,
-            generator_proto, generator_func_proto, array_iter_proto,
+            generator_proto, generator_func_proto,
+            async_iterator_proto, async_gen_proto, async_gen_func_proto, array_iter_proto,
             string_iter_proto, promise_proto: ph(), date_proto: ph(), bigint_proto,
             iter_helper_proto: ph(), iter_wrap_proto: ph(), eval_fn: None,
             html_element_proto: ph(), svg_element_proto: ph(), fragment_proto: ph(),
