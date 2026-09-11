@@ -48,7 +48,46 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-11 · beak 0.168.0 · Kernel 0.336.0** (Rest: `git log`)
+**Stand 2026-09-11 · beak 0.169.0 · Kernel 0.336.0** (Rest: `git log`)
+
+**0.169.0: `yield*` — der dritte Weg in eine angehaltene Maschine.**
+`79,73 → 82,74 %` (+2394 Tests), `for await` 64,9 → **89,9 %**, und die
+Absage `yield-delegate` (2560 Ruempfe) ist aus beiden Listen verschwunden.
+
+**Delegation hat in beak NIE funktioniert** — auch im gewoehnlichen Generator
+nicht: der Uebersetzer sagte ab, der Baumlaeufer dahinter warf „generators are
+not supported". Der Grund, warum es kein Anbau war, steht in einem Satz: **an
+der Anhaltestelle muss die Maschine WISSEN, womit sie wieder angeworfen
+wurde** — mit einem Wert, einem Wurf oder einem `return` —, um genau das an
+den inneren Iterator weiterzureichen. `Vm::send` liefert nur einen Wert,
+`inject_throw` wickelt sofort ab, `close` gibt auf. Also `Vm::Resume` mit drei
+Werten, `send_throw`/`send_return` daneben, und `at_delegate()` als die Frage,
+die `gen.throw()` und `gen.return()` vorher stellen: steht die Maschine an
+einem `yield*`, geht beides WEITER statt zu wirken.
+
+`yield*` selbst ist eine SCHLEIFE in Befehlen, kein Befehl — `DelegateStart` ·
+`DelegateCall` · (`Await`) · `DelegateStep` · `YieldDelegate` · `Jump`.
+Derselbe Schnitt wie bei `for await`, und aus demselben Grund: zwischen dem
+Anstossen des inneren Iterators und dem Auswerten seines Ergebnisses liegt im
+async-Generator ein Anhaltepunkt, und den kann man nicht in einen Befehl
+falten. Drei Feinheiten, die die Tests prueften: **das Ergebnisobjekt des
+INNEREN geht unveraendert hinaus** (im gewoehnlichen Generator — es noch
+einmal einzupacken gaebe `{value:{value:1,done:false},done:false}`), ein
+**erschoepfter innerer Iterator nach `gen.return(v)` beendet den AEUSSEREN
+Rumpf** (derselbe Ausgang wie `Op::Ret`, deshalb dort herausgeloest), und ein
+**umgehuellter synchroner Iterator laesst nur seinen `value` abwarten**, nicht
+sein Ergebnis — ohne das kam aus `yield* [Promise…]` das Versprechen selbst.
+
+Nebenbefund beim Bauen: **der async-Generator brauchte dieselbe MARKE** —
+mit einem gewoehnlichen `Op::Yield` sah seine Anhaltestelle aus wie jede
+andere, und ein `agen.throw(e)` wickelte den aeusseren Rumpf ab, statt ihn
+weiterzureichen.
+
+**▶ Als naechstes in JS:** `$262.IsHTMLDDA` steht jetzt oben (≈1545 Tests
+ueber zwei Meldungen — der `[[IsHTMLDDA]]`-Exot, ein Objekt, das sich wie
+`undefined` VERHAELT; eine Aenderung am Objektmodell), dann `\p{…}` 886
+(davon 700 `Script_*`, also ein viel kleineres Ziel), `import()` 392,
+`createRealm` 353.
 
 **0.168.0: die UA-Masse eines Steuerelements standen als EINE Zahl fuer
 alle da.** `PAD_Y = 3`, ein 1-px-Rahmen, `CTL_PAD_X = 6` — geschaetzt, nicht
@@ -416,7 +455,7 @@ war ein Datenobjekt — es gab gar keine Navigation per Skript.
 
 **Die Zahlen, und sie messen NICHT dasselbe:**
 
-    test262 exec    79,73 %   (V8 auf demselben Korpus: 99,41 %)
+    test262 exec    82,74 %   (V8 auf demselben Korpus: 99,41 %)
                               0.166 fiel die Zahl auf 74,54 %, weil 5485
                               async-Tests endlich im Nenner stehen
     test262 parse   96,87 %

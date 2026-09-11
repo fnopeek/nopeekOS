@@ -255,6 +255,21 @@ pub enum Op {
     /// Rahmens und ueberlebt das Anhalten, weil er ein FELD ist und kein
     /// Rust-Stapel. Das ist die ganze Begruendung des Umbaus, eingeloest.
     Yield,
+    /// Der Anhaltepunkt eines `yield*` im gewoehnlichen Generator: gibt das
+    /// Ergebnisobjekt des INNEREN Iterators unveraendert heraus und ist die
+    /// Marke, an der `throw()`/`return()` weiterreichen statt abzuwickeln.
+    YieldDelegate(bool),
+    /// `yield* x`: den inneren Iterator holen (synchron oder asynchron, je
+    /// nach Art des Generators) und den ersten „erhaltenen" Wert legen.
+    DelegateStart(bool),
+    /// Den inneren Iterator anstossen — mit `next`, `throw` oder `return`, je
+    /// nachdem, womit der aeussere Generator wieder angeworfen wurde. Der
+    /// Sprung geht ans Schleifenende, wenn der innere Iterator kein `return`
+    /// hat und der aeussere aufgeben soll.
+    DelegateCall(u32),
+    /// Das (ggf. abgewartete) Ergebnis auswerten: fertig → ans Ziel springen,
+    /// sonst den Wert fuers `yield` legen.
+    DelegateStep { end: u32, is_async: bool },
     /// **Warten.** Oben liegt das Erwartete; die Maschine haelt an, und was
     /// sie wieder anwirft, ist die Aufloesung des Versprechens.
     ///
@@ -362,7 +377,8 @@ impl Chunk {
         match &mut self.ops[at] {
             Op::Jump(t) | Op::JumpFalse(t) | Op::JumpTrue(t) | Op::JumpFalseKeep(t)
             | Op::JumpTrueKeep(t) | Op::JumpNullishKeep(t) | Op::JumpNullishTo(t)
-            | Op::IterNext(t) | Op::ForInNext(t) | Op::IterStepAsync(t) => *t = here,
+            | Op::IterNext(t) | Op::ForInNext(t) | Op::IterStepAsync(t)
+            | Op::DelegateCall(t) | Op::DelegateStep { end: t, .. } => *t = here,
             other => panic!("patch auf {other:?}"),
         }
     }
