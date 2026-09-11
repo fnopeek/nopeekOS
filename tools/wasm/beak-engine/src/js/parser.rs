@@ -1379,6 +1379,14 @@ impl<'a> Parser<'a> {
             Tok::Regex(b, f) => { self.bump()?; Ok(Expr::Regex { body: b, flags: f }) }
             Tok::Template { .. } => {
                 let (quasis, exprs) = self.template_parts()?;
+                // **Nur ein GETAGGTES Template darf ungueltige Fluchten
+                // enthalten** (ES 12.9.6). Ohne Marke ist jede davon ein
+                // Fruehfehler — der Lexer merkt sie sich als `cooked: None`,
+                // weil er zur Lesezeit noch nicht weiss, ob eine Marke
+                // davorsteht; die Entscheidung faellt hier.
+                if quasis.iter().any(|q| q.cooked.is_none()) {
+                    return self.err("invalid escape sequence in template");
+                }
                 Ok(Expr::Template { quasis, exprs })
             }
             Tok::Ident(_) => {

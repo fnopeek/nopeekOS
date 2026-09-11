@@ -48,7 +48,60 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-10 · beak 0.165.0 · Kernel 0.336.0** (Rest: `git log`)
+**Stand 2026-09-11 · beak 0.166.0 · Kernel 0.336.0** (Rest: `git log`)
+
+**0.166.0: fuenf Kastenfehler, die WPT nicht sehen kann — und eine
+Testquote, die FALLEN musste.** Zwei Haelften.
+
+**(1) Steuerelemente und Floats, gegen Chromium auf Vorlagen aus sechs
+Zeilen.** WPT steht bei 4546 vorher wie nachher; gefunden hat alles fuenf
+`<tools>/gallery/run.py`. **Ein Ausgleich ueberlebte die Luecke, die er
+ausglich**: `flex_metrics` zog einem Steuerelement Polsterung + Rahmen ab,
+weil `intrinsic_width` das 2026-09-04 noch nicht tat — seit 0.145.0 tut es
+das selbst, und seither zog es ZWEIMAL ab, waehrend `resolve_flex_line` nur
+einmal wieder drauflegt. Bootstrap-Knopf 48 statt 74 px, und der wachsende
+Nachbar bekam die Differenz. **Ein Steuerelement nimmt die Breite, die es
+bekommt** — `layout_box_inner` legt seine Raender nicht an (Vertrag der
+Flex-/Raster-/Zellenwege), aber `flow_children` uebergab die Breite des
+UMGEBUNGSkastens: `display:block; width:100px; margin-left:50px` malte
+1902 px auf x = 0. Dieselbe Ursache am Float, deshalb sass Bootstraps
+`.form-check-input` auf der Polsterkante — jede Checkbox, jeder Radioknopf.
+Dazu: **ein Prozent an einem `inline-block` loeste sich ZWEIMAL auf**
+(`col-6` = 469 statt 939; `place_float` kennt und benennt die Falle seit
+0.138.0, der Inline-Weg war der letzte ohne sie), und **ein negativer Rand an
+einem Float liess den Kasten WACHSEN** statt ihn zu verschieben. Bootstrap
+168 → 171 identisch, groesste Abweichung 470 → 47 px.
+
+**(2) Der test262-Laeufer war die groessere Luecke als die Sprache.** Er
+uebersprang jede `async`-Datei mit „Promises gibt es noch nicht" — die gibt
+es seit 0.92.0. **5485 Dateien lagen als „uebergangen" im Bericht.**
+Angeschaltet: **59 132 / 79 325 = 74,54 %** statt 56 639 / 69 194 = 81,86 %.
+Die Quote faellt um sieben Punkte und der Lauf wird um 2493 Tests besser —
+dasselbe Ereignis. Dafuer gebaut: **`$262`** (`global`,
+`detachArrayBuffer`, `evalScript`, `gc`), und es erscheint NUR, wenn der Wirt
+es bestellt, genau wie `crypto` — `evalScript` waere sonst ein zweiter Weg an
+der Skript-Zustellung vorbei. Dazu `$DONE` im Laeufer statt
+`doneprintHandle.js` (das schreibt mit `print` auf die Ausgabe; wir leeren
+`run_jobs` und lesen das Ergebnis aus dem globalen Objekt).
+
+**Und getaggte Templates, in KEINER der beiden Maschinen gebaut** — der
+Uebersetzer sagte ab, der Baumlaeufer dahinter warf. Damit starb jede Seite
+mit lit-html, styled-components oder graphql-tag an der ersten Zeile ihrer
+Bibliothek. **Die Identitaet ist der eigentliche Vertrag**: dieselbe Stelle
+muss bei jeder Auswertung denselben Gegenstand liefern (lit schluesselt seine
+`WeakMap` damit), also Adresse als Schluessel UND die rohen Zeichenketten
+daneben — eine Adresse ist nur belegt eine Identitaet. Nebenbei drei
+Lexer-Fehler, die nur ein getaggtes Template zeigt: die Fehlererholung frass
+das schliessende Akzentzeichen, `\1`–`\9` sind im Template verboten und
+wurden angenommen, und OHNE Marke ist jede ungueltige Flucht ein
+Fruehfehler — das wurde still geschluckt.
+
+**▶ Als naechstes in JS: async-Generatoren + `for await`.** 3460 + 338 + 206
+≈ 4000 Tests, und es ist EIN Mechanismus — `generator.rs` hat den
+angehaltenen Rumpf schon, ein AsyncGenerator ist derselbe Rumpf mit einer
+Warteschlange davor. Der Uebersetzer sagt bei 2518 Programmen mit
+`async-generator` ab und bei 776 Ruempfen mit `for-await`; was absagt, faellt
+auf den Baumlaeufer, und der kann kein `yield`.
 
 **0.165.0: eine Spalte, die nicht schrumpfen kann, macht den Tisch nicht
 breiter.** Florian: „text bricht immer noch raus.. manchmal". Im Bild brechen
@@ -305,13 +358,16 @@ war ein Datenobjekt — es gab gar keine Navigation per Skript.
 
 **Die Zahlen, und sie messen NICHT dasselbe:**
 
-    test262 exec    81,76 %   (V8 auf demselben Korpus: 99,41 %)
-    test262 parse   96,84 %
+    test262 exec    74,54 %   (V8 auf demselben Korpus: 99,41 %)
+                              die Zahl FIEL, weil 5485 async-Tests endlich
+                              im Nenner stehen — 2493 Tests MEHR bestanden
+    test262 parse   96,87 %
     DOM-Aufrufe     99,4 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
-    WPT (CSS)       4545/5179 = 87,8 % ohne Testvehikel (roh 80,5 %)
+    WPT (CSS)       4546/5179 = 87,8 % ohne Testvehikel (roh 80,5 %)
     Bibliotheken    13 von 13 (`<tools>/libprobe/`)
     beak:selftest   Sprache 55/55, Dokument 39/39
-    Kastengeometrie Bootstrap 413/415 · Tailwind 165/165 · ua.html 62/62
+    Kastengeometrie Bootstrap 413/415 (171 identisch) · Tailwind 165/165
+                    · ua.html 62/62
                     (`<tools>/gallery/`, die dritte Vorlage ist NACKT)
     Halde           Schriften faul; srf 44 MiB (war 89)
 

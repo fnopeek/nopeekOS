@@ -587,6 +587,22 @@ pub struct Interp {
     /// festzuhalten — die Adresse bleibt damit unverwechselbar, und der AST
     /// darf trotzdem sterben.
     pub func_chunks: HashMap<usize, (alloc::rc::Weak<Func>, Option<Rc<super::code::Chunk>>)>,
+    /// Die Vorlagen-Gegenstaende getaggter Templates (ES 13.2.8.4).
+    ///
+    /// **Dieselbe Stelle im Quelltext muss bei JEDER Auswertung denselben
+    /// Gegenstand bekommen** — das ist beobachtbar, und lit-html und
+    /// styled-components bauen ihren ganzen Zwischenspeicher darauf: sie
+    /// schluesseln eine `WeakMap` mit dem `strings`-Feld. Ohne stabile
+    /// Identitaet baut lit bei JEDEM Rendern das DOM neu.
+    ///
+    /// Geschluesselt wird mit der ADRESSE des Knotens — und weil eine Adresse
+    /// nur belegt eine Identitaet ist ([[feedback_an_address_is_only_an_identity_while_it_is_occupied]]),
+    /// liegen die ROHEN Zeichenketten daneben und werden beim Treffer
+    /// verglichen. Faellt ein Baum weg und legt der naechste eine andere
+    /// Vorlage auf dieselbe Zelle, gehen die Zeichenketten auseinander und der
+    /// Gegenstand wird neu gebaut. Sind sie GLEICH, ist das Teilen
+    /// unbeobachtbar.
+    pub templates: HashMap<usize, (Vec<Rc<str>>, Value)>,
     /// Woran der Uebersetzer bei einem FUNKTIONSRUMPF absagt, je Grund.
     ///
     /// Die Programm-Absagen (`vm_decline`) waren bis Stufe 4 die ganze
@@ -825,7 +841,7 @@ impl Interp {
                  resize_obs: Vec::new(), inter_obs: Vec::new(),
                  viewport: (0.0, 0.0), scroll_want: None,
                  vm_ran: 0, vm_declined: 0, vm_decline: None, vm_off: false,
-                 func_chunks: HashMap::new(), func_declines: HashMap::new(), pending_labels: Vec::new(), vm_ops: 0, hints_ok: true, vm_calls: 0, vm_calls_native: 0, vm_calls_slow: 0,
+                 func_chunks: HashMap::new(), templates: HashMap::new(), func_declines: HashMap::new(), pending_labels: Vec::new(), vm_ops: 0, hints_ok: true, vm_calls: 0, vm_calls_native: 0, vm_calls_slow: 0,
                  geometry: None,
                  live_dom: core::cell::RefCell::new(None),
                  jobs: alloc::collections::VecDeque::new(),
@@ -902,6 +918,10 @@ impl Interp {
     /// haelt, haelt danach ein LEERES Objekt. Das ist sicher (der Speicher
     /// lebt, solange der `Rc` lebt), aber es ist nicht mehr dasselbe Objekt.
     fn teardown(&mut self) {
+        // Die Vorlagen-Gegenstaende haengen an keiner Wurzel — der Gang unten
+        // findet sie nicht. Sie zeigen nur auf Zeichenketten und auf
+        // `array_proto`, also reicht Loslassen.
+        self.templates.clear();
         let mut seen: HashSet<usize> = HashSet::new();
         let mut envs: HashSet<usize> = HashSet::new();
         let mut objs: Vec<Gc> = alloc::vec![self.realm.global.clone()];
@@ -1984,6 +2004,57 @@ impl Interp {
         };
         self.func_chunks.insert(key, (Rc::downgrade(f), c.clone()));
         c
+    }
+
+    /// `GetTemplateObject` (ES 13.2.8.4) — der Gegenstand, den ein getaggtes
+    /// Template seiner Marke als erstes Argument reicht.
+    ///
+    /// Ein eingefrorenes Feld der GEKOCHTEN Zeichenketten (`undefined`, wo die
+    /// Fluchtfolge ungueltig war — genau dafuer ist `cooked` ein `Option`),
+    /// mit einem ebenfalls eingefrorenen `raw` daneben. Beides nicht
+    /// schreibbar, nicht aufzaehlbar, nicht loeschbar.
+    pub fn template_object(&mut self, quasis: &[super::ast::TemplateElement]) -> Value {
+        let key = quasis.as_ptr() as usize;
+        let raws: Vec<Rc<str>> = quasis.iter().map(|q| Rc::from(q.raw.as_str())).collect();
+        if let Some((old, v)) = self.templates.get(&key) {
+            if old.len() == raws.len() && old.iter().zip(&raws).all(|(a, b)| a == b) {
+                return v.clone();
+            }
+        }
+        // Einfrieren wie `Object.freeze` — und mit derselben Vorsicht: die
+        // Ausleihe muss VOR dem Schreiben enden, sonst paniked das
+        // `borrow_mut` darin.
+        let frozen = |o: &Gc| {
+            o.borrow_mut().extensible = false;
+            // Die Schluessel ZUERST in eine eigene Liste — als
+            // `for k in o.borrow().own_keys()` geschrieben lebt die Leihgabe
+            // bis zum Ende des Rumpfes, und das `borrow_mut` darin paniked.
+            // Wortgleich mit `Object.freeze`, und aus demselben Grund.
+            let keys = o.borrow().own_keys();
+            for k in keys {
+                let existing = o.borrow().get_own(&k).cloned();
+                if let Some(mut p) = existing {
+                    p.writable = false;
+                    p.configurable = false;
+                    o.borrow_mut().set_prop(k, p);
+                }
+            }
+        };
+        let raw_arr = self.new_array(raws.iter().map(|r| Value::Str(r.clone())).collect());
+        let cooked = self.new_array(quasis.iter()
+            .map(|q| q.cooked.as_deref().map_or(Value::Undefined, Value::str))
+            .collect());
+        let (Value::Obj(ro), Value::Obj(co)) = (&raw_arr, &cooked) else {
+            return cooked;
+        };
+        frozen(ro);
+        co.borrow_mut().define("raw", Prop {
+            value: Some(raw_arr.clone()), get: None, set: None,
+            writable: false, enumerable: false, configurable: false,
+        });
+        frozen(co);
+        self.templates.insert(key, (raws, cooked.clone()));
+        cooked
     }
 
     fn make_arguments(&mut self, args: &[Value]) -> Value {

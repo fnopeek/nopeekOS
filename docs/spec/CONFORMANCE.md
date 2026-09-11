@@ -22,12 +22,26 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-09-10, beak 0.162.0)
+### Current number (measured 2026-09-11, beak 0.166.0)
 
 ```
-4545 pass / 1099 fail / 142 inconclusive   (of 5786 vendored reftests)
-= 80.5 % of the conclusive 5644   ·   4545 / 5179 = 87.8 % without vehicles
+4546 pass / 1098 fail / 142 inconclusive   (of 5786 vendored reftests)
+= 80.5 % of the conclusive 5644   ·   4546 / 5179 = 87.8 % without vehicles
 ```
+
+**0.166.0: +1, und die fuenf Fehler daneben sieht WPT gar nicht.** Der eine
+Gewinn ist `css-flexbox/flexbox_flex-natural`. Gefunden wurden in derselben
+Runde fuenf Kastenfehler, die diese Zahl NICHT bewegen, weil sie
+Steuerelemente und `getBoundingClientRect` betreffen und die Reftests beides
+kaum beruehren: ein Steuerelement im Flex war um Polsterung + Rahmen zu
+schmal (zweimal abgezogen, einmal wieder drauf), ein blockweites
+Steuerelement ignorierte Breite UND Raender, ein geflotetes legte seinen Rand
+nicht an, ein Prozent an einem `inline-block` loeste zweimal auf, und ein
+negativer Rand liess einen Float WACHSEN statt ihn zu verschieben. Das Orakel
+dafuer ist `<tools>/gallery/run.py` auf Vorlagen aus sechs Zeilen, nicht WPT —
+dieselbe Lehre wie bei der nackten Vorlage 0.159.0
+([[feedback-a-framework-resets-the-default-it-says-nothing-about]]): eine
+Suite misst, was sie prueft, und WPT prueft Reftests, keine Steuerelemente.
 
 **0.162.0: `smaller` und `larger` sind eine STUFE der Skala** — /1,2 und
 ×1,2 (css-fonts-4 §3.3), nicht 0,85 und 1,15 nach Augenmass. Damit messen

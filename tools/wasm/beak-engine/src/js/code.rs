@@ -129,6 +129,10 @@ pub enum Op {
     Rot4,
     /// Ein regulaerer Ausdruck aus `names[body]` und `names[flags]`.
     Regex { body: u32, flags: u32 },
+    /// Der Vorlagen-Gegenstand eines getaggten Templates (ES 13.2.8.4).
+    /// Gebaut wird er EINMAL je Befehlsstelle — `Interp::template_object`
+    /// haelt ihn unter der Adresse dieses Eintrags fest.
+    TemplateObject(u32),
     /// Die obersten `n` Werte zu einer Zeichenkette verketten (Vorlage).
     Concat(u16),
     /// `delete obj[names[i]]` bzw. `delete obj[key]`.
@@ -308,6 +312,10 @@ pub struct Chunk {
     /// Namen (Bezeichner und Eigenschaften), einmal abgelegt statt je Befehl.
     pub names: Vec<Rc<str>>,
     pub funcs: Vec<Rc<super::ast::Func>>,
+    /// Die Stuecke jedes getaggten Templates. Sie liegen HIER und nicht im
+    /// Baum, weil ein `Chunk` den Baum ueberlebt — und die Adresse dieses
+    /// Eintrags ist der Schluessel, unter dem der Gegenstand gemerkt wird.
+    pub templates: Vec<Vec<super::ast::TemplateElement>>,
     pub classes: Vec<Rc<super::ast::Class>>,
     pub pats: Vec<super::ast::Pat>,
     pub heads: Vec<super::ast::ForHead>,
@@ -319,7 +327,7 @@ pub struct Chunk {
 impl Chunk {
     pub fn new() -> Chunk {
         Chunk { ops: Vec::new(), hints: Vec::new(), constants: Vec::new(), names: Vec::new(),
-                funcs: Vec::new(), classes: Vec::new(), pats: Vec::new(),
+                funcs: Vec::new(), templates: Vec::new(), classes: Vec::new(), pats: Vec::new(),
                 heads: Vec::new(), blocks: Vec::new(), blocks_spread: Vec::new() }
     }
 
@@ -375,6 +383,11 @@ impl Chunk {
     pub fn func(&mut self, f: Rc<super::ast::Func>) -> u32 {
         self.funcs.push(f);
         (self.funcs.len() - 1) as u32
+    }
+
+    pub fn template(&mut self, q: Vec<super::ast::TemplateElement>) -> u32 {
+        self.templates.push(q);
+        (self.templates.len() - 1) as u32
     }
 
     pub fn class(&mut self, c: Rc<super::ast::Class>) -> u32 {

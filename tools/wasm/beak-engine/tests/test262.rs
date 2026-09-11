@@ -60,6 +60,59 @@ const SKIP_FEATURES_EXEC: &[&str] = &[
     "immutable-arraybuffer", "error-stack-accessor",
 ];
 
+/// Der `$DONE`, den ein `async`-Test ruft — unsere Fassung von
+/// `harness/doneprintHandle.js`.
+///
+/// **Ein WAHRER Grund ist ein Fehler**, alles andere (kein Argument,
+/// `undefined`, `null`) ist Erfolg — wortgleich mit dem `if (error)` der
+/// mitgelieferten Datei. Ein zweiter Aufruf ist selbst ein Fehler: die
+/// Spezifikation der Fahne sagt „the sole asynchronous test of a file", und
+/// ein Test, der zweimal fertig wird, hat einen Rueckruf zu viel gefeuert.
+const DONE_SRC: &str = r#"
+var __t262_done = 0, __t262_err = undefined;
+function $DONE(error) {
+  if (__t262_done !== 0) { __t262_done = 3; return; }
+  if (error) { __t262_done = 2; __t262_err = error; } else { __t262_done = 1; }
+}
+"#;
+
+/// Die Schlange leeren und ablesen, was `$DONE` gemeldet hat.
+///
+/// Gerufen wird das NUR fuer `async`-Tests: fuer jeden anderen waere das
+/// Fahren der Schlange eine zweite Semantik — ein gewoehnlicher Test ist
+/// fertig, wenn sein letzter Befehl gelaufen ist.
+fn async_outcome(
+    s: &mut beak_engine::js::Session,
+    r: Result<(), String>,
+) -> Result<(), String> {
+    use beak_engine::js::value::Value;
+    // Ein Wurf im Skript selbst bleibt der Wurf — `$DONE` kam dann nie dazu.
+    r.as_ref().map_err(|e| e.clone())?;
+    beak_engine::js::promise::run_jobs(&mut s.interp);
+    let g = s.interp.realm.global.clone();
+    let read = |k: &str| g.borrow().get_own(k).and_then(|p| p.value.clone());
+    match read("__t262_done") {
+        Some(Value::Num(n)) if n == 1.0 => Ok(()),
+        Some(Value::Num(n)) if n == 3.0 => Err(String::from("$DONE zweimal gerufen")),
+        Some(Value::Num(n)) if n == 2.0 => {
+            let e = read("__t262_err").unwrap_or(Value::Undefined);
+            let name = s.interp.get(&e, "name").ok().and_then(|v| s.interp.to_string(&v).ok());
+            let msg = s.interp.get(&e, "message").ok().and_then(|v| s.interp.to_string(&v).ok());
+            Err(match (name, msg) {
+                (Some(n), Some(m)) if !m.is_empty() => format!("{n}: {m}"),
+                (Some(n), _) if !n.is_empty() => n.to_string(),
+                _ => s.interp.to_string(&e).map(|v| v.to_string())
+                        .unwrap_or_else(|_| String::from("$DONE mit einem Grund")),
+            })
+        }
+        // **Das ist die haeufigste ehrliche Absage**, nicht ein Laeuferfehler:
+        // die Kette blieb irgendwo stehen, meist an einem Merkmal, das es
+        // nicht gibt. Sie muss so heissen, sonst sucht der naechste Leser den
+        // Fehler im Geruest.
+        _ => Err(String::from("$DONE wurde nie gerufen")),
+    }
+}
+
 #[derive(Default)]
 struct Meta {
     description: String,
@@ -350,6 +403,11 @@ fn test262_exec() {
     #[cfg(feature = "strict-probe")]
     let mut probe_names: Vec<(String, [u32; beak_engine::js::STRICT_SITES], String)> = Vec::new();
 
+    // **`$262` anmelden — der Laeufer ist der Wirt.** Die Engine baut es nur,
+    // wenn jemand es bestellt; eine Seite sieht es nie. 455 Dateien scheiterten
+    // ohne es mit `ReferenceError`, an einer Luecke im Geruest statt im Motor.
+    beak_engine::js::test262::enable();
+
     let hread = |f: &str| fs::read_to_string(harness.join(f)).unwrap_or_default();
     let mut hmap: std::collections::BTreeMap<String, String> = Default::default();
     let mut hcache = |f: &str| -> String {
@@ -389,9 +447,17 @@ fn test262_exec() {
         let Ok(src) = fs::read_to_string(p) else { continue };
         let m = frontmatter(&src);
 
-        // Module und async brauchen Auflöser bzw. Promises — beides gibt es
-        // noch nicht. Eigene Zeile im Bericht, NICHT unter "bestanden".
-        if m.flags.iter().any(|f| f == "module" || f == "async") { skip_kind += 1; continue; }
+        // **Module brauchen einen Aufloeser, und den gibt es hier nicht** —
+        // eigene Zeile im Bericht, NICHT unter "bestanden".
+        //
+        // `async` stand hier bis 2026-09-11 daneben, mit der Begruendung, es
+        // gebe keine Promises. Die gibt es seit 0.92.0, Generatoren und
+        // async-Funktionen seit der Befehlsmaschine — 5485 Dateien lagen also
+        // als "uebergangen" im Bericht, weil niemand den Kommentar nachgelesen
+        // hat, als der Grund wegfiel.
+        // [[feedback_a_comment_that_names_its_condition_expires]]
+        if m.flags.iter().any(|f| f == "module") { skip_kind += 1; continue; }
+        let is_async = m.flags.iter().any(|f| f == "async");
         if m.features.iter().any(|f| SKIP_FEATURES_EXEC.contains(&f.as_str())) {
             skip_feat += 1; continue;
         }
@@ -408,6 +474,15 @@ fn test262_exec() {
             // Die Hilfsdateien aus dem Zwischenspeicher: `propertyHelper.js`
             // allein sind 510 Zeilen, und sie je Variante von der Platte zu
             // holen ist Arbeit fuer nichts.
+            // **`$DONE` gehoert VOR die Hilfsdateien.** `asyncHelpers.js`
+            // prueft `hasOwnProperty(globalThis, "$DONE")` und wirft sonst,
+            // bevor der Test ueberhaupt anfaengt. Der mitgelieferte
+            // `doneprintHandle.js` schreibt sein Ergebnis mit `print` auf die
+            // AUSGABE, weil ein Kommandozeilen-Laeufer nichts anderes hat; wir
+            // fahren die Sitzung selbst und lesen es danach aus dem globalen
+            // Objekt — dieselbe Semantik (ein wahrer Grund ist ein Fehler),
+            // ohne den Umweg ueber Text.
+            if is_async && !raw { text.push_str(DONE_SRC); }
             if !raw { for inc in &m.includes { text.push_str(&hcache(inc)); text.push('\n'); } }
             text.push_str(&src);
 
@@ -468,6 +543,11 @@ fn test262_exec() {
                             let (ca, cb) = (s.interp.vm_calls, s.interp.vm_calls_slow);
                             let cn = s.interp.vm_calls_native;
                             let r = s.run(&prog);
+                            // **Ein async-Test ist erst fertig, wenn die
+                            // Schlange leer ist.** Ohne sie zu fahren liefe
+                            // kein einziges `.then`, und JEDER dieser Tests
+                            // meldete "„$DONE wurde nie gerufen"".
+                            let r = if is_async { async_outcome(&mut s, r) } else { r };
                             fdecl = s.interp.func_declines.iter()
                                 .map(|(k, v)| (*k, *v)).collect();
                             #[cfg(feature = "strict-probe")]
