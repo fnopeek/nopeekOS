@@ -697,6 +697,52 @@ impl Compiler {
         Ok(())
     }
 
+    /// `yield* x` (ES 15.5.5) — die Delegation an einen inneren Iterator.
+    ///
+    /// **Eine Schleife in Befehlen, kein einzelner Befehl**, und das ist der
+    /// Grund, warum es sie bis 0.169 gar nicht gab: an ihrem Anhaltepunkt muss
+    /// die Maschine WISSEN, womit sie wieder angeworfen wurde — mit einem
+    /// Wert, einem Wurf oder einem `return` —, um genau das an den inneren
+    /// Iterator weiterzureichen. `Vm::send` liefert nur einen Wert,
+    /// `inject_throw` wickelt sofort ab. Der dritte Weg hinein ist
+    /// `Vm::Resume`, und er wird hier gelesen.
+    ///
+    ///     <x>
+    ///     DelegateStart            ; inneren Iterator holen, `undefined` legen
+    ///   top:
+    ///     DelegateCall(giveup)     ; next / throw / return, je nach Anwurf
+    ///     [Await]                  ; nur im async-Generator
+    ///     DelegateStep(end)        ; fertig -> ans Ende, sonst Wert legen
+    ///     Yield | YieldDelegate    ; hinausgeben und anhalten
+    ///     Jump top
+    ///   giveup:                    ; innerer Iterator hat kein `return`
+    ///     Ret                      ; der AEUSSERE Generator gibt auf
+    ///   end:
+    fn yield_delegate(&mut self, arg: &Expr) -> CompileResult<()> {
+        self.expr(arg)?;
+        self.chunk.emit(Op::DelegateStart(self.in_async));
+        self.iters += 1;
+        let top = self.chunk.here();
+        let giveup = self.chunk.emit_jump(Op::DelegateCall);
+        if self.in_async { self.chunk.emit(Op::Await); }
+        let is_async = self.in_async;
+        let end = self.chunk.emit(Op::DelegateStep { end: u32::MAX, is_async });
+        // **Auch der async-Generator bekommt die MARKE**, nur ohne ROH: an
+        // ihr erkennt `Vm::at_delegate`, dass ein `throw()`/`return()` hier
+        // weiterzureichen ist statt abzuwickeln. Mit einem gewoehnlichen
+        // `Op::Yield` sah die Stelle aus wie jedes andere `yield`, und ein
+        // `agen.throw(e)` wickelte den aeusseren Rumpf ab.
+        self.chunk.emit(Op::YieldDelegate(!is_async));
+        self.chunk.emit(Op::Jump(top));
+        // Der innere Iterator hat kein `return`: der Wert von `gen.return(v)`
+        // liegt schon auf dem Stapel, und der aeussere Rumpf ist damit fertig.
+        self.chunk.patch(giveup);
+        self.chunk.emit(Op::Ret);
+        self.chunk.patch(end);
+        self.iters -= 1;
+        Ok(())
+    }
+
     /// `for (k in obj)`.
     ///
     /// Dieselbe Form wie `for_of` — nur ist die Schluesselliste EIFRIG
@@ -1412,8 +1458,13 @@ impl Compiler {
             // ist damit der Wert dieses Ausdrucks.
             Expr::Yield { arg, delegate } => {
                 if !self.in_gen { return Err(Unsupported("yield-outside-generator")) }
-                if *delegate { return Err(Unsupported("yield-delegate")) }
                 if self.fin > 0 { return Err(Unsupported("yield-in-finally")) }
+                if *delegate {
+                    let Some(e) = arg else {
+                        return Err(Unsupported("yield-delegate-without-operand"));
+                    };
+                    return self.yield_delegate(e);
+                }
                 match arg {
                     Some(e) => self.expr(e)?,
                     None => {

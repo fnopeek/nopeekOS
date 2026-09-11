@@ -179,6 +179,9 @@ enum Seed {
     Start,
     Value(Value),
     Throw(Value),
+    /// Ein `return(v)` an einem `yield*`: es geht als WERT an den inneren
+    /// Iterator, statt den aeusseren Generator aufzugeben.
+    Delegate(Value),
 }
 
 /// Die Maschine einer async-Funktion fahren, bis sie wartet oder fertig ist —
@@ -193,9 +196,11 @@ fn pump(i: &mut Interp, st: &Rc<GenState>, seed: Seed, holder: Value) {
         // Faengt den Wurf im Rumpf niemand, ist die Funktion damit fertig —
         // und ihr Versprechen abgelehnt.
         Seed::Throw(e) => {
-            if vm.inject_throw(i, e.clone()) { vm.drive(i) }
+            if vm.at_delegate() { vm.send_throw(e); vm.drive(i) }
+            else if vm.inject_throw(i, e.clone()) { vm.drive(i) }
             else { Err(super::interp::Abrupt::Throw(e)) }
         }
+        Seed::Delegate(v) => { vm.send_return(v); vm.drive(i) }
     };
     match r {
         Ok(Step::Await(v)) => {
@@ -214,7 +219,7 @@ fn pump(i: &mut Interp, st: &Rc<GenState>, seed: Seed, holder: Value) {
         }
         // Kann nicht vorkommen: ein async-Generator ist beim Uebersetzen
         // abgelehnt, ein `yield` steht also in keinem async-Rumpf.
-        Ok(Step::Yield(_)) => {
+        Ok(Step::Yield(..)) => {
             st.status.set(Status::Done);
             vm.close(i);
         }
@@ -356,6 +361,10 @@ fn serve(i: &mut Interp, st: &Rc<GenState>, holder: Value, mut seed: Option<Seed
                         if st.status.get() == Status::Start { Seed::Start } else { Seed::Value(value) }
                     }
                     ReqKind::Throw => Seed::Throw(value),
+                    // An einem `yield*` geht auch hier beides an den INNEREN
+                    // Iterator, statt den aeusseren abzuwickeln bzw. aufzugeben.
+                    ReqKind::Return if st.vm.borrow().as_ref()
+                        .is_some_and(|vm| vm.at_delegate()) => Seed::Delegate(value),
                     // **`return` fuehrt den Rumpf nicht zu Ende.** Ein
                     // `finally` mit `yield` darin ist beim Uebersetzen
                     // abgelehnt, es kann also keinen geben, der noch laufen
@@ -379,9 +388,11 @@ fn serve(i: &mut Interp, st: &Rc<GenState>, holder: Value, mut seed: Option<Seed
             Seed::Start => vm.drive(i),
             Seed::Value(v) => { vm.send(v); vm.drive(i) }
             Seed::Throw(e) => {
-                if vm.inject_throw(i, e.clone()) { vm.drive(i) }
+                if vm.at_delegate() { vm.send_throw(e); vm.drive(i) }
+                else if vm.inject_throw(i, e.clone()) { vm.drive(i) }
                 else { Err(super::interp::Abrupt::Throw(e)) }
             }
+            Seed::Delegate(v) => { vm.send_return(v); vm.drive(i) }
         };
         match r {
             // **Ein `await` beendet die Runde, aber nicht die Anfrage.** Die
@@ -397,9 +408,11 @@ fn serve(i: &mut Interp, st: &Rc<GenState>, holder: Value, mut seed: Option<Seed
                 super::promise::perform_then(i, &p, ok, er);
                 return;
             }
-            Ok(Step::Yield(v)) => {
+            Ok(Step::Yield(v, _)) => {
                 st.status.set(Status::Suspended);
                 *st.vm.borrow_mut() = Some(vm);
+                // Ein async-Generator gibt immer den WERT heraus, auch beim
+                // `yield*`: `AsyncGeneratorYield(? IteratorValue(…))`.
                 let out = i.iter_result(v, false);
                 if let Some(r) = st.queue.borrow_mut().pop_front() {
                     super::promise::resolve_promise(i, &r.promise, out);
@@ -492,10 +505,14 @@ fn state(i: &mut Interp, t: &Value) -> C<Rc<GenState>> {
 /// dabei richtig stellen. Ein Wurf beendet den Generator endgueltig.
 fn finish(i: &mut Interp, st: &Rc<GenState>, mut vm: Vm, r: C<Step>) -> C<Value> {
     match r {
-        Ok(Step::Yield(v)) => {
+        Ok(Step::Yield(v, raw)) => {
             st.status.set(Status::Suspended);
             *st.vm.borrow_mut() = Some(vm);
-            Ok(i.iter_result(v, false))
+            // **ROH heisst: schon ein Ergebnisobjekt.** `yield*` reicht das
+            // des INNEREN Iterators unveraendert durch (ES 15.5.5,
+            // `GeneratorYield`) — es noch einmal einzupacken gaebe
+            // `{value: {value: 1, done: false}, done: false}`.
+            Ok(if raw { v } else { i.iter_result(v, false) })
         }
         Ok(Step::Done(v)) => {
             st.status.set(Status::Done);
@@ -553,6 +570,14 @@ pub fn throw(i: &mut Interp, t: &Value, v: Value) -> C<Value> {
     let st = state(i, t)?;
     let Some(mut vm) = take(i, &st)? else { return Err(super::interp::Abrupt::Throw(v)) };
     st.status.set(Status::Running);
+    // **An einem `yield*` wickelt ein Wurf NICHT ab.** Dort ist er ein Wert,
+    // der an den inneren Iterator weitergereicht wird (ES 15.5.5, 6.b) — hat
+    // der kein `throw`, entscheidet das die Maschine, nicht diese Stelle.
+    if vm.at_delegate() {
+        vm.send_throw(v);
+        let r = vm.drive(i);
+        return finish(i, &st, vm, r);
+    }
     if !vm.inject_throw(i, v.clone()) {
         st.status.set(Status::Done);
         vm.close(i);
@@ -568,6 +593,16 @@ pub fn throw(i: &mut Interp, t: &Value, v: Value) -> C<Value> {
 pub fn ret(i: &mut Interp, t: &Value, v: Value) -> C<Value> {
     let st = state(i, t)?;
     let Some(mut vm) = take(i, &st)? else { return Ok(i.iter_result(v, true)) };
+    // **An einem `yield*` bekommt der INNERE Iterator sein `return` zuerst.**
+    // Er darf seinen eigenen Aufraeumer fahren, und er darf die Aufgabe sogar
+    // abfangen (indem sein `return()` `done: false` gibt) — dann laeuft der
+    // aeussere Generator weiter, und `finish` sieht ein gewoehnliches `yield`.
+    if vm.at_delegate() {
+        st.status.set(Status::Running);
+        vm.send_return(v);
+        let r = vm.drive(i);
+        return finish(i, &st, vm, r);
+    }
     st.status.set(Status::Done);
     vm.close(i);
     Ok(i.iter_result(v, true))

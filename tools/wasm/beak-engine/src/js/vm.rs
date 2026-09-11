@@ -113,7 +113,13 @@ pub enum Step {
     /// Der Wurzelrahmen ist zurueck.
     Done(Value),
     /// `yield` — die Maschine steht und laesst sich wieder aufnehmen.
-    Yield(Value),
+    ///
+    /// Das `bool` heisst ROH: der Wert IST schon das `{value, done}`-Objekt
+    /// und darf nicht noch einmal eingepackt werden. Genau das verlangt
+    /// `yield*` im gewoehnlichen Generator — es reicht das Ergebnisobjekt des
+    /// INNEREN Iterators unveraendert durch (ES 15.5.5, `GeneratorYield`),
+    /// und Tests pruefen die Identitaet.
+    Yield(Value, bool),
     /// `await` — dasselbe Anhalten, nur wartet hier ein Versprechen darauf,
     /// sie wieder anzuwerfen, statt eines `next()`.
     Await(Value),
@@ -124,20 +130,38 @@ enum Flow {
     /// Weiter zum naechsten.
     Go,
     Done(Value),
-    Yield(Value),
+    Yield(Value, bool),
     Await(Value),
 }
+
+/// Womit eine angehaltene Maschine wieder angeworfen wurde.
+///
+/// **Der dritte Weg hinein.** `send` allein reicht fuer ein gewoehnliches
+/// `yield`: ein `next(v)` legt `v` an die Anhaltestelle, ein `throw(e)`
+/// wickelt sofort ab, ein `return(v)` gibt die Maschine auf. `yield*` braucht
+/// aber alle drei ALS WERT — es muss sie an den inneren Iterator
+/// weiterreichen, statt selbst darauf zu reagieren.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Resume { Normal, Throw, Return }
 
 pub struct Vm {
     stack: Vec<Value>,
     frames: Vec<Frame>,
     /// Der Abschlusswert des Programms (sein letzter Ausdruckswert).
     completion: Value,
+    /// Womit zuletzt wieder angeworfen wurde — nur `yield*` liest es.
+    resume: Resume,
+    /// Dasselbe, festgehalten ueber ein `await` hinweg: in einem
+    /// async-Generator liegt zwischen dem Aufruf am inneren Iterator und der
+    /// Auswertung seines Ergebnisses ein Anhaltepunkt, und der wirft mit
+    /// `send` wieder an — das setzt `resume` auf `Normal` zurueck.
+    deleg: Resume,
 }
 
 impl Vm {
     pub fn new() -> Vm {
-        Vm { stack: Vec::new(), frames: Vec::new(), completion: Value::Undefined }
+        Vm { stack: Vec::new(), frames: Vec::new(), completion: Value::Undefined,
+             resume: Resume::Normal, deleg: Resume::Normal }
     }
 
     /// Ein uebersetztes Programm fahren. `env` ist die Umgebung, in die der
@@ -152,7 +176,7 @@ impl Vm {
             // Ein Programmrumpf wird mit `in_gen == false` uebersetzt; ein
             // `Op::Yield` kann darin nicht stehen. Kein `panic!`: ein Absturz
             // der Maschine ist in einem Kernel keine Fehlermeldung.
-            Step::Yield(_) => Err(i.throw_kind("TypeError", "yield outside a generator")),
+            Step::Yield(..) => Err(i.throw_kind("TypeError", "yield outside a generator")),
             Step::Await(_) => Err(i.throw_kind("TypeError", "await outside an async function")),
         }
     }
@@ -177,7 +201,7 @@ impl Vm {
                                handlers: Vec::new(), iters: Vec::new() });
         match vm.drive(i)? {
             Step::Done(v) => Ok(v),
-            Step::Yield(_) => Err(i.throw_kind("TypeError", "yield outside a generator")),
+            Step::Yield(..) => Err(i.throw_kind("TypeError", "yield outside a generator")),
             Step::Await(_) => Err(i.throw_kind("TypeError", "await outside an async function")),
         }
     }
@@ -198,7 +222,82 @@ impl Vm {
     /// Den Wert von `next(v)` an die Stelle legen, an der `Op::Yield` seinen
     /// abgegeben hat — er ist der Wert des `yield`-Ausdrucks.
     pub fn send(&mut self, v: Value) {
+        self.resume = Resume::Normal;
         self.stack.push(v);
+    }
+
+    /// Wieder anwerfen mit einem WURF — aber ohne abzuwickeln. Nur sinnvoll,
+    /// wenn die Maschine an einem `yield*` steht (`at_delegate`): dort ist der
+    /// Wurf ein WERT, der an den inneren Iterator geht.
+    pub fn send_throw(&mut self, v: Value) {
+        self.resume = Resume::Throw;
+        self.stack.push(v);
+    }
+
+    /// Wieder anwerfen mit einem `return`. Dasselbe: an einem `yield*` bekommt
+    /// der innere Iterator sein `return()` zu sehen, bevor der aeussere
+    /// Generator aufgibt.
+    pub fn send_return(&mut self, v: Value) {
+        self.resume = Resume::Return;
+        self.stack.push(v);
+    }
+
+    /// Der innere Iterator des laufenden `yield*`.
+    fn delegate_iter(&self) -> Option<Value> {
+        match self.frames.last()?.iters.last()? {
+            Iter::Obj(v) | Iter::Async { it: v, .. } => Some(v.clone()),
+            _ => None,
+        }
+    }
+
+    /// Den obersten Rahmen verlassen und seinen Wert zurueckgeben.
+    ///
+    /// Herausgeloest aus `Op::Ret`, weil `yield*` denselben Ausgang braucht:
+    /// **ein `return()` am Generator, das den inneren Iterator erschoepft
+    /// hat, IST ein `return` aus dem aeusseren Rumpf** — samt dem Schliessen
+    /// jeder offenen `for…of`-Iteration darin. Zwei Fassungen davon waeren
+    /// zwei Semantiken fuer denselben Ausgang.
+    fn do_return(&mut self, i: &mut Interp) -> C<Flow> {
+        let v = if self.stack.len() > self.frames.last().unwrap().base {
+            self.pop()
+        } else {
+            Value::Undefined
+        };
+        let f = self.frames.pop().unwrap();
+        // Ein `return` aus einer `for…of`-Schleife heraus muss ihren Iterator
+        // SCHLIESSEN — sonst faehrt ein Generator seinen eigenen
+        // `finally`-Block nie. Von innen nach aussen.
+        for it in f.iters.iter().rev() {
+            match it { Iter::Obj(v) | Iter::Async { it: v, .. } => i.iter_close(v), _ => {} }
+        }
+        self.stack.truncate(f.base);
+        if f.root {
+            if f.is_program {
+                // Der Wert eines PROGRAMMS ist sein letzter Ausdruckswert,
+                // nicht das, was am Ende auf dem Stapel liegt. Ein Funktions-
+                // oder Generatorrumpf hat keinen.
+                let c = core::mem::replace(&mut self.completion, Value::Undefined);
+                return Ok(Flow::Done(if matches!(c, Value::Undefined) { v } else { c }));
+            }
+            return Ok(Flow::Done(v));
+        }
+        i.depth -= 1;
+        if self.frames.is_empty() {
+            return Ok(Flow::Done(v));
+        }
+        self.push(v);
+        Ok(Flow::Go)
+    }
+
+    /// Steht die angehaltene Maschine an einem `yield*`?
+    ///
+    /// `drive` zaehlt `ip` VOR dem Befehl hoch, also steht der Anhaltebefehl
+    /// bei `ip - 1`.
+    pub fn at_delegate(&self) -> bool {
+        let Some(f) = self.frames.last() else { return false };
+        f.ip.checked_sub(1)
+            .and_then(|k| f.chunk.ops.get(k))
+            .is_some_and(|op| matches!(op, Op::YieldDelegate(_)))
     }
 
     /// `gen.throw(v)`: den Wurf an der Anhaltestelle einwerfen. `false`
@@ -285,7 +384,10 @@ impl Vm {
                 Op::Jump(t) => (*t as usize) <= ip,
                 Op::Call { .. } | Op::New(_) | Op::CallSpread(_) | Op::NewSpread
                 | Op::SetCompletion | Op::DeclVar { .. } | Op::Ret
-                | Op::Yield | Op::Await | Op::ForInNext(_) | Op::SuperCall(_) => true,
+                | Op::Yield | Op::Await | Op::ForInNext(_) | Op::SuperCall(_)
+                // Ein `yield*` ruft je Umlauf am inneren Iterator — das treibt
+                // die Schleife voran und gehoert unter denselben Deckel.
+                | Op::YieldDelegate(_) | Op::DelegateCall(_) => true,
                 _ => false,
             };
             i.vm_ops += 1;
@@ -303,7 +405,7 @@ impl Vm {
             }
             match self.step(i, chunk, ip) {
                 Ok(Flow::Done(v)) => return Ok(Step::Done(v)),
-                Ok(Flow::Yield(v)) => return Ok(Step::Yield(v)),
+                Ok(Flow::Yield(v, raw)) => return Ok(Step::Yield(v, raw)),
                 Ok(Flow::Await(v)) => return Ok(Step::Await(v)),
                 Ok(Flow::Go) => {}
                 // Ein Wurf sucht sich seinen Behandler. Findet er keinen, geht
@@ -868,42 +970,148 @@ impl Vm {
             Op::SetCompletion => {
                 self.completion = self.pop();
             }
-            Op::Ret => {
-                let v = if self.stack.len() > self.frames.last().unwrap().base {
-                    self.pop()
-                } else {
-                    Value::Undefined
-                };
-                let f = self.frames.pop().unwrap();
-                // Ein `return` aus einer `for…of`-Schleife heraus muss ihren
-                // Iterator SCHLIESSEN — sonst faehrt ein Generator seinen
-                // eigenen `finally`-Block nie. Von innen nach aussen.
-                for it in f.iters.iter().rev() {
-                    match it { Iter::Obj(v) | Iter::Async { it: v, .. } => i.iter_close(v), _ => {} }
-                }
-                self.stack.truncate(f.base);
-                if f.root {
-                    if f.is_program {
-                        // Der Wert eines PROGRAMMS ist sein letzter
-                        // Ausdruckswert, nicht das, was am Ende auf dem Stapel
-                        // liegt. Ein Funktions- oder Generatorrumpf hat keinen.
-                        let c = core::mem::replace(&mut self.completion, Value::Undefined);
-                        return Ok(Flow::Done(if matches!(c, Value::Undefined) { v } else { c }));
-                    }
-                    return Ok(Flow::Done(v));
-                }
-                i.depth -= 1;
-                if self.frames.is_empty() {
-                    return Ok(Flow::Done(v));
-                }
-                self.push(v);
-            }
+            Op::Ret => return self.do_return(i),
             // Der Rahmen bleibt stehen, wo er steht — `ip` zeigt schon auf den
             // naechsten Befehl, und `Vm::send` legt den Wert von `next(v)` an
             // die Stelle, an der dieser hier seinen abgegeben hat.
+            // ── yield* ───────────────────────────────────────────────────
+            //
+            // Drei Befehle, weil zwischen dem Anstossen des inneren Iterators
+            // und dem Auswerten seines Ergebnisses in einem async-Generator
+            // ein `await` liegt — und ein Anhaltepunkt laesst sich nicht in
+            // einen Befehl hineinfalten. Derselbe Schnitt wie bei `for await`.
+            Op::DelegateStart(is_async) => {
+                let v = self.pop();
+                let it = if *is_async {
+                    let (it, is_async) = i.get_async_iterator(&v)?;
+                    Iter::Async { it, is_async, done: false }
+                } else {
+                    Iter::Obj(i.get_iterator(&v)?)
+                };
+                self.frames.last_mut().unwrap().iters.push(it);
+                // Der erste „erhaltene" Wert ist `undefined` (ES 15.5.5,
+                // Schritt 5) — und die Art ist `Normal`, egal womit der
+                // aeussere Generator gerade lief.
+                self.resume = Resume::Normal;
+                self.push(Value::Undefined);
+            }
+            Op::DelegateCall(giveup) => {
+                let received = self.pop();
+                let kind = self.resume;
+                self.deleg = kind;
+                let Some(it) = self.delegate_iter() else {
+                    return Err(i.throw_kind("TypeError", "no delegate here"));
+                };
+                let name = match kind {
+                    Resume::Normal => "next",
+                    Resume::Throw => "throw",
+                    Resume::Return => "return",
+                };
+                let m = i.get(&it, name)?;
+                if !i.is_callable(&m) {
+                    self.frames.last_mut().unwrap().iters.pop();
+                    return match kind {
+                        // **Ein Iterator ohne `throw` bekommt sein `return`**
+                        // (ES 15.5.5 6.b.iii) und der Wurf wird zum TypeError:
+                        // der innere darf nicht halb offen zurueckbleiben.
+                        Resume::Throw => {
+                            i.iter_close(&it);
+                            Err(i.throw_kind("TypeError",
+                                "the delegated iterator has no throw method"))
+                        }
+                        // Ohne `return` gibt der aeussere Generator direkt auf,
+                        // mit dem Wert, den `gen.return(v)` mitgebracht hat.
+                        Resume::Return => { self.push(received); self.jump(*giveup); Ok(Flow::Go) }
+                        Resume::Normal => Err(i.throw_kind("TypeError",
+                                "the delegated value is not an iterator")),
+                    };
+                }
+                // Wirft der Aufruf SELBST, bleibt der innere Iterator liegen —
+                // dieselbe Regel wie im gewoehnlichen `for…of`: sein Zustand
+                // ist dann unbekannt, und `return()` darauf waere spec-widrig.
+                let r = match i.call(&m, it, &[received]) {
+                    Ok(r) => r,
+                    Err(e) => { self.frames.last_mut().unwrap().iters.pop(); return Err(e) }
+                };
+                // **Ein umgehuellter SYNCHRONER Iterator gibt sein Ergebnis
+                // schon fertig** — abzuwarten ist dort nur der WERT, und sein
+                // `done` steht jetzt fest (ES 27.1.4.4,
+                // AsyncFromSyncIteratorContinuation). Dieselbe Aufteilung wie
+                // bei `for await`; ohne sie kam aus `yield* [Promise…]` das
+                // Versprechen selbst heraus.
+                let wrapped_sync = matches!(self.frames.last().unwrap().iters.last(),
+                                            Some(Iter::Async { is_async: false, .. }));
+                if wrapped_sync {
+                    if !matches!(r, Value::Obj(_)) {
+                        self.frames.last_mut().unwrap().iters.pop();
+                        return Err(i.throw_kind("TypeError",
+                            "the delegated iterator result is not an object"));
+                    }
+                    let d = i.get(&r, "done")?.truthy();
+                    let v = i.get(&r, "value")?;
+                    if let Some(Iter::Async { done, .. }) =
+                        self.frames.last_mut().unwrap().iters.last_mut() { *done = d; }
+                    self.push(v);
+                } else {
+                    self.push(r);
+                }
+            }
+            Op::DelegateStep { end, is_async } => {
+                let r = self.pop();
+                // Der umgehuellte synchrone Fall: `done` steht schon am
+                // Eintrag, und `r` IST der abgewartete Wert.
+                if let Some(Iter::Async { is_async: false, done, .. }) =
+                    self.frames.last().unwrap().iters.last() {
+                    let fertig = *done;
+                    if fertig {
+                        self.frames.last_mut().unwrap().iters.pop();
+                        self.push(r);
+                        if self.deleg == Resume::Return { return self.do_return(i); }
+                        self.jump(*end);
+                    } else {
+                        self.push(r);
+                    }
+                    return Ok(Flow::Go);
+                }
+                if !matches!(r, Value::Obj(_)) {
+                    self.frames.last_mut().unwrap().iters.pop();
+                    return Err(i.throw_kind("TypeError",
+                        "the delegated iterator result is not an object"));
+                }
+                if i.get(&r, "done")?.truthy() {
+                    self.frames.last_mut().unwrap().iters.pop();
+                    let v = i.get(&r, "value")?;
+                    self.push(v);
+                    // **Womit angeworfen wurde, entscheidet den AUSGANG.** Ein
+                    // erschoepfter innerer Iterator nach einem `gen.return(v)`
+                    // beendet den aeusseren Rumpf; nach einem `next()` ist der
+                    // Wert bloss das Ergebnis des `yield*`-Ausdrucks.
+                    if self.deleg == Resume::Return {
+                        return self.do_return(i);
+                    }
+                    self.jump(*end);
+                } else if *is_async {
+                    // Ein async-Generator gibt den WERT heraus und laesst ihn
+                    // einpacken; ein gewoehnlicher reicht das Ergebnisobjekt
+                    // unveraendert durch (`Op::YieldDelegate`).
+                    let v = i.get(&r, "value")?;
+                    self.push(v);
+                } else {
+                    self.push(r);
+                }
+            }
             Op::Yield => {
                 let v = self.pop();
-                return Ok(Flow::Yield(v));
+                return Ok(Flow::Yield(v, false));
+            }
+            // Der Anhaltepunkt eines `yield*` im GEWOEHNLICHEN Generator: der
+            // Wert ist schon das Ergebnisobjekt des inneren Iterators und geht
+            // unveraendert hinaus. Er ist ausserdem die Marke, an der
+            // `at_delegate` erkennt, dass ein `throw()` oder `return()` hier
+            // NICHT abwickeln darf.
+            Op::YieldDelegate(raw) => {
+                let v = self.pop();
+                return Ok(Flow::Yield(v, *raw));
             }
             Op::Await => {
                 let v = self.pop();
@@ -1236,6 +1444,94 @@ mod tests {
             }
         };
         (lauf(true), lauf(false))
+    }
+
+    /// **`yield*` — die Delegation, und sie hat NIE funktioniert.**
+    ///
+    /// Bis 0.169 sagte der Uebersetzer bei jedem `yield*` ab
+    /// (`yield-delegate`), und der Baumlaeufer dahinter warf „generators are
+    /// not supported" — auch im gewoehnlichen Generator. Der Grund, warum es
+    /// kein Anbau war: an der Anhaltestelle muss die Maschine WISSEN, womit
+    /// sie wieder angeworfen wurde (Wert · Wurf · `return`), um es an den
+    /// inneren Iterator weiterzureichen.
+    #[test]
+    fn yield_star_reicht_alle_drei_anwuerfe_weiter() {
+        let faelle: &[(&str, &str)] = &[
+            // Der Rueckgabewert des INNEREN ist der Wert des `yield*`.
+            ("function* i(){ yield 1; yield 2; return 'fin' }\
+              function* o(){ out.push(yield* i()) }\
+              [...o()].forEach(x=>out.unshift(x))", "2|1|fin"),
+            // Ueber ein Feld, eine Zeichenkette, einen eingebauten Iterator.
+            ("function* g(){ yield* [1,2]; yield* 'ab'; yield* new Map([['k',1]]).keys() }\
+              out.push(...g())", "1|2|a|b|k"),
+            // `next(v)` erreicht das INNERE `yield`.
+            ("function* e(){ while(true){ const g = yield '?'; if(g==='stop') return 'E' } }\
+              function* w(){ out.push('R:'+(yield* e())) }\
+              var h=w(); h.next(); h.next('a'); h.next('stop')", "R:E"),
+            // `throw()` geht an den inneren Iterator, der ihn fangen darf.
+            ("function* c(){ try{ yield 'A' }catch(e){ yield 'f:'+e.message } yield 'B' }\
+              function* o(){ yield* c(); yield 'z' }\
+              var h=o(); out.push(h.next().value);\
+              out.push(h.throw(new Error('bam')).value);\
+              out.push(h.next().value); out.push(h.next().value)", "A|f:bam|B|z"),
+            // `return()` laesst den inneren aufraeumen, BEVOR der aeussere aufgibt.
+            ("var m={[Symbol.iterator](){return{next:()=>({value:'x',done:false}),\
+              return:(v)=>{out.push('zu');return{value:v,done:true}}}}};\
+              function* o(){ yield* m; out.push('nie') }\
+              var h=o(); h.next(); out.push(h.return('ok').value)", "zu|ok"),
+            // **Das Ergebnisobjekt des INNEREN geht unveraendert hinaus.**
+            ("var m={[Symbol.iterator](){var n=0;return{next:()=>n++?{value:9,done:true}\
+              :{value:7,done:false,mine:true}}}};\
+              function* o(){ yield* m }\
+              out.push(o().next().mine)", "true"),
+            // Ein Iterator ohne `throw` bekommt sein `return` und dann einen
+            // TypeError (ES 15.5.5, 6.b.iii).
+            ("var m={[Symbol.iterator](){return{next:()=>({value:1,done:false}),\
+              return:()=>{out.push('zu');return{done:true}}}}};\
+              function* o(){ yield* m }\
+              var h=o(); h.next();\
+              try{ h.throw(new Error('x')) }catch(e){ out.push(e.constructor.name) }",
+             "zu|TypeError"),
+        ];
+        for (k, (src, want)) in faelle.iter().enumerate() {
+            let full = alloc::format!("var out=[];{src};out.join('|')");
+            let mut i = super::Interp::new();
+            let prog = crate::js::parse(&full, false).expect("parst");
+            let got = match i.run_program(&prog) {
+                Ok(v) => i.to_string(&v).map(|s| s.to_string())
+                          .unwrap_or_else(|_| alloc::string::String::from("?")),
+                Err(super::Abrupt::Throw(v)) => {
+                    let m = i.get(&v, "message").ok().and_then(|m| i.to_string(&m).ok())
+                             .unwrap_or_else(|| alloc::rc::Rc::from("?"));
+                    alloc::format!("THROW {m}")
+                }
+                Err(_) => alloc::string::String::from("ABRUPT"),
+            };
+            assert_eq!(&got, want, "Fall {k}: {src}");
+        }
+    }
+
+    /// `yield*` im ASYNC-Generator: derselbe Weg, nur wartet er zwischendurch.
+    #[test]
+    fn yield_star_im_async_generator() {
+        let faelle: &[(&str, &str)] = &[
+            ("async function* i(){ yield 1; await null; yield 2; return 'fin' }\
+              async function* o(){ out.push('r='+(yield* i())) }\
+              (async()=>{ for await (const x of o()) out.unshift(x) })()", "2|1|r=fin"),
+            // Ein async-Generator delegiert an einen SYNCHRONEN Iterator: die
+            // Werte darin werden abgewartet (AsyncFromSyncIteratorContinuation).
+            ("async function* g(){ yield* [Promise.resolve('p'),'q'] }\
+              (async()=>{ for await (const x of g()) out.push(String(x)) })()", "p|q"),
+            // `throw()` erreicht auch hier den inneren Generator.
+            ("async function* c(){ try{ yield 'A' }catch(e){ yield 'f:'+e.message } }\
+              async function* o(){ yield* c(); yield 'z' }\
+              (async()=>{ const h=o(); out.push((await h.next()).value);\
+              out.push((await h.throw(new Error('bam'))).value);\
+              out.push((await h.next()).value) })()", "A|f:bam|z"),
+        ];
+        for (k, (src, want)) in faelle.iter().enumerate() {
+            assert_eq!(&async_out(src), want, "Fall {k}: {src}");
+        }
     }
 
     /// **Async-Generatoren und `for await`.**
