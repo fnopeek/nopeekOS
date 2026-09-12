@@ -48,7 +48,7 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-12 · beak 0.172.0 · Kernel 0.336.0, AM GERAET GELAUFEN** (Rest: `git log`)
+**Stand 2026-09-12 · beak 0.172.0 · Kernel 0.337.0, AM GERAET GELAUFEN** (Rest: `git log`)
 
 **0.170.0: vier Releases ohne eine Zeile im Selbsttest.** Kein neues
 Merkmal, sondern das, was die Prüfseite selbst als Regel führt: *„Ohne diese
@@ -63,6 +63,27 @@ nicht mitgezaehlt werden koennen und deshalb eigene sind: der ASYNCHRONE Teil
 ANSTELLEN) meldet nach, wie `micro` es tut, und der KASTEN eines
 Steuerelements wird beim Klick NACHGERECHNET statt gezeigt (Feld 100x34,
 Kaestchen 13 — die Masse aus 0.168, aber mit der Schrift des Geraets).
+
+**Kernel 0.337.0: die fuenf `npk_tcp_*` prueften GAR KEINE Kapabilitaet.**
+Gefunden beim Vorbereiten des WebSocket-Postens — also in genau der Flaeche,
+die erweitert werden sollte. Die Kette: `forge_glue::resolve` loest Importe
+nach NAMEN auf, es gibt keine Pruefung der Importe beim Laden, und ein Modul
+ohne `.npk.caps` bekommt `READ | EXECUTE | RENDER`, also **kein NET**. Damit
+konnte jedes Modul, das den Namen importiert, eine Verbindung zu jeder
+Adresse und jedem Port aufmachen und beliebige Bytes tauschen —
+`npk_http_begin` prueft `Rights::NET` seit je, der rohe Socket daneben nicht.
+Genau die Frage aus dem Sicherheits-Checkpoint, und die Antwort war nicht
+„nein".
+
+Alle fuenf pruefen jetzt `Rights::NET`. **Die REICHWEITE bleibt bewusst
+draussen**: `ctx.net_reach` ist die Regel einer SEITE (damit eine
+oeffentliche Seite nicht ins Heimnetz greift), ein Modul ist keine Seite,
+und bei `debug` IST das Heimnetz der Zweck — es schreibt sein Protokoll an
+ein `nc -lk`. Dass `npk_http_begin` die Seitenregel auf jedes Modul anwendet,
+ist die Unstimmigkeit auf der anderen Seite; sie ist benannt, nicht
+angefasst. `debug` 0.9.1 traegt jetzt seine `.npk.caps` — **wer eine Sektion
+hinschreibt, ERSETZT die Vorgabe** und muss `READ` mitnennen, wenn er es
+behalten will.
 
 **0.172.0: `sandbox.nopeek.ch`, vier Befunde und zwei Antworten.** Florian
 hat die Seite durchgesehen; ausgezaehlt statt vermutet.
