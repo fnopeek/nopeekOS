@@ -1004,6 +1004,7 @@ css_props! {
     OutlineStyle = "outline-style" @ Paint,
     OutlineColor = "outline-color" @ Paint,
     OutlineOffset = "outline-offset" @ Paint,
+    AccentColor = "accent-color" @ Paint,
     BorderRadius = "border-radius" @ Paint,
     Transform = "transform" @ Layout,
     BoxShadow = "box-shadow" @ Paint,

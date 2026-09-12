@@ -3397,13 +3397,23 @@ pub fn install(realm: &mut Realm) {
         with_node!(i, t, |n| Ok(Value::Bool(!n.attrs.is_empty())))
     }, 0, &fp);
     getter(&element_proto, "dataset", |i, t, _| {             // 3966
-        // Eine MOMENTAUFNAHME, kein lebendes Objekt: `el.dataset.x = 1`
-        // schreibt damit KEIN Attribut. Das ist eine echte Luecke und hier
-        // benannt statt versteckt — der Zensus zaehlt fast nur Lesezugriffe.
+        // **Lebendig beim Schreiben, Momentaufnahme beim Lesen.** Die Werte
+        // stehen als gewoehnliche Eigenschaften darauf (das Lesen ist der
+        // Alltagsfall und soll nichts kosten), und `ObjKind::Dataset` traegt
+        // den Knoten, damit `Interp::set` eine Zuweisung ins ATTRIBUT
+        // durchreicht. Vorher war es nur die Momentaufnahme, und
+        // `el.dataset.theme = 'light'` verpuffte — der Theme-Schalter von
+        // `sandbox.nopeek.ch` genau so.
+        //
+        // Offen und benannt: `delete el.dataset.x` entfernt das Attribut
+        // nicht, und ein Schluessel, den das Element noch nicht hat, wird
+        // angelegt — das ist richtig — aber das Objekt in der Hand des
+        // Rufers zeigt Aenderungen von AUSSEN nicht nach.
+        let id = node_of(i, &t)?;
         let pairs: Vec<(String, String)> = with_node!(i, t, |n|
             n.attrs.iter().filter_map(|(k, v)| k.strip_prefix("data-")
                 .map(|r| (dash_to_camel(r), v.to_string()))).collect::<Vec<_>>());
-        let g = new_obj(Some(i.realm.object_proto.clone()));
+        let g = new_kind(Some(i.realm.object_proto.clone()), ObjKind::Dataset(id));
         for (k, v) in pairs { g.borrow_mut().define(&k, Prop::data(Value::string(v))); }
         Ok(Value::Obj(g))
     }, &fp);
@@ -5652,6 +5662,17 @@ fn deliver(i: &mut Interp, ev: &Gc, kind: &str, chain: &[u32]) -> C<bool> {
 }
 
 /// `data-foo-bar` -> `fooBar`.
+/// `theme` -> `data-theme`, `myKey` -> `data-my-key`. Die Umkehr von
+/// `dash_to_camel`, und der Weg, den `el.dataset.x = v` nimmt.
+pub fn camel_to_data_attr(s: &str) -> String {
+    let mut out = String::from("data-");
+    for c in s.chars() {
+        if c.is_ascii_uppercase() { out.push('-'); out.extend(c.to_lowercase()); }
+        else { out.push(c) }
+    }
+    out
+}
+
 fn dash_to_camel(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut up = false;
