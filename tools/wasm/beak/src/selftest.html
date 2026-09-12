@@ -37,6 +37,14 @@
  <span id="geom">Geometrie ungeprueft</span>
 </p>
 <p>
+ <!-- Bekannte Masse, damit der Klick sie NACHRECHNEN kann statt sie nur zu
+      zeigen: Zeilenhoehe 20 + 12 Polsterung + 2 Rahmen = 34 hoch, und das
+      Kaestchen ist 13 px, ohne dass sein Rahmen dazukommt. -->
+ <input id="ctl" style="font:16px/20px monospace;padding:6px 12px;border:1px solid #333;width:100px;box-sizing:border-box">
+ <input id="cbx" type="checkbox">
+ <span id="ctlbox">Steuerelement ungeprueft</span>
+</p>
+<p>
  <button id="b2" onclick="say('inline', 'inline-onclick lief')">onclick-Attribut</button>
  <span id="inline">nicht geklickt</span>
 </p>
@@ -51,6 +59,7 @@
 <h2>Zeitgeber</h2>
 <p id="timer">setTimeout ist nicht gelaufen.</p>
 <p id="micro">Microtask ist nicht gelaufen.</p>
+<p id="agen">async-Generator ist nicht gelaufen.</p>
 
 <h2>Kasten-Beobachter</h2>
 <p id="ro">ResizeObserver hat nicht gemeldet.</p>
@@ -124,6 +133,40 @@ syn(langRows, "Empfaengerpruefung", "try { String.prototype.trim.call(null); ret
 syn(langRows, "Erben von Error", "class E extends Error {} return new E('boom').message", "boom");
 syn(langRows, "Date rechnet", "return new Date(Date.UTC(2026, 8, 5)).toISOString()", "2026-09-05T00:00:00.000Z");
 syn(langRows, "Date liest den Text", "return Date.parse('2026-09-05T14:30:45.123Z')", 1788618645123);
+
+/* Was 0.166-0.169 dazugebracht hat. Dieselbe Regel wie oben: ohne diese
+   Zeilen sagt ein gruener Lauf am Geraet nur, dass nichts kaputt ist. */
+syn(langRows, "Getaggte Vorlage",
+  "function t(s, v) { return s.raw[0] + '|' + s[0] + '|' + v } return t`a\\t${1}b`",
+  "a\\t|a\t|1");
+/* lit-html und styled-components schluesseln ihren Zwischenspeicher mit dem
+   Vorlagen-Gegenstand. Ohne stabile Identitaet bauen sie bei JEDEM Rendern
+   neu — das ist der eigentliche Vertrag, nicht der Text. */
+syn(langRows, "Vorlage behaelt ihre Identitaet",
+  "function id(s) { return s } var a = []; for (var k = 0; k < 3; k++) a.push(id`x`);"
+  + " return a[0] === a[1] && a[1] === a[2]", true);
+syn(langRows, "yield* (Delegation)",
+  "function* i() { yield 1; yield 2; return 'E' } function* o() { var r = yield* i(); yield r }"
+  + " return [...o()].join(',')", "1,2,E");
+syn(langRows, "yield* reicht throw weiter",
+  "function* c() { try { yield 'A' } catch (e) { yield 'f:' + e.message } }"
+  + " function* o() { yield* c() } var h = o(); h.next();"
+  + " return h.throw(new Error('x')).value", "f:x");
+syn(langRows, "yield* reicht das Ergebnis ROH",
+  "var m = { }; m[Symbol.iterator] = function () { var n = 0; return { next: function () {"
+  + " return n++ ? { value: 0, done: true } : { value: 7, done: false, mine: true } } } };"
+  + " function* o() { yield* m } return o().next().mine === true", true);
+syn(langRows, "async-Generator (Gestalt)",
+  "async function* g() { yield 1 } var h = g();"
+  + " return Object.prototype.toString.call(h) + '|' + (h[Symbol.asyncIterator]() === h)",
+  "[object AsyncGenerator]|true");
+/* **Eine Seite darf `$262` NIE sehen.** Es ist das Wirtsobjekt des
+   Konformanzlaeufers; sein `evalScript` waere ein zweiter Weg, Code an der
+   Skript-Zustellung vorbei laufen zu lassen, und `detachArrayBuffer` zoege
+   fremden Sichten den Speicher weg. Die Zeile steht hier, weil ein
+   versehentlich angeschalteter Wirt sonst niemandem auffiele. */
+syn(langRows, "$262 ist NICHT da (Sicherheit)",
+  "return typeof $262 === 'undefined' && !('$262' in globalThis)", true);
 
 /* **Diese eine geht NUR am Geraet.** Host-seitig ist die Uhr des Wirts 0,
    also steht `Date.now()` dort bei 1970 — der Weg ueber `npk_unix_time()`
@@ -640,6 +683,21 @@ document.getElementById("b1").addEventListener("click", function () {
   say("geom", g.width > 0 && g.height > 0
         ? "Knopf ist " + Math.round(g.width) + "x" + Math.round(g.height)
         : "NEIN: Geometrie ist 0");
+  /* **Der Kasten eines Steuerelements, nachgerechnet statt gezeigt.** Bis
+     0.168 standen die UA-Masse als eine Zahl fuer alle da; ein Feld mit
+     eigener Polsterung und eigenem Rahmen kam zu flach heraus und ein
+     Kaestchen zu gross. Beides haengt am Geraet an derselben Stelle wie
+     host-seitig, aber nur hier laeuft es mit der Schrift des Geraets. */
+  var f = document.getElementById("ctl").getBoundingClientRect();
+  var c = document.getElementById("cbx").getBoundingClientRect();
+  var fw = Math.round(f.width), fh = Math.round(f.height), cs = Math.round(c.width);
+  var schlecht = [];
+  if (fw !== 100) { schlecht.push("Feld " + fw + " breit statt 100"); }
+  if (fh !== 34) { schlecht.push("Feld " + fh + " hoch statt 34"); }
+  if (cs !== 13) { schlecht.push("Kaestchen " + cs + " statt 13"); }
+  say("ctlbox", schlecht.length
+    ? "NEIN: " + schlecht.join(" · ")
+    : "Steuerelement stimmt: Feld " + fw + "x" + fh + ", Kaestchen " + cs);
 });
 document.getElementById("b3").addEventListener("click", function () {
   var li = document.createElement("li");
@@ -719,6 +777,42 @@ if (typeof Promise === "function") {
       }, 0);
     });
 }
+
+/* **Der asynchrone Teil braucht die Schlange** und kann deshalb nicht in
+   `langRows` stehen — die werden gezaehlt, bevor der erste Microtask laeuft.
+   Dieselbe Form wie `micro`: die Zeile schreibt ihr Ergebnis nach, und ein
+   Fehler steht als Text da statt als fehlendes JA. */
+(function () {
+  if (typeof Promise !== "function") { return; }
+  var teil = [];
+  (async function () {
+    async function* g() { yield 1; await null; yield 2; return "E"; }
+    async function* o() { var r = yield* g(); yield "r=" + r; }
+    var a = [];
+    for await (var x of o()) { a.push(x); }
+    teil.push(a.join(",") === "1,2,r=E" ? "yield*-async" : "yield*-async FALSCH: " + a);
+
+    /* Ein async-Generator ueber ein gewoehnliches Feld: die Versprechen darin
+       werden ABGEWARTET (AsyncFromSyncIteratorContinuation). */
+    var b = [];
+    for await (var y of [Promise.resolve("p"), "q"]) { b.push(String(y)); }
+    teil.push(b.join(",") === "p,q" ? "for-await" : "for-await FALSCH: " + b);
+
+    /* Drei `next()` auf einmal muessen sich ANSTELLEN, statt die Maschine
+       dreimal anzuwerfen. */
+    async function* z() { yield "a"; yield "b"; yield "c"; }
+    var h = z(), r3 = await Promise.all([h.next(), h.next(), h.next()]);
+    var got = r3.map(function (v) { return v.value }).join("");
+    teil.push(got === "abc" ? "Schlange" : "Schlange FALSCH: " + got);
+  })().then(function () {
+    var schlecht = teil.filter(function (t) { return t.indexOf("FALSCH") >= 0 });
+    say("agen", schlecht.length
+      ? "async-Generator: " + schlecht.join(" · ")
+      : "async-Generator ist gelaufen: " + teil.join(", "));
+  }, function (e) {
+    say("agen", "async-Generator WARF: " + (e && e.message ? e.message : e));
+  });
+})();
 
 /* ---------- Ergebnis ---------- */
 paint("lang", langRows);
