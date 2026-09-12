@@ -48,7 +48,7 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-12 · beak 0.170.1 · Kernel 0.336.0, AM GERAET GELAUFEN** (Rest: `git log`)
+**Stand 2026-09-12 · beak 0.171.0 · Kernel 0.336.0, AM GERAET GELAUFEN** (Rest: `git log`)
 
 **0.170.0: vier Releases ohne eine Zeile im Selbsttest.** Kein neues
 Merkmal, sondern das, was die Prüfseite selbst als Regel führt: *„Ohne diese
@@ -63,6 +63,31 @@ nicht mitgezaehlt werden koennen und deshalb eigene sind: der ASYNCHRONE Teil
 ANSTELLEN) meldet nach, wie `micro` es tut, und der KASTEN eines
 Steuerelements wird beim Klick NACHGERECHNET statt gezeigt (Feld 100x34,
 Kaestchen 13 — die Masse aus 0.168, aber mit der Schrift des Geraets).
+
+**0.171.0: der Tabstreifen, nach zwei Geraetefunden.** Florian: „wir muessen
+tabs optisch noch bisschen mehr hervorheben und das x symbol malt bisschen
+unscharf". Beides hatte einen Grund, und der zweite betrifft nicht nur das `x`.
+
+**Der Atlas fuehrt 16, 24, 32, 48 und 64 — sonst nichts.** Ein Icon in
+`size: 12` bekommt also das 16er und wird auf 4:3 verkleinert. Das Verkleinern
+mittelt korrekt ueber Flaechen (der Kommentar an der Rufstelle sagte noch
+„nearest-neighbour" und war veraltet), und GENAU deshalb wird ein 1,5 px
+breiter Phosphor-Strich dabei weich: eine Flaechenmittelung eines duennen
+Diagonalstrichs auf 0,75× IST unscharf. Der Knopf verlangt jetzt 16, also ein
+1:1-Blit, und `TAB_BTN` waechst von 20 auf 22, damit es hineinpasst
+(`TAB_CHARS` rechnet sich selbst nach). **Benannt und nicht gefixt:** `volume`
+verlangt 20 und wird aus dem 24er verkleinert — dieselbe Ursache, anderes
+Modul.
+
+**Der aktive Tab bekommt einen zwei Pixel hohen Akzentstreifen oben.** Der
+Unterschied war bis hierher `Surface` gegen `SurfaceElevated` plus eine
+Textfarbe — richtig nach §3 `tab`, aber am Geraet zu leise. Der Streifen liegt
+IM Tab, nicht darueber (sonst verschoebe er die Beschriftung des aktiven gegen
+die der anderen), und die Polsterung ist dafuer vom Tab in seine innere Zeile
+gewandert. Dabei beinahe in eine Falle getreten: **in einer `Column` ist
+`align` die QUERachse**, also die Breite — mit `Align::Start` haette der
+Streifen seine natuerliche Breite bekommen, und die ist bei einer Zeile ohne
+Kinder null.
 
 **0.170.1, und der erste Gerätelauf sagte genau das, wofür die Seite da
 ist.** Florian am 2026-09-12: `Sprache 62/62 · Dokument 39/39`, der
