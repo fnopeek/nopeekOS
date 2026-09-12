@@ -782,6 +782,144 @@ fn net_allowed(ctx: &mut HostState) -> bool {
     true
 }
 
+// ── TLS-Stromsocket ──────────────────────────────────────────────────────
+//
+// **Der Strom war schon da, nur nicht herausgefuehrt.** `crypto::tls` bietet
+// `tls_connect`, `tls_send`, `tls_poll` und `tls_close` auf einem
+// gewoehnlichen `tcp_handle` — das ist ein Byte-Socket, und was fehlte, war
+// allein die Tuer fuer ein Modul. Gebraucht wird sie fuer `wss://`: ein
+// WebSocket ist TLS plus ein Handschlag plus Rahmen, und die beiden letzten
+// gehoeren in die Engine, nicht hierher.
+//
+// **Anders als das Jobsystem von `npk_http_*`:** dort ist eine Anfrage ein
+// Auftrag mit Anfang und Ende, hier ist es eine LANGE Verbindung, die
+// meistens still ist. Deshalb eine eigene Tabelle statt einer Warteschlange.
+
+const MAX_TLS: usize = 8;
+
+struct TlsSlot {
+    /// Wem er gehoert. Ein Griff wird NUR dem Prozess beantwortet, der ihn
+    /// geoeffnet hat — dieselbe Regel wie bei den HTTP-Griffen.
+    pid: u32,
+    session: crate::crypto::tls::TlsSession,
+}
+
+static TLS_SLOTS: spin::Mutex<[Option<TlsSlot>; MAX_TLS]> =
+    spin::Mutex::new([const { None }; MAX_TLS]);
+
+/// Gemeinsamer Riegel fuer jeden Zugriff auf einen bestehenden Griff.
+fn tls_slot_ok(ctx: &mut HostState, handle: i32) -> Option<usize> {
+    if !net_allowed(ctx) { return None }
+    if handle < 0 || handle as usize >= MAX_TLS { return None }
+    let i = handle as usize;
+    let g = TLS_SLOTS.lock();
+    match &g[i] {
+        Some(sl) if sl.pid == ctx.pid => Some(i),
+        _ => None,
+    }
+}
+
+/// `npk_tls_connect(ip, port, host_ptr, host_len) -> Griff | -1`
+///
+/// **Blockiert fuer den Handschlag** (gemessen 60 ms: 10 ms TCP + 50 ms TLS)
+/// — dieselbe Groessenordnung, die `open_tls` im HTTP-Weg ohnehin kostet, und
+/// er faellt einmal je Verbindung an. Was ein Modul NICHT darf, ist zehn
+/// Sekunden blockieren: ein Modul ist eine Faser, und die haelt ihren
+/// Arbeitskern an. Wird das je spuerbar, ist die Antwort dieselbe wie bei
+/// `npk_tcp_connect` — in `start` und `status` teilen.
+pub(crate) fn npk_tls_connect(mem: &mut [u8], ctx: &mut HostState,
+                              ip_packed: i32, port: i32,
+                              host_ptr: i32, host_len: i32) -> i32 {
+    if !net_allowed(ctx) { return -1 }
+    if port <= 0 || port > 65535 { return -1 }
+    let ip = [
+        ((ip_packed >> 24) & 0xFF) as u8,
+        ((ip_packed >> 16) & 0xFF) as u8,
+        ((ip_packed >> 8) & 0xFF) as u8,
+        (ip_packed & 0xFF) as u8,
+    ];
+    // **Und HIER gilt die Reichweite.** Anders als beim rohen TCP faehrt
+    // diesen Weg der Browser fuer eine SEITE, und `ctx.net_reach` ist die
+    // Klasse, gegen die jede ihrer Anfragen geprueft wird. Ein `wss://` daran
+    // vorbei waere das Loch, das 0.147.0 zugemacht hat — nur ueber einen
+    // anderen Socket.
+    let to = crate::intent::reach::classify_ip(ip);
+    if !crate::intent::reach::allows(ctx.net_reach, to) {
+        kprintln!("[npk] tls: REICHWEITE verweigert — {}.{}.{}.{} ist {:?}, die Seite ist {:?}",
+            ip[0], ip[1], ip[2], ip[3], to, ctx.net_reach);
+        return -1;
+    }
+    let Some(host) = read_str(mem, host_ptr, host_len) else { return -1 };
+    // Der Name gehoert in SNI und in die Zertifikatspruefung, ohne Port.
+    let bare: String = String::from(host.split(':').next().unwrap_or(&host));
+    if bare.is_empty() || bare.len() > 253 { return -1 }
+
+    let free = {
+        let g = TLS_SLOTS.lock();
+        match g.iter().position(|s| s.is_none()) { Some(i) => i, None => return -1 }
+    };
+    let tcp = match crate::net::tcp::connect(ip, port as u16) {
+        Ok(h) => h,
+        Err(_) => return -1,
+    };
+    let session = match crate::crypto::tls::tls_connect(tcp, &bare) {
+        Ok(s) => s,
+        Err(e) => {
+            kprintln!("[npk] tls: Handschlag mit {} gescheitert ({:?})", bare, e);
+            let _ = crate::net::tcp::close(tcp);
+            return -1;
+        }
+    };
+    TLS_SLOTS.lock()[free] = Some(TlsSlot { pid: ctx.pid, session });
+    free as i32
+}
+
+/// `npk_tls_send(handle, ptr, len) -> 0 | -1`
+pub(crate) fn npk_tls_send(mem: &mut [u8], ctx: &mut HostState,
+                           handle: i32, buf_ptr: i32, buf_len: i32) -> i32 {
+    let Some(i) = tls_slot_ok(ctx, handle) else { return -1 };
+    if buf_ptr < 0 || buf_len <= 0 { return -1 }
+    let start = buf_ptr as usize;
+    let Some(end) = start.checked_add(buf_len as usize) else { return -1 };
+    if end > mem.len() { return -1 }
+    let data = mem[start..end].to_vec();
+    let mut g = TLS_SLOTS.lock();
+    let Some(sl) = g[i].as_mut() else { return -1 };
+    match crate::crypto::tls::tls_send(&mut sl.session, &data) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// `npk_tls_recv(handle, ptr, cap) -> n | 0 (noch nichts) | -1 (zu/Fehler)`
+///
+/// **Kommt SOFORT zurueck.** `tls_poll` sammelt nur, was der TCP-Stapel schon
+/// hat; ein Browser fragt das in jedem Bild, und Warten waere der Preis fuer
+/// nichts.
+pub(crate) fn npk_tls_recv(mem: &mut [u8], ctx: &mut HostState,
+                           handle: i32, buf_ptr: i32, buf_max: i32) -> i32 {
+    let Some(i) = tls_slot_ok(ctx, handle) else { return -1 };
+    if buf_ptr < 0 || buf_max <= 0 { return -1 }
+    let start = buf_ptr as usize;
+    let Some(end) = start.checked_add(buf_max as usize) else { return -1 };
+    if end > mem.len() { return -1 }
+    let mut g = TLS_SLOTS.lock();
+    let Some(sl) = g[i].as_mut() else { return -1 };
+    match crate::crypto::tls::tls_poll(&mut sl.session, &mut mem[start..end]) {
+        Ok(n) => n as i32,
+        Err(_) => -1,
+    }
+}
+
+/// `npk_tls_close(handle) -> 0`
+pub(crate) fn npk_tls_close(ctx: &mut HostState, handle: i32) -> i32 {
+    let Some(i) = tls_slot_ok(ctx, handle) else { return -1 };
+    if let Some(mut sl) = TLS_SLOTS.lock()[i].take() {
+        let _ = crate::crypto::tls::tls_close(&mut sl.session);
+    }
+    0
+}
+
 pub(crate) fn npk_tcp_connect(ctx: &mut HostState, ip_packed: i32, port: i32) -> i32 {
     if !net_allowed(ctx) { return -1; }
     let ip = [

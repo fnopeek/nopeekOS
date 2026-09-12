@@ -212,11 +212,29 @@ Antwort wie bei `fetch`: **gleiche Herkunft**.
 
 Reihenfolge, wenn es drankommt:
 
-| | was | wo |
-|---|---|---|
-| **S1** | TLS-Stromsocket als Hostfunktion | Kernel |
-| **S2** | `WebSocket` (Handschlag, Rahmen, `close`), gleiche Herkunft | Engine + beak |
-| **S3** | `Origin`-Kopf + fremde Herkunft nach Serverzustimmung | Engine |
+| | was | wo | Stand |
+|---|---|---|---|
+| **S1** | TLS-Stromsocket als Hostfunktion | Kernel | **gebaut 2026-09-12** (unveröffentlicht) |
+| **S2** | `WebSocket` (Handschlag, Rahmen, `close`), gleiche Herkunft | Engine + beak | offen |
+| **S3** | `Origin`-Kopf + fremde Herkunft nach Serverzustimmung | Engine | offen |
+
+**S1, wie es gebaut ist:** `npk_tls_connect/send/recv/close`, in BEIDEN
+ABI-Wegen registriert, Tabelle mit acht Plätzen und je Platz die `pid` — ein
+Griff wird nur dem Prozess beantwortet, der ihn geöffnet hat. Gegated mit
+`Rights::NET` **und** der Reichweite: anders als beim rohen TCP fährt diesen
+Weg der Browser für eine SEITE, und `ctx.net_reach` ist die Klasse, gegen die
+jede ihrer Anfragen geprüft wird.
+
+Dazu **`crypto::tls::tls_poll`** — ein nicht-blockierender Leser. `tls_recv`
+wartet auf einen Satz, was für eine angeforderte Antwort richtig und für eine
+meist stille Verbindung falsch ist: ein Browser fragt einen WebSocket in JEDEM
+Bild. `tls_poll` holt nur, was der TCP-Stapel schon hat, sammelt es in
+`TlsSession.rx` und entschlüsselt erst, wenn Kopf und Nutzlast beisammen sind.
+`Ok(0)` heisst „noch nichts" und NICHT „zu".
+
+**Nicht veröffentlicht**, weil eine ABI-Fläche ohne Benutzer nur OTA-Verkehr
+wäre. Sie geht mit S2 zusammen raus. Für S2 fehlt ausserdem **SHA-1**
+(RFC 6455 §4.1, `Sec-WebSocket-Accept`); base64 und CSPRNG sind da.
 
 `EventSource` (SSE) ist danach fast geschenkt — es ist eine lange HTTP-Antwort
 und braucht **P8** (strömender Antwortkörper), nicht S1.

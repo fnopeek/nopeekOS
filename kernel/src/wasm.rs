@@ -2244,6 +2244,42 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     // `debug` froze every other fiber on its worker core for those 10 s,
     // the WiFi driver among them. Its card went unpolled (64 RX buffers =
     // milliseconds), and the link died with the command.
+    // ── npk_tls_* ────────────────────────────────────────────────────────
+    //
+    // **In BEIDEN Wegen**, sonst laeuft es unter forge und stirbt unter dem
+    // Interpreter (oder umgekehrt) — der Fehler, den `feedback_the_second_
+    // engine_only_runs_where_the_first_one_called` beschreibt.
+    linker.func_wrap("env", "npk_tls_connect",
+        |mut caller: Caller<'_, HostState>, ip_packed: i32, port: i32,
+         host_ptr: i32, host_len: i32| -> i32 {
+            let Some(m) = caller.get_export("memory").and_then(|e| e.into_memory())
+                else { return -1 };
+            let (mem, ctx) = m.data_and_store_mut(&mut caller);
+            host_core::npk_tls_connect(mem, ctx, ip_packed, port, host_ptr, host_len)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+    linker.func_wrap("env", "npk_tls_send",
+        |mut caller: Caller<'_, HostState>, handle: i32, buf_ptr: i32, buf_len: i32| -> i32 {
+            let Some(m) = caller.get_export("memory").and_then(|e| e.into_memory())
+                else { return -1 };
+            let (mem, ctx) = m.data_and_store_mut(&mut caller);
+            host_core::npk_tls_send(mem, ctx, handle, buf_ptr, buf_len)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+    linker.func_wrap("env", "npk_tls_recv",
+        |mut caller: Caller<'_, HostState>, handle: i32, buf_ptr: i32, buf_max: i32| -> i32 {
+            let Some(m) = caller.get_export("memory").and_then(|e| e.into_memory())
+                else { return -1 };
+            let (mem, ctx) = m.data_and_store_mut(&mut caller);
+            host_core::npk_tls_recv(mem, ctx, handle, buf_ptr, buf_max)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+    linker.func_wrap("env", "npk_tls_close",
+        |mut caller: Caller<'_, HostState>, handle: i32| -> i32 {
+            host_core::npk_tls_close(caller.data_mut(), handle)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     linker.func_wrap("env", "npk_tcp_connect",
         |mut caller: Caller<'_, HostState>, ip_packed: i32, port: i32| -> i32 {
             host_core::npk_tcp_connect(caller.data_mut(), ip_packed, port)

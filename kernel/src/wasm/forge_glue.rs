@@ -303,6 +303,31 @@ extern "C" fn f_npk_key_inject(vm: *const u64, byte: i32) -> i32 {
     host_core::npk_key_inject(ctx, byte)
 }
 
+extern "C" fn f_npk_tls_connect(vm: *const u64, ip_packed: i32, port: i32,
+                                host_ptr: i32, host_len: i32) -> i32 {
+    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    let (mem, ctx) = unsafe { parts(vm) };
+    host_core::npk_tls_connect(mem, ctx, ip_packed, port, host_ptr, host_len)
+}
+
+extern "C" fn f_npk_tls_send(vm: *const u64, handle: i32, buf_ptr: i32, buf_len: i32) -> i32 {
+    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    let (mem, ctx) = unsafe { parts(vm) };
+    host_core::npk_tls_send(mem, ctx, handle, buf_ptr, buf_len)
+}
+
+extern "C" fn f_npk_tls_recv(vm: *const u64, handle: i32, buf_ptr: i32, buf_max: i32) -> i32 {
+    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    let (mem, ctx) = unsafe { parts(vm) };
+    host_core::npk_tls_recv(mem, ctx, handle, buf_ptr, buf_max)
+}
+
+extern "C" fn f_npk_tls_close(vm: *const u64, handle: i32) -> i32 {
+    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    let (_mem, ctx) = unsafe { parts(vm) };
+    host_core::npk_tls_close(ctx, handle)
+}
+
 extern "C" fn f_npk_tcp_connect(vm: *const u64, ip_packed: i32, port: i32) -> i32 {
     // SAFETY: `vm` ist der vmctx des rufenden Moduls.
     let ctx = unsafe { ctx_of(vm) };
@@ -909,6 +934,10 @@ pub(crate) fn resolve(module: &str, name: &str) -> Option<u64> {
         "npk_stream_open" => f_npk_stream_open as *const () as u64,
         "npk_stream_close" => f_npk_stream_close as *const () as u64,
         "npk_key_inject" => f_npk_key_inject as *const () as u64,
+        "npk_tls_connect" => f_npk_tls_connect as *const () as u64,
+        "npk_tls_send" => f_npk_tls_send as *const () as u64,
+        "npk_tls_recv" => f_npk_tls_recv as *const () as u64,
+        "npk_tls_close" => f_npk_tls_close as *const () as u64,
         "npk_tcp_connect" => f_npk_tcp_connect as *const () as u64,
         "npk_tcp_status" => f_npk_tcp_status as *const () as u64,
         "npk_tcp_close" => f_npk_tcp_close as *const () as u64,
