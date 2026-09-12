@@ -48,7 +48,7 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-12 · beak 0.170.0 · Kernel 0.336.0** (Rest: `git log`)
+**Stand 2026-09-12 · beak 0.170.1 · Kernel 0.336.0, AM GERAET GELAUFEN** (Rest: `git log`)
 
 **0.170.0: vier Releases ohne eine Zeile im Selbsttest.** Kein neues
 Merkmal, sondern das, was die Prüfseite selbst als Regel führt: *„Ohne diese
@@ -63,6 +63,17 @@ nicht mitgezaehlt werden koennen und deshalb eigene sind: der ASYNCHRONE Teil
 ANSTELLEN) meldet nach, wie `micro` es tut, und der KASTEN eines
 Steuerelements wird beim Klick NACHGERECHNET statt gezeigt (Feld 100x34,
 Kaestchen 13 — die Masse aus 0.168, aber mit der Schrift des Geraets).
+
+**0.170.1, und der erste Gerätelauf sagte genau das, wofür die Seite da
+ist.** Florian am 2026-09-12: `Sprache 62/62 · Dokument 39/39`, der
+asynchrone Teil vollstaendig, und **`ctlbox: Feld 100x34, Kaestchen 13`** —
+die UA-Masse aus 0.168 kommen am Geraet an. Das einzige `NEIN` war MEINS: die
+`IntersectionObserver`-Zeile prueft eine Momentaufnahme, als waere sie
+invariant, und ueberschrieb ihr eigenes richtiges JA, sobald man scrollt
+(`oben -56` — und das stimmte, die Urteilszeile war dann wirklich draussen).
+Das Urteil faellt jetzt EINMAL, beim ersten vollstaendigen Paar, und bleibt
+stehen. **Ein Test, der einen Zustand prueft, muss sagen, WANN er ihn
+prueft.**
 
 **Und eine Zeile prueft eine Abwesenheit:** `$262` darf auf einer Seite NIE
 stehen. Es ist das Wirtsobjekt des Konformanzlaeufers; sein `evalScript` waere

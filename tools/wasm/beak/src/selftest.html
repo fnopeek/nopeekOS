@@ -739,7 +739,15 @@ if (typeof IntersectionObserver === "function") {
      Das erste Ziel dieser Zeile war der Knopf `#b1`, und der steht auf
      dieser Seite bei y = 2802 — die Zeile war rot, und ohne die zwei Zahlen
      haette ich das fuer einen Rechenfehler gehalten. */
-  var gesehen = {};
+  /* **Das Urteil faellt EINMAL und bleibt dann stehen.** Die Frage dieser
+     Zeile ist „stellt der Beobachter zu, und unterscheidet er drinnen von
+     draussen" — die ist mit dem ersten vollstaendigen Paar beantwortet.
+     Jede spaetere Zustellung ist ebenso richtig und sagt etwas ANDERES: wer
+     scrollt, schiebt die Urteilszeile aus dem Blick, und `oben = false` ist
+     dann die Wahrheit. Ohne den Riegel ueberschrieb ein korrekter Motor sein
+     eigenes JA mit einem NEIN, sobald man am Geraet einmal gescrollt hat
+     (2026-09-12 am Geraet gesehen: `oben -56`, und das stimmte). */
+  var gesehen = {}, gefaellt = false;
   var io2 = new IntersectionObserver(function (es) {
     for (var k = 0; k < es.length; k++) {
       gesehen[es[k].target.id] = es[k].isIntersecting;
@@ -748,10 +756,13 @@ if (typeof IntersectionObserver === "function") {
         + Math.round(es[k].rootBounds.bottom) + ", Verhaeltnis "
         + es[k].intersectionRatio);
     }
+    if (gefaellt) { return; }
     if (gesehen.verdict !== undefined && gesehen.weitunten !== undefined) {
+      gefaellt = true;
       say("io", gesehen.verdict === true && gesehen.weitunten === false
         ? "IntersectionObserver: die Urteilszeile ist im Blick, der Kasten weit unten nicht"
-        : "NEIN: oben=" + gesehen.verdict + ", weit unten=" + gesehen.weitunten);
+        : "NEIN: oben=" + gesehen.verdict + ", weit unten=" + gesehen.weitunten
+          + " (beim ERSTEN Paar, ungescrollt)");
     }
   });
   io2.observe(document.getElementById("verdict"));
