@@ -157,6 +157,16 @@ unsafe extern "C" {
     fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_clipboard_set(ptr: i32, len: i32) -> i32;
     fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
+    /// Ein TLS-STROM, im Gegensatz zu `npk_http_*`: keine Anfrage mit Ende,
+    /// sondern eine Leitung, die offen bleibt. Gebraucht fuer `wss://`.
+    /// `connect` blockiert fuer den Handschlag (~60 ms, einmal je
+    /// Verbindung); `recv` kommt SOFORT zurueck — 0 heisst „noch nichts",
+    /// -1 heisst zu.
+    fn npk_tls_connect(host_ptr: i32, host_len: i32, port: i32) -> i32;
+    fn npk_tls_send(handle: i32, buf_ptr: i32, buf_len: i32) -> i32;
+    fn npk_tls_recv(handle: i32, buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_tls_close(handle: i32) -> i32;
+
     fn npk_http_begin_many(urls_ptr: i32, urls_len: i32, out_max: i32) -> i32;
     /// Wie oben, aber mit einer Keks-Zeile JE ADRESSE (durch `\n` getrennt,
     /// leere Zeilen zaehlen mit). Seit Kernel 0.333.0.
@@ -2361,6 +2371,87 @@ fn response_headers() -> String {
 ///
 /// Liefert true, wenn etwas ankam — dann lief Seitencode, und der Baum kann
 /// sich geaendert haben.
+/// Die offenen WebSockets: `(Engine-Id, TLS-Griff)`.
+fn ws_jobs() -> &'static mut Vec<(u32, i32)> {
+    static mut JOBS: Vec<(u32, i32)> = Vec::new();
+    // SAFETY: beak ist einfaedig; dieselbe Regel wie bei `fetch_jobs`.
+    unsafe { &mut *core::ptr::addr_of_mut!(JOBS) }
+}
+
+/// **Die Leitung fahren.** Aufbauen, was ansteht; abholen, was ankam;
+/// wegschicken, was die Engine hingelegt hat.
+///
+/// `true`, wenn etwas passiert ist — dann lohnt eine Runde Microtasks.
+fn pump_websockets(sess: &mut beak_engine::js::Session) -> bool {
+    let mut moved = false;
+    // 1. Neue Verbindungen. Der Handschlag kostet ~60 ms und blockiert; das
+    //    ist derselbe Preis, den `open_tls` im HTTP-Weg ohnehin zahlt, und er
+    //    faellt einmal je Verbindung an.
+    let want: Vec<_> = core::mem::take(&mut sess.interp.pending_sockets);
+    for w in want {
+        if !w.secure {
+            // `ws://` ohne TLS gibt es hier nicht: die Engine laesst es nur
+            // aus einer unverschluesselten Seite zu, und dafuer fehlt der
+            // Klartext-Strom. Benannt statt still.
+            log("[beak] WebSocket: ws:// ohne TLS wird nicht gefahren");
+            beak_engine::js::websocket::host_bytes(&mut sess.interp, w.id, None);
+            continue;
+        }
+        let h = unsafe {
+            npk_tls_connect(w.host.as_ptr() as i32, w.host.len() as i32, w.port as i32)
+        };
+        if h < 0 {
+            let mut m = String::from("[beak] WebSocket: Verbindung zu ");
+            m.push_str(&w.host);
+            m.push_str(" gescheitert");
+            log(&m);
+            beak_engine::js::websocket::host_bytes(&mut sess.interp, w.id, None);
+            moved = true;
+            continue;
+        }
+        if unsafe { npk_tls_send(h, w.hello.as_ptr() as i32, w.hello.len() as i32) } < 0 {
+            unsafe { npk_tls_close(h) };
+            beak_engine::js::websocket::host_bytes(&mut sess.interp, w.id, None);
+            moved = true;
+            continue;
+        }
+        ws_jobs().push((w.id, h));
+        moved = true;
+    }
+    // 2. Lesen und schreiben. Ein Puffer je Runde reicht: was nicht
+    //    hineinpasst, liegt im Kernel und kommt beim naechsten Bild.
+    let mut buf = [0u8; 16 * 1024];
+    let mut tot: Vec<(u32, i32)> = Vec::new();
+    for (id, h) in ws_jobs().clone() {
+        loop {
+            let n = unsafe { npk_tls_recv(h, buf.as_mut_ptr() as i32, buf.len() as i32) };
+            if n < 0 {
+                // Zu oder kaputt — die Engine macht daraus 1006.
+                beak_engine::js::websocket::host_bytes(&mut sess.interp, id, None);
+                unsafe { npk_tls_close(h) };
+                tot.push((id, h));
+                moved = true;
+                break;
+            }
+            if n == 0 { break }
+            beak_engine::js::websocket::host_bytes(&mut sess.interp, id, Some(&buf[..n as usize]));
+            moved = true;
+            if (n as usize) < buf.len() { break }
+        }
+        if tot.iter().any(|(x, _)| *x == id) { continue }
+        if let Some(out) = beak_engine::js::websocket::take_out_for(&mut sess.interp, id) {
+            if unsafe { npk_tls_send(h, out.as_ptr() as i32, out.len() as i32) } < 0 {
+                beak_engine::js::websocket::host_bytes(&mut sess.interp, id, None);
+                unsafe { npk_tls_close(h) };
+                tot.push((id, h));
+            }
+            moved = true;
+        }
+    }
+    ws_jobs().retain(|(id, _)| !tot.iter().any(|(x, _)| x == id));
+    moved
+}
+
 fn pump_fetches() -> bool {
     let Some(sess) = js_session() else { return false };
     let mut landed = false;
@@ -5599,9 +5690,19 @@ pub extern "C" fn _start() {
             bump_content_gen("font");
             mark_dirty();
         }
+        // Die offenen WebSockets. Sie laufen VOR den Antworten von `fetch`,
+        // weil eine Nachricht ohne Anlass kommt: niemand hat sie bestellt,
+        // und wer nicht in jedem Bild nachsieht, sieht sie gar nicht.
+        // Ereignisse daraus sind Einstiegspunkte wie jeder andere, also
+        // laeuft danach dieselbe Nacharbeit — deshalb steht die Zeile in
+        // DERSELBEN Bedingung.
+        let ws_moved = match js_session() {
+            Some(s) => pump_websockets(s),
+            None => false,
+        };
         // Was `fetch()` bestellt hat. Kommt eine Antwort an, lief danach
         // Seitencode — und der darf den Baum umgebaut haben.
-        if pump_fetches() {
+        if pump_fetches() | ws_moved {
             if let Some(s) = js_session() {
                 let n = s.interp.run_timers();
                 let _ = n;

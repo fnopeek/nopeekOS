@@ -3349,7 +3349,11 @@ pub fn make_realm() -> Realm {
             event_proto: ph(), location: loc, token_list_proto: ph(), style_proto: ph(), comment_proto: ph(),
             regexp_proto: ph(), symbol_proto, iterator_proto,
             generator_proto, generator_func_proto,
-            async_iterator_proto, async_gen_proto, async_gen_func_proto, array_iter_proto,
+            async_iterator_proto, async_gen_proto, async_gen_func_proto,
+            // Wird von `websocket::install` ersetzt, sobald es die Schnittstelle
+            // gibt; ohne echten Zufall bleibt es dieser leere Platzhalter.
+            websocket_proto: new_obj(Some(object_proto.clone())),
+            array_iter_proto,
             string_iter_proto, promise_proto: ph(), date_proto: ph(), bigint_proto,
             iter_helper_proto: ph(), iter_wrap_proto: ph(), eval_fn: None,
             html_element_proto: ph(), svg_element_proto: ph(), fragment_proto: ph(),

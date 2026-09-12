@@ -303,11 +303,11 @@ extern "C" fn f_npk_key_inject(vm: *const u64, byte: i32) -> i32 {
     host_core::npk_key_inject(ctx, byte)
 }
 
-extern "C" fn f_npk_tls_connect(vm: *const u64, ip_packed: i32, port: i32,
-                                host_ptr: i32, host_len: i32) -> i32 {
+extern "C" fn f_npk_tls_connect(vm: *const u64, host_ptr: i32, host_len: i32,
+                                port: i32) -> i32 {
     // SAFETY: `vm` ist der vmctx des rufenden Moduls.
     let (mem, ctx) = unsafe { parts(vm) };
-    host_core::npk_tls_connect(mem, ctx, ip_packed, port, host_ptr, host_len)
+    host_core::npk_tls_connect(mem, ctx, host_ptr, host_len, port)
 }
 
 extern "C" fn f_npk_tls_send(vm: *const u64, handle: i32, buf_ptr: i32, buf_len: i32) -> i32 {

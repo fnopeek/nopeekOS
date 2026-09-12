@@ -280,6 +280,10 @@ pub struct Realm {
     pub async_iterator_proto: Gc,
     pub async_gen_proto: Gc,
     pub async_gen_func_proto: Gc,
+    /// `WebSocket.prototype`. Steht im Realm, weil ein `instanceof` gegen
+    /// einen fehlenden Namen wirft statt `false` zu ergeben — daran ist
+    /// htmx in 0.140.0 gestorben.
+    pub websocket_proto: Gc,
     pub array_iter_proto: Gc,
     pub string_iter_proto: Gc,
     pub promise_proto: Gc,
@@ -347,6 +351,7 @@ impl Realm {
             self.iterator_proto.clone(), self.generator_proto.clone(),
             self.generator_func_proto.clone(), self.async_iterator_proto.clone(),
             self.async_gen_proto.clone(), self.async_gen_func_proto.clone(),
+            self.websocket_proto.clone(),
             self.array_iter_proto.clone(),
             self.string_iter_proto.clone(), self.promise_proto.clone(),
             self.typed_proto.clone(), self.buffer_proto.clone(),
@@ -611,6 +616,15 @@ pub struct Interp {
     /// Gegenstand wird neu gebaut. Sind sie GLEICH, ist das Teilen
     /// unbeobachtbar.
     pub templates: HashMap<usize, (Vec<Rc<str>>, Value)>,
+    /// Die offenen `WebSocket`s. **Die Engine oeffnet keine Verbindung** —
+    /// hier liegt ihr halber Zustand (Handschlag, Rahmen, Puffer), der Wirt
+    /// fuehrt die Leitung. Dasselbe Muster wie `pending_fetches`.
+    pub sockets: Vec<super::websocket::Socket>,
+    /// Der JS-Gegenstand je Verbindung, fuer die Zustellung der Ereignisse.
+    pub socket_objs: HashMap<u32, Gc>,
+    /// Was der Wirt noch aufbauen soll.
+    pub pending_sockets: Vec<super::websocket::PendingSocket>,
+    pub next_socket_id: u32,
     /// Woran der Uebersetzer bei einem FUNKTIONSRUMPF absagt, je Grund.
     ///
     /// Die Programm-Absagen (`vm_decline`) waren bis Stufe 4 die ganze
@@ -833,6 +847,17 @@ impl Interp {
         };
         super::url::install(&mut realm);
         super::fetch::install(&mut realm);
+        let mut me = Interp::with_realm(realm);
+        // **`WebSocket` erscheint nur, wenn es echten Zufall gibt** — es
+        // braucht eine Maske je Rahmen (RFC 6455 §5.3), und eine
+        // vorhersagbare waere schlechter als eine fehlende Schnittstelle.
+        // Dieselbe Regel wie bei `crypto`, und sie steht hier, weil `install`
+        // den fertigen Interp braucht und nicht nur den Realm.
+        super::websocket::install(&mut me);
+        me
+    }
+
+    fn with_realm(realm: Realm) -> Interp {
         Interp { realm, modules: HashMap::new(), module_fail: None, submits: Vec::new(),
                  deadline: None,
                  pending_sheets: Vec::new(),
@@ -849,7 +874,10 @@ impl Interp {
                  resize_obs: Vec::new(), inter_obs: Vec::new(),
                  viewport: (0.0, 0.0), scroll_want: None,
                  vm_ran: 0, vm_declined: 0, vm_decline: None, vm_off: false,
-                 func_chunks: HashMap::new(), templates: HashMap::new(), func_declines: HashMap::new(), pending_labels: Vec::new(), vm_ops: 0, hints_ok: true, vm_calls: 0, vm_calls_native: 0, vm_calls_slow: 0,
+                 func_chunks: HashMap::new(), templates: HashMap::new(),
+                 sockets: Vec::new(), socket_objs: HashMap::new(),
+                 pending_sockets: Vec::new(), next_socket_id: 1,
+                 func_declines: HashMap::new(), pending_labels: Vec::new(), vm_ops: 0, hints_ok: true, vm_calls: 0, vm_calls_native: 0, vm_calls_slow: 0,
                  geometry: None,
                  live_dom: core::cell::RefCell::new(None),
                  jobs: alloc::collections::VecDeque::new(),
@@ -930,6 +958,11 @@ impl Interp {
         // findet sie nicht. Sie zeigen nur auf Zeichenketten und auf
         // `array_proto`, also reicht Loslassen.
         self.templates.clear();
+        // Eine offene Verbindung haelt ihren JS-Gegenstand, und der haelt
+        // seine Behandler — das ist ein Ring, den der Gang unten nicht findet.
+        self.sockets.clear();
+        self.socket_objs.clear();
+        self.pending_sockets.clear();
         let mut seen: HashSet<usize> = HashSet::new();
         let mut envs: HashSet<usize> = HashSet::new();
         let mut objs: Vec<Gc> = alloc::vec![self.realm.global.clone()];

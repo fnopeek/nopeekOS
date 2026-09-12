@@ -37,6 +37,8 @@ pub mod promise;
 pub mod random;
 pub mod proxy;
 pub mod test262;
+pub mod ws_crypto;
+pub mod websocket;
 pub mod url;
 pub mod xpath;
 pub mod regexp;

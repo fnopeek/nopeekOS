@@ -214,9 +214,9 @@ Reihenfolge, wenn es drankommt:
 
 | | was | wo | Stand |
 |---|---|---|---|
-| **S1** | TLS-Stromsocket als Hostfunktion | Kernel | **gebaut 2026-09-12** (unveröffentlicht) |
-| **S2** | `WebSocket` (Handschlag, Rahmen, `close`), gleiche Herkunft | Engine + beak | offen |
-| **S3** | `Origin`-Kopf + fremde Herkunft nach Serverzustimmung | Engine | offen |
+| **S1** | TLS-Stromsocket als Hostfunktion | Kernel | **gebaut**, Kernel 0.338.0 |
+| **S2** | `WebSocket` (Handschlag, Rahmen, `close`), gleiche Herkunft | Engine + beak | **gebaut**, beak 0.173.0 |
+| **S3** | `Origin`-Kopf, gleiche Herkunft | Engine | **gebaut** — fremde Herkunft nach Serverzustimmung bleibt offen |
 
 **S1, wie es gebaut ist:** `npk_tls_connect/send/recv/close`, in BEIDEN
 ABI-Wegen registriert, Tabelle mit acht Plätzen und je Platz die `pid` — ein
