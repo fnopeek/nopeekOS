@@ -351,6 +351,17 @@ pub struct TlsSession {
     leaf_der: Vec<u8>,
     /// Wohin diese Verbindung geht. Der erste Teil derselben Bedingung.
     peer: ([u8; 4], u16),
+    /// Halb angekommene Bytes eines Satzes, fuer den NICHT-blockierenden
+    /// Leser (`tls_poll`).
+    ///
+    /// **Der Unterschied zwischen Holen und Lauschen.** `tls_recv` wartet auf
+    /// einen Satz — richtig fuer eine Antwort, die man angefordert hat, und
+    /// falsch fuer eine Verbindung, die meistens still ist und irgendwann von
+    /// selbst etwas sagt. Ein WebSocket ist der zweite Fall: ein Browser
+    /// fragt ihn in JEDEM Bild, und zehn Millisekunden Warten je Bild waeren
+    /// der Preis fuer nichts. Also sammeln statt warten — was ankommt, liegt
+    /// hier, bis ein Satz vollstaendig ist.
+    rx: Vec<u8>,
 }
 
 impl TlsSession {
@@ -680,6 +691,7 @@ pub fn tls_connect_alpn(
         alpn: negotiated_alpn,
         leaf_der,
         peer: tcp::peer(tcp_handle).unwrap_or(([0, 0, 0, 0], 0)),
+        rx: Vec::new(),
     })
 }
 
@@ -745,6 +757,69 @@ pub fn tls_recv_patient(
     let copy_len = data.len().min(buf.len());
     buf[..copy_len].copy_from_slice(&data[..copy_len]);
     Ok(copy_len)
+}
+
+/// **Lauschen statt holen** — ein Satz, wenn einer vollstaendig da ist,
+/// sonst `Ok(0)`, und zwar SOFORT.
+///
+/// `tls_recv` wartet mindestens einen Versuch (10 s Deckel, ein Tick
+/// Mindestwartezeit); das ist richtig fuer eine angeforderte Antwort und
+/// falsch fuer eine Verbindung, die von selbst spricht. Hier wird nur
+/// abgeholt, was der TCP-Stapel schon hat, in `session.rx` gesammelt und erst
+/// entschluesselt, wenn Kopf und Nutzlast beisammen sind.
+///
+/// `Ok(0)` heisst „noch nichts" und NICHT „zu" — ein geschlossener Strom
+/// meldet sich als `Err`. Das ist dieselbe Unterscheidung, die `tls_recv`
+/// schon trifft (ein `ChangeCipherSpec` oder eine Handschlagsnachricht in der
+/// Datenphase sind auch 0).
+pub fn tls_poll(session: &mut TlsSession, buf: &mut [u8]) -> Result<usize, TlsError> {
+    // Erst alles einsammeln, was ohne Warten da ist.
+    let mut chunk = [0u8; 2048];
+    loop {
+        match tcp::recv(session.tcp_handle, &mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                // Ein Deckel, damit eine schwatzhafte Gegenstelle nicht den
+                // Kernelspeicher fuellt, bevor der Rufer einen Satz abholt.
+                if session.rx.len() + n > MAX_RECORD_PAYLOAD * 4 {
+                    return Err(TlsError::RecordTooLarge);
+                }
+                session.rx.extend_from_slice(&chunk[..n]);
+            }
+            Err(tcp::TcpError::WouldBlock) | Err(tcp::TcpError::Timeout) => break,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    // Steht ein ganzer Satz da?
+    if session.rx.len() < 5 { return Ok(0) }
+    let ct = session.rx[0];
+    let length = ((session.rx[3] as usize) << 8) | session.rx[4] as usize;
+    if length > MAX_RECORD_PAYLOAD { return Err(TlsError::RecordTooLarge) }
+    if session.rx.len() < 5 + length { return Ok(0) }
+    let record: Vec<u8> = session.rx[5..5 + length].to_vec();
+    session.rx.drain(..5 + length);
+
+    if ct == CT_CHANGE_CIPHER_SPEC { return Ok(0) }
+    if ct != CT_APPLICATION_DATA { return Err(TlsError::UnexpectedMessage) }
+
+    let nonce = build_nonce(&session.server_app_iv, session.server_seq);
+    session.server_seq += 1;
+    let key = &session.server_app_key[..session.cipher.key_len()];
+    let aad = build_record_aad(CT_APPLICATION_DATA, record.len());
+    let plaintext = tls_aead_decrypt(session.cipher, key, &nonce, &aad, &record)
+        .ok_or(TlsError::DecryptError)?;
+    if plaintext.is_empty() { return Ok(0) }
+
+    let real_ct = plaintext[plaintext.len() - 1];
+    let data = &plaintext[..plaintext.len() - 1];
+    if real_ct == CT_ALERT { return Err(TlsError::HandshakeFailed("alert received")) }
+    // Eine Sitzungskarte mitten im Strom ist kein Datensatz — ueberspringen,
+    // wie `tls_recv` es tut.
+    if real_ct == CT_HANDSHAKE { return Ok(0) }
+
+    let copy = data.len().min(buf.len());
+    buf[..copy].copy_from_slice(&data[..copy]);
+    Ok(copy)
 }
 
 /// Close TLS session.
