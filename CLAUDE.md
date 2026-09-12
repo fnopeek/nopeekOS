@@ -48,7 +48,7 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-12 · beak 0.172.0 · Kernel 0.337.0, AM GERAET GELAUFEN** (Rest: `git log`)
+**Stand 2026-09-12 · beak 0.173.0 · Kernel 0.338.0, AM GERAET GELAUFEN** (Rest: `git log`)
 
 **0.170.0: vier Releases ohne eine Zeile im Selbsttest.** Kein neues
 Merkmal, sondern das, was die Prüfseite selbst als Regel führt: *„Ohne diese
@@ -63,6 +63,45 @@ nicht mitgezaehlt werden koennen und deshalb eigene sind: der ASYNCHRONE Teil
 ANSTELLEN) meldet nach, wie `micro` es tut, und der KASTEN eines
 Steuerelements wird beim Klick NACHGERECHNET statt gezeigt (Feld 100x34,
 Kaestchen 13 — die Masse aus 0.168, aber mit der Schrift des Geraets).
+
+**0.173.0 / Kernel 0.338.0: `WebSocket`.** Der Posten aus
+`WEB_PLATFORM_GAPS.md` §2, alle drei Stufen. Ausgeloest von Florians
+Sandkasten: sein `POST /api/session` lief mit 200 durch, und dahinter stand
+`new WebSocket(…)` — ein `ReferenceError`, also „Connecting…" ohne Ende.
+
+**S1 — der Strom war schon da.** `crypto::tls` bietet `tls_connect/send/
+recv/close` auf einem gewoehnlichen `tcp_handle`; was fehlte, war die Tuer.
+`npk_tls_connect/send/recv/close`, in BEIDEN ABI-Wegen, Tabelle mit acht
+Plaetzen und je Platz die `pid`. Gegated mit `Rights::NET` UND der
+Reichweite — und der NAME kommt herein, nicht die Adresse, damit
+`resolve_checked` beides in einem Zug tut. Dazu **`tls_poll`**, ein
+nicht-blockierender Leser: `tls_recv` wartet auf einen Satz, was fuer eine
+angeforderte Antwort richtig und fuer eine meist stille Verbindung falsch ist
+— ein Browser fragt sie in JEDEM Bild.
+
+**S2 — Handschlag und Rahmen.** SHA-1 und base64 stehen in
+`js/ws_crypto.rs`, **nicht** im Kryptomodul des Kernels: SHA-1 ist gebrochen
+und sichert hier nichts, es ist ein fester Rechenschritt gegen einen
+Zwischenspeicher (RFC 6455 §1.3), und neben AES abgelegt laedt es den
+naechsten Leser zum Irrtum ein. Geprueft gegen das Beispiel des Standards
+selbst. `js/websocket.rs` rechnet auf Byte-Puffern und ist damit host-seitig
+pruefbar — **neun Tests**: Mischinhalt (`ws://` aus einer sicheren Seite),
+Schluesselpruefung, Rahmen in Stuecken, Fortsetzung, Ping mit derselben
+Nutzlast zurueck, alle drei Laengenformen, ein maskierter SERVER-Rahmen
+beendet die Verbindung (§5.1), Close-Echo und **1006 fuer einen Abriss ohne
+Close-Rahmen** — den sendet nie jemand, er ist die Auskunft ueber ein Ende,
+das keiner angesagt hat.
+
+**S3 — gleiche Herkunft, und das ist keine Bequemlichkeit.** Einen WebSocket
+schuetzt KEINE CORS-Antwortpruefung; im Web entscheidet allein der Server im
+Handschlag. Wer eine fremde Herkunft durchlaesst, verlaesst sich darauf, dass
+er Nein sagt. Also bis auf Weiteres dieselbe Herkunft (`SecurityError`, mit
+dem NAMEN — Seitencode prueft `e.name`), und der `Origin` faehrt trotzdem
+mit, damit ein Server, der spaeter zustimmen darf, es auch kann.
+
+**`WebSocket` erscheint nur, wenn es echten Zufall gibt** — dieselbe Regel wie
+`crypto`: RFC 6455 §5.3 laesst dem Client keine Wahl bei der Maske, und eine
+vorhersagbare waere schlechter als eine fehlende Schnittstelle.
 
 **Kernel 0.337.0: die fuenf `npk_tcp_*` prueften GAR KEINE Kapabilitaet.**
 Gefunden beim Vorbereiten des WebSocket-Postens — also in genau der Flaeche,

@@ -828,31 +828,26 @@ fn tls_slot_ok(ctx: &mut HostState, handle: i32) -> Option<usize> {
 /// Arbeitskern an. Wird das je spuerbar, ist die Antwort dieselbe wie bei
 /// `npk_tcp_connect` — in `start` und `status` teilen.
 pub(crate) fn npk_tls_connect(mem: &mut [u8], ctx: &mut HostState,
-                              ip_packed: i32, port: i32,
-                              host_ptr: i32, host_len: i32) -> i32 {
+                              host_ptr: i32, host_len: i32, port: i32) -> i32 {
     if !net_allowed(ctx) { return -1 }
     if port <= 0 || port > 65535 { return -1 }
-    let ip = [
-        ((ip_packed >> 24) & 0xFF) as u8,
-        ((ip_packed >> 16) & 0xFF) as u8,
-        ((ip_packed >> 8) & 0xFF) as u8,
-        (ip_packed & 0xFF) as u8,
-    ];
-    // **Und HIER gilt die Reichweite.** Anders als beim rohen TCP faehrt
-    // diesen Weg der Browser fuer eine SEITE, und `ctx.net_reach` ist die
-    // Klasse, gegen die jede ihrer Anfragen geprueft wird. Ein `wss://` daran
-    // vorbei waere das Loch, das 0.147.0 zugemacht hat — nur ueber einen
-    // anderen Socket.
-    let to = crate::intent::reach::classify_ip(ip);
-    if !crate::intent::reach::allows(ctx.net_reach, to) {
-        kprintln!("[npk] tls: REICHWEITE verweigert — {}.{}.{}.{} ist {:?}, die Seite ist {:?}",
-            ip[0], ip[1], ip[2], ip[3], to, ctx.net_reach);
-        return -1;
-    }
     let Some(host) = read_str(mem, host_ptr, host_len) else { return -1 };
     // Der Name gehoert in SNI und in die Zertifikatspruefung, ohne Port.
     let bare: String = String::from(host.split(':').next().unwrap_or(&host));
     if bare.is_empty() || bare.len() > 253 { return -1 }
+    // **Der NAME kommt herein, nicht die Adresse** — und damit macht
+    // `resolve_checked` beides in einem Zug: aufloesen UND die Reichweite
+    // pruefen. Ein Modul, das selbst aufloest, braeuchte dafuer einen eigenen
+    // DNS-Zugang, und dann liefe die Aufloesung an der Klasse vorbei, gegen
+    // die JEDE Anfrage der laufenden Seite geprueft wird (0.147.0). Genau das
+    // Loch nochmal, nur ueber einen anderen Socket.
+    let ip = match crate::intent::http::resolve_checked(&bare, Some(ctx.net_reach)) {
+        Ok(ip) => ip,
+        Err(e) => {
+            kprintln!("[npk] tls: {} — {}", bare, e);
+            return -1;
+        }
+    };
 
     let free = {
         let g = TLS_SLOTS.lock();
