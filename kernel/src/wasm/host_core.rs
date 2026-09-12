@@ -761,7 +761,29 @@ pub(crate) fn npk_key_inject(_ctx: &mut HostState, byte: i32) -> i32 {
     0
 }
 
-pub(crate) fn npk_tcp_connect(_ctx: &mut HostState, ip_packed: i32, port: i32) -> i32 {
+/// **Ein roher Socket ist mindestens so maechtig wie `npk_http_*`** und
+/// gehoert an dasselbe Recht.
+///
+/// Bis Kernel 0.337.0 prueften die fuenf `npk_tcp_*` GAR NICHTS: die Tabelle
+/// in `forge_glue::resolve` loest nach NAMEN auf, Importe werden beim Laden
+/// nicht gegen die Kapabilitaet gehalten, und ein Modul ohne `.npk.caps`
+/// bekommt `READ | EXECUTE | RENDER` — also kein `NET`. Damit konnte jedes
+/// Modul, das den Namen importiert, eine Verbindung zu jeder Adresse und
+/// jedem Port aufmachen und beliebige Bytes tauschen. Das ist genau die
+/// Frage aus dem Sicherheits-Checkpoint von `CLAUDE.md`, und die Antwort war
+/// nicht „nein".
+fn net_allowed(ctx: &mut HostState) -> bool {
+    let cap_id = ctx.cap_id;
+    if let Err(e) = capability::check_global(&cap_id, capability::Rights::NET) {
+        crate::kprintln!("[npk] tcp: Modul {} hat kein NET-Recht ({:?})",
+            capability::short_id(&cap_id), e);
+        return false;
+    }
+    true
+}
+
+pub(crate) fn npk_tcp_connect(ctx: &mut HostState, ip_packed: i32, port: i32) -> i32 {
+    if !net_allowed(ctx) { return -1; }
     let ip = [
         ((ip_packed >> 24) & 0xFF) as u8,
         ((ip_packed >> 16) & 0xFF) as u8,
@@ -769,18 +791,29 @@ pub(crate) fn npk_tcp_connect(_ctx: &mut HostState, ip_packed: i32, port: i32) -
         (ip_packed & 0xFF) as u8,
     ];
     if port <= 0 || port > 65535 { return -1; }
+    // **Die REICHWEITE gilt hier bewusst NICHT.** Sie ist die Regel einer
+    // SEITE: `ctx.net_reach` sagt, welche Klasse das gerade geladene Dokument
+    // erreichen darf, damit eine oeffentliche Seite nicht ins Heimnetz greift.
+    // Ein Modul ist keine Seite — es ist installierte Software mit einer
+    // erklaerten Kapabilitaet, und bei `debug` IST das Heimnetz der Zweck (es
+    // schreibt sein Protokoll an ein `nc -lk` auf dem Entwicklerrechner).
+    //
+    // Der TLS-Weg unten ist der andere Fall: den faehrt beak fuer eine Seite,
+    // und dort gilt sie.
     match crate::net::tcp::connect_start(ip, port as u16) {
         Ok(h) => h as i32,
         Err(_) => -1,
     }
 }
 
-pub(crate) fn npk_tcp_status(_ctx: &mut HostState, handle: i32) -> i32 {
+pub(crate) fn npk_tcp_status(ctx: &mut HostState, handle: i32) -> i32 {
+    if !net_allowed(ctx) { return -1; }
     if handle < 0 { return -1; }
     crate::net::tcp::connect_status(handle as usize)
 }
 
-pub(crate) fn npk_tcp_close(_ctx: &mut HostState, handle: i32) -> i32 {
+pub(crate) fn npk_tcp_close(ctx: &mut HostState, handle: i32) -> i32 {
+    if !net_allowed(ctx) { return -1; }
     if handle >= 0 { let _ = crate::net::tcp::close(handle as usize); }
     0
 }
@@ -2047,7 +2080,8 @@ pub(crate) fn npk_stream_read(mem: &mut [u8], _ctx: &mut HostState, idx: i32, bu
     }
 }
 
-pub(crate) fn npk_tcp_send(mem: &mut [u8], _ctx: &mut HostState, handle: i32, buf_ptr: i32, buf_len: i32) -> i32 {
+pub(crate) fn npk_tcp_send(mem: &mut [u8], ctx: &mut HostState, handle: i32, buf_ptr: i32, buf_len: i32) -> i32 {
+    if !net_allowed(ctx) { return -1; }
     if handle < 0 || buf_len <= 0 { return -1; }
     let data = &*mem;
     let start = buf_ptr as usize;
@@ -2062,7 +2096,8 @@ pub(crate) fn npk_tcp_send(mem: &mut [u8], _ctx: &mut HostState, handle: i32, bu
     }
 }
 
-pub(crate) fn npk_tcp_recv(mem: &mut [u8], _ctx: &mut HostState, handle: i32, buf_ptr: i32, buf_max: i32) -> i32 {
+pub(crate) fn npk_tcp_recv(mem: &mut [u8], ctx: &mut HostState, handle: i32, buf_ptr: i32, buf_max: i32) -> i32 {
+    if !net_allowed(ctx) { return -1; }
     if handle < 0 || buf_max <= 0 { return -1; }
     let data = &mut *mem;
     let start = buf_ptr as usize;

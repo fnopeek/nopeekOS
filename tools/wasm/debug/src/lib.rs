@@ -22,6 +22,19 @@ const VERSION: &str = "0.7.0";
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
 
+/// **`debug` braucht das Netz** — es schreibt sein Protokoll ueber einen
+/// rohen TCP-Socket an ein `nc -lk` auf dem Entwicklerrechner.
+///
+/// Bis Kernel 0.337.0 stand hier nichts, und es lief trotzdem: die fuenf
+/// `npk_tcp_*` prueften GAR KEINE Kapabilitaet. Jetzt tun sie es, und damit
+/// muss das Recht dastehen, wie bei jedem anderen Modul auch.
+#[unsafe(link_section = ".npk.caps")]
+#[used]
+// READ ist dabei, weil die Vorgabe ohne Sektion `READ | EXECUTE | RENDER`
+// ist — wer eine Sektion hinschreibt, ERSETZT die Vorgabe und muss alles
+// nennen, was er behalten will.
+static NPK_CAPS: [u8; 2] = [0x01 | 0x04 | 0x08, 0x01];   // READ|EXEC|RENDER, ext: NET
+
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     // The banner carries the version because the failure mode of the OLD one —
