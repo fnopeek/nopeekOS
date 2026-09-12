@@ -48,7 +48,26 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-11 · beak 0.169.0 · Kernel 0.336.0** (Rest: `git log`)
+**Stand 2026-09-12 · beak 0.170.0 · Kernel 0.336.0** (Rest: `git log`)
+
+**0.170.0: vier Releases ohne eine Zeile im Selbsttest.** Kein neues
+Merkmal, sondern das, was die Prüfseite selbst als Regel führt: *„Ohne diese
+Zeilen sagt ein gruener Lauf nur, dass nichts KAPUTT ist — nicht, dass das
+Neue am Geraet geht."* Alles aus 0.166–0.169 stand host-seitig gemessen da und
+in `beak:selftest` gar nicht. Jetzt: getaggte Vorlagen (samt der IDENTITAET,
+an der lit-html seinen Zwischenspeicher schluesselt), `yield*` in drei Zeilen
+(Delegation · `throw` weiterreichen · das Ergebnisobjekt ROH), die Gestalt
+eines async-Generators — **Sprache 55/55 → 62/62**. Dazu zwei Zeilen, die
+nicht mitgezaehlt werden koennen und deshalb eigene sind: der ASYNCHRONE Teil
+(`for await`, `yield*` im async-Generator, und dass drei `next()` sich
+ANSTELLEN) meldet nach, wie `micro` es tut, und der KASTEN eines
+Steuerelements wird beim Klick NACHGERECHNET statt gezeigt (Feld 100x34,
+Kaestchen 13 — die Masse aus 0.168, aber mit der Schrift des Geraets).
+
+**Und eine Zeile prueft eine Abwesenheit:** `$262` darf auf einer Seite NIE
+stehen. Es ist das Wirtsobjekt des Konformanzlaeufers; sein `evalScript` waere
+ein zweiter Weg, Code an der Skript-Zustellung vorbei laufen zu lassen. Ein
+versehentlich angeschalteter Wirt faellt sonst niemandem auf.
 
 **0.169.0: `yield*` — der dritte Weg in eine angehaltene Maschine.**
 `79,73 → 82,74 %` (+2394 Tests), `for await` 64,9 → **89,9 %**, und die
@@ -462,7 +481,7 @@ war ein Datenobjekt — es gab gar keine Navigation per Skript.
     DOM-Aufrufe     99,4 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
     WPT (CSS)       4547/5180 = 87,8 % ohne Testvehikel (roh 80,5 %)
     Bibliotheken    13 von 13 (`<tools>/libprobe/`)
-    beak:selftest   Sprache 55/55, Dokument 39/39
+    beak:selftest   Sprache 62/62, Dokument 39/39 (+ async + Kasten)
     Kastengeometrie Bootstrap 413/415 (170 identisch) · Tailwind 165/165
                     · ua.html 62/62 · controls.html 49/49 (47 byte-gleich)
                     (`<tools>/gallery/`, die dritte Vorlage ist NACKT)
