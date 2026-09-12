@@ -362,6 +362,11 @@ pub struct TlsSession {
     /// der Preis fuer nichts. Also sammeln statt warten — was ankommt, liegt
     /// hier, bis ein Satz vollstaendig ist.
     rx: Vec<u8>,
+    /// Der ENTSCHLUESSELTE Rest. Ein Satz ist bis zu 16 KB gross, der Puffer
+    /// des Rufers darf kleiner sein — und der Satzzaehler rueckt beim
+    /// Entschluesseln vor, ein weggeworfener Klartext waere unwiederbringlich.
+    /// Also wird hier abgelegt, was diesmal nicht mehr hineinpasst.
+    rx_plain: Vec<u8>,
 }
 
 impl TlsSession {
@@ -692,6 +697,7 @@ pub fn tls_connect_alpn(
         leaf_der,
         peer: tcp::peer(tcp_handle).unwrap_or(([0, 0, 0, 0], 0)),
         rx: Vec::new(),
+        rx_plain: Vec::new(),
     })
 }
 
@@ -773,54 +779,70 @@ pub fn tls_recv_patient(
 /// schon trifft (ein `ChangeCipherSpec` oder eine Handschlagsnachricht in der
 /// Datenphase sind auch 0).
 pub fn tls_poll(session: &mut TlsSession, buf: &mut [u8]) -> Result<usize, TlsError> {
-    // Erst alles einsammeln, was ohne Warten da ist.
+    // 1. Einsammeln, was ohne Warten da ist — aber nur, solange Platz ist.
+    //
+    // **Ein voller Puffer ist Gegendruck, kein Protokollfehler.** Wer daraus
+    // ein `Err` macht, beendet eine gesunde Verbindung, sobald die Gegenstelle
+    // einmal schneller spricht als der Rufer abholt — und genau das tut ein
+    // CDP-Strom. Wird hier nichts mehr abgeholt, laeuft das TCP-Fenster zu
+    // und die Gegenstelle hoert von selbst auf: so ist Gegendruck gedacht.
     let mut chunk = [0u8; 2048];
-    loop {
+    while session.rx.len() < RX_HIGH_WATER {
         match tcp::recv(session.tcp_handle, &mut chunk) {
             Ok(0) => break,
-            Ok(n) => {
-                // Ein Deckel, damit eine schwatzhafte Gegenstelle nicht den
-                // Kernelspeicher fuellt, bevor der Rufer einen Satz abholt.
-                if session.rx.len() + n > MAX_RECORD_PAYLOAD * 4 {
-                    return Err(TlsError::RecordTooLarge);
-                }
-                session.rx.extend_from_slice(&chunk[..n]);
-            }
+            Ok(n) => session.rx.extend_from_slice(&chunk[..n]),
             Err(tcp::TcpError::WouldBlock) | Err(tcp::TcpError::Timeout) => break,
             Err(e) => return Err(e.into()),
         }
     }
-    // Steht ein ganzer Satz da?
-    if session.rx.len() < 5 { return Ok(0) }
-    let ct = session.rx[0];
-    let length = ((session.rx[3] as usize) << 8) | session.rx[4] as usize;
-    if length > MAX_RECORD_PAYLOAD { return Err(TlsError::RecordTooLarge) }
-    if session.rx.len() < 5 + length { return Ok(0) }
-    let record: Vec<u8> = session.rx[5..5 + length].to_vec();
-    session.rx.drain(..5 + length);
 
-    if ct == CT_CHANGE_CIPHER_SPEC { return Ok(0) }
-    if ct != CT_APPLICATION_DATA { return Err(TlsError::UnexpectedMessage) }
+    // 2. Entschluesseln, solange ganze Saetze dastehen und der Rufer noch
+    //    nicht genug hat. Ein uebersprungener Satz (Sitzungskarte,
+    //    `ChangeCipherSpec`, leerer Klartext) beendet die Runde NICHT — sonst
+    //    hiesse `Ok(0)` mal „noch nichts" und mal „hier lag nur nichts fuer
+    //    dich", und der Rufer kann die zwei nicht auseinanderhalten.
+    while session.rx_plain.len() < buf.len() {
+        if session.rx.len() < 5 { break }
+        let ct = session.rx[0];
+        let length = ((session.rx[3] as usize) << 8) | session.rx[4] as usize;
+        if length > MAX_RECORD_PAYLOAD { return Err(TlsError::RecordTooLarge) }
+        if session.rx.len() < 5 + length { break }
+        let record: Vec<u8> = session.rx[5..5 + length].to_vec();
+        session.rx.drain(..5 + length);
 
-    let nonce = build_nonce(&session.server_app_iv, session.server_seq);
-    session.server_seq += 1;
-    let key = &session.server_app_key[..session.cipher.key_len()];
-    let aad = build_record_aad(CT_APPLICATION_DATA, record.len());
-    let plaintext = tls_aead_decrypt(session.cipher, key, &nonce, &aad, &record)
-        .ok_or(TlsError::DecryptError)?;
-    if plaintext.is_empty() { return Ok(0) }
+        if ct == CT_CHANGE_CIPHER_SPEC { continue }
+        if ct != CT_APPLICATION_DATA { return Err(TlsError::UnexpectedMessage) }
 
-    let real_ct = plaintext[plaintext.len() - 1];
-    let data = &plaintext[..plaintext.len() - 1];
-    if real_ct == CT_ALERT { return Err(TlsError::HandshakeFailed("alert received")) }
-    // Eine Sitzungskarte mitten im Strom ist kein Datensatz — ueberspringen,
-    // wie `tls_recv` es tut.
-    if real_ct == CT_HANDSHAKE { return Ok(0) }
+        let nonce = build_nonce(&session.server_app_iv, session.server_seq);
+        session.server_seq += 1;
+        let key = &session.server_app_key[..session.cipher.key_len()];
+        let aad = build_record_aad(CT_APPLICATION_DATA, record.len());
+        let plaintext = tls_aead_decrypt(session.cipher, key, &nonce, &aad, &record)
+            .ok_or(TlsError::DecryptError)?;
+        if plaintext.is_empty() { continue }
 
-    let copy = data.len().min(buf.len());
-    buf[..copy].copy_from_slice(&data[..copy]);
-    Ok(copy)
+        let real_ct = plaintext[plaintext.len() - 1];
+        let data = &plaintext[..plaintext.len() - 1];
+        if real_ct == CT_ALERT { return Err(TlsError::HandshakeFailed("alert received")) }
+        // Eine Sitzungskarte mitten im Strom ist kein Datensatz — ueberspringen,
+        // wie `tls_recv` es tut.
+        if real_ct == CT_HANDSHAKE { continue }
+        session.rx_plain.extend_from_slice(data);
+    }
+
+    // 3. Herausgeben, was passt. Der Rest bleibt liegen und kommt beim
+    //    naechsten Aufruf — **kein Byte wird weggeworfen**.
+    let n = session.rx_plain.len().min(buf.len());
+    buf[..n].copy_from_slice(&session.rx_plain[..n]);
+    session.rx_plain.drain(..n);
+    Ok(n)
 }
+
+/// Ab hier wird nicht mehr vom TCP-Stapel nachgeladen: vier Saetze liegen
+/// dann schon unentschluesselt da. Kein Deckel, der etwas verwirft — eine
+/// Marke, ab der wir aufhoeren zu fragen.
+const RX_HIGH_WATER: usize = MAX_RECORD_PAYLOAD * 4;
+
 
 /// Close TLS session.
 pub fn tls_close(session: &mut TlsSession) -> Result<(), TlsError> {

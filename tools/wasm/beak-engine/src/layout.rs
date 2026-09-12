@@ -2837,7 +2837,7 @@ pub fn layout(
     let perm = z_permutation(ctx.ops.len(), &op_ranges);
     let mut controls = ctx.controls;
     for c in &mut controls {
-        c.at = remap_span(&perm, c.at, c.len).unwrap_or(usize::MAX);
+        c.at = remap_span(&perm, c.at, c.len).unwrap_or(CTL_UNUSABLE);
     }
     let ops = reorder_by_z(ctx.ops, &op_ranges);
     let links = reorder_by_z(ctx.links, &link_ranges);
@@ -5264,7 +5264,7 @@ family: st.family,
         // A control's span must stay EXACT — `repaint_controls` overwrites it
         // in place — so a torn or dropped one is marked unusable instead.
         for c in &mut self.controls {
-            if c.at + c.len <= start {
+            if c.at == CTL_UNUSABLE || c.at + c.len <= start {
                 continue;
             }
             let ok = (c.at >= start && c.len > 0)
@@ -5277,7 +5277,7 @@ family: st.family,
                 .flatten();
             match ok {
                 Some(at) => c.at = at,
-                None => c.at = usize::MAX,
+                None => c.at = CTL_UNUSABLE,
             }
         }
     }
@@ -5415,7 +5415,7 @@ family: st.family,
         // Tastendruck fremde Befehle, und das Feld malte sich unter den alten
         // Kasten: getippter Text unsichtbar, der Text daneben verschoben.
         for c in &mut self.controls {
-            if c.at >= at {
+            if c.at != CTL_UNUSABLE && c.at >= at {
                 c.at += n;
             }
         }
@@ -9616,6 +9616,16 @@ enum Item {
 // nacktes Feld 28 statt 26 px hoch, mit eigener Polsterung 34 statt 36, und
 // beide Fehler zeigten in verschiedene Richtungen — die Sorte, die sich in
 // einem Rahmenwerk gegenseitig zudeckt.
+/// „Dieses Steuerelement ist nicht mehr auffindbar." Gesetzt, wenn seine
+/// Befehlsspanne beim Umbau zerriss — `repaint_controls` ueberschreibt die
+/// Spanne an Ort und Stelle, eine geratene waere fremder Inhalt.
+///
+/// **Ein Wachwert muss ueberall angehalten werden, wo gerechnet wird.** Drei
+/// Stellen zaehlten ungeprueft darauf weiter (`c.at + c.len`, zweimal
+/// `c.at += …`); im Prueflauf ist das ein Ueberlauf-Panik, im ausgelieferten
+/// Bild laeuft es still um null herum und zeigt auf einen echten Befehl.
+const CTL_UNUSABLE: usize = usize::MAX;
+
 const CTL_PAD_X: i32 = 6;
 const CTL_PAD_Y: i32 = 1;
 /// Der Streifen, den ein `<select>` fuer seinen Pfeil frei haelt.
@@ -11998,7 +12008,7 @@ family: seg.style.family,
                 // Indizes seiner Steuerelemente zaehlen aber ab null.
                 let base = ops.len();
                 for c in &mut box_.controls {
-                    c.at += base;
+                    if c.at != CTL_UNUSABLE { c.at += base; }
                 }
                 ops.append(&mut box_.ops);
                 links.append(&mut box_.links);
