@@ -48,7 +48,7 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-12 · beak 0.171.0 · Kernel 0.336.0, AM GERAET GELAUFEN** (Rest: `git log`)
+**Stand 2026-09-12 · beak 0.172.0 · Kernel 0.336.0, AM GERAET GELAUFEN** (Rest: `git log`)
 
 **0.170.0: vier Releases ohne eine Zeile im Selbsttest.** Kein neues
 Merkmal, sondern das, was die Prüfseite selbst als Regel führt: *„Ohne diese
@@ -63,6 +63,44 @@ nicht mitgezaehlt werden koennen und deshalb eigene sind: der ASYNCHRONE Teil
 ANSTELLEN) meldet nach, wie `micro` es tut, und der KASTEN eines
 Steuerelements wird beim Klick NACHGERECHNET statt gezeigt (Feld 100x34,
 Kaestchen 13 — die Masse aus 0.168, aber mit der Schrift des Geraets).
+
+**0.172.0: `sandbox.nopeek.ch`, vier Befunde und zwei Antworten.** Florian
+hat die Seite durchgesehen; ausgezaehlt statt vermutet.
+
+**Die Antwort auf „koennen wir nur 443?" ist NEIN, wir koennen jeden Port** —
+`open_tls` liest `split_host_port(host)` und nimmt `unwrap_or(443)`, HTTP/2
+und Klartext ebenso (`unwrap_or(80)`). DNS und SNI nehmen den nackten Namen,
+der `Host:`-Kopf traegt `host:port`. Hartcodiert ist 443 nur in
+`intent_https` — dem KOMMANDO `https`, nicht dem Browser. Und die Seite
+benutzt ohnehin keinen fremden Port: `session.js` baut
+`API_BASE.replace('http','ws')`, also dieselbe Herkunft.
+
+**Der echte Blocker ist, dass es `WebSocket` gar nicht gibt** — null Treffer
+im ganzen Baum, `new WebSocket(…)` ist ein `ReferenceError`. Die Kette der
+Seite ist `POST /api/session` (das LAEUFT: Methode, Koepfe und Koerper sind
+durchgereicht) → der Server gibt `ws_url` → `new WebSocket` → aus. Daher
+„Connecting…" ohne Ende. Kein kleiner Posten: der Kernel bietet rohes TCP an,
+aber **keinen TLS-Stromsocket**, und `wss://` braucht genau den
+(`WEB_PLATFORM_GAPS.md` §2, S1–S3).
+
+**`accent-color` gebaut** (css-ui-4 §5.1, vererbt, `auto` = Thema). Die Seite
+schreibt dreimal `.network-checkbox input { accent-color: var(--accent) }`,
+und ohne die Eigenschaft bekam sie unsere Themenfarbe — das war „die
+checkboxen … sehen anders aus". Ein `<pre>` gibt es auf der Seite gar nicht:
+„autoscrol pre" sind die BESCHRIFTUNGEN der zwei Kaestchen
+(`networkAutoScroll`, `networkPreserve`).
+
+**`el.dataset.x = v` schreibt jetzt das Attribut.** Es war eine
+Momentaufnahme, und der Kommentar sagte es woertlich — „eine echte Luecke und
+hier benannt statt versteckt — der Zensus zaehlt fast nur Lesezugriffe". Genau
+daran haengt der Theme-Schalter: die Seite setzt
+`document.documentElement.dataset.theme`, das Blatt waehlt mit
+`[data-theme="light"]`, und das Attribut aenderte sich nie. Gebaut als eigene
+Objektart (`ObjKind::Dataset`), die `Interp::set` abfaengt — ein
+Zugriffspaar je Schluessel ginge nicht, weil `data-*` beliebig heisst.
+**Offen und benannt:** `link.disabled` gibt es nicht (die Seite schaltet damit
+ihre zwei Prism-Blaetter um), und `delete el.dataset.x` entfernt das Attribut
+nicht.
 
 **0.171.0: der Tabstreifen, nach zwei Geraetefunden.** Florian: „wir muessen
 tabs optisch noch bisschen mehr hervorheben und das x symbol malt bisschen

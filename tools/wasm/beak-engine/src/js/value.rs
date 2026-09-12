@@ -561,6 +561,14 @@ pub enum ObjKind {
     /// Die Eigenschaftstabelle bleibt trotzdem gefuellt: sie ist es, die
     /// `Object.keys(ns)` und `for..in` beantwortet.
     ModuleNs(Rc<str>),
+    /// `el.dataset` — die Zahl ist der Knoten, dem es gehoert.
+    ///
+    /// **Eine eigene Art, weil das SCHREIBEN durchgreifen muss.** Bis 0.172 war
+    /// `dataset` eine Momentaufnahme: `el.dataset.theme = 'light'` legte eine
+    /// gewoehnliche Eigenschaft an und liess das Attribut stehen. Auf
+    /// `sandbox.nopeek.ch` ist genau das der Theme-Schalter — das Blatt waehlt
+    /// mit `[data-theme="light"]`, und die Seite blieb dunkel.
+    Dataset(u32),
     /// Der Speicher (`ArrayBuffer`) und die zwei Sichten darauf.
     Buffer(Rc<BufData>),
     TypedArray(Rc<TaData>),

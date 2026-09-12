@@ -146,6 +146,9 @@ pub fn make_realm() -> Realm {
                     ObjKind::NumWrap(_) => "Number",
                     ObjKind::BoolWrap(_) => "Boolean",
                     ObjKind::Arguments => "Arguments",
+                    // `Object.prototype.toString.call(el.dataset)` sagt in
+                    // jedem Browser `[object DOMStringMap]`.
+                    ObjKind::Dataset(_) => "DOMStringMap",
                     ObjKind::Regex(_) => "RegExp",
                     ObjKind::Promise(_) => "Promise",
                     ObjKind::Date(_) => "Date",

@@ -1119,6 +1119,15 @@ pub struct ComputedStyle {
     /// parts — but it never enters the box model: no layout code may read it.
     pub outline: BorderSide,
     pub outline_offset: f32,
+    /// `accent-color` (css-ui-4 §5.1) — die Farbe, mit der ein Kaestchen, ein
+    /// Radioknopf, ein Schieber und ein Fortschrittsbalken gemalt werden.
+    ///
+    /// **VERERBT**, und `None` heisst `auto`: dann malt das Thema. Eine Seite,
+    /// die ihre Kaestchen in ihrer eigenen Akzentfarbe will, schreibt genau
+    /// diese eine Zeile — `sandbox.nopeek.ch` dreimal
+    /// (`.network-checkbox input { accent-color: var(--accent) }`), und ohne
+    /// sie bekam sie unsere Themenfarbe statt ihrer.
+    pub accent: Option<Rgba>,
     // — positioning —
     pub position: Position,
     pub top: Len,
@@ -1350,6 +1359,7 @@ impl ComputedStyle {
             nowrap: false,
             pre: false,
             color: Rgba::opaque(theme.text),
+            accent: None,
             hidden: false,
             transparent: false,
             opacity: 1.0,
@@ -1581,6 +1591,7 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         inline_fade: parent.inline_fade,
         opacity_zero: false,
         color: parent.color,
+        accent: parent.accent,
         text_align: parent.text_align,
         center_blocks: parent.center_blocks,
         list_style: parent.list_style,
@@ -3878,6 +3889,18 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         Prop::OutlineOffset => {
             if let Some(px) = parse_length(v.trim(), s.units()) {
                 s.outline_offset = px;
+            }
+        }
+        // `auto` ist der Anfangswert und heisst „das Thema entscheidet".
+        // Jede andere Farbe gilt; eine unlesbare laesst den Vorgaenger stehen
+        // (dieselbe Regel wie ueberall — ein gescheiterter Parse verwirft die
+        // Deklaration, er loescht nicht).
+        Prop::AccentColor => {
+            let t = v.trim();
+            if t.eq_ignore_ascii_case("auto") {
+                s.accent = None;
+            } else if let Some(c) = crate::color::parse_color(t) {
+                s.accent = Some(c);
             }
         }
         Prop::BorderTop => s.border_top = parse_border_shorthand(&v, u, theme),

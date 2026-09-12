@@ -4767,6 +4767,7 @@ family: st.family,
             focused,
             caret,
             bg: st.bg,
+            accent: st.accent,
             // Eine Seite, die dem Steuerelement einen Hintergrund gibt — auch
             // `transparent` —, malt seine Flaeche selbst. So macht es jeder
             // Browser, und Bootstraps `.btn-outline-*` verlaesst sich darauf.
@@ -9648,6 +9649,12 @@ struct CtlBox {
     caret: Option<usize>,
     /// The control's own `background-color`, if the page styled it.
     bg: Option<Rgba>,
+    /// `accent-color` (css-ui-4 §5.1), `None` = `auto` (das Thema entscheidet).
+    ///
+    /// **Am STEUERELEMENT, nicht am Textlauf.** Der erste Versuch legte sie an
+    /// `RunStyle` — den Stil eines Textlaufs, von dem eine Seite tausende hat,
+    /// und von denen keiner ein Kaestchen malt.
+    accent: Option<Rgba>,
     /// The page paints this control's FACE itself — either it said
     /// `appearance: none`, or it gave the control a background of its own
     /// (`transparent` included). Only the face; the widget still shows.
@@ -10007,7 +10014,8 @@ fn paint_control(
             // **Der Ring war grau, auch wenn der Knopf gewaehlt war.** Das
             // war der eigentliche Fehler: der Unterschied zwischen „gewaehlt"
             // und „nicht gewaehlt" lag allein am Punkt in der Mitte.
-            let ring_color = if ctl.checked { Rgba::from(theme.link) } else { border };
+            let akzent = ctl.accent.unwrap_or_else(|| Rgba::from(theme.link));
+            let ring_color = if ctl.checked { akzent } else { border };
             ops.push(DrawOp::RoundRect { x, y: top, w, h, r, color: ring_color, ring: bw });
             if ctl.checked {
                 // Chromium malt in einen 13-px-Knopf einen Punkt von 6 px —
@@ -10018,7 +10026,7 @@ fn paint_control(
                 ops.push(DrawOp::RoundRect {
                     x: x + i, y: top + i, w: iw, h: ih,
                     r: [(iw.min(ih) as f32) / 2.0; 4],
-                    color: theme.link.into(), ring: 0.0,
+                    color: akzent, ring: 0.0,
                 });
             }
         }
@@ -10028,7 +10036,11 @@ fn paint_control(
             // Flaeche — dasselbe Zeichen wie beim Radioknopf, nur eckig, und
             // damit war die Form nicht mehr die Auskunft.
             if ctl.checked && ctl.bg.is_none() && !ctl.no_face {
-                face_op(ops, theme.link.into());
+                // **`accent-color` schlaegt das Thema** (css-ui-4 §5.1). Ohne
+                // sie bekam eine Seite, die ihre Kaestchen in ihrer eigenen
+                // Akzentfarbe will, unsere — `sandbox.nopeek.ch` schreibt
+                // genau das, dreimal.
+                face_op(ops, ctl.accent.unwrap_or_else(|| theme.link.into()));
                 bg_img(ops);
                 ops.push(DrawOp::Check { x, y: top, w, h, color: theme.bg.into() });
             } else {
@@ -14321,6 +14333,46 @@ fn dbg_wiki_shape() {
         assert_eq!(l.controls[2].w, l.controls[3].w);
         assert!(l.controls[2].w > 300, "1fr column stretches the field");
         assert!(l.controls[4].y > l.controls[2].y);
+    }
+
+    /// **`accent-color` schlaegt das Thema** (css-ui-4 §5.1).
+    ///
+    /// Eine Seite, die ihre Kaestchen in ihrer eigenen Akzentfarbe will,
+    /// schreibt genau eine Zeile — `sandbox.nopeek.ch` dreimal
+    /// (`.network-checkbox input { accent-color: var(--accent) }`). Ohne die
+    /// Eigenschaft bekam sie unsere Themenfarbe, und Florian sah es am Geraet:
+    /// „die checkboxen … sehen anders aus".
+    #[test]
+    fn accent_color_faerbt_kaestchen_und_radioknopf() {
+        let first_rect = |css: &str, tag: &str| -> Rgb {
+            let html = alloc::format!(
+                "<body><style>{css}</style>{tag}</body>");
+            let l = lay(&html, 400);
+            rects(&l).first().map(|r| r.4).expect("kein Kasten gemalt")
+        };
+        // Eine eigene Farbe gilt — auch aus einer CSS-Variablen.
+        let eigen = first_rect(":root{--a:#e11d48} input{accent-color:var(--a)}",
+                               "<input type=checkbox checked>");
+        assert_eq!(eigen, Rgb(225, 29, 72), "das Kaestchen nimmt accent-color");
+        let name = first_rect("input{accent-color:rebeccapurple}",
+                              "<input type=checkbox checked>");
+        assert_eq!(name, Rgb(102, 51, 153), "auch ein Farbname");
+        // Ein Radioknopf ist RUND — seine Flaeche, sein Ring und sein Punkt
+        // sind `RoundRect`, und `rects` sammelt nur `Rect`. Erst diese
+        // Unterscheidung macht den Test zu einem Test: die erste Fassung sah
+        // eine leere Liste und haette jede Farbe durchgehen lassen.
+        let l = lay("<body><style>input{accent-color:#e11d48}</style>\
+                     <input type=radio checked></body>", 400);
+        let farben: alloc::vec::Vec<Rgb> = l.ops.iter().filter_map(|o| match o {
+            DrawOp::RoundRect { color, .. } => Some(color.c),
+            _ => None,
+        }).collect();
+        assert!(!farben.is_empty(), "ein Radioknopf malt RoundRects");
+        assert!(farben.contains(&Rgb(225, 29, 72)),
+            "der Ring eines gewaehlten Radioknopfes nimmt accent-color: {farben:?}");
+        // `auto` ist der Anfangswert und laesst das Thema entscheiden.
+        let thema = first_rect("input{accent-color:auto}", "<input type=checkbox checked>");
+        assert_ne!(thema, Rgb(225, 29, 72), "auto faellt aufs Thema zurueck");
     }
 
     /// **Die UA-Masse eines Steuerelements, gegen Chromium ausgerechnet.**

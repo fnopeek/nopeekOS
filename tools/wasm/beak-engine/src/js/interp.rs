@@ -1674,6 +1674,19 @@ impl Interp {
                 return Ok(());
             }
         }
+        // `el.dataset.x = v` schreibt das ATTRIBUT — sonst ist es eine
+        // Zuweisung an eine Kopie, und die Seite wundert sich.
+        let ds = match &o.borrow().kind { ObjKind::Dataset(id) => Some(*id), _ => None };
+        if let Some(id) = ds {
+            let text = self.to_string(&val)?;
+            let attr = super::dombind::camel_to_data_attr(key);
+            if let Some(d) = &mut self.doc { d.set_attr_at(id, &attr, &text); }
+            // Und dieselbe Momentaufnahme mitfuehren: wer sich das Objekt in
+            // einer Variablen haelt, soll seinen eigenen Schreibvorgang lesen
+            // koennen.
+            o.borrow_mut().define(key, Prop::data(Value::Str(text)));
+            return Ok(());
+        }
         if super::proxy::parts(o).is_some() {
             return match super::proxy::trap(self, o, "set")? {
                 Some((f, h, t)) => {
