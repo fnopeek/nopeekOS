@@ -4333,12 +4333,20 @@ const NAV_BTN_RADIUS: u8 = 7;
 /// Der Streifen: 36 px, `SurfaceElevated`, Tabs unten buendig
 /// (`docs/spec/UI_REFRESH.md` §5.2 und §3 `tab`).
 const TABSTRIP_H: u16 = 36;
+/// Der Akzentstreifen oben auf dem aktiven Tab.
+const TAB_ACCENT: u16 = 2;
 const TAB_H: u16 = 30;
 /// **Feste Breite, nicht mitwachsend** (§3 `tab`). Ein Tab, der sich der
 /// Anzahl anpasst, braucht ein Etikett, das mitgeht — und die Schrift gehoert
 /// dem Compositor, eine App kann sie nicht messen.
 const TAB_W: u16 = 160;
-const TAB_BTN: u16 = 20;
+/// **22, damit ein 16-px-Zeichen hineinpasst.** Der Atlas fuehrt 16, 24, 32,
+/// 48 und 64 — eine Anfrage auf 12 bekam das 16er und wurde auf 4:3
+/// verkleinert. Das Verkleinern mittelt korrekt ueber Flaechen, und genau
+/// deshalb wird ein 1,5 px breiter Strich dabei weich: Florian am Geraet,
+/// „das x symbol malt bisschen unscharf". Eine Atlasgroesse zu verlangen ist
+/// ein 1:1-Blit und damit scharf.
+const TAB_BTN: u16 = 22;
 /// Wieviel Text in einen Tab passt, in Zeichen.
 ///
 /// Gerechnet mit 7 px je Zeichen gegen `TextStyle::Body` (13 px). Das ist
@@ -4350,7 +4358,7 @@ const TAB_CHARS: usize = ((TAB_W - 16 - TAB_BTN - 4) / 7) as usize;
 /// Ein kleiner Knopf im Streifen: das `\u{d7}` eines Tabs, das `+` dahinter.
 fn tab_btn(icon: IconId, action: ActionId) -> Widget {
     prefab::center_box(
-        Widget::Icon { id: icon, size: 12, modifiers: vec![Modifier::Tint(Token::OnSurfaceMuted)] },
+        Widget::Icon { id: icon, size: 16, modifiers: vec![Modifier::Tint(Token::OnSurfaceMuted)] },
         vec![
             Modifier::MinWidth(TAB_BTN),
             Modifier::MaxWidth(TAB_BTN),
@@ -4382,7 +4390,6 @@ fn tab_strip() -> Widget {
             Modifier::MinWidth(TAB_W),
             Modifier::MaxWidth(TAB_W),
             Modifier::MinHeight(TAB_H),
-            Modifier::PaddingXY { x: 8, y: 0 },
             Modifier::Rounded(Radius::Md.as_u8()),
         ];
         // **Der aktive Tab traegt die Farbe des Inhalts darunter** (§3
@@ -4395,7 +4402,24 @@ fn tab_strip() -> Widget {
                 Modifier::Rounded(Radius::Md.as_u8()),
             ]));
         }
-        kids.push(Widget::Row {
+        // **Ein Akzentstreifen OBEN auf dem aktiven Tab.** Bis hierher war der
+        // Unterschied zwischen aktiv und ruhend `Surface` gegen
+        // `SurfaceElevated` plus eine Textfarbe — richtig, aber am Geraet zu
+        // leise (Florian: „tabs optisch noch bisschen mehr hervorheben").
+        // Der Streifen ist das uebliche Zeichen und das einzige, das auch aus
+        // zwei Metern liest. Er liegt IM Tab, nicht darueber: sonst
+        // verschoebe er die Beschriftung des aktiven gegen die der anderen.
+        let bar = Widget::Row {
+            children: Vec::new(),
+            spacing: 0,
+            align: Align::Center,
+            modifiers: vec![
+                Modifier::MinHeight(TAB_ACCENT),
+                Modifier::MaxHeight(TAB_ACCENT),
+                Modifier::Background(if sel { Token::Accent } else { Token::SurfaceElevated }),
+            ],
+        };
+        let inner = Widget::Row {
             children: vec![
                 Widget::Text {
                     content: label,
@@ -4409,6 +4433,19 @@ fn tab_strip() -> Widget {
             ],
             spacing: Spacing::Xs.as_u16(),
             align: Align::Center,
+            modifiers: vec![
+                Modifier::Flex(1),
+                Modifier::PaddingXY { x: 8, y: 0 },
+            ],
+        };
+        // **`Stretch`, nicht `Start`.** In einer Spalte ist `align` die
+        // QUERachse, also die Breite: mit `Start` haette der Akzentstreifen
+        // seine natuerliche Breite bekommen — und die ist bei einer Zeile
+        // ohne Kinder null.
+        kids.push(Widget::Column {
+            children: vec![bar, inner],
+            spacing: 0,
+            align: Align::Stretch,
             modifiers: m,
         });
     }
