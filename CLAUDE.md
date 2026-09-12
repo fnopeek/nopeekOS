@@ -48,7 +48,40 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-12 · beak 0.173.0 · Kernel 0.338.0, AM GERAET GELAUFEN** (Rest: `git log`)
+**Stand 2026-09-12 · beak 0.174.0 · Kernel 0.339.0** (Rest: `git log`)
+
+**0.174.0 / Kernel 0.339.0: der Socket stand, die Antwort kam nicht an.**
+Florians Log: `POST 200`, dann `Unhandled promise rejection: Timeout`, und
+nichts dazwischen. **Die Meldung entschied den Fall**, nicht eine Vermutung:
+`sendCDP` lehnt mit `'Not connected'` ab, wenn der Socket nicht offen ist —
+ein `'Timeout'` heisst also, dass `readyState` OPEN war und dass gesendet
+wurde. Der Handschlag hatte funktioniert. Dafuer gibt es jetzt eine
+Gegenprobe ohne Geraet: **`tools/wsdrive.py` legt die TLS-Leitung, unser
+eigener Code rechnet die Rahmen** (`beak-engine/examples/wsreal.rs`) — gegen
+den ECHTEN Server laeuft alles durch (101, Kommando raus,
+`{"id":1,"result":{}}` zurueck). Drei Fehler daneben, alle drei echt:
+**(1) Ein voller Puffer ist Gegendruck, kein Protokollfehler.** `tls_poll`
+zog alles vom TCP-Stapel in `session.rx`, gab aber genau EINEN Satz je
+Aufruf heraus; ueberschritt `rx` dabei 65 KB, kam `RecordTooLarge` — und
+beak macht aus `n < 0` ein Zu. Jetzt wird nur nachgeladen, solange Platz
+ist, es werden alle ganzen Saetze entschluesselt, und was nicht in den
+Puffer des Rufers passt, liegt in `rx_plain` statt verworfen zu werden.
+Dazu holt der Pump die Leitung LEER statt einen Satz je Bild (60/s).
+**(2) Ein werfender Behandler war still.** `fire` verschluckte den Wurf mit
+`let _ =` — die Zustellung hatte funktioniert, die Seite sah einen Timeout
+ohne Grund. Jetzt steht er in der Konsole, und der naechste Behandler laeuft
+trotzdem (im Browser steht jeder fuer sich). **(3) Ein gelungener Aufbau
+schwieg**, also sah ein Log ohne WebSocket-Zeile genauso aus wie eines, in
+dem nie etwas versucht wurde. **Die halbe Strecke war ungeprueft**: die
+neun Tests von 0.173.0 messen die LEITUNG, nicht was eine Seite davon sieht
+— zwei neue fahren `onopen`/`onmessage` durch den Motor, samt
+`JSON.parse(e.data)`. Dabei abgefallen und aelter: **`CTL_UNUSABLE` geriet
+in drei Rechnungen** (`c.at + c.len`, zweimal `c.at += …`) — im Prueflauf
+eine Ueberlauf-Panik (`cargo test --lib` war seit 0.173.0 rot), im
+ausgelieferten Bild ein stiller Umlauf auf einen echten Befehl.
+**Offen und benannt:** warum es auf dem GERAET scheiterte, ist damit noch
+nicht bewiesen — beide Haelften der Engine sind es jetzt, der Kernelstrom
+nicht. Der naechste Lauf sagt es, weil der Weg jetzt spricht.
 
 **0.170.0: vier Releases ohne eine Zeile im Selbsttest.** Kein neues
 Merkmal, sondern das, was die Prüfseite selbst als Regel führt: *„Ohne diese

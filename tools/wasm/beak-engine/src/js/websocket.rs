@@ -419,6 +419,27 @@ fn mask_source() -> impl FnMut() -> [u8; 4] {
 }
 
 /// Ein Ereignis an den JS-Gegenstand zustellen — `onX` und `addEventListener`.
+/// Einen Behandler der Seite rufen — und einen Fehler daraus MELDEN.
+///
+/// **Stille war hier der eigentliche Fehler.** Die Antwort auf ein
+/// CDP-Kommando kam an, `onmessage` warf unterwegs, und die Seite sah nichts
+/// als einen Timeout ohne Grund — die Zustellung hatte funktioniert, die
+/// Auskunft darueber fehlte. Ein Browser schreibt so etwas in die Konsole,
+/// also steht es jetzt auch hier. Und die Zustellung laeuft weiter: jeder
+/// Behandler steht fuer sich, einer, der wirft, nimmt den naechsten nicht mit.
+fn run_handler(i: &mut Interp, f: &Value, obj: &Value, ev: &Value, kind: &str) {
+    if !i.is_callable(f) { return }
+    if let Err(super::interp::Abrupt::Throw(v)) = i.call(f, obj.clone(), &[ev.clone()]) {
+        let text = i.get(&v, "message").ok()
+            .and_then(|m| i.to_string(&m).ok())
+            .filter(|m| !m.is_empty())
+            .or_else(|| i.to_string(&v).ok())
+            .map(|s| String::from(&*s))
+            .unwrap_or_else(|| String::from("?"));
+        i.console_push(alloc::format!("WebSocket: der {kind}-Behandler warf: {text}"));
+    }
+}
+
 fn fire(i: &mut Interp, obj: &Value, kind: &str, fill: &dyn Fn(&mut Interp, &Gc)) -> C<()> {
     let ev = new_obj(Some(i.realm.object_proto.clone()));
     ev.borrow_mut().define("type", Prop::builtin(Value::str(kind)));
@@ -426,7 +447,7 @@ fn fire(i: &mut Interp, obj: &Value, kind: &str, fill: &dyn Fn(&mut Interp, &Gc)
     fill(i, &ev);
     let ev = Value::Obj(ev);
     let on = i.get(obj, &alloc::format!("on{kind}"))?;
-    if i.is_callable(&on) { i.call(&on, obj.clone(), &[ev.clone()])?; }
+    run_handler(i, &on, obj, &ev, kind);
     let list = i.get(obj, W_LISTEN)?;
     if let Value::Obj(arr) = &list {
         let n = match i.get(&list, "length") { Ok(Value::Num(n)) => n as usize, _ => 0 };
@@ -437,8 +458,8 @@ fn fire(i: &mut Interp, obj: &Value, kind: &str, fill: &dyn Fn(&mut Interp, &Gc)
             };
             let kk = i.get(&pair, "0")?;
             let g = i.get(&pair, "1")?;
-            if i.to_string(&kk)?.as_ref() == kind && i.is_callable(&g) {
-                i.call(&g, obj.clone(), &[ev.clone()])?;
+            if i.to_string(&kk)?.as_ref() == kind {
+                run_handler(i, &g, obj, &ev, kind);
             }
         }
     }
@@ -720,6 +741,80 @@ mod tests {
         let s = sock("wss://a.test:8443/ws");
         let req = String::from_utf8(s.handshake()).unwrap();
         assert!(req.contains("\r\nHost: a.test:8443\r\n"), "{req}");
+    }
+
+    /// Einen Motor mit `WebSocket` und einer Seite als Herkunft.
+    fn motor(js: &str) -> Interp {
+        fn zufall(out: &mut [u8]) -> bool { out.fill(7); true }
+        crate::js::random::set_source(zufall);
+        let mut i = Interp::new();
+        i.loc_href = String::from("https://a.test/seite");
+        let prog = crate::js::parse(js, false).expect("parst");
+        assert!(i.run_program(&prog).is_ok(), "das Skript muss laufen");
+        i
+    }
+
+    /// Den Handschlag beantworten und einen Textrahmen nachschieben — so,
+    /// wie der echte Server es tut.
+    fn server_spricht(i: &mut Interp, text: &str) {
+        let id = i.sockets[0].id;
+        let accept = i.sockets[0].expected_accept();
+        let hallo = alloc::format!(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+             Connection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n");
+        host_bytes(i, id, Some(hallo.as_bytes()));
+        let mut rahmen = alloc::vec![0x81u8, text.len() as u8];
+        rahmen.extend_from_slice(text.as_bytes());
+        host_bytes(i, id, Some(&rahmen));
+    }
+
+    fn global(i: &mut Interp, name: &str) -> String {
+        let g = Value::Obj(i.realm.global.clone());
+        let Ok(v) = i.get(&g, name) else { return String::from("<fehlt>") };
+        match i.to_string(&v) {
+            Ok(s) => String::from(&*s),
+            Err(_) => String::from("<unlesbar>"),
+        }
+    }
+
+    /// **Die halbe Strecke war ungeprueft.** Alles darueber misst die
+    /// LEITUNG — Rahmen hinein, Rahmen hinaus. Was eine SEITE davon sieht,
+    /// stand in keinem Test: dass `onopen` faellt, dass `e.data` eine
+    /// Zeichenkette ist und `JSON.parse` sie frisst. Genau diese Strecke
+    /// liegt zwischen „der Server hat geantwortet" und „die Seite hat es
+    /// gemerkt", und genau dort lief ein CDP-Kommando in einen Timeout.
+    #[test]
+    fn die_seite_bekommt_die_nachricht_als_zeichenkette() {
+        let mut i = motor(
+            "var offen = false; var gesehen = 'nichts'; var zustand = -1;
+             var ws = new WebSocket('wss://a.test/ws');
+             ws.onopen = function () { offen = true; };
+             ws.onmessage = function (e) { gesehen = JSON.parse(e.data).id;
+                                           zustand = ws.readyState; };");
+        assert_eq!(i.sockets.len(), 1, "ein Socket steht an");
+        assert_eq!(i.pending_sockets.len(), 1, "und der Wirt hat einen Auftrag");
+        server_spricht(&mut i, r#"{"id":1,"result":{}}"#);
+        assert_eq!(global(&mut i, "offen"), "true", "onopen muss fallen");
+        assert_eq!(global(&mut i, "gesehen"), "1", "e.data muss durch JSON.parse gehen");
+        assert_eq!(global(&mut i, "zustand"), "1", "waehrend der Nachricht ist der Stand OFFEN");
+    }
+
+    /// **Ein Behandler, der wirft, darf nicht still sein.** Vorher verschluckte
+    /// `fire` den Wurf: die Zustellung hatte funktioniert, die Seite sah nur
+    /// einen Timeout ohne Grund. Und der zweite Behandler muss trotzdem laufen
+    /// — im Browser steht jeder fuer sich.
+    #[test]
+    fn ein_werfender_behandler_wird_gemeldet_und_haelt_den_naechsten_nicht_auf() {
+        let mut i = motor(
+            "var zweiter = false;
+             var ws = new WebSocket('wss://a.test/ws');
+             ws.onmessage = function () { null.x; };
+             ws.addEventListener('message', function () { zweiter = true; });");
+        server_spricht(&mut i, "{}");
+        assert_eq!(global(&mut i, "zweiter"), "true", "der zweite Behandler laeuft trotzdem");
+        let konsole = i.take_console();
+        assert!(konsole.iter().any(|l| l.contains("message-Behandler warf")),
+                "der Wurf gehoert gemeldet, gesehen: {konsole:?}");
     }
 
     #[test]

@@ -2371,6 +2371,13 @@ fn response_headers() -> String {
 ///
 /// Liefert true, wenn etwas ankam — dann lief Seitencode, und der Baum kann
 /// sich geaendert haben.
+/// Der Lesepuffer der WebSockets — einer fuer alle, nacheinander benutzt.
+fn ws_buf() -> &'static mut [u8; 16 * 1024] {
+    static mut BUF: [u8; 16 * 1024] = [0; 16 * 1024];
+    // SAFETY: beak ist einfaedig; dieselbe Regel wie bei `fetch_jobs`.
+    unsafe { &mut *core::ptr::addr_of_mut!(BUF) }
+}
+
 /// Die offenen WebSockets: `(Engine-Id, TLS-Griff)`.
 fn ws_jobs() -> &'static mut Vec<(u32, i32)> {
     static mut JOBS: Vec<(u32, i32)> = Vec::new();
@@ -2415,18 +2422,34 @@ fn pump_websockets(sess: &mut beak_engine::js::Session) -> bool {
             moved = true;
             continue;
         }
+        // **Ein gelungener Aufbau muss sich melden.** Schweigt er, sieht ein
+        // Log genauso aus wie eines, in dem gar nichts versucht wurde — und
+        // dann ist die erste Frage nach einem Fehlschlag unbeantwortbar.
+        log(&alloc::format!("[beak] WebSocket: {}:{} verbunden, Handschlag raus ({} B)",
+                            w.host, w.port, w.hello.len()));
         ws_jobs().push((w.id, h));
         moved = true;
     }
     // 2. Lesen und schreiben. Ein Puffer je Runde reicht: was nicht
     //    hineinpasst, liegt im Kernel und kommt beim naechsten Bild.
-    let mut buf = [0u8; 16 * 1024];
+    // **Nicht auf dem Stapel.** 16 KB je Aufruf hiessen 16 KB nullen, 62-mal
+    // in der Sekunde, fuer eine Leitung, die meistens schweigt — und es waere
+    // der einzige Puffer dieser Groesse auf beaks Stapel, direkt unter dem
+    // rekursiven Auslegen.
+    let buf = ws_buf();
     let mut tot: Vec<(u32, i32)> = Vec::new();
     for (id, h) in ws_jobs().clone() {
-        loop {
+        // **Leerholen, nicht anlesen.** `npk_tls_recv` gibt 0 genau dann, wenn
+        // nichts Vollstaendiges mehr dasteht; wer nach dem ersten Satz
+        // aufhoert, holt einen je Bild ab (60/s) und laesst den Rest im
+        // Kernel liegen, bis dessen Puffer zumacht. Der Deckel ist gegen die
+        // andere Richtung: eine Gegenstelle, die nicht aufhoert, darf dieses
+        // Bild nicht ganz auffressen.
+        for _ in 0..64 {
             let n = unsafe { npk_tls_recv(h, buf.as_mut_ptr() as i32, buf.len() as i32) };
             if n < 0 {
                 // Zu oder kaputt — die Engine macht daraus 1006.
+                log("[beak] WebSocket: Leitung zu");
                 beak_engine::js::websocket::host_bytes(&mut sess.interp, id, None);
                 unsafe { npk_tls_close(h) };
                 tot.push((id, h));
@@ -2436,7 +2459,6 @@ fn pump_websockets(sess: &mut beak_engine::js::Session) -> bool {
             if n == 0 { break }
             beak_engine::js::websocket::host_bytes(&mut sess.interp, id, Some(&buf[..n as usize]));
             moved = true;
-            if (n as usize) < buf.len() { break }
         }
         if tot.iter().any(|(x, _)| *x == id) { continue }
         if let Some(out) = beak_engine::js::websocket::take_out_for(&mut sess.interp, id) {
