@@ -184,12 +184,23 @@ npk_tcp_close
 **Aber zwei Dinge fehlen dafür, und beide gehören genannt, bevor jemand
 anfängt:**
 
-1. **Kein TLS.** `npk_tcp_connect` nimmt eine **gepackte IPv4 und einen
-   Port** — Klartext-TCP. `wss://` braucht TLS, und der Kernel hat einen
-   TLS-Stapel (er fährt `https://` über `npk_http_*`), aber er ist nicht als
-   Stromsocket herausgeführt. Das ist ein **Kernel-Posten**: ein
-   TLS-fähiger Stromsocket als neue Hostfunktion (anhängend,
-   [[feedback_abi_append_only]]).
+1. **Kein TLS — aber weniger fehlt, als hier stand.** `npk_tcp_connect` nimmt
+   eine **gepackte IPv4 und einen Port**, also Klartext-TCP. `wss://` braucht
+   TLS.
+
+   > **Nachgemessen 2026-09-12, und diese Zeile war zu pessimistisch.** Der
+   > TLS-Stapel IST bereits ein Byte-Strom und nicht an HTTP gebunden:
+   > `crypto::tls::{tls_connect, tls_connect_alpn, tls_send, tls_recv,
+   > tls_close}` — vier Funktionen mit genau der Form, die ein Socket braucht,
+   > und `TlsSession` sitzt auf einem gewöhnlichen `tcp_handle`. Was fehlt,
+   > ist allein das **Herausführen**: eine Griff-Tabelle plus
+   > `npk_tls_connect/send/recv/close`, anhängend registriert und in BEIDEN
+   > Wegen ([[feedback_abi_append_only]]). Das ist ein Kernel-Posten von
+   > überschaubarer Grösse, kein TLS-Neubau.
+   >
+   > Dazu fehlt für den Handschlag **SHA-1** (RFC 6455 §4.1 rechnet
+   > `Sec-WebSocket-Accept` damit). base64 gibt es (`intent/`), und den
+   > Zufall für die Maskierung jedes Client-Rahmens auch (`security::csprng`).
 2. **Kein DNS an dieser Stelle.** Die Adresse kommt gepackt herein, also muss
    der Rufer schon aufgelöst haben.
 
