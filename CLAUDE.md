@@ -65,12 +65,24 @@ Seite statt einer toten Maschine. **Das ist die Antwort auf die Frage aus dem
 Sicherheits-Checkpoint**, und sie war bisher „ja".
 
 **Und der Grund dahinter, gemessen: `Rc` sammelt keine Ringe ein, und Reacts
-Fiberbaum IST einer.** Auf DDGs Ergebnisseite haelt beak **2002 MB LEBEND
-bei 1478 DOM-Knoten** (`STATS=1` in `pagerun` zaehlt die lebende Halde, nicht
-den RSS). `value.rs` sagt es im Kopf seit je — „Zaehlende Freigabe, kein
-Sammler" —, nur war es folgenlos, solange React ohnehin nicht lief. **Das ist
-jetzt der naechste harte Posten**, siehe
-`memory/feedback_rc_has_no_collector_and_react_is_a_ring.md`.
+Fiberbaum IST einer.** `value.rs` sagt es im Kopf seit je — „Zaehlende
+Freigabe, kein Sammler" —, nur war es folgenlos, solange React ohnehin nicht
+lief. Jetzt ausgezaehlt statt vermutet, hinter `--features heap-census`
+(`heap_census` = zaehlender Gang von ALLEN Wurzeln, `ALL_OBJECTS` =
+Verzeichnis, `collect_cycles` = markieren und kehren; in `pagerun` als
+`STATS=1` und `SWEEP=1`):
+
+    vorher:  2076 MB, 498570 Objekte (85876 erreichbar)
+    geleert: 412694 Objekte
+    nachher:  207 MB — 1869 MB zurueck (90 %)
+
+**83 % der Objekte, 90 % der Bytes liegen in Ringen.** Der erreichbare
+Bestand bleibt ueber den ganzen Lauf bei ~86 000, der Gesamtbestand waechst
+von 70 000 auf 499 000: das Arbeitsset ist stabil, der Muell laeuft. Mit
+Sammler passt die Seite in 207 MB — unter den Modul-Deckel. **Noch kein
+Sammler im Betrieb**: dafuer fehlen ein sicherer Haltepunkt, die Rahmen der
+Maschine als Wurzeln und ein Ausloeser
+(`memory/feedback_rc_has_no_collector_and_react_is_a_ring.md`).
 
 **0.175.2: `indexOf` verwarf seine Startstelle — und jede Suchschleife im
 Web lief ewig.** Der Geraetelauf von 0.175.1 zeigte es: die Suche ging durch
