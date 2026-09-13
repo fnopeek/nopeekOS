@@ -48,7 +48,7 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-13 · beak 0.175.2 · Kernel 0.340.0** (Rest: `git log`)
+**Stand 2026-09-13 · beak 0.175.3 · Kernel 0.340.0** (Rest: `git log`)
 
 **Kernel 0.340.0: ein Modul konnte die ganze Maschine aufbrauchen.** Aus dem
 Geraetelauf: Seitenfehler auf `0xfffffffffffffffd` — das ist `null - 3`,
