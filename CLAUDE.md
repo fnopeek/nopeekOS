@@ -48,7 +48,31 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-13 · beak 0.175.0 · Kernel 0.339.0** (Rest: `git log`)
+**Stand 2026-09-13 · beak 0.175.1 · Kernel 0.339.0** (Rest: `git log`)
+
+**0.175.1: die getippte Suche ging an einer Nummer verloren, die sich
+bewegt.** Aus dem Geraetelauf, und der Log sagte es ohne Vermutung —
+DIESELBEN Knoepfe unter drei Nummern: `156…` nach der Navigation, `157…`
+nach den Skripten, `156…` nach dem Absenden. **`Doc::to_dom` vergibt die
+`seq` bei JEDEM Zurueckschreiben neu**, von eins an in Dokumentreihenfolge;
+ein Knoten mehr am Anfang, und alles dahinter heisst anders. `FormState` war
+nach genau dieser Zahl geschluesselt, also war die Sucheingabe nach jedem
+Skriptlauf verwaist und abgeschickt wurde ein leeres `q` — worauf DDG die
+Startseite zurueckgibt (im Log zweimal dieselben 177105 Bytes). Der
+BAUMknoten ueberlebt das Zurueckschreiben: jeder Tastendruck schreibt den
+Wert jetzt mit in den Knoten, `Page::sync` holt ihn unter den neuen Nummern
+zurueck, und `submit_form` haelt das aktivierte Element ueber seinen Knoten
+fest, solange der Behandler der Seite laeuft.
+
+**Und der Fokus malt jetzt eine `outline`, keinen umgefaerbten Rahmen.**
+Florian: „klick in die suchfeld, macht ein border.. ein blauer, ich glaube
+das stimmt nicht." Stimmte nicht: beak faerbte den Rahmen der SEITE um —
+author colours included — und malte einen, wo gar keiner war. DDGs Suchfeld
+sagt woertlich `border:none;outline:none`. `ComputedStyle` merkt sich jetzt
+mit `outline_set`, ob die Seite ueber den Umriss etwas gesagt hat: hat sie,
+gilt ihr Wort (auch das Nein); hat sie nicht, kommt ein 1-px-Ring
+AUSSERHALB des Rahmenkastens. Preis: `ComputedStyle` 1496 → 1504 Bytes, und
+der Groessentest ist genau dafuer da, die Frage zu stellen.
 
 **0.175.0: `Reflect.construct` verwarf sein Neuziel — und React rendert
 seither nichts.** Florian: „duckduckgo.com beim suchen klick passiert
