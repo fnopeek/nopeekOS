@@ -68,6 +68,16 @@ diag-boxes = []
 # (`onlyStrict`) sagen es NICHT, sie zaehlen nur, wie ein Test gestartet wird.
 # Bleibt aus dem ausgelieferten Modul heraus: Diagnose darf nicht stoeren.
 strict-probe = []
+# Dev-only: zaehlt, wieviele `Object` gerade LEBEN. Ohne diese Zahl sagt ein
+# Markierungsgang nichts — er findet, was ERREICHBAR ist, und erst der
+# Vergleich mit dem Gesamtbestand nennt den Muell in den Ringen. Bleibt aus
+# dem ausgelieferten Modul heraus: ein Zaehler je Objekt ist billig, aber
+# nicht umsonst.
+#
+# Die Zaehler sind EINFAEDIG, wie der Motor selbst. Der Testlaeufer ist es
+# nicht — mit dieser Fahne braucht `cargo test` ein `-- --test-threads=1`,
+# sonst rennen die Tests auf demselben `static mut` und der Lauf bricht ab.
+heap-census = []
 
 # brotli-decompressor: WOFF2 packt seine Tabellen mit Brotli (RFC 7932).
 # NUR der Dekompressor, `default-features = false` = ohne `std`.

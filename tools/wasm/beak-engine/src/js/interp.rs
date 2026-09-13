@@ -336,6 +336,21 @@ pub struct Realm {
     pub dataview_proto: Gc,
 }
 
+/// Was ein Zensus der Halde gefunden hat.
+pub struct Census {
+    /// Objekte, die von den Wurzeln aus zu erreichen sind.
+    pub reachable: usize,
+    /// Umgebungen darin — eine Schliessung haelt ihre, und die haelt wieder
+    /// Schliessungen.
+    pub envs: usize,
+    /// Eigenschaften in den erreichbaren Objekten. Sie sind der Preis: beak
+    /// legt jede einzeln ab, Schluessel als Zeichenkette.
+    pub props: usize,
+    /// Objekte, die insgesamt LEBEN. Nur mit `--features heap-census`, sonst
+    /// null — und ohne diese Zahl sagt `reachable` nichts.
+    pub live: usize,
+}
+
 impl Realm {
     /// Alles, was der Realm selbst festhaelt. Eine Liste und keine
     /// Aufzaehlung von Hand an jeder Stelle: wer ein Feld hinzufuegt, sieht
@@ -1048,6 +1063,206 @@ impl Interp {
     /// ⚠ Wer nach dem Fallenlassen noch einen `Value` aus dieser Maschine
     /// haelt, haelt danach ein LEERES Objekt. Das ist sicher (der Speicher
     /// lebt, solange der `Rc` lebt), aber es ist nicht mehr dasselbe Objekt.
+    /// Von den Wurzeln aus zaehlen, was erreichbar ist.
+    ///
+    /// **Der Gang, den `teardown` schon laeuft — nur zaehlend statt
+    /// abbauend.** `Rc` sammelt keine Ringe ein (`value.rs` sagt es im Kopf),
+    /// und Reacts Fiberbaum IST einer: `return`, `child`, `sibling`,
+    /// `alternate` zeigen aufeinander. Die Frage, die vor jedem Sammler
+    /// steht, ist deshalb nicht „wieviel haelt die Seite", sondern „wieviel
+    /// davon haelt SIE noch, und wieviel haelt nur sich selbst".
+    ///
+    /// Die Wurzeln sind ALLE, die der Interpreter hat — nicht nur die des
+    /// Realms: ein Zeitgeber, ein Beobachter, ein offener `fetch` und jeder
+    /// Behandler am Baum halten genauso. Wer eine auslaesst, zaehlt
+    /// lebendigen Bestand als Muell.
+    pub fn heap_census(&self) -> Census {
+        let (seen, envs, props) = self.walk_roots();
+        Census {
+            reachable: seen.len(),
+            envs,
+            props,
+            live: {
+                #[cfg(feature = "heap-census")]
+                { unsafe { (&raw const super::value::LIVE_OBJECTS).read() } }
+                #[cfg(not(feature = "heap-census"))]
+                { 0 }
+            },
+        }
+    }
+
+    /// Nur die Markierung — was `collect_cycles` behalten muss.
+    #[cfg(feature = "heap-census")]
+    fn mark_reachable(&self) -> HashSet<usize> { self.walk_roots().0 }
+
+    /// Der Gang selbst: von allen Wurzeln aus, ohne etwas anzufassen.
+    fn walk_roots(&self) -> (HashSet<usize>, usize, usize) {
+        fn add(v: &Value, objs: &mut Vec<Gc>) {
+            if let Value::Obj(o) = v { objs.push(o.clone()); }
+        }
+        let mut objs: Vec<Gc> = alloc::vec![self.realm.global.clone()];
+        objs.extend(self.realm.roots());
+        let mut env_stack: Vec<Rc<RefCell<Env>>> = alloc::vec![self.realm.global_env.clone()];
+
+        add(&self.history_state, &mut objs);
+        for v in self.sym_registry.values() { add(v, &mut objs); }
+        for (_, v) in &self.custom { add(v, &mut objs); }
+        for (_, (_, v)) in &self.templates { add(v, &mut objs); }
+        objs.extend(self.pending_rejections.iter().cloned());
+        objs.extend(self.socket_objs.values().cloned());
+        for o in &self.observers { objs.push(o.js.clone()); add(&o.cb, &mut objs); }
+        for o in &self.resize_obs { objs.push(o.js.clone()); add(&o.cb, &mut objs); }
+        for o in &self.inter_obs { objs.push(o.js.clone()); add(&o.cb, &mut objs); }
+        for t in &self.timers {
+            add(&t.cb, &mut objs);
+            for a in &t.args { add(a, &mut objs); }
+        }
+        for j in &self.jobs {
+            match j {
+                super::promise::Job::React { r, arg, .. } => {
+                    if let Some(h) = &r.handler { add(h, &mut objs); }
+                    objs.push(r.derived.clone());
+                    if let Some((a, b)) = &r.cap { add(a, &mut objs); add(b, &mut objs); }
+                    add(arg, &mut objs);
+                }
+                super::promise::Job::Adopt { thenable, then, target } => {
+                    add(thenable, &mut objs); add(then, &mut objs); objs.push(target.clone());
+                }
+            }
+        }
+        for (_, w) in &self.fetch_waiting {
+            match w {
+                super::fetch::Waiter::Promise(g) | super::fetch::Waiter::Xhr(g) =>
+                    objs.push(g.clone()),
+            }
+        }
+        for m in self.modules.values() { env_stack.push(m.borrow().env.clone()); }
+        // **Der Baum haelt mit.** Jede Huelle, jeder Behandler und jeder
+        // `on…`-Wert ist eine Wurzel — und genau daran haengt bei einer
+        // Anwendung der groesste Teil.
+        if let Some(d) = &self.doc {
+            for n in &d.nodes {
+                if let Some(g) = &n.js { objs.push(g.clone()); }
+                for (_, v) in &n.listeners { add(v, &mut objs); }
+                for (_, v) in &n.handlers { add(v, &mut objs); }
+            }
+        }
+
+        let mut seen: HashSet<usize> = HashSet::new();
+        let mut envs: HashSet<usize> = HashSet::new();
+        let mut props = 0usize;
+        while let Some(o) = objs.pop() {
+            if !seen.insert(Rc::as_ptr(&o) as usize) { continue }
+            let b = o.borrow();
+            if let Some(p) = &b.proto { objs.push(p.clone()); }
+            for k in b.own_keys() {
+                props += 1;
+                let Some(pr) = b.get_own(&k) else { continue };
+                for v in [&pr.value, &pr.get, &pr.set].into_iter().flatten() {
+                    add(v, &mut objs);
+                }
+            }
+            match &b.kind {
+                ObjKind::Function(d) => {
+                    env_stack.push(d.env.clone());
+                    if let Some(Value::Obj(x)) = &d.this_val { objs.push(x.clone()); }
+                    if let Some(h) = &d.home_object { objs.push(h.clone()); }
+                }
+                ObjKind::Generator(g) => g.roots(&mut objs, &mut env_stack),
+                ObjKind::Bound { target, this_val, args } => {
+                    objs.push(target.clone());
+                    add(this_val, &mut objs);
+                    for a in args { add(a, &mut objs); }
+                }
+                // **Ein Versprechen haelt seine Behandler.** `teardown` laesst
+                // sie aus; fuer den Zensus waeren sie sonst Muell, obwohl sie
+                // gebraucht werden.
+                ObjKind::Promise(d) => {
+                    let d = d.borrow();
+                    for r in d.on_ok.iter().chain(d.on_err.iter()) {
+                        if let Some(h) = &r.handler { add(h, &mut objs); }
+                        objs.push(r.derived.clone());
+                        if let Some((a, c)) = &r.cap { add(a, &mut objs); add(c, &mut objs); }
+                    }
+                }
+                ObjKind::Proxy(c) => {
+                    if let Some((t, h)) = c.borrow().as_ref() {
+                        objs.push(t.clone()); objs.push(h.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        while let Some(e) = env_stack.pop() {
+            if !envs.insert(Rc::as_ptr(&e) as usize) { continue }
+            let b = e.borrow();
+            if let Some(p) = &b.parent { env_stack.push(p.clone()); }
+            for v in b.vars.values() {
+                if let Value::Obj(x) = &v.value {
+                    if seen.insert(Rc::as_ptr(x) as usize) { objs.push(x.clone()); }
+                }
+            }
+            // Was ueber die Bindungen dazukam, muss noch durch den
+            // Objektgang — sonst fehlen dessen Umgebungen.
+            while let Some(o) = objs.pop() {
+                let b2 = o.borrow();
+                for k in b2.own_keys() {
+                    props += 1;
+                    let Some(pr) = b2.get_own(&k) else { continue };
+                    for v in [&pr.value, &pr.get, &pr.set].into_iter().flatten() {
+                        if let Value::Obj(x) = v {
+                            if seen.insert(Rc::as_ptr(x) as usize) { objs.push(x.clone()); }
+                        }
+                    }
+                }
+                if let Some(p) = &b2.proto {
+                    if seen.insert(Rc::as_ptr(p) as usize) { objs.push(p.clone()); }
+                }
+                if let ObjKind::Function(d) = &b2.kind { env_stack.push(d.env.clone()); }
+            }
+        }
+        (seen, envs.len(), props)
+    }
+
+    /// Die Ringe brechen, die von keiner Wurzel aus zu erreichen sind.
+    ///
+    /// **Markieren und kehren, mit `Rc` als Kehrblech.** Der Gang ist derselbe
+    /// wie in `heap_census`; was er nicht gefunden hat, wird geleert — Werte
+    /// weg, Prototyp weg, Art auf `Plain`. Damit zeigt kein Ring mehr auf sich
+    /// selbst, und der Zaehler kommt von allein auf null.
+    ///
+    /// Gekehrt wird ueber `value::ALL_OBJECTS`: **ohne Verzeichnis kann
+    /// niemand kehren** — ein Sammler muss aufzaehlen koennen, was es gibt.
+    ///
+    /// Liefert `(geleert, uebrig)`.
+    ///
+    /// ⚠ Noch eine MESSUNG, kein Sammler im Betrieb: wer danach noch einen
+    /// `Value` aus einem geleerten Objekt haelt, haelt ein leeres. Dieselbe
+    /// Warnung wie bei `teardown`, und derselbe Grund, sie ernst zu nehmen.
+    #[cfg(feature = "heap-census")]
+    pub fn collect_cycles(&mut self) -> (usize, usize) {
+        let keep = self.mark_reachable();
+        let dead: alloc::vec::Vec<Gc> = unsafe {
+            (&mut *(&raw mut super::value::ALL_OBJECTS)).iter()
+                .filter_map(|w| w.upgrade())
+                .filter(|g| !keep.contains(&(Rc::as_ptr(g) as usize)))
+                .collect()
+        };
+        let n = dead.len();
+        for o in &dead {
+            let mut b = o.borrow_mut();
+            b.clear_props();
+            b.proto = None;
+            b.kind = ObjKind::Plain;
+        }
+        drop(dead);
+        unsafe {
+            let all = &mut *(&raw mut super::value::ALL_OBJECTS);
+            all.retain(|w| w.strong_count() > 0);
+            (n, all.len())
+        }
+    }
+
     fn teardown(&mut self) {
         // Die Vorlagen-Gegenstaende haengen an keiner Wurzel — der Gang unten
         // findet sie nicht. Sie zeigen nur auf Zeichenketten und auf

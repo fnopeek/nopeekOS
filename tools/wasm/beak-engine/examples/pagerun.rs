@@ -294,8 +294,14 @@ Beobachter={}/{} Kekse={} rss={} MB",
                 sess.interp.cookies.len(),
                 rss_mb());
             use std::sync::atomic::Ordering::Relaxed;
-            println!("          Halde LEBEND {} MB, Spitze {} MB",
-                LIVE.load(Relaxed) / 1048576, LIVE_PEAK.load(Relaxed) / 1048576);
+            let c = sess.interp.heap_census();
+            println!("          Halde LEBEND {} MB, Spitze {} MB · Zensus: {} von {} Objekten \
+erreichbar ({} Umgebungen, {} Eigenschaften){}",
+                LIVE.load(Relaxed) / 1048576, LIVE_PEAK.load(Relaxed) / 1048576,
+                c.reachable, c.live, c.envs, c.props,
+                if c.live > c.reachable {
+                    format!(" — {} in Ringen", c.live - c.reachable)
+                } else { String::new() });
         }
         // **Erst bedienen, dann die Uhr laufen lassen.** Wer wartet, darf die
         // Zeitgeber nicht vorziehen — sonst faellt webpacks
@@ -388,6 +394,23 @@ Beobachter={}/{} Kekse={} rss={} MB",
             Some(e) => { let mut t = String::new(); raw_text(e, &mut t); println!("{t}"); }
             None => println!("TEXT: kein Element mit id={id}"),
         }
+    }
+    // `SWEEP=1`: die unerreichbaren Ringe brechen und nachmessen. Die Zahl,
+    // die sagt, was ein Sammler wirklich braechte — alles davor ist eine
+    // Schaetzung ueber Objektzahlen.
+    #[cfg(feature = "heap-census")]
+    if std::env::var("SWEEP").is_ok() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let before = LIVE.load(Relaxed);
+        let c = sess.interp.heap_census();
+        let (dead, left) = sess.interp.collect_cycles();
+        let after = LIVE.load(Relaxed);
+        println!("\n── Ringe gebrochen ──");
+        println!("  vorher:  {} MB, {} Objekte ({} erreichbar)", before / 1048576, c.live, c.reachable);
+        println!("  geleert: {dead} Objekte, danach {left} im Verzeichnis");
+        println!("  nachher: {} MB — {} MB zurueck ({} %)",
+                 after / 1048576, (before - after) / 1048576,
+                 if before > 0 { (before - after) * 100 / before } else { 0 });
     }
     if let Ok(want) = std::env::var("SUBMIT") {
         let dom = sess.interp.doc.as_mut().map(|d| d.to_dom());
