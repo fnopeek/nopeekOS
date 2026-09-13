@@ -1119,6 +1119,16 @@ pub struct ComputedStyle {
     /// parts — but it never enters the box model: no layout code may read it.
     pub outline: BorderSide,
     pub outline_offset: f32,
+    /// Hat die SEITE ueber den Umriss etwas gesagt?
+    ///
+    /// **Der Unterschied zwischen „kein Umriss" und „ich will keinen" ist der
+    /// ganze Punkt.** Ein Browser malt den Fokusring als `outline` und laesst
+    /// die Seite ihn mit `outline: none` abschalten. beak kennt `:focus` in
+    /// der Kaskade nicht, kann die UA-Regel also nicht dort hinschreiben —
+    /// aber es kann merken, ob die Seite die Eigenschaft ueberhaupt in die
+    /// Hand genommen hat. Hat sie das, gilt ihr Wort; hat sie es nicht, malt
+    /// beak seinen eigenen Ring.
+    pub outline_set: bool,
     /// `accent-color` (css-ui-4 §5.1) — die Farbe, mit der ein Kaestchen, ein
     /// Radioknopf, ein Schieber und ein Fortschrittsbalken gemalt werden.
     ///
@@ -1413,6 +1423,7 @@ impl ComputedStyle {
             border_left: BorderSide::default(),
             outline: BorderSide::default(),
             outline_offset: 0.0,
+            outline_set: false,
             position: Position::Static,
             top: Len::Auto,
             right: Len::Auto,
@@ -1656,6 +1667,7 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         // Not inherited: an outline belongs to the element that asked for it.
         outline: BorderSide::default(),
         outline_offset: 0.0,
+        outline_set: false,
         position: Position::Static,
         top: Len::Auto,
         right: Len::Auto,
@@ -3867,19 +3879,24 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         // `outline` reuses the border shorthand grammar (width || style ||
         // colour) — css-ui-4 §3.5 defines it that way, minus `outline-style:
         // auto`, which is the UA's own focus ring and not a value we can draw.
-        Prop::Outline => s.outline = parse_border_shorthand(&v, u, theme),
+        Prop::Outline => { s.outline = parse_border_shorthand(&v, u, theme); s.outline_set = true; }
         Prop::OutlineWidth => {
+            s.outline_set = true;
             if let Some(w) = border_width_kw(v.trim(), s.units()) {
                 s.outline.set_spec_width(w);
             }
         }
         // `auto` is a UA-defined ring; treat it as `solid` so a page asking for
         // a focus ring gets one instead of nothing.
-        Prop::OutlineStyle => s.outline.set_style(match v.trim() {
-            "auto" => "solid",
-            other => other,
-        }),
+        Prop::OutlineStyle => {
+            s.outline_set = true;
+            s.outline.set_style(match v.trim() {
+                "auto" => "solid",
+                other => other,
+            });
+        }
         Prop::OutlineColor => {
+            s.outline_set = true;
             // `invert` has no equivalent here (we do not read back pixels);
             // currentColor is the honest approximation and stays visible.
             if v.trim() != "invert" {
@@ -6461,6 +6478,13 @@ mod size_probe {
         // den senkrechten `margin`s. Der Platz ist es wert — ohne sie fielen
         // ALLE VIER Polsterungen in Prozent auf null, und `padding-top: 56.25%`
         // ist die Art, wie das Web ein 16:9-Kaestchen reserviert.
-        assert_eq!(core::mem::size_of::<super::ComputedStyle>(), 1496);
+        //
+        // 1496 -> 1504: `outline_set`. EIN bool, und es kostet acht Bytes,
+        // weil es hinter dem letzten `f32` keine Luecke mehr gibt. Der Platz
+        // ist es wert: ohne ihn kann beak „die Seite will keinen Fokusring"
+        // nicht von „die Seite hat nichts gesagt" unterscheiden, und dann
+        // faerbt der Fokus den Rahmen der Seite um — auf DuckDuckGos
+        // Suchfeld sah das aus wie ein Fehler und war einer.
+        assert_eq!(core::mem::size_of::<super::ComputedStyle>(), 1504);
     }
 }
