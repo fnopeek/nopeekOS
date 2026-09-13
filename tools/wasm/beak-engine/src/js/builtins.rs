@@ -364,7 +364,8 @@ pub fn make_realm() -> Realm {
     def(&array_proto, "indexOf", |i, this, a| {
         let target = a.first().cloned().unwrap_or(Value::Undefined);
         let n = array_len(i, &this)? as usize;
-        for k in 0..n {
+        let start = arr_from(i, a.get(1), n, 0.0)?;
+        for k in start..n {
             i.tick()?;
             let key = num_to_string(k as f64);
             // Ein LOCH ist kein `undefined`: `new Array(3).indexOf(undefined)`
@@ -591,7 +592,8 @@ pub fn make_realm() -> Realm {
     def(&array_proto, "includes", |i, this, a| {
         let target = a.first().cloned().unwrap_or(Value::Undefined);
         let n = array_len(i, &this)? as usize;
-        for k in 0..n {
+        let start = arr_from(i, a.get(1), n, 0.0)?;
+        for k in start..n {
             i.tick()?;
             let v = i.get(&this, &num_to_string(k as f64))?;
             if v.same_value(&target) || v.strict_eq(&target) { return Ok(Value::Bool(true)); }
@@ -601,7 +603,20 @@ pub fn make_realm() -> Realm {
     def(&array_proto, "lastIndexOf", |i, this, a| {
         let target = a.first().cloned().unwrap_or(Value::Undefined);
         let n = array_len(i, &this)? as usize;
-        for k in (0..n).rev() {
+        // Ohne Stelle ist es das letzte Element; eine negative zaehlt vom
+        // Ende, und was davor liegt, gibt es nicht (ES 23.1.3.20).
+        let last = match a.get(1) {
+            None | Some(Value::Undefined) => n as i64 - 1,
+            Some(v) => {
+                let x = super::value::to_integer(i.to_number(v)?);
+                if x.is_nan() { -1 }
+                else if x >= 0.0 { (x as i64).min(n as i64 - 1) }
+                else if x < -(n as f64) { -1 }
+                else { n as i64 + x as i64 }
+            }
+        };
+        if last < 0 { return Ok(Value::Num(-1.0)) }
+        for k in (0..=last as usize).rev() {
             i.tick()?;
             let v = i.get(&this, &num_to_string(k as f64))?;
             if v.strict_eq(&target) { return Ok(Value::Num(k as f64)); }
@@ -768,16 +783,60 @@ pub fn make_realm() -> Realm {
         let n = to_integer(i.to_number(a.first().unwrap_or(&Value::Num(0.0)))?) as usize;
         Ok(match s.chars().nth(n) { Some(c) => Value::Num(c as u32 as f64), None => Value::Num(f64::NAN) })
     }, 1, fp);
+    /// Eine Zeichenposition, geklemmt auf `[0, len]`.
+    fn clamp_chars(n: f64, len: usize) -> usize {
+        if n.is_nan() || n < 0.0 { 0 } else if n >= len as f64 { len } else { n as usize }
+    }
+    /// Der BYTE-Versatz der `n`-ten Zeichenstelle. beak rechnet in Zeichen,
+    /// Rust schneidet in Bytes — dazwischen gehoert genau eine Umrechnung.
+    fn byte_of(s: &str, n: usize) -> usize {
+        s.char_indices().nth(n).map(|(b, _)| b).unwrap_or(s.len())
+    }
+    /// Der Byte-Versatz, ab dem eine Zeichenkettensuche anfangen soll.
+    fn str_start(i: &mut Interp, s: &str, v: Option<&Value>) -> C<usize> {
+        let len = s.chars().count();
+        let n = match v {
+            None | Some(Value::Undefined) => 0.0,
+            Some(v) => super::value::to_integer(i.to_number(v)?),
+        };
+        Ok(byte_of(s, clamp_chars(n, len)))
+    }
+    /// Der Startindex einer Feldsuche: eine negative Stelle zaehlt vom Ende
+    /// (ES 23.1.3.17), und was davor liegt, ist die Null.
+    fn arr_from(i: &mut Interp, v: Option<&Value>, n: usize, dflt: f64) -> C<usize> {
+        let x = match v {
+            None | Some(Value::Undefined) => dflt,
+            Some(v) => super::value::to_integer(i.to_number(v)?),
+        };
+        Ok(if x.is_nan() || x < -(n as f64) { 0 }
+           else if x < 0.0 { (n as f64 + x) as usize }
+           else if x >= n as f64 { n }
+           else { x as usize })
+    }
+
+    // **Die Startstelle ist kein Beiwerk — sie ist die Schleife.**
+    // `while ((i = s.indexOf(x, i + 1)) >= 0)` ist die Art, wie jeder
+    // Zeichenketten-Laeufer im Web ein zweites Vorkommen sucht. Wer den
+    // zweiten Parameter verwirft, gibt IMMER das erste zurueck, und die
+    // Schleife laeuft fuer immer. Gefunden 2026-09-13 an DuckDuckGos
+    // Ergebnisseite: `balanced-match` sucht so seine Klammerpaare, haengte
+    // 27,6 Millionen Eintraege in ein Array und riss beak mit einer
+    // Allokator-Panik ins Aus.
     def(&string_proto, "indexOf", |i, this, a| {
         let s = this_string(i, &this)?;
         let t = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-        Ok(Value::Num(match s.find(&*t) {
-            Some(b) => s[..b].chars().count() as f64, None => -1.0 }))
+        let b0 = str_start(i, &s, a.get(1))?;
+        Ok(Value::Num(match s[b0..].find(&*t) {
+            Some(b) => s[..b0 + b].chars().count() as f64, None => -1.0 }))
     }, 1, fp);
     def(&string_proto, "includes", |i, this, a| {
         let s = this_string(i, &this)?;
+        if matches!(a.first(), Some(Value::Obj(o)) if super::regexp::compiled(&Value::Obj(o.clone())).is_some()) {
+            return i.type_err("String.prototype.includes: das Argument darf kein RegExp sein");
+        }
         let t = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-        Ok(Value::Bool(s.contains(&*t)))
+        let b0 = str_start(i, &s, a.get(1))?;
+        Ok(Value::Bool(s[b0..].contains(&*t)))
     }, 1, fp);
     def(&string_proto, "split", |i, this, a| {
         let s = this_string(i, &this)?;
@@ -856,7 +915,18 @@ pub fn make_realm() -> Realm {
     def(&string_proto, "lastIndexOf", |i, t, a| {
         let s = this_string(i, &t)?;
         let n = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-        Ok(Value::Num(match s.rfind(&*n) { Some(b) => s[..b].chars().count() as f64, None => -1.0 }))
+        // Ohne Stelle — und bei `NaN` — gilt das ENDE (ES 22.1.3.10): der
+        // Treffer darf ueber die Stelle hinausragen, nur ANFANGEN muss er
+        // davor.
+        let len = s.chars().count();
+        let end = match a.get(1) {
+            None | Some(Value::Undefined) => len,
+            Some(v) => { let x = i.to_number(v)?;
+                         if x.is_nan() { len } else { clamp_chars(super::value::to_integer(x), len) } }
+        };
+        let b_end = byte_of(&s, end);
+        let hit = s.match_indices(&*n).map(|(b, _)| b).filter(|b| *b <= b_end).last();
+        Ok(Value::Num(match hit { Some(b) => s[..b].chars().count() as f64, None => -1.0 }))
     }, 1, fp);
     def(&string_proto, "at", |i, t, a| {
         let s = this_string(i, &t)?;

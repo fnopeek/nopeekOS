@@ -80,12 +80,45 @@ fn host_random(out: &mut [u8]) -> bool {
     }
 }
 
+/// Ein Allokator, der GROSSE Anforderungen meldet — mit Rueckwaertsspur.
+///
+/// Ein Leck sieht man am RSS, aber nicht, WER es anfordert: ein Abtastprofil
+/// zeigt Rechenzeit, und eine einzige Allokation von 1,8 GB kostet keine.
+struct Loud;
+static LOUD_LIMIT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
+unsafe impl std::alloc::GlobalAlloc for Loud {
+    unsafe fn alloc(&self, l: std::alloc::Layout) -> *mut u8 {
+        if l.size() >= LOUD_LIMIT.load(std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("\n=== ALLOC {} B ===\n{}", l.size(), std::backtrace::Backtrace::force_capture());
+        }
+        unsafe { std::alloc::System.alloc(l) }
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: std::alloc::Layout) { unsafe { std::alloc::System.dealloc(p, l) } }
+    unsafe fn realloc(&self, p: *mut u8, l: std::alloc::Layout, n: usize) -> *mut u8 {
+        if n >= LOUD_LIMIT.load(std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("\n=== REALLOC {} B ===\n{}", n, std::backtrace::Backtrace::force_capture());
+        }
+        unsafe { std::alloc::System.realloc(p, l, n) }
+    }
+}
+#[global_allocator]
+static A: Loud = Loud;
+
 static mut DEADLINE: std::time::Instant = unsafe { core::mem::zeroed() };
 static mut T0: Option<std::time::Instant> = None;
 
 /// Die ECHTE Uhr fuer die Probe. Ohne sie ist `performance.now()` ein
 /// Aufrufzaehler, und dann misst das Werkzeug eine andere Plattform als das
 /// Geraet ([[feedback_the_test_path_must_be_the_real_path]]).
+/// Was der Prozess gerade belegt — die einzige Zahl, die einen Leck-Verdacht
+/// bestaetigt oder ausraeumt.
+fn rss_mb() -> u64 {
+    std::fs::read_to_string("/proc/self/status").ok()
+        .and_then(|s| s.lines().find(|l| l.starts_with("VmRSS:"))
+            .and_then(|l| l.split_whitespace().nth(1).and_then(|v| v.parse::<u64>().ok())))
+        .map(|kb| kb / 1024).unwrap_or(0)
+}
+
 fn host_clock() -> f64 {
     unsafe { (&raw const T0).read() }
         .map(|t| t.elapsed().as_secs_f64() * 1000.0)
@@ -93,6 +126,11 @@ fn host_clock() -> f64 {
 }
 
 fn main() {
+    if let Ok(v) = std::env::var("LOUD") {
+        if let Ok(n) = v.parse::<usize>() {
+            LOUD_LIMIT.store(n, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
     unsafe { T0 = Some(std::time::Instant::now()) };
     beak_engine::js::random::set_source(host_random);
     let html_path = std::env::args().nth(1).unwrap_or_default();
@@ -146,7 +184,7 @@ fn main() {
     if let Ok(d) = std::env::var("STEPS") {
         if let Ok(n) = d.parse() { sess.interp.max_steps = n; }
     }
-    sess.interp.clock = Some(host_clock);
+    if std::env::var("NOCLOCK").is_err() { sess.interp.clock = Some(host_clock); }
     if let Ok(u) = std::env::var("URL") { sess.interp.set_location(&u); }
     // `BUDGET=<sekunden>`: dieselbe Frist, die der Wirt am Geraet stellt.
     // Ohne sie laeuft eine Seite host-seitig unbegrenzt, und „haengt" ist
@@ -219,7 +257,23 @@ fn main() {
     let (mut sheets_ok, mut sheets_bad) = (0usize, 0usize);
     let mut fetches = 0usize;
     let mut dynjs = 0usize;
+    let stats = std::env::var("STATS").is_ok();
+    let mut round = 0usize;
     for _ in 0..64 {
+        round += 1;
+        if stats {
+            let d = sess.interp.doc.as_ref();
+            println!("[stats {round:2}] Knoten={} Zeitgeber={} Jobs={} Konsole={} Module={} \
+Beobachter={}/{} Kekse={} rss={} MB",
+                d.map_or(0, |d| d.nodes.len()),
+                sess.interp.timers.len(),
+                sess.interp.jobs.len(),
+                sess.interp.console.len(),
+                sess.interp.modules.len(),
+                sess.interp.resize_obs.len(), sess.interp.inter_obs.len(),
+                sess.interp.cookies.len(),
+                rss_mb());
+        }
         // **Erst bedienen, dann die Uhr laufen lassen.** Wer wartet, darf die
         // Zeitgeber nicht vorziehen — sonst faellt webpacks
         // Zeitueberschreitung vor der Zustellung des Stuecks, auf das sie
