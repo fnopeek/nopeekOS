@@ -48,7 +48,59 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-12 · beak 0.174.0 · Kernel 0.339.0** (Rest: `git log`)
+**Stand 2026-09-13 · beak 0.175.0 · Kernel 0.339.0** (Rest: `git log`)
+
+**0.175.0: `Reflect.construct` verwarf sein Neuziel — und React rendert
+seither nichts.** Florian: „duckduckgo.com beim suchen klick passiert
+nichts". Der Klick war es nie: das Suchfeld ist ein `<textarea name=q>` in
+einem gewoehnlichen GET-Formular, und beak schickt es korrekt ab. Leer war
+die Seite DAHINTER. **Jede von Babel oder SWC uebersetzte `class X extends Y`
+ruft `Reflect.construct(Y, args, X)`** — nur so bekommt das frische Objekt
+`X.prototype`. Das dritte Argument wurde weggeworfen, also landete jede
+React-Klassenkomponente an der OBERklasse: `setState` ja, `render` nein.
+React raeumt daraufhin das servergerenderte HTML weg und rendert nichts —
+**ohne eine einzige Fehlerzeile**. Die Uebersetzer pruefen vorher mit
+`Reflect.construct(Boolean, [], function(){})`, ob es den Weg gibt; beak
+sagte ja und tat es dann nicht. test262 exec **82,74 → 82,76 %**.
+
+**Sichtbar gemacht hat es `reportError`** — eine neue Zeile. React 19 meldet
+jeden unabgefangenen Renderfehler zuerst darueber; ohne den Namen faellt es
+auf `ErrorEvent` (gibt es auch nicht) und am Ende auf `console.error`, wo
+nichts ankam. Dazu nennt **`x is not a function` jetzt den EMPFAENGER und
+seine Bauart** — in einem minifizierten Buendel sagt „render is not a
+function" nichts, „auf einer Instanz von k … | Bauart: constructor,
+isReactComponent, setState, forceUpdate" alles.
+
+**Sechs weitere echte Fehler auf demselben Weg:** (1) **ein Regex direkt
+nach einem Anweisungskopf war ein SyntaxError** — nach `)` las der Lexer `/`
+als Division, auch wenn die Klammer den Kopf von `if`/`for`/`while`/`with`
+schliesst; `for (const [k,v] of m) /re/.test(k)` stand in DDGs Hauptbuendel
+und liess 1,26 MB ausfallen · (2) **`addEventListener` OHNE Empfaenger warf**
+(WebIDL §3.7.4: kein `this` heisst das globale Objekt; `node_of` bekommt die
+Regel NICHT, `window` ist kein `Node`) · (3) **`nomodule`-Skripte liefen
+mit** — zwei Fassungen derselben Bibliothek um denselben Namen, auf der
+Startseite ein core-js-Bundle, das beaks Zusagen ERSETZT · (4) **die
+Zeitgeber ignorierten die Verzoegerung vollstaendig**, `clearTimeout` tat
+nichts, Argumente dahinter fielen weg, `setInterval` lief einmal, `rAF`
+bekam keinen Zeitstempel; damit lief `setTimeout(f,120000)` VOR
+`setTimeout(g,0)` — und genau darauf steht webpacks Nachlader. Dazu war
+**`performance.now()` ein Aufrufzaehler**, an dem Reacts Ablaufplaner misst,
+ob er das Bild abgeben soll · (5) **ein per Skript eingehaengtes
+`<script src>` wurde nie geholt** — derselbe Weg wie `pending_sheets`, nur
+mit `src`, nur einmal und kein Modul · (6) **der Deckel des Regex-Motors
+wurde je STARTSTELLE zurueckgesetzt** (300 000 Zeichen × 400 000 Schritte ist
+keiner), und ein mit `^` verankertes Muster wurde an jeder Stelle versucht.
+
+**Neu:** `DOMParser` (daran fiel DDGs Trefferliste aus), `CSS.supports` +
+`CSS.escape` — geantwortet aus DERSELBEN Funktion, die `@supports` im Blatt
+auswertet. **Eine fehlende Merkmalspruefung ist kein neutraler Zustand,
+sondern ein NEIN:** ohne `CSS` laedt die Seite `css-vars-ponyfill` nach und
+laesst es 1,1 MB Stilblaetter nachbauen.
+
+**Offen und benannt:** die DDG-Startseite rendert jetzt wirklich und braucht
+dafuer MINUTEN — der Motor ist der Engpass (30 % der Zeit in der
+Namenstabelle des Objektmodells, 20 % in der Speicherverwaltung), gemessen
+mit `<tools>/prof/`. Und `new.target` ist weiterhin `undefined`.
 
 **0.174.0 / Kernel 0.339.0: der Socket stand, die Antwort kam nicht an.**
 Florians Log: `POST 200`, dann `Unhandled promise rejection: Timeout`, und
