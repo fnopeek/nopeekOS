@@ -684,6 +684,29 @@ impl CollData {
     }
 }
 
+/// Wieviele `Object` gerade LEBEN.
+///
+/// **Die Zahl, ohne die „erreichbar" nichts aussagt.** Ein Markierungsgang
+/// von den Wurzeln zaehlt, was zu FINDEN ist; erst der Vergleich mit dem
+/// Gesamtbestand sagt, wieviel davon in einem Ring liegt, den `Rc` nie
+/// aufloest. Nur mit `--features heap-census`, damit das ausgelieferte Modul
+/// keinen Zaehler je Objekt traegt.
+#[cfg(feature = "heap-census")]
+pub static mut LIVE_OBJECTS: usize = 0;
+
+#[inline(always)]
+fn census_born() {
+    #[cfg(feature = "heap-census")]
+    unsafe { LIVE_OBJECTS += 1 }
+}
+
+#[cfg(feature = "heap-census")]
+impl Drop for Object {
+    fn drop(&mut self) {
+        unsafe { LIVE_OBJECTS = LIVE_OBJECTS.saturating_sub(1) }
+    }
+}
+
 pub struct Object {
     props: HashMap<PropName, Prop>,
     /// Einfuegereihenfolge. JS gibt Eigenschaften in einer FESTGELEGTEN
@@ -698,9 +721,11 @@ pub struct Object {
 
 impl Object {
     pub fn new(proto: Option<Gc>) -> Object {
+        census_born();
         Object { props: HashMap::new(), order: Vec::new(), proto, kind: ObjKind::Plain, extensible: true }
     }
     pub fn with_kind(proto: Option<Gc>, kind: ObjKind) -> Object {
+        census_born();
         Object { props: HashMap::new(), order: Vec::new(), proto, kind, extensible: true }
     }
 
@@ -1005,9 +1030,46 @@ pub fn to_integer(n: f64) -> f64 {
     if n.is_nan() { 0.0 } else if n.is_infinite() { n } else { libm::trunc(n) }
 }
 
-pub fn new_obj(proto: Option<Gc>) -> Gc { Rc::new(RefCell::new(Object::new(proto))) }
+pub fn new_obj(proto: Option<Gc>) -> Gc { register(Rc::new(RefCell::new(Object::new(proto)))) }
 pub fn new_kind(proto: Option<Gc>, kind: ObjKind) -> Gc {
-    Rc::new(RefCell::new(Object::with_kind(proto, kind)))
+    register(Rc::new(RefCell::new(Object::with_kind(proto, kind))))
+}
+
+/// Jedes Objekt, das je gebaut wurde — als SCHWACHER Verweis.
+///
+/// **Ohne ein Verzeichnis kann niemand kehren.** Ein Sammler markiert von den
+/// Wurzeln aus und raeumt dann alles weg, was er nicht gefunden hat — und
+/// „alles" muss man aufzaehlen koennen. `Rc` kann das nicht; diese Liste
+/// schon. Sie haelt nichts fest (`Weak`), kostet also einen Zeiger je Objekt
+/// und ein Feld in der Liste.
+///
+/// Nur mit `--features heap-census`: das ausgelieferte Modul traegt sie
+/// nicht, solange es keinen Sammler gibt, der sie benutzt.
+#[cfg(feature = "heap-census")]
+pub static mut ALL_OBJECTS: alloc::vec::Vec<alloc::rc::Weak<RefCell<Object>>> =
+    alloc::vec::Vec::new();
+
+/// Ab welcher Laenge das Verzeichnis das naechste Mal aufgeraeumt wird.
+#[cfg(feature = "heap-census")]
+static mut NEXT_COMPACT: usize = 1024;
+
+#[inline(always)]
+fn register(g: Gc) -> Gc {
+    #[cfg(feature = "heap-census")]
+    unsafe {
+        let all = &mut *(&raw mut ALL_OBJECTS);
+        // **Verdoppelnd aufraeumen, nicht nach einem Verhaeltnis.** Ein Gang
+        // ueber die Liste ist O(n); ihn immer dann zu laufen, wenn sie
+        // doppelt so lang ist wie der Bestand, laeuft ihn bei einer Seite,
+        // die staendig Muell macht, fast bei jedem Objekt — und aus O(n) wird
+        // O(n²). Die Marke verdoppelt sich stattdessen nach jedem Gang.
+        if all.len() >= NEXT_COMPACT {
+            all.retain(|w| w.strong_count() > 0);
+            NEXT_COMPACT = (all.len() * 2).max(1024);
+        }
+        all.push(alloc::rc::Rc::downgrade(&g));
+    }
+    g
 }
 
 /// Damit `Box<dyn …>` nicht noetig ist, wenn ein natives Objekt gebaut wird.
