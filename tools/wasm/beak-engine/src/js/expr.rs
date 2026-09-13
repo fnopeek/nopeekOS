@@ -140,7 +140,7 @@ impl Interp {
                         let key = self.member_key2(prop, env)?;
                         let f = self.get(&base, &key)?;
                         if !self.is_callable(&f) {
-                            return Err(self.not_a_function(Some(&key)));
+                            return Err(self.not_a_function(Some(&key), Some(&base)));
                         }
                         (base, f)
                     }
@@ -406,7 +406,7 @@ impl Interp {
                 let key = self.member_key2(prop, env)?;
                 let f = self.get(&base, &key)?;
                 if !self.is_callable(&f) && !optional {
-                    return Err(self.not_a_function(Some(&key)));
+                    return Err(self.not_a_function(Some(&key), Some(&base)));
                 }
                 (base, f)
             }
@@ -435,13 +435,30 @@ impl Interp {
             return Err(self.not_a_function(match callee {
                 Expr::Ident(n) => Some(n.as_str()),
                 _ => None,
-            }));
+            }, Some(&this_val)));
         }
         self.call(&f, this_val, &a)
     }
 
     pub fn construct(&mut self, f: &Value, args: &[Value]) -> C<Value> {
         self.construct_on(f, Value::Undefined, args)
+    }
+
+    /// `new` mit einem eigenen NEUZIEL — der Fall von
+    /// `Reflect.construct(ziel, args, neuziel)`.
+    ///
+    /// **Das dritte Argument ist keine Feinheit, es ist die Vererbung.**
+    /// Jede von Babel oder SWC uebersetzte `class X extends Y` ruft im
+    /// Konstruktor `Reflect.construct(Y, args, X)` — nur so bekommt das
+    /// frische Objekt `X.prototype` statt `Y.prototype`. Wurde das Neuziel
+    /// verworfen, landete die Instanz an der OBERklasse: eine React-
+    /// Komponente hatte `setState`, aber kein `render`, und die ganze Seite
+    /// rendert daraufhin nichts — ohne eine einzige Fehlerzeile, weil formal
+    /// nichts schiefging. Die Uebersetzer pruefen vorher mit
+    /// `Reflect.construct(Boolean, [], function(){})`, ob es den Weg gibt;
+    /// beak sagte ja und tat es dann nicht.
+    pub fn construct_target(&mut self, f: &Value, args: &[Value], nt: &Value) -> C<Value> {
+        self.construct_full(f, Value::Undefined, args, Some(nt))
     }
 
     /// Wie `construct`, aber mit einem Empfaenger fuer den EINGEBAUTEN Fall.
@@ -451,21 +468,28 @@ impl Interp {
     /// Auskunft darueber, WAS gerade gebaut wird. Ein gewoehnliches `new`
     /// gibt `undefined` weiter, wie bisher.
     pub fn construct_on(&mut self, f: &Value, recv: Value, args: &[Value]) -> C<Value> {
+        self.construct_full(f, recv, args, None)
+    }
+
+    /// Der eine Weg, auf dem gebaut wird. `nt` ist das Neuziel, wenn es von
+    /// dem aufgerufenen Konstruktor abweicht (`Reflect.construct`).
+    fn construct_full(&mut self, f: &Value, recv: Value, args: &[Value], nt: Option<&Value>)
+        -> C<Value> {
         let Value::Obj(fo) = f else { return self.type_err("value is not a constructor") };
         // Die `construct`-Falle.
         if super::proxy::parts(fo).is_some() {
             return match super::proxy::trap(self, fo, "construct")? {
                 Some((fn_, hv, t)) => {
                     let arr = self.new_array(args.to_vec());
-                    let nt = f.clone();
-                    let r = self.call(&fn_, hv, &[t, arr, nt])?;
+                    let ntv = nt.cloned().unwrap_or_else(|| f.clone());
+                    let r = self.call(&fn_, hv, &[t, arr, ntv])?;
                     if !matches!(r, Value::Obj(_)) {
                         return self.type_err("construct trap did not return an object");
                     }
                     Ok(r)
                 }
                 None => { let t = super::proxy::target(self, fo)?;
-                          self.construct(&Value::Obj(t), args) }
+                          self.construct_full(&Value::Obj(t), Value::Undefined, args, nt) }
             };
         }
         // Ein nativer Konstruktor baut sein Objekt selbst; ein Pfeil ist keiner.
@@ -479,7 +503,10 @@ impl Interp {
             return r;
         }
         if !self.is_constructor(f) { return self.type_err("value is not a constructor"); }
-        let proto = match self.get(f, "prototype")? {
+        // Der Prototyp kommt vom NEUZIEL, nicht vom gerufenen Konstruktor.
+        // Ohne Neuziel sind beide dasselbe.
+        let proto_from = nt.unwrap_or(f).clone();
+        let proto = match self.get(&proto_from, "prototype")? {
             Value::Obj(p) => Some(p),
             _ => Some(self.realm.object_proto.clone()),
         };

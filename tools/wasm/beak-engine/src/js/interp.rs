@@ -470,6 +470,20 @@ pub struct NavRequest {
     pub reload: bool,
 }
 
+/// Ein angemeldeter Zeitgeber.
+///
+/// `interval` unterscheidet `setInterval` von `setTimeout`: nur ein Intervall
+/// meldet sich nach dem Lauf wieder an. `args` sind die Werte HINTER der
+/// Verzoegerung — `setTimeout(f, 0, a, b)` ruft `f(a, b)`, und Bibliotheken
+/// schreiben das.
+pub struct Timer {
+    pub(crate) id: u32,
+    pub(crate) cb: Value,
+    pub(crate) due: f64,
+    pub(crate) interval: Option<f64>,
+    pub(crate) args: alloc::vec::Vec<Value>,
+}
+
 pub struct Interp {
     pub realm: Realm,
     /// Die geholten ES-Module, nach AUFGELOESTER Adresse. Siehe `modules.rs`
@@ -487,6 +501,21 @@ pub struct Interp {
     /// oder `error` am `<link>`. Ohne diesen Weg wartet jede Seite, die ihr
     /// Blatt per Skript nachlaedt, fuer immer auf ein Ereignis, das nie kommt.
     pub pending_sheets: Vec<(u32, String)>,
+    /// Skripte, die ein SKRIPT eingehaengt hat und die noch geholt werden
+    /// muessen: `(Knoten, Adresse wie im Attribut)`.
+    ///
+    /// **Derselbe Weg wie `pending_sheets`, und aus demselben Grund.** Ein
+    /// `<script src=…>`, das per `appendChild` in die Seite kommt, ist keine
+    /// Randerscheinung: so laedt jeder code-geteilte Bundler seine Stuecke
+    /// nach (webpacks `__webpack_require__.l`), und so wartet Next.js auf
+    /// seine Route, BEVOR es ueberhaupt etwas rendert. Ohne Antwort steht
+    /// die Seite fuer immer — bei DuckDuckGo raeumte React das
+    /// servergerenderte HTML weg und rendert dann nichts mehr.
+    pub pending_scripts: Vec<(u32, String)>,
+    /// Welche Skriptknoten schon gelaufen sind. Die Spezifikation nennt es
+    /// das „already started"-Kennzeichen: ein Skript, das man noch einmal
+    /// einhaengt, laeuft NICHT noch einmal.
+    pub(crate) ran_scripts: Vec<u32>,
     /// Anfragen aus `fetch()`, deren Antwort noch aussteht. **Dasselbe Muster
     /// wie `pending_sheets`:** die Engine holt nichts, sie legt die Anfrage
     /// hin; der Wirt nimmt sie mit `take_pending_fetches`, laedt, und meldet
@@ -541,6 +570,18 @@ pub struct Interp {
     /// Eine Uhr, die nur steigt. Ersatz, bis beak die echte einreicht —
     /// `beak-engine` ist hostfrei und hat keine.
     pub fake_now: f64,
+    /// Die ECHTE Uhr des Wirts, in Millisekunden seit dem Seitenanfang.
+    ///
+    /// **Ohne sie ist `performance.now()` ein Aufrufzaehler**, und das ist
+    /// nicht bloss ungenau: Reacts Ablaufplaner fragt `now() - start >= 5`,
+    /// um zu entscheiden, ob er das Bild abgeben soll. Bei einem Zaehler
+    /// gibt er nach FUENF Fragen ab — er rechnet in Krumen weiter, statt in
+    /// Scheiben, und eine grosse Seite wird darueber nie fertig.
+    ///
+    /// Wie `deadline` ein Funktionszeiger: die Engine hat keine Uhr, der
+    /// Wirt hat eine. Fehlt sie, bleibt der steigende Zaehler — besser als
+    /// eine stehende Zahl, an der jede Zeitmessung null ergibt.
+    pub clock: Option<fn() -> f64>,
     /// Millisekunden seit der Epoche, wie sie der Wirt beim Sitzungsbeginn
     /// gesetzt hat. Die Engine selbst hat keine Uhr; ohne diesen Wert steht
     /// `Date.now()` bei 1970 — richtig, aber nutzlos.
@@ -755,9 +796,27 @@ pub struct Interp {
     /// der ganze Unterschied zwischen `Promise.resolve().then(f)` und
     /// `setTimeout(f, 0)`.
     pub jobs: alloc::collections::VecDeque<super::promise::Job>,
-    /// Angemeldete Zeitgeber-Rueckrufe. Noch laeuft niemand sie; sie zu HALTEN
-    /// kostet nichts und ist die Stelle, an der beaks Schleife ansetzt.
-    pub timers: Vec<Value>,
+    /// Angemeldete Zeitgeber. Noch laeuft niemand sie; sie zu HALTEN kostet
+    /// nichts und ist die Stelle, an der beaks Schleife ansetzt.
+    ///
+    /// **Die Verzoegerung ist keine Zierde.** Bis 0.174.0 stand hier ein
+    /// `Vec<Value>`: jeder Rueckruf lief in der Runde nach seiner Anmeldung,
+    /// in ANMELDEreihenfolge, und `clearTimeout` war ein Nichts. Damit lief
+    /// ein `setTimeout(f, 120000)` VOR einem `setTimeout(g, 0)` daneben —
+    /// und genau darauf steht webpacks Nachlader: er meldet einen Zeitgeber
+    /// als Zeitueberschreitung an und loescht ihn im `onload` des Stuecks.
+    /// Beides ging schief, also meldete jedes nachgeladene Stueck
+    /// „ChunkLoadError: timeout", obwohl es angekommen war.
+    pub timers: Vec<Timer>,
+    /// Die Uhr, an der die Zeitgeber haengen. Sie laeuft nicht von selbst:
+    /// ist nichts faellig und liegt noch etwas an, springt sie auf den
+    /// naechsten Termin. Damit stimmt die REIHENFOLGE immer, auch wenn der
+    /// Wirt keine Uhr einreicht — und die Reihenfolge ist das, woran echter
+    /// Code haengt.
+    pub(crate) vnow: f64,
+    /// Die naechste Kennung. Sie faengt bei 1 an, weil 0 in JavaScript
+    /// falsch ist und Seiten `if (id)` schreiben.
+    pub(crate) next_timer: u32,
     /// Was die Seite auf `console` geschrieben hat.
     ///
     /// Gesammelt statt weggeworfen: `beak-engine` hat keine Serienleitung,
@@ -861,10 +920,12 @@ impl Interp {
         Interp { realm, modules: HashMap::new(), module_fail: None, submits: Vec::new(),
                  deadline: None,
                  pending_sheets: Vec::new(),
+                 pending_scripts: Vec::new(),
+                 ran_scripts: Vec::new(),
                  pending_fetches: Vec::new(), fetch_waiting: Vec::new(),
                  aborted_fetches: Vec::new(), next_fetch_id: 1,
                  pending_rejections: Vec::new(), custom: Vec::new(), depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX,
-                 fake_now: 0.0, epoch_ms: 0.0, doc: None, next_sym: 0, sym_registry: HashMap::new(),
+                 fake_now: 0.0, clock: None, epoch_ms: 0.0, doc: None, next_sym: 0, sym_registry: HashMap::new(),
                  #[cfg(feature = "strict-probe")]
                  strict_probe: [0; STRICT_SITES],
                  cookies: String::new(), cookie_sets: Vec::new(), style_ctx: None,
@@ -882,7 +943,7 @@ impl Interp {
                  live_dom: core::cell::RefCell::new(None),
                  jobs: alloc::collections::VecDeque::new(),
                  rng: 0x2545_F491_4F6C_DD1D, media: None,
-                 timers: Vec::new(), native_new: false, last_match: None, console: Vec::new(), console_dropped: 0 }
+                 timers: Vec::new(), vnow: 0.0, next_timer: 1, native_new: false, last_match: None, console: Vec::new(), console_dropped: 0 }
     }
 
     /// Die angemeldeten Zeitgeber EINMAL durchlaufen.
@@ -909,14 +970,48 @@ impl Interp {
         // einem Ereignisbehandler liegen, bis zufaellig ein Zeitgeber faellig
         // wird: `run_timers` kaeme bei leerer Zeitgeberliste gar nicht dazu.
         super::promise::run_jobs(self);
-        let due = core::mem::take(&mut self.timers);
+        if self.timers.is_empty() { return 0 }
+        // Ist nichts faellig, springt die Uhr auf den naechsten Termin. Das
+        // ist keine echte Zeit — aber es ist die richtige REIHENFOLGE, und
+        // ein Rueckruf, den niemand mehr abbestellt, muss auch laufen.
+        //
+        // **Nicht, solange etwas unterwegs ist.** Wer auf eine Antwort
+        // wartet, darf die Uhr nicht vorstellen: webpack meldet neben jedem
+        // nachgeladenen Stueck einen Zeitgeber auf 120 SEKUNDEN an und
+        // loescht ihn im `onload`. Springt die Uhr, waehrend das Stueck noch
+        // geholt wird, faellt die Zeitueberschreitung VOR der Zustellung —
+        // und die Seite meldet einen Fehler fuer etwas, das ankommt.
+        let waiting = !self.pending_scripts.is_empty()
+            || !self.pending_sheets.is_empty()
+            || !self.pending_fetches.is_empty();
+        let first = self.timers.iter().map(|t| t.due).fold(f64::INFINITY, f64::min);
+        if !waiting && first > self.vnow { self.vnow = first; }
+        if self.timers.iter().all(|t| t.due > self.vnow) { return 0 }
+        let now = self.vnow;
+        let mut due: Vec<Timer> = Vec::new();
+        let mut keep: Vec<Timer> = Vec::new();
+        for t in core::mem::take(&mut self.timers) {
+            if t.due <= now { due.push(t) } else { keep.push(t) }
+        }
+        self.timers = keep;
+        // Gleicher Termin heisst: in der Reihenfolge der Anmeldung.
+        due.sort_by(|a, b| a.due.partial_cmp(&b.due).unwrap_or(core::cmp::Ordering::Equal)
+                            .then(a.id.cmp(&b.id)));
         let n = due.len();
-        for f in due {
+        for t in due {
+            // Ein `setInterval` meldet sich selbst wieder an — VOR dem Lauf,
+            // damit ein `clearInterval` im Rueckruf ihn auch erwischt.
+            if let Some(iv) = t.interval {
+                self.timers.push(Timer { id: t.id, cb: t.cb.clone(), due: now + iv.max(1.0),
+                                         interval: Some(iv), args: t.args.clone() });
+            }
+            let f = t.cb;
+            let args = t.args;
             // Ein Zeitgeber, der wirft, muss es SAGEN. Der Ausgang wurde hier
             // weggeworfen: ein Fehler in einem `setTimeout`-Rueckruf war
             // unsichtbar, und was danach nicht passierte, sah aus wie ein
             // fehlendes Merkmal — dieselbe Falle wie beim Ereignisbehandler.
-            if let Err(e) = self.call(&f, Value::Undefined, &[]) {
+            if let Err(e) = self.call(&f, Value::Undefined, &args) {
                 let msg = super::modules::describe(self, e);
                 self.console_push(alloc::format!("Fehler im Zeitgeber: {msg}"));
             }
@@ -1116,6 +1211,12 @@ impl Interp {
         core::mem::take(&mut self.pending_sheets)
     }
 
+    /// Was an eingehaengten Skripten geholt werden will. Der Wirt holt es ab
+    /// und meldet mit `dombind::script_done` zurueck.
+    pub fn take_pending_scripts(&mut self) -> Vec<(u32, String)> {
+        core::mem::take(&mut self.pending_scripts)
+    }
+
     /// Was `fetch()` losschicken will. Der Wirt holt es ab; die Liste ist
     /// danach leer.
     pub fn take_pending_fetches(&mut self) -> Vec<super::fetch::PendingFetch> {
@@ -1278,6 +1379,15 @@ impl Interp {
     /// zaehlen. Der heisse Pfad zahlt eine Maske und einen Sprung; der
     /// Aufruf selbst kommt alle 65 536 Schritte, das sind rund 60 ms.
     #[inline]
+    /// Millisekunden seit dem Seitenanfang — echt, wenn der Wirt eine Uhr
+    /// eingereicht hat, sonst der steigende Zaehler.
+    pub fn now_ms(&mut self) -> f64 {
+        match self.clock {
+            Some(f) => f(),
+            None => { self.fake_now += 1.0; self.fake_now }
+        }
+    }
+
     pub fn check_deadline(&mut self) -> C<()> {
         if let Some(f) = self.deadline {
             if !f() {
@@ -1306,10 +1416,46 @@ impl Interp {
     /// uebersetzbar wurden, wanderten zwei Korpusskripte auf die Maschine —
     /// und verloren dabei still ihren Namen in der Meldung. Die Prozentzahl
     /// hat das nicht gesehen, der Wandvergleich schon.
-    pub fn not_a_function(&mut self, name: Option<&str>) -> Abrupt {
+    /// `on` ist der EMPFAENGER, auf dem gesucht wurde. Der Name allein sagt
+    /// bei einem haeufigen Wort wie `render` nicht, WESSEN `render` fehlt —
+    /// und in einem minifizierten Buendel steht kein zweiter Hinweis
+    /// daneben ([[feedback_a_runtime_error_without_a_position_costs_an_hour]]).
+    pub fn not_a_function(&mut self, name: Option<&str>, on: Option<&Value>) -> Abrupt {
+        let where_ = match on {
+            Some(v @ Value::Obj(o)) => {
+                // Der Name der Bauart zuerst: „auf einer Instanz von Foo"
+                // sagt in einem minifizierten Buendel mehr als jede
+                // Eigenschaftsliste.
+                let ctor = self.get(v, "constructor").ok()
+                    .and_then(|c| self.get(&c, "name").ok())
+                    .and_then(|n| self.to_string(&n).ok())
+                    .map(|n| alloc::string::String::from(&*n))
+                    .filter(|n| !n.is_empty() && n != "Object");
+                let b = o.borrow();
+                let mut keys: alloc::vec::Vec<alloc::string::String> = b.own_keys().into_iter()
+                    .take(6).map(|k| alloc::string::String::from(&*k)).collect();
+                // Was die BAUART kann, sagt mehr als was die Instanz traegt:
+                // bei einer Komponente ohne `render` ist die Frage „welche".
+                if let Some(pr) = b.proto.clone() {
+                    let pk: alloc::vec::Vec<alloc::string::String> = pr.borrow().own_keys()
+                        .into_iter().take(6).map(|k| alloc::string::String::from(&*k)).collect();
+                    if !pk.is_empty() { keys.push(alloc::format!("| Bauart: {}", pk.join(","))); }
+                }
+                drop(b);
+                match (ctor, keys.is_empty()) {
+                    (Some(c), true) => alloc::format!(" (auf einer Instanz von {c})"),
+                    (Some(c), false) => alloc::format!(" (auf einer Instanz von {c} mit {})", keys.join(",")),
+                    (None, true) => alloc::string::String::from(" (auf einem Objekt ohne Eigenschaften)"),
+                    (None, false) => alloc::format!(" (auf einem Objekt mit {})", keys.join(",")),
+                }
+            }
+            Some(v) if !matches!(v, Value::Undefined) =>
+                alloc::format!(" (auf {})", v.type_of()),
+            _ => alloc::string::String::new(),
+        };
         match name {
-            Some(n) => self.throw_kind("TypeError", &alloc::format!("{n} is not a function")),
-            None => self.throw_kind("TypeError", "value is not a function"),
+            Some(n) => self.throw_kind("TypeError", &alloc::format!("{n} is not a function{where_}")),
+            None => self.throw_kind("TypeError", &alloc::format!("value is not a function{where_}")),
         }
     }
     pub fn range_err<T>(&mut self, msg: &str) -> C<T> { Err(self.throw_kind("RangeError", msg)) }

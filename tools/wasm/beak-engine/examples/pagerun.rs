@@ -45,6 +45,30 @@ fn serve_fetches(sess: &mut beak_engine::js::Session, dir: &str) -> usize {
     n
 }
 
+/// Die `<script src=…>`, die ein Skript eingehaengt hat — aus dem
+/// Spiegelverzeichnis bedient, wie der Wirt sie aus dem Netz bedient.
+///
+/// **Ohne diese Zeilen misst die Probe eine andere Plattform als das
+/// Geraet**: jeder code-geteilte Bundler laedt so nach, und ein Versprechen,
+/// das nie faellt, sieht host-seitig wie eine haengende Seite aus
+/// ([[feedback_the_test_path_must_be_the_real_path]]).
+fn serve_dyn_scripts(sess: &mut beak_engine::js::Session, dir: &str) -> usize {
+    let want = sess.interp.take_pending_scripts();
+    let mut n = 0;
+    for (id, src) in want {
+        n += 1;
+        let u = resolve_path(&format!("{}/", origin()), &src);
+        match std::fs::read_to_string(local(dir, &u)) {
+            Ok(t) => beak_engine::js::dombind::script_done(&mut sess.interp, id, Some(&t)),
+            Err(_) => {
+                println!("  dyn-Skript fehlt: {u}");
+                beak_engine::js::dombind::script_done(&mut sess.interp, id, None);
+            }
+        }
+    }
+    n
+}
+
 /// Zufall fuer die HOST-Werkzeuge — aus `/dev/urandom`, nicht aus einer
 /// Bequemlichkeit. Ohne sie gaebe es hier kein `crypto`, und dann misst das
 /// Werkzeug eine andere Plattform als das Geraet.
@@ -56,7 +80,20 @@ fn host_random(out: &mut [u8]) -> bool {
     }
 }
 
+static mut DEADLINE: std::time::Instant = unsafe { core::mem::zeroed() };
+static mut T0: Option<std::time::Instant> = None;
+
+/// Die ECHTE Uhr fuer die Probe. Ohne sie ist `performance.now()` ein
+/// Aufrufzaehler, und dann misst das Werkzeug eine andere Plattform als das
+/// Geraet ([[feedback_the_test_path_must_be_the_real_path]]).
+fn host_clock() -> f64 {
+    unsafe { (&raw const T0).read() }
+        .map(|t| t.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0)
+}
+
 fn main() {
+    unsafe { T0 = Some(std::time::Instant::now()) };
     beak_engine::js::random::set_source(host_random);
     let html_path = std::env::args().nth(1).unwrap_or_default();
     let dir = std::env::args().nth(2).unwrap_or_else(|| ".".into());
@@ -109,7 +146,17 @@ fn main() {
     if let Ok(d) = std::env::var("STEPS") {
         if let Ok(n) = d.parse() { sess.interp.max_steps = n; }
     }
+    sess.interp.clock = Some(host_clock);
     if let Ok(u) = std::env::var("URL") { sess.interp.set_location(&u); }
+    // `BUDGET=<sekunden>`: dieselbe Frist, die der Wirt am Geraet stellt.
+    // Ohne sie laeuft eine Seite host-seitig unbegrenzt, und „haengt" ist
+    // dann keine Messung, sondern ein Abbruch durch die Uhr daneben.
+    if let Ok(v) = std::env::var("BUDGET") {
+        if let Ok(sec) = v.parse::<u64>() {
+            unsafe { DEADLINE = std::time::Instant::now() + std::time::Duration::from_secs(sec) };
+            sess.interp.deadline = Some(|| unsafe { std::time::Instant::now() < DEADLINE });
+        }
+    }
 
     let (mut ran, mut failed) = (0usize, 0usize);
     let mut inline_n = 0usize;
@@ -171,12 +218,19 @@ fn main() {
     let mut timers = 0;
     let (mut sheets_ok, mut sheets_bad) = (0usize, 0usize);
     let mut fetches = 0usize;
+    let mut dynjs = 0usize;
     for _ in 0..64 {
-        let t = sess.interp.run_timers();
-        timers += t;
+        // **Erst bedienen, dann die Uhr laufen lassen.** Wer wartet, darf die
+        // Zeitgeber nicht vorziehen — sonst faellt webpacks
+        // Zeitueberschreitung vor der Zustellung des Stuecks, auf das sie
+        // sich bezieht.
         fetches += serve_fetches(&mut sess, &dir);
         let want = sess.interp.take_pending_sheets();
-        if t == 0 && want.is_empty() && sess.interp.pending_fetches.is_empty() { break }
+        let js = serve_dyn_scripts(&mut sess, &dir);
+        dynjs += js;
+        let t = sess.interp.run_timers();
+        timers += t;
+        if t == 0 && js == 0 && want.is_empty() && sess.interp.pending_fetches.is_empty() { break }
         for (id, href) in want {
             let u = resolve_path(&format!("{}/", origin()), &href);
             let ok = std::fs::read_to_string(local(&dir, &u)).is_ok();
@@ -195,12 +249,15 @@ fn main() {
         let _ = beak_engine::js::dombind::dispatch(&mut sess.interp, "load", &[dn]);
     }
     for _ in 0..64 {
-        let t = sess.interp.run_timers();
-        timers += t;
         let f = serve_fetches(&mut sess, &dir);
         fetches += f;
-        if t == 0 && f == 0 { break }
+        let js = serve_dyn_scripts(&mut sess, &dir);
+        dynjs += js;
+        let t = sess.interp.run_timers();
+        timers += t;
+        if t == 0 && f == 0 && js == 0 { break }
     }
+    if dynjs > 0 { println!("Skripte per Skript: {dynjs} eingehaengt"); }
     if fetches > 0 { println!("fetch: {fetches} Anfragen aus dem Spiegel bedient"); }
     // Was die Seite per `location` verlangt hat. Ohne diese Zeile sieht eine
     // Seite, die sich selbst weiterschickt, genauso aus wie eine, die nichts
