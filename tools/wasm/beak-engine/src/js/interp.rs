@@ -337,6 +337,7 @@ pub struct Realm {
 }
 
 /// Was ein Zensus der Halde gefunden hat.
+#[cfg(feature = "heap-census")]
 pub struct Census {
     /// Objekte, die von den Wurzeln aus zu erreichen sind.
     pub reachable: usize,
@@ -1076,6 +1077,7 @@ impl Interp {
     /// Realms: ein Zeitgeber, ein Beobachter, ein offener `fetch` und jeder
     /// Behandler am Baum halten genauso. Wer eine auslaesst, zaehlt
     /// lebendigen Bestand als Muell.
+    #[cfg(feature = "heap-census")]
     pub fn heap_census(&self) -> Census {
         let (seen, envs, props) = self.walk_roots();
         Census {
@@ -1096,6 +1098,12 @@ impl Interp {
     fn mark_reachable(&self) -> HashSet<usize> { self.walk_roots().0 }
 
     /// Der Gang selbst: von allen Wurzeln aus, ohne etwas anzufassen.
+    ///
+    /// **Bleibt aus dem ausgelieferten Modul heraus**, solange es keinen
+    /// Sammler gibt, der ihn braucht: Diagnose darf nicht stoeren, und 279
+    /// Bytes im Bild sind 279 Bytes fuer niemanden
+    /// ([[feedback_diagnostics_must_not_disturb]]).
+    #[cfg(feature = "heap-census")]
     fn walk_roots(&self) -> (HashSet<usize>, usize, usize) {
         fn add(v: &Value, objs: &mut Vec<Gc>) {
             if let Value::Obj(o) = v { objs.push(o.clone()); }
