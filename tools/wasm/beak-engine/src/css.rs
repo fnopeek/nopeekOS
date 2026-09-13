@@ -2131,7 +2131,7 @@ pub(crate) fn matching_brace(bytes: &[u8], open: usize, end: usize) -> usize {
 /// `(prop: value)` leaves. A colour-property leaf is supported iff the value
 /// parses as a colour; other feature leaves are assumed supported (render-what-
 /// the-author-intended bias — we implement most box/flex/grid properties).
-fn supports_cond(cond: &str) -> bool {
+pub fn supports_cond(cond: &str) -> bool {
     let c = cond.trim();
     if c.is_empty() {
         return false;
@@ -2160,7 +2160,7 @@ fn supports_cond(cond: &str) -> bool {
     }
 }
 
-fn supports_decl(prop: &str, val: &str) -> bool {
+pub fn supports_decl(prop: &str, val: &str) -> bool {
     let p = prop.to_ascii_lowercase();
     if p == "color" || p == "background" || p == "fill" || p == "stroke" || p.ends_with("-color") {
         // `transparent` IS a supported colour — ask the value parser, not the

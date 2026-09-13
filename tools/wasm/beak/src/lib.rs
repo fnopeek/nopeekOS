@@ -425,6 +425,8 @@ struct Doc {
     nav_css_rounds: usize,
     nav_sheet_nodes: Option<Vec<u32>>,
     nav_sheet_rounds: usize,
+    nav_dynjs_nodes: Option<Vec<u32>>,
+    nav_dynjs_rounds: usize,
 
     // ── Die Ansicht DIESES Dokuments ────────────────────────────────────
     // Nicht zu verwechseln mit dem, was der BILDPUFFER haelt (`LAST_W/H/SY`
@@ -531,7 +533,7 @@ impl Doc {
             content_gen: 0, scroll_y: 0, sel_anchor: None, sel: None, pending_link: None,
             find: None, found: Vec::new(), find_at: 0,
             find_pending: [0; 4], find_pending_len: 0,
-            nav_css_count: 0, nav_scripts: None, js: None, nav_js_count: 0, nav_mod_entries: None, nav_mod_want: None, nav_mod_rounds: 0, nav_css_urls: None, nav_css_parts: None, nav_css_want: None, nav_css_rounds: 0, nav_sheet_nodes: None, nav_sheet_rounds: 0,
+            nav_css_count: 0, nav_scripts: None, js: None, nav_js_count: 0, nav_mod_entries: None, nav_mod_want: None, nav_mod_rounds: 0, nav_css_urls: None, nav_css_parts: None, nav_css_want: None, nav_css_rounds: 0, nav_sheet_nodes: None, nav_sheet_rounds: 0, nav_dynjs_nodes: None, nav_dynjs_rounds: 0,
             dirty: true, need_full: true, images_dirty: false, geom: None, last_vp: (0, 0),
             img_job: -1, img_job_srcs: None, cssimg_job: -1, cssimg_job_keys: None,
             font_job: -1, font_want: None, fetch_jobs: Vec::new(),
@@ -1308,6 +1310,10 @@ enum NavStage {
     /// Die `@import`-Blaetter der verlinkten Blaetter. Rundenweise wie `Mod`:
     /// ein Blatt nennt seine eigenen Importe erst, wenn es da ist.
     CssImport,
+    /// `<script src=…>`, die ein SKRIPT eingehaengt hat. Rundenweise wie
+    /// `Sheet`: ein Stueck, das ankommt, haengt das naechste ein — genau so
+    /// laedt ein geteiltes Buendel seinen Baum nach.
+    DynJs,
 }
 
 /// Handle of the navigation in flight, or -1.
@@ -1602,6 +1608,7 @@ fn nav_pump(engine: &Engine) -> bool {
         NavStage::Mod => nav_modules_arrived(engine),
         NavStage::Sheet => nav_sheets_arrived(engine),
         NavStage::CssImport => nav_css_imports_arrived(engine),
+        NavStage::DynJs => nav_dynjs_arrived(engine),
     }
     true
 }
@@ -1762,6 +1769,11 @@ const MAX_MODULE_ROUNDS: usize = 24;
 /// ist eine Rundreise; eine Seite, die in jeder Runde ein weiteres anmeldet,
 /// haelt den Aufbau sonst offen.
 const MAX_SHEET_ROUNDS: usize = 8;
+/// Wie oft eine Seite per Skript Skripte nachlegen darf. Ein geteiltes
+/// Buendel laedt seinen Baum in Ketten nach — gemessen an DuckDuckGos
+/// Startseite sind es sechs Glieder —, und ohne Deckel haelt eine Seite, die
+/// in jeder Runde ein weiteres anmeldet, den Aufbau offen.
+const MAX_DYNJS_ROUNDS: usize = 12;
 
 fn nav_stylesheets_arrived(engine: &Engine) {
     let h = nav_job();
@@ -2759,7 +2771,9 @@ fn sheet_pump(engine: &Engine) -> bool {
     // geworden ist, meldet seine Blaetter JETZT an.
     for _ in 0..8 { if sess.interp.run_timers() == 0 { break } }
     let want = sess.interp.take_pending_sheets();
-    if want.is_empty() { finish_scripts(engine); return false }
+    // Nichts mehr an Blaettern heisst nicht „fertig": danach kommen die
+    // Skripte, die ein Skript eingehaengt hat.
+    if want.is_empty() { return script_pump(engine) }
     let rounds = doc().nav_sheet_rounds;
     if rounds >= MAX_SHEET_ROUNDS {
         log(&alloc::format!("[beak] sheet rounds capped at {MAX_SHEET_ROUNDS}, {} offen", want.len()));
@@ -2816,6 +2830,83 @@ fn nav_sheets_arrived(engine: &Engine) {
         bump_content_gen("sheet");
         mark_dirty();
     }
+    if !sheet_pump(engine) { nav_done(); }
+}
+
+/// Eine Runde an den Skripten, die ein SKRIPT eingehaengt hat.
+///
+/// **Der Weg, auf dem jedes geteilte Buendel seine Stuecke nachlaedt.**
+/// webpack baut ein `<script>`, haengt es an den Kopf und wartet auf dessen
+/// `onload`; Next.js gibt React erst dann etwas zu rendern. Ohne Antwort
+/// blieb das Versprechen offen — DuckDuckGos Startseite raeumte ihr
+/// servergerendertes HTML weg und stand danach leer da, ohne eine einzige
+/// Fehlerzeile.
+///
+/// Rundenweise wie die Blaetter: ein Stueck, das ankommt, haengt das
+/// naechste ein.
+fn script_pump(engine: &Engine) -> bool {
+    let Some(sess) = js_session() else { finish_scripts(engine); return false };
+    for _ in 0..8 { if sess.interp.run_timers() == 0 { break } }
+    let want = sess.interp.take_pending_scripts();
+    if want.is_empty() { finish_scripts(engine); return false }
+    let rounds = doc().nav_dynjs_rounds;
+    if rounds >= MAX_DYNJS_ROUNDS {
+        log(&alloc::format!("[beak] dyn-script rounds capped at {MAX_DYNJS_ROUNDS}, {} offen",
+                            want.len()));
+        for (id, _) in want { beak_engine::js::dombind::script_done(&mut sess.interp, id, None); }
+        finish_scripts(engine);
+        return false;
+    }
+    let base = url_str().to_string();
+    let mut nodes: Vec<u32> = Vec::new();
+    let mut urls: Vec<String> = Vec::new();
+    for (id, src) in want.into_iter().take(MAX_SCRIPT_URLS) {
+        nodes.push(id);
+        urls.push(resolve(&base, &src));
+    }
+    let h = begin_batch(&urls, SCRIPT_CAP);
+    if h < 0 {
+        log("[beak] dyn scripts could not be fetched");
+        for id in nodes { beak_engine::js::dombind::script_done(&mut sess.interp, id, None); }
+        finish_scripts(engine);
+        return false;
+    }
+    {
+        doc_mut().nav_dynjs_nodes = Some(nodes);
+        doc_mut().nav_dynjs_rounds = rounds + 1;
+        doc_mut().nav_stage = NavStage::DynJs;
+        doc_mut().nav_job = h;
+        doc_mut().nav_stage_ms = now_ms();
+    }
+    true
+}
+
+fn nav_dynjs_arrived(engine: &Engine) {
+    let h = nav_job();
+    let nodes = doc_mut().nav_dynjs_nodes.take().unwrap_or_default();
+    let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
+    let spans = take_batch(h, dst, SCRIPT_CAP.min(IMG_FETCH_CAP), nodes.len());
+    // **Erst ALLES abschreiben, dann laufen lassen.** Ein Skript, das laeuft,
+    // kann das naechste einhaengen — und das holt sich denselben Puffer.
+    let mut texts: Vec<Option<String>> = Vec::with_capacity(nodes.len());
+    for k in 0..nodes.len() {
+        let (off, n) = spans.get(k).copied().unwrap_or((0, 0));
+        if n == 0 { texts.push(None); continue }
+        // SAFETY: `take_batch` hat genau diese Spanne in `IMG_FETCH_BUF`
+        // gefuellt und `off + n` liegt im Deckel, den wir ihm gegeben haben.
+        let bytes = unsafe { core::slice::from_raw_parts(dst.add(off) as *const u8, n) };
+        texts.push(core::str::from_utf8(bytes).ok().map(String::from));
+    }
+    let (mut ok, mut bad) = (0usize, 0usize);
+    if let Some(sess) = js_session() {
+        for (k, id) in nodes.iter().enumerate() {
+            let t = texts.get(k).and_then(|t| t.as_deref());
+            if t.is_some() { ok += 1 } else { bad += 1 }
+            beak_engine::js::dombind::script_done(&mut sess.interp, *id, t);
+        }
+    }
+    log(&alloc::format!("[beak] dyn scripts: {ok} geholt, {bad} gescheitert, {} ms",
+                        now_ms() - doc().nav_stage_ms));
     if !sheet_pump(engine) { nav_done(); }
 }
 

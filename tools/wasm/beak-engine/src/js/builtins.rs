@@ -2080,12 +2080,19 @@ pub fn make_realm() -> Realm {
         // dort `undefined`, ist es eines und wirft. Der Unterschied ist
         // beobachtbar, und `isConstructor` aus dem test262-Vorspann baut
         // genau darauf.
-        if let Some(nt) = a.get(2) {
-            if !i.is_constructor(nt) { return i.type_err("Reflect.construct newTarget is not a constructor"); }
-        }
+        let nt = match a.get(2) {
+            Some(nt) => {
+                if !i.is_constructor(nt) { return i.type_err("Reflect.construct newTarget is not a constructor"); }
+                Some(nt.clone())
+            }
+            None => None,
+        };
         let list = a.get(1).cloned().unwrap_or(Value::Undefined);
         let args = if matches!(list, Value::Undefined) { Vec::new() } else { i.elems(&list)? };
-        i.construct(&f, &args)
+        match nt {
+            Some(nt) => i.construct_target(&f, &args, &nt),
+            None => i.construct(&f, &args),
+        }
     }, 2, fp);
     reflect.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("Reflect")));
     global.borrow_mut().define("Reflect", Prop::builtin(Value::Obj(reflect)));
@@ -2221,16 +2228,72 @@ pub fn make_realm() -> Realm {
     // ein Fehler, der das Skript beendet. Die Warteschlange ist die Stelle,
     // an der beaks Ereignisschleife spaeter ansetzt — dieselbe Form wie bei
     // `addEventListener`.
-    for n in ["setTimeout", "setInterval", "requestAnimationFrame", "requestIdleCallback"] {
-        let g = native(Some(function_proto.clone()), |i, _, a| {
-            let f = a.first().cloned().unwrap_or(Value::Undefined);
-            if i.is_callable(&f) { i.timers.push(f); }
-            Ok(Value::Num(i.timers.len() as f64))
-        }, n, 2, false);
-        global.borrow_mut().define(n, Prop::builtin(Value::Obj(g)));
+    // Die Frist, die `requestIdleCallback` seinem Rueckruf mitgibt. Der
+    // uebliche Rumpf ist `while (d.timeRemaining() > 0) …` — ohne das Objekt
+    // ist das ein TypeError mitten in der Schleife einer Bibliothek.
+    fn idle_deadline(i: &mut Interp) -> Value {
+        let o = super::value::new_obj(Some(i.realm.object_proto.clone()));
+        let fp = i.realm.function_proto.clone();
+        let t = native(Some(fp), |_, _, _| Ok(Value::Num(50.0)), "timeRemaining", 0, false);
+        o.borrow_mut().define("timeRemaining", Prop::builtin(Value::Obj(t)));
+        o.borrow_mut().define("didTimeout", Prop::builtin(Value::Bool(false)));
+        Value::Obj(o)
     }
+
+    // `setTimeout(f, ms, …args)` und `setInterval` — mit der Verzoegerung,
+    // mit den Argumenten dahinter und mit einer Kennung, die `clearTimeout`
+    // auch wirklich findet.
+    fn arm(i: &mut Interp, a: &[Value], repeat: bool) -> Result<Value, super::interp::Abrupt> {
+        let f = a.first().cloned().unwrap_or(Value::Undefined);
+        if !i.is_callable(&f) { return Ok(Value::Num(0.0)) }
+        let ms = match a.get(1) { Some(v) => i.to_number(v)?, None => 0.0 };
+        // Was keine Zahl ist, ist null (HTML §8.6). Ein negatives Wartestueck
+        // gibt es nicht.
+        let ms = if ms.is_nan() || ms < 0.0 { 0.0 } else { ms };
+        let id = i.next_timer;
+        i.next_timer = i.next_timer.wrapping_add(1).max(1);
+        let args = a.iter().skip(2).cloned().collect();
+        let due = i.vnow + ms;
+        i.timers.push(super::interp::Timer {
+            id, cb: f, due, interval: if repeat { Some(ms) } else { None }, args });
+        Ok(Value::Num(id as f64))
+    }
+    let g = native(Some(function_proto.clone()), |i, _, a| arm(i, a, false), "setTimeout", 2, false);
+    global.borrow_mut().define("setTimeout", Prop::builtin(Value::Obj(g)));
+    let g = native(Some(function_proto.clone()), |i, _, a| arm(i, a, true), "setInterval", 2, false);
+    global.borrow_mut().define("setInterval", Prop::builtin(Value::Obj(g)));
+
+    // `requestAnimationFrame` und `requestIdleCallback` haengen am BILD, nicht
+    // an einer Wartezeit: sie sind sofort faellig. Ihr Rueckruf bekommt das,
+    // was die Spezifikation ihm zusagt — einen Zeitstempel bzw. eine Frist —,
+    // denn eine Animationsschleife rechnet mit `ts - last`, und ohne den
+    // Stempel kommt `NaN` heraus.
+    fn arm_frame(i: &mut Interp, a: &[Value], idle: bool) -> Result<Value, super::interp::Abrupt> {
+        let f = a.first().cloned().unwrap_or(Value::Undefined);
+        if !i.is_callable(&f) { return Ok(Value::Num(0.0)) }
+        let id = i.next_timer;
+        i.next_timer = i.next_timer.wrapping_add(1).max(1);
+        let arg = if idle { idle_deadline(i) } else { Value::Num(i.now_ms()) };
+        let due = i.vnow;
+        i.timers.push(super::interp::Timer { id, cb: f, due, interval: None, args: alloc::vec![arg] });
+        Ok(Value::Num(id as f64))
+    }
+    let g = native(Some(function_proto.clone()), |i, _, a| arm_frame(i, a, false),
+                   "requestAnimationFrame", 1, false);
+    global.borrow_mut().define("requestAnimationFrame", Prop::builtin(Value::Obj(g)));
+    let g = native(Some(function_proto.clone()), |i, _, a| arm_frame(i, a, true),
+                   "requestIdleCallback", 1, false);
+    global.borrow_mut().define("requestIdleCallback", Prop::builtin(Value::Obj(g)));
+
     for n in ["clearTimeout", "clearInterval", "cancelAnimationFrame", "cancelIdleCallback"] {
-        let g = native(Some(function_proto.clone()), |_, _, _| Ok(Value::Undefined), n, 1, false);
+        let g = native(Some(function_proto.clone()), |i, _, a| {
+            let id = match a.first() { Some(v) => i.to_number(v)?, None => return Ok(Value::Undefined) };
+            if id.is_finite() && id >= 1.0 {
+                let id = id as u32;
+                i.timers.retain(|t| t.id != id);
+            }
+            Ok(Value::Undefined)
+        }, n, 1, false);
         global.borrow_mut().define(n, Prop::builtin(Value::Obj(g)));
     }
 
@@ -2453,7 +2516,7 @@ pub fn make_realm() -> Realm {
     let perf = new_obj(Some(object_proto.clone()));
     // Eine Uhr, die nur steigt. beak reicht die echte nach; bis dahin ist
     // Monotonie das Einzige, worauf sich ein Skript wirklich verlaesst.
-    def(&perf, "now", |i, _, _| { i.fake_now += 1.0; Ok(Value::Num(i.fake_now)) }, 0, fp);
+    def(&perf, "now", |i, _, _| Ok(Value::Num(i.now_ms())), 0, fp);
     for m in ["mark", "measure", "clearMarks", "clearMeasures"] {
         let g = native(Some(function_proto.clone()), |_, _, _| Ok(Value::Undefined), m, 1, false);
         perf.borrow_mut().define(m, Prop::builtin(Value::Obj(g)));

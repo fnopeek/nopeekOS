@@ -85,6 +85,25 @@ pub struct Parser<'a> {
     pend_names: Vec<String>,
     /// War `cur` eine Zahl in Alt-Oktal-Form?
     num_legacy_octal: bool,
+    /// Fuer jede OFFENE Klammer: schliesst sie den KOPF einer Anweisung
+    /// (`if`, `for`, `while`, `with`)? Danach faengt eine Anweisung an, und
+    /// ein `/` dort ist ein Regex — waehrend dasselbe `)` am Ende eines
+    /// Ausdrucks eine Division einleitet. Das ist die eine Stelle, an der
+    /// `regex_allowed_after` mit dem Token allein nicht auskommt.
+    paren_hdr: Vec<bool>,
+    /// War das zuletzt verbrauchte Token eines dieser vier Woerter?
+    prev_hdr: bool,
+}
+
+/// Ein Ruecksetzpunkt. Traegt die Klammerbuchfuehrung mit — eine Vorausschau,
+/// die eine Argumentliste durchliest, legt sonst Klammern ab, die niemand
+/// mehr abraeumt.
+struct Save {
+    pos: usize,
+    cur: Token,
+    cur_start: usize,
+    parens: usize,
+    prev_hdr: bool,
 }
 
 type R<T> = Result<T, ParseError>;
@@ -99,6 +118,7 @@ impl<'a> Parser<'a> {
             in_func: false, in_gen: false, in_async: module, in_loop: 0, in_switch: 0,
             just_paren: false, in_class_field: false,
             pend_simple: true, pend_names: Vec::new(), num_legacy_octal: first_legacy,
+            paren_hdr: Vec::new(), prev_hdr: false,
         })
     }
 
@@ -111,9 +131,21 @@ impl<'a> Parser<'a> {
         // reserviert sind; sonst sind sie Bezeichner, und dann ist `/` eine
         // Division. Das weiss nur der Parser — `regex_allowed_after` sieht
         // bloss das Token.
+        // Klammerbuchfuehrung: beim `(` merken, WORAUF es folgte, und beim
+        // passenden `)` wieder herausholen. `for (const [k, v] of m) /re/.test(k)`
+        // ist echter Code — er stand in DuckDuckGos Hauptbuendel und liess den
+        // ganzen Chunk als SyntaxError ausfallen.
+        let hdr = match &self.cur.tok {
+            Tok::Punct(P::LParen) => { self.paren_hdr.push(self.prev_hdr); false }
+            Tok::Punct(P::RParen) => self.paren_hdr.pop().unwrap_or(false),
+            _ => false,
+        };
+        self.prev_hdr = matches!(&self.cur.tok,
+            Tok::Keyword(Kw::If | Kw::For | Kw::While | Kw::With));
         let ok = match &self.cur.tok {
             Tok::Keyword(Kw::Yield) => self.in_gen || self.strict,
             Tok::Keyword(Kw::Await) => self.in_async || self.module,
+            Tok::Punct(P::RParen) => hdr,
             t => regex_allowed_after(t),
         };
         self.cur_start = self.lx.pos;
@@ -351,7 +383,7 @@ impl<'a> Parser<'a> {
 
     /// Folgt auf `let` etwas, das es zur Deklaration macht?
     fn let_is_decl(&mut self) -> R<bool> {
-        let save = (self.lx.pos, self.cur.clone(), self.cur_start);
+        let save = self.mark();
         self.bump()?;
         let yes = matches!(self.cur.tok, Tok::Ident(_))
             || self.is_p(P::LBracket) || self.is_p(P::LBrace)
@@ -363,7 +395,7 @@ impl<'a> Parser<'a> {
 
     /// `async function` — aber nur ohne Zeilenumbruch dazwischen.
     fn async_function_ahead(&mut self) -> R<bool> {
-        let save = (self.lx.pos, self.cur.clone(), self.cur_start);
+        let save = self.mark();
         self.bump()?;
         let yes = self.is_kw(Kw::Function) && !self.cur.newline_before;
         self.restore(save);
@@ -371,7 +403,7 @@ impl<'a> Parser<'a> {
     }
 
     fn import_is_expr(&mut self) -> R<bool> {
-        let save = (self.lx.pos, self.cur.clone(), self.cur_start);
+        let save = self.mark();
         self.bump()?;
         let yes = self.is_p(P::LParen) || self.is_p(P::Dot);
         self.restore(save);
@@ -381,10 +413,17 @@ impl<'a> Parser<'a> {
     /// Zuruecksetzen. Nur fuer die drei Stellen oben, an denen ein Token
     /// Vorausschau nicht reicht — nicht als allgemeines Ruecksetzen: davon
     /// leben Parser, die man nicht mehr versteht.
-    fn restore(&mut self, save: (usize, Token, usize)) {
-        self.lx.pos = save.0;
-        self.cur = save.1;
-        self.cur_start = save.2;
+    fn mark(&self) -> Save {
+        Save { pos: self.lx.pos, cur: self.cur.clone(), cur_start: self.cur_start,
+               parens: self.paren_hdr.len(), prev_hdr: self.prev_hdr }
+    }
+
+    fn restore(&mut self, save: Save) {
+        self.lx.pos = save.pos;
+        self.cur = save.cur;
+        self.cur_start = save.cur_start;
+        self.paren_hdr.truncate(save.parens);
+        self.prev_hdr = save.prev_hdr;
     }
 
     fn var_statement(&mut self) -> R<Stmt> {
@@ -588,7 +627,7 @@ impl<'a> Parser<'a> {
         // Ein Label ist ein Bezeichner mit `:` dahinter, und das sieht man
         // erst nach dem Bezeichner.
         if matches!(self.cur.tok, Tok::Ident(_)) {
-            let save = (self.lx.pos, self.cur.clone(), self.cur_start);
+            let save = self.mark();
             let name = self.ident_name()?;
             if self.eat_p(P::Colon)? {
                 let body = self.statement()?;
@@ -871,7 +910,7 @@ impl<'a> Parser<'a> {
     fn class_member(&mut self) -> R<ClassMember> {
         let mut is_static = false;
         if self.is_kw(Kw::Static) {
-            let save = (self.lx.pos, self.cur.clone(), self.cur_start);
+            let save = self.mark();
             self.bump()?;
             // `static` allein als Feldname (`static = 1`, `static;`) ist erlaubt.
             if self.is_p(P::Eq) || self.is_p(P::Semi) || self.is_p(P::RBrace) || self.is_p(P::LParen) {
@@ -894,7 +933,7 @@ impl<'a> Parser<'a> {
         let mut kind = MethodKind::Method;
 
         if self.is_kw(Kw::Async) {
-            let save = (self.lx.pos, self.cur.clone(), self.cur_start);
+            let save = self.mark();
             self.bump()?;
             if self.is_p(P::LParen) || self.is_p(P::Eq) || self.is_p(P::Semi)
                 || self.is_p(P::RBrace) || self.cur.newline_before {
@@ -904,7 +943,7 @@ impl<'a> Parser<'a> {
         if self.eat_p(P::Star)? { is_generator = true; }
         if (self.is_kw(Kw::Get) || self.is_kw(Kw::Set)) && !is_generator {
             let want = if self.is_kw(Kw::Get) { MethodKind::Get } else { MethodKind::Set };
-            let save = (self.lx.pos, self.cur.clone(), self.cur_start);
+            let save = self.mark();
             self.bump()?;
             if self.is_p(P::LParen) || self.is_p(P::Eq) || self.is_p(P::Semi) || self.is_p(P::RBrace) {
                 self.restore(save);
@@ -1027,7 +1066,7 @@ impl<'a> Parser<'a> {
         let is_ident = matches!(self.cur.tok, Tok::Ident(_))
             || matches!(&self.cur.tok, Tok::Keyword(k) if !k.is_reserved());
         if !is_ident { return Ok(None); }
-        let save = (self.lx.pos, self.cur.clone(), self.cur_start);
+        let save = self.mark();
 
         // `async x => …` und `async (…) => …`. Die geklammerte Form ist die
         // haeufigere in echtem Code und war der zweite Grund, aus dem der erste
@@ -1524,7 +1563,7 @@ impl<'a> Parser<'a> {
             let mut kind = 0u8; // 0 normal, 1 get, 2 set
 
             if self.is_kw(Kw::Async) {
-                let save = (self.lx.pos, self.cur.clone(), self.cur_start);
+                let save = self.mark();
                 self.bump()?;
                 if self.is_p(P::Colon) || self.is_p(P::LParen) || self.is_p(P::Comma)
                     || self.is_p(P::RBrace) || self.is_p(P::Eq) || self.cur.newline_before {
@@ -1534,7 +1573,7 @@ impl<'a> Parser<'a> {
             if self.eat_p(P::Star)? { is_generator = true; }
             if (self.is_kw(Kw::Get) || self.is_kw(Kw::Set)) && !is_generator && !is_async {
                 let want = if self.is_kw(Kw::Get) { 1 } else { 2 };
-                let save = (self.lx.pos, self.cur.clone(), self.cur_start);
+                let save = self.mark();
                 self.bump()?;
                 if self.is_p(P::Colon) || self.is_p(P::LParen) || self.is_p(P::Comma)
                     || self.is_p(P::RBrace) || self.is_p(P::Eq) {

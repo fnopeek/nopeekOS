@@ -1203,7 +1203,7 @@ impl Vm {
             // Baumlaeufer. Ohne diese Zeile verlor jedes Skript, das auf die
             // Maschine wanderte, still seine Fehlerdiagnose.
             if !i.is_callable(&callee) {
-                return Err(i.not_a_function(name));
+                return Err(i.not_a_function(name, Some(&this)));
             }
             i.vm_calls_native += 1;
             let v = i.call(&callee, this, &args)?;

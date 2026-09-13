@@ -458,11 +458,11 @@ pub fn install(realm: &mut Realm) {
     let ctor = native(Some(fp.clone()), |i, _, a| {
         // `Date()` OHNE `new` gibt Text, nicht ein Objekt.
         if !i.native_new {
-            let now = { i.fake_now += 1.0; i.epoch_ms + i.fake_now };
+            let now = { let t = i.now_ms(); i.epoch_ms + t };
             return Ok(Value::string(full_string(libm::trunc(now))));
         }
         let t = match a.len() {
-            0 => { i.fake_now += 1.0; libm::trunc(i.epoch_ms + i.fake_now) }
+            0 => { let t = i.now_ms(); libm::trunc(i.epoch_ms + t) }
             1 => {
                 // Ein `Date` als Argument gibt seinen Zeitwert direkt weiter,
                 // ohne den Umweg ueber den Text.
@@ -498,8 +498,8 @@ pub fn install(realm: &mut Realm) {
     def(&ctor, "now", |i, _, _| {
         // Eine steigende Uhr auf dem Zeitstempel des Wirts: zwei Aufrufe
         // duerfen nicht denselben Wert geben, und der Wert muss heute sein.
-        i.fake_now += 1.0;
-        Ok(Value::Num(libm::trunc(i.epoch_ms + i.fake_now)))
+        let t = i.now_ms();
+        Ok(Value::Num(libm::trunc(i.epoch_ms + t)))
     }, 0);
     def(&ctor, "parse", |i, _, a| {
         let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;

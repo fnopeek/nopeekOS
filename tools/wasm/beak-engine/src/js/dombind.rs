@@ -482,6 +482,49 @@ impl Doc {
         made
     }
 
+    /// Ein GANZES Dokument parsen — der Weg von
+    /// `DOMParser.parseFromString`. Anders als `parse_into` bleibt der
+    /// `<html>`/`<head>`/`<body>`-Rahmen STEHEN: hier ist er nicht der
+    /// Rahmen um ein Bruchstueck, sondern das Ergebnis.
+    ///
+    /// Losgeloest wie `createHTMLDocument`: derselbe Knotenspeicher, aber
+    /// kein Elternteil, also sieht ihn weder das Layout noch der Wirt.
+    pub fn parse_document(&mut self, src: &str, html_kind: bool) -> u32 {
+        let parsed = crate::dom::parse(src);
+        let doc = self.create(DOCUMENT_NODE, "#document");
+        if !html_kind {
+            // XML und SVG kennen keinen `<body>`-Rahmen: die Wurzel des
+            // Textes IST die Wurzel des Dokuments.
+            for c in fragment_nodes(&parsed.root) {
+                if let Some(id) = self.from_src_node(c) { self.append(doc, id); }
+            }
+            return doc;
+        }
+        let root = parsed.root.children.iter().find_map(|c| match c {
+            crate::dom::Node::Element(e) if &*e.tag == "html" => Some(c),
+            _ => None,
+        });
+        let html = match root.and_then(|c| self.from_src_node(c)) {
+            Some(id) => id,
+            None => self.create(ELEMENT_NODE, "html"),
+        };
+        self.append(doc, html);
+        // **Der Parser laesst einen leeren `<head>` weg, die Spezifikation
+        // nicht.** Das Bruchstueck-Parsen baut immer beide Kinder, und eine
+        // Seite, die `doc.head` liest, bekaeme sonst `null` fuer ein
+        // Dokument, in dem der Kopf nur leer ist.
+        for (k, tag) in ["head", "body"].iter().enumerate() {
+            if !self.nodes[html as usize].children.iter()
+                .any(|&c| &*self.nodes[c as usize].tag == *tag) {
+                let el = self.create(ELEMENT_NODE, tag);
+                self.nodes[el as usize].parent = Some(html);
+                let at = k.min(self.nodes[html as usize].children.len());
+                self.nodes[html as usize].children.insert(at, el);
+            }
+        }
+        doc
+    }
+
     /// Einen geparsten Teilbaum in die Arena legen, noch ohne Elternteil.
     fn from_src_node(&mut self, n: &crate::dom::Node) -> Option<u32> {
         match n {
@@ -770,6 +813,17 @@ pub fn page_scripts(d: &Doc) -> Vec<ScriptRef> {
         if &*n.tag != "script" { continue; }
         if !script_type_is_js(n) { continue; }
         let module = n.attr("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("module"));
+        // `nomodule` heisst „nur fuer einen Browser OHNE Module" (HTML
+        // §4.12.1). beak hat Module, also gehoert dieser Zweig UEBERSPRUNGEN
+        // — und das ist keine Ersparnis, sondern Richtigkeit: eine Seite
+        // liefert beide Zweige aus, und wer beide faehrt, laesst zwei
+        // Fassungen derselben Bibliothek um denselben globalen Namen
+        // streiten. Auf der DDG-Ergebnisseite sind das 2 MB, auf der
+        // Startseite ein core-js-Bundle, das beaks eingebaute Zusagen
+        // ERSETZT ([[feedback_a_polyfill_replaces_what_it_judges_broken]]).
+        // Auf einem Modulskript wird das Attribut laut Spezifikation
+        // ignoriert.
+        if !module && n.attr("nomodule").is_some() { continue; }
         match n.attr("src") {
             Some(src) if !src.trim().is_empty() =>
                 out.push(ScriptRef::External(src.to_string(), module)),
@@ -931,6 +985,23 @@ pub fn node_of(i: &mut Interp, v: &Value) -> C<u32> {
 /// LETZTES. Der Wurzelknoten steht in jeder Zustellkette genau dort — also
 /// ist er die richtige Adresse, nicht eine Naeherung.
 fn target_node(i: &mut Interp, v: &Value) -> C<u32> {
+    // **Kein `this` heisst das GLOBALE Objekt, nicht „kein Ziel".** WebIDL
+    // §3.7.4 sagt es woertlich: ist der `this`-Wert null oder undefined,
+    // tritt das globale Objekt an seine Stelle — und erst danach wird
+    // geprueft, ob das die Schnittstelle ueberhaupt erfuellt. Fuer
+    // `EventTarget` erfuellt `window` sie, also traegt genau diese Regel das
+    // haeufigste Idiom im Web: `addEventListener("resize", f)` OHNE Empfaenger.
+    // Ein blanker Aufruf uebergibt laut Sprachkern `undefined` (der globale
+    // Bereich ist ein Umgebungssatz, kein Eigenschaftsbezug), und beak machte
+    // daraus einen TypeError — auf DuckDuckGos Ergebnisseite starb daran der
+    // Zeitgeber, der React einhaengt, und die Seite blieb leer.
+    //
+    // `node_of` bekommt die Regel NICHT: `window` ist kein `Node`, ein
+    // blankes `appendChild(x)` muss weiter werfen — auch das steht so in
+    // derselben Vorschrift.
+    if matches!(v, Value::Undefined | Value::Null) {
+        return match &i.doc { Some(d) => Ok(d.doc), None => i.type_err("no document") };
+    }
     if let Value::Obj(o) = v {
         if Rc::ptr_eq(o, &i.realm.global) {
             return match &i.doc { Some(d) => Ok(d.doc), None => i.type_err("no document") };
@@ -1152,7 +1223,7 @@ pub fn eval_box_observers(i: &mut Interp) {
 
     // ── IntersectionObserver ─────────────────────────────────────────────
     let (vw, vh) = i.viewport;
-    let now = { i.fake_now += 1.0; i.fake_now };
+    let now = i.now_ms();
     for n in 0..i.inter_obs.len() {
         // Der Ausschnitt: das Sichtfeld oder der Kasten der Wurzel, in
         // beiden Faellen um `rootMargin` gedehnt.
@@ -1617,7 +1688,7 @@ macro_rules! ev_getter {
 /// Seiten fragen es ab, und ein festes `true` waere gelogen.
 fn build_event(i: &mut Interp, proto: Gc, kind: &str, trusted: bool) -> Gc {
     let ev = new_obj(Some(proto));
-    let stamp = { i.fake_now += 1.0; i.fake_now };
+    let stamp = i.now_ms();
     let mut o = ev.borrow_mut();
     let hidden = |v: Value| Prop { value: Some(v), get: None, set: None,
         writable: true, enumerable: false, configurable: true };
@@ -3958,6 +4029,153 @@ pub fn install(realm: &mut Realm) {
     }, 3, &fp);
     impl_obj.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("DOMImplementation")));
     document_proto.borrow_mut().define("implementation", Prop::builtin(Value::Obj(impl_obj)));
+
+    // `reportError(e)` (HTML §8.1.3.9): einen Fehler so melden, wie es eine
+    // unabgefangene Ausnahme tut — ans Fenster, und danach auf die Konsole.
+    //
+    // **Es ist der Weg, auf dem eine Laufzeitumgebung ueberhaupt SAGT, dass
+    // etwas schiefging.** React 19 meldet jeden unabgefangenen Renderfehler
+    // zuerst hierueber; gibt es den Namen nicht, faellt es auf einen
+    // `ErrorEvent` zurueck, den es auch nicht gibt, und am Ende auf
+    // `console.error`. Wer die Kette nicht hat, bekommt eine Seite, die
+    // nichts rendert UND nichts sagt
+    // ([[feedback_a_silent_failure_hides_every_bug_upstream_of_it]]).
+    def_global(realm, "reportError", |i, _, a| {
+        let err = a.first().cloned().unwrap_or(Value::Undefined);
+        let msg = match i.get(&err, "message") {
+            Ok(Value::Undefined) | Err(_) => i.to_string(&err).map(|s| s.to_string()).unwrap_or_default(),
+            Ok(v) => i.to_string(&v).map(|s| s.to_string()).unwrap_or_default(),
+        };
+        let name = match i.get(&err, "name") {
+            Ok(Value::Undefined) | Err(_) => alloc::string::String::new(),
+            Ok(v) => i.to_string(&v).map(|s| s.to_string()).unwrap_or_default(),
+        };
+        let target = i.doc.as_ref().map(|d| d.doc);
+        let mut handled = false;
+        if let Some(t) = target {
+            let proto = i.realm.event_proto.clone();
+            let ev = build_event(i, proto, "error", false);
+            ev.borrow_mut().define("message", Prop::data(Value::string(msg.clone())));
+            ev.borrow_mut().define("error", Prop::data(err));
+            handled = deliver(i, &ev, "error", &[t]).unwrap_or(false);
+        }
+        // `preventDefault` heisst „ich habe es behandelt" — dann schweigt die
+        // Konsole, genau wie im Browser.
+        if !handled {
+            i.console_push(if name.is_empty() { alloc::format!("error: {msg}") }
+                           else { alloc::format!("error: {name}: {msg}") });
+        }
+        Ok(Value::Undefined)
+    }, 1, &fp);
+
+    // ── CSS ──────────────────────────────────────────────────────────────
+    //
+    // **Eine fehlende Merkmalspruefung ist keine neutrale Luecke — sie ist
+    // ein NEIN.** `CSS.supports` ist die Stelle, an der eine Seite fragt, ob
+    // sie den modernen Weg nehmen darf. Gibt es das Objekt nicht, nimmt sie
+    // den alten: DuckDuckGos Ergebnisseite laedt dann `css-vars-ponyfill`
+    // und laesst es ihre eigenen 1,1 MB Stilblaetter mit verschachtelten
+    // regulaeren Ausdruecken nachbauen — obwohl beak Custom Properties
+    // laengst selbst aufloest. Gemessen: der Lauf kam danach in zwanzig
+    // Minuten nicht zum Ende.
+    //
+    // Geantwortet wird aus DERSELBEN Funktion, die `@supports` im Blatt
+    // auswertet. Zwei Auskuenfte ueber dasselbe waeren zwei Wahrheiten.
+    let css_obj = new_obj(Some(realm.object_proto.clone()));
+    meth(&css_obj, "supports", |i, _, a| {
+        let first = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        match a.get(1) {
+            // Die ZWEIstellige Form nimmt Name und Wert — und sagt fuer eine
+            // Custom Property ausdruecklich NEIN (css-conditional-3 §6): wer
+            // `--x` pruefen will, muss die Bedingungsform nehmen.
+            Some(v) => {
+                let val = i.to_string(v)?;
+                if first.trim().starts_with("--") { return Ok(Value::Bool(false)) }
+                if val.trim().is_empty() { return Ok(Value::Bool(false)) }
+                Ok(Value::Bool(crate::css::supports_decl(first.trim(), val.trim())))
+            }
+            None => Ok(Value::Bool(crate::css::supports_cond(&first))),
+        }
+    }, 2, &fp);
+    // `CSS.escape` (cssom-1 §9): ein Bezeichner, der in einem Selektor stehen
+    // darf. Bibliotheken bauen damit `#\31 23`-Selektoren aus fremden ids;
+    // ohne die Funktion wirft der Aufruf und nimmt das ganze Skript mit.
+    meth(&css_obj, "escape", |i, _, a| {
+        let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let mut out = String::new();
+        for (k, c) in s.chars().enumerate() {
+            let code = c as u32;
+            let ok = c == '-' || c == '_' || c.is_ascii_alphanumeric() || code >= 0x80;
+            if code == 0 { out.push('\u{FFFD}'); continue }
+            // Eine Ziffer am Anfang — und nach einem fuehrenden `-` — muss
+            // als Codepunkt ausgeschrieben werden, sonst liest der Parser
+            // eine Zahl.
+            let lead_digit = c.is_ascii_digit()
+                && (k == 0 || (k == 1 && s.starts_with('-')));
+            if (code < 0x20 || code == 0x7F) || lead_digit {
+                out.push('\\');
+                push_hex(&mut out, code);
+                out.push(' ');
+                continue;
+            }
+            if k == 0 && c == '-' && s.chars().count() == 1 { out.push('\\'); out.push(c); continue }
+            if ok { out.push(c) } else { out.push('\\'); out.push(c) }
+        }
+        Ok(Value::string(out))
+    }, 1, &fp);
+    css_obj.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("CSS")));
+    realm.global.borrow_mut().define("CSS", Prop::builtin(Value::Obj(css_obj)));
+
+    // ── DOMParser ────────────────────────────────────────────────────────
+    //
+    // **Der sichere Weg, fremdes HTML zu LESEN.** `innerHTML =` haengt es in
+    // die Seite; `new DOMParser().parseFromString(s, "text/html")` gibt ein
+    // Dokument NEBEN der Seite zurueck, aus dem man Text und Struktur holt,
+    // ohne dass etwas davon gemalt oder gefahren wird. Genau deshalb bauen
+    // Bibliotheken ihre Bereinigung damit — und genau daran fiel
+    // DuckDuckGos Ergebnisliste aus: ihre React-Schicht parst jeden
+    // Trefferauszug so, der `ReferenceError` loeste die Fehlergrenze aus,
+    // und die Seite blieb mit Kopfleiste und Filtern, aber OHNE Treffer
+    // stehen.
+    //
+    // Ein Bruder von `createHTMLDocument`, kein zweiter Parser: derselbe
+    // Baum, dieselbe Arena, derselbe Rahmen — nur dass der Text hier
+    // mitkommt.
+    let dp_proto = new_obj(Some(realm.object_proto.clone()));
+    meth(&dp_proto, "parseFromString", |i, _, a| {
+        let src = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_string();
+        // Der zweite Parameter ist PFLICHT und eine Aufzaehlung: was nicht
+        // darin steht, ist ein TypeError (DOM §DOMParser). Parameter hinter
+        // einem `;` (`text/html;charset=utf-8`) gehoeren nicht zum Namen.
+        let ty = i.to_string(a.get(1).unwrap_or(&Value::Undefined))?;
+        let ty = ty.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+        let html_kind = match &*ty {
+            "text/html" => true,
+            // **XML faehrt durch denselben Parser, und das ist eine
+            // benannte Naeherung.** Ein echter XML-Lauf muesste bei jedem
+            // Wohlgeformtheitsfehler ein `parsererror`-Dokument liefern;
+            // beak hat einen Parser, und ein zweiter waere eine zweite
+            // Wahrheit darueber, was Auszeichnung bedeutet. Wer hier
+            // `parsererror` erwartet, bekommt es nicht.
+            "text/xml" | "application/xml" | "application/xhtml+xml" | "image/svg+xml" => false,
+            _ => return i.type_err(&alloc::format!(
+                "parseFromString: den Typ '{ty}' gibt es in dieser Aufzaehlung nicht")),
+        };
+        let Some(d) = &mut i.doc else { return i.type_err("no document") };
+        let doc = d.parse_document(&src, html_kind);
+        Ok(wrap(i, doc))
+    }, 2, &fp);
+    let dp_ctor = native(Some(fp.clone()), |i, _, _| {
+        let proto = match i.get(&Value::Obj(i.realm.global.clone()), "DOMParser")
+                          .and_then(|c| i.get(&c, "prototype")) {
+            Ok(Value::Obj(o)) => o, _ => i.realm.object_proto.clone(),
+        };
+        Ok(Value::Obj(new_obj(Some(proto))))
+    }, "DOMParser", 0, true);
+    dp_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(dp_proto.clone())));
+    dp_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(dp_ctor.clone())));
+    dp_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("DOMParser")));
+    realm.global.borrow_mut().define("DOMParser", Prop::builtin(Value::Obj(dp_ctor)));
 
     // Ein Dokument IST ein `XPathEvaluator` (DOM 4 §XPathEvaluatorBase), und
     // `document.evaluate(...)` ist der Einstieg, den eine Seite schreibt —
@@ -6699,6 +6917,7 @@ fn collect_custom(d: &Doc, id: u32, out: &mut Vec<u32>) {
 /// verschwinden.
 fn fire_connected(i: &mut Interp, id: u32) -> C<Value> {
     settle_stylesheet(i, id);
+    settle_script(i, id);
     if i.custom.is_empty() { return Ok(Value::Undefined) }
     if !i.doc.as_ref().is_some_and(|d| is_connected(d, id)) { return Ok(Value::Undefined) }
     let mut list = Vec::new();
@@ -6717,6 +6936,17 @@ fn fire_connected(i: &mut Interp, id: u32) -> C<Value> {
         }
     }
     Ok(Value::Undefined)
+}
+
+/// Ein Codepunkt als Hexziffern, klein geschrieben — die Form, die
+/// `CSS.escape` verlangt.
+fn push_hex(out: &mut String, mut code: u32) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut buf = [0u8; 8];
+    let mut n = 0;
+    if code == 0 { buf[0] = b'0'; n = 1; }
+    while code > 0 { buf[n] = HEX[(code & 0xF) as usize]; code >>= 4; n += 1; }
+    for k in (0..n).rev() { out.push(buf[k] as char); }
 }
 
 /// Ein `<link rel="stylesheet">`, das ein SKRIPT einhaengt, wird zum HOLEN
@@ -6751,6 +6981,64 @@ fn settle_stylesheet(i: &mut Interp, id: u32) {
 /// Der Wirt meldet, wie es einem angeforderten Blatt ergangen ist.
 pub fn sheet_done(i: &mut Interp, id: u32, ok: bool) {
     let _ = dispatch(i, if ok { "load" } else { "error" }, &[id]);
+}
+
+/// Ein `<script src>`, das ein SKRIPT einhaengt, wird zum Holen angemeldet.
+///
+/// **Das ist die Art, in der ein geteiltes Buendel seine Stuecke nachlaedt.**
+/// webpack baut dafuer ein `<script>`, haengt es an den Kopf und wartet auf
+/// sein `onload`; Next.js wartet auf genau dieses Versprechen, BEVOR es
+/// React ueberhaupt etwas zu rendern gibt. Kam nie eine Antwort, blieb das
+/// Versprechen offen und die Seite leer — ohne eine einzige Fehlermeldung,
+/// weil formal nichts schiefgegangen war.
+///
+/// Drei Grenzen, jede mit Grund:
+/// * **Nur mit `src`.** Ein eingehaengtes Skript MIT Text laeuft laut
+///   Spezifikation sofort beim Einhaengen; das ist eine eigene Baustelle
+///   und hier bewusst nicht angefasst.
+/// * **Nur einmal.** Das „already started"-Kennzeichen der Spezifikation:
+///   ein Skript, das man wieder einhaengt, laeuft nicht noch einmal.
+/// * **Kein Modul.** Ein `type="module"` braucht den Graphen, und den loest
+///   der Wirt beim Laden der Seite auf. Es waere ein zweiter Lader — offen
+///   und hier benannt statt still falsch gemacht.
+fn settle_script(i: &mut Interp, id: u32) {
+    let src = i.doc.as_ref().and_then(|d| {
+        let n = &d.nodes[id as usize];
+        if &*n.tag != "script" || !is_connected(d, id) { return None }
+        if n.attr("type").is_some_and(|t| {
+            let t = t.trim().to_ascii_lowercase();
+            !(t.is_empty() || t.contains("javascript") || t == "text/ecmascript")
+        }) { return None }
+        n.attr("src").filter(|s| !s.trim().is_empty()).cloned()
+    });
+    let Some(src) = src else { return };
+    if i.ran_scripts.contains(&id) { return }
+    if i.pending_scripts.iter().any(|(n, _)| *n == id) { return }
+    i.ran_scripts.push(id);
+    i.pending_scripts.push((id, src.to_string()));
+}
+
+/// Der Wirt meldet, was aus einem angeforderten Skript geworden ist.
+///
+/// `Some(quelle)` heisst geholt: der Text laeuft im Bereich der Seite, und
+/// DANACH faellt `load` — die Reihenfolge des Browsers, auf die jeder
+/// Nachlader baut. Ein Wurf im Skript beendet nur dieses Skript; `load`
+/// faellt trotzdem, denn geladen wurde es ja.
+pub fn script_done(i: &mut Interp, id: u32, source: Option<&str>) {
+    let Some(src) = source else {
+        let _ = dispatch(i, "error", &[id]);
+        return;
+    };
+    match super::parse(src, false) {
+        Ok(prog) => {
+            if let Err(a) = i.run_program(&prog) {
+                let msg = super::modules::describe(i, a);
+                i.console_push(alloc::format!("error: {msg}"));
+            }
+        }
+        Err(e) => i.console_push(alloc::format!("error: SyntaxError: {} @{}", e.msg, e.at)),
+    }
+    let _ = dispatch(i, "load", &[id]);
 }
 
 /// Eine unbehandelte Ablehnung ans Fenster melden. Liefert true, wenn ein

@@ -359,6 +359,7 @@ struct St<'a> {
     f: Flags,
     caps: Vec<Option<(usize, usize)>>,
     steps: u32,
+    budget: u32,
 }
 
 /// Wie viele Rueckverfolgungsschritte ein Treffer kosten darf.
@@ -367,6 +368,19 @@ struct St<'a> {
 /// stellt die fremde Seite. Reisst der Deckel, gilt „kein Treffer" — falsch,
 /// aber begrenzt falsch, und ein haengender Browser waere schlimmer.
 const MAX_STEPS: u32 = 400_000;
+/// Was jedes weitere Zeichen der Eingabe dem Deckel zulegt.
+///
+/// **Der Deckel galt bis 0.174.0 je STARTSTELLE, und damit gar nicht.** Ein
+/// Muster ohne Anker wird an jeder Stelle neu versucht; bei 300 000 Zeichen
+/// Stilblatt waren das 300 000 × 400 000 Schritte, also kein Deckel, sondern
+/// ein haengender Browser. Gefunden an DuckDuckGos Ergebnisseite: sie laedt
+/// `css-vars-ponyfill` nach und laesst es ihre eigenen Blaetter mit
+/// verschachtelten Mustern zerlegen.
+///
+/// Jetzt gilt er fuer den GANZEN Lauf, waechst aber mit der Eingabe: eine
+/// ehrliche Suche kostet ungefaehr einen Schritt je Zeichen, und ein Muster,
+/// das viel mehr braucht, sucht nicht mehr, sondern zaehlt Wege ab.
+const STEPS_PER_CHAR: u32 = 64;
 
 fn is_word(c: char) -> bool { c.is_ascii_alphanumeric() || c == '_' }
 fn is_space(c: char) -> bool {
@@ -401,7 +415,7 @@ type K<'k> = &'k dyn Fn(&mut St, usize) -> Option<usize>;
 
 fn m(n: &Node, st: &mut St, pos: usize, k: K) -> Option<usize> {
     st.steps += 1;
-    if st.steps > MAX_STEPS { return None; }
+    if st.steps > st.budget { return None; }
     match n {
         Node::Empty => k(st, pos),
         Node::Char(c) => {
@@ -532,15 +546,46 @@ fn repeat(node: &Node, min: u32, max: u32, greedy: bool, st: &mut St,
 
 impl Regex {
     /// Sucht ab `start`. `sticky` erzwingt einen Treffer GENAU dort.
+    /// Faengt JEDER Weg durch das Muster mit `^` an?
+    ///
+    /// **Dann gibt es genau eine Startstelle, und das ist keine Feinheit.**
+    /// Ohne diese Frage probiert `exec` ein verankertes Muster an jeder
+    /// Stelle der Eingabe — jede davon scheitert sofort, aber sie kostet.
+    /// Ein handgeschriebener Parser ruft sein `^…` einmal je Wortmarke auf
+    /// dem RESTTEXT auf, und aus linear wird quadratisch: bei DuckDuckGos
+    /// 300-KB-Blatt und dem `css-vars-ponyfill` davor lief der Lauf in
+    /// 25 Minuten nicht zu Ende.
+    ///
+    /// Mit `m` gilt die Verankerung je ZEILE, dann stimmt die Abkuerzung
+    /// nicht mehr — deshalb steht die Flagge in der Bedingung.
+    fn anchored(n: &Node) -> bool {
+        match n {
+            Node::Start => true,
+            Node::Seq(v) => v.first().is_some_and(Self::anchored),
+            Node::Alt(v) => !v.is_empty() && v.iter().all(Self::anchored),
+            Node::Group { node, .. } => Self::anchored(node),
+            _ => false,
+        }
+    }
+
     pub fn exec(&self, s: &[char], start: usize) -> Option<Match> {
-        let last = if self.flags.sticky { start } else { s.len() };
+        let last = if self.flags.sticky || (!self.flags.multiline && Self::anchored(&self.root)) {
+            start
+        } else { s.len() };
+        let budget = MAX_STEPS.saturating_add((s.len() as u32).saturating_mul(STEPS_PER_CHAR));
+        // Die Fanggruppen EINMAL, nicht je Startstelle: eine Allokation je
+        // Zeichen der Eingabe ist auf einem Stilblatt teurer als das Suchen.
+        let mut st = St { s, f: self.flags, caps: alloc::vec![None; self.group_count + 1],
+                          steps: 0, budget };
         for at in start..=last {
-            let mut st = St { s, f: self.flags, caps: vec![None; self.group_count + 1], steps: 0 };
+            for c in st.caps.iter_mut() { *c = None; }
             if let Some(end) = m(&self.root, &mut st, at, &|_, e| Some(e)) {
                 st.caps[0] = Some((at, end));
                 return Some(Match { caps: st.caps });
             }
+            if st.steps > st.budget { return None }
             if self.flags.sticky { break; }
+            if at >= last { break; }
         }
         None
     }
