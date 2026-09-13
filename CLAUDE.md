@@ -48,7 +48,38 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-13 · beak 0.175.1 · Kernel 0.339.0** (Rest: `git log`)
+**Stand 2026-09-13 · beak 0.175.2 · Kernel 0.339.0** (Rest: `git log`)
+
+**0.175.2: `indexOf` verwarf seine Startstelle — und jede Suchschleife im
+Web lief ewig.** Der Geraetelauf von 0.175.1 zeigte es: die Suche ging durch
+(23 907 statt 177 105 Bytes — das IST die Ergebnisseite), dann 74 Sekunden
+Rechnen und **PANIK im Allokator, 2476 MB**. Host-seitig nachgestellt: 18 GB
+in 120 Sekunden. Vier Schritte bis zur Ursache — RSS ueber die Zeit, ein
+Allokator mit Rueckwaertsspur (`RawTable<(Rc<str>, Prop)>`, 813 MB), ein
+Zaehler auf dem groessten Objekt (**ein Array mit 27 623 529 Eintraegen**,
+und `new_array` hatte nie mehr als 640 auf einmal gebaut, es wuchs also
+Element fuer Element), und zuletzt ein Abzug der Rahmennamen aus der
+Maschine: `indexOf … push pop` = `balanced-match`, das
+`css-vars-ponyfill` mitbringt und seine Klammerpaare mit
+`i = r.indexOf(e, l + 1)` sucht.
+
+**`indexOf`, `lastIndexOf` und `includes` haben ihren Positionsparameter
+verworfen — bei ZEICHENKETTEN und bei FELDERN, sechs Funktionen.**
+`"aaa".indexOf("a", 1)` gab 0 statt 1. Damit steht in jeder Suchschleife der
+Zeiger still. Jetzt nach Spezifikation samt Feinheiten: negative Stelle
+zaehlt vom Ende, `lastIndexOf` ohne Stelle sucht vom ENDE und laesst den
+Treffer darueber hinausragen, `includes` lehnt ein RegExp ab. beak rechnet
+in ZEICHEN, Rust schneidet in Bytes — dazwischen steht genau eine
+Umrechnung. **test262 exec 82,76 → 83,07 %** (+246).
+
+**Und damit rendert DuckDuckGos Ergebnisseite**: zehn `<article>`-Treffer,
+der erste mit Titel, Adresse und Auszug. `pagerun` hat die Werkzeuge
+dazubekommen, mit denen das zu finden war: `STATS=1` (Behaelter + RSS je
+Runde), `LOUD=<bytes>` (Allokation mit Rueckwaertsspur), `NOCLOCK=1`.
+
+**Offen und benannt:** `canvas.getContext("2d")` gibt `null`, und die Seite
+faellt darueber · eine `@font-face` mit `data:`-Adresse wird nicht dekodiert
+· der Deckel von 32 externen Skripten greift auf DDGs STARTseite (35).
 
 **0.175.1: die getippte Suche ging an einer Nummer verloren, die sich
 bewegt.** Aus dem Geraetelauf, und der Log sagte es ohne Vermutung —
