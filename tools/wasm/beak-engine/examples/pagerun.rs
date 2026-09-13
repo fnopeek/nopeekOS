@@ -86,15 +86,35 @@ fn host_random(out: &mut [u8]) -> bool {
 /// zeigt Rechenzeit, und eine einzige Allokation von 1,8 GB kostet keine.
 struct Loud;
 static LOUD_LIMIT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
+/// Was gerade WIRKLICH belegt ist — Allokationen minus Freigaben.
+///
+/// **Der RSS ist die falsche Zahl.** Er zeigt, was der Wirtsallokator vom
+/// System behalten hat, nicht was die Seite haelt; auf dem Geraet entscheidet
+/// aber die zweite. Der Unterschied war auf DuckDuckGos Ergebnisseite der
+/// zwischen 1,4 GB und dem, was wirklich lebt.
+pub static LIVE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+pub static LIVE_PEAK: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+fn note_alloc(n: usize) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let v = LIVE.fetch_add(n as i64, Relaxed) + n as i64;
+    if v > LIVE_PEAK.load(Relaxed) { LIVE_PEAK.store(v, Relaxed); }
+}
+
 unsafe impl std::alloc::GlobalAlloc for Loud {
     unsafe fn alloc(&self, l: std::alloc::Layout) -> *mut u8 {
+        note_alloc(l.size());
         if l.size() >= LOUD_LIMIT.load(std::sync::atomic::Ordering::Relaxed) {
             eprintln!("\n=== ALLOC {} B ===\n{}", l.size(), std::backtrace::Backtrace::force_capture());
         }
         unsafe { std::alloc::System.alloc(l) }
     }
-    unsafe fn dealloc(&self, p: *mut u8, l: std::alloc::Layout) { unsafe { std::alloc::System.dealloc(p, l) } }
+    unsafe fn dealloc(&self, p: *mut u8, l: std::alloc::Layout) {
+        LIVE.fetch_sub(l.size() as i64, std::sync::atomic::Ordering::Relaxed);
+        unsafe { std::alloc::System.dealloc(p, l) }
+    }
     unsafe fn realloc(&self, p: *mut u8, l: std::alloc::Layout, n: usize) -> *mut u8 {
+        LIVE.fetch_sub(l.size() as i64, std::sync::atomic::Ordering::Relaxed);
+        note_alloc(n);
         if n >= LOUD_LIMIT.load(std::sync::atomic::Ordering::Relaxed) {
             eprintln!("\n=== REALLOC {} B ===\n{}", n, std::backtrace::Backtrace::force_capture());
         }
@@ -273,6 +293,9 @@ Beobachter={}/{} Kekse={} rss={} MB",
                 sess.interp.resize_obs.len(), sess.interp.inter_obs.len(),
                 sess.interp.cookies.len(),
                 rss_mb());
+            use std::sync::atomic::Ordering::Relaxed;
+            println!("          Halde LEBEND {} MB, Spitze {} MB",
+                LIVE.load(Relaxed) / 1048576, LIVE_PEAK.load(Relaxed) / 1048576);
         }
         // **Erst bedienen, dann die Uhr laufen lassen.** Wer wartet, darf die
         // Zeitgeber nicht vorziehen — sonst faellt webpacks
