@@ -914,7 +914,22 @@ impl Page {
         // Eine NAVIGATION wirft die Eingaben weg, ein Skriptlauf nicht — was
         // der Benutzer getippt hat, gehoert ihm, auch wenn die Seite daneben
         // etwas umbaut.
-        if navigated { self.state.reset(); }
+        //
+        // **Und „gehoert ihm" heisst: es muss die Nummerierung ueberleben.**
+        // `Doc::to_dom` vergibt die `seq` bei JEDEM Zurueckschreiben neu, von
+        // eins an in Dokumentreihenfolge — ein einziger Knoten mehr am
+        // Anfang, und jedes Steuerelement dahinter heisst anders. `FormState`
+        // ist nach genau dieser Zahl geschluesselt. Auf DuckDuckGos
+        // Startseite wanderten die Knoepfe zwischen 156 und 157 hin und her,
+        // und die Sucheingabe war nach jedem Lauf verwaist: abgeschickt wurde
+        // ein leeres `q`. Der BAUM traegt den Wert (dorthin schreibt jeder
+        // Tastendruck), also wird er von dort zurueckgeholt — unter den neuen
+        // Nummern.
+        if navigated {
+            self.state.reset();
+        } else if let Some(s) = js_session() {
+            pull_control_values(self, s);
+        }
         self.log_forms();
         true
     }
@@ -3868,6 +3883,17 @@ fn submit_form(engine: &Engine, page: &mut Page, activated: Option<u32>) -> bool
     let form_seq = activated.or(page.state.focus)
         .and_then(|s| page.forms.get(s)?.form)
         .and_then(|f| page.forms.forms.get(f).map(|d| d.seq));
+    // Die Steuerelemente, um die es geht, ueber ihre BAUMknoten festhalten:
+    // der Behandler der Seite darf umbauen, und dann heissen sie anders
+    // (`to_dom` nummeriert neu). Ohne das zeigte `activated` nach dem
+    // Behandler auf ein anderes Element — oder auf keines, und dann wurde
+    // gar nichts abgeschickt.
+    let node_of = |s: Option<u32>| -> Option<u32> {
+        let s = s?;
+        js_session().and_then(|x| x.interp.doc.as_ref()).and_then(|d| d.by_seq(s))
+    };
+    let act_node = node_of(activated);
+    let focus_node = node_of(page.state.focus);
     if let Some(fs) = form_seq {
         arm_script_budget();
         // VOR dem Behandler. Er kann Minuten rechnen (eine Anmeldung, die
@@ -3911,6 +3937,15 @@ fn submit_form(engine: &Engine, page: &mut Page, activated: Option<u32>) -> bool
         m.push_str(" ms");
         log(&m);
     }
+    // Und zurueck: derselbe Knoten, seine JETZIGE Nummer.
+    let seq_of = |n: Option<u32>| -> Option<u32> {
+        let n = n?;
+        js_session().and_then(|x| x.interp.doc.as_ref())
+            .and_then(|d| d.nodes.get(n as usize).map(|x| x.seq))
+            .filter(|s| *s != 0)
+    };
+    let activated = seq_of(act_node).or(activated);
+    if let Some(f) = seq_of(focus_node) { page.state.focus = Some(f); }
     let sub = match forms::submit(&page.forms, &page.state, activated) {
         Some(s) => s,
         // Silence here reads as "the button is dead". It is not the same
@@ -4886,6 +4921,7 @@ fn edit_key(engine: &Engine, page: &mut Page, key: KeyCode) -> bool {
                 .map(|b| b.seq);
             page.state.set_value(seq, value);
             page.state.caret = caret;
+            push_control_values(page);
             submit_form(engine, page, activated);
             return true;
         }
@@ -4893,6 +4929,11 @@ fn edit_key(engine: &Engine, page: &mut Page, key: KeyCode) -> bool {
     }
     page.state.set_value(seq, value);
     page.state.caret = caret;
+    // **In den BAUM, bei jedem Tastendruck.** Die `seq`, unter der der Wert
+    // in `FormState` liegt, gilt nur bis zum naechsten `to_dom` — der
+    // Baumknoten gilt weiter. Er ist die Bruecke, ueber die `sync` den Wert
+    // zurueckholt, und nebenbei das, was ein Behandler der Seite liest.
+    push_control_values(page);
     true
 }
 
@@ -4914,11 +4955,15 @@ fn activate(engine: &Engine, page: &mut Page, seq: u32) {
             page.state.focus = Some(seq);
             let f = &page.forms;
             page.state.toggle(f, seq);
+            // Derselbe Grund wie beim Tippen: der Haken gehoert in den Baum,
+            // sonst ueberlebt er das naechste `to_dom` nicht.
+            push_control_values(page);
         }
         ControlKind::Select => {
             page.state.focus = Some(seq);
             let f = &page.forms;
             page.state.cycle_select(f, seq);
+            push_control_values(page);
         }
         _ => {
             // A text field takes focus with the caret at the end.

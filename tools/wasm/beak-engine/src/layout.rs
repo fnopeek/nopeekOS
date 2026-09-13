@@ -4765,6 +4765,16 @@ family: st.family,
             checked: self.forms.checked_or(el.seq, el.attr("checked").is_some()),
             disabled: el.attr("disabled").is_some(),
             focused,
+            focus_ring: if st.outline_set {
+                // Die Seite hat es in die Hand genommen: ihr Wort gilt, und
+                // `outline: none` heisst NICHTS malen.
+                (st.outline.styled && st.outline.width > 0.0).then(|| (
+                    px_of(st.outline.width).max(1),
+                    Some(st.outline.color.unwrap_or(st.color)),
+                    px_of(st.outline_offset)))
+            } else {
+                Some((1, None, 0))
+            },
             caret,
             bg: st.bg,
             accent: st.accent,
@@ -9655,6 +9665,17 @@ struct CtlBox {
     /// blasst ihn ab; beak malte ihn bis hierher unveraendert.
     disabled: bool,
     focused: bool,
+    /// Der Fokusring, wenn dieses Steuerelement die Tastatur hat: Breite,
+    /// Farbe (`None` = die des Themas) und Abstand vom Rahmenkasten.
+    ///
+    /// **Ein Browser malt hier eine `outline`, keinen umgefaerbten Rahmen.**
+    /// beak faerbte bis 0.175.0 den Rahmen der SEITE blau um — auf
+    /// DuckDuckGos rundem Suchfeld sah das aus wie ein Fehler, und es war
+    /// einer: die Seite hatte ihre Farbe gesagt, und wir haben sie
+    /// ueberschrieben. Ein Umriss liegt AUSSERHALB des Kastens und nimmt
+    /// nichts weg. Hat die Seite selbst etwas ueber `outline` gesagt, gilt
+    /// ihr Wort — auch das Nein.
+    focus_ring: Option<(i32, Option<Rgba>, i32)>,
     /// Caret position in characters, when this control has keyboard focus.
     caret: Option<usize>,
     /// The control's own `background-color`, if the page styled it.
@@ -9939,7 +9960,7 @@ fn paint_control(
     // dunkles Thema hat: 150/255 zwischen Flaeche und Textfarbe ergibt auf
     // Weiss #7c7c7c und auf Dunkel dasselbe Mittelgrau von der anderen Seite
     // ([[feedback_dark_mode_is_two_things]]).
-    let border = Rgba::opaque(if ctl.focused { theme.link } else { mix(theme.bg, theme.text, 150) });
+    let border = Rgba::opaque(mix(theme.bg, theme.text, 150));
     let round = ctl.radius.iter().any(|r| *r > 0.5);
     // Eine gerundete Ecke kann nicht aus vier Rechtecken bestehen. Solange alle
     // vier Seiten dieselbe Breite und Farbe haben — bei Knoepfen und Feldern
@@ -9951,13 +9972,35 @@ fn paint_control(
         let same = [r, b, l].iter().all(|s| s.w == t.w && s.transparent == t.transparent
                                             && s.color.map(|c| c.c) == t.color.map(|c| c.c));
         (round && same && t.w > 0 && !t.transparent)
-            .then(|| (t.w as f32, if ctl.focused { border } else { t.color.unwrap_or(border) }))
+            .then(|| (t.w as f32, t.color.unwrap_or(border)))
     };
     let frame = |ops: &mut Vec<DrawOp>| match ring {
         Some((bw, color)) => ops.push(DrawOp::RoundRect {
             x, y: top, w, h, r: ctl.radius, color, ring: bw,
         }),
-        None => stroke_frame(ops, x, top, w, h, &ctl.border, border, ctl.focused),
+        None => stroke_frame(ops, x, top, w, h, &ctl.border, border),
+    };
+    // **Der Fokus liegt AUSSERHALB.** Ein Browser zeichnet hier eine
+    // `outline`: sie nimmt dem Kasten nichts weg und faerbt nichts um. Was
+    // die Seite selbst ueber `outline` gesagt hat, gilt — auch ihr Nein.
+    let focus_op = |ops: &mut Vec<DrawOp>| {
+        let Some((rw, rc, off)) = ctl.focus_ring else { return };
+        if !ctl.focused || rw <= 0 { return }
+        let c = rc.unwrap_or(Rgba::opaque(theme.link));
+        let o = off + rw;
+        let (rx, ry, rrw, rrh) = (x - o, top - o, w + 2 * o, h + 2 * o);
+        if rrw <= 0 || rrh <= 0 { return }
+        if round {
+            let r = ctl.radius.map(|v| if v > 0.5 { v + o as f32 } else { 0.0 });
+            ops.push(DrawOp::RoundRect { x: rx, y: ry, w: rrw, h: rrh, r, color: c, ring: rw as f32 });
+        } else {
+            for (bx, by, bw, bh) in [
+                (rx, ry, rrw, rw), (rx, ry + rrh - rw, rrw, rw),
+                (rx, ry, rw, rrh), (rx + rrw - rw, ry, rw, rrh),
+            ] {
+                ops.push(DrawOp::Rect { x: bx, y: by, w: bw, h: bh, color: c });
+            }
+        }
     };
     // Die Flaeche — gerundet, wenn die Seite es sagt.
     let face_op = |ops: &mut Vec<DrawOp>, color: Rgba| {
@@ -10178,6 +10221,9 @@ family: ctl.style.family,
             }
         }
     }
+    // Zuletzt, also OBEN: der Ring liegt ueber allem, was das Steuerelement
+    // selbst gemalt hat.
+    focus_op(ops);
     controls.push(rect(ops, ctl));
 }
 
@@ -10189,12 +10235,9 @@ family: ctl.style.family,
 /// left still gets a 1px ring while it has the keyboard, because that ring is
 /// an OUTLINE — it says where typing goes, and a page hiding its border never
 /// meant to hide that.
-fn stroke_frame(ops: &mut Vec<DrawOp>, x: i32, y: i32, w: i32, h: i32, sides: &[CtlSide; 4], ua: Rgba, focused: bool) {
+fn stroke_frame(ops: &mut Vec<DrawOp>, x: i32, y: i32, w: i32, h: i32, sides: &[CtlSide; 4], ua: Rgba) {
     let visible = |s: &CtlSide| s.w > 0 && !s.transparent;
-    if focused && !sides.iter().any(visible) {
-        stroke_rect(ops, x, y, w, h, ua);
-        return;
-    }
+    let _ = &visible;
     let [t, r, b, l] = *sides;
     // Widths are clamped to the box so a frame thicker than its control still
     // reads as a frame instead of painting past the far edge.
@@ -10206,10 +10249,7 @@ fn stroke_frame(ops: &mut Vec<DrawOp>, x: i32, y: i32, w: i32, h: i32, sides: &[
     ] {
         if visible(&side) {
             let (rx, ry, rw, rh) = rect;
-            // Focus recolours the whole frame, author colours included — the
-            // control has the keyboard, and that has to be visible on a page
-            // that gave its fields a colour of their own.
-            let color = if focused { ua } else { side.color.unwrap_or(ua) };
+            let color = side.color.unwrap_or(ua);
             ops.push(DrawOp::Rect { x: rx, y: ry, w: rw, h: rh, color });
         }
     }
@@ -14507,7 +14547,12 @@ fn dbg_wiki_shape() {
         let l2 = lay_forms(html, 800, &st);
         assert!(l2.ops.iter().any(|o| matches!(o, DrawOp::Text { text, .. } if text == "nopeek")));
         assert!(!l2.ops.iter().any(|o| matches!(o, DrawOp::Text { text, .. } if text == "Suchbegriff")));
-        assert_eq!(rects(&l2).len(), plain_rects + 1, "the caret is the one extra rect");
+        // Der Fokus bringt zweierlei mit: den Caret und den Ring, den ein
+        // Browser als `outline` AUSSERHALB des Kastens malt (vier Kanten).
+        // Bis 0.175.0 faerbte beak stattdessen den Rahmen der Seite um — das
+        // sah auf einem Feld, das seine Farbe selbst gesagt hat, falsch aus,
+        // und es war falsch.
+        assert_eq!(rects(&l2).len(), plain_rects + 4 + 1, "Ring (4 Kanten) und Caret");
     }
 
     #[test]
@@ -14617,6 +14662,30 @@ fn dbg_wiki_shape() {
         st.focus = Some(seq);
         let focused = lay_forms(html, 400, &st);
         assert_eq!(rects(&focused).len(), rects(&l).len() + 4 + 1, "ring plus caret");
+    }
+
+    /// **Sagt die Seite `outline: none`, gibt es keinen Ring — und ihr
+    /// Rahmen behaelt seine Farbe.**
+    ///
+    /// So macht es jeder Browser: der Fokus ist eine `outline`, und eine
+    /// Seite darf sie abschalten. beak faerbte bis 0.175.0 stattdessen den
+    /// RAHMEN der Seite um; auf DuckDuckGos Suchfeld, das seine Farbe selbst
+    /// nennt, wurde daraus ein blauer Kasten, den niemand bestellt hatte.
+    #[test]
+    fn a_page_that_says_outline_none_gets_no_focus_ring() {
+        let html = "<body><form action=/s>\
+                    <input name=q style=\"border:2px solid #ff0000;outline:none\"></form></body>";
+        let l = lay(html, 400);
+        let seq = l.controls[0].seq;
+        let mut st = FormState::default();
+        st.focus = Some(seq);
+        let focused = lay_forms(html, 400, &st);
+        // Nur der Caret kommt dazu.
+        assert_eq!(rects(&focused).len(), rects(&l).len() + 1, "kein Ring, nur der Caret");
+        // Und der Rahmen ist noch der der Seite.
+        let red = rects(&focused).iter()
+            .filter(|r| r.4 == Rgb(0xff, 0x00, 0x00)).count();
+        assert!(red > 0, "der Rahmen der Seite behaelt seine Farbe");
     }
 
     /// **Das Zeichen ist ein HAKEN, kein Quadrat.** Bis 0.149.0 stand hier
