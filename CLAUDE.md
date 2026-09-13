@@ -48,7 +48,29 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-13 · beak 0.175.2 · Kernel 0.339.0** (Rest: `git log`)
+**Stand 2026-09-13 · beak 0.175.2 · Kernel 0.340.0** (Rest: `git log`)
+
+**Kernel 0.340.0: ein Modul konnte die ganze Maschine aufbrauchen.** Aus dem
+Geraetelauf: Seitenfehler auf `0xfffffffffffffffd` — das ist `null - 3`,
+eine benutzte Fehlallokation —, RIP im dynamisch erzeugten Code, danach
+`capacity overflow` im Kernel. **`MAX_MEMORY_BYTES` ist die
+ADRESSRESERVIERUNG eines forge-Platzes (8 GB), kein RAM-Deckel**, und
+dazwischen stand nichts: ein Modul wuchs bis zum letzten Rahmen, und eine
+leere Maschine ist kein Zustand, aus dem ein Kernel noch eine Absage
+schreiben kann. Jetzt zwei Schranken in `memory.grow`, beide als Absage AN
+DAS MODUL: `MAX_INSTANCE_BYTES` = 1 GB je Instanz (der gemessene Normalfall
+sind 44–90 MiB) und `KERNEL_RESERVE_MB` = 96 MB, die der Kernel fuer sich
+behaelt. Das Modul endet dann in seinem eigenen `unreachable` — eine tote
+Seite statt einer toten Maschine. **Das ist die Antwort auf die Frage aus dem
+Sicherheits-Checkpoint**, und sie war bisher „ja".
+
+**Und der Grund dahinter, gemessen: `Rc` sammelt keine Ringe ein, und Reacts
+Fiberbaum IST einer.** Auf DDGs Ergebnisseite haelt beak **2002 MB LEBEND
+bei 1478 DOM-Knoten** (`STATS=1` in `pagerun` zaehlt die lebende Halde, nicht
+den RSS). `value.rs` sagt es im Kopf seit je — „Zaehlende Freigabe, kein
+Sammler" —, nur war es folgenlos, solange React ohnehin nicht lief. **Das ist
+jetzt der naechste harte Posten**, siehe
+`memory/feedback_rc_has_no_collector_and_react_is_a_ring.md`.
 
 **0.175.2: `indexOf` verwarf seine Startstelle — und jede Suchschleife im
 Web lief ewig.** Der Geraetelauf von 0.175.1 zeigte es: die Suche ging durch
