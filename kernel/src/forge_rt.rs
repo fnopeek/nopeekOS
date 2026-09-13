@@ -31,6 +31,33 @@ const INSTANCE_STRIDE: u64 = 16 * 1024 * 1024 * 1024;
 /// an eight-byte access at the very top needs.
 pub const MAX_MEMORY_BYTES: u64 = 8 * 1024 * 1024 * 1024 + 0x1000;
 
+/// Wieviel Arbeitsspeicher EIN Modul wirklich belegen darf.
+///
+/// **`MAX_MEMORY_BYTES` ist die Adressreservierung, kein Deckel** — sie sagt,
+/// wie weit ein Platz reicht, nicht wieviel RAM er nehmen darf. Dazwischen
+/// stand bis hierher nichts: ein Modul wuchs, bis die MASCHINE leer war, und
+/// dann starb der Kernel an seiner eigenen naechsten Allokation. Gemessen am
+/// 2026-09-13 an DuckDuckGos Ergebnisseite — beak hielt dort 2 GB, weil `Rc`
+/// keine Ringe einsammelt und Reacts Fiberbaum einer ist. Im Log: Seitenfehler
+/// auf `0xfffffffffffffffd` (das ist `null - 3`, eine benutzte
+/// Fehlallokation), danach „capacity overflow" im Kernel, Halt.
+///
+/// **Ein Modul, das zuviel will, muss sterben; die Maschine nicht.** Das ist
+/// dieselbe Grenze wie jede andere in diesem System: die Sandbox darf nicht
+/// nach draussen wirken, und der Arbeitsspeicher der ganzen Maschine ist
+/// draussen.
+///
+/// Die Zahl steht ueber dem gemessenen Normalfall, nicht darunter
+/// ([[feedback_a_cap_set_from_a_guess_is_below_the_normal_case]]): eine
+/// gewoehnliche Seite haelt in beak 44 bis 90 MiB, und beak ist das
+/// hungrigste Modul, das es gibt. Ein Gigabyte ist das Zehnfache davon.
+pub const MAX_INSTANCE_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Was der Kernel fuer sich behaelt. Ohne diese Reserve gibt er den letzten
+/// Rahmen an ein Modul und kann danach nicht einmal mehr die Absage
+/// aufschreiben — genau das ist am 2026-09-13 passiert.
+pub const KERNEL_RESERVE_MB: usize = 96;
+
 const PAGE: u64 = 4096;
 
 /// Wieviele Plaetze es GIBT. Ein Platz ist `INSTANCE_STRIDE` breit, und
@@ -394,6 +421,22 @@ extern "C" fn grow(ctx: *mut u64, delta: u32) -> u32 {
             crate::kprintln!(
                 "[npk] forge: memory.grow abgelehnt — Deckel erreicht ({} von hoechstens {} Seiten)",
                 new_pages, max_pages);
+            return u32::MAX;
+        }
+        // Der Deckel des MODULS, und darunter die Reserve der MASCHINE.
+        // Beides ist eine Absage an das Modul, keine Panik im Kernel.
+        if new_pages * 65536 > MAX_INSTANCE_BYTES {
+            crate::kprintln!(
+                "[npk] forge: memory.grow abgelehnt — Modul-Deckel erreicht ({} MB von hoechstens {} MB)",
+                new_pages * 65536 / (1024 * 1024), MAX_INSTANCE_BYTES / (1024 * 1024));
+            return u32::MAX;
+        }
+        let (_, free_mb) = crate::memory::stats();
+        let want_mb = (delta as usize * 65536).div_ceil(1024 * 1024);
+        if free_mb < KERNEL_RESERVE_MB + want_mb {
+            crate::kprintln!(
+                "[npk] forge: memory.grow abgelehnt — Maschine fast leer ({} MB frei, {} MB Reserve, {} MB gefragt)",
+                free_mb, KERNEL_RESERVE_MB, want_mb);
             return u32::MAX;
         }
         if delta > 0 {
