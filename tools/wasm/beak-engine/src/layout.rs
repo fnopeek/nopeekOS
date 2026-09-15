@@ -463,10 +463,24 @@ fn translate_op_list(ops: &mut [DrawOp], dx: i32, dy: i32) {
             | DrawOp::RoundRect { x, y, .. }
             | DrawOp::Check { x, y, .. }
             | DrawOp::Shadow { x, y, .. }
-            | DrawOp::Text { x, y, .. }
             | DrawOp::Image { x, y, .. } => {
                 *x += dx;
                 *y += dy;
+            }
+            // **Der Ausschnitt eines Textlaufs wandert MIT**, aus demselben
+            // Grund wie der des Hintergrunds darunter: er steht in
+            // Dokumentkoordinaten. Blieb er stehen, wurde der Lauf an seiner
+            // NEUEN Stelle gegen ein Rechteck an der ALTEN geschnitten — und
+            // uebrig blieb, wo sich beide um ein Pixel ueberlappten, eine
+            // senkrechte Linie von einem Pixel Breite. Auf DuckDuckGos
+            // Trefferliste standen die quer durch die Seite.
+            DrawOp::Text { x, y, clip, .. } => {
+                *x += dx;
+                *y += dy;
+                if let Some(c) = clip {
+                    c.0 += dx;
+                    c.1 += dy;
+                }
             }
             // Der Malbereich steht in Dokumentkoordinaten wie der Kasten
             // selbst — bleibt er stehen, schneidet er den Hintergrund an der

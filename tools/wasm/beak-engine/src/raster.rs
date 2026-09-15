@@ -2412,6 +2412,35 @@ mod tests {
     const STRIPES_4X1: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAQAAAABCAIAAAB2Xpia\
         AAAAEklEQVR42mP4z8DAAMb//zMAABzwBPxjoz6tAAAAAElFTkSuQmCC";
 
+    /// **Ein Ausschnitt, der nicht mitwandert, schneidet an der ALTEN Stelle.**
+    /// Der Inhalt eines atomaren Inline wird bei 0,0 ausgelegt, dort
+    /// beschnitten und danach an seine Zeilenstelle verschoben. Blieb der
+    /// Ausschnitt stehen, wurde der Lauf an seiner neuen Stelle gegen ein
+    /// Rechteck an der alten geschnitten — uebrig blieb, wo sich beide um ein
+    /// Pixel ueberlappten, eine senkrechte Linie von einem Pixel. Auf
+    /// DuckDuckGos Trefferliste standen die quer durch die Seite.
+    #[test]
+    fn ein_ausschnitt_wandert_mit_seinem_befehl() {
+        let (w, h) = (400u32, 40u32);
+        let mut eng = Engine::new();
+        eng.set_theme(light());
+        let lay = eng.layout(
+            "<body style='margin:0'><div style='padding-left:200px'>\
+             <span style='display:inline-block;overflow:hidden;width:120px;\
+             color:#ff0000;font-size:20px'>HHHHHH</span></div></body>", w);
+        let mut buf = alloc::vec![0u8; (w * h * 4) as usize];
+        eng.paint(&lay, w, h, 0, &mut buf);
+        // Rote Tinte RECHTS von x=200 — dort steht der Kasten wirklich.
+        let mut ink = 0;
+        for y in 0..h {
+            for x in 200..320u32 {
+                let i = ((y * w + x) * 4) as usize;
+                if buf[i + 2] > 120 && buf[i + 1] < 120 && buf[i] < 120 { ink += 1; }
+            }
+        }
+        assert!(ink > 60, "der Text steht an seiner Stelle, nicht als Streifen anderswo ({ink} Punkte)");
+    }
+
     /// **Die Kette von der Ankunft bis zum Pixel**, mit einer
     /// protokollrelativen Adresse — genau der Fall von DuckDuckGos
     /// Trefferliste (`//external-content.duckduckgo.com/ip3/x.ico`). Der Log
