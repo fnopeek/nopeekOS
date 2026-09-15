@@ -2142,9 +2142,36 @@ pub fn resolve_in(
     if s.bg_cc {
         s.bg = Some(s.color);
     }
+    // **Was schwebt oder absolut steht, ist block-artig** (css-display-3 §2.7).
+    // Ohne die Regel blieb ein `display: inline-flex` mit `float: right` ein
+    // ATOMARER INLINE: er stand auf der Zeile statt zu fliessen. Auf DDGs
+    // Wissenskasten war das der „Directions"-Knopf, der links vor dem Titel
+    // klebte, statt rechts neben ihm zu stehen.
+    //
+    // `getComputedStyle` rechnete dieselbe Regel schon — aber NUR fuer
+    // Flexkinder und nur fuer die Antwort, nicht fuers Layout. Jetzt eine
+    // Funktion fuer beide ([[feedback_a_copy_is_a_second_semantics_waiting]]).
+    if s.float != FloatKind::None || matches!(s.position, Position::Absolute | Position::Fixed) {
+        s.display = blockify(s.display);
+    }
     finish_borders(&mut s);
     unbox_contents(&el.tag, &mut s);
     s
+}
+
+/// Die block-artige Entsprechung eines `display` (css-display-3 §2.7).
+///
+/// Gilt fuer alles, was aus dem Fluss faellt — schwebend, absolut, fest — und
+/// fuer ein Flex- oder Rasterkind. `list-item`, `block`, `flex` und `grid`
+/// bleiben, wie sie sind; `none` und `contents` erzeugen gar keinen Kasten.
+pub fn blockify(d: Display) -> Display {
+    match d {
+        Display::Inline | Display::InlineBlock | Display::TableCell | Display::TableCaption
+        | Display::TableRow | Display::TableRowGroup | Display::TableHeaderGroup
+        | Display::TableFooterGroup => Display::Block,
+        Display::InlineFlex => Display::Flex,
+        other => other,
+    }
 }
 
 /// `display: contents` — the element generates no box (css-display-3 §3.1).
