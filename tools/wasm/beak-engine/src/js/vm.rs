@@ -382,7 +382,7 @@ impl Vm {
             // eine echte Abbruchgarantie.
             let counts = match &chunk.ops[ip] {
                 Op::Jump(t) => (*t as usize) <= ip,
-                Op::Call { .. } | Op::New(_) | Op::CallSpread(_) | Op::NewSpread
+                Op::Call { .. } | Op::New { .. } | Op::CallSpread(_) | Op::NewSpread
                 | Op::SetCompletion | Op::DeclVar { .. } | Op::Ret
                 | Op::Yield | Op::Await | Op::ForInNext(_) | Op::SuperCall(_)
                 // Ein `yield*` ruft je Umlauf am inneren Iterator — das treibt
@@ -611,10 +611,11 @@ impl Vm {
                 }
                 self.invoke(i, callee, this, args, n)?;
             }
-            Op::New(argc) => {
+            Op::New { argc, name } => {
                 let args = self.take(*argc as usize);
                 let callee = self.pop();
-                let v = i.construct(&callee, &args)?;
+                let n = chunk.names.get(*name as usize).map(|s| &**s);
+                let v = i.construct_named(&callee, &args, n)?;
                 self.push(v);
             }
             Op::MakeArray(n) => {

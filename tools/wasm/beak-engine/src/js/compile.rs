@@ -130,6 +130,30 @@ pub fn program(prog: &Program) -> CompileResult<Chunk> {
     Ok(c.chunk)
 }
 
+/// Der Name eines Gerufenen, wenn er eine Punktkette aus Bezeichnern ist:
+/// `Foo`, `Intl.PluralRules`, `window.Intl.ListFormat`.
+///
+/// **Die drei Stufen sind kein Luxus.** Ein Buendel schreibt
+/// `new window.Intl.ListFormat(…)`, und mit nur zwei Stufen blieb die
+/// Meldung namenlos — genau in dem Fall, fuer den sie da ist.
+/// Alles andere (`t[n]`, `(0, o.X)`) hat keinen Namen, und dann ist
+/// `u32::MAX` die ehrliche Antwort.
+pub(crate) fn dotted_name(e: &Expr) -> Option<alloc::string::String> {
+    match e {
+        Expr::Ident(n) => Some(n.clone()),
+        Expr::Member { obj, prop: p, optional: false } => match &**p {
+            MemberProp::Ident(p) => {
+                let head = dotted_name(obj)?;
+                // Drei Glieder reichen; laenger sagt eine Meldung nichts mehr.
+                if head.matches('.').count() >= 2 { return None }
+                Some(alloc::format!("{head}.{p}"))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 impl Compiler {
     // ── Anweisungen ──────────────────────────────────────────────────────
     /// Wie `stmt`, aber ohne Abschlusswert. In einer FUNKTION gibt es keinen —
@@ -1272,13 +1296,18 @@ impl Compiler {
                 Ok(())
             }
             Expr::New { callee, args } => {
+                // Wie beim Aufruf: der Name ist fuer die MELDUNG da.
+                let named = match dotted_name(callee) {
+                    Some(n) => self.chunk.name(&n),
+                    None => u32::MAX,
+                };
                 self.expr(callee)?;
                 if Self::args_have_spread(args) {
                     self.args_as_array(args)?;
                     self.chunk.emit(Op::NewSpread);
                 } else {
                     let n = self.plain_args(args)?;
-                    self.chunk.emit(Op::New(n));
+                    self.chunk.emit(Op::New { argc: n, name: named });
                 }
                 Ok(())
             }

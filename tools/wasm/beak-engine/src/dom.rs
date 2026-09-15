@@ -12,6 +12,7 @@
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use crate::entities;
 
 /// A DOM node: an element subtree or a run of text.
 pub enum Node {
@@ -551,7 +552,7 @@ fn decode_all(s: &str) -> String {
     while i < s.len() {
         let ch = s[i..].chars().next().unwrap();
         if ch == '&' {
-            let (d, adv) = decode_entity(&s[i..]);
+            let (d, adv) = decode_entity_at(&s[i..], true);
             out.push_str(&d);
             i += adv;
         } else {
@@ -564,55 +565,80 @@ fn decode_all(s: &str) -> String {
 
 /// Decode one entity starting at `&…`. Returns (text, bytes-consumed). On no
 /// match, consumes just the `&` and returns it literally.
-fn decode_entity(s: &str) -> (String, usize) {
+fn decode_entity(s: &str) -> (String, usize) { decode_entity_at(s, false) }
+
+/// Dasselbe, aber mit der Auskunft, ob wir in einem ATTRIBUT stehen — und das
+/// ist keine Feinheit, sondern der Unterschied zwischen einem funktionierenden
+/// und einem zerstoerten Link.
+///
+/// **Die Tabelle ist jetzt die ganze** (`entities::NAMED`, 2125 Namen).
+/// Vorher standen fuenfzehn hier, und jeder andere Name landete als TEXT auf
+/// der Seite: DuckDuckGos Vorlage schreibt `&ZeroWidthSpace;`, und das stand
+/// zehnmal woertlich in der Randspalte.
+///
+/// Zwei Regeln der Spezifikation (WHATWG §13.2.5.72 f.), beide hier:
+///
+/// * **Ohne `;` gilt nur die Altlast** — die 106 Namen, die HTML weiter ohne
+///   Semikolon zulaesst, und davon die LAENGSTE Uebereinstimmung.
+/// * **In einem Attribut wird eine Altlast NICHT ersetzt**, wenn danach `=`
+///   oder ein alphanumerisches Zeichen steht. Genau dafuer gibt es die Regel:
+///   `?a&copy=1` ist ein Abfrageteil und kein Copyright-Zeichen.
+fn decode_entity_at(s: &str, in_attr: bool) -> (String, usize) {
     debug_assert!(s.starts_with('&'));
-    let mut name = String::new();
-    let mut consumed = 1; // the '&'
-    for ch in s[1..].chars() {
-        if ch == ';' {
-            consumed += 1;
-            let out = match name.as_str() {
-                "amp" => "&".into(),
-                "lt" => "<".into(),
-                "gt" => ">".into(),
-                "quot" => "\"".into(),
-                "apos" => "'".into(),
-                "nbsp" => "\u{00A0}".into(),
-                "mdash" => "\u{2014}".into(),
-                "ndash" => "\u{2013}".into(),
-                "hellip" => "\u{2026}".into(),
-                "copy" => "\u{00A9}".into(),
-                "reg" => "\u{00AE}".into(),
-                "trade" => "\u{2122}".into(),
-                "raquo" => "\u{00BB}".into(),
-                "laquo" => "\u{00AB}".into(),
-                "quot;" => "\"".into(),
-                _ => {
-                    if let Some(rest) = name.strip_prefix('#') {
-                        let cp = if let Some(h) = rest.strip_prefix(['x', 'X']) {
-                            u32::from_str_radix(h, 16).ok()
-                        } else {
-                            rest.parse::<u32>().ok()
-                        };
-                        cp.and_then(char::from_u32).map(String::from).unwrap_or_default()
-                    } else {
-                        // unknown named entity → keep literal
-                        let mut lit = String::from("&");
-                        lit.push_str(&name);
-                        lit.push(';');
-                        lit
-                    }
-                }
-            };
-            return (out, consumed);
+    let rest = &s[1..];
+
+    // Numerisch: `&#123;` / `&#x7b;`. Der Leser darf hier NICHT ueber die
+    // Ziffern hinauslaufen, sonst frisst ein `&#` ohne `;` den halben Text.
+    if let Some(num) = rest.strip_prefix('#') {
+        let hex = num.starts_with(['x', 'X']);
+        let digits = &num[usize::from(hex)..];
+        let n = digits.chars()
+            .take_while(|c| if hex { c.is_ascii_hexdigit() } else { c.is_ascii_digit() })
+            .count();
+        if n > 0 {
+            let body = &digits[..n];
+            let cp = if hex { u32::from_str_radix(body, 16).ok() } else { body.parse::<u32>().ok() };
+            // Das `;` gehoert dazu, wenn es da ist; fehlt es, ist der Verweis
+            // laut Spezifikation trotzdem gueltig (mit Parse-Fehler).
+            let semi = usize::from(digits[n..].starts_with(';'));
+            let adv = 1 + 1 + usize::from(hex) + n + semi;
+            return (cp.and_then(char::from_u32).map(String::from).unwrap_or_default(), adv);
         }
-        if ch == '&' || ch.is_whitespace() || name.len() > 30 {
-            break;
-        }
-        name.push(ch);
-        consumed += ch.len_utf8();
+        return (String::from("&"), 1);
     }
-    ("&".into(), 1)
+
+    // Benannt. Der Name laeuft bis zum ersten Zeichen, das keiner sein kann —
+    // laenger als der laengste der Tabelle braucht niemand zu lesen.
+    let name_len = rest.char_indices()
+        .take_while(|(k, c)| *k < entities::MAX_NAME && c.is_ascii_alphanumeric())
+        .map(|(k, c)| k + c.len_utf8())
+        .last().unwrap_or(0);
+    let name = &rest[..name_len];
+
+    if rest[name_len..].starts_with(';') {
+        if let Some(c) = entities::lookup(name) {
+            return (String::from(c), 1 + name_len + 1);
+        }
+        // Kein bekannter Name: woertlich stehen lassen, wie bisher.
+        let mut lit = String::from("&");
+        lit.push_str(name);
+        lit.push(';');
+        return (lit, 1 + name_len + 1);
+    }
+
+    // Kein Semikolon — nur die Altlast, und im Attribut nur, wenn danach
+    // weder `=` noch ein alphanumerisches Zeichen kommt.
+    if name_len > 0 {
+        if let Some((c, n)) = entities::longest_legacy(name) {
+            let next = rest[n..].chars().next();
+            let blocked = in_attr
+                && next.is_some_and(|c| c == '=' || c.is_ascii_alphanumeric());
+            if !blocked {
+                return (String::from(c), 1 + n);
+            }
+        }
+    }
+    (String::from("&"), 1)
 }
 
 /// Collapse runs of whitespace to a single space, trimming the ends.
@@ -658,6 +684,38 @@ mod tests {
             }
         }
         collapse_ws(&s)
+    }
+
+    /// **Die Tabelle war fuenfzehn Namen gross, das Web hat 2125.** Alles
+    /// andere stand woertlich auf der Seite — DuckDuckGos Randspalte zeigte
+    /// zehnmal `&ZeroWidthSpace;` als Text.
+    #[test]
+    fn jeder_benannte_verweis_wird_ersetzt() {
+        let dom = parse("<p>a&ZeroWidthSpace;b &times; 3&deg; &middot; &shy;x &nixda;</p>");
+        assert_eq!(text_of(dom.body()),
+                   "a\u{200b}b \u{d7} 3\u{b0} \u{b7} \u{ad}x &nixda;");
+    }
+
+    /// Ohne `;` gilt nur die Altlast — und in einem ATTRIBUT auch die nicht,
+    /// wenn `=` oder ein Buchstabe folgt. Sonst zerlegt `?a&copy=1` sich
+    /// selbst (WHATWG §13.2.5.73).
+    #[test]
+    fn eine_altlast_ohne_semikolon_zerstoert_keinen_link() {
+        let dom = parse("<a href=\"/x?a&copy=1&amp;b=2\" title=\"&copy 2026\">&copy 2026</a>");
+        let a = match &dom.body().children[0] { Node::Element(e) => e, _ => panic!() };
+        assert_eq!(a.attr("href"), Some("/x?a&copy=1&b=2"));
+        // Kein `=` dahinter: dort wird ersetzt, im Attribut wie im Text.
+        assert_eq!(a.attr("title"), Some("\u{a9} 2026"));
+        assert_eq!(text_of(a), "\u{a9} 2026");
+    }
+
+    /// Der numerische Leser darf nicht ueber seine Ziffern hinauslaufen.
+    #[test]
+    fn ein_numerischer_verweis_endet_an_seinen_ziffern() {
+        let dom = parse("<p>&#65;&#x42;&#67 D &# E</p>");
+        // `&#67` ohne `;` ist ein Parse-Fehler und wird TROTZDEM ersetzt
+        // (WHATWG §13.2.5.80) — deshalb klebt das C am B.
+        assert_eq!(text_of(dom.body()), "ABC D &# E");
     }
 
     #[test]

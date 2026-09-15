@@ -107,7 +107,11 @@ impl Interp {
             Expr::New { callee, args } => {
                 let f = self.eval(callee, env)?;
                 let a = self.eval_args(args, env)?;
-                self.construct(&f, &a)
+                // Derselbe Name wie in der Befehlsmaschine — beide Maschinen
+                // muessen dieselbe Meldung geben, sonst sagt ein Wechsel des
+                // Weges etwas anderes ueber denselben Fehler.
+                let name = super::compile::dotted_name(callee);
+                self.construct_named(&f, &a, name.as_deref())
             }
             Expr::Spread(inner) => self.eval(inner, env),
             Expr::Super => Ok(Value::Undefined),
@@ -440,6 +444,15 @@ impl Interp {
         self.call(&f, this_val, &a)
     }
 
+    /// Bauen und den NAMEN des Gerufenen mitgeben — er steht nur in der
+    /// Fehlermeldung, und dort entscheidet er den Fall.
+    pub fn construct_named(&mut self, f: &Value, args: &[Value], name: Option<&str>) -> C<Value> {
+        let was = core::mem::replace(&mut self.new_name, name.map(alloc::string::String::from));
+        let r = self.construct(f, args);
+        self.new_name = was;
+        r
+    }
+
     pub fn construct(&mut self, f: &Value, args: &[Value]) -> C<Value> {
         self.construct_on(f, Value::Undefined, args)
     }
@@ -475,7 +488,7 @@ impl Interp {
     /// dem aufgerufenen Konstruktor abweicht (`Reflect.construct`).
     fn construct_full(&mut self, f: &Value, recv: Value, args: &[Value], nt: Option<&Value>)
         -> C<Value> {
-        let Value::Obj(fo) = f else { return self.type_err("value is not a constructor") };
+        let Value::Obj(fo) = f else { return Err(self.not_a_constructor(f)) };
         // Die `construct`-Falle.
         if super::proxy::parts(fo).is_some() {
             return match super::proxy::trap(self, fo, "construct")? {
@@ -494,7 +507,7 @@ impl Interp {
         }
         // Ein nativer Konstruktor baut sein Objekt selbst; ein Pfeil ist keiner.
         if let ObjKind::Native(n) = &fo.borrow().kind {
-            if !n.ctor { return self.type_err("value is not a constructor"); }
+            if !n.ctor { return Err(self.not_a_constructor(f)); }
             let nf = n.clone();
             let was = self.native_new;
             self.native_new = true;
@@ -502,7 +515,7 @@ impl Interp {
             self.native_new = was;
             return r;
         }
-        if !self.is_constructor(f) { return self.type_err("value is not a constructor"); }
+        if !self.is_constructor(f) { return Err(self.not_a_constructor(f)); }
         // Der Prototyp kommt vom NEUZIEL, nicht vom gerufenen Konstruktor.
         // Ohne Neuziel sind beide dasselbe.
         let proto_from = nt.unwrap_or(f).clone();

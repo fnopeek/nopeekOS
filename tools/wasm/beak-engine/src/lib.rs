@@ -21,6 +21,7 @@ pub mod cookies;
 pub mod color;
 pub mod css;
 pub mod dom;
+pub mod entities;
 pub mod fonts;
 pub mod gsub;
 pub mod forms;

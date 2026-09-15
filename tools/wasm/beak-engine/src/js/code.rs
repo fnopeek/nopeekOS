@@ -97,7 +97,11 @@ pub enum Op {
     /// fehlt, und genau das ist im Zielkorpus der haeufigste Fehlschlag.
     Call { argc: u16, name: u32 },
     /// Stapel: callee, arg0..argN → ergebnis.
-    New(u16),
+    /// Der Name des Gerufenen faehrt MIT — nicht fuer das Bauen, sondern fuer
+    /// den Fehlschlag: „Intl.PluralRules is not a constructor" sagt, was
+    /// fehlt, „undefined is not a constructor" nicht. `u32::MAX` heisst
+    /// namenlos (ein Ausdruck statt eines Namens).
+    New { argc: u16, name: u32 },
     /// Feld aus den obersten `n` Werten. `true` an Stelle `k` heisst: dort
     /// stand eine LUECKE (`[1, , 3]`), und die ist nicht dasselbe wie
     /// `undefined` — `in` findet sie nicht.
