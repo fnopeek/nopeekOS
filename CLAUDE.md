@@ -48,7 +48,7 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-15 · beak 0.183.2 · Kernel 0.340.0** (Rest: `git log`)
+**Stand 2026-09-15 · beak 0.183.3 · Kernel 0.340.0** (Rest: `git log`)
 
 **0.183.0: die Bildsammlung las das urspruengliche HTML.** Der Geraetelauf
 beantwortete die gestellte Frage eindeutig — **keine einzige Zeile zu
