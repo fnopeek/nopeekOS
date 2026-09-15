@@ -48,7 +48,17 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-15 · beak 0.180.0 · Kernel 0.340.0** (Rest: `git log`)
+**Stand 2026-09-15 · beak 0.181.0 · Kernel 0.340.0** (Rest: `git log`)
+
+**0.181.0: ein Float zaehlte nicht zur Eigenbreite seiner Zeile.** Florian:
+„proteciton. privacy dann das symbol.. ist auf die neue line geruscht". Auf
+eine Vorlage reduziert: Chromium Kasten 302 breit mit dem Knopf auf der ersten
+Zeile, beak 289 breit mit dem Knopf darunter — und 302 − 289 = 32 ist genau
+die Breite des Knopfes. `intrinsic_walk` MAXTE den Float gegen die Zeile,
+statt ihn dazuzuzaehlen; ein Float steht aber NEBEN der Zeile. Jetzt derselbe
+Weg wie ein atomarer Inline (`run.atomic` summiert, `run.atomic_min`
+konkurriert), womit `Run::floats` als Feld wegfaellt. Danach byte-gleich mit
+Chromium. **WPT 4547 → 4554, gegen die Baseline +7 / −0.**
 
 **0.180.0: ein Textbefehl wurde GANZ behalten, sobald er den Ausschnitt
 beruehrte.** Florians Befund aus dem Bild: „Search Settings" stand lesbar
@@ -923,7 +933,7 @@ war ein Datenobjekt — es gab gar keine Navigation per Skript.
                               async-Tests endlich im Nenner stehen
     test262 parse   96,87 %
     DOM-Aufrufe     99,4 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
-    WPT (CSS)       4547/5180 = 87,8 % ohne Testvehikel (roh 80,5 %)
+    WPT (CSS)       4554/5180 = 87,9 % ohne Testvehikel (roh 80,6 %)
     Bibliotheken    13 von 13 (`<tools>/libprobe/`)
     beak:selftest   Sprache 64/64, Dokument 45/45 (+ async + Kasten)
     Kastengeometrie Bootstrap 413/415 (170 identisch) · Tailwind 165/165
