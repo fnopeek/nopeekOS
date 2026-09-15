@@ -512,6 +512,15 @@ erreichbar ({} Umgebungen, {} Eigenschaften){}",
             }
             lay = eng.layout_ext(&html, &css, width);
         }
+        // `IMGOPS=1` nennt jeden Bildbefehl mit seinem Kasten — die einzige
+        // Art, einen Bildkasten zu pruefen, der auf 1 px zusammenfaellt.
+        if std::env::var("IMGOPS").is_ok() {
+            for o in lay.ops.iter() {
+                if let beak_engine::layout::DrawOp::Image { x, y, w, h, src, .. } = o {
+                    println!("IMG {x:5},{y:<5} {w:5}x{h:<5} {src}");
+                }
+            }
+        }
         println!("  Schriften der Seite: {}", eng.web_font_count());
         let h = lay.height.clamp(1, 20000);
         let mut buf = vec![0u8; (width * h * 4) as usize];

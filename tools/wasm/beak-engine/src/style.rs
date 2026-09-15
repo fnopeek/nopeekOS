@@ -1887,9 +1887,18 @@ pub fn resolve_in(
     // the content against the left edge. The value is a "dimension": a bare
     // number is pixels, a trailing `%` a percentage.
     //
-    // Images are NOT in this list: `img_box` already reads their attributes,
-    // and setting the property here too would apply the hint twice.
-    if matches!(el.tag.as_str(), "table" | "td" | "th" | "col" | "colgroup" | "hr") {
+    // **`<img>` stand hier NICHT, mit der Begruendung, `img_box` lese die
+    // Attribute ohnehin — und das war der Fehler.** `img_box` liest sie erst,
+    // wenn der Kasten schon gelegt wird; bis dahin sagt die Kaskade `auto`,
+    // und jeder, der VORHER fragt, bekommt die falsche Antwort: ein
+    // `<img width=30 height=30>` in einer streckenden Flexzeile kam 30x60
+    // heraus (Chromium 30x30), weil seine Quergroesse als `auto` galt. Doppelt
+    // angewandt wird nichts — `img_box` nimmt `css(st.width)` ZUERST und faellt
+    // nur ohne sie auf das Attribut zurueck, und das ist derselbe Wert.
+    if matches!(
+        el.tag.as_str(),
+        "table" | "td" | "th" | "col" | "colgroup" | "hr" | "img" | "embed" | "video" | "canvas"
+    ) {
         if let Some(l) = el.attr("width").and_then(parse_dimension_attr) {
             s.width = l;
         }
