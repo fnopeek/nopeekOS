@@ -667,10 +667,26 @@ fn clip_ops(ops: &mut Vec<DrawOp>, start: usize, cl: i32, ct: i32, cr: i32, cb: 
                     });
                 }
             }
-            DrawOp::Text { x, y, size, .. } => {
+            DrawOp::Text { x, y, size, color, bold, italic, mono, family, sp, text, clip } => {
                 let bottom = y + size as i32 + 4;
                 if x < cr && y < cb && bottom > ct {
-                    ops.push(op);
+                    // Der neue Ausschnitt wird mit dem alten GESCHNITTEN:
+                    // zwei ineinander liegende `overflow:hidden` begrenzen
+                    // beide, und der innere gewinnt nur, wo er enger ist.
+                    let (nl, nt) = (cl, ct);
+                    let (nr, nb) = (cr, cb);
+                    let c2 = match clip {
+                        None => (nl, nt, nr - nl, nb - nt),
+                        Some((ox, oy, ow, oh)) => {
+                            let (l, t) = (ox.max(nl), oy.max(nt));
+                            let (r, b) = ((ox + ow).min(nr), (oy + oh).min(nb));
+                            (l, t, r - l, b - t)
+                        }
+                    };
+                    if c2.2 > 0 && c2.3 > 0 {
+                        ops.push(DrawOp::Text { x, y, size, color, bold, italic, mono,
+                                                family, sp, text, clip: Some(c2) });
+                    }
                 }
             }
         }
@@ -929,6 +945,21 @@ pub enum DrawOp {
         family: u32,
         sp: (f32, f32),
         text: String,
+        /// Der Ausschnitt, in dem dieser Lauf malen darf — in Dokument-
+        /// koordinaten, `None` heisst unbeschnitten.
+        ///
+        /// **Ein Textbefehl wurde vorher GANZ behalten, sobald er den
+        /// Ausschnitt irgendwo beruehrte.** Das ist bei einem grossen Kasten
+        /// harmlos und bei einem kleinen das Gegenteil: die
+        /// `visually-hidden`-Technik des ganzen Webs ist ein Kasten von 1x1
+        /// mit `overflow:hidden` und einem langen Text darin, und der stand
+        /// damit LESBAR ueber dem, was daneben liegt — auf DuckDuckGos
+        /// Kopfzeile „Search Settings" quer ueber dem Zahnrad.
+        ///
+        /// Der Rasterer klemmt jede Glyphe ohnehin gegen die Leinwand; der
+        /// Ausschnitt sind dieselben vier Zeilen mit anderen Grenzen, also
+        /// kostet er kein Pixel mehr.
+        clip: Option<(i32, i32, i32, i32)>,
     },
     /// A filled rectangle (divider, list bullet).
     Rect { x: i32, y: i32, w: i32, h: i32, color: Rgba },
@@ -3777,6 +3808,7 @@ impl<'a> Ctx<'a> {
             border_ops(&ps, x, y, w, h, (true, true), &mut ops);
             if !text.trim().is_empty() {
                 ops.push(DrawOp::Text {
+                    clip: None,
                     x: x + (ps.border_left.width + ps.pad_left) as i32,
                     y: y + (ps.border_top.width + ps.pad_top) as i32,
                     size: ps.font_px,
@@ -3846,6 +3878,7 @@ family: ps.family,
         // Element, das es hier nicht gibt.
         let lead = 0.0f32;
         let ops = alloc::vec![DrawOp::Text {
+            clip: None,
             x: 0,
             y: ceil_i32(lead),
             size: st.font_px,
@@ -3912,6 +3945,7 @@ family: st.family,
         border_ops(&ps, bx, by, bw, bh, (true, true), &mut ops);
         if !text.trim().is_empty() {
             ops.push(DrawOp::Text {
+                clip: None,
                 x: bx + (ps.border_left.width + ps.pad_left) as i32,
                 y: by + (ps.border_top.width + ps.pad_top) as i32,
                 size: ps.font_px,
@@ -4169,6 +4203,7 @@ family: ps.family,
                 let label = marker_label(st.list_style, self.marker_ord);
                 let mw = measure(self.fonts.pick(st.bold, st.italic, st.mono, st.family), &label, st.font_px);
                 self.ops.push(DrawOp::Text {
+                    clip: None,
                     x: content_x - 8 - ceil_i32(mw),
                     y: top,
                     size: st.font_px,
@@ -9043,6 +9078,7 @@ fn layout_pre(
         let text = line.replace('\t', "    ");
         if !text.is_empty() && !st.hidden && !st.transparent {
             ops.push(DrawOp::Text {
+                clip: None,
                 x,
                 y: y + baseline_off,
                 size: st.font_px,
@@ -10141,6 +10177,7 @@ fn paint_control(
                 let color = if ctl.ghost { theme.muted.into() } else { ink };
                 for line in wrap_lines(font, &ctl.text, ctl.style.size, inner_w, rows as usize) {
                     ops.push(DrawOp::Text {
+                        clip: None,
                         x: tx,
                         y: ly,
                         size: ctl.style.size,
@@ -10180,6 +10217,7 @@ family: ctl.style.family,
                     _ => tx,
                 };
                 ops.push(DrawOp::Text {
+                    clip: None,
                     x: tx,
                     y: ty,
                     size: ctl.style.size,
@@ -11526,10 +11564,11 @@ fn op_eq(a: &DrawOp, b: &DrawOp) -> bool {
         ) => (ax, ay, aw, ah, ac) == (bx, by, bw, bh, bc) && ar == br && ag == bg,
         (
             DrawOp::Text { x: ax, y: ay, size: asz, color: ac, bold: ab, italic: ai, mono: am,
-family: 0, sp: asp, text: at },
+family: 0, sp: asp, text: at, clip: acl },
             DrawOp::Text { x: bx, y: by, size: bsz, color: bc, bold: bb, italic: bi, mono: bm,
-family: 0, sp: bsp, text: bt },
-        ) => (ax, ay, ac, ab, ai, am, at) == (bx, by, bc, bb, bi, bm, bt) && asz == bsz && asp == bsp,
+family: 0, sp: bsp, text: bt, clip: bcl },
+        ) => (ax, ay, ac, ab, ai, am, at) == (bx, by, bc, bb, bi, bm, bt) && asz == bsz && asp == bsp
+             && acl == bcl,
         _ => false,
     }
 }
@@ -11792,6 +11831,7 @@ fn plan_one(
         let mut now = Vec::new();
         push_decorations(&run, x, run_w, baseline, &mut now);
         now.push(DrawOp::Text {
+            clip: None,
             x,
             y,
             size,
@@ -11989,6 +12029,7 @@ fn emit_line(
                         push_decorations(&seg.style, seg.x + dx, w, run_baseline, ops);
                     }
                     ops.push(DrawOp::Text {
+                        clip: None,
                         x: seg.x + dx,
                         y: top,
                         size: seg.style.size,

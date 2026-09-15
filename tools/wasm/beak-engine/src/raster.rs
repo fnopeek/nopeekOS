@@ -1237,12 +1237,15 @@ impl Engine {
                                 *rw - 2 * *spread, *rh - 2 * *spread);
                     fill_shadow(out, wi, hi, *x, *y - scroll_y, *rw, *rh, *blur, *color, keep);
                 }
-                DrawOp::Text { x, y, size, color, bold, italic, mono, family, sp, text } => {
+                DrawOp::Text { x, y, size, color, bold, italic, mono, family, sp, text, clip } => {
                     let vy = *y - scroll_y;
                     if vy > hi || vy + (*size as i32) + 6 < 0 {
                         continue; // fully off-screen line → skip
                     }
-                    self.draw_run(out, wi, hi, *x, vy, *size, *color, *bold, *italic, *mono, *family, *sp, text);
+                    // Der Ausschnitt steht in DOKUMENTkoordinaten; hier wird
+                    // gerollt, also faehrt er dieselbe Strecke mit.
+                    let cv = clip.map(|(cx, cy, cw, ch)| (cx, cy - scroll_y, cw, ch));
+                    self.draw_run(out, wi, hi, *x, vy, *size, *color, *bold, *italic, *mono, *family, *sp, text, cv);
                 }
                 DrawOp::Image { x, y, w: iw, h: ih, src, alt, fit, filter } => {
                     let vy = *y - scroll_y;
@@ -1307,7 +1310,7 @@ impl Engine {
         fill(out, wi, hi, x, y, 1, h, c);
         fill(out, wi, hi, x + w - 1, y, 1, h, c);
         if !alt.is_empty() && w > 24 {
-            self.draw_run(out, wi, hi, x + 4, y + 4, 13.0, self.theme.muted.into(), false, false, false, 0, (0.0, 0.0), alt);
+            self.draw_run(out, wi, hi, x + 4, y + 4, 13.0, self.theme.muted.into(), false, false, false, 0, (0.0, 0.0), alt, None);
         }
     }
 
@@ -1335,7 +1338,16 @@ impl Engine {
         // the line box did not reserve.
         sp: (f32, f32),
         text: &str,
+        // Der Ausschnitt in ANSICHTskoordinaten, `None` heisst die ganze
+        // Leinwand. Er klemmt dieselben vier Grenzen wie der Rand des
+        // Puffers, also kostet er kein Pixel mehr.
+        clip: Option<(i32, i32, i32, i32)>,
     ) {
+        let (klx, klty, klr, klb) = match clip {
+            Some((cx, cy, cw, ch)) => (cx.max(0), cy.max(0), (cx + cw).min(w), (cy + ch).min(h)),
+            None => (0, 0, w, h),
+        };
+        if klr <= klx || klb <= klty { return }
         let fonts = self.fonts.borrow();
         let font = fonts.pick(bold, italic, mono, family);
         let face = Fonts::face_key(bold, italic, mono, family);
@@ -1374,8 +1386,8 @@ impl Engine {
             pen += m.advance_width + extra;
             // Clip the glyph box against the buffer once; the inner loop then
             // walks a row by offset and never re-tests a bound.
-            let (cx0, cx1) = (gx0.max(0), (gx0 + m.width as i32).min(w));
-            let (cy0, cy1) = (gy0.max(0), (gy0 + m.height as i32).min(h));
+            let (cx0, cx1) = (gx0.max(klx), (gx0 + m.width as i32).min(klr));
+            let (cy0, cy1) = (gy0.max(klty), (gy0 + m.height as i32).min(klb));
             if cx1 <= cx0 || cy1 <= cy0 {
                 continue;
             }
@@ -2687,6 +2699,37 @@ mod tests {
         assert_eq!(rows.len(), 3, "three line boxes, one per block: {rows:?}");
     }
 
+    /// **Die `visually-hidden`-Technik des ganzen Webs**: ein Kasten von 1x1
+    /// mit `overflow:hidden` und einem langen Text darin. Ein Textbefehl wurde
+    /// vorher GANZ behalten, sobald er den Ausschnitt irgendwo beruehrte — und
+    /// bei 1x1 beruehrt er ihn immer. Auf DuckDuckGos Kopfzeile stand
+    /// „Search Settings" damit lesbar quer ueber dem Zahnrad.
+    ///
+    /// Geprueft wird in PIXELN, nicht an einer Zahl: der Fehler war einer des
+    /// MALENS, der Kasten war die ganze Zeit richtig 1x1
+    /// ([[feedback_paint_test_not_parse_test]]).
+    #[test]
+    fn ein_versteckter_kasten_malt_seinen_text_nicht_daneben() {
+        let html = "<div style='position:relative;height:30px;background:#ffffff'>\
+                    <span style='position:absolute;width:1px;height:1px;overflow:hidden;\
+                    white-space:nowrap;color:#000000'>XXXXXXXXXXXXXXXXXXXX</span></div>";
+        let (w, h) = (300u32, 40u32);
+        let mut eng = Engine::new();
+        eng.set_theme(light());
+        let lay = eng.layout(html, w);
+        let mut buf = alloc::vec![0u8; (w * h * 4) as usize];
+        eng.paint(&lay, w, h, 0, &mut buf);
+        // Ab x=8 ist der 1x1-Kasten vorbei; dahinter darf keine Tinte liegen.
+        let mut ink = 0;
+        for y in 0..h {
+            for x in 8..w {
+                let i = ((y * w + x) * 4) as usize;
+                if buf[i] < 200 || buf[i + 1] < 200 || buf[i + 2] < 200 { ink += 1; }
+            }
+        }
+        assert_eq!(ink, 0, "{ink} Pixel Tinte ausserhalb eines 1x1-Kastens mit overflow:hidden");
+    }
+
     /// `text-overflow: ellipsis` — Bootstrap's `.text-truncate` idiom. The box
     /// keeps the width it was given; only what is painted inside it changes.
     #[test]
@@ -2696,7 +2739,9 @@ mod tests {
         let eng = Engine::new();
         let dump = dump_ops(&eng.layout(truncate, 400));
         let run = dump.lines().find(|l| l.starts_with('T')).expect("one text run");
-        assert!(run.ends_with("\u{2026}\"", ), "the run ends in an ellipsis: {run}");
+        // Die Zeile traegt seit dem Text-Ausschnitt ein `clip=` am Ende; der
+        // Text steht davor, und geprueft wird der Text.
+        assert!(run.contains("\u{2026}\""), "the run ends in an ellipsis: {run}");
         assert!(!run.contains("not fit"), "and the tail it replaced is gone: {run}");
 
         // `clip` is the initial value, and the same box under it keeps the
@@ -2826,8 +2871,9 @@ mod tests {
         let mut s = alloc::string::String::new();
         for op in &l.ops {
             match op {
-                DrawOp::Text { x, y, size, color, bold, italic, mono, family, sp, text } => {
-                    let _ = write!(s, "T {x},{y} {size:.2} c={color:?} {bold}{italic}{mono} {sp:?} {text:?}\n");
+                DrawOp::Text { x, y, size, color, bold, italic, mono, family, sp, text, clip } => {
+                    let c = match clip { Some(c) => alloc::format!(" clip={c:?}"), None => alloc::string::String::new() };
+                    let _ = write!(s, "T {x},{y} {size:.2} c={color:?} {bold}{italic}{mono} {sp:?} {text:?}{c}\n");
                 }
                 DrawOp::Rect { x, y, w, h, color } => {
                     let _ = write!(s, "R {x},{y} {w}x{h} c={color:?}\n");
