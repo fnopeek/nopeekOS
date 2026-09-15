@@ -6813,7 +6813,19 @@ family: st.family,
         // returned. A FLOATED box leaves the line, so it is not one of these.)
         let atomic_inline = matches!(cs.display,
             Display::InlineBlock | Display::InlineFlex | Display::Inline);
-        if atomic_inline && cs.float == FloatKind::None {
+        // **Ein Float steht NEBEN der Zeile, nicht darunter** — also zaehlt er
+        // bei max-content zu ihr dazu, genau wie ein atomarer Inline. Vorher
+        // wurde er dagegen GEMAXT, und damit fiel seine Breite aus der
+        // Eigenbreite heraus: DuckDuckGos Kopfleiste ist ein
+        // schrumpfender Kasten mit einem langen Text und einem
+        // `float: right`-Knopf daneben, und der Kasten kam 32 px — die Breite
+        // des Knopfes — zu schmal heraus. Dann passte der Float nicht mehr
+        // und rutschte eine Zeile tiefer, unter den Text.
+        //
+        // Dass geflossene GESCHWISTER sich aufsummieren, bleibt damit richtig:
+        // `run.atomic` summiert. Und bei MIN-content bekommt jeder Float seine
+        // eigene Zeile, also konkurrieren sie dort — das tut `atomic_min`.
+        if cs.float != FloatKind::None || (atomic_inline && cs.float == FloatKind::None) {
             run.atomic += p;
             run.atomic_min = run.atomic_min.max(m);
             return;
@@ -6824,19 +6836,7 @@ family: st.family,
             *min += m;
             return;
         }
-        // Floated siblings sit side by side, so a block container's max-content
-        // width is their SUM, not the widest of them. Taking the widest sized a
-        // `float: right` <ul> of icons to ONE icon — and its own floated <li>
-        // children then had no room beside each other and stacked vertically,
-        // which is exactly what the Wikipedia footer showed. At MIN-content each
-        // float gets its own line, so there the widest still wins.
-        if cs.float != FloatKind::None {
-            run.floats += p;
-            *pref = pref.max(run.floats);
-        } else {
-            run.floats = 0.0;
-            *pref = pref.max(p);
-        }
+        *pref = pref.max(p);
         *min = min.max(m);
     }
 
@@ -9104,10 +9104,6 @@ family: st.family,
 struct Run {
     text: String,
     frame: f32,
-    /// Running sum of the margin-box widths of a consecutive group of floated
-    /// siblings. They sit SIDE BY SIDE, so at max-content they add up instead
-    /// of competing; any non-float box ends the group.
-    floats: f32,
     /// Sum of the outer widths of the atomic inline boxes on this line —
     /// `inline-block`, images, form controls. They sit ON the line next to the
     /// text, so at max-content they add to it. Measuring them as block-level
@@ -12490,6 +12486,33 @@ mod tests {
         let blue = rects(&l).into_iter().find(|(.., c)| *c == Rgb(0, 0, 0xff)).unwrap();
         assert_eq!(red.1, blue.1, "the two floats share a line, not stack");
         assert_eq!(blue.0 - red.0, 40, "and sit directly beside each other");
+    }
+
+    /// **Ein Float steht NEBEN der Zeile, also zaehlt seine Breite dazu.**
+    /// Vorher wurde er gegen die Zeile GEMAXT, und der schrumpfende Kasten kam
+    /// genau um die Float-Breite zu schmal heraus — dann passte der Float
+    /// nicht mehr hinein und rutschte eine Zeile tiefer. Auf DuckDuckGos
+    /// Kopfleiste war das der Hamburger-Knopf unter „Protection. Privacy."
+    ///
+    /// Geprueft wird die BREITE des schrumpfenden Kastens: 200 + 32. Sie ist
+    /// die Ursache; wo der Float dann landet, ist die Folge. Chromium misst
+    /// auf derselben Vorlage dieselben 232.
+    #[test]
+    fn ein_float_zaehlt_zur_eigenbreite_seiner_zeile() {
+        let l = lay(
+            "<body style=\"margin:0\"><div style=\"position:relative;height:60px\">\
+             <div style=\"position:absolute;right:0;top:0;height:40px;background:#00ff00\">\
+             <span style=\"display:inline-block;width:200px;height:30px\"></span>\
+             <div style=\"float:right;width:32px;height:32px;background:#ff0000\"></div>\
+             </div></div></body>",
+            600,
+        );
+        let boxrect = rects(&l).into_iter().find(|(.., c)| *c == Rgb(0, 0xff, 0))
+            .expect("der schrumpfende Kasten malt seinen Grund");
+        assert_eq!(boxrect.2, 232, "200 (inline-block) + 32 (Float) — der Float zaehlt mit");
+        let red = rects(&l).into_iter().find(|(.., c)| *c == Rgb(0xff, 0, 0))
+            .expect("der Float malt");
+        assert_eq!(red.1, 0, "und er steht auf der ERSTEN Zeile, nicht darunter");
     }
 
     #[test]
