@@ -539,6 +539,9 @@ pub struct Interp {
     /// Ein MODUL hat keinen: dort ist die Antwort laut HTML §4.12.1 `null`,
     /// und `import.meta.url` ist der Weg. Wer `None` setzt, sagt genau das.
     pub current_script: Option<u32>,
+    /// Der NAME des gerade gebauten Konstruktors, fuer die Fehlermeldung.
+    /// `construct_named` stellt ihn und raeumt ihn wieder weg.
+    pub(crate) new_name: Option<String>,
     /// Wo das naechste `document.write` desselben Skripts hinschreibt:
     /// `(Skriptknoten, zuletzt geschriebener Knoten)`.
     ///
@@ -956,6 +959,7 @@ impl Interp {
                  pending_sheets: Vec::new(),
                  pending_scripts: Vec::new(),
                  current_script: None,
+                 new_name: None,
                  write_point: None,
                  ran_scripts: Vec::new(),
                  pending_fetches: Vec::new(), fetch_waiting: Vec::new(),
@@ -1663,6 +1667,54 @@ impl Interp {
     /// bei einem haeufigen Wort wie `render` nicht, WESSEN `render` fehlt —
     /// und in einem minifizierten Buendel steht kein zweiter Hinweis
     /// daneben ([[feedback_a_runtime_error_without_a_position_costs_an_hour]]).
+    /// „value is not a constructor" sagte ueber den Wert GAR NICHTS — und in
+    /// einem minifizierten Buendel steht daneben kein zweiter Hinweis
+    /// ([[feedback_a_runtime_error_without_a_position_costs_an_hour]]).
+    ///
+    /// Die drei Antworten, die den Fall entscheiden: ein `undefined` heisst
+    /// fehlender Name oder fehlender Import, ein Pfeil/eine Methode/ein
+    /// Generator heisst falsche Bauart, und ein eingebauter ohne `new` heisst
+    /// Absicht der Spezifikation.
+    pub fn not_a_constructor(&mut self, f: &Value) -> Abrupt {
+        // Die BAUART, kurz: sie sagt, warum es keiner ist.
+        let art = match f {
+            Value::Obj(o) => match &o.borrow().kind {
+                ObjKind::Function(d) => {
+                    let n = &d.node;
+                    if n.is_arrow { "eine Pfeilfunktion" }
+                    else if n.is_generator { "ein Generator" }
+                    else if n.is_async { "eine async-Funktion" }
+                    else { "eine Methode" }
+                }
+                ObjKind::Native(_) => "eingebaut, aber nicht mit new",
+                _ => "ein gewoehnliches Objekt",
+            },
+            v => v.type_of(),
+        };
+        // Der Name der RUFSTELLE entscheidet den Fall: „Intl.PluralRules is
+        // not a constructor (undefined)" nennt eine fehlende Schnittstelle,
+        // „undefined is not a constructor" nur einen Zustand.
+        if let Some(n) = self.new_name.clone() {
+            return self.throw_kind("TypeError",
+                &alloc::format!("{n} is not a constructor ({art})"));
+        }
+        // Ohne Namen an der Rufstelle: der eigene Name des Werts, wenn er
+        // einen hat.
+        let own = match f {
+            Value::Obj(_) => self.get(f, "name").ok()
+                .and_then(|n| self.to_string(&n).ok())
+                .map(|n| alloc::string::String::from(&*n))
+                .filter(|n| !n.is_empty()),
+            _ => None,
+        };
+        match own {
+            Some(n) => self.throw_kind("TypeError",
+                &alloc::format!("{n} is not a constructor ({art})")),
+            None => self.throw_kind("TypeError",
+                &alloc::format!("{art} is not a constructor")),
+        }
+    }
+
     pub fn not_a_function(&mut self, name: Option<&str>, on: Option<&Value>) -> Abrupt {
         let where_ = match on {
             Some(v @ Value::Obj(o)) => {
