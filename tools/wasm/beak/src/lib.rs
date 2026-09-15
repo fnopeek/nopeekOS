@@ -3468,6 +3468,15 @@ fn images_arrived(
             moved = true;
         }
     }
+    // **Ein geglueckter Lauf war stumm**, und damit sah eine Runde, in der
+    // sieben Bilder ankamen, im Log genauso aus wie eine, in der keines
+    // angefragt wurde. Genau das hat einen ganzen Geraetelauf gekostet: die
+    // Frage „werden sie geholt?" liess sich nur an den `h2`-Zeilen des Wirts
+    // ablesen, und ob sie DEKODIERT wurden, gar nicht
+    // ([[feedback_the_fast_path_must_say_it_ran]]).
+    log(&alloc::format!("[beak] Bilder: {} von {} dekodiert{}",
+        arrived.len(), want.len(),
+        if moved { ", ein geratener Kasten wurde bestimmt" } else { "" }));
     if arrived.is_empty() {
         return;
     }
