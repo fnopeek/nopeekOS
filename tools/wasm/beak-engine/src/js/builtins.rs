@@ -3490,6 +3490,7 @@ pub fn make_realm() -> Realm {
             string_iter_proto, promise_proto: ph(), date_proto: ph(), bigint_proto,
             iter_helper_proto: ph(), iter_wrap_proto: ph(), eval_fn: None,
             html_element_proto: ph(), svg_element_proto: ph(), fragment_proto: ph(),
+            event_target_proto: ph(),
             prej_proto: ph(), text_encoder_proto: ph(), text_decoder_proto: ph(),
             tag_protos: HashMap::new(), url_proto: ph(), url_params_proto: ph(),
             response_proto: ph(), headers_proto: ph(),

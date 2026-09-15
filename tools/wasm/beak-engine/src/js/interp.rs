@@ -300,6 +300,11 @@ pub struct Realm {
     pub html_element_proto: Gc,
     pub svg_element_proto: Gc,
     pub fragment_proto: Gc,
+    /// `EventTarget.prototype` — gebraucht, weil `new EventTarget()` einen
+    /// LOSGELOESTEN Knoten baut und `wrap` ihm den richtigen Prototyp geben
+    /// muss. Ueber den globalen Namen zu gehen waere falsch: den darf die
+    /// Seite ueberschreiben.
+    pub event_target_proto: Gc,
     pub tag_protos: HashMap<&'static str, Gc>,
     pub url_proto: Gc,
     pub url_params_proto: Gc,
@@ -376,6 +381,7 @@ impl Realm {
             self.abort_ctrl_proto.clone(), self.xhr_proto.clone(),
             self.html_element_proto.clone(), self.svg_element_proto.clone(),
             self.fragment_proto.clone(), self.url_proto.clone(), self.url_params_proto.clone(),
+            self.event_target_proto.clone(),
         ]
     }
 }
