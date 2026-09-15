@@ -625,6 +625,20 @@ impl Interp {
             }
             None => (Some(self.realm.object_proto.clone()), None),
         };
+        // **Eine benannte Klasse steht in ihrem EIGENEN Rumpf** (ES 15.7.14):
+        // `class aa { … new aa(…) … }` sieht sich selbst, und zwar auch dann,
+        // wenn der aeussere Name nie vergeben wird oder spaeter umgehaengt
+        // wird. Derselbe Bereich wie bei einem benannten Funktionsausdruck
+        // (`func_value` daneben) — nur fehlte er hier, und der Intl-Polyfill
+        // von DuckDuckGo starb daran mit `aa is not defined`.
+        //
+        // Die Oberklasse wird noch im AEUSSEREN Bereich ausgewertet: dort ist
+        // die Bindung laut Spezifikation noch nicht angelegt.
+        let cenv = match &c.name {
+            Some(_) => Env::new(Some(env.clone()), false),
+            None => env.clone(),
+        };
+        let env = &cenv;
         let proto = new_obj(parent_proto);
 
         // Der Konstruktor IST die Klasse. Fehlt er, wird ein leerer erzeugt —
@@ -688,6 +702,12 @@ impl Interp {
             co.borrow_mut().define("name", Prop {
                 value: Some(Value::str(c.name.as_deref().unwrap_or(""))), get: None, set: None,
                 writable: false, enumerable: false, configurable: true });
+        }
+        // Jetzt, nicht spaeter: ein STATISCHES Feld wird noch in dieser
+        // Funktion ausgewertet und darf die Klasse schon sehen.
+        if let Some(n) = &c.name {
+            cenv.borrow_mut().vars.insert(Rc::from(n.as_str()),
+                Binding { value: ctor.clone(), mutable: false, initialized: true });
         }
         // **Statische Vererbung.** Ohne sie findet `B.create()` das
         // `static create` der Elternklasse nicht — und `Object.getPrototypeOf(B)`

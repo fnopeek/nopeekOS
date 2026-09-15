@@ -1350,6 +1350,29 @@ mod tests {
         (err, CALLS.load(Ordering::Relaxed))
     }
 
+    /// **Eine benannte Klasse steht in ihrem EIGENEN Rumpf** (ES 15.7.14) —
+    /// und zwar in beiden Maschinen. DuckDuckGos Intl-Polyfill baut seine
+    /// `Locale` als `class aa { … new aa(…) … }` und starb sonst mit
+    /// `aa is not defined`; der Name darf dabei NICHT nach aussen dringen.
+    fn class_self(novm: bool) -> alloc::string::String {
+        let mut i = super::Interp::new();
+        i.vm_off = novm;
+        let src = "var C = class Inner { \
+                   constructor(){ this.ok = this instanceof Inner } \
+                   self(){ return new Inner() } \
+                   static who(){ return typeof Inner } }; \
+                   console.log(C.who(), new C().ok, new C().self().ok, typeof Inner);";
+        let prog = crate::js::parse(src, false).expect("parst");
+        assert!(i.run_program(&prog).is_ok(), "der Lauf warf");
+        i.console.join("|")
+    }
+
+    #[test]
+    fn eine_benannte_klasse_sieht_sich_selbst() {
+        assert_eq!(class_self(false), "function true true undefined");
+        assert_eq!(class_self(true), "function true true undefined");
+    }
+
     #[test]
     fn die_uhr_erreicht_die_befehlsmaschine() {
         let (abgebrochen, gefragt) = run(false);

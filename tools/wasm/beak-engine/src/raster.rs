@@ -44,6 +44,11 @@ pub struct Engine {
     /// `add_font` zurueck — dieselbe Runde wie beim Modulgraphen und den
     /// nachgeladenen Stilblaettern.
     pending_fonts: core::cell::RefCell<alloc::vec::Vec<(alloc::string::String, u32, u16, bool)>>,
+    /// Gesichter, deren Bytes SCHON dastehen — ein `@font-face` mit
+    /// `data:`-Adresse. Sie warten hier, weil `note_font_faces` unter einem
+    /// gehaltenen `self.sheet` laeuft und `add_font` es leert; `load_inline_fonts`
+    /// nimmt sie, wenn nichts mehr entliehen ist.
+    inline_fonts: core::cell::RefCell<alloc::vec::Vec<(alloc::string::String, u32, u16, bool)>>,
     /// Adressen, die schon angefragt wurden — sonst fragt jedes Auslegen neu.
     asked_fonts: core::cell::RefCell<alloc::vec::Vec<alloc::string::String>>,
     /// Rasterised-glyph cache keyed by (char, size-bits, face-id). fontdue's
@@ -284,6 +289,7 @@ impl Engine {
         Engine {
             fonts: core::cell::RefCell::new(Fonts::new()),
             pending_fonts: core::cell::RefCell::new(alloc::vec::Vec::new()),
+            inline_fonts: core::cell::RefCell::new(alloc::vec::Vec::new()),
             asked_fonts: core::cell::RefCell::new(alloc::vec::Vec::new()),
             glyphs: RefCell::new(HashMap::new()),
             theme: Theme::DARK,
@@ -698,7 +704,17 @@ impl Engine {
             let Some(url) = f.src.first() else { continue };
             if self.asked_fonts.borrow().iter().any(|u| u == url) { continue }
             self.asked_fonts.borrow_mut().push(url.clone());
-            self.pending_fonts.borrow_mut().push((url.clone(), f.family, f.weight, f.italic));
+            // **Ein `data:`-Gesicht braucht kein Netz** — seine Bytes stehen im
+            // Blatt. Dem Wirt gegeben hiesse, `data:application` als
+            // RECHNERnamen aufzuloesen: die Anfrage scheitert, das Gesicht
+            // fehlt, und ein Stueck der Adresse liegt beim Aufloeser. Bei
+            // CSS-Bildern loest die Engine sie seit je selbst auf.
+            let list = if url.starts_with("data:") || url.starts_with("DATA:") {
+                &self.inline_fonts
+            } else {
+                &self.pending_fonts
+            };
+            list.borrow_mut().push((url.clone(), f.family, f.weight, f.italic));
         }
     }
 
@@ -706,6 +722,24 @@ impl Engine {
     /// angefragt.
     pub fn take_pending_fonts(&self) -> alloc::vec::Vec<(alloc::string::String, u32, u16, bool)> {
         core::mem::take(&mut self.pending_fonts.borrow_mut())
+    }
+
+    /// Die `data:`-Gesichter dekodieren und aufnehmen. Liefert true, wenn
+    /// eines dazukam — dann muss neu ausgelegt werden, wie bei einer geholten
+    /// Schrift auch.
+    ///
+    /// Der Wirt ruft das, WEIL hier nichts mehr entliehen ist: `add_font`
+    /// leert die Blatt- und Baumzwischenspeicher.
+    pub fn load_inline_fonts(&self) -> bool {
+        let want = core::mem::take(&mut *self.inline_fonts.borrow_mut());
+        let mut loaded = false;
+        for (url, family, weight, italic) in want {
+            match crate::image::decode_data_uri(&url) {
+                Some(b) if self.add_font(family, weight, italic, &b) => loaded = true,
+                _ => {}
+            }
+        }
+        loaded
     }
 
     /// Eine geholte Schrift aufnehmen. `bytes` darf WOFF2 oder rohes sfnt

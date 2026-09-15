@@ -709,8 +709,11 @@ pub enum ScriptRef {
     /// HIERHER und wird nicht spaeter geraten: ein Modul ohne `import` parst
     /// auch als Skript, haette dann aber den falschen Bereich und das falsche
     /// `this` — und zwar still.
-    Inline(String, bool),
-    External(String, bool),
+    /// Der dritte Wert ist der KNOTEN des `<script>`. Er ist
+    /// `document.currentScript`, und ohne ihn findet ein Turbopack-Buendel
+    /// seinen eigenen Pfad nicht.
+    Inline(String, bool, u32),
+    External(String, bool, u32),
 }
 
 /// ALLE Skripte der Seite, in Dokumentreihenfolge — eingebettete wie externe.
@@ -826,10 +829,10 @@ pub fn page_scripts(d: &Doc) -> Vec<ScriptRef> {
         if !module && n.attr("nomodule").is_some() { continue; }
         match n.attr("src") {
             Some(src) if !src.trim().is_empty() =>
-                out.push(ScriptRef::External(src.to_string(), module)),
+                out.push(ScriptRef::External(src.to_string(), module, id)),
             _ => {
                 let text = d.text_of(id);
-                if !text.trim().is_empty() { out.push(ScriptRef::Inline(text, module)); }
+                if !text.trim().is_empty() { out.push(ScriptRef::Inline(text, module, id)); }
             }
         }
     }
@@ -3312,6 +3315,21 @@ pub fn install(realm: &mut Realm) {
         match doc_part(i, &this, DocPart::Head)? { Some(x) => Ok(wrap(i, x)), None => Ok(Value::Null) }
     }, &fp);
     getter(&document_proto, "readyState", |_, _, _| Ok(Value::str("complete")), &fp);
+    // **`currentScript` ist der Weg, auf dem ein Buendel sich selbst findet.**
+    // Jedes von Turbopack erzeugte Stueck meldet sich mit
+    // `TURBOPACK.push([document.currentScript, …])` an und wirft ohne den
+    // Knoten „chunk path empty but not in a worker" — auf DDGs Startseite
+    // fielen daran sieben Skripte und ein Inline-Stueck aus. Dasselbe Feld
+    // sagt `document.write`, WOHIN geschrieben wird.
+    //
+    // Nur am Hauptdokument, und nur waehrend ein klassisches Skript laeuft:
+    // in einem Modul, in einem Rueckruf und in einem zweiten Dokument ist die
+    // Antwort `null` (HTML §4.12.1).
+    getter(&document_proto, "currentScript", |i, this, _| {
+        let root = node_of(i, &this)?;
+        if i.doc.as_ref().map(|d| d.doc) != Some(root) { return Ok(Value::Null) }
+        match i.current_script { Some(n) => Ok(wrap(i, n)), None => Ok(Value::Null) }
+    }, &fp);
     // `scrollingElement` — das Element, dessen `scrollTop` die SEITE rollt.
     // Im Standardmodus ist das `documentElement`, und beak parst nichts
     // anderes. Eine Seite liest es und schreibt dann darauf; beide Antworten
@@ -3340,6 +3358,24 @@ pub fn install(realm: &mut Realm) {
     // schlimmsten Richtung: eine Seite, der man sagt, sie sei sichtbar,
     // pollt weiter. Wer das baut, baut diese drei Getter mit — und
     // `visibilitychange`, das es noch gar nicht gibt.
+    // **`document.write` — die eine Stelle, an der beaks Modell nicht das des
+    // Browsers ist.** Dort laeuft ein klassisches Skript WAEHREND des Parsens
+    // und schreibt in den Strom; beak hat den Baum schon fertig, wenn das
+    // erste Skript laeuft (`page_scripts` sagt es woertlich). Das Ergebnis
+    // ist trotzdem dasselbe, wenn man dorthin schreibt, wo der Parser stuende:
+    // unmittelbar HINTER das schreibende `<script>`.
+    //
+    // Nach der Spezifikation waere ein `write` ohne Einfuegestelle ein
+    // `document.open()` — also das Dokument LEEREN. Das tut beak nicht: hier
+    // hat kein Skript je eine Einfuegestelle im Sinne der Spezifikation, und
+    // eine leere Seite waere die schlechtere von zwei falschen Antworten.
+    // Ohne `currentScript` (aus einem Zeitgeber, einem Rueckruf) steht es
+    // deshalb auf der Konsole und passiert nichts.
+    //
+    // DDGs Startseite laedt so ihren Intl-Polyfill nach; ohne die Funktion
+    // starb das Skript an `write is not a function`.
+    meth(&document_proto, "write", |i, this, a| doc_write(i, &this, a, false), 1, &fp);
+    meth(&document_proto, "writeln", |i, this, a| doc_write(i, &this, a, true), 1, &fp);
     getter(&document_proto, "visibilityState", |_, _, _| Ok(Value::str("visible")), &fp);
     getter(&document_proto, "hidden", |_, _, _| Ok(Value::Bool(false)), &fp);
     meth(&document_proto, "hasFocus", |_, _, _| Ok(Value::Bool(true)), 0, &fp);
@@ -6915,6 +6951,45 @@ fn collect_custom(d: &Doc, id: u32, out: &mut Vec<u32>) {
 /// Ein Wurf im Rueckruf beendet NICHT das Einhaengen — so macht es ein
 /// Browser auch —, landet aber sichtbar auf der Konsole statt still zu
 /// verschwinden.
+/// `document.write`/`writeln`: das Bruchstueck hinter das schreibende
+/// `<script>` haengen und alles darin anschliessen.
+///
+/// Angeschlossen heisst hier auch GEHOLT: ein geschriebenes `<script src>`
+/// laeuft, anders als eines aus `innerHTML`. Genau das ist der Unterschied
+/// zwischen den beiden Wegen, und der Grund, warum eine Seite `write` nimmt.
+fn doc_write(i: &mut Interp, this: &Value, a: &[Value], line: bool) -> C<Value> {
+    let root = node_of(i, this)?;
+    if i.doc.as_ref().map(|d| d.doc) != Some(root) { return Ok(Value::Undefined) }
+    let mut html = String::new();
+    for v in a { html.push_str(&i.to_string(v)?); }
+    if line { html.push('\n'); }
+    if html.trim().is_empty() { return Ok(Value::Undefined) }
+    let Some(script) = i.current_script else {
+        i.console_push(alloc::format!(
+            "document.write ohne laufendes Skript — nichts geschrieben ({} B)", html.len()));
+        return Ok(Value::Undefined);
+    };
+    // Die Einfuegestelle: hinter dem zuletzt Geschriebenen DIESES Skripts,
+    // sonst hinter dem Skript selbst.
+    let after = match i.write_point {
+        Some((s, last)) if s == script => last,
+        _ => script,
+    };
+    let Some(d) = &mut i.doc else { return Ok(Value::Undefined) };
+    let Some(parent) = d.nodes[after as usize].parent else { return Ok(Value::Undefined) };
+    let at = d.nodes[parent as usize].children.iter().position(|&c| c == after).map(|k| k + 1);
+    let made = d.parse_into(parent, &html, at);
+    if let Some(&last) = made.last() { i.write_point = Some((script, last)); }
+    // Auch die TIEFER liegenden: `write` schreibt selten einen nackten
+    // Knoten, und ein `<script>` in einem `<div>` muss genauso laufen.
+    for n in made {
+        let mut all = alloc::vec![n];
+        if let Some(d) = &i.doc { d.descendants(n, &mut all); }
+        for x in all { fire_connected(i, x)?; }
+    }
+    Ok(Value::Undefined)
+}
+
 fn fire_connected(i: &mut Interp, id: u32) -> C<Value> {
     settle_stylesheet(i, id);
     settle_script(i, id);
@@ -7031,7 +7106,13 @@ pub fn script_done(i: &mut Interp, id: u32, source: Option<&str>) {
     };
     match super::parse(src, false) {
         Ok(prog) => {
-            if let Err(a) = i.run_program(&prog) {
+            // `document.currentScript` zeigt auf DIESEN Knoten, solange er
+            // laeuft — und danach auf den, in dem wir stehen: ein per Skript
+            // eingehaengtes `<script>` laeuft aus einem anderen heraus.
+            let outer = i.current_script.replace(id);
+            let r = i.run_program(&prog);
+            i.current_script = outer;
+            if let Err(a) = r {
                 let msg = super::modules::describe(i, a);
                 i.console_push(alloc::format!("error: {msg}"));
             }

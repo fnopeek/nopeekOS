@@ -160,6 +160,15 @@ syn(langRows, "async-Generator (Gestalt)",
   "async function* g() { yield 1 } var h = g();"
   + " return Object.prototype.toString.call(h) + '|' + (h[Symbol.asyncIterator]() === h)",
   "[object AsyncGenerator]|true");
+/* Was 0.176.0 dazugebracht hat. Eine benannte Klasse steht in ihrem EIGENEN
+   Rumpf (ES 15.7.14) — jede von Babel oder einem Bundler erzeugte Klasse
+   prueft sich damit selbst, und DuckDuckGos Intl-Polyfill starb ohne die
+   Bindung an `aa is not defined`. */
+syn(langRows, "Benannte Klasse sieht sich selbst",
+  "var C = class I { constructor() { this.ok = this instanceof I } self() { return new I() }"
+  + " static who() { return typeof I } };"
+  + " return C.who() + '|' + new C().self().ok + '|' + typeof I", "function|true|undefined");
+
 /* **Eine Seite darf `$262` NIE sehen.** Es ist das Wirtsobjekt des
    Konformanzlaeufers; sein `evalScript` waere ein zweiter Weg, Code an der
    Skript-Zustellung vorbei laufen zu lassen, und `detachArrayBuffer` zoege
@@ -649,6 +658,37 @@ row(domRows, "Felder auf Attributen", function () {
   return a.getAttribute("href") === "/x" && a.title === "t"
       && a.tabIndex === 2 && a.hidden === true
       && document.createElement("div").tabIndex === -1;
+});
+
+/* **`document.currentScript` ist der Weg, auf dem ein Buendel sich selbst
+   findet.** Jedes von Turbopack erzeugte Stueck meldet sich mit
+   `TURBOPACK.push([document.currentScript, …])` an; ohne den Knoten fielen auf
+   DuckDuckGos Startseite sieben Skripte und ein Inline-Stueck auf einmal aus.
+   Die Zeile laeuft im laufenden Skript, also MUSS die Antwort ein `<script>`
+   sein — und dasselbe, das `document.write` als Einfuegestelle nimmt. */
+row(domRows, "document.currentScript", function () {
+  var c = document.currentScript;
+  return c !== null && c.tagName === "SCRIPT" && c.parentElement !== null;
+});
+/* `document.write` schreibt dorthin, wo der Parser stuende: unmittelbar
+   HINTER das schreibende `<script>`. Zwei Aufrufe muessen in ihrer
+   Reihenfolge landen, nicht verkehrt herum. */
+row(domRows, "document.write", function () {
+  document.write('<b id="w1">eins</b>');
+  document.write('<i id="w2">zwei</i>');
+  var a = document.getElementById("w1"), b = document.getElementById("w2");
+  if (!a || !b) return false;
+  var s = document.currentScript;
+  return a.previousSibling === s && b.previousSibling === a;
+});
+/* **Eine fehlende Merkmalspruefung ist ein NEIN.** `var()` ist in JEDER
+   Eigenschaft gueltig; sagt `CSS.supports` hier nein, laedt DuckDuckGo
+   `css-vars-ponyfill` und laesst es 1,1 MB Blaetter nachbauen — gemessen
+   120 s statt 1,5 und 2 GB Halde. */
+row(domRows, "CSS.supports kennt var()", function () {
+  return CSS.supports("color", "var(--test, red)") === true
+      && CSS.supports("(--a: 0)") === true
+      && CSS.supports("color", "totalerquatsch") === false;
 });
 
 /* ---------- Behandler ---------- */

@@ -2162,6 +2162,12 @@ pub fn supports_cond(cond: &str) -> bool {
 
 pub fn supports_decl(prop: &str, val: &str) -> bool {
     let p = prop.to_ascii_lowercase();
+    // **Ein `var()` ist in JEDER Eigenschaft gueltig** (css-variables-1 §3):
+    // eingesetzt wird beim Gebrauch, also kann beim Parsen nichts daran
+    // scheitern. Der Farbleser darunter sagt zu `var(--test, red)` nein — und
+    // DDG fragt GENAU das, bevor es seine 1,1 MB Blaetter an
+    // `css-vars-ponyfill` uebergibt.
+    if crate::vars::has_var(val) { return true }
     if p == "color" || p == "background" || p == "fill" || p == "stroke" || p.ends_with("-color") {
         // `transparent` IS a supported colour — ask the value parser, not the
         // one that folds transparency into "no value".
@@ -3056,6 +3062,21 @@ fn ident_at(s: &str, mut i: usize) -> (String, usize) {
 
 #[cfg(test)]
 mod tests {
+
+    /// **Die Frage, die DuckDuckGo stellt, bevor es 1,1 MB Blaetter an einen
+    /// Polyfill uebergibt.** `var()` ist in JEDER Eigenschaft gueltig; wer
+    /// hier nein sagt, laedt `css-vars-ponyfill` und rechnet 120 s statt 1,5.
+    #[test]
+    fn a_var_is_valid_in_every_property() {
+        assert!(super::supports_decl("color", "var(--test, red)"));
+        assert!(super::supports_decl("background-color", "var(--x)"));
+        assert!(super::supports_cond("(color: var(--test, red))"));
+        // Kein `var()` daneben: der Farbleser entscheidet weiter.
+        assert!(super::supports_decl("color", "red"));
+        assert!(!super::supports_decl("color", "totalerquatsch"));
+        // `notvar(` ist keine Ersetzung.
+        assert!(!super::supports_decl("color", "notvar(--x)"));
+    }
 
 
     /// `@import` is how a hand-written site splits its CSS, and the whole of
