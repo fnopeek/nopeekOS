@@ -457,6 +457,9 @@ struct Doc {
     /// ihn genannt hat. -1 / None, wenn nichts unterwegs ist.
     img_job: i32,
     img_job_srcs: Option<Vec<(String, String)>>,
+    /// Adressen, zu denen schon eine Fehlanzeige im Log steht — die Meldung
+    /// gehoert EINMAL hin, nicht in jedes Bild.
+    img_missed: Vec<String>,
     /// Dasselbe fuer Hintergruende, benannt wie das Layout sie fuehrt.
     cssimg_job: i32,
     cssimg_job_keys: Option<Vec<(u64, String)>>,
@@ -535,7 +538,8 @@ impl Doc {
             find_pending: [0; 4], find_pending_len: 0,
             nav_css_count: 0, nav_scripts: None, js: None, nav_js_count: 0, nav_mod_entries: None, nav_mod_want: None, nav_mod_rounds: 0, nav_css_urls: None, nav_css_parts: None, nav_css_want: None, nav_css_rounds: 0, nav_sheet_nodes: None, nav_sheet_rounds: 0, nav_dynjs_nodes: None, nav_dynjs_rounds: 0,
             dirty: true, need_full: true, images_dirty: false, geom: None, last_vp: (0, 0),
-            img_job: -1, img_job_srcs: None, cssimg_job: -1, cssimg_job_keys: None,
+            img_job: -1, img_job_srcs: None, img_missed: Vec::new(),
+            cssimg_job: -1, cssimg_job_keys: None,
             font_job: -1, font_want: None, fetch_jobs: Vec::new(),
             pending_imgs: Vec::new(), pending_css_imgs: Vec::new(), css_asked: Vec::new(),
             script_nav_chain: 0, nav_from_script: false, script_tally: (0, 0, 0),
@@ -3337,6 +3341,13 @@ fn begin_images(engine: &mut Engine) -> Vec<String> {
     // Bilder stehen — DDGs Ergebnisseite ist eine Huelle, und ihre Karte wie
     // ihre Seitensymbole kamen deshalb nie zur Anfrage.
     let all = engine.image_srcs_now(html_str(), vw);
+    // **Die Sammelstelle sagte bis hierher nicht, was sie gesammelt hat.**
+    // Damit sah „auf der Seite steht kein Bild" genauso aus wie „ich habe im
+    // falschen Baum nachgesehen" — und genau das war es einmal.
+    if !all.is_empty() {
+        log(&alloc::format!("[beak] Bilder gesammelt: {} (z.B. {})",
+            all.len(), all.first().map(|s| &s[..s.len().min(72)]).unwrap_or("")));
+    }
     for src in all.iter() {
         if pending.len() >= MAX_IMAGES {
             log(&alloc::format!("[beak] image cap hit: {} of {} sources fetched", MAX_IMAGES, all.len()));
@@ -3498,6 +3509,20 @@ fn images_arrived(
         Some(l) if !l.images_in_band(&arrived, band.0, band.1) => {}
         _ => mark_dirty(),
     }
+}
+
+/// Wonach das letzte Malen vergeblich suchte — EINMAL je Adresse.
+///
+/// Der Platzhalter ist stumm, und damit sieht „nie angefragt" genauso aus wie
+/// „geholt, dekodiert, und beim Malen unter einem anderen Schluessel gesucht".
+/// Die Zeile nennt beide Haelften: die gesuchte Zeichenkette und wie viele
+/// Bilder der Speicher ueberhaupt haelt.
+fn log_image_miss(engine: &Engine) {
+    let Some((src, held)) = engine.image_miss() else { return };
+    if doc().img_missed.iter().any(|s| *s == src) { return }
+    doc_mut().img_missed.push(src.clone());
+    log(&alloc::format!("[beak] Bild nicht im Speicher ({held} da): {}",
+        &src[..src.len().min(96)]));
 }
 
 fn images_dirty() -> bool {
@@ -4307,6 +4332,8 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
     } else {
         engine.paint(layout, w as u32, h as u32, sy, buf);
     }
+    // Was das Malen nicht gefunden hat — einmal je Adresse.
+    log_image_miss(engine);
     // Inspect overlay: outline the selected element box (document → screen).
     if inspect_mode() {
         if let Some((bx, by, bw, bh)) = selected_rect() {
