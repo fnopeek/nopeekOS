@@ -22,12 +22,21 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-09-11, beak 0.168.0)
+### Current number (measured 2026-09-15, beak 0.181.0)
 
 ```
-4547 pass / 1098 fail / 141 inconclusive   (of 5786 vendored reftests)
-= 80.5 % of the conclusive 5645   ·   4547 / 5180 = 87.8 % without vehicles
+4554 pass / 1091 fail / 141 inconclusive   (of 5786 vendored reftests)
+= 80.7 % of the conclusive 5645   ·   4554 / 5180 = 87.9 % without vehicles
 ```
+
+**0.181.0: +7 / −0 gegen die gesegnete Baseline.** Gewonnen ueber zwei
+Releases: `CSS2/bidi-breaking-001`/`-002`, `css-text/hyphens-i18n-auto-005`,
+`hyphens-i18n-manual-005`, `hyphens-none-011`, `hyphens-punctuation-001`,
+`text-autospace-no-001`. Keiner verloren. Bewegt haben es zwei Aenderungen,
+beide aus der DuckDuckGo-Runde: der **Ausschnitt am Textbefehl** (0.180.0 —
+ein Textlauf wurde ganz behalten, sobald er den Ausschnitt beruehrte) und die
+**Eigenbreite eines Floats** (0.181.0 — er wurde gegen seine Zeile gemaxt
+statt dazugezaehlt).
 
 **0.168.0: +2 / −1, und der eine Rueckgang ist ein Bestehen aus Versehen
 weniger.** Gewonnen: `CSS2/blocks-026` und `html-forms/block-in-inline` (das
