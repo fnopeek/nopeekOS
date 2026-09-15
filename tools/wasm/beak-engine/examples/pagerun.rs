@@ -219,9 +219,9 @@ fn main() {
     let (mut ran, mut failed) = (0usize, 0usize);
     let mut inline_n = 0usize;
     for r in refs {
-        let (src, label, is_mod) = match r {
-            ScriptRef::Inline(t, m) => { inline_n += 1; (t, format!("inline #{inline_n}"), m) }
-            ScriptRef::External(u, m) => {
+        let (src, label, is_mod, node) = match r {
+            ScriptRef::Inline(t, m, n) => { inline_n += 1; (t, format!("inline #{inline_n}"), m, n) }
+            ScriptRef::External(u, m, n) => {
                 // **Denselben Weg wie die Blaetter**: `local` schneidet die
                 // Abfrage ab und legt den Pfad flach, wie `mirror.py` es tut.
                 // Der alte Weg nahm nur den Dateinamen — `js/main.js?v=1`
@@ -229,7 +229,7 @@ fn main() {
                 // Verzeichnis" fuer eine Datei, die daliegt
                 // ([[feedback_the_probe_must_use_the_targets_resolver]]).
                 match std::fs::read_to_string(local(&dir, &u)) {
-                    Ok(t) => (t, u, m),
+                    Ok(t) => (t, u, m, n),
                     Err(e) => {
                         failed += 1;
                         println!("FAIL {u}: nicht im Verzeichnis ({e})");
@@ -261,7 +261,12 @@ fn main() {
                 }
             },
         };
-        match sess.run(&prog) {
+        // `document.currentScript` — ein Modul hat keinen (HTML §4.12.1),
+        // und genau deshalb steht es NUR an diesem Zweig.
+        sess.interp.current_script = Some(node);
+        let r = sess.run(&prog);
+        sess.interp.current_script = None;
+        match r {
             Ok(()) => { ran += 1; println!("ok   {label} ({} B)", src.len()); }
             Err(e) => { failed += 1; println!("FAIL {label}: {e}"); }
         }
@@ -482,8 +487,11 @@ erreichbar ({} Umgebungen, {} Eigenschaften){}",
         eng.set_scripted_dom(Some(dom));
         let mut lay = eng.layout_ext(&html, &css, width);
         for _ in 0..4 {
+            // Dieselbe Runde wie der Wirt: erst die `data:`-Gesichter, die
+            // gar kein Netz brauchen ([[feedback_the_test_path_must_be_the_real_path]]).
+            let inline = eng.load_inline_fonts();
             let want = eng.take_pending_fonts();
-            if want.is_empty() { break }
+            if want.is_empty() && !inline { break }
             for (url, family, weight, italic) in want {
                 let u = resolve_path(&format!("{}/", origin()), &url);
                 if let Ok(b) = std::fs::read(local(&dir, &u)) {
@@ -829,8 +837,9 @@ fn page_layout(sess: &mut beak_engine::js::Session, html: &str, dir: &str)
     // eingebauten Schrift und vergleicht dann Breiten, die es nicht gibt.
     let (mut ok, mut bad) = (0usize, 0usize);
     for _ in 0..4 {
+        let inline = eng.load_inline_fonts();
         let want = eng.take_pending_fonts();
-        if want.is_empty() { break }
+        if want.is_empty() && !inline { break }
         for (url, family, weight, italic) in want {
             let u = resolve_path(&format!("{}/", origin()), &url);
             match std::fs::read(local(dir, &u)) {

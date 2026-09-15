@@ -528,6 +528,24 @@ pub struct Interp {
     /// die Seite fuer immer — bei DuckDuckGo raeumte React das
     /// servergerenderte HTML weg und rendert dann nichts mehr.
     pub pending_scripts: Vec<(u32, String)>,
+    /// Der `<script>`-Knoten, dessen Code GERADE laeuft — `document.currentScript`.
+    ///
+    /// **Ohne ihn faellt jedes Turbopack-Buendel aus.** Ein von Next.js
+    /// erzeugtes Stueck meldet sich mit
+    /// `TURBOPACK.push([document.currentScript, …])` an und wirft sonst
+    /// „chunk path empty but not in a worker"; DDGs Startseite verlor so
+    /// sieben Stuecke und ein Inline-Skript auf einmal.
+    ///
+    /// Ein MODUL hat keinen: dort ist die Antwort laut HTML §4.12.1 `null`,
+    /// und `import.meta.url` ist der Weg. Wer `None` setzt, sagt genau das.
+    pub current_script: Option<u32>,
+    /// Wo das naechste `document.write` desselben Skripts hinschreibt:
+    /// `(Skriptknoten, zuletzt geschriebener Knoten)`.
+    ///
+    /// Das Paar trennt sich selbst von einem alten Lauf: passt der erste Wert
+    /// nicht mehr zu `current_script`, gilt es nicht. Ohne die Stelle landete
+    /// ein zweites `write` VOR dem ersten.
+    pub(crate) write_point: Option<(u32, u32)>,
     /// Welche Skriptknoten schon gelaufen sind. Die Spezifikation nennt es
     /// das „already started"-Kennzeichen: ein Skript, das man noch einmal
     /// einhaengt, laeuft NICHT noch einmal.
@@ -937,6 +955,8 @@ impl Interp {
                  deadline: None,
                  pending_sheets: Vec::new(),
                  pending_scripts: Vec::new(),
+                 current_script: None,
+                 write_point: None,
                  ran_scripts: Vec::new(),
                  pending_fetches: Vec::new(), fetch_waiting: Vec::new(),
                  aborted_fetches: Vec::new(), next_fetch_id: 1,

@@ -58,12 +58,12 @@ fn main() {
     let (mut ran, mut failed) = (0usize, 0usize);
     let mut inline_n = 0usize;
     for r in refs {
-        let (src, label, is_mod) = match r {
-            ScriptRef::Inline(t, m) => { inline_n += 1; (t, format!("inline #{inline_n}"), m) }
-            ScriptRef::External(u, m) => {
+        let (src, label, is_mod, node) = match r {
+            ScriptRef::Inline(t, m, n) => { inline_n += 1; (t, format!("inline #{inline_n}"), m, n) }
+            ScriptRef::External(u, m, n) => {
                 let name = u.rsplit('/').next().unwrap_or(&u).to_string();
                 match std::fs::read_to_string(format!("{dir}/{name}")) {
-                    Ok(t) => (t, u, m),
+                    Ok(t) => (t, u, m, n),
                     Err(e) => {
                         failed += 1;
                         println!("FAIL {u}: nicht im Verzeichnis ({e})");
@@ -95,7 +95,10 @@ fn main() {
                 }
             },
         };
-        match sess.run(&prog) {
+        sess.interp.current_script = Some(node);
+        let r = sess.run(&prog);
+        sess.interp.current_script = None;
+        match r {
             Ok(()) => { ran += 1; println!("ok   {label} ({} B)", src.len()); }
             Err(e) => { failed += 1; println!("FAIL {label}: {e}"); }
         }

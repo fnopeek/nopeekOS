@@ -21,9 +21,12 @@ fn main() {
     let html = include_str!("../../beak/src/selftest.html");
     let dom = beak_engine::dom::parse(html);
     let doc = Doc::from_dom(&dom);
-    let scripts: Vec<String> = page_scripts(&doc)
+    // MIT dem Knoten: er ist `document.currentScript` und die Einfuegestelle
+    // von `document.write`. Ohne ihn liefe die Probe auf einer anderen
+    // Plattform als das Geraet ([[feedback_the_test_path_must_be_the_real_path]]).
+    let scripts: Vec<(String, u32)> = page_scripts(&doc)
         .into_iter()
-        .filter_map(|r| match r { ScriptRef::Inline(t, _) => Some(t), _ => None })
+        .filter_map(|r| match r { ScriptRef::Inline(t, _, n) => Some((t, n)), _ => None })
         .collect();
     println!("{} eingebettete Skripte, {} B HTML", scripts.len(), html.len());
 
@@ -63,12 +66,15 @@ fn main() {
         theme,
         viewport_w: 1024.0,
     });
-    for (n, src) in scripts.iter().enumerate() {
+    for (n, (src, node)) in scripts.iter().enumerate() {
         let prog = match beak_engine::js::parse(src, false) {
             Ok(p) => p,
             Err(e) => { println!("Skript {n}: PARSE-FEHLER {e:?}"); continue }
         };
-        if let Err(e) = sess.run(&prog) {
+        sess.interp.current_script = Some(*node);
+        let r = sess.run(&prog);
+        sess.interp.current_script = None;
+        if let Err(e) = r {
             println!("Skript {n}: LAUFFEHLER {e:?}");
         }
     }

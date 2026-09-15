@@ -1756,12 +1756,13 @@ const MAX_IMPORT_SHEETS: usize = 64;
 
 /// Ein Skript, das auf seinen Text wartet — oder ihn schon hat.
 enum PendingScript {
-    /// Quelltext, die Kennung (fuer ein Modul: seine Adresse) und ob es ein
-    /// Modul ist.
-    Ready(String, String, bool),
+    /// Quelltext, die Kennung (fuer ein Modul: seine Adresse), ob es ein
+    /// Modul ist, und der KNOTEN des `<script>` — er ist
+    /// `document.currentScript`.
+    Ready(String, String, bool, u32),
     /// Der Index in der Bestellung, in der Reihenfolge der Anforderung,
     /// plus die Adresse — ein Fehler ohne Kennung ist keine Auskunft.
-    Fetching(usize, String, bool),
+    Fetching(usize, String, bool, u32),
 }
 
 /// Wie viele externe Skripte eine Seite holen darf.
@@ -1961,22 +1962,22 @@ fn nav_begin_scripts(engine: &Engine) -> bool {
     let mut inline_n = 0usize;
     for r in refs {
         match r {
-            ScriptRef::Inline(t, m) => {
+            ScriptRef::Inline(t, m, node) => {
                 inline_n += 1;
                 // Ein eingebettetes Modul bekommt eine eigene Adresse: sie
                 // ist der Schluessel im Lader UND was `import.meta.url`
                 // sagt, und relative Angaben loesen sich dagegen auf.
                 let label = if m { alloc::format!("{base}#inline{inline_n}") }
                             else { alloc::format!("inline #{inline_n}") };
-                list.push(PendingScript::Ready(t, label, m));
+                list.push(PendingScript::Ready(t, label, m, node));
             }
-            ScriptRef::External(src, m) => {
+            ScriptRef::External(src, m, node) => {
                 if urls.len() >= MAX_SCRIPT_URLS {
                     log(&alloc::format!("[beak] script cap hit: {} external scripts used", MAX_SCRIPT_URLS));
                     continue;
                 }
                 let u = resolve(&base, &src);
-                list.push(PendingScript::Fetching(urls.len(), u.clone(), m));
+                list.push(PendingScript::Fetching(urls.len(), u.clone(), m, node));
                 urls.push(u);
             }
         }
@@ -2008,8 +2009,8 @@ fn nav_scripts_arrived(engine: &Engine) {
     let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
     let spans = take_batch(h, dst, SCRIPT_CAP.min(IMG_FETCH_CAP), want);
     for p in list.iter_mut() {
-        let (k, label, is_mod) = match p {
-            PendingScript::Fetching(k, l, m) => (*k, core::mem::take(l), *m),
+        let (k, label, is_mod, node) = match p {
+            PendingScript::Fetching(k, l, m, n) => (*k, core::mem::take(l), *m, *n),
             _ => continue,
         };
         let (off, n) = spans.get(k).copied().unwrap_or((0, 0));
@@ -2027,7 +2028,7 @@ fn nav_scripts_arrived(engine: &Engine) {
                 }
             }
         };
-        *p = PendingScript::Ready(text, label, is_mod);
+        *p = PendingScript::Ready(text, label, is_mod, node);
     }
     log_ms("fetch scripts", now_ms() - doc().nav_stage_ms);
     if !run_scripts(engine, list) { nav_done(); }
@@ -2297,9 +2298,9 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) -> bool {
     // liest `gNbc`, das ein eingebettetes Skript davor setzt.
     let mut entries: Vec<String> = Vec::new();
     for p in &list {
-        let (src, label, is_mod) = match p {
-            PendingScript::Ready(s, l, m) => (s, l.as_str(), *m),
-            PendingScript::Fetching(_, l, _) => {
+        let (src, label, is_mod, node) = match p {
+            PendingScript::Ready(s, l, m, n) => (s, l.as_str(), *m, *n),
+            PendingScript::Fetching(_, l, _, _) => {
                 failed += 1;
                 log(&alloc::format!("[beak]   script FAIL {l}: nie angekommen"));
                 continue;
@@ -2340,7 +2341,13 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) -> bool {
         };
         // Ein Skript, das scheitert, darf die naechsten nicht mitnehmen — so
         // macht es ein Browser auch.
-        match sess.run(&prog) {
+        // `document.currentScript` zeigt auf DIESEN Knoten, solange er
+        // laeuft. Ein Modul kommt hier nicht vorbei — dort ist die Antwort
+        // laut HTML §4.12.1 `null`.
+        sess.interp.current_script = Some(node);
+        let r = sess.run(&prog);
+        sess.interp.current_script = None;
+        match r {
             Ok(()) => ran += 1,
             Err(e) => {
                 failed += 1;
@@ -2613,6 +2620,9 @@ fn pump_fonts(engine: &Engine) -> bool {
                             now_ms() - doc().nav_stage_ms));
     }
     if doc().font_job >= 0 { return loaded }
+    // Erst die Gesichter, deren Bytes schon im Blatt stehen — sie gehen nicht
+    // ins Netz und kosten keine Runde.
+    if engine.load_inline_fonts() { loaded = true; }
     let mut want = engine.take_pending_fonts();
     if want.is_empty() { return loaded }
     want.truncate(MAX_FONT_URLS);

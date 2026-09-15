@@ -75,7 +75,15 @@ fn parse_var_args(input: &str, open: usize) -> Option<(usize, String, Option<Str
 // ── low-level helpers ───────────────────────────────────────────────────────
 
 /// `true` if bytes at `i` spell `var(` (case-insensitive on `var`).
+///
+/// Das Zeichen DAVOR gehoert zur Frage: ein Funktionsname ist ein ganzer
+/// Bezeichner, also ist `notvar(--x)` die Funktion `notvar` und kein `var()`.
+/// Ohne die Schranke setzte `expand` dort mitten im Namen ein.
 fn is_var_at(b: &[u8], i: usize) -> bool {
+    if i > 0 {
+        let p = b[i - 1];
+        if p.is_ascii_alphanumeric() || p == b'_' || p == b'-' || p >= 0x80 { return false }
+    }
     i + 4 <= b.len()
         && (b[i] | 0x20) == b'v'
         && (b[i + 1] | 0x20) == b'a'
