@@ -48,7 +48,21 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-15 · beak 0.182.0 · Kernel 0.340.0** (Rest: `git log`)
+**Stand 2026-09-15 · beak 0.183.0 · Kernel 0.340.0** (Rest: `git log`)
+
+**0.183.0: die Bildsammlung las das urspruengliche HTML.** Der Geraetelauf
+beantwortete die gestellte Frage eindeutig — **keine einzige Zeile zu
+`external-content.duckduckgo.com`**: das Bild wird nicht langsam geholt und
+nicht abgelehnt, es wird nie angefragt. Die Ursache war
+`image_srcs(html_str(), vw)`: `html_str()` ist das HTML vom Netz, DDGs
+Ergebnisseite aber eine HUELLE, die React fuellt. Das Layout liest den
+Skriptbaum seit je, die Bildsammlung daneben las weiter das Original — zwei
+Baeume, eine Frage. Das erklaert den leeren Kartenkasten UND die fehlenden
+Symbole vor jedem Treffer; mit der Adresse hatte es nie etwas zu tun (die
+protokollrelative `//external-content…` loest beak korrekt auf, gegen node
+geprueft). **Benannt und nicht gefixt:** ein per Skript eingehaengtes
+`<picture>` waehlt seinen Kandidaten nicht — `picture::resolve` laeuft auf dem
+Skriptbaum auch im Layout nicht.
 
 **0.182.0: vier Fehler, und alle vier in Eigenschaften, die beak HAT.** Genau
 das hatte der Eigenschaftszensus vorhergesagt (`<tools>/gallery/propcensus.py`:
