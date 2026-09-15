@@ -48,7 +48,37 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-15 · beak 0.178.0 · Kernel 0.340.0** (Rest: `git log`)
+**Stand 2026-09-15 · beak 0.179.0 · Kernel 0.340.0** (Rest: `git log`)
+
+**0.179.0: `getComputedStyle` antwortete auf 31 von 43 Fragen GAR NICHT.**
+Florian: „elemente stimmen noch nicht ganz, eher css kosmetisch". Also das
+Kastenorakel auf die echte DDG-Ergebnisseite — Chromium und beak auf
+demselben Bestand. Zuerst musste die Probe repariert werden, und das ist der
+erste Befund: **`pagerun` baute seit 0.175.3 nicht ohne
+`--features heap-census`**, also bekam jedes Werkzeug einen Baufehler auf
+stderr und LEERE Ausgabe auf stdout — der Vergleich meldete „beak 0 Kaesten"
+und sah aus wie ein Motorfehler.
+
+Messung: Chromium 487 Kaesten, beak 394. **Warnung an die Zahl:** der
+Vergleich schluesselt mit `span#6` — fehlen Kaesten, paart er ab der ersten
+Luecke VERSCHIEDENE Elemente. Auf eindeutige Schluessel eingeschraenkt
+bleiben 108 sichere Paare, 23 identisch.
+
+Daraus der Befund: `position`, `overflow`, `top`/`left`/`right`/`bottom`,
+`z-index`, `float`, `clear`, `box-sizing`, `flex-*`, `justify-content`,
+`align-items`, `white-space`, `text-align`, `vertical-align`, `gap`, `order`,
+`min`/`max-height`, `border-radius`, `text-indent` — alle leer. Das ist der
+Mechanismus, mit dem eine skriptgetriebene Seite sich SELBST falsch auslegt.
+Geantwortet wird aus demselben Feld, aus dem das Layout rechnet. **31 → 5**,
+und die fuenf Reste (`transform`, `transition`, `cursor`, `pointer-events`)
+baut beak nicht.
+
+**Was es NICHT geaendert hat:** die DDG-Seite misst sich danach Zahl fuer
+Zahl gleich. Die Luecke war real, nur nicht das, was DIESE Seite verschiebt.
+Offen und gemessen: SVG-Elemente melden keinen Kasten (48 von 115), zehn
+Kontextmenues sitzen falsch, die Seite ist 158 px zu hoch. Gegenprobe der
+Galerien gleich oder besser (Bootstrap 171 statt 162 identisch, keine
+Abweichung ueber 64 px).
 
 **0.178.0: `new EventTarget()` — ein fehlender Konstruktor hielt die KARTE
 auf.** Und die Diagnose davor war meine, nicht die der Quelle: ich hatte
@@ -878,7 +908,7 @@ war ein Datenobjekt — es gab gar keine Navigation per Skript.
     DOM-Aufrufe     99,4 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
     WPT (CSS)       4547/5180 = 87,8 % ohne Testvehikel (roh 80,5 %)
     Bibliotheken    13 von 13 (`<tools>/libprobe/`)
-    beak:selftest   Sprache 64/64, Dokument 44/44 (+ async + Kasten)
+    beak:selftest   Sprache 64/64, Dokument 45/45 (+ async + Kasten)
     Kastengeometrie Bootstrap 413/415 (170 identisch) · Tailwind 165/165
                     · ua.html 62/62 · controls.html 49/49 (47 byte-gleich)
                     (`<tools>/gallery/`, die dritte Vorlage ist NACKT)
