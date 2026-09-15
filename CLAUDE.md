@@ -48,7 +48,28 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-15 · beak 0.177.0 · Kernel 0.340.0** (Rest: `git log`)
+**Stand 2026-09-15 · beak 0.178.0 · Kernel 0.340.0** (Rest: `git log`)
+
+**0.178.0: `new EventTarget()` — ein fehlender Konstruktor hielt die KARTE
+auf.** Und die Diagnose davor war meine, nicht die der Quelle: ich hatte
+gesagt, DDGs Kartenkasten sei ein Canvas. `dist_g.js` baut ihn mit
+`mapkit.getStaticImageURL(...)`, also als statisches BILD.
+
+**DDG prueft vor dem Laden von MapKit drei Dinge**, jedes mit
+`new Function(src)()`: `true?.valueOf()`, `class C { ok = true }` — und
+`new EventTarget() instanceof EventTarget`. Schlaegt eines fehl, wirft der
+Lader `MapKitUnsupportedError`, BEVOR irgendetwas geholt wird; genau deshalb
+stand im Geraetelauf keine einzige `/mapkit/`-Zeile. Zwei Proben gingen
+durch, die dritte warf `Illegal constructor`. **`EventTarget` HAT einen
+Konstruktor** (DOM §2.7); beak fuehrte es nur als Schnittstelle. Gebaut als
+LOSGELOESTER Knoten — damit tragen die drei Methoden unveraendert, und ohne
+Elter ist die Blasenkette ein Glied lang. `iface` bekommt dafuer eine
+Schwester `iface_with`; alle anderen DOM-Schnittstellen werfen weiter.
+
+**Nicht bewiesen ist damit, dass die Karte erscheint:** danach kommen
+`/local.js?get_mk_token=1`, `/mapkit/` und `mapkit.init`, und die haengen am
+Wissenskasten, den der Spiegel nicht nachstellt (`t.js` ist eine
+Einmal-Adresse). Das Tor, das messbar war, ist auf.
 
 **0.177.0: die Tabelle der benannten Verweise kannte fuenfzehn Namen, HTML
 hat 2125.** Aus dem ersten Geraetelauf mit 0.176.0: DuckDuckGos Ergebnisseite
@@ -857,7 +878,7 @@ war ein Datenobjekt — es gab gar keine Navigation per Skript.
     DOM-Aufrufe     99,4 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
     WPT (CSS)       4547/5180 = 87,8 % ohne Testvehikel (roh 80,5 %)
     Bibliotheken    13 von 13 (`<tools>/libprobe/`)
-    beak:selftest   Sprache 64/64, Dokument 43/43 (+ async + Kasten)
+    beak:selftest   Sprache 64/64, Dokument 44/44 (+ async + Kasten)
     Kastengeometrie Bootstrap 413/415 (170 identisch) · Tailwind 165/165
                     · ua.html 62/62 · controls.html 49/49 (47 byte-gleich)
                     (`<tools>/gallery/`, die dritte Vorlage ist NACKT)
