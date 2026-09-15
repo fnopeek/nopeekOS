@@ -48,7 +48,34 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-15 · beak 0.176.0 · Kernel 0.340.0** (Rest: `git log`)
+**Stand 2026-09-15 · beak 0.177.0 · Kernel 0.340.0** (Rest: `git log`)
+
+**0.177.0: die Tabelle der benannten Verweise kannte fuenfzehn Namen, HTML
+hat 2125.** Aus dem ersten Geraetelauf mit 0.176.0: DuckDuckGos Ergebnisseite
+STEHT — und in der Randspalte stand zehnmal woertlich `&ZeroWidthSpace;`.
+Jeder Name ausserhalb der fuenfzehn landete als TEXT auf der Seite. Gebaut ist
+deshalb die GANZE Liste (`src/entities.rs`, erzeugt aus
+`html.spec.whatwg.org/entities.json`): sie ist abgeschlossen und normiert, eine
+handverlesene waere eine Schaetzung darueber, was eine Seite schreiben darf.
+Preis **53 KB, 1,1 % des Moduls**. Dabei zwei Regeln mitgebaut, die vorher
+nicht gestellt waren: **ohne `;` gilt nur die Altlast** (106 Namen, laengste
+Uebereinstimmung), und **im ATTRIBUT gilt auch die nicht, wenn `=` oder ein
+Buchstabe folgt** — sonst wird aus `?a&copy=1` ein Copyright-Zeichen und der
+Link ist kaputt.
+
+**Und `TypeError: value is not a constructor` sagte ueber den Wert nichts.**
+Jetzt nennt die Meldung Rufstelle und Bauart —
+`window.Intl.ListFormat is not a constructor (undefined)` —, und damit war der
+Fall in EINEM Lauf beantwortet: DDG faengt ihn selbst ab und nimmt seinen
+Rueckfallpfad, die zwei Zeilen im Log sind sein eigenes `console.error`. Der
+Name faehrt als zweites Feld in `Op::New` mit, wie bei `Op::Call` seit je, und
+wird als PUNKTKETTE gebaut (`dotted_name`, bis drei Glieder) — mit nur zwei
+blieb die Meldung genau in dem Fall namenlos, fuer den sie da ist.
+
+**Offen und benannt:** die Karte im Wissenskasten ist Apple MapKit JS (DDG
+proxied es unter `/mapkit/`) und zeichnet in ein Canvas — dieselbe Luecke wie
+bei lottie. `Intl` fehlen `Locale`, `Collator`, `PluralRules`,
+`RelativeTimeFormat`, `ListFormat`, `Segmenter`, `DisplayNames`.
 
 **0.176.0: DuckDuckGo, vier Fehler — und der teuerste war eine ANTWORT.**
 Aus dem Geraetelauf: die Startseite verlor neun Skripte, die Ergebnisseite
@@ -830,7 +857,7 @@ war ein Datenobjekt — es gab gar keine Navigation per Skript.
     DOM-Aufrufe     99,4 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
     WPT (CSS)       4547/5180 = 87,8 % ohne Testvehikel (roh 80,5 %)
     Bibliotheken    13 von 13 (`<tools>/libprobe/`)
-    beak:selftest   Sprache 63/63, Dokument 42/42 (+ async + Kasten)
+    beak:selftest   Sprache 64/64, Dokument 43/43 (+ async + Kasten)
     Kastengeometrie Bootstrap 413/415 (170 identisch) · Tailwind 165/165
                     · ua.html 62/62 · controls.html 49/49 (47 byte-gleich)
                     (`<tools>/gallery/`, die dritte Vorlage ist NACKT)
