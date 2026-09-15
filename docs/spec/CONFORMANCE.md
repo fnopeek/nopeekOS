@@ -22,14 +22,14 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
-### Current number (measured 2026-09-15, beak 0.181.0)
+### Current number (measured 2026-09-15, beak 0.182.0)
 
 ```
-4554 pass / 1091 fail / 141 inconclusive   (of 5786 vendored reftests)
-= 80.7 % of the conclusive 5645   ·   4554 / 5180 = 87.9 % without vehicles
+4556 pass / 1089 fail / 141 inconclusive   (of 5786 vendored reftests)
+= 80.7 % of the conclusive 5645   ·   4556 / 5180 = 88.0 % without vehicles
 ```
 
-**0.181.0: +7 / −0 gegen die gesegnete Baseline.** Gewonnen ueber zwei
+**0.182.0: +9 / −0 gegen die gesegnete Baseline.** Gewonnen ueber zwei
 Releases: `CSS2/bidi-breaking-001`/`-002`, `css-text/hyphens-i18n-auto-005`,
 `hyphens-i18n-manual-005`, `hyphens-none-011`, `hyphens-punctuation-001`,
 `text-autospace-no-001`. Keiner verloren. Bewegt haben es zwei Aenderungen,

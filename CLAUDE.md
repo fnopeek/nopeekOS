@@ -48,7 +48,30 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-15 · beak 0.181.0 · Kernel 0.340.0** (Rest: `git log`)
+**Stand 2026-09-15 · beak 0.182.0 · Kernel 0.340.0** (Rest: `git log`)
+
+**0.182.0: vier Fehler, und alle vier in Eigenschaften, die beak HAT.** Genau
+das hatte der Eigenschaftszensus vorhergesagt (`<tools>/gallery/propcensus.py`:
+von 106 wirksamen CSS-Eigenschaften auf DDGs Ergebnisseite baut beak 89, und
+die 17 Reste aendern kein Pixel — **der Rueckstand zum echten Web sind FEHLER,
+keine fehlenden Merkmale**).
+
+**(1)** Was schwebt oder absolut steht, ist block-artig (css-display-3 §2.7) —
+die Kaskade blockifizierte gar nicht, `getComputedStyle` rechnete die Regel
+schon, aber nur fuer die Antwort. **(2)** Ein geflotetes STEUERELEMENT ist aus
+dem Fluss: in `flow_children` stand der Steuerelement-Zweig VOR dem
+Float-Zweig und verschluckte ihn — nur bei automatischer Breite, weshalb es
+wie ein Breitenfehler aussah. Damit steht „Directions" im Wissenskasten
+wieder rechts. **(3)** Ein Formatierungszeichen hat keine Laufweite:
+`is_zero_width_format` wurde nur fuer `letter-spacing` gefragt, die Schrift gab
+`.notdef` zurueck — **zwanzig U+200C kamen auf 184 px**. **(4)** `::before`
+und `::after` zaehlen zur Eigenbreite (samt ihrem RANDkasten); das Layout malt
+sie seit je, die Messung kannte sie nur am Steuerelement.
+
+**WPT 4554 → 4556, gegen die Baseline +9 / −0**; Galerien Zahl fuer Zahl
+unveraendert. Offen: die Pillen der ECHTEN Seite brechen weiter (die gerenderte
+Randspalte nutzt andere Klassen als das alte Blatt), der schrumpfende Kasten
+rechnet seinen linken Rand mit, die Seite ist 158 px zu hoch.
 
 **0.181.0: ein Float zaehlte nicht zur Eigenbreite seiner Zeile.** Florian:
 „proteciton. privacy dann das symbol.. ist auf die neue line geruscht". Auf
@@ -933,7 +956,7 @@ war ein Datenobjekt — es gab gar keine Navigation per Skript.
                               async-Tests endlich im Nenner stehen
     test262 parse   96,87 %
     DOM-Aufrufe     99,4 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
-    WPT (CSS)       4554/5180 = 87,9 % ohne Testvehikel (roh 80,6 %)
+    WPT (CSS)       4556/5180 = 88,0 % ohne Testvehikel (roh 80,7 %)
     Bibliotheken    13 von 13 (`<tools>/libprobe/`)
     beak:selftest   Sprache 64/64, Dokument 45/45 (+ async + Kasten)
     Kastengeometrie Bootstrap 413/415 (170 identisch) · Tailwind 165/165
