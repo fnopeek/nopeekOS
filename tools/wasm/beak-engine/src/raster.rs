@@ -44,6 +44,15 @@ pub struct Engine {
     /// `add_font` zurueck — dieselbe Runde wie beim Modulgraphen und den
     /// nachgeladenen Stilblaettern.
     pending_fonts: core::cell::RefCell<alloc::vec::Vec<(alloc::string::String, u32, u16, bool)>>,
+    /// Die Adresse, unter der das MALEN zuletzt vergeblich nach Pixeln suchte.
+    ///
+    /// **Der Platzhalter ist stumm**, und damit sieht „nie angefragt" genauso
+    /// aus wie „geholt, dekodiert, und beim Malen unter einem anderen
+    /// Schluessel gesucht". Auf DuckDuckGos Trefferliste stand im Log
+    /// „4 von 4 dekodiert" und auf dem Schirm blieben die Kaestchen leer —
+    /// die Frage, mit welcher Zeichenkette gesucht wurde, konnte niemand
+    /// beantworten ([[feedback_the_fast_path_must_say_it_ran]]).
+    img_miss: core::cell::RefCell<Option<alloc::string::String>>,
     /// Gesichter, deren Bytes SCHON dastehen — ein `@font-face` mit
     /// `data:`-Adresse. Sie warten hier, weil `note_font_faces` unter einem
     /// gehaltenen `self.sheet` laeuft und `add_font` es leert; `load_inline_fonts`
@@ -289,6 +298,7 @@ impl Engine {
         Engine {
             fonts: core::cell::RefCell::new(Fonts::new()),
             pending_fonts: core::cell::RefCell::new(alloc::vec::Vec::new()),
+            img_miss: core::cell::RefCell::new(None),
             inline_fonts: core::cell::RefCell::new(alloc::vec::Vec::new()),
             asked_fonts: core::cell::RefCell::new(alloc::vec::Vec::new()),
             glyphs: RefCell::new(HashMap::new()),
@@ -610,6 +620,13 @@ impl Engine {
     /// image, keep only its pixels, reuse the same fetch scratch for the next.
     /// `images_begin` clears the PAGE map, never the cross-navigation cache —
     /// that is the whole point of the cache surviving a navigation.
+    /// Wonach das letzte Malen vergeblich suchte, und wie viele Bilder der
+    /// Speicher haelt. Der Wirt fragt danach, wenn ein Kasten leer bleibt.
+    pub fn image_miss(&self) -> Option<(alloc::string::String, usize)> {
+        let miss = self.img_miss.borrow_mut().take()?;
+        Some((miss, self.images.borrow().len()))
+    }
+
     pub fn images_begin(&mut self) {
         self.images.get_mut().clear();
         self.img_budget.set(crate::image::TOTAL_BUDGET);
@@ -1285,7 +1302,10 @@ impl Engine {
                     // placeholder that layout used to emit as separate ops.
                     match self.images.borrow().get(src) {
                         Some(img) => blit_image(out, wi, hi, *x, vy, *iw, *ih, img, *fit, filt(layout, *filter)),
-                        None => self.draw_img_placeholder(out, wi, hi, *x, vy, *iw, *ih, alt),
+                        None => {
+                            *self.img_miss.borrow_mut() = Some(alloc::string::String::from(&**src));
+                            self.draw_img_placeholder(out, wi, hi, *x, vy, *iw, *ih, alt)
+                        }
                     }
                 }
                 DrawOp::Gradient { x, y, w: gw, h: gh, clip, repeat, pos, size, r, g } => {
@@ -2391,6 +2411,56 @@ mod tests {
     /// make the aspect ratio (4:1) unmistakable against a square box.
     const STRIPES_4X1: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAQAAAABCAIAAAB2Xpia\
         AAAAEklEQVR42mP4z8DAAMb//zMAABzwBPxjoz6tAAAAAElFTkSuQmCC";
+
+    /// **Die Kette von der Ankunft bis zum Pixel**, mit einer
+    /// protokollrelativen Adresse — genau der Fall von DuckDuckGos
+    /// Trefferliste (`//external-content.duckduckgo.com/ip3/x.ico`). Der Log
+    /// sagte „4 von 4 dekodiert", und die Kaestchen blieben leer; diese Zeile
+    /// fragt, ob zwischen ABLEGEN und MALEN derselbe Schluessel steht.
+    #[test]
+    fn ein_geholtes_bild_wird_auch_gemalt() {
+        let png = crate::image::decode_data_uri(STRIPES_4X1).expect("Testbild");
+        let (w, h) = (60u32, 40u32);
+        let mut eng = Engine::new();
+        eng.set_theme(light());
+        // Wie der Wirt es tut: erst die Runde beginnen, dann das Bild ablegen.
+        eng.images_begin();
+        eng.add_image_cached("//h.example/x.png", "https://h.example/x.png", &png)
+            .expect("dekodiert");
+        let lay = eng.layout(
+            "<body style='margin:0'><img src='//h.example/x.png' \
+             style='display:block;width:40px;height:20px'></body>", w);
+        let mut buf = alloc::vec![0u8; (w * h * 4) as usize];
+        eng.paint(&lay, w, h, 0, &mut buf);
+        // Das Testbild ist rot/gruen/blau/gelb — der erste Streifen ist ROT.
+        let i = ((2 * w + 2) * 4) as usize;
+        let (r, g, b) = (buf[i + 2], buf[i + 1], buf[i]);
+        assert!(r > 200 && g < 80 && b < 80,
+                "das geholte Bild wird gemalt, nicht der Platzhalter — gelesen ({r},{g},{b})");
+    }
+
+    /// Dieselbe Kette in der REIHENFOLGE DES GERAETS: erst auslegen, dann
+    /// kommt das Bild an, dann wird neu gemalt. Genau das tut der Wirt, und
+    /// genau da blieben DuckDuckGos Kaestchen leer.
+    #[test]
+    fn ein_spaet_geholtes_bild_wird_auch_gemalt() {
+        let png = crate::image::decode_data_uri(STRIPES_4X1).expect("Testbild");
+        let (w, h) = (60u32, 40u32);
+        let mut eng = Engine::new();
+        eng.set_theme(light());
+        eng.images_begin();
+        let html = "<body style='margin:0'><img src='//h.example/x.png' \
+                    style='display:block;width:40px;height:20px'></body>";
+        let lay = eng.layout(html, w);          // ausgelegt, Bild noch nicht da
+        eng.add_image_cached("//h.example/x.png", "https://h.example/x.png", &png)
+            .expect("dekodiert");
+        let mut buf = alloc::vec![0u8; (w * h * 4) as usize];
+        eng.paint(&lay, w, h, 0, &mut buf);     // nur neu MALEN, nicht neu auslegen
+        let i = ((2 * w + 2) * 4) as usize;
+        let (r, g, b) = (buf[i + 2], buf[i + 1], buf[i]);
+        assert!(r > 200 && g < 80 && b < 80,
+                "auch das SPAET geholte Bild wird gemalt — gelesen ({r},{g},{b})");
+    }
 
     fn stripes(fit: &str) -> alloc::string::String {
         alloc::format!(
