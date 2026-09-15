@@ -3332,7 +3332,11 @@ fn begin_images(engine: &mut Engine) -> Vec<String> {
     // candidate per media query, so fetching at a different width would fetch
     // a URL the page never asks for and leave the real one blank.
     let vw = canvas_rect().map(|(_, _, w, _)| w as u32).unwrap_or(1280);
-    let all = beak_engine::image_srcs(html_str(), vw);
+    // **Aus dem Baum, den das LAYOUT benutzt**, nicht aus dem urspruenglichen
+    // HTML. Eine Seite, die ihren Inhalt per Skript baut, hat dort keine
+    // Bilder stehen — DDGs Ergebnisseite ist eine Huelle, und ihre Karte wie
+    // ihre Seitensymbole kamen deshalb nie zur Anfrage.
+    let all = engine.image_srcs_now(html_str(), vw);
     for src in all.iter() {
         if pending.len() >= MAX_IMAGES {
             log(&alloc::format!("[beak] image cap hit: {} of {} sources fetched", MAX_IMAGES, all.len()));

@@ -694,6 +694,33 @@ impl Engine {
 
     pub fn has_scripted_dom(&self) -> bool { self.scripted.borrow().is_some() }
 
+    /// Die Bildadressen aus dem Baum, den das LAYOUT benutzt.
+    ///
+    /// **Die Bildsammlung las das urspruengliche HTML** — auf einer Seite, die
+    /// ihren Inhalt per Skript baut, steht dort nichts. DuckDuckGos
+    /// Ergebnisseite ist eine Huelle, die React fuellt: die Karte im
+    /// Wissenskasten und die Seitensymbole der Treffer kamen deshalb nie auch
+    /// nur zur ANFRAGE, und im Geraetelog stand keine einzige Zeile zu ihrem
+    /// Wirt
+    /// ([[feedback_the_second_engine_only_runs_where_the_first_one_called]]).
+    ///
+    /// Der Skriptbaum wird so gelesen, wie das Layout ihn liest — ohne
+    /// `picture::resolve`, denn das laeuft auf ihm auch dort nicht (eine
+    /// eigene, benannte Luecke: ein per Skript eingehaengtes `<picture>`
+    /// waehlt seinen Kandidaten nicht). Ohne Skriptbaum ist es Zeichen fuer
+    /// Zeichen die alte Antwort.
+    pub fn image_srcs_now(&self, html: &str, width: u32) -> alloc::vec::Vec<alloc::string::String> {
+        let held = self.scripted.borrow();
+        match &*held {
+            Some(dom) => {
+                let mut out = alloc::vec::Vec::new();
+                crate::collect_img_srcs(&dom.root, &mut out);
+                out
+            }
+            None => { drop(held); crate::image_srcs(html, width) }
+        }
+    }
+
     /// Welche `@font-face`-Schriften die Seite verlangt und noch nicht hat.
     ///
     /// Nur die ERSTE Quelle je Gesicht: die Liste ist die Rangfolge der Seite,
@@ -2738,6 +2765,29 @@ mod tests {
             }
         }
         assert_eq!(ink, 0, "{ink} Pixel Tinte ausserhalb eines 1x1-Kastens mit overflow:hidden");
+    }
+
+    /// **Die Bildsammlung las das urspruengliche HTML.** Auf einer Seite, die
+    /// ihren Inhalt per Skript baut, steht dort nichts: DuckDuckGos
+    /// Ergebnisseite ist eine Huelle, die React fuellt, und ihre Karte wie ihre
+    /// Seitensymbole kamen nie auch nur zur ANFRAGE — im Geraetelog stand
+    /// keine einzige Zeile zu `external-content.duckduckgo.com`.
+    #[test]
+    fn bilder_kommen_aus_dem_baum_den_das_layout_benutzt() {
+        let huelle = "<html><body><div id=root></div></body></html>";
+        let eng = Engine::new();
+        // Ohne Skriptbaum: Zeichen fuer Zeichen die alte Antwort.
+        assert!(eng.image_srcs_now(huelle, 800).is_empty());
+
+        let gebaut = crate::dom::parse(
+            "<html><body><div id=root>\
+             <img alt=map src=\"//external-content.duckduckgo.com/ssv2/?size=448x157\">\
+             <img src=\"data:image/png;base64,AAAA\">\
+             </div></body></html>");
+        eng.set_scripted_dom(Some(gebaut));
+        let got = eng.image_srcs_now(huelle, 800);
+        assert_eq!(got, alloc::vec!["//external-content.duckduckgo.com/ssv2/?size=448x157"],
+                   "die per Skript gebaute Karte wird gefunden, das `data:` NICHT gemeldet");
     }
 
     /// `text-overflow: ellipsis` — Bootstrap's `.text-truncate` idiom. The box

@@ -103,6 +103,28 @@ pub fn image_srcs(html: &str, width: u32) -> alloc::vec::Vec<alloc::string::Stri
     out
 }
 
+/// Die `src` aller `<img>` unter `el` — dieselbe Regel wie in `image_srcs`,
+/// als eigene Funktion, weil zwei Baeume sie brauchen.
+pub(crate) fn collect_img_srcs(el: &Element, out: &mut alloc::vec::Vec<alloc::string::String>) {
+    for c in &el.children {
+        if let Node::Element(e) = c {
+            if e.tag == "img" {
+                if let Some(s) = e.attr("src") {
+                    let s = s.trim();
+                    // Ein `data:` traegt seine Bytes selbst — es dem Wirt zu
+                    // melden hiesse, die ganze Nutzlast als Adresse ins Netz
+                    // zu schicken.
+                    let inline = s.starts_with("data:") || s.starts_with("DATA:");
+                    if !s.is_empty() && !inline {
+                        out.push(alloc::string::ToString::to_string(s));
+                    }
+                }
+            }
+            collect_img_srcs(e, out);
+        }
+    }
+}
+
 // Host demo: render a representative page to a BMP so the layout + text can be
 // eyeballed on the dev box without booting the OS (docs/spec/BROWSER.md §10).
 // Run: `cargo test --release render_sample_to_bmp -- --nocapture`
