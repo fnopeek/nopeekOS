@@ -6629,6 +6629,26 @@ family: st.family,
             // that resolves all three the way the paint does.
             let iw = self.svg_size(el, st).0 as f32;
             (iw, iw)
+        } else if el.tag == "img" {
+            // **Ein `<img>` stand in KEINEM der Zweige** — `replaced_intrinsic`
+            // fuehrt es nicht, und ein Bild hat keine Kinder. Also fiel es
+            // durch bis zum Textzweig und meldete NULL, bei beiden Breiten.
+            //
+            // Wo das zuschlaegt: die Eigenbreite ist die Untergrenze, unter die
+            // ein Flex-Element nicht schrumpft (css-flexbox-1 §4.5). Mit null
+            // schrumpft jedes Bild in einer engen Flexzeile auf null und wird
+            // von `img_box` auf EINEN Pixel geklemmt — ein 90 px hoher Strich
+            // von einem Pixel Breite, und daneben die Favicons als 1x16. Auf
+            // DuckDuckGos Ergebnisseite traf es JEDES Bild.
+            //
+            // Gemessen wird durch `img_box`, also durch genau die Funktion, die
+            // den Kasten danach auch legt ([[feedback_intrinsic_shared_path]]);
+            // `intrinsic_walk` tut es fuer ein Bild INNERHALB eines Behaelters
+            // seit je so, nur der Weg auf das Bild SELBST kannte die Regel
+            // nicht ([[feedback_the_rule_may_already_be_written_eight_lines_below]]).
+            // Ein Bild bricht nicht um: Min- und Max-Inhaltsbreite sind gleich.
+            let iw = self.img_box(el, st).0 as f32;
+            (iw, iw)
         } else if let Some((iw, _)) = replaced_intrinsic(el) {
             (iw, iw)
         // A control has no text children to measure — without this it sizes to
@@ -14468,6 +14488,66 @@ fn dbg_wiki_shape() {
         assert_eq!(img.len(), 1, "one image op");
         assert_eq!(img[0], (200, 100, "/x.png", "Foto"));
         assert!(l.guessed_image_srcs.is_empty(), "definite width+height → repaint suffices");
+    }
+
+    #[test]
+    fn ein_bild_schrumpft_in_einer_engen_flexzeile_nicht_auf_einen_pixel() {
+        // Die Eigenbreite eines Bildes ist die Untergrenze, unter die ein
+        // Flex-Element nicht schrumpft (css-flexbox-1 §4.5). `intrinsic_width`
+        // meldete fuer ein `<img>` NULL — es stand in keinem Zweig —, also
+        // schrumpfte jedes Bild in einer engen Zeile bis auf den einen Pixel,
+        // auf den `img_box` klemmt. Auf DuckDuckGos Ergebnisseite war das der
+        // 90 px hohe Strich von einem Pixel Breite und jedes Favicon daneben.
+        let l = lay(
+            "<body><div style=\"width:300px\"><div style=\"display:flex\">\
+             <div>Ein ziemlich langer Text der die Zeile fuellt und den Rest \
+             verdraengt bis nichts mehr bleibt</div>\
+             <img src=\"/a.png\" style=\"width:90px;height:90px\"></div></div></body>",
+            800,
+        );
+        let img: Vec<_> = l.ops.iter().filter_map(|o| match o {
+            DrawOp::Image { w, h, .. } => Some((*w, *h)),
+            _ => None,
+        }).collect();
+        assert_eq!(img, vec![(90, 90)], "das Bild behaelt seine 90 px");
+    }
+
+    #[test]
+    fn ein_bild_ohne_masse_meldet_die_breite_die_es_bekommt() {
+        // Messung und Auslegung teilen sich `img_box`, also meldet die
+        // Eigenbreite genau den Kasten, der danach gelegt wird — auch fuer ein
+        // Bild, dessen Pixel noch nicht da sind ([[feedback_intrinsic_shared_path]]).
+        let l = lay(
+            "<body><div style=\"width:120px\"><div style=\"display:flex\">\
+             <div>Text Text Text Text</div>\
+             <img src=\"/a.png\" width=\"64\" height=\"64\" style=\"align-self:flex-start\">\
+             </div></div></body>",
+            800,
+        );
+        let img: Vec<_> = l.ops.iter().filter_map(|o| match o {
+            DrawOp::Image { w, h, .. } => Some((*w, *h)),
+            _ => None,
+        }).collect();
+        assert_eq!(img, vec![(64, 64)], "die Attributmasse sind die Untergrenze");
+    }
+
+    #[test]
+    fn die_masse_eines_bildes_stehen_in_der_kaskade_nicht_erst_im_kasten() {
+        // `width`/`height` am `<img>` sind Praesentationshinweise (HTML
+        // Rendering §15.3.5-6), also GEHOEREN sie in die Kaskade. Solange sie
+        // nur `img_box` kannte, sah jeder, der vorher fragt, `auto`: in einer
+        // streckenden Flexzeile wurde aus 30x30 ein 30x60 (Chromium: 30x30).
+        let l = lay(
+            "<body><div style=\"display:flex;width:120px\">\
+             <div>Text Text Text Text Text Text</div>\
+             <img src=\"/a.png\" width=\"30\" height=\"30\"></div></body>",
+            800,
+        );
+        let img: Vec<_> = l.ops.iter().filter_map(|o| match o {
+            DrawOp::Image { w, h, .. } => Some((*w, *h)),
+            _ => None,
+        }).collect();
+        assert_eq!(img, vec![(30, 30)], "der Hinweis wirkt auf BEIDEN Achsen");
     }
 
     #[test]

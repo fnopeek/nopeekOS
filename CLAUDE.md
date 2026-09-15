@@ -48,7 +48,39 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-15 · beak 0.183.3 · Kernel 0.340.0** (Rest: `git log`)
+**Stand 2026-09-15 · beak 0.184.0 · Kernel 0.340.0** (Rest: `git log`)
+
+**0.184.0: der duenne Strich war ein Bild, und beak kannte die Breite eines
+Bildes nicht.** Florian: „hast du den langen duennen strich gesehen 1pixel
+breit und wohl ca 2cm lang". Nachgestellt auf DDGs Ergebnisseite, host-seitig:
+**JEDES Bild der Seite war einen Pixel breit** — die Favicons `1x16`, das
+Vorschaubild `1x90` (90 px sind bei 96 dpi genau seine 2,4 cm). Die Hoehe
+stimmte jedesmal, und das war der Hinweis.
+
+**`intrinsic_width` fuehrte `<img>` in KEINEM Zweig.** `replaced_intrinsic`
+kennt `iframe`/`video`/`canvas`/`object`/`embed`, ein `<svg>` hat einen
+eigenen, und ein Bild fiel bis zum Textzweig durch — wo es keine Kinder hat
+und also NULL meldet, bei beiden Breiten. Die Eigenbreite ist aber die
+Untergrenze, unter die ein Flex-Element nicht schrumpft (css-flexbox-1 §4.5):
+mit null schrumpfte jedes Bild in einer engen Zeile bis auf den einen Pixel,
+auf den `img_box` klemmt. Gemessen wird jetzt durch `img_box` — also durch
+genau die Funktion, die den Kasten danach auch legt; `intrinsic_walk` tut das
+fuer ein Bild INNERHALB eines Behaelters seit je so, nur der Weg auf das Bild
+SELBST kannte die Regel nicht.
+
+**Und dabei fiel der zweite:** `width`/`height` am `<img>` sind
+Praesentationshinweise (HTML Rendering §15.3.5-6) und standen in der Kaskade
+NICHT — mit der Begruendung, `img_box` lese sie ohnehin. Das tut es, aber
+erst beim Legen des Kastens; bis dahin sagt die Kaskade `auto`, und jeder,
+der vorher fragt, bekommt die falsche Antwort. Gegen Chromium gemessen: ein
+`<img width=30 height=30>` in einer streckenden Flexzeile kam **30x60** statt
+30x30. Doppelt angewandt wird nichts — `img_box` nimmt `css(st.width)`
+zuerst, und das ist derselbe Wert.
+
+Beide zusammen haengen an EINER neuen Selbsttestzeile (`imgbox`), und ohne
+sie sagt sie woertlich `NEIN: Bild 1x46 statt 30x30`. Tore unveraendert: 468
+Tests, WPT +9/−0 gegen die Baseline, alle vier Galerien auf ihren gesegneten
+Zahlen. `pagedump` nennt jetzt auch Bildbefehle, `pagerun` kennt `IMGOPS=1`.
 
 **0.183.0: die Bildsammlung las das urspruengliche HTML.** Der Geraetelauf
 beantwortete die gestellte Frage eindeutig — **keine einzige Zeile zu

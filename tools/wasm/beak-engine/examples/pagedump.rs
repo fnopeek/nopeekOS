@@ -27,6 +27,8 @@ fn main() {
             DrawOp::Gradient { x, y, w, h, g, .. } =>
                 println!("Gradient  {x:5},{y:<5} {w:4}x{h:<4} {:?} {}deg rep={} {:?}",
                          g.kind, g.angle, g.repeating, g.stops()),
+            DrawOp::Image { x, y, w, h, src, alt, .. } =>
+                println!("Image     {x:5},{y:<5} {w:4}x{h:<4} {src:?} alt={alt:?}"),
             _ => {}
         }
     }

@@ -45,6 +45,19 @@
  <span id="ctlbox">Steuerelement ungeprueft</span>
 </p>
 <p>
+ <!-- Die Eigenbreite eines Bildes ist die Untergrenze, unter die ein
+      Flex-Element nicht schrumpft (css-flexbox-1 §4.5), und `width`/`height`
+      sind Praesentationshinweise (HTML Rendering §15.3.5-6). Die Zeile ist
+      ABSICHTLICH zu eng: ohne die erste Regel schrumpft das Bild auf einen
+      Pixel, ohne die zweite streckt es sich auf die Zeilenhoehe. Das Bild
+      kommt nie an — genau darum geht es, der KASTEN steht vorher fest. -->
+ <span id="imgrow" style="display:inline-flex;width:120px">
+  <span>Text Text Text Text Text Text</span>
+  <img id="imgp" src="kommt-nie.png" width="30" height="30">
+ </span>
+ <span id="imgbox">Bildkasten ungeprueft</span>
+</p>
+<p>
  <button id="b2" onclick="say('inline', 'inline-onclick lief')">onclick-Attribut</button>
  <span id="inline">nicht geklickt</span>
 </p>
@@ -790,6 +803,11 @@ document.getElementById("b1").addEventListener("click", function () {
   say("ctlbox", schlecht.length
     ? "NEIN: " + schlecht.join(" · ")
     : "Steuerelement stimmt: Feld " + fw + "x" + fh + ", Kaestchen " + cs);
+  var i = document.getElementById("imgp").getBoundingClientRect();
+  var iw = Math.round(i.width), ih = Math.round(i.height);
+  say("imgbox", (iw === 30 && ih === 30)
+    ? "Bildkasten stimmt: " + iw + "x" + ih
+    : "NEIN: Bild " + iw + "x" + ih + " statt 30x30");
 });
 document.getElementById("b3").addEventListener("click", function () {
   var li = document.createElement("li");
