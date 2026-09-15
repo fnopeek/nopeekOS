@@ -1578,7 +1578,8 @@ pub fn wrap(i: &mut Interp, id: u32) -> Value {
         _ => {
             let tag = i.doc.as_ref().map(|d| d.nodes[id as usize].tag.clone())
                        .unwrap_or_else(|| Rc::from(""));
-            if &*tag == "#fragment" { i.realm.fragment_proto.clone() }
+            if &*tag == "#eventtarget" { i.realm.event_target_proto.clone() }
+            else if &*tag == "#fragment" { i.realm.fragment_proto.clone() }
             else if &*tag == "svg" || tag.starts_with("svg:") {
                 i.realm.tag_protos.get("svg").cloned()
                     .unwrap_or_else(|| i.realm.svg_element_proto.clone())
@@ -4258,8 +4259,17 @@ pub fn install(realm: &mut Realm) {
     // `class X extends HTMLElement {}` laeuft trotzdem durch: sie liest nur
     // `HTMLElement.prototype`, gerufen wird der Konstruktor erst bei `new`.
     fn iface(realm: &Realm, name: &str, proto: &Gc) -> Gc {
-        let c = native(Some(realm.function_proto.clone()),
-                       |i, _, _| i.type_err("Illegal constructor"), name, 0, true);
+        iface_with(realm, name, proto, |i, _, _| i.type_err("Illegal constructor"))
+    }
+
+    /// Dieselbe Verdrahtung, aber mit einem echten Konstruktor. **Die
+    /// meisten DOM-Schnittstellen haben keinen** — `new HTMLElement()` wirft
+    /// im Browser genauso. `EventTarget` HAT einen (DOM §2.7), und das ist
+    /// keine Feinheit: DuckDuckGo prueft damit, ob es Apples MapKit laden
+    /// darf (`no_event_target`), und ohne den Konstruktor wird die Karte im
+    /// Wissenskasten nie auch nur ANGEFORDERT.
+    fn iface_with(realm: &Realm, name: &str, proto: &Gc, ctor: NativeFn) -> Gc {
+        let c = native(Some(realm.function_proto.clone()), ctor, name, 0, true);
         c.borrow_mut().define("prototype", Prop::frozen(Value::Obj(proto.clone())));
         proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(c.clone())));
         // **`Symbol.toStringTag` traegt den Schnittstellennamen** (WebIDL
@@ -4275,7 +4285,29 @@ pub fn install(realm: &mut Realm) {
         realm.global.borrow_mut().define(name, Prop::builtin(Value::Obj(c.clone())));
         c
     }
-    iface(realm, "EventTarget", &event_target_proto);
+    // **Ein eigenstaendiges `EventTarget` ist ein LOSGELOESTER Knoten.**
+    // Damit tragen `addEventListener`, `removeEventListener` und
+    // `dispatchEvent` unveraendert: die Zuhoererliste sitzt am Knoten, und
+    // ohne Elter ist die Blasenkette genau ein Glied lang — was fuer ein
+    // Ziel ohne Baum richtig ist. Die Alternative waere eine ZWEITE
+    // Zuhoererverwaltung neben der ersten
+    // ([[feedback_a_copy_is_a_second_semantics_waiting]]).
+    //
+    // Gesehen wird er von niemandem sonst: er haengt an keinem Elter, also
+    // erreicht ihn weder ein Selektor noch das Auslegen.
+    iface_with(realm, "EventTarget", &event_target_proto, |i, _, _| {
+        if !i.native_new { return i.type_err("Constructor EventTarget requires 'new'") }
+        // Die Zuhoererliste sitzt im Dokument — ohne eines gibt es keine
+        // Stelle, an der sie stehen koennte. Auf einer Seite gibt es immer
+        // eins; nur das nackte `jsrun` hat keins, und dort steht es so da,
+        // statt still ein halbes Ziel zu liefern.
+        let Some(d) = &mut i.doc else {
+            return i.type_err("EventTarget needs a document (the listener list lives there)")
+        };
+        let id = d.create(ELEMENT_NODE, "#eventtarget");
+        Ok(wrap(i, id))
+    });
+    realm.event_target_proto = event_target_proto.clone();
     // Das Fenster IST ein EventTarget — dadurch hat `window` dieselben drei
     // Methoden wie jeder Knoten, ohne sie ein zweites Mal zu definieren.
     realm.global.borrow_mut().proto = Some(event_target_proto.clone());

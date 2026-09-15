@@ -667,6 +667,22 @@ row(domRows, "Felder auf Attributen", function () {
       && document.createElement("div").tabIndex === -1;
 });
 
+/* **`EventTarget` HAT einen Konstruktor** (DOM §2.7) — und das ist keine
+   Formalie: DuckDuckGo prueft damit woertlich, ob es Apples MapKit laden
+   darf. Schlug `new EventTarget()` fehl, wurde die Karte im Wissenskasten
+   nie auch nur ANGEFORDERT. Die Zeile faehrt DDGs eigene Probe nach und
+   prueft dazu, dass das Ding auch zustellt. */
+row(domRows, "new EventTarget()", function () {
+  if (!(typeof EventTarget === "function" && new EventTarget() instanceof EventTarget)) return false;
+  var t = new EventTarget(), n = 0;
+  var f = function () { n++ };
+  t.addEventListener("ping", f);
+  t.dispatchEvent(new Event("ping"));
+  t.removeEventListener("ping", f);
+  t.dispatchEvent(new Event("ping"));
+  return n === 1 && Object.prototype.toString.call(t) === "[object EventTarget]";
+});
+
 /* **Die Tabelle der benannten Verweise war fuenfzehn Namen gross, HTML hat
    2125.** Alles andere stand woertlich auf der Seite: DuckDuckGos Vorlage fuer
    „Searches related to" schreibt `&ZeroWidthSpace;`, und das erschien zehnmal
