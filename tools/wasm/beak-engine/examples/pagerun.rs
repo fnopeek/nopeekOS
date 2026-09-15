@@ -299,14 +299,26 @@ Beobachter={}/{} Kekse={} rss={} MB",
                 sess.interp.cookies.len(),
                 rss_mb());
             use std::sync::atomic::Ordering::Relaxed;
-            let c = sess.interp.heap_census();
-            println!("          Halde LEBEND {} MB, Spitze {} MB · Zensus: {} von {} Objekten \
+            // **Die Halde zaehlt der Allokator, den Zensus die Engine.** Nur
+            // der zweite haengt an `heap-census`; ohne das Merkmal soll die
+            // Probe TROTZDEM bauen. Sie tat es seit 0.175.3 nicht mehr, und
+            // daran fiel der Galerie-Vergleich aus — still, weil `cargo run`
+            // seinen Baufehler nach stderr schreibt und der Aufrufer stdout
+            // liest ([[feedback_a_silent_failure_hides_every_bug_upstream_of_it]]).
+            #[cfg(feature = "heap-census")]
+            {
+                let c = sess.interp.heap_census();
+                println!("          Halde LEBEND {} MB, Spitze {} MB · Zensus: {} von {} Objekten \
 erreichbar ({} Umgebungen, {} Eigenschaften){}",
-                LIVE.load(Relaxed) / 1048576, LIVE_PEAK.load(Relaxed) / 1048576,
-                c.reachable, c.live, c.envs, c.props,
-                if c.live > c.reachable {
-                    format!(" — {} in Ringen", c.live - c.reachable)
-                } else { String::new() });
+                    LIVE.load(Relaxed) / 1048576, LIVE_PEAK.load(Relaxed) / 1048576,
+                    c.reachable, c.live, c.envs, c.props,
+                    if c.live > c.reachable {
+                        format!(" — {} in Ringen", c.live - c.reachable)
+                    } else { String::new() });
+            }
+            #[cfg(not(feature = "heap-census"))]
+            println!("          Halde LEBEND {} MB, Spitze {} MB (Zensus: --features heap-census)",
+                LIVE.load(Relaxed) / 1048576, LIVE_PEAK.load(Relaxed) / 1048576);
         }
         // **Erst bedienen, dann die Uhr laufen lassen.** Wer wartet, darf die
         // Zeitgeber nicht vorziehen — sonst faellt webpacks

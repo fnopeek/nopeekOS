@@ -5015,6 +5015,92 @@ pub fn serialize_computed(s: &ComputedStyle) -> String {
     }
     put("opacity", &if s.transparent || s.opacity_zero { "0".into() } else { trim_f32(s.opacity) });
     put("visibility", if s.transparent { "hidden" } else { "visible" });
+
+    // **Einunddreissig von dreiundvierzig gefragten Eigenschaften kamen leer
+    // zurueck**, gemessen auf DuckDuckGos Ergebnisseite. Das ist keine
+    // Kosmetik: eine Positionierungsbibliothek fragt `position`, bevor sie
+    // rechnet, ein Rollbeobachter `overflow`, ein Flexhelfer `flex-grow`. Wer
+    // "" bekommt, nimmt den falschen Zweig — und die Seite legt sich SELBST
+    // falsch aus, ohne dass im Layout ein Fehler steckt.
+    //
+    // Geantwortet wird aus DEMSELBEN Feld, aus dem das Layout rechnet. Wo das
+    // Feld weniger weiss als CSS (aus `flex-direction: row-reverse` ist nur
+    // `flex_row` uebrig), steht hier, was das Layout TUT — zwei Wahrheiten
+    // waeren schlimmer als eine grobe.
+    put("position", match s.position {
+        Position::Static => "static", Position::Relative => "relative",
+        Position::Absolute => "absolute", Position::Fixed => "fixed",
+        Position::Sticky => "sticky",
+    });
+    for (k, v) in [("top", s.top), ("right", s.right), ("bottom", s.bottom), ("left", s.left)] {
+        put(k, &len(v));
+    }
+    put("z-index", &match s.z_index {
+        ZIndex::Value(n) => alloc::format!("{n}"),
+        _ => String::from("auto"),
+    });
+    put("float", match s.float {
+        FloatKind::None => "none", FloatKind::Left => "left", FloatKind::Right => "right",
+    });
+    put("clear", match s.clear {
+        ClearKind::None => "none", ClearKind::Left => "left",
+        ClearKind::Right => "right", ClearKind::Both => "both",
+    });
+    let ovf = |v: Overflow| match v {
+        Overflow::Visible => "visible", Overflow::Hidden => "hidden",
+        Overflow::Clip => "clip", Overflow::Scroll => "scroll", Overflow::Auto => "auto",
+    };
+    put("overflow-x", ovf(s.overflow_x));
+    put("overflow-y", ovf(s.overflow_y));
+    // Die Kurzform gibt es nur, wenn beide Achsen dasselbe sagen — so
+    // serialisiert ein Browser sie auch.
+    if s.overflow_x == s.overflow_y { put("overflow", ovf(s.overflow_x)); }
+    put("min-height", &len(s.min_height));
+    put("max-height", &len(s.max_height));
+    put("flex-direction", if s.flex_row { "row" } else { "column" });
+    put("flex-wrap", if s.flex_wrap { "wrap" } else { "nowrap" });
+    put("justify-content", match s.justify {
+        Justify::Start => "flex-start", Justify::End => "flex-end", Justify::Center => "center",
+        Justify::Between => "space-between", Justify::Around => "space-around",
+        Justify::Evenly => "space-evenly",
+    });
+    let cross = |v: CrossAlign| match v {
+        CrossAlign::Stretch => "stretch", CrossAlign::Start => "flex-start",
+        CrossAlign::Center => "center", CrossAlign::End => "flex-end",
+    };
+    put("align-items", cross(s.align_items));
+    put("flex-grow", &trim_f32(s.flex_grow));
+    put("flex-shrink", &trim_f32(s.flex_shrink));
+    put("order", &alloc::format!("{}", s.order));
+    put("column-gap", &len(s.grid_col_gap));
+    put("row-gap", &len(s.grid_row_gap));
+    put("text-align", match s.text_align {
+        TextAlign::Start => "start", TextAlign::End => "end", TextAlign::Left => "left",
+        TextAlign::Right => "right", TextAlign::Center => "center",
+        TextAlign::Justify => "justify",
+    });
+    put("text-transform", match s.text_transform {
+        TextTransform::None => "none", TextTransform::Upper => "uppercase",
+        TextTransform::Lower => "lowercase", TextTransform::Capitalize => "capitalize",
+    });
+    put("text-indent", &len(s.text_indent));
+    put("box-sizing", if s.box_border { "border-box" } else { "content-box" });
+    // `white-space` fuehrt beak als EINE Frage — bricht die Zeile um oder
+    // nicht. `pre` und `pre-wrap` unterscheidet das Feld nicht; hier steht,
+    // was das Layout tut.
+    put("white-space", if s.nowrap { "nowrap" } else { "normal" });
+    put("vertical-align", match s.valign {
+        VAlign::Baseline => "baseline", VAlign::Sub => "sub", VAlign::Super => "super",
+        VAlign::Top => "top", VAlign::Middle => "middle", VAlign::Bottom => "bottom",
+        VAlign::TextTop => "text-top", VAlign::TextBottom => "text-bottom",
+    });
+    // Die Kurzform `gap`, wenn beide Achsen dasselbe sagen — wie `overflow`.
+    if s.grid_col_gap == s.grid_row_gap { put("gap", &len(s.grid_row_gap)); }
+    // Vier Ecken; gleich grosse schreibt ein Browser als EINEN Wert.
+    let r = &s.radius;
+    put("border-radius", &if r.iter().all(|x| *x == r[0]) { len(r[0]) } else {
+        alloc::format!("{} {} {} {}", len(r[0]), len(r[1]), len(r[2]), len(r[3]))
+    });
     o
 }
 

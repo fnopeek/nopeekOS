@@ -667,6 +667,24 @@ row(domRows, "Felder auf Attributen", function () {
       && document.createElement("div").tabIndex === -1;
 });
 
+/* **`getComputedStyle` gab auf 31 von 43 gefragten Eigenschaften eine LEERE
+   Zeichenkette zurueck** — gemessen auf DuckDuckGos Ergebnisseite. Das ist
+   kein Detail: eine Positionierungsbibliothek fragt `position`, bevor sie
+   rechnet, ein Rollbeobachter `overflow`, ein Flexhelfer `flex-grow`. Wer ""
+   bekommt, nimmt den falschen Zweig. */
+row(domRows, "getComputedStyle antwortet", function () {
+  var d = document.createElement("div");
+  d.style.cssText = "position:absolute;overflow:hidden;box-sizing:border-box;"
+                  + "flex-grow:2;z-index:3;float:left;text-align:right;top:5px";
+  document.getElementById("sink").appendChild(d);
+  var c = getComputedStyle(d);
+  var will = { position:"absolute", overflow:"hidden", "box-sizing":"border-box",
+               "flex-grow":"2", "z-index":"3", float:"left", "text-align":"right", top:"5px" };
+  for (var k in will) if (c.getPropertyValue(k) !== will[k]) return k + "=" + c.getPropertyValue(k);
+  d.parentNode.removeChild(d);
+  return true;
+});
+
 /* **`EventTarget` HAT einen Konstruktor** (DOM §2.7) — und das ist keine
    Formalie: DuckDuckGo prueft damit woertlich, ob es Apples MapKit laden
    darf. Schlug `new EventTarget()` fehl, wurde die Karte im Wissenskasten
