@@ -48,7 +48,48 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-13 · beak 0.175.3 · Kernel 0.340.0** (Rest: `git log`)
+**Stand 2026-09-15 · beak 0.176.0 · Kernel 0.340.0** (Rest: `git log`)
+
+**0.176.0: DuckDuckGo, vier Fehler — und der teuerste war eine ANTWORT.**
+Aus dem Geraetelauf: die Startseite verlor neun Skripte, die Ergebnisseite
+rechnete 133 s und endete mit 843 MB und einem Zugriff daneben. Am Spiegel
+beider Seiten nachgestellt (`tools/ddgmirror.py`) und ausgezaehlt.
+
+**`CSS.supports` sagte NEIN zu `var()`, und das kostete 119 Sekunden.** DDGs
+Hauptbuendel fragt woertlich `CSS.supports("color","var(--test, red)")` und
+laedt sonst `css-vars-ponyfill`, das 1,1 MB Stilblaetter nachbaut — in einer
+Schleife, die nicht aufhoert. `supports_decl` reichte die Frage an den
+FARBleser weiter, und der kennt kein `var()`. Ein `var()` ist aber in JEDER
+Eigenschaft gueltig (css-variables-1 §3). A/B auf demselben Spiegel:
+**120,9 s → 1,6 s · Halde-Spitze 2049 → 338 MB · Konsole 1298 → 2 Zeilen.**
+Das Objekt `CSS` gibt es seit 0.175.0 und der Kommentar dort nennt genau
+diesen Polyfill — gebaut war die Tuer, die Frage dahinter stand weiter falsch.
+
+**`document.currentScript` gab es nicht — acht der neun Ausfaelle.** Jedes
+Turbopack-Stueck meldet sich mit
+`TURBOPACK.push([document.currentScript, …])` und wirft sonst „chunk path
+empty but not in a worker". `ScriptRef` traegt jetzt den KNOTEN, und alle
+vier Wege setzen ihn (Wirt, `pagerun`, `ctlpaint`, `selftest`); ein Modul
+bekommt keinen. **`document.write`** ist der neunte: geschrieben wird
+dorthin, wo der Parser stuende — hinter das schreibende `<script>`, und
+dafuer gibt es jetzt `currentScript`. Ohne Einfuegestelle waere nach
+Spezifikation `document.open()` faellig, also LEEREN; beak sagt es
+stattdessen auf der Konsole.
+
+**Und eine benannte Klasse sah sich selbst nicht.** Der Intl-Polyfill, den
+DDG per `document.write` nachlaedt, starb an `aa is not defined` — alle
+zwanzig `aa` der Datei sind Schluessel, bis auf
+`class aa { … new aa(n) … }`. Der Name eines KLASSENAUSDRUCKS ist in seinem
+eigenen Rumpf gebunden (ES 15.7.14); beak hatte den Bereich fuer benannte
+Funktionsausdruecke, fuer Klassen fehlte er. test262 exec **83,07 → 83,08 %**.
+Dazu: ein `@font-face` mit `data:`-Adresse ging an den WIRT, der
+`data:application` beim Aufloeser als RECHNERnamen erfragte — jetzt loest die
+Engine es selbst auf, wie bei CSS-Bildern seit je.
+
+Host-seitig danach: **Startseite 30 von 30 Skripten (vorher 21), 0,22 s ·
+Ergebnisseite 22 von 22, 1,6 s.** Offen und benannt: `canvas.getContext("2d")`
+ist weiterhin `null` (daran faellt lottie aus) und `Intl.PluralRules`/`Locale`
+fehlen — deshalb holt DDG den 566-KB-Polyfill ueberhaupt.
 
 **Kernel 0.340.0: ein Modul konnte die ganze Maschine aufbrauchen.** Aus dem
 Geraetelauf: Seitenfehler auf `0xfffffffffffffffd` — das ist `null - 3`,
@@ -782,14 +823,14 @@ war ein Datenobjekt — es gab gar keine Navigation per Skript.
 
 **Die Zahlen, und sie messen NICHT dasselbe:**
 
-    test262 exec    82,74 %   (V8 auf demselben Korpus: 99,41 %)
+    test262 exec    83,08 %   (V8 auf demselben Korpus: 99,41 %)
                               0.166 fiel die Zahl auf 74,54 %, weil 5485
                               async-Tests endlich im Nenner stehen
     test262 parse   96,87 %
     DOM-Aufrufe     99,4 % gedeckt  (`tests/apigap.rs`, Chromium-Zensus)
     WPT (CSS)       4547/5180 = 87,8 % ohne Testvehikel (roh 80,5 %)
     Bibliotheken    13 von 13 (`<tools>/libprobe/`)
-    beak:selftest   Sprache 62/62, Dokument 39/39 (+ async + Kasten)
+    beak:selftest   Sprache 63/63, Dokument 42/42 (+ async + Kasten)
     Kastengeometrie Bootstrap 413/415 (170 identisch) · Tailwind 165/165
                     · ua.html 62/62 · controls.html 49/49 (47 byte-gleich)
                     (`<tools>/gallery/`, die dritte Vorlage ist NACKT)
