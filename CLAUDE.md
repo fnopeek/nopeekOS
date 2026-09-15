@@ -48,7 +48,24 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-15 · beak 0.179.0 · Kernel 0.340.0** (Rest: `git log`)
+**Stand 2026-09-15 · beak 0.180.0 · Kernel 0.340.0** (Rest: `git log`)
+
+**0.180.0: ein Textbefehl wurde GANZ behalten, sobald er den Ausschnitt
+beruehrte.** Florians Befund aus dem Bild: „Search Settings" stand lesbar
+quer ueber dem Zahnrad in DDGs Kopfzeile. Das ist die
+`visually-hidden`-Technik des ganzen Webs — 1x1 mit `overflow:hidden` und
+langem Text darin —, und beak malte den Text.
+
+**Der Kasten war die ganze Zeit richtig** (`1px`, Rechteck `0x0`). Es war ein
+Fehler des MALENS, und deshalb hat ihn keine Kastenmessung je gesehen; er
+fiel erst auf, als Chromium und beak als BILD nebeneinander lagen. Ein
+Rechteck wurde geschnitten, ein Textlauf nicht — bei einem grossen Kasten
+harmlos, bei einem 1x1 das Gegenteil. Jetzt traegt `DrawOp::Text` seinen
+Ausschnitt, `clip_ops` schneidet ihn mit einem vorhandenen, und der Rasterer
+klemmt die Glyphen dagegen — **kostet kein Pixel mehr**, weil der Blit ohnehin
+gegen die Leinwand klemmt. Gegen Chromium: die versteckten Faelle sauber, ein
+40x10-Fenster zeigt in beiden denselben Streifen. Der Test prueft PIXEL —
+ohne die Aenderung 1020 Punkte Tinte daneben.
 
 **0.179.0: `getComputedStyle` antwortete auf 31 von 43 Fragen GAR NICHT.**
 Florian: „elemente stimmen noch nicht ganz, eher css kosmetisch". Also das
