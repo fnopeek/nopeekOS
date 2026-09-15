@@ -1765,6 +1765,9 @@ fn is_zero_width_format(c: char) -> bool {
         | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}' | '\u{00AD}')
 }
 
+/// `is_zero_width_format` fuer den Rasterer — dieselbe Liste, nicht eine zweite.
+pub fn is_zero_width_format_pub(c: char) -> bool { is_zero_width_format(c) }
+
 /// The extra advance `sp` adds after `c`.
 pub(crate) fn char_spacing(c: char, sp: (f32, f32)) -> f32 {
     if is_zero_width_format(c) {
@@ -1790,12 +1793,23 @@ pub fn measure_sp_pub(font: Face, s: &str, size: f32, sp: (f32, f32)) -> f32 {
 pub fn line_gap_pub(font: Face, size: f32) -> f32 { line_gap(font, size) }
 
 fn measure(font: Face, s: &str, size: f32) -> f32 {
+    // **Ein Formatierungszeichen hat KEINE Laufweite.** `is_zero_width_format`
+    // sagt seit je, welche das sind, wurde aber nur fuer `letter-spacing`
+    // gefragt — die Schrift wurde trotzdem nach einer Glyphe gefragt, und fuer
+    // ein Zeichen ohne Glyphe gibt sie die Breite von `.notdef` zurueck.
+    // Gemessen: zwanzig U+200C kamen auf 184 px statt 0, und zwanzig U+200B
+    // auf 1 px (je ein Bruchteil, der sich aufaddierte). DuckDuckGos Vorlage
+    // fuer „Searches related to" haengt ein `&ZeroWidthSpace;` hinter jeden
+    // Eintrag, und dieses eine Pixel brach den Text auf zwei Zeilen.
     // The fast path is the one that runs: every embedded face is subsetted and
     // carries no GSUB, so a page in the body font never allocates here.
     if font.ligatures().is_none() {
-        return s.chars().map(|c| font.metrics(c, size).advance_width).sum();
+        return s.chars().filter(|c| !is_zero_width_format(*c))
+            .map(|c| font.metrics(c, size).advance_width).sum();
     }
-    font.shape(s).iter().map(|(g, _, _)| font.metrics_indexed(*g, size).advance_width).sum()
+    font.shape(s).iter()
+        .filter(|(_, at, n)| !s[*at..*at + *n].chars().all(is_zero_width_format))
+        .map(|(g, _, _)| font.metrics_indexed(*g, size).advance_width).sum()
 }
 
 /// `measure` plus `(letter-spacing, word-spacing)`. Letter-spacing lands after
@@ -1812,12 +1826,16 @@ fn measure_sp(font: Face, s: &str, size: f32, sp: (f32, f32)) -> f32 {
     // (css-text-3 §8.2). Word-spacing does not — it lands on a separator that
     // no ligature crosses.
     if sp.0 != 0.0 || font.ligatures().is_none() {
-        return s.chars().map(|c| font.metrics(c, size).advance_width + char_spacing(c, sp)).sum();
+        return s.chars()
+            .map(|c| if is_zero_width_format(c) { 0.0 }
+                     else { font.metrics(c, size).advance_width } + char_spacing(c, sp))
+            .sum();
     }
     font.shape(s)
         .iter()
         .map(|(g, at, n)| {
-            let adv = font.metrics_indexed(*g, size).advance_width;
+            let adv = if s[*at..*at + *n].chars().all(is_zero_width_format) { 0.0 }
+                      else { font.metrics_indexed(*g, size).advance_width };
             // A ligature is one unit; the spacing of the run it covers is the
             // separator spacing of its characters, which for a ligature is
             // always zero (no ligature spans a space).
@@ -3355,7 +3373,16 @@ impl<'a> Ctx<'a> {
                     && matches!(st.margin_right, Len::Auto);
                 let block_level = matches!(st.display, Display::Block | Display::Flex | Display::Grid)
                     && (!matches!(st.width, Len::Auto) || centred);
-                if !block_level {
+                // **Ein GEFLOTETES Steuerelement ist aus dem Fluss**, genau wie
+                // das absolut positionierte zwei Zweige weiter oben — es
+                // gehoert in den Float-Zweig unten, nicht auf die Zeile. Ohne
+                // diese Bedingung verschluckte der Steuerelement-Zweig den
+                // Float, und zwar nur bei AUTOMATISCHER Breite: mit einer
+                // erklaerten fiel es durch `block_level` hindurch und floss.
+                // Deshalb sah es wie ein Breitenfehler aus. Auf DDGs
+                // Wissenskasten klebte so der „Directions"-Knopf links vor dem
+                // Titel, statt rechts neben ihm zu stehen.
+                if !block_level && st.float == FloatKind::None {
                     self.path.push(self.info(el));
                     let ctl = self.control_box(el, &st, kind, w as f32);
                     inline.control(ctl);
@@ -3858,12 +3885,18 @@ family: ps.family,
     /// Element, das es hier nicht gibt — benannt statt still.
     fn anon_text_box(&mut self, text: &str, st: &ComputedStyle, avail_w: i32) -> Option<AtomicBox> {
         let t = text.trim();
-        if t.is_empty() {
+        // **Ein Lauf aus lauter Formatierungszeichen ist KEIN Inhalt.** Er
+        // erzeugt keinen Kasten — und erst recht keinen von einem Pixel, das
+        // dem Nachbarn fehlt. DuckDuckGos Vorlage haengt ein
+        // `&ZeroWidthSpace;` hinter jeden Eintrag von „Searches related to";
+        // daraus wurde ein eigenes Flex-Element, dessen eine Pixel den Text
+        // daneben auf zwei Zeilen brach.
+        if t.is_empty() || t.chars().all(is_zero_width_format) {
             return None;
         }
         let font = self.fonts.pick(st.bold, st.italic, st.mono, st.family);
         let sp = (st.letter_spacing, st.word_spacing);
-        let w = measure_sp(font, t, st.font_px, sp).min(avail_w as f32).max(1.0);
+        let w = measure_sp(font, t, st.font_px, sp).min(avail_w as f32).max(0.0);
         let h = line_gap(font, st.font_px).max(1.0);
         // Der Text sitzt an der Oberkante des Kastens, ohne eigenen
         // Durchschuss.
@@ -4989,7 +5022,13 @@ family: st.family,
         if ps.display == Display::None || matches!(ps.position, Position::Absolute | Position::Fixed) {
             return None;
         }
-        let frame = ps.pad_left + ps.pad_right + ps.border_x();
+        // Der RANDkasten zaehlt, nicht der Rahmenkasten: DDGs Lupe traegt
+        // ihre 4 px Abstand als `margin-right`, und ohne die kam der Kasten
+        // um genau diese 4 px zu schmal heraus. Ein Prozentrand loest sich
+        // gegen eine Breite auf, die es hier noch nicht gibt — er zaehlt
+        // deshalb null, wie in `child_outer` auch.
+        let margins = ps.margin_left.px(0.0).unwrap_or(0.0) + ps.margin_right.px(0.0).unwrap_or(0.0);
+        let frame = ps.pad_left + ps.pad_right + ps.border_x() + margins;
         if let Len::Px(w) = ps.width {
             return Some(if ps.box_border { w.max(frame) } else { w + frame });
         }
@@ -6649,7 +6688,21 @@ family: st.family,
             if push {
                 self.path.pop();
             }
-            got
+            // **`::before` und `::after` stehen AUF der Zeile, also zaehlen
+            // sie mit.** Das Layout malt sie seit je (`pseudo_box`), die
+            // Messung daneben kannte sie nur am Steuerelement — und damit
+            // liefen die beiden Wege auseinander
+            // ([[feedback_intrinsic_shared_path]]). DuckDuckGos „Searches
+            // related to" haengt seine Lupe als `::before` an: der Kasten kam
+            // um deren 20 px zu schmal heraus, und der Text brach auf zwei
+            // Zeilen.
+            //
+            // Bei max-content addieren sie sich zum Inhalt; bei min-content
+            // konkurrieren sie, denn zwischen Pseudo und erstem Wort darf die
+            // Zeile brechen — dieselbe Regel wie fuer einen atomaren Inline.
+            let ps = self.pseudo_intrinsic(el, st, PseudoElem::Before).unwrap_or(0.0)
+                + self.pseudo_intrinsic(el, st, PseudoElem::After).unwrap_or(0.0);
+            (got.0 + ps, got.1.max(ps))
         };
         // Whole pixels, rounded UP. A max-content width is a REQUIREMENT — the
         // width at which the content does not wrap — so a consumer that turns
@@ -8275,7 +8328,13 @@ family: st.family,
         for k in 0..ln {
             let (kid, s) = (&items[idx0 + k].0, items[idx0 + k].1);
             let s_meas = flex_item_style(&s, Some(size[k]), None, true);
-            let box_main = (size[k] + li[k].main_pad).max(1.0) as i32;
+            // **Kein Mindestpixel.** Ein Flexkasten darf leer sein, und die
+            // Eigenbreite daneben rechnet auch mit 0 — eine 1 hier laesst die
+            // beiden Wege auseinanderlaufen. Auf DDGs „Searches related to"
+            // war das ein `&ZeroWidthSpace;` als anonymes Element: es nahm
+            // dem Text neben sich genau ein Pixel weg, und der brach damit
+            // auf zwei Zeilen ([[feedback_intrinsic_shared_path]]).
+            let box_main = (size[k] + li[k].main_pad).max(0.0) as i32;
             let mark = self.flex_mark();
             let bottom = match kid {
                 Kid::El(el) => {
@@ -8388,7 +8447,7 @@ family: st.family,
                 // item's own padding and border have to go back on, or a
                 // control (which paints exactly this width) loses them and
                 // clips its label.
-                let box_main = (size[k] + li[k].main_pad).max(1.0) as i32;
+                let box_main = (size[k] + li[k].main_pad).max(0.0) as i32;
                 let _ = self.layout_item(el, &s2, item_x[k] as i32, box_main, y);
                 self.path.pop();
             }
@@ -9272,7 +9331,12 @@ impl<'a> Ctx<'a> {
                 if st.box_border { (v - pad_border).max(0.0) } else { v }
             }
         };
-        let outer_w = ceil_i32(content_w + pad_border + ml + mr).max(1);
+        // **Ein leerer atomarer Inline ist NULL breit, nicht eins.** Der
+        // Mindestpixel hier war der Grund, warum DDGs Pillen auf zwei Zeilen
+        // brachen: ihre Vorlage haengt ein `&ZeroWidthSpace;` hinter den Text,
+        // das wird zu einem eigenen Kasten, und dessen eine Pixel nahm der
+        // Text daneben genau am Umbruch fehlte. Chromium misst dort 0.
+        let outer_w = ceil_i32(content_w + pad_border + ml + mr).max(0);
 
         // **Ein Prozent loeste sich ein ZWEITES Mal auf** — derselbe Fall, den
         // `place_float` schon kennt und benennt: `layout_box` bekommt unten
@@ -12513,6 +12577,56 @@ mod tests {
         let red = rects(&l).into_iter().find(|(.., c)| *c == Rgb(0xff, 0, 0))
             .expect("der Float malt");
         assert_eq!(red.1, 0, "und er steht auf der ERSTEN Zeile, nicht darunter");
+    }
+
+    /// **Was schwebt, ist block-artig** (css-display-3 §2.7), und ein
+    /// geflotetes STEUERELEMENT ist aus dem Fluss wie jedes andere. Beides
+    /// fehlte: ein `display:inline-flex` mit `float:right` blieb ein atomarer
+    /// Inline auf der Zeile, und der Steuerelement-Zweig in `flow_children`
+    /// verschluckte den Float — aber nur bei automatischer Breite, weshalb es
+    /// wie ein Breitenfehler aussah. Auf DDGs Wissenskasten klebte so der
+    /// „Directions"-Knopf links vor dem Titel.
+    #[test]
+    fn ein_geflotetes_steuerelement_fliesst() {
+        let l = lay(
+            "<body style=\"margin:0\"><div style=\"width:400px;position:relative;overflow:hidden\">\
+             <button style=\"float:right;display:inline-flex;background:#ff0000\">Weg</button>\
+             <h2 style=\"margin:0\">Titel</h2></div></body>",
+            600,
+        );
+        let c = l.controls.first().expect("der Knopf ist ein Steuerelement");
+        assert!(c.x > 200, "er steht RECHTS im 400er Kasten, nicht links (x={})", c.x);
+        assert_eq!(c.y, 0, "und auf der ersten Zeile");
+    }
+
+    /// **Ein Formatierungszeichen hat keine Laufweite, und `::before` zaehlt
+    /// mit.** Beides traf DDGs „Searches related to": die Vorlage haengt ein
+    /// `&ZeroWidthSpace;` hinter jeden Eintrag und eine Lupe davor, und der
+    /// Kasten kam um beides zu schmal heraus — der Text brach auf zwei Zeilen.
+    #[test]
+    fn ein_nullbreites_zeichen_und_ein_pseudo_messen_richtig() {
+        // Zwanzig U+200C: null breit, nicht zwanzig Glyphen.
+        let zwnj: String = core::iter::repeat('\u{200c}').take(20).collect();
+        let l = lay(&alloc::format!(
+            "<body style=\"margin:0\"><span id=a style=\"display:inline-block;background:#00ff00\">{zwnj}</span></body>"), 600);
+        // Vorher waren das 184 px — je ein `.notdef` aus der Schrift. Das eine
+        // Pixel, das bleibt, ist der Boden des gemalten Kastens, nicht die
+        // Laufweite; er steht hier als Zahl statt als Behauptung.
+        let g = rects(&l).into_iter().find(|(.., c)| *c == Rgb(0, 0xff, 0));
+        assert!(g.is_none_or(|r| r.2 <= 1),
+                "zwanzig Formatierungszeichen tragen keine Breite, gemessen {:?}", g);
+
+        // Und das `::before` steht AUF der Zeile, also zaehlt seine Breite
+        // samt Rand in die Eigenbreite des schrumpfenden Kastens.
+        let l2 = lay(
+            "<style>.p::before{content:\"\";display:inline-block;width:16px;height:16px;margin-right:4px}</style>\
+             <body style=\"margin:0\"><div style=\"display:inline-block;background:#0000ff\">\
+             <span class=p>abc</span></div></body>",
+            600,
+        );
+        let blue = rects(&l2).into_iter().find(|(.., c)| *c == Rgb(0, 0, 0xff))
+            .expect("der schrumpfende Kasten malt seinen Grund");
+        assert!(blue.2 >= 20, "die Lupe (16+4) zaehlt mit, Breite war {}", blue.2);
     }
 
     #[test]

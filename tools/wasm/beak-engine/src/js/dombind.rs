@@ -2160,16 +2160,6 @@ fn style_tree(i: &Interp) -> Option<alloc::rc::Rc<crate::dom::Dom>> {
 /// an einem `<li>` in einer Flex-Leiste auch `list-item`. Nachgemessen, nicht
 /// vermutet: die erste Fassung machte `block` daraus und lag an neunzehn
 /// Kaesten der Bootstrap-Galerie falsch.
-fn blockify(d: crate::style::Display) -> crate::style::Display {
-    use crate::style::Display as D;
-    match d {
-        D::Inline | D::InlineBlock | D::TableCell | D::TableCaption
-        | D::TableRow | D::TableRowGroup | D::TableHeaderGroup | D::TableFooterGroup => D::Block,
-        D::InlineFlex => D::Flex,
-        other => other,
-    }
-}
-
 fn computed_decls(i: &Interp, node: u32) -> Option<String> {
     let ctx = i.style_ctx.as_ref()?;
     let tree = style_tree(i)?;
@@ -2215,7 +2205,7 @@ fn computed_decls(i: &Interp, node: u32) -> Option<String> {
         // Mal zwei Wahrheiten zu derselben Frage.
         if matches!(parent.display, crate::style::Display::Flex
                     | crate::style::Display::InlineFlex | crate::style::Display::Grid) {
-            out.display = blockify(out.display);
+            out.display = crate::style::blockify(out.display);
         }
         if let Some(m) = own { vars = m; }
         // `rem` rechnet gegen die WURZEL, und die steht erst fest, wenn sie

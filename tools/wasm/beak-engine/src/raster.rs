@@ -1376,6 +1376,16 @@ impl Engine {
             text.chars().map(|c| (c as u32, crate::layout::char_spacing(c, sp))).collect()
         };
         for (unit, extra) in run {
+            // Dasselbe wie beim MESSEN: ein Formatierungszeichen hat keine
+            // Glyphe und keine Laufweite. Wer es hier malen liesse, schoebe
+            // den Stift um genau das weiter, was die Messung nicht gerechnet
+            // hat ([[feedback_intrinsic_shared_path]]).
+            if unit & 0x8000_0000 == 0
+                && char::from_u32(unit).is_some_and(crate::layout::is_zero_width_format_pub)
+            {
+                pen += extra;
+                continue;
+            }
             let key = (unit, size.to_bits(), face);
             let (m, cov) = cache.entry(key).or_insert_with(|| match unit & 0x8000_0000 {
                 0 => font.rasterize(char::from_u32(unit).unwrap_or('\u{FFFD}'), size),
