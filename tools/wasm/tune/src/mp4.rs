@@ -114,6 +114,17 @@ pub enum Codec {
     Other([u8; 4]),
 }
 
+/// Which matrix and range the planes are coded with.
+///
+/// Three sources say this, and we read the second: the SPS's VUI (the
+/// decoder throws it away), the container's `colr` box, and — when neither
+/// is there — the same rule every player falls back on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Colour {
+    pub bt709: bool,
+    pub full_range: bool,
+}
+
 #[allow(dead_code)]
 pub struct Track {
     pub kind: Kind,
@@ -123,6 +134,7 @@ pub struct Track {
     pub duration: u64,
     pub width: u32,
     pub height: u32,
+    pub colour: Colour,
     /// Clockwise display rotation in degrees (0, 90, 180, 270) from the
     /// `tkhd` matrix. A phone films landscape and writes the matrix; the
     /// coded picture is NOT the picture the viewer expects. Dropping this
@@ -300,6 +312,16 @@ fn parse_trak(trak: &[u8], file: &[u8]) -> Option<Track> {
     };
 
     let samples = build_samples(&tables, file);
+    let colour = tables.colour
+        .or_else(|| match &tables.codec {
+            Codec::Avc { sps, .. } => sps.first().and_then(|s| sps_colour(s)),
+            _ => None,
+        })
+        // Drei Quellen, in dieser Reihenfolge: die `colr`-Box des Containers,
+        // das VUI des SPS, und erst dann die Konvention nach Bildhoehe (SD
+        // wurde unter Rec. 601 gedreht, HD unter Rec. 709). Die Hoehenregel
+        // ist ein Rateschritt und steht deshalb zuletzt.
+        .unwrap_or(Colour { bt709: h > 576, full_range: false });
     Some(Track {
         kind,
         codec: tables.codec,
@@ -307,6 +329,12 @@ fn parse_trak(trak: &[u8], file: &[u8]) -> Option<Track> {
         duration,
         width: w,
         height: h,
+        // Untagged is the normal case for anything not made for broadcast,
+        // and then the picture's HEIGHT is the convention: SD was shot under
+        // Rec. 601, HD under Rec. 709. Guessing 709 for a 544-line clip
+        // tilts every strong red — which looks like a decoder bug and is a
+        // missing tag.
+        colour,
         rotation,
         rate: tables.rate,
         channels: tables.channels,
@@ -370,6 +398,7 @@ fn find_box<'a>(d: &'a [u8], want: &[u8; 4]) -> Option<&'a [u8]> {
 
 struct Tables {
     codec: Codec,
+    colour: Option<Colour>,
     visual: Option<(u16, u16)>,
     rate: u32,
     channels: u8,
@@ -391,6 +420,7 @@ struct Tables {
 fn parse_stbl(stbl: &[u8]) -> Option<Tables> {
     let mut t = Tables {
         codec: Codec::Other(*b"none"),
+        colour: None,
         visual: None,
         rate: 0,
         channels: 0,
@@ -485,12 +515,13 @@ fn parse_sample_entry(fmt: &[u8; 4], entry: &[u8], t: &mut Tables) {
             t.visual = Some((w, h));
             if e.skip(4 + 4 + 4 + 2 + 32 + 2 + 2).is_none() { return; }
             while let Some((bt, body)) = e.next_box() {
-                if &bt == b"avcC" {
-                    if let Some(c) = parse_avcc(body) { t.codec = c; }
-                    return;
+                match &bt {
+                    b"avcC" => if let Some(c) = parse_avcc(body) { t.codec = c; },
+                    b"colr" => t.colour = parse_colr(body),
+                    _ => {}
                 }
             }
-            t.codec = Codec::Other(*fmt);
+            if matches!(t.codec, Codec::Other(_)) { t.codec = Codec::Other(*fmt); }
         }
         b"mp4a" => {
             if e.skip(8).is_none() { return; }
@@ -509,6 +540,155 @@ fn parse_sample_entry(fmt: &[u8; 4], entry: &[u8], t: &mut Tables) {
         }
         _ => t.codec = Codec::Other(*fmt),
     }
+}
+
+/// The container's colour tag. `nclx` carries a range flag, its older twin
+/// `nclc` does not and is always limited range. An ICC profile (`rICC`,
+/// `prof`) says nothing about the matrix, so it answers None and the
+/// fallback decides — better than picking one at random.
+fn parse_colr(d: &[u8]) -> Option<Colour> {
+    let mut c = Cur::new(d);
+    let kind = *<&[u8; 4]>::try_from(c.take(4)?).ok()?;
+    if &kind != b"nclx" && &kind != b"nclc" { return None; }
+    c.skip(2 + 2)?; // primaries, transfer
+    let matrix = c.u16()?;
+    let full_range = if &kind == b"nclx" { c.u8()? & 0x80 != 0 } else { false };
+    Some(Colour {
+        // 1 = Rec. 709. 5 and 6 are the two spellings of Rec. 601; anything
+        // else (2 = unspecified, 9 = Rec. 2020) is not something this blit
+        // can carry out, so it reads as 601 for SD and 709 above.
+        bt709: matrix == 1,
+        full_range,
+    })
+}
+
+/// Bitwise reader for an SPS: Exp-Golomb, as H.264 writes its syntax.
+struct Bits<'a> { d: &'a [u8], bit: usize }
+
+impl<'a> Bits<'a> {
+    fn new(d: &'a [u8]) -> Bits<'a> { Bits { d, bit: 0 } }
+    fn u1(&mut self) -> Option<u32> {
+        let (byte, off) = (self.bit / 8, 7 - self.bit % 8);
+        let v = (*self.d.get(byte)? >> off) & 1;
+        self.bit += 1;
+        Some(v as u32)
+    }
+    fn un(&mut self, n: usize) -> Option<u32> {
+        let mut v = 0u32;
+        for _ in 0..n { v = (v << 1) | self.u1()?; }
+        Some(v)
+    }
+    /// Unsigned Exp-Golomb. The leading-zero count is capped: a corrupt
+    /// stream of zero bytes would otherwise spin to the end of the buffer.
+    fn ue(&mut self) -> Option<u32> {
+        let mut zeros = 0usize;
+        while self.u1()? == 0 {
+            zeros += 1;
+            if zeros > 31 { return None; }
+        }
+        if zeros == 0 { return Some(0); }
+        Some((1u32 << zeros) - 1 + self.un(zeros)?)
+    }
+    fn se(&mut self) -> Option<i32> {
+        let k = self.ue()?;
+        Some(if k % 2 == 1 { ((k + 1) / 2) as i32 } else { -((k / 2) as i32) })
+    }
+}
+
+/// Strip the emulation-prevention bytes. Inside a NAL, the encoder inserts a
+/// `0x03` after any `00 00` that would otherwise look like a start code; the
+/// syntax underneath does not know about them.
+fn rbsp(nal: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(nal.len());
+    let mut zeros = 0usize;
+    for &b in nal {
+        if zeros >= 2 && b == 3 { zeros = 0; continue; }
+        if b == 0 { zeros += 1 } else { zeros = 0 }
+        out.push(b);
+    }
+    out
+}
+
+/// The colour tag the SPS carries in its VUI.
+///
+/// ffmpeg reads this, and so a file that looks untagged at the container
+/// level is usually not: a phone video with no `colr` box still says Rec.709
+/// here. Guessing from the picture height instead gets that one wrong, and a
+/// wrong matrix tilts every strong colour — which looks like a decoder bug.
+///
+/// Everything before the VUI has to be walked because the syntax is not
+/// byte-aligned; there is no shortcut to the field we want.
+fn sps_colour(sps: &[u8]) -> Option<Colour> {
+    let d = rbsp(sps);
+    // Skip the one-byte NAL header, then profile / constraints / level.
+    let mut b = Bits::new(d.get(1..)?);
+    let profile = b.un(8)?;
+    b.un(8)?;  // constraint flags + reserved
+    b.un(8)?;  // level_idc
+    b.ue()?;   // seq_parameter_set_id
+    if matches!(profile, 100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135) {
+        let chroma = b.ue()?;
+        if chroma == 3 { b.u1()?; }
+        b.ue()?;  // bit_depth_luma_minus8
+        b.ue()?;  // bit_depth_chroma_minus8
+        b.u1()?;  // qpprime_y_zero_transform_bypass_flag
+        if b.u1()? == 1 {
+            // Scaling lists: each present one is a delta walk of 16 or 64
+            // values, and skipping them wrong puts every field after this
+            // one bit out of place.
+            let n = if chroma != 3 { 8 } else { 12 };
+            for i in 0..n {
+                if b.u1()? == 1 {
+                    let size = if i < 6 { 16 } else { 64 };
+                    let mut last = 8i32;
+                    let mut next = 8i32;
+                    for _ in 0..size {
+                        if next != 0 {
+                            next = (last + b.se()? + 256) % 256;
+                        }
+                        last = if next == 0 { last } else { next };
+                    }
+                }
+            }
+        }
+    }
+    b.ue()?;  // log2_max_frame_num_minus4
+    match b.ue()? {
+        0 => { b.ue()?; }
+        1 => {
+            b.u1()?;
+            b.se()?;
+            b.se()?;
+            let n = b.ue()?;
+            if n > 255 { return None; }
+            for _ in 0..n { b.se()?; }
+        }
+        _ => {}
+    }
+    b.ue()?;  // max_num_ref_frames
+    b.u1()?;  // gaps_in_frame_num_value_allowed_flag
+    b.ue()?;  // pic_width_in_mbs_minus1
+    b.ue()?;  // pic_height_in_map_units_minus1
+    if b.u1()? == 0 { b.u1()?; }   // frame_mbs_only_flag / mb_adaptive
+    b.u1()?;  // direct_8x8_inference_flag
+    if b.u1()? == 1 { b.ue()?; b.ue()?; b.ue()?; b.ue()?; }  // cropping
+    if b.u1()? == 0 { return None; }  // vui_parameters_present_flag
+
+    if b.u1()? == 1 {                 // aspect_ratio_info_present_flag
+        if b.un(8)? == 255 { b.un(16)?; b.un(16)?; }   // Extended_SAR
+    }
+    if b.u1()? == 1 { b.u1()?; }      // overscan
+    if b.u1()? == 0 { return None; }  // video_signal_type_present_flag
+    b.un(3)?;                         // video_format
+    let full_range = b.u1()? == 1;
+    if b.u1()? == 0 {
+        // Range said, matrix not. That is still worth having.
+        return Some(Colour { bt709: false, full_range });
+    }
+    b.un(8)?;                         // colour_primaries
+    b.un(8)?;                         // transfer_characteristics
+    let matrix = b.un(8)?;
+    Some(Colour { bt709: matrix == 1, full_range })
 }
 
 fn parse_avcc(d: &[u8]) -> Option<Codec> {

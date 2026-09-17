@@ -344,14 +344,11 @@ impl Tune {
         let ms = now - self.video_t0;
         let Some(v) = self.video.as_mut() else { return };
         self.video_ms = ms;
+        let flags = v.colour_flags;
         if let Some(f) = v.frame_at(ms) {
             let (ys, cs) = video::Video::strides(f);
-            // Rec. 709, limited range: what every HD encoder writes by
-            // default. The stream's own VUI would be the honest source and
-            // is the next thing to read — until then this is a documented
-            // assumption, not a silent one.
             host::canvas_commit_yuv(VIDEO_CANVAS, &f.y, &f.u, &f.v, ys, cs,
-                                    f.width as u32, f.height as u32, 1);
+                                    f.width as u32, f.height as u32, flags);
         }
         if v.ended() {
             self.drained = true;
