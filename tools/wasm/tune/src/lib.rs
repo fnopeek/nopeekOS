@@ -752,7 +752,13 @@ pub extern "C" fn _start() {
         // decoder for as long as the hand keeps moving, and the mailbox
         // holds 600 ms.
         let now = host::ticks();
-        t.sink.tick(now, t.playing);
+        // `playing` heisst „der Spieler laeuft", der Sink braucht aber „es
+        // klingt gerade". Bei einem stummen Film sind das zwei verschiedene
+        // Dinge: `submitted` bleibt 0, die Wanduhr schiebt `played` vor, und
+        // die Aussetzer-Bedingung ist bei JEDEM Takt wahr — hundertmal je
+        // Sekunde. Ein Zaehler, dessen Voraussetzung nicht geprueft wird,
+        // meldet ununterbrochen und sagt damit nichts mehr.
+        t.sink.tick(now, t.playing && t.src.is_some());
         t.pump();
         t.video_tick();
         if t.sink.underruns != t.told_underruns {
