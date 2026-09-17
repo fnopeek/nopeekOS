@@ -207,6 +207,13 @@ const CELL_RADIUS: u8 = 9;
 const DASH_W_ACTIVE: u16 = 12;
 const DASH_W_RUNNING: u16 = 3;
 const DASH_H: u16 = 2;
+/// Ausgleichsmarke ueber der Kachel — siehe `icon_cell`. Unsichtbar,
+/// belegt aber Platz, genau wie der Laufstrich einer ruhenden Anwendung.
+const CELL_LIFT: u16 = 2;
+/// Abstand zwischen den drei Teilen der Zelle. Er steht ZWEIMAL in der
+/// Spalte (Marke|Kachel und Kachel|Strich), deshalb ist er 1 und nicht
+/// `Spacing::Xs`.
+const CELL_GAP: u16 = 1;
 /// Tile + gap + dash → the cell column's height.
 const DOCK_HEIGHT: i32 = 50;
 const CELL_FOOTPRINT: i32 = 36; // tile + inter-cell gap
@@ -712,9 +719,27 @@ fn icon_cell(
         RunState::Idle    => prefab::mark(DASH_W_RUNNING, DASH_H, None),
     };
 
+    // Die Kachel haengt ohne Ausgleich ZU HOCH, und der Grund ist der
+    // Laufstrich: unter der Kachel stehen Abstand und Strich, ueber ihr
+    // nichts. Gemessen in der 48 px hohen Ablage waren das 9 px ueber dem
+    // Symbol und 15 darunter — die Differenz ist genau Abstand + Strich.
+    // Bei einer Anwendung, die NICHT laeuft, ist der Strich unsichtbar
+    // (aber platzhaltend), und dann sieht man die 15 als leere Flaeche.
+    //
+    // Ausgeglichen wird mit einer ebenso unsichtbaren Marke oben. Die
+    // beiden Zahlen sind ausgerechnet und nicht gesetzt: die Spalte muss
+    // bei 40 bleiben (sonst waechst die Ablage und mit ihr der
+    // Pill-Radius), und der Abstand zaehlt ZWEIMAL, weil er zwischen
+    // Marke und Kachel ebenso steht wie zwischen Kachel und Strich —
+    //
+    //     M + 2*S + 34 + 2 = 40   und   Symbol mittig
+    //
+    // hat genau eine ganzzahlige Loesung: M = 2, S = 1. Ergebnis 12 px
+    // ueber dem Symbol und 12 darunter, die Hover-Kachel ebenfalls
+    // mittig (7/7), und der Strich bleibt auf demselben Pixel wie vorher.
     Widget::Column {
-        children:  alloc::vec![tile, dash],
-        spacing:   Spacing::Xs.as_u16(),
+        children:  alloc::vec![prefab::mark(1, CELL_LIFT, None), tile, dash],
+        spacing:   CELL_GAP,
         align:     Align::Center,
         modifiers: Vec::new(),
     }
