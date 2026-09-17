@@ -117,6 +117,20 @@ const MAX_QUEUE_BYTES: usize = 256 * 1024 * 1024;
 /// werden, egal was faellig ist.
 const SHOW_FIRST_FLOOR_MS: i64 = 150;
 
+/// Ab diesem Vorrat hat das ZEIGEN Vorrang vor dem Dekodieren.
+///
+/// Gemessen am Geraet, 1440p, Tag/Nacht: der Vorlauf stand bei **1202 ms**
+/// und es wurden trotzdem nur 17 von 30 Bildern gezeigt. Sechsunddreissig
+/// fertige Bilder lagen da — der Puffer war tief genug und wurde nicht
+/// ausgegeben, weil jede Runde 55 ms dekodierte und dabei zwei Bilder
+/// faellig werden liess.
+///
+/// Ein Puffer, der in der teuren Szene voll bleibt, hat nichts getan. Ueber
+/// dieser Marke wird deshalb bis zum naechsten faelligen Bild GEWARTET statt
+/// dekodiert; darunter kehrt sich der Vorrang um, sonst laeuft er leer und
+/// die Anzeige faellt auf die Dekodierrate.
+const SPEND_LEAD_ABOVE_MS: i64 = 600;
+
 /// Lead to build before the clock starts. Less than the target, because the
 /// rest can be built while playing and nobody wants to wait a second for a
 /// three-second clip.
@@ -336,13 +350,24 @@ impl Video {
         }
     }
 
-    /// Liegt ein Bild bereit UND genug Vorrat, um es zu zeigen, ohne
-    /// vorher zu dekodieren?
-    pub fn show_before_decode(&self, ms: i64) -> bool {
+    /// Soll diese Runde ans Zeigen gehen statt ans Dekodieren?
+    ///
+    /// `decode_ms` ist, was eine Dekodierung gerade WIRKLICH kostet — der
+    /// Rufer misst es. Die Frage ist nicht „ist etwas faellig", sondern
+    /// „waere etwas faellig, BEVOR diese Dekodierung fertig ist": wer das
+    /// erst hinterher fragt, hat das Bild schon verpasst.
+    pub fn show_before_decode(&self, ms: i64, decode_ms: i64) -> bool {
+        if self.queue.len() <= REORDER { return false; }
+        let lead = self.lead_ms(ms);
+        if lead <= SHOW_FIRST_FLOOR_MS { return false; }
+        // Faellig: immer zeigen. Sonst nur, wenn der Vorrat es traegt und die
+        // naechste Faelligkeit in die Dekodierung hineinfiele.
         self.next_due_in(ms) == 0
-            && self.lead_ms(ms) > SHOW_FIRST_FLOOR_MS
-            && self.queue.len() > REORDER
+            || (lead >= SPEND_LEAD_ABOVE_MS && self.next_due_in(ms) < decode_ms)
     }
+
+    /// Ist der Vorrat gross genug, dass Warten billiger ist als Dekodieren?
+    pub fn rich(&self, ms: i64) -> bool { self.lead_ms(ms) >= SPEND_LEAD_ABOVE_MS }
 
     /// Ist der Vorrat voll? Nur dann darf der Rufer schlafen.
     ///
