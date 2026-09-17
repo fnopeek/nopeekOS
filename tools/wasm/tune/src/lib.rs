@@ -1016,7 +1016,7 @@ pub extern "C" fn _start() {
                 // Bild gewartet — die Runde gehoert dann dem Zeigen. Darunter
                 // zaehlt jede Millisekunde fuers Dekodieren.
                 let nap = match (t.playing, t.video.as_ref()) {
-                    (true, Some(v)) if v.rich(t.video_ms) || v.stocked(t.video_ms) =>
+                    (true, Some(v)) if v.may_wait(t.video_ms, t.decode_est_ms) =>
                         v.next_due_in(t.video_ms).clamp(1, TICK_MS as i64) as i32,
                     (true, Some(_)) => 1,
                     (true, None)    => TICK_MS,
