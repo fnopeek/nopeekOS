@@ -188,6 +188,8 @@ struct Tune {
     video_t0: i64,
     /// Video time of the last frame handed to the compositor, for the UI.
     video_ms: i64,
+    /// Second of playback the lag was last reported for.
+    told_lag_s: i64,
 }
 
 const A_PLAY_PAUSE: u32 = 1;
@@ -227,6 +229,7 @@ impl Tune {
             video: None,
             video_t0: 0,
             video_ms: 0,
+            told_lag_s: -1,
         };
 
         let mut argbuf = [0u8; 512];
@@ -349,6 +352,18 @@ impl Tune {
             let (ys, cs) = video::Video::strides(f);
             host::canvas_commit_yuv(VIDEO_CANVAS, &f.y, &f.u, &f.v, ys, cs,
                                     f.width as u32, f.height as u32, flags);
+        }
+        // Wie weit das Bild hinter der Uhr liegt. Eine Maschine, die nicht
+        // mitkommt, soll es mit einer ZAHL sagen und nicht als Gefuehl —
+        // einmal je Sekunde, damit die Meldung nicht selbst zur Last wird.
+        let lag = ms - v.shown_ms();
+        let sec = ms / 1000;
+        if lag > 150 && sec != self.told_lag_s {
+            self.told_lag_s = sec;
+            let mut m = alloc::string::String::from("[tune] Bild haengt ");
+            push_u32(&mut m, lag.min(u32::MAX as i64) as u32);
+            m.push_str(" ms hinter der Uhr");
+            log(&m);
         }
         if v.ended() {
             self.drained = true;
@@ -566,10 +581,16 @@ fn render(t: &Tune) -> Widget {
     // waere daneben richtig und hier falsch: sie ist das Groesste in der
     // Spalte, und ein Video in einer Restzeile ist kein Video.
     let body = match t.video.as_ref() {
-        Some(v) => Widget::Canvas {
+        Some(_) => Widget::Canvas {
             id: CanvasId(VIDEO_CANVAS as u32),
-            width: v.width.min(u16::MAX as u32) as u16,
-            height: v.height.min(u16::MAX as u32) as u16,
+            // NICHT die Videogroesse. `measure_intrinsic` nimmt diese Zahlen
+            // als UNTERGRENZE der Spalte; ein 2560 breites Bild haette auf
+            // einem 1920er Schirm das Layout getrieben statt sich einzufuegen.
+            // Die wirkliche Groesse entsteht aus `Flex(1)` und dem
+            // contain-fit des Compositors, der das gespeicherte Bild
+            // unabhaengig davon einpasst.
+            width: 320,
+            height: 180,
             modifiers: alloc::vec![Modifier::Flex(1)],
         },
         None => list,
