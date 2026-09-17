@@ -192,6 +192,11 @@ struct Tune {
     video_ms: i64,
     /// Second of playback the lag was last reported for.
     told_lag_s: i64,
+    /// Was eine Dekodierung gerade kostet, gleitend gemittelt. Die Zahl
+    /// entscheidet, ob eine Runde noch dekodieren darf, ohne das naechste
+    /// Bild zu verpassen — und sie aendert sich mit der Szene um das
+    /// Dreifache, taugt also nicht als Konstante.
+    decode_est_ms: i64,
     /// Vorlauf der Tonspur in ms — was vor dem ersten hoerbaren Sample liegt.
     audio_priming_ms: i64,
     /// Still filling the queue before the clock starts.
@@ -243,6 +248,7 @@ impl Tune {
             video_ms: 0,
             told_lag_s: -1,
             audio_priming_ms: 0,
+            decode_est_ms: 20,
             video_buffering: false,
             sec_decode_ms: 0,
             sec_commit_ms: 0,
@@ -416,7 +422,8 @@ impl Tune {
         // Zeigen hat Vorrang, solange Vorrat da ist. Eine Runde, die erst
         // dekodiert, laesst in ihren 52 ms zwei Bilder faellig werden und
         // kann nur eines zeigen — gemessen 109 dekodiert gegen 75 gezeigt.
-        let budget = if self.video.as_ref().unwrap().show_before_decode(ms) {
+        let est = self.decode_est_ms;
+        let budget = if self.video.as_ref().unwrap().show_before_decode(ms, est) {
             0
         } else {
             video::PLAY_DECODES
@@ -427,7 +434,14 @@ impl Tune {
             let v = self.video.as_mut().unwrap();
             v.decode_step(ms, budget);
         }
-        self.sec_decode_ms += host::ticks() - t_dec;
+        let took = host::ticks() - t_dec;
+        self.sec_decode_ms += took;
+        if budget > 0 && took > 0 {
+            // Gleitendes Mittel, 1:3 — schnell genug, um einer Ueberblendung
+            // zu folgen, traege genug, um nicht auf einem Ausreisser zu
+            // schwingen.
+            self.decode_est_ms = (self.decode_est_ms * 3 + took) / 4;
+        }
         self.sec_decoded += self.video.as_mut().unwrap().take_decoded();
 
         // Die Uhr NEU lesen. Das Dekodieren hat gedauert, und die Bilder,
@@ -998,9 +1012,13 @@ pub extern "C" fn _start() {
                 // Szene fehlt; das Dekodieren laeuft schneller als Echtzeit
                 // (22 ms je Bild bei 33 ms Periode), und genau diese Luecke
                 // ist der Puffer.
+                // Ueber der Vorrats-Marke wird bis zum naechsten faelligen
+                // Bild gewartet — die Runde gehoert dann dem Zeigen. Darunter
+                // zaehlt jede Millisekunde fuers Dekodieren.
                 let nap = match (t.playing, t.video.as_ref()) {
-                    (true, Some(v)) if !v.stocked(t.video_ms) => 1,
-                    (true, Some(v)) => v.next_due_in(t.video_ms).clamp(1, TICK_MS as i64) as i32,
+                    (true, Some(v)) if v.rich(t.video_ms) || v.stocked(t.video_ms) =>
+                        v.next_due_in(t.video_ms).clamp(1, TICK_MS as i64) as i32,
+                    (true, Some(_)) => 1,
                     (true, None)    => TICK_MS,
                     (false, _)      => TICK_MS * 4,
                 };
