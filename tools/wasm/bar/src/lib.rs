@@ -94,6 +94,24 @@ const WS_W: u16 = 38;
 // polstert, macht die Bar schmaler als die Fenster; genau das ist in
 // 0.9.0 passiert.
 
+/// Einzug VOR der ersten Desktop-Zelle, als unsichtbare Marke.
+///
+/// Gerechnet, nicht gesetzt: die Karte polstert 4, die Zeile setzt
+/// zwischen Marke und erster Zelle ihre eigenen `Spacing::Xxs` = 2, also
+/// 4 + 6 + 2 = **12 px** bis zur „1" — dieselben 12, die die Ablage im
+/// Dock innen laesst, damit die zwei Pillen gleich aussehen.
+///
+/// Eine unsichtbare Marke und nicht `PaddingXY`, weil das links UND
+/// rechts polstert; hier soll nur links etwas passieren.
+const WS_INDENT: u16 = 6;
+/// Abstand des Trennstrichs zu beiden Nachbarn, als Polsterung.
+///
+/// `1 2 3 4 (5) | (6) Appname` — die zwei unsichtbaren Plaetze sind je
+/// eine Desktop-Zelle breit, deshalb steht hier `WS_W` und keine eigene
+/// Zahl: wird die Zelle breiter, wandert der Strich mit. Sichtbar wird
+/// daraus je Seite `Zonenabstand 2 + WS_W`, und weil `PaddingXY` links
+/// wie rechts gleich polstert, ist es von selbst symmetrisch.
+const SEP_GAP: u16 = WS_W;
 /// Eckradius der Desktop-Zellen: ganz rund.
 ///
 /// Sie sitzen in der Karte, die selbst eine Pille ist (36 px hoch →
@@ -425,6 +443,7 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
             // one recedes to OnSurfaceFaint, so the row doubles as an
             // at-a-glance map of where your windows are.
             let mut row = Vec::new();
+            row.push(prefab::mark(WS_INDENT, 1, None));
             for i in 0..st.ws_count {
                 let active = i == st.ws_active;
                 let mut mods: Vec<Modifier> = alloc::vec![
@@ -470,7 +489,7 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
                         spacing: 0,
                         align: Align::Center,
                         modifiers: alloc::vec![
-                            Modifier::Padding(Padding::Xs.as_u16()),
+                            Modifier::PaddingXY { x: SEP_GAP, y: Padding::Xs.as_u16() },
                             Modifier::MaxHeight(BAND_H),
                         ],
                     },
