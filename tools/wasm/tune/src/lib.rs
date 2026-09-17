@@ -896,7 +896,14 @@ pub extern "C" fn _start() {
                 // Millisekunden schieben eine Runde ueber die Bildperiode,
                 // und weil eine Runde nur EIN Bild zeigt, faellt dort dann
                 // genau eines aus.
+                // Geschlafen wird erst, wenn der Vorrat VOLL ist — und dann
+                // bis zum naechsten faelligen Bild. Solange er es nicht ist,
+                // ist jede geschlafene Millisekunde eine, die in der teuren
+                // Szene fehlt; das Dekodieren laeuft schneller als Echtzeit
+                // (22 ms je Bild bei 33 ms Periode), und genau diese Luecke
+                // ist der Puffer.
                 let nap = match (t.playing, t.video.as_ref()) {
+                    (true, Some(v)) if !v.stocked(t.video_ms) => 1,
                     (true, Some(v)) => v.next_due_in(t.video_ms).clamp(1, TICK_MS as i64) as i32,
                     (true, None)    => TICK_MS,
                     (false, _)      => TICK_MS * 4,
