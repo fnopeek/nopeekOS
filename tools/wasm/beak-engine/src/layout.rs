@@ -505,6 +505,14 @@ fn translate_op_list(ops: &mut [DrawOp], dx: i32, dy: i32) {
 /// would drift, and one that merely FORGOT the shadow silently left the tab
 /// underline behind while recolouring the text above it.
 fn shadow_ops(st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, out: &mut Vec<DrawOp>) {
+    // **Die Schattenform ist der Rahmenkasten, um den Spread GEWACHSEN** —
+    // und mit ihm die Ecken (CSS Backgrounds 3 §7.1.1). Ein Schatten mit
+    // Spread unter einer Pille ist also runder als sie, nicht gleich rund.
+    let base = radii_px(st, w);
+    let grown = |sp: f32| -> [f32; 4] {
+        let g = |v: f32| if v > 0.0 { (v + sp).max(0.0) } else { 0.0 };
+        [g(base[0]), g(base[1]), g(base[2]), g(base[3])]
+    };
     // Der WEICHE zuerst: er liegt hinter dem scharfen. Das ist die Form, in
     // der Bootstrap seine Schatten schreibt (`0 .5rem 1rem rgba(0,0,0,.15)`),
     // und bis 0.61.0 fiel sie ganz weg — nur `blur == 0` wurde gemalt.
@@ -516,7 +524,8 @@ fn shadow_ops(st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, out: &mut Vec<
         if sw > 0 && shh > 0 {
             out.push(DrawOp::Shadow { x: sx, y: sy, w: sw, h: shh, blur: sh.blur,
                                       color: sh.color.unwrap_or(st.color),
-                                      dx: sh.dx as i32, dy: sh.dy as i32, spread: sh.spread as i32 });
+                                      dx: sh.dx as i32, dy: sh.dy as i32, spread: sh.spread as i32,
+                                      r: grown(sh.spread) });
         }
     }
     let Some(sh) = st.shadow else { return };
@@ -538,6 +547,21 @@ fn shadow_ops(st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, out: &mut Vec<
     // four pieces: a band above, a band below, and the left/right slivers
     // of the rows in between.
     let color = sh.color.unwrap_or(st.color);
+    // **Ein `0 0 0 Npx` auf einem runden Kasten ist ein RING, kein Rahmen aus
+    // vier Rechtecken.** So schreibt das halbe Web seine Umrandungen — DDGs
+    // Suchfeld hat gar keinen `border`, sein sichtbarer Strich ist der dritte
+    // Schatten seiner Liste (`0 0 0 1px rgba(0,0,0,.08)`). Als vier Rechtecke
+    // gemalt bekam die Kapsel eckige Ecken, und das war der ganze Unterschied
+    // zwischen „sieht aus wie ein Browser" und „sieht aus wie ein Kasten".
+    //
+    // Nur ohne Versatz: mit `dx`/`dy` ist die Differenz der beiden Kaesten
+    // kein Ring mehr, und dafuer bleibt der Weg darunter.
+    let r_sharp = grown(sh.spread);
+    if sh.dx == 0.0 && sh.dy == 0.0 && sh.spread > 0.0 && r_sharp.iter().any(|&v| v > 0.0) {
+        out.push(DrawOp::RoundRect { x: sx, y: sy, w: sw, h: shh, r: r_sharp,
+                                     color, ring: sh.spread });
+        return;
+    }
     let (sx1, sy1) = (sx + sw, sy + shh);
     let (x1, y1) = (x + w, y + h);
     let mut push = |px: i32, py: i32, pw: i32, ph: i32| {
@@ -623,9 +647,9 @@ fn clip_ops(ops: &mut Vec<DrawOp>, start: usize, cl: i32, ct: i32, cr: i32, cb: 
             // Ein weicher Schatten wird nur ganz oder gar nicht behalten:
             // ihn zuzuschneiden hiesse, seine Deckung neu zu rechnen, und die
             // entsteht erst beim Malen.
-            DrawOp::Shadow { x, y, w, h, blur, color, dx, dy, spread } => {
+            DrawOp::Shadow { x, y, w, h, blur, color, dx, dy, spread, r } => {
                 if x >= cl && y >= ct && x + w <= cr && y + h <= cb {
-                    ops.push(DrawOp::Shadow { x, y, w, h, blur, color, dx, dy, spread });
+                    ops.push(DrawOp::Shadow { x, y, w, h, blur, color, dx, dy, spread, r });
                 }
             }
             // A rounded box that the clip fully contains keeps its corners;
@@ -991,7 +1015,14 @@ pub enum DrawOp {
     /// different rectangle as soon as there is an offset or a spread. Keeping
     /// them (rather than the border box itself) is what makes the op survive
     /// a translation untouched.
-    Shadow { x: i32, y: i32, w: i32, h: i32, blur: f32, color: Rgba, dx: i32, dy: i32, spread: i32 },
+    /// Ein aeusserer Kastenschatten. `r` sind die Eckradien der SCHATTENform
+    /// — der Radius des Rahmenkastens, um den Spread gewachsen (CSS
+    /// Backgrounds 3 §7.1.1). Ohne sie malt ein Schatten unter einer Pille
+    /// eckige Ecken, und genau daran sah DuckDuckGos Suchfeld aus wie ein
+    /// Kasten statt wie eine Kapsel: der sichtbare Ring dort ist ein
+    /// `box-shadow`, kein Rahmen.
+    Shadow { x: i32, y: i32, w: i32, h: i32, blur: f32, color: Rgba, dx: i32, dy: i32,
+             spread: i32, r: [f32; 4] },
     /// A `border-radius` box. `r` is `[tl, tr, br, bl]` in px; `ring` is 0 for
     /// a solid fill, or the border thickness to stroke along the inside edge.
     /// Kept apart from `Rect` so the plain case stays one `memory.copy` per
@@ -12715,6 +12746,72 @@ mod tests {
         for (_, _, t) in texts(&l) {
             assert!(!t.starts_with('\u{200D}') && !t.ends_with('\u{200D}'), "split at a ZWJ: {t:?}");
         }
+    }
+
+    /// **Ein `0 0 0 Npx`-Schatten auf einem runden Kasten ist ein RING.**
+    ///
+    /// So schreibt das halbe Web seine Umrandungen, und DuckDuckGos Suchfeld
+    /// hat gar keinen `border` — sein sichtbarer Strich ist der dritte
+    /// Schatten seiner Liste. Als vier Rechtecke gemalt bekam die Kapsel
+    /// eckige Ecken; gemessen gegen Chromium wanderte beaks Kante bei jedem
+    /// `y` auf derselben Spalte, waehrend Chromiums sich nach aussen bog.
+    #[test]
+    fn a_spread_only_shadow_on_a_round_box_is_a_ring() {
+        let ring = |css: &str| {
+            let l = lay(&format!("<body><div style=\"width:200px;height:40px;{css}\">x</div></body>"), 400);
+            l.ops.iter().find_map(|o| match o {
+                DrawOp::RoundRect { r, ring, w, h, .. } if *ring > 0.0 =>
+                    Some((*r, *ring, *w, *h)),
+                _ => None,
+            })
+        };
+        // Der Fall der echten Seite: Kapsel, kein Rahmen, Ring als Schatten.
+        let (r, thick, w, h) = ring("border-radius:20px;box-shadow:0 0 0 1px #000")
+            .expect("ein Ring, keine vier Rechtecke");
+        assert_eq!(thick, 1.0);
+        // Der Kasten des Schattens ist um den Spread GEWACHSEN, und die Ecken
+        // mit ihm (CSS Backgrounds 3 §7.1.1): 20 + 1.
+        assert_eq!((w, h), (202, 42));
+        assert!((r[0] - 21.0).abs() < 0.01, "Eckradius {} statt 21", r[0]);
+        // Ohne Radius bleibt es beim alten Weg — vier Rechtecke, kein Ring.
+        assert!(ring("box-shadow:0 0 0 1px #000").is_none());
+        // Mit Versatz ist die Differenz kein Ring mehr.
+        assert!(ring("border-radius:20px;box-shadow:2px 0 0 1px #000").is_none());
+    }
+
+    /// Der WEICHE Schatten folgt den Ecken ebenfalls — gemessen in PIXELN,
+    /// nicht an Befehlen ([[feedback_paint_test_not_parse_test]]): ein Punkt
+    /// weit ausserhalb der Eckrundung muss frei bleiben, die Mitte derselben
+    /// Kante gedeckt sein.
+    #[test]
+    fn a_soft_shadow_follows_the_corner_radius() {
+        // **Mit SPREAD, und das ist keine Zierde.** Ohne ihn liegt die ganze
+        // Eckrundung INNERHALB des Rahmenkastens, und der wird aus einem
+        // aeusseren Schatten ohnehin ausgespart (CSS Backgrounds 3 §7.1.1) —
+        // eckig und rund sehen dort gleich aus, und der Test waere gruen,
+        // ohne etwas zu pruefen. Erst der Spread schiebt die Ecke nach
+        // draussen, wo sie zu sehen ist.
+        //
+        // Ein LEERER Kasten (ein Buchstabe traefe die Messpunkte) und ein
+        // WEISSER Schatten (der Vorgabegrund dieser Probe ist dunkel).
+        let l = lay("<body style=\"margin:0\"><div style=\"width:120px;height:60px;\
+margin:40px;border-radius:30px;box-shadow:0 0 6px 8px #fff\"></div></body>", 400);
+        let eng = crate::Engine::new();
+        let (w, h) = (240u32, 200u32);
+        let mut buf = alloc::vec![0u8; (w * h * 4) as usize];
+        eng.paint(&l, w, h, 0, &mut buf);
+        let at = |x: u32, y: u32| buf[((y * w + x) * 4) as usize] as i32;
+        // Rahmenkasten 40,40 120x60; Schattenform um 8 gewachsen, also
+        // 32,32 136x76 mit Radius 38 — Mittelpunkt der oberen linken Ecke
+        // wieder (70,70). (38,38) liegt 7 px AUSSERHALB dieses Kreises und
+        // zugleich AUSSERHALB des ausgesparten Rahmenkastens: genau dort
+        // malte der eckige Schatten voll durch. (100,36) ist die Mitte der
+        // Oberkante im Schatten, (10,10) der freie Grund.
+        let frei = at(10, 10);
+        assert!((at(38, 38) - frei).abs() <= 6,
+            "Ecke {} gegen freien Grund {} — der Schatten ist eckig", at(38, 38), frei);
+        assert!(at(100, 36) - frei > 60,
+            "Kantenmitte {} kaum heller als der freie Grund {}", at(100, 36), frei);
     }
 
     #[test]

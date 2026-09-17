@@ -1309,12 +1309,12 @@ impl Engine {
                 DrawOp::Check { x, y, w: cw, h: ch, color } => {
                     stroke_check(out, wi, hi, *x, *y - scroll_y, *cw, *ch, *color);
                 }
-                DrawOp::Shadow { x, y, w: rw, h: rh, blur, color, dx, dy, spread } => {
+                DrawOp::Shadow { x, y, w: rw, h: rh, blur, color, dx, dy, spread, r } => {
                     // Der Kasten, der ausgespart bleibt: das Schattenrechteck
                     // zurueckgerechnet auf den Rahmenkasten.
                     let keep = (*x - *dx + *spread, *y - *dy + *spread - scroll_y,
                                 *rw - 2 * *spread, *rh - 2 * *spread);
-                    fill_shadow(out, wi, hi, *x, *y - scroll_y, *rw, *rh, *blur, *color, keep);
+                    fill_shadow(out, wi, hi, *x, *y - scroll_y, *rw, *rh, *blur, *color, keep, *r);
                 }
                 DrawOp::Text { x, y, size, color, bold, italic, mono, family, sp, text, clip } => {
                     let vy = *y - scroll_y;
@@ -1920,13 +1920,20 @@ fn mul255(x: u8, y: u8) -> u8 {
 /// `sigma = blur / 2`, wie CSS Backgrounds 3 §7.1.1 es vorschreibt: der
 /// Radius spannt zwei Standardabweichungen.
 ///
-/// **Was hier NICHT drin ist:** die Ecken folgen keinem `border-radius`. Bei
-/// den Radien, mit denen echte Seiten arbeiten (6 px) und den Weichzeichnungen
-/// (16 px) liegt der Unterschied unter der Sichtbarkeitsschwelle; bei einem
-/// Kreis waere er sichtbar. Benannt statt still.
+/// **Die Ecken folgen dem `border-radius`** — seit 0.187.0. Der Kommentar
+/// hier sagte vorher, der Unterschied liege bei 6 px Radius unter der
+/// Sichtbarkeitsschwelle. Das stimmt fuer eine KARTE und nicht fuer eine
+/// KAPSEL: DuckDuckGos Suchfeld ist 40 px hoch mit 24 px Radius, und sein
+/// Ring ist ein Schatten. Eckig gemalt war es der ganze Unterschied zum
+/// Browserbild ([[feedback_a_comment_that_names_its_condition_expires]]).
+///
+/// **Der trennbare Weg bleibt, wo er stimmt.** Ohne Radius ist die Deckung
+/// exakt `fx * fy`, und daran wird nichts gerechnet. Nur INNERHALB der vier
+/// Eckquadrate tritt die Abstandsfunktion an ihre Stelle — dort, und nur
+/// dort, war das Rechteck falsch.
 #[allow(clippy::too_many_arguments)]
 fn fill_shadow(out: &mut [u8], cw: i32, ch: i32, x: i32, y: i32, w: i32, h: i32,
-               blur: f32, color: Rgba, keep: (i32, i32, i32, i32)) {
+               blur: f32, color: Rgba, keep: (i32, i32, i32, i32), r: [f32; 4]) {
     if w <= 0 || h <= 0 || color.a == 0 {
         return;
     }
@@ -1943,9 +1950,30 @@ fn fill_shadow(out: &mut [u8], cw: i32, ch: i32, x: i32, y: i32, w: i32, h: i32,
     for px in x0..x1 {
         fx.push(span(px as f32 + 0.5, x as f32, (x + w) as f32, sigma));
     }
+    // Die Radien auf den Kasten klemmen: mehr als die halbe Kante gibt es
+    // nicht (CSS Backgrounds 3 §5.5).
+    let lim = (w.min(h) as f32) * 0.5;
+    let r = [r[0].min(lim).max(0.0), r[1].min(lim).max(0.0),
+             r[2].min(lim).max(0.0), r[3].min(lim).max(0.0)];
+    let round = r.iter().any(|&v| v > 0.0);
+    // Mittelpunkt und Radius der Ecke, in deren Quadrat dieser Punkt liegt —
+    // sonst `None`, und dann gilt der trennbare Weg unveraendert.
+    let corner = |px: f32, py: f32| -> Option<(f32, f32, f32)> {
+        let (l, t, rr, b) = (x as f32, y as f32, (x + w) as f32, (y + h) as f32);
+        for (i, (cx, cy, sx, sy)) in [(l, t, 1.0f32, 1.0f32), (rr, t, -1.0, 1.0),
+                                      (rr, b, -1.0, -1.0), (l, b, 1.0, -1.0)].iter().enumerate() {
+            let rad = r[i];
+            if rad <= 0.0 { continue }
+            let (ox, oy) = (cx + sx * rad, cy + sy * rad);
+            if (px - ox) * sx <= 0.0 && (py - oy) * sy <= 0.0 {
+                return Some((ox, oy, rad));
+            }
+        }
+        None
+    };
     for py in y0..y1 {
         let fy = span(py as f32 + 0.5, y as f32, (y + h) as f32, sigma);
-        if fy <= 0.002 {
+        if fy <= 0.002 && !round {
             continue;
         }
         let inside_y = py >= keep.1 && py < keep.1 + keep.3;
@@ -1964,7 +1992,19 @@ fn fill_shadow(out: &mut [u8], cw: i32, ch: i32, x: i32, y: i32, w: i32, h: i32,
             if inside_y && px >= keep.0 && px < keep.0 + keep.2 {
                 continue;
             }
-            let a = fx[k] * fy * (color.a as f32);
+            // **Im Eckquadrat entscheidet der ABSTAND, nicht das Produkt.**
+            // Auf den geraden Kanten geben beide dasselbe (eine Kante weit
+            // weg traegt den Faktor eins), also stossen sie stetig aneinander.
+            let cov = match if round { corner(px as f32 + 0.5, py as f32 + 0.5) } else { None } {
+                Some((ox, oy, rad)) => {
+                    let (dx, dy) = (px as f32 + 0.5 - ox, py as f32 + 0.5 - oy);
+                    let d = libm::sqrtf(dx * dx + dy * dy) - rad;
+                    let k = 1.0 / (sigma * core::f32::consts::SQRT_2);
+                    (0.5 * (1.0 - libm::erff(d * k))).clamp(0.0, 1.0)
+                }
+                None => fx[k] * fy,
+            };
+            let a = cov * (color.a as f32);
             if a < 0.5 {
                 continue;
             }

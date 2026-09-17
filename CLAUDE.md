@@ -48,7 +48,38 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-17 · beak 0.186.1 · Kernel 0.340.0** (Rest: `git log`)
+**Stand 2026-09-17 · beak 0.187.0 · Kernel 0.340.0** (Rest: `git log`)
+
+**0.187.0: der Strich um DDGs Suchfeld war gar kein Rahmen — und Schatten
+hatten eckige Ecken.** Florian: „haben wir noch eine border um das input feld
+… dort ist es einfach gerundet nicht?". Gemessen statt geraten, Spalte fuer
+Spalte durch beide Bilder: Chromiums Kante wandert an der Ecke nach aussen
+(y=20 → 171, y=22 → 164, y=26 → 158, y=40 → 152), beaks stand bei **jedem**
+`y` auf 152. Ein Rechteck.
+
+Und das runde Ding ist weder das `<input>` (Radius 0, durchsichtig) noch ein
+Rahmen: es ist der GROSSELTER mit `border-radius:24px` — und sein sichtbarer
+Strich ist der dritte Schatten seiner Liste,
+`box-shadow: … , 0 0 0 1px rgba(0,0,0,.08)`. **Das halbe Web schreibt seine
+Umrandungen so.** beak malte ihn als vier Rechtecke.
+
+Zwei Wege, beide gebaut: **ein `0 0 0 Npx` auf einem runden Kasten ist ein
+RING** (`DrawOp::RoundRect` mit `ring`, statt vier Rechtecken) — nur ohne
+Versatz, denn mit `dx`/`dy` ist die Differenz zweier Kaesten kein Ring mehr.
+Und **`fill_shadow` folgt jetzt dem Radius**: der trennbare Weg (`fx * fy`,
+exakt) bleibt, wo er stimmt, und nur INNERHALB der vier Eckquadrate tritt die
+Abstandsfunktion an seine Stelle. Der Radius faehrt als Feld im Befehl mit,
+um den Spread GEWACHSEN (CSS Backgrounds 3 §7.1.1).
+
+Der Kommentar an `fill_shadow` sagte vorher, der Unterschied liege „bei den
+Radien, mit denen echte Seiten arbeiten (6 px), unter der
+Sichtbarkeitsschwelle". Das gilt fuer eine KARTE und nicht fuer eine KAPSEL:
+40 px hoch, 24 px Radius. **WPT 4556 → 4557, +10/−0**, 470 Tests (zwei neue:
+der Ring an den Befehlen, die Ecke in PIXELN — und der zweite meldet ohne den
+Fix „Ecke 247 gegen freien Grund 28"). Galerien unveraendert; von den zwoelf
+Render-Hashes wandern die drei von Tailwind, und dort ist ein Befehl WENIGER
+drin als vorher.
+
 
 **0.186.1: aus dem Geraetelauf — eine Zeile, die FEHLTE, und ein Name, der das
 Geraet verliess.** Florians Lauf von 0.186.0: `fresh` und `kbdev` gruen, also
