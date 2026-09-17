@@ -1511,6 +1511,15 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
             f.asm.popcnt(false, A, A);
             f.push_from_ty(A, ValType::I32);
         }
+        // The emitter took its width flag from the start; only this arm was
+        // missing. It is not a niche opcode: a pure-Rust H.264 decoder built
+        // for wasm32 lands two functions on it, and they carry 23 % of the
+        // module's instructions.
+        I64Popcnt => {
+            f.pop_to(A);
+            f.asm.popcnt(true, A, A);
+            f.push_from_ty(A, ValType::I64);
+        }
 
         // Width conversions. `pop_to` already read the value at its own
         // width, so wrapping needs no instruction at all — the narrower store

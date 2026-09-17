@@ -969,6 +969,14 @@ const CASES: &[Case] = &[
     Case { name: "i32_clz_0", decl: "", body: "i32.const 0 i32.clz", params: 0 },
     Case { name: "i32_ctz_0", decl: "", body: "i32.const 0 i32.ctz", params: 0 },
     Case { name: "i32_popcnt", decl: "", body: "local.get 0 i32.popcnt", params: 1 },
+    // Built from two i32 params like the i64 clz/ctz cases above, so the
+    // HIGH half is exercised too — a `popcnt` emitted without REX.W counts
+    // only the low 32 bits and would pass a test that never sets them.
+    Case { name: "i64_popcnt", decl: "", body:
+        "local.get 0 i64.extend_i32_u i64.const 32 i64.shl local.get 1 i64.extend_i32_u i64.or \
+         i64.popcnt i32.wrap_i64", params: 2 },
+    Case { name: "i64_popcnt_0", decl: "", body: "i64.const 0 i64.popcnt i32.wrap_i64", params: 0 },
+    Case { name: "i64_popcnt_all", decl: "", body: "i64.const -1 i64.popcnt i32.wrap_i64", params: 0 },
 
     // Width conversions, both directions and both signednesses.
     Case { name: "i64_ext_u", decl: "", body:
