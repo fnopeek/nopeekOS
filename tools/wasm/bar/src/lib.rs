@@ -104,14 +104,10 @@ const WS_W: u16 = 38;
 /// Eine unsichtbare Marke und nicht `PaddingXY`, weil das links UND
 /// rechts polstert; hier soll nur links etwas passieren.
 const WS_INDENT: u16 = 6;
-/// Abstand des Trennstrichs zu beiden Nachbarn, als Polsterung.
-///
-/// `1 2 3 4 (5) | (6) Appname` — die zwei unsichtbaren Plaetze sind je
-/// eine Desktop-Zelle breit, deshalb steht hier `WS_W` und keine eigene
-/// Zahl: wird die Zelle breiter, wandert der Strich mit. Sichtbar wird
-/// daraus je Seite `Zonenabstand 2 + WS_W`, und weil `PaddingXY` links
-/// wie rechts gleich polstert, ist es von selbst symmetrisch.
-const SEP_GAP: u16 = WS_W;
+/// Hoehe des Trennstrichs. Seine BREITE ist keine eigene Zahl: er sitzt
+/// in einer Zelle, die genau so breit ist wie eine Arbeitsflaeche —
+/// siehe das Segment „title".
+const SEP_H: u16 = 14;
 /// Eckradius der Desktop-Zellen: ganz rund.
 ///
 /// Sie sitzen in der Karte, die selbst eine Pille ist (36 px hoch →
@@ -483,16 +479,37 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
         "title" => {
             if st.title.is_empty() { Vec::new() }
             else {
+                // `1 2 3 4 (5) | (6) Appname` — und das RASTER ist das
+                // Mittel, nicht ein ausbalanciertes Paar Abstaende.
+                //
+                // Zuerst stand hier eine Polsterung von einer Zellbreite.
+                // Die stimmte im Abstand und nicht in der Lage: sie setzt
+                // den Strich ans ENDE des Platzes (5) statt in seine
+                // Mitte, gemessen 19,5 px zu weit rechts — eine halbe
+                // Zelle.
+                //
+                // Jetzt bekommt er die Zelle wirklich: ein Kasten von
+                // `WS_W`, der Strich darin zwischen zwei Spreizern, also
+                // mittig. Der leere Platz (6) ist eine unsichtbare Marke
+                // derselben Breite. Damit liegt alles auf demselben
+                // 40er-Raster wie die Ziffern (`WS_W` + Zonenabstand),
+                // und keine Zahl davon ist von Hand abgestimmt.
                 alloc::vec![
                     Widget::Row {
-                        children: alloc::vec![prefab::mark(1, 14, Some(Token::Border))],
+                        children: alloc::vec![
+                            Widget::Spacer { flex: 1 },
+                            prefab::mark(1, SEP_H, Some(Token::Border)),
+                            Widget::Spacer { flex: 1 },
+                        ],
                         spacing: 0,
                         align: Align::Center,
                         modifiers: alloc::vec![
-                            Modifier::PaddingXY { x: SEP_GAP, y: Padding::Xs.as_u16() },
+                            Modifier::MinWidth(WS_W),
+                            Modifier::MaxWidth(WS_W),
                             Modifier::MaxHeight(BAND_H),
                         ],
                     },
+                    prefab::mark(WS_W, 1, None),
                     Widget::Row {
                         children: alloc::vec![
                             Widget::Icon {
