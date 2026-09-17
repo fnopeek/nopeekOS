@@ -31,7 +31,7 @@ checksum = "f69bdf7e634dc76798adc292ebd4f6e8e125cde6843a264fe398c52c3f7e8541"
 
 [[package]]
 name = "nopeek_widgets"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "postcard",
  "serde",
