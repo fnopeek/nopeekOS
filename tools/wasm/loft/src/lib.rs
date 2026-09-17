@@ -487,7 +487,7 @@ impl Loft {
             // a player that can say nothing but "unsupported format".
             // Seit tune 0.2.0 auch Bewegtbild — aber nur H.264 in MP4, und
             // ein fragmentiertes sagt es selbst, statt schwarz zu bleiben.
-            "mp3" | "wav" | "mp4" | "m4v" | "mov" => Some("tune".to_string()),
+            "mp3" | "wav" | "mp4" | "m4v" | "mov" | "m4a" | "aac" => Some("tune".to_string()),
             _ => None,
         }
     }

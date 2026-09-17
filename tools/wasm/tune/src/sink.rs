@@ -34,6 +34,10 @@ pub struct Sink {
     out_sent:  usize,
     /// 48 kHz frames handed to the mailbox since the last resync.
     submitted: u64,
+    /// Stand beim letzten `restart`. Die Uhr darf nicht darunter fallen:
+    /// direkt nach einem Sprung ist der Ring leer, und `submitted - unheard`
+    /// laege 85 ms VOR der Stelle, auf die gesprungen wurde.
+    base: u64,
     /// 48 kHz frames the driver has drained, from the wall clock.
     played:    u64,
     last_ms:   i64,
@@ -57,6 +61,7 @@ impl Sink {
             out_bytes: 0,
             out_sent: 0,
             submitted: 0,
+            base: 0,
             played: 0,
             last_ms: 0,
             underruns: 0,
@@ -75,6 +80,7 @@ impl Sink {
         self.out_bytes = 0;
         self.out_sent = 0;
         self.submitted = at_frame_48k;
+        self.base = at_frame_48k;
         self.played = at_frame_48k;
         self.last_ms = now_ms;
     }
@@ -89,12 +95,41 @@ impl Sink {
 
     pub fn ok(&self) -> bool { self.slot >= 0 }
 
+    /// Bytes, die zwischen Mailbox und Lautsprecher noch warten.
+    ///
+    /// `audio_hda` haelt einen eigenen Ring von 2 x 2048 Rahmen = 16384
+    /// Bytes, und der steht HINTER dem, was `npk_audio_buffered` meldet.
+    /// Der Kernel rechnet dieselbe Zahl fuer den microVM-Gast dazu
+    /// (`HDA_RING_BYTES` in `virtio_snd_pci.rs`) — wer sie weglaesst, laesst
+    /// das Bild 85 ms vor dem Ton laufen.
+    const HDA_RING_FRAMES: u64 = 16_384 / 4;
+
     /// Advance the play clock. `playing` false freezes it, which is what
     /// makes a pause hold its position.
+    ///
+    /// **Die Quelle ist der RING, nicht die Wanduhr.** Was noch im Ring
+    /// liegt, ist noch nicht gehoert; `submitted` minus das ist die Zahl.
+    /// Die Wanduhr bleibt als Rueckfall, wenn kein Schlitz offen ist — sie
+    /// ist eine Schaetzung und driftet gegen den Takt der Karte, und ueber
+    /// einen Film sieht man das.
     pub fn tick(&mut self, now_ms: i64, playing: bool) {
         let dt = (now_ms - self.last_ms).max(0) as u64;
         self.last_ms = now_ms;
         if !playing { return; }
+
+        let ring = host::audio_buffered(self.slot);
+        if ring >= 0 {
+            let unheard = ring as u64 / 4 + Self::HDA_RING_FRAMES;
+            let played = self.submitted.saturating_sub(unheard).max(self.base);
+            // Ein LEERER Ring, obwohl wir spielen, ist ein Aussetzer — und
+            // genau das, was die Wanduhr frueher nur raten konnte.
+            if ring == 0 && self.submitted > 0 && played >= self.submitted {
+                self.underruns = self.underruns.saturating_add(1);
+            }
+            self.played = played;
+            return;
+        }
+
         self.played += dt * MIX_RATE as u64 / 1000;
         if self.played > self.submitted {
             // We promised the speaker more than we delivered: the ring ran
@@ -103,6 +138,20 @@ impl Sink {
             self.played = self.submitted;
             self.underruns = self.underruns.saturating_add(1);
         }
+    }
+
+    /// Gehoerte Rahmen, JETZT aus dem Ring gelesen.
+    ///
+    /// `played_frames` gibt den Stand des letzten `tick`. Wer zwischen zwei
+    /// Ticks eine Zeit braucht — der Bildweg tut das, zwischen Dekodieren
+    /// und Zeigen —, bekommt hier eine frische. Ohne das stuende die Uhr
+    /// waehrend einer Dekodierung still, und genau das hat in 0.3.0 schon
+    /// einmal jedes zweite Bild gekostet.
+    pub fn played_frames_now(&self) -> u64 {
+        let ring = host::audio_buffered(self.slot);
+        if ring < 0 { return self.played; }
+        let unheard = ring as u64 / 4 + Self::HDA_RING_FRAMES;
+        self.submitted.saturating_sub(unheard).max(self.base)
     }
 
     /// 48 kHz frames buffered ahead of the speaker.

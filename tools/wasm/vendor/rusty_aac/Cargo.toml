@@ -39,6 +39,9 @@ license = "Apache-2.0"
 repository = "https://github.com/Remade-With-Rust/remade_ffmpeg_rs"
 
 [features]
+# Upstream ist std-gebunden und fuehrt das Merkmal nicht — der Vendor baut
+# no_std, also muss es hier deklariert sein, sonst warnt jeder cfg-Zweig.
+std = []
 # Der Encoder ist 4940 der 8602 Zeilen und traegt fast jede std-Stelle des
 # Crates. nopeekOS dekodiert nur, also bleibt er aus — die Datei bleibt
 # liegen, damit sich der Vendor gegen upstream diffen laesst.

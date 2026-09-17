@@ -29,6 +29,8 @@ use nopeek_widgets::prefab;
 use nopeek_widgets::style::{Padding, Radius, Spacing};
 use nopeek_widgets::*;
 
+mod aac;
+mod demux;
 mod host;
 mod mp3;
 // Der Container. Noch nicht verdrahtet — der Spieler kommt als eigener
@@ -190,6 +192,8 @@ struct Tune {
     video_ms: i64,
     /// Second of playback the lag was last reported for.
     told_lag_s: i64,
+    /// Vorlauf der Tonspur in ms — was vor dem ersten hoerbaren Sample liegt.
+    audio_priming_ms: i64,
     /// Still filling the queue before the clock starts.
     video_buffering: bool,
     /// Je Sekunde gesammelt: Zeit im Dekoder, Zeit im Commit, Bilder.
@@ -238,6 +242,7 @@ impl Tune {
             video_t0: 0,
             video_ms: 0,
             told_lag_s: -1,
+            audio_priming_ms: 0,
             video_buffering: false,
             sec_decode_ms: 0,
             sec_commit_ms: 0,
@@ -289,6 +294,7 @@ impl Tune {
         self.src = None;
         self.video = None;
         self.video_ms = 0;
+        self.audio_priming_ms = 0;
         self.drained = false;
         self.error = None;
         let path = match self.full_path() { Some(p) => p, None => return };
@@ -297,53 +303,73 @@ impl Tune {
             Some(b) => b,
             None => { self.error = Some("cannot read file".to_string()); return; }
         };
-        // Nach INHALT entscheiden, nicht nach Endung — dieselbe Regel, nach
-        // der `source::open` seit je den Tondekoder waehlt.
-        if video::looks_like(bytes) {
-            match video::Video::open(bytes) {
-                Ok(v) => {
-                    self.video_t0 = host::ticks();
-                    self.video = Some(v);
-                    self.playing = play;
-                    self.video_buffering = true;
-                }
-                // Der Grund gehoert auf den Schirm. „geht nicht" ist bei einem
-                // fragmentierten MP4 eine andere Auskunft als bei einem Codec,
-                // den wir nicht bauen, und nur eine davon ist unser Fehler.
-                Err(video::OpenError::Fragmented) =>
-                    self.error = Some("fragmented MP4 (moof) — not supported".to_string()),
-                Err(video::OpenError::NoVideo) =>
-                    self.error = Some("no H.264 track".to_string()),
-                Err(video::OpenError::NotMp4) =>
-                    self.error = Some("not an MP4".to_string()),
+        // EINE Lesung des Containers, zwei Stroeme. Nach INHALT
+        // entschieden, nicht nach Endung — dieselbe Regel, nach der
+        // `source::open` seit je den Tondekoder waehlt.
+        let d = demux::open(bytes);
+        let priming = d.audio_priming;
+
+        if let Some(v) = d.video {
+            self.video_t0 = host::ticks();
+            self.video_buffering = true;
+            self.video = Some(v);
+        }
+
+        if let Some(src) = d.audio {
+            if !self.sink.ok() {
+                self.error = Some("no free audio slot".to_string());
+            } else {
+                // Der Vorlauf der TONspur, in ihrer eigenen Rate. Die
+                // Videospur derselben Datei hat oft einen anderen; beide roh
+                // zu spielen ist der einfachste Weg zu 48 ms Versatz.
+                let rate = src.info().rate.max(1);
+                self.audio_priming_ms = (priming as i64 * 1000) / rate as i64;
+                self.sink.restart(rate, host::ticks(), 0);
+                self.src = Some(src);
             }
+        }
+
+        if self.video.is_none() && self.src.is_none() {
+            // Der Grund gehoert auf den Schirm. Ein fragmentiertes MP4 ist
+            // eine andere Auskunft als ein Codec, den wir nicht bauen, und
+            // nur eine davon ist unser Fehler.
+            self.error = Some(match d.video_error {
+                Some(video::OpenError::Fragmented) =>
+                    "fragmented MP4 (moof) — not supported".to_string(),
+                Some(video::OpenError::NoVideo) => "no H.264 track".to_string(),
+                Some(video::OpenError::NotMp4) => "not an MP4".to_string(),
+                None => "unsupported format".to_string(),
+            });
             return;
         }
-        if !self.sink.ok() {
-            self.error = Some("no free audio slot".to_string());
-            return;
-        }
-        match source::open(bytes) {
-            Some(s) => {
-                self.sink.restart(s.info().rate, host::ticks(), 0);
-                self.src = Some(s);
-                self.playing = play;
-            }
-            None => self.error = Some("unsupported format".to_string()),
-        }
+        self.playing = play;
     }
 
     fn info_rate(&self) -> u32 { self.src.as_ref().map(|s| s.info().rate).unwrap_or(48_000) }
 
     /// Play position in ms — what the speaker has reached, not what the
     /// decoder has read.
+    /// Die Wiedergabestelle, wie sie der Betrachter sieht.
+    ///
+    /// Mit Ton ist der TON die Uhr, auch wenn ein Bild dazu laeuft: er
+    /// zaehlt, was wirklich gehoert wurde. Ein STUMMER Film hat nichts, woran
+    /// er sich haengen koennte — dort ist die Wanduhr die Uhr, und das ist
+    /// keine Notloesung, sondern die einzige verfuegbare Zeit.
     fn position_ms(&self) -> u64 {
-        // Ein stummer Film hat keinen Ton, an den er sich haengen koennte:
-        // dort IST die Wanduhr die Uhr. Sobald tune einen Film mit Ton
-        // spielt, uebernimmt der Sink — er zaehlt, was wirklich gehoert
-        // wurde, und der Kristall der Karte laeuft anders als die Wanduhr.
+        if self.src.is_some() { return self.audio_ms().max(0) as u64; }
         if self.video.is_some() { return self.video_ms.max(0) as u64; }
         self.sink.played_frames() * 1000 / sink::MIX_RATE as u64
+    }
+
+    /// Gehoerte Zeit auf der PRAESENTATIONS-Achse: was der Ring hergibt,
+    /// minus den Vorlauf, der vor dem ersten hoerbaren Sample liegt.
+    ///
+    /// Die Videospur rechnet ihre `pts` schon gegen ihr eigenes
+    /// `edit_start`; beide landen damit auf derselben Null, und genau das
+    /// ist Lippensynchronitaet.
+    fn audio_ms(&self) -> i64 {
+        self.sink.played_frames() as i64 * 1000 / sink::MIX_RATE as i64
+            - self.audio_priming_ms
     }
 
     fn duration_ms(&self) -> u64 {
@@ -355,75 +381,92 @@ impl Tune {
     /// turn of the loop, like `pump` — decoding a frame costs milliseconds,
     /// and it belongs where the event loop can see it.
     fn video_tick(&mut self) {
-        if !self.playing { return; }
+        if !self.playing || self.video.is_none() { return; }
+        let has_audio = self.src.is_some();
         let now = host::ticks();
-        let Some(v) = self.video.as_mut() else { return };
 
-        // Vor dem Start erst Vorrat anlegen. Die Uhr wird dabei
+        // Vor dem Start erst Vorrat anlegen. Ohne Ton wird die Wanduhr
         // MITGEZOGEN statt angehalten — sonst zaehlt die Pufferzeit als
         // Rueckstand, und die erste Meldung des Laufs waere eine ueber ein
-        // Problem, das gerade behoben wird.
+        // Problem, das gerade behoben wird. Mit Ton haelt der Sink ohnehin
+        // an, solange nichts eingespeist wurde.
         if self.video_buffering {
-            self.video_t0 = now - self.video_ms;
-            let flags = v.colour_flags;
+            if !has_audio { self.video_t0 = now - self.video_ms; }
+            let at = self.video_ms;
+            let flags = self.video.as_ref().map(|v| v.colour_flags).unwrap_or(0);
+            let v = self.video.as_mut().unwrap();
+            v.decode_step(at, video::FILL_DECODES);
             // Das erste Bild wird dabei schon gezeigt. Ein schwarzer Kasten,
             // waehrend im Hintergrund gepuffert wird, sieht aus wie ein
             // Fehler; das stehende erste Bild sieht aus wie das, was es ist.
-            v.decode_step(self.video_ms, video::FILL_DECODES);
-            if let Some(f) = v.take_due(self.video_ms) {
+            if let Some(f) = v.take_due(at) {
                 let (ys, cs) = video::Video::strides(f);
                 host::canvas_commit_yuv(VIDEO_CANVAS, &f.y, &f.u, &f.v, ys, cs,
                                         f.width as u32, f.height as u32, flags);
             }
-            if v.primed(self.video_ms) { self.video_buffering = false; }
+            if self.video.as_ref().unwrap().primed(at) { self.video_buffering = false; }
             return;
         }
 
-        let ms = now - self.video_t0;
+        // ── Uhr lesen ─────────────────────────────────────────────────────
+        let ms = self.clock_ms(has_audio, now);
         self.video_ms = ms;
-        let flags = v.colour_flags;
+        let flags = self.video.as_ref().unwrap().colour_flags;
+
         // Zeigen hat Vorrang, solange Vorrat da ist. Eine Runde, die erst
         // dekodiert, laesst in ihren 52 ms zwei Bilder faellig werden und
         // kann nur eines zeigen — gemessen 109 dekodiert gegen 75 gezeigt.
-        let budget = if v.show_before_decode(ms) { 0 } else { video::PLAY_DECODES };
+        let budget = if self.video.as_ref().unwrap().show_before_decode(ms) {
+            0
+        } else {
+            video::PLAY_DECODES
+        };
+
         let t_dec = host::ticks();
-        v.decode_step(ms, budget);
+        {
+            let v = self.video.as_mut().unwrap();
+            v.decode_step(ms, budget);
+        }
         self.sec_decode_ms += host::ticks() - t_dec;
-        self.sec_decoded += v.take_decoded();
+        self.sec_decoded += self.video.as_mut().unwrap().take_decoded();
+
         // Die Uhr NEU lesen. Das Dekodieren hat gedauert, und die Bilder,
-        // die inzwischen faellig wurden, sind genau die, die sonst
-        // unbemerkt verfallen.
-        let ms = host::ticks() - self.video_t0;
+        // die inzwischen faellig wurden, sind genau die, die sonst unbemerkt
+        // verfallen. Auch mit Tonuhr: `played_frames_now` liest den Ring.
+        let ms = self.clock_ms(has_audio, host::ticks());
         self.video_ms = ms;
-        let got = v.take_due(ms).is_some();
-        if got {
-            // Der Commit ist NICHT gratis: er kopiert die drei Ebenen ueber
-            // die Modulgrenze und laesst das Fenster neu rastern, und beides
-            // laeuft im Wirtsaufruf, also seriell zum Dekodieren. Deshalb
-            // wird er getrennt gemessen — sonst sieht seine Zeit aus wie
-            // Dekodierzeit.
-            let t_com = host::ticks();
-            if let Some(f) = v.current_frame() {
+
+        let t_com = host::ticks();
+        let mut showed = false;
+        {
+            let v = self.video.as_mut().unwrap();
+            if let Some(f) = v.take_due(ms) {
                 let (ys, cs) = video::Video::strides(f);
+                // Der Commit ist NICHT gratis: er kopiert die drei Ebenen
+                // ueber die Modulgrenze und laesst das Fenster neu rastern,
+                // und beides laeuft im Wirtsaufruf, also seriell zum
+                // Dekodieren. Deshalb getrennt gemessen.
                 host::canvas_commit_yuv(VIDEO_CANVAS, &f.y, &f.u, &f.v, ys, cs,
                                         f.width as u32, f.height as u32, flags);
+                showed = true;
             }
-            self.sec_commit_ms += host::ticks() - t_com;
         }
-        // Wie weit das Bild hinter der Uhr liegt. Eine Maschine, die nicht
-        // mitkommt, soll es mit einer ZAHL sagen und nicht als Gefuehl —
-        // einmal je Sekunde, damit die Meldung nicht selbst zur Last wird.
-        let lag = ms - v.shown_ms();
-        let lead = v.lead_ms(ms);
+        if showed { self.sec_commit_ms += host::ticks() - t_com; }
+
+        let (lag, lead, dropped, shown, ended) = {
+            let v = self.video.as_mut().unwrap();
+            (ms - v.shown_ms(), v.lead_ms(ms),
+             core::mem::take(&mut v.dropped), core::mem::take(&mut v.shown_count),
+             v.ended())
+        };
+        if ended { self.drained = true; }
+
         let sec = ms / 1000;
         if sec != self.told_lag_s {
             self.told_lag_s = sec;
-            let dropped = core::mem::take(&mut v.dropped);
-            let shown = core::mem::take(&mut v.shown_count);
             // Gemeldet wird, was ERKLAERT: ein verworfenes Bild ist das, was
             // das Auge sieht, auch wenn die Uhr stimmt. Und die zwei Zeiten
-            // daneben sagen, WOHIN die Sekunde ging — ohne sie waere jede
-            // Antwort darauf geraten.
+            // daneben sagen, WOHIN die Sekunde ging.
             if dropped > 0 || lag > 150 {
                 let mut m = alloc::string::String::from("[tune] ");
                 push_u32(&mut m, shown);
@@ -446,13 +489,15 @@ impl Tune {
             self.sec_commit_ms = 0;
             self.sec_decoded = 0;
         }
-        if v.ended() {
-            self.drained = true;
-        }
     }
 
     /// Decode ahead until the mailbox holds `TARGET_LEAD_MS`. Runs between
     /// event polls, so each visit does a little and returns.
+    ///
+    /// Bei einem Film mit Ton ist das der Weg, der die UHR fuellt: der Bildweg
+    /// folgt ihr, also darf sie nicht leerlaufen. `drained` faellt deshalb
+    /// hier und im Bildweg unabhaengig — ein Film endet, wenn BEIDE fertig
+    /// sind, nicht wenn einer es ist.
     fn pump(&mut self) {
         if !self.playing || self.src.is_none() { return; }
         if !self.sink.flush() { return; }   // ring still full from last time
@@ -464,7 +509,7 @@ impl Tune {
                 None => 0,
             };
             if n == 0 {
-                self.drained = true;
+                if self.video.is_none() { self.drained = true; }
                 break;
             }
             self.sink.push(block, n, channels);
@@ -472,47 +517,72 @@ impl Tune {
         }
     }
 
-    fn toggle(&mut self) {
-        if self.video.is_some() {
-            self.playing = !self.playing;
-            // Die Wanduhr laeuft weiter, also wird beim Fortsetzen der
-            // Nullpunkt nachgezogen statt die Pause mitgezaehlt.
-            if self.playing { self.video_t0 = host::ticks() - self.video_ms; }
-            return;
+    /// Die Zeit, der das Bild folgt. Mit Ton ist es der Ton, sonst die Wand.
+    fn clock_ms(&self, has_audio: bool, now: i64) -> i64 {
+        if has_audio {
+            self.sink.played_frames_now() as i64 * 1000 / sink::MIX_RATE as i64
+                - self.audio_priming_ms
+        } else {
+            now - self.video_t0
         }
-        if self.src.is_none() { self.load(true); return; }
-        self.playing = !self.playing;
-        if self.playing {
-            // Without this the first tick after a pause charges the whole
-            // paused stretch to the speaker and reports a phantom underrun.
-            self.sink.resume(host::ticks());
-            return;
-        }
-        // Pausing drops the buffered lead, so sound stops where the display
-        // says it stopped instead of playing on for another half second —
-        // and the decoder is rewound to exactly there, so resuming repeats
-        // nothing. Seeking already does all of that.
-        let at = self.position_ms();
-        self.seek_to_ms(at);
     }
 
-    fn seek_to_ms(&mut self, ms: u64) {
-        if let Some(v) = self.video.as_mut() {
-            // Ein Dekoder faengt nur an einem Synchronbild an; was
-            // zurueckkommt, ist die Stelle, die es wirklich geworden ist.
-            let landed = v.seek(ms as i64);
-            self.video_ms = landed;
-            self.video_t0 = host::ticks() - landed;
-            self.drained = false;
+    fn toggle(&mut self) {
+        if self.src.is_none() && self.video.is_none() { self.load(true); return; }
+        self.playing = !self.playing;
+        if self.playing {
+            if self.src.is_some() {
+                // Without this the first tick after a pause charges the whole
+                // paused stretch to the speaker and reports a phantom underrun.
+                self.sink.resume(host::ticks());
+            } else {
+                // Die Wanduhr lief weiter, also wird der Nullpunkt
+                // nachgezogen statt die Pause mitgezaehlt.
+                self.video_t0 = host::ticks() - self.video_ms;
+            }
             return;
         }
-        let rate = self.info_rate() as u64;
-        let landed = match self.src.as_mut() {
-            Some(s) => s.seek(ms * rate / 1000),
-            None => return,
-        };
-        let at48 = landed * sink::MIX_RATE as u64 / rate.max(1);
-        self.sink.restart(self.info_rate(), host::ticks(), at48);
+        // Pausieren mit Ton heisst: den Vorlauf wegwerfen. Sonst spielt der
+        // Ring noch eine halbe Sekunde weiter, waehrend das Bild steht — und
+        // beim Fortsetzen waere er doppelt zu hoeren. Springen tut genau das.
+        if self.src.is_some() {
+            let at = self.position_ms();
+            self.seek_to_ms(at);
+        }
+    }
+
+    /// Auf `ms` der PRAESENTATIONS-Achse springen — beide Stroeme.
+    ///
+    /// Der Ton bestimmt, wo es wirklich hingeht (er kann auf jeden Rahmen),
+    /// und das Bild folgt auf sein naechstes Synchronbild davor. Andersherum
+    /// waere der Ton an einer Stelle, an der das Bild noch nichts zeigt.
+    fn seek_to_ms(&mut self, ms: u64) {
+        let mut at = ms as i64;
+
+        if self.src.is_some() {
+            let rate = self.info_rate().max(1) as u64;
+            // Der Vorlauf gehoert dazugerechnet: die Praesentationsachse
+            // faengt NACH ihm an, die Rahmen der Spur davor.
+            let src_frame =
+                ((ms as i64 + self.audio_priming_ms).max(0) as u64) * rate / 1000;
+            let landed = match self.src.as_mut() {
+                Some(s) => s.seek(src_frame),
+                None => 0,
+            };
+            let at48 = landed * sink::MIX_RATE as u64 / rate;
+            self.sink.restart(rate as u32, host::ticks(), at48);
+            at = (landed as i64 * 1000 / rate as i64) - self.audio_priming_ms;
+        }
+
+        if let Some(v) = self.video.as_mut() {
+            let landed = v.seek(at);
+            self.video_ms = landed;
+            self.video_t0 = host::ticks() - landed;
+            // Nach einem Sprung ist die Schlange leer — erst wieder Vorrat
+            // anlegen, sonst ruckelt genau die Stelle, auf die man gezeigt
+            // hat.
+            self.video_buffering = true;
+        }
         self.drained = false;
     }
 
@@ -794,7 +864,16 @@ fn read_home_dir() -> String {
 /// Was die Ordnerliste annimmt. Ton UND Bewegtbild, an einer Stelle, damit
 /// ein neues Format nicht an zwei Orten nachgetragen werden muss.
 fn is_media(name: &str) -> bool {
-    source::is_audio(name) || video::is_video(name)
+    // `.m4a` ist MP4 mit Tonspur und ohne Bild — derselbe Demuxer, also
+    // gehoert es hierher und nicht in eine dritte Liste.
+    let lower = {
+        let mut s = String::with_capacity(name.len());
+        for c in name.chars() { s.push(c.to_ascii_lowercase()); }
+        s
+    };
+    source::is_audio(name)
+        || video::is_video(name)
+        || [".m4a", ".aac"].iter().any(|e| lower.ends_with(e))
 }
 
 fn list_media(dir: &str) -> Vec<Track> {

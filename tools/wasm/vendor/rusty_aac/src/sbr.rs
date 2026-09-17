@@ -37,7 +37,6 @@
 //! pretending otherwise.
 
 
-use alloc::vec::Vec;
 #[allow(unused_imports)]
 use crate::mathshim::Float;
 

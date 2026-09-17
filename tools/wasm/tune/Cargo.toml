@@ -1,6 +1,6 @@
 [package]
 name = "tune"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "tune — audio player for nopeekOS."
 
@@ -18,6 +18,8 @@ nanomp3 = "0.1"
 # forge nicht uebersetzt, trappt).
 rusty_h264-decoder = { path = "../vendor/rusty_h264-decoder", default-features = false, features = ["libm"] }
 rusty_h264-common  = { path = "../vendor/rusty_h264-common",  default-features = false, features = ["libm"] }
+# AAC. Ebenfalls vendort und nach no_std portiert — siehe ../vendor/VENDOR.md.
+rusty_aac = { path = "../vendor/rusty_aac", default-features = false }
 
 [dependencies.postcard]
 version = "1.0"
