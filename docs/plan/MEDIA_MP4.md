@@ -183,12 +183,14 @@ doppelt so viele Pixel wie 1080p, und die Leiter sagte, schon 1080p sei
 nicht zu schaffen. Fenster vergroessern, skalieren, Arbeitsflaeche wechseln:
 laeuft weiter.
 
-**Was daran falsch war, laesst sich eingrenzen, aber noch nicht aufteilen.**
-1440p30 sind 110,6 Mpx/s, und derselbe Dekoder schafft auf dem Ryzen skalar
-841 Mpx/s (auf genau dieser Datei gemessen). Also ist **forge x Geraet
-zusammen hoechstens 7,6x**, nicht die 11,8x, mit denen die Tabelle gerechnet
-hat. Welcher der beiden Faktoren daneben liegt, ist NICHT gemessen; der
-Verdacht ist forge:
+**Der Faktor ist inzwischen GEMESSEN: 5,8x, nicht 11,8x.** Dieselbe Datei
+host-seitig 3,8 ms je Bild, am Geraet 22 ms — und beide Zahlen stammen aus
+demselben Material, nicht aus einer fremden Last. Die erste Schranke
+(„hoechstens 7,6x") aus Florians fluessigem 1440p-Lauf stimmt damit und war
+nur grob.
+
+Welcher der beiden Teilfaktoren daneben lag, ist weiterhin nicht
+aufgeteilt; der Verdacht bleibt forge:
 
 > **3,4-3,9x ist an beaks Box-Layout gemessen** — Zeigerjagd, Allokation,
 > dichte Aufrufe. Ein Dekoder ist das Gegenteil: lange arithmetische
@@ -217,8 +219,27 @@ viele Bilder hintereinander. Ein Schnitt ist EIN teures Bild und wird von
 der Reihenfolge-Warteschlange schon geschluckt; eine Ueberblendung ist eine
 Kette.
 
-Gebaut daraus (tune 0.2.4): **Vorlauf beim Dekodieren**, 1000 ms, gedeckelt
-auf 128 MB. Die 1000 kommen aus den gemessenen 647, nicht aus dem Bauch; der
+**Und was die Szene wirklich kostet, ist ausgerechnet** (tune 0.4.3):
+
+```text
+  normal      3,8 ms/Bild host -> 22,0 ms Geraet ->  660 ms je Sekunde Inhalt
+  Sekunde 36 11,2 ms/Bild host -> 64,8 ms Geraet -> 1945 ms -> 945 ms fehlen
+  Sekunde 37  7,5 ms/Bild host -> 43,4 ms Geraet -> 1303 ms -> 303 ms fehlen
+                                                     Defizit  1248 ms
+```
+
+Und es sind BITS, nicht Pixel: 27,7 statt 8 KB je Bild in der Szene. Der
+Stufenprofiler des Dekoders zeigt keinen Ausreisser, sondern alles
+gleichmaessig teurer — Entropie 14 %, Deblocking 15-17 %, und `dpb-clone`
+mit 5 % ist in beiden Szenen identisch. **Es gibt dort keinen billigen
+Faktor 3.**
+
+Der Puffer muss das Defizit decken, und das ist eine Zahl: 1248 ms. Ein
+1440p-Bild in I420 sind 5,27 MB, also braucht es 48 Bilder = 256 MB. Mit
+192 MB waren es 1200 ms — achtundvierzig Millisekunden zu wenig.
+
+Gebaut daraus (tune 0.2.4, nachgezogen bis 0.4.3): **Vorlauf beim
+Dekodieren**, 1500 ms, gedeckelt auf 256 MB. Die 1000 kommen aus den gemessenen 647, nicht aus dem Bauch; der
 Bytedeckel ist der, der bei 1440p wirklich greift (23 Bilder = 775 ms), und
 er steht in Bytes, weil ein Deckel nach Bildern bei jeder Aufloesung etwas
 anderes kostet. Gefuellt wird nur, wenn die billigen Szenen davor Zeit

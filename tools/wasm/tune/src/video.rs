@@ -76,16 +76,29 @@ const TARGET_LEAD_MS: i64 = 1500;
 /// file, which is the same mistake as sizing a buffer by item count anywhere
 /// else. So the lead is whichever comes first.
 ///
-/// **Und es war der Deckel, der wirklich griff.** Bei 1440p sind 128 MB nur
-/// 23 Bilder, also 775 ms — weniger als das gemessene Loch von 700 ms plus
-/// Reserve. Die Zeitgrenze stand auf 1000 und kam nie zum Zug.
+/// **Und es ist der Deckel, der wirklich greift** — zweimal in Folge zu
+/// knapp, und beide Male nachgerechnet statt geraten.
 ///
-/// 192 MB sind bei 1440p rund 34 Bilder (1,15 s) und bei 1080p mehr, als die
-/// Zeitgrenze zulaesst. Das ist viel Speicher, und es ist der Preis dafuer,
-/// dass eine Ueberblendung nicht sichtbar wird; belegt wird er nur, wenn die
-/// billigen Szenen davor Zeit uebrig hatten, und er schrumpft mit der
-/// Aufloesung von selbst.
-const MAX_QUEUE_BYTES: usize = 192 * 1024 * 1024;
+/// Das Defizit der Tag/Nacht-Ueberblendung, Sekunde fuer Sekunde aus der
+/// host-seitigen Messung (3,8 ms je Bild normal, 11,2 in der Szene) mal dem
+/// Geraetefaktor 5,8, den Florians Log gegen dieselbe Datei hergibt:
+///
+/// ```text
+///   Sekunde 36:  30 Bilder x 64,8 ms = 1945 ms fuer 1000 ms Inhalt -> 945 ms fehlen
+///   Sekunde 37:  30 Bilder x 43,4 ms = 1303 ms                     -> 303 ms fehlen
+///                                                            Summe   1248 ms
+/// ```
+///
+/// Ein 1440p-Bild in I420 sind 5,27 MB. 192 MB reichten damit fuer 36 Bilder
+/// = **1200 ms** — achtundvierzig Millisekunden zu wenig, und die Zeitgrenze
+/// von 1500 kam nie zum Zug. 256 MB sind 48 Bilder = 1600 ms; ab da bindet
+/// die Zeit und nicht der Speicher, und das ist die richtige Reihenfolge.
+///
+/// Es ist viel Speicher, und es ist der Preis dafuer, dass eine Ueberblendung
+/// nicht sichtbar wird. Belegt wird er nur, wenn die billigen Szenen davor
+/// Zeit uebrig hatten, und er schrumpft mit der Aufloesung von selbst: bei
+/// 1080p sind dieselben 256 MB mehr, als die Zeitgrenze zulaesst.
+const MAX_QUEUE_BYTES: usize = 256 * 1024 * 1024;
 
 /// Ab wieviel Vorrat das ZEIGEN vor dem Dekodieren kommt.
 ///
