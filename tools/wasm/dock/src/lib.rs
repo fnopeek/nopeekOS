@@ -210,7 +210,17 @@ const DASH_H: u16 = 2;
 /// Tile + gap + dash → the cell column's height.
 const DOCK_HEIGHT: i32 = 50;
 const CELL_FOOTPRINT: i32 = 36; // tile + inter-cell gap
-const SIDE_PADDING: i32 = 24;
+/// Waagrechte Polsterung IM Tray — Platz fuer den Eckbogen der Pille.
+/// Gerechnet, nicht geschaetzt: die engste Stelle verlangt 4,8 px (siehe
+/// `render`), 12 lassen 7,2 px Luft.
+const TRAY_PAD_X: u16 = 12;
+/// Senkrechte Polsterung. Sie setzt die Tray-Hoehe (40 + 2x4 = 48) und
+/// damit den Pill-Radius (24). Nicht anfassen, ohne die Rechnung in
+/// `render` neu zu machen.
+const TRAY_PAD_Y: u16 = 4;
+/// Fensterbreite = Zellen + dies. Traegt jetzt auch die zwei mal
+/// `TRAY_PAD_X`, sonst nimmt der Bogen den Zellen ihren Platz weg.
+const SIDE_PADDING: i32 = 24 + 2 * TRAY_PAD_X as i32;
 /// Approximate compositor `DOCK_BOTTOM_GAP * scale` (kernel default is 12,
 /// HiDPI scale 2× → 24). Subtracted from the expanded window height so
 /// the visible bottom gap is preserved when a menu is open.
@@ -318,8 +328,8 @@ impl Dock {
         ));
         cells.push(Widget::Spacer { flex: 1 });
 
-        // The tray: a rounded SurfaceElevated pill holding the icons.
-        // Padding::Xs (4 px) on all sides bumps the Row's intrinsic height
+        // The tray: a SurfaceElevated pill holding the icons.
+        // TRAY_PAD_Y (4 px) top and bottom bumps the Row's intrinsic height
         // from (icon+OnHover-pad) = 40 to a full 48 px → matches DOCK_HEIGHT
         // in the idle window AND keeps the visible tray the same size when
         // the menu-expand wraps it in a bottom-anchored Column (whose Spacer
@@ -331,8 +341,29 @@ impl Dock {
             align:     Align::Center,
             modifiers: alloc::vec![
                 Modifier::Background(Token::SurfaceElevated),
-                Modifier::Rounded(Radius::Lg.as_u8()),
-                Modifier::Padding(Padding::Xs.as_u16()),
+                // Pill = ganz rund: der Rasterer klemmt den Radius auf
+                // `min(w/2, h/2)`, bei 48 px Hoehe also echte Halbkreise.
+                Modifier::Rounded(Radius::Pill.as_u8()),
+                // Waagrecht MEHR als senkrecht, und das ist der Punkt.
+                //
+                // Der Eckbogen frisst waagrechten Platz, und am meisten
+                // nicht ganz oben, sondern dort, wo der Bogen der Pille
+                // und der Bogen der Kachel gegeneinander laufen.
+                // Ausgerechnet fuer 48 px Tray und eine 34er Kachel mit
+                // Radius 9: die engste Stelle liegt bei y = 6,4 px und
+                // verlangt **4,8 px**. Mit den 4 px von vorher schnitte
+                // die Pille 0,8 px in die erste und letzte Kachel — beim
+                // Hover-Highlight sichtbar.
+                //
+                // Heute stehen dort zufaellig ~13 px, weil die zwei
+                // flexiblen Abstandhalter die Icons zentrieren. Das ist
+                // ein NEBENPRODUKT: wer ein Icon dazupinnt, verbraucht
+                // den Schlupf, und dann schneidet es doch. Also
+                // ausdruecklich 12 px, unabhaengig von der Zentrierung.
+                //
+                // Senkrecht bleiben es 4: die Hoehe bestimmt den
+                // Pill-Radius, und 48 px sind auch DOCK_HEIGHT.
+                Modifier::PaddingXY { x: TRAY_PAD_X, y: TRAY_PAD_Y },
             ],
         };
 
