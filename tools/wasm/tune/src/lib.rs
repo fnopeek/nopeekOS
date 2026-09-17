@@ -419,39 +419,20 @@ impl Tune {
         self.video_ms = ms;
         let flags = self.video.as_ref().unwrap().colour_flags;
 
-        // Zeigen hat Vorrang, solange Vorrat da ist. Eine Runde, die erst
-        // dekodiert, laesst in ihren 52 ms zwei Bilder faellig werden und
-        // kann nur eines zeigen — gemessen 109 dekodiert gegen 75 gezeigt.
-        let est = self.decode_est_ms;
-        let budget = if self.video.as_ref().unwrap().show_before_decode(ms, est) {
-            0
-        } else {
-            video::PLAY_DECODES
-        };
-
-        let t_dec = host::ticks();
-        {
-            let v = self.video.as_mut().unwrap();
-            v.decode_step(ms, budget);
-        }
-        let took = host::ticks() - t_dec;
-        self.sec_decode_ms += took;
-        if budget > 0 && took > 0 {
-            // Gleitendes Mittel, 1:3 — schnell genug, um einer Ueberblendung
-            // zu folgen, traege genug, um nicht auf einem Ausreisser zu
-            // schwingen.
-            self.decode_est_ms = (self.decode_est_ms * 3 + took) / 4;
-        }
-        self.sec_decoded += self.video.as_mut().unwrap().take_decoded();
-
-        // Die Uhr NEU lesen. Das Dekodieren hat gedauert, und die Bilder,
-        // die inzwischen faellig wurden, sind genau die, die sonst unbemerkt
-        // verfallen. Auch mit Tonuhr: `played_frames_now` liest den Ring.
-        let ms = self.clock_ms(has_audio, host::ticks());
-        self.video_ms = ms;
-
-        let t_com = host::ticks();
+        // ZEIGEN ZUERST, dann dekodieren — und beides in derselben Runde.
+        //
+        // Bis 0.4.5 stand hier eine Wahl: war ein Bild faellig, bekam die
+        // Runde Budget 0. Gemessen am echten Film nahm das **27 % aller
+        // Runden** das Dekodieren weg, obwohl ein Commit nur 3 ms von 33
+        // kostet — und der Vorlauf wurde zum Saegezahn (143 bis 1563 ms)
+        // statt auf seinen 1500 zu stehen. Mit halbem Puffer traf er die
+        // Ueberblendung, und DAS war das Ruckeln: 106 Bilder mehr als eine
+        // Periode zu spaet, ueber vier Sekunden verteilt.
+        //
+        // Umgedreht ist die Frage beantwortet, statt gestellt: das faellige
+        // Bild ist schon auf dem Schirm, wenn die Dekodierung beginnt.
         let mut showed = false;
+        let t_com = host::ticks();
         {
             let v = self.video.as_mut().unwrap();
             if let Some(f) = v.take_due(ms) {
@@ -466,6 +447,30 @@ impl Tune {
             }
         }
         if showed { self.sec_commit_ms += host::ticks() - t_com; }
+
+        // Die Uhr NEU lesen: der Commit hat gedauert, und das Dekodieren
+        // richtet sich nach dem Vorlauf, der seither kleiner ist.
+        let ms = self.clock_ms(has_audio, host::ticks());
+        self.video_ms = ms;
+
+        let t_dec = host::ticks();
+        {
+            let v = self.video.as_mut().unwrap();
+            v.decode_step(ms, video::PLAY_DECODES);
+        }
+        let took = host::ticks() - t_dec;
+        self.sec_decode_ms += took;
+        if took > 0 {
+            // Gleitendes Mittel, 1:3. Es steuert nichts mehr — es steht im
+            // Bericht, und dort sagt es, warum eine Sekunde teuer war.
+            self.decode_est_ms = (self.decode_est_ms * 3 + took) / 4;
+        }
+        self.sec_decoded += self.video.as_mut().unwrap().take_decoded();
+
+        // Und noch einmal die Uhr: die Dekodierung war lang, und der
+        // Rueckstand, den der Bericht gleich nennt, ist der von JETZT.
+        let ms = self.clock_ms(has_audio, host::ticks());
+        self.video_ms = ms;
 
         let (lag, lead, ended) = {
             let v = self.video.as_ref().unwrap();
@@ -1016,7 +1021,7 @@ pub extern "C" fn _start() {
                 // Bild gewartet — die Runde gehoert dann dem Zeigen. Darunter
                 // zaehlt jede Millisekunde fuers Dekodieren.
                 let nap = match (t.playing, t.video.as_ref()) {
-                    (true, Some(v)) if v.may_wait(t.video_ms, t.decode_est_ms) =>
+                    (true, Some(v)) if v.may_wait(t.video_ms) =>
                         v.next_due_in(t.video_ms).clamp(1, TICK_MS as i64) as i32,
                     (true, Some(_)) => 1,
                     (true, None)    => TICK_MS,

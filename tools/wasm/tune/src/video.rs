@@ -100,26 +100,17 @@ const TARGET_LEAD_MS: i64 = 1500;
 /// 1080p sind dieselben 256 MB mehr, als die Zeitgrenze zulaesst.
 const MAX_QUEUE_BYTES: usize = 256 * 1024 * 1024;
 
-/// Ab wieviel Vorrat das ZEIGEN vor dem Dekodieren kommt.
-///
-/// Gemessen an Florians Lauf, 1440p30, Tag/Nacht-Ueberblendung: **109 Bilder
-/// dekodiert, 75 gezeigt** — 45 wurden bezahlt und nie gesehen. Der Grund
-/// ist die Reihenfolge in der Runde: wer erst 52 ms dekodiert und dann EIN
-/// Bild zeigt, laesst in der Zwischenzeit zwei faellig werden und wirft
-/// eines davon weg.
-///
-/// Ein faelliges Bild zu zeigen kostet 3 ms. Liegt genug Vorrat da, gehoert
-/// es also VOR das naechste Dekodieren — dann laeuft die Anzeige weiter mit
-/// voller Rate, und der Vorrat bezahlt dafuer. Genau dafuer ist er da.
-///
-/// Der Boden ist nicht null: unter der Reihenfolge-Tiefe weiss die Schlange
-/// nicht mehr, welches Bild das naechste ist, und dann muss dekodiert
-/// werden, egal was faellig ist.
-const SHOW_FIRST_FLOOR_MS: i64 = 150;
-
-/// Was ein Commit kostet, grob. Er steht neben der Dekodierung in derselben
-/// Runde, also gehoert er in die Frage, ob beides in eine Bildperiode passt.
-const SHOW_COST_MS: i64 = 3;
+// Die Runde ZEIGT zuerst und dekodiert danach — und beides, nicht eines
+// von beidem.
+//
+// Das war bis 0.4.5 zwei Konstanten und zwei Praedikate
+// (`SHOW_FIRST_FLOOR_MS`, `SHOW_COST_MS`, `overloaded`,
+// `show_before_decode`). Sie beantworteten die Frage „zeigen ODER
+// dekodieren", und die Frage war falsch gestellt: ein Commit kostet 3 ms
+// von 33, die anderen 30 gehoeren dem Dekodieren. Gemessen nahm die Regel
+// **27 % aller Runden** ihr Budget, und der Vorlauf wurde zum Saegezahn
+// zwischen 143 und 1563 ms statt auf 1500 zu stehen — womit er die teure
+// Szene mit halbem Puffer traf.
 
 /// Lead to build before the clock starts. Less than the target, because the
 /// rest can be built while playing and nobody wants to wait a second for a
@@ -155,10 +146,6 @@ pub struct Video {
     pub height: u32,
     pub rotation: u16,
     pub duration_ms: u64,
-    /// Abstand zweier Bilder in ms, aus der Sampletabelle. Nicht geraten und
-    /// nicht 1000/30: eine Datei mit 16 oder 23,976 Bildern je Sekunde
-    /// beantwortet dieselbe Frage anders.
-    period_ms: i64,
     /// Flags for `npk_canvas_commit_yuv`: bit 0 = Rec. 709, bit 1 = full range.
     pub colour_flags: i32,
     /// Every sample has been fed. The queue may still hold pictures.
@@ -201,7 +188,6 @@ impl Video {
             height: track.height,
             rotation: track.rotation,
             duration_ms: track.duration_ms(),
-            period_ms: (track.duration_ms() as i64 / track.samples.len().max(1) as i64).max(1),
             colour_flags: (track.colour.bt709 as i32) | ((track.colour.full_range as i32) << 1),
             data,
             track,
@@ -345,43 +331,42 @@ impl Video {
         }
     }
 
-    /// Passt Dekodieren UND Zeigen noch in eine Bildperiode?
-    ///
-    /// Das ist die Frage, an der alles haengt, und nicht „wie voll ist der
-    /// Puffer". Ein Vorrats-Schwellwert mit entgegengesetztem Verhalten auf
-    /// beiden Seiten macht aus sich selbst einen Attraktor: gemessen klebte
-    /// der Vorlauf danach bei exakt 600 ms, statt auf 1500 zu steigen.
-    ///
-    /// Passt es (normal, 22 + 3 gegen 33 ms), gibt es gar keinen Konflikt —
-    /// dann wird dekodiert UND gezeigt, und der Vorrat waechst von selbst.
-    /// Passt es nicht (die Ueberblendung, 55 + 3), muss die Runde sich
-    /// entscheiden, und dann hat das Zeigen Vorrang, solange Vorrat da ist.
-    pub fn overloaded(&self, decode_ms: i64) -> bool {
-        decode_ms + SHOW_COST_MS >= self.period_ms
-    }
-
-    /// Soll diese Runde ans Zeigen gehen statt ans Dekodieren?
-    ///
-    /// `decode_ms` ist, was eine Dekodierung gerade WIRKLICH kostet — der
-    /// Rufer misst es. Die zweite Frage ist nicht „ist etwas faellig",
-    /// sondern „waere etwas faellig, BEVOR diese Dekodierung fertig ist":
-    /// wer das erst hinterher fragt, hat das Bild schon verpasst.
-    pub fn show_before_decode(&self, ms: i64, decode_ms: i64) -> bool {
-        if self.queue.len() <= REORDER { return false; }
-        if self.lead_ms(ms) <= SHOW_FIRST_FLOOR_MS { return false; }
-        self.next_due_in(ms) == 0
-            || (self.overloaded(decode_ms) && self.next_due_in(ms) < decode_ms)
-    }
-
     /// Darf der Rufer schlafen, statt die Runde ans Dekodieren zu geben?
     ///
-    /// Zwei Gruende, und beide heissen „Dekodieren hilft hier nicht": der
-    /// Vorrat ist voll, oder er reicht noch und eine Dekodierung wuerde
-    /// ohnehin ein Bild kosten.
-    pub fn may_wait(&self, ms: i64, decode_ms: i64) -> bool {
+    /// **Nur wenn der Vorrat voll ist, und das ist die ganze Regel.**
+    ///
+    /// Bis 0.4.5 stand hier eine zweite Bedingung — „ueberlastet, aber es
+    /// ist noch Vorrat da, also hat das Zeigen Vorrang" —, dazu ein
+    /// `show_before_decode`, das der Runde ihr Dekodierbudget nahm, sobald
+    /// ein Bild faellig war. Die Beobachtung dahinter stimmte (eine Runde,
+    /// die 57 ms dekodiert, laesst zwei Bilder faellig werden und kann nur
+    /// eines zeigen); der Schluss war falsch, und er kostete **27 % aller
+    /// Runden**, die nicht dekodierten, obwohl sie es gekonnt haetten.
+    ///
+    /// Nachgerechnet am echten Film — 1625 Bilder, Kosten je Bild aus
+    /// `<tools>/mediabench`, echte pts aus dem Container:
+    ///
+    /// ```text
+    ///   Politik                 gezeigt  verworfen  SPAET  max Rueckstand
+    ///   immer dekodieren           1542         83      0           33 ms
+    ///   zwei Runden auslassen      1570         55     62          487 ms
+    ///   Zeigen hat Vorrang         1580         45    106          916 ms
+    /// ```
+    ///
+    /// **Wer das Dekodieren auslaesst, tauscht gezeigte gegen SPAETE Bilder**
+    /// — und ein spaetes Bild ist genau das, was man sieht: das Bild bleibt
+    /// stehen und springt. Ein verworfenes sieht man nicht. Die Bildrate
+    /// faellt in der Ueberblendung so oder so; die Frage ist nur, ob sie
+    /// glatt faellt.
+    ///
+    /// Die andere Haelfte der Antwort steht beim Rufer: die Runde ZEIGT
+    /// zuerst und dekodiert danach. Damit ist die Frage, die
+    /// `show_before_decode` stellen wollte, schon beantwortet, wenn sie
+    /// gestellt wuerde.
+    pub fn may_wait(&self, ms: i64) -> bool {
         self.stocked(ms)
-            || (self.overloaded(decode_ms) && self.lead_ms(ms) > SHOW_FIRST_FLOOR_MS)
     }
+
 
     /// Ist der Vorrat voll? Nur dann darf der Rufer schlafen.
     ///
