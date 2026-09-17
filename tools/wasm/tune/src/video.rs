@@ -62,6 +62,11 @@ const TARGET_LEAD_MS: i64 = 1000;
 /// billigen Szenen davor Zeit uebrig hatten.
 const MAX_QUEUE_BYTES: usize = 128 * 1024 * 1024;
 
+/// Lead to build before the clock starts. Less than the target, because the
+/// rest can be built while playing and nobody wants to wait a second for a
+/// three-second clip.
+const PREROLL_MS: i64 = 400;
+
 pub struct Video {
     data: &'static [u8],
     track: mp4::Track,
@@ -201,6 +206,12 @@ impl Video {
         let mut budget = MAX_DECODES_PER_CALL;
         self.fill(ms, &mut budget);
 
+        // Ausgeben kostet KEIN Budget, und das ist der Punkt: ein spaetes
+        // Bild wegzuwerfen ist ein `remove` und kein Dekodieren. Stand hier
+        // ein Budgetabbruch, gab ein Aufruf genau EIN Bild heraus, waehrend
+        // die Uhr um die Aufrufdauer weiterlief — die Schlange wuchs hinten
+        // und das Bild kroch vorne. Am Geraet sah das aus wie „677 ms
+        // Rueckstand bei 256 ms Vorlauf", also wie ein Widerspruch.
         let mut advanced = false;
         while let Some(&(pts, _)) = self.queue.first() {
             if pts > ms { break; }
@@ -212,9 +223,10 @@ impl Video {
                 .saturating_sub(f.y.len() + f.u.len() + f.v.len());
             self.shown = Some((pts, f));
             advanced = true;
-            self.fill(ms, &mut budget);
-            if budget == 0 { break; }
         }
+        // Erst danach nachfuellen: was die Ausgabe eben geleert hat, wird
+        // mit dem uebrigen Budget wieder aufgefuellt.
+        self.fill(ms, &mut budget);
         if advanced { self.shown.as_ref().map(|(_, f)| f) } else { None }
     }
 
@@ -229,6 +241,16 @@ impl Video {
             *budget -= 1;
             if !self.feed_one() { break; }
         }
+    }
+
+    /// Enough decoded to start without stumbling.
+    ///
+    /// Playback used to begin the moment the file opened, with nothing in
+    /// the queue — measured at the device: 207 ms behind with 26 ms of lead.
+    /// The first second is the one stretch where the decoder has no head
+    /// start at all, so it is the one stretch where waiting is free.
+    pub fn primed(&self, ms: i64) -> bool {
+        self.lead_ms(ms) >= PREROLL_MS || self.fed_all
     }
 
     /// Picture time the queue reaches beyond `ms`. Zero means the decoder is
