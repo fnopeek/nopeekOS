@@ -946,6 +946,12 @@ const TICK_MS: i32 = 10;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
+    // Die Version ZUERST, vor allem anderen. Ohne sie sagt ein Log nicht,
+    // welchen Bau er misst — und eine Messung aus dem falschen Bau ist
+    // schlimmer als keine. Konkret passiert 2026-09-17: ein Lauf, der
+    // Zeile fuer Zeile mit dem vorigen identisch war, und keine Zeile im
+    // Log, die das haette entscheiden koennen.
+    log(concat!("[tune] version ", env!("CARGO_PKG_VERSION")));
     let mut t = Tune::new();
     commit_scene(&t);      // window appears before the first fetch
     let autoplay = t.opened_with_file;
