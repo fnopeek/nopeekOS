@@ -34,6 +34,9 @@ pub struct Sink {
     out_sent:  usize,
     /// 48 kHz frames handed to the mailbox since the last resync.
     submitted: u64,
+    /// Wanduhrzeit der letzten Ring-Lesung — der Anker, von dem aus
+    /// `played_frames_at` interpoliert.
+    anchor_ms: i64,
     /// Stand beim letzten `restart`. Die Uhr darf nicht darunter fallen:
     /// direkt nach einem Sprung ist der Ring leer, und `submitted - unheard`
     /// laege 85 ms VOR der Stelle, auf die gesprungen wurde.
@@ -62,6 +65,7 @@ impl Sink {
             out_sent: 0,
             submitted: 0,
             base: 0,
+            anchor_ms: 0,
             played: 0,
             last_ms: 0,
             underruns: 0,
@@ -82,6 +86,7 @@ impl Sink {
         self.submitted = at_frame_48k;
         self.base = at_frame_48k;
         self.played = at_frame_48k;
+        self.anchor_ms = now_ms;
         self.last_ms = now_ms;
     }
 
@@ -104,54 +109,65 @@ impl Sink {
     /// das Bild 85 ms vor dem Ton laufen.
     const HDA_RING_FRAMES: u64 = 16_384 / 4;
 
+    /// Wie oft der Ring gefragt wird. Er korrigiert die Drift, und dafuer
+    /// reichen zehn Lesungen je Sekunde: der Takt der Karte und die Wanduhr
+    /// laufen um ppm auseinander, also um Mikrosekunden in 100 ms.
+    ///
+    /// Die Zahl ist nicht Sparsamkeit. `npk_audio_buffered` nimmt
+    /// `SLOTS.lock()`, und dieselbe Sperre haelt der Treiber auf einem
+    /// anderen Kern, waehrend er 2048 Rahmen mischt.
+    const ANCHOR_EVERY_MS: i64 = 100;
+
     /// Advance the play clock. `playing` false freezes it, which is what
     /// makes a pause hold its position.
     ///
-    /// **Die Quelle ist der RING, nicht die Wanduhr.** Was noch im Ring
-    /// liegt, ist noch nicht gehoert; `submitted` minus das ist die Zahl.
-    /// Die Wanduhr bleibt als Rueckfall, wenn kein Schlitz offen ist — sie
-    /// ist eine Schaetzung und driftet gegen den Takt der Karte, und ueber
-    /// einen Film sieht man das.
+    /// Zwei Quellen mit klarer Aufgabenteilung: die **Wanduhr** schiebt
+    /// zwischen den Lesungen, der **Ring** faengt sie regelmaessig wieder
+    /// ein. Allein taugt keine — die Wanduhr driftet ueber einen Film, und
+    /// der Ring kostet bei jeder Lesung eine fremde Sperre.
     pub fn tick(&mut self, now_ms: i64, playing: bool) {
         let dt = (now_ms - self.last_ms).max(0) as u64;
         self.last_ms = now_ms;
         if !playing { return; }
 
+        // Zwischen zwei Ankern: schieben.
+        self.played = (self.played + dt * MIX_RATE as u64 / 1000).min(self.submitted);
+
+        if now_ms - self.anchor_ms < Self::ANCHOR_EVERY_MS { return; }
         let ring = host::audio_buffered(self.slot);
-        if ring >= 0 {
-            let unheard = ring as u64 / 4 + Self::HDA_RING_FRAMES;
-            let played = self.submitted.saturating_sub(unheard).max(self.base);
-            // Ein LEERER Ring, obwohl wir spielen, ist ein Aussetzer — und
-            // genau das, was die Wanduhr frueher nur raten konnte.
-            if ring == 0 && self.submitted > 0 && played >= self.submitted {
+        if ring < 0 {
+            // Kein Schlitz — dann bleibt nur die Wanduhr, und ein Ueberholen
+            // des Eingespeisten IST der Aussetzer.
+            if self.played >= self.submitted && self.submitted > 0 {
                 self.underruns = self.underruns.saturating_add(1);
             }
-            self.played = played;
             return;
         }
-
-        self.played += dt * MIX_RATE as u64 / 1000;
-        if self.played > self.submitted {
-            // We promised the speaker more than we delivered: the ring ran
-            // dry. Say so — an underrun that only shows as a click is a
-            // measurement we threw away.
-            self.played = self.submitted;
+        self.anchor_ms = now_ms;
+        let unheard = ring as u64 / 4 + Self::HDA_RING_FRAMES;
+        // Ein LEERER Ring, obwohl wir spielen, ist ein Aussetzer — und genau
+        // das, was die Wanduhr frueher nur raten konnte.
+        if ring == 0 && self.submitted > self.base {
             self.underruns = self.underruns.saturating_add(1);
         }
+        self.played = self.submitted.saturating_sub(unheard).max(self.base);
     }
 
-    /// Gehoerte Rahmen, JETZT aus dem Ring gelesen.
+    /// Gehoerte Rahmen zum Zeitpunkt `now_ms` — **ohne Wirtsaufruf.**
     ///
-    /// `played_frames` gibt den Stand des letzten `tick`. Wer zwischen zwei
-    /// Ticks eine Zeit braucht — der Bildweg tut das, zwischen Dekodieren
-    /// und Zeigen —, bekommt hier eine frische. Ohne das stuende die Uhr
-    /// waehrend einer Dekodierung still, und genau das hat in 0.3.0 schon
-    /// einmal jedes zweite Bild gekostet.
-    pub fn played_frames_now(&self) -> u64 {
-        let ring = host::audio_buffered(self.slot);
-        if ring < 0 { return self.played; }
-        let unheard = ring as u64 / 4 + Self::HDA_RING_FRAMES;
-        self.submitted.saturating_sub(unheard).max(self.base)
+    /// Der Ring ist der ANKER, die Wanduhr interpoliert dazwischen. Das ist
+    /// nicht Bequemlichkeit, sondern gemessen: `npk_audio_buffered` nimmt
+    /// `SLOTS.lock()`, und dieselbe Sperre haelt der Treiber auf einem
+    /// anderen Kern, waehrend er 2048 Rahmen mischt. Drei Lesungen je Tick
+    /// haben den Vorlauf des Bildwegs von 850 auf 150 ms gedrueckt — die
+    /// Kapazitaet ging ins Warten.
+    ///
+    /// Die Wanduhr driftet gegen den Takt der Karte; das ist egal, solange
+    /// der naechste Anker sie wieder einfaengt. Genau deshalb ist sie
+    /// zwischen zwei Ankern richtig und ueber einen Film falsch.
+    pub fn played_frames_at(&self, now_ms: i64) -> u64 {
+        let dt = (now_ms - self.last_ms).max(0) as u64;
+        (self.played + dt * MIX_RATE as u64 / 1000).min(self.submitted)
     }
 
     /// 48 kHz frames buffered ahead of the speaker.

@@ -453,17 +453,23 @@ impl Tune {
         }
         if showed { self.sec_commit_ms += host::ticks() - t_com; }
 
-        let (lag, lead, dropped, shown, ended) = {
-            let v = self.video.as_mut().unwrap();
-            (ms - v.shown_ms(), v.lead_ms(ms),
-             core::mem::take(&mut v.dropped), core::mem::take(&mut v.shown_count),
-             v.ended())
+        let (lag, lead, ended) = {
+            let v = self.video.as_ref().unwrap();
+            (ms - v.shown_ms(), v.lead_ms(ms), v.ended())
         };
         if ended { self.drained = true; }
 
         let sec = ms / 1000;
         if sec != self.told_lag_s {
             self.told_lag_s = sec;
+            // ERST HIER leeren. Beim Umbau auf die Tonuhr standen die beiden
+            // `take` eine Ebene zu weit aussen und liefen bei JEDEM Tick —
+            // die Meldung zaehlte dann einen Tick statt einer Sekunde und
+            // sagte „1 Bilder, 1 verworfen", egal was lief.
+            let (dropped, shown) = {
+                let v = self.video.as_mut().unwrap();
+                (core::mem::take(&mut v.dropped), core::mem::take(&mut v.shown_count))
+            };
             // Gemeldet wird, was ERKLAERT: ein verworfenes Bild ist das, was
             // das Auge sieht, auch wenn die Uhr stimmt. Und die zwei Zeiten
             // daneben sagen, WOHIN die Sekunde ging.
@@ -520,7 +526,7 @@ impl Tune {
     /// Die Zeit, der das Bild folgt. Mit Ton ist es der Ton, sonst die Wand.
     fn clock_ms(&self, has_audio: bool, now: i64) -> i64 {
         if has_audio {
-            self.sink.played_frames_now() as i64 * 1000 / sink::MIX_RATE as i64
+            self.sink.played_frames_at(now) as i64 * 1000 / sink::MIX_RATE as i64
                 - self.audio_priming_ms
         } else {
             now - self.video_t0
