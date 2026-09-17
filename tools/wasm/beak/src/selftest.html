@@ -67,6 +67,16 @@
  <span id="fresh">Frischer Kasten ungeprueft</span>
 </p>
 <p>
+ <!-- Die Ereignisarten der BEDIENUNG. Gemessen ueber zwoelf Korpusseiten
+      meldet `keydown` auf 11 von 12 an, `input` auf 8
+      (docs/plan/BROWSER_INPUT_EVENTS.md) — und bis 0.186.0 kannte beak nur
+      die Basis `Event`. Geprueft wird die KETTE (instanceof), die Felder und
+      dass `preventDefault` auf einem abbrechbaren Ereignis ankommt. -->
+ <input id="kbdfeld" value="">
+ <span id="kbdev">Ereignisarten ungeprueft</span>
+ <span id="mausev">Mausereignis ungeprueft</span>
+</p>
+<p>
  <button id="b2" onclick="say('inline', 'inline-onclick lief')">onclick-Attribut</button>
  <span id="inline">nicht geklickt</span>
 </p>
@@ -826,6 +836,41 @@ document.getElementById("b1").addEventListener("click", function () {
   host.appendChild(neu);
   var fw2 = Math.round(neu.getBoundingClientRect().width);
   var ow2 = neu.offsetWidth;
+  var kf = document.getElementById("kbdfeld");
+  var gesehen = [];
+  kf.addEventListener("keydown", function(e){
+    gesehen.push("kd:" + e.key + "/" + e.code + "/" + e.keyCode + "/" + e.which
+      + (e.shiftKey ? "/shift" : "") + (e instanceof KeyboardEvent ? "/kbd" : "")
+      + (e instanceof UIEvent ? "/ui" : "") + (e instanceof Event ? "/ev" : "")
+      + (e.getModifierState("Shift") ? "/mod" : ""));
+    if (e.key === "x") { e.preventDefault(); }
+  });
+  kf.addEventListener("input", function(e){
+    gesehen.push("in:" + e.data + "/" + e.inputType
+      + (e instanceof InputEvent ? "/inp" : "") + (e.cancelable ? "/CANCEL" : "/ok"));
+  });
+  // Der Klick traegt seinen ORT. Bis 0.186.0 war er eine nackte `Event`, und
+  // `e.clientX` war `undefined` — eine falsche Antwort, keine fehlende.
+  var mausfeld = document.getElementById("b1");
+  mausfeld.addEventListener("click", function(e){
+    var gut = (typeof e.clientX === "number") && (typeof e.pageX === "number")
+              && e.button === 0 && e.detail === 1 && (e instanceof MouseEvent);
+    say("mausev", gut
+      ? "Mausereignis stimmt: " + Math.round(e.clientX) + "," + Math.round(e.clientY)
+        + " · Taste " + e.button + " · MouseEvent"
+      : "NEIN: clientX=" + e.clientX + " pageX=" + e.pageX + " button=" + e.button
+        + " detail=" + e.detail + " mouse=" + (e instanceof MouseEvent));
+  });
+  var kd = new KeyboardEvent("keydown", { key: "x", code: "KeyX", keyCode: 88,
+                                          shiftKey: true, bubbles: true, cancelable: true });
+  var abgebrochen = !kf.dispatchEvent(kd);
+  kf.dispatchEvent(new InputEvent("input", { data: "x", inputType: "insertText", bubbles: true }));
+  var soll = "kd:x/KeyX/88/88/shift/kbd/ui/ev/mod|in:x/insertText/inp/ok";
+  var ist = gesehen.join("|");
+  say("kbdev", (ist === soll && abgebrochen)
+    ? "Ereignisarten stimmen: " + ist + " · preventDefault kam an"
+    : "NEIN: " + ist + (abgebrochen ? "" : " · preventDefault kam NICHT an"));
+
   say("fresh", (fw2 === 240 && ow2 === 240)
     ? "Frischer Kasten stimmt: " + fw2 + " breit, sofort gemessen"
     : "NEIN: frisch eingehaengt meldet " + fw2 + "/" + ow2 + " statt 240");

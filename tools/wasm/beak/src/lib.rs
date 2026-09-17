@@ -446,6 +446,13 @@ struct Doc {
     geom: Option<alloc::rc::Rc<alloc::vec::Vec<beak_engine::layout::ElemRect>>>,
     /// Das Sichtfeld, das die JS-Sitzung dieses Dokuments zuletzt gehoert hat.
     last_vp: (i32, i32),
+    /// Rollstand und Fenstermass, wie sie der SEITE zuletzt gemeldet wurden.
+    ///
+    /// Getrennt von `scroll_y`/`last_vp`: die sagen, was gemalt wird, diese
+    /// sagen, was die Seite WEISS. Ohne den Unterschied faellt `scroll` bei
+    /// jedem Bild oder gar nicht.
+    told_scroll: i32,
+    told_vp: (i32, i32),
 
     // ── Die Nebenabrufe DIESES Dokuments ────────────────────────────────
     // Bilder, Hintergruende, Schriften, `fetch`: alles, was NEBEN dem
@@ -538,6 +545,7 @@ impl Doc {
             find_pending: [0; 4], find_pending_len: 0,
             nav_css_count: 0, nav_scripts: None, js: None, nav_js_count: 0, nav_mod_entries: None, nav_mod_want: None, nav_mod_rounds: 0, nav_css_urls: None, nav_css_parts: None, nav_css_want: None, nav_css_rounds: 0, nav_sheet_nodes: None, nav_sheet_rounds: 0, nav_dynjs_nodes: None, nav_dynjs_rounds: 0,
             dirty: true, need_full: true, images_dirty: false, geom: None, last_vp: (0, 0),
+            told_scroll: 0, told_vp: (0, 0),
             img_job: -1, img_job_srcs: None, img_missed: Vec::new(),
             cssimg_job: -1, cssimg_job_keys: None,
             font_job: -1, font_want: None, fetch_jobs: Vec::new(),
@@ -897,6 +905,12 @@ struct Page {
     nav: u32,
     /// Stand des Baums, aus dem `forms` gebaut wurde.
     scripted: u64,
+    /// Der Wert des fokussierten Feldes, als es den Fokus BEKAM.
+    ///
+    /// `change` faellt bei einem Textfeld nicht je Zeichen, sondern beim
+    /// Verlassen — und nur, wenn sich wirklich etwas geaendert hat (HTML
+    /// §4.10.5.5). Ohne diesen Wert waere „geaendert" nicht zu beantworten.
+    focus_value: Option<String>,
     /// Fingerabdruck des zuletzt GEMELDETEN Bestands.
     ///
     /// `sync` laeuft nach jedem Skriptlauf und nach jedem Beobachter-Rueckruf,
@@ -910,7 +924,8 @@ struct Page {
 impl Page {
     fn new() -> Page {
         Page { forms: forms::Forms { forms: Vec::new(), controls: Vec::new() },
-               state: FormState::default(), nav: 0, scripted: 0, logged: 0 }
+               state: FormState::default(), nav: 0, scripted: 0, logged: 0,
+               focus_value: None }
     }
     /// Das Formularmodell nachziehen — nach einer Navigation ODER nachdem
     /// Skripte den Baum ersetzt haben.
@@ -3181,8 +3196,14 @@ fn dispatch_click(engine: &Engine, page: &mut Page, lay: &Layout, cx: i32, cy: i
     });
     if !doc.has_listeners && !on_label { return false; }
     let t0 = now_ms();
+    // **Mit dem ORT.** `cx`/`cy` kommen als Fenster-x und Dokument-y herein
+    // (`cy` hat den Rollstand schon drin); `client*` will beides
+    // fensterbezogen, `page*` beides dokumentbezogen. Waagrecht rollt beak
+    // nicht, also sind die zwei x gleich.
+    let sy = scroll_y() as f64;
     let prevented = matches!(
-        beak_engine::js::dombind::dispatch(&mut sess.interp, "click", &nodes), Ok(true));
+        beak_engine::js::dombind::dispatch_at(&mut sess.interp, "click", &nodes,
+            Some((cx as f64, cy as f64 - sy, cx as f64, cy as f64))), Ok(true));
     let timers = sess.interp.run_timers();
     sync_cookies(sess);
     sync_history(engine, sess);
@@ -4969,11 +4990,95 @@ fn utf8_feed(pending: &mut [u8; 4], len: &mut u8, b: u8) -> Option<char> {
 
 /// Apply one key to the focused control. Returns true if the page must be
 /// re-laid-out (the control's painted text or caret changed).
+
+/// Wie eine Taste in der Sprache der Seite heisst: `key` (der WERT), `code`
+/// (der ORT auf der Tastatur) und die Altlast `keyCode`.
+///
+/// Drei Namen und nicht einer, weil Seiten alle drei lesen: React und
+/// modernes JS `key`, Tastaturkuerzel `code` (der ueberlebt ein anderes
+/// Layout), und der ganze Altbestand `keyCode`/`which`. Wer nur `key`
+/// liefert, laesst die Haelfte der Behandler ins Leere greifen.
+fn key_names(key: KeyCode, pending: bool) -> Option<(String, String, u32, bool)> {
+    let s = |a: &str| String::from(a);
+    Some(match key {
+        // Ein halbes UTF-8-Zeichen ist noch keine Taste — es wird gemeldet,
+        // wenn es vollstaendig ist.
+        KeyCode::Char(_) if pending => return None,
+        KeyCode::Char(b' ') => (s(" "), s("Space"), 32, false),
+        KeyCode::Char(b) if b >= 0x20 && b != 0x7F && b < 0x80 => {
+            let c = b as char;
+            let code = if c.is_ascii_alphabetic() {
+                alloc::format!("Key{}", c.to_ascii_uppercase())
+            } else if c.is_ascii_digit() {
+                alloc::format!("Digit{c}")
+            } else { s("") };
+            // `keyCode` ist der GROSSBUCHSTABE, auch wenn klein getippt wird —
+            // die Altlast kennt keine Schreibweise, nur die Taste.
+            (alloc::format!("{c}"), code, c.to_ascii_uppercase() as u32,
+             c.is_ascii_uppercase())
+        }
+        // Alles ab 0x80 ist ein fertiges Zeichen aus `utf8_feed`; sein `code`
+        // haengt am Layout, das wir nicht kennen, also bleibt er leer.
+        KeyCode::Char(_) => (s(""), s(""), 0, false),
+        KeyCode::Backspace => (s("Backspace"), s("Backspace"), 8, false),
+        KeyCode::Delete => (s("Delete"), s("Delete"), 46, false),
+        KeyCode::Enter => (s("Enter"), s("Enter"), 13, false),
+        KeyCode::Escape => (s("Escape"), s("Escape"), 27, false),
+        KeyCode::Left => (s("ArrowLeft"), s("ArrowLeft"), 37, false),
+        KeyCode::Right => (s("ArrowRight"), s("ArrowRight"), 39, false),
+        KeyCode::Up => (s("ArrowUp"), s("ArrowUp"), 38, false),
+        KeyCode::Down => (s("ArrowDown"), s("ArrowDown"), 40, false),
+        KeyCode::Home => (s("Home"), s("Home"), 36, false),
+        KeyCode::End => (s("End"), s("End"), 35, false),
+        KeyCode::PageUp => (s("PageUp"), s("PageUp"), 33, false),
+        KeyCode::PageDown => (s("PageDown"), s("PageDown"), 34, false),
+        KeyCode::Tab => (s("Tab"), s("Tab"), 9, false),
+        _ => return None,
+    })
+}
+
+/// Ein Ereignis der Bedienung an die Seite geben und die Runde zu Ende
+/// fahren.
+///
+/// **Die Runde gehoert dazu.** Ein Behandler, der `fetch` anstoesst oder ein
+/// `setTimeout` legt — und das tut jede Vorschlagsliste —, braucht die
+/// Microtasks und die Zeitgeber, sonst liegt seine Arbeit bis zum naechsten
+/// Ereignis still. Der Rueckgabewert sagt, ob die Seite ABGEBROCHEN hat.
+fn fire_ui(engine: &Engine, f: impl FnOnce(&mut beak_engine::js::interp::Interp) -> bool) -> bool {
+    let Some(sess) = js_session() else { return false };
+    arm_script_budget();
+    let prevented = f(&mut sess.interp);
+    let _ = sess.interp.run_timers();
+    sync_cookies(sess);
+    sync_history(engine, sess);
+    sync_scroll(sess);
+    drain_console(sess);
+    if sess.interp.doc.as_ref().is_some_and(|d| d.dirty) {
+        if let Some(d) = sess.interp.doc.as_mut() {
+            engine.set_scripted_dom(Some(d.to_dom()));
+        }
+        bump_content_gen("ui-event");
+        mark_dirty();
+    }
+    prevented
+}
+
 fn edit_key(engine: &Engine, page: &mut Page, key: KeyCode) -> bool {
     let (seq, kind, mut value) = match page.focused() {
         Some((c, v)) => (c.seq, c.kind, v.to_string()),
         None => return false,
     };
+    // **`keydown` ZUERST, und sein Abbruch gilt.** So filtert jedes
+    // Eingabefeld der Welt Zeichen (UI Events §5.4). Ohne diese Zeile glaubt
+    // eine Seite, sie haette verhindert, und der Tastendruck kommt trotzdem
+    // an — das waere schlimmer als gar keine Zustellung.
+    if let Some((k, code, kc, shift)) = key_names(key, page.state.pending_len > 0) {
+        if fire_ui(engine, |ip| {
+            beak_engine::js::dombind::dispatch_key(ip, "keydown", seq, &k, &code, kc, shift)
+        }) {
+            return true;
+        }
+    }
     if !kind.is_text() {
         // Space / Enter activate a button or toggle a box, like a browser.
         return match key {
@@ -4982,13 +5087,16 @@ fn edit_key(engine: &Engine, page: &mut Page, key: KeyCode) -> bool {
                 true
             }
             KeyCode::Escape => {
-                page.state.focus = None;
+                set_focus(engine, page, None);
                 true
             }
             _ => false,
         };
     }
     let mut caret = page.state.caret.min(value.len());
+    // Was eingefuegt wurde — `InputEvent.data`. Bei einer Loeschung `None`,
+    // und das ist kein Platzhalter: die Spezifikation sagt dort `null`.
+    let mut typed: Option<String> = None;
     match key {
         // **Nicht mehr nur ASCII.** `0x20..0x7F` hiess woertlich: auf einer
         // Deutschschweizer Tastatur laesst sich kein `ä` in ein Formular
@@ -4997,7 +5105,11 @@ fn edit_key(engine: &Engine, page: &mut Page, key: KeyCode) -> bool {
         // LATIN-1 und machte aus dem Fuehrungsbyte 0xC3 ein `Ã`.
         KeyCode::Char(b) if b >= 0x20 && b != 0x7F => {
             match utf8_feed(&mut page.state.pending, &mut page.state.pending_len, b) {
-                Some(ch) => { value.insert(caret, ch); caret += ch.len_utf8(); }
+                Some(ch) => {
+                    value.insert(caret, ch);
+                    caret += ch.len_utf8();
+                    typed = Some(alloc::format!("{ch}"));
+                }
                 // Folge noch nicht vollstaendig: nichts tun, nichts malen.
                 None => return false,
             }
@@ -5022,7 +5134,7 @@ fn edit_key(engine: &Engine, page: &mut Page, key: KeyCode) -> bool {
         KeyCode::Home => caret = 0,
         KeyCode::End => caret = value.len(),
         KeyCode::Escape => {
-            page.state.focus = None;
+            set_focus(engine, page, None);
             return true;
         }
         KeyCode::Enter => {
@@ -5049,7 +5161,121 @@ fn edit_key(engine: &Engine, page: &mut Page, key: KeyCode) -> bool {
     // Baumknoten gilt weiter. Er ist die Bruecke, ueber die `sync` den Wert
     // zurueckholt, und nebenbei das, was ein Behandler der Seite liest.
     push_control_values(page);
+    // **Und jetzt sagen, dass sich etwas geaendert hat.** Der Wert steht
+    // schon im Knoten — ein Behandler, der `e.target.value` liest, bekommt
+    // ihn also. `input` blast und ist NICHT abbrechbar; daran haengt jede
+    // Vorschlagsliste, jeder Live-Filter, jeder Zeichenzaehler des Webs.
+    let (itype, data) = match key {
+        KeyCode::Backspace => ("deleteContentBackward", None),
+        KeyCode::Delete => ("deleteContentForward", None),
+        _ => ("insertText", typed.clone()),
+    };
+    fire_ui(engine, |ip| {
+        beak_engine::js::dombind::dispatch_input_event(ip, "input", seq, itype, data.as_deref())
+    });
+    if let Some((k, code, kc, shift)) = key_names(key, false) {
+        fire_ui(engine, |ip| {
+            beak_engine::js::dombind::dispatch_key(ip, "keyup", seq, &k, &code, kc, shift)
+        });
+    }
     true
+}
+
+/// Den Fokus wechseln — und es der Seite sagen.
+///
+/// **Ein Weg, nicht sieben Zuweisungen.** `focus`/`blur` blasen NICHT,
+/// `focusin`/`focusout` schon (UI Events §5.2), und Seiten benutzen beide:
+/// wer am Formular lauscht statt am Feld, hoert nur das zweite. Dazu faellt
+/// hier `change` — bei einem Textfeld beim VERLASSEN und nur, wenn sich der
+/// Wert seit dem Fokussieren geaendert hat (HTML §4.10.5.5), nicht je Zeichen.
+fn set_focus(engine: &Engine, page: &mut Page, next: Option<u32>) {
+    let prev = page.state.focus;
+    if prev == next { return }
+    if let Some(old) = prev {
+        let now = page.forms.get(old).map(|c| page.state.value(c).to_string());
+        let changed = page.forms.get(old).is_some_and(|c| c.kind.is_text())
+            && now != page.focus_value;
+        if changed {
+            fire_ui(engine, |ip| {
+                beak_engine::js::dombind::dispatch_seq(ip, "change", old)
+            });
+        }
+        fire_ui(engine, |ip| {
+            beak_engine::js::dombind::dispatch_focus(ip, "blur", old, next)
+        });
+        fire_ui(engine, |ip| {
+            beak_engine::js::dombind::dispatch_focus(ip, "focusout", old, next)
+        });
+    }
+    page.state.focus = next;
+    page.focus_value = next
+        .and_then(|n| page.forms.get(n).map(|c| page.state.value(c).to_string()));
+    if let Some(new) = next {
+        fire_ui(engine, |ip| {
+            beak_engine::js::dombind::dispatch_focus(ip, "focus", new, prev)
+        });
+        fire_ui(engine, |ip| {
+            beak_engine::js::dombind::dispatch_focus(ip, "focusin", new, prev)
+        });
+    }
+}
+
+/// `mousedown`/`mouseup` am Ort des Zeigers.
+///
+/// Gemessen melden acht von zwoelf Korpusseiten `mousedown` an — mehr als
+/// `input`. Ein `click` allein reicht ihnen nicht: wer ein Menue beim
+/// Druecken oeffnet und beim Loslassen waehlt, sieht sonst nur die Mitte.
+fn dispatch_mouse_edge(engine: &Engine, lay: &Layout, kind: &'static str, cx: i32, cy: i32) {
+    let Some(sess) = js_session() else { return };
+    if !sess.interp.doc.as_ref().is_some_and(|d| d.has_listeners) { return }
+    let chain = lay.element_chain(cx, cy);
+    if chain.is_empty() { return }
+    let Some(doc) = sess.interp.doc.as_ref() else { return };
+    let nodes: Vec<u32> = chain.iter().filter_map(|s| doc.by_seq(*s)).collect();
+    if nodes.is_empty() { return }
+    let sy = scroll_y() as f64;
+    fire_ui(engine, move |ip| {
+        matches!(beak_engine::js::dombind::dispatch_at(ip, kind, &nodes,
+            Some((cx as f64, cy as f64 - sy, cx as f64, cy as f64))), Ok(true))
+    });
+}
+
+/// `scroll` und `resize` an die Seite melden — nach dem Bild, nicht waehrend.
+///
+/// **Nur bei Aenderung, und deshalb mit eigenem Gedaechtnis.** `scroll_y`
+/// sagt, wohin gemalt wird; `told_scroll`, was die Seite zuletzt gehoert hat.
+/// Ohne den Unterschied faellt das Ereignis je Bild (60/s, und jede Seite mit
+/// einem Sticky-Kopf rechnet dann dauernd) oder nie.
+///
+/// Gemessen ueber die zwoelf Korpusseiten: `resize` meldet auf 10 von 12 an,
+/// `scroll` auf 9 (`docs/plan/BROWSER_INPUT_EVENTS.md`).
+fn fire_viewport_events(engine: &Engine) {
+    let sy = scroll_y();
+    let vp = canvas_rect().map(|(_, _, w, h)| (w, h)).unwrap_or((0, 0));
+    let scrolled = sy != doc().told_scroll;
+    let resized = vp != doc().told_vp && doc().told_vp != (0, 0);
+    if !scrolled && !resized { doc_mut().told_vp = vp; return }
+    doc_mut().told_scroll = sy;
+    doc_mut().told_vp = vp;
+    // Nur wenn ueberhaupt jemand zuhoert — sonst kostet jedes Rollen einen
+    // Durchlauf durch die Maschine, fuer nichts.
+    if !js_session().is_some_and(|s| s.interp.doc.as_ref().is_some_and(|d| d.has_listeners)) {
+        return;
+    }
+    if scrolled {
+        fire_ui(engine, |ip| {
+            let Some(d) = ip.doc.as_ref() else { return false };
+            let doc_node = d.doc;
+            matches!(beak_engine::js::dombind::dispatch(ip, "scroll", &[doc_node]), Ok(true))
+        });
+    }
+    if resized {
+        fire_ui(engine, |ip| {
+            let Some(d) = ip.doc.as_ref() else { return false };
+            let doc_node = d.doc;
+            matches!(beak_engine::js::dombind::dispatch(ip, "resize", &[doc_node]), Ok(true))
+        });
+    }
 }
 
 /// Click / keyboard activation of a control: submit, toggle, or take focus.
@@ -5060,14 +5286,14 @@ fn activate(engine: &Engine, page: &mut Page, seq: u32) {
     };
     match kind {
         ControlKind::Submit => {
-            page.state.focus = Some(seq);
+            set_focus(engine, page, Some(seq));
             submit_form(engine, page, Some(seq));
         }
         ControlKind::Reset => {
             page.state.reset();
         }
         ControlKind::Checkbox | ControlKind::Radio => {
-            page.state.focus = Some(seq);
+            set_focus(engine, page, Some(seq));
             let f = &page.forms;
             page.state.toggle(f, seq);
             // Derselbe Grund wie beim Tippen: der Haken gehoert in den Baum,
@@ -5075,14 +5301,14 @@ fn activate(engine: &Engine, page: &mut Page, seq: u32) {
             push_control_values(page);
         }
         ControlKind::Select => {
-            page.state.focus = Some(seq);
+            set_focus(engine, page, Some(seq));
             let f = &page.forms;
             page.state.cycle_select(f, seq);
             push_control_values(page);
         }
         _ => {
             // A text field takes focus with the caret at the end.
-            page.state.focus = Some(seq);
+            set_focus(engine, page, Some(seq));
             page.state.caret = page.forms.get(seq).map(|c| page.state.value(c).len()).unwrap_or(0);
         }
     }
@@ -5380,6 +5606,7 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
                         // `preventDefault`, ist der Klick verbraucht — sonst
                         // wuerde beak zusaetzlich dem Link folgen, den die Seite
                         // gerade abgefangen hat.
+                        dispatch_mouse_edge(engine, lay, "mousedown", cx, cy);
                         let dispatched = dispatch_click(engine, page, lay, cx, cy);
                         (
                             dispatched,
@@ -5482,6 +5709,14 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
         // Markierung.
         Event::MouseButton { button: MouseButton::Left, down: false, x, y } => {
             doc_mut().sel_anchor = None;
+            // **VOR der Linklogik, und unabhaengig davon.** Ein `mouseup`
+            // faellt auch dort, wo kein Link haengt — ein Schieberegler, der
+            // beim Loslassen einrastet, liegt auf keinem `<a>`.
+            if let Some((rx, ry, _, _)) = canvas_rect() {
+                if let Some((lay, _, _, _)) = cache.as_ref() {
+                    dispatch_mouse_edge(engine, lay, "mouseup", x - rx, y - ry + scroll_y());
+                }
+            }
             let Some((href, px, py)) = doc_mut().pending_link.take() else { return false };
             // Gezogen? Dann war es keine Navigation. Vier Pixel Toleranz,
             // damit eine zitternde Hand noch klickt.
@@ -5956,6 +6191,11 @@ pub extern "C" fn _start() {
             d.css_asked.clear();
         }
         maybe_repaint(engine(), &mut cache, &mut paint_buf, &page.state);
+        // NACH dem Bild: die Seite hoert, was sich bewegt hat. Waehrend
+        // `maybe_repaint` ginge es nicht — dort ist der Zwischenspeicher
+        // veraenderlich geliehen, und ein Behandler, der den Baum aendert,
+        // haette ihn unter dem laufenden Bild weg.
+        fire_viewport_events(engine());
         // Die Schriften, die die Seite mitbringt. NACH dem ersten Auslegen:
         // vorher weiss niemand, welche sie ueberhaupt verlangt.
         if pump_fonts(engine()) {
@@ -6007,7 +6247,16 @@ pub extern "C" fn _start() {
         // wartete auf einen Einstiegspunkt, den es nicht gibt.
         pump_box_observers(engine());
         // JETZT steht die Geometrie — `load` darf fallen.
+        // `pageshow` faellt NACH `load`, einmal je Navigation (HTML §7.11.4).
+        // Eine Seite, die ihren Zustand beim Zurueckkommen aus dem Verlauf
+        // wiederherstellt, haengt daran — und `persisted` ist bei uns immer
+        // `false`, weil beak keinen Seitenzwischenspeicher hat.
         if fire_load(engine(), &page) {
+            if let Some(sess) = js_session() {
+                if let Some(dn) = sess.interp.doc.as_ref().map(|d| d.doc) {
+                    let _ = beak_engine::js::dombind::dispatch(&mut sess.interp, "pageshow", &[dn]);
+                }
+            }
             page.sync(engine());
             if let Some(s) = js_session() { pull_control_values(&mut page, s); }
         }
