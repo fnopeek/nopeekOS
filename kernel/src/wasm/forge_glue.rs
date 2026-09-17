@@ -574,6 +574,15 @@ extern "C" fn f_npk_canvas_commit(vm: *const u64, canvas_id: i32, ptr: i32, len:
     host_core::npk_canvas_commit(mem, ctx, canvas_id, ptr, len, width, height)
 }
 
+extern "C" fn f_npk_canvas_commit_yuv(vm: *const u64, canvas_id: i32, y_ptr: i32,
+                                      u_ptr: i32, v_ptr: i32, ys: i32, cs: i32,
+                                      width: i32, height: i32, flags: i32) -> i32 {
+    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    let (mem, ctx) = unsafe { parts(vm) };
+    host_core::npk_canvas_commit_yuv(mem, ctx, canvas_id, y_ptr, u_ptr, v_ptr,
+                                     ys, cs, width, height, flags)
+}
+
 extern "C" fn f_npk_canvas_rect(vm: *const u64, canvas_id: i32, out_ptr: i32) -> i32 {
     // SAFETY: `vm` ist der vmctx des rufenden Moduls.
     let (mem, ctx) = unsafe { parts(vm) };
@@ -638,6 +647,12 @@ extern "C" fn f_npk_audio_submit(vm: *const u64, slot: i32, ptr: i32, len: i32) 
     // SAFETY: `vm` ist der vmctx des rufenden Moduls.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_audio_submit(mem, ctx, slot, ptr, len)
+}
+
+extern "C" fn f_npk_audio_buffered(vm: *const u64, slot: i32) -> i32 {
+    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    let (_mem, ctx) = unsafe { parts(vm) };
+    host_core::npk_audio_buffered(ctx, slot)
 }
 
 extern "C" fn f_npk_audio_poll_mix(vm: *const u64, ptr: i32, max: i32) -> i32 {
@@ -978,6 +993,7 @@ pub(crate) fn resolve(module: &str, name: &str) -> Option<u64> {
         "npk_clipboard_get" => f_npk_clipboard_get as *const () as u64,
         "npk_scene_commit" => f_npk_scene_commit as *const () as u64,
         "npk_canvas_commit" => f_npk_canvas_commit as *const () as u64,
+        "npk_canvas_commit_yuv" => f_npk_canvas_commit_yuv as *const () as u64,
         "npk_canvas_rect" => f_npk_canvas_rect as *const () as u64,
         "npk_capture_screen" => f_npk_capture_screen as *const () as u64,
         "npk_event_poll" => f_npk_event_poll as *const () as u64,
@@ -989,6 +1005,7 @@ pub(crate) fn resolve(module: &str, name: &str) -> Option<u64> {
         "npk_window_titles" => f_npk_window_titles as *const () as u64,
         "npk_acpi_dsdt" => f_npk_acpi_dsdt as *const () as u64,
         "npk_audio_submit" => f_npk_audio_submit as *const () as u64,
+        "npk_audio_buffered" => f_npk_audio_buffered as *const () as u64,
         "npk_audio_poll_mix" => f_npk_audio_poll_mix as *const () as u64,
         "npk_fs_list" => f_npk_fs_list as *const () as u64,
         "npk_fs_stat" => f_npk_fs_stat as *const () as u64,

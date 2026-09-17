@@ -1664,7 +1664,65 @@ pub(crate) fn npk_canvas_commit(mem: &mut [u8], ctx: &mut HostState, canvas_id: 
         wid, canvas_id as u32, width as u32, height as u32, px) {
         return -1;
     }
-    crate::shade::widgets::rerender_window(wid);
+    crate::shade::widgets::rerender_window_pixels(wid);
+    crate::shade::request_render();
+    0
+}
+
+/// `npk_canvas_commit_yuv(canvas_id, y_ptr, u_ptr, v_ptr, ys, cs, w, h, flags)`
+///
+/// Upload a planar 4:2:0 frame (I420) instead of BGRA. `ys`/`cs` are row
+/// strides in bytes, so a decoder can hand over its padded planes without
+/// repacking them. `flags`: bit 0 = Rec. 709 (else Rec. 601), bit 1 = full
+/// range (else limited/studio).
+///
+/// **Why this exists next to `npk_canvas_commit`:** converting Y′CbCr to
+/// BGRA inside a module costs 145 % of a core at 1080p30 — measured, and
+/// more than decoding the frame. Here the conversion happens in the blit,
+/// natively and only for the pixels that land in the canvas rect, and the
+/// frame crosses the boundary at 1.5 bytes per pixel instead of 4.
+pub(crate) fn npk_canvas_commit_yuv(
+    mem: &mut [u8], ctx: &mut HostState,
+    canvas_id: i32, y_ptr: i32, u_ptr: i32, v_ptr: i32,
+    ys: i32, cs: i32, width: i32, height: i32, flags: i32,
+) -> i32 {
+    let cap_id = ctx.cap_id;
+    if capability::check_global(&cap_id, capability::Rights::CANVAS).is_err() {
+        return -1;
+    }
+    let wid = ctx.widget_window_id;
+    if wid == 0 || width <= 0 || height <= 0 || ys <= 0 || cs <= 0 { return -1; }
+    let (w, h) = (width as u32, height as u32);
+    let (ys, cs) = (ys as usize, cs as usize);
+    let ch = ((h + 1) / 2) as usize;
+
+    // How much of each plane the blit may touch. `canvas::commit_i420`
+    // checks the same thing against the copied Vec; this check is about a
+    // different question — whether the module's own memory holds it.
+    let Some(need_y) = ys.checked_mul(h as usize) else { return -1 };
+    let Some(need_c) = cs.checked_mul(ch) else { return -1 };
+
+    let data = &*mem;
+    let take = |ptr: i32, n: usize| -> Option<alloc::vec::Vec<u8>> {
+        if ptr < 0 { return None; }
+        let start = ptr as usize;
+        let end = start.checked_add(n)?;
+        if end > data.len() { return None; }
+        Some(data[start..end].to_vec())
+    };
+    let (Some(y), Some(u), Some(v)) =
+        (take(y_ptr, need_y), take(u_ptr, need_c), take(v_ptr, need_c))
+        else { return -1 };
+
+    let coding = crate::shade::widgets::canvas::YuvCoding {
+        bt709: flags & 1 != 0,
+        full_range: flags & 2 != 0,
+    };
+    if !crate::shade::widgets::canvas::commit_i420(
+        wid, canvas_id as u32, w, h, y, u, v, ys, cs, coding) {
+        return -1;
+    }
+    crate::shade::widgets::rerender_window_pixels(wid);
     crate::shade::request_render();
     0
 }
@@ -2005,6 +2063,24 @@ pub(crate) fn npk_audio_submit(mem: &mut [u8], _ctx: &mut HostState, slot: i32, 
     let (start, end) = (ptr as usize, ptr as usize + len as usize);
     if end > data.len() { return -1; }
     crate::audio::submit(slot as usize, &data[start..end]) as i32
+}
+
+/// `npk_audio_buffered(slot)` — bytes still sitting in the slot's ring,
+/// or -1 for a closed/invalid slot.
+///
+/// **This is the play clock.** Without it an app can only estimate what has
+/// been heard from the wall clock (`submitted - elapsed * rate`), and the
+/// wall clock and the audio crystal drift apart. For music nobody notices;
+/// for lipsync over a film the error accumulates, which is why every player
+/// that shows pictures makes the audio output its master clock.
+///
+/// Ungated and without an ownership check, exactly like `npk_audio_submit`
+/// and `npk_audio_close` next to it — the audio slots have no owner today.
+/// That is a gap worth its own decision, not one to half-close here: a read
+/// that is stricter than the write beside it buys nothing.
+pub(crate) fn npk_audio_buffered(_ctx: &mut HostState, slot: i32) -> i32 {
+    if slot < 0 { return -1; }
+    crate::audio::buffered(slot as usize) as i32
 }
 
 pub(crate) fn npk_audio_poll_mix(mem: &mut [u8], _ctx: &mut HostState, ptr: i32, max: i32) -> i32 {

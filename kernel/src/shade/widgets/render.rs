@@ -963,7 +963,20 @@ fn paint_node_eff(
                 }
             }
             let drawn = super::canvas::with_bitmap(wid, cid, |px, w, h| {
-                rast.canvas_blit(target, px, w, h, rect, zoom, pan);
+                match px {
+                    super::canvas::Pixels::Bgra(b) => {
+                        rast.canvas_blit(target, b, w, h, rect, zoom, pan);
+                    }
+                    // Planar 4:2:0 converts inside the blit, at destination
+                    // size. See `canvas.rs` for why it is not converted on
+                    // the way in.
+                    super::canvas::Pixels::I420 { y, u, v, ys, cs, coding } => {
+                        let p = super::abi::I420Ref {
+                            y, u, v, ys: *ys, cs: *cs, coeffs: coding.coeffs(),
+                        };
+                        rast.canvas_blit_i420(target, &p, w, h, rect, zoom, pan);
+                    }
+                }
             }).is_some();
             if !drawn {
                 rast.rect(target, rect, Fill::Solid(Token::SurfaceMuted));
