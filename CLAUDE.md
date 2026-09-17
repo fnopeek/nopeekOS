@@ -48,7 +48,27 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-17 · beak 0.186.0 · Kernel 0.340.0** (Rest: `git log`)
+**Stand 2026-09-17 · beak 0.186.1 · Kernel 0.340.0** (Rest: `git log`)
+
+**0.186.1: aus dem Geraetelauf — eine Zeile, die FEHLTE, und ein Name, der das
+Geraet verliess.** Florians Lauf von 0.186.0: `fresh` und `kbdev` gruen, also
+tragen der Relayout-Haken und die Ereignisarten am Geraet. **`mausev` sagte
+gar nichts** — und das war mein Testfehler, nicht der Code: die Zeile meldete
+ihren Lauscher IM Klickhandler von `b1` an, also genau in dem Ereignis, dessen
+Felder sie messen wollte. Host-seitig war sie trotzdem gruen, weil der Laeufer
+`b1` ZWEIMAL klickt; am Geraet klickt ein Finger einmal. **Eine gruene Zeile,
+die eine Wiederholung braucht, ist nicht gruen.** Jetzt oben angemeldet.
+Dazu: `dns: beak: gibt es nicht` stand im Log, weil `kommt-nie.png` relativ zu
+`beak:selftest` aufgeloest `beak` zum RECHNERnamen macht — eine eingebaute
+Seite holt jetzt gar nichts mehr aus dem Netz. Ein erfundener Name, der an den
+Aufloeser geht, ist kein Schoenheitsfehler.
+
+**Aus demselben Lauf, gemessen:** der erzwungene Relayout fiel ZWEIMAL in der
+ganzen Sitzung (`relayout: relayout`), der Deckel von vier hat nie gegriffen,
+und ein Layout kostet am Geraet **10-40 ms** auf dieser Seite — `dom::parse`
+und `css::cascade` melden beide **0 ms**, der Blattzwischenspeicher aus
+0.185.0 traegt also. `navigation -> first paint: 130 ms`.
+
 
 **0.186.0: der Wirt stellte VIER Ereignisse zu, und keins davon war eine
 Taste.** Florian: „die orignale duckduckgo seite zeigt bei der suche bereits

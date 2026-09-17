@@ -3378,6 +3378,14 @@ fn begin_images(engine: &mut Engine) -> Vec<String> {
     // `set_url` raeumt sie im Dokument weg, hier faellt der Anstrich nach.
     engine.set_marks(None, Vec::new());
     engine.images_begin();
+    // **Eine eingebaute Seite holt nichts aus dem Netz.** Ihre Bilder stehen
+    // relativ zu `beak:selftest`, und daraus wird beim Aufloesen ein
+    // RECHNERname `beak` — im Geraetelauf vom 2026-09-17 stand woertlich
+    // `dns: beak: gibt es nicht`. Ein erfundener Name, der an den Aufloeser
+    // geht, ist kein Schoenheitsfehler: er verlaesst das Geraet.
+    if selftest::matches(url_str()) {
+        return Vec::new();
+    }
     let mut pending: Vec<String> = Vec::new();
     // The SAME viewport width layout uses: `<picture>`/`srcset` picks its
     // candidate per media query, so fetching at a different width would fetch
