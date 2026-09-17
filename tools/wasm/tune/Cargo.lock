@@ -109,6 +109,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_aac"
+version = "0.5.0"
+dependencies = [
+ "libm",
+ "spin",
+]
+
+[[package]]
 name = "rusty_h264-common"
 version = "0.16.0"
 dependencies = [
@@ -223,11 +231,12 @@ dependencies = [
 
 [[package]]
 name = "tune"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "nanomp3",
  "nopeek_widgets",
  "postcard",
+ "rusty_aac",
  "rusty_h264-common",
  "rusty_h264-decoder",
 ]

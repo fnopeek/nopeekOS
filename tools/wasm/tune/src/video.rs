@@ -144,10 +144,6 @@ pub struct Video {
     fed_all: bool,
 }
 
-pub fn looks_like(d: &[u8]) -> bool {
-    mp4::looks_like(d)
-}
-
 /// Extensions the folder listing accepts as video. Next to [`Video::open`]
 /// so a new container is registered in one place, the same way `is_audio`
 /// sits next to `source::open`.
@@ -170,10 +166,12 @@ pub enum OpenError {
 }
 
 impl Video {
-    pub fn open(data: &'static [u8]) -> Result<Video, OpenError> {
-        let m = mp4::parse(data).ok_or(OpenError::NotMp4)?;
-        if m.fragmented { return Err(OpenError::Fragmented); }
-        let track = m.video.ok_or(OpenError::NoVideo)?;
+    /// `track` muss die Videospur eines bereits geparsten MP4 sein.
+    ///
+    /// Der Container wird EINMAL geparst (siehe `demux`) — vorher tat es
+    /// jede Haelfte fuer sich, und zwei Parser auf derselben Datei sind zwei
+    /// Gelegenheiten, verschiedener Meinung zu sein.
+    pub fn from_track(data: &'static [u8], track: mp4::Track) -> Result<Video, OpenError> {
         if !matches!(track.codec, mp4::Codec::Avc { .. }) || track.samples.is_empty() {
             return Err(OpenError::NoVideo);
         }
@@ -366,13 +364,6 @@ impl Video {
     /// hand to mouth, and the next expensive scene will be visible.
     pub fn lead_ms(&self, ms: i64) -> i64 {
         self.queue.last().map(|(p, _)| p - ms).unwrap_or(0).max(0)
-    }
-
-    /// Das Bild auf dem Schirm, unabhaengig davon, ob es eben gewechselt
-    /// hat — `frame_at` gibt den Borrow zurueck, und der Rufer braucht ihn
-    /// noch einmal, nachdem er die Zeit dazwischen gemessen hat.
-    pub fn current_frame(&self) -> Option<&YuvFrame> {
-        self.shown.as_ref().map(|(_, f)| f)
     }
 
     /// Presentation time of the picture on screen. The gap to the caller's
