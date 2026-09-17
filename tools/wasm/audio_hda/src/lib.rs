@@ -90,9 +90,33 @@ fn widget_type(mmio: i32, cad: u32, nid: u32) -> u32 {
     (get_param(mmio, cad, nid, PARAM_AUDIO_WIDGET_CAP) >> 20) & 0xF
 }
 
-// Unmute the output amp of a widget at (near) max gain.
+/// Unmute the output amp of a widget at (near) max gain — **if it has one.**
+///
+/// Ein Verstaerker-Verb an ein Widget OHNE Verstaerker ist nach Spezifikation
+/// undefiniert, und die beiden Pruefungen hier sind nicht Vorsicht, sondern
+/// der Unterschied zwischen Ton und Stille:
+///
+/// QEMUs Line-Out-Pin meldet `AMP_OUT_CAP = 0` und traegt in seiner
+/// Knotenbeschreibung kein `stindex` — der faellt damit auf 0 zurueck, also
+/// auf DENSELBEN Strom wie der DAC. Ohne die Pruefung rechnet der Code
+/// `steps = 0` -> `gain = 0`, schreibt das Verb trotzdem, und QEMU setzt
+/// damit die Verstaerkung des DAC-Stroms auf null: `left = 0 * 255 / 74`.
+/// Der Treiber stellt den DAC also korrekt ein und loescht ihn eine Zeile
+/// spaeter selbst.
+///
+/// Auf echter Hardware hat der Pin einen eigenen Verstaerker mit Stufen > 0,
+/// also schrieb derselbe Code dort einen sinnvollen Wert — der Fehler war am
+/// Geraet unsichtbar und in QEMU total.
 fn unmute_out(mmio: i32, cad: u32, nid: u32) {
+    // Beides fragen, weil beides unabhaengig „nein" sagen kann: das
+    // Faehigkeitsbit des Widgets und die Stufenzahl seines Verstaerkers.
+    if get_param(mmio, cad, nid, PARAM_AUDIO_WIDGET_CAP) & WCAP_OUT_AMP == 0 {
+        return;
+    }
     let steps = (get_param(mmio, cad, nid, PARAM_AMP_OUT_CAP) >> 8) & 0x7F;
+    if steps == 0 {
+        return;
+    }
     // ~3/4 of max gain — audible but not blasting (real volume control = M4).
     let gain = ((steps * 3 / 4) & 0x7F) as u16;
     codec_cmd(mmio, cad, nid, vset_amp(AMP_SET_OUT_BOTH | gain));

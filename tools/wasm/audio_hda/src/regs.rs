@@ -52,6 +52,10 @@ pub const PARAM_AUDIO_WIDGET_CAP: u32 = 0x09; // [23:20] = widget type
 pub const PARAM_PIN_CAP: u32 = 0x0C; // bit4 = output capable
 pub const PARAM_CONN_LIST_LEN: u32 = 0x0E; // [6:0] len, bit7 long-form
 pub const PARAM_AMP_OUT_CAP: u32 = 0x12; // [14:8] num steps
+/// Widget-Faehigkeit „hat einen Ausgangsverstaerker" (AC_WCAP_OUT_AMP).
+/// Ohne dieses Bit ist ein Amp-Verb an das Widget undefiniert — siehe
+/// `unmute_out`, wo genau das einmal den Ton gekostet hat.
+pub const WCAP_OUT_AMP: u32 = 1 << 2;
 
 // Widget types (from AUDIO_WIDGET_CAP >> 20 & 0xF):
 pub const WTYPE_DAC: u32 = 0x0; // audio output
