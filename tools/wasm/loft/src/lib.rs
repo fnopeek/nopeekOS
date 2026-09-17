@@ -485,7 +485,9 @@ impl Loft {
             "png" => Some("iris".to_string()),
             // Only what tune can actually decode today; a .flac would open
             // a player that can say nothing but "unsupported format".
-            "mp3" | "wav" => Some("tune".to_string()),
+            // Seit tune 0.2.0 auch Bewegtbild — aber nur H.264 in MP4, und
+            // ein fragmentiertes sagt es selbst, statt schwarz zu bleiben.
+            "mp3" | "wav" | "mp4" | "m4v" | "mov" => Some("tune".to_string()),
             _ => None,
         }
     }
@@ -2050,6 +2052,9 @@ fn icon_for(e: &Entry) -> IconId {
         "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "svg" => IconId::Image,
         // The icon says what the file IS, not what we can play yet.
         "mp3" | "wav" | "flac" | "ogg" | "opus" | "m4a" | "aac" => IconId::FileAudio,
+        // Kein eigenes Filmsymbol im Atlas — `Image` ist das naechste, das
+        // stimmt: ein Film ist eine Folge davon.
+        "mp4" | "m4v" | "mov" | "mkv" | "webm" | "avi" => IconId::Image,
         _ => IconId::File,
     }
 }

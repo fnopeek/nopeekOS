@@ -33,8 +33,8 @@ mod host;
 mod mp3;
 // Der Container. Noch nicht verdrahtet — der Spieler kommt als eigener
 // Schnitt; geprüft ist er host-seitig gegen ffmpeg (<tools>/mediabench).
-#[allow(dead_code)]
 mod mp4;
+mod video;
 mod resample;
 mod sink;
 mod source;
@@ -51,7 +51,7 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 // security boundary, and the kernel holds no format knowledge to protect.
 #[unsafe(link_section = ".npk.caps")]
 #[used]
-static NPK_CAPS: [u8; 1] = [caps::READ | caps::RENDER];
+static NPK_CAPS: [u8; 1] = [caps::READ | caps::RENDER | caps::CANVAS];
 
 fn log(msg: &str) { host::log(msg); }
 
@@ -178,6 +178,16 @@ struct Tune {
     shown_s: i64,
     /// Underruns already reported, so a stutter logs once and not per tick.
     told_underruns: u32,
+    /// The video half, when the file has one. `None` is an ordinary audio
+    /// track and every line below behaves exactly as it did before.
+    video: Option<video::Video>,
+    /// Wall-clock tick at which the current video started, so the picture
+    /// time is `now - started`. The audio sink's clock is the better one and
+    /// takes over the moment tune plays a film WITH sound; for a silent file
+    /// there is nothing to synchronise to.
+    video_t0: i64,
+    /// Video time of the last frame handed to the compositor, for the UI.
+    video_ms: i64,
 }
 
 const A_PLAY_PAUSE: u32 = 1;
@@ -193,6 +203,8 @@ const TRACK_BASE:   u32 = 1000;
 /// two thousand rows per second for a clock that moved by one digit. The
 /// window follows the current track; skipping still walks the whole folder.
 const LIST_WINDOW:  usize = 200;
+/// Die eine Leinwand. Eine App darf mehrere haben; ein Spieler zeigt ein Bild.
+const VIDEO_CANVAS: i32 = 0;
 
 impl Tune {
     fn new() -> Tune {
@@ -212,6 +224,9 @@ impl Tune {
             vol: host::get_volume().clamp(0, 100) as u8,
             shown_s: -1,
             told_underruns: 0,
+            video: None,
+            video_t0: 0,
+            video_ms: 0,
         };
 
         let mut argbuf = [0u8; 512];
@@ -242,7 +257,7 @@ impl Tune {
     }
 
     fn refresh(&mut self) {
-        self.files = list_audio(&self.dir);
+        self.files = list_media(&self.dir);
         if self.idx >= self.files.len() { self.idx = 0; }
     }
 
@@ -257,6 +272,8 @@ impl Tune {
     /// starts making noise because it was opened is a rude window.
     fn load(&mut self, play: bool) {
         self.src = None;
+        self.video = None;
+        self.video_ms = 0;
         self.drained = false;
         self.error = None;
         let path = match self.full_path() { Some(p) => p, None => return };
@@ -265,6 +282,27 @@ impl Tune {
             Some(b) => b,
             None => { self.error = Some("cannot read file".to_string()); return; }
         };
+        // Nach INHALT entscheiden, nicht nach Endung — dieselbe Regel, nach
+        // der `source::open` seit je den Tondekoder waehlt.
+        if video::looks_like(bytes) {
+            match video::Video::open(bytes) {
+                Ok(v) => {
+                    self.video_t0 = host::ticks();
+                    self.video = Some(v);
+                    self.playing = play;
+                }
+                // Der Grund gehoert auf den Schirm. „geht nicht" ist bei einem
+                // fragmentierten MP4 eine andere Auskunft als bei einem Codec,
+                // den wir nicht bauen, und nur eine davon ist unser Fehler.
+                Err(video::OpenError::Fragmented) =>
+                    self.error = Some("fragmented MP4 (moof) — not supported".to_string()),
+                Err(video::OpenError::NoVideo) =>
+                    self.error = Some("no H.264 track".to_string()),
+                Err(video::OpenError::NotMp4) =>
+                    self.error = Some("not an MP4".to_string()),
+            }
+            return;
+        }
         if !self.sink.ok() {
             self.error = Some("no free audio slot".to_string());
             return;
@@ -284,11 +322,40 @@ impl Tune {
     /// Play position in ms — what the speaker has reached, not what the
     /// decoder has read.
     fn position_ms(&self) -> u64 {
+        // Ein stummer Film hat keinen Ton, an den er sich haengen koennte:
+        // dort IST die Wanduhr die Uhr. Sobald tune einen Film mit Ton
+        // spielt, uebernimmt der Sink — er zaehlt, was wirklich gehoert
+        // wurde, und der Kristall der Karte laeuft anders als die Wanduhr.
+        if self.video.is_some() { return self.video_ms.max(0) as u64; }
         self.sink.played_frames() * 1000 / sink::MIX_RATE as u64
     }
 
     fn duration_ms(&self) -> u64 {
+        if let Some(v) = self.video.as_ref() { return v.duration_ms; }
         self.src.as_ref().map(|s| s.info().duration_ms()).unwrap_or(0)
+    }
+
+    /// Advance the picture and hand it to the compositor. Called once per
+    /// turn of the loop, like `pump` — decoding a frame costs milliseconds,
+    /// and it belongs where the event loop can see it.
+    fn video_tick(&mut self) {
+        if !self.playing { return; }
+        let now = host::ticks();
+        let ms = now - self.video_t0;
+        let Some(v) = self.video.as_mut() else { return };
+        self.video_ms = ms;
+        if let Some(f) = v.frame_at(ms) {
+            let (ys, cs) = video::Video::strides(f);
+            // Rec. 709, limited range: what every HD encoder writes by
+            // default. The stream's own VUI would be the honest source and
+            // is the next thing to read — until then this is a documented
+            // assumption, not a silent one.
+            host::canvas_commit_yuv(VIDEO_CANVAS, &f.y, &f.u, &f.v, ys, cs,
+                                    f.width as u32, f.height as u32, 1);
+        }
+        if v.ended() {
+            self.drained = true;
+        }
     }
 
     /// Decode ahead until the mailbox holds `TARGET_LEAD_MS`. Runs between
@@ -313,6 +380,13 @@ impl Tune {
     }
 
     fn toggle(&mut self) {
+        if self.video.is_some() {
+            self.playing = !self.playing;
+            // Die Wanduhr laeuft weiter, also wird beim Fortsetzen der
+            // Nullpunkt nachgezogen statt die Pause mitgezaehlt.
+            if self.playing { self.video_t0 = host::ticks() - self.video_ms; }
+            return;
+        }
         if self.src.is_none() { self.load(true); return; }
         self.playing = !self.playing;
         if self.playing {
@@ -330,6 +404,15 @@ impl Tune {
     }
 
     fn seek_to_ms(&mut self, ms: u64) {
+        if let Some(v) = self.video.as_mut() {
+            // Ein Dekoder faengt nur an einem Synchronbild an; was
+            // zurueckkommt, ist die Stelle, die es wirklich geworden ist.
+            let landed = v.seek(ms as i64);
+            self.video_ms = landed;
+            self.video_t0 = host::ticks() - landed;
+            self.drained = false;
+            return;
+        }
         let rate = self.info_rate() as u64;
         let landed = match self.src.as_mut() {
             Some(s) => s.seek(ms * rate / 1000),
@@ -390,7 +473,9 @@ fn render(t: &Tune) -> Widget {
     };
 
     let toolbar = prefab::toolbar(alloc::vec![
-        Widget::Icon { id: IconId::MusicNotes, size: 24, modifiers: Vec::new() },
+        Widget::Icon {
+            id: if t.video.is_some() { IconId::Image } else { IconId::MusicNotes },
+            size: 24, modifiers: Vec::new() },
         head,
         Widget::Spacer { flex: 1 },
         prefab::text_badge(if dur > 0 {
@@ -480,6 +565,19 @@ fn render(t: &Tune) -> Widget {
         modifiers: alloc::vec![Modifier::Flex(1)],
     };
 
+    // Solange ein Film laeuft, bekommt das BILD die Flaeche. Die Liste
+    // waere daneben richtig und hier falsch: sie ist das Groesste in der
+    // Spalte, und ein Video in einer Restzeile ist kein Video.
+    let body = match t.video.as_ref() {
+        Some(v) => Widget::Canvas {
+            id: CanvasId(VIDEO_CANVAS as u32),
+            width: v.width.min(u16::MAX as u32) as u16,
+            height: v.height.min(u16::MAX as u32) as u16,
+            modifiers: alloc::vec![Modifier::Flex(1)],
+        },
+        None => list,
+    };
+
     let right = match t.src.as_ref() {
         Some(s) => {
             let i = s.info();
@@ -490,7 +588,12 @@ fn render(t: &Tune) -> Widget {
                 alloc::format!("{} · {} Hz · {}", i.kind, i.rate, ch)
             }
         }
-        None => String::new(),
+        None => match t.video.as_ref() {
+            Some(v) if v.rotation != 0 =>
+                alloc::format!("H.264 · {}x{} · gedreht {}\u{b0}", v.width, v.height, v.rotation),
+            Some(v) => alloc::format!("H.264 · {}x{}", v.width, v.height),
+            None => String::new(),
+        },
     };
 
     Widget::Column {
@@ -499,7 +602,7 @@ fn render(t: &Tune) -> Widget {
             progress,
             transport,
             Widget::Divider,
-            list,
+            body,
             Widget::Divider,
             prefab::footer(&t.dir, &right),
         ],
@@ -589,14 +692,20 @@ fn read_home_dir() -> String {
     core::str::from_utf8(slice).unwrap_or("home").to_string()
 }
 
-fn list_audio(dir: &str) -> Vec<Track> {
+/// Was die Ordnerliste annimmt. Ton UND Bewegtbild, an einer Stelle, damit
+/// ein neues Format nicht an zwei Orten nachgetragen werden muss.
+fn is_media(name: &str) -> bool {
+    source::is_audio(name) || video::is_video(name)
+}
+
+fn list_media(dir: &str) -> Vec<Track> {
     let buf_ptr = &raw mut LIST_BUF as *mut u8;
     let n = host::fs_list(dir, buf_ptr, LIST_BUF_SIZE);
     let mut out: Vec<Track> = Vec::new();
     if n <= 0 { return out; }
     let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
     for e in nopeek_widgets::fs::list_entries(slice) {
-        if e.is_dir || !source::is_audio(e.name) { continue; }
+        if e.is_dir || !is_media(e.name) { continue; }
         out.push(Track { name: e.name.to_string(), size: e.size });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -648,6 +757,7 @@ pub extern "C" fn _start() {
         let now = host::ticks();
         t.sink.tick(now, t.playing);
         t.pump();
+        t.video_tick();
         if t.sink.underruns != t.told_underruns {
             // A stutter that only shows as a click is a measurement thrown
             // away — the serial mirror gets the count. Checked here and not
@@ -672,7 +782,7 @@ pub extern "C" fn _start() {
             PollResult::Empty => {
                 // The track ends when the mailbox has drained, not when the
                 // decoder ran out — otherwise the last second is cut off.
-                if t.drained && t.playing && t.sink.lead_frames() == 0 {
+                if t.drained && t.playing && (t.video.is_some() || t.sink.lead_frames() == 0) {
                     t.playing = false;
                         if t.files.len() > 1 { t.skip(1); } else { t.seek_to_ms(0); }
                     commit_scene(&t);

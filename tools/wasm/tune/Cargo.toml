@@ -1,6 +1,6 @@
 [package]
 name = "tune"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "tune — audio player for nopeekOS."
 
@@ -13,6 +13,11 @@ nopeek_widgets = { path = "../sdk/widgets", features = ["heap"] }
 # dependencies, no libm — the whole decoder is tables. Measured against
 # ffmpeg on 30 s of real material: correlation 0.9999, max error 2 LSB.
 nanomp3 = "0.1"
+# H.264. Vendort mit genau einem Patch — siehe ../vendor/VENDOR.md, auch
+# dafuer, warum `asm` aus bleiben MUSS (forge kennt kein simd128, und was
+# forge nicht uebersetzt, trappt).
+rusty_h264-decoder = { path = "../vendor/rusty_h264-decoder", default-features = false, features = ["libm"] }
+rusty_h264-common  = { path = "../vendor/rusty_h264-common",  default-features = false, features = ["libm"] }
 
 [dependencies.postcard]
 version = "1.0"

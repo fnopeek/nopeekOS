@@ -24,7 +24,6 @@ struct Cur<'a> {
 
 impl<'a> Cur<'a> {
     fn new(d: &'a [u8]) -> Cur<'a> { Cur { d, p: 0 } }
-    fn at(d: &'a [u8], p: usize) -> Cur<'a> { Cur { d, p } }
     fn left(&self) -> usize { self.d.len().saturating_sub(self.p) }
     fn skip(&mut self, n: usize) -> Option<()> {
         self.p = self.p.checked_add(n)?;
@@ -98,6 +97,11 @@ pub struct Sample {
 pub enum Kind { Video, Audio }
 
 #[derive(Clone)]
+// `Aac`, the four-character code in `Other`, and the audio track's rate and
+// channel count are parsed and not yet read. That is deliberate: they are
+// what the AUDIO half will need, and a container that parses only what today
+// happens to consume is a container that gets re-read later.
+#[allow(dead_code)]
 pub enum Codec {
     /// H.264. `sps`/`pps` come from `avcC` and have to be prepended to the
     /// stream, because in MP4 they live in the header and not in the data.
@@ -110,6 +114,7 @@ pub enum Codec {
     Other([u8; 4]),
 }
 
+#[allow(dead_code)]
 pub struct Track {
     pub kind: Kind,
     pub codec: Codec,
@@ -151,10 +156,6 @@ impl Track {
         (s.pts as i64 - self.edit_start as i64) * 1000 / self.timescale as i64
     }
 
-    pub fn dts_ms(&self, s: &Sample) -> i64 {
-        if self.timescale == 0 { return 0; }
-        (s.dts as i64 - self.edit_start as i64) * 1000 / self.timescale as i64
-    }
 
     /// Index of the last sync sample at or before `ms`. A decoder started
     /// anywhere else produces garbage until the next one.

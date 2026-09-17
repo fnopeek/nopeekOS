@@ -19,6 +19,9 @@ unsafe extern "C" {
     fn npk_audio_submit(slot: i32, ptr: i32, len: i32) -> i32;
     fn npk_audio_set_volume(pct: i32) -> i32;
     fn npk_audio_get_volume() -> i32;
+    fn npk_audio_buffered(slot: i32) -> i32;
+    fn npk_canvas_commit_yuv(canvas_id: i32, y_ptr: i32, u_ptr: i32, v_ptr: i32,
+                             ys: i32, cs: i32, w: i32, h: i32, flags: i32) -> i32;
 }
 
 pub fn scene_commit(bytes: &[u8]) -> i32 {
@@ -49,3 +52,33 @@ pub fn audio_close(slot: i32) { unsafe { let _ = npk_audio_close(slot); } }
 pub fn audio_submit(slot: i32, ptr: i32, len: i32) -> i32 { unsafe { npk_audio_submit(slot, ptr, len) } }
 pub fn set_volume(pct: i32) { unsafe { let _ = npk_audio_set_volume(pct); } }
 pub fn get_volume() -> i32 { unsafe { npk_audio_get_volume() } }
+
+/// Bytes still sitting in the slot's ring.
+///
+/// Unused until tune plays a film WITH sound — then this, not the wall
+/// clock, is what the picture follows. Declared now because it is the one
+/// piece of the A/V-sync design that lives in the kernel and it should be
+/// visible here when someone builds that half. It costs nothing in the
+/// shipped module: with no caller, the import is stripped (checked — it is
+/// NOT in tune.wasm's import list).
+///
+/// The honest play clock: the wall clock and the audio crystal drift apart,
+/// and over a film that shows.
+#[allow(dead_code)]
+pub fn audio_buffered(slot: i32) -> i32 {
+    unsafe { npk_audio_buffered(slot) }
+}
+
+/// Upload a planar 4:2:0 frame. The colour conversion happens in the
+/// compositor, at the size the canvas really has — doing it here would cost
+/// more than decoding the frame (measured: 145 % of a core at 1080p30).
+///
+/// `flags`: bit 0 = Rec. 709, bit 1 = full range.
+pub fn canvas_commit_yuv(canvas_id: i32, y: &[u8], u: &[u8], v: &[u8],
+                         ys: usize, cs: usize, w: u32, h: u32, flags: i32) -> i32 {
+    unsafe {
+        npk_canvas_commit_yuv(canvas_id, y.as_ptr() as i32, u.as_ptr() as i32,
+                              v.as_ptr() as i32, ys as i32, cs as i32,
+                              w as i32, h as i32, flags)
+    }
+}
