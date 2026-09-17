@@ -377,6 +377,13 @@ pub extern "C" fn _start() {
     let mut reports = 5u32;
     let mut pulled: u64 = 0;
     let mut ticks: u32 = 0;
+    // Berichte, die NUR feuern, wenn wirklich Ton durchlief. Die fuenf
+    // Sekundenberichte oben treffen die Stille am Anfang; ein Beep kommt
+    // spaeter und waere sonst nie im Log.
+    let mut loud_reports = 6u32;
+    let mut peak: i32 = 0;
+    let mut wrote: u32 = 0;
+    let mut readback: u32 = 0;
     loop {
         let lpib = (mmio_r32(mmio, base + SD_LPIB) as usize) % RING_BYTES;
         ticks += 1;
@@ -390,6 +397,15 @@ pub extern "C" fn _start() {
             loghex(" gemischt=0x", pulled as u32);
             log("\n");
         }
+        if loud_reports > 0 && peak > 0 {
+            loud_reports -= 1;
+            loghex("[audio_hda] TON: Spitze=0x", peak as u32);
+            loghex(" geschrieben=0x", wrote);
+            loghex(" zurueckgelesen=0x", readback);
+            loghex(" wpos=0x", write_pos as u32);
+            log("\n");
+            peak = 0;
+        }
         loop {
             // Bytes the DMA has played since we last filled (frame-aligned to 4).
             let avail = ((lpib + RING_BYTES - write_pos) % RING_BYTES) & !3;
@@ -398,7 +414,24 @@ pub extern "C" fn _start() {
             let n = avail.min(RING_BYTES - write_pos).min(HALF_BYTES);
             let mix = unsafe { &mut *core::ptr::addr_of_mut!(MIXBUF) };
             audio_poll_mix(&mut mix[..n]);
+            // Lautstaerke des gemischten Blocks: sagt, ob aus der Mailbox
+            // ueberhaupt etwas kommt. Nur jedes achte Sample, das reicht fuer
+            // eine Spitze und kostet ein Achtel.
+            let mut i = 0usize;
+            while i + 1 < n {
+                let v = i16::from_le_bytes([mix[i], mix[i + 1]]) as i32;
+                let a = if v < 0 { -v } else { v };
+                if a > peak { peak = a; }
+                i += 16;
+            }
             dma_write(audio, write_pos as u32, &mix[..n]);
+            // Und zurueckholen, was eben geschrieben wurde. Stimmt das nicht
+            // ueberein, landet `dma_write` nicht dort, wo das Geraet liest —
+            // und dann ist jede Zeile darueber eine Behauptung.
+            if n >= 4 {
+                wrote = u32::from_le_bytes([mix[0], mix[1], mix[2], mix[3]]);
+                readback = dma_read32(audio, write_pos as u32);
+            }
             pulled += n as u64;
             write_pos = (write_pos + n) % RING_BYTES;
         }
