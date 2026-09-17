@@ -76,10 +76,37 @@ const FONT_MAX: u16 = 18;      // line height at 18 ≈ 22 px < BAND_H
 const ICON_DEFAULT: u16 = 18;
 const ICON_MIN: u16 = 12;
 const ICON_MAX: u16 = 20;      // 20 + the readout's 4 px padding = BAND_H
-/// Minimum width of a workspace pill / a trailing icon cell.
+/// Minimum width of a trailing icon cell.
 const CELL_W: u16 = 26;
-/// Corner radius of those cells.
+/// Corner radius of those cells. Bleibt klein: ein Tray-Icon ist
+/// quadratisch, und `Pill` machte daraus einen KREIS.
 const CELL_RADIUS: u8 = 6;
+/// Breite einer Desktop-Zelle. Sie ist groesser als `CELL_W`, und das ist
+/// der ganze Unterschied zwischen einer Pille und einem Kreis: der
+/// Rasterer klemmt `Pill` auf `min(w/2, h/2)`, bei 24 px Bandhoehe also
+/// auf 12. Was davon als GERADE Strecke uebrigbleibt, macht die Form —
+/// 26 px lassen 2 px (ein Kreis), 38 px lassen 14 px (eine Pille).
+const WS_W: u16 = 38;
+/// Seitlicher Abstand der Karte zur Bildschirmkante.
+///
+/// Dieselben 12 px, die der Compositor dem Dock nach unten gibt
+/// (`DOCK_BOTTOM_GAP`) — damit die zwei Pillen zueinander passen. Der
+/// Panel-Streifen bleibt 1920 breit, der Strut aendert sich also nicht;
+/// es aendert sich nur, wo die Karte darin sitzt.
+const SIDE_GAP: u16 = 12;
+/// Senkrechter Abstand. Der Streifen ist 36 px hoch und die Karte braucht
+/// 32 (Band 24 + 2x4), also bleiben genau 2 oben und 2 unten. Mehr ginge
+/// nur, indem der Streifen waechst — und der ist ein Strut, das kostet
+/// Platz fuer die Fenster.
+const TOP_GAP: u16 = 2;
+/// Eckradius der Desktop-Zellen: ganz rund.
+///
+/// Sie sitzen in der Karte, die selbst eine Pille ist (32 px hoch →
+/// Radius 16), mit 4 px Polsterung dazwischen. 16 − 4 = 12, und 12 ist
+/// genau der Radius, den `Pill` hier ergibt: die Boegen sind
+/// KONZENTRISCH, und deshalb braucht die Karte hier keinen Zuschlag,
+/// anders als die Ablage im Dock.
+const WS_RADIUS: u8 = Radius::Pill as u8;
 
 // ── Bump allocator with a reset mark ─────────────────────────────────
 // Config is parsed once (below MARK and kept); the per-frame widget tree
@@ -405,9 +432,9 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
             for i in 0..st.ws_count {
                 let active = i == st.ws_active;
                 let mut mods: Vec<Modifier> = alloc::vec![
-                    Modifier::MinWidth(CELL_W),
+                    Modifier::MinWidth(WS_W),
                     Modifier::MinHeight(BAND_H),
-                    Modifier::Rounded(CELL_RADIUS),
+                    Modifier::Rounded(WS_RADIUS),
                     Modifier::OnClick(ActionId(WS_BASE + i as u32)),
                 ];
                 if active {
@@ -417,9 +444,11 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
                     if !workspace_occupied(i) {
                         mods.push(Modifier::Tint(Token::OnSurfaceFaint));
                     }
+                    // Dieselbe Form wie die Zelle: ein Hover-Rechteck mit
+                    // anderem Radius ist der Fall, der auffaellt.
                     mods.push(Modifier::Hover(alloc::vec![
                         Modifier::Background(Token::SurfaceHover),
-                        Modifier::Rounded(CELL_RADIUS),
+                        Modifier::Rounded(WS_RADIUS),
                     ]));
                 }
                 row.push(cell(
@@ -576,14 +605,35 @@ fn build_tree(seg: &Segments, st: &BarState) -> Widget {
     // is filled at chrome alpha with anti-aliased corners and the
     // compositor composites it by per-pixel alpha — translucent panel,
     // crisp glyphs, no halo.
-    Widget::Stack {
+    let card = Widget::Stack {
         children: alloc::vec![sides, center],
         modifiers: alloc::vec![
             Modifier::Background(Token::SurfaceElevated),
-            Modifier::Border { token: Token::Border, width: 1, radius: Radius::Md.as_u8() },
-            Modifier::Rounded(Radius::Md.as_u8()),
+            // Ganz rund. Der Rasterer klemmt `Pill` auf `min(w/2, h/2)`,
+            // die Karte ist 32 px hoch (Band 24 + 2x4) → Radius 16, also
+            // echte Halbkreise an beiden Enden.
+            //
+            // Rahmen und Fuellung tragen DENSELBEN Wert. Stuenden dort
+            // zwei, liefe der 1-px-Strich neben seiner eigenen Flaeche.
+            Modifier::Border { token: Token::Border, width: 1, radius: Radius::Pill.as_u8() },
+            Modifier::Rounded(Radius::Pill.as_u8()),
             Modifier::Padding(Padding::Xs.as_u16()),
         ],
+    };
+    // Die Karte SCHWEBT im Streifen, statt ihn auszufuellen.
+    //
+    // Ein `Stack` reicht jedem Kind die volle Inhaltsflaeche
+    // (`layout.rs`: `place(c, content, ctx)`), die Polsterung hier ist
+    // also der Rand der Karte: 1920x36 minus 2x12 und 2x2 → 1896x32.
+    //
+    // Die 32 sind nicht nebensaechlich, sie SETZEN den Radius: `Pill`
+    // klemmt auf `min(w/2, h/2)` = 16. Zusammen mit der 4-px-Polsterung
+    // der Karte ergibt 16 − 4 = 12, und 12 ist genau der Radius, den eine
+    // 38x24-Desktopzelle bekommt. Die Boegen sind damit KONZENTRISCH, und
+    // deshalb braucht die Bar keinen waagrechten Zuschlag wie das Dock.
+    Widget::Stack {
+        children: alloc::vec![card],
+        modifiers: alloc::vec![Modifier::PaddingXY { x: SIDE_GAP, y: TOP_GAP }],
     }
 }
 
