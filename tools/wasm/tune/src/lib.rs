@@ -190,6 +190,8 @@ struct Tune {
     video_ms: i64,
     /// Second of playback the lag was last reported for.
     told_lag_s: i64,
+    /// Still filling the queue before the clock starts.
+    video_buffering: bool,
 }
 
 const A_PLAY_PAUSE: u32 = 1;
@@ -230,6 +232,7 @@ impl Tune {
             video_t0: 0,
             video_ms: 0,
             told_lag_s: -1,
+            video_buffering: false,
         };
 
         let mut argbuf = [0u8; 512];
@@ -293,6 +296,7 @@ impl Tune {
                     self.video_t0 = host::ticks();
                     self.video = Some(v);
                     self.playing = play;
+                    self.video_buffering = true;
                 }
                 // Der Grund gehoert auf den Schirm. „geht nicht" ist bei einem
                 // fragmentierten MP4 eine andere Auskunft als bei einem Codec,
@@ -344,8 +348,28 @@ impl Tune {
     fn video_tick(&mut self) {
         if !self.playing { return; }
         let now = host::ticks();
-        let ms = now - self.video_t0;
         let Some(v) = self.video.as_mut() else { return };
+
+        // Vor dem Start erst Vorrat anlegen. Die Uhr wird dabei
+        // MITGEZOGEN statt angehalten — sonst zaehlt die Pufferzeit als
+        // Rueckstand, und die erste Meldung des Laufs waere eine ueber ein
+        // Problem, das gerade behoben wird.
+        if self.video_buffering {
+            self.video_t0 = now - self.video_ms;
+            let flags = v.colour_flags;
+            // Das erste Bild wird dabei schon gezeigt. Ein schwarzer Kasten,
+            // waehrend im Hintergrund gepuffert wird, sieht aus wie ein
+            // Fehler; das stehende erste Bild sieht aus wie das, was es ist.
+            if let Some(f) = v.frame_at(self.video_ms) {
+                let (ys, cs) = video::Video::strides(f);
+                host::canvas_commit_yuv(VIDEO_CANVAS, &f.y, &f.u, &f.v, ys, cs,
+                                        f.width as u32, f.height as u32, flags);
+            }
+            if v.primed(self.video_ms) { self.video_buffering = false; }
+            return;
+        }
+
+        let ms = now - self.video_t0;
         self.video_ms = ms;
         let flags = v.colour_flags;
         if let Some(f) = v.frame_at(ms) {
