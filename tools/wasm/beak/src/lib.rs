@@ -453,6 +453,13 @@ struct Doc {
     /// jedem Bild oder gar nicht.
     told_scroll: i32,
     told_vp: (i32, i32),
+    /// In welcher Haelfte des Blinktakts der Zeiger zuletzt gemalt wurde.
+    /// `None` heisst: es blinkt gerade keiner.
+    caret_phase: Option<bool>,
+    /// Wann der Takt zuletzt zurueckgesetzt wurde. Ein Browser zeigt den
+    /// Zeiger direkt nach einem Tastendruck SOLIDE — wer tippt, will sehen,
+    /// wo er steht, und nicht auf die naechste Halbsekunde warten.
+    caret_since: i64,
 
     // ── Die Nebenabrufe DIESES Dokuments ────────────────────────────────
     // Bilder, Hintergruende, Schriften, `fetch`: alles, was NEBEN dem
@@ -545,7 +552,7 @@ impl Doc {
             find_pending: [0; 4], find_pending_len: 0,
             nav_css_count: 0, nav_scripts: None, js: None, nav_js_count: 0, nav_mod_entries: None, nav_mod_want: None, nav_mod_rounds: 0, nav_css_urls: None, nav_css_parts: None, nav_css_want: None, nav_css_rounds: 0, nav_sheet_nodes: None, nav_sheet_rounds: 0, nav_dynjs_nodes: None, nav_dynjs_rounds: 0,
             dirty: true, need_full: true, images_dirty: false, geom: None, last_vp: (0, 0),
-            told_scroll: 0, told_vp: (0, 0),
+            told_scroll: 0, told_vp: (0, 0), caret_phase: None, caret_since: 0,
             img_job: -1, img_job_srcs: None, img_missed: Vec::new(),
             cssimg_job: -1, cssimg_job_keys: None,
             font_job: -1, font_want: None, fetch_jobs: Vec::new(),
@@ -5164,6 +5171,10 @@ fn edit_key(engine: &Engine, page: &mut Page, key: KeyCode) -> bool {
     }
     page.state.set_value(seq, value);
     page.state.caret = caret;
+    // Der Blinktakt faengt von vorn an: direkt nach einem Tastendruck steht
+    // der Zeiger solide, sonst blinkt er einem beim Tippen weg.
+    doc_mut().caret_since = now_ms();
+    doc_mut().caret_phase = None;
     // **In den BAUM, bei jedem Tastendruck.** Die `seq`, unter der der Wert
     // in `FormState` liegt, gilt nur bis zum naechsten `to_dom` — der
     // Baumknoten gilt weiter. Er ist die Bruecke, ueber die `sync` den Wert
@@ -5216,6 +5227,8 @@ fn set_focus(engine: &Engine, page: &mut Page, next: Option<u32>) {
         });
     }
     page.state.focus = next;
+    doc_mut().caret_since = now_ms();
+    doc_mut().caret_phase = None;
     page.focus_value = next
         .and_then(|n| page.forms.get(n).map(|c| page.state.value(c).to_string()));
     if let Some(new) = next {
@@ -5246,6 +5259,41 @@ fn dispatch_mouse_edge(engine: &Engine, lay: &Layout, kind: &'static str, cx: i3
         matches!(beak_engine::js::dombind::dispatch_at(ip, kind, &nodes,
             Some((cx as f64, cy as f64 - sy, cx as f64, cy as f64))), Ok(true))
     });
+}
+
+/// **Der Schreibzeiger blinkt.** Etwa zweimal je Sekunde, und nur der
+/// Streifen, in dem er steht, wird neu gemalt.
+///
+/// Die 530 ms sind die Halbperiode, die Browser benutzen. Nach einem
+/// Tastendruck faengt der Takt von vorn an und der Zeiger steht SOLIDE — wer
+/// tippt, will sehen, wo er ist.
+///
+/// Kostet nur etwas, solange ein Textfeld den Fokus hat: sonst faellt die
+/// erste Zeile heraus und es bleibt bei einem Vergleich je Runde.
+fn blink_caret(engine: &Engine, cache: &Option<(Layout, i32, i32, u32)>,
+               buf: &mut [u8], page: &Page) {
+    let focused_text = page.state.focus
+        .and_then(|f| page.forms.get(f))
+        .is_some_and(|c| c.kind.is_text());
+    if !focused_text {
+        doc_mut().caret_phase = None;
+        return;
+    }
+    let Some((lay, _, _, _)) = cache.as_ref() else { return };
+    let Some((_, cy, _, chh)) = lay.caret_rect() else { return };
+    let Some((_, _, w, h)) = canvas_rect() else { return };
+    if w <= 0 || h <= 0 || buf.len() < (w * h * 4) as usize { return }
+    let on = ((now_ms() - doc().caret_since) / 530) % 2 == 0;
+    if doc().caret_phase == Some(on) { return }
+    doc_mut().caret_phase = Some(on);
+    // Nur die Zeilen des Zeigers, in FENSTERkoordinaten und geklemmt.
+    let sy = scroll_y();
+    let (y0, y1) = ((cy - sy).max(0), (cy - sy + chh).min(h));
+    if y1 <= y0 { return }
+    engine.set_caret_on(on);
+    engine.paint_band(lay, w as u32, h as u32, sy, buf, y0 as u32, y1 as u32);
+    engine.set_caret_on(true);
+    unsafe { npk_canvas_commit(CANVAS_ID, buf.as_ptr() as i32, buf.len() as i32, w, h) };
 }
 
 /// `scroll` und `resize` an die Seite melden — nach dem Bild, nicht waehrend.
@@ -6204,6 +6252,7 @@ pub extern "C" fn _start() {
         // veraenderlich geliehen, und ein Behandler, der den Baum aendert,
         // haette ihn unter dem laufenden Bild weg.
         fire_viewport_events(engine());
+        blink_caret(engine(), &cache, &mut paint_buf, &page);
         // Die Schriften, die die Seite mitbringt. NACH dem ersten Auslegen:
         // vorher weiss niemand, welche sie ueberhaupt verlangt.
         if pump_fonts(engine()) {

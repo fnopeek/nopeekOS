@@ -48,7 +48,30 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-17 · beak 0.187.0 · Kernel 0.340.0** (Rest: `git log`)
+**Stand 2026-09-17 · beak 0.188.0 · Kernel 0.340.0** (Rest: `git log`)
+
+**0.188.0: der Schreibzeiger blinkt.** Florian: „was sicher auch noch ist der
+cursor der in input blinkt.. das haben wir auch nicht". Gemalt wurde er seit
+je — er stand nur still.
+
+**Er ist jetzt ein eigener Befehl (`DrawOp::Caret`), und das ist der ganze
+Trick.** Als gewoehnliches Rechteck steckte er IM Layout: ihn ein- und
+auszuschalten haette je Takt ein Neuauslegen gekostet, am Geraet 10-40 ms,
+zweimal je Sekunde. Als eigene Art laesst der Rasterer ihn in der dunklen
+Haelfte einfach aus (`Engine::set_caret_on`), das Layout bleibt stehen, und
+der Wirt malt ueber `Layout::caret_rect()` nur die ZEILEN neu, in denen er
+steht. Halbperiode 530 ms wie im Browser; **nach jedem Tastendruck und jedem
+Fokuswechsel faengt der Takt von vorn an und der Zeiger steht solide** — wer
+tippt, will sehen, wo er ist, und nicht auf die naechste Halbsekunde warten.
+Kostet nichts, solange kein Textfeld den Fokus hat: dann faellt die erste
+Zeile heraus.
+
+**471 Tests** (einer neu, und er prueft in PIXELN: zwei Anstriche, hell und
+dunkel, duerfen sich GENAU im Kasten des Zeigers unterscheiden und sonst
+nirgends). Drei bestehende Tests zaehlten den Zeiger bei den Rechtecken mit
+und zaehlen ihn jetzt einzeln. WPT 4557 (+10/−0), Galerien und alle zwoelf
+Render-Hashes unveraendert.
+
 
 **0.187.0: der Strich um DDGs Suchfeld war gar kein Rahmen — und Schatten
 hatten eckige Ecken.** Florian: „haben wir noch eine border um das input feld

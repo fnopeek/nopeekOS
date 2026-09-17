@@ -128,6 +128,9 @@ pub struct Engine {
     /// cost on the machine that is actually slow. `None` on the host, where
     /// `tests/diag.rs` times the phases from outside.
     clock: core::cell::Cell<Option<fn() -> u64>>,
+    /// Ist der Schreibzeiger in DIESEM Bild sichtbar? Der Wirt kippt es im
+    /// Takt; das Layout bleibt dabei stehen.
+    caret_on: core::cell::Cell<bool>,
     /// Der Steuerelement-Zustand des letzten Auslegens.
     ///
     /// **Fuer das Neuauslegen auf Verlangen.** Der Haken des Wirts ist ein
@@ -328,6 +331,7 @@ impl Engine {
             hover: RefCell::new(Vec::new()),
             hover_prev: RefCell::new(Vec::new()),
             clock: core::cell::Cell::new(None),
+            caret_on: core::cell::Cell::new(true),
             last_forms: core::cell::RefCell::new(crate::forms::FormState::default()),
             repaint_bail: core::cell::Cell::new(""),
             dom: RefCell::new(Vec::new()),
@@ -991,6 +995,9 @@ impl Engine {
         self.last_forms.borrow().clone()
     }
 
+    /// Den Schreibzeiger fuer das naechste Bild an- oder ausknipsen.
+    pub fn set_caret_on(&self, on: bool) { self.caret_on.set(on); }
+
     pub fn set_clock(&self, f: fn() -> u64) {
         self.clock.set(Some(f));
     }
@@ -1302,6 +1309,15 @@ impl Engine {
             match op {
                 DrawOp::Rect { x, y, w: rw, h: rh, color } => {
                     fill(out, wi, hi, *x, *y - scroll_y, *rw, *rh, *color);
+                }
+                // **Der Schreibzeiger blinkt, also wird er hier ausgelassen
+                // statt weggelassen.** Ein Takt darf kein Neuauslegen kosten
+                // — am Geraet sind das 10-40 ms, zweimal je Sekunde. So
+                // bleibt das Layout stehen und nur der Anstrich wechselt.
+                DrawOp::Caret { x, y, w: rw, h: rh, color } => {
+                    if self.caret_on.get() {
+                        fill(out, wi, hi, *x, *y - scroll_y, *rw, *rh, *color);
+                    }
                 }
                 DrawOp::RoundRect { x, y, w: rw, h: rh, r, color, ring } => {
                     fill_round(out, wi, hi, *x, *y - scroll_y, *rw, *rh, *r, *color, *ring);
@@ -3111,6 +3127,9 @@ mod tests {
                 }
                 DrawOp::Rect { x, y, w, h, color } => {
                     let _ = write!(s, "R {x},{y} {w}x{h} c={color:?}\n");
+                }
+                DrawOp::Caret { x, y, w, h, color } => {
+                    let _ = write!(s, "I {x},{y} {w}x{h} c={color:?}\n");
                 }
                 DrawOp::RoundRect { x, y, w, h, r, color, ring } => {
                     let _ = write!(s, "Q {x},{y} {w}x{h} {r:?} c={color:?} {ring:.2}\n");
