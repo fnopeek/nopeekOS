@@ -193,7 +193,12 @@ fn main() {
         },
         viewport_w: 1902.0,
     });
-    sess.interp.set_media(1902.0, 1000.0, false);
+    // `DARK=1` faehrt die Probe im Dunkelmodus — dieselbe Lage, die der Wirt
+    // aus `query_theme().is_dark()` einreicht. Ohne den Schalter misst man
+    // immer hell und kann nicht sagen, ob eine Seite das Schema ueberhaupt
+    // liest.
+    let dark = std::env::var("DARK").is_ok();
+    sess.interp.set_media(1902.0, 1000.0, dark);
     // `DEPTH=` hebt den Aufrufdeckel — die Frage „echte Endlosschleife oder
     // nur tiefer als 400?" ist sonst nicht zu beantworten.
     if let Ok(d) = std::env::var("DEPTH") {
@@ -388,6 +393,7 @@ erreichbar ({} Umgebungen, {} Eigenschaften){}",
                  if n.replace { "replace" } else { "assign" },
                  if n.reload { "/reload" } else { "" }, n.url);
     }
+    let mut n1 = sess.interp.console.len();
     for l in &sess.interp.console[n0..] { println!("  timer| {l}"); }
     // `DUMP=1` zeigt, was am Ende im Baum steht — die Frage „laufen die
     // Skripte" ist nicht dieselbe wie „haben sie etwas gebaut".
@@ -412,11 +418,45 @@ erreichbar ({} Umgebungen, {} Eigenschaften){}",
                 let Some((id, v)) = pair.split_once('=') else { continue };
                 let Some(seq) = find_seq(dom.body(), id) else {
                     println!("TYPE: kein Element mit id={id}"); continue };
-                if let Some(d) = sess.interp.doc.as_mut() {
-                    if let Some(n) = d.by_seq(seq) {
-                        d.nodes[n as usize].value = Some(std::rc::Rc::from(v));
-                        d.touch();
+                // **Zeichen fuer Zeichen, mit den Ereignissen dazu** — das
+                // ist der Weg des Wirts seit 0.186.0 (`edit_key`). Den Wert
+                // in einem Zug hineinzuschreiben hiesse, eine Seite zu
+                // messen, die nie getippt bekommt: die Vorschlagsliste haengt
+                // an `input`, nicht am Wert
+                // ([[feedback_the_test_path_must_be_the_real_path]]).
+                let mut acc = String::new();
+                for ch in v.chars() {
+                    let key = format!("{ch}");
+                    let code = if ch.is_ascii_alphabetic() {
+                        format!("Key{}", ch.to_ascii_uppercase())
+                    } else if ch.is_ascii_digit() {
+                        format!("Digit{ch}")
+                    } else if ch == ' ' { String::from("Space") } else { String::new() };
+                    let kc = ch.to_ascii_uppercase() as u32;
+                    if beak_engine::js::dombind::dispatch_key(
+                        &mut sess.interp, "keydown", seq, &key, &code, kc, false) {
+                        continue;
                     }
+                    acc.push(ch);
+                    if let Some(d) = sess.interp.doc.as_mut() {
+                        if let Some(n) = d.by_seq(seq) {
+                            d.nodes[n as usize].value = Some(std::rc::Rc::from(acc.as_str()));
+                            d.touch();
+                        }
+                    }
+                    beak_engine::js::dombind::dispatch_input_event(
+                        &mut sess.interp, "input", seq, "insertText", Some(&key));
+                    beak_engine::js::dombind::dispatch_key(
+                        &mut sess.interp, "keyup", seq, &key, &code, kc, false);
+                    let _ = sess.interp.run_timers();
+                }
+                // Was ein Behandler angestossen hat, zu Ende fahren: eine
+                // Vorschlagsliste holt ihre Antwort mit `fetch`.
+                for _ in 0..32 {
+                    let f = serve_fetches(&mut sess, &dir);
+                    let j = serve_dyn_scripts(&mut sess, &dir);
+                    let t = sess.interp.run_timers();
+                    if f == 0 && j == 0 && t == 0 { break }
                 }
             }
         }
@@ -425,6 +465,15 @@ erreichbar ({} Umgebungen, {} Eigenschaften){}",
     // `TEXT=<id>` gibt den Inhalt EINES Elements ungekuerzt aus — der Weg,
     // auf dem eine eingehaengte Sonde ihr Ergebnis herausreicht, und zwar
     // derselbe, den Chromium mit `--dump-dom` nimmt.
+    // **Was WAEHREND `TYPE`/`CLICK`/`SUBMIT` gesagt wurde.** Die Zeile oben
+    // leert die Konsole nach der Skriptrunde; alles, was ein Behandler danach
+    // schreibt, stand bis 0.186.0 nirgends — und eine Probe, die das Tippen
+    // misst, sah ihre eigenen Ausgaben nicht.
+    if sess.interp.console.len() > n1 {
+        for l in &sess.interp.console[n1..] { println!("  nach| {l}"); }
+        n1 = sess.interp.console.len();
+    }
+    let _ = n1;
     if let Ok(id) = std::env::var("TEXT") {
         let dom = sess.interp.doc.as_mut().map(|d| d.to_dom());
         match dom.as_ref().and_then(|d| find_el(&d.root, &id)) {
@@ -899,8 +948,16 @@ fn page_layout(ip: &mut beak_engine::js::interp::Interp, html: &str, dir: &str)
     thread_local! {
         static ENG: beak_engine::Engine = {
             let mut e = beak_engine::Engine::new();
-            e.set_theme(Theme { bg: Rgb(255,255,255), text: Rgb(33,37,41), heading: Rgb(33,37,41),
-                                link: Rgb(13,110,253), muted: Rgb(108,117,125), rule: Rgb(222,226,230) });
+            // Das Thema entscheidet `prefers-color-scheme` in der Kaskade —
+            // es MUSS zur Medienlage passen, sonst rechnet das Layout mit
+            // einem anderen Schema als das Skript liest.
+            e.set_theme(if std::env::var("DARK").is_ok() {
+                Theme { bg: Rgb(18,18,18), text: Rgb(222,226,230), heading: Rgb(240,240,240),
+                        link: Rgb(110,168,254), muted: Rgb(150,155,160), rule: Rgb(60,63,66) }
+            } else {
+                Theme { bg: Rgb(255,255,255), text: Rgb(33,37,41), heading: Rgb(33,37,41),
+                        link: Rgb(13,110,253), muted: Rgb(108,117,125), rule: Rgb(222,226,230) }
+            });
             e
         };
     }
@@ -966,5 +1023,5 @@ fn feed_geometry(ip: &mut beak_engine::js::interp::Interp, html: &str, dir: &str
         boxes: std::rc::Rc::new(rects), scroll: (0, 0),
         content: (width as i32, lay.height as i32),
     });
-    ip.set_media(width as f64, 1080.0, false);
+    ip.set_media(width as f64, 1080.0, std::env::var("DARK").is_ok());
 }

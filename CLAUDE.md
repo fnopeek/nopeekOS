@@ -48,7 +48,54 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-17 · beak 0.185.0 · Kernel 0.340.0** (Rest: `git log`)
+**Stand 2026-09-17 · beak 0.186.0 · Kernel 0.340.0** (Rest: `git log`)
+
+**0.186.0: der Wirt stellte VIER Ereignisse zu, und keins davon war eine
+Taste.** Florian: „die orignale duckduckgo seite zeigt bei der suche bereits
+resultate im dropdown an". Ausgezaehlt statt vermutet: der Wirt ruft
+`dispatch` fuer genau `load`, `DOMContentLoaded`, `click`, `submit` — sonst
+nichts. `edit_key` schrieb jeden Tastendruck in `FormState` UND in den
+Baumknoten und **sagte es der Seite nie**. Und die Engine kannte nur die Basis
+`Event`: kein `UIEvent`, `KeyboardEvent`, `InputEvent`, `FocusEvent`,
+`MouseEvent` — ein Behandler, der `e.key` liest, bekam `undefined`.
+
+**Der Zensus** (`addEventListener` und die `onfoo=`-Form vor dem ersten
+Seitenskript umgehaengt, zwoelf Korpusseiten, Chromium): `click` 12/12,
+**`keydown` 11/12**, `change` 10/12, `resize` 10/12, `focus` 10/12,
+`scroll` 9/12, `blur` 9/12, `mouseover` 8/12, **`input` 8/12**. **Von den zehn
+verbreitetsten Ereignissen des Webs stellten wir genau EINES zu.**
+
+Gebaut: die fuenf Arten mit echter Kette und echten Konstruktoren; die
+Tastatur als `keydown → (Abbruch? Ende) → Wert → input → keyup`; der Fokus als
+EIN Weg (`set_focus`) mit `blur`/`focusout`/`focus`/`focusin` und `change`
+beim VERLASSEN, nur bei echter Aenderung. **`preventDefault` auf `keydown`
+verschluckt den Tastendruck** — so filtert jedes Eingabefeld der Welt Zeichen,
+und ohne das waere die Zustellung schlimmer als keine. Gemessen: getippt
+„axb" in ein Feld, dessen `keydown` bei `x` abbricht → im Feld steht `ab`.
+An DDGs echtem Suchfeld: die Ereignisse kommen an, blasen bis `document` und
+tragen den wachsenden Wert. Neue Selbsttestzeile `kbdev`. Tore unveraendert:
+468 Tests, WPT 4556 (+9/−0), vier Galerien, zwoelf Render-Hashes. Papier:
+`docs/plan/BROWSER_INPUT_EVENTS.md`.
+
+Dazu die Maus und das Fenster: der Klick ist jetzt ein echtes `MouseEvent`
+(`clientX/Y` fensterbezogen, `pageX/Y` dokumentbezogen, `button`, `detail`) —
+bis hierher war er eine nackte `Event`, und `e.clientX` war `undefined`, also
+eine FALSCHE Antwort und keine fehlende. Dazu `mousedown`/`mouseup` (8/12
+Seiten) und `scroll`/`resize` nach dem Bild, mit eigenem Gedaechtnis, sonst
+faellt es je Bild oder nie; `pageshow` einmal nach `load`. Selbsttestzeile
+`mausev`. **`visibilitychange` bewusst NICHT** — `visibilityState` ist bei uns
+konstant `"visible"`, ein Ereignis dafuer waere erfunden. **Offen:**
+`mouseover`/`mouseout` — die Zeigerspur ist der teuerste Pfad im Wirt, das
+gehoert gemessen, bevor dort ein Skriptlauf je Bewegung dazukommt.
+
+**Und der Dunkelmodus: `query_theme()` gibt eine HARTE weisse Palette
+zurueck**, also hoert jede Seite „hell". Die Leitung dahinter ist ganz — mit
+`DARK=1` in `pagerun` gemessen schaltet DDG sauber um (`matchMedia` dark,
+`kae=d`, `body` 22,22,22). Der Grund fuer die Konstante steht in
+`memory/feedback_dark_mode_is_two_things.md`, und die Bedingung war „bis
+`color-scheme` geparst ist" — **ist es nicht**. Das ist der Posten, der ihn
+freischaltet.
+
 
 **0.185.0: die Geometrie war das letzte BILD, und eine Seite, die EINMAL
 misst, blieb fuer immer falsch.** Florians Frage nach DDGs Karte. Sie ist kein

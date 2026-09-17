@@ -1687,6 +1687,88 @@ macro_rules! ev_getter {
     }};
 }
 
+/// Ein Ereignis einer ART bauen, wie `new KeyboardEvent("keydown", {...})` es
+/// tut: Prototyp aus dem globalen Namen, Basisfelder aus dem Wörterbuch, und
+/// danach die Felder, die genau diese Art fuehrt.
+///
+/// Ein Woerterbuchfeld, das fehlt, bekommt den Vorgabewert der Spezifikation
+/// — nicht `undefined`. Eine Seite, die `e.clientX + 1` rechnet, bekaeme sonst
+/// `NaN`, und das sieht aus wie ein Rechenfehler der Seite.
+fn event_of_kind(i: &mut Interp, iface: &str, a: &[Value]) -> C<Gc> {
+    let kind = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+    let init = a.get(1).cloned().unwrap_or(Value::Undefined);
+    let proto = match i.get(&Value::Obj(i.realm.global.clone()), iface)
+                      .and_then(|c| i.get(&c, "prototype")) {
+        Ok(Value::Obj(o)) => o, _ => i.realm.event_proto.clone(),
+    };
+    let ev = build_event(i, proto, &kind, false);
+    apply_event_init(i, &ev, &init)?;
+    let has = matches!(init, Value::Obj(_));
+    let set = |ev: &Gc, slot: &str, v: Value| {
+        ev.borrow_mut().define(slot, Prop { value: Some(v), get: None, set: None,
+            writable: true, enumerable: false, configurable: true });
+    };
+    // Die vier Umschalter und `detail`/`view` hat jede Art unter `UIEvent`.
+    for (k, slot) in [("altKey", "__evalt"), ("ctrlKey", "__evctrl"),
+                      ("shiftKey", "__evshift"), ("metaKey", "__evmeta")] {
+        let v = if has { i.get(&init, k)?.truthy() } else { false };
+        set(&ev, slot, Value::Bool(v));
+    }
+    let detail = if has { i.get(&init, "detail")? } else { Value::Num(0.0) };
+    set(&ev, EV_DETAIL, if matches!(detail, Value::Undefined) { Value::Num(0.0) } else { detail });
+    let view = if has { i.get(&init, "view")? } else { Value::Null };
+    set(&ev, "__evview", if matches!(view, Value::Undefined) { Value::Null } else { view });
+    let mut num = |i: &mut Interp, k: &str, slot: &str| -> C<()> {
+        let v = if has { i.get(&init, k)? } else { Value::Undefined };
+        let n = match v { Value::Undefined => 0.0, other => i.to_number(&other)? };
+        set(&ev, slot, Value::Num(n));
+        Ok(())
+    };
+    match iface {
+        "KeyboardEvent" => {
+            for (k, slot) in [("key", "__evkey"), ("code", "__evcode")] {
+                let v = if has { i.get(&init, k)? } else { Value::Undefined };
+                let sv = match v { Value::Undefined => alloc::string::String::from(""),
+                                   other => i.to_string(&other)?.to_string() };
+                set(&ev, slot, Value::str(&sv));
+            }
+            num(i, "keyCode", "__evkeycode")?;
+            num(i, "charCode", "__evcharcode")?;
+            num(i, "location", "__evlocation")?;
+            let r = if has { i.get(&init, "repeat")?.truthy() } else { false };
+            set(&ev, "__evrepeat", Value::Bool(r));
+            let c = if has { i.get(&init, "isComposing")?.truthy() } else { false };
+            set(&ev, "__evcomposing", Value::Bool(c));
+        }
+        "InputEvent" => {
+            let d = if has { i.get(&init, "data")? } else { Value::Null };
+            set(&ev, "__evdata", if matches!(d, Value::Undefined) { Value::Null } else { d });
+            let t = if has { i.get(&init, "inputType")? } else { Value::Undefined };
+            let ts = match t { Value::Undefined => alloc::string::String::from(""),
+                               other => i.to_string(&other)?.to_string() };
+            set(&ev, "__evinputtype", Value::str(&ts));
+            let c = if has { i.get(&init, "isComposing")?.truthy() } else { false };
+            set(&ev, "__evcomposing", Value::Bool(c));
+        }
+        "FocusEvent" => {
+            let r = if has { i.get(&init, "relatedTarget")? } else { Value::Null };
+            set(&ev, "__evrelated", if matches!(r, Value::Undefined) { Value::Null } else { r });
+        }
+        "MouseEvent" => {
+            for (k, slot) in [("clientX", "__evclientx"), ("clientY", "__evclienty"),
+                              ("pageX", "__evpagex"), ("pageY", "__evpagey"),
+                              ("offsetX", "__evoffsetx"), ("offsetY", "__evoffsety"),
+                              ("button", "__evbutton"), ("buttons", "__evbuttons")] {
+                num(i, k, slot)?;
+            }
+            let r = if has { i.get(&init, "relatedTarget")? } else { Value::Null };
+            set(&ev, "__evrelated", if matches!(r, Value::Undefined) { Value::Null } else { r });
+        }
+        _ => {}
+    }
+    Ok(ev)
+}
+
 /// Ein Ereignisobjekt mit gesetzten Schlitzen. `trusted` unterscheidet, was
 /// beak selbst zustellt, von dem, was die Seite mit `dispatchEvent` schickt —
 /// Seiten fragen es ab, und ein festes `true` waere gelogen.
@@ -5016,6 +5098,104 @@ pub fn install(realm: &mut Realm) {
     custom_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(custom_ctor.clone())));
     custom_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("CustomEvent")));
     realm.global.borrow_mut().define("CustomEvent", Prop::builtin(Value::Obj(custom_ctor)));
+
+    // ── Die Ereignis-ARTEN der Bedienung ────────────────────────────────
+    //
+    // **Bis 0.185.0 kannte beak nur die Basis `Event`.** Ein Behandler, der
+    // `e.key` oder `e.clientX` liest, bekam `undefined`, und ein
+    // `e instanceof KeyboardEvent` warf — der Name gab es nicht. Gemessen ueber
+    // die zwoelf Korpusseiten meldet `keydown` auf 11 von 12 an, `input` auf 8
+    // (`docs/plan/BROWSER_INPUT_EVENTS.md`); das ist die BEDIEN-Haelfte des
+    // Webs, und sie hing an diesen fuenf Namen.
+    //
+    // Die Kette ist die echte: Event -> UIEvent -> {Keyboard, Mouse, Focus,
+    // Input}Event. Die Felder stehen in Schlitzen und werden ueber
+    // Prototyp-Zugriffe gelesen, wie bei `Event` seit je — damit sind sie
+    // nicht aufzaehlbar, genau wie im Browser.
+    let ui_proto = new_obj(Some(event_proto.clone()));
+    ev_getter!(ui_proto, fp2, "detail", EV_DETAIL);
+    ev_getter!(ui_proto, fp2, "view", "__evview");
+    let ui_ctor = iface_with(realm, "UIEvent", &ui_proto, |i, _, a| {
+        let ev = event_of_kind(i, "UIEvent", a)?;
+        Ok(Value::Obj(ev))
+    });
+    let _ = ui_ctor;
+
+    let kbd_proto = new_obj(Some(ui_proto.clone()));
+    ev_getter!(kbd_proto, fp2, "key", "__evkey");
+    ev_getter!(kbd_proto, fp2, "code", "__evcode");
+    ev_getter!(kbd_proto, fp2, "keyCode", "__evkeycode");
+    ev_getter!(kbd_proto, fp2, "charCode", "__evcharcode");
+    ev_getter!(kbd_proto, fp2, "which", "__evkeycode");
+    ev_getter!(kbd_proto, fp2, "repeat", "__evrepeat");
+    ev_getter!(kbd_proto, fp2, "isComposing", "__evcomposing");
+    ev_getter!(kbd_proto, fp2, "location", "__evlocation");
+    ev_getter!(kbd_proto, fp2, "altKey", "__evalt");
+    ev_getter!(kbd_proto, fp2, "ctrlKey", "__evctrl");
+    ev_getter!(kbd_proto, fp2, "shiftKey", "__evshift");
+    ev_getter!(kbd_proto, fp2, "metaKey", "__evmeta");
+    // `getModifierState` liest dieselben vier Schlitze. Seiten fragen damit
+    // nach Umschaltern, die wir gar nicht fuehren (`CapsLock`), und die
+    // richtige Antwort darauf ist `false`, nicht ein Wurf.
+    meth(&kbd_proto, "getModifierState", |i, t, a| {
+        let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let slot = match &*k {
+            "Alt" => "__evalt", "Control" => "__evctrl",
+            "Shift" => "__evshift", "Meta" => "__evmeta",
+            _ => return Ok(Value::Bool(false)),
+        };
+        Ok(Value::Bool(i.get(&t, slot)?.truthy()))
+    }, 1, &fp2);
+    iface_with(realm, "KeyboardEvent", &kbd_proto, |i, _, a| {
+        let ev = event_of_kind(i, "KeyboardEvent", a)?;
+        Ok(Value::Obj(ev))
+    });
+
+    let input_proto = new_obj(Some(ui_proto.clone()));
+    ev_getter!(input_proto, fp2, "data", "__evdata");
+    ev_getter!(input_proto, fp2, "inputType", "__evinputtype");
+    ev_getter!(input_proto, fp2, "isComposing", "__evcomposing");
+    iface_with(realm, "InputEvent", &input_proto, |i, _, a| {
+        let ev = event_of_kind(i, "InputEvent", a)?;
+        Ok(Value::Obj(ev))
+    });
+
+    let focus_proto = new_obj(Some(ui_proto.clone()));
+    ev_getter!(focus_proto, fp2, "relatedTarget", "__evrelated");
+    iface_with(realm, "FocusEvent", &focus_proto, |i, _, a| {
+        let ev = event_of_kind(i, "FocusEvent", a)?;
+        Ok(Value::Obj(ev))
+    });
+
+    let mouse_proto = new_obj(Some(ui_proto.clone()));
+    ev_getter!(mouse_proto, fp2, "clientX", "__evclientx");
+    ev_getter!(mouse_proto, fp2, "clientY", "__evclienty");
+    ev_getter!(mouse_proto, fp2, "pageX", "__evpagex");
+    ev_getter!(mouse_proto, fp2, "pageY", "__evpagey");
+    ev_getter!(mouse_proto, fp2, "screenX", "__evclientx");
+    ev_getter!(mouse_proto, fp2, "screenY", "__evclienty");
+    ev_getter!(mouse_proto, fp2, "offsetX", "__evoffsetx");
+    ev_getter!(mouse_proto, fp2, "offsetY", "__evoffsety");
+    ev_getter!(mouse_proto, fp2, "button", "__evbutton");
+    ev_getter!(mouse_proto, fp2, "buttons", "__evbuttons");
+    ev_getter!(mouse_proto, fp2, "altKey", "__evalt");
+    ev_getter!(mouse_proto, fp2, "ctrlKey", "__evctrl");
+    ev_getter!(mouse_proto, fp2, "shiftKey", "__evshift");
+    ev_getter!(mouse_proto, fp2, "metaKey", "__evmeta");
+    ev_getter!(mouse_proto, fp2, "relatedTarget", "__evrelated");
+    meth(&mouse_proto, "getModifierState", |i, t, a| {
+        let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let slot = match &*k {
+            "Alt" => "__evalt", "Control" => "__evctrl",
+            "Shift" => "__evshift", "Meta" => "__evmeta",
+            _ => return Ok(Value::Bool(false)),
+        };
+        Ok(Value::Bool(i.get(&t, slot)?.truthy()))
+    }, 1, &fp2);
+    iface_with(realm, "MouseEvent", &mouse_proto, |i, _, a| {
+        let ev = event_of_kind(i, "MouseEvent", a)?;
+        Ok(Value::Obj(ev))
+    });
     // `PromiseRejectionEvent` — die Art, unter der eine unbehandelte
     // Ablehnung ans Fenster kommt.
     //
@@ -5860,11 +6040,50 @@ fn inline_handler(i: &mut Interp, node: u32, kind: &str) -> C<Option<Value>> {
 /// Kette stattdessen aus dem Baum baut, prueft einen Weg, den beak nie geht
 /// ([[feedback_the_test_path_must_be_the_real_path]]).
 pub fn dispatch(i: &mut Interp, kind: &str, chain: &[u32]) -> C<bool> {
+    dispatch_at(i, kind, chain, None)
+}
+
+/// Wie `dispatch`, aber mit dem ORT des Zeigers — dann wird daraus ein
+/// `MouseEvent`.
+///
+/// **Ein Klick ohne Koordinaten ist eine falsche Antwort, keine fehlende.**
+/// Bis 0.186.0 war jeder Klick eine nackte `Event`, und `e.clientX` war
+/// `undefined`: eine Seite, die ihr Menue an den Zeiger legt, rechnete mit
+/// `NaN`. `client*` ist FENSTERbezogen, `page*` dokumentbezogen — der Rufer
+/// gibt beides, weil nur er den Rollstand kennt.
+pub fn dispatch_at(i: &mut Interp, kind: &str, chain: &[u32],
+                   at: Option<(f64, f64, f64, f64)>) -> C<bool> {
     if chain.is_empty() { return Ok(false); }
-    let proto = i.realm.event_proto.clone();
+    let proto = match at {
+        Some(_) => iface_proto(i, "MouseEvent"),
+        None => i.realm.event_proto.clone(),
+    };
     let ev = build_event(i, proto, kind, true);
-    ev.borrow_mut().define(EV_BUBBLES, Prop { value: Some(Value::Bool(true)), get: None,
-        set: None, writable: true, enumerable: false, configurable: true });
+    {
+        let mut o = ev.borrow_mut();
+        let mut put = |k: &str, v: Value| {
+            o.define(k, Prop { value: Some(v), get: None, set: None,
+                writable: true, enumerable: false, configurable: true });
+        };
+        put(EV_BUBBLES, Value::Bool(true));
+        if let Some((cx, cy, px, py)) = at {
+            for (k, v) in [("__evclientx", cx), ("__evclienty", cy),
+                           ("__evpagex", px), ("__evpagey", py),
+                           ("__evoffsetx", 0.0), ("__evoffsety", 0.0)] {
+                put(k, Value::Num(v));
+            }
+            // Die linke Taste: `button` zaehlt ab null, `buttons` ist eine
+            // Bitmaske und bei einem `click` schon wieder leer.
+            put("__evbutton", Value::Num(0.0));
+            put("__evbuttons", Value::Num(0.0));
+            for k in ["__evalt", "__evctrl", "__evshift", "__evmeta"] {
+                put(k, Value::Bool(false));
+            }
+            put("__evrelated", Value::Null);
+            // `detail` ist bei einem einfachen Klick 1 (UI Events §5.3).
+            put(EV_DETAIL, Value::Num(1.0));
+        }
+    }
     let prevented = deliver(i, &ev, kind, chain)?;
     // **Ein Klick auf ein `<label>` aktiviert sein Steuerelement** (HTML
     // §4.10.4). Das ist keine Feinheit, sondern die Art, wie ein Kaestchen
@@ -7387,6 +7606,97 @@ fn tags_of(d: &Doc, from: u32, tag: &str) -> Vec<u32> {
 /// ein Formular, das abgeschickt wird, ein Element, das den Fokus bekommt.
 /// Liefert true, wenn ein Behandler `preventDefault` gerufen hat (oder
 /// `false` zurueckgab).
+/// Der Prototyp einer Ereignisart, ueber ihren globalen Namen.
+fn iface_proto(i: &mut Interp, iface: &str) -> Gc {
+    match i.get(&Value::Obj(i.realm.global.clone()), iface)
+           .and_then(|c| i.get(&c, "prototype")) {
+        Ok(Value::Obj(o)) => o,
+        _ => i.realm.event_proto.clone(),
+    }
+}
+
+/// Ein Ereignis einer ART ueber den Baumknoten `seq` zustellen.
+///
+/// **Der eine Weg fuer alles, was der Wirt schickt.** Gibt `true`, wenn die
+/// Seite abgebrochen hat (`preventDefault`) — und genau darauf muss der Rufer
+/// hoeren: ein `keydown`, das abgebrochen wurde, darf kein Zeichen einfuegen.
+fn dispatch_typed(i: &mut Interp, iface: &str, kind: &str, seq: u32,
+                  bubbles: bool, cancelable: bool,
+                  fields: &[(&str, Value)]) -> bool {
+    let Some(doc) = i.doc.as_ref() else { return false };
+    let Some(id) = doc.by_seq(seq) else { return false };
+    let chain = ancestors(i, id);
+    if chain.is_empty() { return false }
+    let proto = iface_proto(i, iface);
+    let ev = build_event(i, proto, kind, true);
+    {
+        let mut o = ev.borrow_mut();
+        let mut put = |k: &str, v: Value| {
+            o.define(k, Prop { value: Some(v), get: None, set: None,
+                writable: true, enumerable: false, configurable: true });
+        };
+        put(EV_BUBBLES, Value::Bool(bubbles));
+        put(EV_CANCELABLE, Value::Bool(cancelable));
+        for (k, v) in fields { put(k, v.clone()); }
+    }
+    matches!(deliver(i, &ev, kind, &chain), Ok(true))
+}
+
+/// `keydown`/`keyup` an das Steuerelement mit dieser `seq`.
+///
+/// `key` ist der WERT der Taste (`"a"`, `"Enter"`, `"ArrowLeft"`), `code` ihr
+/// Ort auf der Tastatur (`"KeyA"`). `key_code` ist die Altlast, die trotzdem
+/// jeder liest. Gibt `true`, wenn die Seite abgebrochen hat.
+pub fn dispatch_key(i: &mut Interp, kind: &str, seq: u32, key: &str, code: &str,
+                    key_code: u32, shift: bool) -> bool {
+    dispatch_typed(i, "KeyboardEvent", kind, seq, true, true, &[
+        ("__evkey", Value::str(key)),
+        ("__evcode", Value::str(code)),
+        ("__evkeycode", Value::Num(key_code as f64)),
+        ("__evcharcode", Value::Num(0.0)),
+        ("__evlocation", Value::Num(0.0)),
+        ("__evrepeat", Value::Bool(false)),
+        ("__evcomposing", Value::Bool(false)),
+        ("__evalt", Value::Bool(false)),
+        ("__evctrl", Value::Bool(false)),
+        ("__evshift", Value::Bool(shift)),
+        ("__evmeta", Value::Bool(false)),
+        (EV_DETAIL, Value::Num(0.0)),
+    ])
+}
+
+/// `beforeinput`/`input` an das Steuerelement mit dieser `seq`.
+///
+/// `beforeinput` ist abbrechbar, `input` nicht (UI Events §5.1) — deshalb
+/// sagt `cancelable` hier nicht immer dasselbe.
+pub fn dispatch_input_event(i: &mut Interp, kind: &str, seq: u32,
+                            input_type: &str, data: Option<&str>) -> bool {
+    let d = match data { Some(t) => Value::str(t), None => Value::Null };
+    dispatch_typed(i, "InputEvent", kind, seq, true, kind == "beforeinput", &[
+        ("__evdata", d),
+        ("__evinputtype", Value::str(input_type)),
+        ("__evcomposing", Value::Bool(false)),
+        (EV_DETAIL, Value::Num(0.0)),
+    ])
+}
+
+/// `focus`/`blur` (blasen NICHT) und `focusin`/`focusout` (blasen).
+///
+/// Beide Paare, weil Seiten beide benutzen und das eine das andere nicht
+/// ersetzt: `focus` erreicht nur das Element selbst, `focusin` den ganzen Weg
+/// nach oben — eine Seite, die am Formular lauscht, hoert nur das zweite.
+pub fn dispatch_focus(i: &mut Interp, kind: &str, seq: u32, related: Option<u32>) -> bool {
+    let rel = match related.and_then(|r| i.doc.as_ref().and_then(|d| d.by_seq(r))) {
+        Some(id) => wrap(i, id),
+        None => Value::Null,
+    };
+    let bubbles = kind == "focusin" || kind == "focusout";
+    dispatch_typed(i, "FocusEvent", kind, seq, bubbles, false, &[
+        ("__evrelated", rel),
+        (EV_DETAIL, Value::Num(0.0)),
+    ])
+}
+
 pub fn dispatch_seq(i: &mut Interp, kind: &str, seq: u32) -> bool {
     let Some(doc) = i.doc.as_ref() else { return false };
     let Some(id) = doc.by_seq(seq) else { return false };

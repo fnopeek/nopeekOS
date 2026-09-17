@@ -167,7 +167,13 @@ fn main() {
             println!("{id}: der Klickpunkt ({cx},{cy}) findet das Element NICHT — Kette {chain:?}");
         }
         for _ in 0..times {
-            match beak_engine::js::dombind::dispatch(&mut sess.interp, "click", &nodes) {
+            // **Mit dem ORT, wie der Wirt** — er schickt seit 0.186.0
+            // `dispatch_at`. Ohne die Koordinaten waere `e.clientX` hier
+            // `undefined` und am Geraet eine Zahl, und die Zeile `mausev`
+            // stuende host rot und Geraet gruen
+            // ([[feedback_the_test_path_must_be_the_real_path]]).
+            match beak_engine::js::dombind::dispatch_at(&mut sess.interp, "click", &nodes,
+                Some((cx as f64, cy as f64, cx as f64, cy as f64))) {
                 Ok(p) => { let _ = p; }
                 Err(_) => println!("{id}: LAUFFEHLER"),
             }
