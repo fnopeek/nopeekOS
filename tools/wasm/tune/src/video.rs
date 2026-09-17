@@ -71,6 +71,23 @@ const TARGET_LEAD_MS: i64 = 1000;
 /// billigen Szenen davor Zeit uebrig hatten.
 const MAX_QUEUE_BYTES: usize = 128 * 1024 * 1024;
 
+/// Ab wieviel Vorrat das ZEIGEN vor dem Dekodieren kommt.
+///
+/// Gemessen an Florians Lauf, 1440p30, Tag/Nacht-Ueberblendung: **109 Bilder
+/// dekodiert, 75 gezeigt** — 45 wurden bezahlt und nie gesehen. Der Grund
+/// ist die Reihenfolge in der Runde: wer erst 52 ms dekodiert und dann EIN
+/// Bild zeigt, laesst in der Zwischenzeit zwei faellig werden und wirft
+/// eines davon weg.
+///
+/// Ein faelliges Bild zu zeigen kostet 3 ms. Liegt genug Vorrat da, gehoert
+/// es also VOR das naechste Dekodieren — dann laeuft die Anzeige weiter mit
+/// voller Rate, und der Vorrat bezahlt dafuer. Genau dafuer ist er da.
+///
+/// Der Boden ist nicht null: unter der Reihenfolge-Tiefe weiss die Schlange
+/// nicht mehr, welches Bild das naechste ist, und dann muss dekodiert
+/// werden, egal was faellig ist.
+const SHOW_FIRST_FLOOR_MS: i64 = 150;
+
 /// Lead to build before the clock starts. Less than the target, because the
 /// rest can be built while playing and nobody wants to wait a second for a
 /// three-second clip.
@@ -274,6 +291,14 @@ impl Video {
             *budget -= 1;
             if !self.feed_one() { break; }
         }
+    }
+
+    /// Liegt ein Bild bereit UND genug Vorrat, um es zu zeigen, ohne
+    /// vorher zu dekodieren?
+    pub fn show_before_decode(&self, ms: i64) -> bool {
+        self.next_due_in(ms) == 0
+            && self.lead_ms(ms) > SHOW_FIRST_FLOOR_MS
+            && self.queue.len() > REORDER
     }
 
     /// Ist der Vorrat voll? Nur dann darf der Rufer schlafen.
