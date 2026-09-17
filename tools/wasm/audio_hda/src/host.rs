@@ -25,6 +25,7 @@ unsafe extern "C" {
     fn npk_dma_alloc(pages: i32) -> i32;
     fn npk_dma_phys_addr(handle: i32) -> i64;
     fn npk_dma_write(handle: i32, dma_off: i32, wasm_ptr: i32, len: i32) -> i32;
+    fn npk_dma_read32(handle: i32, offset: i32) -> i32;
 
     fn npk_memory_fence() -> i32;
     fn npk_sleep(ms: i32) -> i32;
@@ -86,4 +87,13 @@ pub fn fence() {
 }
 pub fn sleep_ms(ms: u32) {
     unsafe { npk_sleep(ms as i32) };
+}
+
+/// Ein Doppelwort aus dem DMA-Puffer zurueckholen.
+///
+/// Diagnose: ob `dma_write` wirklich in dem Speicher landet, den das Geraet
+/// liest. Ohne Rueckweg ist „geschrieben" eine Behauptung — und unter QEMU
+/// sah genau das aus wie ein gesunder Stream ohne Ton.
+pub fn dma_read32(h: i32, off: u32) -> u32 {
+    unsafe { npk_dma_read32(h, off as i32) as u32 }
 }
