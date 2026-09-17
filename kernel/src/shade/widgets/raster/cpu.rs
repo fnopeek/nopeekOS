@@ -14,7 +14,7 @@
 #![allow(dead_code)]
 
 use crate::shade::widgets::abi::{
-    Fill, IconId, Point, RasterTarget, Rasterizer, Rect, Shadow, TextStyle, Token,
+    Fill, I420Ref, IconId, Point, RasterTarget, Rasterizer, Rect, Shadow, TextStyle, Token,
 };
 
 /// CPU-backed rasterizer. Holds no state between calls — safe to share
@@ -168,77 +168,197 @@ impl Rasterizer for CpuRasterizer {
 
     fn canvas_blit(&mut self, t: &mut RasterTarget, src: &[u8], sw: u32, sh: u32,
                    rect: Rect, zoom_q88: u32, pan: (i32, i32)) {
-        if sw == 0 || sh == 0 || rect.w == 0 || rect.h == 0 { return; }
-        if src.len() < (sw * sh * 4) as usize { return; }
-        // Contain-fit: largest integer scale (numerator/denominator) that
-        // keeps the whole image inside the rect, preserving aspect.
-        // dst_w = sw * rect.w / sw capped... compute via the smaller ratio.
-        let rw = rect.w;
-        let rh = rect.h;
-        // Choose dst size: scale so that dst_w<=rw and dst_h<=rh, max one.
-        let (fit_w, fit_h) = {
-            // fit by width vs by height, pick the one that fits both.
-            let by_w_h = (sh * rw + sw / 2) / sw; // height if scaled to rw
-            if by_w_h <= rh {
-                (rw, by_w_h.max(1))
-            } else {
-                let by_h_w = (sw * rh + sh / 2) / sh; // width if scaled to rh
-                (by_h_w.max(1), rh)
-            }
-        };
-        // Zoom multiplies the fitted size; the image stays centred and the
-        // rect crops it. 256 = plain fit.
-        let z = zoom_q88.max(1) as u64;
-        let dst_w = (((fit_w as u64 * z) / 256).max(1)).min(u32::MAX as u64) as u32;
-        let dst_h = (((fit_h as u64 * z) / 256).max(1)).min(u32::MAX as u64) as u32;
-
-        let (rx, ry) = window_to_target(t, rect.x, rect.y);
-        // Signed: zoomed past the rect the origin goes negative.
-        // Pan is clamped to the overhang — the amount by which the scaled
-        // image exceeds the rect — so dragging stops at the image edge
-        // instead of pulling it off into the background. Nothing overhangs
-        // on an axis that still fits, so that axis simply cannot be moved.
-        let over_x = (dst_w as i32 - rw as i32).max(0) / 2;
-        let over_y = (dst_h as i32 - rh as i32).max(0) / 2;
-        let pan_x = pan.0.clamp(-over_x, over_x);
-        let pan_y = pan.1.clamp(-over_y, over_y);
-        let ox = rx + (rw as i32 - dst_w as i32) / 2 + pan_x;
-        let oy = ry + (rh as i32 - dst_h as i32) / 2 + pan_y;
-
-        // Walk only the pixels that can survive: the target clip, the
-        // canvas rect and the scaled image all intersected up front. The
-        // old form iterated the whole destination and skipped per pixel,
-        // which at high zoom is most of the work for nothing.
-        let (clx0, cly0, clx1, cly1) = local_clip(t);
-        let x0 = clx0.max(rx).max(ox);
-        let y0 = cly0.max(ry).max(oy);
-        let x1 = clx1.min(rx + rw as i32).min(ox + dst_w as i32);
-        let y1 = cly1.min(ry + rh as i32).min(oy + dst_h as i32);
-        if x0 >= x1 || y0 >= y1 { return; }
+        if src.len() < (sw as usize) * (sh as usize) * 4 { return; }
+        let Some(f) = canvas_fit(t, sw, sh, rect, zoom_q88, pan) else { return };
 
         let stride = t.stride as usize;
-        for py in y0..y1 {
-            let dy = (py - oy) as u32;
-            let sy = ((dy as u64 * sh as u64) / dst_h as u64) as u32; // nearest-neighbour
-            let src_row = (sy.min(sh - 1) as usize) * (sw as usize) * 4;
-            let dst_row = (py as usize) * stride;
-            for px in x0..x1 {
-                let dx = (px - ox) as u32;
-                let sx = ((dx as u64 * sw as u64) / dst_w as u64) as u32;
-                let src_off = src_row + (sx.min(sw - 1) as usize) * 4;
-                let b = src[src_off]     as u32;
-                let g = src[src_off + 1] as u32;
-                let r = src[src_off + 2] as u32;
-                let a = src[src_off + 3] as u32;
-                t.pixels[dst_row + px as usize] = (a << 24) | (r << 16) | (g << 8) | b;
+        let n = (f.x1 - f.x0) as usize;
+        let mut ys = Step::new(f.y0 - f.oy, sh, f.dst_h);
+        let xs0 = Step::new(f.x0 - f.ox, sw, f.dst_w);
+
+        // One destination pixel per source pixel: BGRA little-endian already
+        // IS the target word, so a row is a straight copy. Measured 21x
+        // cheaper than the scaling walk, and it is the case a canvas painted
+        // at its own size (`npk_canvas_rect`) hits on every commit. The
+        // third term is what makes the unchecked slice below sound.
+        let one_to_one =
+            sw == f.dst_w && sh == f.dst_h && xs0.idx as usize + n <= sw as usize;
+
+        for py in f.y0..f.y1 {
+            let src_row = (ys.idx.min(sh - 1) as usize) * (sw as usize) * 4;
+            let dst_row = (py as usize) * stride + f.x0 as usize;
+            let out = &mut t.pixels[dst_row..dst_row + n];
+            if one_to_one {
+                let s = src_row + xs0.idx as usize * 4;
+                for (d, c) in out.iter_mut().zip(src[s..s + n * 4].chunks_exact(4)) {
+                    *d = u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+                }
+            } else {
+                let mut xs = xs0;
+                for d in out.iter_mut() {
+                    let o = src_row + (xs.idx.min(sw - 1) as usize) * 4;
+                    *d = u32::from_le_bytes([src[o], src[o + 1], src[o + 2], src[o + 3]]);
+                    xs.step();
+                }
             }
+            ys.step();
         }
     }
+
+    fn canvas_blit_i420(&mut self, t: &mut RasterTarget, p: &I420Ref, sw: u32, sh: u32,
+                        rect: Rect, zoom_q88: u32, pan: (i32, i32)) {
+        let Some(f) = canvas_fit(t, sw, sh, rect, zoom_q88, pan) else { return };
+
+        // Y'CbCr -> BGR happens HERE, not in the module, and per DESTINATION
+        // pixel, not per source pixel. A 1080p frame in a 720p window costs
+        // 0.92 Mpx instead of 2.07, and it runs native (SSE/AVX2 are in the
+        // target spec) instead of inside an interpreter-free but SIMD-free
+        // forge module, where the same loop measured 145 % of a core.
+        let c = p.coeffs;
+        let stride = t.stride as usize;
+        let n = (f.x1 - f.x0) as usize;
+        let mut ys = Step::new(f.y0 - f.oy, sh, f.dst_h);
+        let xs0 = Step::new(f.x0 - f.ox, sw, f.dst_w);
+
+        // Every index below is inside its plane because `canvas::commit_i420`
+        // proved it: `sy < sh`, `sx < sw`, `y.len() >= ys*sh`,
+        // `u.len()/v.len() >= cs*ceil(sh/2)`.
+        for py in f.y0..f.y1 {
+            let sy = ys.idx.min(sh - 1) as usize;
+            let y_row = sy * p.ys;
+            let c_row = (sy >> 1) * p.cs;
+            let dst_row = (py as usize) * stride + f.x0 as usize;
+            let out = &mut t.pixels[dst_row..dst_row + n];
+            let mut xs = xs0;
+            for d in out.iter_mut() {
+                let sx = xs.idx.min(sw - 1) as usize;
+                let yy = (p.y[y_row + sx] as i32 - c.y_off) * c.y_mul;
+                let uu = p.u[c_row + (sx >> 1)] as i32 - 128;
+                let vv = p.v[c_row + (sx >> 1)] as i32 - 128;
+                let r = ((yy + c.r_v * vv + 128) >> 8).clamp(0, 255) as u32;
+                let g = ((yy - c.g_u * uu - c.g_v * vv + 128) >> 8).clamp(0, 255) as u32;
+                let b = ((yy + c.b_u * uu + 128) >> 8).clamp(0, 255) as u32;
+                *d = 0xff00_0000 | (r << 16) | (g << 8) | b;
+                xs.step();
+            }
+            ys.step();
+        }
+    }
+
 
     // blur / shadow / effect use the default trait impls (no-op).
     fn blur(&mut self, _t: &mut RasterTarget, _r: Rect, _radius: u8) {}
     fn shadow(&mut self, _t: &mut RasterTarget, _r: Rect, _s: Shadow) {}
     fn effect(&mut self, _t: &mut RasterTarget, _r: Rect, _id: crate::shade::widgets::abi::EffectId) {}
+}
+
+// ── Canvas geometry + the source walk ────────────────────────────────
+
+/// Where a contain-fit canvas lands in the target and which part of it
+/// survives the clip. Shared by both canvas blits so the two cannot drift
+/// apart — the fit, the zoom and the pan clamp are one piece of arithmetic
+/// with one owner.
+struct CanvasFit {
+    ox: i32,
+    oy: i32,
+    dst_w: u32,
+    dst_h: u32,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+}
+
+fn canvas_fit(t: &RasterTarget, sw: u32, sh: u32, rect: Rect,
+              zoom_q88: u32, pan: (i32, i32)) -> Option<CanvasFit> {
+    if sw == 0 || sh == 0 || rect.w == 0 || rect.h == 0 { return None; }
+    // Contain-fit: the larger of the two ratios that still keeps the whole
+    // image inside the rect, aspect preserved.
+    let rw = rect.w;
+    let rh = rect.h;
+    let (fit_w, fit_h) = {
+        let by_w_h = (sh * rw + sw / 2) / sw; // height if scaled to rw
+        if by_w_h <= rh {
+            (rw, by_w_h.max(1))
+        } else {
+            let by_h_w = (sw * rh + sh / 2) / sh; // width if scaled to rh
+            (by_h_w.max(1), rh)
+        }
+    };
+    // Zoom multiplies the fitted size; the image stays centred and the
+    // rect crops it. 256 = plain fit.
+    let z = zoom_q88.max(1) as u64;
+    let dst_w = (((fit_w as u64 * z) / 256).max(1)).min(u32::MAX as u64) as u32;
+    let dst_h = (((fit_h as u64 * z) / 256).max(1)).min(u32::MAX as u64) as u32;
+
+    let (rx, ry) = window_to_target(t, rect.x, rect.y);
+    // Signed: zoomed past the rect the origin goes negative. Pan is clamped
+    // to the overhang — the amount by which the scaled image exceeds the
+    // rect — so dragging stops at the image edge instead of pulling it off
+    // into the background. Nothing overhangs on an axis that still fits, so
+    // that axis simply cannot be moved.
+    let over_x = (dst_w as i32 - rw as i32).max(0) / 2;
+    let over_y = (dst_h as i32 - rh as i32).max(0) / 2;
+    let pan_x = pan.0.clamp(-over_x, over_x);
+    let pan_y = pan.1.clamp(-over_y, over_y);
+    let ox = rx + (rw as i32 - dst_w as i32) / 2 + pan_x;
+    let oy = ry + (rh as i32 - dst_h as i32) / 2 + pan_y;
+
+    // Walk only the pixels that can survive: the target clip, the canvas
+    // rect and the scaled image all intersected up front. Iterating the
+    // whole destination and skipping per pixel is, at high zoom, most of
+    // the work for nothing.
+    let (clx0, cly0, clx1, cly1) = local_clip(t);
+    let x0 = clx0.max(rx).max(ox);
+    let y0 = cly0.max(ry).max(oy);
+    let x1 = clx1.min(rx + rw as i32).min(ox + dst_w as i32);
+    let y1 = cly1.min(ry + rh as i32).min(oy + dst_h as i32);
+    if x0 >= x1 || y0 >= y1 { return None; }
+
+    Some(CanvasFit { ox, oy, dst_w, dst_h, x0, y0, x1, y1 })
+}
+
+/// Nearest-neighbour source index that WALKS instead of being divided for.
+///
+/// `idx` grows by the whole part of the step and `acc` carries the
+/// remainder, tipping one further exactly when it reaches `den`. That is
+/// the same number as `d * num / den` — verified bit-for-bit against the
+/// division over 35 combinations of destination size and offset
+/// (`<tools>/mediabench/src/blit_equiv.rs`) — without a 64-bit division
+/// per pixel. At 1080p that division ran two million times per frame.
+#[derive(Clone, Copy)]
+struct Step {
+    idx: u32,
+    acc: u64,
+    whole: u32,
+    rem: u64,
+    den: u64,
+}
+
+impl Step {
+    /// `d0` is the first destination offset, and must not be negative —
+    /// both callers derive it from a bound that already clamped against
+    /// the origin.
+    fn new(d0: i32, num: u32, den: u32) -> Step {
+        let n = (d0.max(0) as u64) * num as u64;
+        Step {
+            idx: (n / den as u64) as u32,
+            acc: n % den as u64,
+            whole: num / den,
+            rem: (num % den) as u64,
+            den: den as u64,
+        }
+    }
+
+    #[inline]
+    fn step(&mut self) {
+        self.idx += self.whole;
+        self.acc += self.rem;
+        if self.acc >= self.den {
+            self.acc -= self.den;
+            self.idx += 1;
+        }
+    }
 }
 
 // ── Pixel helpers ────────────────────────────────────────────────────

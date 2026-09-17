@@ -767,6 +767,19 @@ pub const PALETTE_SLOTS: usize = 32;
 /// and subtracts `origin` internally to get the target-local position.
 /// Draws are clipped to `size`. This is what makes tile-boundary drawing
 /// Just Work — the left tile clips the right half away, and vice versa.
+/// A planar 4:2:0 frame, borrowed from the canvas store. Every field was
+/// validated by `canvas::commit_i420`, which is what lets the blit index
+/// the planes without re-deriving a single bound.
+pub struct I420Ref<'a> {
+    pub y: &'a [u8],
+    pub u: &'a [u8],
+    pub v: &'a [u8],
+    /// Row strides in bytes — a decoder pads rows, so these are not `w`.
+    pub ys: usize,
+    pub cs: usize,
+    pub coeffs: super::canvas::YuvCoeffs,
+}
+
 pub struct RasterTarget<'a> {
     /// Backing pixel buffer (BGRA32, packed u32 per pixel).
     pub pixels:  &'a mut [u32],
@@ -854,6 +867,13 @@ pub trait Rasterizer: Send + Sync {
     /// and is clamped to the overhang, so the rect never shows a gap.
     fn canvas_blit(&mut self, _t: &mut RasterTarget, _src: &[u8], _sw: u32, _sh: u32,
                    _rect: Rect, _zoom_q88: u32, _pan: (i32, i32)) {}
+
+    /// The same blit for a planar 4:2:0 frame, converting Y′CbCr to BGRA
+    /// on the way. Separate from `canvas_blit` rather than a format flag
+    /// on it because the two walk different memory: one plane of 4-byte
+    /// pixels against three planes at two resolutions. Default no-op.
+    fn canvas_blit_i420(&mut self, _t: &mut RasterTarget, _p: &I420Ref, _sw: u32, _sh: u32,
+                        _rect: Rect, _zoom_q88: u32, _pan: (i32, i32)) {}
 
     // ── Reserved (v2+, default no-op on CPU backend) ──────────────────
 

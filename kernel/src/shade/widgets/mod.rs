@@ -2586,6 +2586,52 @@ pub fn rerender_window(wid: u32) {
     });
 }
 
+/// Repaint a window from its EXISTING layout.
+///
+/// For a canvas commit the widget tree is untouched — only the pixels a
+/// `Widget::Canvas` holds changed — so `layout_scrolled` would produce the
+/// same tree it produced last time. At 30 frames a second that is the most
+/// expensive thing in the path, done for nothing.
+///
+/// The rasterisation itself still runs over the whole buffer, and that is
+/// deliberate: painting only the canvas rect would have to know what sits
+/// ON TOP of it (an open menu, a popover, a scroll clip), and a repaint
+/// that gets z-order wrong erases the menu instead of the frame. Skipping
+/// the layout is safe without asking that question at all.
+pub fn rerender_window_pixels(wid: u32) {
+    let (tree, layout_tree, popovers, rect, hover_path, focus_path, active_path,
+         density, input_edit, scroll_y, scroll_x) = match SCENES.lock().get(&wid) {
+        Some(s) => (
+            s.tree.clone(),
+            s.layout_tree.clone(),
+            s.popovers.clone(),
+            abi::Rect { x: s.origin_x, y: s.origin_y, w: s.width, h: s.height },
+            s.hover_path.clone(),
+            s.focus_path.clone(),
+            s.active_path.clone(),
+            s.density,
+            s.input_edit.clone(),
+            s.scroll_y,
+            s.scroll_x,
+        ),
+        None => return,
+    };
+    let h: Option<&[u32]> = if hover_path.is_empty() { None } else { Some(&hover_path) };
+    let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
+    let a: Option<&[u32]> = active_path.as_deref();
+    let new_pixels = rasterize_buffer_with_overlays(
+        wid, &tree, &layout_tree, &popovers, rect, h, f, a, density,
+        input_edit.as_ref(), scroll_y, scroll_x);
+    if let Some(scene) = SCENES.lock().get_mut(&wid) {
+        scene.pixels = new_pixels;
+    }
+    crate::shade::with_compositor(|c| {
+        if let Some(win) = c.windows.iter_mut().find(|w| w.id.0 == wid) {
+            win.dirty = true;
+        }
+    });
+}
+
 pub fn relayout_scene(window_id: u32, new_x: i32, new_y: i32, new_w: u32, new_h: u32) -> bool {
     let mut guard = SCENES.lock();
     let scene = match guard.get_mut(&window_id) {

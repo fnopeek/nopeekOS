@@ -1580,6 +1580,21 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_canvas_commit_yuv(canvas_id, y, u, v, ys, cs, w, h, flags) -> 0 / -1
+    // The same escape hatch for a planar 4:2:0 frame — a video decoder
+    // hands over its own planes and the blit converts, at destination
+    // size and natively. CANVAS-gated exactly like the BGRA form.
+    linker.func_wrap("env", "npk_canvas_commit_yuv",
+        |mut caller: Caller<'_, HostState>, canvas_id: i32, y_ptr: i32, u_ptr: i32,
+         v_ptr: i32, ys: i32, cs: i32, width: i32, height: i32, flags: i32| -> i32 {
+            let Some(m) = caller.get_export("memory").and_then(|e| e.into_memory())
+                else { return -1 };
+            let (mem, ctx) = m.data_and_store_mut(&mut caller);
+            host_core::npk_canvas_commit_yuv(mem, ctx, canvas_id, y_ptr, u_ptr, v_ptr,
+                                             ys, cs, width, height, flags)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_screen_size() -> (width << 16) | height, or 0 on error.
     // Allowed for RENDER (overlay sizing) OR CAPTURE (screenshot tool
     // sizing its capture buffer — it has no RENDER in full-screen mode).
@@ -1984,6 +1999,14 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 else { return -1 };
             let (mem, ctx) = m.data_and_store_mut(&mut caller);
             host_core::npk_audio_submit(mem, ctx, slot, ptr, len)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_audio_buffered(slot) -> bytes still in the ring, -1 if closed.
+    // The honest play clock; see host_core for why the wall clock is not one.
+    linker.func_wrap("env", "npk_audio_buffered",
+        |mut caller: Caller<'_, HostState>, slot: i32| -> i32 {
+            host_core::npk_audio_buffered(caller.data_mut(), slot)
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
