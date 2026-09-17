@@ -31,10 +31,21 @@ Diff, den jemand liest.
 
 `--no-default-features`, dazu `libm`. Damit bleibt der **skalare** Arm:
 
-- **`asm` MUSS aus bleiben.** Es sind portable Rust-SIMD-Kerne, und forge
-  kennt `simd128` nicht. Eine Funktion, die forge nicht uebersetzt, bekommt
-  den Trap-Stumpf — das Modul stuerzt beim ersten Aufruf ab, es wird nicht
-  langsamer. Gemessen ist der Arm ohnehin nur 1,14x auf normalem Material.
+- **`asm` bleibt aus, und der Grund ist nicht der, der hier stand.**
+  Nachgesehen 2026-09-17 im Crate selbst: `rusty_h264-accel` ist
+  `std::arch::x86_64` (SSE2/AVX2) plus `aarch64` NEON plus eine skalare
+  Referenz, alles hinter `#[cfg(target_arch = ...)]`. **Es gibt keinen
+  wasm-Arm und kein `simd128` im ganzen Crate** — auf wasm32 wuerde `asm`
+  also nicht trappen, es taete schlicht NICHTS ausser die Angriffsflaeche
+  um ein Crate zu vergroessern, das bewusst nicht `forbid(unsafe)` ist.
+  Voriger Grund („portable Rust-SIMD, forge kennt `simd128` nicht, also
+  Trap-Stumpf") war falsch; die Schlussfolgerung war zufaellig richtig.
+
+  **Was das fuer Beschleunigung heisst:** SIMD im Dekoder gibt es fuer uns
+  nicht zu holen, sondern nur zu SCHREIBEN — wasm-SIMD-Kerne plus `simd128`
+  in forge. Gemessen lohnt es sich dort, wo es weh tut: Deblocking ist
+  **37 %** der Dekodierzeit (Abtastprofil, `<tools>/prof`), CABAC 17 %,
+  Motion Compensation 12 %.
 - **`std` und `global-alloc` bleiben aus**: tune bringt seine Halde selbst
   mit (`nopeek_widgets::heap`).
 
