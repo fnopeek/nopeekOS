@@ -369,7 +369,8 @@ impl Tune {
             // Das erste Bild wird dabei schon gezeigt. Ein schwarzer Kasten,
             // waehrend im Hintergrund gepuffert wird, sieht aus wie ein
             // Fehler; das stehende erste Bild sieht aus wie das, was es ist.
-            if let Some(f) = v.frame_at(self.video_ms, video::FILL_DECODES) {
+            v.decode_step(self.video_ms, video::FILL_DECODES);
+            if let Some(f) = v.take_due(self.video_ms) {
                 let (ys, cs) = video::Video::strides(f);
                 host::canvas_commit_yuv(VIDEO_CANVAS, &f.y, &f.u, &f.v, ys, cs,
                                         f.width as u32, f.height as u32, flags);
@@ -386,9 +387,15 @@ impl Tune {
         // kann nur eines zeigen — gemessen 109 dekodiert gegen 75 gezeigt.
         let budget = if v.show_before_decode(ms) { 0 } else { video::PLAY_DECODES };
         let t_dec = host::ticks();
-        let got = v.frame_at(ms, budget).is_some();
+        v.decode_step(ms, budget);
         self.sec_decode_ms += host::ticks() - t_dec;
         self.sec_decoded += v.take_decoded();
+        // Die Uhr NEU lesen. Das Dekodieren hat gedauert, und die Bilder,
+        // die inzwischen faellig wurden, sind genau die, die sonst
+        // unbemerkt verfallen.
+        let ms = host::ticks() - self.video_t0;
+        self.video_ms = ms;
+        let got = v.take_due(ms).is_some();
         if got {
             // Der Commit ist NICHT gratis: er kopiert die drei Ebenen ueber
             // die Modulgrenze und laesst das Fenster neu rastern, und beides

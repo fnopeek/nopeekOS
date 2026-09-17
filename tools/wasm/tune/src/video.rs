@@ -50,13 +50,24 @@ pub const PLAY_DECODES: usize = 1;
 /// it is otherwise idle, are used to build a lead. That is what the audio
 /// sink has done from the start (`sink::TARGET_LEAD_MS`).
 ///
-/// **1000 ms, und die Zahl ist gemessen.** Florians Geraetelauf, 1440p30,
-/// Tag/Nacht-Ueberblendung: der Rueckstand stieg auf **647 ms** und ging
-/// danach wieder zurueck (424 -> 647 -> 314). Ein Loch, kein Dauerzustand —
-/// also genau das, was ein Vorlauf schluckt, wenn er tief genug ist. Harte
-/// Schnitte in derselben Datei liefen ohne Rueckstand durch: EIN teures Bild
-/// faengt schon die Reihenfolge-Warteschlange ab, eine lange Kette nicht.
-const TARGET_LEAD_MS: i64 = 1000;
+/// **1500 ms, und die Zahl ist ausgerechnet.** Florians Lauf mit 0.2.9,
+/// 1440p30, Tag/Nacht-Ueberblendung, Sekunde fuer Sekunde:
+///
+/// ```text
+///   30 faellig, 21 dekodiert  ->  9 fehlen
+///   30 faellig, 18 dekodiert  -> 12 fehlen
+///   30 faellig, 30 dekodiert  ->  0
+///                     Summe     21 Bilder = 700 ms
+/// ```
+///
+/// Der Vorlauf ging dabei von 880 auf **40 ms** — er hat 840 ms hergegeben
+/// und war damit knapp zu flach. Ein Puffer, der bis auf 40 ms leerlaeuft,
+/// hat die Szene nicht gedeckt, er hat sie ueberlebt.
+///
+/// Das Defizit einer Szene ist die Zahl, die den Vorlauf setzt, und nicht
+/// die Bildrate oder das Bauchgefuehl. 2000 ms geben dem gemessenen Loch von
+/// 700 ms gut den doppelten Spielraum; bei 1440p greift ohnehin der Bytedeckel.
+const TARGET_LEAD_MS: i64 = 1500;
 
 /// And the real limit is BYTES, not frames.
 ///
@@ -65,11 +76,16 @@ const TARGET_LEAD_MS: i64 = 1000;
 /// file, which is the same mistake as sizing a buffer by item count anywhere
 /// else. So the lead is whichever comes first.
 ///
-/// 128 MB reicht bei 1440p fuer 23 Bilder (775 ms) und bei 1080p fuer mehr,
-/// als die Zeitgrenze zulaesst. Es ist viel, und es ist der Preis dafuer,
-/// dass ein Ueberblendung nicht sichtbar wird; belegt wird es nur, wenn die
-/// billigen Szenen davor Zeit uebrig hatten.
-const MAX_QUEUE_BYTES: usize = 128 * 1024 * 1024;
+/// **Und es war der Deckel, der wirklich griff.** Bei 1440p sind 128 MB nur
+/// 23 Bilder, also 775 ms — weniger als das gemessene Loch von 700 ms plus
+/// Reserve. Die Zeitgrenze stand auf 1000 und kam nie zum Zug.
+///
+/// 192 MB sind bei 1440p rund 34 Bilder (1,15 s) und bei 1080p mehr, als die
+/// Zeitgrenze zulaesst. Das ist viel Speicher, und es ist der Preis dafuer,
+/// dass eine Ueberblendung nicht sichtbar wird; belegt wird er nur, wenn die
+/// billigen Szenen davor Zeit uebrig hatten, und er schrumpft mit der
+/// Aufloesung von selbst.
+const MAX_QUEUE_BYTES: usize = 192 * 1024 * 1024;
 
 /// Ab wieviel Vorrat das ZEIGEN vor dem Dekodieren kommt.
 ///
@@ -240,16 +256,31 @@ impl Video {
     /// skipped without decoding it (the next one predicts from it), but it
     /// can be skipped on the way to the screen, and that is where the whole
     /// cost of a commit sits.
-    pub fn frame_at(&mut self, ms: i64, max_decodes: usize) -> Option<&YuvFrame> {
+    /// Decode ahead. Getrennt vom Zeigen, und das ist der Punkt: dazwischen
+    /// muss der Rufer die UHR NEU LESEN.
+    ///
+    /// Vorher stand beides in einem Aufruf und gab gegen dasselbe `ms` aus,
+    /// das VOR dem Dekodieren gelesen wurde. Nach 41 ms Dekodieren ist die
+    /// Uhr aber 41 ms weiter, und die Bilder, die inzwischen faellig wurden,
+    /// sah die Ausgabeschleife nicht — die Dekodier-Runde zeigte also gar
+    /// nichts. Gemessen waren das 22 Bilder je Sekunde in der teuren Szene,
+    /// obwohl fertige danebenlagen.
+    pub fn decode_step(&mut self, ms: i64, max_decodes: usize) {
         let mut budget = max_decodes;
         self.fill(ms, &mut budget);
+    }
 
-        // Ausgeben kostet KEIN Budget, und das ist der Punkt: ein spaetes
-        // Bild wegzuwerfen ist ein `remove` und kein Dekodieren. Stand hier
-        // ein Budgetabbruch, gab ein Aufruf genau EIN Bild heraus, waehrend
-        // die Uhr um die Aufrufdauer weiterlief — die Schlange wuchs hinten
-        // und das Bild kroch vorne. Am Geraet sah das aus wie „677 ms
-        // Rueckstand bei 256 ms Vorlauf", also wie ein Widerspruch.
+    /// Das Bild, das jetzt dran ist — und alles davor faellt weg.
+    ///
+    /// Frames that are already late are dropped rather than shown: a picture
+    /// cannot be skipped without decoding it (the next one predicts from
+    /// it), but it can be skipped on the way to the screen, and that is
+    /// where the whole cost of a commit sits.
+    ///
+    /// Kostet KEIN Budget: ein spaetes Bild wegzuwerfen ist ein `remove` und
+    /// kein Dekodieren. Stand hier ein Budgetabbruch, gab ein Aufruf genau
+    /// EIN Bild heraus, waehrend die Uhr um die Aufrufdauer weiterlief.
+    pub fn take_due(&mut self, ms: i64) -> Option<&YuvFrame> {
         let mut advanced = false;
         while let Some(&(pts, _)) = self.queue.first() {
             if pts > ms { break; }
@@ -263,11 +294,12 @@ impl Video {
             self.shown = Some((pts, f));
             advanced = true;
         }
-        if advanced { self.shown_count += 1; }
-        // Erst danach nachfuellen: was die Ausgabe eben geleert hat, wird
-        // mit dem uebrigen Budget wieder aufgefuellt.
-        self.fill(ms, &mut budget);
-        if advanced { self.shown.as_ref().map(|(_, f)| f) } else { None }
+        if advanced {
+            self.shown_count += 1;
+            self.shown.as_ref().map(|(_, f)| f)
+        } else {
+            None
+        }
     }
 
     /// Decode ahead: deep enough to order pictures, then as far ahead of the
