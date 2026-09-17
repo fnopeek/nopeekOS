@@ -364,8 +364,32 @@ pub extern "C" fn _start() {
     // lap ahead of the play head (~85 ms latency, reported to the guest as the
     // HDA-ring latency). poll_mix yields silence when no app is playing.
     let mut write_pos: usize = 0;
+    // Erste fuenf Sekunden: sagen, ob die DMA ueberhaupt laeuft.
+    //
+    // Der Loop unten fuellt nur, was die DMA SCHON GESPIELT hat
+    // (`avail = LPIB - write_pos`). Steht LPIB still, wird nie etwas
+    // geschrieben — und das sieht im Log aus wie ein sauberer Start ohne
+    // Ton. Genau dieser Fall trat unter QEMU auf, und er war von „Senke
+    // stumm" nicht zu unterscheiden, weil niemand LPIB gemeldet hat.
+    //
+    // Selbstbegrenzt: nach fuenf Berichten still, damit ein Treiber, der
+    // immer laeuft, das Log nicht flutet.
+    let mut reports = 5u32;
+    let mut pulled: u64 = 0;
+    let mut ticks: u32 = 0;
     loop {
         let lpib = (mmio_r32(mmio, base + SD_LPIB) as usize) % RING_BYTES;
+        ticks += 1;
+        if reports > 0 && ticks % 250 == 0 {
+            reports -= 1;
+            loghex("[audio_hda] LPIB=0x", lpib as u32);
+            loghex(" wpos=0x", write_pos as u32);
+            // SD_CTL als u32 gelesen traegt STS im obersten Byte (Offset
+            // 0x03) — Lauf-Bit, Stream-Tag und Status in einer Zahl.
+            loghex(" SDCTL=0x", mmio_r32(mmio, base + SD_CTL));
+            loghex(" gemischt=0x", pulled as u32);
+            log("\n");
+        }
         loop {
             // Bytes the DMA has played since we last filled (frame-aligned to 4).
             let avail = ((lpib + RING_BYTES - write_pos) % RING_BYTES) & !3;
@@ -375,6 +399,7 @@ pub extern "C" fn _start() {
             let mix = unsafe { &mut *core::ptr::addr_of_mut!(MIXBUF) };
             audio_poll_mix(&mut mix[..n]);
             dma_write(audio, write_pos as u32, &mix[..n]);
+            pulled += n as u64;
             write_pos = (write_pos + n) % RING_BYTES;
         }
         sleep_ms(4);
