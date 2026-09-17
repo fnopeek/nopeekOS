@@ -626,6 +626,27 @@ run_qemu_generic() {
     rm -f "$serial_log"
     log "Serial log: $serial_log"
 
+    # Audio-Senke: live hoeren, wenn dieses QEMU es kann, sonst in eine
+    # Datei. Die Backends sind bei Arch eigene Pakete (qemu-audio-pipewire /
+    # -pa), also entscheidet nicht die QEMU-Version, sondern was installiert
+    # ist — und das fragen wir QEMU selbst, statt es zu raten.
+    #
+    # Die Datei ist kein Notnagel: sie ist das schaerfere Werkzeug, weil man
+    # sie gegen ffmpeg halten kann. Nur hoert man sie eben nicht.
+    local audiodev="${QEMU_AUDIODEV:-}"
+    if [ -z "$audiodev" ]; then
+        local have
+        have="$(qemu-system-x86_64 -audiodev help 2>/dev/null)"
+        if printf '%s\n' "$have" | grep -qx "pipewire"; then
+            audiodev="pipewire,id=snd0"
+        elif printf '%s\n' "$have" | grep -qx "pa"; then
+            audiodev="pa,id=snd0"
+        else
+            audiodev="wav,id=snd0,path=/tmp/nopeek-audio.wav"
+        fi
+    fi
+    log "Audio: -audiodev $audiodev"
+
     qemu-system-x86_64 \
         "${accel_args[@]}" \
         "${fw_args[@]}" \
@@ -642,7 +663,7 @@ run_qemu_generic() {
         -device usb-mouse,bus=xhci.0 \
         -device intel-hda \
         -device hda-output,audiodev=snd0 \
-        -audiodev "${QEMU_AUDIODEV:-wav,id=snd0,path=/tmp/nopeek-audio.wav}" \
+        -audiodev "$audiodev" \
         "${installer_args[@]}" \
         "${net_args[@]}" \
         -no-reboot \
