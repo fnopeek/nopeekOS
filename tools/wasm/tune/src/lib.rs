@@ -31,6 +31,10 @@ use nopeek_widgets::*;
 
 mod host;
 mod mp3;
+// Der Container. Noch nicht verdrahtet — der Spieler kommt als eigener
+// Schnitt; geprüft ist er host-seitig gegen ffmpeg (<tools>/mediabench).
+#[allow(dead_code)]
+mod mp4;
 mod resample;
 mod sink;
 mod source;
