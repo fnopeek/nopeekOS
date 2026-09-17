@@ -610,8 +610,21 @@ fn rect_coverage(px: i32, py: i32, rx: i32, ry: i32, rw: i32, rh: i32, r: i32) -
     let in_y_core = py >= ry + r && py < ry + rh - r;
     if in_x_core || in_y_core { return 255; }
 
-    let cx = if px < rx + r { rx + r } else { rx + rw - 1 - r };
-    let cy = if py < ry + r { ry + r } else { ry + rh - 1 - r };
+    // Dieselben Mittelpunkte wie `fill_rounded_rect_target`, und das ist
+    // keine Kosmetik. Dort ist der Versatz `r - 1 - col`, der Mittelpunkt
+    // liegt also auf Pixel `rx + r - 1` und `rx + rw - r`. Hier stand
+    // `rx + r` und `rx + rw - 1 - r` — um EINEN Pixel daneben, auf allen
+    // vier Ecken, seit es die Funktion gibt.
+    //
+    // Bei den Radien, mit denen bisher gemalt wurde (4 bis 8), ist das
+    // ein Versatz unter der Aufmerksamkeitsschwelle. Bei einer PILLE
+    // (r = h/2) kippt es: mit `ry + r` und `ry + rh - 1 - r` liegt der
+    // UNTERE Mittelpunkt einen Pixel UEBER dem oberen, die beiden
+    // Halbkreise ueberlappen verkehrt, und die Form wird in der Mitte
+    // eingeschnuert. Der Strich lief dann sichtbar neben seiner eigenen
+    // Flaeche — gemeldet an der Bar, h = 32, r = 16.
+    let cx = if px < rx + r { rx + r - 1 } else { rx + rw - r };
+    let cy = if py < ry + r { ry + r - 1 } else { ry + rh - r };
     corner_coverage(px - cx, py - cy, r)
 }
 
@@ -645,4 +658,70 @@ fn blend_over(dst: u32, src: u32, src_alpha: u8) -> u32 {
     let b = (sb * sa + db * dst_contrib) / out_a;
 
     (out_a << 24) | (r << 16) | (g << 8) | b
+}
+
+#[cfg(test)]
+mod round_tests {
+    use super::{corner_coverage, rect_coverage};
+
+    /// Strich und Fuellung muessen DIESELBE Form meinen.
+    ///
+    /// `fill_rounded_rect_target` baut seine Ecken zeilenweise mit
+    /// `corner_coverage(r-1-col, r-1-row, r)`. `rect_coverage` — von dem
+    /// der STRICH lebt — rechnet dieselbe Ecke analytisch. Standen die
+    /// Mittelpunkte einen Pixel auseinander, lief der Rahmen neben seiner
+    /// eigenen Flaeche.
+    #[test]
+    fn stroke_and_fill_agree_on_every_corner() {
+        for &(w, h) in &[(64, 32), (40, 24), (200, 36), (33, 33), (48, 48)] {
+            for r in 1..=(w.min(h) / 2) {
+                for row in 0..r {
+                    for col in 0..r {
+                        let want = corner_coverage(r - 1 - col, r - 1 - row, r);
+                        // alle vier Ecken gegen die Fuellung halten
+                        for &(px, py) in &[
+                            (col, row),                 // oben links
+                            (w - 1 - col, row),         // oben rechts
+                            (col, h - 1 - row),         // unten links
+                            (w - 1 - col, h - 1 - row), // unten rechts
+                        ] {
+                            let got = rect_coverage(px, py, 0, 0, w, h, r);
+                            assert_eq!(
+                                got, want,
+                                "w={w} h={h} r={r} Pixel ({px},{py}): \
+                                 Strich {got} gegen Fuellung {want}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Eine Pille (r = h/2) ist der Fall, in dem der alte Fehler kippte:
+    /// die zwei Bogenmittelpunkte tauschten die Reihenfolge und schnuerten
+    /// die Form in der Mitte ein. Die Silhouette muss senkrecht
+    /// spiegelsymmetrisch sein und in der Mitte am breitesten.
+    #[test]
+    fn pill_is_symmetric_and_widest_in_the_middle() {
+        let (w, h) = (200, 32);
+        let r = h / 2;
+        let left_edge = |y: i32| (0..w).find(|&x| rect_coverage(x, y, 0, 0, w, h, r) > 0);
+        for y in 0..h / 2 {
+            assert_eq!(
+                left_edge(y),
+                left_edge(h - 1 - y),
+                "Pille bei y={y} nicht spiegelsymmetrisch zu y={}",
+                h - 1 - y
+            );
+        }
+        let mid = left_edge(h / 2 - 1).unwrap();
+        assert_eq!(mid, 0, "die Pille muss auf halber Hoehe die Kante beruehren");
+        for y in 0..h {
+            assert!(
+                left_edge(y).unwrap() >= mid,
+                "y={y} ragt links ueber die breiteste Stelle hinaus"
+            );
+        }
+    }
 }
