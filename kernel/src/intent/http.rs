@@ -143,13 +143,24 @@ fn do_http_request(args: &str, use_tls: bool) {
     let host = host.trim();
     let path = if path.is_empty() { "/" } else { path };
 
-    // Streaming fast-path: HTTPS + `> name` writes the body straight
-    // into npkFS via the ChunkedWriter so a multi-GB ISO / movie
-    // download doesn't fill the heap. Peak RAM = one 16 MiB chunk
-    // regardless of total size. Plain-HTTP storing stays on the
-    // legacy buffered path (capped at HTTP_MAX_RESPONSE = 128 KB)
-    // because we never want to encourage cleartext downloads of
-    // anything large enough to need streaming.
+    // Streaming fast-path: `-d` or `> name` writes the body straight into
+    // npkFS via the ChunkedWriter so a multi-GB ISO / movie download doesn't
+    // fill the heap. Peak RAM = one 16 MiB chunk regardless of total size.
+    //
+    // **Fuer BEIDE Schemata.** Hier stand, Klartext-HTTP bleibe beim
+    // Speichern auf dem gepufferten Weg mit seinen 128 KB — das tut es
+    // nicht, und die Bedingung unten sagt es auch nicht: sie fragt nur nach
+    // `-d` oder `> name`. `HTTP_MAX_RESPONSE` gilt allein fuer den Weg
+    // DARUNTER, der die Antwort auf den Schirm schreibt. Der Satz hat mich
+    // einmal eine falsche Auskunft gekostet.
+    //
+    // ⚠ Und was hier NICHT geprueft wird: `net.allow_plain_http`. Der
+    // Schalter sitzt in `parse_url`, und die ruft nur der MODULweg
+    // (`npk_http_*`, also beak). Wer `http …` in die Shell tippt, bekommt
+    // Klartext ohne Schalter und ohne die KLARTEXT-Zeile, die `parse_url`
+    // sonst druckt. Das ist vertretbar — am eigenen Prompt ist der Mensch
+    // die Instanz, nicht die Seite —, aber es ist eine Asymmetrie und
+    // gehoert benannt statt entdeckt.
     if flags.discard || store_as.is_some() {
         // Sink for the streamed body. With -d we DON'T open npkFS — bytes are
         // counted + thrown away, so this measures the pure net throughput
