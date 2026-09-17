@@ -168,17 +168,61 @@ je Sekunde Ton (ffmpeg, 1 Thread) — selbst mit x11,8 sind das 0,4 % eines
 Kerns. Reine Rust-Dekoder gibt es (`symphonia-codec-aac`, `rusty_aac`), beide
 `std`-gebunden; das ist eine Portierung, keine Forschung.
 
-## Die Leiter — was wann geht
+## Die Leiter — WIDERLEGT am Geraet (2026-09-17)
 
-| | heute mit forge | was fehlt |
+Die Vorhersage stand hier so:
+
+| | vorhergesagt | was daraus wurde |
 |---|---|---|
-| **480p30** | **26 %** eines Kerns | nichts — das laeuft |
-| **720p30** | **55 %** | nichts — das laeuft mit Luft |
-| **1080p30** | **123 %** | **geht nicht** |
+| **480p30** | 26 % eines Kerns | — |
+| **720p30** | 55 % | — |
+| **1080p30** | **123 %, „geht nicht"** | **die Vorhersage ist falsch** |
 
-**Also: 480p und 720p ja, 1080p nein.** Und die Grenze liegt nicht am
-Dekoder — der ist gleichauf mit ffmpegs C-Pfad — sondern am Aufschlag, den
-ein WASM-Modul zahlt.
+**Florians Geraetelauf spielt 2560x1440 bei 30 fps fluessig** — mehr als
+doppelt so viele Pixel wie 1080p, und die Leiter sagte, schon 1080p sei
+nicht zu schaffen. Fenster vergroessern, skalieren, Arbeitsflaeche wechseln:
+laeuft weiter.
+
+**Was daran falsch war, laesst sich eingrenzen, aber noch nicht aufteilen.**
+1440p30 sind 110,6 Mpx/s, und derselbe Dekoder schafft auf dem Ryzen skalar
+841 Mpx/s (auf genau dieser Datei gemessen). Also ist **forge x Geraet
+zusammen hoechstens 7,6x**, nicht die 11,8x, mit denen die Tabelle gerechnet
+hat. Welcher der beiden Faktoren daneben liegt, ist NICHT gemessen; der
+Verdacht ist forge:
+
+> **3,4-3,9x ist an beaks Box-Layout gemessen** — Zeigerjagd, Allokation,
+> dichte Aufrufe. Ein Dekoder ist das Gegenteil: lange arithmetische
+> Schleifen ueber Felder, mit Zugriffsmustern, die der Cache mag. Es gibt
+> keinen Grund anzunehmen, dass derselbe Aufschlag gilt, und ich habe ihn
+> trotzdem uebertragen.
+
+**Die Lehre gehoert hierher und nicht in eine Fussnote:** ein Faktor, der an
+EINER Last gemessen wurde, ist keine Eigenschaft des Uebersetzers. Die
+Tabelle sah aus wie eine Messung und war eine Extrapolation.
+
+**Was gemessen bleibt und weiter gilt:** die Dekoderzeiten je Frame auf dem
+Ryzen, die Farbmathematik, der Blit, und dass die Farbraumrechnung im Modul
+145 % eines Kerns kostet. Falsch war nur die Bruecke aufs Geraet.
+
+## Was am Geraet WIRKLICH begrenzt: die Bitrate, nicht die Pixel
+
+Der eine Fehler im Lauf war eine **Tag/Nacht-Ueberblendung**: Rueckstand
+424 -> 647 -> 314 ms, danach wieder eingeholt. Harte Schnitte in derselben
+Datei liefen ohne Rueckstand durch.
+
+Das ist die ganze Physik in einem Satz: **Dekodierkosten folgen den BITS,
+nicht den Pixeln.** Eine globale Helligkeitsaenderung laesst nichts
+vorhersagen, also hat jeder Makroblock ein grosses Residuum — und das ueber
+viele Bilder hintereinander. Ein Schnitt ist EIN teures Bild und wird von
+der Reihenfolge-Warteschlange schon geschluckt; eine Ueberblendung ist eine
+Kette.
+
+Gebaut daraus (tune 0.2.4): **Vorlauf beim Dekodieren**, 1000 ms, gedeckelt
+auf 128 MB. Die 1000 kommen aus den gemessenen 647, nicht aus dem Bauch; der
+Bytedeckel ist der, der bei 1440p wirklich greift (23 Bilder = 775 ms), und
+er steht in Bytes, weil ein Deckel nach Bildern bei jeder Aufloesung etwas
+anderes kostet. Gefuellt wird nur, wenn die billigen Szenen davor Zeit
+uebrig hatten.
 
 ## „Das koennen wir mit unserem Compiler beschleunigen"
 
