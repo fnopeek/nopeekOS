@@ -87,25 +87,21 @@ const CELL_RADIUS: u8 = 6;
 /// auf 12. Was davon als GERADE Strecke uebrigbleibt, macht die Form —
 /// 26 px lassen 2 px (ein Kreis), 38 px lassen 14 px (eine Pille).
 const WS_W: u16 = 38;
-/// Seitlicher Abstand der Karte zur Bildschirmkante.
-///
-/// Dieselben 12 px, die der Compositor dem Dock nach unten gibt
-/// (`DOCK_BOTTOM_GAP`) — damit die zwei Pillen zueinander passen. Der
-/// Panel-Streifen bleibt 1920 breit, der Strut aendert sich also nicht;
-/// es aendert sich nur, wo die Karte darin sitzt.
-const SIDE_GAP: u16 = 12;
-/// Senkrechter Abstand. Der Streifen ist 36 px hoch und die Karte braucht
-/// 32 (Band 24 + 2x4), also bleiben genau 2 oben und 2 unten. Mehr ginge
-/// nur, indem der Streifen waechst — und der ist ein Strut, das kostet
-/// Platz fuer die Fenster.
-const TOP_GAP: u16 = 2;
+// KEIN eigener Rand hier. Der Compositor setzt die Bar selbst als
+// schwebende Pille: `set_bar_panel` schreibt `win.x = margin`,
+// `win.width = screen_w - 2*margin` mit `shade.bar_margin` (Vorgabe 6) —
+// DERSELBE Rand, mit dem die Kacheln liegen. Wer hier noch einmal
+// polstert, macht die Bar schmaler als die Fenster; genau das ist in
+// 0.9.0 passiert.
+
 /// Eckradius der Desktop-Zellen: ganz rund.
 ///
-/// Sie sitzen in der Karte, die selbst eine Pille ist (32 px hoch →
-/// Radius 16), mit 4 px Polsterung dazwischen. 16 − 4 = 12, und 12 ist
-/// genau der Radius, den `Pill` hier ergibt: die Boegen sind
-/// KONZENTRISCH, und deshalb braucht die Karte hier keinen Zuschlag,
-/// anders als die Ablage im Dock.
+/// Sie sitzen in der Karte, die selbst eine Pille ist (36 px hoch →
+/// Radius 18), mit 4 px Polsterung dazwischen. Konzentrisch waeren
+/// 18 − 4 = 14; eine 38x24-Zelle bekommt 12, ist also zwei Pixel ENGER
+/// als der Bogen ueber ihr. Das ist die sichere Richtung — zu weit waere
+/// der Fall, in dem die Ecke schneidet. Deshalb braucht die Bar keinen
+/// waagrechten Zuschlag, anders als die Ablage im Dock.
 const WS_RADIUS: u8 = Radius::Pill as u8;
 
 // ── Bump allocator with a reset mark ─────────────────────────────────
@@ -605,13 +601,14 @@ fn build_tree(seg: &Segments, st: &BarState) -> Widget {
     // is filled at chrome alpha with anti-aliased corners and the
     // compositor composites it by per-pixel alpha — translucent panel,
     // crisp glyphs, no halo.
-    let card = Widget::Stack {
+    Widget::Stack {
         children: alloc::vec![sides, center],
         modifiers: alloc::vec![
             Modifier::Background(Token::SurfaceElevated),
-            // Ganz rund. Der Rasterer klemmt `Pill` auf `min(w/2, h/2)`,
-            // die Karte ist 32 px hoch (Band 24 + 2x4) → Radius 16, also
-            // echte Halbkreise an beiden Enden.
+            // Ganz rund. Der Rasterer klemmt `Pill` auf `min(w/2, h/2)`.
+            // Die Karte fuellt das Fenster, und dessen Hoehe setzt der
+            // Compositor auf `pill_h` = das `h` aus `set_panel`, also 36
+            // → Radius 18, echte Halbkreise an beiden Enden.
             //
             // Rahmen und Fuellung tragen DENSELBEN Wert. Stuenden dort
             // zwei, liefe der 1-px-Strich neben seiner eigenen Flaeche.
@@ -619,21 +616,6 @@ fn build_tree(seg: &Segments, st: &BarState) -> Widget {
             Modifier::Rounded(Radius::Pill.as_u8()),
             Modifier::Padding(Padding::Xs.as_u16()),
         ],
-    };
-    // Die Karte SCHWEBT im Streifen, statt ihn auszufuellen.
-    //
-    // Ein `Stack` reicht jedem Kind die volle Inhaltsflaeche
-    // (`layout.rs`: `place(c, content, ctx)`), die Polsterung hier ist
-    // also der Rand der Karte: 1920x36 minus 2x12 und 2x2 → 1896x32.
-    //
-    // Die 32 sind nicht nebensaechlich, sie SETZEN den Radius: `Pill`
-    // klemmt auf `min(w/2, h/2)` = 16. Zusammen mit der 4-px-Polsterung
-    // der Karte ergibt 16 − 4 = 12, und 12 ist genau der Radius, den eine
-    // 38x24-Desktopzelle bekommt. Die Boegen sind damit KONZENTRISCH, und
-    // deshalb braucht die Bar keinen waagrechten Zuschlag wie das Dock.
-    Widget::Stack {
-        children: alloc::vec![card],
-        modifiers: alloc::vec![Modifier::PaddingXY { x: SIDE_GAP, y: TOP_GAP }],
     }
 }
 
