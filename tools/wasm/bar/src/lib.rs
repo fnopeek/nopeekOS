@@ -490,10 +490,18 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
                 //
                 // Jetzt bekommt er die Zelle wirklich: ein Kasten von
                 // `WS_W`, der Strich darin zwischen zwei Spreizern, also
-                // mittig. Der leere Platz (6) ist eine unsichtbare Marke
-                // derselben Breite. Damit liegt alles auf demselben
-                // 40er-Raster wie die Ziffern (`WS_W` + Zonenabstand),
-                // und keine Zahl davon ist von Hand abgestimmt.
+                // mittig. Damit liegt alles auf demselben 40er-Raster wie
+                // die Ziffern (`WS_W` + Zonenabstand), und keine Zahl
+                // davon ist von Hand abgestimmt.
+                //
+                // Und **weil** der Strich in SEINER Zelle mittig sitzt,
+                // ist der Abstand nach beiden Seiten von selbst gleich:
+                // bis zur „4" ist es eine halbe Zelle plus Zonenabstand,
+                // bis zur Anwendung dasselbe — 21,5 px und 21,5 px. Der
+                // leere Platz (6) aus Florians erster Skizze stand
+                // zwischendrin und machte daraus 21,5 gegen 61,5; er ist
+                // deshalb weg. Symmetrie ist hier eine Eigenschaft der
+                // Konstruktion und nicht eine abgestimmte Zahl.
                 alloc::vec![
                     Widget::Row {
                         children: alloc::vec![
@@ -509,7 +517,6 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
                             Modifier::MaxHeight(BAND_H),
                         ],
                     },
-                    prefab::mark(WS_W, 1, None),
                     Widget::Row {
                         children: alloc::vec![
                             Widget::Icon {
