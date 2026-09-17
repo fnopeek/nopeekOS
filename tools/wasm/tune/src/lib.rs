@@ -192,6 +192,12 @@ struct Tune {
     told_lag_s: i64,
     /// Still filling the queue before the clock starts.
     video_buffering: bool,
+    /// Je Sekunde gesammelt: Zeit im Dekoder, Zeit im Commit, Bilder.
+    /// Die Uhr hat 10-ms-Koernung, also taugt nur die SUMME ueber eine
+    /// Sekunde — ein einzelnes Bild zu messen waere Rauschen.
+    sec_decode_ms: i64,
+    sec_commit_ms: i64,
+    sec_decoded: u32,
 }
 
 const A_PLAY_PAUSE: u32 = 1;
@@ -233,6 +239,9 @@ impl Tune {
             video_ms: 0,
             told_lag_s: -1,
             video_buffering: false,
+            sec_decode_ms: 0,
+            sec_commit_ms: 0,
+            sec_decoded: 0,
         };
 
         let mut argbuf = [0u8; 512];
@@ -372,10 +381,23 @@ impl Tune {
         let ms = now - self.video_t0;
         self.video_ms = ms;
         let flags = v.colour_flags;
-        if let Some(f) = v.frame_at(ms) {
-            let (ys, cs) = video::Video::strides(f);
-            host::canvas_commit_yuv(VIDEO_CANVAS, &f.y, &f.u, &f.v, ys, cs,
-                                    f.width as u32, f.height as u32, flags);
+        let t_dec = host::ticks();
+        let got = v.frame_at(ms).is_some();
+        self.sec_decode_ms += host::ticks() - t_dec;
+        self.sec_decoded += v.take_decoded();
+        if got {
+            // Der Commit ist NICHT gratis: er kopiert die drei Ebenen ueber
+            // die Modulgrenze und laesst das Fenster neu rastern, und beides
+            // laeuft im Wirtsaufruf, also seriell zum Dekodieren. Deshalb
+            // wird er getrennt gemessen — sonst sieht seine Zeit aus wie
+            // Dekodierzeit.
+            let t_com = host::ticks();
+            if let Some(f) = v.current_frame() {
+                let (ys, cs) = video::Video::strides(f);
+                host::canvas_commit_yuv(VIDEO_CANVAS, &f.y, &f.u, &f.v, ys, cs,
+                                        f.width as u32, f.height as u32, flags);
+            }
+            self.sec_commit_ms += host::ticks() - t_com;
         }
         // Wie weit das Bild hinter der Uhr liegt. Eine Maschine, die nicht
         // mitkommt, soll es mit einer ZAHL sagen und nicht als Gefuehl —
@@ -383,18 +405,35 @@ impl Tune {
         let lag = ms - v.shown_ms();
         let lead = v.lead_ms(ms);
         let sec = ms / 1000;
-        if lag > 150 && sec != self.told_lag_s {
+        if sec != self.told_lag_s {
             self.told_lag_s = sec;
-            // Der Vorlauf steht daneben, weil er die Frage beantwortet, die
-            // der Rueckstand allein offen laesst: war der Puffer LEER, als es
-            // eng wurde (dann ist er zu flach), oder war er voll und die
-            // Stelle einfach teurer als alles, was wir vorhalten koennen?
-            let mut m = alloc::string::String::from("[tune] Bild haengt ");
-            push_u32(&mut m, lag.min(u32::MAX as i64) as u32);
-            m.push_str(" ms hinter der Uhr, Vorlauf ");
-            push_u32(&mut m, lead.min(u32::MAX as i64) as u32);
-            m.push_str(" ms");
-            log(&m);
+            let dropped = core::mem::take(&mut v.dropped);
+            let shown = core::mem::take(&mut v.shown_count);
+            // Gemeldet wird, was ERKLAERT: ein verworfenes Bild ist das, was
+            // das Auge sieht, auch wenn die Uhr stimmt. Und die zwei Zeiten
+            // daneben sagen, WOHIN die Sekunde ging — ohne sie waere jede
+            // Antwort darauf geraten.
+            if dropped > 0 || lag > 150 {
+                let mut m = alloc::string::String::from("[tune] ");
+                push_u32(&mut m, shown);
+                m.push_str(" Bilder, ");
+                push_u32(&mut m, dropped);
+                m.push_str(" verworfen · Rueckstand ");
+                push_u32(&mut m, lag.max(0).min(u32::MAX as i64) as u32);
+                m.push_str(" ms, Vorlauf ");
+                push_u32(&mut m, lead.min(u32::MAX as i64) as u32);
+                m.push_str(" ms · dekodiert ");
+                push_u32(&mut m, self.sec_decoded);
+                m.push_str("x in ");
+                push_u32(&mut m, self.sec_decode_ms.max(0) as u32);
+                m.push_str(" ms, gemalt ");
+                push_u32(&mut m, self.sec_commit_ms.max(0) as u32);
+                m.push_str(" ms");
+                log(&m);
+            }
+            self.sec_decode_ms = 0;
+            self.sec_commit_ms = 0;
+            self.sec_decoded = 0;
         }
         if v.ended() {
             self.drained = true;
@@ -852,7 +891,17 @@ pub extern "C" fn _start() {
                 }
                 // Paused, there is nothing to keep up with — poll a quarter
                 // as often and leave the core alone.
-                host::sleep(if t.playing { TICK_MS } else { TICK_MS * 4 });
+                // Zehn Millisekunden fest sind richtig, solange Vorrat da
+                // ist — und reine Latenz, wenn keiner da ist. Genau in der
+                // teuren Szene wird jede Runde gebraucht.
+                let thin = t.video.as_ref()
+                    .map(|v| v.lead_ms(t.video_ms) < 250)
+                    .unwrap_or(false);
+                host::sleep(match (t.playing, thin) {
+                    (true, true)  => 1,
+                    (true, false) => TICK_MS,
+                    (false, _)    => TICK_MS * 4,
+                });
             }
             PollResult::WindowGone => { t.sink.close(); return; }
         }
