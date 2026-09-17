@@ -461,6 +461,7 @@ fn translate_op_list(ops: &mut [DrawOp], dx: i32, dy: i32) {
         match op {
             DrawOp::Rect { x, y, .. }
             | DrawOp::RoundRect { x, y, .. }
+            | DrawOp::Caret { x, y, .. }
             | DrawOp::Check { x, y, .. }
             | DrawOp::Shadow { x, y, .. }
             | DrawOp::Image { x, y, .. } => {
@@ -635,6 +636,15 @@ fn clip_ops(ops: &mut Vec<DrawOp>, start: usize, cl: i32, ct: i32, cr: i32, cb: 
     for op in tail {
         let before = ops.len();
         match op {
+            // Der Zeiger wird wie ein Rechteck geschnitten — er sitzt IM
+            // Steuerelement, also darf er dessen Ausschnitt nicht verlassen.
+            DrawOp::Caret { x, y, w, h, color } => {
+                let (nx, ny) = (x.max(cl), y.max(ct));
+                let (nr, nb) = ((x + w).min(cr), (y + h).min(cb));
+                if nr > nx && nb > ny {
+                    ops.push(DrawOp::Caret { x: nx, y: ny, w: nr - nx, h: nb - ny, color });
+                }
+            }
             DrawOp::Rect { x, y, w, h, color } => {
                 let nx = x.max(cl);
                 let ny = y.max(ct);
@@ -1028,6 +1038,13 @@ pub enum DrawOp {
     /// Kept apart from `Rect` so the plain case stays one `memory.copy` per
     /// row — the rounded one has to walk its corner rows.
     RoundRect { x: i32, y: i32, w: i32, h: i32, r: [f32; 4], color: Rgba, ring: f32 },
+    /// Der Schreibzeiger in einem Textfeld — ein eigener Befehl, damit er
+    /// BLINKEN kann.
+    ///
+    /// Als gewoehnliches Rechteck kostete jeder Takt ein Neuauslegen (am
+    /// Geraet 10-40 ms, zweimal je Sekunde); als eigene Art laesst der
+    /// Rasterer ihn einfach aus, und der Wirt malt nur seinen Streifen neu.
+    Caret { x: i32, y: i32, w: i32, h: i32, color: Rgba },
     /// Der Haken eines angekreuzten Kaestchens: zwei Striche im Kasten
     /// `x,y,w,h`.
     ///
@@ -1124,6 +1141,7 @@ fn op_bottom(op: &DrawOp) -> i32 {
         // A text run's `y` is its top; `size` over-estimates the descent
         // slightly, which is the safe direction for a scroll extent.
         DrawOp::Text { y, size, .. } => y + ceil_i32(*size),
+        DrawOp::Caret { y, h, .. } => y + h,
         DrawOp::Rect { y, h, .. }
         | DrawOp::RoundRect { y, h, .. }
         | DrawOp::Check { y, h, .. }
@@ -1584,6 +1602,7 @@ fn op_key(op: &DrawOp) -> OpKey {
         DrawOp::Text { x, y, size, text, .. } => {
             OpKey { kind: 0, x: *x, y: *y, a: size.to_bits() as i32, b: text.len() as i32 }
         }
+        DrawOp::Caret { x, y, w, h, .. } => OpKey { kind: 9, x: *x, y: *y, a: *w, b: *h },
         DrawOp::Rect { x, y, w, h, .. } => OpKey { kind: 1, x: *x, y: *y, a: *w, b: *h },
         DrawOp::RoundRect { x, y, w, h, .. } => OpKey { kind: 2, x: *x, y: *y, a: *w, b: *h },
         DrawOp::Image { x, y, w, h, .. } => OpKey { kind: 3, x: *x, y: *y, a: *w, b: *h },
@@ -1618,6 +1637,18 @@ impl Layout {
     /// the display list is where an image's PLACED box lives — `img_box` only
     /// measures, and the y a repaint cares about is decided when the box is
     /// flowed. One pass per arriving batch, not per image.
+    /// Der Kasten des Schreibzeigers in DOKUMENTkoordinaten, wenn die Seite
+    /// gerade einen malt.
+    ///
+    /// Der Wirt braucht ihn, um im Takt nur DIESEN Streifen neu zu malen —
+    /// ein blinkender Zeiger, der die ganze Seite kostet, blinkt nicht lange.
+    pub fn caret_rect(&self) -> Option<(i32, i32, i32, i32)> {
+        self.ops.iter().rev().find_map(|o| match o {
+            DrawOp::Caret { x, y, w, h, .. } => Some((*x, *y, *w, *h)),
+            _ => None,
+        })
+    }
+
     pub fn images_in_band(&self, srcs: &[&str], top: i32, bottom: i32) -> bool {
         self.ops.iter().any(|op| match op {
             DrawOp::Image { y, h, src, .. } => {
@@ -5466,6 +5497,7 @@ family: st.family,
             match op {
                 DrawOp::Text { color, .. }
                 | DrawOp::Rect { color, .. }
+                | DrawOp::Caret { color, .. }
                 | DrawOp::Shadow { color, .. }
                 | DrawOp::Check { color, .. }
                 | DrawOp::RoundRect { color, .. } => *color = f.apply(*color),
@@ -8906,6 +8938,7 @@ family: st.family,
             match op {
                 DrawOp::Text { x, y, .. }
                 | DrawOp::Rect { x, y, .. }
+                | DrawOp::Caret { x, y, .. }
                 | DrawOp::RoundRect { x, y, .. }
                 | DrawOp::Check { x, y, .. }
                 | DrawOp::Shadow { x, y, .. }
@@ -10374,7 +10407,7 @@ family: ctl.style.family,
                 let cw = measure(font, &upto, ctl.style.size);
                 let inner = (w - ctl.pad_l - CTL_PAD_X - 2) as f32;
                 let cx = tx + cw.min(inner.max(0.0)) as i32;
-                ops.push(DrawOp::Rect {
+                ops.push(DrawOp::Caret {
                     x: cx,
                     y: ty + 1,
                     w: 1,
@@ -12755,6 +12788,47 @@ mod tests {
     /// Schatten seiner Liste. Als vier Rechtecke gemalt bekam die Kapsel
     /// eckige Ecken; gemessen gegen Chromium wanderte beaks Kante bei jedem
     /// `y` auf derselben Spalte, waehrend Chromiums sich nach aussen bog.
+    /// **Der Schreibzeiger ist ein eigener Befehl, damit er blinken kann.**
+    ///
+    /// Als gewoehnliches Rechteck haette jeder Takt ein Neuauslegen gekostet
+    /// (am Geraet 10-40 ms, zweimal je Sekunde). So bleibt das Layout stehen,
+    /// und der Rasterer laesst ihn in der dunklen Haelfte einfach aus.
+    #[test]
+    fn the_caret_is_its_own_op_and_the_engine_can_hide_it() {
+        let mut st = crate::forms::FormState::default();
+        let l0 = lay("<body><input id=q></body>", 400);
+        let seq = l0.controls.first().map(|c| c.seq).expect("ein Steuerelement");
+        st.set_value(seq, alloc::string::String::from("hallo"));
+        st.focus = Some(seq);
+        st.caret = 5;
+        let eng = crate::Engine::new();
+        let l = eng.layout_forms("<body><input id=q></body>", "", 400, &st);
+        let carets = l.ops.iter().filter(|o| matches!(o, DrawOp::Caret { .. })).count();
+        assert_eq!(carets, 1, "genau ein Zeiger, und als eigener Befehl");
+        let (cx, cy, cw, chh) = l.caret_rect().expect("caret_rect findet ihn");
+        assert_eq!(cw, 1, "ein Pixel breit");
+        assert!(chh > 4, "und so hoch wie die Zeile, nicht {chh}");
+        // Dieselben Kaesten, zwei Anstriche: hell und dunkel muessen sich
+        // GENAU an dieser Stelle unterscheiden und sonst nirgends.
+        let (w, h) = (400u32, 60u32);
+        let mut on = alloc::vec![0u8; (w * h * 4) as usize];
+        let mut off = alloc::vec![0u8; (w * h * 4) as usize];
+        eng.set_caret_on(true);
+        eng.paint(&l, w, h, 0, &mut on);
+        eng.set_caret_on(false);
+        eng.paint(&l, w, h, 0, &mut off);
+        eng.set_caret_on(true);
+        let anders: alloc::vec::Vec<usize> = (0..(w * h) as usize)
+            .filter(|i| on[i * 4..i * 4 + 3] != off[i * 4..i * 4 + 3])
+            .collect();
+        assert!(!anders.is_empty(), "abgeschaltet aendert sich nichts — er wird immer gemalt");
+        for i in &anders {
+            let (px, py) = ((*i as u32 % w) as i32, (*i as u32 / w) as i32);
+            assert!(px >= cx && px < cx + cw && py >= cy && py < cy + chh,
+                "Pixel {px},{py} aendert sich, liegt aber ausserhalb des Zeigers");
+        }
+    }
+
     #[test]
     fn a_spread_only_shadow_on_a_round_box_is_a_ring() {
         let ring = |css: &str| {
@@ -14921,7 +14995,11 @@ fn dbg_wiki_shape() {
         // Bis 0.175.0 faerbte beak stattdessen den Rahmen der Seite um — das
         // sah auf einem Feld, das seine Farbe selbst gesagt hat, falsch aus,
         // und es war falsch.
-        assert_eq!(rects(&l2).len(), plain_rects + 4 + 1, "Ring (4 Kanten) und Caret");
+        assert_eq!(rects(&l2).len(), plain_rects + 4, "der Ring, vier Kanten");
+        // Der Zeiger ist seit 0.188.0 ein eigener Befehl — er zaehlt bei den
+        // Rechtecken nicht mehr mit, steht aber da.
+        assert_eq!(l2.ops.iter().filter(|o| matches!(o, DrawOp::Caret { .. })).count(), 1,
+                   "und der Schreibzeiger");
     }
 
     #[test]
@@ -15030,7 +15108,12 @@ fn dbg_wiki_shape() {
         let mut st = FormState::default();
         st.focus = Some(seq);
         let focused = lay_forms(html, 400, &st);
-        assert_eq!(rects(&focused).len(), rects(&l).len() + 4 + 1, "ring plus caret");
+        // Vier Rechtecke fuer den Ring. Der Zeiger zaehlt seit 0.188.0 NICHT
+        // mehr mit: er ist ein eigener Befehl, damit er blinken kann, ohne
+        // dass ein Takt ein Neuauslegen kostet.
+        assert_eq!(rects(&focused).len(), rects(&l).len() + 4, "der Ring, vier Rechtecke");
+        let carets = focused.ops.iter().filter(|o| matches!(o, DrawOp::Caret { .. })).count();
+        assert_eq!(carets, 1, "und genau ein Schreibzeiger");
     }
 
     /// **Sagt die Seite `outline: none`, gibt es keinen Ring — und ihr
@@ -15049,8 +15132,11 @@ fn dbg_wiki_shape() {
         let mut st = FormState::default();
         st.focus = Some(seq);
         let focused = lay_forms(html, 400, &st);
-        // Nur der Caret kommt dazu.
-        assert_eq!(rects(&focused).len(), rects(&l).len() + 1, "kein Ring, nur der Caret");
+        // Kein Ring — und der Zeiger ist seit 0.188.0 kein Rechteck mehr,
+        // also kommt bei den Rechtecken GAR nichts dazu.
+        assert_eq!(rects(&focused).len(), rects(&l).len(), "kein Ring");
+        assert_eq!(focused.ops.iter().filter(|o| matches!(o, DrawOp::Caret { .. })).count(), 1,
+                   "der Schreibzeiger steht trotzdem");
         // Und der Rahmen ist noch der der Seite.
         let red = rects(&focused).iter()
             .filter(|r| r.4 == Rgb(0xff, 0x00, 0x00)).count();
