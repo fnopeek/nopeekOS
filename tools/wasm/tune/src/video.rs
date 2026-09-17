@@ -19,6 +19,18 @@ use crate::mp4;
 /// queue always emits the smallest `pts` it holds.
 const REORDER: usize = 4;
 
+/// Most samples one `frame_at` call may decode.
+///
+/// Without a cap this loop catches up until it reaches the wall clock, and
+/// that is unbounded: a second behind at 30 fps is thirty decodes in ONE
+/// call, and at 1440p thirty decodes are a second and a half in which the
+/// event loop does not poll. The window stops answering, and „too slow"
+/// looks like „hung" — two very different bugs.
+///
+/// With the cap the picture simply falls behind and the clock says by how
+/// much. That is the honest symptom, and it is the one you can measure.
+const MAX_DECODES_PER_CALL: usize = 4;
+
 pub struct Video {
     data: &'static [u8],
     track: mp4::Track,
@@ -142,10 +154,20 @@ impl Video {
     /// Decoding happens here and nowhere else, so the cost lands on the
     /// caller's clock and a slow frame shows up as a late frame rather than
     /// as a stalled event loop.
+    ///
+    /// Frames that are already late are decoded and NOT shown — only the
+    /// newest one that has come due reaches the caller. A picture cannot be
+    /// skipped without decoding it (the next one predicts from it), but it
+    /// can be skipped on the way to the screen, and that is where the whole
+    /// cost of a commit sits.
     pub fn frame_at(&mut self, ms: i64) -> Option<&YuvFrame> {
+        let mut budget = MAX_DECODES_PER_CALL;
         // Keep the queue full enough that the next picture in PRESENTATION
         // order is really the smallest one we hold.
-        while self.queue.len() < REORDER && self.feed_one() {}
+        while self.queue.len() < REORDER && budget > 0 {
+            budget -= 1;
+            if !self.feed_one() { break; }
+        }
 
         let mut advanced = false;
         while let Some(&(pts, _)) = self.queue.first() {
@@ -156,9 +178,20 @@ impl Video {
             let (pts, f) = self.queue.remove(0);
             self.shown = Some((pts, f));
             advanced = true;
-            while self.queue.len() < REORDER && self.feed_one() {}
+            while self.queue.len() < REORDER && budget > 0 {
+                budget -= 1;
+                if !self.feed_one() { break; }
+            }
+            if budget == 0 { break; }
         }
         if advanced { self.shown.as_ref().map(|(_, f)| f) } else { None }
+    }
+
+    /// Presentation time of the picture on screen. The gap to the caller's
+    /// clock IS the lag, and it is the number that says whether the machine
+    /// keeps up.
+    pub fn shown_ms(&self) -> i64 {
+        self.shown.as_ref().map(|(p, _)| *p).unwrap_or(0)
     }
 
     /// Everything fed and nothing left to show.
