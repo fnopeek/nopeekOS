@@ -117,19 +117,9 @@ const MAX_QUEUE_BYTES: usize = 256 * 1024 * 1024;
 /// werden, egal was faellig ist.
 const SHOW_FIRST_FLOOR_MS: i64 = 150;
 
-/// Ab diesem Vorrat hat das ZEIGEN Vorrang vor dem Dekodieren.
-///
-/// Gemessen am Geraet, 1440p, Tag/Nacht: der Vorlauf stand bei **1202 ms**
-/// und es wurden trotzdem nur 17 von 30 Bildern gezeigt. Sechsunddreissig
-/// fertige Bilder lagen da — der Puffer war tief genug und wurde nicht
-/// ausgegeben, weil jede Runde 55 ms dekodierte und dabei zwei Bilder
-/// faellig werden liess.
-///
-/// Ein Puffer, der in der teuren Szene voll bleibt, hat nichts getan. Ueber
-/// dieser Marke wird deshalb bis zum naechsten faelligen Bild GEWARTET statt
-/// dekodiert; darunter kehrt sich der Vorrang um, sonst laeuft er leer und
-/// die Anzeige faellt auf die Dekodierrate.
-const SPEND_LEAD_ABOVE_MS: i64 = 600;
+/// Was ein Commit kostet, grob. Er steht neben der Dekodierung in derselben
+/// Runde, also gehoert er in die Frage, ob beides in eine Bildperiode passt.
+const SHOW_COST_MS: i64 = 3;
 
 /// Lead to build before the clock starts. Less than the target, because the
 /// rest can be built while playing and nobody wants to wait a second for a
@@ -165,6 +155,10 @@ pub struct Video {
     pub height: u32,
     pub rotation: u16,
     pub duration_ms: u64,
+    /// Abstand zweier Bilder in ms, aus der Sampletabelle. Nicht geraten und
+    /// nicht 1000/30: eine Datei mit 16 oder 23,976 Bildern je Sekunde
+    /// beantwortet dieselbe Frage anders.
+    period_ms: i64,
     /// Flags for `npk_canvas_commit_yuv`: bit 0 = Rec. 709, bit 1 = full range.
     pub colour_flags: i32,
     /// Every sample has been fed. The queue may still hold pictures.
@@ -207,6 +201,7 @@ impl Video {
             height: track.height,
             rotation: track.rotation,
             duration_ms: track.duration_ms(),
+            period_ms: (track.duration_ms() as i64 / track.samples.len().max(1) as i64).max(1),
             colour_flags: (track.colour.bt709 as i32) | ((track.colour.full_range as i32) << 1),
             data,
             track,
@@ -350,24 +345,43 @@ impl Video {
         }
     }
 
+    /// Passt Dekodieren UND Zeigen noch in eine Bildperiode?
+    ///
+    /// Das ist die Frage, an der alles haengt, und nicht „wie voll ist der
+    /// Puffer". Ein Vorrats-Schwellwert mit entgegengesetztem Verhalten auf
+    /// beiden Seiten macht aus sich selbst einen Attraktor: gemessen klebte
+    /// der Vorlauf danach bei exakt 600 ms, statt auf 1500 zu steigen.
+    ///
+    /// Passt es (normal, 22 + 3 gegen 33 ms), gibt es gar keinen Konflikt —
+    /// dann wird dekodiert UND gezeigt, und der Vorrat waechst von selbst.
+    /// Passt es nicht (die Ueberblendung, 55 + 3), muss die Runde sich
+    /// entscheiden, und dann hat das Zeigen Vorrang, solange Vorrat da ist.
+    pub fn overloaded(&self, decode_ms: i64) -> bool {
+        decode_ms + SHOW_COST_MS >= self.period_ms
+    }
+
     /// Soll diese Runde ans Zeigen gehen statt ans Dekodieren?
     ///
     /// `decode_ms` ist, was eine Dekodierung gerade WIRKLICH kostet — der
-    /// Rufer misst es. Die Frage ist nicht „ist etwas faellig", sondern
-    /// „waere etwas faellig, BEVOR diese Dekodierung fertig ist": wer das
-    /// erst hinterher fragt, hat das Bild schon verpasst.
+    /// Rufer misst es. Die zweite Frage ist nicht „ist etwas faellig",
+    /// sondern „waere etwas faellig, BEVOR diese Dekodierung fertig ist":
+    /// wer das erst hinterher fragt, hat das Bild schon verpasst.
     pub fn show_before_decode(&self, ms: i64, decode_ms: i64) -> bool {
         if self.queue.len() <= REORDER { return false; }
-        let lead = self.lead_ms(ms);
-        if lead <= SHOW_FIRST_FLOOR_MS { return false; }
-        // Faellig: immer zeigen. Sonst nur, wenn der Vorrat es traegt und die
-        // naechste Faelligkeit in die Dekodierung hineinfiele.
+        if self.lead_ms(ms) <= SHOW_FIRST_FLOOR_MS { return false; }
         self.next_due_in(ms) == 0
-            || (lead >= SPEND_LEAD_ABOVE_MS && self.next_due_in(ms) < decode_ms)
+            || (self.overloaded(decode_ms) && self.next_due_in(ms) < decode_ms)
     }
 
-    /// Ist der Vorrat gross genug, dass Warten billiger ist als Dekodieren?
-    pub fn rich(&self, ms: i64) -> bool { self.lead_ms(ms) >= SPEND_LEAD_ABOVE_MS }
+    /// Darf der Rufer schlafen, statt die Runde ans Dekodieren zu geben?
+    ///
+    /// Zwei Gruende, und beide heissen „Dekodieren hilft hier nicht": der
+    /// Vorrat ist voll, oder er reicht noch und eine Dekodierung wuerde
+    /// ohnehin ein Bild kosten.
+    pub fn may_wait(&self, ms: i64, decode_ms: i64) -> bool {
+        self.stocked(ms)
+            || (self.overloaded(decode_ms) && self.lead_ms(ms) > SHOW_FIRST_FLOOR_MS)
+    }
 
     /// Ist der Vorrat voll? Nur dann darf der Rufer schlafen.
     ///
