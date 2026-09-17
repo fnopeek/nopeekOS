@@ -519,6 +519,33 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
                     },
                     Widget::Row {
                         children: alloc::vec![
+                            // Das Symbol steht MITTIG in seiner Zelle, wie
+                            // eine Ziffer in ihrer.
+                            //
+                            // Ohne das klebt es am Trennstrich, und zwar
+                            // sichtbar: die Kaesten sind zwar symmetrisch
+                            // (21,5 px links wie rechts), aber die „4" ist
+                            // eine 6-px-Ziffer in der MITTE einer 38-px-
+                            // Zelle — rechts von ihr stehen 17 px leere
+                            // Zelle. Das Symbol dagegen faengt sofort an
+                            // seiner Kastenkante an. Gemessen: 38,5 px
+                            // Tinte-zu-Tinte auf der einen Seite, 21,5 auf
+                            // der anderen.
+                            //
+                            // Mit dem Vorlauf sitzt sein Mittelpunkt auf
+                            // dem Mittelpunkt von Zelle 6, und damit
+                            // stehen alle im selben 40er-Takt:
+                            // 36,5 · 76,5 · 116,5 · 156,5 · 196,5 · 236,5.
+                            //
+                            // Die Breite ist gerechnet, nicht gesetzt: die
+                            // halbe Restzelle minus den Abstand, den die
+                            // Zeile ohnehin zwischen Marke und Symbol
+                            // setzt. Sie folgt damit `icon_px()`, das aus
+                            // der Konfiguration kommt.
+                            prefab::mark(
+                                (WS_W.saturating_sub(icon_px()) / 2)
+                                    .saturating_sub(Spacing::Sm.as_u16()),
+                                1, None),
                             Widget::Icon {
                                 id: icon_for_app(st.title),
                                 size: icon_px(),
