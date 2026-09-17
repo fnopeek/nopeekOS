@@ -228,7 +228,7 @@ impl Decoder {
         let sw = if cur_kbd { &self.kbd_s } else { &self.sine_s };
         let mut frame = vec![0f32; LONG_N];
         for w in 0..8 {
-            let time = dsp::imdct(&spec[w * SHORT_HALF..(w + 1) * SHORT_HALF]); // 256
+            let time = dsp::imdct_fast(&spec[w * SHORT_HALF..(w + 1) * SHORT_HALF]); // 256
             let off = 448 + w * SHORT_HALF;
             for n in 0..SHORT_N {
                 frame[off + n] += time[n] * sw[n] * OUTPUT_NORM;
@@ -248,7 +248,7 @@ impl Decoder {
         let frame = if info.window_sequence == WindowSequence::EightShort {
             self.short_frame(spec, info.window_shape_kbd)
         } else {
-            let time = dsp::imdct(spec); // 2048
+            let time = dsp::imdct_fast(spec); // 2048
             let win = self.long_window(
                 info.window_sequence,
                 self.prev_kbd[ch],

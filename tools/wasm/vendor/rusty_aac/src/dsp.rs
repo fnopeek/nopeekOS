@@ -238,6 +238,85 @@ pub fn mdct_fast(x: &[f32]) -> Vec<f32> {
     out
 }
 
+/// **Schnelle IMDCT (O(N log N))** — nopeekOS-Zusatz, siehe ../VENDOR.md.
+///
+/// Die direkte [`imdct`] daneben ruft `cos()` in der INNEREN Schleife:
+/// 2048 x 1024 = 2,1 Millionen Transzendentenaufrufe je langem Block, bei
+/// 43 Bloecken je Sekunde also 90 Millionen. Gemessen kostet sie **948 ms
+/// je Sekunde Ton** auf einem Ryzen 9600X — unter forge waeren das elf
+/// Kerne. Der Modulkopf sagt es selbst vorher: „can be swapped for an
+/// FFT-based fast path later without changing results."
+///
+/// Das hier ist dieser Pfad, und es ist Zeile fuer Zeile die UMKEHRUNG von
+/// [`mdct_fast`]: dieselben Drehungen, dieselbe M-Punkt-FFT, dieselben
+/// Twiddles. Beide Drehungen sind orthogonale 2x2-Matrizen (c²+s²=1) und
+/// damit ihre eigene Umkehrung bis auf ein Vorzeichen — deshalb steht hier
+/// keine zweite Tabelle.
+///
+/// Die direkte Fassung bleibt als ORAKEL stehen; der Test daneben haelt
+/// beide gegeneinander.
+pub fn imdct_fast(spec: &[f32]) -> Vec<f32> {
+    let l = spec.len();
+    let n = l * 2;
+    if n < 4 {
+        return imdct(spec); // winzige Groessen: das Orakel selbst
+    }
+    let m = n / 4;
+    let owned;
+    let tw = match mdct_twiddles(n) {
+        Some(t) => t,
+        None => { owned = MdctTwiddles::build(n); &owned }
+    };
+
+    // 1. Nachdrehung rueckwaerts + packen.
+    //    Vorwaerts war  A = vr·c + vi·s ,  B = vr·s − vi·c   (A,B = X/2)
+    //    also           vr = A·c + B·s ,  vi = A·s − B·c.
+    let (mut re, mut im) = (vec![0f64; m], vec![0f64; m]);
+    for p in 0..m {
+        let a = spec[2 * p] as f64 * 0.5;
+        let b = spec[l - 1 - 2 * p] as f64 * 0.5;
+        re[p] = a * tw.post_c[p] + b * tw.post_s[p];
+        im[p] = a * tw.post_s[p] - b * tw.post_c[p];
+    }
+
+    // 2. Inverse FFT ueber die Konjugierten-Regel: ifft(z) = conj(fft(conj z))/M.
+    for v in im.iter_mut() { *v = -*v; }
+    fft(&mut re, &mut im, &tw.fft_c, &tw.fft_s);
+    let inv = 1.0 / m as f64;
+    for p in 0..m { re[p] *= inv; im[p] *= -inv; }
+
+    // 3. Vordrehung rueckwaerts.
+    //    Vorwaerts war  R = yr·c + yi·s ,  I = yi·c − yr·s
+    //    also           yr = R·c − I·s ,  yi = R·s + I·c.
+    let mut y = vec![0f64; l];
+    for p in 0..m {
+        let (r, i) = (re[p], im[p]);
+        y[2 * p] = r * tw.pre_c[p] - i * tw.pre_s[p];
+        y[l - 1 - 2 * p] = r * tw.pre_s[p] + i * tw.pre_c[p];
+    }
+
+    // 4. Entfalten — die Transponierte der TDAC-Faltung aus `mdct_fast`.
+    let (l2, l32) = (l / 2, 3 * l / 2);
+    let mut out = vec![0f64; n];
+    for mm in 0..l {
+        let v = y[mm];
+        if mm < l2 {
+            out[l32 - 1 - mm] -= v;
+            out[mm + l32] -= v;
+        } else {
+            out[mm - l2] += v;
+            out[l32 - 1 - mm] -= v;
+        }
+    }
+
+    // 5. Kein Massstab. Die 2/N der direkten Fassung und das x2 der
+    //    Vorwaertskette heben sich gegen die 1/M der inversen FFT und die
+    //    Faltung genau auf. Ich hatte hier 1/N geraten; das Orakel sagte
+    //    „Verhaeltnis exakt 16" bei N=16 und damit, dass der Faktor 1 ist.
+    //    Eine Konstante in einer Transformationskette gehoert gemessen.
+    out.iter().map(|&v| v as f32).collect()
+}
+
 /// AAC sine analysis/synthesis window: `w[n] = sin(π/N·(n+½))`.
 pub fn sine_window(n: usize) -> Vec<f32> {
     (0..n)
@@ -384,6 +463,42 @@ mod tests {
                 out[i],
                 signal[i]
             );
+        }
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod imdct_fast_tests {
+    use super::*;
+
+    /// Die schnelle IMDCT muss die direkte treffen — bei beiden Blockgroessen,
+    /// die AAC benutzt. Das Orakel ist die Fassung, die `cos()` auswertet;
+    /// sie ist langsam und richtig, und genau dafuer bleibt sie stehen.
+    #[test]
+    fn fast_imdct_matches_the_direct_oracle() {
+        for &n in &[16usize, 64, 256, 2048] {
+            let l = n / 2;
+            // Deterministisches Pseudorauschen — ein Test, dessen Eingabe sich
+            // je Lauf aendert, meldet seinen Fehler irgendwann und nie wieder.
+            let mut st = 0x2545F491u32;
+            let spec: Vec<f32> = (0..l).map(|_| {
+                st = st.wrapping_mul(1664525).wrapping_add(1013904223);
+                ((st >> 8) as f32 / 8388608.0) - 1.0
+            }).collect();
+
+            let slow = imdct(&spec);
+            let fast = imdct_fast(&spec);
+            assert_eq!(slow.len(), fast.len(), "N={n}");
+
+            let peak = slow.iter().fold(0f32, |a, &b| a.max(b.abs()));
+            let mut worst = 0f32;
+            for (a, b) in slow.iter().zip(fast.iter()) {
+                worst = worst.max((a - b).abs());
+            }
+            // 1e-5 relativ zur Spitze: die schnelle Kette rechnet in f64 und
+            // rundet einmal am Ende, die direkte summiert N Terme.
+            assert!(worst <= peak * 1e-5 + 1e-6,
+                    "N={n}: groesste Abweichung {worst} bei Spitze {peak}");
         }
     }
 }
