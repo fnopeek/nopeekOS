@@ -8,7 +8,7 @@ description = "tune — audio player for nopeekOS."
 crate-type = ["cdylib"]
 
 [dependencies]
-nopeek_widgets = { path = "../sdk/widgets" }
+nopeek_widgets = { path = "../sdk/widgets", features = ["heap"] }
 # minimp3 transliterated to safe-ish Rust: no_std, no allocation, no
 # dependencies, no libm — the whole decoder is tables. Measured against
 # ffmpeg on 30 s of real material: correlation 0.9999, max error 2 LSB.
@@ -20,7 +20,7 @@ default-features = false
 features = ["alloc"]
 
 [build-dependencies]
-nopeek_widgets = { path = "../sdk/widgets" }
+nopeek_widgets = { path = "../sdk/widgets", features = ["heap"] }
 
 [profile.release]
 opt-level = "s"

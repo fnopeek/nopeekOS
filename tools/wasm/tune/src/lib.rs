@@ -104,30 +104,16 @@ fn poll_event() -> PollResult {
 // and a scene tree rebuilt from scratch each frame. The file bytes do NOT
 // live here — they are claimed with `memory.grow` (see `file_arena`), so a
 // four-minute song never has to fit in a fixed heap.
-const HEAP_SIZE: usize = 4 * 1024 * 1024;
-static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
-static mut HEAP_POS: usize = 0;
-
-struct BumpAllocator;
-unsafe impl core::alloc::GlobalAlloc for BumpAllocator {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        let pos = unsafe { (&raw const HEAP_POS).read() };
-        let aligned = (pos + layout.align() - 1) & !(layout.align() - 1);
-        if aligned + layout.size() > HEAP_SIZE { return core::ptr::null_mut(); }
-        unsafe { (&raw mut HEAP_POS).write(aligned + layout.size()) };
-        unsafe { (&raw mut HEAP as *mut u8).add(aligned) }
-    }
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {}
-}
-
+// Eine Halde, die FREIGIBT (`nopeek_widgets::heap`, seit widgets 0.28.0).
+// Der Bump-Allokator davor reichte, solange tune nur Tonbloecke dekodierte:
+// ein paar Kilobyte je Runde, und die Szene wurde mit einer Marke
+// zurueckgedreht. Ein Videobild ist 0,5 MB, und je Sekunde kommen sechzehn
+// davon — ein Allokator ohne Freigabe waere nach wenigen Sekunden voll.
 #[global_allocator]
-static ALLOCATOR: BumpAllocator = BumpAllocator;
+static ALLOCATOR: nopeek_widgets::heap::Allocator = nopeek_widgets::heap::new();
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { log("[tune] panic!"); loop {} }
-
-fn alloc_mark() -> usize { unsafe { (&raw const HEAP_POS).read() } }
-fn alloc_reset(pos: usize) { unsafe { (&raw mut HEAP_POS).write(pos) } }
 
 // ── File arena ────────────────────────────────────────────────────────
 //
@@ -148,9 +134,11 @@ fn arena_reserve(want: usize) -> Option<*mut u8> {
         let pages = want.div_ceil(WASM_PAGE);
         let prev = core::arch::wasm32::memory_grow(0, pages);
         if prev == usize::MAX { return None; }
-        // The bump allocator hands out slices of a fixed array and never
-        // grows memory, so we are the only caller and each claim is one
-        // contiguous run. Dropping the old one simply forgets it.
+        // Seit der Umstellung auf `nopeek_widgets::heap` sind wir NICHT
+        // mehr der einzige Rufer von `memory.grow` — die Halde waechst
+        // ebenso. Das macht nichts: `memory_grow` gibt die vorige
+        // Seitenzahl zurueck, die frischen Seiten dahinter gehoeren uns
+        // allein, und die alte Belegung wird schlicht vergessen.
         let fresh = (prev * WASM_PAGE) as *mut u8;
         (&raw mut ARENA_PTR).write(fresh);
         (&raw mut ARENA_CAP).write(pages * WASM_PAGE);
@@ -650,7 +638,6 @@ pub extern "C" fn _start() {
     commit_scene(&t);      // window appears before the first fetch
     let autoplay = t.opened_with_file;
     t.load(autoplay);
-    let mut mark = alloc_mark();
     commit_scene(&t);
 
     loop {
@@ -675,9 +662,7 @@ pub extern "C" fn _start() {
         match poll_event() {
             PollResult::Event(ev) => {
                 let plen = match &ev { Event::Open(s) => copy_payload(s), _ => 0 };
-                alloc_reset(mark);
                 let outcome = handle(&mut t, ev, payload_str(plen));
-                mark = alloc_mark();   // state changes (playlist, tags) persist
                 match outcome {
                     Outcome::Idle => {}
                     Outcome::Render => { commit_scene(&t); t.shown_s = -1; }
@@ -689,9 +674,7 @@ pub extern "C" fn _start() {
                 // decoder ran out — otherwise the last second is cut off.
                 if t.drained && t.playing && t.sink.lead_frames() == 0 {
                     t.playing = false;
-                    alloc_reset(mark);
-                    if t.files.len() > 1 { t.skip(1); } else { t.seek_to_ms(0); }
-                    mark = alloc_mark();
+                        if t.files.len() > 1 { t.skip(1); } else { t.seek_to_ms(0); }
                     commit_scene(&t);
                     t.shown_s = -1;
                 }
@@ -700,8 +683,7 @@ pub extern "C" fn _start() {
                 let secs = (t.position_ms() / 1000) as i64;
                 if t.playing && secs != t.shown_s {
                     t.shown_s = secs;
-                    alloc_reset(mark);
-                    commit_scene(&t);
+                        commit_scene(&t);
                 }
                 // Paused, there is nothing to keep up with — poll a quarter
                 // as often and leave the core alone.

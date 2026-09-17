@@ -78,7 +78,6 @@ const DE: Strings = Strings {
 fn s() -> &'static Strings {
     match i18n::lang() { i18n::Lang::De => &DE, _ => &EN }
 }
-use talc::TalcLock;
 
 // ── App metadata + capabilities ───────────────────────────────────────────
 
@@ -5939,139 +5938,16 @@ fn poll_event() -> PollResult {
 
 // ── Heap: a real free-list allocator. The six font faces (persistent) + each
 //    frame's layout + paint buffer are freed on drop, unlike a bump heap. ───
-
-// ── The heap GROWS; it is not guessed ───────────────────────────────────────
-
-/// Ported from talc's own `WasmGrowAndExtend` (talc 5.0.4, `src/wasm.rs`) with
-/// exactly one change: the growth STEP.
-///
-/// Talc grows by just enough for the allocation that failed. That is right
-/// where `memory.grow` is cheap. Under wasmi it is not — linear memory is one
-/// contiguous buffer, so every grow copies all of it, and growing a page at a
-/// time up to a 60 MB working set would copy tens of gigabytes. Doubling makes
-/// the number of grows logarithmic and the total copying linear in the final
-/// size, at the cost of holding up to twice the peak.
-///
-/// What it replaces: `static mut HEAP: [u8; 128 MB]` — a ceiling nobody
-/// measured. And it was not free headroom: wasmi allocates the whole linear
-/// memory eagerly, so that array cost 128 MB on every start, while a page that
-/// wanted more died against it anyway.
-#[derive(Debug)]
-struct GrowingHeap {
-    /// End of the arena talc last received, so a contiguous grow can EXTEND it
-    /// instead of starting a second heap. Zero means "nothing handed over yet".
-    ///
-    /// An address and not a `NonNull`, which is what talc's own source stores:
-    /// `NonNull` is not `Send`, and this allocator sits behind a mutex on
-    /// purpose (see the note where it is declared) rather than behind talc's
-    /// single-threaded cell.
-    end: usize,
-}
-
-impl GrowingHeap {
-    const fn new() -> Self {
-        GrowingHeap { end: 0 }
-    }
-}
-
-const WASM_PAGE: usize = 64 * 1024;
-
-/// Groesster Wachstumsschritt der Halde: 64 MB. Siehe `acquire` — Verdoppeln
-/// ohne Deckel wird ab einigen hundert MB zu einer Forderung, die das Geraet
-/// nicht erfuellen kann.
-const GROW_CAP_PAGES: usize = 1024;
-
-// SAFETY: `acquire` hands talc only memory that `memory.grow` just returned —
-// freshly mapped pages past the previous end of linear memory, which nothing
-// else can reach. It allocates nothing itself. That is talc's own
-// `WasmGrowAndExtend` contract, kept.
-unsafe impl talc::source::Source for GrowingHeap {
-    fn acquire<B: talc::base::binning::Binning>(
-        talc: &mut talc::base::Talc<Self, B>,
-        layout: core::alloc::Layout,
-    ) -> Result<(), ()> {
-        // Over-estimate deliberately: talc warns that UNDER-sizing here loops
-        // forever, handing over heaps that can never fit the allocation.
-        let need = layout.size() + layout.align() + 4 * WASM_PAGE;
-        let need_pages = need.div_ceil(WASM_PAGE);
-        let have_pages = core::arch::wasm32::memory_size::<0>();
-        // **Verdoppeln, aber nicht endlos.** Bis 64 MB ist Verdoppeln richtig:
-        // wenige Anfragen, wenig Verschnitt. Darueber wird daraus eine
-        // Forderung, die das Geraet nicht erfuellen KANN — bei 512 MB
-        // Halde fragte beak nach weiteren 512 MB, der Kernel konnte sie nicht
-        // abbilden, und der Absturz sah aus wie „Speicher voll", obwohl vier
-        // Seiten gereicht haetten.
-        let step = have_pages.max(1).min(GROW_CAP_PAGES);
-        let delta = need_pages.max(step);
-
-        // Nacheinander kleiner fragen, statt beim ersten Nein aufzugeben. Das
-        // Geraet sagt zu einem halben Gigabyte nein und zu vier Seiten ja —
-        // und die vier Seiten sind das, was der Aufrufer wirklich braucht.
-        let mut delta = delta;
-        let prev_end = loop {
-            let got = core::arch::wasm32::memory_grow::<0>(delta);
-            if got != usize::MAX { break got }
-            if delta <= need_pages {
-                // Jetzt ist die Maschine wirklich voll — und das gehoert mit
-                // ZAHLEN ins Log, nicht als nackte Panikzeile. Ohne
-                // Allokation: wir stecken gerade IM Allokator.
-                log("[beak] Halde erschoepft — memory.grow hat nein gesagt");
-                log("[beak]   Seiten bisher:");
-                log(u32_str(have_pages as u32));
-                log("[beak]   noch gebraucht (Seiten):");
-                log(u32_str(need_pages as u32));
-                return Err(());
-            }
-            delta = (delta / 2).max(need_pages);
-        };
-        let base = (prev_end * WASM_PAGE) as *mut u8;
-        let size = delta * WASM_PAGE;
-
-        let old_end = core::mem::replace(&mut talc.source.end, 0);
-        if old_end == base as usize {
-            // SAFETY: contiguous with the arena we handed over last time, and
-            // `old_end` came from talc itself, so it is non-null.
-            let new_end = unsafe {
-                talc.extend(
-                    core::ptr::NonNull::new_unchecked(base),
-                    base.wrapping_add(size),
-                )
-            };
-            talc.source.end = new_end.as_ptr() as usize;
-            return Ok(());
-        }
-        // SAFETY: fresh pages, owned by nothing else.
-        talc.source.end = unsafe { talc.claim(base, size) }.map_or(0, |e| e.as_ptr() as usize);
-        Ok(())
-    }
-}
-
-// `TalcLock` (mutex-guarded), NOT talc's `WasmArenaTalc`/`TalcSyncCell`. The
-// cell variants are only sound on single-threaded WebAssembly and enforce that
-// with a target check, not the type system — so the day beak gets workers, or
-// wasmi turns on the threads proposal, they would go quietly unsound. The
-// uncontended spin lock costs a few instructions; that is the cheaper mistake.
+//
+// Die wachsende Halde selbst steht seit widgets 0.28.0 in der SDK
+// (`nopeek_widgets::heap`), weil tune sie fuer dekodierte Videobilder
+// genauso braucht. Sie stand bis beak 0.188.0 hier; die zwei Zahlen darin
+// — der Verdopplungsschritt und sein Deckel — sind je einmal bezahlt
+// worden, und eine zweite Kopie haette sie nochmal bezahlen muessen.
 #[global_allocator]
-static ALLOCATOR: TalcLock<spin::Mutex<()>, GrowingHeap> = TalcLock::new(GrowingHeap::new());
+static ALLOCATOR: nopeek_widgets::heap::Allocator = nopeek_widgets::heap::new();
 
-// u32 → decimal &str in a static buffer (no alloc — safe in the panic handler
-// even when the panic is an allocation failure).
-static mut NUMBUF: [u8; 12] = [0; 12];
-fn u32_str(mut n: u32) -> &'static str {
-    let b = core::ptr::addr_of_mut!(NUMBUF) as *mut u8;
-    let buf = unsafe { core::slice::from_raw_parts_mut(b, 12) };
-    let mut i = 12;
-    if n == 0 {
-        i -= 1;
-        buf[i] = b'0';
-    }
-    while n > 0 {
-        i -= 1;
-        buf[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-    unsafe { core::str::from_utf8_unchecked(&buf[i..]) }
-}
+use nopeek_widgets::heap::u32_str;
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {

@@ -47,6 +47,13 @@ extern crate alloc;
 pub mod abi;
 pub mod app_meta;
 pub mod fs;
+/// Die wachsende Halde — nur mit dem Merkmal `heap`, weil sie `talc`
+/// mitbringt. Siehe das Modul selbst, wann sie richtig ist.
+// Nur fuer wasm32: das Modul IST der `memory.grow`-Weg. Auf dem Host
+// (build.rs, Tests) gaebe es nichts zu tun und jede Zeile darin waere
+// toter Code, den der Compiler zu Recht anmahnt.
+#[cfg(all(feature = "heap", target_arch = "wasm32"))]
+pub mod heap;
 pub mod i18n;
 pub mod prefab;
 pub mod style;
