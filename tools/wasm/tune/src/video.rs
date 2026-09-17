@@ -276,6 +276,18 @@ impl Video {
         }
     }
 
+    /// Ist der Vorrat voll? Nur dann darf der Rufer schlafen.
+    ///
+    /// Die freie Kapazitaet steckt genau hier: dekodieren kostet am Geraet
+    /// 22 ms je Bild und eine Bildperiode ist 33 ms, also LIESSEN sich 45
+    /// Bilder je Sekunde dekodieren, wo 30 gebraucht werden. Wer in dieser
+    /// Luecke schlaeft, verschenkt sie — und steht in der teuren Szene ohne
+    /// Puffer da. Gemessen: mit festem Schlaf fiel der Vorlauf von 870 auf
+    /// 150 ms und der Rueckstand stieg auf 734.
+    pub fn stocked(&self, ms: i64) -> bool {
+        self.lead_ms(ms) >= TARGET_LEAD_MS || self.queue_bytes >= MAX_QUEUE_BYTES
+    }
+
     /// Wie lange bis zum naechsten faelligen Bild. Der Rufer schlaeft danach
     /// — ein fester Schlaf schiebt eine Runde ueber die Bildperiode, und
     /// dann faellt genau dort ein Bild aus.
