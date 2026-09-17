@@ -8,7 +8,7 @@ description = "beak — the native, sandboxed web browser for nopeekOS. See docs
 crate-type = ["cdylib"]
 
 [dependencies]
-nopeek_widgets = { path = "../sdk/widgets" }
+nopeek_widgets = { path = "../sdk/widgets", features = ["heap"] }
 beak-engine = { path = "../beak-engine" }
 # Real reclaiming heap: fontdue does heavy transient allocation while parsing
 # the fonts, which a never-freeing bump allocator can't reclaim (OOM). talc,
@@ -17,8 +17,6 @@ beak-engine = { path = "../beak-engine" }
 # it into a quadratic crawl. Measured on the six faces: 683 ms and *rising per
 # face* (18 → 302 ms) vs talc's 36 ms flat (5.7-6.3 ms each). Under the wasmi
 # interpreter that was the difference between a 10 s and a sub-second start.
-talc = { version = "5", default-features = false }
-spin = { version = "0.12", default-features = false, features = ["mutex", "spin_mutex", "lock_api"] }
 
 [dependencies.postcard]
 version = "1.0"
@@ -26,7 +24,7 @@ default-features = false
 features = ["alloc"]
 
 [build-dependencies]
-nopeek_widgets = { path = "../sdk/widgets" }
+nopeek_widgets = { path = "../sdk/widgets", features = ["heap"] }
 
 [profile.release]
 opt-level = "s"

@@ -1,6 +1,6 @@
 [package]
 name = "nopeek_widgets"
-version = "0.27.0"
+version = "0.28.0"
 edition = "2024"
 description = "nopeekOS widget SDK — declarative GUI types for WASM apps."
 license = "AGPL-3.0-or-later"
@@ -9,6 +9,16 @@ license = "AGPL-3.0-or-later"
 # Library for WASM apps to depend on. Apps compile to cdylib; this crate
 # provides the types + postcard serialization shared by every GUI app.
 crate-type = ["rlib"]
+
+[features]
+# Die wachsende Halde. Optional, weil sie `talc` mitbringt und ein Modul wie
+# `top` (3,5 KB) mit einem Bump-Allokator vollstaendig bedient ist. Wer je
+# Bild alloziert und freigibt, schaltet sie ein.
+heap = ["dep:talc", "dep:spin"]
+
+[dependencies]
+talc = { version = "5", default-features = false, optional = true }
+spin = { version = "0.12", default-features = false, features = ["mutex", "spin_mutex", "lock_api"], optional = true }
 
 [dependencies.serde]
 version = "1.0"
