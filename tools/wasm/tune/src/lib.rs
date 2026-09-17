@@ -381,8 +381,12 @@ impl Tune {
         let ms = now - self.video_t0;
         self.video_ms = ms;
         let flags = v.colour_flags;
+        // Zeigen hat Vorrang, solange Vorrat da ist. Eine Runde, die erst
+        // dekodiert, laesst in ihren 52 ms zwei Bilder faellig werden und
+        // kann nur eines zeigen — gemessen 109 dekodiert gegen 75 gezeigt.
+        let budget = if v.show_before_decode(ms) { 0 } else { video::PLAY_DECODES };
         let t_dec = host::ticks();
-        let got = v.frame_at(ms, video::PLAY_DECODES).is_some();
+        let got = v.frame_at(ms, budget).is_some();
         self.sec_decode_ms += host::ticks() - t_dec;
         self.sec_decoded += v.take_decoded();
         if got {
