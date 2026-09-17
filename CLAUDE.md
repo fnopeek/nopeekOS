@@ -48,7 +48,51 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-**Stand 2026-09-15 · beak 0.184.0 · Kernel 0.340.0** (Rest: `git log`)
+**Stand 2026-09-17 · beak 0.185.0 · Kernel 0.340.0** (Rest: `git log`)
+
+**0.185.0: die Geometrie war das letzte BILD, und eine Seite, die EINMAL
+misst, blieb fuer immer falsch.** Florians Frage nach DDGs Karte. Sie ist kein
+Canvas — die ganze Seite hat **null `<canvas>`** —, sondern ein statisches PNG
+(`//external-content.duckduckgo.com/ssv2/?…`, 640x157, 105 KB, laedt mit 200).
+Ein Getter auf `offsetWidth` mit einer Logzeile je Lesung sagte den Fall in
+einer Zeile: **`DIV.wYu4suoXF9TNnHFAfIQY -> 0 connected=true`**, genau einmal
+gelesen. DDGs Modul misst seinen eben gemounteten Kopfkasten
+(`useEffect`, Abhaengigkeiten `[imageUrl, o, location]`), beak sagt 0, die 0
+steht in `useState`, die Abhaengigkeiten aendern sich nie mehr — und
+`l && e ? <StaticMap/> : null` bleibt `null`. Ein Bild spaeter ist derselbe
+Kasten **652 px** breit; es fragt nur keiner mehr.
+
+**`Interp::relayout`** ist jetzt ein Haken wie `clock`: hat ein Element keinen
+Kasten, ist der Baum seit dem letzten Bild schmutzig und haengt es AM
+Dokument, wird auf der Stelle neu ausgelegt. Alle elf Kastenzugaenge gehen
+durch `ensure_box`. **Die enge Fassung ist Absicht** — ein Browser rechnet bei
+JEDER Lesung auf schmutzigem Baum neu; hier nur, wenn gar kein Kasten da ist.
+Gemessen deckt das alle Faelle: DDG **4 von 219** Lesungen, sandbox 3 von 77,
+alle auf Elementen ohne Kasten, alle heilen ein Bild spaeter. Deckel
+`FORCED_LAYOUT_CAP = 4` je Bild, mit einer Konsolenzeile, wenn er greift.
+
+**Und die Kaskade wurde bei JEDER DOM-Aenderung ganz weggeworfen.**
+`scripted_gen` stand im Schluessel des Blatt-Zwischenspeichers — ein
+`classList.toggle` liess `parse` ueber 1,06 MB neu laufen. Am Baum haengt die
+Kaskade aber nur an zwei Dingen: dem Text der `<style>`-Bloecke und den
+`url()` in `style`-Attributen. Beides steht jetzt da, wo es hingehoert. A/B
+auf derselben Engine: **Kaskade 19,8 → 0,1 ms**, ein erzwungenes Layout
+**78 → 55 ms** (`to_dom` 0,8 · Blaetter 2,8 · `layout_ext` 51 — `dom::parse`
+war schon 0). Preis des ganzen Postens auf DDG: **+270 ms** ueber den
+Seitenaufbau, und die Karte steht.
+
+Die `Engine` ist dafuer aus `main` in eine Globale gewandert (ein `fn`-Zeiger
+faengt nichts ein) und merkt sich den `FormState` des letzten Auslegens — mit
+`default()` waere ein Feld mit Text schmaler, und die falsche Zahl ginge an
+die Seite zurueck. **Neue Selbsttestzeile `fresh`**, und ohne den Haken sagt
+sie woertlich `NEIN: frisch eingehaengt meldet 0/0 statt 240`. Tore
+unveraendert: 468 Tests, Selbsttest 64/64 + 45/45, WPT 4556 (+9/−0), alle vier
+Galerien und alle zwoelf Render-Hashes Zahl fuer Zahl gleich. Papier:
+`docs/plan/BROWSER_RELAYOUT_ON_DEMAND.md`. **Offen und benannt:** das
+Box-Layout selbst (51 ms fuer 1015 Kaesten) — inkrementell statt ganz ist der
+naechste Posten; `tests/diag.rs` baut nicht mehr (`DrawOp::Gradient`/`Shadow`
+fehlen in seinen `match`-Armen) und mit ihm fehlt der einzige Malzeit-Zaehler.
+
 
 **0.184.0: der duenne Strich war ein Bild, und beak kannte die Breite eines
 Bildes nicht.** Florian: „hast du den langen duennen strich gesehen 1pixel

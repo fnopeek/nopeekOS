@@ -578,6 +578,27 @@ static mut TABS: Vec<alloc::boxed::Box<Doc>> = Vec::new();
 /// Welcher Tab gemalt wird und lebt. Immer gueltig — `active` klemmt.
 static mut ACTIVE: usize = 0;
 
+/// **Die Layout-Engine als Globale, nicht als Variable der Bildschleife.**
+///
+/// Sie lag bis 0.184.0 in `main`, und das ging, solange nur die Schleife sie
+/// brauchte. `Interp::relayout` ist aber ein `fn`-Zeiger und faengt nichts
+/// ein: der Haken, mit dem eine Seite mitten im Skript ein frisches Layout
+/// verlangt, kommt an eine lokale Variable nicht heran.
+///
+/// Die Entleihung endet wie bei `tabs()` in der rufenden Anweisung — wer ein
+/// `&mut` ueber einen Skriptlauf festhielte, haette zwei davon.
+static mut ENGINE: Option<Engine> = None;
+
+fn engine() -> &'static Engine {
+    // SAFETY: ein Faden; `main` legt sie vor dem ersten Gebrauch an, und die
+    // Entleihung endet in der rufenden Anweisung.
+    unsafe { (*core::ptr::addr_of_mut!(ENGINE)).get_or_insert_with(Engine::new) }
+}
+fn engine_mut() -> &'static mut Engine {
+    // SAFETY: wie `engine()`.
+    unsafe { (*core::ptr::addr_of_mut!(ENGINE)).get_or_insert_with(Engine::new) }
+}
+
 /// Wieviele Tabs.
 ///
 /// **Der Speicher ist es nicht** — ein eingefrorener Tab ist Kilobytes. Es
@@ -2251,6 +2272,11 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) -> bool {
     let doc = beak_engine::js::dombind::Doc::from_dom(&dom);
     let mut sess = beak_engine::js::Session::new(SCRIPT_STEPS);
     sess.interp.deadline = Some(script_time_left);
+    // **Neu auslegen auf Verlangen.** Ohne diese Zeile antwortet jede
+    // Kastenfrage aus dem letzten BILD, und ein Element, das ein Skript eben
+    // eingehaengt hat, meldet 0 — bei einer Seite, die nur EINMAL misst, fuer
+    // immer. Siehe `docs/plan/BROWSER_RELAYOUT_ON_DEMAND.md`.
+    sess.interp.relayout = Some(host_relayout);
     arm_script_budget();
     sess.interp.set_document(doc);
     // Die Adresse gehoert dem Wirt — und zwar die, aus der das Dokument KAM,
@@ -4183,6 +4209,45 @@ fn stroke_rect_bgra(buf: &mut [u8], w: i32, h: i32, x: i32, y: i32, rw: i32, rh:
     }
 }
 
+/// **Ein frisches Layout, mitten im Skript.**
+///
+/// Gerufen aus `Interp`, wenn eine Seite den Kasten eines Elements liest, das
+/// sie im selben Schritt eingehaengt hat. Derselbe Weg, den die Bildschleife
+/// je Bild faehrt — Baum zurueckschreiben, auslegen, Kaesten einreichen —
+/// nur jetzt auf Verlangen.
+///
+/// **Was er NICHT tut: den Zwischenspeicher der Schleife fuellen.** Der liegt
+/// in `main`, und ein `fn`-Zeiger kommt nicht daran. Das naechste Bild legt
+/// also noch einmal aus — aber das haette es ohnehin getan, denn der Baum hat
+/// sich geaendert und `content_gen` steht schon weiter. Der Preis ist genau
+/// dieses eine erzwungene Layout, nicht zwei.
+///
+/// Den Deckel gegen Layout-Thrashing haelt die Maschine (`FORCED_LAYOUT_CAP`);
+/// hier steht nur die Arbeit.
+fn host_relayout(ip: &mut beak_engine::js::interp::Interp) {
+    let Some((_x, _y, w, h)) = canvas_rect() else { return };
+    if w <= 0 || h <= 0 { return }
+    if let Some(d) = ip.doc.as_mut() {
+        engine().set_scripted_dom(Some(d.to_dom()));
+    }
+    // Der Schleife sagen, dass ihr Zwischenspeicher alt ist. Ohne das haelt
+    // sie ihn fuer gueltig, weil `to_dom` eine Zeile weiter oben `dirty`
+    // geloescht hat.
+    bump_content_gen("relayout");
+    // Die getippten Werte des Benutzers, wie beim letzten Auslegen. Mit
+    // `FormState::default()` waere ein Feld mit Text schmaler, und genau
+    // diese falsche Zahl ginge an die Seite zurueck.
+    let forms = engine().last_forms();
+    let lay = do_layout(engine(), w as u32, &forms);
+    let boxes = alloc::rc::Rc::new(lay.element_rects());
+    doc_mut().geom = Some(boxes.clone());
+    let max_scroll = (lay.height as i32 - h).max(0);
+    let sy = scroll_y().clamp(0, max_scroll);
+    ip.set_geometry(beak_engine::js::interp::Geometry {
+        boxes, scroll: (0, sy), content: (w, lay.height as i32),
+    });
+}
+
 fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, buf: &mut Vec<u8>, state: &FormState) {
     let (_x, _y, w, h) = match canvas_rect() {
         Some(r) => r,
@@ -5772,10 +5837,9 @@ pub extern "C" fn _start() {
     // gebaut, wenn es zum ersten Mal gebraucht wird; eine gewoehnliche Seite
     // fasst zwei bis vier an. Wieviele es wirklich waren, sagt die Zeile nach
     // dem ersten Malen.
-    let mut engine = Engine::new();
+    engine_mut().set_theme(query_theme());
     // Lend the engine our tick source so it can report the per-phase split.
-    engine.set_clock(|| unsafe { npk_ticks() } as u64);
-    engine.set_theme(query_theme());
+    engine().set_clock(|| unsafe { npk_ticks() } as u64);
     // Die Kekse der letzten Sitzungen zurueck ins Glas, BEVOR die erste
     // Anfrage rausgeht — sonst laedt die Startseite abgemeldet und meldet
     // sich erst beim zweiten Klick wieder an.
@@ -5785,7 +5849,7 @@ pub extern "C" fn _start() {
     // Engine is up — fetch the launch URL now (if we were opened with one).
     if arg_len > 0 {
         let u = url_str().to_string();
-        go(&engine, &u);
+        go(engine(), &u);
     }
 
     // Cached layout: (Layout, width it was laid out at, content generation).
@@ -5816,7 +5880,7 @@ pub extern "C" fn _start() {
             match poll_event() {
                 PollResult::Event(ev) => {
                     had_event = true;
-                    if handle(&engine, ev, &mut cache, &mut page) {
+                    if handle(engine(), ev, &mut cache, &mut page) {
                         chrome = true;
                     }
                 }
@@ -5832,7 +5896,7 @@ pub extern "C" fn _start() {
         // Take delivery of whatever the kernel finished while we were
         // painting: the document, or its stylesheets. THIS is where a
         // navigation completes now — no path through `handle` waits for one.
-        if nav_pump(&engine) {
+        if nav_pump(engine()) {
             chrome = true;
         }
         // …and only then re-parse the document's forms, so the page that just
@@ -5848,7 +5912,7 @@ pub extern "C" fn _start() {
         //
         // Die Sitzung wird DURCHGEREICHT, nicht neu geholt — zweimal
         // `js_session` waeren zwei veraenderliche Ausleihen auf dasselbe Feld.
-        if page.sync(&engine) {
+        if page.sync(engine()) {
             if let Some(s) = js_session() { pull_control_values(&mut page, s); }
         }
         // Ein Formular, das die Seite schon beim Laden abschicken will, darf
@@ -5856,14 +5920,14 @@ pub extern "C" fn _start() {
         let pending = js_session().map(|s| s.interp.take_submits()).unwrap_or_default();
         for seq in pending {
             log(&alloc::format!("[beak] script submit: form seq={seq}"));
-            if submit_form_seq(&engine, &page, seq) { break }
+            if submit_form_seq(engine(), &page, seq) { break }
         }
         // Und eine Navigation, die die Seite selbst verlangt hat. **Hier
         // zentral und nicht an jedem Einstiegspunkt:** ein Skript beim
         // Laden, ein Zeitgeber, ein `load`-Behandler und ein Klick landen
         // alle in derselben Runde — sechs Aufrufstellen waeren sechs
         // Gelegenheiten, eine zu vergessen.
-        sync_nav(&engine);
+        sync_nav(engine());
         if chrome {
             render_chrome();
         }
@@ -5884,17 +5948,17 @@ pub extern "C" fn _start() {
         // that layout and laid it out again. Two full layouts per navigation,
         // and on the device a layout is over five seconds.
         if images_dirty() {
-            let q = begin_images(&mut engine);
-            engine.css_images_begin();
+            let q = begin_images(engine_mut());
+            engine().css_images_begin();
             let d = doc_mut();
             d.pending_imgs = q;
             d.pending_css_imgs.clear();
             d.css_asked.clear();
         }
-        maybe_repaint(&engine, &mut cache, &mut paint_buf, &page.state);
+        maybe_repaint(engine(), &mut cache, &mut paint_buf, &page.state);
         // Die Schriften, die die Seite mitbringt. NACH dem ersten Auslegen:
         // vorher weiss niemand, welche sie ueberhaupt verlangt.
-        if pump_fonts(&engine) {
+        if pump_fonts(engine()) {
             bump_content_gen("font");
             mark_dirty();
         }
@@ -5921,12 +5985,12 @@ pub extern "C" fn _start() {
                 // Anfrage geht ohne den Keks hinaus, den die Seite gerade
                 // gesetzt hat.
                 sync_cookies(s);
-                sync_history(&engine, s);
+                sync_history(engine(), s);
                 sync_scroll(s);
                 drain_console(s);
                 if s.interp.doc.as_ref().is_some_and(|d| d.dirty) {
                     if let Some(d) = s.interp.doc.as_mut() {
-                        engine.set_scripted_dom(Some(d.to_dom()));
+                        engine().set_scripted_dom(Some(d.to_dom()));
                     }
                     bump_content_gen("fetch");
                     mark_dirty();
@@ -5941,10 +6005,10 @@ pub extern "C" fn _start() {
         // ohne Zeitgeber und ohne Ereignisse ihre Beobachter angemeldet und
         // nie einen Rueckruf gesehen — die Meldung laege in der Schlange und
         // wartete auf einen Einstiegspunkt, den es nicht gibt.
-        pump_box_observers(&engine);
+        pump_box_observers(engine());
         // JETZT steht die Geometrie — `load` darf fallen.
-        if fire_load(&engine, &page) {
-            page.sync(&engine);
+        if fire_load(engine(), &page) {
+            page.sync(engine());
             if let Some(s) = js_session() { pull_control_values(&mut page, s); }
         }
         // The visible document band, read AFTER the repaint clamped the scroll
@@ -5969,7 +6033,7 @@ pub extern "C" fn _start() {
         // gehaltene Referenz daneben waere die zweite Entleihung, vor der der
         // Kommentar an `doc`/`doc_mut` warnt.
         let mut q = core::mem::take(&mut doc_mut().pending_imgs);
-        pump_images(&mut engine, &mut q, layout, band);
+        pump_images(engine_mut(), &mut q, layout, band);
         doc_mut().pending_imgs = q;
         // The layout reports which CSS images it needs, so this queue can only
         // be filled AFTER a layout — unlike `<img>`, whose srcs are in the HTML
@@ -5995,7 +6059,7 @@ pub extern "C" fn _start() {
                 // cannot happen in `begin_images`. The url is resolved exactly
                 // as `pump_css_images` resolves it, or put and get would
                 // use different keys for one picture.
-                if engine.adopt_css_cached(*k, &resolve(url_str(), u)) {
+                if engine().adopt_css_cached(*k, &resolve(url_str(), u)) {
                     css_adopted.push(*k);
                 } else {
                     pending_css_imgs.push((*k, u.clone()));
@@ -6011,7 +6075,7 @@ pub extern "C" fn _start() {
             }
         }
         let layout = cache.as_ref().map(|(l, _, _, _): &(Layout, i32, i32, u32)| l);
-        pump_css_images(&engine, &mut pending_css_imgs, layout, band);
+        pump_css_images(engine(), &mut pending_css_imgs, layout, band);
         doc_mut().css_asked = css_asked;
         doc_mut().pending_css_imgs = pending_css_imgs;
         // ALWAYS yield so this worker core can halt — a cooperative fiber that

@@ -2037,6 +2037,73 @@ fn layout_seq(i: &Interp, this: &Value) -> Option<u32> {
     Some(if n.seq != 0 { n.seq } else { n.src_seq }).filter(|s| *s != 0)
 }
 
+/// Der Deckel gegen Layout-Thrashing: so oft darf zwischen zwei Bildern des
+/// Wirts erzwungen ausgelegt werden. Eine Seite, die in einer Schleife
+/// schreibt und liest, erzwingt sonst je Durchlauf ein volles Layout — auf
+/// DDGs Ergebnisseite sind das 51 ms.
+const FORCED_LAYOUT_CAP: u32 = 4;
+
+/// **Vor jeder Kastenfrage: hat dieses Element schon einen Kasten?**
+///
+/// Wenn nicht, der Baum sich seit dem letzten Bild bewegt hat und das Element
+/// AM Dokument haengt, dann ist die Null keine Antwort, sondern ein fehlendes
+/// Bild — also wird jetzt ausgelegt.
+///
+/// **Die enge Fassung, und das ist Absicht.** Ein Browser rechnet bei JEDER
+/// Lesung auf einem schmutzigen Baum neu. Hier wird nur nachgelegt, wenn gar
+/// kein Kasten da ist. Gemessen auf DDGs Ergebnisseite und
+/// `sandbox.nopeek.ch` deckt das alle Faelle ab, die heute falsch antworten
+/// (4 von 219 bzw. 3 von 77 Lesungen, alle auf Elementen ohne Kasten);
+/// Leseschleifen ueber bestehende Elemente kosten damit nichts. Der
+/// Unterschied ist benannt, nicht versteckt: ein Element, das sich seit dem
+/// letzten Bild BEWEGT hat, meldet weiter den alten Ort.
+fn ensure_box(i: &mut Interp, this: &Value) {
+    if i.relayout.is_none() || i.in_forced_layout { return }
+    // Schon ein Kasten da? Dann ist nichts zu tun — der haeufigste Fall, und
+    // er muss billig bleiben.
+    if let Some(seq) = layout_seq(i, this) {
+        if i.geometry.as_ref().is_some_and(|g| g.boxes.iter().any(|b| b.seq == seq)) { return }
+    }
+    // Nur wenn der Baum sich bewegt hat. Ist er sauber, ist die Null die
+    // Wahrheit (`display:none`, ein leeres Inline) und ein Layout aendert
+    // daran nichts.
+    if !i.doc.as_ref().is_some_and(|d| d.dirty) { return }
+    // Und nur fuer einen Knoten AM Dokument. Ein losgeloester bekaeme auch
+    // nach dem Auslegen keinen Kasten — wir wuerden je Lesung neu rechnen.
+    let Ok(id) = node_of_ref(i, this) else { return };
+    if !is_in_document(i, id) { return }
+    force_layout(i);
+}
+
+fn is_in_document(i: &Interp, id: u32) -> bool {
+    let Some(d) = &i.doc else { return false };
+    let mut cur = Some(id);
+    while let Some(x) = cur {
+        if x == d.doc { return true }
+        cur = d.nodes[x as usize].parent;
+    }
+    false
+}
+
+/// Den Haken des Wirts rufen — einmal, unter dem Deckel, und mit einer Zeile
+/// auf der Konsole, wenn der Deckel greift. Ein Deckel, der stillschweigend
+/// eine falsche Zahl liefert, ist schlimmer als keiner.
+fn force_layout(i: &mut Interp) {
+    if i.forced_layouts >= FORCED_LAYOUT_CAP {
+        if i.forced_layouts == FORCED_LAYOUT_CAP {
+            i.forced_layouts += 1;
+            i.console_push(alloc::string::String::from(
+                "warn: mehr als 4 erzwungene Auslegungen in einem Bild — ab hier antworten Kastenfragen aus dem letzten Bild"));
+        }
+        return
+    }
+    let Some(f) = i.relayout else { return };
+    i.in_forced_layout = true;
+    f(i);
+    i.in_forced_layout = false;
+    i.forced_layouts += 1;
+}
+
 /// Der Rahmenkasten in FENSTERkoordinaten: `(x, y, w, h)`.
 ///
 /// Ein Kasten kann in mehrere Fragmente zerfallen (ein Inline-Kasten je
@@ -3028,12 +3095,14 @@ pub fn install(realm: &mut Realm) {
     // sichtbar. Im Aufrufzensus ist `getBoundingClientRect` mit 1125 Aufrufen
     // der GROESSTE einzelne Posten, und er stand als „gedeckt" in der Bilanz.
     meth(&element_proto, "getBoundingClientRect", |i, t, _| {
+        ensure_box(i, &t);
         let r = elem_rect(i, &t);
         Ok(Value::Obj(rect_obj(i, r)))
     }, 0, &fp);
     // Die Fragmente einzeln — ein Inline-Kasten ueber drei Zeilen hat drei
     // Rechtecke, und genau deshalb gibt es diese Funktion neben der oberen.
     meth(&element_proto, "getClientRects", |i, t, _| {
+        ensure_box(i, &t);
         let (sx, sy) = i.geometry.as_ref().map_or((0, 0), |g| g.scroll);
         let seq = layout_seq(i, &t);
         let rects: Vec<(f64, f64, f64, f64)> = match (&i.geometry, seq) {
@@ -3050,18 +3119,20 @@ pub fn install(realm: &mut Realm) {
         Ok(Value::Obj(out))
     }, 0, &fp);
     getter(&element_proto, "offsetWidth",
-        |i, t, _| Ok(Value::Num(elem_rect(i, &t).map_or(0.0, |r| r.2))), &fp);
+        |i, t, _| { ensure_box(i, &t); Ok(Value::Num(elem_rect(i, &t).map_or(0.0, |r| r.2))) }, &fp);
     getter(&element_proto, "offsetHeight",
-        |i, t, _| Ok(Value::Num(elem_rect(i, &t).map_or(0.0, |r| r.3))), &fp);
+        |i, t, _| { ensure_box(i, &t); Ok(Value::Num(elem_rect(i, &t).map_or(0.0, |r| r.3))) }, &fp);
     // `offsetTop`/`offsetLeft` gehen gegen den `offsetParent`, und den gibt es
     // hier nicht. Gegen das DOKUMENT ist die naechstbeste Wahrheit und fuer
     // die ueblichen Faelle (ein Element in einem nicht positionierten Rumpf)
     // dieselbe Zahl. Benannt, damit niemand sie fuer exakt haelt.
     getter(&element_proto, "offsetTop", |i, t, _| {
+        ensure_box(i, &t);
         let sy = i.geometry.as_ref().map_or(0, |g| g.scroll.1);
         Ok(Value::Num(elem_rect(i, &t).map_or(0.0, |r| r.1 + sy as f64)))
     }, &fp);
     getter(&element_proto, "offsetLeft", |i, t, _| {
+        ensure_box(i, &t);
         let sx = i.geometry.as_ref().map_or(0, |g| g.scroll.0);
         Ok(Value::Num(elem_rect(i, &t).map_or(0.0, |r| r.0 + sx as f64)))
     }, &fp);
@@ -3079,10 +3150,12 @@ pub fn install(realm: &mut Realm) {
     // Mit 0 blieb der Block stehen, das Formular schickte `biw=&bih=`, und
     // Google hielt uns fuer einen Browser ohne JavaScript.
     getter(&element_proto, "clientWidth", |i, t, _| {
+        ensure_box(i, &t);
         if is_root_element(i, &t) { return Ok(viewport_num(i, "innerWidth")) }
         Ok(Value::Num(elem_inner(i, &t).map_or(0.0, |(w, _)| w)))
     }, &fp);
     getter(&element_proto, "clientHeight", |i, t, _| {
+        ensure_box(i, &t);
         if is_root_element(i, &t) { return Ok(viewport_num(i, "innerHeight")) }
         Ok(Value::Num(elem_inner(i, &t).map_or(0.0, |(_, h)| h)))
     }, &fp);
@@ -3111,6 +3184,7 @@ pub fn install(realm: &mut Realm) {
     //   ueberlaufender Text haelt eine Seite rollbar, ohne einen Kasten zu
     //   haben.
     getter(&element_proto, "scrollHeight", |i, t, _| {
+        ensure_box(i, &t);
         if is_scrolling_root(i, &t) {
             let c = i.geometry.as_ref().map_or(0.0, |g| g.content.1 as f64);
             return Ok(Value::Num(c.max(viewport_f(i, "innerHeight"))));
@@ -3118,6 +3192,7 @@ pub fn install(realm: &mut Realm) {
         Ok(Value::Num(scroll_area(i, &t).map_or(0.0, |(_, h)| h)))
     }, &fp);
     getter(&element_proto, "scrollWidth", |i, t, _| {
+        ensure_box(i, &t);
         if is_scrolling_root(i, &t) {
             let c = i.geometry.as_ref().map_or(0.0, |g| g.content.0 as f64);
             return Ok(Value::Num(c.max(viewport_f(i, "innerWidth"))));
@@ -3155,6 +3230,7 @@ pub fn install(realm: &mut Realm) {
     // selbst. Das ist die Antwort, auf die eine Seite prueft, wenn sie
     // fragt, ob ein Element ueberhaupt sichtbar ist.
     getter(&element_proto, "offsetParent", |i, t, _| {
+        ensure_box(i, &t);
         let id = node_of(i, &t)?;
         let (html, body) = match &i.doc {
             Some(d) => (d.html, d.body),

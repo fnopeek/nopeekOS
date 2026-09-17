@@ -128,6 +128,15 @@ pub struct Engine {
     /// cost on the machine that is actually slow. `None` on the host, where
     /// `tests/diag.rs` times the phases from outside.
     clock: core::cell::Cell<Option<fn() -> u64>>,
+    /// Der Steuerelement-Zustand des letzten Auslegens.
+    ///
+    /// **Fuer das Neuauslegen auf Verlangen.** Der Haken des Wirts ist ein
+    /// `fn`-Zeiger und faengt nichts ein; die getippten Werte liegen aber in
+    /// einer Variablen der Bildschleife. Mit `FormState::default()`
+    /// auszulegen waere falsch — ein Feld mit Text ist breiter als ein leeres,
+    /// und die Kaesten gingen an die Seite zurueck. Also merkt sich die
+    /// Engine, womit sie zuletzt gerufen wurde.
+    last_forms: core::cell::RefCell<crate::forms::FormState>,
     /// Why the last pointer repaint gave up — see `Engine::repaint_bail`.
     repaint_bail: core::cell::Cell<&'static str>,
     /// The last parsed DOCUMENT with the fingerprint of the inputs that built
@@ -319,6 +328,7 @@ impl Engine {
             hover: RefCell::new(Vec::new()),
             hover_prev: RefCell::new(Vec::new()),
             clock: core::cell::Cell::new(None),
+            last_forms: core::cell::RefCell::new(crate::forms::FormState::default()),
             repaint_bail: core::cell::Cell::new(""),
             dom: RefCell::new(Vec::new()),
             scripted: RefCell::new(None),
@@ -973,6 +983,14 @@ impl Engine {
     /// Lend the engine a monotonic tick source, so `Layout::phase` reports
     /// what parse, cascade and layout each cost. Purely optional — the engine
     /// stays free of host functions either way.
+    /// Der Steuerelement-Zustand des letzten Auslegens, als Kopie.
+    ///
+    /// Eine KOPIE und keine Entleihung: der Rufer legt damit sofort neu aus,
+    /// und `layout_forms` schreibt dabei in dasselbe Feld zurueck.
+    pub fn last_forms(&self) -> crate::forms::FormState {
+        self.last_forms.borrow().clone()
+    }
+
     pub fn set_clock(&self, f: fn() -> u64) {
         self.clock.set(Some(f));
     }
@@ -993,6 +1011,7 @@ impl Engine {
     ) -> Layout {
         let now = || self.clock.get().map_or(0, |f| f());
         let t0 = now();
+        *self.last_forms.borrow_mut() = forms.clone();
         let dom_key = fingerprint(html.as_bytes())
             ^ (width as u64) << 40
             ^ (self.theme.is_dark() as u64) << 63;
@@ -1023,12 +1042,23 @@ impl Engine {
         // The viewport HEIGHT is part of the identity too, since `resolve_vars`
         // bakes custom properties down and one may hold a `vh` length. Without
         // it a purely vertical window resize would keep the stale sheet.
+        //
+        // **Der Skriptbaum steht mit seinem INHALT im Schluessel, nicht mit
+        // einem Zaehler.** Bis 0.184.0 ging `scripted_gen` hier ein, und das
+        // heisst: jede einzelne DOM-Aenderung — ein `classList.toggle` —
+        // machte das ganze Blatt ungueltig und `parse` lief ueber 1,06 MB
+        // neu (gemessen auf DDGs Ergebnisseite: 15,8 ms je Auslegen). Am
+        // Baum haengt die Kaskade aber nur an zwei Dingen: dem Text der
+        // `<style>`-Bloecke und den `url()` in `style`-Attributen. Das erste
+        // steht jetzt im Schluessel, das zweite wird bei einem Treffer
+        // nachgetragen.
+        let style_text = crate::css::style_text(dom);
         let key = fingerprint(html.as_bytes())
             ^ fingerprint(external_css.as_bytes()).rotate_left(17)
             ^ (width as u64) << 40
             ^ (self.viewport_h.get() as u64).rotate_left(23)
             ^ (media.dark as u64) << 63
-            ^ self.scripted_gen.get().rotate_left(41);
+            ^ fingerprint(style_text.as_bytes()).rotate_left(41);
         let sheet_hit = promote(&mut self.sheet.borrow_mut(), key);
         if !sheet_hit {
             let collected = crate::css::collect_all(dom, external_css, media);
@@ -1036,6 +1066,11 @@ impl Engine {
             let mut held = self.sheet.borrow_mut();
             held.insert(0, (key, collected));
             held.truncate(DOC_SLOTS);
+        } else {
+            // Ein `style="background-image:url(…)"`, das ein Skript eben
+            // gesetzt hat, steht in keinem geparsten Blatt — es muss in die
+            // Tabelle, sonst hat der Befehl beim Malen keine Adresse.
+            crate::css::add_inline_urls(dom, &mut self.sheet.borrow_mut()[0].1);
         }
         let t_css = now();
         let held = self.sheet.borrow();
