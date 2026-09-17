@@ -73,11 +73,19 @@ pub struct Video {
     dec: Decoder,
     /// Next sample to feed the decoder, in decode order.
     next: usize,
+    /// Samples decoded since the counter was last read.
+    decoded: u32,
     /// Reused scratch for the Annex-B reframing, so a frame costs no
     /// allocation beyond the picture itself.
     au: Vec<u8>,
     /// Decoded but not yet shown, ascending by presentation time.
     queue: Vec<(i64, YuvFrame)>,
+    /// Pictures decoded and thrown away because a newer one was already due.
+    /// Not a failure — it is what keeps the picture on the clock — but it is
+    /// what the eye SEES when the machine is short, so it gets counted.
+    pub dropped: u32,
+    /// Pictures handed to the screen.
+    pub shown_count: u32,
     /// Bytes the queue holds, tracked rather than recomputed: the planes do
     /// not change size, and walking them per call to add up three `len()`s
     /// would be work that grows with the lead we are trying to build.
@@ -138,8 +146,11 @@ impl Video {
             dec: Decoder::new(),
             next: 0,
             au: Vec::new(),
+            decoded: 0,
             queue: Vec::new(),
             queue_bytes: 0,
+            dropped: 0,
+            shown_count: 0,
             shown: None,
             fed_all: false,
         };
@@ -180,6 +191,7 @@ impl Video {
         // A sample the decoder refuses is one lost picture, not a lost film:
         // the next sync sample starts it again. Silence here would hide a
         // broken file, so the caller gets to log it.
+        self.decoded += 1;
         if let Ok(Some(f)) = self.dec.decode(&self.au) {
             // Insert sorted; the queue is four long, so this is cheaper than
             // keeping a heap and far cheaper than being wrong about order.
@@ -221,9 +233,11 @@ impl Video {
             let (pts, f) = self.queue.remove(0);
             self.queue_bytes = self.queue_bytes
                 .saturating_sub(f.y.len() + f.u.len() + f.v.len());
+            if advanced { self.dropped += 1; }   // der vorige kam nie hin
             self.shown = Some((pts, f));
             advanced = true;
         }
+        if advanced { self.shown_count += 1; }
         // Erst danach nachfuellen: was die Ausgabe eben geleert hat, wird
         // mit dem uebrigen Budget wieder aufgefuellt.
         self.fill(ms, &mut budget);
@@ -232,6 +246,12 @@ impl Video {
 
     /// Decode ahead: deep enough to order pictures, then as far ahead of the
     /// clock as the lead allows, and never past the byte cap.
+    /// Samples decoded since the last `take_decoded`. Der Rufer misst die
+    /// ZEIT selbst; hier wird nur gezaehlt, was sie verursacht hat.
+    pub fn take_decoded(&mut self) -> u32 {
+        core::mem::take(&mut self.decoded)
+    }
+
     fn fill(&mut self, ms: i64, budget: &mut usize) {
         while *budget > 0 {
             let need_order = self.queue.len() < REORDER;
@@ -257,6 +277,13 @@ impl Video {
     /// hand to mouth, and the next expensive scene will be visible.
     pub fn lead_ms(&self, ms: i64) -> i64 {
         self.queue.last().map(|(p, _)| p - ms).unwrap_or(0).max(0)
+    }
+
+    /// Das Bild auf dem Schirm, unabhaengig davon, ob es eben gewechselt
+    /// hat — `frame_at` gibt den Borrow zurueck, und der Rufer braucht ihn
+    /// noch einmal, nachdem er die Zeit dazwischen gemessen hat.
+    pub fn current_frame(&self) -> Option<&YuvFrame> {
+        self.shown.as_ref().map(|(_, f)| f)
     }
 
     /// Presentation time of the picture on screen. The gap to the caller's
