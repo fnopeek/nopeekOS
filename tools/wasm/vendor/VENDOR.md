@@ -104,3 +104,34 @@ vorgeschrieben; 1 LSB ist Rundung. **Und der Versatz von 2112 ist genau das
 `edit_start`, das unser Demuxer aus der Edit-List liest** — ffmpeg schneidet
 exakt diese AAC-Vorlaufsamples weg. Die Edit-List ist damit nicht mehr eine
 Vermutung ueber Lippensynchronitaet, sondern eine gemessene Zahl.
+
+## Der Zusatz, ohne den er unbrauchbar ist: `imdct_fast`
+
+Upstream wertet die IMDCT **direkt** aus — `cos()` in der inneren Schleife,
+2048 x 1024 = 2,1 Millionen Transzendentenaufrufe je langem Block. Der
+Modulkopf sagt es selbst vorher: *„can be swapped for an FFT-based fast path
+later without changing results."*
+
+Gemessen, was es kostet:
+
+    direkt:   948 ms je Sekunde Ton (Ryzen 9600X)  ->  x11,8 = 1118 % eines
+                                                       Geraetekerns
+    schnell:  3,0 ms je Sekunde Ton                ->  4 % eines Kerns
+
+**Faktor 316.** Mit der direkten Fassung verhungerte am Geraet alles andere:
+der Bildweg kam auf 4 Dekodierungen je Sekunde und die Mailbox lief
+durchgehend leer.
+
+`imdct_fast` ist Zeile fuer Zeile die UMKEHRUNG von `mdct_fast`, das
+upstream schon hatte — dieselben Twiddles, dieselbe M-Punkt-FFT. Beide
+Drehungen sind orthogonale 2x2-Matrizen, also ihre eigene Umkehrung; die
+inverse FFT laeuft ueber die Konjugierten-Regel.
+
+**Die direkte Fassung bleibt als ORAKEL stehen**, und ein Test haelt beide
+bei N = 16, 64, 256, 2048 gegeneinander. Genau der hat auch den einzigen
+Fehler gefunden: ich hatte den Massstab mit `1/N` GERATEN, das Orakel sagte
+„Verhaeltnis exakt 16 bei N=16", und damit war der Faktor 1. Eine Konstante
+in einer Transformationskette gehoert gemessen.
+
+Am Ergebnis aendert die Umstellung nichts: derselbe ffmpeg-Vergleich, 1 LSB
+und 99,8 dB wie vorher.
