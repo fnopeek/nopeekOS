@@ -369,7 +369,7 @@ impl Tune {
             // Das erste Bild wird dabei schon gezeigt. Ein schwarzer Kasten,
             // waehrend im Hintergrund gepuffert wird, sieht aus wie ein
             // Fehler; das stehende erste Bild sieht aus wie das, was es ist.
-            if let Some(f) = v.frame_at(self.video_ms) {
+            if let Some(f) = v.frame_at(self.video_ms, video::FILL_DECODES) {
                 let (ys, cs) = video::Video::strides(f);
                 host::canvas_commit_yuv(VIDEO_CANVAS, &f.y, &f.u, &f.v, ys, cs,
                                         f.width as u32, f.height as u32, flags);
@@ -382,7 +382,7 @@ impl Tune {
         self.video_ms = ms;
         let flags = v.colour_flags;
         let t_dec = host::ticks();
-        let got = v.frame_at(ms).is_some();
+        let got = v.frame_at(ms, video::PLAY_DECODES).is_some();
         self.sec_decode_ms += host::ticks() - t_dec;
         self.sec_decoded += v.take_decoded();
         if got {
@@ -891,17 +891,17 @@ pub extern "C" fn _start() {
                 }
                 // Paused, there is nothing to keep up with — poll a quarter
                 // as often and leave the core alone.
-                // Zehn Millisekunden fest sind richtig, solange Vorrat da
-                // ist — und reine Latenz, wenn keiner da ist. Genau in der
-                // teuren Szene wird jede Runde gebraucht.
-                let thin = t.video.as_ref()
-                    .map(|v| v.lead_ms(t.video_ms) < 250)
-                    .unwrap_or(false);
-                host::sleep(match (t.playing, thin) {
-                    (true, true)  => 1,
-                    (true, false) => TICK_MS,
-                    (false, _)    => TICK_MS * 4,
-                });
+                // Nicht fest schlafen, sondern bis zum naechsten faelligen
+                // Bild — hoechstens aber die uebliche Runde. Zehn feste
+                // Millisekunden schieben eine Runde ueber die Bildperiode,
+                // und weil eine Runde nur EIN Bild zeigt, faellt dort dann
+                // genau eines aus.
+                let nap = match (t.playing, t.video.as_ref()) {
+                    (true, Some(v)) => v.next_due_in(t.video_ms).clamp(1, TICK_MS as i64) as i32,
+                    (true, None)    => TICK_MS,
+                    (false, _)      => TICK_MS * 4,
+                };
+                host::sleep(nap);
             }
             PollResult::WindowGone => { t.sink.close(); return; }
         }
