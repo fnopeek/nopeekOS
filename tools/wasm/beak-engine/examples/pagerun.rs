@@ -205,6 +205,13 @@ fn main() {
         if let Ok(n) = d.parse() { sess.interp.max_steps = n; }
     }
     if std::env::var("NOCLOCK").is_err() { sess.interp.clock = Some(host_clock); }
+    // **Neu auslegen auf Verlangen.** `NORELAYOUT=1` nimmt es heraus — fuer
+    // das A/B, und damit eine Messung sagen kann, WAS sie misst.
+    if std::env::var("NORELAYOUT").is_err() {
+        HTML.with(|h| *h.borrow_mut() = html.clone());
+        DIR.with(|d| *d.borrow_mut() = dir.clone());
+        sess.interp.relayout = Some(host_relayout);
+    }
     if let Ok(u) = std::env::var("URL") { sess.interp.set_location(&u); }
     // `BUDGET=<sekunden>`: dieselbe Frist, die der Wirt am Geraet stellt.
     // Ohne sie laeuft eine Seite host-seitig unbegrenzt, und „haengt" ist
@@ -330,6 +337,11 @@ erreichbar ({} Umgebungen, {} Eigenschaften){}",
         dynjs += js;
         let t = sess.interp.run_timers();
         timers += t;
+        // Siehe `GEOMEVERY` weiter unten: der Wirt misst je Bild, auch
+        // WAEHREND die Skripte noch laufen. Genau in dieser Runde haengt
+        // React seine Bausteine ein, und wer hier nicht misst, laesst jedes
+        // frisch eingehaengte Element `offsetWidth == 0` melden.
+        if std::env::var("GEOMEVERY").is_ok() { feed_geometry(&mut sess.interp, &html, &dir); }
         if t == 0 && js == 0 && want.is_empty() && sess.interp.pending_fetches.is_empty() { break }
         for (id, href) in want {
             let u = resolve_path(&format!("{}/", origin()), &href);
@@ -344,10 +356,17 @@ erreichbar ({} Umgebungen, {} Eigenschaften){}",
     if let Some(dn) = sess.interp.doc.as_ref().map(|d| d.doc) {
         let _ = beak_engine::js::dombind::dispatch(&mut sess.interp, "DOMContentLoaded", &[dn]);
     }
-    feed_geometry(&mut sess, &html, &dir);
+    feed_geometry(&mut sess.interp, &html, &dir);
     if let Some(dn) = sess.interp.doc.as_ref().map(|d| d.doc) {
         let _ = beak_engine::js::dombind::dispatch(&mut sess.interp, "load", &[dn]);
     }
+    // **`GEOMEVERY=1` legt zwischen zwei Zeitgeber-Runden ein BILD ein.**
+    // Der Wirt misst je Bild neu (`set_geometry` in `beak/src/lib.rs`); die
+    // Probe tut es sonst genau einmal, und dann meldet jedes Element, das ein
+    // Skript spaeter einhaengt, fuer immer `offsetWidth == 0`. Wer eine Seite
+    // untersucht, die sich selbst vermisst, misst ohne diesen Schalter die
+    // Probe statt beak.
+    let geom_every = std::env::var("GEOMEVERY").is_ok();
     for _ in 0..64 {
         let f = serve_fetches(&mut sess, &dir);
         fetches += f;
@@ -355,6 +374,7 @@ erreichbar ({} Umgebungen, {} Eigenschaften){}",
         dynjs += js;
         let t = sess.interp.run_timers();
         timers += t;
+        if geom_every { feed_geometry(&mut sess.interp, &html, &dir); }
         if t == 0 && f == 0 && js == 0 { break }
     }
     if dynjs > 0 { println!("Skripte per Skript: {dynjs} eingehaengt"); }
@@ -654,7 +674,7 @@ fn click_ids(sess: &mut beak_engine::js::Session, html: &str, dir: &str, spec: &
         if id.is_empty() { continue }
         // Je Klick neu auslegen — ein Behandler, der den Baum aendert,
         // verschiebt die Kaesten fuer den naechsten.
-        let Some(lay) = page_layout(sess, html, dir) else { return };
+        let Some(lay) = page_layout(&mut sess.interp, html, dir) else { return };
         let Some(dom) = sess.interp.doc.as_mut().map(|d| d.to_dom()) else { return };
         let Some(seq) = find_seq(&dom.root, id) else {
             println!("CLICK: kein Element mit id={id}"); continue };
@@ -827,21 +847,64 @@ fn to_bmp(px: &[u8], w: u32, h: u32) -> Vec<u8> {
 /// Blaetter aus dem Baum, die Schriftrunde. Zwei Aufrufer — die Geometrie fuer
 /// `getBoundingClientRect`, und der Klickpunkt fuer `CLICK`. **Eine Quelle**,
 /// sonst misst die eine Seite etwas anderes als die andere.
-fn page_layout(sess: &mut beak_engine::js::Session, html: &str, dir: &str)
+thread_local! {
+    /// Das HTML und das Spiegelverzeichnis fuer den Relayout-Haken. Ein
+    /// `fn`-Zeiger faengt nichts ein, also muessen die zwei Dinge, die
+    /// `feed_geometry` braucht, hier stehen — beim Wirt sind es ohnehin
+    /// Globale (`html_str()`, `css_str()`).
+    static HTML: core::cell::RefCell<String> = const { core::cell::RefCell::new(String::new()) };
+    static DIR: core::cell::RefCell<String> = const { core::cell::RefCell::new(String::new()) };
+}
+
+/// **Neu auslegen auf Verlangen** — derselbe Weg, den der Wirt je Bild faehrt,
+/// nur jetzt aus der Maschine heraus gerufen. Ohne ihn misst die Probe eine
+/// Engine ohne diesen Weg und findet den Fehler nicht, den sie suchen soll
+/// ([[feedback_the_test_path_must_be_the_real_path]]).
+fn host_relayout(ip: &mut beak_engine::js::interp::Interp) {
+    let dir = DIR.with(|d| d.borrow().clone());
+    HTML.with(|h| {
+        let html = h.borrow();
+        feed_geometry(ip, &html, &dir);
+    });
+}
+
+/// Mikrosekunden seit Prozessstart — die Uhr, aus der `Layout::phase` seine
+/// drei Zahlen rechnet. Ohne sie steht dort dreimal null.
+fn mono_us() -> u64 {
+    use std::sync::OnceLock;
+    static T0: OnceLock<std::time::Instant> = OnceLock::new();
+    T0.get_or_init(std::time::Instant::now).elapsed().as_micros() as u64
+}
+
+fn page_layout(ip: &mut beak_engine::js::interp::Interp, html: &str, dir: &str)
     -> Option<beak_engine::layout::Layout> {
-    let dom = sess.interp.doc.as_mut().map(|d| d.to_dom())?;
+    let t_dom = std::time::Instant::now();
+    let dom = ip.doc.as_mut().map(|d| d.to_dom())?;
+    let d_dom = t_dom.elapsed();
+    let t_css = std::time::Instant::now();
     let mut css = String::new();
     let mut n = 0;
     collect_links(dom.body(), dir, &mut css, &mut n);
     collect_links(&dom.root, dir, &mut css, &mut n);
+    let d_css = t_css.elapsed();
     if std::env::var("CSSDBG").is_ok() {
         eprintln!("[css] {n} Blaetter, {} B, .main-area: {}", css.len(), css.contains(".main-area"));
     }
     let width: u32 = std::env::var("W").ok().and_then(|w| w.parse().ok()).unwrap_or(1902);
     use beak_engine::layout::{Rgb, Theme};
-    let mut eng = beak_engine::Engine::new();
-    eng.set_theme(Theme { bg: Rgb(255,255,255), text: Rgb(33,37,41), heading: Rgb(33,37,41),
-                          link: Rgb(13,110,253), muted: Rgb(108,117,125), rule: Rgb(222,226,230) });
+    // **EINE Engine fuer alle Auslegungen, wie beim Wirt.** Eine frische je
+    // Messung hat jeden Zwischenspeicher kalt — Dokument, Blatt, Schriften —
+    // und die Probe misst dann den ersten Aufbau statt das Neuauslegen, das
+    // sie messen will ([[feedback_the_test_path_must_be_the_real_path]]).
+    thread_local! {
+        static ENG: beak_engine::Engine = {
+            let mut e = beak_engine::Engine::new();
+            e.set_theme(Theme { bg: Rgb(255,255,255), text: Rgb(33,37,41), heading: Rgb(33,37,41),
+                                link: Rgb(13,110,253), muted: Rgb(108,117,125), rule: Rgb(222,226,230) });
+            e
+        };
+    }
+    ENG.with(|eng| {
     // `H=` gehoert zur MESSUNG, nicht zur Kosmetik: `vh` und
     // `min-height:100vh` haengen daran. Mit der Vorgabe 600 statt der echten
     // Fensterhoehe lag die ganze Fritzbox-Seite 225 px zu hoch, und der
@@ -851,8 +914,12 @@ fn page_layout(sess: &mut beak_engine::js::Session, html: &str, dir: &str)
     // `element_rects()` ist leer — derselbe Schalter, den der Wirt setzt,
     // sobald eine Seite Skripte faehrt.
     eng.set_hit_all(true);
+    eng.set_clock(mono_us);
     eng.set_scripted_dom(Some(dom));
+    let t_lay = std::time::Instant::now();
     let mut lay = eng.layout_ext(html, &css, width);
+    let d_lay = t_lay.elapsed();
+    let mut n_lay = 1;
     // Die Schriften der Seite holen und NOCHMAL auslegen — dieselbe Runde,
     // die der Wirt faehrt. Ohne den zweiten Lauf misst die Probe mit der
     // eingebauten Schrift und vergleicht dann Breiten, die es nicht gibt.
@@ -869,22 +936,35 @@ fn page_layout(sess: &mut beak_engine::js::Session, html: &str, dir: &str)
             }
         }
         lay = eng.layout_ext(html, &css, width);
+        n_lay += 1;
     }
     if ok + bad > 0 { println!("Schriften: {ok} geladen, {bad} gescheitert"); }
+    // **Wo die Zeit eines erzwungenen Neuauslegens stuende.** `to_dom` baut den
+    // Baum zurueck, `collect_links` sammelt die Blaetter, `layout_ext` parst
+    // das HTML, faehrt die Kaskade und legt die Kaesten. Drei Zahlen statt
+    // einer, weil nur eine davon unvermeidlich ist.
+    if std::env::var("PHASEDBG").is_ok() {
+        eprintln!("  PHASE to_dom {:.1} ms · Blaetter {:.1} ms ({} B) · layout_ext {:.1} ms [parse {:.1} · cascade {:.1} · box {:.1}] · {} Layouts, {} Kaesten",
+            d_dom.as_secs_f64()*1000.0, d_css.as_secs_f64()*1000.0, css.len(),
+            d_lay.as_secs_f64()*1000.0,
+            lay.phase[0] as f64/1000.0, lay.phase[1] as f64/1000.0, lay.phase[2] as f64/1000.0,
+            n_lay, lay.element_rects().len());
+    }
     Some(lay)
+    })
 }
 
-fn feed_geometry(sess: &mut beak_engine::js::Session, html: &str, dir: &str) {
+fn feed_geometry(ip: &mut beak_engine::js::interp::Interp, html: &str, dir: &str) {
     let width: u32 = std::env::var("W").ok().and_then(|w| w.parse().ok()).unwrap_or(1902);
-    let Some(lay) = page_layout(sess, html, dir) else { return };
+    let Some(lay) = page_layout(ip, html, dir) else { return };
     let rects = lay.element_rects();
     if std::env::var("GEOMDBG").is_ok() {
         eprintln!("  Geometrie: {} Kaesten, Layouthoehe {}", rects.len(), lay.height);
         for r in rects.iter().take(8) { eprintln!("    seq={} {},{} {}x{}", r.seq, r.x, r.y, r.w, r.h); }
     }
-    sess.interp.set_geometry(beak_engine::js::interp::Geometry {
+    ip.set_geometry(beak_engine::js::interp::Geometry {
         boxes: std::rc::Rc::new(rects), scroll: (0, 0),
         content: (width as i32, lay.height as i32),
     });
-    sess.interp.set_media(width as f64, 1080.0, false);
+    ip.set_media(width as f64, 1080.0, false);
 }

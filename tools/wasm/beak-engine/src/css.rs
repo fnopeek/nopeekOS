@@ -1663,6 +1663,27 @@ pub fn collect(dom: &Dom, media: Media) -> Stylesheet {
 /// Author stylesheet = already-fetched external `<link>` CSS (document order:
 /// `<head>` first) followed by inline `<style>` blocks. The shell fetches the
 /// linked files (the engine is host-free) and hands their bytes in as `external`.
+/// Der Text aller `<style>`-Bloecke des Dokuments, in Baumreihenfolge.
+///
+/// **Das ist alles, was die Kaskade am BAUM haengt** — das und die `url()` in
+/// `style`-Attributen, die `add_inline_urls` nachtraegt. Deshalb steht diese
+/// Funktion oeffentlich hier: wer das gesammelte Blatt zwischenspeichert,
+/// muss auf DIESEN Inhalt schluesseln und nicht auf „irgendetwas am Baum hat
+/// sich bewegt". Ein `classList.toggle` aendert kein Stilblatt.
+pub fn style_text(dom: &Dom) -> String {
+    let mut out = String::new();
+    gather_style_text(&dom.root, &mut out);
+    out
+}
+
+/// Die `url()` aus den `style`-Attributen des Baums in die Tabelle eines
+/// Blattes nachtragen. Ueber `BTreeMap::or_insert_with` mehrfach anwendbar:
+/// ein zwischengespeichertes Blatt bekommt damit die Adressen des AKTUELLEN
+/// Baums, ohne neu geparst zu werden.
+pub fn add_inline_urls(dom: &Dom, sheet: &mut Stylesheet) {
+    gather_inline_urls(&dom.root, sheet);
+}
+
 pub fn collect_all(dom: &Dom, external: &str, _media: Media) -> Stylesheet {
     let mut css = String::from(external);
     css.push('\n');

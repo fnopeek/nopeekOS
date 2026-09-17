@@ -263,7 +263,7 @@ fn collect_options(el: &Element, out: &mut Vec<(String, String)>, selected: &mut
 
 /// The user's edits to a document's controls. Anything untouched falls back to
 /// the parsed defaults, so `FormState::default()` renders the page as authored.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct FormState {
     values: BTreeMap<u32, String>,
     checked: BTreeMap<u32, bool>,

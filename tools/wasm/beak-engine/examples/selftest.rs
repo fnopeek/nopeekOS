@@ -14,6 +14,38 @@ fn host_random(out: &mut [u8]) -> bool {
     }
 }
 
+thread_local! {
+    /// Die Engine, aus der das erzwungene Neuauslegen kommt — dieselbe, die
+    /// danach die Klickketten legt. Ein `fn`-Zeiger faengt nichts ein, also
+    /// muss sie hier stehen; am Geraet ist sie aus demselben Grund eine
+    /// Globale (`beak/src/lib.rs`).
+    static ENG: beak_engine::Engine = {
+        let mut e = beak_engine::Engine::new();
+        e.set_theme(beak_engine::Theme {
+            bg: beak_engine::Rgb(255, 255, 255), text: beak_engine::Rgb(0, 0, 0),
+            heading: beak_engine::Rgb(0, 0, 0), link: beak_engine::Rgb(0, 0, 238),
+            muted: beak_engine::Rgb(96, 96, 96), rule: beak_engine::Rgb(128, 128, 128) });
+        e
+    };
+}
+
+/// **Neu auslegen auf Verlangen**, host-seitig — derselbe Weg wie
+/// `host_relayout` im Wirt. Ohne ihn waere die Zeile `fresh` hier rot und am
+/// Geraet gruen ([[feedback_the_test_path_must_be_the_real_path]]).
+fn host_relayout(ip: &mut beak_engine::js::interp::Interp) {
+    let html = include_str!("../../beak/src/selftest.html");
+    ENG.with(|eng| {
+        if let Some(d) = ip.doc.as_mut() { eng.set_scripted_dom(Some(d.to_dom())); }
+        let forms = eng.last_forms();
+        let lay = eng.layout_forms(html, "", 1024, &forms);
+        ip.set_geometry(beak_engine::js::interp::Geometry {
+            boxes: std::rc::Rc::new(lay.element_rects()),
+            scroll: (0, 0),
+            content: (1024, lay.height as i32),
+        });
+    });
+}
+
 fn main() {
     beak_engine::js::random::set_source(host_random);
     use beak_engine::js::dombind::{Doc, ScriptRef, page_scripts};
@@ -32,6 +64,13 @@ fn main() {
 
     let mut sess = beak_engine::js::Session::new(50_000_000);
     sess.interp.set_document(doc);
+    // Der Haken, wie ihn der Wirt setzt. Die Pruefseite haengt ein Element
+    // ein und misst es im selben Schritt — ohne ihn meldet es 0.
+    ENG.with(|eng| eng.set_hit_all(true));
+    // `NORELAYOUT=1` nimmt den Haken heraus. Nicht Zierde: damit laesst sich
+    // pruefen, dass die Zeile `fresh` ueberhaupt noch beissen KANN — ohne
+    // Haken sagt sie „0/0 statt 240".
+    if std::env::var("NORELAYOUT").is_err() { sess.interp.relayout = Some(host_relayout); }
     sess.interp.set_media(1024.0, 768.0, false);
     // Dieselbe Adresse wie am Geraet (`selftest::URL`). Ohne sie stuende hier
     // `about:blank` und dort `beak:selftest` — und die eine Sache, die diese
@@ -96,14 +135,11 @@ fn main() {
     // Testpfad, der nicht der echte ist, ist kein Test
     // ([[feedback_verify_the_call_path]]).
     println!("\n── Klicks (Kette aus dem LAYOUT, wie in beak) ──");
-    let mut engine = beak_engine::Engine::new();
-    engine.set_theme(beak_engine::Theme {
-        bg: beak_engine::Rgb(255, 255, 255), text: beak_engine::Rgb(0, 0, 0),
-        heading: beak_engine::Rgb(0, 0, 0), link: beak_engine::Rgb(0, 0, 238),
-        muted: beak_engine::Rgb(96, 96, 96), rule: beak_engine::Rgb(128, 128, 128) });
-    engine.set_hit_all(sess.interp.doc.as_ref().unwrap().has_listeners);
-    engine.set_scripted_dom(Some(sess.interp.doc.as_mut().unwrap().to_dom()));
-    let lay = engine.layout_forms(html, "", 1024, &Default::default());
+    let lay = ENG.with(|engine| {
+        engine.set_hit_all(sess.interp.doc.as_ref().unwrap().has_listeners);
+        engine.set_scripted_dom(Some(sess.interp.doc.as_mut().unwrap().to_dom()));
+        engine.layout_forms(html, "", 1024, &Default::default())
+    });
     // Die Kaesten einreichen — GENAU wie beak es je Bild tut. Ohne das
     // antwortet `getBoundingClientRect` hier mit Nullen, und die Zeile `geom`
     // waere host-seitig rot und am Geraet gruen: derselbe Fehler wie bei der

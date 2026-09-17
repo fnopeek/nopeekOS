@@ -749,6 +749,22 @@ pub struct Interp {
     /// Siehe `Geometry`. `None` heisst: der Wirt hat keine eingereicht, und
     /// dann antwortet die Geometrie mit Nullen wie eh und je.
     pub geometry: Option<Geometry>,
+    /// **Neu auslegen auf Verlangen.** Der Wirt haengt hier ein, wie er es
+    /// bei `clock` tut; ohne Haken bleibt alles wie vorher.
+    ///
+    /// Warum es den Haken braucht: `geometry` ist das letzte BILD. Ein
+    /// Element, das ein Skript im selben Schritt eingehaengt hat, steht nicht
+    /// darin und meldet 0 — und eine Seite, die EINMAL misst, bleibt damit
+    /// fuer immer falsch. Ein Browser rechnet an dieser Stelle synchron neu.
+    pub relayout: Option<fn(&mut Interp)>,
+    /// Wie oft seit dem letzten Bild des Wirts erzwungen ausgelegt wurde.
+    /// `set_geometry` setzt es zurueck — aber nur, wenn der Wirt ruft und
+    /// nicht der Haken selbst.
+    pub forced_layouts: u32,
+    /// Laeuft gerade ein erzwungenes Auslegen? Sperre gegen Rekursion (der
+    /// Haken ruft `set_geometry`, und darin fragen die Kastenbeobachter
+    /// wieder nach Kaesten) und gegen das Zuruecksetzen des Deckels.
+    pub in_forced_layout: bool,
     /// Der lebende Baum in der Form, die die Kaskade lesen kann — gebaut aus
     /// `doc`, und nur neu gebaut, wenn `doc.version` sich bewegt hat.
     ///
@@ -986,6 +1002,9 @@ impl Interp {
                  pending_sockets: Vec::new(), next_socket_id: 1,
                  func_declines: HashMap::new(), pending_labels: Vec::new(), vm_ops: 0, hints_ok: true, vm_calls: 0, vm_calls_native: 0, vm_calls_slow: 0,
                  geometry: None,
+                 relayout: None,
+                 forced_layouts: 0,
+                 in_forced_layout: false,
                  live_dom: core::cell::RefCell::new(None),
                  jobs: alloc::collections::VecDeque::new(),
                  rng: 0x2545_F491_4F6C_DD1D, media: None,
@@ -1530,6 +1549,9 @@ impl Interp {
     /// wird bei jedem Einreichen nachgezogen.
     pub fn set_geometry(&mut self, g: Geometry) {
         self.geometry = Some(g);
+        // Ein Bild des Wirts gibt das Budget zurueck; ein erzwungenes
+        // Auslegen nicht — sonst waere der Deckel keiner.
+        if !self.in_forced_layout { self.forced_layouts = 0; }
         // **Hier und nirgends sonst.** `ResizeObserver` und
         // `IntersectionObserver` fragen nicht nach der Zeit, sondern nach
         // dem Kasten — und der steht genau jetzt fest. Ein Zeitgeber, der

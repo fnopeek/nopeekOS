@@ -58,6 +58,15 @@
  <span id="imgbox">Bildkasten ungeprueft</span>
 </p>
 <p>
+ <!-- **Neu auslegen auf Verlangen.** Ein Element, das ein Skript eben
+      eingehaengt hat, steht im letzten BILD nicht — ohne ein frisches Layout
+      meldet es 0, und eine Seite, die nur einmal misst, bleibt fuer immer
+      falsch (DuckDuckGos Karte). Gemessen wird im selben Schritt wie das
+      Einhaengen, denn genau das ist der Fall, um den es geht. -->
+ <span id="freshhost" style="display:block;width:240px"></span>
+ <span id="fresh">Frischer Kasten ungeprueft</span>
+</p>
+<p>
  <button id="b2" onclick="say('inline', 'inline-onclick lief')">onclick-Attribut</button>
  <span id="inline">nicht geklickt</span>
 </p>
@@ -808,6 +817,18 @@ document.getElementById("b1").addEventListener("click", function () {
   say("imgbox", (iw === 30 && ih === 30)
     ? "Bildkasten stimmt: " + iw + "x" + ih
     : "NEIN: Bild " + iw + "x" + ih + " statt 30x30");
+
+  // Einhaengen und im SELBEN Schritt messen. 240 ist die Breite des
+  // Elters — ein Blockkasten ohne eigene Breite nimmt sie ganz.
+  var host = document.getElementById("freshhost");
+  var neu = document.createElement("div");
+  neu.style.height = "10px";
+  host.appendChild(neu);
+  var fw2 = Math.round(neu.getBoundingClientRect().width);
+  var ow2 = neu.offsetWidth;
+  say("fresh", (fw2 === 240 && ow2 === 240)
+    ? "Frischer Kasten stimmt: " + fw2 + " breit, sofort gemessen"
+    : "NEIN: frisch eingehaengt meldet " + fw2 + "/" + ow2 + " statt 240");
 });
 document.getElementById("b3").addEventListener("click", function () {
   var li = document.createElement("li");
