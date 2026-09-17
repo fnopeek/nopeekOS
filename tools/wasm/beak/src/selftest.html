@@ -787,6 +787,25 @@ function say(id, text) {
   console.log("[selftest] " + id + ": " + text);
 }
 
+/* Der Klick traegt seinen ORT. Bis 0.186.0 war er eine nackte `Event`, und
+   `e.clientX` war `undefined` — eine FALSCHE Antwort, keine fehlende.
+
+   **Hier oben und nicht im Klickhandler.** Die erste Fassung meldete sich
+   INNERHALB des b1-Handlers an und konnte damit genau den Klick nicht sehen,
+   der sie anmeldete; host-seitig war sie trotzdem gruen, weil der Laeufer b1
+   ZWEIMAL klickt, und am Geraet (ein Klick) sagte sie gar nichts. Ein
+   Lauscher gehoert angemeldet, BEVOR das Ereignis faellt, das er pruefen
+   soll. */
+document.getElementById("b1").addEventListener("click", function (e) {
+  var gut = (typeof e.clientX === "number") && (typeof e.pageX === "number")
+            && e.button === 0 && e.detail === 1 && (e instanceof MouseEvent);
+  say("mausev", gut
+    ? "Mausereignis stimmt: " + Math.round(e.clientX) + "," + Math.round(e.clientY)
+      + " · Taste " + e.button + " · MouseEvent"
+    : "NEIN: clientX=" + e.clientX + " pageX=" + e.pageX + " button=" + e.button
+      + " detail=" + e.detail + " mouse=" + (e instanceof MouseEvent));
+});
+
 var clicks = 0;
 document.getElementById("b1").addEventListener("click", function () {
   clicks++;
@@ -848,18 +867,6 @@ document.getElementById("b1").addEventListener("click", function () {
   kf.addEventListener("input", function(e){
     gesehen.push("in:" + e.data + "/" + e.inputType
       + (e instanceof InputEvent ? "/inp" : "") + (e.cancelable ? "/CANCEL" : "/ok"));
-  });
-  // Der Klick traegt seinen ORT. Bis 0.186.0 war er eine nackte `Event`, und
-  // `e.clientX` war `undefined` — eine falsche Antwort, keine fehlende.
-  var mausfeld = document.getElementById("b1");
-  mausfeld.addEventListener("click", function(e){
-    var gut = (typeof e.clientX === "number") && (typeof e.pageX === "number")
-              && e.button === 0 && e.detail === 1 && (e instanceof MouseEvent);
-    say("mausev", gut
-      ? "Mausereignis stimmt: " + Math.round(e.clientX) + "," + Math.round(e.clientY)
-        + " · Taste " + e.button + " · MouseEvent"
-      : "NEIN: clientX=" + e.clientX + " pageX=" + e.pageX + " button=" + e.button
-        + " detail=" + e.detail + " mouse=" + (e instanceof MouseEvent));
   });
   var kd = new KeyboardEvent("keydown", { key: "x", code: "KeyX", keyCode: 88,
                                           shiftKey: true, bubbles: true, cancelable: true });
