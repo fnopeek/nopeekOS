@@ -19,17 +19,26 @@ use crate::mp4;
 /// queue always emits the smallest `pts` it holds.
 const REORDER: usize = 4;
 
-/// Most samples one `frame_at` call may decode.
+/// Decodes per call while FILLING UP — before the clock runs.
 ///
-/// Without a cap this loop catches up until it reaches the wall clock, and
-/// that is unbounded: a second behind at 30 fps is thirty decodes in ONE
-/// call, and at 1440p thirty decodes are a second and a half in which the
-/// event loop does not poll. The window stops answering, and „too slow"
-/// looks like „hung" — two very different bugs.
+/// Only here may a call take several: nobody is watching yet, and the whole
+/// point is to get a lead before the first picture moves.
+pub const FILL_DECODES: usize = 4;
+
+/// Decodes per call while PLAYING. One, and the reason is the whole bug.
 ///
-/// With the cap the picture simply falls behind and the clock says by how
-/// much. That is the honest symptom, and it is the one you can measure.
-const MAX_DECODES_PER_CALL: usize = 4;
+/// A turn of the caller's loop shows at most ONE picture. So the display
+/// rate is the TURN rate, not the decode rate — and every decode a turn does
+/// makes that turn longer. Measured at the device, 1440p30: four decodes at
+/// 22 ms are 88 ms, which is 2.6 frame periods in one turn, so two or three
+/// pictures fall due unseen. The log said it plainly: „30x dekodiert" (the
+/// machine keeps up) next to „4 verworfen" (a quarter never shown).
+///
+/// With one, a turn is one decode plus one commit, and it fits inside a
+/// frame period with room to spare. When decoding is slower than that — the
+/// expensive scene — the LEAD drains instead, which is exactly what a lead
+/// is for, and the picture keeps its rate until the lead is gone.
+pub const PLAY_DECODES: usize = 1;
 
 /// How far ahead of the clock to decode, in ms of PICTURE time.
 ///
@@ -214,8 +223,8 @@ impl Video {
     /// skipped without decoding it (the next one predicts from it), but it
     /// can be skipped on the way to the screen, and that is where the whole
     /// cost of a commit sits.
-    pub fn frame_at(&mut self, ms: i64) -> Option<&YuvFrame> {
-        let mut budget = MAX_DECODES_PER_CALL;
+    pub fn frame_at(&mut self, ms: i64, max_decodes: usize) -> Option<&YuvFrame> {
+        let mut budget = max_decodes;
         self.fill(ms, &mut budget);
 
         // Ausgeben kostet KEIN Budget, und das ist der Punkt: ein spaetes
@@ -253,14 +262,25 @@ impl Video {
     }
 
     fn fill(&mut self, ms: i64, budget: &mut usize) {
+        // Die Reihenfolge-Tiefe ist eine Pflicht, kein Vorrat: ohne sie
+        // weiss die Schlange nicht, welches Bild das naechste ist. Sie geht
+        // deshalb VOR dem Budget und nicht aus ihm.
+        while self.queue.len() < REORDER {
+            if !self.feed_one() { break; }
+        }
         while *budget > 0 {
-            let need_order = self.queue.len() < REORDER;
             let lead = self.queue.last().map(|(p, _)| *p - ms).unwrap_or(0);
-            let want_lead = lead < TARGET_LEAD_MS && self.queue_bytes < MAX_QUEUE_BYTES;
-            if !need_order && !want_lead { break; }
+            if lead >= TARGET_LEAD_MS || self.queue_bytes >= MAX_QUEUE_BYTES { break; }
             *budget -= 1;
             if !self.feed_one() { break; }
         }
+    }
+
+    /// Wie lange bis zum naechsten faelligen Bild. Der Rufer schlaeft danach
+    /// — ein fester Schlaf schiebt eine Runde ueber die Bildperiode, und
+    /// dann faellt genau dort ein Bild aus.
+    pub fn next_due_in(&self, ms: i64) -> i64 {
+        self.queue.first().map(|(p, _)| p - ms).unwrap_or(0).max(0)
     }
 
     /// Enough decoded to start without stumbling.
