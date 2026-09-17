@@ -51,3 +51,56 @@ aus den `Cargo.toml` entfernt; sonst ist alles unveraendert.
    Fassung kann einen Opcode mitbringen, den forge nicht kennt.
 5. `<tools>/mediabench/src/pipeline_probe.rs` gegen ffmpeg: die Pixel
    muessen byte-gleich bleiben.
+
+---
+
+# Vendorter AAC-Dekoder
+
+`rusty_aac` 0.5.0, Apache-2.0, © Mata Network — dieselbe Familie wie der
+H.264-Dekoder oben, und aus demselben Grund gewaehlt: **keine einzige
+Laufzeitabhaengigkeit** und ein eigener MDCT. Der naechstbeste Kandidat
+(`soundkit-aac-lc`) zieht `rustfft` — std-gebunden, gross, SIMD —, und der
+IMDCT IST der Kern eines AAC-Dekoders; ihn ueber eine fremde FFT zu holen,
+die wir dann auch portieren muessten, ist der laengere Weg.
+
+## Was portiert wurde (upstream ist `std`)
+
+Der Dekodierpfad braucht erstaunlich wenig: von den 61 `std::`-Stellen des
+Crates liegen fast alle in `encode.rs` — **4940 der 8602 Zeilen**, und wir
+dekodieren nur.
+
+1. **`encode` und `latm` hinter dem Merkmal `encode`**, aus per Vorgabe. Die
+   Dateien bleiben liegen, damit sich der Vendor gegen upstream diffen
+   laesst. `latm` haengt am `BitWriter` des Encoders; MP4 traegt rohe
+   AAC-Rahmen, also brauchen wir es nicht.
+2. **`src/chanorder.rs`** — die eine Funktion aus `encode.rs`, die der
+   Dekoder wirklich braucht (`aac_to_interleave_order`), woertlich kopiert.
+3. **`src/mathshim.rs`** — `sin`/`cos`/`sqrt`/`abs`/`powf`/… sind in `std`,
+   nicht in `core`. Statt 35 Aufrufstellen auf `libm::sinf(x)` umzuschreiben
+   (und damit den Diff gegen upstream zu zerstoeren) steht dort ein Trait mit
+   denselben NAMEN; ein `use` je Datei genuegt. Dazu ein `OnceLock` auf
+   `spin::Once`, weil dessen Methode `call_once` statt `get_or_init` heisst.
+4. `std::` → `core::` fuer Konstanten, `fmt`, `ops`, `cmp`, `mem`; die
+   `impl std::error::Error` faellt weg (gibt es in core nicht, die Meldung
+   traegt `Display`).
+5. `use alloc::…` fuer `Vec`/`String`/`Box`/`vec!`/`format!`.
+
+**`simd` bleibt aus** (Vorgabe ist jetzt `default = []`) — wie beim H.264
+und aus demselben Grund: forge kennt kein `simd128`, und was forge nicht
+uebersetzt, trappt.
+
+## Geprueft
+
+`<tools>/mediabench/src/aac_probe.rs`: MP4 durch UNSEREN Demuxer, Rahmen
+durch diesen Dekoder, PCM gegen `ffmpeg -f s16le`.
+
+    Handyvideo, 44,1 kHz stereo, 267 Rahmen:
+      Spitze wir 14435, ffmpeg 14435
+      bester Versatz 2112 Samples · Korrelation 1,000000
+      SNR 99,8 dB · groesste Abweichung 1 LSB
+
+AAC ist nach ISO 14496-3 float-basiert und ausdruecklich NICHT bit-exakt
+vorgeschrieben; 1 LSB ist Rundung. **Und der Versatz von 2112 ist genau das
+`edit_start`, das unser Demuxer aus der Edit-List liest** — ffmpeg schneidet
+exakt diese AAC-Vorlaufsamples weg. Die Edit-List ist damit nicht mehr eine
+Vermutung ueber Lippensynchronitaet, sondern eine gemessene Zahl.
