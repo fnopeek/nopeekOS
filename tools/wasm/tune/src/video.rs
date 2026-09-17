@@ -36,6 +36,8 @@ pub struct Video {
     pub height: u32,
     pub rotation: u16,
     pub duration_ms: u64,
+    /// Flags for `npk_canvas_commit_yuv`: bit 0 = Rec. 709, bit 1 = full range.
+    pub colour_flags: i32,
     /// Every sample has been fed. The queue may still hold pictures.
     fed_all: bool,
 }
@@ -78,6 +80,7 @@ impl Video {
             height: track.height,
             rotation: track.rotation,
             duration_ms: track.duration_ms(),
+            colour_flags: (track.colour.bt709 as i32) | ((track.colour.full_range as i32) << 1),
             data,
             track,
             dec: Decoder::new(),
