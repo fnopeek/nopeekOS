@@ -31,6 +31,37 @@ const REORDER: usize = 4;
 /// much. That is the honest symptom, and it is the one you can measure.
 const MAX_DECODES_PER_CALL: usize = 4;
 
+/// How far ahead of the clock to decode, in ms of PICTURE time.
+///
+/// Four frames of reorder depth is enough to put pictures in order and not
+/// enough to absorb anything. The cost of decoding follows the BITS, not the
+/// pixels: a day-to-night crossfade leaves every macroblock with a large
+/// residual and costs several times what a talking head costs. The machine
+/// holds the average and misses the peak — unless the cheap stretches, where
+/// it is otherwise idle, are used to build a lead. That is what the audio
+/// sink has done from the start (`sink::TARGET_LEAD_MS`).
+///
+/// **1000 ms, und die Zahl ist gemessen.** Florians Geraetelauf, 1440p30,
+/// Tag/Nacht-Ueberblendung: der Rueckstand stieg auf **647 ms** und ging
+/// danach wieder zurueck (424 -> 647 -> 314). Ein Loch, kein Dauerzustand —
+/// also genau das, was ein Vorlauf schluckt, wenn er tief genug ist. Harte
+/// Schnitte in derselben Datei liefen ohne Rueckstand durch: EIN teures Bild
+/// faengt schon die Reihenfolge-Warteschlange ab, eine lange Kette nicht.
+const TARGET_LEAD_MS: i64 = 1000;
+
+/// And the real limit is BYTES, not frames.
+///
+/// 500 ms at 30 fps is fifteen pictures — 47 MB at 1080p and 83 MB at
+/// 1440p. A cap counted in frames means the memory it costs depends on the
+/// file, which is the same mistake as sizing a buffer by item count anywhere
+/// else. So the lead is whichever comes first.
+///
+/// 128 MB reicht bei 1440p fuer 23 Bilder (775 ms) und bei 1080p fuer mehr,
+/// als die Zeitgrenze zulaesst. Es ist viel, und es ist der Preis dafuer,
+/// dass ein Ueberblendung nicht sichtbar wird; belegt wird es nur, wenn die
+/// billigen Szenen davor Zeit uebrig hatten.
+const MAX_QUEUE_BYTES: usize = 128 * 1024 * 1024;
+
 pub struct Video {
     data: &'static [u8],
     track: mp4::Track,
@@ -42,6 +73,10 @@ pub struct Video {
     au: Vec<u8>,
     /// Decoded but not yet shown, ascending by presentation time.
     queue: Vec<(i64, YuvFrame)>,
+    /// Bytes the queue holds, tracked rather than recomputed: the planes do
+    /// not change size, and walking them per call to add up three `len()`s
+    /// would be work that grows with the lead we are trying to build.
+    queue_bytes: usize,
     /// The picture currently on screen, and when it starts.
     shown: Option<(i64, YuvFrame)>,
     pub width: u32,
@@ -99,6 +134,7 @@ impl Video {
             next: 0,
             au: Vec::new(),
             queue: Vec::new(),
+            queue_bytes: 0,
             shown: None,
             fed_all: false,
         };
@@ -143,6 +179,7 @@ impl Video {
             // Insert sorted; the queue is four long, so this is cheaper than
             // keeping a heap and far cheaper than being wrong about order.
             let at = self.queue.partition_point(|(p, _)| *p <= pts);
+            self.queue_bytes += f.y.len() + f.u.len() + f.v.len();
             self.queue.insert(at, (pts, f));
         }
         true
@@ -162,12 +199,7 @@ impl Video {
     /// cost of a commit sits.
     pub fn frame_at(&mut self, ms: i64) -> Option<&YuvFrame> {
         let mut budget = MAX_DECODES_PER_CALL;
-        // Keep the queue full enough that the next picture in PRESENTATION
-        // order is really the smallest one we hold.
-        while self.queue.len() < REORDER && budget > 0 {
-            budget -= 1;
-            if !self.feed_one() { break; }
-        }
+        self.fill(ms, &mut budget);
 
         let mut advanced = false;
         while let Some(&(pts, _)) = self.queue.first() {
@@ -176,15 +208,33 @@ impl Video {
             // earliest, or there is nothing left to come.
             if self.queue.len() < REORDER && !self.fed_all { break; }
             let (pts, f) = self.queue.remove(0);
+            self.queue_bytes = self.queue_bytes
+                .saturating_sub(f.y.len() + f.u.len() + f.v.len());
             self.shown = Some((pts, f));
             advanced = true;
-            while self.queue.len() < REORDER && budget > 0 {
-                budget -= 1;
-                if !self.feed_one() { break; }
-            }
+            self.fill(ms, &mut budget);
             if budget == 0 { break; }
         }
         if advanced { self.shown.as_ref().map(|(_, f)| f) } else { None }
+    }
+
+    /// Decode ahead: deep enough to order pictures, then as far ahead of the
+    /// clock as the lead allows, and never past the byte cap.
+    fn fill(&mut self, ms: i64, budget: &mut usize) {
+        while *budget > 0 {
+            let need_order = self.queue.len() < REORDER;
+            let lead = self.queue.last().map(|(p, _)| *p - ms).unwrap_or(0);
+            let want_lead = lead < TARGET_LEAD_MS && self.queue_bytes < MAX_QUEUE_BYTES;
+            if !need_order && !want_lead { break; }
+            *budget -= 1;
+            if !self.feed_one() { break; }
+        }
+    }
+
+    /// Picture time the queue reaches beyond `ms`. Zero means the decoder is
+    /// hand to mouth, and the next expensive scene will be visible.
+    pub fn lead_ms(&self, ms: i64) -> i64 {
+        self.queue.last().map(|(p, _)| p - ms).unwrap_or(0).max(0)
     }
 
     /// Presentation time of the picture on screen. The gap to the caller's
@@ -207,6 +257,7 @@ impl Video {
         let i = self.track.sync_at_ms(ms.max(0) as u64);
         self.dec = Decoder::new();
         self.queue.clear();
+        self.queue_bytes = 0;
         self.shown = None;
         self.next = i;
         self.fed_all = false;

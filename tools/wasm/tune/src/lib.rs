@@ -357,12 +357,19 @@ impl Tune {
         // mitkommt, soll es mit einer ZAHL sagen und nicht als Gefuehl —
         // einmal je Sekunde, damit die Meldung nicht selbst zur Last wird.
         let lag = ms - v.shown_ms();
+        let lead = v.lead_ms(ms);
         let sec = ms / 1000;
         if lag > 150 && sec != self.told_lag_s {
             self.told_lag_s = sec;
+            // Der Vorlauf steht daneben, weil er die Frage beantwortet, die
+            // der Rueckstand allein offen laesst: war der Puffer LEER, als es
+            // eng wurde (dann ist er zu flach), oder war er voll und die
+            // Stelle einfach teurer als alles, was wir vorhalten koennen?
             let mut m = alloc::string::String::from("[tune] Bild haengt ");
             push_u32(&mut m, lag.min(u32::MAX as i64) as u32);
-            m.push_str(" ms hinter der Uhr");
+            m.push_str(" ms hinter der Uhr, Vorlauf ");
+            push_u32(&mut m, lead.min(u32::MAX as i64) as u32);
+            m.push_str(" ms");
             log(&m);
         }
         if v.ended() {
