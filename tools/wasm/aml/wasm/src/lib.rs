@@ -23,7 +23,7 @@ static NPK_CAPS: [u8; 1] = [0x40];
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
-    log("[aml] panic");
+    logln("[aml] panic");
     // TRAPPEN, nicht drehen. `loop {}` verwandelte jeden Absturz in einen
     // stillen Haenger: die Meldung ging in einen seriellen Port, den ein
     // Notebook nicht hat, und danach drehte die Faser fuer immer. Ein Trap
@@ -54,12 +54,17 @@ unsafe extern "C" {
 /// `kprint!`, also auf den BILDSCHIRM und in den Bootlog-Mitschnitt (und
 /// damit in `dmesg`). Deshalb beides: welcher Kanal lebt, weiss man erst
 /// hinterher.
+/// Ein Kanal, nicht zwei.
+///
+/// `npk_print` laeuft ueber `kprint!`, also auf den Bildschirm UND in den
+/// Bootlog-Mitschnitt (`dmesg`). `npk_log_serial` schreibt daneben in den
+/// UART und haengt an JEDEN Aufruf ein `\r\n` — in beide zu schreiben gab
+/// jede Zeile doppelt und zerriss sie an jeder Zahl. Ein sichtbarer Kanal
+/// genuegt.
 fn log(s: &str) {
-    unsafe {
-        npk_print(s.as_ptr() as i32, s.len() as i32);
-        npk_log_serial(s.as_ptr() as i32, s.len() as i32);
-    }
+    unsafe { npk_print(s.as_ptr() as i32, s.len() as i32) };
 }
+fn logln(s: &str) { log(s); log("\n"); }
 
 /// `log` mit einer Zahl dahinter — ohne Formatierer, der Allokation braucht.
 fn lognum(prefix: &str, mut v: u32) {
@@ -68,7 +73,8 @@ fn lognum(prefix: &str, mut v: u32) {
     if v == 0 { i -= 1; buf[i] = b'0'; }
     while v > 0 { i -= 1; buf[i] = b'0' + (v % 10) as u8; v /= 10; }
     log(prefix);
-    if let Ok(s) = core::str::from_utf8(&buf[i..]) { log(s); }
+    if let Ok(t) = core::str::from_utf8(&buf[i..]) { log(t); }
+    log("\n");
 }
 
 // ── bump allocator: reset to zero each tick (re-parse is fully transient) ──
@@ -114,14 +120,14 @@ impl Ec for HostEc {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    log("[aml] battery driver start");
+    logln("[aml] battery driver start");
 
     let dsdt_ptr = core::ptr::addr_of_mut!(DSDT) as *mut u8;
     let len = unsafe { npk_acpi_dsdt(dsdt_ptr as i32, DSDT_MAX as i32) };
     lognum("[aml] DSDT bytes reported: ", len as u32);
     if len <= 0 || len as usize > DSDT_MAX {
         lognum("[aml] no DSDT, or larger than the buffer of ", DSDT_MAX as u32);
-        log("[aml] driver idle");
+        logln("[aml] driver idle");
         return;
     }
     let table_len = len as usize;
@@ -129,15 +135,24 @@ pub extern "C" fn _start() {
     // Die Runde zaehlen. Haengt der Interpreter, sagt die letzte gedruckte
     // Zahl, ob es beim ERSTEN Durchgang passiert oder erst spaeter — und
     // das sind zwei ganz verschiedene Fehler.
+    // Die erste Runde erzaehlt, danach nur noch, wenn sich das ERGEBNIS
+    // aendert. Eine Wegmarke je Runde ist beim Suchen richtig und im
+    // Betrieb eine Flut — der Treiber laeuft fuer immer.
     let mut round = 0u32;
+    let mut last = i32::MIN;
     loop {
         round += 1;
-        lognum("[aml] round ", round);
         heap_reset();
         let table = unsafe { core::slice::from_raw_parts(dsdt_ptr as *const u8, table_len) };
-        log("[aml]  parsing DSDT...");
-        let packed = decode(table);
-        lognum("[aml]  decode done, packed=", packed as u32);
+        let packed = decode(table, round == 1);
+        if packed != last {
+            if packed < 0 {
+                logln("[aml] no usable battery (packed=-1)");
+            } else {
+                lognum("[aml] battery percent=", (packed & 0xFF) as u32);
+            }
+            last = packed;
+        }
         unsafe { npk_battery_report(packed) };
         unsafe { npk_sleep(10_000) };
     }
@@ -145,16 +160,31 @@ pub extern "C" fn _start() {
 
 /// Parse the DSDT and evaluate the first present battery; return the bar's
 /// packed encoding ((status<<8)|percent) or -1 if none.
-fn decode(table: &[u8]) -> i32 {
+fn decode(table: &[u8], verbose: bool) -> i32 {
     let ns = match Namespace::load(table) {
         Ok(ns) => ns,
-        Err(_) => { log("[aml]  Namespace::load failed"); return -1; }
+        Err(_) => { logln("[aml]  Namespace::load failed"); return -1; }
     };
-    log("[aml]  namespace loaded, looking for batteries");
+    if verbose { logln("[aml]  namespace loaded, looking for batteries"); }
     let mut ec = HostEc;
+    let mut n = 0u32;
     for bat in find_batteries(&ns) {
-        log("[aml]  battery found, reading _BST/_BIF (EC access)");
-        if let Ok(info) = read_battery(&ns, &mut ec, &bat) {
+        n += 1;
+        // Warum -1? Bisher fielen "Methode/EC hat gemeckert" und "Akku
+        // meldet sich als nicht vorhanden" in dieselbe stille -1, und das
+        // sind zwei ganz verschiedene Fehler. `read_battery` traegt einen
+        // Fehlertext — der wurde weggeworfen.
+        match read_battery(&ns, &mut ec, &bat) {
+            Err(e) => if verbose {
+                log("[aml]  _BST/_BIF failed: ");
+                logln(&e);
+            },
+            Ok(info) => {
+            if verbose {
+                lognum("[aml]  present=", info.present as u32);
+                lognum("[aml]  state=", info.state);
+                lognum("[aml]  percent=", info.percent as u32);
+            }
             if info.present {
                 // bar status: 0=discharging 1=charging 2=full 3=plugged-idle.
                 let status = if info.state & 0x2 != 0 {
@@ -168,7 +198,9 @@ fn decode(table: &[u8]) -> i32 {
                 };
                 return (status << 8) | info.percent as i32;
             }
+            }
         }
     }
+    if verbose { lognum("[aml]  batteries seen: ", n); }
     -1
 }
