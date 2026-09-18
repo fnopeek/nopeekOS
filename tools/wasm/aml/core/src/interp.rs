@@ -112,8 +112,18 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::Bat
     };
 
     // Absent batteries report 0xFFFFFFFF in every field.
+    //
+    // Was `_BST` WIRKLICH gesagt hat, faehrt mit: mit `..Default::default()`
+    // kam aus diesem Zweig `state=0 remaining=0` heraus, und das sah aus wie
+    // eine Messung. Der Rufer konnte "Firmware meldet keinen Akku" nicht von
+    // "wir haben nichts gelesen" unterscheiden.
     if remaining == 0xFFFF_FFFF {
-        return Ok(crate::BatteryInfo { present: false, ..Default::default() });
+        return Ok(crate::BatteryInfo {
+            present: false,
+            state,
+            remaining_mah: remaining,
+            ..Default::default()
+        });
     }
 
     // _BIF / _BIX -> full charge capacity.
