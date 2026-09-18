@@ -363,14 +363,27 @@ impl<'a> Interp<'a> {
             let _ = self.call_path(&root_ini, Vec::new());
         }
 
-        // Eltern vor Kindern: nach Pfadtiefe, dann nach Namen.
+        // Ueber die `_INI`-METHODEN gehen, nicht ueber Knoten, die wie ein
+        // Geraet AUSSEHEN.
+        //
+        // Vorher filterte das auf `Node::Scope` — und der Lader vergibt den
+        // fuer Device, Scope, Processor, PowerRes und ThermalZone
+        // gleichermassen. Was er NICHT so einsortiert, fiel heraus, und
+        // damit auch dessen `_INI`. Auf Florians Geraet lief genau EINE von
+        // 56 Abfragebehandlern begleiteten Firmware — eine verdaechtig
+        // kleine Zahl.
+        //
+        // Der Elter einer `_INI` IST das Geraet. Damit haengt der Gang an
+        // dem, was wir suchen, statt an einer Einsortierung.
+        let ini_seg = ini;
         let mut devs: Vec<Path> = self
             .ns
             .nodes
-            .iter()
-            .filter(|(_, n)| matches!(n, Node::Scope))
-            .map(|(p, _)| p.clone())
+            .keys()
+            .filter(|p| p.len() > 1 && p.last() == Some(&ini_seg))
+            .map(|p| { let mut d = p.clone(); d.pop(); d })
             .collect();
+        self.ec.note_num("[aml]  _INI methods found: ", devs.len() as u64);
         devs.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
 
         let mut ran = 0u32;
@@ -1134,10 +1147,25 @@ impl<'a> Interp<'a> {
 
     fn region_byte(&mut self, space: u8, addr: u64) -> u8 {
         if space == 3 {
-            self.ec.read(addr as u8)
-        } else {
-            *self.mem.get(&(space, addr)).unwrap_or(&0)
+            return self.ec.read(addr as u8);
         }
+        // Jede ANDERE Regionsart — SystemMemory(0), SystemIO(1),
+        // PCI-Config(2), SMBus(4) — liegt bei uns auf einem Notizblock und
+        // liefert dort, wo noch nichts geschrieben wurde, eine 0.
+        //
+        // Das ist als Bremse gedacht (die Handshakes der Firmware laufen
+        // damit ins Leere statt auf echte Ports), war aber STILL: eine
+        // gelesene 0 aus einem echten Register ist von einer erfundenen
+        // nicht zu unterscheiden, und die DSDT rechnet mit beiden weiter.
+        // Genau daran haben wir heute schon dreimal geglaubt.
+        let known = self.mem.get(&(space, addr)).copied();
+        let v = known.unwrap_or(0);
+        if known.is_none() {
+            self.ec.note_num("[aml]   region read space=", space as u64);
+            self.ec.note_num("[aml]     addr=", addr);
+            self.ec.note("[aml]     -> 0 (NICHT hinterlegt, erfunden)");
+        }
+        v
     }
 
     fn set_region_byte(&mut self, space: u8, addr: u64, val: u8) {
