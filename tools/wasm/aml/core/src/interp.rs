@@ -101,8 +101,27 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::Bat
     // Reihenfolge wie ACPICA in `acpi_initialize_objects`: erst die
     // Operationsregionen freigeben (`_REG`), dann die Geraete anlaufen
     // lassen (`_STA`/`_INI`).
+    it.ec.note("[aml]  phase _REG");
     it.register_ec_regions()?;
+    it.ec.note("[aml]  phase _INI");
     it.run_ini_methods();
+
+    // `_STA` des Akkugeraets — das fragt ein Betriebssystem VOR `_BST`, und
+    // es beantwortet die Frage direkt: Bit0 vorhanden, Bit3 funktionsfaehig,
+    // **Bit4 = Akku eingelegt** (ACPI 6.5 §10.2.1). Bisher sind wir ohne
+    // diese Auskunft gleich auf `_BST` gegangen und hatten hinterher nur
+    // 0xFFFFFFFF, das beides heissen kann.
+    let mut sta = bat.clone();
+    sta.push(crate::value::seg("_STA"));
+    if it.has(&sta) {
+        match it.call_path(&sta, Vec::new()) {
+            Ok(v) => it.ec.note_num("[aml]  battery _STA=", v.as_int()),
+            Err(_) => it.ec.note("[aml]  battery _STA failed"),
+        }
+    } else {
+        it.ec.note("[aml]  battery has no _STA");
+    }
+    it.ec.note("[aml]  phase _BST");
 
     // _BST -> Package { State, PresentRate, RemainingCapacity, Voltage }
     let mut p = bat.clone();
@@ -110,6 +129,15 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::Bat
     let bst = it.call_path(&p, Vec::new())?;
     let (state, remaining) = match &bst {
         Value::Package(e) if e.len() >= 4 => {
+            // Das ganze Paket zeigen: 0xFFFFFFFF in JEDEM Feld heisst "kein
+            // Akku", 0xFFFFFFFF nur in einem heisst "unbekannt" — und aus
+            // `remaining` allein war das nicht zu sehen.
+            for (i, el) in e.iter().enumerate().take(4) {
+                it.ec.note_num(
+                    match i { 0 => "[aml]   _BST[0] state=", 1 => "[aml]   _BST[1] rate=",
+                              2 => "[aml]   _BST[2] remaining=", _ => "[aml]   _BST[3] voltage=" },
+                    el.borrow().as_int());
+            }
             (e[0].borrow().as_int() as u32, e[2].borrow().as_int() as u32)
         }
         _ => return Err(format!("_BST did not return a Package(>=4): got {}", kind(&bst))),
