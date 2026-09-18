@@ -24,6 +24,7 @@
 #   usb /dev/sdX         Build self-contained installer + flash USB
 #                        (bundles browser + all modules → offline-ready)
 #   release              Sign kernel + modules + assets (ECDSA P-384)
+#   sign-modules         Sign ONLY release/modules/ (kernel untouched)
 #
 # Without argument: build + qemu
 
@@ -820,6 +821,11 @@ Installer / release:
                        works fully offline, no OTA needed post-install.
   usb-full /dev/sdX    Alias of `usb` (kept for back-compat).
   release              Sign kernel + modules + assets (ECDSA P-384)
+  sign-modules         Sign ONLY release/modules/ + rewrite their manifest.
+                       Baut den Kernel NICHT — eine Modulaenderung kostet
+                       damit keinen 5-MB-Download und keinen Versionssprung
+                       am Kernel. Nur Module, deren sha384 vom Manifest
+                       abweicht, werden neu signiert.
   release-large <tag>  Upload release/assets/large/* to GitHub Releases
                        under <tag>, sign with update.key, write
                        manifest.large with url= overrides. The next
@@ -956,6 +962,49 @@ case "${1:-}" in
         # configure if config fragment unchanged + bzImage already up
         # to date in the source dir).
         bash "$PROJECT_DIR/microvm-linux/build.sh"
+        ;;
+    sign-modules)
+        # Module signieren, OHNE den Kernel anzufassen.
+        #
+        # `release` ruft intern `build`, und weil die WASM-Module als Assets
+        # im Kernelbild liegen, aendert sich dabei kernel.efi — ein
+        # Versionssprung und ein 5-MB-OTA-Download fuer eine Aenderung von
+        # 95 KB. Bei sieben Iterationen an einem Abend ist das sechsmal
+        # umsonst.
+        #
+        # Signiert wird nur, was sich WIRKLICH geaendert hat: eine
+        # ECDSA-Signatur ist nicht deterministisch, ein blindes Neusignieren
+        # schriebe alle 21 Dateien um und fuellte den Verlauf mit Rauschen.
+        # Verglichen wird der sha384 gegen den, den das Manifest fuehrt.
+        RELEASE_DIR="$PROJECT_DIR/release"
+        KEY_FILE="$PROJECT_DIR/update.key"
+        [ -d "$RELEASE_DIR/modules" ] || { err "no release/modules/"; exit 1; }
+        [ -f "$KEY_FILE" ] || { err "no update.key - cannot sign"; exit 1; }
+        OLD_MANIFEST="$RELEASE_DIR/modules/manifest"
+        MODULE_MANIFEST=""
+        SIGNED=0
+        for wasm_file in "$RELEASE_DIR/modules/"*.wasm; do
+            [ -f "$wasm_file" ] || continue
+            MOD_NAME=$(basename "$wasm_file" .wasm)
+            MOD_SIZE=$(stat -c%s "$wasm_file")
+            MOD_SHA=$(openssl dgst -sha384 -hex "$wasm_file" 2>/dev/null | awk '{print $NF}')
+            MOD_VER=$(head -1 "$RELEASE_DIR/modules/${MOD_NAME}.version" 2>/dev/null || echo "0.1.0")
+            MODULE_MANIFEST="${MODULE_MANIFEST}[${MOD_NAME}]
+version=${MOD_VER}
+size=${MOD_SIZE}
+sha384=${MOD_SHA}
+
+"
+            PREV_SHA=$(awk -v m="[$MOD_NAME]" '$0==m{f=1;next} f&&/^sha384=/{sub("sha384=","");print;exit} f&&/^\[/{exit}' "$OLD_MANIFEST" 2>/dev/null || true)
+            if [ "$PREV_SHA" = "$MOD_SHA" ] && [ -f "$RELEASE_DIR/modules/${MOD_NAME}.sig" ]; then
+                continue
+            fi
+            openssl dgst -sha384 -sign "$KEY_FILE" -out "$RELEASE_DIR/modules/${MOD_NAME}.sig" "$wasm_file"
+            ok "Signed module: $MOD_NAME $MOD_VER ($MOD_SIZE bytes)"
+            SIGNED=$((SIGNED + 1))
+        done
+        echo "$MODULE_MANIFEST" > "$OLD_MANIFEST"
+        ok "Module manifest written - $SIGNED module(s) re-signed, kernel untouched"
         ;;
     release)
         check_deps
