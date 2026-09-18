@@ -148,9 +148,22 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::Bat
     // 0xFFFFFFFF, das beides heissen kann.
     let mut sta = bat.clone();
     sta.push(crate::value::seg("_STA"));
+    // Praesenz kommt aus `_STA` Bit4 (ACPI 6.5 §10.2.1 "Battery is
+    // present"), nicht aus einem geratenen `remaining`.
+    //
+    // Bisher stand unten `remaining == 0xFFFFFFFF -> present = false`. Das
+    // war eine Kruecke aus der Zeit, als `_STA` gar nicht gefragt wurde —
+    // und sie ist falsch: 0xFFFFFFFF heisst nach Spezifikation
+    // "UNBEKANNT", nicht "nicht vorhanden". Ein voller Akku am Netz, dessen
+    // Restkapazitaet die Firmware nicht beziffert, verschwand damit ganz.
+    let mut sta_present: Option<bool> = None;
     if it.has(&sta) {
         match it.call_path(&sta, Vec::new()) {
-            Ok(v) => it.ec.note_num("[aml]  battery _STA=", v.as_int()),
+            Ok(v) => {
+                let f = v.as_int();
+                it.ec.note_num("[aml]  battery _STA=", f);
+                sta_present = Some(f & 0x10 != 0);
+            }
             Err(_) => it.ec.note("[aml]  battery _STA failed"),
         }
     } else {
@@ -184,7 +197,17 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::Bat
     // kam aus diesem Zweig `state=0 remaining=0` heraus, und das sah aus wie
     // eine Messung. Der Rufer konnte "Firmware meldet keinen Akku" nicht von
     // "wir haben nichts gelesen" unterscheiden.
-    if remaining == 0xFFFF_FFFF {
+    // Sagt `_STA` ausdruecklich "kein Akku", ist es keiner — sonst gilt
+    // ein unbekanntes `remaining` als unbekannt und nicht als abwesend.
+    if sta_present == Some(false) {
+        return Ok(crate::BatteryInfo {
+            present: false,
+            state,
+            remaining_mah: remaining,
+            ..Default::default()
+        });
+    }
+    if remaining == 0xFFFF_FFFF && sta_present.is_none() {
         return Ok(crate::BatteryInfo {
             present: false,
             state,
@@ -1168,7 +1191,11 @@ impl<'a> Interp<'a> {
         // 0xFE800008 — der EC haengt dort im Speicher statt an den Ports.
         if space == 0 {
             if let Some(v) = self.ec.mem_read(addr) {
-                self.ec.note_num("[aml]   sysmem read -> ", v as u64);
+                // MIT Adresse: sieben Werte ohne Herkunft sagen nicht, ob
+                // ein zusammenhaengender Block gelesen wird oder siebenmal
+                // dieselbe Stelle.
+                self.ec.note_num("[aml]   sysmem [", addr);
+                self.ec.note_num("[aml]        ] -> ", v as u64);
                 return v;
             }
         }
@@ -1181,9 +1208,18 @@ impl<'a> Interp<'a> {
     fn set_region_byte(&mut self, space: u8, addr: u64, val: u8) {
         if space == 3 {
             self.ec.write(addr as u8, val);
-        } else {
-            self.mem.insert((space, addr), val);
+            return;
         }
+        // Ein Schreibzugriff auf eine Nicht-EC-Region landet auf dem
+        // Notizblock und erreicht die Hardware NICHT. Das ist Absicht
+        // (Schreiben auf beliebiges MMIO koennte Geraete umprogrammieren),
+        // war aber still — und wenn die Firmware hier ein Auswahlregister
+        // bedient und danach liest, bekommt sie die Daten der falschen
+        // Auswahl, ohne dass irgendwo etwas auffaellt.
+        self.ec.note_num("[aml]   scratch write space=", space as u64);
+        self.ec.note_num("[aml]        addr=", addr);
+        self.ec.note_num("[aml]        val=", val as u64);
+        self.mem.insert((space, addr), val);
     }
 
     fn read_field(&mut self, path: &Path) -> R<Value> {
