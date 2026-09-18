@@ -104,7 +104,27 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::Bat
     it.ec.note("[aml]  phase _REG");
     it.register_ec_regions()?;
     it.ec.note("[aml]  phase _INI");
-    it.run_ini_methods();
+    let ini_ran = it.run_ini_methods();
+    it.ec.note_num("[aml]  _INI methods run: ", ini_ran as u64);
+
+    // Wieviele `_Qxx` fuehrt diese DSDT?
+    //
+    // Das sind die Abfragebehandler des EC: der Baustein meldet ein
+    // Ereignis (Akku rein/raus, Kabel), das Betriebssystem holt die
+    // Ereignisnummer mit QR_EC ab und ruft `_Q<nr>`. **Wir tun das nicht**,
+    // und wenn die Firmware ihr "Akku steckt"-Flag dort setzt, bleibt es
+    // auf seinem Anfangswert — genau das Bild, das `_STA` hier zeigt
+    // (0x0F: Geraet da, Bit4 frei = kein Akku), ohne dass ein einziger
+    // EC-Zugriff stattfindet.
+    //
+    // Die Zahl sagt, ob dieser Weg ueberhaupt in Frage kommt.
+    let mut qcount = 0u64;
+    for p in ns.nodes.keys() {
+        if let Some(last) = p.last() {
+            if last[0] == b'_' && last[1] == b'Q' { qcount += 1; }
+        }
+    }
+    it.ec.note_num("[aml]  _Qxx handlers in DSDT: ", qcount);
 
     // `_STA` des Akkugeraets — das fragt ein Betriebssystem VOR `_BST`, und
     // es beantwortet die Frage direkt: Bit0 vorhanden, Bit3 funktionsfaehig,
@@ -318,7 +338,7 @@ impl<'a> Interp<'a> {
     /// Abweichung, bewusst: ACPICA laeuft das EINMAL beim Hochfahren, wir
     /// je Messrunde — `decode` baut den Namespace jede Runde neu, und
     /// `_REG` laeuft aus demselben Grund ebenfalls jedes Mal.
-    fn run_ini_methods(&mut self) {
+    fn run_ini_methods(&mut self) -> u32 {
         let ini = crate::value::seg("_INI");
         let sta_seg = crate::value::seg("_STA");
 
@@ -338,6 +358,7 @@ impl<'a> Interp<'a> {
             .collect();
         devs.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
 
+        let mut ran = 0u32;
         let mut pruned: Vec<Path> = Vec::new();
         for dev in devs {
             if pruned
@@ -370,9 +391,11 @@ impl<'a> Interp<'a> {
                 ip.push(ini);
                 if self.has(&ip) {
                     let _ = self.call_path(&ip, Vec::new());
+                    ran += 1;
                 }
             }
         }
+        ran
     }
 
     fn call_path(&mut self, path: &Path, args: Vec<Obj>) -> R<Value> {
