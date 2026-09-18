@@ -478,6 +478,42 @@ pub(crate) fn npk_battery(ctx: &mut HostState) -> i32 {
     }
 }
 
+/// Ein Byte aus einer SystemMemory-Operationsregion lesen.
+///
+/// Manche Firmware spricht mit ihrem Embedded Controller nicht ueber die
+/// ISA-Ports, sondern ueber ein speichergemapptes Fenster — auf einem
+/// Lenovo IdeaPad lesen `_STA` und `_BST` des Akkus `0xFE800008`. Ohne
+/// diesen Zugang erfindet der Interpreter dort eine 0, und die Firmware
+/// schliesst daraus auf "kein Akku".
+///
+/// **Sicherheit.** Die Frage aus dem Checkpoint lautet: kann ein Modul
+/// damit aus seinem Sandkasten? Drei Schranken sagen nein:
+///
+///  * `Rights::HARDWARE` — dasselbe Recht wie fuer die EC-Ports, und das
+///    hat genau ein Modul.
+///  * **Nur LESEN.** Ein Schreibzugriff auf beliebiges MMIO koennte
+///    Geraete umprogrammieren; der bleibt auf dem Notizblock des
+///    Interpreters und geht nirgendwohin.
+///  * **Niemals Arbeitsspeicher.** Jede Adresse, die in einem als nutzbar
+///    gemeldeten RAM-Bereich liegt, wird abgelehnt — und darin liegen
+///    Kernel, Halde und die linearen Speicher aller Module. Kennt der
+///    Kernel die Karte nicht, gilt alles als RAM, also alles als tabu.
+pub(crate) fn npk_acpi_mem_read(ctx: &mut HostState, hi: i32, lo: i32) -> i32 {
+    let cap_id = ctx.cap_id;
+    if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
+        return -1;
+    }
+    let addr = ((hi as u32 as u64) << 32) | (lo as u32 as u64);
+    if crate::memory::is_usable_ram(addr) {
+        kprintln!("[npk] aml: refused SystemMemory read at {:#x} — that is RAM", addr);
+        return -1;
+    }
+    match crate::paging::read_phys_u8(addr) {
+        Some(v) => v as i32,
+        None => -1,
+    }
+}
+
 /// Eine anstehende EC-Abfrage abholen. -1 = nichts anliegend / kein Recht.
 pub(crate) fn npk_ec_query(ctx: &mut HostState) -> i32 {
     let cap_id = ctx.cap_id;

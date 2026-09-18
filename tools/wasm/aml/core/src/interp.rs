@@ -1158,14 +1158,24 @@ impl<'a> Interp<'a> {
         // gelesene 0 aus einem echten Register ist von einer erfundenen
         // nicht zu unterscheiden, und die DSDT rechnet mit beiden weiter.
         // Genau daran haben wir heute schon dreimal geglaubt.
-        let known = self.mem.get(&(space, addr)).copied();
-        let v = known.unwrap_or(0);
-        if known.is_none() {
-            self.ec.note_num("[aml]   region read space=", space as u64);
-            self.ec.note_num("[aml]     addr=", addr);
-            self.ec.note("[aml]     -> 0 (NICHT hinterlegt, erfunden)");
+        // Was WIR geschrieben haben, gilt zuerst: die Handshakes der
+        // Firmware sollen ihren eigenen Wert zurueckbekommen.
+        if let Some(v) = self.mem.get(&(space, addr)).copied() {
+            return v;
         }
-        v
+        // SystemMemory(0): das echte Fenster fragen, bevor etwas erfunden
+        // wird. Auf einem Lenovo IdeaPad lesen `_STA` und `_BST` des Akkus
+        // 0xFE800008 — der EC haengt dort im Speicher statt an den Ports.
+        if space == 0 {
+            if let Some(v) = self.ec.mem_read(addr) {
+                self.ec.note_num("[aml]   sysmem read -> ", v as u64);
+                return v;
+            }
+        }
+        self.ec.note_num("[aml]   region read space=", space as u64);
+        self.ec.note_num("[aml]     addr=", addr);
+        self.ec.note("[aml]     -> 0 (NICHT hinterlegt, erfunden)");
+        0
     }
 
     fn set_region_byte(&mut self, space: u8, addr: u64, val: u8) {
