@@ -53,6 +53,9 @@ pub const PARAM_PIN_CAP: u32 = 0x0C; // bit4 = output capable
 pub const PARAM_CONN_LIST_LEN: u32 = 0x0E; // [6:0] len, bit7 long-form
 pub const PARAM_AMP_OUT_CAP: u32 = 0x12; // [14:8] num steps
 pub const PARAM_AMP_IN_CAP: u32 = 0x0D;  // [14:8] num steps
+/// Bit31 von AMP_*_CAP: „kann stummschalten". Null Stufen UND dieses Bit
+/// heisst reiner Stummschalter — ein Verstaerker, der nur auf/zu kann.
+pub const AMP_CAP_MUTE: u32 = 1 << 31;
 /// Widget-Faehigkeit „hat einen Ausgangsverstaerker" (AC_WCAP_OUT_AMP).
 /// Ohne dieses Bit ist ein Amp-Verb an das Widget undefiniert — siehe
 /// `unmute_out`, wo genau das einmal den Ton gekostet hat.
