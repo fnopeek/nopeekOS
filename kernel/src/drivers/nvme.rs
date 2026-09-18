@@ -340,14 +340,26 @@ pub fn init() -> bool {
     // Read capabilities
     let cap = mmio_read64(bar0_virt, REG_CAP);
     let doorbell_stride = 4u32 << ((cap >> 32) & 0xF) as u32; // DSTRD field
-    let max_queue_entries = (cap & 0xFFFF) as u16 + 1;
+    // CAP.MQES ist NULLBASIERT: der groesste zulaessige Wert 0xFFFF heisst
+    // 65536 Eintraege. `as u16 + 1` lief dabei ueber und ergab 0 — und mit
+    // 0 lehnt die Pruefung darunter JEDE Queue-Groesse ab. Ausgerechnet der
+    // Controller, der am meisten kann, kam damit nicht hoch.
+    //
+    // Gemeldet an einer KIOXIA [1e0f:000c] in einem Lenovo IdeaPad Flex 5
+    // 14ALC7: "version 1.4.0, max queue 0" — die Version las sich sauber,
+    // der Controller antwortete also; nur die Rechnung daneben war falsch.
+    // In u32, damit der groesste zulaessige Wert auch der groesste bleibt.
+    let max_queue_entries = (cap & 0xFFFF) as u32 + 1;
     let version = mmio_read32(bar0_virt, REG_VS);
 
-    kprintln!("[npk] nvme: version {}.{}.{}, max queue {}",
+    // CAP roh mit ins Log: eine 0 kann aus einem ueberlaufenen Plus kommen
+    // ODER aus einem Register, das gar nicht antwortet, und die zwei Faelle
+    // sehen in der gerechneten Zahl gleich aus.
+    kprintln!("[npk] nvme: version {}.{}.{}, CAP={:#018x}, max queue {}",
         version >> 16, (version >> 8) & 0xFF, version & 0xFF,
-        max_queue_entries);
+        cap, max_queue_entries);
 
-    if (IO_QUEUE_SIZE as u16) > max_queue_entries {
+    if IO_QUEUE_SIZE as u32 > max_queue_entries {
         kprintln!("[npk] nvme: IO_QUEUE_SIZE={} exceeds CAP.MQES+1={}, refusing init",
             IO_QUEUE_SIZE, max_queue_entries);
         return false;
