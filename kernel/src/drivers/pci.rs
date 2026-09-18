@@ -9,7 +9,7 @@ use crate::kprintln;
 const CONFIG_ADDR: u16 = 0xCF8;
 const CONFIG_DATA: u16 = 0xCFC;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PciAddr {
     pub bus: u8,
     pub device: u8,

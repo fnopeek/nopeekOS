@@ -199,6 +199,14 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     let net_up = virtio_net::init() | intel_nic::init();
     if !net_up {
         rtl8153::init();
+        // Der Dongle-Scan hat jeden angefassten Controller zurueckgesetzt,
+        // also auch eine USB-Maus darauf. Jetzt ist der PS/2-Zeiger wieder
+        // frei: oben stieg `init_mouse` vor seiner eigenen Diagnose aus,
+        // weil die USB-Maus da noch lebte — und danach wusste niemand, ob
+        // am Aux-Port ueberhaupt etwas haengt.
+        if !xhci::mouse_available() && keyboard::init_mouse() {
+            vga::show_status(b"PS/2 pointer online");
+        }
     }
     if netdev::is_available() {
         vga::show_status(b"Network online");

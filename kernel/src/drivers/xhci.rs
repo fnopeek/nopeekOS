@@ -331,6 +331,12 @@ pub fn is_available() -> bool { AVAILABLE.load(Ordering::Relaxed) }
 
 #[allow(dead_code)]
 struct XhciState {
+    /// PCI-Adresse dieses Controllers. Ohne sie laesst sich nicht sagen, ob
+    /// ein anderer Weg (der NIC-Scan) GENAU DIESEN zurueckgesetzt hat oder
+    /// einen daneben — und "irgendeiner wurde angefasst, also alles
+    /// wegwerfen" wirft auf einer Maschine mit mehreren Controllern eine
+    /// funktionierende Tastatur weg.
+    pci_addr: pci::PciAddr,
     mmio: u64,
     oper: u64,          // operational registers base
     rt: u64,            // runtime registers base
@@ -609,6 +615,7 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
     kprintln!("[npk] xhci: controller running");
 
     let state = XhciState {
+        pci_addr: dev.addr,
         mmio, oper, rt, db, ctx_size, max_ports,
         dcbaa, cmd_ring, cmd_cycle: 1, cmd_enqueue: 0,
         evt_ring, evt_cycle: 1, evt_dequeue: 0, evt_seg_table,
@@ -2197,7 +2204,7 @@ pub fn nic_attach(vid: u16, pid: u16, ep_in: u8, ep_out: u8) -> bool {
     if NIC.lock().is_some() { return true; }
     if AVAILABLE.load(Ordering::Relaxed) || MOUSE_AVAILABLE.load(Ordering::Relaxed) {
         kprintln!("[npk] xhci: USB-NIC scan resets every controller it probes — \
-                   keyboard/mouse on the same one will stop responding");
+                   keyboard/mouse on the SAME one will stop responding");
     }
     for bus in 0u16..=255 {
         for dev_num in 0u8..32 {
@@ -2274,6 +2281,27 @@ fn dump_nic_ports(x: &XhciState) {
 }
 
 fn nic_try_attach(dev: pci::PciDevice, vid: u16, pid: u16, ep_in: u8, ep_out: u8) -> bool {
+    // `bring_up_controller` haelt den Controller an und setzt ihn zurueck.
+    // Steht auf GENAU DIESEM eine Tastatur oder Maus, ist sie danach weg —
+    // ihre Flagge aber stuende weiter, der Zeiger wuerde gemalt und
+    // berichtete nie wieder. Das sieht aus wie ein Fehler im Compositor und
+    // ist in Wahrheit ein Geraet, das es nicht mehr gibt.
+    //
+    // Nur DIESER Controller, nach PCI-Adresse verglichen: haengt die
+    // Tastatur an einem anderen, bleibt sie unberuehrt — und genau das ist
+    // der Normalfall auf einer Maschine mit mehreren Controllern.
+    {
+        let mut st = STATE.lock();
+        if st.as_ref().map(|s| s.pci_addr == dev.addr).unwrap_or(false) {
+            let kbd = AVAILABLE.swap(false, Ordering::Relaxed);
+            let mouse = MOUSE_AVAILABLE.swap(false, Ordering::Relaxed);
+            if kbd || mouse {
+                kprintln!("[npk] xhci: dropping USB keyboard/mouse on {:02x}:{:02x}.{} — the NIC scan resets it",
+                    dev.addr.bus, dev.addr.device, dev.addr.function);
+            }
+            *st = None;
+        }
+    }
     let mut x = match bring_up_controller(dev, 16) { Some(s) => s, None => return false };
     dump_nic_ports(&x);
 
