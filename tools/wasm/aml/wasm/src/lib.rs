@@ -107,11 +107,20 @@ fn heap_reset() {
 const DSDT_MAX: usize = 512 * 1024;
 static mut DSDT: [u8; DSDT_MAX] = [0; DSDT_MAX];
 
-struct HostEc;
+/// Der EC-Zugang des Treibers.
+///
+/// `read` MUSS ein Byte liefern — die Schnittstelle des Interpreters laesst
+/// kein "keine Antwort" zu, und eine 0 ist an dieser Stelle eine plausible
+/// Luege: die DSDT rechnet damit weiter und schliesst auf "kein Akku".
+/// Deshalb wird wenigstens GEZAEHLT, wie oft das passiert, und der Zaehler
+/// steht danach im Log. Ohne ihn sieht ein stummer EC genauso aus wie eine
+/// Firmware, die wirklich keinen Akku meldet.
+struct HostEc { reads: u32, fails: u32 }
 impl Ec for HostEc {
     fn read(&mut self, addr: u8) -> u8 {
         let r = unsafe { npk_ec_read(addr as i32) };
-        if r < 0 { 0 } else { r as u8 }
+        self.reads += 1;
+        if r < 0 { self.fails += 1; 0 } else { r as u8 }
     }
     fn write(&mut self, addr: u8, val: u8) {
         unsafe { npk_ec_write(addr as i32, val as i32) };
@@ -166,7 +175,7 @@ fn decode(table: &[u8], verbose: bool) -> i32 {
         Err(_) => { logln("[aml]  Namespace::load failed"); return -1; }
     };
     if verbose { logln("[aml]  namespace loaded, looking for batteries"); }
-    let mut ec = HostEc;
+    let mut ec = HostEc { reads: 0, fails: 0 };
     let mut n = 0u32;
     for bat in find_batteries(&ns) {
         n += 1;
@@ -183,7 +192,11 @@ fn decode(table: &[u8], verbose: bool) -> i32 {
             if verbose {
                 lognum("[aml]  present=", info.present as u32);
                 lognum("[aml]  state=", info.state);
+                lognum("[aml]  remaining_mah=", info.remaining_mah);
+                lognum("[aml]  full_mah=", info.full_charge_mah);
                 lognum("[aml]  percent=", info.percent as u32);
+                lognum("[aml]  EC reads=", ec.reads);
+                lognum("[aml]  EC failed=", ec.fails);
             }
             if info.present {
                 // bar status: 0=discharging 1=charging 2=full 3=plugged-idle.
