@@ -125,6 +125,9 @@ impl Ec for HostEc {
     fn write(&mut self, addr: u8, val: u8) {
         unsafe { npk_ec_write(addr as i32, val as i32) };
     }
+    fn sleep_ms(&mut self, ms: u32) {
+        unsafe { npk_sleep(ms as i32) };
+    }
 }
 
 #[unsafe(no_mangle)]
