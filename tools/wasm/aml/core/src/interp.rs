@@ -169,6 +169,19 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::Bat
     } else {
         it.ec.note("[aml]  battery has no _STA");
     }
+    // REIHENFOLGE wie Linux: erst die Beschreibung, dann der Zustand.
+    //
+    // `drivers/acpi/battery.c` ruft `acpi_battery_get_info` (_BIX/_BIF) VOR
+    // `acpi_battery_get_state` (_BST). Wir hatten es umgekehrt, und das ist
+    // nicht gleichgueltig: manche Firmware setzt in `_BIF` ihre Akkuauswahl
+    // oder latcht die Messwerte, und ein `_BST` davor meldet dann
+    // pflichtgemaess "unbekannt". Genau das Bild auf Florians IdeaPad, wo
+    // `_BST` sieben RICHTIGE Bytes liest (Rest 4745, Spannung 11971 mV) und
+    // trotzdem dreimal Ones zurueckgibt.
+    it.ec.note("[aml]  phase _BIF");
+    let full = it.read_full_charge(bat)?;
+    it.ec.note_num("[aml]  full charge: ", full as u64);
+
     it.ec.note("[aml]  phase _BST");
 
     // _BST -> Package { State, PresentRate, RemainingCapacity, Voltage }
@@ -215,9 +228,6 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::Bat
             ..Default::default()
         });
     }
-
-    // _BIF / _BIX -> full charge capacity.
-    let full = it.read_full_charge(bat)?;
 
     // `remaining == 0xFFFFFFFF` heisst UNBEKANNT (ACPI 6.5 §10.2.2), und
     // eine unbekannte Restkapazitaet darf keinen Prozentwert ergeben.
