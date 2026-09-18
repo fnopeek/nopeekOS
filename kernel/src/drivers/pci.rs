@@ -142,6 +142,23 @@ pub fn report_mass_storage() {
 }
 
 pub fn find_by_class(class: u8, subclass: u8) -> Option<PciDevice> {
+    find_by_class_n(class, subclass, 0)
+}
+
+/// The `index`-th device of this class, in PCI scan order.
+///
+/// Eine Klasse kann mehrfach besetzt sein, und welcher Treffer zuerst
+/// kommt, ist Zufall der Busreihenfolge. Fast jede Maschine hat ZWEI
+/// HD-Audio-Controller — den der GPU (HDMI/DP) und den der Southbridge
+/// (Lautsprecher) —, und `find_by_class` gab immer den ersten. Damit lief
+/// der Ton in einen DisplayPort, an dem nichts haengt.
+///
+/// Der Kernel entscheidet dabei NICHT, welcher der richtige ist: er reicht
+/// den n-ten heraus, und welcher taugt, weiss nur der Treiber (hier: der
+/// Codec mit einem analogen Ausgangspin). Dieselbe Trennung wie bei
+/// `drivers::report` — der Kernel traegt, er urteilt nicht.
+pub fn find_by_class_n(class: u8, subclass: u8, index: u32) -> Option<PciDevice> {
+    let mut seen = 0u32;
     for bus in 0u16..=255 {
         for dev in 0u8..32 {
             for func in 0u8..8 {
@@ -157,6 +174,7 @@ pub fn find_by_class(class: u8, subclass: u8) -> Option<PciDevice> {
                 let sub = ((class_reg >> 16) & 0xFF) as u8;
 
                 if cls == class && sub == subclass {
+                    if seen != index { seen += 1; continue; }
                     let vid = (id & 0xFFFF) as u16;
                     let did = ((id >> 16) & 0xFFFF) as u16;
                     return Some(PciDevice {
