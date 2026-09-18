@@ -99,7 +99,15 @@ pub fn run_first_boot(salt: &[u8; 16]) -> bool {
             }
         }
     } else {
+        // Hier endet die Installation, und danach haelt die Maschine an —
+        // kein Prompt, also kein `dmesg`, und `dmesg prev` braeuchte npkFS,
+        // also genau die Platte, die fehlt. Was der Bildschirm JETZT zeigt,
+        // ist alles, was es gibt. Also zeigen, was da war.
+        kprintln!();
         kprintln!("[npk] No block device found. Cannot continue setup.");
+        kprintln!("[npk] PCI mass-storage controllers seen:");
+        crate::pci::report_mass_storage();
+        kprintln!("[npk] nopeekOS drives NVMe (class 01:08) and virtio-blk, nothing else.");
         return false;
     }
 

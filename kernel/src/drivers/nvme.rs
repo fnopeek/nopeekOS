@@ -294,9 +294,15 @@ fn nvme_msix_confirm(vector: u8) {
 /// Initialize the NVMe controller.
 pub fn init() -> bool {
     // Find NVMe device by class code (01h:08h)
+    // Die Absage war STUMM, und damit sah "keine NVMe da" genauso aus wie
+    // "Treiber nicht gerufen". Eine Zeile kostet nichts und ist auf einem
+    // Geraet ohne Platte die einzige Auskunft, die es gibt.
     let dev = match pci::find_by_class(NVME_CLASS, NVME_SUBCLASS) {
         Some(d) => d,
-        None => return false,
+        None => {
+            kprintln!("[npk] nvme: no device of class 01:08 on the PCI bus");
+            return false;
+        }
     };
 
     kprintln!("[npk] nvme: PCI {:02x}:{:02x}.{} [{:04x}:{:04x}] IRQ {}",
