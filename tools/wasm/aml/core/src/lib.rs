@@ -30,6 +30,14 @@ pub trait Ec {
     /// Lesezugriff auf den EC. Wir haben beides verworfen und also zu frueh
     /// gelesen. Vorgabe: nichts tun, damit der Pruefstand ohne Uhr auskommt.
     fn sleep_ms(&mut self, _ms: u32) {}
+    /// Diagnosekanal fuer den Interpreter.
+    ///
+    /// `aml_core` ist `no_std` und hat kein Log. Ohne das laesst sich nicht
+    /// sagen, aus WELCHEM Abschnitt ein EC-Zugriff kommt — `_REG`, `_INI`
+    /// oder `_BST` sehen im Mitschnitt gleich aus, und das war genau die
+    /// Frage, an der wir zuletzt haengen blieben.
+    fn note(&mut self, _s: &str) {}
+    fn note_num(&mut self, _s: &str, _v: u64) {}
 }
 
 /// A namespace object.

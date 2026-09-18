@@ -158,6 +158,12 @@ impl Ec for HostEc {
     fn sleep_ms(&mut self, ms: u32) {
         unsafe { npk_sleep(ms as i32) };
     }
+    fn note(&mut self, s: &str) {
+        if self.verbose { logln(s); }
+    }
+    fn note_num(&mut self, s: &str, v: u64) {
+        if self.verbose { lognum(s, v as u32); }
+    }
 }
 
 #[unsafe(no_mangle)]
