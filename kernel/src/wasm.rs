@@ -1948,6 +1948,13 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_acpi_mem_read(hi, lo) -> byte, or -1 (RAM / no right / unmapped)
+    linker.func_wrap("env", "npk_acpi_mem_read",
+        |mut caller: Caller<'_, HostState>, hi: i32, lo: i32| -> i32 {
+            host_core::npk_acpi_mem_read(caller.data_mut(), hi, lo)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_ec_query() -> query number, or -1 when nothing is pending
     linker.func_wrap("env", "npk_ec_query",
         |mut caller: Caller<'_, HostState>| -> i32 {

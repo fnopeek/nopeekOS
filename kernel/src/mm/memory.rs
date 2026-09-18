@@ -97,6 +97,26 @@ unsafe extern "C" {
     static __heap_start: u8;
 }
 
+/// Die Bereiche, die die Firmware als NUTZBAREN Arbeitsspeicher gemeldet
+/// hat — Kernel, Halde und die linearen Speicher der Module liegen darin.
+///
+/// Gebraucht wird das fuer genau eine Frage: darf ein Modul diese physische
+/// Adresse lesen? Alles, was hier drinliegt, ist Arbeitsspeicher und damit
+/// TABU; was draussen liegt, ist Firmware- oder Geraetefenster.
+static RAM_RANGES: Mutex<([(u64, u64); 64], usize)> = Mutex::new(([(0, 0); 64], 0));
+
+/// Liegt `addr` in einem als nutzbar gemeldeten RAM-Bereich?
+///
+/// Konservativ: kennen wir die Karte nicht (Zahl 0), gilt ALLES als RAM und
+/// damit als tabu. Lieber eine Auskunft verweigern als eine geben, die den
+/// Sandkasten oeffnet.
+pub fn is_usable_ram(addr: u64) -> bool {
+    let g = RAM_RANGES.lock();
+    let (ranges, n) = &*g;
+    if *n == 0 { return true; }
+    ranges[..*n].iter().any(|(b, l)| addr >= *b && addr < b.saturating_add(*l))
+}
+
 pub fn init(boot_info: &crate::boot_info::BootInfo) {
     let mut alloc = ALLOCATOR.lock();
     alloc.mark_all_used();
@@ -122,6 +142,19 @@ pub fn init(boot_info: &crate::boot_info::BootInfo) {
     // region in the UEFI map — already left as "used" by the loop
     // above. The boot_info struct lives in BSS (= part of the kernel
     // image), so no separate reservation needed.
+
+    // Die RAM-Karte merken, solange wir sie in der Hand haben.
+    {
+        let mut g = RAM_RANGES.lock();
+        let (ranges, n) = &mut *g;
+        for region in boot_info.usable_regions() {
+            if *n >= ranges.len() { break; }
+            let length = region.page_count * PAGE_SIZE as u64;
+            if length == 0 { continue; }
+            ranges[*n] = (region.physical_start, length);
+            *n += 1;
+        }
+    }
 
     let free = alloc.free_count;
     let free_mb = free * PAGE_SIZE / (1024 * 1024);

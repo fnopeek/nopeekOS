@@ -246,6 +246,28 @@ pub fn init() {
 /// Map a 4KB virtual page to a physical frame.
 /// Automatically splits 1GB and 2MB huge pages when a different mapping
 /// (e.g. NO_CACHE for MMIO) is needed at 4KB granularity.
+/// Obergrenze der Identitaetsabbildung (siehe `init`: 64 GB).
+pub const IDENTITY_LIMIT: u64 = 64 * 1024 * 1024 * 1024;
+
+/// Ein Byte an einer physischen Adresse lesen.
+///
+/// Der Kernel bildet die ersten 64 GB identisch ab, physisch ist hier also
+/// gleich virtuell. Gedacht fuer FIRMWARE-Fenster (ACPI-SystemMemory-
+/// Regionen); der Rufer muss vorher geprueft haben, dass die Adresse KEIN
+/// Arbeitsspeicher ist — diese Funktion prueft das nicht, sie prueft nur
+/// die Abbildungsgrenze.
+///
+/// Gelesen wird ueber die gewoehnliche Abbildung, also gecacht. Fuer ein
+/// Statusbyte der Firmware ist das in Ordnung; ein Register, das sich ohne
+/// unser Zutun aendert, braucht eine UC-Abbildung, und das ist hier
+/// benannt und nicht gebaut.
+pub fn read_phys_u8(addr: u64) -> Option<u8> {
+    if addr >= IDENTITY_LIMIT { return None; }
+    // SAFETY: innerhalb der Identitaetsabbildung, ein einzelnes Byte,
+    // ausschliesslich lesend.
+    Some(unsafe { core::ptr::read_volatile(addr as *const u8) })
+}
+
 pub fn map_page(vaddr: u64, paddr: u64, flags: PageFlags) -> Result<(), PagingError> {
     if vaddr & 0xFFF != 0 || paddr & 0xFFF != 0 {
         return Err(PagingError::NotAligned);

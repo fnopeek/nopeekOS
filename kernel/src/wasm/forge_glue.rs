@@ -183,6 +183,12 @@ extern "C" fn f_npk_battery(vm: *const u64) -> i32 {
     host_core::npk_battery(ctx)
 }
 
+extern "C" fn f_npk_acpi_mem_read(vm: *const u64, hi: i32, lo: i32) -> i32 {
+    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    let ctx = unsafe { ctx_of(vm) };
+    host_core::npk_acpi_mem_read(ctx, hi, lo)
+}
+
 extern "C" fn f_npk_ec_query(vm: *const u64) -> i32 {
     // SAFETY: `vm` ist der vmctx des rufenden Moduls.
     let ctx = unsafe { ctx_of(vm) };
@@ -943,6 +949,7 @@ pub(crate) fn resolve(module: &str, name: &str) -> Option<u64> {
         "npk_battery" => f_npk_battery as *const () as u64,
         "npk_ec_read" => f_npk_ec_read as *const () as u64,
         "npk_ec_query" => f_npk_ec_query as *const () as u64,
+        "npk_acpi_mem_read" => f_npk_acpi_mem_read as *const () as u64,
         "npk_ec_write" => f_npk_ec_write as *const () as u64,
         "npk_battery_report" => f_npk_battery_report as *const () as u64,
         "npk_audio_open" => f_npk_audio_open as *const () as u64,

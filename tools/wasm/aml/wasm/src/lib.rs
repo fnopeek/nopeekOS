@@ -41,6 +41,7 @@ unsafe extern "C" {
     fn npk_ec_read(addr: i32) -> i32;
     fn npk_ec_write(addr: i32, val: i32) -> i32;
     fn npk_ec_query() -> i32;
+    fn npk_acpi_mem_read(hi: i32, lo: i32) -> i32;
     fn npk_battery_report(packed: i32);
     fn npk_sleep(ms: i32) -> i32;
     fn npk_log_serial(ptr: i32, len: i32);
@@ -158,6 +159,12 @@ impl Ec for HostEc {
     }
     fn sleep_ms(&mut self, ms: u32) {
         unsafe { npk_sleep(ms as i32) };
+    }
+    fn mem_read(&mut self, addr: u64) -> Option<u8> {
+        let hi = (addr >> 32) as u32 as i32;
+        let lo = (addr & 0xFFFF_FFFF) as u32 as i32;
+        let r = unsafe { npk_acpi_mem_read(hi, lo) };
+        if r < 0 { None } else { Some(r as u8) }
     }
     fn query(&mut self) -> Option<u8> {
         let q = unsafe { npk_ec_query() };

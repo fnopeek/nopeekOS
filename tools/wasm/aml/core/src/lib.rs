@@ -39,6 +39,13 @@ pub trait Ec {
     /// Eine anstehende EC-ABFRAGE abholen (`QR_EC`), oder `None`.
     /// Vorgabe: es gibt keine — der Pruefstand hat keinen echten EC.
     fn query(&mut self) -> Option<u8> { None }
+    /// Ein Byte aus einer SystemMemory-Operationsregion lesen.
+    ///
+    /// Manche Firmware spricht mit ihrem EC nicht ueber die ISA-Ports,
+    /// sondern ueber ein speichergemapptes Fenster. Vorgabe: `None` — der
+    /// Pruefstand hat keinen physischen Speicher, und der Interpreter
+    /// faellt dann auf seinen Notizblock zurueck.
+    fn mem_read(&mut self, _addr: u64) -> Option<u8> { None }
     fn note(&mut self, _s: &str) {}
     fn note_num(&mut self, _s: &str, _v: u64) {}
 }
