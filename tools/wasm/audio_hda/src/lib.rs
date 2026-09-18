@@ -104,17 +104,33 @@ fn widget_type(mmio: i32, cad: u32, nid: u32) -> u32 {
 /// Der Treiber stellt den DAC also korrekt ein und loescht ihn eine Zeile
 /// spaeter selbst.
 ///
-/// Auf echter Hardware hat der Pin einen eigenen Verstaerker mit Stufen > 0,
-/// also schrieb derselbe Code dort einen sinnvollen Wert — der Fehler war am
-/// Geraet unsichtbar und in QEMU total.
+/// Der Satz „auf echter Hardware hat der Pin Stufen > 0" stimmte nicht.
+/// Auf dem Realtek eines Lenovo IdeaPad meldet der LAUTSPRECHERpin
+/// `steps = 0` — und ist trotzdem stumm, weil null Stufen NICHT „kein
+/// Verstaerker" heisst, sondern „reiner Stummschalter". Der hat ein
+/// Mute-Bit, und das blieb unangetastet: Strom lief, Pin stimmte, kein Ton.
+///
+/// Die Spezifikation trennt die beiden Faelle in Bit31 von `AMP_*_CAP`
+/// („kann stummschalten"):
+///
+/// * Stufen 0 **und** Bit31 gesetzt → Stummschalter, MUSS aufgemacht werden
+/// * Stufen 0 **und** Bit31 frei    → kann nichts, Verb schadet nur (QEMU,
+///   dessen Pin `AMP_OUT_CAP = 0` meldet — Bit31 also ebenfalls frei)
+///
+/// Damit bleibt der QEMU-Fall oben Wort fuer Wort gueltig, und der Pin, der
+/// nur stummschalten kann, geht trotzdem auf.
 fn unmute_out(mmio: i32, cad: u32, nid: u32) {
     // Beides fragen, weil beides unabhaengig „nein" sagen kann: das
     // Faehigkeitsbit des Widgets und die Stufenzahl seines Verstaerkers.
     if get_param(mmio, cad, nid, PARAM_AUDIO_WIDGET_CAP) & WCAP_OUT_AMP == 0 {
         return;
     }
-    let steps = (get_param(mmio, cad, nid, PARAM_AMP_OUT_CAP) >> 8) & 0x7F;
+    let cap = get_param(mmio, cad, nid, PARAM_AMP_OUT_CAP);
+    let steps = (cap >> 8) & 0x7F;
     if steps == 0 {
+        if cap & AMP_CAP_MUTE == 0 { return; }
+        // Verstaerkung 0, Mute-Bit (Bit7) frei: aufgemacht.
+        codec_cmd(mmio, cad, nid, vset_amp(AMP_SET_OUT_BOTH));
         return;
     }
     // ~3/4 of max gain — audible but not blasting (real volume control = M4).
@@ -133,19 +149,30 @@ fn unmute_in(mmio: i32, cad: u32, nid: u32, index: u32) {
     if get_param(mmio, cad, nid, PARAM_AUDIO_WIDGET_CAP) & WCAP_IN_AMP == 0 {
         return;
     }
-    let steps = (get_param(mmio, cad, nid, PARAM_AMP_IN_CAP) >> 8) & 0x7F;
-    if steps == 0 { return; }
+    let cap = get_param(mmio, cad, nid, PARAM_AMP_IN_CAP);
+    let steps = (cap >> 8) & 0x7F;
+    let idx = (index as u16 & 0xF) << 8;
+    if steps == 0 {
+        // Dieselbe Trennung wie beim Ausgang: Stummschalter aufmachen,
+        // einen Verstaerker ohne jede Faehigkeit in Ruhe lassen.
+        if cap & AMP_CAP_MUTE == 0 { return; }
+        codec_cmd(mmio, cad, nid, vset_amp(AMP_SET_IN_BOTH | idx));
+        return;
+    }
     let gain = ((steps * 3 / 4) & 0x7F) as u16;
-    codec_cmd(mmio, cad, nid, vset_amp(AMP_SET_IN_BOTH | ((index as u16 & 0xF) << 8) | gain));
+    codec_cmd(mmio, cad, nid, vset_amp(AMP_SET_IN_BOTH | idx | gain));
 }
 
-/// Was `unmute_out` an einem Knoten tatsaechlich vorfindet — fuer den Log.
-/// Ein Knoten OHNE Verstaerker oder mit null Stufen wird still uebergangen,
-/// und dann steht im Log nur, dass „entmutet" wurde, waehrend nichts
-/// geschrieben wurde.
-fn amp_steps(mmio: i32, cad: u32, nid: u32) -> u32 {
+/// Die ROHE Verstaerkerfaehigkeit eines Knotens — fuer den Log.
+///
+/// Die Stufenzahl allein reicht nicht: `steps = 0` kann „kein Verstaerker",
+/// „reiner Stummschalter" oder „Widget hat gar keinen Ausgangsverstaerker"
+/// heissen, und die drei verlangen Verschiedenes. Bit31 = kann
+/// stummschalten, [14:8] = Stufen, [6:0] = Offset. `0` heisst hier: das
+/// Widget fuehrt gar keinen Ausgangsverstaerker.
+fn amp_cap(mmio: i32, cad: u32, nid: u32) -> u32 {
     if get_param(mmio, cad, nid, PARAM_AUDIO_WIDGET_CAP) & WCAP_OUT_AMP == 0 { return 0; }
-    (get_param(mmio, cad, nid, PARAM_AMP_OUT_CAP) >> 8) & 0x7F
+    get_param(mmio, cad, nid, PARAM_AMP_OUT_CAP)
 }
 
 fn conn_entry0(mmio: i32, cad: u32, nid: u32) -> u32 {
@@ -161,7 +188,7 @@ fn trace_to_dac(mmio: i32, cad: u32, pin: u32) -> u32 {
     // "pin 0x14" und "DAC 0x02", und ob ein Mixer dazwischenliegt — also
     // ob ueberhaupt ein Eingangsverstaerker im Spiel ist — bleibt offen.
     loghex("[audio_hda] path: pin 0x", pin);
-    loghex(" (out-amp steps=", amp_steps(mmio, cad, pin));
+    loghex(" (out-amp cap=0x", amp_cap(mmio, cad, pin));
     log(")");
     let len = get_param(mmio, cad, pin, PARAM_CONN_LIST_LEN) & 0x7F;
     if len == 0 { log(" <- (no connection list)\n"); return 0; }
@@ -169,7 +196,7 @@ fn trace_to_dac(mmio: i32, cad: u32, pin: u32) -> u32 {
     if first == 0 { log(" <- (empty)\n"); return 0; }
     if widget_type(mmio, cad, first) == WTYPE_DAC {
         loghex(" <- dac 0x", first);
-        loghex(" (out-amp steps=", amp_steps(mmio, cad, first));
+        loghex(" (out-amp cap=0x", amp_cap(mmio, cad, first));
         log(")\n");
         return first;
     }
@@ -180,12 +207,12 @@ fn trace_to_dac(mmio: i32, cad: u32, pin: u32) -> u32 {
     unmute_out(mmio, cad, first);
     unmute_in(mmio, cad, first, 0);
     loghex(" <- mid 0x", first);
-    loghex(" (out-amp steps=", amp_steps(mmio, cad, first));
+    loghex(" (out-amp cap=0x", amp_cap(mmio, cad, first));
     log(")");
     let inner = conn_entry0(mmio, cad, first);
     if inner != 0 && widget_type(mmio, cad, inner) == WTYPE_DAC {
         loghex(" <- dac 0x", inner);
-        loghex(" (out-amp steps=", amp_steps(mmio, cad, inner));
+        loghex(" (out-amp cap=0x", amp_cap(mmio, cad, inner));
         log(")\n");
         return inner;
     }
@@ -368,7 +395,7 @@ fn reset_stream(mmio: i32, base: u32) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    log("[audio_hda] v0.3.1 — generic HDA driver (mailbox streaming) starting\n");
+    log("[audio_hda] v0.3.2 — generic HDA driver (mailbox streaming) starting\n");
 
     // Bind the HDA controller by PCI class — hardware-independent, no
     // vendor:device hardcode. Intel cAVS controllers report subclass 0x01
