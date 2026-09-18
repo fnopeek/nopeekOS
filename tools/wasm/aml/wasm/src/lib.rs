@@ -67,6 +67,23 @@ fn log(s: &str) {
 fn logln(s: &str) { log(s); log("\n"); }
 
 /// `log` mit einer Zahl dahinter — ohne Formatierer, der Allokation braucht.
+/// Zwei Zahlen in einer Zeile — fuer `[addr] -> wert`.
+fn lognum2(a: &str, x: u32, b: &str, y: u32) {
+    log(a);
+    lognum_raw(x);
+    log(b);
+    lognum_raw(y);
+    log("\n");
+}
+
+fn lognum_raw(mut v: u32) {
+    let mut buf = [0u8; 12];
+    let mut i = buf.len();
+    if v == 0 { i -= 1; buf[i] = b'0'; }
+    while v > 0 { i -= 1; buf[i] = b'0' + (v % 10) as u8; v /= 10; }
+    if let Ok(t) = core::str::from_utf8(&buf[i..]) { log(t); }
+}
+
 fn lognum(prefix: &str, mut v: u32) {
     let mut buf = [0u8; 12];
     let mut i = buf.len();
@@ -115,15 +132,28 @@ static mut DSDT: [u8; DSDT_MAX] = [0; DSDT_MAX];
 /// Deshalb wird wenigstens GEZAEHLT, wie oft das passiert, und der Zaehler
 /// steht danach im Log. Ohne ihn sieht ein stummer EC genauso aus wie eine
 /// Firmware, die wirklich keinen Akku meldet.
-struct HostEc { reads: u32, fails: u32 }
+struct HostEc { reads: u32, fails: u32, verbose: bool }
 impl Ec for HostEc {
     fn read(&mut self, addr: u8) -> u8 {
         let r = unsafe { npk_ec_read(addr as i32) };
         self.reads += 1;
-        if r < 0 { self.fails += 1; 0 } else { r as u8 }
+        let v = if r < 0 { self.fails += 1; 0 } else { r as u8 };
+        // Jedes gelesene BYTE zeigen, nicht nur zaehlen.
+        //
+        // "failed=0" heisst nur "kein Fehlercode" — nicht "sinnvoller Wert".
+        // Liefert der EC lauter Nullen, sieht das fuer die DSDT aus wie eine
+        // echte Messung, und sie schliesst auf "kein Akku". Genau diese zwei
+        // Faelle liessen sich bisher nicht trennen.
+        if self.verbose {
+            lognum2("[aml]   ec.read  [", addr as u32, "] -> ", v as u32);
+        }
+        v
     }
     fn write(&mut self, addr: u8, val: u8) {
         unsafe { npk_ec_write(addr as i32, val as i32) };
+        if self.verbose {
+            lognum2("[aml]   ec.write [", addr as u32, "] <- ", val as u32);
+        }
     }
     fn sleep_ms(&mut self, ms: u32) {
         unsafe { npk_sleep(ms as i32) };
@@ -178,7 +208,7 @@ fn decode(table: &[u8], verbose: bool) -> i32 {
         Err(_) => { logln("[aml]  Namespace::load failed"); return -1; }
     };
     if verbose { logln("[aml]  namespace loaded, looking for batteries"); }
-    let mut ec = HostEc { reads: 0, fails: 0 };
+    let mut ec = HostEc { reads: 0, fails: 0, verbose };
     let mut n = 0u32;
     for bat in find_batteries(&ns) {
         n += 1;
