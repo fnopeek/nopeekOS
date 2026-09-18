@@ -212,8 +212,21 @@ pub fn init_mouse() -> bool {
     let bat = ps2_read();   // 0xAA self-test
     let id  = ps2_read();   // device id
     let v = |o: Option<u8>| o.map(|b| b as u16).unwrap_or(0x100);
-    kprintln!("[npk] ps2: aux test={:#x} reset ack={:#x} self-test={:#x} id={:#x} (0x100 = no answer)",
-        v(aux_test), v(ack), v(bat), v(id));
+    // Die Zahl allein kostet den naechsten Leser eine Suche, und sie sagt
+    // sehr Verschiedenes: 0x00 heisst "Port in Ordnung, nur nichts dran",
+    // alles andere heisst "dieser Kanal funktioniert nicht" — und das
+    // trennt "Touchpad haengt woanders" von "wir machen etwas falsch".
+    let why = match aux_test {
+        Some(0x00) => "port ok",
+        Some(0x01) => "clock line stuck low",
+        Some(0x02) => "clock line stuck high",
+        Some(0x03) => "data line stuck low - no working aux channel",
+        Some(0x04) => "data line stuck high - no working aux channel",
+        Some(_)    => "unknown test result",
+        None       => "no answer to the port test",
+    };
+    kprintln!("[npk] ps2: aux test={:#x} ({}) reset ack={:#x} self-test={:#x} id={:#x} (0x100 = no answer)",
+        v(aux_test), why, v(ack), v(bat), v(id));
     // Lenient: der Selbsttest ist das eigentliche Lebenszeichen, und
     // mancher Controller verschluckt das ACK — also reicht 0xAA an
     // irgendeiner der drei Stellen. Fehlt es ganz, ist der Aux-Port leer.
