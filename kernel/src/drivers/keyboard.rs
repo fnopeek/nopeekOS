@@ -5,6 +5,7 @@
 //! USB keyboards work via BIOS legacy PS/2 emulation.
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering, AtomicU32};
+use crate::kprintln;
 use crate::serial::{inb, outb};
 
 const DATA_PORT: u16 = 0x60;
@@ -64,6 +65,11 @@ pub fn init() {
         // Check if PS/2 controller exists (0xFF = no controller)
         let status = inb(STATUS_PORT);
         if status == 0xFF {
+            // Sagen, dass es ihn nicht gibt. Vorher war das stumm, und damit
+            // war die Frage "haengt die eingebaute Tastatur ueberhaupt am
+            // i8042?" am Geraet nicht zu beantworten — ohne Tastatur laesst
+            // sich auch kein Diagnosebefehl tippen.
+            kprintln!("[npk] ps2: no i8042 — a built-in keyboard must come from USB or I2C-HID");
             return; // No PS/2 controller (USB-only system)
         }
 
@@ -76,9 +82,38 @@ pub fn init() {
         // Enable keyboard (send 0xAE to command port)
         outb(STATUS_PORT, 0xAE);
 
+        // Scancode-UEBERSETZUNG (Konfigbit 6). `decode_scancode` liest Satz 1,
+        // und den liefert der Controller NUR mit eingeschalteter Uebersetzung.
+        // Eine Maschine, die rein ueber UEFI startet, kann ihn mit geloeschtem
+        // Bit uebergeben; die Tastatur sendet dann Satz 2, und jeder Scancode
+        // decodiert zu Unsinn oder zu gar nichts — genau das Bild einer
+        // "toten" Tastatur. Lesen, aendern, schreiben: wo das Bit schon steht,
+        // passiert nichts.
+        wait_write();
+        outb(STATUS_PORT, 0x20);
+        match ps2_read() {
+            Some(cfg) => {
+                kprintln!("[npk] ps2: i8042 status {:#04x} config {:#04x}{}",
+                    status, cfg,
+                    if cfg & 0x40 == 0 { " — translation OFF, turning it on" } else { "" });
+                if cfg & 0x40 == 0 {
+                    wait_write();
+                    outb(STATUS_PORT, 0x60);
+                    wait_write();
+                    outb(DATA_PORT, cfg | 0x40);
+                }
+            }
+            None => kprintln!("[npk] ps2: i8042 status {:#04x}, config read timed out", status),
+        }
+
         // Enable scanning (send 0xF4 to data port)
         wait_write();
         outb(DATA_PORT, 0xF4);
+        match ps2_read() {
+            Some(0xFA) => kprintln!("[npk] ps2: keyboard scanning enabled"),
+            Some(b)    => kprintln!("[npk] ps2: enable scanning answered {:#04x}", b),
+            None       => kprintln!("[npk] ps2: enable scanning got no answer — no keyboard on the i8042"),
+        }
     }
 }
 
