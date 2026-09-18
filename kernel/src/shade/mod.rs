@@ -1380,6 +1380,9 @@ pub fn poll_render() {
             }
 
             let focused_id = comp.focused;
+            // Wurde ausser dem fokussierten Fenster noch eines gemalt?
+            // Siehe die Begruendung hinter der Schleife.
+            let mut others_repainted = false;
             // Render back-to-front so overlays paint last (otherwise a
             // terminal behind drun would overwrite drun's pixels).
             let render_order: alloc::vec::Vec<crate::shade::window::WindowId> =
@@ -1427,11 +1430,32 @@ pub fn poll_render() {
                     }
                 }
 
+                if Some(win.id) != focused_id { others_repainted = true; }
                 let border_color = if win.focused { active_border } else { inactive_border };
                 compositor::Compositor::render_window(shadow, info, win,
                     comp.border, comp.rounding, comp.opacity, comp.scale, border_color,
                     glow);
                 framebuffer::blit_rect(fb, win.x, win.y, win.width, win.height);
+            }
+
+            // Der Hof zum SCHLUSS, sobald ausser dem fokussierten Fenster
+            // noch eines gemalt wurde.
+            //
+            // `render_window` stellt `Kasten + Band` aus der Wand wieder
+            // her, und das Band IST die Luecke (`glow_width` klemmt auf
+            // `gaps`) — also genau das Stueck Schirm, auf dem der Hof des
+            // NACHBARN liegt. Kommt der Nachbar in dieser Schleife nach dem
+            // fokussierten Fenster, wischt er dessen Hof in der Luecke weg.
+            // Was im eigenen Kasten steht, die vier Eckzwickel, wird mit dem
+            // fokussierten Fenster geblittet und bleibt stehen: ein Keil an
+            // der Ecke mit nichts darunter. Sichtbar nur bei MEHREREN
+            // Fenstern, weil es sonst keinen Nachbarn gibt, der die Luecke
+            // anfasst, und nur auf diesem Teilweg — ein voller Neuaufbau
+            // malt ohnehin alles in einem Zug.
+            if others_repainted {
+                for (bx, by, bw, bh) in comp.render_focus_glow(shadow, info) {
+                    framebuffer::blit_rect(fb, bx, by, bw, bh);
+                }
             }
         }
 
