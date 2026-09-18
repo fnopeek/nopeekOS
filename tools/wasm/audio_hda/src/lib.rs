@@ -122,6 +122,32 @@ fn unmute_out(mmio: i32, cad: u32, nid: u32) {
     codec_cmd(mmio, cad, nid, vset_amp(AMP_SET_OUT_BOTH | gain));
 }
 
+/// Entmutet den EINGANGSverstaerker `index` eines Knotens.
+///
+/// Ein Mixer hat je Eingang einen eigenen Verstaerker, und die stehen auf
+/// vielen Codecs ab Werk auf stumm. `unmute_out` oeffnet nur den Ausgang —
+/// damit ist Mixer → Pin frei und DAC → Mixer weiter zu. Das sieht aus wie
+/// ein laufender Strom ohne Ton: LPIB laeuft, der Pin stimmt, es kommt
+/// nichts.
+fn unmute_in(mmio: i32, cad: u32, nid: u32, index: u32) {
+    if get_param(mmio, cad, nid, PARAM_AUDIO_WIDGET_CAP) & WCAP_IN_AMP == 0 {
+        return;
+    }
+    let steps = (get_param(mmio, cad, nid, PARAM_AMP_IN_CAP) >> 8) & 0x7F;
+    if steps == 0 { return; }
+    let gain = ((steps * 3 / 4) & 0x7F) as u16;
+    codec_cmd(mmio, cad, nid, vset_amp(AMP_SET_IN_BOTH | ((index as u16 & 0xF) << 8) | gain));
+}
+
+/// Was `unmute_out` an einem Knoten tatsaechlich vorfindet — fuer den Log.
+/// Ein Knoten OHNE Verstaerker oder mit null Stufen wird still uebergangen,
+/// und dann steht im Log nur, dass „entmutet" wurde, waehrend nichts
+/// geschrieben wurde.
+fn amp_steps(mmio: i32, cad: u32, nid: u32) -> u32 {
+    if get_param(mmio, cad, nid, PARAM_AUDIO_WIDGET_CAP) & WCAP_OUT_AMP == 0 { return 0; }
+    (get_param(mmio, cad, nid, PARAM_AMP_OUT_CAP) >> 8) & 0x7F
+}
+
 fn conn_entry0(mmio: i32, cad: u32, nid: u32) -> u32 {
     // Short-form connection list: 4 entries packed in one response.
     let r = codec_cmd(mmio, cad, nid, vget_conn_entry(0)).unwrap_or(0);
@@ -131,22 +157,40 @@ fn conn_entry0(mmio: i32, cad: u32, nid: u32) -> u32 {
 // Walk from an output pin back to its feeding DAC (up to 2 hops through a
 // mixer/selector), unmuting each node in the path.
 fn trace_to_dac(mmio: i32, cad: u32, pin: u32) -> u32 {
+    // Der Weg wird GEMELDET, nicht vermutet. Ohne ihn steht im Log nur
+    // "pin 0x14" und "DAC 0x02", und ob ein Mixer dazwischenliegt — also
+    // ob ueberhaupt ein Eingangsverstaerker im Spiel ist — bleibt offen.
+    loghex("[audio_hda] path: pin 0x", pin);
+    loghex(" (out-amp steps=", amp_steps(mmio, cad, pin));
+    log(")");
     let len = get_param(mmio, cad, pin, PARAM_CONN_LIST_LEN) & 0x7F;
-    if len == 0 { return 0; }
+    if len == 0 { log(" <- (no connection list)\n"); return 0; }
     let first = conn_entry0(mmio, cad, pin);
-    if first == 0 { return 0; }
+    if first == 0 { log(" <- (empty)\n"); return 0; }
     if widget_type(mmio, cad, first) == WTYPE_DAC {
+        loghex(" <- dac 0x", first);
+        loghex(" (out-amp steps=", amp_steps(mmio, cad, first));
+        log(")\n");
         return first;
     }
-    // mixer or selector: select input 0, unmute, descend one level
+    // mixer or selector: select input 0, unmute BOTH directions, descend
     if widget_type(mmio, cad, first) == WTYPE_SELECTOR {
         codec_cmd(mmio, cad, first, vset_conn_select(0));
     }
     unmute_out(mmio, cad, first);
+    unmute_in(mmio, cad, first, 0);
+    loghex(" <- mid 0x", first);
+    loghex(" (out-amp steps=", amp_steps(mmio, cad, first));
+    log(")");
     let inner = conn_entry0(mmio, cad, first);
     if inner != 0 && widget_type(mmio, cad, inner) == WTYPE_DAC {
+        loghex(" <- dac 0x", inner);
+        loghex(" (out-amp steps=", amp_steps(mmio, cad, inner));
+        log(")\n");
         return inner;
     }
+    loghex(" <- 0x", inner);
+    log(" (not a DAC)\n");
     inner
 }
 
@@ -324,7 +368,7 @@ fn reset_stream(mmio: i32, base: u32) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    log("[audio_hda] v0.3.0 — generic HDA driver (mailbox streaming) starting\n");
+    log("[audio_hda] v0.3.1 — generic HDA driver (mailbox streaming) starting\n");
 
     // Bind the HDA controller by PCI class — hardware-independent, no
     // vendor:device hardcode. Intel cAVS controllers report subclass 0x01
