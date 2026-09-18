@@ -162,6 +162,35 @@ fn draw_wallpaper(shadow: *mut u8, info: &FbInfo) {
     unsafe { core::ptr::copy_nonoverlapping(wp, shadow, size); }
 }
 
+/// Restore the background in a rect, but only where `want` says so.
+///
+/// The focus halo wraps the ROUNDED corner of a tile, so it also paints the
+/// four corner notches — inside the tile's bounding box, outside its
+/// outline. A plain rect restore there would wipe the window's own arc, so
+/// the caller masks it down to the pixels the halo can reach.
+pub fn draw_background_region_where(shadow: *mut u8, info: &FbInfo,
+                                    rx: u32, ry: u32, rw: u32, rh: u32,
+                                    want: impl Fn(u32, u32) -> bool) {
+    let wp = unsafe { WALLPAPER };
+    let pitch = info.pitch as usize;
+    let x1 = (rx + rw).min(info.width);
+    let y1 = (ry + rh).min(info.height);
+    for y in ry..y1 {
+        let row = y as usize * pitch;
+        for x in rx..x1 {
+            if !want(x, y) { continue }
+            let off = row + x as usize * 4;
+            // SAFETY: x < info.width and y < info.height, so `off` is inside
+            // the shadow buffer; the wallpaper, when present, is allocated
+            // screen-sized with the same pitch (see `set_wallpaper`).
+            unsafe {
+                let px = if wp.is_null() { BG_GREY } else { *(wp.add(off) as *const u32) };
+                *(shadow.add(off) as *mut u32) = px;
+            }
+        }
+    }
+}
+
 fn draw_wallpaper_region(shadow: *mut u8, info: &FbInfo, rx: u32, ry: u32, rw: u32, rh: u32) {
     let wp = unsafe { WALLPAPER };
     if wp.is_null() {

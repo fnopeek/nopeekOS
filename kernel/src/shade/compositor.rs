@@ -553,6 +553,29 @@ impl Compositor {
             background::draw_background_region(shadow, info, bx, by, bw, bh);
             out.push((bx, by, bw, bh));
         }
+        // Und die vier ECKZWICKEL — innerhalb des umschliessenden Rechtecks,
+        // ausserhalb des Umrisses. Der Hof malt dort, die vier Streifen oben
+        // decken sie NICHT ab (sie enden an den Kanten des Kastens), und weil
+        // dieser Weg inkrementell ist, blieb der helle Blitzanstrich dort
+        // stehen, bis das Fenster irgendwann ganz neu gezeichnet wurde: ein
+        // kleiner Keil an jeder Ecke. Der volle Weg (`render_window`) stellt
+        // den ganzen Kasten her und hatte das Problem nie.
+        //
+        // Maskiert, weil in demselben Quadrat auch der Bogen des Fensters
+        // liegt — ein glattes Rechteck wuerde ihn wegwischen.
+        let r = self.rounding.min(w / 2).min(h / 2);
+        if r > 0 {
+            for (cx, cy) in [(x, y), (x + w - r, y),
+                             (x, y + h - r), (x + w - r, y + h - r)] {
+                if cx >= info.width || cy >= info.height { continue }
+                let cw = r.min(info.width - cx);
+                let ch = r.min(info.height - cy);
+                if cw == 0 || ch == 0 { continue }
+                background::draw_background_region_where(shadow, info, cx, cy, cw, ch,
+                    |px, py| render::rect_coverage_sdf(px, py, x, y, w, h, r) == 0);
+                out.push((cx, cy, cw, ch));
+            }
+        }
         render::draw_glow_ring(shadow, info, x, y, w, h, self.rounding,
             glow.color, glow.band, glow.alpha);
         out
