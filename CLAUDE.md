@@ -37,6 +37,13 @@ See README.md for the full vision and phase planning.
 ./build.sh qemu         # Build + QEMU (development)
 ./build.sh debug        # Build + QEMU with GDB stub
 ./build.sh release      # Build + sign (ECDSA P-384) → release/ for OTA
+./build.sh sign-modules # NUR release/modules/ signieren, Kernel unberuehrt.
+                        # Fuer eine reine Modulaenderung: kein 5-MB-Download
+                        # und kein Versionssprung am Kernel. Es werden nur
+                        # Module mit geaendertem sha384 neu signiert.
+                        # Die Kopie in kernel/src/install_data/assets/ wird
+                        # dabei NICHT mitgezogen — die gehoert erst
+                        # synchronisiert, wenn ein Modul fertig ist.
 ./build.sh vbox         # Build + VirtualBox (demo)
 ./build.sh vbox-clean   # Remove VirtualBox VM
 ./build.sh installer    # Two-pass installer build (bundled assets)
