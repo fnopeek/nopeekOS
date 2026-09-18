@@ -180,12 +180,32 @@ pub fn init_mouse() -> bool {
         wait_write();
         outb(DATA_PORT, cfg & !0x20);
     }
-    // Reset the device (0xFF → 0xFA, 0xAA, 0x00). No reply = no aux device.
-    if mouse_write(0xFF).is_none() {
+    // Reset (0xFF) antwortet ACK 0xFA, dann Selbsttest 0xAA, dann die
+    // Geraete-ID: 0x00 Standard-PS/2 (3 Byte), 0x03 mit Rad (4 Byte),
+    // 0x04 fuenf Tasten (4 Byte).
+    //
+    // Die drei Bytes wurden verworfen, und `mouse_write` prueft das ACK
+    // nicht — die Zeile darunter meldete also "touchpad/mouse on i8042
+    // aux", sobald IRGENDEIN Byte zurueckkam. Auf einem Geraet, dessen
+    // Touchpad in Wahrheit an I2C-HID haengt, ist das eine falsche
+    // Auskunft, und eine falsche ist schlimmer als keine: sie laesst
+    // niemanden weitersuchen.
+    let ack = mouse_write(0xFF);
+    let bat = ps2_read();   // 0xAA self-test
+    let id  = ps2_read();   // device id
+    let v = |o: Option<u8>| o.map(|b| b as u16).unwrap_or(0x100);
+    kprintln!("[npk] ps2: aux reset ack={:#x} self-test={:#x} id={:#x} (0x100 = no answer)",
+        v(ack), v(bat), v(id));
+    // Lenient: der Selbsttest ist das eigentliche Lebenszeichen, und
+    // mancher Controller verschluckt das ACK — also reicht 0xAA an
+    // irgendeiner der drei Stellen. Fehlt es ganz, ist der Aux-Port leer.
+    if ack != Some(0xAA) && bat != Some(0xAA) && id != Some(0xAA) {
+        kprintln!("[npk] ps2: no aux self-test (0xAA) in the reset answer — aux port treated as empty");
         return false;
     }
-    let _ = ps2_read();   // 0xAA self-test
-    let _ = ps2_read();   // 0x00 device id
+    if id != Some(0x00) && bat == Some(0xAA) {
+        kprintln!("[npk] ps2: aux id {:#x} is not the 3-byte standard — packets can desync", v(id));
+    }
     let _ = mouse_write(0xF6);   // set defaults
     let _ = mouse_write(0xF4);   // enable data reporting (→ 0xFA)
     PS2_MOUSE_ENABLED.store(true, Ordering::Release);

@@ -860,6 +860,26 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         .filter(|&p| r32(state.oper, portsc_off(p)) & PORTSC_CCS != 0)
         .count();
     kprintln!("[npk] xhci: no keyboard — {} of {} ports connected", connected, state.max_ports);
+
+    // Den laufenden Controller BEHALTEN, wenn etwas dranhaengt.
+    //
+    // `STATE` wurde bisher nur auf dem Erfolgspfad gesetzt, und `init_mouse`
+    // braucht es. Eine Maschine mit USB-Maus aber PS/2-Tastatur bekam damit
+    // gar keinen USB-Zeiger: die Tastatur fehlt, also `false`, also faellt
+    // der ganze hochgefahrene Controller weg — samt der Maus, die daran
+    // haengt. Gemeldet an einem Lenovo IdeaPad, dessen Tastatur am i8042
+    // sitzt.
+    //
+    // Nur, wenn noch keiner steht: ein spaeterer Controller MIT Tastatur
+    // ueberschreibt das oben ohnehin, und unter mehreren ohne Tastatur ist
+    // der erste mit angeschlossenen Geraeten die bessere Wette als der
+    // letzte.
+    if connected > 0 {
+        let mut slot = STATE.lock();
+        if slot.is_none() {
+            *slot = Some(state);
+        }
+    }
     false // No keyboard found on any port
 }
 
