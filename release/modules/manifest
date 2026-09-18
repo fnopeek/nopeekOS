@@ -1,7 +1,7 @@
 [aml]
-version=0.3.3
-size=99195
-sha384=ea46bdba46d5027ab13cd3708d5c2289b12854701d9d397247a7ce4eb1db4dec5a4aed3fa1afeb96439efbe9a90da854
+version=0.3.4
+size=100440
+sha384=b8d01279cffde0920d264d6d09938b391fca2bad00f3b50ce83f6b58f21a51f77b5e11e0b3c0146c7f55fc946d577082
 
 [audio_hda]
 version=0.3.2
