@@ -126,6 +126,21 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::Bat
     }
     it.ec.note_num("[aml]  _Qxx handlers in DSDT: ", qcount);
 
+    // Liegengebliebene EC-EREIGNISSE abholen und ihre `_Qxx` ausfuehren.
+    //
+    // Das ist `acpi_ec_clear` aus Linux `drivers/acpi/ec.c`, und es ist der
+    // Schritt, der hier gefehlt hat: der EC sammelt Ereignisse (Akku
+    // eingelegt, Netzteil dran, Deckel), setzt Bit5 seines Statusregisters
+    // und wartet, dass jemand sie mit `QR_EC` abholt. Erst im `_Q<nr>`
+    // traegt die Firmware ihren Zustand nach. Holt sie keiner ab, bleibt
+    // `_STA` auf seinem Anfangswert — auf Florians IdeaPad 0x0F, also
+    // "kein Akku", bei vollem Akku am Netz.
+    //
+    // Deckel 100 wie `ACPI_EC_CLEAR_MAX`; Linux warnt, wenn er greift, und
+    // wertet das als haengenden EC.
+    let drained = it.drain_ec_queries();
+    it.ec.note_num("[aml]  stale EC events drained: ", drained as u64);
+
     // `_STA` des Akkugeraets — das fragt ein Betriebssystem VOR `_BST`, und
     // es beantwortet die Frage direkt: Bit0 vorhanden, Bit3 funktionsfaehig,
     // **Bit4 = Akku eingelegt** (ACPI 6.5 §10.2.1). Bisher sind wir ohne
@@ -396,6 +411,54 @@ impl<'a> Interp<'a> {
             }
         }
         ran
+    }
+
+    /// Anstehende EC-Abfragen abholen und ihre `_Q<nr>` ausfuehren.
+    ///
+    /// Der Name ist `_Q` plus die Nummer in HEX — Linux liest ihn mit
+    /// `sscanf(node_name, "_Q%x", &value)`, also zwei Grossbuchstaben-
+    /// Ziffern. Gesucht wird er im Scope des EC-Geraets, und das ist der
+    /// Elter einer EmbeddedControl-Region.
+    fn drain_ec_queries(&mut self) -> u32 {
+        // Scopes, in denen eine EC-Region haengt.
+        let mut scopes: Vec<Path> = Vec::new();
+        for (path, node) in self.ns.nodes.iter() {
+            if let Node::Region { space: 3, .. } = node {
+                let mut par = path.clone();
+                par.pop();
+                if !scopes.contains(&par) { scopes.push(par); }
+            }
+        }
+        if scopes.is_empty() { return 0; }
+
+        let hex = |n: u8| -> Seg {
+            let d = |v: u8| if v < 10 { b'0' + v } else { b'A' + (v - 10) };
+            [b'_', b'Q', d(n >> 4), d(n & 0xF)]
+        };
+
+        let mut done = 0u32;
+        for _ in 0..100 {
+            let q = match self.ec.query() { Some(q) => q, None => break };
+            self.ec.note_num("[aml]   EC query 0x", q as u64);
+            let name = hex(q);
+            let mut found = false;
+            for sc in &scopes {
+                let mut h = sc.clone();
+                h.push(name);
+                if self.has(&h) {
+                    let _ = self.call_path(&h, Vec::new());
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                // Linux protokolliert das ebenfalls und macht weiter: ein
+                // Ereignis ohne Behandler ist kein Fehler, es ist abgeholt.
+                self.ec.note("[aml]   (no handler for that query)");
+            }
+            done += 1;
+        }
+        done
     }
 
     fn call_path(&mut self, path: &Path, args: Vec<Obj>) -> R<Value> {
