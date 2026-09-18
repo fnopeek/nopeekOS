@@ -98,7 +98,11 @@ fn eisa_id(s: &str) -> u64 {
 
 pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::BatteryInfo> {
     let mut it = Interp { ns, dyn_nodes: BTreeMap::new(), ec, depth: 0, mem: BTreeMap::new() };
+    // Reihenfolge wie ACPICA in `acpi_initialize_objects`: erst die
+    // Operationsregionen freigeben (`_REG`), dann die Geraete anlaufen
+    // lassen (`_STA`/`_INI`).
     it.register_ec_regions()?;
+    it.run_ini_methods();
 
     // _BST -> Package { State, PresentRate, RemainingCapacity, Voltage }
     let mut p = bat.clone();
@@ -174,22 +178,41 @@ impl<'a> Interp<'a> {
     /// Run every EmbeddedControl region's parent `_REG(3, 1)` so the firmware
     /// sets its "EC ready" gate (e.g. ECRG = 1). Generic — no name hardcoded.
     fn register_ec_regions(&mut self) -> R<()> {
-        let mut parents: Vec<Path> = Vec::new();
+        // `_REG(space, 1)` fuer JEDE Regionsart, die wir bedienen — nicht nur
+        // fuer den EC.
+        //
+        // ACPICA ruft `_REG` fuer jeden Raum, fuer den ein Handler steht
+        // (`acpi_ev_initialize_op_regions`), und damit sagt das
+        // Betriebssystem der Firmware: "dieser Raum ist jetzt benutzbar."
+        // Wir haben das nur fuer Raum 3 getan, obwohl `region_byte` die
+        // uebrigen mit Speicher hinterlegt — eine DSDT, die ihren Zustand in
+        // einem `_REG` fuer SystemIO oder SystemMemory einrichtet, blieb
+        // dadurch halb angelaufen.
+        //
+        // Paare (Elternscope, Raum), damit ein Scope mit zwei Regionen auch
+        // zwei Aufrufe bekommt.
+        let mut pairs: Vec<(Path, u8)> = Vec::new();
         for (path, node) in self.ns.nodes.iter() {
-            if let Node::Region { space: 3, .. } = node {
+            if let Node::Region { space, .. } = node {
                 let mut par = path.clone();
                 par.pop();
-                if !parents.contains(&par) {
-                    parents.push(par);
+                let e = (par, *space);
+                if !pairs.contains(&e) {
+                    pairs.push(e);
                 }
             }
         }
-        for par in parents {
+        // EC zuletzt: die uebrigen Raeume richten oft erst das Tor ein, durch
+        // das der EC danach ueberhaupt antwortet.
+        pairs.sort_by_key(|(_, sp)| if *sp == 3 { 1 } else { 0 });
+        for (par, space) in pairs {
             let mut reg = par.clone();
             reg.push(crate::value::seg("_REG"));
             if self.has(&reg) {
-                let args = vec![obj(Value::Int(3)), obj(Value::Int(1))];
-                let _ = self.call_path(&reg, args)?;
+                let args = vec![obj(Value::Int(space as u64)), obj(Value::Int(1))];
+                // Eine meckernde `_REG` darf die uebrigen nicht abbrechen —
+                // dasselbe Verhalten wie bei `_INI`.
+                let _ = self.call_path(&reg, args);
             }
         }
         Ok(())
@@ -240,6 +263,88 @@ impl<'a> Interp<'a> {
         };
         for sg in &n.segs { base.push(*sg); }
         base
+    }
+
+    /// `_INI` ueber den ganzen Namespace — der Anlauf, den das
+    /// BETRIEBSSYSTEM macht.
+    ///
+    /// Nachgebaut aus ACPICA `acpi_ns_initialize_devices` /
+    /// `acpi_ns_init_one_device` (nsinit.c): von oben nach unten, die Wurzel
+    /// zuerst, und `_STA` entscheidet.
+    ///
+    ///   * kein `_STA`  -> vorhanden UND funktionsfaehig
+    ///   * Bit0 gesetzt -> vorhanden, `_INI` laeuft
+    ///   * weder Bit0 noch Bit3 -> Geraet ist weder vorhanden noch
+    ///     funktionsfaehig: der ganze TEILBAUM wird uebersprungen
+    ///     ("don't look at the children of such a device")
+    ///   * abwesend, aber funktionsfaehig -> `_INI` nicht, Kinder schon
+    ///
+    /// Wir haben das nie getan, und die Referenz-DSDT allein hat 44 solche
+    /// Methoden. Darin richtet die Firmware ihren Zustand ein — unter
+    /// anderem den, an dem der EC seinen Akku meldet.
+    ///
+    /// Fehler werden verschluckt, und das ist hier ACPICAs Verhalten: eine
+    /// `_INI`, die meckert, darf den Anlauf der uebrigen Geraete nicht
+    /// abbrechen.
+    ///
+    /// Abweichung, bewusst: ACPICA laeuft das EINMAL beim Hochfahren, wir
+    /// je Messrunde — `decode` baut den Namespace jede Runde neu, und
+    /// `_REG` laeuft aus demselben Grund ebenfalls jedes Mal.
+    fn run_ini_methods(&mut self) {
+        let ini = crate::value::seg("_INI");
+        let sta_seg = crate::value::seg("_STA");
+
+        // Die Wurzel zuerst (ACPICA: \_INI, dann \_SB._INI, dann der Rest).
+        let root_ini: Path = vec![ini];
+        if self.has(&root_ini) {
+            let _ = self.call_path(&root_ini, Vec::new());
+        }
+
+        // Eltern vor Kindern: nach Pfadtiefe, dann nach Namen.
+        let mut devs: Vec<Path> = self
+            .ns
+            .nodes
+            .iter()
+            .filter(|(_, n)| matches!(n, Node::Scope))
+            .map(|(p, _)| p.clone())
+            .collect();
+        devs.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+
+        let mut pruned: Vec<Path> = Vec::new();
+        for dev in devs {
+            if pruned
+                .iter()
+                .any(|d| dev.len() > d.len() && dev.starts_with(d.as_slice()))
+            {
+                continue;
+            }
+            let mut sta = dev.clone();
+            sta.push(sta_seg);
+            let flags: u64 = if self.has(&sta) {
+                match self.call_path(&sta, Vec::new()) {
+                    Ok(v) => v.as_int(),
+                    // Meckert `_STA`, behandeln wir das Geraet wie ACPICA:
+                    // vorhanden und funktionsfaehig, damit ein Fehler nicht
+                    // einen ganzen Teilbaum stilllegt.
+                    Err(_) => 0x0F,
+                }
+            } else {
+                u32::MAX as u64
+            };
+            let present = flags & 0x01 != 0;
+            let functioning = flags & 0x08 != 0;
+            if !present && !functioning {
+                pruned.push(dev);
+                continue;
+            }
+            if present {
+                let mut ip = dev.clone();
+                ip.push(ini);
+                if self.has(&ip) {
+                    let _ = self.call_path(&ip, Vec::new());
+                }
+            }
+        }
     }
 
     fn call_path(&mut self, path: &Path, args: Vec<Obj>) -> R<Value> {
@@ -701,8 +806,23 @@ impl<'a> Interp<'a> {
                 Ok((Value::Int(r), p2))
             }
             0x21 | 0x22 => {
-                // Stall(usec) / Sleep(msec) — no-op, consume the time arg.
-                let (_a, p1) = self.eval(f, p + 2)?;
+                // Stall(usec) = 0x21, Sleep(msec) = 0x22.
+                //
+                // Beides war ein No-op, und das ist keine Kleinigkeit: die
+                // Firmware wartet damit auf ihre EIGENE Hardware, typisch
+                // zwischen einem Schreib- und einem Lesezugriff auf den EC.
+                // Wer nicht wartet, liest zu frueh und bekommt den alten
+                // Wert — ohne dass irgendwo ein Fehler entsteht.
+                let (a, p1) = self.eval(f, p + 2)?;
+                let ms = if b[p + 1] == 0x21 {
+                    // Stall rechnet in Mikrosekunden; aufrunden, damit ein
+                    // Stall(1) nicht zu null wird.
+                    ((a.as_int() + 999) / 1000) as u32
+                } else {
+                    a.as_int() as u32
+                };
+                // Deckel: eine DSDT darf uns nicht minutenlang anhalten.
+                if ms > 0 { self.ec.sleep_ms(ms.min(50)); }
                 Ok((Value::Uninit, p1))
             }
             0x31 => {

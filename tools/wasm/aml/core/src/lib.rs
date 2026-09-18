@@ -25,6 +25,11 @@ use alloc::{collections::BTreeMap, string::String, vec::Vec};
 pub trait Ec {
     fn read(&mut self, addr: u8) -> u8;
     fn write(&mut self, addr: u8, val: u8);
+    /// `Sleep(ms)` / `Stall(us)` aus dem AML. Die Firmware wartet damit auf
+    /// ihre eigene Hardware — meist zwischen einem Schreib- und einem
+    /// Lesezugriff auf den EC. Wir haben beides verworfen und also zu frueh
+    /// gelesen. Vorgabe: nichts tun, damit der Pruefstand ohne Uhr auskommt.
+    fn sleep_ms(&mut self, _ms: u32) {}
 }
 
 /// A namespace object.
