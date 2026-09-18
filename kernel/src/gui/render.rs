@@ -233,6 +233,25 @@ pub fn rect_coverage_sdf(px: u32, py: u32,
     arc_coverage_sdf(cdx_q8, cdy_q8, r_i * 256)
 }
 
+/// Signed distance (Q24.8) from the outline of the rounded rect to the
+/// CENTRE of pixel `(px, py)`. Negative inside, positive outside.
+///
+/// The arc centres are the ones `rect_coverage_sdf` places — `(rx+r, ry+r)`
+/// and its three mirrors — so the halo and the chrome can never disagree
+/// about the shape they are drawing.
+pub fn rrect_distance_sdf(px: u32, py: u32,
+                          rx: u32, ry: u32, rw: u32, rh: u32, r: u32) -> i32 {
+    let pcx = px as i32 * 256 + 128;
+    let pcy = py as i32 * 256 + 128;
+    let lo_x = (rx + r) as i32 * 256;
+    let hi_x = (rx + rw - r) as i32 * 256;
+    let lo_y = (ry + r) as i32 * 256;
+    let hi_y = (ry + rh - r) as i32 * 256;
+    let qx = (lo_x - pcx).max(pcx - hi_x).max(0) as i64;
+    let qy = (lo_y - pcy).max(pcy - hi_y).max(0) as i64;
+    isqrt_u64((qx * qx + qy * qy) as u64) as i32 - r as i32 * 256
+}
+
 /// Soft halo just OUTSIDE a rounded rect, alpha falling off with distance.
 ///
 /// The focus border is a hairline in a wallpaper-derived colour, so on a busy
@@ -253,24 +272,24 @@ pub fn draw_glow_ring(shadow: *mut u8, info: &FbInfo,
     let y1 = (y + h + width).min(info.height);
     if x1 <= x0 || y1 <= y0 { return; }
 
+    let band_q8 = width as i32 * 256;
     let paint = |px: u32, py: u32| {
         if rect_coverage_sdf(px, py, x, y, w, h, r) > 0 { return; }
-        // Distance to the tile in whole pixels = the first grown ring that
-        // reaches this pixel. Nearest ring is brightest.
-        for i in 1..=width {
-            let gx = x.saturating_sub(i);
-            let gy = y.saturating_sub(i);
-            let gw = w + i + (x - gx);
-            let gh = h + i + (y - gy);
-            let cov = rect_coverage_sdf(px, py, gx, gy, gw, gh, r + i);
-            if cov == 0 { continue; }
-            let falloff = (width + 1 - i) * 256 / width;
-            let a = (alpha * falloff / 256) * cov / 256;
-            if a > 0 {
-                let bg = read_pixel(shadow, info, px, py);
-                put_pixel(shadow, info, px, py, blend(color, bg, a.min(256)));
-            }
-            return;
+        // One distance, not a ring search. Counting whole rings and then
+        // scaling by THAT ring's edge coverage looks right on a straight
+        // edge (coverage is always 256 there) and falls apart on the arcs,
+        // where every pixel lands in some ring's ~1.17 px fringe: the halo
+        // came out as a fan of steps with black gaps in it. Measured on the
+        // corner diagonal: 55 55 10 53 17 17 0 17 17 1.
+        let d = rrect_distance_sdf(px, py, x, y, w, h, r).max(0);
+        if d >= band_q8 { return; }
+        // Same profile the ring search had on a straight edge: column `i`
+        // out has its centre at d = i - 0.5 and got (width + 1 - i) / width.
+        let f = (((band_q8 + 128 - d) as i64 * 256) / band_q8 as i64).min(256) as u32;
+        let a = alpha * f / 256;
+        if a > 0 {
+            let bg = read_pixel(shadow, info, px, py);
+            put_pixel(shadow, info, px, py, blend(color, bg, a.min(256)));
         }
     };
 
@@ -640,6 +659,66 @@ pub fn fill_rounded_rect_gradient_alpha(buf: *mut u8, info: &FbInfo,
             } else {
                 put_pixel(buf, info, px, py, (alpha.min(255) << 24) | (color & 0x00FFFFFF));
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod glow_tests {
+    use super::*;
+
+    /// Alpha of the focus halo at a pixel, exactly as `draw_glow_ring`
+    /// computes it — without a framebuffer.
+    fn halo(px: u32, py: u32, x: u32, y: u32, w: u32, h: u32, r: u32,
+            band: u32, alpha: u32) -> Option<u32> {
+        if rect_coverage_sdf(px, py, x, y, w, h, r) > 0 { return None }
+        let band_q8 = band as i32 * 256;
+        let d = rrect_distance_sdf(px, py, x, y, w, h, r).max(0);
+        if d >= band_q8 { return Some(0) }
+        let f = (((band_q8 + 128 - d) as i64 * 256) / band_q8 as i64).min(256) as u32;
+        Some(alpha * f / 256)
+    }
+
+    /// The halo must never get brighter as it gets further from the tile.
+    /// The ring search this replaced broke that on the four arcs — it took
+    /// the first whole ring reaching a pixel and scaled by THAT ring's edge
+    /// coverage, so a pixel could land in a fringe worth almost nothing
+    /// while its outer neighbour sat fully inside the next ring. Measured
+    /// over the same cases below: up to 79 of 100 brighter outwards.
+    #[test]
+    fn halo_never_brightens_outwards() {
+        let (x, y, w, h) = (60u32, 60u32, 120u32, 100u32);
+        for r in [0u32, 4, 8, 10, 16, 20, 24, 40] {
+            if r > w / 2 || r > h / 2 { continue }
+            for band in [2u32, 6, 8, 12, 16] {
+                for py in (y - band)..(y + h + band) {
+                    for px in (x - band)..(x + w + band) {
+                        let Some(a) = halo(px, py, x, y, w, h, r, band, 100) else { continue };
+                        let d0 = rrect_distance_sdf(px, py, x, y, w, h, r);
+                        for (dx, dy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                            let nx = (px as i32 + dx) as u32;
+                            let ny = (py as i32 + dy) as u32;
+                            let Some(b) = halo(nx, ny, x, y, w, h, r, band, 100) else { continue };
+                            let d1 = rrect_distance_sdf(nx, ny, x, y, w, h, r);
+                            assert!(!(d1 > d0 && b > a),
+                                "r={r} band={band}: ({px},{py})={a} but outer ({nx},{ny})={b}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The straight edges are what the ring search already got right, and
+    /// the profile there must not move: column `i` out is
+    /// `(band + 1 - i) / band` of the full strength.
+    #[test]
+    fn straight_edge_profile_is_unchanged() {
+        let (x, y, w, h, r, band) = (60u32, 60u32, 120u32, 100u32, 20u32, 12u32);
+        let ymid = y + h / 2;
+        for i in 1..=band {
+            let want = 100 * ((band + 1 - i) * 256 / band) / 256;
+            assert_eq!(halo(x - i, ymid, x, y, w, h, r, band, 100), Some(want));
         }
     }
 }
