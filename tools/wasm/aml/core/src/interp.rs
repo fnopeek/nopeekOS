@@ -9,6 +9,19 @@ const MAX_DEPTH: usize = 64;
 
 pub struct Interp<'a> {
     ns: &'a Namespace,
+    /// Knoten, die eine METHODE zur Laufzeit deklariert (`OpRegion`, `Field`
+    /// im Rumpf). Die stehen nicht in der geladenen Tabelle: unser Lader
+    /// stellt Methodenruempfe zurueck und sieht sie erst beim Ausfuehren.
+    ///
+    /// ACPICA teilt das anders auf — der Knoten entsteht beim PARSEN, und
+    /// `acpi_ds_eval_region_operands` wertet Adresse und Laenge erst beim
+    /// AUSFUEHREN aus (dsopcode.c). Bei uns faellt beides zusammen, weil wir
+    /// den Rumpf ohnehin erst zur Laufzeit ansehen; das Ergebnis ist
+    /// dasselbe. Unterschied, bewusst: ACPICA loescht die Knoten beim
+    /// Verlassen der Methode (owner id), wir behalten sie bis zum Ende des
+    /// Laufs — `decode` baut je Runde einen frischen Namespace, also leben
+    /// sie nicht laenger als eine Messung.
+    dyn_nodes: BTreeMap<Path, Node>,
     ec: &'a mut dyn Ec,
     depth: usize,
     /// In-memory backing for non-EmbeddedControl regions (SystemIO,
@@ -84,7 +97,7 @@ fn eisa_id(s: &str) -> u64 {
 }
 
 pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::BatteryInfo> {
-    let mut it = Interp { ns, ec, depth: 0, mem: BTreeMap::new() };
+    let mut it = Interp { ns, dyn_nodes: BTreeMap::new(), ec, depth: 0, mem: BTreeMap::new() };
     it.register_ec_regions()?;
 
     // _BST -> Package { State, PresentRate, RemainingCapacity, Voltage }
@@ -126,7 +139,7 @@ impl<'a> Interp<'a> {
         // _BIF: Package[1]=DesignCap, [2]=LastFullChargeCap.
         let mut p = bat.clone();
         p.push(crate::value::seg("_BIF"));
-        if self.ns.nodes.contains_key(&p) {
+        if self.has(&p) {
             let v = self.call_path(&p, Vec::new())?;
             if let Value::Package(e) = &v {
                 if e.len() >= 3 {
@@ -137,7 +150,7 @@ impl<'a> Interp<'a> {
         // _BIX: Package[2]=DesignCap, [3]=LastFullChargeCap (Revision at [0]).
         let mut p = bat.clone();
         p.push(crate::value::seg("_BIX"));
-        if self.ns.nodes.contains_key(&p) {
+        if self.has(&p) {
             let v = self.call_path(&p, Vec::new())?;
             if let Value::Package(e) = &v {
                 if e.len() >= 4 {
@@ -164,12 +177,59 @@ impl<'a> Interp<'a> {
         for par in parents {
             let mut reg = par.clone();
             reg.push(crate::value::seg("_REG"));
-            if self.ns.nodes.contains_key(&reg) {
+            if self.has(&reg) {
                 let args = vec![obj(Value::Int(3)), obj(Value::Int(1))];
                 let _ = self.call_path(&reg, args)?;
             }
         }
         Ok(())
+    }
+
+    /// Gibt es diesen Pfad — in der Tabelle ODER zur Laufzeit deklariert?
+    fn has(&self, p: &Path) -> bool {
+        self.dyn_nodes.contains_key(p) || self.ns.nodes.contains_key(p)
+    }
+
+    /// Knoten nachschlagen; Laufzeitdeklarationen verdecken die Tabelle.
+    fn node(&self, p: &Path) -> Option<&Node> {
+        self.dyn_nodes.get(p).or_else(|| self.ns.get(p))
+    }
+
+    /// Wie `Namespace::resolve`, aber ueber BEIDE Karten. Ein Feld, das eine
+    /// Methode gerade selbst angelegt hat, muss sie auch finden koennen.
+    fn resolve(&self, scope: &Path, rooted: bool, carets: usize, segs: &[Seg]) -> Option<Path> {
+        let mut base: Path = if rooted {
+            Vec::new()
+        } else {
+            let mut b = scope.clone();
+            for _ in 0..carets { b.pop(); }
+            b
+        };
+        if !rooted && carets == 0 && segs.len() == 1 {
+            loop {
+                let mut cand = base.clone();
+                cand.push(segs[0]);
+                if self.has(&cand) { return Some(cand); }
+                if base.is_empty() { return None; }
+                base.pop();
+            }
+        }
+        for sg in segs { base.push(*sg); }
+        if self.has(&base) { Some(base) } else { None }
+    }
+
+    /// Absoluter Pfad einer DEKLARATION (kein Aufwaertssuchen) — wie
+    /// `Loader::def_path`.
+    fn def_path(&self, scope: &Path, n: &NRef) -> Path {
+        let mut base: Path = if n.rooted {
+            Vec::new()
+        } else {
+            let mut b = scope.clone();
+            for _ in 0..n.carets { b.pop(); }
+            b
+        };
+        for sg in &n.segs { base.push(*sg); }
+        base
     }
 
     fn call_path(&mut self, path: &Path, args: Vec<Obj>) -> R<Value> {
@@ -180,7 +240,14 @@ impl<'a> Interp<'a> {
             Some(Node::Method { body, scope, .. }) => (body.as_slice(), scope.clone()),
             Some(Node::Name(v)) => return Ok(v.borrow().clone()),
             Some(Node::Field { .. }) => return self.read_field(path),
-            _ => return Err(format!("call: {} is not a method", path_str(path))),
+            _ => {
+                // Zur Laufzeit deklarierte Feldeinheit: die steht nur in
+                // `dyn_nodes`. Methoden koennen dort nie stehen, deshalb
+                // bleibt der Zugriff oben absichtlich auf der Tabelle — er
+                // leiht `body` aus, und das muss die Methode ueberleben.
+                if self.dyn_nodes.contains_key(path) { return self.read_field(path); }
+                return Err(format!("call: {} is not a method", path_str(path)));
+            }
         };
         // The method's own scope is the path itself (names it creates live here);
         // unqualified lookups search upward from here.
@@ -273,6 +340,34 @@ impl<'a> Interp<'a> {
             }
             0xA5 => Ok((Flow::Break, p + 1)),
             0x9F => Ok((Flow::Continue, p + 1)),
+            // DEKLARATIONEN im Methodenrumpf. Legales, verbreitetes AML: eine
+            // Methode legt ihre Operationsregion und deren Felder selbst an,
+            // typisch fuer gemultiplexte EC-Register. Der Lader sieht sie nie,
+            // weil er Methodenruempfe zurueckstellt.
+            0x5B if b[p + 1] == 0x80 => {
+                // OpRegionOp NameString RegionSpace RegionOffset RegionLen.
+                // Offset und Laenge sind TermArgs und werden HIER ausgewertet
+                // — genau der Schritt, den ACPICA in
+                // `acpi_ds_eval_region_operands` macht.
+                let (nref, p1) = name_at(b, p + 2);
+                let space = b[p1];
+                let (off, p2) = self.eval(f, p1 + 1)?;
+                let (len, p3) = self.eval(f, p2)?;
+                let target = self.def_path(&f.scope, &nref);
+                self.dyn_nodes.insert(
+                    target,
+                    Node::Region { space, offset: off.as_int(), len: len.as_int() },
+                );
+                Ok((Flow::Normal, p3))
+            }
+            0x5B if b[p + 1] == 0x81 => {
+                // FieldOp PkgLength NameString FieldFlags FieldList
+                let (pkg_end, p1) = pkg_length(b, p + 2);
+                let (rref, p2) = name_at(b, p1);
+                let region = self.def_path(&f.scope, &rref);
+                self.dyn_field_list(b, &region, p2 + 1, pkg_end);
+                Ok((Flow::Normal, pkg_end))
+            }
             _ => {
                 // Expression statement (Store, method call, op with target...).
                 let (_v, np) = self.eval(f, p)?;
@@ -651,11 +746,19 @@ impl<'a> Interp<'a> {
         }
 
         let path = self
-            .ns
             .resolve(&f.scope, nref.rooted, nref.carets, &nref.segs)
             .ok_or_else(|| format!("unresolved name {} (scope {})", segs_str(&nref.segs), path_str(&f.scope)))?;
-        match self.ns.get(&path) {
-            Some(Node::Method { flags, .. }) => {
+        // Erst auslesen, dann handeln: `node()` leiht `self`, und die Arme
+        // darunter rufen `&mut self`-Methoden.
+        enum Kind { Method(u8), Name(Value), Field, Other }
+        let kind = match self.node(&path) {
+            Some(Node::Method { flags, .. }) => Kind::Method(*flags),
+            Some(Node::Name(v)) => Kind::Name(v.borrow().clone()),
+            Some(Node::Field { .. }) => Kind::Field,
+            _ => Kind::Other,
+        };
+        match kind {
+            Kind::Method(flags) => {
                 let argc = (flags & 0x07) as usize;
                 let mut args = Vec::with_capacity(argc);
                 let mut q = p1;
@@ -667,9 +770,9 @@ impl<'a> Interp<'a> {
                 let v = self.call_path(&path, args)?;
                 Ok((v, q))
             }
-            Some(Node::Name(v)) => Ok((v.borrow().clone(), p1)),
-            Some(Node::Field { .. }) => Ok((self.read_field(&path)?, p1)),
-            _ => Ok((Value::Uninit, p1)),
+            Kind::Name(v) => Ok((v, p1)),
+            Kind::Field => Ok((self.read_field(&path)?, p1)),
+            Kind::Other => Ok((Value::Uninit, p1)),
         }
     }
 
@@ -707,9 +810,9 @@ impl<'a> Interp<'a> {
             0x5B if b[p + 1] == 0x31 => Ok((None, p + 2)), // DebugObj sink
             0x5C | 0x5E | 0x2E | 0x2F | 0x41..=0x5A | 0x5F => {
                 let (nref, p1) = name_at(b, p);
-                let path = self.ns.resolve(&f.scope, nref.rooted, nref.carets, &nref.segs);
+                let path = self.resolve(&f.scope, nref.rooted, nref.carets, &nref.segs);
                 match path {
-                    Some(pp) => match self.ns.get(&pp) {
+                    Some(pp) => match self.node(&pp) {
                         Some(Node::Field { .. }) => Ok((Some(Place::Field(pp)), p1)),
                         Some(Node::Name(o)) => Ok((Some(Place::Obj(o.clone())), p1)),
                         _ => Ok((Some(Place::Field(pp)), p1)),
@@ -838,15 +941,52 @@ impl<'a> Interp<'a> {
         Ok(())
     }
 
+    /// FieldList einer Laufzeit-Deklaration, Bit fuer Bit — dieselbe Regel
+    /// wie `Loader::field_list`: Feldeinheiten sind GESCHWISTER der Region,
+    /// nicht ihre Kinder.
+    fn dyn_field_list(&mut self, b: &[u8], region: &Path, start: usize, end: usize) {
+        let mut p = start;
+        let mut bit: u64 = 0;
+        while p < end && p < b.len() {
+            match b[p] {
+                0x00 => {
+                    // ReservedField / Offset(): PkgLength-WERT ist eine Bitluecke.
+                    let (pe, p1) = pkg_length(b, p + 1);
+                    bit += (pe - (p + 1)) as u64;
+                    p = p1;
+                }
+                0x01 => p += 3,                         // AccessField
+                0x02 => { let (_n, p1) = name_at(b, p + 1); p = p1; } // ConnectField
+                0x03 => p += 4,                         // ExtendedAccessField
+                _ => {
+                    if p + 4 > b.len() { return; }
+                    let mut sg: Seg = [0; 4];
+                    sg.copy_from_slice(&b[p..p + 4]);
+                    let (pe, p1) = pkg_length(b, p + 4);
+                    let width = (pe - (p + 4)) as u64;
+                    let mut fp = region.clone();
+                    fp.pop();
+                    fp.push(sg);
+                    self.dyn_nodes.insert(
+                        fp,
+                        Node::Field { region: region.clone(), bit_offset: bit, bit_width: width },
+                    );
+                    bit += width;
+                    p = p1;
+                }
+            }
+        }
+    }
+
     /// (region_space, region_byte_base, field_bit_offset, field_bit_width)
     fn field_geom(&self, path: &Path) -> R<(u8, u64, u64, u64)> {
-        let (region, bit_offset, bit_width) = match self.ns.get(path) {
+        let (region, bit_offset, bit_width) = match self.node(path) {
             Some(Node::Field { region, bit_offset, bit_width }) => {
                 (region.clone(), *bit_offset, *bit_width)
             }
             _ => return Err(format!("{} is not a field", path_str(path))),
         };
-        let (space, offset) = match self.ns.get(&region) {
+        let (space, offset) = match self.node(&region) {
             Some(Node::Region { space, offset, .. }) => (*space, *offset),
             _ => return Err(format!("region {} missing", path_str(&region))),
         };
