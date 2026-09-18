@@ -611,6 +611,45 @@ impl<'a> Interp<'a> {
     /// Evaluate a NameString as a value: method invocation, name read, or field read.
     fn eval_name(&mut self, f: &Frame, p: usize) -> R<(Value, usize)> {
         let (nref, p1) = name_at(f.body, p);
+
+        // ── Namen, die das BETRIEBSSYSTEM liefert ────────────────────────
+        //
+        // `_OSI`, `_OS` und `_REV` stehen NICHT in der DSDT (ACPI 6.5 §5.7).
+        // Die Firmware fragt damit, mit wem sie es zu tun hat, und
+        // verzweigt danach — jeder Interpreter (ACPICA, Linux, Windows)
+        // bringt sie mit. Uns fehlten sie ganz, und deshalb starb auf einem
+        // Lenovo IdeaPad schon `\_SB_.PCI0.LPC0.EC0_._REG` an
+        // "unresolved name _OSI" — also der Aufruf, der dem EC seine
+        // Operationsregion freigibt. Ohne den gibt es keinen Akku.
+        //
+        // Auf dem Intel-Notebook faellt es nicht auf: dessen DSDT ruft auf
+        // diesem Pfad kein `_OSI`. Die Luecke war immer da.
+        if nref.carets == 0 && nref.segs.len() == 1 {
+            match &nref.segs[0] {
+                b"_OSI" => {
+                    // Genau ein Argument (die abgefragte Zeichenkette).
+                    let (arg, q) = self.eval(f, p1)?;
+                    let yes = match &arg {
+                        Value::Str(s) => osi_supported(s),
+                        _ => false,
+                    };
+                    // ACPI: "Ones" ist wahr, 0 ist falsch.
+                    return Ok((Value::Int(if yes { 0xFFFF_FFFF } else { 0 }), q));
+                }
+                b"_OS_" => {
+                    // Was Linux meldet, und zwar mit Absicht: eine DSDT, die
+                    // hier etwas Unbekanntes liest, nimmt ihren aeltesten
+                    // Pfad.
+                    return Ok((Value::Str(String::from("Microsoft Windows NT")), p1));
+                }
+                b"_REV" => {
+                    // ACPI-Revision, die wir auswerten koennen.
+                    return Ok((Value::Int(2), p1));
+                }
+                _ => {}
+            }
+        }
+
         let path = self
             .ns
             .resolve(&f.scope, nref.rooted, nref.carets, &nref.segs)
@@ -980,6 +1019,21 @@ fn seg_at(b: &[u8], p: usize) -> Seg {
     let mut s: Seg = [0; 4];
     s.copy_from_slice(&b[p..p + 4]);
     s
+}
+
+/// Antwort auf `_OSI("…")`.
+///
+/// Wahr fuer die Windows-Zeichenketten, und das ist kein Zufall: fast jede
+/// Firmware fragt danach, und wer mit Nein antwortet, bekommt den aeltesten
+/// Pfad der DSDT — oder gar keinen. Alles andere ist falsch, insbesondere
+/// "Linux": das hat Linux selbst abgeschafft, weil Firmware daraufhin
+/// kaputte Sonderwege nimmt.
+///
+/// Bewusst OHNE obere Grenze bei der Jahreszahl. Eine Liste hier waere eine
+/// Zahl aus dem Bauch, die auf dem naechsten Geraet unter dem Normalfall
+/// liegt — dieselbe Bauart Fehler wie ein Deckel, der nie gerissen ist.
+fn osi_supported(s: &str) -> bool {
+    s.starts_with("Windows ")
 }
 
 fn segs_str(segs: &[Seg]) -> String {
