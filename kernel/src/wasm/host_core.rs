@@ -505,7 +505,17 @@ pub(crate) fn npk_acpi_mem_read(ctx: &mut HostState, hi: i32, lo: i32) -> i32 {
     }
     let addr = ((hi as u32 as u64) << 32) | (lo as u32 as u64);
     if crate::memory::is_usable_ram(addr) {
-        kprintln!("[npk] aml: refused SystemMemory read at {:#x} — that is RAM", addr);
+        // Nur die ersten paar melden. Der Treiber misst fuer immer, und
+        // eine Absage je Runde ist nach einer Minute eine Flut — die
+        // AUSKUNFT ist einmal wertvoll, die Wiederholung nie.
+        use core::sync::atomic::{AtomicU32, Ordering};
+        static REFUSED: AtomicU32 = AtomicU32::new(0);
+        let n = REFUSED.fetch_add(1, Ordering::Relaxed);
+        if n < 3 {
+            kprintln!("[npk] aml: refused SystemMemory read at {:#x} — that is RAM", addr);
+        } else if n == 3 {
+            kprintln!("[npk] aml: (further SystemMemory refusals silenced)");
+        }
         return -1;
     }
     match crate::paging::read_phys_u8(addr) {

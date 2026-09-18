@@ -605,6 +605,31 @@ impl<'a> Interp<'a> {
             }
             0xA5 => Ok((Flow::Break, p + 1)),
             0x9F => Ok((Flow::Continue, p + 1)),
+            // Name(x, wert) im Methodenrumpf — die haeufigste Deklaration
+            // ueberhaupt: eine Methode legt ihr Ergebnispaket an, fuellt es
+            // und gibt es zurueck. Genau daran starb `GBIF`.
+            0x08 => {
+                let (nref, p1) = name_at(b, p + 1);
+                let (v, p2) = self.eval(f, p1)?;
+                let target = self.def_path(&f.scope, &nref);
+                self.dyn_nodes.insert(target, Node::Name(obj(v)));
+                Ok((Flow::Normal, p2))
+            }
+            // Mutex(name, flags) / Event(name) — im Rumpf zulaessig. Wir
+            // fuehren sie als "vorhanden"; `Acquire`/`Release` sind bei
+            // einem einzigen Rechenweg ohnehin folgenlos.
+            0x5B if b[p + 1] == 0x01 => {
+                let (nref, p1) = name_at(b, p + 2);
+                let target = self.def_path(&f.scope, &nref);
+                self.dyn_nodes.insert(target, Node::Other);
+                Ok((Flow::Normal, p1 + 1)) // + SyncFlags
+            }
+            0x5B if b[p + 1] == 0x02 => {
+                let (nref, p1) = name_at(b, p + 2);
+                let target = self.def_path(&f.scope, &nref);
+                self.dyn_nodes.insert(target, Node::Other);
+                Ok((Flow::Normal, p1))
+            }
             // DEKLARATIONEN im Methodenrumpf. Legales, verbreitetes AML: eine
             // Methode legt ihre Operationsregion und deren Felder selbst an,
             // typisch fuer gemultiplexte EC-Register. Der Lader sieht sie nie,
@@ -633,6 +658,9 @@ impl<'a> Interp<'a> {
                 self.dyn_field_list(b, &region, p2 + 1, pkg_end);
                 Ok((Flow::Normal, pkg_end))
             }
+            0x8A | 0x8B | 0x8C | 0x8D | 0x8F | 0x13 => Err(String::from(
+                "Create*Field im Methodenrumpf — braucht eine eigene Knotenart \
+                 (Quellpuffer + Bitversatz + Breite); benannt, nicht gebaut")),
             _ => {
                 // Expression statement (Store, method call, op with target...).
                 let (_v, np) = self.eval(f, p)?;
@@ -979,6 +1007,14 @@ impl<'a> Interp<'a> {
                 // DebugObj as a value (rare) — treat as 0.
                 Ok((Value::Int(0), p + 2))
             }
+            // Die Luecke, die nach diesem Abend noch steht, und zwar mit
+            // Namen statt als Zahl: Pufferfelder brauchen eine eigene
+            // Knotenart (Quelle + Bitversatz + Breite), IndexField ein
+            // Index/Daten-Paar. Beides ist ECHTE Semantik, kein Ueberspringen.
+            0x86 => Err(String::from(
+                "IndexField im Methodenrumpf — braucht Index/Daten-Semantik (nicht gebaut)")),
+            0x87 => Err(String::from(
+                "BankField im Methodenrumpf — nicht gebaut")),
             other => Err(format!("unhandled ext eval opcode 5B {:#04x} at body+{:#x}", other, p)),
         }
     }
