@@ -24,7 +24,12 @@ static NPK_CAPS: [u8; 1] = [0x40];
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
     log("[aml] panic");
-    loop {}
+    // TRAPPEN, nicht drehen. `loop {}` verwandelte jeden Absturz in einen
+    // stillen Haenger: die Meldung ging in einen seriellen Port, den ein
+    // Notebook nicht hat, und danach drehte die Faser fuer immer. Ein Trap
+    // faengt der Kernel ab und druckt "forge: aml endete mit unreachable"
+    // ueber kprintln — also auf den Bildschirm.
+    core::arch::wasm32::unreachable()
 }
 
 // Host functions are WASM imports from the `env` module, resolved by the
@@ -38,10 +43,32 @@ unsafe extern "C" {
     fn npk_battery_report(packed: i32);
     fn npk_sleep(ms: i32) -> i32;
     fn npk_log_serial(ptr: i32, len: i32);
+    fn npk_print(ptr: i32, len: i32);
 }
 
+/// In BEIDE Kanaele.
+///
+/// `npk_log_serial` geht nur in den UART und den Fernspiegel — auf einem
+/// Notebook ohne seriellen Port ist das unsichtbar, und haengt die Maschine,
+/// kommt auch der Spiegel nicht mehr heraus. `npk_print` laeuft ueber
+/// `kprint!`, also auf den BILDSCHIRM und in den Bootlog-Mitschnitt (und
+/// damit in `dmesg`). Deshalb beides: welcher Kanal lebt, weiss man erst
+/// hinterher.
 fn log(s: &str) {
-    unsafe { npk_log_serial(s.as_ptr() as i32, s.len() as i32) };
+    unsafe {
+        npk_print(s.as_ptr() as i32, s.len() as i32);
+        npk_log_serial(s.as_ptr() as i32, s.len() as i32);
+    }
+}
+
+/// `log` mit einer Zahl dahinter — ohne Formatierer, der Allokation braucht.
+fn lognum(prefix: &str, mut v: u32) {
+    let mut buf = [0u8; 12];
+    let mut i = buf.len();
+    if v == 0 { i -= 1; buf[i] = b'0'; }
+    while v > 0 { i -= 1; buf[i] = b'0' + (v % 10) as u8; v /= 10; }
+    log(prefix);
+    if let Ok(s) = core::str::from_utf8(&buf[i..]) { log(s); }
 }
 
 // ── bump allocator: reset to zero each tick (re-parse is fully transient) ──
@@ -91,16 +118,26 @@ pub extern "C" fn _start() {
 
     let dsdt_ptr = core::ptr::addr_of_mut!(DSDT) as *mut u8;
     let len = unsafe { npk_acpi_dsdt(dsdt_ptr as i32, DSDT_MAX as i32) };
+    lognum("[aml] DSDT bytes reported: ", len as u32);
     if len <= 0 || len as usize > DSDT_MAX {
-        log("[aml] no DSDT (or too large) — driver idle");
+        lognum("[aml] no DSDT, or larger than the buffer of ", DSDT_MAX as u32);
+        log("[aml] driver idle");
         return;
     }
     let table_len = len as usize;
 
+    // Die Runde zaehlen. Haengt der Interpreter, sagt die letzte gedruckte
+    // Zahl, ob es beim ERSTEN Durchgang passiert oder erst spaeter — und
+    // das sind zwei ganz verschiedene Fehler.
+    let mut round = 0u32;
     loop {
+        round += 1;
+        lognum("[aml] round ", round);
         heap_reset();
         let table = unsafe { core::slice::from_raw_parts(dsdt_ptr as *const u8, table_len) };
+        log("[aml]  parsing DSDT...");
         let packed = decode(table);
+        lognum("[aml]  decode done, packed=", packed as u32);
         unsafe { npk_battery_report(packed) };
         unsafe { npk_sleep(10_000) };
     }
@@ -111,10 +148,12 @@ pub extern "C" fn _start() {
 fn decode(table: &[u8]) -> i32 {
     let ns = match Namespace::load(table) {
         Ok(ns) => ns,
-        Err(_) => return -1,
+        Err(_) => { log("[aml]  Namespace::load failed"); return -1; }
     };
+    log("[aml]  namespace loaded, looking for batteries");
     let mut ec = HostEc;
     for bat in find_batteries(&ns) {
+        log("[aml]  battery found, reading _BST/_BIF (EC access)");
         if let Ok(info) = read_battery(&ns, &mut ec, &bat) {
             if info.present {
                 // bar status: 0=discharging 1=charging 2=full 3=plugged-idle.
