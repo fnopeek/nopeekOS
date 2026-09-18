@@ -97,6 +97,50 @@ pub fn find_device(vendor: u16, device: u16) -> Option<PciDevice> {
 }
 
 /// Find first PCI device matching class + subclass
+/// Print every PCI mass-storage controller (class 01h) with its subclass
+/// and prog-if.
+///
+/// The storage drivers bind by EXACT class, so on a machine where none
+/// matches, the installer halted with "No block device found" and nothing
+/// to go on — and without a disk there is no npkFS, so `dmesg prev` cannot
+/// answer it either. The subclass alone usually names the cause.
+pub fn report_mass_storage() {
+    let mut found = 0u32;
+    for bus in 0u16..=255 {
+        for dev in 0u8..32 {
+            for func in 0u8..8 {
+                let addr = PciAddr { bus: bus as u8, device: dev, function: func };
+                let id = read32(addr, 0x00);
+                if id == 0xFFFF_FFFF || id == 0 {
+                    if func == 0 { break; }
+                    continue;
+                }
+                let class_reg = read32(addr, 0x08);
+                if ((class_reg >> 24) & 0xFF) as u8 == 0x01 {
+                    let sub = ((class_reg >> 16) & 0xFF) as u8;
+                    let pif = ((class_reg >> 8) & 0xFF) as u8;
+                    let note = match sub {
+                        0x08 => "NVMe - this is the one we drive",
+                        0x06 => "AHCI/SATA - no driver in nopeekOS",
+                        0x04 => "RAID - set the BIOS storage mode to AHCI/NVMe",
+                        0x01 => "IDE - no driver in nopeekOS",
+                        _    => "unknown subclass",
+                    };
+                    kprintln!("[npk] pci: storage {:02x}:{:02x}.{} [{:04x}:{:04x}] class 01:{:02x}:{:02x} - {}",
+                        addr.bus, addr.device, addr.function,
+                        (id & 0xFFFF) as u16, ((id >> 16) & 0xFFFF) as u16,
+                        sub, pif, note);
+                    found += 1;
+                }
+                if func == 0 && read8(addr, 0x0E) & 0x80 == 0 { break; }
+            }
+        }
+    }
+    if found == 0 {
+        kprintln!("[npk] pci: no mass-storage controller (class 01h) on the bus at all");
+    }
+}
+
 pub fn find_by_class(class: u8, subclass: u8) -> Option<PciDevice> {
     for bus in 0u16..=255 {
         for dev in 0u8..32 {
