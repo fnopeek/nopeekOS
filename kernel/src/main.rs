@@ -127,9 +127,14 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     // USB keyboard (xHCI) — before any user input is needed
     if xhci::init() {
         vga::show_status(b"USB keyboard online");
-        if xhci::init_mouse() {
-            vga::show_status(b"USB mouse online");
-        }
+    }
+    // Die Maus NICHT geschachtelt: sie haengt am Controller, nicht an der
+    // Tastatur. Steht die Tastatur am i8042 und die Maus an USB, gab die
+    // alte Schachtelung gar keinen Zeiger — `init()` meldet false, weil es
+    // nach einer TASTATUR sucht. `init_mouse` faellt ohne laufenden
+    // Controller von selbst durch.
+    if xhci::init_mouse() {
+        vga::show_status(b"USB mouse online");
     }
 
     // PS/2 touchpad/mouse on the i8042 aux port — only when there's no USB
