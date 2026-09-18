@@ -988,9 +988,20 @@ pub(crate) fn npk_pci_bind(ctx: &mut HostState, vendor: i32, device: i32) -> i32
 }
 
 pub(crate) fn npk_pci_bind_class(ctx: &mut HostState, class: i32, subclass: i32) -> i32 {
+    npk_pci_bind_class_n(ctx, class, subclass, 0)
+}
+
+/// Bind the `index`-th PCI device of a class. Same rights check as
+/// `npk_pci_bind_class`; `index` 0 is exactly the old behaviour.
+///
+/// Damit kann ein Treiber die Geraete seiner Klasse DURCHGEHEN, statt den
+/// ersten nehmen zu muessen. Das Urteil, welches taugt, bleibt bei ihm —
+/// der Kernel kennt keine Lautsprecher.
+pub(crate) fn npk_pci_bind_class_n(ctx: &mut HostState, class: i32, subclass: i32, index: i32) -> i32 {
     let cls = class as u8;
     let sub = subclass as u8;
-    let dev = match pci::find_by_class(cls, sub) {
+    if index < 0 { return -1; }
+    let dev = match pci::find_by_class_n(cls, sub, index as u32) {
         Some(d) => d,
         None => return -1,
     };

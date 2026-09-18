@@ -370,6 +370,12 @@ extern "C" fn f_npk_pci_bind_class(vm: *const u64, class: i32, subclass: i32) ->
     host_core::npk_pci_bind_class(ctx, class, subclass)
 }
 
+extern "C" fn f_npk_pci_bind_class_n(vm: *const u64, class: i32, subclass: i32, index: i32) -> i32 {
+    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    let ctx = unsafe { ctx_of(vm) };
+    host_core::npk_pci_bind_class_n(ctx, class, subclass, index)
+}
+
 extern "C" fn f_npk_pci_read_config(vm: *const u64, offset: i32) -> i32 {
     // SAFETY: `vm` ist der vmctx des rufenden Moduls.
     let ctx = unsafe { ctx_of(vm) };
@@ -960,6 +966,7 @@ pub(crate) fn resolve(module: &str, name: &str) -> Option<u64> {
         "npk_debug_target_port" => f_npk_debug_target_port as *const () as u64,
         "npk_pci_bind" => f_npk_pci_bind as *const () as u64,
         "npk_pci_bind_class" => f_npk_pci_bind_class as *const () as u64,
+        "npk_pci_bind_class_n" => f_npk_pci_bind_class_n as *const () as u64,
         "npk_pci_read_config" => f_npk_pci_read_config as *const () as u64,
         "npk_pci_write_config" => f_npk_pci_write_config as *const () as u64,
         "npk_pci_enable_bus_master" => f_npk_pci_enable_bus_master as *const () as u64,

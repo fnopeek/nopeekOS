@@ -152,7 +152,12 @@ fn trace_to_dac(mmio: i32, cad: u32, pin: u32) -> u32 {
 
 // Generic codec setup: find an output pin + its DAC, configure format/stream,
 // enable the pin, unmute the path. Returns the DAC NID or 0 on failure.
-fn setup_codec(mmio: i32, cad: u32) -> u32 {
+/// Richtet den Codec ein. Zweiter Rueckgabewert: **ist der gewaehlte
+/// Ausgang ANALOG?** (Lautsprecher, Kopfhoerer oder Line-Out). Daran
+/// entscheidet `_start`, ob dieser Controller der richtige ist — eine
+/// HDMI-Audioeinheit hat nur `dev=0x05`, und ein Ton dorthin ist auf
+/// Lautsprechern nicht zu hoeren.
+fn setup_codec(mmio: i32, cad: u32) -> (u32, bool) {
     // Function groups under the root node.
     let root = get_param(mmio, cad, 0, PARAM_SUB_NODE_COUNT);
     let fg_start = (root >> 16) & 0xFF;
@@ -166,7 +171,7 @@ fn setup_codec(mmio: i32, cad: u32) -> u32 {
     }
     if afg == 0 {
         log("[audio_hda] no audio function group\n");
-        return 0;
+        return (0, false);
     }
     loghex("[audio_hda] AFG nid=0x", afg);
     log("\n");
@@ -207,7 +212,7 @@ fn setup_codec(mmio: i32, cad: u32) -> u32 {
     if pin == 0 { pin = pin_fallback; }
     if pin == 0 {
         log("[audio_hda] no output pin\n");
-        return 0;
+        return (0, false);
     }
     let devname = match pin_dev {
         1 => "speaker",
@@ -223,7 +228,7 @@ fn setup_codec(mmio: i32, cad: u32) -> u32 {
     let dac = trace_to_dac(mmio, cad, pin);
     if dac == 0 {
         log("[audio_hda] no DAC behind pin\n");
-        return 0;
+        return (0, false);
     }
     loghex("[audio_hda] DAC nid=0x", dac);
     log("\n");
@@ -240,10 +245,48 @@ fn setup_codec(mmio: i32, cad: u32) -> u32 {
     codec_cmd(mmio, cad, pin, vset_eapd(EAPD_ENABLE));
     unmute_out(mmio, cad, pin);
 
-    dac
+    (dac, pin_pri != 99)
 }
 
 // ── controller bring-up ───────────────────────────────────────────────────
+
+/// Hoechste Zahl an HD-Audio-Controllern, die durchprobiert wird.
+const MAX_HDA: u32 = 4;
+
+/// Die Bindung steht bereits: Controller hochfahren und den Codec
+/// einrichten. Gibt `(mmio, iss, analog)` oder `None`, wenn dieser
+/// Controller nichts taugt — der Rufer geht dann zum naechsten.
+fn bring_up() -> Option<(i32, u32, bool)> {
+    pci_enable_bus_master();
+    // Intel quirk: clear TCSEL (PCI 0x44) traffic-class bits so DMA uses TC0.
+    let tcsel = pci_read_config(0x44);
+    pci_write_config(0x44, tcsel & !0x7);
+
+    let mmio = mmio_map_bar(0, 16);
+    if mmio < 0 { log("[audio_hda] BAR0 map failed\n"); return None; }
+    if !reset_controller(mmio) { log("[audio_hda] controller reset timeout\n"); return None; }
+
+    let gcap = mmio_r16(mmio, GCAP) as u32;
+    let iss = (gcap >> 8) & 0xF; // input streams (output streams follow them)
+    let oss = (gcap >> 12) & 0xF;
+    loghex("[audio_hda] controller up, gcap=0x", gcap);
+    log("\n");
+    if oss == 0 { log("[audio_hda] no output streams\n"); return None; }
+
+    let statests = mmio_r16(mmio, STATESTS) as u32;
+    loghex("[audio_hda] STATESTS=0x", statests);
+    log("\n");
+    if statests == 0 { log("[audio_hda] no codec detected\n"); return None; }
+    let mut cad = 0u32;
+    while cad < 15 && statests & (1 << cad) == 0 { cad += 1; }
+    loghex("[audio_hda] codec addr=0x", cad);
+    log("\n");
+
+    let (dac, analog) = setup_codec(mmio, cad);
+    if dac == 0 { log("[audio_hda] codec setup failed\n"); return None; }
+    Some((mmio, iss, analog))
+}
+
 fn reset_controller(mmio: i32) -> bool {
     // Assert reset (CRST=0), wait, then deassert (CRST=1), wait for run.
     let g = mmio_r32(mmio, GCTL);
@@ -281,62 +324,52 @@ fn reset_stream(mmio: i32, base: u32) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    log("[audio_hda] v0.2.0 — generic HDA driver (mailbox streaming) starting\n");
+    log("[audio_hda] v0.3.0 — generic HDA driver (mailbox streaming) starting\n");
 
     // Bind the HDA controller by PCI class — hardware-independent, no
     // vendor:device hardcode. Intel cAVS controllers report subclass 0x01
     // ("Audio controller") instead of the canonical 0x03 ("HD Audio"); both
     // expose the same HDA register interface, so accept either.
-    let mut bound = pci_bind_class(0x04, 0x03) == 0;
-    if !bound {
-        bound = pci_bind_class(0x04, 0x01) == 0;
+    // Den richtigen Controller SUCHEN, nicht den ersten nehmen.
+    //
+    // Fast jede Maschine hat zwei HD-Audio-Controller: den der GPU (HDMI/DP)
+    // und den der Southbridge (Lautsprecher, Kopfhoerer). Welcher in der
+    // PCI-Reihenfolge zuerst steht, ist Zufall — auf einem Lenovo IdeaPad
+    // stand die HDMI-Einheit vorn, und der Ton lief korrekt erzeugt in einen
+    // DisplayPort, an dem nichts haengt. Sechs Ausgangspins, alle dev=0x05
+    // ("Digital Other Out"), kein einziger analoger.
+    //
+    // Das Urteil gehoert hierher und nicht in den Kernel: der reicht den
+    // n-ten Controller der Klasse heraus, was ein brauchbarer Ausgang ist,
+    // weiss nur dieser Treiber. Intel cAVS meldet Unterklasse 0x01 statt
+    // 0x03 — beide Listen werden durchgegangen.
+    let mut chosen: Option<(i32, u32)> = None;   // (mmio, iss)
+    let mut fb: Option<(u8, u32)> = None;        // erster brauchbarer, aber digital
+    'outer: for &sub in [0x03u8, 0x01u8].iter() {
+        for i in 0..MAX_HDA {
+            if pci_bind_class_n(0x04, sub, i) != 0 { break; }
+            match bring_up() {
+                Some((mmio, iss, true)) => { chosen = Some((mmio, iss)); break 'outer; }
+                Some((_, _, false)) => { if fb.is_none() { fb = Some((sub, i)); } }
+                None => {}
+            }
+        }
     }
-    if !bound {
-        log("[audio_hda] no HDA controller (class 04:03 / 04:01) — exit\n");
-        return;
+    if chosen.is_none() {
+        // Keiner hat einen analogen Ausgang — dann der erste, der ueberhaupt
+        // lief. Eine Maschine, die nur ueber HDMI ausgibt, soll nicht
+        // schlechter dastehen als vorher.
+        if let Some((sub, i)) = fb {
+            log("[audio_hda] no analog output anywhere — using the first controller that worked\n");
+            if pci_bind_class_n(0x04, sub, i) == 0 {
+                if let Some((mmio, iss, _)) = bring_up() { chosen = Some((mmio, iss)); }
+            }
+        }
     }
-    pci_enable_bus_master();
-    // Intel quirk: clear TCSEL (PCI 0x44) traffic-class bits so DMA uses TC0.
-    let tcsel = pci_read_config(0x44);
-    pci_write_config(0x44, tcsel & !0x7);
-
-    let mmio = mmio_map_bar(0, 16);
-    if mmio < 0 {
-        log("[audio_hda] BAR0 map failed — exit\n");
-        return;
-    }
-
-    if !reset_controller(mmio) {
-        log("[audio_hda] controller reset timeout — exit\n");
-        return;
-    }
-    let gcap = mmio_r16(mmio, GCAP) as u32;
-    let iss = (gcap >> 8) & 0xF; // input streams (output streams follow them)
-    let oss = (gcap >> 12) & 0xF;
-    loghex("[audio_hda] controller up, gcap=0x", gcap);
-    log("\n");
-    if oss == 0 {
-        log("[audio_hda] no output streams — exit\n");
-        return;
-    }
-
-    let statests = mmio_r16(mmio, STATESTS) as u32;
-    loghex("[audio_hda] STATESTS=0x", statests);
-    log("\n");
-    if statests == 0 {
-        log("[audio_hda] no codec detected — exit\n");
-        return;
-    }
-    let mut cad = 0u32;
-    while cad < 15 && statests & (1 << cad) == 0 { cad += 1; }
-    loghex("[audio_hda] codec addr=0x", cad);
-    log("\n");
-
-    let dac = setup_codec(mmio, cad);
-    if dac == 0 {
-        log("[audio_hda] codec setup failed — exit\n");
-        return;
-    }
+    let (mmio, iss) = match chosen {
+        Some(c) => c,
+        None => { log("[audio_hda] no usable HDA controller — exit\n"); return; }
+    };
 
     // ── DMA: the playback ring (zeroed by the kernel = silence) + its BDL ──
     let audio = dma_alloc(((RING_BYTES + 4095) / 4096) as u16);

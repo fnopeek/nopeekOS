@@ -10,6 +10,7 @@ unsafe extern "C" {
 
     // PCI
     fn npk_pci_bind_class(class: i32, subclass: i32) -> i32;
+    fn npk_pci_bind_class_n(class: i32, subclass: i32, index: i32) -> i32;
     fn npk_pci_enable_bus_master() -> i32;
     fn npk_pci_read_config(offset: i32) -> i32;
     fn npk_pci_write_config(offset: i32, value: i32) -> i32;
@@ -45,6 +46,12 @@ pub fn log(s: &str) {
 
 pub fn pci_bind_class(class: u8, subclass: u8) -> i32 {
     unsafe { npk_pci_bind_class(class as i32, subclass as i32) }
+}
+/// Den `index`-ten Controller dieser Klasse binden. Eine Maschine hat fast
+/// immer ZWEI HD-Audio-Controller (GPU-HDMI und Southbridge), und welcher
+/// zuerst kommt, ist Zufall der PCI-Reihenfolge.
+pub fn pci_bind_class_n(class: u8, subclass: u8, index: u32) -> i32 {
+    unsafe { npk_pci_bind_class_n(class as i32, subclass as i32, index as i32) }
 }
 pub fn pci_enable_bus_master() -> i32 {
     unsafe { npk_pci_enable_bus_master() }

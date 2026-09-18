@@ -2377,6 +2377,13 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_pci_bind_class_n(class, subclass, index) -> 0=ok, -1=not found, -2=denied
+    linker.func_wrap("env", "npk_pci_bind_class_n",
+        |mut caller: Caller<'_, HostState>, class: i32, subclass: i32, index: i32| -> i32 {
+            host_core::npk_pci_bind_class_n(caller.data_mut(), class, subclass, index)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_pci_read_config(offset) -> u32 value or -1
     linker.func_wrap("env", "npk_pci_read_config",
         |mut caller: Caller<'_, HostState>, offset: i32| -> i32 {
