@@ -71,13 +71,28 @@ const BAND_H: u16 = 24;
 const FONT_DEFAULT: u16 = 15;
 const FONT_MIN: u16 = 9;
 const FONT_MAX: u16 = 18;      // line height at 18 ≈ 22 px < BAND_H
-/// Icon px in the bar. The atlas is native at 16/24; 18 comes down from
-/// 24 through the compositor's box filter.
-const ICON_DEFAULT: u16 = 18;
-const ICON_MIN: u16 = 12;
+/// Icon px in the bar. **Der Atlas fuehrt 16, 24, 32, 48, 64 — sonst
+/// nichts** (aus `release/assets/phosphor.atlas` gelesen, nicht geraten).
+/// Jede andere Zahl holt die naechstgroessere und laesst sie vom Kasten-
+/// filter verkleinern: 18 kam aus dem 24er auf **0,75x**, und eine
+/// Flaechenmittelung eines 1,5 px breiten Phosphor-Strichs auf 0,75 IST
+/// unscharf. Der Kommentar hier nannte den Weg vorher und zog den Schluss
+/// nicht. **16 ist unter 24 das einzige Mass mit 1:1-Blit**, und es macht
+/// den Lautsprecher zugleich kleiner (gemessen 17 px Tinte bei 18, die
+/// anderen Symbole 15 — das Sprechersymbol ist schlicht breiter gebaut).
+const ICON_DEFAULT: u16 = 16;
+const ICON_MIN: u16 = 12;      // nicht im Atlas → wird verkleinert
 const ICON_MAX: u16 = 20;      // 20 + the readout's 4 px padding = BAND_H
-/// Minimum width of a trailing icon cell.
-const CELL_W: u16 = 26;
+/// Minimum width of a trailing icon cell. Sie steht NUR in `tray_cell`,
+/// darum weitet sie die Symbole rechts, ohne das 40-px-Raster der
+/// Desktops (`WS_W` + Zonenabstand) anzufassen.
+const CELL_W: u16 = 30;
+/// Breite der Trennstrich-Zelle. Genau die 16 px, die vorher der leere
+/// Platz hatte: der Abstand, der einen Fehlklick verhindert, bleibt
+/// derselbe — nur steht jetzt ein Strich in seiner MITTE, statt dass er
+/// leer ist. Mit `CELL_W` waere Kamera↔Ausschalter von 28 auf 48 px
+/// gegangen, und das war nicht gefragt.
+const SEP_W: u16 = 16;
 /// Corner radius of those cells. Bleibt klein: ein Tray-Icon ist
 /// quadratisch, und `Pill` machte daraus einen KREIS.
 const CELL_RADIUS: u8 = 6;
@@ -208,7 +223,7 @@ fn default_segments() -> Segments {
     Segments {
         left:   ["workspaces", "title"].iter().map(|s| s.to_string()).collect(),
         center: ["clock"].iter().map(|s| s.to_string()).collect(),
-        right:  ["volume", "battery", "tray", "screenshot", "gap", "power"].iter().map(|s| s.to_string()).collect(),
+        right:  ["volume", "battery", "screenshot", "sep", "power"].iter().map(|s| s.to_string()).collect(),
     }
 }
 
@@ -588,12 +603,33 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
             alloc::vec![readout(icon, icon_mods,
                 alloc::format!("{}%", percent), None)]
         }
-        "tray" => alloc::vec![tray_cell(IconId::Gear, None, Token::OnSurfaceMuted)],
         "screenshot" => alloc::vec![
             tray_cell(IconId::Camera, Some(ActionId(SHOT)), Token::OnSurfaceMuted)
         ],
-        // Fixed-width empty filler — keeps the camera and power icons a
-        // safe distance apart so a click can't land on the wrong one.
+        // Trennstrich vor dem Ausschalter, in SEINER eigenen Zelle —
+        // dieselbe Bauweise wie der Strich zwischen Desktops und Anwendung
+        // (0.9.3). Weil er in der Zelle mittig sitzt, ist der Abstand zur
+        // Kamera und zum Ausschalter von selbst gleich; keine der Zahlen
+        // ist von Hand abgestimmt. Die Zelle haelt zugleich den Abstand,
+        // den vorher der leere Platz hielt: ein Klick auf die Kamera darf
+        // nicht auf dem Ausschalter landen.
+        "sep" => alloc::vec![Widget::Row {
+            children: alloc::vec![
+                Widget::Spacer { flex: 1 },
+                prefab::mark(1, SEP_H, Some(Token::Border)),
+                Widget::Spacer { flex: 1 },
+            ],
+            spacing: 0,
+            align: Align::Center,
+            modifiers: alloc::vec![
+                Modifier::MinWidth(SEP_W),
+                Modifier::MaxWidth(SEP_W),
+                Modifier::MaxHeight(BAND_H),
+            ],
+        }],
+        // Leerer Platz fester Breite. Steht nicht mehr in der Vorgabe —
+        // "sep" hat ihn abgeloest —, bleibt aber, damit eine bestehende
+        // `sys/config/bar` ihn weiter nennen darf.
         "gap" => alloc::vec![Widget::Text {
             content: String::new(),
             style: TextStyle::Body,
