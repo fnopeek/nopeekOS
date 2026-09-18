@@ -695,14 +695,32 @@ fn init_controller(dev: pci::PciDevice) -> bool {
     // Try each connected port until we find a keyboard.
     // Non-keyboard devices are left alone (slot stays allocated, no cleanup).
     // Each attempt uses separate DMA resources to avoid corruption.
+    // `attempt` zaehlt die DMA-Saetze, die BELEGT BLEIBEN — nicht die
+    // angefassten Ports. Vorher war es dasselbe, und daran scheiterte jedes
+    // Notebook: Kamera, Fingerabdruckleser und das Bluetooth des
+    // WLAN-Moduls haengen als INTERNE USB-Geraete am selben Wurzel-Hub. Die
+    // verbrauchten beide Saetze, `attempt >= 2` brach ab, und die Buchse mit
+    // der Tastatur wurde nie angefasst. Gemeldet an einem Lenovo IdeaPad
+    // Flex 5 14ALC7; auf NUC und HP faellt es nicht auf, weil dort weniger
+    // intern haengt.
+    //
+    // Jetzt kostet nur ein Geraet einen Satz, das wir ADRESSIERT LASSEN:
+    // das erste fremde (init_mouse greift seinen Slot wieder auf). Jedes
+    // weitere gibt seinen Slot zurueck, und ein Port, der gar nicht erst zu
+    // einem Slot kommt, kostet nichts.
     let mut attempt = 0u32;
+    let mut switched = false;
     for p in 0..state.max_ports {
         if r32(state.oper, portsc_off(p)) & PORTSC_CCS == 0 { continue; }
         if attempt >= 2 { break; } // only 2 resource sets available
         kprintln!("[npk] xhci: trying port {} (attempt {})", p + 1, attempt);
 
-        // Second attempt: save probe EP0 state, switch to mouse DMA resources
-        if attempt == 1 {
+        // Save probe EP0 state, switch to mouse DMA resources — EINMAL.
+        // Der Satz wird danach fuer jeden weiteren Port wiederverwendet, und
+        // ein zweiter Durchlauf hier wuerde den EP0-Stand des gemerkten
+        // Geraets mit dem gerade laufenden ueberschreiben.
+        if attempt == 1 && !switched {
+            switched = true;
             // Save EP0 state from attempt 0 (the probed non-keyboard device)
             // so init_mouse can reuse its slot without re-enumerating
             state.mouse_ep0_cycle = state.ep0_cycle;
@@ -710,6 +728,8 @@ fn init_controller(dev: pci::PciDevice) -> bool {
             // Switch to fresh mouse resources for keyboard enumeration
             state.device_ctx = state.mouse_device_ctx;
             state.ep0_ring = state.mouse_ep0_ring;
+        }
+        if switched {
             state.ep0_cycle = 1;
             state.ep0_enqueue = 0;
         }
@@ -718,8 +738,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         kprintln!("[npk] xhci: resetting port {}...", p + 1);
         if !reset_port(&state, p) {
             kprintln!("[npk] xhci: port reset failed");
-            attempt += 1;
-            continue;
+            continue;   // kein Slot vergeben — kostet keinen Satz
         }
         state.port_speed = (r32(state.oper, portsc_off(p)) >> 10) & 0xF;
         kprintln!("[npk] xhci: port {} reset ok, speed={}", p + 1, state.port_speed);
@@ -728,7 +747,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         kprintln!("[npk] xhci: enable slot...");
         let slot_id = match cmd_enable_slot(&mut state) {
             Some(s) => s,
-            None => { kprintln!("[npk] xhci: enable slot failed"); attempt += 1; continue; }
+            None => { kprintln!("[npk] xhci: enable slot failed"); continue; }
         };
         state.slot_id = slot_id;
         kprintln!("[npk] xhci: slot {} assigned", slot_id);
@@ -753,7 +772,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         kprintln!("[npk] xhci: addressing device (maxpkt={})...", max_packet);
         if !cmd_address_device(&mut state, p, max_packet) {
             kprintln!("[npk] xhci: address device failed");
-            attempt += 1;
+            cmd_disable_slot(&mut state, slot_id);
             continue;
         }
         kprintln!("[npk] xhci: device addressed");
@@ -762,7 +781,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         kprintln!("[npk] xhci: getting config descriptor...");
         if !usb_get_descriptor(&mut state, DESC_CONFIG, 9) {
             kprintln!("[npk] xhci: get config desc failed");
-            attempt += 1;
+            cmd_disable_slot(&mut state, slot_id);
             continue;
         }
         let total_len = u16::from_le_bytes([
@@ -775,7 +794,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         kprintln!("[npk] xhci: getting full config desc ({} bytes)...", fetch_len);
         if !usb_get_descriptor(&mut state, DESC_CONFIG, fetch_len) {
             kprintln!("[npk] xhci: get full config desc failed");
-            attempt += 1;
+            cmd_disable_slot(&mut state, slot_id);
             continue;
         }
 
@@ -785,10 +804,16 @@ fn init_controller(dev: pci::PciDevice) -> bool {
                 Some(v) => v,
                 None => {
                     kprintln!("[npk] xhci: port {} not a keyboard, skipping", p + 1);
-                    // Save probed device info — init_mouse can reuse this slot
-                    state.probed_port = p;
-                    state.probed_slot = slot_id;
-                    attempt += 1;
+                    if state.probed_slot == 0 {
+                        // Save probed device info — init_mouse can reuse this slot
+                        state.probed_port = p;
+                        state.probed_slot = slot_id;
+                        attempt += 1;
+                    } else {
+                        // Schon eines gemerkt: dieses hier zurueckgeben, damit
+                        // sein Satz fuer den naechsten Port frei bleibt.
+                        cmd_disable_slot(&mut state, slot_id);
+                    }
                     continue;
                 }
             };
@@ -831,6 +856,10 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         return true;
     }
 
+    let connected = (0..state.max_ports)
+        .filter(|&p| r32(state.oper, portsc_off(p)) & PORTSC_CCS != 0)
+        .count();
+    kprintln!("[npk] xhci: no keyboard — {} of {} ports connected", connected, state.max_ports);
     false // No keyboard found on any port
 }
 
