@@ -190,12 +190,30 @@ pub fn init_mouse() -> bool {
     // Touchpad in Wahrheit an I2C-HID haengt, ist das eine falsche
     // Auskunft, und eine falsche ist schlimmer als keine: sie laesst
     // niemanden weitersuchen.
-    let ack = mouse_write(0xFF);
+    // Erst den Aux-Port SELBST pruefen: 0xA9 "test auxiliary interface"
+    // antwortet 0x00 wenn er in Ordnung ist, 0x01/0x02 Taktleitung haengt,
+    // 0x03 Datenleitung haengt, 0x04 kein Aux-Port. Das ist billiger und
+    // eindeutiger, als aus der Antwort auf ein Reset zu raten — und wir
+    // haben den Befehl nie benutzt.
+    unsafe {
+        wait_write();
+        outb(STATUS_PORT, 0xA9);
+    }
+    let aux_test = ps2_read();
+
+    // Reset (0xFF), MIT Wiederholung auf 0xFE ("Resend"). Das schreibt das
+    // PS/2-Protokoll so vor, und wir haben es nie getan — ein einzelnes
+    // 0xFE hat der alte Code sogar als "Geraet vorhanden" gewertet.
+    let mut ack = None;
+    for _ in 0..3 {
+        ack = mouse_write(0xFF);
+        if ack != Some(0xFE) { break; }
+    }
     let bat = ps2_read();   // 0xAA self-test
     let id  = ps2_read();   // device id
     let v = |o: Option<u8>| o.map(|b| b as u16).unwrap_or(0x100);
-    kprintln!("[npk] ps2: aux reset ack={:#x} self-test={:#x} id={:#x} (0x100 = no answer)",
-        v(ack), v(bat), v(id));
+    kprintln!("[npk] ps2: aux test={:#x} reset ack={:#x} self-test={:#x} id={:#x} (0x100 = no answer)",
+        v(aux_test), v(ack), v(bat), v(id));
     // Lenient: der Selbsttest ist das eigentliche Lebenszeichen, und
     // mancher Controller verschluckt das ACK — also reicht 0xAA an
     // irgendeiner der drei Stellen. Fehlt es ganz, ist der Aux-Port leer.
