@@ -1948,6 +1948,13 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_ec_query() -> query number, or -1 when nothing is pending
+    linker.func_wrap("env", "npk_ec_query",
+        |mut caller: Caller<'_, HostState>| -> i32 {
+            host_core::npk_ec_query(caller.data_mut())
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_ec_read(addr) -> i32: read one EC-RAM byte (0..255) or -1.
     linker.func_wrap("env", "npk_ec_read",
         |mut caller: Caller<'_, HostState>, addr: i32| -> i32 {

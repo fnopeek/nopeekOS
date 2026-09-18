@@ -25,6 +25,10 @@ const EC_FLAG_IBF: u8 = 0x02; // input buffer full → controller still busy
 
 const CMD_READ: u8 = 0x80; // RD_EC
 const CMD_WRITE: u8 = 0x81; // WR_EC
+const CMD_QUERY: u8 = 0x84; // QR_EC
+
+/// Statusbit: der EC hat ein EREIGNIS zu melden (ec.c: `ACPI_EC_FLAG_SCI`).
+const EC_FLAG_SCI: u8 = 0x20;
 
 fn udelay(us: u64) {
     let freq = crate::interrupts::tsc_freq();
@@ -64,6 +68,32 @@ pub fn read(addr: u8) -> Option<u8> {
     unsafe { outb(EC_DATA, addr); }
     if !wait_obf_set() { return None; }
     Some(unsafe { inb(EC_DATA) })
+}
+
+/// Eine anstehende EC-ABFRAGE abholen (`QR_EC`), oder `None`.
+///
+/// Der EC meldet Ereignisse — Akku rein/raus, Netzteil, Deckel, Tasten —
+/// indem er Bit 5 seines Statusregisters setzt. Das Betriebssystem holt
+/// daraufhin mit `QR_EC` (0x84) eine Ereignisnummer ab und ruft im AML
+/// `_Q<nr>`. Erst DORT traegt die Firmware ihren Zustand nach; eine DSDT
+/// mit 56 solchen Behandlern (gemessen auf einem Lenovo IdeaPad) haengt
+/// ihre halbe Geraeteverwaltung daran.
+///
+/// Wir haben das nie getan, und deshalb stand dort auf einem Notebook mit
+/// vollem Akku `_STA = 0x0F` — Geraet da, Bit4 frei, also "kein Akku
+/// eingelegt". Die Firmware war nie gefragt worden.
+///
+/// Weg aus Linux `drivers/acpi/acpica`/`ec.c`, Abfragepfad: Statusbit
+/// pruefen, Kommando schreiben, EIN Byte lesen. Null heisst "nichts
+/// anliegend" (ec.c behandelt 0 ausdruecklich als leere Abfrage).
+pub fn query() -> Option<u8> {
+    // SAFETY: ring-0 ISA-Portzugriff auf den EC, wie im ganzen Modul.
+    if unsafe { inb(EC_SC) } & EC_FLAG_SCI == 0 { return None; }
+    if !wait_ibf_clear() { return None; }
+    unsafe { outb(EC_SC, CMD_QUERY); }
+    if !wait_obf_set() { return None; }
+    let q = unsafe { inb(EC_DATA) };
+    if q == 0 { None } else { Some(q) }
 }
 
 /// Read a little-endian 16-bit word from EC RAM (addr = low byte).

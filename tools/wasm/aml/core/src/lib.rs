@@ -36,6 +36,9 @@ pub trait Ec {
     /// sagen, aus WELCHEM Abschnitt ein EC-Zugriff kommt — `_REG`, `_INI`
     /// oder `_BST` sehen im Mitschnitt gleich aus, und das war genau die
     /// Frage, an der wir zuletzt haengen blieben.
+    /// Eine anstehende EC-ABFRAGE abholen (`QR_EC`), oder `None`.
+    /// Vorgabe: es gibt keine — der Pruefstand hat keinen echten EC.
+    fn query(&mut self) -> Option<u8> { None }
     fn note(&mut self, _s: &str) {}
     fn note_num(&mut self, _s: &str, _v: u64) {}
 }

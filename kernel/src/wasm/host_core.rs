@@ -478,6 +478,18 @@ pub(crate) fn npk_battery(ctx: &mut HostState) -> i32 {
     }
 }
 
+/// Eine anstehende EC-Abfrage abholen. -1 = nichts anliegend / kein Recht.
+pub(crate) fn npk_ec_query(ctx: &mut HostState) -> i32 {
+    let cap_id = ctx.cap_id;
+    if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
+        return -1;
+    }
+    match crate::ec::query() {
+        Some(q) => q as i32,
+        None => -1,
+    }
+}
+
 pub(crate) fn npk_ec_read(ctx: &mut HostState, addr: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
