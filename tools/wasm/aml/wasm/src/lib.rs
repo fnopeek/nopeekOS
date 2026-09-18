@@ -249,6 +249,16 @@ fn decode(table: &[u8], verbose: bool) -> i32 {
                 lognum("[aml]  EC reads=", ec.reads);
                 lognum("[aml]  EC failed=", ec.fails);
             }
+            // Ein Akku, dessen Restkapazitaet die Firmware nicht beziffert,
+            // hat keinen Prozentwert — und eine erfundene Zahl in der Bar
+            // ist schlechter als gar keine Zelle.
+            if info.present && info.remaining_mah == 0xFFFF_FFFF {
+                if verbose {
+                    logln("[aml]  battery present, but _BST reports UNKNOWN remaining");
+                    logln("[aml]  -> kein Prozentwert; die Bar zeigt nichts statt etwas Falsches");
+                }
+                return -1;
+            }
             if info.present {
                 // bar status: 0=discharging 1=charging 2=full 3=plugged-idle.
                 let status = if info.state & 0x2 != 0 {

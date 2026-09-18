@@ -219,7 +219,15 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::Bat
     // _BIF / _BIX -> full charge capacity.
     let full = it.read_full_charge(bat)?;
 
-    let percent = if full > 0 {
+    // `remaining == 0xFFFFFFFF` heisst UNBEKANNT (ACPI 6.5 §10.2.2), und
+    // eine unbekannte Restkapazitaet darf keinen Prozentwert ergeben.
+    //
+    // Vorher lief sie durch dieselbe Rechnung wie ein Messwert: 4294967295
+    // mal 100 durch 53530 ist riesig, `.min(100)` macht daraus **100 %** —
+    // eine Zahl, die aussieht wie eine Messung, sich nie aendert und keinen
+    // Ursprung hat. Zum fuenften Mal an einem Abend dasselbe Muster: ein
+    // fehlender Wert, der als plausibler getarnt wird.
+    let percent = if full > 0 && remaining != 0xFFFF_FFFF {
         (((remaining as u64) * 100 + (full as u64) / 2) / full as u64).min(100) as u8
     } else {
         0
