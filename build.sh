@@ -133,10 +133,34 @@ assert_relative_only() {
     fi
 }
 
+# Die beiden ABI-Wege muessen DIESELBEN Host-Calls kennen.
+#
+# Ein Modul laeuft unter wasmi ODER unter forge, und wer einen Namen nur in
+# einer der beiden Tabellen eintraegt, merkt es erst am Geraet — unter dem
+# anderen Motor fehlt die Funktion einfach. Das ist hier schon passiert.
+check_host_abi() {
+    python3 - "$PROJECT_DIR" <<'PYEOF' || { err "host-ABI tables differ"; exit 1; }
+import re, sys
+root = sys.argv[1]
+linker = set(re.findall(r'func_wrap\("env",\s*"(npk_[a-z0-9_]+)"',
+    open(f"{root}/kernel/src/wasm.rs").read()))
+glue = set(re.findall(r'"(npk_[a-z0-9_]+)"\s*=>\s*f_npk',
+    open(f"{root}/kernel/src/wasm/forge_glue.rs").read()))
+only_l, only_g = sorted(linker - glue), sorted(glue - linker)
+if only_l or only_g:
+    print(f"  wasmi only: {only_l}")
+    print(f"  forge only: {only_g}")
+    sys.exit(1)
+print(f"  host ABI: {len(linker)} calls, both engines agree")
+PYEOF
+}
+
 build() {
     log "Building kernel..."
 
     cd "$PROJECT_DIR"
+
+    check_host_abi
 
     # Refresh the embedded initramfs before cargo so include_bytes!
     # picks up any microvm/linux/init/ source change.
