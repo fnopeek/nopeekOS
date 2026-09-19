@@ -8,6 +8,10 @@
 //!
 //! Der ganze ACPI-Teil liegt in [`i2c_hid_core`] und ist host-seitig gegen
 //! eine echte Firmware-Tabelle geprueft (`hp_dsdt_finds_the_touchpad`).
+//!
+//! Gelesen wird nur, wenn der Interrupt-Pin sagt, dass etwas anliegt
+//! ([`Gate`]) — blind zu lesen kostete 1,4 ms Busarbeit je Versuch und
+//! damit einen halben Kern im Leerlauf.
 
 #![no_std]
 
@@ -280,6 +284,20 @@ pub extern "C" fn _start() {
         }
         let mut alive = false;
         for l in live.iter_mut() {
+            // Erst den PIN fragen, dann den Bus anfassen.
+            //
+            // Ein Leseversuch holt `wMaxInputLength` Bytes — bis zu 64,
+            // bei 400 kHz also 1,4 ms auf dem Bus. Der Pin kostet ein
+            // Register.
+            let (poll_now, gate_said_no) = gate_check(l);
+            if !poll_now {
+                // Wer nicht gefragt wurde, kann nicht schweigen — es gilt
+                // der letzte echte Befund.
+                if !l.dead { alive = true; }
+                continue;
+            }
+            let mut got = false;
+            let mut answered = false;
             // Die Leitung LEER holen, nicht einen Bericht je Runde.
             //
             // Ein Bild aus zwei Berichten braucht sonst zwei Runden, und
@@ -289,11 +307,21 @@ pub extern "C" fn _start() {
             // schwatzendes Geraet die Runde nicht besetzt.
             for _ in 0..8 {
                 match poll_live(l, &mut buf) {
-                    Step::Data => { alive = true; }
-                    Step::Empty => { alive = true; break; }
+                    Step::Data => {
+                        answered = true;
+                        got = true;
+                        // Der Pegel steht, bis der Bericht geholt ist —
+                        // ist er weg, liegt nichts mehr an. Die leere
+                        // Nachlese waere sonst eine ganze Uebertragung.
+                        if !gate_asserted_now(l) { break; }
+                    }
+                    Step::Empty => { answered = true; break; }
                     Step::Dead => break,
                 }
             }
+            l.dead = !answered;
+            if answered { alive = true; }
+            gate_verdict(l, gate_said_no, got);
         }
         if !alive {
             logln("[i2c-hid] all devices stopped answering — giving up");
@@ -347,7 +375,9 @@ fn probe_bus(d: &i2c_hid_core::discover::HidDevice) -> Option<Live> {
         Ok(dw) => {
             logln(&alloc::format!("[i2c-hid]   {}", dw.describe()));
             logln("[i2c-hid]   Designware signature OK — the controller is really there");
-            return talk_to_device(&mut bus, &dw, d);
+            let mut live = talk_to_device(&mut bus, &dw, d)?;
+            live.gate = arm_gate(d);
+            return Some(live);
         }
         Err(dw_i2c::Error::NotDesignware(v)) => {
             logln(&alloc::format!(
@@ -456,7 +486,59 @@ struct Live {
     /// `buttons != 0` einspeist, meldet den Druck und nie das Ende — und
     /// der Compositor haelt die Taste fuer immer fuer gedrueckt.
     last_buttons: i32,
+
+    /// Fragen wir den Pin, bevor wir den Bus anfassen?
+    gate: Gate,
+    /// Hat dieses Geraet beim letzten ECHTEN Leseversuch geschwiegen?
+    ///
+    /// Eine uebersprungene Runde ist kein Schweigen — es wurde gar nicht
+    /// gefragt. Ohne diesen Merker haette das Tor die Notbremse
+    /// ausgehebelt: ein toter Bus saehe aus wie ein ruhiges Touchpad.
+    dead: bool,
 }
+
+/// Der Pin, der sagt, ob ueberhaupt ein Bericht anliegt.
+///
+/// **Warum es das gibt.** Ein Leseversuch ist nicht billig: geholt wird
+/// `wMaxInputLength`, bei uns bis zu 64 Bytes (der Puffer deckelt dort),
+/// und bei 400 kHz sind das 1,4 ms, in denen der Kern auf dem Bus wartet.
+/// Zweihundertmal je Sekunde, fuer zwei Geraete. Das ist der Grund, warum
+/// dieses Modul im Leerlauf einen halben Kern verbraucht hat.
+///
+/// Linux liest deshalb NIE blind: `i2c_hid_get_input` haengt dort
+/// ausschliesslich an `i2c_hid_irq`. Wir haben keinen Interrupt, aber der
+/// Pegel steht an, bis der Bericht geholt ist — also laesst er sich
+/// abfragen, und das kostet ein Register statt einer Uebertragung.
+enum Gate {
+    /// Kein Pin, kein bekannter Block, oder er hat sich als falsch
+    /// erwiesen: lesen wie bisher.
+    Blind,
+    /// Der Pin steht und wird gefragt.
+    Pin {
+        handle: i32,
+        reg_off: u32,
+        active_low: bool,
+        /// Wieviele Runden hintereinander sagte er „nichts da"?
+        skipped: u32,
+        /// Wie oft kam trotzdem ein Bericht, als er „nichts da" sagte?
+        contradictions: u32,
+        /// Hat er je RICHTIG einen Bericht angesagt? Steht einmal im Log.
+        proved: bool,
+    },
+}
+
+/// Gegenprobe: so viele uebersprungene Runden, dann wird trotzdem gelesen.
+///
+/// **Schweigen beweist nichts** — ein ruhendes Touchpad sagt nichts, und
+/// ein Pin, der immer „nichts da" meldet, sieht genauso aus. Was etwas
+/// beweist, ist der umgekehrte Fall: ein Bericht, der ankommt, OBWOHL der
+/// Pin nein sagte. Alle 100 ms wird deshalb blind gelesen, und drei solche
+/// Widersprueche hintereinander schalten das Tor dauerhaft ab.
+const GATE_CROSS_CHECK_ROUNDS: u32 = 20;
+/// Hat der Pin einen Bericht einmal richtig ANGESAGT, taugt er — dann
+/// reicht ein Herzschlag je Sekunde, und die Gegenprobe kostet nichts mehr.
+const GATE_CROSS_CHECK_PROVED: u32 = 200;
+const GATE_MAX_CONTRADICTIONS: u32 = 3;
 
 /// Mit dem GERAET reden: Bus einrichten, Adresse antippen, HID-Deskriptor
 /// holen, aufwecken und zuruecksetzen.
@@ -663,6 +745,8 @@ fn talk_to_device(
         track: i2c_hid_core::gesture::Tracker::new(scroll_step, hscroll_step, tap_move),
         have_ref: false, rx: 0, ry: 0,
         last_buttons: 0,
+        gate: Gate::Blind,
+        dead: false,
     })
 }
 
@@ -684,6 +768,169 @@ enum Step {
     Empty,
     /// Der Bus antwortet nicht mehr.
     Dead,
+}
+
+// ── Das Tor am Interrupt-Pin ─────────────────────────────────────────
+//
+// Eine Abbildung je GPIO-Block, nicht je Geraet: beide Geraete dieses
+// Notebooks haengen am selben, und `MAX_MMIO_MAPS` ist vier.
+const MAX_GPIO_MAPS: usize = 2;
+static mut GPIO_MAPS: [(u32, u32, i32); MAX_GPIO_MAPS] = [(0, 0, -1); MAX_GPIO_MAPS];
+static mut GPIO_MAP_N: usize = 0;
+
+fn map_gpio_page(base: u32, pages: u32) -> i32 {
+    // SAFETY: ein Faden, ein Lauf — das Modul hat keine Nebenlaeufigkeit.
+    let maps = unsafe { &mut *core::ptr::addr_of_mut!(GPIO_MAPS) };
+    let n = unsafe { core::ptr::addr_of!(GPIO_MAP_N).read() };
+    for (b, p, h) in maps.iter().take(n) {
+        if *b == base && *p >= pages { return *h; }
+    }
+    let h = unsafe { npk_mmio_map_phys(0, base as i32, pages as i32) };
+    if h >= 0 && n < MAX_GPIO_MAPS {
+        maps[n] = (base, pages, h);
+        unsafe { core::ptr::addr_of_mut!(GPIO_MAP_N).write(n + 1) };
+    }
+    h
+}
+
+/// Das Tor scharf machen — oder begruenden, warum nicht.
+///
+/// Jede Absage steht im Log. Ein Treiber, der still blind pollt, sieht
+/// genauso aus wie einer, der es nicht tut.
+fn arm_gate(d: &i2c_hid_core::discover::HidDevice) -> Gate {
+    use i2c_hid_core::gpio;
+
+    let addr = d.slave_address;
+    let Some(&pin) = d.gpio_pins.first() else {
+        logln(&alloc::format!(
+            "[i2c-hid] {addr:#04x}: no GpioInt in _CRS — reading blind every 5 ms"));
+        return Gate::Blind;
+    };
+    let Some(g) = d.gpio_controller.as_ref() else {
+        logln(&alloc::format!(
+            "[i2c-hid] {addr:#04x}: GpioInt names \"{}\", which is not in the namespace — \
+             reading blind", d.gpio_source));
+        return Gate::Blind;
+    };
+    // Der Registeraufbau ist AMD-eigen. Ein fremder Block an derselben
+    // Stelle fuehrt etwas anderes, und ein geratenes Bit 16 waere
+    // schlimmer als gar keine Abfrage.
+    if !gpio::is_amd_block(&g.ids) {
+        logln(&alloc::format!(
+            "[i2c-hid] {addr:#04x}: GPIO block [{}] is not one whose registers we know — \
+             reading blind", g.ids.join(",")));
+        return Gate::Blind;
+    }
+    // Eine FLANKE laesst sich nicht abfragen: im Augenblick des Hinsehens
+    // ist sie vorbei. Nur ein Pegel steht an, bis der Bericht geholt ist.
+    if !d.gpio_level_triggered() {
+        logln(&alloc::format!(
+            "[i2c-hid] {addr:#04x}: GpioInt is edge-triggered — a level is what can be \
+             polled, reading blind"));
+        return Gate::Blind;
+    }
+    let Some(w) = gpio::pin_window(g.mmio_base, g.mmio_len, pin) else {
+        logln(&alloc::format!(
+            "[i2c-hid] {addr:#04x}: pin {pin} lies outside {:#010x}+{:#x} — reading blind",
+            g.mmio_base, g.mmio_len));
+        return Gate::Blind;
+    };
+    let handle = map_gpio_page(w.map_base, w.pages);
+    if handle < 0 {
+        logln(&alloc::format!(
+            "[i2c-hid] {addr:#04x}: GPIO MMIO {:#010x} not mappable — reading blind",
+            w.map_base));
+        return Gate::Blind;
+    }
+    let active_low = d.gpio_active_low();
+    let v = unsafe { npk_mmio_read32(handle, w.reg_off as i32) } as u32;
+    if v == u32::MAX {
+        logln(&alloc::format!(
+            "[i2c-hid] {addr:#04x}: pin register reads all ones — nobody answered there, \
+             reading blind"));
+        return Gate::Blind;
+    }
+    logln(&alloc::format!(
+        "[i2c-hid] {addr:#04x}: gating on GPIO pin {pin} ({:#010x}+{:#x}, active-{}, \
+         now {}) — the bus is only touched when it says so",
+        w.map_base, w.reg_off,
+        if active_low { "low" } else { "high" },
+        if gpio::asserted(v, active_low) { "asserted" } else { "idle" }));
+    Gate::Pin { handle, reg_off: w.reg_off, active_low, skipped: 0, contradictions: 0, proved: false }
+}
+
+/// Liegt gerade etwas an? Ohne Tor lautet die Antwort immer ja.
+fn gate_asserted_now(l: &mut Live) -> bool {
+    match &l.gate {
+        Gate::Blind => true,
+        Gate::Pin { handle, reg_off, active_low, .. } => {
+            let v = unsafe { npk_mmio_read32(*handle, *reg_off as i32) } as u32;
+            i2c_hid_core::gpio::asserted(v, *active_low)
+        }
+    }
+}
+
+/// Soll diese Runde gelesen werden — und sagte der Pin dabei nein?
+fn gate_check(l: &mut Live) -> (bool, bool) {
+    let Gate::Pin { handle, reg_off, active_low, skipped, proved, .. } = &mut l.gate else {
+        return (true, false);
+    };
+    let v = unsafe { npk_mmio_read32(*handle, *reg_off as i32) } as u32;
+    if i2c_hid_core::gpio::asserted(v, *active_low) {
+        *skipped = 0;
+        return (true, false);
+    }
+    *skipped += 1;
+    let every = if *proved { GATE_CROSS_CHECK_PROVED } else { GATE_CROSS_CHECK_ROUNDS };
+    if *skipped >= every {
+        *skipped = 0;
+        (true, true)
+    } else {
+        (false, true)
+    }
+}
+
+/// Was die Gegenprobe ergeben hat.
+///
+/// Abgeschaltet wird das Tor nur durch einen WIDERSPRUCH — ein Bericht,
+/// der ankam, obwohl der Pin nichts meldete. Dass nichts kommt, beweist
+/// gar nichts: ein unberuehrtes Touchpad schweigt.
+fn gate_verdict(l: &mut Live, gate_said_no: bool, got_data: bool) {
+    if !got_data { return; }
+    let addr = l.addr;
+    let n = match &mut l.gate {
+        Gate::Blind => return,
+        Gate::Pin { contradictions, proved, .. } => {
+            if !gate_said_no {
+                // Eine RICHTIGE Ansage loescht die Widersprueche.
+                //
+                // Ein Widerspruch kann auch ein Wettlauf sein: der Finger
+                // setzt genau in der Gegenprobe auf, Mikrosekunden nachdem
+                // der Pin gelesen wurde. Das passiert einzeln. Ein FALSCHES
+                // Tor dagegen widerspricht bei jeder Gegenprobe und sagt
+                // nie etwas richtig an — nur DAS soll es abschalten.
+                *contradictions = 0;
+                if !*proved {
+                    *proved = true;
+                    logln(&alloc::format!(
+                        "[i2c-hid] {addr:#04x}: the pin announced a report — the gate holds"));
+                }
+                return;
+            }
+            *contradictions += 1;
+            *contradictions
+        }
+    };
+    if n >= GATE_MAX_CONTRADICTIONS {
+        l.gate = Gate::Blind;
+        logln(&alloc::format!(
+            "[i2c-hid] {addr:#04x}: {n} reports in a row arrived while the pin said \
+             nothing — the gate is wrong, back to reading blind"));
+    } else {
+        logln(&alloc::format!(
+            "[i2c-hid] {addr:#04x}: a report arrived while the pin said nothing \
+             ({n}/{GATE_MAX_CONTRADICTIONS})"));
+    }
 }
 
 fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {

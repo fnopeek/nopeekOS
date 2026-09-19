@@ -93,6 +93,29 @@ pub struct HidDevice {
     pub gpio_source: String,
     pub gpio_pins: Vec<u16>,
     pub gpio_controller: Option<GpioController>,
+    /// Die rohen Interrupt-Flaggen des `GpioInt`.
+    ///
+    /// Sie sagen, WAS am Pin „es liegt etwas an" heisst, und ohne sie
+    /// waere die Polaritaet geraten. ACPICA (`acpi_rs_convert_gpio` in
+    /// `rsserial.c`) zerlegt dasselbe Feld: Bit 0 Triggerart, Bits 2:1
+    /// Polaritaet, Bit 3 geteilt, Bit 4 weckfaehig.
+    pub gpio_int_flags: u16,
+}
+
+impl HidDevice {
+    /// Pegel- statt flankengesteuert (ACPI Bit 0, `ACPI_LEVEL_SENSITIVE`).
+    ///
+    /// Nur ein PEGEL laesst sich abfragen: er steht an, bis der Bericht
+    /// geholt ist. Eine Flanke ist im Augenblick des Hinsehens meist
+    /// schon vorbei.
+    pub fn gpio_level_triggered(&self) -> bool {
+        self.gpio_int_flags & 1 == 0
+    }
+
+    /// Aktiv LOW (ACPI Bits 2:1, `ACPI_ACTIVE_LOW` = 1).
+    pub fn gpio_active_low(&self) -> bool {
+        (self.gpio_int_flags >> 1) & 3 == 1
+    }
 }
 
 /// Der GPIO-Block, auf den der `GpioInt` des Geraets zeigt.
@@ -275,6 +298,7 @@ pub fn find(ns: &Namespace, m: &mut Machine) -> Vec<HidDevice> {
         let mut controller_source = String::new();
         let mut gpio_source = String::new();
         let mut gpio_pins = Vec::new();
+        let mut gpio_int_flags = 0u16;
         for r in res {
             match r {
                 // `i2c_acpi_fill_info`: der ERSTE I2cSerialBus zaehlt.
@@ -285,11 +309,12 @@ pub fn find(ns: &Namespace, m: &mut Machine) -> Vec<HidDevice> {
                     bus_speed_hz = connection_speed;
                     controller_source = source;
                 }
-                crs::Resource::Gpio { connection_type, pins, source, .. }
+                crs::Resource::Gpio { connection_type, pins, source, int_flags, .. }
                     if connection_type == crs::GPIO_CONN_INTERRUPT && gpio_pins.is_empty() =>
                 {
                     gpio_pins = pins;
                     gpio_source = source;
+                    gpio_int_flags = int_flags;
                 }
                 _ => {}
             }
@@ -324,6 +349,7 @@ pub fn find(ns: &Namespace, m: &mut Machine) -> Vec<HidDevice> {
             gpio_source,
             gpio_pins,
             gpio_controller,
+            gpio_int_flags,
         });
     }
     out
@@ -408,7 +434,13 @@ pub fn report(d: &HidDevice) -> Vec<String> {
             ),
             None => format!("\"{}\" not found", d.gpio_source),
         };
-        out.push(format!("i2c-hid:   GpioInt pin {:?} on {}", d.gpio_pins, g));
+        out.push(format!(
+            "i2c-hid:   GpioInt pin {:?} {} active-{} on {}",
+            d.gpio_pins,
+            if d.gpio_level_triggered() { "level" } else { "edge" },
+            if d.gpio_active_low() { "low" } else { "high" },
+            g
+        ));
     }
     out
 }
@@ -460,6 +492,18 @@ mod tests {
         let g = d.gpio_controller.as_ref().expect("GPIO controller");
         assert!(g.ids.iter().any(|i| i == "INT34BB"));
         assert_eq!(g.mmio_len, 0x10000);
+
+        // Was am Pin „es liegt etwas an" heisst — aus ECHTER Firmware,
+        // nicht aus der Annahme, dass HID over I2C es immer so macht.
+        // 0x12 = Pegel (Bit 0 = 0), aktiv LOW (Bits 2:1 = 1), weckfaehig.
+        assert_eq!(d.gpio_int_flags, 0x0012);
+        assert!(d.gpio_level_triggered());
+        assert!(d.gpio_active_low());
+
+        // Und dieser Block ist ein INTEL-Block: sein Registeraufbau ist
+        // nicht der, den `gpio.rs` rechnet, und er darf deshalb nicht
+        // angefasst werden.
+        assert!(!crate::gpio::is_amd_block(&g.ids));
     }
 
     /// Dieselbe Tabelle, aber mit aufgeloesten Bedingungen auf Scope-Ebene.
