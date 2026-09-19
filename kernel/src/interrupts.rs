@@ -428,11 +428,15 @@ extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
     // mouse is up) — same model as the USB drain → smooth cursor regardless
     // of the run loop's HLT/spin.
     crate::keyboard::poll_ps2_irq();
-    // Core 0 busy tracking: add one tick worth of busy TSC (Core 0 runs event loop)
-    let freq = TSC_FREQ.load(Ordering::Relaxed);
-    if freq > 0 {
-        crate::smp::per_core::add_busy_tsc(0, freq / 100);
-    }
+    // NO busy-TSC fabrication here.
+    //
+    // This used to add `freq / 100` — one whole tick of cycles — to Core 0
+    // on every tick, with the note "Core 0 runs event loop". That is the
+    // wall clock itself, so Core 0's usage was pinned at 99-100 % by
+    // construction and said nothing about the machine. The shell loop has
+    // executed `hlt` when idle for a long time; the accounting never
+    // followed. Usage now comes from `record_halt` at the HLT sites, like
+    // every other core (`update_core_freq`).
     // Update BSP frequency once per second (for top display)
     if tick % 100 == 0 {
         crate::smp::per_core::update_core_freq(0);
@@ -455,11 +459,15 @@ extern "x86-interrupt" fn apic_timer_handler(_frame: InterruptStackFrame) {
     crate::smp::per_core::record_wake(0, crate::smp::per_core::WAKE_TIMER);
     crate::xhci::poll_events_irq();
     crate::keyboard::poll_ps2_irq();
-    // Core 0 busy tracking: add one tick worth of busy TSC (Core 0 runs event loop)
-    let freq = TSC_FREQ.load(Ordering::Relaxed);
-    if freq > 0 {
-        crate::smp::per_core::add_busy_tsc(0, freq / 100);
-    }
+    // NO busy-TSC fabrication here.
+    //
+    // This used to add `freq / 100` — one whole tick of cycles — to Core 0
+    // on every tick, with the note "Core 0 runs event loop". That is the
+    // wall clock itself, so Core 0's usage was pinned at 99-100 % by
+    // construction and said nothing about the machine. The shell loop has
+    // executed `hlt` when idle for a long time; the accounting never
+    // followed. Usage now comes from `record_halt` at the HLT sites, like
+    // every other core (`update_core_freq`).
     // Update BSP frequency once per second (for top display)
     if tick % 100 == 0 {
         crate::smp::per_core::update_core_freq(0);
