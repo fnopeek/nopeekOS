@@ -629,17 +629,45 @@ impl Compositor {
     /// side-by-side, a tall one stacks. That is why the first split on a
     /// landscape screen goes to the right.
     fn dwindle_parent(&self) -> (Option<WindowId>, bool) {
-        let Some(fid) = self.focused else { return (None, true) };
-        match self.windows.iter().find(|w| {
-            w.id == fid
-                && w.workspace == self.active_workspace
-                && w.state == WindowState::Tiled
-                && w.visible
-                && !w.is_overlay
-        }) {
-            Some(f) => (Some(fid), f.width >= f.height),
-            None => (None, true),
+        // 1. Das fokussierte Fenster — aber nur, wenn es wirklich eine
+        //    Kachel ist.
+        if let Some(fid) = self.focused {
+            if let Some(f) = self.windows.iter().find(|w| w.id == fid && self.is_tile(w)) {
+                return (Some(fid), f.width >= f.height);
+            }
         }
+
+        // 2. Der Fokus liegt auf einem OVERLAY — dem Launcher, einem Menue.
+        //
+        //    Hier stand frueher `return (None, true)`, und das machte das
+        //    neue Fenster zu einer WURZEL. Zwei Wurzeln liegen beide ueber
+        //    dem ganzen Schirm, ihre Mittelpunkte fallen also zusammen;
+        //    `swap_direction` sucht den naechsten Nachbarn geometrisch und
+        //    findet in KEINER Richtung einen. Mod+Shift+Pfeil tat damit
+        //    nichts — bei jeder App, die aus `drun` gestartet wurde. Aus
+        //    dem Dock ging es, weil ein Panel den Fokus gar nicht nimmt und
+        //    die Shell fokussiert bleibt.
+        //
+        //    Ein Overlay ist kein Ort, an den man kachelt. Es ist aber auch
+        //    kein Grund, den Baum zu vergessen: genommen wird die oberste
+        //    echte Kachel, also das Fenster, in dem der Nutzer gerade
+        //    gearbeitet hat, bevor er den Launcher aufzog.
+        for &id in &self.z_order {
+            if let Some(f) = self.windows.iter().find(|w| w.id == id && self.is_tile(w)) {
+                return (Some(id), f.width >= f.height);
+            }
+        }
+        (None, true)
+    }
+
+    /// Kommt dieses Fenster als Elternteil einer neuen Kachel in Frage?
+    fn is_tile(&self, w: &Window) -> bool {
+        w.workspace == self.active_workspace
+            && w.state == WindowState::Tiled
+            && w.visible
+            && !w.is_overlay
+            && !w.is_dock
+            && !w.is_bar
     }
 
     /// Is this window part of the active workspace's tiling right now?
