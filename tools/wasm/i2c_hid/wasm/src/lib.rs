@@ -391,6 +391,9 @@ struct Live {
     switched: Option<u8>,
     /// Wieviele Berichte sind bisher gekommen?
     seen: u32,
+    /// Wieviele Kontaktlagen wurden schon gemeldet? Die ersten paar
+    /// gehoeren ins Log: ob ZWEI Finger ankommen, sagt sonst niemand.
+    touch_logged: u32,
     /// Bezugspunkt fuer die Umrechnung von ORT auf WEG.
     have_ref: bool,
     rx: i32,
@@ -465,6 +468,20 @@ fn talk_to_device(
     }
     let map = report::parse(&rd);
     logln(&alloc::format!("[i2c-hid]   {}", map.describe()));
+
+    // Den Deskriptor ROH ins Log, wenn er klein genug ist.
+    //
+    // Mein Parser findet auf diesem Geraet EINEN Kontaktplatz, wo ein
+    // Praezisions-Touchpad fuenf deklariert. Das laesst sich nicht
+    // erraten — es steht in diesen Bytes, und sie sind die Grundwahrheit,
+    // nicht meine Auslegung davon. 381 Bytes sind 16 Zeilen; die 893 der
+    // Wacom bleiben draussen.
+    if n <= 512 {
+        logln(&alloc::format!("[i2c-hid]   raw report descriptor, {n} bytes:"));
+        for (i, chunk) in rd.chunks(24).enumerate() {
+            logln(&alloc::format!("[i2c-hid]   rd {:03x} {:02x?}", i * 24, chunk));
+        }
+    }
 
     // Wenn das Geraet einen „Device Mode" fuehrt, auf 3 stellen.
     //
@@ -553,6 +570,7 @@ fn talk_to_device(
         unknown_logged: 0,
         switched,
         seen: 0,
+        touch_logged: 0,
         have_ref: false, rx: 0, ry: 0,
         scroll_acc: 0, last_n: 0, last_buttons: 0,
     })
@@ -628,6 +646,12 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> bool {
             }
 
             let n = down.len();
+            if n > 0 && l.touch_logged < 6 {
+                l.touch_logged += 1;
+                let raw = count.as_ref().map(|c| report::extract(data, c)).unwrap_or(-1);
+                logln(&alloc::format!(
+                    "[i2c-hid]   touch: {n} finger(s) down, contact-count field {raw}, first {:?}", &down[..down.len().min(2)]));
+            }
             if n != l.last_n {
                 // Fingerzahl gewechselt: Bezug neu setzen, sonst springt
                 // es beim Aufsetzen oder Abheben des zweiten.
