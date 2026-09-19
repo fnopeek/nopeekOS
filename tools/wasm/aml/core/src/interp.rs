@@ -1330,13 +1330,15 @@ impl<'a> Interp<'a> {
     fn run_deferred(&mut self) {
         let items: Vec<(Path, Vec<u8>)> = self.ns.deferred.clone();
         for (scope, bytes) in items {
-            let f = Frame { scope: scope.clone(), args: Vec::new(), locals: Vec::new(), body: &bytes };
-            let r = if bytes.first() == Some(&0x5B) {
-                self.create_buffer_field(&f, 0)
-            } else {
-                self.create_buffer_field(&f, 0)
+            let f = Frame {
+                scope: scope.clone(), args: Vec::new(),
+                locals: (0..8).map(|_| obj(Value::Uninit)).collect(),
+                body: &bytes,
             };
-            if let Err(e) = r {
+            // Ueber DENSELBEN Verteiler wie ein Methodenrumpf: dort sind
+            // `Create*Field` und `OpRegion` schon richtig behandelt, und
+            // eine zweite Fassung waere eine zweite Semantik.
+            if let Err(e) = self.stmt(&f, 0, bytes.len()) {
                 let name = path_str(&scope);
                 self.ec.note(&format!("[aml]  deferred op in {name} failed: {e}"));
             }

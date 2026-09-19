@@ -224,8 +224,7 @@ fn probe_bus(d: &i2c_hid_core::discover::HidDevice) {
         }
         Err(dw_i2c::Error::NotDesignware(v)) => {
             logln(&alloc::format!(
-                "[i2c-hid]   COMP_TYPE {v:#010x}, expected 0x44570140 — wrong address, \
-                 or the block is powered down"));
+                "[i2c-hid]   COMP_TYPE {v:#010x}, expected 0x44570140 — wrong address,  or the block is powered down"));
         }
         Err(e) => logln(&alloc::format!("[i2c-hid]   controller setup failed: {e:?}")),
     }

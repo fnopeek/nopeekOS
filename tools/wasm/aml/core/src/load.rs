@@ -179,13 +179,29 @@ impl<'a> Loader<'a> {
                 // battery we only need EmbeddedControl regions, whose offset is
                 // a constant; other regions may have computed offsets we just
                 // skip past.
+                let op_start = p - 2; // 0x5B 0x80
                 let (name, p1) = self.name_ref(p);
                 let space = self.b[p1];
-                let (offset, p2) = self.region_arg(scope, p1 + 1)?;
-                let (len, p3) = self.region_arg(scope, p2)?;
+                let (offset, p2, off_lit) = self.region_arg(scope, p1 + 1)?;
+                let (len, p3, len_lit) = self.region_arg(scope, p2)?;
                 p = p3;
                 let t = self.def_path(scope, &name);
                 self.ns.nodes.insert(t, Node::Region { space, offset, len });
+                if !off_lit || !len_lit {
+                    // GERECHNETE Basis. Hier stand frueher schlicht 0, und
+                    // damit lasen alle Felder der Region ab Adresse null.
+                    // Auf Florians IdeaPad sind das `IC0E`/`IC3E` — die
+                    // Freigabebits der I2C-Controller —, und ihre erfundene
+                    // 0 liess das `_STA` beider Controller „abgeschaltet"
+                    // melden, obwohl beide laufen.
+                    //
+                    // ACPICA wertet Adresse und Laenge erst beim AUSFUEHREN
+                    // aus (`acpi_ds_eval_region_operands`). Unser
+                    // Interpreter tut das im Methodenrumpf laengst; hier
+                    // wird die Anweisung dafuer aufgehoben.
+                    let bytes = self.b[op_start..p].to_vec();
+                    self.ns.deferred.push((scope.clone(), bytes));
+                }
             }
             0x81 => {
                 // FieldOp PkgLength NameString FieldFlags FieldList
@@ -416,16 +432,19 @@ impl<'a> Loader<'a> {
 
     /// A RegionOffset/RegionLen TermArg: a constant value if it is one,
     /// otherwise 0 after skipping the (computed) expression.
-    fn region_arg(&mut self, scope: &Path, p: usize) -> Result<(u64, usize), String> {
+    /// Basis oder Laenge einer Operationsregion. Der dritte Rueckgabewert
+    /// sagt, ob es eine ECHTE Zahl war — sonst muss die Anweisung
+    /// nachgeholt werden.
+    fn region_arg(&mut self, scope: &Path, p: usize) -> Result<(u64, usize, bool), String> {
         match self.b[p] {
             0x00 | 0x01 | 0xFF | 0x0A | 0x0B | 0x0C | 0x0E => {
                 let (v, np) = self.data_object(p, self.b.len())?;
                 let n = v.borrow().as_int();
-                Ok((n, np))
+                Ok((n, np, true))
             }
             _ => {
                 let np = self.skip_term_arg(scope, p)?;
-                Ok((0, np))
+                Ok((0, np, false))
             }
         }
     }
