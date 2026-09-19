@@ -254,6 +254,10 @@ pub extern "C" fn _start() {
     // `npk_sleep` gibt dazwischen an den Scheduler ab, kostet also weder
     // Kern noch Treibstoff.
     let mut buf = [0u8; 64];
+    // Drei Minuten Buchfuehrung, dann Ruhe.
+    let mut stat_lines_left = 18u32;
+    let mut next_stat_us = { let t = unsafe { npk_now_us() }; if t < 0 { 0 } else { t as u64 } }
+        + 10_000_000;
     loop {
         // Hat der Umschalter in den Praezisionsmodus gegriffen?
         //
@@ -293,6 +297,7 @@ pub extern "C" fn _start() {
             if !poll_now {
                 // Wer nicht gefragt wurde, kann nicht schweigen — es gilt
                 // der letzte echte Befund.
+                l.skips += 1;
                 if !l.dead { alive = true; }
                 continue;
             }
@@ -305,18 +310,21 @@ pub extern "C" fn _start() {
             // Geraets — ein Bericht geht verloren, sobald es einmal
             // schneller ist als wir. Acht ist der Deckel, damit ein
             // schwatzendes Geraet die Runde nicht besetzt.
-            for _ in 0..8 {
+            for i in 0..8 {
+                l.polls += 1;
                 match poll_live(l, &mut buf) {
                     Step::Data => {
                         answered = true;
                         got = true;
+                        l.datas += 1;
+                        if i == 7 { l.capped += 1; }
                         // Der Pegel steht, bis der Bericht geholt ist —
                         // ist er weg, liegt nichts mehr an. Die leere
                         // Nachlese waere sonst eine ganze Uebertragung.
                         if !gate_asserted_now(l) { break; }
                     }
-                    Step::Empty => { answered = true; break; }
-                    Step::Dead => break,
+                    Step::Empty => { answered = true; l.empties += 1; break; }
+                    Step::Dead => { l.errs += 1; break; }
                 }
             }
             l.dead = !answered;
@@ -326,6 +334,22 @@ pub extern "C" fn _start() {
         if !alive {
             logln("[i2c-hid] all devices stopped answering — giving up");
             return;
+        }
+
+        // Alle zehn Sekunden sagen, was die Runde wirklich gekostet hat —
+        // und dann von selbst aufhoeren. Sonst bleibt ein Treiber, der
+        // einen Kern frisst, eine Ratesache.
+        let now = { let t = unsafe { npk_now_us() }; if t < 0 { 0 } else { t as u64 } };
+        if stat_lines_left > 0 && now >= next_stat_us {
+            next_stat_us = now + 10_000_000;
+            stat_lines_left -= 1;
+            for l in live.iter_mut() {
+                logln(&alloc::format!(
+                    "[i2c-hid] {:#04x}: 10 s — {} read(s): {} data, {} empty, {} FAILED ·                      {} rounds skipped by the pin · {} drain caps",
+                    l.addr, l.polls, l.datas, l.empties, l.errs, l.skips, l.capped));
+                l.polls = 0; l.datas = 0; l.empties = 0;
+                l.errs = 0; l.skips = 0; l.capped = 0;
+            }
         }
         unsafe { npk_sleep(5) };
     }
@@ -489,6 +513,20 @@ struct Live {
 
     /// Fragen wir den Pin, bevor wir den Bus anfassen?
     gate: Gate,
+    // ── Was diese zehn Sekunden gekostet haben ───────────────────
+    //
+    // Ein Treiber, der 90 % eines Kerns frisst und nichts sagt, laesst
+    // nur raten. Diese Zeilen sind die Zahlen dazu, und sie hoeren von
+    // selbst wieder auf.
+    polls: u32,
+    datas: u32,
+    empties: u32,
+    errs: u32,
+    skips: u32,
+    capped: u32,
+    /// Die ersten paar Fehlschlaege MIT Grund. Ein stiller Fehlschlag ist
+    /// der teuerste Zustand ueberhaupt: xfer wartet bis zu einer Sekunde.
+    err_logged: u32,
     /// Hat dieses Geraet beim letzten ECHTEN Leseversuch geschwiegen?
     ///
     /// Eine uebersprungene Runde ist kein Schweigen — es wurde gar nicht
@@ -747,6 +785,8 @@ fn talk_to_device(
         last_buttons: 0,
         gate: Gate::Blind,
         dead: false,
+        polls: 0, datas: 0, empties: 0, errs: 0, skips: 0, capped: 0,
+        err_logged: 0,
     })
 }
 
@@ -938,7 +978,18 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
     let r = match hid::get_input(&mut l.bus, &l.dw, l.addr, &l.desc, buf) {
         Ok(Some(r)) => r,
         Ok(None) => return Step::Empty,
-        Err(_) => return Step::Dead,
+        Err(e) => {
+            // Der Grund wurde bisher WEGGEWORFEN. Ein Timeout und ein
+            // AddrNack sehen von aussen gleich aus und kosten das
+            // Tausendfache voneinander: der eine kehrt sofort zurueck,
+            // der andere haelt xfer bis zu einer Sekunde fest.
+            if l.err_logged < 8 {
+                l.err_logged += 1;
+                logln(&alloc::format!(
+                    "[i2c-hid] {:#04x}: input read failed: {e:?}", l.addr));
+            }
+            return Step::Dead;
+        }
     };
     let (id, data) = if l.uses_ids && !r.is_empty() { (r[0], &r[1..]) } else { (0u8, r) };
 

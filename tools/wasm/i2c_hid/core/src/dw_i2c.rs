@@ -538,9 +538,30 @@ pub fn xfer(bus: &mut dyn Bus, dw: &Dw, addr: u16, msgs: &mut [Msg]) -> Result<(
     xfer_init(bus, dw, addr, &mut x);
 
     // Linux gibt einer Uebertragung 1 s (adapter.timeout = HZ). Dasselbe.
+    //
+    // ABER: Linux WARTET diese Sekunde (`wait_for_completion_timeout`), wir
+    // POLLEN sie. Eine Sekunde `udelay(10)` ist eine Sekunde voller Kern —
+    // fuer eine Uebertragung, bei der gerade gar nichts passiert. Deshalb
+    // wird abgegeben, sobald sie STEHT.
+    //
+    // Die Schwelle ist nicht geraten: `DW_IC_RX_TL` steht auf 0, der Block
+    // meldet also bei JEDEM empfangenen Byte, und ein Byte dauert selbst
+    // bei 100 kHz nur 90 us. Zwei Millisekunden ohne eine einzige Meldung
+    // heisst, dass nichts unterwegs ist. Eine gesunde Uebertragung
+    // erreicht die Schwelle nie.
+    //
+    // **Und ein Ueberlauf ist dabei ausgeschlossen, nicht bloss
+    // unwahrscheinlich:** `xfer_msg` stellt nie mehr Lesebefehle ein, als
+    // der Empfangs-FIFO tief ist (`rx_outstanding >= rx_fifo_depth` bricht
+    // ab). Was waehrend des Schlafens ankommen KANN, passt also immer
+    // hinein — die einzige Wirkung einer verschlafenen Millisekunde ist
+    // Verzoegerung, kein verlorenes Byte.
     let deadline = bus.now_us() + 1_000_000;
+    const STALLED_US: u64 = 2_000;
+    let mut last_progress = bus.now_us();
     loop {
         let stat = read_clear_intrbits(bus, &mut x);
+        if stat != 0 { last_progress = bus.now_us(); }
 
         // `i2c_dw_process_transfer`
         if stat & DW_IC_INTR_TX_ABRT != 0 {
@@ -566,11 +587,18 @@ pub fn xfer(bus: &mut dyn Bus, dw: &Dw, addr: u16, msgs: &mut [Msg]) -> Result<(
             break;
         }
 
-        if bus.now_us() >= deadline {
+        let now = bus.now_us();
+        if now >= deadline {
             disable(bus, dw.bus_freq_hz);
             return Err(Error::Timeout);
         }
-        bus.udelay(10);
+        if now.saturating_sub(last_progress) > STALLED_US {
+            // Steht sie, ABGEBEN statt drehen. `udelay` ab 1 ms gibt an den
+            // Scheduler ab; darunter bliebe es eine Warteschleife.
+            bus.udelay(1000);
+        } else {
+            bus.udelay(10);
+        }
     }
 
     // Linux wartet hier, bis der Block nicht mehr aktiv ist, und schaltet
