@@ -63,6 +63,14 @@ pub struct WasmResult {
 
 /// Hardware driver state for WASM modules that access PCI devices.
 struct HwDriverState {
+    /// Haengt dieser Zustand an einem PCI-Geraet?
+    ///
+    /// Seit es `npk_mmio_map_phys` gibt, kann ein Treiber Hardware fahren,
+    /// die NICHT auf PCI liegt — der Designware-I2C im AMD-FCH zum
+    /// Beispiel. Dann ist `pci_addr` ohne Bedeutung, und jeder Ruf, der
+    /// damit in den Konfigurationsraum greift, muss abgelehnt werden statt
+    /// auf 00:00.0 zu landen.
+    is_pci: bool,
     pci_addr: pci::PciAddr,
     #[allow(dead_code)] // populated for future audit/debug, not yet read
     vendor_id: u16,
@@ -1952,6 +1960,22 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     linker.func_wrap("env", "npk_acpi_mem_read",
         |mut caller: Caller<'_, HostState>, hi: i32, lo: i32| -> i32 {
             host_core::npk_acpi_mem_read(caller.data_mut(), hi, lo)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_mmio_map_phys(hi, lo, pages) -> handle, or -1. Fuer Hardware, die
+    // nicht auf PCI liegt (FCH-I2C: Touchpad). Rechte + RAM-/APIC-Verbot
+    // stehen in host_core.
+    linker.func_wrap("env", "npk_mmio_map_phys",
+        |mut caller: Caller<'_, HostState>, hi: i32, lo: i32, pages: i32| -> i32 {
+            host_core::npk_mmio_map_phys(caller.data_mut(), hi, lo, pages)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_pointer_inject(dx, dy, buttons, scroll) -> 0, oder -1 ohne Recht.
+    linker.func_wrap("env", "npk_pointer_inject",
+        |mut caller: Caller<'_, HostState>, dx: i32, dy: i32, buttons: i32, scroll: i32| -> i32 {
+            host_core::npk_pointer_inject(caller.data_mut(), dx, dy, buttons, scroll)
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 

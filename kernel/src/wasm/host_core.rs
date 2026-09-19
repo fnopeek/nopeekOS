@@ -1032,6 +1032,7 @@ pub(crate) fn npk_pci_bind(ctx: &mut HostState, vendor: i32, device: i32) -> i32
         return -2;
     }
     ctx.hw = Some(HwDriverState {
+        is_pci: true,
         pci_addr: dev.addr,
         vendor_id: vid,
         device_id: did,
@@ -1073,6 +1074,7 @@ pub(crate) fn npk_pci_bind_class_n(ctx: &mut HostState, class: i32, subclass: i3
     kprintln!("[npk] WASM driver bound to {:02x}:{:02x}.{} [{:04x}:{:04x}]",
         a.bus, a.device, a.function, dev.vendor_id, dev.device_id);
     ctx.hw = Some(HwDriverState {
+        is_pci: true,
         pci_addr: dev.addr,
         vendor_id: dev.vendor_id,
         device_id: dev.device_id,
@@ -1086,8 +1088,10 @@ pub(crate) fn npk_pci_bind_class_n(ctx: &mut HostState, class: i32, subclass: i3
 
 pub(crate) fn npk_pci_read_config(ctx: &mut HostState, offset: i32) -> i32 {
     let hw = match ctx.hw.as_ref() {
-        Some(h) => h,
-        None => return -1,
+        Some(h) if h.is_pci => h,
+        // Ohne PCI-Geraet gibt es keine Konfigurationsadresse — hier zu
+        // antworten hiesse, auf 00:00.0 zu greifen.
+        _ => return -1,
     };
     if offset < 0 || offset > 255 { return -1; }
     pci::read32(hw.pci_addr, offset as u8) as i32
@@ -1095,8 +1099,10 @@ pub(crate) fn npk_pci_read_config(ctx: &mut HostState, offset: i32) -> i32 {
 
 pub(crate) fn npk_pci_write_config(ctx: &mut HostState, offset: i32, value: i32) -> i32 {
     let hw = match ctx.hw.as_ref() {
-        Some(h) => h,
-        None => return -1,
+        Some(h) if h.is_pci => h,
+        // Ohne PCI-Geraet gibt es keine Konfigurationsadresse — hier zu
+        // antworten hiesse, auf 00:00.0 zu greifen.
+        _ => return -1,
     };
     if offset < 0 || offset > 255 { return -1; }
     pci::write32(hw.pci_addr, offset as u8, value as u32);
@@ -1105,8 +1111,10 @@ pub(crate) fn npk_pci_write_config(ctx: &mut HostState, offset: i32, value: i32)
 
 pub(crate) fn npk_pci_enable_bus_master(ctx: &mut HostState) -> i32 {
     let hw = match ctx.hw.as_mut() {
-        Some(h) => h,
-        None => return -1,
+        Some(h) if h.is_pci => h,
+        // Ohne PCI-Geraet gibt es keine Konfigurationsadresse — hier zu
+        // antworten hiesse, auf 00:00.0 zu greifen.
+        _ => return -1,
     };
     pci::enable_bus_master(hw.pci_addr);
     // Also enable memory space
@@ -1117,7 +1125,8 @@ pub(crate) fn npk_pci_enable_bus_master(ctx: &mut HostState) -> i32 {
 }
 
 pub(crate) fn npk_irq_register(ctx: &mut HostState, entry: i32) -> i32 {
-    let hw = match ctx.hw.as_ref() { Some(h) => h, None => return -1 };
+    // Ohne PCI-Geraet gibt es keine Konfigurationsadresse.
+    let hw = match ctx.hw.as_ref() { Some(h) if h.is_pci => h, _ => return -1 };
     if !(0..2048).contains(&entry) { return -1; }
     match crate::irq::register(hw.pci_addr, entry as u16) {
         Some(v) => v as i32,
@@ -1142,8 +1151,10 @@ pub(crate) fn npk_irq_wait(_ctx: &mut HostState, vector: i32, since: i64, timeou
 
 pub(crate) fn npk_mmio_map_bar(ctx: &mut HostState, bar_idx: i32, pages: i32) -> i32 {
     let hw = match ctx.hw.as_mut() {
-        Some(h) => h,
-        None => return -1,
+        Some(h) if h.is_pci => h,
+        // Ohne PCI-Geraet gibt es keine Konfigurationsadresse — hier zu
+        // antworten hiesse, auf 00:00.0 zu greifen.
+        _ => return -1,
     };
     if bar_idx < 0 || bar_idx > 5 || pages <= 0 || pages > 256 { return -1; }
     if hw.mmio_maps.len() >= MAX_MMIO_MAPS { return -1; }
@@ -1199,6 +1210,137 @@ pub(crate) fn npk_mmio_map_bar(ctx: &mut HostState, bar_idx: i32, pages: i32) ->
     kprintln!("[npk] WASM driver: MMIO BAR{} mapped at {:#x} — BAR size {:#x}, requested {} pages, mapped {} pages",
         bar_idx, bar_base, bar_size, requested, page_count);
     handle as i32
+}
+
+/// Einen PHYSISCHEN MMIO-Bereich abbilden, der nicht zu einem PCI-Geraet
+/// gehoert.
+///
+/// Gebraucht fuer Hardware, die die Firmware nur ueber ACPI ansagt: auf
+/// AMD-Renoir/Lucienne haengen die I2C-Controller (Touchpad!) an fester
+/// MMIO im FCH und tauchen im PCI-Raum gar nicht auf. `npk_mmio_map_bar`
+/// greift dort nicht.
+///
+/// Die Abbildung landet in derselben Handle-Tabelle wie ein BAR, also
+/// lesen und schreiben die vorhandenen `npk_mmio_read*`/`write*` sie
+/// unveraendert.
+///
+/// **Sicherheits-Checkpoint: kann ein Modul damit aus seinem Sandkasten?**
+/// Ein Modul mit `Rights::HARDWARE` kann heute schon ein PCI-BAR abbilden
+/// und DMA anfordern; der Zuwachs ist begrenzt, aber nicht null. Vier
+/// Schranken:
+///
+///  * **`Rights::HARDWARE`** — dasselbe Recht wie EC-Ports und DSDT.
+///  * **Niemals Arbeitsspeicher.** Geprueft wird JEDE Seite der Spanne,
+///    nicht nur die erste: eine Spanne, die am Rand eines Lochs beginnt,
+///    darf nicht in den RAM hineinreichen. Kennt der Kernel die Karte
+///    nicht, gilt alles als RAM, also alles als tabu.
+///  * **Niemals LAPIC oder IOAPIC.** Eine Schreibung nach
+///    `0xFEE0_0000` ist ein Interrupt an einen beliebigen Vektor auf einem
+///    beliebigen Kern — das ist Codeausfuehrung im Kernel, nicht
+///    Geraetezugriff. Der IOAPIC daneben routet fremde Interrupts.
+///  * **Deckel** auf die Spanne (16 Seiten = 64 KiB) und auf die Zahl der
+///    Abbildungen (`MAX_MMIO_MAPS`), wie bei einem BAR.
+pub(crate) fn npk_mmio_map_phys(ctx: &mut HostState, hi: i32, lo: i32, pages: i32) -> i32 {
+    let cap_id = ctx.cap_id;
+    if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
+        kprintln!("[npk] WASM: npk_mmio_map_phys DENIED — needs HARDWARE");
+        return -1;
+    }
+    if pages <= 0 || pages > 16 { return -1; }
+    let base = ((hi as u32 as u64) << 32) | (lo as u32 as u64);
+    if base == 0 || base & 0xFFF != 0 { return -1; }
+    let n = pages as usize;
+
+    for i in 0..n {
+        let a = match base.checked_add((i * 4096) as u64) { Some(a) => a, None => return -1 };
+        if crate::memory::is_usable_ram(a) {
+            kprintln!("[npk] WASM: npk_mmio_map_phys refused {:#x} — that is RAM", a);
+            return -1;
+        }
+        // LAPIC [0xFEE00000, 0xFEF00000) und IOAPIC [0xFEC00000, 0xFED00000).
+        if (0xFEE0_0000..0xFEF0_0000).contains(&a) || (0xFEC0_0000..0xFED0_0000).contains(&a) {
+            kprintln!("[npk] WASM: npk_mmio_map_phys refused {:#x} — interrupt controller", a);
+            return -1;
+        }
+    }
+
+    // Ein Zustand ohne PCI-Geraet, falls das Modul nie gebunden hat.
+    if ctx.hw.is_none() {
+        ctx.hw = Some(HwDriverState {
+            is_pci: false,
+            pci_addr: pci::PciAddr { bus: 0, device: 0, function: 0 },
+            vendor_id: 0,
+            device_id: 0,
+            mmio_maps: Vec::new(),
+            dma_allocs: Vec::new(),
+            bus_master_enabled: false,
+            registered_as_netdev: false,
+        });
+    }
+    let hw = match ctx.hw.as_mut() { Some(h) => h, None => return -1 };
+    if hw.mmio_maps.len() >= MAX_MMIO_MAPS { return -1; }
+
+    for i in 0..n {
+        let a = base + (i * 4096) as u64;
+        // SAFETY: geprueft — kein RAM, kein Interruptcontroller. NO_CACHE,
+        // weil Geraeteregister nicht zwischengespeichert werden duerfen.
+        if let Err(e) = crate::paging::map_page(
+            a, a,
+            crate::paging::PageFlags::PRESENT
+                | crate::paging::PageFlags::WRITABLE
+                | crate::paging::PageFlags::NO_CACHE,
+        ) {
+            kprintln!("[npk] WASM: npk_mmio_map_phys map {:#x}: {}", a, e);
+            return -1;
+        }
+    }
+    let handle = hw.mmio_maps.len();
+    hw.mmio_maps.push((base, n));
+    kprintln!("[npk] WASM driver: MMIO {:#x}+{:#x} mapped (handle {})",
+        base, n * 4096, handle);
+    handle as i32
+}
+
+/// Eine Zeigerbewegung einspeisen.
+///
+/// Geht in dieselbe Schlange, aus der PS/2 und USB schon kommen
+/// (`xhci::inject_mouse`) — kein zweiter Weg in den Compositor. Damit
+/// stehen Touchpad, Maus und was noch kommt nebeneinander, statt sich zu
+/// verdraengen.
+///
+/// `dx`/`dy` sind hier `i32`, im Ereignis `i8`: eine schnelle Bewegung wird
+/// in Schritte ZERLEGT, statt geklemmt zu werden. Klemmen hiesse, dass der
+/// Zeiger bei schnellen Strichen zurueckbleibt.
+///
+/// Rechte: `Rights::HARDWARE`. **`npk_key_inject` prueft daneben GAR
+/// KEINS** — jedes Modul kann Tastendruecke in die Shell schreiben. Das ist
+/// ein eigener Befund und ausdruecklich nicht die Vorlage hier.
+pub(crate) fn npk_pointer_inject(ctx: &mut HostState, dx: i32, dy: i32, buttons: i32, scroll: i32) -> i32 {
+    let cap_id = ctx.cap_id;
+    if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
+        return -1;
+    }
+    let b = (buttons & 0x07) as u8;
+    let s = scroll.clamp(-127, 127) as i8;
+    let (mut rx, mut ry) = (dx, dy);
+    // Hoechstens ein paar Schritte — eine absurde Zahl darf keine Schleife
+    // aufhalten, und mehr als 16 x 127 Punkte ist keine Handbewegung.
+    for step in 0..16 {
+        let sx = rx.clamp(-127, 127);
+        let sy = ry.clamp(-127, 127);
+        rx -= sx;
+        ry -= sy;
+        let last = rx == 0 && ry == 0;
+        crate::xhci::inject_mouse(crate::xhci::MouseEvent {
+            buttons: b,
+            dx: sx as i8,
+            dy: sy as i8,
+            // Der Rollwert gehoert EINMAL dazu, nicht an jeden Teilschritt.
+            scroll: if step == 0 { s } else { 0 },
+        });
+        if last { break; }
+    }
+    0
 }
 
 pub(crate) fn npk_mmio_read32(ctx: &mut HostState, handle: i32, offset: i32) -> i32 {
