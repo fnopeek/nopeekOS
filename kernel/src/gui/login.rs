@@ -216,6 +216,20 @@ fn draw_status(shadow: *mut u8, info: &FbInfo, l: &Layout, msg: &str, color: u32
 
 /// Run the graphical login screen.
 /// Returns the 256-bit master key on success, or halts on lockout.
+/// HLT once and report it.
+///
+/// Every halt site must go through something that calls `record_halt` —
+/// the per-core usage figure is `100 − halted%`, so an unreported halt
+/// reads as full load (`smp::per_core`).
+fn idle_halt() {
+    let t0 = crate::interrupts::rdtsc();
+    // SAFETY: ring-0 idle with interrupts enabled; the 100 Hz APIC timer
+    // and every input IRQ wake us.
+    unsafe { core::arch::asm!("hlt"); }
+    crate::smp::per_core::record_halt(
+        0, crate::interrupts::rdtsc().saturating_sub(t0));
+}
+
 pub fn run(salt: &[u8; 16]) -> [u8; 32] {
     // Enable GUI mode (kprintln skips framebuffer, only serial)
     // Color scheme already selected in main.rs after csprng::init()
@@ -347,7 +361,7 @@ pub fn run(salt: &[u8; 16]) -> [u8; 32] {
                             let start = crate::interrupts::ticks();
                             while crate::interrupts::ticks().wrapping_sub(start) < 50 {
                                 // SAFETY: ring-0, IRQs enabled, APIC timer ticks us.
-                                unsafe { core::arch::asm!("hlt"); }
+                                idle_halt();
                             }
 
                             // Exit GUI mode, clear screen for loop
@@ -416,7 +430,7 @@ pub fn run(salt: &[u8; 16]) -> [u8; 32] {
                                         layout.screen_w, 24 * layout.scale);
                                 });
                                 // SAFETY: ring-0, IRQs enabled; APIC timer ticks us each 10ms.
-                                unsafe { core::arch::asm!("hlt"); }
+                                idle_halt();
                             }
 
                             // Reset input field
@@ -483,7 +497,7 @@ pub fn run(salt: &[u8; 16]) -> [u8; 32] {
             // cursor blink / clock updates; USB is IRQ-driven (APIC timer drains
             // xHCI into SPSC ring), so keys wake us too.
             // SAFETY: ring-0 idle with interrupts enabled.
-            unsafe { core::arch::asm!("hlt"); }
+            idle_halt();
         }
     }
 }

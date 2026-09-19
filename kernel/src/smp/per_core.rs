@@ -123,8 +123,17 @@ static CORE_HALT_COUNT: [AtomicU64; 256] = {
 };
 
 /// Record one genuine idle halt of `cycles` TSC duration on `core_id`.
-/// Called by every site that executes HLT/MWAIT. This is the only
-/// signal that distinguishes "halted" from "spinning".
+///
+/// **Invariant: EVERY site that executes HLT/MWAIT must call this.** It is
+/// the only signal that distinguishes "halted" from "spinning", and since
+/// 0.377.0 it is also the source of the usage figure (`100 − halted%`) —
+/// so a halt that stays silent does not read as idle, it reads as FULL
+/// LOAD. That is what `core0_idle_tick` did: `cores` said 1 % and `top`
+/// said 100 % at the same moment, because the two idle through different
+/// halt sites and only one of them reported.
+///
+/// A deliberate spin (e.g. draining a moving pointer) must NOT call it —
+/// there the core really is busy.
 pub fn record_halt(core_id: usize, cycles: u64) {
     if core_id >= 256 { return; }
     CORE_HALT_TSC[core_id].fetch_add(cycles, Ordering::Relaxed);

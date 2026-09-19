@@ -1034,8 +1034,11 @@ fn core0_idle_tick() {
     // unchanged. No-op on USB/IRQ-mouse hosts (mouse_active_within stays
     // false → always HLT, as before).
     if crate::keyboard::mouse_active_within(40) {
+        // Deliberate spin — and it MUST NOT be recorded as a halt. The
+        // core really is busy here, and the usage figure should say so.
         return;
     }
+    let t0 = crate::interrupts::rdtsc();
     let rflags: u64;
     // SAFETY: read RFLAGS to preserve the caller's interrupt-enable state.
     unsafe { core::arch::asm!("pushfq; pop {}", out(reg) rflags); }
@@ -1047,6 +1050,14 @@ fn core0_idle_tick() {
         // until after HLT is armed, so the wake is never lost).
         unsafe { core::arch::asm!("sti; hlt; cli"); }
     }
+    // Report it. This was the ONE halt site that stayed silent, and since
+    // 0.377.0 the usage figure is 100 − halted%, so a silent halt reads as
+    // full load. It is the path a FOREGROUND app idles on (`top` running,
+    // a widget focused), while the bare shell idles through
+    // `read_line_with_tab` — which is exactly why `cores` said 1 % and
+    // `top` said 100 % at the same moment.
+    crate::smp::per_core::record_halt(
+        0, crate::interrupts::rdtsc().saturating_sub(t0));
 }
 
 /// Idle auto-GC trigger, called from the shell run-loop's ~1 Hz top.
