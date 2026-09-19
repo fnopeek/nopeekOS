@@ -214,8 +214,6 @@ fn draw_status(shadow: *mut u8, info: &FbInfo, l: &Layout, msg: &str, color: u32
         color, None, l.scale);
 }
 
-/// Run the graphical login screen.
-/// Returns the 256-bit master key on success, or halts on lockout.
 /// HLT once and report it.
 ///
 /// Every halt site must go through something that calls `record_halt` —
@@ -230,6 +228,8 @@ fn idle_halt() {
         0, crate::interrupts::rdtsc().saturating_sub(t0));
 }
 
+/// Run the graphical login screen.
+/// Returns the 256-bit master key on success, or halts on lockout.
 pub fn run(salt: &[u8; 16]) -> [u8; 32] {
     // Enable GUI mode (kprintln skips framebuffer, only serial)
     // Color scheme already selected in main.rs after csprng::init()
