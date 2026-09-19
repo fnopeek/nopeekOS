@@ -498,6 +498,12 @@ extern "C" fn f_npk_dma_alloc(vm: *const u64, pages: i32) -> i32 {
     host_core::npk_dma_alloc(ctx, pages)
 }
 
+extern "C" fn f_npk_dma_alloc_below(vm: *const u64, pages: i32, limit_mb: i32) -> i32 {
+    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    let ctx = unsafe { ctx_of(vm) };
+    host_core::npk_dma_alloc_below(ctx, pages, limit_mb)
+}
+
 extern "C" fn f_npk_dma_phys_addr(vm: *const u64, handle: i32) -> i64 {
     // SAFETY: `vm` ist der vmctx des rufenden Moduls.
     let ctx = unsafe { ctx_of(vm) };
@@ -1031,6 +1037,7 @@ pub(crate) fn resolve(module: &str, name: &str) -> Option<u64> {
         "npk_mmio_read64" => f_npk_mmio_read64 as *const () as u64,
         "npk_mmio_write64" => f_npk_mmio_write64 as *const () as u64,
         "npk_dma_alloc" => f_npk_dma_alloc as *const () as u64,
+        "npk_dma_alloc_below" => f_npk_dma_alloc_below as *const () as u64,
         "npk_dma_phys_addr" => f_npk_dma_phys_addr as *const () as u64,
         "npk_dma_read32" => f_npk_dma_read32 as *const () as u64,
         "npk_dma_write32" => f_npk_dma_write32 as *const () as u64,

@@ -2565,6 +2565,17 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_dma_alloc_below(page_count, limit_mb) -> handle or -1
+    // Der Treiber nennt die Obergrenze selbst. `allocate_contiguous_below`
+    // sucht von oben, also liegt eine 4-GB-Grenze immer direkt unter dem
+    // PCI-MMIO-Loch — auf AMD-Blech genau dort, wo TSEG/DPR jedes Geraet
+    // abweist, waehrend die CPU dort ungestoert liest und schreibt.
+    linker.func_wrap("env", "npk_dma_alloc_below",
+        |mut caller: Caller<'_, HostState>, pages: i32, limit_mb: i32| -> i32 {
+            host_core::npk_dma_alloc_below(caller.data_mut(), pages, limit_mb)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_dma_alloc(page_count) -> handle or -1
     linker.func_wrap("env", "npk_dma_alloc",
         |mut caller: Caller<'_, HostState>, pages: i32| -> i32 {
