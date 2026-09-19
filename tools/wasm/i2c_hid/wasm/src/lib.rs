@@ -144,6 +144,24 @@ pub extern "C" fn _start() {
     m.init();
 
     let found = i2c_hid_core::discover::find(&ns, &mut m);
+    // Sagt ein `_STA` null, noch einmal MIT SPUR: woraus ist die Null
+    // entstanden? Nur fuer die Controller, und nur im Zweifelsfall — die
+    // Spur ist laut.
+    for d in &found {
+        if let Some(c) = &d.controller {
+            if !c.present {
+                logln(&alloc::format!(
+                    "[i2c-hid] why is {} absent? tracing its _STA:",
+                    aml_core::path_str(&c.path)));
+                let mut p = c.path.clone();
+                p.push(aml_core::seg("_STA"));
+                match m.call_traced(&p, alloc::vec::Vec::new()) {
+                    Ok(v) => logln(&alloc::format!("[i2c-hid]   _STA returned {:#x}", v.as_int())),
+                    Err(e) => logln(&alloc::format!("[i2c-hid]   _STA failed: {e}")),
+                }
+            }
+        }
+    }
     if found.is_empty() {
         // Das ist eine ANTWORT, keine Panne: eine Maschine ohne Touchpad
         // (QEMU, die NUC) sagt genau das.
@@ -169,13 +187,26 @@ fn probe_bus(d: &i2c_hid_core::discover::HidDevice) {
     use i2c_hid_core::dw_i2c;
 
     let c = match &d.controller {
-        Some(c) if c.mmio_base != 0 && c.present => c,
-        Some(c) if !c.present => {
-            logln("[i2c-hid]   controller _STA says absent — not touching its registers");
-            return;
-        }
+        Some(c) if c.mmio_base != 0 => c,
         _ => { logln("[i2c-hid]   controller has no fixed MMIO — nothing to map"); return; }
     };
+
+    // `_STA` sperrt hier NICHT mehr, es warnt nur.
+    //
+    // Unser `_STA` wird auf einem Interpreter gerechnet, der zugegebene
+    // Loecher hat: Operationsregionen ohne hinterlegten Speicher liefern
+    // eine erfundene 0, und im Log stehen Lesungen an Adressen wie 0x6 —
+    // das ist ein Fenster, dessen Basis nie berechnet wurde. Eine so
+    // zustande gekommene 0 ueber einen direkten Hardware-Lesezugriff zu
+    // stellen, ist die falsche Reihenfolge der Beweise.
+    //
+    // Die Grenze liegt deshalb zwischen LESEN und SCHREIBEN: die Kennung
+    // holen darf man immer (ein Registerlesen im FCH-Bereich antwortet
+    // schlimmstenfalls mit lauter Einsen), einrichten erst, wenn sie
+    // stimmt.
+    if !c.present {
+        logln("[i2c-hid]   _STA says absent — reading the signature anyway,                writes only if it checks out");
+    }
 
     let pages = ((c.mmio_len as usize).max(4096) + 4095) / 4096;
     let handle = unsafe { npk_mmio_map_phys(0, c.mmio_base as i32, pages.min(16) as i32) };

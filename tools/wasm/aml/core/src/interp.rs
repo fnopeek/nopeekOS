@@ -24,6 +24,13 @@ pub struct Interp<'a> {
     dyn_nodes: BTreeMap<Path, Node>,
     ec: &'a mut dyn Ec,
     depth: usize,
+    /// Jeden gelesenen NAMEN melden.
+    ///
+    /// Gebaut fuer die Frage „warum sagt `_STA` null?" — die Antwort steht
+    /// in den drei, vier Werten, die die Methode dafuer liest, und die
+    /// sieht man sonst nirgends. Ein Interpreter, der eine 0 errechnet,
+    /// muss sagen koennen, WORAUS.
+    trace: bool,
     /// In-memory backing for non-EmbeddedControl regions (SystemIO,
     /// SystemMemory, PCI config, ...). Keyed by (region_space, absolute_byte).
     /// Only EmbeddedControl touches real hardware; the firmware's SMI/init
@@ -97,7 +104,7 @@ fn eisa_id(s: &str) -> u64 {
 }
 
 pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::BatteryInfo> {
-    let mut it = Interp { ns, dyn_nodes: BTreeMap::new(), ec, depth: 0, mem: BTreeMap::new() };
+    let mut it = Interp { ns, dyn_nodes: BTreeMap::new(), ec, depth: 0, trace: false, mem: BTreeMap::new() };
     // Reihenfolge wie ACPICA in `acpi_initialize_objects`: erst die
     // Operationsregionen freigeben (`_REG`), dann die Geraete anlaufen
     // lassen (`_STA`/`_INI`).
@@ -1154,8 +1161,23 @@ impl<'a> Interp<'a> {
                 let v = self.call_path(&path, args)?;
                 Ok((v, q))
             }
-            Kind::Name(v) => Ok((v, p1)),
-            Kind::Field => Ok((self.read_field(&path)?, p1)),
+            Kind::Name(v) => {
+                if self.trace {
+                    let d = describe(&v);
+                    let n = path_str(&path);
+                    self.ec.note(&format!("[aml]   trace {n} = {d}"));
+                }
+                Ok((v, p1))
+            }
+            Kind::Field => {
+                let v = self.read_field(&path)?;
+                if self.trace {
+                    let d = describe(&v);
+                    let n = path_str(&path);
+                    self.ec.note(&format!("[aml]   trace {n} = {d} (field)"));
+                }
+                Ok((v, p1))
+            }
             Kind::BufField(o, off, w) => {
                 let v = o.borrow();
                 let r = match &*v {
@@ -1831,6 +1853,18 @@ fn buf_field_write(b: &mut [u8], off: u64, width: u64, val: &Value) {
     }
 }
 
+/// Einen Wert kurz benennen — fuer die Spur, nicht fuer Menschen mit Zeit.
+fn describe(v: &Value) -> String {
+    match v {
+        Value::Int(n) => format!("{n:#x}"),
+        Value::Str(s) => format!("\"{s}\""),
+        Value::Buffer(b) => format!("Buffer[{}]", b.len()),
+        Value::Package(e) => format!("Package[{}]", e.len()),
+        Value::Uninit => String::from("Uninit"),
+        Value::Ref(_) => String::from("Ref"),
+    }
+}
+
 fn concat_res_template(a: &Value, b: &Value) -> Vec<u8> {
     let empty: Vec<u8> = Vec::new();
     let ab = match a { Value::Buffer(v) => v, _ => &empty };
@@ -1865,7 +1899,7 @@ pub struct Machine<'a> {
 impl<'a> Machine<'a> {
     pub fn new(ns: &'a Namespace, ec: &'a mut dyn Ec) -> Machine<'a> {
         Machine {
-            it: Interp { ns, dyn_nodes: BTreeMap::new(), ec, depth: 0, mem: BTreeMap::new() },
+            it: Interp { ns, dyn_nodes: BTreeMap::new(), ec, depth: 0, trace: false, mem: BTreeMap::new() },
         }
     }
 
@@ -1930,6 +1964,19 @@ impl<'a> Machine<'a> {
     /// als brauchbar meldet.
     pub fn device_present(&mut self, dev: &Path) -> bool {
         self.device_status(dev).map(|f| f & 0x01 != 0 || f & 0x08 != 0).unwrap_or(true)
+    }
+
+    /// Dieselbe Methode noch einmal, aber mit SPUR: jeder gelesene Name
+    /// und sein Wert gehen ins Log.
+    ///
+    /// Gedacht fuer den Fall, dass eine Antwort nicht stimmen kann. Eine
+    /// gerechnete Null sagt nichts; die drei Werte, aus denen sie entstand,
+    /// sagen alles.
+    pub fn call_traced(&mut self, p: &Path, args: Vec<Obj>) -> R<Value> {
+        self.it.trace = true;
+        let r = self.it.call_path(p, args);
+        self.it.trace = false;
+        r
     }
 
     /// Der rohe `_STA`-Wert, oder `None`, wenn es keinen gibt.
