@@ -90,6 +90,49 @@ impl Namespace {
         load::load_table(table)
     }
 
+    /// Bedingte Bloecke auf Scope-Ebene aufloesen.
+    ///
+    /// ACPICA FUEHRT die Termliste einer Tabelle beim Laden aus
+    /// (`acpi_ns_execute_table`); ein `If` dort ist eine Verzweigung, kein
+    /// Text. Unser Lader kann keine Bedingung auswerten und hob sie
+    /// deshalb auf — hier werden sie nachgeholt: Praedikat durch den
+    /// Interpreter, genommener Zweig durch den Lader.
+    ///
+    /// Mehrfach, weil ein genommener Zweig selbst wieder bedingt sein
+    /// kann. Der Deckel ist grosszuegig und endlich.
+    pub fn resolve_conditionals(&mut self, ec: &mut dyn Ec) -> usize {
+        let mut resolved = 0usize;
+        for _ in 0..8 {
+            // Bedingte von den uebrigen aufgehobenen Anweisungen trennen.
+            let mut conds: Vec<(Path, alloc::vec::Vec<u8>)> = Vec::new();
+            let mut rest: Vec<(Path, alloc::vec::Vec<u8>)> = Vec::new();
+            for (scope, bytes) in core::mem::take(&mut self.deferred) {
+                if bytes.first() == Some(&0xA0) { conds.push((scope, bytes)); }
+                else { rest.push((scope, bytes)); }
+            }
+            self.deferred = rest;
+            if conds.is_empty() { break; }
+
+            // Erst ENTSCHEIDEN (nur lesender Zugriff auf den Namespace) …
+            let mut chosen: Vec<(Path, alloc::vec::Vec<u8>, usize, usize)> = Vec::new();
+            {
+                let mut m = Machine::new(self, ec);
+                for (scope, bytes) in &conds {
+                    if let Some((a, b)) = m.taken_branch(scope, bytes) {
+                        chosen.push((scope.clone(), bytes.clone(), a, b));
+                    }
+                }
+            }
+            // … dann LADEN (schreibender Zugriff).
+            for (scope, bytes, a, b) in chosen {
+                if load::load_range(self, &bytes, a, b, scope).is_ok() {
+                    resolved += 1;
+                }
+            }
+        }
+        resolved
+    }
+
     /// Eine weitere Tabelle (SSDT) in denselben Namespace laden.
     pub fn load_more(&mut self, table: &[u8]) -> Result<(), String> {
         load::load_into(self, table)

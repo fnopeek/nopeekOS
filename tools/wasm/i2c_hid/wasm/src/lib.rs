@@ -173,6 +173,13 @@ pub extern "C" fn _start() {
     logln(&alloc::format!("[i2c-hid] namespace: DSDT + {loaded} SSDT(s)"));
 
     let mut ec = FirmwareAccess;
+    // Bedingte Deklarationen auf Scope-Ebene aufloesen — ACPICA FUEHRT die
+    // Termliste beim Laden aus, ein `If` dort ist eine Verzweigung. Daran
+    // haengt auf diesem Geraet `FRTB`, die Basis der Region mit den
+    // Freigabebits der I2C-Controller.
+    let n = ns.resolve_conditionals(&mut ec);
+    logln(&alloc::format!("[i2c-hid] scope-level conditionals resolved: {n}"));
+
     let mut m = Machine::new(&ns, &mut ec);
     m.init();
 

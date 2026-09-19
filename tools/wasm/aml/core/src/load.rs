@@ -13,6 +13,18 @@ pub fn load_table(table: &[u8]) -> Result<Namespace, String> {
     Ok(ns)
 }
 
+/// Einen Ausschnitt roher AML-Bytes als Termliste in einen Scope laden.
+///
+/// Gebraucht fuer den genommenen Zweig eines `If` auf Scope-Ebene: die
+/// BEDINGUNG entscheidet der Interpreter, die DEKLARATIONEN darin gehoeren
+/// hierher.
+pub fn load_range(ns: &mut Namespace, bytes: &[u8], start: usize, end: usize, scope: Path)
+    -> Result<(), String>
+{
+    let mut ld = Loader { b: bytes, ns };
+    ld.term_list(scope, start, end)
+}
+
 /// Eine WEITERE Tabelle in denselben Namespace legen.
 ///
 /// Eine Firmware verteilt ihre Deklarationen ueber die DSDT und beliebig
@@ -146,10 +158,35 @@ impl<'a> Loader<'a> {
                 self.ns.deferred.push((scope.clone(), bytes));
             }
             0xA0 | 0xA1 | 0xA2 => {
-                // If / Else / While at scope level: skip the whole block. (The
-                // battery objects are never conditionally defined.)
+                // If / Else / While auf SCOPE-Ebene: aufheben und beim
+                // Anlauf AUSFUEHREN.
+                //
+                // Hier stand „skip the whole block (the battery objects are
+                // never conditionally defined)". Fuer den Akku stimmte das.
+                // Fuer alles andere ist es ein Loch im Namespace: ACPICA
+                // FUEHRT die Termliste einer Tabelle beim Laden aus
+                // (`acpi_ns_execute_table`), ein `If` ist dort eine
+                // Verzweigung und kein Text. Was darin deklariert wird,
+                // existiert fuer einen Ueberspringer nicht.
+                //
+                // Auf Florians IdeaPad haengt daran `FRTB` — die Basis der
+                // Region mit den Freigabebits der I2C-Controller —, und auf
+                // Intel-Tabellen die `_HID` der I2C-Controller selbst.
+                //
+                // Ein `Else` gehoert zu seinem `If`: beide zusammen
+                // aufheben, sonst entscheidet der Interpreter ohne
+                // Gegenstueck.
+                let op_start = p - 1;
                 let (pkg_end, _p1) = self.pkg_length(p);
                 p = pkg_end;
+                if self.b[op_start] == 0xA0 && p < end && self.b[p] == 0xA1 {
+                    let (else_end, _) = self.pkg_length(p + 1);
+                    p = else_end;
+                }
+                if self.b[op_start] != 0xA1 {
+                    let bytes = self.b[op_start..p].to_vec();
+                    self.ns.deferred.push((scope.clone(), bytes));
+                }
             }
             0x5B => {
                 let ext = self.b[p];

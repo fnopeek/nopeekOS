@@ -43,10 +43,12 @@ fn main() {
     let verbose = std::env::args().any(|a| a == "-v");
     let table = std::fs::read(&path).expect("read table");
 
-    let ns = Namespace::load(&table).expect("load DSDT");
+    let mut ns = Namespace::load(&table).expect("load DSDT");
     println!("namespace: {} nodes", ns.nodes.len());
 
     let mut ec = NoEc { verbose };
+    let n = ns.resolve_conditionals(&mut ec);
+    println!("scope-level conditionals resolved: {n}");
     let mut m = Machine::new(&ns, &mut ec);
     m.init();
 
