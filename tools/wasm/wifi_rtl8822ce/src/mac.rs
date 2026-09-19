@@ -273,7 +273,8 @@ struct Backup {
 /// mac.c `DLFW_RESTORE_REG_NUM`
 const DLFW_RESTORE_REG_NUM: usize = 6;
 
-/// util.c `rtw_restore_reg`
+/// util.c `rtw_restore_reg`. mac.c `download_firmware_reg_restore` ist ein
+/// Einzeiler darum herum und faellt deshalb hier mit hinein.
 fn restore_reg(h: i32, bckp: &[Backup]) {
     for b in bckp {
         match b.len {
@@ -490,8 +491,10 @@ fn download_firmware_to_mem(
             return false;
         }
 
-        // mac.c `send_firmware_pkt`: pg_addr = src >> 7. Der USB-Sonderfall
-        // (+1 Byte, wenn (size + TX_DESC_SIZE) auf 512 aufgeht) gilt nur dort.
+        // mac.c `send_firmware_pkt` -> `send_firmware_pkt_rsvd_page`:
+        // pg_addr = src >> 7. Der USB-Sonderfall (+1 Byte, wenn
+        // (size + TX_DESC_SIZE) auf 512 aufgeht) gilt nur dort, und
+        // `kmemdup` daneben ist Linux-Speicherverwaltung.
         if !write_data_rsvd_page(h, trx, stage, (src >> 7) as u16,
                                  &data[from..to], 0, band) {
             host::print("[rtl8822ce] rsvd page fehlgeschlagen bei Offset ");
