@@ -39,6 +39,7 @@ unsafe extern "C" {
     fn npk_mmio_write32(handle: i32, offset: i32, value: i32) -> i32;
     fn npk_now_us() -> i64;
     fn npk_acpi_mem_read(hi: i32, lo: i32) -> i32;
+    fn npk_acpi_table(sig: i32, index: i32, buf_ptr: i32, buf_max: i32) -> i32;
 }
 
 /// Der Hardwarezugang des Bustreibers.
@@ -94,8 +95,15 @@ unsafe impl core::alloc::GlobalAlloc for Bump {
 #[global_allocator]
 static ALLOC: Bump = Bump;
 
+/// "SSDT", wie die vier Zeichen im Speicher stehen (little-endian).
+const SIG_SSDT: i32 = i32::from_le_bytes(*b"SSDT");
+
 const DSDT_MAX: usize = 512 * 1024;
 static mut DSDT: [u8; DSDT_MAX] = [0; DSDT_MAX];
+/// Platz fuer EINE SSDT auf einmal — der Namespace kopiert heraus, was er
+/// braucht, also darf der Puffer danach wieder benutzt werden.
+const SSDT_MAX: usize = 256 * 1024;
+static mut SSDT: [u8; SSDT_MAX] = [0; SSDT_MAX];
 
 /// Der Firmware-Zugang des Interpreters.
 ///
@@ -134,10 +142,35 @@ pub extern "C" fn _start() {
     // SAFETY: der Kernel hat genau `len` Bytes hineingeschrieben.
     let table = unsafe { core::slice::from_raw_parts(dsdt_ptr as *const u8, len as usize) };
 
-    let ns = match Namespace::load(table) {
+    let mut ns = match Namespace::load(table) {
         Ok(ns) => ns,
         Err(_) => { logln("[i2c-hid] DSDT did not parse"); return; }
     };
+
+    // Und JEDE SSDT dazu.
+    //
+    // Eine Firmware verteilt ihre Deklarationen ueber die DSDT und
+    // beliebig viele SSDTs; sie bilden EINEN Namespace, und Linux laedt
+    // sie alle. Wer nur die DSDT liest, dem fehlen Namen, die woanders
+    // stehen — hier die Basis der Region mit den Freigabebits der
+    // I2C-Controller.
+    let ssdt_ptr = core::ptr::addr_of_mut!(SSDT) as *mut u8;
+    let mut loaded = 0u32;
+    for i in 0..32 {
+        let n = unsafe { npk_acpi_table(SIG_SSDT, i, ssdt_ptr as i32, SSDT_MAX as i32) };
+        if n <= 0 { break; }
+        if n as usize > SSDT_MAX {
+            logln(&alloc::format!("[i2c-hid] SSDT {i} is {n} bytes — bigger than our buffer"));
+            continue;
+        }
+        // SAFETY: der Kernel hat genau `n` Bytes hineingeschrieben.
+        let t = unsafe { core::slice::from_raw_parts(ssdt_ptr as *const u8, n as usize) };
+        match ns.load_more(t) {
+            Ok(()) => loaded += 1,
+            Err(e) => logln(&alloc::format!("[i2c-hid] SSDT {i} did not parse: {e}")),
+        }
+    }
+    logln(&alloc::format!("[i2c-hid] namespace: DSDT + {loaded} SSDT(s)"));
 
     let mut ec = FirmwareAccess;
     let mut m = Machine::new(&ns, &mut ec);

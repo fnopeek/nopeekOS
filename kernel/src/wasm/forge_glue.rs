@@ -673,6 +673,12 @@ extern "C" fn f_npk_acpi_dsdt(vm: *const u64, buf_ptr: i32, buf_max: i32) -> i32
     host_core::npk_acpi_dsdt(mem, ctx, buf_ptr, buf_max)
 }
 
+extern "C" fn f_npk_acpi_table(vm: *const u64, sig: i32, index: i32, buf_ptr: i32, buf_max: i32) -> i32 {
+    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    let (mem, ctx) = unsafe { parts(vm) };
+    host_core::npk_acpi_table(mem, ctx, sig, index, buf_ptr, buf_max)
+}
+
 extern "C" fn f_npk_audio_submit(vm: *const u64, slot: i32, ptr: i32, len: i32) -> i32 {
     // SAFETY: `vm` ist der vmctx des rufenden Moduls.
     let (mem, ctx) = unsafe { parts(vm) };
@@ -1039,6 +1045,7 @@ pub(crate) fn resolve(module: &str, name: &str) -> Option<u64> {
         "npk_bar_state" => f_npk_bar_state as *const () as u64,
         "npk_window_titles" => f_npk_window_titles as *const () as u64,
         "npk_acpi_dsdt" => f_npk_acpi_dsdt as *const () as u64,
+        "npk_acpi_table" => f_npk_acpi_table as *const () as u64,
         "npk_audio_submit" => f_npk_audio_submit as *const () as u64,
         "npk_audio_buffered" => f_npk_audio_buffered as *const () as u64,
         "npk_audio_poll_mix" => f_npk_audio_poll_mix as *const () as u64,

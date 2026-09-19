@@ -7,14 +7,28 @@ use crate::{Namespace, Node};
 use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
 
 pub fn load_table(table: &[u8]) -> Result<Namespace, String> {
+    let mut ns = Namespace { nodes: BTreeMap::new(), deferred: Vec::new() };
+    predefine_root(&mut ns);
+    load_into(&mut ns, table)?;
+    Ok(ns)
+}
+
+/// Eine WEITERE Tabelle in denselben Namespace legen.
+///
+/// Eine Firmware verteilt ihre Deklarationen ueber die DSDT und beliebig
+/// viele SSDTs, und sie bilden EINEN Namespace — Linux laedt sie
+/// entsprechend alle (`acpi_tb_load_namespace`). Wer nur die DSDT liest,
+/// dem fehlen Namen, die woanders stehen: auf einem Lenovo IdeaPad die
+/// Basis der Region mit den Freigabebits der I2C-Controller (`FRTB`), und
+/// ohne sie meldet `_STA` beider Controller „abgeschaltet".
+pub fn load_into(ns: &mut Namespace, table: &[u8]) -> Result<(), String> {
     if table.len() < 36 || &table[0..4] != b"DSDT" && &table[0..4] != b"SSDT" {
         return Err(format!("not a DSDT/SSDT: {:?}", &table[0..4.min(table.len())]));
     }
-    let mut ns = Namespace { nodes: BTreeMap::new(), deferred: Vec::new() };
-    predefine_root(&mut ns);
-    let mut ld = Loader { b: table, ns: &mut ns };
-    ld.term_list(Vec::new(), 36, table.len())?;
-    Ok(ns)
+    let len = u32::from_le_bytes([table[4], table[5], table[6], table[7]]) as usize;
+    let end = if len >= 36 && len <= table.len() { len } else { table.len() };
+    let mut ld = Loader { b: table, ns };
+    ld.term_list(Vec::new(), 36, end)
 }
 
 /// Die Namen, die das BETRIEBSSYSTEM mitbringt — nicht die Tabelle.

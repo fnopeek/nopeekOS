@@ -1963,6 +1963,17 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_acpi_table(sig, index, buf_ptr, buf_max) -> len. Die n-te Tabelle
+    // mit dieser Signatur; `sig` sind die vier Zeichen little-endian.
+    linker.func_wrap("env", "npk_acpi_table",
+        |mut caller: Caller<'_, HostState>, sig: i32, index: i32, buf_ptr: i32, buf_max: i32| -> i32 {
+            let Some(m) = caller.get_export("memory").and_then(|e| e.into_memory())
+                else { return -1 };
+            let (mem, ctx) = m.data_and_store_mut(&mut caller);
+            host_core::npk_acpi_table(mem, ctx, sig, index, buf_ptr, buf_max)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_mmio_map_phys(hi, lo, pages) -> handle, or -1. Fuer Hardware, die
     // nicht auf PCI liegt (FCH-I2C: Touchpad). Rechte + RAM-/APIC-Verbot
     // stehen in host_core.
