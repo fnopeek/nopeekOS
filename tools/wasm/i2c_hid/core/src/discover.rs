@@ -478,8 +478,9 @@ mod tests {
         let table = include_bytes!("../../../aml/dev/DSDT.aml");
         let mut ns = Namespace::load(table).expect("load");
         let mut ec = NoEc;
-        let n = ns.resolve_conditionals(&mut ec);
-        assert!(n > 0, "die Tabelle hat bedingte Deklarationen auf Scope-Ebene");
+        let (seen, taken) = ns.resolve_conditionals(&mut ec);
+        assert!(seen > 0, "die Tabelle hat bedingte Deklarationen auf Scope-Ebene");
+        assert!(taken > 0, "und mindestens eine gilt");
 
         let mut m = Machine::new(&ns, &mut ec);
         m.init();

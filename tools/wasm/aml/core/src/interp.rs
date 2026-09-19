@@ -1327,8 +1327,17 @@ impl<'a> Interp<'a> {
     /// ACPICA fuehrt die Termliste beim Laden aus; wir holen genau die
     /// Anweisungen nach, die dafuer einen Interpreter brauchen. Vor `_REG`
     /// und `_INI`, weil die sie benutzen.
-    fn run_deferred(&mut self) {
+    fn run_deferred(&mut self) -> Vec<(Path, Vec<u8>)> {
         let items: Vec<(Path, Vec<u8>)> = self.ns.deferred.clone();
+        self.run_deferred_items(items, true)
+    }
+
+    /// Eine Liste aufgehobener Anweisungen ausfuehren; zurueck kommt, was
+    /// NICHT ging.
+    fn run_deferred_items(&mut self, items: Vec<(Path, Vec<u8>)>, loud: bool)
+        -> Vec<(Path, Vec<u8>)>
+    {
+        let mut failed = Vec::new();
         for (scope, bytes) in items {
             let f = Frame {
                 scope: scope.clone(), args: Vec::new(),
@@ -1339,10 +1348,34 @@ impl<'a> Interp<'a> {
             // `Create*Field` und `OpRegion` schon richtig behandelt, und
             // eine zweite Fassung waere eine zweite Semantik.
             if let Err(e) = self.stmt(&f, 0, bytes.len()) {
-                let name = path_str(&scope);
-                self.ec.note(&format!("[aml]  deferred op in {name} failed: {e}"));
+                if loud {
+                    let name = path_str(&scope);
+                    self.ec.note(&format!("[aml]  deferred op in {name} failed: {e}"));
+                    // „Unaufloesbar" ist eine halbe Auskunft. Die andere
+                    // Haelfte ist, ob es den Namen ueberhaupt gibt — das
+                    // trennt „steht woanders im Baum" von „steht in keiner
+                    // Tabelle, die wir sehen", und nur das eine davon ist
+                    // ein Ladefehler.
+                    if let Some(want) = e.strip_prefix("unresolved name ") {
+                        let want = want.split(' ').next().unwrap_or("");
+                        let seg = crate::value::seg(want);
+                        let mut hits = 0usize;
+                        for p in self.ns.nodes.keys() {
+                            if p.last() == Some(&seg) && hits < 3 {
+                                self.ec.note(&format!("[aml]    but {want} exists at {}", path_str(p)));
+                                hits += 1;
+                            }
+                        }
+                        if hits == 0 {
+                            self.ec.note(&format!(
+                                "[aml]    {want} is in NO table we loaded"));
+                        }
+                    }
+                }
+                failed.push((scope, bytes));
             }
         }
+        failed
     }
 
     fn read_place(&mut self, pl: &Place) -> R<Value> {
@@ -1945,12 +1978,28 @@ impl<'a> Machine<'a> {
     /// Regionen noch nicht freigegeben sind, mit ihren Anfangswerten.
     pub fn init(&mut self) {
         self.it.ec.note("[aml]  phase deferred table ops");
-        self.it.run_deferred();
+        let failed = self.it.run_deferred();
         self.it.ec.note("[aml]  phase _REG");
         let _ = self.it.register_ec_regions();
         self.it.ec.note("[aml]  phase _INI");
         let n = self.it.run_ini_methods();
         self.it.ec.note_num("[aml]  _INI methods run: ", n as u64);
+
+        // Was beim ersten Mal nicht ging, NOCH EINMAL.
+        //
+        // ACPICA wertet die Operanden einer Operationsregion erst beim
+        // ERSTEN ZUGRIFF aus (`acpi_ds_eval_region_operands`), also
+        // fruehestens nach `_REG` und `_INI`. Wir holen sie beim Anlauf
+        // nach — und sind damit zu frueh, wenn die Basis ein Name ist, den
+        // erst `_INI` setzt. Ein zweiter Versuch danach kostet nichts und
+        // deckt genau diesen Fall.
+        if !failed.is_empty() {
+            let n = failed.len();
+            let still = self.it.run_deferred_items(failed, true);
+            self.it.ec.note(&format!(
+                "[aml]  deferred retry after _INI: {} of {n} now ok",
+                n - still.len()));
+        }
     }
 
     pub fn has(&self, p: &Path) -> bool {

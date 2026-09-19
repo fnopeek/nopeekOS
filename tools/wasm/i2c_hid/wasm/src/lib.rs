@@ -97,6 +97,10 @@ static ALLOC: Bump = Bump;
 
 /// "SSDT", wie die vier Zeichen im Speicher stehen (little-endian).
 const SIG_SSDT: i32 = i32::from_le_bytes(*b"SSDT");
+/// ACPICA laedt ausser SSDT auch PSDT und OSDT in den Namespace
+/// (`acpi_tb_load_namespace`). Selten, aber es kostet nichts.
+const SIG_PSDT: i32 = i32::from_le_bytes(*b"PSDT");
+const SIG_OSDT: i32 = i32::from_le_bytes(*b"OSDT");
 
 const DSDT_MAX: usize = 512 * 1024;
 static mut DSDT: [u8; DSDT_MAX] = [0; DSDT_MAX];
@@ -156,9 +160,11 @@ pub extern "C" fn _start() {
     // I2C-Controller.
     let ssdt_ptr = core::ptr::addr_of_mut!(SSDT) as *mut u8;
     let mut loaded = 0u32;
+    for (sig, name) in [(SIG_SSDT, "SSDT"), (SIG_PSDT, "PSDT"), (SIG_OSDT, "OSDT")] {
     for i in 0..32 {
-        let n = unsafe { npk_acpi_table(SIG_SSDT, i, ssdt_ptr as i32, SSDT_MAX as i32) };
+        let n = unsafe { npk_acpi_table(sig, i, ssdt_ptr as i32, SSDT_MAX as i32) };
         if n <= 0 { break; }
+        let _ = name;
         if n as usize > SSDT_MAX {
             logln(&alloc::format!("[i2c-hid] SSDT {i} is {n} bytes — bigger than our buffer"));
             continue;
@@ -167,18 +173,20 @@ pub extern "C" fn _start() {
         let t = unsafe { core::slice::from_raw_parts(ssdt_ptr as *const u8, n as usize) };
         match ns.load_more(t) {
             Ok(()) => loaded += 1,
-            Err(e) => logln(&alloc::format!("[i2c-hid] SSDT {i} did not parse: {e}")),
+            Err(e) => logln(&alloc::format!("[i2c-hid] {name} {i} did not parse: {e}")),
         }
     }
-    logln(&alloc::format!("[i2c-hid] namespace: DSDT + {loaded} SSDT(s)"));
+    }
+    logln(&alloc::format!("[i2c-hid] namespace: DSDT + {loaded} more table(s)"));
 
     let mut ec = FirmwareAccess;
     // Bedingte Deklarationen auf Scope-Ebene aufloesen — ACPICA FUEHRT die
     // Termliste beim Laden aus, ein `If` dort ist eine Verzweigung. Daran
     // haengt auf diesem Geraet `FRTB`, die Basis der Region mit den
     // Freigabebits der I2C-Controller.
-    let n = ns.resolve_conditionals(&mut ec);
-    logln(&alloc::format!("[i2c-hid] scope-level conditionals resolved: {n}"));
+    let (seen, taken) = ns.resolve_conditionals(&mut ec);
+    logln(&alloc::format!(
+        "[i2c-hid] scope-level conditionals: {seen} seen, {taken} taken"));
 
     let mut m = Machine::new(&ns, &mut ec);
     m.init();

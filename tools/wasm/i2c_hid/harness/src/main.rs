@@ -47,8 +47,8 @@ fn main() {
     println!("namespace: {} nodes", ns.nodes.len());
 
     let mut ec = NoEc { verbose };
-    let n = ns.resolve_conditionals(&mut ec);
-    println!("scope-level conditionals resolved: {n}");
+    let (seen, taken) = ns.resolve_conditionals(&mut ec);
+    println!("scope-level conditionals: {seen} seen, {taken} taken");
     let mut m = Machine::new(&ns, &mut ec);
     m.init();
 

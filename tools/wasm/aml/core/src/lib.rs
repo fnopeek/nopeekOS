@@ -90,6 +90,16 @@ impl Namespace {
         load::load_table(table)
     }
 
+    /// Jeden Knoten, dessen LETZTES Segment so heisst — egal wo.
+    ///
+    /// Die Frage „gibt es den Namen ueberhaupt?" ist bei einem
+    /// „unresolved name" die einzige, die weiterhilft: sie trennt „steht
+    /// woanders im Baum" von „steht in keiner Tabelle, die wir sehen".
+    pub fn find_by_segment(&self, name: &str) -> alloc::vec::Vec<Path> {
+        let want = value::seg(name);
+        self.nodes.keys().filter(|p| p.last() == Some(&want)).cloned().collect()
+    }
+
     /// Bedingte Bloecke auf Scope-Ebene aufloesen.
     ///
     /// ACPICA FUEHRT die Termliste einer Tabelle beim Laden aus
@@ -100,7 +110,12 @@ impl Namespace {
     ///
     /// Mehrfach, weil ein genommener Zweig selbst wieder bedingt sein
     /// kann. Der Deckel ist grosszuegig und endlich.
-    pub fn resolve_conditionals(&mut self, ec: &mut dyn Ec) -> usize {
+    ///
+    /// Rueckgabe: `(betrachtet, genommen)`. Die erste Zahl trennt „wir
+    /// haben keine gefunden" von „viele gefunden, eine galt" — ohne sie
+    /// sagt eine 1 nichts.
+    pub fn resolve_conditionals(&mut self, ec: &mut dyn Ec) -> (usize, usize) {
+        let mut seen = 0usize;
         let mut resolved = 0usize;
         for _ in 0..8 {
             // Bedingte von den uebrigen aufgehobenen Anweisungen trennen.
@@ -112,6 +127,7 @@ impl Namespace {
             }
             self.deferred = rest;
             if conds.is_empty() { break; }
+            seen += conds.len();
 
             // Erst ENTSCHEIDEN (nur lesender Zugriff auf den Namespace) …
             let mut chosen: Vec<(Path, alloc::vec::Vec<u8>, usize, usize)> = Vec::new();
@@ -130,7 +146,7 @@ impl Namespace {
                 }
             }
         }
-        resolved
+        (seen, resolved)
     }
 
     /// Eine weitere Tabelle (SSDT) in denselben Namespace laden.
