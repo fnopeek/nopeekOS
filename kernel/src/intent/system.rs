@@ -850,6 +850,32 @@ pub fn intent_gpu(args: &str) {
 
 pub fn intent_shade(args: &str) {
     match args.trim() {
+        // Die Fensterliste mit ihrem ECHTEN Zustand — Art, Terminal, PID,
+        // Wurzel-Flag. `window_lines` (was das Dock liest) zeigt nur Titel,
+        // und genau daran laesst sich nicht sehen, warum eine „geschlossene"
+        // App weiterlebt.
+        "windows" | "wins" => {
+            let dump = crate::shade::with_compositor(|c| c.dump_windows())
+                .unwrap_or_default();
+            kprintln!();
+            kprintln!("{}", dump.trim_end());
+            // Und wer haelt noch ein Terminal besetzt? Ein Fenster kann weg
+            // sein, waehrend die App darin weiterlaeuft — dann steht hier
+            // ein Terminal auf `app`, zu dem es kein Fenster mehr gibt.
+            let mut busy = alloc::string::String::new();
+            for i in 0..16u8 {
+                if crate::wasm::has_wasm_app(i) {
+                    use core::fmt::Write;
+                    let _ = write!(busy, " {}", i);
+                }
+            }
+            if busy.is_empty() {
+                kprintln!("[npk] terminals with a running app: none");
+            } else {
+                kprintln!("[npk] terminals with a running app:{}", busy);
+            }
+            kprintln!();
+        }
         "init" | "start" => {
             if crate::shade::is_active() {
                 kprintln!("[npk] shade: already running");
