@@ -461,4 +461,32 @@ mod tests {
         assert!(g.ids.iter().any(|i| i == "INT34BB"));
         assert_eq!(g.mmio_len, 0x10000);
     }
+
+    /// Dieselbe Tabelle, aber mit aufgeloesten Bedingungen auf Scope-Ebene.
+    ///
+    /// `Device (I2C1)` deklariert sein `_HID` INNERHALB eines
+    /// `If ((SMD1 != One))`. Ein Lader, der Bedingungen ueberspringt, sieht
+    /// einen Controller ohne Kennung — und ohne Kennung gibt es keinen
+    /// Eingangstakt, also keine SCL-Zaehler, also keinen Bus.
+    ///
+    /// **Was der Test NICHT prueft:** was hinter den Bedingungen steht,
+    /// haengt an NVS-Werten der Firmware, und die kann ein Pruefstand ohne
+    /// Geraet nicht hinterlegen. Deshalb hier nur das, was von ihnen
+    /// unabhaengig ist.
+    #[test]
+    fn scope_level_conditionals_declare_the_controller_hid() {
+        let table = include_bytes!("../../../aml/dev/DSDT.aml");
+        let mut ns = Namespace::load(table).expect("load");
+        let mut ec = NoEc;
+        let n = ns.resolve_conditionals(&mut ec);
+        assert!(n > 0, "die Tabelle hat bedingte Deklarationen auf Scope-Ebene");
+
+        let mut m = Machine::new(&ns, &mut ec);
+        m.init();
+        let found = find(&ns, &mut m);
+        assert_eq!(found.len(), 1);
+        let c = found[0].controller.as_ref().expect("controller");
+        assert!(c.ids.iter().any(|i| i == "INT34B3"),
+            "das _HID steht im If — ohne aufgeloeste Bedingung fehlt es: {:?}", c.ids);
+    }
 }

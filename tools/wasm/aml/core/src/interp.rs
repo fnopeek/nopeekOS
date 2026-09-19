@@ -1905,6 +1905,41 @@ impl<'a> Machine<'a> {
         }
     }
 
+    /// Das PRAEDIKAT eines aufgehobenen `If`-Blocks auswerten und sagen,
+    /// welcher Zweig gilt — als Byte-Bereich innerhalb von `bytes`.
+    ///
+    /// Mehr tut der Interpreter hier nicht. Was im Zweig steht, sind
+    /// DEKLARATIONEN (`Method`, `Name`, `Device`, `OperationRegion`), und
+    /// die gehoeren dem Lader. Sie hier noch einmal zu behandeln waere eine
+    /// zweite Fassung derselben Semantik — der erste Versuch scheiterte
+    /// prompt an „unhandled eval opcode 0x14", also an `Method`.
+    pub fn taken_branch(&mut self, scope: &Path, bytes: &[u8]) -> Option<(usize, usize)> {
+        if bytes.first() != Some(&0xA0) { return None; }
+        let f = Frame {
+            scope: scope.clone(), args: Vec::new(),
+            locals: (0..8).map(|_| obj(Value::Uninit)).collect(),
+            body: bytes,
+        };
+        let (pkg_end, p1) = pkg_length(bytes, 1);
+        let (cond, p2) = match self.it.eval(&f, p1) {
+            Ok(v) => v,
+            Err(e) => {
+                let n = path_str(scope);
+                self.it.ec.note(&format!("[aml]  scope-If in {n}: {e}"));
+                return None;
+            }
+        };
+        if cond.as_int() != 0 {
+            return Some((p2, pkg_end));
+        }
+        // Sonst der Else-Zweig, wenn es einen gibt.
+        if pkg_end < bytes.len() && bytes[pkg_end] == 0xA1 {
+            let (else_end, e1) = pkg_length(bytes, pkg_end + 1);
+            return Some((e1, else_end.min(bytes.len())));
+        }
+        None
+    }
+
     /// `_REG` und dann `_INI` — die Reihenfolge aus ACPICAs
     /// `acpi_initialize_objects`. Ohne das antwortet eine Firmware, deren
     /// Regionen noch nicht freigegeben sind, mit ihren Anfangswerten.
