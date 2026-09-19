@@ -14,8 +14,10 @@ extern crate alloc;
 mod value;
 mod load;
 mod interp;
+pub mod crs;
 
-pub use value::{path_str, seg, Obj, Path, Place, Seg, Value};
+pub use interp::{devices_with_ids, eisa_str, Machine};
+pub use value::{obj, path_str, seg, Obj, Path, Place, Seg, Value};
 
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
@@ -62,6 +64,8 @@ pub enum Node {
     Region { space: u8, offset: u64, len: u64 },
     /// A field unit inside a region.
     Field { region: Path, bit_offset: u64, bit_width: u64 },
+    /// Ein Bitausschnitt eines Puffers (`CreateWordField` & Co.).
+    BufferField { buf: Obj, bit_offset: u64, bit_width: u64 },
     /// Mutex / Event / External declaration — presence only.
     Other,
 }
@@ -69,6 +73,15 @@ pub enum Node {
 /// The loaded ACPI namespace.
 pub struct Namespace {
     pub nodes: BTreeMap<Path, Node>,
+    /// Anweisungen auf SCOPE-Ebene, die einen Interpreter brauchen.
+    ///
+    /// ACPICA FUEHRT die Termliste einer Tabelle beim Laden aus
+    /// (`acpi_ns_execute_table`), unser Lader liest sie nur. `CreateWordField
+    /// (SBFG, 0x17, INT1)` steht aber genau dort und braucht den Wert seines
+    /// Quellpuffers — also wird die Anweisung mit ihrem Scope aufgehoben und
+    /// beim ersten Anlauf nachgeholt. Paare (Scope, rohe AML-Bytes der
+    /// Anweisung).
+    pub deferred: Vec<(Path, alloc::vec::Vec<u8>)>,
 }
 
 impl Namespace {

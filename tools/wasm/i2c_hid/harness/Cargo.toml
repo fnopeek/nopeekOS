@@ -1,0 +1,12 @@
+[package]
+name = "i2c_hid_harness"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "i2c_hid_harness"
+path = "src/main.rs"
+
+[dependencies]
+i2c_hid_core = { path = "../core" }
+aml_core = { path = "../../aml/core" }

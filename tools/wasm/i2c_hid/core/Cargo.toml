@@ -1,0 +1,15 @@
+[package]
+name = "i2c_hid_core"
+version = "0.1.0"
+edition = "2024"
+
+# no_std + alloc. Baut fuer den std-Pruefstand UND fuer wasm32.
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+aml_core = { path = "../../aml/core" }
+
+[profile.release]
+opt-level = "s"
+lto = true

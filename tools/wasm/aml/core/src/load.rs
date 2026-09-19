@@ -2,7 +2,7 @@
 //! method bodies, and skips control-flow blocks at scope level (the battery
 //! objects are all unconditional definitions).
 
-use crate::value::{obj, Obj, Path, Seg, Value};
+use crate::value::{obj, seg, Obj, Path, Seg, Value};
 use crate::{Namespace, Node};
 use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
 
@@ -10,10 +10,39 @@ pub fn load_table(table: &[u8]) -> Result<Namespace, String> {
     if table.len() < 36 || &table[0..4] != b"DSDT" && &table[0..4] != b"SSDT" {
         return Err(format!("not a DSDT/SSDT: {:?}", &table[0..4.min(table.len())]));
     }
-    let mut ns = Namespace { nodes: BTreeMap::new() };
+    let mut ns = Namespace { nodes: BTreeMap::new(), deferred: Vec::new() };
+    predefine_root(&mut ns);
     let mut ld = Loader { b: table, ns: &mut ns };
     ld.term_list(Vec::new(), 36, table.len())?;
     Ok(ns)
+}
+
+/// Die Namen, die das BETRIEBSSYSTEM mitbringt — nicht die Tabelle.
+///
+/// ACPICA legt sie in `acpi_ns_root_initialize` (nsaccess.c) an, und das ist
+/// kein Schoenheitsdetail: eine Firmware fragt
+/// `If (CondRefOf (\_OSI, Local0))`, BEVOR sie `_OSI` benutzt. Wer die
+/// Namen nur beim AUFRUF abfaengt, sagt dort Nein — und die Tabelle nimmt
+/// dann ihren Pfad fuer ein Betriebssystem von vor 2001. Auf der
+/// HP-Tabelle blieb `OSYS` damit auf 0x07D0, und das `_CRS` des Touchpads
+/// gab statt Bus + Interrupt nur den Interrupt zurueck.
+///
+/// Die Scope-Namen (`_SB_`, `_TZ_`, …) legt ACPICA ebenfalls an; die
+/// deklariert jede Tabelle selbst, also bleiben sie hier weg.
+fn predefine_root(ns: &mut Namespace) {
+    // `_OSI` ist bei ACPICA eine Methode; wir fangen den Aufruf in
+    // `eval_name` ab, brauchen hier also nur die PRAESENZ.
+    ns.nodes.insert(alloc::vec![seg("_OSI")], Node::Other);
+    // `_GL_` ist der globale Mutex (ACPI 6.5 §5.7.1). Unser `Acquire` ist
+    // ein No-op, aber `super_name` muss den Namen finden.
+    ns.nodes.insert(alloc::vec![seg("_GL_")], Node::Other);
+    // `_OS_` und `_REV` sind Namen mit Werten. `eval_name` antwortet
+    // ohnehin; der Knoten macht sie fuer `CondRefOf` sichtbar.
+    ns.nodes.insert(
+        alloc::vec![seg("_OS_")],
+        Node::Name(obj(Value::Str(alloc::string::String::from("Microsoft Windows NT")))),
+    );
+    ns.nodes.insert(alloc::vec![seg("_REV")], Node::Name(obj(Value::Int(2))));
 }
 
 struct Loader<'a> {
@@ -90,12 +119,17 @@ impl<'a> Loader<'a> {
             }
             0x8A | 0x8B | 0x8C | 0x8D | 0x8F => {
                 // CreateDWord/Word/Byte/Bit/QWordField(source, index, NameString)
+                let op_start = p - 1;
                 let p1 = self.skip_term_arg(scope, p)?;
                 let p2 = self.skip_term_arg(scope, p1)?;
                 let (name, p3) = self.name_ref(p2);
                 p = p3;
                 let t = self.def_path(scope, &name);
+                // Platzhalter, damit der Name aufloesbar ist, BEVOR die
+                // aufgehobene Anweisung laeuft; sie ersetzt ihn dann.
                 self.ns.nodes.insert(t, Node::Other);
+                let bytes = self.b[op_start..p].to_vec();
+                self.ns.deferred.push((scope.clone(), bytes));
             }
             0xA0 | 0xA1 | 0xA2 => {
                 // If / Else / While at scope level: skip the whole block. (The
@@ -213,6 +247,7 @@ impl<'a> Loader<'a> {
             }
             0x13 => {
                 // CreateFieldOp source bit-index num-bits NameString
+                let op_start = p - 2; // 0x5B 0x13
                 let p1 = self.skip_term_arg(scope, p)?;
                 let p2 = self.skip_term_arg(scope, p1)?;
                 let p3 = self.skip_term_arg(scope, p2)?;
@@ -220,6 +255,8 @@ impl<'a> Loader<'a> {
                 p = p4;
                 let t = self.def_path(scope, &name);
                 self.ns.nodes.insert(t, Node::Other);
+                let bytes = self.b[op_start..p].to_vec();
+                self.ns.deferred.push((scope.clone(), bytes));
             }
             other => {
                 return Err(format!("unhandled ext opcode 5B {:#04x} at {:#x}", other, p - 1));
