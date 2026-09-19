@@ -7,9 +7,27 @@ IdeaPad Flex 5 14ALC7 das **einzige** eingebaute Netzgerät (`02:00.0`).
 **Karte:** [WIFI_RTL8822CE_LINUX_MAP.md](WIFI_RTL8822CE_LINUX_MAP.md) — was der
 Linux-Treiber hat, Datei für Datei, ausgezählt.
 
-**Stand 2026-09-19:** Kernel **0.376.0** (L1 zu: `npk_mmio_read8/write8`).
-Modul **wifi_rtl8822ce 0.4.0**. **Stufen 0, 1 und 2a am Gerät grün**;
-**2b (Firmware) gebaut, ungeprüft**.
+**Stand 2026-09-19:** Kernel **0.382.0** · Modul **wifi_rtl8822ce 0.9.0**.
+**Stufen 0, 1, 2a, 2b und 2c am Gerät GRÜN** — die Firmware läuft
+(`FW_READY nach 3938 µs`) und die efuse liefert die echte MAC-Adresse
+`e0:0a:f6:8b:bf:83`, dazu `nss 2 · ant 2 · bw 0x07 (bis 80 MHz) · hci 0x04
+(PCIe) · btcoex`. Damit ist der Weg PCI → Bridge → Power → Ringe → DMA →
+Firmware → C2H → efuse Ende zu Ende bewiesen. **Als Nächstes: Stufe 3.**
+
+**Der teuerste Fund lag nicht im Treiber.** Jede DMA-Anfrage des Chips endete
+mit *Received Master Abort*: `npk_pci_enable_bus_master` setzte das Bit nur am
+GERÄT, und eine PCI-Bridge leitet von ihrem Sekundärbus nur nach oben weiter,
+wenn **sie** Bus-Master ist. NVMe und xHCI fielen nicht darauf herein, weil die
+Firmware sie selbst benutzt und mit eingeschalteten Bridges übergibt — eine
+WLAN-Karte fasst UEFI nie an. Drei Hypothesen davor sind durch Messung
+gestorben, siehe L1–L8.
+
+**Zwei Portierfehler, die dieselbe Form hatten:** `rtw_hci_setup` ist
+`rtw_pci_setup` und damit ZWEI Aufrufe (`reset_trx_ring` **und**
+`rtw_pci_dma_reset`), und `check_hw_ready` hält in Linux eine **Frist** von
+10 ms (1000 × `udelay(10)`), nicht 1000 Runden — ohne die Pause waren das hier
+1–2 ms, und die Firmware bekam ein Zehntel der Zeit für ihr `FW_INIT_RDY`.
+Beide Male habe ich die Zahl übernommen und den Mechanismus dahinter nicht.
 
 **Werkzeuge im Modulverzeichnis:** `gen_pwrseq.py` erzeugt die
 Power-Sequenz-Tabellen aus `rtw8822c.c`; `check_regs.py` hält **jede**
@@ -373,6 +391,119 @@ umgestellt wird — den Weg, den `debug.wasm` schon nimmt und der Tasten und
 Prompt beim Terminal laesst. Ein Treiber liest keine Tasten; `APP_RUNNING`
 ist fuer ihn die falsche Einstufung. Heute nicht angefasst, weil kein
 Treiber im Baum bleibt.
+
+## ▶ HIER WEITERMACHEN (Pause 2026-09-19)
+
+**Stand:** Kernel **0.382.0**, Modul **wifi_rtl8822ce 0.9.0**, alles gepusht,
+Baum sauber. **Stufen 0, 1, 2a, 2b, 2c am Gerät grün.** Nächster Posten:
+**Stufe 3a — `rtw_mac_init`**, und die Vorarbeit dafür steht unten, damit sie
+niemand zweimal macht.
+
+### Was das Gerät gemessen hat (nicht abschreiben, das steht hier)
+
+    SYS_CFG1 0x0c493d3d -> cut 3 = RTW_CHIP_VER_CUT_D, vendor 9, RF 2T2R
+    MAC       e0:0a:f6:8b:bf:83   (aus der efuse)
+    rfe_option 1 · channel_plan 0x7f · crystal_cap 63 · regd 1
+    rf_board_option 0x21 -> btcoex JA, share_ant JA
+    thermal A/B 27/27 · hw_cap nss 2, ant 2, bw 0x07 (bis 80 MHz), hci 0x04
+    Power-Sequenz 605-614 us · FW_READY nach 3778-3938 us · efuse in 2 ms
+    DMA: 1545 von 2048 Seiten, 11 von 1024 Stücken, alles unter 1 GiB
+
+`rfe_option 1` heißt: `rtw8822c_rfe_defs[1]`, und das ist derselbe
+Tabellensatz wie 0, 2, 3, 4 und 6 — nur `[5]` weicht ab. Für Stufe 3 heißt
+das: die Standardtabellen, kein Sonderweg.
+
+### Stufe 3a — `rtw_mac_init`, die Funktionsliste in Aufrufreihenfolge
+
+Braucht **keine** der großen Parametertabellen.
+
+    rtw_mac_init                            (mac.c:1391)
+     ├─ rtw_init_trx_cfg                    (mac.c:1354)
+     │   ├─ txdma_queue_mapping             (mac.c:1087)  rqpn_table_8822c[1]
+     │   ├─ priority_queue_cfg              (mac.c:1260)
+     │   │   ├─ rtw_set_trx_fifo_info       (mac.c:1138)  ← rsvd_boundary!
+     │   │   └─ __priority_queue_cfg        (mac.c:1192)  page_table_8822c[1]
+     │   └─ init_h2c                        (mac.c:1301)
+     ├─ rtw8822c_mac_init                   (rtw8822c.c)  SIFS/EDCA/AMPDU/RRSR
+     ├─ rtw_drv_info_cfg                    (mac.c:1373)
+     └─ rtw_hci_interface_cfg = rtw_pci_interface_cfg (pci.c:1437)
+         └─ 8822C **cut >= D**: REG_HCI_MIX_CFG |= BIT_PCIE_EMAC_PDN_AUX_TO_FAST_CLK
+            — unser Chip IST cut D, der Zweig gilt also.
+
+**Tabellen des Chips, beide indiziert mit `[1]` (PCIe):**
+
+    page_table_8822c[1] = { hq 64, nq 64, lq 64, exq 64, gapq 1 }
+    rqpn_table_8822c[1] = { vo NORMAL, vi NORMAL, be LOW, bk LOW,
+                            mg EXTRA, hi HIGH }
+    enum: EXTRA 0 · LOW 1 · NORMAL 2 · HIGH 3
+
+**`rtw_set_trx_fifo_info` rechnet den Seitenplan** (mac.c:1138) — daraus
+kommt `fifo->rsvd_boundary`, das `rtw_fw_write_data_rsvd_page` bisher als 0
+einsetzt (korrekt, solange `rtw_mac_init` nicht lief). Mit 3a wird daraus ein
+echter Wert, und **`fw::write_data_rsvd_page` muss ihn dann bekommen** statt
+der 0 — das ist die eine Stelle, an der 3a in bestehenden Code greift.
+Zahlen dafür: `txff_size 262144`, `page_size 128` → `txff_pg_num 2048`;
+`rsvd_drv_pg_num 16`, `csi_buf_pg_num 50`, `RSVD_PG_FW_TXBUF_NUM 4`,
+`RSVD_PG_CPU_INSTRUCTION_NUM 0`, `RSVD_PG_H2CQ_NUM`/`H2C_EXTRAINFO`/
+`H2C_STATICINFO` aus `mac.h`.
+
+**Register und Konstanten, schon herausgesucht und gegen die Quelle geprüft:**
+
+    TX_PAGE_SIZE_SHIFT 7 · TX_PAGE_SIZE 128 · PHY_STATUS_SIZE 4
+    C2H_PKT_BUF 256 · RSVD_PG_DRV_NUM 16 · RSVD_PG_FW_TXBUF_NUM 4
+    RSVD_PG_CPU_INSTRUCTION_NUM 0
+    REG_TRXFF_BNDY 0x0114 · REG_RXFF_BNDY 0x011C
+    REG_AUTO_LLT_V1 0x0208 / BIT_AUTO_INIT_LLT_V1 BIT(0)
+    REG_TXDMA_OFFSET_CHK 0x020C
+    REG_FIFOPAGE_INFO_2..5 0x0234 0x0238 0x023C 0x0240
+    REG_H2C_HEAD 0x0244 · REG_H2C_TAIL 0x0248 · REG_H2C_READ_ADDR 0x024C
+    REG_H2C_INFO 0x0254
+    REG_H2C_PKT_READADDR 0x10D0 · REG_H2C_PKT_WRITEADDR 0x10D4
+    REG_HCI_MIX_CFG 0x03FC / BIT_PCIE_EMAC_PDN_AUX_TO_FAST_CLK BIT(26)
+    BIT_EN_WR_FREE_TAIL BIT(20) · REG_BCNQ_BDNY_V1 0x0424
+    REG_BCNQ1_BDNY_V1 0x0456 · REG_RCR 0x0608 / BIT_APP_PHYSTS BIT(28)
+    REG_RX_DRVINFO_SZ 0x060F · REG_WMAC_OPTION_FUNCTION 0x07D0
+    MAC_TRX_ENABLE = HCI_TXDMA_EN|HCI_RXDMA_EN|TXDMA_EN|… (reg.h:219)
+    BIT_TXDMA_{VO,VI,BE,BK,MG,HI}Q_MAP(x)  (reg.h:233-258)
+
+**Gate 3a:** `REG_AUTO_LLT_V1` löscht `BIT_AUTO_INIT_LLT_V1` von selbst
+(`check_hw_ready` wartet darauf — das ist die Quittung der Hardware, dass die
+Link-List-Tabelle gebaut ist), `init_h2c` findet `h2cq_size == h2cq_free`,
+und `rsvd_boundary` steht im Log.
+
+### Danach
+
+**3b — die Tabellen.** `rtw8822c_table.c`, 46 105 Zeilen, ~450 KiB. Wird
+ERZEUGT wie `pwrseq.rs`; `gen_pwrseq.py` ist die Vorlage. Danach
+`rtw_phy_load_tables`. Modul wächst auf ~0,7 MB.
+
+**3c — `rtw8822c_phy_set_param`.** `header_file_init(pre/post)` ·
+`config_trx_mode` · `rtw_phy_init` · `rtw8822c_rf_init` · `pwrtrack_init` ·
+`rtw_bf_phy_init`. Gate: `rtw_phy_read_rf` auf beiden Pfaden, und
+`false_alarm_statistics` zählt ≠ 0 — der Empfänger hört.
+
+### Werkzeuge (im Modulverzeichnis)
+
+    python3 tools/wasm/wifi_rtl8822ce/check_regs.py      # 147 Konstanten, 0 Abweichungen
+    python3 tools/wasm/wifi_rtl8822ce/gen_pwrseq.py      # Tabellen aus der C-Quelle
+    python3 tools/linux-coverage.py --chip rtl8822ce     # 89 / 940
+
+**`check_regs.py` vor jedem Commit laufen lassen.** Es hat schon einen echten
+Fehler gefunden (`TX_DESC_QSEL_H2C` war 17 geraten, ist 19).
+
+### Der Ablauf für eine neue Version
+
+    # Modul allein (Kernel unverändert):
+    sed -i 's/^version = .*/version = "0.X.Y"/' tools/wasm/wifi_rtl8822ce/Cargo.toml
+    tools/stage-module.sh wifi_rtl8822ce
+    python3 tools/forge-gate.py release/modules/wifi_rtl8822ce.wasm
+    ./build.sh sign-modules
+    # commit: NUR eigene Pfade, nie `git add -A` — nebenan liegt fremde Arbeit
+    # am Gerät: install wifi_rtl8822ce && driver wifi_rtl8822ce
+
+**Stagen, signieren und committen gehören in EINEN Zug.** Dazwischen kann ein
+fremder Release das Manifest mitnehmen und ein Paar zerreißen — genau das ist
+am 2026-09-19 einmal passiert.
 
 ## 4 — Die Regeln, die in jeder Stufe gelten
 
