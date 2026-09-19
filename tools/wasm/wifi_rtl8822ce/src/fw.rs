@@ -7,6 +7,44 @@ use crate::host;
 use crate::pci::{self, Trx};
 use crate::regs::*;
 
+/// PCI-Konfigurationsraum: Kommando und Status.
+///
+/// Das Kommandoregister sagt, ob der Chip ueberhaupt Busmaster ist — ohne
+/// das kann er keinen Deskriptor aus dem Hauptspeicher holen, und genau so
+/// sieht es aus: MMIO geht, DMA nicht.
+///
+/// Das STATUSregister ist die zweite Haelfte der Frage. Bit 13 (Received
+/// Master Abort) und Bit 12 (Received Target Abort) stehen, wenn der Chip
+/// es VERSUCHT hat und abgewiesen wurde. Bleiben sie leer und Busmaster ist
+/// an, hat er gar nicht erst hingesehen. Das sind zwei verschiedene Fehler.
+pub fn dump_pci_cmd(tag: &str) {
+    let v = host::pci_read_config(0x04);
+    let cmd = (v & 0xFFFF) as u16;
+    let sts = (v >> 16) as u16;
+    host::print("    PCI cfg04 ");
+    host::print(tag);
+    host::print(": cmd=0x");
+    host::print_hex16(cmd);
+    host::print(" (io ");
+    host::print(if cmd & 1 != 0 { "an" } else { "AUS" });
+    host::print(", mem ");
+    host::print(if cmd & 2 != 0 { "an" } else { "AUS" });
+    host::print(", busmaster ");
+    host::print(if cmd & 4 != 0 { "an" } else { "AUS" });
+    host::print(")  status=0x");
+    host::print_hex16(sts);
+    if sts & (1 << 13) != 0 {
+        host::print(" MASTER-ABORT");
+    }
+    if sts & (1 << 12) != 0 {
+        host::print(" TARGET-ABORT");
+    }
+    if sts & (1 << 8) != 0 {
+        host::print(" PARITY");
+    }
+    host::print("\n");
+}
+
 pub fn dump_reg32(h: i32, name: &str, off: u32) {
     host::print("    ");
     host::print(name);
@@ -78,6 +116,7 @@ pub fn write_data_rsvd_page(
         dump_reg32(h, "H2CQ_CSR  ", REG_H2CQ_CSR);
         dump_reg32(h, "PCI_CTRL  ", pci::RTK_PCI_CTRL);
         dump_reg32(h, "MCUFW_CTRL", REG_MCUFW_CTRL);
+        dump_pci_cmd("vorher ");
     }
 
     let mut ok = pci::write_data_rsvd_page(h, trx, stage, payload, current_band_type, verbose);
@@ -89,9 +128,27 @@ pub fn write_data_rsvd_page(
             dump_reg32(h, "FIFOPG_C2 ", REG_FIFOPAGE_CTRL_2);
             dump_reg32(h, "TXDMA_STAT", REG_TXDMA_STATUS);
             dump_reg32(h, "PCI_CTRL  ", pci::RTK_PCI_CTRL);
-            dump_reg32(h, "BCN_WORK16", pci::RTK_PCI_RXBD_NUM_MPDUQ);
             dump_reg32(h, "CR        ", REG_CR);
             dump_reg32(h, "FWHW_TXQ  ", REG_FWHW_TXQ_CTRL);
+            // 0x382 ist NICHT vierfach ausgerichtet; der 32-Bit-Lesezugriff
+            // im letzten Lauf gab 0xffffffff und war damit mein eigener
+            // Messfehler, nicht die Antwort des Chips.
+            host::print("    BCN_WORK  @0x383 = 0x");
+            host::print_hex8(host::r8(h, pci::RTK_PCI_TXBD_BCN_WORK));
+            host::print("   (noch gesetzt = nie abgeholt)\n");
+            host::print("    BCN-Ring[0..16] =");
+            for i in 0..4 {
+                host::print(" 0x");
+                host::print_hex32(host::dma_r32(trx.tx[pci::Q_BCN].handle, i * 4));
+            }
+            host::print("\n      OWN-Bit ");
+            let psb = host::dma_r32(trx.tx[pci::Q_BCN].handle, 0) >> 16;
+            host::print(if psb & 0x8000 != 0 {
+                "steht noch -> der Chip hat den Eintrag nie angefasst\n"
+            } else {
+                "ist GELOESCHT -> der Chip hat ihn geholt\n"
+            });
+            dump_pci_cmd("nachher");
         }
         ok = false;
     }

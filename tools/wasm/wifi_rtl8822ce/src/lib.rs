@@ -180,7 +180,14 @@ pub extern "C" fn _start() {
     host::print_hex16(dev);
     host::print("\n");
 
-    host::pci_enable_bus_master();
+    // Rueckgabewert lesen, nicht wegwerfen: ohne Busmaster kann der Chip
+    // keinen Deskriptor aus dem Hauptspeicher holen, und das sieht dann aus
+    // wie ein Fehler im Treiber statt wie eine fehlende Erlaubnis.
+    let bm = host::pci_enable_bus_master();
+    if bm != 0 {
+        host::print("[rtl8822ce] Bus-Master konnte nicht eingeschaltet werden\n");
+    }
+    fw::dump_pci_cmd("nach bind");
 
     // ── BAR2 abbilden ────────────────────────────────────────────
     let h = host::mmio_map_bar(BAR_REG, BAR_PAGES);
