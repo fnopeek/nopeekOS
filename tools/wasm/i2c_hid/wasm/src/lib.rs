@@ -40,6 +40,7 @@ unsafe extern "C" {
     fn npk_now_us() -> i64;
     fn npk_acpi_mem_read(hi: i32, lo: i32) -> i32;
     fn npk_acpi_table(sig: i32, index: i32, buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_pointer_inject(dx: i32, dy: i32, buttons: i32, scroll: i32) -> i32;
 }
 
 /// Der Hardwarezugang des Bustreibers.
@@ -290,7 +291,7 @@ fn talk_to_device(
     dw: &i2c_hid_core::dw_i2c::Dw,
     d: &i2c_hid_core::discover::HidDevice,
 ) {
-    use i2c_hid_core::{dw_i2c, hid};
+    use i2c_hid_core::{dw_i2c, hid, report};
     use i2c_hid_core::dw_i2c::Bus as _;
 
     let addr = d.slave_address;
@@ -321,19 +322,89 @@ fn talk_to_device(
         Err(e) => { logln(&alloc::format!("[i2c-hid]   {e}")); return; }
     }
 
-    // Ein paar Runden horchen. Ohne Beruehrung meldet ein Touchpad nichts,
-    // also ist „nichts" hier die erwartete Antwort — es geht darum, dass
-    // die Leitung traegt.
+    // Den REPORT-DESKRIPTOR holen und AUSWERTEN. Was ein Byte im Bericht
+    // bedeutet, steht dort und nirgends sonst — ohne ihn gilt ein Treiber
+    // fuer genau ein Modell.
+    let n = desc.report_desc_length as usize;
+    if n == 0 || n > 4096 {
+        logln("[i2c-hid]   no usable report descriptor length");
+        return;
+    }
+    let mut rd = alloc::vec![0u8; n];
+    if let Err(e) = hid::read_register(bus, dw, addr, desc.report_desc_register, &mut rd) {
+        logln(&alloc::format!("[i2c-hid]   report descriptor read failed: {e:?}"));
+        return;
+    }
+    let map = report::parse(&rd);
+    logln(&alloc::format!("[i2c-hid]   {}", map.describe()));
+
+    let Some(rid) = map.pointer_report() else {
+        logln("[i2c-hid]   no report carries X and Y — not a pointer");
+        return;
+    };
+    let fx = *map.find(rid, report::PAGE_GENERIC_DESKTOP, report::USAGE_X).unwrap();
+    let fy = *map.find(rid, report::PAGE_GENERIC_DESKTOP, report::USAGE_Y).unwrap();
+    let tip = map.find(rid, report::PAGE_DIGITIZER, report::USAGE_TIP_SWITCH).copied();
+    let btn: alloc::vec::Vec<report::Field> = (1u16..=3)
+        .filter_map(|u| map.find(rid, report::PAGE_BUTTON, u).copied())
+        .collect();
+
+    logln("[i2c-hid]   POINTER LIVE — move your finger for 10 s");
+
+    // Absolut gegen relativ: eine Maus meldet Wege, ein Touchpad Orte.
+    // Aus Orten wird ein Weg, indem man den vorigen abzieht — und die
+    // ERSTE Beruehrung liefert keinen, sonst spraenge der Zeiger dorthin,
+    // wo der Finger aufsetzt.
     let mut buf = [0u8; 64];
+    let mut have_ref = false;
+    let (mut rx, mut ry) = (0i32, 0i32);
     let mut got = 0u32;
-    for _ in 0..200 {
+    let mut moved = 0u32;
+
+    for _ in 0..2000 {
         match hid::get_input(bus, dw, addr, &desc, &mut buf) {
             Ok(Some(r)) => {
+                // Das erste Byte ist die Report-ID, wenn der Deskriptor
+                // welche benutzt; die Feldversaetze zaehlen ohne sie.
+                let (id, data) = if map.uses_ids && !r.is_empty() {
+                    (r[0], &r[1..])
+                } else {
+                    (0u8, r)
+                };
+                if id != rid { continue; }
                 got += 1;
-                if got <= 3 {
+
+                let x = report::extract(data, &fx);
+                let y = report::extract(data, &fy);
+                let touching = match &tip {
+                    Some(t) => report::extract(data, t) != 0,
+                    None => true,
+                };
+                let mut buttons = 0i32;
+                for (i, f) in btn.iter().enumerate() {
+                    if report::extract(data, f) != 0 { buttons |= 1 << i; }
+                }
+
+                let (dx, dy) = if fx.relative {
+                    (x, y)
+                } else if !touching {
+                    have_ref = false;
+                    (0, 0)
+                } else if have_ref {
+                    (x - rx, y - ry)
+                } else {
+                    have_ref = true;
+                    (0, 0)
+                };
+                if !fx.relative { rx = x; ry = y; }
+
+                if dx != 0 || dy != 0 || buttons != 0 {
+                    moved += 1;
+                    unsafe { npk_pointer_inject(dx, dy, buttons, 0) };
+                }
+                if moved <= 3 && (dx != 0 || dy != 0) {
                     logln(&alloc::format!(
-                        "[i2c-hid]   input report {} bytes: {:02x?}", r.len(),
-                        &r[..r.len().min(16)]));
+                        "[i2c-hid]   report id {id}: x={x} y={y} -> dx={dx} dy={dy} btn={buttons}"));
                 }
             }
             Ok(None) => {}
@@ -344,5 +415,6 @@ fn talk_to_device(
         }
         bus.udelay(5_000);
     }
-    logln(&alloc::format!("[i2c-hid]   {got} input report(s) in 1 s — touch it while this runs"));
+    logln(&alloc::format!(
+        "[i2c-hid]   {got} report(s), {moved} with movement"));
 }
