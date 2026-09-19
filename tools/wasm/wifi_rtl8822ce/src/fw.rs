@@ -7,6 +7,16 @@ use crate::host;
 use crate::pci::{self, Trx};
 use crate::regs::*;
 
+pub fn dump_reg32(h: i32, name: &str, off: u32) {
+    host::print("    ");
+    host::print(name);
+    host::print(" @0x");
+    host::print_hex16(off as u16);
+    host::print(" = 0x");
+    host::print_hex32(host::r32(h, off));
+    host::print("\n");
+}
+
 /// util.c `check_hw_ready`: 1000 Runden, 10 us auseinander, und gelesen wird
 /// mit `rtw_read32_mask` — also 32 Bit, auch wenn das Register ein Byte ist.
 pub fn check_hw_ready(h: i32, addr: u32, mask: u32, target: u32) -> bool {
@@ -31,9 +41,10 @@ pub fn check_hw_ready(h: i32, addr: u32, mask: u32, target: u32) -> bool {
 /// `rsvd_boundary` ist beim Firmware-Download noch 0: es wird erst von
 /// `rtw_set_trx_fifo_info` gesetzt, und das laeuft in `rtw_mac_init` — also
 /// NACH dem Download. Linux schreibt hier also ebenfalls eine 0 zurueck.
+#[allow(clippy::too_many_arguments)]
 pub fn write_data_rsvd_page(
     h: i32, trx: &Trx, stage: i32, pg_addr: u16, payload: &[u8],
-    rsvd_boundary: u16, current_band_type: u8,
+    rsvd_boundary: u16, current_band_type: u8, verbose: bool,
 ) -> bool {
     if payload.is_empty() {
         return false;
@@ -54,10 +65,34 @@ pub fn write_data_rsvd_page(
     host::w8(h, REG_FWHW_TXQ_CTRL + 2, bckp1 & !((BIT_EN_BCNQ_DL >> 16) as u8));
 
     // `rtw_hci_write_data_rsvd_page` -> `rtw_pci_write_data_rsvd_page`
-    let mut ok = pci::write_data_rsvd_page(h, trx, stage, payload, current_band_type);
+    if verbose {
+        host::print("  [dump] vor dem Schreiben:\n");
+        dump_reg32(h, "CR        ", REG_CR);
+        dump_reg32(h, "FIFOPG_C2 ", REG_FIFOPAGE_CTRL_2);
+        dump_reg32(h, "FIFOPG_I1 ", REG_FIFOPAGE_INFO_1);
+        dump_reg32(h, "RQPN_CTRL2", REG_RQPN_CTRL_2);
+        dump_reg32(h, "FWHW_TXQ  ", REG_FWHW_TXQ_CTRL);
+        dump_reg32(h, "BCN_CTRL  ", REG_BCN_CTRL);
+        dump_reg32(h, "TXDMA_STAT", REG_TXDMA_STATUS);
+        dump_reg32(h, "TXDMA_PQ  ", REG_TXDMA_PQ_MAP);
+        dump_reg32(h, "H2CQ_CSR  ", REG_H2CQ_CSR);
+        dump_reg32(h, "PCI_CTRL  ", pci::RTK_PCI_CTRL);
+        dump_reg32(h, "MCUFW_CTRL", REG_MCUFW_CTRL);
+    }
+
+    let mut ok = pci::write_data_rsvd_page(h, trx, stage, payload, current_band_type, verbose);
 
     if ok && !check_hw_ready(h, REG_FIFOPAGE_CTRL_2, BIT_BCN_VALID_V1, 1) {
         host::print("[rtl8822ce] error beacon valid\n");
+        if verbose {
+            host::print("  [dump] nach dem Anstoss:\n");
+            dump_reg32(h, "FIFOPG_C2 ", REG_FIFOPAGE_CTRL_2);
+            dump_reg32(h, "TXDMA_STAT", REG_TXDMA_STATUS);
+            dump_reg32(h, "PCI_CTRL  ", pci::RTK_PCI_CTRL);
+            dump_reg32(h, "BCN_WORK16", pci::RTK_PCI_RXBD_NUM_MPDUQ);
+            dump_reg32(h, "CR        ", REG_CR);
+            dump_reg32(h, "FWHW_TXQ  ", REG_FWHW_TXQ_CTRL);
+        }
         ok = false;
     }
 

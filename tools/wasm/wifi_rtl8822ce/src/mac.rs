@@ -495,8 +495,11 @@ fn download_firmware_to_mem(
         // pg_addr = src >> 7. Der USB-Sonderfall (+1 Byte, wenn
         // (size + TX_DESC_SIZE) auf 512 aufgeht) gilt nur dort, und
         // `kmemdup` daneben ist Linux-Speicherverwaltung.
+        // Nur das ERSTE Stueck wird ausgeschuettet — 50 Stuecke mal zwoelf
+        // Register waeren keine Diagnose mehr, sondern eine Wand.
+        let verbose = first_part && mem_offset == 0;
         if !write_data_rsvd_page(h, trx, stage, (src >> 7) as u16,
-                                 &data[from..to], 0, band) {
+                                 &data[from..to], 0, band, verbose) {
             host::print("[rtl8822ce] rsvd page fehlgeschlagen bei Offset ");
             host::print_dec(mem_offset);
             host::print("\n");
@@ -601,6 +604,17 @@ pub fn download_firmware(h: i32, trx: &mut Trx, stage: i32, fw: &[u8], band: u8)
             return false;
         }
     };
+
+    // Was die Power-Sequenz hinterlassen hat, BEVOR das Backup es umschreibt.
+    // REG_RQPN_CTRL_2 ist der interessante: das Backup ODERt nur BIT_LD_RQPN
+    // darauf, es SETZT die Seitenzahlen nicht — die kommen erst in
+    // __priority_queue_cfg, also nach dem Download. Steht hier eine 0, hat
+    // die HIQ null Seiten, und dann kann keine Reserved Page landen.
+    host::print("  [dump] nach power_on, vor dem Backup:\n");
+    crate::fw::dump_reg32(h, "RQPN_CTRL2", REG_RQPN_CTRL_2);
+    crate::fw::dump_reg32(h, "FIFOPG_I1 ", REG_FIFOPAGE_INFO_1);
+    crate::fw::dump_reg32(h, "CR        ", REG_CR);
+    crate::fw::dump_reg32(h, "TXDMA_PQ  ", REG_TXDMA_PQ_MAP);
 
     wlan_cpu_enable(h, false);
 
