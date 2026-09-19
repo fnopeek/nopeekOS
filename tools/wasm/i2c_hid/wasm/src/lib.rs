@@ -1003,7 +1003,7 @@ fn gate_verdict(l: &mut Live, gate_said_no: bool, got_data: bool) {
                 *contradictions = 0;
                 if !*proved {
                     *proved = true;
-                    logln(&alloc::format!(
+                    dbgln(&alloc::format!(
                         "[i2c-hid] {addr:#04x}: the pin announced a report — the gate holds"));
                 }
                 return;
@@ -1061,7 +1061,7 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
     if Some(id) == l.touch_rid {
         if !l.saw_touch {
             l.saw_touch = true;
-            logln(&alloc::format!(
+            dbgln(&alloc::format!(
                 "[i2c-hid] {:#04x}: touchpad report {id} is live — precision mode took",
                 l.addr));
         }
