@@ -99,6 +99,21 @@ ADAPTIVITY · SCAN_OFFLOAD`. Dass `9.9.15 ≥ 9.9.13` ist, heißt außerdem: der
 gibt also einen Präzedenzfall. rtw88-Firmware steht unter derselben Lizenz wie
 die, die wir schon ausliefern.
 
+**Was das Modul am Ende wiegt** — gemessen, nicht geschätzt. Bei einem
+WLAN-Treiber ist fast alles Blob:
+
+| | Code | Blobs | gesamt |
+|---|---|---|---|
+| `wifi_ax200` (fertig) | 78,5 KiB | 1336,0 KiB Firmware | **1,38 MiB** |
+| `wifi` / 8852BE (fertig) | ~78 KiB | 1216 KiB FW + 149 KiB Tabellen | **1,41 MiB** |
+| `wifi_rtl8822ce` heute (Stufe 0) | 6,2 KiB | — | **6,2 KiB** |
+| `wifi_rtl8822ce` Prognose | ~80 KiB | 198 KiB FW + ~450 KiB Tabellen | **~0,7 MiB** |
+
+Halb so groß wie der Intel-Treiber, weil Realteks Firmware **sechsmal
+kleiner** ist (198 KiB gegen 1336 KiB). Dafür wiegen hier die Tabellen mehr
+als die Firmware: `rtw8822c_rf_a` und `_rf_b` allein sind 40 070 + 40 706
+Werte = 315 KiB. Sie kommen in Stufe 3.
+
 ---
 
 ## 2 — Die Löcher, die JETZT schon benannt sind
@@ -233,28 +248,49 @@ Jede Stufe: **vollständig portierte Funktionen** aus der Aufrufkette
     driver wifi_rtl8822ce        # startet Stufe 0
     wlan                         # zeigt den Bericht danach noch einmal
 
-### Stufe 1 — Strom und efuse
-- `rtw_mac_pre_system_cfg` · `rtw_pwr_seq_parser` + beide Tabellen ·
+### Stufe 1 — Nur der Strom
+Kein Byte Firmware, kein Ring. Das geht, und es ist der Grund für den Schnitt
+genau hier (siehe „Reihenfolge" unten).
+
+- `rtw_mac_pre_system_cfg` · `rtw_pwr_seq_parser` mit beiden Tabellen
+  (`trans_carddis_to_cardemu_8822c`, `trans_cardemu_to_act_8822c`) ·
   `rtw_mac_init_system_cfg` · `rtw_mac_power_switch` samt
   `-EALREADY`-Rückfall (der zweite Anlauf ist kein Sonderfall, er ist der
-  Normalfall nach einem Warmstart).
-- `rtw_parse_efuse_map` · `rtw8822ce_efuse_parsing` · `rtw_dump_hw_feature`
-  (braucht die Firmware — **FWDL passiert hier schon zum ersten Mal**, siehe
-  Karte §3) · `rtw_check_supported_rfe`.
-- **Gate:** die **MAC-Adresse aus der efuse** ist gültig, `rfe_option`,
-  `channel_plan`, `crystal_cap`, **`btcoex`** stehen im Log (L6).
+  Normalfall nach einem Warmstart) · `rtw_mac_power_off`.
+- **Gate:** `REG_CR` **verlässt** `0xea` beim Einschalten und **kehrt dorthin
+  zurück** beim Ausschalten. Beide Richtungen, sonst misst man einen Zustand,
+  den der Chip schon vorher hatte.
+- Der 8-Bit-Pfad trägt hier zum ersten Mal echte Last: der Interpreter ist
+  nichts als `read8`/`write8`. Deshalb steht sein Test schon in Stufe 0.
 
-### Stufe 2 — Ringe und Firmware
-- `rtw_pci_init_trx_ring`: 8 TX-Ringe + 1 RX-Ring, die Adress-/Anzahl-/
+### Stufe 2 — Ringe, Firmware, efuse
+Die drei gehören in EINE Stufe, weil Linux sie verschränkt (siehe unten).
+**Hier kommt der Firmware-Blob ins Modul** (197,9 KiB).
+
+- `rtw_pci_init_trx_ring`: 8 TX-Ringe + der MPDU-RX-Ring, die Adress-/Anzahl-/
   Index-Register aus `pci.h` (L3 vorher entschieden).
 - `rtw_download_firmware` vollständig: `check_firmware_size` ·
-  `wlan_cpu_enable` · Registersicherung · `send_firmware_pkt` ·
-  `iddma_download_firmware` · `download_firmware_end_flow` ·
-  `download_firmware_validate`.
-- **Gate:** `REG_MCUFW_CTRL` liest `FW_READY`, und ein erstes H2C bekommt
-  eine C2H-Antwort. **Ein `Ok()` auf dem Schreibweg ist keine Quittung**
-  ([[feedback_a_bus_ack_is_not_an_accepted_report]]) — das Gate ist die
-  Antwort, nicht der Versand.
+  `wlan_cpu_enable` · Registersicherung · `send_firmware_pkt` →
+  `rtw_fw_write_data_rsvd_page` → **BCN-Queue** · `iddma_download_firmware` ·
+  `download_firmware_end_flow` · `download_firmware_validate`.
+- `rtw_chip_efuse_info_setup` vollständig: `rtw_parse_efuse_map` ·
+  `rtw8822ce_efuse_parsing` · `rtw_dump_hw_feature` · `rtw_check_supported_rfe`.
+- **Gate:** `REG_MCUFW_CTRL` liest `FW_READY`, **und** die MAC-Adresse aus der
+  efuse ist gültig, mit `rfe_option`, `channel_plan`, `crystal_cap` und
+  **`btcoex`** im Log (L6). **Ein `Ok()` auf dem Schreibweg ist keine
+  Quittung** ([[feedback_a_bus_ack_is_not_an_accepted_report]]) — das Gate ist
+  die Antwort, nicht der Versand.
+
+> **Warum diese Reihenfolge, und warum der Plan sie zuerst falsch hatte.**
+> Der erste Entwurf trennte „Strom und efuse" von „Ringe und Firmware" — als
+> ob die efuse vor der Firmware käme. Sie kommt nicht: `rtw_chip_efuse_enable`
+> lädt **erst die Firmware**, schreibt dann `C2H_HW_FEATURE_DUMP` und liest
+> die Antwort. Und die Firmware geht auf PCIe **durch die BCN-TX-Queue**
+> (`rtw_pci_write_data_rsvd_page` → `rtw_pci_tx_write_data(…,
+> RTW_TX_QUEUE_BCN)`), also müssen die Ringe vorher stehen. Die echte Kette
+> ist **Ringe → FWDL → efuse**, und ein Stufenschnitt quer dazu hätte
+> bedeutet, Stufe 1 mit einem Gate zu beenden, das ohne Stufe 2 nicht
+> erreichbar ist.
 
 ### Stufe 3 — MAC und PHY
 - `rtw_init_trx_cfg` (`txdma_queue_mapping`, `priority_queue_cfg`, `init_h2c`) ·
