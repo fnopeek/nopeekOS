@@ -24,11 +24,24 @@ pub const USAGE_WHEEL: u16 = 0x38;
 // Usages (Digitizer)
 pub const USAGE_TIP_SWITCH: u16 = 0x42;
 pub const USAGE_CONTACT_ID: u16 = 0x51;
+/// „Device Mode" im Feature-Bericht: 0 = Maus-Kompatibilitaet,
+/// 3 = Praezisions-Touchpad. Ohne diesen Schalter liefert ein Touchpad
+/// gar keine Mehrfingerdaten — es TUT so, als waere es eine Maus.
+pub const USAGE_INPUT_MODE: u16 = 0x52;
 pub const USAGE_CONTACT_COUNT: u16 = 0x54;
+
+/// Zu welchem Berichtstyp ein Feld gehoert.
+///
+/// Report-IDs sind je Typ eigenstaendig: derselbe Bericht 3 kann als
+/// Eingabe und als Feature ganz verschieden aussehen, und beide haben
+/// ihre eigenen Bitversaetze.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Kind { Input, Output, Feature }
 
 /// Ein Feld in einem Eingabebericht.
 #[derive(Clone, Copy, Debug)]
 pub struct Field {
+    pub kind: Kind,
     pub report_id: u8,
     pub usage_page: u16,
     pub usage: u16,
@@ -76,7 +89,10 @@ pub fn parse(desc: &[u8]) -> ReportMap {
     let mut usages: Vec<u16> = Vec::new();
     let mut usage_min: Option<u16> = None;
     // Bitversatz je Report-ID.
-    let mut offsets: [u32; 256] = [0; 256];
+    // Je Typ eigene Versaetze — siehe [`Kind`].
+    let mut off_in: [u32; 256] = [0; 256];
+    let mut off_out: [u32; 256] = [0; 256];
+    let mut off_feat: [u32; 256] = [0; 256];
 
     let mut i = 0usize;
     while i < desc.len() {
@@ -107,11 +123,21 @@ pub fn parse(desc: &[u8]) -> ReportMap {
         match ty {
             // ── Main ───────────────────────────────────────────────
             0 => match tag {
-                0x8 => {
-                    // Input
+                0x8 | 0x9 | 0xB => {
+                    // Input / Output / Feature — dieselbe Buchfuehrung,
+                    // nur ein anderer Topf.
+                    let kind = match tag {
+                        0x8 => Kind::Input,
+                        0x9 => Kind::Output,
+                        _ => Kind::Feature,
+                    };
                     let constant = val & 0x01 != 0;
                     let relative = val & 0x04 != 0;
-                    let off = &mut offsets[g.report_id as usize];
+                    let off = match kind {
+                        Kind::Input => &mut off_in[g.report_id as usize],
+                        Kind::Output => &mut off_out[g.report_id as usize],
+                        Kind::Feature => &mut off_feat[g.report_id as usize],
+                    };
                     for n in 0..g.report_count {
                         let usage = if (n as usize) < usages.len() {
                             usages[n as usize]
@@ -121,6 +147,7 @@ pub fn parse(desc: &[u8]) -> ReportMap {
                             usages.last().copied().unwrap_or(0)
                         };
                         out.fields.push(Field {
+                            kind,
                             report_id: g.report_id,
                             usage_page: g.usage_page,
                             usage,
@@ -133,13 +160,6 @@ pub fn parse(desc: &[u8]) -> ReportMap {
                         });
                         *off += g.report_size;
                     }
-                    usages.clear();
-                    usage_min = None;
-                }
-                0x9 | 0xB => {
-                    // Output / Feature: Platz mitzaehlen ist unnoetig, sie
-                    // liegen in EIGENEN Berichten. Nur die lokalen Items
-                    // verfallen.
                     usages.clear();
                     usage_min = None;
                 }
@@ -176,10 +196,25 @@ pub fn parse(desc: &[u8]) -> ReportMap {
 }
 
 impl ReportMap {
-    /// Das erste Feld mit dieser Usage in diesem Bericht.
+    /// Das erste EINGABEfeld mit dieser Usage in diesem Bericht.
     pub fn find(&self, report_id: u8, page: u16, usage: u16) -> Option<&Field> {
+        self.find_all(Kind::Input, report_id, page, usage).into_iter().next()
+    }
+
+    /// ALLE Felder dieser Usage — ein Mehrfinger-Touchpad fuehrt X und Y
+    /// je Kontaktpunkt, also mehrfach im selben Bericht.
+    pub fn find_all(&self, kind: Kind, report_id: u8, page: u16, usage: u16) -> Vec<&Field> {
+        self.fields.iter().filter(|f| {
+            f.kind == kind && f.report_id == report_id
+                && f.usage_page == page && f.usage == usage && !f.constant
+        }).collect()
+    }
+
+    /// Ein FEATURE-Feld mit dieser Usage, irgendwo — samt seiner
+    /// Berichtsnummer.
+    pub fn find_feature(&self, page: u16, usage: u16) -> Option<&Field> {
         self.fields.iter().find(|f| {
-            f.report_id == report_id && f.usage_page == page && f.usage == usage && !f.constant
+            f.kind == Kind::Feature && f.usage_page == page && f.usage == usage
         })
     }
 
@@ -187,7 +222,7 @@ impl ReportMap {
     pub fn report_ids(&self) -> Vec<u8> {
         let mut ids: Vec<u8> = Vec::new();
         for f in &self.fields {
-            if !ids.contains(&f.report_id) { ids.push(f.report_id); }
+            if f.kind == Kind::Input && !ids.contains(&f.report_id) { ids.push(f.report_id); }
         }
         ids
     }
@@ -198,6 +233,20 @@ impl ReportMap {
             self.find(id, PAGE_GENERIC_DESKTOP, USAGE_X).is_some()
                 && self.find(id, PAGE_GENERIC_DESKTOP, USAGE_Y).is_some()
         })
+    }
+
+    /// Ein Bericht, der KONTAKTPUNKTE traegt — also ein echter
+    /// Touchpad-Bericht und keine Maus-Nachahmung.
+    pub fn touchpad_report(&self) -> Option<u8> {
+        self.report_ids().into_iter().find(|&id| {
+            self.find(id, PAGE_DIGITIZER, USAGE_TIP_SWITCH).is_some()
+                && self.find(id, PAGE_GENERIC_DESKTOP, USAGE_X).is_some()
+        })
+    }
+
+    /// Wieviele Kontaktpunkte dieser Bericht fuehrt.
+    pub fn contact_slots(&self, report_id: u8) -> usize {
+        self.find_all(Kind::Input, report_id, PAGE_DIGITIZER, USAGE_TIP_SWITCH).len()
     }
 
     pub fn describe(&self) -> String {

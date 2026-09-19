@@ -119,7 +119,9 @@ pub fn fetch_descriptor(
 
 /// Opcodes aus dem HID-over-I2C-Protokoll (i2c-hid-core.c).
 pub const OPCODE_RESET: u8 = 0x01;
+pub const OPCODE_SET_REPORT: u8 = 0x03;
 pub const OPCODE_SET_POWER: u8 = 0x08;
+pub const REPORT_TYPE_FEATURE: u8 = 0x03;
 pub const PWR_ON: u8 = 0x00;
 pub const PWR_SLEEP: u8 = 0x01;
 
@@ -165,6 +167,44 @@ pub fn set_power(
         bus.udelay(60_000);
     }
     r
+}
+
+/// `i2c_hid_set_or_send_report` mit `do_set = true` — ein FEATURE-Bericht
+/// an das Geraet.
+///
+/// Gebraucht fuer genau eine Sache, aber eine wichtige: den „Device Mode"
+/// eines Praezisions-Touchpads auf 3 zu stellen. Ohne diesen Schalter
+/// meldet es sich wie eine Maus und liefert gar keine Mehrfingerdaten —
+/// Zweifinger-Scrollen ist dann nicht schwer, sondern unmoeglich.
+///
+/// Die Form ist die des Originals: Befehlsregister, SET_REPORT mit Typ
+/// und Berichtsnummer, dann die Adresse des DATENregisters, dann der
+/// Bericht mit seiner Laenge davor (`i2c_hid_format_report`).
+pub fn set_report(
+    bus: &mut dyn Bus, dw: &dw_i2c::Dw, addr: u16, d: &HidDesc,
+    report_type: u8, report_id: u8, data: &[u8],
+) -> Result<(), Error> {
+    let mut cmd: Vec<u8> = vec![
+        (d.command_register & 0xFF) as u8,
+        (d.command_register >> 8) as u8,
+    ];
+    encode_command(&mut cmd, OPCODE_SET_REPORT, report_type, report_id);
+    cmd.push((d.data_register & 0xFF) as u8);
+    cmd.push((d.data_register >> 8) as u8);
+
+    // `i2c_hid_format_report`: Laenge zuerst, dann — wenn es eine gibt —
+    // die Berichtsnummer, dann die Daten. Die Laenge zaehlt sich SELBST
+    // mit.
+    let mut body: Vec<u8> = vec![0, 0];
+    if report_id != 0 { body.push(report_id); }
+    body.extend_from_slice(data);
+    let n = body.len() as u16;
+    body[0] = (n & 0xFF) as u8;
+    body[1] = (n >> 8) as u8;
+    cmd.extend_from_slice(&body);
+
+    let mut msgs = [Msg::Write(&cmd)];
+    dw_i2c::xfer(bus, dw, addr, &mut msgs)
 }
 
 /// `i2c_hid_start_hwreset` + `i2c_hid_finish_hwreset`.
