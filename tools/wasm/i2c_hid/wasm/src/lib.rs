@@ -328,10 +328,18 @@ struct Live {
     fx: i2c_hid_core::report::Field,
     fy: i2c_hid_core::report::Field,
     tip: Option<i2c_hid_core::report::Field>,
+    /// Das Rad, wenn das Geraet eines fuehrt.
+    wheel: Option<i2c_hid_core::report::Field>,
     btn: alloc::vec::Vec<i2c_hid_core::report::Field>,
     have_ref: bool,
     rx: i32,
     ry: i32,
+    /// Die zuletzt gemeldete Tastenlage.
+    ///
+    /// Ein LOSLASSEN ist ein Ereignis wie ein Druck: wer nur bei
+    /// `buttons != 0` einspeist, meldet den Druck und nie das Ende — und
+    /// der Compositor haelt die Taste fuer immer fuer gedrueckt.
+    last_buttons: i32,
 }
 
 /// Mit dem GERAET reden: Bus einrichten, Adresse antippen, HID-Deskriptor
@@ -399,18 +407,25 @@ fn talk_to_device(
     let fx = *map.find(rid, report::PAGE_GENERIC_DESKTOP, report::USAGE_X).unwrap();
     let fy = *map.find(rid, report::PAGE_GENERIC_DESKTOP, report::USAGE_Y).unwrap();
     let tip = map.find(rid, report::PAGE_DIGITIZER, report::USAGE_TIP_SWITCH).copied();
+    let wheel = map.find(rid, report::PAGE_GENERIC_DESKTOP, report::USAGE_WHEEL).copied();
     let btn: alloc::vec::Vec<report::Field> = (1u16..=3)
         .filter_map(|u| map.find(rid, report::PAGE_BUTTON, u).copied())
         .collect();
 
+    logln(&alloc::format!(
+        "[i2c-hid]   can do: move ({}), {} button(s), wheel {}, tip-switch {}",
+        if fx.relative { "relative" } else { "absolute" },
+        btn.len(),
+        if wheel.is_some() { "yes" } else { "no" },
+        if tip.is_some() { "yes" } else { "no" }));
     logln("[i2c-hid]   ready");
     Some(Live {
         bus: HostBus { handle: bus.handle },
         dw: i2c_hid_core::dw_i2c::Dw { ..*dw },
         addr, desc,
         uses_ids: map.uses_ids,
-        rid, fx, fy, tip, btn,
-        have_ref: false, rx: 0, ry: 0,
+        rid, fx, fy, tip, wheel, btn,
+        have_ref: false, rx: 0, ry: 0, last_buttons: 0,
     })
 }
 
@@ -454,8 +469,16 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> bool {
     };
     if !l.fx.relative { l.rx = x; l.ry = y; }
 
-    if dx != 0 || dy != 0 || buttons != 0 {
-        unsafe { npk_pointer_inject(dx, dy, buttons, 0) };
+    // Das Rad meldet immer RELATIV — Rasten, keine Position. Deshalb
+    // geht es direkt durch, ohne den Umweg ueber einen Bezugspunkt.
+    let scroll = match &l.wheel {
+        Some(w) => report::extract(data, w),
+        None => 0,
+    };
+
+    if dx != 0 || dy != 0 || scroll != 0 || buttons != l.last_buttons {
+        unsafe { npk_pointer_inject(dx, dy, buttons, scroll) };
     }
+    l.last_buttons = buttons;
     true
 }
