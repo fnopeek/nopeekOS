@@ -339,6 +339,7 @@ pub const RSVD_STAGE_BYTES: u32 = 0x1000 + crate::tx::TX_PKT_DESC_SZ as u32;
 /// freizugeben.
 pub fn write_data_rsvd_page(
     h: i32, trx: &Trx, stage: i32, payload: &[u8], current_band_type: u8,
+    verbose: bool,
 ) -> bool {
     // tx.c `rtw_tx_write_data_rsvd_page_get` baut in Linux ein skb mit 48
     // Byte Vorlauf und ruft dann `rtw_tx_rsvd_page_pkt_info_update`. Bei uns
@@ -380,8 +381,51 @@ pub fn write_data_rsvd_page(
 
     host::fence();
 
+    if verbose {
+        // Zurueckgelesen, nicht geglaubt: liegen Deskriptor und Nutzdaten
+        // wirklich im DMA-Puffer, und steht der Ringeintrag so da, wie wir
+        // ihn geschrieben haben?
+        host::print("    stage @0x");
+        host::print_hex32(dma);
+        host::print("  desc[0..8] =");
+        for i in 0..2 {
+            host::print(" 0x");
+            host::print_hex32(host::dma_r32(stage, i * 4));
+        }
+        host::print("\n    payload[0..8] =");
+        for i in 0..2 {
+            host::print(" 0x");
+            host::print_hex32(host::dma_r32(stage, desc_sz as u32 + i * 4));
+        }
+        host::print("\n    erwartet      =");
+        for i in 0..2 {
+            let o = (i * 4) as usize;
+            let w = u32::from_le_bytes([payload[o], payload[o + 1],
+                                        payload[o + 2], payload[o + 3]]);
+            host::print(" 0x");
+            host::print_hex32(w);
+        }
+        host::print("\n    BCN-Ring[0..16] =");
+        for i in 0..4 {
+            host::print(" 0x");
+            host::print_hex32(host::dma_r32(ring, i * 4));
+        }
+        host::print("\n    psb_len = 0x");
+        host::print_hex32(psb_len);
+        host::print("  total = ");
+        host::print_dec(total as u32);
+        host::print("\n");
+    }
+
     // pci.c: "reserved pages go through beacon queue"
     let work = host::r8(h, RTK_PCI_TXBD_BCN_WORK);
     host::w8(h, RTK_PCI_TXBD_BCN_WORK, work | BIT_PCI_BCNQ_FLAG);
+    if verbose {
+        host::print("    BCN_WORK @0x383: 0x");
+        host::print_hex8(work);
+        host::print(" -> 0x");
+        host::print_hex8(host::r8(h, RTK_PCI_TXBD_BCN_WORK));
+        host::print("\n");
+    }
     true
 }
