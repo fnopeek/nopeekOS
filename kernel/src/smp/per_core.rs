@@ -55,6 +55,14 @@ static CORE_BUSY_TSC: [AtomicU64; 256] = {
 };
 
 /// Snapshots for delta computation
+/// Per-core snapshot of CORE_HALT_TSC at the last `update_core_freq`.
+/// Two samples and a difference are what turns a cumulative halt counter
+/// into a percentage.
+static LAST_HALT: [AtomicU64; 256] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; 256]
+};
+
 static LAST_BUSY: [AtomicU64; 256] = {
     const ZERO: AtomicU64 = AtomicU64::new(0);
     [ZERO; 256]
@@ -398,8 +406,8 @@ pub fn update_core_freq(core_id: usize) {
     };
     let tsc = crate::interrupts::rdtsc();
 
-    let busy = CORE_BUSY_TSC[core_id].load(Ordering::Relaxed);
-    let prev_busy = LAST_BUSY[core_id].swap(busy, Ordering::Relaxed);
+    let halted = CORE_HALT_TSC[core_id].load(Ordering::Relaxed);
+    let prev_halted = LAST_HALT[core_id].swap(halted, Ordering::Relaxed);
     let prev_tsc = LAST_TSC_CORE[core_id].swap(tsc, Ordering::Relaxed);
     let prev_aperf = LAST_APERF[core_id].swap(aperf, Ordering::Relaxed);
     let prev_mperf = LAST_MPERF[core_id].swap(mperf, Ordering::Relaxed);
@@ -409,13 +417,27 @@ pub fn update_core_freq(core_id: usize) {
     let delta_tsc = tsc.wrapping_sub(prev_tsc);
     let delta_aperf = aperf.wrapping_sub(prev_aperf);
     let delta_mperf = mperf.wrapping_sub(prev_mperf);
-    let delta_busy = busy.wrapping_sub(prev_busy);
+    let delta_halt = halted.wrapping_sub(prev_halted);
 
     if delta_tsc == 0 { return; }
 
-    // Scheduler-tracked usage (task execution time / wall clock).
-    let sched_pct = (delta_busy * 100 / delta_tsc).min(100) as u32;
-    CORE_USAGE[core_id].store(sched_pct, Ordering::Relaxed);
+    // Usage = 100 − halted%, the same definition `intent_cores` prints.
+    //
+    // It used to be CORE_BUSY_TSC / wall clock, and that is self-reported:
+    // code adds the cycles it BELIEVES were work. For Core 0 the timer ISR
+    // added one whole tick's worth (`freq / 100`) on every tick — that is
+    // exactly the wall clock, unconditionally, 100 times a second. Clamped
+    // with `.min(100)`, Core 0 could therefore never report anything but
+    // 99-100 %, no matter what it did. It was a declaration from the era
+    // when the shell loop really did spin, and it outlived the `hlt` that
+    // replaced the spinning.
+    //
+    // The honest counter was already there — `record_halt` at every HLT
+    // site — and only `cores` used it. Now every core is measured the same
+    // way: a spinner never halts and shows ~100 %, a core idling on the
+    // timer shows ~0 %.
+    let halt_pct = ((delta_halt as u128) * 100 / (delta_tsc as u128)).min(100) as u32;
+    CORE_USAGE[core_id].store(100 - halt_pct, Ordering::Relaxed);
 
     // Effective running frequency: APERF/MPERF * nominal_TSC_freq.
     // TSC is calibrated to nominal base; MPERF ticks at that same rate.
@@ -470,7 +492,8 @@ pub fn max_turbo_mhz() -> u32 { MAX_TURBO_MHZ.load(Ordering::Relaxed) }
 /// Min efficiency frequency in MHz (from HWP capabilities).
 pub fn min_eff_mhz() -> u32 { MIN_EFF_MHZ.load(Ordering::Relaxed) }
 
-/// Per-core CPU usage in percent (0-100), based on delta busy/total TSC.
+/// Per-core CPU usage in percent (0-100): 100 − halted% over the last
+/// sampling window. Measured, not self-reported.
 pub fn core_usage(core_id: usize) -> u32 {
     if core_id >= 256 { return 0; }
     CORE_USAGE[core_id].load(Ordering::Relaxed)
