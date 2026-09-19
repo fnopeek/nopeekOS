@@ -1356,7 +1356,7 @@ pub(crate) fn npk_mmio_read32(ctx: &mut HostState, handle: i32, offset: i32) -> 
     if h >= hw.mmio_maps.len() { return -1; }
     let (base, pages) = hw.mmio_maps[h];
     let off = offset as usize;
-    if off + 4 > pages * 4096 { return -1; }
+    if offset < 0 || off + 4 > pages * 4096 { return -1; }
     // SAFETY: validated MMIO region within mapped BAR
     unsafe { core::ptr::read_volatile((base + off as u64) as *const u32) as i32 }
 }
@@ -1370,7 +1370,7 @@ pub(crate) fn npk_mmio_write32(ctx: &mut HostState, handle: i32, offset: i32, va
     if h >= hw.mmio_maps.len() { return -1; }
     let (base, pages) = hw.mmio_maps[h];
     let off = offset as usize;
-    if off + 4 > pages * 4096 { return -1; }
+    if offset < 0 || off + 4 > pages * 4096 { return -1; }
     // SAFETY: validated MMIO region within mapped BAR
     unsafe { core::ptr::write_volatile((base + off as u64) as *mut u32, value as u32) }
     0
@@ -1385,7 +1385,7 @@ pub(crate) fn npk_mmio_read16(ctx: &mut HostState, handle: i32, offset: i32) -> 
     if h >= hw.mmio_maps.len() { return -1; }
     let (base, pages) = hw.mmio_maps[h];
     let off = offset as usize;
-    if off + 2 > pages * 4096 || off & 0x1 != 0 { return -1; }
+    if offset < 0 || off + 2 > pages * 4096 || off & 0x1 != 0 { return -1; }
     // SAFETY: validated MMIO region within mapped BAR, 2-byte aligned
     unsafe { core::ptr::read_volatile((base + off as u64) as *const u16) as i32 }
 }
@@ -1399,9 +1399,44 @@ pub(crate) fn npk_mmio_write16(ctx: &mut HostState, handle: i32, offset: i32, va
     if h >= hw.mmio_maps.len() { return -1; }
     let (base, pages) = hw.mmio_maps[h];
     let off = offset as usize;
-    if off + 2 > pages * 4096 || off & 0x1 != 0 { return -1; }
+    if offset < 0 || off + 2 > pages * 4096 || off & 0x1 != 0 { return -1; }
     // SAFETY: validated MMIO region within mapped BAR, 2-byte aligned
     unsafe { core::ptr::write_volatile((base + off as u64) as *mut u16, value as u16) }
+    0
+}
+
+// 8-bit MMIO. Realtek rtw88 (RTL8822CE) rechnet seinen halben Registersatz
+// in Bytes: die Power-Sequenz ist ein read8/write8-Interpreter, und Register
+// wie REG_SYS_FUNC_EN+1 sind als EINZELNES Byte gemeint. Ein 32-Bit-RMW ist
+// dafuer kein Ersatz — er liest und schreibt drei Nachbarbytes mit, und bei
+// Registern mit Leseeffekt ist das ein anderer Vorgang. Linux waehlt die
+// Breite absichtlich; wir uebernehmen sie.
+pub(crate) fn npk_mmio_read8(ctx: &mut HostState, handle: i32, offset: i32) -> i32 {
+    let hw = match ctx.hw.as_ref() {
+        Some(h) => h,
+        None => return -1,
+    };
+    let h = handle as usize;
+    if h >= hw.mmio_maps.len() { return -1; }
+    let (base, pages) = hw.mmio_maps[h];
+    let off = offset as usize;
+    if offset < 0 || off + 1 > pages * 4096 { return -1; }
+    // SAFETY: validated MMIO region within mapped BAR
+    unsafe { core::ptr::read_volatile((base + off as u64) as *const u8) as i32 }
+}
+
+pub(crate) fn npk_mmio_write8(ctx: &mut HostState, handle: i32, offset: i32, value: i32) -> i32 {
+    let hw = match ctx.hw.as_ref() {
+        Some(h) => h,
+        None => return -1,
+    };
+    let h = handle as usize;
+    if h >= hw.mmio_maps.len() { return -1; }
+    let (base, pages) = hw.mmio_maps[h];
+    let off = offset as usize;
+    if offset < 0 || off + 1 > pages * 4096 { return -1; }
+    // SAFETY: validated MMIO region within mapped BAR
+    unsafe { core::ptr::write_volatile((base + off as u64) as *mut u8, value as u8) }
     0
 }
 
@@ -1414,7 +1449,7 @@ pub(crate) fn npk_mmio_read64(ctx: &mut HostState, handle: i32, offset: i32) -> 
     if h >= hw.mmio_maps.len() { return -1; }
     let (base, pages) = hw.mmio_maps[h];
     let off = offset as usize;
-    if off + 8 > pages * 4096 { return -1; }
+    if offset < 0 || off + 8 > pages * 4096 { return -1; }
     // SAFETY: validated MMIO region within mapped BAR
     let lo = unsafe { core::ptr::read_volatile((base + off as u64) as *const u32) } as u64;
     let hi = unsafe { core::ptr::read_volatile((base + off as u64 + 4) as *const u32) } as u64;
@@ -1430,7 +1465,7 @@ pub(crate) fn npk_mmio_write64(ctx: &mut HostState, handle: i32, offset: i32, va
     if h >= hw.mmio_maps.len() { return -1; }
     let (base, pages) = hw.mmio_maps[h];
     let off = offset as usize;
-    if off + 8 > pages * 4096 { return -1; }
+    if offset < 0 || off + 8 > pages * 4096 { return -1; }
     let v = value as u64;
     // SAFETY: validated MMIO region within mapped BAR
     unsafe {
@@ -1482,7 +1517,7 @@ pub(crate) fn npk_dma_read32(ctx: &mut HostState, handle: i32, offset: i32) -> i
     if h >= hw.dma_allocs.len() { return -1; }
     let (phys, pages) = hw.dma_allocs[h];
     let off = offset as usize;
-    if off + 4 > pages * 4096 { return -1; }
+    if offset < 0 || off + 4 > pages * 4096 { return -1; }
     // SAFETY: reading from validated DMA buffer
     unsafe { core::ptr::read_volatile((phys + off as u64) as *const u32) as i32 }
 }
@@ -1496,7 +1531,7 @@ pub(crate) fn npk_dma_write32(ctx: &mut HostState, handle: i32, offset: i32, val
     if h >= hw.dma_allocs.len() { return -1; }
     let (phys, pages) = hw.dma_allocs[h];
     let off = offset as usize;
-    if off + 4 > pages * 4096 { return -1; }
+    if offset < 0 || off + 4 > pages * 4096 { return -1; }
     // SAFETY: writing to validated DMA buffer
     unsafe { core::ptr::write_volatile((phys + off as u64) as *mut u32, value as u32) }
     0

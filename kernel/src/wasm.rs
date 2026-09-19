@@ -2533,6 +2533,24 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_mmio_read8(handle, offset) -> u8 as i32
+    // npk_mmio_write8(handle, offset, value) -> 0 or -1
+    // Echtes 8-Bit-MMIO. rtw88 (RTL8822CE) fuehrt seine Power-Sequenz als
+    // read8/write8-Interpreter und meint Register wie REG_SYS_FUNC_EN+1 als
+    // EINZELNES Byte. Ein 32-Bit-RMW beruehrt drei Nachbarbytes und ist damit
+    // ein anderer Vorgang — Linux waehlt die Breite absichtlich.
+    linker.func_wrap("env", "npk_mmio_read8",
+        |mut caller: Caller<'_, HostState>, handle: i32, offset: i32| -> i32 {
+            host_core::npk_mmio_read8(caller.data_mut(), handle, offset)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    linker.func_wrap("env", "npk_mmio_write8",
+        |mut caller: Caller<'_, HostState>, handle: i32, offset: i32, value: i32| -> i32 {
+            host_core::npk_mmio_write8(caller.data_mut(), handle, offset, value)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_mmio_read64(handle, offset) -> i64
     linker.func_wrap("env", "npk_mmio_read64",
         |mut caller: Caller<'_, HostState>, handle: i32, offset: i32| -> i64 {
