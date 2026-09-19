@@ -6,6 +6,10 @@ forge/**/target
 *.o
 *.bin
 !release/kernel.bin
+# Treiber-Firmware gehoert ins Repo. tools/wasm/wifi/src/rtw8852b_fw.bin kam
+# vor der *.bin-Regel dazu und bleibt deshalb getrackt; ein NEUER Blob faellt
+# ohne diese Ausnahme still aus dem Commit, und dann baut origin nicht.
+!tools/wasm/*/firmware/*.bin
 kernel/src/install_data/grub.efi
 kernel/src/install_data/kernel.bin
 kernel/src/install_data/kernel.efi

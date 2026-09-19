@@ -27,6 +27,8 @@ unsafe extern "C" {
 
     fn npk_dma_alloc(pages: i32) -> i32;
     fn npk_dma_phys_addr(handle: i32) -> i64;
+    fn npk_dma_read(handle: i32, dma_off: i32, wasm_ptr: i32, len: i32) -> i32;
+    fn npk_dma_write(handle: i32, dma_off: i32, wasm_ptr: i32, len: i32) -> i32;
     fn npk_dma_read32(handle: i32, offset: i32) -> i32;
     fn npk_dma_write32(handle: i32, offset: i32, value: i32) -> i32;
 
@@ -129,6 +131,16 @@ pub fn dma_alloc(pages: u16) -> i32 {
 pub fn dma_phys(handle: i32) -> u64 {
     let v = unsafe { npk_dma_phys_addr(handle) };
     if v < 0 { 0 } else { v as u64 }
+}
+
+/// Bytes aus dem Linearspeicher in den DMA-Puffer. 4096 Bytes ueber 1024
+/// Einzelschreibungen waeren dieselbe Wirkung zum vielfachen Preis.
+pub fn dma_write_buf(handle: i32, offset: u32, data: &[u8]) -> i32 {
+    unsafe { npk_dma_write(handle, offset as i32, data.as_ptr() as i32, data.len() as i32) }
+}
+
+pub fn dma_read_buf(handle: i32, offset: u32, buf: &mut [u8]) -> i32 {
+    unsafe { npk_dma_read(handle, offset as i32, buf.as_mut_ptr() as i32, buf.len() as i32) }
 }
 
 pub fn dma_r32(handle: i32, offset: u32) -> u32 {

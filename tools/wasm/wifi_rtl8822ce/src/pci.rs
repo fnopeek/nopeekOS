@@ -246,25 +246,29 @@ pub fn verify_rings(h: i32, trx: &Trx) -> bool {
     for q in 0..N_TX_QUEUES {
         let desa = host::r32(h, TXQ[q].desa);
         let mut line_ok = desa == trx.tx[q].dma;
-        let num = match TXQ[q].num {
-            Some(reg) => {
-                let v = host::r16(h, reg) as u32 & TRX_BD_IDX_MASK;
-                line_ok &= v == (trx.tx[q].len & TRX_BD_IDX_MASK);
-                v
-            }
-            None => 0,
-        };
         host::print(if line_ok { "  [ JA  ] " } else { "  [NEIN ] " });
         host::print(TXQ[q].name);
         host::print(" DESA 0x");
         host::print_hex32(desa);
-        host::print("  NUM ");
-        host::print_dec(num);
         host::print("  (erwartet 0x");
         host::print_hex32(trx.tx[q].dma);
-        host::print(", ");
-        host::print_dec(trx.tx[q].len);
-        host::print(")\n");
+        host::print(")  NUM ");
+        match TXQ[q].num {
+            Some(reg) => {
+                let v = host::r16(h, reg) as u32 & TRX_BD_IDX_MASK;
+                let want = trx.tx[q].len & TRX_BD_IDX_MASK;
+                line_ok &= v == want;
+                host::print_dec(v);
+                host::print(" (erwartet ");
+                host::print_dec(want);
+                host::print(")");
+            }
+            // pci.h:57 — "BCNQ is specialized for rsvd page, does not need to
+            // specify a number". Eine Null hier waere keine Abweichung,
+            // sondern eine Frage, die es gar nicht gibt.
+            None => host::print("— (BCNQ hat kein NUM-Register)"),
+        }
+        host::print("\n");
         ok &= line_ok;
     }
 
@@ -284,4 +288,68 @@ pub fn verify_rings(h: i32, trx: &Trx) -> bool {
     ok &= line_ok;
 
     ok
+}
+
+// ── Stufe 2b: eine Reserved Page ueber die BCN-Queue ─────────────
+// pci.h:162-163
+pub const RTK_PCI_TXBD_OWN_OFFSET: u32 = 15;
+pub const RTK_PCI_TXBD_BCN_WORK: u32 = 0x383;
+pub const BIT_PCI_BCNQ_FLAG: u8 = 1 << 4; // pci.h:36
+
+/// Groesstes Stueck, das `download_firmware_to_mem` am Stueck schiebt
+/// (mac.c: `max_size = 0x1000`), plus der Deskriptor davor.
+pub const RSVD_STAGE_BYTES: u32 = 0x1000 + crate::tx::TX_PKT_DESC_SZ as u32;
+
+/// pci.c `rtw_pci_write_data_rsvd_page` + `rtw_pci_tx_write_data` fuer
+/// `RTW_TX_QUEUE_BCN`.
+///
+/// Der BCN-Weg ist der Sonderfall im Sonderfall: kein `avail_desc`, kein
+/// Vorruecken von `wp`, dafuer das OWN-Bit in `psb_len` und ein Anstoss ueber
+/// `RTK_PCI_TXBD_BCN_WORK`. `rtw_pci_release_rsvd_page` gibt in Linux das
+/// vorige skb frei — bei uns ist der Staging-Puffer fest, es gibt nichts
+/// freizugeben.
+pub fn write_data_rsvd_page(
+    h: i32, trx: &Trx, stage: i32, payload: &[u8], current_band_type: u8,
+) -> bool {
+    let desc_sz = crate::tx::TX_PKT_DESC_SZ;
+    let mut info = crate::tx::rsvd_page_pkt_info_update(payload, current_band_type);
+    // pci.c: `pkt_info->qsel = rtw_pci_get_tx_qsel(skb, queue)` — fuer die
+    // BCN-Queue also BEACON, und erst DANACH wird der Deskriptor gefuellt.
+    info.qsel = crate::tx::TX_DESC_QSEL_BEACON;
+
+    let mut desc = [0u8; crate::tx::TX_PKT_DESC_SZ];
+    crate::tx::fill_tx_desc(&info, &mut desc);
+
+    // Deskriptor und Nutzdaten liegen zusammenhaengend, wie das skb in Linux
+    // nach `skb_push`: der zweite Buffer-Deskriptor zeigt auf dma + 48.
+    host::dma_write_buf(stage, 0, &desc);
+    host::dma_write_buf(stage, desc_sz as u32, payload);
+
+    let dma = host::dma_phys(stage) as u32;
+    let total = desc_sz + payload.len(); // = skb->len nach dem Push
+    let mut psb_len = ((total as u32 - 1) / 128) + 1;
+    psb_len |= 1 << RTK_PCI_TXBD_OWN_OFFSET;
+
+    // `get_tx_buffer_desc(ring, 16)` mit wp = 0 -> Offset 0.
+    //
+    // ZWEI Deskriptoren in EINEN Ringplatz, und das passt genau:
+    // `struct rtw_pci_tx_buffer_desc` (pci.h:165) ist
+    // { __le16 buf_size; __le16 psb_len; __le32 dma; } = 8 Bytes, waehrend
+    // `tx_buf_desc_sz` 16 ist. Ein Platz fasst also Kopf- UND Nutzdaten-
+    // Deskriptor. Der erste zeigt auf die 48 Deskriptorbytes, der zweite auf
+    // die Nutzdaten dahinter.
+    let ring = trx.tx[Q_BCN].handle;
+    // buf_desc[0] = { buf_size: 48, psb_len, dma }
+    host::dma_w32(ring, 0, (desc_sz as u32 & 0xFFFF) | (psb_len << 16));
+    host::dma_w32(ring, 4, dma);
+    // buf_desc[1] = { buf_size: payload, psb_len: 0, dma + 48 }
+    host::dma_w32(ring, 8, payload.len() as u32 & 0xFFFF);
+    host::dma_w32(ring, 12, dma + desc_sz as u32);
+
+    host::fence();
+
+    // pci.c: "reserved pages go through beacon queue"
+    let work = host::r8(h, RTK_PCI_TXBD_BCN_WORK);
+    host::w8(h, RTK_PCI_TXBD_BCN_WORK, work | BIT_PCI_BCNQ_FLAG);
+    true
 }
