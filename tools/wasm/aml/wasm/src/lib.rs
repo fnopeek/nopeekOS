@@ -46,6 +46,7 @@ unsafe extern "C" {
     fn npk_sleep(ms: i32) -> i32;
     fn npk_log_serial(ptr: i32, len: i32);
     fn npk_print(ptr: i32, len: i32);
+    fn npk_sys_info(key: i32) -> i64;
 }
 
 /// In BEIDE Kanaele.
@@ -181,6 +182,11 @@ impl Ec for HostEc {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     logln("[aml] battery driver start");
+    // Der ausfuehrliche Mitschrieb der ERSTEN Runde — jede Region, jeder
+    // EC-Zugriff, jedes Feld von `_BIF` — ist das Werkzeug, mit dem dieser
+    // Treiber gebaut wurde, und rund 150 Zeilen. Im Normalbetrieb bleibt
+    // er aus; `set log.drivers 1` holt ihn zurueck.
+    let loud = unsafe { npk_sys_info(50) } == 1;
 
     let dsdt_ptr = core::ptr::addr_of_mut!(DSDT) as *mut u8;
     let len = unsafe { npk_acpi_dsdt(dsdt_ptr as i32, DSDT_MAX as i32) };
@@ -204,7 +210,7 @@ pub extern "C" fn _start() {
         round += 1;
         heap_reset();
         let table = unsafe { core::slice::from_raw_parts(dsdt_ptr as *const u8, table_len) };
-        let packed = decode(table, round == 1);
+        let packed = decode(table, loud && round == 1);
         if packed != last {
             if packed < 0 {
                 logln("[aml] no usable battery (packed=-1)");
