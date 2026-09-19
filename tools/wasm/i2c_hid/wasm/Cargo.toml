@@ -1,0 +1,16 @@
+[package]
+name = "i2c_hid"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+i2c_hid_core = { path = "../core" }
+aml_core = { path = "../../aml/core" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"

@@ -10,7 +10,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 for mod in "$@"; do
     src="$ROOT/tools/wasm/$mod"
-    [ -d "$src" ] || { echo "no such module: $mod" >&2; exit 1; }
+    # Module mit eigenem core/harness (aml, i2c_hid) legen ihre Crate eine
+    # Ebene tiefer. Das stand bisher nur im Memory als "von Hand bauen" —
+    # und genau solche Handgriffe vergisst man bei der Freigabe.
+    if [ ! -f "$src/Cargo.toml" ] && [ -f "$src/wasm/Cargo.toml" ]; then
+        src="$src/wasm"
+    fi
+    [ -f "$src/Cargo.toml" ] || { echo "no such module: $mod" >&2; exit 1; }
 
     ( cd "$src" && cargo build --release --target wasm32-unknown-unknown )
 
