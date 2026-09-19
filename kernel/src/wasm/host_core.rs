@@ -1509,6 +1509,50 @@ pub(crate) fn npk_dma_alloc(ctx: &mut HostState, pages: i32) -> i32 {
     handle as i32
 }
 
+/// Wie `npk_dma_alloc`, aber der Treiber nennt die OBERGRENZE selbst.
+///
+/// `npk_dma_alloc` sucht unter 4 GB, und `allocate_contiguous_below` sucht
+/// von oben nach unten — das Ergebnis liegt damit immer direkt unter dem
+/// PCI-MMIO-Loch. Auf AMD-Blech ist genau dort TSEG/DPR: die CPU liest und
+/// schreibt dort, ein GERAET wird abgewiesen, und der Chip bekommt einen
+/// Master Abort auf eine Adresse, die aussieht wie gueltiges RAM.
+///
+/// Welche Adressen ein Geraet erreichen kann, ist Geraetewissen und gehoert
+/// deshalb in den Treiber, nicht in eine Konstante hier. `limit_mb <= 0`
+/// heisst 4 GB, also das alte Verhalten; mehr als 4 GB gibt es nicht, weil
+/// jedes Geraet mit 32-Bit-Deskriptoren sonst stillschweigend falsch laege.
+///
+/// Sicherheit: derselbe Weg, dieselben Deckel, dieselbe Bitmap. Der Ruger
+/// waehlt eine Obergrenze, keine Adresse — er kann sich damit keinen
+/// fremden Speicher aussuchen.
+pub(crate) fn npk_dma_alloc_below(ctx: &mut HostState, pages: i32, limit_mb: i32) -> i32 {
+    let hw = match ctx.hw.as_mut() {
+        Some(h) => h,
+        None => return -1,
+    };
+    if pages <= 0 || pages as usize > MAX_DMA_PAGES_PER_CALL { return -1; }
+    let page_count = pages as usize;
+    if hw.dma_allocs.len() >= MAX_DMA_ALLOCS { return -1; }
+    let total: usize = hw.dma_allocs.iter().map(|(_, p)| *p).sum();
+    if total + page_count > MAX_DMA_PAGES { return -1; }
+
+    let limit = if limit_mb <= 0 {
+        0x1_0000_0000u64
+    } else {
+        ((limit_mb as u64) * 1024 * 1024).min(0x1_0000_0000)
+    };
+
+    let phys = match crate::memory::allocate_contiguous_below(page_count, limit) {
+        Some(p) => p,
+        None => return -1,
+    };
+    // SAFETY: zeroing freshly allocated DMA memory
+    unsafe { core::ptr::write_bytes(phys as *mut u8, 0, page_count * 4096) }
+    let handle = hw.dma_allocs.len();
+    hw.dma_allocs.push((phys, page_count));
+    handle as i32
+}
+
 pub(crate) fn npk_dma_phys_addr(ctx: &mut HostState, handle: i32) -> i64 {
     let hw = match ctx.hw.as_ref() {
         Some(h) => h,
