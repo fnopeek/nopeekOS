@@ -38,6 +38,7 @@ unsafe extern "C" {
     fn npk_mmio_read32(handle: i32, offset: i32) -> i32;
     fn npk_mmio_write32(handle: i32, offset: i32, value: i32) -> i32;
     fn npk_now_us() -> i64;
+    fn npk_acpi_mem_read(hi: i32, lo: i32) -> i32;
 }
 
 /// Der Hardwarezugang des Bustreibers.
@@ -96,13 +97,27 @@ static ALLOC: Bump = Bump;
 const DSDT_MAX: usize = 512 * 1024;
 static mut DSDT: [u8; DSDT_MAX] = [0; DSDT_MAX];
 
-/// Der Interpreter braucht einen EC-Zugang. Ein I2C-HID-Geraet fragt
-/// keinen — aber `_INI` und `_REG` auf dem Weg dorthin koennten es tun,
-/// und dann ist eine 0 die ehrlichere Antwort als ein Absturz.
-struct NoEc;
-impl Ec for NoEc {
+/// Der Firmware-Zugang des Interpreters.
+///
+/// Einen Embedded Controller fragt ein I2C-HID-Geraet nicht — aber
+/// SystemMemory schon, und das ist hier der Unterschied zwischen „laeuft"
+/// und „laeuft nicht": das `_STA` der I2C-Controller liest ein
+/// Konfigurationsbyte aus dem NVS-Fenster der Firmware. Ohne diesen Zugang
+/// erfindet der Interpreter dort eine 0, und die Firmware schliesst
+/// pflichtgemaess auf „abgeschaltet" — gemessen an Florians IdeaPad, wo
+/// beide Controller als absent gemeldet wurden, obwohl beide laufen.
+///
+/// Dasselbe Loch hatte der Akku-Treiber, und es steht dort seit
+/// Kernel 0.365.0 offen. `npk_acpi_mem_read` ist nur LESEND und lehnt
+/// jede Adresse in der RAM-Karte ab.
+struct FirmwareAccess;
+impl Ec for FirmwareAccess {
     fn read(&mut self, _a: u8) -> u8 { 0 }
     fn write(&mut self, _a: u8, _v: u8) {}
+    fn mem_read(&mut self, addr: u64) -> Option<u8> {
+        let v = unsafe { npk_acpi_mem_read((addr >> 32) as i32, addr as u32 as i32) };
+        if v < 0 { None } else { Some(v as u8) }
+    }
     fn note(&mut self, s: &str) { logln(s); }
 }
 
@@ -124,7 +139,7 @@ pub extern "C" fn _start() {
         Err(_) => { logln("[i2c-hid] DSDT did not parse"); return; }
     };
 
-    let mut ec = NoEc;
+    let mut ec = FirmwareAccess;
     let mut m = Machine::new(&ns, &mut ec);
     m.init();
 

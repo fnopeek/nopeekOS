@@ -1922,20 +1922,30 @@ impl<'a> Machine<'a> {
     }
 
     /// `_STA` nach ACPI 6.5 §6.3.7: fehlt die Methode, gilt das Geraet als
-    /// vorhanden. Sonst Bit0 = vorhanden, Bit3 = funktionsfaehig — genau die
-    /// Pruefung aus Linux' `acpi_bus_get_status`.
+    /// vorhanden. Sonst Bit0 = vorhanden, Bit3 = funktionsfaehig.
+    ///
+    /// **ODER, nicht UND.** Linux `acpi_device_is_present` (scan.c):
+    /// `adev->status.present || adev->status.functional`. Ein Und ist
+    /// strenger als die Vorlage und sperrt Geraete aus, die die Firmware
+    /// als brauchbar meldet.
     pub fn device_present(&mut self, dev: &Path) -> bool {
+        self.device_status(dev).map(|f| f & 0x01 != 0 || f & 0x08 != 0).unwrap_or(true)
+    }
+
+    /// Der rohe `_STA`-Wert, oder `None`, wenn es keinen gibt.
+    ///
+    /// Eine Entscheidung ohne die Zahl dahinter ist am Geraet nicht
+    /// nachvollziehbar — „absent" sagt nicht, ob die Firmware 0 meinte
+    /// oder ob wir ihr eine 0 untergeschoben haben.
+    pub fn device_status(&mut self, dev: &Path) -> Option<u64> {
         let mut p = dev.clone();
         p.push(crate::value::seg("_STA"));
         if !self.has(&p) {
-            return true;
+            return None;
         }
         match self.it.call_path(&p, Vec::new()) {
-            Ok(v) => {
-                let f = v.as_int();
-                f & 0x01 != 0 && f & 0x08 != 0
-            }
-            Err(_) => false,
+            Ok(v) => Some(v.as_int()),
+            Err(_) => Some(0),
         }
     }
 
