@@ -250,25 +250,30 @@ pub extern "C" fn _start() {
     // `npk_sleep` gibt dazwischen an den Scheduler ab, kostet also weder
     // Kern noch Treibstoff.
     let mut buf = [0u8; 64];
-    let mut rounds = 0u32;
     loop {
-        rounds += 1;
-        // Nach etwa zwei Sekunden: hat ein Geraet, das wir umgeschaltet
-        // haben, ueberhaupt etwas gesagt? Wenn nicht, hat der Schalter es
-        // verstummen lassen — dann zurueck in die Maus-Nachahmung, statt
-        // auf den naechsten Release zu warten. Ein Treiber, der sich
-        // selbst aussperrt, muss sich selbst zurueckholen.
-        if rounds == 400 {
-            for l in live.iter_mut() {
-                if l.seen == 0 {
-                    if let Some(rid) = l.switched.take() {
-                        logln("[i2c-hid] silent since the mode switch — going back to mouse mode");
-                        let (dw, desc, addr) = (
-                            i2c_hid_core::dw_i2c::Dw { ..l.dw }, l.desc, l.addr);
-                        let _ = i2c_hid_core::hid::set_report(
-                            &mut l.bus, &dw, addr, &desc,
-                            i2c_hid_core::hid::REPORT_TYPE_FEATURE, rid, &[0]);
-                    }
+        // Hat der Umschalter in den Praezisionsmodus gegriffen?
+        //
+        // NICHT ueber die Zeit. 0.15.0 fragte nach zwei Sekunden „hat das
+        // Geraet etwas gesagt?" und schaltete sonst zurueck — und ein
+        // Touchpad, das niemand beruehrt, sagt NICHTS. Der Wachhund lief
+        // also jedesmal, bevor der erste Finger aufsetzte, und nahm den
+        // Modus wieder weg. Genau deshalb kam am Geraet nur Bericht 1.
+        //
+        // Die Frage, die sich beantworten laesst, ist eine andere: kommen
+        // Berichte, aber NIE der des Touchpads? Dann hat der Schalter
+        // nicht gegriffen. Schweigen beweist gar nichts und darf deshalb
+        // auch nichts ausloesen.
+        for l in live.iter_mut() {
+            if l.touch_rid.is_some() && !l.saw_touch && l.other_seen >= 64 {
+                if let Some(rid) = l.switched.take() {
+                    logln(&alloc::format!(
+                        "[i2c-hid] {:#04x}: 64 reports and none is the touchpad one — \
+                         the mode switch did not take, back to mouse mode", l.addr));
+                    let (dw, desc, addr) = (
+                        i2c_hid_core::dw_i2c::Dw { ..l.dw }, l.desc, l.addr);
+                    let _ = i2c_hid_core::hid::set_report(
+                        &mut l.bus, &dw, addr, &desc,
+                        i2c_hid_core::hid::REPORT_TYPE_FEATURE, rid, &[0]);
                 }
             }
         }
@@ -414,6 +419,12 @@ struct Live {
     switched: Option<u8>,
     /// Wieviele Berichte sind bisher gekommen?
     seen: u32,
+    /// Die Nummer des Touchpad-Berichts, falls es einen gibt.
+    touch_rid: Option<u8>,
+    /// Ist er je gekommen? Das ist der BEWEIS, dass der Umschalter griff.
+    saw_touch: bool,
+    /// Wieviele Berichte kamen, die NICHT der des Touchpads sind?
+    other_seen: u32,
     /// Wieviele Kontaktlagen wurden schon gemeldet? Die ersten paar
     /// gehoeren ins Log: ob ZWEI Finger ankommen, sagt sonst niemand.
     touch_logged: u32,
@@ -605,10 +616,15 @@ fn talk_to_device(
         dw: i2c_hid_core::dw_i2c::Dw { ..*dw },
         addr, desc,
         uses_ids: map.uses_ids,
+        touch_rid: decoders.iter()
+            .find(|d| matches!(d.mode, Mode::Touchpad { .. }))
+            .map(|d| d.rid),
         decoders,
         unknown_logged: 0,
         switched,
         seen: 0,
+        saw_touch: false,
+        other_seen: 0,
         touch_logged: 0,
         raw_logged: 0, scroll_logged: 0,
         track: i2c_hid_core::gesture::Tracker::new(scroll_step),
@@ -659,10 +675,20 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
     };
     let (mode, btn) = (&d.mode, &d.btn);
     l.seen += 1;
+    if Some(id) == l.touch_rid {
+        if !l.saw_touch {
+            l.saw_touch = true;
+            logln(&alloc::format!(
+                "[i2c-hid] {:#04x}: touchpad report {id} is live — precision mode took",
+                l.addr));
+        }
+    } else {
+        l.other_seen += 1;
+    }
 
     if l.raw_logged < 16 {
         l.raw_logged += 1;
-        logln(&alloc::format!("[i2c-hid]   in {id}: {:02x?}", data));
+        logln(&alloc::format!("[i2c-hid] {:#04x} in {id}: {:02x?}", l.addr, data));
     }
 
     let mut buttons = 0i32;
