@@ -81,7 +81,12 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     kprintln!("/_/ /_/\\____/ .___/\\___/\\___/_/|_|\\____//____/  ");
     kprintln!("           /_/");
     kprintln!();
-    kprintln!("[npk] AI-native Operating System v0.1.0");
+    // Die ECHTE Version, nicht eine hartkodierte. Hier stand seit je
+    // "v0.1.0", und eine falsche Zahl ist schlechter als keine: einen
+    // Geraetelauf, der das alte Bild gebootet hat, erkennt man sonst nur am
+    // WORTLAUT einer Logzeile — und das nur, wenn man sie gerade geaendert
+    // hat. [[feedback_log_the_version_in_the_trace]]
+    kprintln!("[npk] AI-native Operating System v{}", env!("CARGO_PKG_VERSION"));
     kprintln!("[npk] Booting (UEFI)...");
     kprintln!();
 

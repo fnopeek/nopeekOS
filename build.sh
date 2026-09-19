@@ -39,7 +39,11 @@ export RUST_TARGET_PATH="$PROJECT_DIR/targets"
 KERNEL_BIN="$PROJECT_DIR/target/$TARGET/release/nopeekos-kernel"
 KERNEL_EFI="$PROJECT_DIR/target/kernel.efi"
 INSTALLER_DISK="$PROJECT_DIR/target/installer.img"
-DISK_IMG="$PROJECT_DIR/target/disk.img"
+# Mit DISK_IMG=... laesst sich eine EIGENE Testplatte verwenden. Zwei
+# QEMU-Laeufe auf derselben Datei gehen nicht (QEMU nimmt eine Schreibsperre),
+# und wer nebenher mit mtools in die ESP schreibt, veraendert die Platte
+# einer laufenden Sitzung.
+DISK_IMG="${DISK_IMG:-$PROJECT_DIR/target/disk.img}"
 
 # OVMF firmware (UEFI) — read-only CODE + writable per-VM VARS.
 # Arch: /usr/share/edk2-ovmf/x64/  Debian/Ubuntu: /usr/share/OVMF/
@@ -642,6 +646,25 @@ run_qemu_generic() {
     #
     # Die Datei ist kein Notnagel: sie ist das schaerfere Werkzeug, weil man
     # sie gegen ffmpeg halten kann. Nur hoert man sie eben nicht.
+    # USB: normalerweise ein Controller mit Tastatur UND Maus.
+    # QEMU_USB=split legt einen ZWEITEN xHCI an und haengt die Maus dort hin
+    # — die Lage auf Florians IdeaPad (Tastatur 04:00.3, Maus 04:00.4). Ohne
+    # das laesst sich "Geraet am anderen Controller" lokal gar nicht pruefen.
+    local -a usb_args=(
+        -device qemu-xhci,id=xhci
+        -device usb-kbd,bus=xhci.0
+        -device usb-mouse,bus=xhci.0
+    )
+    if [ "${QEMU_USB:-}" = "split" ]; then
+        usb_args=(
+            -device qemu-xhci,id=xhci
+            -device usb-kbd,bus=xhci.0
+            -device qemu-xhci,id=xhci2
+            -device usb-mouse,bus=xhci2.0
+        )
+        log "QEMU_USB=split: keyboard on xhci, mouse on a SECOND controller"
+    fi
+
     local audiodev="${QEMU_AUDIODEV:-}"
     if [ -z "$audiodev" ]; then
         local have
@@ -667,9 +690,7 @@ run_qemu_generic() {
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
         -device nvme,drive=drive0,serial=nopeekos-test \
-        -device qemu-xhci,id=xhci \
-        -device usb-kbd,bus=xhci.0 \
-        -device usb-mouse,bus=xhci.0 \
+        "${usb_args[@]}" \
         -device intel-hda \
         -device hda-output,audiodev=snd0 \
         -audiodev "$audiodev" \
