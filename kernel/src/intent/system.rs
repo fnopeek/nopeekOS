@@ -1277,6 +1277,9 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("[npk]");
             help_note("keys: name, timezone, keyboard, lang, accent, theme, launcher,");
             help_note("      autostart, mouse_speed, shade.* (see 'help desktop')");
+            help_note("      log.drivers — 1 = drivers print their diagnostics");
+            help_note("      (raw descriptors, register traces, per-second");
+            help_note("      counters). Default 0. Findings and errors always print.");
             help_note("      code.scheme — syntax colours in spell: auto, dark-plus,");
             help_note("      light-plus, monokai, solarized-dark/-light, abyss,");
             help_note("      kimbie-dark, quiet-light");
