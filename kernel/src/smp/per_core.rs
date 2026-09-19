@@ -236,6 +236,105 @@ pub fn register_bsp(apic_id: u32) {
         );
     }
     HAS_APERFMPERF.store(ecx & 1 != 0, Ordering::Release);
+    rapl_probe();
+}
+
+// ── RAPL: was zieht das CPU-Package wirklich? ────────────────────────
+//
+// Die Frage dahinter ist nicht akademisch: Florians IdeaPad zieht im
+// Leerlauf 21,4 W (aus `_BST`, deckungsgleich mit 2,5 h auf 53,5 Wh),
+// dasselbe Blech unter Linux 5-8 W. Es gibt acht plausible Verdaechtige
+// — C-States, Aufwachrate, PCIe-ASPM, NVMe-APST, der UC-Framebuffer, der
+// USB-Dongle, WLAN, der dauerlaufende Audio-DMA — und EINE Zahl. Dieses
+// Register trennt den groessten Block vom Rest: ist das Package 3 W,
+// sind C-States und Tickless die falsche Baustelle.
+//
+// Portiert aus Linux 6.18. Das Merkmalsbit steht in
+// `arch/x86/kernel/cpu/amd.c`:
+//
+//     /* Bit 14 indicates the Runtime Average Power Limit interface. */
+//     if (c->x86_power & BIT(14)) set_cpu_cap(c, X86_FEATURE_RAPL);
+//
+// wobei `x86_power` = CPUID Fn8000_0007_EDX ist. Die drei MSR-Nummern
+// stehen in `arch/x86/include/asm/msr-index.h`, die Lage des
+// Einheitenfeldes in `arch/x86/events/rapl.c`
+// (`(msr_rapl_power_unit_bits >> 8) & 0x1F`).
+const MSR_AMD_RAPL_POWER_UNIT: u32 = 0xC001_0299;
+const MSR_AMD_CORE_ENERGY_STATUS: u32 = 0xC001_029A;
+const MSR_AMD_PKG_ENERGY_STATUS: u32 = 0xC001_029B;
+
+static HAS_RAPL: AtomicBool = AtomicBool::new(false);
+/// Nanojoule je Zaehlschritt. Die Einheit ist 2^-ESU Joule; in nJ
+/// gerechnet bleibt es eine ganze Zahl (ESU 16 -> 15258 nJ) und es
+/// braucht keine Gleitkommazahl im Kernel.
+static RAPL_NJ_PER_UNIT: AtomicU32 = AtomicU32::new(0);
+
+/// MUSS auf dem zu messenden Kern laufen (rdmsr ist kernlokal) und nur,
+/// wenn `has_rapl()` gilt — sonst #GP.
+fn rdmsr32(msr: u32) -> u32 {
+    let lo: u32;
+    // SAFETY: der Rufer hat `has_rapl()` geprueft; das MSR existiert dann
+    // auf jedem Kern dieses Sockels.
+    unsafe {
+        core::arch::asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") _);
+    }
+    lo
+}
+
+fn rapl_probe() {
+    let edx: u32;
+    // SAFETY: CPUID 0x80000007 ist auf jedem x86-64 gueltig; rbx wird von
+    // LLVM reserviert, deshalb von Hand gesichert.
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "mov eax, 0x80000007",
+            "cpuid",
+            "pop rbx",
+            out("edx") edx,
+            out("eax") _,
+            out("ecx") _,
+        );
+    }
+    if edx & (1 << 14) == 0 { return; }
+    HAS_RAPL.store(true, Ordering::Release);
+    // Erst JETZT lesen — vor dem Merkmalsbit waere es ein #GP.
+    let esu = (rdmsr32(MSR_AMD_RAPL_POWER_UNIT) >> 8) & 0x1F;
+    // 2^-ESU Joule, in Nanojoule: 1e9 >> ESU. Ein absurdes ESU (0 oder
+    // >30) ergaebe Unsinn statt einer Messung — dann lieber gar keine.
+    if esu == 0 || esu > 30 {
+        HAS_RAPL.store(false, Ordering::Release);
+        return;
+    }
+    RAPL_NJ_PER_UNIT.store((1_000_000_000u64 >> esu) as u32, Ordering::Release);
+}
+
+pub fn has_rapl() -> bool { HAS_RAPL.load(Ordering::Acquire) }
+
+/// Nanojoule je Zaehlschritt (0 = kein RAPL).
+pub fn rapl_nj_per_unit() -> u32 { RAPL_NJ_PER_UNIT.load(Ordering::Relaxed) }
+
+/// Roher Energiezaehler des PACKAGE. 32 Bit, laeuft um — immer die
+/// Differenz zweier Abtastungen nehmen (`wrapping_sub`).
+pub fn rapl_pkg_raw() -> u32 {
+    if !has_rapl() { return 0; }
+    rdmsr32(MSR_AMD_PKG_ENERGY_STATUS)
+}
+
+/// Dasselbe fuer den KERN, auf dem dieser Aufruf laeuft.
+pub fn rapl_core_raw() -> u32 {
+    if !has_rapl() { return 0; }
+    rdmsr32(MSR_AMD_CORE_ENERGY_STATUS)
+}
+
+/// Milliwatt aus Zaehlerdifferenz und Fenster.
+///
+/// mW = nJ / us — die Einheiten kuerzen sich, deshalb steht hier keine
+/// Umrechnungskonstante, die man falsch setzen koennte.
+pub fn rapl_mw(delta_units: u32, window_us: u64) -> u64 {
+    let nj = rapl_nj_per_unit() as u64;
+    if nj == 0 || window_us == 0 { return 0; }
+    (delta_units as u64).saturating_mul(nj) / window_us
 }
 
 pub fn register_ap(apic_id: u32, core_id: u32) {

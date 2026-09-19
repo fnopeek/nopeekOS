@@ -342,6 +342,80 @@ pub fn intent_history(args: &str) {
 /// pack at address 0x0B, and prints the decoded charge + status. Lets us
 /// tell "no controller" from "controller but no battery on the bus" from
 /// "battery present but odd values" without a serial cable.
+/// Wieviel Strom zieht das CPU-Package — gemessen, nicht geschaetzt.
+///
+/// Der Anlass: das IdeaPad zieht im Leerlauf 21,4 W (aus `_BST`,
+/// deckungsgleich mit 2,5 h auf 53,5 Wh), dasselbe Blech unter Linux
+/// 5-8 W. Es gibt acht plausible Verdaechtige und EINE Zahl; diese hier
+/// trennt den groessten Block ab. Ist das Package 3 W, sind C-States und
+/// Tickless die falsche Baustelle und der Strom geht an Bildschirm,
+/// PCIe-Links, NVMe und die Peripherie.
+///
+/// Das Fenster wird mit `hlt` verbracht — gemessen werden soll der
+/// LEERLAUF und nicht die Messung.
+pub fn intent_power(args: &str) {
+    if !crate::smp::per_core::has_rapl() {
+        kprintln!();
+        kprintln!("  Kein RAPL: CPUID Fn8000_0007_EDX[14] ist nicht gesetzt.");
+        kprintln!("  Das gibt es auf AMD ab Zen (Familie 17h) und auf");
+        kprintln!("  Intel-Blech ueber andere MSRs, die wir nicht lesen.");
+        kprintln!();
+        return;
+    }
+
+    // Laenger als bei `cores`: Energie ist ein Integral, und ein langes
+    // Fenster mittelt die Zacken weg, die das Dock und die Bar je Sekunde
+    // machen. `power 5` misst fuenf Sekunden.
+    let secs: u64 = args.trim().parse().unwrap_or(2).clamp(1, 30);
+    let tsc_hz = crate::interrupts::tsc_freq().max(1);
+
+    let t0 = crate::interrupts::rdtsc();
+    let pkg0 = crate::smp::per_core::rapl_pkg_raw();
+    let core0_e0 = crate::smp::per_core::rapl_core_raw();
+    let (halt0, _) = crate::smp::per_core::halt_snapshot(0);
+
+    let deadline = t0 + secs * tsc_hz;
+    while crate::interrupts::rdtsc() < deadline {
+        let h0 = crate::interrupts::rdtsc();
+        // SAFETY: ring-0, IRQs im Shell-Loop an — der 100-Hz-Timer weckt
+        // uns binnen ~10 ms, um die Frist erneut zu pruefen.
+        unsafe { core::arch::asm!("hlt"); }
+        crate::smp::per_core::record_halt(
+            0, crate::interrupts::rdtsc().saturating_sub(h0));
+    }
+
+    let t1 = crate::interrupts::rdtsc();
+    let pkg1 = crate::smp::per_core::rapl_pkg_raw();
+    let core0_e1 = crate::smp::per_core::rapl_core_raw();
+    let (halt1, _) = crate::smp::per_core::halt_snapshot(0);
+
+    let window_tsc = t1.saturating_sub(t0).max(1);
+    let window_us = window_tsc / (tsc_hz / 1_000_000).max(1);
+    let pkg_mw = crate::smp::per_core::rapl_mw(pkg1.wrapping_sub(pkg0), window_us);
+    let core_mw = crate::smp::per_core::rapl_mw(core0_e1.wrapping_sub(core0_e0), window_us);
+
+    // Wieviel des Fensters war Core 0 wirklich angehalten? Eine Wattzahl
+    // ohne diese Angabe laesst offen, ob gerade Leerlauf gemessen wurde.
+    let halt_pct = ((halt1.saturating_sub(halt0) as u128) * 100
+        / (window_tsc as u128)).min(100) as u64;
+
+    kprintln!();
+    kprintln!("  CPU-Leistung (RAPL, {} s Fenster, Core 0 im hlt)", secs);
+    kprintln!("  ─────────────────────────────────────────────");
+    kprintln!("  Package          {}.{:03} W", pkg_mw / 1000, pkg_mw % 1000);
+    kprintln!("  davon Core 0     {}.{:03} W", core_mw / 1000, core_mw % 1000);
+    kprintln!("  Core 0 angehalten  {} % des Fensters", halt_pct);
+    kprintln!();
+    kprintln!("  Rohwerte: dPkg={} dCore0={} Einheit={} nJ Fenster={} us",
+        pkg1.wrapping_sub(pkg0), core0_e1.wrapping_sub(core0_e0),
+        crate::smp::per_core::rapl_nj_per_unit(), window_us);
+    kprintln!();
+    kprintln!("  Vergleich: 'battery' nennt die Entnahme des AKKUS (Gesamt-");
+    kprintln!("  system). Die Differenz ist alles, was nicht die CPU ist —");
+    kprintln!("  Bildschirm, PCIe-Links, NVMe, USB, WLAN, Audio.");
+    kprintln!();
+}
+
 pub fn intent_battery() {
     const SBS_ADDR: u8 = 0x0B;
     kprintln!();

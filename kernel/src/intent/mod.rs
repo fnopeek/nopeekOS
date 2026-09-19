@@ -445,6 +445,10 @@ fn is_core0_intent(verb: &str) -> bool {
     matches!(verb, "lock" | "passwd" | "password" | "passphrase" |
                    "clear" | "cls" | "shade" | "shell" | "npk-shell" |
                    "cd" | "pwd" | "top" | "htop" | "cores" | "cpu" | "history" | "gpu" |
+                   // `power` liest kernLOKALE MSRs (RAPL) und haelt Core 0
+                   // selbst an — auf einem Worker gemessen waere beides
+                   // die falsche Zahl.
+                   "power" | "watt" | "watts" |
                    // microvm + browser: VMX state (CR4.VMXE,
                    // IA32_FEATURE_CONTROL lock-bit, TSS, GDT-with-TR-
                    // slot) is BSP-only — worker cores would VMfail
@@ -1678,6 +1682,9 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         }
         "akku" | "battery" | "bat" => {
             system::intent_battery();
+        }
+        "power" | "watt" | "watts" => {
+            system::intent_power(args);
         }
         "dsdt" => {
             // `dsdt send <ip> <port>` streams the raw table over TCP (exact
