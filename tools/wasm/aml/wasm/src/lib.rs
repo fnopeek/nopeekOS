@@ -213,8 +213,13 @@ pub extern "C" fn _start() {
         let packed = decode(table, loud && round == 1);
         if packed != last {
             if packed < 0 {
+                // Ein Akku, der sich nicht mehr meldet, ist ein Befund.
                 logln("[aml] no usable battery (packed=-1)");
-            } else {
+            } else if loud {
+                // Der Prozentwert nicht: er aendert sich ueber eine
+                // Entladung rund hundertmal, und die Bar zeigt ihn
+                // ohnehin. Eine Zeile, die dem Nutzer waehrend des
+                // Tippens in den Prompt faellt, ist keine Auskunft.
                 lognum("[aml] battery percent=", (packed & 0xFF) as u32);
             }
             last = packed;
