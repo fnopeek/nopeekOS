@@ -101,6 +101,7 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::Bat
     // Reihenfolge wie ACPICA in `acpi_initialize_objects`: erst die
     // Operationsregionen freigeben (`_REG`), dann die Geraete anlaufen
     // lassen (`_STA`/`_INI`).
+    it.run_deferred();
     it.ec.note("[aml]  phase _REG");
     it.register_ec_regions()?;
     it.ec.note("[aml]  phase _INI");
@@ -459,7 +460,18 @@ impl<'a> Interp<'a> {
                 let mut ip = dev.clone();
                 ip.push(ini);
                 if self.has(&ip) {
-                    let _ = self.call_path(&ip, Vec::new());
+                    // Ein `_INI`, das WIRFT, muss es sagen. Es richtet das
+                    // Geraet ein — auf der HP-Tabelle setzt das `_INI` des
+                    // Touchpads die Adresse seines HID-Deskriptors —, und
+                    // ein verschlucktes `let _ =` laesst danach jeden
+                    // Folgefehler wie eine Eigenheit der Firmware aussehen.
+                    match self.call_path(&ip, Vec::new()) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            let name = path_str(&ip);
+                            self.ec.note(&format!("[aml]  {name} failed: {e}"));
+                        }
+                    }
                     ran += 1;
                 }
             }
@@ -528,6 +540,15 @@ impl<'a> Interp<'a> {
                 // `dyn_nodes`. Methoden koennen dort nie stehen, deshalb
                 // bleibt der Zugriff oben absichtlich auf der Tabelle — er
                 // leiht `body` aus, und das muss die Methode ueberleben.
+                if let Some(Node::BufferField { buf, bit_offset, bit_width }) =
+                    self.dyn_nodes.get(path)
+                {
+                    let v = buf.borrow();
+                    return Ok(match &*v {
+                        Value::Buffer(b) => buf_field_read(b, *bit_offset, *bit_width),
+                        _ => Value::Int(0),
+                    });
+                }
                 if self.dyn_nodes.contains_key(path) { return self.read_field(path); }
                 return Err(format!("call: {} is not a method", path_str(path)));
             }
@@ -676,9 +697,14 @@ impl<'a> Interp<'a> {
                 self.dyn_field_list(b, &region, p2 + 1, pkg_end);
                 Ok((Flow::Normal, pkg_end))
             }
-            0x8A | 0x8B | 0x8C | 0x8D | 0x8F | 0x13 => Err(String::from(
-                "Create*Field im Methodenrumpf — braucht eine eigene Knotenart \
-                 (Quellpuffer + Bitversatz + Breite); benannt, nicht gebaut")),
+            0x8A | 0x8B | 0x8C | 0x8D | 0x8F => {
+                let np = self.create_buffer_field(f, p)?;
+                Ok((Flow::Normal, np))
+            }
+            0x5B if b[p + 1] == 0x13 => {
+                let np = self.create_buffer_field(f, p)?;
+                Ok((Flow::Normal, np))
+            }
             _ => {
                 // Expression statement (Store, method call, op with target...).
                 let (_v, np) = self.eval(f, p)?;
@@ -931,6 +957,27 @@ impl<'a> Interp<'a> {
                 }
                 Ok((r, p3))
             }
+            0x84 => {
+                // ConcatenateResTemplate(a, b, target) — ACPI 2.0.
+                //
+                // 1:1 aus ACPICA `acpi_ex_concat_template` (exconcat.c):
+                // in BEIDEN Vorlagen das End-Tag suchen, die Teile davor
+                // hintereinanderlegen und EIN neues End-Tag anhaengen,
+                // dessen Pruefsumme 0 ist („ignorieren"). Ein leerer Puffer
+                // ist erlaubt und zaehlt wie ein reines End-Tag.
+                //
+                // Ohne diesen Operator gibt das `_CRS` jedes
+                // I2C-HID-Geraets nichts zurueck — die Firmware setzt ihre
+                // Vorlage aus Bus- und GPIO-Teil zusammen.
+                let (a, p1) = self.eval(f, p + 1)?;
+                let (bb, p2) = self.eval(f, p1)?;
+                let (tgt, p3) = self.super_name(f, p2)?;
+                let r = Value::Buffer(concat_res_template(&a, &bb));
+                if let Some(pl) = tgt {
+                    self.store(&pl, r.clone())?;
+                }
+                Ok((r, p3))
+            }
             0x99 => {
                 // ToInteger(operand, target)
                 let (a, p1) = self.eval(f, p + 1)?;
@@ -1084,11 +1131,14 @@ impl<'a> Interp<'a> {
             .ok_or_else(|| format!("unresolved name {} (scope {})", segs_str(&nref.segs), path_str(&f.scope)))?;
         // Erst auslesen, dann handeln: `node()` leiht `self`, und die Arme
         // darunter rufen `&mut self`-Methoden.
-        enum Kind { Method(u8), Name(Value), Field, Other }
+        enum Kind { Method(u8), Name(Value), Field, BufField(Obj, u64, u64), Other }
         let kind = match self.node(&path) {
             Some(Node::Method { flags, .. }) => Kind::Method(*flags),
             Some(Node::Name(v)) => Kind::Name(v.borrow().clone()),
             Some(Node::Field { .. }) => Kind::Field,
+            Some(Node::BufferField { buf, bit_offset, bit_width }) => {
+                Kind::BufField(buf.clone(), *bit_offset, *bit_width)
+            }
             _ => Kind::Other,
         };
         match kind {
@@ -1106,6 +1156,14 @@ impl<'a> Interp<'a> {
             }
             Kind::Name(v) => Ok((v, p1)),
             Kind::Field => Ok((self.read_field(&path)?, p1)),
+            Kind::BufField(o, off, w) => {
+                let v = o.borrow();
+                let r = match &*v {
+                    Value::Buffer(b) => buf_field_read(b, off, w),
+                    _ => Value::Int(0),
+                };
+                Ok((r, p1))
+            }
             Kind::Other => Ok((Value::Uninit, p1)),
         }
     }
@@ -1149,6 +1207,9 @@ impl<'a> Interp<'a> {
                     Some(pp) => match self.node(&pp) {
                         Some(Node::Field { .. }) => Ok((Some(Place::Field(pp)), p1)),
                         Some(Node::Name(o)) => Ok((Some(Place::Obj(o.clone())), p1)),
+                        Some(Node::BufferField { buf, bit_offset, bit_width }) => {
+                            Ok((Some(Place::BufField(buf.clone(), *bit_offset, *bit_width)), p1))
+                        }
                         _ => Ok((Some(Place::Field(pp)), p1)),
                     },
                     None => Ok((None, p1)),
@@ -1187,6 +1248,79 @@ impl<'a> Interp<'a> {
 
     // ── places ────────────────────────────────────────────────────────
 
+    /// `CreateBitField` / `CreateByteField` / `CreateWordField` /
+    /// `CreateDWordField` / `CreateQWordField` / `CreateField`.
+    ///
+    /// ACPI 6.5 §19.6.20-25: ein benanntes BUFFER-FELD, also ein
+    /// Bitausschnitt eines bestehenden Puffers — kein eigener Speicher.
+    /// Schreibt jemand hinein, aendert sich der Puffer.
+    ///
+    /// Die Quelle wird als SuperName geholt, nicht mit `eval`: `eval` gaebe
+    /// eine KOPIE des Puffers, und `INT1 = GNUM (GPDI)` schriebe dann ins
+    /// Leere — die Ressourcenvorlage, aus der `_CRS` seine Pinnummer nimmt,
+    /// bliebe auf null.
+    fn create_buffer_field(&mut self, f: &Frame, p: usize) -> R<usize> {
+        let b = f.body;
+        let (op, arg0) = if b[p] == 0x5B { (0x13u8, p + 2) } else { (b[p], p + 1) };
+
+        let (src_place, p1) = self.super_name_opt(f, arg0)?;
+        let buf = match src_place {
+            Some(Place::Obj(o)) => o,
+            // Eine Quelle, die kein schlichter Name ist (Index(...), ein
+            // Methodenergebnis): dann gibt es keinen Puffer zum Anbinden.
+            // Ein Wegwerfpuffer haelt den Lauf am Leben und ist als solcher
+            // benannt.
+            other => {
+                let v = match other {
+                    Some(pl) => self.read_place(&pl)?,
+                    None => Value::Uninit,
+                };
+                self.ec.note("[aml]  Create*Field on a non-name source — writes will not stick");
+                obj(v)
+            }
+        };
+
+        let (idx, p2) = self.eval(f, p1)?;
+        let (bit_offset, bit_width, p3) = match op {
+            0x8D => (idx.as_int(), 1u64, p2),                 // CreateBitField
+            0x8C => (idx.as_int() * 8, 8, p2),                // CreateByteField
+            0x8B => (idx.as_int() * 8, 16, p2),               // CreateWordField
+            0x8A => (idx.as_int() * 8, 32, p2),               // CreateDWordField
+            0x8F => (idx.as_int() * 8, 64, p2),               // CreateQWordField
+            _ => {
+                // CreateField(source, bit-index, num-bits, name)
+                let (n, q) = self.eval(f, p2)?;
+                (idx.as_int(), n.as_int(), q)
+            }
+        };
+
+        let (nref, p4) = name_at(b, p3);
+        let path = self.def_path(&f.scope, &nref);
+        self.dyn_nodes.insert(path, Node::BufferField { buf, bit_offset, bit_width });
+        Ok(p4)
+    }
+
+    /// Aufgehobene Anweisungen der Tabelle nachholen.
+    ///
+    /// ACPICA fuehrt die Termliste beim Laden aus; wir holen genau die
+    /// Anweisungen nach, die dafuer einen Interpreter brauchen. Vor `_REG`
+    /// und `_INI`, weil die sie benutzen.
+    fn run_deferred(&mut self) {
+        let items: Vec<(Path, Vec<u8>)> = self.ns.deferred.clone();
+        for (scope, bytes) in items {
+            let f = Frame { scope: scope.clone(), args: Vec::new(), locals: Vec::new(), body: &bytes };
+            let r = if bytes.first() == Some(&0x5B) {
+                self.create_buffer_field(&f, 0)
+            } else {
+                self.create_buffer_field(&f, 0)
+            };
+            if let Err(e) = r {
+                let name = path_str(&scope);
+                self.ec.note(&format!("[aml]  deferred op in {name} failed: {e}"));
+            }
+        }
+    }
+
     fn read_place(&mut self, pl: &Place) -> R<Value> {
         match pl {
             Place::Obj(o) => Ok(o.borrow().clone()),
@@ -1195,6 +1329,13 @@ impl<'a> Interp<'a> {
                 let v = o.borrow();
                 match &*v {
                     Value::Buffer(b) => Ok(Value::Int(*b.get(*i).unwrap_or(&0) as u64)),
+                    _ => Ok(Value::Int(0)),
+                }
+            }
+            Place::BufField(o, off, w) => {
+                let v = o.borrow();
+                match &*v {
+                    Value::Buffer(b) => Ok(buf_field_read(b, *off, *w)),
                     _ => Ok(Value::Int(0)),
                 }
             }
@@ -1214,6 +1355,13 @@ impl<'a> Interp<'a> {
                     if *i < b.len() {
                         b[*i] = val.as_int() as u8;
                     }
+                }
+                Ok(())
+            }
+            Place::BufField(o, off, w) => {
+                let mut v = o.borrow_mut();
+                if let Value::Buffer(b) = &mut *v {
+                    buf_field_write(b, *off, *w, &val);
                 }
                 Ok(())
             }
@@ -1583,4 +1731,280 @@ fn skip_else(b: &[u8], p: usize) -> usize {
     } else {
         p
     }
+}
+
+/// Laenge einer Ressourcen-Vorlage BIS zu ihrem End-Tag.
+///
+/// ACPICA `acpi_ut_get_resource_end_tag`: die Deskriptoren durchgehen und
+/// beim kleinen Typ 0x0F stehenbleiben. Ein leerer Puffer gilt als Vorlage
+/// mit nichts als einem End-Tag, also Laenge 0.
+fn resource_body_len(b: &[u8]) -> usize {
+    let mut i = 0usize;
+    while i < b.len() {
+        let tag = b[i];
+        if tag & 0x80 == 0 {
+            if (tag >> 3) & 0x0F == 0x0F {
+                return i; // End-Tag: Laenge ist alles davor
+            }
+            i += 1 + (tag & 0x07) as usize;
+        } else {
+            if i + 3 > b.len() {
+                break;
+            }
+            let len = (b[i + 1] as usize) | ((b[i + 2] as usize) << 8);
+            i += 3 + len;
+        }
+    }
+    // Kein End-Tag gefunden: alles gilt als Rumpf.
+    b.len().min(i)
+}
+
+/// Bits `[off, off+width)` aus einem Puffer lesen — LSB zuerst innerhalb
+/// jedes Bytes (ACPI 6.5 §19.6.20 ff.). Bis 64 Bit ist das Ergebnis eine
+/// Zahl, darueber ein Puffer.
+fn buf_field_read(b: &[u8], off: u64, width: u64) -> Value {
+    if width == 0 {
+        return Value::Int(0);
+    }
+    if width <= 64 {
+        let mut v = 0u64;
+        for i in 0..width {
+            let bit = off + i;
+            let byte = (bit / 8) as usize;
+            let cur = b.get(byte).copied().unwrap_or(0);
+            if (cur >> (bit % 8)) & 1 != 0 {
+                v |= 1u64 << i;
+            }
+        }
+        return Value::Int(v);
+    }
+    let n = ((width + 7) / 8) as usize;
+    let mut out = vec![0u8; n];
+    for i in 0..width {
+        let bit = off + i;
+        let byte = (bit / 8) as usize;
+        let cur = b.get(byte).copied().unwrap_or(0);
+        if (cur >> (bit % 8)) & 1 != 0 {
+            out[(i / 8) as usize] |= 1u8 << (i % 8);
+        }
+    }
+    Value::Buffer(out)
+}
+
+/// Dieselben Bits schreiben. Der Puffer WAECHST nicht — was ausserhalb
+/// liegt, faellt weg, wie bei ACPICA.
+fn buf_field_write(b: &mut [u8], off: u64, width: u64, val: &Value) {
+    let src: Vec<u8> = match val {
+        Value::Buffer(v) => v.clone(),
+        Value::Str(s) => s.as_bytes().to_vec(),
+        other => other.as_int().to_le_bytes().to_vec(),
+    };
+    for i in 0..width {
+        let bit = off + i;
+        let byte = (bit / 8) as usize;
+        if byte >= b.len() {
+            break;
+        }
+        let sbyte = (i / 8) as usize;
+        let sbit = if sbyte < src.len() { (src[sbyte] >> (i % 8)) & 1 } else { 0 };
+        let mask = 1u8 << (bit % 8);
+        if sbit != 0 {
+            b[byte] |= mask;
+        } else {
+            b[byte] &= !mask;
+        }
+    }
+}
+
+fn concat_res_template(a: &Value, b: &Value) -> Vec<u8> {
+    let empty: Vec<u8> = Vec::new();
+    let ab = match a { Value::Buffer(v) => v, _ => &empty };
+    let bb = match b { Value::Buffer(v) => v, _ => &empty };
+    let l0 = resource_body_len(ab);
+    let l1 = resource_body_len(bb);
+    let mut out = Vec::with_capacity(l0 + l1 + 2);
+    out.extend_from_slice(&ab[..l0]);
+    out.extend_from_slice(&bb[..l1]);
+    out.push(0x79); // ACPI_RESOURCE_NAME_END_TAG | 1
+    out.push(0x00); // Pruefsumme 0 = "ignorieren"
+    out
+}
+
+// ── Allgemeiner Zugang: Geraete finden und Methoden auswerten ─────────
+//
+// Bis hierher war der Interpreter auf den Akku zugeschnitten. Die Wege, die
+// ein Bustreiber braucht, sind dieselben — nur ohne die Akku-Frage
+// davor: Geraete nach `_HID`/`_CID` suchen, `_STA` fragen, `_CRS`/`_DSM`
+// auswerten.
+
+/// Ein initialisierter Interpreter, den ein Aufrufer mehrfach befragen kann.
+///
+/// `read_battery` baut sich seinen eigenen und faehrt eine feste Folge; wer
+/// Geraete SUCHT, braucht stattdessen einen, der stehen bleibt — jede
+/// Auswertung auf einem frischen Interpreter hiesse, `_REG`/`_INI` je Frage
+/// erneut zu fahren.
+pub struct Machine<'a> {
+    it: Interp<'a>,
+}
+
+impl<'a> Machine<'a> {
+    pub fn new(ns: &'a Namespace, ec: &'a mut dyn Ec) -> Machine<'a> {
+        Machine {
+            it: Interp { ns, dyn_nodes: BTreeMap::new(), ec, depth: 0, mem: BTreeMap::new() },
+        }
+    }
+
+    /// `_REG` und dann `_INI` — die Reihenfolge aus ACPICAs
+    /// `acpi_initialize_objects`. Ohne das antwortet eine Firmware, deren
+    /// Regionen noch nicht freigegeben sind, mit ihren Anfangswerten.
+    pub fn init(&mut self) {
+        self.it.ec.note("[aml]  phase deferred table ops");
+        self.it.run_deferred();
+        self.it.ec.note("[aml]  phase _REG");
+        let _ = self.it.register_ec_regions();
+        self.it.ec.note("[aml]  phase _INI");
+        let n = self.it.run_ini_methods();
+        self.it.ec.note_num("[aml]  _INI methods run: ", n as u64);
+    }
+
+    pub fn has(&self, p: &Path) -> bool {
+        self.it.has(p)
+    }
+
+    /// Diagnosekanal — geht denselben Weg wie die Notizen des Interpreters.
+    pub fn note(&mut self, s: &str) {
+        self.it.ec.note(s);
+    }
+
+    pub fn call(&mut self, p: &Path, args: Vec<Obj>) -> R<Value> {
+        self.it.call_path(p, args)
+    }
+
+    /// Den Wert eines Knotens holen: ein `Name` liefert seinen Inhalt, eine
+    /// `Method` wird AUSGEFUEHRT.
+    ///
+    /// Genau hier lag die Falle: `find_batteries` sah nur `Node::Name`, und
+    /// `_HID` darf eine Methode sein (die HP-Tabelle schreibt woertlich
+    /// `Method (_HID) { Return ("SYNA30A1") }`). Eine Art ohne Zweig faellt
+    /// in den, der nichts sagt.
+    pub fn value_of(&mut self, p: &Path) -> R<Value> {
+        match self.it.ns.get(p) {
+            Some(Node::Name(o)) => Ok(o.borrow().clone()),
+            Some(Node::Method { .. }) => self.it.call_path(p, Vec::new()),
+            Some(_) => Err(String::from("node is not a value")),
+            None => Err(String::from("no such node")),
+        }
+    }
+
+    /// Ein Kind des Geraets auswerten, z. B. `_CRS`.
+    pub fn eval_child(&mut self, dev: &Path, name: &str) -> R<Value> {
+        let mut p = dev.clone();
+        p.push(crate::value::seg(name));
+        if !self.has(&p) {
+            return Err(String::from("absent"));
+        }
+        self.value_of(&p)
+    }
+
+    /// `_STA` nach ACPI 6.5 §6.3.7: fehlt die Methode, gilt das Geraet als
+    /// vorhanden. Sonst Bit0 = vorhanden, Bit3 = funktionsfaehig — genau die
+    /// Pruefung aus Linux' `acpi_bus_get_status`.
+    pub fn device_present(&mut self, dev: &Path) -> bool {
+        let mut p = dev.clone();
+        p.push(crate::value::seg("_STA"));
+        if !self.has(&p) {
+            return true;
+        }
+        match self.it.call_path(&p, Vec::new()) {
+            Ok(v) => {
+                let f = v.as_int();
+                f & 0x01 != 0 && f & 0x08 != 0
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Alle Kennungen eines Geraets: `_HID` zuerst, dann jede aus `_CID`
+    /// (das ein Package mehrerer sein darf).
+    pub fn device_ids(&mut self, dev: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        for name in ["_HID", "_CID"] {
+            if let Ok(v) = self.eval_child(dev, name) {
+                push_ids(&v, &mut out);
+            }
+        }
+        out
+    }
+}
+
+/// Eine Kennung kann eine Zeichenkette, eine EisaId-Zahl oder ein Package
+/// aus beidem sein (ACPI 6.5 §6.1.2 `_CID`).
+fn push_ids(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::Str(s) => out.push(s.clone()),
+        Value::Int(n) => {
+            let s = eisa_str(*n);
+            if !s.is_empty() {
+                out.push(s);
+            }
+        }
+        Value::Package(e) => {
+            for o in e {
+                push_ids(&o.borrow(), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// EisaId auspacken — die Umkehrung von [`eisa_id`].
+///
+/// Gegenrichtung statt Kandidatenvergleich: so faellt jede Kennung als NAME
+/// an und kann berichtet werden, auch eine, nach der niemand gesucht hat.
+pub fn eisa_str(n: u64) -> String {
+    let n = n & 0xFFFF_FFFF;
+    // Rueck-Byteswap (eisa_id speichert little-endian).
+    let s = ((n >> 24) & 0xFF) | (((n >> 16) & 0xFF) << 8) | (((n >> 8) & 0xFF) << 16) | ((n & 0xFF) << 24);
+    let m = |sh: u32| -> u8 { (((s >> sh) & 0x1F) as u8) + b'@' };
+    let (m0, m1, m2) = (m(26), m(21), m(16));
+    if !(m0.is_ascii_uppercase() && m1.is_ascii_uppercase() && m2.is_ascii_uppercase()) {
+        return String::new();
+    }
+    let hex = |v: u64| -> char {
+        let v = (v & 0xF) as u8;
+        if v < 10 { (b'0' + v) as char } else { (b'A' + v - 10) as char }
+    };
+    let mut out = String::new();
+    out.push(m0 as char);
+    out.push(m1 as char);
+    out.push(m2 as char);
+    out.push(hex(s >> 12));
+    out.push(hex(s >> 8));
+    out.push(hex(s >> 4));
+    out.push(hex(s));
+    out
+}
+
+/// Jedes Geraet im Namespace, das ueberhaupt eine Kennung traegt.
+///
+/// Ein „Geraet" ist hier der ELTER eines `_HID`- oder `_CID`-Knotens. Die
+/// Kennungen selbst werden erst beim Fragen ausgewertet — ein `_HID` als
+/// Methode auszufuehren kostet, und die meisten Tabellen fuehren Dutzende.
+pub fn devices_with_ids(ns: &Namespace) -> Vec<Path> {
+    let mut out: Vec<Path> = Vec::new();
+    for path in ns.nodes.keys() {
+        let last = match path.last() {
+            Some(s) => *s,
+            None => continue,
+        };
+        if last != crate::value::seg("_HID") && last != crate::value::seg("_CID") {
+            continue;
+        }
+        let mut dev = path.clone();
+        dev.pop();
+        if !out.contains(&dev) {
+            out.push(dev);
+        }
+    }
+    out
 }
