@@ -382,6 +382,14 @@ struct XhciState {
     /// NIC-Ereignis landete damit in `process_hid_report`.
     has_keyboard: bool,
     has_mouse: bool,
+    /// DMA-Satz fuer ein Netzgeraet an DIESEM Controller.
+    nic_device_ctx: u64,
+    nic_ep0_ring: u64,
+    /// Das Netzgeraet, wenn eines hier haengt. **Kein eigener
+    /// Controller-Zustand mehr:** frueher trug `NicXhci` eine zweite
+    /// `XhciState` mit eigenem Dequeue-Zeiger auf denselben Ereignisring,
+    /// und wer zuerst drainte, nahm dem anderen seine Ereignisse weg.
+    nic: Option<NicRings>,
     mouse_slot_id: u8,
     mouse_device_ctx: u64,
     mouse_ep0_ring: u64,
@@ -434,11 +442,11 @@ fn store_ctrl(state: XhciState) -> bool {
     false
 }
 
-/// Traegt der Controller an dieser Adresse ein Eingabegeraet?
-fn ctrl_has_hid(addr: pci::PciAddr) -> bool {
-    let g = CTRLS.lock();
-    g.iter().flatten().any(|s| s.pci_addr == addr && (s.has_keyboard || s.has_mouse))
-}
+// `ctrl_has_hid` gab es hier, um beim NIC-Scan den Controller mit dem
+// Eingabegeraet ZULETZT anzufassen. Die Reihenfolge war noetig, solange das
+// Anfassen einen Reset bedeutete. Seit `nic_probe` auf dem LAUFENDEN
+// Controller sucht, gibt es nichts mehr zu schonen — und der ganze Grund
+// fuer die Schonung ist weg.
 
 /// Initialize xHCI controller and enumerate USB keyboard.
 /// Tries all xHCI controllers until one with a connected device is found.
@@ -600,6 +608,11 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
     let mouse_device_ctx = alloc_dma(1, "mouse dev ctx");
     let mouse_ep0_ring = alloc_dma(1, "mouse EP0");
     let mouse_intr_ring = alloc_dma(1, "mouse intr");
+    // Ein DRITTER Satz, fuer ein Netzgeraet am selben Controller. Ohne ihn
+    // muesste es sich einen mit Tastatur oder Maus teilen — und genau daran
+    // ist heute alles gestorben, was als drittes kam.
+    let nic_device_ctx = alloc_dma(1, "nic dev ctx");
+    let nic_ep0_ring = alloc_dma(1, "nic EP0");
 
     if dcbaa == 0 || cmd_ring == 0 || evt_ring == 0 || evt_seg_table == 0
         || input_ctx == 0 || device_ctx == 0 || ep0_ring == 0 || intr_ring == 0
@@ -615,6 +628,7 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
     write_trb(intr_ring, NUM_TR_TRBS - 1, intr_ring, 0, TRB_LINK | TRB_CYCLE | (1 << 1));
     write_trb(mouse_ep0_ring, NUM_TR_TRBS - 1, mouse_ep0_ring, 0, TRB_LINK | TRB_CYCLE | (1 << 1));
     write_trb(mouse_intr_ring, NUM_TR_TRBS - 1, mouse_intr_ring, 0, TRB_LINK | TRB_CYCLE | (1 << 1));
+    write_trb(nic_ep0_ring, NUM_TR_TRBS - 1, nic_ep0_ring, 0, TRB_LINK | TRB_CYCLE | (1 << 1));
 
     // Set up Event Ring Segment Table (1 entry)
     // SAFETY: writing to DMA-allocated, zeroed memory
@@ -678,6 +692,7 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
         repeat_key: 0, repeat_shift: false, repeat_altgr: false, repeat_start: 0, repeat_last: 0,
         port_num: 0, error_count: 0,
         has_keyboard: false, has_mouse: false, mouse_slot_id: 0,
+        nic_device_ctx, nic_ep0_ring, nic: None,
         mouse_device_ctx, mouse_ep0_ring, mouse_ep0_cycle: 1, mouse_ep0_enqueue: 0,
         mouse_intr_ring, mouse_intr_cycle: 1, mouse_intr_enqueue: 0,
         mouse_intr_ep_dci: 0, mouse_port_num: 0, mouse_port_speed: 0,
@@ -1919,8 +1934,16 @@ const NIC_RX_BUFS: usize = 128;
 const NIC_TX_BUFS: usize = 16;
 const NIC_TX_BUF_BYTES: usize = 2048;
 
-struct NicXhci {
-    x: XhciState,
+/// Was NUR dem Netzgeraet gehoert. Der Controller darum herum ist
+/// `XhciState` und wird geteilt.
+struct NicRings {
+    /// Slot und Port des Geraets — es ist eines unter mehreren.
+    slot_id: u8,
+    port_num: u32,
+    port_speed: u32,
+    /// Eigener EP0-Stand (Steuertransfers im Betrieb: Link-Status).
+    ep0_cycle: u32,
+    ep0_enqueue: usize,
     in_ring: u64,  in_cycle: u32,  in_enq: usize,  in_dci: u8,
     out_ring: u64, out_cycle: u32, out_enq: usize, out_dci: u8,
     in_buf: u64,   out_buf: u64,       // out_buf = base of NIC_TX_BUFS TX buffers
@@ -1934,7 +1957,6 @@ struct NicXhci {
     rx_done_count: usize,
 }
 
-static NIC: spin::Mutex<Option<NicXhci>> = spin::Mutex::new(None);
 
 // USB-transport-layer profiling (read + reset via nic_take_stats). Lets a
 // speed test see whether the bottleneck is the bulk RX path (few bytes /
@@ -1949,8 +1971,50 @@ static NIC_TX_CYC:   core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU
 /// Negotiated USB link speed of the NIC: "SuperSpeed" / "High-Speed" /
 /// "Full-Speed" / "Low-Speed". Full/Low would cap an Ethernet dongle far below
 /// gigabit (Full-Speed = 12 Mbit), so this rules that enumeration fault in/out.
+/// Auf dem Controller arbeiten, der das Netzgeraet traegt.
+fn with_nic<R>(f: impl FnOnce(&mut XhciState) -> R) -> Option<R> {
+    let mut g = CTRLS.lock();
+    for i in 0..MAX_CTRLS {
+        if let Some(s) = g[i].as_mut() {
+            if s.nic.is_some() { return Some(f(s)); }
+        }
+    }
+    None
+}
+
+/// Den EP0-Satz auf das NETZGERAET stellen, `f` laufen lassen, zurueck.
+///
+/// `usb_control_transfer` arbeitet auf dem Satz, der gerade im Zustand
+/// steht, und das ist der der Tastatur. Die Maus macht es beim Aufzaehlen
+/// seit je so; das Netzgeraet braucht es im BETRIEB, weil `rtl8153` den
+/// Link-Status ueber Steuertransfers liest.
+fn with_nic_ep0<R>(state: &mut XhciState, f: impl FnOnce(&mut XhciState) -> R) -> R {
+    let saved = (state.slot_id, state.ep0_ring, state.ep0_cycle,
+                 state.ep0_enqueue, state.device_ctx, state.port_speed);
+    if let Some(n) = state.nic.as_ref() {
+        state.slot_id = n.slot_id;
+        state.ep0_cycle = n.ep0_cycle;
+        state.ep0_enqueue = n.ep0_enqueue;
+        state.port_speed = n.port_speed;
+    }
+    state.ep0_ring = state.nic_ep0_ring;
+    state.device_ctx = state.nic_device_ctx;
+    let r = f(state);
+    if let Some(n) = state.nic.as_mut() {
+        n.ep0_cycle = state.ep0_cycle;
+        n.ep0_enqueue = state.ep0_enqueue;
+    }
+    state.slot_id = saved.0;
+    state.ep0_ring = saved.1;
+    state.ep0_cycle = saved.2;
+    state.ep0_enqueue = saved.3;
+    state.device_ctx = saved.4;
+    state.port_speed = saved.5;
+    r
+}
+
 pub fn nic_link_speed_str() -> &'static str {
-    match NIC.lock().as_ref().map(|n| n.x.port_speed) {
+    match with_nic(|s| s.nic.as_ref().map(|n| n.port_speed).unwrap_or(0)) {
         Some(SPEED_SUPER) => "SuperSpeed (5 Gbit)",
         Some(SPEED_HIGH) => "High-Speed (480 Mbit)",
         Some(SPEED_FULL) => "Full-Speed (12 Mbit!)",
@@ -1967,7 +2031,10 @@ pub fn nic_take_stats() -> (u64, u64, u64, u64, u64, u64) {
      NIC_TX_CALLS.swap(0, Relaxed), NIC_TX_CYC.swap(0, Relaxed))
 }
 
-pub fn nic_attached() -> bool { NIC.lock().is_some() }
+pub fn nic_attached() -> bool {
+    let g = CTRLS.lock();
+    g.iter().flatten().any(|s| s.nic.is_some())
+}
 
 /// Read-only scan of EVERY xHCI controller in the system: PCI id, port count,
 /// and each connected/USB3 port's protocol + link state. Finds whether USB-C
@@ -2136,139 +2203,30 @@ fn tb_warm_reset_ctrl(addr: pci::PciAddr, did: u16) {
 /// The boot-time scan scrolls past fast; this lets the `nic` command print the
 /// same USB2/USB3 protocol + ccs/speed table whenever asked.
 pub fn nic_dump_ports() {
-    match NIC.lock().as_ref() {
-        Some(n) => {
-            dump_nic_ports(&n.x);
-            let link = match n.x.port_speed {
-                SPEED_SUPER => "SuperSpeed (5 Gbit)",
-                SPEED_HIGH => "High-Speed (480 Mbit)",
-                SPEED_FULL => "Full-Speed (12 Mbit!)",
-                SPEED_LOW => "Low-Speed (1.5 Mbit!)",
-                _ => "unknown",
-            };
-            kprintln!("[npk] xhci: NIC link = {}", link);
-        }
-        None => kprintln!("[npk] xhci: no NIC attached"),
-    }
+    let done = with_nic(|state| {
+        dump_nic_ports(state);
+        let (speed, port) = state.nic.as_ref()
+            .map(|n| (n.port_speed, n.port_num + 1)).unwrap_or((0, 0));
+        let link = match speed {
+            SPEED_SUPER => "SuperSpeed (5 Gbit)",
+            SPEED_HIGH => "High-Speed (480 Mbit)",
+            SPEED_FULL => "Full-Speed (12 Mbit!)",
+            SPEED_LOW => "Low-Speed (1.5 Mbit!)",
+            _ => "unknown",
+        };
+        kprintln!("[npk] xhci: NIC on port {} — link = {}", port, link);
+    });
+    if done.is_none() { kprintln!("[npk] xhci: no NIC attached"); }
 }
 
 /// USB link speed of the attached NIC as an r8152 coalesce class:
 /// 2 = SuperSpeed, 1 = High, 0 = Full/other. Picks the RX aggregation timeout.
 pub fn nic_speed_class() -> u8 {
-    match NIC.lock().as_ref().map(|n| n.x.port_speed) {
+    match with_nic(|s| s.nic.as_ref().map(|n| n.port_speed).unwrap_or(0)) {
         Some(SPEED_SUPER) => 2,
         Some(SPEED_HIGH) => 1,
         _ => 0,
     }
-}
-
-/// Find `vid:pid` on any xHCI controller, bring the controller up, address the
-/// device, set its configuration and configure bulk IN (EP `ep_in`) + bulk OUT
-/// (EP `ep_out`). On success the device is ready for nic_control / nic_bulk_*.
-///
-/// **Ein Controller wird zurueckgesetzt, schon um NACHZUSEHEN.** Aufzaehlen
-/// geht nur auf einem laufenden Controller, und `bring_up_controller` haelt
-/// ihn an und setzt ihn zurueck — jedes dort adressierte Geraet verliert
-/// seinen Slot. Auf einer Maschine mit zwei Controllern hiess das: der mit
-/// der Maus wird ausgeraeumt, und der Dongle steckt am anderen.
-///
-/// Deshalb ZWEI Durchgaenge:
-///
-/// 1. jeder Controller AUSSER dem, auf dem Tastatur/Maus stehen,
-/// 2. erst wenn der Dongle sonst nirgends war, auch dieser — und wenn er
-///    auch dort nicht ist, werden Tastatur und Maus wieder aufgezaehlt.
-///
-/// Ohne (2) waere die Suche unvollstaendig; ohne die Wiederaufzaehlung
-/// kostet ein erfolgloser Blick den Zeiger fuer immer.
-pub fn nic_attach(vid: u16, pid: u16, ep_in: u8, ep_out: u8) -> bool {
-    if NIC.lock().is_some() { return true; }
-    // Wo stehen Tastatur/Maus? Nach PCI-ADRESSE, nicht nach "irgendeiner
-    // ist belegt": haengen sie an einem anderen Controller, geht sie der
-    // Dongle-Scan nichts an.
-    // Welche Controller tragen ein Eingabegeraet? Es koennen mehrere sein
-    // — Tastatur auf dem einen, Maus auf dem anderen ist genau der Fall des
-    // IdeaPad.
-    let mut any_hid = false;
-    {
-        let g = CTRLS.lock();
-        for s in g.iter().flatten() {
-            if s.has_keyboard || s.has_mouse {
-                any_hid = true;
-                kprintln!("[npk] xhci: input device lives on {:02x}:{:02x}.{} — \
-                           that controller is probed LAST",
-                    s.pci_addr.bus, s.pci_addr.device, s.pci_addr.function);
-            }
-        }
-    }
-
-    for pass in 0..2 {
-        // Zweiter Durchgang nur, wenn es ueberhaupt einen geschonten
-        // Controller gibt.
-        if pass == 1 && !any_hid { break; }
-        for bus in 0u16..=255 {
-            for dev_num in 0u8..32 {
-                for func in 0u8..8 {
-                    let addr = pci::PciAddr { bus: bus as u8, device: dev_num, function: func };
-                    let id = pci::read32(addr, 0x00);
-                    if id == 0xFFFF_FFFF || id == 0 { if func == 0 { break; } continue; }
-                    let class_reg = pci::read32(addr, 0x08);
-                    if ((class_reg >> 24) & 0xFF) as u8 == 0x0C
-                        && ((class_reg >> 16) & 0xFF) as u8 == 0x03
-                        && ((class_reg >> 8) & 0xFF) as u8 == 0x30
-                    {
-                        let is_hid = ctrl_has_hid(addr);
-                        // Durchgang 0 laesst den HID-Controller aus,
-                        // Durchgang 1 nimmt NUR ihn.
-                        if is_hid != (pass == 1) {
-                            if func == 0 && pci::read8(addr, 0x0E) & 0x80 == 0 { break; }
-                            continue;
-                        }
-                        let pci_dev = pci::PciDevice {
-                            addr,
-                            vendor_id: (id & 0xFFFF) as u16,
-                            device_id: ((id >> 16) & 0xFFFF) as u16,
-                            bar0: pci::read32(addr, 0x10),
-                            irq_line: pci::read8(addr, 0x3C),
-                        };
-                        if is_hid {
-                            kprintln!("[npk] xhci: no NIC elsewhere — probing the \
-                                       keyboard/mouse controller {:02x}:{:02x}.{}",
-                                addr.bus, addr.device, addr.function);
-                        }
-                        if nic_try_attach(pci_dev, vid, pid, ep_in, ep_out) { return true; }
-                        if is_hid {
-                            // Der Blick war umsonst: der Controller ist
-                            // zurueckgesetzt, Tastatur und Maus sind weg.
-                            // Sie kommen zurueck, indem dieselbe Aufzaehlung
-                            // noch einmal laeuft — sonst kostet eine
-                            // ERGEBNISLOSE Suche den Zeiger fuer immer.
-                            // Preis, benannt: `bring_up_controller` holt sich
-                            // frische DMA-Seiten und `alloc_dma` hat keinen
-                            // Rueckweg — die Wiederaufzaehlung laesst ~13
-                            // Seiten liegen. EINMAL je Start, und ein toter
-                            // Zeiger kostet mehr.
-                            kprintln!("[npk] xhci: no NIC there either — re-enumerating \
-                                       keyboard/mouse");
-                            // Frisch gelesen statt kopiert: `PciDevice` ist
-                            // nicht `Copy`, und `nic_try_attach` hat den
-                            // ersten verbraucht. Die Felder stehen im
-                            // Konfigurationsraum und aendern sich nicht.
-                            init_controller(pci::PciDevice {
-                                addr,
-                                vendor_id: (id & 0xFFFF) as u16,
-                                device_id: ((id >> 16) & 0xFFFF) as u16,
-                                bar0: pci::read32(addr, 0x10),
-                                irq_line: pci::read8(addr, 0x3C),
-                            });
-                            init_mouse();
-                        }
-                    }
-                    if func == 0 && pci::read8(addr, 0x0E) & 0x80 == 0 { break; }
-                }
-            }
-        }
-    }
-    false
 }
 
 /// xHCI major USB revision of root port `port0` (0-based) from the Supported
@@ -2318,110 +2276,252 @@ fn dump_nic_ports(x: &XhciState) {
     }
 }
 
-fn nic_try_attach(dev: pci::PciDevice, vid: u16, pid: u16, ep_in: u8, ep_out: u8) -> bool {
-    // `bring_up_controller` haelt den Controller an und setzt ihn zurueck.
-    // Steht auf GENAU DIESEM eine Tastatur oder Maus, ist sie danach weg —
-    // ihre Flagge aber stuende weiter, der Zeiger wuerde gemalt und
-    // berichtete nie wieder. Das sieht aus wie ein Fehler im Compositor und
-    // ist in Wahrheit ein Geraet, das es nicht mehr gibt.
-    //
-    // Nur DIESER Controller, nach PCI-Adresse verglichen: haengt die
-    // Tastatur an einem anderen, bleibt sie unberuehrt — und genau das ist
-    // der Normalfall auf einer Maschine mit mehreren Controllern.
-    {
-        let mut g = CTRLS.lock();
-        for i in 0..MAX_CTRLS {
-            let matches = g[i].as_ref().map(|s| s.pci_addr == dev.addr).unwrap_or(false);
-            if !matches { continue; }
-            let had = g[i].as_ref().map(|s| (s.has_keyboard, s.has_mouse)).unwrap_or((false, false));
-            if had.0 || had.1 {
-                kprintln!("[npk] xhci: dropping USB keyboard/mouse on {:02x}:{:02x}.{} — the NIC scan resets it",
-                    dev.addr.bus, dev.addr.device, dev.addr.function);
-            }
-            // Der Eintrag zeigt nach dem Reset auf Ringe, die die Hardware
-            // nicht mehr benutzt — er muss weg, nicht nur die Flaggen.
-            g[i] = None;
+/// Das Netzgeraet auf EINEM Controller suchen und einrichten — ohne ihn
+/// zurueckzusetzen.
+///
+/// Das ist der ganze Punkt. Bis hierher fuhr der NIC-Weg sich den
+/// Controller selbst hoch (`bring_up_controller` = anhalten + `HCRST`), und
+/// damit verlor ALLES darauf seinen Slot: die Tastatur auf Florians
+/// IdeaPad, und genauso ein Stick oder ein Headset. Der Controller LAEUFT
+/// aber schon, seit `init()` ihn aufgezaehlt hat — es fehlt nur ein Slot
+/// mehr darin.
+///
+/// Die Ports von Tastatur und Maus werden ausgelassen: dort sitzt ein
+/// Geraet, das wir schon adressiert haben, und ein Port-Reset waere genau
+/// der Schaden, den wir vermeiden wollen.
+fn nic_probe(state: &mut XhciState, vid: u16, pid: u16, ep_in: u8, ep_out: u8) -> bool {
+    if state.nic.is_some() { return true; }
+    dump_nic_ports(state);
+
+    // Den eingestellten EP0-Satz merken — daran haengt die Tastatur.
+    let saved = (state.slot_id, state.ep0_ring, state.ep0_cycle,
+                 state.ep0_enqueue, state.device_ctx, state.port_speed);
+    let mut found = false;
+
+    for p in 0..state.max_ports {
+        if state.has_keyboard && p == state.port_num { continue; }
+        if state.has_mouse && p == state.mouse_port_num { continue; }
+        if r32(state.oper, portsc_off(p)) & PORTSC_CCS == 0 { continue; }
+
+        if !reset_port(state, p) { continue; }
+        state.port_speed = (r32(state.oper, portsc_off(p)) >> 10) & 0xF;
+
+        // Eigener, frischer Satz fuer dieses Geraet.
+        // SAFETY: DMA-Speicher dieses Controllers, kein Geraet zeigt darauf.
+        unsafe {
+            core::ptr::write_bytes(state.nic_ep0_ring as *mut u8, 0, 4096);
+            core::ptr::write_bytes(state.nic_device_ctx as *mut u8, 0, 4096);
         }
-        // Die globalen Flaggen nur loeschen, wenn KEIN anderer Controller
-        // das Geraet noch traegt.
-        if !g.iter().flatten().any(|s| s.has_keyboard) {
-            AVAILABLE.store(false, Ordering::Relaxed);
-        }
-        if !g.iter().flatten().any(|s| s.has_mouse) {
-            MOUSE_AVAILABLE.store(false, Ordering::Relaxed);
-        }
-    }
-    let mut x = match bring_up_controller(dev, 16) { Some(s) => s, None => return false };
-    dump_nic_ports(&x);
+        write_trb(state.nic_ep0_ring, NUM_TR_TRBS - 1, state.nic_ep0_ring, 0,
+            TRB_LINK | TRB_CYCLE | (1 << 1));
+        state.ep0_ring = state.nic_ep0_ring;
+        state.device_ctx = state.nic_device_ctx;
+        state.ep0_cycle = 1;
+        state.ep0_enqueue = 0;
 
-    for p in 0..x.max_ports {
-        let sc = r32(x.oper, portsc_off(p));
-        if sc & PORTSC_CCS == 0 { continue; }
-        x.port_speed = (sc >> 10) & 0xF;
-        if sc & PORTSC_PED == 0 {
-            if !reset_port(&x, p) { continue; }
-            x.port_speed = (r32(x.oper, portsc_off(p)) >> 10) & 0xF;
+        let slot = match cmd_enable_slot(state) { Some(s) => s, None => continue };
+        state.slot_id = slot;
+        // SAFETY: Geraetekontext-Zeiger dieses Slots in der DMA-DCBAA
+        unsafe {
+            core::ptr::write_volatile((state.dcbaa as *mut u64).add(slot as usize),
+                state.device_ctx);
         }
 
-        let slot = match cmd_enable_slot(&mut x) { Some(s) => s, None => continue };
-        x.slot_id = slot;
-        // SAFETY: slot's device-context pointer into the DMA DCBAA
-        unsafe { core::ptr::write_volatile((x.dcbaa as *mut u64).add(slot as usize), x.device_ctx); }
+        let mp0 = match state.port_speed {
+            SPEED_LOW | SPEED_FULL => 8u16, SPEED_HIGH => 64, SPEED_SUPER => 512, _ => 64,
+        };
+        if !cmd_address_device(state, p, mp0) { cmd_disable_slot(state, slot); continue; }
+        if !usb_get_descriptor(state, DESC_DEVICE, 18) { cmd_disable_slot(state, slot); continue; }
+        let dvid = u16::from_le_bytes([r8(state.data_buf, 8), r8(state.data_buf, 9)]);
+        let dpid = u16::from_le_bytes([r8(state.data_buf, 10), r8(state.data_buf, 11)]);
+        if dvid != vid || dpid != pid {
+            // Nicht unseres: Slot ZURUECKGEBEN. Ein liegengelassener Slot
+            // laesst den naechsten Anlauf auf demselben Port scheitern.
+            cmd_disable_slot(state, slot);
+            continue;
+        }
 
-        let mp0 = match x.port_speed { SPEED_LOW | SPEED_FULL => 8u16, SPEED_HIGH => 64, SPEED_SUPER => 512, _ => 64 };
-        reset_ep0_ring(&mut x);
-        if !cmd_address_device(&mut x, p, mp0) { cmd_disable_slot(&mut x, slot); continue; }
-
-        if !usb_get_descriptor(&mut x, DESC_DEVICE, 18) { cmd_disable_slot(&mut x, slot); continue; }
-        let dvid = u16::from_le_bytes([r8(x.data_buf, 8), r8(x.data_buf, 9)]);
-        let dpid = u16::from_le_bytes([r8(x.data_buf, 10), r8(x.data_buf, 11)]);
-        if dvid != vid || dpid != pid { cmd_disable_slot(&mut x, slot); continue; }
-
-        // Set configuration so the bulk endpoints become usable.
-        if !usb_get_descriptor(&mut x, DESC_CONFIG, 9) { cmd_disable_slot(&mut x, slot); return false; }
-        let config_val = r8(x.data_buf, 5);
-        if !usb_set_config(&mut x, config_val) { cmd_disable_slot(&mut x, slot); return false; }
+        if !usb_get_descriptor(state, DESC_CONFIG, 9) { cmd_disable_slot(state, slot); break; }
+        let config_val = r8(state.data_buf, 5);
+        if !usb_set_config(state, config_val) { cmd_disable_slot(state, slot); break; }
 
         let in_ring = alloc_dma(1, "nic bulk-in ring");
         let out_ring = alloc_dma(1, "nic bulk-out ring");
         let in_buf = alloc_dma(NIC_RX_BUFS * NIC_BULK_BUF_PAGES, "nic in bufs");
         let out_buf = alloc_dma((NIC_TX_BUFS * NIC_TX_BUF_BYTES).div_ceil(4096), "nic tx bufs");
         if in_ring == 0 || out_ring == 0 || in_buf == 0 || out_buf == 0 {
-            kprintln!("[npk] xhci: nic DMA alloc failed"); return false;
+            kprintln!("[npk] xhci: nic DMA alloc failed");
+            cmd_disable_slot(state, slot);
+            break;
         }
-        // Bulk-IN ring loops over NIC_RX_BUFS slots; bulk-OUT keeps the full ring.
+        // Bulk-IN laeuft ueber NIC_RX_BUFS Plaetze; Bulk-OUT behaelt den Ring.
         write_trb(in_ring, NIC_RX_BUFS, in_ring, 0, TRB_LINK | TRB_CYCLE | (1 << 1));
         write_trb(out_ring, NUM_TR_TRBS - 1, out_ring, 0, TRB_LINK | TRB_CYCLE | (1 << 1));
 
-        let in_dci = ep_in * 2 + 1;   // IN endpoint
-        let out_dci = ep_out * 2;     // OUT endpoint
-        let bulk_mp = if x.port_speed == SPEED_SUPER { 1024 } else { 512 };
-        if !cmd_configure_bulk(&mut x, in_dci, in_ring, out_dci, out_ring, bulk_mp) {
-            kprintln!("[npk] xhci: nic configure-bulk failed (speed {})", x.port_speed);
-            cmd_disable_slot(&mut x, slot);
-            return false;
+        let in_dci = ep_in * 2 + 1;   // IN-Endpunkt
+        let out_dci = ep_out * 2;     // OUT-Endpunkt
+        let bulk_mp = if state.port_speed == SPEED_SUPER { 1024 } else { 512 };
+        if !cmd_configure_bulk(state, in_dci, in_ring, out_dci, out_ring, bulk_mp) {
+            kprintln!("[npk] xhci: nic configure-bulk failed (speed {})", state.port_speed);
+            cmd_disable_slot(state, slot);
+            break;
         }
 
         kprintln!("[npk] xhci: NIC attached on {:02x}:{:02x}.{} port {} (slot {}, bulk in EP{} out EP{}, speed {})",
-            x.pci_addr.bus, x.pci_addr.device, x.pci_addr.function,
-            p + 1, slot, ep_in, ep_out, x.port_speed);
-        let mut nic = NicXhci {
-            x, in_ring, in_cycle: 1, in_enq: 0, in_dci,
+            state.pci_addr.bus, state.pci_addr.device, state.pci_addr.function,
+            p + 1, slot, ep_in, ep_out, state.port_speed);
+
+        state.nic = Some(NicRings {
+            slot_id: slot, port_num: p, port_speed: state.port_speed,
+            ep0_cycle: state.ep0_cycle, ep0_enqueue: state.ep0_enqueue,
+            in_ring, in_cycle: 1, in_enq: 0, in_dci,
             out_ring, out_cycle: 1, out_enq: 0, out_dci,
             in_buf, out_buf,
             tx_inflight: 0, tx_next: 0,
             rx_armed: 0, trb_buf: [0; NIC_RX_BUFS],
             rx_done_buf: [0; NIC_RX_BUFS], rx_done_len: [0; NIC_RX_BUFS],
             rx_done_head: 0, rx_done_count: 0,
+        });
+        // RX-Ring vorfuellen, damit das Geraet ohne Wartezeit liefern kann.
+        for b in 0..NIC_RX_BUFS { nic_arm_rx(state, b); }
+        found = true;
+        break;
+    }
+
+    // Zurueckstellen, was die Tastatur braucht.
+    state.slot_id = saved.0;
+    state.ep0_ring = saved.1;
+    state.ep0_cycle = saved.2;
+    state.ep0_enqueue = saved.3;
+    state.device_ctx = saved.4;
+    state.port_speed = saved.5;
+    found
+}
+
+/// `vid:pid` auf irgendeinem Controller finden und einrichten.
+///
+/// Zwei Wege, und der zweite ist der Notnagel:
+///
+/// 1. **Sanft** — auf jedem Controller, der SCHON LAEUFT (alle, seit
+///    `init()` sie aufzaehlt). Nichts wird zurueckgesetzt, nichts verliert
+///    seinen Slot.
+/// 2. **Rueckfall** — ein Controller, den wir nicht fuehren, wird
+///    hochgefahren (also zurueckgesetzt), abgelegt und dann GENAUSO
+///    abgesucht. Eine Bauart, nicht zwei.
+///
+/// Ohne (2) koennte ein Controller, der beim Start nicht in die Tabelle
+/// passte, das Netzgeraet fuer immer verstecken — und ohne Netz gibt es
+/// kein Update zurueck.
+pub fn nic_attach(vid: u16, pid: u16, ep_in: u8, ep_out: u8) -> bool {
+    if nic_attached() { return true; }
+
+    {
+        let mut g = CTRLS.lock();
+        for i in 0..MAX_CTRLS {
+            if let Some(s) = g[i].as_mut() {
+                if nic_probe(s, vid, pid, ep_in, ep_out) { return true; }
+            }
+        }
+    }
+
+    // Rueckfall: ein Controller, den die Tabelle nicht kennt.
+    for bus in 0u16..=255 {
+        for dev_num in 0u8..32 {
+            for func in 0u8..8 {
+                let addr = pci::PciAddr { bus: bus as u8, device: dev_num, function: func };
+                let id = pci::read32(addr, 0x00);
+                if id == 0xFFFF_FFFF || id == 0 { if func == 0 { break; } continue; }
+                let class_reg = pci::read32(addr, 0x08);
+                if ((class_reg >> 24) & 0xFF) as u8 == 0x0C
+                    && ((class_reg >> 16) & 0xFF) as u8 == 0x03
+                    && ((class_reg >> 8) & 0xFF) as u8 == 0x30
+                    && !ctrl_known(addr)
+                {
+                    kprintln!("[npk] xhci: NIC not on any running controller — bringing up {:02x}:{:02x}.{}",
+                        addr.bus, addr.device, addr.function);
+                    let pci_dev = pci::PciDevice {
+                        addr,
+                        vendor_id: (id & 0xFFFF) as u16,
+                        device_id: ((id >> 16) & 0xFFFF) as u16,
+                        bar0: pci::read32(addr, 0x10),
+                        irq_line: pci::read8(addr, 0x3C),
+                    };
+                    if let Some(x) = bring_up_controller(pci_dev, 16) {
+                        store_ctrl(x);
+                        let mut g = CTRLS.lock();
+                        for i in 0..MAX_CTRLS {
+                            let hit = g[i].as_ref().map(|s| s.pci_addr == addr).unwrap_or(false);
+                            if !hit { continue; }
+                            if let Some(s) = g[i].as_mut() {
+                                if nic_probe(s, vid, pid, ep_in, ep_out) { return true; }
+                            }
+                        }
+                    }
+                }
+                if func == 0 && pci::read8(addr, 0x0E) & 0x80 == 0 { break; }
+            }
+        }
+    }
+
+    // Rueckfall 2: die BEKANNTEN Controller, mit Reset — der alte Weg.
+    //
+    // Ohne das waere der Rueckfall wirkungslos: seit `init()` steht JEDER
+    // Controller in der Tabelle, also findet Rueckfall 1 nie einen. Und
+    // ohne Netz gibt es kein Update zurueck — auf dem IdeaPad ist der
+    // Dongle der einzige Weg, die WLAN-Karte (10ec:c822) hat bei uns keinen
+    // Treiber. Der schlechteste Ausgang muss "wie frueher" sein, nicht
+    // "abgeschnitten".
+    let mut addrs: [Option<pci::PciAddr>; MAX_CTRLS] = [None; MAX_CTRLS];
+    {
+        let g = CTRLS.lock();
+        for i in 0..MAX_CTRLS {
+            addrs[i] = g[i].as_ref().map(|s| s.pci_addr);
+        }
+    }
+    for a in addrs.into_iter().flatten() {
+        kprintln!("[npk] xhci: NIC not found gently on {:02x}:{:02x}.{} — falling back to a \
+                   controller RESET (everything addressed there loses its slot)",
+            a.bus, a.device, a.function);
+        {
+            let mut g = CTRLS.lock();
+            for i in 0..MAX_CTRLS {
+                if g[i].as_ref().map(|s| s.pci_addr) == Some(a) { g[i] = None; }
+            }
+            if !g.iter().flatten().any(|s| s.has_keyboard) {
+                AVAILABLE.store(false, Ordering::Relaxed);
+            }
+            if !g.iter().flatten().any(|s| s.has_mouse) {
+                MOUSE_AVAILABLE.store(false, Ordering::Relaxed);
+            }
+        }
+        let id = pci::read32(a, 0x00);
+        let pci_dev = pci::PciDevice {
+            addr: a,
+            vendor_id: (id & 0xFFFF) as u16,
+            device_id: ((id >> 16) & 0xFFFF) as u16,
+            bar0: pci::read32(a, 0x10),
+            irq_line: pci::read8(a, 0x3C),
         };
-        // Prime the RX ring: arm every buffer so the device can fill them
-        // back-to-back without ever stalling for a host re-arm.
-        for b in 0..NIC_RX_BUFS { nic_arm_rx(&mut nic, b); }
-        *NIC.lock() = Some(nic);
-        return true;
+        let x = match bring_up_controller(pci_dev, 16) { Some(x) => x, None => continue };
+        store_ctrl(x);
+        let mut g = CTRLS.lock();
+        for i in 0..MAX_CTRLS {
+            if g[i].as_ref().map(|s| s.pci_addr) != Some(a) { continue; }
+            if let Some(s) = g[i].as_mut() {
+                if nic_probe(s, vid, pid, ep_in, ep_out) { return true; }
+            }
+        }
     }
     false
 }
+
+/// Fuehrt die Tabelle diesen Controller schon?
+fn ctrl_known(addr: pci::PciAddr) -> bool {
+    let g = CTRLS.lock();
+    g.iter().flatten().any(|s| s.pci_addr == addr)
+}
+
+
 
 /// Configure both bulk endpoints (IN + OUT) in one Configure Endpoint command.
 fn cmd_configure_bulk(state: &mut XhciState, in_dci: u8, in_ring: u64,
@@ -2464,196 +2564,141 @@ fn cmd_configure_bulk(state: &mut XhciState, in_dci: u8, in_ring: u64,
     matches!(wait_command_completion(state), Some((cc, _)) if cc == CC_SUCCESS)
 }
 
-/// Consume one transfer event from the NIC controller's event ring (if any).
-/// Bulk-IN completions are stashed (rx_ready_len) so a TX/control wait never
-/// loses a received packet. Returns the consumed event's (cc, dci), or None.
-/// Write the Event Ring Dequeue Pointer once, clearing Event Handler Busy.
-/// Call after a drain batch (only when events were consumed) instead of per
-/// event — collapses N MMIO writes per poll into one.
-#[inline]
-fn nic_flush_erdp(nic: &NicXhci) {
-    let erdp = nic.x.evt_ring + (nic.x.evt_dequeue * 16) as u64;
-    w64(nic.x.rt + 0x20, 0x18, erdp | (1 << 3));
-}
-
-fn nic_consume_event(nic: &mut NicXhci) -> Option<(u32, u32)> {
-    let (param, status, control) = read_trb(nic.x.evt_ring, nic.x.evt_dequeue);
-    if control & TRB_CYCLE != nic.x.evt_cycle { return None; }
-
-    nic.x.evt_dequeue += 1;
-    if nic.x.evt_dequeue >= NUM_EVT_TRBS { nic.x.evt_dequeue = 0; nic.x.evt_cycle ^= 1; }
-    // ERDP is flushed ONCE per drain batch (nic_flush_erdp), not per event — a
-    // per-event MMIO write cost ~300ns each, which with the 128-deep ring meant
-    // up to ~40µs per nic_bulk_in (the netdev spikes that starved the USB drain
-    // and re-overflowed the chip FIFO despite armed buffers).
-
-    if control & (0x3F << 10) != EVT_TRANSFER { return Some((0xFF, 0xFF)); }
-    let cc = (status >> 24) & 0xFF;
-    let residual = status & 0x00FF_FFFF;
-    let dci = (control >> 16) & 0x1F;
-    if dci == nic.in_dci as u32 {
-        // Bulk-IN completion: map the event's TRB pointer back to its buffer
-        // (param = address of the completed Transfer TRB).
-        let slot = ((param.wrapping_sub(nic.in_ring)) / 16) as usize;
-        if slot >= NIC_RX_BUFS {
-            // Stray / link-TRB event — not a data buffer. Ignore it; never
-            // synthesize a delivery of buffer 0 (that injected a duplicate).
-            return Some((cc, dci));
+/// Einen Bulk-IN-TRB auf RX-Puffer `buf_idx` scharf machen.
+///
+/// Der Erzeuger laeuft durch die Ringplaetze 0..NIC_RX_BUFS-1; der
+/// Link-TRB auf Platz NIC_RX_BUFS wickelt ihn um und kippt das Zyklusbit,
+/// genau eine Runde vor dem Verbraucher im Geraet.
+fn nic_arm_rx(state: &mut XhciState, buf_idx: usize) {
+    let (sid, dci) = {
+        let n = match state.nic.as_mut() { Some(n) => n, None => return };
+        let ring_slot = n.in_enq;
+        let cyc = n.in_cycle;
+        let addr = n.in_buf + (buf_idx * NIC_BULK_BUF_BYTES) as u64;
+        write_trb(n.in_ring, ring_slot, addr, NIC_BULK_BUF_BYTES as u32,
+            TRB_NORMAL | TRB_IOC | cyc);
+        n.trb_buf[ring_slot] = buf_idx;
+        n.in_enq += 1;
+        if n.in_enq >= NIC_RX_BUFS {
+            write_trb(n.in_ring, NIC_RX_BUFS, n.in_ring, 0, TRB_LINK | cyc | (1 << 1));
+            n.in_cycle ^= 1;
+            n.in_enq = 0;
         }
-        let buf_idx = nic.trb_buf[slot];
-        if nic.rx_armed > 0 { nic.rx_armed -= 1; }
-        // Only deliver clean completions. On an error CC the residual/length is
-        // not a valid byte count → delivering it feeds the rx_desc walker a
-        // wrong-length aggregate (the truncated_batches/DISCARDED we saw). And
-        // if the done-FIFO is momentarily full we must not drop the buffer on
-        // the floor. In both cases re-arm it right away so it never leaks out
-        // of the ring (Linux skips a bad-status URB and re-submits it).
-        let ok = cc == CC_SUCCESS || cc == CC_SHORT_PACKET;
-        if ok && nic.rx_done_count < NIC_RX_BUFS {
-            let len = (NIC_BULK_BUF_BYTES as u32).saturating_sub(residual) as usize;
-            let t = (nic.rx_done_head + nic.rx_done_count) % NIC_RX_BUFS;
-            nic.rx_done_buf[t] = buf_idx;
-            nic.rx_done_len[t] = len;
-            nic.rx_done_count += 1;
-        } else {
-            nic_arm_rx(nic, buf_idx);
-        }
-    } else if dci == nic.out_dci as u32 {
-        // Bulk-OUT completion: free one in-flight TX buffer.
-        if nic.tx_inflight > 0 { nic.tx_inflight -= 1; }
-    }
-    Some((cc, dci))
-}
-
-/// Arm one bulk-IN TRB pointing at RX buffer `buf_idx`. The producer cycles
-/// through ring slots 0..NIC_RX_BUFS-1; the link TRB at slot NIC_RX_BUFS wraps
-/// it and toggles the cycle bit, exactly one lap ahead of the device's consumer.
-fn nic_arm_rx(nic: &mut NicXhci, buf_idx: usize) {
-    let slot = nic.in_enq;
-    let cyc = nic.in_cycle;
-    let addr = nic.in_buf + (buf_idx * NIC_BULK_BUF_BYTES) as u64;
-    write_trb(nic.in_ring, slot, addr, NIC_BULK_BUF_BYTES as u32, TRB_NORMAL | TRB_IOC | cyc);
-    nic.trb_buf[slot] = buf_idx;
-    nic.in_enq += 1;
-    if nic.in_enq >= NIC_RX_BUFS {
-        write_trb(nic.in_ring, NIC_RX_BUFS, nic.in_ring, 0, TRB_LINK | cyc | (1 << 1));
-        nic.in_cycle ^= 1;
-        nic.in_enq = 0;
-    }
-    nic.rx_armed += 1;
-    let sid = nic.x.slot_id as u32;
-    let dci = nic.in_dci as u32;
-    ring_doorbell(&nic.x, sid, dci);
+        n.rx_armed += 1;
+        (n.slot_id as u32, n.in_dci as u32)
+    };
+    ring_doorbell(state, sid, dci);
 }
 
 /// EP0 control transfer for the NIC. `buf` carries the data stage (copied into
 /// the controller's data_buf for OUT, read back for IN). Used for r8152
 /// register access.
 pub fn nic_control(req_type: u8, request: u8, value: u16, index: u16, buf: &mut [u8], dir_in: bool) -> bool {
-    let mut lock = NIC.lock();
-    let nic = match lock.as_mut() { Some(n) => n, None => return false };
-    let len = buf.len().min(2048) as u16;
-    if !dir_in && len > 0 {
-        // SAFETY: data_buf is a 4 KiB DMA page; len <= 2048
-        unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), nic.x.data_buf as *mut u8, len as usize); }
-    }
-    let ok = usb_control_transfer(&mut nic.x, req_type, request, value, index, len, dir_in);
-    if ok && dir_in && len > 0 {
-        // SAFETY: as above
-        unsafe { core::ptr::copy_nonoverlapping(nic.x.data_buf as *const u8, buf.as_mut_ptr(), len as usize); }
-    }
-    ok
+    with_nic(|state| {
+        let len = buf.len().min(2048) as u16;
+        if !dir_in && len > 0 {
+            // SAFETY: data_buf is a 4 KiB DMA page; len <= 2048
+            unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), state.data_buf as *mut u8, len as usize); }
+        }
+        let ok = with_nic_ep0(state, |s|
+            usb_control_transfer(s, req_type, request, value, index, len, dir_in));
+        if ok && dir_in && len > 0 {
+            // SAFETY: as above
+            unsafe { core::ptr::copy_nonoverlapping(state.data_buf as *const u8, buf.as_mut_ptr(), len as usize); }
+        }
+        ok
+    }).unwrap_or(false)
 }
 
-/// Bulk OUT (TX): post `data` (<= NIC_TX_BUF_BYTES) and return immediately —
-/// the USB completion is reaped lazily (next nic_bulk_out / nic_bulk_in drain).
-/// A frame is never lost: it sits in its own TX buffer until the device DMAs it.
+/// Einen Rahmen senden. Feuern und vergessen.
 pub fn nic_bulk_out(data: &[u8]) -> bool {
-    let mut lock = NIC.lock();
-    let nic = match lock.as_mut() { Some(n) => n, None => return false };
+    with_nic(|state| nic_bulk_out_on(state, data)).unwrap_or(false)
+}
+
+fn nic_bulk_out_on(state: &mut XhciState, data: &[u8]) -> bool {
     use core::sync::atomic::Ordering::Relaxed;
 
-    // Reap finished TX (frees buffers) + drain any pending RX completions.
-    let mut drained = 0u32;
-    while nic_consume_event(nic).is_some() { drained += 1; }
+    // Ereignisse abholen: gibt fertige TX-Puffer frei, nimmt RX-Completions
+    // entgegen — und stellt nebenbei Tastatur und Maus zu, die am SELBEN
+    // Ereignisring haengen. Genau dafuer gibt es nur noch eine Zustellstelle.
+    drain(state);
 
-    // Backpressure: only if ALL TX buffers are still in flight do we wait
-    // (bounded) for one to drain — otherwise we'd overwrite live DMA.
-    if nic.tx_inflight >= NIC_TX_BUFS {
+    // Gegendruck: nur wenn ALLE TX-Puffer unterwegs sind, wird (begrenzt)
+    // gewartet — sonst ueberschrieben wir lebendes DMA.
+    let full = |s: &XhciState| s.nic.as_ref().map(|n| n.tx_inflight >= NIC_TX_BUFS).unwrap_or(true);
+    if full(state) {
         let t0 = crate::interrupts::rdtsc();
         let deadline = crate::interrupts::ticks() + 100;
-        while nic.tx_inflight >= NIC_TX_BUFS {
-            if crate::interrupts::ticks() >= deadline {
-                if drained > 0 { nic_flush_erdp(nic); }
-                return false;
-            }
-            if nic_consume_event(nic).is_some() { drained += 1; } else { core::hint::spin_loop(); }
+        while full(state) {
+            if crate::interrupts::ticks() >= deadline { return false; }
+            drain(state);
+            core::hint::spin_loop();
         }
         NIC_TX_CYC.fetch_add(crate::interrupts::rdtsc().wrapping_sub(t0), Relaxed);
     }
-    if drained > 0 { nic_flush_erdp(nic); }
 
     let len = data.len().min(NIC_TX_BUF_BYTES);
-    let bidx = nic.tx_next;
-    let addr = nic.out_buf + (bidx * NIC_TX_BUF_BYTES) as u64;
-    // SAFETY: TX buffer `bidx` is free (tx_inflight < NIC_TX_BUFS guarantees the
-    // last user of this round-robin slot already completed).
-    unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), addr as *mut u8, len); }
+    let (sid, dci) = {
+        let n = match state.nic.as_mut() { Some(n) => n, None => return false };
+        let bidx = n.tx_next;
+        let addr = n.out_buf + (bidx * NIC_TX_BUF_BYTES) as u64;
+        // SAFETY: Platz `bidx` ist frei — tx_inflight < NIC_TX_BUFS heisst,
+        // der letzte Nutzer dieses Rundlauf-Platzes ist fertig.
+        unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), addr as *mut u8, len); }
 
-    let idx = nic.out_enq;
-    let cyc = nic.out_cycle;
-    write_trb(nic.out_ring, idx, addr, len as u32, TRB_NORMAL | TRB_IOC | cyc);
-    nic.out_enq += 1;
-    if nic.out_enq >= NUM_TR_TRBS - 1 {
-        write_trb(nic.out_ring, NUM_TR_TRBS - 1, nic.out_ring, 0, TRB_LINK | cyc | (1 << 1));
-        nic.out_cycle ^= 1;
-        nic.out_enq = 0;
-    }
-    nic.tx_next = (bidx + 1) % NIC_TX_BUFS;
-    nic.tx_inflight += 1;
-    let slot = nic.x.slot_id as u32;
-    let dci = nic.out_dci as u32;
-    ring_doorbell(&nic.x, slot, dci);
+        let idx = n.out_enq;
+        let cyc = n.out_cycle;
+        write_trb(n.out_ring, idx, addr, len as u32, TRB_NORMAL | TRB_IOC | cyc);
+        n.out_enq += 1;
+        if n.out_enq >= NUM_TR_TRBS - 1 {
+            write_trb(n.out_ring, NUM_TR_TRBS - 1, n.out_ring, 0, TRB_LINK | cyc | (1 << 1));
+            n.out_cycle ^= 1;
+            n.out_enq = 0;
+        }
+        n.tx_next = (bidx + 1) % NIC_TX_BUFS;
+        n.tx_inflight += 1;
+        (n.slot_id as u32, n.out_dci as u32)
+    };
+    ring_doorbell(state, sid, dci);
     NIC_TX_CALLS.fetch_add(1, Relaxed);
-    true   // fire-and-forget
+    true
 }
 
-/// Bulk IN (RX) poll: copy a completed bulk-IN buffer into `buf`, returns its
-/// byte count (an aggregate of one-or-more RTL8153 rx_desc-prefixed packets the
-/// class driver then splits). Non-blocking: returns 0 when nothing is ready.
+/// Einen empfangenen Rahmen abholen. 0 = nichts da.
 pub fn nic_bulk_in(buf: &mut [u8]) -> usize {
-    let mut lock = NIC.lock();
-    let nic = match lock.as_mut() { Some(n) => n, None => return 0 };
+    with_nic(|state| nic_bulk_in_on(state, buf)).unwrap_or(0)
+}
 
-    // Drain all pending completions into the done FIFO (keeps the device's
-    // event ring from backing up and stalling the controller). Flush ERDP once
-    // for the whole batch (not per event) — and only if we consumed any, so an
-    // empty poll (99% of them) costs no MMIO.
-    let mut drained = 0u32;
-    while nic_consume_event(nic).is_some() { drained += 1; }
-    if drained > 0 { nic_flush_erdp(nic); }
-
+fn nic_bulk_in_on(state: &mut XhciState, buf: &mut [u8]) -> usize {
     use core::sync::atomic::Ordering::Relaxed;
-    if nic.rx_done_count == 0 {
-        NIC_RX_EMPTY.fetch_add(1, Relaxed);
-        return 0;
-    }
 
-    let h = nic.rx_done_head;
-    let b = nic.rx_done_buf[h];
-    let len = nic.rx_done_len[h];
-    nic.rx_done_head = (h + 1) % NIC_RX_BUFS;
-    nic.rx_done_count -= 1;
+    // Alles Anstehende einsammeln — das haelt den Ereignisring frei, der
+    // sonst den Controller anhaelt.
+    drain(state);
 
-    let n = len.min(buf.len());
-    let src = nic.in_buf + (b * NIC_BULK_BUF_BYTES) as u64;
-    // SAFETY: src is RX buffer `b`, which holds `len` bytes of received data
-    unsafe { core::ptr::copy_nonoverlapping(src as *const u8, buf.as_mut_ptr(), n); }
-    NIC_RX_BYTES.fetch_add(n as u64, Relaxed);
+    let (b, len, armed, in_buf) = {
+        let n = match state.nic.as_mut() { Some(n) => n, None => return 0 };
+        if n.rx_done_count == 0 {
+            NIC_RX_EMPTY.fetch_add(1, Relaxed);
+            return 0;
+        }
+        let h = n.rx_done_head;
+        let b = n.rx_done_buf[h];
+        let len = n.rx_done_len[h];
+        n.rx_done_head = (h + 1) % NIC_RX_BUFS;
+        n.rx_done_count -= 1;
+        (b, len, n.rx_armed, n.in_buf)
+    };
+
+    let n_copy = len.min(buf.len());
+    let src = in_buf + (b * NIC_BULK_BUF_BYTES) as u64;
+    // SAFETY: `src` ist RX-Puffer `b` und traegt `len` empfangene Bytes.
+    unsafe { core::ptr::copy_nonoverlapping(src as *const u8, buf.as_mut_ptr(), n_copy); }
+    NIC_RX_BYTES.fetch_add(n_copy as u64, Relaxed);
     NIC_RX_DELIV.fetch_add(1, Relaxed);
-    NIC_RX_ARMED.fetch_add(nic.rx_armed as u64, Relaxed); // ring depth still armed behind the device
-    nic_arm_rx(nic, b);   // re-arm; buffer `b` is free now that we copied it out
-    n
+    NIC_RX_ARMED.fetch_add(armed as u64, Relaxed);
+    nic_arm_rx(state, b);   // Puffer ist frei, sobald er herauskopiert ist
+    n_copy
 }
 
 // === Interrupt Transfer (Keyboard Polling) ===
@@ -2693,6 +2738,8 @@ struct Evt {
     /// Damit — und nur damit — laesst sich sagen, WEM es gehoert.
     param: u64,
     control: u32,
+    /// Nicht uebertragene Bytes (Transfer Event, Bits 23..0 von `status`).
+    residual: u32,
 }
 
 /// Das naechste Ereignis abholen und den Cursor weiterstellen.
@@ -2715,6 +2762,7 @@ fn next_event(state: &mut XhciState) -> Option<Evt> {
         cc: (status >> 24) & 0xFF,
         param,
         control,
+        residual: status & 0x00FF_FFFF,
     })
 }
 
@@ -2767,6 +2815,46 @@ fn dispatch_transfer(state: &mut XhciState, e: &Evt) -> bool {
         }
         schedule_mouse_interrupt_transfer(state);
         return true;
+    }
+
+    // Das Netzgeraet: seine Ringe sind die groessten, und im Betrieb
+    // kommen von dort die meisten Ereignisse.
+    if let Some((ir, or)) = state.nic.as_ref().map(|n| (n.in_ring, n.out_ring)) {
+        let on_in = ir != 0 && a >= ir && a < ir + ((NIC_RX_BUFS + 1) * 16) as u64;
+        let on_out = or != 0 && a >= or && a < or + (NUM_TR_TRBS * 16) as u64;
+        if on_in {
+            // Die TRB-Adresse zurueck auf ihren Puffer rechnen.
+            let ring_slot = ((a.wrapping_sub(ir)) / 16) as usize;
+            let mut rearm: Option<usize> = None;
+            if ring_slot < NIC_RX_BUFS {
+                if let Some(n) = state.nic.as_mut() {
+                    let buf_idx = n.trb_buf[ring_slot];
+                    if n.rx_armed > 0 { n.rx_armed -= 1; }
+                    // Nur saubere Completions zustellen. Bei einem Fehler ist
+                    // die Restlaenge keine gueltige Byteanzahl, und ein voller
+                    // Ausgabespeicher darf den Puffer nicht verschlucken —
+                    // in beiden Faellen sofort wieder scharf machen, wie
+                    // Linux eine fehlerhafte URB neu einreicht.
+                    if ok && n.rx_done_count < NIC_RX_BUFS {
+                        let len = (NIC_BULK_BUF_BYTES as u32).saturating_sub(e.residual) as usize;
+                        let t = (n.rx_done_head + n.rx_done_count) % NIC_RX_BUFS;
+                        n.rx_done_buf[t] = buf_idx;
+                        n.rx_done_len[t] = len;
+                        n.rx_done_count += 1;
+                    } else {
+                        rearm = Some(buf_idx);
+                    }
+                }
+            }
+            if let Some(b) = rearm { nic_arm_rx(state, b); }
+            return true;
+        }
+        if on_out {
+            if let Some(n) = state.nic.as_mut() {
+                if n.tx_inflight > 0 { n.tx_inflight -= 1; }
+            }
+            return true;
+        }
     }
 
     if state.has_keyboard && in_ring(a, state.intr_ring) {
