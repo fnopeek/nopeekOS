@@ -376,6 +376,13 @@ struct XhciState {
     probed_port: u32,    // 0xFFFF = none
     probed_slot: u8,
     // Mouse device (second USB device on same controller)
+    /// Traegt DIESER Controller die Tastatur?
+    ///
+    /// Bisher sagte das die globale Flagge `AVAILABLE`, und der Drain
+    /// schloss per `else` auf "dann ist es die Tastatur". Sobald mehr als
+    /// ein Geraet am Controller haengt, ist dieser Schluss falsch: ein
+    /// NIC-Ereignis landete damit in `process_hid_report`.
+    has_keyboard: bool,
     has_mouse: bool,
     mouse_slot_id: u8,
     mouse_device_ctx: u64,
@@ -627,7 +634,7 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
         repeat_key: 0, repeat_shift: false, repeat_altgr: false, repeat_start: 0, repeat_last: 0,
         port_num: 0, error_count: 0,
         probed_port: 0xFFFF, probed_slot: 0,
-        has_mouse: false, mouse_slot_id: 0,
+        has_keyboard: false, has_mouse: false, mouse_slot_id: 0,
         mouse_device_ctx, mouse_ep0_ring, mouse_ep0_cycle: 1, mouse_ep0_enqueue: 0,
         mouse_intr_ring, mouse_intr_cycle: 1, mouse_intr_enqueue: 0,
         mouse_intr_ep_dci: 0, mouse_port_num: 0, mouse_port_speed: 0,
@@ -858,6 +865,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         // Schedule first interrupt transfer
         schedule_interrupt_transfer(&mut state);
         kprintln!("[npk] xhci: USB keyboard (HID boot protocol)");
+        state.has_keyboard = true;
         AVAILABLE.store(true, Ordering::Relaxed);
         *STATE.lock() = Some(state);
         return true;
@@ -1596,32 +1604,29 @@ fn post_command(state: &mut XhciState, param: u64, status: u32, mut control: u32
     ring_doorbell(state, 0, 0); // HC doorbell
 }
 
+/// Auf die Antwort auf einen Befehl warten — und alles, was daneben
+/// hereinkommt, ZUSTELLEN.
+///
+/// Vorher wurde jedes fremde Ereignis kommentarlos verworfen
+/// ("Consume other events"). Solange nur ein Geraet am Controller hing,
+/// konnte dabei nichts verloren gehen. Haengen Tastatur, Maus und ein
+/// USB-Netzgeraet daran, verschluckt jeder Befehl im Betrieb einen Bericht
+/// — und weil der Transfer dann nie nachgelegt wird, verstummt das Geraet.
 fn wait_command_completion(state: &mut XhciState) -> Option<(u32, u32)> {
-    // Poll event ring for command completion (1s timeout)
     let deadline = crate::interrupts::ticks() + 100;
     loop {
         if crate::interrupts::ticks() >= deadline { return None; }
-        let (_param, status, control) = read_trb(state.evt_ring, state.evt_dequeue);
-        let cycle = control & TRB_CYCLE;
-        if cycle != state.evt_cycle { core::hint::spin_loop(); continue; }
-
-        let trb_type = control & (0x3F << 10);
-        let cc = (status >> 24) & 0xFF;
-
-        state.evt_dequeue += 1;
-        if state.evt_dequeue >= NUM_EVT_TRBS {
-            state.evt_dequeue = 0;
-            state.evt_cycle ^= 1;
+        let e = match next_event(state) {
+            Some(e) => e,
+            None => { core::hint::spin_loop(); continue; }
+        };
+        flush_erdp(state);
+        if e.trb_type == EVT_CMD_COMPLETE {
+            return Some((e.cc, (e.control >> 24) & 0xFF));
         }
-        let erdp = state.evt_ring + (state.evt_dequeue * 16) as u64;
-        let ir0 = state.rt + 0x20;
-        w64(ir0, 0x18, erdp | (1 << 3));
-
-        if trb_type == EVT_CMD_COMPLETE {
-            let slot = (control >> 24) & 0xFF;
-            return Some((cc, slot));
+        if e.trb_type == EVT_TRANSFER {
+            dispatch_transfer(state, &e);
         }
-        // Consume other events (port status change etc.)
     }
 }
 
@@ -1744,31 +1749,30 @@ fn usb_control_transfer(state: &mut XhciState, bm_request: u8, b_request: u8,
     // Ring doorbell for slot, target EP0 (DCI=1)
     ring_doorbell(state, state.slot_id as u32, 1);
 
-    // Wait for transfer completion (1s timeout)
+    // Auf die Antwort warten (1 s) — und dabei zustellen, was anderen
+    // gehoert. Erkannt wird das eigene Ereignis an der TRB-ADRESSE: sie
+    // liegt im EP0-Ring DIESES Geraets.
     let deadline = crate::interrupts::ticks() + 100;
     loop {
         if crate::interrupts::ticks() >= deadline { return false; }
-        let (_param, status, control) = read_trb(state.evt_ring, state.evt_dequeue);
-        if control & TRB_CYCLE != state.evt_cycle { core::hint::spin_loop(); continue; }
-
-        state.evt_dequeue += 1;
-        if state.evt_dequeue >= NUM_EVT_TRBS {
-            state.evt_dequeue = 0;
-            state.evt_cycle ^= 1;
+        let e = match next_event(state) {
+            Some(e) => e,
+            None => { core::hint::spin_loop(); continue; }
+        };
+        flush_erdp(state);
+        if e.trb_type != EVT_TRANSFER { continue; }
+        let ok = e.cc == CC_SUCCESS || e.cc == CC_SHORT_PACKET;
+        if in_ring(e.param, state.ep0_ring) {
+            return ok;
         }
-        let erdp = state.evt_ring + (state.evt_dequeue * 16) as u64;
-        let ir0 = state.rt + 0x20;
-        w64(ir0, 0x18, erdp | (1 << 3));
-
-        let trb_type = control & (0x3F << 10);
-        let cc = (status >> 24) & 0xFF;
-
-        if trb_type == EVT_TRANSFER {
-            return cc == CC_SUCCESS || cc == CC_SHORT_PACKET;
+        if dispatch_transfer(state, &e) {
+            continue;
         }
-        if trb_type == EVT_CMD_COMPLETE {
-            // Unexpected command completion — consume and continue
-        }
+        // Gehoert keinem Geraet, das wir kennen. Frueher galt JEDES
+        // Transferereignis als das eigene; diesen Fall so zu lassen ist
+        // die vorsichtige Wahl — sonst liefe ein Aufbau, dessen Ereignis
+        // wir nicht zuordnen koennen, in den Zeitablauf.
+        return ok;
     }
 }
 
@@ -2694,65 +2698,160 @@ fn schedule_interrupt_transfer(state: &mut XhciState) {
 pub fn poll_events_irq() {
     if let Some(mut lock) = STATE.try_lock() {
         if let Some(ref mut state) = *lock {
-            drain_all_events(state);
+            drain(state);
         }
     }
 }
 
-/// Drain all pending xHCI events from the event ring.
-/// Called exclusively from timer IRQ — no competing consumers.
-fn drain_all_events(state: &mut XhciState) {
-    for _ in 0..NUM_EVT_TRBS {
-        let (param, status, control) = read_trb(state.evt_ring, state.evt_dequeue);
-        if control & TRB_CYCLE != state.evt_cycle { break; }
+/// Ein abgeholtes Ereignis vom Ereignisring.
+struct Evt {
+    trb_type: u32,
+    cc: u32,
+    /// Bei einem Transferereignis: die Adresse des fertigen Transfer-TRB.
+    /// Damit — und nur damit — laesst sich sagen, WEM es gehoert.
+    param: u64,
+    control: u32,
+}
 
-        let trb_type = control & (0x3F << 10);
-        let cc = (status >> 24) & 0xFF;
+/// Das naechste Ereignis abholen und den Cursor weiterstellen.
+///
+/// **Schreibt ERDP nicht.** Das tut `flush_erdp` einmal je Runde: ein
+/// MMIO-Schreibzugriff kostet ~300 ns, und bei 128 Eintraegen waren das bis
+/// zu 40 µs je Abholung — die Spitzen, die den USB-Drain aushungerten.
+fn next_event(state: &mut XhciState) -> Option<Evt> {
+    let (param, status, control) = read_trb(state.evt_ring, state.evt_dequeue);
+    if control & TRB_CYCLE != state.evt_cycle {
+        return None;
+    }
+    state.evt_dequeue += 1;
+    if state.evt_dequeue >= NUM_EVT_TRBS {
+        state.evt_dequeue = 0;
+        state.evt_cycle ^= 1;
+    }
+    Some(Evt {
+        trb_type: control & (0x3F << 10),
+        cc: (status >> 24) & 0xFF,
+        param,
+        control,
+    })
+}
 
-        // Advance dequeue + ERDP
-        state.evt_dequeue += 1;
-        if state.evt_dequeue >= NUM_EVT_TRBS {
-            state.evt_dequeue = 0;
-            state.evt_cycle ^= 1;
-        }
-        let erdp = state.evt_ring + (state.evt_dequeue * 16) as u64;
-        let ir0 = state.rt + 0x20;
-        w64(ir0, 0x18, erdp | (1 << 3));
+/// Den Ereignisring-Dequeue-Zeiger schreiben und "Event Handler Busy"
+/// loeschen. Einmal je Runde, aber MINDESTENS einmal, wenn etwas abgeholt
+/// wurde — sonst meldet der Controller keine weiteren Ereignisse.
+fn flush_erdp(state: &XhciState) {
+    let erdp = state.evt_ring + (state.evt_dequeue * 16) as u64;
+    w64(state.rt + 0x20, 0x18, erdp | (1 << 3));
+}
 
-        if trb_type != EVT_TRANSFER { continue; }
+/// Liegt die TRB-Adresse `a` in dem Transferring, der bei `base` beginnt?
+fn in_ring(a: u64, base: u64) -> bool {
+    base != 0 && a >= base && a < base + (NUM_TR_TRBS * 16) as u64
+}
 
-        let trb_addr = param;
-        let is_mouse = state.has_mouse
-            && trb_addr >= state.mouse_intr_ring
-            && trb_addr < state.mouse_intr_ring + (NUM_TR_TRBS * 16) as u64;
+/// Ein Transferereignis dem Geraet ZUSTELLEN, dem sein Ring gehoert.
+///
+/// **Die Adresse des TRB ist der Besitzausweis.** Vorher entschied ein
+/// `else`: "nicht die Maus, also die Tastatur" — richtig, solange genau
+/// zwei Geraete am Controller hingen, und still falsch, sobald ein drittes
+/// dazukommt.
+///
+/// Gibt `false` zurueck, wenn das Ereignis niemandem hier gehoert (dann
+/// gehoert es dem synchronen Warter, der gerade einen Steuertransfer oder
+/// einen Befehl laufen hat).
+fn dispatch_transfer(state: &mut XhciState, e: &Evt) -> bool {
+    let a = e.param;
+    let cc = e.cc;
+    let ok = cc == CC_SUCCESS || cc == CC_SHORT_PACKET;
 
-        if is_mouse {
-            if cc == CC_SUCCESS || cc == CC_SHORT_PACKET {
-                process_mouse_report(state);
-            }
-            schedule_mouse_interrupt_transfer(state);
+    if state.has_mouse && in_ring(a, state.mouse_intr_ring) {
+        if ok {
+            process_mouse_report(state);
+            state.mouse_error_count = 0;
+        } else if cc == 19 {
+            // Missed Service Error — harmlos, die GUI hat die CPU belegt.
         } else {
-            if cc == CC_SUCCESS || cc == CC_SHORT_PACKET {
-                let buf = state.data_buf + 2048;
-                let modifiers = r8(buf, 0);
-                let mut keys = [0u8; 6];
-                for i in 0..6 {
-                    keys[i] = r8(buf, (2 + i) as u32);
+            state.mouse_error_count += 1;
+            if state.mouse_error_count >= 10 {
+                state.mouse_error_count = 0;
+                let portsc = r32(state.oper, portsc_off(state.mouse_port_num));
+                if portsc & PORTSC_CCS == 0 {
+                    // Geraet abgezogen: nicht nachlegen.
+                    state.has_mouse = false;
+                    MOUSE_AVAILABLE.store(false, Ordering::Relaxed);
+                    return true;
                 }
-                process_hid_report(modifiers, &keys, state);
-                state.prev_keys = keys;
             }
-            schedule_interrupt_transfer(state);
         }
+        schedule_mouse_interrupt_transfer(state);
+        return true;
+    }
+
+    if state.has_keyboard && in_ring(a, state.intr_ring) {
+        if ok {
+            state.error_count = 0;
+            let buf = state.data_buf + 2048;
+            let modifiers = r8(buf, 0);
+            let mut keys = [0u8; 6];
+            for i in 0..6 {
+                keys[i] = r8(buf, (2 + i) as u32);
+            }
+            process_hid_report(modifiers, &keys, state);
+            state.prev_keys = keys;
+        } else if cc == 19 {
+            // Missed Service Error — auch fuer die Tastatur harmlos.
+        } else {
+            state.error_count += 1;
+            if state.error_count >= 3 {
+                let portsc = r32(state.oper, portsc_off(state.port_num));
+                if portsc & PORTSC_CCS == 0 {
+                    state.has_keyboard = false;
+                    AVAILABLE.store(false, Ordering::Relaxed);
+                    return true;
+                }
+                state.error_count = 0;
+            }
+        }
+        schedule_interrupt_transfer(state);
+        return true;
+    }
+
+    false
+}
+
+/// Alle anstehenden Ereignisse abholen und zustellen.
+///
+/// **Eine** Runde fuer alle Rufer — vorher gab es `drain_all_events` (Timer-
+/// IRQ) und `drain_events` (Hauptschleife) nebeneinander, und nur die zweite
+/// zaehlte Fehler und erkannte ein abgezogenes Geraet. Welches Verhalten
+/// galt, entschied, wer zuerst drankam.
+fn drain(state: &mut XhciState) {
+    let mut any = false;
+    for _ in 0..NUM_EVT_TRBS {
+        let e = match next_event(state) {
+            Some(e) => e,
+            None => break,
+        };
+        any = true;
+        if e.trb_type == EVT_TRANSFER {
+            // Ein Ereignis, das niemandem hier gehoert, ist eines, auf das
+            // gerade ein Steuertransfer wartet — er ist aber nicht hier,
+            // also ist es verwaist. Verwerfen, nicht an ein falsches Geraet
+            // geben.
+            dispatch_transfer(state, &e);
+        }
+        let _ = e.control;
+    }
+    if any {
+        flush_erdp(state);
     }
 }
 
-/// Drain pending xHCI events. Call frequently during long operations
-/// to prevent event ring overflow (which stalls the controller).
-/// Cached keyboard layout (avoids config::get allocation in IRQ context).
+/// Gemerkte Tastaturbelegung — `config::get` allokiert, und das geht im
+/// IRQ-Kontext nicht.
 static IS_DE_LAYOUT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
 
-/// Call after config is loaded to cache keyboard layout.
+/// Nach dem Laden der Konfiguration rufen.
 pub fn cache_keyboard_layout() {
     let is_de = match crate::config::get("keyboard") {
         Some(ref s) if s == "us" => false,
@@ -2761,90 +2860,12 @@ pub fn cache_keyboard_layout() {
     IS_DE_LAYOUT.store(is_de, Ordering::Relaxed);
 }
 
-/// Drain xHCI events from main loop context. Only needed during early boot
-/// (before timer IRQ is active). After boot, timer IRQ drains exclusively.
+/// Ereignisse aus der Hauptschleife abholen. Nur im fruehen Start noetig,
+/// bevor der Timer-IRQ laeuft; danach drained der ausschliesslich.
 pub fn poll_events() {
     if let Some(mut lock) = STATE.try_lock() {
         if let Some(ref mut state) = *lock {
-            drain_events(state);
-        }
-    }
-}
-
-fn drain_events(state: &mut XhciState) {
-    for _ in 0..NUM_EVT_TRBS {
-        let (param, status, control) = read_trb(state.evt_ring, state.evt_dequeue);
-        if control & TRB_CYCLE != state.evt_cycle { break; }
-
-        let trb_type = control & (0x3F << 10);
-        let cc = (status >> 24) & 0xFF;
-
-        // ERDP fix: write the index of the event we JUST processed (not the next one)
-        // xHCI spec 4.9.4: ERDP points to the last processed event TRB
-        let _processed_idx = state.evt_dequeue;
-
-        state.evt_dequeue += 1;
-        if state.evt_dequeue >= NUM_EVT_TRBS {
-            state.evt_dequeue = 0;
-            state.evt_cycle ^= 1;
-        }
-        let erdp = state.evt_ring + (state.evt_dequeue * 16) as u64;
-        let ir0 = state.rt + 0x20;
-        w64(ir0, 0x18, erdp | (1 << 3));
-
-        if trb_type == EVT_TRANSFER {
-            let trb_addr = param;
-            let is_mouse = state.has_mouse
-                && trb_addr >= state.mouse_intr_ring
-                && trb_addr < state.mouse_intr_ring + (NUM_TR_TRBS * 16) as u64;
-
-            if is_mouse {
-                if cc == CC_SUCCESS || cc == CC_SHORT_PACKET {
-                    process_mouse_report(state);
-                    state.mouse_error_count = 0;
-                } else if cc == 19 {
-                    // Missed Service Error — harmless, GUI was blocking CPU.
-                    // Just reschedule without counting as error.
-                } else {
-                    state.mouse_error_count += 1;
-                    if state.mouse_error_count >= 10 {
-                        state.mouse_error_count = 0;
-                        let portsc = r32(state.oper, portsc_off(state.mouse_port_num));
-                        if portsc & PORTSC_CCS == 0 {
-                            state.has_mouse = false;
-                            MOUSE_AVAILABLE.store(false, Ordering::Relaxed);
-                            continue;
-                        }
-                    }
-                }
-                schedule_mouse_interrupt_transfer(state);
-            } else {
-                if cc == CC_SUCCESS || cc == CC_SHORT_PACKET {
-                    state.error_count = 0;
-
-                    let buf = state.data_buf + 2048;
-                    let modifiers = r8(buf, 0);
-                    let mut keys = [0u8; 6];
-                    for i in 0..6 {
-                        keys[i] = r8(buf, (2 + i) as u32);
-                    }
-                    process_hid_report(modifiers, &keys, state);
-                    state.prev_keys = keys;
-                } else if cc == 19 {
-                    // Missed Service Error — harmless for keyboard too
-                } else {
-                    state.error_count += 1;
-                    if state.error_count >= 3 {
-                        let portsc = r32(state.oper, portsc_off(state.port_num));
-                        if portsc & PORTSC_CCS == 0 {
-                            AVAILABLE.store(false, Ordering::Relaxed);
-                            return;
-                        }
-                        state.error_count = 0;
-                    }
-                }
-                schedule_interrupt_transfer(state);
-            }
+            drain(state);
         }
     }
 }
