@@ -252,7 +252,7 @@ pub extern "C" fn _start() {
 
     // ── Stufe 2a: die Ringe (rtw_pci_setup_resource) ─────────────
     // Die Reihenfolge ist Linux': rtw_power_on ruft rtw_hci_setup — und
-    // damit reset_buf_desc — VOR rtw_mac_power_on. Die Ringregister liegen
+    // damit rtw_pci_setup — VOR rtw_mac_power_on. Die Ringregister liegen
     // im PCIe-Block und leben unabhaengig vom MAC.
     let mut trx = match pci::init_trx_ring() {
         Some(t) => t,
@@ -269,7 +269,7 @@ pub extern "C" fn _start() {
     host::print_dec(trx.dma_allocs);
     host::print(" Stuecken, von 2048 Seiten / 1024 Stuecken\n");
 
-    pci::reset_buf_desc(h, &mut trx);
+    pci::setup(h, &mut trx); // = rtw_hci_setup: reset_trx_ring + dma_reset
     host::print("[rtl8822ce] Ringregister mit MAC AUS:\n");
     let rings_off_ok = pci::verify_rings(h, &trx);
 
