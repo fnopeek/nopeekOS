@@ -224,11 +224,17 @@ pub struct MouseEvent {
     pub dx: i8,
     pub dy: i8,
     pub scroll: i8,
+    /// Waagrechtes Rollen (AC Pan), positiv = nach RECHTS.
+    ///
+    /// Eine eigene Achse und kein Vorzeichen an `scroll`: beide koennen
+    /// im selben Ereignis stehen, und ein Touchpad liefert sie auch
+    /// gleichzeitig. Die USB-Boot-Maus kennt sie nicht und laesst sie 0.
+    pub hscroll: i8,
 }
 
 // Mouse event buffer — IRQ-safe SPSC ring (producer: IRQ/poll, consumer: main thread)
 const MOUSE_BUF_SIZE: usize = 128;
-static mut MOUSE_BUF: [MouseEvent; MOUSE_BUF_SIZE] = [MouseEvent { buttons: 0, dx: 0, dy: 0, scroll: 0 }; MOUSE_BUF_SIZE];
+static mut MOUSE_BUF: [MouseEvent; MOUSE_BUF_SIZE] = [MouseEvent { buttons: 0, dx: 0, dy: 0, scroll: 0, hscroll: 0 }; MOUSE_BUF_SIZE];
 static MOUSE_HEAD: AtomicUsize = AtomicUsize::new(0);
 static MOUSE_TAIL: AtomicUsize = AtomicUsize::new(0);
 
@@ -1288,7 +1294,7 @@ fn process_mouse_report(state: &mut XhciState) {
         // `true` = der billige Weg: nur den Zeiger bewegen. `handle_mouse`
         // hebt selbst auf ein volles Bild an, wenn es ein Ziehen, Klicken
         // oder Rollen ist.
-        inject_pointer(MouseEvent { buttons, dx, dy, scroll }, true);
+        inject_pointer(MouseEvent { buttons, dx, dy, scroll, hscroll: 0 }, true);
         state.mouse_prev_buttons = buttons;
     }
 }

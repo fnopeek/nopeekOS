@@ -1983,10 +1983,11 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
-    // npk_pointer_inject(dx, dy, buttons, scroll) -> 0, oder -1 ohne Recht.
+    // npk_pointer_inject(dx, dy, buttons, scroll, hscroll) -> 0, oder -1 ohne Recht.
     linker.func_wrap("env", "npk_pointer_inject",
-        |mut caller: Caller<'_, HostState>, dx: i32, dy: i32, buttons: i32, scroll: i32| -> i32 {
-            host_core::npk_pointer_inject(caller.data_mut(), dx, dy, buttons, scroll)
+        |mut caller: Caller<'_, HostState>, dx: i32, dy: i32, buttons: i32, scroll: i32,
+         hscroll: i32| -> i32 {
+            host_core::npk_pointer_inject(caller.data_mut(), dx, dy, buttons, scroll, hscroll)
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 

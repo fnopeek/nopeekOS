@@ -41,7 +41,7 @@ unsafe extern "C" {
     fn npk_now_us() -> i64;
     fn npk_acpi_mem_read(hi: i32, lo: i32) -> i32;
     fn npk_acpi_table(sig: i32, index: i32, buf_ptr: i32, buf_max: i32) -> i32;
-    fn npk_pointer_inject(dx: i32, dy: i32, buttons: i32, scroll: i32) -> i32;
+    fn npk_pointer_inject(dx: i32, dy: i32, buttons: i32, scroll: i32, hscroll: i32) -> i32;
     fn npk_sleep(ms: i32) -> i32;
 }
 
@@ -570,6 +570,7 @@ fn talk_to_device(
     // Maus. Welcher kommt, entscheidet das Geraet, nicht wir.
     let mut decoders: alloc::vec::Vec<Decoder> = alloc::vec::Vec::new();
     let mut scroll_step = 1i32;
+    let mut hscroll_step = 1i32;
     let mut tap_move = 1i32;
 
     if let Some(id) = map.touchpad_report() {
@@ -597,9 +598,13 @@ fn talk_to_device(
             // derselbe Wert, den libinput nimmt. Aus dem Geraet
             // hergeleitet, nicht in Pixeln geraten.
             tap_move = ((xs[0].logical_max - xs[0].logical_min).max(1) / 80).max(1);
+            // Die quere Raste kommt aus der BREITE, nicht aus der Hoehe:
+            // das Pad ist breiter als hoch, und ein Schritt aus der Hoehe
+            // liefe quer zu fein.
+            hscroll_step = (((xs[0].logical_max - xs[0].logical_min).max(1)) / 40).max(1);
             logln(&alloc::format!(
-                "[i2c-hid]   report {id}: touchpad, {n} contact slot(s), scroll step {step}, \
-                 tap move {tap_move}, ids {}",
+                "[i2c-hid]   report {id}: touchpad, {n} contact slot(s), \
+                 scroll step {step}/{hscroll_step}, tap move {tap_move}, ids {}",
                 if ids.is_empty() { "no" } else { "yes" }));
             scroll_step = step;
             decoders.push(Decoder {
@@ -655,7 +660,7 @@ fn talk_to_device(
         other_seen: 0,
         touch_logged: 0,
         raw_logged: 0, scroll_logged: 0, tap_logged: 0,
-        track: i2c_hid_core::gesture::Tracker::new(scroll_step, tap_move),
+        track: i2c_hid_core::gesture::Tracker::new(scroll_step, hscroll_step, tap_move),
         have_ref: false, rx: 0, ry: 0,
         last_buttons: 0,
     })
@@ -724,19 +729,19 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
         if report::extract(data, f) != 0 { buttons |= 1 << i; }
     }
 
-    let (dx, dy, scroll) = match mode {
+    let (dx, dy, scroll, hscroll) = match mode {
         Mode::Mouse { fx, fy, wheel } => {
             let x = report::extract(data, fx);
             let y = report::extract(data, fy);
             // Das Rad meldet immer RELATIV — Rasten, keine Position.
             let s = wheel.as_ref().map(|w| report::extract(data, w)).unwrap_or(0);
             if fx.relative {
-                (x, y, s)
+                (x, y, s, 0)
             } else {
                 let d = if l.have_ref { (x - l.rx, y - l.ry) } else { (0, 0) };
                 l.have_ref = true;
                 l.rx = x; l.ry = y;
-                (d.0, d.1, s)
+                (d.0, d.1, s, 0)
             }
         }
         Mode::Touchpad { contacts, count } => {
@@ -757,8 +762,8 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
             }
             let now_ms = { let t = unsafe { npk_now_us() }; if t < 0 { 0 } else { t as u64 / 1000 } };
             match l.track.feed(cc, &present[..np], contacts.len(), now_ms) {
-                gesture::Out::Pending => (0, 0, 0),
-                gesture::Out::Frame { n, gesture, dx, dy, scroll, tap } => {
+                gesture::Out::Pending => (0, 0, 0, 0),
+                gesture::Out::Frame { n, gesture, dx, dy, scroll, hscroll, tap } => {
                     if n > 0 && l.touch_logged < 3 {
                         l.touch_logged += 1;
                         logln(&alloc::format!(
@@ -766,31 +771,32 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
                              gesture {gesture}, {:?}",
                             &l.track.frame()[..n.min(2)]));
                     }
-                    if scroll != 0 && l.scroll_logged < 3 {
+                    if (scroll != 0 || hscroll != 0) && l.scroll_logged < 3 {
                         l.scroll_logged += 1;
-                        logln(&alloc::format!("[i2c-hid]   scroll: {scroll} click(s)"));
+                        logln(&alloc::format!(
+                            "[i2c-hid]   scroll: {scroll} up, {hscroll} right"));
                     }
                     if tap > 0 {
                         // Druck UND Loslassen. Der Compositor liest die
                         // Tastenlage aus dem Ring; ein Druck ohne Ende
                         // haelt sie fuer immer gedrueckt.
                         let b = 1i32 << (tap - 1);
-                        unsafe { npk_pointer_inject(0, 0, b, 0) };
-                        unsafe { npk_pointer_inject(0, 0, 0, 0) };
+                        unsafe { npk_pointer_inject(0, 0, b, 0, 0) };
+                        unsafe { npk_pointer_inject(0, 0, 0, 0, 0) };
                         if l.tap_logged < 2 {
                             l.tap_logged += 1;
                             logln(&alloc::format!(
                                 "[i2c-hid]   tap: {tap} finger(s) -> button {b}"));
                         }
                     }
-                    (dx, dy, scroll)
+                    (dx, dy, scroll, hscroll)
                 }
             }
         }
     };
 
-    if dx != 0 || dy != 0 || scroll != 0 || buttons != l.last_buttons {
-        unsafe { npk_pointer_inject(dx, dy, buttons, scroll) };
+    if dx != 0 || dy != 0 || scroll != 0 || hscroll != 0 || buttons != l.last_buttons {
+        unsafe { npk_pointer_inject(dx, dy, buttons, scroll, hscroll) };
     }
     l.last_buttons = buttons;
     Step::Data

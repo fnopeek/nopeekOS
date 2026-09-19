@@ -195,10 +195,12 @@ extern "C" fn f_npk_mmio_map_phys(vm: *const u64, hi: i32, lo: i32, pages: i32) 
     host_core::npk_mmio_map_phys(ctx, hi, lo, pages)
 }
 
-extern "C" fn f_npk_pointer_inject(vm: *const u64, dx: i32, dy: i32, buttons: i32, scroll: i32) -> i32 {
+extern "C" fn f_npk_pointer_inject(
+    vm: *const u64, dx: i32, dy: i32, buttons: i32, scroll: i32, hscroll: i32,
+) -> i32 {
     // SAFETY: `vm` ist der vmctx des rufenden Moduls.
     let ctx = unsafe { ctx_of(vm) };
-    host_core::npk_pointer_inject(ctx, dx, dy, buttons, scroll)
+    host_core::npk_pointer_inject(ctx, dx, dy, buttons, scroll, hscroll)
 }
 
 extern "C" fn f_npk_ec_query(vm: *const u64) -> i32 {

@@ -702,6 +702,17 @@ pub enum Event {
     /// scroll handling and sends this instead. An app that ignores it
     /// simply doesn't zoom.
     Zoom { delta: i32 },
+    /// Waagrechtes Rollen ueber der fokussierten App, das kein
+    /// `Widget::Scroll` mit waagrechter Achse verbraucht hat. `dx` ist
+    /// pixelskaliert, positiv = nach RECHTS.
+    ///
+    /// Eigene Variante und kein Feld an `Wheel`: ein angehaengter Wert
+    /// waere eine ABI-Aenderung an einer bestehenden Variante, und die
+    /// bricht jede App, die gegen das alte SDK gebaut ist. Angehaengt
+    /// scheitert bei ihnen nur das Dekodieren DIESES Ereignisses, und es
+    /// wird uebersprungen. MUSS im Gleichschritt mit der SDK-Kopie in
+    /// `tools/wasm/sdk/widgets/src/abi.rs` bleiben.
+    WheelX { dx: i32 },
     // Appended only.
 }
 

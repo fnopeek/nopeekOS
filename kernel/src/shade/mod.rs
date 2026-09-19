@@ -310,6 +310,7 @@ pub fn forward_pointer_to_guest(evt: &crate::xhci::MouseEvent) {
     const ABS_X: u16 = 0x00;
     const ABS_Y: u16 = 0x01;
     const REL_WHEEL: u16 = 0x08;
+    const REL_HWHEEL: u16 = 0x06;
     const BTN_LEFT: u16 = 0x110;
     const BTN_RIGHT: u16 = 0x111;
     const BTN_MIDDLE: u16 = 0x112;
@@ -360,6 +361,10 @@ pub fn forward_pointer_to_guest(evt: &crate::xhci::MouseEvent) {
     // Wheel — Linux reads `value` as __s32; pass the signed delta.
     if evt.scroll != 0 {
         push_input_event(EV_REL, REL_WHEEL, evt.scroll as i32 as u32);
+        any = true;
+    }
+    if evt.hscroll != 0 {
+        push_input_event(EV_REL, REL_HWHEEL, evt.hscroll as i32 as u32);
         any = true;
     }
 
@@ -1606,6 +1611,23 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
     // race-free. forward_pointer_to_guest no-ops unless a Surface
     // window is focused, so this is free in normal desktop use.
     forward_pointer_to_guest(evt);
+
+    // Waagrechtes Rollen — beim Touchpad zwei Finger nach links/rechts,
+    // bei einer Maus das Kippen des Rades. EIGENER Zweig vor dem
+    // senkrechten, und ohne `return`: ein schraeger Wisch kann beide
+    // Achsen tragen, und wer hier aussteigt, verschluckt die andere.
+    //
+    // Kein Zweig fuer das Terminal: sein Rueckblick hat nur eine Achse.
+    if evt.hscroll != 0 {
+        if let Some(wid) = focused_widget_id() {
+            let delta = (evt.hscroll as i32) * WIDGET_SCROLL_STEP;
+            if widgets::scroll_by_x(wid, delta) {
+                request_render();
+            } else {
+                widgets::push_event(wid, widgets::abi::Event::WheelX { dx: delta });
+            }
+        }
+    }
 
     // Mouse wheel over a focused widget app → scroll its Widget::Scroll.
     // (Surface/microvm windows already consumed the wheel in

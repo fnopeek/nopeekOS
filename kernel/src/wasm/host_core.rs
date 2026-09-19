@@ -1315,13 +1315,16 @@ pub(crate) fn npk_mmio_map_phys(ctx: &mut HostState, hi: i32, lo: i32, pages: i3
 /// Rechte: `Rights::HARDWARE`. **`npk_key_inject` prueft daneben GAR
 /// KEINS** — jedes Modul kann Tastendruecke in die Shell schreiben. Das ist
 /// ein eigener Befund und ausdruecklich nicht die Vorlage hier.
-pub(crate) fn npk_pointer_inject(ctx: &mut HostState, dx: i32, dy: i32, buttons: i32, scroll: i32) -> i32 {
+pub(crate) fn npk_pointer_inject(
+    ctx: &mut HostState, dx: i32, dy: i32, buttons: i32, scroll: i32, hscroll: i32,
+) -> i32 {
     let cap_id = ctx.cap_id;
     if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
         return -1;
     }
     let b = (buttons & 0x07) as u8;
     let s = scroll.clamp(-127, 127) as i8;
+    let h = hscroll.clamp(-127, 127) as i8;
     let (mut rx, mut ry) = (dx, dy);
     // Hoechstens ein paar Schritte — eine absurde Zahl darf keine Schleife
     // aufhalten, und mehr als 16 x 127 Punkte ist keine Handbewegung.
@@ -1337,6 +1340,7 @@ pub(crate) fn npk_pointer_inject(ctx: &mut HostState, dx: i32, dy: i32, buttons:
             dy: sy as i8,
             // Der Rollwert gehoert EINMAL dazu, nicht an jeden Teilschritt.
             scroll: if step == 0 { s } else { 0 },
+            hscroll: if step == 0 { h } else { 0 },
         });
         if last { break; }
     }
