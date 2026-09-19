@@ -60,6 +60,12 @@ pub struct Controller {
     /// fester MMIO (AMD FCH). Dann gibt es kein `Memory32Fixed`, und das
     /// ist kein Fehler, sondern eine andere Anbindung.
     pub pci_adr: Option<u64>,
+    /// Sagt `_STA` des CONTROLLERS, dass er da und funktionsfaehig ist?
+    ///
+    /// Vor dem ersten MMIO-Zugriff gefragt: ein abgeschalteter Block
+    /// antwortet im besten Fall mit lauter Einsen und im schlechteren gar
+    /// nicht. Die Firmware weiss es, also wird sie gefragt.
+    pub present: bool,
     /// 0 = unbekannt; dann sind `sscn`/`fmcn` die einzige Quelle.
     pub input_clock_hz: u32,
     /// `(hcnt, lcnt, sda_hold)` aus `SSCN` (Standard Mode).
@@ -170,6 +176,7 @@ fn read_controller(m: &mut Machine, ns: &Namespace, path: &Path) -> Controller {
     };
     Controller {
         pci_adr,
+        present: m.device_present(path),
         input_clock_hz: input_clock_hz(&ids),
         sscn: scl_params(m, path, "SSCN"),
         fmcn: scl_params(m, path, "FMCN"),
@@ -350,6 +357,11 @@ pub fn report(d: &HidDevice) -> Vec<String> {
             }
             if let Some((h, l, s)) = c.fmcn {
                 out.push(format!("i2c-hid:   FMCN hcnt={} lcnt={} sda_hold={}", h, l, s));
+            }
+            if !c.present {
+                out.push(String::from(
+                    "i2c-hid:   controller _STA says absent or not functioning",
+                ));
             }
             if c.mmio_base == 0 {
                 match c.pci_adr {
