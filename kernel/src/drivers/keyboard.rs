@@ -301,6 +301,9 @@ fn feed_mouse(byte: u8) {
                 dx: clamp(dx),
                 dy: clamp(-dy),   // PS/2 +Y is up; screen +Y is down
                 scroll: 0,
+                // Das PS/2-Basispaket hat drei Bytes und keine Rolldaten;
+                // erst IntelliMouse (4 Bytes) traegt sie.
+                hscroll: 0,
             });
         }
     }
