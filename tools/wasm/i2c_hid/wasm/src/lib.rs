@@ -437,6 +437,8 @@ struct Live {
     raw_logged: u32,
     /// Die ersten Rollentscheidungen.
     scroll_logged: u32,
+    /// Die ersten Antipper.
+    tap_logged: u32,
 
     // ── Aus Orten werden Wege und Gesten ─────────────────────────
     //
@@ -568,6 +570,7 @@ fn talk_to_device(
     // Maus. Welcher kommt, entscheidet das Geraet, nicht wir.
     let mut decoders: alloc::vec::Vec<Decoder> = alloc::vec::Vec::new();
     let mut scroll_step = 1i32;
+    let mut tap_move = 1i32;
 
     if let Some(id) = map.touchpad_report() {
         let tips = map.find_all(report::Kind::Input, id, report::PAGE_DIGITIZER, report::USAGE_TIP_SWITCH);
@@ -589,8 +592,14 @@ fn talk_to_device(
             // die Zahl aus dem Geraet selbst kommt.
             let span = (ys[0].logical_max - ys[0].logical_min).max(1);
             let step = (span / 40).max(1);
+            // Soweit darf ein Finger wandern und es bleibt ein Tippen:
+            // rund ein Achtzigstel der Padbreite, also etwa 1,3 mm —
+            // derselbe Wert, den libinput nimmt. Aus dem Geraet
+            // hergeleitet, nicht in Pixeln geraten.
+            tap_move = ((xs[0].logical_max - xs[0].logical_min).max(1) / 80).max(1);
             logln(&alloc::format!(
-                "[i2c-hid]   report {id}: touchpad, {n} contact slot(s), scroll step {step}, ids {}",
+                "[i2c-hid]   report {id}: touchpad, {n} contact slot(s), scroll step {step}, \
+                 tap move {tap_move}, ids {}",
                 if ids.is_empty() { "no" } else { "yes" }));
             scroll_step = step;
             decoders.push(Decoder {
@@ -645,8 +654,8 @@ fn talk_to_device(
         saw_touch: false,
         other_seen: 0,
         touch_logged: 0,
-        raw_logged: 0, scroll_logged: 0,
-        track: i2c_hid_core::gesture::Tracker::new(scroll_step),
+        raw_logged: 0, scroll_logged: 0, tap_logged: 0,
+        track: i2c_hid_core::gesture::Tracker::new(scroll_step, tap_move),
         have_ref: false, rx: 0, ry: 0,
         last_buttons: 0,
     })
@@ -705,7 +714,7 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
         l.other_seen += 1;
     }
 
-    if l.raw_logged < 16 {
+    if l.raw_logged < 4 {
         l.raw_logged += 1;
         logln(&alloc::format!("[i2c-hid] {:#04x} in {id}: {:02x?}", l.addr, data));
     }
@@ -746,19 +755,33 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
                     np += 1;
                 }
             }
-            match l.track.feed(cc, &present[..np], contacts.len()) {
+            let now_ms = { let t = unsafe { npk_now_us() }; if t < 0 { 0 } else { t as u64 / 1000 } };
+            match l.track.feed(cc, &present[..np], contacts.len(), now_ms) {
                 gesture::Out::Pending => (0, 0, 0),
-                gesture::Out::Frame { n, gesture, dx, dy, scroll } => {
-                    if n > 0 && l.touch_logged < 8 {
+                gesture::Out::Frame { n, gesture, dx, dy, scroll, tap } => {
+                    if n > 0 && l.touch_logged < 3 {
                         l.touch_logged += 1;
                         logln(&alloc::format!(
                             "[i2c-hid]   frame: {n} finger(s), contact-count {cc}, \
                              gesture {gesture}, {:?}",
                             &l.track.frame()[..n.min(2)]));
                     }
-                    if scroll != 0 && l.scroll_logged < 8 {
+                    if scroll != 0 && l.scroll_logged < 3 {
                         l.scroll_logged += 1;
                         logln(&alloc::format!("[i2c-hid]   scroll: {scroll} click(s)"));
+                    }
+                    if tap > 0 {
+                        // Druck UND Loslassen. Der Compositor liest die
+                        // Tastenlage aus dem Ring; ein Druck ohne Ende
+                        // haelt sie fuer immer gedrueckt.
+                        let b = 1i32 << (tap - 1);
+                        unsafe { npk_pointer_inject(0, 0, b, 0) };
+                        unsafe { npk_pointer_inject(0, 0, 0, 0) };
+                        if l.tap_logged < 2 {
+                            l.tap_logged += 1;
+                            logln(&alloc::format!(
+                                "[i2c-hid]   tap: {tap} finger(s) -> button {b}"));
+                        }
                     }
                     (dx, dy, scroll)
                 }
