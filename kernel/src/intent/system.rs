@@ -1349,6 +1349,7 @@ pub fn intent_help_topic(topic: &str) {
             help_row("dmesg [pat]", "Kernel log (dmesg prev = last boot; pat filters lines)");
             help_row("bootlog", "Log of the current boot");
             help_row("cores", "Per-core load and frequency");
+            help_row("power [s]", "CPU package watts over s seconds (RAPL)");
             help_row("cpu", "CPU model and features");
             help_row("slab", "Allocator statistics");
             help_row("history", "Previous intents (history clear wipes them)");
