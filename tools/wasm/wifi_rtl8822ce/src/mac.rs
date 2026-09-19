@@ -256,3 +256,373 @@ pub fn mac_power_on(h: i32, cut_version: u8) -> Result<(), PwrErr> {
 pub fn mac_power_off(h: i32, cut_version: u8) {
     let _ = mac_power_switch(h, cut_version, false);
 }
+
+// ── Stufe 2b: der Firmware-Download (mac.c) ──────────────────────
+
+use crate::fw::{check_hw_ready, write_data_rsvd_page};
+use crate::pci::Trx;
+
+/// `struct rtw_backup_info` (main.h)
+#[derive(Clone, Copy, Default)]
+struct Backup {
+    len: u8,
+    reg: u32,
+    val: u32,
+}
+
+/// mac.c `DLFW_RESTORE_REG_NUM`
+const DLFW_RESTORE_REG_NUM: usize = 6;
+
+/// util.c `rtw_restore_reg`
+fn restore_reg(h: i32, bckp: &[Backup]) {
+    for b in bckp {
+        match b.len {
+            1 => host::w8(h, b.reg, b.val as u8),
+            2 => host::w16(h, b.reg, b.val as u16),
+            4 => host::w32(h, b.reg, b.val),
+            _ => {}
+        }
+    }
+}
+
+/// util.c `ltecoex_read_reg`
+fn ltecoex_read_reg(h: i32, offset: u16) -> Option<u32> {
+    if !check_hw_ready(h, LTECOEX_ACCESS_CTRL, LTECOEX_READY, 1) {
+        return None;
+    }
+    host::w32(h, LTECOEX_ACCESS_CTRL, 0x800F_0000 | offset as u32);
+    Some(host::r32(h, LTECOEX_READ_DATA))
+}
+
+/// util.c `ltecoex_reg_write`
+fn ltecoex_reg_write(h: i32, offset: u16, value: u32) -> bool {
+    if !check_hw_ready(h, LTECOEX_ACCESS_CTRL, LTECOEX_READY, 1) {
+        return false;
+    }
+    host::w32(h, LTECOEX_WRITE_DATA, value);
+    host::w32(h, LTECOEX_ACCESS_CTRL, 0xC00F_0000 | offset as u32);
+    true
+}
+
+/// mac.c `wlan_cpu_enable`
+fn wlan_cpu_enable(h: i32, enable: bool) {
+    if enable {
+        host::set8(h, REG_RSV_CTRL + 1, BIT_WLMCU_IOIF);
+        host::set8(h, REG_SYS_FUNC_EN + 1, BIT_FEN_CPUEN);
+    } else {
+        host::clr8(h, REG_SYS_FUNC_EN + 1, BIT_FEN_CPUEN);
+        host::clr8(h, REG_RSV_CTRL + 1, BIT_WLMCU_IOIF);
+    }
+}
+
+/// Felder aus `struct rtw_fw_hdr` (fw.h:20-40), alle little-endian.
+/// `h2c_fmt_ver` liest heute niemand — es entscheidet ab 2c, welches
+/// H2C-Format gilt, und gehoert deshalb schon hier hin.
+#[allow(dead_code)]
+pub struct FwHdr {
+    pub version: u16,
+    pub sub_version: u8,
+    pub sub_index: u8,
+    pub feature: u32,
+    pub h2c_fmt_ver: u16,
+    pub mem_usage: u8,
+    pub dmem_addr: u32,
+    pub dmem_size: u32,
+    pub imem_size: u32,
+    pub emem_size: u32,
+    pub emem_addr: u32,
+    pub imem_addr: u32,
+}
+
+fn le16(b: &[u8], o: usize) -> u16 {
+    u16::from_le_bytes([b[o], b[o + 1]])
+}
+fn le32(b: &[u8], o: usize) -> u32 {
+    u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
+}
+
+pub fn parse_fw_hdr(d: &[u8]) -> FwHdr {
+    FwHdr {
+        version: le16(d, 0x04),
+        sub_version: d[0x06],
+        sub_index: d[0x07],
+        feature: le32(d, 0x0C),
+        h2c_fmt_ver: le16(d, 0x1C),
+        dmem_addr: le32(d, 0x20),
+        dmem_size: le32(d, 0x24),
+        mem_usage: d[0x18],
+        imem_size: le32(d, 0x30),
+        emem_size: le32(d, 0x34),
+        emem_addr: le32(d, 0x38),
+        imem_addr: le32(d, 0x3C),
+    }
+}
+
+/// mac.c `check_firmware_size`
+pub fn check_firmware_size(d: &[u8]) -> bool {
+    if d.len() < FW_HDR_SIZE {
+        return false;
+    }
+    let hdr = parse_fw_hdr(d);
+    let dmem = hdr.dmem_size + FW_HDR_CHKSUM_SIZE;
+    let imem = hdr.imem_size + FW_HDR_CHKSUM_SIZE;
+    let emem = if hdr.mem_usage & (1 << 4) != 0 {
+        hdr.emem_size + FW_HDR_CHKSUM_SIZE
+    } else {
+        0
+    };
+    FW_HDR_SIZE as u32 + dmem + imem + emem == d.len() as u32
+}
+
+/// mac.c `download_firmware_reg_backup`
+fn download_firmware_reg_backup(h: i32) -> [Backup; DLFW_RESTORE_REG_NUM] {
+    let mut b = [Backup::default(); DLFW_RESTORE_REG_NUM];
+    let mut i = 0;
+
+    // set HIQ to hi priority
+    b[i] = Backup { len: 1, reg: REG_TXDMA_PQ_MAP + 1,
+                    val: host::r8(h, REG_TXDMA_PQ_MAP + 1) as u32 };
+    i += 1;
+    host::w8(h, REG_TXDMA_PQ_MAP + 1, RTW_DMA_MAPPING_HIGH << 6);
+
+    // DLFW only use HIQ, map HIQ to hi priority
+    b[i] = Backup { len: 1, reg: REG_CR, val: host::r8(h, REG_CR) as u32 };
+    i += 1;
+    b[i] = Backup { len: 4, reg: REG_H2CQ_CSR, val: BIT_H2CQ_FULL };
+    i += 1;
+    host::w8(h, REG_CR, BIT_HCI_TXDMA_EN | BIT_TXDMA_EN);
+    host::w32(h, REG_H2CQ_CSR, BIT_H2CQ_FULL);
+
+    // Config hi priority queue and public priority queue page number
+    b[i] = Backup { len: 2, reg: REG_FIFOPAGE_INFO_1,
+                    val: host::r16(h, REG_FIFOPAGE_INFO_1) as u32 };
+    i += 1;
+    b[i] = Backup { len: 4, reg: REG_RQPN_CTRL_2,
+                    val: host::r32(h, REG_RQPN_CTRL_2) | BIT_LD_RQPN };
+    i += 1;
+    host::w16(h, REG_FIFOPAGE_INFO_1, 0x200);
+    host::w32(h, REG_RQPN_CTRL_2, b[i - 1].val);
+
+    // Disable beacon related functions
+    let tmp = host::r8(h, REG_BCN_CTRL);
+    b[i] = Backup { len: 1, reg: REG_BCN_CTRL, val: tmp as u32 };
+    i += 1;
+    host::w8(h, REG_BCN_CTRL, (tmp & !BIT_EN_BCN_FUNCTION) | BIT_DIS_TSF_UDT);
+
+    debug_assert!(i == DLFW_RESTORE_REG_NUM);
+    b
+}
+
+/// mac.c `download_firmware_reset_platform`
+fn download_firmware_reset_platform(h: i32) {
+    host::clr8(h, REG_CPU_DMEM_CON + 2, (BIT_WL_PLATFORM_RST >> 16) as u8);
+    host::clr8(h, REG_SYS_CLK_CTRL + 1, (BIT_CPU_CLK_EN >> 8) as u8);
+    host::set8(h, REG_CPU_DMEM_CON + 2, (BIT_WL_PLATFORM_RST >> 16) as u8);
+    host::set8(h, REG_SYS_CLK_CTRL + 1, (BIT_CPU_CLK_EN >> 8) as u8);
+}
+
+/// mac.c `iddma_enable`
+fn iddma_enable(h: i32, src: u32, dst: u32, ctrl: u32) -> bool {
+    host::w32(h, REG_DDMA_CH0SA, src);
+    host::w32(h, REG_DDMA_CH0DA, dst);
+    host::w32(h, REG_DDMA_CH0CTRL, ctrl);
+    check_hw_ready(h, REG_DDMA_CH0CTRL, BIT_DDMACH0_OWN, 0)
+}
+
+/// mac.c `iddma_download_firmware`
+fn iddma_download_firmware(h: i32, src: u32, dst: u32, len: u32, first: bool) -> bool {
+    let mut ch0_ctrl = BIT_DDMACH0_CHKSUM_EN | BIT_DDMACH0_OWN;
+    if !check_hw_ready(h, REG_DDMA_CH0CTRL, BIT_DDMACH0_OWN, 0) {
+        return false;
+    }
+    ch0_ctrl |= len & BIT_MASK_DDMACH0_DLEN;
+    if !first {
+        ch0_ctrl |= BIT_DDMACH0_CHKSUM_CONT;
+    }
+    iddma_enable(h, src, dst, ch0_ctrl)
+}
+
+/// mac.c `check_fw_checksum`
+fn check_fw_checksum(h: i32, addr: u32) -> bool {
+    let fw_ctrl = host::r8(h, REG_MCUFW_CTRL) as u32;
+
+    if host::r32(h, REG_DDMA_CH0CTRL) & BIT_DDMACH0_CHKSUM_STS != 0 {
+        let v = if addr < OCPBASE_DMEM_88XX {
+            (fw_ctrl | BIT_IMEM_DW_OK) & !BIT_IMEM_CHKSUM_OK
+        } else {
+            (fw_ctrl | BIT_DMEM_DW_OK) & !BIT_DMEM_CHKSUM_OK
+        };
+        host::w8(h, REG_MCUFW_CTRL, v as u8);
+        host::print("[rtl8822ce] invalid fw checksum\n");
+        return false;
+    }
+
+    let v = if addr < OCPBASE_DMEM_88XX {
+        fw_ctrl | BIT_IMEM_DW_OK | BIT_IMEM_CHKSUM_OK
+    } else {
+        fw_ctrl | BIT_DMEM_DW_OK | BIT_DMEM_CHKSUM_OK
+    };
+    host::w8(h, REG_MCUFW_CTRL, v as u8);
+    true
+}
+
+/// mac.c `download_firmware_to_mem`
+#[allow(clippy::too_many_arguments)]
+fn download_firmware_to_mem(
+    h: i32, trx: &Trx, stage: i32, data: &[u8], src: u32, dst: u32, size: u32,
+    band: u8,
+) -> bool {
+    const MAX_SIZE: u32 = 0x1000;
+    let desc_size = crate::tx::TX_PKT_DESC_SZ as u32;
+
+    let mut mem_offset = 0u32;
+    let mut first_part = true;
+    let mut residue = size;
+
+    host::set32(h, REG_DDMA_CH0CTRL, BIT_DDMACH0_RESET_CHKSUM_STS);
+
+    while residue > 0 {
+        let pkt_size = residue.min(MAX_SIZE);
+        let from = mem_offset as usize;
+        let to = from + pkt_size as usize;
+        if to > data.len() {
+            host::print("[rtl8822ce] FW-Stueck liegt ausserhalb des Blobs\n");
+            return false;
+        }
+
+        // mac.c `send_firmware_pkt`: pg_addr = src >> 7. Der USB-Sonderfall
+        // (+1 Byte, wenn (size + TX_DESC_SIZE) auf 512 aufgeht) gilt nur dort.
+        if !write_data_rsvd_page(h, trx, stage, (src >> 7) as u16,
+                                 &data[from..to], 0, band) {
+            host::print("[rtl8822ce] rsvd page fehlgeschlagen bei Offset ");
+            host::print_dec(mem_offset);
+            host::print("\n");
+            return false;
+        }
+
+        if !iddma_download_firmware(h, OCPBASE_TXBUF_88XX + src + desc_size,
+                                    dst + mem_offset, pkt_size, first_part) {
+            host::print("[rtl8822ce] iddma fehlgeschlagen bei Offset ");
+            host::print_dec(mem_offset);
+            host::print("\n");
+            return false;
+        }
+
+        first_part = false;
+        mem_offset += pkt_size;
+        residue -= pkt_size;
+    }
+
+    check_fw_checksum(h, dst)
+}
+
+/// mac.c `start_download_firmware`
+fn start_download_firmware(h: i32, trx: &Trx, stage: i32, fw: &[u8], band: u8) -> bool {
+    let hdr = parse_fw_hdr(fw);
+    let dmem_size = hdr.dmem_size + FW_HDR_CHKSUM_SIZE;
+    let imem_size = hdr.imem_size + FW_HDR_CHKSUM_SIZE;
+    let emem_size = if hdr.mem_usage & (1 << 4) != 0 {
+        hdr.emem_size + FW_HDR_CHKSUM_SIZE
+    } else {
+        0
+    };
+
+    let val = (host::r16(h, REG_MCUFW_CTRL) & 0x3800) | BIT_MCUFWDL_EN as u16;
+    host::w16(h, REG_MCUFW_CTRL, val);
+
+    let mut off = FW_HDR_SIZE;
+    for (name, size, addr) in [
+        ("dmem", dmem_size, hdr.dmem_addr),
+        ("imem", imem_size, hdr.imem_addr),
+        ("emem", emem_size, hdr.emem_addr),
+    ] {
+        if size == 0 {
+            continue;
+        }
+        let addr = addr & !(1u32 << 31);
+        host::print("  ");
+        host::print(name);
+        host::print(" -> 0x");
+        host::print_hex32(addr);
+        host::print(", ");
+        host::print_dec(size);
+        host::print(" Bytes ");
+        let t0 = host::now_us();
+        if !download_firmware_to_mem(h, trx, stage, &fw[off..], 0, addr, size, band) {
+            host::print("— FEHLER\n");
+            return false;
+        }
+        host::print("— ok (");
+        host::print_dec((host::now_us() - t0) as u32 / 1000);
+        host::print(" ms)\n");
+        off += size as usize;
+    }
+    true
+}
+
+/// mac.c `download_firmware_end_flow`
+fn download_firmware_end_flow(h: i32) {
+    host::w32(h, REG_TXDMA_STATUS, BTI_PAGE_OVF);
+
+    let fw_ctrl = host::r16(h, REG_MCUFW_CTRL) as u32;
+    if fw_ctrl & BIT_CHECK_SUM_OK != BIT_CHECK_SUM_OK {
+        return;
+    }
+    let v = (fw_ctrl | BIT_FW_DW_RDY) & !(BIT_MCUFWDL_EN as u32);
+    host::w16(h, REG_MCUFW_CTRL, v as u16);
+}
+
+/// mac.c `download_firmware_validate`
+fn download_firmware_validate(h: i32) -> bool {
+    if check_hw_ready(h, REG_MCUFW_CTRL, FW_READY_MASK, FW_READY) {
+        return true;
+    }
+    let fw_key = host::r32(h, REG_FW_DBG7) & FW_KEY_MASK;
+    if fw_key == ILLEGAL_KEY_GROUP {
+        host::print("[rtl8822ce] invalid fw key\n");
+    }
+    false
+}
+
+/// mac.c `__rtw_download_firmware`, alle dreizehn Schritte in Reihenfolge.
+pub fn download_firmware(h: i32, trx: &mut Trx, stage: i32, fw: &[u8], band: u8) -> bool {
+    if !check_firmware_size(fw) {
+        host::print("[rtl8822ce] Firmware-Groesse passt nicht zum Kopf\n");
+        return false;
+    }
+
+    let ltecoex_bckp = match ltecoex_read_reg(h, 0x38) {
+        Some(v) => v,
+        None => {
+            host::print("[rtl8822ce] LTE-Coex antwortet nicht\n");
+            return false;
+        }
+    };
+
+    wlan_cpu_enable(h, false);
+
+    let bckp = download_firmware_reg_backup(h);
+    download_firmware_reset_platform(h);
+
+    let ok = start_download_firmware(h, trx, stage, fw, band);
+
+    if ok {
+        restore_reg(h, &bckp);
+        download_firmware_end_flow(h);
+        wlan_cpu_enable(h, true);
+        if !ltecoex_reg_write(h, 0x38, ltecoex_bckp) {
+            host::print("[rtl8822ce] LTE-Coex-Ruecksicherung fehlgeschlagen\n");
+            return false;
+        }
+        if download_firmware_validate(h) {
+            // "reset desc and index" — rtw_hci_setup nach dem Download.
+            crate::pci::reset_buf_desc(h, trx);
+            return true;
+        }
+    }
+
+    // dlfw_fail
+    host::clr8(h, REG_MCUFW_CTRL, BIT_MCUFWDL_EN);
+    host::set8(h, REG_SYS_FUNC_EN + 1, BIT_FEN_CPUEN);
+    false
+}

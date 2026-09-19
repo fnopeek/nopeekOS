@@ -7,9 +7,15 @@ IdeaPad Flex 5 14ALC7 das **einzige** eingebaute Netzgerät (`02:00.0`).
 **Karte:** [WIFI_RTL8822CE_LINUX_MAP.md](WIFI_RTL8822CE_LINUX_MAP.md) — was der
 Linux-Treiber hat, Datei für Datei, ausgezählt.
 
-**Stand 2026-09-19:** Kernel **0.376.0** (L1 zu: `npk_mmio_read8/write8` in
-beiden ABI-Wegen) · Modul **wifi_rtl8822ce 0.1.0** = Stufe 0, gebaut und
-gestaged, **am Gerät noch nicht gelaufen**.
+**Stand 2026-09-19:** Kernel **0.376.0** (L1 zu: `npk_mmio_read8/write8`).
+Modul **wifi_rtl8822ce 0.4.0**. **Stufen 0, 1 und 2a am Gerät grün**;
+**2b (Firmware) gebaut, ungeprüft**.
+
+**Werkzeuge im Modulverzeichnis:** `gen_pwrseq.py` erzeugt die
+Power-Sequenz-Tabellen aus `rtw8822c.c`; `check_regs.py` hält **jede**
+Konstante gegen ihren `#define`/Enum-Eintrag in den Linux-Headern (134
+geprüft, 0 Abweichungen) — die Regel „vor jedem Commit grep gegen reg.h" tut
+damit ein Skript statt eines Vorsatzes.
 
 ---
 
@@ -264,22 +270,35 @@ genau hier (siehe „Reihenfolge" unten).
   nichts als `read8`/`write8`. Deshalb steht sein Test schon in Stufe 0.
 
 ### Stufe 2 — Ringe, Firmware, efuse
-Die drei gehören in EINE Stufe, weil Linux sie verschränkt (siehe unten).
-**Hier kommt der Firmware-Blob ins Modul** (197,9 KiB).
+Die drei hängen zusammen (siehe unten), aber jede hat ihr eigenes, billiges
+Gate — deshalb drei Teilstufen statt einer. **In 2b kommt der Firmware-Blob
+ins Modul** (197,9 KiB; das Modul wächst von 12 KB auf 217 KB).
 
-- `rtw_pci_init_trx_ring`: 8 TX-Ringe + der MPDU-RX-Ring, die Adress-/Anzahl-/
-  Index-Register aus `pci.h` (L3 vorher entschieden).
-- `rtw_download_firmware` vollständig: `check_firmware_size` ·
-  `wlan_cpu_enable` · Registersicherung · `send_firmware_pkt` →
-  `rtw_fw_write_data_rsvd_page` → **BCN-Queue** · `iddma_download_firmware` ·
-  `download_firmware_end_flow` · `download_firmware_validate`.
-- `rtw_chip_efuse_info_setup` vollständig: `rtw_parse_efuse_map` ·
-  `rtw8822ce_efuse_parsing` · `rtw_dump_hw_feature` · `rtw_check_supported_rfe`.
-- **Gate:** `REG_MCUFW_CTRL` liest `FW_READY`, **und** die MAC-Adresse aus der
-  efuse ist gültig, mit `rfe_option`, `channel_plan`, `crystal_cap` und
-  **`btcoex`** im Log (L6). **Ein `Ok()` auf dem Schreibweg ist keine
-  Quittung** ([[feedback_a_bus_ack_is_not_an_accepted_report]]) — das Gate ist
-  die Antwort, nicht der Versand.
+**2a — die Ringe.** ✅ am Gerät grün
+`rtw_pci_init_trx_ring` + `rtw_pci_reset_buf_desc`: 8 TX-Ringe + der
+MPDU-RX-Ring. Gate: jedes Adress- und Anzahlregister liest zurück, mit MAC
+aus UND an. Gemessen: 1545 von 2048 DMA-Seiten, 11 von 1024 Stücken.
+
+**2b — die Firmware.**
+`rtw_download_firmware` vollständig, alle dreizehn Schritte:
+`check_firmware_size` · `ltecoex_read_reg` · `wlan_cpu_enable(false)` ·
+`download_firmware_reg_backup` (6 Register) · `reset_platform` ·
+`start_download_firmware` → je Abschnitt `download_firmware_to_mem` →
+`send_firmware_pkt` → `rtw_fw_write_data_rsvd_page` → **BCN-Queue** →
+`iddma_download_firmware` → `check_fw_checksum` · `reg_restore` ·
+`end_flow` · `wlan_cpu_enable(true)` · `ltecoex_reg_write` ·
+`download_firmware_validate` · `rtw_hci_setup`.
+Dazu aus `tx.c` der 48-Byte-Sendedeskriptor einer Reserved Page.
+**Gate:** `REG_MCUFW_CTRL` liest `FW_READY`. **Ein `Ok()` auf dem Schreibweg
+ist keine Quittung** ([[feedback_a_bus_ack_is_not_an_accepted_report]]) — das
+Gate ist die Antwort, nicht der Versand.
+
+**2c — efuse und hw_feature.**
+`rtw_chip_efuse_info_setup` vollständig: `rtw_parse_efuse_map` ·
+`rtw8822ce_efuse_parsing` · `rtw_dump_hw_feature` (C2H, braucht also 2b) ·
+`rtw_check_supported_rfe`.
+**Gate:** die MAC-Adresse aus der efuse ist gültig, mit `rfe_option`,
+`channel_plan`, `crystal_cap` und **`btcoex`** im Log (L6).
 
 > **Warum diese Reihenfolge, und warum der Plan sie zuerst falsch hatte.**
 > Der erste Entwurf trennte „Strom und efuse" von „Ringe und Firmware" — als

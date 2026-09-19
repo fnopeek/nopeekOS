@@ -39,6 +39,10 @@
 //! kehrt beim Abschalten dorthin zurueck. Nur eine Richtung zu messen hiesse,
 //! einen Zustand zu pruefen, den der Chip vielleicht schon hatte.
 //!
+//! **Stufe 2b: die Firmware.** `rtw_download_firmware` vollstaendig
+//! (`mac.rs` + `fw.rs` + `tx.rs`), 202600 Bytes ueber die BCN-Queue und
+//! DDMA nach dmem/imem/emem. Gate: `REG_MCUFW_CTRL` liest `FW_READY`.
+//!
 //! **Stufe 2a: die Ringe.** `rtw_pci_init_trx_ring` + `rtw_pci_reset_buf_desc`
 //! (`pci.rs`), in Linux' Reihenfolge — die Ringregister werden programmiert,
 //! BEVOR der MAC angeht (`rtw_power_on` ruft `rtw_hci_setup` vor
@@ -48,9 +52,11 @@
 #![no_std]
 
 mod host;
+mod fw;
 mod mac;
 mod pci;
 mod pwrseq;
+mod tx;
 mod regs;
 use regs::*;
 
@@ -79,6 +85,17 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 /// Eine Quelle fuer die Version — Banner und Bericht koennen nicht
 /// auseinanderlaufen.
 const DRIVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// rtw8822c.c `.fw_name = "rtw88/rtw8822c_fw.bin"` — mitgeliefert wie der
+/// AX200-Blob. Version 9.9.15, und `check_firmware_size` rechnet den Kopf
+/// gegen die Dateilaenge nach, bevor ein Byte an den Chip geht.
+static FW: &[u8] = include_bytes!("../firmware/rtw8822c_fw.bin");
+
+/// `hal.current_band_type` ist beim Download noch 0 — gesetzt wird es erst
+/// in `rtw_set_channel`, also lange danach. Das entscheidet in
+/// `rtw_tx_pkt_info_update_rate`, welcher Zweig gilt, und wir nehmen
+/// denselben wie Linux.
+const BAND_AT_FWDL: u8 = 0;
 
 /// Ergebnis von `rtw_chip_parameter_setup` (main.c:1876-1900).
 struct Hal {
@@ -310,7 +327,48 @@ pub extern "C" fn _start() {
     let rings_ok = gate("Ringregister halten ihre Werte (MAC aus UND an)",
                         rings_off_ok && rings_on_ok);
 
+    // ── Stufe 2b: die Firmware (rtw_download_firmware) ───────────
+    // Reihenfolge wie `rtw_power_on`: hci_setup, mac_power_on, DANN der
+    // Download. Vorher gibt es keinen laufenden MAC, durch dessen BCN-Queue
+    // die Seiten gehen koennten.
+    let hdr = mac::parse_fw_hdr(FW);
+    host::print("[rtl8822ce] Stufe 2b: Firmware v");
+    host::print_dec(hdr.version as u32);
+    host::print(".");
+    host::print_dec(hdr.sub_version as u32);
+    host::print(".");
+    host::print_dec(hdr.sub_index as u32);
+    host::print(", ");
+    host::print_dec(FW.len() as u32);
+    host::print(" Bytes, feature 0x");
+    host::print_hex32(hdr.feature);
+    host::print("\n");
+
+    let fw_ok = match host::dma_alloc(
+        (pci::RSVD_STAGE_BYTES.div_ceil(4096)) as u16) {
+        st if st >= 0 => {
+            let ok = mac::download_firmware(h, &mut trx, st, FW, BAND_AT_FWDL);
+            let ctrl = host::r16(h, REG_MCUFW_CTRL);
+            host::print("  MCUFWCTL = 0x");
+            host::print_hex16(ctrl);
+            host::print(" (FW_READY waere 0x");
+            host::print_hex16(FW_READY as u16);
+            host::print(" unter Maske 0x");
+            host::print_hex16(FW_READY_MASK as u16);
+            host::print(")\n");
+            ok
+        }
+        _ => {
+            host::print("  kein DMA fuer den Zwischenpuffer\n");
+            false
+        }
+    };
+    let stage2b = gate("Firmware laeuft (MCUFW_CTRL liest FW_READY)", fw_ok);
+
     // Wie Linux es in rtw_chip_efuse_info_setup tut: wieder ausschalten.
+    // Ab hier ist das PFLICHT und nicht Kosmetik — eine laufende Firmware
+    // darf nicht mehr in Puffer schreiben, die der Kernel beim Zurueckkehren
+    // freigibt (dieselbe Begruendung steht am Ende von wifi_ax200).
     mac::mac_power_off(h, hal.cut_version);
     let cr_off = host::r8(h, REG_CR);
     host::print("  nach AUS: CR = 0x");
@@ -330,9 +388,14 @@ pub extern "C" fn _start() {
         "[rtl8822ce] Stufe 1: NEIN — nicht weiterbauen, bevor das steht\n"
     });
     host::print(if stage2a {
-        "[rtl8822ce] Stufe 2a: GRUEN — weiter mit 2b (Firmware ueber die BCN-Queue)\n"
+        "[rtl8822ce] Stufe 2a: GRUEN\n"
     } else {
         "[rtl8822ce] Stufe 2a: NEIN — nicht weiterbauen, bevor das steht\n"
+    });
+    host::print(if stage2b {
+        "[rtl8822ce] Stufe 2b: GRUEN — weiter mit 2c (efuse + hw_feature)\n"
+    } else {
+        "[rtl8822ce] Stufe 2b: NEIN — nicht weiterbauen, bevor das steht\n"
     });
 
 

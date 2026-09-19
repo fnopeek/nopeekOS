@@ -1,0 +1,171 @@
+//! `tx.c` aus Linux 6.18.26 rtw88 — nur der Teil, den der Firmware-Download
+//! braucht: der 48-Byte-Sendedeskriptor einer Reserved Page.
+//!
+//! Portiert: `rtw_tx_pkt_info_update_rate` · `rtw_tx_pkt_info_update_sec` ·
+//! `rtw_tx_rsvd_page_pkt_info_update` (Typ `RSVD_BEACON`) ·
+//! `rtw_tx_fill_tx_desc`.
+#![allow(dead_code)]
+
+// main.h:232-248
+pub const RTW_RATEID_G: u8 = 7;
+pub const RTW_RATEID_B_20M: u8 = 8;
+// main.h:250-262
+pub const DESC_RATE1M: u8 = 0x00;
+pub const DESC_RATE6M: u8 = 0x04;
+pub const DESC_RATE24M: u8 = 0x08;
+// main.h:87
+pub const RTW_BAND_2G: u8 = 1;
+
+// tx.h:79-83 — abgelesen, nicht abgeleitet. HIGH ist 17 und H2C 19; mit
+// einem geratenen 17 fuer H2C haette `more_data` (qsel == HIGH) still
+// mitgefeuert.
+pub const TX_DESC_QSEL_BEACON: u8 = 16;
+pub const TX_DESC_QSEL_HIGH: u8 = 17;
+pub const TX_DESC_QSEL_MGMT: u8 = 18;
+pub const TX_DESC_QSEL_H2C: u8 = 19;
+
+/// rtw8822c.c `rtw8822c_hw_spec.tx_pkt_desc_sz`
+pub const TX_PKT_DESC_SZ: usize = 48;
+
+/// `struct rtw_tx_pkt_info` (tx.h) — nur die Felder, die der
+/// Reserved-Page-Weg setzt. Alles andere bleibt null, wie in Linux, wo
+/// `pkt_info` als `{0}` angelegt wird.
+#[derive(Default)]
+pub struct TxPktInfo {
+    pub tx_pkt_size: u32,
+    pub offset: u8,
+    pub bmc: bool,
+    pub ls: bool,
+    pub dis_qselseq: bool,
+    pub mac_id: u8,
+    pub qsel: u8,
+    pub rate_id: u8,
+    pub sec_type: u8,
+    pub pkt_offset: u8,
+    pub ampdu_en: bool,
+    pub report: bool,
+    pub ampdu_density: u8,
+    pub bt_null: bool,
+    pub hw_ssn_sel: u8,
+    pub use_rate: bool,
+    pub dis_rate_fallback: bool,
+    pub rts: bool,
+    pub nav_use_hdr: bool,
+    pub ampdu_factor: u8,
+    pub rate: u8,
+    pub short_gi: bool,
+    pub bw: u8,
+    pub ldpc: bool,
+    pub stbc: u8,
+    pub sn: u16,
+    pub en_hwseq: bool,
+    pub seq: u16,
+    pub tim_offset: u16,
+}
+
+#[inline]
+fn bits(v: u32, mask: u32) -> u32 {
+    (v << mask.trailing_zeros()) & mask
+}
+
+/// tx.c `rtw_tx_pkt_info_update_rate`, mit `ignore_rate = true`.
+///
+/// `rtw_get_mgmt_rate` gibt bei `ignore_rate` immer `lowest_rate` zurueck —
+/// die vif-Abfrage dahinter kann gar nicht greifen.
+fn pkt_info_update_rate(info: &mut TxPktInfo, current_band_type: u8) {
+    if current_band_type == RTW_BAND_2G {
+        info.rate_id = RTW_RATEID_B_20M;
+        info.rate = DESC_RATE1M;
+    } else {
+        info.rate_id = RTW_RATEID_G;
+        info.rate = DESC_RATE6M;
+    }
+    info.use_rate = true;
+    info.dis_rate_fallback = true;
+}
+
+/// tx.c `rtw_tx_rsvd_page_pkt_info_update` fuer `type == RSVD_BEACON`.
+///
+/// **`bmc` wird aus dem NUTZDATEN gelesen**, und das ist kein Versehen:
+/// Linux legt `struct ieee80211_hdr *hdr = skb->data` auf den Puffer, auch
+/// wenn darin Firmware steht. `addr1` liegt bei Offset 4. Wir machen es
+/// genauso — eine Abweichung hier waere ein anderer Deskriptor als der, den
+/// der Chip unter Linux bekommt.
+pub fn rsvd_page_pkt_info_update(payload: &[u8], current_band_type: u8) -> TxPktInfo {
+    let mut info = TxPktInfo::default();
+
+    // type == RSVD_BEACON -> qsel wird hier NICHT gesetzt (pci.c tut es).
+    pkt_info_update_rate(&mut info, current_band_type);
+
+    let a1 = &payload[4..10.min(payload.len())];
+    let bcast = a1.len() == 6 && a1.iter().all(|&b| b == 0xff);
+    let mcast = !a1.is_empty() && a1[0] & 0x01 != 0;
+    info.bmc = bcast || mcast;
+
+    info.tx_pkt_size = payload.len() as u32;
+    info.offset = TX_PKT_DESC_SZ as u8;
+    info.ls = true;
+    // RSVD_BEACON ist kein RSVD_PS_POLL:
+    info.dis_qselseq = true;
+    info.en_hwseq = true;
+    info.hw_ssn_sel = 0;
+    // RSVD_BEACON mit leerer rsvd_page_list -> tim_offset bleibt 0.
+    // `rtw_tx_pkt_info_update_sec` ohne hw_key -> sec_type bleibt 0.
+    info
+}
+
+/// tx.c `rtw_tx_fill_tx_desc`. Schreibt die 48 Bytes an den Anfang von `desc`.
+pub fn fill_tx_desc(info: &TxPktInfo, desc: &mut [u8; TX_PKT_DESC_SZ]) {
+    let more_data = info.qsel == TX_DESC_QSEL_HIGH;
+
+    let w0 = bits(info.tx_pkt_size, 0x0000_FFFF)          // TXPKTSIZE 15:0
+        | bits(info.offset as u32, 0x00FF_0000)           // OFFSET 23:16
+        | bits(info.bmc as u32, 1 << 24)                  // BMC
+        | bits(info.ls as u32, 1 << 26)                   // LS
+        | bits(info.dis_qselseq as u32, 1 << 31);         // DISQSELSEQ
+
+    let w1 = bits(info.mac_id as u32, 0x0000_00FF)        // MACID 7:0
+        | bits(info.qsel as u32, 0x0000_1F00)             // QSEL 12:8
+        | bits(info.rate_id as u32, 0x001F_0000)          // RATE_ID 20:16
+        | bits(info.sec_type as u32, 0x00C0_0000)         // SEC_TYPE 23:22
+        | bits(info.pkt_offset as u32, 0x1F00_0000)       // PKT_OFFSET 28:24
+        | bits(more_data as u32, 1 << 29);                // MORE_DATA
+
+    let w2 = bits(info.ampdu_en as u32, 1 << 12)          // AGG_EN
+        | bits(info.report as u32, 1 << 19)               // SPE_RPT
+        | bits(info.ampdu_density as u32, 0x0070_0000)    // AMPDU_DEN 22:20
+        | bits(info.bt_null as u32, 1 << 23);             // BT_NULL
+
+    let w3 = bits(info.hw_ssn_sel as u32, 0x0000_00C0)    // HW_SSN_SEL 7:6
+        | bits(info.use_rate as u32, 1 << 8)              // USE_RATE
+        | bits(info.dis_rate_fallback as u32, 1 << 10)    // DISDATAFB
+        | bits(info.rts as u32, 1 << 12)                  // USE_RTS
+        | bits(info.nav_use_hdr as u32, 1 << 15)          // NAVUSEHDR
+        | bits(info.ampdu_factor as u32, 0x003E_0000);    // MAX_AGG_NUM 21:17
+
+    // `old_datarate_fb_limit` ist beim 8822C false — der Zweig entfaellt.
+    let mut w4 = bits(info.rate as u32, 0x0000_007F);     // DATARATE 6:0
+
+    let mut w5 = bits(info.short_gi as u32, 1 << 4)       // DATA_SHORT
+        | bits(info.bw as u32, 0x0000_0060)               // DATA_BW 6:5
+        | bits(info.ldpc as u32, 1 << 7)                  // DATA_LDPC
+        | bits(info.stbc as u32, 0x0000_0300);            // DATA_STBC 9:8
+
+    let w6 = bits(info.sn as u32, 0x0000_0FFF);           // SW_DEFINE 11:0
+    let w8 = bits(info.en_hwseq as u32, 1 << 15);         // EN_HWSEQ
+    let mut w9 = bits(info.seq as u32, 0x00FF_F000);      // SW_SEQ 23:12
+
+    if info.rts {
+        w4 |= bits(DESC_RATE24M as u32, 0x1F00_0000);     // RTSRATE 28:24
+        w5 |= bits(1, 1 << 12);                           // DATA_RTS_SHORT
+    }
+    if info.tim_offset != 0 {
+        w9 |= bits(1, 1 << 7)                             // TIM_EN
+            | bits(info.tim_offset as u32, 0x0000_007F);  // TIM_OFFSET 6:0
+    }
+
+    desc.fill(0);
+    for (i, w) in [w0, w1, w2, w3, w4, w5, w6, 0, w8, w9].iter().enumerate() {
+        desc[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+    }
+}
