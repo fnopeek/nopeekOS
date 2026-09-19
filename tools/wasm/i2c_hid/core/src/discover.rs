@@ -377,7 +377,7 @@ pub fn report(d: &HidDevice) -> Vec<String> {
                         adr & 0xFFFF
                     )),
                     None if c.ids.is_empty() => out.push(String::from(
-                        "i2c-hid:   controller carries no _HID and no _ADR — on Intel tables                          both sit inside an If() at scope level, and our loader skips those",
+                        "i2c-hid:   controller carries no _HID and no _ADR (Intel tables put both inside an If() at scope level, which our loader skips)",
                     )),
                     None => out.push(String::from(
                         "i2c-hid:   controller has NEITHER fixed MMIO NOR _ADR",
