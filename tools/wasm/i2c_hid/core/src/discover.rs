@@ -66,6 +66,8 @@ pub struct Controller {
     /// antwortet im besten Fall mit lauter Einsen und im schlechteren gar
     /// nicht. Die Firmware weiss es, also wird sie gefragt.
     pub present: bool,
+    /// Der rohe `_STA`-Wert (`None` = keine Methode, gilt als vorhanden).
+    pub sta: Option<u64>,
     /// 0 = unbekannt; dann sind `sscn`/`fmcn` die einzige Quelle.
     pub input_clock_hz: u32,
     /// `(hcnt, lcnt, sda_hold)` aus `SSCN` (Standard Mode).
@@ -177,6 +179,7 @@ fn read_controller(m: &mut Machine, ns: &Namespace, path: &Path) -> Controller {
     Controller {
         pci_adr,
         present: m.device_present(path),
+        sta: m.device_status(path),
         input_clock_hz: input_clock_hz(&ids),
         sscn: scl_params(m, path, "SSCN"),
         fmcn: scl_params(m, path, "FMCN"),
@@ -359,9 +362,9 @@ pub fn report(d: &HidDevice) -> Vec<String> {
                 out.push(format!("i2c-hid:   FMCN hcnt={} lcnt={} sda_hold={}", h, l, s));
             }
             if !c.present {
-                out.push(String::from(
-                    "i2c-hid:   controller _STA says absent or not functioning",
-                ));
+                out.push(format!(
+                    "i2c-hid:   controller _STA = {:#x} — absent or not functioning",
+                    c.sta.unwrap_or(0)));
             }
             if c.mmio_base == 0 {
                 match c.pci_adr {
