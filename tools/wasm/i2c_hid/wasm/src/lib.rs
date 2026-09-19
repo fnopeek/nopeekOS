@@ -269,6 +269,7 @@ fn probe_bus(d: &i2c_hid_core::discover::HidDevice) {
         Ok(dw) => {
             logln(&alloc::format!("[i2c-hid]   {}", dw.describe()));
             logln("[i2c-hid]   Designware signature OK — the controller is really there");
+            talk_to_device(&mut bus, &dw, d);
         }
         Err(dw_i2c::Error::NotDesignware(v)) => {
             logln(&alloc::format!(
@@ -276,4 +277,72 @@ fn probe_bus(d: &i2c_hid_core::discover::HidDevice) {
         }
         Err(e) => logln(&alloc::format!("[i2c-hid]   controller setup failed: {e:?}")),
     }
+}
+
+/// Mit dem GERAET reden: Bus einrichten, Adresse antippen, HID-Deskriptor
+/// holen, aufwecken und zuruecksetzen.
+///
+/// Ab hier wird GESCHRIEBEN. Die Rechtfertigung ist der Registerwert, den
+/// der Controller gerade selbst geliefert hat — nicht eine Firmware-Flagge,
+/// die wir aus einem Namen errechnen, den wir nirgends finden.
+fn talk_to_device(
+    bus: &mut HostBus,
+    dw: &i2c_hid_core::dw_i2c::Dw,
+    d: &i2c_hid_core::discover::HidDevice,
+) {
+    use i2c_hid_core::{dw_i2c, hid};
+    use i2c_hid_core::dw_i2c::Bus as _;
+
+    let addr = d.slave_address;
+    let desc_reg = match d.descriptor_address {
+        Some(r) => r,
+        None => { logln("[i2c-hid]   no descriptor register — cannot talk to it"); return; }
+    };
+
+    dw_i2c::init_master(bus, dw);
+    logln("[i2c-hid]   master initialised");
+
+    match hid::probe_address(bus, dw, addr) {
+        Ok(()) => logln(&alloc::format!("[i2c-hid]   device at {addr:#04x} answers")),
+        Err(e) => {
+            logln(&alloc::format!("[i2c-hid]   device at {addr:#04x} does not answer: {e:?}"));
+            return;
+        }
+    }
+
+    let desc = match hid::fetch_descriptor(bus, dw, addr, desc_reg) {
+        Ok(x) => x,
+        Err(e) => { logln(&alloc::format!("[i2c-hid]   {e}")); return; }
+    };
+    logln(&alloc::format!("[i2c-hid]   {}", desc.describe()));
+
+    match hid::reset(bus, dw, addr, &desc) {
+        Ok(()) => logln("[i2c-hid]   power on + reset done"),
+        Err(e) => { logln(&alloc::format!("[i2c-hid]   {e}")); return; }
+    }
+
+    // Ein paar Runden horchen. Ohne Beruehrung meldet ein Touchpad nichts,
+    // also ist „nichts" hier die erwartete Antwort — es geht darum, dass
+    // die Leitung traegt.
+    let mut buf = [0u8; 64];
+    let mut got = 0u32;
+    for _ in 0..200 {
+        match hid::get_input(bus, dw, addr, &desc, &mut buf) {
+            Ok(Some(r)) => {
+                got += 1;
+                if got <= 3 {
+                    logln(&alloc::format!(
+                        "[i2c-hid]   input report {} bytes: {:02x?}", r.len(),
+                        &r[..r.len().min(16)]));
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                logln(&alloc::format!("[i2c-hid]   input read failed: {e:?}"));
+                break;
+            }
+        }
+        bus.udelay(5_000);
+    }
+    logln(&alloc::format!("[i2c-hid]   {got} input report(s) in 1 s — touch it while this runs"));
 }

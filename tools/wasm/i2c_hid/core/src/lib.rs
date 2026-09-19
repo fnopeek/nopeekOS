@@ -10,6 +10,7 @@
 //! 1. [`discover`] — was die Firmware sagt (DSDT): Controller, Slave-Adresse,
 //!    Deskriptor-Register, GPIO-Pin.
 //! 2. [`dw_i2c`] — der Synopsys-Designware-Bus, auf dem das Geraet haengt.
+//! 3. [`hid`] — HID over I2C: Deskriptor, Power, Reset, Eingabeberichte.
 
 #![cfg_attr(not(test), no_std)]
 
@@ -17,3 +18,4 @@ extern crate alloc;
 
 pub mod discover;
 pub mod dw_i2c;
+pub mod hid;
