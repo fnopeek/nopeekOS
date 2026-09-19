@@ -268,7 +268,7 @@ pub extern "C" fn _start() {
             return;
         }
     };
-    host::print("[rtl8822ce] Stufe 2a: Ringe belegt — ");
+    host::print("[rtl8822ce] Stufe 2a: Ringe belegt unter 1 GiB — ");
     host::print_dec(trx.dma_pages);
     host::print(" Seiten (");
     host::print_dec(trx.dma_pages * 4 / 1024);
@@ -351,8 +351,8 @@ pub extern "C" fn _start() {
     host::print_hex32(hdr.feature);
     host::print("\n");
 
-    let fw_ok = match host::dma_alloc(
-        (pci::RSVD_STAGE_BYTES.div_ceil(4096)) as u16) {
+    let fw_ok = match host::dma_alloc_below(
+        (pci::RSVD_STAGE_BYTES.div_ceil(4096)) as u16, 1024) {
         st if st >= 0 => {
             let ok = mac::download_firmware(h, &mut trx, st, FW, BAND_AT_FWDL);
             let ctrl = host::r16(h, REG_MCUFW_CTRL);

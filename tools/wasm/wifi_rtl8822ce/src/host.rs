@@ -26,6 +26,7 @@ unsafe extern "C" {
     fn npk_mmio_write32(handle: i32, offset: i32, value: i32) -> i32;
 
     fn npk_dma_alloc(pages: i32) -> i32;
+    fn npk_dma_alloc_below(pages: i32, limit_mb: i32) -> i32;
     fn npk_dma_phys_addr(handle: i32) -> i64;
     fn npk_dma_read(handle: i32, dma_off: i32, wasm_ptr: i32, len: i32) -> i32;
     fn npk_dma_write(handle: i32, dma_off: i32, wasm_ptr: i32, len: i32) -> i32;
@@ -126,6 +127,12 @@ pub fn clr32(h: i32, off: u32, bits: u32) {
 /// TX-/RX-Deskriptor hat nur ein 32-Bit-Adressfeld).
 pub fn dma_alloc(pages: u16) -> i32 {
     unsafe { npk_dma_alloc(pages as i32) }
+}
+
+/// Wie `dma_alloc`, aber unter einer selbst genannten Obergrenze.
+/// `limit_mb = 0` heisst 4 GB, also dasselbe wie `dma_alloc`.
+pub fn dma_alloc_below(pages: u16, limit_mb: u32) -> i32 {
+    unsafe { npk_dma_alloc_below(pages as i32, limit_mb as i32) }
 }
 
 pub fn dma_phys(handle: i32) -> u64 {

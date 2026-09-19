@@ -142,8 +142,22 @@ pub struct Trx {
 
 const EMPTY_TX: TxRing = TxRing { dma: 0, len: 0, handle: -1, wp: 0, rp: 0 };
 
+/// Obergrenze fuer JEDES DMA-Stueck dieses Treibers.
+///
+/// Zwei Gruende, und nur der erste steht in Linux: die DESA-Register sind
+/// 32 Bit breit, also muss alles unter 4 GB liegen. Der zweite kommt vom
+/// Geraetelauf — mit der 4-GB-Grenze sucht `allocate_contiguous_below` von
+/// oben und landet direkt unter dem PCI-MMIO-Loch (0xcdffa000 abwaerts).
+/// Von dort holte der Chip nichts ab und quittierte mit **Received Master
+/// Abort**, waehrend die CPU dieselben Bytes ungestoert las und schrieb.
+/// Auf AMD-Blech ist das die Gegend von TSEG/DPR.
+///
+/// 1 GB ist bewusst deutlich darunter und immer noch weit ueber allem,
+/// was ein PCIe-Geraet an Ausrichtung verlangt.
+const DMA_LIMIT_MB: u32 = 1024;
+
 fn alloc_pages(pages: u32) -> Option<(i32, u32)> {
-    let h = host::dma_alloc(pages as u16);
+    let h = host::dma_alloc_below(pages as u16, DMA_LIMIT_MB);
     if h < 0 {
         return None;
     }
