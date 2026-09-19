@@ -340,6 +340,9 @@ pub const RSVD_STAGE_BYTES: u32 = 0x1000 + crate::tx::TX_PKT_DESC_SZ as u32;
 pub fn write_data_rsvd_page(
     h: i32, trx: &Trx, stage: i32, payload: &[u8], current_band_type: u8,
 ) -> bool {
+    // tx.c `rtw_tx_write_data_rsvd_page_get` baut in Linux ein skb mit 48
+    // Byte Vorlauf und ruft dann `rtw_tx_rsvd_page_pkt_info_update`. Bei uns
+    // ist der Vorlauf der feste Staging-Puffer, das skb faellt weg.
     let desc_sz = crate::tx::TX_PKT_DESC_SZ;
     let mut info = crate::tx::rsvd_page_pkt_info_update(payload, current_band_type);
     // pci.c: `pkt_info->qsel = rtw_pci_get_tx_qsel(skb, queue)` — fuer die

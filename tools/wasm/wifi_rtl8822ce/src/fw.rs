@@ -53,6 +53,7 @@ pub fn write_data_rsvd_page(
     let bckp1 = host::r8(h, REG_FWHW_TXQ_CTRL + 2);
     host::w8(h, REG_FWHW_TXQ_CTRL + 2, bckp1 & !((BIT_EN_BCNQ_DL >> 16) as u8));
 
+    // `rtw_hci_write_data_rsvd_page` -> `rtw_pci_write_data_rsvd_page`
     let mut ok = pci::write_data_rsvd_page(h, trx, stage, payload, current_band_type);
 
     if ok && !check_hw_ready(h, REG_FIFOPAGE_CTRL_2, BIT_BCN_VALID_V1, 1) {
