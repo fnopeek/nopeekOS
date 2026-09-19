@@ -268,6 +268,28 @@ im Log.
 > damit ein Wettlauf (Finger setzt zwischen Pinlesung und Uebertragung auf)
 > nicht als Fehler zaehlt, und streckt die Gegenprobe auf eine Sekunde.
 >
+> **Am Geraet gemessen (0.24.0), und der erste Lauf widerlegte den Bau.**
+> `0x15` (Elan): 819 von 823 Runden vom Pin uebersprungen, vier Lesungen,
+> alle leer — das Tor traegt. `0x0a` (Wacom): **6584 Lesungen in 10 s, alle
+> mit Daten, null uebersprungen, 823-mal am Deckel von acht.** Also die
+> ganze Last, und viermal hintereinander Ziffer fuer Ziffer dieselbe Zahl:
+> kein Stossbetrieb, ein konstanter Strom.
+>
+> Der Grund stand drei Zeilen weiter oben im selben Log: `report id 255
+> arrived — no decoder for it`, dreimal, dann `the gate is wrong, back to
+> reading blind`. **Der Pin hatte die ganze Zeit recht.** Der Wacom
+> beantwortet eine Lesung ohne anliegende Daten mit einem Bericht der
+> ID 255 — einer Nummer, die sein eigener Deskriptor nicht fuehrt (seine
+> sind 28, 19, 20, 11, 16, 31, 1); der Elan mit ID 0. Genau die Frage, die
+> zwei Absaetze weiter oben seit je steht: was sagt ein Geraet, wenn man es
+> ohne Grund anspricht — es sagt nicht Laenge 0.
+>
+> Mein Widerspruchszaehler nahm diesen Muell als Beweis, dass der Pin luegt,
+> und schaltete ein funktionierendes Tor ab. Seit **0.25.0** ist eine
+> undeklarierte Nummer `Step::Junk`: sie beendet die Drainschleife (statt
+> acht Uebertragungen je Runde fuer nichts) und zaehlt nicht gegen den Pin.
+> **Nur ein Bericht, den der Deskriptor kennt, ist ein Bericht.**
+>
 > **Offen und benannt:** waehrend einer Uebertragung dreht `dw_i2c::xfer`
 > weiter gegen die Uhr (`udelay(10)`), statt abzugeben. Das kostet jetzt
 > nur noch, solange wirklich Finger auf dem Pad liegen — abgeben ginge erst,
