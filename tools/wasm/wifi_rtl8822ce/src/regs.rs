@@ -184,6 +184,33 @@ pub const LTECOEX_READY: u32 = 1 << 29;
 pub const FW_HDR_SIZE: usize = 64;
 pub const FW_HDR_CHKSUM_SIZE: u32 = 8;
 
+// ── Stufe 2c: efuse und hw_feature ───────────────────────────────
+pub const REG_EFUSE_CTRL: u32 = 0x0030; // reg.h:48
+pub const BIT_EF_FLAG: u32 = 1 << 31;
+pub const BIT_SHIFT_EF_ADDR: u32 = 8;
+pub const BIT_MASK_EF_ADDR: u32 = 0x3ff;
+pub const BIT_MASK_EF_DATA: u32 = 0xff;
+pub const BITS_EF_ADDR: u32 = BIT_MASK_EF_ADDR << BIT_SHIFT_EF_ADDR;
+
+pub const REG_LDO_EFUSE_CTRL: u32 = 0x0034; // reg.h:62
+pub const BIT_MASK_EFUSE_BANK_SEL: u32 = (1 << 8) | (1 << 9);
+
+pub const REG_C2HEVT: u32 = 0x01A0; // reg.h:287
+/// fw.h:63 — der Ausloeser, VOR dem Firmware-Download geschrieben.
+pub const C2H_HW_FEATURE_DUMP: u8 = 0xfd;
+/// fw.h:57 — die Antwort der Firmware.
+pub const C2H_HW_FEATURE_REPORT: u8 = 0x19;
+/// main.h:39
+pub const HW_FEATURE_LEN: usize = 13;
+
+pub const REG_ANAPARLDO_POW_MAC: u32 = 0x0029; // rtw8822c.h:181
+pub const BIT_LDOE25_PON: u8 = 1 << 0; // rtw8822c.h:182
+
+// efuse.h:8-11
+pub const EFUSE_HW_CAP_IGNORE: u8 = 0;
+pub const EFUSE_HW_CAP_SUPP_BW80: u8 = 7;
+pub const EFUSE_HW_CAP_SUPP_BW40: u8 = 6;
+
 /// rtw8822c.c `rtw8822c_hw_spec.sys_func_en`
 pub const SYS_FUNC_EN_8822C: u8 = 0xD8;
 

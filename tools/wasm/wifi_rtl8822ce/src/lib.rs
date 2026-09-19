@@ -52,6 +52,7 @@
 #![no_std]
 
 mod host;
+mod efuse;
 mod fw;
 mod mac;
 mod pci;
@@ -372,6 +373,58 @@ pub extern "C" fn _start() {
     };
     let stage2b = gate("Firmware laeuft (MCUFW_CTRL liest FW_READY)", fw_ok);
 
+    // ── Stufe 2c: efuse und hw_feature ───────────────────────────
+    let mut stage2c = false;
+    if stage2b {
+        host::print("[rtl8822ce] Stufe 2c: efuse (");
+        host::print_dec(efuse::PHYSICAL_SIZE as u32);
+        host::print(" physisch -> ");
+        host::print_dec(efuse::LOGICAL_SIZE as u32);
+        host::print(" logisch)\n");
+        if let Some(e) = efuse::efuse_info_setup(h, hal.rf_path_num) {
+            host::print("  MAC  ");
+            for (i, b) in e.addr.iter().enumerate() {
+                if i > 0 { host::print(":"); }
+                host::print_hex8(*b);
+            }
+            host::print("\n  rfe_option ");
+            host::print_dec(e.rfe_option as u32);
+            host::print(" · channel_plan 0x");
+            host::print_hex8(e.channel_plan);
+            host::print(" · crystal_cap ");
+            host::print_dec(e.crystal_cap as u32);
+            host::print(" · regd ");
+            host::print_dec(e.regd as u32);
+            host::print("\n  rf_board_option 0x");
+            host::print_hex8(e.rf_board_option);
+            host::print(" · btcoex ");
+            host::print(if e.btcoex { "JA" } else { "nein" });
+            host::print(" · share_ant ");
+            host::print(if e.share_ant { "JA" } else { "nein" });
+            host::print("\n  thermal A/B ");
+            host::print_dec(e.thermal_meter[0] as u32);
+            host::print("/");
+            host::print_dec(e.thermal_meter[1] as u32);
+            host::print(" · hw_cap nss ");
+            host::print_dec(e.hw_cap_nss as u32);
+            host::print(", ant ");
+            host::print_dec(e.hw_cap_ant_num as u32);
+            host::print(", bw 0x");
+            host::print_hex8(e.hw_cap_bw);
+            host::print(", hci 0x");
+            host::print_hex8(e.hw_cap_hci);
+            host::print("\n");
+
+            // main.c: is_valid_ether_addr — nicht null, nicht multicast.
+            let valid = e.addr != [0u8; 6]
+                && e.addr != [0xffu8; 6]
+                && e.addr[0] & 0x01 == 0;
+            stage2c = gate("MAC-Adresse aus der efuse ist gueltig", valid);
+        } else {
+            let _ = gate("MAC-Adresse aus der efuse ist gueltig", false);
+        }
+    }
+
     // Wie Linux es in rtw_chip_efuse_info_setup tut: wieder ausschalten.
     // Ab hier ist das PFLICHT und nicht Kosmetik — eine laufende Firmware
     // darf nicht mehr in Puffer schreiben, die der Kernel beim Zurueckkehren
@@ -400,9 +453,14 @@ pub extern "C" fn _start() {
         "[rtl8822ce] Stufe 2a: NEIN — nicht weiterbauen, bevor das steht\n"
     });
     host::print(if stage2b {
-        "[rtl8822ce] Stufe 2b: GRUEN — weiter mit 2c (efuse + hw_feature)\n"
+        "[rtl8822ce] Stufe 2b: GRUEN\n"
     } else {
         "[rtl8822ce] Stufe 2b: NEIN — nicht weiterbauen, bevor das steht\n"
+    });
+    host::print(if stage2c {
+        "[rtl8822ce] Stufe 2c: GRUEN — weiter mit Stufe 3 (MAC + PHY)\n"
+    } else {
+        "[rtl8822ce] Stufe 2c: NEIN — nicht weiterbauen, bevor das steht\n"
     });
 
 

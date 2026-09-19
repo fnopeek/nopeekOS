@@ -642,6 +642,11 @@ pub fn download_firmware(h: i32, trx: &mut Trx, stage: i32, fw: &[u8], band: u8)
         }
     };
 
+    // rtw_chip_efuse_enable: DAS steht zwischen mac_power_on und dem
+    // Download, und ohne es liefert die Firmware spaeter keinen
+    // hw-feature-Bericht.
+    host::w8(h, REG_C2HEVT, C2H_HW_FEATURE_DUMP);
+
     // Was die Power-Sequenz hinterlassen hat, BEVOR das Backup es umschreibt.
     // REG_RQPN_CTRL_2 ist der interessante: das Backup ODERt nur BIT_LD_RQPN
     // darauf, es SETZT die Seitenzahlen nicht — die kommen erst in
