@@ -1401,9 +1401,24 @@ impl<'a> Interp<'a> {
                 return v;
             }
         }
-        self.ec.note_num("[aml]   region read space=", space as u64);
-        self.ec.note_num("[aml]     addr=", addr);
-        self.ec.note("[aml]     -> 0 (NICHT hinterlegt, erfunden)");
+        // EINE Zeile mit allem darin, und nur die ersten paar.
+        //
+        // Vorher waren es drei Zeilen ueber `note_num` — und ein Rufer, der
+        // nur `note` liefert (der i2c-hid-Treiber tut das), bekam davon
+        // ausgerechnet die beiden mit den ZAHLEN nicht. Uebrig blieb ein
+        // Dutzend nackter „erfunden", das nicht sagte, wo.
+        //
+        // Ein erfundener Wert ist EINMAL eine Auskunft und danach Laerm:
+        // die Firmware liest solche Register in Schleifen.
+        use core::sync::atomic::{AtomicU32, Ordering};
+        static INVENTED: AtomicU32 = AtomicU32::new(0);
+        let n = INVENTED.fetch_add(1, Ordering::Relaxed);
+        if n < 4 {
+            self.ec.note(&format!(
+                "[aml]   region space={space} addr={addr:#x} not backed -> 0 (invented)"));
+        } else if n == 4 {
+            self.ec.note("[aml]   (further invented region reads silenced)");
+        }
         0
     }
 
@@ -1933,7 +1948,15 @@ impl<'a> Machine<'a> {
                 push_ids(&v, &mut out);
             }
         }
-        out
+        // Doppelte werfen: ein Geraet darf denselben Namen in `_HID` UND
+        // `_CID` fuehren (der AMD-GPIO-Block tut das), und zweimal
+        // dasselbe zu melden sieht nach zwei Geraeten aus.
+        out.dedup();
+        let mut uniq: Vec<String> = Vec::new();
+        for id in out {
+            if !uniq.contains(&id) { uniq.push(id); }
+        }
+        uniq
     }
 }
 

@@ -34,6 +34,36 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 unsafe extern "C" {
     fn npk_acpi_dsdt(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_print(ptr: i32, len: i32);
+    fn npk_mmio_map_phys(hi: i32, lo: i32, pages: i32) -> i32;
+    fn npk_mmio_read32(handle: i32, offset: i32) -> i32;
+    fn npk_mmio_write32(handle: i32, offset: i32, value: i32) -> i32;
+    fn npk_now_us() -> i64;
+}
+
+/// Der Hardwarezugang des Bustreibers.
+///
+/// Der Treiber rechnet, diese Huelle greift zu — deshalb laeuft derselbe
+/// Code im Pruefstand gegen einen Mock.
+struct HostBus { handle: i32 }
+
+impl i2c_hid_core::dw_i2c::Bus for HostBus {
+    fn read32(&mut self, off: u32) -> u32 {
+        unsafe { npk_mmio_read32(self.handle, off as i32) as u32 }
+    }
+    fn write32(&mut self, off: u32, val: u32) {
+        unsafe { npk_mmio_write32(self.handle, off as i32, val as i32) };
+    }
+    fn now_us(&mut self) -> u64 {
+        let t = unsafe { npk_now_us() };
+        if t < 0 { 0 } else { t as u64 }
+    }
+    fn udelay(&mut self, us: u32) {
+        // Kein Schlaf unter einer Millisekunde: `npk_sleep` rechnet in ms,
+        // und ein I2C-Zyklus dauert 2,5 us. Also gegen die Uhr drehen.
+        let end = self.now_us() + us as u64;
+        while self.now_us() < end { core::hint::spin_loop(); }
+    }
+    fn note(&mut self, s: &str) { logln(s); }
 }
 
 fn log(s: &str) {
@@ -109,6 +139,48 @@ pub extern "C" fn _start() {
         for line in i2c_hid_core::discover::report(d) {
             logln(&line);
         }
+        probe_bus(d);
     }
-    logln("[i2c-hid] discovery done — bus driver not built yet");
+    logln("[i2c-hid] done");
+}
+
+/// Den Controller ANFASSEN: abbilden, Kennung lesen, Zaehler rechnen.
+///
+/// Das ist der erste Schritt, der die Hardware beruehrt — und die Kennung
+/// ist die billigste Probe, dass Abbildung und Adresse stimmen. Steht dort
+/// `0x44570140` ("DW" + 0x0140), ist der ganze Weg bis hierher richtig:
+/// DSDT gelesen, `_CRS` ausgewertet, MMIO abgebildet.
+fn probe_bus(d: &i2c_hid_core::discover::HidDevice) {
+    use i2c_hid_core::dw_i2c;
+
+    let c = match &d.controller {
+        Some(c) if c.mmio_base != 0 && c.present => c,
+        Some(c) if !c.present => {
+            logln("[i2c-hid]   controller _STA says absent — not touching its registers");
+            return;
+        }
+        _ => { logln("[i2c-hid]   controller has no fixed MMIO — nothing to map"); return; }
+    };
+
+    let pages = ((c.mmio_len as usize).max(4096) + 4095) / 4096;
+    let handle = unsafe { npk_mmio_map_phys(0, c.mmio_base as i32, pages.min(16) as i32) };
+    if handle < 0 {
+        logln("[i2c-hid]   MMIO mapping REFUSED — no HARDWARE right, or the range is RAM");
+        return;
+    }
+
+    let mut bus = HostBus { handle };
+    let clk_khz = c.input_clock_hz / 1000;
+    match dw_i2c::Dw::setup(&mut bus, d.bus_speed_hz, clk_khz, c.sscn, c.fmcn) {
+        Ok(dw) => {
+            logln(&alloc::format!("[i2c-hid]   {}", dw.describe()));
+            logln("[i2c-hid]   Designware signature OK — the controller is really there");
+        }
+        Err(dw_i2c::Error::NotDesignware(v)) => {
+            logln(&alloc::format!(
+                "[i2c-hid]   COMP_TYPE {v:#010x}, expected 0x44570140 — wrong address, \
+                 or the block is powered down"));
+        }
+        Err(e) => logln(&alloc::format!("[i2c-hid]   controller setup failed: {e:?}")),
+    }
 }
