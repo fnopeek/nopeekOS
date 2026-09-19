@@ -468,6 +468,18 @@ extern "C" fn f_npk_mmio_write16(vm: *const u64, handle: i32, offset: i32, value
     host_core::npk_mmio_write16(ctx, handle, offset, value)
 }
 
+extern "C" fn f_npk_mmio_read8(vm: *const u64, handle: i32, offset: i32) -> i32 {
+    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    let ctx = unsafe { ctx_of(vm) };
+    host_core::npk_mmio_read8(ctx, handle, offset)
+}
+
+extern "C" fn f_npk_mmio_write8(vm: *const u64, handle: i32, offset: i32, value: i32) -> i32 {
+    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    let ctx = unsafe { ctx_of(vm) };
+    host_core::npk_mmio_write8(ctx, handle, offset, value)
+}
+
 extern "C" fn f_npk_mmio_read64(vm: *const u64, handle: i32, offset: i32) -> i64 {
     // SAFETY: `vm` ist der vmctx des rufenden Moduls.
     let ctx = unsafe { ctx_of(vm) };
@@ -1012,6 +1024,8 @@ pub(crate) fn resolve(module: &str, name: &str) -> Option<u64> {
         "npk_mmio_map_bar" => f_npk_mmio_map_bar as *const () as u64,
         "npk_mmio_read32" => f_npk_mmio_read32 as *const () as u64,
         "npk_mmio_write32" => f_npk_mmio_write32 as *const () as u64,
+        "npk_mmio_read8" => f_npk_mmio_read8 as *const () as u64,
+        "npk_mmio_write8" => f_npk_mmio_write8 as *const () as u64,
         "npk_mmio_read16" => f_npk_mmio_read16 as *const () as u64,
         "npk_mmio_write16" => f_npk_mmio_write16 as *const () as u64,
         "npk_mmio_read64" => f_npk_mmio_read64 as *const () as u64,
