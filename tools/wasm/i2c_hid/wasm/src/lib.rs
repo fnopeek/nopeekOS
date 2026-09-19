@@ -274,7 +274,20 @@ pub extern "C" fn _start() {
         }
         let mut alive = false;
         for l in live.iter_mut() {
-            if poll_live(l, &mut buf) { alive = true; }
+            // Die Leitung LEER holen, nicht einen Bericht je Runde.
+            //
+            // Ein Bild aus zwei Berichten braucht sonst zwei Runden, und
+            // bei 5 ms Abstand liegt das genau auf der Melderate des
+            // Geraets — ein Bericht geht verloren, sobald es einmal
+            // schneller ist als wir. Acht ist der Deckel, damit ein
+            // schwatzendes Geraet die Runde nicht besetzt.
+            for _ in 0..8 {
+                match poll_live(l, &mut buf) {
+                    Step::Data => { alive = true; }
+                    Step::Empty => { alive = true; break; }
+                    Step::Dead => break,
+                }
+            }
         }
         if !alive {
             logln("[i2c-hid] all devices stopped answering — giving up");
@@ -350,14 +363,24 @@ enum Mode {
     },
     /// Praezisions-Touchpad: KONTAKTPUNKTE. Je Finger ein Tip-Switch, ein
     /// X und ein Y — daraus entstehen Gesten, die kein Geraet meldet.
+    ///
+    /// Die KENNUNG (`Contact Identifier`) faehrt mit, und sie ist kein
+    /// Beiwerk: liegen zwei Finger auf, muss der Weg aus DEMSELBEN Finger
+    /// gerechnet werden. Ohne sie ist der Bezugspunkt der „erste Kontakt
+    /// im Bild", und wenn das Geraet die Reihenfolge einmal tauscht,
+    /// springt die Strecke um den Fingerabstand.
     Touchpad {
-        contacts: alloc::vec::Vec<(report::Field, report::Field, report::Field)>,
+        contacts: alloc::vec::Vec<Contact>,
         count: Option<report::Field>,
-        /// Ein Scrollschritt in Geraeteeinheiten, aus dem logischen
-        /// Bereich hergeleitet — ein Touchpad mit 3000 Einheiten Hoehe
-        /// braucht einen anderen Schwellwert als eines mit 800.
-        scroll_step: i32,
     },
+}
+
+/// Ein Kontaktplatz im Bericht: liegt er auf, wer ist er, wo ist er.
+struct Contact {
+    tip: report::Field,
+    id: Option<report::Field>,
+    x: report::Field,
+    y: report::Field,
 }
 
 /// Ein Bericht und wie er zu lesen ist.
@@ -394,28 +417,22 @@ struct Live {
     /// Wieviele Kontaktlagen wurden schon gemeldet? Die ersten paar
     /// gehoeren ins Log: ob ZWEI Finger ankommen, sagt sonst niemand.
     touch_logged: u32,
+    /// Die ersten Berichte ROH. Was das Geraet wirklich schickt, sagt
+    /// keine abgeleitete Zahl.
+    raw_logged: u32,
+    /// Die ersten Rollentscheidungen.
+    scroll_logged: u32,
 
-    // ── Ein BILD aus mehreren Berichten ───────────────────────────
+    // ── Aus Orten werden Wege und Gesten ─────────────────────────
     //
-    // Florians Elan fuehrt in seinem Bericht EINEN Kontaktplatz und
-    // schickt bei zwei Fingern ZWEI Berichte hintereinander; `Contact
-    // Count` steht nur im ersten und sagt, wieviele folgen. Wer jeden
-    // Bericht fuer ein Bild haelt, sieht nie mehr als einen Finger — und
-    // genau daran ist das Zweifinger-Rollen gescheitert.
-    frame: [(i32, i32); 8],
-    frame_n: usize,
-    expected: usize,
-    collected: usize,
-    in_frame: bool,
-    /// Bezugspunkt fuer die Umrechnung von ORT auf WEG.
+    // Das steht in `i2c_hid_core::gesture` und nicht hier, weil genau
+    // diese Logik zweimal falsch ausgeliefert wurde und beide Male erst
+    // am Geraet auffiel. Dort haengen Tests daran.
+    track: i2c_hid_core::gesture::Tracker,
+    /// Bezugspunkt fuer eine Maus, die ORTE statt Wege meldet.
     have_ref: bool,
     rx: i32,
     ry: i32,
-    /// Aufgelaufene Scrollstrecke, bis sie eine Raste ergibt.
-    scroll_acc: i32,
-    /// Wieviele Finger lagen zuletzt auf? Ein Wechsel setzt den Bezug
-    /// zurueck — sonst springt der Zeiger, wenn der zweite Finger kommt.
-    last_n: usize,
     /// Die zuletzt gemeldete Tastenlage.
     ///
     /// Ein LOSLASSEN ist ein Ereignis wie ein Druck: wer nur bei
@@ -521,28 +538,37 @@ fn talk_to_device(
     // JEDEN Bericht einrichten, den wir lesen koennen — Touchpad und
     // Maus. Welcher kommt, entscheidet das Geraet, nicht wir.
     let mut decoders: alloc::vec::Vec<Decoder> = alloc::vec::Vec::new();
+    let mut scroll_step = 1i32;
 
     if let Some(id) = map.touchpad_report() {
         let tips = map.find_all(report::Kind::Input, id, report::PAGE_DIGITIZER, report::USAGE_TIP_SWITCH);
         let xs = map.find_all(report::Kind::Input, id, report::PAGE_GENERIC_DESKTOP, report::USAGE_X);
         let ys = map.find_all(report::Kind::Input, id, report::PAGE_GENERIC_DESKTOP, report::USAGE_Y);
+        let ids = map.find_all(report::Kind::Input, id, report::PAGE_DIGITIZER, report::USAGE_CONTACT_ID);
         let n = tips.len().min(xs.len()).min(ys.len());
         if n > 0 {
-            let contacts: alloc::vec::Vec<_> =
-                (0..n).map(|i| (*tips[i], *xs[i], *ys[i])).collect();
+            let contacts: alloc::vec::Vec<_> = (0..n)
+                .map(|i| Contact {
+                    tip: *tips[i],
+                    id: ids.get(i).map(|f| **f),
+                    x: *xs[i],
+                    y: *ys[i],
+                })
+                .collect();
             // Ein Scrollschritt aus dem logischen Bereich: etwa ein
             // Vierzigstel der Padhoehe je Raste. Geraeteunabhaengig, weil
             // die Zahl aus dem Geraet selbst kommt.
             let span = (ys[0].logical_max - ys[0].logical_min).max(1);
             let step = (span / 40).max(1);
             logln(&alloc::format!(
-                "[i2c-hid]   report {id}: touchpad, {n} contact slot(s), scroll step {step}"));
+                "[i2c-hid]   report {id}: touchpad, {n} contact slot(s), scroll step {step}, ids {}",
+                if ids.is_empty() { "no" } else { "yes" }));
+            scroll_step = step;
             decoders.push(Decoder {
                 rid: id,
                 mode: Mode::Touchpad {
                     contacts,
                     count: map.find(id, report::PAGE_DIGITIZER, report::USAGE_CONTACT_COUNT).copied(),
-                    scroll_step: step,
                 },
                 btn: (1u16..=3).filter_map(|u| map.find(id, report::PAGE_BUTTON, u).copied()).collect(),
             });
@@ -584,10 +610,10 @@ fn talk_to_device(
         switched,
         seen: 0,
         touch_logged: 0,
-        frame: [(0, 0); 8], frame_n: 0,
-        expected: 0, collected: 0, in_frame: false,
+        raw_logged: 0, scroll_logged: 0,
+        track: i2c_hid_core::gesture::Tracker::new(scroll_step),
         have_ref: false, rx: 0, ry: 0,
-        scroll_acc: 0, last_n: 0, last_buttons: 0,
+        last_buttons: 0,
     })
 }
 
@@ -601,12 +627,22 @@ fn talk_to_device(
 /// Und eine GESTE meldet niemand. „Zwei Finger wandern parallel" steht in
 /// keinem Bericht; es entsteht erst hier, aus der Zahl der aufliegenden
 /// Kontaktpunkte und ihrer Bewegung. Unter Linux macht das libinput.
-fn poll_live(l: &mut Live, buf: &mut [u8]) -> bool {
+/// Was ein einzelner Leseversuch ergeben hat.
+enum Step {
+    /// Ein Bericht kam — es kann sofort noch einer dahinter liegen.
+    Data,
+    /// Nichts da. Das Geraet lebt, hat aber gerade nichts zu sagen.
+    Empty,
+    /// Der Bus antwortet nicht mehr.
+    Dead,
+}
+
+fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
     use i2c_hid_core::{hid, report};
     let r = match hid::get_input(&mut l.bus, &l.dw, l.addr, &l.desc, buf) {
         Ok(Some(r)) => r,
-        Ok(None) => return true,
-        Err(_) => return false,
+        Ok(None) => return Step::Empty,
+        Err(_) => return Step::Dead,
     };
     let (id, data) = if l.uses_ids && !r.is_empty() { (r[0], &r[1..]) } else { (0u8, r) };
 
@@ -619,10 +655,15 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> bool {
             logln(&alloc::format!(
                 "[i2c-hid]   report id {id} arrived, {} bytes — no decoder for it", r.len()));
         }
-        return true;
+        return Step::Data;
     };
     let (mode, btn) = (&d.mode, &d.btn);
     l.seen += 1;
+
+    if l.raw_logged < 16 {
+        l.raw_logged += 1;
+        logln(&alloc::format!("[i2c-hid]   in {id}: {:02x?}", data));
+    }
 
     let mut buttons = 0i32;
     for (i, f) in btn.iter().enumerate() {
@@ -644,70 +685,37 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> bool {
                 (d.0, d.1, s)
             }
         }
-        Mode::Touchpad { contacts, count, scroll_step } => {
-            let step = *scroll_step;
-            // Ein Bild kann ueber mehrere Berichte kommen. Der erste
-            // traegt `Contact Count`; die folgenden tragen 0.
+        Mode::Touchpad { contacts, count } => {
+            use i2c_hid_core::gesture;
             let cc = count.as_ref().map(|c| report::extract(data, c)).unwrap_or(-1);
-            if !l.in_frame {
-                l.expected = if cc > 0 { cc as usize } else { 0 };
-                l.frame_n = 0;
-                l.collected = 0;
-                l.in_frame = true;
+            let mut present = [(0i32, 0i32, 0i32); 8];
+            let mut np = 0usize;
+            for (i, c) in contacts.iter().enumerate() {
+                if report::extract(data, &c.tip) != 0 && np < present.len() {
+                    // Ohne Kennungsfeld ist der PLATZ die Kennung.
+                    let cid = c.id.as_ref()
+                        .map(|f| report::extract(data, f))
+                        .unwrap_or(i as i32);
+                    present[np] =
+                        (cid, report::extract(data, &c.x), report::extract(data, &c.y));
+                    np += 1;
+                }
             }
-            for (tip, fx, fy) in contacts.iter() {
-                if report::extract(data, tip) != 0 && l.frame_n < l.frame.len() {
-                    l.frame[l.frame_n] = (report::extract(data, fx), report::extract(data, fy));
-                    l.frame_n += 1;
-                }
-                l.collected += 1;
-            }
-
-            if l.collected < l.expected {
-                // Es fehlen noch Finger — nichts entscheiden.
-                (0, 0, 0)
-            } else {
-                l.in_frame = false;
-                let n = l.frame_n;
-                if n > 0 && l.touch_logged < 6 {
-                    l.touch_logged += 1;
-                    logln(&alloc::format!(
-                        "[i2c-hid]   frame: {n} finger(s), contact-count {cc}, {:?}",
-                        &l.frame[..n.min(2)]));
-                }
-                if n != l.last_n {
-                    // Fingerzahl gewechselt: Bezug neu setzen, sonst
-                    // springt es beim Aufsetzen oder Abheben des zweiten.
-                    l.have_ref = false;
-                    l.scroll_acc = 0;
-                }
-                l.last_n = n;
-
-                if n == 0 {
-                    l.have_ref = false;
-                    (0, 0, 0)
-                } else {
-                    // Ein Finger: sein Ort. Zwei: ihr Mittel.
-                    let (sx, sy) = l.frame[..n].iter()
-                        .fold((0i32, 0i32), |a, p| (a.0 + p.0, a.1 + p.1));
-                    let (x, y) = (sx / n as i32, sy / n as i32);
-                    let (ddx, ddy) = if l.have_ref { (x - l.rx, y - l.ry) } else { (0, 0) };
-                    l.have_ref = true;
-                    l.rx = x; l.ry = y;
-
-                    if n >= 2 {
-                        // ZWEI FINGER = ROLLEN. Die Strecke laeuft auf,
-                        // bis sie eine Raste ergibt — sonst kaeme bei
-                        // jedem Bild eine, und das Rollen waere
-                        // unbrauchbar schnell.
-                        l.scroll_acc += ddy;
-                        let clicks = l.scroll_acc / step;
-                        if clicks != 0 { l.scroll_acc -= clicks * step; }
-                        // Y waechst nach UNTEN, ein Rad zaehlt nach OBEN.
-                        (0, 0, -clicks)
-                    } else {
-                        (ddx, ddy, 0)
+            match l.track.feed(cc, &present[..np], contacts.len()) {
+                gesture::Out::Pending => (0, 0, 0),
+                gesture::Out::Frame { n, gesture, dx, dy, scroll } => {
+                    if n > 0 && l.touch_logged < 8 {
+                        l.touch_logged += 1;
+                        logln(&alloc::format!(
+                            "[i2c-hid]   frame: {n} finger(s), contact-count {cc}, \
+                             gesture {gesture}, {:?}",
+                            &l.track.frame()[..n.min(2)]));
                     }
+                    if scroll != 0 && l.scroll_logged < 8 {
+                        l.scroll_logged += 1;
+                        logln(&alloc::format!("[i2c-hid]   scroll: {scroll} click(s)"));
+                    }
+                    (dx, dy, scroll)
                 }
             }
         }
@@ -717,5 +725,5 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> bool {
         unsafe { npk_pointer_inject(dx, dy, buttons, scroll) };
     }
     l.last_buttons = buttons;
-    true
+    Step::Data
 }
