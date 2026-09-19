@@ -25,6 +25,11 @@ unsafe extern "C" {
     fn npk_mmio_read32(handle: i32, offset: i32) -> i32;
     fn npk_mmio_write32(handle: i32, offset: i32, value: i32) -> i32;
 
+    fn npk_dma_alloc(pages: i32) -> i32;
+    fn npk_dma_phys_addr(handle: i32) -> i64;
+    fn npk_dma_read32(handle: i32, offset: i32) -> i32;
+    fn npk_dma_write32(handle: i32, offset: i32, value: i32) -> i32;
+
     fn npk_memory_fence() -> i32;
     fn npk_sleep(ms: i32) -> i32;
     fn npk_ticks() -> i64;
@@ -111,6 +116,27 @@ pub fn set32(h: i32, off: u32, bits: u32) {
 /// `rtw_write32_clr`
 pub fn clr32(h: i32, off: u32, bits: u32) {
     w32(h, off, r32(h, off) & !bits);
+}
+
+// ── DMA ──────────────────────────────────────────────────────────
+
+/// Zusammenhaengende Seiten unter 4 GB (der Kernel garantiert beides; der
+/// TX-/RX-Deskriptor hat nur ein 32-Bit-Adressfeld).
+pub fn dma_alloc(pages: u16) -> i32 {
+    unsafe { npk_dma_alloc(pages as i32) }
+}
+
+pub fn dma_phys(handle: i32) -> u64 {
+    let v = unsafe { npk_dma_phys_addr(handle) };
+    if v < 0 { 0 } else { v as u64 }
+}
+
+pub fn dma_r32(handle: i32, offset: u32) -> u32 {
+    unsafe { npk_dma_read32(handle, offset as i32) as u32 }
+}
+
+pub fn dma_w32(handle: i32, offset: u32, val: u32) {
+    unsafe { npk_dma_write32(handle, offset as i32, val as i32) };
 }
 
 // ── Zeit und Bericht ─────────────────────────────────────────────
