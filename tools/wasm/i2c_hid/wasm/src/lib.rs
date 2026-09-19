@@ -394,6 +394,19 @@ struct Live {
     /// Wieviele Kontaktlagen wurden schon gemeldet? Die ersten paar
     /// gehoeren ins Log: ob ZWEI Finger ankommen, sagt sonst niemand.
     touch_logged: u32,
+
+    // ── Ein BILD aus mehreren Berichten ───────────────────────────
+    //
+    // Florians Elan fuehrt in seinem Bericht EINEN Kontaktplatz und
+    // schickt bei zwei Fingern ZWEI Berichte hintereinander; `Contact
+    // Count` steht nur im ersten und sagt, wieviele folgen. Wer jeden
+    // Bericht fuer ein Bild haelt, sieht nie mehr als einen Finger — und
+    // genau daran ist das Zweifinger-Rollen gescheitert.
+    frame: [(i32, i32); 8],
+    frame_n: usize,
+    expected: usize,
+    collected: usize,
+    in_frame: bool,
     /// Bezugspunkt fuer die Umrechnung von ORT auf WEG.
     have_ref: bool,
     rx: i32,
@@ -571,6 +584,8 @@ fn talk_to_device(
         switched,
         seen: 0,
         touch_logged: 0,
+        frame: [(0, 0); 8], frame_n: 0,
+        expected: 0, collected: 0, in_frame: false,
         have_ref: false, rx: 0, ry: 0,
         scroll_acc: 0, last_n: 0, last_buttons: 0,
     })
@@ -630,60 +645,69 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> bool {
             }
         }
         Mode::Touchpad { contacts, count, scroll_step } => {
-            // Welche Finger liegen auf?
-            let mut down: alloc::vec::Vec<(i32, i32)> = alloc::vec::Vec::new();
+            let step = *scroll_step;
+            // Ein Bild kann ueber mehrere Berichte kommen. Der erste
+            // traegt `Contact Count`; die folgenden tragen 0.
+            let cc = count.as_ref().map(|c| report::extract(data, c)).unwrap_or(-1);
+            if !l.in_frame {
+                l.expected = if cc > 0 { cc as usize } else { 0 };
+                l.frame_n = 0;
+                l.collected = 0;
+                l.in_frame = true;
+            }
             for (tip, fx, fy) in contacts.iter() {
-                if report::extract(data, tip) != 0 {
-                    down.push((report::extract(data, fx), report::extract(data, fy)));
+                if report::extract(data, tip) != 0 && l.frame_n < l.frame.len() {
+                    l.frame[l.frame_n] = (report::extract(data, fx), report::extract(data, fy));
+                    l.frame_n += 1;
                 }
-            }
-            // `Contact Count` ist die Ansage des Geraets; die Tip-Switches
-            // sind der Befund. Wo beide da sind, gilt der kleinere — ein
-            // Bericht kann mehr Plaetze fuehren als gerade belegt sind.
-            if let Some(c) = count {
-                let n = report::extract(data, c).max(0) as usize;
-                if n < down.len() { down.truncate(n); }
+                l.collected += 1;
             }
 
-            let n = down.len();
-            if n > 0 && l.touch_logged < 6 {
-                l.touch_logged += 1;
-                let raw = count.as_ref().map(|c| report::extract(data, c)).unwrap_or(-1);
-                logln(&alloc::format!(
-                    "[i2c-hid]   touch: {n} finger(s) down, contact-count field {raw}, first {:?}", &down[..down.len().min(2)]));
-            }
-            if n != l.last_n {
-                // Fingerzahl gewechselt: Bezug neu setzen, sonst springt
-                // es beim Aufsetzen oder Abheben des zweiten.
-                l.have_ref = false;
-                l.scroll_acc = 0;
-            }
-            l.last_n = n;
-
-            if n == 0 {
-                l.have_ref = false;
+            if l.collected < l.expected {
+                // Es fehlen noch Finger — nichts entscheiden.
                 (0, 0, 0)
             } else {
-                // Bei einem Finger dessen Ort, bei zweien ihr Mittel.
-                let (sx, sy) = down.iter().fold((0i32, 0i32), |a, p| (a.0 + p.0, a.1 + p.1));
-                let (x, y) = (sx / n as i32, sy / n as i32);
-                let (ddx, ddy) = if l.have_ref { (x - l.rx, y - l.ry) } else { (0, 0) };
-                l.have_ref = true;
-                l.rx = x; l.ry = y;
+                l.in_frame = false;
+                let n = l.frame_n;
+                if n > 0 && l.touch_logged < 6 {
+                    l.touch_logged += 1;
+                    logln(&alloc::format!(
+                        "[i2c-hid]   frame: {n} finger(s), contact-count {cc}, {:?}",
+                        &l.frame[..n.min(2)]));
+                }
+                if n != l.last_n {
+                    // Fingerzahl gewechselt: Bezug neu setzen, sonst
+                    // springt es beim Aufsetzen oder Abheben des zweiten.
+                    l.have_ref = false;
+                    l.scroll_acc = 0;
+                }
+                l.last_n = n;
 
-                if n >= 2 {
-                    // ZWEI FINGER = ROLLEN. Die Strecke laeuft auf, bis
-                    // sie eine Raste ergibt — sonst kaeme bei jedem
-                    // Bericht eine, und das Rollen waere unbrauchbar
-                    // schnell.
-                    l.scroll_acc += ddy;
-                    let step = *scroll_step;
-                    let clicks = l.scroll_acc / step;
-                    if clicks != 0 { l.scroll_acc -= clicks * step; }
-                    // Y waechst nach UNTEN, ein Rad zaehlt nach OBEN.
-                    (0, 0, -clicks)
+                if n == 0 {
+                    l.have_ref = false;
+                    (0, 0, 0)
                 } else {
-                    (ddx, ddy, 0)
+                    // Ein Finger: sein Ort. Zwei: ihr Mittel.
+                    let (sx, sy) = l.frame[..n].iter()
+                        .fold((0i32, 0i32), |a, p| (a.0 + p.0, a.1 + p.1));
+                    let (x, y) = (sx / n as i32, sy / n as i32);
+                    let (ddx, ddy) = if l.have_ref { (x - l.rx, y - l.ry) } else { (0, 0) };
+                    l.have_ref = true;
+                    l.rx = x; l.ry = y;
+
+                    if n >= 2 {
+                        // ZWEI FINGER = ROLLEN. Die Strecke laeuft auf,
+                        // bis sie eine Raste ergibt — sonst kaeme bei
+                        // jedem Bild eine, und das Rollen waere
+                        // unbrauchbar schnell.
+                        l.scroll_acc += ddy;
+                        let clicks = l.scroll_acc / step;
+                        if clicks != 0 { l.scroll_acc -= clicks * step; }
+                        // Y waechst nach UNTEN, ein Rad zaehlt nach OBEN.
+                        (0, 0, -clicks)
+                    } else {
+                        (ddx, ddy, 0)
+                    }
                 }
             }
         }

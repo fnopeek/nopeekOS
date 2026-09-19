@@ -138,6 +138,37 @@ pub fn parse(desc: &[u8]) -> ReportMap {
                         Kind::Output => &mut off_out[g.report_id as usize],
                         Kind::Feature => &mut off_feat[g.report_id as usize],
                     };
+                    // Ein Block, dessen Elemente ALLE DIESELBE Usage
+                    // tragen, braucht keinen Eintrag je Element.
+                    //
+                    // Linux speichert Anzahl und Groesse einmal je Feld;
+                    // ich lege je Element einen an, und ein
+                    // Hersteller-Feature mit `Report Count (0x488)` macht
+                    // daraus 1160 Eintraege — auf Florians Touchpad kamen
+                    // so 1583 Felder aus 381 Bytes zusammen. Wo die Usages
+                    // sich unterscheiden (Kontaktpunkte, Tastenreihen ueber
+                    // `Usage Minimum`), bleibt es bei einem Eintrag je
+                    // Element; sonst genuegt einer, und der Versatz
+                    // springt ueber den ganzen Block.
+                    let distinct = usages.len() > 1 || usage_min.is_some();
+                    if !distinct && g.report_count > 1 {
+                        out.fields.push(Field {
+                            kind,
+                            report_id: g.report_id,
+                            usage_page: g.usage_page,
+                            usage: usages.last().copied().unwrap_or(0),
+                            bit_offset: *off,
+                            bit_size: g.report_size,
+                            logical_min: g.logical_min,
+                            logical_max: g.logical_max,
+                            relative,
+                            constant,
+                        });
+                        *off += g.report_size * g.report_count;
+                        usages.clear();
+                        usage_min = None;
+                        continue;
+                    }
                     for n in 0..g.report_count {
                         let usage = if (n as usize) < usages.len() {
                             usages[n as usize]
@@ -146,6 +177,19 @@ pub fn parse(desc: &[u8]) -> ReportMap {
                         } else {
                             usages.last().copied().unwrap_or(0)
                         };
+                        // Fuellbits erzeugen KEIN Feld.
+                        //
+                        // Sie werden nie gelesen (`find` filtert sie
+                        // ohnehin), aber sie kosten: ein Herstellerblock
+                        // mit `Report Count (0x488)` legte 1160 Eintraege
+                        // an. Auf Florians Touchpad kamen so 1634 Felder
+                        // aus 381 Bytes zusammen. Der Versatz muss
+                        // trotzdem weiterlaufen — sonst verrutscht alles
+                        // danach.
+                        if constant {
+                            *off += g.report_size;
+                            continue;
+                        }
                         out.fields.push(Field {
                             kind,
                             report_id: g.report_id,
@@ -245,6 +289,11 @@ impl ReportMap {
     }
 
     /// Wieviele Kontaktpunkte dieser Bericht fuehrt.
+    ///
+    /// **Das ist nicht die Zahl der Finger, die das Geraet erkennt.** Ein
+    /// Praezisions-Touchpad, dessen Bericht nur einen Platz hat, schickt
+    /// MEHRERE Berichte je Bild — `Contact Count` im ersten sagt, wieviele
+    /// insgesamt kommen. Florians Elan macht genau das.
     pub fn contact_slots(&self, report_id: u8) -> usize {
         self.find_all(Kind::Input, report_id, PAGE_DIGITIZER, USAGE_TIP_SWITCH).len()
     }
@@ -356,6 +405,50 @@ mod tests {
         assert_eq!(extract(&data, x), 5);
         assert_eq!(extract(&data, y), -3, "negativ, weil logical_min < 0");
         assert_eq!(extract(&data, b1), 1);
+    }
+
+    /// Der ECHTE Deskriptor von Florians Touchpad (Elan ELAN06FA,
+    /// `vid=0x04f3 pid=0x31ad`, 381 Bytes, vom Geraet gelesen).
+    ///
+    /// Er haelt genau das fest, was uns eine Fehlersuche gekostet hat:
+    /// Bericht 4 fuehrt **einen** Kontaktplatz und ein `Contact Count`.
+    /// Wer daraus schliesst, das Pad erkenne nur einen Finger, sucht den
+    /// Fehler danach an der falschen Stelle.
+    #[test]
+    fn elan_touchpad_report_layout() {
+        let d = include_bytes!("../testdata/elan06fa.bin");
+        let m = parse(d);
+        assert_eq!(m.contact_slots(4), 1, "EIN Platz — das Geraet sendet mehrere Berichte");
+
+        let tip = m.find(4, PAGE_DIGITIZER, USAGE_TIP_SWITCH).expect("tip switch");
+        assert_eq!((tip.bit_offset, tip.bit_size), (1, 1));
+
+        let x = m.find(4, PAGE_GENERIC_DESKTOP, USAGE_X).expect("X");
+        assert_eq!((x.bit_offset, x.bit_size), (8, 16));
+        assert_eq!(x.logical_max, 3679);
+        assert!(!x.relative, "ein Touchpad meldet ORTE");
+
+        let y = m.find(4, PAGE_GENERIC_DESKTOP, USAGE_Y).expect("Y");
+        assert_eq!((y.bit_offset, y.bit_size), (24, 16));
+        assert_eq!(y.logical_max, 2261);
+
+        let cc = m.find(4, PAGE_DIGITIZER, USAGE_CONTACT_COUNT).expect("contact count");
+        assert_eq!((cc.bit_offset, cc.bit_size), (56, 8));
+
+        let b1 = m.find(4, PAGE_BUTTON, 1).expect("Klickflaeche");
+        assert_eq!(b1.bit_offset, 64);
+
+        // 88 Bit = 11 Byte, plus Berichtsnummer und zwei Laengenbytes = 14
+        // — genau das `wMaxInputLength`, das das Geraet ansagt.
+        //
+        // Und der Umschalter in den Praezisionsmodus muss auffindbar sein,
+        // sonst sendet es ueberhaupt keinen Bericht 4.
+        let im = m.find_feature(PAGE_DIGITIZER, USAGE_INPUT_MODE).expect("Device Mode");
+        assert_eq!(im.report_id, 3);
+
+        // Und der Block, der frueher 1634 Felder erzeugt hat, erzeugt jetzt
+        // keine: Fuellbits sind keine Felder.
+        assert!(m.fields.len() < 100, "{} Felder aus 381 Bytes", m.fields.len());
     }
 
     /// `bSize == 3` heisst VIER Bytes. Wer drei liest, verschiebt alles
