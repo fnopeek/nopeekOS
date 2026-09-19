@@ -399,12 +399,54 @@ struct XhciState {
     mouse_error_count: u32,
 }
 
-static STATE: spin::Mutex<Option<XhciState>> = spin::Mutex::new(None);
+/// Wieviele xHCI-Controller wir gleichzeitig fuehren.
+///
+/// Florians IdeaPad hat zwei (04:00.3 und 04:00.4), Desktops gelegentlich
+/// drei. Vier ist Platz mit Luft, und die Tabelle kostet nur Zeiger.
+const MAX_CTRLS: usize = 4;
+
+/// **Ein Zustand JE CONTROLLER.** Vorher gab es genau einen, und daraus
+/// folgten zwei Fehler, die wie verschiedene aussahen: eine Maus am
+/// ZWEITEN Controller wurde nie gesucht (`init_mouse` lief nur ueber den
+/// Controller der Tastatur), und der USB-Dongle-Scan raeumte den
+/// Controller aus, auf dem der Zeiger sass. Beides ist dieselbe Annahme —
+/// ein Controller hat einen Besitzer.
+static CTRLS: spin::Mutex<[Option<XhciState>; MAX_CTRLS]> =
+    spin::Mutex::new([None, None, None, None]);
+
+/// Einen hochgefahrenen Controller ablegen: ersetzt den Eintrag mit
+/// derselben PCI-Adresse, sonst der erste freie Platz.
+fn store_ctrl(state: XhciState) -> bool {
+    let addr = state.pci_addr;
+    let mut g = CTRLS.lock();
+    for i in 0..MAX_CTRLS {
+        if g[i].as_ref().map(|s| s.pci_addr) == Some(addr) {
+            g[i] = Some(state);
+            return true;
+        }
+    }
+    for i in 0..MAX_CTRLS {
+        if g[i].is_none() {
+            g[i] = Some(state);
+            return true;
+        }
+    }
+    kprintln!("[npk] xhci: more than {} controllers — {:02x}:{:02x}.{} not tracked",
+        MAX_CTRLS, addr.bus, addr.device, addr.function);
+    false
+}
+
+/// Traegt der Controller an dieser Adresse ein Eingabegeraet?
+fn ctrl_has_hid(addr: pci::PciAddr) -> bool {
+    let g = CTRLS.lock();
+    g.iter().flatten().any(|s| s.pci_addr == addr && (s.has_keyboard || s.has_mouse))
+}
 
 /// Initialize xHCI controller and enumerate USB keyboard.
 /// Tries all xHCI controllers until one with a connected device is found.
 pub fn init() -> bool {
-    // Find all xHCI controllers (class 0C:03:30) and try each
+    let mut found = false;
+    // Find all xHCI controllers (class 0C:03:30) and bring up each
     for bus in 0u16..=255 {
         for dev_num in 0u8..32 {
             for func in 0u8..8 {
@@ -426,13 +468,17 @@ pub fn init() -> bool {
                         bar0: pci::read32(addr, 0x10),
                         irq_line: pci::read8(addr, 0x3C),
                     };
-                    if init_controller(pci_dev) { return true; }
+                    // Kein frueher Ausstieg mehr: ein Controller, den
+                    // wir nie hochgefahren haben, kann spaeter auch kein
+                    // Geraet hergeben — und die Maus des IdeaPad sass
+                    // genau auf dem, den wir uebersprungen haben.
+                    if init_controller(pci_dev) { found = true; }
                 }
                 if func == 0 && pci::read8(addr, 0x0E) & 0x80 == 0 { break; }
             }
         }
     }
-    false
+    found
 }
 
 /// Bring a controller from PCI-discovered to running: map BAR0, halt+reset,
@@ -867,7 +913,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         kprintln!("[npk] xhci: USB keyboard (HID boot protocol)");
         state.has_keyboard = true;
         AVAILABLE.store(true, Ordering::Relaxed);
-        *STATE.lock() = Some(state);
+        store_ctrl(state);
         return true;
     }
 
@@ -876,37 +922,52 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         .count();
     kprintln!("[npk] xhci: no keyboard — {} of {} ports connected", connected, state.max_ports);
 
-    // Den laufenden Controller BEHALTEN, wenn etwas dranhaengt.
+    // Den laufenden Controller BEHALTEN.
     //
-    // `STATE` wurde bisher nur auf dem Erfolgspfad gesetzt, und `init_mouse`
-    // braucht es. Eine Maschine mit USB-Maus aber PS/2-Tastatur bekam damit
-    // gar keinen USB-Zeiger: die Tastatur fehlt, also `false`, also faellt
-    // der ganze hochgefahrene Controller weg — samt der Maus, die daran
-    // haengt. Gemeldet an einem Lenovo IdeaPad, dessen Tastatur am i8042
-    // sitzt.
+    // Der Zustand wurde frueher nur auf dem Erfolgspfad abgelegt, und
+    // `init_mouse` braucht ihn. Eine Maschine mit USB-Maus aber
+    // PS/2-Tastatur bekam damit gar keinen USB-Zeiger: die Tastatur fehlt,
+    // also `false`, also fiel der ganze hochgefahrene Controller weg —
+    // samt der Maus, die daran haengt. Gemeldet an einem Lenovo IdeaPad,
+    // dessen Tastatur am i8042 sitzt.
     //
-    // Nur, wenn noch keiner steht: ein spaeterer Controller MIT Tastatur
-    // ueberschreibt das oben ohnehin, und unter mehreren ohne Tastatur ist
-    // der erste mit angeschlossenen Geraeten die bessere Wette als der
-    // letzte.
-    if connected > 0 {
-        let mut slot = STATE.lock();
-        if slot.is_none() {
-            *slot = Some(state);
-        }
-    }
+    // IMMER ablegen, auch ohne Tastatur und auch ohne angeschlossenes
+    // Geraet: der Controller LAEUFT jetzt, und was spaeter dort eingesteckt
+    // wird — eine Maus, ein Netzadapter — findet nur, wer ihn kennt. Die
+    // frueher noetige Wette ("der erste mit Geraeten ist die bessere")
+    // faellt mit der Tabelle weg, jeder bekommt seinen Platz.
+    let _ = connected;
+    store_ctrl(state);
     false // No keyboard found on any port
 }
 
-/// Initialize USB mouse on the same xHCI controller (different port).
-/// Call after init() succeeds.
+/// Eine USB-Maus suchen — auf JEDEM Controller, nicht nur auf dem der
+/// Tastatur.
+///
+/// Vorher lief das ueber genau einen Zustand, also ueber den Controller,
+/// auf dem die Tastatur gefunden wurde. Steckt die Maus an einer Buchse,
+/// die zu einem anderen gehoert, wurde sie nie gesucht: der Port war
+/// bestromt (die Maus leuchtete), aber nie adressiert. Gemessen auf dem
+/// IdeaPad, Tastatur auf 04:00.3, Maus auf 04:00.4.
 pub fn init_mouse() -> bool {
-    let mut lock = STATE.lock();
-    let state = match lock.as_mut() {
-        Some(s) => s,
-        None => return false,
-    };
+    let mut g = CTRLS.lock();
+    for i in 0..MAX_CTRLS {
+        let state = match g[i].as_mut() {
+            Some(s) => s,
+            None => continue,
+        };
+        if state.has_mouse { continue; }
+        if probe_mouse(state) {
+            MOUSE_AVAILABLE.store(true, Ordering::Relaxed);
+            return true;
+        }
+    }
+    kprintln!("[npk] xhci: no mouse found on any controller");
+    false
+}
 
+/// Der Gang auf EINEM Controller.
+fn probe_mouse(state: &mut XhciState) -> bool {
     let kbd_port = state.port_num;
     let max_ports = state.max_ports;
 
@@ -919,7 +980,6 @@ pub fn init_mouse() -> bool {
             kprintln!("[npk] xhci: USB mouse (HID boot protocol) on {:02x}:{:02x}.{} port {}",
                 state.pci_addr.bus, state.pci_addr.device, state.pci_addr.function, p + 1);
             state.has_mouse = true;
-            MOUSE_AVAILABLE.store(true, Ordering::Relaxed);
             return true;
         }
     }
@@ -936,11 +996,9 @@ pub fn init_mouse() -> bool {
             kprintln!("[npk] xhci: USB mouse (HID boot protocol) on {:02x}:{:02x}.{} port {}",
                 state.pci_addr.bus, state.pci_addr.device, state.pci_addr.function, p + 1);
             state.has_mouse = true;
-            MOUSE_AVAILABLE.store(true, Ordering::Relaxed);
             return true;
         }
     }
-    kprintln!("[npk] xhci: no mouse found on any port");
     false
 }
 
@@ -2221,19 +2279,26 @@ pub fn nic_attach(vid: u16, pid: u16, ep_in: u8, ep_out: u8) -> bool {
     // Wo stehen Tastatur/Maus? Nach PCI-ADRESSE, nicht nach "irgendeiner
     // ist belegt": haengen sie an einem anderen Controller, geht sie der
     // Dongle-Scan nichts an.
-    let hid_addr = STATE.lock().as_ref().map(|s| s.pci_addr);
-    if let Some(h) = hid_addr {
-        if AVAILABLE.load(Ordering::Relaxed) || MOUSE_AVAILABLE.load(Ordering::Relaxed) {
-            kprintln!("[npk] xhci: keyboard/mouse live on {:02x}:{:02x}.{} — \
-                       that controller is probed LAST",
-                h.bus, h.device, h.function);
+    // Welche Controller tragen ein Eingabegeraet? Es koennen mehrere sein
+    // — Tastatur auf dem einen, Maus auf dem anderen ist genau der Fall des
+    // IdeaPad.
+    let mut any_hid = false;
+    {
+        let g = CTRLS.lock();
+        for s in g.iter().flatten() {
+            if s.has_keyboard || s.has_mouse {
+                any_hid = true;
+                kprintln!("[npk] xhci: input device lives on {:02x}:{:02x}.{} — \
+                           that controller is probed LAST",
+                    s.pci_addr.bus, s.pci_addr.device, s.pci_addr.function);
+            }
         }
     }
 
     for pass in 0..2 {
         // Zweiter Durchgang nur, wenn es ueberhaupt einen geschonten
         // Controller gibt.
-        if pass == 1 && hid_addr.is_none() { break; }
+        if pass == 1 && !any_hid { break; }
         for bus in 0u16..=255 {
             for dev_num in 0u8..32 {
                 for func in 0u8..8 {
@@ -2245,7 +2310,7 @@ pub fn nic_attach(vid: u16, pid: u16, ep_in: u8, ep_out: u8) -> bool {
                         && ((class_reg >> 16) & 0xFF) as u8 == 0x03
                         && ((class_reg >> 8) & 0xFF) as u8 == 0x30
                     {
-                        let is_hid = hid_addr == Some(addr);
+                        let is_hid = ctrl_has_hid(addr);
                         // Durchgang 0 laesst den HID-Controller aus,
                         // Durchgang 1 nimmt NUR ihn.
                         if is_hid != (pass == 1) {
@@ -2358,15 +2423,26 @@ fn nic_try_attach(dev: pci::PciDevice, vid: u16, pid: u16, ep_in: u8, ep_out: u8
     // Tastatur an einem anderen, bleibt sie unberuehrt — und genau das ist
     // der Normalfall auf einer Maschine mit mehreren Controllern.
     {
-        let mut st = STATE.lock();
-        if st.as_ref().map(|s| s.pci_addr == dev.addr).unwrap_or(false) {
-            let kbd = AVAILABLE.swap(false, Ordering::Relaxed);
-            let mouse = MOUSE_AVAILABLE.swap(false, Ordering::Relaxed);
-            if kbd || mouse {
+        let mut g = CTRLS.lock();
+        for i in 0..MAX_CTRLS {
+            let matches = g[i].as_ref().map(|s| s.pci_addr == dev.addr).unwrap_or(false);
+            if !matches { continue; }
+            let had = g[i].as_ref().map(|s| (s.has_keyboard, s.has_mouse)).unwrap_or((false, false));
+            if had.0 || had.1 {
                 kprintln!("[npk] xhci: dropping USB keyboard/mouse on {:02x}:{:02x}.{} — the NIC scan resets it",
                     dev.addr.bus, dev.addr.device, dev.addr.function);
             }
-            *st = None;
+            // Der Eintrag zeigt nach dem Reset auf Ringe, die die Hardware
+            // nicht mehr benutzt — er muss weg, nicht nur die Flaggen.
+            g[i] = None;
+        }
+        // Die globalen Flaggen nur loeschen, wenn KEIN anderer Controller
+        // das Geraet noch traegt.
+        if !g.iter().flatten().any(|s| s.has_keyboard) {
+            AVAILABLE.store(false, Ordering::Relaxed);
+        }
+        if !g.iter().flatten().any(|s| s.has_mouse) {
+            MOUSE_AVAILABLE.store(false, Ordering::Relaxed);
         }
     }
     let mut x = match bring_up_controller(dev, 16) { Some(s) => s, None => return false };
@@ -2696,9 +2772,9 @@ fn schedule_interrupt_transfer(state: &mut XhciState) {
 /// This is the ONLY code that talks to xHCI hardware — main thread
 /// only reads from software ring buffers (KEY_BUF / MOUSE_BUF).
 pub fn poll_events_irq() {
-    if let Some(mut lock) = STATE.try_lock() {
-        if let Some(ref mut state) = *lock {
-            drain(state);
+    if let Some(mut g) = CTRLS.try_lock() {
+        for slot in g.iter_mut().flatten() {
+            drain(slot);
         }
     }
 }
@@ -2863,9 +2939,9 @@ pub fn cache_keyboard_layout() {
 /// Ereignisse aus der Hauptschleife abholen. Nur im fruehen Start noetig,
 /// bevor der Timer-IRQ laeuft; danach drained der ausschliesslich.
 pub fn poll_events() {
-    if let Some(mut lock) = STATE.try_lock() {
-        if let Some(ref mut state) = *lock {
-            drain(state);
+    if let Some(mut g) = CTRLS.try_lock() {
+        for slot in g.iter_mut().flatten() {
+            drain(slot);
         }
     }
 }
