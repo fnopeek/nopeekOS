@@ -7,6 +7,7 @@
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
     fn npk_print(ptr: i32, len: i32);
+    fn npk_sys_info(key: i32) -> i64;
 
     // PCI
     fn npk_pci_bind_class(class: i32, subclass: i32) -> i32;
@@ -43,6 +44,28 @@ pub fn audio_poll_mix(buf: &mut [u8]) -> usize {
 pub fn log(s: &str) {
     unsafe { npk_print(s.as_ptr() as i32, s.len() as i32) };
 }
+
+// ── Diagnosezeilen: gebaut, aber im Normalbetrieb still ──────────────
+//
+// Die Codec-Topologie und die Sekundenberichte (LPIB/wpos/SDCTL) sind das
+// Werkzeug, mit dem dieser Treiber gebaut wurde — sie sagen, ob die DMA
+// ueberhaupt laeuft. Im Normalbetrieb sagt das niemandem etwas.
+// EINMAL beim Start gefragt; `set log.drivers 1` holt sie zurueck.
+static mut VERBOSE: bool = false;
+
+/// Einmal beim Start: will der Nutzer den Mitschrieb sehen?
+pub fn log_init() {
+    // SAFETY: ein Faden, ein Lauf — einmal gesetzt, danach nur gelesen.
+    unsafe {
+        core::ptr::addr_of_mut!(VERBOSE).write(npk_sys_info(50) == 1);
+    }
+}
+
+pub fn verbose() -> bool {
+    // SAFETY: siehe `log_init`.
+    unsafe { core::ptr::addr_of!(VERBOSE).read() }
+}
+
 
 pub fn pci_bind_class(class: u8, subclass: u8) -> i32 {
     unsafe { npk_pci_bind_class(class as i32, subclass as i32) }

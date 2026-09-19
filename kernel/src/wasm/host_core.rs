@@ -681,6 +681,17 @@ pub(crate) fn npk_sys_info(_ctx: &mut HostState, key: i32) -> i64 {
         // mount before we could ever see it.
         40 => fsck_sys_info(),
 
+        // ── 50: sollen Treiber ihre Diagnosezeilen drucken? ──────────
+        //
+        // Jede Fundgeschichte in diesem Baum haengt an einer Logzeile, die
+        // jemand VORHER eingebaut hat — die Zeilen gehoeren also nicht
+        // geloescht. Sie gehoeren nur nicht in den Normalbetrieb: rohe
+        // Deskriptoren, Registerspuren, Sekundenzaehler. Ein Treiber fragt
+        // das EINMAL beim Start und schweigt danach.
+        //
+        // Vorgabe AUS. `set log.drivers 1` holt alles zurueck.
+        50 => if crate::config::get("log.drivers").as_deref() == Some("1") { 1 } else { 0 },
+
         _ => -1,
     }
 }

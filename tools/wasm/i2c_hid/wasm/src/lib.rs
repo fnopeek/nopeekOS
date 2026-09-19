@@ -47,6 +47,31 @@ unsafe extern "C" {
     fn npk_acpi_table(sig: i32, index: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_pointer_inject(dx: i32, dy: i32, buttons: i32, scroll: i32, hscroll: i32) -> i32;
     fn npk_sleep(ms: i32) -> i32;
+    fn npk_sys_info(key: i32) -> i64;
+}
+
+// ── Diagnosezeilen: gebaut, aber im Normalbetrieb still ──────────────
+//
+// Jeder Fund an diesem Treiber haengt an einer dieser Zeilen — der rohe
+// Deskriptor, die ersten Berichte, die Zehn-Sekunden-Buchfuehrung. Sie
+// gehoeren deshalb nicht geloescht, sondern geschaltet. EINMAL beim Start
+// gefragt (`npk_sys_info(50)` = Konfigwert `log.drivers`), danach kostet
+// es einen Vergleich.
+//
+// Was NICHT hier haengt: was der Treiber ENTSCHEIDET. Welches Geraet
+// gefunden wurde, ob der Praezisionsmodus griff, woran das Tor haengt und
+// jeder Fehler — das steht immer im Log, sonst ist ein Geraetelauf ohne
+// Aussage.
+static mut VERBOSE: bool = false;
+
+fn verbose() -> bool {
+    // SAFETY: ein Faden, ein Lauf.
+    unsafe { core::ptr::addr_of!(VERBOSE).read() }
+}
+
+/// Wie `logln`, aber nur wenn `set log.drivers 1` gesetzt ist.
+fn dbgln(s: &str) {
+    if verbose() { logln(s); }
 }
 
 /// Der Hardwarezugang des Bustreibers.
@@ -149,11 +174,15 @@ impl Ec for FirmwareAccess {
         let v = unsafe { npk_acpi_mem_read((addr >> 32) as i32, addr as u32 as i32) };
         if v < 0 { None } else { Some(v as u8) }
     }
-    fn note(&mut self, s: &str) { logln(s); }
+    fn note(&mut self, s: &str) { dbgln(s); }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
+    // SAFETY: ein Faden, ein Lauf — einmal gesetzt, danach nur gelesen.
+    unsafe {
+        core::ptr::addr_of_mut!(VERBOSE).write(npk_sys_info(50) == 1);
+    }
     logln("[i2c-hid] looking for a HID-over-I2C device in the firmware tables");
 
     let dsdt_ptr = core::ptr::addr_of_mut!(DSDT) as *mut u8;
@@ -217,14 +246,14 @@ pub extern "C" fn _start() {
     for d in &found {
         if let Some(c) = &d.controller {
             if !c.present {
-                logln(&alloc::format!(
+                dbgln(&alloc::format!(
                     "[i2c-hid] why is {} absent? tracing its _STA:",
                     aml_core::path_str(&c.path)));
                 let mut p = c.path.clone();
                 p.push(aml_core::seg("_STA"));
                 match m.call_traced(&p, alloc::vec::Vec::new()) {
-                    Ok(v) => logln(&alloc::format!("[i2c-hid]   _STA returned {:#x}", v.as_int())),
-                    Err(e) => logln(&alloc::format!("[i2c-hid]   _STA failed: {e}")),
+                    Ok(v) => dbgln(&alloc::format!("[i2c-hid]   _STA returned {:#x}", v.as_int())),
+                    Err(e) => dbgln(&alloc::format!("[i2c-hid]   _STA failed: {e}")),
                 }
             }
         }
@@ -345,7 +374,7 @@ pub extern "C" fn _start() {
             next_stat_us = now + 10_000_000;
             stat_lines_left -= 1;
             for l in live.iter_mut() {
-                logln(&alloc::format!(
+                dbgln(&alloc::format!(
                     "[i2c-hid] {:#04x}: 10 s — {} read(s): {} data, {} empty, \
                      {} undeclared, {} FAILED · {} rounds skipped by the pin · \
                      {} drain caps",
@@ -402,8 +431,8 @@ fn probe_bus(d: &i2c_hid_core::discover::HidDevice) -> Option<Live> {
     let clk_khz = c.input_clock_hz / 1000;
     match dw_i2c::Dw::setup(&mut bus, d.bus_speed_hz, clk_khz, c.sscn, c.fmcn) {
         Ok(dw) => {
-            logln(&alloc::format!("[i2c-hid]   {}", dw.describe()));
-            logln("[i2c-hid]   Designware signature OK — the controller is really there");
+            dbgln(&alloc::format!("[i2c-hid]   {}", dw.describe()));
+            dbgln("[i2c-hid]   Designware signature OK — the controller is really there");
             let mut live = talk_to_device(&mut bus, &dw, d)?;
             live.gate = arm_gate(d);
             return Some(live);
@@ -604,10 +633,10 @@ fn talk_to_device(
     };
 
     dw_i2c::init_master(bus, dw);
-    logln("[i2c-hid]   master initialised");
+    dbgln("[i2c-hid]   master initialised");
 
     match hid::probe_address(bus, dw, addr) {
-        Ok(()) => logln(&alloc::format!("[i2c-hid]   device at {addr:#04x} answers")),
+        Ok(()) => dbgln(&alloc::format!("[i2c-hid]   device at {addr:#04x} answers")),
         Err(e) => {
             logln(&alloc::format!("[i2c-hid]   device at {addr:#04x} does not answer: {e:?}"));
             return None;
@@ -621,7 +650,7 @@ fn talk_to_device(
     logln(&alloc::format!("[i2c-hid]   {}", desc.describe()));
 
     match hid::reset(bus, dw, addr, &desc) {
-        Ok(()) => logln("[i2c-hid]   power on + reset done"),
+        Ok(()) => dbgln("[i2c-hid]   power on + reset done"),
         Err(e) => { logln(&alloc::format!("[i2c-hid]   {e}")); return None; }
     }
 
@@ -640,7 +669,7 @@ fn talk_to_device(
         return None;
     }
     let map = report::parse(&rd);
-    logln(&alloc::format!("[i2c-hid]   {}", map.describe()));
+    dbgln(&alloc::format!("[i2c-hid]   {}", map.describe()));
 
     // Den Deskriptor ROH ins Log, wenn er klein genug ist.
     //
@@ -650,9 +679,9 @@ fn talk_to_device(
     // nicht meine Auslegung davon. 381 Bytes sind 16 Zeilen; die 893 der
     // Wacom bleiben draussen.
     if n <= 512 {
-        logln(&alloc::format!("[i2c-hid]   raw report descriptor, {n} bytes:"));
+        dbgln(&alloc::format!("[i2c-hid]   raw report descriptor, {n} bytes:"));
         for (i, chunk) in rd.chunks(24).enumerate() {
-            logln(&alloc::format!("[i2c-hid]   rd {:03x} {:02x?}", i * 24, chunk));
+            dbgln(&alloc::format!("[i2c-hid]   rd {:03x} {:02x?}", i * 24, chunk));
         }
     }
 
@@ -1042,7 +1071,7 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
 
     if l.raw_logged < 4 {
         l.raw_logged += 1;
-        logln(&alloc::format!("[i2c-hid] {:#04x} in {id}: {:02x?}", l.addr, data));
+        dbgln(&alloc::format!("[i2c-hid] {:#04x} in {id}: {:02x?}", l.addr, data));
     }
 
     let mut buttons = 0i32;
@@ -1087,14 +1116,14 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
                 gesture::Out::Frame { n, gesture, dx, dy, scroll, hscroll, tap } => {
                     if n > 0 && l.touch_logged < 3 {
                         l.touch_logged += 1;
-                        logln(&alloc::format!(
+                        dbgln(&alloc::format!(
                             "[i2c-hid]   frame: {n} finger(s), contact-count {cc}, \
                              gesture {gesture}, {:?}",
                             &l.track.frame()[..n.min(2)]));
                     }
                     if (scroll != 0 || hscroll != 0) && l.scroll_logged < 3 {
                         l.scroll_logged += 1;
-                        logln(&alloc::format!(
+                        dbgln(&alloc::format!(
                             "[i2c-hid]   scroll: {scroll} up, {hscroll} right"));
                     }
                     if tap > 0 {
@@ -1106,7 +1135,7 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
                         unsafe { npk_pointer_inject(0, 0, 0, 0, 0) };
                         if l.tap_logged < 2 {
                             l.tap_logged += 1;
-                            logln(&alloc::format!(
+                            dbgln(&alloc::format!(
                                 "[i2c-hid]   tap: {tap} finger(s) -> button {b}"));
                         }
                     }

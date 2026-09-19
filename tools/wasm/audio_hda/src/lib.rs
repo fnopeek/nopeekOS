@@ -56,6 +56,15 @@ fn loghex(prefix: &str, v: u32) {
     log(unsafe { core::str::from_utf8_unchecked(&buf) });
 }
 
+/// Eine GANZE Diagnosezeile (Praefix, Hexwert, Zeilenende), nur mit
+/// `set log.drivers 1`.
+///
+/// Bewusst inklusive Zeilenende: ein gegateter Anfang mit ungegatetem
+/// `log("\n")` dahinter haette Leerzeilen gedruckt.
+fn dbghexln(prefix: &str, v: u32) {
+    if host::verbose() { loghex(prefix, v); log("\n"); }
+}
+
 // ── Immediate-command codec access ────────────────────────────────────────
 fn codec_cmd(mmio: i32, cad: u32, nid: u32, verb20: u32) -> Option<u32> {
     let cmd = (cad << 28) | (nid << 20) | (verb20 & 0xFFFFF);
@@ -187,9 +196,11 @@ fn trace_to_dac(mmio: i32, cad: u32, pin: u32) -> u32 {
     // Der Weg wird GEMELDET, nicht vermutet. Ohne ihn steht im Log nur
     // "pin 0x14" und "DAC 0x02", und ob ein Mixer dazwischenliegt — also
     // ob ueberhaupt ein Eingangsverstaerker im Spiel ist — bleibt offen.
-    loghex("[audio_hda] path: pin 0x", pin);
-    loghex(" (out-amp cap=0x", amp_cap(mmio, cad, pin));
-    log(")");
+    if host::verbose() {
+        loghex("[audio_hda] path: pin 0x", pin);
+        loghex(" (out-amp cap=0x", amp_cap(mmio, cad, pin));
+        log(")");
+    }
     let len = get_param(mmio, cad, pin, PARAM_CONN_LIST_LEN) & 0x7F;
     if len == 0 { log(" <- (no connection list)\n"); return 0; }
     let first = conn_entry0(mmio, cad, pin);
@@ -244,8 +255,7 @@ fn setup_codec(mmio: i32, cad: u32) -> (u32, bool) {
         log("[audio_hda] no audio function group\n");
         return (0, false);
     }
-    loghex("[audio_hda] AFG nid=0x", afg);
-    log("\n");
+    dbghexln("[audio_hda] AFG nid=0x", afg);
     codec_cmd(mmio, cad, afg, vset_power(0)); // D0
 
     // Widgets under the AFG.
@@ -268,10 +278,12 @@ fn setup_codec(mmio: i32, cad: u32) -> (u32, bool) {
         let cfg = codec_cmd(mmio, cad, nid, vget_config_default()).unwrap_or(0);
         let conn = (cfg >> 30) & 0x3; // 1 = no physical connection
         let dev = (cfg >> 20) & 0xF; // 0=LineOut 1=Speaker 2=HPOut
-        loghex("[audio_hda]  out-pin nid=0x", nid);
-        loghex(" dev=0x", dev);
-        loghex(" conn=0x", conn);
-        log("\n");
+        if host::verbose() {
+            loghex("[audio_hda]  out-pin nid=0x", nid);
+            loghex(" dev=0x", dev);
+            loghex(" conn=0x", conn);
+            log("\n");
+        }
         if conn == 1 { continue; } // no physical jack/connection
         let pri = match dev { 1 => 0, 2 => 1, 0 => 2, _ => continue };
         if pri < pin_pri {
@@ -301,8 +313,7 @@ fn setup_codec(mmio: i32, cad: u32) -> (u32, bool) {
         log("[audio_hda] no DAC behind pin\n");
         return (0, false);
     }
-    loghex("[audio_hda] DAC nid=0x", dac);
-    log("\n");
+    dbghexln("[audio_hda] DAC nid=0x", dac);
 
     // Configure the DAC: power, format, bind to our stream tag, unmute.
     codec_cmd(mmio, cad, dac, vset_power(0));
@@ -340,18 +351,15 @@ fn bring_up() -> Option<(i32, u32, bool)> {
     let gcap = mmio_r16(mmio, GCAP) as u32;
     let iss = (gcap >> 8) & 0xF; // input streams (output streams follow them)
     let oss = (gcap >> 12) & 0xF;
-    loghex("[audio_hda] controller up, gcap=0x", gcap);
-    log("\n");
+    dbghexln("[audio_hda] controller up, gcap=0x", gcap);
     if oss == 0 { log("[audio_hda] no output streams\n"); return None; }
 
     let statests = mmio_r16(mmio, STATESTS) as u32;
-    loghex("[audio_hda] STATESTS=0x", statests);
-    log("\n");
+    dbghexln("[audio_hda] STATESTS=0x", statests);
     if statests == 0 { log("[audio_hda] no codec detected\n"); return None; }
     let mut cad = 0u32;
     while cad < 15 && statests & (1 << cad) == 0 { cad += 1; }
-    loghex("[audio_hda] codec addr=0x", cad);
-    log("\n");
+    dbghexln("[audio_hda] codec addr=0x", cad);
 
     let (dac, analog) = setup_codec(mmio, cad);
     if dac == 0 { log("[audio_hda] codec setup failed\n"); return None; }
@@ -395,7 +403,8 @@ fn reset_stream(mmio: i32, base: u32) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    log("[audio_hda] v0.3.2 — generic HDA driver (mailbox streaming) starting\n");
+    host::log_init();
+    log("[audio_hda] v0.3.3 — generic HDA driver (mailbox streaming) starting\n");
 
     // Bind the HDA controller by PCI class — hardware-independent, no
     // vendor:device hardcode. Intel cAVS controllers report subclass 0x01
@@ -515,7 +524,7 @@ pub extern "C" fn _start() {
     loop {
         let lpib = (mmio_r32(mmio, base + SD_LPIB) as usize) % RING_BYTES;
         ticks += 1;
-        if reports > 0 && ticks % 250 == 0 {
+        if host::verbose() && reports > 0 && ticks % 250 == 0 {
             reports -= 1;
             loghex("[audio_hda] LPIB=0x", lpib as u32);
             loghex(" wpos=0x", write_pos as u32);
@@ -525,7 +534,7 @@ pub extern "C" fn _start() {
             loghex(" gemischt=0x", pulled as u32);
             log("\n");
         }
-        if loud_reports > 0 && peak > 0 {
+        if host::verbose() && loud_reports > 0 && peak > 0 {
             loud_reports -= 1;
             loghex("[audio_hda] TON: Spitze=0x", peak as u32);
             loghex(" geschrieben=0x", wrote);
