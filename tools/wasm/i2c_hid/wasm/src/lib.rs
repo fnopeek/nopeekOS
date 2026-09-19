@@ -271,9 +271,10 @@ pub extern "C" fn _start() {
                          the mode switch did not take, back to mouse mode", l.addr));
                     let (dw, desc, addr) = (
                         i2c_hid_core::dw_i2c::Dw { ..l.dw }, l.desc, l.addr);
+                    let zero = alloc::vec![0u8; l.mode_len];
                     let _ = i2c_hid_core::hid::set_report(
                         &mut l.bus, &dw, addr, &desc,
-                        i2c_hid_core::hid::REPORT_TYPE_FEATURE, rid, &[0]);
+                        i2c_hid_core::hid::REPORT_TYPE_FEATURE, rid, &zero);
                 }
             }
         }
@@ -417,6 +418,9 @@ struct Live {
     /// Haben wir auf den Praezisionsmodus umgeschaltet, und in welchem
     /// Feature-Bericht steht der Schalter?
     switched: Option<u8>,
+    /// Wie lang dieser Feature-Bericht ist — die Ruecknahme muss dieselbe
+    /// Laenge haben wie das Setzen, sonst wird auch sie verworfen.
+    mode_len: usize,
     /// Wieviele Berichte sind bisher gekommen?
     seen: u32,
     /// Die Nummer des Touchpad-Berichts, falls es einen gibt.
@@ -532,12 +536,26 @@ fn talk_to_device(
     // Finger gar nicht gemeldet wird. Der Schalter steht in einem
     // Feature-Bericht (Digitizer 0x52).
     let mut switched: Option<u8> = None;
+    let mut mode_len: usize = 1;
     if let Some(im) = map.find_feature(report::PAGE_DIGITIZER, report::USAGE_INPUT_MODE) {
         let im = *im;
-        match hid::set_report(bus, dw, addr, &desc, hid::REPORT_TYPE_FEATURE, im.report_id, &[3]) {
+        // Die Laenge kommt aus dem DESKRIPTOR, nicht aus dem Bauch.
+        //
+        // Florians Elan fuehrt `Input Mode` mit `Report Size 16` — der
+        // Feature-Bericht ist ZWEI Bytes lang. Wir schickten eines. Auf
+        // dem Bus quittiert das Geraet, der Bericht ist aber zu kurz und
+        // wird verworfen: kein Fehler, keine Wirkung, und danach kommt
+        // ewig nur die Maus-Nachahmung. Fuellbits zaehlen mit, deshalb
+        // rechnet `report_bytes` und nicht die Summe der Felder.
+        let n = map.report_bytes(report::Kind::Feature, im.report_id).max(1);
+        mode_len = n;
+        let mut payload = alloc::vec![0u8; n];
+        report::insert(&mut payload, &im, 3);
+        match hid::set_report(bus, dw, addr, &desc, hid::REPORT_TYPE_FEATURE, im.report_id, &payload) {
             Ok(()) => {
                 logln(&alloc::format!(
-                    "[i2c-hid]   device mode -> 3 (precision touchpad), feature report {}",
+                    "[i2c-hid]   device mode -> 3 (precision touchpad), feature report {} \
+                     ({n} byte(s): {payload:02x?})",
                     im.report_id));
                 switched = Some(im.report_id);
             }
@@ -622,6 +640,7 @@ fn talk_to_device(
         decoders,
         unknown_logged: 0,
         switched,
+        mode_len,
         seen: 0,
         saw_touch: false,
         other_seen: 0,
