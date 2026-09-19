@@ -329,6 +329,32 @@ Reihenfolge nach Wirkung, jede für sich messbar:
 
 ---
 
+### L8 — **Eine Diagnosestufe muss ZURUECKKEHREN.** *(gilt ab sofort)*
+
+`driver <modul>` geht ueber `spawn_on_worker`, und das setzt `APP_RUNNING`
+fuer das Terminal: die Tasten gehen an das Modul, der Prompt bleibt aus. Ein
+Modul, das in einer Endlosschleife sitzt, macht damit genau das Terminal
+unbrauchbar, aus dem man gerade debuggt. Florian, 2026-09-19: *„sonst hängt
+mir das System beim Debug."*
+
+Die Stufen 0–2a kehren deshalb zurueck. Der Kernel raeumt danach auf — DMA
+freigeben, PCI loesen — **und loescht den Bericht**, ausdruecklich begruendet
+mit „a dead driver's snapshot must not read as live numbers". Das Ergebnis
+einer terminierenden Stufe steht also im TERMINAL, nicht in `wlan`.
+
+**Ab 2b kommt eine zweite Pflicht dazu**, und sie stand schon im AX200
+(`wifi_ax200/src/lib.rs`, Ende von `_start`): *„the kernel frees our DMA
+buffers on return and a still-running firmware must not DMA into them
+afterwards."* Sobald die Firmware laeuft, muss sie **vor** dem Zurueckkehren
+angehalten werden. Solange nur der MAC an- und ausgeht, ist das erledigt.
+
+**Offen fuer Stufe 5:** ein fertiger Treiber muss bleiben. Dann ist zu
+entscheiden, ob `intent_run_driver` auf `spawn_on_worker_background`
+umgestellt wird — den Weg, den `debug.wasm` schon nimmt und der Tasten und
+Prompt beim Terminal laesst. Ein Treiber liest keine Tasten; `APP_RUNNING`
+ist fuer ihn die falsche Einstufung. Heute nicht angefasst, weil kein
+Treiber im Baum bleibt.
+
 ## 4 — Die Regeln, die in jeder Stufe gelten
 
 1. **Ganze Funktionen, alle Zweige**, auch die „vermutlich no-op". Keine

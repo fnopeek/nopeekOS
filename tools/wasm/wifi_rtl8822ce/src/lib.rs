@@ -14,6 +14,21 @@
 //! Schreibzugriff von uns liegen — und das ist der ganze Sinn einer ersten
 //! Stufe, die nur eine Frage stellt.
 //!
+//! **Die Stufen 0-2a sind Diagnose und KEHREN ZURUECK.** Ein Treiber, der
+//! nicht endet, haelt das Terminal, aus dem er gestartet wurde
+//! (`spawn_on_worker` setzt `APP_RUNNING`) — und ein Lauf, nach dem man nicht
+//! weiterarbeiten kann, ist beim Suchen schlimmer als kein Lauf. Der Chip
+//! bleibt dabei AUS zurueck, und der Kernel gibt beim Ende alles DMA frei.
+//! Erst wenn die Firmware laeuft und Frames fliessen (ab 2b), wird daraus ein
+//! Treiber, der bleiben muss — und dann ist der Startweg die Frage, nicht das
+//! Modul.
+//!
+//! **Ab 2b kommt eine zweite Pflicht dazu, und die stand schon im AX200:**
+//! „the kernel frees our DMA buffers on return and a still-running firmware
+//! must not DMA into them afterwards". Solange nur der MAC an- und wieder
+//! ausgeht, ist das erledigt; sobald eine Firmware laeuft, muss sie VOR dem
+//! Zurueckkehren angehalten werden.
+//!
 //! Gate: `chip_version` plausibel, RF-Typ 2T2R, und der frische 8-Bit-Pfad
 //! (`npk_mmio_read8`) liefert byteweise dasselbe wie der 32-Bit-Pfad.
 //!
@@ -213,12 +228,8 @@ pub extern "C" fn _start() {
     all &= gate("8/16/32-Bit-Zugriff stimmen ueberein", widths_ok && !dead);
 
     if !all {
-        host::print("[rtl8822ce] Stufe 0: NEIN — Stufe 1 wird nicht gefahren\n");
-        publish(&hal, cr, fwctrl, false, false, false);
-        loop {
-            host::sleep_ms(1000);
-            publish(&hal, cr, fwctrl, false, false, false);
-        }
+        host::print("[rtl8822ce] Stufe 0: NEIN — Stufe 1 und 2a werden nicht gefahren\n");
+        return;
     }
     host::print("[rtl8822ce] Stufe 0: GRUEN\n");
 
@@ -230,11 +241,7 @@ pub extern "C" fn _start() {
         Some(t) => t,
         None => {
             host::print("[rtl8822ce] DMA reicht nicht fuer die Ringe — Stufe 2a aus\n");
-            publish(&hal, cr, fwctrl, true, false, false);
-            loop {
-                host::sleep_ms(1000);
-                publish(&hal, cr, fwctrl, true, false, false);
-            }
+            return;
         }
     };
     host::print("[rtl8822ce] Stufe 2a: Ringe belegt — ");
@@ -328,15 +335,15 @@ pub extern "C" fn _start() {
         "[rtl8822ce] Stufe 2a: NEIN — nicht weiterbauen, bevor das steht\n"
     });
 
-    // Der Bericht bleibt stehen, damit `wlan` ihn nach dem Lauf noch zeigt.
-    publish(&hal, cr_off, fwctrl, true, stage1, stage2a);
 
-    // Gebunden bleiben. Ein Treiber, der zurueckkehrt, gibt sein PCI-Gerat
-    // frei — und der naechste Lauf faende einen Chip in unbekanntem Zustand.
-    loop {
-        host::sleep_ms(1000);
-        publish(&hal, cr_off, fwctrl, true, stage1, stage2a);
-    }
+    // Zurueckkehren, nicht schlafen. Der Kernel raeumt danach auf: DMA
+    // freigeben, PCI loesen, und den Bericht loeschen — letzteres mit der
+    // ausdruecklichen Begruendung, dass die Zahlen eines toten Treibers nicht
+    // wie lebende aussehen duerfen. Das Ergebnis dieser Stufen steht deshalb
+    // HIER im Terminal und nicht in `wlan`.
+    // Der Chip ist hier bereits aus (Stufe 1 schaltet ihn zuletzt ab), also
+    // kann niemand mehr in die gleich freigegebenen Puffer schreiben.
+    host::print("[rtl8822ce] fertig — Chip ist aus, Geraet freigegeben\n");
 }
 
 /// Wieviele der 54 Kommandos auf UNSEREM Geraet ueberhaupt laufen. Eine
@@ -362,59 +369,4 @@ fn gate(name: &str, ok: bool) -> bool {
     host::print(name);
     host::print("\n");
     ok
-}
-
-/// Klartextblock fuer das Intent `wlan`. Der Kernel parst nichts, er
-/// speichert Bytes mit Zeitstempel.
-fn publish(hal: &Hal, cr: u8, fwctrl: u16, s0: bool, s1: bool, s2a: bool) {
-    let mut buf = [0u8; 256];
-    let mut n = 0usize;
-    let mut put = |s: &[u8], n: &mut usize| {
-        for &b in s {
-            if *n < buf.len() {
-                buf[*n] = b;
-                *n += 1;
-            }
-        }
-    };
-    put(b"rtl8822ce ", &mut n);
-    put(DRIVER_VERSION.as_bytes(), &mut n);
-    put(b" stufe0=", &mut n);
-    put(if s0 { b"gruen" } else { b"NEIN " }, &mut n);
-    put(b" stufe1=", &mut n);
-    put(if s1 { b"gruen" } else { b"NEIN " }, &mut n);
-    put(b" stufe2a=", &mut n);
-    put(if s2a { b"gruen" } else { b"NEIN " }, &mut n);
-    put(b"\nsys_cfg1=0x", &mut n);
-    put(&hex32(hal.chip_version), &mut n);
-    put(b" cut=", &mut n);
-    put(&dec(hal.cut_version as u32), &mut n);
-    put(b" rf=", &mut n);
-    put(if hal.rf_2t2r { b"2T2R" } else { b"1T1R" }, &mut n);
-    put(b"\ncr=0x", &mut n);
-    put(&hex32(cr as u32)[6..], &mut n);
-    put(b" mcufw=0x", &mut n);
-    put(&hex32(fwctrl as u32)[4..], &mut n);
-    put(b"\n", &mut n);
-    host::driver_report(&buf[..n]);
-}
-
-const HEXD: &[u8; 16] = b"0123456789abcdef";
-
-fn hex32(v: u32) -> [u8; 8] {
-    let mut b = [0u8; 8];
-    for i in 0..8 {
-        b[7 - i] = HEXD[((v >> (i * 4)) & 0xf) as usize];
-    }
-    b
-}
-
-/// Dezimal, immer drei Stellen mit fuehrenden Nullen. Reicht fuer cut
-/// (0-15) und haelt den Bericht ohne Allokator.
-fn dec(v: u32) -> [u8; 3] {
-    [
-        b'0' + ((v / 100) % 10) as u8,
-        b'0' + ((v / 10) % 10) as u8,
-        b'0' + (v % 10) as u8,
-    ]
 }
