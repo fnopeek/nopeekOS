@@ -5,7 +5,7 @@
 //! Plan: `docs/plan/WIFI_RTL8822CE.md` · Karte:
 //! `docs/plan/WIFI_RTL8822CE_LINUX_MAP.md`.
 //!
-//! **Stufe 0 (diese Datei): die Tuer.** PCI binden, Bus-Master, **BAR2**
+//! **Stufe 0: die Tuer.** PCI binden, Bus-Master, **BAR2**
 //! abbilden (pci.c `rtw_pci_io_mapping`: `u8 bar_id = 2` — nicht BAR0), und
 //! `REG_SYS_CFG1` lesen wie `rtw_chip_parameter_setup` es tut.
 //!
@@ -16,10 +16,19 @@
 //!
 //! Gate: `chip_version` plausibel, RF-Typ 2T2R, und der frische 8-Bit-Pfad
 //! (`npk_mmio_read8`) liefert byteweise dasselbe wie der 32-Bit-Pfad.
+//!
+//! **Stufe 1: der Strom.** `rtw_mac_power_on` vollstaendig (`mac.rs`), mit
+//! den vier Power-Sequenz-Tabellen aus `pwrseq.rs` — erzeugt aus der
+//! C-Quelle, nicht abgetippt. Noch keine Firmware, noch keine Ringe.
+//! Gate in BEIDE Richtungen: `REG_CR` verlaesst `0xea` beim Einschalten und
+//! kehrt beim Abschalten dorthin zurueck. Nur eine Richtung zu messen hiesse,
+//! einen Zustand zu pruefen, den der Chip vielleicht schon hatte.
 
 #![no_std]
 
 mod host;
+mod mac;
+mod pwrseq;
 mod regs;
 use regs::*;
 
@@ -196,21 +205,97 @@ pub extern "C" fn _start() {
     all &= gate("RF-Typ 2T2R (Datenblatt: 2x2)", hal.rf_2t2r && !dead);
     all &= gate("8/16/32-Bit-Zugriff stimmen ueberein", widths_ok && !dead);
 
-    host::print(if all {
-        "[rtl8822ce] Stufe 0: GRUEN — weiter mit Stufe 1 (Power-Sequenz + efuse)\n"
+    if !all {
+        host::print("[rtl8822ce] Stufe 0: NEIN — Stufe 1 wird nicht gefahren\n");
+        publish(&hal, cr, fwctrl, false, false);
+        loop {
+            host::sleep_ms(1000);
+            publish(&hal, cr, fwctrl, false, false);
+        }
+    }
+    host::print("[rtl8822ce] Stufe 0: GRUEN\n");
+
+    // ── Stufe 1: der Strom ───────────────────────────────────────
+    host::print("[rtl8822ce] Stufe 1: Power-Sequenz (");
+    host::print_dec(pwr_cmds_for_us(hal.cut_version) as u32);
+    host::print(" von 54 Kommandos gelten fuer PCIe + cut ");
+    host::print_dec(hal.cut_version as u32);
+    host::print(")\n");
+
+    let t0 = host::now_us();
+    let on = mac::mac_power_on(h, hal.cut_version);
+    let dt_on = host::now_us() - t0;
+
+    let on_ok = on.is_ok();
+    if let Err(e) = on {
+        host::print(match e {
+            mac::PwrErr::Busy => "[rtl8822ce] Power-Sequenz abgebrochen (Polling)\n",
+            mac::PwrErr::Already => "[rtl8822ce] Power-Sequenz: unerwartetes EALREADY\n",
+        });
+    }
+
+    let cr_on = host::r8(h, REG_CR);
+    let fsmco_on = host::r32(h, REG_SYS_PW_CTRL);
+    let funcen_on = host::r8(h, REG_SYS_FUNC_EN + 1);
+    host::print("  nach AN : CR = 0x");
+    host::print_hex8(cr_on);
+    host::print("  APS_FSMCO = 0x");
+    host::print_hex32(fsmco_on);
+    host::print("  SYS_FUNC_EN+1 = 0x");
+    host::print_hex8(funcen_on);
+    host::print("  (");
+    host::print_dec(dt_on as u32);
+    host::print(" us)\n");
+
+    let pwr_on_ok = gate("MAC laeuft nach der Power-Sequenz (CR != 0xea)",
+                         on_ok && cr_on != CR_POWER_OFF);
+
+    // Wie Linux es in rtw_chip_efuse_info_setup tut: wieder ausschalten.
+    mac::mac_power_off(h, hal.cut_version);
+    let cr_off = host::r8(h, REG_CR);
+    host::print("  nach AUS: CR = 0x");
+    host::print_hex8(cr_off);
+    host::print("  APS_FSMCO = 0x");
+    host::print_hex32(host::r32(h, REG_SYS_PW_CTRL));
+    host::print("\n");
+
+    let pwr_off_ok = gate("MAC ist nach dem Abschalten wieder aus (CR == 0xea)",
+                          cr_off == CR_POWER_OFF);
+
+    let stage1 = pwr_on_ok && pwr_off_ok;
+    host::print(if stage1 {
+        "[rtl8822ce] Stufe 1: GRUEN — weiter mit Stufe 2 (Ringe, Firmware, efuse)\n"
     } else {
-        "[rtl8822ce] Stufe 0: NEIN — nicht weiterbauen, bevor das steht\n"
+        "[rtl8822ce] Stufe 1: NEIN — nicht weiterbauen, bevor das steht\n"
     });
 
     // Der Bericht bleibt stehen, damit `wlan` ihn nach dem Lauf noch zeigt.
-    publish(&hal, cr, fwctrl, all);
+    publish(&hal, cr_off, fwctrl, true, stage1);
 
     // Gebunden bleiben. Ein Treiber, der zurueckkehrt, gibt sein PCI-Gerat
     // frei — und der naechste Lauf faende einen Chip in unbekanntem Zustand.
     loop {
         host::sleep_ms(1000);
-        publish(&hal, cr, fwctrl, all);
+        publish(&hal, cr_off, fwctrl, true, stage1);
     }
+}
+
+/// Wieviele der 54 Kommandos auf UNSEREM Geraet ueberhaupt laufen. Eine
+/// Zahl, die man sonst erst beim Suchen vermisst.
+fn pwr_cmds_for_us(cut: u8) -> usize {
+    let m = cut_version_to_mask(cut);
+    let mut n = 0;
+    for seq in pwrseq::CARD_ENABLE_FLOW.iter().chain(pwrseq::CARD_DISABLE_FLOW.iter()) {
+        for c in seq.iter() {
+            if c.cmd != pwrseq::RTW_PWR_CMD_END
+                && c.intf_mask & pwrseq::RTW_PWR_INTF_PCI_MSK != 0
+                && c.cut_mask & m != 0
+            {
+                n += 1;
+            }
+        }
+    }
+    n
 }
 
 fn gate(name: &str, ok: bool) -> bool {
@@ -222,7 +307,7 @@ fn gate(name: &str, ok: bool) -> bool {
 
 /// Klartextblock fuer das Intent `wlan`. Der Kernel parst nichts, er
 /// speichert Bytes mit Zeitstempel.
-fn publish(hal: &Hal, cr: u8, fwctrl: u16, ok: bool) {
+fn publish(hal: &Hal, cr: u8, fwctrl: u16, s0: bool, s1: bool) {
     let mut buf = [0u8; 256];
     let mut n = 0usize;
     let mut put = |s: &[u8], n: &mut usize| {
@@ -235,8 +320,10 @@ fn publish(hal: &Hal, cr: u8, fwctrl: u16, ok: bool) {
     };
     put(b"rtl8822ce ", &mut n);
     put(DRIVER_VERSION.as_bytes(), &mut n);
-    put(b" stufe0 ", &mut n);
-    put(if ok { b"gruen" } else { b"NEIN " }, &mut n);
+    put(b" stufe0=", &mut n);
+    put(if s0 { b"gruen" } else { b"NEIN " }, &mut n);
+    put(b" stufe1=", &mut n);
+    put(if s1 { b"gruen" } else { b"NEIN " }, &mut n);
     put(b"\nsys_cfg1=0x", &mut n);
     put(&hex32(hal.chip_version), &mut n);
     put(b" cut=", &mut n);
