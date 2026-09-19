@@ -2,7 +2,14 @@
 //!
 //! Portiert: `rtw_pci_init_tx_ring` · `rtw_pci_init_rx_ring` ·
 //! `rtw_pci_reset_rx_desc` · `rtw_pci_init_trx_ring` ·
-//! `rtw_pci_reset_buf_desc` · `rtw_pci_reset_trx_ring`.
+//! `rtw_pci_reset_buf_desc` · `rtw_pci_reset_trx_ring` ·
+//! `rtw_pci_dma_reset` · `rtw_pci_setup`.
+//!
+//! **`rtw_hci_setup` ist `rtw_pci_setup`, und das sind ZWEI Aufrufe.** In
+//! 0.4.0 stand hier nur `reset_buf_desc`; `rtw_pci_dma_reset` fehlte, und
+//! damit lief die TRX-DMA-Schnittstelle nie an — die erste Reserved Page
+//! blieb liegen und `BIT_BCN_VALID_V1` wurde nie 1. Deshalb gibt es `setup()`
+//! als EINE Funktion: wer sie ruft, kann die zweite Haelfte nicht vergessen.
 //!
 //! **Zwei benannte Abweichungen, beide begruendet:**
 //!
@@ -90,6 +97,8 @@ pub const RTK_PCI_TXBD_H2CQ_CSR: u32 = 0x1330;
 pub const BIT_CLR_H2CQ_HOST_IDX: u32 = 1 << 16;
 pub const BIT_CLR_H2CQ_HW_IDX: u32 = 1 << 8;
 pub const RTK_PCI_CTRL: u32 = 0x300;
+pub const BIT_RST_TRXDMA_INTF: u32 = 1 << 20; // pci.h:18
+pub const BIT_RX_TAG_EN: u32 = 1 << 15; // pci.h:19
 pub const TRX_BD_IDX_MASK: u32 = 0xFFF; // GENMASK(11, 0)
 pub const TRX_BD_HW_IDX_MASK: u32 = 0x0FFF_0000; // GENMASK(27, 16)
 
@@ -126,6 +135,9 @@ pub struct Trx {
     pub rx: RxRing,
     pub dma_pages: u32,
     pub dma_allocs: u32,
+    /// `rtwpci->rx_tag` — von `rtw_pci_dma_reset` auf 0 gesetzt, gelesen von
+    /// `rtw_pci_dma_check` in Stufe 2d.
+    pub rx_tag: u16,
 }
 
 const EMPTY_TX: TxRing = TxRing { dma: 0, len: 0, handle: -1, wp: 0, rp: 0 };
@@ -201,7 +213,24 @@ pub fn init_trx_ring() -> Option<Trx> {
         host::dma_w32(desc_h, off + 4, rx.buf_phys(i));
     }
 
-    Some(Trx { tx, rx, dma_pages: pages, dma_allocs: allocs })
+    Some(Trx { tx, rx, dma_pages: pages, dma_allocs: allocs, rx_tag: 0 })
+}
+
+/// pci.c `rtw_pci_dma_reset` — „reset dma and rx tag".
+///
+/// Ohne diese eine Zeile faehrt die TRX-DMA-Schnittstelle nicht an. Die
+/// Ringadressen stehen dann korrekt in den Registern (und lesen sich auch
+/// zurueck), nur holt der Chip die Deskriptoren nie ab.
+fn dma_reset(h: i32, trx: &mut Trx) {
+    host::set32(h, RTK_PCI_CTRL, BIT_RST_TRXDMA_INTF | BIT_RX_TAG_EN);
+    trx.rx_tag = 0;
+}
+
+/// pci.c `rtw_pci_setup` — was `rtw_hci_setup` fuer PCIe bedeutet.
+/// Beide Haelften, immer zusammen.
+pub fn setup(h: i32, trx: &mut Trx) {
+    reset_buf_desc(h, trx); // = rtw_pci_reset_trx_ring
+    dma_reset(h, trx);
 }
 
 /// pci.c `rtw_pci_reset_buf_desc`
