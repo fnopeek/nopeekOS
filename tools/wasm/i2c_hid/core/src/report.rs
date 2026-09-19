@@ -63,6 +63,24 @@ pub struct ReportMap {
     /// Hat der Deskriptor ueberhaupt Report-IDs benutzt? Wenn nicht,
     /// traegt der Bericht kein ID-Byte.
     pub uses_ids: bool,
+    /// Die GANZE Laenge je Bericht, in Bit.
+    ///
+    /// Aus den Feldern allein ist sie NICHT herleitbar: Fuellbits sind
+    /// keine Felder, stehen aber im Bericht. Und wer einen Feature-Bericht
+    /// zu kurz schickt, bekommt auf dem Bus ein ACK und trotzdem keine
+    /// Wirkung — genau daran ist der Umschalter in den Praezisionsmodus
+    /// gescheitert (Elan: `Report Size 16`, wir schickten ein Byte).
+    lens: Vec<(Kind, u8, u32)>,
+}
+
+impl ReportMap {
+    /// Wie lang ist dieser Bericht, in BYTES, ohne das Report-ID-Byte?
+    pub fn report_bytes(&self, kind: Kind, id: u8) -> usize {
+        self.lens.iter()
+            .find(|(k, i, _)| *k == kind && *i == id)
+            .map(|(_, _, bits)| ((*bits as usize) + 7) / 8)
+            .unwrap_or(0)
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -236,6 +254,15 @@ pub fn parse(desc: &[u8]) -> ReportMap {
             _ => {}
         }
     }
+    for id in 0..256usize {
+        for (kind, off) in [
+            (Kind::Input, off_in[id]),
+            (Kind::Output, off_out[id]),
+            (Kind::Feature, off_feat[id]),
+        ] {
+            if off > 0 { out.lens.push((kind, id as u8, off)); }
+        }
+    }
     out
 }
 
@@ -334,6 +361,20 @@ pub fn extract(data: &[u8], f: &Field) -> i32 {
         }
     }
     v as i32
+}
+
+/// Einen Wert IN einen Bericht schreiben — das Gegenstueck zu
+/// [`extract`]. Bits ausserhalb des Puffers fallen weg.
+pub fn insert(data: &mut [u8], f: &Field, value: i32) {
+    if f.bit_size == 0 || f.bit_size > 32 { return; }
+    let v = value as u32;
+    for k in 0..f.bit_size {
+        let bit = f.bit_offset + k;
+        let byte = (bit / 8) as usize;
+        if byte >= data.len() { break; }
+        let mask = 1u8 << (bit % 8);
+        if (v >> k) & 1 != 0 { data[byte] |= mask; } else { data[byte] &= !mask; }
+    }
 }
 
 #[cfg(test)]
@@ -449,6 +490,50 @@ mod tests {
         // Und der Block, der frueher 1634 Felder erzeugt hat, erzeugt jetzt
         // keine: Fuellbits sind keine Felder.
         assert!(m.fields.len() < 100, "{} Felder aus 381 Bytes", m.fields.len());
+    }
+
+    /// Der Umschalter in den Praezisionsmodus ist ZWEI Bytes lang.
+    ///
+    /// Am Geraet quittierte das Elan einen Ein-Byte-Feature-Bericht auf
+    /// dem Bus und schaltete NICHT um — es kam weiter nur die
+    /// Maus-Nachahmung. Im Deskriptor steht `Report Size 16` an
+    /// `Input Mode`, und ein zu kurzer Feature-Bericht wird verworfen.
+    /// Die Laenge gehoert deshalb aus dem Deskriptor gerechnet und nicht
+    /// geraten — samt Fuellbits, die keine Felder sind.
+    #[test]
+    fn a_feature_report_is_as_long_as_the_descriptor_says() {
+        let d = include_bytes!("../testdata/elan06fa.bin");
+        let m = parse(d);
+
+        let im = m.find_feature(PAGE_DIGITIZER, USAGE_INPUT_MODE).expect("Device Mode");
+        assert_eq!(im.report_id, 3);
+        assert_eq!(im.bit_size, 16, "Report Size 16 — nicht 8");
+        assert_eq!(m.report_bytes(Kind::Feature, 3), 2);
+
+        // Und so sieht die Nutzlast aus, die das Geraet erwartet.
+        let mut payload = alloc::vec![0u8; m.report_bytes(Kind::Feature, 3)];
+        insert(&mut payload, im, 3);
+        assert_eq!(&payload[..], &[0x03, 0x00]);
+
+        // Bericht 5 endet auf 14 Fuellbits: aus den FELDERN allein kaeme
+        // ein Byte heraus, richtig sind zwei.
+        assert_eq!(m.report_bytes(Kind::Feature, 5), 2);
+    }
+
+    /// Schreiben und Lesen muessen sich treffen, auch quer ueber eine
+    /// Bytegrenze und mit Vorzeichen.
+    #[test]
+    fn insert_and_extract_are_inverse() {
+        let f = Field {
+            kind: Kind::Feature, report_id: 1, usage_page: 0, usage: 0,
+            bit_offset: 5, bit_size: 12, logical_min: -2048, logical_max: 2047,
+            relative: false, constant: false,
+        };
+        let mut b = [0u8; 4];
+        for v in [0i32, 1, -1, 2047, -2048, 1234] {
+            insert(&mut b, &f, v);
+            assert_eq!(extract(&b, &f), v, "{v}");
+        }
     }
 
     /// `bSize == 3` heisst VIER Bytes. Wer drei liest, verschiebt alles
