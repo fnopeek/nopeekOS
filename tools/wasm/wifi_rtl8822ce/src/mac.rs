@@ -471,7 +471,7 @@ fn check_fw_checksum(h: i32, addr: u32) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn download_firmware_to_mem(
     h: i32, trx: &Trx, stage: i32, data: &[u8], src: u32, dst: u32, size: u32,
-    band: u8,
+    band: u8, dump_first: bool,
 ) -> bool {
     const MAX_SIZE: u32 = 0x1000;
     let desc_size = crate::tx::TX_PKT_DESC_SZ as u32;
@@ -495,9 +495,10 @@ fn download_firmware_to_mem(
         // pg_addr = src >> 7. Der USB-Sonderfall (+1 Byte, wenn
         // (size + TX_DESC_SIZE) auf 512 aufgeht) gilt nur dort, und
         // `kmemdup` daneben ist Linux-Speicherverwaltung.
-        // Nur das ERSTE Stueck wird ausgeschuettet — 50 Stuecke mal zwoelf
-        // Register waeren keine Diagnose mehr, sondern eine Wand.
-        let verbose = first_part && mem_offset == 0;
+        // Nur das allererste Stueck des ganzen Downloads wird ausgeschuettet
+        // — fuenfzig Stuecke mal zwoelf Register waeren keine Diagnose mehr,
+        // sondern eine Wand.
+        let verbose = dump_first && first_part && mem_offset == 0;
         if !write_data_rsvd_page(h, trx, stage, (src >> 7) as u16,
                                  &data[from..to], 0, band, verbose) {
             host::print("[rtl8822ce] rsvd page fehlgeschlagen bei Offset ");
@@ -554,7 +555,8 @@ fn start_download_firmware(h: i32, trx: &Trx, stage: i32, fw: &[u8], band: u8) -
         host::print_dec(size);
         host::print(" Bytes ");
         let t0 = host::now_us();
-        if !download_firmware_to_mem(h, trx, stage, &fw[off..], 0, addr, size, band) {
+        if !download_firmware_to_mem(h, trx, stage, &fw[off..], 0, addr, size,
+                                     band, off == FW_HDR_SIZE) {
             host::print("— FEHLER\n");
             return false;
         }
@@ -579,14 +581,49 @@ fn download_firmware_end_flow(h: i32) {
 }
 
 /// mac.c `download_firmware_validate`
+///
+/// Hier wartet nicht die Hardware auf ein Register, sondern WIR auf eine
+/// Firmware, die gerade anlaeuft: `BIT_FW_INIT_RDY` setzt sie selbst,
+/// nachdem `wlan_cpu_enable` ihren Kern gestartet hat. Linux gibt dafuer
+/// 10 ms. Schafft sie das nicht, wird hier NICHT einfach aufgegeben,
+/// sondern weitergemessen — die Zahl sagt, ob die Frist zu knapp ist oder
+/// ob das Bit nie kommt, und das sind zwei verschiedene Fehler.
+const VALIDATE_DIAG_US: u64 = 500_000;
+
 fn download_firmware_validate(h: i32) -> bool {
-    if check_hw_ready(h, REG_MCUFW_CTRL, FW_READY_MASK, FW_READY) {
+    let (ok, us) = crate::fw::check_hw_ready_for(
+        h, REG_MCUFW_CTRL, FW_READY_MASK, FW_READY, crate::fw::LINUX_FRIST_US);
+    if ok {
+        host::print("  FW_READY nach ");
+        host::print_dec(us as u32);
+        host::print(" us (Linux gibt 10000)\n");
         return true;
     }
-    let fw_key = host::r32(h, REG_FW_DBG7) & FW_KEY_MASK;
-    if fw_key == ILLEGAL_KEY_GROUP {
-        host::print("[rtl8822ce] invalid fw key\n");
+
+    host::print("  nach Linux' 10 ms: MCUFW_CTRL = 0x");
+    host::print_hex16(host::r16(h, REG_MCUFW_CTRL));
+    host::print(" — weiter messen bis 500 ms …\n");
+    let (ok2, us2) = crate::fw::check_hw_ready_for(
+        h, REG_MCUFW_CTRL, FW_READY_MASK, FW_READY, VALIDATE_DIAG_US);
+    if ok2 {
+        host::print("  FW_READY doch, nach ");
+        host::print_dec((us + us2) as u32);
+        host::print(" us — Linux' Frist ist auf dieser Maschine zu knapp\n");
+        return true;
     }
+    host::print("  auch nach ");
+    host::print_dec(((us + us2) / 1000) as u32);
+    host::print(" ms nicht: MCUFW_CTRL = 0x");
+    host::print_hex16(host::r16(h, REG_MCUFW_CTRL));
+    host::print("\n");
+
+    let fw_key = host::r32(h, REG_FW_DBG7) & FW_KEY_MASK;
+    host::print("  FW_DBG7 = 0x");
+    host::print_hex32(host::r32(h, REG_FW_DBG7));
+    if fw_key == ILLEGAL_KEY_GROUP {
+        host::print("  -> invalid fw key");
+    }
+    host::print("\n");
     false
 }
 

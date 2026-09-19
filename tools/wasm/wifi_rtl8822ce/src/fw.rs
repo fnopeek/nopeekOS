@@ -58,20 +58,42 @@ pub fn dump_reg32(h: i32, name: &str, off: u32) {
 /// util.c `check_hw_ready`: 1000 Runden, 10 us auseinander, und gelesen wird
 /// mit `rtw_read32_mask` — also 32 Bit, auch wenn das Register ein Byte ist.
 pub fn check_hw_ready(h: i32, addr: u32, mask: u32, target: u32) -> bool {
+    check_hw_ready_for(h, addr, mask, target, LINUX_FRIST_US).0
+}
+
+/// Linux: 1000 Runden mit je `udelay(10)` — die Frist ist also **10 ms**,
+/// und die Rundenzahl ist nur die Art, wie sie dort gezaehlt wird.
+pub const LINUX_FRIST_US: u64 = 1000 * 10;
+
+/// util.c `check_hw_ready`, aber an der UHR statt an der Rundenzahl.
+///
+/// Die erste Fassung hielt 1000 Runden ohne Pause — das sind hier eine bis
+/// zwei Millisekunden statt zehn, also ein Zehntel von Linux' Frist. Der
+/// Kommentar daneben behauptete schon die Uhr; der Code tat etwas anderes,
+/// und die Firmware bekam zu wenig Zeit, ihr FW_INIT_RDY zu setzen.
+///
+/// Gibt zurueck, ob es geklappt hat UND wie lange es gedauert hat — die
+/// zweite Zahl ist der Unterschied zwischen „zu knapp" und „kommt nie".
+pub fn check_hw_ready_for(
+    h: i32, addr: u32, mask: u32, target: u32, frist_us: u64,
+) -> (bool, u64) {
     let shift = mask.trailing_zeros();
     let start = host::now_us();
-    for cnt in 0..1000u32 {
+    loop {
         if (host::r32(h, addr) & mask) >> shift == target {
-            return true;
+            return (true, host::now_us() - start);
         }
-        // 10 us liegen unter unserer Schlafaufloesung. Eng lesen und die
-        // Gesamtfrist (1000 x 10 us = 10 ms) an der Uhr halten; ab 10 ms
-        // abgeben, damit ein haengendes Register nicht den Kern blockiert.
-        if cnt > 0 && cnt % 64 == 0 && host::now_us() - start > 10_000 {
+        let waited = host::now_us() - start;
+        if waited >= frist_us {
+            return (false, waited);
+        }
+        // 10 us liegen unter unserer Schlafaufloesung, also wird eng
+        // gelesen. Ab 10 ms wird zwischen den Lesungen abgegeben, damit
+        // eine lange Frist nicht den Kern blockiert.
+        if waited > 10_000 {
             host::sleep_ms(1);
         }
     }
-    false
 }
 
 /// fw.c `rtw_fw_write_data_rsvd_page`, 3081-Zweig, PCIe.
