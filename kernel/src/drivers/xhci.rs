@@ -232,13 +232,61 @@ static mut MOUSE_BUF: [MouseEvent; MOUSE_BUF_SIZE] = [MouseEvent { buttons: 0, d
 static MOUSE_HEAD: AtomicUsize = AtomicUsize::new(0);
 static MOUSE_TAIL: AtomicUsize = AtomicUsize::new(0);
 
-fn push_mouse(evt: MouseEvent) {
+/// Serialisiert ALLE Einspeiser des Zeigers.
+///
+/// Der Ring war als Einzelerzeuger gebaut ("single producer (IRQ or poll)")
+/// und ist es nicht mehr: PS/2 speist aus dem Timer-IRQ ein, USB aus dem
+/// Drain — der seit 0.371.0 auch aus dem Netzpfad auf einem Worker-Kern
+/// laeuft —, und ein WASM-Treiber (Touchpad) von einem beliebigen Kern.
+static POINTER_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
+/// Den Ring beschicken. **Nur mit gehaltener `POINTER_LOCK` rufen.**
+fn push_mouse_locked(evt: MouseEvent) {
     let head = MOUSE_HEAD.load(Ordering::Relaxed);
     let next = (head + 1) % MOUSE_BUF_SIZE;
     if next != MOUSE_TAIL.load(Ordering::Acquire) {
-        // SAFETY: single producer (IRQ or poll), head only written here
+        // SAFETY: die Sperre macht daraus genau einen Schreiber; `head`
+        // wird nur hier geschrieben.
         unsafe { MOUSE_BUF[head] = evt; }
         MOUSE_HEAD.store(next, Ordering::Release);
+    }
+}
+
+/// Ein Zeigerereignis einspeisen — aus JEDER Quelle.
+///
+/// Zwei Dinge dahinter sind Lese-Aendern-Schreiben und muessen zusammen
+/// geschehen: der Ringschub und `cursor::update_atomic`. Der Name des
+/// zweiten taeuscht — es ist eine FOLGE einzelner Atomzugriffe, und sie
+/// traegt dabei die VORIGE Tastenlage nach. Verschraenken sich zwei
+/// Laeufe, geht ein Klick verloren oder es entsteht einer, den niemand
+/// gemacht hat.
+///
+/// Waehrend die Sperre gehalten wird, sind die Interrupts DIESES Kerns
+/// aus: sonst liefe sein eigener Timer-IRQ hier hinein und drehte sich auf
+/// der Sperre fest, die er selbst haelt.
+///
+/// `cheap` waehlt den Malweg: die Maus bewegt nur den Zeiger
+/// (`request_cursor_move`), ein PS/2- oder Treiberereignis verlangt ein
+/// volles Bild. Beides liegt AUSSERHALB der Sperre — es ist teuer und
+/// braucht sie nicht.
+fn inject_pointer(evt: MouseEvent, cheap: bool) {
+    let rflags: u64;
+    // SAFETY: IF sichern und ausschalten, unten genau so wiederherstellen.
+    unsafe { core::arch::asm!("pushfq; pop {}; cli", out(reg) rflags) };
+    {
+        let _g = POINTER_LOCK.lock();
+        MOUSE_AVAILABLE.store(true, Ordering::Relaxed);
+        crate::shade::cursor::update_atomic(evt.dx, evt.dy, evt.buttons);
+        push_mouse_locked(evt);
+    }
+    if rflags & (1 << 9) != 0 {
+        // SAFETY: IF war an — wieder anschalten.
+        unsafe { core::arch::asm!("sti") };
+    }
+    if cheap {
+        crate::shade::request_cursor_move();
+    } else {
+        crate::shade::request_render();
     }
 }
 
@@ -247,13 +295,7 @@ fn push_mouse(evt: MouseEvent) {
 /// loop's existing `poll_mouse()` delivers it with no extra plumbing. Marks the
 /// pointer available on first event.
 pub fn inject_mouse(evt: MouseEvent) {
-    MOUSE_AVAILABLE.store(true, Ordering::Relaxed);
-    // Move the visible cursor overlay + request a render — same as the USB
-    // mouse parse path. Without this the cursor appears but never moves
-    // (handle_mouse only reads the atomic position; update_atomic writes it).
-    crate::shade::cursor::update_atomic(evt.dx, evt.dy, evt.buttons);
-    crate::shade::request_render();
-    push_mouse(evt);
+    inject_pointer(evt, false);
 }
 
 /// Poll for a key from the USB keyboard. Called from keyboard.rs.
@@ -1234,21 +1276,20 @@ fn process_mouse_report(state: &mut XhciState) {
 
     // Only push event if something changed (movement, button, or scroll)
     if dx != 0 || dy != 0 || buttons != state.mouse_prev_buttons || scroll != 0 {
-        push_mouse(MouseEvent { buttons, dx, dy, scroll });
+        // Durch DIESELBE Stelle wie PS/2 und ein Treibermodul — der USB-Weg
+        // schob den Ring vorher selbst und schrieb die Position daneben
+        // fort, also genau die zwei Schritte, die zusammengehoeren.
+        //
+        // Der Zeiger wird IN den Schatten komponiert (shade::render_frame_*),
+        // also traegt der naechste Blit die neue Position mit — kein eigener
+        // MMIO-Schreibzugriff aus dem IRQ, der gegen einen laufenden Blit
+        // rennen und ueber schnellen Flaechen flackern koennte.
+        //
+        // `true` = der billige Weg: nur den Zeiger bewegen. `handle_mouse`
+        // hebt selbst auf ein volles Bild an, wenn es ein Ziehen, Klicken
+        // oder Rollen ist.
+        inject_pointer(MouseEvent { buttons, dx, dy, scroll }, true);
         state.mouse_prev_buttons = buttons;
-
-        // Update the atomic cursor position and ask shade to render. The
-        // cursor is composed INTO the shadow as the final layer (see
-        // shade::render_frame_*), so the next compose picks up this new
-        // position and the shadow→MMIO blit carries it atomically — no
-        // separate IRQ-side MMIO write that could race against an
-        // in-flight blit and produce flicker over high-frequency
-        // surfaces (microvm browser tile @ 60 Hz).
-        crate::shade::cursor::update_atomic(dx, dy, buttons);
-        // Default to the cheap cursor-only path; handle_mouse upgrades to a
-        // full render if this is a drag/click/scroll. The old full
-        // request_render() recomposited the whole scene on every move.
-        crate::shade::request_cursor_move();
     }
 }
 
