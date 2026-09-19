@@ -973,7 +973,7 @@ fn probe_mouse(state: &mut XhciState) -> bool {
 
     // First: try the port that was already probed during keyboard search.
     // That device is already addressed (slot active) — no reset needed.
-    if state.probed_port != 0xFFFF && state.probed_port != kbd_port {
+    if state.probed_port != 0xFFFF && !(state.has_keyboard && state.probed_port == kbd_port) {
         let p = state.probed_port;
         kprintln!("[npk] xhci: reusing probed device on port {} (slot {})", p + 1, state.probed_slot);
         if try_init_mouse_reuse(state) {
@@ -984,9 +984,33 @@ fn probe_mouse(state: &mut XhciState) -> bool {
         }
     }
 
-    // Fallback: scan remaining ports for a mouse (fresh enumeration)
+    // Rueckfall: die uebrigen Ports FRISCH aufzaehlen — und den vorher
+    // angefassten Port NICHT auslassen.
+    //
+    // Er wurde ausgelassen, weil der Wiederverwendungspfad ihn schon
+    // bedient hatte. Der kann aber fehlschlagen, und auf Florians IdeaPad
+    // tut er das aus einem Grund, der hier nicht zu reparieren ist: nach
+    // dem gemerkten Port probiert die Tastatursuche WEITERE Ports, und die
+    // benutzen denselben zweiten DMA-Satz (`mouse_ep0_ring`,
+    // `mouse_device_ctx`). Adressiert sich einer davon, gehoert der Satz
+    // ihm — der gemerkte Slot und der EP0-Ring passen dann nicht mehr
+    // zusammen, und es kommt kein Transfer zurueck.
+    //
+    // Die Folge war, dass die EINZIGE Beruehrung der echten Maus der
+    // kaputte Weg war: Port 2 trug sie („composite mouse device"), und der
+    // Rueckfall uebersprang genau ihn. Ein frischer Anlauf setzt den Port
+    // zurueck und legt Slot und Ring gemeinsam neu an.
+    //
+    // Der tiefere Posten bleibt: ZWEI feste DMA-Saetze reichen fuer zwei
+    // Geraete, nicht fuer drei.
     for p in 0..max_ports {
-        if p == kbd_port || p == state.probed_port { continue; }
+        // Den Port der Tastatur auslassen — aber NUR, wenn dieser
+        // Controller ueberhaupt eine traegt. Ohne Tastatur steht
+        // `port_num` auf seinem Anfangswert 0, und damit wurde auf jedem
+        // tastaturlosen Controller der erste Port uebersprungen. Eine Maus
+        // dort waere unauffindbar gewesen, ohne dass irgendwo etwas
+        // gemeldet haette.
+        if state.has_keyboard && p == kbd_port { continue; }
         let portsc = r32(state.oper, portsc_off(p));
         if portsc & PORTSC_CCS == 0 { continue; }
 
