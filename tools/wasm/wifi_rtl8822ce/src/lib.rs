@@ -23,11 +23,18 @@
 //! Gate in BEIDE Richtungen: `REG_CR` verlaesst `0xea` beim Einschalten und
 //! kehrt beim Abschalten dorthin zurueck. Nur eine Richtung zu messen hiesse,
 //! einen Zustand zu pruefen, den der Chip vielleicht schon hatte.
+//!
+//! **Stufe 2a: die Ringe.** `rtw_pci_init_trx_ring` + `rtw_pci_reset_buf_desc`
+//! (`pci.rs`), in Linux' Reihenfolge — die Ringregister werden programmiert,
+//! BEVOR der MAC angeht (`rtw_power_on` ruft `rtw_hci_setup` vor
+//! `rtw_mac_power_on`). Gate: jedes Adress- und Anzahlregister gibt zurueck,
+//! was hineingeschrieben wurde, einmal mit MAC aus und einmal mit MAC an.
 
 #![no_std]
 
 mod host;
 mod mac;
+mod pci;
 mod pwrseq;
 mod regs;
 use regs::*;
@@ -207,13 +214,40 @@ pub extern "C" fn _start() {
 
     if !all {
         host::print("[rtl8822ce] Stufe 0: NEIN — Stufe 1 wird nicht gefahren\n");
-        publish(&hal, cr, fwctrl, false, false);
+        publish(&hal, cr, fwctrl, false, false, false);
         loop {
             host::sleep_ms(1000);
-            publish(&hal, cr, fwctrl, false, false);
+            publish(&hal, cr, fwctrl, false, false, false);
         }
     }
     host::print("[rtl8822ce] Stufe 0: GRUEN\n");
+
+    // ── Stufe 2a: die Ringe (rtw_pci_setup_resource) ─────────────
+    // Die Reihenfolge ist Linux': rtw_power_on ruft rtw_hci_setup — und
+    // damit reset_buf_desc — VOR rtw_mac_power_on. Die Ringregister liegen
+    // im PCIe-Block und leben unabhaengig vom MAC.
+    let mut trx = match pci::init_trx_ring() {
+        Some(t) => t,
+        None => {
+            host::print("[rtl8822ce] DMA reicht nicht fuer die Ringe — Stufe 2a aus\n");
+            publish(&hal, cr, fwctrl, true, false, false);
+            loop {
+                host::sleep_ms(1000);
+                publish(&hal, cr, fwctrl, true, false, false);
+            }
+        }
+    };
+    host::print("[rtl8822ce] Stufe 2a: Ringe belegt — ");
+    host::print_dec(trx.dma_pages);
+    host::print(" Seiten (");
+    host::print_dec(trx.dma_pages * 4 / 1024);
+    host::print(" MiB) in ");
+    host::print_dec(trx.dma_allocs);
+    host::print(" Stuecken, von 2048 Seiten / 1024 Stuecken\n");
+
+    pci::reset_buf_desc(h, &mut trx);
+    host::print("[rtl8822ce] Ringregister mit MAC AUS:\n");
+    let rings_off_ok = pci::verify_rings(h, &trx);
 
     // ── Stufe 1: der Strom ───────────────────────────────────────
     host::print("[rtl8822ce] Stufe 1: Power-Sequenz (");
@@ -250,6 +284,25 @@ pub extern "C" fn _start() {
     let pwr_on_ok = gate("MAC laeuft nach der Power-Sequenz (CR != 0xea)",
                          on_ok && cr_on != CR_POWER_OFF);
 
+    // Dieselbe Pruefung mit laufendem MAC. Linux programmiert die Ringe
+    // nach dem Firmware-Download NOCH EINMAL (`rtw_hci_setup` in
+    // `__rtw_download_firmware`, Kommentar: „reset desc and index") — also
+    // ist die Frage, ob dazwischen etwas verlorengeht, berechtigt und
+    // billig zu beantworten.
+    host::print("[rtl8822ce] dieselben Register mit MAC AN:\n");
+    let rings_on_ok = pci::verify_rings(h, &trx);
+    let rx_idx = host::r32(h, pci::RTK_PCI_RXBD_IDX_MPDUQ);
+    host::print("  RXBD_IDX = 0x");
+    host::print_hex32(rx_idx);
+    host::print("  (HW-Schreibzeiger ");
+    host::print_dec((rx_idx & pci::TRX_BD_HW_IDX_MASK) >> 16);
+    host::print(", unser Lesezeiger ");
+    host::print_dec(rx_idx & pci::TRX_BD_IDX_MASK);
+    host::print(")\n");
+
+    let rings_ok = gate("Ringregister halten ihre Werte (MAC aus UND an)",
+                        rings_off_ok && rings_on_ok);
+
     // Wie Linux es in rtw_chip_efuse_info_setup tut: wieder ausschalten.
     mac::mac_power_off(h, hal.cut_version);
     let cr_off = host::r8(h, REG_CR);
@@ -263,20 +316,26 @@ pub extern "C" fn _start() {
                           cr_off == CR_POWER_OFF);
 
     let stage1 = pwr_on_ok && pwr_off_ok;
+    let stage2a = rings_ok;
     host::print(if stage1 {
-        "[rtl8822ce] Stufe 1: GRUEN — weiter mit Stufe 2 (Ringe, Firmware, efuse)\n"
+        "[rtl8822ce] Stufe 1: GRUEN\n"
     } else {
         "[rtl8822ce] Stufe 1: NEIN — nicht weiterbauen, bevor das steht\n"
     });
+    host::print(if stage2a {
+        "[rtl8822ce] Stufe 2a: GRUEN — weiter mit 2b (Firmware ueber die BCN-Queue)\n"
+    } else {
+        "[rtl8822ce] Stufe 2a: NEIN — nicht weiterbauen, bevor das steht\n"
+    });
 
     // Der Bericht bleibt stehen, damit `wlan` ihn nach dem Lauf noch zeigt.
-    publish(&hal, cr_off, fwctrl, true, stage1);
+    publish(&hal, cr_off, fwctrl, true, stage1, stage2a);
 
     // Gebunden bleiben. Ein Treiber, der zurueckkehrt, gibt sein PCI-Gerat
     // frei — und der naechste Lauf faende einen Chip in unbekanntem Zustand.
     loop {
         host::sleep_ms(1000);
-        publish(&hal, cr_off, fwctrl, true, stage1);
+        publish(&hal, cr_off, fwctrl, true, stage1, stage2a);
     }
 }
 
@@ -307,7 +366,7 @@ fn gate(name: &str, ok: bool) -> bool {
 
 /// Klartextblock fuer das Intent `wlan`. Der Kernel parst nichts, er
 /// speichert Bytes mit Zeitstempel.
-fn publish(hal: &Hal, cr: u8, fwctrl: u16, s0: bool, s1: bool) {
+fn publish(hal: &Hal, cr: u8, fwctrl: u16, s0: bool, s1: bool, s2a: bool) {
     let mut buf = [0u8; 256];
     let mut n = 0usize;
     let mut put = |s: &[u8], n: &mut usize| {
@@ -324,6 +383,8 @@ fn publish(hal: &Hal, cr: u8, fwctrl: u16, s0: bool, s1: bool) {
     put(if s0 { b"gruen" } else { b"NEIN " }, &mut n);
     put(b" stufe1=", &mut n);
     put(if s1 { b"gruen" } else { b"NEIN " }, &mut n);
+    put(b" stufe2a=", &mut n);
+    put(if s2a { b"gruen" } else { b"NEIN " }, &mut n);
     put(b"\nsys_cfg1=0x", &mut n);
     put(&hex32(hal.chip_version), &mut n);
     put(b" cut=", &mut n);
