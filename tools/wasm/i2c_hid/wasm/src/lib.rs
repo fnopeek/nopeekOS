@@ -324,6 +324,7 @@ pub extern "C" fn _start() {
                         if !gate_asserted_now(l) { break; }
                     }
                     Step::Empty => { answered = true; l.empties += 1; break; }
+                    Step::Junk => { answered = true; l.junk += 1; break; }
                     Step::Dead => { l.errs += 1; break; }
                 }
             }
@@ -345,9 +346,12 @@ pub extern "C" fn _start() {
             stat_lines_left -= 1;
             for l in live.iter_mut() {
                 logln(&alloc::format!(
-                    "[i2c-hid] {:#04x}: 10 s — {} read(s): {} data, {} empty, {} FAILED ·                      {} rounds skipped by the pin · {} drain caps",
-                    l.addr, l.polls, l.datas, l.empties, l.errs, l.skips, l.capped));
-                l.polls = 0; l.datas = 0; l.empties = 0;
+                    "[i2c-hid] {:#04x}: 10 s — {} read(s): {} data, {} empty, \
+                     {} undeclared, {} FAILED · {} rounds skipped by the pin · \
+                     {} drain caps",
+                    l.addr, l.polls, l.datas, l.empties, l.junk, l.errs,
+                    l.skips, l.capped));
+                l.polls = 0; l.datas = 0; l.empties = 0; l.junk = 0;
                 l.errs = 0; l.skips = 0; l.capped = 0;
             }
         }
@@ -383,7 +387,8 @@ fn probe_bus(d: &i2c_hid_core::discover::HidDevice) -> Option<Live> {
     // schlimmstenfalls mit lauter Einsen), einrichten erst, wenn sie
     // stimmt.
     if !c.present {
-        logln("[i2c-hid]   _STA says absent — reading the signature anyway,                writes only if it checks out");
+        logln("[i2c-hid]   _STA says absent — reading the signature anyway, \
+               writes only if it checks out");
     }
 
     let pages = ((c.mmio_len as usize).max(4096) + 4095) / 4096;
@@ -521,6 +526,7 @@ struct Live {
     polls: u32,
     datas: u32,
     empties: u32,
+    junk: u32,
     errs: u32,
     skips: u32,
     capped: u32,
@@ -785,7 +791,7 @@ fn talk_to_device(
         last_buttons: 0,
         gate: Gate::Blind,
         dead: false,
-        polls: 0, datas: 0, empties: 0, errs: 0, skips: 0, capped: 0,
+        polls: 0, datas: 0, empties: 0, junk: 0, errs: 0, skips: 0, capped: 0,
         err_logged: 0,
     })
 }
@@ -802,10 +808,26 @@ fn talk_to_device(
 /// Kontaktpunkte und ihrer Bewegung. Unter Linux macht das libinput.
 /// Was ein einzelner Leseversuch ergeben hat.
 enum Step {
-    /// Ein Bericht kam — es kann sofort noch einer dahinter liegen.
+    /// Ein Bericht kam, und wir konnten ihn lesen — es kann sofort noch
+    /// einer dahinter liegen.
     Data,
     /// Nichts da. Das Geraet lebt, hat aber gerade nichts zu sagen.
     Empty,
+    /// **Etwas kam, aber es ist kein Bericht.**
+    ///
+    /// Eine Nummer, die der Deskriptor des Geraets SELBST nicht fuehrt.
+    /// Florians Wacom antwortet auf eine Lesung ohne anliegende Daten mit
+    /// ID 255 — seine eigenen sind 28, 19, 20, 11, 16, 31, 1 —, der Elan
+    /// mit ID 0, statt mit Laenge 0, wie HID over I2C es vorsieht. Genau
+    /// diese Frage stellt `docs/plan/INPUT_I2C_HID.md` seit je: was sagt
+    /// ein Geraet, wenn man es ohne Grund anspricht.
+    ///
+    /// Das ist KEINE Information. Es darf deshalb weder die Drainschleife
+    /// weiterlaufen lassen (acht Uebertragungen je Runde, fuer nichts)
+    /// noch als Beweis GEGEN den Interrupt-Pin zaehlen — und genau das
+    /// hat es in 0.23/0.24 getan: drei solche Antworten haben ein
+    /// funktionierendes Tor abgeschaltet.
+    Junk,
     /// Der Bus antwortet nicht mehr.
     Dead,
 }
@@ -1000,9 +1022,10 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
         if l.unknown_logged < 3 {
             l.unknown_logged += 1;
             logln(&alloc::format!(
-                "[i2c-hid]   report id {id} arrived, {} bytes — no decoder for it", r.len()));
+                "[i2c-hid]   report id {id} arrived, {} bytes — the descriptor does not \
+                 declare that id; taking it as nothing", r.len()));
         }
-        return Step::Data;
+        return Step::Junk;
     };
     let (mode, btn) = (&d.mode, &d.btn);
     l.seen += 1;
