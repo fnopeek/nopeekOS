@@ -14,6 +14,7 @@
 extern crate alloc;
 
 use aml_core::{Ec, Machine, Namespace};
+use i2c_hid_core::report;
 
 // Rohzugriff auf Firmware und Hardware: HARDWARE (Bit 0x40). Wer eine
 // `.npk.caps`-Sektion schreibt, ERSETZT die Vorgabe und muss READ selbst
@@ -318,6 +319,27 @@ fn probe_bus(d: &i2c_hid_core::discover::HidDevice) -> Option<Live> {
 }
 
 /// Ein eingerichtetes Geraet, aus dem sich Zeigerbewegung lesen laesst.
+/// Wie dieses Geraet seine Zeigerdaten meldet.
+enum Mode {
+    /// Maus-Nachahmung: ein X, ein Y, Tasten, vielleicht ein Rad.
+    Mouse {
+        fx: report::Field,
+        fy: report::Field,
+        wheel: Option<report::Field>,
+    },
+    /// Praezisions-Touchpad: KONTAKTPUNKTE. Je Finger ein Tip-Switch, ein
+    /// X und ein Y — daraus entstehen Gesten, die kein Geraet meldet.
+    Touchpad {
+        contacts: alloc::vec::Vec<(report::Field, report::Field, report::Field)>,
+        count: Option<report::Field>,
+        /// Ein Scrollschritt in Geraeteeinheiten, aus dem logischen
+        /// Bereich hergeleitet — ein Touchpad mit 3000 Einheiten Hoehe
+        /// braucht einen anderen Schwellwert als eines mit 800.
+        scroll_step: i32,
+    },
+}
+
+/// Ein eingerichtetes Geraet, aus dem sich Zeigerbewegung lesen laesst.
 struct Live {
     bus: HostBus,
     dw: i2c_hid_core::dw_i2c::Dw,
@@ -325,15 +347,17 @@ struct Live {
     desc: i2c_hid_core::hid::HidDesc,
     uses_ids: bool,
     rid: u8,
-    fx: i2c_hid_core::report::Field,
-    fy: i2c_hid_core::report::Field,
-    tip: Option<i2c_hid_core::report::Field>,
-    /// Das Rad, wenn das Geraet eines fuehrt.
-    wheel: Option<i2c_hid_core::report::Field>,
-    btn: alloc::vec::Vec<i2c_hid_core::report::Field>,
+    mode: Mode,
+    btn: alloc::vec::Vec<report::Field>,
+    /// Bezugspunkt fuer die Umrechnung von ORT auf WEG.
     have_ref: bool,
     rx: i32,
     ry: i32,
+    /// Aufgelaufene Scrollstrecke, bis sie eine Raste ergibt.
+    scroll_acc: i32,
+    /// Wieviele Finger lagen zuletzt auf? Ein Wechsel setzt den Bezug
+    /// zurueck — sonst springt der Zeiger, wenn der zweite Finger kommt.
+    last_n: usize,
     /// Die zuletzt gemeldete Tastenlage.
     ///
     /// Ein LOSLASSEN ist ein Ereignis wie ein Druck: wer nur bei
@@ -400,41 +424,85 @@ fn talk_to_device(
     let map = report::parse(&rd);
     logln(&alloc::format!("[i2c-hid]   {}", map.describe()));
 
-    let Some(rid) = map.pointer_report() else {
+    // Wenn das Geraet einen „Device Mode" fuehrt, auf 3 stellen.
+    //
+    // Ein Praezisions-Touchpad startet in der MAUS-Nachahmung: ein X, ein
+    // Y, Tasten — und keine Kontaktpunkte. Zweifinger-Scrollen ist in
+    // diesem Zustand nicht schwer, sondern unmoeglich, weil der zweite
+    // Finger gar nicht gemeldet wird. Der Schalter steht in einem
+    // Feature-Bericht (Digitizer 0x52).
+    if let Some(im) = map.find_feature(report::PAGE_DIGITIZER, report::USAGE_INPUT_MODE) {
+        let im = *im;
+        match hid::set_report(bus, dw, addr, &desc, hid::REPORT_TYPE_FEATURE, im.report_id, &[3]) {
+            Ok(()) => logln(&alloc::format!(
+                "[i2c-hid]   device mode -> 3 (precision touchpad), feature report {}",
+                im.report_id)),
+            Err(e) => logln(&alloc::format!(
+                "[i2c-hid]   device mode switch failed: {e:?} — staying in mouse mode")),
+        }
+    }
+
+    // Einen Bericht mit KONTAKTPUNKTEN bevorzugen; sonst die Maus.
+    let (rid, mode) = if let Some(id) = map.touchpad_report() {
+        let tips = map.find_all(report::Kind::Input, id, report::PAGE_DIGITIZER, report::USAGE_TIP_SWITCH);
+        let xs = map.find_all(report::Kind::Input, id, report::PAGE_GENERIC_DESKTOP, report::USAGE_X);
+        let ys = map.find_all(report::Kind::Input, id, report::PAGE_GENERIC_DESKTOP, report::USAGE_Y);
+        let n = tips.len().min(xs.len()).min(ys.len());
+        let contacts: alloc::vec::Vec<_> =
+            (0..n).map(|i| (*tips[i], *xs[i], *ys[i])).collect();
+        // Ein Scrollschritt aus dem logischen Bereich: etwa ein
+        // Vierzigstel der Padhoehe je Raste. Geraeteunabhaengig, weil die
+        // Zahl aus dem Geraet selbst kommt.
+        let span = (ys[0].logical_max - ys[0].logical_min).max(1);
+        let step = (span / 40).max(1);
+        logln(&alloc::format!(
+            "[i2c-hid]   can do: touchpad, {} contact slot(s), scroll step {} units",
+            contacts.len(), step));
+        (id, Mode::Touchpad {
+            contacts,
+            count: map.find(id, report::PAGE_DIGITIZER, report::USAGE_CONTACT_COUNT).copied(),
+            scroll_step: step,
+        })
+    } else if let Some(id) = map.pointer_report() {
+        let fx = *map.find(id, report::PAGE_GENERIC_DESKTOP, report::USAGE_X).unwrap();
+        let fy = *map.find(id, report::PAGE_GENERIC_DESKTOP, report::USAGE_Y).unwrap();
+        let wheel = map.find(id, report::PAGE_GENERIC_DESKTOP, report::USAGE_WHEEL).copied();
+        logln(&alloc::format!(
+            "[i2c-hid]   can do: mouse ({}), wheel {}",
+            if fx.relative { "relative" } else { "absolute" },
+            if wheel.is_some() { "yes" } else { "no" }));
+        (id, Mode::Mouse { fx, fy, wheel })
+    } else {
         logln("[i2c-hid]   no report carries X and Y — not a pointer");
         return None;
     };
-    let fx = *map.find(rid, report::PAGE_GENERIC_DESKTOP, report::USAGE_X).unwrap();
-    let fy = *map.find(rid, report::PAGE_GENERIC_DESKTOP, report::USAGE_Y).unwrap();
-    let tip = map.find(rid, report::PAGE_DIGITIZER, report::USAGE_TIP_SWITCH).copied();
-    let wheel = map.find(rid, report::PAGE_GENERIC_DESKTOP, report::USAGE_WHEEL).copied();
+
     let btn: alloc::vec::Vec<report::Field> = (1u16..=3)
         .filter_map(|u| map.find(rid, report::PAGE_BUTTON, u).copied())
         .collect();
+    logln(&alloc::format!("[i2c-hid]   {} button(s), ready", btn.len()));
 
-    logln(&alloc::format!(
-        "[i2c-hid]   can do: move ({}), {} button(s), wheel {}, tip-switch {}",
-        if fx.relative { "relative" } else { "absolute" },
-        btn.len(),
-        if wheel.is_some() { "yes" } else { "no" },
-        if tip.is_some() { "yes" } else { "no" }));
-    logln("[i2c-hid]   ready");
     Some(Live {
         bus: HostBus { handle: bus.handle },
         dw: i2c_hid_core::dw_i2c::Dw { ..*dw },
         addr, desc,
         uses_ids: map.uses_ids,
-        rid, fx, fy, tip, wheel, btn,
-        have_ref: false, rx: 0, ry: 0, last_buttons: 0,
+        rid, mode, btn,
+        have_ref: false, rx: 0, ry: 0,
+        scroll_acc: 0, last_n: 0, last_buttons: 0,
     })
 }
 
-/// Einen Eingabebericht abholen und als Zeigerbewegung einspeisen.
+/// Einen Eingabebericht abholen und als Zeiger oder Geste einspeisen.
 ///
-/// Absolut gegen relativ ist der Punkt: eine Maus meldet WEGE, ein
+/// Der Unterschied, um den sich alles dreht: eine Maus meldet WEGE, ein
 /// Touchpad ORTE. Aus Orten wird ein Weg, indem man den vorigen abzieht —
 /// und die ERSTE Beruehrung liefert keinen, sonst spraenge der Zeiger
-/// dorthin, wo der Finger aufsetzt. Beim Abheben faellt der Bezug weg.
+/// dorthin, wo der Finger aufsetzt.
+///
+/// Und eine GESTE meldet niemand. „Zwei Finger wandern parallel" steht in
+/// keinem Bericht; es entsteht erst hier, aus der Zahl der aufliegenden
+/// Kontaktpunkte und ihrer Bewegung. Unter Linux macht das libinput.
 fn poll_live(l: &mut Live, buf: &mut [u8]) -> bool {
     use i2c_hid_core::{hid, report};
     let r = match hid::get_input(&mut l.bus, &l.dw, l.addr, &l.desc, buf) {
@@ -445,35 +513,78 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> bool {
     let (id, data) = if l.uses_ids && !r.is_empty() { (r[0], &r[1..]) } else { (0u8, r) };
     if id != l.rid { return true; }
 
-    let x = report::extract(data, &l.fx);
-    let y = report::extract(data, &l.fy);
-    let touching = match &l.tip {
-        Some(t) => report::extract(data, t) != 0,
-        None => true,
-    };
     let mut buttons = 0i32;
     for (i, f) in l.btn.iter().enumerate() {
         if report::extract(data, f) != 0 { buttons |= 1 << i; }
     }
 
-    let (dx, dy) = if l.fx.relative {
-        (x, y)
-    } else if !touching {
-        l.have_ref = false;
-        (0, 0)
-    } else if l.have_ref {
-        (x - l.rx, y - l.ry)
-    } else {
-        l.have_ref = true;
-        (0, 0)
-    };
-    if !l.fx.relative { l.rx = x; l.ry = y; }
+    let (dx, dy, scroll) = match &l.mode {
+        Mode::Mouse { fx, fy, wheel } => {
+            let x = report::extract(data, fx);
+            let y = report::extract(data, fy);
+            // Das Rad meldet immer RELATIV — Rasten, keine Position.
+            let s = wheel.as_ref().map(|w| report::extract(data, w)).unwrap_or(0);
+            if fx.relative {
+                (x, y, s)
+            } else {
+                let d = if l.have_ref { (x - l.rx, y - l.ry) } else { (0, 0) };
+                l.have_ref = true;
+                l.rx = x; l.ry = y;
+                (d.0, d.1, s)
+            }
+        }
+        Mode::Touchpad { contacts, count, scroll_step } => {
+            // Welche Finger liegen auf?
+            let mut down: alloc::vec::Vec<(i32, i32)> = alloc::vec::Vec::new();
+            for (tip, fx, fy) in contacts.iter() {
+                if report::extract(data, tip) != 0 {
+                    down.push((report::extract(data, fx), report::extract(data, fy)));
+                }
+            }
+            // `Contact Count` ist die Ansage des Geraets; die Tip-Switches
+            // sind der Befund. Wo beide da sind, gilt der kleinere — ein
+            // Bericht kann mehr Plaetze fuehren als gerade belegt sind.
+            if let Some(c) = count {
+                let n = report::extract(data, c).max(0) as usize;
+                if n < down.len() { down.truncate(n); }
+            }
 
-    // Das Rad meldet immer RELATIV — Rasten, keine Position. Deshalb
-    // geht es direkt durch, ohne den Umweg ueber einen Bezugspunkt.
-    let scroll = match &l.wheel {
-        Some(w) => report::extract(data, w),
-        None => 0,
+            let n = down.len();
+            if n != l.last_n {
+                // Fingerzahl gewechselt: Bezug neu setzen, sonst springt
+                // es beim Aufsetzen oder Abheben des zweiten.
+                l.have_ref = false;
+                l.scroll_acc = 0;
+            }
+            l.last_n = n;
+
+            if n == 0 {
+                l.have_ref = false;
+                (0, 0, 0)
+            } else {
+                // Bei einem Finger dessen Ort, bei zweien ihr Mittel.
+                let (sx, sy) = down.iter().fold((0i32, 0i32), |a, p| (a.0 + p.0, a.1 + p.1));
+                let (x, y) = (sx / n as i32, sy / n as i32);
+                let (ddx, ddy) = if l.have_ref { (x - l.rx, y - l.ry) } else { (0, 0) };
+                l.have_ref = true;
+                l.rx = x; l.ry = y;
+
+                if n >= 2 {
+                    // ZWEI FINGER = ROLLEN. Die Strecke laeuft auf, bis
+                    // sie eine Raste ergibt — sonst kaeme bei jedem
+                    // Bericht eine, und das Rollen waere unbrauchbar
+                    // schnell.
+                    l.scroll_acc += ddy;
+                    let step = *scroll_step;
+                    let clicks = l.scroll_acc / step;
+                    if clicks != 0 { l.scroll_acc -= clicks * step; }
+                    // Y waechst nach UNTEN, ein Rad zaehlt nach OBEN.
+                    (0, 0, -clicks)
+                } else {
+                    (ddx, ddy, 0)
+                }
+            }
+        }
     };
 
     if dx != 0 || dy != 0 || scroll != 0 || buttons != l.last_buttons {
