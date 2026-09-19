@@ -6,6 +6,7 @@ exclude = [
     "tools/wasm/top",
     "tools/wasm/wifi",
     "tools/wasm/wifi_ax200",
+    "tools/wasm/wifi_rtl8822ce",
     "tools/wasm/audio_hda",
     "tools/wasm/debug",
     "tools/wasm/sdk/widgets",
