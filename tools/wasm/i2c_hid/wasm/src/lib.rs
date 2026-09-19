@@ -250,7 +250,28 @@ pub extern "C" fn _start() {
     // `npk_sleep` gibt dazwischen an den Scheduler ab, kostet also weder
     // Kern noch Treibstoff.
     let mut buf = [0u8; 64];
+    let mut rounds = 0u32;
     loop {
+        rounds += 1;
+        // Nach etwa zwei Sekunden: hat ein Geraet, das wir umgeschaltet
+        // haben, ueberhaupt etwas gesagt? Wenn nicht, hat der Schalter es
+        // verstummen lassen — dann zurueck in die Maus-Nachahmung, statt
+        // auf den naechsten Release zu warten. Ein Treiber, der sich
+        // selbst aussperrt, muss sich selbst zurueckholen.
+        if rounds == 400 {
+            for l in live.iter_mut() {
+                if l.seen == 0 {
+                    if let Some(rid) = l.switched.take() {
+                        logln("[i2c-hid] silent since the mode switch — going back to mouse mode");
+                        let (dw, desc, addr) = (
+                            i2c_hid_core::dw_i2c::Dw { ..l.dw }, l.desc, l.addr);
+                        let _ = i2c_hid_core::hid::set_report(
+                            &mut l.bus, &dw, addr, &desc,
+                            i2c_hid_core::hid::REPORT_TYPE_FEATURE, rid, &[0]);
+                    }
+                }
+            }
+        }
         let mut alive = false;
         for l in live.iter_mut() {
             if poll_live(l, &mut buf) { alive = true; }
@@ -339,6 +360,13 @@ enum Mode {
     },
 }
 
+/// Ein Bericht und wie er zu lesen ist.
+struct Decoder {
+    rid: u8,
+    mode: Mode,
+    btn: alloc::vec::Vec<report::Field>,
+}
+
 /// Ein eingerichtetes Geraet, aus dem sich Zeigerbewegung lesen laesst.
 struct Live {
     bus: HostBus,
@@ -346,9 +374,23 @@ struct Live {
     addr: u16,
     desc: i2c_hid_core::hid::HidDesc,
     uses_ids: bool,
-    rid: u8,
-    mode: Mode,
-    btn: alloc::vec::Vec<report::Field>,
+    /// **Alle** Berichte, die wir lesen koennen — nicht einer.
+    ///
+    /// 0.14.0 legte sich auf den Touchpad-Bericht fest und warf jeden
+    /// anderen weg. Greift der Umschalter auf den Praezisionsmodus nicht,
+    /// sendet das Geraet weiter seinen MAUS-Bericht — und der Zeiger stand
+    /// still. Linux verteilt eingehende Berichte nach ihrer NUMMER an den
+    /// passenden Decoder, statt eine Nummer zu erwarten; das ist der
+    /// Unterschied zwischen „laeuft" und „laeuft, wenn ich richtig
+    /// geraten habe".
+    decoders: alloc::vec::Vec<Decoder>,
+    /// Die ersten paar unbekannten Berichtsnummern melden.
+    unknown_logged: u32,
+    /// Haben wir auf den Praezisionsmodus umgeschaltet, und in welchem
+    /// Feature-Bericht steht der Schalter?
+    switched: Option<u8>,
+    /// Wieviele Berichte sind bisher gekommen?
+    seen: u32,
     /// Bezugspunkt fuer die Umrechnung von ORT auf WEG.
     have_ref: bool,
     rx: i32,
@@ -431,63 +473,86 @@ fn talk_to_device(
     // diesem Zustand nicht schwer, sondern unmoeglich, weil der zweite
     // Finger gar nicht gemeldet wird. Der Schalter steht in einem
     // Feature-Bericht (Digitizer 0x52).
+    let mut switched: Option<u8> = None;
     if let Some(im) = map.find_feature(report::PAGE_DIGITIZER, report::USAGE_INPUT_MODE) {
         let im = *im;
         match hid::set_report(bus, dw, addr, &desc, hid::REPORT_TYPE_FEATURE, im.report_id, &[3]) {
-            Ok(()) => logln(&alloc::format!(
-                "[i2c-hid]   device mode -> 3 (precision touchpad), feature report {}",
-                im.report_id)),
+            Ok(()) => {
+                logln(&alloc::format!(
+                    "[i2c-hid]   device mode -> 3 (precision touchpad), feature report {}",
+                    im.report_id));
+                switched = Some(im.report_id);
+            }
             Err(e) => logln(&alloc::format!(
                 "[i2c-hid]   device mode switch failed: {e:?} — staying in mouse mode")),
         }
     }
 
-    // Einen Bericht mit KONTAKTPUNKTEN bevorzugen; sonst die Maus.
-    let (rid, mode) = if let Some(id) = map.touchpad_report() {
+    // JEDEN Bericht einrichten, den wir lesen koennen — Touchpad und
+    // Maus. Welcher kommt, entscheidet das Geraet, nicht wir.
+    let mut decoders: alloc::vec::Vec<Decoder> = alloc::vec::Vec::new();
+
+    if let Some(id) = map.touchpad_report() {
         let tips = map.find_all(report::Kind::Input, id, report::PAGE_DIGITIZER, report::USAGE_TIP_SWITCH);
         let xs = map.find_all(report::Kind::Input, id, report::PAGE_GENERIC_DESKTOP, report::USAGE_X);
         let ys = map.find_all(report::Kind::Input, id, report::PAGE_GENERIC_DESKTOP, report::USAGE_Y);
         let n = tips.len().min(xs.len()).min(ys.len());
-        let contacts: alloc::vec::Vec<_> =
-            (0..n).map(|i| (*tips[i], *xs[i], *ys[i])).collect();
-        // Ein Scrollschritt aus dem logischen Bereich: etwa ein
-        // Vierzigstel der Padhoehe je Raste. Geraeteunabhaengig, weil die
-        // Zahl aus dem Geraet selbst kommt.
-        let span = (ys[0].logical_max - ys[0].logical_min).max(1);
-        let step = (span / 40).max(1);
-        logln(&alloc::format!(
-            "[i2c-hid]   can do: touchpad, {} contact slot(s), scroll step {} units",
-            contacts.len(), step));
-        (id, Mode::Touchpad {
-            contacts,
-            count: map.find(id, report::PAGE_DIGITIZER, report::USAGE_CONTACT_COUNT).copied(),
-            scroll_step: step,
-        })
-    } else if let Some(id) = map.pointer_report() {
-        let fx = *map.find(id, report::PAGE_GENERIC_DESKTOP, report::USAGE_X).unwrap();
-        let fy = *map.find(id, report::PAGE_GENERIC_DESKTOP, report::USAGE_Y).unwrap();
+        if n > 0 {
+            let contacts: alloc::vec::Vec<_> =
+                (0..n).map(|i| (*tips[i], *xs[i], *ys[i])).collect();
+            // Ein Scrollschritt aus dem logischen Bereich: etwa ein
+            // Vierzigstel der Padhoehe je Raste. Geraeteunabhaengig, weil
+            // die Zahl aus dem Geraet selbst kommt.
+            let span = (ys[0].logical_max - ys[0].logical_min).max(1);
+            let step = (span / 40).max(1);
+            logln(&alloc::format!(
+                "[i2c-hid]   report {id}: touchpad, {n} contact slot(s), scroll step {step}"));
+            decoders.push(Decoder {
+                rid: id,
+                mode: Mode::Touchpad {
+                    contacts,
+                    count: map.find(id, report::PAGE_DIGITIZER, report::USAGE_CONTACT_COUNT).copied(),
+                    scroll_step: step,
+                },
+                btn: (1u16..=3).filter_map(|u| map.find(id, report::PAGE_BUTTON, u).copied()).collect(),
+            });
+        }
+    }
+
+    for id in map.report_ids() {
+        if decoders.iter().any(|d| d.rid == id) { continue; }
+        let (Some(fx), Some(fy)) = (
+            map.find(id, report::PAGE_GENERIC_DESKTOP, report::USAGE_X),
+            map.find(id, report::PAGE_GENERIC_DESKTOP, report::USAGE_Y),
+        ) else { continue };
+        let (fx, fy) = (*fx, *fy);
         let wheel = map.find(id, report::PAGE_GENERIC_DESKTOP, report::USAGE_WHEEL).copied();
         logln(&alloc::format!(
-            "[i2c-hid]   can do: mouse ({}), wheel {}",
+            "[i2c-hid]   report {id}: mouse ({}), wheel {}",
             if fx.relative { "relative" } else { "absolute" },
             if wheel.is_some() { "yes" } else { "no" }));
-        (id, Mode::Mouse { fx, fy, wheel })
-    } else {
+        decoders.push(Decoder {
+            rid: id,
+            mode: Mode::Mouse { fx, fy, wheel },
+            btn: (1u16..=3).filter_map(|u| map.find(id, report::PAGE_BUTTON, u).copied()).collect(),
+        });
+    }
+
+    if decoders.is_empty() {
         logln("[i2c-hid]   no report carries X and Y — not a pointer");
         return None;
-    };
-
-    let btn: alloc::vec::Vec<report::Field> = (1u16..=3)
-        .filter_map(|u| map.find(rid, report::PAGE_BUTTON, u).copied())
-        .collect();
-    logln(&alloc::format!("[i2c-hid]   {} button(s), ready", btn.len()));
+    }
+    logln(&alloc::format!("[i2c-hid]   {} decoder(s), ready", decoders.len()));
 
     Some(Live {
         bus: HostBus { handle: bus.handle },
         dw: i2c_hid_core::dw_i2c::Dw { ..*dw },
         addr, desc,
         uses_ids: map.uses_ids,
-        rid, mode, btn,
+        decoders,
+        unknown_logged: 0,
+        switched,
+        seen: 0,
         have_ref: false, rx: 0, ry: 0,
         scroll_acc: 0, last_n: 0, last_buttons: 0,
     })
@@ -511,14 +576,27 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> bool {
         Err(_) => return false,
     };
     let (id, data) = if l.uses_ids && !r.is_empty() { (r[0], &r[1..]) } else { (0u8, r) };
-    if id != l.rid { return true; }
+
+    // Den Decoder zu DIESER Nummer nehmen. Kennt ihn keiner, einmal
+    // sagen, welche Nummer kam — das ist die Auskunft, die fehlt, wenn
+    // sich nichts bewegt.
+    let Some(d) = l.decoders.iter().find(|d| d.rid == id) else {
+        if l.unknown_logged < 3 {
+            l.unknown_logged += 1;
+            logln(&alloc::format!(
+                "[i2c-hid]   report id {id} arrived, {} bytes — no decoder for it", r.len()));
+        }
+        return true;
+    };
+    let (mode, btn) = (&d.mode, &d.btn);
+    l.seen += 1;
 
     let mut buttons = 0i32;
-    for (i, f) in l.btn.iter().enumerate() {
+    for (i, f) in btn.iter().enumerate() {
         if report::extract(data, f) != 0 { buttons |= 1 << i; }
     }
 
-    let (dx, dy, scroll) = match &l.mode {
+    let (dx, dy, scroll) = match mode {
         Mode::Mouse { fx, fy, wheel } => {
             let x = report::extract(data, fx);
             let y = report::extract(data, fy);
