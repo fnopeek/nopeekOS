@@ -77,6 +77,50 @@ pub fn find_table(sig: &[u8; 4]) -> Option<usize> {
     }
 }
 
+/// Die `index`-te Tabelle mit dieser Signatur — samt Laenge.
+///
+/// **Es gibt mehr als eine SSDT.** Linux laedt die DSDT UND jede SSDT in
+/// denselben Namespace (`acpi_tb_load_namespace`); wer nur die DSDT liest,
+/// dem fehlen Namen, die andere Tabellen deklarieren. Auf Florians IdeaPad
+/// haengt genau daran die Basis der Operationsregion, in der die
+/// Freigabebits der I2C-Controller stehen: `FRTB` ist in der DSDT nicht
+/// aufloesbar.
+///
+/// `find_table` gibt immer die ERSTE; hier laesst sich durchzaehlen.
+pub fn find_table_nth(sig: &[u8; 4], index: usize) -> Option<(usize, usize)> {
+    let rsdp = find_rsdp()?;
+    let revision = unsafe { *rsdp.add(15) };
+    let (root, stride) = if revision >= 2 {
+        (unsafe { *(rsdp.add(24) as *const u64) } as usize, 8usize)
+    } else {
+        (unsafe { *(rsdp.add(16) as *const u32) } as usize, 4usize)
+    };
+    ensure_mapped(root, 4096);
+    let length = unsafe { *((root + 4) as *const u32) } as usize;
+    if length < 36 || length > 0x10000 { return None; }
+    let entries = (length - 36) / stride;
+
+    let mut seen = 0usize;
+    for i in 0..entries {
+        let entry = root + 36 + i * stride;
+        let addr = if stride == 8 {
+            (unsafe { *(entry as *const u64) }) as usize
+        } else {
+            (unsafe { *(entry as *const u32) }) as usize
+        };
+        if addr == 0 { continue; }
+        ensure_mapped(addr, 8);
+        let table_sig = unsafe { core::slice::from_raw_parts(addr as *const u8, 4) };
+        if table_sig != sig { continue; }
+        if seen != index { seen += 1; continue; }
+        let len = unsafe { *((addr + 4) as *const u32) } as usize;
+        if len < 36 || len > 0x40_0000 { return None; }
+        ensure_mapped(addr, len);
+        return Some((addr, len));
+    }
+    None
+}
+
 /// Public wrapper: ensure a physical address range is identity-mapped.
 pub fn ensure_mapped_pub(addr: usize, size: usize) {
     ensure_mapped(addr, size);

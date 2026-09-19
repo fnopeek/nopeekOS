@@ -90,6 +90,11 @@ impl Namespace {
         load::load_table(table)
     }
 
+    /// Eine weitere Tabelle (SSDT) in denselben Namespace laden.
+    pub fn load_more(&mut self, table: &[u8]) -> Result<(), String> {
+        load::load_into(self, table)
+    }
+
     pub fn get(&self, p: &Path) -> Option<&Node> {
         self.nodes.get(p)
     }

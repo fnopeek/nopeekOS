@@ -2249,6 +2249,44 @@ pub(crate) fn npk_window_titles(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i3
     write_len as i32
 }
 
+/// Die `index`-te ACPI-Tabelle mit dieser Signatur in den Modulspeicher.
+///
+/// `sig` traegt die vier Zeichen little-endian in einem `i32` — so, wie
+/// sie im Speicher stehen (`SSDT` = 0x54445353).
+///
+/// **Warum es das braucht:** eine Firmware verteilt ihren Namespace ueber
+/// die DSDT UND beliebig viele SSDTs, und Linux laedt sie alle in
+/// denselben (`acpi_tb_load_namespace`). Wer nur die DSDT liest, dem
+/// fehlen Namen, die woanders deklariert sind — auf Florians IdeaPad die
+/// Basis der Region, in der die Freigabebits der I2C-Controller stehen.
+///
+/// Rueckgabe: Laenge, oder die BENOETIGTE Laenge wenn der Puffer zu klein
+/// ist, oder -1 (kein Recht / gibt es nicht).
+pub(crate) fn npk_acpi_table(
+    mem: &mut [u8], ctx: &mut HostState, sig: i32, index: i32, buf_ptr: i32, buf_max: i32,
+) -> i32 {
+    let cap_id = ctx.cap_id;
+    if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
+        return -1;
+    }
+    if index < 0 || index > 63 { return -1; }
+    let sig_bytes = (sig as u32).to_le_bytes();
+    let Some((addr, len)) = crate::acpi::find_table_nth(&sig_bytes, index as usize) else {
+        return -1;
+    };
+    if len > buf_max as usize {
+        return len as i32;
+    }
+    // SAFETY: find_table_nth hat [addr, addr+len) abgebildet.
+    let src = unsafe { core::slice::from_raw_parts(addr as *const u8, len) };
+    let data = &mut *mem;
+    let start = buf_ptr as usize;
+    let end = start + len;
+    if end > data.len() { return -1; }
+    data[start..end].copy_from_slice(src);
+    len as i32
+}
+
 pub(crate) fn npk_acpi_dsdt(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
