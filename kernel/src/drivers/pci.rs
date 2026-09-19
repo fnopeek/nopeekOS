@@ -209,6 +209,76 @@ pub fn enable_bus_master(addr: PciAddr) {
     write32(addr, 0x04, cmd | 0x04);
 }
 
+/// Die Bridge finden, hinter der `bus` haengt: Sekundaerbus <= bus <=
+/// Subordinatbus. Erst Bus 0 (der Normalfall), dann der volle Durchgang.
+fn find_bridge_for_bus(bus: u8) -> Option<PciAddr> {
+    let mut search = |b: u8| -> Option<PciAddr> {
+        for dev in 0..32u8 {
+            for func in 0..8u8 {
+                let a = PciAddr { bus: b, device: dev, function: func };
+                let id = read32(a, 0x00);
+                if id == 0xFFFF_FFFF || id == 0 {
+                    if func == 0 { break; }
+                    continue;
+                }
+                let hdr = read8(a, 0x0E);
+                if hdr & 0x7F == 0x01 {
+                    let sec = read8(a, 0x19);
+                    let sub = read8(a, 0x1A);
+                    if bus >= sec && bus <= sub {
+                        return Some(a);
+                    }
+                }
+                if func == 0 && hdr & 0x80 == 0 { break; }
+            }
+        }
+        None
+    };
+    if let Some(a) = search(0) { return Some(a); }
+    for b in 1..=255u8 {
+        if b == bus { continue; }
+        if let Some(a) = search(b) { return Some(a); }
+    }
+    None
+}
+
+/// Bus-Mastering auf JEDER Bridge zwischen `addr` und der Wurzel einschalten.
+///
+/// Eine PCI-Bridge leitet eine Transaktion von ihrem Sekundaerbus nur dann
+/// nach oben weiter, wenn in IHREM Kommandoregister Bus Master gesetzt ist
+/// (PCI-zu-PCI-Bridge-Spezifikation 1.2, §3.2.5.3). Steht es dort nicht,
+/// schickt das Geraet seine Leseanfrage ab und bekommt einen Master Abort —
+/// waehrend MMIO von der CPU nach unten tadellos funktioniert, weil das die
+/// andere Richtung ist.
+///
+/// Das trifft genau die Geraete, die die Firmware NICHT selbst benutzt hat:
+/// NVMe (Boot) und xHCI (Tastatur) kommen mit eingeschalteten Bridges aus
+/// UEFI, eine WLAN-Karte nicht. Gefunden am RTL8822CE im IdeaPad, nachdem
+/// drei andere Erklaerungen gemessen und verworfen waren.
+pub fn enable_bus_master_path(addr: PciAddr) {
+    let mut bus = addr.bus;
+    // Acht Ebenen sind mehr, als eine reale Topologie tief wird; der Deckel
+    // ist gegen einen Ring in kaputten Bus-Nummern, nicht gegen Tiefe.
+    for _ in 0..8 {
+        if bus == 0 { return; }
+        let Some(bridge) = find_bridge_for_bus(bus) else {
+            kprintln!("[npk] keine Bridge fuer Bus {:02x} gefunden", bus);
+            return;
+        };
+        let before = read32(bridge, 0x04);
+        if before & 0x06 != 0x06 {
+            write32(bridge, 0x04, before | 0x06);
+            kprintln!("[npk] Bridge {:02x}:{:02x}.{} fuer Bus {:02x}: cmd {:#06x} -> {:#06x} (Bus-Master war AUS)",
+                bridge.bus, bridge.device, bridge.function, bus,
+                before & 0xFFFF, (before | 0x06) & 0xFFFF);
+        } else {
+            kprintln!("[npk] Bridge {:02x}:{:02x}.{} fuer Bus {:02x}: cmd {:#06x} (Bus-Master war schon an)",
+                bridge.bus, bridge.device, bridge.function, bus, before & 0xFFFF);
+        }
+        bus = bridge.bus;
+    }
+}
+
 /// Assign an MMIO address to an unassigned BAR and configure the parent bridge.
 /// `bar_offset` is the config space offset of the BAR (e.g. 0x18 for BAR2).
 /// Returns the assigned physical address, or 0 on failure.

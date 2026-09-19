@@ -1131,6 +1131,10 @@ pub(crate) fn npk_pci_enable_bus_master(ctx: &mut HostState) -> i32 {
     // Also enable memory space
     let cmd = pci::read32(hw.pci_addr, 0x04);
     pci::write32(hw.pci_addr, 0x04, cmd | 0x06);
+    // Und auf jeder Bridge darueber: ohne Bus Master DORT leitet sie die
+    // Anfrage des Geraets nicht nach oben weiter, und das Geraet bekommt
+    // einen Master Abort auf voellig gueltiges RAM.
+    pci::enable_bus_master_path(hw.pci_addr);
     hw.bus_master_enabled = true;
     0
 }
