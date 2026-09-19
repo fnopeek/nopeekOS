@@ -41,6 +41,7 @@ unsafe extern "C" {
     fn npk_acpi_mem_read(hi: i32, lo: i32) -> i32;
     fn npk_acpi_table(sig: i32, index: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_pointer_inject(dx: i32, dy: i32, buttons: i32, scroll: i32) -> i32;
+    fn npk_sleep(ms: i32) -> i32;
 }
 
 /// Der Hardwarezugang des Bustreibers.
@@ -61,8 +62,20 @@ impl i2c_hid_core::dw_i2c::Bus for HostBus {
         if t < 0 { 0 } else { t as u64 }
     }
     fn udelay(&mut self, us: u32) {
-        // Kein Schlaf unter einer Millisekunde: `npk_sleep` rechnet in ms,
-        // und ein I2C-Zyklus dauert 2,5 us. Also gegen die Uhr drehen.
+        // Ab einer Millisekunde ABGEBEN, nicht drehen.
+        //
+        // wasmi zaehlt je WASM-Befehl, und `run` gibt einem Modul zehn
+        // Milliarden davon. Eine Warteschleife gegen die Uhr verbraucht
+        // sie in Sekunden — der erste Lauf mit lebendem Zeiger endete
+        // nach zehn Sekunden mit „fuel exhausted". `npk_sleep` gibt an den
+        // Scheduler ab und kostet EINEN Befehl.
+        //
+        // Darunter bleibt das Drehen: `npk_sleep` rechnet in Millisekunden,
+        // und ein I2C-Zyklus dauert 2,5 us.
+        if us >= 1000 {
+            unsafe { npk_sleep((us / 1000) as i32) };
+            return;
+        }
         let end = self.now_us() + us as u64;
         while self.now_us() < end { core::hint::spin_loop(); }
     }
@@ -349,7 +362,7 @@ fn talk_to_device(
         .filter_map(|u| map.find(rid, report::PAGE_BUTTON, u).copied())
         .collect();
 
-    logln("[i2c-hid]   POINTER LIVE — move your finger for 10 s");
+    logln("[i2c-hid]   POINTER LIVE — move your finger (60 s, then it returns)");
 
     // Absolut gegen relativ: eine Maus meldet Wege, ein Touchpad Orte.
     // Aus Orten wird ein Weg, indem man den vorigen abzieht — und die
@@ -361,7 +374,7 @@ fn talk_to_device(
     let mut got = 0u32;
     let mut moved = 0u32;
 
-    for _ in 0..2000 {
+    for _ in 0..12_000 {
         match hid::get_input(bus, dw, addr, &desc, &mut buf) {
             Ok(Some(r)) => {
                 // Das erste Byte ist die Report-ID, wenn der Deskriptor
