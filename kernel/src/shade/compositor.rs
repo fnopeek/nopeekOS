@@ -1153,6 +1153,44 @@ impl Compositor {
         out
     }
 
+    /// Jedes Fenster mit seinem ECHTEN Zustand — die Ansicht, die es
+    /// braucht, wenn eine App „optisch geschlossen" ist und trotzdem in
+    /// `top` und im Dock weiterlebt.
+    ///
+    /// `window_lines` (was das Dock sieht) zeigt nur Titel und laesst
+    /// Overlays und Panels weg; genau dort verschwindet dann auch die
+    /// Frage, WELCHES Fenster ueberlebt hat und in welcher Art.
+    pub fn dump_windows(&self) -> alloc::string::String {
+        use core::fmt::Write;
+        let mut out = alloc::string::String::new();
+        let _ = writeln!(out,
+            "  ID  KIND      TERM  PID   STATE     FLAGS                 TITLE");
+        let _ = writeln!(out,
+            "  ──  ────      ────  ───   ─────     ─────                 ─────");
+        for wid in &self.z_order {
+            let Some(w) = self.windows.iter().find(|w| w.id == *wid) else { continue };
+            let kind = match w.kind {
+                crate::shade::window::WindowKind::Terminal => "Terminal",
+                crate::shade::window::WindowKind::Widget => "Widget  ",
+                crate::shade::window::WindowKind::Surface => "Surface ",
+            };
+            let state = match w.state {
+                WindowState::Tiled => "Tiled   ",
+                _ => "Floating",
+            };
+            let mut flags = alloc::string::String::new();
+            if Some(w.id) == self.focused { flags.push_str("focused "); }
+            if w.is_overlay { flags.push_str("overlay "); }
+            if w.is_dock { flags.push_str("dock "); }
+            if w.is_bar { flags.push_str("bar "); }
+            if w.split_from.is_none() { flags.push_str("ROOT "); }
+            if !w.visible { flags.push_str("hidden "); }
+            let _ = writeln!(out, "  {:>2}  {}  {:>4}  {:>3}   {}  {:<21} {}",
+                w.id.0, kind, w.terminal_idx, w.pid, state, flags.trim_end(), w.title);
+        }
+        out
+    }
+
     /// Drive the dock reveal/hide intent from the current cursor Y.
     /// Called every frame (poll_render) so dwell/debounce advance even
     /// while the cursor is parked. Suppressed during a drag/resize so the
