@@ -614,6 +614,14 @@ run_qemu_generic() {
             -device virtio-net-pci,netdev=net0,vectors=3,rx_queue_size=1024
         )
     fi
+    # QEMU_NET=none: GAR KEINE NIC. Damit laeuft der Gast in den Zweig
+    # `!net_up` und sucht den USB-Ethernet-Dongle — der einzige Weg, den
+    # xHCI-Dongle-Scan lokal zu pruefen (die HP-Notebooks ohne Kabelport
+    # gehen ihn bei jedem Start).
+    if [ "${QEMU_NET:-}" = "none" ]; then
+        net_args=(-nic none)
+        log "QEMU_NET=none: no NIC at all (exercises the USB-dongle scan)"
+    fi
     echo ""
 
     # Serial output: COM1 → live file unbuffered AND mirrored to stdio

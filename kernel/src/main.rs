@@ -192,10 +192,16 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     // the whole data path — including traffic that belonged elsewhere.
     //
     // The USB dongle is NOT free to probe: nic_attach halts and RESETS an xHCI
-    // controller, which drops every device already addressed on it. In QEMU that
-    // is the one controller carrying keyboard and mouse — probing for a dongle
-    // that isn't there killed the login keyboard. So it is only worth that price
-    // when no PCI NIC came up (the HP notebook, which has no wired port).
+    // controller, which drops every device already addressed on it. So it is only
+    // worth that price when no PCI NIC came up (the HP notebook, which has no
+    // wired port).
+    //
+    // Seit Kernel 0.366.0 ist der Preis kleiner: `nic_attach` probiert den
+    // Controller, auf dem Tastatur/Maus stehen, ZULETZT — und wenn der Dongle
+    // auch dort nicht ist, zaehlt es sie wieder auf. Auf einer Maschine mit
+    // zwei Controllern (IdeaPad) ueberlebt die USB-Maus den Scan damit ganz.
+    // Haengt der Dongle am SELBEN Controller, gewinnt weiterhin er; das loest
+    // erst ein gemeinsamer Controller-Zustand (docs/plan/INPUT_I2C_HID.md).
     let net_up = virtio_net::init() | intel_nic::init();
     if !net_up {
         rtl8153::init();

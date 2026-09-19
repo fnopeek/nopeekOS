@@ -908,7 +908,8 @@ pub fn init_mouse() -> bool {
         let p = state.probed_port;
         kprintln!("[npk] xhci: reusing probed device on port {} (slot {})", p + 1, state.probed_slot);
         if try_init_mouse_reuse(state) {
-            kprintln!("[npk] xhci: USB mouse (HID boot protocol)");
+            kprintln!("[npk] xhci: USB mouse (HID boot protocol) on {:02x}:{:02x}.{} port {}",
+                state.pci_addr.bus, state.pci_addr.device, state.pci_addr.function, p + 1);
             state.has_mouse = true;
             MOUSE_AVAILABLE.store(true, Ordering::Relaxed);
             return true;
@@ -924,7 +925,8 @@ pub fn init_mouse() -> bool {
         kprintln!("[npk] xhci: device on port {} (mouse candidate)", p + 1);
 
         if try_init_mouse_on_port(state, p) {
-            kprintln!("[npk] xhci: USB mouse (HID boot protocol)");
+            kprintln!("[npk] xhci: USB mouse (HID boot protocol) on {:02x}:{:02x}.{} port {}",
+                state.pci_addr.bus, state.pci_addr.device, state.pci_addr.function, p + 1);
             state.has_mouse = true;
             MOUSE_AVAILABLE.store(true, Ordering::Relaxed);
             return true;
@@ -2196,37 +2198,98 @@ pub fn nic_speed_class() -> u8 {
 /// device, set its configuration and configure bulk IN (EP `ep_in`) + bulk OUT
 /// (EP `ep_out`). On success the device is ready for nic_control / nic_bulk_*.
 ///
-/// Destructive by nature: bringing a controller up halts and RESETS it, so every
-/// device already addressed there loses its slot while STATE keeps pointing at
-/// rings the hardware no longer uses. Nothing fails loudly — the keyboard simply
-/// stops delivering. Only call this when the NIC is worth that price.
+/// **Ein Controller wird zurueckgesetzt, schon um NACHZUSEHEN.** Aufzaehlen
+/// geht nur auf einem laufenden Controller, und `bring_up_controller` haelt
+/// ihn an und setzt ihn zurueck — jedes dort adressierte Geraet verliert
+/// seinen Slot. Auf einer Maschine mit zwei Controllern hiess das: der mit
+/// der Maus wird ausgeraeumt, und der Dongle steckt am anderen.
+///
+/// Deshalb ZWEI Durchgaenge:
+///
+/// 1. jeder Controller AUSSER dem, auf dem Tastatur/Maus stehen,
+/// 2. erst wenn der Dongle sonst nirgends war, auch dieser — und wenn er
+///    auch dort nicht ist, werden Tastatur und Maus wieder aufgezaehlt.
+///
+/// Ohne (2) waere die Suche unvollstaendig; ohne die Wiederaufzaehlung
+/// kostet ein erfolgloser Blick den Zeiger fuer immer.
 pub fn nic_attach(vid: u16, pid: u16, ep_in: u8, ep_out: u8) -> bool {
     if NIC.lock().is_some() { return true; }
-    if AVAILABLE.load(Ordering::Relaxed) || MOUSE_AVAILABLE.load(Ordering::Relaxed) {
-        kprintln!("[npk] xhci: USB-NIC scan resets every controller it probes — \
-                   keyboard/mouse on the SAME one will stop responding");
+    // Wo stehen Tastatur/Maus? Nach PCI-ADRESSE, nicht nach "irgendeiner
+    // ist belegt": haengen sie an einem anderen Controller, geht sie der
+    // Dongle-Scan nichts an.
+    let hid_addr = STATE.lock().as_ref().map(|s| s.pci_addr);
+    if let Some(h) = hid_addr {
+        if AVAILABLE.load(Ordering::Relaxed) || MOUSE_AVAILABLE.load(Ordering::Relaxed) {
+            kprintln!("[npk] xhci: keyboard/mouse live on {:02x}:{:02x}.{} — \
+                       that controller is probed LAST",
+                h.bus, h.device, h.function);
+        }
     }
-    for bus in 0u16..=255 {
-        for dev_num in 0u8..32 {
-            for func in 0u8..8 {
-                let addr = pci::PciAddr { bus: bus as u8, device: dev_num, function: func };
-                let id = pci::read32(addr, 0x00);
-                if id == 0xFFFF_FFFF || id == 0 { if func == 0 { break; } continue; }
-                let class_reg = pci::read32(addr, 0x08);
-                if ((class_reg >> 24) & 0xFF) as u8 == 0x0C
-                    && ((class_reg >> 16) & 0xFF) as u8 == 0x03
-                    && ((class_reg >> 8) & 0xFF) as u8 == 0x30
-                {
-                    let pci_dev = pci::PciDevice {
-                        addr,
-                        vendor_id: (id & 0xFFFF) as u16,
-                        device_id: ((id >> 16) & 0xFFFF) as u16,
-                        bar0: pci::read32(addr, 0x10),
-                        irq_line: pci::read8(addr, 0x3C),
-                    };
-                    if nic_try_attach(pci_dev, vid, pid, ep_in, ep_out) { return true; }
+
+    for pass in 0..2 {
+        // Zweiter Durchgang nur, wenn es ueberhaupt einen geschonten
+        // Controller gibt.
+        if pass == 1 && hid_addr.is_none() { break; }
+        for bus in 0u16..=255 {
+            for dev_num in 0u8..32 {
+                for func in 0u8..8 {
+                    let addr = pci::PciAddr { bus: bus as u8, device: dev_num, function: func };
+                    let id = pci::read32(addr, 0x00);
+                    if id == 0xFFFF_FFFF || id == 0 { if func == 0 { break; } continue; }
+                    let class_reg = pci::read32(addr, 0x08);
+                    if ((class_reg >> 24) & 0xFF) as u8 == 0x0C
+                        && ((class_reg >> 16) & 0xFF) as u8 == 0x03
+                        && ((class_reg >> 8) & 0xFF) as u8 == 0x30
+                    {
+                        let is_hid = hid_addr == Some(addr);
+                        // Durchgang 0 laesst den HID-Controller aus,
+                        // Durchgang 1 nimmt NUR ihn.
+                        if is_hid != (pass == 1) {
+                            if func == 0 && pci::read8(addr, 0x0E) & 0x80 == 0 { break; }
+                            continue;
+                        }
+                        let pci_dev = pci::PciDevice {
+                            addr,
+                            vendor_id: (id & 0xFFFF) as u16,
+                            device_id: ((id >> 16) & 0xFFFF) as u16,
+                            bar0: pci::read32(addr, 0x10),
+                            irq_line: pci::read8(addr, 0x3C),
+                        };
+                        if is_hid {
+                            kprintln!("[npk] xhci: no NIC elsewhere — probing the \
+                                       keyboard/mouse controller {:02x}:{:02x}.{}",
+                                addr.bus, addr.device, addr.function);
+                        }
+                        if nic_try_attach(pci_dev, vid, pid, ep_in, ep_out) { return true; }
+                        if is_hid {
+                            // Der Blick war umsonst: der Controller ist
+                            // zurueckgesetzt, Tastatur und Maus sind weg.
+                            // Sie kommen zurueck, indem dieselbe Aufzaehlung
+                            // noch einmal laeuft — sonst kostet eine
+                            // ERGEBNISLOSE Suche den Zeiger fuer immer.
+                            // Preis, benannt: `bring_up_controller` holt sich
+                            // frische DMA-Seiten und `alloc_dma` hat keinen
+                            // Rueckweg — die Wiederaufzaehlung laesst ~13
+                            // Seiten liegen. EINMAL je Start, und ein toter
+                            // Zeiger kostet mehr.
+                            kprintln!("[npk] xhci: no NIC there either — re-enumerating \
+                                       keyboard/mouse");
+                            // Frisch gelesen statt kopiert: `PciDevice` ist
+                            // nicht `Copy`, und `nic_try_attach` hat den
+                            // ersten verbraucht. Die Felder stehen im
+                            // Konfigurationsraum und aendern sich nicht.
+                            init_controller(pci::PciDevice {
+                                addr,
+                                vendor_id: (id & 0xFFFF) as u16,
+                                device_id: ((id >> 16) & 0xFFFF) as u16,
+                                bar0: pci::read32(addr, 0x10),
+                                irq_line: pci::read8(addr, 0x3C),
+                            });
+                            init_mouse();
+                        }
+                    }
+                    if func == 0 && pci::read8(addr, 0x0E) & 0x80 == 0 { break; }
                 }
-                if func == 0 && pci::read8(addr, 0x0E) & 0x80 == 0 { break; }
             }
         }
     }
@@ -2353,7 +2416,8 @@ fn nic_try_attach(dev: pci::PciDevice, vid: u16, pid: u16, ep_in: u8, ep_out: u8
             return false;
         }
 
-        kprintln!("[npk] xhci: NIC attached on port {} (slot {}, bulk in EP{} out EP{}, speed {})",
+        kprintln!("[npk] xhci: NIC attached on {:02x}:{:02x}.{} port {} (slot {}, bulk in EP{} out EP{}, speed {})",
+            x.pci_addr.bus, x.pci_addr.device, x.pci_addr.function,
             p + 1, slot, ep_in, ep_out, x.port_speed);
         let mut nic = NicXhci {
             x, in_ring, in_cycle: 1, in_enq: 0, in_dci,
