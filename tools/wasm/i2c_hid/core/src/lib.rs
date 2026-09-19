@@ -13,6 +13,7 @@
 //! 3. [`hid`] — HID over I2C: Deskriptor, Power, Reset, Eingabeberichte.
 //! 4. [`report`] — der Report-Deskriptor: was ein Byte im Bericht bedeutet.
 //! 5. [`gesture`] — aus Kontaktpunkten werden Zeigerwege und Gesten.
+//! 6. [`gpio`] — der Pin, der sagt, ob ueberhaupt etwas anliegt.
 
 #![cfg_attr(not(test), no_std)]
 
@@ -22,4 +23,5 @@ pub mod discover;
 pub mod dw_i2c;
 pub mod hid;
 pub mod gesture;
+pub mod gpio;
 pub mod report;

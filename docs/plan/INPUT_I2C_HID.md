@@ -240,6 +240,39 @@ Das spart nicht nur Strom — es umgeht auch die Frage, ob ein Geraet beim Lesen
 ohne Daten die Leitung **dehnt**, statt Laenge 0 zu melden. Findet sich kein
 GPIO-Block, wird blind gepollt; das ist dann die Reserve und steht als solche
 im Log.
+
+> **Gebaut in 0.23.0, und der Grund war messbar.** 0.14–0.22 pollten blind,
+> und Florian sah im Betrieb **fast durchgehend 60 % eines Kerns**. Die
+> Rechnung dahinter: ein Leseversuch holt `wMaxInputLength`, bei uns bis
+> zu 64 Bytes (der Puffer deckelt dort) — bei 400 kHz **1,4 ms**, in denen
+> `dw_i2c::xfer` den Kern gegen die Uhr dreht. Zweimal je Runde, alle 5 ms:
+> **~2 von 5 ms sind Busarbeit fuer nichts.** Die genaue Laenge je Geraet
+> steht in seiner `hid: … max N`-Zeile im Bootlog.
+>
+> `i2c_hid_core::gpio` rechnet jetzt `base + pin * 4` und liest Bit 16
+> (`PIN_STS`), beides aus `pinctrl-amd.{c,h}`; die Polaritaet kommt aus den
+> `int_flags` des `GpioInt` (ACPI Bits 2:1), nicht aus einer Annahme.
+> Angefasst wird nur ein Block, dessen Kennung Linux' `amd_gpio_acpi_match`
+> auch nimmt — Florians HP fuehrt einen **Intel**-Block (`INT34BB`) an
+> derselben Stelle, und ein geratenes Bit 16 waere dort schlimmer als gar
+> keine Abfrage.
+>
+> **Das Tor kann sich nur selbst abschalten, nie den Zeiger.** Drei Wege
+> hinaus: ein Pinregister aus lauter Einsen gilt als „liegt an" (dort hat
+> niemand geantwortet); eine FLANKE wird gar nicht erst gefragt; und alle
+> 100 ms wird trotzdem gelesen. **Schweigen beweist nichts** — ein ruhendes
+> Touchpad sagt genauso wenig wie ein kaputtes Tor. Was etwas beweist, ist
+> der Widerspruch: kommt drei Gegenproben hintereinander ein Bericht,
+> obwohl der Pin nein sagte, geht es aus und wir sind wieder da, wo 0.22.0
+> war — mit einer Zeile im Log. Eine richtige Ansage loescht die Zaehlung,
+> damit ein Wettlauf (Finger setzt zwischen Pinlesung und Uebertragung auf)
+> nicht als Fehler zaehlt, und streckt die Gegenprobe auf eine Sekunde.
+>
+> **Offen und benannt:** waehrend einer Uebertragung dreht `dw_i2c::xfer`
+> weiter gegen die Uhr (`udelay(10)`), statt abzugeben. Das kostet jetzt
+> nur noch, solange wirklich Finger auf dem Pad liegen — abgeben ginge erst,
+> wenn feststeht, dass in der Zeit kein RX-FIFO ueberlaeuft (Tiefe 32, bei
+> 400 kHz 720 us).
 | `i2c_hid_get_report` / `set_or_send_report` | `:257,344` — noetig fuer den Praezisions-Modus (Feature-Report 0x07, „Input Mode"). |
 
 ### Stufe 4 — Berichte auswerten
