@@ -634,7 +634,7 @@ pub fn download_firmware(h: i32, trx: &mut Trx, stage: i32, fw: &[u8], band: u8)
         if download_firmware_validate(h) {
             // "reset desc and index" — rtw_hci_setup nach dem Download,
             // also wieder BEIDE Haelften.
-            crate::pci::setup(h, trx);
+            crate::pci::setup(h, trx, false);
             return true;
         }
     }

@@ -276,7 +276,7 @@ pub extern "C" fn _start() {
     host::print_dec(trx.dma_allocs);
     host::print(" Stuecken, von 2048 Seiten / 1024 Stuecken\n");
 
-    pci::setup(h, &mut trx); // = rtw_hci_setup: reset_trx_ring + dma_reset
+    pci::setup(h, &mut trx, true); // = rtw_hci_setup: reset_trx_ring + dma_reset
     host::print("[rtl8822ce] Ringregister mit MAC AUS:\n");
     let rings_off_ok = pci::verify_rings(h, &trx);
 

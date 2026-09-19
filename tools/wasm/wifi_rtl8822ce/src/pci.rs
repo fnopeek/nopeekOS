@@ -228,17 +228,51 @@ fn dma_reset(h: i32, trx: &mut Trx) {
 
 /// pci.c `rtw_pci_setup` — was `rtw_hci_setup` fuer PCIe bedeutet.
 /// Beide Haelften, immer zusammen.
-pub fn setup(h: i32, trx: &mut Trx) {
-    reset_buf_desc(h, trx); // = rtw_pci_reset_trx_ring
+pub fn setup(h: i32, trx: &mut Trx, verbose: bool) {
+    reset_buf_desc(h, trx, verbose); // = rtw_pci_reset_trx_ring
     dma_reset(h, trx);
 }
 
+/// Die OBERE Haelfte eines DESA-Registers auf null setzen.
+///
+/// Die DESA-Register liegen **acht** Byte auseinander (0x308, 0x310, 0x318,
+/// …) — jedes ist ein 64-Bit-Adressregister, und `rtw_pci_reset_buf_desc`
+/// schreibt mit `rtw_write32` nur die unteren 32 Bit. Linux kommt damit
+/// durch, weil `pci_enable_device` auf einem frisch zurueckgesetzten Gerdt
+/// laeuft und die obere Haelfte dann null ist; eine DMA-Maske setzt
+/// `rtw_pci_claim` ausdruecklich nicht, die Vorgabe sind 32 Bit.
+///
+/// Wir setzen kein PCIe-Geraet zurueck. Bleibt oben ein Rest stehen, baut
+/// der Chip eine 64-Bit-Adresse, auf die niemand antwortet — und genau das
+/// sagte der Geraetelauf: Busmaster an, Anfrage abgeschickt, Received
+/// Master Abort, OWN-Bit unberuehrt. Deshalb wird die obere Haelfte
+/// AUSDRUECKLICH genullt, und zwar VOR der unteren, damit die Adresse in
+/// dem Moment vollstaendig ist, in dem der Chip sie uebernimmt.
+fn desa_hi_clear(h: i32, desa: u32, name: &str, verbose: bool) {
+    let hi = host::r32(h, desa + 4);
+    if verbose {
+        host::print("    DESA-hi ");
+        host::print(name);
+        host::print(" @0x");
+        host::print_hex16((desa + 4) as u16);
+        host::print(" = 0x");
+        host::print_hex32(hi);
+        host::print(if hi != 0 { "  <- NICHT null\n" } else { "\n" });
+    }
+    host::w32(h, desa + 4, 0);
+}
+
 /// pci.c `rtw_pci_reset_buf_desc`
-pub fn reset_buf_desc(h: i32, trx: &mut Trx) {
+pub fn reset_buf_desc(h: i32, trx: &mut Trx, verbose: bool) {
     let tmp = host::r8(h, RTK_PCI_CTRL + 3);
     host::w8(h, RTK_PCI_CTRL + 3, tmp | 0xf7);
 
+    if verbose {
+        host::print("  [dump] obere Haelfte der DESA-Register vor dem Nullen:\n");
+    }
+
     // BCNQ: nur die Adresse, keine Anzahl.
+    desa_hi_clear(h, TXQ[Q_BCN].desa, TXQ[Q_BCN].name, verbose);
     host::w32(h, TXQ[Q_BCN].desa, trx.tx[Q_BCN].dma);
 
     // Reihenfolge wie in Linux: H2C, BK, BE, VO, VI, MGMT, HI0.
@@ -249,12 +283,14 @@ pub fn reset_buf_desc(h: i32, trx: &mut Trx) {
         if let Some(num) = TXQ[q].num {
             host::w16(h, num, (r.len & TRX_BD_IDX_MASK) as u16);
         }
+        desa_hi_clear(h, TXQ[q].desa, TXQ[q].name, verbose);
         host::w32(h, TXQ[q].desa, r.dma);
     }
 
     trx.rx.rp = 0;
     trx.rx.wp = 0;
     host::w16(h, RTK_PCI_RXBD_NUM_MPDUQ, (trx.rx.len & TRX_BD_IDX_MASK) as u16);
+    desa_hi_clear(h, RTK_PCI_RXBD_DESA_MPDUQ, "MPDU", verbose);
     host::w32(h, RTK_PCI_RXBD_DESA_MPDUQ, trx.rx.dma);
 
     // reset read/write point
