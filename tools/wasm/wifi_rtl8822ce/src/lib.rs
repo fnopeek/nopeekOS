@@ -657,16 +657,13 @@ pub extern "C" fn _start() {
                          rates.as_ref(), efuse.as_ref()) {
         (true, Some(_v), Some(b), Some((caps, si)), Some(e)) =>
             stage6a_link(h, &hal, &mut trx, mgmt_buf, &mut h2c, b, caps,
-                         *si, e.addr),
+                         *si, e.addr, 8_000_000),
         _ => {
             host::print("[rtl8822ce] Stufe 6a: uebersprungen, 5f steht nicht\n");
             false
         }
     };
 
-    // Und wieder aus, aus demselben Grund wie oben: der Kernel gibt gleich
-    // die DMA-Puffer frei, in die eine laufende Firmware sonst weiterschriebe.
-    mac::mac_power_off(h, hal.cut_version);
 
     host::print(if stage3a {
         "[rtl8822ce] Stufe 3a: GRUEN\n"
@@ -733,6 +730,30 @@ pub extern "C" fn _start() {
     } else {
         "[rtl8822ce] Stufe 6a: NEIN — nicht weiterbauen, bevor das steht\n"
     });
+
+    // ── Stufe 6b: stehenbleiben ──────────────────────────────────
+    //
+    // **Hier kehrt der Treiber nicht mehr zurueck.** Bis 6a lief eine
+    // Stufenkette, und am Ende schaltete `mac_power_off` den Chip ab — die
+    // Verbindung stand, die DHCP-Adresse kam, und Sekunden spaeter war
+    // beides weg. Ein Treiber, der seine Arbeit beendet, ist kein Treiber.
+    //
+    // Die Zusammenfassung steht deshalb DAVOR: wer nie zurueckkehrt, kann
+    // sie hinterher nicht mehr drucken.
+    if stage6a {
+        if let (Some(e), Some(b), Some((caps, si))) =
+            (efuse.as_ref(), target.as_ref(), rates.as_ref())
+        {
+            host::print("[rtl8822ce] Stufe 6b: der Treiber bleibt stehen —\n             \x20         Bericht je Sekunde, RX-Wachhund, kein\n             \x20         Abschalten mehr\n");
+            stage6a_link(h, &hal, &mut trx, mgmt_buf, &mut h2c, b, caps,
+                         *si, e.addr, 0);
+        }
+    }
+
+    // Ab hier nur noch, wenn eine Stufe NICHT steht: der Kernel gibt
+    // gleich die DMA-Puffer frei, in die eine laufende Firmware sonst
+    // weiterschriebe.
+    mac::mac_power_off(h, hal.cut_version);
 
 
     // Zurueckkehren, nicht schlafen. Der Kernel raeumt danach auf: DMA
@@ -3179,8 +3200,8 @@ fn rx_to_8023(f: &[u8], out: &mut [u8], miss: &mut u32)
 #[allow(clippy::too_many_arguments)]
 fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 h2c: &mut fw::H2cState, bss: &Bss,
-                caps: &sta::PeerCaps, si: sta::StaInfo, mac: [u8; 6])
-    -> bool
+                caps: &sta::PeerCaps, si: sta::StaInfo, mac: [u8; 6],
+                frist_us: u64) -> bool
 {
     host::print("[rtl8822ce] Stufe 6a: der Steuerkanal und der Datenweg\n");
 
@@ -3242,10 +3263,15 @@ fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     let mut extra_reported = 0u32;
     let mut llc_miss = 0u32;
 
-    // Acht Sekunden. Der Handschlag braucht vier Rahmen und ist in
-    // Millisekunden durch; wer laenger wartet, wartet auf einen Fehler.
+    // `frist_us == 0` heisst: nicht mehr aufhoeren. Stufe 6a gibt acht
+    // Sekunden vor — der Handschlag braucht vier Rahmen und ist in
+    // Millisekunden durch, wer laenger wartet, wartet auf einen Fehler.
+    // Stufe 6b ruft dieselbe Schleife ohne Frist.
     let t0 = host::now_us();
-    while host::now_us() - t0 < 8_000_000 {
+    let mut report_ms = host::now_ms();
+    let mut rx_silent_ms = host::now_ms();
+    let mut rx_wd = 0u32;
+    while frist_us == 0 || host::now_us() - t0 < frist_us {
         // ── Empfangen ────────────────────────────────────────────
         let got = pci::rx_poll(h, trx, 64, rxbuf, &mut dm, &mut path_div,
                                hal.rf_path_num, 0, link.channel,
@@ -3408,6 +3434,36 @@ fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         pci::tx_isr(h, trx, pci::Q_BE);
         pci::tx_isr(h, trx, tx::RTW_TX_QUEUE_MGMT);
 
+        // ── Einmal je Sekunde: der Bericht fuer `wlan` ───────────
+        // Die Luft ist fuer den Kernel unsichtbar. Rate, Zaehler und
+        // Schluesselzustand stehen nirgends sonst — ohne sie ist eine
+        // Leitung, die wegen einer Legacy-Rate langsam ist, nicht von
+        // einer zu unterscheiden, die wegen voller Schlangen langsam ist.
+        let now = host::now_ms();
+        if now.wrapping_sub(report_ms) >= 1000 {
+            report_ms = now;
+            publish_report(&link, data_rx, data_tx, eapol_rx, eapol_tx,
+                           keys_set, authorized, rx_wd);
+        }
+
+        // ── RX-Stille als Wachhund ───────────────────────────────
+        // Auf einer lebenden Zelle kommt IMMER etwas: Beacons allein sind
+        // zehn je Sekunde. Voelliges Schweigen heisst, dass der Ring
+        // steht, nicht dass die Luft leer ist.
+        if got > 0 {
+            rx_silent_ms = now;
+        } else if now.wrapping_sub(rx_silent_ms) > 5_000 {
+            rx_silent_ms = now;
+            rx_wd += 1;
+            if rx_wd <= 4 {
+                host::print("[rtl8822ce] RX still seit 5 s — Ringzeiger rp=");
+                host::print_dec(trx.rx.rp);
+                host::print(", rx_tag ");
+                host::print_dec(trx.rx_tag as u32);
+                host::print("\n");
+            }
+        }
+
         if got == 0 {
             host::sleep_ms(1);
         }
@@ -3479,4 +3535,78 @@ fn trim(t: &[u8], mut a: usize, mut b: usize) -> (usize, usize) {
         b -= 1;
     }
     (a, b)
+}
+
+/// docs/spec/WIFI_CLASS_ABI.md §3 — `npk_driver_report`.
+///
+/// Ein Klartextblock, den das Intent `wlan` neben die Kernelsicht druckt.
+/// Der Kernel parst nichts; was berichtenswert ist, ist Geraetewissen.
+#[allow(clippy::too_many_arguments)]
+fn publish_report(link: &Link, rx: u32, tx: u32, eapol_rx: u32,
+                  eapol_tx: u32, keys: u32, authorized: bool, rx_wd: u32) {
+    let mut b = [0u8; 512];
+    let mut n = 0usize;
+    let put = |s: &str, b: &mut [u8; 512], n: &mut usize| {
+        let k = s.len().min(b.len() - *n);
+        b[*n..*n + k].copy_from_slice(&s.as_bytes()[..k]);
+        *n += k;
+    };
+    let num = |v: u32, b: &mut [u8; 512], n: &mut usize| {
+        let mut d = [0u8; 10];
+        let mut i = 10;
+        let mut v = v;
+        if v == 0 {
+            i -= 1;
+            d[i] = b'0';
+        }
+        while v > 0 {
+            i -= 1;
+            d[i] = b'0' + (v % 10) as u8;
+            v /= 10;
+        }
+        let k = (10 - i).min(b.len() - *n);
+        b[*n..*n + k].copy_from_slice(&d[i..i + k]);
+        *n += k;
+    };
+
+    put("rtl8822ce  ", &mut b, &mut n);
+    put(if authorized { "verbunden" } else { "NICHT verbunden" },
+        &mut b, &mut n);
+    put("  kanal ", &mut b, &mut n);
+    num(link.channel as u32, &mut b, &mut n);
+    put("  rate 0x", &mut b, &mut n);
+    let hex = b"0123456789abcdef";
+    if n + 2 <= b.len() {
+        b[n] = hex[(link.highest_rate >> 4) as usize];
+        b[n + 1] = hex[(link.highest_rate & 0xf) as usize];
+        n += 2;
+    }
+    put("  bw ", &mut b, &mut n);
+    num(link.si.bw_mode as u32, &mut b, &mut n);
+    put("\nbssid ", &mut b, &mut n);
+    for (i, byte) in link.bssid.iter().enumerate() {
+        if i > 0 && n < b.len() {
+            b[n] = b':';
+            n += 1;
+        }
+        if n + 2 <= b.len() {
+            b[n] = hex[(byte >> 4) as usize];
+            b[n + 1] = hex[(byte & 0xf) as usize];
+            n += 2;
+        }
+    }
+    put("\ndaten rein/raus ", &mut b, &mut n);
+    num(rx, &mut b, &mut n);
+    put("/", &mut b, &mut n);
+    num(tx, &mut b, &mut n);
+    put("  eapol ", &mut b, &mut n);
+    num(eapol_rx, &mut b, &mut n);
+    put("/", &mut b, &mut n);
+    num(eapol_tx, &mut b, &mut n);
+    put("  schluessel ", &mut b, &mut n);
+    num(keys, &mut b, &mut n);
+    put("  rx-wachhund ", &mut b, &mut n);
+    num(rx_wd, &mut b, &mut n);
+    put("\n", &mut b, &mut n);
+    host::driver_report(&b[..n]);
 }
