@@ -785,10 +785,10 @@ fn dac_cal_restore(h: i32, dm: &DmInfo) -> bool {
 }
 
 /// rtw8822c.c:943-1008 `rtw8822c_rf_dac_cal`
-pub fn rf_dac_cal(h: i32, dm: &mut DmInfo) {
+pub fn rf_dac_cal(h: i32, dm: &mut DmInfo) -> bool {
     if dac_cal_restore(h, dm) {
         host::print("    DACK aus dem Zwischenspeicher wiederhergestellt\n");
-        return;
+        return true;
     }
 
     // not able to restore, do it
@@ -806,36 +806,14 @@ pub fn rf_dac_cal(h: i32, dm: &mut DmInfo) {
 
     // path-A
     let (adc_ic_a, adc_qc_a) = dac_cal_adc(h, dm, RF_PATH_A);
-    for _ in 0..10 {
-        dac_cal_step1(h, dm, RF_PATH_A);
-        let (ic, qc) = dac_cal_step2(h, RF_PATH_A);
-        ic_a = ic;
-        qc_a = qc;
-        let (ic, qc, io, qo) =
-            dac_cal_step3(h, RF_PATH_A, adc_ic_a, adc_qc_a, ic, qc);
-        i_a = io;
-        q_a = qo;
-        if ic < 5 && qc < 5 {
-            break;
-        }
-    }
+    let conv_a = dac_cal_loop(h, dm, RF_PATH_A, adc_ic_a, adc_qc_a,
+                              &mut ic_a, &mut qc_a, &mut i_a, &mut q_a);
     dac_cal_step4(h, RF_PATH_A);
 
     // path-B
     let (adc_ic_b, adc_qc_b) = dac_cal_adc(h, dm, RF_PATH_B);
-    for _ in 0..10 {
-        dac_cal_step1(h, dm, RF_PATH_B);
-        let (ic, qc) = dac_cal_step2(h, RF_PATH_B);
-        ic_b = ic;
-        qc_b = qc;
-        let (ic, qc, io, qo) =
-            dac_cal_step3(h, RF_PATH_B, adc_ic_b, adc_qc_b, ic, qc);
-        i_b = io;
-        q_b = qo;
-        if ic < 5 && qc < 5 {
-            break;
-        }
-    }
+    let conv_b = dac_cal_loop(h, dm, RF_PATH_B, adc_ic_b, adc_qc_b,
+                              &mut ic_b, &mut qc_b, &mut i_b, &mut q_b);
     dac_cal_step4(h, RF_PATH_B);
 
     host::w32(h, 0x1b00, 0x0000_0008);
@@ -869,4 +847,44 @@ pub fn rf_dac_cal(h: i32, dm: &mut DmInfo) {
     host::print(" q=0x");
     host::print_hex32(q_b);
     host::print("\n");
+
+    conv_a && conv_b
+}
+
+/// Die zehn Runden aus `rtw8822c_rf_dac_cal`, fuer EINEN Pfad.
+///
+/// In Linux steht diese Schleife zweimal ausgeschrieben da und sagt NICHTS
+/// darueber, wie sie ausgegangen ist — sie laeuft zehnmal und geht weiter.
+/// Hier meldet sie jede Runde, und zwar den Wert, an dem der Abbruch haengt
+/// (`ic`/`qc` aus step3, der BETRAG des restlichen Versatzes). Der erste
+/// Geraetelauf sagte fuer Pfad B 36/40 statt unter 5 — und aus einer
+/// Endzahl allein ist nicht zu sehen, ob es schwingt, feststeht oder
+/// langsam faellt ([[feedback_dump_the_raw_input_before_debugging_the_interpretation]]).
+#[allow(clippy::too_many_arguments)]
+fn dac_cal_loop(h: i32, dm: &DmInfo, path: usize, adc_ic: u32, adc_qc: u32,
+                ic_out: &mut u32, qc_out: &mut u32,
+                i_out: &mut u32, q_out: &mut u32) -> bool {
+    host::print("    DACK ");
+    host::print(if path == RF_PATH_A { "A" } else { "B" });
+    host::print(" Runden (Restversatz |i|/|q|, Abbruch unter 5):");
+    let mut converged = false;
+    for _ in 0..10 {
+        dac_cal_step1(h, dm, path);
+        let (ic, qc) = dac_cal_step2(h, path);
+        *ic_out = ic;
+        *qc_out = qc;
+        let (ic, qc, io, qo) = dac_cal_step3(h, path, adc_ic, adc_qc, ic, qc);
+        *i_out = io;
+        *q_out = qo;
+        host::print(" ");
+        host::print_dec(ic);
+        host::print("/");
+        host::print_dec(qc);
+        if ic < 5 && qc < 5 {
+            converged = true;
+            break;
+        }
+    }
+    host::print(if converged { "  -> konvergiert\n" } else { "  -> NICHT konvergiert\n" });
+    converged
 }

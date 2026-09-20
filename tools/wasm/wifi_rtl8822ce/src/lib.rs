@@ -533,7 +533,7 @@ pub extern "C" fn _start() {
         "[rtl8822ce] Stufe 3b: NEIN — nicht weiterbauen, bevor das steht\n"
     });
     host::print(if stage3c {
-        "[rtl8822ce] Stufe 3c: GRUEN — der Empfaenger hoert. Weiter mit Stufe 4\n"
+        "[rtl8822ce] Stufe 3c: GRUEN — BB und RF stehen. Weiter mit Stufe 4\n"
     } else {
         "[rtl8822ce] Stufe 3c: NEIN — nicht weiterbauen, bevor das steht\n"
     });
@@ -670,9 +670,9 @@ fn phy_set_param_and_check(h: i32, hal: &Hal, e: &efuse::Efuse) -> (bool, bool) 
     let mut path_div = dm::PathDiv::default();
 
     let t0 = host::now_us();
-    let tables_ok = chip::phy_set_param(h, &mut dm, &mut path_div, e,
-                                        hal.cut_version, hal.rf_path_num,
-                                        hal.antenna_tx, hal.antenna_rx);
+    let (tables_ok, dack_ok) = chip::phy_set_param(h, &mut dm, &mut path_div, e,
+                                                   hal.cut_version, hal.rf_path_num,
+                                                   hal.antenna_tx, hal.antenna_rx);
     host::print("  phy_set_param fertig in ");
     host::print_dec((host::now_us() - t0) as u32);
     host::print(" us\n");
@@ -699,26 +699,40 @@ fn phy_set_param_and_check(h: i32, hal: &Hal, e: &efuse::Efuse) -> (bool, bool) 
     stage3b &= gate("beide RF-Pfade antworten mit Tabellenwerten", rf_ok);
 
     // ── Gate 3c ──────────────────────────────────────────────────
-    // Einmal lesen setzt die Zaehler zurueck; die ZWEITE Lesung nach einer
-    // kurzen Pause ist die, die etwas aussagt. Ein Zaehler, der nach dem
-    // Zuruecksetzen wieder steigt, misst.
+    // **Das Gate stand in 0.10.0 an der falschen Stelle.** Es fragte, ob
+    // der Empfaenger CCA-Ereignisse zaehlt — und das kann er hier gar nicht,
+    // auch in Linux nicht: `false_alarm_statistics` laeuft dort erst im
+    // Wachhund (main.c:280), also NACH `rtw_coex_power_on_setting` (das die
+    // gemeinsame Antenne ueberhaupt erst umlegt, coex.c:"set antenna path
+    // to BT") und NACH `rtw_set_channel` (das AGC, CCA-Maske und
+    // RX-Filter programmiert, rtw8822c.c `set_channel_bb`). Beides ist
+    // Stufe 4. Ein Gate, das einen Zustand vor seiner Zeit prueft, misst
+    // nichts ([[feedback_a_test_of_a_state_must_say_when]]).
+    //
+    // Was Stufe 3c WIRKLICH beantworten kann: lief `phy_set_param` durch,
+    // antworten beide RF-Pfade, und hat die DAC-Kalibrierung ihr eigenes
+    // Ziel erreicht — den Restversatz unter 5 auf BEIDEN Pfaden.
+    let stage3c = gate("die DAC-Kalibrierung konvergiert auf beiden Pfaden",
+                       dack_ok);
+
+    // Gemessen, aber NICHT gewertet: die Zaehler stehen hier
+    // erwartungsgemaess auf 0. Sie stehen trotzdem im Log, weil sie ab
+    // Stufe 4 das Gate sind und man dann die Ausgangslage kennen will.
     chip::false_alarm_statistics(h, &mut dm);
     host::sleep_ms(50);
     chip::false_alarm_statistics(h, &mut dm);
 
-    host::print("  Falschalarme: cck ");
+    host::print("  [Vorgriff Stufe 4, hier erwartungsgemaess 0]\n    Falschalarme: cck ");
     host::print_dec(dm.cck_fa_cnt);
     host::print(" · ofdm ");
     host::print_dec(dm.ofdm_fa_cnt);
-    host::print(" · gesamt ");
-    host::print_dec(dm.total_fa_cnt);
-    host::print("\n  CCA: cck ");
+    host::print("\n    CCA: cck ");
     host::print_dec(dm.cck_cca_cnt);
     host::print(" · ofdm ");
     host::print_dec(dm.ofdm_cca_cnt);
     host::print(" · gesamt ");
     host::print_dec(dm.total_cca_cnt);
-    host::print("\n  CRC ok/err: cck ");
+    host::print("\n    CRC ok/err: cck ");
     host::print_dec(dm.cck_ok_cnt);
     host::print("/");
     host::print_dec(dm.cck_err_cnt);
@@ -726,20 +740,13 @@ fn phy_set_param_and_check(h: i32, hal: &Hal, e: &efuse::Efuse) -> (bool, bool) 
     host::print_dec(dm.ofdm_ok_cnt);
     host::print("/");
     host::print_dec(dm.ofdm_err_cnt);
-    host::print(" · ht ");
-    host::print_dec(dm.ht_ok_cnt);
-    host::print("/");
-    host::print_dec(dm.ht_err_cnt);
-    host::print("\n  IGI 0x");
+    host::print("\n    IGI 0x");
     host::print_hex8(dm.igi_history[0]);
     host::print(" · cck_gi Grenzen u/l ");
     host::print_dec(dm.cck_gi_u_bnd as u32);
     host::print("/");
     host::print_dec(dm.cck_gi_l_bnd as u32);
     host::print("\n");
-
-    let stage3c = gate("der Empfaenger zaehlt CCA-Ereignisse",
-                       dm.total_cca_cnt != 0);
 
     (stage3b, stage3c)
 }

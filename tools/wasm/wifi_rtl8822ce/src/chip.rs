@@ -458,9 +458,9 @@ fn pa_bias(h: i32, rf_path_num: u8) {
 }
 
 /// rtw8822c.c:1838-1845 `rtw8822c_rf_init`
-fn rf_init(h: i32, dm: &mut DmInfo, rf_path_num: u8) {
+fn rf_init(h: i32, dm: &mut DmInfo, rf_path_num: u8) -> bool {
     let t0 = host::now_us();
-    crate::rfk::rf_dac_cal(h, dm);
+    let dack_ok = crate::rfk::rf_dac_cal(h, dm);
     host::print("    DACK ");
     host::print_dec((host::now_us() - t0) as u32 / 1000);
     host::print(" ms\n");
@@ -469,6 +469,7 @@ fn rf_init(h: i32, dm: &mut DmInfo, rf_path_num: u8) {
     thermal_trim(h, rf_path_num);
     power_trim(h, rf_path_num);
     pa_bias(h, rf_path_num);
+    dack_ok
 }
 
 /// rtw8822c.c:1847-1860 `rtw8822c_pwrtrack_init`. Reiner Treiberzustand.
@@ -492,12 +493,12 @@ fn pwrtrack_init(dm: &mut DmInfo, thermal_meter_k: u8) {
 /// `hal->antenna_tx`/`antenna_rx` kommen aus `rtw_chip_parameter_setup`:
 /// bei 2T2R beide `BB_PATH_AB`. `is_tx2_path` ist dort fest `false`.
 ///
-/// Gibt zurueck, ob die Tabellen so viele Schreibzugriffe abgegeben haben,
-/// wie `gen_tables.py` vorausgerechnet hat — das ist das Gate der Stufe 3b.
+/// Gibt zurueck: (Tabellen wie gerechnet, DAC-Kalibrierung konvergiert) —
+/// die Gates der Stufen 3b und 3c.
 #[allow(clippy::too_many_arguments)]
 pub fn phy_set_param(h: i32, dm: &mut DmInfo, path_div: &mut PathDiv,
                      e: &Efuse, cut_version: u8, rf_path_num: u8,
-                     antenna_tx: u8, antenna_rx: u8) -> bool {
+                     antenna_tx: u8, antenna_rx: u8) -> (bool, bool) {
     // power on BB/RF domain
     host::set8(h, REG_SYS_FUNC_EN, BIT_FEN_BB_GLB_RST | BIT_FEN_BB_RSTB);
     host::set8(h, REG_RF_CTRL, BIT_RF_EN | BIT_RF_RSTB | BIT_RF_SDM_RSTB);
@@ -547,12 +548,12 @@ pub fn phy_set_param(h: i32, dm: &mut DmInfo, path_div: &mut PathDiv,
     dm.cck_gi_u_bnd = (cck_gi_u_bnd_msb << 4) | cck_gi_u_bnd_lsb;
     dm.cck_gi_l_bnd = (cck_gi_l_bnd_msb << 4) | cck_gi_l_bnd_lsb;
 
-    rf_init(h, dm, rf_path_num);
+    let dack_ok = rf_init(h, dm, rf_path_num);
     pwrtrack_init(dm, e.thermal_meter_k);
 
     crate::bf::phy_init(h);
 
-    tables_ok
+    (tables_ok, dack_ok)
 }
 
 /// rtw8822c.c:2004 `rtw8822c_false_alarm_statistics`.
