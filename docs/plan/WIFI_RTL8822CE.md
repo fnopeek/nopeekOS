@@ -879,39 +879,43 @@ nicht und meldete deshalb Übereinstimmung:
 **204 von 204 Funktionen Zugriff für Zugriff gleich · 845 Konstanten, 0
 Abweichungen · Abdeckung 299 → 374 von 940, `rtw8822c.c` 141/171.**
 
-### Stufe 5d am Gerät: drei von vier Gates grün (0.17.1)
+### Stufe 5d am Gerät: ✅ GRÜN — der Sender ist kalibriert (0.17.1)
 
-**Die Kalibrierung selbst läuft, und sie läuft gut.** `power_track_type 0`
-(also kein TSSI, TXGAPK rechnet wirklich) · TXGAPK gelaufen, Versätze Pfad A
-`0,1,0,0,1,1,-6,-6,-6,-6` in 219 ms · IQK `RPT_CIP 0xaa` nach 20 ms · **DPK
-beide Pfade ok, `gs 94/94`, `txagc 15/16`, `coef1 fertig`, 105 ms** — das ist
-Linux' Größenordnung. Gesamt 344 ms, und der Empfänger hört danach
-unverändert (CCA 236).
+**Die Kalibrierung läuft, und die Zahlen sind Linux' Zahlen.**
+`power_track_type 0` (kein TSSI, TXGAPK rechnet wirklich) · TXGAPK
+**14 ms**, Versätze Pfad A `0,1,0,0,1,1,-6,-6,-6,-6` · IQK `RPT_CIP 0xaa`
+nach 20 ms · **DPK beide Pfade, `gs 94/93`, `txagc 15/16`, `coef1 fertig`,
+105 ms** · **gesamt 139 ms**. Danach CCA 178 und **14 CCK-Pakete mit
+gültiger Prüfsumme bei null Fehlern** — der Empfänger hört unverändert.
 
-**Rot ist allein der RFK-Handschlag, und die Ursache steht im Log:**
-`failed to send h2c command`, zweimal. Die Quittung blieb aus, weil das
-Kommando nie hinausging — das **Postfach** (HMEBOX) nimmt nichts mehr an,
-während der **Warteschlangen**-Weg (IQK, H2C-Paket 0x0E) im selben Lauf
-einwandfrei trägt. Die Firmware lebt also; sie leert nur ihr Postfach nicht.
+**Der Postfach-Fehler war unserer, und der Log beweist es Zeile für
+Zeile.** Mit EINEM `H2cState` (wie `rtwdev->h2c`) gehen 4a's Coex-Kommandos
+in die Fächer 0 und 1, 5c's `scan_notify` in **2 und 3** — `HMETFR 0x04`
+und `0x08` zeigen genau das gerade beschriebene Fach im Flug —, und bis 5d
+beginnt, steht `HMETFR 0x00`: die Firmware hat alles geleert.
 
-**Eine echte Abweichung von Linux gefunden und behoben:** wir legten in
-JEDER Stufe einen eigenen `H2cState` an (4a, 5c, 5d). In Linux gibt es genau
-ein `rtwdev->h2c` für das ganze Gerät, und die Reihenfolge der vier
-Postfächer ist der Sinn der Sache — der Treiber reicht sie im Kreis weiter,
-damit die Firmware Zeit hat, das vorige zu leeren. Mit drei Zuständen fing
-5d wieder bei Fach 0 an, dem Fach, das 5c zuletzt beschrieben hatte.
-**Das ist richtig so, aber es ist noch nicht bewiesen, dass es das Symptom
-heilt:** leert die Firmware gar nichts mehr, verschiebt ein anderes Fach den
-Fehlschlag nur um zwei.
+**Und damit ist die eigentliche Regel benannt: die Reihe der vier
+Postfächer ist ein PROTOKOLL, keine Buchführung.** Die Firmware läuft
+denselben Ring mit und erwartet das NÄCHSTE Fach. Springt der Treiber
+zurück — wie unsere drei getrennten Zustände es taten, als 5d wieder bei
+Fach 0 anfing —, wartet die Firmware auf ein Fach, das nie kommt, und das
+zurückgesprungene bleibt für immer „voll". Deshalb hat Linux genau ein
+`last_box_num` für das Gerät.
 
-**Deshalb misst 0.17.1 statt zu raten:** `HMETFR` wird nach jedem
-`scan_notify` und am Anfang von 5d gemeldet, die Fehlermeldung nennt Fach
-und Fahnen, und **der Empfangsring wird vor der Kalibrierung geleert** —
-denn die C2H-Antworten der Firmware holt bisher niemand ab. Linux liest sie
-fortwährend; bei uns läuft `rx_poll` nur in den Messfenstern von 5a bis 5c.
-`rtw_core_fw_scan_notify(false)` wartet in Linux ausdrücklich auf eine
-C2H-Antwort, und eine Firmware, deren Ausgang keiner leert, ist der erste
-Verdächtige für „die Firmware antwortet nicht".
+Zwei Nebenbefunde aus demselben Lauf:
+
+* **TXGAPK fiel von 219 ms auf 14 ms.** Die 200 ms waren zweimal
+  `wait_rfk_ack` im Leerlauf; jetzt kommen die Quittungen in **542 µs und
+  2 µs**. Ein Fehlschlag kostet nicht nur das Ergebnis, er kostet Zeit, und
+  beides sah vorher nach „so lange dauert die Kalibrierung" aus.
+* **Der geleerte Empfangsring gab genau eine Nachricht her: `c2h id 0x38`
+  = `C2H_SCAN_RESULT`** — die Antwort, auf die
+  `rtw_core_fw_scan_notify(false)` in Linux ausdrücklich wartet. Die
+  Firmware hatte geantwortet; es hörte nur niemand zu.
+
+**Offen und benannt:** C2H wird gezählt und gemeldet, aber nicht
+ausgewertet (`rtw_fw_c2h_cmd_handle` fehlt ganz) · `r.rp` der Sendequeues
+steht weiter still (`rtw_pci_tx_isr`).
 
 ### ▶ Danach — hier weitermachen
 
