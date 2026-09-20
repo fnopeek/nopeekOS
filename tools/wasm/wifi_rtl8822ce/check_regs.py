@@ -123,8 +123,38 @@ def evaluate(expr, defs, depth=0):
         return None
 
 
+def vif_port_defs():
+    """`rtw_vif_port[0]` aus mac80211.c — eine TABELLE, kein `#define`.
+
+    Ohne diesen Leser sind die acht Adressen des Ports unsichtbar fuer den
+    Pruefer, und ein falsches `PORT0_MAC_ADDR` sieht am Geraet genau aus wie
+    „der AP antwortet nicht". Siehe
+    feedback_a_constant_with_no_name_is_invisible_to_a_constant_checker.
+    """
+    path = os.path.join(D, "mac80211.c")
+    if not os.path.exists(path):
+        return {}
+    src = open(path, errors="ignore").read()
+    m = re.search(r"rtw_vif_port\[\]\s*=\s*\{(.*?)\n\};", src, re.S)
+    if not m:
+        return {}
+    m0 = re.search(r"\[0\]\s*=\s*\{(.*?)\n\t\},", m.group(1), re.S)
+    if not m0:
+        return {}
+    out = {}
+    for fm in re.finditer(r"\.(\w+)\s*=\s*\{([^}]*)\}", m0.group(1)):
+        field, body = fm.group(1), fm.group(2)
+        for am in re.finditer(r"\.(addr|mask)\s*=\s*(0x[0-9a-fA-F]+)", body):
+            key = f"PORT0_{field.upper()}"
+            if am.group(1) == "mask":
+                key += "_MASK"
+            out[key] = ("mac80211.c", 0, am.group(2))
+    return out
+
+
 def main():
     defs = linux_defs()
+    defs.update(vif_port_defs())
     if not defs:
         sys.exit(f"Linux-Quelle fehlt unter {D}")
 

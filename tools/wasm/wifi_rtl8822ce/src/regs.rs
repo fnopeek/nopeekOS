@@ -900,3 +900,31 @@ pub const BIT_SHIFT_TXSC_40M: u32 = 4; // reg.h:260
 pub const BIT_MASK_TXSC_40M: u8 = 0xf; // reg.h:261
 pub const BIT_SHIFT_TXSC_20M: u32 = 0; // reg.h:264
 pub const BIT_MASK_TXSC_20M: u8 = 0xf; // reg.h:265
+
+// ── Stufe 5b: der Sendeweg ───────────────────────────────────────
+// mac80211.c:108-115 `rtw_vif_port[0]`. Wir fahren nur Port 0 — Linux
+// vergibt den ersten freien, und bei EINER Schnittstelle ist das die Null.
+pub const PORT0_MAC_ADDR: u32 = 0x0610;
+pub const PORT0_BSSID: u32 = 0x0618;
+pub const PORT0_NET_TYPE: u32 = 0x0100; // = REG_CR
+pub const PORT0_NET_TYPE_MASK: u32 = 0x30000;
+pub const PORT0_AID: u32 = 0x06a8;
+pub const PORT0_AID_MASK: u32 = 0x7ff;
+pub const PORT0_BCN_CTRL: u32 = 0x0550; // = REG_BCN_CTRL
+pub const PORT0_BCN_CTRL_MASK: u32 = 0xff;
+
+// main.h:586-592 `enum rtw_vif_port_set`
+pub const PORT_SET_MAC_ADDR: u32 = 1 << 0;
+pub const PORT_SET_BSSID: u32 = 1 << 1;
+pub const PORT_SET_NET_TYPE: u32 = 1 << 2;
+pub const PORT_SET_AID: u32 = 1 << 3;
+pub const PORT_SET_BCN_CTRL: u32 = 1 << 4;
+
+// main.h:115-120 `enum rtw_net_type`
+pub const RTW_NET_NO_LINK: u32 = 0;
+pub const RTW_NET_AD_HOC: u32 = 1;
+pub const RTW_NET_MGD_LINKED: u32 = 2;
+pub const RTW_NET_AP_MODE: u32 = 3;
+
+// reg.h:478-480 stehen schon oben (REG_BCN_CTRL, BIT_DIS_TSF_UDT,
+// BIT_EN_BCN_FUNCTION) — dort als u8, weil `rtw_write8_mask` sie schreibt.

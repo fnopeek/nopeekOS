@@ -505,12 +505,12 @@ zweites Mal anwirft, spart sie die ganze Messung.
     python3 tools/wasm/wifi_rtl8822ce/gen_pwrseq.py   # src/pwrseq.rs aus rtw8822c.c
     python3 tools/linux-coverage.py --chip rtl8822ce   # 265 / 940 (war 89)
 
-**Abdeckung nach Stufe 5a: 279 von 940 rtw88-Funktionen** (vor dieser Runde
-89). `rtw8822c.c` 68/171 · `phy.c` 59/97 · `mac.c` 39/49 · `pci.c` 29/81 ·
-`coex.c` 27/111 · `main.c` 14/84 · `rx.c` 3/8 · `efuse.c` 5/5. Auf 0 stehen
-nur noch `mac80211.c` (die obere Hälfte, die `wifid` ersetzt), `debug.c`,
-`led.c` und `wow.c` — die letzten drei stehen unter „wird bewusst nicht
-gebaut".
+**Abdeckung nach Stufe 5b: 295 von 940 rtw88-Funktionen** (vor dieser Runde
+89). `rtw8822c.c` 68/171 · `phy.c` 59/97 · `mac.c` 39/49 · `pci.c` 30/81 ·
+`coex.c` 27/111 · `main.c` 18/84 · `tx.c` 15/31 · `efuse.c` 5/5 · `rx.c` 3/8.
+Auf 0 stehen nur noch `mac80211.c` (die obere Hälfte, die `wifid` ersetzt),
+`debug.c`, `led.c` und `wow.c` — die letzten drei stehen unter „wird bewusst
+nicht gebaut".
 
 **`check_regs.py` UND `seqdiff.py` vor jedem Commit laufen lassen.** Der erste
 hat schon einen echten Fehler gefunden (`TX_DESC_QSEL_H2C` war 17 geraten, ist
@@ -750,15 +750,57 @@ C-Funktion herausgelöst steht, wird für den Vergleich wieder angehängt,
 statt aus der Prüfung zu fallen. **124 von 124 Funktionen Zugriff für
 Zugriff gleich.**
 
+### Stufe 5b — der Sendeweg (0.15.0)
+
+Gebaut: `rtw_vif_port_config` + `rtw_vif_write_addr` + der STATION-Zweig von
+`rtw_ops_add_interface` · `rtw_get_mgmt_rate` · `rtw_tx_mgmt_pkt_info_update`
+· `rtw_tx_pkt_info_update` · `rtw_tx_queue_mapping` · `rtw_pci_tx_write`.
+`rtw_pci_tx_write_data` nimmt sein `pkt_info` jetzt vom Rufer, wie in Linux —
+bis 5a baute es sich selbst eins, weil es nur den H2C-Weg kannte.
+
+**Das Gate ist die ANTWORT, nicht der verbrauchte Deskriptor.** Dass der
+Chip einen Deskriptor abholt, sagt nur, dass DMA läuft; dass ein fremder AP
+eine Probe Response an unsere Adresse schickt, sagt, dass der Rahmen die
+Antenne verlassen hat und richtig gebaut war.
+
+**Warum der Port zuerst kommt:** ohne `rtw_vif_port_config` steht in
+`0x0610` keine Adresse, und `BIT_APM` im RCR lässt dann nur Broadcast
+durch. Eine Probe Response ist an UNS gerichtet — sie käme nie an, und das
+sieht am Gerät genauso aus wie „der AP hat nicht geantwortet".
+
+**Kalibriert wird hier bewusst nicht, und das ist Linux' Entscheidung.**
+`rtw_set_channel` setzt am Ende nur `need_rfk = true`; GAPK, IQK und DPK
+laufen in `rtw_chip_prepare_tx`, das mac80211 aus `mgd_prepare_tx` ruft —
+also VOR dem Anmelden, nicht beim Kanalwechsel. Linux' Kommentar nennt den
+Grund: während eines Scans auf jedem Kanal zu kalibrieren dauert zu lange.
+Ein Probe Request geht dort genauso unkalibriert hinaus wie hier. **Damit
+hat `rtw8822c_phy_calibration` seinen Platz: Stufe 5c, vor dem Auth.**
+
+**Zwei weitere Werkzeuglücken geschlossen**, beide derselben Art wie die aus
+5a: `check_regs.py` liest jetzt die Tabelle `rtw_vif_port[]` aus
+`mac80211.c` — die acht Portadressen sind Struct-Felder ohne `#define` und
+waren damit unsichtbar; ein falsches `PORT0_MAC_ADDR` sieht am Gerät aus wie
+„der AP antwortet nicht". Und `seqdiff.py` fand den Rumpf von
+`rtw_tx_queue_mapping` nicht, weil sein Rückgabetyp aus ZWEI Wörtern
+besteht (`enum rtw_tx_queue_type`) — die Funktion wurde übersprungen statt
+geprüft. **133 von 133 Funktionen, 0 ohne C-Rumpf.**
+
+**Offen und benannt:** `r.rp` der Sendequeues steht still — in Linux zieht
+`rtw_pci_tx_isr` ihn nach. Bei drei Rahmen in einem Ring von 128 folgenlos,
+bei einem laufenden Sender der nächste Posten.
+
 ### ▶ Danach — hier weitermachen
 
-**5b — `rtw_hci_start` im Ernst**, der Empfangsring gefüllt und
-nachgefüllt, plus der `netdev`-Anschluss (`npk_netdev_register`,
-`npk_submit_rx`), der seit Kernel 0.205.0 steht.
+**5c — Scan, Auth, Assoc.** Jetzt erst: `rtw_chip_prepare_tx` mit
+GAPK/IQK/DPK vor dem Auth, `rtw_pci_tx_isr` für den Sendezeiger,
+`rtw_get_channel_params` fürs Kanalhüpfen, die Elementeauswertung des
+Beacons, und `rtw_rx_addr_match`. Der `netdev`-Anschluss
+(`npk_netdev_register`, `npk_submit_rx`) kommt ans ENDE dieser Stufe, nicht
+an ihren Anfang: vor einer Verbindung gibt es keine Datenrahmen, die er
+weiterreichen könnte.
 
-**5c — Scan, Auth, Assoc.** Ab hier ist `wifid` dran; die obere Hälfte ist
-herstellerunabhängig und in `wifi_ax200` einmal gebaut
-([[project_wifi_ax200]]).
+Ab dort ist `wifid` dran; die obere Hälfte ist herstellerunabhängig und in
+`wifi_ax200` einmal gebaut ([[project_wifi_ax200]]).
 
 **Offen und benannt:** die DAC-Kalibrierung konvergiert nicht (siehe oben) ·
 `rtw_coex_switchband_notify` und `rtw_coex_run_coex` fehlen, also gibt es
