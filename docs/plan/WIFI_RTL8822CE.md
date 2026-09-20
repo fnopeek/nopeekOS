@@ -512,6 +512,11 @@ Auf 0 stehen nur noch `mac80211.c` (die obere Hälfte, die `wifid` ersetzt),
 `debug.c`, `led.c` und `wow.c` — die letzten drei stehen unter „wird bewusst
 nicht gebaut".
 
+**Die vier Prüfer vor jedem Commit:** `check_regs.py` · `seqdiff.py` ·
+`txpwrcheck.py` · `cfgcheck.py` (der Konfigurationsleser, host-seitig gegen
+13 Randfälle — greift er daneben, bleibt `target` leer, Stufe 5e wird
+übersprungen, und nichts im Log sagt, dass ein Parser schuld war).
+
 **`check_regs.py` UND `seqdiff.py` vor jedem Commit laufen lassen.** Der erste
 hat schon einen echten Fehler gefunden (`TX_DESC_QSEL_H2C` war 17 geraten, ist
 19); der zweite prüft die Sache, die keine Konstantenliste sehen kann — ob die
