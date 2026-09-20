@@ -152,6 +152,9 @@ DEVIATION = {
 # Funktionen, deren Zahlenfolge sich NICHT vergleichen laesst, mit Grund.
 # Die Zugriffsfolge wird trotzdem geprueft.
 HEX_SKIP = {
+    "rtw_fw_send_ra_info": "wie rtw_fw_send_general_info -- Linux setzt die "
+        "Felder mit SET_RA_INFO_*(…GENMASK(..)); bei uns stehen dieselben "
+        "Masken als Zahl.",
     "rtw_fw_media_status_report": "wie rtw_fw_send_general_info.",
     "rtw_fw_scan_notify": "wie rtw_fw_send_general_info.",
     "rtw_fw_inform_rfk_status": "wie rtw_fw_send_general_info.",

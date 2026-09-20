@@ -63,6 +63,7 @@ mod pci;
 mod phy;
 mod pwrseq;
 mod rfk;
+mod sta;
 mod rfkcal;
 mod dpk;
 mod txgapk;
@@ -624,17 +625,28 @@ pub extern "C" fn _start() {
     };
 
     // ── Stufe 5e: Auth und Assoc ─────────────────────────────────
+    let mut linked: Option<vif::Vif> = None;
     let stage5e = match (stage5d, efuse.as_ref(), _txpwr.as_ref(),
                          target.as_ref()) {
         (true, Some(e), Some(t), Some(b)) =>
             stage5e_connect(h, &hal, &mut trx, mgmt_buf, &mut h2c, e, t,
-                            e.addr, b),
+                            e.addr, b, &mut linked),
         (true, _, _, None) => {
             host::print("[rtl8822ce] Stufe 5e: uebersprungen, der Suchlauf\n             \x20         hat kein Ziel auf 2,4 GHz gefunden\n");
             false
         }
         _ => {
             host::print("[rtl8822ce] Stufe 5e: uebersprungen, 5d steht nicht\n");
+            false
+        }
+    };
+
+    // ── Stufe 5f: die Ratenanpassung ─────────────────────────────
+    let stage5f = match (stage5e, linked.as_ref(), target.as_ref()) {
+        (true, Some(v), Some(b)) =>
+            stage5f_rates(h, &mut trx, &mut h2c, &hal, v, b),
+        _ => {
+            host::print("[rtl8822ce] Stufe 5f: uebersprungen, 5e steht nicht\n");
             false
         }
     };
@@ -697,6 +709,11 @@ pub extern "C" fn _start() {
         "[rtl8822ce] Stufe 5e: GRUEN — DER AP HAT UNS ANGENOMMEN\n"
     } else {
         "[rtl8822ce] Stufe 5e: NEIN — nicht weiterbauen, bevor das steht\n"
+    });
+    host::print(if stage5f {
+        "[rtl8822ce] Stufe 5f: GRUEN — DIE FIRMWARE WAEHLT DIE RATE\n"
+    } else {
+        "[rtl8822ce] Stufe 5f: NEIN — nicht weiterbauen, bevor das steht\n"
     });
 
 
@@ -2351,7 +2368,8 @@ fn print_signed(v: i32) {
 #[allow(clippy::too_many_arguments)]
 fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                    h2c: &mut fw::H2cState, e: &efuse::Efuse,
-                   t: &txpower::TxPower, mac: [u8; 6], bss: &Bss) -> bool {
+                   t: &txpower::TxPower, mac: [u8; 6], bss: &Bss,
+                   out_vif: &mut Option<vif::Vif>) -> bool {
     host::print("[rtl8822ce] Stufe 5e: Auth und Assoc mit \"");
     print_ssid(&bss.ssid[..bss.ssid_len as usize]);
     host::print("\" auf K");
@@ -2478,6 +2496,7 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             "media_status_report FEHLGESCHLAGEN\n"
         });
         ok &= gate("die Firmware nimmt die Verbindungsmeldung an", msr);
+        *out_vif = Some(vifc);
     }
 
     ok
@@ -2486,6 +2505,11 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
 /// Die AID der letzten Anmeldeantwort. Sie steht im selben Rahmen wie der
 /// Status, und der Rueckgabeweg von `exchange` traegt nur EINE Zahl.
 static mut LAST_ASSOC_AID: u16 = 0;
+
+/// Und der ganze Rahmen dazu: Stufe 5f liest daraus die Faehigkeiten des
+/// AP (HT, VHT, Raten). In Linux baut mac80211 daraus `ieee80211_sta`.
+static mut LAST_ASSOC_RESP: [u8; 256] = [0; 256];
+static mut LAST_ASSOC_RESP_LEN: usize = 0;
 
 /// Einen Verwaltungsrahmen senden und auf die Antwort warten.
 ///
@@ -2537,6 +2561,9 @@ fn exchange(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                         unsafe {
                             LAST_ASSOC_AID =
                                 u16::from_le_bytes([f[28], f[29]]);
+                            let n = f.len().min(256);
+                            LAST_ASSOC_RESP[..n].copy_from_slice(&f[..n]);
+                            LAST_ASSOC_RESP_LEN = n;
                         }
                     }
                     status = Some(v);
@@ -2664,6 +2691,194 @@ fn mgmt_header(out: &mut [u8; 256], subtype_fc: u8, mac: &[u8; 6],
     out[10..16].copy_from_slice(mac); // addr2 = wir
     out[16..22].copy_from_slice(bssid); // addr3 = BSSID
     out[22..24].copy_from_slice(&0u16.to_le_bytes()); // seq
+}
+
+/// Stufe 5f — die Ratenanpassung.
+///
+/// Der Treiber schickt der Firmware KEINE Rate, sondern eine MASKE:
+/// welche der 64 Raten dieses Gegenueber kann. Die Firmware waehlt daraus
+/// laufend und meldet ihre Wahl als `C2H_RA_RPT` zurueck — und genau das
+/// ist das Tor dieser Stufe. Eine Maske, die niemand beantwortet, ist eine
+/// Behauptung.
+///
+/// **Die Maske kommt aus der Anmeldeantwort**, die Stufe 5e aufgehoben
+/// hat: HT- und VHT-Element, unterstuetzte Raten. In Linux baut mac80211
+/// daraus `ieee80211_sta`; hier steht der Parser in `sta.rs` und gehoert
+/// spaeter `wifid`.
+///
+/// **Nicht gebaut und namentlich:** `rtw_fw_download_rsvd_page` +
+/// `rtw_send_rsvd_page_h2c`. Die reservierten Seiten tragen PS-Poll, Null-
+/// und QoS-Null-Rahmen, die die FIRMWARE im Stromsparbetrieb selbst
+/// sendet. Stromsparen gibt es hier nicht, also wuerden die Seiten
+/// geschrieben und nie gelesen. Sie gehoeren zu LPS, nicht hierher.
+fn stage5f_rates(h: i32, trx: &mut pci::Trx, h2c: &mut fw::H2cState,
+                 hal: &Hal, vifc: &vif::Vif, bss: &Bss) -> bool {
+    host::print("[rtl8822ce] Stufe 5f: die Ratenanpassung\n");
+
+    // SAFETY: einfaedig, und 5e hat vorher geschrieben.
+    let (resp, len) = unsafe {
+        (&*core::ptr::addr_of!(LAST_ASSOC_RESP), LAST_ASSOC_RESP_LEN)
+    };
+    if len < 30 {
+        host::print("  keine Anmeldeantwort aufgehoben\n");
+        return false;
+    }
+
+    let caps = sta::parse_assoc_resp(&resp[..len]);
+    host::print("  Gegenueber: HT ");
+    host::print(if caps.ht_supported { "ja" } else { "nein" });
+    if caps.ht_supported {
+        host::print(" (cap 0x");
+        host::print_hex16(caps.ht_cap);
+        host::print(", MCS ");
+        for (i, b) in caps.ht_mcs.iter().enumerate() {
+            if i > 0 {
+                host::print(":");
+            }
+            host::print_hex8(*b);
+        }
+        host::print(")");
+    }
+    host::print(" · VHT ");
+    host::print(if caps.vht_supported { "ja" } else { "nein" });
+    if caps.vht_supported {
+        host::print(" (cap 0x");
+        host::print_hex32(caps.vht_cap);
+        host::print(", mcs_map 0x");
+        host::print_hex16(caps.vht_mcs_map);
+        host::print(")");
+    }
+    host::print("\n  Raten 0x");
+    host::print_hex16(caps.supp_rates);
+    host::print(" · Bandbreite ");
+    host::print(match caps.bandwidth {
+        0 => "20",
+        1 => "40",
+        _ => "80",
+    });
+    host::print(" MHz\n");
+
+    let mut si = sta::StaInfo { mac_id: vifc.mac_id, init_ra_lv: 1,
+                                ..Default::default() };
+    let nss = if hal.rf_2t2r { 2 } else { 1 };
+    let wireless_set = sta::update_sta_info(&mut si, &caps, nss,
+                                            bss.channel <= 14);
+
+    host::print("  rate_id ");
+    host::print_dec(si.rate_id as u32);
+    host::print(" · bw_mode ");
+    host::print_dec(si.bw_mode as u32);
+    host::print(" · sgi ");
+    host::print(if si.sgi_enable { "ja" } else { "nein" });
+    host::print(" · vht ");
+    host::print(if si.vht_enable { "ja" } else { "nein" });
+    host::print(" · wireless_set 0x");
+    host::print_hex8(wireless_set as u8);
+    host::print("\n  ra_mask 0x");
+    host::print_hex32((si.ra_mask >> 32) as u32);
+    host::print_hex32(si.ra_mask as u32);
+    host::print("\n");
+
+    let mut ok = true;
+    ok &= gate("die Anmeldeantwort traegt Raten fuer dieses Gegenueber",
+               caps.supp_rates != 0);
+    ok &= gate("die Ratenmaske ist nicht leer", si.ra_mask != 0);
+
+    let ra = fw::send_ra_info(h, h2c, &mut si, true);
+    let dp = fw::default_port(h, h2c, vifc.port, vifc.mac_id, vifc.net_type);
+    host::print("  send_ra_info ");
+    host::print(if ra { "raus" } else { "FEHLGESCHLAGEN" });
+    host::print(" · default_port ");
+    host::print(if dp { "raus" } else { "FEHLGESCHLAGEN" });
+    host::print("\n");
+    ok &= gate("die Firmware nimmt die Ratenmaske an", ra);
+
+    // ── Und jetzt zuhoeren, was die Firmware daraus macht ────────
+    let mut dm = dm::DmInfo::new();
+    let mut path_div = dm::PathDiv::default();
+    chip::read_cck_gi_bnd(h, &mut dm);
+    static mut RXBUF6: [u8; pci::RTK_PCI_RX_BUF_SIZE as usize] =
+        [0; pci::RTK_PCI_RX_BUF_SIZE as usize];
+    // SAFETY: ein Faden, ein Rufer, der Puffer verlaesst die Funktion nicht.
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(RXBUF6) };
+
+    let mut ra_rpt = 0u32;
+    let mut last_rate = 0u8;
+    let mut last_sgi = false;
+    let mut last_bw = 0u8;
+    let mut c2h_total = 0u32;
+    let t0 = host::now_us();
+    while host::now_us() - t0 < 2_000_000 {
+        let n = pci::rx_poll(h, trx, 64, buf, &mut dm, &mut path_div,
+                             hal.rf_path_num, 0, bss.channel, |st, pkt| {
+            if !st.is_c2h {
+                return;
+            }
+            let off = RX_PKT_DESC_SZ as usize + st.drv_info_sz as usize
+                + st.shift as usize;
+            let Some(c) = fw::c2h_parse(&pkt[off..]) else { return };
+            c2h_total += 1;
+            if c2h_total <= 8 {
+                host::print("    c2h 0x");
+                host::print_hex8(c.id);
+                host::print(" ");
+                host::print(fw::c2h_name(c.id));
+                host::print("\n");
+            }
+            // `rtw_fw_ra_report_handle`: rate_sgi, mac_id, …, bw
+            if c.id as u32 == C2H_RA_RPT && c.payload.len() >= 7 {
+                ra_rpt += 1;
+                last_rate = (c.payload[0] as u32 & RTW_C2H_RA_RPT_RATE) as u8;
+                last_sgi = c.payload[0] as u32 & RTW_C2H_RA_RPT_SGI != 0;
+                last_bw = c.payload[6];
+            }
+        });
+        if n == 0 {
+            host::sleep_ms(1);
+        }
+    }
+
+    host::print("  C2H insgesamt ");
+    host::print_dec(c2h_total);
+    host::print(", davon RA_RPT ");
+    host::print_dec(ra_rpt);
+    if ra_rpt > 0 {
+        host::print("\n  zuletzt gewaehlt: Rate 0x");
+        host::print_hex8(last_rate);
+        host::print(" (");
+        host::print(rate_name(last_rate));
+        host::print("), SGI ");
+        host::print(if last_sgi { "ja" } else { "nein" });
+        host::print(", bw ");
+        host::print_dec(last_bw as u32);
+    }
+    host::print("\n");
+    ok &= gate("die Firmware meldet eine gewaehlte Rate zurueck",
+               ra_rpt > 0);
+    ok
+}
+
+/// main.h:250-262 `DESC_RATE*` als Namen — fuer den Bericht.
+fn rate_name(r: u8) -> &'static str {
+    match r {
+        0x00 => "CCK 1M",
+        0x01 => "CCK 2M",
+        0x02 => "CCK 5,5M",
+        0x03 => "CCK 11M",
+        0x04 => "OFDM 6M",
+        0x05 => "OFDM 9M",
+        0x06 => "OFDM 12M",
+        0x07 => "OFDM 18M",
+        0x08 => "OFDM 24M",
+        0x09 => "OFDM 36M",
+        0x0a => "OFDM 48M",
+        0x0b => "OFDM 54M",
+        0x0c..=0x13 => "HT MCS0-7",
+        0x14..=0x1b => "HT MCS8-15",
+        0x2c..=0x35 => "VHT 1SS",
+        0x36..=0x3f => "VHT 2SS",
+        _ => "?",
+    }
 }
 
 fn gate(name: &str, ok: bool) -> bool {
