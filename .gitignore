@@ -28,3 +28,4 @@ release/assets/manifest.large
 # artifacts (cpio.gz + sqfs per version). Distributed via the
 # large lane (GitHub Releases), never committed to the repo.
 release/apps/
+__pycache__/
