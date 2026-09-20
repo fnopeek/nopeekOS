@@ -973,6 +973,38 @@ Tor „ein fremder AP antwortet" steht in 5c**, über dreizehn aktive Kanäle
 gezählt. Das ist kein weicheres Tor, sondern ein belastbareres: in jedem
 bisherigen 5c-Lauf kamen Antworten von mehreren Zellen.
 
+### Stufe 5e am Gerät: ✅ GRÜN — der AP hat uns angenommen (0.18.1)
+
+```
+Auth:  Antwort nach Versuch 1, Status 0 (angenommen)
+Assoc: Antwort nach Versuch 1, Status 0 (angenommen)   AID 1
+Port: net_type MGD_LINKED, AID gesetzt · media_status_report raus
+```
+
+**Ziel war `IvyPie_New` auf K7, −49 dBm, Fähigkeiten `0x1431`, RSN 22
+Bytes** — also WPA2 (Privacy-Bit gesetzt). Beide Schritte antworteten beim
+ERSTEN Versuch; bei −49 dBm braucht es keine Wiederholung.
+
+**Die RSN-Wahl stimmte auf Anhieb.** Ein falsches Paarschlüssel-Verfahren
+hätte Status 43 gegeben, ein falsches AKM Status 44 — Status 0 heisst, dass
+CCMP/PSK aus dem Element des AP richtig gewählt und richtig gebaut war.
+Dass das Fähigkeitsfeld echot wird (`ESS | (AP & 0x0030)` = `0x0031`),
+gehört dazu: wer mehr behauptet, als der AP kann, wird abgelehnt.
+
+**Und 0.18.1 hat sich sofort bewährt:** 5b ist grün über seine mechanischen
+Tore, und das Tor „ein fremder AP antwortet" meldete in 5c **4 Antworten
+über 13 Kanäle** — bei genau einer davon auf Kanal 1. Auf einem Kanal wäre
+es wieder ein Münzwurf gewesen.
+
+**Was diese Stufe NICHT behauptet:** die Verbindung trägt noch keine Daten.
+Ohne Vierwegehandschlag wirft der AP uns nach wenigen Sekunden wieder
+hinaus, und der Chip wird am Ende des Laufs ohnehin abgeschaltet.
+Angemeldet ist nicht verbunden — das Tor stand bewusst genau hier.
+
+**Stand: Stufen 0 bis 5e am Gerät grün.** Die ganze Kette von PCI bis zur
+Anmeldung an einer echten Funkzelle steht, 1:1 aus rtw88 portiert, 207 von
+207 Funktionen Zugriff für Zugriff gleich.
+
 ### ▶ Danach — hier weitermachen
 
 **5f — die Verbindung halten.** `rtw_update_sta_info` + `rtw_fw_send_ra_info`,
