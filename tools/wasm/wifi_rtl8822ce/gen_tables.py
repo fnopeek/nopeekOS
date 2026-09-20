@@ -248,6 +248,287 @@ def txpwr_by_rate_map():
     return out
 
 
+
+def struct_tables():
+    """Die Tabellen, die keine flachen u32-Felder sind.
+
+    `bb_pg` traegt sechs Spalten (band, rf_path, tx_num, addr, bitmask,
+    data), `txpwr_lmt` ebenfalls sechs (regd, band, bw, rs, ch, lmt) — die
+    letzte VORZEICHENBEHAFTET. **Beide RFE-Typen werden erzeugt**, nicht nur
+    der, den unser Geraet gerade meldet: `rtw_get_rfe_def` schlaegt in
+    `rtw8822c_rfe_defs[]` nach, und wer nur einen Eintrag baut, hat einen
+    Treiber fuer genau ein Board.
+
+    Sie stehen in der TABELLENdatei, nicht in der Chipdatei."""
+    src = open(SRC, errors="ignore").read()
+    out = []
+    for cname, rname, cols, signed in (
+            ("rtw8822c_bb_pg_type0", "BB_PG_TYPE0", 6, False),
+            ("rtw8822c_txpwr_lmt_type0", "TXPWR_LMT_TYPE0", 6, True),
+            ("rtw8822c_txpwr_lmt_type5", "TXPWR_LMT_TYPE5", 6, True)):
+        m = re.search(r"static const struct \w+ " + cname + r"\[\] = \{(.*?)\n\};",
+                      src, re.S)
+        if not m:
+            sys.exit(f"Tabelle {cname} nicht gefunden")
+        rows = []
+        for entry in re.finditer(r"\{([^{}]*?)\}", m.group(1)):
+            vals = [v.strip() for v in entry.group(1).split(",") if v.strip()]
+            if len(vals) != cols:
+                sys.exit(f"{cname}: {len(vals)} Spalten statt {cols}: {vals}")
+            rows.append([int(v, 0) for v in vals])
+        if signed:
+            ty = "(u8, u8, u8, u8, u8, i8)"
+            fmt = lambda r: ("(%d, %d, %d, %d, %d, %d)"
+                             % (r[0], r[1], r[2], r[3], r[4],
+                                r[5] - 256 if r[5] > 127 else r[5]))
+        else:
+            ty = "[u32; 6]"
+            fmt = lambda r: "[" + ", ".join(f"0x{v:x}" for v in r) + "]"
+        out.append(f"/// rtw8822c_table.c `{cname}` — {len(rows)} Zeilen")
+        out.append(f"pub static {rname}: [{ty}; {len(rows)}] = [")
+        for r in rows:
+            out.append("    " + fmt(r) + ",")
+        out.append("];\n")
+        print(f"  {cname:30s} {len(rows):6d} Zeilen")
+    return out
+
+
+def rate_sections():
+    """phy.c:55-124 — die zehn Ratengruppen und ihre Laengen, plus die
+    5-GHz-Kanalliste aus phy.c:1581. Alles Felder, alles erzeugt."""
+    rates = desc_rates()
+    src = open(PHY_SRC, errors="ignore").read()
+    names = ["rtw_cck_rates", "rtw_ofdm_rates", "rtw_ht_1s_rates",
+             "rtw_ht_2s_rates", "rtw_vht_1s_rates", "rtw_vht_2s_rates",
+             "rtw_ht_3s_rates", "rtw_ht_4s_rates", "rtw_vht_3s_rates",
+             "rtw_vht_4s_rates"]
+    out = ["""/// phy.c:118-124 `rtw_rate_section[]` — die zehn Ratenabschnitte in
+/// der Reihenfolge von `enum rtw_rate_section`. Die LAENGEN stehen in
+/// `rtw_rate_size[]` und sind hier die Laenge des Scheibchens."""]
+    out.append(f"pub static RATE_SECTION: [&[u8]; {len(names)}] = [")
+    for n in names:
+        m = re.search(r"const u8 " + n + r"\[\] = \{(.*?)\};", src, re.S)
+        if not m:
+            sys.exit(f"{n} nicht gefunden")
+        vals = [rates[x] for x in re.findall(r"DESC_RATE[A-Z0-9_]*", m.group(1))]
+        out.append("    &[" + ", ".join(str(v) for v in vals) + "],")
+    out.append("];\n")
+
+    m = re.search(r"rtw_channel_idx_5g\[RTW_MAX_CHANNEL_NUM_5G\] = \{(.*?)\};",
+                  src, re.S)
+    if not m:
+        sys.exit("rtw_channel_idx_5g nicht gefunden")
+    ch = [int(v) for v in re.findall(r"\b\d+\b", re.sub(r"/\*.*?\*/", "", m.group(1), flags=re.S))]
+    out.append("/// phy.c:1581-1588 `rtw_channel_idx_5g[]`")
+    out.append(f"pub static CHANNEL_IDX_5G: [u8; {len(ch)}] = [")
+    for i in range(0, len(ch), 7):
+        out.append("    " + ", ".join(str(v) for v in ch[i:i + 7]) + ",")
+    out.append("];\n")
+    print(f"  {'rate_section + channel_idx_5g':30s} {len(names):6d} Gruppen, "
+          f"{len(ch)} 5-GHz-Kanaele")
+    return out
+
+
+
+def txpower_reference():
+    """Rechnet `rtw_chip_board_info_setup` NACH und legt Pruefsummen ab.
+
+    Dieselbe Machart wie die Schreibzugriffszahlen der Parametertabellen:
+    eine zweite Umsetzung derselben Regel, die VORHERSAGT, was der Treiber
+    herausbekommen muss. 25 KiB abgeleiteter Zustand lassen sich nicht
+    einzeln vergleichen; eine Summe ueber alle Zellen schon, und sie faellt
+    bei jedem einzelnen falschen Byte auf.
+
+    Gerechnet wird fuer rfe_option 1 -- unser Geraet -- also mit
+    txpwr_lmt_type0."""
+    MAXP = 0x7f
+    NREGD, NBW, NRS, N2G, N5G, NPATH, NRATE = 13, 3, 10, 14, 49, 4, 0x54
+    WW = 12
+    ALT = {3: 0, 4: 2, 5: 2, 6: 0, 7: 2, 8: 0, 9: 2, 10: 2, 11: 2}
+
+    src = open(SRC, errors="ignore").read()
+
+    def rows(name, cols):
+        m = re.search(r"static const struct \w+ " + name + r"\[\] = \{(.*?)\n\};",
+                      src, re.S)
+        out = []
+        for e in re.finditer(r"\{([^{}]*?)\}", m.group(1)):
+            v = [int(x.strip(), 0) for x in e.group(1).split(",") if x.strip()]
+            out.append(v)
+        return out
+
+    # --- die Zuordnung Adresse -> Raten, wie txpwr_by_rate_map sie erzeugt
+    rates_enum = desc_rates()
+    phy = open(PHY_SRC, errors="ignore").read()
+    mm = re.search(r"rtw_phy_get_rate_values_of_txpwr_by_rate\(struct"
+                   r".*?\n\{(.*?)\n\}\n", phy, re.S)
+    amap, pending, cur, calc = {}, [], {}, False
+    for raw in mm.group(1).split("\n"):
+        line = raw.strip()
+        c = re.match(r"case (0x[0-9A-Fa-f]+):$", line)
+        if c:
+            pending.append(int(c.group(1), 16)); continue
+        r = re.match(r"rate\[(\d)\] = (DESC_RATE[A-Z0-9_]*);$", line)
+        if r:
+            cur[int(r.group(1))] = rates_enum[r.group(2)]; continue
+        if "bcd_to_dec_pwr_by_rate" in line or line.startswith("if (mask =="):
+            calc = True; continue
+        if line == "break;":
+            if pending and cur and not calc:
+                for a in pending:
+                    amap[a] = [cur[i] for i in sorted(cur)]
+            pending, cur, calc = [], {}, False
+    def s8(x):
+        return x - 256 if x > 127 else x
+    def bcd(val, i):
+        b = (val >> (i * 8)) & 0xff
+        return s8((b & 0x0f) + (b >> 4) * 10)
+    def tbl(val, i):
+        return s8((val >> (i * 8)) & 0xff)
+
+    off2g = [[0] * NRATE for _ in range(NPATH)]
+    off5g = [[0] * NRATE for _ in range(NPATH)]
+    base2g = [[0] * NRS for _ in range(NPATH)]
+    base5g = [[0] * NRS for _ in range(NPATH)]
+    lim2g = [[[[MAXP] * N2G for _ in range(NRS)] for _ in range(NBW)]
+             for _ in range(NREGD)]
+    lim5g = [[[[MAXP] * N5G for _ in range(NRS)] for _ in range(NBW)]
+             for _ in range(NREGD)]
+
+    # --- rtw_parse_tbl_bb_pg
+    for band, rfpath, _txnum, addr, mask, data in rows("rtw8822c_bb_pg_type0", 6):
+        if addr in (0xfe, 0xffe):
+            continue
+        if addr == 0xE08:
+            rs_, pw = [0x00], [bcd(data, 1)]
+        elif addr == 0x86C:
+            if mask == 0xffffff00:
+                rs_, pw = [0x01, 0x02, 0x03], [tbl(data, i) for i in (1, 2, 3)]
+            elif mask == 0x000000ff:
+                rs_, pw = [0x03], [bcd(data, 0)]
+            else:
+                continue
+        elif addr in amap:
+            rs_ = amap[addr]
+            pw = [tbl(data, i) for i in range(len(rs_))]
+        else:
+            continue
+        if rfpath >= NPATH or band not in (0, 1) or len(rs_) > NPATH:
+            continue
+        for i, rr in enumerate(rs_):
+            (off2g if band == 0 else off5g)[rfpath][rr] = pw[i]
+
+    # --- rtw_parse_tbl_txpwr_lmt
+    def clamp(v):
+        return max(-MAXP, min(MAXP, v))
+    ch5 = [int(v) for v in re.findall(r"\b\d+\b", re.sub(
+        r"/\*.*?\*/", "",
+        re.search(r"rtw_channel_idx_5g\[RTW_MAX_CHANNEL_NUM_5G\] = \{(.*?)\};",
+                  phy, re.S).group(1), flags=re.S))]
+    flag = 0
+    for regd, band, bw, rs, ch, lmt in rows("rtw8822c_txpwr_lmt_type0", 6):
+        flag |= 1 << regd
+        lmt = clamp(s8(lmt))
+        if band == 0:
+            if not 1 <= ch <= N2G:
+                continue
+            ci = ch - 1
+            tab = lim2g
+        else:
+            if ch not in ch5:
+                continue
+            ci = ch5.index(ch)
+            tab = lim5g
+        if regd >= NREGD or bw >= NBW or rs >= NRS:
+            continue
+        tab[regd][bw][rs][ci] = lmt
+        tab[WW][bw][rs][ci] = min(tab[WW][bw][rs][ci], lmt)
+
+    for i in range(NREGD):
+        if i == WW or flag & (1 << i):
+            continue
+        alt = ALT.get(i)
+        src_i = alt if (alt is not None and flag & (1 << alt)) else WW
+        for bw in range(NBW):
+            for rs in range(NRS):
+                lim2g[i][bw][rs] = list(lim2g[src_i][bw][rs])
+                lim5g[i][bw][rs] = list(lim5g[src_i][bw][rs])
+
+    # --- rtw_xref_txpwr_lmt
+    for regd in range(NREGD):
+        for bw in (0, 1):
+            for ci in range(N5G):
+                for ht, vht in ((2, 4), (3, 5), (6, 8), (7, 9)):
+                    a, b = lim5g[regd][bw][ht][ci], lim5g[regd][bw][vht][ci]
+                    if a == b:
+                        continue
+                    if a == MAXP:
+                        lim5g[regd][bw][ht][ci] = b
+                    elif b == MAXP:
+                        lim5g[regd][bw][vht][ci] = a
+
+    # --- rtw_phy_tx_power_by_rate_config
+    sect = []
+    names = ["rtw_cck_rates", "rtw_ofdm_rates", "rtw_ht_1s_rates",
+             "rtw_ht_2s_rates", "rtw_vht_1s_rates", "rtw_vht_2s_rates",
+             "rtw_ht_3s_rates", "rtw_ht_4s_rates", "rtw_vht_3s_rates",
+             "rtw_vht_4s_rates"]
+    for n in names:
+        m2 = re.search(r"const u8 " + n + r"\[\] = \{(.*?)\};", phy, re.S)
+        sect.append([rates_enum[x] for x in
+                     re.findall(r"DESC_RATE[A-Z0-9_]*", m2.group(1))])
+    for path in range(NPATH):
+        for rs in range(NRS):
+            rr = sect[rs]
+            bi = rr[-3] if len(rr) == 10 else rr[-1]
+            b2, b5 = off2g[path][bi], off5g[path][bi]
+            base2g[path][rs], base5g[path][rs] = b2, b5
+            for r in rr:
+                off2g[path][r] = s8((off2g[path][r] - b2) & 0xff)
+                off5g[path][r] = s8((off5g[path][r] - b5) & 0xff)
+
+    # --- rtw_phy_tx_power_limit_config
+    for regd in range(NREGD):
+        for bw in range(NBW):
+            for rs in range(NRS):
+                b2 = base2g[0][rs]
+                for ch in range(N2G):
+                    lim2g[regd][bw][rs][ch] = s8((lim2g[regd][bw][rs][ch] - b2) & 0xff)
+                b5 = base5g[0][rs]
+                for ch in range(N5G):
+                    lim5g[regd][bw][rs][ch] = s8((lim5g[regd][bw][rs][ch] - b5) & 0xff)
+
+    def chks(nested):
+        tot = 0
+        def walk(x):
+            nonlocal tot
+            if isinstance(x, list):
+                for y in x:
+                    walk(y)
+            else:
+                tot = (tot + (x & 0xff)) & 0xffffffff
+        walk(nested)
+        return tot
+
+    c_off2g, c_off5g = chks(off2g), chks(off5g)
+    c_b2, c_b5 = chks(base2g), chks(base5g)
+    c_l2, c_l5 = chks(lim2g), chks(lim5g)
+    print(f"  {'txpower (Nachrechnung)':30s} Pruefsummen "
+          f"off2g 0x{c_off2g:x} off5g 0x{c_off5g:x} "
+          f"lim2g 0x{c_l2:x} lim5g 0x{c_l5:x}")
+    return ["""/// `rtw_chip_board_info_setup` fuer rfe_option 1, vom Erzeuger
+/// NACHGERECHNET. Der abgeleitete Zustand ist 25 KiB gross — einzeln
+/// vergleichen geht nicht, eine Summe ueber alle Zellen schon, und die
+/// faellt bei jedem einzelnen falschen Byte auf.
+///
+/// Reihenfolge: by_rate_offset_2g · _5g · by_rate_base_2g · _5g ·
+/// limit_2g · limit_5g. Summiert wird byteweise, ohne Vorzeichen.""",
+            f"pub static EXPECTED_TXPWR_SUMS: [u32; 6] = [",
+            f"    0x{c_off2g:08x}, 0x{c_off5g:08x}, 0x{c_b2:08x},",
+            f"    0x{c_b5:08x}, 0x{c_l2:08x}, 0x{c_l5:08x},",
+            "];\n"]
+
+
 def main():
     src = open(SRC, errors="ignore").read()
     out = ['''//! ERZEUGT von gen_tables.py aus Linux 6.18.26 rtw8822c_table.c — nicht
@@ -290,6 +571,9 @@ pub const EXPECTED_WRITES_CUT_D_RFE1: [(&str, u32); %d] = [""" % len(expected))
 
     out += coex_tables()
     out += txpwr_by_rate_map()
+    out += struct_tables()
+    out += rate_sections()
+    out += txpower_reference()
 
     open(OUT, "w").write("\n".join(out))
     print(f"  {'SUMME':30s} {total:6d} Woerter "
