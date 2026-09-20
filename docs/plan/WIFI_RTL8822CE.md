@@ -1129,6 +1129,35 @@ Treiber, der die Verbindung HÄLT, ist 6b.
 **220 von 220 Funktionen · 960 Konstanten, 0 Abweichungen · Abdeckung 396
 → 397 von 940.**
 
+### 0.21.0 — msg1 ging durch, msg3 nicht: vier Bytes zu viel
+
+Der erste Lauf von 6a: **der Steuerkanal trägt Ende zu Ende.** `EV_READY`
+hinaus, `[wifid] READY — supplicant armed`, msg1 vom AP herein, msg2
+hinaus. Dann viermal `4-way FAILED (bad MIC / unwrap)`.
+
+**Die Stelle im Code sagt, was das heisst.** `Step::Fail` kommt aus dem
+**msg3**-Zweig — msg1 trägt gar keinen MIC (`ki & KI_MIC == 0` → immer
+`Step::Reply`). Der AP hat unser msg2 also **angenommen**: der PMK stimmt,
+der Sendeweg trägt, der Anmeldeantrag war richtig. Es scheiterte daran,
+dass `wifid` msg3 nicht verifizieren konnte.
+
+**`compute_mic` rechnet über `frame.len()`** — die ganze Scheibe, die der
+Treiber übergibt. Und `WLAN_RCR_CFG = 0xE400220E` hat **APP_FCS (31),
+APP_MIC (30) und APP_ICV (29) gesetzt**, also liefert der Deskriptor mehr
+Bytes, als der Rahmen lang ist. Vier davon sind die Prüfsumme.
+
+Der EAPOL-Rahmen wird jetzt auf seine **angesagte** Länge gekürzt: der
+802.1X-Kopf trägt sie in den Bytes 2..4 (gross-endig), der ganze Rahmen ist
+`4 + diese Zahl`. Das ist durch den Rahmen selbst bestimmt und nicht
+geraten — und es meldet zugleich, **wie viele** Bytes zu viel kamen, damit
+der nächste Lauf die Vermutung „vier, die Prüfsumme" bestätigt oder
+widerlegt.
+
+**Offen und bewusst noch nicht angefasst:** derselbe Überhang geht auch an
+`npk_netdev_submit_rx`. Bei IP ist er harmlos (der IP-Kopf trägt seine
+eigene Länge), aber er ist falsch. Sobald die Messung die Zahl nennt, wird
+er dort ebenso abgeschnitten — vorher wäre es geraten.
+
 ### ▶ Danach — hier weitermachen
 
 **6b — die Verbindung halten.** Der Treiber läuft, statt Stufen
