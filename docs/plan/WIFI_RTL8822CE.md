@@ -505,7 +505,7 @@ zweites Mal anwirft, spart sie die ganze Messung.
     python3 tools/wasm/wifi_rtl8822ce/gen_pwrseq.py   # src/pwrseq.rs aus rtw8822c.c
     python3 tools/linux-coverage.py --chip rtl8822ce   # 265 / 940 (war 89)
 
-**Abdeckung nach Stufe 5f: 394 von 940 rtw88-Funktionen** (vor dieser Runde
+**Abdeckung nach Stufe 5f: 396 von 940 rtw88-Funktionen** (vor dieser Runde
 89). `rtw8822c.c` 68/171 · `phy.c` 59/97 · `mac.c` 39/49 · `pci.c` 30/81 ·
 `coex.c` 27/111 · `main.c` 18/84 · `tx.c` 15/31 · `efuse.c` 5/5 · `rx.c` 3/8.
 Auf 0 stehen nur noch `mac80211.c` (die obere Hälfte, die `wifid` ersetzt),
@@ -1046,6 +1046,31 @@ gelesen — sie gehören zu LPS, nicht hierher.
 
 **214 von 214 Funktionen · 917 Konstanten, 0 Abweichungen · Abdeckung 389
 → 394 von 940.**
+
+### 0.19.1 — der Anmeldeantrag bot kein HT an, also bekamen wir keins
+
+Stufe 5f war am Gerät grün, und **eine Zahl darin war trotzdem falsch**:
+`Gegenueber: HT nein · VHT nein`. Bei einem AP mit 5-GHz-Zwilling auf K100
+kann das nicht stimmen. Die Folge stand zwei Zeilen tiefer — `ra_mask
+0x0ff5`, nur Legacy-Bits, und die Firmware wählte **OFDM 54M als Bestes,
+das sie DURFTE**.
+
+**Der AP hat uns korrekt das geantwortet, was wir gefragt haben.** Unser
+Anmeldeantrag trug SSID, Raten und RSN — **kein HT-Element**. Eine Station,
+die kein HT anbietet, wird als Legacy-Station angenommen, und dann lässt
+der AP HT auch in seiner Antwort weg. Das war kein Parserfehler; der Parser
+las korrekt, dass nichts da war.
+
+Gebaut: `rtw_init_ht_cap` und `rtw_init_vht_cap` als fertige Elemente
+(id 45 / id 191), aus unseren eigenen Werten — `hw_cap.nss`, `hw_cap.bw`,
+`hw_cap.ptcl` aus der efuse, `rx_ldpc`/`tx_stbc` des 8822C,
+`bfee_sts_cap = 3`. **VHT nur auf 5 GHz**: auf 2,4 GHz ist es nicht
+zugelassen, und ein AP darf einen Antrag mit VHT im falschen Band ablehnen.
+
+**Das ist die Klasse „stillschweigend weggelassen", und sie kostete genau
+eine Stufe Verzögerung.** Ich hatte den Anmeldeantrag auf das Minimum
+gebaut, das durchgeht — das Tor von 5e war „Status 0", und das kam. Was
+fehlte, zeigte sich erst als Deckel bei 54 Mbit in 5f.
 
 ### ▶ Danach — hier weitermachen
 

@@ -2447,12 +2447,19 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     }
 
     // ── Anmeldung ────────────────────────────────────────────────
-    let n = build_assoc_req(&mut frame, &mac, bss);
+    let n = build_assoc_req(&mut frame, &mac, bss, e, hal.rf_path_num);
     host::print("  Anmeldeantrag ");
     host::print_dec(n as u32);
-    host::print(" Bytes");
+    host::print(" Bytes · HT ja (nss ");
+    host::print_dec(e.hw_cap_nss as u32);
+    host::print(", bw 0x");
+    host::print_hex8(e.hw_cap_bw);
+    host::print(")");
+    if bss.channel > 14 {
+        host::print(" · VHT ja");
+    }
     if bss.rsn_len > 0 {
-        host::print(" (mit RSN: CCMP/PSK)");
+        host::print(" · RSN CCMP/PSK");
     }
     host::print("\n");
     let mut aid = 0u16;
@@ -2613,7 +2620,13 @@ fn build_auth_req(out: &mut [u8; 256], mac: &[u8; 6], bssid: &[u8; 6])
 }
 
 /// 802.11 §9.3.3.6 — Anmeldeantrag.
-fn build_assoc_req(out: &mut [u8; 256], mac: &[u8; 6], bss: &Bss) -> usize {
+///
+/// **Mit HT- und VHT-Element.** Ohne sie nimmt der AP uns als
+/// LEGACY-Station an und laesst HT auch in seiner Antwort weg — in 0.19.0
+/// kam genau das heraus: `ra_mask 0x0ff5`, keine MCS-Bits, Deckel bei
+/// OFDM 54M. Ein Antrag, der weniger anbietet, bekommt weniger.
+fn build_assoc_req(out: &mut [u8; 256], mac: &[u8; 6], bss: &Bss,
+                   e: &efuse::Efuse, rf_path_num: u8) -> usize {
     mgmt_header(out, 0x00, mac, &bss.bssid);
     // Faehigkeiten: ESS, dazu Privacy und Short Preamble so, wie der AP
     // sie ansagt. Wer hier mehr behauptet, als der AP kann, wird abgelehnt.
@@ -2642,9 +2655,23 @@ fn build_assoc_req(out: &mut [u8; 256], mac: &[u8; 6], bss: &Bss) -> usize {
     out[n + 2..n + 6].copy_from_slice(&[0x30, 0x48, 0x60, 0x6c]);
     n += 6;
 
+    // Die Elemente stehen in AUFSTEIGENDER Kennung: 45 HT, 48 RSN,
+    // 191 VHT. 802.11 verlangt es nicht, aber es kostet nichts, und
+    // manche APs sind darin eigen.
+
+    // HT — immer. Es entscheidet, ob wir als 11n-Station angenommen werden.
+    n += sta::build_ht_cap_ie(&mut out[n..], e.hw_cap_bw, e.hw_cap_nss);
+
     // RSN — aus dem, was der AP ansagt, EINE Wahl gebaut.
     if bss.rsn_len > 0 {
         n += build_rsn_ie(&mut out[n..], &bss.rsn[..bss.rsn_len as usize]);
+    }
+
+    // VHT nur auf 5 GHz: auf 2,4 GHz ist es nicht zugelassen, und ein AP
+    // darf einen Antrag mit VHT im falschen Band ablehnen.
+    if bss.channel > 14 {
+        n += sta::build_vht_cap_ie(&mut out[n..], e.hw_cap_ptcl,
+                                   e.hw_cap_nss, rf_path_num);
     }
     n
 }
