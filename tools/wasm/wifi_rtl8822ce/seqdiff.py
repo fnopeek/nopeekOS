@@ -152,6 +152,11 @@ DEVIATION = {
 # Funktionen, deren Zahlenfolge sich NICHT vergleichen laesst, mit Grund.
 # Die Zugriffsfolge wird trotzdem geprueft.
 HEX_SKIP = {
+    "rtw_init_ht_cap":
+        "Linux fuellt eine `ieee80211_sta_ht_cap`-Struktur, wir bauen das "
+        "fertige ELEMENT (id 45, 26 Byte). Die Feldversaetze im Puffer "
+        "(0x3, 0x7, 0xff) haben in Linux keine Entsprechung, weil dort der "
+        "Uebersetzer sie vergibt.",
     "rtw_fw_send_ra_info": "wie rtw_fw_send_general_info -- Linux setzt die "
         "Felder mit SET_RA_INFO_*(…GENMASK(..)); bei uns stehen dieselben "
         "Masken als Zahl.",

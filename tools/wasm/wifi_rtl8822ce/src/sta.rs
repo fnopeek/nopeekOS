@@ -324,3 +324,96 @@ pub fn update_sta_info(si: &mut StaInfo, c: &PeerCaps, nss: u8,
     si.rate_id = rate_id;
     wireless_set
 }
+
+// ════════════════════════════════════════════════════════════════
+// Was WIR koennen — und damit auch anbieten muessen
+// ════════════════════════════════════════════════════════════════
+
+/// main.c:1580-1600 `rtw_init_ht_cap`, als fertiges HT-Element
+/// (802.11 §9.4.2.55: id 45, 26 Byte Rumpf).
+///
+/// **Ohne dieses Element im Anmeldeantrag nimmt der AP uns als
+/// LEGACY-Station an** — und laesst HT dann auch in seiner Antwort weg.
+/// Genau das ist in 0.19.0 passiert: `ra_mask 0x0ff5`, keine MCS-Bits, und
+/// die Firmware waehlte OFDM 54M als Bestes, das sie DURFTE.
+///
+/// `rx_ldpc` und `tx_stbc` sind beim 8822C beide `true`
+/// (rtw8822c.c:5391-5392).
+pub fn build_ht_cap_ie(out: &mut [u8], hw_cap_bw: u8, nss: u8) -> usize {
+    let mut cap = IEEE80211_HT_CAP_SGI_20
+        | IEEE80211_HT_CAP_MAX_AMSDU
+        | (1 << IEEE80211_HT_CAP_RX_STBC_SHIFT);
+    cap |= IEEE80211_HT_CAP_LDPC_CODING; // rx_ldpc
+    cap |= IEEE80211_HT_CAP_TX_STBC; // tx_stbc
+    // `hw_cap.bw & BIT(RTW_CHANNEL_WIDTH_40)`
+    if hw_cap_bw & (1 << 1) != 0 {
+        cap |= IEEE80211_HT_CAP_SUP_WIDTH_20_40
+            | IEEE80211_HT_CAP_DSSSCCK40
+            | IEEE80211_HT_CAP_SGI_40;
+    }
+
+    out[0] = WLAN_EID_HT_CAPABILITY as u8;
+    out[1] = 26;
+    let b = &mut out[2..28];
+    b.fill(0);
+    b[0..2].copy_from_slice(&(cap as u16).to_le_bytes());
+    // A-MPDU: Faktor in Bit 1:0, Dichte in Bit 4:2.
+    b[2] = (IEEE80211_HT_MAX_AMPDU_64K as u8 & 0x3)
+        | ((IEEE80211_HT_MPDU_DENSITY_2 as u8 & 0x7) << 2);
+    // Supported MCS Set: rx_mask[0..10], rx_highest(2), tx_params(1), Rest 0.
+    for i in 0..nss.min(4) as usize {
+        b[3 + i] = 0xff;
+    }
+    b[3 + 4] = 0x01; // `mcs.rx_mask[4] = 0x01`
+    b[3 + 10..3 + 12].copy_from_slice(&(150u16 * nss as u16).to_le_bytes());
+    b[3 + 12] = IEEE80211_HT_MCS_TX_DEFINED as u8;
+    28
+}
+
+/// main.c:1602-1643 `rtw_init_vht_cap`, als fertiges VHT-Element
+/// (802.11 §9.4.2.157: id 191, 12 Byte Rumpf).
+///
+/// Kehrt um, wenn die efuse etwas anderes als VHT ansagt — dieselbe
+/// Bedingung wie in Linux. `bfee_sts_cap` ist 3 (main.c:1905),
+/// `rf_path_num > 1` gilt hier.
+pub fn build_vht_cap_ie(out: &mut [u8], hw_cap_ptcl: u8, nss: u8,
+                        rf_path_num: u8) -> usize {
+    if hw_cap_ptcl != EFUSE_HW_CAP_IGNORE as u8
+        && hw_cap_ptcl != EFUSE_HW_CAP_PTCL_VHT as u8
+    {
+        return 0;
+    }
+    let mut cap = IEEE80211_VHT_CAP_MAX_MPDU_LENGTH_11454
+        | IEEE80211_VHT_CAP_SHORT_GI_80
+        | IEEE80211_VHT_CAP_RXSTBC_1
+        | IEEE80211_VHT_CAP_HTC_VHT
+        | IEEE80211_VHT_CAP_MAX_A_MPDU_LENGTH_EXPONENT_MASK;
+    if rf_path_num > 1 {
+        cap |= IEEE80211_VHT_CAP_TXSTBC;
+    }
+    cap |= IEEE80211_VHT_CAP_MU_BEAMFORMEE_CAPABLE
+        | IEEE80211_VHT_CAP_SU_BEAMFORMEE_CAPABLE;
+    cap |= 3 << IEEE80211_VHT_CAP_BEAMFORMEE_STS_SHIFT; // bfee_sts_cap
+    cap |= IEEE80211_VHT_CAP_RXLDPC; // rx_ldpc
+
+    let mut mcs_map = 0u16;
+    for i in 0..8u16 {
+        let v = if (i as u8) < nss {
+            IEEE80211_VHT_MCS_SUPPORT_0_9 as u16
+        } else {
+            IEEE80211_VHT_MCS_NOT_SUPPORTED as u16
+        };
+        mcs_map |= v << (i * 2);
+    }
+    let highest = 390u16 * nss as u16;
+
+    out[0] = WLAN_EID_VHT_CAPABILITY as u8;
+    out[1] = 12;
+    let b = &mut out[2..14];
+    b[0..4].copy_from_slice(&cap.to_le_bytes());
+    b[4..6].copy_from_slice(&mcs_map.to_le_bytes()); // rx_mcs_map
+    b[6..8].copy_from_slice(&highest.to_le_bytes()); // rx_highest
+    b[8..10].copy_from_slice(&mcs_map.to_le_bytes()); // tx_mcs_map
+    b[10..12].copy_from_slice(&highest.to_le_bytes()); // tx_highest
+    14
+}

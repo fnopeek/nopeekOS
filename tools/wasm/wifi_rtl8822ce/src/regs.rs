@@ -1185,3 +1185,23 @@ pub const HT_LDPC_EN: u8 = 1 << 0; // main.h:185
 pub const H2C_CMD_DEFAULT_PORT: u32 = 0x2c; // fw.h:487
 pub const RTW_H2C_DEFAULT_PORT_W0_PORTID: u32 = 0x0000ff00; // fw.h:109  GENMASK(15, 8)
 pub const RTW_H2C_DEFAULT_PORT_W0_MACID: u32 = 0x00ff0000; // fw.h:110  GENMASK(23, 16)
+
+// ── Stufe 5f.1: unsere EIGENEN Faehigkeiten (main.c:1580-1640) ──
+pub const IEEE80211_HT_CAP_MAX_AMSDU: u32 = 0x0800; // ../../../../../include/linux/ieee80211.h:1923
+pub const IEEE80211_HT_CAP_RX_STBC_SHIFT: u32 = 8; // ../../../../../include/linux/ieee80211.h:1921
+pub const IEEE80211_HT_CAP_TX_STBC: u32 = 0x0080; // ../../../../../include/linux/ieee80211.h:1919
+pub const IEEE80211_HT_CAP_DSSSCCK40: u32 = 0x1000; // ../../../../../include/linux/ieee80211.h:1924
+pub const IEEE80211_HT_MAX_AMPDU_64K: u32 = 3; // ../../../../../include/linux/ieee80211.h:1947
+pub const IEEE80211_HT_MPDU_DENSITY_2: u32 = 4; // ../../../../../include/linux/ieee80211.h:1972
+pub const IEEE80211_HT_MCS_TX_DEFINED: u32 = 0x01; // ../../../../../include/linux/ieee80211.h:1867
+pub const IEEE80211_VHT_CAP_MAX_MPDU_LENGTH_11454: u32 = 0x00000002; // ../../../../../include/linux/ieee80211.h:2431
+pub const IEEE80211_VHT_CAP_RXSTBC_1: u32 = 0x00000100; // ../../../../../include/linux/ieee80211.h:2441
+pub const IEEE80211_VHT_CAP_HTC_VHT: u32 = 0x00400000; // ../../../../../include/linux/ieee80211.h:2456
+pub const IEEE80211_VHT_CAP_MAX_A_MPDU_LENGTH_EXPONENT_MASK: u32 = 0x3800000; // ../../../../../include/linux/ieee80211.h:2458  (7 << IEEE80211_VHT_CAP_MAX_A_MPDU_LENGTH_EXPONENT_SHIFT)
+pub const IEEE80211_VHT_CAP_TXSTBC: u32 = 0x00000080; // ../../../../../include/linux/ieee80211.h:2440
+pub const IEEE80211_VHT_CAP_MU_BEAMFORMEE_CAPABLE: u32 = 0x00100000; // ../../../../../include/linux/ieee80211.h:2454
+pub const IEEE80211_VHT_CAP_SU_BEAMFORMEE_CAPABLE: u32 = 0x00001000; // ../../../../../include/linux/ieee80211.h:2448
+pub const IEEE80211_VHT_CAP_BEAMFORMEE_STS_SHIFT: u32 = 13; // ../../../../../include/linux/ieee80211.h:2449
+pub const IEEE80211_VHT_MCS_SUPPORT_0_9: u32 = 2; // ../../../../../include/linux/ieee80211.h:2107
+pub const IEEE80211_VHT_MCS_NOT_SUPPORTED: u32 = 3; // ../../../../../include/linux/ieee80211.h:2107
+pub const EFUSE_HW_CAP_PTCL_VHT: u32 = 3; // efuse.h:9
