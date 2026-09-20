@@ -7,19 +7,29 @@ IdeaPad Flex 5 14ALC7 das **einzige** eingebaute Netzgerät (`02:00.0`).
 **Karte:** [WIFI_RTL8822CE_LINUX_MAP.md](WIFI_RTL8822CE_LINUX_MAP.md) — was der
 Linux-Treiber hat, Datei für Datei, ausgezählt.
 
-**Stand 2026-09-20:** Kernel **0.383.0** · Modul **wifi_rtl8822ce 0.10.3**.
-**Stufen 0 bis 3c am Gerät GRÜN.** Der Weg PCI → Bridge → Power → Ringe →
-DMA → Firmware → C2H → efuse → MAC-Init → Parametertabellen → BB/RF ist Ende
-zu Ende bewiesen: `rsvd_boundary 1938`, der H2C-Ring meldet sich leer, die
-Link-List-Tabelle baut sich selbst, alle sechs Tabellen geben **Zahl für
-Zahl** so viele Schreibzugriffe ab wie vorausgerechnet (bb 1289 · agc 450 ·
-rfk_init 2460 · rf_b 697 · rf_a 789), und beide RF-Pfade antworten mit
-Tabellenwerten. **Als Nächstes: Stufe 4.**
+**Stand 2026-09-20: DER EMPFÄNGER HÖRT.** Kernel **0.383.0** · Modul
+**wifi_rtl8822ce 0.13.0**. **Stufen 0 bis 4c am Gerät GRÜN.**
+
+Der Lauf von 0.13.0 auf Kanal 1, 20 MHz, nach 200 ms:
+
+    Falschalarme: cck 57 · ofdm 91 · gesamt 148
+    CCA:          cck 137 · ofdm 93 · gesamt 230
+    CRC ok/err:   cck 34/0 · ofdm 2/1 · ht 0/0
+    RF 0x18: A 0x00003001 B 0x00003001  (Kanal 1, Bandbreite 20 MHz)
+    Leistungsindex A: 1M 71 · 6M 72 · MCS7 72  ·  B: 1M 88 · 6M 83 · MCS7 83
+
+**34 CCK-Pakete mit gültiger Prüfsumme und KEIN einziger Fehler.** Das sind
+Beacons der Nachbarschaft, sauber dekodiert. Damit ist die ganze Kette Ende
+zu Ende bewiesen: PCI → Bridge → Power-Sequenz → Ringe → DMA → Firmware →
+C2H → efuse → Sendeleistungstabellen → MAC-Init → Parametertabellen → BB/RF
+→ DAC-Kalibrierung → Coex-Antenne → Kanal → AGC und CCA-Maske.
 
 **Geprüft ist, was sich ohne Gerät prüfen LÄSST**, und zwar mechanisch:
-`check_regs.py` hält **462 Konstanten** gegen die Linux-Quelle (0 Abweichungen),
-`seqdiff.py` vergleicht **22 Funktionen Zugriff für Zugriff und Zahl für Zahl**
-mit dem C-Original, und `gen_tables.py` rechnet vorher aus, wieviele
+`check_regs.py` hält **651 Konstanten** gegen die Linux-Quelle (0 Abweichungen),
+`seqdiff.py` vergleicht **107 Funktionen Zugriff für Zugriff und Zahl für Zahl**
+mit dem C-Original, `txpwrcheck.py` baut die Sendeleistungskette host-seitig
+und hält sechs Prüfsummen gegen eine unabhängige Nachrechnung, und
+`gen_tables.py` rechnet vorher aus, wieviele
 Schreibzugriffe jede Tabelle auf DIESEM Chip abgeben muss — der Treiber hält
 seine eigene Zahl dagegen. Was davon der Gerätelauf noch beantworten muss,
 steht unten unter „HIER WEITERMACHEN".
@@ -42,9 +52,10 @@ Beide Male habe ich die Zahl übernommen und den Mechanismus dahinter nicht.
 **Werkzeuge im Modulverzeichnis:** `gen_pwrseq.py` und `gen_tables.py`
 erzeugen die Power-Sequenz- und die Parametertabellen aus der C-Quelle;
 `check_regs.py` hält **jede** Konstante gegen ihren `#define`/Enum-Eintrag in
-der Linux-Quelle (462 geprüft, 0 Abweichungen), `seqdiff.py` hält jede
+der Linux-Quelle (651 geprüft, 0 Abweichungen), `seqdiff.py` hält jede
 portierte Funktion Zugriff für Zugriff und Zahl für Zahl gegen das C-Original
-(22 Funktionen). Die Regel „vor jedem Commit grep gegen reg.h" tun damit zwei
+(107 Funktionen), und `txpwrcheck.py` prüft die Sendeleistung host-seitig
+gegen eine unabhängige Nachrechnung. Die Regel „vor jedem Commit grep gegen reg.h" tun damit zwei
 Skripte statt eines Vorsatzes — und beide sind gegen einen absichtlich
 eingebauten Fehler geprüft.
 
@@ -492,13 +503,13 @@ zweites Mal anwirft, spart sie die ganze Messung.
     python3 tools/wasm/wifi_rtl8822ce/txpwrcheck.py   # Sendeleistung host-seitig
     python3 tools/wasm/wifi_rtl8822ce/gen_tables.py   # src/tables.rs aus rtw8822c_table.c
     python3 tools/wasm/wifi_rtl8822ce/gen_pwrseq.py   # src/pwrseq.rs aus rtw8822c.c
-    python3 tools/linux-coverage.py --chip rtl8822ce   # 165 / 940 (war 89)
+    python3 tools/linux-coverage.py --chip rtl8822ce   # 265 / 940 (war 89)
 
-**Abdeckung nach Stufe 3: 165 von 940 rtw88-Funktionen** (vorher 89). Die
-Zuwächse liegen dort, wo sie hingehören: `rtw8822c.c` 56/171, `mac.c` 37/49,
-`phy.c` 23/97, `pci.c` 19/81. Eine Datei im Hauptweg auf 0 gibt es nicht mehr
-außer `coex.c`, `ps.c`, `rx.c` und `mac80211.c` — und die sind alle Stufe 4
-oder später.
+**Abdeckung nach Stufe 4c: 265 von 940 rtw88-Funktionen** (vor dieser Runde
+89). `rtw8822c.c` 67/171 · `phy.c` 54/97 · `mac.c` 39/49 · `coex.c` 27/111 ·
+`pci.c` 26/81 · `efuse.c` 5/5. Auf 0 stehen nur noch `rx.c` (Stufe 5a),
+`mac80211.c` (die obere Hälfte, die `wifid` ersetzt), `debug.c`, `led.c` und
+`wow.c` — die letzten drei stehen unter „wird bewusst nicht gebaut".
 
 **`check_regs.py` UND `seqdiff.py` vor jedem Commit laufen lassen.** Der erste
 hat schon einen echten Fehler gefunden (`TX_DESC_QSEL_H2C` war 17 geraten, ist
@@ -672,11 +683,10 @@ ganzen Kette darunter: `get_tx_power_index` · `get_2g/5g_tx_power_index` ·
 `channel_group` · `rtw8822c_set_tx_power_index` mit
 `set_write_tx_power_ref` und `set_tx_power_diff`.
 
-**Gate 4c:** RF 0x18 trägt auf beiden Pfaden den gesetzten Kanal und die
-Bandbreite · und **`false_alarm_statistics` zählt CCA-Ereignisse ≠ 0** — das
-Gate, das seit 0.10.0 auf seine Stufe gewartet hat. Zählt der Chip dazu
-Pakete mit gültiger Prüfsumme, ist das fremder Funkverkehr auf Kanal 1, und
-der Empfänger hört nicht nur, er versteht.
+**Gate 4c — am Gerät GRÜN.** RF 0x18 trägt auf beiden Pfaden Kanal 1 und
+20 MHz (`0x00003001`), `false_alarm_statistics` zählt 230 CCA-Ereignisse in
+200 ms, und **34 CCK-Pakete kamen mit gültiger Prüfsumme und null Fehlern
+durch**. Der Empfänger hört nicht nur, er versteht.
 
 **Zwei benannte Abweichungen.** `rtw_get_channel_params` liest in Linux eine
 `cfg80211_chan_def`; die gibt es ohne obere Hälfte nicht. Für 20 MHz ist ihr
@@ -692,11 +702,31 @@ und sie sieht anders aus, als sie aussehen „müsste": zwei Bezugswerte je Pfad
 in vier festen Registern (`0x18a0`/`0x41a0`, `0x18e8`/`0x41e8`), und vor
 JEDEM Schreibzugriff wird `0x1c90` Bit 15 gelöscht. Ersetzt durch die echte.
 
-### Danach
+### ▶ Danach — hier weitermachen
 
-`rtw_hci_start` im Ernst (Empfangsring füllen, `rx_tag`, `is_c2h` trennen),
-`rtw_set_channel` aus der oberen Hälfte heraus, Scan, Auth, Assoc — und dann
-ist `wifid` dran, das herstellerunabhängig schon steht.
+**Der Empfänger hört, aber der Treiber bekommt noch keine Frames.** Die
+Zähler der BB steigen; der Weg von dort in den Empfangsring und hinauf ist
+der nächste Posten:
+
+**5a — der Empfangsweg.** `rtw_pci_rx_isr` bzw. sein Abfrage-Gegenstück:
+`rtw_pci_get_hw_rx_ring_nr`, `rtw_pci_dma_check` (das `rx_tag` aus Stufe 2a
+hat seinen ersten Leser), `rtw_rx_query_rx_desc`, `query_phy_status`,
+`rtw_pci_rx_napi` — und die Trennung an `pkt_stat.is_c2h`, weil auf PCIe
+Firmware-Antworten durch denselben Ring kommen. Gate: ein Beacon landet mit
+seiner Länge, seinem RSSI und seiner Rate im Ring.
+
+**5b — `rtw_hci_start` im Ernst**, der Empfangsring gefüllt und
+nachgefüllt, plus der `netdev`-Anschluss (`npk_netdev_register`,
+`npk_submit_rx`), der seit Kernel 0.205.0 steht.
+
+**5c — Scan, Auth, Assoc.** Ab hier ist `wifid` dran; die obere Hälfte ist
+herstellerunabhängig und in `wifi_ax200` einmal gebaut
+([[project_wifi_ax200]]).
+
+**Offen und benannt:** die DAC-Kalibrierung konvergiert nicht (siehe oben) ·
+`rtw_coex_switchband_notify` und `rtw_coex_run_coex` fehlen, also gibt es
+keine laufende Koexistenz · `rtw_get_channel_params` für 40/80 MHz ·
+`rtw_regd_init` (die Zone kommt derzeit aus der efuse, `regd 1`).
 
 ### Der Ablauf für eine neue Version
 
