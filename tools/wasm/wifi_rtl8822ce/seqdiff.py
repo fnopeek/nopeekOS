@@ -132,6 +132,13 @@ HEX_SKIP = {
         "Linux schreibt die Deskriptorfelder einzeln mit cpu_to_le16(); wir "
         "packen sie zu zwei 32-Bit-Worten, mit den Masken als Zahl.",
     "rtw_coex_tdma_timer_base": "FIELD_PREP(PARA1_H2C69_*) gegen eine Maske.",
+    "rtw_phy_get_rate_values_of_txpwr_by_rate":
+        "die 81 zuordnenden case-Marken stehen als erzeugte Tabelle in "
+        "tables.rs (gen_tables.py, gegengeprueft: 83 Marken in der Quelle = "
+        "81 erzeugt + 2 rechnende). Im Code bleiben nur die zwei, die "
+        "rechnen -- also genau die Hexzahlen, die hier fehlen.",
+    "rtw_phy_init_tx_power_limit": "max_power_index statt chip->max_power_index.",
+    "rtw_phy_set_tx_power_limit": "clamp gegen MAX_POWER_INDEX als Konstante.",
 }
 
 def discover():

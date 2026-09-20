@@ -66,6 +66,7 @@ mod rfk;
 mod sec;
 mod tables;
 mod tx;
+mod txpower;
 mod regs;
 use regs::*;
 
@@ -497,6 +498,19 @@ pub extern "C" fn _start() {
         "[rtl8822ce] Stufe 2c: NEIN — nicht weiterbauen, bevor das steht\n"
     });
 
+    // ── Stufe 4b: rtw_chip_board_info_setup ──────────────────────
+    // Sie steht VOR Stufe 3, weil sie in Linux vor `rtw_power_on` steht:
+    // `rtw_chip_info_setup` = parameter_setup -> efuse_info_setup ->
+    // board_info_setup. Die Nummer 4b ist die Reihenfolge, in der wir
+    // gebaut haben, nicht die, in der gelaufen wird.
+    let (stage4b, _txpwr) = match efuse.as_ref() {
+        Some(e) if stage2c => stage4b_board_info_setup(e.rfe_option),
+        _ => {
+            host::print("[rtl8822ce] Stufe 4b: uebersprungen, 2c steht nicht\n");
+            (false, None)
+        }
+    };
+
     // ── Stufe 3a: rtw_power_on, bis rtw_mac_init ─────────────────
     //
     // Alles davor war `rtw_chip_info_setup` — in Linux die Probe-Zeit, die
@@ -562,9 +576,14 @@ pub extern "C" fn _start() {
         "[rtl8822ce] Stufe 3c: NEIN — nicht weiterbauen, bevor das steht\n"
     });
     host::print(if stage4a {
-        "[rtl8822ce] Stufe 4a: GRUEN — weiter mit Stufe 4b (Sendeleistung)\n"
+        "[rtl8822ce] Stufe 4a: GRUEN\n"
     } else {
         "[rtl8822ce] Stufe 4a: NEIN — nicht weiterbauen, bevor das steht\n"
+    });
+    host::print(if stage4b {
+        "[rtl8822ce] Stufe 4b: GRUEN — weiter mit Stufe 4c (set_channel)\n"
+    } else {
+        "[rtl8822ce] Stufe 4b: NEIN — nicht weiterbauen, bevor das steht\n"
     });
 
 
@@ -576,6 +595,86 @@ pub extern "C" fn _start() {
     // Der Chip ist hier bereits aus (Stufe 1 schaltet ihn zuletzt ab), also
     // kann niemand mehr in die gleich freigegebenen Puffer schreiben.
     host::print("[rtl8822ce] fertig — Chip ist aus, Geraet freigegeben\n");
+}
+
+/// main.c:2064-2081 `rtw_chip_board_info_setup` — Stufe 4b.
+///
+/// **Sie steht hier und nicht spaeter, weil sie in Linux hier steht:**
+/// `rtw_chip_info_setup` ruft `parameter_setup`, dann `efuse_info_setup`,
+/// dann `board_info_setup` — alles zur Probe-Zeit, VOR `rtw_power_on`. Sie
+/// fasst kein Register an; sie fuellt die Tabellen, aus denen
+/// `rtw_set_channel` spaeter die Sendeleistung rechnet.
+///
+/// Das Gate braucht deshalb kein Geraet: `gen_tables.py` rechnet dieselbe
+/// Kette in Python nach und legt Pruefsummen ueber die 25 KiB abgeleiteten
+/// Zustand ab. Stimmt eine nicht, ist ein einzelnes Byte anders — und das
+/// faellt hier auf statt als schiefe Sendeleistung auf einem Kanal.
+fn stage4b_board_info_setup(rfe_option: u8) -> (bool, Option<txpower::TxPower>) {
+    host::print("[rtl8822ce] Stufe 4b: rtw_chip_board_info_setup (Sendeleistung)\n");
+
+    let t0 = host::now_us();
+    let t = match txpower::board_info_setup(rfe_option) {
+        Some(t) => t,
+        None => {
+            host::print("  kein RFE-Satz fuer rfe_option ");
+            host::print_dec(rfe_option as u32);
+            host::print("\n");
+            return (false, None);
+        }
+    };
+    let dt = host::now_us() - t0;
+
+    let got = txpower::checksums(&t);
+    let want = tables::EXPECTED_TXPWR_SUMS;
+    host::print("  Tabellen: bb_pg ");
+    host::print_dec(tables::BB_PG_TYPE0.len() as u32);
+    host::print(" Zeilen, txpwr_lmt ");
+    host::print_dec(txpower::txpwr_lmt_tbl(rfe_option).map_or(0, |x| x.len()) as u32);
+    host::print(" Zeilen  (");
+    host::print_dec(dt as u32);
+    host::print(" us)\n");
+
+    const NAMEN: [&str; 6] = ["by_rate_offset_2g", "by_rate_offset_5g",
+                              "by_rate_base_2g  ", "by_rate_base_5g  ",
+                              "limit_2g         ", "limit_5g         "];
+    let mut ok = true;
+    for i in 0..6 {
+        host::print("    ");
+        host::print(NAMEN[i]);
+        host::print(" 0x");
+        host::print_hex32(got[i]);
+        if got[i] == want[i] {
+            host::print("  (erwartet)\n");
+        } else {
+            host::print("  <- ERWARTET 0x");
+            host::print_hex32(want[i]);
+            host::print("\n");
+            ok = false;
+        }
+    }
+
+    // Eine Zahl zum Anfassen: die Grenze fuer FCC, 20 MHz, CCK, Kanal 1.
+    host::print("  Beispiel: FCC/20MHz/CCK/Kanal 1 -> ");
+    let v = t.limit_2g[0][0][0][0];
+    if v < 0 {
+        host::print("-");
+        host::print_dec((-(v as i32)) as u32);
+    } else {
+        host::print_dec(v as u32);
+    }
+    host::print(", Basis CCK Pfad 0 ");
+    let b = t.by_rate_base_2g[0][0];
+    if b < 0 {
+        host::print("-");
+        host::print_dec((-(b as i32)) as u32);
+    } else {
+        host::print_dec(b as u32);
+    }
+    host::print("\n");
+
+    let ok = gate("jede Pruefsumme der Sendeleistung stimmt mit der Nachrechnung",
+                  ok);
+    (ok, Some(t))
 }
 
 /// main.c:1374-1411 `rtw_power_on`, bis einschliesslich `rtw_mac_init`.
