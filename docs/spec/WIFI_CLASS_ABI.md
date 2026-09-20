@@ -118,10 +118,21 @@ wegen voller Queues langsam ist.
 noch selbst verbindet, liest er die Policy aus npkFS — dieselbe Stelle, aus der
 `wifid` sein Credential nimmt:
 
-| Objekt | Wirkung |
+**EINE Datei, `key: value` je Zeile: `sys/config/wifi`.** `wifid` liest
+daraus `ssid:`, die Treiber ebenso — eine zweite Stelle für dasselbe würde
+auseinanderdriften, und dann assoziiert der Treiber zu einem Netz, für das
+`wifid` keinen PSK hat.
+
+| Schlüssel in `sys/config/wifi` | Wirkung |
 |--------|---------|
-| `sys/config/wifi_ssid` | nur APs dieses Netzes kommen als Ziel in Frage |
-| `sys/config/wifi_band` | `auto` (Standard, 5 GHz ab −70 dBm bevorzugt) · `5` · `2.4` |
+| `ssid:` | nur APs dieses Netzes kommen als Ziel in Frage |
+| `band:` | `auto` (Standard, 5 GHz ab −70 dBm bevorzugt) · `5` · `2.4` |
+
+Das Passwort steht getrennt in `sys/config/wifi_psk` (nur `wifid` liest es;
+der Treiber sieht es nie).
+
+    store /sys/config/wifi      ssid: MeinNetz
+    store /sys/config/wifi_psk  meinpasswort
 
 Ohne SSID-Filter nimmt der Treiber den lautesten AP **irgendeines** Netzes —
 inklusive dem des Nachbarn, für den `wifid` keinen PSK hat (stiller

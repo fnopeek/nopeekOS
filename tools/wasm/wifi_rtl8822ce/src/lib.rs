@@ -2021,24 +2021,24 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     // endet in einem stillen MIC-Fehlschlag, und niemand sieht, woran.
     // Nur 2,4 GHz: dort duerfen wir senden, auf 5 GHz haben wir nur
     // gehorcht.
-    let mut want_store = [0u8; 64];
-    let wn = host::fetch("sys/config/wifi_ssid", &mut want_store);
-    let want = if wn > 0 {
-        // Ein abschliessender Zeilenumbruch gehoert nicht zum Namen.
-        let mut k = (wn as usize).min(want_store.len());
-        while k > 0 && (want_store[k - 1] == b'\n'
-                        || want_store[k - 1] == b'\r') {
-            k -= 1;
-        }
-        if k > 0 { Some(k) } else { None }
+    // **Eine Datei, `key: value` je Zeile — dieselbe, die `wifid` und
+    // `wifi_ax200` lesen.** Bis 0.20.0 stand hier `sys/config/wifi_ssid`;
+    // das steht so in einem veralteten Absatz der Spec, und es waere eine
+    // ZWEITE Stelle gewesen, die dasselbe konfiguriert. Zwei Stellen
+    // driften auseinander, und dann assoziiert der Treiber zu einem Netz,
+    // fuer das `wifid` keinen PSK hat.
+    let mut cfg = [0u8; 512];
+    let cn = host::fetch("sys/config/wifi", &mut cfg);
+    let want = if cn > 0 {
+        cfg_get(&cfg[..cn as usize], b"ssid")
     } else {
         None
     };
-    host::print("  sys/config/wifi_ssid: ");
+    host::print("  sys/config/wifi ssid: ");
     match want {
-        Some(k) => {
+        Some((a, b)) => {
             host::print("\"");
-            print_ssid(&want_store[..k]);
+            print_ssid(&cfg[a..b]);
             host::print("\"");
         }
         None => host::print("nicht gesetzt — der lauteste AP wird genommen"),
@@ -2047,9 +2047,9 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
 
     *target = found[..n_found].iter()
         .filter(|b| b.channel <= 14 && b.ssid_len > 0)
-        .filter(|b| match want {
-            Some(k) => b.ssid_len as usize == k
-                && b.ssid[..k] == want_store[..k],
+        .filter(|bss| match want {
+            Some((a, b)) => bss.ssid_len as usize == b - a
+                && bss.ssid[..b - a] == cfg[a..b],
             None => true,
         })
         .max_by_key(|b| b.best)
@@ -3339,4 +3339,41 @@ fn gate(name: &str, ok: bool) -> bool {
     host::print(name);
     host::print("\n");
     ok
+}
+
+/// `cfg_get` aus `wifid`/`wifi_ax200` — eine Zeile `key: value`, `#` ist
+/// ein Kommentar. Gibt die GRENZEN des Wertes zurueck, nicht eine
+/// Scheibe: der Puffer wird daneben weiterbenutzt.
+fn cfg_get(text: &[u8], key: &[u8]) -> Option<(usize, usize)> {
+    let mut start = 0usize;
+    while start <= text.len() {
+        let end = text[start..].iter().position(|&b| b == b'\n')
+            .map(|p| start + p).unwrap_or(text.len());
+        let (a, b) = trim(text, start, end);
+        if b > a && text[a] != b'#' {
+            if let Some(c) = text[a..b].iter().position(|&x| x == b':') {
+                let (ka, kb) = trim(text, a, a + c);
+                if &text[ka..kb] == key {
+                    let (va, vb) = trim(text, a + c + 1, b);
+                    return Some((va, vb));
+                }
+            }
+        }
+        if end >= text.len() {
+            break;
+        }
+        start = end + 1;
+    }
+    None
+}
+
+/// Leerzeichen und Wagenruecklauf an beiden Enden weg.
+fn trim(t: &[u8], mut a: usize, mut b: usize) -> (usize, usize) {
+    while a < b && (t[a] == b' ' || t[a] == b'\t') {
+        a += 1;
+    }
+    while b > a && (t[b - 1] == b' ' || t[b - 1] == b'\t' || t[b - 1] == b'\r') {
+        b -= 1;
+    }
+    (a, b)
 }
