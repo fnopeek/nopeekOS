@@ -488,6 +488,23 @@ fn pwrtrack_init(dm: &mut DmInfo, thermal_meter_k: u8) {
     dm.thermal_meter_lck = thermal_meter_k;
 }
 
+/// rtw8822c.c:1961-1968, ein Stueck aus `rtw8822c_phy_set_param`.
+///
+/// Herausgeloest, weil der EMPFANGSweg (`query_phy_status_page0`) dieselben
+/// zwei Zahlen braucht: sie sind der Massstab, an dem ein CCK-Paket seine
+/// RSSI bekommt. In Linux stehen sie in `dm_info` und werden genau hier
+/// einmal gefuellt; sie gehoeren dem TREIBER, nicht dem Paket.
+pub fn read_cck_gi_bnd(h: i32, dm: &mut crate::dm::DmInfo) {
+    let cck_gi_u_bnd_msb = host::r32_mask(h, 0x1a98, 0xc000) as u8;
+    let cck_gi_u_bnd_lsb = host::r32_mask(h, 0x1aa8, 0xf0000) as u8;
+    let cck_gi_l_bnd_msb = host::r32_mask(h, 0x1a98, 0xc0) as u8;
+    let cck_gi_l_bnd_lsb = host::r32_mask(h, 0x1a70, 0x0f00_0000) as u8;
+
+    dm.cck_gi_u_bnd = (cck_gi_u_bnd_msb << 4) | cck_gi_u_bnd_lsb;
+    dm.cck_gi_l_bnd = (cck_gi_l_bnd_msb << 4) | cck_gi_l_bnd_lsb;
+}
+
+
 /// rtw8822c.c:1862-1913 `rtw8822c_phy_set_param`.
 ///
 /// `hal->antenna_tx`/`antenna_rx` kommen aus `rtw_chip_parameter_setup`:
@@ -540,13 +557,7 @@ pub fn phy_set_param(h: i32, dm: &mut DmInfo, path_div: &mut PathDiv,
     config_trx_mode(h, antenna_tx, antenna_rx, is_tx2_path);
     phy::phy_init(h, dm, path_div, e.crystal_cap, DEFAULT_1SS_TX_PATH);
 
-    let cck_gi_u_bnd_msb = host::r32_mask(h, 0x1a98, 0xc000) as u8;
-    let cck_gi_u_bnd_lsb = host::r32_mask(h, 0x1aa8, 0xf0000) as u8;
-    let cck_gi_l_bnd_msb = host::r32_mask(h, 0x1a98, 0xc0) as u8;
-    let cck_gi_l_bnd_lsb = host::r32_mask(h, 0x1a70, 0x0f00_0000) as u8;
-
-    dm.cck_gi_u_bnd = (cck_gi_u_bnd_msb << 4) | cck_gi_u_bnd_lsb;
-    dm.cck_gi_l_bnd = (cck_gi_l_bnd_msb << 4) | cck_gi_l_bnd_lsb;
+    read_cck_gi_bnd(h, dm);
 
     let dack_ok = rf_init(h, dm, rf_path_num);
     pwrtrack_init(dm, e.thermal_meter_k);

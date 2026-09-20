@@ -505,11 +505,12 @@ zweites Mal anwirft, spart sie die ganze Messung.
     python3 tools/wasm/wifi_rtl8822ce/gen_pwrseq.py   # src/pwrseq.rs aus rtw8822c.c
     python3 tools/linux-coverage.py --chip rtl8822ce   # 265 / 940 (war 89)
 
-**Abdeckung nach Stufe 4c: 265 von 940 rtw88-Funktionen** (vor dieser Runde
-89). `rtw8822c.c` 67/171 · `phy.c` 54/97 · `mac.c` 39/49 · `coex.c` 27/111 ·
-`pci.c` 26/81 · `efuse.c` 5/5. Auf 0 stehen nur noch `rx.c` (Stufe 5a),
-`mac80211.c` (die obere Hälfte, die `wifid` ersetzt), `debug.c`, `led.c` und
-`wow.c` — die letzten drei stehen unter „wird bewusst nicht gebaut".
+**Abdeckung nach Stufe 5a: 279 von 940 rtw88-Funktionen** (vor dieser Runde
+89). `rtw8822c.c` 68/171 · `phy.c` 59/97 · `mac.c` 39/49 · `pci.c` 29/81 ·
+`coex.c` 27/111 · `main.c` 14/84 · `rx.c` 3/8 · `efuse.c` 5/5. Auf 0 stehen
+nur noch `mac80211.c` (die obere Hälfte, die `wifid` ersetzt), `debug.c`,
+`led.c` und `wow.c` — die letzten drei stehen unter „wird bewusst nicht
+gebaut".
 
 **`check_regs.py` UND `seqdiff.py` vor jedem Commit laufen lassen.** Der erste
 hat schon einen echten Fehler gefunden (`TX_DESC_QSEL_H2C` war 17 geraten, ist
@@ -702,18 +703,54 @@ und sie sieht anders aus, als sie aussehen „müsste": zwei Bezugswerte je Pfad
 in vier festen Registern (`0x18a0`/`0x41a0`, `0x18e8`/`0x41e8`), und vor
 JEDEM Schreibzugriff wird `0x1c90` Bit 15 gelöscht. Ersetzt durch die echte.
 
+### Stufe 5a — der Empfangsweg (0.14.0)
+
+Gebaut: `rtw_pci_get_hw_rx_ring_nr` · `rtw_pci_dma_check` (das `rx_tag` aus
+Stufe 2a hat seinen ersten Leser) · `rtw_pci_sync_rx_desc_device` ·
+`rtw_pci_rx_napi` als Abfrageweg · `rtw_rx_query_rx_desc` ·
+`query_phy_status` mit **beiden** Seiten · `rtw_phy_power_2_db` /
+`db_2_linear` / `linear_2_db` / `rf_power_2_rssi` · `rtw_set_rx_freq_band` ·
+`rtw_update_rx_freq_for_invalid`. Gate: ein Rahmen landet mit Länge, Rate,
+Bandbreite, Kanal und Signalstärke im Ring.
+
+**Ein Ring, dessen Inhalt niemand lesen kann.** `RxRing` warf seit Stufe 2a
+die DMA-Handles seiner Puffer weg (`let (_h, phys) = alloc_pages(...)`) — der
+Chip braucht nur die physische Adresse, und solange nichts gelesen wurde,
+fiel es nicht auf. Ein Empfangsring ohne Lesezugang fällt genau einmal auf:
+beim ersten Paket. Jetzt trägt er `chunk_handle` und `buf_loc()`.
+
+**`query_phy_status_page1` stand zuerst als Kurzfassung da, und ihre Masken
+waren falsch.** Gegen `rtw8822c.h:156-178` nachgelesen: `PWDB_B` liegt in
+Wort 0 Bits 23:16 (nicht 15:8), `L_RXSC` in Bits 11:8 (nicht 3:0), der Kanal
+in Wort **1**, `RXSNR_A/B` in Wort 6 Bits 7:0 und 15:8. Dazu fehlten
+`cfo_tail`, die vier `dm_info`-Rückschreibungen und die Pfaddiversität.
+Beide Seiten stehen jetzt ganz da — einschliesslich der `<=`-Schleife, die
+in Linux bei zwei Pfaden **dreimal** läuft und `rssi[2]` schreibt. Sie ist
+abgeschrieben, nicht stillschweigend korrigiert.
+
+**Die CCK-Verstaerkungsgrenzen gehören dem Treiber.** `l_bnd`/`u_bnd` sind
+`dm_info->cck_gi_l_bnd`/`_u_bnd`, einmal in `phy_set_param` aus der Hardware
+gelesen (am Gerät 16 und 63). Sie stehen jetzt in `chip::read_cck_gi_bnd` —
+demselben Code, mit einem zweiten Rufer.
+
+**Drei Abweichungen von `rtw_pci_rx_napi` geschlossen**, alle beim
+Gegenlesen gefunden: `rx_done` zählt in Linux **nur** die Funkrahmen, nicht
+die C2H-Antworten · der Schreibzeiger geht ungemaskt ins Register ·
+`rtw_update_rx_freq_for_invalid` fehlte ganz (ein CCK-Rahmen kann mit Kanal 0
+kommen, dann gilt der laufende Kanal).
+
+**`seqdiff.py` meldete eine Funktion mit null Zugriffen, und das war das
+Werkzeug.** Steht ein `#[allow(...)]` zwischen Doc-Kommentar und Definition,
+brach der Rumpf-Finder ab — die Funktion erschien als „null Zugriffe", und
+eine stille Null sieht aus wie Übereinstimmung. Dabei kam
+`rtw_get_tx_power_params` zum Vorschein, das seit Stufe 4b unbemerkt
+mitlief. Dazu kennt das Werkzeug jetzt **Teilstücke**
+(`/// <datei>.c:<zeilen>, ein Stueck aus \`<name>\``): was bei uns aus einer
+C-Funktion herausgelöst steht, wird für den Vergleich wieder angehängt,
+statt aus der Prüfung zu fallen. **124 von 124 Funktionen Zugriff für
+Zugriff gleich.**
+
 ### ▶ Danach — hier weitermachen
-
-**Der Empfänger hört, aber der Treiber bekommt noch keine Frames.** Die
-Zähler der BB steigen; der Weg von dort in den Empfangsring und hinauf ist
-der nächste Posten:
-
-**5a — der Empfangsweg.** `rtw_pci_rx_isr` bzw. sein Abfrage-Gegenstück:
-`rtw_pci_get_hw_rx_ring_nr`, `rtw_pci_dma_check` (das `rx_tag` aus Stufe 2a
-hat seinen ersten Leser), `rtw_rx_query_rx_desc`, `query_phy_status`,
-`rtw_pci_rx_napi` — und die Trennung an `pkt_stat.is_c2h`, weil auf PCIe
-Firmware-Antworten durch denselben Ring kommen. Gate: ein Beacon landet mit
-seiner Länge, seinem RSSI und seiner Rate im Ring.
 
 **5b — `rtw_hci_start` im Ernst**, der Empfangsring gefüllt und
 nachgefüllt, plus der `netdev`-Anschluss (`npk_netdev_register`,

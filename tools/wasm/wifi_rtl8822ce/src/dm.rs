@@ -24,6 +24,13 @@ pub struct DmInfo {
     pub cck_gi_u_bnd: u8,
     pub cck_gi_l_bnd: u8,
 
+    // main.h:1766-1770 — was der EMPFANGSweg zurueckschreibt (Stufe 5a).
+    pub rx_snr: [i8; 4],
+    pub rx_evm_dbm: [u8; 4],
+    pub cfo_tail: [i16; 4],
+    pub rssi: [u8; 4],
+    pub curr_rx_rate: u8,
+
     // rtw_phy_init
     pub fa_history: [u32; 4],
     pub igi_history: [u8; 4],
@@ -71,6 +78,11 @@ impl DmInfo {
             dack_dck: [[[0; DACK_DCK_BACKUP_NUM]; 2]; DACK_PATH_8822C],
             cck_gi_u_bnd: 0,
             cck_gi_l_bnd: 0,
+            rx_snr: [0; 4],
+            rx_evm_dbm: [0; 4],
+            cfo_tail: [0; 4],
+            rssi: [0; 4],
+            curr_rx_rate: 0,
             fa_history: [0; 4],
             igi_history: [0; 4],
             igi_bitmap: 0,
@@ -108,8 +120,8 @@ impl DmInfo {
 #[derive(Clone, Copy, Default)]
 pub struct PathDiv {
     pub current_tx_path: u8,
+    pub path_a_sum: u32,
+    pub path_b_sum: u32,
     pub path_a_cnt: u16,
-    pub path_a_sum: u16,
     pub path_b_cnt: u16,
-    pub path_b_sum: u16,
 }

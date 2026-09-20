@@ -119,14 +119,27 @@ pub struct RxRing {
     pub rp: u32,
     /// Bis zu zwei zusammenhaengende Stuecke, aus denen die Puffer stammen.
     chunk_phys: [u32; 2],
+    /// **Und ihre DMA-Handles.** Bis 2a wurden die weggeworfen — der Chip
+    /// braucht nur die physische Adresse, aber WIR muessen die Puffer auch
+    /// LESEN koennen, und dafuer gibt es nur den Handle. Ein Empfangsring,
+    /// dessen Inhalt niemand lesen kann, faellt erst auf, wenn das erste
+    /// Paket da ist.
+    chunk_handle: [i32; 2],
     per_chunk: u32,
 }
 
 impl RxRing {
-    /// Physische Adresse des i-ten Empfangspuffers.
+    /// Physische Adresse des i-ten Empfangspuffers — das, was der Chip
+    /// bekommt.
     pub fn buf_phys(&self, i: u32) -> u32 {
         let c = (i / self.per_chunk) as usize;
         self.chunk_phys[c] + (i % self.per_chunk) * RX_BUF_STRIDE
+    }
+
+    /// Handle und Versatz desselben Puffers — das, womit WIR ihn lesen.
+    pub fn buf_loc(&self, i: u32) -> (i32, u32) {
+        let c = (i / self.per_chunk) as usize;
+        (self.chunk_handle[c], (i % self.per_chunk) * RX_BUF_STRIDE)
     }
 }
 
@@ -201,11 +214,13 @@ pub fn init_trx_ring() -> Option<Trx> {
     let per_chunk = RTK_MAX_RX_DESC_NUM / 2;
     let chunk_pages = per_chunk * RX_BUF_STRIDE / PAGE;
     let mut chunk_phys = [0u32; 2];
+    let mut chunk_handle = [-1i32; 2];
     for c in 0..2 {
-        let (_h, phys) = alloc_pages(chunk_pages)?;
+        let (hh, phys) = alloc_pages(chunk_pages)?;
         pages += chunk_pages;
         allocs += 1;
         chunk_phys[c] = phys;
+        chunk_handle[c] = hh;
     }
 
     let rx = RxRing {
@@ -215,6 +230,7 @@ pub fn init_trx_ring() -> Option<Trx> {
         wp: 0,
         rp: 0,
         chunk_phys,
+        chunk_handle,
         per_chunk,
     };
 
@@ -627,4 +643,125 @@ pub fn h2c_wait_consumed(h: i32, trx: &Trx, frist_us: u64) -> (bool, u64, u32) {
             return (false, waited, hw);
         }
     }
+}
+
+// ════════════════════════════════════════════════════════════════
+// Stufe 5a: der Empfangsweg
+// ════════════════════════════════════════════════════════════════
+
+/// pci.h:204 `RX_TAG_MAX`
+pub const RX_TAG_MAX: u16 = 8192;
+
+/// pci.c:1023-1039 `rtw_pci_get_hw_rx_ring_nr`.
+///
+/// Der Chip schreibt seinen Stand in die oberen zwoelf Bit desselben
+/// Registers, aus dem wir unseren lesen. Die Differenz ist die Zahl der
+/// Puffer, die er gefuellt hat.
+pub fn get_hw_rx_ring_nr(h: i32, trx: &Trx) -> u32 {
+    let tmp = host::r32(h, RTK_PCI_RXBD_IDX_MPDUQ);
+    let cur_wp = (tmp & TRX_BD_HW_IDX_MASK) >> 16;
+    if cur_wp >= trx.rx.wp {
+        cur_wp - trx.rx.wp
+    } else {
+        trx.rx.len - (trx.rx.wp - cur_wp)
+    }
+}
+
+/// pci.c:683-702 `rtw_pci_dma_check`.
+///
+/// **Hier bekommt `rx_tag` aus Stufe 2a seinen ersten Leser.** Der Chip
+/// schreibt in `total_pkt_size` des Pufferdeskriptors eine fortlaufende
+/// Marke; stimmt sie nicht mit unserer, hat der Bus etwas verschluckt.
+/// Linux warnt und rechnet weiter — genau so steht es hier.
+pub fn dma_check(trx: &mut Trx, idx: u32) -> bool {
+    let off = idx * RX_BUF_DESC_SZ;
+    // `struct rtw_pci_rx_buffer_desc` (pci.h:193):
+    // { __le16 buf_size; __le16 total_pkt_size; __le32 dma; }
+    let w0 = host::dma_r32(trx.rx.handle, off);
+    let total_pkt_size = (w0 >> 16) as u16;
+    let ok = total_pkt_size == trx.rx_tag;
+    if !ok {
+        host::print("[rtl8822ce] pci bus timeout, check dma status (rx_tag ");
+        host::print_dec(trx.rx_tag as u32);
+        host::print(", gelesen ");
+        host::print_dec(total_pkt_size as u32);
+        host::print(")\n");
+    }
+    trx.rx_tag = (trx.rx_tag + 1) % RX_TAG_MAX;
+    ok
+}
+
+/// pci.c:235-250 `rtw_pci_sync_rx_desc_device` — den Platz wieder
+/// freigeben, damit der Chip ihn erneut fuellt.
+fn sync_rx_desc_device(trx: &Trx, idx: u32) {
+    let off = idx * RX_BUF_DESC_SZ;
+    // `memset(buf_desc, 0, sizeof(*buf_desc))`, dann buf_size und dma.
+    host::dma_w32(trx.rx.handle, off, RTK_PCI_RX_BUF_SIZE & 0xFFFF);
+    host::dma_w32(trx.rx.handle, off + 4, trx.rx.buf_phys(idx));
+}
+
+/// pci.c:1041-1117 `rtw_pci_rx_napi`, als ABFRAGEweg.
+///
+/// **Benannte Abweichung:** Linux wird vom Interrupt geweckt und gibt das
+/// Paket an `ieee80211_rx_napi`. Wir fragen ab und rufen `deliver` je
+/// Paket; alles dazwischen — Deskriptor lesen, `rx_tag` pruefen, Platz
+/// wieder freigeben, Zeiger fortschreiben — ist dieselbe Folge.
+///
+/// Der `skb`-Tausch aus Linux entfaellt: dort wird ein NEUER Puffer
+/// angelegt und der alte sofort wieder an die DMA gehaengt, damit der
+/// Empfang nicht stockt. Bei uns wird der Inhalt in den Linearspeicher
+/// gelesen, und danach ist der Puffer genauso wieder frei.
+#[allow(clippy::too_many_arguments)]
+pub fn rx_poll(h: i32, trx: &mut Trx, limit: u32, buf: &mut [u8],
+               dm: &mut crate::dm::DmInfo, path_div: &mut crate::dm::PathDiv,
+               rf_path_num: u8, current_band_width: u8,
+               current_channel: u8,
+               mut deliver: impl FnMut(&crate::rx::RxPktStat, &[u8])) -> u32 {
+    let count = get_hw_rx_ring_nr(h, trx).min(limit);
+    let mut cur_rp = trx.rx.rp;
+    let mut rx_done = 0u32;
+
+    for _ in 0..count {
+        dma_check(trx, cur_rp);
+
+        let (bh, boff) = trx.rx.buf_loc(cur_rp);
+        // Erst den Deskriptorkopf, dann so viel, wie er ansagt.
+        let head = crate::tx::TX_PKT_DESC_SZ.min(buf.len());
+        host::dma_read_buf(bh, boff, &mut buf[..head]);
+        let stat = crate::rx::query_rx_desc(&buf[..head]);
+
+        let pkt_offset = crate::regs::RX_PKT_DESC_SZ as usize
+            + stat.drv_info_sz as usize + stat.shift as usize;
+        let total = (pkt_offset + stat.pkt_len as usize).min(buf.len());
+        if total > head {
+            host::dma_read_buf(bh, boff, &mut buf[..total]);
+        }
+
+        // `query_phy_status` braucht den Block HINTER dem Deskriptor.
+        let mut stat = crate::rx::query_rx_desc_full(&buf[..total], dm,
+                                                     path_div, rf_path_num,
+                                                     current_band_width);
+        // `rtw_pci_rx_napi` tut das nach dem Abziehen des Deskriptors.
+        // Ohne Suche ist `scanning` falsch, siehe dort.
+        crate::rx::update_rx_freq_for_invalid(&mut stat, current_channel,
+                                              false);
+        deliver(&stat, &buf[..total]);
+        if !stat.is_c2h {
+            rx_done += 1;
+        }
+
+        sync_rx_desc_device(trx, cur_rp);
+        cur_rp += 1;
+        if cur_rp >= trx.rx.len {
+            cur_rp = 0;
+        }
+    }
+
+    trx.rx.rp = cur_rp;
+    // „'rp', the last position we have read, is seen as previous position
+    //  of 'wp' that is used to calculate 'count' next time."
+    trx.rx.wp = cur_rp;
+    host::w16(h, RTK_PCI_RXBD_IDX_MPDUQ, trx.rx.rp as u16);
+
+    rx_done
 }

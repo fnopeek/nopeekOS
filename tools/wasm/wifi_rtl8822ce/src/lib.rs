@@ -63,6 +63,7 @@ mod pci;
 mod phy;
 mod pwrseq;
 mod rfk;
+mod rx;
 mod sec;
 mod tables;
 mod tx;
@@ -565,6 +566,14 @@ pub extern "C" fn _start() {
         }
     };
 
+    // ── Stufe 5a: der Empfangsweg ────────────────────────────────
+    let stage5a = if stage4c {
+        stage5a_rx(h, &hal, &mut trx)
+    } else {
+        host::print("[rtl8822ce] Stufe 5a: uebersprungen, 4c steht nicht\n");
+        false
+    };
+
     // Und wieder aus, aus demselben Grund wie oben: der Kernel gibt gleich
     // die DMA-Puffer frei, in die eine laufende Firmware sonst weiterschriebe.
     mac::mac_power_off(h, hal.cut_version);
@@ -598,6 +607,11 @@ pub extern "C" fn _start() {
         "[rtl8822ce] Stufe 4c: GRUEN — DER EMPFAENGER HOERT\n"
     } else {
         "[rtl8822ce] Stufe 4c: NEIN — nicht weiterbauen, bevor das steht\n"
+    });
+    host::print(if stage5a {
+        "[rtl8822ce] Stufe 5a: GRUEN — DIE PAKETE KOMMEN AN\n"
+    } else {
+        "[rtl8822ce] Stufe 5a: NEIN — nicht weiterbauen, bevor das steht\n"
     });
 
 
@@ -1233,6 +1247,146 @@ fn pwr_cmds_for_us(cut: u8) -> usize {
         }
     }
     n
+}
+
+/// Stufe 5a — der WIRT um `pci::rx_poll` herum, nicht der Port selbst.
+///
+/// Der Port ist `pci::rx_poll` (= `rtw_pci_rx_napi`); hier steht nur, wie
+/// lange gefragt wird und was gemeldet wird. Linux laeuft dort aus dem
+/// Interrupt in NAPI; wir haben keine Geraete-Interrupts (benannte
+/// Abweichung seit Stufe 2), also wird der Schreibzeiger gelesen.
+fn stage5a_rx(h: i32, hal: &Hal, trx: &mut pci::Trx) -> bool {
+    /// Derselbe Kanal wie in Stufe 4c — `hal.current_channel`.
+    const CH_5A: u8 = 1;
+
+    host::print("[rtl8822ce] Stufe 5a: der Empfangsweg\n");
+
+    // `dm_info` traegt die CCK-Verstaerkungsgrenzen, an denen ein
+    // CCK-Paket seine Signalstaerke bekommt. Sie stehen in der Hardware,
+    // seit `phy_set_param` sie dort gelesen hat.
+    let mut dm = dm::DmInfo::new();
+    let mut path_div = dm::PathDiv::default();
+    chip::read_cck_gi_bnd(h, &mut dm);
+    host::print("  cck_gi Grenzen u/l ");
+    host::print_dec(dm.cck_gi_u_bnd as u32);
+    host::print("/");
+    host::print_dec(dm.cck_gi_l_bnd as u32);
+    host::print("\n");
+
+    // Ein ganzer Empfangspuffer. Er liegt statisch, weil dieser Treiber
+    // keinen Allokator hat und 11 KB auf dem Stapel nicht stehen.
+    static mut RXBUF: [u8; pci::RTK_PCI_RX_BUF_SIZE as usize] =
+        [0; pci::RTK_PCI_RX_BUF_SIZE as usize];
+    // SAFETY: Einfaeden, ein Rufer, und der Puffer verlaesst diese
+    // Funktion nicht. Es gibt in diesem Treiber keinen zweiten Pfad, der
+    // ihn anfasst.
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(RXBUF) };
+
+    let mut total = 0u32;
+    let mut c2h = 0u32;
+    let mut crc = 0u32;
+    let mut shown = 0u32;
+    let mut best: i8 = -128;
+    let mut rounds = 0u32;
+
+    // 2000 ms. Ein Beacon-Intervall sind 102,4 ms, also kommt in dieser
+    // Zeit von JEDEM erreichbaren Netz mehr als ein Rahmen — wenn der Weg
+    // traegt. Kommt in zwei Sekunden nichts, ist es kein Timing-Problem.
+    let t0 = host::now_us();
+    while host::now_us() - t0 < 2_000_000 {
+        rounds += 1;
+        let n = pci::rx_poll(h, trx, 64, buf, &mut dm, &mut path_div,
+                             hal.rf_path_num, 0, CH_5A, |st, pkt| {
+            total += 1;
+            if st.is_c2h {
+                c2h += 1;
+                return;
+            }
+            if st.crc_err {
+                crc += 1;
+            }
+            if st.signal_power > best {
+                best = st.signal_power;
+            }
+            // Die ersten acht ganz, damit man SIEHT, was ankommt.
+            if shown < 8 && !st.crc_err {
+                shown += 1;
+                print_pkt(st, pkt);
+            }
+        });
+        if n == 0 {
+            host::sleep_ms(1);
+        }
+    }
+
+    host::print("  Runden ");
+    host::print_dec(rounds);
+    host::print(" · Pakete ");
+    host::print_dec(total);
+    host::print(" (c2h ");
+    host::print_dec(c2h);
+    host::print(", crc-Fehler ");
+    host::print_dec(crc);
+    host::print(")\n  staerkstes Signal ");
+    print_dbm(best);
+    host::print("\n  Ringzeiger rp=");
+    host::print_dec(trx.rx.rp);
+    host::print(" · rx_tag ");
+    host::print_dec(trx.rx_tag as u32);
+    host::print("\n");
+
+    let mut ok = true;
+    ok &= gate("der Ring liefert Pakete", total > 0);
+    ok &= gate("und mindestens eins davon ist ein Funkrahmen mit\n\
+         \x20         gueltiger Pruefsumme", total - c2h - crc > 0);
+    ok &= gate("der PHY-Status traegt eine Signalstaerke", best > -128);
+    ok
+}
+
+/// Eine Zeile je Paket: Laenge, Rate, Bandbreite, Kanal, Signal — und die
+/// ersten Bytes des Rahmens, denn an `frame_control` sieht man, ob es ein
+/// Beacon ist.
+fn print_pkt(st: &rx::RxPktStat, pkt: &[u8]) {
+    let off = RX_PKT_DESC_SZ as usize + st.drv_info_sz as usize
+        + st.shift as usize;
+    host::print("    len ");
+    host::print_dec(st.pkt_len as u32);
+    host::print(" · rate 0x");
+    host::print_hex8(st.rate);
+    host::print(" · bw ");
+    host::print(match st.bw {
+        0 => "20",
+        1 => "40",
+        _ => "80",
+    });
+    host::print(" · ch ");
+    host::print_dec(st.channel as u32);
+    host::print(" (");
+    host::print_dec(st.freq as u32);
+    host::print(" MHz) · ");
+    print_dbm(st.signal_power);
+    host::print(" · rssi ");
+    host::print_dec(st.rssi as u32);
+    if off + 2 <= pkt.len() {
+        let fc = u16::from_le_bytes([pkt[off], pkt[off + 1]]);
+        host::print(" · fc 0x");
+        host::print_hex16(fc);
+        // 802.11: Typ in Bits 3:2, Subtyp in 7:4. 0x80 = Beacon.
+        if fc & 0xfc == 0x80 {
+            host::print(" BEACON");
+        }
+    }
+    host::print("\n");
+}
+
+fn print_dbm(v: i8) {
+    if v < 0 {
+        host::print("-");
+        host::print_dec((-(v as i32)) as u32);
+    } else {
+        host::print_dec(v as u32);
+    }
+    host::print(" dBm");
 }
 
 fn gate(name: &str, ok: bool) -> bool {
