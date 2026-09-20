@@ -1626,8 +1626,9 @@ fn stage5b_tx(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     host::print("  Probe Responses an UNSERE Adresse: ");
     host::print_dec(resp);
     host::print("\n");
-    ok &= gate("ein fremder AP antwortet uns — der Rahmen hat die\n\
-         \x20         Antenne verlassen", resp > 0);
+    if resp == 0 {
+        host::print("  [Befund] auf Kanal 1 antwortet gerade niemand. Das ist\n         \x20         eine Aussage ueber die NACHBARSCHAFT, nicht ueber uns —\n         \x20         ein Kanal ist ein Muenzwurf. Der Beweis, dass der Rahmen\n         \x20         die Antenne verlaesst, faellt im Suchlauf ueber DREIZEHN\n         \x20         Kanaele (Stufe 5c).\n");
+    }
     ok
 }
 
@@ -1919,10 +1920,14 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
 
     let mut n_2g = 0u32;
     let mut n_5g = 0u32;
+    let mut n_resp = 0u32;
     for b in found[..n_found].iter() {
         if b.channel > 14 { n_5g += 1 } else { n_2g += 1 }
+        n_resp += b.resps as u32;
     }
-    host::print("  gefunden: ");
+    host::print("  Probe Responses insgesamt: ");
+    host::print_dec(n_resp);
+    host::print("\n  gefunden: ");
     host::print_dec(n_found as u32);
     host::print(" Netze (");
     host::print_dec(n_2g);
@@ -2006,6 +2011,11 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     // angenommen hat, schon. Die Zahl der gefundenen Netze ist ein BEFUND
     // und steht oben.
     ok &= gate("jeder angefahrene Kanal steht danach im RF", rf_ok == n_ch);
+    // **Hier gehoert dieses Tor hin und nicht in 5b.** Dass ein Rahmen die
+    // Antenne verlaesst, beweist nur eine ANTWORT — und ob auf EINEM Kanal
+    // gerade jemand antwortet, ist ein Muenzwurf. Ueber dreizehn Kanaele
+    // ist es keiner mehr.
+    ok &= gate("ein fremder AP antwortet auf unseren Probe Request\n         \x20         (ueber alle aktiven Kanaele)", n_resp > 0);
     ok &= gate("der Suchlauf findet Netze", n_found > 0);
     let mehr_als_einer = {
         let first = found[..n_found].iter().map(|b| b.channel).next()
