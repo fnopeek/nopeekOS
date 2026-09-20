@@ -1229,6 +1229,27 @@ steckenbleiben) · Wiederverbinden nach einem Deauth (`EV_LINK_DOWN` und ein
 neuer Durchlauf ab 5e) · LPS mit den reservierten Seiten · die laufende
 Koexistenz.
 
+### Benannt und noch nicht gebaut: die Ausgabe muss leise werden
+
+Florian, nachdem der Treiber im Autostart lief: *„der ganze debug phase 0-6
+spammt beim booten … das system voll."* Stimmt — ein Treiber, der bei jedem
+Boot sechs Stufen mit Gates ausdruckt, macht die Konsole für alles andere
+unbrauchbar.
+
+**Form:** derselbe Schalter, den `wifi_ax200` schon benutzt — ein Schlüssel
+in `sys/config/wifi`. `debug: 1` schaltet die Stufenkette ein; ohne ihn
+bleibt sie still.
+
+**Still heisst nicht stumm.** Eine Zeile, wenn es steht, und jede Zeile,
+wenn etwas nicht steht:
+
+    [rtl8822ce] verbunden: "IvyPie_New" K7 -49 dBm · HT MCS7 40 MHz · AID 3
+
+**Die Tore bleiben.** Sie sind der Grund, warum sechs Stufen entstanden
+sind, ohne im Dunkeln zu suchen — sie gehören hinter den Schalter, nicht in
+den Müll. Und der Treiberbericht (`npk_driver_report`, je Sekunde) ist
+davon unberührt: der geht an `wlan` und nicht auf die Konsole.
+
 ### ▶ Danach — hier weitermachen
 
 **6b — die Verbindung halten.** Der Treiber läuft, statt Stufen
