@@ -699,21 +699,34 @@ fn phy_set_param_and_check(h: i32, hal: &Hal, e: &efuse::Efuse) -> (bool, bool) 
     stage3b &= gate("beide RF-Pfade antworten mit Tabellenwerten", rf_ok);
 
     // ── Gate 3c ──────────────────────────────────────────────────
-    // **Das Gate stand in 0.10.0 an der falschen Stelle.** Es fragte, ob
-    // der Empfaenger CCA-Ereignisse zaehlt — und das kann er hier gar nicht,
+    // **Das Gate stand in 0.10.0 an der falschen Stelle**, und in 0.10.1
+    // stand es an der zweiten falschen Stelle. Beide Fehler sind derselbe:
+    // eine Bedingung erfinden, die Linux nicht hat.
+    //
+    // 0.10.0 fragte nach CCA-Ereignissen. Die kann es hier nicht geben,
     // auch in Linux nicht: `false_alarm_statistics` laeuft dort erst im
     // Wachhund (main.c:280), also NACH `rtw_coex_power_on_setting` (das die
-    // gemeinsame Antenne ueberhaupt erst umlegt, coex.c:"set antenna path
-    // to BT") und NACH `rtw_set_channel` (das AGC, CCA-Maske und
-    // RX-Filter programmiert, rtw8822c.c `set_channel_bb`). Beides ist
-    // Stufe 4. Ein Gate, das einen Zustand vor seiner Zeit prueft, misst
-    // nichts ([[feedback_a_test_of_a_state_must_say_when]]).
+    // gemeinsame Antenne umlegt) und NACH `rtw_set_channel` (das AGC,
+    // CCA-Maske und RX-Filter programmiert). Beides ist Stufe 4.
     //
-    // Was Stufe 3c WIRKLICH beantworten kann: lief `phy_set_param` durch,
-    // antworten beide RF-Pfade, und hat die DAC-Kalibrierung ihr eigenes
-    // Ziel erreicht — den Restversatz unter 5 auf BEIDEN Pfaden.
-    let stage3c = gate("die DAC-Kalibrierung konvergiert auf beiden Pfaden",
-                       dack_ok);
+    // 0.10.1 fragte nach der Konvergenz der DAC-Kalibrierung. **Linux
+    // prueft das nirgends** — `rtw8822c_rf_dac_cal` laeuft zehnmal und geht
+    // weiter, ob der Restversatz unter 5 faellt oder nicht. Wir haben kein
+    // Linux auf diesem Geraet, koennen also nicht wissen, was dort
+    // herauskaeme. Ein Gate ohne Vergleichsmass ist eine Meinung
+    // ([[feedback_a_test_of_a_state_must_say_when]]).
+    //
+    // Was Stufe 3c beantworten KANN: lief `phy_set_param` durch und
+    // antworten beide RF-Pfade mit dem, was die Tabellen hineingeschrieben
+    // haben. Die Konvergenz steht als BEFUND darunter, mit Zahlen.
+    let stage3c = gate("phy_set_param lief durch, beide RF-Pfade antworten",
+                       rf_ok);
+
+    host::print(if dack_ok {
+        "  [Befund] die DAC-Kalibrierung konvergiert auf beiden Pfaden\n"
+    } else {
+        "  [Befund] die DAC-Kalibrierung konvergiert NICHT auf beiden Pfaden.\n                    Linux prueft das nicht, wir haben kein Vergleichsmass —\n                    benannt und offen, siehe docs/plan/WIFI_RTL8822CE.md\n"
+    });
 
     // Gemessen, aber NICHT gewertet: die Zaehler stehen hier
     // erwartungsgemaess auf 0. Sie stehen trotzdem im Log, weil sie ab

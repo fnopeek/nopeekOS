@@ -220,9 +220,9 @@ fn header_file_init(h: i32, pre: bool) {
 /// rtw8822c.c:101-106 `rtw8822c_bb_reset` — aus, an, aus? Nein: AN, aus, AN.
 /// Der mittlere Schritt ist der Reset, die zwei aeusseren halten ihn.
 fn bb_reset(h: i32) {
-    host::w16(h, REG_SYS_FUNC_EN, host::r16(h, REG_SYS_FUNC_EN) | BIT_FEN_BB_RSTB as u16);
-    host::w16(h, REG_SYS_FUNC_EN, host::r16(h, REG_SYS_FUNC_EN) & !(BIT_FEN_BB_RSTB as u16));
-    host::w16(h, REG_SYS_FUNC_EN, host::r16(h, REG_SYS_FUNC_EN) | BIT_FEN_BB_RSTB as u16);
+    host::set16(h, REG_SYS_FUNC_EN, BIT_FEN_BB_RSTB as u16);
+    host::clr16(h, REG_SYS_FUNC_EN, BIT_FEN_BB_RSTB as u16);
+    host::set16(h, REG_SYS_FUNC_EN, BIT_FEN_BB_RSTB as u16);
 }
 
 /// rtw8822c.c:2444-2459 `rtw8822c_config_cck_rx_path`

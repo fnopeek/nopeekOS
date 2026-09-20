@@ -483,7 +483,7 @@ zweites Mal anwirft, spart sie die ganze Messung.
 |---|---|
 | **3a** | `AUTO_INIT_LLT_V1` löscht sich selbst (die Hardware hat die Link-List-Tabelle gebaut) · `init_h2c` findet `h2cq_size == h2cq_free` · `rsvd_boundary == 1938` · `REG_CR` trägt `MAC_TRX_ENABLE` · `PCIE_EMAC_PDN_AUX_TO_FAST_CLK` steht (cut D) |
 | **3b** | jede Tabelle gibt genau so viele Schreibzugriffe ab wie gerechnet · RF-Register 0x00 und 0x18 antworten auf BEIDEN Pfaden mit etwas, das weder 0 noch 0xfffff ist |
-| **3c** | `false_alarm_statistics` zählt CCA-Ereignisse ≠ 0 — **der Empfänger hört** |
+| **3c** | `phy_set_param` läuft durch und beide RF-Pfade antworten mit Tabellenwerten. **Die CCA-Zähler sind hier KEIN Gate** — sie laufen in Linux erst nach der Coex-Antenne und `set_channel`, also ab Stufe 4 |
 
 ### Werkzeuge (im Modulverzeichnis)
 
@@ -511,6 +511,50 @@ eingebauten Fehler geprüft: ein Zahlendreher in der DACK und ein
 `rtw8822c.c` und `bf.h`. Vorher fielen zusammengesetzte Makros wie
 `WLAN_SIFS_CFG` (vier Werte über drei Zeilen) still durch — also genau die,
 die man beim Abtippen falsch macht. Von 147 geprüften Konstanten auf 462.
+
+### Benannt und offen: die DAC-Kalibrierung konvergiert nicht
+
+**Gemessen am Geraet (0.10.2), beide Pfade, je zehn Runden:**
+
+    ADCK A  12/2 13/2 12/2 12/3 12/2 12/2 12/2 12/2 12/2 12/2   nicht konvergiert
+    ADCK B  20/24 ... zehnmal derselbe Wert                      nicht konvergiert
+    DACK A  0/1                                                  konvergiert
+    DACK B  36/39 36/40 ... zehnmal derselbe Wert                nicht konvergiert
+
+Der Abbruch haengt an „Restversatz unter 5". Die Korrektur wird geschrieben
+(`base_addr + 0x68`), die Hardware nimmt sie an — `failed to write IQ vector
+to hardware` steht **nicht** im Log — und die Nachmessung aendert sich nicht.
+In Runde 5 der ADCK A steht sogar ein anderer Ausgleich (`0x0c0c` statt
+`0x080c`), das Register wird also wirklich beschrieben.
+
+**Was ausgeschlossen ist, durch Messung:**
+
+- **Der Pfadzugriff.** `RF 0x3e` liest `A=0x3, B=0x20` — genau die Werte, die
+  `rf_a` und `rf_b` dort schreiben. Es ist das einzige Register, auf das die
+  zwei Tabellen verschieden schreiben und das danach niemand mehr anfasst.
+  Dass `RF 0x00` und `0x18` auf beiden Pfaden gleich lesen, ist KEIN Befund:
+  dort schreiben beide Tabellen denselben Wert (nachgerechnet gegen den
+  Bedingungslaeufer).
+- **Eine eingefrorene Messung.** Die Rohproben aus `0x2dbc` streuen und
+  unterscheiden sich je Pfad (A: i −18…−7, B: i −23…−19), 100 von 100
+  Lesungen gueltig.
+- **Ein Portierfehler.** `seqdiff.py` findet die Funktionspaare jetzt SELBST
+  ueber die Doc-Kommentare und vergleicht **65 Funktionen** statt 22 — darunter
+  die ganze DACK. Alle gleich, Zugriff fuer Zugriff und Zahl fuer Zahl. Der
+  eine scheinbare Unterschied in `dac_cal_adc` war Linux' eigene
+  `rtw_dbg`-Formatzeichenkette, die das Werkzeug als Registerwerte gelesen hat.
+
+**Warum es trotzdem kein Gate ist.** Linux prueft die Konvergenz **nirgends**:
+`rtw8822c_rf_dac_cal` laeuft zehnmal und geht weiter. Es gibt also kein
+Vergleichsmass dafuer, was auf DIESEM Board herauskommen muesste, und der
+Entwicklungsrechner hat eine andere Karte (8852CE/rtw89). Daraus ein Tor zu
+machen hiesse, eine Meinung zu pruefen. Es steht als BEFUND im Log, mit
+Zahlen, und hier.
+
+**Die Folge, soweit absehbar:** ein unkompensierter Gleichspannungsversatz
+verschlechtert die Empfindlichkeit des betroffenen Pfades. Er haelt den
+Empfaenger nicht an. Wenn Stufe 4 steht und Pfad B messbar schlechter hoert
+als A, ist das hier die erste Spur.
 
 ### Was danach kommt — Stufe 4
 

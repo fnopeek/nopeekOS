@@ -254,3 +254,13 @@ pub fn delay_us(us: u64) {
     let t0 = now_us();
     while now_us() - t0 < us {}
 }
+
+/// `rtw_write16_set`
+pub fn set16(h: i32, off: u32, bits: u16) {
+    w16(h, off, r16(h, off) | bits);
+}
+
+/// `rtw_write16_clr`
+pub fn clr16(h: i32, off: u32, bits: u16) {
+    w16(h, off, r16(h, off) & !bits);
+}
