@@ -82,6 +82,9 @@ OTHER_BUS = {
 # Hexzahlen, die nur im Zweig eines anderen Busses stehen.
 HEX_OTHER_BUS = {
     "__priority_queue_cfg": [0x1],  # USB: rtw_write8_set(..., BIT(1))
+    # rtw8822c.h:183 XCAP_MASK -- bei uns beim NAMEN genannt und von
+    # check_regs.py gegen die Quelle geprueft, deshalb keine Zahl im Code.
+    "rtw8822c_phy_set_param": [0x7f],
 }
 
 # Funktionen, deren ZUGRIFFSFOLGE bewusst von Linux abweicht, mit Grund.
@@ -110,6 +113,13 @@ DEVIATION = {
 # Funktionen, deren Zahlenfolge sich NICHT vergleichen laesst, mit Grund.
 # Die Zugriffsfolge wird trotzdem geprueft.
 HEX_SKIP = {
+    "rtw_get_tx_power_params":
+        "unsere Fassung zieht rtw_phy_get_tx_power_index mit hinein, und "
+        "dessen Rueckgabe ist in Linux eine stille s8->u8-Wandlung (s8 "
+        "tx_power, u8 Rueckgabetyp). In Rust steht sie als & 0xff da.",
+    "rtw_pci_sync_rx_desc_device":
+        "Linux schreibt buf_size als __le16-Feld; wir schreiben das Wort in "
+        "einem 32-Bit-Zugriff und maskieren es dafuer mit 0xFFFF.",
     "rtw8822c_false_alarm_statistics":
         "Linux zieht die Felder mit FIELD_GET(GENMASK(31,16), x); das sind "
         "Makros ohne eine einzige Hexzahl. Jede Schreibweise auf unserer "
@@ -165,8 +175,13 @@ def discover():
     aus, um die es gerade geht — das ist in 0.10.2 passiert: `dac_cal_adc`
     stand nicht drin, und dort lag der Fehler.
     """
-    pairs = []
+    pairs, parts = [], {}
     src_re = re.compile(r"^/// (?:.*·\s*)?([a-z0-9_]+\.c):[\d-]+\s+`([A-Za-z_]\w*)`")
+    # Ein STUECK einer C-Funktion, das bei uns eigen steht. Ohne diese Form
+    # verschwindet jede herausgeloeste Zeile aus dem Vergleich: die
+    # C-Funktion meldet dann „Zahlen fehlen" und das Stueck gar nichts.
+    part_re = re.compile(
+        r"^/// ([a-z0-9_]+\.c):[\d-]+,\s+ein Stueck aus\s+`([A-Za-z_]\w*)`")
     fn_re = re.compile(r"^(?:pub )?fn ([a-z0-9_]+)")
     for rf in sorted(os.listdir(R)):
         if not rf.endswith(".rs"):
@@ -174,18 +189,33 @@ def discover():
         lines = open(os.path.join(R, rf)).read().split("\n")
         for i, line in enumerate(lines):
             m = src_re.match(line)
+            part = False
             if not m:
-                continue
+                m = part_re.match(line)
+                part = m is not None
+                if not m:
+                    continue
             cfile, cname = m.groups()
             # die naechste Funktionsdefinition unter dem Kommentarblock
             for j in range(i + 1, min(i + 40, len(lines))):
                 if lines[j].startswith("///") or lines[j].startswith("//"):
                     continue
+                # Ein Attribut steht ZWISCHEN Kommentar und Definition.
+                # Brach der Finder hier ab, meldete die Funktion still
+                # „null Zugriffe" — und eine stille Null sieht aus wie
+                # Uebereinstimmung.
+                if lines[j].lstrip().startswith("#["):
+                    continue
                 fm = fn_re.match(lines[j])
                 if fm:
-                    pairs.append((cname, cfile, cname, rf, lines[j].rstrip(" {")))
+                    if part:
+                        parts.setdefault(cname, []).append(
+                            (rf, lines[j].rstrip(" {")))
+                    else:
+                        pairs.append((cname, cfile, cname, rf,
+                                      lines[j].rstrip(" {")))
                 break
-    return pairs
+    return pairs, parts
 
 
 def c_body(path, name):
@@ -289,11 +319,15 @@ def main():
     bad = 0
     skipped = []
     deviated = []
-    cases = discover()
+    cases, parts = discover()
     for name, cf, csig, rf, rsig in cases:
         try:
             c = c_seq(c_body(cf, csig))
             r = rs_seq(rs_body(rf, rsig))
+            # Was bei uns herausgeloest steht, gehoert fuer den Vergleich
+            # zurueck an seinen Platz.
+            for prf, prsig in parts.get(name, []):
+                r += rs_seq(rs_body(prf, prsig))
         except ValueError:
             # Kein Rumpf zu finden: eine Tabelle, eine Konstante oder eine
             # Funktion, die in Linux anders heisst. Nichts zu vergleichen.
@@ -314,6 +348,8 @@ def main():
             continue
         ch = hexes(c_body(cf, csig), strip_comments=False)
         rh = hexes(rs_body(rf, rsig), strip_comments=True)
+        for prf, prsig in parts.get(name, []):
+            rh += hexes(rs_body(prf, prsig), strip_comments=True)
         ch = [v for v in ch if v not in HEX_OTHER_BUS.get(name, [])]
         if ch != rh:
             print(f"  HEX   {name:34s} Linux {len(ch):3d}  wir {len(rh):3d}")

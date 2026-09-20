@@ -592,6 +592,29 @@ def channel_groups():
     return out
 
 
+
+def db_invert_table():
+    """phy.c:28-53 `db_invert_table[12][8]` — 96 Zahlen, aus denen die
+    dB-Umrechnung des RSSI besteht. Abtippen waere 96 Gelegenheiten."""
+    src = open(PHY_SRC, errors="ignore").read()
+    m = re.search(r"static const u32 db_invert_table\[12\]\[8\] = \{(.*?)\n\};",
+                  src, re.S)
+    if not m:
+        sys.exit("db_invert_table nicht gefunden")
+    vals = [int(v.rstrip("U")) for v in
+            re.findall(r"\b(\d+U?)\b", m.group(1))]
+    if len(vals) != 96:
+        sys.exit(f"db_invert_table: {len(vals)} Zahlen statt 96")
+    out = ["/// phy.c:28-53 `db_invert_table[12][8]`"]
+    out.append("pub static DB_INVERT_TABLE: [[u32; 8]; 12] = [")
+    for i in range(12):
+        row = vals[i * 8:(i + 1) * 8]
+        out.append("    [" + ", ".join(str(v) for v in row) + "],")
+    out.append("];\n")
+    print(f"  {'db_invert_table (phy.c)':30s} {len(vals):6d} Zahlen")
+    return out
+
+
 def main():
     src = open(SRC, errors="ignore").read()
     out = ['''//! ERZEUGT von gen_tables.py aus Linux 6.18.26 rtw8822c_table.c — nicht
@@ -637,6 +660,7 @@ pub const EXPECTED_WRITES_CUT_D_RFE1: [(&str, u32); %d] = [""" % len(expected))
     out += struct_tables()
     out += rate_sections()
     out += channel_groups()
+    out += db_invert_table()
     out += txpower_reference()
 
     open(OUT, "w").write("\n".join(out))
