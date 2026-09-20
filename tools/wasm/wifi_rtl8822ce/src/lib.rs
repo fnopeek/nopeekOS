@@ -3164,6 +3164,7 @@ fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     let mut data_rx = 0u32;
     let mut data_tx = 0u32;
     let mut link_up_sent = false;
+    let mut extra_reported = 0u32;
 
     // Acht Sekunden. Der Handschlag braucht vier Rahmen und ist in
     // Millisekunden durch; wer laenger wartet, wartet auf einen Fehler.
@@ -3195,7 +3196,37 @@ fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 eapol_rx += 1;
                 // `EV_EAPOL_RX` = [0x84][len u16 LE][Rahmen] — und der
                 // Rahmen ist der EAPOL-RUMPF hinter dem Ethertyp.
-                let body = &ethbuf[14..n];
+                //
+                // **Auf die ANGESAGTE Laenge kuerzen.** Der EAPOL-Kopf
+                // traegt sie in den Bytes 2..4 (802.1X, gross-endig), und
+                // der ganze Rahmen ist 4 + diese Zahl. Was die Hardware
+                // dahinter anhaengt, gehoert nicht dazu: `WLAN_RCR_CFG`
+                // hat APP_FCS, APP_MIC und APP_ICV gesetzt, also liefert
+                // der Deskriptor mehr Bytes, als der Rahmen lang ist.
+                //
+                // **Das ist nicht kosmetisch.** `wifid` rechnet den MIC
+                // ueber die GANZE Scheibe, die es bekommt
+                // (`compute_mic`: `frame.len()`). Vier Bytes zu viel, und
+                // msg3 schlaegt fehl — msg1 nicht, denn das traegt gar
+                // keinen MIC. Genau dieses Muster stand im Geraetelauf.
+                let raw = &ethbuf[14..n];
+                let body = if raw.len() >= 4 {
+                    let declared =
+                        4 + u16::from_be_bytes([raw[2], raw[3]]) as usize;
+                    if extra_reported < 2 && declared <= raw.len() {
+                        extra_reported += 1;
+                        host::print("    EAPOL: ");
+                        host::print_dec(raw.len() as u32);
+                        host::print(" Bytes geliefert, ");
+                        host::print_dec(declared as u32);
+                        host::print(" angesagt (");
+                        host::print_dec((raw.len() - declared) as u32);
+                        host::print(" zu viel)\n");
+                    }
+                    &raw[..declared.min(raw.len())]
+                } else {
+                    raw
+                };
                 let mut ev = [0u8; 600];
                 if body.len() + 3 <= ev.len() {
                     ev[0] = EV_EAPOL_RX;
