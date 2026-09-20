@@ -7,6 +7,12 @@ Reihenfolge. Genau da sitzen Portierfehler, die kein Compiler sieht: eine
 vertauschte Zeile, ein vergessener Zugriff, ein 16-Bit-Schreibzugriff, wo
 Linux 8 Bit schreibt (Regel 3 des Plans: „Write-Breite ist Semantik").
 
+**Was es NICHT sieht:** berechnete Werte. `rtw_write32(base + 0x68, temp)`
+wird gegen `host::w32(h, base_addr + 0x68, temp)` verglichen -- steht bei uns
+`temp + 1`, faellt das nicht auf, weil `temp` keine Hexzahl ist. Verglichen
+werden die Art, die Breite, das Register und die nackten Zahlen; die
+Rechnung dahinter liest ein Mensch.
+
 Zweiter Vergleich: die FOLGE ALLER HEXZAHLEN im Rumpf. Bei der
 DAC-Kalibrierung stehen mehrere hundert Magiezahlen wie `0x0a11fb88`, die
 keine benannte Konstante sind — `check_regs.py` kann sie also nicht sehen,
@@ -49,6 +55,13 @@ def hexes(body, strip_comments):
         body = re.sub(r"//[^\n]*", "", body)
     else:
         body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+        # `rtw_dbg(..., "[DACK] ADCK 0x%08x=0x08%x\n", ...)` enthaelt 0x08.
+        # Eine Formatzeichenkette ist kein Registerwert.
+        body = re.sub(r'"(?:[^"\\]|\\.)*"', '""', body)
+        # Ganze Logzeilen raus: `rtw_dbg(..., base_addr + 0x68, temp)` traegt
+        # Adressen als ARGUMENTE, und die sind keine Registerarbeit.
+        body = re.sub(r"\brtw_(?:dbg|err|warn|info)\s*\([^;]*?\);", "", body,
+                      flags=re.S)
     return [int(v.replace("_", ""), 16) for v in HEX.findall(body)]
 
 # Zugriffe, die in Linux NUR im SDIO- oder USB-Zweig stehen. Auf PCIe ist
@@ -71,6 +84,29 @@ HEX_OTHER_BUS = {
     "__priority_queue_cfg": [0x1],  # USB: rtw_write8_set(..., BIT(1))
 }
 
+# Funktionen, deren ZUGRIFFSFOLGE bewusst von Linux abweicht, mit Grund.
+# Die Abweichung steht hier namentlich, nicht als stiller Filter im Code.
+DEVIATION = {
+    "rtw_read8_physical_efuse":
+        "Linux pollt mit read_poll_timeout(rtw_read32, ...) -- ein Makro, das "
+        "der Zaehler als EINEN Zugriff sieht; wir lesen in einer Schleife.",
+    "rtw_power_on":
+        "unsere Fassung ist der Wirt um die Stufe herum und meldet unterwegs "
+        "CR, Seitenplan und Gates. Linux' rtw_power_on fasst kein Register an.",
+    "rtw_phy_adaptivity_init":
+        "chip->ops->adaptivity_init ist hier eingesetzt statt aufgerufen -- "
+        "der 8822C hat genau eine Fassung davon.",
+    "rtw8822c_dac_backup_reg":
+        "die sechzehn Adressen stehen bei uns als const DACK_ADDRS neben der "
+        "Funktion, in Linux als lokales Feld darin.",
+    "rtw8822c_dac_restore_reg":
+        "util.c rtw_restore_reg ist eingesetzt statt aufgerufen; hier sind "
+        "alle Eintraege 4 Byte breit, der len-Zweig faellt weg.",
+    "rtw8822c_rf_dac_cal":
+        "die zwei ausgeschriebenen Zehnerschleifen sind zu dac_cal_loop "
+        "zusammengefasst, und davor steht die RF-0x3e-Diagnose.",
+}
+
 # Funktionen, deren Zahlenfolge sich NICHT vergleichen laesst, mit Grund.
 # Die Zugriffsfolge wird trotzdem geprueft.
 HEX_SKIP = {
@@ -78,75 +114,68 @@ HEX_SKIP = {
         "Linux zieht die Felder mit FIELD_GET(GENMASK(31,16), x); das sind "
         "Makros ohne eine einzige Hexzahl. Jede Schreibweise auf unserer "
         "Seite ergibt eine andere Zahlenfolge, auch die richtige.",
+    "rtw8822c_power_trim": "FIELD_GET(PPG_2G_A_MASK, x) gegen eine Maske.",
+    "rtw8822c_thermal_trim": "FIELD_GET(GENMASK(3,1)) gegen eine Maske.",
+    "rtw8822c_pa_bias": "FIELD_GET(PPG_PABIAS_MASK, x) gegen eine Maske.",
+    "check_positive": "die 0x0f-Zeile steht im 8812A-Zweig, den wir nicht bauen.",
+    "rtw8822c_dac_iq_offset": "`if (t != 0x0)` gegen `if t != 0`.",
+    "rtw8822c_dac_backup_reg": "siehe DEVIATION.",
+    "rtw8822c_rf_dac_cal": "siehe DEVIATION.",
 }
 
-CASES = [
-    ("rtw8822c_mac_init", "rtw8822c.c", "static int rtw8822c_mac_init(",
-     "chip.rs", "pub fn mac_init(h: i32) -> bool"),
-    ("txdma_queue_mapping", "mac.c", "static int txdma_queue_mapping(",
-     "mac.rs", "fn txdma_queue_mapping(h: i32)"),
-    ("__priority_queue_cfg", "mac.c", "static int __priority_queue_cfg(",
-     "mac.rs", "fn priority_queue_cfg_3081("),
-    ("init_h2c", "mac.c", "static int init_h2c(",
-     "mac.rs", "fn init_h2c(h: i32, f: &Fifo)"),
-    ("rtw_drv_info_cfg", "mac.c", "static int rtw_drv_info_cfg(",
-     "mac.rs", "fn drv_info_cfg(h: i32)"),
-    ("rtw8822c_header_file_init", "rtw8822c.c",
-     "static void rtw8822c_header_file_init(struct rtw_dev *rtwdev, bool pre)",
-     "chip.rs", "fn header_file_init(h: i32, pre: bool)"),
-    ("rtw8822c_config_cck_rx_path", "rtw8822c.c",
-     "static void rtw8822c_config_cck_rx_path(", "chip.rs",
-     "fn config_cck_rx_path("),
-    ("rtw8822c_config_ofdm_rx_path", "rtw8822c.c",
-     "static void rtw8822c_config_ofdm_rx_path(", "chip.rs",
-     "fn config_ofdm_rx_path("),
-    ("rtw8822c_config_cck_tx_path", "rtw8822c.c",
-     "static void rtw8822c_config_cck_tx_path(", "chip.rs",
-     "fn config_cck_tx_path("),
-    ("rtw8822c_config_ofdm_tx_path", "rtw8822c.c",
-     "static void rtw8822c_config_ofdm_tx_path(", "chip.rs",
-     "fn config_ofdm_tx_path("),
-    ("rtw8822c_toggle_igi", "rtw8822c.c", "static void rtw8822c_toggle_igi(",
-     "chip.rs", "fn toggle_igi(h: i32)"),
-    ("rtw8822c_false_alarm_statistics", "rtw8822c.c",
-     "static void rtw8822c_false_alarm_statistics(", "chip.rs",
-     "pub fn false_alarm_statistics("),
-    ("rtw8822c_dac_bb_setting", "rtw8822c.c",
-     "static void rtw8822c_dac_bb_setting(", "rfk.rs", "fn dac_bb_setting(h: i32)"),
-    ("rtw8822c_dac_cal_step1", "rtw8822c.c",
-     "static void rtw8822c_dac_cal_step1(", "rfk.rs", "fn dac_cal_step1("),
-    ("rtw8822c_dac_cal_step2", "rtw8822c.c",
-     "static void rtw8822c_dac_cal_step2(", "rfk.rs", "fn dac_cal_step2("),
-    ("rtw8822c_dac_cal_step3", "rtw8822c.c",
-     "static void rtw8822c_dac_cal_step3(", "rfk.rs", "fn dac_cal_step3("),
-    ("rtw8822c_dac_cal_step4", "rtw8822c.c",
-     "static void rtw8822c_dac_cal_step4(", "rfk.rs", "fn dac_cal_step4("),
-    ("rtw8822c_dac_cal_restore_prepare", "rtw8822c.c",
-     "static void rtw8822c_dac_cal_restore_prepare(", "rfk.rs",
-     "fn dac_cal_restore_prepare("),
-    ("rtw8822c_dac_cal_restore_dck", "rtw8822c.c",
-     "static void rtw8822c_dac_cal_restore_dck(", "rfk.rs",
-     "fn dac_cal_restore_dck("),
-    ("rtw8822c_dac_cal_backup_dck", "rtw8822c.c",
-     "static void rtw8822c_dac_cal_backup_dck(", "rfk.rs",
-     "fn dac_cal_backup_dck("),
-    ("rtw8822c_dac_cal_backup", "rtw8822c.c",
-     "static void rtw8822c_dac_cal_backup(struct rtw_dev *rtwdev)", "rfk.rs",
-     "fn dac_cal_backup(h: i32, dm: &mut DmInfo)"),
-    ("rtw_bf_phy_init", "bf.c", "void rtw_bf_phy_init(", "bf.rs",
-     "pub fn phy_init(h: i32)"),
-]
+def discover():
+    """Findet die Paare (C-Funktion, Rust-Funktion) SELBST.
+
+    Jede portierte Funktion traegt ihren Ursprung im Doc-Kommentar, in der
+    Form "/// <datei>.c:<zeilen> `<c_name>`", und direkt darunter steht
+    ihre Rust-Fassung. Eine handverlesene Liste laesst genau die Funktion
+    aus, um die es gerade geht — das ist in 0.10.2 passiert: `dac_cal_adc`
+    stand nicht drin, und dort lag der Fehler.
+    """
+    pairs = []
+    src_re = re.compile(r"^/// (?:.*·\s*)?([a-z0-9_]+\.c):[\d-]+\s+`([A-Za-z_]\w*)`")
+    fn_re = re.compile(r"^(?:pub )?fn ([a-z0-9_]+)")
+    for rf in sorted(os.listdir(R)):
+        if not rf.endswith(".rs"):
+            continue
+        lines = open(os.path.join(R, rf)).read().split("\n")
+        for i, line in enumerate(lines):
+            m = src_re.match(line)
+            if not m:
+                continue
+            cfile, cname = m.groups()
+            # die naechste Funktionsdefinition unter dem Kommentarblock
+            for j in range(i + 1, min(i + 40, len(lines))):
+                if lines[j].startswith("///") or lines[j].startswith("//"):
+                    continue
+                fm = fn_re.match(lines[j])
+                if fm:
+                    pairs.append((cname, cfile, cname, rf, lines[j].rstrip(" {")))
+                break
+    return pairs
 
 
-def c_body(path, sig):
+def c_body(path, name):
+    """Der Rumpf der C-Funktion `name` — ueber ihre Definitionszeile."""
     src = open(os.path.join(L, path), errors="ignore").read()
-    i = src.index(sig)
-    return src[i:src.index("\n}\n", i)]
+    pat = re.compile(r"^(?:static\s+)?(?:const\s+)?[A-Za-z_]\w*[\s*]+"
+                     + re.escape(name) + r"\s*\(", re.M)
+    for m in pat.finditer(src):
+        # Eine Vorwaertsdeklaration endet mit `;` und hat keinen Rumpf.
+        # `rtw8822c_config_trx_mode` steht in rtw8822c.c zweimal, und der
+        # erste Treffer ist die Deklaration in Zeile 23.
+        head = src[m.start():m.start() + 400]
+        brace, semi = head.find("{"), head.find(";")
+        if brace != -1 and (semi == -1 or brace < semi):
+            return src[m.start():src.index("\n}\n", m.start())]
+    raise ValueError(name)
 
 
 def rs_body(path, sig):
     src = open(os.path.join(R, path)).read()
     i = src.index(sig)
+    if "{" not in src[i:i + 400]:
+        raise ValueError(sig)
     k = src.index("{", i)
     depth = 0
     while True:
@@ -160,8 +189,21 @@ def rs_body(path, sig):
     return src[i:k]
 
 
+# Lokale Namen, die auf beiden Seiten dasselbe Register meinen. Sie stehen
+# hier einzeln, weil eine allgemeine Normierung auch echte Unterschiede
+# wegbuegeln wuerde.
+ALIAS = {
+    "addrs[i]": "DACK_ADDRS[i]",
+    "sipi_addr[rf_path]": "RF_SIPI_ADDR[rf_path]",
+    "edcca_th[EDCCA_TH_L2H_IDX].hw_reg.addr": "addr",
+    "edcca_th[EDCCA_TH_H2L_IDX].hw_reg.addr": "addr",
+}
+
+
 def norm(s):
-    return re.sub(r"\s+", "", s)
+    s = re.sub(r"\s+", "", s)
+    s = s.replace("crate::regs::", "").replace("crate::pci::", "")
+    return ALIAS.get(s, s)
 
 
 def c_seq(body):
@@ -206,13 +248,17 @@ def report(name, c, r):
 
 def main():
     bad = 0
-    for name, cf, csig, rf, rsig in CASES:
+    skipped = []
+    deviated = []
+    cases = discover()
+    for name, cf, csig, rf, rsig in cases:
         try:
             c = c_seq(c_body(cf, csig))
             r = rs_seq(rs_body(rf, rsig))
-        except ValueError as exc:
-            print(f"  ??    {name}: nicht gefunden ({exc})")
-            bad += 1
+        except ValueError:
+            # Kein Rumpf zu finden: eine Tabelle, eine Konstante oder eine
+            # Funktion, die in Linux anders heisst. Nichts zu vergleichen.
+            skipped.append(name)
             continue
         for t in OTHER_BUS.get(name, []):
             if t not in c:
@@ -221,7 +267,9 @@ def main():
                 bad += 1
             else:
                 c.remove(t)
-        if not report(name, c, r):
+        if name in DEVIATION:
+            deviated.append(name)
+        elif not report(name, c, r):
             bad += 1
         if name in HEX_SKIP:
             continue
@@ -240,11 +288,15 @@ def main():
                           f"Linux={av}  wir={bv}")
                     break
             bad += 1
-    print(f"  {len(CASES) - bad} von {len(CASES)} Funktionen Zugriff fuer "
-          f"Zugriff gleich, {len(CASES) - len(HEX_SKIP)} davon auch Zahl "
-          f"fuer Zahl")
-    for n, why in HEX_SKIP.items():
-        print(f"  (ohne Zahlenvergleich: {n} — {why})")
+    n = len(cases) - len(skipped) - len(deviated)
+    print(f"  {n - bad} von {n} Funktionen Zugriff fuer Zugriff gleich, "
+          f"{n - len(HEX_SKIP)} davon auch Zahl fuer Zahl")
+    print(f"  {len(deviated)} bewusst abweichend, {len(HEX_SKIP)} ohne "
+          f"Zahlenvergleich, {len(skipped)} ohne C-Rumpf")
+    for nm, why in DEVIATION.items():
+        print(f"    abweichend  {nm}: {why}")
+    for nm, why in HEX_SKIP.items():
+        print(f"    ohne Zahlen {nm}: {why}")
     sys.exit(1 if bad else 0)
 
 
