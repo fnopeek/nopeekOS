@@ -152,6 +152,10 @@ DEVIATION = {
 # Funktionen, deren Zahlenfolge sich NICHT vergleichen laesst, mit Grund.
 # Die Zugriffsfolge wird trotzdem geprueft.
 HEX_SKIP = {
+    "rtw_tx_data_pkt_info_update":
+        "Linux waehlt die Rate IN der Funktion (`supp_rates[0] <= 0xf`); "
+        "bei uns entscheidet das der Rufer, weil er die Faehigkeiten des "
+        "Gegenuebers ohnehin geparst hat. Die 0xf steht dort.",
     "rtw_init_ht_cap":
         "Linux fuellt eine `ieee80211_sta_ht_cap`-Struktur, wir bauen das "
         "fertige ELEMENT (id 45, 26 Byte). Die Feldversaetze im Puffer "

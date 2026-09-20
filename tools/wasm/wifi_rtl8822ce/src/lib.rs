@@ -642,11 +642,24 @@ pub extern "C" fn _start() {
     };
 
     // ── Stufe 5f: die Ratenanpassung ─────────────────────────────
+    let mut rates: Option<(sta::PeerCaps, sta::StaInfo)> = None;
     let stage5f = match (stage5e, linked.as_ref(), target.as_ref()) {
         (true, Some(v), Some(b)) =>
-            stage5f_rates(h, &mut trx, &mut h2c, &hal, v, b),
+            stage5f_rates(h, &mut trx, &mut h2c, &hal, v, b, &mut rates),
         _ => {
             host::print("[rtl8822ce] Stufe 5f: uebersprungen, 5e steht nicht\n");
+            false
+        }
+    };
+
+    // ── Stufe 6a: Steuerkanal, Handschlag, Datenweg ──────────────
+    let stage6a = match (stage5f, linked.as_ref(), target.as_ref(),
+                         rates.as_ref(), efuse.as_ref()) {
+        (true, Some(_v), Some(b), Some((caps, si)), Some(e)) =>
+            stage6a_link(h, &hal, &mut trx, mgmt_buf, &mut h2c, b, caps,
+                         *si, e.addr),
+        _ => {
+            host::print("[rtl8822ce] Stufe 6a: uebersprungen, 5f steht nicht\n");
             false
         }
     };
@@ -714,6 +727,11 @@ pub extern "C" fn _start() {
         "[rtl8822ce] Stufe 5f: GRUEN — DIE FIRMWARE WAEHLT DIE RATE\n"
     } else {
         "[rtl8822ce] Stufe 5f: NEIN — nicht weiterbauen, bevor das steht\n"
+    });
+    host::print(if stage6a {
+        "[rtl8822ce] Stufe 6a: GRUEN — DER HANDSCHLAG IST DURCH\n"
+    } else {
+        "[rtl8822ce] Stufe 6a: NEIN — nicht weiterbauen, bevor das steht\n"
     });
 
 
@@ -1996,11 +2014,44 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     }
     host::print("\n");
 
-    // Das staerkste Netz auf 2,4 GHz wird das Ziel von Stufe 5e. Nur
-    // 2,4 GHz, weil wir dort senden duerfen — auf 5 GHz haben wir nur
-    // gehorcht, und die Sendeerlaubnis gehoert der oberen Haelfte.
+    // **Das Ziel kommt aus `sys/config/wifi_ssid`, nicht aus der
+    // Lautstaerke.** docs/spec/WIFI_CLASS_ABI.md sagt warum: ohne
+    // SSID-Filter nimmt der Treiber den lautesten AP IRGENDEINES Netzes,
+    // auch den des Nachbarn — und fuer den hat `wifid` keinen PSK. Das
+    // endet in einem stillen MIC-Fehlschlag, und niemand sieht, woran.
+    // Nur 2,4 GHz: dort duerfen wir senden, auf 5 GHz haben wir nur
+    // gehorcht.
+    let mut want_store = [0u8; 64];
+    let wn = host::fetch("sys/config/wifi_ssid", &mut want_store);
+    let want = if wn > 0 {
+        // Ein abschliessender Zeilenumbruch gehoert nicht zum Namen.
+        let mut k = (wn as usize).min(want_store.len());
+        while k > 0 && (want_store[k - 1] == b'\n'
+                        || want_store[k - 1] == b'\r') {
+            k -= 1;
+        }
+        if k > 0 { Some(k) } else { None }
+    } else {
+        None
+    };
+    host::print("  sys/config/wifi_ssid: ");
+    match want {
+        Some(k) => {
+            host::print("\"");
+            print_ssid(&want_store[..k]);
+            host::print("\"");
+        }
+        None => host::print("nicht gesetzt — der lauteste AP wird genommen"),
+    }
+    host::print("\n");
+
     *target = found[..n_found].iter()
         .filter(|b| b.channel <= 14 && b.ssid_len > 0)
+        .filter(|b| match want {
+            Some(k) => b.ssid_len as usize == k
+                && b.ssid[..k] == want_store[..k],
+            None => true,
+        })
         .max_by_key(|b| b.best)
         .copied();
     if let Some(b) = target {
@@ -2676,33 +2727,34 @@ fn build_assoc_req(out: &mut [u8; 256], mac: &[u8; 6], bss: &Bss,
     n
 }
 
-/// 802.11 §9.4.2.24 — unser RSN-Element aus dem des AP.
+/// 802.11 §9.4.2.24 — unser RSN-Element.
 ///
-/// **Ein Antrag waehlt, ein Beacon zaehlt auf.** Das Element des AP nennt
-/// alle Verfahren, die er kann; unseres muss GENAU EINES nennen, sonst
-/// lehnt er mit Status 43 ab. Gewaehlt wird CCMP als Paarschluessel und
-/// PSK als Authentifizierung — die Gruppenchiffre wird uebernommen, denn
-/// die bestimmt der AP allein.
+/// **Es ist BYTE-GLEICH mit dem in `wifid`** (`wasm/src/lib.rs:124`), und
+/// das ist kein Zufall, sondern ein Vertrag, den die ABI nicht ausdrueckt:
+/// der Vierwegehandschlag rechnet seinen MIC ueber GENAU das RSN-Element,
+/// das die Station im Anmeldeantrag geschickt hat. Weicht unseres ab,
+/// verwirft der AP msg2 — und sagt nicht warum.
+///
+/// CCMP als Gruppen- und Paarschluessel, PSK als Authentifizierung.
+const RSN_IE_WPA2_CCMP_PSK: [u8; 22] = [
+    0x30, 0x14, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00, 0x00, 0x0f,
+    0xac, 0x04, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x02, 0x00, 0x00,
+];
+
+/// Unser RSN-Element schreiben — und MELDEN, wenn der AP etwas anderes
+/// ansagt, als wir anbieten koennen.
+///
+/// **Ein Antrag waehlt, ein Beacon zaehlt auf**: das Element des AP nennt
+/// alle Verfahren, die er kann; unseres nennt genau eines. Kann er CCMP
+/// nicht als Gruppenchiffre, scheitert die Verbindung spaeter im
+/// Handschlag — und dann soll hier schon stehen, warum.
 fn build_rsn_ie(out: &mut [u8], ap: &[u8]) -> usize {
     const CCMP: [u8; 4] = [0x00, 0x0f, 0xac, 0x04];
-    const PSK: [u8; 4] = [0x00, 0x0f, 0xac, 0x02];
-
-    // ap: id(1) len(1) version(2) group(4) pair_cnt(2) pair[] akm_cnt(2) …
-    if ap.len() < 8 {
-        return 0;
+    if ap.len() >= 8 && ap[4..8] != CCMP {
+        host::print("  [Hinweis] der AP nennt eine andere Gruppenchiffre als\n         \x20         CCMP — der Handschlag wird daran scheitern.\n");
     }
-    let group = &ap[4..8];
-
-    out[0] = 48;
-    out[1] = 20; // Laenge: 2 + 4 + 2 + 4 + 2 + 4 + 2
-    out[2..4].copy_from_slice(&1u16.to_le_bytes()); // Version 1
-    out[4..8].copy_from_slice(group);
-    out[8..10].copy_from_slice(&1u16.to_le_bytes());
-    out[10..14].copy_from_slice(&CCMP);
-    out[14..16].copy_from_slice(&1u16.to_le_bytes());
-    out[16..20].copy_from_slice(&PSK);
-    out[20..22].copy_from_slice(&0u16.to_le_bytes()); // RSN-Faehigkeiten
-    22
+    out[..RSN_IE_WPA2_CCMP_PSK.len()].copy_from_slice(&RSN_IE_WPA2_CCMP_PSK);
+    RSN_IE_WPA2_CCMP_PSK.len()
 }
 
 /// Der gemeinsame 24-Byte-Kopf eines Verwaltungsrahmens an einen AP.
@@ -2739,7 +2791,8 @@ fn mgmt_header(out: &mut [u8; 256], subtype_fc: u8, mac: &[u8; 6],
 /// sendet. Stromsparen gibt es hier nicht, also wuerden die Seiten
 /// geschrieben und nie gelesen. Sie gehoeren zu LPS, nicht hierher.
 fn stage5f_rates(h: i32, trx: &mut pci::Trx, h2c: &mut fw::H2cState,
-                 hal: &Hal, vifc: &vif::Vif, bss: &Bss) -> bool {
+                 hal: &Hal, vifc: &vif::Vif, bss: &Bss,
+                 out: &mut Option<(sta::PeerCaps, sta::StaInfo)>) -> bool {
     host::print("[rtl8822ce] Stufe 5f: die Ratenanpassung\n");
 
     // SAFETY: einfaedig, und 5e hat vorher geschrieben.
@@ -2882,6 +2935,7 @@ fn stage5f_rates(h: i32, trx: &mut pci::Trx, h2c: &mut fw::H2cState,
     host::print("\n");
     ok &= gate("die Firmware meldet eine gewaehlte Rate zurueck",
                ra_rpt > 0);
+    *out = Some((caps, si));
     ok
 }
 
@@ -2906,6 +2960,378 @@ fn rate_name(r: u8) -> &'static str {
         0x36..=0x3f => "VHT 2SS",
         _ => "?",
     }
+}
+
+/// Der Zustand einer stehenden Verbindung — Stufe 6a.
+struct Link {
+    bssid: [u8; 6],
+    mac: [u8; 6],
+    channel: u8,
+    si: sta::StaInfo,
+    highest_rate: u8,
+    /// Laufende Folgenummer fuer Datenrahmen. Der Chip vergibt sie bei
+    /// `en_hwseq` selbst, aber `pkt_info.seq` steht trotzdem im
+    /// Deskriptor — Linux fuellt es aus dem Rahmenkopf.
+    seq: u16,
+    ptk_installed: bool,
+    cam: [sec::CamEntry; 4],
+}
+
+/// docs/spec/WIFI_CLASS_ABI.md §2b — ein Ethernet-Rahmen als
+/// 802.11-Datenrahmen an den AP.
+///
+/// 802.3: `[DA 6][SA 6][ethertype 2][Nutzlast]`
+/// 802.11 ToDS: `[fc 2][dur 2][addr1=BSSID][addr2=SA][addr3=DA][seq 2]`
+/// plus LLC/SNAP (RFC 1042) und den Ethertyp.
+///
+/// **Gewoehnliche Daten, kein QoS.** Unser Anmeldeantrag trug kein
+/// WMM-Element, also hat der AP uns als Nicht-QoS-Station angenommen —
+/// ein QoS-Rahmen waere jetzt falsch. Das haengt zusammen: wer WMM
+/// anbietet, muss QoS senden, und wer es nicht anbietet, darf nicht.
+fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
+           eth: &[u8], encrypt: bool) -> bool {
+    if eth.len() < 14 {
+        return false;
+    }
+    let mut frame = [0u8; 2048];
+    let payload = &eth[14..];
+    let total = 24 + 6 + 2 + payload.len();
+    if total > frame.len() {
+        return false;
+    }
+
+    frame[0] = DOT11_FC_TYPE_DATA;
+    frame[1] = 0x01; // ToDS
+    if encrypt {
+        frame[1] |= DOT11_FC_PROTECTED;
+    }
+    frame[2..4].copy_from_slice(&0u16.to_le_bytes());
+    frame[4..10].copy_from_slice(&link.bssid); // addr1 = Empfaenger
+    frame[10..16].copy_from_slice(&link.mac); // addr2 = Quelle
+    frame[16..22].copy_from_slice(&eth[0..6]); // addr3 = Ziel
+    frame[22..24].copy_from_slice(&(link.seq << 4).to_le_bytes());
+    frame[24..30].copy_from_slice(&LLC_SNAP_HDR);
+    frame[30..32].copy_from_slice(&eth[12..14]); // Ethertyp
+    frame[32..32 + payload.len()].copy_from_slice(payload);
+
+    let mut info = tx::TxPktInfo::default();
+    // `rtw_tx_pkt_info_update` fuer einen Datenrahmen: erst die Rate,
+    // dann die gemeinsamen Felder.
+    tx::data_pkt_info_update(&mut info, link.seq, Some(&link.si),
+                             link.highest_rate);
+    let a1 = &frame[4..10];
+    info.bmc = a1.iter().all(|&b| b == 0xff) || a1[0] & 0x01 != 0;
+    info.tx_pkt_size = total as u32;
+    info.offset = tx::TX_PKT_DESC_SZ as u8;
+    info.ls = true;
+    info.mac_id = link.si.mac_id;
+    // `rtw_tx_pkt_info_update_sec`: mit installiertem Schluessel traegt der
+    // Deskriptor die acht Byte des CCMP-Kopfes als zusaetzliche Laenge.
+    if encrypt {
+        info.sec_type = 0x3; // AES
+    }
+
+    link.seq = link.seq.wrapping_add(1) & 0x0fff;
+
+    let queue = pci::Q_BE;
+    if !pci::tx_write(h, trx, mgmt_buf, queue, &mut info, &frame[..total]) {
+        return false;
+    }
+    pci::tx_kick_off_queue(h, trx, queue);
+    true
+}
+
+/// docs/spec/WIFI_CLASS_ABI.md §2b, Demux-Regel: ein empfangener
+/// 802.11-Datenrahmen wird zu 802.3 und geht dann entweder als `EAPOL_RX`
+/// an `wifid` oder in den IP-Stapel.
+///
+/// Gibt zurueck: (war es EAPOL, war es ein Datenrahmen).
+fn rx_demux(f: &[u8], mac: &[u8; 6]) -> (bool, bool) {
+    if f.len() < 24 {
+        return (false, false);
+    }
+    if f[0] & 0x0c != DOT11_FC_TYPE_DATA {
+        return (false, false);
+    }
+    // Null und QoS-Null tragen keinen Rumpf.
+    if f[0] & DOT11_STYPE_NODATA != 0 {
+        return (false, true);
+    }
+    let qos = f[0] & DOT11_STYPE_QOS != 0;
+    let hdr = 24 + if qos { 2 } else { 0 };
+    // Bei verschluesselten Rahmen steht der CCMP-Kopf dazwischen; die
+    // Hardware entfernt ihn, wenn der Schluessel im Speicher steht.
+    if f.len() < hdr + 8 {
+        return (false, true);
+    }
+    if f[hdr..hdr + 6] != LLC_SNAP_HDR {
+        return (false, true);
+    }
+    let et = u16::from_be_bytes([f[hdr + 6], f[hdr + 7]]);
+    // FromDS: addr1 = wir, addr2 = BSSID, addr3 = Quelle.
+    let _ = mac;
+    (et == ETHERTYPE_EAPOL, true)
+}
+
+/// Ein empfangener Datenrahmen als 802.3 in `out`. Gibt die Laenge zurueck.
+fn to_8023(f: &[u8], out: &mut [u8]) -> usize {
+    let qos = f[0] & DOT11_STYPE_QOS != 0;
+    let hdr = 24 + if qos { 2 } else { 0 };
+    let body = &f[hdr + 6..]; // hinter LLC/SNAP
+    if body.len() < 2 || out.len() < 14 + body.len() - 2 {
+        return 0;
+    }
+    out[0..6].copy_from_slice(&f[4..10]); // DA = addr1
+    out[6..12].copy_from_slice(&f[16..22]); // SA = addr3
+    out[12..14].copy_from_slice(&body[0..2]); // Ethertyp
+    let n = body.len() - 2;
+    out[14..14 + n].copy_from_slice(&body[2..]);
+    14 + n
+}
+
+/// Stufe 6a — der Steuerkanal, der Datenweg und der Vierwegehandschlag.
+///
+/// **Hier hoert der Stufentest auf und der Treiber faengt an.** Bis 5f
+/// arbeitete `main` eine Kette ab und schaltete den Chip aus; hier laeuft
+/// eine Schleife: Empfangsring leeren, Sendequittungen einsammeln,
+/// Kommandos von `wifid` ausfuehren, Ereignisse hinaufmelden.
+///
+/// **Den Handschlag rechnet `wifid`, nicht wir** — er ist
+/// herstellerunabhaengig und steht einmal da
+/// (`tools/wasm/wifid/core/src/eapol.rs`). Der Treiber transportiert die
+/// Rahmen und schreibt die fertigen Schluessel in den Speicher. Genau so
+/// steht es in `docs/spec/WIFI_CLASS_ABI.md` §1: der Treiber sieht nie
+/// den PSK.
+#[allow(clippy::too_many_arguments)]
+fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
+                h2c: &mut fw::H2cState, bss: &Bss,
+                caps: &sta::PeerCaps, si: sta::StaInfo, mac: [u8; 6])
+    -> bool
+{
+    host::print("[rtl8822ce] Stufe 6a: der Steuerkanal und der Datenweg\n");
+
+    let mut link = Link {
+        bssid: bss.bssid,
+        mac,
+        channel: bss.channel,
+        si,
+        highest_rate: if caps.ht_supported {
+            tx::highest_ht_tx_rate(&caps.ht_mcs, hal.rf_2t2r)
+        } else {
+            0x0b // DESC_RATE54M
+        },
+        seq: 0,
+        ptk_installed: false,
+        cam: [sec::CamEntry::default(); 4],
+    };
+
+    // Der Datenkanal existiert seit Kernel 0.205.0; ohne Anmeldung sieht
+    // ihn der IP-Stapel nicht.
+    let reg = host::netdev_register(&mac);
+    host::print("  netdev_register ");
+    host::print(if reg >= 0 { "ok" } else { "FEHLGESCHLAGEN" });
+    host::print("\n");
+
+    // `EV_READY` = [0x83][ap_mac 6][our_mac 6] — damit baut `wifid` seinen
+    // Supplicant fuer GENAU diese Zelle.
+    let mut ready = [0u8; 13];
+    ready[0] = EV_READY;
+    ready[1..7].copy_from_slice(&bss.bssid);
+    ready[7..13].copy_from_slice(&mac);
+    let sent = host::wifi_send_event(&ready);
+    host::print("  EV_READY an wifid ");
+    host::print(if sent >= 0 { "raus" } else { "FEHLGESCHLAGEN" });
+    host::print(" — der Supplicant wird jetzt scharf gemacht\n");
+
+    let mut dm = dm::DmInfo::new();
+    let mut path_div = dm::PathDiv::default();
+    chip::read_cck_gi_bnd(h, &mut dm);
+    static mut RXBUF7: [u8; pci::RTK_PCI_RX_BUF_SIZE as usize] =
+        [0; pci::RTK_PCI_RX_BUF_SIZE as usize];
+    static mut ETHBUF: [u8; 2048] = [0; 2048];
+    static mut CMDBUF: [u8; 2048] = [0; 2048];
+    // SAFETY: einfaedig, je ein Rufer, keiner verlaesst diese Funktion.
+    let (rxbuf, ethbuf, cmdbuf) = unsafe {
+        (&mut *core::ptr::addr_of_mut!(RXBUF7),
+         &mut *core::ptr::addr_of_mut!(ETHBUF),
+         &mut *core::ptr::addr_of_mut!(CMDBUF))
+    };
+
+    let mut eapol_rx = 0u32;
+    let mut eapol_tx = 0u32;
+    let mut keys_set = 0u32;
+    let mut authorized = false;
+    let mut data_rx = 0u32;
+    let mut data_tx = 0u32;
+    let mut link_up_sent = false;
+
+    // Acht Sekunden. Der Handschlag braucht vier Rahmen und ist in
+    // Millisekunden durch; wer laenger wartet, wartet auf einen Fehler.
+    let t0 = host::now_us();
+    while host::now_us() - t0 < 8_000_000 {
+        // ── Empfangen ────────────────────────────────────────────
+        let got = pci::rx_poll(h, trx, 64, rxbuf, &mut dm, &mut path_div,
+                               hal.rf_path_num, 0, link.channel,
+                               |st, pkt| {
+            if st.crc_err || st.is_c2h {
+                return;
+            }
+            let off = RX_PKT_DESC_SZ as usize + st.drv_info_sz as usize
+                + st.shift as usize;
+            if off >= pkt.len() {
+                return;
+            }
+            let f = &pkt[off..];
+            let (is_eapol, is_data) = rx_demux(f, &mac);
+            if !is_data {
+                return;
+            }
+            data_rx += 1;
+            let n = to_8023(f, ethbuf);
+            if n == 0 {
+                return;
+            }
+            if is_eapol {
+                eapol_rx += 1;
+                // `EV_EAPOL_RX` = [0x84][len u16 LE][Rahmen] — und der
+                // Rahmen ist der EAPOL-RUMPF hinter dem Ethertyp.
+                let body = &ethbuf[14..n];
+                let mut ev = [0u8; 600];
+                if body.len() + 3 <= ev.len() {
+                    ev[0] = EV_EAPOL_RX;
+                    ev[1] = (body.len() & 0xff) as u8;
+                    ev[2] = (body.len() >> 8) as u8;
+                    ev[3..3 + body.len()].copy_from_slice(body);
+                    host::wifi_send_event(&ev[..3 + body.len()]);
+                }
+            } else if authorized {
+                host::netdev_submit_rx(&ethbuf[..n]);
+            }
+        });
+
+        // ── Kommandos von wifid ──────────────────────────────────
+        loop {
+            let clen = host::wifi_poll_cmd(cmdbuf);
+            if clen <= 0 {
+                break;
+            }
+            let cmd = &cmdbuf[..clen as usize];
+            match cmd.first().copied() {
+                // TX_EAPOL: [op][len u16 LE][Rahmen]
+                Some(CMD_TX_EAPOL) if cmd.len() >= 3 => {
+                    let len = ((cmd[2] as usize) << 8) | cmd[1] as usize;
+                    if cmd.len() >= 3 + len {
+                        let mut eth = [0u8; 600];
+                        eth[0..6].copy_from_slice(&link.bssid);
+                        eth[6..12].copy_from_slice(&mac);
+                        eth[12..14]
+                            .copy_from_slice(&ETHERTYPE_EAPOL.to_be_bytes());
+                        eth[14..14 + len].copy_from_slice(&cmd[3..3 + len]);
+                        // **Verschluesselt, sobald die PTK steht.** msg2 und
+                        // msg4 gehen im Klartext hinaus, wie sie muessen —
+                        // ein GRUPPEN-Neuschluessel kommt Minuten spaeter,
+                        // mit der PTK laengst im Speicher, und der AP
+                        // erwartet ihn geschuetzt.
+                        let enc = link.ptk_installed;
+                        if tx_8023(h, trx, mgmt_buf, &mut link,
+                                   &eth[..14 + len], enc) {
+                            eapol_tx += 1;
+                        } else {
+                            host::print("  EAPOL NICHT GESENDET — der AP\n\
+                             \x20         wird es wiederholen und dann\n\
+                             \x20         aufgeben\n");
+                        }
+                    }
+                }
+                // SET_KEY: [op][key_type][key_idx][cipher][key_len][key][rsc 6]
+                Some(CMD_SET_KEY) if cmd.len() >= 5 => {
+                    let key_type = cmd[1];
+                    let key_idx = cmd[2];
+                    let key_len = cmd[4] as usize;
+                    if cmd.len() >= 5 + key_len + 6 {
+                        let key = &cmd[5..5 + key_len];
+                        let group = key_type == 1;
+                        // Paarschluessel auf Platz 0, Gruppenschluessel auf
+                        // seinen Index — so haelt es auch mac80211.
+                        let slot = if group { key_idx.min(3) } else { 0 };
+                        let addr = if group { [0xffu8; 6] } else { link.bssid };
+                        sec::write_cam(h, &mut link.cam[slot as usize], slot,
+                                       RTW_CAM_AES as u8, key_idx, group,
+                                       &addr, key);
+                        keys_set += 1;
+                        if !group {
+                            link.ptk_installed = true;
+                        }
+                        host::print("  Schluessel gesetzt: ");
+                        host::print(if group { "GTK" } else { "PTK" });
+                        host::print(" Platz ");
+                        host::print_dec(slot as u32);
+                        host::print(", ");
+                        host::print_dec(key_len as u32);
+                        host::print(" Bytes\n");
+                    }
+                }
+                // AUTHORIZED: der Handschlag ist durch.
+                Some(CMD_AUTHORIZED) => {
+                    authorized = true;
+                    host::netdev_set_link(true);
+                    let mut up = [0u8; 7];
+                    up[0] = EV_LINK_UP;
+                    up[1..7].copy_from_slice(&link.bssid);
+                    host::wifi_send_event(&up);
+                    link_up_sent = true;
+                    host::print("  *** AUTHORIZED — Datenweg offen ***\n");
+                }
+                _ => {}
+            }
+        }
+
+        // ── Senden, was der IP-Stapel loswerden will ─────────────
+        if authorized {
+            loop {
+                let n = host::netdev_poll_tx(ethbuf);
+                if n <= 0 {
+                    break;
+                }
+                let enc = link.ptk_installed;
+                if tx_8023(h, trx, mgmt_buf, &mut link,
+                           &ethbuf[..n as usize], enc) {
+                    data_tx += 1;
+                }
+            }
+        }
+
+        // `rtw_pci_tx_isr` — den Lesezeiger nachziehen.
+        pci::tx_isr(h, trx, pci::Q_BE);
+        pci::tx_isr(h, trx, tx::RTW_TX_QUEUE_MGMT);
+
+        if got == 0 {
+            host::sleep_ms(1);
+        }
+    }
+
+    host::print("  EAPOL rein/raus ");
+    host::print_dec(eapol_rx);
+    host::print("/");
+    host::print_dec(eapol_tx);
+    host::print(" · Schluessel ");
+    host::print_dec(keys_set);
+    host::print(" · Datenrahmen rein/raus ");
+    host::print_dec(data_rx);
+    host::print("/");
+    host::print_dec(data_tx);
+    host::print("\n");
+
+    let mut ok = true;
+    ok &= gate("der AP faengt den Vierwegehandschlag an (EAPOL msg1)",
+               eapol_rx > 0);
+    ok &= gate("wir beantworten ihn", eapol_tx > 0);
+    ok &= gate("wifid installiert Paar- und Gruppenschluessel",
+               keys_set >= 2);
+    ok &= gate("der Handschlag ist durch (AUTHORIZED, LINK_UP)",
+               authorized && link_up_sent);
+    let _ = h2c;
+    ok
 }
 
 fn gate(name: &str, ok: bool) -> bool {
