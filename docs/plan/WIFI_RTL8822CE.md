@@ -1311,22 +1311,77 @@ einem Gruppen-Neuschlüssel. Das sind Messungen, keine Gates.
 
 ### ▶ Danach — hier weitermachen
 
-**6b — die Verbindung halten.** Der Treiber läuft, statt Stufen
-abzuarbeiten: Watchdogs für TX und RX, `npk_driver_report`, Wiederverbinden
-nach Deauth. Danach LPS mit den reservierten Seiten,
-`rtw_get_channel_params` fürs Kanalhüpfen, die Elementeauswertung des
-Beacons, und `rtw_rx_addr_match`. Der `netdev`-Anschluss
-(`npk_netdev_register`, `npk_submit_rx`) kommt ans ENDE dieser Stufe, nicht
-an ihren Anfang: vor einer Verbindung gibt es keine Datenrahmen, die er
-weiterreichen könnte.
+Stand: Netz läuft, **stabil ist es nicht**. Florian: *„er schmeisst uns nach
+einer weile random raus"*. Vier Posten, in dieser Reihenfolge.
 
-Ab dort ist `wifid` dran; die obere Hälfte ist herstellerunabhängig und in
-`wifi_ax200` einmal gebaut ([[project_wifi_ax200]]).
+#### 1. Die Stufenausgabe hinter `debug: 1` (klein, entsperrt die Konsole)
 
-**Offen und benannt:** die DAC-Kalibrierung konvergiert nicht (siehe oben) ·
-`rtw_coex_switchband_notify` und `rtw_coex_run_coex` fehlen, also gibt es
-keine laufende Koexistenz · `rtw_get_channel_params` für 40/80 MHz ·
-`rtw_regd_init` (die Zone kommt derzeit aus der efuse, `regd 1`).
+Im Autostart druckt der Treiber bei jedem Boot sechs Stufen mit Gates und
+macht die Konsole für alles andere unbrauchbar. Schalter: ein Schlüssel in
+`sys/config/wifi` (derselbe Weg wie `ampdu:`/`ps:` beim AX200), gelesen mit
+dem `cfg_get`, das seit 0.20.1 in `lib.rs` steht.
+
+Still heisst **nicht stumm**: eine Zeile wenn es steht, jede Zeile wenn
+etwas nicht steht.
+
+    [rtl8822ce] verbunden: "IvyPie_New" K7 -49 dBm · HT MCS7 40 MHz · AID 3
+
+Die Tore bleiben — sie sind der Grund, warum sechs Stufen entstanden sind,
+ohne im Dunkeln zu suchen. Hinter den Schalter, nicht in den Müll.
+
+#### 2. Den Rauswurf SEHEN (die Diagnose)
+
+**Wir sind blind dafür.** `rx_to_8023` filtert in der ersten Zeile auf
+Datenrahmen:
+
+```rust
+if f.len() < 24 || f[0] & 0x0c != DOT11_FC_TYPE_DATA { return None; }
+```
+
+Ein Deauth ist ein VERWALTUNGSrahmen und fällt lautlos durch. Aus
+Treibersicht stirbt die Verbindung nicht — sie wird nur still. **Genau
+deshalb wirkt es zufällig.** Und der Kernel glaubt weiter an `carrier UP`
+und schiebt Pakete in eine tote Leitung.
+
+Zu bauen, in `link_pump`s Empfangsschleife:
+
+* **Deauth** `fc[0] == 0xc0` (Subtyp 12), **Disassoc** `fc[0] == 0xa0`
+  (Subtyp 10), beide nur, wenn `addr2 == BSSID`. Der **Grundcode** steht
+  little-endian in den Bytes 24..26 — 802.11 §9.4.1.7. Er gehört ins Log:
+  1 = unspecified, 2 = prev auth no longer valid, 7 = class-3 frame from
+  nonassociated STA, **15 = 4-way handshake timeout**, 16 = group key
+  handshake timeout. Die 15 und die 16 wären die Bestätigung, dass es am
+  Neuschlüssel hängt.
+* Dann `netdev_set_link(false)`, `EV_LINK_DOWN` mit `reason 1` an `wifid`
+  (Spec §4b), und `ls.authorized = false`.
+
+#### 3. Den Gruppen-Neuschlüssel ZÄHLEN (dieselbe Diagnose)
+
+Der Weg ist gebaut — `wifid` hat `Step::Rekey`, und wir verschlüsseln
+EAPOL, sobald die PTK steht (genau der Fehler, den der AX200-Kommentar
+teuer bezahlt hat) —, aber **nichts zählt ihn**. Zwei Zähler im
+Treiberbericht beantworten die Frage in einem Lauf:
+
+    neuschluessel 3 empfangen, 3 beantwortet · gtk-installationen 4
+
+Kommt „3 empfangen, 0 beantwortet", liegt es an uns. Kommt „3/3" und der
+AP wirft uns trotzdem raus, liegt es woanders — und der Grundcode aus
+Posten 2 sagt wo.
+
+#### 4. Wiederverbinden (die Heilung)
+
+Erst wenn 2 und 3 messen, lohnt sich das: nach `EV_LINK_DOWN` zurück zu
+5e (Auth + Assoc auf demselben Kanal), Schlüssel im CAM löschen
+(`sec::clear_cam`), `link_setup` **nicht** noch einmal — `EV_READY` ein
+zweites Mal war der Fehler von 0.23.0. `wifid` braucht allerdings einen
+frischen Supplicant, also gehört genau dort ein neues `EV_READY` hin. Das
+ist der feine Unterschied, den 0.23.1 nicht auflöst: **einmal je
+Verbindung, nicht einmal je Stufe.**
+
+Dazu ein TX-Wachhund (der Sendering kann genauso steckenbleiben wie der
+Empfangsring) und, weiter hinten: LPS + reservierte Seiten, die laufende
+Koexistenz, DIG, und die DAC-Kalibrierung, die seit 0.10.3 nicht
+konvergiert.
 
 ### Der Ablauf für eine neue Version
 
