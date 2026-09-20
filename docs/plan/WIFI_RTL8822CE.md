@@ -1280,6 +1280,35 @@ Sekunden Frist, 6b mit keiner. Die Zähler gehören dem LINK, nicht der
 Stufe: einer, der beim Übergang auf null springt, ist eine Lüge über die
 Leitung.
 
+### ✅ NETZ. Stufen 0 bis 6b am Gerät grün (0.23.1)
+
+```
+wlan       registered, carrier UP
+tx queue   enq 29  deq 29  backlog 0 B
+rtl8822ce  verbunden  kanal 7  rate 0x1b  bw 1
+daten rein/raus 27/27  eapol 2/2  schluessel 2  rx-wachhund 0
+
+[npk] google.ch -> 172.217.208.94
+[npk] 4 sent, 4 received, 0% lost   rtt min/avg/max = 10/10/10 ms
+```
+
+**Der Fix von 0.23.1 ist in genau der Zeile bewiesen, die vorher das
+Gegenteil sagte:** `tx queue` stand bei `enq 126 deq 4 backlog 6176 B` und
+steht jetzt bei `enq 29 deq 29 backlog 0`. Der Treiber holt ab, was der
+IP-Stapel loswerden will. Dazu: EIN `READY` im Supplicant-Log statt zwei,
+`schluessel 2` statt 0, und `ctrl chan driver→wifid` 4 statt 9 Nachrichten.
+
+**Damit ist die Kette vollständig** — PCI, Power, Ringe, DMA, Firmware,
+efuse, Sendeleistung, MAC-Init, Tabellen, BB/RF, Coex-Antenne, Kanal,
+Empfang, Senden, Suchlauf, RF-Kalibrierung, Auth, Assoc, Ratenanpassung
+(MCS15 auf 40 MHz), Vierwegehandschlag, Schlüssel, DHCP, ARP, DNS, ICMP.
+**220 von 220 Funktionen Zugriff für Zugriff wie Linux, 960 Konstanten
+ohne eine Abweichung.**
+
+**Was das NICHT beweist**, und deshalb steht es hier: Durchsatz unter Last ·
+Stabilität über Stunden · Wiederverbinden nach einem Deauth · Verhalten bei
+einem Gruppen-Neuschlüssel. Das sind Messungen, keine Gates.
+
 ### ▶ Danach — hier weitermachen
 
 **6b — die Verbindung halten.** Der Treiber läuft, statt Stufen
