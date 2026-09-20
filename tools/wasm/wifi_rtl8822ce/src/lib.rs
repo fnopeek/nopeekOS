@@ -653,11 +653,13 @@ pub extern "C" fn _start() {
     };
 
     // ── Stufe 6a: Steuerkanal, Handschlag, Datenweg ──────────────
+    let mut link: Option<Link> = None;
+    let mut lstats = LinkStats::default();
     let stage6a = match (stage5f, linked.as_ref(), target.as_ref(),
                          rates.as_ref(), efuse.as_ref()) {
         (true, Some(_v), Some(b), Some((caps, si)), Some(e)) =>
-            stage6a_link(h, &hal, &mut trx, mgmt_buf, &mut h2c, b, caps,
-                         *si, e.addr, 8_000_000),
+            stage6a_link(h, &hal, &mut trx, mgmt_buf, b, caps, *si,
+                         e.addr, &mut link, &mut lstats),
         _ => {
             host::print("[rtl8822ce] Stufe 6a: uebersprungen, 5f steht nicht\n");
             false
@@ -741,12 +743,14 @@ pub extern "C" fn _start() {
     // Die Zusammenfassung steht deshalb DAVOR: wer nie zurueckkehrt, kann
     // sie hinterher nicht mehr drucken.
     if stage6a {
-        if let (Some(e), Some(b), Some((caps, si))) =
-            (efuse.as_ref(), target.as_ref(), rates.as_ref())
-        {
+        if let (Some(e), Some(l)) = (efuse.as_ref(), link.as_mut()) {
             host::print("[rtl8822ce] Stufe 6b: der Treiber bleibt stehen —\n             \x20         Bericht je Sekunde, RX-Wachhund, kein\n             \x20         Abschalten mehr\n");
-            stage6a_link(h, &hal, &mut trx, mgmt_buf, &mut h2c, b, caps,
-                         *si, e.addr, 0);
+            // **Dieselbe Schleife, derselbe Link, dieselben Zaehler.**
+            // 6b setzt fort, statt neu anzufangen — ein zweites
+            // `EV_READY` liesse `wifid` einen frischen Supplicant bauen,
+            // der auf ein msg1 wartet, das der AP nie wieder schickt.
+            link_pump(h, &hal, &mut trx, mgmt_buf, l, &mut lstats,
+                      e.addr, 0);
         }
     }
 
@@ -2983,6 +2987,23 @@ fn rate_name(r: u8) -> &'static str {
     }
 }
 
+/// Die Zaehler der Verbindung. Sie gehoeren dem LINK, nicht der Stufe —
+/// 6b setzt fort, wo 6a aufgehoert hat, und ein Zaehler, der dabei auf
+/// null springt, ist eine Luege ueber die Leitung.
+#[derive(Default, Clone, Copy)]
+struct LinkStats {
+    eapol_rx: u32,
+    eapol_tx: u32,
+    keys_set: u32,
+    data_rx: u32,
+    data_tx: u32,
+    authorized: bool,
+    link_up_sent: bool,
+    extra_reported: u32,
+    llc_miss: u32,
+    rx_wd: u32,
+}
+
 /// Der Zustand einer stehenden Verbindung — Stufe 6a.
 struct Link {
     bssid: [u8; 6],
@@ -3184,7 +3205,7 @@ fn rx_to_8023(f: &[u8], out: &mut [u8], miss: &mut u32)
     Some((14 + payload.len(), et == ETHERTYPE_EAPOL))
 }
 
-/// Stufe 6a — der Steuerkanal, der Datenweg und der Vierwegehandschlag.
+/// PLATZ
 ///
 /// **Hier hoert der Stufentest auf und der Treiber faengt an.** Bis 5f
 /// arbeitete `main` eine Kette ab und schaltete den Chip aus; hier laeuft
@@ -3198,14 +3219,15 @@ fn rx_to_8023(f: &[u8], out: &mut [u8], miss: &mut u32)
 /// steht es in `docs/spec/WIFI_CLASS_ABI.md` §1: der Treiber sieht nie
 /// den PSK.
 #[allow(clippy::too_many_arguments)]
-fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
-                h2c: &mut fw::H2cState, bss: &Bss,
-                caps: &sta::PeerCaps, si: sta::StaInfo, mac: [u8; 6],
-                frist_us: u64) -> bool
-{
-    host::print("[rtl8822ce] Stufe 6a: der Steuerkanal und der Datenweg\n");
-
-    let mut link = Link {
+/// Den Link aufbauen: beim Kernel anmelden und `wifid` scharf machen.
+///
+/// **Das darf genau EINMAL geschehen.** Ein zweites `EV_READY` laesst
+/// `wifid` einen frischen Supplicant bauen, der auf ein msg1 wartet, das
+/// der AP nie wieder schickt — genau das ist in 0.23.0 passiert, weil
+/// Stufe 6b die Funktion von 6a ein zweites Mal rief.
+fn link_setup(hal: &Hal, bss: &Bss, caps: &sta::PeerCaps, si: sta::StaInfo,
+              mac: [u8; 6]) -> Link {
+    let link = Link {
         bssid: bss.bssid,
         mac,
         channel: bss.channel,
@@ -3239,6 +3261,17 @@ fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     host::print(if sent >= 0 { "raus" } else { "FEHLGESCHLAGEN" });
     host::print(" — der Supplicant wird jetzt scharf gemacht\n");
 
+    link
+}
+
+/// Die Schleife des Treibers. `frist_us == 0` heisst: nicht mehr aufhoeren.
+///
+/// Sie bekommt Link UND Zaehler von aussen, damit Stufe 6b dort fortsetzt,
+/// wo 6a aufgehoert hat.
+#[allow(clippy::too_many_arguments)]
+fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
+             link: &mut Link, ls: &mut LinkStats, mac: [u8; 6],
+             frist_us: u64) {
     let mut dm = dm::DmInfo::new();
     let mut path_div = dm::PathDiv::default();
     chip::read_cck_gi_bnd(h, &mut dm);
@@ -3253,15 +3286,6 @@ fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
          &mut *core::ptr::addr_of_mut!(CMDBUF))
     };
 
-    let mut eapol_rx = 0u32;
-    let mut eapol_tx = 0u32;
-    let mut keys_set = 0u32;
-    let mut authorized = false;
-    let mut data_rx = 0u32;
-    let mut data_tx = 0u32;
-    let mut link_up_sent = false;
-    let mut extra_reported = 0u32;
-    let mut llc_miss = 0u32;
 
     // `frist_us == 0` heisst: nicht mehr aufhoeren. Stufe 6a gibt acht
     // Sekunden vor — der Handschlag braucht vier Rahmen und ist in
@@ -3270,7 +3294,6 @@ fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     let t0 = host::now_us();
     let mut report_ms = host::now_ms();
     let mut rx_silent_ms = host::now_ms();
-    let mut rx_wd = 0u32;
     while frist_us == 0 || host::now_us() - t0 < frist_us {
         // ── Empfangen ────────────────────────────────────────────
         let got = pci::rx_poll(h, trx, 64, rxbuf, &mut dm, &mut path_div,
@@ -3285,13 +3308,13 @@ fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 return;
             }
             let f = &pkt[off..];
-            let Some((n, is_eapol)) = rx_to_8023(f, ethbuf, &mut llc_miss)
+            let Some((n, is_eapol)) = rx_to_8023(f, ethbuf, &mut ls.llc_miss)
             else {
                 return;
             };
-            data_rx += 1;
+            ls.data_rx += 1;
             if is_eapol {
-                eapol_rx += 1;
+                ls.eapol_rx += 1;
                 // `EV_EAPOL_RX` = [0x84][len u16 LE][Rahmen] — und der
                 // Rahmen ist der EAPOL-RUMPF hinter dem Ethertyp.
                 //
@@ -3311,8 +3334,8 @@ fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 let body = if raw.len() >= 4 {
                     let declared =
                         4 + u16::from_be_bytes([raw[2], raw[3]]) as usize;
-                    if extra_reported < 2 && declared <= raw.len() {
-                        extra_reported += 1;
+                    if ls.extra_reported < 2 && declared <= raw.len() {
+                        ls.extra_reported += 1;
                         host::print("    EAPOL: ");
                         host::print_dec(raw.len() as u32);
                         host::print(" Bytes geliefert, ");
@@ -3333,7 +3356,7 @@ fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     ev[3..3 + body.len()].copy_from_slice(body);
                     host::wifi_send_event(&ev[..3 + body.len()]);
                 }
-            } else if authorized {
+            } else if ls.authorized {
                 host::netdev_submit_rx(&ethbuf[..n]);
             }
         });
@@ -3362,9 +3385,9 @@ fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                         // mit der PTK laengst im Speicher, und der AP
                         // erwartet ihn geschuetzt.
                         let enc = link.ptk_installed;
-                        if tx_8023(h, trx, mgmt_buf, &mut link,
+                        if tx_8023(h, trx, mgmt_buf, link,
                                    &eth[..14 + len], enc) {
-                            eapol_tx += 1;
+                            ls.eapol_tx += 1;
                         } else {
                             host::print("  EAPOL NICHT GESENDET — der AP\n\
                              \x20         wird es wiederholen und dann\n\
@@ -3387,7 +3410,7 @@ fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                         sec::write_cam(h, &mut link.cam[slot as usize], slot,
                                        RTW_CAM_AES as u8, key_idx, group,
                                        &addr, key);
-                        keys_set += 1;
+                        ls.keys_set += 1;
                         if !group {
                             link.ptk_installed = true;
                         }
@@ -3402,13 +3425,13 @@ fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 }
                 // AUTHORIZED: der Handschlag ist durch.
                 Some(CMD_AUTHORIZED) => {
-                    authorized = true;
+                    ls.authorized = true;
                     host::netdev_set_link(true);
                     let mut up = [0u8; 7];
                     up[0] = EV_LINK_UP;
                     up[1..7].copy_from_slice(&link.bssid);
                     host::wifi_send_event(&up);
-                    link_up_sent = true;
+                    ls.link_up_sent = true;
                     host::print("  *** AUTHORIZED — Datenweg offen ***\n");
                 }
                 _ => {}
@@ -3416,16 +3439,16 @@ fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         }
 
         // ── Senden, was der IP-Stapel loswerden will ─────────────
-        if authorized {
+        if ls.authorized {
             loop {
                 let n = host::netdev_poll_tx(ethbuf);
                 if n <= 0 {
                     break;
                 }
                 let enc = link.ptk_installed;
-                if tx_8023(h, trx, mgmt_buf, &mut link,
+                if tx_8023(h, trx, mgmt_buf, link,
                            &ethbuf[..n as usize], enc) {
-                    data_tx += 1;
+                    ls.data_tx += 1;
                 }
             }
         }
@@ -3442,8 +3465,8 @@ fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         let now = host::now_ms();
         if now.wrapping_sub(report_ms) >= 1000 {
             report_ms = now;
-            publish_report(&link, data_rx, data_tx, eapol_rx, eapol_tx,
-                           keys_set, authorized, rx_wd);
+            publish_report(link, ls.data_rx, ls.data_tx, ls.eapol_rx, ls.eapol_tx,
+                           ls.keys_set, ls.authorized, ls.rx_wd);
         }
 
         // ── RX-Stille als Wachhund ───────────────────────────────
@@ -3454,8 +3477,8 @@ fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             rx_silent_ms = now;
         } else if now.wrapping_sub(rx_silent_ms) > 5_000 {
             rx_silent_ms = now;
-            rx_wd += 1;
-            if rx_wd <= 4 {
+            ls.rx_wd += 1;
+            if ls.rx_wd <= 4 {
                 host::print("[rtl8822ce] RX still seit 5 s — Ringzeiger rp=");
                 host::print_dec(trx.rx.rp);
                 host::print(", rx_tag ");
@@ -3469,27 +3492,43 @@ fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         }
     }
 
+}
+
+
+/// Stufe 6a — Aufbau, Handschlag und die ersten acht Sekunden.
+#[allow(clippy::too_many_arguments)]
+fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
+                bss: &Bss, caps: &sta::PeerCaps, si: sta::StaInfo,
+                mac: [u8; 6], link: &mut Option<Link>,
+                ls: &mut LinkStats) -> bool {
+    host::print("[rtl8822ce] Stufe 6a: der Steuerkanal und der Datenweg\n");
+
+    let mut l = link_setup(hal, bss, caps, si, mac);
+    // Acht Sekunden: der Handschlag braucht vier Rahmen und ist in
+    // Millisekunden durch; wer laenger wartet, wartet auf einen Fehler.
+    link_pump(h, hal, trx, mgmt_buf, &mut l, ls, mac, 8_000_000);
+
     host::print("  EAPOL rein/raus ");
-    host::print_dec(eapol_rx);
+    host::print_dec(ls.eapol_rx);
     host::print("/");
-    host::print_dec(eapol_tx);
+    host::print_dec(ls.eapol_tx);
     host::print(" · Schluessel ");
-    host::print_dec(keys_set);
+    host::print_dec(ls.keys_set);
     host::print(" · Datenrahmen rein/raus ");
-    host::print_dec(data_rx);
+    host::print_dec(ls.data_rx);
     host::print("/");
-    host::print_dec(data_tx);
+    host::print_dec(ls.data_tx);
     host::print("\n");
 
     let mut ok = true;
     ok &= gate("der AP faengt den Vierwegehandschlag an (EAPOL msg1)",
-               eapol_rx > 0);
-    ok &= gate("wir beantworten ihn", eapol_tx > 0);
+               ls.eapol_rx > 0);
+    ok &= gate("wir beantworten ihn", ls.eapol_tx > 0);
     ok &= gate("wifid installiert Paar- und Gruppenschluessel",
-               keys_set >= 2);
+               ls.keys_set >= 2);
     ok &= gate("der Handschlag ist durch (AUTHORIZED, LINK_UP)",
-               authorized && link_up_sent);
-    let _ = h2c;
+               ls.authorized && ls.link_up_sent);
+    *link = Some(l);
     ok
 }
 
