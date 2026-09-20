@@ -237,3 +237,425 @@ pub const RX_BUF_DESC_SZ: u32 = 8;
 pub const PHY_EFUSE_SIZE: u32 = 512;
 pub const LOG_EFUSE_SIZE: u32 = 768;
 pub const PTCT_EFUSE_SIZE: u32 = 124;
+
+// ════════════════════════════════════════════════════════════════
+// Stufe 3a: rtw_mac_init
+// ════════════════════════════════════════════════════════════════
+
+// ── mac.c `txdma_queue_mapping` (reg.h:207-260) ──────────────────
+pub const BIT_RXDMA_EN: u8 = 1 << 3; // reg.h:215
+pub const BIT_HCI_RXDMA_EN: u8 = 1 << 1; // reg.h:217
+pub const BIT_PROTOCOL_EN: u8 = 1 << 4; // reg.h:214
+pub const BIT_SCHEDULE_EN: u8 = 1 << 5; // reg.h:213
+pub const BIT_MACTXEN: u8 = 1 << 6; // reg.h:212
+pub const BIT_MACRXEN: u8 = 1 << 7; // reg.h:211
+/// reg.h:219 — alle acht Bits, also 0xff. Der Name steht hier, weil Linux
+/// ihn schreibt; die Zahl daneben ist kein Kommentar, sondern das Ergebnis.
+pub const MAC_TRX_ENABLE: u8 = BIT_HCI_TXDMA_EN | BIT_HCI_RXDMA_EN | BIT_TXDMA_EN
+    | BIT_RXDMA_EN | BIT_PROTOCOL_EN | BIT_SCHEDULE_EN | BIT_MACTXEN | BIT_MACRXEN;
+
+// Die sechs Queue-Abbildungen sind Feldmakros: zwei Bit je Queue im
+// 16-Bit-Wort REG_TXDMA_PQ_MAP (reg.h:233-258).
+pub const BIT_SHIFT_TXDMA_VOQ_MAP: u32 = 4; // reg.h:231
+pub const BIT_SHIFT_TXDMA_VIQ_MAP: u32 = 6; // reg.h:235
+pub const BIT_SHIFT_TXDMA_BEQ_MAP: u32 = 8; // reg.h:243
+pub const BIT_SHIFT_TXDMA_BKQ_MAP: u32 = 10; // reg.h:247
+pub const BIT_SHIFT_TXDMA_MGQ_MAP: u32 = 12; // reg.h:251
+pub const BIT_SHIFT_TXDMA_HIQ_MAP: u32 = 14; // reg.h:255
+pub const BIT_MASK_TXDMA_QUEUE_MAP: u16 = 0x3; // reg.h:232 u.a., fuer alle sechs
+
+/// main.h:1010-1013 — die vier Zielprioritaeten.
+pub const RTW_DMA_MAPPING_EXTRA: u8 = 0; // main.h:1010
+pub const RTW_DMA_MAPPING_LOW: u8 = 1; // main.h:1011
+pub const RTW_DMA_MAPPING_NORMAL: u8 = 2; // main.h:1012
+
+// ── mac.c `rtw_set_trx_fifo_info` (mac.h:24-29, main.h:34-35) ────
+pub const TX_PAGE_SIZE_SHIFT: u32 = 7; // main.h:34
+pub const TX_PAGE_SIZE: u32 = 1 << TX_PAGE_SIZE_SHIFT; // main.h:35
+pub const RSVD_PG_DRV_NUM: u16 = 16; // mac.h:24
+pub const RSVD_PG_H2C_EXTRAINFO_NUM: u16 = 24; // mac.h:25
+pub const RSVD_PG_H2C_STATICINFO_NUM: u16 = 8; // mac.h:26
+pub const RSVD_PG_H2CQ_NUM: u16 = 8; // mac.h:27
+pub const RSVD_PG_CPU_INSTRUCTION_NUM: u16 = 0; // mac.h:28
+pub const RSVD_PG_FW_TXBUF_NUM: u16 = 4; // mac.h:29
+pub const C2H_PKT_BUF: u32 = 256; // mac.h:11
+pub const PHY_STATUS_SIZE: u8 = 4; // mac.h:13
+
+/// rtw8822c.c `rtw8822c_hw_spec` — die drei Zahlen, aus denen der Seitenplan
+/// faellt. `page_size` ist `TX_PAGE_SIZE`.
+pub const TXFF_SIZE_8822C: u32 = 262144; // rtw8822c.c:5345
+pub const RXFF_SIZE_8822C: u32 = 24576; // rtw8822c.c:5346
+pub const RSVD_DRV_PG_NUM_8822C: u16 = 16; // rtw8822c.c:5348
+pub const CSI_BUF_PG_NUM_8822C: u16 = 50; // rtw8822c.c:5352
+
+// ── mac.c `__priority_queue_cfg` ─────────────────────────────────
+pub const REG_FIFOPAGE_INFO_2: u32 = 0x0234; // reg.h:351
+pub const REG_FIFOPAGE_INFO_3: u32 = 0x0238; // reg.h:352
+pub const REG_FIFOPAGE_INFO_4: u32 = 0x023C; // reg.h:353
+pub const REG_FIFOPAGE_INFO_5: u32 = 0x0240; // reg.h:354
+pub const BIT_EN_WR_FREE_TAIL: u32 = 1 << 20; // reg.h:389
+pub const REG_BCNQ_BDNY_V1: u32 = 0x0424; // reg.h:392
+pub const REG_BCNQ1_BDNY_V1: u32 = 0x0456; // reg.h:411
+pub const REG_RXFF_BNDY: u32 = 0x011C; // reg.h:276
+pub const REG_AUTO_LLT_V1: u32 = 0x0208; // reg.h:325
+pub const BIT_AUTO_INIT_LLT_V1: u32 = 1 << 0; // reg.h:326
+
+// ── mac.c `init_h2c` ─────────────────────────────────────────────
+pub const REG_H2C_HEAD: u32 = 0x0244; // reg.h:355
+pub const REG_H2C_TAIL: u32 = 0x0248; // reg.h:356
+pub const REG_H2C_READ_ADDR: u32 = 0x024C; // reg.h:357
+pub const REG_H2C_INFO: u32 = 0x0254; // reg.h:358
+pub const REG_TXDMA_OFFSET_CHK: u32 = 0x020C; // reg.h:330
+pub const REG_H2C_PKT_READADDR: u32 = 0x10D0; // reg.h:800
+pub const REG_H2C_PKT_WRITEADDR: u32 = 0x10D4; // reg.h:801
+
+// ── mac.c `rtw_drv_info_cfg` ─────────────────────────────────────
+pub const REG_RX_DRVINFO_SZ: u32 = 0x060F; // reg.h:536
+pub const REG_TRXFF_BNDY: u32 = 0x0114; // reg.h:275
+pub const REG_RCR: u32 = 0x0608; // reg.h:502
+pub const BIT_APP_PHYSTS: u32 = 1 << 28; // reg.h:506
+pub const REG_WMAC_OPTION_FUNCTION: u32 = 0x07D0; // reg.h:595
+
+// ── pci.c `rtw_pci_interface_cfg` ────────────────────────────────
+pub const REG_HCI_MIX_CFG: u32 = 0x03FC; // reg.h:381
+pub const BIT_PCIE_EMAC_PDN_AUX_TO_FAST_CLK: u32 = 1 << 26; // reg.h:382
+
+// ── rtw8822c.c `rtw8822c_mac_init` — Register ────────────────────
+pub const REG_SPEC_SIFS: u32 = 0x0428; // reg.h:397
+pub const REG_SIFS: u32 = 0x0514; // reg.h:457
+pub const REG_RESP_SIFS_CCK: u32 = 0x063C; // reg.h:542
+pub const REG_RESP_SIFS_OFDM: u32 = 0x063E; // reg.h:543
+pub const REG_DARFRC: u32 = 0x0430; // reg.h:399
+pub const REG_DARFRCH: u32 = 0x0434; // reg.h:400
+pub const REG_RARFRCH: u32 = 0x043C; // reg.h:401
+pub const REG_ARFR0: u32 = 0x0444; // reg.h:404
+pub const REG_ARFRH0: u32 = 0x0448; // reg.h:405
+pub const REG_ARFR1_V1: u32 = 0x044C; // reg.h:406
+pub const REG_ARFRH1_V1: u32 = 0x0450; // reg.h:407
+pub const REG_ARFR4: u32 = 0x049C; // reg.h:425
+pub const REG_ARFRH4: u32 = 0x04A0; // reg.h:427
+pub const REG_ARFR5: u32 = 0x04A4; // reg.h:428
+pub const REG_ARFRH5: u32 = 0x04A8; // reg.h:429
+pub const REG_AMPDU_MAX_TIME_V1: u32 = 0x0455; // reg.h:410
+pub const REG_TX_HANG_CTRL: u32 = 0x045E; // reg.h:415
+pub const BIT_EN_EOF_V1: u8 = 1 << 2; // reg.h:417
+pub const REG_PRECNT_CTRL: u32 = 0x04E5; // reg.h:440
+pub const BIT_EN_PRECNT: u16 = 1 << 11; // reg.h:442
+pub const REG_PROT_MODE_CTRL: u32 = 0x04C8; // reg.h:437
+pub const REG_BAR_MODE_CTRL: u32 = 0x04CC; // reg.h:439
+pub const REG_FAST_EDCA_VOVI_SETTING: u32 = 0x1448; // reg.h:825
+pub const REG_FAST_EDCA_BEBK_SETTING: u32 = 0x144C; // reg.h:826
+pub const REG_LIFETIME_EN: u32 = 0x0426; // reg.h:395
+pub const BIT_BA_PARSER_EN: u8 = 1 << 5; // reg.h:396
+pub const REG_RRSR: u32 = 0x0440; // reg.h:402
+pub const BITS_RRSR_RSC: u32 = 0x60_0000; // reg.h:403  GENMASK(22, 21)
+pub const REG_EDCA_VO_PARAM: u32 = 0x0500; // reg.h:447
+pub const REG_EDCA_VI_PARAM: u32 = 0x0504; // reg.h:448
+pub const REG_EDCA_BE_PARAM: u32 = 0x0508; // reg.h:449
+pub const REG_EDCA_BK_PARAM: u32 = 0x050C; // reg.h:450
+pub const REG_PIFS: u32 = 0x0512; // reg.h:456
+pub const REG_TX_PTCL_CTRL: u32 = 0x0520; // reg.h:463
+pub const BIT_SIFS_BK_EN: u32 = 1 << 12; // reg.h:465
+pub const REG_RD_CTRL: u32 = 0x0524; // reg.h:469
+pub const BIT_DIS_TXOP_CFE: u32 = 1 << 10; // reg.h:471
+pub const BIT_DIS_LSIG_CFE: u32 = 1 << 9; // reg.h:472
+pub const BIT_DIS_STBC_CFE: u32 = 1 << 8; // reg.h:473
+pub const REG_AFE_CTRL1: u32 = 0x0024; // reg.h:46
+pub const BIT_MAC_CLK_SEL: u32 = (1 << 20) | (1 << 21); // reg.h:47
+pub const REG_USTIME_TSF: u32 = 0x055C; // reg.h:486
+pub const REG_USTIME_EDCA: u32 = 0x0638; // reg.h:539
+pub const REG_MISC_CTRL: u32 = 0x0577; // reg.h:489
+pub const BIT_EN_FREE_CNT: u8 = 1 << 3; // reg.h:490
+pub const BIT_DIS_SECOND_CCA: u8 = (1 << 0) | (1 << 1); // reg.h:491
+pub const REG_TIMER0_SRC_SEL: u32 = 0x05B4; // reg.h:495
+pub const BIT_TSFT_SEL_TIMER0: u8 = (1 << 4) | (1 << 5) | (1 << 6); // reg.h:496
+pub const REG_TXPAUSE: u32 = 0x0522; // reg.h:466
+pub const REG_SLOT: u32 = 0x051B; // reg.h:462
+pub const REG_RD_NAV_NXT: u32 = 0x0544; // reg.h:476
+pub const REG_RXTSF_OFFSET_CCK: u32 = 0x055E; // reg.h:488
+pub const REG_TBTT_PROHIBIT: u32 = 0x0540; // reg.h:474
+pub const REG_DRVERLYINT: u32 = 0x0558; // reg.h:483
+pub const REG_BCN_CTRL_CLINT0: u32 = 0x0551; // reg.h:482
+pub const REG_BCNDMATIM: u32 = 0x0559; // reg.h:484
+pub const REG_BCN_MAX_ERR: u32 = 0x055D; // reg.h:487
+pub const REG_MAR: u32 = 0x0620; // reg.h:538
+pub const REG_BBPSF_CTRL: u32 = 0x06DC; // reg.h:577
+pub const REG_ACKTO: u32 = 0x0640; // reg.h:544
+pub const REG_ACKTO_CCK: u32 = 0x0639; // reg.h:540
+pub const REG_EIFS: u32 = 0x0642; // reg.h:545
+pub const REG_NAV_CTRL: u32 = 0x0650; // reg.h:546
+pub const REG_WMAC_TRXPTCL_CTL_H: u32 = 0x066C; // reg.h:551
+pub const REG_RXFLTMAP0: u32 = 0x06A0; // reg.h:566
+pub const REG_RXFLTMAP2: u32 = 0x06A4; // reg.h:568
+pub const REG_RX_PKT_LIMIT: u32 = 0x060C; // reg.h:535
+pub const REG_TCR: u32 = 0x0604; // reg.h:498
+pub const REG_GENERAL_OPTION: u32 = 0x1664; // reg.h:894
+pub const BIT_DUMMY_FCS_READY_MASK_EN: u32 = 1 << 9; // reg.h:895
+pub const REG_WMAC_OPTION_FUNCTION_1: u32 = 0x07D4; // reg.h:596
+pub const REG_RXPSF_CTRL: u32 = 0x1610; // reg.h:828
+pub const REG_RXPSF_TYPE_CTRL: u32 = 0x1614; // reg.h:893
+pub const REG_INT_MIG: u32 = 0x0304; // reg.h:380
+/// `REG_SND_PTCL_CTRL` und sein Bit stehen in **bf.h**, nicht in reg.h —
+/// Beamforming hat dort seinen eigenen Registerblock.
+pub const REG_SND_PTCL_CTRL: u32 = 0x0718; // bf.h:15
+pub const BIT_DIS_CHK_VHTSIGB_CRC: u8 = 1 << 6; // bf.h:16
+
+// REG_RXPSF_CTRL-Felder (reg.h:831-889)
+pub const BIT_SHIFT_RXGCK_VHT_FIFOTHR: u32 = 26; // reg.h:831
+pub const BIT_SHIFT_RXGCK_HT_FIFOTHR: u32 = 24; // reg.h:838
+pub const BIT_SHIFT_RXGCK_OFDM_FIFOTHR: u32 = 22; // reg.h:845
+pub const BIT_SHIFT_RXGCK_CCK_FIFOTHR: u32 = 20; // reg.h:852
+pub const BIT_SHIFT_RXPSF_PKTLENTHR: u32 = 13; // reg.h:861
+pub const BIT_MASK_RXPSF_PKTLENTHR: u16 = 0x7; // reg.h:862
+pub const BIT_RXPSF_CTRLEN: u16 = 1 << 12; // reg.h:871
+pub const BIT_RXPSF_VHTCHKEN: u16 = 1 << 11; // reg.h:872
+pub const BIT_RXPSF_HTCHKEN: u16 = 1 << 10; // reg.h:873
+pub const BIT_RXPSF_OFDMCHKEN: u16 = 1 << 9; // reg.h:874
+pub const BIT_RXPSF_CCKCHKEN: u16 = 1 << 8; // reg.h:875
+pub const BIT_RXPSF_OFDMRST: u16 = 1 << 7; // reg.h:876
+pub const BIT_RXPSF_CCKRST: u16 = 1 << 6; // reg.h:877
+pub const BIT_RXPSF_MHCHKEN: u16 = 1 << 5; // reg.h:878
+pub const BIT_RXPSF_CONT_ERRCHKEN: u16 = 1 << 4; // reg.h:879
+pub const BIT_SHIFT_RXPSF_ERRTHR: u32 = 0; // reg.h:882
+pub const BIT_MASK_RXPSF_ERRTHR: u16 = 0x7; // reg.h:883
+
+// ── rtw8822c.c `rtw8822c_mac_init` — Werte ───────────────────────
+pub const WLAN_TXQ_RPT_EN: u8 = 0x1F; // rtw8822c.c:1915
+pub const WLAN_SLOT_TIME: u8 = 0x09; // rtw8822c.c:1916
+pub const WLAN_PIFS_TIME: u8 = 0x1C; // rtw8822c.c:1917
+pub const WLAN_NAV_MAX: u8 = 0xC8; // rtw8822c.c:1922
+pub const WLAN_DRV_EARLY_INT: u8 = 0x04; // rtw8822c.c:1929
+pub const WLAN_BCN_CTRL_CLT0: u8 = 0x10; // rtw8822c.c:1930
+pub const WLAN_BCN_DMA_TIME: u8 = 0x02; // rtw8822c.c:1931
+pub const WLAN_BCN_MAX_ERR: u8 = 0xFF; // rtw8822c.c:1932
+pub const WLAN_SIFS_CCK_CTX: u16 = 0x0A; // rtw8822c.c:1935
+pub const WLAN_SIFS_CCK_IRX: u16 = 0x0A; // rtw8822c.c:1936
+pub const WLAN_SIFS_OFDM_CTX: u16 = 0x0E; // rtw8822c.c:1937
+pub const WLAN_SIFS_OFDM_IRX: u16 = 0x0E; // rtw8822c.c:1938
+pub const WLAN_EIFS_DUR_TUNE: u16 = 0x40; // rtw8822c.c:1939
+pub const WLAN_EDCA_VO_PARAM: u32 = 0x002F_A226; // rtw8822c.c:1940
+pub const WLAN_EDCA_VI_PARAM: u32 = 0x005E_A328; // rtw8822c.c:1941
+pub const WLAN_EDCA_BE_PARAM: u32 = 0x005E_A42B; // rtw8822c.c:1942
+pub const WLAN_EDCA_BK_PARAM: u32 = 0x0000_A44F; // rtw8822c.c:1943
+pub const WLAN_RX_FILTER0: u32 = 0xFFFF_FFFF; // rtw8822c.c:1945
+pub const WLAN_RX_FILTER2: u16 = 0xFFFF; // rtw8822c.c:1946
+pub const WLAN_RCR_CFG: u32 = 0xE400_220E; // rtw8822c.c:1947
+pub const WLAN_RXPKT_MAX_SZ_512: u8 = 24; // rtw8822c.c:1949  (12288 >> 9)
+pub const WLAN_AMPDU_MAX_TIME: u8 = 0x70; // rtw8822c.c:1951
+pub const WLAN_RTS_LEN_TH: u32 = 0xFF; // rtw8822c.c:1952
+pub const WLAN_RTS_TX_TIME_TH: u32 = 0x08; // rtw8822c.c:1953
+pub const WLAN_MAX_AGG_PKT_LIMIT: u32 = 0x3f; // rtw8822c.c:1954
+pub const WLAN_RTS_MAX_AGG_PKT_LIMIT: u32 = 0x3f; // rtw8822c.c:1955
+pub const WLAN_PRE_TXCNT_TIME_TH: u16 = 0x1E0; // rtw8822c.c:1956
+pub const FAST_EDCA_VO_TH: u8 = 0x06; // rtw8822c.c:1957
+pub const FAST_EDCA_VI_TH: u8 = 0x06; // rtw8822c.c:1958
+pub const FAST_EDCA_BE_TH: u8 = 0x06; // rtw8822c.c:1959
+pub const FAST_EDCA_BK_TH: u8 = 0x06; // rtw8822c.c:1960
+pub const WLAN_BAR_RETRY_LIMIT: u16 = 0x01; // rtw8822c.c:1961
+pub const WLAN_BAR_ACK_TYPE: u8 = 0x05; // rtw8822c.c:1962
+pub const WLAN_RA_TRY_RATE_AGG_LIMIT: u16 = 0x08; // rtw8822c.c:1963
+pub const WLAN_RESP_TXRATE: u8 = 0x84; // rtw8822c.c:1964
+pub const WLAN_ACK_TO: u8 = 0x21; // rtw8822c.c:1965
+pub const WLAN_ACK_TO_CCK: u8 = 0x6A; // rtw8822c.c:1966
+pub const WLAN_DATA_RATE_FB_CNT_1_4: u32 = 0x0100_0000; // rtw8822c.c:1967
+pub const WLAN_DATA_RATE_FB_CNT_5_8: u32 = 0x0807_0504; // rtw8822c.c:1968
+pub const WLAN_RTS_RATE_FB_CNT_5_8: u32 = 0x0807_0504; // rtw8822c.c:1969
+pub const WLAN_DATA_RATE_FB_RATE0: u32 = 0xFE01_F010; // rtw8822c.c:1970
+pub const WLAN_DATA_RATE_FB_RATE0_H: u32 = 0x4000_0000; // rtw8822c.c:1971
+pub const WLAN_RTS_RATE_FB_RATE1: u32 = 0x003F_F010; // rtw8822c.c:1972
+pub const WLAN_RTS_RATE_FB_RATE1_H: u32 = 0x4000_0000; // rtw8822c.c:1973
+pub const WLAN_RTS_RATE_FB_RATE4: u32 = 0x0600_F010; // rtw8822c.c:1974
+pub const WLAN_RTS_RATE_FB_RATE4_H: u32 = 0x4000_03E0; // rtw8822c.c:1975
+pub const WLAN_RTS_RATE_FB_RATE5: u32 = 0x0600_F015; // rtw8822c.c:1976
+pub const WLAN_RTS_RATE_FB_RATE5_H: u32 = 0x0000_00E0; // rtw8822c.c:1977
+pub const WLAN_MULTI_ADDR: u32 = 0xFFFF_FFFF; // rtw8822c.c:1978
+pub const WLAN_TX_FUNC_CFG1: u8 = 0x30; // rtw8822c.c:1980
+pub const WLAN_TX_FUNC_CFG2: u8 = 0x30; // rtw8822c.c:1981
+pub const WLAN_MAC_OPT_NORM_FUNC1: u8 = 0x98; // rtw8822c.c:1982
+pub const WLAN_MAC_OPT_FUNC2: u32 = 0xb081_0041; // rtw8822c.c:1984
+pub const WLAN_MAC_INT_MIG_CFG: u32 = 0x3333_0000; // rtw8822c.c:1985
+/// rtw8822c.c:1987 — zusammengesetzt aus CCK_CONT_TX 0x0A, OFDM_CONT_TX 0x0E,
+/// CCK_TRX 0x0A und OFDM_TRX 0x10 an ihren Schiebestellen: 0x100A0E0A.
+pub const WLAN_SIFS_CFG: u32 = 0x100A_0E0A; // rtw8822c.c:1987
+/// rtw8822c.c:1992 — CCK_DUR_TUNE 0x0A | OFDM_DUR_TUNE 0x10 << 8.
+pub const WLAN_SIFS_DUR_TUNE: u16 = 0x100A; // rtw8822c.c:1992
+/// rtw8822c.c:1995 — TBTT_PROHIBIT 0x04 | TBTT_HOLD_TIME 0x64 << 8.
+pub const WLAN_TBTT_TIME: u32 = 0x0000_6404; // rtw8822c.c:1995
+pub const WLAN_NAV_CFG: u32 = 0x001B_0005; // rtw8822c.c:1998
+pub const WLAN_RX_TSF_CFG: u16 = 0x3030; // rtw8822c.c:1999
+pub const MAC_CLK_SPEED: u8 = 80; // rtw8822c.c:2001
+
+// ── Feldmakros aus reg.h, als Funktionen ─────────────────────────
+// In C sind das `#define NAME(x) (((x) & MASK) << SHIFT)`. Als Funktion
+// bleibt die Maske stehen, wo sie in Linux steht — ein direkt geschriebener
+// Zahlenwert waere die Rechnung von HEUTE und nicht die Regel.
+
+/// reg.h:233-258 — dieselbe Form fuer alle sechs Sendequeues.
+#[inline]
+pub fn bit_txdma_queue_map(x: u8, shift: u32) -> u16 {
+    ((x as u16) & BIT_MASK_TXDMA_QUEUE_MAP) << shift
+}
+
+/// reg.h:833 `BIT_RXGCK_VHT_FIFOTHR(x)`
+#[inline]
+pub fn bit_rxgck_vht_fifothr(x: u32) -> u32 {
+    (x & 0x3) << BIT_SHIFT_RXGCK_VHT_FIFOTHR
+}
+/// reg.h:840 `BIT_RXGCK_HT_FIFOTHR(x)`
+#[inline]
+pub fn bit_rxgck_ht_fifothr(x: u32) -> u32 {
+    (x & 0x3) << BIT_SHIFT_RXGCK_HT_FIFOTHR
+}
+/// reg.h:847 `BIT_RXGCK_OFDM_FIFOTHR(x)`
+#[inline]
+pub fn bit_rxgck_ofdm_fifothr(x: u32) -> u32 {
+    (x & 0x3) << BIT_SHIFT_RXGCK_OFDM_FIFOTHR
+}
+/// reg.h:854 `BIT_RXGCK_CCK_FIFOTHR(x)`
+#[inline]
+pub fn bit_rxgck_cck_fifothr(x: u32) -> u32 {
+    (x & 0x3) << BIT_SHIFT_RXGCK_CCK_FIFOTHR
+}
+
+/// reg.h:869 `BIT_SET_RXPSF_PKTLENTHR(x, v)` — Feld loeschen, dann setzen.
+#[inline]
+pub fn bit_set_rxpsf_pktlenthr(x: u16, v: u16) -> u16 {
+    (x & !(BIT_MASK_RXPSF_PKTLENTHR << BIT_SHIFT_RXPSF_PKTLENTHR))
+        | ((v & BIT_MASK_RXPSF_PKTLENTHR) << BIT_SHIFT_RXPSF_PKTLENTHR)
+}
+
+/// reg.h:889 `BIT_SET_RXPSF_ERRTHR(x, v)`
+#[inline]
+pub fn bit_set_rxpsf_errthr(x: u16, v: u16) -> u16 {
+    (x & !(BIT_MASK_RXPSF_ERRTHR << BIT_SHIFT_RXPSF_ERRTHR))
+        | ((v & BIT_MASK_RXPSF_ERRTHR) << BIT_SHIFT_RXPSF_ERRTHR)
+}
+
+// ════════════════════════════════════════════════════════════════
+// Stufe 3c: rtw8822c_phy_set_param
+// ════════════════════════════════════════════════════════════════
+
+// ── rtw8822c_header_file_init (rtw8822c.h:214-219, 312-314) ──────
+pub const REG_3WIRE: u32 = 0x180C; // rtw8822c.h:214
+pub const REG_3WIRE2: u32 = 0x410C; // rtw8822c.h:353
+pub const BIT_3WIRE_TX_EN: u32 = 0x1; // rtw8822c.h:216  GENMASK(0, 0)
+pub const BIT_3WIRE_RX_EN: u32 = 0x2; // rtw8822c.h:217  GENMASK(1, 1)
+pub const BIT_3WIRE_PI_ON: u32 = 1 << 28; // rtw8822c.h:219
+pub const REG_ENCCK: u32 = 0x1C3C; // rtw8822c.h:312
+pub const BIT_CCK_BLK_EN: u32 = 1 << 1; // rtw8822c.h:313
+pub const BIT_CCK_OFDM_BLK_EN: u32 = 0x3; // rtw8822c.h:314  GENMASK(1, 0)
+
+// ── Sende-/Empfangspfade (rtw8822c.h, main.h:141-147) ────────────
+pub const BB_PATH_A: u8 = 1 << 0; // main.h:142
+pub const BB_PATH_B: u8 = 1 << 1; // main.h:143
+pub const BB_PATH_AB: u8 = BB_PATH_A | BB_PATH_B; // main.h:147
+pub const REG_ORITXCODE: u32 = 0x1800; // rtw8822c.h:212
+pub const REG_ORITXCODE2: u32 = 0x4100; // rtw8822c.h:352
+pub const MASK20BITS: u32 = 0xfffff; // phy.h:184
+pub const REG_CCANRX: u32 = 0x1A2C; // rtw8822c.h:242
+pub const REG_RXCCKSEL: u32 = 0x1A04; // rtw8822c.h:236
+pub const REG_RXFNCTL: u32 = 0x1D30; // rtw8822c.h:326
+pub const REG_AGCSWSH: u32 = 0x0C44; // rtw8822c.h:207
+pub const REG_ANTWTPD: u32 = 0x0C54; // rtw8822c.h:208
+pub const REG_MRCM: u32 = 0x0C38; // rtw8822c.h:206
+pub const REG_ANTMAP0: u32 = 0x0820; // rtw8822c.h:190
+pub const REG_TXLGMAP: u32 = 0x1E2C; // rtw8822c.h:335
+pub const REG_RXIGI: u32 = 0x1D70; // rtw8822c.h:329
+
+// ── DPD, Quarz (reg.h) ───────────────────────────────────────────
+pub const REG_DIS_DPD: u32 = 0x0A70; // reg.h:657
+pub const DIS_DPD_MASK: u32 = 0x3ff; // reg.h:658  GENMASK(9, 0)
+pub const DIS_DPD_RATEALL: u32 = 0x3ff; // reg.h:669
+pub const REG_ANAPAR_XTAL_0: u32 = 0x1040; // reg.h:791
+pub const XCAP_MASK: u32 = 0x7f; // rtw8822c.h:183  GENMASK(6, 0)
+
+// ── DACK (rtw8822c.h:139-142, main.h:1625-1626, rtw8822c.h:229-232) ──
+pub const DACK_PATH_8822C: usize = 2; // rtw8822c.h:139
+pub const DACK_REG_8822C: usize = 16; // rtw8822c.h:140
+pub const DACK_RF_8822C: usize = 1; // rtw8822c.h:141
+pub const DACK_SN_8822C: usize = 100; // rtw8822c.h:142
+pub const DACK_MSBK_BACKUP_NUM: usize = 15; // main.h:1625
+pub const DACK_DCK_BACKUP_NUM: usize = 2; // main.h:1626
+pub const REG_DCKA_I_0: u32 = 0x18BC; // rtw8822c.h:229
+pub const REG_DCKA_I_1: u32 = 0x18C0; // rtw8822c.h:230
+pub const REG_DCKA_Q_0: u32 = 0x18D8; // rtw8822c.h:231
+pub const REG_DCKA_Q_1: u32 = 0x18DC; // rtw8822c.h:232
+pub const REG_DCKB_I_0: u32 = 0x41BC; // rtw8822c.h:359
+pub const REG_DCKB_I_1: u32 = 0x41C0; // rtw8822c.h:360
+pub const REG_DCKB_Q_0: u32 = 0x41D8; // rtw8822c.h:361
+pub const REG_DCKB_Q_1: u32 = 0x41DC; // rtw8822c.h:362
+
+// ── RF-Register und ihre Felder (rtw8822c.h:384-406) ─────────────
+pub const RF_PA: u32 = 0x60; // rtw8822c.h:384
+pub const RF_PABIAS_2G_MASK: u32 = 0xf000; // rtw8822c.h:385  GENMASK(15, 12)
+pub const RF_PABIAS_5G_MASK: u32 = 0xf0000; // rtw8822c.h:386  GENMASK(19, 16)
+pub const RF_THEMAL_MASK: u32 = 0xf0000; // rtw8822c.h:406  GENMASK(19, 16)
+
+// ── Werkskalibrierung in der PHYSISCHEN efuse (rtw8822c.h:405-428) ──
+pub const PPG_THERMAL_B: u16 = 0x1B0; // rtw8822c.h:405
+pub const PPG_2GH_TXAB: u16 = 0x1D2; // rtw8822c.h:407
+pub const PPG_2G_A_MASK: u8 = 0x0f; // rtw8822c.h:408  GENMASK(3, 0)
+pub const PPG_2G_B_MASK: u8 = 0xf0; // rtw8822c.h:409  GENMASK(7, 4)
+pub const PPG_2GL_TXAB: u16 = 0x1D4; // rtw8822c.h:410
+pub const PPG_PABIAS_2GB: u16 = 0x1D5; // rtw8822c.h:411
+pub const PPG_PABIAS_2GA: u16 = 0x1D6; // rtw8822c.h:412
+pub const PPG_PABIAS_MASK: u8 = 0x0f; // rtw8822c.h:413  GENMASK(3, 0)
+pub const PPG_PABIAS_5GB: u16 = 0x1D7; // rtw8822c.h:414
+pub const PPG_PABIAS_5GA: u16 = 0x1D8; // rtw8822c.h:415
+pub const PPG_5G_MASK: u8 = 0x1f; // rtw8822c.h:416  GENMASK(4, 0)
+pub const PPG_5GH1_TXB: u16 = 0x1DB; // rtw8822c.h:417
+pub const PPG_5GH1_TXA: u16 = 0x1DC; // rtw8822c.h:418
+pub const PPG_5GM2_TXB: u16 = 0x1DF; // rtw8822c.h:419
+pub const PPG_5GM2_TXA: u16 = 0x1E0; // rtw8822c.h:420
+pub const PPG_5GM1_TXB: u16 = 0x1E3; // rtw8822c.h:421
+pub const PPG_5GM1_TXA: u16 = 0x1E4; // rtw8822c.h:422
+pub const PPG_5GL2_TXB: u16 = 0x1E7; // rtw8822c.h:423
+pub const PPG_5GL2_TXA: u16 = 0x1E8; // rtw8822c.h:424
+pub const PPG_5GL1_TXB: u16 = 0x1EB; // rtw8822c.h:425
+pub const PPG_5GL1_TXA: u16 = 0x1EC; // rtw8822c.h:426
+pub const PPG_2GM_TXAB: u16 = 0x1EE; // rtw8822c.h:427
+pub const PPG_THERMAL_A: u16 = 0x1EF; // rtw8822c.h:428
+/// efuse.h:13 — und zugleich der Wert, den ein LEERES efuse-Byte hat.
+pub const EFUSE_READ_FAIL: u8 = 0xff;
+
+// ── Adaptivity / EDCCA ───────────────────────────────────────────
+pub const RTW8822C_EDCCA_MAX: u8 = 0x7f; // rtw8822c.h:180
+pub const BIT_DIS_EDCCA: u32 = 1 << 15; // reg.h:464
+pub const BIT_EDCCA_MSK_CNTDOWN_EN: u32 = 1 << 11; // reg.h:470
+pub const REG_EDCCA_DECISION: u32 = 0x0844; // rtw8822c.h:193
+pub const BIT_EDCCA_OPTION: u32 = 0x6000_0000; // rtw8822c.h:194  GENMASK(30, 29)
+/// rtw8822c.c:5287-5294 `rtw8822c_edcca_th` — Adresse, Maske und der
+/// Versatz, der auf den Schwellwert addiert wird.
+pub const EDCCA_TH_L2H: (u32, u32, u8) = (0x84c, 0x00ff_0000, 0x80);
+pub const EDCCA_TH_H2L: (u32, u32, u8) = (0x84c, 0xff00_0000, 0x80);
+
+// ── Beamforming-Grundeinstellung (bf.h) ──────────────────────────
+pub const REG_TXBF_CTRL: u32 = 0x042C; // bf.h:8
+pub const REG_NDPA_OPT_CTRL: u32 = 0x045F; // bf.h:10
+pub const REG_MU_TX_CTL: u32 = 0x14C0; // bf.h:19
+pub const REG_WMAC_MU_BF_OPTION: u32 = 0x167C; // bf.h:23
+pub const REG_WMAC_MU_BF_CTL: u32 = 0x1680; // bf.h:24
+pub const BIT_WMAC_TXMU_ACKPOLICY_EN: u8 = 1 << 6; // bf.h:27
+pub const BIT_USE_NDPA_PARAMETER: u32 = 1 << 30; // bf.h:28
+pub const BIT_MU_P1_WAIT_STATE_EN: u32 = 1 << 16; // bf.h:29
+pub const BIT_EN_MU_MIMO: u32 = 1 << 7; // bf.h:30
+pub const BIT_SHIFT_R_MU_RL: u32 = 12; // bf.h:33
+pub const BIT_SHIFT_WMAC_TXMU_ACKPOLICY: u32 = 4; // bf.h:34
+pub const BIT_MASK_R_MU_RL: u32 = 0xf000; // bf.h:37  GENMASK(15, 12)
+pub const BIT_MASK_R_MU_TABLE_VALID: u32 = 0x3f; // bf.h:38  GENMASK(5, 0)
+pub const BIT_MASK_CSI_RATE: u32 = 0x3f00_0000; // bf.h:40  GENMASK(29, 24)
+pub const DESC_RATE6M: u32 = 0x04; // main.h:255
+
+// ── Falschalarm-Zaehler (rtw8822c.h:243-347) ─────────────────────
+pub const REG_CCK_FACNT: u32 = 0x1A5C; // rtw8822c.h:245
+pub const REG_OFDM_FACNT1: u32 = 0x2D04; // rtw8822c.h:343
+pub const REG_OFDM_FACNT2: u32 = 0x2D08; // rtw8822c.h:344
+pub const REG_OFDM_FACNT3: u32 = 0x2D0C; // rtw8822c.h:345
+pub const REG_OFDM_FACNT4: u32 = 0x2D10; // rtw8822c.h:346
+pub const REG_OFDM_FACNT5: u32 = 0x2D20; // rtw8822c.h:347
+pub const BIT_CCK_FA_RST: u32 = 0xc000; // rtw8822c.h:243  GENMASK(15, 14)
+pub const BIT_OFDM_FA_RST: u32 = 0x3000; // rtw8822c.h:244  GENMASK(13, 12)
+pub const REG_RX_BREAK: u32 = 0x1D2C; // rtw8822c.h:324
+pub const BIT_COM_RX_GCK_EN: u32 = 1 << 31; // rtw8822c.h:325
+pub const REG_CNT_CTRL: u32 = 0x1EB4; // rtw8822c.h:339
+pub const BIT_ALL_CNT_RST: u32 = 1 << 25; // rtw8822c.h:340

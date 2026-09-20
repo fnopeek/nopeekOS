@@ -345,3 +345,32 @@ pub fn efuse_info_setup(h: i32, rf_path_num: u8) -> Option<Efuse> {
     host::print("\n");
     Some(e)
 }
+
+/// efuse.c:31-49 `rtw_read8_physical_efuse` — EIN Byte aus der physischen
+/// efuse, ohne Bankwechsel und ohne LDO-Schalter.
+///
+/// Das ist der Weg, ueber den `rtw8822c_rf_init` seine Werkskalibrierung
+/// holt (Thermik, Leistungsabgleich, PA-Vorspannung). Linux pollt mit
+/// `read_poll_timeout(..., 1000, 100000, ...)`, also alle 1 ms bis
+/// **100 ms** — eine andere Frist als der volle Abzug oben, und deshalb
+/// steht sie hier eigens.
+///
+/// Gibt `EFUSE_READ_FAIL` zurueck, wenn die Frist ablaeuft. Der Wert ist
+/// 0xff und damit zugleich das, was ein UNBESCHRIEBENES efuse-Byte liefert
+/// — die Rufer behandeln beides gleich, und das ist Absicht.
+pub fn read8_physical(h: i32, addr: u16) -> u8 {
+    host::w32_mask(h, REG_EFUSE_CTRL, 0x3ff00, addr as u32);
+    host::clr32(h, REG_EFUSE_CTRL, BIT_EF_FLAG);
+
+    let start = host::now_us();
+    loop {
+        let ctl = host::r32(h, REG_EFUSE_CTRL);
+        if ctl & BIT_EF_FLAG != 0 {
+            return host::r8(h, REG_EFUSE_CTRL);
+        }
+        if host::now_us() - start >= 100_000 {
+            return EFUSE_READ_FAIL;
+        }
+        host::sleep_ms(1);
+    }
+}

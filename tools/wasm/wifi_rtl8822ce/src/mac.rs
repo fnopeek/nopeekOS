@@ -471,7 +471,7 @@ fn check_fw_checksum(h: i32, addr: u32) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn download_firmware_to_mem(
     h: i32, trx: &Trx, stage: i32, data: &[u8], src: u32, dst: u32, size: u32,
-    band: u8, dump_first: bool,
+    band: u8, rsvd_boundary: u16, dump_first: bool,
 ) -> bool {
     const MAX_SIZE: u32 = 0x1000;
     let desc_size = crate::tx::TX_PKT_DESC_SZ as u32;
@@ -500,7 +500,7 @@ fn download_firmware_to_mem(
         // sondern eine Wand.
         let verbose = dump_first && first_part && mem_offset == 0;
         if !write_data_rsvd_page(h, trx, stage, (src >> 7) as u16,
-                                 &data[from..to], 0, band, verbose) {
+                                 &data[from..to], rsvd_boundary, band, verbose) {
             host::print("[rtl8822ce] rsvd page fehlgeschlagen bei Offset ");
             host::print_dec(mem_offset);
             host::print("\n");
@@ -524,7 +524,8 @@ fn download_firmware_to_mem(
 }
 
 /// mac.c `start_download_firmware`
-fn start_download_firmware(h: i32, trx: &Trx, stage: i32, fw: &[u8], band: u8) -> bool {
+fn start_download_firmware(h: i32, trx: &Trx, stage: i32, fw: &[u8], band: u8,
+                           rsvd_boundary: u16) -> bool {
     let hdr = parse_fw_hdr(fw);
     let dmem_size = hdr.dmem_size + FW_HDR_CHKSUM_SIZE;
     let imem_size = hdr.imem_size + FW_HDR_CHKSUM_SIZE;
@@ -556,7 +557,7 @@ fn start_download_firmware(h: i32, trx: &Trx, stage: i32, fw: &[u8], band: u8) -
         host::print(" Bytes ");
         let t0 = host::now_us();
         if !download_firmware_to_mem(h, trx, stage, &fw[off..], 0, addr, size,
-                                     band, off == FW_HDR_SIZE) {
+                                     band, rsvd_boundary, off == FW_HDR_SIZE) {
             host::print("— FEHLER\n");
             return false;
         }
@@ -628,7 +629,8 @@ fn download_firmware_validate(h: i32) -> bool {
 }
 
 /// mac.c `__rtw_download_firmware`, alle dreizehn Schritte in Reihenfolge.
-pub fn download_firmware(h: i32, trx: &mut Trx, stage: i32, fw: &[u8], band: u8) -> bool {
+pub fn download_firmware(h: i32, trx: &mut Trx, stage: i32, fw: &[u8], band: u8,
+                         rsvd_boundary: u16) -> bool {
     if !check_firmware_size(fw) {
         host::print("[rtl8822ce] Firmware-Groesse passt nicht zum Kopf\n");
         return false;
@@ -663,7 +665,7 @@ pub fn download_firmware(h: i32, trx: &mut Trx, stage: i32, fw: &[u8], band: u8)
     let bckp = download_firmware_reg_backup(h);
     download_firmware_reset_platform(h);
 
-    let ok = start_download_firmware(h, trx, stage, fw, band);
+    let ok = start_download_firmware(h, trx, stage, fw, band, rsvd_boundary);
 
     if ok {
         restore_reg(h, &bckp);
@@ -685,4 +687,293 @@ pub fn download_firmware(h: i32, trx: &mut Trx, stage: i32, fw: &[u8], band: u8)
     host::clr8(h, REG_MCUFW_CTRL, BIT_MCUFWDL_EN);
     host::set8(h, REG_SYS_FUNC_EN + 1, BIT_FEN_CPUEN);
     false
+}
+
+// ── Stufe 3a: rtw_mac_init (mac.c:1391) ──────────────────────────
+//
+// Reihenfolge wie in Linux:
+//   rtw_mac_init
+//    ├─ rtw_init_trx_cfg
+//    │   ├─ txdma_queue_mapping
+//    │   ├─ priority_queue_cfg   (rtw_set_trx_fifo_info + __priority_queue_cfg)
+//    │   └─ init_h2c
+//    ├─ chip->ops->mac_init      = chip::mac_init
+//    ├─ rtw_drv_info_cfg
+//    └─ rtw_hci_interface_cfg    = pci::interface_cfg
+
+use crate::chip;
+
+/// main.h:1886-1900 `struct rtw_fifo_conf`, ohne den Zeiger auf `rqpn` —
+/// der ist bei uns eine Konstante, weil wir genau einen Bus haben.
+///
+/// **Der Vorgabewert ist NICHT Kosmetik.** `rtw_fw_write_data_rsvd_page`
+/// schreibt `rsvd_boundary` beim Aufraeumen zurueck, und solange
+/// `rtw_mac_init` nicht gelaufen ist, steht dort in Linux eine 0. Der
+/// Firmware-Download passiert VOR `rtw_mac_init` — also mit 0, und das ist
+/// richtig so.
+#[derive(Default, Clone, Copy)]
+pub struct Fifo {
+    pub rsvd_boundary: u16,
+    pub rsvd_pg_num: u16,
+    pub rsvd_drv_pg_num: u16,
+    pub txff_pg_num: u16,
+    pub acq_pg_num: u16,
+    pub rsvd_drv_addr: u16,
+    pub rsvd_h2c_info_addr: u16,
+    pub rsvd_h2c_sta_info_addr: u16,
+    pub rsvd_h2cq_addr: u16,
+    pub rsvd_cpu_instr_addr: u16,
+    pub rsvd_fw_txbuf_addr: u16,
+    pub rsvd_csibuf_addr: u16,
+}
+
+pub enum MacErr {
+    /// Linux: `-ENOMEM` — der Seitenplan passt nicht in den TX-FIFO.
+    NoMem,
+    /// Linux: `-EINVAL` — rsvd_boundary und rsvd_drv_addr laufen auseinander,
+    /// oder der H2C-Ring meldet eine andere Fuellung als seine Groesse.
+    Inval,
+    /// Linux: `-EBUSY` — die Hardware hat die Link-List-Tabelle nicht gebaut.
+    Busy,
+}
+
+/// mac.c:1086-1135 `txdma_queue_mapping`, PCIe-Zweig.
+fn txdma_queue_mapping(h: i32) -> &'static chip::Rqpn {
+    let rqpn = &chip::RQPN_PCIE;
+
+    let mut txdma_pq_map: u16 = 0;
+    txdma_pq_map |= bit_txdma_queue_map(rqpn.dma_map_hi, BIT_SHIFT_TXDMA_HIQ_MAP);
+    txdma_pq_map |= bit_txdma_queue_map(rqpn.dma_map_mg, BIT_SHIFT_TXDMA_MGQ_MAP);
+    txdma_pq_map |= bit_txdma_queue_map(rqpn.dma_map_bk, BIT_SHIFT_TXDMA_BKQ_MAP);
+    txdma_pq_map |= bit_txdma_queue_map(rqpn.dma_map_be, BIT_SHIFT_TXDMA_BEQ_MAP);
+    txdma_pq_map |= bit_txdma_queue_map(rqpn.dma_map_vi, BIT_SHIFT_TXDMA_VIQ_MAP);
+    txdma_pq_map |= bit_txdma_queue_map(rqpn.dma_map_vo, BIT_SHIFT_TXDMA_VOQ_MAP);
+    host::w16(h, REG_TXDMA_PQ_MAP, txdma_pq_map);
+
+    // Erst AUS, dann alle acht TRX-Bits an. Das ist kein Vorsichtsschritt,
+    // sondern steht so in Linux — und ein `write8` auf REG_CR laesst die
+    // oberen Bytes des 32-Bit-Registers in Ruhe.
+    host::w8(h, REG_CR, 0);
+    host::w8(h, REG_CR, MAC_TRX_ENABLE);
+
+    // rtw_chip_wcpu_3081 — gilt fuer den 8822C.
+    if !WCPU_8051 {
+        host::w32(h, REG_H2CQ_CSR, BIT_H2CQ_FULL);
+    }
+
+    rqpn
+}
+
+/// mac.c:1138-1186 `rtw_set_trx_fifo_info`, 3081-Zweig.
+///
+/// Rechnet den ganzen Seitenplan des Sende-FIFOs, von oben nach unten: was
+/// die Firmware fuer sich behaelt, liegt AM ENDE des FIFOs, und
+/// `rsvd_boundary` ist die Grenze, unter der die Sendequeues arbeiten.
+/// Die Schlusspruefung (`rsvd_boundary == rsvd_drv_addr`) ist Linux' eigene
+/// Gegenrechnung: die Grenze wird zweimal auf verschiedenen Wegen bestimmt,
+/// und wenn beide nicht dasselbe sagen, stimmt der Plan nicht.
+pub fn set_trx_fifo_info() -> Result<Fifo, MacErr> {
+    let mut f = Fifo {
+        rsvd_drv_pg_num: RSVD_DRV_PG_NUM_8822C,
+        txff_pg_num: (TXFF_SIZE_8822C / TX_PAGE_SIZE) as u16,
+        ..Default::default()
+    };
+    let csi_buf_pg_num = CSI_BUF_PG_NUM_8822C;
+
+    f.rsvd_pg_num = if WCPU_8051 {
+        f.rsvd_drv_pg_num
+    } else {
+        f.rsvd_drv_pg_num
+            + RSVD_PG_H2C_EXTRAINFO_NUM
+            + RSVD_PG_H2C_STATICINFO_NUM
+            + RSVD_PG_H2CQ_NUM
+            + RSVD_PG_CPU_INSTRUCTION_NUM
+            + RSVD_PG_FW_TXBUF_NUM
+            + csi_buf_pg_num
+    };
+
+    if f.rsvd_pg_num > f.txff_pg_num {
+        return Err(MacErr::NoMem);
+    }
+
+    f.acq_pg_num = f.txff_pg_num - f.rsvd_pg_num;
+    f.rsvd_boundary = f.txff_pg_num - f.rsvd_pg_num;
+
+    let mut cur_pg_addr = f.txff_pg_num;
+    if !WCPU_8051 {
+        cur_pg_addr -= csi_buf_pg_num;
+        f.rsvd_csibuf_addr = cur_pg_addr;
+        cur_pg_addr -= RSVD_PG_FW_TXBUF_NUM;
+        f.rsvd_fw_txbuf_addr = cur_pg_addr;
+        cur_pg_addr -= RSVD_PG_CPU_INSTRUCTION_NUM;
+        f.rsvd_cpu_instr_addr = cur_pg_addr;
+        cur_pg_addr -= RSVD_PG_H2CQ_NUM;
+        f.rsvd_h2cq_addr = cur_pg_addr;
+        cur_pg_addr -= RSVD_PG_H2C_STATICINFO_NUM;
+        f.rsvd_h2c_sta_info_addr = cur_pg_addr;
+        cur_pg_addr -= RSVD_PG_H2C_EXTRAINFO_NUM;
+        f.rsvd_h2c_info_addr = cur_pg_addr;
+    }
+    cur_pg_addr -= f.rsvd_drv_pg_num;
+    f.rsvd_drv_addr = cur_pg_addr;
+
+    if f.rsvd_boundary != f.rsvd_drv_addr {
+        host::print("[rtl8822ce] wrong rsvd driver address\n");
+        return Err(MacErr::Inval);
+    }
+
+    Ok(f)
+}
+
+/// mac.c:1192-1236 `__priority_queue_cfg` (3081-Zweig, PCIe).
+fn priority_queue_cfg_3081(h: i32, f: &Fifo, pg: &chip::PageTable, pubq_num: u16)
+    -> Result<(), MacErr>
+{
+    host::w16(h, REG_FIFOPAGE_INFO_1, pg.hq_num);
+    host::w16(h, REG_FIFOPAGE_INFO_2, pg.lq_num);
+    host::w16(h, REG_FIFOPAGE_INFO_3, pg.nq_num);
+    host::w16(h, REG_FIFOPAGE_INFO_4, pg.exq_num);
+    host::w16(h, REG_FIFOPAGE_INFO_5, pubq_num);
+    host::set32(h, REG_RQPN_CTRL_2, BIT_LD_RQPN);
+
+    host::w16(h, REG_FIFOPAGE_CTRL_2, f.rsvd_boundary);
+    host::set8(h, REG_FWHW_TXQ_CTRL + 2, (BIT_EN_WR_FREE_TAIL >> 16) as u8);
+
+    host::w16(h, REG_BCNQ_BDNY_V1, f.rsvd_boundary);
+    host::w16(h, REG_FIFOPAGE_CTRL_2 + 2, f.rsvd_boundary);
+    host::w16(h, REG_BCNQ1_BDNY_V1, f.rsvd_boundary);
+    host::w32(h, REG_RXFF_BNDY, RXFF_SIZE_8822C - C2H_PKT_BUF - 1);
+
+    // Der USB-Zweig (BIT_MASK_BLK_DESC_NUM, TXDMA_OFFSET_CHK+1) steht in
+    // Linux dazwischen und gilt fuer uns nicht.
+
+    host::set8(h, REG_AUTO_LLT_V1, BIT_AUTO_INIT_LLT_V1 as u8);
+
+    // Die Hardware baut jetzt ihre Link-List-Tabelle und LOESCHT das Bit,
+    // wenn sie fertig ist. Das ist die einzige Quittung, die es fuer den
+    // Seitenplan gibt.
+    if !check_hw_ready(h, REG_AUTO_LLT_V1, BIT_AUTO_INIT_LLT_V1, 0) {
+        host::print("[rtl8822ce] AUTO_INIT_LLT bleibt stehen — LLT nicht gebaut\n");
+        return Err(MacErr::Busy);
+    }
+
+    host::w8(h, REG_CR + 3, 0);
+    Ok(())
+}
+
+/// mac.c:1260-1299 `priority_queue_cfg`, PCIe-Zweig.
+fn priority_queue_cfg(h: i32) -> Result<Fifo, MacErr> {
+    let f = set_trx_fifo_info()?;
+    let pg = &chip::PAGE_TABLE[1]; // RTW_HCI_TYPE_PCIE
+
+    let pubq_num = f.acq_pg_num - pg.hq_num - pg.lq_num - pg.nq_num
+        - pg.exq_num - pg.gapq_num;
+
+    if WCPU_8051 {
+        // `__priority_queue_cfg_legacy`, fuer den 8822C unerreichbar.
+        return Err(MacErr::Inval);
+    }
+    priority_queue_cfg_3081(h, &f, pg, pubq_num)?;
+    Ok(f)
+}
+
+/// mac.c:1301-1352 `init_h2c` (3081).
+///
+/// Der H2C-Ring liegt IM Sende-FIFO, auf den Seiten, die `set_trx_fifo_info`
+/// dafuer reserviert hat. Geschrieben werden Kopf, Schwanz und Lesezeiger als
+/// BYTE-Adressen (`seite << 7`), und die Schlusspruefung fragt die Hardware,
+/// wie voll sie den Ring sieht: ein frischer Ring ist leer, also muss
+/// `h2cq_free` genau `h2cq_size` sein.
+fn init_h2c(h: i32, f: &Fifo) -> Result<(), MacErr> {
+    if WCPU_8051 {
+        return Ok(());
+    }
+
+    let h2cq_addr = (f.rsvd_h2cq_addr as u32) << TX_PAGE_SIZE_SHIFT;
+    let h2cq_size = (RSVD_PG_H2CQ_NUM as u32) << TX_PAGE_SIZE_SHIFT;
+
+    let mut value32 = host::r32(h, REG_H2C_HEAD);
+    value32 = (value32 & 0xFFFC_0000) | h2cq_addr;
+    host::w32(h, REG_H2C_HEAD, value32);
+
+    let mut value32 = host::r32(h, REG_H2C_READ_ADDR);
+    value32 = (value32 & 0xFFFC_0000) | h2cq_addr;
+    host::w32(h, REG_H2C_READ_ADDR, value32);
+
+    let mut value32 = host::r32(h, REG_H2C_TAIL);
+    value32 &= 0xFFFC_0000;
+    value32 |= h2cq_addr + h2cq_size;
+    host::w32(h, REG_H2C_TAIL, value32);
+
+    let value8 = (host::r8(h, REG_H2C_INFO) & 0xFC) | 0x01;
+    host::w8(h, REG_H2C_INFO, value8);
+
+    let value8 = (host::r8(h, REG_H2C_INFO) & 0xFB) | 0x04;
+    host::w8(h, REG_H2C_INFO, value8);
+
+    let value8 = (host::r8(h, REG_TXDMA_OFFSET_CHK + 1) & 0x7f) | 0x80;
+    host::w8(h, REG_TXDMA_OFFSET_CHK + 1, value8);
+
+    let wp = host::r32(h, REG_H2C_PKT_WRITEADDR) & 0x3FFFF;
+    let rp = host::r32(h, REG_H2C_PKT_READADDR) & 0x3FFFF;
+    let h2cq_free = if wp >= rp { h2cq_size - (wp - rp) } else { rp - wp };
+
+    host::print("  H2C-Ring @0x");
+    host::print_hex32(h2cq_addr);
+    host::print(", ");
+    host::print_dec(h2cq_size);
+    host::print(" Bytes — frei ");
+    host::print_dec(h2cq_free);
+    host::print(" (wp 0x");
+    host::print_hex32(wp);
+    host::print(", rp 0x");
+    host::print_hex32(rp);
+    host::print(")\n");
+
+    if h2cq_size != h2cq_free {
+        host::print("[rtl8822ce] H2C queue mismatch\n");
+        return Err(MacErr::Inval);
+    }
+    Ok(())
+}
+
+/// mac.c:1354-1371 `rtw_init_trx_cfg`
+fn init_trx_cfg(h: i32) -> Result<Fifo, MacErr> {
+    txdma_queue_mapping(h);
+    let f = priority_queue_cfg(h)?;
+    init_h2c(h, &f)?;
+    Ok(f)
+}
+
+/// mac.c:1373-1389 `rtw_drv_info_cfg`
+fn drv_info_cfg(h: i32) {
+    host::w8(h, REG_RX_DRVINFO_SZ, PHY_STATUS_SIZE);
+    if !WCPU_8051 {
+        // "For rxdesc len = 0 issue"
+        let value8 = (host::r8(h, REG_TRXFF_BNDY + 1) & 0xF0) | 0xF;
+        host::w8(h, REG_TRXFF_BNDY + 1, value8);
+    }
+    host::set32(h, REG_RCR, BIT_APP_PHYSTS);
+    host::clr32(h, REG_WMAC_OPTION_FUNCTION + 4, (1 << 8) | (1 << 9));
+}
+
+/// mac.c:1391-1411 `rtw_mac_init`.
+///
+/// Gibt den Seitenplan zurueck, weil er ab hier gebraucht wird: jede
+/// Reserved Page, die spaeter geschrieben wird, liegt relativ zu
+/// `rsvd_boundary`.
+pub fn mac_init(h: i32, cut_version: u8) -> Result<Fifo, MacErr> {
+    let f = init_trx_cfg(h)?;
+
+    // chip->ops->mac_init
+    if !chip::mac_init(h) {
+        return Err(MacErr::Inval);
+    }
+
+    drv_info_cfg(h);
+
+    // rtw_hci_interface_cfg
+    crate::pci::interface_cfg(h, cut_version);
+
+    Ok(f)
 }

@@ -7,12 +7,22 @@ IdeaPad Flex 5 14ALC7 das **einzige** eingebaute Netzgerät (`02:00.0`).
 **Karte:** [WIFI_RTL8822CE_LINUX_MAP.md](WIFI_RTL8822CE_LINUX_MAP.md) — was der
 Linux-Treiber hat, Datei für Datei, ausgezählt.
 
-**Stand 2026-09-19:** Kernel **0.382.0** · Modul **wifi_rtl8822ce 0.9.0**.
-**Stufen 0, 1, 2a, 2b und 2c am Gerät GRÜN** — die Firmware läuft
-(`FW_READY nach 3938 µs`) und die efuse liefert die echte MAC-Adresse
+**Stand 2026-09-20:** Kernel **0.383.0** · Modul **wifi_rtl8822ce 0.10.0**.
+**Stufen 0, 1, 2a, 2b, 2c am Gerät GRÜN** (Lauf vom 2026-09-19): die Firmware
+läuft (`FW_READY nach 3938 µs`), die efuse liefert die echte MAC-Adresse
 `e0:0a:f6:8b:bf:83`, dazu `nss 2 · ant 2 · bw 0x07 (bis 80 MHz) · hci 0x04
-(PCIe) · btcoex`. Damit ist der Weg PCI → Bridge → Power → Ringe → DMA →
-Firmware → C2H → efuse Ende zu Ende bewiesen. **Als Nächstes: Stufe 3.**
+(PCIe) · btcoex`. **Stufe 3 ist gebaut und wartet auf den Gerätelauf** —
+`rtw_mac_init` (3a), die sechs Parametertabellen samt Bedingungsläufer (3b)
+und `rtw8822c_phy_set_param` mit DAC-Kalibrierung, Trimmung und
+Beamforming-Grundeinstellung (3c).
+
+**Geprüft ist, was sich ohne Gerät prüfen LÄSST**, und zwar mechanisch:
+`check_regs.py` hält **462 Konstanten** gegen die Linux-Quelle (0 Abweichungen),
+`seqdiff.py` vergleicht **22 Funktionen Zugriff für Zugriff und Zahl für Zahl**
+mit dem C-Original, und `gen_tables.py` rechnet vorher aus, wieviele
+Schreibzugriffe jede Tabelle auf DIESEM Chip abgeben muss — der Treiber hält
+seine eigene Zahl dagegen. Was davon der Gerätelauf noch beantworten muss,
+steht unten unter „HIER WEITERMACHEN".
 
 **Der teuerste Fund lag nicht im Treiber.** Jede DMA-Anfrage des Chips endete
 mit *Received Master Abort*: `npk_pci_enable_bus_master` setzte das Bit nur am
@@ -29,11 +39,14 @@ gestorben, siehe L1–L8.
 1–2 ms, und die Firmware bekam ein Zehntel der Zeit für ihr `FW_INIT_RDY`.
 Beide Male habe ich die Zahl übernommen und den Mechanismus dahinter nicht.
 
-**Werkzeuge im Modulverzeichnis:** `gen_pwrseq.py` erzeugt die
-Power-Sequenz-Tabellen aus `rtw8822c.c`; `check_regs.py` hält **jede**
-Konstante gegen ihren `#define`/Enum-Eintrag in den Linux-Headern (134
-geprüft, 0 Abweichungen) — die Regel „vor jedem Commit grep gegen reg.h" tut
-damit ein Skript statt eines Vorsatzes.
+**Werkzeuge im Modulverzeichnis:** `gen_pwrseq.py` und `gen_tables.py`
+erzeugen die Power-Sequenz- und die Parametertabellen aus der C-Quelle;
+`check_regs.py` hält **jede** Konstante gegen ihren `#define`/Enum-Eintrag in
+der Linux-Quelle (462 geprüft, 0 Abweichungen), `seqdiff.py` hält jede
+portierte Funktion Zugriff für Zugriff und Zahl für Zahl gegen das C-Original
+(22 Funktionen). Die Regel „vor jedem Commit grep gegen reg.h" tun damit zwei
+Skripte statt eines Vorsatzes — und beide sind gegen einen absichtlich
+eingebauten Fehler geprüft.
 
 ---
 
@@ -392,14 +405,14 @@ Prompt beim Terminal laesst. Ein Treiber liest keine Tasten; `APP_RUNNING`
 ist fuer ihn die falsche Einstufung. Heute nicht angefasst, weil kein
 Treiber im Baum bleibt.
 
-## ▶ HIER WEITERMACHEN (Pause 2026-09-19)
+## ▶ HIER WEITERMACHEN (Stand 2026-09-20)
 
-**Stand:** Kernel **0.382.0**, Modul **wifi_rtl8822ce 0.9.0**, alles gepusht,
-Baum sauber. **Stufen 0, 1, 2a, 2b, 2c am Gerät grün.** Nächster Posten:
-**Stufe 3a — `rtw_mac_init`**, und die Vorarbeit dafür steht unten, damit sie
-niemand zweimal macht.
+**Alles gepusht, Baum sauber. Der nächste Schritt ist ein GERÄTELAUF von
+0.10.0** — `install wifi_rtl8822ce && driver wifi_rtl8822ce`. Die Stufen 3a,
+3b und 3c melden sich einzeln mit ihren Gates; was sie sagen, entscheidet, ob
+Stufe 4 dran ist oder eine der drei nachgebessert wird.
 
-### Was das Gerät gemessen hat (nicht abschreiben, das steht hier)
+### Was das Gerät zuletzt gemessen hat (nicht abschreiben, das steht hier)
 
     SYS_CFG1 0x0c493d3d -> cut 3 = RTW_CHIP_VER_CUT_D, vendor 9, RF 2T2R
     MAC       e0:0a:f6:8b:bf:83   (aus der efuse)
@@ -407,89 +420,110 @@ niemand zweimal macht.
     rf_board_option 0x21 -> btcoex JA, share_ant JA
     thermal A/B 27/27 · hw_cap nss 2, ant 2, bw 0x07 (bis 80 MHz), hci 0x04
     Power-Sequenz 605-614 us · FW_READY nach 3778-3938 us · efuse in 2 ms
-    DMA: 1545 von 2048 Seiten, 11 von 1024 Stücken, alles unter 1 GiB
+    DMA: 1545 von 2048 Seiten, 11 von 1024 Stuecken, alles unter 1 GiB
 
-`rfe_option 1` heißt: `rtw8822c_rfe_defs[1]`, und das ist derselbe
-Tabellensatz wie 0, 2, 3, 4 und 6 — nur `[5]` weicht ab. Für Stufe 3 heißt
-das: die Standardtabellen, kein Sonderweg.
+### Was in 0.10.0 dazugekommen ist
 
-### Stufe 3a — `rtw_mac_init`, die Funktionsliste in Aufrufreihenfolge
+**Stufe 3a — `rtw_mac_init` (mac.c:1391), vollständig.**
+`txdma_queue_mapping` · `rtw_set_trx_fifo_info` · `__priority_queue_cfg` ·
+`init_h2c` · `rtw8822c_mac_init` (77 Registerzugriffe) · `rtw_drv_info_cfg` ·
+`rtw_pci_interface_cfg`. Der Seitenplan fällt daraus heraus und steht im Log:
+`txff 2048 Seiten, rsvd 110, acq 1938 -> rsvd_boundary 1938`.
 
-Braucht **keine** der großen Parametertabellen.
+**Der Ablauf ist jetzt Linux' Ablauf, und das heißt: die Firmware wird ZWEIMAL
+geladen.** Alles bis 2c ist `rtw_chip_efuse_info_setup` (main.c:1999) — die
+Probe-Zeit, die den Chip nur für die efuse anwirft und danach wieder
+ausschaltet. Stufe 3 ist `rtw_power_on` (main.c:1374) und fängt wieder ganz
+vorn an: `rtw_hci_setup` → `rtw_mac_power_on` → `rtw_download_firmware` →
+`rtw_mac_init` → `phy_set_param`. Ein ausgeschalteter MAC hat keine Firmware
+mehr; der zweite Download ist kein Versehen.
 
-    rtw_mac_init                            (mac.c:1391)
-     ├─ rtw_init_trx_cfg                    (mac.c:1354)
-     │   ├─ txdma_queue_mapping             (mac.c:1087)  rqpn_table_8822c[1]
-     │   ├─ priority_queue_cfg              (mac.c:1260)
-     │   │   ├─ rtw_set_trx_fifo_info       (mac.c:1138)  ← rsvd_boundary!
-     │   │   └─ __priority_queue_cfg        (mac.c:1192)  page_table_8822c[1]
-     │   └─ init_h2c                        (mac.c:1301)
-     ├─ rtw8822c_mac_init                   (rtw8822c.c)  SIFS/EDCA/AMPDU/RRSR
-     ├─ rtw_drv_info_cfg                    (mac.c:1373)
-     └─ rtw_hci_interface_cfg = rtw_pci_interface_cfg (pci.c:1437)
-         └─ 8822C **cut >= D**: REG_HCI_MIX_CFG |= BIT_PCIE_EMAC_PDN_AUX_TO_FAST_CLK
-            — unser Chip IST cut D, der Zweig gilt also.
+**`fifo.rsvd_boundary` fährt jetzt durch den Download-Pfad** statt als feste 0
+— das war die eine Stelle, an der 3a in bestehenden Code greift. Sie ist beim
+ERSTEN Download trotzdem 0, weil `rtw_mac_init` da noch nicht gelaufen ist;
+genau so steht es in Linux.
 
-**Tabellen des Chips, beide indiziert mit `[1]` (PCIe):**
+**Stufe 3b — die Tabellen.** `gen_tables.py` erzeugt `src/tables.rs` aus
+`rtw8822c_table.c`: **92 430 Wörter = 361 KiB** in sechs Tabellen (mac, bb,
+agc, rfk_init, rf_a, rf_b). Dazu der Bedingungsläufer `rtw_parse_tbl_phy_cond`
+und die vier `rtw_phy_cfg_*`, sowie `rtw_phy_read_rf` /
+`rtw_phy_write_rf_reg_mix`.
 
-    page_table_8822c[1] = { hq 64, nq 64, lq 64, exq 64, gapq 1 }
-    rqpn_table_8822c[1] = { vo NORMAL, vi NORMAL, be LOW, bk LOW,
-                            mg EXTRA, hi HIGH }
-    enum: EXTRA 0 · LOW 1 · NORMAL 2 · HIGH 3
+**Die RF-Tabellen werden in UMGEKEHRTER Reihenfolge geladen** und das ist kein
+Tippfehler: `rtw8822c_hw_spec` sagt `.rf_tbl = {&rtw8822c_rf_b_tbl,
+&rtw8822c_rf_a_tbl}` (rtw8822c.c:5382), die Schleife läuft über den Index, und
+jede Tabelle trägt ihren Pfad selbst. Erst B, dann A.
 
-**`rtw_set_trx_fifo_info` rechnet den Seitenplan** (mac.c:1138) — daraus
-kommt `fifo->rsvd_boundary`, das `rtw_fw_write_data_rsvd_page` bisher als 0
-einsetzt (korrekt, solange `rtw_mac_init` nicht lief). Mit 3a wird daraus ein
-echter Wert, und **`fw::write_data_rsvd_page` muss ihn dann bekommen** statt
-der 0 — das ist die eine Stelle, an der 3a in bestehenden Code greift.
-Zahlen dafür: `txff_size 262144`, `page_size 128` → `txff_pg_num 2048`;
-`rsvd_drv_pg_num 16`, `csi_buf_pg_num 50`, `RSVD_PG_FW_TXBUF_NUM 4`,
-`RSVD_PG_CPU_INSTRUCTION_NUM 0`, `RSVD_PG_H2CQ_NUM`/`H2C_EXTRAINFO`/
-`H2C_STATICINFO` aus `mac.h`.
+**Der Erzeuger rechnet das Gate gleich mit.** Für unseren Chipzustand
+(cut D · rfe_option 1 · PCIe · pkg 15) sagt er vorher, wieviele
+Schreibzugriffe jede Tabelle abgeben muss:
 
-**Register und Konstanten, schon herausgesucht und gegen die Quelle geprüft:**
+    mac 0 · bb 1289 · agc 450 · rfk_init 2460 · rf_a 789 · rf_b 697
 
-    TX_PAGE_SIZE_SHIFT 7 · TX_PAGE_SIZE 128 · PHY_STATUS_SIZE 4
-    C2H_PKT_BUF 256 · RSVD_PG_DRV_NUM 16 · RSVD_PG_FW_TXBUF_NUM 4
-    RSVD_PG_CPU_INSTRUCTION_NUM 0
-    REG_TRXFF_BNDY 0x0114 · REG_RXFF_BNDY 0x011C
-    REG_AUTO_LLT_V1 0x0208 / BIT_AUTO_INIT_LLT_V1 BIT(0)
-    REG_TXDMA_OFFSET_CHK 0x020C
-    REG_FIFOPAGE_INFO_2..5 0x0234 0x0238 0x023C 0x0240
-    REG_H2C_HEAD 0x0244 · REG_H2C_TAIL 0x0248 · REG_H2C_READ_ADDR 0x024C
-    REG_H2C_INFO 0x0254
-    REG_H2C_PKT_READADDR 0x10D0 · REG_H2C_PKT_WRITEADDR 0x10D4
-    REG_HCI_MIX_CFG 0x03FC / BIT_PCIE_EMAC_PDN_AUX_TO_FAST_CLK BIT(26)
-    BIT_EN_WR_FREE_TAIL BIT(20) · REG_BCNQ_BDNY_V1 0x0424
-    REG_BCNQ1_BDNY_V1 0x0456 · REG_RCR 0x0608 / BIT_APP_PHYSTS BIT(28)
-    REG_RX_DRVINFO_SZ 0x060F · REG_WMAC_OPTION_FUNCTION 0x07D0
-    MAC_TRX_ENABLE = HCI_TXDMA_EN|HCI_RXDMA_EN|TXDMA_EN|… (reg.h:219)
-    BIT_TXDMA_{VO,VI,BE,BK,MG,HI}Q_MAP(x)  (reg.h:233-258)
+Der Treiber zählt mit und meldet jede Abweichung. **Das prüft den
+Bedingungsläufer selbst** — die Regel „`rfe` wird IMMER verglichen, auch auf
+0, `cut`/`pkg`/`intf` nur wenn genannt" (phy.c:1130-1171) ist genau die Art
+Detail, das man still falsch baut und erst als Funkausfall merkt.
 
-**Gate 3a:** `REG_AUTO_LLT_V1` löscht `BIT_AUTO_INIT_LLT_V1` von selbst
-(`check_hw_ready` wartet darauf — das ist die Quittung der Hardware, dass die
-Link-List-Tabelle gebaut ist), `init_h2c` findet `h2cq_size == h2cq_free`,
-und `rsvd_boundary` steht im Log.
+**Stufe 3c — `rtw8822c_phy_set_param` (rtw8822c.c:1862).**
+`header_file_init(pre)` · `rtw_phy_load_tables` · Quarzkapazität ·
+`header_file_init(post)` · `config_trx_mode` (mit cck/ofdm-Pfaden, `bb_reset`,
+`toggle_igi`) · `rtw_phy_init` · `rtw8822c_rf_init` · `pwrtrack_init` ·
+`rtw_bf_phy_init`.
 
-### Danach
+Der dickste Brocken darin ist die **DAC-Kalibrierung** (`rfk.rs`, ~900 Zeilen
+C): sie misst den Gleichspannungsversatz von ADC und DAC beider Pfade und
+trägt den Ausgleich ein. `dac_cal_restore` ist mit portiert, greift beim ersten
+Lauf aber nicht (`dack_msbk` ist null) — sobald der Treiber den Chip ein
+zweites Mal anwirft, spart sie die ganze Messung.
 
-**3b — die Tabellen.** `rtw8822c_table.c`, 46 105 Zeilen, ~450 KiB. Wird
-ERZEUGT wie `pwrseq.rs`; `gen_pwrseq.py` ist die Vorlage. Danach
-`rtw_phy_load_tables`. Modul wächst auf ~0,7 MB.
+### Die Gates der Stufe 3, die nur das Gerät beantworten kann
 
-**3c — `rtw8822c_phy_set_param`.** `header_file_init(pre/post)` ·
-`config_trx_mode` · `rtw_phy_init` · `rtw8822c_rf_init` · `pwrtrack_init` ·
-`rtw_bf_phy_init`. Gate: `rtw_phy_read_rf` auf beiden Pfaden, und
-`false_alarm_statistics` zählt ≠ 0 — der Empfänger hört.
+| Gate | Was es misst |
+|---|---|
+| **3a** | `AUTO_INIT_LLT_V1` löscht sich selbst (die Hardware hat die Link-List-Tabelle gebaut) · `init_h2c` findet `h2cq_size == h2cq_free` · `rsvd_boundary == 1938` · `REG_CR` trägt `MAC_TRX_ENABLE` · `PCIE_EMAC_PDN_AUX_TO_FAST_CLK` steht (cut D) |
+| **3b** | jede Tabelle gibt genau so viele Schreibzugriffe ab wie gerechnet · RF-Register 0x00 und 0x18 antworten auf BEIDEN Pfaden mit etwas, das weder 0 noch 0xfffff ist |
+| **3c** | `false_alarm_statistics` zählt CCA-Ereignisse ≠ 0 — **der Empfänger hört** |
 
 ### Werkzeuge (im Modulverzeichnis)
 
-    python3 tools/wasm/wifi_rtl8822ce/check_regs.py      # 147 Konstanten, 0 Abweichungen
-    python3 tools/wasm/wifi_rtl8822ce/gen_pwrseq.py      # Tabellen aus der C-Quelle
-    python3 tools/linux-coverage.py --chip rtl8822ce     # 89 / 940
+    python3 tools/wasm/wifi_rtl8822ce/check_regs.py   # 462 Konstanten, 0 Abweichungen
+    python3 tools/wasm/wifi_rtl8822ce/seqdiff.py      # 22 Funktionen, Zugriff fuer Zugriff
+    python3 tools/wasm/wifi_rtl8822ce/gen_tables.py   # src/tables.rs aus rtw8822c_table.c
+    python3 tools/wasm/wifi_rtl8822ce/gen_pwrseq.py   # src/pwrseq.rs aus rtw8822c.c
+    python3 tools/linux-coverage.py --chip rtl8822ce   # 165 / 940 (war 89)
 
-**`check_regs.py` vor jedem Commit laufen lassen.** Es hat schon einen echten
-Fehler gefunden (`TX_DESC_QSEL_H2C` war 17 geraten, ist 19).
+**Abdeckung nach Stufe 3: 165 von 940 rtw88-Funktionen** (vorher 89). Die
+Zuwächse liegen dort, wo sie hingehören: `rtw8822c.c` 56/171, `mac.c` 37/49,
+`phy.c` 23/97, `pci.c` 19/81. Eine Datei im Hauptweg auf 0 gibt es nicht mehr
+außer `coex.c`, `ps.c`, `rx.c` und `mac80211.c` — und die sind alle Stufe 4
+oder später.
+
+**`check_regs.py` UND `seqdiff.py` vor jedem Commit laufen lassen.** Der erste
+hat schon einen echten Fehler gefunden (`TX_DESC_QSEL_H2C` war 17 geraten, ist
+19); der zweite prüft die Sache, die keine Konstantenliste sehen kann — ob die
+Zugriffe in derselben REIHENFOLGE, mit derselben BREITE und mit denselben
+rohen Hexzahlen stehen wie in Linux. Beide sind gegen einen absichtlich
+eingebauten Fehler geprüft: ein Zahlendreher in der DACK und ein
+32-auf-16-Bit-Wechsel werden beide gemeldet.
+
+**`check_regs.py` löst jetzt beide Seiten REKURSIV auf** und liest auch
+`rtw8822c.c` und `bf.h`. Vorher fielen zusammengesetzte Makros wie
+`WLAN_SIFS_CFG` (vier Werte über drei Zeilen) still durch — also genau die,
+die man beim Abtippen falsch macht. Von 147 geprüften Konstanten auf 462.
+
+### Was danach kommt — Stufe 4
+
+Nicht gebaut und benannt: **die Sendeleistung.** `rtw_chip_board_info_setup`
+(main.c:2064) lädt `bb_pg_type0` und `txpwr_lmt_type0`, dazu gehören
+`rtw_parse_tbl_bb_pg`, `rtw_parse_tbl_txpwr_lmt` mit der
+Regulierungszonen-Ersatzlogik und `rtw_phy_tx_power_*`. Das sind zwei weitere
+Tabellen (~100 KiB) und ein eigener Parser — ein anderer Aufrufweg als
+`rtw_phy_load_tables`, deshalb bewusst nicht in 3b mitgenommen.
+
+Danach: `rtw_mac_postinit` (beim 8822C NULL), `rtw_hci_start`,
+`rtw_fw_send_general_info`/`send_phydm_info`, die Koexistenz — und dann
+`rtw_set_channel` und der Empfangsweg.
 
 ### Der Ablauf für eine neue Version
 
@@ -525,11 +559,23 @@ am 2026-09-19 einmal passiert.
 
 ## 5 — Ablage und Release
 
-    tools/wasm/wifi_rtl8822ce/        Modulname = Treibername (Präfix `wifi` → Klasse 02:80)
-      src/{lib,host,regs,mac,phy,fw,pci,efuse,tx,rx,sec,coex,rfk}.rs
-      src/tables/                     erzeugt aus rtw8822c_table.c
+    tools/wasm/wifi_rtl8822ce/        Modulname = Treibername (Praefix `wifi` -> Klasse 02:80)
+      src/host.rs      Treiber-ABI
+      src/regs.rs      Register und Bits, jede Zeile mit ihrer Quellzeile
+      src/pwrseq.rs    ERZEUGT aus rtw8822c.c (gen_pwrseq.py)
+      src/tables.rs    ERZEUGT aus rtw8822c_table.c (gen_tables.py), 361 KiB
+      src/mac.rs       mac.c   — Strom, Firmware-Download, rtw_mac_init
+      src/pci.rs       pci.c   — Ringe, rsvd page, interface_cfg
+      src/fw.rs        fw.c    — check_hw_ready, write_data_rsvd_page
+      src/tx.rs        tx.c    — der Sendedeskriptor
+      src/efuse.rs     efuse.c — efuse-Abzug, hw_feature
+      src/phy.rs       phy.c   — Tabellenlader, Bedingungslaeufer, RF-Zugriff
+      src/bf.rs        bf.c    — rtw_bf_phy_init
+      src/chip.rs      rtw8822c.c — was NUR dieser Chip tut
+      src/rfk.rs       rtw8822c.c — die DAC-Kalibrierung
+      src/dm.rs        struct rtw_dm_info, der PHY-Zustand
       firmware/rtw8822c_fw.bin
-      gen_tables.py
+      gen_pwrseq.py · gen_tables.py · check_regs.py · seqdiff.py
 
 Ein reiner Modulwechsel geht über `tools/stage-module.sh wifi_rtl8822ce` +
 `./build.sh sign-modules` — **kein Kernel-Versionssprung**. Die zwei neuen

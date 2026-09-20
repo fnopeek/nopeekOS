@@ -52,11 +52,17 @@
 #![no_std]
 
 mod host;
+mod bf;
+mod chip;
+mod dm;
 mod efuse;
 mod fw;
 mod mac;
 mod pci;
+mod phy;
 mod pwrseq;
+mod rfk;
+mod tables;
 mod tx;
 mod regs;
 use regs::*;
@@ -106,6 +112,9 @@ struct Hal {
     vendor_id: u8,
     rf_2t2r: bool,
     rf_path_num: u8,
+    /// main.c:1884-1893 — bei 2T2R beide `BB_PATH_AB`, sonst `BB_PATH_A`.
+    antenna_tx: u8,
+    antenna_rx: u8,
 }
 
 /// main.c `rtw_chip_parameter_setup` — der Teil, der aus EINEM Register
@@ -121,6 +130,8 @@ fn chip_parameter_setup(h: i32) -> Hal {
         vendor_id: bit_get_vendor_id(chip_version),
         rf_2t2r,
         rf_path_num: if rf_2t2r { 2 } else { 1 },
+        antenna_tx: if rf_2t2r { BB_PATH_AB } else { BB_PATH_A },
+        antenna_rx: if rf_2t2r { BB_PATH_AB } else { BB_PATH_A },
     }
 }
 
@@ -352,10 +363,17 @@ pub extern "C" fn _start() {
     host::print_hex32(hdr.feature);
     host::print("\n");
 
-    let fw_ok = match host::dma_alloc_below(
-        (pci::RSVD_STAGE_BYTES.div_ceil(4096)) as u16, 1024) {
+    // `rtwdev->fifo` lebt in Linux ueber den ganzen Treiber und ist bis zum
+    // ersten `rtw_mac_init` NULL. Der Download liest daraus `rsvd_boundary`
+    // — hier also noch 0, genau wie dort.
+    let mut fifo = mac::Fifo::default();
+
+    let stage_buf = host::dma_alloc_below(
+        (pci::RSVD_STAGE_BYTES.div_ceil(4096)) as u16, 1024);
+    let fw_ok = match stage_buf {
         st if st >= 0 => {
-            let ok = mac::download_firmware(h, &mut trx, st, FW, BAND_AT_FWDL);
+            let ok = mac::download_firmware(h, &mut trx, st, FW, BAND_AT_FWDL,
+                                            fifo.rsvd_boundary);
             let ctrl = host::r16(h, REG_MCUFW_CTRL);
             host::print("  MCUFWCTL = 0x");
             host::print_hex16(ctrl);
@@ -375,6 +393,7 @@ pub extern "C" fn _start() {
 
     // ── Stufe 2c: efuse und hw_feature ───────────────────────────
     let mut stage2c = false;
+    let mut efuse = None;
     if stage2b {
         host::print("[rtl8822ce] Stufe 2c: efuse (");
         host::print_dec(efuse::PHYSICAL_SIZE as u32);
@@ -420,6 +439,7 @@ pub extern "C" fn _start() {
                 && e.addr != [0xffu8; 6]
                 && e.addr[0] & 0x01 == 0;
             stage2c = gate("MAC-Adresse aus der efuse ist gueltig", valid);
+            efuse = Some(e);
         } else {
             let _ = gate("MAC-Adresse aus der efuse ist gueltig", false);
         }
@@ -458,9 +478,64 @@ pub extern "C" fn _start() {
         "[rtl8822ce] Stufe 2b: NEIN — nicht weiterbauen, bevor das steht\n"
     });
     host::print(if stage2c {
-        "[rtl8822ce] Stufe 2c: GRUEN — weiter mit Stufe 3 (MAC + PHY)\n"
+        "[rtl8822ce] Stufe 2c: GRUEN\n"
     } else {
         "[rtl8822ce] Stufe 2c: NEIN — nicht weiterbauen, bevor das steht\n"
+    });
+
+    // ── Stufe 3a: rtw_power_on, bis rtw_mac_init ─────────────────
+    //
+    // Alles davor war `rtw_chip_info_setup` — in Linux die Probe-Zeit, die
+    // den Chip anschaltet, NUR um die efuse zu lesen, und ihn danach wieder
+    // ausschaltet. Das hier ist der ZWEITE Zyklus, `rtw_power_on`
+    // (main.c:1374), und er faengt wieder ganz vorne an:
+    //
+    //     rtw_hci_setup -> rtw_mac_power_on -> rtw_download_firmware
+    //                   -> rtw_mac_init
+    //
+    // Die Firmware wird also ein zweites Mal geladen. Das ist keine
+    // Verschwendung aus Unachtsamkeit, sondern was Linux tut: zwischen den
+    // Zyklen war der MAC aus, und ein ausgeschalteter MAC hat keine
+    // Firmware mehr.
+    let mut stage3b = false;
+    let mut stage3c = false;
+    let stage3a = match (stage2c, efuse) {
+        (true, Some(e)) => {
+            host::print("[rtl8822ce] Stufe 3a: rtw_power_on (zweiter Zyklus) + rtw_mac_init\n");
+            let ok = power_on_and_mac_init(h, &hal, &mut trx, stage_buf, &mut fifo);
+            if ok {
+                let (b, c) = phy_set_param_and_check(h, &hal, &e);
+                stage3b = b;
+                stage3c = c;
+            } else {
+                host::print("[rtl8822ce] Stufe 3b/3c: uebersprungen, 3a steht nicht\n");
+            }
+            ok
+        }
+        _ => {
+            host::print("[rtl8822ce] Stufe 3a: uebersprungen, 2c steht nicht\n");
+            false
+        }
+    };
+
+    // Und wieder aus, aus demselben Grund wie oben: der Kernel gibt gleich
+    // die DMA-Puffer frei, in die eine laufende Firmware sonst weiterschriebe.
+    mac::mac_power_off(h, hal.cut_version);
+
+    host::print(if stage3a {
+        "[rtl8822ce] Stufe 3a: GRUEN\n"
+    } else {
+        "[rtl8822ce] Stufe 3a: NEIN — nicht weiterbauen, bevor das steht\n"
+    });
+    host::print(if stage3b {
+        "[rtl8822ce] Stufe 3b: GRUEN\n"
+    } else {
+        "[rtl8822ce] Stufe 3b: NEIN — nicht weiterbauen, bevor das steht\n"
+    });
+    host::print(if stage3c {
+        "[rtl8822ce] Stufe 3c: GRUEN — der Empfaenger hoert. Weiter mit Stufe 4\n"
+    } else {
+        "[rtl8822ce] Stufe 3c: NEIN — nicht weiterbauen, bevor das steht\n"
     });
 
 
@@ -472,6 +547,201 @@ pub extern "C" fn _start() {
     // Der Chip ist hier bereits aus (Stufe 1 schaltet ihn zuletzt ab), also
     // kann niemand mehr in die gleich freigegebenen Puffer schreiben.
     host::print("[rtl8822ce] fertig — Chip ist aus, Geraet freigegeben\n");
+}
+
+/// main.c:1374-1411 `rtw_power_on`, bis einschliesslich `rtw_mac_init`.
+///
+/// Was danach kommt (`phy_set_param`, `mac_postinit`, `hci_start`, die
+/// H2C-Nachrichten und die Koexistenz) ist Stufe 3b und 3c — es steht hier
+/// bewusst NICHT als Platzhalter, damit niemand eine halbe Kette fuer eine
+/// ganze haelt.
+fn power_on_and_mac_init(
+    h: i32, hal: &Hal, trx: &mut pci::Trx, stage_buf: i32, fifo: &mut mac::Fifo,
+) -> bool {
+    // rtw_hci_setup
+    pci::setup(h, trx, false);
+
+    // rtw_mac_power_on
+    let t0 = host::now_us();
+    if mac::mac_power_on(h, hal.cut_version).is_err() {
+        host::print("  rtw_mac_power_on fehlgeschlagen\n");
+        return false;
+    }
+    host::print("  MAC an nach ");
+    host::print_dec((host::now_us() - t0) as u32);
+    host::print(" us, CR = 0x");
+    host::print_hex8(host::r8(h, REG_CR));
+    host::print("\n");
+
+    // rtw_wait_firmware_completion entfaellt: unsere Firmware liegt im
+    // Binaerbild, es gibt kein asynchrones Nachladen, auf das zu warten waere.
+
+    // rtw_download_firmware
+    if stage_buf < 0 {
+        host::print("  kein DMA fuer den Zwischenpuffer\n");
+        return false;
+    }
+    let t0 = host::now_us();
+    if !mac::download_firmware(h, trx, stage_buf, FW, BAND_AT_FWDL,
+                               fifo.rsvd_boundary) {
+        host::print("  zweiter Firmware-Download fehlgeschlagen\n");
+        return false;
+    }
+    host::print("  Firmware zum zweiten Mal geladen (");
+    host::print_dec((host::now_us() - t0) as u32 / 1000);
+    host::print(" ms)\n");
+
+    // rtw_mac_init
+    let t0 = host::now_us();
+    let f = match mac::mac_init(h, hal.cut_version) {
+        Ok(f) => f,
+        Err(e) => {
+            host::print(match e {
+                mac::MacErr::NoMem =>
+                    "  rtw_mac_init: Seitenplan passt nicht in den TX-FIFO\n",
+                mac::MacErr::Inval =>
+                    "  rtw_mac_init: eine Gegenrechnung stimmt nicht\n",
+                mac::MacErr::Busy =>
+                    "  rtw_mac_init: die Hardware quittiert nicht\n",
+            });
+            return false;
+        }
+    };
+    let dt = host::now_us() - t0;
+    *fifo = f;
+
+    // Der Seitenplan im Klartext. Er ist die Zahl, an der ab jetzt jede
+    // Reserved Page haengt — und er steht nirgendwo sonst.
+    host::print("  Seitenplan: txff ");
+    host::print_dec(f.txff_pg_num as u32);
+    host::print(" Seiten, rsvd ");
+    host::print_dec(f.rsvd_pg_num as u32);
+    host::print(", acq ");
+    host::print_dec(f.acq_pg_num as u32);
+    host::print("  ->  rsvd_boundary ");
+    host::print_dec(f.rsvd_boundary as u32);
+    host::print("\n  rsvd: drv ");
+    host::print_dec(f.rsvd_drv_addr as u32);
+    host::print(" · h2c_info ");
+    host::print_dec(f.rsvd_h2c_info_addr as u32);
+    host::print(" · h2c_sta ");
+    host::print_dec(f.rsvd_h2c_sta_info_addr as u32);
+    host::print(" · h2cq ");
+    host::print_dec(f.rsvd_h2cq_addr as u32);
+    host::print(" · fw_txbuf ");
+    host::print_dec(f.rsvd_fw_txbuf_addr as u32);
+    host::print(" · csibuf ");
+    host::print_dec(f.rsvd_csibuf_addr as u32);
+    host::print("  (");
+    host::print_dec(dt as u32);
+    host::print(" us)\n");
+
+    // Die Gates der Stufe: die zwei Quittungen der Hardware und die zwei
+    // Zahlen, die aus Linux' eigener Rechnung fallen.
+    let llt = host::r8(h, REG_AUTO_LLT_V1) & BIT_AUTO_INIT_LLT_V1 as u8;
+    let mut ok = true;
+    ok &= gate("Link-List-Tabelle gebaut (AUTO_INIT_LLT_V1 geloescht)", llt == 0);
+    ok &= gate("rsvd_boundary == 1938 (2048 Seiten minus 110 reservierte)",
+               f.rsvd_boundary == 1938);
+    // rtw_pci_interface_cfg auf cut >= D.
+    let mix = host::r32(h, REG_HCI_MIX_CFG);
+    ok &= gate("PCIE_EMAC_PDN_AUX_TO_FAST_CLK steht (cut D)",
+               mix & BIT_PCIE_EMAC_PDN_AUX_TO_FAST_CLK != 0);
+    // Der MAC laeuft: REG_CR traegt alle acht TRX-Bits.
+    let cr = host::r8(h, REG_CR);
+    ok &= gate("REG_CR traegt MAC_TRX_ENABLE", cr & MAC_TRX_ENABLE == MAC_TRX_ENABLE);
+    ok
+}
+
+/// main.c:1413 `chip->ops->phy_set_param` — Stufe 3b (Tabellen) und
+/// 3c (BB/RF-Aufbau) in einem Zug, weil `rtw_phy_load_tables` MITTEN in
+/// `rtw8822c_phy_set_param` steht und nicht daneben.
+///
+/// Die zwei Gates sind getrennt, weil sie verschiedene Fragen stellen:
+/// **3b** — kommt aus den Tabellen ueberhaupt etwas an? Gemessen wird das
+/// am RF-Register 0x00 BEIDER Pfade: es traegt nach dem Laden den Wert, den
+/// die Tabelle hineingeschrieben hat, und ist weder 0 noch 0xfffff.
+/// **3c** — hoert der Empfaenger? Gemessen an `false_alarm_statistics`:
+/// die CCA-Zaehler des Chips laufen nur, wenn die BB arbeitet.
+fn phy_set_param_and_check(h: i32, hal: &Hal, e: &efuse::Efuse) -> (bool, bool) {
+    host::print("[rtl8822ce] Stufe 3b/3c: rtw8822c_phy_set_param\n");
+
+    let mut dm = dm::DmInfo::new();
+    let mut path_div = dm::PathDiv::default();
+
+    let t0 = host::now_us();
+    let tables_ok = chip::phy_set_param(h, &mut dm, &mut path_div, e,
+                                        hal.cut_version, hal.rf_path_num,
+                                        hal.antenna_tx, hal.antenna_rx);
+    host::print("  phy_set_param fertig in ");
+    host::print_dec((host::now_us() - t0) as u32);
+    host::print(" us\n");
+
+    // ── Gate 3b ──────────────────────────────────────────────────
+    // `rtw_phy_read_rf` geht ueber das direkte Fenster; ein Pfad, der nicht
+    // antwortet, liefert 0xfffff (alle Bits) oder 0.
+    let mut rf_ok = true;
+    for path in [phy::RF_PATH_A, phy::RF_PATH_B] {
+        let v0 = phy::read_rf(h, path, 0x00, phy::RFREG_MASK);
+        let v18 = phy::read_rf(h, path, 0x18, phy::RFREG_MASK);
+        host::print("  RF ");
+        host::print(if path == phy::RF_PATH_A { "A" } else { "B" });
+        host::print(": 0x00 = 0x");
+        host::print_hex32(v0);
+        host::print("  0x18 = 0x");
+        host::print_hex32(v18);
+        host::print("\n");
+        rf_ok &= v0 != 0 && v0 != phy::RFREG_MASK
+            && v18 != 0 && v18 != phy::RFREG_MASK;
+    }
+    let mut stage3b = gate("jede Tabelle gibt so viele Schreibzugriffe ab wie gerechnet",
+                           tables_ok);
+    stage3b &= gate("beide RF-Pfade antworten mit Tabellenwerten", rf_ok);
+
+    // ── Gate 3c ──────────────────────────────────────────────────
+    // Einmal lesen setzt die Zaehler zurueck; die ZWEITE Lesung nach einer
+    // kurzen Pause ist die, die etwas aussagt. Ein Zaehler, der nach dem
+    // Zuruecksetzen wieder steigt, misst.
+    chip::false_alarm_statistics(h, &mut dm);
+    host::sleep_ms(50);
+    chip::false_alarm_statistics(h, &mut dm);
+
+    host::print("  Falschalarme: cck ");
+    host::print_dec(dm.cck_fa_cnt);
+    host::print(" · ofdm ");
+    host::print_dec(dm.ofdm_fa_cnt);
+    host::print(" · gesamt ");
+    host::print_dec(dm.total_fa_cnt);
+    host::print("\n  CCA: cck ");
+    host::print_dec(dm.cck_cca_cnt);
+    host::print(" · ofdm ");
+    host::print_dec(dm.ofdm_cca_cnt);
+    host::print(" · gesamt ");
+    host::print_dec(dm.total_cca_cnt);
+    host::print("\n  CRC ok/err: cck ");
+    host::print_dec(dm.cck_ok_cnt);
+    host::print("/");
+    host::print_dec(dm.cck_err_cnt);
+    host::print(" · ofdm ");
+    host::print_dec(dm.ofdm_ok_cnt);
+    host::print("/");
+    host::print_dec(dm.ofdm_err_cnt);
+    host::print(" · ht ");
+    host::print_dec(dm.ht_ok_cnt);
+    host::print("/");
+    host::print_dec(dm.ht_err_cnt);
+    host::print("\n  IGI 0x");
+    host::print_hex8(dm.igi_history[0]);
+    host::print(" · cck_gi Grenzen u/l ");
+    host::print_dec(dm.cck_gi_u_bnd as u32);
+    host::print("/");
+    host::print_dec(dm.cck_gi_l_bnd as u32);
+    host::print("\n");
+
+    let stage3c = gate("der Empfaenger zaehlt CCA-Ereignisse",
+                       dm.total_cca_cnt != 0);
+
+    (stage3b, stage3c)
 }
 
 /// Wieviele der 54 Kommandos auf UNSEREM Geraet ueberhaupt laufen. Eine

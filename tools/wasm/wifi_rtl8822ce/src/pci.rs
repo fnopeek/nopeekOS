@@ -479,3 +479,17 @@ pub fn write_data_rsvd_page(
     }
     true
 }
+
+// ── Stufe 3a: rtw_hci_interface_cfg ──────────────────────────────
+
+/// pci.c:1437-1450 `rtw_pci_interface_cfg`.
+///
+/// Der einzige Chip mit einem Zweig ist der 8822C, und der gilt ab
+/// **cut D**. Unser Geraet meldet cut 3 = `RTW_CHIP_VER_CUT_D`, also gilt er.
+/// Die Zeile schaltet den PCIe-EMAC im Aux-Takt auf den schnellen Takt um.
+pub fn interface_cfg(h: i32, cut_version: u8) {
+    if cut_version >= crate::regs::RTW_CHIP_VER_CUT_D {
+        host::w32_mask(h, crate::regs::REG_HCI_MIX_CFG,
+                       crate::regs::BIT_PCIE_EMAC_PDN_AUX_TO_FAST_CLK, 1);
+    }
+}
