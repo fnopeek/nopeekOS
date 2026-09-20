@@ -505,7 +505,7 @@ zweites Mal anwirft, spart sie die ganze Messung.
     python3 tools/wasm/wifi_rtl8822ce/gen_pwrseq.py   # src/pwrseq.rs aus rtw8822c.c
     python3 tools/linux-coverage.py --chip rtl8822ce   # 265 / 940 (war 89)
 
-**Abdeckung nach Stufe 5b: 295 von 940 rtw88-Funktionen** (vor dieser Runde
+**Abdeckung nach Stufe 5c: 299 von 940 rtw88-Funktionen** (vor dieser Runde
 89). `rtw8822c.c` 68/171 · `phy.c` 59/97 · `mac.c` 39/49 · `pci.c` 30/81 ·
 `coex.c` 27/111 · `main.c` 18/84 · `tx.c` 15/31 · `efuse.c` 5/5 · `rx.c` 3/8.
 Auf 0 stehen nur noch `mac80211.c` (die obere Hälfte, die `wifid` ersetzt),
@@ -789,9 +789,50 @@ geprüft. **133 von 133 Funktionen, 0 ohne C-Rumpf.**
 `rtw_pci_tx_isr` ihn nach. Bei drei Rahmen in einem Ring von 128 folgenlos,
 bei einem laufenden Sender der nächste Posten.
 
+### Stufe 5c — der Suchlauf (0.16.0)
+
+Florians Befund nach 5b: „meiner war nicht drunter obwohl der eig. das
+beste signal habe müsste". Die Antwort brauchte keine Untersuchung: **wir
+hörten auf genau einem Kanal.** Stufe 4c setzt Kanal 1 und nie wieder einen
+anderen; alles, was auf 6 oder 11 oder auf 5 GHz funkt, war nie in der Luft,
+die wir gehört haben. Der Beweis stand im Log selbst — `yff-25919-5Ghz`
+antwortete auf 2412 MHz, also das 2,4-GHz-Funkteil eines Doppelband-APs.
+
+Gebaut: `rtw_set_channel` für JEDEN Kanal (bis hier war er auf 1 genagelt),
+`rtw_core_scan_start`/`_complete`, `rtw_fw_scan_notify` (H2C 0x59, gegated
+auf `FW_FEATURE_NOTIFY_SCAN` aus dem Firmware-Kopf), die Elementeauswertung
+von Beacon und Probe Response, und eine Liste gefundener Zellen.
+
+**Aktiv auf 2,4 GHz, passiv auf 5 GHz.** Der Unterschied ist keine
+Bequemlichkeit: auf welchen 5-GHz-Kanälen gesendet werden DARF, entscheidet
+die Zulassungszone, und diese Regeln gehören der oberen Hälfte
+(`wifid`/cfg80211). Empfangen ist überall erlaubt, also hört der Suchlauf
+dort, wo er nicht fragen darf.
+
+**Das Gate misst UNS, nicht die Nachbarschaft.** Ob auf einem Kanal jemand
+funkt, entscheidet nicht der Treiber; ob der Chip den Kanal angenommen hat,
+schon. Also: RF 0x18 wird nach JEDEM Kanalwechsel auf beiden Pfaden
+zurückgelesen, und das Gate ist 38 von 38.
+
+**Und der Kanalfeger fand einen echten Absturz, bevor das Gerät ihn fand.**
+`txpwrcheck.py` rechnet jetzt jeden Kanal × Bandbreite × Zone einmal durch
+(1512 Kombinationen) — die 5-GHz-Pfade waren 1:1 portiert, aber nie
+gelaufen, und ein Indexfehler wäre dort kein Fehlwert, sondern ein Trap.
+Er trat sofort auf: **`rtw_5g_ht_ns_pwr_idx_diff` ist EIN Byte, das
+2G-Gegenstück `rtw_2g_ns_pwr_idx_diff` sind ZWEI** — ich hatte den 2G-Schritt
+kopiert. Damit lasen `g5_ns_bw20/bw40` die Bytes 33/35/37 statt 33/34/35,
+und `g5_vht_bw80` griff auf Byte 42 eines 42-Byte-Blocks. Dazu stand `bw80`
+im falschen Nibble (in `rtw_5g_vht_ns_pwr_idx_diff` liegt `bw160` unten).
+Der Bauplan steht jetzt als eigene Prüfung da: eine Probe mit genau einem
+gesetzten Nibble je Zugriff, **16 von 16**.
+
+**Dabei verschluckte der Prüfstand selbst die Panik**: er schrieb stderr nur,
+wenn stdout LEER war — also gerade dann nicht, wenn es mitten im Lauf kracht.
+Dieselbe Klasse wie die zwei Werkzeuglücken aus 5a und 5b.
+
 ### ▶ Danach — hier weitermachen
 
-**5c — Scan, Auth, Assoc.** Jetzt erst: `rtw_chip_prepare_tx` mit
+**5d — Auth und Assoc.** Jetzt erst: `rtw_chip_prepare_tx` mit
 GAPK/IQK/DPK vor dem Auth, `rtw_pci_tx_isr` für den Sendezeiger,
 `rtw_get_channel_params` fürs Kanalhüpfen, die Elementeauswertung des
 Beacons, und `rtw_rx_addr_match`. Der `netdev`-Anschluss

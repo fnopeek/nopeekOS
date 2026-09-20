@@ -39,6 +39,37 @@ mod tables { include!("tables_inc.rs"); }
 #[allow(dead_code, clippy::all)]
 mod txpower { include!("txpower_inc.rs"); }
 
+/// Ein efuse-Block, wie ihn `TxPwrIdx` liest. Die Werte sind erfunden —
+/// gemessen wird hier nur, ob ein Index danebengreift, nicht welcher Pegel
+/// herauskommt.
+static EF: [u8; 42] = [
+    0x2c, 0x2c, 0x2c, 0x2c, 0x2c, 0x2c, 0x2c, 0x2c, 0x2c, 0x2c,
+    0x2c, 0x2c, 0x2c, 0x2c, 0x11, 0x11, 0x11, 0x11, 0x28, 0x28,
+    0x28, 0x28, 0x28, 0x28, 0x28, 0x28, 0x28, 0x28, 0x28, 0x28,
+    0x28, 0x28, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+    0x11, 0x11,
+];
+
+type Getter = fn(&txpower::TxPwrIdx) -> i8;
+static LAYOUT: &[(&str, usize, bool, Getter)] = &[
+    ("g2_ht1s_ofdm", 11, false, |p| p.g2_ht1s_ofdm()),
+    ("g2_ht1s_bw20", 11, true,  |p| p.g2_ht1s_bw20()),
+    ("g2_ns_bw20(2)", 12, false, |p| p.g2_ns_bw20(2)),
+    ("g2_ns_bw40(2)", 12, true,  |p| p.g2_ns_bw40(2)),
+    ("g2_ns_bw20(3)", 14, false, |p| p.g2_ns_bw20(3)),
+    ("g2_ns_bw20(4)", 16, false, |p| p.g2_ns_bw20(4)),
+    ("g5_ht1s_ofdm", 32, false, |p| p.g5_ht1s_ofdm()),
+    ("g5_ht1s_bw20", 32, true,  |p| p.g5_ht1s_bw20()),
+    ("g5_ns_bw20(2)", 33, false, |p| p.g5_ns_bw20(2)),
+    ("g5_ns_bw40(2)", 33, true,  |p| p.g5_ns_bw40(2)),
+    ("g5_ns_bw20(3)", 34, false, |p| p.g5_ns_bw20(3)),
+    ("g5_ns_bw20(4)", 35, false, |p| p.g5_ns_bw20(4)),
+    ("g5_vht_bw80(1)", 38, true, |p| p.g5_vht_bw80(1)),
+    ("g5_vht_bw80(2)", 39, true, |p| p.g5_vht_bw80(2)),
+    ("g5_vht_bw80(3)", 40, true, |p| p.g5_vht_bw80(3)),
+    ("g5_vht_bw80(4)", 41, true, |p| p.g5_vht_bw80(4)),
+];
+
 fn main() {
     let t = txpower::board_info_setup(1).expect("rfe_option 1");
     let got = txpower::checksums(&t);
@@ -56,6 +87,60 @@ fn main() {
     println!("  Beispiel: FCC/20MHz/CCK/Kanal 1 = {}, Basis CCK Pfad 0 = {}",
              t.limit_2g[0][0][0][0], t.by_rate_base_2g[0][0]);
     println!("  {} von 6 Pruefsummen gleich", 6 - bad);
+
+    // Der Suchlauf (Stufe 5c) faehrt JEDEN Kanal an, und die 5-GHz-Pfade
+    // sind zwar 1:1 portiert, aber nie gelaufen. Ein Indexfehler waere dort
+    // kein Fehlwert, sondern ein Trap — also wird hier jeder Kanal einmal
+    // ausgerechnet. Stuerzt es, stuerzt es HIER und nicht am Geraet.
+    // Der BAUPLAN von `struct rtw_txpwr_idx` (main.h, __packed), Byte fuer
+    // Byte. 2G: cck_base[6] @0 · bw40_base[5] @6 · ht_1s @11 (1 B) ·
+    // ht_2s/3s/4s @12,14,16 (je 2 B) = 18 B. 5G: bw40_base[14] @18 ·
+    // ht_1s @32 (1 B) · ht_2s/3s/4s @33,34,35 (je 1 B!) · ofdm @36 (2 B) ·
+    // vht_1s..4s @38,39,40,41 = 42 B. Eine Probe mit EINEM gesetzten Byte
+    // sagt, ob jeder Zugriff dort landet, wo er soll.
+    let mut layout_bad = 0usize;
+    for &(name, off, hi, get) in LAYOUT {
+        let mut lay = [0u8; 42];
+        lay[off] = if hi { 0x70 } else { 0x07 };
+        let got = get(&txpower::TxPwrIdx(&lay));
+        if got != 7 {
+            println!("  LAYOUT {} greift nicht auf Byte {} ({} Nibble): {}",
+                     name, off, if hi { "hohes" } else { "tiefes" }, got);
+            layout_bad += 1;
+        }
+    }
+    println!("  Bauplan: {} von {} Zugriffen auf dem richtigen Nibble",
+             LAYOUT.len() - layout_bad, LAYOUT.len());
+    if layout_bad > 0 { bad += layout_bad; }
+
+    let idx = [txpower::TxPwrIdx(&EF), txpower::TxPwrIdx(&EF),
+               txpower::TxPwrIdx(&EF), txpower::TxPwrIdx(&EF)];
+    let ch_2g: Vec<u8> = (1..=14).collect();
+    let ch_5g: Vec<u8> = tables::CHANNEL_IDX_5G.to_vec();
+    let mut n = 0;
+    let mut sum: u64 = 0;
+    for (band, list) in [(txpower::PHY_BAND_2G, &ch_2g),
+                         (txpower::PHY_BAND_5G, &ch_5g)] {
+        for &ch in list.iter() {
+            for bw in 0..3usize {
+                for regd in 0..8usize {
+                    let mut t2 = txpower::TxPower { cch_by_bw: t.cch_by_bw, ..t };
+                    t2.cch_by_bw[0] = ch;
+                    let mut tbl = [[0u8; txpower::DESC_RATE_MAX];
+                                   txpower::RTW_RF_PATH_MAX];
+                    txpower::set_tx_power_level(&t2, &idx, &mut tbl, 2, ch, bw,
+                                                band, regd);
+                    for p in 0..2 { for r in 0..txpower::DESC_RATE_MAX {
+                        sum = sum.wrapping_mul(31).wrapping_add(tbl[p][r] as u64);
+                    } }
+                    n += 1;
+                }
+            }
+        }
+    }
+    println!("  Kanalfeger: {} Kombinationen (Kanal x Bandbreite x Zone) \
+ohne Absturz, Pruefsumme 0x{:016x}", n, sum);
+
     std::process::exit(if bad == 0 { 0 } else { 1 });
 }
 '''
@@ -83,7 +168,11 @@ def main():
         r = subprocess.run(["cargo", "run", "--release", "-q"], cwd=tmp,
                            env=env, capture_output=True, text=True)
         sys.stdout.write(r.stdout)
-        if r.returncode != 0 and not r.stdout.strip():
+        # Bei einem Fehlschlag IMMER auch stderr zeigen. Die alte Bedingung
+        # („nur wenn stdout leer ist") verschluckte genau den Fall, fuer den
+        # dieses Werkzeug da ist: eine Panik MITTEN im Lauf, mit den ersten
+        # Zeilen schon auf stdout.
+        if r.returncode != 0:
             sys.stderr.write(r.stderr)
         sys.exit(r.returncode)
     finally:

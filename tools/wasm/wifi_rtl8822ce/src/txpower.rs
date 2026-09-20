@@ -552,9 +552,15 @@ impl<'a> TxPwrIdx<'a> {
     pub fn bw40_base_5g(&self, g: usize) -> u8 { self.0[18 + g] }
     pub fn g5_ht1s_ofdm(&self) -> i8 { Self::n4(self.0[32], false) }
     pub fn g5_ht1s_bw20(&self) -> i8 { Self::n4(self.0[32], true) }
-    pub fn g5_ns_bw20(&self, n: usize) -> i8 { Self::n4(self.0[33 + (n - 2) * 2], false) }
-    pub fn g5_ns_bw40(&self, n: usize) -> i8 { Self::n4(self.0[33 + (n - 2) * 2], true) }
-    pub fn g5_vht_bw80(&self, n: usize) -> i8 { Self::n4(self.0[40 + (n - 1)], false) }
+    // **`rtw_5g_ht_ns_pwr_idx_diff` ist EIN Byte** (bw20:4, bw40:4) — das
+    // 2G-Gegenstueck daneben ist zwei, und genau dieser Schritt stand hier
+    // zuerst. @33,34,35 fuer 2s/3s/4s.
+    pub fn g5_ns_bw20(&self, n: usize) -> i8 { Self::n4(self.0[33 + (n - 2)], false) }
+    pub fn g5_ns_bw40(&self, n: usize) -> i8 { Self::n4(self.0[33 + (n - 2)], true) }
+    // ofdm_diff @36,37 (zwei Byte) liest `rtw_phy_get_5g_tx_power_index`
+    // nicht — dahinter kommen vht_1s..4s @38,39,40,41, und in
+    // `rtw_5g_vht_ns_pwr_idx_diff` steht bw160 UNTEN, bw80 OBEN.
+    pub fn g5_vht_bw80(&self, n: usize) -> i8 { Self::n4(self.0[38 + (n - 1)], true) }
 }
 
 // Ratengrenzen aus main.h:249-340, gebraucht fuer die Abschnitts- und

@@ -381,6 +381,11 @@ pub extern "C" fn _start() {
     // — hier also noch 0, genau wie dort.
     let mut fifo = mac::Fifo::default();
 
+    // Die Merkmalsbits der Firmware entscheiden, welche H2C-Kommandos sie
+    // ueberhaupt kennt (`rtw_fw_feature_check`). Sie stehen im Kopf des
+    // Abbilds, also gibt es sie schon vor dem Download.
+    let fw_feature = mac::parse_fw_hdr(FW).feature;
+
     let stage_buf = host::dma_alloc_below(
         (pci::RSVD_STAGE_BYTES.div_ceil(4096)) as u16, 1024);
     // Der H2C-Ring braucht einen EIGENEN Zwischenpuffer: der oben ist fuer
@@ -588,6 +593,16 @@ pub extern "C" fn _start() {
         }
     };
 
+    // ── Stufe 5c: der Suchlauf ───────────────────────────────────
+    let stage5c = match (stage5b, efuse.as_ref(), _txpwr.as_ref()) {
+        (true, Some(e), Some(t)) => stage5c_scan(h, &hal, &mut trx, mgmt_buf,
+                                                 e, t, e.addr, fw_feature),
+        _ => {
+            host::print("[rtl8822ce] Stufe 5c: uebersprungen, 5b steht nicht\n");
+            false
+        }
+    };
+
     // Und wieder aus, aus demselben Grund wie oben: der Kernel gibt gleich
     // die DMA-Puffer frei, in die eine laufende Firmware sonst weiterschriebe.
     mac::mac_power_off(h, hal.cut_version);
@@ -631,6 +646,11 @@ pub extern "C" fn _start() {
         "[rtl8822ce] Stufe 5b: GRUEN — WIR SENDEN, UND ES WIRD GEANTWORTET\n"
     } else {
         "[rtl8822ce] Stufe 5b: NEIN — nicht weiterbauen, bevor das steht\n"
+    });
+    host::print(if stage5c {
+        "[rtl8822ce] Stufe 5c: GRUEN — WIR SEHEN DIE UMGEBUNG\n"
+    } else {
+        "[rtl8822ce] Stufe 5c: NEIN — nicht weiterbauen, bevor das steht\n"
     });
 
 
@@ -1458,7 +1478,7 @@ fn stage5b_tx(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     // die OBERE Haelfte, die hier `wifid` wird. Er steht hier, weil der
     // Sendeweg sonst nichts zu senden haette; 5c loest ihn ab.
     let mut frame = [0u8; 64];
-    let n = build_probe_req(&mut frame, &mac);
+    let n = build_probe_req(&mut frame, &mac, 1);
     let frame = &frame[..n];
 
     let mut info = tx::pkt_info_update(frame, vif.mac_id, tx::RTW_BAND_2G);
@@ -1570,7 +1590,7 @@ fn stage5b_tx(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
 /// Die Sequenznummer bleibt null — `en_hwseq` steht im Deskriptor, also
 /// vergibt sie der Chip. Gebaut wird nur, was ein AP zum Antworten
 /// braucht: die drei Adressen, das leere SSID-Element und die Raten.
-fn build_probe_req(out: &mut [u8; 64], mac: &[u8; 6]) -> usize {
+fn build_probe_req(out: &mut [u8; 64], mac: &[u8; 6], ch: u8) -> usize {
     let bcast = [0xffu8; 6];
     out[0..2].copy_from_slice(&0x0040u16.to_le_bytes()); // Verwaltung, Subtyp 4
     out[2..4].copy_from_slice(&0u16.to_le_bytes()); // duration
@@ -1593,7 +1613,7 @@ fn build_probe_req(out: &mut [u8; 64], mac: &[u8; 6]) -> usize {
     // DS Parameter Set: der Kanal, auf dem wir fragen.
     out[n] = 3;
     out[n + 1] = 1;
-    out[n + 2] = 1;
+    out[n + 2] = ch;
     n + 3
 }
 
@@ -1629,6 +1649,340 @@ fn print_probe_resp(f: &[u8], st: &rx::RxPktStat) {
         i += 2 + len;
     }
     host::print("\"\n");
+}
+
+/// Eine gefundene Funkzelle. Nur das, was aus Beacon oder Probe Response
+/// sicher herausfaellt — nichts Abgeleitetes.
+#[derive(Clone, Copy)]
+struct Bss {
+    bssid: [u8; 6],
+    ssid: [u8; 32],
+    ssid_len: u8,
+    channel: u8,
+    best: i8,
+    beacons: u16,
+    resps: u16,
+}
+
+const MAX_BSS: usize = 48;
+
+/// main.c:880-913 `rtw_set_channel` — der Teil, der auf JEDEN Kanal passt.
+///
+/// Stufe 4c hatte ihn auf Kanal 1 festgenagelt; fuer einen Suchlauf muss er
+/// der Reihe nach jeden Kanal bekommen. `rtw_get_channel_params` fehlt noch
+/// (es rechnet aus einer `chandef` den Mitten- und den primaeren Kanal); bei
+/// 20 MHz sind beide derselbe, und breiter fahren wir nicht.
+fn switch_channel(h: i32, hal: &Hal, e: &efuse::Efuse, t: &txpower::TxPower,
+                  ch: u8) -> bool {
+    const BW: usize = 0; // RTW_CHANNEL_WIDTH_20
+
+    // `rtw_update_channel`
+    let mut t2 = txpower::TxPower { cch_by_bw: t.cch_by_bw, ..*t };
+    t2.cch_by_bw[0] = ch;
+
+    chip::set_channel(h, ch, BW, RTW_SC_DONT_CARE);
+
+    // `rtw_coex_switchband_notify` steht hier in Linux, mit drei
+    // verschiedenen Gruenden je nach Band und Suchlauf. Er muendet in
+    // `rtw_coex_run_coex` — die LAUFENDE Koexistenz, die den Verkehrs- und
+    // BT-Zustand braucht. Benannt und nicht gebaut, seit Stufe 4c.
+
+    let band = if ch > 14 { txpower::PHY_BAND_5G } else { txpower::PHY_BAND_2G };
+    let mut tbl = [[0u8; txpower::DESC_RATE_MAX]; txpower::RTW_RF_PATH_MAX];
+    let idx: [txpower::TxPwrIdx; 4] = [
+        txpower::TxPwrIdx(&e.txpwr_idx[0]), txpower::TxPwrIdx(&e.txpwr_idx[1]),
+        txpower::TxPwrIdx(&e.txpwr_idx[2]), txpower::TxPwrIdx(&e.txpwr_idx[3]),
+    ];
+    txpower::set_tx_power_level(&t2, &idx, &mut tbl, hal.rf_path_num, ch, BW,
+                                band, e.regd as usize);
+    chip::set_tx_power_index(h, hal.rf_path_num, &tbl);
+
+    // `need_rfk` wird beim Suchen NICHT gesetzt — genau das ist der Sinn des
+    // `RTW_FLAG_SCANNING`-Zweigs: auf jedem Kanal zu kalibrieren dauert zu
+    // lange. Die Kalibrierung gehoert vor das Anmelden.
+
+    // Und die Gegenprobe: RF 0x18 traegt Band, Kanal und Bandbreite. Sie
+    // kostet zwei Lesezugriffe und sagt etwas ueber UNS statt ueber die
+    // Nachbarschaft — ob ein Netz auf einem Kanal funkt, entscheidet nicht
+    // der Treiber, ob der Chip den Kanal angenommen hat schon.
+    let a = phy::read_rf(h, phy::RF_PATH_A, 0x18, phy::RFREG_MASK);
+    let b = phy::read_rf(h, phy::RF_PATH_B, 0x18, phy::RFREG_MASK);
+    a & 0xff == ch as u32 && b & 0xff == ch as u32
+}
+
+/// Stufe 5c — der Suchlauf.
+///
+/// **Aktiv auf 2,4 GHz, passiv auf 5 GHz.** Aktiv heisst: ein Probe Request
+/// hinaus, dann zuhoeren. Passiv heisst: nur zuhoeren. Der Unterschied ist
+/// keine Bequemlichkeit — auf welchen 5-GHz-Kanaelen gesendet werden DARF,
+/// entscheidet die Zulassungszone, und die Regeln dafuer gehoeren der
+/// oberen Haelfte (`wifid`/cfg80211), nicht dem Treiber. Empfangen ist
+/// ueberall erlaubt, also hoert der Suchlauf dort, wo er nicht fragen darf.
+#[allow(clippy::too_many_arguments)]
+fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
+                e: &efuse::Efuse, t: &txpower::TxPower, mac: [u8; 6],
+                fw_feature: u32) -> bool {
+    // 2,4 GHz: die dreizehn Kanaele, die es in Europa gibt. Kanal 14 ist
+    // nur in Japan und nur mit DSSS zugelassen — er steht bewusst nicht da.
+    const ACTIVE_2G: [u8; 13] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+    // 5 GHz: UNII-1 bis UNII-3, wie cfg80211 sie fuehrt. Nur zum Hoeren.
+    const PASSIVE_5G: [u8; 25] = [
+        36, 40, 44, 48, 52, 56, 60, 64,
+        100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
+        149, 153, 157, 161, 165,
+    ];
+    // Ein Beacon-Intervall sind 102,4 ms. Wer kuerzer horcht, verpasst ein
+    // Netz nicht wegen schwachem Signal, sondern wegen der Uhr.
+    const DWELL_MS: u32 = 130;
+
+    host::print("[rtl8822ce] Stufe 5c: der Suchlauf\n");
+    if mgmt_buf < 0 {
+        host::print("  kein DMA-Puffer fuer die MGMT-Queue\n");
+        return false;
+    }
+
+    // `rtw_core_scan_start`. Die Adresse steht seit 5b im Port (mac80211
+    // reicht hier eine ggf. gewuerfelte durch; wir nehmen unsere eigene).
+    // `rtw_leave_lps` und `RTW_FLAG_DIG_DISABLE` sind bei uns wirkungslos —
+    // es gibt weder Stromsparen noch eine laufende Verstaerkungsregelung.
+    // `rtw_coex_scan_notify` ist dieselbe benannte Luecke wie oben.
+    let mut h2c = fw::H2cState::default();
+    let notify = fw_feature & FW_FEATURE_NOTIFY_SCAN != 0;
+    host::print("  fw feature 0x");
+    host::print_hex32(fw_feature);
+    host::print(if notify {
+        " · NOTIFY_SCAN ja\n"
+    } else {
+        " · NOTIFY_SCAN nein\n"
+    });
+    if notify {
+        fw::scan_notify(h, &mut h2c, true);
+    }
+
+    let mut dm = dm::DmInfo::new();
+    let mut path_div = dm::PathDiv::default();
+    chip::read_cck_gi_bnd(h, &mut dm);
+    static mut RXBUF3: [u8; pci::RTK_PCI_RX_BUF_SIZE as usize] =
+        [0; pci::RTK_PCI_RX_BUF_SIZE as usize];
+    // SAFETY: ein Faden, ein Rufer, der Puffer verlaesst die Funktion nicht.
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(RXBUF3) };
+
+    let mut found: [Bss; MAX_BSS] = [Bss {
+        bssid: [0; 6], ssid: [0; 32], ssid_len: 0,
+        channel: 0, best: -128, beacons: 0, resps: 0,
+    }; MAX_BSS];
+    let mut n_found = 0usize;
+    let mut probes = 0u32;
+    let mut overflow = false;
+
+    let mut frame = [0u8; 64];
+    let t_start = host::now_us();
+    let mut rf_ok = 0u32;
+    let mut rf_bad_first = 0u8;
+    let mut n_ch = 0u32;
+
+    for (list, active) in [(&ACTIVE_2G[..], true), (&PASSIVE_5G[..], false)] {
+        for &ch in list {
+            n_ch += 1;
+            if switch_channel(h, hal, e, t, ch) {
+                rf_ok += 1;
+            } else if rf_bad_first == 0 {
+                rf_bad_first = ch;
+            }
+
+            if active {
+                let n = build_probe_req(&mut frame, &mac, ch);
+                let f = &frame[..n];
+                let mut info =
+                    tx::pkt_info_update(f, 0, tx::RTW_BAND_2G);
+                let q = tx::RTW_TX_QUEUE_MGMT;
+                if pci::tx_write(h, trx, mgmt_buf, q, &mut info, f) {
+                    pci::tx_kick_off_queue(h, trx, q);
+                    probes += 1;
+                }
+            }
+
+            let t0 = host::now_us();
+            while host::now_us() - t0 < DWELL_MS as u64 * 1000 {
+                let got = pci::rx_poll(h, trx, 64, buf, &mut dm, &mut path_div,
+                                       hal.rf_path_num, 0, ch, |st, pkt| {
+                    if st.crc_err || st.is_c2h {
+                        return;
+                    }
+                    let off = RX_PKT_DESC_SZ as usize + st.drv_info_sz as usize
+                        + st.shift as usize;
+                    if off + 36 > pkt.len() {
+                        return;
+                    }
+                    let fc = u16::from_le_bytes([pkt[off], pkt[off + 1]]);
+                    // Beacon (0x80) und Probe Response (0x50) tragen
+                    // beide denselben Rumpf: 12 feste Bytes, dann Elemente.
+                    let is_beacon = fc & 0xfc == 0x80;
+                    let is_resp = fc & 0xfc == 0x50;
+                    if !is_beacon && !is_resp {
+                        return;
+                    }
+                    if !record_bss(&mut found, &mut n_found, &pkt[off..], ch,
+                                   st.signal_power, is_beacon) {
+                        overflow = true;
+                    }
+                });
+                if got == 0 {
+                    host::sleep_ms(1);
+                }
+            }
+        }
+    }
+
+    // `rtw_core_scan_complete`
+    if notify {
+        fw::scan_notify(h, &mut h2c, false);
+    }
+    // Zurueck auf den Kanal, auf dem die Stufen davor gemessen haben.
+    let _ = switch_channel(h, hal, e, t, 1);
+
+    let dauer = (host::now_us() - t_start) / 1000;
+    host::print("  ");
+    host::print_dec(ACTIVE_2G.len() as u32);
+    host::print(" Kanaele aktiv + ");
+    host::print_dec(PASSIVE_5G.len() as u32);
+    host::print(" passiv · ");
+    host::print_dec(DWELL_MS);
+    host::print(" ms je Kanal · ");
+    host::print_dec(dauer as u32);
+    host::print(" ms · ");
+    host::print_dec(probes);
+    host::print(" Probe Requests\n");
+
+    let mut n_2g = 0u32;
+    let mut n_5g = 0u32;
+    for b in found[..n_found].iter() {
+        if b.channel > 14 { n_5g += 1 } else { n_2g += 1 }
+    }
+    host::print("  gefunden: ");
+    host::print_dec(n_found as u32);
+    host::print(" Netze (");
+    host::print_dec(n_2g);
+    host::print(" auf 2,4 GHz, ");
+    host::print_dec(n_5g);
+    host::print(" auf 5 GHz)\n");
+    if overflow {
+        host::print("  [Hinweis] mehr als ");
+        host::print_dec(MAX_BSS as u32);
+        host::print(" Netze — die Liste ist voll, nicht die Luft\n");
+    }
+
+    for b in found[..n_found].iter() {
+        host::print("    ");
+        for i in 0..6 {
+            if i > 0 {
+                host::print(":");
+            }
+            host::print_hex8(b.bssid[i]);
+        }
+        host::print(" · K");
+        host::print_dec(b.channel as u32);
+        if b.channel < 10 {
+            host::print(" ");
+        }
+        if b.channel < 100 {
+            host::print(" ");
+        }
+        host::print(" · ");
+        print_dbm(b.best);
+        host::print(" · B");
+        host::print_dec(b.beacons as u32);
+        host::print("/R");
+        host::print_dec(b.resps as u32);
+        host::print(" · \"");
+        print_ssid(&b.ssid[..b.ssid_len as usize]);
+        host::print("\"\n");
+    }
+
+    host::print("  RF 0x18 bestaetigt ");
+    host::print_dec(rf_ok);
+    host::print(" von ");
+    host::print_dec(n_ch);
+    host::print(" Kanaelen");
+    if rf_bad_first != 0 {
+        host::print(" (erster Fehlschlag: Kanal ");
+        host::print_dec(rf_bad_first as u32);
+        host::print(")");
+    }
+    host::print("\n");
+
+    let mut ok = true;
+    // **Das Gate misst UNS, nicht die Nachbarschaft.** Ob auf einem Kanal
+    // jemand funkt, entscheidet nicht der Treiber — ob der Chip den Kanal
+    // angenommen hat, schon. Die Zahl der gefundenen Netze ist ein BEFUND
+    // und steht oben.
+    ok &= gate("jeder angefahrene Kanal steht danach im RF", rf_ok == n_ch);
+    ok &= gate("der Suchlauf findet Netze", n_found > 0);
+    let mehr_als_einer = {
+        let first = found[..n_found].iter().map(|b| b.channel).next()
+            .unwrap_or(0);
+        found[..n_found].iter().any(|b| b.channel != first)
+    };
+    ok &= gate("und zwar auf MEHR als dem einen Kanal von vorher",
+               mehr_als_einer);
+    ok
+}
+
+/// Einen Beacon oder eine Probe Response in die Liste aufnehmen. Gibt
+/// `false` zurueck, wenn kein Platz mehr ist — eine volle Liste ist ein
+/// BEFUND und darf nicht wie ein leerer Kanal aussehen.
+fn record_bss(found: &mut [Bss; MAX_BSS], n: &mut usize, f: &[u8], ch: u8,
+              signal: i8, is_beacon: bool) -> bool {
+    let mut bssid = [0u8; 6];
+    bssid.copy_from_slice(&f[16..22]); // addr3
+
+    for b in found[..*n].iter_mut() {
+        if b.bssid == bssid {
+            if signal > b.best {
+                b.best = signal;
+            }
+            if is_beacon { b.beacons += 1 } else { b.resps += 1 }
+            return true;
+        }
+    }
+    if *n >= MAX_BSS {
+        return false;
+    }
+    let e = &mut found[*n];
+    e.bssid = bssid;
+    e.channel = ch;
+    e.best = signal;
+    e.beacons = is_beacon as u16;
+    e.resps = !is_beacon as u16;
+    // 24 Kopf + 12 feste Felder, dann die Elemente. SSID ist Kennung 0.
+    let mut i = 36;
+    while i + 2 <= f.len() {
+        let id = f[i];
+        let len = f[i + 1] as usize;
+        if i + 2 + len > f.len() {
+            break;
+        }
+        if id == 0 {
+            let take = len.min(32);
+            e.ssid[..take].copy_from_slice(&f[i + 2..i + 2 + take]);
+            e.ssid_len = take as u8;
+            break;
+        }
+        i += 2 + len;
+    }
+    *n += 1;
+    true
+}
+
+fn print_ssid(s: &[u8]) {
+    if s.is_empty() {
+        host::print("<versteckt>");
+        return;
+    }
+    for &c in s {
+        let b = [if (0x20..0x7f).contains(&c) { c } else { b'.' }];
+        host::print(unsafe { core::str::from_utf8_unchecked(&b) });
+    }
 }
 
 fn gate(name: &str, ok: bool) -> bool {
