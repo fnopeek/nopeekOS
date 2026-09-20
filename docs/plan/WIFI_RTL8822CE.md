@@ -879,6 +879,40 @@ nicht und meldete deshalb Übereinstimmung:
 **204 von 204 Funktionen Zugriff für Zugriff gleich · 845 Konstanten, 0
 Abweichungen · Abdeckung 299 → 374 von 940, `rtw8822c.c` 141/171.**
 
+### Stufe 5d am Gerät: drei von vier Gates grün (0.17.1)
+
+**Die Kalibrierung selbst läuft, und sie läuft gut.** `power_track_type 0`
+(also kein TSSI, TXGAPK rechnet wirklich) · TXGAPK gelaufen, Versätze Pfad A
+`0,1,0,0,1,1,-6,-6,-6,-6` in 219 ms · IQK `RPT_CIP 0xaa` nach 20 ms · **DPK
+beide Pfade ok, `gs 94/94`, `txagc 15/16`, `coef1 fertig`, 105 ms** — das ist
+Linux' Größenordnung. Gesamt 344 ms, und der Empfänger hört danach
+unverändert (CCA 236).
+
+**Rot ist allein der RFK-Handschlag, und die Ursache steht im Log:**
+`failed to send h2c command`, zweimal. Die Quittung blieb aus, weil das
+Kommando nie hinausging — das **Postfach** (HMEBOX) nimmt nichts mehr an,
+während der **Warteschlangen**-Weg (IQK, H2C-Paket 0x0E) im selben Lauf
+einwandfrei trägt. Die Firmware lebt also; sie leert nur ihr Postfach nicht.
+
+**Eine echte Abweichung von Linux gefunden und behoben:** wir legten in
+JEDER Stufe einen eigenen `H2cState` an (4a, 5c, 5d). In Linux gibt es genau
+ein `rtwdev->h2c` für das ganze Gerät, und die Reihenfolge der vier
+Postfächer ist der Sinn der Sache — der Treiber reicht sie im Kreis weiter,
+damit die Firmware Zeit hat, das vorige zu leeren. Mit drei Zuständen fing
+5d wieder bei Fach 0 an, dem Fach, das 5c zuletzt beschrieben hatte.
+**Das ist richtig so, aber es ist noch nicht bewiesen, dass es das Symptom
+heilt:** leert die Firmware gar nichts mehr, verschiebt ein anderes Fach den
+Fehlschlag nur um zwei.
+
+**Deshalb misst 0.17.1 statt zu raten:** `HMETFR` wird nach jedem
+`scan_notify` und am Anfang von 5d gemeldet, die Fehlermeldung nennt Fach
+und Fahnen, und **der Empfangsring wird vor der Kalibrierung geleert** —
+denn die C2H-Antworten der Firmware holt bisher niemand ab. Linux liest sie
+fortwährend; bei uns läuft `rx_poll` nur in den Messfenstern von 5a bis 5c.
+`rtw_core_fw_scan_notify(false)` wartet in Linux ausdrücklich auf eine
+C2H-Antwort, und eine Firmware, deren Ausgang keiner leert, ist der erste
+Verdächtige für „die Firmware antwortet nicht".
+
 ### ▶ Danach — hier weitermachen
 
 **5e — Auth und Assoc.** `rtw_pci_tx_isr` für den Sendezeiger,

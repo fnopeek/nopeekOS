@@ -389,6 +389,12 @@ pub extern "C" fn _start() {
     // Abbilds, also gibt es sie schon vor dem Download.
     let fw_feature = mac::parse_fw_hdr(FW).feature;
 
+    // `rtwdev->h2c` — EINER fuer das ganze Geraet. Die Reihenfolge der vier
+    // Postfaecher ist der Sinn der Sache: der Treiber reicht sie im Kreis
+    // weiter, damit die Firmware Zeit hat, das vorige zu leeren. Bis 0.17.0
+    // legte jede Stufe einen eigenen an und fing wieder bei Fach 0 an.
+    let mut h2c = fw::H2cState::default();
+
     let stage_buf = host::dma_alloc_below(
         (pci::RSVD_STAGE_BYTES.div_ceil(4096)) as u16, 1024);
     // Der H2C-Ring braucht einen EIGENEN Zwischenpuffer: der oben ist fuer
@@ -562,7 +568,7 @@ pub extern "C" fn _start() {
 
     // ── Stufe 4a: der Rest von rtw_power_on und rtw_core_start ───
     let stage4a = match (stage3c, efuse.as_ref()) {
-        (true, Some(e)) => stage4a_power_on_tail(h, &hal, &mut trx, h2c_buf,
+        (true, Some(e)) => stage4a_power_on_tail(h, &hal, &mut trx, h2c_buf, &mut h2c,
                                                  &mut fifo, e),
         _ => {
             host::print("[rtl8822ce] Stufe 4a: uebersprungen, 3c steht nicht\n");
@@ -599,7 +605,8 @@ pub extern "C" fn _start() {
     // ── Stufe 5c: der Suchlauf ───────────────────────────────────
     let stage5c = match (stage5b, efuse.as_ref(), _txpwr.as_ref()) {
         (true, Some(e), Some(t)) => stage5c_scan(h, &hal, &mut trx, mgmt_buf,
-                                                 e, t, e.addr, fw_feature),
+                                                 &mut h2c, e, t, e.addr,
+                                                 fw_feature),
         _ => {
             host::print("[rtl8822ce] Stufe 5c: uebersprungen, 5b steht nicht\n");
             false
@@ -608,7 +615,7 @@ pub extern "C" fn _start() {
 
     // ── Stufe 5d: die RF-Kalibrierung ────────────────────────────
     let stage5d = match (stage5c, efuse.as_ref()) {
-        (true, Some(e)) => stage5d_calibration(h, &hal, &mut trx, h2c_buf, e),
+        (true, Some(e)) => stage5d_calibration(h, &hal, &mut trx, h2c_buf, &mut h2c, e),
         _ => {
             host::print("[rtl8822ce] Stufe 5d: uebersprungen, 5c steht nicht\n");
             false
@@ -990,6 +997,7 @@ fn phy_set_param_and_check(h: i32, hal: &Hal, e: &efuse::Efuse) -> (bool, bool) 
 ///     rtw_sec_enable_sec_engine
 ///     rtw_write32(REG_RCR, hal->rcr)
 fn stage4a_power_on_tail(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
+                         h2c: &mut fw::H2cState,
                          fifo: &mut mac::Fifo, e: &efuse::Efuse) -> bool {
     host::print("[rtl8822ce] Stufe 4a: rtw_power_on (Rest) + rtw_core_start\n");
 
@@ -998,7 +1006,6 @@ fn stage4a_power_on_tail(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
         return false;
     }
 
-    let mut h2c = fw::H2cState::default();
     let mut cx = coex::Coex::new();
 
     // `rtw_mac_postinit`: `chip->ops->mac_postinit` ist beim 8822C NULL,
@@ -1013,8 +1020,8 @@ fn stage4a_power_on_tail(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
     // Sie gehen durch die H2C-QUEUE, nicht durch die Mailbox. Der Ring
     // dafuer steht seit Stufe 3a (`init_h2c`).
     let wp_before = trx.tx[pci::Q_H2C].wp;
-    let gi = fw::send_general_info(h, trx, h2c_buf, &mut h2c, fifo);
-    let pi = fw::send_phydm_info(h, trx, h2c_buf, &mut h2c, e.rfe_option,
+    let gi = fw::send_general_info(h, trx, h2c_buf, h2c, fifo);
+    let pi = fw::send_phydm_info(h, trx, h2c_buf, h2c, e.rfe_option,
                                  hal.rf_2t2r, hal.cut_version,
                                  hal.antenna_rx, hal.antenna_tx);
 
@@ -1056,9 +1063,9 @@ fn stage4a_power_on_tail(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
 
     let scbd_before = coex::read_scbd_raw(h);
     let t0 = host::now_us();
-    coex::power_on_setting(h, &mut cx, &mut h2c, e.share_ant, e.rfe_option);
+    coex::power_on_setting(h, &mut cx, h2c, e.share_ant, e.rfe_option);
     let scbd_poweron = coex::read_scbd_raw(h);
-    coex::init_hw_config(h, &mut cx, &mut h2c, e.share_ant, wifi_only,
+    coex::init_hw_config(h, &mut cx, h2c, e.share_ant, wifi_only,
                          e.rfe_option);
     let scbd_after = coex::read_scbd_raw(h);
     let dt = host::now_us() - t0;
@@ -1737,6 +1744,7 @@ fn switch_channel(h: i32, hal: &Hal, e: &efuse::Efuse, t: &txpower::TxPower,
 /// ueberall erlaubt, also hoert der Suchlauf dort, wo er nicht fragen darf.
 #[allow(clippy::too_many_arguments)]
 fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
+                h2c: &mut fw::H2cState,
                 e: &efuse::Efuse, t: &txpower::TxPower, mac: [u8; 6],
                 fw_feature: u32) -> bool {
     // 2,4 GHz: die dreizehn Kanaele, die es in Europa gibt. Kanal 14 ist
@@ -1763,7 +1771,6 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     // `rtw_leave_lps` und `RTW_FLAG_DIG_DISABLE` sind bei uns wirkungslos —
     // es gibt weder Stromsparen noch eine laufende Verstaerkungsregelung.
     // `rtw_coex_scan_notify` ist dieselbe benannte Luecke wie oben.
-    let mut h2c = fw::H2cState::default();
     let notify = fw_feature & FW_FEATURE_NOTIFY_SCAN != 0;
     host::print("  fw feature 0x");
     host::print_hex32(fw_feature);
@@ -1773,7 +1780,12 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         " · NOTIFY_SCAN nein\n"
     });
     if notify {
-        fw::scan_notify(h, &mut h2c, true);
+        let ok = fw::scan_notify(h, h2c, true);
+        host::print("  scan_notify(start) ");
+        host::print(if ok { "raus" } else { "FEHLGESCHLAGEN" });
+        host::print(" · HMETFR 0x");
+        host::print_hex8(fw::hmetfr(h));
+        host::print("\n");
     }
 
     let mut dm = dm::DmInfo::new();
@@ -1853,7 +1865,12 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
 
     // `rtw_core_scan_complete`
     if notify {
-        fw::scan_notify(h, &mut h2c, false);
+        let ok = fw::scan_notify(h, h2c, false);
+        host::print("  scan_notify(stop) ");
+        host::print(if ok { "raus" } else { "FEHLGESCHLAGEN" });
+        host::print(" · HMETFR 0x");
+        host::print_hex8(fw::hmetfr(h));
+        host::print("\n");
     }
     // Zurueck auf den Kanal, auf dem die Stufen davor gemessen haben.
     let _ = switch_channel(h, hal, e, t, 1);
@@ -2012,6 +2029,7 @@ fn print_ssid(s: &[u8]) {
 /// in `main.c`.
 #[allow(clippy::too_many_arguments)]
 fn stage5d_calibration(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
+                       h2c: &mut fw::H2cState,
                        e: &efuse::Efuse) -> bool {
     host::print("[rtl8822ce] Stufe 5d: die RF-Kalibrierung\n");
     if h2c_buf < 0 {
@@ -2027,9 +2045,60 @@ fn stage5d_calibration(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
     host::print_dec(e.power_track_type as u32);
     host::print(" · thermal_meter ");
     host::print_dec(e.thermal_meter_k as u32);
+    host::print(" · HMETFR 0x");
+    host::print_hex8(fw::hmetfr(h));
+    host::print(" · naechstes Fach ");
+    host::print_dec(h2c.last_box_num as u32);
     host::print("\n");
 
-    let mut h2c = fw::H2cState::default();
+    // **Die C2H-Antworten der Firmware holt bisher niemand ab.** Auf PCIe
+    // kommen sie durch DENSELBEN Empfangsring wie die Funkrahmen, an
+    // `pkt_stat.is_c2h` getrennt. Linux liest sie fortwaehrend; bei uns
+    // laeuft `rx_poll` nur in den Messfenstern von 5a bis 5c. Was seit dem
+    // letzten Fenster aufgelaufen ist, wird hier zuerst geleert — eine
+    // Firmware, deren Ausgang keiner leert, ist ein Verdaechtiger fuer
+    // jedes „die Firmware antwortet nicht".
+    {
+        let mut dmx = dm::DmInfo::new();
+        let mut pdx = dm::PathDiv::default();
+        static mut RXBUF4: [u8; pci::RTK_PCI_RX_BUF_SIZE as usize] =
+            [0; pci::RTK_PCI_RX_BUF_SIZE as usize];
+        // SAFETY: ein Faden, ein Rufer, der Puffer verlaesst den Block nicht.
+        let b = unsafe { &mut *core::ptr::addr_of_mut!(RXBUF4) };
+        let mut c2h = 0u32;
+        let mut frames = 0u32;
+        let t0 = host::now_us();
+        while host::now_us() - t0 < 50_000 {
+            let n = pci::rx_poll(h, trx, 64, b, &mut dmx, &mut pdx,
+                                 hal.rf_path_num, 0, 1, |st, pkt| {
+                if st.is_c2h {
+                    c2h += 1;
+                    let off = RX_PKT_DESC_SZ as usize
+                        + st.drv_info_sz as usize + st.shift as usize;
+                    if c2h <= 4 && off + 2 <= pkt.len() {
+                        host::print("    c2h id 0x");
+                        host::print_hex8(pkt[off]);
+                        host::print(" len ");
+                        host::print_dec(st.pkt_len as u32);
+                        host::print("\n");
+                    }
+                } else {
+                    frames += 1;
+                }
+            });
+            if n == 0 {
+                host::sleep_ms(1);
+            }
+        }
+        host::print("  Ring geleert: ");
+        host::print_dec(c2h);
+        host::print(" C2H, ");
+        host::print_dec(frames);
+        host::print(" Funkrahmen · HMETFR danach 0x");
+        host::print_hex8(fw::hmetfr(h));
+        host::print("\n");
+    }
+
     let mut gapk = txgapk::GapkInfo::new();
     let mut dpkinfo = dpk::DpkInfo::new();
     // `rtw_load_rfk_table` hat die RFK-Tabelle in Stufe 3c geschrieben und
@@ -2047,7 +2116,7 @@ fn stage5d_calibration(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
     let t0 = host::now_us();
     let (gapk_rpt, hs1, hs2) =
         rfkcal::do_gapk(h, &mut gapk, hal.rf_path_num, DM_FLAGS,
-                        e.power_track_type, &mut bt_iqk_timeout, &mut h2c);
+                        e.power_track_type, &mut bt_iqk_timeout, h2c);
     let dt_gapk = host::now_us() - t0;
 
     host::print("  Handschlag: BT-IQK ");
@@ -2092,7 +2161,7 @@ fn stage5d_calibration(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
 
     // ── do_iqk ───────────────────────────────────────────────────
     let t0 = host::now_us();
-    let (iqk_ok, iqk_us, iqk_chk) = rfkcal::do_iqk(h, trx, h2c_buf, &mut h2c);
+    let (iqk_ok, iqk_us, iqk_chk) = rfkcal::do_iqk(h, trx, h2c_buf, h2c);
     let _ = host::now_us() - t0;
     host::print("  IQK (Firmware): ");
     host::print(if iqk_ok { "fertig" } else { "NICHT fertig" });
