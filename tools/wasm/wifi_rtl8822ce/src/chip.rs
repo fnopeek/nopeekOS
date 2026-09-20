@@ -741,3 +741,306 @@ pub fn coex_cfg_gnt_fix(h: i32, c: &mut Coex, share_ant: bool) {
         }
     }
 }
+
+// ════════════════════════════════════════════════════════════════
+// Stufe 4c: rtw8822c_set_channel (rtw8822c.c:2529)
+// ════════════════════════════════════════════════════════════════
+
+/// main.h:73-79 — die Bandpruefungen, die `set_channel_bb` und
+/// `set_channel_rf` ueberall benutzen.
+#[inline] fn is_ch_2g(ch: u8) -> bool { ch <= 14 }
+#[inline] fn is_ch_5g(ch: u8) -> bool { ch >= 36 && ch <= 177 }
+#[inline] fn is_ch_5g_band_1(ch: u8) -> bool { (36..=48).contains(&ch) }
+#[inline] fn is_ch_5g_band_2(ch: u8) -> bool { (52..=64).contains(&ch) }
+#[inline] fn is_ch_5g_band_3(ch: u8) -> bool { (100..=144).contains(&ch) }
+#[inline] fn is_ch_5g_band_4(ch: u8) -> bool { (149..=177).contains(&ch) }
+
+/// rtw8822c.c:2229-2239 `rtw8822c_rstb_3wire`
+fn rstb_3wire(h: i32, enable: bool) {
+    if enable {
+        host::w32_mask(h, REG_RSTB, BIT_RSTB_3WIRE, 0x1);
+        host::w32_mask(h, REG_ANAPAR_A, BIT_ANAPAR_UPDATE, 0x1);
+        host::w32_mask(h, REG_ANAPAR_B, BIT_ANAPAR_UPDATE, 0x1);
+    } else {
+        host::w32_mask(h, REG_RSTB, BIT_RSTB_3WIRE, 0x0);
+    }
+}
+
+/// rtw8822c.c:2241-2397 `rtw8822c_set_channel_bb`.
+///
+/// **Hier stehen AGC und CCA-Maske** — und das ist der Grund, warum die
+/// Falschalarmzaehler vor dieser Funktion nichts zaehlen koennen.
+fn set_channel_bb(h: i32, channel: u8, bw: usize, primary_ch_idx: u8) {
+    if is_ch_2g(channel) {
+        host::clr32(h, REG_BGCTRL, BITS_RX_IQ_WEIGHT);
+        host::set32(h, REG_TXF4, 1 << 20);
+        host::clr32(h, REG_CCK_CHECK, BIT_CHECK_CCK_EN as u32);
+        host::clr32(h, REG_CCKTXONLY, BIT_BB_CCK_CHECK_EN);
+        host::w32_mask(h, REG_CCAMSK, 0x3F00_0000, 0xF);
+
+        match bw {
+            0 => {
+                host::w32_mask(h, REG_RXAGCCTL0, BITS_RXAGC_CCK, 0x5);
+                host::w32_mask(h, REG_RXAGCCTL, BITS_RXAGC_CCK, 0x5);
+                host::w32_mask(h, REG_RXAGCCTL0, BITS_RXAGC_OFDM, 0x6);
+                host::w32_mask(h, REG_RXAGCCTL, BITS_RXAGC_OFDM, 0x6);
+            }
+            1 => {
+                host::w32_mask(h, REG_RXAGCCTL0, BITS_RXAGC_CCK, 0x4);
+                host::w32_mask(h, REG_RXAGCCTL, BITS_RXAGC_CCK, 0x4);
+                host::w32_mask(h, REG_RXAGCCTL0, BITS_RXAGC_OFDM, 0x0);
+                host::w32_mask(h, REG_RXAGCCTL, BITS_RXAGC_OFDM, 0x0);
+            }
+            _ => {}
+        }
+
+        if channel == 13 || channel == 14 {
+            host::w32_mask(h, REG_SCOTRK, 0xfff, 0x969);
+        } else if channel == 11 || channel == 12 {
+            host::w32_mask(h, REG_SCOTRK, 0xfff, 0x96a);
+        } else {
+            host::w32_mask(h, REG_SCOTRK, 0xfff, 0x9aa);
+        }
+
+        if channel == 14 {
+            host::w32_mask(h, REG_TXF0, MASKHWORD, 0x3da0);
+            host::w32_mask(h, REG_TXF1, MASKDWORD, 0x4962_c931);
+            host::w32_mask(h, REG_TXF2, MASKLWORD, 0x6aa3);
+            host::w32_mask(h, REG_TXF3, MASKHWORD, 0xaa7b);
+            host::w32_mask(h, REG_TXF4, MASKLWORD, 0xf3d7);
+            host::w32_mask(h, REG_TXF5, MASKDWORD, 0x0);
+            host::w32_mask(h, REG_TXF6, MASKDWORD, 0xff01_2455);
+            host::w32_mask(h, REG_TXF7, MASKDWORD, 0xffff);
+        } else {
+            host::w32_mask(h, REG_TXF0, MASKHWORD, 0x5284);
+            host::w32_mask(h, REG_TXF1, MASKDWORD, 0x3e18_fec8);
+            host::w32_mask(h, REG_TXF2, MASKLWORD, 0x0a88);
+            host::w32_mask(h, REG_TXF3, MASKHWORD, 0xacc4);
+            host::w32_mask(h, REG_TXF4, MASKLWORD, 0xc8b2);
+            host::w32_mask(h, REG_TXF5, MASKDWORD, 0x00fa_f0de);
+            host::w32_mask(h, REG_TXF6, MASKDWORD, 0x0012_2344);
+            host::w32_mask(h, REG_TXF7, MASKDWORD, 0x0fff_ffff);
+        }
+
+        if channel == 13 {
+            host::w32_mask(h, REG_TXDFIR0, 0x70, 0x3);
+        } else {
+            host::w32_mask(h, REG_TXDFIR0, 0x70, 0x1);
+        }
+    } else if is_ch_5g(channel) {
+        host::set32(h, REG_CCKTXONLY, BIT_BB_CCK_CHECK_EN);
+        host::set32(h, REG_CCK_CHECK, BIT_CHECK_CCK_EN as u32);
+        host::set32(h, REG_BGCTRL, BITS_RX_IQ_WEIGHT);
+        host::clr32(h, REG_TXF4, 1 << 20);
+        host::w32_mask(h, REG_CCAMSK, 0x3F00_0000, 0x22);
+        host::w32_mask(h, REG_TXDFIR0, 0x70, 0x3);
+
+        if is_ch_5g_band_1(channel) || is_ch_5g_band_2(channel) {
+            host::w32_mask(h, REG_RXAGCCTL0, BITS_RXAGC_OFDM, 0x1);
+            host::w32_mask(h, REG_RXAGCCTL, BITS_RXAGC_OFDM, 0x1);
+        } else if is_ch_5g_band_3(channel) {
+            host::w32_mask(h, REG_RXAGCCTL0, BITS_RXAGC_OFDM, 0x2);
+            host::w32_mask(h, REG_RXAGCCTL, BITS_RXAGC_OFDM, 0x2);
+        } else if is_ch_5g_band_4(channel) {
+            host::w32_mask(h, REG_RXAGCCTL0, BITS_RXAGC_OFDM, 0x3);
+            host::w32_mask(h, REG_RXAGCCTL, BITS_RXAGC_OFDM, 0x3);
+        }
+
+        if (36..=51).contains(&channel) {
+            host::w32_mask(h, REG_SCOTRK, 0xfff, 0x494);
+        } else if (52..=55).contains(&channel) {
+            host::w32_mask(h, REG_SCOTRK, 0xfff, 0x493);
+        } else if (56..=111).contains(&channel) {
+            host::w32_mask(h, REG_SCOTRK, 0xfff, 0x453);
+        } else if (112..=119).contains(&channel) {
+            host::w32_mask(h, REG_SCOTRK, 0xfff, 0x452);
+        } else if (120..=172).contains(&channel) {
+            host::w32_mask(h, REG_SCOTRK, 0xfff, 0x412);
+        } else if (173..=177).contains(&channel) {
+            host::w32_mask(h, REG_SCOTRK, 0xfff, 0x411);
+        }
+    }
+
+    match bw {
+        0 => {
+            host::w32_mask(h, REG_DFIRBW, 0x3FF0, 0x19B);
+            host::w32_mask(h, REG_TXBWCTL, 0xf, 0x0);
+            host::w32_mask(h, REG_TXBWCTL, 0xffc0, 0x0);
+            host::w32_mask(h, REG_TXCLK, 0x700, 0x7);
+            host::w32_mask(h, REG_TXCLK, 0x700000, 0x6);
+            host::w32_mask(h, REG_CCK_SOURCE, BIT_NBI_EN, 0x0);
+            host::w32_mask(h, REG_SBD, BITS_SUBTUNE, 0x1);
+            host::w32_mask(h, REG_PT_CHSMO, BIT_PT_OPT, 0x0);
+        }
+        1 => {
+            host::w32_mask(h, REG_CCKSB, 1 << 4,
+                           if primary_ch_idx == RTW_SC_20_UPPER { 1 } else { 0 });
+            host::w32_mask(h, REG_TXBWCTL, 0xf, 0x5);
+            host::w32_mask(h, REG_TXBWCTL, 0xc0, 0x0);
+            host::w32_mask(h, REG_TXBWCTL, 0xff00,
+                           (primary_ch_idx as u32) | ((primary_ch_idx as u32) << 4));
+            host::w32_mask(h, REG_CCK_SOURCE, BIT_NBI_EN, 0x1);
+            host::w32_mask(h, REG_SBD, BITS_SUBTUNE, 0x1);
+            host::w32_mask(h, REG_PT_CHSMO, BIT_PT_OPT, 0x1);
+        }
+        2 => {
+            host::w32_mask(h, REG_TXBWCTL, 0xf, 0xa);
+            host::w32_mask(h, REG_TXBWCTL, 0xc0, 0x0);
+            host::w32_mask(h, REG_TXBWCTL, 0xff00,
+                           (primary_ch_idx as u32) | ((primary_ch_idx as u32) << 4));
+            host::w32_mask(h, REG_SBD, BITS_SUBTUNE, 0x6);
+            host::w32_mask(h, REG_PT_CHSMO, BIT_PT_OPT, 0x1);
+        }
+        5 => {
+            host::w32_mask(h, REG_DFIRBW, 0x3FF0, 0x2AB);
+            host::w32_mask(h, REG_TXBWCTL, 0xf, 0x0);
+            host::w32_mask(h, REG_TXBWCTL, 0xffc0, 0x1);
+            host::w32_mask(h, REG_TXCLK, 0x700, 0x4);
+            host::w32_mask(h, REG_TXCLK, 0x700000, 0x4);
+            host::w32_mask(h, REG_CCK_SOURCE, BIT_NBI_EN, 0x0);
+            host::w32_mask(h, REG_SBD, BITS_SUBTUNE, 0x1);
+            host::w32_mask(h, REG_PT_CHSMO, BIT_PT_OPT, 0x0);
+        }
+        6 => {
+            host::w32_mask(h, REG_DFIRBW, 0x3FF0, 0x2AB);
+            host::w32_mask(h, REG_TXBWCTL, 0xf, 0x0);
+            host::w32_mask(h, REG_TXBWCTL, 0xffc0, 0x2);
+            host::w32_mask(h, REG_TXCLK, 0x700, 0x6);
+            host::w32_mask(h, REG_TXCLK, 0x700000, 0x5);
+            host::w32_mask(h, REG_CCK_SOURCE, BIT_NBI_EN, 0x0);
+            host::w32_mask(h, REG_SBD, BITS_SUBTUNE, 0x1);
+            host::w32_mask(h, REG_PT_CHSMO, BIT_PT_OPT, 0x0);
+        }
+        _ => {}
+    }
+}
+
+/// rtw8822c.c:2399-2434 `rtw8822c_set_channel_rf`.
+///
+/// Eine einzige Zahl — RF-Register 0x18 — traegt Band, Kanal, RFSI und
+/// Bandbreite; sie wird gelesen, feldweise geloescht und neu gesetzt.
+fn set_channel_rf(h: i32, channel: u8, bw: usize) {
+    const RF18_BAND_MASK: u32 = (1 << 16) | (1 << 9) | (1 << 8);
+    const RF18_BAND_2G: u32 = 0;
+    const RF18_BAND_5G: u32 = (1 << 16) | (1 << 8);
+    const RF18_CHANNEL_MASK: u32 = MASKBYTE0;
+    const RF18_RFSI_MASK: u32 = (1 << 18) | (1 << 17);
+    const RF18_RFSI_GE_CH80: u32 = 1 << 17;
+    const RF18_RFSI_GT_CH140: u32 = 1 << 18;
+    const RF18_BW_MASK: u32 = (1 << 13) | (1 << 12);
+    const RF18_BW_20M: u32 = (1 << 13) | (1 << 12);
+    const RF18_BW_40M: u32 = 1 << 13;
+    const RF18_BW_80M: u32 = 1 << 12;
+
+    let mut rf_reg18 = phy::read_rf(h, RF_PATH_A, 0x18, RFREG_MASK);
+    rf_reg18 &= !(RF18_BAND_MASK | RF18_CHANNEL_MASK | RF18_RFSI_MASK | RF18_BW_MASK);
+    rf_reg18 |= if is_ch_2g(channel) { RF18_BAND_2G } else { RF18_BAND_5G };
+    rf_reg18 |= (channel as u32) & RF18_CHANNEL_MASK;
+    if is_ch_5g_band_4(channel) {
+        rf_reg18 |= RF18_RFSI_GT_CH140;
+    } else if is_ch_5g_band_3(channel) {
+        rf_reg18 |= RF18_RFSI_GE_CH80;
+    }
+
+    let rf_rxbb: u32 = match bw {
+        1 => { rf_reg18 |= RF18_BW_40M; 0x10 }
+        2 => { rf_reg18 |= RF18_BW_80M; 0x8 }
+        // RTW_CHANNEL_WIDTH_5/10/20 und Linux' `default:`
+        _ => { rf_reg18 |= RF18_BW_20M; 0x18 }
+    };
+
+    rstb_3wire(h, false);
+
+    for path in [RF_PATH_A, RF_PATH_B] {
+        phy::write_rf_reg_mix(h, path, RF_LUTWE2, 0x04, 0x01);
+        phy::write_rf_reg_mix(h, path, RF_LUTWA, 0x1f, 0x12);
+        phy::write_rf_reg_mix(h, path, RF_LUTWD0, 0xfffff, rf_rxbb);
+        phy::write_rf_reg_mix(h, path, RF_LUTWE2, 0x04, 0x00);
+    }
+
+    phy::write_rf_reg_mix(h, RF_PATH_A, RF_CFGCH, RFREG_MASK, rf_reg18);
+    phy::write_rf_reg_mix(h, RF_PATH_B, RF_CFGCH, RFREG_MASK, rf_reg18);
+
+    rstb_3wire(h, true);
+}
+
+/// rtw8822c.c:2529-2546 `rtw8822c_set_channel`
+pub fn set_channel(h: i32, channel: u8, bw: usize, primary_ch_idx: u8) {
+    set_channel_bb(h, channel, bw, primary_ch_idx);
+    crate::mac::set_channel_mac(h, channel, bw, primary_ch_idx);
+    set_channel_rf(h, channel, bw);
+    toggle_igi(h);
+}
+
+/// rtw8822c.c:2693-2713 `rtw8822c_set_write_tx_power_ref`.
+///
+/// Zwei Bezugswerte je Pfad — CCK und OFDM — in vier festen Registern.
+/// Vor JEDEM Schreibzugriff wird `0x1c90` Bit 15 geloescht; das ist kein
+/// Versehen und keine Schleifeninvariante, es steht so da.
+fn set_write_tx_power_ref(h: i32, rf_path_num: u8,
+                          tx_pwr_ref_cck: [u8; 2], tx_pwr_ref_ofdm: [u8; 2]) {
+    const TXREF_CCK: [u32; 2] = [0x18a0, 0x41a0];
+    const TXREF_OFDM: [u32; 2] = [0x18e8, 0x41e8];
+
+    for path in 0..rf_path_num as usize {
+        host::w32_mask(h, 0x1c90, 1 << 15, 0);
+        host::w32_mask(h, TXREF_CCK[path], 0x7f0000, tx_pwr_ref_cck[path] as u32);
+    }
+    for path in 0..rf_path_num as usize {
+        host::w32_mask(h, 0x1c90, 1 << 15, 0);
+        host::w32_mask(h, TXREF_OFDM[path], 0x1fc00, tx_pwr_ref_ofdm[path] as u32);
+    }
+}
+
+/// rtw8822c.c:2566-2586 `rtw8822c_set_tx_power_diff`
+fn set_tx_power_diff(h: i32, rate: u8, diff_idx: &[i8; 4]) {
+    const OFFSET_TXAGC: u32 = 0x3a00;
+    let rate_idx = (rate & 0xfc) as u32;
+    let mut pwr_idx = [0u32; 4];
+    for i in 0..4 {
+        pwr_idx[i] = (diff_idx[i] as u8 & 0x7f) as u32;
+    }
+    let phy_pwr_idx = pwr_idx[0] | (pwr_idx[1] << 8) | (pwr_idx[2] << 16)
+        | (pwr_idx[3] << 24);
+
+    // rtw8822c.c:2578 — `0x1c90` ist REG_RSTB, Bit 15.
+    host::w32_mask(h, 0x1c90, 1 << 15, 0x0);
+    host::w32_mask(h, OFFSET_TXAGC + rate_idx, MASKDWORD, phy_pwr_idx);
+}
+
+/// rtw8822c.c:2588-2620 `rtw8822c_set_tx_power_index`.
+///
+/// Schreibt nicht die Indizes selbst, sondern zwei BEZUGSwerte (CCK und
+/// MCS7) und je Vierergruppe von Raten die ABWEICHUNG davon — und zwar das
+/// Minimum beider Pfade.
+pub fn set_tx_power_index(h: i32, rf_path_num: u8,
+                          tbl: &[[u8; crate::txpower::DESC_RATE_MAX];
+                                 crate::txpower::RTW_RF_PATH_MAX]) {
+    const DESC_RATE11M: usize = 0x03;
+    const DESC_RATEMCS7: usize = 0x13;
+    const RATE_SECTION_2SS_MAX: usize = 5; // __RTW_RATE_SECTION_2SS_MAX
+
+    let pwr_ref_cck = [tbl[RF_PATH_A][DESC_RATE11M], tbl[RF_PATH_B][DESC_RATE11M]];
+    let pwr_ref_ofdm = [tbl[RF_PATH_A][DESC_RATEMCS7], tbl[RF_PATH_B][DESC_RATEMCS7]];
+
+    set_write_tx_power_ref(h, rf_path_num, pwr_ref_cck, pwr_ref_ofdm);
+
+    let mut diff_idx = [0i8; 4];
+    for rs in 0..=RATE_SECTION_2SS_MAX {
+        for &rate in crate::tables::RATE_SECTION[rs].iter() {
+            let pwr_a = tbl[RF_PATH_A][rate as usize];
+            let pwr_b = tbl[RF_PATH_B][rate as usize];
+            let (diff_a, diff_b) = if rs == 0 {
+                (pwr_a as i8 - pwr_ref_cck[0] as i8,
+                 pwr_b as i8 - pwr_ref_cck[1] as i8)
+            } else {
+                (pwr_a as i8 - pwr_ref_ofdm[0] as i8,
+                 pwr_b as i8 - pwr_ref_ofdm[1] as i8)
+            };
+            diff_idx[(rate % 4) as usize] = diff_a.min(diff_b);
+            if rate % 4 == 3 {
+                set_tx_power_diff(h, rate - 3, &diff_idx);
+            }
+        }
+    }
+}

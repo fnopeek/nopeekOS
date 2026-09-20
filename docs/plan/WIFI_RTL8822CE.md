@@ -488,7 +488,7 @@ zweites Mal anwirft, spart sie die ganze Messung.
 ### Werkzeuge (im Modulverzeichnis)
 
     python3 tools/wasm/wifi_rtl8822ce/check_regs.py   # 462 Konstanten, 0 Abweichungen
-    python3 tools/wasm/wifi_rtl8822ce/seqdiff.py      # 91 Funktionen, Zugriff fuer Zugriff
+    python3 tools/wasm/wifi_rtl8822ce/seqdiff.py      # 107 Funktionen, Zugriff fuer Zugriff
     python3 tools/wasm/wifi_rtl8822ce/txpwrcheck.py   # Sendeleistung host-seitig
     python3 tools/wasm/wifi_rtl8822ce/gen_tables.py   # src/tables.rs aus rtw8822c_table.c
     python3 tools/wasm/wifi_rtl8822ce/gen_pwrseq.py   # src/pwrseq.rs aus rtw8822c.c
@@ -663,11 +663,34 @@ VHT-Basisrate) — das schlägt auf alle sechs Summen durch.
 die PARAMETERtabellen aus `cut_version` und `rfe_option` — beide dort schon
 bekannt, kein Registerzugriff, gleiches Ergebnis.
 
-**4c — `rtw_set_channel`.** `rtw8822c_set_channel_bb` (157 Zeilen, AGC,
-CCA-Maske, RX-Filter) · `rtw_set_channel_mac` · `rtw8822c_set_channel_rf` ·
-`toggle_igi` · `rtw_coex_switchband_notify` · `rtw_phy_set_tx_power_level`.
-**Gate 4c: `false_alarm_statistics` zählt CCA-Ereignisse ≠ 0** — das Gate,
-das in 0.10.0 fälschlich schon an Stufe 3 hing.
+**4c — `rtw_set_channel`. GEBAUT in 0.13.0.** `rtw8822c_set_channel_bb`
+(157 Zeilen: AGC, CCA-Maske, RX-Filter, Bandbreite) · `rtw_set_channel_mac` ·
+`rtw8822c_set_channel_rf` (Band, Kanal, RFSI und Bandbreite in EINER Zahl,
+RF 0x18) · `rtw8822c_toggle_igi` · `rtw_phy_set_tx_power_level` mit der
+ganzen Kette darunter: `get_tx_power_index` · `get_2g/5g_tx_power_index` ·
+`get_tx_power_limit` · `dis_dpd_by_rate_diff` · `rate_to_rate_section` ·
+`channel_group` · `rtw8822c_set_tx_power_index` mit
+`set_write_tx_power_ref` und `set_tx_power_diff`.
+
+**Gate 4c:** RF 0x18 trägt auf beiden Pfaden den gesetzten Kanal und die
+Bandbreite · und **`false_alarm_statistics` zählt CCA-Ereignisse ≠ 0** — das
+Gate, das seit 0.10.0 auf seine Stufe gewartet hat. Zählt der Chip dazu
+Pakete mit gültiger Prüfsumme, ist das fremder Funkverkehr auf Kanal 1, und
+der Empfänger hört nicht nur, er versteht.
+
+**Zwei benannte Abweichungen.** `rtw_get_channel_params` liest in Linux eine
+`cfg80211_chan_def`; die gibt es ohne obere Hälfte nicht. Für 20 MHz ist ihr
+Ergebnis genau `center = primary = Kanal`, und das wird eingesetzt — die
+Rechnung für 40 und 80 MHz kommt mit der Stufe, die eine Bandbreite wählt.
+Und `rtw_coex_switchband_notify` gehört zur laufenden Koexistenz
+(`rtw_coex_run_coex` mit `COEX_RSN_2GSWITCHBAND`) und braucht den
+Verkehrszustand, den erst eine Verbindung hat.
+
+**Ein Fehler, den das Lesen gefangen hat:** ich hatte
+`rtw8822c_set_write_tx_power_ref` geschrieben, bevor ich sie gelesen hatte —
+und sie sieht anders aus, als sie aussehen „müsste": zwei Bezugswerte je Pfad
+in vier festen Registern (`0x18a0`/`0x41a0`, `0x18e8`/`0x41e8`), und vor
+JEDEM Schreibzugriff wird `0x1c90` Bit 15 gelöscht. Ersetzt durch die echte.
 
 ### Danach
 

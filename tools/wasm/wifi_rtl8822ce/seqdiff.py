@@ -139,6 +139,21 @@ HEX_SKIP = {
         "rechnen -- also genau die Hexzahlen, die hier fehlen.",
     "rtw_phy_init_tx_power_limit": "max_power_index statt chip->max_power_index.",
     "rtw_phy_set_tx_power_limit": "clamp gegen MAX_POWER_INDEX als Konstante.",
+    "rtw8822c_set_channel_rf":
+        "die vier LUT-Schreibzugriffe stehen in Linux fuer jeden Pfad "
+        "ausgeschrieben, bei uns in einer Schleife -- gleiche Folge, "
+        "weniger Literale.",
+    "rtw8822c_set_tx_power_index": "DESC_RATE11M/MCS7 als lokale Konstante.",
+    "rtw_set_channel":
+        "unsere Fassung ist der Wirt um die Stufe herum und meldet "
+        "unterwegs Leistungsindizes und RF 0x18.",
+    "rtw_phy_rate_to_rate_section": "Bereichsmuster statt DESC_RATE*-Namen.",
+    "rtw_get_channel_group":
+        "die Zuordnung ist erzeugt (tables::CHANNEL_GROUP); im Code bleibt "
+        "der rechnende Fall, den der Erzeuger namentlich meldet.",
+    "rtw_phy_get_dis_dpd_by_rate_diff":
+        "das RTW_DPD_RATE_CHECK-Makro baut die DESC_RATE*-Namen zusammen; "
+        "bei uns stehen die Ratenwerte als Zahl.",
 }
 
 def discover():
@@ -215,6 +230,9 @@ def rs_body(path, sig):
 ALIAS = {
     "addrs[i]": "DACK_ADDRS[i]",
     "bd_idx": "idx",
+    "txref_cck[path]": "TXREF_CCK[path]",
+    "txref_ofdm[path]": "TXREF_OFDM[path]",
+    "offset_txagc+rate_idx": "OFFSET_TXAGC+rate_idx",
     "sipi_addr[rf_path]": "RF_SIPI_ADDR[rf_path]",
     "edcca_th[EDCCA_TH_L2H_IDX].hw_reg.addr": "addr",
     "edcca_th[EDCCA_TH_H2L_IDX].hw_reg.addr": "addr",

@@ -808,3 +808,95 @@ pub const BIT_PI_IGNORE_GNT_BT: u32 = 1 << 3; // reg.h:932
 pub const BIT_NOMASK_TXBT_ENABLE: u32 = 1 << 3; // reg.h:933
 pub const REG_IGN_GNTBT4: u32 = 0x4160; // reg.h:940
 pub const COEX_WLINK_5G: u8 = 0x3; // coex.h:175
+
+// ════════════════════════════════════════════════════════════════
+// Stufe 4c: rtw_set_channel
+// ════════════════════════════════════════════════════════════════
+
+// ── rtw8822c_set_channel_bb ──────────────────────────────────────
+pub const REG_TXDFIR0: u32 = 0x0808; // rtw8822c.h:188
+pub const REG_DFIRBW: u32 = 0x0810; // rtw8822c.h:189
+pub const REG_SBD: u32 = 0x088C; // rtw8822c.h:198
+pub const BITS_SUBTUNE: u32 = 0xf000; // rtw8822c.h:199
+pub const REG_TXBWCTL: u32 = 0x09B0; // rtw8822c.h:202
+pub const REG_TXCLK: u32 = 0x09B4; // rtw8822c.h:203
+pub const REG_SCOTRK: u32 = 0x0C30; // rtw8822c.h:205
+pub const REG_PT_CHSMO: u32 = 0x0CBC; // rtw8822c.h:209
+pub const BIT_PT_OPT: u32 = 1 << 21; // rtw8822c.h:210
+pub const REG_RXAGCCTL0: u32 = 0x18AC; // rtw8822c.h:226
+pub const BITS_RXAGC_CCK: u32 = 0xf000; // rtw8822c.h:227
+pub const BITS_RXAGC_OFDM: u32 = 0x01f0; // rtw8822c.h:228
+pub const REG_CCKSB: u32 = 0x1A00; // rtw8822c.h:234
+pub const REG_BGCTRL: u32 = 0x1A14; // rtw8822c.h:237
+pub const BITS_RX_IQ_WEIGHT: u32 = 0x300; // rtw8822c.h:238
+pub const REG_TXF0: u32 = 0x1A20; // rtw8822c.h:239
+pub const REG_TXF1: u32 = 0x1A24; // rtw8822c.h:240
+pub const REG_TXF2: u32 = 0x1A28; // rtw8822c.h:241
+pub const REG_CCKTXONLY: u32 = 0x1A80; // rtw8822c.h:246
+pub const BIT_BB_CCK_CHECK_EN: u32 = 1 << 18; // rtw8822c.h:247
+pub const REG_TXF3: u32 = 0x1A98; // rtw8822c.h:248
+pub const REG_TXF4: u32 = 0x1A9C; // rtw8822c.h:249
+pub const REG_TXF5: u32 = 0x1AA0; // rtw8822c.h:250
+pub const REG_TXF6: u32 = 0x1AAC; // rtw8822c.h:251
+pub const REG_TXF7: u32 = 0x1AB0; // rtw8822c.h:252
+pub const REG_CCK_SOURCE: u32 = 0x1ABC; // rtw8822c.h:253
+pub const BIT_NBI_EN: u32 = 1 << 30; // rtw8822c.h:254
+pub const REG_CCAMSK: u32 = 0x1C80; // rtw8822c.h:315
+pub const REG_RXAGCCTL: u32 = 0x41AC; // rtw8822c.h:358
+pub const REG_CCK_CHECK: u32 = 0x0454; // reg.h:408
+pub const BIT_CHECK_CCK_EN: u8 = 1 << 7; // reg.h:409
+
+// ── rtw8822c_rstb_3wire / set_channel_rf ─────────────────────────
+pub const REG_ANAPAR_A: u32 = 0x1830; // rtw8822c.h:220
+pub const BIT_ANAPAR_UPDATE: u32 = 1 << 29; // rtw8822c.h:221
+pub const REG_ANAPAR_B: u32 = 0x4130; // rtw8822c.h:354
+pub const REG_RSTB: u32 = 0x1C90; // rtw8822c.h:316
+pub const BIT_RSTB_3WIRE: u32 = 1 << 8; // rtw8822c.h:317
+pub const RF_CFGCH: u32 = 0x18; // reg.h:961
+pub const RF_LUTWA: u32 = 0x33; // reg.h:971
+pub const RF_LUTWD0: u32 = 0x3F; // reg.h:973
+pub const RF_LUTWE2: u32 = 0xEE; // reg.h:997
+
+// ── rtw_set_channel_mac ──────────────────────────────────────────
+pub const REG_DATA_SC: u32 = 0x0483; // reg.h:419
+pub const REG_WMAC_TRXPTCL_CTL: u32 = 0x0668; // reg.h:547
+pub const BIT_RFMOD: u32 = 0x180; // reg.h:548  GENMASK(8, 7)
+pub const BIT_RFMOD_80M: u32 = 1 << 8; // reg.h:549
+pub const BIT_RFMOD_40M: u32 = 1 << 7; // reg.h:550
+pub const MAC_CLK_HW_DEF_80M: u32 = 0; // reg.h:269
+pub const BIT_SHIFT_MAC_CLK_SEL: u32 = 20; // reg.h:268
+
+// ── Unterkanallage (main.h:106-112) ──────────────────────────────
+pub const RTW_SC_DONT_CARE: u8 = 0; // main.h:106
+pub const RTW_SC_20_UPPER: u8 = 1; // main.h:107
+pub const RTW_SC_20_LOWER: u8 = 2; // main.h:108
+pub const RTW_SC_20_UPMOST: u8 = 3; // main.h:109
+pub const RTW_SC_20_LOWEST: u8 = 4; // main.h:110
+pub const RTW_SC_40_UPPER: u8 = 9; // main.h:111
+pub const RTW_SC_40_LOWER: u8 = 10; // main.h:112
+
+pub const MASKBYTE0: u32 = 0xff; // phy.h:172
+pub const MASKHWORD: u32 = 0xffff0000; // phy.h:176
+pub const MASKDWORD: u32 = 0xffffffff; // phy.h:178
+
+// ── DPD-Abzug je Rate (reg.h:659-668) ────────────────────────────
+pub const DIS_DPD_RATE6M: u16 = 1 << 0; // reg.h:659
+pub const DIS_DPD_RATE9M: u16 = 1 << 1; // reg.h:660
+pub const DIS_DPD_RATEMCS0: u16 = 1 << 2; // reg.h:661
+pub const DIS_DPD_RATEMCS1: u16 = 1 << 3; // reg.h:662
+pub const DIS_DPD_RATEMCS8: u16 = 1 << 4; // reg.h:663
+pub const DIS_DPD_RATEMCS9: u16 = 1 << 5; // reg.h:664
+pub const DIS_DPD_RATEVHT1SS_MCS0: u16 = 1 << 6; // reg.h:665
+pub const DIS_DPD_RATEVHT1SS_MCS1: u16 = 1 << 7; // reg.h:666
+pub const DIS_DPD_RATEVHT2SS_MCS0: u16 = 1 << 8; // reg.h:667
+pub const DIS_DPD_RATEVHT2SS_MCS1: u16 = 1 << 9; // reg.h:668
+
+/// rtw8822c.c:5352 `.txgi_factor = 2` · :5385 `.en_dis_dpd = true`
+/// · :5386 `.dpd_ratemask = DIS_DPD_RATEALL`
+pub const TXGI_FACTOR: i16 = 2;
+pub const EN_DIS_DPD: bool = true;
+pub const DPD_RATEMASK: u16 = 0x3ff; // = DIS_DPD_RATEALL
+pub const BIT_SHIFT_TXSC_40M: u32 = 4; // reg.h:260
+pub const BIT_MASK_TXSC_40M: u8 = 0xf; // reg.h:261
+pub const BIT_SHIFT_TXSC_20M: u32 = 0; // reg.h:264
+pub const BIT_MASK_TXSC_20M: u8 = 0xf; // reg.h:265

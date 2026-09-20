@@ -977,3 +977,51 @@ pub fn mac_init(h: i32, cut_version: u8) -> Result<Fifo, MacErr> {
 
     Ok(f)
 }
+
+/// mac.c:1029-1076 `rtw_set_channel_mac`, 3081-Zweig.
+///
+/// Die MAC-Haelfte des Kanalwechsels: Unterkanallage, Bandbreite im
+/// Sendeprotokoll, MAC-Takt und die CCK-Pruefung, die auf 5 GHz AN ist —
+/// dort darf gar keine CCK-Rate ankommen.
+pub fn set_channel_mac(h: i32, channel: u8, bw: usize, primary_ch_idx: u8) {
+    let txsc20 = primary_ch_idx;
+    let mut txsc40 = 0u8;
+    if bw == 2 {
+        // RTW_CHANNEL_WIDTH_80
+        txsc40 = if txsc20 == RTW_SC_20_UPPER || txsc20 == RTW_SC_20_UPMOST {
+            RTW_SC_40_UPPER
+        } else {
+            RTW_SC_40_LOWER
+        };
+    }
+    // reg.h:260-267 `BIT_TXSC_20M(x)` und `BIT_TXSC_40M(x)`
+    host::w8(h, REG_DATA_SC,
+             ((txsc20 & BIT_MASK_TXSC_20M) << BIT_SHIFT_TXSC_20M)
+             | ((txsc40 & BIT_MASK_TXSC_40M) << BIT_SHIFT_TXSC_40M));
+
+    let mut value32 = host::r32(h, REG_WMAC_TRXPTCL_CTL) & !BIT_RFMOD;
+    match bw {
+        2 => value32 |= BIT_RFMOD_80M,
+        1 => value32 |= BIT_RFMOD_40M,
+        // RTW_CHANNEL_WIDTH_20 und Linux' `default:` — nichts dazu.
+        _ => {}
+    }
+    host::w32(h, REG_WMAC_TRXPTCL_CTL, value32);
+
+    if WCPU_8051 {
+        return;
+    }
+
+    let mut value32 = host::r32(h, REG_AFE_CTRL1) & !BIT_MAC_CLK_SEL;
+    value32 |= MAC_CLK_HW_DEF_80M << BIT_SHIFT_MAC_CLK_SEL;
+    host::w32(h, REG_AFE_CTRL1, value32);
+
+    host::w8(h, REG_USTIME_TSF, MAC_CLK_SPEED);
+    host::w8(h, REG_USTIME_EDCA, MAC_CLK_SPEED);
+
+    let mut value8 = host::r8(h, REG_CCK_CHECK) & !BIT_CHECK_CCK_EN;
+    if channel >= 36 && channel <= 177 {
+        value8 |= BIT_CHECK_CCK_EN;
+    }
+    host::w8(h, REG_CCK_CHECK, value8);
+}

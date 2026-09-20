@@ -15607,6 +15607,32 @@ pub static CHANNEL_IDX_5G: [u8; 49] = [
     165, 167, 169, 171, 173, 175, 177,
 ];
 
+/// phy.c:1872-1960 `rtw_get_channel_group` — Kanal auf Leistungsgruppe.
+/// Index ist die Kanalnummer; 0xff heisst „kein Eintrag" (Linux warnt dort
+/// und faellt auf Gruppe 0).
+///
+/// **Kanal 2 rechnet** — CCK gibt 0, alles andere 1 — und steht deshalb
+/// hier mit dem NICHT-CCK-Wert; den Sonderfall macht `txpower.rs`.
+pub static CHANNEL_GROUP: [u8; 178] = [
+    255, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 0, 255, 0, 255, 0, 255, 0, 255, 1, 255, 1, 255,
+    1, 255, 1, 255, 2, 255, 2, 255, 2, 255, 2, 255, 3, 255, 3, 255,
+    3, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 4, 255, 4, 255, 4, 255, 4, 255, 5, 255, 5, 255,
+    5, 255, 5, 255, 6, 255, 6, 255, 6, 255, 6, 255, 7, 255, 7, 255,
+    7, 255, 7, 255, 8, 255, 8, 255, 8, 255, 8, 255, 9, 255, 9, 255,
+    9, 255, 255, 255, 255, 10, 255, 10, 255, 10, 255, 10, 255, 11, 255, 11,
+    255, 11, 255, 255, 255, 12, 255, 12, 255, 12, 255, 12, 255, 13, 255, 13,
+    255, 13,
+];
+
+/// Die rechnenden Faelle: (Kanal, Gruppe fuer CCK, sonst)
+pub static CHANNEL_GROUP_CCK: [(u8, u8, u8); 1] = [
+    (14, 5, 4),
+];
+
 /// `rtw_chip_board_info_setup` fuer rfe_option 1, vom Erzeuger
 /// NACHGERECHNET. Der abgeleitete Zustand ist 25 KiB gross — einzeln
 /// vergleichen geht nicht, eine Summe ueber alle Zellen schon, und die
