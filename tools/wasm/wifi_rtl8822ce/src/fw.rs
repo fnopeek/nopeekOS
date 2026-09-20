@@ -204,9 +204,22 @@ pub fn write_data_rsvd_page(
 /// Der Zustand zwischen zwei Kommandos: welches Postfach als naechstes
 /// drankommt und welche Folgenummer ein PAKET traegt.
 #[derive(Default, Clone, Copy)]
+/// `struct rtw_dev.h2c` (main.h) — **EINER fuer das ganze Geraet.**
+///
+/// Bis 0.17.0 legte jede Stufe einen eigenen an. Damit fing Stufe 5d
+/// wieder bei Fach 0 an, obwohl 5c es zuletzt beschrieben hatte, und
+/// `seq` lief mehrfach von null los. In Linux gibt es genau ein
+/// `rtwdev->h2c`, und die Reihenfolge der Faecher ist der ganze Sinn:
+/// der Treiber reicht sie im Kreis weiter, damit die Firmware Zeit hat,
+/// das vorige zu leeren.
 pub struct H2cState {
     pub last_box_num: u8,
     pub seq: u8,
+}
+
+/// Die vier Fachfahnen, wie der Chip sie gerade meldet.
+pub fn hmetfr(h: i32) -> u8 {
+    host::r8(h, REG_HMETFR)
 }
 
 /// Feld an seine Schiebestelle, im Wort `word` des H2C-Puffers.
@@ -241,13 +254,22 @@ pub fn send_h2c_command(h: i32, st: &mut H2cState, pkt: &[u8; H2C_PKT_SIZE]) -> 
 
     let start = host::now_us();
     loop {
-        if (host::r8(h, REG_HMETFR) >> box_num) & 0x1 == 0 {
+        let flags = host::r8(h, REG_HMETFR);
+        if (flags >> box_num) & 0x1 == 0 {
             break;
         }
         if host::now_us() - start >= 3000 {
-            host::print("[rtl8822ce] failed to send h2c command\n");
+            // Linux sagt nur „failed to send h2c command". Welches Fach und
+            // welche Fahnen — das ist der Unterschied zwischen einer
+            // Meldung und einer Diagnose.
+            host::print("[rtl8822ce] failed to send h2c command (Fach ");
+            host::print_dec(box_num as u32);
+            host::print(", HMETFR 0x");
+            host::print_hex8(flags);
+            host::print(")\n");
             return false;
         }
+        host::delay_us(100);
     }
 
     // `h2c_cmd->msg` sind die Bytes 0..4, `msg_ext` die Bytes 4..8 —
