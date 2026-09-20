@@ -505,7 +505,7 @@ zweites Mal anwirft, spart sie die ganze Messung.
     python3 tools/wasm/wifi_rtl8822ce/gen_pwrseq.py   # src/pwrseq.rs aus rtw8822c.c
     python3 tools/linux-coverage.py --chip rtl8822ce   # 265 / 940 (war 89)
 
-**Abdeckung nach Stufe 5d: 374 von 940 rtw88-Funktionen** (vor dieser Runde
+**Abdeckung nach Stufe 5e: 389 von 940 rtw88-Funktionen** (vor dieser Runde
 89). `rtw8822c.c` 68/171 · `phy.c` 59/97 · `mac.c` 39/49 · `pci.c` 30/81 ·
 `coex.c` 27/111 · `main.c` 18/84 · `tx.c` 15/31 · `efuse.c` 5/5 · `rx.c` 3/8.
 Auf 0 stehen nur noch `mac80211.c` (die obere Hälfte, die `wifid` ersetzt),
@@ -917,9 +917,45 @@ Zwei Nebenbefunde aus demselben Lauf:
 ausgewertet (`rtw_fw_c2h_cmd_handle` fehlt ganz) · `r.rp` der Sendequeues
 steht weiter still (`rtw_pci_tx_isr`).
 
+### Stufe 5e — Auth und Assoc (0.18.0)
+
+Der Suchlauf gibt jetzt sein Ziel heraus: das **stärkste Netz auf 2,4 GHz**
+mit BSSID, Kanal, Fähigkeitsfeld und dem rohen RSN-Element. Danach in
+Linux' Reihenfolge: Kanal des Ziels setzen → `rtw_chip_prepare_tx` (die
+Kalibrierung aus 5d, denn `rtw_set_channel` hat `need_rfk` gesetzt) →
+`PORT_SET_BSSID` → Auth → Assoc → bei Erfolg `RTW_NET_MGD_LINKED` mit der
+AID in den Port und `rtw_fw_media_status_report`.
+
+**Kalibriert wird auf dem ZIELkanal, nicht auf dem des Suchlaufs.** Das ist
+der Grund, warum `rtw_chip_prepare_tx` in Linux hinter dem Kanalwechsel
+steht und nicht davor.
+
+**Ein Antrag wählt, ein Beacon zählt auf.** Das RSN-Element des AP nennt
+alle Verfahren, die er kann; unseres muss genau EINES nennen, sonst lehnt
+er mit Status 43 ab. Gewählt wird CCMP als Paarschlüssel und PSK als
+Authentifizierung; die Gruppenchiffre wird übernommen, denn die bestimmt
+der AP allein.
+
+Dazu `rtw_pci_tx_isr` (der Lesezeiger `r.rp` stand seit 5b still — bei drei
+Rahmen folgenlos, bei einem laufenden Sender nach 127), `rtw_fw_media_status_report`
+und der C2H-Verteiler: **jede Nachricht der Firmware wird jetzt mit ihrem
+NAMEN gemeldet** statt gezählt.
+
+**Namentlich nicht gebaut, und jedes ist ein eigener Posten:**
+`rtw_update_sta_info` + `rtw_fw_send_ra_info` (die Ratenanpassung braucht
+die HT/VHT-Fähigkeiten des Gegenübers aus der Anmeldeantwort — ein
+Elementeparser der oberen Hälfte) · `rtw_fw_download_rsvd_page` +
+`rtw_send_rsvd_page_h2c` (der WEG steht seit Stufe 2, der INHALT ist obere
+Hälfte) · `rtw_fw_default_port` · `rtw_coex_media_status_notify` ·
+`rtw_bf_assoc` · `rtw_set_ampdu_factor` · `rtw_fw_beacon_filter_config`.
+
+**Das Tor steht bewusst VOR dem Vierwegehandschlag.** Eine Anmeldung ohne
+ihn endet nach wenigen Sekunden in einem Deauth — das ist erwartet und kein
+Fehler. Ab da ist es `wifid`.
+
 ### ▶ Danach — hier weitermachen
 
-**5e — Auth und Assoc.** `rtw_pci_tx_isr` für den Sendezeiger,
+**5f — die Verbindung halten.** `rtw_update_sta_info` + `rtw_fw_send_ra_info`,
 `rtw_get_channel_params` fürs Kanalhüpfen, die Elementeauswertung des
 Beacons, und `rtw_rx_addr_match`. Der `netdev`-Anschluss
 (`npk_netdev_register`, `npk_submit_rx`) kommt ans ENDE dieser Stufe, nicht

@@ -1110,3 +1110,17 @@ pub const MASKBYTE1: u32 = 0xff00; // phy.h:154
 /// ist 0, also BIT(0). Der Name steht in einem anderen Baum (cfg80211),
 /// deshalb hier ausgerechnet statt erzeugt.
 pub const RTW_BAND_2G_MASK: u32 = 1 << 0;
+
+// ── Stufe 5e: Verbinden ─────────────────────────────────────────
+pub const H2C_CMD_MEDIA_STATUS_RPT: u32 = 0x01; // fw.h:484
+pub const C2H_CCX_TX_RPT: u32 = 0x03; // fw.h:51
+pub const C2H_BT_INFO: u32 = 0x09; // fw.h:51
+pub const C2H_BT_MP_INFO: u32 = 0x0b; // fw.h:51
+pub const C2H_BT_HID_INFO: u32 = 0x45; // fw.h:51
+pub const C2H_RA_RPT: u32 = 0x0c; // fw.h:51
+pub const C2H_WLAN_INFO: u32 = 0x27; // fw.h:51
+pub const C2H_WLAN_RFON: u32 = 0x32; // fw.h:51
+pub const C2H_BCN_FILTER_NOTIFY: u32 = 0x36; // fw.h:51
+pub const C2H_ADAPTIVITY: u32 = 0x37; // fw.h:51
+pub const C2H_SCAN_RESULT: u32 = 0x38; // fw.h:51
+pub const C2H_HALMAC: u32 = 0xff; // fw.h:51

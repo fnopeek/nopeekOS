@@ -418,3 +418,68 @@ pub fn do_iqk(h: i32, trx: &mut Trx, stage: i32, st: &mut H2cState,
     h2c_set(&mut pkt, 2, 1 << 1, segment_iqk as u32); // IQK_SET_SEGMENT_IQK
     send_h2c_packet(h, trx, stage, st, &mut pkt)
 }
+
+/// fw.c:1123-1132 `rtw_fw_media_status_report` — Kommando 0x01, Postfach.
+///
+/// Sagt der Firmware, dass diese `mac_id` verbunden ist. Sie richtet
+/// daraufhin ihre eigene Buchfuehrung ein (Ratenanpassung, Stromsparen).
+pub fn media_status_report(h: i32, st: &mut H2cState, mac_id: u8,
+                           connect: bool) -> bool {
+    let mut pkt = [0u8; H2C_PKT_SIZE];
+    set_cmd_id_class(&mut pkt, H2C_CMD_MEDIA_STATUS_RPT);
+    h2c_set(&mut pkt, 0, 1 << 8, connect as u32); // SET_OP_MODE
+    h2c_set(&mut pkt, 0, 0x00ff_0000, mac_id as u32); // SET_MACID
+    send_h2c_command(h, st, &pkt)
+}
+
+/// fw.h:73-77 `struct rtw_c2h_cmd` — Kennung, Folgenummer, Nutzlast.
+pub struct C2hCmd<'a> {
+    pub id: u8,
+    pub seq: u8,
+    pub payload: &'a [u8],
+}
+
+/// fw.c:334-380 `rtw_fw_c2h_cmd_handle`, der Verteiler.
+///
+/// **Was hinter den Kennungen liegt, ist noch nicht gebaut** — und das
+/// steht hier namentlich statt als stiller `_ =>`. Jede dieser Zeilen ist
+/// ein eigener Posten: `rtw_tx_report_handle` braucht die Sendequittungen,
+/// `rtw_coex_bt_info_notify` die laufende Koexistenz,
+/// `rtw_fw_ra_report_handle` die Ratenanpassung. Gemeldet wird jede
+/// Nachricht trotzdem, denn eine Firmware, die etwas sagt, sagt es aus
+/// einem Grund.
+pub fn c2h_name(id: u8) -> &'static str {
+    // Eine Tabelle statt `match`: die Kennungen stehen in `regs.rs` teils
+    // als `u8` (weil jemand sie in ein Byteregister schreibt) und teils
+    // als `u32`, und ein Muster darf keine Umwandlung tragen.
+    const NAMES: &[(u32, &str)] = &[
+        (C2H_CCX_TX_RPT, "CCX_TX_RPT (Sendequittung)"),
+        (C2H_BT_INFO, "BT_INFO"),
+        (C2H_BT_MP_INFO, "BT_MP_INFO"),
+        (C2H_BT_HID_INFO, "BT_HID_INFO"),
+        (C2H_RA_RPT, "RA_RPT (Ratenanpassung)"),
+        (C2H_HW_FEATURE_REPORT as u32, "HW_FEATURE_REPORT"),
+        (C2H_WLAN_INFO, "WLAN_INFO"),
+        (C2H_WLAN_RFON, "WLAN_RFON"),
+        (C2H_BCN_FILTER_NOTIFY, "BCN_FILTER_NOTIFY"),
+        (C2H_ADAPTIVITY, "ADAPTIVITY"),
+        (C2H_SCAN_RESULT, "SCAN_RESULT"),
+        (C2H_HW_FEATURE_DUMP as u32, "HW_FEATURE_DUMP"),
+        (C2H_HALMAC, "HALMAC"),
+    ];
+    for &(k, v) in NAMES {
+        if k == id as u32 {
+            return v;
+        }
+    }
+    "unbekannt"
+}
+
+/// Den C2H-Kopf aus einem Empfangspuffer ziehen. `pkt_offset` ist in Linux
+/// derselbe Versatz wie beim Funkrahmen: Deskriptor + drv_info + shift.
+pub fn c2h_parse(frame: &[u8]) -> Option<C2hCmd<'_>> {
+    if frame.len() < 2 {
+        return None;
+    }
+    Some(C2hCmd { id: frame[0], seq: frame[1], payload: &frame[2..] })
+}
