@@ -143,6 +143,111 @@ def coex_tables():
     return out
 
 
+
+PHY_SRC = os.path.expanduser(
+    "~/.cache/nopeekos/linux-src/linux-6.18.26/drivers/net/wireless/"
+    "realtek/rtw88/phy.c")
+MAIN_H = os.path.expanduser(
+    "~/.cache/nopeekos/linux-src/linux-6.18.26/drivers/net/wireless/"
+    "realtek/rtw88/main.h")
+
+
+def desc_rates():
+    """`enum rtw_rate_index` aus main.h — DESC_RATE1M und Freunde."""
+    h = open(MAIN_H, errors="ignore").read()
+    # Die DESC_RATE* stehen in `enum rtw_rate_section`-Naehe, nicht in
+    # `rtw_rate_index` — gesucht wird der Block, der DESC_RATE1M enthaelt.
+    m = None
+    for cand in re.finditer(r"enum \w+ \{(.*?)\n\};", h, re.S):
+        if "DESC_RATE1M" in cand.group(1):
+            m = cand
+            break
+    if not m:
+        sys.exit("der Aufzaehlungsblock mit DESC_RATE1M wurde nicht gefunden")
+    out, nxt = {}, 0
+    for line in m.group(1).split("\n"):
+        e = re.match(r"\s*(DESC_RATE[A-Z0-9_]*)\s*(?:=\s*(0x[0-9a-fA-F]+|\d+))?\s*,",
+                     line)
+        if not e:
+            continue
+        if e.group(2):
+            nxt = int(e.group(2), 0)
+        out[e.group(1)] = nxt
+        nxt += 1
+    return out
+
+
+def txpwr_by_rate_map():
+    """phy.c `rtw_phy_get_rate_values_of_txpwr_by_rate`.
+
+    304 Zeilen `switch`, die NICHTS tun als eine Registeradresse auf eine
+    Gruppe von Raten abzubilden — Daten in Schaltergestalt. Also erzeugt.
+
+    Zwei Faelle bleiben ausdruecklich draussen und stehen als CODE in
+    phy.rs, weil sie rechnen statt zuzuordnen: **0xE08** nimmt
+    `bcd_to_dec_pwr_by_rate(val, 1)` statt `tbl_to_dec_pwr_by_rate`, und
+    **0x86C** haengt an der MASKE (0xffffff00 gibt drei Raten ab Index 1,
+    0x000000ff eine einzige aus BCD). Sie werden hier namentlich gemeldet,
+    nicht stillschweigend uebergangen."""
+    rates = desc_rates()
+    src = open(PHY_SRC, errors="ignore").read()
+    m = re.search(r"rtw_phy_get_rate_values_of_txpwr_by_rate\(struct"
+                  r".*?\n\{(.*?)\n\}\n", src, re.S)
+    if not m:
+        sys.exit("rtw_phy_get_rate_values_of_txpwr_by_rate nicht gefunden")
+
+    entries = []          # (adressen, raten)
+    special = []          # adressen, die rechnen statt zuzuordnen
+    pending = []          # `case 0x...:` ohne Rumpf -> Durchfall
+    cur = {}              # rate[i] = NAME des laufenden Rumpfes
+    calc = False          # rechnet dieser Rumpf?
+
+    for raw in m.group(1).split("\n"):
+        line = raw.strip()
+        c = re.match(r"case (0x[0-9A-Fa-f]+):$", line)
+        if c:
+            pending.append(int(c.group(1), 16))
+            continue
+        r = re.match(r"rate\[(\d)\] = (DESC_RATE[A-Z0-9_]*);$", line)
+        if r:
+            name = r.group(2)
+            if name not in rates:
+                sys.exit(f"unbekannte Rate {name}")
+            cur[int(r.group(1))] = rates[name]
+            continue
+        if "bcd_to_dec_pwr_by_rate" in line or line.startswith("if (mask =="):
+            calc = True
+            continue
+        if line == "break;":
+            if pending:
+                if calc or not cur:
+                    special.extend(pending)
+                else:
+                    entries.append((pending, [cur[i] for i in sorted(cur)]))
+            pending, cur, calc = [], {}, False
+            continue
+
+    n_addr = sum(len(a) for a, _ in entries)
+    print(f"  {'txpwr_by_rate (phy.c switch)':30s} {n_addr:6d} Adressen "
+          f"in {len(entries)} Gruppen, {len(special)} rechnende Sonderfaelle "
+          f"({', '.join(hex(a) for a in special)})")
+
+    out = ["""/// phy.c `rtw_phy_get_rate_values_of_txpwr_by_rate` — der Teil, der
+/// ZUORDNET. Eine Registeradresse aus `bb_pg` nennt eine Gruppe von Raten;
+/// die Werte selbst kommen byteweise aus dem Tabelleneintrag.
+///
+/// **Nicht enthalten sind die zwei Faelle, die RECHNEN** (0xE08 mit
+/// `bcd_to_dec_pwr_by_rate`, 0x86C je nach Maske). Die stehen als Code in
+/// `phy.rs` — hier waeren sie eine Zuordnung, die keine ist."""]
+    out.append(f"pub static TXPWR_BY_RATE_MAP: [(u32, &[u8]); {n_addr}] = [")
+    for addrs, rs in entries:
+        lit = ", ".join(str(v) for v in rs)
+        for a in addrs:
+            out.append(f"    (0x{a:03X}, &[{lit}]),")
+    out.append("];\n")
+    return out
+
+
 def main():
     src = open(SRC, errors="ignore").read()
     out = ['''//! ERZEUGT von gen_tables.py aus Linux 6.18.26 rtw8822c_table.c — nicht
@@ -184,6 +289,7 @@ pub const EXPECTED_WRITES_CUT_D_RFE1: [(&str, u32); %d] = [""" % len(expected))
     out.append("];\n")
 
     out += coex_tables()
+    out += txpwr_by_rate_map()
 
     open(OUT, "w").write("\n".join(out))
     print(f"  {'SUMME':30s} {total:6d} Woerter "
