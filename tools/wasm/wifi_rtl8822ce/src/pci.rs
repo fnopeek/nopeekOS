@@ -832,3 +832,30 @@ pub fn tx_wait_consumed(h: i32, trx: &Trx, queue: usize, frist_us: u64)
         }
     }
 }
+
+/// pci.c:915-1021 `rtw_pci_tx_isr`, der Teil, der den LESEzeiger nachzieht.
+///
+/// **Ohne ihn steht `r.rp` still** und `avail_desc` zaehlt den Ring
+/// langsam voll, obwohl der Chip laengst alles abgeholt hat. Bei drei
+/// Rahmen ist das folgenlos, bei einem laufenden Sender nach 127.
+///
+/// Der Rest von Linux' Funktion ist Pufferverwaltung (`skb_dequeue`,
+/// `dma_unmap_single`, `ieee80211_tx_status_irqsafe`) — wir haben feste
+/// Plaetze je Ringindex und keinen Netzstapel, der eine Quittung erwartet.
+/// Gibt zurueck, wie viele Deskriptoren seit dem letzten Mal fertig wurden.
+pub fn tx_isr(h: i32, trx: &mut Trx, queue: usize) -> u32 {
+    let idx_reg = match TXQ[queue].idx {
+        Some(reg) => reg,
+        None => return 0,
+    };
+    let bd_idx = host::r32(h, idx_reg);
+    let cur_rp = (bd_idx >> 16) & TRX_BD_IDX_MASK;
+    let r = &trx.tx[queue];
+    let count = if cur_rp >= r.rp {
+        cur_rp - r.rp
+    } else {
+        r.len - (r.rp - cur_rp)
+    };
+    trx.tx[queue].rp = cur_rp;
+    count
+}

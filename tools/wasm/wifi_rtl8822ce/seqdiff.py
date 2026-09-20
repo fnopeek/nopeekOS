@@ -152,6 +152,7 @@ DEVIATION = {
 # Funktionen, deren Zahlenfolge sich NICHT vergleichen laesst, mit Grund.
 # Die Zugriffsfolge wird trotzdem geprueft.
 HEX_SKIP = {
+    "rtw_fw_media_status_report": "wie rtw_fw_send_general_info.",
     "rtw_fw_scan_notify": "wie rtw_fw_send_general_info.",
     "rtw_fw_inform_rfk_status": "wie rtw_fw_send_general_info.",
     "rtw_fw_do_iqk": "wie rtw_fw_send_general_info.",
@@ -339,6 +340,8 @@ ALIAS = {
     "three_wire[path]": "THREE_WIRE[path]",
     "cfg1_1b00[path]": "CFG1_1B00[path]",
     "cfg2_1b00[path]": "CFG2_1B00[path]",
+    # Stufe 5e
+    "bd_idx_addr": "idx_reg",
 }
 
 # Umbenennungen, die NUR in einer Funktion gelten. Ein globaler Eintrag fuer

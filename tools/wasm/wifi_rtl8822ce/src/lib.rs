@@ -603,10 +603,11 @@ pub extern "C" fn _start() {
     };
 
     // ── Stufe 5c: der Suchlauf ───────────────────────────────────
+    let mut target: Option<Bss> = None;
     let stage5c = match (stage5b, efuse.as_ref(), _txpwr.as_ref()) {
         (true, Some(e), Some(t)) => stage5c_scan(h, &hal, &mut trx, mgmt_buf,
                                                  &mut h2c, e, t, e.addr,
-                                                 fw_feature),
+                                                 fw_feature, &mut target),
         _ => {
             host::print("[rtl8822ce] Stufe 5c: uebersprungen, 5b steht nicht\n");
             false
@@ -618,6 +619,22 @@ pub extern "C" fn _start() {
         (true, Some(e)) => stage5d_calibration(h, &hal, &mut trx, h2c_buf, &mut h2c, e),
         _ => {
             host::print("[rtl8822ce] Stufe 5d: uebersprungen, 5c steht nicht\n");
+            false
+        }
+    };
+
+    // ── Stufe 5e: Auth und Assoc ─────────────────────────────────
+    let stage5e = match (stage5d, efuse.as_ref(), _txpwr.as_ref(),
+                         target.as_ref()) {
+        (true, Some(e), Some(t), Some(b)) =>
+            stage5e_connect(h, &hal, &mut trx, mgmt_buf, &mut h2c, e, t,
+                            e.addr, b),
+        (true, _, _, None) => {
+            host::print("[rtl8822ce] Stufe 5e: uebersprungen, der Suchlauf\n             \x20         hat kein Ziel auf 2,4 GHz gefunden\n");
+            false
+        }
+        _ => {
+            host::print("[rtl8822ce] Stufe 5e: uebersprungen, 5d steht nicht\n");
             false
         }
     };
@@ -675,6 +692,11 @@ pub extern "C" fn _start() {
         "[rtl8822ce] Stufe 5d: GRUEN — DER SENDER IST KALIBRIERT\n"
     } else {
         "[rtl8822ce] Stufe 5d: NEIN — nicht weiterbauen, bevor das steht\n"
+    });
+    host::print(if stage5e {
+        "[rtl8822ce] Stufe 5e: GRUEN — DER AP HAT UNS ANGENOMMEN\n"
+    } else {
+        "[rtl8822ce] Stufe 5e: NEIN — nicht weiterbauen, bevor das steht\n"
     });
 
 
@@ -1686,6 +1708,12 @@ struct Bss {
     best: i8,
     beacons: u16,
     resps: u16,
+    /// Faehigkeitsfeld aus Beacon/Probe Response (802.11 §9.4.1.4).
+    capability: u16,
+    /// Das RSN-Element des AP, roh. Daraus waehlt der Anmeldeantrag
+    /// SEINE Verfahren — ein AP lehnt sonst mit Status 43 ab.
+    rsn: [u8; 64],
+    rsn_len: u8,
 }
 
 const MAX_BSS: usize = 48;
@@ -1746,7 +1774,7 @@ fn switch_channel(h: i32, hal: &Hal, e: &efuse::Efuse, t: &txpower::TxPower,
 fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 h2c: &mut fw::H2cState,
                 e: &efuse::Efuse, t: &txpower::TxPower, mac: [u8; 6],
-                fw_feature: u32) -> bool {
+                fw_feature: u32, target: &mut Option<Bss>) -> bool {
     // 2,4 GHz: die dreizehn Kanaele, die es in Europa gibt. Kanal 14 ist
     // nur in Japan und nur mit DSSS zugelassen — er steht bewusst nicht da.
     const ACTIVE_2G: [u8; 13] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
@@ -1799,6 +1827,7 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     let mut found: [Bss; MAX_BSS] = [Bss {
         bssid: [0; 6], ssid: [0; 32], ssid_len: 0,
         channel: 0, best: -128, beacons: 0, resps: 0,
+        capability: 0, rsn: [0; 64], rsn_len: 0,
     }; MAX_BSS];
     let mut n_found = 0usize;
     let mut probes = 0u32;
@@ -1945,6 +1974,32 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     }
     host::print("\n");
 
+    // Das staerkste Netz auf 2,4 GHz wird das Ziel von Stufe 5e. Nur
+    // 2,4 GHz, weil wir dort senden duerfen — auf 5 GHz haben wir nur
+    // gehorcht, und die Sendeerlaubnis gehoert der oberen Haelfte.
+    *target = found[..n_found].iter()
+        .filter(|b| b.channel <= 14 && b.ssid_len > 0)
+        .max_by_key(|b| b.best)
+        .copied();
+    if let Some(b) = target {
+        host::print("  Ziel fuer Stufe 5e: \"");
+        print_ssid(&b.ssid[..b.ssid_len as usize]);
+        host::print("\" auf K");
+        host::print_dec(b.channel as u32);
+        host::print(" · ");
+        print_dbm(b.best);
+        host::print(" · Faehigkeiten 0x");
+        host::print_hex16(b.capability);
+        host::print(" · RSN ");
+        if b.rsn_len > 0 {
+            host::print_dec(b.rsn_len as u32);
+            host::print(" Bytes");
+        } else {
+            host::print("keins (offen oder WEP)");
+        }
+        host::print("\n");
+    }
+
     let mut ok = true;
     // **Das Gate misst UNS, nicht die Nachbarschaft.** Ob auf einem Kanal
     // jemand funkt, entscheidet nicht der Treiber — ob der Chip den Kanal
@@ -1988,7 +2043,11 @@ fn record_bss(found: &mut [Bss; MAX_BSS], n: &mut usize, f: &[u8], ch: u8,
     e.best = signal;
     e.beacons = is_beacon as u16;
     e.resps = !is_beacon as u16;
-    // 24 Kopf + 12 feste Felder, dann die Elemente. SSID ist Kennung 0.
+    // 24 Kopf + 8 Zeitstempel + 2 Beacon-Intervall, dann das
+    // Faehigkeitsfeld, dann die Elemente.
+    if f.len() >= 36 {
+        e.capability = u16::from_le_bytes([f[34], f[35]]);
+    }
     let mut i = 36;
     while i + 2 <= f.len() {
         let id = f[i];
@@ -1996,11 +2055,18 @@ fn record_bss(found: &mut [Bss; MAX_BSS], n: &mut usize, f: &[u8], ch: u8,
         if i + 2 + len > f.len() {
             break;
         }
-        if id == 0 {
-            let take = len.min(32);
-            e.ssid[..take].copy_from_slice(&f[i + 2..i + 2 + take]);
-            e.ssid_len = take as u8;
-            break;
+        match id {
+            0 => {
+                let take = len.min(32);
+                e.ssid[..take].copy_from_slice(&f[i + 2..i + 2 + take]);
+                e.ssid_len = take as u8;
+            }
+            // 48 = RSN (802.11 §9.4.2.24). Roh behalten, samt Kopf.
+            48 if len + 2 <= 64 => {
+                e.rsn[..len + 2].copy_from_slice(&f[i..i + 2 + len]);
+                e.rsn_len = (len + 2) as u8;
+            }
+            _ => {}
         }
         i += 2 + len;
     }
@@ -2248,6 +2314,346 @@ fn print_signed(v: i32) {
     } else {
         host::print_dec(v as u32);
     }
+}
+
+/// Stufe 5e — Authentifizierung und Anmeldung.
+///
+/// **Die Reihenfolge ist Linux' Reihenfolge**: Kanal des Ziels setzen →
+/// `rtw_chip_prepare_tx` (die Kalibrierung aus 5d, denn `rtw_set_channel`
+/// hat `need_rfk` gesetzt) → `PORT_SET_BSSID` → Auth → Assoc → und bei
+/// Erfolg `net_type = RTW_NET_MGD_LINKED` mit der AID in den Port, dazu
+/// `rtw_fw_media_status_report`.
+///
+/// **Was daneben steht und hier NICHT gebaut ist, namentlich:**
+/// * `rtw_update_sta_info` + `rtw_fw_send_ra_info` — die Ratenanpassung
+///   braucht die HT/VHT-Faehigkeiten des Gegenuebers aus der
+///   Anmeldeantwort. Das ist ein Elementeparser der OBEREN Haelfte, und
+///   ohne ihn waere jede Ratenmaske geraten.
+/// * `rtw_fw_download_rsvd_page` + `rtw_send_rsvd_page_h2c` — PS-Poll,
+///   Null- und QoS-Null-Rahmen in den reservierten Seitenbereich. Der Weg
+///   dahin steht seit Stufe 2 (`download_firmware` schreibt dort), der
+///   INHALT ist obere Haelfte.
+/// * `rtw_fw_default_port`, `rtw_coex_media_status_notify`,
+///   `rtw_bf_assoc`, `rtw_set_ampdu_factor`, `rtw_fw_beacon_filter_config`.
+/// * Der Vierwegehandschlag und der Schluesselspeicher — ab da ist es
+///   `wifid`, und eine Anmeldung ohne ihn endet nach wenigen Sekunden in
+///   einem Deauth. Das Tor dieser Stufe steht DAVOR.
+#[allow(clippy::too_many_arguments)]
+fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
+                   h2c: &mut fw::H2cState, e: &efuse::Efuse,
+                   t: &txpower::TxPower, mac: [u8; 6], bss: &Bss) -> bool {
+    host::print("[rtl8822ce] Stufe 5e: Auth und Assoc mit \"");
+    print_ssid(&bss.ssid[..bss.ssid_len as usize]);
+    host::print("\" auf K");
+    host::print_dec(bss.channel as u32);
+    host::print("\n");
+
+    // `rtw_set_channel` auf den Kanal des Ziels.
+    if !switch_channel(h, hal, e, t, bss.channel) {
+        host::print("  RF 0x18 traegt den Zielkanal NICHT\n");
+        return false;
+    }
+
+    // `rtw_chip_prepare_tx`: `need_rfk` steht, also wird kalibriert — und
+    // zwar auf DIESEM Kanal, nicht auf dem des Suchlaufs.
+    let mut gapk = txgapk::GapkInfo::new();
+    let mut dpkinfo = dpk::DpkInfo::new();
+    dpkinfo.is_dpk_pwr_on = true;
+    let mut bt_iqk_timeout = false;
+    let t0 = host::now_us();
+    rfkcal::power_save(h, hal.rf_path_num, false);
+    rfkcal::do_gapk(h, &mut gapk, hal.rf_path_num, 0, e.power_track_type,
+                    &mut bt_iqk_timeout, h2c);
+    rfkcal::do_iqk(h, trx, mgmt_buf, h2c);
+    let dpk_rpt = dpk::do_dpk(h, &mut dpkinfo, hal.rf_path_num);
+    rfkcal::power_save(h, hal.rf_path_num, true);
+    host::print("  auf K");
+    host::print_dec(bss.channel as u32);
+    host::print(" kalibriert (");
+    host::print_dec(((host::now_us() - t0) / 1000) as u32);
+    host::print(" ms, DPK ");
+    host::print(match dpk_rpt {
+        dpk::DpkRpt::Ran { .. } => "gelaufen",
+        dpk::DpkRpt::Reloaded => "aus dem Zwischenspeicher",
+        dpk::DpkRpt::PwrOff => "aus",
+    });
+    host::print(")\n");
+
+    // `rtw_ops_bss_info_changed`, Zweig `BSS_CHANGED_BSSID`. Ab jetzt
+    // nimmt die Hardware Rahmen dieser Zelle an.
+    let mut vifc = vif::add_interface_station(h, mac);
+    vifc.bssid = bss.bssid;
+    vif::port_config(h, &vifc, PORT_SET_BSSID);
+
+    let mut dm = dm::DmInfo::new();
+    let mut path_div = dm::PathDiv::default();
+    chip::read_cck_gi_bnd(h, &mut dm);
+    static mut RXBUF5: [u8; pci::RTK_PCI_RX_BUF_SIZE as usize] =
+        [0; pci::RTK_PCI_RX_BUF_SIZE as usize];
+    // SAFETY: ein Faden, ein Rufer, der Puffer verlaesst die Funktion nicht.
+    let rxbuf = unsafe { &mut *core::ptr::addr_of_mut!(RXBUF5) };
+
+    let mut frame = [0u8; 256];
+    let mut ok = true;
+
+    // ── Authentifizierung (Open System) ──────────────────────────
+    // Auch WPA2 authentifiziert OFFEN; die Schluessel kommen erst nach
+    // der Anmeldung, im Vierwegehandschlag.
+    let n = build_auth_req(&mut frame, &mac, &bss.bssid);
+    let (auth_ok, auth_status, auth_tries) =
+        exchange(h, hal, trx, mgmt_buf, rxbuf, &mut dm, &mut path_div,
+                 &frame[..n], &mac, bss.channel, 0xb0, |f| {
+            // Auth-Antwort: Algorithmus, Folge 2, Status.
+            if f.len() < 30 {
+                return None;
+            }
+            let seq = u16::from_le_bytes([f[26], f[27]]);
+            let status = u16::from_le_bytes([f[28], f[29]]);
+            if seq == 2 { Some(status) } else { None }
+        });
+    host::print("  Auth: ");
+    report_exchange(auth_ok, auth_status, auth_tries);
+    ok &= gate("der AP authentifiziert uns", auth_ok && auth_status == 0);
+    if !(auth_ok && auth_status == 0) {
+        return false;
+    }
+
+    // ── Anmeldung ────────────────────────────────────────────────
+    let n = build_assoc_req(&mut frame, &mac, bss);
+    host::print("  Anmeldeantrag ");
+    host::print_dec(n as u32);
+    host::print(" Bytes");
+    if bss.rsn_len > 0 {
+        host::print(" (mit RSN: CCMP/PSK)");
+    }
+    host::print("\n");
+    let mut aid = 0u16;
+    let (assoc_ok, assoc_status, assoc_tries) =
+        exchange(h, hal, trx, mgmt_buf, rxbuf, &mut dm, &mut path_div,
+                 &frame[..n], &mac, bss.channel, 0x10, |f| {
+            // Anmeldeantwort: Faehigkeiten, Status, AID.
+            if f.len() < 30 {
+                return None;
+            }
+            Some(u16::from_le_bytes([f[26], f[27]]))
+        });
+    if assoc_ok && assoc_status == 0 {
+        // Die AID steht im SELBEN Rahmen wie der Status, zwei Byte
+        // dahinter. `exchange` traegt nur eine Zahl zurueck, also legt
+        // der Leser sie daneben ab.
+        // SAFETY: einfaedig, ein Schreiber, ein Leser.
+        aid = unsafe { LAST_ASSOC_AID };
+    }
+    host::print("  Assoc: ");
+    report_exchange(assoc_ok, assoc_status, assoc_tries);
+    if assoc_ok && assoc_status == 0 {
+        host::print("  AID ");
+        host::print_dec((aid & 0x3fff) as u32);
+        host::print("\n");
+    }
+    ok &= gate("der AP nimmt uns an (Status 0 und eine AID)",
+               assoc_ok && assoc_status == 0 && (aid & 0x3fff) != 0);
+
+    if assoc_ok && assoc_status == 0 {
+        // `rtw_vif_assoc_changed` + `PORT_SET_NET_TYPE | PORT_SET_AID`
+        vifc.aid = (aid & 0x3fff) as u32;
+        vifc.net_type = RTW_NET_MGD_LINKED;
+        vif::port_config(h, &vifc, PORT_SET_NET_TYPE | PORT_SET_AID);
+        // `rtw_fw_media_status_report`
+        let msr = fw::media_status_report(h, h2c, vifc.mac_id, true);
+        host::print("  Port: net_type MGD_LINKED, AID gesetzt · ");
+        host::print(if msr {
+            "media_status_report raus\n"
+        } else {
+            "media_status_report FEHLGESCHLAGEN\n"
+        });
+        ok &= gate("die Firmware nimmt die Verbindungsmeldung an", msr);
+    }
+
+    ok
+}
+
+/// Die AID der letzten Anmeldeantwort. Sie steht im selben Rahmen wie der
+/// Status, und der Rueckgabeweg von `exchange` traegt nur EINE Zahl.
+static mut LAST_ASSOC_AID: u16 = 0;
+
+/// Einen Verwaltungsrahmen senden und auf die Antwort warten.
+///
+/// Dreimal, mit Abstand: ein einzelner Rahmen kann kollidieren, und ein AP
+/// darf ihn verwerfen. Gibt (Antwort gekommen, Status, Versuche) zurueck.
+#[allow(clippy::too_many_arguments)]
+fn exchange(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
+            rxbuf: &mut [u8], dm: &mut dm::DmInfo,
+            path_div: &mut dm::PathDiv, frame: &[u8], mac: &[u8; 6],
+            channel: u8, want_fc: u8,
+            parse: impl Fn(&[u8]) -> Option<u16>) -> (bool, u16, u32)
+{
+    let queue = tx::RTW_TX_QUEUE_MGMT;
+    for tries in 1..=3u32 {
+        let mut info = tx::pkt_info_update(frame, 0, tx::RTW_BAND_2G);
+        if !pci::tx_write(h, trx, mgmt_buf, queue, &mut info, frame) {
+            return (false, 0, tries);
+        }
+        pci::tx_kick_off_queue(h, trx, queue);
+        let (_done, _us, _hw) = pci::tx_wait_consumed(h, trx, queue, 50_000);
+        // `rtw_pci_tx_isr` — den Lesezeiger nachziehen, sonst zaehlt der
+        // Ring sich ueber mehrere Rahmen voll.
+        pci::tx_isr(h, trx, queue);
+
+        let mut status: Option<u16> = None;
+        let t0 = host::now_us();
+        while host::now_us() - t0 < 300_000 && status.is_none() {
+            let n = pci::rx_poll(h, trx, 64, rxbuf, dm, path_div,
+                                 hal.rf_path_num, 0, channel, |st, pkt| {
+                if st.crc_err || st.is_c2h || status.is_some() {
+                    return;
+                }
+                let off = RX_PKT_DESC_SZ as usize + st.drv_info_sz as usize
+                    + st.shift as usize;
+                if off + 30 > pkt.len() {
+                    return;
+                }
+                let f = &pkt[off..];
+                if f[0] != want_fc {
+                    return;
+                }
+                if f[4..10] != mac[..] {
+                    return;
+                }
+                if let Some(v) = parse(f) {
+                    // Bei der Anmeldeantwort traegt derselbe Rahmen die AID.
+                    if want_fc == 0x10 && f.len() >= 32 {
+                        // SAFETY: einfaedig, ein Schreiber.
+                        unsafe {
+                            LAST_ASSOC_AID =
+                                u16::from_le_bytes([f[28], f[29]]);
+                        }
+                    }
+                    status = Some(v);
+                }
+            });
+            if n == 0 {
+                host::sleep_ms(1);
+            }
+        }
+        if let Some(v) = status {
+            return (true, v, tries);
+        }
+        host::sleep_ms(50);
+    }
+    (false, 0, 3)
+}
+
+fn report_exchange(got: bool, status: u16, tries: u32) {
+    if !got {
+        host::print("keine Antwort nach 3 Versuchen\n");
+        return;
+    }
+    host::print("Antwort nach Versuch ");
+    host::print_dec(tries);
+    host::print(", Status ");
+    host::print_dec(status as u32);
+    host::print(match status {
+        0 => " (angenommen)",
+        1 => " (unspezifisch abgelehnt)",
+        12 => " (abgelehnt: Vorbedingungen)",
+        17 => " (abgelehnt: AP voll)",
+        43 => " (abgelehnt: falsches Paarschluessel-Verfahren)",
+        _ => "",
+    });
+    host::print("\n");
+}
+
+/// 802.11 §9.3.3.12 — Authentifizierungsrahmen, Open System, Folge 1.
+fn build_auth_req(out: &mut [u8; 256], mac: &[u8; 6], bssid: &[u8; 6])
+    -> usize
+{
+    mgmt_header(out, 0xb0, mac, bssid);
+    out[24..26].copy_from_slice(&0u16.to_le_bytes()); // Algorithmus 0 = offen
+    out[26..28].copy_from_slice(&1u16.to_le_bytes()); // Folge 1
+    out[28..30].copy_from_slice(&0u16.to_le_bytes()); // Status 0
+    30
+}
+
+/// 802.11 §9.3.3.6 — Anmeldeantrag.
+fn build_assoc_req(out: &mut [u8; 256], mac: &[u8; 6], bss: &Bss) -> usize {
+    mgmt_header(out, 0x00, mac, &bss.bssid);
+    // Faehigkeiten: ESS, dazu Privacy und Short Preamble so, wie der AP
+    // sie ansagt. Wer hier mehr behauptet, als der AP kann, wird abgelehnt.
+    let cap = 0x0001u16 | (bss.capability & 0x0030);
+    out[24..26].copy_from_slice(&cap.to_le_bytes());
+    out[26..28].copy_from_slice(&10u16.to_le_bytes()); // Listen Interval
+    let mut n = 28;
+
+    // SSID
+    let sl = bss.ssid_len as usize;
+    out[n] = 0;
+    out[n + 1] = sl as u8;
+    out[n + 2..n + 2 + sl].copy_from_slice(&bss.ssid[..sl]);
+    n += 2 + sl;
+
+    // Supported Rates: 1, 2, 5.5, 11, 6, 9, 12, 18 Mbit
+    out[n] = 1;
+    out[n + 1] = 8;
+    out[n + 2..n + 10]
+        .copy_from_slice(&[0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24]);
+    n += 10;
+
+    // Extended Supported Rates: 24, 36, 48, 54 Mbit
+    out[n] = 50;
+    out[n + 1] = 4;
+    out[n + 2..n + 6].copy_from_slice(&[0x30, 0x48, 0x60, 0x6c]);
+    n += 6;
+
+    // RSN — aus dem, was der AP ansagt, EINE Wahl gebaut.
+    if bss.rsn_len > 0 {
+        n += build_rsn_ie(&mut out[n..], &bss.rsn[..bss.rsn_len as usize]);
+    }
+    n
+}
+
+/// 802.11 §9.4.2.24 — unser RSN-Element aus dem des AP.
+///
+/// **Ein Antrag waehlt, ein Beacon zaehlt auf.** Das Element des AP nennt
+/// alle Verfahren, die er kann; unseres muss GENAU EINES nennen, sonst
+/// lehnt er mit Status 43 ab. Gewaehlt wird CCMP als Paarschluessel und
+/// PSK als Authentifizierung — die Gruppenchiffre wird uebernommen, denn
+/// die bestimmt der AP allein.
+fn build_rsn_ie(out: &mut [u8], ap: &[u8]) -> usize {
+    const CCMP: [u8; 4] = [0x00, 0x0f, 0xac, 0x04];
+    const PSK: [u8; 4] = [0x00, 0x0f, 0xac, 0x02];
+
+    // ap: id(1) len(1) version(2) group(4) pair_cnt(2) pair[] akm_cnt(2) …
+    if ap.len() < 8 {
+        return 0;
+    }
+    let group = &ap[4..8];
+
+    out[0] = 48;
+    out[1] = 20; // Laenge: 2 + 4 + 2 + 4 + 2 + 4 + 2
+    out[2..4].copy_from_slice(&1u16.to_le_bytes()); // Version 1
+    out[4..8].copy_from_slice(group);
+    out[8..10].copy_from_slice(&1u16.to_le_bytes());
+    out[10..14].copy_from_slice(&CCMP);
+    out[14..16].copy_from_slice(&1u16.to_le_bytes());
+    out[16..20].copy_from_slice(&PSK);
+    out[20..22].copy_from_slice(&0u16.to_le_bytes()); // RSN-Faehigkeiten
+    22
+}
+
+/// Der gemeinsame 24-Byte-Kopf eines Verwaltungsrahmens an einen AP.
+/// Die Folgenummer bleibt null — `en_hwseq` steht im Sendedeskriptor,
+/// also vergibt sie der Chip.
+fn mgmt_header(out: &mut [u8; 256], subtype_fc: u8, mac: &[u8; 6],
+               bssid: &[u8; 6]) {
+    out.fill(0);
+    out[0] = subtype_fc;
+    out[1] = 0x00;
+    out[2..4].copy_from_slice(&0u16.to_le_bytes()); // duration
+    out[4..10].copy_from_slice(bssid); // addr1 = Empfaenger
+    out[10..16].copy_from_slice(mac); // addr2 = wir
+    out[16..22].copy_from_slice(bssid); // addr3 = BSSID
+    out[22..24].copy_from_slice(&0u16.to_le_bytes()); // seq
 }
 
 fn gate(name: &str, ok: bool) -> bool {
