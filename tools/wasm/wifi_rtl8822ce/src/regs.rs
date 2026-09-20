@@ -1205,3 +1205,49 @@ pub const IEEE80211_VHT_CAP_BEAMFORMEE_STS_SHIFT: u32 = 13; // ../../../../../in
 pub const IEEE80211_VHT_MCS_SUPPORT_0_9: u32 = 2; // ../../../../../include/linux/ieee80211.h:2107
 pub const IEEE80211_VHT_MCS_NOT_SUPPORTED: u32 = 3; // ../../../../../include/linux/ieee80211.h:2107
 pub const EFUSE_HW_CAP_PTCL_VHT: u32 = 3; // efuse.h:9
+
+// ── Stufe 6a: der Steuerkanal (docs/spec/WIFI_CLASS_ABI.md §4) ───
+// Abwaerts (Manager -> Treiber)
+pub const CMD_SCAN: u8 = 0x01;
+pub const CMD_CONNECT: u8 = 0x02;
+pub const CMD_DISCONNECT: u8 = 0x03;
+pub const CMD_SET_KEY: u8 = 0x04;
+pub const CMD_TX_EAPOL: u8 = 0x05;
+pub const CMD_TX_MGMT: u8 = 0x06;
+pub const CMD_ASSOCIATED: u8 = 0x07;
+pub const CMD_AUTHORIZED: u8 = 0x08;
+// Aufwaerts (Treiber -> Manager)
+pub const EV_SCAN_AP: u8 = 0x81;
+pub const EV_SCAN_DONE: u8 = 0x82;
+pub const EV_READY: u8 = 0x83;
+pub const EV_EAPOL_RX: u8 = 0x84;
+pub const EV_LINK_UP: u8 = 0x85;
+pub const EV_LINK_DOWN: u8 = 0x86;
+pub const EV_CONNECT_FAILED: u8 = 0x87;
+pub const EV_RX_MGMT: u8 = 0x88;
+
+/// 802.2 LLC/SNAP-Kopf vor jedem 802.11-Datenrahmen (RFC 1042).
+pub const LLC_SNAP_HDR: [u8; 6] = [0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00];
+pub const ETHERTYPE_EAPOL: u16 = 0x888e;
+/// `fc[0] & 0x0c == 0x08` — Datenrahmen.
+pub const DOT11_FC_TYPE_DATA: u8 = 0x08;
+/// `fc[1]` — die Nutzlast ist verschluesselt.
+pub const DOT11_FC_PROTECTED: u8 = 0x40;
+/// Subtyp-Bit: QoS-Daten, zwei Byte QoS-Control hinter dem Kopf.
+pub const DOT11_STYPE_QOS: u8 = 0x08;
+/// Subtyp-Bit: Null und QoS-Null tragen KEINEN Rumpf.
+pub const DOT11_STYPE_NODATA: u8 = 0x04;
+pub const RTW_SEC_CMD_REG: u32 = 0x670; // sec.h:8
+pub const RTW_SEC_WRITE_REG: u32 = 0x674; // sec.h:9
+pub const RTW_SEC_CAM_ENTRY_SHIFT: u32 = 3; // sec.h:13
+pub const RTW_SEC_CMD_WRITE_ENABLE: u32 = 1 << 16; // sec.h:15
+pub const RTW_SEC_CMD_POLLING: u32 = 1 << 31; // sec.h:17
+pub const RTW_CAM_AES: u32 = 4; // main.h:713
+pub const RTW_CAM_TKIP: u32 = 2; // main.h:713
+pub const RTW_CAM_WEP40: u32 = 1; // main.h:713
+pub const RTW_CAM_WEP104: u32 = 5; // main.h:713
+pub const RTW_CAM_NONE: u32 = 0; // main.h:713
+pub const DESC_RATE11M: u32 = 0x03; // main.h:246
+pub const DESC_RATE54M: u32 = 0x0b; // main.h:246
+pub const DESC_RATEMCS7: u32 = 0x13; // main.h:246
+pub const DESC_RATEMCS15: u32 = 0x1b; // main.h:246

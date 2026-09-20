@@ -203,8 +203,31 @@ def vif_port_defs():
     return out
 
 
+def peer_driver_defs():
+    """Die Steuerkanal-Konstanten des AX200-Treibers.
+
+    `CMD_*`, `EV_*` und die 802.11-Rahmenbits stehen NICHT in Linux —
+    sie kommen aus `docs/spec/WIFI_CLASS_ABI.md`. Gegen die Spec kann
+    dieser Pruefer nicht rechnen, aber gegen den ZWEITEN Treiber, der
+    dieselbe ABI spricht: weichen die beiden voneinander ab, redet der
+    Manager mit einem von ihnen falsch, und niemand merkt es.
+    """
+    peer = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "..", "wifi_ax200", "src", "regs.rs")
+    if not os.path.exists(peer):
+        return {}
+    out = {}
+    src = open(peer, errors="ignore").read()
+    for m in re.finditer(r"(?:pub )?const ((?:CMD|EV|DOT11|LLC|ETHERTYPE)"
+                         r"[A-Z0-9_]*)\s*:\s*\w+(?:\s*;\s*\d+\])?"
+                         r"\s*=\s*([^;]+);", src):
+        out[m.group(1)] = ("wifi_ax200/regs.rs", 0, m.group(2).strip())
+    return out
+
+
 def main():
     defs = linux_defs()
+    defs.update(peer_driver_defs())
     defs.update(vif_port_defs())
     if not defs:
         sys.exit(f"Linux-Quelle fehlt unter {D}")

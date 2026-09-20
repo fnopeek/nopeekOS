@@ -505,7 +505,7 @@ zweites Mal anwirft, spart sie die ganze Messung.
     python3 tools/wasm/wifi_rtl8822ce/gen_pwrseq.py   # src/pwrseq.rs aus rtw8822c.c
     python3 tools/linux-coverage.py --chip rtl8822ce   # 265 / 940 (war 89)
 
-**Abdeckung nach Stufe 5f: 396 von 940 rtw88-Funktionen** (vor dieser Runde
+**Abdeckung nach Stufe 6a: 397 von 940 rtw88-Funktionen** (vor dieser Runde
 89). `rtw8822c.c` 68/171 · `phy.c` 59/97 · `mac.c` 39/49 · `pci.c` 30/81 ·
 `coex.c` 27/111 · `main.c` 18/84 · `tx.c` 15/31 · `efuse.c` 5/5 · `rx.c` 3/8.
 Auf 0 stehen nur noch `mac80211.c` (die obere Hälfte, die `wifid` ersetzt),
@@ -1072,11 +1072,63 @@ eine Stufe Verzögerung.** Ich hatte den Anmeldeantrag auf das Minimum
 gebaut, das durchgeht — das Tor von 5e war „Status 0", und das kam. Was
 fehlte, zeigte sich erst als Deckel bei 54 Mbit in 5f.
 
+### Stufe 6a — der Steuerkanal, der Handschlag und der Datenweg (0.20.0)
+
+**Hier hört der Stufentest auf und der Treiber fängt an.** Bis 5f arbeitete
+`main` eine Kette ab; 6a ist eine Schleife: Empfangsring leeren,
+Sendequittungen einsammeln, Kommandos von `wifid` ausführen, Ereignisse
+hinaufmelden.
+
+**Den Handschlag rechnet `wifid`, nicht wir.** Er ist herstellerunabhängig
+und steht einmal da (`tools/wasm/wifid/core/src/eapol.rs`) —
+`docs/spec/WIFI_CLASS_ABI.md` §1 sagt es klar: *der Treiber sieht nie den
+PSK*. Wir transportieren die Rahmen und schreiben die fertigen Schlüssel in
+den Speicher.
+
+Gebaut: `rtw_sec_write_cam` + `rtw_sec_clear_cam` (acht Worte je Platz,
+**rückwärts** geschrieben — Wort 0 trägt das Gültig-Bit und geht zuletzt
+hinaus) · `rtw_tx_data_pkt_info_update` · `get_highest_ht_tx_rate` ·
+802.3↔802.11 in beide Richtungen mit LLC/SNAP · die Demux-Regel aus §2b
+(Ethertyp 0x888E → `EV_EAPOL_RX` an `wifid`, sonst `npk_netdev_submit_rx`)
+· `EV_READY`/`EV_LINK_UP` hinauf, `TX_EAPOL`/`SET_KEY`/`AUTHORIZED` herunter.
+
+**Drei Verträge, die keine ABI ausdrückt, und alle drei hätten still
+versagt:**
+
+* **Unser RSN-Element ist jetzt BYTE-GLEICH mit dem in `wifid`.** Der
+  Vierwegehandschlag rechnet seinen MIC über genau das Element, das die
+  Station im Anmeldeantrag geschickt hat. Ich kopierte vorher die
+  Gruppenchiffre des AP — bei einem reinen CCMP-AP dasselbe, bei einem
+  Misch-AP nicht, und dann verwirft der AP msg2, ohne zu sagen warum.
+* **Das Ziel kommt aus `sys/config/wifi_ssid`**, nicht aus der Lautstärke.
+  Die Spec sagt warum: ohne SSID-Filter nimmt der Treiber den lautesten AP
+  *irgendeines* Netzes, auch den des Nachbarn — für den `wifid` keinen PSK
+  hat, und das endet im stillen MIC-Fehlschlag.
+* **Gewöhnliche Datenrahmen, kein QoS.** Unser Anmeldeantrag trägt kein
+  WMM-Element, also hat der AP uns als Nicht-QoS-Station angenommen. Wer
+  WMM nicht anbietet, darf kein QoS senden.
+
+**Dazu ein neuer Prüfer:** `check_regs.py` vergleicht die
+Steuerkanal-Konstanten (`CMD_*`, `EV_*`, `DOT11_*`) gegen **`wifi_ax200`** —
+zwei Treiber, eine ABI. Weichen sie voneinander ab, redet der Manager mit
+einem von ihnen falsch, und niemand merkt es. 13 Konstanten, 0 Abweichungen.
+
+**Voraussetzung am Gerät:** `wifid` muss laufen und seine Zugangsdaten
+haben — `store /sys/config/wifi_ssid <name>` und
+`store /sys/config/wifi_psk <pass>`.
+
+**Was 6a NICHT behauptet:** der Chip wird am Ende des Laufs weiter
+abgeschaltet. Auch ein gelungener Handschlag endet mit dem Stufentest — ein
+Treiber, der die Verbindung HÄLT, ist 6b.
+
+**220 von 220 Funktionen · 960 Konstanten, 0 Abweichungen · Abdeckung 396
+→ 397 von 940.**
+
 ### ▶ Danach — hier weitermachen
 
-**5g — die Verbindung halten.** Der Vierwegehandschlag und der
-Schlüsselspeicher (`rtw_sec_write_cam`), dann LPS mit den reservierten
-Seiten,
+**6b — die Verbindung halten.** Der Treiber läuft, statt Stufen
+abzuarbeiten: Watchdogs für TX und RX, `npk_driver_report`, Wiederverbinden
+nach Deauth. Danach LPS mit den reservierten Seiten,
 `rtw_get_channel_params` fürs Kanalhüpfen, die Elementeauswertung des
 Beacons, und `rtw_rx_addr_match`. Der `netdev`-Anschluss
 (`npk_netdev_register`, `npk_submit_rx`) kommt ans ENDE dieser Stufe, nicht

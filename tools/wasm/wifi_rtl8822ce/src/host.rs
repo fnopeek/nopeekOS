@@ -38,6 +38,56 @@ unsafe extern "C" {
     fn npk_ticks() -> i64;
     fn npk_now_us() -> i64;
     fn npk_driver_report(buf_ptr: i32, len: i32) -> i32;
+
+    // ── Stufe 6a: der Steuerkanal und der Datenweg ───────────────
+    // docs/spec/WIFI_CLASS_ABI.md §3. Die Treiberseite ist an den
+    // gebundenen Treiber gegated; `wifid` sitzt am anderen Ende.
+    fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_wifi_poll_cmd(buf_ptr: i32, max: i32) -> i32;
+    fn npk_wifi_send_event(buf_ptr: i32, len: i32) -> i32;
+    fn npk_netdev_register(mac_ptr: i32) -> i32;
+    fn npk_netdev_submit_rx(buf_ptr: i32, len: i32) -> i32;
+    fn npk_netdev_poll_tx(buf_ptr: i32, max: i32) -> i32;
+    fn npk_netdev_set_link(up: i32) -> i32;
+}
+
+// ── Stufe 6a: Steuerkanal, npkFS und Datenweg ────────────────────
+
+/// Ein Objekt aus npkFS holen. Gibt die Laenge zurueck, `-1` wenn es
+/// nicht da ist — und das ist ein gewoehnlicher Fall, kein Fehler.
+pub fn fetch(name: &str, buf: &mut [u8]) -> i32 {
+    unsafe {
+        npk_fetch(name.as_ptr() as i32, name.len() as i32,
+                  buf.as_mut_ptr() as i32, buf.len() as i32)
+    }
+}
+
+/// Naechstes Kommando von `wifid`, `-1` = keins.
+pub fn wifi_poll_cmd(buf: &mut [u8]) -> i32 {
+    unsafe { npk_wifi_poll_cmd(buf.as_mut_ptr() as i32, buf.len() as i32) }
+}
+
+/// Ereignis an `wifid`.
+pub fn wifi_send_event(msg: &[u8]) -> i32 {
+    unsafe { npk_wifi_send_event(msg.as_ptr() as i32, msg.len() as i32) }
+}
+
+pub fn netdev_register(mac: &[u8; 6]) -> i32 {
+    unsafe { npk_netdev_register(mac.as_ptr() as i32) }
+}
+
+/// Ein empfangenes Ethernet-Rahmen an den IP-Stapel.
+pub fn netdev_submit_rx(frame: &[u8]) -> i32 {
+    unsafe { npk_netdev_submit_rx(frame.as_ptr() as i32, frame.len() as i32) }
+}
+
+/// Ein zu sendendes Ethernet-Rahmen holen, `-1` = keins.
+pub fn netdev_poll_tx(buf: &mut [u8]) -> i32 {
+    unsafe { npk_netdev_poll_tx(buf.as_mut_ptr() as i32, buf.len() as i32) }
+}
+
+pub fn netdev_set_link(up: bool) {
+    unsafe { npk_netdev_set_link(up as i32) };
 }
 
 // ── Ausgabe ──────────────────────────────────────────────────────

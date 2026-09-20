@@ -6,6 +6,8 @@
 //! `rtw_tx_fill_tx_desc`.
 #![allow(dead_code)]
 
+use crate::regs::{DESC_RATEMCS7, DESC_RATEMCS15};
+
 // main.h:232-248
 pub const RTW_RATEID_G: u8 = 7;
 pub const RTW_RATEID_B_20M: u8 = 8;
@@ -265,4 +267,54 @@ pub fn pkt_info_update(frame: &[u8], mac_id: u8, current_band_type: u8)
     // Queue, genau wie `rtw_pci_get_tx_qsel` es fuer jede andere Queue tut.
     info.ls = true;
     info
+}
+
+/// tx.c:400-412 `rtw_tx_data_pkt_info_update`, Zweig MIT `sta`.
+///
+/// **Was `!sta` (Broadcast/Multicast) angeht, steht in Linux VOR dem
+/// Sprung**: Rate 6M, rate_id 6, 20 MHz. Das ist hier der Zweig
+/// `si = None`.
+///
+/// `ampdu_en` haengt an `IEEE80211_TX_CTL_AMPDU` — eine Fahne, die
+/// mac80211 setzt, wenn ein Block-Ack-Block offen ist. Ohne
+/// Block-Ack-Aushandlung gibt es sie nicht, und ein erfundenes
+/// A-MPDU-Flag waere schlimmer als keins. `dm_info->fix_rate` ist eine
+/// debugfs-Einstellung und steht auf `DESC_RATE_MAX` (= aus).
+pub fn data_pkt_info_update(info: &mut TxPktInfo, seq: u16,
+                            si: Option<&crate::sta::StaInfo>,
+                            highest_rate: u8) {
+    let mut rate = DESC_RATE6M;
+    let mut rate_id = 6u8;
+    let mut bw = 0u8; // RTW_CHANNEL_WIDTH_20
+    let mut stbc = 0u8;
+    let mut ldpc = 0u8;
+
+    if let Some(s) = si {
+        rate = highest_rate;
+        bw = s.bw_mode;
+        rate_id = s.rate_id;
+        stbc = s.stbc_en;
+        ldpc = s.ldpc_en;
+    }
+
+    info.seq = seq;
+    info.ampdu_en = false;
+    info.rate = rate;
+    info.rate_id = rate_id;
+    info.bw = bw;
+    info.stbc = stbc;
+    info.ldpc = ldpc != 0;
+}
+
+/// tx.c:112-123 `get_highest_ht_tx_rate`.
+///
+/// Die Bedingung ist `rf_type == RF_2T2R`, nicht `nss > 1` — auf diesem
+/// Chip dasselbe, aber die Quelle fragt nach dem RF-Aufbau und nicht nach
+/// der Zahl der Stroeme.
+pub fn highest_ht_tx_rate(ht_mcs: &[u8; 4], rf_2t2r: bool) -> u8 {
+    if rf_2t2r && ht_mcs[1] != 0 {
+        DESC_RATEMCS15 as u8
+    } else {
+        DESC_RATEMCS7 as u8
+    }
 }
