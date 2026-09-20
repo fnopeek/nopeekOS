@@ -1250,6 +1250,36 @@ sind, ohne im Dunkeln zu suchen — sie gehören hinter den Schalter, nicht in
 den Müll. Und der Treiberbericht (`npk_driver_report`, je Sekunde) ist
 davon unberührt: der geht an `wlan` und nicht auf die Konsole.
 
+### 0.23.1 — 6b startete 6a neu, statt sie fortzusetzen
+
+Florians Lauf ohne LAN-Dongle: **die Verbindung stand** — `carrier UP`,
+`address 192.168.178.172`, Handschlag komplett, `AUTHORIZED`,
+`link up connected`. Und dann kein Ping, kein DNS, nichts.
+
+Der Treiberbericht sagte, warum:
+
+```
+[wifid] READY   supplicant armed for 4-way     ← ein ZWEITES Mal
+rtl8822ce NICHT verbunden ... schluessel 0
+tx queue enq 126  deq 4   backlog 6176 B
+```
+
+**Stufe 6b rief `stage6a_link` ein zweites Mal.** Die Funktion legte einen
+frischen `Link` an (`ptk_installed: false`, Zähler auf null,
+`authorized = false`) und schickte **`EV_READY` erneut**. `wifid` machte
+daraufhin einen neuen Supplicant scharf und wartete auf ein msg1, das der
+AP nie wieder schickt. Weil der Sendeweg hinter `if authorized` hängt, nahm
+der Treiber seither nichts mehr aus der Kernelschlange — daher
+`enq 126, deq 4`.
+
+**Eine Stufe, die ihren Vorgänger neu startet statt fortzusetzen, ist keine
+Fortsetzung.** Jetzt sind Aufbau und Schleife getrennt: `link_setup`
+meldet beim Kernel an und macht `wifid` scharf — **genau einmal** —, und
+`link_pump` läuft mit Link und Zählern von aussen. 6a ruft es mit acht
+Sekunden Frist, 6b mit keiner. Die Zähler gehören dem LINK, nicht der
+Stufe: einer, der beim Übergang auf null springt, ist eine Lüge über die
+Leitung.
+
 ### ▶ Danach — hier weitermachen
 
 **6b — die Verbindung halten.** Der Treiber läuft, statt Stufen
