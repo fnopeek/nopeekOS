@@ -953,6 +953,26 @@ Hälfte) · `rtw_fw_default_port` · `rtw_coex_media_status_notify` ·
 ihn endet nach wenigen Sekunden in einem Deauth — das ist erwartet und kein
 Fehler. Ab da ist es `wifid`.
 
+### 0.18.1 — ein Tor, das die Nachbarschaft mass, stand in 5b
+
+Ein Lauf von 0.18.0 blieb in Stufe 5b stehen: drei Deskriptoren in 4 µs
+abgeholt, **null Probe Responses**, und damit hingen 5c bis 5e. Der
+Sendeweg war dabei byte-gleich zu 0.17.1 (`tx.rs` unverändert, `pci.rs`
+nur um `tx_isr` reicher, das 5b gar nicht ruft) — die Luft war leiser: 21
+statt 62 Pakete, Beacons bei −87…−96 statt −84…−90 dBm.
+
+**Das ist dieselbe Klasse, die 5c schon gelöst hatte, und ich hatte sie in
+5b stehen lassen.** Dass ein Rahmen die Antenne verlässt, beweist nur eine
+ANTWORT — aber ob auf EINEM Kanal gerade jemand antwortet, ist ein
+Münzwurf. Dreimal gewonnen, einmal verloren, und ein fremder AP hielt die
+ganze Kette an.
+
+Jetzt: **5b behält die Tore, die UNS messen** (Adresse im Port, richtige
+Queue, Deskriptoren abgeholt) und meldet die Antworten als Befund; **das
+Tor „ein fremder AP antwortet" steht in 5c**, über dreizehn aktive Kanäle
+gezählt. Das ist kein weicheres Tor, sondern ein belastbareres: in jedem
+bisherigen 5c-Lauf kamen Antworten von mehreren Zellen.
+
 ### ▶ Danach — hier weitermachen
 
 **5f — die Verbindung halten.** `rtw_update_sta_info` + `rtw_fw_send_ra_info`,
