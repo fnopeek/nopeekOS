@@ -113,6 +113,15 @@ DEVIATION = {
 # Funktionen, deren Zahlenfolge sich NICHT vergleichen laesst, mit Grund.
 # Die Zugriffsfolge wird trotzdem geprueft.
 HEX_SKIP = {
+    "rtw_tx_queue_mapping":
+        "wie rtw_tx_pkt_info_update: ieee80211_is_beacon/is_mgmt/is_ctl und "
+        "is_broadcast_ether_addr sind Makros ohne Zahl, bei uns Masken auf "
+        "frame_control und addr1.",
+    "rtw_tx_pkt_info_update":
+        "Linux fragt den Rahmentyp mit ieee80211_is_mgmt/is_nullfunc/is_data "
+        "und die Adresse mit is_broadcast_ether_addr -- Makros ohne eine "
+        "Zahl. Bei uns stehen dieselben Pruefungen als Masken auf "
+        "frame_control (0x3, 0xf) und auf addr1 (0x01).",
     "rtw_get_tx_power_params":
         "unsere Fassung zieht rtw_phy_get_tx_power_index mit hinein, und "
         "dessen Rueckgabe ist in Linux eine stille s8->u8-Wandlung (s8 "
@@ -223,7 +232,12 @@ def c_body(path, name):
     src = open(os.path.join(L, path), errors="ignore").read()
     # Der Rueckgabetyp darf auf der ZEILE DAVOR stehen
     # (`struct sk_buff *\nrtw_tx_write_data_h2c_get(`).
-    pat = re.compile(r"^(?:(?:static\s+)?(?:const\s+)?[A-Za-z_]\w*[\s*]+)?"
+    # `enum rtw_tx_queue_type rtw_tx_queue_mapping(` hat einen Rueckgabetyp
+    # aus ZWEI Woertern. Mit nur einem blieb die Funktion ohne Rumpf, und
+    # eine Funktion ohne Rumpf wird uebersprungen statt geprueft.
+    pat = re.compile(r"^(?:(?:static\s+)?(?:const\s+)?"
+                     r"(?:(?:enum|struct|union|unsigned|signed)\s+)?"
+                     r"[A-Za-z_]\w*[\s*]+)?"
                      + re.escape(name) + r"\s*\(", re.M)
     for m in pat.finditer(src):
         # Eine Vorwaertsdeklaration endet mit `;` und hat keinen Rumpf.
@@ -266,6 +280,20 @@ ALIAS = {
     "sipi_addr[rf_path]": "RF_SIPI_ADDR[rf_path]",
     "edcca_th[EDCCA_TH_L2H_IDX].hw_reg.addr": "addr",
     "edcca_th[EDCCA_TH_H2L_IDX].hw_reg.addr": "addr",
+    # Stufe 5b: derselbe Zugriff, andere Schreibweise des Ausdrucks.
+    "start+i": "start+iasu32",
+}
+
+# Umbenennungen, die NUR in einer Funktion gelten. Ein globaler Eintrag fuer
+# einen so gewoehnlichen Namen wie `addr` faerbt sonst jede andere Funktion
+# mit -- beim ersten Versuch brach damit `rtw_phy_set_edcca_th`.
+ALIAS_IN = {
+    # rtw_vif_port_config zieht `addr`/`mask` erst in lokale Variablen; bei
+    # uns steht das Tabellenfeld direkt da. Die Adressen selbst prueft
+    # check_regs.py gegen dieselbe Tabelle in mac80211.c.
+    "rtw_vif_port_config": {
+        "addr": ["c.net_type.0", "c.aid.0", "c.bcn_ctrl.0"],
+    },
 }
 
 
@@ -273,6 +301,30 @@ def norm(s):
     s = re.sub(r"\s+", "", s)
     s = s.replace("crate::regs::", "").replace("crate::pci::", "")
     return ALIAS.get(s, s)
+
+
+def apply_alias_in(name, c):
+    """Die funktionslokalen Umbenennungen, der REIHE nach angewandt.
+
+    `rtw_vif_port_config` schreibt dreimal ueber dieselbe lokale Variable
+    `addr`; welches Tabellenfeld gemeint ist, sagt allein die Reihenfolge.
+    Deshalb zaehlt ein Zaehler je Name mit.
+    """
+    table = ALIAS_IN.get(name)
+    if not table:
+        return c
+    seen = {}
+    out = []
+    for op, width, reg in c:
+        cands = table.get(reg)
+        if cands:
+            i = seen.get(reg, 0)
+            seen[reg] = i + 1
+            if i < len(cands):
+                out.append((op, width, cands[i]))
+                continue
+        out.append((op, width, reg))
+    return out
 
 
 def c_seq(body):
@@ -328,6 +380,7 @@ def main():
             # zurueck an seinen Platz.
             for prf, prsig in parts.get(name, []):
                 r += rs_seq(rs_body(prf, prsig))
+            c = apply_alias_in(name, c)
         except ValueError:
             # Kein Rumpf zu finden: eine Tabelle, eine Konstante oder eine
             # Funktion, die in Linux anders heisst. Nichts zu vergleichen.

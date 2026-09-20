@@ -67,6 +67,7 @@ mod rx;
 mod sec;
 mod tables;
 mod tx;
+mod vif;
 mod txpower;
 mod regs;
 use regs::*;
@@ -386,6 +387,10 @@ pub extern "C" fn _start() {
     // den Firmware-Download gedacht und genau ein Stueck gross.
     let h2c_buf = host::dma_alloc_below(
         (pci::H2C_STAGE_BYTES.div_ceil(4096)) as u16, 1024);
+    // Und die MGMT-Queue einen dritten: ihre Rahmen sind bis 2 KB gross,
+    // das H2C-Raster von 128 Bytes traegt keinen einzigen davon.
+    let mgmt_buf = host::dma_alloc_below(
+        (pci::MGMT_STAGE_BYTES.div_ceil(4096)) as u16, 1024);
     let fw_ok = match stage_buf {
         st if st >= 0 => {
             let ok = mac::download_firmware(h, &mut trx, st, FW, BAND_AT_FWDL,
@@ -574,6 +579,15 @@ pub extern "C" fn _start() {
         false
     };
 
+    // ── Stufe 5b: der Sendeweg ───────────────────────────────────
+    let stage5b = match (stage5a, efuse.as_ref()) {
+        (true, Some(e)) => stage5b_tx(h, &hal, &mut trx, mgmt_buf, e.addr),
+        _ => {
+            host::print("[rtl8822ce] Stufe 5b: uebersprungen, 5a steht nicht\n");
+            false
+        }
+    };
+
     // Und wieder aus, aus demselben Grund wie oben: der Kernel gibt gleich
     // die DMA-Puffer frei, in die eine laufende Firmware sonst weiterschriebe.
     mac::mac_power_off(h, hal.cut_version);
@@ -612,6 +626,11 @@ pub extern "C" fn _start() {
         "[rtl8822ce] Stufe 5a: GRUEN — DIE PAKETE KOMMEN AN\n"
     } else {
         "[rtl8822ce] Stufe 5a: NEIN — nicht weiterbauen, bevor das steht\n"
+    });
+    host::print(if stage5b {
+        "[rtl8822ce] Stufe 5b: GRUEN — WIR SENDEN, UND ES WIRD GEANTWORTET\n"
+    } else {
+        "[rtl8822ce] Stufe 5b: NEIN — nicht weiterbauen, bevor das steht\n"
     });
 
 
@@ -1387,6 +1406,229 @@ fn print_dbm(v: i8) {
         host::print_dec(v as u32);
     }
     host::print(" dBm");
+}
+
+/// Stufe 5b — der Sendeweg, und die Antwort darauf.
+///
+/// Der Port bekommt seine Adresse (`rtw_ops_add_interface`), dann geht ein
+/// Probe Request hinaus und wir hoeren zu. **Das Gate ist die ANTWORT**,
+/// nicht der verbrauchte Deskriptor: dass der Chip einen Deskriptor abholt,
+/// sagt nur, dass DMA laeuft — dass ein fremder AP antwortet, sagt, dass
+/// der Rahmen die Antenne verlassen hat und richtig gebaut war.
+///
+/// **Kalibriert wird hier bewusst nicht.** `rtw_set_channel` setzt am Ende
+/// `need_rfk = true`, und `rtw_chip_prepare_tx` fuehrt GAPK/IQK/DPK erst
+/// aus, wenn mac80211 `mgd_prepare_tx` ruft — also VOR dem Anmelden, nicht
+/// beim Kanalwechsel. Linux' Kommentar nennt den Grund: waehrend eines
+/// Scans auf jedem Kanal zu kalibrieren dauert zu lange. Ein Probe Request
+/// geht in Linux genauso unkalibriert hinaus wie hier.
+fn stage5b_tx(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
+              mac: [u8; 6]) -> bool {
+    host::print("[rtl8822ce] Stufe 5b: der Sendeweg\n");
+    if mgmt_buf < 0 {
+        host::print("  kein DMA-Puffer fuer die MGMT-Queue\n");
+        return false;
+    }
+
+    // `rtw_ops_add_interface`, Zweig STATION. Ohne diesen Schritt steht im
+    // Port-Register keine Adresse, und `BIT_APM` im RCR laesst dann nur
+    // Broadcast durch — eine Probe Response ist an UNS gerichtet.
+    let vif = vif::add_interface_station(h, mac);
+    host::print("  Port 0: Adresse ");
+    for (i, b) in mac.iter().enumerate() {
+        if i > 0 {
+            host::print(":");
+        }
+        host::print_hex8(*b);
+    }
+    host::print(" · net_type ");
+    host::print_dec(vif.net_type);
+    host::print(" · zurueckgelesen ");
+    let mut back = [0u8; 6];
+    for (i, b) in back.iter_mut().enumerate() {
+        *b = host::r8(h, PORT0_MAC_ADDR + i as u32);
+    }
+    let addr_ok = back == mac;
+    host::print(if addr_ok { "gleich" } else { "ANDERS" });
+    host::print("\n");
+
+    let mut ok = gate("die Adresse steht im Port-Register", addr_ok);
+
+    // Ein Probe Request. Das baut in Linux `ieee80211_build_probe_req` —
+    // die OBERE Haelfte, die hier `wifid` wird. Er steht hier, weil der
+    // Sendeweg sonst nichts zu senden haette; 5c loest ihn ab.
+    let mut frame = [0u8; 64];
+    let n = build_probe_req(&mut frame, &mac);
+    let frame = &frame[..n];
+
+    let mut info = tx::pkt_info_update(frame, vif.mac_id, tx::RTW_BAND_2G);
+    let queue = tx::queue_mapping(
+        u16::from_le_bytes([frame[0], frame[1]]), &frame[4..10]);
+    host::print("  Rahmen ");
+    host::print_dec(n as u32);
+    host::print(" Bytes · Queue ");
+    host::print_dec(queue as u32);
+    host::print(" · qsel ");
+    host::print_dec(pci::tx_qsel(queue) as u32);
+    host::print(" · rate 0x");
+    host::print_hex8(info.rate);
+    host::print(" · rate_id ");
+    host::print_dec(info.rate_id as u32);
+    host::print("\n");
+    ok &= gate("ein Verwaltungsrahmen geht in die MGMT-Queue",
+               queue == tx::RTW_TX_QUEUE_MGMT);
+
+    // Dreimal, mit Abstand: ein einzelner Probe Request kann kollidieren,
+    // und ein AP darf ihn auch schlicht verwerfen.
+    let mut sent = 0u32;
+    let mut consumed = 0u32;
+    let mut last_us = 0u64;
+    for _ in 0..3 {
+        if !pci::tx_write(h, trx, mgmt_buf, queue, &mut info, frame) {
+            break;
+        }
+        pci::tx_kick_off_queue(h, trx, queue);
+        sent += 1;
+        let (done, us, hw) = pci::tx_wait_consumed(h, trx, queue, 50_000);
+        if done {
+            consumed += 1;
+            last_us = us;
+        } else {
+            host::print("  Deskriptor nicht abgeholt: hw ");
+            host::print_dec(hw);
+            host::print(" statt ");
+            host::print_dec(trx.tx[queue].wp & pci::TRX_BD_IDX_MASK);
+            host::print("\n");
+        }
+        host::sleep_ms(20);
+    }
+    host::print("  gesendet ");
+    host::print_dec(sent);
+    host::print(" · vom Chip abgeholt ");
+    host::print_dec(consumed);
+    host::print(" (zuletzt nach ");
+    host::print_dec(last_us as u32);
+    host::print(" us)\n");
+    ok &= gate("der Chip holt die Sendedeskriptoren ab", consumed == sent
+               && sent > 0);
+
+    // Und jetzt zuhoeren. Eine Probe Response ist Subtyp 5.
+    let mut dm = dm::DmInfo::new();
+    let mut path_div = dm::PathDiv::default();
+    chip::read_cck_gi_bnd(h, &mut dm);
+    static mut RXBUF2: [u8; pci::RTK_PCI_RX_BUF_SIZE as usize] =
+        [0; pci::RTK_PCI_RX_BUF_SIZE as usize];
+    // SAFETY: wie in Stufe 5a — ein Faden, ein Rufer, der Puffer verlaesst
+    // diese Funktion nicht.
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(RXBUF2) };
+
+    let mut resp = 0u32;
+    let mut shown = 0u32;
+    let t0 = host::now_us();
+    while host::now_us() - t0 < 1_000_000 {
+        let n = pci::rx_poll(h, trx, 64, buf, &mut dm, &mut path_div,
+                             hal.rf_path_num, 0, 1, |st, pkt| {
+            if st.crc_err || st.is_c2h {
+                return;
+            }
+            let off = RX_PKT_DESC_SZ as usize + st.drv_info_sz as usize
+                + st.shift as usize;
+            if off + 24 > pkt.len() {
+                return;
+            }
+            let fc = u16::from_le_bytes([pkt[off], pkt[off + 1]]);
+            // Subtyp 5 = Probe Response, Typ 0 = Verwaltung.
+            if fc & 0xfc != 0x50 {
+                return;
+            }
+            // `addr1` ist unsere Adresse — sonst haette der Filter ihn
+            // gar nicht durchgelassen, aber gemessen ist besser.
+            if pkt[off + 4..off + 10] != mac[..] {
+                return;
+            }
+            resp += 1;
+            if shown < 6 {
+                shown += 1;
+                print_probe_resp(&pkt[off..], st);
+            }
+        });
+        if n == 0 {
+            host::sleep_ms(1);
+        }
+    }
+
+    host::print("  Probe Responses an UNSERE Adresse: ");
+    host::print_dec(resp);
+    host::print("\n");
+    ok &= gate("ein fremder AP antwortet uns — der Rahmen hat die\n\
+         \x20         Antenne verlassen", resp > 0);
+    ok
+}
+
+/// `ieee80211_build_probe_req` in klein: ein Wildcard-Probe-Request.
+///
+/// Die Sequenznummer bleibt null — `en_hwseq` steht im Deskriptor, also
+/// vergibt sie der Chip. Gebaut wird nur, was ein AP zum Antworten
+/// braucht: die drei Adressen, das leere SSID-Element und die Raten.
+fn build_probe_req(out: &mut [u8; 64], mac: &[u8; 6]) -> usize {
+    let bcast = [0xffu8; 6];
+    out[0..2].copy_from_slice(&0x0040u16.to_le_bytes()); // Verwaltung, Subtyp 4
+    out[2..4].copy_from_slice(&0u16.to_le_bytes()); // duration
+    out[4..10].copy_from_slice(&bcast); // addr1 = Empfaenger
+    out[10..16].copy_from_slice(mac); // addr2 = wir
+    out[16..22].copy_from_slice(&bcast); // addr3 = BSSID
+    out[22..24].copy_from_slice(&0u16.to_le_bytes()); // seq, siehe oben
+    let mut n = 24;
+    // SSID-Element, Laenge 0 = „jedes Netz"
+    out[n] = 0;
+    out[n + 1] = 0;
+    n += 2;
+    // Supported Rates: 1, 2, 5.5, 11, 6, 9, 12, 18 Mbit. Das hohe Bit
+    // markiert eine GRUNDrate.
+    out[n] = 1;
+    out[n + 1] = 8;
+    out[n + 2..n + 10]
+        .copy_from_slice(&[0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24]);
+    n += 10;
+    // DS Parameter Set: der Kanal, auf dem wir fragen.
+    out[n] = 3;
+    out[n + 1] = 1;
+    out[n + 2] = 1;
+    n + 3
+}
+
+/// Eine Zeile je Antwort: BSSID, Signal und der Netzname aus dem
+/// SSID-Element. Ein Name macht aus „ein Rahmen kam" ein „wir sehen X".
+fn print_probe_resp(f: &[u8], st: &rx::RxPktStat) {
+    host::print("    von ");
+    for i in 0..6 {
+        if i > 0 {
+            host::print(":");
+        }
+        host::print_hex8(f[16 + i]); // addr3 = BSSID
+    }
+    host::print(" · ");
+    print_dbm(st.signal_power);
+    host::print(" · SSID \"");
+    // 24 Kopf + 12 feste Felder (Zeitstempel, Intervall, Faehigkeiten),
+    // dann die Elemente. Das SSID-Element hat die Kennung 0.
+    let mut i = 36;
+    while i + 2 <= f.len() {
+        let id = f[i];
+        let len = f[i + 1] as usize;
+        if i + 2 + len > f.len() {
+            break;
+        }
+        if id == 0 {
+            for &c in &f[i + 2..i + 2 + len] {
+                let s = [if (0x20..0x7f).contains(&c) { c } else { b'.' }];
+                host::print(unsafe { core::str::from_utf8_unchecked(&s) });
+            }
+            break;
+        }
+        i += 2 + len;
+    }
+    host::print("\"\n");
 }
 
 fn gate(name: &str, ok: bool) -> bool {

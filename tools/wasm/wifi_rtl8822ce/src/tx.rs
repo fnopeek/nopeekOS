@@ -68,17 +68,26 @@ fn bits(v: u32, mask: u32) -> u32 {
     (v << mask.trailing_zeros()) & mask
 }
 
-/// tx.c `rtw_tx_pkt_info_update_rate`, mit `ignore_rate = true`.
+/// tx.c:44-58 `rtw_get_mgmt_rate`.
 ///
-/// `rtw_get_mgmt_rate` gibt bei `ignore_rate` immer `lowest_rate` zurueck —
-/// die vif-Abfrage dahinter kann gar nicht greifen.
+/// Ohne vif, ohne `basic_rates`, mit `ignore_rate` oder mit
+/// `RTW_FLAG_FORCE_LOWEST_RATE` kommt `lowest_rate` heraus. Vor dem
+/// Verbinden gibt es keine `basic_rates` — die kennt erst
+/// `bss_conf`, also frueher als Stufe 5c nie. Der `__ffs`-Zweig ist
+/// damit noch nicht erreichbar und steht bewusst nicht da; er waere eine
+/// Behauptung ueber einen Zustand, den der Treiber nicht fuehrt.
+fn get_mgmt_rate(lowest_rate: u8) -> u8 {
+    lowest_rate
+}
+
+/// tx.c:60-77 `rtw_tx_pkt_info_update_rate`.
 fn pkt_info_update_rate(info: &mut TxPktInfo, current_band_type: u8) {
     if current_band_type == RTW_BAND_2G {
         info.rate_id = RTW_RATEID_B_20M;
-        info.rate = DESC_RATE1M;
+        info.rate = get_mgmt_rate(DESC_RATE1M);
     } else {
         info.rate_id = RTW_RATEID_G;
-        info.rate = DESC_RATE6M;
+        info.rate = get_mgmt_rate(DESC_RATE6M);
     }
     info.use_rate = true;
     info.dis_rate_fallback = true;
@@ -178,4 +187,82 @@ pub fn fill_tx_desc(info: &TxPktInfo, desc: &mut [u8; TX_PKT_DESC_SZ]) {
 /// null — auch `offset` und `ls`, anders als beim Reserved-Page-Weg.
 pub fn write_data_h2c_get(size: u32) -> TxPktInfo {
     TxPktInfo { tx_pkt_size: size, ..Default::default() }
+}
+
+// ── Stufe 5b: ein gewoehnlicher Rahmen statt einer Reserved Page ──
+
+/// tx.c:391-398 `rtw_tx_mgmt_pkt_info_update`
+fn mgmt_pkt_info_update(info: &mut TxPktInfo, current_band_type: u8) {
+    pkt_info_update_rate(info, current_band_type);
+    info.dis_qselseq = true;
+    info.en_hwseq = true;
+    info.hw_ssn_sel = 0;
+    // Linux: „TODO: need to change hw port and hw ssn sel for multiple vifs"
+}
+
+/// main.h:202-215 — die Queues, plus `ac_to_hwq`.
+pub const RTW_TX_QUEUE_BCN: usize = 4;
+pub const RTW_TX_QUEUE_MGMT: usize = 5;
+pub const RTW_TX_QUEUE_HI0: usize = 6;
+
+/// tx.c:641-662 `rtw_tx_queue_mapping`.
+///
+/// `q_mapping` ist die Zugangsklasse, die mac80211 an den skb haengt; ohne
+/// obere Haelfte gibt es sie nicht, und deshalb steht hier BE — derselbe
+/// Wert, den Linux' `WARN_ON_ONCE`-Zweig nimmt, wenn sie fehlt.
+pub fn queue_mapping(fc: u16, addr1: &[u8]) -> usize {
+    let is_beacon = fc & 0xfc == 0x80;
+    let ftype = (fc >> 2) & 0x3;
+    let is_mgmt = ftype == 0;
+    let is_ctl = ftype == 1;
+    let bcast = addr1.len() == 6 && addr1.iter().all(|&b| b == 0xff);
+    let mcast = !addr1.is_empty() && addr1[0] & 0x01 != 0;
+
+    if is_beacon {
+        RTW_TX_QUEUE_BCN
+    } else if is_mgmt || is_ctl {
+        RTW_TX_QUEUE_MGMT
+    } else if bcast || mcast {
+        RTW_TX_QUEUE_HI0
+    } else {
+        crate::pci::Q_BE
+    }
+}
+
+/// tx.c:414-455 `rtw_tx_pkt_info_update`, fuer einen Rahmen OHNE `sta`.
+///
+/// **Was nicht da steht und warum:** `si`/`rtwvif` fuer `mac_id` kommt vom
+/// Rufer (bei uns die 0 aus `vif::add_interface_station`) ·
+/// `rtw_tx_data_pkt_info_update` gehoert zum Datenzweig, den es vor einer
+/// Verbindung nicht gibt · `rtw_tx_report_enable` haengt an
+/// `IEEE80211_TX_CTL_REQ_TX_STATUS`, einer Fahne der oberen Haelfte ·
+/// `rtw_tx_pkt_info_update_sec` ohne `hw_key` laesst `sec_type` auf null,
+/// wie beim Reserved-Page-Weg · `rtw_tx_stats` zaehlt fuer die obere
+/// Haelfte.
+pub fn pkt_info_update(frame: &[u8], mac_id: u8, current_band_type: u8)
+    -> TxPktInfo
+{
+    let mut info = TxPktInfo { mac_id, ..Default::default() };
+    let fc = u16::from_le_bytes([frame[0], frame[1]]);
+    let ftype = (fc >> 2) & 0x3;
+    let subtype = (fc >> 4) & 0xf;
+    // `ieee80211_is_nullfunc`: Datentyp, Subtyp 4 (Null) — hier mitgefuehrt,
+    // weil Linux ihn in DENSELBEN Zweig schickt wie die Verwaltung.
+    let is_mgmt = ftype == 0;
+    let is_nullfunc = ftype == 2 && subtype == 4;
+    if is_mgmt || is_nullfunc {
+        mgmt_pkt_info_update(&mut info, current_band_type);
+    }
+
+    let a1 = &frame[4..10.min(frame.len())];
+    let bcast = a1.len() == 6 && a1.iter().all(|&b| b == 0xff);
+    let mcast = !a1.is_empty() && a1[0] & 0x01 != 0;
+    info.bmc = bcast || mcast;
+
+    info.tx_pkt_size = frame.len() as u32;
+    info.offset = TX_PKT_DESC_SZ as u8;
+    // `pkt_info->qsel = skb->priority` — bei uns setzt es `tx_qsel` aus der
+    // Queue, genau wie `rtw_pci_get_tx_qsel` es fuer jede andere Queue tut.
+    info.ls = true;
+    info
 }

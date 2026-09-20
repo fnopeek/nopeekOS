@@ -535,7 +535,7 @@ pub fn avail_desc(wp: u32, rp: u32, len: u32) -> u32 {
 }
 
 /// pci.c:34-52 `rtw_pci_get_tx_qsel` — nur die Queues, die wir fahren.
-fn tx_qsel(queue: usize) -> u8 {
+pub fn tx_qsel(queue: usize) -> u8 {
     match queue {
         Q_BCN => crate::tx::TX_DESC_QSEL_BEACON,
         Q_H2C => crate::tx::TX_DESC_QSEL_H2C,
@@ -566,25 +566,28 @@ pub fn tx_kick_off_queue(h: i32, trx: &Trx, queue: usize) {
 /// Ringplatz richtet sich nach `wp`, das OWN-Bit wird NICHT gesetzt (das ist
 /// der BCN-Sonderfall), und `wp` rueckt danach vor.
 pub fn tx_write_data(_h: i32, trx: &mut Trx, stage: i32, queue: usize,
-                     payload: &[u8]) -> bool {
+                     info: &mut crate::tx::TxPktInfo, payload: &[u8]) -> bool {
     let desc_sz = crate::tx::TX_PKT_DESC_SZ;
     let ring_len = trx.tx[queue].len;
     let wp = trx.tx[queue].wp;
     let rp = trx.tx[queue].rp;
 
     if avail_desc(wp, rp, ring_len) == 0 {
-        host::print("[rtl8822ce] H2C-Ring voll\n");
+        host::print("[rtl8822ce] Sendering voll, Queue ");
+        host::print_dec(queue as u32);
+        host::print("\n");
         return false; // Linux: -ENOSPC
     }
 
-    let mut info = crate::tx::write_data_h2c_get(payload.len() as u32);
     info.qsel = tx_qsel(queue);
     let mut desc = [0u8; crate::tx::TX_PKT_DESC_SZ];
-    crate::tx::fill_tx_desc(&info, &mut desc);
+    crate::tx::fill_tx_desc(info, &mut desc);
 
     // Ein Platz je Ringindex, damit ein noch nicht abgeholtes Paket nicht
-    // unter dem Chip weggeschrieben wird.
-    let slot = wp * H2C_SLOT_BYTES;
+    // unter dem Chip weggeschrieben wird. Der H2C-Weg hat sein eigenes,
+    // engeres Raster — dort sind die Nutzdaten immer 32 Bytes.
+    let stride = if queue == Q_H2C { H2C_SLOT_BYTES } else { TX_SLOT_BYTES };
+    let slot = wp * stride;
     host::dma_write_buf(stage, slot, &desc);
     host::dma_write_buf(stage, slot + desc_sz as u32, payload);
     let dma = host::dma_phys(stage) as u32 + slot;
@@ -611,7 +614,8 @@ pub fn tx_write_data(_h: i32, trx: &mut Trx, stage: i32, queue: usize,
 
 /// pci.c:1206-1224 `rtw_pci_write_data_h2c`
 pub fn write_data_h2c(h: i32, trx: &mut Trx, stage: i32, buf: &[u8]) -> bool {
-    if !tx_write_data(h, trx, stage, Q_H2C, buf) {
+    let mut info = crate::tx::write_data_h2c_get(buf.len() as u32);
+    if !tx_write_data(h, trx, stage, Q_H2C, &mut info, buf) {
         host::print("[rtl8822ce] failed to write h2c data\n");
         return false;
     }
@@ -764,4 +768,67 @@ pub fn rx_poll(h: i32, trx: &mut Trx, limit: u32, buf: &mut [u8],
     host::w16(h, RTK_PCI_RXBD_IDX_MPDUQ, trx.rx.rp as u16);
 
     rx_done
+}
+
+// ════════════════════════════════════════════════════════════════
+// Stufe 5b: der Sendeweg
+// ════════════════════════════════════════════════════════════════
+
+/// Der Ring, aus dem ein gewoehnlicher Rahmen gesendet wird.
+///
+/// Linux gibt `dma_map_single` auf dem skb selbst — jeder Rahmen liegt
+/// dort, wo der Netzstapel ihn hingelegt hat. Wir haben keinen Allokator,
+/// also gibt es einen festen Platz je Ringindex, genau wie beim H2C-Weg.
+pub const TX_SLOT_BYTES: u32 = 2048;
+
+/// So gross muss der Zwischenpuffer der MGMT-Queue sein: ein Platz je
+/// Ringindex, und `wp` laeuft ueber die ganze Ringlaenge.
+pub const MGMT_STAGE_BYTES: u32 = RTK_DEFAULT_TX_DESC_NUM * TX_SLOT_BYTES;
+
+/// pci.c:897-913 `rtw_pci_tx_write`.
+///
+/// Der Zweig `avail_desc < 2` haelt in Linux die mac80211-Queue an. Ohne
+/// obere Haelfte gibt es nichts anzuhalten; gemeldet wird es trotzdem,
+/// denn ein voller Ring ist Gegendruck und kein Fehler.
+pub fn tx_write(h: i32, trx: &mut Trx, stage: i32, queue: usize,
+                info: &mut crate::tx::TxPktInfo, frame: &[u8]) -> bool {
+    if !tx_write_data(h, trx, stage, queue, info, frame) {
+        return false;
+    }
+    // **`rp` steht bei uns still.** In Linux zieht `rtw_pci_tx_isr` ihn
+    // nach, wenn der Chip einen Deskriptor abgearbeitet hat; ohne
+    // Interrupt und ohne Sendequittung gibt es dafuer noch keinen Weg.
+    // Bei drei Rahmen in einem Ring von 128 ist das folgenlos — bei einem
+    // LAUFENDEN Sender ist es der naechste Posten (Stufe 5c).
+    let r = &trx.tx[queue];
+    if avail_desc(r.wp, r.rp, r.len) < 2 {
+        host::print("[rtl8822ce] Sendering fast voll (Gegendruck)\n");
+    }
+    true
+}
+
+/// Wie `h2c_wait_consumed`, aber fuer eine beliebige Sendequeue.
+///
+/// **Das ist eine DEADLINE, keine Stichprobe.** Ein Blick gleich nach dem
+/// Anstossen sagt nichts: der Chip hat den Deskriptor dann noch nicht
+/// gelesen, und ein `hw != wp` waere kein Befund.
+pub fn tx_wait_consumed(h: i32, trx: &Trx, queue: usize, frist_us: u64)
+    -> (bool, u64, u32)
+{
+    let idx_reg = match TXQ[queue].idx {
+        Some(reg) => reg,
+        None => return (false, 0, 0),
+    };
+    let want = trx.tx[queue].wp & TRX_BD_IDX_MASK;
+    let start = host::now_us();
+    loop {
+        let hw = (host::r32(h, idx_reg) & TRX_BD_HW_IDX_MASK) >> 16;
+        if hw == want {
+            return (true, host::now_us() - start, hw);
+        }
+        let waited = host::now_us() - start;
+        if waited >= frist_us {
+            return (false, waited, hw);
+        }
+    }
 }
