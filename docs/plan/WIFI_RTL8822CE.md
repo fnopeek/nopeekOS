@@ -505,7 +505,7 @@ zweites Mal anwirft, spart sie die ganze Messung.
     python3 tools/wasm/wifi_rtl8822ce/gen_pwrseq.py   # src/pwrseq.rs aus rtw8822c.c
     python3 tools/linux-coverage.py --chip rtl8822ce   # 265 / 940 (war 89)
 
-**Abdeckung nach Stufe 6a: 397 von 940 rtw88-Funktionen** (vor dieser Runde
+**Abdeckung nach Stufe 6b: 398 von 940 rtw88-Funktionen** (vor dieser Runde
 89). `rtw8822c.c` 68/171 · `phy.c` 59/97 · `mac.c` 39/49 · `pci.c` 30/81 ·
 `coex.c` 27/111 · `main.c` 18/84 · `tx.c` 15/31 · `efuse.c` 5/5 · `rx.c` 3/8.
 Auf 0 stehen nur noch `mac80211.c` (die obere Hälfte, die `wifid` ersetzt),
@@ -1195,6 +1195,39 @@ und APP_MIC gesetzt hat.
 LLC/SNAP nicht an der gerechneten Stelle, wird an den zwei anderen
 möglichen gesucht und gesagt, wo es stand. Ein stiller Fehlgriff dort
 verwirft jeden Rahmen und sieht aus wie eine tote Leitung.
+
+### Stufe 6b — der Treiber bleibt stehen (0.23.0)
+
+Florians Lauf von 0.22.0: **DHCP lief durch, er hatte die Adresse** — und
+Sekunden später war sie weg. Das war keine Überraschung, sondern die
+Grenze, die 6a selbst benannt hatte: nach acht Sekunden endete die Stufe,
+`mac_power_off` schaltete den Chip ab, und der Kernel fiel auf `usb-lan`
+zurück.
+
+**Ein Treiber, der seine Arbeit beendet, ist kein Treiber.** Dieselbe
+Schleife läuft jetzt ohne Frist (`frist_us == 0`), und die Zusammenfassung
+der Stufen steht DAVOR — wer nie zurückkehrt, kann sie hinterher nicht
+mehr drucken. `mac_power_off` gilt nur noch für den Fall, dass eine Stufe
+nicht steht: dann kehrt der Treiber zurück, und die laufende Firmware darf
+nicht mehr in Puffer schreiben, die der Kernel gleich freigibt.
+
+Dazu zwei Dinge, die ein stehender Treiber braucht und ein Stufentest nicht:
+
+* **`npk_driver_report` je Sekunde** (Spec §3). Die Luft ist für den Kernel
+  unsichtbar: Kanal, ausgehandelte Rate, Bandbreite, BSSID, Rahmenzähler,
+  Schlüsselzustand stehen nirgends sonst. Ohne sie ist eine Leitung, die
+  wegen einer Legacy-Rate langsam ist, nicht von einer zu unterscheiden,
+  die wegen voller Schlangen langsam ist. `wlan` druckt den Block neben der
+  Kernelsicht.
+* **Ein RX-Wachhund.** Auf einer lebenden Zelle kommt immer etwas — Beacons
+  allein sind zehn je Sekunde. Fünf Sekunden völliges Schweigen heissen,
+  dass der Ring steht, nicht dass die Luft leer ist; gemeldet werden dann
+  Ringzeiger und `rx_tag`, die vier ersten Male.
+
+**Offen und benannt:** ein TX-Wachhund (der Sendering kann genauso
+steckenbleiben) · Wiederverbinden nach einem Deauth (`EV_LINK_DOWN` und ein
+neuer Durchlauf ab 5e) · LPS mit den reservierten Seiten · die laufende
+Koexistenz.
 
 ### ▶ Danach — hier weitermachen
 
