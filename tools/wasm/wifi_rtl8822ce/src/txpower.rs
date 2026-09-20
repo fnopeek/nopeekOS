@@ -19,6 +19,7 @@
 #![allow(dead_code)]
 
 use crate::host;
+use crate::regs::*;
 use crate::tables;
 
 // ── Masse aus main.h ─────────────────────────────────────────────
@@ -518,4 +519,303 @@ pub fn checksums(t: &TxPower) -> [u32; 6] {
     }
     [s2(&t.by_rate_offset_2g), s2(&t.by_rate_offset_5g),
      sb(&t.by_rate_base_2g), sb(&t.by_rate_base_5g), l2, l5]
+}
+
+// ════════════════════════════════════════════════════════════════
+// Stufe 4c: aus den Tabellen wird ein Leistungsindex je Rate
+// ════════════════════════════════════════════════════════════════
+
+/// main.h:438-531 `struct rtw_txpwr_idx`, wie er in der efuse liegt:
+/// 42 Byte je Pfad, gepackt, mit 4-Bit-Feldern.
+///
+///     2G: cck_base[6] · bw40_base[5] · ht_1s_diff · ht_2s/3s/4s_diff
+///     5G: bw40_base[14] · ht_1s · ht_2s/3s/4s · ofdm · vht_1s..4s
+pub struct TxPwrIdx<'a>(pub &'a [u8; 42]);
+
+impl<'a> TxPwrIdx<'a> {
+    fn n4(b: u8, hi: bool) -> i8 {
+        // Ein 4-Bit-Bitfeld mit Vorzeichen, little-endian: das UNTERE
+        // Nibble ist das erste Feld.
+        let v = if hi { b >> 4 } else { b & 0x0f };
+        if v & 0x8 != 0 { (v as i8) - 16 } else { v as i8 }
+    }
+    pub fn cck_base(&self, g: usize) -> u8 { self.0[g] }
+    pub fn bw40_base_2g(&self, g: usize) -> u8 { self.0[6 + g] }
+    // 2G ht_1s_diff @11: ofdm (unten), bw20 (oben)
+    pub fn g2_ht1s_ofdm(&self) -> i8 { Self::n4(self.0[11], false) }
+    pub fn g2_ht1s_bw20(&self) -> i8 { Self::n4(self.0[11], true) }
+    // 2G ht_2s/3s/4s_diff @12,13,14: bw20 (unten), bw40 (oben) im ersten
+    // Byte — `rtw_2g_ns_pwr_idx_diff` ist ZWEI Byte: bw20,bw40 | cck,ofdm
+    pub fn g2_ns_bw20(&self, n: usize) -> i8 { Self::n4(self.0[12 + (n - 2) * 2], false) }
+    pub fn g2_ns_bw40(&self, n: usize) -> i8 { Self::n4(self.0[12 + (n - 2) * 2], true) }
+    // 5G beginnt bei 18: bw40_base[14]
+    pub fn bw40_base_5g(&self, g: usize) -> u8 { self.0[18 + g] }
+    pub fn g5_ht1s_ofdm(&self) -> i8 { Self::n4(self.0[32], false) }
+    pub fn g5_ht1s_bw20(&self) -> i8 { Self::n4(self.0[32], true) }
+    pub fn g5_ns_bw20(&self, n: usize) -> i8 { Self::n4(self.0[33 + (n - 2) * 2], false) }
+    pub fn g5_ns_bw40(&self, n: usize) -> i8 { Self::n4(self.0[33 + (n - 2) * 2], true) }
+    pub fn g5_vht_bw80(&self, n: usize) -> i8 { Self::n4(self.0[40 + (n - 1)], false) }
+}
+
+// Ratengrenzen aus main.h:249-340, gebraucht fuer die Abschnitts- und
+// Streamzuordnung.
+const DESC_RATE11M: u8 = 0x03;
+const DESC_RATE6M: u8 = 0x04;
+const DESC_RATE54M: u8 = 0x0b;
+const DESC_RATEMCS0: u8 = 0x0c;
+const DESC_RATEMCS7: u8 = 0x13;
+const DESC_RATEMCS8: u8 = 0x14;
+const DESC_RATEMCS15: u8 = 0x1b;
+const DESC_RATEMCS16: u8 = 0x1c;
+const DESC_RATEMCS23: u8 = 0x23;
+const DESC_RATEMCS24: u8 = 0x24;
+const DESC_RATEMCS31: u8 = 0x2c;
+const DESC_RATEVHT1SS_MCS0: u8 = 0x2d;
+const DESC_RATEVHT1SS_MCS9: u8 = 0x36;
+const DESC_RATEVHT2SS_MCS0: u8 = 0x37;
+const DESC_RATEVHT2SS_MCS9: u8 = 0x40;
+const DESC_RATEVHT3SS_MCS0: u8 = 0x41;
+const DESC_RATEVHT3SS_MCS9: u8 = 0x4a;
+const DESC_RATEVHT4SS_MCS0: u8 = 0x4b;
+const DESC_RATEVHT4SS_MCS9: u8 = 0x53;
+
+/// phy.c:1962-1990 `rtw_phy_rate_to_rate_section`.
+/// `RTW_RATE_SECTION_NUM` heisst „Rate ungueltig".
+pub fn rate_to_rate_section(rate: u8) -> usize {
+    match rate {
+        0x00..=DESC_RATE11M => 0,
+        DESC_RATE6M..=DESC_RATE54M => 1,
+        DESC_RATEMCS0..=DESC_RATEMCS7 => 2,
+        DESC_RATEMCS8..=DESC_RATEMCS15 => 3,
+        DESC_RATEMCS16..=DESC_RATEMCS23 => 6,
+        DESC_RATEMCS24..=DESC_RATEMCS31 => 7,
+        DESC_RATEVHT1SS_MCS0..=DESC_RATEVHT1SS_MCS9 => 4,
+        DESC_RATEVHT2SS_MCS0..=DESC_RATEVHT2SS_MCS9 => 5,
+        DESC_RATEVHT3SS_MCS0..=DESC_RATEVHT3SS_MCS9 => 8,
+        DESC_RATEVHT4SS_MCS0..=DESC_RATEVHT4SS_MCS9 => 9,
+        _ => RTW_RATE_SECTION_NUM,
+    }
+}
+
+/// phy.c:1872-1960 `rtw_get_channel_group` — die Zuordnung ist erzeugt,
+/// der rechnende Fall (Kanal 14) steht hier.
+fn channel_group(channel: u8, rate: u8) -> u8 {
+    for &(ch, cck, other) in tables::CHANNEL_GROUP_CCK.iter() {
+        if ch == channel {
+            return if rate <= DESC_RATE11M { cck } else { other };
+        }
+    }
+    let i = channel as usize;
+    if i < tables::CHANNEL_GROUP.len() && tables::CHANNEL_GROUP[i] != 0xff {
+        tables::CHANNEL_GROUP[i]
+    } else {
+        // Linux: `default: WARN_ON(1); fallthrough;` -> Gruppe 0
+        0
+    }
+}
+
+fn mcs_rate(rate: u8) -> bool {
+    (DESC_RATEMCS0..=DESC_RATEMCS31).contains(&rate)
+        || (DESC_RATEVHT1SS_MCS0..=DESC_RATEVHT4SS_MCS9).contains(&rate)
+}
+fn above_2ss(rate: u8) -> bool {
+    (DESC_RATEMCS8..=DESC_RATEMCS31).contains(&rate) || rate >= DESC_RATEVHT2SS_MCS0
+}
+fn above_3ss(rate: u8) -> bool {
+    (DESC_RATEMCS16..=DESC_RATEMCS31).contains(&rate) || rate >= DESC_RATEVHT3SS_MCS0
+}
+fn above_4ss(rate: u8) -> bool {
+    (DESC_RATEMCS24..=DESC_RATEMCS31).contains(&rate) || rate >= DESC_RATEVHT4SS_MCS0
+}
+
+/// phy.c:1993-2050 `rtw_phy_get_2g_tx_power_index`
+fn get_2g_tx_power_index(p: &TxPwrIdx, bw: usize, rate: u8, group: u8) -> u8 {
+    let f = TXGI_FACTOR;
+    let g = group as usize;
+    let mut tx = if rate <= DESC_RATE11M {
+        p.cck_base(g) as i16
+    } else {
+        p.bw40_base_2g(g) as i16
+    };
+
+    if (DESC_RATE6M..=DESC_RATE54M).contains(&rate) {
+        tx += p.g2_ht1s_ofdm() as i16 * f;
+    }
+    if !mcs_rate(rate) {
+        return tx as u8;
+    }
+    match bw {
+        1 => {
+            // bw40 ist die Basis
+            if above_2ss(rate) { tx += p.g2_ns_bw40(2) as i16 * f; }
+            if above_3ss(rate) { tx += p.g2_ns_bw40(3) as i16 * f; }
+            if above_4ss(rate) { tx += p.g2_ns_bw40(4) as i16 * f; }
+        }
+        _ => {
+            // RTW_CHANNEL_WIDTH_20 und Linux' `default: WARN_ON(1)`
+            tx += p.g2_ht1s_bw20() as i16 * f;
+            if above_2ss(rate) { tx += p.g2_ns_bw20(2) as i16 * f; }
+            if above_3ss(rate) { tx += p.g2_ns_bw20(3) as i16 * f; }
+            if above_4ss(rate) { tx += p.g2_ns_bw20(4) as i16 * f; }
+        }
+    }
+    tx as u8
+}
+
+/// phy.c:2052-2120 `rtw_phy_get_5g_tx_power_index`
+fn get_5g_tx_power_index(p: &TxPwrIdx, bw: usize, rate: u8, group: u8) -> u8 {
+    let f = TXGI_FACTOR;
+    let g = group as usize;
+    let mut tx = p.bw40_base_5g(g) as i16;
+
+    if !mcs_rate(rate) {
+        tx += p.g5_ht1s_ofdm() as i16 * f;
+        return tx as u8;
+    }
+    match bw {
+        1 => {
+            if above_2ss(rate) { tx += p.g5_ns_bw40(2) as i16 * f; }
+            if above_3ss(rate) { tx += p.g5_ns_bw40(3) as i16 * f; }
+            if above_4ss(rate) { tx += p.g5_ns_bw40(4) as i16 * f; }
+        }
+        2 => {
+            // die Basis von 80 MHz ist der Mittelwert aus bw40+ und bw40-
+            let lower = p.bw40_base_5g(g) as i16;
+            let upper = p.bw40_base_5g(g + 1) as i16;
+            tx = (lower + upper) / 2;
+            tx += p.g5_vht_bw80(1) as i16 * f;
+            if above_2ss(rate) { tx += p.g5_vht_bw80(2) as i16 * f; }
+            if above_3ss(rate) { tx += p.g5_vht_bw80(3) as i16 * f; }
+            if above_4ss(rate) { tx += p.g5_vht_bw80(4) as i16 * f; }
+        }
+        _ => {
+            tx += p.g5_ht1s_bw20() as i16 * f;
+            if above_2ss(rate) { tx += p.g5_ns_bw20(2) as i16 * f; }
+            if above_3ss(rate) { tx += p.g5_ns_bw20(3) as i16 * f; }
+            if above_4ss(rate) { tx += p.g5_ns_bw20(4) as i16 * f; }
+        }
+    }
+    tx as u8
+}
+
+/// phy.c:2149-2196 `rtw_phy_get_tx_power_limit`.
+///
+/// **Es wird das MINIMUM ueber alle Bandbreiten von 20 MHz bis zur
+/// aktuellen genommen** — nicht nur die aktuelle. Und CCK/OFDM kennen nur
+/// 20 MHz, HT hoechstens 40.
+fn get_tx_power_limit(t: &TxPower, band: u8, bw: usize, rate: u8,
+                      regd: usize) -> i8 {
+    let mut power_limit = MAX_POWER_INDEX;
+    if regd > RTW_REGD_WW {
+        return power_limit;
+    }
+    let rs = rate_to_rate_section(rate);
+    if rs == RTW_RATE_SECTION_NUM {
+        return MAX_POWER_INDEX;
+    }
+
+    let mut bw = bw;
+    if rs == 0 || rs == 1 {
+        bw = 0; // nur 20 MHz bei CCK und OFDM
+    }
+    if (DESC_RATEMCS0..=DESC_RATEMCS31).contains(&rate) {
+        bw = bw.min(1); // HT hoechstens 40 MHz
+    }
+
+    for cur_bw in 0..=bw {
+        let cur_ch = t.cch_by_bw[cur_bw];
+        let ch_idx = match channel_to_idx(band, cur_ch) {
+            Some(i) => i,
+            None => return MAX_POWER_INDEX,
+        };
+        let cur_lmt = if cur_ch as usize <= RTW_MAX_CHANNEL_NUM_2G {
+            t.limit_2g[regd][cur_bw][rs][ch_idx]
+        } else {
+            t.limit_5g[regd][cur_bw][rs][ch_idx]
+        };
+        power_limit = power_limit.min(cur_lmt);
+    }
+    power_limit
+}
+
+/// phy.c:2122-2147 `rtw_phy_get_dis_dpd_by_rate_diff`.
+/// `en_dis_dpd` ist beim 8822C true, `dpd_ratemask` ist `DIS_DPD_RATEALL`.
+fn dis_dpd_by_rate_diff(rate: u8) -> i16 {
+    if !EN_DIS_DPD {
+        return 0;
+    }
+    let bit: u16 = match rate {
+        0x04 => DIS_DPD_RATE6M,
+        0x05 => DIS_DPD_RATE9M,
+        DESC_RATEMCS0 => DIS_DPD_RATEMCS0,
+        0x0d => DIS_DPD_RATEMCS1,
+        DESC_RATEMCS8 => DIS_DPD_RATEMCS8,
+        0x15 => DIS_DPD_RATEMCS9,
+        DESC_RATEVHT1SS_MCS0 => DIS_DPD_RATEVHT1SS_MCS0,
+        0x2e => DIS_DPD_RATEVHT1SS_MCS1,
+        DESC_RATEVHT2SS_MCS0 => DIS_DPD_RATEVHT2SS_MCS0,
+        0x38 => DIS_DPD_RATEVHT2SS_MCS1,
+        _ => return 0,
+    };
+    if bit & DPD_RATEMASK != 0 { -6 * TXGI_FACTOR } else { 0 }
+}
+
+/// phy.c:2219-2256 `rtw_get_tx_power_params` + phy.c:2258-2283
+/// `rtw_phy_get_tx_power_index`, zusammengezogen.
+///
+/// **`pwr_sar` ist `max_power_index`**: `hal->sar.src` ist
+/// `RTW_SAR_SOURCE_NONE`, solange kein ACPI-SAR-Block da ist, und
+/// `rtw_query_sar` gibt dann genau das zurueck. **`pwr_remnant` ist 0**:
+/// `txagc_remnant_*` setzt die Leistungsnachfuehrung im laufenden Betrieb.
+#[allow(clippy::too_many_arguments)]
+pub fn get_tx_power_index(t: &TxPower, p: &TxPwrIdx, path: usize, rate: u8,
+                          bw: usize, ch: u8, regd: usize, band: u8) -> u8 {
+    let group = channel_group(ch, rate);
+
+    let (base, offset) = if band == PHY_BAND_2G {
+        (get_2g_tx_power_index(p, bw, rate, group),
+         t.by_rate_offset_2g[path][rate as usize])
+    } else {
+        (get_5g_tx_power_index(p, bw, rate, group),
+         t.by_rate_offset_5g[path][rate as usize])
+    };
+
+    let limit = get_tx_power_limit(t, band, bw, rate, regd);
+    let sar = MAX_POWER_INDEX;
+    let remnant: i16 = 0;
+
+    let mut off = (offset as i16).min(limit as i16).min(sar as i16);
+    off += dis_dpd_by_rate_diff(rate);
+
+    let tx_power = base as i16 + off + remnant;
+    if tx_power > MAX_POWER_INDEX as i16 {
+        MAX_POWER_INDEX as u8
+    } else if tx_power < 0 {
+        // Linux rechnet in u8 und laesst es umlaufen; der Wert wird danach
+        // ohnehin auf sieben Bit beschnitten.
+        (tx_power as i32 as u32 & 0xff) as u8
+    } else {
+        tx_power as u8
+    }
+}
+
+/// phy.c:2285-2330 `rtw_phy_set_tx_power_index_by_rs` +
+/// `rtw_phy_set_tx_power_level_by_path`. Fuellt `tx_pwr_tbl`.
+///
+/// `regd` kommt in Linux aus `rtw_regd_get` — der Regulierungszone, die
+/// `rtw_regd_init` aus dem Laenderkuerzel setzt. Solange die nicht steht,
+/// ist es die efuse-Zone.
+pub fn set_tx_power_level(t: &TxPower, p: &[TxPwrIdx], tbl: &mut [[u8; DESC_RATE_MAX]; RTW_RF_PATH_MAX],
+                          rf_path_num: u8, ch: u8, bw: usize, band: u8, regd: usize) {
+    for path in 0..rf_path_num as usize {
+        // Ohne 2,4 GHz keine CCK-Raten.
+        let start = if band == PHY_BAND_2G { 0 } else { 1 };
+        for rs in start..RTW_RATE_SECTION_NUM {
+            for &rate in tables::RATE_SECTION[rs].iter() {
+                let idx = get_tx_power_index(t, &p[path], path, rate, bw, ch,
+                                             regd, band);
+                tbl[path][rate as usize] = idx;
+            }
+        }
+    }
 }

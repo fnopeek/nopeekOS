@@ -556,6 +556,15 @@ pub extern "C" fn _start() {
         }
     };
 
+    // ── Stufe 4c: rtw_set_channel ────────────────────────────────
+    let stage4c = match (stage4a && stage4b, efuse.as_ref(), _txpwr.as_ref()) {
+        (true, Some(e), Some(t)) => stage4c_set_channel(h, &hal, e, t),
+        _ => {
+            host::print("[rtl8822ce] Stufe 4c: uebersprungen, 4a/4b stehen nicht\n");
+            false
+        }
+    };
+
     // Und wieder aus, aus demselben Grund wie oben: der Kernel gibt gleich
     // die DMA-Puffer frei, in die eine laufende Firmware sonst weiterschriebe.
     mac::mac_power_off(h, hal.cut_version);
@@ -581,9 +590,14 @@ pub extern "C" fn _start() {
         "[rtl8822ce] Stufe 4a: NEIN — nicht weiterbauen, bevor das steht\n"
     });
     host::print(if stage4b {
-        "[rtl8822ce] Stufe 4b: GRUEN — weiter mit Stufe 4c (set_channel)\n"
+        "[rtl8822ce] Stufe 4b: GRUEN\n"
     } else {
         "[rtl8822ce] Stufe 4b: NEIN — nicht weiterbauen, bevor das steht\n"
+    });
+    host::print(if stage4c {
+        "[rtl8822ce] Stufe 4c: GRUEN — DER EMPFAENGER HOERT\n"
+    } else {
+        "[rtl8822ce] Stufe 4c: NEIN — nicht weiterbauen, bevor das steht\n"
     });
 
 
@@ -1061,6 +1075,143 @@ fn stage4a_power_on_tail(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
         host::print("  [Befund] der Empfaenger zaehlt SCHON OHNE Kanal — die\n         \x20          Antenne war der Grund. Stufe 4c wird es bestaetigen.\n");
     } else {
         host::print("  [Befund] weiter still. Dann fehlt der KANAL, und das\n         \x20          ist Stufe 4c (set_channel programmiert AGC und\n         \x20          CCA-Maske). Kein Widerspruch, nur die naechste Stufe.\n");
+    }
+
+    ok
+}
+
+/// main.c:1440-1476 `rtw_set_channel` — Stufe 4c.
+///
+///     rtw_get_channel_params      aus der Kanalwahl werden Mittenkanal,
+///                                 Bandbreite und Unterkanallage
+///     rtw_update_channel          derselbe Zustand in `hal`
+///     chip->ops->set_channel      = rtw8822c_set_channel: BB, MAC, RF,
+///                                   toggle_igi
+///     rtw_coex_switchband_notify  BENANNTE ABWEICHUNG, siehe unten
+///     rtw_phy_set_tx_power_level  aus den Tabellen von 4b wird ein
+///                                 Leistungsindex je Rate und Pfad
+///
+/// **Der Kanal kommt hier von uns, nicht von mac80211.**
+/// `rtw_get_channel_params` liest in Linux eine `cfg80211_chan_def`; die
+/// gibt es ohne obere Haelfte nicht. Fuer 20 MHz ist das Ergebnis dieser
+/// Funktion genau `center = primary = Kanal`, und das ist, was hier
+/// eingesetzt wird — die Rechnung fuer 40 und 80 MHz kommt mit der Stufe,
+/// die eine Bandbreite auswaehlt.
+fn stage4c_set_channel(h: i32, hal: &Hal, e: &efuse::Efuse,
+                       t: &txpower::TxPower) -> bool {
+    // Kanal 1, 20 MHz. Der niedrigste 2,4-GHz-Kanal ist der, auf dem am
+    // ehesten jemand funkt — und genau darum geht es beim Messen.
+    const CH: u8 = 1;
+    const BW: usize = 0; // RTW_CHANNEL_WIDTH_20
+    const PRIMARY_IDX: u8 = RTW_SC_DONT_CARE;
+
+    host::print("[rtl8822ce] Stufe 4c: rtw_set_channel (Kanal ");
+    host::print_dec(CH as u32);
+    host::print(", 20 MHz)\n");
+
+    // `rtw_update_channel` — bei 20 MHz ist der Mittenkanal der primaere,
+    // und `cch_by_bw[20M]` traegt ihn. Der Rest von `hal` (sar_band,
+    // current_band_*) wird hier als lokale Groesse gefuehrt.
+    let mut t2 = txpower::TxPower { cch_by_bw: t.cch_by_bw, ..*t };
+    t2.cch_by_bw[0] = CH;
+
+    let t0 = host::now_us();
+    chip::set_channel(h, CH, BW, PRIMARY_IDX);
+    let dt_ch = host::now_us() - t0;
+
+    // `rtw_coex_switchband_notify` gehoert zur laufenden Koexistenz
+    // (`rtw_coex_run_coex` mit COEX_RSN_2GSWITCHBAND) und braucht den
+    // Verkehrszustand, den erst eine Verbindung hat. BENANNT UND NICHT
+    // GEBAUT — er entscheidet nicht, ob der Empfaenger hoert.
+
+    // `rtw_phy_set_tx_power_level`
+    let t0 = host::now_us();
+    let mut tbl = [[0u8; txpower::DESC_RATE_MAX]; txpower::RTW_RF_PATH_MAX];
+    let idx: [txpower::TxPwrIdx; 4] = [
+        txpower::TxPwrIdx(&e.txpwr_idx[0]), txpower::TxPwrIdx(&e.txpwr_idx[1]),
+        txpower::TxPwrIdx(&e.txpwr_idx[2]), txpower::TxPwrIdx(&e.txpwr_idx[3]),
+    ];
+    txpower::set_tx_power_level(&t2, &idx, &mut tbl, hal.rf_path_num, CH, BW,
+                                txpower::PHY_BAND_2G, e.regd as usize);
+    chip::set_tx_power_index(h, hal.rf_path_num, &tbl);
+    let dt_pwr = host::now_us() - t0;
+
+    host::print("  set_channel ");
+    host::print_dec(dt_ch as u32);
+    host::print(" us, Sendeleistung ");
+    host::print_dec(dt_pwr as u32);
+    host::print(" us (regd ");
+    host::print_dec(e.regd as u32);
+    host::print(")\n  Leistungsindex Pfad A: 1M ");
+    host::print_dec(tbl[0][0x00] as u32);
+    host::print(" · 6M ");
+    host::print_dec(tbl[0][0x04] as u32);
+    host::print(" · MCS7 ");
+    host::print_dec(tbl[0][0x13] as u32);
+    host::print("  ·  Pfad B: 1M ");
+    host::print_dec(tbl[1][0x00] as u32);
+    host::print(" · 6M ");
+    host::print_dec(tbl[1][0x04] as u32);
+    host::print(" · MCS7 ");
+    host::print_dec(tbl[1][0x13] as u32);
+    host::print("\n");
+
+    // RF 0x18 traegt jetzt Band, Kanal und Bandbreite — zurueckgelesen.
+    let rf18_a = phy::read_rf(h, phy::RF_PATH_A, 0x18, phy::RFREG_MASK);
+    let rf18_b = phy::read_rf(h, phy::RF_PATH_B, 0x18, phy::RFREG_MASK);
+    host::print("  RF 0x18: A 0x");
+    host::print_hex32(rf18_a);
+    host::print(" B 0x");
+    host::print_hex32(rf18_b);
+    host::print("  (Kanal ");
+    host::print_dec(rf18_a & 0xff);
+    host::print(", Bandbreite 0x");
+    host::print_hex8(((rf18_a >> 12) & 0x3) as u8);
+    host::print(")\n");
+
+    let mut ok = true;
+    ok &= gate("RF 0x18 traegt auf beiden Pfaden den gesetzten Kanal",
+               rf18_a & 0xff == CH as u32 && rf18_b & 0xff == CH as u32);
+    // 20 MHz ist RF18_BW_20M = BIT(13)|BIT(12), also 0x3 im Feld.
+    ok &= gate("RF 0x18 traegt die Bandbreite 20 MHz",
+               (rf18_a >> 12) & 0x3 == 0x3);
+
+    // ── Das Gate, das seit 0.10.0 auf seine Stufe gewartet hat ───
+    let mut dm = dm::DmInfo::new();
+    chip::false_alarm_statistics(h, &mut dm);
+    host::sleep_ms(200);
+    chip::false_alarm_statistics(h, &mut dm);
+
+    host::print("  Falschalarme: cck ");
+    host::print_dec(dm.cck_fa_cnt);
+    host::print(" · ofdm ");
+    host::print_dec(dm.ofdm_fa_cnt);
+    host::print(" · gesamt ");
+    host::print_dec(dm.total_fa_cnt);
+    host::print("\n  CCA: cck ");
+    host::print_dec(dm.cck_cca_cnt);
+    host::print(" · ofdm ");
+    host::print_dec(dm.ofdm_cca_cnt);
+    host::print(" · gesamt ");
+    host::print_dec(dm.total_cca_cnt);
+    host::print("\n  CRC ok/err: cck ");
+    host::print_dec(dm.cck_ok_cnt);
+    host::print("/");
+    host::print_dec(dm.cck_err_cnt);
+    host::print(" · ofdm ");
+    host::print_dec(dm.ofdm_ok_cnt);
+    host::print("/");
+    host::print_dec(dm.ofdm_err_cnt);
+    host::print(" · ht ");
+    host::print_dec(dm.ht_ok_cnt);
+    host::print("/");
+    host::print_dec(dm.ht_err_cnt);
+    host::print("\n");
+
+    ok &= gate("der Empfaenger zaehlt CCA-Ereignisse", dm.total_cca_cnt != 0);
+    if dm.cck_ok_cnt + dm.ofdm_ok_cnt + dm.ht_ok_cnt > 0 {
+        host::print("  [Befund] und er hat PAKETE mit gueltiger Pruefsumme\n\
+         \x20          gesehen — das ist fremder Funkverkehr auf Kanal 1.\n");
     }
 
     ok

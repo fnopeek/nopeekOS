@@ -61,7 +61,6 @@ const _: () = assert!(OFF_MAC_ADDR == 0x120);
 const XCAP_MASK: u8 = 0x7f;
 
 /// `struct rtw_efuse`, nur die Felder, die `rtw8822c_read_efuse` setzt.
-#[derive(Default)]
 pub struct Efuse {
     pub addr: [u8; 6],
     pub usb_mode_switch: u8,
@@ -90,6 +89,10 @@ pub struct Efuse {
     pub hw_cap_nss: u8,
     pub hw_cap_ptcl: u8,
     pub hw_cap_ant_num: u8,
+    /// rtw8822c.c:74-75 `efuse->txpwr_idx_table[i] = map->txpwr_idx_table[i]`
+    /// — vier Pfade zu 42 Byte, ROH aus der logischen efuse. Die 4-Bit-
+    /// Felder darin liest `txpower::TxPwrIdx`.
+    pub txpwr_idx: [[u8; TXPWR_IDX_SIZE]; 4],
 }
 
 /// rtw8822c.c `rtw8822c_cfg_ldo25`
@@ -230,8 +233,31 @@ fn read_efuse(log_map: &[u8]) -> Efuse {
         thermal_meter: [log_map[OFF_PATH_A_THERMAL], log_map[OFF_PATH_B_THERMAL]],
         thermal_meter_k: ((log_map[OFF_PATH_A_THERMAL] as u16
             + log_map[OFF_PATH_B_THERMAL] as u16) >> 1) as u8,
+        txpwr_idx: {
+            // rtw8822c.c:74-75 — vier Pfade zu 42 Byte am Stueck.
+            let mut t = [[0u8; TXPWR_IDX_SIZE]; 4];
+            for (i, row) in t.iter_mut().enumerate() {
+                let o = OFF_TXPWR_IDX_TABLE + i * TXPWR_IDX_SIZE;
+                row.copy_from_slice(&log_map[o..o + TXPWR_IDX_SIZE]);
+            }
+            t
+        },
         power_track_type: (log_map[OFF_TX_PWR_CALIBRATE_RATE] >> 4) & 0xf,
-        ..Default::default()
+        // Der Rest bleibt null, wie in Linux, wo `rtw_efuse` Teil eines
+        // kzalloc'ten `rtw_dev` ist. `share_ant`/`btcoex` und die vier
+        // `ext_*` setzt `efuse_info_setup` danach.
+        addr: [0; 6],
+        share_ant: false,
+        btcoex: false,
+        ext_pa_2g: 0,
+        ext_lna_2g: 0,
+        ext_pa_5g: 0,
+        ext_lna_5g: 0,
+        hw_cap_hci: 0,
+        hw_cap_bw: 0,
+        hw_cap_nss: 0,
+        hw_cap_ptcl: 0,
+        hw_cap_ant_num: 0,
     };
     // rtw8822ce_efuse_parsing: ether_addr_copy(efuse->addr, map->e.mac_addr)
     e.addr.copy_from_slice(&log_map[OFF_MAC_ADDR..OFF_MAC_ADDR + 6]);

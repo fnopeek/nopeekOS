@@ -529,6 +529,69 @@ def txpower_reference():
             "];\n"]
 
 
+
+def channel_groups():
+    """phy.c:1872-1960 `rtw_get_channel_group` — 89 Zeilen `switch`, die
+    einen Kanal auf eine Leistungsgruppe abbilden. Wieder Daten in
+    Schaltergestalt.
+
+    **Eine Ausnahme rechnet**, und welche das ist, liest der Erzeuger aus
+    der Quelle statt sie zu raten: die Zeile `return rate <= DESC_RATE11M ?
+    A : B`. Hier steht dafuer der NICHT-CCK-Wert B; den CCK-Wert A traegt
+    `txpower.rs` als Sonderfall."""
+    src = open(PHY_SRC, errors="ignore").read()
+    m = re.search(r"static u8 rtw_get_channel_group\(u8 channel, u8 rate\)"
+                  r"\n\{(.*?)\n\}\n", src, re.S)
+    if not m:
+        sys.exit("rtw_get_channel_group nicht gefunden")
+
+    groups, pending, special = {}, [], []
+    for raw in m.group(1).split("\n"):
+        line = raw.strip()
+        c = re.match(r"case (\d+):$", line)
+        if c:
+            pending.append(int(c.group(1))); continue
+        r = re.match(r"return (\d+);$", line)
+        if r:
+            for ch in pending:
+                groups[ch] = int(r.group(1))
+            pending = []
+            continue
+        rr = re.match(r"return rate <= DESC_RATE11M \? (\d+) : (\d+);$", line)
+        if rr:
+            cck, other = int(rr.group(1)), int(rr.group(2))
+            for ch in pending:
+                special.append((ch, cck, other))
+                groups[ch] = other
+            pending = []
+
+    lo, hi = min(groups), max(groups)
+    out = ["""/// phy.c:1872-1960 `rtw_get_channel_group` — Kanal auf Leistungsgruppe.
+/// Index ist die Kanalnummer; 0xff heisst „kein Eintrag" (Linux warnt dort
+/// und faellt auf Gruppe 0).
+///
+/// **Kanal 2 rechnet** — CCK gibt 0, alles andere 1 — und steht deshalb
+/// hier mit dem NICHT-CCK-Wert; den Sonderfall macht `txpower.rs`."""]
+    out.append(f"pub static CHANNEL_GROUP: [u8; {hi + 1}] = [")
+    row = []
+    for ch in range(hi + 1):
+        row.append(str(groups.get(ch, 0xff)))
+        if len(row) == 16:
+            out.append("    " + ", ".join(row) + ","); row = []
+    if row:
+        out.append("    " + ", ".join(row) + ",")
+    out.append("];\n")
+    out.append("/// Die rechnenden Faelle: (Kanal, Gruppe fuer CCK, sonst)")
+    out.append(f"pub static CHANNEL_GROUP_CCK: [(u8, u8, u8); {len(special)}] = [")
+    for ch, cck, other in special:
+        out.append(f"    ({ch}, {cck}, {other}),")
+    out.append("];\n")
+    print(f"  {'channel_group (phy.c switch)':30s} {len(groups):6d} Kanaele "
+          f"({lo}..{hi}), rechnend: "
+          + ", ".join(f"Kanal {c} -> CCK {a} sonst {b}" for c, a, b in special))
+    return out
+
+
 def main():
     src = open(SRC, errors="ignore").read()
     out = ['''//! ERZEUGT von gen_tables.py aus Linux 6.18.26 rtw8822c_table.c — nicht
@@ -573,6 +636,7 @@ pub const EXPECTED_WRITES_CUT_D_RFE1: [(&str, u32); %d] = [""" % len(expected))
     out += txpwr_by_rate_map()
     out += struct_tables()
     out += rate_sections()
+    out += channel_groups()
     out += txpower_reference()
 
     open(OUT, "w").write("\n".join(out))

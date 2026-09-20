@@ -33,6 +33,8 @@ mod host {
     pub fn sleep_ms(_ms: u32) {}
 }
 #[allow(dead_code, clippy::all)]
+mod regs { include!("regs_inc.rs"); }
+#[allow(dead_code, clippy::all)]
 mod tables { include!("tables_inc.rs"); }
 #[allow(dead_code, clippy::all)]
 mod txpower { include!("txpower_inc.rs"); }
@@ -70,7 +72,7 @@ def main():
         # Die Modulkopf-Attribute und inneren Doc-Kommentare stoeren beim
         # `include!`; sie fliegen fuer die Gegenprobe raus, die Quelle
         # selbst bleibt unberuehrt.
-        for name in ("tables", "txpower"):
+        for name in ("tables", "txpower", "regs"):
             s = (SRC / f"{name}.rs").read_text()
             s = re.sub(r"^#!\[[^\]]*\]\s*$", "", s, flags=re.M)
             s = re.sub(r"^//!.*$", "", s, flags=re.M)
