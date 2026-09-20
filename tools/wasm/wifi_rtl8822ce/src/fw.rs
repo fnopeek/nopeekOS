@@ -373,3 +373,26 @@ pub fn scan_notify(h: i32, st: &mut H2cState, start: bool) -> bool {
     h2c_set(&mut pkt, 0, 1 << 8, start as u32); // SET_SCAN_START
     send_h2c_command(h, st, &pkt)
 }
+
+/// fw.c:437-446 `rtw_fw_inform_rfk_status` — Kommando 0x6d, Postfach.
+pub fn inform_rfk_status(h: i32, st: &mut H2cState, start: bool) -> bool {
+    let mut pkt = [0u8; H2C_PKT_SIZE];
+    set_cmd_id_class(&mut pkt, H2C_CMD_WIFI_CALIBRATION);
+    h2c_set(&mut pkt, 0, 1 << 8, start as u32); // RFK_SET_INFORM_START
+    send_h2c_command(h, st, &pkt)
+}
+
+/// fw.c:448-459 `rtw_fw_do_iqk` — der QUEUE-Weg, nicht das Postfach.
+///
+/// Die IQK rechnet die FIRMWARE; der Treiber stoesst sie nur an und wartet
+/// danach auf `REG_RPT_CIP`.
+pub fn do_iqk(h: i32, trx: &mut Trx, stage: i32, st: &mut H2cState,
+              clear: bool, segment_iqk: bool) -> bool {
+    let mut pkt = [0u8; H2C_PKT_SIZE];
+    let total_size = H2C_PKT_HDR_SIZE + 1;
+    h2c_pkt_set_header(&mut pkt, H2C_PKT_IQK as u32);
+    h2c_set(&mut pkt, 1, 0x0000_ffff, total_size as u32); // SET_PKT_H2C_TOTAL_LEN
+    h2c_set(&mut pkt, 2, 1 << 0, clear as u32); // IQK_SET_CLEAR
+    h2c_set(&mut pkt, 2, 1 << 1, segment_iqk as u32); // IQK_SET_SEGMENT_IQK
+    send_h2c_packet(h, trx, stage, st, &mut pkt)
+}

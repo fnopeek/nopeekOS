@@ -36,6 +36,15 @@ R = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
 
 C_OPS = re.compile(
     r"rtw_(write|read)(8|16|32)(_set|_clr|_mask)?\s*\(\s*rtwdev\s*,\s*([^,)]+)")
+
+# `read_poll_timeout(rtw_read32_mask, val, …, rtwdev, REG, MASK)` — der
+# Zugriff steht als ARGUMENT eines Makros, nicht als Aufruf. Fuer C_OPS ist
+# er unsichtbar, und die Funktion meldete deshalb weniger Zugriffe als sie
+# macht. Mindestens fuenf Stellen in rtw88 arbeiten so.
+C_POLL = re.compile(
+    r"read_poll_timeout(?:_atomic)?\s*\(\s*"
+    r"rtw_(write|read)(8|16|32)(_set|_clr|_mask)?\s*,"
+    r"(.*?)\)\s*;", re.S)
 RS_OPS = re.compile(
     r"host::(w|r|set|clr)(8|16|32)(_mask)?\s*\(\s*h\s*,\s*([^,)]+)")
 
@@ -53,6 +62,10 @@ def hexes(body, strip_comments):
     Kommentare fliegen vorher raus — unsere tragen Adressen im Text."""
     if strip_comments:
         body = re.sub(r"//[^\n]*", "", body)
+        # Unsere Seite schreibt dieselben Masken als `1 << n`.
+        body = re.sub(r"\b1(?:u8|u16|u32|u64|usize|i8|i16|i32|i64)?"
+                      r"\s*<<\s*(\d+)\b",
+                      lambda m: "0x%x" % (1 << int(m.group(1))), body)
     else:
         body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
         # `rtw_dbg(..., "[DACK] ADCK 0x%08x=0x08%x\n", ...)` enthaelt 0x08.
@@ -62,6 +75,17 @@ def hexes(body, strip_comments):
         # Adressen als ARGUMENTE, und die sind keine Registerarbeit.
         body = re.sub(r"\brtw_(?:dbg|err|warn|info)\s*\([^;]*?\);", "", body,
                       flags=re.S)
+        # `GENMASK(27, 16)` und `BIT(12)` sind ZAHLEN, nur anders
+        # geschrieben. Ohne diese Zeile meldet jede Funktion, die in Linux
+        # eine Maske als Makro schreibt und bei uns als Hexzahl, einen
+        # Unterschied -- und jede davon braeuchte eine eigene Ausnahme.
+        # Vier Funktionen der DPK allein waren das.
+        body = re.sub(r"GENMASK\(\s*(\d+)\s*,\s*(\d+)\s*\)",
+                      lambda m: "0x%x" % (((1 << (int(m.group(1))
+                                                  - int(m.group(2)) + 1)) - 1)
+                                          << int(m.group(2))), body)
+        body = re.sub(r"\bBIT\(\s*(\d+)\s*\)",
+                      lambda m: "0x%x" % (1 << int(m.group(1))), body)
     return [int(v.replace("_", ""), 16) for v in HEX.findall(body)]
 
 # Zugriffe, die in Linux NUR im SDIO- oder USB-Zweig stehen. Auf PCIe ist
@@ -81,7 +105,7 @@ OTHER_BUS = {
 
 # Hexzahlen, die nur im Zweig eines anderen Busses stehen.
 HEX_OTHER_BUS = {
-    "__priority_queue_cfg": [0x1],  # USB: rtw_write8_set(..., BIT(1))
+    "__priority_queue_cfg": [0x2],  # USB: rtw_write8_set(..., BIT(1))
     # rtw8822c.h:183 XCAP_MASK -- bei uns beim NAMEN genannt und von
     # check_regs.py gegen die Quelle geprueft, deshalb keine Zahl im Code.
     "rtw8822c_phy_set_param": [0x7f],
@@ -90,6 +114,21 @@ HEX_OTHER_BUS = {
 # Funktionen, deren ZUGRIFFSFOLGE bewusst von Linux abweicht, mit Grund.
 # Die Abweichung steht hier namentlich, nicht als stiller Filter im Code.
 DEVIATION = {
+    "rtw8822c_dpk_restore_registers":
+        "util.c rtw_restore_reg ist eingesetzt statt aufgerufen -- wie bei "
+        "rtw8822c_dac_restore_reg. Hier sind alle Eintraege 4 Byte breit, "
+        "der len-Zweig faellt weg.",
+    "rtw8822c_rfk_handshake":
+        "Linux schreibt die ARFR4-Abfrage in BEIDEN Zweigen aus; bei uns "
+        "steht sie einmal als wait_rfk_ack und wird zweimal gerufen. "
+        "Gleiche Folge am Bus, eine Zeile weniger im Text.",
+    "rtw8822c_txgapk_afe_dpk":
+        "Linux schreibt die achtzehn Werte als achtzehn Aufrufe aus, bei "
+        "uns stehen sie in einem Feld und eine Schleife schreibt sie. "
+        "DIESELBE Folge auf DASSELBE Register -- und dass die achtzehn "
+        "ZAHLEN stimmen, prueft der Zahlenvergleich daneben.",
+    "rtw8822c_txgapk_afe_dpk_restore":
+        "wie rtw8822c_txgapk_afe_dpk, sechzehn Werte.",
     "rtw_read8_physical_efuse":
         "Linux pollt mit read_poll_timeout(rtw_read32, ...) -- ein Makro, das "
         "der Zaehler als EINEN Zugriff sieht; wir lesen in einer Schleife.",
@@ -113,6 +152,13 @@ DEVIATION = {
 # Funktionen, deren Zahlenfolge sich NICHT vergleichen laesst, mit Grund.
 # Die Zugriffsfolge wird trotzdem geprueft.
 HEX_SKIP = {
+    "rtw_fw_scan_notify": "wie rtw_fw_send_general_info.",
+    "rtw_fw_inform_rfk_status": "wie rtw_fw_send_general_info.",
+    "rtw_fw_do_iqk": "wie rtw_fw_send_general_info.",
+    "rtw8822c_txgapk_write_tx_gain":
+        "Linux setzt `tmp = 0x20` schon in der Deklarationszeile und gleich "
+        "darauf noch einmal im 2,4-GHz-Zweig; die erste Zuweisung ist tot. "
+        "Bei uns gibt es sie nicht, also eine 0x20 weniger.",
     "rtw_tx_queue_mapping":
         "wie rtw_tx_pkt_info_update: ieee80211_is_beacon/is_mgmt/is_ctl und "
         "is_broadcast_ether_addr sind Makros ohne Zahl, bei uns Masken auf "
@@ -282,6 +328,17 @@ ALIAS = {
     "edcca_th[EDCCA_TH_H2L_IDX].hw_reg.addr": "addr",
     # Stufe 5b: derselbe Zugriff, andere Schreibweise des Ausdrucks.
     "start+i": "start+iasu32",
+    # Stufe 5d: Schleifenvariable bzw. GROSSGESCHRIEBENE Tabelle.
+    "reg[i]": "r",
+    "reg[path]+addr*4": "REG[path]+addr*4",
+    "0x1b18+offset[path]": "0x1b18+OFFSET[path]",
+    "REG_DPD_CTL0_S0+offset[path]": "REG_DPD_CTL0_S0+OFFSET[path]",
+    "REG_DPD_CTL1_S0+offset[path]": "REG_DPD_CTL1_S0+OFFSET[path]",
+    "path_setting[path]": "PATH_SETTING[path]",
+    "set_pi[path]": "SET_PI[path]",
+    "three_wire[path]": "THREE_WIRE[path]",
+    "cfg1_1b00[path]": "CFG1_1B00[path]",
+    "cfg2_1b00[path]": "CFG2_1B00[path]",
 }
 
 # Umbenennungen, die NUR in einer Funktion gelten. Ein globaler Eintrag fuer
@@ -327,7 +384,24 @@ def apply_alias_in(name, c):
     return out
 
 
+def poll_expand(body):
+    """Jeden `read_poll_timeout(rtw_readXX, …)` in einen gewoehnlichen
+    Aufruf umschreiben, damit `C_OPS` ihn sieht."""
+    def rep(m):
+        kind, width, mod, rest = m.groups()
+        # Die Argumente hinter `false,` sind die des Lesers: rtwdev, REG, …
+        parts = [p.strip() for p in rest.split(",")]
+        try:
+            i = parts.index("rtwdev")
+        except ValueError:
+            return m.group(0)
+        args = ", ".join(parts[i:])
+        return f"rtw_{kind}{width}{mod or ''}({args});"
+    return C_POLL.sub(rep, body)
+
+
 def c_seq(body):
+    body = poll_expand(body)
     out = []
     for m in C_OPS.finditer(body):
         kind, width, mod, reg = m.groups()

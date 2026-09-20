@@ -63,6 +63,9 @@ mod pci;
 mod phy;
 mod pwrseq;
 mod rfk;
+mod rfkcal;
+mod dpk;
+mod txgapk;
 mod rx;
 mod sec;
 mod tables;
@@ -603,6 +606,15 @@ pub extern "C" fn _start() {
         }
     };
 
+    // ── Stufe 5d: die RF-Kalibrierung ────────────────────────────
+    let stage5d = match (stage5c, efuse.as_ref()) {
+        (true, Some(e)) => stage5d_calibration(h, &hal, &mut trx, h2c_buf, e),
+        _ => {
+            host::print("[rtl8822ce] Stufe 5d: uebersprungen, 5c steht nicht\n");
+            false
+        }
+    };
+
     // Und wieder aus, aus demselben Grund wie oben: der Kernel gibt gleich
     // die DMA-Puffer frei, in die eine laufende Firmware sonst weiterschriebe.
     mac::mac_power_off(h, hal.cut_version);
@@ -651,6 +663,11 @@ pub extern "C" fn _start() {
         "[rtl8822ce] Stufe 5c: GRUEN — WIR SEHEN DIE UMGEBUNG\n"
     } else {
         "[rtl8822ce] Stufe 5c: NEIN — nicht weiterbauen, bevor das steht\n"
+    });
+    host::print(if stage5d {
+        "[rtl8822ce] Stufe 5d: GRUEN — DER SENDER IST KALIBRIERT\n"
+    } else {
+        "[rtl8822ce] Stufe 5d: NEIN — nicht weiterbauen, bevor das steht\n"
     });
 
 
@@ -1982,6 +1999,185 @@ fn print_ssid(s: &[u8]) {
     for &c in s {
         let b = [if (0x20..0x7f).contains(&c) { c } else { b'.' }];
         host::print(unsafe { core::str::from_utf8_unchecked(&b) });
+    }
+}
+
+/// rtw8822c.c:4179-4186 `rtw8822c_phy_calibration` — Stufe 5d.
+///
+/// **Sie laeuft hier, weil Linux sie hier laufen laesst.** `rtw_set_channel`
+/// setzt nur `need_rfk = true`; ausgefuehrt wird sie in
+/// `rtw_chip_prepare_tx`, das mac80211 aus `mgd_prepare_tx` ruft — also
+/// nach dem Suchlauf und VOR dem Anmelden. Waehrend des Suchens auf jedem
+/// Kanal zu kalibrieren dauert zu lange, und genau das sagt der Kommentar
+/// in `main.c`.
+#[allow(clippy::too_many_arguments)]
+fn stage5d_calibration(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
+                       e: &efuse::Efuse) -> bool {
+    host::print("[rtl8822ce] Stufe 5d: die RF-Kalibrierung\n");
+    if h2c_buf < 0 {
+        host::print("  kein DMA-Puffer fuer H2C\n");
+        return false;
+    }
+
+    // `dm_flags` wird in Linux NUR aus debugfs beschrieben; beim Start ist
+    // es null, und damit ist keine Kalibrierung abgeschaltet.
+    const DM_FLAGS: u32 = 0;
+
+    host::print("  power_track_type ");
+    host::print_dec(e.power_track_type as u32);
+    host::print(" · thermal_meter ");
+    host::print_dec(e.thermal_meter_k as u32);
+    host::print("\n");
+
+    let mut h2c = fw::H2cState::default();
+    let mut gapk = txgapk::GapkInfo::new();
+    let mut dpkinfo = dpk::DpkInfo::new();
+    // `rtw_load_rfk_table` hat die RFK-Tabelle in Stufe 3c geschrieben und
+    // setzt dabei dieses Flag (phy.c:1847). Ohne geladene Tabelle gaebe es
+    // keine DPK — die Reihenfolge ist der Grund, nicht ein Sonderfall.
+    dpkinfo.is_dpk_pwr_on = true;
+    let mut bt_iqk_timeout = false;
+
+    let t_all = host::now_us();
+
+    // `rtw8822c_rfk_power_save(rtwdev, false)`
+    rfkcal::power_save(h, hal.rf_path_num, false);
+
+    // ── do_gapk ──────────────────────────────────────────────────
+    let t0 = host::now_us();
+    let (gapk_rpt, hs1, hs2) =
+        rfkcal::do_gapk(h, &mut gapk, hal.rf_path_num, DM_FLAGS,
+                        e.power_track_type, &mut bt_iqk_timeout, &mut h2c);
+    let dt_gapk = host::now_us() - t0;
+
+    host::print("  Handschlag: BT-IQK ");
+    if hs1.bt_iqk_timeout {
+        host::print("ZEITUEBERSCHREITUNG nach ");
+    } else {
+        host::print("frei nach ");
+    }
+    host::print_dec(hs1.bt_iqk_waited_us as u32);
+    host::print(" us · Start-Quittung ");
+    host::print(if hs1.start_ack { "ja" } else { "NEIN" });
+    host::print(" (");
+    host::print_dec(hs1.start_ack_us as u32);
+    host::print(" us) · Ende-Quittung ");
+    host::print(if hs2.finish_ack { "ja" } else { "NEIN" });
+    host::print(" (");
+    host::print_dec(hs2.finish_ack_us as u32);
+    host::print(" us)\n  TXGAPK: ");
+    match gapk_rpt {
+        txgapk::TxgapkRpt::Ran => {
+            host::print("gelaufen, Kanal ");
+            host::print_dec(gapk.channel as u32);
+            host::print(" · Versatz Pfad A");
+            for i in 0..txgapk::RF_HW_OFFSET_NUM_U {
+                host::print(if i == 0 { " " } else { "," });
+                print_signed(gapk.offset[i][0] as i32);
+            }
+        }
+        txgapk::TxgapkRpt::NoTxGain =>
+            host::print("uebersprungen, keine Verstaerkungstabelle gelesen"),
+        txgapk::TxgapkRpt::TssiMode(t) => {
+            host::print("uebersprungen — TSSI-Modus (power_track_type ");
+            host::print_dec(t as u32);
+            host::print("), der Chip regelt selbst");
+        }
+        txgapk::TxgapkRpt::Disabled =>
+            host::print("abgeschaltet ueber dm_flags"),
+    }
+    host::print(" · ");
+    host::print_dec((dt_gapk / 1000) as u32);
+    host::print(" ms\n");
+
+    // ── do_iqk ───────────────────────────────────────────────────
+    let t0 = host::now_us();
+    let (iqk_ok, iqk_us, iqk_chk) = rfkcal::do_iqk(h, trx, h2c_buf, &mut h2c);
+    let _ = host::now_us() - t0;
+    host::print("  IQK (Firmware): ");
+    host::print(if iqk_ok { "fertig" } else { "NICHT fertig" });
+    host::print(", RPT_CIP 0x");
+    host::print_hex8(iqk_chk);
+    host::print(" nach ");
+    host::print_dec((iqk_us / 1000) as u32);
+    host::print(" ms\n");
+
+    // ── do_dpk ───────────────────────────────────────────────────
+    let t0 = host::now_us();
+    let dpk_rpt = dpk::do_dpk(h, &mut dpkinfo, hal.rf_path_num);
+    let dt_dpk = host::now_us() - t0;
+    host::print("  DPK: ");
+    let mut dpk_paths = 0u8;
+    match dpk_rpt {
+        dpk::DpkRpt::Ran { path_ok, gs, txagc, coef1_ready } => {
+            dpk_paths = path_ok;
+            host::print("Pfade ok 0b");
+            host::print_dec((path_ok & 1) as u32);
+            host::print_dec(((path_ok >> 1) & 1) as u32);
+            host::print(" · gs ");
+            host::print_dec(gs[0] as u32);
+            host::print("/");
+            host::print_dec(gs[1] as u32);
+            host::print(" · txagc ");
+            host::print_dec(txagc[0] as u32);
+            host::print("/");
+            host::print_dec(txagc[1] as u32);
+            host::print(" · coef1 ");
+            host::print(if coef1_ready { "fertig" } else { "HAENGT" });
+        }
+        dpk::DpkRpt::PwrOff => host::print("uebersprungen, DPD-Strom aus"),
+        dpk::DpkRpt::Reloaded => host::print("aus dem Zwischenspeicher"),
+    }
+    host::print(" · ");
+    host::print_dec((dt_dpk / 1000) as u32);
+    host::print(" ms · Waerme ");
+    host::print_dec(dpkinfo.thermal_dpk[0] as u32);
+    host::print("/");
+    host::print_dec(dpkinfo.thermal_dpk[1] as u32);
+    host::print("\n");
+
+    // `rtw8822c_rfk_power_save(rtwdev, true)`
+    rfkcal::power_save(h, hal.rf_path_num, true);
+    host::print("  gesamt ");
+    host::print_dec(((host::now_us() - t_all) / 1000) as u32);
+    host::print(" ms\n");
+
+    // ── Und die Frage, die zaehlt: hoert der Empfaenger danach noch? ──
+    // Eine Kalibrierung, die den Empfang kaputtmacht, ist schlimmer als
+    // keine. Dieselbe Messung wie in Stufe 4c, damit die Zahlen
+    // vergleichbar sind.
+    let mut dm = dm::DmInfo::new();
+    chip::false_alarm_statistics(h, &mut dm);
+    host::sleep_ms(200);
+    chip::false_alarm_statistics(h, &mut dm);
+    host::print("  danach: CCA ");
+    host::print_dec(dm.total_cca_cnt);
+    host::print(" · CRC ok/err cck ");
+    host::print_dec(dm.cck_ok_cnt);
+    host::print("/");
+    host::print_dec(dm.cck_err_cnt);
+    host::print(" · ofdm ");
+    host::print_dec(dm.ofdm_ok_cnt);
+    host::print("/");
+    host::print_dec(dm.ofdm_err_cnt);
+    host::print("\n");
+
+    let mut ok = true;
+    ok &= gate("die Firmware quittiert den RFK-Handschlag",
+               hs1.start_ack && hs2.finish_ack);
+    ok &= gate("die Firmware meldet die IQK als fertig", iqk_ok);
+    ok &= gate("die DPK richtet mindestens einen Pfad ein", dpk_paths != 0);
+    ok &= gate("und der Empfaenger hoert danach unveraendert",
+               dm.total_cca_cnt != 0);
+    ok
+}
+
+fn print_signed(v: i32) {
+    if v < 0 {
+        host::print("-");
+        host::print_dec((-v) as u32);
+    } else {
+        host::print_dec(v as u32);
     }
 }
 

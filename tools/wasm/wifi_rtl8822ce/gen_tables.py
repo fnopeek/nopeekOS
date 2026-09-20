@@ -38,7 +38,87 @@ TABLES = [
     ("rtw8822c_array_mp_cal_init", "RFK_INIT", "rtw_phy_cfg_bb, ueber rtw_load_rfk_table"),
     ("rtw8822c_rf_a", "RF_A", "rtw_phy_cfg_rf, RF_PATH_A"),
     ("rtw8822c_rf_b", "RF_B", "rtw_phy_cfg_rf, RF_PATH_B"),
+] 
+
+# Stufe 5d — die drei Tabellen von `rtw8822c_do_dpk`. Sie sind TRIPEL
+# (Adresse, Maske, Wert) und werden mit `rtw_write32_mask` geschrieben
+# (`rtw8822c_parse_tbl_dpk`), nicht paarweise wie alle anderen. Ein
+# Paar-Leser haette sie still falsch gelesen.
+DPK_TABLES = [
+    ("rtw8822c_dpk_mac_bb", "DPK_MAC_BB", "rtw8822c_dpk_mac_bb_setting"),
+    ("rtw8822c_dpk_afe_is_dpk", "DPK_AFE_IS_DPK", "rtw8822c_dpk_afe_setting(true)"),
+    ("rtw8822c_dpk_afe_no_dpk", "DPK_AFE_NO_DPK", "rtw8822c_dpk_afe_setting(false)"),
 ]
+
+
+_MASK_NAMES = None
+
+
+def mask_names():
+    """Benannte Masken aus den Linux-Headern (`MASKDWORD` & Co.).
+
+    Die AFE-Tabellen schreiben ihre Maske als NAMEN. Ein Leser, der nur
+    Zahlen kennt, muesste sie ueberspringen — und eine uebersprungene
+    Maske ist ein stiller Schreibfehler auf echte Hardware.
+    """
+    global _MASK_NAMES
+    if _MASK_NAMES is not None:
+        return _MASK_NAMES
+    _MASK_NAMES = {}
+    base = os.path.dirname(SRC)
+    for f in ("phy.h", "reg.h", "main.h", "rtw8822c.h"):
+        path = os.path.join(base, f)
+        if not os.path.exists(path):
+            continue
+        for m in re.finditer(r"^\s*#define\s+(MASK\w+|BIT_\w+|GENMASK\w*)"
+                             r"\s+(.+?)\s*$",
+                             open(path, errors="ignore").read(), re.M):
+            e = m.group(2).split("/*")[0].strip()
+            e = re.sub(r"BIT\((\d+)\)", r"(1 << \1)", e)
+            e = re.sub(r"GENMASK\((\d+),\s*(\d+)\)",
+                       lambda g: str(((1 << (int(g.group(1)) -
+                                             int(g.group(2)) + 1)) - 1)
+                                     << int(g.group(2))), e)
+            if not re.fullmatch(r"[0-9a-fA-FxX()<>|&~+*\s-]+", e):
+                continue
+            try:
+                _MASK_NAMES.setdefault(m.group(1),
+                                       eval(e, {"__builtins__": {}}, {}))
+            except Exception:
+                pass
+    return _MASK_NAMES
+
+
+def parse_triples(src, name):
+    """`{addr, bitmask, data}` — mit BIT()/GENMASK() in der Maske."""
+    m = re.search(r"static const u32\s+" + name + r"\[\]\s*=\s*\{(.*?)\n\};",
+                  src, re.S)
+    if not m:
+        sys.exit(f"Tabelle {name} nicht gefunden")
+    body = m.group(1)
+    names = mask_names()
+    toks = []
+    pat = (r"BIT\(\s*(\d+)\s*\)|GENMASK\(\s*(\d+)\s*,\s*(\d+)\s*\)"
+           r"|0x[0-9A-Fa-f]+|\b\d+\b|\b[A-Z][A-Z0-9_]*\b")
+    for t in re.finditer(pat, body):
+        g = t.group(0)
+        if g.startswith("BIT("):
+            toks.append(1 << int(t.group(1)))
+        elif g.startswith("GENMASK("):
+            hi, lo = int(t.group(2)), int(t.group(3))
+            toks.append(((1 << (hi - lo + 1)) - 1) << lo)
+        elif g[0].isdigit():
+            toks.append(int(g, 0))
+        elif g in names:
+            toks.append(names[g])
+        else:
+            sys.exit(f"{name}: unbekannter Name {g!r}")
+    rest = re.sub(pat, "", body)
+    if re.search(r"[^\s,]", rest):
+        sys.exit(f"{name}: unerwarteter Inhalt {rest.strip()[:60]!r}")
+    if len(toks) % 3:
+        sys.exit(f"{name}: {len(toks)} Woerter sind kein Vielfaches von 3")
+    return toks
 
 
 def parse(src, name):
@@ -629,6 +709,16 @@ def main():
 ''']
     total = 0
     expected = []
+    dpk_out = []
+    for cname, rname, note in DPK_TABLES:
+        vals = parse_triples(src, cname)
+        dpk_out.append(f"/// rtw8822c_table.c `{cname}` — {len(vals)//3} "
+                       f"Tripel (Adresse, Maske, Wert) · {note}")
+        dpk_out.append(f"pub static {rname}: [u32; {len(vals)}] = [")
+        for i in range(0, len(vals), 3):
+            dpk_out.append("    " + " ".join(f"0x{v:08x}," for v in vals[i:i + 3]))
+        dpk_out.append("];\n")
+        print(f"  {cname:32s} {len(vals)//3:5d} Tripel")
     for cname, rname, note in TABLES:
         vals = parse(src, cname)
         if len(vals) % 2:
@@ -663,6 +753,7 @@ pub const EXPECTED_WRITES_CUT_D_RFE1: [(&str, u32); %d] = [""" % len(expected))
     out += db_invert_table()
     out += txpower_reference()
 
+    out.extend(dpk_out)
     open(OUT, "w").write("\n".join(out))
     print(f"  {'SUMME':30s} {total:6d} Woerter "
           f"({total * 4 / 1024:7.1f} KiB) -> {OUT}")
