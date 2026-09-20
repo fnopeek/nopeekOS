@@ -7,14 +7,14 @@ IdeaPad Flex 5 14ALC7 das **einzige** eingebaute Netzgerät (`02:00.0`).
 **Karte:** [WIFI_RTL8822CE_LINUX_MAP.md](WIFI_RTL8822CE_LINUX_MAP.md) — was der
 Linux-Treiber hat, Datei für Datei, ausgezählt.
 
-**Stand 2026-09-20:** Kernel **0.383.0** · Modul **wifi_rtl8822ce 0.10.0**.
-**Stufen 0, 1, 2a, 2b, 2c am Gerät GRÜN** (Lauf vom 2026-09-19): die Firmware
-läuft (`FW_READY nach 3938 µs`), die efuse liefert die echte MAC-Adresse
-`e0:0a:f6:8b:bf:83`, dazu `nss 2 · ant 2 · bw 0x07 (bis 80 MHz) · hci 0x04
-(PCIe) · btcoex`. **Stufe 3 ist gebaut und wartet auf den Gerätelauf** —
-`rtw_mac_init` (3a), die sechs Parametertabellen samt Bedingungsläufer (3b)
-und `rtw8822c_phy_set_param` mit DAC-Kalibrierung, Trimmung und
-Beamforming-Grundeinstellung (3c).
+**Stand 2026-09-20:** Kernel **0.383.0** · Modul **wifi_rtl8822ce 0.10.3**.
+**Stufen 0 bis 3c am Gerät GRÜN.** Der Weg PCI → Bridge → Power → Ringe →
+DMA → Firmware → C2H → efuse → MAC-Init → Parametertabellen → BB/RF ist Ende
+zu Ende bewiesen: `rsvd_boundary 1938`, der H2C-Ring meldet sich leer, die
+Link-List-Tabelle baut sich selbst, alle sechs Tabellen geben **Zahl für
+Zahl** so viele Schreibzugriffe ab wie vorausgerechnet (bb 1289 · agc 450 ·
+rfk_init 2460 · rf_b 697 · rf_a 789), und beide RF-Pfade antworten mit
+Tabellenwerten. **Als Nächstes: Stufe 4.**
 
 **Geprüft ist, was sich ohne Gerät prüfen LÄSST**, und zwar mechanisch:
 `check_regs.py` hält **462 Konstanten** gegen die Linux-Quelle (0 Abweichungen),
@@ -556,18 +556,68 @@ verschlechtert die Empfindlichkeit des betroffenen Pfades. Er haelt den
 Empfaenger nicht an. Wenn Stufe 4 steht und Pfad B messbar schlechter hoert
 als A, ist das hier die erste Spur.
 
-### Was danach kommt — Stufe 4
+### Stufe 4 — bis der Empfänger hört
 
-Nicht gebaut und benannt: **die Sendeleistung.** `rtw_chip_board_info_setup`
-(main.c:2064) lädt `bb_pg_type0` und `txpwr_lmt_type0`, dazu gehören
-`rtw_parse_tbl_bb_pg`, `rtw_parse_tbl_txpwr_lmt` mit der
-Regulierungszonen-Ersatzlogik und `rtw_phy_tx_power_*`. Das sind zwei weitere
-Tabellen (~100 KiB) und ein eigener Parser — ein anderer Aufrufweg als
-`rtw_phy_load_tables`, deshalb bewusst nicht in 3b mitgenommen.
+Gemessen, nicht vermutet: nach `phy_set_param` stehen die CCA-Zähler auf 0,
+und **in Linux ist das genauso**. `false_alarm_statistics` läuft dort erst im
+Wachhund (main.c:280), und davor liegen drei Dinge. Sie sind die drei
+Unterstufen, jede eine ganze Linux-Funktion, keine davon übersprungen.
 
-Danach: `rtw_mac_postinit` (beim 8822C NULL), `rtw_hci_start`,
-`rtw_fw_send_general_info`/`send_phydm_info`, die Koexistenz — und dann
-`rtw_set_channel` und der Empfangsweg.
+**4a — der Rest von `rtw_power_on` und `rtw_core_start`.**
+
+    rtw_power_on (main.c:1374), ab wo wir stehen:
+     ├─ rtw_mac_postinit            beim 8822C NULL, also nichts
+     ├─ rtw_hci_start = rtw_pci_start   schaltet NUR Interrupts frei;
+     │                                  wir pollen -> benannte Abweichung
+     ├─ rtw_fw_send_general_info    H2C-PAKET durch die H2C-Queue
+     ├─ rtw_fw_send_phydm_info      dito
+     ├─ rtw_coex_power_on_setting   "set antenna path to BT"
+     └─ rtw_coex_init_hw_config     danach ANT_INIT (btcoex JA, share_ant JA)
+    rtw_core_start (main.c:1517):
+     ├─ rtw_sec_enable_sec_engine
+     └─ rtw_write32(REG_RCR, hal->rcr)   "rcr reset after powered on"
+
+**Was die Coex-Kette mitzieht, ausgezählt statt geschätzt:** `set_ant_path`
+(152 Zeilen) · `table` + `set_table` · `tdma` · `write_scbd`/`read_scbd` ·
+`init_coex_var` · `monitor_bt_enable` · `wl_slot_extend` · `set_init` ·
+`set_wl_pri_mask` · `set_gnt_debug` · `query_bt_info` — und darunter die
+**BT-Mailbox** (`rtw_fw_bt_wifi_control`, `rtw_fw_query_bt_info` über
+`rtw_fw_send_h2c_command`, also die HMEBOX-Register, nicht die H2C-Queue)
+sowie die Chip-Ops `rtw8822c_coex_cfg_init/_ant_switch/_gnt_fix/_gnt_debug/
+_rfe_type/_wl_tx_power/_wl_rx_gain`. Zusammen ~400 Zeilen C plus die
+Koexistenz-Tabellen des Chips.
+
+**Zwei H2C-WEGE, und sie sind nicht dasselbe** — das ist die Falle dieser
+Stufe: `rtw_fw_send_h2c_command` schreibt in die **HMEBOX**-Register
+(Mailbox, 8 Byte, für Coex), `rtw_fw_send_h2c_packet` schiebt ein 32-Byte-
+Paket durch die **H2C-Queue** (der Ring, dessen Adresse `init_h2c` gesetzt
+hat, für general/phydm info). Wer den einen für den anderen hält, schickt
+alles ins Leere.
+
+**Gate 4a:** die zwei H2C-Pakete gehen durch (der Ring bewegt seinen
+Schreibzeiger), die Mailbox quittiert, und `REG_WIFI_BT_INFO` trägt das
+Score-Board. **Und die offene Frage, die 4a beantwortet:** zählen die
+CCA-Zähler jetzt schon? Die Antenne ist der wahrscheinlichste einzelne
+Grund, und wenn sie es ist, sieht man es hier.
+
+**4b — die Sendeleistung.** `rtw_chip_board_info_setup` (main.c:2064):
+`rtw_phy_init_tx_power` · `bb_pg_type0` und `txpwr_lmt_type0` laden ·
+`rtw_phy_tx_power_by_rate_config` · `rtw_phy_tx_power_limit_config`. Zwei
+weitere erzeugte Tabellen (~100 KiB) und ein eigener Parser mit der
+Regulierungszonen-Ersatzlogik. In Linux läuft das zur PROBE-Zeit, nicht in
+`power_on` — es steht hier, weil 4c es braucht.
+
+**4c — `rtw_set_channel`.** `rtw8822c_set_channel_bb` (157 Zeilen, AGC,
+CCA-Maske, RX-Filter) · `rtw_set_channel_mac` · `rtw8822c_set_channel_rf` ·
+`toggle_igi` · `rtw_coex_switchband_notify` · `rtw_phy_set_tx_power_level`.
+**Gate 4c: `false_alarm_statistics` zählt CCA-Ereignisse ≠ 0** — das Gate,
+das in 0.10.0 fälschlich schon an Stufe 3 hing.
+
+### Danach
+
+`rtw_hci_start` im Ernst (Empfangsring füllen, `rx_tag`, `is_c2h` trennen),
+`rtw_set_channel` aus der oberen Hälfte heraus, Scan, Auth, Assoc — und dann
+ist `wifid` dran, das herstellerunabhängig schon steht.
 
 ### Der Ablauf für eine neue Version
 
