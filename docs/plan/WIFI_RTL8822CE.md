@@ -1158,6 +1158,44 @@ widerlegt.
 eigene Länge), aber er ist falsch. Sobald die Messung die Zahl nennt, wird
 er dort ebenso abgeschnitten — vorher wäre es geraten.
 
+### Stufe 6a am Gerät: ✅ der Handschlag ist durch (0.22.0)
+
+```
+EAPOL: 103 Bytes geliefert, 99 angesagt (4 zu viel)
+[wifid] 4-way: sending msg2
+EAPOL: 159 Bytes geliefert, 155 angesagt (4 zu viel)
+[wifid] 4-way: msg3 OK — sending msg4 + installing keys
+[wifid] *** 4-way complete — AUTHORIZED ***
+[npk] net: link usb-lan (up) -> wifi (up)
+```
+
+**Die Messung bestätigt die Herleitung auf den Punkt: vier Bytes, die
+Prüfsumme.** Und `wifid` fährt den Vierwegehandschlag über unseren
+Steuerkanal durch, ohne eine Zeile Verschlüsselung im Treiber.
+
+**Aber DHCP bekam keine Antwort** — und das bei 20 gesendeten Datenrahmen.
+Zwei Fehler, beide in der VERSCHLÜSSELUNG, und deshalb lief der Handschlag
+(unverschlüsselt) durch und alles danach nicht:
+
+* **Senden: der CCMP-Kopf fehlte.** `rtw_ops_set_key` setzt
+  `IEEE80211_KEY_FLAG_GENERATE_IV`, und das heisst in mac80211: der Stapel
+  macht acht Byte Platz und schreibt die Paketnummer hinein
+  (`ccmp_pn2hdr`), die Hardware verschlüsselt nur. Wir schrieben ihn nicht.
+* **Empfangen: der CCMP-Kopf wurde nicht übersprungen.** Die Hardware
+  entfernt ihn NICHT — `rtw_rx_fill_rx_status` setzt `RX_FLAG_DECRYPTED`,
+  aber nicht `RX_FLAG_IV_STRIPPED`; in Linux räumt mac80211 ihn weg. Unser
+  LLC/SNAP-Vergleich griff acht Byte zu früh und verwarf **jeden**
+  verschlüsselten Rahmen.
+
+Dazu wird hinten jetzt abgeschnitten, was nicht dazugehört: Prüfsumme
+(immer) und bei CCMP der 8-Byte-MIC — beides, weil `WLAN_RCR_CFG` APP_FCS
+und APP_MIC gesetzt hat.
+
+**Und wie beim AX200 gibt es einen Rückfallpfad mit MELDUNG:** sitzt
+LLC/SNAP nicht an der gerechneten Stelle, wird an den zwei anderen
+möglichen gesucht und gesagt, wo es stand. Ein stiller Fehlgriff dort
+verwirft jeden Rahmen und sieht aus wie eine tote Leitung.
+
 ### ▶ Danach — hier weitermachen
 
 **6b — die Verbindung halten.** Der Treiber läuft, statt Stufen

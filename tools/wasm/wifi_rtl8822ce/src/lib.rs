@@ -2974,7 +2974,28 @@ struct Link {
     /// Deskriptor — Linux fuellt es aus dem Rahmenkopf.
     seq: u16,
     ptk_installed: bool,
+    /// 802.11 §12.5.3.2 — die 48-Bit-Paketnummer des Paarschluessels.
+    /// Sie faengt bei eins an und zaehlt je Rahmen hoch; eine wiederholte
+    /// Nummer verwirft der AP als Wiedereinspielung.
+    tx_pn: u64,
     cam: [sec::CamEntry; 4],
+}
+
+/// 802.11 §12.5.3.2 — der acht Byte lange CCMP-Kopf.
+///
+/// Die Paketnummer steht in zwei Stuecken, und das ist kein Versehen der
+/// Spezifikation: Byte 2 ist reserviert und Byte 3 traegt das ExtIV-Bit
+/// und die Schluesselnummer, damit ein alter WEP-Empfaenger den Rahmen
+/// als erweitert erkennt.
+fn ccmp_hdr(out: &mut [u8], pn: u64, key_id: u8) {
+    out[0] = (pn & 0xff) as u8; // PN0
+    out[1] = ((pn >> 8) & 0xff) as u8; // PN1
+    out[2] = 0; // reserviert
+    out[3] = 0x20 | (key_id << 6); // ExtIV | KeyID
+    out[4] = ((pn >> 16) & 0xff) as u8; // PN2
+    out[5] = ((pn >> 24) & 0xff) as u8; // PN3
+    out[6] = ((pn >> 32) & 0xff) as u8; // PN4
+    out[7] = ((pn >> 40) & 0xff) as u8; // PN5
 }
 
 /// docs/spec/WIFI_CLASS_ABI.md §2b — ein Ethernet-Rahmen als
@@ -2995,7 +3016,7 @@ fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
     }
     let mut frame = [0u8; 2048];
     let payload = &eth[14..];
-    let total = 24 + 6 + 2 + payload.len();
+    let total = 24 + if encrypt { 8 } else { 0 } + 6 + 2 + payload.len();
     if total > frame.len() {
         return false;
     }
@@ -3010,9 +3031,24 @@ fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
     frame[10..16].copy_from_slice(&link.mac); // addr2 = Quelle
     frame[16..22].copy_from_slice(&eth[0..6]); // addr3 = Ziel
     frame[22..24].copy_from_slice(&(link.seq << 4).to_le_bytes());
-    frame[24..30].copy_from_slice(&LLC_SNAP_HDR);
-    frame[30..32].copy_from_slice(&eth[12..14]); // Ethertyp
-    frame[32..32 + payload.len()].copy_from_slice(payload);
+
+    // **Der CCMP-Kopf wird vom TREIBER geschrieben, nicht von der
+    // Hardware.** `rtw_ops_set_key` setzt `IEEE80211_KEY_FLAG_GENERATE_IV`,
+    // und das heisst in mac80211: der Stapel macht acht Byte Platz und
+    // schreibt die Paketnummer hinein (`ccmp_pn2hdr`), die Hardware
+    // verschluesselt nur. Ohne ihn stehen unsere Rahmen fuer den AP nicht
+    // zur Entschluesselung bereit — und das sieht aus wie eine Leitung,
+    // auf der nichts zurueckkommt.
+    let ofs = if encrypt {
+        ccmp_hdr(&mut frame[24..32], link.tx_pn, 0);
+        link.tx_pn = link.tx_pn.wrapping_add(1);
+        32
+    } else {
+        24
+    };
+    frame[ofs..ofs + 6].copy_from_slice(&LLC_SNAP_HDR);
+    frame[ofs + 6..ofs + 8].copy_from_slice(&eth[12..14]); // Ethertyp
+    frame[ofs + 8..ofs + 8 + payload.len()].copy_from_slice(payload);
 
     let mut info = tx::TxPktInfo::default();
     // `rtw_tx_pkt_info_update` fuer einen Datenrahmen: erst die Rate,
@@ -3041,52 +3077,90 @@ fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
     true
 }
 
+/// Wo der LLC/SNAP-Kopf eines Datenrahmens steht, und wieviel hinten
+/// nicht dazugehoert.
+///
+/// **Ein verschluesselter Rahmen traegt acht Byte CCMP-Kopf zwischen dem
+/// 802.11-Kopf und den Nutzdaten**, und die Hardware entfernt ihn NICHT:
+/// `rtw_rx_fill_rx_status` setzt `RX_FLAG_DECRYPTED`, aber nicht
+/// `RX_FLAG_IV_STRIPPED` — in Linux raeumt mac80211 ihn weg. Hinten haengen
+/// die Pruefsumme (immer) und bei CCMP der acht Byte lange MIC, beides
+/// weil `WLAN_RCR_CFG` APP_FCS und APP_MIC gesetzt hat.
+///
+/// Findet sich LLC/SNAP nicht an der gerechneten Stelle, wird an den zwei
+/// anderen moeglichen gesucht und das GEMELDET. Ein stiller Fehlgriff
+/// hier verwirft jeden Rahmen und sieht aus wie eine tote Leitung.
+fn llc_offset(f: &[u8], miss: &mut u32) -> Option<(usize, usize)> {
+    let qos = f[0] & DOT11_STYPE_QOS != 0;
+    let hdrlen = 24 + if qos { 2 } else { 0 };
+    let prot = f[1] & DOT11_FC_PROTECTED != 0;
+    let crypt = if prot { 8usize } else { 0 };
+    let trailing = 4 + if prot { 8usize } else { 0 };
+
+    let at = |o: usize| o + 6 <= f.len() && f[o..o + 6] == LLC_SNAP_HDR;
+    let want = hdrlen + crypt;
+    let found = if at(want) {
+        want
+    } else if at(hdrlen) {
+        if *miss < 3 {
+            *miss += 1;
+            host::print("    [Befund] LLC/SNAP steht bei ");
+            host::print_dec(hdrlen as u32);
+            host::print(" statt ");
+            host::print_dec(want as u32);
+            host::print(" — der CCMP-Kopf fehlt\n");
+        }
+        hdrlen
+    } else if at(hdrlen + 8) {
+        if *miss < 3 {
+            *miss += 1;
+            host::print("    [Befund] LLC/SNAP steht bei ");
+            host::print_dec((hdrlen + 8) as u32);
+            host::print(" statt ");
+            host::print_dec(want as u32);
+            host::print("\n");
+        }
+        hdrlen + 8
+    } else {
+        return None;
+    };
+    if found + 8 + trailing > f.len() {
+        return Some((found, 0));
+    }
+    Some((found, trailing))
+}
+
 /// docs/spec/WIFI_CLASS_ABI.md §2b, Demux-Regel: ein empfangener
 /// 802.11-Datenrahmen wird zu 802.3 und geht dann entweder als `EAPOL_RX`
 /// an `wifid` oder in den IP-Stapel.
 ///
-/// Gibt zurueck: (war es EAPOL, war es ein Datenrahmen).
-fn rx_demux(f: &[u8], mac: &[u8; 6]) -> (bool, bool) {
-    if f.len() < 24 {
-        return (false, false);
-    }
-    if f[0] & 0x0c != DOT11_FC_TYPE_DATA {
-        return (false, false);
+/// Gibt die Laenge des 802.3-Rahmens in `out` zurueck und ob es EAPOL war.
+fn rx_to_8023(f: &[u8], out: &mut [u8], miss: &mut u32)
+    -> Option<(usize, bool)>
+{
+    if f.len() < 24 || f[0] & 0x0c != DOT11_FC_TYPE_DATA {
+        return None;
     }
     // Null und QoS-Null tragen keinen Rumpf.
     if f[0] & DOT11_STYPE_NODATA != 0 {
-        return (false, true);
+        return None;
     }
-    let qos = f[0] & DOT11_STYPE_QOS != 0;
-    let hdr = 24 + if qos { 2 } else { 0 };
-    // Bei verschluesselten Rahmen steht der CCMP-Kopf dazwischen; die
-    // Hardware entfernt ihn, wenn der Schluessel im Speicher steht.
-    if f.len() < hdr + 8 {
-        return (false, true);
+    let (llc, trailing) = llc_offset(f, miss)?;
+    let body_end = f.len().saturating_sub(trailing);
+    if body_end < llc + 8 {
+        return None;
     }
-    if f[hdr..hdr + 6] != LLC_SNAP_HDR {
-        return (false, true);
+    let et = u16::from_be_bytes([f[llc + 6], f[llc + 7]]);
+    let payload = &f[llc + 8..body_end];
+    if out.len() < 14 + payload.len() {
+        return None;
     }
-    let et = u16::from_be_bytes([f[hdr + 6], f[hdr + 7]]);
     // FromDS: addr1 = wir, addr2 = BSSID, addr3 = Quelle.
-    let _ = mac;
-    (et == ETHERTYPE_EAPOL, true)
-}
-
-/// Ein empfangener Datenrahmen als 802.3 in `out`. Gibt die Laenge zurueck.
-fn to_8023(f: &[u8], out: &mut [u8]) -> usize {
-    let qos = f[0] & DOT11_STYPE_QOS != 0;
-    let hdr = 24 + if qos { 2 } else { 0 };
-    let body = &f[hdr + 6..]; // hinter LLC/SNAP
-    if body.len() < 2 || out.len() < 14 + body.len() - 2 {
-        return 0;
-    }
-    out[0..6].copy_from_slice(&f[4..10]); // DA = addr1
-    out[6..12].copy_from_slice(&f[16..22]); // SA = addr3
-    out[12..14].copy_from_slice(&body[0..2]); // Ethertyp
-    let n = body.len() - 2;
-    out[14..14 + n].copy_from_slice(&body[2..]);
-    14 + n
+    out[0..6].copy_from_slice(&f[4..10]);
+    out[6..12].copy_from_slice(&f[16..22]);
+    out[12..14].copy_from_slice(&f[llc + 6..llc + 8]);
+    out[14..14 + payload.len()].copy_from_slice(payload);
+    Some((14 + payload.len(), et == ETHERTYPE_EAPOL))
 }
 
 /// Stufe 6a — der Steuerkanal, der Datenweg und der Vierwegehandschlag.
@@ -3122,6 +3196,7 @@ fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         },
         seq: 0,
         ptk_installed: false,
+        tx_pn: 1,
         cam: [sec::CamEntry::default(); 4],
     };
 
@@ -3165,6 +3240,7 @@ fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     let mut data_tx = 0u32;
     let mut link_up_sent = false;
     let mut extra_reported = 0u32;
+    let mut llc_miss = 0u32;
 
     // Acht Sekunden. Der Handschlag braucht vier Rahmen und ist in
     // Millisekunden durch; wer laenger wartet, wartet auf einen Fehler.
@@ -3183,15 +3259,11 @@ fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 return;
             }
             let f = &pkt[off..];
-            let (is_eapol, is_data) = rx_demux(f, &mac);
-            if !is_data {
+            let Some((n, is_eapol)) = rx_to_8023(f, ethbuf, &mut llc_miss)
+            else {
                 return;
-            }
+            };
             data_rx += 1;
-            let n = to_8023(f, ethbuf);
-            if n == 0 {
-                return;
-            }
             if is_eapol {
                 eapol_rx += 1;
                 // `EV_EAPOL_RX` = [0x84][len u16 LE][Rahmen] — und der
