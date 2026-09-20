@@ -201,7 +201,7 @@ fn dac_iq_check(value: u32) -> bool {
 /// Der Deckel von 10000 ist Linux'; ohne ihn haengt die Schleife, wenn die
 /// Hardware nur Ueberlaeufe liefert.
 fn dac_cal_iq_sample(h: i32, iv: &mut [u32; DACK_SN_8822C],
-                     qv: &mut [u32; DACK_SN_8822C]) {
+                     qv: &mut [u32; DACK_SN_8822C], verbose: bool) {
     let mut i = 0usize;
     let mut cnt = 0u32;
     while i < DACK_SN_8822C && cnt < 10000 {
@@ -212,6 +212,29 @@ fn dac_cal_iq_sample(h: i32, iv: &mut [u32; DACK_SN_8822C],
         if dac_iq_check(iv[i]) && dac_iq_check(qv[i]) {
             i += 1;
         }
+    }
+    if verbose {
+        // Die ROHEN Proben, bevor irgendetwas daraus gerechnet wird. Ein
+        // Feld aus 100 gleichen Zahlen ist eine eingefrorene Messung; eine
+        // echte streut ([[feedback_dump_the_raw_input_before_debugging_the_interpretation]]).
+        let (mut imin, mut imax, mut qmin, mut qmax) = (iv[0], iv[0], qv[0], qv[0]);
+        for k in 0..DACK_SN_8822C {
+            if iv[k] < imin { imin = iv[k]; }
+            if iv[k] > imax { imax = iv[k]; }
+            if qv[k] < qmin { qmin = qv[k]; }
+            if qv[k] > qmax { qmax = qv[k]; }
+        }
+        host::print("      Rohproben i 0x");
+        host::print_hex16(imin as u16);
+        host::print("..0x");
+        host::print_hex16(imax as u16);
+        host::print("  q 0x");
+        host::print_hex16(qmin as u16);
+        host::print("..0x");
+        host::print_hex16(qmax as u16);
+        host::print("  (");
+        host::print_dec(cnt);
+        host::print(" Lesungen fuer 100 gueltige)\n");
     }
 }
 
@@ -272,13 +295,13 @@ fn dac_cal_iq_search(h: i32, iv: &mut [u32; DACK_SN_8822C],
 /// Die zwei `rtw_read_rf` am Anfang stehen in Linux nur fuer die Debugzeile
 /// dahinter — aber ein Lesezugriff auf ein RF-Register ist bei diesem Chip
 /// ein echter Buszugriff, und weglassen hiesse, die Reihenfolge zu aendern.
-fn dac_cal_rf_mode(h: i32) -> (u32, u32) {
+fn dac_cal_rf_mode(h: i32, verbose: bool) -> (u32, u32) {
     let _rf_a = read_rf(h, RF_PATH_A, 0x0, RFREG_MASK);
     let _rf_b = read_rf(h, RF_PATH_B, 0x0, RFREG_MASK);
 
     let mut iv = [0u32; DACK_SN_8822C];
     let mut qv = [0u32; DACK_SN_8822C];
-    dac_cal_iq_sample(h, &mut iv, &mut qv);
+    dac_cal_iq_sample(h, &mut iv, &mut qv, verbose);
     dac_cal_iq_search(h, &mut iv, &mut qv)
 }
 
@@ -322,10 +345,14 @@ fn dac_cal_adc(h: i32, dm: &mut DmInfo, path: usize) -> (u32, u32) {
     wrf(h, RF_PATH_A, 0x0, 0x10000);
     wrf(h, RF_PATH_B, 0x0, 0x10000);
 
-    for _ in 0..10 {
+    host::print("    ADCK ");
+    host::print(if path == RF_PATH_A { "A" } else { "B" });
+    host::print(" Runden (Restversatz |i|/|q|, Abbruch unter 5):\n");
+    let mut converged = false;
+    for round in 0..10 {
         host::w32(h, 0x1c3c, path_sel + 0x8003);
         host::w32(h, 0x1c24, 0x0001_0002);
-        let (mut ic, mut qc) = dac_cal_rf_mode(h);
+        let (mut ic, mut qc) = dac_cal_rf_mode(h, round == 0);
 
         // compensation value
         if ic != 0x0 {
@@ -342,17 +369,30 @@ fn dac_cal_adc(h: i32, dm: &mut DmInfo, path: usize) -> (u32, u32) {
 
         // check ADC DC offset
         host::w32(h, 0x1c3c, path_sel + 0x8103);
-        let (mut ic, mut qc) = dac_cal_rf_mode(h);
+        let (mut ic, mut qc) = dac_cal_rf_mode(h, false);
         if ic >= 0x200 {
             ic = 0x400 - ic;
         }
         if qc >= 0x200 {
             qc = 0x400 - qc;
         }
+        host::print("      -> ");
+        host::print_dec(ic);
+        host::print("/");
+        host::print_dec(qc);
+        host::print("  (Ausgleich 0x");
+        host::print_hex32(dm.dack_adck[path]);
+        host::print(")\n");
         if ic < 5 && qc < 5 {
+            converged = true;
             break;
         }
     }
+    host::print(if converged {
+        "      ADCK konvergiert\n"
+    } else {
+        "      ADCK NICHT konvergiert\n"
+    });
 
     // ADCK step2
     host::w32(h, 0x1c3c, 0x0000_0003);
@@ -422,7 +462,7 @@ fn dac_cal_step2(h: i32, path: usize) -> (u32, u32) {
     host::w32(h, base_addr + 0x10, 0x02d5_08c5);
     host::w32(h, 0x1c3c, 0x0008_8103);
 
-    let (ic_in, qc_in) = dac_cal_rf_mode(h);
+    let (ic_in, qc_in) = dac_cal_rf_mode(h, false);
     let mut ic = ic_in;
     let mut qc = qc_in;
 
@@ -507,7 +547,7 @@ fn dac_cal_step3(h: i32, path: usize, adc_ic: u32, adc_qc: u32,
     host::w32(h, base_addr + 0x68, temp);
     host::w32(h, base_addr + 0x10, 0x02d5_08c5);
     host::w32(h, base_addr + 0x60, 0xf000_0000);
-    let (mut ic, mut qc) = dac_cal_rf_mode(h);
+    let (mut ic, mut qc) = dac_cal_rf_mode(h, false);
 
     ic = if ic >= 0x10 { ic - 0x10 } else { 0x400 - (0x10 - ic) };
     qc = if qc >= 0x10 { qc - 0x10 } else { 0x400 - (0x10 - qc) };
@@ -786,6 +826,17 @@ fn dac_cal_restore(h: i32, dm: &DmInfo) -> bool {
 
 /// rtw8822c.c:943-1008 `rtw8822c_rf_dac_cal`
 pub fn rf_dac_cal(h: i32, dm: &mut DmInfo) -> bool {
+    // Die Tabellen schreiben auf RF 0x3e als EINZIGES Register, das danach
+    // niemand mehr anfasst, verschiedene Werte je Pfad: A=0x3, B=0x20
+    // (rtw8822c_table.c, gegen den Bedingungslaeufer nachgerechnet). Lesen
+    // beide Pfade dasselbe, ist der Pfadzugriff selbst falsch — und dann
+    // ist jede Aussage ueber "Pfad B" wertlos.
+    host::print("    RF 0x3e (Tabelle: A=0x3, B=0x20):  A=0x");
+    host::print_hex32(read_rf(h, RF_PATH_A, 0x3e, RFREG_MASK));
+    host::print("  B=0x");
+    host::print_hex32(read_rf(h, RF_PATH_B, 0x3e, RFREG_MASK));
+    host::print("\n");
+
     if dac_cal_restore(h, dm) {
         host::print("    DACK aus dem Zwischenspeicher wiederhergestellt\n");
         return true;
