@@ -231,3 +231,26 @@ pub fn log_reg32(name: &str, val: u32) {
     print_hex32(val);
     print("\n");
 }
+
+/// hci.h:241-253 `rtw_write32_mask` — Feld an seiner Schiebestelle setzen.
+/// `data` ist der Wert des FELDES, nicht das fertige Bitmuster.
+pub fn w32_mask(h: i32, off: u32, mask: u32, data: u32) {
+    let shift = mask.trailing_zeros();
+    let orig = r32(h, off);
+    w32(h, off, (orig & !mask) | ((data << shift) & mask));
+}
+
+/// hci.h:202-212 `rtw_read32_mask`
+pub fn r32_mask(h: i32, off: u32, mask: u32) -> u32 {
+    (r32(h, off) & mask) >> mask.trailing_zeros()
+}
+
+/// `udelay(n)`. Unter einer Millisekunde kann `npk_sleep` nichts, also wird
+/// auf der Uhr gedreht. Der Preis ist ehrlich: ein `npk_now_us` kostet selbst
+/// etwa so viel wie die kuerzeste Pause, die hier verlangt wird (1 us nach
+/// jedem RF-Schreibzugriff), und laenger zu warten als noetig ist harmlos —
+/// kuerzer waere es nicht.
+pub fn delay_us(us: u64) {
+    let t0 = now_us();
+    while now_us() - t0 < us {}
+}

@@ -1,15 +1,25 @@
 #!/usr/bin/env python3
-"""Haelt jede Konstante in src/regs.rs gegen ihre Quellzeile in Linux.
+"""Haelt jede Konstante in src/*.rs gegen ihre Quellzeile in Linux.
 
 Die Regel aus memory/feedback_linux_strict.md lautet „vor jedem Commit: grep
 gegen reg.h". Von Hand macht das niemand zuverlaessig, also macht es hier ein
 Skript: jede Zeile der Form
 
-    pub const NAME: uN = <ausdruck>; // reg.h:123
+    pub const NAME: uN = <ausdruck>;
 
-(in regs.rs, pwrseq.rs, pci.rs, tx.rs, mac.rs, fw.rs) wird gegen `#define NAME ...` ODER einen Enum-Eintrag `NAME = ...` in den
-Linux-Headern ausgewertet und verglichen. Gibt es den Namen in Linux nicht,
-ist es unsere eigene Konstante und es gibt nichts zu vergleichen.
+(in regs.rs, pwrseq.rs, pci.rs, tx.rs, mac.rs, fw.rs, chip.rs) wird gegen
+`#define NAME ...` ODER einen Enum-Eintrag `NAME = ...` in der Linux-Quelle
+ausgewertet und verglichen. Gibt es den Namen in Linux nicht, ist es unsere
+eigene Konstante und es gibt nichts zu vergleichen.
+
+**Beide Seiten werden REKURSIV aufgeloest.** Ein `#define WLAN_SIFS_CFG
+(WLAN_SIFS_CCK_CONT_TX | (WLAN_SIFS_OFDM_CONT_TX << BIT_SHIFT_SIFS_OFDM_CTX)
+| ...)` ueber drei Zeilen ist sonst „nicht auswertbar" und faellt still durch
+— und genau solche zusammengesetzten Werte sind die, die man beim Abtippen
+falsch macht.
+
+Gesucht wird nicht nur in den Headern: `WLAN_*`, `FAST_EDCA_*` und
+`MAC_CLK_SPEED` stehen in **rtw8822c.c**, `REG_SND_PTCL_CTRL` in **bf.h**.
 
     python3 tools/wasm/wifi_rtl8822ce/check_regs.py
 """
@@ -22,67 +32,140 @@ D = os.path.expanduser("~/.cache/nopeekos/linux-src/linux-6.18.26/"
 SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
 # Alle Dateien mit Konstanten, nicht nur regs.rs: TX_DESC_QSEL_H2C stand in
 # tx.rs und war geraten (17 statt 19).
-RS_FILES = ("regs.rs", "pwrseq.rs", "pci.rs", "tx.rs", "mac.rs", "fw.rs")
+RS_FILES = ("regs.rs", "pwrseq.rs", "pci.rs", "tx.rs", "mac.rs", "fw.rs",
+            "chip.rs", "efuse.rs")
+# rtw8822c.c steht MIT in der Liste, aber hinten: gibt es einen Namen in
+# einem Header UND in der Chipdatei, gilt der Header.
+C_FILES = ("reg.h", "mac.h", "fw.h", "main.h", "pci.h", "tx.h", "bf.h",
+           "efuse.h", "rtw8822c.h", "rtw8822c.c")
 
 
-def headers():
-    out = ""
-    for f in ("reg.h", "mac.h", "fw.h", "main.h", "pci.h", "tx.h"):
+# Namen aus Headern AUSSERHALB von rtw88, die in einer Definition vorkommen.
+# Die Alternative waere, die betroffene Zeile ungeprueft durchzulassen — und
+# eine stille Ausnahme ist genau das, wogegen dieses Skript gebaut ist.
+EXTERNAL = {
+    # include/uapi/linux/nl80211.h, enum nl80211_band
+    "NL80211_BAND_2GHZ": 0,
+    "NL80211_BAND_5GHZ": 1,
+    "NL80211_BAND_60GHZ": 2,
+    "NL80211_BAND_6GHZ": 3,
+}
+
+
+def linux_defs():
+    """name -> (datei, zeile, ausdruck). Fortsetzungszeilen zusammengezogen."""
+    out = {n: ("nl80211.h", 0, str(v)) for n, v in EXTERNAL.items()}
+    for f in C_FILES:
         p = os.path.join(D, f)
-        if os.path.exists(p):
-            out += open(p, errors="ignore").read()
+        if not os.path.exists(p):
+            continue
+        raw = open(p, errors="ignore").read()
+        # Zeilennummer vor dem Zusammenziehen merken: `\`-Fortsetzungen
+        # verschieben sonst jede Angabe dahinter.
+        joined, lineno, buf, start = [], 0, "", 1
+        for n, line in enumerate(raw.split("\n"), 1):
+            if not buf:
+                start = n
+            if line.endswith("\\"):
+                buf += line[:-1] + " "
+                continue
+            joined.append((start, buf + line))
+            buf = ""
+        for n, line in joined:
+            m = re.match(r"\s*#define\s+([A-Za-z_]\w*)\s+(.*)", line)
+            if m and m.group(1) not in out:
+                out[m.group(1)] = (f, n, m.group(2).split("/*")[0].strip())
+            else:
+                # Enum-Eintraege: RTW_DMA_MAPPING_HIGH, TX_DESC_QSEL_*,
+                # DESC_RATE* stehen so da und nicht als Makro.
+                m = re.match(r"\s*([A-Z][A-Z0-9_]*)\s*=\s*([^,\n}]+)", line)
+                if m and m.group(1) not in out:
+                    out[m.group(1)] = (f, n, m.group(2).strip())
     return out
 
 
-def c_value(name, hdr):
-    """#define ODER Enum-Eintrag. Viele Werte (RTW_DMA_MAPPING_HIGH,
-    TX_DESC_QSEL_*, DESC_RATE*) stehen als Enum da, nicht als Makro — wer nur
-    nach #define sucht, prueft die Haelfte nicht."""
-    m = re.search(r"#define\s+" + re.escape(name) + r"\s+(.+)", hdr)
-    if not m:
-        m = re.search(r"\b" + re.escape(name) + r"\s*=\s*([^,\n}]+)", hdr)
-    if not m:
+def evaluate(expr, defs, depth=0):
+    """Rechnet einen C- oder Rust-Ausdruck aus und loest Namen ueber `defs`
+    auf. `None` heisst „nicht aufloesbar", nicht „null"."""
+    if depth > 12:
         return None
-    e = m.group(1).split("/*")[0].strip()
-    e = re.sub(r"BIT\((\d+)\)", lambda x: f"(1<<{x.group(1)})", e)
+    # Rust schreibt bitweises NICHT als `!`, Python als `~`; und unsere
+    # Ausdruecke stehen ueber mehrere Zeilen.
+    expr = " ".join(expr.split())
+    expr = re.sub(r"!(?!=)", "~", expr)
+    e = expr.replace("_", "") if re.fullmatch(r"0[xX][0-9a-fA-F_]+", expr.strip()) else expr
+    e = re.sub(r"(0[xX][0-9a-fA-F]+(?:_[0-9a-fA-F]+)+)",
+               lambda m: m.group(1).replace("_", ""), e)
+    e = re.sub(r"\b(\d+(?:_\d+)+)\b", lambda m: m.group(1).replace("_", ""), e)
+    e = re.sub(r"BIT\((\d+)\)", lambda m: f"(1<<{m.group(1)})", e)
     e = re.sub(r"GENMASK\((\d+),\s*(\d+)\)",
-               lambda x: str(((1 << (int(x.group(1)) + 1)) - 1)
-                             ^ ((1 << int(x.group(2))) - 1)), e)
+               lambda m: str(((1 << (int(m.group(1)) + 1)) - 1)
+                             ^ ((1 << int(m.group(2))) - 1)), e)
+    e = re.sub(r"\b(u8|u16|u32|u64|usize)\b", "", e)     # `1u8 << 2`, `as u8`
+    e = e.replace(" as ", " ")
+    for nm in sorted(set(re.findall(r"\b[A-Za-z_]\w*\b", e)), key=len, reverse=True):
+        if nm in ("BIT", "GENMASK"):
+            continue  # als Funktion im Auswertungsraum, siehe unten
+        if nm not in defs:
+            return None
+        v = evaluate(defs[nm][2], defs, depth + 1)
+        if v is None:
+            return None
+        e = re.sub(r"\b" + re.escape(nm) + r"\b", f"({v})", e)
+    # `BIT(NAME)` bleibt uebrig, wenn das Argument selbst ein Name war —
+    # der ist oben schon ersetzt, also rechnet die Funktion hier zu Ende.
+    env = {"BIT": lambda n: 1 << n,
+           "GENMASK": lambda hi, lo: ((1 << (hi + 1)) - 1) ^ ((1 << lo) - 1)}
     try:
-        return eval(e, {"__builtins__": {}}, {})
+        return eval(e, {"__builtins__": {}}, env)
     except Exception:
         return None
 
 
 def main():
-    hdr = headers()
-    if not hdr:
+    defs = linux_defs()
+    if not defs:
         sys.exit(f"Linux-Quelle fehlt unter {D}")
-    rs = ""
+
+    ours = {}
+    order = []
     for f in RS_FILES:
         p = os.path.join(SRC, f)
-        if os.path.exists(p):
-            rs += open(p).read()
+        if not os.path.exists(p):
+            continue
+        for m in re.finditer(r"(?:pub )?const ([A-Z0-9_]+)\s*:\s*\w+\s*=\s*([^;]+);",
+                             open(p).read()):
+            if m.group(1) not in ours:
+                ours[m.group(1)] = (f, m.group(2).strip())
+                order.append(m.group(1))
+
+    # Unsere eigenen Namen duerfen in unseren Ausdruecken vorkommen.
+    mixed = dict(defs)
+    for nm, (f, expr) in ours.items():
+        mixed.setdefault(nm, (f, 0, expr))
+
     checked = unsourced = bad = 0
-    for m in re.finditer(r"(?:pub )?const ([A-Z0-9_]+): u\w+ = ([^;]+);", rs):
-        name, expr = m.group(1), m.group(2)
-        want = c_value(name, hdr)
-        if want is None:
-            # Kein Linux-Name -> unsere eigene Konstante (BAR_PAGES, Q_BK,
-            # Puffergroessen). Nichts zu vergleichen.
+    for name in order:
+        f, expr = ours[name]
+        if name not in defs:
             unsourced += 1
             continue
-        try:
-            got = eval(re.sub(r"1 << (\d+)", r"(1<<\1)", expr),
-                       {"__builtins__": {}}, {})
-        except Exception:
-            print(f"  ? {name}: unser Ausdruck ist nicht auswertbar: {expr}")
+        want = evaluate(defs[name][2], defs)
+        got = evaluate(expr, mixed)
+        if want is None:
+            print(f"  ? {name}: Linux' Ausdruck nicht auswertbar: {defs[name][2]}")
+            bad += 1
+            continue
+        if got is None:
+            print(f"  ? {name}: unser Ausdruck nicht auswertbar: {expr}")
             bad += 1
             continue
         checked += 1
         if got != want:
-            print(f"  ABWEICHUNG {name}: unser {got:#x} vs Linux {want:#x}")
+            src = f"{defs[name][0]}:{defs[name][1]}"
+            print(f"  ABWEICHUNG {name}: unser {got:#x} vs Linux {want:#x} ({src})")
             bad += 1
+
     print(f"  {checked} Konstanten gegen Linux geprueft, {bad} Abweichungen, "
           f"{unsourced} eigene (kein Linux-Name)")
     sys.exit(1 if bad else 0)
