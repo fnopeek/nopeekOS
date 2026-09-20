@@ -602,3 +602,29 @@ pub fn write_data_h2c(h: i32, trx: &mut Trx, stage: i32, buf: &[u8]) -> bool {
     tx_kick_off_queue(h, trx, Q_H2C);
     true
 }
+
+/// Wartet, bis die Firmware die H2C-Queue leergeraeumt hat.
+///
+/// **Kein Linux-Gegenstueck** — dort holt der Treiber den Lesezeiger gar
+/// nicht ab, er schreibt und geht weiter. Hier ist es eine MESSUNG: in
+/// 0.11.0 stand der HW-Zeiger auf 1, als unserer schon auf 2 stand, und
+/// eine Stichprobe einen Befehl nach dem Anstoss sagt nichts darueber, ob
+/// der Chip nicht will oder nur noch nicht fertig ist
+/// ([[feedback_a_test_of_a_state_must_say_when]]).
+///
+/// Gibt zurueck, ob er aufgeholt hat, und wie lange es gedauert hat.
+pub fn h2c_wait_consumed(h: i32, trx: &Trx, frist_us: u64) -> (bool, u64, u32) {
+    let want = trx.tx[Q_H2C].wp & TRX_BD_IDX_MASK;
+    let start = host::now_us();
+    loop {
+        let idx = host::r32(h, RTK_PCI_TXBD_IDX_H2CQ);
+        let hw = (idx & TRX_BD_HW_IDX_MASK) >> 16;
+        if hw == want {
+            return (true, host::now_us() - start, hw);
+        }
+        let waited = host::now_us() - start;
+        if waited >= frist_us {
+            return (false, waited, hw);
+        }
+    }
+}

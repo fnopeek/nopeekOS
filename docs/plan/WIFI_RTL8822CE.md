@@ -595,19 +595,35 @@ Paket durch die **H2C-Queue** (der Ring, dessen Adresse `init_h2c` gesetzt
 hat, für general/phydm info). Wer den einen für den anderen hält, schickt
 alles ins Leere.
 
-**Gate 4a, vier Teile:** beide H2C-Pakete geschrieben · **der Chip hat sie
-abgeholt** (der HW-Lesezeiger der H2C-Queue steht auf unserem Schreibzeiger —
-das ist der Beweis, dass der Ring aus Stufe 3a wirklich trägt) · das
-Score-Board trägt `ACTIVE|ONOFF` · `REG_RCR` steht auf `hal->rcr`.
+**Gate 4a, fünf Teile:** beide H2C-Pakete geschrieben · **die Firmware hat die
+H2C-Queue leergeräumt** (der HW-Lesezeiger holt unseren Schreibzeiger ein —
+der Beweis, dass der Ring aus Stufe 3a wirklich trägt) · **GNT_WL und GNT_BT
+stehen so, wie `set_ant_path(INIT)` sie setzt** · der Pfadbesitzer ist WLAN ·
+`REG_RCR` steht auf `hal->rcr`.
+
+**Das Score-Board ist KEIN Gate**, und das ist am Gerät gelernt. Es ist ein
+gemeinsames Postfach; die Bits, die interessieren, schreibt der BT-Kern.
+Läuft der nicht, steht dort 0 — im Lauf von 0.11.0 stand dort 0, `kt_ver 3`,
+`bt_disabled`. Linux prüft es nirgends. Was sich prüfen lässt, ist die
+**Wirkung**: bei `bt_disabled` nimmt `set_ant_path(COEX_SET_ANT_INIT)` den
+Zweig `GNT_BT = SW_LOW`, `GNT_WL = SW_HIGH` — die Antenne geht an WLAN. Das
+steht im indirekten LTE-Registerraum und ist lesbar. Der Rohwert des
+Score-Boards steht trotzdem im Log, ohne die Maske von `read_scbd`: sonst
+lässt sich eine 0 nicht von „unser eigener Schreibzugriff kam nie an"
+unterscheiden.
 
 **Und die offene Frage, die 4a beantwortet:** zählen die CCA-Zähler jetzt
 schon? Die Antenne ist der wahrscheinlichste einzelne Grund. Der Treiber sagt
 es in Klartext — zählt er, war es die Antenne; zählt er nicht, fehlt der
 Kanal und das ist 4c. Beides ist eine Antwort.
 
-**Eine benannte Abweichung, und nur eine:** `rtw_hci_start` = `rtw_pci_start`
-schaltet ausschließlich Interrupts frei. Dieses Modul fährt den Chip im
-Abfragebetrieb, es gibt keine Interruptleitung dorthin.
+**Zwei benannte Abweichungen:** `rtw_hci_start` = `rtw_pci_start` schaltet
+ausschließlich Interrupts frei — dieses Modul fährt den Chip im
+Abfragebetrieb, es gibt keine Interruptleitung dorthin. Und der Lesezeiger
+der H2C-Queue wird von uns ABGEWARTET; Linux holt ihn gar nicht ab. Das ist
+eine Messung, kein Verhalten: in 0.11.0 stand er auf 1, während unserer schon
+auf 2 stand, und eine Stichprobe einen Befehl nach dem Anstoß sagt nichts
+darüber, ob der Chip nicht will oder nur noch nicht fertig ist.
 
 **Ein Fehler, den die Portierung selbst gefangen hat:** der H2C-Ring braucht
 einen Zwischenpuffer mit einem Platz je RINGeintrag (128 × 128 Byte), nicht
