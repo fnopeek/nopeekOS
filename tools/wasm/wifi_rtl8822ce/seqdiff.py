@@ -121,6 +121,17 @@ HEX_SKIP = {
     "rtw8822c_dac_iq_offset": "`if (t != 0x0)` gegen `if t != 0`.",
     "rtw8822c_dac_backup_reg": "siehe DEVIATION.",
     "rtw8822c_rf_dac_cal": "siehe DEVIATION.",
+    "rtw_fw_send_general_info":
+        "Linux setzt die Felder mit le32p_replace_bits(..., GENMASK(..)); "
+        "bei uns stehen dieselben Masken als Zahl.",
+    "rtw_fw_send_phydm_info": "wie rtw_fw_send_general_info.",
+    "rtw_fw_bt_wifi_control": "wie rtw_fw_send_general_info.",
+    "rtw_fw_query_bt_info": "wie rtw_fw_send_general_info.",
+    "rtw_fw_coex_tdma_type": "wie rtw_fw_send_general_info.",
+    "rtw_pci_tx_write_data":
+        "Linux schreibt die Deskriptorfelder einzeln mit cpu_to_le16(); wir "
+        "packen sie zu zwei 32-Bit-Worten, mit den Masken als Zahl.",
+    "rtw_coex_tdma_timer_base": "FIELD_PREP(PARA1_H2C69_*) gegen eine Maske.",
 }
 
 def discover():
@@ -158,7 +169,9 @@ def discover():
 def c_body(path, name):
     """Der Rumpf der C-Funktion `name` — ueber ihre Definitionszeile."""
     src = open(os.path.join(L, path), errors="ignore").read()
-    pat = re.compile(r"^(?:static\s+)?(?:const\s+)?[A-Za-z_]\w*[\s*]+"
+    # Der Rueckgabetyp darf auf der ZEILE DAVOR stehen
+    # (`struct sk_buff *\nrtw_tx_write_data_h2c_get(`).
+    pat = re.compile(r"^(?:(?:static\s+)?(?:const\s+)?[A-Za-z_]\w*[\s*]+)?"
                      + re.escape(name) + r"\s*\(", re.M)
     for m in pat.finditer(src):
         # Eine Vorwaertsdeklaration endet mit `;` und hat keinen Rumpf.
@@ -194,6 +207,7 @@ def rs_body(path, sig):
 # wegbuegeln wuerde.
 ALIAS = {
     "addrs[i]": "DACK_ADDRS[i]",
+    "bd_idx": "idx",
     "sipi_addr[rf_path]": "RF_SIPI_ADDR[rf_path]",
     "edcca_th[EDCCA_TH_L2H_IDX].hw_reg.addr": "addr",
     "edcca_th[EDCCA_TH_H2L_IDX].hw_reg.addr": "addr",

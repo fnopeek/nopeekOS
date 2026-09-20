@@ -37,7 +37,7 @@ RS_FILES = ("regs.rs", "pwrseq.rs", "pci.rs", "tx.rs", "mac.rs", "fw.rs",
 # rtw8822c.c steht MIT in der Liste, aber hinten: gibt es einen Namen in
 # einem Header UND in der Chipdatei, gilt der Header.
 C_FILES = ("reg.h", "mac.h", "fw.h", "main.h", "pci.h", "tx.h", "bf.h",
-           "efuse.h", "rtw8822c.h", "rtw8822c.c")
+           "efuse.h", "sec.h", "coex.h", "phy.h", "rtw8822c.h", "rtw8822c.c")
 
 
 # Namen aus Headern AUSSERHALB von rtw88, die in einer Definition vorkommen.
@@ -78,7 +78,8 @@ def linux_defs():
             else:
                 # Enum-Eintraege: RTW_DMA_MAPPING_HIGH, TX_DESC_QSEL_*,
                 # DESC_RATE* stehen so da und nicht als Makro.
-                m = re.match(r"\s*([A-Z][A-Z0-9_]*)\s*=\s*([^,\n}]+)", line)
+                m = re.match(r"\s*([A-Z][A-Z0-9_]*)\s*=\s*"
+                             r"((?:GENMASK\([^)]*\)|BIT\([^)]*\)|[^,\n}])+)", line)
                 if m and m.group(1) not in out:
                     out[m.group(1)] = (f, n, m.group(2).strip())
     return out

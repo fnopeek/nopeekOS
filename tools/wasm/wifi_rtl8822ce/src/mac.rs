@@ -287,7 +287,7 @@ fn restore_reg(h: i32, bckp: &[Backup]) {
 }
 
 /// util.c `ltecoex_read_reg`
-fn ltecoex_read_reg(h: i32, offset: u16) -> Option<u32> {
+pub fn ltecoex_read_reg(h: i32, offset: u16) -> Option<u32> {
     if !check_hw_ready(h, LTECOEX_ACCESS_CTRL, LTECOEX_READY, 1) {
         return None;
     }
@@ -296,7 +296,7 @@ fn ltecoex_read_reg(h: i32, offset: u16) -> Option<u32> {
 }
 
 /// util.c `ltecoex_reg_write`
-fn ltecoex_reg_write(h: i32, offset: u16, value: u32) -> bool {
+pub fn ltecoex_reg_write(h: i32, offset: u16, value: u32) -> bool {
     if !check_hw_ready(h, LTECOEX_ACCESS_CTRL, LTECOEX_READY, 1) {
         return false;
     }

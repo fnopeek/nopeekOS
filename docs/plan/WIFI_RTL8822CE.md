@@ -563,7 +563,8 @@ und **in Linux ist das genauso**. `false_alarm_statistics` läuft dort erst im
 Wachhund (main.c:280), und davor liegen drei Dinge. Sie sind die drei
 Unterstufen, jede eine ganze Linux-Funktion, keine davon übersprungen.
 
-**4a — der Rest von `rtw_power_on` und `rtw_core_start`.**
+**4a — der Rest von `rtw_power_on` und `rtw_core_start`. GEBAUT in 0.11.0,
+am Gerät ungeprüft.**
 
     rtw_power_on (main.c:1374), ab wo wir stehen:
      ├─ rtw_mac_postinit            beim 8822C NULL, also nichts
@@ -594,11 +595,25 @@ Paket durch die **H2C-Queue** (der Ring, dessen Adresse `init_h2c` gesetzt
 hat, für general/phydm info). Wer den einen für den anderen hält, schickt
 alles ins Leere.
 
-**Gate 4a:** die zwei H2C-Pakete gehen durch (der Ring bewegt seinen
-Schreibzeiger), die Mailbox quittiert, und `REG_WIFI_BT_INFO` trägt das
-Score-Board. **Und die offene Frage, die 4a beantwortet:** zählen die
-CCA-Zähler jetzt schon? Die Antenne ist der wahrscheinlichste einzelne
-Grund, und wenn sie es ist, sieht man es hier.
+**Gate 4a, vier Teile:** beide H2C-Pakete geschrieben · **der Chip hat sie
+abgeholt** (der HW-Lesezeiger der H2C-Queue steht auf unserem Schreibzeiger —
+das ist der Beweis, dass der Ring aus Stufe 3a wirklich trägt) · das
+Score-Board trägt `ACTIVE|ONOFF` · `REG_RCR` steht auf `hal->rcr`.
+
+**Und die offene Frage, die 4a beantwortet:** zählen die CCA-Zähler jetzt
+schon? Die Antenne ist der wahrscheinlichste einzelne Grund. Der Treiber sagt
+es in Klartext — zählt er, war es die Antenne; zählt er nicht, fehlt der
+Kanal und das ist 4c. Beides ist eine Antwort.
+
+**Eine benannte Abweichung, und nur eine:** `rtw_hci_start` = `rtw_pci_start`
+schaltet ausschließlich Interrupts frei. Dieses Modul fährt den Chip im
+Abfragebetrieb, es gibt keine Interruptleitung dorthin.
+
+**Ein Fehler, den die Portierung selbst gefangen hat:** der H2C-Ring braucht
+einen Zwischenpuffer mit einem Platz je RINGeintrag (128 × 128 Byte), nicht
+je gesendetem Paket — `wp` läuft über die ganze Ringlänge. Die erste Fassung
+teilte sich den Puffer mit dem Firmware-Download, der genau ein Stück groß
+ist. Beim Anlauf mit zwei Paketen wäre das nie aufgefallen.
 
 **4b — die Sendeleistung.** `rtw_chip_board_info_setup` (main.c:2064):
 `rtw_phy_init_tx_power` · `bb_pg_type0` und `txpwr_lmt_type0` laden ·

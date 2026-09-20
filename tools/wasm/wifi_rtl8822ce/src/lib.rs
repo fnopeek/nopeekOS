@@ -54,6 +54,7 @@
 mod host;
 mod bf;
 mod chip;
+mod coex;
 mod dm;
 mod efuse;
 mod fw;
@@ -62,6 +63,7 @@ mod pci;
 mod phy;
 mod pwrseq;
 mod rfk;
+mod sec;
 mod tables;
 mod tx;
 mod regs;
@@ -115,6 +117,10 @@ struct Hal {
     /// main.c:1884-1893 — bei 2T2R beide `BB_PATH_AB`, sonst `BB_PATH_A`.
     antenna_tx: u8,
     antenna_rx: u8,
+    /// main.c:2183 die Vorgabe, main.c:1903 das ODER mit `BIT_VHT_DACK`.
+    /// `rtw_core_start` schreibt das ins Register, NACHDEM `mac_init` dort
+    /// `WLAN_RCR_CFG` hinterlassen hat — „rcr reset after powered on".
+    rcr: u32,
 }
 
 /// main.c `rtw_chip_parameter_setup` — der Teil, der aus EINEM Register
@@ -132,6 +138,10 @@ fn chip_parameter_setup(h: i32) -> Hal {
         rf_path_num: if rf_2t2r { 2 } else { 1 },
         antenna_tx: if rf_2t2r { BB_PATH_AB } else { BB_PATH_A },
         antenna_rx: if rf_2t2r { BB_PATH_AB } else { BB_PATH_A },
+        // main.c:2183 „default rx filter setting" plus main.c:1903.
+        rcr: BIT_APP_FCS | BIT_APP_MIC | BIT_APP_ICV | BIT_PKTCTL_DLEN
+            | BIT_HTC_LOC_CTRL | BIT_APP_PHYSTS | BIT_AB | BIT_AM | BIT_APM
+            | BIT_VHT_DACK,
     }
 }
 
@@ -370,6 +380,10 @@ pub extern "C" fn _start() {
 
     let stage_buf = host::dma_alloc_below(
         (pci::RSVD_STAGE_BYTES.div_ceil(4096)) as u16, 1024);
+    // Der H2C-Ring braucht einen EIGENEN Zwischenpuffer: der oben ist fuer
+    // den Firmware-Download gedacht und genau ein Stueck gross.
+    let h2c_buf = host::dma_alloc_below(
+        (pci::H2C_STAGE_BYTES.div_ceil(4096)) as u16, 1024);
     let fw_ok = match stage_buf {
         st if st >= 0 => {
             let ok = mac::download_firmware(h, &mut trx, st, FW, BAND_AT_FWDL,
@@ -499,12 +513,12 @@ pub extern "C" fn _start() {
     // Firmware mehr.
     let mut stage3b = false;
     let mut stage3c = false;
-    let stage3a = match (stage2c, efuse) {
+    let stage3a = match (stage2c, efuse.as_ref()) {
         (true, Some(e)) => {
             host::print("[rtl8822ce] Stufe 3a: rtw_power_on (zweiter Zyklus) + rtw_mac_init\n");
             let ok = power_on_and_mac_init(h, &hal, &mut trx, stage_buf, &mut fifo);
             if ok {
-                let (b, c) = phy_set_param_and_check(h, &hal, &e);
+                let (b, c) = phy_set_param_and_check(h, &hal, e);
                 stage3b = b;
                 stage3c = c;
             } else {
@@ -514,6 +528,16 @@ pub extern "C" fn _start() {
         }
         _ => {
             host::print("[rtl8822ce] Stufe 3a: uebersprungen, 2c steht nicht\n");
+            false
+        }
+    };
+
+    // ── Stufe 4a: der Rest von rtw_power_on und rtw_core_start ───
+    let stage4a = match (stage3c, efuse.as_ref()) {
+        (true, Some(e)) => stage4a_power_on_tail(h, &hal, &mut trx, h2c_buf,
+                                                 &mut fifo, e),
+        _ => {
+            host::print("[rtl8822ce] Stufe 4a: uebersprungen, 3c steht nicht\n");
             false
         }
     };
@@ -533,9 +557,14 @@ pub extern "C" fn _start() {
         "[rtl8822ce] Stufe 3b: NEIN — nicht weiterbauen, bevor das steht\n"
     });
     host::print(if stage3c {
-        "[rtl8822ce] Stufe 3c: GRUEN — BB und RF stehen. Weiter mit Stufe 4\n"
+        "[rtl8822ce] Stufe 3c: GRUEN — BB und RF stehen\n"
     } else {
         "[rtl8822ce] Stufe 3c: NEIN — nicht weiterbauen, bevor das steht\n"
+    });
+    host::print(if stage4a {
+        "[rtl8822ce] Stufe 4a: GRUEN — weiter mit Stufe 4b (Sendeleistung)\n"
+    } else {
+        "[rtl8822ce] Stufe 4a: NEIN — nicht weiterbauen, bevor das steht\n"
     });
 
 
@@ -762,6 +791,149 @@ fn phy_set_param_and_check(h: i32, hal: &Hal, e: &efuse::Efuse) -> (bool, bool) 
     host::print("\n");
 
     (stage3b, stage3c)
+}
+
+/// main.c:1413-1434 der Rest von `rtw_power_on`, dann main.c:1517-1533
+/// `rtw_core_start` bis zum RCR-Schreibzugriff.
+///
+///     rtw_mac_postinit        beim 8822C NULL (rtw8822c.c:4967) -> nichts
+///     rtw_hci_start           = rtw_pci_start: schaltet NUR Interrupts
+///                               frei. Wir pollen -> BENANNTE ABWEICHUNG,
+///                               siehe docs/plan/WIFI_RTL8822CE.md
+///     rtw_fw_send_general_info    H2C-PAKET durch die H2C-Queue
+///     rtw_fw_send_phydm_info      dito
+///     rtw_coex_power_on_setting   Antenne auf BT
+///     rtw_coex_init_hw_config     danach auf INIT
+///     rtw_sec_enable_sec_engine
+///     rtw_write32(REG_RCR, hal->rcr)
+fn stage4a_power_on_tail(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
+                         fifo: &mut mac::Fifo, e: &efuse::Efuse) -> bool {
+    host::print("[rtl8822ce] Stufe 4a: rtw_power_on (Rest) + rtw_core_start\n");
+
+    if h2c_buf < 0 {
+        host::print("  kein DMA fuer den H2C-Zwischenpuffer\n");
+        return false;
+    }
+
+    let mut h2c = fw::H2cState::default();
+    let mut cx = coex::Coex::new();
+
+    // `rtw_mac_postinit`: `chip->ops->mac_postinit` ist beim 8822C NULL,
+    // die Funktion kehrt ohne einen Registerzugriff zurueck.
+
+    // `rtw_hci_start` = `rtw_pci_start`: setzt `rtwpci->running` und ruft
+    // `rtw_pci_enable_interrupt`. Wir fahren den Chip im Abfragebetrieb,
+    // es gibt keine Interruptleitung zu diesem Modul — die einzige
+    // Abweichung dieser Stufe, und sie steht im Papier.
+
+    // ── Die zwei H2C-PAKETE ──────────────────────────────────────
+    // Sie gehen durch die H2C-QUEUE, nicht durch die Mailbox. Der Ring
+    // dafuer steht seit Stufe 3a (`init_h2c`).
+    let wp_before = trx.tx[pci::Q_H2C].wp;
+    let gi = fw::send_general_info(h, trx, h2c_buf, &mut h2c, fifo);
+    let pi = fw::send_phydm_info(h, trx, h2c_buf, &mut h2c, e.rfe_option,
+                                 hal.rf_2t2r, hal.cut_version,
+                                 hal.antenna_rx, hal.antenna_tx);
+
+    host::print("  H2C-Pakete: general_info ");
+    host::print(if gi { "ok" } else { "FEHLER" });
+    host::print(" (fw_tx_boundary ");
+    host::print_dec((fifo.rsvd_fw_txbuf_addr - fifo.rsvd_boundary) as u32);
+    host::print("), phydm_info ");
+    host::print(if pi { "ok" } else { "FEHLER" });
+    host::print("\n");
+
+    // Der Chip holt die Eintraege selbst ab: die oberen zwoelf Bit des
+    // Indexregisters sind SEIN Lesezeiger. Steht er auf unserem
+    // Schreibzeiger, hat er beide Pakete genommen.
+    let idx = host::r32(h, pci::RTK_PCI_TXBD_IDX_H2CQ);
+    let hw_idx = (idx & pci::TRX_BD_HW_IDX_MASK) >> 16;
+    let our_wp = idx & pci::TRX_BD_IDX_MASK;
+    host::print("  H2CQ_IDX = 0x");
+    host::print_hex32(idx);
+    host::print("  (unser Schreibzeiger ");
+    host::print_dec(our_wp);
+    host::print(", HW-Lesezeiger ");
+    host::print_dec(hw_idx);
+    host::print(", vorher ");
+    host::print_dec(wp_before);
+    host::print(")\n");
+
+    // ── Die Koexistenz, und damit die ANTENNE ────────────────────
+    // `wifi_only = !efuse->btcoex` (main.c:1431). Unsere efuse sagt
+    // btcoex JA, also ist es false und der INIT-Zweig gilt.
+    let wifi_only = !e.btcoex;
+    host::print("  Coex: btcoex ");
+    host::print(if e.btcoex { "JA" } else { "nein" });
+    host::print(", share_ant ");
+    host::print(if e.share_ant { "JA" } else { "nein" });
+    host::print(" -> wifi_only ");
+    host::print(if wifi_only { "JA" } else { "nein" });
+    host::print("\n");
+
+    let t0 = host::now_us();
+    coex::power_on_setting(h, &mut cx, &mut h2c, e.share_ant, e.rfe_option);
+    let scbd_poweron = coex::read_scbd(h);
+    coex::init_hw_config(h, &mut cx, &mut h2c, e.share_ant, wifi_only,
+                         e.rfe_option);
+    let dt = host::now_us() - t0;
+
+    host::print("  Score-Board: nach power_on 0x");
+    host::print_hex16(scbd_poweron);
+    host::print(", nach init 0x");
+    host::print_hex16(coex::read_scbd(h));
+    host::print("  (BT ");
+    host::print(if cx.bt_disabled { "AUS" } else { "an" });
+    host::print(", kt_ver ");
+    host::print_dec(cx.kt_ver as u32);
+    host::print(", ");
+    host::print_dec(dt as u32);
+    host::print(" us)\n");
+
+    // ── rtw_core_start ───────────────────────────────────────────
+    sec::enable_sec_engine(h);
+    host::w32(h, REG_RCR, hal.rcr);
+
+    let rcr = host::r32(h, REG_RCR);
+    host::print("  RCR = 0x");
+    host::print_hex32(rcr);
+    host::print(" (geschrieben 0x");
+    host::print_hex32(hal.rcr);
+    host::print(")\n");
+
+    // ── Gates ────────────────────────────────────────────────────
+    let mut ok = true;
+    ok &= gate("beide H2C-Pakete geschrieben", gi && pi);
+    ok &= gate("der Chip hat die H2C-Pakete abgeholt (HW-Zeiger == unserer)",
+               hw_idx == our_wp && our_wp == wp_before + 2);
+    // Das Score-Board ist das Zwei-Byte-Gespraech mit dem BT-Kern. Nach
+    // `init_hw_config` muessen ACTIVE und ONOFF stehen.
+    let want = COEX_SCBD_ACTIVE | COEX_SCBD_ONOFF;
+    ok &= gate("Score-Board traegt ACTIVE|ONOFF",
+               coex::read_scbd(h) & want == want);
+    ok &= gate("RCR steht auf hal->rcr", rcr == hal.rcr);
+
+    // ── Und die Frage, fuer die 4a da ist ────────────────────────
+    let mut dm = dm::DmInfo::new();
+    chip::false_alarm_statistics(h, &mut dm);
+    host::sleep_ms(50);
+    chip::false_alarm_statistics(h, &mut dm);
+    host::print("  [nach der Coex-Antenne] CCA: cck ");
+    host::print_dec(dm.cck_cca_cnt);
+    host::print(" · ofdm ");
+    host::print_dec(dm.ofdm_cca_cnt);
+    host::print(" · gesamt ");
+    host::print_dec(dm.total_cca_cnt);
+    host::print("  ·  Falschalarme gesamt ");
+    host::print_dec(dm.total_fa_cnt);
+    host::print("\n");
+    if dm.total_cca_cnt != 0 {
+        host::print("  [Befund] der Empfaenger zaehlt SCHON OHNE Kanal — die\n         \x20          Antenne war der Grund. Stufe 4c wird es bestaetigen.\n");
+    } else {
+        host::print("  [Befund] weiter still. Dann fehlt der KANAL, und das\n         \x20          ist Stufe 4c (set_channel programmiert AGC und\n         \x20          CCA-Maske). Kein Widerspruch, nur die naechste Stufe.\n");
+    }
+
+    ok
 }
 
 /// Wieviele der 54 Kommandos auf UNSEREM Geraet ueberhaupt laufen. Eine

@@ -493,3 +493,112 @@ pub fn interface_cfg(h: i32, cut_version: u8) {
                        crate::regs::BIT_PCIE_EMAC_PDN_AUX_TO_FAST_CLK, 1);
     }
 }
+
+// ── Stufe 4a: die H2C-Queue ──────────────────────────────────────
+
+/// pci.h:62-73 — der Schreibzeiger der H2C-Queue.
+pub const RTK_PCI_TXBD_IDX_H2CQ: u32 = 0x132C; // pci.h:66
+
+/// Ein Platz je Ringeintrag fuer den H2C-Zwischenpuffer. Linux legt je
+/// Paket ein skb an; solange der Chip einen Deskriptor nicht abgeholt hat,
+/// darf sein Inhalt nicht ueberschrieben werden. Ein Platz je Index ist die
+/// gleiche Zusage ohne Allokator.
+pub const H2C_SLOT_BYTES: u32 = 128; // 48 Deskriptor + 32 Nutzdaten, aufgerundet
+
+/// Der H2C-Zwischenpuffer braucht einen Platz je RINGeintrag, nicht je
+/// gesendetem Paket: `wp` laeuft ueber die ganze Ringlaenge und faengt
+/// dann von vorn an. Beim Anlauf gehen zwei Pakete raus, danach viele —
+/// und ein Puffer, der nur fuer den Anlauf reicht, faellt genau dann um,
+/// wenn schon alles zu laufen scheint.
+pub const H2C_STAGE_BYTES: u32 = RTK_DEFAULT_TX_DESC_NUM * H2C_SLOT_BYTES;
+
+/// pci.h:154-160 `avail_desc`
+#[inline]
+pub fn avail_desc(wp: u32, rp: u32, len: u32) -> u32 {
+    if rp > wp { rp - wp - 1 } else { len - wp + rp - 1 }
+}
+
+/// pci.c:34-52 `rtw_pci_get_tx_qsel` — nur die Queues, die wir fahren.
+fn tx_qsel(queue: usize) -> u8 {
+    match queue {
+        Q_BCN => crate::tx::TX_DESC_QSEL_BEACON,
+        Q_H2C => crate::tx::TX_DESC_QSEL_H2C,
+        Q_MGMT => crate::tx::TX_DESC_QSEL_MGMT,
+        Q_HI0 => crate::tx::TX_DESC_QSEL_HIGH,
+        // Linux: `default: return skb->priority;` — die Datenqueues tragen
+        // die Priorität des Pakets. Kein Weg, den Stufe 4a benutzt.
+        _ => 0,
+    }
+}
+
+/// pci.c:914-926 `rtw_pci_tx_kick_off_queue`.
+///
+/// `rtw_pci_deep_ps_leave` davor gilt nur ohne `FW_FEATURE_TX_WAKE` — unsere
+/// Firmware (9.9.15, feature 0x1e7) fuehrt das Bit, und Deep-PS ist ohnehin
+/// nicht gebaut.
+pub fn tx_kick_off_queue(h: i32, trx: &Trx, queue: usize) {
+    let idx = match TXQ[queue].idx {
+        Some(reg) => reg,
+        None => return,
+    };
+    host::w16(h, idx, (trx.tx[queue].wp & TRX_BD_IDX_MASK) as u16);
+}
+
+/// pci.c:806-895 `rtw_pci_tx_write_data`, fuer eine Queue MIT Schreibzeiger.
+///
+/// Der Unterschied zum Reserved-Page-Weg: hier gibt es `avail_desc`, der
+/// Ringplatz richtet sich nach `wp`, das OWN-Bit wird NICHT gesetzt (das ist
+/// der BCN-Sonderfall), und `wp` rueckt danach vor.
+pub fn tx_write_data(_h: i32, trx: &mut Trx, stage: i32, queue: usize,
+                     payload: &[u8]) -> bool {
+    let desc_sz = crate::tx::TX_PKT_DESC_SZ;
+    let ring_len = trx.tx[queue].len;
+    let wp = trx.tx[queue].wp;
+    let rp = trx.tx[queue].rp;
+
+    if avail_desc(wp, rp, ring_len) == 0 {
+        host::print("[rtl8822ce] H2C-Ring voll\n");
+        return false; // Linux: -ENOSPC
+    }
+
+    let mut info = crate::tx::write_data_h2c_get(payload.len() as u32);
+    info.qsel = tx_qsel(queue);
+    let mut desc = [0u8; crate::tx::TX_PKT_DESC_SZ];
+    crate::tx::fill_tx_desc(&info, &mut desc);
+
+    // Ein Platz je Ringindex, damit ein noch nicht abgeholtes Paket nicht
+    // unter dem Chip weggeschrieben wird.
+    let slot = wp * H2C_SLOT_BYTES;
+    host::dma_write_buf(stage, slot, &desc);
+    host::dma_write_buf(stage, slot + desc_sz as u32, payload);
+    let dma = host::dma_phys(stage) as u32 + slot;
+
+    let total = desc_sz + payload.len();
+    let psb_len = ((total as u32 - 1) / 128) + 1;
+
+    // `get_tx_buffer_desc(ring, tx_buf_desc_sz)` — der Platz nach `wp`.
+    let ring = trx.tx[queue].handle;
+    let off = wp * TX_BUF_DESC_SZ;
+    host::dma_w32(ring, off, (desc_sz as u32 & 0xFFFF) | (psb_len << 16));
+    host::dma_w32(ring, off + 4, dma);
+    host::dma_w32(ring, off + 8, payload.len() as u32 & 0xFFFF);
+    host::dma_w32(ring, off + 12, dma + desc_sz as u32);
+
+    host::fence();
+
+    trx.tx[queue].wp += 1;
+    if trx.tx[queue].wp >= ring_len {
+        trx.tx[queue].wp = 0;
+    }
+    true
+}
+
+/// pci.c:1206-1224 `rtw_pci_write_data_h2c`
+pub fn write_data_h2c(h: i32, trx: &mut Trx, stage: i32, buf: &[u8]) -> bool {
+    if !tx_write_data(h, trx, stage, Q_H2C, buf) {
+        host::print("[rtl8822ce] failed to write h2c data\n");
+        return false;
+    }
+    tx_kick_off_queue(h, trx, Q_H2C);
+    true
+}
